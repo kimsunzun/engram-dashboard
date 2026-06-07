@@ -108,7 +108,7 @@ interface Slot { id: number; agentId: string | null }
 - [x] Step 8 — Monaco DiffEditor
 - [x] Step 9 — 슬롯 팝업 분리
 - [x] Step 10 — 에이전트 트리 분리
-- [ ] 슬롯 동적 분할 (미구현, View 단계에서 추가 가능)
+- [x] 슬롯 동적 분할 (SlotNode/SplitNode 재귀 트리, LayoutRenderer)
 - [ ] 팝업→메인 도킹 (백엔드 단계로 미룸)
 
 ## 더미 → 실제 전환 시 교체 지점
