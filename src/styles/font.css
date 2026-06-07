@@ -1,0 +1,9 @@
+:root {
+  --font-ui:           'JetBrains Mono', monospace;
+  --font-terminal:     'Cascadia Code', monospace;
+  --font-code:         'Fira Code', monospace;
+  --font-claude-prose: 'Inter', sans-serif;
+  --font-claude-code:  'JetBrains Mono', monospace;
+  --font-claude-path:  'Cascadia Code', monospace;
+  --font-claude-header:'Inter', sans-serif;
+}

@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@import './styles/theme.css';
+@import './styles/font.css';
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
