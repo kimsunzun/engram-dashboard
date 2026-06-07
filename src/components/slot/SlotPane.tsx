@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useSlotStore } from '../../store/slotStore'
+import { useSlotStore, findSlot } from '../../store/slotStore'
 import { useAgentStore } from '../../store/agentStore'
 import SlotContextMenu from './SlotContextMenu'
 
@@ -9,11 +9,13 @@ interface SlotPaneProps {
 }
 
 export default function SlotPane({ slotId, children }: SlotPaneProps) {
-  const { slots, focusedSlotId, setFocusedSlot } = useSlotStore()
+  const layout = useSlotStore(s => s.layout)
+  const focusedSlotId = useSlotStore(s => s.focusedSlotId)
+  const setFocusedSlot = useSlotStore(s => s.setFocusedSlot)
   const agents = useAgentStore(s => s.agents)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
-  const slot = slots.find(s => s.id === slotId)
+  const slot = findSlot(layout, slotId)
   const isFocused = focusedSlotId === slotId
   const agentName = slot?.agentId ? (agents.find(a => a.id === slot.agentId)?.name ?? '—') : '—'
 

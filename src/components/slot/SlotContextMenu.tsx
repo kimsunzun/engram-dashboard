@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useSlotStore } from '../../store/slotStore'
 
 interface SlotContextMenuProps {
   x: number
@@ -7,13 +8,10 @@ interface SlotContextMenuProps {
   onClose: () => void
 }
 
-interface MenuItem {
-  label: string
-  action: () => void
-}
-
 export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null)
+  const splitSlot = useSlotStore(s => s.splitSlot)
+  const closeSlot = useSlotStore(s => s.closeSlot)
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -23,11 +21,12 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
-  const items: MenuItem[] = [
-    { label: '분할',        action: () => {} },
+  const items = [
+    { label: '가로 분할', action: () => splitSlot(slotId, 'horizontal') },
+    { label: '세로 분할', action: () => splitSlot(slotId, 'vertical') },
     { label: '에이전트 전환', action: () => {} },
     { label: '팝업으로 분리', action: () => window.open(`index.html#/popup?slotId=${slotId}`, '_blank') },
-    { label: '닫기',        action: () => {} },
+    { label: '닫기', action: () => closeSlot(slotId) },
   ]
 
   return (

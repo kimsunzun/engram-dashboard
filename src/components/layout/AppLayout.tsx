@@ -1,15 +1,16 @@
 import { useState } from 'react'
 import { Allotment } from 'allotment'
 import 'allotment/dist/style.css'
+import { useSlotStore } from '../../store/slotStore'
 import Sidebar from './Sidebar'
-import SlotPane from '../slot/SlotPane'
-import TerminalSlot from '../slot/TerminalSlot'
+import LayoutRenderer from './LayoutRenderer'
 import DiffPanel from '../diff/DiffPanel'
 import StatusBar from './StatusBar'
 
 export default function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [diffOpen, setDiffOpen] = useState(false)
+  const layout = useSlotStore(s => s.layout)
 
   return (
     <div style={{ height: '100%', position: 'relative' }}>
@@ -39,14 +40,7 @@ export default function AppLayout() {
         <Allotment.Pane>
           <Allotment vertical>
             <Allotment.Pane>
-              <Allotment>
-                <Allotment.Pane>
-                  <SlotPane slotId={1}><TerminalSlot /></SlotPane>
-                </Allotment.Pane>
-                <Allotment.Pane>
-                  <SlotPane slotId={2}><TerminalSlot /></SlotPane>
-                </Allotment.Pane>
-              </Allotment>
+              <LayoutRenderer node={layout} />
             </Allotment.Pane>
             <Allotment.Pane preferredSize={300} minSize={300} maxSize={300} visible={diffOpen}>
               <DiffPanel />
