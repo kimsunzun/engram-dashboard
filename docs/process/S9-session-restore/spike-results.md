@@ -29,12 +29,23 @@
 4. **fallback = 새 uuid** (기존 ID 재사용 exit 1로 불가 확인 → 설계대로).
 5. **복원 실패 신호 명확** (exit 1 + stderr, Hang 아님).
 
-## 미확인 — TUI(대화형) 특유 (PTY spike 필요)
+## TUI(대화형) 실측 결과 — wezterm 패인 + 파일 관찰
 
-우리는 `-p`가 아닌 **대화형 TUI**로 spawn. 세션 파일 메커니즘은 동일 가능성 높으나(같은 projects 경로) 다음은 PTY 실측 남음:
-1. TUI 내 `/clear`·`/resume` 시 세션 ID 변경 여부 (사용자 질문)
-2. fresh PTY(다른 크기)에서 `--resume` redraw
-3. 신규 cwd 첫 spawn 시 trust/온보딩 프롬프트 → 복원 Hang 가능성
+`claude --session-id <U2>` 를 TUI로 spawn하고 send-text로 조작, `~/.claude/projects/` 관찰.
+
+| 항목 | 결과 |
+|------|------|
+| TUI에서 `--session-id` | ✓ `-p`와 동일 — 우리 지정 `<U2>.jsonl` 생성 |
+| **`/clear`** | **새 세션 ID 생성!** 프로세스 그대로인데 `U2.jsonl` → 새 `<ae718820>.jsonl` 추가, 이후 대화는 새 파일에. **→ AgentId/session_id 분리 필수의 결정적 증거** |
+| `/clear` 파일 감지 | 새 `.jsonl` **즉시 생성** → **파일 watch로 능동 감지 가능** (사용자 아이디어 실현 확정) |
+| 신규 cwd trust 프롬프트 | **이 환경에선 안 뜸**(이미 신뢰됨, "Welcome back"). 단 완전 새 머신/계정에선 뜰 수 있음 — 운영 시 주의 |
+
+### 남은 경미 항목 (위험 낮음)
+- **fresh PTY redraw**: 우리 대시보드가 cols/rows를 관리(resize command)하므로 우리 책임 영역. claude는 받은 크기로 렌더 — 큰 위험 아님.
+- **`/resume` 픽커**: `/clear`로 "TUI 내 세션 변경 → 새 파일" 메커니즘이 확인됐으므로 `/resume`도 동류. 파일 watch가 커버.
+
+### release notes 주의 (관찰)
+"Fixed sessions not saving transcripts (...) when launched from VS Code integrated terminal" — PTY/통합터미널 환경에서 세션 저장 안 되던 버그가 **수정됨**. 우리도 PTY spawn이라 **claude 버전 최신 유지**가 안전망(구버전이면 세션 미저장 위험).
 
 ## 정리 필요
 - 임시 데이터: `C:/temp/claude-spike` + `~/.claude/projects/C--temp-claude-spike` (실측용, 삭제 예정)
