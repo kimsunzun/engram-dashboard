@@ -4,10 +4,22 @@ import { themeManager } from './theme/ThemeManager'
 import AppLayout from './components/layout/AppLayout'
 import PopupPage from './pages/PopupPage'
 import TreePage from './pages/TreePage'
+import { initEventBus } from './store/eventBus'
+import { ptyApi } from './api/ptyApi'
+import { useAgentStore } from './store/agentStore'
 
 function App() {
   useEffect(() => {
     themeManager.apply('dark')
+  }, [])
+
+  useEffect(() => {
+    // Tauri 이벤트 버스 초기화 + 에이전트 초기 목록 로드
+    void initEventBus()
+    ptyApi
+      .getAgents()
+      .then(agents => useAgentStore.getState().setAgents(agents))
+      .catch(err => console.warn('[App] getAgents failed:', err))
   }, [])
 
   return (

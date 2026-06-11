@@ -1,38 +1,27 @@
 import { useRef, useEffect, useState } from 'react'
 import { Tree, type NodeRendererProps } from 'react-arborist'
-import { useAgentStore, dummyAgents, dummyGroups } from '../../store/agentStore'
+import { useAgentStore } from '../../store/agentStore'
 import { useSlotStore } from '../../store/slotStore'
 
 type AgentNodeData = {
   id: string
   name: string
-  isGroup: boolean
-  memberCount?: number
-  status?: string
-  cost?: string
-  children?: AgentNodeData[]
+  status: string
 }
 
-const treeData: AgentNodeData[] = dummyGroups.map(g => ({
-  id: g.id,
-  name: g.name,
-  isGroup: true,
-  memberCount: g.members.length,
-  children: g.members
-    .map(mid => dummyAgents.find(a => a.id === mid))
-    .filter((a): a is typeof dummyAgents[0] => Boolean(a))
-    .map(a => ({ id: a.id, name: a.name, isGroup: false, status: a.status, cost: a.cost })),
-}))
+function statusColor(status: string): string {
+  switch (status) {
+    case 'Running': return 'var(--accent)'
+    case 'Exiting': return '#f5a623'
+    case 'Failed':  return '#ff4444'
+    default:        return 'var(--text-muted)'
+  }
+}
 
 function NodeRenderer({ node, style }: NodeRendererProps<AgentNodeData>) {
   const setSelectedAgent = useAgentStore(s => s.setSelectedAgent)
   const selectedAgentId = useAgentStore(s => s.selectedAgentId)
   const { focusedSlotId, assignAgent } = useSlotStore()
-
-  const statusColor =
-    node.data.status === 'running' ? 'var(--accent)' :
-    node.data.status === 'error'   ? '#ff4444' :
-    'var(--text-muted)'
 
   return (
     <div
@@ -50,35 +39,15 @@ function NodeRenderer({ node, style }: NodeRendererProps<AgentNodeData>) {
         userSelect: 'none',
       }}
       onClick={() => {
-        if (node.data.isGroup) {
-          node.toggle()
-        } else {
-          setSelectedAgent(node.id)
-          assignAgent(focusedSlotId, node.id)
-        }
+        setSelectedAgent(node.id)
+        assignAgent(focusedSlotId, node.id)
       }}
     >
-      {node.data.isGroup ? (
-        <>
-          <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>{node.isOpen ? '▾' : '▸'}</span>
-          <span>{node.data.name}</span>
-          <span style={{
-            marginLeft: 'auto',
-            background: 'var(--bg)',
-            border: '1px solid var(--border)',
-            borderRadius: '8px',
-            padding: '0 5px',
-            fontSize: '10px',
-            color: 'var(--text-muted)',
-          }}>{node.data.memberCount}</span>
-        </>
-      ) : (
-        <>
-          <span style={{ color: statusColor, fontSize: '10px', marginLeft: '12px' }}>●</span>
-          <span>{node.data.name}</span>
-          <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '10px' }}>{node.data.cost}</span>
-        </>
-      )}
+      <span style={{ color: statusColor(node.data.status), fontSize: '10px', marginLeft: '4px' }}>●</span>
+      <span>{node.data.name}</span>
+      <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '10px' }}>
+        {node.data.status}
+      </span>
     </div>
   )
 }
@@ -86,6 +55,7 @@ function NodeRenderer({ node, style }: NodeRendererProps<AgentNodeData>) {
 export default function AgentTree() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 200, height: 400 })
+  const agents = useAgentStore(s => s.agents)
 
   useEffect(() => {
     const el = containerRef.current
@@ -98,6 +68,32 @@ export default function AgentTree() {
     return () => ro.disconnect()
   }, [])
 
+  const treeData: AgentNodeData[] = agents.map(a => ({
+    id: a.id,
+    name: a.id.slice(0, 8),
+    status: a.status.type,
+  }))
+
+  if (treeData.length === 0) {
+    return (
+      <div
+        ref={containerRef}
+        style={{
+          flex: 1,
+          overflow: 'hidden',
+          minHeight: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-ui)', fontSize: '12px' }}>
+          에이전트 없음
+        </span>
+      </div>
+    )
+  }
+
   return (
     <div ref={containerRef} style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
       <Tree<AgentNodeData>
@@ -106,7 +102,6 @@ export default function AgentTree() {
         height={dimensions.height}
         rowHeight={24}
         indent={12}
-        initialOpenState={{ g1: true }}
         disableEdit
         disableDrag
         disableDrop

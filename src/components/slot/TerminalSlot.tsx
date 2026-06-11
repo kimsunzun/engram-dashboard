@@ -2,51 +2,146 @@ import { useRef, useEffect } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { ptyApi } from '../../api/ptyApi'
+import { decodeBase64Bytes } from '../../api/decodeBase64'
+import { useAgentStore } from '../../store/agentStore'
 
-const DUMMY_LINES = [
-  "Claude 비서 에이전트 v1.0\r\n",
-  "\x1b[32m✓\x1b[0m 작업 완료: requirements.md 분석\r\n",
-  "\x1b[33m⚠\x1b[0m 파일 경로: I:/Engram/core/dashboard/\r\n",
-  "\x1b[31m✗\x1b[0m 오류: 파일을 찾을 수 없습니다\r\n",
-  "\x1b[90m>\x1b[0m 대기 중...\r\n",
-]
-
-function getCssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+interface TerminalSlotProps {
+  agentId: string | null
 }
 
-export default function TerminalSlot() {
+export default function TerminalSlot({ agentId }: TerminalSlotProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const terminalRef = useRef<Terminal | null>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+  // ResizeObserver 콜백에서 최신 agentId를 읽기 위한 ref
+  const agentIdRef = useRef<string | null>(agentId)
+  // onData 핸들러에서 terminated 상태 확인용 ref (§4-1: NotFound 스팸 방지)
+  const isTerminatedRef = useRef(false)
+  // resize debounce 타이머
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
+    agentIdRef.current = agentId
+  }, [agentId])
 
-    const fitAddon = new FitAddon()
-    const terminal = new Terminal({
-      theme: {
-        background: getCssVar('--bg') || '#0a0a0a',
-        foreground: getCssVar('--text') || '#e0e0e0',
-        cursor:     getCssVar('--accent') || '#4a9eff',
-      },
-      fontFamily: getCssVar('--font-terminal') || "'Cascadia Code', monospace",
+  const agents = useAgentStore(s => s.agents)
+  const agent = agentId ? (agents.find(a => a.id === agentId) ?? null) : null
+  const isTerminated =
+    agent != null &&
+    (agent.status.type === 'Exited' ||
+      agent.status.type === 'Killed' ||
+      agent.status.type === 'Failed')
+
+  // isTerminatedRef 동기화 — onData 클로저에서 최신 값 참조
+  useEffect(() => { isTerminatedRef.current = isTerminated }, [isTerminated])
+
+  // Terminal 인스턴스 초기화 (1회)
+  useEffect(() => {
+    if (!containerRef.current) return
+    const term = new Terminal({
+      fontFamily: 'var(--font-terminal)',
       fontSize: 13,
-      cursorBlink: true,
+      theme: { background: '#0a0a0a', foreground: '#e0e0e0', cursor: '#4a9eff' },
     })
+    const fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
+    term.open(containerRef.current)
+    fitAddon.fit()
+    terminalRef.current = term
+    fitAddonRef.current = fitAddon
 
-    terminal.loadAddon(fitAddon)
-    terminal.open(el)
-    DUMMY_LINES.forEach(line => terminal.write(line))
-    setTimeout(() => { try { fitAddon.fit() } catch {} }, 50)
-
-    const ro = new ResizeObserver(() => { try { fitAddon.fit() } catch {} })
-    ro.observe(el)
+    const ro = new ResizeObserver(() => {
+      fitAddon.fit()
+      const aid = agentIdRef.current
+      if (!aid) return
+      // debounce 50ms — 드래그 중 매 프레임 IPC 발사 방지
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      resizeTimerRef.current = setTimeout(() => {
+        resizeTimerRef.current = null
+        void ptyApi.resizePty(aid, term.cols, term.rows)
+      }, 50)
+    })
+    ro.observe(containerRef.current)
 
     return () => {
       ro.disconnect()
-      terminal.dispose()
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      term.dispose()
+      terminalRef.current = null
+      fitAddonRef.current = null
     }
   }, [])
 
-  return <div ref={containerRef} style={{ flex: 1, minHeight: 0, width: '100%', height: '100%', overflow: 'hidden' }} />
+  // PTY 출력 구독 (agentId 변경 시 재구독)
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!agentId || !terminal) return
+
+    let sinkId: string | null = null
+    let channel: unknown = null
+    let cancelled = false
+
+    terminal.reset() // C2: 재구독 시 이전 출력 제거 (StrictMode 중복 방지)
+    const lastSeq = { current: -1 } // T-2/G-2: seq dedup
+
+    ptyApi
+      .subscribeOutput(agentId, event => {
+        if (cancelled) return
+        if (event.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
+        lastSeq.current = event.seq
+        terminal.write(decodeBase64Bytes(event.data_b64))
+      })
+      .then(result => {
+        if (cancelled) {
+          void ptyApi.unsubscribeOutput(agentId, result.sinkId)
+          return
+        }
+        sinkId = result.sinkId
+        channel = result.channel
+      })
+
+    return () => {
+      cancelled = true
+      if (channel) delete (channel as any).onmessage // G-1: null 할당 아닌 delete (#13133)
+      if (sinkId) void ptyApi.unsubscribeOutput(agentId, sinkId)
+    }
+  }, [agentId])
+
+  // 키 입력 → writeStdin (§4-1: terminated 후 입력 차단 + catch)
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!agentId || !terminal) return
+    const disp = terminal.onData(data => {
+      if (isTerminatedRef.current) return
+      void ptyApi.writeStdin(agentId, new TextEncoder().encode(data)).catch(() => {})
+    })
+    return () => disp.dispose()
+  }, [agentId])
+
+  return (
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+      {isTerminated && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-ui)',
+            fontSize: '13px',
+            pointerEvents: 'none',
+          }}
+        >
+          {agent!.status.type === 'Failed'
+            ? `Failed: ${(agent!.status as { type: 'Failed'; message: string }).message}`
+            : '종료됨'}
+        </div>
+      )}
+    </div>
+  )
 }

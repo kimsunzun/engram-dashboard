@@ -17,7 +17,8 @@ export default function SlotPane({ slotId, children }: SlotPaneProps) {
 
   const slot = findSlot(layout, slotId)
   const isFocused = focusedSlotId === slotId
-  const agentName = slot?.agentId ? (agents.find(a => a.id === slot.agentId)?.name ?? '—') : '—'
+  // TODO(3c): AgentInfo에 name 없음 → id 앞 8자 표시. 슬롯-에이전트 연결 시 재정의.
+  const agentName = slot?.agentId ? (agents.find(a => a.id === slot.agentId)?.id.slice(0, 8) ?? '—') : '—'
 
   return (
     <div

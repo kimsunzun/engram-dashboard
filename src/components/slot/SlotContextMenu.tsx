@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { useSlotStore } from '../../store/slotStore'
+import { useSlotStore, findSlot } from '../../store/slotStore'
+import { ptyApi } from '../../api/ptyApi'
 
 interface SlotContextMenuProps {
   x: number
@@ -12,6 +13,8 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
   const ref = useRef<HTMLDivElement>(null)
   const splitSlot = useSlotStore(s => s.splitSlot)
   const closeSlot = useSlotStore(s => s.closeSlot)
+  const layout = useSlotStore(s => s.layout)
+  const assignAgent = useSlotStore(s => s.assignAgent)
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -22,6 +25,25 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
   }, [onClose])
 
   const items = [
+    {
+      label: '에이전트 생성',
+      action: () => {
+        const cwd = window.prompt('작업 디렉토리', 'C:/') ?? ''
+        if (!cwd.trim()) return
+        ptyApi
+          .spawnAgent(cwd.trim())
+          .then(agent => assignAgent(slotId, agent.id))
+          .catch(e => console.error('[spawn]', e))
+      },
+    },
+    {
+      label: '에이전트 종료',
+      action: () => {
+        const slot = findSlot(layout, slotId)
+        if (!slot?.agentId) return
+        ptyApi.killAgent(slot.agentId).catch(e => console.error('[kill]', e))
+      },
+    },
     { label: '가로 분할', action: () => splitSlot(slotId, 'horizontal') },
     { label: '세로 분할', action: () => splitSlot(slotId, 'vertical') },
     { label: '에이전트 전환', action: () => {} },

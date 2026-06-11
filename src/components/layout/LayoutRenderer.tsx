@@ -10,7 +10,7 @@ function nodeKey(node: LayoutNode): string {
 
 export default function LayoutRenderer({ node }: { node: LayoutNode }) {
   if (node.type === 'slot') {
-    return <SlotPane slotId={node.id}><TerminalSlot /></SlotPane>
+    return <SlotPane slotId={node.id}><TerminalSlot agentId={node.agentId} /></SlotPane>
   }
   return (
     <div style={{ height: '100%' }}>

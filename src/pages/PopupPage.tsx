@@ -1,9 +1,12 @@
 import { useSearchParams } from 'react-router-dom'
 import TerminalSlot from '../components/slot/TerminalSlot'
+import { useSlotStore, findSlot } from '../store/slotStore'
 
 export default function PopupPage() {
   const [params] = useSearchParams()
-  const slotId = params.get('slotId') ?? '1'
+  const slotId = parseInt(params.get('slotId') ?? '1', 10)
+  const layout = useSlotStore(s => s.layout)
+  const slot = findSlot(layout, slotId)
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
@@ -22,7 +25,7 @@ export default function PopupPage() {
         Slot {slotId} — Popup
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
-        <TerminalSlot />
+        <TerminalSlot agentId={slot?.agentId ?? null} />
       </div>
     </div>
   )
