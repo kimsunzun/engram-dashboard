@@ -99,16 +99,51 @@ restore_all():  // auto_restore=true 프로필만, stagger(순차+간격) — sp
 
 서버측 세션 만료 반응(Gemini)도 #2/#7 계열로 관찰.
 
-## 8. 후퇴선 (spike #4가 fork 확정 + #5 조합 불가 시)
+### 7-R. Spike 실측 결과 (2026-06-11 완료 — `spike-results.md`)
+| # | 결과 |
+|---|------|
+| 1 | `--session-id <uuid>` 정상, json에 우리 uuid 반환 ✓. 재사용은 exit 1 `already in use` |
+| 2 | `--resume <없는uuid>` exit 1 `No conversation found` ✓ — fallback 신호 명확(Hang 아님) |
+| **4** | **`--resume` fork 안 함** — session id 유지 + append ✓ (**후퇴선 §8 불필요**) |
+| /clear | **새 sessionId 생성**, `sessions/<pid>.json`에서 실시간 갱신 ✓ |
+| 핵심 | **`~/.claude/sessions/<PID>.json` = {pid, sessionId, status, …}** — PID로 현재 sessionId 결정적 조회 |
+| trust | 이 환경 미발생(신뢰됨). 새 머신선 가능 — 운영 주의 |
+| 3·redraw | 경미(우리가 cols/rows 관리) |
 
-session id를 transcript 디렉토리 최신 파일 탐색으로 알아내려는 시도 = **wezterm 캡처 비결정성으로 회귀 → 금지.** 그 경우 답: **매 복원을 fresh-new-id 정책으로 후퇴**(AgentId 불변 유지, 대화 연속만 포기). 미리 정해두면 spike 결과와 무관하게 설계 안 무너짐.
+## 8. 후퇴선 — **불필요 (spike #4로 fork 안 함 확인)**
 
-## 9. 진행 순서 (3자: spike 우선)
+`--resume`가 fork하지 않음이 실측됨 → "fresh-new-id 후퇴" 시나리오 자체가 발생 안 함. (단 transcript 디렉토리 최신파일 탐색으로 sid 추정하는 길은 여전히 금지 — sessions/<pid>.json이 결정적 대체.)
 
-1. **Spike #1~9 실측** (코어 구현 전) — 특히 #4·#5가 §3/§4/§8 분기 결정
-2. spike 결과로 §6 상태머신 개정안 확정 → 백엔드·프론트 LLD 개정
-3. 코어 구현 (프로필/persist/복원/재시작)
+## 9. 진행 순서
+
+1. ✅ Spike 실측 완료 (§7-R)
+2. 🔄 §6 상태머신 개정안 확정 → 백엔드·프론트 LLD 개정
+3. ⏳ 코어 구현 (프로필/persist/복원/재시작)
 
 ## 10. 방어 원칙 (wezterm 교훈 — 유지)
 
 위치 무관 AgentId / 직접 spawn 추적 / 세션ID 분리통제 / 레이아웃↔세션 분리 / 복원실패 graceful(새id fallback + 보존 명시).
+
+## 11. sid 확보 메커니즘 (spike 확정 — 최종)
+
+**핵심: 최초는 우리가 지정(캡처 불필요), 변경 시에만 sessions/<pid>.json으로 결정적 재확보.**
+
+### 11-1. 최초 sid — spawn 시
+- `AgentId`(불변 키) + `claude_session_id`(초기 uuid) **둘 다 우리 생성**
+- `claude --session-id <claude_session_id>`로 spawn → **우리 지정값으로 시작.** wezterm식 "claude 생성 sid 사후 캡처" 불필요 (비결정성 원천 제거)
+- child PID 확보 (PtyManager 보유 — 휘발성 핸들, 저장 안 함)
+
+### 11-2. sid 추적 — 실행 중 (변경 감지)
+- `~/.claude/sessions/<현재 child_pid>.json` 한 파일 watch (create/modify)
+- `sessionId`가 우리가 아는 `claude_session_id`와 달라지면(=`/clear`·fork) → `claude_session_id` 갱신, 옛 값 `old_session_ids` 이력
+- **PID 불안정 무관** — 저장하지 않고, 현재 살아있는 child PID는 PtyManager가 항상 보유 → 그때그때 조회
+
+### 11-3. 복원 — 재시작/앱 시작
+- 저장된 `claude_session_id`(최신)로 `claude --resume <id>`
+- 실패(exit 1 `No conversation found`) → **새 uuid로 fresh fallback** + 옛 id 이력 + `agent-restore-result` UI 알림("새 세션, 이전 대화 보존됨")
+- 복원 후 새 child PID로 11-2 재개
+
+### 11-4. 방어 (best-effort)
+- `sessions/<pid>.json`은 **비공식 내부 파일**(version 필드 존재 → 포맷 변동 가능) → 없거나 바뀌어도 **최소 "최초 지정값" 유지** → 복원 시도 → 실패 시 fallback. **어느 경우든 무손상.**
+- PID 재사용 → `startedAt`/`updatedAt`으로 우리 프로세스 검증
+- claude 버전 최신 유지 (구버전 PTY 세션 미저장 버그 — release notes 관찰)
