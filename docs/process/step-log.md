@@ -58,10 +58,25 @@
 - **무엇:** core/dashboard 통합 → docs 트리 재편 → 과정/정설 분리 + 타임라인
 - **결과:** ✅ 모든 자료 `apps/engram-dashboard` 일원화. `process/`(과정 기록) + `reference/`(정설, 추후) 분리, 이 `step-log.md` 작성.
 
+## S9 — 세션 저장/복원 (코어 GO)  · 커밋 `8981cb9`~`7052bc2`
+- **무엇:** claude 세션 무손실 복원 + 에이전트 프로필 영속화 + 약간의 추상화(claude.rs/profile.rs 분리). 자동재시작(restart_agent)은 **게이트**(설계만).
+- **어떻게(H-4 순서, 매니저 직접 구현 + fable 리뷰 게이트):**
+  1. `profile.rs` + ProfileRegistry(단일 소유자, sid 생성·갱신) + dunce — `8981cb9`
+  2. `persistence/` atomic agents.json(tmp+sync_all+rename+parent fsync, schema_version, .corrupt 보존) — `d7f42f4`
+  3. `session_tracker.rs` sid drift 폴링(best-effort, PID shim 우회 스캔, 단일 스레드+정지핸들, degraded 강등) — `0a59fa3`
+  4. LLD 개정 a~g(backend §18 / frontend §11, Stage-1 보존+addendum) — `1b9499c`
+  5. `claude.rs` 격리 + manager `spawn_agent(profile,mode)`/`restore_all`(백그라운드)/fallback(조기종료 윈도→fresh, 종점 Failed) — `f67476b`
+  6. profile CRUD 커맨드 + 프론트 TS 미러(epoch 재구독) + **fable 리뷰 수정** — `7052bc2`
+- **검증:** unit test 19, headless PASS, `cargo fmt`·`tsc` 클린, `pty/` tauri import 0.
+- **fable 리뷰(조건부 GO→수정 완료):** C-1 remove_session drain 대기(stale Killed 경합 제거), M-1 resume 조기종료 code 무관 fallback, Mn-1 status_changed epoch 동봉, Mn-2 Started variant, Mn-5 단일 persist.
+- **핵심 메커니즘:** spawn 시 `--session-id <uuid>`로 우리가 sid 통제 → 재시작 `--resume`로 무손실 복원. `/clear`로 sid 바뀌면 `sessions/<pid>.json` 폴링으로 따라잡아 즉시 persist. 복원 정확성은 우리 통제 sid에만 의존(추적 파일은 best-effort).
+- **문서:** `S9-session-restore/session-restore-lld.md`, `-code-plan.md`(§H), `spike-results.md`, `s9-*-review-*.md`
+
 ---
 
 ## 다음 (미진행)
-- **세션 저장/복원** — 핵심 기능. LLD §범위에 "추후 결정"이던 항목. 떠있던 에이전트(명령/cwd/레이아웃) persist + claude `--continue` 대화 복원. **설계 예정.**
-- spawn 설정화 (에이전트 프로필) — 세션 복원과 연결
-- Phase 3d (popup URL 전달 + monaco) + 프론트 상세
+- **[게이트] 자동 재시작** — `restart_agent` 전용 태스크(사다리 resume→fresh→정지, backoff). 코어 안정 후.
+- **실제 claude 복원 E2E** — headless는 shell만 실증. claude `--session-id`/`--resume` + `sessions/<pid>.json` PID 일치를 실제 claude로 실측(spike) 필요.
+- 메시지 시스템(에이전트 간 통신) — 백엔드 추가 설계.
+- Phase 3d (popup URL 전달 + monaco) + 프론트 상세(복원 배너 UX).
 - `reference/` 정설 문서 집필 (시스템 안정화 후)
