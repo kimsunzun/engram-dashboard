@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod logging;
+pub mod persistence;
 pub mod pty;
 
 use std::sync::Arc;
