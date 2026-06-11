@@ -1,4 +1,5 @@
 //! PtyManager — Phase 1 결합부. session/drain/platform/types를 묶어 에이전트 생명주기를 관리한다.
+//! S9: 프로필 기반 spawn + 세션 복원(restore_all) + claude 세션 추적 부착.
 //!
 //! tauri import 0 — 상위 상태 알림은 StatusSink trait으로 주입받는다(AppHandle 아님).
 //!
@@ -12,12 +13,17 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
+use crate::pty::claude;
 use crate::pty::drain::spawn_drain_thread;
+use crate::pty::profile::{
+    AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
+};
 use crate::pty::session::{PtySession, PtySessionInit};
+use crate::pty::session_tracker::SessionTracker;
 use crate::pty::types::{
     AgentId, AgentInfo, AgentStatus, OutputSink, PtyChunk, PtyError, SinkId, StatusSink,
 };
@@ -28,13 +34,19 @@ use crate::pty::platform::JobObjectHandle;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
-/// 검증용 기본 셸. 셸/명령 인자화는 추후(LLD: 본래 "claude"). 지금은 기본 동작 우선.
+/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하면 resume 실패로 보고
+/// fresh로 fallback한다(H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
+/// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
+const RESTORE_STAGGER: Duration = Duration::from_millis(200);
+
+/// 검증·기본용 셸. 프로필 없이 빠르게 띄울 때 commands가 사용한다.
 #[cfg(windows)]
-fn default_shell() -> &'static str {
+pub fn default_shell() -> &'static str {
     "cmd.exe"
 }
 #[cfg(not(windows))]
-fn default_shell() -> &'static str {
+pub fn default_shell() -> &'static str {
     "bash"
 }
 
@@ -42,18 +54,95 @@ pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<AgentId, Arc<PtySession>>>>,
     // C1: Tauri AppHandle이 아니라 StatusSink trait 주입(테스트 시 Noop 가능).
     status_sink: Arc<dyn StatusSink>,
+    // S9: 프로필 단일 소유자(sid 생성·갱신·persist) + claude 세션 추적기.
+    profiles: Arc<ProfileRegistry>,
+    tracker: Arc<SessionTracker>,
 }
 
 impl PtyManager {
-    pub fn new(status_sink: Arc<dyn StatusSink>) -> Self {
+    pub fn new(
+        status_sink: Arc<dyn StatusSink>,
+        profiles: Arc<ProfileRegistry>,
+        tracker: Arc<SessionTracker>,
+    ) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             status_sink,
+            profiles,
+            tracker,
         }
     }
 
-    /// PTY spawn + drain thread 시작. 성공 시 AgentInfo 반환.
-    pub fn spawn_agent(&self, cwd: &Path) -> Result<AgentInfo, PtyError> {
+    /// 프로필 레지스트리 접근(commands에서 CRUD에 사용).
+    pub fn profiles(&self) -> &Arc<ProfileRegistry> {
+        &self.profiles
+    }
+
+    // ── spawn ──────────────────────────────────────────────────────────────
+
+    /// 프로필 기반 spawn. claude면 mode에 따라 `--session-id`/`--resume`를 조립한다.
+    /// 성공 시 AgentInfo 반환.
+    pub fn spawn_agent(
+        &self,
+        profile: &AgentProfile,
+        mode: SpawnMode,
+    ) -> Result<AgentInfo, PtyError> {
+        // 이중 spawn 가드 — 같은 id가 이미 살아있으면 거부(맵 교체는 복원/재시작 경로 전용).
+        if self
+            .sessions
+            .read()
+            .expect("sessions poisoned")
+            .contains_key(&profile.id)
+        {
+            return Err(PtyError::SpawnFailed(format!(
+                "agent {} already running",
+                profile.id
+            )));
+        }
+
+        // 프로필을 레지스트리에 등록(idempotent + 즉시 persist). 복원 경로는 기존 프로필을 그대로 넘긴다.
+        self.profiles.upsert(profile.clone());
+
+        // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
+        let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
+
+        // claude면 세션 id 확보(없으면 생성·persist). 생성 책임은 ProfileRegistry(H-1.4).
+        let session_id = if claude::needs_session(&profile.command) {
+            self.profiles.ensure_session_id(profile.id)
+        } else {
+            None
+        };
+
+        let (program, args) = claude::build_command(&profile.command, mode, session_id);
+        // epoch는 레지스트리의 현재값(fallback respawn 등에서 미리 bump됨).
+        let epoch = self.profiles.get(profile.id).map(|p| p.epoch).unwrap_or(0);
+
+        let (session, child_pid) =
+            self.spawn_session(profile.id, &cwd, &profile.env, &program, &args, epoch)?;
+
+        // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략.
+        if let (Some(sid), Some(pid)) = (session_id, child_pid) {
+            self.tracker.watch(profile.id, pid, sid);
+        }
+
+        tracing::info!(agent = %profile.id, %program, epoch, ?mode, "에이전트 spawn");
+
+        let info = self.agent_info(&session);
+        self.status_sink.agent_list_updated(self.list_agents());
+        Ok(info)
+    }
+
+    /// PTY 생성 + child spawn + drain thread 기동 + sessions 등록의 공통 기계부.
+    /// 반환: 등록된 세션 Arc + child PID(Option).
+    fn spawn_session(
+        &self,
+        id: AgentId,
+        cwd: &Path,
+        env: &[(String, String)],
+        program: &str,
+        args: &[String],
+        epoch: u32,
+    ) -> Result<(Arc<PtySession>, Option<u32>), PtyError> {
         // 1. PTY 생성 (기본 24x80)
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -64,9 +153,15 @@ impl PtyManager {
             })
             .map_err(|e| PtyError::SpawnFailed(format!("openpty: {e}")))?;
 
-        // 2. child spawn
-        let mut cmd = CommandBuilder::new(default_shell());
+        // 2. child spawn (program + args + cwd + env)
+        let mut cmd = CommandBuilder::new(program);
+        for a in args {
+            cmd.arg(a);
+        }
         cmd.cwd(cwd);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -75,18 +170,19 @@ impl PtyManager {
         // slave는 spawn 후 불필요 — drop으로 FD 누수 방지(닫혀야 ConPTY EOF도 정상).
         drop(pair.slave);
 
+        let child_pid = child.process_id();
+
         // 3. Windows: Job 생성 + child 편입 (spike/windows.rs 검증 순서 그대로).
         #[cfg(windows)]
         let job_handle = {
             let job = JobObjectHandle::new()?;
-            if let Some(pid) = child.process_id() {
+            if let Some(pid) = child_pid {
                 job.assign(pid)?;
             }
             job
         };
 
         // 4. ★ master를 session에 넣기 전에 reader/writer를 먼저 확보 ★
-        //    master가 PtySession 안으로 이동하면 try_clone_reader/take_writer 호출이 불가능해진다.
         let reader = pair
             .master
             .try_clone_reader()
@@ -97,10 +193,10 @@ impl PtyManager {
             .map_err(|e| PtyError::SpawnFailed(format!("take_writer: {e}")))?;
 
         // 5. PtySession 생성 → Arc
-        let id = uuid::Uuid::new_v4();
         let session = Arc::new(PtySession::new(PtySessionInit {
             id,
             cwd: cwd.to_path_buf(),
+            epoch,
             master: pair.master,
             writer,
             child,
@@ -125,12 +221,158 @@ impl PtyManager {
             .expect("sessions poisoned")
             .insert(id, session.clone());
 
-        // 9. 목록 변경 알림 (manager 책임). 개별 status_changed는 drain 단독이므로 여기선 안 함.
-        let info = self.agent_info(&session);
-        self.status_sink.agent_list_updated(self.list_agents());
-
-        Ok(info)
+        Ok((session, child_pid))
     }
+
+    // ── 복원 (S9 코어) ───────────────────────────────────────────────────────
+
+    /// auto_restore 프로필 전부 복원 시도. **백그라운드 스레드에서 호출할 것**(stagger·조기종료
+    /// 윈도 대기로 블로킹 — setup 동기 호출 금지, H-1.8). 에이전트별 결과를 통지하고 반환한다.
+    pub fn restore_all(&self) -> Vec<RestoreReport> {
+        let targets = self.profiles.restorable();
+        tracing::info!(count = targets.len(), "restore_all 시작");
+
+        let mut reports = Vec::with_capacity(targets.len());
+        for profile in targets {
+            let outcome = self.restore_one(&profile);
+            // fallback에서 epoch가 bump됐을 수 있으니 최신값을 읽는다.
+            let epoch = self
+                .profiles
+                .get(profile.id)
+                .map(|p| p.epoch)
+                .unwrap_or(profile.epoch);
+            let report = RestoreReport {
+                agent_id: profile.id,
+                epoch,
+                outcome,
+            };
+            tracing::info!(agent = %report.agent_id, ?report.outcome, "복원 결과");
+            self.status_sink.restore_result(report.clone());
+            reports.push(report);
+            std::thread::sleep(RESTORE_STAGGER);
+        }
+        reports
+    }
+
+    /// 프로필 1개 복원. claude+sid 있으면 resume 시도 후 조기종료면 fresh fallback,
+    /// 그 외(shell 등)는 fresh로 시작.
+    fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
+        let resumable =
+            claude::needs_session(&profile.command) && profile.claude_session_id.is_some();
+
+        if !resumable {
+            return match self.spawn_agent(profile, SpawnMode::Fresh) {
+                Ok(_) => RestoreOutcome::Resumed,
+                Err(e) => RestoreOutcome::Failed {
+                    reason: e.to_string(),
+                },
+            };
+        }
+
+        // claude resume 시도
+        match self.spawn_agent(profile, SpawnMode::Resume) {
+            Err(e) => self.fallback_fresh(profile, format!("resume spawn 실패: {e}")),
+            Ok(_) => match self.early_terminal_status(profile.id, EARLY_EXIT_WINDOW) {
+                // 조기 비정상 종료 = resume 실패 → fallback
+                Some(AgentStatus::Exited { code: Some(c) }) if c != 0 => {
+                    self.fallback_fresh(profile, format!("resume 조기 종료(code={c})"))
+                }
+                Some(AgentStatus::Failed { message }) => {
+                    self.fallback_fresh(profile, format!("resume 실패: {message}"))
+                }
+                Some(AgentStatus::Killed) => {
+                    self.fallback_fresh(profile, "resume 조기 Killed".into())
+                }
+                // 여전히 Running이거나 code==0 정상 종료 → 성공으로 간주(silent stale 방지: 불확실은
+                // resume 유지가 아니라 위에서 명확한 실패만 fallback).
+                _ => RestoreOutcome::Resumed,
+            },
+        }
+    }
+
+    /// resume 실패 시: 기존 세션 정리 → 새 sid 발급(old 이력) → epoch++ → fresh spawn.
+    /// fresh마저 실패하면 `Failed`로 종결(재귀 금지 — H-1.7 종점).
+    fn fallback_fresh(&self, profile: &AgentProfile, reason: String) -> RestoreOutcome {
+        tracing::warn!(agent = %profile.id, %reason, "resume 실패 → fresh fallback");
+        self.remove_session(profile.id);
+
+        let old_sid = profile.claude_session_id;
+        let new_sid = uuid::Uuid::new_v4();
+        // 맵 교체이므로 epoch++ (H-1.5). old sid는 이력으로.
+        self.profiles.update_with(profile.id, |p| {
+            if let Some(old) = p.claude_session_id.take() {
+                p.old_session_ids.push(old);
+            }
+            p.claude_session_id = Some(new_sid);
+        });
+        self.profiles.bump_epoch(profile.id);
+
+        let updated = self
+            .profiles
+            .get(profile.id)
+            .unwrap_or_else(|| profile.clone());
+
+        match self.spawn_agent(&updated, SpawnMode::Fresh) {
+            Ok(_) => RestoreOutcome::FreshFallback {
+                old_sid,
+                new_sid,
+                reason,
+            },
+            Err(e) => RestoreOutcome::Failed {
+                reason: format!("fresh fallback도 실패: {e}"),
+            },
+        }
+    }
+
+    /// spawn 후 window 안에 terminal 상태가 되면 그 상태를, 안 되면 None(여전히 살아있음).
+    fn early_terminal_status(&self, id: AgentId, window: Duration) -> Option<AgentStatus> {
+        let deadline = Instant::now() + window;
+        loop {
+            let session = match self.get_session(id) {
+                Ok(s) => s,
+                // 맵에서 사라짐 = 비정상 → 종료로 간주.
+                Err(_) => {
+                    return Some(AgentStatus::Failed {
+                        message: "session gone".into(),
+                    })
+                }
+            };
+            let status = session.status.lock().expect("status poisoned").clone();
+            if matches!(
+                status,
+                AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
+            ) {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// 세션을 조용히 정리(상태 알림 없이) — fallback 전 옛 세션 제거 전용.
+    /// 이미 종료된 세션이 대상이라 best-effort kill로 충분하다.
+    fn remove_session(&self, id: AgentId) {
+        self.tracker.unwatch(id);
+        let removed = self
+            .sessions
+            .write()
+            .expect("sessions poisoned")
+            .remove(&id);
+        if let Some(session) = removed {
+            session.shutdown.store(true, Ordering::Release);
+            {
+                let mut child = session.child.lock().expect("child poisoned");
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            // master drop → ConPTY 종료 → drain EOF로 자연 종료.
+            let _ = session.master.lock().expect("master poisoned").take();
+        }
+    }
+
+    // ── 구독/입출력 (Stage-1 그대로) ─────────────────────────────────────────
 
     /// 구독자 등록 + replay 전송 → SinkId. C4 로직은 session.subscribe에 있다.
     pub fn subscribe(
@@ -152,7 +394,6 @@ impl PtyManager {
     /// PTY stdin write.
     pub fn write_stdin(&self, agent_id: AgentId, data: &[u8]) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
-        // writer lock만 잡는다(독립 lock). drain은 replay/subscribers만 잡으므로 교착 없음.
         let mut writer = session.writer.lock().expect("writer poisoned");
         writer
             .write_all(data)
@@ -166,7 +407,6 @@ impl PtyManager {
     /// PTY cols/rows 변경.
     pub fn resize(&self, agent_id: AgentId, cols: u16, rows: u16) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
-        // master가 이미 take된(=killed) 경우는 조용히 무시하고 atomic만 갱신.
         if let Some(master) = session.master.lock().expect("master poisoned").as_ref() {
             master
                 .resize(PtySize {
@@ -182,18 +422,13 @@ impl PtyManager {
         Ok(())
     }
 
+    // ── kill (Stage-1 6단계 절대순서 + S9 tracker unwatch) ────────────────────
+
     /// 에이전트 종료 — ★LLD §6 6단계 절대순서★ (spike로 검증된 순서, 변경 금지).
-    ///
-    /// ★상태 알림 분담★: 과도기 `Exiting`은 kill_agent가 설정·알림하고(아래 step 0.5),
-    /// terminal(`Killed`/`Exited`/`Failed`)은 drain thread가 단독 전이·알림한다.
-    /// drain의 terminal 가드 덕에 여기서 쓴 Exiting을 나중에 안전하게 덮어쓴다.
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
-        // 0. Arc clone 후 sessions read lock 즉시 해제 (§10 규칙1).
         let session = self.get_session(agent_id)?;
 
         // 0.5. 과도기 Exiting 전이 — kill 누르면 즉시 '종료중' 알림.
-        //      status lock 안에서 terminal이 아닐 때만 설정하고, 외부 호출(status_changed)은
-        //      §10(status lock 보유 중 외부 호출 금지)에 따라 lock 해제 후 수행한다.
         let entered_exiting = {
             let mut status = session.status.lock().expect("status poisoned");
             if matches!(
@@ -214,7 +449,7 @@ impl PtyManager {
         // 1. shutdown 신호 — drain이 종료 시 Killed로 전이하도록.
         session.shutdown.store(true, Ordering::Release);
 
-        // 2~3. child kill + wait(reap, 좀비 방지). 순서 보존 위해 한 lock 구간에서.
+        // 2~3. child kill + wait(reap, 좀비 방지).
         {
             let mut child = session.child.lock().expect("child poisoned");
             let _ = child.kill();
@@ -227,11 +462,10 @@ impl PtyManager {
             let _ = session.job_handle.terminate(1);
         }
 
-        // 5. master.take() → drop → ClosePseudoConsole → reader EOF (C3). 반드시 4 이후 5.
+        // 5. master.take() → drop → ClosePseudoConsole → reader EOF (C3).
         let _ = session.master.lock().expect("master poisoned").take();
 
-        // 6. drain 완료 대기 (G-1). timeout이면 handle을 그냥 두고 진행 — 세션 제거로 Arc
-        //    참조가 끊기면 drain은 자연 종료된다(leak 아님).
+        // 6. drain 완료 대기 (G-1). timeout이면 그냥 진행(세션 제거로 Arc 끊겨 자연 종료).
         if let Some(rx) = session
             .drain_done_rx
             .lock()
@@ -241,11 +475,12 @@ impl PtyManager {
             let _ = rx.recv_timeout(Duration::from_secs(5));
         }
 
-        // 7. sessions에서 제거 (write lock — 즉시 해제).
+        // 7. sessions에서 제거 + 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지).
         self.sessions
             .write()
             .expect("sessions poisoned")
             .remove(&agent_id);
+        self.tracker.unwatch(agent_id);
 
         // 8. 목록 변경 알림 (manager 책임). 개별 status_changed(Killed)는 drain 단독.
         self.status_sink.agent_list_updated(self.list_agents());
@@ -253,9 +488,10 @@ impl PtyManager {
         Ok(())
     }
 
+    // ── 조회/종료 ─────────────────────────────────────────────────────────────
+
     /// 전체 목록 스냅샷.
     pub fn list_agents(&self) -> Vec<AgentInfo> {
-        // 규칙1: sessions lock 보유 중 session 내부 lock 금지 → Arc만 모으고 즉시 해제.
         let sessions: Vec<Arc<PtySession>> = {
             let guard = self.sessions.read().expect("sessions poisoned");
             guard.values().cloned().collect()
@@ -266,19 +502,15 @@ impl PtyManager {
     /// replay 스냅샷 조회.
     pub fn get_snapshot(&self, agent_id: AgentId) -> Result<Vec<PtyChunk>, PtyError> {
         let session = self.get_session(agent_id)?;
-        // snapshot을 먼저 바인딩 — MutexGuard 임시값이 session보다 오래 사는 것을 방지.
         let snapshot = session.replay.lock().expect("replay poisoned").snapshot();
         Ok(snapshot)
     }
 
     /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고, 각 kill을 병렬 실행한다.
-    ///
-    /// 순차로 돌리면 kill_agent마다 drain 완료 recv_timeout(5s)가 직렬로 쌓여
-    /// worst case N*5s가 걸린다. scoped thread로 동시 실행하면 worst case가 단일 5s로 줄고,
-    /// 정상(즉시 종료) 경로는 영향이 없다. scope는 'static 없이 &self를 빌려 쓰고
-    /// 스코프 종료 시 모든 스레드를 join하므로 전부 정리된 뒤 반환된다.
-    /// 각 스레드 내부의 kill_agent 6단계 순서는 그대로 유지된다.
     pub fn shutdown_all(&self) {
+        // S9: 세션 추적 스레드부터 정지(폴링이 정리 중인 세션을 건드리지 않게).
+        self.tracker.stop();
+
         let ids: Vec<AgentId> = {
             let guard = self.sessions.read().expect("sessions poisoned");
             guard.keys().copied().collect()
@@ -312,6 +544,7 @@ impl PtyManager {
             status: session.status.lock().expect("status poisoned").clone(),
             cols: session.cols.load(Ordering::Relaxed),
             rows: session.rows.load(Ordering::Relaxed),
+            epoch: session.epoch,
         }
     }
 }

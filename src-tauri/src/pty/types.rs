@@ -38,6 +38,8 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub cols: u16,
     pub rows: u16,
+    /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 트리거(S9 §18-a).
+    pub epoch: u32,
 }
 
 /// PTY 백엔드 오류 타입
@@ -69,6 +71,8 @@ pub trait OutputSink: Send + Sync + 'static {
 pub trait StatusSink: Send + Sync + 'static {
     fn status_changed(&self, id: AgentId, status: AgentStatus);
     fn agent_list_updated(&self, agents: Vec<AgentInfo>);
+    /// 복원 시도 결과 통지(S9 §18-d). 기본 no-op — 복원을 안 쓰는 sink는 구현 불필요.
+    fn restore_result(&self, _report: crate::pty::profile::RestoreReport) {}
 }
 
 // ReplayBuffer 는 session.rs 로 이동 (LLD §1/§4: session.rs 소속).

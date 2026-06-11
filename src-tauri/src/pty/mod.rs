@@ -1,3 +1,4 @@
+pub mod claude;
 pub mod drain;
 pub mod manager;
 pub mod platform;

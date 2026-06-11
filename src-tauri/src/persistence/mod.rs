@@ -88,7 +88,9 @@ impl FileProfileStore {
 
     /// 손상 파일을 `.corrupt-<ts>`로 보존(덮어쓰기 방지). 파싱 불가일 때만 호출한다.
     fn preserve_corrupt(&self, path: &Path) {
-        let backup = self.dir.join(format!("{FILE_NAME}.corrupt-{}", now_millis()));
+        let backup = self
+            .dir
+            .join(format!("{FILE_NAME}.corrupt-{}", now_millis()));
         match fs::rename(path, &backup) {
             Ok(()) => tracing::warn!("손상된 agents.json을 {:?}로 보존", backup),
             Err(e) => tracing::error!("corrupt 파일 보존 실패: {e}"),

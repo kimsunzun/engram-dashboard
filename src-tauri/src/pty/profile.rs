@@ -330,9 +330,7 @@ mod tests {
     fn sample() -> AgentProfile {
         AgentProfile::new(
             "t".into(),
-            AgentCommand::Claude {
-                extra_args: vec![],
-            },
+            AgentCommand::Claude { extra_args: vec![] },
             PathBuf::from("."),
             vec![],
             true,
@@ -357,7 +355,10 @@ mod tests {
         reg.upsert(p);
         let first = reg.ensure_session_id(id).unwrap();
         let second = reg.ensure_session_id(id).unwrap();
-        assert_eq!(first, second, "두 번째 호출은 기존 sid를 그대로 반환해야 함");
+        assert_eq!(
+            first, second,
+            "두 번째 호출은 기존 sid를 그대로 반환해야 함"
+        );
     }
 
     #[test]
@@ -373,7 +374,10 @@ mod tests {
         assert!(reg.observe_session_id(id, sid2));
         let got = reg.get(id).unwrap();
         assert_eq!(got.claude_session_id, Some(sid2));
-        assert!(got.old_session_ids.contains(&sid1), "옛 sid가 이력에 남아야 함");
+        assert!(
+            got.old_session_ids.contains(&sid1),
+            "옛 sid가 이력에 남아야 함"
+        );
 
         // 같은 값 재관측은 no-op
         assert!(!reg.observe_session_id(id, sid2));

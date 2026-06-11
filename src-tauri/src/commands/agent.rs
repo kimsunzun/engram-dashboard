@@ -1,16 +1,30 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use tauri::State;
 use uuid::Uuid;
 
+use crate::pty::manager::default_shell;
+use crate::pty::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::pty::types::AgentInfo;
 use crate::AppState;
 
+/// 기존 thin spawn — cwd만 받아 기본 셸 에이전트를 띄운다(transient, auto_restore=false).
+/// claude 프로필 CRUD/복원은 별도 커맨드(S9-6)에서 다룬다.
 #[tauri::command]
 pub async fn spawn_agent(state: State<'_, AppState>, cwd: String) -> Result<AgentInfo, String> {
+    let profile = AgentProfile::new(
+        cwd.clone(),
+        AgentCommand::Shell {
+            program: default_shell().to_string(),
+            args: vec![],
+        },
+        PathBuf::from(&cwd),
+        vec![],
+        false,
+    );
     state
         .manager
-        .spawn_agent(Path::new(&cwd))
+        .spawn_agent(&profile, SpawnMode::Fresh)
         .map_err(|e| e.to_string())
 }
 

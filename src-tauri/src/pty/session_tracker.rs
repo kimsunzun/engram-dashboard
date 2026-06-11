@@ -271,10 +271,7 @@ pub struct SessionTracker {
 
 impl SessionTracker {
     /// 추적기 생성(스레드는 아직 안 띄움 — `start()` 호출 시 기동).
-    pub fn new(
-        config: TrackerConfig,
-        on_change: Arc<dyn Fn(AgentId, Uuid) + Send + Sync>,
-    ) -> Self {
+    pub fn new(config: TrackerConfig, on_change: Arc<dyn Fn(AgentId, Uuid) + Send + Sync>) -> Self {
         Self {
             dir: config.sessions_dir,
             enabled: config.enabled,
@@ -321,7 +318,9 @@ impl SessionTracker {
     /// 단일 폴링 스레드 기동. 비활성이면 띄우지 않는다. 중복 호출은 무시.
     pub fn start(&self) {
         if !self.active() {
-            tracing::info!("session_tracker 비활성(토글 off 또는 sessions_dir 미해석) — 추적 안 함");
+            tracing::info!(
+                "session_tracker 비활성(토글 off 또는 sessions_dir 미해석) — 추적 안 함"
+            );
             return;
         }
         let mut handle_guard = self.handle.lock().expect("handle poisoned");

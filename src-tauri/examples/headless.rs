@@ -5,7 +5,7 @@
 //!
 //! 실행: src-tauri 디렉토리에서 `cargo run --example headless`
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +13,10 @@ use base64::Engine as _;
 use uuid::Uuid;
 
 use engram_dashboard_lib::logging::{init_logging, mask_secrets, set_log_level};
-use engram_dashboard_lib::pty::manager::PtyManager;
+use engram_dashboard_lib::persistence::FileProfileStore;
+use engram_dashboard_lib::pty::manager::{default_shell, PtyManager};
+use engram_dashboard_lib::pty::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
+use engram_dashboard_lib::pty::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_lib::pty::types::{
     AgentId, AgentInfo, AgentStatus, OutputSink, PtyEvent, SinkError, SinkId, StatusSink,
 };
@@ -72,10 +75,36 @@ fn main() {
     set_log_level("debug").expect("set_log_level failed");
 
     let status_sink: Arc<dyn StatusSink> = Arc::new(LogSink::new());
-    let manager = PtyManager::new(status_sink);
 
-    // 1) spawn — cmd.exe (AgentStatus::Running 상태로 시작됨).
-    let info = manager.spawn_agent(Path::new(".")).expect("spawn failed");
+    // 프로필 영속화는 임시 디렉토리, 세션 추적은 비활성(shell이라 세션 파일 없음).
+    let store = Arc::new(FileProfileStore::new(
+        std::env::temp_dir().join("engram-headless"),
+    ));
+    let profiles = Arc::new(ProfileRegistry::new(store));
+    let tracker = Arc::new(SessionTracker::new(
+        TrackerConfig {
+            sessions_dir: None,
+            enabled: false,
+            poll_interval: Duration::from_secs(1),
+        },
+        Arc::new(|_, _| {}),
+    ));
+    let manager = PtyManager::new(status_sink, profiles, tracker);
+
+    // 1) spawn — 기본 셸(Shell 프로필, Fresh). AgentStatus::Running 상태로 시작됨.
+    let profile = AgentProfile::new(
+        "headless".into(),
+        AgentCommand::Shell {
+            program: default_shell().to_string(),
+            args: vec![],
+        },
+        PathBuf::from("."),
+        vec![],
+        false,
+    );
+    let info = manager
+        .spawn_agent(&profile, SpawnMode::Fresh)
+        .expect("spawn failed");
     tracing::info!(?info, "spawned");
 
     // 2) subscribe — 이후 PTY 출력이 LogSink.send로 흘러온다.

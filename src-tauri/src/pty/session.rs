@@ -31,6 +31,9 @@ pub struct PtySession {
     // ── 불변 (생성 후 변경 없음) ──────────────────────────────
     pub id: AgentId,
     pub cwd: PathBuf,
+    /// 이 세션 인스턴스가 spawn된 시점의 epoch. 재spawn마다 새 PtySession이 새 epoch로 생성되어
+    /// 프론트 재구독 트리거가 된다(S9 §18-a). 세션 단위 불변값.
+    pub epoch: u32,
 
     // ── PTY I/O (각각 독립 lock) ──────────────────────────────
     // master: Option 필수 — kill 시 take()로 drop → ConPTY 종료 → reader EOF (spike 검증).
@@ -66,6 +69,7 @@ pub struct PtySession {
 pub struct PtySessionInit {
     pub id: AgentId,
     pub cwd: PathBuf,
+    pub epoch: u32,
     pub master: Box<dyn MasterPty + Send>,
     pub writer: Box<dyn Write + Send>,
     pub child: Box<dyn Child + Send + Sync>,
@@ -82,6 +86,7 @@ impl PtySession {
         Self {
             id: init.id,
             cwd: init.cwd,
+            epoch: init.epoch,
             master: Mutex::new(Some(init.master)),
             writer: Mutex::new(init.writer),
             child: Mutex::new(init.child),

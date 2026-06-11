@@ -8,7 +8,10 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
+use persistence::FileProfileStore;
 use pty::manager::PtyManager;
+use pty::profile::{ProfileRegistry, RestoreReport};
+use pty::session_tracker::{SessionTracker, TrackerConfig};
 use pty::types::{AgentId, AgentInfo, AgentStatus, OutputSink, SinkError, SinkId};
 
 // ── AppState ─────────────────────────────────────────────────────────────────
@@ -76,6 +79,13 @@ impl pty::types::StatusSink for TauriStatusSink {
             tracing::warn!("emit agent-list-updated failed: {e}");
         }
     }
+
+    fn restore_result(&self, report: RestoreReport) {
+        // 복원 결과를 프론트에 통지(S9 §18-d). 실패는 로그만.
+        if let Err(e) = self.app.emit("agent-restore-result", report) {
+            tracing::warn!("emit agent-restore-result failed: {e}");
+        }
+    }
 }
 
 // ── run() ────────────────────────────────────────────────────────────────────
@@ -90,7 +100,33 @@ pub fn run() {
             let status_sink = Arc::new(TauriStatusSink {
                 app: app.handle().clone(),
             });
-            let manager = Arc::new(PtyManager::new(status_sink));
+
+            // 프로필 저장 위치 = 앱 데이터 디렉토리(agents.json).
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let store = Arc::new(FileProfileStore::new(data_dir));
+            let profiles = Arc::new(ProfileRegistry::new(store));
+
+            // 세션 추적: sid 변경(/clear 등) 관측 시 레지스트리에 반영(즉시 persist).
+            let profiles_cb = profiles.clone();
+            let tracker = Arc::new(SessionTracker::new(
+                TrackerConfig::default(),
+                Arc::new(move |agent_id, new_sid| {
+                    profiles_cb.observe_session_id(agent_id, new_sid);
+                }),
+            ));
+            tracker.start();
+
+            let manager = Arc::new(PtyManager::new(status_sink, profiles, tracker));
+
+            // 복원은 백그라운드 — 앱 창 블로킹 방지(H-1.8). stagger·조기종료 윈도 대기 포함.
+            let mgr = manager.clone();
+            std::thread::spawn(move || {
+                mgr.restore_all();
+            });
+
             app.manage(AppState { manager });
             Ok(())
         })
