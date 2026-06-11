@@ -271,15 +271,25 @@ impl PtyManager {
         Ok(snapshot)
     }
 
-    /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고 각각 kill.
+    /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고, 각 kill을 병렬 실행한다.
+    ///
+    /// 순차로 돌리면 kill_agent마다 drain 완료 recv_timeout(5s)가 직렬로 쌓여
+    /// worst case N*5s가 걸린다. scoped thread로 동시 실행하면 worst case가 단일 5s로 줄고,
+    /// 정상(즉시 종료) 경로는 영향이 없다. scope는 'static 없이 &self를 빌려 쓰고
+    /// 스코프 종료 시 모든 스레드를 join하므로 전부 정리된 뒤 반환된다.
+    /// 각 스레드 내부의 kill_agent 6단계 순서는 그대로 유지된다.
     pub fn shutdown_all(&self) {
         let ids: Vec<AgentId> = {
             let guard = self.sessions.read().expect("sessions poisoned");
             guard.keys().copied().collect()
         };
-        for id in ids {
-            let _ = self.kill_agent(id);
-        }
+        std::thread::scope(|s| {
+            for id in ids {
+                s.spawn(move || {
+                    let _ = self.kill_agent(id);
+                });
+            }
+        });
     }
 
     // ── 내부 헬퍼 ─────────────────────────────────────────────

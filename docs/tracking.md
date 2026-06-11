@@ -4,7 +4,16 @@
 
 ## 보류 (재도입 예정)
 
-### T-1. 로그 API 키 마스킹 (mask_api_keys) — 보안
+### T-1. 로그 API 키 마스킹 — ✅ 구현 (2026-06-11)
+- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. LogSink에 적용. dr26 LGTM.
+- **한계(문서화):** AWS Secret Key(40자 base64)는 패턴 식별 불가 — best-effort. generic api_key= 는 오탐 리스크로 미적용.
+- **규칙(명문화 필요):** 추후 production에 PTY 텍스트 로그 추가 시 반드시 mask_secrets 적용 → CLAUDE.md/LLD 명시 예정(D-6).
+
+### D-6. tauri 버전 표기 + mask_secrets 규칙 — 문서 갱신
+- LLD §2 'tauri 2.4 고정' → 실제 Cargo.toml `tauri="2"`(2.11.2, spike 재검증). LLD §2 + CLAUDE.md 의존성 절 갱신.
+- production PTY 텍스트 로그 시 mask_secrets 필수 규칙 CLAUDE.md/LLD 한 줄 명문화.
+
+### (구) T-1 보류 메모
 - **상태:** 보류 (폐기 아님)
 - **출처:** LLD §14 `LogConfig{mask_api_keys}`. 모듈 6a logging core 구현 시 단순화하며 누락(ed12 브리핑 실수). dr26 리뷰 지적.
 - **현재 위험:** 낮음. 기본 로그 OFF(warn)라 PTY 출력이 로그로 흐르지 않음.
@@ -69,6 +78,11 @@
 §9(R-1 알림분담+Exiting), §10(D-3 poison fail-fast 규칙4), §13(D-2 JobObject API), §14(D-1 로깅+mask_api_keys 보류), §6(D-4 drain 4인자) 모두 backend-lld-stage1.md에 반영 완료.
 
 ---
+
+### D-5. frontend-integration-lld 동기화 (Phase 3 중 발견)
+- **상태:** 미반영. Phase 3 마무리 시 frontend LLD 갱신.
+- 경로: LLD가 src/types/pty.ts·src/lib/ptyApi.ts·src/lib/eventBus.ts 표기 → 실제 src/api/types.ts·src/api/ptyApi.ts·src/store/eventBus.ts. LLD 경로 표기 갱신.
+- getSnapshot: LLD §2가 {seq,data_b64}[] 오기 → 실제 PtyChunk는 data:number[]. 코드는 unknown[]+Phase3c 보류로 처리(T-7). LLD §2 수정.
 
 ### (이력) 갱신 항목 상세
 

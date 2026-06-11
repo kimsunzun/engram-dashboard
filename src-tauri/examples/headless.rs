@@ -12,7 +12,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use uuid::Uuid;
 
-use engram_dashboard_lib::logging::{init_logging, set_log_level};
+use engram_dashboard_lib::logging::{init_logging, mask_secrets, set_log_level};
 use engram_dashboard_lib::pty::manager::PtyManager;
 use engram_dashboard_lib::pty::types::{
     AgentId, AgentInfo, AgentStatus, OutputSink, PtyEvent, SinkError, SinkId, StatusSink,
@@ -20,11 +20,8 @@ use engram_dashboard_lib::pty::types::{
 
 // ── LogSink ──────────────────────────────────────────────────────────────────
 // OutputSink + StatusSink 양쪽을 구현하는 테스트용 sink.
-// PTY 출력을 그대로 tracing::info!로 찍는다.
-//
-// ⚠️  실제 Claude 에이전트 연결 시 PTY 출력에 API 키가 포함될 수 있다.
-//     반드시 masking layer(logging/masking.rs)를 적용한 뒤 로그로 출력해야 한다
-//     (tracking T-1). 현재는 cmd.exe/pwsh 대상 테스트라 안전하지만 이 주석은 유지.
+// PTY 출력은 mask_secrets() 적용 후 로그에 찍는다 (T-1 완료).
+// 기본 warn 레벨에서는 PTY 출력이 찍히지 않으나, debug 활성화 시 안전망.
 
 struct LogSink {
     id: SinkId,
@@ -41,11 +38,12 @@ impl OutputSink for LogSink {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&event.data_b64)
             .unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes);
         tracing::info!(
             agent = %event.agent_id,
             seq = event.seq,
             "PTY out: {:?}",
-            String::from_utf8_lossy(&bytes)
+            mask_secrets(&text)  // T-1: API키·토큰 마스킹 후 출력
         );
         Ok(())
     }

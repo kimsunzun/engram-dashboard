@@ -25,6 +25,7 @@ portable-pty = "0.8.1"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 thiserror = "1.0"
 base64 = "0.22"
+regex = "1.11"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
