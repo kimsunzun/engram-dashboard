@@ -408,3 +408,29 @@ export async function initEventBus() {
 4. Tauri Event listener를 App level에서 1회 등록하는 패턴 — HMR/dev reload 시 중복 등록 위험이 있는가? 해결책?
 5. 팝업 창에서 `resize → subscribe` 순서 — Rust 쪽에서 보면 resize 전에 subscribe가 먼저 도착할 수 있는가? (async 순서 보장 여부)
 6. 전체 구조에서 놓친 것, 프론트엔드 통합 시 알려진 Tauri v2.4 pitfall?
+
+---
+
+## 11. S9 개정 (세션 복원) — 프론트 델타
+
+근거: `../S9-session-restore/session-restore-lld.md`(§6) + `session-restore-code-plan.md`(§E·§H). fable 7건 중 프론트 (e)~(g).
+
+### (e) §4 subscribe effect — `[agentId, epoch]` 재구독
+- 재시작은 **구독자 승계(이주)가 아니라 프론트 재구독**으로 처리한다(확정 설계 2개에 대한 최소 변경, 실패 모드 가시성). 백엔드 변경은 "같은 AgentId 새 PtySession 맵 교체"뿐.
+- `AgentInfo`/`agent-status-changed`에 추가된 `epoch: u32`를 받아, subscribe effect 의존성을 `[agentId, epoch]`로 바꾼다. status 변화만으로는 effect가 재실행되지 않으므로 **epoch 증가가 재구독의 결정적 트리거**가 된다. 멀티 창도 각자 이벤트 수신 → 각자 재구독으로 균일.
+
+```ts
+// 변경 전: }, [agentId])
+// 변경 후:
+}, [agentId, epoch])   // epoch 증가 = 재spawn → 재구독
+```
+
+### (f) §4 재시작 배너 순서 — reset → 배너 → replay
+- 재시작 감지 시 순서: `terminal.reset()` → 재시작 배너 표시 → (재구독으로) replay 재생. 이미 검증된 idempotent 경로(C2 reset + seq dedup)를 그대로 탄다 — agent 전환과 동일 코드.
+
+### (g) §1/§4 상태 표시 — Exited→Running 재진입 허용
+- 프론트 상태 모델이 terminal(`Exited`/`Killed`/`Failed`) → `Running` 재진입을 허용해야 한다(같은 AgentId가 다시 살아남). 입력 가드(§4-1)는 현재 status 기준으로 동작하므로 재진입 시 자동 해제된다. 선택적으로 `Restarting` 표시.
+
+### TS 타입 미러 추가 (§1)
+- `AgentInfo`/`AgentStatusChanged`에 `epoch: number` 추가.
+- `agent-restore-result` 이벤트 payload: `{ agent_id: string, epoch: number, outcome: RestoreOutcome }` (discriminated union, tag `type`: `Resumed`/`FreshFallback`/`Blocked`/`Failed`).

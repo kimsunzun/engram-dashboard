@@ -785,3 +785,35 @@ fn test_spawn_and_output() {
 4. **RwLock starvation** — 사실상 없음. drain이 sessions 맵 직접 접근 안 함. [§10]
 5. **AppState Mutex** — 제거됨. `Arc<PtyManager>` 확정. [§8]
 6. **추가 발견** — C1(serde tag), TerminateJobObject, completion channel, tauri 2.4 고정, frontend AgentStatus wire 불일치 모두 반영.
+
+---
+
+## 18. S9 개정 (세션 복원) — Stage-1 확정본에 대한 델타
+
+근거: `../S9-session-restore/session-restore-lld.md`(§12) + `session-restore-code-plan.md`(§E·§H). Stage-1 본문은 보존하고, 세션 복원으로 달라지는 의미론만 여기 모은다. fable 7건 중 백엔드 (a)~(d).
+
+### (a) §9 상태머신 — 같은 AgentId 재진입 허용 + epoch
+- 재시작(restore/restart)은 **같은 AgentId로 새 `PtySession`을 sessions 맵에 교체 삽입**한다. 즉 `Exited`/`Killed`/`Failed`(terminal) → `Running` 재진입을 manager 경로에 한해 허용한다(drain은 여전히 단방향: terminal 가드 유지).
+- 맵 교체가 일어나는 **모든 지점**에서 `ProfileRegistry::bump_epoch(id)`로 `epoch`를 +1 한다(restart + **fresh fallback respawn 포함** — H-1.5). `epoch`는 `AgentInfo`/`agent-status-changed` payload에 실려 프론트 재구독의 결정적 트리거가 된다.
+- 전이표 추가행:
+
+  | 현재 상태 | 전이 → | 트리거 | 수행 주체 | 비고 |
+  |---|---|---|---|---|
+  | `Exited`/`Killed`/`Failed` | → `Running` (새 세션) | `restore_all`/`restart_agent` | manager | 새 PtySession 맵 교체 + epoch++ |
+
+### (b) §10 스레드 목록 — restart 전용 태스크
+- drain thread는 terminal 전이 후 **직접 respawn하지 않는다**(자기 수명과 얽힘 방지). drain은 manager에 신호만 보내고, **별도 restart 태스크**가 사다리(resume→fresh→정지)·backoff·respawn을 수행한다. 단, restart 자동화는 **게이트**(코어 안정 후) — 코어 GO 단계에선 `restore_all`(부팅 시 1회, 백그라운드)만 구현한다.
+- 스레드 목록 추가행:
+
+  | 스레드 | spawn 주체 | 수명 | 비고 |
+  |---|---|---|---|
+  | session-tracker (단일) | `SessionTracker::start` | 앱 전체 | 모든 에이전트 sid 폴링, 정지 핸들 보유. best-effort |
+  | restart 태스크 | manager(게이트) | 재시작 처리 동안 | 코어 GO 범위 밖 |
+
+### (c) §7/§10 stale unsubscribe 무해
+- 재시작 직후 프론트가 보낸 **옛 sinkId unsubscribe가 새 세션에 도착**할 수 있다. `subscribers.retain(|s| s.sink_id() != sink_id)`는 not-found여도 무에러 통과하므로 무해(이미 그렇게 설계됨 — 명시만).
+
+### (d) §5/§8 StatusSink 확장 — restore-result + epoch
+- `StatusSink`에 `restore_result(report: RestoreReport)` 통지 경로를 추가하고, `agent-restore-result` 이벤트로 emit한다.
+- `AgentInfo`·`AgentStatusChanged`에 `epoch: u32` 필드 추가(프론트 재구독 트리거 — 프론트 LLD §4 개정과 짝).
+- spawn 진입점이 `spawn_agent(profile, mode)`로 바뀐다(cwd 단독 인자 → 프로필 기반). cwd는 저장 전 `dunce::canonicalize`로 정규화한다.
