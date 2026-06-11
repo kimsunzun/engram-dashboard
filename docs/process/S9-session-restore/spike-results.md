@@ -40,6 +40,18 @@
 | `/clear` 파일 감지 | 새 `.jsonl` **즉시 생성** → **파일 watch로 능동 감지 가능** (사용자 아이디어 실현 확정) |
 | 신규 cwd trust 프롬프트 | **이 환경에선 안 뜸**(이미 신뢰됨, "Welcome back"). 단 완전 새 머신/계정에선 뜰 수 있음 — 운영 시 주의 |
 
+### ★핵심 발견 — `~/.claude/sessions/<PID>.json` (탐색 문제 해결)★
+```json
+{"pid":45404,"sessionId":"<현재세션>","cwd":"...","name":"...","status":"idle|busy","kind":"interactive","startedAt":...,"updatedAt":...}
+```
+- **파일명 = PID, 내부에 현재 sessionId + status + name + cwd.**
+- 우리가 spawn한 **child PID로 이 파일을 읽으면 현재 sessionId를 결정적으로 확보** → cwd 디렉토리 매핑 추측 불필요(탐색 문제 근본 해결).
+- **`/clear` 시 같은 PID 파일의 sessionId가 실시간 갱신 확인** (561e5d0b → 1e91e1e2). updatedAt도 갱신.
+- **능동 동기화 = `sessions/<child_pid>.json` 한 파일만 watch** (cwd 디렉토리 전체 watch + 매핑 모호 전부 불필요).
+- 보너스: `status`(idle/busy/shell) — 에이전트 상태 보조 신호로도 활용 가능.
+
+**주의(best-effort 유지):** 비공식 내부 파일로 보임(version 필드 존재 → 버전별 포맷 변동 가능). PID 재사용 시 stale 위험 → `startedAt`/`updatedAt`으로 검증. 프로세스 종료 시 파일 정리 여부 미확인. → 결정적 소스로 쓰되 fallback(분리 + 새uuid)은 유지.
+
 ### 남은 경미 항목 (위험 낮음)
 - **fresh PTY redraw**: 우리 대시보드가 cols/rows를 관리(resize command)하므로 우리 책임 영역. claude는 받은 크기로 렌더 — 큰 위험 아님.
 - **`/resume` 픽커**: `/clear`로 "TUI 내 세션 변경 → 새 파일" 메커니즘이 확인됐으므로 `/resume`도 동류. 파일 watch가 커버.
