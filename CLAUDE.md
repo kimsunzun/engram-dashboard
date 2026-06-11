@@ -1,38 +1,27 @@
 # Engram Dashboard
 
-Tauri v2 + React 19 + TypeScript 기반 에이전트 모니터링 대시보드.
-**View phase 완료. 현재 Backend phase** — Rust PTY 백엔드 구현 중.
+Tauri v2 + React 19 + Rust(portable-pty) 기반 Claude 에이전트 관리 대시보드.
 
-## 현재 상태 (2026-06-11)
+## 현재 상태 (2026-06-11) — 상세: `docs/README.md`
 
-**LLD Stage1 확정** (`docs/backend-lld-stage1.md`) — fable/Gemini/GPT 3자 검증 완료, GO 판정.  
-**다음 작업:** 2단계 모듈별 Rust 코드 구현.
+**백엔드 완성** (Phase1 PTY 코어 + Phase2 Tauri 연결 + 마감) + **프론트 통합 3a~3c** (실제 PTY ↔ xterm, E2E claude 기동 확인).
+**다음: 세션 저장/복원 설계** (핵심 기능 — LLD에 "추후 결정"이던 항목).
 
-### 백엔드 구현 순서
-1. `src-tauri/src/pty/types.rs` — 타입 정의
-2. `src-tauri/src/pty/session.rs` — PtySession 구조체
-3. `src-tauri/src/pty/drain.rs` — drain thread
-4. `src-tauri/src/pty/manager.rs` — PtyManager
-5. `src-tauri/src/pty/platform/windows.rs` — Job Object
-6. `src-tauri/src/logging/mod.rs` — 로그
-7. `src-tauri/src/commands/` — Tauri command layer
-8. `src-tauri/src/lib.rs` — AppState, 등록
+문서: `docs/README.md`(인덱스) · `docs/design/`(확정 설계) · `docs/tracking.md`(보류·결정) · `docs/briefings/`(구현 지시서).
+검증: dco23(Opus)/dcs24(Sonnet) 코딩 → dr26(Fable) LLD 리뷰 → dq25 QA 3-게이트.
 
-### 핵심 설계 원칙 (LLD에서 확정)
-- `pty/` 하위 파일은 **tauri import 금지** — OutputSink/StatusSink trait으로 추상화
+### 핵심 설계 원칙 (`docs/design/backend-lld-stage1.md`)
+- `pty/` 하위 **tauri import 금지** — OutputSink/StatusSink trait 추상화 (headless 테스트 가능)
 - `AppState { manager: Arc<PtyManager> }` — 외부 Mutex 없음
-- drain thread는 OS thread (blocking I/O와 자연 일치)
-- PTY 출력 전달: `Channel<PtyEvent>` (emit_all 금지)
-- kill 시퀀스: `child.kill() → child.wait() → TerminateJobObject(Windows) → master.take() → completion_channel.recv_timeout(5s)`
-- replay→live: subscribers lock 보유 중 replay 전송 (순서 역전 방지)
+- drain thread = OS thread (blocking I/O 자연 일치), `channel.send` 시 lock 미보유
+- PTY 출력: `Channel<PtyEvent>`(base64) / 상태: event emit (agent-status-changed, agent-list-updated)
+- kill 6단계: `shutdown → child.kill → wait → TerminateJobObject → master.take → recv_timeout(5s)`
+- 상태 알림 분담: 과도기 Exiting = manager, terminal(Killed/Exited/Failed) = drain
+- replay→live: subscribers lock 보유 중 replay 전송 (C4, 순서 역전 방지) / 프론트 seq dedup 전제
 
-### 의존성 (고정)
-- `tauri = "2.4"` (2.5 Channel silent failure 이슈)
-- `portable-pty = "0.8.1"` (smoke test 후 업그레이드)
-
-### 2단계 첫 스파이크 (코드 전 Windows 실측)
-1. spawn → 출력 수신 → kill → join 즉시 완료 (TerminateJobObject 검증)
-2. 창 닫힘 후 Channel.send() 반환값 (silent failure 여부)
+### 의존성 (확정)
+- `tauri = "2"` (최신 2.x — Channel 무손실 Windows 실측 확인, spike)
+- `portable-pty = "0.8.1"` · `regex = "1.11"`(로그 마스킹)
 
 ## 기술 스택
 
