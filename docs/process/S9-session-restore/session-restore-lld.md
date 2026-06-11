@@ -147,3 +147,26 @@ restore_all():  // auto_restore=true 프로필만, stagger(순차+간격) — sp
 - `sessions/<pid>.json`은 **비공식 내부 파일**(version 필드 존재 → 포맷 변동 가능) → 없거나 바뀌어도 **최소 "최초 지정값" 유지** → 복원 시도 → 실패 시 fallback. **어느 경우든 무손상.**
 - PID 재사용 → `startedAt`/`updatedAt`으로 우리 프로세스 검증
 - claude 버전 최신 유지 (구버전 PTY 세션 미저장 버그 — release notes 관찰)
+
+## 12. 3자 최종 통합 (확정 — fable/Gemini/GPT)
+
+**판정: 코어 GO / 위험구간 게이트.** 리뷰 전문: `s9-final-review-fable.md`, `session-restore-final-review-gemini.md`, `-gpt.md`.
+
+### 12-1. 확정 (만장일치)
+- **AgentId / claude_session_id 분리** — 실측 지지.
+- **§6 = 프론트 재구독 (구독자 승계 아님)** [fable 권고 + GPT "채널 승계 NO-GO" 일치]. 근거: 확정 LLD 최소 변경, 배너로 프론트가 어차피 재시작 인지 필요, C2(`terminal.reset`)로 검증된 idempotent 경로, 실패 가시성. **구현 키: `AgentInfo`+이벤트에 `epoch:u32`, 프론트 effect deps `[agentId, epoch]`.** 재시작은 drain 직접 말고 전용 restart 태스크.
+
+### 12-2. 구현 게이트
+- **코어 GO (즉시):** 프로필 / AgentId 분리 / spawn(`--session-id`) / atomic persist / 기본 복원(`--resume`) / sid watcher / fresh fallback
+- **게이트 (코어 후·잠정, 신뢰기능 공개 전 검증):** 자동 재시작 / terminal 상태 재진입 [GPT NO-GO 구간]
+
+### 12-3. 필수 수정 (3자 발견)
+1. **[Gemini 치명] cwd 정규화는 `dunce::canonicalize`** — `std::fs::canonicalize`는 Windows에서 UNC 접두사(`\\?\`)를 붙여 claude 세션 폴더명(`projects/<cwd치환>`)을 왜곡 → 터미널 직접 실행과 불일치로 복원 깨짐. dunce로 접두사 회피.
+2. **[GPT 최대위험] silent stale restore 금지** — sessions 추적 실패 시 옛 sid로 **조용히** 복원하지 말 것. 불확실하면 **명시적 fresh fallback + 알림**.
+3. **[fable] PID 불일치(shim) 우회** — PTY child PID가 shim(claude.cmd→node)이면 `sessions/<child_pid>.json`이 없을 수 있음. 그땐 `sessions/*.json`에서 **`sessionId == 우리 지정값` 스캔**(우리 sid는 유일키라 결정적). spawn 직후 self-test로 조기 감지.
+4. **[fable 보안] `profile.env` 평문 persist 금지** — env에 API 키/토큰 들어가면 `agents.json`에 평문 유출. 시크릿 저장 금지 명시 + 키 패턴 경고.
+5. **[Gemini] sessions watch 레이스** → 파일 아닌 **디렉토리 단위 watch** + 갱신 atomic.
+6. **운영:** `CLAUDE_CONFIG_DIR`로 `~/.claude` 이동 가능성 고려, `sessions/<pid>.json` version 게이트 + watcher 토글.
+
+### 12-4. LLD 개정 체크리스트 (코드 기획 입력)
+`s9-final-review-fable.md`의 백엔드 a~d / 프론트 e~g 7건 — 코드 기획 시 반영(§6 충돌 닫힘).
