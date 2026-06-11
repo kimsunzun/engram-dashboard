@@ -1,7 +1,38 @@
 # Engram Dashboard
 
 Tauri v2 + React 19 + TypeScript 기반 에이전트 모니터링 대시보드.
-현재 **View-only phase** — 더미 데이터, Rust 백엔드 연결 없음.
+**View phase 완료. 현재 Backend phase** — Rust PTY 백엔드 구현 중.
+
+## 현재 상태 (2026-06-11)
+
+**LLD Stage1 확정** (`docs/backend-lld-stage1.md`) — fable/Gemini/GPT 3자 검증 완료, GO 판정.  
+**다음 작업:** 2단계 모듈별 Rust 코드 구현.
+
+### 백엔드 구현 순서
+1. `src-tauri/src/pty/types.rs` — 타입 정의
+2. `src-tauri/src/pty/session.rs` — PtySession 구조체
+3. `src-tauri/src/pty/drain.rs` — drain thread
+4. `src-tauri/src/pty/manager.rs` — PtyManager
+5. `src-tauri/src/pty/platform/windows.rs` — Job Object
+6. `src-tauri/src/logging/mod.rs` — 로그
+7. `src-tauri/src/commands/` — Tauri command layer
+8. `src-tauri/src/lib.rs` — AppState, 등록
+
+### 핵심 설계 원칙 (LLD에서 확정)
+- `pty/` 하위 파일은 **tauri import 금지** — OutputSink/StatusSink trait으로 추상화
+- `AppState { manager: Arc<PtyManager> }` — 외부 Mutex 없음
+- drain thread는 OS thread (blocking I/O와 자연 일치)
+- PTY 출력 전달: `Channel<PtyEvent>` (emit_all 금지)
+- kill 시퀀스: `child.kill() → child.wait() → TerminateJobObject(Windows) → master.take() → completion_channel.recv_timeout(5s)`
+- replay→live: subscribers lock 보유 중 replay 전송 (순서 역전 방지)
+
+### 의존성 (고정)
+- `tauri = "2.4"` (2.5 Channel silent failure 이슈)
+- `portable-pty = "0.8.1"` (smoke test 후 업그레이드)
+
+### 2단계 첫 스파이크 (코드 전 Windows 실측)
+1. spawn → 출력 수신 → kill → join 즉시 완료 (TerminateJobObject 검증)
+2. 창 닫힘 후 Channel.send() 반환값 (silent failure 여부)
 
 ## 기술 스택
 
