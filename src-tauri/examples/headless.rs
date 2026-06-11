@@ -57,9 +57,9 @@ impl OutputSink for LogSink {
 }
 
 impl StatusSink for LogSink {
-    fn status_changed(&self, id: AgentId, status: AgentStatus) {
+    fn status_changed(&self, id: AgentId, status: AgentStatus, epoch: u32) {
         // Running→Exiting→Killed 전이가 이 로그에 순서대로 찍혀야 한다.
-        tracing::info!(agent = %id, ?status, "STATUS changed");
+        tracing::info!(agent = %id, ?status, epoch, "STATUS changed");
     }
 
     fn agent_list_updated(&self, agents: Vec<AgentInfo>) {

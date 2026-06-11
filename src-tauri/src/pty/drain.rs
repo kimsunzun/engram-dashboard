@@ -33,7 +33,7 @@ pub fn spawn_drain_thread(
 
         // 루프 탈출(EOF/Err/shutdown 무엇이든) → terminal 전이 1회 + 알림.
         let new_status = transition(&session);
-        status_sink.status_changed(session.id, new_status);
+        status_sink.status_changed(session.id, new_status, session.epoch);
 
         // G-1: 완료 신호. kill_agent의 recv_timeout(5s)가 이걸 받는다.
         // 수신측이 이미 사라졌어도(타임아웃 후 detach) 무시.

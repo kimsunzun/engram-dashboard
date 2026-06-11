@@ -69,7 +69,9 @@ pub trait OutputSink: Send + Sync + 'static {
 
 /// 에이전트 상태 변경 알림 추상화 — pty/가 AppHandle 없이 상위 층에 통보
 pub trait StatusSink: Send + Sync + 'static {
-    fn status_changed(&self, id: AgentId, status: AgentStatus);
+    /// epoch 동봉(S9 §18-d): 프론트가 재spawn 후 옛 세션의 지연된 terminal 알림을
+    /// epoch 불일치로 버릴 수 있게 한다(stale Killed 방어, fable C-1/Mn-1).
+    fn status_changed(&self, id: AgentId, status: AgentStatus, epoch: u32);
     fn agent_list_updated(&self, agents: Vec<AgentInfo>);
     /// 복원 시도 결과 통지(S9 §18-d). 기본 no-op — 복원을 안 쓰는 sink는 구현 불필요.
     fn restore_result(&self, _report: crate::pty::profile::RestoreReport) {}

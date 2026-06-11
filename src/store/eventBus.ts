@@ -3,7 +3,7 @@
 
 import { listen } from '@tauri-apps/api/event'
 
-import type { AgentInfo, AgentStatus } from '../api/types'
+import type { AgentInfo, AgentStatus, RestoreReport } from '../api/types'
 import { useAgentStore } from './agentStore'
 
 let unlistenFns: (() => void)[] = []
@@ -30,8 +30,19 @@ export function initEventBus(): Promise<void> {
 
       // agent-status-changed: 개별 status 갱신(뱃지 표시용, 목록 제거 안 함, T-4)
       unlistenFns.push(
-        await listen<{ id: string; status: AgentStatus }>('agent-status-changed', e => {
-          useAgentStore.getState().onStatusChanged(e.payload.id, e.payload.status)
+        await listen<{ id: string; status: AgentStatus; epoch: number }>(
+          'agent-status-changed',
+          e => {
+            useAgentStore.getState().onStatusChanged(e.payload.id, e.payload.status)
+          },
+        ),
+      )
+
+      // agent-restore-result: 부팅 복원 결과(S9). 현재는 로그만 — UX 배너는 추후.
+      unlistenFns.push(
+        await listen<RestoreReport>('agent-restore-result', e => {
+          const { agent_id, outcome } = e.payload
+          console.info('[restore]', agent_id, outcome.type, outcome)
         }),
       )
 

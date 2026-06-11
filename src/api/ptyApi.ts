@@ -3,7 +3,7 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 
-import type { AgentInfo, PtyEvent, SinkId } from './types'
+import type { AgentInfo, AgentProfile, PtyEvent, SinkId } from './types'
 
 export const ptyApi = {
   /** PTY 에이전트 spawn. cwd는 작업 디렉토리 절대 경로. */
@@ -47,4 +47,36 @@ export const ptyApi = {
    */
   getSnapshot: (agentId: string) =>
     invoke<unknown[]>('get_agent_snapshot', { agentId }),
+
+  // ── S9: 프로필 CRUD + 프로필 기반 spawn ──────────────────────────────────────
+
+  /** 저장된 프로필 전체 조회. */
+  listProfiles: () => invoke<AgentProfile[]>('list_profiles'),
+
+  /** claude 프로필 생성(스폰하지 않음). env에 자격증명 금지(평문 저장). */
+  createClaudeProfile: (
+    name: string,
+    cwd: string,
+    extraArgs: string[],
+    env: [string, string][],
+    autoRestore: boolean,
+  ) =>
+    invoke<AgentProfile>('create_claude_profile', {
+      name,
+      cwd,
+      extraArgs,
+      env,
+      autoRestore,
+    }),
+
+  /** 프로필 삭제(실행 중 세션은 killAgent로 별도 종료). */
+  deleteProfile: (agentId: string) => invoke<void>('delete_profile', { agentId }),
+
+  /** 저장된 프로필 spawn. resume=true면 기존 세션 이어받기(claude --resume). */
+  spawnProfile: (agentId: string, resume: boolean) =>
+    invoke<AgentInfo>('spawn_profile', { agentId, resume }),
+
+  /** auto_restore 토글. */
+  setProfileAutoRestore: (agentId: string, autoRestore: boolean) =>
+    invoke<void>('set_profile_auto_restore', { agentId, autoRestore }),
 }

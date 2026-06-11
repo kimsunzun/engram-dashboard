@@ -73,6 +73,8 @@ pub struct RestoreReport {
 pub enum RestoreOutcome {
     /// `--resume` 성공 — 기존 대화 그대로 이어받음.
     Resumed,
+    /// 이어받기 대상이 아니라 새 세션을 시작함(shell, 또는 sid 없는 claude). resume 아님(fable Mn-2).
+    Started,
     /// resume 실패 → 새 세션으로 fallback. 어떤 sid가 폐기되고 새로 생겼는지 명시한다.
     /// (silent stale 금지 — 무엇이 바뀌었는지 항상 가시화)
     FreshFallback {

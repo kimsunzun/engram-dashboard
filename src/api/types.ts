@@ -26,10 +26,55 @@ export interface AgentInfo {
   status: AgentStatus
   cols: number
   rows: number
+  /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (S9 §18) */
+  epoch: number
 }
 
 /** agent-status-changed Tauri event 페이로드 */
 export interface AgentStatusChanged {
   id: string
   status: AgentStatus
+  /** 재spawn epoch — 옛 세션의 지연 알림을 버리는 데 사용 (S9 §18-d) */
+  epoch: number
+}
+
+// ── S9: 프로필 + 복원 ──────────────────────────────────────────────────────────
+
+/** 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치 */
+export type AgentCommand =
+  | { kind: 'Claude'; extra_args: string[] }
+  | { kind: 'Shell'; program: string; args: string[] }
+
+export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'
+
+/** 영속 프로필 — agents.json 단위. env에 자격증명 금지(평문 저장) */
+export interface AgentProfile {
+  id: string
+  name: string
+  command: AgentCommand
+  cwd: string
+  env: [string, string][]
+  claude_session_id: string | null
+  old_session_ids: string[]
+  epoch: number
+  auto_restore: boolean
+  restart_policy: RestartPolicy
+  created_at: number
+  last_active: number
+  last_restore: number | null
+}
+
+/** 복원 결말 — agent-restore-result event, #[serde(tag="type")] */
+export type RestoreOutcome =
+  | { type: 'Resumed' }
+  | { type: 'Started' }
+  | { type: 'FreshFallback'; old_sid: string | null; new_sid: string; reason: string }
+  | { type: 'Blocked'; reason: string }
+  | { type: 'Failed'; reason: string }
+
+/** agent-restore-result Tauri event 페이로드 */
+export interface RestoreReport {
+  agent_id: string
+  epoch: number
+  outcome: RestoreOutcome
 }

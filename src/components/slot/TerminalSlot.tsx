@@ -27,6 +27,8 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
 
   const agents = useAgentStore(s => s.agents)
   const agent = agentId ? (agents.find(a => a.id === agentId) ?? null) : null
+  // S9 §18-e: epoch이 바뀌면(재spawn) 재구독 트리거. status 변화만으론 effect가 안 돈다.
+  const epoch = agent?.epoch ?? 0
   const isTerminated =
     agent != null &&
     (agent.status.type === 'Exited' ||
@@ -106,7 +108,8 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
       if (channel) delete (channel as any).onmessage // G-1: null 할당 아닌 delete (#13133)
       if (sinkId) void ptyApi.unsubscribeOutput(agentId, sinkId)
     }
-  }, [agentId])
+    // epoch 포함 — 재spawn(같은 agentId, epoch++) 시 reset → 재구독 → replay 재생 (S9 §18-e/f)
+  }, [agentId, epoch])
 
   // 키 입력 → writeStdin (§4-1: terminated 후 입력 차단 + catch)
   useEffect(() => {

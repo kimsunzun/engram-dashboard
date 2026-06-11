@@ -58,6 +58,8 @@ impl OutputSink for ChannelOutputSink {
 struct AgentStatusChanged {
     id: AgentId,
     status: AgentStatus,
+    /// S9 §18-d: 재spawn 트리거 epoch. 프론트가 옛 세션의 지연 알림을 버릴 수 있게 한다.
+    epoch: u32,
 }
 
 /// StatusSink의 Tauri 구현 — AppHandle로 저빈도 상태 이벤트 emit
@@ -66,8 +68,8 @@ pub struct TauriStatusSink {
 }
 
 impl pty::types::StatusSink for TauriStatusSink {
-    fn status_changed(&self, id: AgentId, status: AgentStatus) {
-        let payload = AgentStatusChanged { id, status };
+    fn status_changed(&self, id: AgentId, status: AgentStatus, epoch: u32) {
+        let payload = AgentStatusChanged { id, status, epoch };
         // emit 실패는 무시(로그만) — 창이 닫히는 중일 수 있음. 패닉 금지.
         if let Err(e) = self.app.emit("agent-status-changed", payload) {
             tracing::warn!("emit agent-status-changed failed: {e}");
@@ -139,6 +141,12 @@ pub fn run() {
             commands::write_stdin,
             commands::resize_pty,
             commands::get_agent_snapshot,
+            // S9-6: 프로필 CRUD + 프로필 기반 spawn
+            commands::list_profiles,
+            commands::create_claude_profile,
+            commands::delete_profile,
+            commands::spawn_profile,
+            commands::set_profile_auto_restore,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

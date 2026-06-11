@@ -261,8 +261,9 @@ impl PtyManager {
             claude::needs_session(&profile.command) && profile.claude_session_id.is_some();
 
         if !resumable {
+            // shell이거나 sid 없는 claude → 이어받기가 아니라 새 세션 시작(Started).
             return match self.spawn_agent(profile, SpawnMode::Fresh) {
-                Ok(_) => RestoreOutcome::Resumed,
+                Ok(_) => RestoreOutcome::Started,
                 Err(e) => RestoreOutcome::Failed {
                     reason: e.to_string(),
                 },
@@ -272,20 +273,15 @@ impl PtyManager {
         // claude resume 시도
         match self.spawn_agent(profile, SpawnMode::Resume) {
             Err(e) => self.fallback_fresh(profile, format!("resume spawn 실패: {e}")),
+            // ★fable M-1★: 성공한 claude resume은 TUI라 윈도 안에 종료하지 않는다.
+            // 따라서 윈도 내 terminal 진입은 code와 무관하게 resume 실패 신호다
+            // (code==0 조기 종료를 Resumed로 오판하면 빈 화면을 "복원 성공"으로 오보).
+            // None(여전히 Running)만 Resumed.
             Ok(_) => match self.early_terminal_status(profile.id, EARLY_EXIT_WINDOW) {
-                // 조기 비정상 종료 = resume 실패 → fallback
-                Some(AgentStatus::Exited { code: Some(c) }) if c != 0 => {
-                    self.fallback_fresh(profile, format!("resume 조기 종료(code={c})"))
+                Some(status) => {
+                    self.fallback_fresh(profile, format!("resume 조기 종료({status:?})"))
                 }
-                Some(AgentStatus::Failed { message }) => {
-                    self.fallback_fresh(profile, format!("resume 실패: {message}"))
-                }
-                Some(AgentStatus::Killed) => {
-                    self.fallback_fresh(profile, "resume 조기 Killed".into())
-                }
-                // 여전히 Running이거나 code==0 정상 종료 → 성공으로 간주(silent stale 방지: 불확실은
-                // resume 유지가 아니라 위에서 명확한 실패만 fallback).
-                _ => RestoreOutcome::Resumed,
+                None => RestoreOutcome::Resumed,
             },
         }
     }
@@ -298,14 +294,15 @@ impl PtyManager {
 
         let old_sid = profile.claude_session_id;
         let new_sid = uuid::Uuid::new_v4();
-        // 맵 교체이므로 epoch++ (H-1.5). old sid는 이력으로.
+        // sid 교체 + epoch++(맵 교체, H-1.5)를 한 번의 mutate로 — 단일 atomic persist
+        // (crash window를 둘로 쪼개지 않음, fable Mn-5).
         self.profiles.update_with(profile.id, |p| {
             if let Some(old) = p.claude_session_id.take() {
                 p.old_session_ids.push(old);
             }
             p.claude_session_id = Some(new_sid);
+            p.epoch = p.epoch.wrapping_add(1);
         });
-        self.profiles.bump_epoch(profile.id);
 
         let updated = self
             .profiles
@@ -352,7 +349,11 @@ impl PtyManager {
     }
 
     /// 세션을 조용히 정리(상태 알림 없이) — fallback 전 옛 세션 제거 전용.
-    /// 이미 종료된 세션이 대상이라 best-effort kill로 충분하다.
+    ///
+    /// ★fable C-1★: 단순 kill/take만 하고 반환하면 옛 drain thread가 아직 살아 있다가
+    /// 뒤늦게 `status_changed(id, Killed)`를 emit한다. 직후 같은 id로 fresh respawn하면
+    /// 그 stale Killed가 갓 살아난 새 세션을 덮을 수 있다. 따라서 여기서도 kill_agent step 6처럼
+    /// **drain 완료를 동기 대기**해 옛 drain의 terminal 알림이 respawn보다 먼저 끝나게 한다.
     fn remove_session(&self, id: AgentId) {
         self.tracker.unwatch(id);
         let removed = self
@@ -367,8 +368,21 @@ impl PtyManager {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            // master drop → ConPTY 종료 → drain EOF로 자연 종료.
+            #[cfg(windows)]
+            {
+                let _ = session.job_handle.terminate(1);
+            }
+            // master drop → ConPTY 종료 → drain EOF.
             let _ = session.master.lock().expect("master poisoned").take();
+            // 옛 drain 종료까지 대기 — 지연된 stale Killed가 respawn 전에 소진되도록.
+            if let Some(rx) = session
+                .drain_done_rx
+                .lock()
+                .expect("drain_done_rx poisoned")
+                .take()
+            {
+                let _ = rx.recv_timeout(Duration::from_secs(5));
+            }
         }
     }
 
@@ -443,7 +457,7 @@ impl PtyManager {
         };
         if entered_exiting {
             self.status_sink
-                .status_changed(agent_id, AgentStatus::Exiting);
+                .status_changed(agent_id, AgentStatus::Exiting, session.epoch);
         }
 
         // 1. shutdown 신호 — drain이 종료 시 Killed로 전이하도록.
