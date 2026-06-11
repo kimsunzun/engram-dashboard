@@ -35,6 +35,22 @@
 - **출처:** Channel spike 중 vite 경고 'ts.worker.js optimizeDeps 미존재'. spike엔 무해.
 - **조치:** monaco diff editor 통합 시 `optimizeDeps.exclude`에 monaco worker 추가 검토.
 
+### T-6. cwd 워크스페이스 검증 (CwdDenied) — 보안 보류
+- **상태:** 보류(폐기 아님). 실제 멀티 에이전트 운영 단계에서 정책 결정.
+- **출처:** dr26 commands+lib 리뷰. PtyError::CwdDenied가 dead variant — spawn_agent가 임의 cwd 허용(검증 없음).
+- **위험:** 에이전트를 임의 디렉토리에서 spawn 가능. 현재 개발/검증 단계엔 과하나 운영 시 워크스페이스 화이트리스트 필요.
+- **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
+
+### T-7. get_agent_snapshot wire 포맷 — Phase 3 info
+- **상태:** Phase 3에서 snapshot 사용 여부에 따라 결정.
+- **출처:** dr26 리뷰. get_agent_snapshot이 PtyChunk(data:Vec<u8>→JSON number[]) 반환 — live PtyEvent의 base64와 불일치.
+- **조치:** subscribe가 replay를 자동 전송하므로 프론트가 snapshot 안 쓰면 무관. 쓸 거면 base64로 포맷 통일.
+
+### T-8. shutdown_all 순차 종료 지연 — info
+- **상태:** 허용(현재). 거슬리면 추후 개선.
+- **출처:** dr26 ExitRequested 재확인. shutdown_all이 agent마다 kill_agent의 recv_timeout(5s) 순차 누적 → drain hang 시 N개=5Ns 지연. 정상 경로는 즉시(spike 23ms 실측).
+- **조치:** 다수 에이전트 + 비정상 hang 동시 발생 시에만 체감. 필요 시 병렬 kill(스레드/join) 또는 timeout 단축.
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)
