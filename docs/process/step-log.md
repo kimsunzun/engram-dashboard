@@ -92,7 +92,9 @@
 
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
-- **[큰 것] 원격(WS) 프론트 = 모바일 제어** — 에이전트는 데스크톱에서 돌고 폰은 원격 I/O 프론트로 보고/조작. §1(모바일 WebSocket)·§5(핸들) 전제 위에 OutputSink의 WebSocket 구현 + 명령용 네트워크 브리지 + 인증/TLS만 추가하면 됨(아키텍처 재사용, 갈아엎기 0). 보안이 1급.
+- **[입주 1단계] 재시작 생존 = auto-restore + UI 레이아웃 영속화** — 입주 시 백엔드 재시작이 잦은데, (a) 에이전트는 `restart_agent`/restore로 부활(claude `--resume` 실측 PASS), (b) **레이아웃·슬롯 배치는 현재 영속화 0**(slotStore plain Zustand, persist 미들웨어 없음 → 재시작 시 초기화). 둘 다 작고 즉효 — 입주 전 선결.
+- **[입주 2단계] 에이전트 데몬화 (Rust 서버 + React 소켓 클라, tmux 모델)** — UI 재시작이 에이전트를 안 죽이게(서버가 세션 보유, 클라가 attach). **시점 결정: 에이전트 안정화(자동재시작·복원) 끝난 직후.** 공수 ~1~2주, `ptyApi.ts`/`eventBus`/`OutputSink`가 길목이라 facade swap(갈아엎기 X). 로컬 속도 영향 0(이미 직렬화 중, loopback 한 홉). 원격/모바일과 동일 인프라. **전제: "메시지 패싱·무상태 클라" 규율 유지**(공유메모리·동기 가정 금지)로 double-stabilization 방지 — facade 한 곳만 재검증.
+- **[큰 것] 원격(WS) 프론트 = 모바일 제어** — 데몬화(2단계)의 자연 연장. 에이전트는 데스크톱(데몬)에서 돌고 폰은 원격 I/O 프론트로 attach. 인증/TLS 추가. 보안 1급.
 - **[아이디어] 모드 시스템 (터미널/클로드/코덱스/api)** — 슬롯/에이전트의 "mode" 라벨이 [AgentCommand variant + transport + 기본 렌더러]를 묶어 고름. 터미널=Shell, 클로드·코덱스=콘솔(PtyTransport), api=ApiTransport(비-터미널, capability.output로 렌더러 분기). 모드 추가 = variant+backend(+api는 transport)+렌더러 하나. S10 추상화 위 UI 표현.
 - **[아이디어] data-driven 우클릭 메뉴 (§5 구체 사례)** — SlotContextMenu를 데이터 트리(`MenuItem{label,children?,action?}`, 중첩 2·3단)로. 각 잎 항목=핸들(모드 spawn/분할/저장 등). 그 메뉴 config(JSON)를 LLM이 읽고(정보화)·수정(제어) → 사람 클릭과 LLM이 같은 핸들. "클로드에게 부탁해 메뉴 커스터마이징" = LLM이 메뉴 데이터 편집.
 - **[✅ 해결] claude 콘솔 spawn Windows 실패** — `ClaudeBackend` program="claude"가 ConPTY/CreateProcessW로 확장자 없는 npm shim 못 띄우던 버그(error 193). 수정 완료(커밋 `adf80d7`): `backend/mod.rs::console_command`가 Windows에서 `cmd.exe /c <prog> …`로 래핑(claude.cmd shim 해석, claude 종료 시 cmd도 종료=수명 유지, JobObject 트리 kill), 비Windows 직접. claude/codex/gemini 공용 헬퍼. 스파이크(2026-06-12)로 발견(UI에 spawn 버튼 없고 테스트가 셸뿐이라 잠복) → 라이브로 실제 claude TUI spawn + `--session-id`/`--resume` 무손실 복원까지 실측 PASS. ※codex/gemini stub도 라우팅 시 console_command 채택 필요(현재 미적용).
