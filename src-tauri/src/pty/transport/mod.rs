@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::pty::output_core::OutputCore;
 use crate::pty::types::{Capabilities, InputEvent, PtyError};
 
+pub mod api;
 pub mod pty;
 
 /// 에이전트 백엔드(PTY/API)를 추상화하는 seam. AgentSession이 `Box<dyn AgentTransport>`로 보유.

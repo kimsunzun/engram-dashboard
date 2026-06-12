@@ -450,6 +450,8 @@ impl AgentManager {
             cols: session.cols.load(Ordering::Relaxed),
             rows: session.rows.load(Ordering::Relaxed),
             epoch: session.epoch,
+            // transport 종류별 capability — session.capabilities()가 transport.capabilities()를 위임.
+            capabilities: session.capabilities(),
         }
     }
 }

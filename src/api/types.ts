@@ -19,6 +19,54 @@ export interface PtyEvent {
 /** subscribe_agent_output 반환값 — unsubscribe 시 사용 */
 export type SinkId = string
 
+// ── Capabilities (Rust Capabilities 미러, snake_case) ──────────────────────────
+
+/** PTY 입력 채널 지원 여부 */
+export interface InputCaps {
+  raw: boolean
+  message: boolean
+  attachment: boolean
+}
+
+/** 출력 포맷 지원 여부 */
+export interface OutputCaps {
+  terminal_bytes: boolean
+  markdown: boolean
+  tool_events: boolean
+  usage: boolean
+}
+
+/** 제어 동작 지원 여부 */
+export interface ControlCaps {
+  resize: boolean
+  interrupt: boolean
+  cancel: boolean
+  graceful_shutdown: boolean
+}
+
+/** 세션 연속성 지원 여부 */
+export interface SessionCaps {
+  resume: boolean
+  snapshot: boolean
+  cwd_env: boolean
+}
+
+/** 모델 파라미터 제어 지원 여부 */
+export interface ModelCaps {
+  select: boolean
+  temperature: boolean
+  max_tokens: boolean
+}
+
+/** transport 종류별 영역별 capability — AgentInfo에 포함되어 프론트 UI 분기에 사용 */
+export interface Capabilities {
+  input: InputCaps
+  output: OutputCaps
+  control: ControlCaps
+  session: SessionCaps
+  model: ModelCaps
+}
+
 /** 에이전트 메타데이터 스냅샷 */
 export interface AgentInfo {
   id: string
@@ -28,6 +76,8 @@ export interface AgentInfo {
   rows: number
   /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (S9 §18) */
   epoch: number
+  /** transport 종류별 지원 영역 — UI 분기용 */
+  capabilities: Capabilities
 }
 
 /** agent-status-changed Tauri event 페이로드 */

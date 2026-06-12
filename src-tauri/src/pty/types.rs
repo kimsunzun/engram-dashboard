@@ -122,6 +122,8 @@ pub struct AgentInfo {
     pub rows: u16,
     /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 트리거(S9 §18-a).
     pub epoch: u32,
+    /// transport 종류별 지원 영역 — 프론트가 UI 분기에 사용.
+    pub capabilities: Capabilities,
 }
 
 /// PTY 백엔드 오류 타입
@@ -137,6 +139,9 @@ pub enum PtyError {
     CwdDenied,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// transport가 해당 동작을 지원하지 않음(ApiTransport 껍데기 등). 동사별 미지원 신호.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 /// OutputSink 전송 실패 신호 — drain이 감지 시 해당 구독자 제거 트리거

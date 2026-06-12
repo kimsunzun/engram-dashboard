@@ -135,6 +135,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::spawn_agent,
             commands::kill_agent,
+            commands::interrupt_agent,
             commands::get_agents,
             commands::subscribe_agent_output,
             commands::unsubscribe_agent_output,

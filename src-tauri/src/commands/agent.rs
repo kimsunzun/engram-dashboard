@@ -34,6 +34,13 @@ pub async fn kill_agent(state: State<'_, AppState>, agent_id: String) -> Result<
     state.manager.kill_agent(id).map_err(|e| e.to_string())
 }
 
+/// 진행 중 작업만 중단(≠kill). PTY=0x03 주입. 프로세스는 살아 있다.
+#[tauri::command]
+pub async fn interrupt_agent(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    let id = Uuid::parse_str(&agent_id).map_err(|e| e.to_string())?;
+    state.manager.interrupt(id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn get_agents(state: State<'_, AppState>) -> Result<Vec<AgentInfo>, String> {
     Ok(state.manager.list_agents())

@@ -7,9 +7,13 @@
 //! tauri import 0.
 
 pub mod claude;
+pub mod codex;
+pub mod gemini;
 pub mod shell;
 
 pub use claude::ClaudeBackend;
+pub use codex::CodexBackend;
+pub use gemini::GeminiBackend;
 pub use shell::ShellBackend;
 
 use std::path::PathBuf;
