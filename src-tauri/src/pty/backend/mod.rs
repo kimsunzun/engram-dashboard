@@ -23,6 +23,29 @@ use uuid::Uuid;
 use crate::pty::profile::{AgentCommand, SpawnMode};
 use crate::pty::types::CommandSpec;
 
+/// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
+///
+/// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
+/// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
+/// `<prog>.cmd` shim을 해석해 실제 프로세스를 띄운다. `cmd /c`는 대상이 종료되면 함께 종료되므로
+/// "PTY 자식 = 에이전트" 수명이 유지된다(JobObject가 트리 통째 kill). 비Windows는 그대로 직접 실행.
+///
+/// shim이 아닌 일반 실행파일(Shell의 cmd.exe 등)에는 적용하지 않는다 — CLI 백엔드 전용.
+pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let mut wrapped = Vec::with_capacity(args.len() + 2);
+        wrapped.push("/c".to_string());
+        wrapped.push(program.to_string());
+        wrapped.extend(args);
+        ("cmd.exe".to_string(), wrapped)
+    }
+    #[cfg(not(windows))]
+    {
+        (program.to_string(), args)
+    }
+}
+
 /// 백엔드별 명령 명세 산출 인터페이스.
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {

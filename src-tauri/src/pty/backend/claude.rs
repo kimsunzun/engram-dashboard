@@ -10,18 +10,16 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::pty::backend::AgentBackend;
+use crate::pty::backend::{console_command, AgentBackend};
 use crate::pty::profile::{AgentCommand, SpawnMode};
 use crate::pty::types::CommandSpec;
 
-/// claude 실행 파일명. PATH로 해석된다.
+/// claude 실행 파일명(논리값). 실제 spawn 시 Windows에선 `console_command`가 `cmd.exe /c claude`로
+/// 감싼다(npm shim 해석, error 193 회피 — backend/mod.rs 참조).
 ///
-/// ※ Windows에서 `claude`가 `claude.cmd` shim(→cmd→node)일 수 있다. 그 경우 우리 child PID는
-/// shim 프로세스라 `sessions/<pid>.json`이 child PID와 어긋난다 — session_tracker가 sid 스캔으로
-/// 우회한다(설계상 흡수). 복원 정확성은 `--session-id`/`--resume`(우리 통제)에 있으므로 무관.
-#[cfg(windows)]
-const CLAUDE_PROGRAM: &str = "claude";
-#[cfg(not(windows))]
+/// ※ Windows shim 경유 시 우리 child PID는 cmd/shim 프로세스라 `sessions/<pid>.json`이 child PID와
+/// 어긋난다 — session_tracker가 sid 스캔으로 우회한다(설계상 흡수). 복원 정확성은
+/// `--session-id`/`--resume`(우리 통제)에 있으므로 무관.
 const CLAUDE_PROGRAM: &str = "claude";
 
 /// claude 백엔드 unit struct. &'static으로 사용, 상태 없음.
@@ -54,8 +52,10 @@ impl AgentBackend for ClaudeBackend {
                     args.push(sid.to_string());
                 }
                 args.extend(extra_args.iter().cloned());
+                // Windows shim 회피: cmd /c claude … 로 감싼다(비Windows는 그대로).
+                let (program, args) = console_command(CLAUDE_PROGRAM, args);
                 CommandSpec {
-                    program: CLAUDE_PROGRAM.to_string(),
+                    program,
                     args,
                     env,
                     cwd,
@@ -95,15 +95,17 @@ mod tests {
             SpawnMode::Fresh,
             Some(sid),
         );
-        assert_eq!(s.program, CLAUDE_PROGRAM);
-        assert_eq!(
-            s.args,
+        // Windows면 cmd /c claude … 로 래핑되므로 기대값도 console_command로 계산.
+        let (p, a) = console_command(
+            CLAUDE_PROGRAM,
             vec![
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--verbose".to_string(),
-            ]
+            ],
         );
+        assert_eq!(s.program, p);
+        assert_eq!(s.args, a);
     }
 
     #[test]
@@ -114,7 +116,11 @@ mod tests {
             SpawnMode::Resume,
             Some(sid),
         );
-        assert_eq!(s.args, vec!["--resume".to_string(), sid.to_string()]);
+        let (_p, a) = console_command(
+            CLAUDE_PROGRAM,
+            vec!["--resume".to_string(), sid.to_string()],
+        );
+        assert_eq!(s.args, a);
     }
 
     #[test]
@@ -126,9 +132,10 @@ mod tests {
             SpawnMode::Fresh,
             None,
         );
-        assert_eq!(s.program, CLAUDE_PROGRAM);
-        // sid 없으면 세션 플래그 없이 extra_args만 들어가야 한다.
-        assert_eq!(s.args, vec!["--debug".to_string()]);
+        // sid 없으면 세션 플래그 없이 extra_args만(Windows면 cmd /c 래핑).
+        let (p, a) = console_command(CLAUDE_PROGRAM, vec!["--debug".to_string()]);
+        assert_eq!(s.program, p);
+        assert_eq!(s.args, a);
     }
 
     #[test]
