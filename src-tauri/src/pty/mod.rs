@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod drain;
 pub mod manager;
+pub mod output_core;
 pub mod platform;
 pub mod profile;
 pub mod session;

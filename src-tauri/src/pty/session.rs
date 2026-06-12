@@ -10,7 +10,6 @@
 //! 잠글 수 있어 교착 없이 병행 가능하다. 전체 세션을 단일 Mutex로 묶으면 drain 중
 //! stdin이 막히고 stdin 중 drain이 막힌다.
 
-use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
@@ -21,7 +20,8 @@ use std::thread::JoinHandle;
 use base64::Engine as _;
 use portable_pty::{Child, MasterPty};
 
-use crate::pty::types::{AgentId, AgentStatus, OutputChunk, OutputSink, PtyEvent, SinkId};
+use crate::pty::output_core::ReplayBuffer;
+use crate::pty::types::{AgentId, AgentStatus, OutputSink, PtyEvent, SinkId};
 
 #[cfg(windows)]
 use crate::pty::platform::JobObjectHandle;
@@ -154,42 +154,4 @@ impl PtySession {
     }
 }
 
-/// 늦게 붙는 창을 위한 PTY 출력 ring buffer — 상한 2MB, 초과 시 앞부터 제거.
-/// (types.rs에서 이동 — LLD §1/§4가 session.rs 소속으로 명시)
-pub struct ReplayBuffer {
-    chunks: VecDeque<OutputChunk>,
-    total_bytes: usize,
-    max_bytes: usize,
-}
-
-impl ReplayBuffer {
-    pub fn new() -> Self {
-        Self {
-            chunks: VecDeque::new(),
-            total_bytes: 0,
-            max_bytes: 2 * 1024 * 1024,
-        }
-    }
-
-    pub fn push(&mut self, chunk: OutputChunk) {
-        self.total_bytes += chunk.data.len();
-        self.chunks.push_back(chunk);
-        while self.total_bytes > self.max_bytes {
-            if let Some(oldest) = self.chunks.pop_front() {
-                self.total_bytes -= oldest.data.len();
-            } else {
-                break;
-            }
-        }
-    }
-
-    pub fn snapshot(&self) -> Vec<OutputChunk> {
-        self.chunks.iter().cloned().collect()
-    }
-}
-
-impl Default for ReplayBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// ReplayBuffer 는 output_core.rs 로 이동(장기 소속). PtySession.replay가 stage 3까지 이걸 import.
