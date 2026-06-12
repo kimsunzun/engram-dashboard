@@ -93,6 +93,9 @@
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[큰 것] 원격(WS) 프론트 = 모바일 제어** — 에이전트는 데스크톱에서 돌고 폰은 원격 I/O 프론트로 보고/조작. §1(모바일 WebSocket)·§5(핸들) 전제 위에 OutputSink의 WebSocket 구현 + 명령용 네트워크 브리지 + 인증/TLS만 추가하면 됨(아키텍처 재사용, 갈아엎기 0). 보안이 1급.
+- **[아이디어] 모드 시스템 (터미널/클로드/코덱스/api)** — 슬롯/에이전트의 "mode" 라벨이 [AgentCommand variant + transport + 기본 렌더러]를 묶어 고름. 터미널=Shell, 클로드·코덱스=콘솔(PtyTransport), api=ApiTransport(비-터미널, capability.output로 렌더러 분기). 모드 추가 = variant+backend(+api는 transport)+렌더러 하나. S10 추상화 위 UI 표현.
+- **[아이디어] data-driven 우클릭 메뉴 (§5 구체 사례)** — SlotContextMenu를 데이터 트리(`MenuItem{label,children?,action?}`, 중첩 2·3단)로. 각 잎 항목=핸들(모드 spawn/분할/저장 등). 그 메뉴 config(JSON)를 LLM이 읽고(정보화)·수정(제어) → 사람 클릭과 LLM이 같은 핸들. "클로드에게 부탁해 메뉴 커스터마이징" = LLM이 메뉴 데이터 편집.
+- **[버그] claude 콘솔 spawn Windows 실패** — `ClaudeBackend` program="claude"가 ConPTY/CreateProcessW로 확장자 없는 npm shim 못 띄움(error 193). 수정: Windows에서 `cmd.exe /c claude …`(cmd가 claude.cmd shim 해석, claude 종료 시 cmd도 종료=수명 유지, JobObject가 트리 kill). 비Windows는 "claude" 직접. 스파이크(2026-06-12)로 발견 — UI에 spawn 버튼 없고 테스트가 셸뿐이라 잠복했던 것. ※`--session-id`/`--resume` 무손실 복원은 우회 경로로 실측 PASS.
 - **codex/gemini CLI spike** — 실제 CLI 구독 후 플래그 확정 → `AgentCommand`에 Codex/Gemini variant 추가 + `backend_for` 라우팅 연결(현재 stub은 best-guess+미연결).
 - **[게이트] 자동 재시작** — `restart_agent` 전용 태스크(사다리 resume→fresh→정지, backoff). 코어 안정 후.
 - **실제 claude 복원 E2E** — headless는 shell만 실증. claude `--session-id`/`--resume` + `sessions/<pid>.json` PID 일치를 실제 claude로 실측(spike) 필요.
