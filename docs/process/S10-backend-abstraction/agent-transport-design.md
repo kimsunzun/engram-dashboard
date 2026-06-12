@@ -120,8 +120,23 @@ struct Capabilities {               // bool 나열이 아니라 영역별 묶음
 ### ✅ 해결 — OutputEvent/InputEvent: 확장 enum으로 인터페이스화 후 넘어감 (사용자 결정)
 **결정:** `OutputEvent`(`TerminalBytes`만)·`InputEvent`(`Raw`만)를 **확장 가능한 enum**으로 정의하고, core를 variant-agnostic(`_ => ignore`)로 둔다. API variant는 붙을 때 한 줄 추가(교체 가능 = 인터페이스화 완료). "지금 dead variant 이름까지 쓸지"는 비용 0의 곁가지라 비결정 — 안 쓰고 진행. 원칙: "나중에 교체만 되면 인터페이스화하고 넘어간다."
 
-(아래는 검토 당시 3자 입장 기록 — 결정은 위)
-### (참고) 검토 당시 갈림: OutputEvent API variant를 지금 정의?
+## 구현 순서 (④ — 단계마다 build/test/commit, 끝에 fable 게이트)
+
+검증된 S9 코드 재편이라 **회귀 0**이 목표. 각 단계 후 `cargo test --lib` + `cargo run --example headless` 통과 유지.
+
+1. **중립 타입/enum 정의** — `OutputEvent{TerminalBytes}` · `InputEvent{Raw}`(확장 enum) · `TerminalReason{Exited{code}/Killed/Interrupted/StreamClosed/Cancelled/Error(String)}` · `Capabilities`(영역별, 콘솔 값) · `CommandSpec{program,args,env,cwd}`. `PtyChunk`→`OutputChunk` 중립화.
+2. **OutputCore 추출** — PtySession에서 seq/replay/subscribers/status를 분리한 구조체. `emit(event)` · `finish(reason)`(idempotent + finalize once) · `join_pump(timeout)` · subscribe/unsubscribe. 단위 테스트.
+3. **AgentTransport trait + PtyTransport** — master/writer/child/shutdown/job + pump 스레드를 PtyTransport로 이동. `shutdown()`(반환 전 master drop 보장) · pump가 `OutputEvent` emit + 종료 시 `TerminalReason` 산출→`core.finish`. headless 통과.
+4. **AgentBackend(CommandSpec 산출)** — `ClaudeBackend`(현 claude.rs) + `CodexBackend`/`GeminiBackend` stub. SpawnMode 중립 유지, 플래그명 매핑만 각 backend.
+5. **AgentSession** — OutputCore + transport 보유. `write_input`/`resize`/`interrupt`/`kill`(=shutdown+join_pump)/`reconfigure`/`capabilities` 노출.
+6. **AgentManager**(PtyManager 개명) — `Arc<dyn AgentSession>` 보유. spawn/restore/fallback을 `capabilities().resume` 기반 generic으로. S9 복원 로직 이식. `remove_session` 중복 소멸.
+7. **ApiTransport 껍데기** — AgentTransport 구현하되 `Unsupported`/`unimplemented!`. capability 전부 false.
+8. **commands/lib/프론트 재배선** — `send_input`/`interrupt` 커맨드, `capabilities`를 `AgentInfo` 스냅샷에 포함, TS 미러.
+9. **fable 게이트** + headless + 전체 테스트.
+
+**불변식 유지(회귀 금지):** kill의 "master drop→reader EOF→join" 인과(이제 shutdown→join_pump 2동사로), §10 락 규칙, drain send 시 lock 미보유, epoch 재구독, best-effort tracker.
+
+## (참고) 검토 당시 갈림: OutputEvent API variant를 지금 정의?
 - **fable + GPT (2): 미리 정의 X.** wire 포맷(Serialize, 프론트 공유)이라 dead variant가 TS로 샘 + API shape 불명 = 추측 over-engineer. 지금은 `TerminalBytes`만 + 이름 중립화. 대신 **core를 variant-agnostic**(consumer `_ => ignore`)으로 = 확장 안전 구조만 확보.
 - **Gemini (1): 미리 정의 O(강력).** LLM primitive(TextDelta/Usage/ToolCall)는 저위험·준표준. core fanout/replay match-arm 미리 안정화 → API는 transport만 끼움. `Extension(Value)` 탈출구.
 - **매니저 권고: 미리 정의 X.** "저위험 over-engineer"는 "확장이 안 깨지고 retrofit이 비싼 것"에만 적용 — OutputEvent는 나중에 variant 추가가 싸므로(consumer ignore) 그 바에 못 미침. 단 3자 진짜 공통점인 **"core를 variant-agnostic 확장안전으로"** 는 지금 확보.
