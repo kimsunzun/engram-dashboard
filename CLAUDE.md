@@ -107,11 +107,27 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 - `windows` (Job Object) — `#[cfg(windows)]`
 
 ## 빌드·검증 명령 (`src-tauri/`)
-- `cargo test --lib` — unit test (현재 19건)
+- `cargo test --lib` — unit test (현재 38건)
 - `cargo run --example headless` — **프론트 없이** 백엔드 spawn→write→resize→kill 로그 검증
-- `cargo fmt` / `grep -r "use tauri" src/pty/` (→ 0줄) — 포맷·격리 게이트
+- `cargo run --example transport_smoke` / `session_smoke` — manager 없이 PtyTransport/AgentSession 직접 실측(신경로)
+- `cargo fmt` / `rg "use tauri" src/pty/` (→ 0줄) — 포맷·격리 게이트
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E
 - 로그 ON: `RUST_LOG=debug` (기본 OFF=warn)
+
+### GUI 시각/동작 검증 (`scripts/cdp.mjs`) — 실제 앱을 코드로 확인
+실제 Tauri 창(WebView2)에 **CDP로 직접 붙어** 스크린샷·DOM 조회·실제 `invoke` 호출까지 한다. MCP·새 세션·재시작 불필요(node 내장 WebSocket만). **Windows 전용**(WebView2). 절차:
+```bash
+# 1) 디버그 포트 열고 앱 실행 (bash: env var 붙여 백그라운드)
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev
+# 2) 포트 뜰 때까지 대기: curl http://127.0.0.1:9223/json/version
+# 3) 검증
+node scripts/cdp.mjs info                 # 페이지 목록
+node scripts/cdp.mjs shot out.png          # 스크린샷 → Read로 확인
+node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON 출력)
+```
+`eval`로 DOM 텍스트(`document.body.innerText`)나 **백엔드 직접 호출**(`window.__TAURI__.core.invoke('spawn_agent',{cwd})` 등) 가능 → spawn/write/interrupt/kill 전 경로를 실제 IPC로 검증.
+포트는 9223 고정(9222는 Gemini 자동화 Chrome — 충돌 회피). 다른 포트는 `CDP_PORT` env.
+검증 목적이면 스샷보다 `eval` 텍스트가 토큰·정확도 유리(픽셀 해석 회피). S10 GUI E2E를 이 방식으로 회귀 0 확인함(2026-06-12).
 
 ## 컨벤션
 - 중요 로직(동시성·kill·unsafe·비자명한 결정)에 **왜** 그런지 한국어 주석. 자명한 코드엔 주석 금지.
