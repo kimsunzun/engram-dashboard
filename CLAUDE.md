@@ -34,7 +34,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 PTY 프로세스든 HTTP API든 모바일 WebSocket이든, **출력·상태는 이 trait으로만 흐른다.** 코어(`pty/`)는 Tauri·전송 방식을 모른다. 그래서 headless 테스트가 가능하고, 새 전송 경로는 sink 구현만 추가하면 흡수된다.
 
 ### 2. 세션 런타임 비전 — `AgentSession` 단일 인터페이스 + capability 매트릭스
-모든 백엔드가 **같은 인터페이스**(start/write_input/resize/kill/output)를 구현한다. 차이는 구조가 아니라 **"이 capability를 지원하냐 마냐"** 뿐이다. API 백엔드도 출력을 **가상 터미널에 물려** 같은 바이트 스트림으로 흐르게 하므로, 렌더링·런타임 경로가 하나로 통일된다.
+모든 백엔드가 **같은 인터페이스**(start/write_input/resize/kill/output)를 구현한다. 차이는 구조가 아니라 **"이 capability를 지원하냐 마냐"** 뿐이다. **출력은 종류를 가정하지 않는다(터미널 강제 금지)** — `OutputEvent`(터미널 바이트는 한 variant일 뿐, API는 TextDelta/Usage/ToolCall 등)와 `capabilities.output`(terminal_bytes/markdown/tool_events/usage)로 **종류를 구분**하고, 슬롯이 그에 맞는 렌더러를 고른다(터미널=xterm / API=구조화·마크다운 뷰). ~~"API도 가상 터미널에 물려 같은 바이트 스트림으로"~~ 옛 가정은 S10 OutputEvent 결정으로 폐기 — API는 터미널이 아닐 수 있다.
 
 | capability | claude_console | codex_console | codex_api |
 |---|---|---|---|
