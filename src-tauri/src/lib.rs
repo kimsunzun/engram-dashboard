@@ -9,16 +9,16 @@ use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
 use persistence::FileProfileStore;
-use pty::manager::PtyManager;
+use pty::manager::AgentManager;
 use pty::profile::{ProfileRegistry, RestoreReport};
 use pty::session_tracker::{SessionTracker, TrackerConfig};
 use pty::types::{AgentId, AgentInfo, AgentStatus, OutputSink, SinkError, SinkId};
 
 // ── AppState ─────────────────────────────────────────────────────────────────
 
-/// Tauri 관리 상태 — PtyManager 접근점. 외부 Mutex 없음(M1).
+/// Tauri 관리 상태 — AgentManager 접근점. 외부 Mutex 없음(M1).
 pub struct AppState {
-    pub manager: Arc<PtyManager>,
+    pub manager: Arc<AgentManager>,
 }
 
 // ── ChannelOutputSink ─────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ pub fn run() {
             ));
             tracker.start();
 
-            let manager = Arc::new(PtyManager::new(status_sink, profiles, tracker));
+            let manager = Arc::new(AgentManager::new(status_sink, profiles, tracker));
 
             // 복원은 백그라운드 — 앱 창 블로킹 방지(H-1.8). stagger·조기종료 윈도 대기 포함.
             let mgr = manager.clone();

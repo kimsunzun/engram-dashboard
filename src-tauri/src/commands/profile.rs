@@ -1,6 +1,6 @@
 //! 프로필 CRUD + 프로필 기반 spawn 커맨드 (S9-6).
 //!
-//! Tauri thin wrapper — 비즈니스 로직 없음. ProfileRegistry/PtyManager 호출만.
+//! Tauri thin wrapper — 비즈니스 로직 없음. ProfileRegistry/AgentManager 호출만.
 //! 자격증명은 env에 넣지 말 것(평문 persist — persistence가 경고).
 
 use std::path::PathBuf;

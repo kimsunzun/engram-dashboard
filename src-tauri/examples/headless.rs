@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use engram_dashboard_lib::logging::{init_logging, mask_secrets, set_log_level};
 use engram_dashboard_lib::persistence::FileProfileStore;
-use engram_dashboard_lib::pty::manager::{default_shell, PtyManager};
+use engram_dashboard_lib::pty::manager::{default_shell, AgentManager};
 use engram_dashboard_lib::pty::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_lib::pty::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_lib::pty::types::{
@@ -89,7 +89,7 @@ fn main() {
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = PtyManager::new(status_sink, profiles, tracker);
+    let manager = AgentManager::new(status_sink, profiles, tracker);
 
     // 1) spawn — 기본 셸(Shell 프로필, Fresh). AgentStatus::Running 상태로 시작됨.
     let profile = AgentProfile::new(

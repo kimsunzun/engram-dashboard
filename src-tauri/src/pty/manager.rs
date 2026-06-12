@@ -1,35 +1,34 @@
-//! PtyManager — Phase 1 결합부. session/drain/platform/types를 묶어 에이전트 생명주기를 관리한다.
-//! S9: 프로필 기반 spawn + 세션 복원(restore_all) + claude 세션 추적 부착.
+//! AgentManager — Phase 1 결합부. backend/transport/output_core/session을 묶어 에이전트
+//! 생명주기를 관리한다. S10: PtyManager→AgentManager 개명 + 신경로 전환.
+//! S9: 프로필 기반 spawn + 세션 복원(restore_all) + claude 세션 추적 부착(불변).
+//!
+//! 신경로(S10): manager는 backend(CommandSpec 산출) → PtyTransport(자원) +
+//! OutputCore(출력) → AgentSession(합성)을 조립한다. 옛 PtySession/drain.rs/claude.rs는 제거됨.
 //!
 //! tauri import 0 — 상위 상태 알림은 StatusSink trait으로 주입받는다(AppHandle 아님).
 //!
-//! 락 순서(LLD §10 규칙1): `sessions` RwLock은 조회 전용이다. Arc를 clone하고 lock을
-//! 즉시 해제한 뒤에야 session 내부 lock을 취득한다. sessions lock 보유 중 session 내부
-//! lock 취득은 금지(데드락 방지).
+//! 락 순서(LLD §10 규칙1): `sessions` RwLock은 조회 전용이다. Arc<AgentSession>을 clone하고
+//! lock을 즉시 해제한 뒤에야 session 내부 lock(core/transport)을 취득한다. sessions lock
+//! 보유 중 session 내부 lock 취득은 금지(데드락 방지).
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-
-use crate::pty::claude;
-use crate::pty::drain::spawn_drain_thread;
+use crate::pty::backend;
+use crate::pty::output_core::OutputCore;
 use crate::pty::profile::{
     AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
-use crate::pty::session::{PtySession, PtySessionInit};
+use crate::pty::session::AgentSession;
 use crate::pty::session_tracker::SessionTracker;
+use crate::pty::transport::pty::PtyTransport;
+use crate::pty::transport::AgentTransport;
 use crate::pty::types::{
-    AgentId, AgentInfo, AgentStatus, OutputChunk, OutputSink, PtyError, SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, CommandSpec, OutputChunk, OutputSink, PtyError, SinkId,
+    StatusSink,
 };
-
-#[cfg(windows)]
-use crate::pty::platform::JobObjectHandle;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -50,8 +49,8 @@ pub fn default_shell() -> &'static str {
     "bash"
 }
 
-pub struct PtyManager {
-    sessions: Arc<RwLock<HashMap<AgentId, Arc<PtySession>>>>,
+pub struct AgentManager {
+    sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     // C1: Tauri AppHandle이 아니라 StatusSink trait 주입(테스트 시 Noop 가능).
     status_sink: Arc<dyn StatusSink>,
     // S9: 프로필 단일 소유자(sid 생성·갱신·persist) + claude 세션 추적기.
@@ -59,7 +58,7 @@ pub struct PtyManager {
     tracker: Arc<SessionTracker>,
 }
 
-impl PtyManager {
+impl AgentManager {
     pub fn new(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
@@ -80,8 +79,8 @@ impl PtyManager {
 
     // ── spawn ──────────────────────────────────────────────────────────────
 
-    /// 프로필 기반 spawn. claude면 mode에 따라 `--session-id`/`--resume`를 조립한다.
-    /// 성공 시 AgentInfo 반환.
+    /// 프로필 기반 spawn. backend가 CommandSpec을 산출(claude면 mode에 따라
+    /// `--session-id`/`--resume`). 성공 시 AgentInfo 반환.
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
@@ -106,116 +105,77 @@ impl PtyManager {
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
 
-        // claude면 세션 id 확보(없으면 생성·persist). 생성 책임은 ProfileRegistry(H-1.4).
-        let session_id = if claude::needs_session(&profile.command) {
+        // backend가 세션 추적 대상인지 판단(claude=true, shell=false). true면 세션 id 확보
+        // (없으면 생성·persist). 생성 책임은 ProfileRegistry(H-1.4).
+        let needs = backend::needs_session(&profile.command);
+        let sid = if needs {
             self.profiles.ensure_session_id(profile.id)
         } else {
             None
         };
 
-        let (program, args) = claude::build_command(&profile.command, mode, session_id);
         // epoch는 레지스트리의 현재값(fallback respawn 등에서 미리 bump됨).
         let epoch = self.profiles.get(profile.id).map(|p| p.epoch).unwrap_or(0);
 
-        let (session, child_pid) =
-            self.spawn_session(profile.id, &cwd, &profile.env, &program, &args, epoch)?;
+        // backend가 program/args/env/cwd를 중립 CommandSpec으로 산출. transport는 claude/shell을 모른다.
+        let spec = backend::build_command_spec(
+            &profile.command,
+            mode,
+            sid,
+            cwd.clone(),
+            profile.env.clone(),
+        );
 
-        // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략.
-        if let (Some(sid), Some(pid)) = (session_id, child_pid) {
-            self.tracker.watch(profile.id, pid, sid);
+        let (session, child_pid) = self.spawn_session(profile.id, spec, epoch)?;
+
+        // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
+        if let (Some(s), Some(pid)) = (sid, child_pid) {
+            if needs {
+                self.tracker.watch(profile.id, pid, s);
+            }
         }
 
-        tracing::info!(agent = %profile.id, %program, epoch, ?mode, "에이전트 spawn");
+        tracing::info!(agent = %profile.id, epoch, ?mode, "에이전트 spawn");
 
         let info = self.agent_info(&session);
         self.status_sink.agent_list_updated(self.list_agents());
         Ok(info)
     }
 
-    /// PTY 생성 + child spawn + drain thread 기동 + sessions 등록의 공통 기계부.
-    /// 반환: 등록된 세션 Arc + child PID(Option).
+    /// PtyTransport open + OutputCore 생성 + pump 기동(transport.start) + AgentSession 합성 +
+    /// sessions 등록의 공통 기계부. 반환: 등록된 세션 Arc + child PID(Option).
     fn spawn_session(
         &self,
         id: AgentId,
-        cwd: &Path,
-        env: &[(String, String)],
-        program: &str,
-        args: &[String],
+        spec: CommandSpec,
         epoch: u32,
-    ) -> Result<(Arc<PtySession>, Option<u32>), PtyError> {
-        // 1. PTY 생성 (기본 24x80)
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: DEFAULT_ROWS,
-                cols: DEFAULT_COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| PtyError::SpawnFailed(format!("openpty: {e}")))?;
+    ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
+        // 1. PTY 생성 + child spawn + job 편입 + reader/writer 확보. pump는 아직 안 띄움.
+        let (transport, child_pid) = PtyTransport::open(&spec, DEFAULT_COLS, DEFAULT_ROWS)?;
 
-        // 2. child spawn (program + args + cwd + env)
-        let mut cmd = CommandBuilder::new(program);
-        for a in args {
-            cmd.arg(a);
-        }
-        cmd.cwd(cwd);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| PtyError::SpawnFailed(format!("spawn: {e}")))?;
+        // 2. 출력 측 core 생성(status Running, seq 0). transport와 분리된 출력 fanout 담당.
+        let core = Arc::new(OutputCore::new(id, epoch, self.status_sink.clone()));
 
-        // slave는 spawn 후 불필요 — drop으로 FD 누수 방지(닫혀야 ConPTY EOF도 정상).
-        drop(pair.slave);
+        // 3. transport를 trait object로 박싱.
+        let transport: Box<dyn AgentTransport> = Box::new(transport);
 
-        let child_pid = child.process_id();
+        // 4. ★순서 중요(fable M-1)★ pump 기동을 insert보다 먼저 한다(S9 원본도 drain을 sessions
+        //    insert 전에 spawn). start가 reader를 take해 pump 스레드를 띄우고 core.attach_pump로
+        //    핸들/done_rx를 적재한다 — 이후 kill의 join_pump가 이걸 쓴다.
+        transport.start(core.clone());
 
-        // 3. Windows: Job 생성 + child 편입 (spike/windows.rs 검증 순서 그대로).
-        #[cfg(windows)]
-        let job_handle = {
-            let job = JobObjectHandle::new()?;
-            if let Some(pid) = child_pid {
-                job.assign(pid)?;
-            }
-            job
-        };
-
-        // 4. ★ master를 session에 넣기 전에 reader/writer를 먼저 확보 ★
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| PtyError::SpawnFailed(format!("clone_reader: {e}")))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| PtyError::SpawnFailed(format!("take_writer: {e}")))?;
-
-        // 5. PtySession 생성 → Arc
-        let session = Arc::new(PtySession::new(PtySessionInit {
+        // 5. core + transport를 AgentSession으로 합성(cols/rows atomic은 session 보유).
+        let session = Arc::new(AgentSession::new(
             id,
-            cwd: cwd.to_path_buf(),
+            spec.cwd.clone(),
             epoch,
-            master: pair.master,
-            writer,
-            child,
-            cols: DEFAULT_COLS,
-            rows: DEFAULT_ROWS,
-            #[cfg(windows)]
-            job_handle,
-        }));
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            core,
+            transport,
+        ));
 
-        // 6~7. drain 완료 채널 + drain thread 기동, rx/handle를 세션에 사후 주입.
-        let (done_tx, done_rx) = mpsc::channel();
-        *session
-            .drain_done_rx
-            .lock()
-            .expect("drain_done_rx poisoned") = Some(done_rx);
-        let handle = spawn_drain_thread(session.clone(), reader, self.status_sink.clone(), done_tx);
-        *session.drain_handle.lock().expect("drain_handle poisoned") = Some(handle);
-
-        // 8. sessions 등록 (write lock — 한 statement에서 즉시 해제).
+        // 6. sessions 등록 — start 후 insert(S9 원본 순서 보존). write lock은 한 statement에서 즉시 해제.
         self.sessions
             .write()
             .expect("sessions poisoned")
@@ -258,7 +218,7 @@ impl PtyManager {
     /// 그 외(shell 등)는 fresh로 시작.
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
         let resumable =
-            claude::needs_session(&profile.command) && profile.claude_session_id.is_some();
+            backend::needs_session(&profile.command) && profile.claude_session_id.is_some();
 
         if !resumable {
             // shell이거나 sid 없는 claude → 이어받기가 아니라 새 세션 시작(Started).
@@ -334,7 +294,7 @@ impl PtyManager {
                     })
                 }
             };
-            let status = session.status.lock().expect("status poisoned").clone();
+            let status = session.status();
             if matches!(
                 status,
                 AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
@@ -350,10 +310,11 @@ impl PtyManager {
 
     /// 세션을 조용히 정리(상태 알림 없이) — fallback 전 옛 세션 제거 전용.
     ///
-    /// ★fable C-1★: 단순 kill/take만 하고 반환하면 옛 drain thread가 아직 살아 있다가
+    /// ★fable C-1★: 단순 kill/take만 하고 반환하면 옛 pump 스레드가 아직 살아 있다가
     /// 뒤늦게 `status_changed(id, Killed)`를 emit한다. 직후 같은 id로 fresh respawn하면
-    /// 그 stale Killed가 갓 살아난 새 세션을 덮을 수 있다. 따라서 여기서도 kill_agent step 6처럼
-    /// **drain 완료를 동기 대기**해 옛 drain의 terminal 알림이 respawn보다 먼저 끝나게 한다.
+    /// 그 stale Killed가 갓 살아난 새 세션을 덮을 수 있다. 따라서 여기서도 kill_agent처럼
+    /// session.kill로 **pump 완료를 동기 대기**(join_pump)해 옛 pump의 terminal 알림이
+    /// respawn보다 먼저 끝나게 한다. enter_exiting/agent_list_updated는 호출하지 않는다(silent).
     fn remove_session(&self, id: AgentId) {
         self.tracker.unwatch(id);
         let removed = self
@@ -362,33 +323,15 @@ impl PtyManager {
             .expect("sessions poisoned")
             .remove(&id);
         if let Some(session) = removed {
-            session.shutdown.store(true, Ordering::Release);
-            {
-                let mut child = session.child.lock().expect("child poisoned");
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            #[cfg(windows)]
-            {
-                let _ = session.job_handle.terminate(1);
-            }
-            // master drop → ConPTY 종료 → drain EOF.
-            let _ = session.master.lock().expect("master poisoned").take();
-            // 옛 drain 종료까지 대기 — 지연된 stale Killed가 respawn 전에 소진되도록.
-            if let Some(rx) = session
-                .drain_done_rx
-                .lock()
-                .expect("drain_done_rx poisoned")
-                .take()
-            {
-                let _ = rx.recv_timeout(Duration::from_secs(5));
-            }
+            // shutdown(자원 폐쇄, master drop) + join_pump(완료 대기). pump의 finish(Killed)는
+            // 정상 발행되고 join으로 소진된다 — stale Killed가 respawn 전에 끝남(원본 C-1 동작 동일).
+            session.kill(Duration::from_secs(5));
         }
     }
 
-    // ── 구독/입출력 (Stage-1 그대로) ─────────────────────────────────────────
+    // ── 구독/입출력 ────────────────────────────────────────────────────────
 
-    /// 구독자 등록 + replay 전송 → SinkId. C4 로직은 session.subscribe에 있다.
+    /// 구독자 등록 + replay 전송 → SinkId. C4 로직은 core.subscribe에 있다.
     pub fn subscribe(
         &self,
         agent_id: AgentId,
@@ -405,89 +348,38 @@ impl PtyManager {
         Ok(())
     }
 
-    /// PTY stdin write.
+    /// PTY stdin write → transport(Raw 바이트).
     pub fn write_stdin(&self, agent_id: AgentId, data: &[u8]) -> Result<(), PtyError> {
-        let session = self.get_session(agent_id)?;
-        let mut writer = session.writer.lock().expect("writer poisoned");
-        writer
-            .write_all(data)
-            .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-        writer
-            .flush()
-            .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-        Ok(())
+        self.get_session(agent_id)?.write_input(data)
     }
 
-    /// PTY cols/rows 변경.
+    /// PTY cols/rows 변경. resize 성공 시에만 cols/rows atomic 갱신(AgentSession 책임).
     pub fn resize(&self, agent_id: AgentId, cols: u16, rows: u16) -> Result<(), PtyError> {
-        let session = self.get_session(agent_id)?;
-        if let Some(master) = session.master.lock().expect("master poisoned").as_ref() {
-            master
-                .resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(|e| PtyError::SpawnFailed(format!("resize: {e}")))?;
-        }
-        session.cols.store(cols, Ordering::Relaxed);
-        session.rows.store(rows, Ordering::Relaxed);
-        Ok(())
+        self.get_session(agent_id)?.resize(cols, rows)
     }
 
-    // ── kill (Stage-1 6단계 절대순서 + S9 tracker unwatch) ────────────────────
+    /// 진행 중 작업만 중단(≠kill). PTY=0x03 주입. 프로세스는 살아 있다.
+    pub fn interrupt(&self, agent_id: AgentId) -> Result<(), PtyError> {
+        self.get_session(agent_id)?.interrupt()
+    }
 
-    /// 에이전트 종료 — ★LLD §6 6단계 절대순서★ (spike로 검증된 순서, 변경 금지).
+    // ── kill (LLD §6 절대순서 + S9 tracker unwatch) ──────────────────────────
+
+    /// 에이전트 종료 — ★인과 순서 보존★. enter_exiting(Exiting 알림) → session.kill
+    /// (transport.shutdown → master drop → pump EOF → core.finish(Killed) → join_pump)
+    /// → sessions 제거 → tracker unwatch → 목록 알림. (spike로 검증된 순서, 변경 금지).
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
 
-        // 0.5. 과도기 Exiting 전이 — kill 누르면 즉시 '종료중' 알림.
-        let entered_exiting = {
-            let mut status = session.status.lock().expect("status poisoned");
-            if matches!(
-                *status,
-                AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
-            ) {
-                false
-            } else {
-                *status = AgentStatus::Exiting;
-                true
-            }
-        };
-        if entered_exiting {
-            self.status_sink
-                .status_changed(agent_id, AgentStatus::Exiting, session.epoch);
-        }
+        // 0.5. 과도기 Exiting 전이 — kill 누르면 즉시 '종료중' 알림. 전이+발행은 core 안에서
+        //      이뤄진다(manager가 트리거, core가 status_changed(Exiting) 발행). 이미 terminal이면
+        //      false 반환하나 별도 처리 없음(개별 status_changed(Killed)는 pump의 finish 단독).
+        let _ = session.enter_exiting();
 
-        // 1. shutdown 신호 — drain이 종료 시 Killed로 전이하도록.
-        session.shutdown.store(true, Ordering::Release);
-
-        // 2~3. child kill + wait(reap, 좀비 방지).
-        {
-            let mut child = session.child.lock().expect("child poisoned");
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-
-        // 4. Windows: Job 전체 종료 → 손자 프로세스까지 → ConPTY slave 핸들 해제.
-        #[cfg(windows)]
-        {
-            let _ = session.job_handle.terminate(1);
-        }
-
-        // 5. master.take() → drop → ClosePseudoConsole → reader EOF (C3).
-        let _ = session.master.lock().expect("master poisoned").take();
-
-        // 6. drain 완료 대기 (G-1). timeout이면 그냥 진행(세션 제거로 Arc 끊겨 자연 종료).
-        if let Some(rx) = session
-            .drain_done_rx
-            .lock()
-            .expect("drain_done_rx poisoned")
-            .take()
-        {
-            let _ = rx.recv_timeout(Duration::from_secs(5));
-        }
+        // 1~6. 자원 강제 종료 + pump 완료 대기. shutdown이 master를 drop해 pump read를 EOF로
+        //       깨우고(→core.finish(Killed)), join_pump가 그 pump 종료를 5s 대기한다. timeout이면
+        //       그냥 진행(세션 제거로 Arc 끊겨 자연 종료).
+        session.kill(Duration::from_secs(5));
 
         // 7. sessions에서 제거 + 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지).
         self.sessions
@@ -496,7 +388,7 @@ impl PtyManager {
             .remove(&agent_id);
         self.tracker.unwatch(agent_id);
 
-        // 8. 목록 변경 알림 (manager 책임). 개별 status_changed(Killed)는 drain 단독.
+        // 8. 목록 변경 알림 (manager 책임). 개별 status_changed(Killed)는 pump 단독.
         self.status_sink.agent_list_updated(self.list_agents());
 
         Ok(())
@@ -506,7 +398,7 @@ impl PtyManager {
 
     /// 전체 목록 스냅샷.
     pub fn list_agents(&self) -> Vec<AgentInfo> {
-        let sessions: Vec<Arc<PtySession>> = {
+        let sessions: Vec<Arc<AgentSession>> = {
             let guard = self.sessions.read().expect("sessions poisoned");
             guard.values().cloned().collect()
         };
@@ -516,8 +408,7 @@ impl PtyManager {
     /// replay 스냅샷 조회.
     pub fn get_snapshot(&self, agent_id: AgentId) -> Result<Vec<OutputChunk>, PtyError> {
         let session = self.get_session(agent_id)?;
-        let snapshot = session.replay.lock().expect("replay poisoned").snapshot();
-        Ok(snapshot)
+        Ok(session.snapshot())
     }
 
     /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고, 각 kill을 병렬 실행한다.
@@ -540,8 +431,8 @@ impl PtyManager {
 
     // ── 내부 헬퍼 ─────────────────────────────────────────────
 
-    /// sessions에서 Arc<PtySession>을 clone해 반환(§10 규칙1: read lock 즉시 해제).
-    fn get_session(&self, agent_id: AgentId) -> Result<Arc<PtySession>, PtyError> {
+    /// sessions에서 Arc<AgentSession>을 clone해 반환(§10 규칙1: read lock 즉시 해제).
+    fn get_session(&self, agent_id: AgentId) -> Result<Arc<AgentSession>, PtyError> {
         self.sessions
             .read()
             .expect("sessions poisoned")
@@ -551,11 +442,11 @@ impl PtyManager {
     }
 
     /// session 스냅샷 → AgentInfo. (sessions lock을 보유하지 않은 상태에서만 호출)
-    fn agent_info(&self, session: &Arc<PtySession>) -> AgentInfo {
+    fn agent_info(&self, session: &Arc<AgentSession>) -> AgentInfo {
         AgentInfo {
             id: session.id,
             cwd: session.cwd.to_string_lossy().to_string(),
-            status: session.status.lock().expect("status poisoned").clone(),
+            status: session.status(),
             cols: session.cols.load(Ordering::Relaxed),
             rows: session.rows.load(Ordering::Relaxed),
             epoch: session.epoch,

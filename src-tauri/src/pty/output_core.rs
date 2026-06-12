@@ -4,9 +4,10 @@
 //! 왜 분리하는가: 출력 fanout·종료 전이·구독은 PTY든 API든 transport 종류와 무관하게
 //! 동일하다. transport는 바이트·이벤트를 만들어 `emit`/`finish`로 넘기기만 하면 된다.
 //!
-//! 이 단계(stage 2)에선 아직 PtySession/manager에 배선되지 않는다. 독립 모듈로 완성한다.
+//! transport(pump)가 emit/finish로 출력·종료를 넘기고, manager/AgentSession이 subscribe/
+//! status/snapshot으로 조회한다.
 //!
-//! tauri import 0. drain.rs/session.rs의 락 규율·불변식을 글자 그대로 보존한다.
+//! tauri import 0. S9 drain/session의 락 규율·불변식을 글자 그대로 보존한다.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -272,7 +273,6 @@ impl OutputCore {
 }
 
 /// 늦게 붙는 창을 위한 PTY 출력 ring buffer — 상한 2MB, 초과 시 앞부터 제거.
-/// (장기 소속이 output_core.rs — session.rs에서 이동. PtySession.replay가 stage 3까지 이걸 import.)
 pub struct ReplayBuffer {
     chunks: VecDeque<OutputChunk>,
     total_bytes: usize,
