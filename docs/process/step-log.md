@@ -91,6 +91,7 @@
 ---
 
 ## 다음 (미진행)
+- **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **codex/gemini CLI spike** — 실제 CLI 구독 후 플래그 확정 → `AgentCommand`에 Codex/Gemini variant 추가 + `backend_for` 라우팅 연결(현재 stub은 best-guess+미연결).
 - **[게이트] 자동 재시작** — `restart_agent` 전용 태스크(사다리 resume→fresh→정지, backoff). 코어 안정 후.
 - **실제 claude 복원 E2E** — headless는 shell만 실증. claude `--session-id`/`--resume` + `sessions/<pid>.json` PID 일치를 실제 claude로 실측(spike) 필요.
