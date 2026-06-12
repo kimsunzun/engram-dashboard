@@ -1,5 +1,7 @@
 # S10 — 백엔드 추상화 설계 (AgentTransport / OutputEvent)
 
+> **✅ 구현 완료 (2026-06-12, 커밋 `60fe859`~`fb50917`).** 9단계 전부 + fable 게이트(2/3/6/최종) GO. 회귀 0(test 38 / headless·smoke PASS). 구체 시그니처는 `impl-spec.md`, 타임라인은 `../step-log.md` S10. 콘솔(PtyTransport) 구현·검증, ApiTransport·codex/gemini는 stub(후일 채움).
+
 근거: GPT+Gemini 구성 검토 수렴(`web 검토 2026-06-12`) + 사용자 결정.
 범위: 멀티 백엔드(claude/codex/gemini 콘솔 + API) 통합 인터페이스. **장기·저위험은 충분히 추상화(over-engineer 허용), API는 껍데기만, 콘솔 3종은 구현.**
 

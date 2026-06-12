@@ -72,9 +72,26 @@
 - **핵심 메커니즘:** spawn 시 `--session-id <uuid>`로 우리가 sid 통제 → 재시작 `--resume`로 무손실 복원. `/clear`로 sid 바뀌면 `sessions/<pid>.json` 폴링으로 따라잡아 즉시 persist. 복원 정확성은 우리 통제 sid에만 의존(추적 파일은 best-effort).
 - **문서:** `S9-session-restore/session-restore-lld.md`, `-code-plan.md`(§H), `spike-results.md`, `s9-*-review-*.md`
 
+## S10 — 백엔드 추상화 (AgentTransport/OutputEvent)  · 커밋 `60fe859`~`fb50917`
+- **무엇:** 검증된 S9 PTY 코드를 `AgentManager → AgentSession(OutputCore) → dyn AgentTransport(PtyTransport/ApiTransport)` 구조로 재편. 멀티 백엔드(claude/codex/gemini 콘솔 + API) 통합 인터페이스. **회귀 0**이 목표(기능 추가 아닌 seam 추상화).
+- **어떻게(9단계, 단계별 build/test/commit + fable 리뷰 게이트, 오케스트레이터=서브에이전트 디스패치):**
+  1. 중립 타입/enum: `OutputEvent`/`InputEvent`(확장 enum) · `TerminalReason` · `Capabilities`(영역별) · `CommandSpec` · PtyChunk→`OutputChunk` — `60fe859`
+  2. `output_core.rs` OutputCore: seq/replay/subscribers/status/finalize, emit(variant-agnostic)/finish(finalize 1회)/join_pump/enter_exiting/subscribe — `dbcde55`
+  3. `transport/{mod,pty}.rs` AgentTransport trait + PtyTransport: spawn/kill 1~5단계/drain_loop+transition 흡수, pump 스레드, shutdown 멱등 — `cd3b048`
+  4. `backend/{mod,claude,shell}.rs` AgentBackend + CommandSpec 산출 dispatch — `38d2fe7`
+  5. `session.rs` AgentSession 합성: kill=shutdown+join_pump 2동사 — `7c68e31`
+  6. `manager.rs` AgentManager(PtyManager 개명) 신경로 전환 + 옛 구조(PtySession/drain.rs/claude.rs) 제거 — `c954305`
+  7/8. ApiTransport 껍데기 + codex/gemini stub(dispatch 미연결, best-guess) + interrupt_agent 커맨드 + AgentInfo.capabilities + TS 미러 — `fb50917`
+- **검증:** unit test 38(S9 19→backend 이관·stub 추가), headless·transport_smoke·session_smoke PASS, full build(bin), `cargo fmt`·`tsc` 클린, `pty/` tauri import 0.
+- **신경로 실측:** `examples/transport_smoke.rs`·`session_smoke.rs` 신설 — manager 없이 PtyTransport/AgentSession 직접 검증(shutdown→pump EOF→finish(Killed) 인과, hang 없음).
+- **fable 리뷰(2/3/6 + 최종 게이트, 전부 GO):** 회귀 0 확인. B-1(enter_exiting/finish 알림 역전 창)은 S9 기존 동작=natural-exit race, agent-list-updated 완화로 회귀 아님. attach_pump race는 mpsc 무한버퍼로 무손실. 소유권 분할(transport/core/session) 깨끗, "교체 가능" 추상화 성립(ApiTransport가 같은 trait로 끼워짐).
+- **단계화(후일):** OutputEvent API variant(TextDelta/Usage 등)·ApiTransport 내부 HTTP 스트림·codex/gemini CLI 플래그(spike 후 AgentCommand variant 추가)·semantic event log/replay 고도화.
+- **문서:** `S10-backend-abstraction/agent-transport-design.md`, `impl-spec.md`(코더 공통 참조 — 구체 시그니처)
+
 ---
 
 ## 다음 (미진행)
+- **codex/gemini CLI spike** — 실제 CLI 구독 후 플래그 확정 → `AgentCommand`에 Codex/Gemini variant 추가 + `backend_for` 라우팅 연결(현재 stub은 best-guess+미연결).
 - **[게이트] 자동 재시작** — `restart_agent` 전용 태스크(사다리 resume→fresh→정지, backoff). 코어 안정 후.
 - **실제 claude 복원 E2E** — headless는 shell만 실증. claude `--session-id`/`--resume` + `sessions/<pid>.json` PID 일치를 실제 claude로 실측(spike) 필요.
 - 메시지 시스템(에이전트 간 통신) — 백엔드 추가 설계.
