@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use base64::Engine as _;
 
 use crate::pty::session::PtySession;
-use crate::pty::types::{AgentStatus, PtyChunk, PtyEvent, StatusSink};
+use crate::pty::types::{AgentStatus, OutputChunk, PtyEvent, StatusSink};
 
 /// drain thread 기동. reader는 master.try_clone_reader() 결과(spawn 직후 호출).
 /// status_sink/done_tx는 PtySession에 없으므로 manager가 보유분을 넘긴다.
@@ -71,7 +71,7 @@ fn drain_loop(session: &Arc<PtySession>, mut reader: Box<dyn Read + Send>) {
             .replay
             .lock()
             .expect("replay poisoned")
-            .push(PtyChunk { seq, data });
+            .push(OutputChunk { seq, data });
 
         // 5. ★불변식 1★ subscribers를 clone으로 스냅샷 뜨고 즉시 lock 해제 → lock 밖에서 send.
         //    send는 blocking 가능(IPC). lock을 쥔 채 send하면 subscribe/다른 send와 교착·정체.

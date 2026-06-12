@@ -25,7 +25,7 @@ use crate::pty::profile::{
 use crate::pty::session::{PtySession, PtySessionInit};
 use crate::pty::session_tracker::SessionTracker;
 use crate::pty::types::{
-    AgentId, AgentInfo, AgentStatus, OutputSink, PtyChunk, PtyError, SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, OutputChunk, OutputSink, PtyError, SinkId, StatusSink,
 };
 
 #[cfg(windows)]
@@ -514,7 +514,7 @@ impl PtyManager {
     }
 
     /// replay 스냅샷 조회.
-    pub fn get_snapshot(&self, agent_id: AgentId) -> Result<Vec<PtyChunk>, PtyError> {
+    pub fn get_snapshot(&self, agent_id: AgentId) -> Result<Vec<OutputChunk>, PtyError> {
         let session = self.get_session(agent_id)?;
         let snapshot = session.replay.lock().expect("replay poisoned").snapshot();
         Ok(snapshot)

@@ -15,9 +15,91 @@ pub enum AgentStatus {
     Killed,
 }
 
+/// pump→core 내부 출력 이벤트. 확장 가능 enum. core는 variant-agnostic(_ => ignore).
+#[derive(Debug, Clone)]
+pub enum OutputEvent {
+    TerminalBytes(Vec<u8>), // 콘솔 — 지금 유일 variant
+                            // 후일: TextDelta(String) / MessageDone / Usage{..} / ToolCall{..} / Error(String)
+}
+
+/// session→transport 입력 이벤트. 확장 가능 enum.
+#[derive(Debug, Clone)]
+pub enum InputEvent {
+    Raw(Vec<u8>), // PTY 키 입력 바이트
+                  // 후일: Message(String) / Reconfigure{..}
+}
+
+/// transport가 산출하는 종료 사유(flat). core가 AgentStatus로 매핑(finalize 1회).
+/// ※ raw lib error(reqwest/nix) 직접 노출 금지 — 도메인 문자열로.
+#[derive(Debug, Clone)]
+pub enum TerminalReason {
+    Exited { code: Option<i32> },
+    Killed,
+    Interrupted,
+    StreamClosed,
+    Cancelled,
+    Error(String),
+}
+
+/// transport에 주입하는 중립 실행 명세. backend가 산출. PtyTransport는 claude/codex를 모름.
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: std::path::PathBuf,
+}
+
+/// 영역별 capability (bool 폭증 금지). 콘솔 값으로 채움. 직렬화(프론트 공유, snake_case).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Capabilities {
+    pub input: InputCaps,
+    pub output: OutputCaps,
+    pub control: ControlCaps,
+    pub session: SessionCaps,
+    pub model: ModelCaps,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InputCaps {
+    pub raw: bool,
+    pub message: bool,
+    pub attachment: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OutputCaps {
+    pub terminal_bytes: bool,
+    pub markdown: bool,
+    pub tool_events: bool,
+    pub usage: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ControlCaps {
+    pub resize: bool,
+    pub interrupt: bool,
+    pub cancel: bool,
+    pub graceful_shutdown: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionCaps {
+    pub resume: bool,
+    pub snapshot: bool,
+    pub cwd_env: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelCaps {
+    pub select: bool,
+    pub temperature: bool,
+    pub max_tokens: bool,
+}
+
 /// drain 내부 전달용 raw PTY 출력 청크 — 바이너리 그대로 (UTF-8 쪼개짐 방지)
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PtyChunk {
+pub struct OutputChunk {
     pub seq: u64,
     pub data: Vec<u8>,
 }

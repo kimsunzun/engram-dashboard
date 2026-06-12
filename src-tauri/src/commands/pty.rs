@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::pty::types::{PtyChunk, PtyEvent, SinkId};
+use crate::pty::types::{OutputChunk, PtyEvent, SinkId};
 use crate::{AppState, ChannelOutputSink};
 
 #[tauri::command]
@@ -62,7 +62,7 @@ pub async fn resize_pty(
 pub async fn get_agent_snapshot(
     state: State<'_, AppState>,
     agent_id: String,
-) -> Result<Vec<PtyChunk>, String> {
+) -> Result<Vec<OutputChunk>, String> {
     let id = Uuid::parse_str(&agent_id).map_err(|e| e.to_string())?;
     state.manager.get_snapshot(id).map_err(|e| e.to_string())
 }

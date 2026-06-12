@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 use base64::Engine as _;
 use portable_pty::{Child, MasterPty};
 
-use crate::pty::types::{AgentId, AgentStatus, OutputSink, PtyChunk, PtyEvent, SinkId};
+use crate::pty::types::{AgentId, AgentStatus, OutputChunk, OutputSink, PtyEvent, SinkId};
 
 #[cfg(windows)]
 use crate::pty::platform::JobObjectHandle;
@@ -157,7 +157,7 @@ impl PtySession {
 /// 늦게 붙는 창을 위한 PTY 출력 ring buffer — 상한 2MB, 초과 시 앞부터 제거.
 /// (types.rs에서 이동 — LLD §1/§4가 session.rs 소속으로 명시)
 pub struct ReplayBuffer {
-    chunks: VecDeque<PtyChunk>,
+    chunks: VecDeque<OutputChunk>,
     total_bytes: usize,
     max_bytes: usize,
 }
@@ -171,7 +171,7 @@ impl ReplayBuffer {
         }
     }
 
-    pub fn push(&mut self, chunk: PtyChunk) {
+    pub fn push(&mut self, chunk: OutputChunk) {
         self.total_bytes += chunk.data.len();
         self.chunks.push_back(chunk);
         while self.total_bytes > self.max_bytes {
@@ -183,7 +183,7 @@ impl ReplayBuffer {
         }
     }
 
-    pub fn snapshot(&self) -> Vec<PtyChunk> {
+    pub fn snapshot(&self) -> Vec<OutputChunk> {
         self.chunks.iter().cloned().collect()
     }
 }
