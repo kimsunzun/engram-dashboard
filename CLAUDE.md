@@ -21,6 +21,12 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 > **모든 기능은 추상 인터페이스 위에 구현하고, 내부 구현체는 교체(swappable)되는 형태로 짠다.**
 > 특정 모델·전송 방식에 코드를 묶지 않는다. 이게 이 프로젝트를 10년 끌고 가는 법칙이다.
 
+### 0. 판단 기준 — 위험도 낮으면 over-engineering 쪽으로
+이 프로젝트는 **장기(10년) 유지보수**가 전제다. 그래서 추상화 결정은 단순 YAGNI가 아니라 **위험도 × 기간**으로 판단한다:
+- **저위험 + 장기** (인터페이스 경계, seam, 타입 enum 등 나중에 바꾸면 비싼 것) → **지금 충분히 깐다(over-engineering 허용).** 리팩터 비용이 크고 미래가 확실하면 미리 짓는 게 옳다.
+- **고비용·불확실** (실제 동작을 모르는 백엔드 내부, 검증 안 된 가정) → **껍데기/정의만 두고 실측 때 채운다.**
+- 예: `OutputEvent`/`InputEvent` seam·capability 영역 구조·콘솔 백엔드 3종은 지금 만든다. API transport 내부·semantic event log는 껍데기만(API 모델 등장 때). 상세: `docs/process/S10-backend-abstraction/`.
+
 ### 1. 출력/상태 계약 — `OutputSink` / `StatusSink` (이미 구현, load-bearing seam)
 PTY 프로세스든 HTTP API든 모바일 WebSocket이든, **출력·상태는 이 trait으로만 흐른다.** 코어(`pty/`)는 Tauri·전송 방식을 모른다. 그래서 headless 테스트가 가능하고, 새 전송 경로는 sink 구현만 추가하면 흡수된다.
 
