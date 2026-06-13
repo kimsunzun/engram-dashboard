@@ -12,6 +12,9 @@ export const ptyApi = {
   /** 에이전트 종료 요청 — Running→Exiting→Killed 전이. */
   killAgent: (agentId: string) => invoke<void>('kill_agent', { agentId }),
 
+  /** 진행 중 작업만 중단(≠kill). PTY=Ctrl+C(0x03) 주입, 프로세스는 살아 있음. */
+  interruptAgent: (agentId: string) => invoke<void>('interrupt_agent', { agentId }),
+
   /** 현재 에이전트 목록 전체 조회. */
   getAgents: () => invoke<AgentInfo[]>('get_agents'),
 

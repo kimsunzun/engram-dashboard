@@ -11,10 +11,9 @@ interface SlotContextMenuProps {
 
 export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null)
-  const splitSlot = useSlotStore(s => s.splitSlot)
-  const closeSlot = useSlotStore(s => s.closeSlot)
+  // UI는 store 액션을 직접 부르지 않고 dispatch(단일 제어 표면, §5)만 호출한다.
+  const dispatch = useSlotStore(s => s.dispatch)
   const layout = useSlotStore(s => s.layout)
-  const assignAgent = useSlotStore(s => s.assignAgent)
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -24,6 +23,9 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
+  const slot = findSlot(layout, slotId)
+  const slotAgentId = slot?.content.kind === 'terminal' ? slot.content.agentId : null
+
   const items = [
     {
       label: '에이전트 생성',
@@ -32,23 +34,30 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
         if (!cwd.trim()) return
         ptyApi
           .spawnAgent(cwd.trim())
-          .then(agent => assignAgent(slotId, agent.id))
+          .then(agent => dispatch({ kind: 'assignAgent', slotId, agentId: agent.id }))
           .catch(e => console.error('[spawn]', e))
       },
     },
     {
       label: '에이전트 종료',
       action: () => {
-        const slot = findSlot(layout, slotId)
-        if (!slot?.agentId) return
-        ptyApi.killAgent(slot.agentId).catch(e => console.error('[kill]', e))
+        if (!slotAgentId) return
+        ptyApi.killAgent(slotAgentId).catch(e => console.error('[kill]', e))
       },
     },
-    { label: '가로 분할', action: () => splitSlot(slotId, 'horizontal') },
-    { label: '세로 분할', action: () => splitSlot(slotId, 'vertical') },
-    { label: '에이전트 전환', action: () => {} },
+    {
+      label: '에이전트 트리 보기',
+      action: () => dispatch({ kind: 'setSlotContent', slotId, content: { kind: 'tree' } }),
+    },
+    {
+      label: '터미널 보기',
+      action: () =>
+        dispatch({ kind: 'setSlotContent', slotId, content: { kind: 'terminal', agentId: null } }),
+    },
+    { label: '가로 분할', action: () => dispatch({ kind: 'splitSlot', slotId, dir: 'horizontal' }) },
+    { label: '세로 분할', action: () => dispatch({ kind: 'splitSlot', slotId, dir: 'vertical' }) },
     { label: '팝업으로 분리', action: () => window.open(`index.html#/popup?slotId=${slotId}`, '_blank') },
-    { label: '닫기', action: () => closeSlot(slotId) },
+    { label: '닫기', action: () => dispatch({ kind: 'closeSlot', slotId }) },
   ]
 
   return (

@@ -88,6 +88,13 @@
 - **단계화(후일):** OutputEvent API variant(TextDelta/Usage 등)·ApiTransport 내부 HTTP 스트림·codex/gemini CLI 플래그(spike 후 AgentCommand variant 추가)·semantic event log/replay 고도화.
 - **문서:** `S10-backend-abstraction/agent-transport-design.md`, `impl-spec.md`(코더 공통 참조 — 구체 시그니처)
 
+## S11 — 에이전트 트리 슬롯화 + capability 잠복 버그 수정 (2026-06-14)
+- **무엇:** ① `AgentInfo.name` 백엔드 채움(ProfileRegistry 조회, AgentSession에 중복 필드 안 둠). ② 슬롯 콘텐츠 모델 객체 union(`{kind:'terminal',agentId}|{kind:'tree'}`) + `LayoutCommand`/`dispatch` 단일 제어 표면(§5, `window.__engramLayout` 노출=LLM 제어 경로). ③ 트리를 슬롯 콘텐츠로(`LayoutRenderer` kind 분기). ④ `AgentTree` 재작성: 클릭=selectOnly(자기파괴 루프 방지), 우클릭 메뉴(배치/종료/중단), interrupt는 `ControlCaps.interrupt` capability 분기, 이름 표시. ⑤ 슬롯 우클릭 트리/터미널 토글.
+- **어떻게:** `/consult`(GPT+Gemini+opus judge 블라인드 교차검증) → 설계 보정(string enum→객체 union 확정, store 직접호출→dispatch, name=ProfileRegistry 조회가 옳음 판정). 코딩 → opus 리뷰([높음] AgentTree 우클릭 메뉴 바깥닫기 가드 누락 수정) → QA(test/tsc/GUI 실측).
+- **★capability 잠복 버그★:** `src-tauri/capabilities/` 파일이 없어 core event listen이 막혀, `agent-list-updated`/`status-changed` 상태 브로드캐스트가 **프론트에 원래부터 안 닿던** 버그(PTY 출력은 Channel이라 권한 무관 → 여태 미노출). 증상: spawn해도 트리 미갱신 → 거기서 kill 불가. `capabilities/default.json`(`core:default`+`core:event:default`)로 해결. spawn→트리 추가 / kill→트리 제거 실시간 GUI 실측 PASS.
+- **검증:** unit test 38/38, `tsc` 0, `cargo fmt`, `pty/` tauri import 0, GUI 실측(9223 cdp eval — 트리 토글·이름·spawn/kill 실시간 갱신·`__engramLayout` 제어표면) 전부 PASS.
+- **보류:** tabs 구조(`content`→`tabs[]` 확장)·레이아웃 영속화·UI 동작의 완전 backend 이관(데몬화 때). `assignAgent`/`setSlotContent` 명령 중복은 편의로 유지.
+
 ---
 
 ## 다음 (미진행)
@@ -104,3 +111,4 @@
 - 메시지 시스템(에이전트 간 통신) — 백엔드 추가 설계.
 - Phase 3d (popup URL 전달 + monaco) + 프론트 상세(복원 배너 UX).
 - `reference/` 정설 문서 집필 (시스템 안정화 후)
+- **[정리] `pty/` 폴더명·구성 재고** — S10 후 `pty/`가 PTY 전용이 아니라 에이전트 코어 전반(AgentManager/AgentSession/OutputCore/transport/backend) 보유. 폴더명이 내용과 불일치(에이전트 공용 매니저가 pty/ 안). 다른 모듈 배치도 같이 점검(사용자 지적 2026-06-14, 트리 슬롯화 작업 끝난 뒤).

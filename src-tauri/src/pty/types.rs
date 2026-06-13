@@ -116,6 +116,8 @@ pub struct PtyEvent {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentInfo {
     pub id: AgentId,
+    /// 표시용 이름. ProfileRegistry(단일 진실원)에서 채운다. 프로필이 없으면 id 앞 8자.
+    pub name: String,
     pub cwd: String,
     pub status: AgentStatus,
     pub cols: u16,

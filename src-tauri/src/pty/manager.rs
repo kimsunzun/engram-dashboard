@@ -443,8 +443,20 @@ impl AgentManager {
 
     /// session 스냅샷 → AgentInfo. (sessions lock을 보유하지 않은 상태에서만 호출)
     fn agent_info(&self, session: &Arc<AgentSession>) -> AgentInfo {
+        // name은 ProfileRegistry(단일 진실원)에서 조회한다. get()이 profiles lock을 잡아 clone 후
+        // 즉시 해제하므로 sessions lock과 동시에 보유하지 않는다(§10 락 순서, agent_info는 sessions
+        // lock 미보유 상태에서만 호출). 프로필이 없으면 id 앞 8자로 fallback.
+        let name = self
+            .profiles
+            .get(session.id)
+            .map(|p| p.name)
+            .unwrap_or_else(|| {
+                let s = session.id.to_string();
+                s[..8].to_string()
+            });
         AgentInfo {
             id: session.id,
+            name,
             cwd: session.cwd.to_string_lossy().to_string(),
             status: session.status(),
             cols: session.cols.load(Ordering::Relaxed),

@@ -70,6 +70,8 @@ export interface Capabilities {
 /** 에이전트 메타데이터 스냅샷 */
 export interface AgentInfo {
   id: string
+  /** 표시용 이름. 백엔드 ProfileRegistry에서 채움(없으면 id 앞 8자). */
+  name: string
   cwd: string
   status: AgentStatus
   cols: number

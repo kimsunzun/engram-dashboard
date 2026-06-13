@@ -13,7 +13,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **프론트 통합 3a~3c** — 실제 PTY ↔ xterm E2E. 3d(popup+monaco)·복원 UX는 보류.
 - **다음** — codex/gemini CLI spike(플래그 확정→variant 라우팅), (게이트) 자동 재시작, 실제 claude 복원 E2E spike, 메시지 시스템, ApiTransport 내부.
 
-검증 흐름: 코딩 → fable LLD 리뷰 → QA(build/test) 3-게이트.
+검증 흐름: 코딩 → fable LLD 리뷰 → QA 3-게이트. **QA는 build/test + GUI 실측(`scripts/cdp.mjs` eval/shot)을 항상 포함**한다 — 코드(test/tsc)가 통과해도 실제 화면에서 동작을 확인하기 전엔 미완으로 본다.
 
 ---
 
@@ -137,6 +137,10 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 `eval`로 DOM 텍스트(`document.body.innerText`)나 **백엔드 직접 호출**(`window.__TAURI__.core.invoke('spawn_agent',{cwd})` 등) 가능 → spawn/write/interrupt/kill 전 경로를 실제 IPC로 검증.
 포트는 9223 고정(9222는 Gemini 자동화 Chrome — 충돌 회피). 다른 포트는 `CDP_PORT` env.
 검증 목적이면 스샷보다 `eval` 텍스트가 토큰·정확도 유리(픽셀 해석 회피). S10 GUI E2E를 이 방식으로 회귀 0 확인함(2026-06-12).
+
+## 커뮤니케이션
+
+사용자 응답 시 생소할 만한 전문용어는 그대로 쓰되, 바로 옆이나 밑에 쉬운 한 줄 풀이를 단다. 단 모든 용어가 아니라 사용자가 막힐 만한 것만 — 흔한 용어까지 풀면 장황해진다. 코드·파일명·경로는 영문 그대로 둔다.
 
 ## 컨벤션
 - 중요 로직(동시성·kill·unsafe·비자명한 결정)에 **왜** 그런지 한국어 주석. 자명한 코드엔 주석 금지.

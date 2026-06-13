@@ -11,14 +11,15 @@ interface SlotPaneProps {
 export default function SlotPane({ slotId, children }: SlotPaneProps) {
   const layout = useSlotStore(s => s.layout)
   const focusedSlotId = useSlotStore(s => s.focusedSlotId)
-  const setFocusedSlot = useSlotStore(s => s.setFocusedSlot)
+  const dispatch = useSlotStore(s => s.dispatch)
   const agents = useAgentStore(s => s.agents)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   const slot = findSlot(layout, slotId)
   const isFocused = focusedSlotId === slotId
-  // TODO(3c): AgentInfo에 name 없음 → id 앞 8자 표시. 슬롯-에이전트 연결 시 재정의.
-  const agentName = slot?.agentId ? (agents.find(a => a.id === slot.agentId)?.id.slice(0, 8) ?? '—') : '—'
+  // 슬롯이 터미널일 때만 agentId가 있다(tree면 없음). 이름은 AgentInfo.name, 없으면 id 앞 8자.
+  const agentId = slot?.content.kind === 'terminal' ? slot.content.agentId : null
+  const agentName = agentId ? (agents.find(a => a.id === agentId)?.name ?? agentId.slice(0, 8)) : '—'
 
   return (
     <div
@@ -38,7 +39,7 @@ export default function SlotPane({ slotId, children }: SlotPaneProps) {
         boxSizing: 'border-box',
         cursor: 'default',
       }}
-      onClick={() => setFocusedSlot(slotId)}
+      onClick={() => dispatch({ kind: 'focusSlot', slotId })}
       onContextMenu={e => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY }) }}
     >
       {children ?? <span style={{ color: 'var(--text-muted)' }}>Slot {slotId}</span>}

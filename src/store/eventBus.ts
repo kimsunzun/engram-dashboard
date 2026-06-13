@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event'
 
 import type { AgentInfo, AgentStatus, RestoreReport } from '../api/types'
 import { useAgentStore } from './agentStore'
+import { useSlotStore } from './slotStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
@@ -15,6 +16,12 @@ export function initEventBus(): Promise<void> {
 
   initPromise = (async () => {
     try {
+      // §5: 레이아웃 제어 표면(dispatch)을 window에 노출 → LLM(cdp eval 등)이 사람 UI와
+      // 동일한 단일 진입점을 호출할 수 있다. 정식 control surface 전까지의 임시 경로.
+      ;(globalThis as Record<string, unknown>).__engramLayout = {
+        dispatch: useSlotStore.getState().dispatch,
+      }
+
       // HMR 재평가 시 기존 리스너 먼저 해제
       if (unlistenFns.length > 0) {
         unlistenFns.forEach(fn => fn())

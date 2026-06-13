@@ -7,6 +7,8 @@ export default function PopupPage() {
   const slotId = parseInt(params.get('slotId') ?? '1', 10)
   const layout = useSlotStore(s => s.layout)
   const slot = findSlot(layout, slotId)
+  // 팝업은 터미널만 표시. 슬롯이 터미널일 때만 agentId가 있다(tree면 null).
+  const agentId = slot?.content.kind === 'terminal' ? slot.content.agentId : null
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
@@ -25,7 +27,7 @@ export default function PopupPage() {
         Slot {slotId} — Popup
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
-        <TerminalSlot agentId={slot?.agentId ?? null} />
+        <TerminalSlot agentId={agentId} />
       </div>
     </div>
   )
