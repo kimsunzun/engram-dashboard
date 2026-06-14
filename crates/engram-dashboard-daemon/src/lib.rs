@@ -25,7 +25,7 @@ use engram_dashboard_protocol::PROTOCOL_VERSION;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use ws::{ConnRegistry, DaemonStatusSink};
+use ws::{ConnRegistry, DaemonStatusSink, KeepaliveConfig};
 
 const DAEMON_FILE: &str = "daemon.json";
 
@@ -78,6 +78,40 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
     Ok(s)
 }
 
+// ── panic hook (B-1) ──────────────────────────────────────────────────────────────
+
+/// 데몬 전역 panic hook 설치. panic 한 스레드명·위치·메시지를 tracing::error! 로 남긴다.
+///
+/// ★기존 hook 보존★: set_hook 으로 교체하기 전 take_hook 으로 이전 hook 을 잡아, 새 hook
+///   안에서 먼저 로깅한 뒤 이전 hook 을 이어 호출한다(default backtrace 출력 등 유지).
+/// ★멱등(테스트 안전)★: 여러 테스트가 run()/이 함수를 반복 호출해도 hook 이 무한 중첩되지
+///   않도록 Once 로 1회만 설치한다. 설치된 hook 은 프로세스 수명 동안 유지된다.
+fn install_panic_hook() {
+    use std::sync::Once;
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let thread = std::thread::current();
+            let name = thread.name().unwrap_or("<unnamed>");
+            // payload 는 보통 &str 또는 String — 둘 다 시도해 메시지를 뽑는다.
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            tracing::error!(thread = name, location, "스레드 panic: {msg}");
+            // 이전 hook 이어 호출(default 동작 보존).
+            prev(info);
+        }));
+    });
+}
+
 // ── AgentManager 배선 (src-tauri lib.rs setup 미러) ───────────────────────────────
 
 /// src-tauri 의 setup 블록과 동일한 방식으로 AgentManager 를 조립한다(파일 기반 store).
@@ -121,6 +155,7 @@ fn build_manager_with_store(
 /// 종료 경로: shutdown_rx 가 true 로 바뀌면(StopDaemon) 또는 Ctrl-C(run() 만 — 테스트는 watch 로
 /// 종료) 루프를 빠져나온다. ★이 함수는 self-contained accept loop 로, main 과 테스트가 동일하게
 /// 쓴다 — 운영/테스트 경로가 한 코드를 공유해 회귀를 막는다.★
+#[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
     listener: TcpListener,
     manager: Arc<AgentManager>,
@@ -129,6 +164,7 @@ async fn run_accept_loop(
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
     enable_ctrl_c: bool,
+    keepalive: KeepaliveConfig,
 ) {
     loop {
         tokio::select! {
@@ -148,6 +184,7 @@ async fn run_accept_loop(
                                 registry,
                                 expected_token,
                                 shutdown_tx,
+                                keepalive,
                             )
                             .await;
                         });
@@ -183,6 +220,13 @@ async fn run_accept_loop(
 pub async fn run() -> Result<(), i32> {
     // 0) 기본 warn(OFF) — RUST_LOG 로 재정의. core 의 init_logging 재사용(키 마스킹 포함).
     logging::init_logging();
+
+    // 0.5) panic hook 설치(B-1). 데몬 내부 스레드(pump 등)가 panic 하면 silent 정지로
+    //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단"), panic 위치·스레드명·메시지를
+    //   tracing::error! 로 가시화한다. ★기존 default hook 동작 보존★: backtrace/표준 출력
+    //   동작을 잃지 않게 이전 hook 도 이어서 호출한다(연쇄). 데몬 전체는 죽이지 않는다 —
+    //   연결 task panic 은 tokio 가 이미 격리하고, pump panic 은 B-2 가 Failed 로 전이시킨다.
+    install_panic_hook();
 
     // 1) 단일 인스턴스 가드. 이미 실행 중이면 로그 남기고 정상 종료(exit 0).
     //    ★_guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 mutex 해제 = 단일성 깨짐).
@@ -298,7 +342,8 @@ pub async fn run() -> Result<(), i32> {
         expected_token,
         shutdown_tx,
         shutdown_rx,
-        true, // 운영: Ctrl-C graceful 종료 활성
+        true,                       // 운영: Ctrl-C graceful 종료 활성
+        KeepaliveConfig::default(), // 운영 기본 keepalive(20s/50s)
     )
     .await;
 
@@ -364,9 +409,27 @@ pub async fn start_test_server() -> std::io::Result<TestServerHandle> {
     start_test_server_with_store(store).await
 }
 
+/// keepalive 주입형 — keepalive(half-open 감지) 동작을 검증하는 테스트가 짧은 ping/idle 값을
+/// 끼운다(상수 하드코딩 회피 — 테스트가 수십 초 걸리지 않게). 운영 기본은 위 start_test_server.
+pub async fn start_test_server_with_keepalive(
+    keepalive: KeepaliveConfig,
+) -> std::io::Result<TestServerHandle> {
+    let store: Arc<dyn ProfileStore> = Arc::new(MemProfileStore::default());
+    start_test_server_inner(store, keepalive).await
+}
+
 /// store 주입형 — 복원·persist 동작을 검증하고 싶은 테스트가 store 를 직접 끼운다.
 pub async fn start_test_server_with_store(
     store: Arc<dyn ProfileStore>,
+) -> std::io::Result<TestServerHandle> {
+    // keepalive 미관심 테스트는 운영 기본값 사용.
+    start_test_server_inner(store, KeepaliveConfig::default()).await
+}
+
+/// store + keepalive 둘 다 주입하는 내부 구현(공유). 위 공개 헬퍼들이 이걸 호출한다.
+async fn start_test_server_inner(
+    store: Arc<dyn ProfileStore>,
+    keepalive: KeepaliveConfig,
 ) -> std::io::Result<TestServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -392,6 +455,7 @@ pub async fn start_test_server_with_store(
                 shutdown_tx,
                 shutdown_rx,
                 false, // 테스트: Ctrl-C 미설치(watch 로만 종료)
+                keepalive,
             )
             .await;
         })

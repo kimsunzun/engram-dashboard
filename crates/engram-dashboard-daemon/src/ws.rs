@@ -52,6 +52,36 @@ const CONN_TX_CAP: usize = 4608;
 /// auth 첫 frame 대기 한도. 이 안에 Auth Text 가 안 오면 close.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// 운영 기본 keepalive 주기 — 데몬이 능동 WS Ping 을 보내는 간격.
+const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(20);
+/// 운영 기본 idle 한도 — 마지막 클라 수신 후 이 시간 넘게 무응답이면 half-open 으로 보고 close.
+/// ping_interval 의 2.5배(여러 Ping 을 놓쳐야 끊김 — 일시 지연 위양성 방지).
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
+
+/// WS application-level keepalive 설정(A). 능동 Ping 주기 + idle 한도.
+///
+/// ★half-open 감지★: tungstenite 는 들어온 Ping 에 자동 Pong 만 하고 능동 Ping 은 안 보낸다.
+/// FIN 없이 끊기는 연결(sleep/wake·NAT 타임아웃·모바일 터널)에서 TCP keepalive(기본 2시간)는
+/// 무의미하므로, write_task 가 ping_interval 마다 Ping 을 보내고 read_task 가 마지막 수신 시각을
+/// 기록한다. idle_timeout 초과면 close_signal 로 그 연결을 끊는다(좀비 구독/broadcast 누수 방지).
+///
+/// ★테스트 주입★: 상수 하드코딩이면 테스트가 수십 초 걸리므로, 짧은 값(예 200ms/600ms)을
+/// 주입할 수 있게 설정 가능하게 둔다. 운영 경로는 `default()`(20s/50s) 그대로.
+#[derive(Clone, Copy, Debug)]
+pub struct KeepaliveConfig {
+    pub ping_interval: Duration,
+    pub idle_timeout: Duration,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            ping_interval: DEFAULT_PING_INTERVAL,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+        }
+    }
+}
+
 /// 허용 Origin allowlist(기본). Origin 없음(네이티브/하네스)은 허용 — 토큰이 주 방어.
 const ALLOWED_ORIGINS: &[&str] = &[
     "http://localhost:1420",
@@ -422,6 +452,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// WS 업그레이드 → auth → Hello/list push → read/write task → cleanup.
 ///
 /// `expected_token` 은 daemon.json 의 토큰. `shutdown_tx` 는 StopDaemon 수신 시 main 종료를 트리거.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection(
     stream: TcpStream,
     peer: std::net::SocketAddr,
@@ -429,6 +460,7 @@ pub async fn handle_connection(
     registry: ConnRegistry,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
+    keepalive: KeepaliveConfig,
 ) {
     // 1) WS 업그레이드 + Origin 검사.
     let mut ws = match tokio_tungstenite::accept_hdr_async(stream, OriginCheck).await {
@@ -531,6 +563,13 @@ pub async fn handle_connection(
     //    read_task 와 cleanup 이 공유하므로 Arc<Mutex<..>>.
     let subs: Arc<Mutex<HashMap<AgentId, SinkId>>> = Arc::new(Mutex::new(HashMap::new()));
 
+    // ── keepalive 공유 시계(A) ──────────────────────────────────────────────────────
+    // base = 연결 시작 시각(tokio Instant). last_recv = base 기준 경과 ms(AtomicU64).
+    // read_task 가 클라로부터 무언가(Pong 포함) 받을 때마다 갱신하고, write_task 의 ping arm 이
+    // base.elapsed() - last_recv 로 idle 경과를 계산해 idle_timeout 초과 시 close_signal 발동.
+    let keepalive_base = tokio::time::Instant::now();
+    let last_recv = Arc::new(AtomicU64::new(0));
+
     // read_task: stream_half 에서 명령을 읽어 dispatch. conn_tx 로 응답을 큐잉.
     //   close_signal 은 handle_subscribe 가 만드는 WsOutputSink 에 주입(full 시 깨우기용).
     let mut read_handle = tokio::spawn(read_task(
@@ -541,11 +580,21 @@ pub async fn handle_connection(
         shutdown_tx,
         conn_id,
         close_signal.clone(),
+        keepalive_base,
+        last_recv.clone(),
     ));
 
     // write_task: conn_rx 에서 받은 WsOutbound 를 sink_half 로 순서대로 write(단일 writer).
-    //   close_signal 발동 시 큐가 막혀 있어도 깨어 닫는다(좀비 방지).
-    let mut write_handle = tokio::spawn(write_task(sink_half, conn_rx, conn_id, close_signal));
+    //   close_signal 발동 시 큐가 막혀 있어도 깨어 닫는다(좀비 방지). keepalive Ping 도 여기서 송신.
+    let mut write_handle = tokio::spawn(write_task(
+        sink_half,
+        conn_rx,
+        conn_id,
+        close_signal,
+        keepalive,
+        keepalive_base,
+        last_recv,
+    ));
 
     // 6) 하나라도 끝나면 cleanup. ★살아남은 쪽을 명시적으로 abort★ — JoinHandle 을 그냥 drop 하면
     //    task 가 detach 되어 계속 돈다(WS half 를 붙든 채 좀비). 그래서 &mut 로 select 해 핸들을
@@ -602,12 +651,22 @@ type SinkHalf =
 /// 좀비 연결이 된다. 그래서 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를
 /// 동시에 대기한다. WsOutputSink 가 full 을 만나 `close_signal.notify_one()` 하면, 큐가
 /// 가득 차 있어도 이 select 가 깨어 sink_half.close() 후 break → cleanup 으로 이어진다.
+#[allow(clippy::too_many_arguments)]
 async fn write_task(
     mut sink_half: SinkHalf,
     mut conn_rx: mpsc::Receiver<WsOutbound>,
     conn_id: ConnId,
     close_signal: Arc<Notify>,
+    keepalive: KeepaliveConfig,
+    keepalive_base: tokio::time::Instant,
+    last_recv: Arc<AtomicU64>,
 ) {
+    // ★keepalive Ping 주기(A)★: ping_interval 마다 능동 Ping 을 보낸다(half-open 감지).
+    //   tick 마다 마지막 수신 후 경과가 idle_timeout 초과면 close_signal 로 이 연결을 끊는다.
+    let mut ping_tick = tokio::time::interval(keepalive.ping_interval);
+    // 첫 tick 즉발 방지(연결 직후 바로 Ping 쏘지 않게) — 정상 첫 주기부터.
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             // 큐 밖 종료 신호 — full 로 큐가 막혀 있어도 여기로 깨어 닫는다.
@@ -615,6 +674,28 @@ async fn write_task(
                 tracing::info!(conn = conn_id, "write_task: close_signal(슬로우 소비자) — 종료");
                 let _ = sink_half.close().await;
                 break;
+            }
+            // keepalive: 주기적 능동 Ping + idle 판정.
+            _ = ping_tick.tick() => {
+                // idle 판정: 마지막 클라 수신(Pong 또는 임의 메시지) 이후 경과.
+                let now_ms = keepalive_base.elapsed().as_millis() as u64;
+                let last_ms = last_recv.load(Ordering::Acquire);
+                let idle = Duration::from_millis(now_ms.saturating_sub(last_ms));
+                if idle >= keepalive.idle_timeout {
+                    // half-open 추정 — Pong 미응답이 idle_timeout 넘김. 이 연결을 닫는다.
+                    tracing::info!(
+                        conn = conn_id,
+                        idle_ms = idle.as_millis() as u64,
+                        "write_task: keepalive idle_timeout 초과(half-open 추정) — 종료"
+                    );
+                    let _ = sink_half.close().await;
+                    break;
+                }
+                // 능동 Ping 송신. 실패(소켓 닫힘)면 종료.
+                if let Err(e) = sink_half.send(Message::Ping(Vec::new().into())).await {
+                    tracing::debug!(conn = conn_id, "write_task keepalive Ping 송신 실패 — 종료: {e}");
+                    break;
+                }
             }
             recv = conn_rx.recv() => {
                 let Some(out) = recv else {
@@ -654,6 +735,8 @@ async fn read_task(
     shutdown_tx: watch::Sender<bool>,
     conn_id: ConnId,
     close_signal: Arc<Notify>,
+    keepalive_base: tokio::time::Instant,
+    last_recv: Arc<AtomicU64>,
 ) {
     while let Some(item) = stream_half.next().await {
         let msg = match item {
@@ -663,6 +746,13 @@ async fn read_task(
                 break;
             }
         };
+        // ★keepalive(A)★: 클라로부터 무언가 받았다 = 연결이 살아있다는 증거. Pong 포함 모든
+        //   메시지에서 마지막 수신 시각을 갱신한다(write_task 의 idle 판정 분모). tungstenite 는
+        //   Pong 을 Message::Pong 으로 올려주므로 능동 Ping 의 응답도 여기서 잡힌다.
+        last_recv.store(
+            keepalive_base.elapsed().as_millis() as u64,
+            Ordering::Release,
+        );
         match msg {
             Message::Text(text) => {
                 match serde_json::from_str::<AgentCommand>(&text) {

@@ -116,6 +116,25 @@ impl PtyTransport {
     }
 }
 
+/// catch_unwind 결과 → 종료 reason 매핑(B-2). 정상이면 본체가 산출한 reason 을 그대로,
+/// panic 이면 payload 에서 메시지를 뽑아 `Error("pump panicked: ..")` 로 변환한다.
+/// pump 클로저에서 분리해 둔 이유: 이 매핑이 load-bearing(panic→Failed 전이)이라 실제 PTY
+/// child 없이 단위테스트로 직접 검증할 수 있게 한다.
+fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
+    match result {
+        Ok(reason) => reason,
+        Err(payload) => {
+            // panic payload 는 보통 &str 또는 String — 둘 다 시도.
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            TerminalReason::Error(format!("pump panicked: {msg}"))
+        }
+    }
+}
+
 impl AgentTransport for PtyTransport {
     /// pump 스레드 기동 + core 연결. reader가 이미 take됐으면(재호출) 아무것도 안 한다.
     ///
@@ -135,53 +154,86 @@ impl AgentTransport for PtyTransport {
         let shutdown = self.shutdown.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            // ── B-2: pump 본체를 catch_unwind로 감싼다 ──
+            // pump 스레드가 panic하면(emit/read/try_wait 어디서든) 그 agent 출력이 영구 silent
+            // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 catch_unwind로 잡아, panic이면
+            // core.finish(Error)로 Failed 전이시켜 사용자/LLM에게 가시화한다.
+            //
+            // ★UnwindSafe★: 클로저가 잡는 reader/buf/child/shutdown은 panic 후 더 쓰지 않고
+            //   버리므로(스레드가 곧 종료) 논리적 불변 깨짐이 없다 → AssertUnwindSafe로 명시.
+            //   Mutex(child) 자체는 UnwindSafe지만 캡처 묶음(특히 dyn Read reader)이 아니므로 감싼다.
+            // ★Mutex poison 범위(정확히)★: 아래 reason 산출의 child.lock()만 poison-tolerant
+            //   (into_inner)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
+            //   다른 agent로 전파되지 않는다.
+            //   단 panic이 pump_core.emit() 내부(replay/subscribers lock 보유 중)에서 터지면 그
+            //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 이후 그 agent에 새 구독/조회가
+            //   오면 subscribe_from/status/snapshot의 .expect("...poisoned")가 재-panic한다. 그러나
+            //   (a) core는 agent 전용이라 다른 agent로 전파 안 되고, (b) 그 재-panic은 연결 task
+            //   (read_task) 안이라 tokio가 그 task만 격리(데몬·타 agent 무사)한다. 또 현재 emit
+            //   경로에는 실제 panic 원이 없다(WsOutputSink::send는 panic 대신 Err 반환). 그래서
+            //   core lock은 의도적으로 fail-fast(expect) 유지 — poison은 "데이터 불일치 가능"의
+            //   신호라 무시(into_inner)보다 그 agent를 죽이는 게 안전하다.
+            let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut reader = reader;
+                let mut buf = [0u8; 4096];
 
-            // ── drain_loop (drain.rs L44-100) ──
-            loop {
-                // 1. blocking read — read 자체가 자연 배칭. EOF(master drop) 또는 Err로 깨면 종료.
-                let n = match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
+                // ── drain_loop (drain.rs L44-100) ──
+                loop {
+                    // 1. blocking read — read 자체가 자연 배칭. EOF(master drop) 또는 Err로 깨면 종료.
+                    let n = match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+
+                    // 2. shutdown 보조 확인(현 drain.rs step2 안전망 그대로). 보통 master drop EOF가
+                    //    먼저 깨우지만, read가 데이터를 막 반환한 직후 kill이 걸린 경우를 위한 안전망.
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    // 3. core가 seq 발급·replay·fanout을 전담(불변식 1·2는 OutputCore::emit 안).
+                    pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()));
+                }
+
+                // ── transition (drain.rs L110-136)의 reason 산출 ──
+                // child exit code를 status lock 무관하게 try_wait로 취득. Killed 경로면 안 쓰지만
+                // (lock 안에서 판정이 갈리던 현 구조와 동치로) 미리 확보해 둔다.
+                // 주: kill 경로는 shutdown의 child.kill()+wait()가 이미 reap했을 수 있어 None일 수 있다
+                //     — 그땐 shutdown=true라 Killed로 가므로 code 미사용, 무해.
+                // ★poison-tolerant★: lock이 poison이어도 into_inner로 데이터를 꺼내 또 panic하지 않는다.
+                let code = {
+                    let mut child = match child.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    match child.try_wait() {
+                        Ok(Some(status)) => Some(status.exit_code() as i32),
+                        _ => None,
+                    }
                 };
 
-                // 2. shutdown 보조 확인(현 drain.rs step2 안전망 그대로). 보통 master drop EOF가
-                //    먼저 깨우지만, read가 데이터를 막 반환한 직후 kill이 걸린 경우를 위한 안전망.
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
+                // shutdown store(Release)와 페어링되도록 Acquire로 읽는다(현 drain.rs와 동일).
+                // 이미 terminal이면 덮지 않는 idempotent 규칙은 core.finish의 finalize 게이트가 담당.
+                if shutdown.load(Ordering::Acquire) {
+                    TerminalReason::Killed
+                } else {
+                    TerminalReason::Exited { code }
                 }
+            }));
 
-                // 3. core가 seq 발급·replay·fanout을 전담(불변식 1·2는 OutputCore::emit 안).
-                pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()));
-            }
-
-            // ── transition (drain.rs L110-136)의 reason 산출 ──
-            // child exit code를 status lock 무관하게 try_wait로 취득. Killed 경로면 안 쓰지만
-            // (lock 안에서 판정이 갈리던 현 구조와 동치로) 미리 확보해 둔다.
-            // 주: kill 경로는 shutdown의 child.kill()+wait()가 이미 reap했을 수 있어 None일 수 있다
-            //     — 그땐 shutdown=true라 Killed로 가므로 code 미사용, 무해.
-            let code = {
-                let mut child = child.lock().expect("child poisoned");
-                match child.try_wait() {
-                    Ok(Some(status)) => Some(status.exit_code() as i32),
-                    _ => None,
-                }
-            };
-
-            // shutdown store(Release)와 페어링되도록 Acquire로 읽는다(현 drain.rs와 동일).
-            // 이미 terminal이면 덮지 않는 idempotent 규칙은 core.finish의 finalize 게이트가 담당.
-            let reason = if shutdown.load(Ordering::Acquire) {
-                TerminalReason::Killed
-            } else {
-                TerminalReason::Exited { code }
-            };
+            // panic이면 Error reason으로, 정상이면 산출된 reason으로 종료 전이.
+            // ★finalize 1회 보존★: panic 경로의 finish와 (정상 EOF 직후 race로) 중복 호출돼도
+            //   OutputCore.finalized.swap(AcqRel)가 정확히 1회만 통과시킨다. catch_unwind는 한
+            //   클로저가 panic하면 그 안의 정상 finish는 도달 못 하므로, 여기서 정확히 한 번만
+            //   finish가 불린다(panic→Error 또는 정상→reason). 이중 호출 자체가 발생하지 않는다.
+            let reason = resolve_pump_reason(normal_reason);
 
             // terminal 알림 주체 = pump(=core.finish). finalize 정확히 1회.
             pump_core.finish(reason);
 
             // G-1: 완료 신호. core.join_pump의 recv_timeout가 받는다. 수신측이 이미
-            // 사라졌어도(타임아웃 후 detach) 무시.
+            // 사라졌어도(타임아웃 후 detach) 무시. ★panic 경로에서도 반드시 보낸다★ —
+            // catch_unwind로 panic을 흡수했으므로 이 send에 도달한다(join_pump가 5s 안 멈춤).
             let _ = done_tx.send(());
         });
 
@@ -283,5 +335,150 @@ impl AgentTransport for PtyTransport {
                 max_tokens: false,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pty::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
+    use std::sync::Mutex;
+
+    /// status 변경을 순서대로 수집하는 mock(격리 검증용).
+    struct CapturingStatusSink {
+        statuses: Mutex<Vec<AgentStatus>>,
+    }
+    impl CapturingStatusSink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                statuses: Mutex::new(Vec::new()),
+            })
+        }
+        fn statuses(&self) -> Vec<AgentStatus> {
+            self.statuses.lock().unwrap().clone()
+        }
+    }
+    impl StatusSink for CapturingStatusSink {
+        fn status_changed(&self, _id: AgentId, status: AgentStatus, _epoch: u32) {
+            self.statuses.lock().unwrap().push(status);
+        }
+        fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+    }
+
+    // ── B-2: panic catch_unwind 결과가 Error reason 으로 매핑되는지 ──
+    #[test]
+    fn resolve_pump_reason_panic_becomes_error() {
+        // panic 한 클로저 → Error("pump panicked: ..") + 원래 메시지 보존.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+                panic!("boom in pump");
+            }));
+        let reason = resolve_pump_reason(result);
+        match reason {
+            TerminalReason::Error(msg) => {
+                assert!(msg.starts_with("pump panicked:"), "Error prefix: {msg}");
+                assert!(
+                    msg.contains("boom in pump"),
+                    "원래 panic 메시지 보존: {msg}"
+                );
+            }
+            other => panic!("panic 은 Error 로 매핑돼야: {other:?}"),
+        }
+    }
+
+    // ── B-2: 정상 종료 reason 은 그대로 passthrough ──
+    #[test]
+    fn resolve_pump_reason_normal_passthrough() {
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            TerminalReason::Exited { code: Some(0) }
+        }));
+        assert!(matches!(
+            resolve_pump_reason(ok),
+            TerminalReason::Exited { code: Some(0) }
+        ));
+        // Killed 도 보존.
+        let killed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+                TerminalReason::Killed
+            }));
+        assert!(matches!(
+            resolve_pump_reason(killed),
+            TerminalReason::Killed
+        ));
+    }
+
+    // ── B-2: panic reason → core.finish → Failed 전이(정확히 1회) ──
+    // pump 본체가 panic 했을 때 그 agent 의 OutputCore 가 Failed 로 전이하는지(가시화) +
+    // finalize 1회 불변식이 깨지지 않는지(중복 finish 흡수)를 검증한다.
+    #[test]
+    fn panic_reason_finishes_core_as_failed_once() {
+        let status_sink = CapturingStatusSink::new();
+        let core = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            status_sink.clone() as Arc<dyn StatusSink>,
+        ));
+
+        // pump 가 panic 했다고 가정 → resolve_pump_reason 으로 Error 산출 → finish.
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+                panic!("simulated pump panic")
+            }));
+        let reason = resolve_pump_reason(panicked);
+        core.finish(reason);
+        // (race 모사) 정상 EOF finish 가 뒤늦게 와도 finalize 1회로 무시.
+        core.finish(TerminalReason::Exited { code: Some(0) });
+
+        // status_sink 에 Failed 정확히 1회.
+        let statuses = status_sink.statuses();
+        assert_eq!(statuses.len(), 1, "finalize 1회 — status 변경 1건만");
+        match &statuses[0] {
+            AgentStatus::Failed { message } => {
+                assert!(
+                    message.contains("pump panicked"),
+                    "Failed 메시지: {message}"
+                );
+            }
+            other => panic!("panic 은 Failed 로 전이해야: {other:?}"),
+        }
+        assert!(matches!(core.status(), AgentStatus::Failed { .. }));
+    }
+
+    // ── B-2: 한 agent 의 pump panic 이 다른 agent 로 전파되지 않음(격리) ──
+    #[test]
+    fn pump_panic_does_not_affect_other_agent() {
+        let sink_a = CapturingStatusSink::new();
+        let sink_b = CapturingStatusSink::new();
+        let core_a = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            sink_a.clone() as Arc<dyn StatusSink>,
+        ));
+        let core_b = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            sink_b.clone() as Arc<dyn StatusSink>,
+        ));
+
+        // A 의 pump 가 panic → A 만 Failed.
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+                panic!("A panic")
+            }));
+        core_a.finish(resolve_pump_reason(panicked));
+
+        // B 는 정상 출력 후 정상 종료 — A 의 panic 과 무관.
+        core_b.emit(OutputEvent::TerminalBytes(b"alive".to_vec()));
+        core_b.finish(TerminalReason::Exited { code: Some(0) });
+
+        assert!(
+            matches!(core_a.status(), AgentStatus::Failed { .. }),
+            "A 는 Failed"
+        );
+        assert!(
+            matches!(core_b.status(), AgentStatus::Exited { code: Some(0) }),
+            "B 는 영향 없이 정상 Exited"
+        );
+        assert_eq!(sink_b.statuses().len(), 1, "B status 변경 1건(정상)");
     }
 }

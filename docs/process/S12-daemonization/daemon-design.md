@@ -29,6 +29,7 @@
   - epoch 일치 & afterSeq≥oldestSeq → Resume(afterSeq+1부터).
 - ★**raw byte replay ≠ terminal 화면 상태**(alt-screen/cursor 위치/진행바/full-screen TUI는 중간부터 재생하면 깨짐). **v1 치명도: 치명 아님** — 정상 경로(처음부터 구독, ring 안)는 정확. truncated는 ring 밖 예외 경로에서만 degrade.
 - **v1 계약 명문화:** "exact byte resume만 보장. afterSeq가 replay window 안이면 gap/dup 0. window 밖이면 terminal state exact 복원 미보장 → clear + tail replay + 'output truncated' 표시." VT-parser snapshot/disk spool은 v2.
+- ★**truncated=false 여도 화면 복원이 깨질 수 있는 별개 케이스**: `truncated` 플래그는 "요청한 afterSeq 가 ring 안에 있다(seq gap 0)"만 보장한다. 그러나 ring 이 가득 차 앞에서 evict 될 때, **alt-screen 진입 시퀀스(`\e[?1049h`)나 전체 화면 clear(`\e[2J`/`\e[3J`) 같은 "화면 상태를 세팅하는 초기 바이트"가 ring 밖으로 밀려나면**, 이후 바이트는 모두 ring 안에 남아 truncated=false 로 판정되더라도 화면 복원이 깨진다(예: full-screen TUI 가 alt-screen 진입 시퀀스 없이 본문만 재생됨). 즉 이것은 truncated 플래그가 보장하는 "seq 연속성"과는 **독립된 케이스**(seq 는 연속이지만 화면 상태 시드 바이트가 소실)이며, raw byte ring 모델의 근본 한계다. phase4 의 VT-framebuffer(VT-parser 가 화면 상태를 스냅샷으로 유지 → 재연결 시 화면 자체를 복원)로 해소 예정이다.
 
 ### 1-4. 토큰 전달 = ACL 포트파일만 (arg·query string·env 금지) ★spike #1 후 갱신
 - 프로세스 커맨드라인은 `wmic process`/`Get-CimInstance Win32_Process`로 **같은 사용자 타 프로세스가 읽는다** → CLI arg 토큰 노출. query string도 프록시/로그 흔적(loopback이라 위험 낮으나 0 아님).

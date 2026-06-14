@@ -17,7 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_core::pty::profile::{AgentCommand, AgentProfile, SpawnMode};
-use engram_dashboard_daemon::{start_test_server, TestServerHandle};
+use engram_dashboard_daemon::ws::KeepaliveConfig;
+use engram_dashboard_daemon::{
+    start_test_server, start_test_server_with_keepalive, TestServerHandle,
+};
 use engram_dashboard_protocol::{
     decode_frame, AgentCommand as WireCommand, AgentEvent, RequestId, SubscribeAction,
     PROTOCOL_VERSION,
@@ -303,6 +306,44 @@ impl Client {
                 Ok(Some(Ok(Message::Close(_)))) => return true,
                 // 그 외 메시지는 무시(읽긴 하지만 — tungstenite 는 한 메시지씩 디코드).
                 Ok(Some(Ok(_))) => continue,
+            }
+        }
+    }
+
+    /// keepalive 검증용: deadline 내에 서버가 보낸 **raw Ping** 프레임을 1회 이상 보면 true.
+    /// ★중요★: tungstenite 는 stream 을 poll 할 때 들어온 Ping 에 자동 Pong 한다. 이 메서드는
+    /// 정상 클라처럼 계속 읽으며(자동 Pong 유발) 그 와중에 Ping 도착을 관측한다. 다른 control/
+    /// binary 는 흡수한다.
+    async fn saw_ping_within(&mut self, deadline: Duration) -> bool {
+        let end = std::time::Instant::now() + deadline;
+        loop {
+            let remaining = end.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match tokio::time::timeout(remaining, self.ws.next()).await {
+                Err(_) => return false,
+                Ok(None) | Ok(Some(Err(_))) => return false,
+                Ok(Some(Ok(Message::Ping(_)))) => return true,
+                // 다른 메시지(Pong/Text/Binary/Close)는 흡수하고 계속(자동 Pong 은 tungstenite 처리).
+                Ok(Some(Ok(_))) => continue,
+            }
+        }
+    }
+
+    /// keepalive 회귀 검증용: deadline 동안 **계속 읽으며**(자동 Pong 유발) 연결이 닫히지 않으면
+    /// true(=정상 활성 클라는 keepalive 로 끊기지 않음). 닫히면 false.
+    async fn stays_alive_while_reading(&mut self, deadline: Duration) -> bool {
+        let end = std::time::Instant::now() + deadline;
+        loop {
+            let remaining = end.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return true; // deadline 까지 안 닫힘 = 살아있음.
+            }
+            match tokio::time::timeout(remaining, self.ws.next()).await {
+                Err(_) => return true, // 타임아웃 = 그 사이 닫힘 없음.
+                Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => return false,
+                Ok(Some(Ok(_))) => continue, // 정상 읽기(자동 Pong) 지속.
             }
         }
     }
@@ -1411,6 +1452,85 @@ async fn case26_ws_spawn_unknown_profile_error() {
     assert!(
         msg.contains("profile not found"),
         "없는 profile Spawn 은 profile not found Error 여야: {msg}"
+    );
+
+    server.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// A: WS application-level keepalive (half-open 연결 감지).
+//   데몬이 능동 Ping 을 보내고, 마지막 클라 수신 후 idle_timeout 초과 시 연결을 닫는다.
+//   ★짧은 주입값★(ping 200ms / idle 600ms)으로 테스트가 수 초 내 끝나게 한다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+/// 테스트용 짧은 keepalive 설정(상수 하드코딩 회피 — 운영 20s/50s 와 분리).
+fn fast_keepalive() -> KeepaliveConfig {
+    KeepaliveConfig {
+        ping_interval: Duration::from_millis(200),
+        idle_timeout: Duration::from_millis(600),
+    }
+}
+
+// ── 케이스 27: 데몬이 능동 Ping 을 보낸다(half-open 감지의 전제) ─────────────────────
+#[tokio::test]
+async fn case27_keepalive_server_sends_ping() {
+    let server = start_test_server_with_keepalive(fast_keepalive())
+        .await
+        .unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    // ping_interval(200ms) 안에 첫 Ping 이 와야 한다. 여유 deadline(2s).
+    assert!(
+        c.saw_ping_within(Duration::from_secs(2)).await,
+        "데몬이 ping_interval 안에 능동 WS Ping 을 보내야(half-open 감지 전제)"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 28: Pong 미응답(죽은 클라) → idle_timeout 후 서버가 close ─────────────────
+//   tungstenite 는 stream 을 poll 할 때만 자동 Pong 한다. 죽은 클라를 흉내내려고 auth 후
+//   idle 구간 동안 **전혀 읽지 않는다**(자동 Pong 미발생) → 서버 last_recv 가 갱신되지 않아
+//   idle_timeout(600ms) 초과 → close_signal → 서버가 이 연결을 닫는다.
+#[tokio::test]
+async fn case28_keepalive_dead_client_closed() {
+    let server = start_test_server_with_keepalive(fast_keepalive())
+        .await
+        .unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    // ★주의★: drain_handshake 든 expect_closed_within 이든 stream 을 poll 하면 tungstenite 가
+    //   서버 Ping 에 자동 Pong 해 last_recv 가 갱신된다(=죽은 클라가 아니게 됨). 그래서 먼저
+    //   idle_timeout 의 수 배 동안 **전혀 읽지 않고 sleep** 해 자동 Pong 을 원천 차단한다.
+    //   그 sleep 동안 서버 ping arm 이 idle 을 감지(last_recv=auth 시점 고정)해 연결을 닫는다.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // 이제 비로소 poll → 이미 닫혔거나(backlog 소진 후 Close) 즉시 Close 를 관측해야 한다.
+    // (이 시점에 버퍼된 Ping 들에 뒤늦게 Pong 을 쓰려 해도 서버는 이미 닫는 중 → 무해.)
+    assert!(
+        c.expect_closed_within(Duration::from_secs(3)).await,
+        "Pong 미응답(죽은 클라)이면 idle_timeout 후 서버가 연결을 닫아야"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 29: 정상 활성 클라는 keepalive 로 끊기지 않음(회귀 방지) ──────────────────
+//   클라가 계속 읽으면 tungstenite 가 서버 Ping 에 자동 Pong → 서버 last_recv 가 갱신돼
+//   idle_timeout 을 넘지 않는다. idle_timeout(600ms)의 수 배 동안 살아있어야 한다.
+#[tokio::test]
+async fn case29_keepalive_active_client_survives() {
+    let server = start_test_server_with_keepalive(fast_keepalive())
+        .await
+        .unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    // idle_timeout(600ms)의 ~4배(2.5s) 동안 계속 읽으며(자동 Pong) 안 끊기는지.
+    assert!(
+        c.stays_alive_while_reading(Duration::from_millis(2500))
+            .await,
+        "정상 활성 클라는 keepalive(자동 Pong)로 idle_timeout 을 넘지 않아 끊기면 안 됨"
     );
 
     server.shutdown().await;
