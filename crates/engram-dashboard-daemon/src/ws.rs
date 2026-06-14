@@ -162,6 +162,156 @@ impl Default for ConnRegistry {
     }
 }
 
+// ── 멀티뷰어 협상 상태(MultiViewState) ───────────────────────────────────────────────
+//
+// 데몬은 한 agent 를 여러 연결(메인창/팝업/모바일)이 동시 attach 하는 것을 전제한다. 그래서 두
+// 정책을 데몬측에 둔다(코어 무변경 — 코어는 최종 크기·통과 여부만 받는다):
+//  - resize 협상(tmux smallest): 각 viewport 가 자기 크기를 등록하면, agent 의 모든 viewport 중
+//    가장 작은(min cols, min rows) 크기로 PTY 를 맞춘다(작은 화면이 안 깨짐).
+//  - 입력 lease(Zellij 명시 lease): 한 agent 의 입력 권한을 한 연결만 쥘 수 있다(인터리브 방지).
+//
+// ★동시성★: 여러 연결 task 가 동시 접근하므로 Arc<Mutex>. **lock 보유 중 manager.resize/await 호출
+//   금지** — lock 을 잡고 짧게 협상값만 계산해 해제한 뒤 그 결과로 manager 를 부른다(코어 §10 락 순서).
+
+/// agent 별 viewport 크기 맵 + agent 별 입력 lease 를 묶은 멀티뷰어 협상 상태.
+#[derive(Clone, Default)]
+pub struct MultiViewState {
+    inner: Arc<Mutex<MultiViewInner>>,
+}
+
+#[derive(Default)]
+struct MultiViewInner {
+    /// agent_id → (viewport_id → (cols, rows)). 빈 맵이면 협상 대상 없음(직접 resize).
+    viewports: HashMap<AgentId, HashMap<String, (u16, u16)>>,
+    /// agent_id → 입력 lease 보유 conn(None = 비어 있음 → WriteStdin/Interrupt 자유 통과).
+    leases: HashMap<AgentId, ConnId>,
+}
+
+/// 입력 lease 정책 판정 결과.
+enum LeasePass {
+    /// 통과 — lease 가 비었거나 이 conn 이 보유자.
+    Allow,
+    /// 거부 — 다른 conn 이 보유 중.
+    Denied,
+}
+
+impl MultiViewState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// viewport 크기를 등록/갱신하고, 그 agent 의 협상된 smallest 크기를 반환한다.
+    /// 반환 None = 등록된 viewport 가 없음(이론상 방금 넣었으므로 항상 Some). lock 은 이 안에서만 보유.
+    fn set_viewport(
+        &self,
+        agent_id: AgentId,
+        viewport_id: String,
+        cols: u16,
+        rows: u16,
+    ) -> Option<(u16, u16)> {
+        let mut g = self.inner.lock().expect("multiview poisoned");
+        g.viewports
+            .entry(agent_id)
+            .or_default()
+            .insert(viewport_id, (cols, rows));
+        smallest(g.viewports.get(&agent_id))
+    }
+
+    /// 한 연결이 보유한 viewport 들을 제거하고, 영향받은 agent 별 재협상 결과를 반환한다.
+    /// 반환: (agent_id, Some(min) = 남은 viewport 의 smallest / None = 이제 viewport 없음).
+    /// cleanup 에서 호출 — 끊긴 연결의 크기를 빼고 남은 뷰어 기준으로 다시 키운다(tmux detach 동치).
+    fn remove_conn_viewports(
+        &self,
+        owned: &[(AgentId, String)],
+    ) -> Vec<(AgentId, Option<(u16, u16)>)> {
+        let mut g = self.inner.lock().expect("multiview poisoned");
+        // 같은 agent 가 여러 viewport 를 가질 수 있어 agent 단위로 1회만 재협상한다.
+        let mut affected: Vec<AgentId> = Vec::new();
+        for (agent_id, viewport_id) in owned {
+            if let Some(m) = g.viewports.get_mut(agent_id) {
+                m.remove(viewport_id);
+                if m.is_empty() {
+                    g.viewports.remove(agent_id);
+                }
+                if !affected.contains(agent_id) {
+                    affected.push(*agent_id);
+                }
+            }
+        }
+        affected
+            .into_iter()
+            .map(|a| (a, smallest(g.viewports.get(&a))))
+            .collect()
+    }
+
+    /// 입력 lease 획득 시도. Ok(true)=새로 획득(상태 변경), Ok(false)=이미 이 conn 보유(idempotent),
+    /// Err=다른 conn 이 보유 중. lock 은 이 안에서만.
+    fn acquire(&self, agent_id: AgentId, conn_id: ConnId) -> Result<bool, ()> {
+        let mut g = self.inner.lock().expect("multiview poisoned");
+        match g.leases.get(&agent_id) {
+            None => {
+                g.leases.insert(agent_id, conn_id);
+                Ok(true)
+            }
+            Some(&holder) if holder == conn_id => Ok(false), // 재획득 idempotent
+            Some(_) => Err(()),                              // 타 conn 보유
+        }
+    }
+
+    /// 입력 lease 해제 시도. Ok(true)=해제됨(상태 변경), Ok(false)=원래 비어 있었음,
+    /// Err=다른 conn 이 보유 중(보유자만 해제 가능).
+    fn release(&self, agent_id: AgentId, conn_id: ConnId) -> Result<bool, ()> {
+        let mut g = self.inner.lock().expect("multiview poisoned");
+        match g.leases.get(&agent_id) {
+            Some(&holder) if holder == conn_id => {
+                g.leases.remove(&agent_id);
+                Ok(true)
+            }
+            None => Ok(false),
+            Some(_) => Err(()),
+        }
+    }
+
+    /// WriteStdin/Interrupt 입력 권한 판정. lease 비었으면 Allow, 보유자면 Allow, 타 conn 이면 Denied.
+    fn check_input(&self, agent_id: AgentId, conn_id: ConnId) -> LeasePass {
+        let g = self.inner.lock().expect("multiview poisoned");
+        match g.leases.get(&agent_id) {
+            None => LeasePass::Allow,
+            Some(&holder) if holder == conn_id => LeasePass::Allow,
+            Some(_) => LeasePass::Denied, // 타 conn 이 lease 보유 중 → 거부
+        }
+    }
+
+    /// 한 연결이 보유한 모든 agent lease 를 해제하고, 실제 해제된 agent 들을 반환한다(좀비 lock 방지).
+    /// 반환된 agent 들은 이제 lease 가 비었으므로 InputLeaseChanged{held:false} 를 브로드캐스트할 대상.
+    fn release_all_for_conn(&self, conn_id: ConnId) -> Vec<AgentId> {
+        let mut g = self.inner.lock().expect("multiview poisoned");
+        let freed: Vec<AgentId> = g
+            .leases
+            .iter()
+            .filter(|(_, &h)| h == conn_id)
+            .map(|(a, _)| *a)
+            .collect();
+        for a in &freed {
+            g.leases.remove(a);
+        }
+        freed
+    }
+}
+
+/// viewport 맵에서 smallest(min cols, min rows) 계산. tmux 기본 정책 — 가장 작은 뷰에 맞춰
+/// 어느 뷰도 PTY 보다 작아 깨지지 않게 한다. 빈/없는 맵이면 None.
+fn smallest(views: Option<&HashMap<String, (u16, u16)>>) -> Option<(u16, u16)> {
+    let m = views?;
+    let mut it = m.values();
+    let &(mut c, mut r) = it.next()?;
+    for &(vc, vr) in it {
+        c = c.min(vc);
+        r = r.min(vr);
+    }
+    Some((c, r))
+}
+
 // ── 타입 변환(core → wire) ─────────────────────────────────────────────────────
 //
 // ★명시 매핑(runtime reflection 폐기)★: 옛 구현은 serde_json::to_value→from_value 로 core↔wire
@@ -458,6 +608,7 @@ pub async fn handle_connection(
     peer: std::net::SocketAddr,
     manager: Arc<AgentManager>,
     registry: ConnRegistry,
+    multiview: MultiViewState,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     keepalive: KeepaliveConfig,
@@ -563,6 +714,10 @@ pub async fn handle_connection(
     //    read_task 와 cleanup 이 공유하므로 Arc<Mutex<..>>.
     let subs: Arc<Mutex<HashMap<AgentId, SinkId>>> = Arc::new(Mutex::new(HashMap::new()));
 
+    // 5b) 이 연결이 등록한 (agent_id, viewport_id) 들 — cleanup 에서 viewport 협상 맵을 정리하기 위함.
+    //     한 연결이 여러 viewport 를 가질 수 있어(여러 agent·여러 뷰) Vec 로 추적한다.
+    let owned_viewports: Arc<Mutex<Vec<(AgentId, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
     // ── keepalive 공유 시계(A) ──────────────────────────────────────────────────────
     // base = 연결 시작 시각(tokio Instant). last_recv = base 기준 경과 ms(AtomicU64).
     // read_task 가 클라로부터 무언가(Pong 포함) 받을 때마다 갱신하고, write_task 의 ping arm 이
@@ -576,7 +731,10 @@ pub async fn handle_connection(
         stream_half,
         conn_tx.clone(),
         manager.clone(),
+        registry.clone(),
+        multiview.clone(),
         subs.clone(),
+        owned_viewports.clone(),
         shutdown_tx,
         conn_id,
         close_signal.clone(),
@@ -621,6 +779,30 @@ pub async fn handle_connection(
     for (agent_id, sink_id) in leftovers {
         let _ = manager.unsubscribe(agent_id, sink_id);
     }
+
+    // ── 멀티뷰어 cleanup ───────────────────────────────────────────────────────
+    // (a) viewport 재협상: 끊긴 연결의 viewport 들을 맵에서 빼고, 영향받은 agent 를 남은 뷰어 기준
+    //     smallest 로 다시 resize 한다(tmux detach 후 잔여 클라 기준으로 다시 키우는 것과 동일).
+    //     ★lock 순서★: remove_conn_viewports 가 multiview lock 안에서 협상값만 계산해 반환한 뒤
+    //     lock 을 푼 상태에서 manager.resize 를 부른다(lock 보유 중 코어 호출 금지).
+    let owned: Vec<(AgentId, String)> = {
+        let g = owned_viewports.lock().expect("owned_viewports poisoned");
+        g.clone()
+    };
+    if !owned.is_empty() {
+        for (agent_id, negotiated) in multiview.remove_conn_viewports(&owned) {
+            if let Some((cols, rows)) = negotiated {
+                // 남은 뷰어가 있으면 그 smallest 로 복귀. 없으면(None) 그대로 둔다(마지막 크기 유지).
+                let _ = manager.resize(agent_id, cols, rows);
+            }
+        }
+    }
+    // (b) 입력 lease 자동 해제: 보유자가 끊기면 다른 뷰어가 영영 막히면 안 된다(좀비 lock 방지).
+    //     해제된 agent 는 이제 lease 가 비었으니 InputLeaseChanged{held:false} 를 전 연결에 통보.
+    for agent_id in multiview.release_all_for_conn(conn_id) {
+        broadcast_lease_changed(&registry, agent_id, false);
+    }
+
     registry.unregister(conn_id);
     tracing::info!(%peer, conn = conn_id, "연결 종료 — cleanup 완료");
 }
@@ -731,7 +913,10 @@ async fn read_task(
     mut stream_half: StreamHalf,
     conn_tx: mpsc::Sender<WsOutbound>,
     manager: Arc<AgentManager>,
+    registry: ConnRegistry,
+    multiview: MultiViewState,
     subs: Arc<Mutex<HashMap<AgentId, SinkId>>>,
+    owned_viewports: Arc<Mutex<Vec<(AgentId, String)>>>,
     shutdown_tx: watch::Sender<bool>,
     conn_id: ConnId,
     close_signal: Arc<Notify>,
@@ -757,8 +942,19 @@ async fn read_task(
             Message::Text(text) => {
                 match serde_json::from_str::<AgentCommand>(&text) {
                     Ok(cmd) => {
-                        if dispatch(cmd, &conn_tx, &manager, &subs, &shutdown_tx, &close_signal)
-                            .await
+                        if dispatch(
+                            cmd,
+                            &conn_tx,
+                            &manager,
+                            &registry,
+                            &multiview,
+                            &subs,
+                            &owned_viewports,
+                            conn_id,
+                            &shutdown_tx,
+                            &close_signal,
+                        )
+                        .await
                         {
                             // dispatch 가 연결 종료를 요청(StopDaemon 등) — 루프 탈출.
                             break;
@@ -793,11 +989,16 @@ async fn read_task(
 
 /// 단일 명령 dispatch. 반환 true = 연결 종료 요청(StopDaemon).
 /// side-effect 명령은 request_id 있으면 Ack/Error.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     cmd: AgentCommand,
     conn_tx: &mpsc::Sender<WsOutbound>,
     manager: &Arc<AgentManager>,
+    registry: &ConnRegistry,
+    multiview: &MultiViewState,
     subs: &Arc<Mutex<HashMap<AgentId, SinkId>>>,
+    owned_viewports: &Arc<Mutex<Vec<(AgentId, String)>>>,
+    conn_id: ConnId,
     shutdown_tx: &watch::Sender<bool>,
     close_signal: &Arc<Notify>,
 ) -> bool {
@@ -854,7 +1055,13 @@ async fn dispatch(
             agent_id,
             request_id,
         } => {
-            let result = manager.interrupt(agent_id).map_err(|e| e.to_string());
+            // Interrupt(Ctrl+C)도 입력 평면이라 lease 게이트를 거친다(WriteStdin 과 동일 정책).
+            let result = match multiview.check_input(agent_id, conn_id) {
+                LeasePass::Allow => manager.interrupt(agent_id).map_err(|e| e.to_string()),
+                LeasePass::Denied => {
+                    Err("input locked by another viewer; acquire first".to_string())
+                }
+            };
             reply(conn_tx, request_id, result).await;
         }
 
@@ -863,10 +1070,16 @@ async fn dispatch(
             data,
             request_id,
         } => {
-            // data → InputEvent::Raw(write_stdin 이 내부에서 Raw 로 감쌈).
-            let result = manager
-                .write_stdin(agent_id, &data)
-                .map_err(|e| e.to_string());
+            // ★입력 lease 게이트★: lease 가 비었거나(단일 뷰어 흔한 경우 마찰 0) 이 conn 이 보유자면
+            //   통과, 타 conn 이 보유 중이면 거부(stdin 인터리브 방지). lock 은 check_input 안에서만.
+            let result = match multiview.check_input(agent_id, conn_id) {
+                LeasePass::Allow => manager
+                    .write_stdin(agent_id, &data)
+                    .map_err(|e| e.to_string()),
+                LeasePass::Denied => {
+                    Err("input locked by another viewer; acquire first".to_string())
+                }
+            };
             reply(conn_tx, request_id, result).await;
         }
 
@@ -874,10 +1087,31 @@ async fn dispatch(
             agent_id,
             cols,
             rows,
-            viewport_id: _,
+            viewport_id,
         } => {
             // Resize 는 request_id 가 없는 명령(messages.rs) — Ack 없이 best-effort, 실패만 Error.
-            if let Err(e) = manager.resize(agent_id, cols, rows) {
+            // ★멀티뷰어 협상(tmux smallest)★: viewport_id 가 있으면 그 뷰의 크기를 협상 맵에 기록하고
+            //   그 agent 의 모든 viewport 중 smallest 로 PTY 를 맞춘다(작은 화면이 안 깨짐). viewport_id
+            //   가 없으면(v1 프론트 기본) 협상을 우회해 그 크기로 직접 resize(하위호환).
+            //   ★lock 순서★: set_viewport 가 multiview lock 안에서 협상값만 계산해 반환한 뒤 lock 을 푼
+            //   상태에서 manager.resize 를 부른다(lock 보유 중 코어 호출 금지).
+            let target = match viewport_id {
+                Some(v) => {
+                    // 이 연결이 등록한 viewport 추적(cleanup 재협상용). 중복 등록은 무시.
+                    {
+                        let mut owned = owned_viewports.lock().expect("owned_viewports poisoned");
+                        if !owned.iter().any(|(a, vid)| *a == agent_id && vid == &v) {
+                            owned.push((agent_id, v.clone()));
+                        }
+                    }
+                    multiview
+                        .set_viewport(agent_id, v, cols, rows)
+                        .unwrap_or((cols, rows))
+                }
+                // 단일 뷰어 — 협상 우회.
+                None => (cols, rows),
+            };
+            if let Err(e) = manager.resize(agent_id, target.0, target.1) {
                 send_error(conn_tx, None, format!("resize failed: {e}")).await;
             }
         }
@@ -906,6 +1140,52 @@ async fn dispatch(
             let sink_id = subs.lock().expect("subs poisoned").remove(&agent_id);
             if let Some(sid) = sink_id {
                 let _ = manager.unsubscribe(agent_id, sid);
+            }
+        }
+
+        AgentCommand::AcquireInput {
+            agent_id,
+            request_id,
+        } => {
+            // lease 비었으면 획득(Ack) + InputLeaseChanged{held:true} 브로드캐스트. 같은 conn 재획득은
+            // 멱등(Ack, 상태 변경 없음 → 브로드캐스트 생략). 타 conn 보유면 Error.
+            match multiview.acquire(agent_id, conn_id) {
+                Ok(true) => {
+                    broadcast_lease_changed(registry, agent_id, true);
+                    reply(conn_tx, request_id, Ok(())).await;
+                }
+                Ok(false) => reply(conn_tx, request_id, Ok(())).await, // idempotent
+                Err(()) => {
+                    reply(
+                        conn_tx,
+                        request_id,
+                        Err("input held by another viewer".to_string()),
+                    )
+                    .await
+                }
+            }
+        }
+
+        AgentCommand::ReleaseInput {
+            agent_id,
+            request_id,
+        } => {
+            // 보유자만 해제 가능. 해제 시 InputLeaseChanged{held:false} 브로드캐스트. 원래 비어 있었으면
+            // 멱등(Ack). 타 conn 이 보유 중이면 Error(남의 lease 를 뺏지 못함).
+            match multiview.release(agent_id, conn_id) {
+                Ok(true) => {
+                    broadcast_lease_changed(registry, agent_id, false);
+                    reply(conn_tx, request_id, Ok(())).await;
+                }
+                Ok(false) => reply(conn_tx, request_id, Ok(())).await, // 원래 비어 있음
+                Err(()) => {
+                    reply(
+                        conn_tx,
+                        request_id,
+                        Err("input lease held by another viewer".to_string()),
+                    )
+                    .await
+                }
             }
         }
 
@@ -1090,6 +1370,16 @@ async fn handle_subscribe(
         epoch: current_epoch,
     }) {
         let _ = conn_tx.send(WsOutbound::Text(text)).await;
+    }
+}
+
+/// 입력 lease 상태 변경을 전 연결에 브로드캐스트(다른 뷰어가 "잠김/해제" 를 알게). 보유자 식별값은
+/// 노출하지 않고 held(bool) 만 — §5(LLM 도 leaseholder 변화를 관측 가능). registry 의 try_send 라
+/// pump/cleanup 등 어느 컨텍스트에서 불려도 안전(block 없음).
+fn broadcast_lease_changed(registry: &ConnRegistry, agent_id: AgentId, held: bool) {
+    let ev = AgentEvent::InputLeaseChanged { agent_id, held };
+    if let Some(text) = event_json(&ev) {
+        registry.broadcast_text(text);
     }
 }
 

@@ -354,6 +354,28 @@ async fn expect_closed_within(c: &mut Client, deadline: Duration) -> bool {
     c.expect_closed_within(deadline).await
 }
 
+/// 협상된 PTY 크기 검증용: manager 의 AgentInfo(cols/rows)가 (cols,rows)가 될 때까지 폴링.
+/// ★resize 는 비동기(WS → read_task → dispatch → manager)라 즉시 반영이 아니다★ → 폴링한다.
+/// AgentInfo 가 cols/rows 를 노출하므로(agent_info_to_wire) manager.list_agents 로 직접 확인 가능.
+async fn wait_for_size(handle: &TestServerHandle, id: Uuid, cols: u16, rows: u16) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let got = handle
+            .manager
+            .list_agents()
+            .into_iter()
+            .find(|a| a.id == id)
+            .map(|a| (a.cols, a.rows));
+        if got == Some((cols, rows)) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // ── 서버 헬퍼 ──────────────────────────────────────────────────────────────────────
 
 /// 결정적 출력을 위해 interactive `cmd.exe` 를 직접 띄운다(/c 없이 — 살아있는 셸).
@@ -1532,6 +1554,237 @@ async fn case29_keepalive_active_client_survives() {
             .await,
         "정상 활성 클라는 keepalive(자동 Pong)로 idle_timeout 을 넘지 않아 끊기면 안 됨"
     );
+
+    server.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 멀티뷰어: resize 협상(tmux smallest) + 입력 lease(Zellij 명시 lease).
+//   두 연결로 같은 agent 를 동시 attach 한 상황을 시뮬한다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+// ── 케이스 30: resize 협상 — 두 viewport 의 smallest 로 PTY, detach 후 재협상 ──────────
+#[tokio::test]
+async fn case30_multiviewer_resize_smallest_and_renegotiate() {
+    let server = start_test_server().await.unwrap();
+    let id = spawn_shell_agent(&server);
+
+    // 연결1: viewport "a" → (80,40).
+    let mut c1 = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c1).await;
+    c1.send(&WireCommand::Resize {
+        agent_id: id,
+        cols: 80,
+        rows: 40,
+        viewport_id: Some("a".into()),
+    })
+    .await;
+    // viewport 하나뿐이면 그 크기가 곧 협상값.
+    assert!(
+        wait_for_size(&server, id, 80, 40).await,
+        "viewport a 단독이면 (80,40)"
+    );
+
+    // 연결2: viewport "b" → (40,20). 두 뷰어 중 smallest = (40,20) 로 PTY 가 맞춰져야 한다.
+    let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c2).await;
+    c2.send(&WireCommand::Resize {
+        agent_id: id,
+        cols: 40,
+        rows: 20,
+        viewport_id: Some("b".into()),
+    })
+    .await;
+    assert!(
+        wait_for_size(&server, id, 40, 20).await,
+        "두 viewport(a=80x40, b=40x20)의 smallest = (40,20)"
+    );
+
+    // 연결2 끊김 → 그 viewport 가 빠지고 남은 a 기준 (80,40) 으로 재협상(복귀).
+    drop(c2);
+    assert!(
+        wait_for_size(&server, id, 80, 40).await,
+        "viewport b 의 연결이 끊기면 남은 a 기준 (80,40) 으로 재협상 복귀"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 31: resize 하위호환 — viewport_id 없으면 협상 우회(직접 그 크기) ─────────────
+#[tokio::test]
+async fn case31_resize_no_viewport_id_bypasses_negotiation() {
+    let server = start_test_server().await.unwrap();
+    let id = spawn_shell_agent(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+    // viewport_id=None(v1 프론트 기본) → 협상 없이 그 크기로 직접.
+    c.send(&WireCommand::Resize {
+        agent_id: id,
+        cols: 120,
+        rows: 50,
+        viewport_id: None,
+    })
+    .await;
+    assert!(
+        wait_for_size(&server, id, 120, 50).await,
+        "viewport_id 없으면 그 크기로 직접 resize(하위호환)"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 32: 입력 lease — 보유 중 타 연결 WriteStdin 거부, 해제 후 통과 ───────────────
+#[tokio::test]
+async fn case32_input_lease_locks_other_viewer() {
+    let server = start_test_server().await.unwrap();
+    let id = spawn_shell_agent(&server);
+
+    let mut c1 = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c1).await;
+    let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c2).await;
+
+    // 연결1 이 lease 획득 → Ack.
+    let req_acq = RequestId::new();
+    c1.send(&WireCommand::AcquireInput {
+        agent_id: id,
+        request_id: req_acq,
+    })
+    .await;
+    c1.await_ack(req_acq).await;
+
+    // 연결2 WriteStdin → lease 가 c1 에 잠겨 있어 Error.
+    let req_w2 = RequestId::new();
+    c2.send(&WireCommand::WriteStdin {
+        agent_id: id,
+        data: b"echo BLOCKED\r\n".to_vec(),
+        request_id: req_w2,
+    })
+    .await;
+    let msg = c2.await_error(req_w2).await;
+    assert!(
+        msg.contains("locked by another viewer"),
+        "lease 보유 중 타 연결 WriteStdin 은 locked Error 여야: {msg}"
+    );
+
+    // 보유자(c1) WriteStdin 은 통과(Ack).
+    let req_w1 = RequestId::new();
+    c1.send(&WireCommand::WriteStdin {
+        agent_id: id,
+        data: b"echo HOLDER_OK\r\n".to_vec(),
+        request_id: req_w1,
+    })
+    .await;
+    c1.await_ack(req_w1).await;
+
+    // c1 이 ReleaseInput → 이후 c2 WriteStdin 통과.
+    let req_rel = RequestId::new();
+    c1.send(&WireCommand::ReleaseInput {
+        agent_id: id,
+        request_id: req_rel,
+    })
+    .await;
+    c1.await_ack(req_rel).await;
+
+    let req_w2b = RequestId::new();
+    c2.send(&WireCommand::WriteStdin {
+        agent_id: id,
+        data: b"echo NOW_OK\r\n".to_vec(),
+        request_id: req_w2b,
+    })
+    .await;
+    c2.await_ack(req_w2b).await;
+
+    server.shutdown().await;
+}
+
+// ── 케이스 33: 보유자 연결 끊기면 lease 자동 해제(좀비 lock 방지) ───────────────────────
+#[tokio::test]
+async fn case33_input_lease_auto_released_on_disconnect() {
+    let server = start_test_server().await.unwrap();
+    let id = spawn_shell_agent(&server);
+
+    let mut c1 = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c1).await;
+    let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c2).await;
+
+    // c1 이 lease 획득.
+    let req_acq = RequestId::new();
+    c1.send(&WireCommand::AcquireInput {
+        agent_id: id,
+        request_id: req_acq,
+    })
+    .await;
+    c1.await_ack(req_acq).await;
+
+    // c1 끊김 → cleanup 이 lease 자동 해제해야 한다(보유자 사망 시 다른 뷰어가 영영 막히면 안 됨).
+    drop(c1);
+
+    // c2 가 acquire 시도 → 끊긴 보유자 lease 가 풀렸으므로 성공해야 한다.
+    //   끊김 cleanup 이 비동기라 즉시 반영 아님 → 재시도 폴링.
+    let mut acquired = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        let req = RequestId::new();
+        c2.send(&WireCommand::AcquireInput {
+            agent_id: id,
+            request_id: req,
+        })
+        .await;
+        // Ack 또는 Error 중 무엇이 오는지 본다.
+        let mut got = None;
+        let inner = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < inner {
+            match c2.next().await {
+                Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
+                    got = Some(true);
+                    break;
+                }
+                Some(Incoming::Event(AgentEvent::Error {
+                    request_id: Some(rid),
+                    ..
+                })) if rid == req => {
+                    got = Some(false);
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        if got == Some(true) {
+            acquired = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        acquired,
+        "보유자(c1) 끊김 후 c2 가 lease 를 획득할 수 있어야(좀비 lock 자동 해제)"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 34: lease 없을 때 WriteStdin 자유 통과(case14 회귀 — 단일 뷰어 마찰 0) ───────
+#[tokio::test]
+async fn case34_no_lease_write_stdin_passes_freely() {
+    let server = start_test_server().await.unwrap();
+    let id = spawn_shell_agent(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    // lease 를 잡지 않은 상태에서 WriteStdin → 자유 통과(Ack). 단일 뷰어 흔한 경우.
+    let req = RequestId::new();
+    c.send(&WireCommand::WriteStdin {
+        agent_id: id,
+        data: b"echo FREE\r\n".to_vec(),
+        request_id: req,
+    })
+    .await;
+    c.await_ack(req).await;
 
     server.shutdown().await;
 }

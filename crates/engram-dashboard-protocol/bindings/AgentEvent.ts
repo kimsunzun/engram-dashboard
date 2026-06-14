@@ -22,4 +22,4 @@ replay_from: number,
 /**
  * ring 밖으로 밀려 일부 손실(clear+tail). UI "output truncated" 표시.
  */
-truncated: boolean, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "Error": { request_id: RequestId | null, message: string, } };
+truncated: boolean, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "Error": { request_id: RequestId | null, message: string, } };

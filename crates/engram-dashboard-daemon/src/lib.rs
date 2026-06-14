@@ -25,7 +25,7 @@ use engram_dashboard_protocol::PROTOCOL_VERSION;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use ws::{ConnRegistry, DaemonStatusSink, KeepaliveConfig};
+use ws::{ConnRegistry, DaemonStatusSink, KeepaliveConfig, MultiViewState};
 
 const DAEMON_FILE: &str = "daemon.json";
 
@@ -160,6 +160,7 @@ async fn run_accept_loop(
     listener: TcpListener,
     manager: Arc<AgentManager>,
     registry: ConnRegistry,
+    multiview: MultiViewState,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -174,6 +175,7 @@ async fn run_accept_loop(
                         tracing::debug!(%peer, "연결 수락 — WS 핸들러로 넘김");
                         let manager = manager.clone();
                         let registry = registry.clone();
+                        let multiview = multiview.clone();
                         let expected_token = expected_token.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
@@ -182,6 +184,7 @@ async fn run_accept_loop(
                                 peer,
                                 manager,
                                 registry,
+                                multiview,
                                 expected_token,
                                 shutdown_tx,
                                 keepalive,
@@ -291,6 +294,8 @@ pub async fn run() -> Result<(), i32> {
 
     // 5) 연결 레지스트리(status 브로드캐스트용) — DaemonStatusSink 와 accept loop 가 공유한다.
     let registry = ConnRegistry::new();
+    // 5b) 멀티뷰어 협상 상태(resize smallest + 입력 lease) — 전 연결이 공유한다.
+    let multiview = MultiViewState::new();
 
     // 6) AgentManager 배선(src-tauri 미러). status_sink = DaemonStatusSink(registry).
     let manager = build_manager(&data_dir, registry.clone());
@@ -339,6 +344,7 @@ pub async fn run() -> Result<(), i32> {
         listener,
         manager.clone(),
         registry,
+        multiview,
         expected_token,
         shutdown_tx,
         shutdown_rx,
@@ -440,6 +446,7 @@ async fn start_test_server_inner(
     let expected_token = Arc::new(token.clone());
 
     let registry = ConnRegistry::new();
+    let multiview = MultiViewState::new();
     let manager = build_manager_with_store(store, registry.clone());
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -451,6 +458,7 @@ async fn start_test_server_inner(
                 listener,
                 manager,
                 registry,
+                multiview,
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,

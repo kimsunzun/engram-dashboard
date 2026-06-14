@@ -67,6 +67,19 @@ pub enum AgentCommand {
         #[ts(type = "string")]
         agent_id: AgentId,
     },
+    /// 입력 lease 획득 요청(다중 뷰어 입력 충돌 방지, Zellij 명시 lease 모델). lease 가 비었으면
+    /// 이 연결이 입력 권한을 잡는다. 이미 다른 연결이 보유하면 Error. §5: LLM 도 이 명령으로 권한을 쥔다.
+    AcquireInput {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        request_id: RequestId,
+    },
+    /// 입력 lease 해제. 보유자만 해제할 수 있다(보유자 아니면 Error). 해제 후엔 누구나 다시 acquire 가능.
+    ReleaseInput {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        request_id: RequestId,
+    },
     /// 전체 에이전트 목록 조회(연결 직후 데몬이 자동 push 도 하지만 명시 조회도 허용).
     ListAgents,
     /// 데몬 종료(§5 LLM 제어). force=true 면 활성 에이전트 있어도 종료, kill_agents=true 면 함께 정리.
@@ -132,6 +145,13 @@ pub enum AgentEvent {
     AgentListUpdated { agents: Vec<AgentInfo> },
     /// 복원 시도 결과.
     RestoreResult { report: RestoreReport },
+    /// 입력 lease 상태 변경 통보(다중 뷰어가 "지금 잠겨있음"을 알게 함). held=true 면 누군가 보유 중,
+    /// false 면 비어 있음(아무나 acquire 가능). 보유자 conn 식별값은 보안상 노출하지 않는다(잠김 여부만).
+    InputLeaseChanged {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        held: bool,
+    },
     /// 오류 통지. request_id 있으면 특정 command 실패.
     Error {
         request_id: Option<RequestId>,
