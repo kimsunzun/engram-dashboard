@@ -17,5 +17,6 @@ pub use windows::JobObjectHandle;
 mod process;
 
 pub use process::{
-    current_process_start_time, pid_alive, pid_alive_with_start_time, process_creation_time,
+    child_pids, current_process_start_time, pid_alive, pid_alive_with_start_time,
+    process_creation_time,
 };

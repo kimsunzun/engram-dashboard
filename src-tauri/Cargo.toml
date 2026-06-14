@@ -41,4 +41,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Variant",
 ] }
 
+# real_wmi_spawn_smoke(#[ignore] 통합테스트)에서 운영 data_dir(%APPDATA%) 경로 산출에만 사용.
+# 운영 코드는 data_dir 을 호출자(lib.rs)가 주입하므로 dev-dependency 로 충분(런타임 의존 0).
+[dev-dependencies]
+dirs = "6"
+
 # profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).

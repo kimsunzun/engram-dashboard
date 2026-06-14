@@ -31,14 +31,30 @@ const DAEMON_FILE: &str = "daemon.json";
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
-/// 데이터 디렉토리 결정: `dirs::data_dir().join("com.engram.dashboard")`.
+/// data_dir override 환경변수 이름. 설정 시 그 경로를 data_dir 로 그대로 쓴다.
 ///
-/// ★Embedded 일치★: 이 경로는 src-tauri/tauri.conf.json 의 identifier(com.engram.dashboard)와
-/// Tauri app_data_dir 규약에 맞춰야 한다. Tauri 의 app_data_dir() 은 Windows 에서
-/// RoamingAppData(`%APPDATA%`)\<identifier> 를 반환하고, `dirs::data_dir()` 도 동일한
-/// RoamingAppData 를 반환하므로 둘이 바이트 단위로 일치한다. 바뀌면 Embedded 와 어긋나
-/// 같은 agents.json/daemon.json 을 못 보게 된다.
+/// ★용도: 실프로세스 격리테스트★. stale daemon.json discovery 같은 테스트는 실제 데몬 .exe 를
+/// 띄워 daemon.json 발행/덮어쓰기를 검증하는데, 운영 기본 경로(`%APPDATA%\com.engram.dashboard`)를
+/// 건드리면 실제 환경을 오염시킨다. 이 env 로 임시 디렉토리를 가리키게 해 격리한다.
+/// ★운영 회귀 0★: env 미설정 시 기존 `dirs::data_dir()` 경로를 그대로 쓴다(아래 분기).
+const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
+
+/// 데이터 디렉토리 결정. 우선 `ENGRAM_DATA_DIR`(테스트 격리용 override), 없으면
+/// `dirs::data_dir().join("com.engram.dashboard")`.
+///
+/// ★Embedded 일치★: override 미설정 시 이 경로는 src-tauri/tauri.conf.json 의
+/// identifier(com.engram.dashboard)와 Tauri app_data_dir 규약에 맞춰야 한다. Tauri 의
+/// app_data_dir() 은 Windows 에서 RoamingAppData(`%APPDATA%`)\<identifier> 를 반환하고,
+/// `dirs::data_dir()` 도 동일한 RoamingAppData 를 반환하므로 둘이 바이트 단위로 일치한다. 바뀌면
+/// Embedded 와 어긋나 같은 agents.json/daemon.json 을 못 보게 된다.
 fn resolve_data_dir() -> PathBuf {
+    // 1) 테스트 격리 override — 비어있지 않은 값이 설정돼 있으면 그 경로를 그대로 사용.
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    // 2) 운영 기본(회귀 0) — 기존 동작 그대로.
     match dirs::data_dir() {
         Some(base) => base.join("com.engram.dashboard"),
         None => {
@@ -430,12 +446,35 @@ mod tests {
 
     // (적용4-3) resolve_data_dir 가 identifier(com.engram.dashboard)로 끝나는지 — Embedded
     //   app_data_dir 과 같은 폴더를 가리키는 불변식. 어긋나면 두 모드가 다른 agents.json 을 본다.
+    //
+    // ★env override 와 기본 동작을 한 테스트에서 검증★: ENGRAM_DATA_DIR 은 프로세스 전역 상태라
+    //   별도 테스트로 나누면 병렬 실행 시 경합한다. set→확인→remove→확인 을 한 흐름에서 직렬로 한다.
+    //   (테스트 끝에서 반드시 remove 해 다른 테스트로 새지 않게 한다.)
     #[test]
-    fn resolve_data_dir_ends_with_identifier() {
-        let dir = resolve_data_dir();
+    fn resolve_data_dir_env_override_and_default() {
+        // 1) 운영 기본(override 미설정) — identifier 로 끝나야(Embedded 일치).
+        std::env::remove_var(DATA_DIR_ENV);
+        let default_dir = resolve_data_dir();
         assert!(
-            dir.ends_with("com.engram.dashboard"),
-            "data_dir 은 identifier 로 끝나야(Embedded 일치): {dir:?}"
+            default_dir.ends_with("com.engram.dashboard"),
+            "override 미설정 시 identifier 로 끝나야(운영 회귀 0): {default_dir:?}"
         );
+
+        // 2) override 설정 — 그 경로를 그대로 사용(identifier 미부착).
+        let custom = std::env::temp_dir().join("engram-data-dir-override-test");
+        std::env::set_var(DATA_DIR_ENV, &custom);
+        let overridden = resolve_data_dir();
+        assert_eq!(overridden, custom, "override 설정 시 그 경로를 그대로 사용");
+
+        // 3) 빈 값은 무시하고 기본으로 폴백(빈 env 가 의도치 않게 cwd 를 가리키지 않게).
+        std::env::set_var(DATA_DIR_ENV, "");
+        let empty_fallback = resolve_data_dir();
+        assert!(
+            empty_fallback.ends_with("com.engram.dashboard"),
+            "빈 override 는 무시하고 운영 기본으로 폴백: {empty_fallback:?}"
+        );
+
+        // 정리 — 다른 테스트로 새지 않게 반드시 제거.
+        std::env::remove_var(DATA_DIR_ENV);
     }
 }

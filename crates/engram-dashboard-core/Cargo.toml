@@ -23,4 +23,5 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp", # child_pids: 프로세스 트리 열거(실프로세스 격리테스트용)
 ] }

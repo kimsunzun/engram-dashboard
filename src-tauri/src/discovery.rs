@@ -1017,11 +1017,94 @@ mod tests {
         assert!(matches!(err, DiscoveryError::ExeNotFound(_)), "{err:?}");
     }
 
-    // 실제 WMI spawn 은 실프로세스 — 단위 불가. 수동/통합 확인용.
+    // ── 실제 WMI spawn smoke(실프로세스) — `-- --ignored` 로 실행(Windows 전용) ───────────
+    //
+    // 검증: locate_daemon_exe 로 빌드된 데몬 .exe 를 찾아 WMI Win32_Process.Create 로 실제 spawn →
+    //   RV==0(성공) → 데몬이 daemon.json 을 발행하는지 폴링으로 회수 → 그 데몬을 정리(kill).
+    //
+    // ★운영 daemon.json 오염 방지★: WMI Create 는 자식에 env 주입이 불가(설계 확정)하므로 spawn 된
+    //   데몬은 운영 기본 data_dir(%APPDATA%\com.engram.dashboard)를 본다. ENGRAM_DATA_DIR 격리가
+    //   WMI 경로엔 닿지 않는다(한계). 그래서 테스트는 (1) 기존 운영 daemon.json 을 백업하고,
+    //   (2) ★기존 데몬이 살아있으면 단일-인스턴스 mutex 로 우리 spawn 이 거부돼 검증이 무의미하므로
+    //   그 경우 테스트를 skip(return)★ 하며, (3) 끝에서 우리가 띄운 데몬을 kill 하고 백업을 복원한다.
+    //
+    // 한계(은폐 금지): 이 smoke 는 운영 data_dir 을 건드리므로(백업/복원으로 최소화하나 완전 격리는
+    //   아님) CI 보다는 로컬 수동 검증용이다. 기존 살아있는 데몬이 있으면 skip 된다.
+    #[cfg(windows)]
     #[test]
-    #[ignore = "실제 WMI Win32_Process.Create — 데몬 exe 필요(수동 통합)"]
+    #[ignore = "실제 WMI Win32_Process.Create — 데몬 exe 필요(수동 통합, Windows 전용)"]
     fn real_wmi_spawn_smoke() {
-        let exe = locate_daemon_exe().expect("daemon exe");
-        wmi_spawn(&exe).expect("WMI spawn");
+        let exe = locate_daemon_exe().expect("daemon exe — 먼저 `cargo build` 필요");
+        let exe_abs = dunce::canonicalize(&exe).expect("exe canonicalize");
+
+        // 운영 data_dir/daemon.json 경로.
+        let data_dir = dirs::data_dir()
+            .expect("data_dir")
+            .join("com.engram.dashboard");
+        std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
+        let daemon_path = data_dir.join(DAEMON_FILE);
+
+        // (1) 기존 daemon.json 백업(있으면) + 살아있는 데몬이면 skip.
+        let backup = std::fs::read(&daemon_path).ok();
+        if let Some(bytes) = &backup {
+            if let Ok(prev) = DaemonInfo::parse(bytes) {
+                if !RealLiveness.is_dead(prev.pid, prev.start_time) {
+                    eprintln!(
+                        "real_wmi_spawn_smoke: 기존 데몬(pid={})이 살아있어 단일-인스턴스로 spawn 이 \
+                         거부됨 — 검증 무의미하므로 skip",
+                        prev.pid
+                    );
+                    return;
+                }
+            }
+        }
+        // stale 또는 부재 → 우리 데몬이 발행할 수 있게 비운다(데몬도 stale 이면 덮어쓰지만 명확히).
+        let _ = std::fs::remove_file(&daemon_path);
+
+        // (2) 실제 WMI spawn — RV==0 이어야 성공.
+        wmi_spawn(&exe_abs).expect("WMI Win32_Process.Create 성공(RV=0)");
+
+        // (3) 데몬이 daemon.json 을 발행하는지 폴링 회수.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut spawned: Option<DaemonInfo> = None;
+        while Instant::now() < deadline {
+            if let Ok(bytes) = std::fs::read(&daemon_path) {
+                if let Ok(info) = DaemonInfo::parse(&bytes) {
+                    // 우리가 띄운 살아있는 데몬인지 확인(stale 잔존 아님).
+                    if !RealLiveness.is_dead(info.pid, info.start_time) {
+                        spawned = Some(info);
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // (4) 정리 — 우리가 띄운 데몬 kill(taskkill /F) + daemon.json 백업 복원.
+        let result = spawned.clone();
+        if let Some(info) = &spawned {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &info.pid.to_string(), "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        // 백업 복원(있었으면) 또는 우리 임시 파일 제거.
+        match backup {
+            Some(bytes) => {
+                let _ = std::fs::write(&daemon_path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&daemon_path);
+            }
+        }
+
+        // 단언: 데몬이 실제로 떠 daemon.json 을 발행했고, 그 PID 가 (kill 전엔) 살아있었다.
+        let info = result.expect("WMI spawn 한 데몬이 daemon.json 을 발행해야");
+        assert!(info.port != 0, "spawn 한 데몬은 유효 포트 발행");
+        assert_eq!(
+            info.protocol_version, PROTOCOL_VERSION,
+            "spawn 한 데몬의 protocol_version 일치"
+        );
     }
 }

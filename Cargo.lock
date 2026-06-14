@@ -877,6 +877,7 @@ name = "engram-dashboard"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "dirs",
  "dunce",
  "engram-dashboard-core",
  "engram-dashboard-protocol",

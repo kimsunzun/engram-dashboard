@@ -1502,61 +1502,416 @@ fn assert_seq_contiguous_from_zero(seqs: &[u64]) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// 실프로세스 전용 케이스 (#[ignore]) — in-process 로는 검증 불가, 수동 실행.
+// 실프로세스 전용 케이스 (#[cfg(windows)] + #[ignore]) — in-process 로는 검증 불가.
 //
 // 아래는 실제 데몬 .exe / OS Job Object / named mutex / 파일시스템 discovery 가 필요해
-// in-process 서버로는 재현할 수 없다. 기본 `cargo test` 에서 제외(#[ignore])하고, 수동으로
+// in-process 서버로는 재현할 수 없다(데몬을 진짜 별도 프로세스로 띄워야만 인과가 성립).
+// 기본 `cargo test` 에서는 제외(#[ignore] — 실 OS·느림)하고, 다음으로 돌린다:
 //   cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture
-// 로 돌린다. ★현재는 스캐폴드(미구현)★ — 실제 .exe 기동/검증 로직은 후속 단위에서 채운다.
-// 은폐 금지: 이 경로들은 지금 자동 검증되지 않음을 명시한다.
+//
+// ★Step7 구현 완료★: 세 케이스 모두 실제 데몬 .exe 를 spawn 해 검증한다(이전 unimplemented! RED →
+// 이제 GREEN). 각 테스트는 ENGRAM_DATA_DIR 로 임시 data_dir 을 격리해 운영 환경(%APPDATA%)을
+// 오염시키지 않으며, 끝에서 데몬·자식 프로세스 kill + 임시 디렉토리 삭제로 자원 누수 0.
+//
+// ★Windows 전용★: 데몬은 Windows 1차. named mutex/Job Object/child_pids 가 Windows 구현이라
+//   #[cfg(windows)] 로 한정한다(다른 OS 에선 컴파일 자체에서 제외 — 위장 PASS 없음).
 // ══════════════════════════════════════════════════════════════════════════════════
 
-/// 데몬 .exe kill → PTY child(자식 프로세스)가 Job(KILL_ON_JOB_CLOSE)으로 동반 정리되는지.
-/// 검증법(수동): 데몬 .exe 를 spawn → WS 로 shell agent spawn → 자식 PID 기록 →
-///   데몬 프로세스를 TerminateProcess → 자식 PID 가 사라지는지 폴링.
-#[tokio::test]
-#[ignore = "실프로세스/Job 필요 — 수동 실행(미구현)"]
-async fn ignored_daemon_kill_cleans_pty_child() {
-    // ★위장 금지(M2)★: 빈 body 면 `--ignored` 실행 시 PASS 로 집계돼 "검증됨"으로 오인된다.
-    // unimplemented! 로 두어 실행 시 panic(RED) 이 나게 한다 — 미구현이 통과로 둔갑하지 않게.
-    //
-    // 무엇을: 데몬 .exe 를 별도 OS 프로세스로 spawn → WS 로 shell agent spawn → 그 PTY 자식 PID
-    //   기록 → 데몬 프로세스를 TerminateProcess → 자식 PID 가 함께 사라지는지(KILL_ON_JOB_CLOSE) 폴링.
-    // 왜 실프로세스: in-process 서버는 데몬과 같은 프로세스라 "데몬 프로세스 종료 → Job 핸들 close →
-    //   자식 동반 사망" 의 인과를 재현할 수 없다(같은 프로세스를 죽이면 테스트 자신이 죽음).
-    // 언제: phase 2 step 7(실 .exe 기동 하네스 bin) 에서 데몬 바이너리 spawn 유틸과 함께 구현.
-    unimplemented!("Step6 후속: 데몬 .exe kill→PTY 자식 Job 동반 정리 — 실프로세스/Job 필요");
-}
+#[cfg(windows)]
+mod real_process {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command};
 
-/// single-instance: 두 번째 데몬 .exe 기동이 named mutex 로 거부(정상 종료 + daemon.json 미덮어쓰기)되는지.
-/// 검증법(수동): 데몬 A 기동 → 데몬 B 기동 → B 가 즉시 종료(exit 0)하고 A 의 daemon.json 이 보존되는지.
-#[tokio::test]
-#[ignore = "실프로세스 2개 필요 — 수동 실행(미구현)"]
-async fn ignored_single_instance_second_rejected() {
-    // ★위장 금지(M2)★: unimplemented! 로 두어 `--ignored` 실행 시 panic(RED). 빈 body 면 PASS 둔갑.
-    //
-    // 무엇을: 데몬 A 를 .exe 로 기동 → 데몬 B 를 .exe 로 기동 → B 가 named mutex 로 거부돼 즉시
-    //   정상 종료(exit 0)하고 A 의 daemon.json 이 보존(미덮어쓰기)되는지 확인.
-    // 왜 실프로세스: single-instance 가드는 named mutex 로 구현되는데, 같은 프로세스 안에서는
-    //   mutex 재획득이 막히는 의미가 없다(다른 OS 프로세스라야 단일성 검증이 성립).
-    // 언제: phase 2 step 7 에서 데몬 .exe 2회 기동 하네스로 구현.
-    unimplemented!("Step6 후속: 두 번째 데몬 .exe 가 named mutex 로 거부 — 실프로세스 2개 필요");
-}
+    use engram_dashboard_protocol::DaemonInfo;
 
-/// stale daemon.json + discovery spawn(Step5 real_wmi_spawn_smoke 연계).
-/// 검증법(수동): stale(죽은 PID) daemon.json 을 둔 뒤 데몬 .exe 기동 → 덮어쓰고 새 토큰/포트 발행되는지.
-#[tokio::test]
-#[ignore = "실프로세스 + 파일시스템 discovery 필요 — 수동 실행(미구현)"]
-async fn ignored_stale_daemon_json_discovery() {
-    // ★위장 금지(M2)★: unimplemented! 로 두어 `--ignored` 실행 시 panic(RED). 빈 body 면 PASS 둔갑.
+    /// 데몬 바이너리 절대경로(cargo 가 통합테스트에 주입). 실제 빌드된 .exe.
+    const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
+
+    /// 테스트별 고유 격리 컨텍스트. data_dir(ENGRAM_DATA_DIR)·instance_key(ENGRAM_INSTANCE_KEY)를
+    /// 함께 묶어 데몬에 주입한다. 둘 다 유니크하면 데몬이 ★data_dir·mutex 모두 독립★이라 cargo 의
+    /// 병렬 실행에서도 다른 테스트 데몬과 충돌하지 않는다(USERNAME Global mutex 공유가 flaky 원인이었음).
+    struct IsoCtx {
+        data_dir: PathBuf,
+        instance_key: String,
+    }
+
+    /// 테스트마다 고유한 임시 data_dir + instance_key 생성(이전 잔여 정리). nanos + 테스트명 + 카운터로
+    /// 유니크 — 병렬 실행 충돌 없음. ENGRAM_DATA_DIR/ENGRAM_INSTANCE_KEY 로 데몬에 주입해 운영
+    /// %APPDATA% 와 운영 USERNAME mutex 를 둘 다 건드리지 않는다.
+    fn fresh_iso(tag: &str) -> IsoCtx {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // 같은 나노초에 두 번 불려도 충돌하지 않게 프로세스 내 단조 카운터를 섞는다.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let uniq = format!("{tag}-{nanos}-{n}");
+        let dir = std::env::temp_dir().join(format!("engram-step7-{uniq}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp data_dir 생성");
+        IsoCtx {
+            data_dir: dir,
+            instance_key: format!("step7-{uniq}"),
+        }
+    }
+
+    /// 주어진 격리 컨텍스트로 데몬 .exe 를 별도 OS 프로세스로 spawn.
+    /// ENGRAM_DATA_DIR override 로 daemon.json/agents.json 을 임시 디렉토리에 쓰게 하고,
+    /// ENGRAM_INSTANCE_KEY override 로 단일 인스턴스 mutex 를 테스트별로 격리한다.
+    /// ★stderr 캡처(진단)★: 데몬이 왜 daemon.json 을 못 쓰는지(mutex 거부? data_dir? panic?)를
+    ///   실패 시 인용할 수 있도록 stderr 를 piped 로 받고 RUST_LOG=info 로 진단 로그를 켠다.
+    ///   (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
+    fn spawn_daemon_iso(ctx: &IsoCtx) -> Child {
+        spawn_daemon_with_key(&ctx.data_dir, &ctx.instance_key)
+    }
+
+    /// data_dir + instance_key 를 명시 주입하는 spawn(단일인스턴스 테스트가 같은 key 2개를 띄울 때 사용).
+    fn spawn_daemon_with_key(data_dir: &Path, instance_key: &str) -> Child {
+        Command::new(DAEMON_EXE)
+            .env("ENGRAM_DATA_DIR", data_dir)
+            .env("ENGRAM_INSTANCE_KEY", instance_key)
+            // 진단용: info 레벨로 "데몬 시작/이미 실행 중/stale 덮어씀" 등 진단 로그를 받는다.
+            .env("RUST_LOG", "info")
+            .stdin(std::process::Stdio::null())
+            // ★stdout 캡처(진단)★: core 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
+            //   daemon.json 을 못 쓰는지(mutex 거부? data_dir? panic?)를 실패 시 인용하려고 stdout 을
+            //   piped 로 받는다. (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("데몬 .exe spawn")
+    }
+
+    /// 실행 중/종료된 데몬의 진단 로그(stdout+stderr)를 비차단으로 회수(진단 인용용). 핸들을 take 해
+    /// 끝까지 읽는다 — 호출 전 데몬이 이미 종료했거나(EOF) kill 됐어야 블록되지 않는다.
+    /// tracing fmt 는 stdout 으로 쓰므로 stdout 이 주된 출처다(stderr 는 패닉 백트레이스 등 보조).
+    fn drain_logs(child: &mut Child) -> String {
+        use std::io::Read;
+        let mut buf = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut buf);
+        }
+        if let Some(mut err) = child.stderr.take() {
+            let mut e = String::new();
+            let _ = err.read_to_string(&mut e);
+            if !e.is_empty() {
+                buf.push_str("\n--- stderr ---\n");
+                buf.push_str(&e);
+            }
+        }
+        buf
+    }
+
+    /// daemon.json 이 써질 때까지 폴링해 DaemonInfo 회수. deadline 초과면 None.
+    fn poll_daemon_json(data_dir: &Path, deadline: std::time::Duration) -> Option<DaemonInfo> {
+        let path = data_dir.join("daemon.json");
+        let end = std::time::Instant::now() + deadline;
+        while std::time::Instant::now() < end {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if let Ok(info) = DaemonInfo::parse(&bytes) {
+                    return Some(info);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        None
+    }
+
+    /// 특정 조건(predicate)이 참이 될 때까지 폴링(true 반환). deadline 초과면 false.
+    fn poll_until(deadline: std::time::Duration, mut pred: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + deadline;
+        while std::time::Instant::now() < end {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        pred()
+    }
+
+    /// 데몬 프로세스를 확실히 종료(kill + wait). 정리 경로에서 호출(누수 0).
+    fn kill_daemon(child: &mut Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// auto_restore=true 인 cmd.exe shell 프로필 1개를 담은 agents.json 을 data_dir 에 써둔다.
+    /// 데몬이 부팅 시 restore_all 로 이 프로필을 복원 → 살아있는 PTY child(cmd.exe)를 만든다.
+    /// ShellBackend 는 program/args 를 그대로 PTY 에 싣는다(shim 래핑 없음) → cmd.exe 가 데몬의
+    /// 직계 자식이 되어 child_pids(daemon_pid) 로 식별 가능하다.
+    ///
+    /// ★왜 agents.json 직접 작성★: WS 프로토콜에는 프로필 생성(CRUD)이 아직 없어(messages.rs)
+    ///   WS Spawn 만으로는 실프로세스 데몬에 새 프로필을 만들 수 없다. 데몬의 부팅 복원 경로
+    ///   (restore_all)를 통해 살아있는 PTY child 를 띄우는 것이 현 프로토콜에서 가능한 길이다.
+    ///   FileProfileStore 의 디스크 포맷({schema_version, profiles})에 맞춰 직접 직렬화한다.
+    fn write_restorable_shell_agents_json(data_dir: &Path) {
+        // FileProfileStore::SCHEMA_VERSION == 1 (persistence/mod.rs). 형태 고정(회귀 시 감지).
+        let profile = AgentProfile::new(
+            "step7-restore-shell".into(),
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            true, // auto_restore=true → 부팅 복원 대상
+        );
+        // ProfilesFile 은 비공개 구조라 동등한 JSON 을 직접 만든다(schema_version=1 + profiles 배열).
+        let profiles_json = serde_json::to_string(&[profile]).expect("profile 직렬화");
+        let file = format!("{{\"schema_version\":1,\"profiles\":{profiles_json}}}");
+        std::fs::write(data_dir.join("agents.json"), file).expect("agents.json 작성");
+    }
+
+    // ── case1: 데몬 .exe kill → PTY child(cmd.exe) Job(KILL_ON_JOB_CLOSE) 동반 정리 ──────
     //
-    // 무엇을: stale(죽은 PID) daemon.json 을 data_dir 에 둔 뒤 데몬 .exe 기동 → 그 파일을 덮어쓰고
-    //   새 토큰/포트/PID 가 발행되는지(stale 검사 → 덮어쓰기 경로, lib.rs run() 의 2.5단계) 확인.
-    // 왜 실프로세스: run() 은 실제 data_dir(파일시스템)과 자기 PID 로 stale 을 판정·기록한다.
-    //   in-process start_test_server 는 이 daemon.json/파일 IO 경로를 의도적으로 생략(격리)하므로
-    //   discovery 를 재현할 수 없다.
-    // 언제: phase 2 step 7 에서 임시 data_dir + .exe 기동 하네스로 구현.
-    unimplemented!(
-        "Step6 후속: stale daemon.json 덮어쓰기 + 새 발행 — 실프로세스/파일 discovery 필요"
-    );
+    // 검증: 데몬 .exe spawn(임시 data_dir, restorable cmd.exe 프로필 동봉) → 데몬이 부팅 복원으로
+    //   cmd.exe child 를 띄움 → child_pids(daemon_pid) 로 그 PID 식별 → 데몬 프로세스 kill →
+    //   그 child PID 가 죽는지(pid_alive=false) 폴링. KILL_ON_JOB_CLOSE 면 동반 사망 → PASS.
+    //
+    // child PID 식별: AgentInfo/WS 프로토콜은 child pid 를 노출하지 않으므로, OS 프로세스 트리
+    //   열거(core platform::child_pids, Toolhelp32Snapshot)로 데몬의 직계 자식 cmd.exe 를 찾는다.
+    #[tokio::test]
+    #[ignore = "실프로세스/Job 필요 — `-- --ignored` 로 실행(Windows 전용)"]
+    async fn ignored_daemon_kill_cleans_pty_child() {
+        use engram_dashboard_core::pty::platform::{
+            child_pids, pid_alive_with_start_time, process_creation_time,
+        };
+
+        let ctx = fresh_iso("kill");
+        let data_dir = ctx.data_dir.clone();
+        write_restorable_shell_agents_json(&data_dir);
+        let mut daemon = spawn_daemon_iso(&ctx);
+
+        // 1) 데몬 기동 확인(daemon.json) + 그 PID 회수. 미발행 시 stderr 를 인용해 원인 가시화.
+        let info = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {
+            Some(i) => i,
+            None => {
+                let _ = daemon.kill();
+                let _ = daemon.wait();
+                let err = drain_logs(&mut daemon);
+                let _ = std::fs::remove_dir_all(&data_dir);
+                panic!("데몬이 daemon.json 을 발행해야 — 데몬 로그:\n{err}");
+            }
+        };
+        let daemon_pid = info.pid;
+        assert!(daemon_pid != 0, "데몬 PID 유효");
+
+        // 2) 부팅 복원으로 cmd.exe child 가 뜰 때까지 대기 → 그 PID 들 기록.
+        //    복원은 3s 조기종료 윈도가 있어 넉넉히 대기한다.
+        let mut child_set: Vec<u32> = Vec::new();
+        let appeared = poll_until(std::time::Duration::from_secs(20), || {
+            child_set = child_pids(daemon_pid);
+            !child_set.is_empty()
+        });
+        if !appeared {
+            // 식별 실패 — 은폐 금지: 정리 후 명확히 실패 보고(자식을 못 찾으면 검증 불가).
+            kill_daemon(&mut daemon);
+            let _ = std::fs::remove_dir_all(&data_dir);
+            panic!(
+                "데몬(pid={daemon_pid})의 PTY child(cmd.exe)를 OS 트리 열거로 식별하지 못함 — \
+                 복원이 자식을 안 띄웠거나 ppid 미반영. 이 케이스는 살아있는 child 식별이 전제다."
+            );
+        }
+        // 식별된 자식들의 (pid, creation_time) 을 기록한다.
+        // ★왜 creation_time 인가★: `pid_alive` 는 OpenProcess 실패 시 *보수적으로 true* 를 반환해
+        //   "죽음" 검증에 부적합하다(실측: 죽은 PID 도 pid_alive=true → 오판). 죽음을 정확히 보려면
+        //   creation_time 을 사전 기록하고 kill 후 `pid_alive_with_start_time(pid, 기록값)` 로 판정한다.
+        //   죽으면 process_creation_time=None + expected!=0 → false(dead). PID 재사용되면 creation_time
+        //   이 달라 false. 살아있고 같으면 true. = 정확한 동일-프로세스 생존 판정.
+        let live_children: Vec<(u32, u64)> = child_set
+            .iter()
+            .copied()
+            .filter_map(|p| process_creation_time(p).map(|ct| (p, ct)))
+            .collect();
+        assert!(
+            !live_children.is_empty(),
+            "kill 전 데몬의 살아있는 PTY child 가 있어야(creation_time 조회됨): {child_set:?}"
+        );
+
+        // 3) 데몬 프로세스를 강제 종료(TerminateProcess). Job 핸들이 닫히며 KILL_ON_JOB_CLOSE 발동.
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+
+        // 4) 자식 PID 들이 동반 사망하는지 폴링(Job 정리는 즉시는 아닐 수 있어 여유).
+        //    pid_alive_with_start_time(p, 기록 creation_time): 같은 프로세스가 살아있을 때만 true.
+        let all_dead = poll_until(std::time::Duration::from_secs(15), || {
+            live_children
+                .iter()
+                .all(|&(p, ct)| !pid_alive_with_start_time(p, ct))
+        });
+
+        // 정리 — 만약 안 죽었으면 잔존 자식을 직접 kill(누수 방지) 후 단언.
+        if !all_dead {
+            for &(p, _) in &live_children {
+                // best-effort 잔존 정리(taskkill).
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &p.to_string(), "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        assert!(
+            all_dead,
+            "데몬 kill 후 PTY child({live_children:?})가 Job(KILL_ON_JOB_CLOSE)으로 동반 사망해야"
+        );
+    }
+
+    // ── case2: single-instance — 두 번째 데몬이 named mutex 로 거부(빠른 정상 종료 + json 불변) ──
+    //
+    // 검증: 데몬 A spawn → daemon.json 발행 확인 → 데몬 B spawn(같은 data_dir/env) → B 가
+    //   named mutex 로 거부돼 빠르게(3s 내) 정상 종료(exit 0)하고, A 의 daemon.json 이 보존
+    //   (B 가 안 덮어씀 = pid/token 불변)되는지 확인.
+    //
+    // exit code: instance.rs 가 중복 시 run() 이 Ok(()) → main 이 정상 종료(exit 0). 따라서
+    //   "exit 0 + 빠른 종료 + json 불변" 으로 단언한다(중복 전용 특수 코드는 없음 — 그 사실 명시).
+    #[tokio::test]
+    #[ignore = "실프로세스 2개 필요 — `-- --ignored` 로 실행(Windows 전용)"]
+    async fn ignored_single_instance_second_rejected() {
+        // ★single-instance 충돌을 의도적으로 유발★: A·B 가 **같은 instance_key + data_dir** 를 쓴다.
+        //   다른 테스트와는 유니크한 key 라 격리되지만, 이 테스트 내부 두 데몬은 동일 key 라 같은 mutex 를
+        //   다퉈 B 가 거부된다(검증 목적). 다른 ignored 테스트가 병렬로 돌아도 key 가 달라 영향 없음.
+        let ctx = fresh_iso("single");
+        let data_dir = ctx.data_dir.clone();
+        let key = ctx.instance_key.clone();
+
+        // 1) 데몬 A — daemon.json 발행 확인 + 원본 정보 보관.
+        let mut daemon_a = spawn_daemon_with_key(&data_dir, &key);
+        let info_a = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {
+            Some(i) => i,
+            None => {
+                let _ = daemon_a.kill();
+                let _ = daemon_a.wait();
+                let err = drain_logs(&mut daemon_a);
+                let _ = std::fs::remove_dir_all(&data_dir);
+                panic!("데몬 A 가 daemon.json 을 발행해야 — 데몬 A 로그:\n{err}");
+            }
+        };
+
+        // 2) 데몬 B — 같은 instance_key + data_dir 로 spawn. named mutex 거부 → 빠르게 정상 종료해야 한다.
+        let mut daemon_b = spawn_daemon_with_key(&data_dir, &key);
+        let exited_fast = poll_until(std::time::Duration::from_secs(3), || {
+            matches!(daemon_b.try_wait(), Ok(Some(_)))
+        });
+
+        // B 종료 상태 회수(아직이면 정리에서 kill).
+        let b_status = daemon_b.try_wait().ok().flatten();
+
+        // 3) A 의 daemon.json 이 보존됐는지(B 가 안 덮어씀) — pid/token 동일.
+        let info_after = poll_daemon_json(&data_dir, std::time::Duration::from_secs(2));
+
+        // 정리 — A kill, B 가 혹시 살아있으면 kill, B stderr 회수(진단), 디렉토리 삭제.
+        kill_daemon(&mut daemon_a);
+        if b_status.is_none() {
+            let _ = daemon_b.kill();
+            let _ = daemon_b.wait();
+        }
+        let b_logs = drain_logs(&mut daemon_b);
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        // 단언: B 가 3s 내 종료.
+        assert!(
+            exited_fast,
+            "두 번째 데몬은 mutex 거부로 빠르게(3s 내) 종료해야 — B 로그:\n{b_logs}"
+        );
+        // 단언: B 가 정상 종료(exit 0). 중복은 run() 이 Ok → exit 0(중복 전용 코드 없음).
+        if let Some(status) = b_status {
+            assert!(
+                status.success(),
+                "두 번째 데몬은 정상 종료(exit 0)해야 — got {status:?}, B 로그:\n{b_logs}"
+            );
+        } else {
+            panic!("두 번째 데몬이 3s 내 종료하지 않음(mutex 거부 실패 가능) — B 로그:\n{b_logs}");
+        }
+        // 단언: A 의 daemon.json 이 보존(B 가 안 덮어씀) — pid/token 동일.
+        let info_after = info_after.expect("A 의 daemon.json 이 유지돼야");
+        assert_eq!(
+            info_after.pid, info_a.pid,
+            "두 번째 데몬이 daemon.json 을 덮어쓰면 안 됨(pid 불변)"
+        );
+        assert_eq!(
+            info_after.token, info_a.token,
+            "daemon.json token 도 불변(B 가 새 토큰을 발행하면 안 됨)"
+        );
+    }
+
+    // ── case3: stale daemon.json → 데몬이 stale 감지 후 자기 정보로 덮어쓰기 ────────────────
+    //
+    // 검증(선택지 A — 데몬 자가 발행): 죽은 PID 를 가진 stale daemon.json 을 임시 data_dir 에 써둠 →
+    //   데몬 .exe spawn(같은 data_dir) → 데몬이 is_stale 판정 후 자기 pid/port/token/start_time 으로
+    //   덮어쓰는지(run() 2.5단계) 확인. 새 pid != stale pid, start_time != 0, port/token 발행.
+    //
+    // src-tauri 의 ensure_daemon(WMI spawn) 경로는 별도 테스트(discovery::real_wmi_spawn_smoke)로
+    //   분리해 채운다(daemon crate 에서 src-tauri 함수 호출 불가). 그건 같은 step7 에서 구현.
+    #[tokio::test]
+    #[ignore = "실프로세스 + 파일 discovery 필요 — `-- --ignored` 로 실행(Windows 전용)"]
+    async fn ignored_stale_daemon_json_discovery() {
+        let ctx = fresh_iso("stale");
+        let data_dir = ctx.data_dir.clone();
+
+        // 1) 죽은 PID 를 가진 stale daemon.json 을 써둔다.
+        //    죽은 PID 만들기: 짧은 자식 spawn 후 kill → 그 PID 는 곧 dead(creation time 없음 → is_stale).
+        let mut tmp_child = Command::new("cmd.exe")
+            .args(["/c", "exit"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("임시 자식 spawn");
+        let dead_pid = tmp_child.id();
+        let _ = tmp_child.wait(); // 종료 보장 → dead_pid 는 이제 죽음.
+
+        let stale = DaemonInfo {
+            pid: dead_pid,
+            host: "127.0.0.1".into(),
+            port: 59999,
+            token: "d".repeat(64), // stale 토큰(데몬이 새 것으로 바꿔야 함)
+            protocol_version: PROTOCOL_VERSION,
+            // ★start_time 은 0 이 아닌 임의값★. is_stale 로직: start_time==0 이면 pid_alive() 로
+            //   fallback 하는데, pid_alive() 는 OpenProcess 실패(죽은 PID) 시 *보수적으로 true*(살아있음)
+            //   를 반환해 stale 판정이 안 된다 → 데몬이 "살아있는 데몬 보호"로 종료해버린다(run() 2.5).
+            //   start_time!=0 이면 process_creation_time(dead_pid)=None(죽음) + expected!=0 → false(dead)
+            //   로 확실히 stale 판정된다(이 분기가 stale 판정을 보장).
+            start_time: 0xDEAD_BEEF,
+        };
+        let stale_json = serde_json::to_vec_pretty(&stale).expect("stale 직렬화");
+        std::fs::write(data_dir.join("daemon.json"), &stale_json).expect("stale daemon.json 작성");
+
+        // 2) 데몬 .exe spawn — stale 을 감지하고 덮어써야 한다.
+        let mut daemon = spawn_daemon_iso(&ctx);
+
+        // 3) daemon.json 이 새 데몬 정보(살아있는 pid != dead_pid)로 바뀔 때까지 폴링.
+        let mut latest: Option<DaemonInfo> = None;
+        let overwritten = poll_until(std::time::Duration::from_secs(15), || {
+            latest = poll_daemon_json(&data_dir, std::time::Duration::from_millis(100));
+            matches!(&latest, Some(i) if i.pid != dead_pid)
+        });
+
+        // 정리 — 데몬 kill, stderr 회수(진단), 임시 디렉토리 삭제.
+        kill_daemon(&mut daemon);
+        let err = drain_logs(&mut daemon);
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        assert!(
+            overwritten,
+            "데몬이 stale daemon.json 을 자기 정보로 덮어써야(pid 가 stale dead_pid={dead_pid} 와 달라야) — 데몬 로그:\n{err}"
+        );
+        let fresh = latest.expect("덮어쓴 daemon.json");
+        assert_ne!(fresh.pid, dead_pid, "새 pid 는 stale dead_pid 와 달라야");
+        assert!(
+            fresh.start_time != 0,
+            "새 데몬은 유효 start_time 을 기록해야"
+        );
+        assert_ne!(
+            fresh.token,
+            "d".repeat(64),
+            "새 데몬은 새 토큰을 발행해야(stale 토큰 유지 금지)"
+        );
+        assert!(fresh.port != 0, "새 데몬은 유효 포트를 기록해야");
+    }
 }

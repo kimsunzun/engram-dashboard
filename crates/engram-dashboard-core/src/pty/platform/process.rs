@@ -116,11 +116,70 @@ pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
     }
 }
 
+/// 주어진 부모 PID 의 **직계 자식 프로세스 PID 목록**을 OS 스냅샷으로 열거한다(Windows).
+///
+/// ★왜 필요한가★: AgentInfo/WS 프로토콜은 PTY child 의 PID 를 노출하지 않는다(설계상 손발/두뇌
+/// 분리 — 프론트는 PID 를 몰라도 된다). 그러나 실프로세스 격리테스트(데몬 .exe kill → PTY child
+/// 동반 사망)는 "데몬이 띄운 자식 프로세스가 실제로 죽었는지"를 PID 로 확인해야 한다. 그 PID 를
+/// 외부에서 알아내는 유일한 길이 OS 프로세스 트리 열거다. Toolhelp32Snapshot 으로 전 프로세스를
+/// 훑어 `th32ParentProcessID == parent` 인 항목의 PID 를 모은다.
+///
+/// best-effort: 스냅샷/순회 실패 시 빈 Vec. ppid 는 OS 가 즉시 갱신하지 않는 경우가 있어
+/// (부모가 죽으면 ppid 가 stale 일 수 있음) "살아있는 부모의 직계 자식" 용도로만 신뢰한다.
+#[cfg(windows)]
+pub fn child_pids(parent: u32) -> Vec<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut out = Vec::new();
+    if parent == 0 {
+        return out;
+    }
+    // SAFETY: 전체 프로세스 스냅샷 생성. 실패면 빈 핸들 → 빈 결과.
+    let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+        Ok(h) => h,
+        Err(_) => return out,
+    };
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: core::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    // SAFETY: 유효 스냅샷 핸들 + dwSize 가 채워진 entry. First 가 성공하면 Next 로 순회한다.
+    let first = unsafe { Process32FirstW(snapshot, &mut entry) };
+    if first.is_ok() {
+        loop {
+            if entry.th32ParentProcessID == parent {
+                out.push(entry.th32ProcessID);
+            }
+            // SAFETY: 같은 유효 핸들 + entry. 더 없으면 Err → break.
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+    // SAFETY: CreateToolhelp32Snapshot 이 반환한 유효 핸들을 한 번만 닫는다.
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    out
+}
+
 // ── non-windows stub ─────────────────────────────────────────────────────────────
 
 #[cfg(not(windows))]
 pub fn process_creation_time(_pid: u32) -> Option<u64> {
     None
+}
+
+/// non-windows: 프로세스 트리 열거 미구현(데몬은 Windows 1차) — 빈 목록.
+#[cfg(not(windows))]
+pub fn child_pids(_parent: u32) -> Vec<u32> {
+    Vec::new()
 }
 
 #[cfg(not(windows))]
@@ -173,6 +232,45 @@ mod tests {
         assert!(
             !pid_alive_with_start_time(pid, wrong),
             "creation time 불일치면 dead(PID 재사용 방어)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn child_pids_parent_zero_is_empty() {
+        // 부모 0(시스템 idle) 은 우리 관심 대상이 아님 → 빈 목록.
+        assert!(child_pids(0).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn child_pids_finds_spawned_child() {
+        // 자기 자신이 자식을 띄우면 그 PID 가 child_pids(자기 PID) 에 나타나야 한다.
+        // best-effort 헬퍼의 기본 동작(부모-자식 매칭)을 현재 프로세스 기준으로 실측.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 3 127.0.0.1 > NUL"]) // 잠깐 살아있는 자식
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe spawn");
+        let child_pid = child.id();
+        let me = std::process::id();
+
+        // ppid 반영에 약간의 지연이 있을 수 있어 짧게 폴링.
+        let mut found = false;
+        for _ in 0..50 {
+            if child_pids(me).contains(&child_pid) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            found,
+            "spawn 한 자식 PID({child_pid}) 가 child_pids({me}) 에 나타나야"
         );
     }
 
