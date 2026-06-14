@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::pty::manager::default_shell;
-use crate::pty::profile::{AgentCommand, AgentProfile, SpawnMode};
-use crate::pty::types::AgentInfo;
 use crate::AppState;
+use engram_dashboard_core::pty::manager::default_shell;
+use engram_dashboard_core::pty::profile::{AgentCommand, AgentProfile, SpawnMode};
+use engram_dashboard_core::pty::types::AgentInfo;
 
 /// 기존 thin spawn — cwd만 받아 기본 셸 에이전트를 띄운다(transient, auto_restore=false).
 /// claude 프로필 CRUD/복원은 별도 커맨드(S9-6)에서 다룬다.

@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use uuid::Uuid;
 
-use engram_dashboard_lib::logging::{init_logging, mask_secrets, set_log_level};
-use engram_dashboard_lib::pty::manager::default_shell;
-use engram_dashboard_lib::pty::output_core::OutputCore;
-use engram_dashboard_lib::pty::transport::pty::PtyTransport;
-use engram_dashboard_lib::pty::transport::AgentTransport;
-use engram_dashboard_lib::pty::types::{
+use engram_dashboard_core::logging::{init_logging, mask_secrets, set_log_level};
+use engram_dashboard_core::pty::manager::default_shell;
+use engram_dashboard_core::pty::output_core::OutputCore;
+use engram_dashboard_core::pty::transport::pty::PtyTransport;
+use engram_dashboard_core::pty::transport::AgentTransport;
+use engram_dashboard_core::pty::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputSink, PtyEvent, SinkError,
     SinkId, StatusSink,
 };

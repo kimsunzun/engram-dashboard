@@ -1,7 +1,7 @@
 pub mod commands;
-pub mod logging;
-pub mod persistence;
-pub mod pty;
+
+// S12 phase 1: pty/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
+use engram_dashboard_core::{logging, persistence, pty};
 
 use std::sync::Arc;
 

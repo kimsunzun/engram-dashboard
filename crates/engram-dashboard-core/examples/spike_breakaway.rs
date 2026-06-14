@@ -35,9 +35,10 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 mod win {
     use windows::Win32::Foundation::{BOOL, HANDLE};
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, QueryInformationJobObject,
-        SetInformationJobObject, TerminateJobObject, JobObjectExtendedLimitInformation,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -203,7 +204,10 @@ fn run_diag() {
             }
             Err(e) => {
                 // spawn 자체가 막힘 = 부모 Job 이 breakaway 불허(JOB_OBJECT_LIMIT_BREAKAWAY_OK X)
-                println!("[A] breakaway spawn FAILED: {e} (errno={:?}) ⚠", e.raw_os_error());
+                println!(
+                    "[A] breakaway spawn FAILED: {e} (errno={:?}) ⚠",
+                    e.raw_os_error()
+                );
                 println!("[A] => 부모 Job 이 breakaway 불허일 가능성 — fallback 검증 필수");
             }
         }
@@ -215,15 +219,7 @@ fn run_diag() {
         let marker_c_str = marker_c.to_string_lossy().to_string();
         // cmd /c start "" /b <exe> child <marker>
         let spawn_c = Command::new("cmd")
-            .args([
-                "/c",
-                "start",
-                "",
-                "/b",
-                &exe_str,
-                "child",
-                &marker_c_str,
-            ])
+            .args(["/c", "start", "", "/b", &exe_str, "child", &marker_c_str])
             .creation_flags(DETACHED_PROCESS)
             .spawn();
         match spawn_c {
@@ -360,7 +356,7 @@ fn run_selfkill(marker: &str) {
         std::thread::sleep(Duration::from_millis(800));
         println!("[B] 이제 부모 자살(TerminateJobObject) — 외부에서 marker 확인할 것");
         let _ = win::terminate(job, 1); // job 안의 모든 프로세스(=부모) 종료. breakaway 자식은 제외.
-        // 도달 못 할 수 있음(자기 자신 종료).
+                                        // 도달 못 할 수 있음(자기 자신 종료).
         std::thread::sleep(Duration::from_secs(2));
         println!("[B] (여기 출력되면 자살 실패 — 부모가 job 에 안 들어갔을 수 있음)");
     }

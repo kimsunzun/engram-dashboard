@@ -12,12 +12,12 @@ use std::time::Duration;
 use base64::Engine as _;
 use uuid::Uuid;
 
-use engram_dashboard_lib::logging::{init_logging, mask_secrets, set_log_level};
-use engram_dashboard_lib::persistence::FileProfileStore;
-use engram_dashboard_lib::pty::manager::{default_shell, AgentManager};
-use engram_dashboard_lib::pty::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
-use engram_dashboard_lib::pty::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_lib::pty::types::{
+use engram_dashboard_core::logging::{init_logging, mask_secrets, set_log_level};
+use engram_dashboard_core::persistence::FileProfileStore;
+use engram_dashboard_core::pty::manager::{default_shell, AgentManager};
+use engram_dashboard_core::pty::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
+use engram_dashboard_core::pty::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_core::pty::types::{
     AgentId, AgentInfo, AgentStatus, OutputSink, PtyEvent, SinkError, SinkId, StatusSink,
 };
 

@@ -1,0 +1,27 @@
+[package]
+name = "engram-dashboard-core"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 에이전트 코어 — AgentManager·OutputCore·AgentTransport·backend·persistence·logging. Tauri import 0(headless)."
+
+# src-tauri 에서 그대로 이동한 모듈(pty/persistence/logging). 의존성도 동일하게 옮김.
+# Embedded(src-tauri)와 미래 daemon(별도 bin)이 공통으로 의존하는 lib.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.8.1"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+thiserror = "1.0"
+base64 = "0.22"
+regex = "1.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dunce = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_JobObjects",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
