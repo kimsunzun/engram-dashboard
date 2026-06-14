@@ -68,7 +68,8 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 
 ---
 
-## 백엔드 모듈 맵 (`src-tauri/src/`)
+## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/` — S12 phase 1 이동)
+> 아래 `pty/`·`persistence/`·`logging/`는 S12 phase 1에서 `src-tauri/src/`→`crates/engram-dashboard-core/src/`로 이동(git mv, history 보존). 내부 `crate::` 경로는 무수정(코어 crate 의 top-level 모듈). `src-tauri`는 `engram_dashboard_core::{pty,persistence,logging}`로 re-import. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs).
 
 ```
 pty/                          # S10 추상화: AgentManager → AgentSession(OutputCore) → dyn AgentTransport
@@ -115,11 +116,14 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 - `portable-pty = "0.8.1"` · `uuid` · `thiserror` · `base64` · `regex`(로그 마스킹) · `tracing` · `dunce`(cwd canonicalize UNC 회피)
 - `windows` (Job Object) — `#[cfg(windows)]`
 
-## 빌드·검증 명령 (`src-tauri/`)
-- `cargo test --lib` — unit test (현재 38건)
-- `cargo run --example headless` — **프론트 없이** 백엔드 spawn→write→resize→kill 로그 검증
-- `cargo run --example transport_smoke` / `session_smoke` — manager 없이 PtyTransport/AgentSession 직접 실측(신경로)
-- `cargo fmt` / `rg "use tauri" src/pty/` (→ 0줄) — 포맷·격리 게이트
+## 빌드·검증 명령 (Cargo workspace — S12 phase 1 이후 루트에서 실행)
+S12 phase 1 이후 **Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(pty/persistence/logging)는 `crates/engram-dashboard-core`로 이동, examples도 거기로. `target/`는 워크스페이스 루트.
+- `cargo test -p engram-dashboard-core --lib` — 코어 unit test (현재 38건)
+- `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩 (현재 21건)
+- `cargo run -p engram-dashboard-core --example headless` — **프론트 없이** 백엔드 spawn→write→resize→kill 로그 검증
+- `cargo run -p engram-dashboard-core --example transport_smoke` / `session_smoke` — manager 없이 PtyTransport/AgentSession 직접 실측
+- `cargo build` (루트) — 전체 workspace 빌드
+- `cargo fmt` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E
 - 로그 ON: `RUST_LOG=debug` (기본 OFF=warn)
 
@@ -166,7 +170,9 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 ## 프론트 파일 구조 (`src/`)
 
 ```
-api/        types.ts(백엔드 타입 미러+epoch/AgentProfile/RestoreOutcome) · ptyApi.ts(invoke 래퍼+프로필 CRUD) · decodeBase64.ts
+api/        types.ts(백엔드 타입 미러+epoch/AgentProfile/RestoreOutcome) · ptyApi.ts(invoke 저수준 래퍼) · decodeBase64.ts
+            agentClient.ts(★제어 표면 인터페이스) · embeddedClient.ts(in-process 구현, invoke/Channel 캡슐화) · clientFactory.ts(싱글톤+window.__ENGRAM_AGENT__ 노출, phase4 mode 토글 자리)
+            ※ 컴포넌트·스토어는 agentClient 인터페이스만 의존(ptyApi 직접 호출 X). DaemonClient(WS)는 phase4에 동일 인터페이스로 추가.
 store/      agentStore.ts · slotStore.ts · themeStore.ts · eventBus.ts(Tauri 이벤트 1회 등록, agent-list-updated/status-changed/restore-result)
 components/ layout/(AppLayout·Sidebar·StatusBar) · agent/AgentTree · slot/(SlotPane·TerminalSlot·SlotContextMenu) · diff/DiffPanel
 pages/      PopupPage(/popup?slotId=N) · TreePage(/tree)

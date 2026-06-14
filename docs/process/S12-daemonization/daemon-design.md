@@ -86,8 +86,10 @@ engram-dashboard/ (repo 루트 = workspace)
 
 ## 6. 구현 phasing
 - **★spike 0 (phase 1 이전):** Job Object breakaway 실측. 부모 job(IDE/터미널) breakaway 불허 시 분리 가능 여부 + fallback(`cmd /c start /b`) 검증. **안 풀리면 전체 무효.**
-- **phase 0:** engram-dashboard-protocol 확정. 테스트: ts-rs/tauri-specta 타입생성, codec golden frame, OutputChunk forward-compat, version mismatch.
-- **phase 1:** engram-dashboard-core workspace 추출(Tauri import 0 유지) + 프론트 AgentClient 인터페이스 + EmbeddedClient. **embedded 회귀 0**(spawn/write/resize/kill, seq monotonic, StrictMode 중복 방어). protocolVersion 포함.
+- **✅ phase 0(완료 2026-06-14):** engram-dashboard-protocol 독립 crate. AgentCommand/AgentEvent/OutputChunk/SubscribeAction + domain 미러 + codec binary frame + ts-rs 바인딩. 테스트 21건 PASS(codec golden/roundtrip/에러 + 타입별 export). 커밋 `61f2d0f`. ※이름 충돌(protocol AgentCommand ↔ core profile AgentCommand=spawn 종류) → phase 1+ 에서 spawn 종류 SpawnSpec 개명 필요.
+- **✅ phase 1(완료 2026-06-14):** 
+  - **1a 백엔드:** Cargo workspace(루트 Cargo.toml: protocol/core/src-tauri). pty/persistence/logging→`crates/engram-dashboard-core`(git mv, history 보존, 내부 crate:: 무수정). examples도 core 로. 격리 게이트 use tauri 0. 회귀 0(core unit 38 / headless·transport_smoke·session_smoke / 전체 빌드 / target 워크스페이스 재배치 tauri dev 정상). 커밋 `576c5e1`.
+  - **1b 프론트:** AgentClient 인터페이스 + EmbeddedClient(Channel·base64·#13133 캡슐화) + clientFactory(싱글톤+§5 window.__ENGRAM_AGENT__). 컴포넌트 ptyApi→agentClient. GUI E2E: spawn→subscribe→writeStdin→디코드 277B/3청크, kill 후 0, UI 정상. 커밋 `5346240`.
 - **phase 2:** 데몬 단독 + 격리 하네스(transport_smoke 확장). 필수 케이스:
   - 수명주기: single instance / stale port·lock / incompatible version / **UI kill→데몬 생존** / **데몬 kill→PTY child 정리** / duplicate spawn race / **breakaway 성공 확인**.
   - 보안: token 없음·오답·Origin mismatch·oversized·auth timeout 거부.

@@ -101,7 +101,11 @@
 - **확정 핵심:** 단일 WS 연결(lane 분리 금지)·output hot path 커스텀 binary frame/control JSON·ring 잘림 truncated 분기·토큰 env/ACL portfile(arg 금지)·emit try_send=코어변경0·Job breakaway가 단일 장애점(spike #1). 두-모드 토글(Embedded/Daemon). Cargo workspace(core/protocol/daemon/tauri).
 - **상태:** 설계 완료, 사용자 결정 7개(+transport=8) 전부 완료(daemon-design §8-d). 구현 진입.
 - **★spike #1 완료(2026-06-14) — Job breakaway 실측, 판정 GO.** 측정 환경 부모 Job=`0x2000`(KILL_ON_JOB_CLOSE+breakaway 불허, worst-case). `CREATE_BREAKAWAY_FROM_JOB` 직접 실패(os err 5)·`start /b` fallback 동반사망(설계 가정 폐기)·**WMI `Win32_Process.Create` 분리 성공(in_job=false).** → spawn=WMI 채택, 파생제약: WMI는 env 주입 불가 → 토큰=ACL port.json 강제. 코드 `examples/spike_breakaway.rs`(보존), 결과 `S12-daemonization/spike1-breakaway-result.md`.
-- **진행 중:** phase 0(protocol crate) → phase 1(core workspace 추출 + AgentClient/EmbeddedClient).
+- **✅ phase 0 완료(2026-06-14):** `engram-dashboard-protocol` 독립 crate — AgentCommand/AgentEvent/OutputChunk/SubscribeAction + domain 미러 + binary frame codec + ts-rs 바인딩. 테스트 21 PASS. 커밋 `61f2d0f`.
+- **✅ phase 1 완료(2026-06-14):** Cargo workspace 추출 + 프론트 AgentClient.
+  - 1a: pty/persistence/logging→`crates/engram-dashboard-core`(git mv, 내부 crate:: 무수정). examples 동반. 격리 게이트 0. 회귀 0(unit 38/headless·smoke/빌드/tauri dev target 재배치 정상). 커밋 `576c5e1`.
+  - 1b: AgentClient 인터페이스+EmbeddedClient(Channel·base64·#13133 캡슐화)+clientFactory(§5 window.__ENGRAM_AGENT__). 컴포넌트 ptyApi→agentClient. GUI E2E PASS(spawn→subscribe→writeStdin 277B/3청크, kill 0, UI 정상). 커밋 `5346240`.
+- **다음:** phase 2(데몬 단독 bin + WS server + 격리 하네스). spawn=WMI(spike #1), 토큰=ACL port.json. ★구현 전 이름 충돌(SpawnSpec 개명) 처리.
 
 ---
 
