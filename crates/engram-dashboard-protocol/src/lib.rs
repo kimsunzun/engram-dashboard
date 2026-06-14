@@ -25,6 +25,7 @@
 //! 고정. binary frame 의 seq 는 JS `DataView.getBigUint64` 로 받으므로 무관(JSON 경로만 number).
 
 mod codec;
+mod discovery;
 mod domain;
 mod ids;
 mod messages;
@@ -33,6 +34,7 @@ pub use codec::{
     decode_frame, encode_terminal_frame, CodecError, DecodedFrame, FRAME_HEADER_LEN,
     FRAME_TAG_TERMINAL_BYTES,
 };
+pub use discovery::DaemonInfo;
 pub use domain::{
     AgentInfo, AgentStatus, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
     RestoreOutcome, RestoreReport, SessionCaps,

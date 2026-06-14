@@ -180,12 +180,17 @@ async fn run() -> Result<(), i32> {
     let expected_token = Arc::new(token.clone());
 
     // 8) daemon.json atomic 기록. 토큰을 포함하나 파일에만 — 로그엔 port/pid 만.
+    //    start_time: 자기 프로세스 creation time(GetProcessTimes). PID 재사용 시 discovery 가
+    //    "PID 살아있음 AND creation time 일치"로 진짜 우리 데몬인지 구분하게 한다. 조회 실패 시 0(미상).
+    let start_time =
+        engram_dashboard_core::pty::platform::current_process_start_time().unwrap_or(0);
     let info = portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
         port,
         token,
         protocol_version: PROTOCOL_VERSION,
+        start_time,
     };
     if let Err(e) = portfile::write_atomic(&daemon_path, &info) {
         tracing::error!("daemon.json 기록 실패: {e}");

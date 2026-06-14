@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod discovery;
 
 // S12 phase 1: pty/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
 use engram_dashboard_core::{logging, persistence, pty};
@@ -158,6 +159,8 @@ pub fn run() {
             commands::delete_profile,
             commands::spawn_profile,
             commands::set_profile_auto_restore,
+            // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면. 부팅 자동 호출은 phase4.
+            commands::discover_daemon,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -1,36 +1,25 @@
 //! daemon.json — 데몬 발견(discovery) 파일.
 //!
 //! 데몬이 잡은 host/port + 접속 토큰 + protocol_version 을 atomic 하게 기록한다.
-//! UI(Embedded)나 외부 클라이언트는 이 파일을 읽어 데몬에 붙는다(다음 단위 WS).
+//! UI(Embedded)나 외부 클라이언트는 이 파일을 읽어 데몬에 붙는다.
+//!
+//! **구조체는 `protocol::DaemonInfo`** — daemon 이 write, tauri 가 read 하는 두 프로세스의
+//! 공유 계약이라 protocol crate 에 있다. 여기엔 daemon 측 IO(write_atomic/read)와 stale
+//! 판정만 둔다.
 //!
 //! **atomic 보장(persistence/mod.rs 와 동일 패턴):** 같은 디렉토리에 tmp 를 쓰고
 //! `sync_all` 후 `rename` 한다. 같은 파일시스템 내 rename 이라 교체가 원자적 —
 //! 크래시가 나도 daemon.json 은 완전한 옛 내용이거나 완전한 새 내용 둘 중 하나다.
 //!
-//! **보안:** token 은 이 파일에만 둔다(로그 금지). 파일 권한 강화는 추후 단위.
+//! **보안:** token 은 이 파일에만 둔다(로그 금지).
 
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+pub use engram_dashboard_protocol::DaemonInfo;
 
 const TMP_NAME: &str = "daemon.json.tmp";
-
-/// 데몬 발견 정보. daemon.json 의 전체 내용.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DaemonInfo {
-    /// 데몬 프로세스 PID — stale 판정(살아있는지)에 사용.
-    pub pid: u32,
-    /// 항상 "127.0.0.1"(로컬 전용 바인드).
-    pub host: String,
-    /// 데몬이 실제로 바인드한 포트(랜덤).
-    pub port: u16,
-    /// 접속 토큰(256-bit hex 64자). 로그 금지.
-    pub token: String,
-    /// 데몬이 말하는 프로토콜 버전 — 클라이언트가 호환성 판단.
-    pub protocol_version: u32,
-}
 
 /// tmp → sync_all → rename. 부모 디렉토리는 호출자가 만들어 두었다고 가정하되,
 /// 안전하게 create_dir_all 도 한 번 더 한다(idempotent).
@@ -40,7 +29,8 @@ pub fn write_atomic(path: &Path, info: &DaemonInfo) -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent dir"))?;
     fs::create_dir_all(dir)?;
 
-    let json = serde_json::to_vec_pretty(info)
+    let json = info
+        .to_json_pretty()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     // 1) 같은 디렉토리 tmp 에 전체를 쓰고 디스크까지 flush(sync_all = 데이터+메타데이터).
@@ -72,7 +62,7 @@ pub fn read(path: &Path) -> Option<DaemonInfo> {
         Ok(b) => b,
         Err(_) => return None,
     };
-    match serde_json::from_slice::<DaemonInfo>(&bytes) {
+    match DaemonInfo::parse(&bytes) {
         Ok(info) => Some(info),
         Err(e) => {
             tracing::warn!("daemon.json 파싱 실패: {e} — 무시");
@@ -83,56 +73,14 @@ pub fn read(path: &Path) -> Option<DaemonInfo> {
 
 /// 기록된 데몬이 더 이상 살아있지 않은지(stale) 판정. true=죽음(무시 가능).
 ///
-/// Windows: OpenProcess 로 PID 생존을 확인한다. 핸들을 열 수 있으면 살아있다고 본다
-/// (best-effort — 권한 부족 등으로 못 열어도 "죽음"으로 보지 않고 살아있다고 보수적 판단).
-/// non-windows: 판정 수단 미구현 → 보수적으로 "살아있음"(false) 반환.
+/// liveness 판정은 core 의 공유 함수(`pid_alive_with_start_time`)에 위임한다 — daemon·tauri
+/// 양쪽이 같은 로직을 쓰도록(DRY). "PID 살아있음 AND creation time==기록값"일 때만 살아있다고
+/// 본다. start_time==0(미상, 옛 daemon.json)이면 PID 단독 생존으로 보수 판정한다.
+///
+/// ★PID 재사용(M2) 방어★: 데몬이 죽고 같은 PID 를 다른 프로세스가 받았어도 creation time 이
+/// 달라 dead 로 판정 → 엉뚱한 프로세스를 살아있는 데몬으로 오인하지 않는다.
 pub fn is_stale(info: &DaemonInfo) -> bool {
-    pid_is_dead(info.pid)
-}
-
-#[cfg(windows)]
-fn pid_is_dead(pid: u32) -> bool {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    // PID 0 은 시스템 idle — 우리 데몬일 수 없음. stale 취급.
-    if pid == 0 {
-        return true;
-    }
-
-    // SAFETY: OpenProcess — 최소 권한(QUERY_LIMITED_INFORMATION)으로 대상 PID 핸들을
-    // 연다. 핸들 상속 false. 대상이 없으면(이미 종료) Err 반환.
-    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-        Ok(h) => h,
-        // 못 열면: 프로세스가 없거나 권한 부족. 권한 부족과 부재를 구분하기 어려우니
-        // 보수적으로 "살아있음 가능"=stale 아님 으로 본다(살아있는 데몬을 잘못 덮지 않게).
-        Err(_) => return false,
-    };
-
-    // 핸들을 열었어도 좀비(이미 종료했지만 핸들 잔존)일 수 있으니 exit code 로 한 번 더 확인.
-    // STILL_ACTIVE(259)면 살아있음. 그 외면 종료됨.
-    const STILL_ACTIVE: u32 = 259;
-    let mut code: u32 = 0;
-    // SAFETY: 방금 연 유효한 핸들과 스택의 u32 출력 포인터. 실패해도 code 는 그대로.
-    let ok = unsafe { GetExitCodeProcess(handle, &mut code) }.is_ok();
-    // SAFETY: OpenProcess 가 반환한 유효한 핸들을 한 번만 닫는다.
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-
-    // 조회 실패면 보수적으로 살아있다고 봄(stale 아님). 성공이면 STILL_ACTIVE 여부로 판정.
-    if !ok {
-        return false;
-    }
-    code != STILL_ACTIVE
-}
-
-#[cfg(not(windows))]
-fn pid_is_dead(_pid: u32) -> bool {
-    // non-windows: 생존 판정 미구현 — 보수적으로 살아있다고 봄(stale 아님).
-    false
+    !engram_dashboard_core::pty::platform::pid_alive_with_start_time(info.pid, info.start_time)
 }
 
 #[cfg(test)]
@@ -154,6 +102,7 @@ mod tests {
             port: 54321,
             token: "a".repeat(64),
             protocol_version: 1,
+            start_time: 0,
         }
     }
 
@@ -190,28 +139,53 @@ mod tests {
     fn serde_shape_is_stable() {
         // 필드 이름/형태 회귀 방지(클라이언트와 공유되는 wire 포맷).
         let info = sample();
-        let json = serde_json::to_string(&info).unwrap();
-        let back: DaemonInfo = serde_json::from_str(&json).unwrap();
+        let json = String::from_utf8(info.to_json_pretty().unwrap()).unwrap();
+        let back = DaemonInfo::parse(json.as_bytes()).unwrap();
         assert_eq!(back, info);
         assert!(json.contains("\"protocol_version\""));
         assert!(json.contains("\"port\""));
     }
 
+    #[cfg(windows)]
     #[test]
     fn pid_zero_is_stale() {
-        // PID 0 은 우리 데몬일 수 없음 → stale.
+        // PID 0 은 우리 데몬일 수 없음 → stale(windows).
         let mut info = sample();
         info.pid = 0;
-        // windows 에서는 true(stale), non-windows stub 에서는 false.
-        // 기본 동작만 확인: 패닉 없이 bool 을 돌려준다.
-        let _ = is_stale(&info);
+        assert!(is_stale(&info), "PID 0 은 stale");
     }
 
     #[test]
-    fn current_process_is_not_stale() {
-        // 현재 실행 중인 테스트 프로세스 PID 는 살아있으므로 stale 이 아니어야 한다.
+    fn current_process_with_unknown_start_time_is_not_stale() {
+        // start_time==0(미상, 옛 daemon.json) → PID 생존 fallback. 자기 PID 는 살아있으므로 not stale.
         let mut info = sample();
         info.pid = std::process::id();
-        assert!(!is_stale(&info), "현재 프로세스는 살아있어야 함");
+        info.start_time = 0;
+        assert!(
+            !is_stale(&info),
+            "미상 start_time + 살아있는 PID → not stale"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_process_with_matching_start_time_is_not_stale() {
+        // 자기 PID + 자기 creation time → not stale(정상 데몬).
+        let mut info = sample();
+        info.pid = std::process::id();
+        info.start_time =
+            engram_dashboard_core::pty::platform::current_process_start_time().unwrap();
+        assert!(!is_stale(&info), "PID+creation time 일치면 not stale");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_pid_with_mismatched_start_time_is_stale() {
+        // ★PID 재사용 방어★: 같은 PID 라도 creation time 이 다르면 stale(우리 데몬 아님).
+        let mut info = sample();
+        info.pid = std::process::id();
+        let real = engram_dashboard_core::pty::platform::current_process_start_time().unwrap();
+        info.start_time = real.wrapping_add(999);
+        assert!(is_stale(&info), "creation time 불일치 = 재사용 PID → stale");
     }
 }

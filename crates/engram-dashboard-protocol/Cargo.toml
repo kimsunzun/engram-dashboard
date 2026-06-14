@@ -7,6 +7,7 @@ description = "Engram Dashboard 경계 계약 — UI↔core/daemon wire 프로�
 # phase 0: 독립 crate(아직 workspace 미편입). phase 1 에서 root workspace member 로 편입 + core 가 의존.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"       # discovery::DaemonInfo parse/serialize(daemon.json 공유 계약)
 serde_bytes = "0.11"   # OutputChunk::TerminalBytes — Vec<u8> 를 number[] 아닌 바이트로(JSON 경로용)
 uuid = { version = "1", features = ["v4", "serde"] }
 ts-rs = { version = "10", features = ["uuid-impl"] }   # Rust→TS 타입 생성(결정 #2). uuid→string 매핑.

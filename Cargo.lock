@@ -898,13 +898,17 @@ name = "engram-dashboard"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "dunce",
  "engram-dashboard-core",
+ "engram-dashboard-protocol",
  "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "thiserror 1.0.69",
  "tracing",
  "uuid",
+ "windows 0.58.0",
 ]
 
 [[package]]
@@ -949,6 +953,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_bytes",
+ "serde_json",
  "ts-rs",
  "uuid",
 ]
