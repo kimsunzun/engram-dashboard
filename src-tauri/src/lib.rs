@@ -8,11 +8,13 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
+use base64::Engine as _;
+
 use persistence::FileProfileStore;
 use pty::manager::AgentManager;
 use pty::profile::{ProfileRegistry, RestoreReport};
 use pty::session_tracker::{SessionTracker, TrackerConfig};
-use pty::types::{AgentId, AgentInfo, AgentStatus, OutputSink, SinkError, SinkId};
+use pty::types::{AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId};
 
 // ── AppState ─────────────────────────────────────────────────────────────────
 
@@ -41,7 +43,15 @@ impl ChannelOutputSink {
 }
 
 impl OutputSink for ChannelOutputSink {
-    fn send(&self, event: PtyEvent) -> Result<(), SinkError> {
+    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+        // S12: 코어는 raw OutputFrame을 준다. base64 인코딩은 여기(Embedded sink) 책임 —
+        // Tauri JSON Channel이 바이너리를 못 실어서 base64로 우회. epoch는 Channel 경로에선
+        // 미사용(프론트가 [agentId,epoch] 재구독은 agent-list-updated로 트리거).
+        let event = PtyEvent {
+            agent_id: frame.agent_id,
+            seq: frame.seq,
+            data_b64: base64::engine::general_purpose::STANDARD.encode(frame.data),
+        };
         // send 실패 = 창이 닫힘 → drain이 dead sink로 감지해 구독자 목록에서 제거.
         self.channel.send(event).map_err(|_| SinkError)
     }

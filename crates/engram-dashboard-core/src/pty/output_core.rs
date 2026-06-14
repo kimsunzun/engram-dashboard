@@ -16,10 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use base64::Engine as _;
-
 use crate::pty::types::{
-    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputSink, PtyEvent, SinkId, StatusSink,
+    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputSink, SinkId, StatusSink,
     TerminalReason,
 };
 
@@ -84,23 +82,31 @@ impl OutputCore {
         #[allow(unreachable_patterns)]
         match event {
             OutputEvent::TerminalBytes(bytes) => {
-                // 3. seq 발급 + 이벤트 구성 (C2: 즉시 send — partial batch 정체 없음).
+                // 3. seq 발급 (C2: 즉시 send — partial batch 정체 없음).
                 let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                 let data = bytes;
-                let event = PtyEvent {
-                    agent_id: self.id,
-                    seq,
-                    data_b64: base64::engine::general_purpose::STANDARD.encode(&data),
-                };
 
-                // 4. replay 저장 — brief lock. 여기서 subscribers lock은 잡지 않는다(불변식 2).
+                // 4. ★replay 저장 먼저★ — brief lock. **순서 중요(gap 방지)**: replay.push가
+                //    fanout보다 먼저여야, subscribe가 이 사이에 끼어들어도 새 sink는 replay에서
+                //    이 seq를 받는다(최악 dup, 프론트 seq dedup이 흡수). 역순이면 gap 발생.
+                //    raw를 replay에 1회 clone(현 base64 String clone과 동등 비용), fanout은 borrow.
                 self.replay
                     .lock()
                     .expect("replay poisoned")
-                    .push(OutputChunk { seq, data });
+                    .push(OutputChunk {
+                        seq,
+                        data: data.clone(),
+                    });
 
                 // 5. ★불변식 1★ subscribers를 clone으로 스냅샷 뜨고 즉시 lock 해제 → lock 밖에서 send.
-                //    send는 blocking 가능(IPC). lock을 쥔 채 send하면 subscribe/다른 send와 교착·정체.
+                //    send는 blocking/try_send 가능. lock을 쥔 채 send하면 subscribe/다른 send와 교착·정체.
+                //    raw OutputFrame(borrow)을 넘긴다 — base64/wire 인코딩은 sink 책임(코어 transport-agnostic).
+                let frame = OutputFrame {
+                    agent_id: self.id,
+                    epoch: self.epoch,
+                    seq,
+                    data: &data,
+                };
                 let sinks = self
                     .subscribers
                     .lock()
@@ -109,7 +115,7 @@ impl OutputCore {
 
                 let mut dead = Vec::new();
                 for sink in sinks {
-                    if sink.send(event.clone()).is_err() {
+                    if sink.send(frame).is_err() {
                         dead.push(sink.sink_id());
                     }
                 }
@@ -238,13 +244,15 @@ impl OutputCore {
 
         // replay 전송 — snapshot의 seq와 이후 live chunk의 seq가 끊기지 않아 프론트가
         // seq로 dedup/정렬 가능. 막 등록된 sink라 send 실패는 unlikely → 무시(§7).
-        for chunk in snapshot {
-            let event = PtyEvent {
+        // raw OutputFrame(borrow) 전달 — 인코딩은 sink 책임.
+        for chunk in &snapshot {
+            let frame = OutputFrame {
                 agent_id: self.id,
+                epoch: self.epoch,
                 seq: chunk.seq,
-                data_b64: base64::engine::general_purpose::STANDARD.encode(&chunk.data),
+                data: &chunk.data,
             };
-            let _ = sink.send(event);
+            let _ = sink.send(frame);
         }
 
         // lock 해제 → emit 재개. (명시적 drop으로 lock 보유 구간을 분명히 표시)
@@ -316,10 +324,11 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// 받은 PtyEvent를 순서대로 수집하는 mock OutputSink.
+    /// 받은 출력을 (seq, raw data)로 순서대로 수집하는 mock OutputSink.
+    /// raw 경계화 검증: base64 아닌 raw 바이트가 그대로 오는지 확인.
     struct MockSink {
         id: SinkId,
-        events: Mutex<Vec<PtyEvent>>,
+        events: Mutex<Vec<(u64, Vec<u8>)>>,
     }
 
     impl MockSink {
@@ -331,7 +340,7 @@ mod tests {
         }
 
         fn seqs(&self) -> Vec<u64> {
-            self.events.lock().unwrap().iter().map(|e| e.seq).collect()
+            self.events.lock().unwrap().iter().map(|e| e.0).collect()
         }
 
         fn len(&self) -> usize {
@@ -340,8 +349,12 @@ mod tests {
     }
 
     impl OutputSink for MockSink {
-        fn send(&self, event: PtyEvent) -> Result<(), crate::pty::types::SinkError> {
-            self.events.lock().unwrap().push(event);
+        fn send(&self, frame: OutputFrame<'_>) -> Result<(), crate::pty::types::SinkError> {
+            // raw 바이트를 복사 보관(테스트 검증용).
+            self.events
+                .lock()
+                .unwrap()
+                .push((frame.seq, frame.data.to_vec()));
             Ok(())
         }
         fn sink_id(&self) -> SinkId {
@@ -392,6 +405,12 @@ mod tests {
         assert_eq!(sink.seqs(), vec![0, 1]);
         // 구독자에 2건 전달.
         assert_eq!(sink.len(), 2);
+        // ★raw 경계화 검증: sink가 base64 아닌 raw 바이트를 받았는지.
+        {
+            let ev = sink.events.lock().unwrap();
+            assert_eq!(ev[0].1, b"hello");
+            assert_eq!(ev[1].1, b"world");
+        }
         // replay에 2건 누적.
         let snap = core.snapshot();
         assert_eq!(snap.len(), 2);

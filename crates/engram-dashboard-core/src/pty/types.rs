@@ -104,12 +104,25 @@ pub struct OutputChunk {
     pub data: Vec<u8>,
 }
 
-/// 프론트로 나가는 PTY 출력 wire 포맷 — base64 인코딩으로 JSON 호환
+/// 프론트로 나가는 PTY 출력 wire 포맷 — base64 인코딩으로 JSON 호환.
+/// ※S12: 이건 **Embedded(Tauri JSON Channel) 전용** 표현. base64는 JSON Channel 제약이며
+/// 코어 관심사가 아니다 — ChannelOutputSink가 OutputFrame(raw)을 받아 이걸로 인코딩한다.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PtyEvent {
     pub agent_id: AgentId,
     pub seq: u64,
     pub data_b64: String,
+}
+
+/// 코어→sink 출력 경계 (S12 raw 경계화). **raw 바이트를 빌려서** 전달 — base64/wire 인코딩은
+/// sink 책임(Embedded=base64 PtyEvent, Daemon=binary frame). Copy(참조만)라 fanout 시 복사 0.
+/// agent_id/epoch는 OutputCore가 보유한 불변값을 그대로 싣는다(데몬 frame 헤더용).
+#[derive(Debug, Clone, Copy)]
+pub struct OutputFrame<'a> {
+    pub agent_id: AgentId,
+    pub epoch: u32,
+    pub seq: u64,
+    pub data: &'a [u8],
 }
 
 /// 에이전트 메타데이터 스냅샷 — 목록 조회 및 상태 동기화용
@@ -150,9 +163,11 @@ pub enum PtyError {
 #[derive(Debug)]
 pub struct SinkError;
 
-/// PTY 출력 전달 추상화 — Tauri 의존 없이 headless 테스트 가능하게 격리
+/// PTY 출력 전달 추상화 — Tauri 의존 없이 headless 테스트 가능하게 격리.
+/// ※S12: send는 **raw OutputFrame**을 받는다(base64 아님). wire 인코딩은 구현체가 소유:
+/// ChannelOutputSink=base64 PtyEvent / WsOutputSink=binary frame. → 코어 transport-agnostic.
 pub trait OutputSink: Send + Sync + 'static {
-    fn send(&self, event: PtyEvent) -> Result<(), SinkError>;
+    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError>;
     fn sink_id(&self) -> SinkId;
 }
 

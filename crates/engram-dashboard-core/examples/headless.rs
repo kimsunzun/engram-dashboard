@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
 use uuid::Uuid;
 
 use engram_dashboard_core::logging::{init_logging, mask_secrets, set_log_level};
@@ -18,7 +17,7 @@ use engram_dashboard_core::pty::manager::{default_shell, AgentManager};
 use engram_dashboard_core::pty::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_core::pty::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::pty::types::{
-    AgentId, AgentInfo, AgentStatus, OutputSink, PtyEvent, SinkError, SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId, StatusSink,
 };
 
 // ── LogSink ──────────────────────────────────────────────────────────────────
@@ -37,14 +36,12 @@ impl LogSink {
 }
 
 impl OutputSink for LogSink {
-    fn send(&self, event: PtyEvent) -> Result<(), SinkError> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&event.data_b64)
-            .unwrap_or_default();
-        let text = String::from_utf8_lossy(&bytes);
+    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+        // S12 raw 경계화: frame.data가 이미 raw 바이트(base64 디코드 불필요).
+        let text = String::from_utf8_lossy(frame.data);
         tracing::info!(
-            agent = %event.agent_id,
-            seq = event.seq,
+            agent = %frame.agent_id,
+            seq = frame.seq,
             "PTY out: {:?}",
             mask_secrets(&text)  // T-1: API키·토큰 마스킹 후 출력
         );
