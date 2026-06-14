@@ -873,7 +873,6 @@ dependencies = [
  "base64 0.22.1",
  "engram-dashboard-core",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -885,7 +884,6 @@ dependencies = [
 name = "engram-dashboard-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "dunce",
  "portable-pty",
  "regex",
@@ -904,7 +902,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_bytes",
- "serde_json",
  "ts-rs",
  "uuid",
 ]

@@ -5,6 +5,7 @@
 //! 소유권 분할(impl-spec 표): AgentSession은 id/cwd/epoch/cols/rows + core(Arc) + transport(Box)만 든다.
 //!   - master/child/shutdown/job/reader/writer → transport(PtyTransport) 안.
 //!   - subscribers/replay/seq/status/finalized → core(OutputCore) 안.
+//!
 //! 따라서 모든 메서드는 자기 필드(cols/rows atomic)를 만지거나 core/transport로 위임할 뿐이다.
 //!
 //! tauri import 0.

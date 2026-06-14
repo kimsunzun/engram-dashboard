@@ -79,7 +79,8 @@ impl OutputCore {
     pub fn emit(&self, event: OutputEvent) {
         // 미래 variant(TextDelta/Usage/...)는 무시. 현재 enum이 단일 variant라 `_` 팔이
         // 도달 불가하지만, variant 추가 시 자동으로 무시 동작이 되도록 의도적으로 둔다.
-        #[allow(unreachable_patterns)]
+        // single_match: variant-agnostic 의도(미래 variant 자동 무시)라 의도적으로 match 유지.
+        #[allow(unreachable_patterns, clippy::single_match)]
         match event {
             OutputEvent::TerminalBytes(bytes) => {
                 // 3. seq 발급 (C2: 즉시 send — partial batch 정체 없음).
@@ -89,7 +90,8 @@ impl OutputCore {
                 // 4. ★replay 저장 먼저★ — brief lock. **순서 중요(gap 방지)**: replay.push가
                 //    fanout보다 먼저여야, subscribe가 이 사이에 끼어들어도 새 sink는 replay에서
                 //    이 seq를 받는다(최악 dup, 프론트 seq dedup이 흡수). 역순이면 gap 발생.
-                //    raw를 replay에 1회 clone(현 base64 String clone과 동등 비용), fanout은 borrow.
+                //    raw를 replay에 1회 clone(N=1 구독 기준 구 base64 String clone과 실질 동률 — 구
+                //    emit은 replay move(0) + sink마다 String clone, 신 emit은 replay clone 1 + borrow fanout).
                 self.replay
                     .lock()
                     .expect("replay poisoned")

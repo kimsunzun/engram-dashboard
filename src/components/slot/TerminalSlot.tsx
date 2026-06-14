@@ -100,6 +100,8 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
         }
         sub = handle
       })
+      // 구독 실패(예: 직전 kill로 NotFound)는 unhandled rejection 방지용으로 흡수.
+      .catch(() => {})
 
     return () => {
       cancelled = true
