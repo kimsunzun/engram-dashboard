@@ -81,6 +81,16 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 
 ---
 
+## 참조 구현 (기능 구현 시 비교 참고)
+
+새 기능(특히 데몬화·원격·스트리밍·재연결·멀티플랫폼·에이전트 영속)을 설계·구현할 때 바닥부터 짜지 말고, 아래 성숙한 오픈소스가 같은 문제를 어떻게 풀었는지 먼저 보고 트레이드오프를 비교한다. **참조 = 패턴 차용이지 코드 복붙 아님** — 코드를 그대로 옮길 때만 라이선스 법무 확인. 소스는 `I:\Engram_Workspace\references\`에 클론돼 있다(git 추적 밖).
+
+- **tmux** — client-server attach/detach 원형. 데몬이 세션 보유, 클라가 붙고 떨어진다. control mode 프로토콜.
+- **Zellij** (Rust) — 기술스택 최근접 멀티플렉서. 서버/클라 분리·자체 IPC·플러그인 제어 표면.
+- **Mosh** — 끊겨도 살아남는 재연결·로밍(SSP state-sync). 모바일/불안정 네트워크 회복력.
+- **ttyd / gotty** — PTY를 WebSocket으로 브라우저에 스트리밍. engram 웹 프론트의 정확한 전송 모델.
+- **Hermes Agent** (Nous Research, MIT) — 에이전트 단위 영속 기억 + 멀티플랫폼 원격 입구(Telegram/Discord/Slack).
+
 ## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/` — S12 phase 1 이동)
 > 아래 `pty/`·`persistence/`·`logging/`는 S12 phase 1에서 `src-tauri/src/`→`crates/engram-dashboard-core/src/`로 이동(git mv, history 보존). 내부 `crate::` 경로는 무수정(코어 crate 의 top-level 모듈). `src-tauri`는 `engram_dashboard_core::{pty,persistence,logging}`로 re-import. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs).
 
