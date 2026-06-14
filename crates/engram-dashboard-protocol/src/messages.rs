@@ -12,6 +12,12 @@ use crate::ids::{AgentId, ProfileId, RequestId};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum AgentCommand {
+    /// 연결 후 첫 frame 전용 인증(설계 §4 step 4b). 데몬이 "연결 1초 내 첫 frame"으로만 유효성을
+    /// 강제한다 — 그 외 시점의 Auth 는 무시한다. token 은 daemon.json 의 256-bit hex.
+    Auth {
+        token: String,
+        protocol_version: u32,
+    },
     /// 새 에이전트 spawn. 프로필 참조.
     Spawn {
         #[ts(type = "string")]

@@ -12,6 +12,7 @@
 
 mod instance;
 mod portfile;
+mod ws;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,36 +20,16 @@ use std::sync::Arc;
 use engram_dashboard_core::logging;
 use engram_dashboard_core::persistence::FileProfileStore;
 use engram_dashboard_core::pty::manager::AgentManager;
-use engram_dashboard_core::pty::profile::{ProfileRegistry, RestoreReport};
+use engram_dashboard_core::pty::profile::ProfileRegistry;
 use engram_dashboard_core::pty::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::pty::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+
+use ws::{ConnRegistry, DaemonStatusSink};
 
 const DAEMON_FILE: &str = "daemon.json";
-
-// ── LogStatusSink ──────────────────────────────────────────────────────────────
-
-/// StatusSink 의 데몬 stub — 상태 변화를 tracing 으로만 남긴다.
-///
-/// ★다음 단위 교체 지점★: WS 서버가 생기면 이걸 `WsStatusSink`(연결된 클라이언트에게
-/// AgentEvent 를 push)로 교체한다. AgentManager::new 에 주입되는 단 한 곳만 바꾸면 됨.
-struct LogStatusSink;
-
-impl StatusSink for LogStatusSink {
-    fn status_changed(&self, id: AgentId, status: AgentStatus, epoch: u32) {
-        tracing::info!(agent = %id, ?status, epoch, "status_changed");
-    }
-
-    fn agent_list_updated(&self, agents: Vec<AgentInfo>) {
-        tracing::info!(count = agents.len(), "agent_list_updated");
-    }
-
-    fn restore_result(&self, report: RestoreReport) {
-        tracing::info!(agent = %report.agent_id, ?report.outcome, "restore_result");
-    }
-}
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
@@ -86,10 +67,12 @@ fn generate_token() -> Result<String, getrandom::Error> {
 // ── AgentManager 배선 (src-tauri lib.rs setup 미러) ───────────────────────────────
 
 /// src-tauri 의 setup 블록과 동일한 방식으로 AgentManager 를 조립한다.
-/// 차이: StatusSink 가 TauriStatusSink 대신 LogStatusSink. data_dir 은 Embedded 와 동일
-/// (dirs::data_dir()/com.engram.dashboard = Tauri app_data_dir).
-fn build_manager(data_dir: &std::path::Path) -> Arc<AgentManager> {
-    let status_sink = Arc::new(LogStatusSink);
+/// 차이: StatusSink 가 TauriStatusSink 대신 DaemonStatusSink(연결된 WS 클라이언트에 push).
+/// data_dir 은 Embedded 와 동일(dirs::data_dir()/com.engram.dashboard = Tauri app_data_dir).
+/// `registry` 는 main 에서 만들어 주입한다 — DaemonStatusSink 와 accept loop 가 같은 인스턴스를 공유해야
+/// status 브로드캐스트 대상(전 연결 conn_tx)이 일치한다.
+fn build_manager(data_dir: &std::path::Path, registry: ConnRegistry) -> Arc<AgentManager> {
+    let status_sink = Arc::new(DaemonStatusSink::new(registry));
 
     // 프로필 저장 = data_dir/agents.json (FileProfileStore 는 디렉토리를 받고 내부에서 파일명 결합).
     let store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
@@ -185,10 +168,18 @@ async fn run() -> Result<(), i32> {
         }
     };
 
-    // 5) AgentManager 배선(src-tauri 미러).
-    let manager = build_manager(&data_dir);
+    // 5) 연결 레지스트리(status 브로드캐스트용) — DaemonStatusSink 와 accept loop 가 공유한다.
+    //    main 에서 만들어 양쪽에 주입(같은 인스턴스 = 같은 연결 집합).
+    let registry = ConnRegistry::new();
 
-    // 6) daemon.json atomic 기록. 토큰을 포함하나 파일에만 — 로그엔 port/pid 만.
+    // 6) AgentManager 배선(src-tauri 미러). status_sink = DaemonStatusSink(registry).
+    let manager = build_manager(&data_dir, registry.clone());
+
+    // 7) auth 비교용 토큰을 Arc 로 보관한다 — daemon.json 기록(아래)에 token 을 move 하므로,
+    //    그 전에 공유본을 떠 둔다. 보안: 이 값은 로그/외부 노출 금지(handle_connection 내부 비교 전용).
+    let expected_token = Arc::new(token.clone());
+
+    // 8) daemon.json atomic 기록. 토큰을 포함하나 파일에만 — 로그엔 port/pid 만.
     let info = portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
@@ -208,7 +199,7 @@ async fn run() -> Result<(), i32> {
         "데몬 시작 — daemon.json 기록 완료"
     );
 
-    // 7) 복원은 blocking(3s 조기종료 윈도·stagger). spawn_blocking 으로 async executor 보호.
+    // 9) 복원은 blocking(3s 조기종료 윈도·stagger). spawn_blocking 으로 async executor 보호.
     //    핸들을 보관한다 — 종료 시 shutdown_all 전에 in-flight restore 와 경합하지 않게 abort.
     //    join 하지 않음 — 복원은 백그라운드로 진행(부팅 블로킹 방지, src-tauri 와 동일 의도).
     let restore_handle = {
@@ -218,24 +209,53 @@ async fn run() -> Result<(), i32> {
         })
     };
 
-    // 8) accept loop + Ctrl-C graceful 종료.
-    //    ★다음 단위(step 4b) TODO★: 아래 accept 한 stream 을
-    //      (a) WebSocket 업그레이드 → (b) Hello 에서 토큰 auth 검증 →
-    //      (c) AgentCommand/AgentEvent 프레임 핸들링(manager 에 위임).
-    //    지금은 수락 후 로그만 남기고 drop 한다.
-    tracing::info!("accept loop 시작(현재는 수락 후 drop — WS 핸들링은 다음 단위)");
+    // 10) 종료 신호 채널(watch). StopDaemon 명령이 이 watch 로 main 종료를 트리거한다.
+    //     ★종료 신호 방식★: tokio watch — 여러 연결이 동시에 send(true) 해도 안전(latest-wins),
+    //     수신측(아래 select!)이 변경을 1회 감지하면 충분. Notify 대신 watch 를 쓴 이유: 상태 보유
+    //     (이미 true 면 늦게 구독해도 즉시 감지)와 다중 sender clone 이 자연스럽다.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    // 11) accept loop. 각 연결을 handle_connection(WS 업그레이드 + auth + 프레임 핸들링)으로 넘긴다.
+    //     연결마다 task spawn — 한 연결의 느림/오류가 다른 연결·accept 를 막지 않는다.
+    //     종료 경로 2개: Ctrl-C(graceful) / StopDaemon(watch=true).
+    tracing::info!("accept loop 시작(WS 핸들링 활성)");
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((_stream, peer)) => {
-                        // TODO(step 4b): _stream 을 WS 업그레이드 + auth + 핸들링으로 넘긴다.
-                        tracing::info!(%peer, "연결 수락 — 현재는 drop(WS 미구현)");
-                        // _stream 은 여기서 drop → 연결 종료.
+                    Ok((stream, peer)) => {
+                        tracing::debug!(%peer, "연결 수락 — WS 핸들러로 넘김");
+                        // 연결당 task — 핸들러가 자체적으로 cleanup(unsubscribe + 레지스트리 제거)한다.
+                        let manager = manager.clone();
+                        let registry = registry.clone();
+                        let expected_token = expected_token.clone();
+                        let shutdown_tx = shutdown_tx.clone();
+                        tokio::spawn(async move {
+                            ws::handle_connection(
+                                stream,
+                                peer,
+                                manager,
+                                registry,
+                                expected_token,
+                                shutdown_tx,
+                            )
+                            .await;
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("accept 실패: {e}");
                     }
+                }
+            }
+            // StopDaemon 명령 수신 — watch 가 true 로 바뀌면 종료.
+            res = shutdown_rx.changed() => {
+                match res {
+                    Ok(()) if *shutdown_rx.borrow() => {
+                        tracing::info!("StopDaemon 수신 — graceful 종료 시작");
+                        break;
+                    }
+                    Ok(()) => {} // false 로의 변경은 무시(현재 발생 안 함)
+                    Err(_) => break, // 모든 sender drop — 종료
                 }
             }
             _ = tokio::signal::ctrl_c() => {

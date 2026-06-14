@@ -15,6 +15,10 @@ engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+# WS 서버(step 4b): accept_hdr_async(Origin 콜백)/split/Message. rustls 등 TLS 불필요(로컬 평문 WS).
+tokio-tungstenite = "0.26"
+# split(SplitSink/SplitStream) + StreamExt::next + SinkExt::send. WS read/write 분리에 필수.
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -22,6 +26,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 # 토큰 난수: 256-bit(32B) → hex 64자. rand 대신 getrandom — 의존 가벼움(OS CSPRNG 직접).
 getrandom = "0.2"
+# WsOutputSink sink_id 생성 + AgentId 파싱. core/protocol 과 동일 1.x(AgentId=Uuid).
+uuid = { version = "1", features = ["v4"] }
 # data_dir: Tauri app_data_dir 과 동일한 RoamingAppData(%APPDATA%) 폴더 반환 → Embedded 와 경로 일치.
 dirs = "5"
 
