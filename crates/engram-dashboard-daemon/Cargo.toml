@@ -1,0 +1,33 @@
+[package]
+name = "engram-dashboard-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 데몬 — 단일 인스턴스, 랜덤 포트 + 토큰 발급, AgentManager 소유. WS 서버는 다음 단위(phase 2 step 4b)."
+
+# 데몬 실행 진입점. AgentManager 를 daemon 프로세스가 소유하고, src-tauri(Embedded)와
+# 같은 core/protocol 을 공유한다.
+[[bin]]
+name = "engram-dashboard-daemon"
+path = "src/main.rs"
+
+[dependencies]
+engram-dashboard-core = { path = "../engram-dashboard-core" }
+engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+# 토큰 난수: 256-bit(32B) → hex 64자. rand 대신 getrandom — 의존 가벼움(OS CSPRNG 직접).
+getrandom = "0.2"
+# data_dir: Tauri app_data_dir 과 동일한 RoamingAppData(%APPDATA%) 폴더 반환 → Embedded 와 경로 일치.
+dirs = "5"
+
+# named mutex(단일 인스턴스) + pid liveness(OpenProcess). core 와 동일 0.58 버전 고정.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }

@@ -6,6 +6,7 @@ resolver = "2"
 members = [
     "crates/engram-dashboard-protocol",
     "crates/engram-dashboard-core",
+    "crates/engram-dashboard-daemon",
     "src-tauri",
 ]
 
