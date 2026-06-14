@@ -93,13 +93,43 @@ engram-dashboard/ (repo 루트 = workspace)
 - **acceptance test:** Tauri 재시작 → 데몬 생존 + 무손실 복원.
 
 ## 7. 사용자 결정 필요 (미해결)
-1. **idle-timeout 기본값** — OFF(항상 생존) vs "PTY 0+연결 0" N분 후 자살(30분?).
-2. **타입 생성** — ts-rs(안정) vs tauri-specta(통합, RC).
+1. ✅ **idle-timeout = OFF, 항상 생존** (결정 2026-06-14). 사유: 나중에 스케줄러로 에이전트를 깨울 수 있으므로 데몬이 늘 살아 있어야 함. idle 자동 종료 없음. (명시적 StopDaemon 커맨드로만 종료.)
+2. ✅ **타입 생성 = ts-rs** (결정 2026-06-14). 사유: 필요한 건 protocol 타입(AgentCommand/AgentEvent) 자동 생성뿐. tauri-specta의 invoke 바인딩 이점은 WS 데몬 경로엔 무효 + specta 2.0 RC 불안정. ts-rs 하나로 양 모드 타입 커버. u64 seq는 `#[ts(type="bigint")]` 또는 string 매핑 검토(JS number 2^53 한계).
 3. **truncated replay UX** — tail+표시(v1) vs VT snapshot(v2) vs disk spool. v1 범위.
 4. **로컬 transport** — TCP+토큰 단독(v1) vs named pipe+TCP 이중(강화 시점).
 5. **프론트 throttle 주체** — 데몬 16ms 묶음 vs 프론트 rAF flush.
 6. **version mismatch 시 old daemon** — 자동 종료 vs 사용자 확인.
 7. **다중 Tauri 인스턴스** — 단일 데몬 다중 창 허용 정책(이중 spawn 가드 manager.rs:90 데몬 유지 확인).
+
+## 8-b. 결정 로그 (Q&A 진행 2026-06-14)
+- **#1 idle-timeout = OFF, 항상 생존** (스케줄러로 에이전트 깨움 대비). 명시적 StopDaemon만.
+- **#2 타입 생성 = ts-rs** (WS라 tauri-specta invoke 이점 무효, RC 회피).
+- **#3 truncated replay = A(clear+tail+마커)** + **버퍼 = 설정가능 기본값, 에이전트(LLM)가 런타임 조정**(SetReplayBufferSize). **구조화 출력(turn 단위)**: 핵심 필수지만 **TUI↔구조화 스위칭 구조로 나중 설계**. claude는 interactive TUI(바이트, 단위끊기 X) vs `-p stream-json`(구조화 turn/tool, TUI 포기) 택일 — SDK 아님. 데몬은 OutputChunk가 양쪽(TerminalBytes / 구조화 variant + turnId) 표현 가능하게 **열어만 둠**, 구현은 스위칭 설계 때.
+- **#4 epoch 불일치 = full reset.** backpressure = bounded 큐 + **emit try_send(절대 블록 X = 코어 변경 0)** + 넘치면 **그 클라만 끊기**(watermark pause 안 씀 — 단순 disconnect 모델). **회복 = 클라 주도, 끊긴 원인별:**
+  - 서버가 버퍼로 끊을 때 → WS close 사유 태그(`SlowConsumer`) → 클라 **refresh 요청**(밀린 백로그 안 받고 현재로 점프).
+  - 그냥 에러(비정상 close) → 클라 **resume(afterSeq)** → 서버가 ring에 있으면 이어주고, 없으면 **refresh로 강등**.
+  - refresh가 주는 "현재 상태": v1=clear+tail(근사), v2=VT parser 화면 스냅샷(정확, 나중 — far-behind refresh가 v2의 분명한 동기).
+  - 원칙: **서버=버퍼 자율정책+상태 통보, 클라=resume/refresh 판단.** thrash 클라는 **서버가 rate-limit/블록 가능(나중)**.
+  - **회복 로직 위치: DaemonClient 분리**(네트워크 끊김은 Daemon에만 존재). Embedded는 회복 0. 공용 `AgentClient` 인터페이스 뒤 → 나중에 DaemonClient 안에서만 채우면 됨(공용·Embedded 무영향). **상세 구현은 나중.**
+
+## 8-d. 사용자 결정 7개 — 전부 완료 (2026-06-14)
+1. **idle-timeout = OFF, 항상 생존**(스케줄러로 에이전트 깨움 대비). StopDaemon만.
+2. **타입 생성 = ts-rs.**
+3. **truncated replay = A(clear+tail+"truncated" 마커).** 버퍼 = 설정가능 기본 + 에이전트(LLM) 런타임 조정. 구조화(turn 단위) 출력 = TUI↔구조화 **스위칭 모드로 나중 설계**(§8-c), 데몬은 OutputChunk 양 표현 열어만 둠.
+4. **epoch 불일치 = full reset.** backpressure = bounded + emit try_send(코어 변경 0) + 못 따라오면 처리 — **끊기 vs flow-control pause(클라 ACK)는 DaemonClient 구현 때 택1**(표준은 pause). 회복 = **클라 주도**: 끊긴 원인별(서버 close 사유 `SlowConsumer`→refresh / 비정상→resume), 서버는 resume 불가 시 refresh 강등. refresh "현재상태" = v1 clear+tail / v2 VT 스냅샷. 회복로직 = DaemonClient 분리(Embedded 회복 0). **상세 구현 나중.**
+5. **throttle = 표준**: 데몬은 read 청크 중계(특별 배칭 X), 클라는 xterm 프레임(rAF, skip-frame, 50MB) 렌더. 적응형/프레임스킵·sync mode·flow control 다 xterm이 가짐. (검증: ttyd/gotty 중계 + xterm.js rAF + 일반 터미널 vsync 렌더.)
+6. **버전 처리 = 한참 나중(deferred).** 지금 안 짬(둘 다 같이 띄움). 나중: protocolVersion(깨질 때만 +1) **또는/그리고** parse-error 시 **팝업 가이드**(사용자가 데몬 재시작) — auto-restart·협상 레이어 안 만듦.
+7. **클라이언트 = 1개(Tauri 앱 = Rust 백엔드 1개) + React 창 여러 개(뷰).** 공유 상태(레이아웃·슬롯 창간 이동·관리창 싱글톤)는 백엔드 한 곳, 창은 뷰(Tauri 창 = 독립 React라 공유는 백엔드/이벤트로). multi-subscriber는 클라이언트(앱·모바일)당 1연결 기준, 창당 아님. **다중창 상세 + 다중 .exe 정책 = 나중.**
+- **transport = v1 TCP(127.0.0.1)+토큰.** named pipe = v2 보안강화 옵션. (모바일 WS 직결 목표라 TCP 통일.)
+
+**→ 설계 결정 완결. 다음은 구현 단계. ★최우선: Job Object breakaway spike(데몬화 성패 단일 장애점) — phase 1 이전 단독 실측.**
+
+## 8-c. 모드 스위칭 아키텍처 (나중 구현, 짜고 사용자 검수)
+2축 직교: **위치**(Embedded/Daemon=AgentClient) ⟂ **모드**(TUI/Structured=AgentMode). 원칙: **모드 = [실행법+transport+capability+렌더러] 묶음, 코어(OutputCore/Session/Manager/AgentClient)는 모드 불가지.**
+- 백엔드: `AgentMode` enum→dispatch. `ClaudeTui`(interactive CommandSpec / PtyTransport / cap.output=terminal_bytes / emit TerminalBytes) vs `ClaudeStructured`(`-p stream-json` CommandSpec / **StreamJsonTransport**(신규, stdout JSON 라인 파싱) / cap.output=structured / emit TextDelta·ToolUse·ToolResult·Usage). 둘 다 같은 OutputCore.
+- 프론트: Slot이 `capability.output`으로 렌더러 선택 — terminal_bytes→TerminalRenderer(xterm, 기존) / structured→**StructuredRenderer**(turn 벡터·접기·VS Code풍, 신규). StructuredRenderer는 claude-stream-json + 미래 HTTP API 양쪽 섬김.
+- 이미 있음(S10): AgentTransport trait·OutputCore variant-agnostic emit·OutputChunk/Capabilities 슬롯·backend dispatch. 신규: AgentMode·StreamJsonTransport·StructuredRenderer·turnId/exchangeId.
+- 스위칭 = spawn 시점 결정(라이브 변환 불가 — TUI vs stream-json은 다른 프로세스 실행). 모드 변경 = 해당 모드로 재spawn(필요 시 --resume, 출력모드 바꿔 resume 가능성은 실측). 갈아엎기 0 — 모드 추가 = transport 1 + 렌더러 1 + 묶음.
 
 ## 8. 모델별 기여 (참고)
 - Claude-Opus(가장 신뢰, 사실오류 0, 코드 직접 검증): 단일 WS·binary frame·try_send=코어변경0·"Job 소유권 이전=환상"·breakaway 단일장애점·list 스냅샷·version 협상.
