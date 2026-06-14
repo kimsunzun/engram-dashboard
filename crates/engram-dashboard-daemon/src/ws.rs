@@ -132,49 +132,126 @@ impl Default for ConnRegistry {
     }
 }
 
-// ── 타입 변환(core ↔ wire) ─────────────────────────────────────────────────────
+// ── 타입 변환(core → wire) ─────────────────────────────────────────────────────
 //
-// core::AgentInfo/RestoreReport 는 Serialize 전용 미러, protocol 타입은 Serialize+Deserialize.
-// 둘은 글자 그대로 동일한 JSON 형태(domain.rs 주석 "글자 그대로 일치")라 serde_json roundtrip 으로
-// 안전히 변환한다. AgentEvent(wire 타입 임베드)를 직렬화하려면 wire 타입이 필요하다.
+// ★명시 매핑(runtime reflection 폐기)★: 옛 구현은 serde_json::to_value→from_value 로 core↔wire
+// 를 변환했다. 이러면 한쪽 필드/태그가 어긋나도 컴파일은 통과하고 런타임에 silent drop(None) 됐다.
+// 이제는 필드를 하나하나 명시 매핑한다 — core 에 필드가 추가/개명되면 **컴파일 에러**가 나게.
+//
+// 변환은 데몬 crate 에 둔다(core 는 protocol 무의존 유지 — §1 불변). orphan rule 때문에 외부 두
+// 타입 사이 `impl From` 은 불가하나, 데몬이 양쪽을 다 의존하므로 자유 함수로 직접 필드 접근한다.
+
+use engram_dashboard_core::pty::profile::RestoreOutcome as CoreRestoreOutcome;
+use engram_dashboard_core::pty::types::Capabilities as CoreCaps;
+use engram_dashboard_protocol::{
+    Capabilities as WireCaps, ControlCaps as WireControlCaps, InputCaps as WireInputCaps,
+    ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps, RestoreOutcome as WireRestoreOutcome,
+    SessionCaps as WireSessionCaps,
+};
+
+/// core Capabilities → wire. 5개 sub-cap 의 모든 bool 필드를 명시 매핑.
+fn caps_to_wire(c: &CoreCaps) -> WireCaps {
+    WireCaps {
+        input: WireInputCaps {
+            raw: c.input.raw,
+            message: c.input.message,
+            attachment: c.input.attachment,
+        },
+        output: WireOutputCaps {
+            terminal_bytes: c.output.terminal_bytes,
+            markdown: c.output.markdown,
+            tool_events: c.output.tool_events,
+            usage: c.output.usage,
+        },
+        control: WireControlCaps {
+            resize: c.control.resize,
+            interrupt: c.control.interrupt,
+            cancel: c.control.cancel,
+            graceful_shutdown: c.control.graceful_shutdown,
+        },
+        session: WireSessionCaps {
+            resume: c.session.resume,
+            snapshot: c.session.snapshot,
+            cwd_env: c.session.cwd_env,
+        },
+        model: WireModelCaps {
+            select: c.model.select,
+            temperature: c.model.temperature,
+            max_tokens: c.model.max_tokens,
+        },
+    }
+}
+
+/// core AgentStatus → wire. 5개 variant 전수 명시 — variant 추가 시 컴파일 에러로 강제.
+fn status_to_wire(status: &CoreStatus) -> engram_dashboard_protocol::AgentStatus {
+    use engram_dashboard_protocol::AgentStatus as W;
+    match status {
+        CoreStatus::Running => W::Running,
+        CoreStatus::Exiting => W::Exiting,
+        CoreStatus::Exited { code } => W::Exited { code: *code },
+        CoreStatus::Failed { message } => W::Failed {
+            message: message.clone(),
+        },
+        CoreStatus::Killed => W::Killed,
+    }
+}
+
+/// core AgentInfo → wire. 모든 필드 명시(누락 시 컴파일 에러).
+fn agent_info_to_wire(a: &CoreAgentInfo) -> WireAgentInfo {
+    WireAgentInfo {
+        id: a.id,
+        name: a.name.clone(),
+        cwd: a.cwd.clone(),
+        status: status_to_wire(&a.status),
+        cols: a.cols,
+        rows: a.rows,
+        epoch: a.epoch,
+        capabilities: caps_to_wire(&a.capabilities),
+    }
+}
+
+/// core RestoreOutcome → wire. 전 variant 명시.
+/// ★Uuid→String★: core FreshFallback{old_sid: Option<Uuid>, new_sid: Uuid} 를 wire 의
+/// {Option<String>, String} 으로 `to_string()` 변환(옛 reflection 은 JSON string 우연 호환에
+/// 의존했음). 명시 변환으로 이 변환을 코드로 못박는다.
+fn restore_outcome_to_wire(outcome: &CoreRestoreOutcome) -> WireRestoreOutcome {
+    match outcome {
+        CoreRestoreOutcome::Resumed => WireRestoreOutcome::Resumed,
+        CoreRestoreOutcome::Started => WireRestoreOutcome::Started,
+        CoreRestoreOutcome::FreshFallback {
+            old_sid,
+            new_sid,
+            reason,
+        } => WireRestoreOutcome::FreshFallback {
+            old_sid: old_sid.map(|u| u.to_string()),
+            new_sid: new_sid.to_string(),
+            reason: reason.clone(),
+        },
+        CoreRestoreOutcome::Blocked { reason } => WireRestoreOutcome::Blocked {
+            reason: reason.clone(),
+        },
+        CoreRestoreOutcome::Failed { reason } => WireRestoreOutcome::Failed {
+            reason: reason.clone(),
+        },
+    }
+}
 
 fn core_agents_to_wire(agents: Vec<CoreAgentInfo>) -> Vec<WireAgentInfo> {
-    agents
-        .into_iter()
-        .filter_map(|a| {
-            // 변환 실패 시 어느 agent 인지 알 수 있게 agent_id 를 로그에 포함(M3).
-            let agent_id = a.id;
-            match serde_json::to_value(&a).and_then(serde_json::from_value) {
-                Ok(w) => Some(w),
-                Err(e) => {
-                    tracing::error!(%agent_id, "AgentInfo core→wire 변환 실패: {e}");
-                    None
-                }
-            }
-        })
-        .collect()
+    agents.iter().map(agent_info_to_wire).collect()
 }
 
-fn core_report_to_wire(report: CoreRestoreReport) -> Option<RestoreReport> {
-    match serde_json::to_value(&report).and_then(serde_json::from_value) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            tracing::error!("RestoreReport core→wire 변환 실패: {e}");
-            None
-        }
+/// core RestoreReport → wire. 모든 필드 명시(누락 시 컴파일 에러).
+fn core_report_to_wire(report: CoreRestoreReport) -> RestoreReport {
+    RestoreReport {
+        agent_id: report.agent_id,
+        epoch: report.epoch,
+        outcome: restore_outcome_to_wire(&report.outcome),
     }
 }
 
-/// core::AgentStatus → wire JSON value. StatusChanged 직렬화에 사용.
-/// AgentEvent::StatusChanged 는 wire AgentStatus 를 요구하므로 roundtrip 변환.
-fn core_status_to_wire(status: CoreStatus) -> Option<engram_dashboard_protocol::AgentStatus> {
-    match serde_json::to_value(&status).and_then(serde_json::from_value) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            tracing::error!("AgentStatus core→wire 변환 실패: {e}");
-            None
-        }
-    }
+/// core AgentStatus → wire. StatusChanged 직렬화에 사용.
+fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protocol::AgentStatus {
+    status_to_wire(&status)
 }
 
 /// AgentEvent 를 JSON 문자열로 직렬화(control 전송용). 실패는 거의 불가능하나 로그 후 None.
@@ -207,12 +284,9 @@ impl DaemonStatusSink {
 
 impl StatusSink for DaemonStatusSink {
     fn status_changed(&self, id: AgentId, status: CoreStatus, epoch: u32) {
-        let Some(wire_status) = core_status_to_wire(status) else {
-            return;
-        };
         let ev = AgentEvent::StatusChanged {
             agent_id: id,
-            status: wire_status,
+            status: core_status_to_wire(status),
             epoch,
         };
         if let Some(text) = event_json(&ev) {
@@ -230,10 +304,9 @@ impl StatusSink for DaemonStatusSink {
     }
 
     fn restore_result(&self, report: CoreRestoreReport) {
-        let Some(wire) = core_report_to_wire(report) else {
-            return;
+        let ev = AgentEvent::RestoreResult {
+            report: core_report_to_wire(report),
         };
-        let ev = AgentEvent::RestoreResult { report: wire };
         if let Some(text) = event_json(&ev) {
             self.registry.broadcast_text(text);
         }
@@ -760,16 +833,26 @@ async fn dispatch(
             request_id,
         } => {
             // ── M4: force 정책 ──────────────────────────────────────────────────
-            // force=false 인데 활성 에이전트가 남아 있으면 거부(종료하지 않음). 실수로 데몬을
-            // 내려 살아있는 PTY 세션을 모두 죽이는 사고를 막는다. 활성 0이거나 force=true 면 진행.
-            let active = manager.list_agents();
-            if !force && !active.is_empty() {
+            // force=false 인데 **실활성** 에이전트가 남아 있으면 거부(종료하지 않음). 실수로 데몬을
+            // 내려 살아있는 PTY 세션을 모두 죽이는 사고를 막는다. 실활성 0이거나 force=true 면 진행.
+            // ★실활성만 카운트★: 이미 죽은(Exited/Killed/Failed)·종료중(Exiting) 세션은 제외한다 —
+            //   이들 때문에 거부하면 살릴 게 없는데도 데몬을 못 내리는 오작동이 된다.
+            let active_count = manager
+                .list_agents()
+                .iter()
+                .filter(|a| {
+                    matches!(
+                        a.status,
+                        CoreStatus::Running // 비-terminal·비-Exiting 만 실활성
+                    )
+                })
+                .count();
+            if !force && active_count > 0 {
                 send_error(
                     conn_tx,
                     Some(request_id),
                     format!(
-                        "active agents present ({}); use force=true to stop the daemon",
-                        active.len()
+                        "active agents present ({active_count}); use force=true to stop the daemon"
                     ),
                 )
                 .await;
@@ -1266,9 +1349,99 @@ mod tests {
                 "variant {core_status:?} 가 다른 wire status 로 변환됨"
             );
             // (c) core_status_to_wire 단독 경로도 동일 결과.
-            let direct = core_status_to_wire(core_status.clone())
-                .unwrap_or_else(|| panic!("variant {core_status:?} core_status_to_wire 실패"));
+            let direct = core_status_to_wire(core_status.clone());
             assert_eq!(direct, expected_wire, "직접 변환 경로도 일치해야 함");
         }
+    }
+
+    // ── 9. (적용1) core::RestoreOutcome 전 variant → wire 명시 변환 ──────────────────
+    //    특히 FreshFallback 의 Uuid→String 변환을 명시 검증(옛 reflection 의 우연 호환 제거).
+    #[test]
+    fn all_restore_outcomes_convert_to_wire() {
+        use engram_dashboard_core::pty::profile::RestoreOutcome as Co;
+        use engram_dashboard_protocol::RestoreOutcome as Wo;
+
+        let old = uuid::Uuid::new_v4();
+        let new = uuid::Uuid::new_v4();
+
+        // Resumed / Started — unit variant.
+        assert_eq!(restore_outcome_to_wire(&Co::Resumed), Wo::Resumed);
+        assert_eq!(restore_outcome_to_wire(&Co::Started), Wo::Started);
+
+        // FreshFallback(old=Some) — Uuid → String 변환 단언.
+        match restore_outcome_to_wire(&Co::FreshFallback {
+            old_sid: Some(old),
+            new_sid: new,
+            reason: "r".into(),
+        }) {
+            Wo::FreshFallback {
+                old_sid,
+                new_sid,
+                reason,
+            } => {
+                assert_eq!(old_sid, Some(old.to_string()), "old_sid Uuid→String");
+                assert_eq!(new_sid, new.to_string(), "new_sid Uuid→String");
+                assert_eq!(reason, "r");
+            }
+            other => panic!("FreshFallback 기대, got {other:?}"),
+        }
+
+        // FreshFallback(old=None) — None 보존.
+        match restore_outcome_to_wire(&Co::FreshFallback {
+            old_sid: None,
+            new_sid: new,
+            reason: "r2".into(),
+        }) {
+            Wo::FreshFallback { old_sid, .. } => assert_eq!(old_sid, None, "None 보존"),
+            other => panic!("FreshFallback 기대, got {other:?}"),
+        }
+
+        // Blocked / Failed — reason 보존.
+        assert_eq!(
+            restore_outcome_to_wire(&Co::Blocked { reason: "b".into() }),
+            Wo::Blocked { reason: "b".into() }
+        );
+        assert_eq!(
+            restore_outcome_to_wire(&Co::Failed { reason: "f".into() }),
+            Wo::Failed { reason: "f".into() }
+        );
+    }
+
+    // ── 10. (적용4-1) OriginCheck::on_request 분기 — 무방비 였던 거부/허용 분기 검증 ──────
+    //    순수 헤더 검사라 in-process 서버 불필요. Request 를 직접 만들어 콜백을 호출한다.
+    fn run_origin_check(origin: Option<&str>) -> Result<(), ()> {
+        use tokio_tungstenite::tungstenite::http::Request as HttpRequest;
+        let mut builder = HttpRequest::builder().uri("/");
+        if let Some(o) = origin {
+            builder = builder.header("origin", o);
+        }
+        let request = builder.body(()).unwrap();
+        // Response 는 콜백이 통과시키는 더미. on_request 는 self 를 소비한다.
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .body(())
+            .unwrap();
+        OriginCheck
+            .on_request(&request, response)
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+
+    #[test]
+    fn origin_check_allows_listed_origin() {
+        // allowlist 에 있는 Origin → 허용.
+        assert!(run_origin_check(Some("tauri://localhost")).is_ok());
+        assert!(run_origin_check(Some("http://localhost:1420")).is_ok());
+    }
+
+    #[test]
+    fn origin_check_rejects_unlisted_origin() {
+        // allowlist 밖 Origin → 거부(mutation 으로 무방비 였던 분기).
+        assert!(run_origin_check(Some("http://evil.example.com")).is_err());
+    }
+
+    #[test]
+    fn origin_check_allows_missing_origin() {
+        // Origin 헤더 없음 → 현 정책상 허용(네이티브/하네스, 토큰이 주 방어).
+        assert!(run_origin_check(None).is_ok());
     }
 }

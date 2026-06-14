@@ -419,8 +419,12 @@ async fn case01_auth_success_hello_and_list() {
 async fn case02_auth_wrong_token_closes() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_and_auth(server.port, &"f".repeat(64)).await;
-    // 서버는 Error 후 close 해야 한다.
-    assert!(c.expect_closed().await, "틀린 토큰이면 연결이 닫혀야 함");
+    // 서버는 Error 후 close 해야 한다. ★짧은 deadline★: 옛 expect_closed 는 10s recv timeout 에
+    //   기대 닫힘을 잡아 느리고 불명확했다(mutation D). 닫힘은 즉시 일어나므로 3s 안에 단언한다.
+    assert!(
+        c.expect_closed_within(Duration::from_secs(3)).await,
+        "틀린 토큰이면 연결이 즉시(3s 내) 닫혀야 함"
+    );
     server.shutdown().await;
 }
 
@@ -1339,6 +1343,75 @@ async fn case23_ws_parse_failure_error() {
         AgentEvent::AgentListUpdated { .. } => {}
         ev => panic!("파싱 실패 Error 후에도 연결 유지·동작해야, got {ev:?}"),
     }
+
+    server.shutdown().await;
+}
+
+// ── 케이스 24: dispatch 실패 arm — 없는 agent_id Kill → Error(req echo) ─────────────
+//   정상계(case13~)만 타던 갭을 메운다. manager 가 NotFound 를 반환하면 dispatch 가 그 에러를
+//   Error{request_id: Some(보낸 req)} 로 매핑하는지.
+#[tokio::test]
+async fn case24_ws_kill_unknown_agent_error() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::Kill {
+        agent_id: Uuid::new_v4(), // 존재하지 않는 agent
+        request_id: req,
+    })
+    .await;
+    let msg = c.await_error(req).await;
+    assert!(
+        msg.contains("not found"),
+        "없는 agent Kill 은 not found Error 여야: {msg}"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 25: dispatch 실패 arm — 없는 agent_id WriteStdin → Error(req echo) ─────────
+#[tokio::test]
+async fn case25_ws_write_unknown_agent_error() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::WriteStdin {
+        agent_id: Uuid::new_v4(),
+        data: b"x".to_vec(),
+        request_id: req,
+    })
+    .await;
+    let msg = c.await_error(req).await;
+    assert!(
+        msg.contains("not found"),
+        "없는 agent WriteStdin 은 not found Error 여야: {msg}"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 26: dispatch 실패 arm — 없는 profile_id Spawn → Error(req echo) ────────────
+#[tokio::test]
+async fn case26_ws_spawn_unknown_profile_error() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::Spawn {
+        profile_id: Uuid::new_v4(), // 레지스트리에 없는 프로필
+        request_id: req,
+    })
+    .await;
+    let msg = c.await_error(req).await;
+    assert!(
+        msg.contains("profile not found"),
+        "없는 profile Spawn 은 profile not found Error 여야: {msg}"
+    );
 
     server.shutdown().await;
 }

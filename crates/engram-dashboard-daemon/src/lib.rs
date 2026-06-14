@@ -427,4 +427,15 @@ mod tests {
         let b = generate_token().unwrap();
         assert_ne!(a, b);
     }
+
+    // (적용4-3) resolve_data_dir 가 identifier(com.engram.dashboard)로 끝나는지 — Embedded
+    //   app_data_dir 과 같은 폴더를 가리키는 불변식. 어긋나면 두 모드가 다른 agents.json 을 본다.
+    #[test]
+    fn resolve_data_dir_ends_with_identifier() {
+        let dir = resolve_data_dir();
+        assert!(
+            dir.ends_with("com.engram.dashboard"),
+            "data_dir 은 identifier 로 끝나야(Embedded 일치): {dir:?}"
+        );
+    }
 }
