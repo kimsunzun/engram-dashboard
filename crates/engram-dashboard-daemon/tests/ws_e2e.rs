@@ -210,6 +210,68 @@ impl Client {
         panic!("Error 도달 전 timeout/close");
     }
 
+    /// 다음 ProfileListUpdated 의 profiles 를 반환(중간 다른 event/frame 흡수). ListProfiles 응답 검증용.
+    async fn await_profile_list(&mut self) -> Vec<engram_dashboard_protocol::AgentProfile> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match self.next().await {
+                Some(Incoming::Event(AgentEvent::ProfileListUpdated { profiles })) => {
+                    return profiles
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        panic!("ProfileListUpdated 도달 전 timeout/close");
+    }
+
+    /// CRUD 응답을 한 번에 대기: Ack(req echo) **와** ProfileListUpdated 를 둘 다 본다(순서 무관).
+    /// reply(Ack) 와 broadcast_profile_list 의 큐잉 순서에 의존하지 않게 한 루프에서 함께 모은다.
+    /// 반환: 마지막으로 본 ProfileListUpdated 의 profiles.
+    async fn await_crud(&mut self, req: RequestId) -> Vec<engram_dashboard_protocol::AgentProfile> {
+        let mut saw_ack = false;
+        let mut profiles: Option<Vec<engram_dashboard_protocol::AgentProfile>> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while (!saw_ack || profiles.is_none()) && std::time::Instant::now() < deadline {
+            match self.next().await {
+                Some(Incoming::Event(AgentEvent::Ack { request_id })) => {
+                    assert_eq!(request_id, req, "CRUD Ack 의 request_id echo");
+                    saw_ack = true;
+                }
+                Some(Incoming::Event(AgentEvent::ProfileListUpdated { profiles: p })) => {
+                    profiles = Some(p);
+                }
+                Some(Incoming::Event(AgentEvent::Error {
+                    request_id: Some(rid),
+                    message,
+                })) if rid == req => panic!("CRUD 실패 Error(req={rid:?}): {message}"),
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            saw_ack && profiles.is_some(),
+            "CRUD 후 Ack({saw_ack})+ProfileListUpdated({}) 둘 다 와야",
+            profiles.is_some()
+        );
+        profiles.unwrap()
+    }
+
+    /// 다음 Snapshot event 의 (agent_id, chunks) 를 반환(중간 event/frame 흡수).
+    async fn await_snapshot(&mut self) -> (Uuid, Vec<engram_dashboard_protocol::SnapshotChunk>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match self.next().await {
+                Some(Incoming::Event(AgentEvent::Snapshot { agent_id, chunks })) => {
+                    return (agent_id, chunks)
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        panic!("Snapshot 도달 전 timeout/close");
+    }
+
     /// Spawn 응답을 한 번에 대기: Ack(req echo) **와** wanted agent_id 포함 AgentListUpdated 를
     /// **둘 다** 볼 때까지 수신한다(순서 무관). ★중요★: spawn_agent 은 agent_list_updated 브로드캐스트를
     /// reply(Ack) **전에** 큐잉하므로 conn_tx 순서가 [list, Ack] 이다. 따라서 await_ack 를 먼저 부르면
@@ -1785,6 +1847,303 @@ async fn case34_no_lease_write_stdin_passes_freely() {
     })
     .await;
     c.await_ack(req).await;
+
+    server.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// phase4 1단계: 프로필 CRUD + ad-hoc spawn 의 WS wire 경로.
+//   각 case 는 EmbeddedClient(invoke)와 동일 의미인지(인자/부작용)를 dispatch 경로로 검증한다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+// ── 케이스 35: WS CreateProfile → Ack + ProfileListUpdated(새 프로필 포함) ──────────
+#[tokio::test]
+async fn case35_ws_create_profile() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::CreateProfile {
+        name: "p35".into(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        extra_args: vec!["--foo".into()],
+        env: vec![],
+        auto_restore: true,
+        request_id: req,
+    })
+    .await;
+
+    let profiles = c.await_crud(req).await;
+    let created = profiles
+        .iter()
+        .find(|p| p.name == "p35")
+        .expect("ProfileListUpdated 에 새 프로필 p35 포함");
+    assert!(
+        matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args } if extra_args == &vec!["--foo".to_string()]),
+        "claude 프로필이 extra_args 보존"
+    );
+    assert!(created.auto_restore, "auto_restore 반영");
+    // manager(공유 레지스트리)에도 실제 등록됐는지 — dispatch 가 upsert 했다는 사실 확인.
+    assert!(
+        server.manager.profiles().get(created.id).is_some(),
+        "create 후 manager 레지스트리에 존재해야"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 36: WS ListProfiles → ProfileListUpdated ─────────────────────────────────
+#[tokio::test]
+async fn case36_ws_list_profiles() {
+    let server = start_test_server().await.unwrap();
+    // 미리 1개 등록(공개 API — start_test_server 배선 무수정).
+    let pre_id = register_shell_profile(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    c.send(&WireCommand::ListProfiles).await;
+    let profiles = c.await_profile_list().await;
+    assert!(
+        profiles.iter().any(|p| p.id == pre_id),
+        "ListProfiles 응답에 미리 등록한 프로필 포함"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 37: WS SpawnProfile → Ack + AgentListUpdated(그 profile_id 로) ────────────
+#[tokio::test]
+async fn case37_ws_spawn_profile() {
+    let server = start_test_server().await.unwrap();
+    let profile_id = register_shell_profile(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    // resume=false → Fresh spawn. agent_id == profile_id(프로필 id 가 곧 agent id).
+    let req = RequestId::new();
+    c.send(&WireCommand::SpawnProfile {
+        profile_id,
+        resume: false,
+        request_id: req,
+    })
+    .await;
+    c.await_spawn(profile_id, req).await;
+    assert!(
+        server.manager.agent_epoch(profile_id).is_some(),
+        "SpawnProfile 후 manager 에 agent 가 살아있어야"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 38: WS DeleteProfile → Ack + ProfileListUpdated(제거됨) ──────────────────
+#[tokio::test]
+async fn case38_ws_delete_profile() {
+    let server = start_test_server().await.unwrap();
+    let profile_id = register_shell_profile(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::DeleteProfile {
+        profile_id,
+        request_id: req,
+    })
+    .await;
+    let profiles = c.await_crud(req).await;
+    assert!(
+        !profiles.iter().any(|p| p.id == profile_id),
+        "DeleteProfile 후 목록에서 제거돼야"
+    );
+    assert!(
+        server.manager.profiles().get(profile_id).is_none(),
+        "manager 레지스트리에서도 제거"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 39: WS SetProfileAutoRestore → Ack + ProfileListUpdated(토글 반영) ────────
+#[tokio::test]
+async fn case39_ws_set_auto_restore() {
+    let server = start_test_server().await.unwrap();
+    // register_shell_profile 은 auto_restore=false 로 등록 → true 로 토글되는지 본다.
+    let profile_id = register_shell_profile(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::SetProfileAutoRestore {
+        profile_id,
+        auto_restore: true,
+        request_id: req,
+    })
+    .await;
+    let profiles = c.await_crud(req).await;
+    let p = profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .expect("토글 대상 프로필이 목록에 있어야");
+    assert!(p.auto_restore, "auto_restore 가 true 로 토글돼야");
+    assert!(
+        server
+            .manager
+            .profiles()
+            .get(profile_id)
+            .map(|p| p.auto_restore)
+            .unwrap_or(false),
+        "manager 레지스트리에도 토글 반영"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 40: WS SpawnByCwd → Ack + AgentListUpdated(새 ad-hoc agent) ──────────────
+#[tokio::test]
+async fn case40_ws_spawn_by_cwd() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    // SpawnByCwd 는 새 uuid 를 생성하므로 id 를 미리 모른다 → Ack + (목록 증가)로 확인한다.
+    let before = server.manager.list_agents().len();
+    let req = RequestId::new();
+    c.send(&WireCommand::SpawnByCwd {
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        request_id: req,
+    })
+    .await;
+    // Ack(req echo) 와 비어있지 않은 새 AgentListUpdated 를 둘 다 본다.
+    let mut saw_ack = false;
+    let mut saw_new = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while (!saw_ack || !saw_new) && std::time::Instant::now() < deadline {
+        match c.next().await {
+            Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
+                saw_ack = true;
+            }
+            Some(Incoming::Event(AgentEvent::AgentListUpdated { agents })) => {
+                if agents.len() > before {
+                    saw_new = true;
+                }
+            }
+            Some(Incoming::Event(AgentEvent::Error {
+                request_id: Some(rid),
+                message,
+            })) if rid == req => panic!("SpawnByCwd 실패 Error: {message}"),
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(
+        saw_ack && saw_new,
+        "SpawnByCwd 후 Ack({saw_ack})+증가한 AgentListUpdated({saw_new}) 둘 다 와야"
+    );
+    assert!(
+        server.manager.list_agents().len() > before,
+        "manager 에 ad-hoc agent 가 추가돼야"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 41: WS GetSnapshot → Snapshot(chunks) + Ack ──────────────────────────────
+#[tokio::test]
+async fn case41_ws_get_snapshot() {
+    let server = start_test_server().await.unwrap();
+    let id = spawn_shell_agent(&server);
+
+    // 결정적 출력을 쌓아 snapshot 에 chunk 가 있게 한다.
+    server.manager.write_stdin(id, b"echo SNAP41\r\n").unwrap();
+    wait_for_output(&server, id, 1).await;
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::GetSnapshot {
+        agent_id: id,
+        request_id: req,
+    })
+    .await;
+    let (aid, chunks) = c.await_snapshot().await;
+    assert_eq!(aid, id, "Snapshot 의 agent_id echo");
+    assert!(!chunks.is_empty(), "쌓인 출력이 snapshot chunk 로 와야");
+    // Ack 도 와야(요청 완료 확정).
+    c.await_ack(req).await;
+
+    server.shutdown().await;
+}
+
+// ── 케이스 42: WS SpawnProfile 없는 profile_id → Error(req echo) ────────────────────
+#[tokio::test]
+async fn case42_ws_spawn_profile_unknown_error() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::SpawnProfile {
+        profile_id: Uuid::new_v4(),
+        resume: false,
+        request_id: req,
+    })
+    .await;
+    let msg = c.await_error(req).await;
+    assert!(
+        msg.contains("profile not found"),
+        "없는 profile SpawnProfile 은 not found Error 여야: {msg}"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 43: WS SetProfileAutoRestore 없는 profile_id → Error(req echo) ────────────
+#[tokio::test]
+async fn case43_ws_set_auto_restore_unknown_error() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::SetProfileAutoRestore {
+        profile_id: Uuid::new_v4(),
+        auto_restore: true,
+        request_id: req,
+    })
+    .await;
+    let msg = c.await_error(req).await;
+    assert!(
+        msg.contains("profile not found"),
+        "없는 profile SetProfileAutoRestore 은 not found Error 여야: {msg}"
+    );
+
+    server.shutdown().await;
+}
+
+// ── 케이스 44: WS GetSnapshot 없는 agent_id → Error(req echo) ───────────────────────
+#[tokio::test]
+async fn case44_ws_get_snapshot_unknown_error() {
+    let server = start_test_server().await.unwrap();
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let req = RequestId::new();
+    c.send(&WireCommand::GetSnapshot {
+        agent_id: Uuid::new_v4(),
+        request_id: req,
+    })
+    .await;
+    let msg = c.await_error(req).await;
+    assert!(
+        msg.contains("not found") || !msg.is_empty(),
+        "없는 agent GetSnapshot 은 Error 여야: {msg}"
+    );
 
     server.shutdown().await;
 }

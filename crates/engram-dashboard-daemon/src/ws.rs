@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engram_dashboard_core::pty::manager::AgentManager;
+use engram_dashboard_core::pty::manager::{default_shell, AgentManager};
 use engram_dashboard_core::pty::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::pty::profile::SpawnMode;
 use engram_dashboard_core::pty::types::{
@@ -321,12 +321,17 @@ fn smallest(views: Option<&HashMap<String, (u16, u16)>>) -> Option<(u16, u16)> {
 // 변환은 데몬 crate 에 둔다(core 는 protocol 무의존 유지 — §1 불변). orphan rule 때문에 외부 두
 // 타입 사이 `impl From` 은 불가하나, 데몬이 양쪽을 다 의존하므로 자유 함수로 직접 필드 접근한다.
 
-use engram_dashboard_core::pty::profile::RestoreOutcome as CoreRestoreOutcome;
-use engram_dashboard_core::pty::types::Capabilities as CoreCaps;
+use engram_dashboard_core::pty::profile::{
+    AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
+    RestartPolicy as CoreRestartPolicy, RestoreOutcome as CoreRestoreOutcome,
+};
+use engram_dashboard_core::pty::types::{Capabilities as CoreCaps, OutputChunk as CoreOutputChunk};
 use engram_dashboard_protocol::{
-    Capabilities as WireCaps, ControlCaps as WireControlCaps, InputCaps as WireInputCaps,
-    ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps, RestoreOutcome as WireRestoreOutcome,
-    SessionCaps as WireSessionCaps,
+    AgentProfile as WireProfile, AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
+    ControlCaps as WireControlCaps, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
+    OutputCaps as WireOutputCaps, RestartPolicy as WireRestartPolicy,
+    RestoreOutcome as WireRestoreOutcome, SessionCaps as WireSessionCaps,
+    SnapshotChunk as WireSnapshotChunk,
 };
 
 /// core Capabilities → wire. 5개 sub-cap 의 모든 bool 필드를 명시 매핑.
@@ -418,6 +423,61 @@ fn restore_outcome_to_wire(outcome: &CoreRestoreOutcome) -> WireRestoreOutcome {
 
 fn core_agents_to_wire(agents: Vec<CoreAgentInfo>) -> Vec<WireAgentInfo> {
     agents.iter().map(agent_info_to_wire).collect()
+}
+
+/// core profile::AgentCommand → wire AgentSpawnCommand. 2 variant 전수 명시.
+fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
+    match cmd {
+        CoreSpawnCommand::Claude { extra_args } => WireSpawnCommand::Claude {
+            extra_args: extra_args.clone(),
+        },
+        CoreSpawnCommand::Shell { program, args } => WireSpawnCommand::Shell {
+            program: program.clone(),
+            args: args.clone(),
+        },
+    }
+}
+
+/// core RestartPolicy → wire. 3 variant 전수 명시(추가 시 컴파일 에러).
+fn restart_policy_to_wire(p: CoreRestartPolicy) -> WireRestartPolicy {
+    match p {
+        CoreRestartPolicy::Never => WireRestartPolicy::Never,
+        CoreRestartPolicy::OnCrash => WireRestartPolicy::OnCrash,
+        CoreRestartPolicy::Always => WireRestartPolicy::Always,
+    }
+}
+
+/// core AgentProfile → wire. 모든 필드 명시(누락/개명 시 컴파일 에러).
+/// ★Uuid→String / PathBuf→String★: claude_session_id·old_session_ids 는 Uuid, cwd 는 PathBuf 라
+/// JSON 표현(문자열)으로 명시 변환한다(reflection 왕복 금지 — agent_info_to_wire 와 동일 원칙).
+fn profile_to_wire(p: &CoreProfile) -> WireProfile {
+    WireProfile {
+        id: p.id,
+        name: p.name.clone(),
+        command: spawn_command_to_wire(&p.command),
+        cwd: p.cwd.to_string_lossy().into_owned(),
+        env: p.env.clone(),
+        claude_session_id: p.claude_session_id.map(|u| u.to_string()),
+        old_session_ids: p.old_session_ids.iter().map(|u| u.to_string()).collect(),
+        epoch: p.epoch,
+        auto_restore: p.auto_restore,
+        restart_policy: restart_policy_to_wire(p.restart_policy),
+        created_at: p.created_at,
+        last_active: p.last_active,
+        last_restore: p.last_restore,
+    }
+}
+
+fn core_profiles_to_wire(profiles: Vec<CoreProfile>) -> Vec<WireProfile> {
+    profiles.iter().map(profile_to_wire).collect()
+}
+
+/// core OutputChunk → wire SnapshotChunk. {seq, data} 명시 매핑.
+fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
+    WireSnapshotChunk {
+        seq: c.seq,
+        data: c.data.clone(),
+    }
 }
 
 /// core RestoreReport → wire. 모든 필드 명시(누락 시 컴파일 에러).
@@ -1243,6 +1303,135 @@ async fn dispatch(
             let _ = shutdown_tx.send(true);
             return true;
         }
+
+        // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────
+        // 각 arm 은 대응 Tauri command(EmbeddedClient)와 같은 동작을 해야 한다(인자/부작용 동일).
+        AgentCommand::SpawnByCwd { cwd, request_id } => {
+            // Tauri `spawn_agent(cwd)` 미러: 기본 셸 ad-hoc 프로필(auto_restore=false)을 Fresh spawn.
+            // (영속 등록은 manager.spawn_agent 내부 upsert 가 처리 — Tauri 경로와 동일.)
+            let profile = CoreProfile::new(
+                cwd.clone(),
+                CoreSpawnCommand::Shell {
+                    program: default_shell().to_string(),
+                    args: vec![],
+                },
+                std::path::PathBuf::from(&cwd),
+                vec![],
+                false,
+            );
+            let result = manager
+                .spawn_agent(&profile, SpawnMode::Fresh)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            // spawn_agent 성공 시 agent_list_updated 는 StatusSink 가 이미 브로드캐스트(Spawn arm 과 동일).
+            reply(conn_tx, request_id, result).await;
+        }
+
+        AgentCommand::ListProfiles => {
+            // Tauri `list_profiles` 미러 — 읽기 전용 조회. 요청 연결에만 응답(ListAgents 와 동형).
+            if let Some(text) = event_json(&AgentEvent::ProfileListUpdated {
+                profiles: core_profiles_to_wire(manager.profiles().list()),
+            }) {
+                let _ = conn_tx.send(WsOutbound::Text(text)).await;
+            }
+        }
+
+        AgentCommand::CreateProfile {
+            name,
+            cwd,
+            extra_args,
+            env,
+            auto_restore,
+            request_id,
+        } => {
+            // Tauri `create_claude_profile` 미러: claude 프로필 생성·upsert(스폰 안 함).
+            let profile = CoreProfile::new(
+                name,
+                CoreSpawnCommand::Claude { extra_args },
+                std::path::PathBuf::from(cwd),
+                env,
+                auto_restore,
+            );
+            manager.profiles().upsert(profile);
+            reply(conn_tx, request_id, Ok(())).await;
+            // 생성은 공유 상태 변경 → 전 연결에 갱신된 목록 push.
+            broadcast_profile_list(registry, manager);
+        }
+
+        AgentCommand::DeleteProfile {
+            profile_id,
+            request_id,
+        } => {
+            // Tauri `delete_profile` 미러: 등록 해제·persist(실행 중 세션은 별도 Kill).
+            // remove 는 무조건 성공(없는 id 면 no-op) — Tauri 경로와 동일하게 Ack.
+            manager.profiles().remove(profile_id);
+            reply(conn_tx, request_id, Ok(())).await;
+            broadcast_profile_list(registry, manager);
+        }
+
+        AgentCommand::SpawnProfile {
+            profile_id,
+            resume,
+            request_id,
+        } => {
+            // Tauri `spawn_profile` 미러: 저장된 프로필을 Resume/Fresh 로 spawn. 없으면 Error.
+            let mode = if resume {
+                SpawnMode::Resume
+            } else {
+                SpawnMode::Fresh
+            };
+            let result = match manager.profiles().get(profile_id) {
+                Some(profile) => manager
+                    .spawn_agent(&profile, mode)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                None => Err(format!("profile not found: {profile_id}")),
+            };
+            // 성공 시 agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
+            reply(conn_tx, request_id, result).await;
+        }
+
+        AgentCommand::SetProfileAutoRestore {
+            profile_id,
+            auto_restore,
+            request_id,
+        } => {
+            // Tauri `set_profile_auto_restore` 미러: update_with 로 토글. 없으면 Error(Tauri 와 동일).
+            let ok = manager
+                .profiles()
+                .update_with(profile_id, |p| p.auto_restore = auto_restore);
+            if ok {
+                reply(conn_tx, request_id, Ok(())).await;
+                broadcast_profile_list(registry, manager);
+            } else {
+                reply(
+                    conn_tx,
+                    request_id,
+                    Err(format!("profile not found: {profile_id}")),
+                )
+                .await;
+            }
+        }
+
+        AgentCommand::GetSnapshot {
+            agent_id,
+            request_id,
+        } => {
+            // Tauri `get_agent_snapshot` 미러: 그 시점 replay buffer 스냅샷 1회 조회. 없으면 Error.
+            match manager.get_snapshot(agent_id) {
+                Ok(chunks) => {
+                    if let Some(text) = event_json(&AgentEvent::Snapshot {
+                        agent_id,
+                        chunks: chunks.iter().map(snapshot_chunk_to_wire).collect(),
+                    }) {
+                        let _ = conn_tx.send(WsOutbound::Text(text)).await;
+                    }
+                    // Ack 로 요청 완료 확정(request_id echo).
+                    reply(conn_tx, request_id, Ok(())).await;
+                }
+                Err(e) => reply(conn_tx, request_id, Err(e.to_string())).await,
+            }
+        }
     }
     false
 }
@@ -1378,6 +1567,17 @@ async fn handle_subscribe(
 /// pump/cleanup 등 어느 컨텍스트에서 불려도 안전(block 없음).
 fn broadcast_lease_changed(registry: &ConnRegistry, agent_id: AgentId, held: bool) {
     let ev = AgentEvent::InputLeaseChanged { agent_id, held };
+    if let Some(text) = event_json(&ev) {
+        registry.broadcast_text(text);
+    }
+}
+
+/// 현재 프로필 목록을 전 연결에 브로드캐스트(ProfileListUpdated). 프로필 CRUD(생성/삭제/토글)는
+/// 공유 ProfileRegistry 상태를 바꾸므로 모든 뷰어가 최신 목록을 보게 한다(agent_list_updated 와 동형).
+fn broadcast_profile_list(registry: &ConnRegistry, manager: &Arc<AgentManager>) {
+    let ev = AgentEvent::ProfileListUpdated {
+        profiles: core_profiles_to_wire(manager.profiles().list()),
+    };
     if let Some(text) = event_json(&ev) {
         registry.broadcast_text(text);
     }

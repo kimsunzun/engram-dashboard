@@ -4,7 +4,9 @@
 
 use ts_rs::TS;
 
-use crate::domain::{AgentInfo, AgentStatus, Capabilities, RestoreReport};
+use crate::domain::{
+    AgentInfo, AgentProfile, AgentStatus, Capabilities, RestoreReport, SnapshotChunk,
+};
 use crate::ids::{AgentId, ProfileId, RequestId};
 
 /// UI→core 요청 envelope(설계 §3). side-effect 명령은 `request_id` 로 idempotent.
@@ -88,6 +90,60 @@ pub enum AgentCommand {
         kill_agents: bool,
         request_id: RequestId,
     },
+
+    // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────────
+    // EmbeddedClient(invoke)의 프로필 메서드와 1:1 대응. 두 모드가 같은 동작을 해야
+    // DaemonClient 가 EmbeddedClient 와 호환된다(아래 각 variant 주석에 대응 invoke 명시).
+    /// cwd 만으로 ad-hoc 셸 에이전트 spawn(영속 프로필 없이 transient). EmbeddedClient `spawnAgent(cwd)`
+    /// = Tauri `spawn_agent` 대응 — 기본 셸 명령 + auto_restore=false 로 Fresh spawn.
+    SpawnByCwd { cwd: String, request_id: RequestId },
+
+    /// 저장된 프로필 전체 조회. EmbeddedClient `listProfiles` = Tauri `list_profiles` 대응.
+    /// 응답은 [`AgentEvent::ProfileListUpdated`].
+    ListProfiles,
+
+    /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). EmbeddedClient `createClaudeProfile`
+    /// = Tauri `create_claude_profile` 대응. ※env 에 자격증명 금지(평문 persist).
+    CreateProfile {
+        name: String,
+        cwd: String,
+        extra_args: Vec<String>,
+        env: Vec<(String, String)>,
+        auto_restore: bool,
+        request_id: RequestId,
+    },
+
+    /// 프로필 삭제. EmbeddedClient `deleteProfile` = Tauri `delete_profile` 대응.
+    DeleteProfile {
+        #[ts(type = "string")]
+        profile_id: ProfileId,
+        request_id: RequestId,
+    },
+
+    /// 저장된 프로필 spawn. resume=true 면 기존 세션 이어받기(claude `--resume`).
+    /// EmbeddedClient `spawnProfile(agentId, resume)` = Tauri `spawn_profile` 대응.
+    SpawnProfile {
+        #[ts(type = "string")]
+        profile_id: ProfileId,
+        resume: bool,
+        request_id: RequestId,
+    },
+
+    /// auto_restore 토글. EmbeddedClient `setProfileAutoRestore` = Tauri `set_profile_auto_restore` 대응.
+    SetProfileAutoRestore {
+        #[ts(type = "string")]
+        profile_id: ProfileId,
+        auto_restore: bool,
+        request_id: RequestId,
+    },
+
+    /// replay buffer 스냅샷 조회. EmbeddedClient `getSnapshot` = Tauri `get_agent_snapshot` 대응.
+    /// 응답은 [`AgentEvent::Snapshot`]. (Subscribe replay 와 별개의 1회성 조회.)
+    GetSnapshot {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        request_id: RequestId,
+    },
 }
 
 /// core→UI 이벤트 envelope(설계 §3, JSON 경로). TerminalBytes 출력은 여기 없음(binary frame).
@@ -152,6 +208,17 @@ pub enum AgentEvent {
         agent_id: AgentId,
         held: bool,
     },
+    /// 프로필 목록 갱신(phase4 1단계). ListProfiles 응답 + CRUD(생성/삭제/토글) 후 자동 push.
+    /// 프론트 ProfileRegistry 미러 갱신용. AgentListUpdated 의 프로필판.
+    ProfileListUpdated { profiles: Vec<AgentProfile> },
+
+    /// GetSnapshot 응답 — 그 시점 replay buffer 스냅샷(phase4 1단계).
+    Snapshot {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        chunks: Vec<SnapshotChunk>,
+    },
+
     /// 오류 통지. request_id 있으면 특정 command 실패.
     Error {
         request_id: Option<RequestId>,

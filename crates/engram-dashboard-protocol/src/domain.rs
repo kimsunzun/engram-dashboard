@@ -3,7 +3,7 @@
 
 use ts_rs::TS;
 
-use crate::ids::AgentId;
+use crate::ids::{AgentId, ProfileId};
 
 /// 에이전트 생명주기 상태 — internally-tagged(`type`). 프론트 discriminated union.
 /// core(types.rs) AgentStatus 와 글자 그대로 일치.
@@ -116,4 +116,71 @@ pub struct RestoreReport {
     pub agent_id: AgentId,
     pub epoch: u32,
     pub outcome: RestoreOutcome,
+}
+
+// ── 프로필 wire 미러(phase4 1단계) ──────────────────────────────────────────────
+//
+// core(profile.rs) 의 AgentProfile/AgentCommand/RestartPolicy 직렬화 형태를 그대로 미러한다.
+// core 는 protocol 무의존(§1 불변)이라 core 타입을 여기 쓸 수 없다 — 그래서 같은 JSON 형태의
+// 독립 타입을 두고, core↔wire 명시 변환은 데몬이 한다(reflection 왕복 금지 — agent_info_to_wire 패턴).
+// 프론트 `src/api/types.ts` 의 AgentProfile/AgentCommand/RestartPolicy 와 글자 그대로 일치.
+
+/// 에이전트 실행 명령 wire 미러 — core `profile::AgentCommand` 와 동일(`#[serde(tag="kind")]`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "kind")]
+#[ts(export)]
+pub enum AgentSpawnCommand {
+    /// claude CLI. extra_args 는 세션 인자를 제외한 사용자 추가 인자.
+    Claude { extra_args: Vec<String> },
+    /// 임의 셸 프로그램.
+    Shell { program: String, args: Vec<String> },
+}
+
+/// 자동 재시작 정책 wire 미러 — core `profile::RestartPolicy` 와 동일.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum RestartPolicy {
+    Never,
+    OnCrash,
+    Always,
+}
+
+/// 영속 프로필 wire 미러 — core `profile::AgentProfile` 의 직렬화 형태와 일치.
+/// 프로필 CRUD command/event(ProfileListUpdated)에 실린다.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct AgentProfile {
+    #[ts(type = "string")]
+    pub id: ProfileId,
+    pub name: String,
+    pub command: AgentSpawnCommand,
+    /// 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
+    pub cwd: String,
+    /// ※자격증명 금지(평문 persist).
+    pub env: Vec<(String, String)>,
+    /// 현재 claude 세션 id(없으면 None).
+    #[ts(type = "string | null")]
+    pub claude_session_id: Option<String>,
+    /// 폐기된 과거 세션 id 이력.
+    #[ts(type = "string[]")]
+    pub old_session_ids: Vec<String>,
+    pub epoch: u32,
+    pub auto_restore: bool,
+    pub restart_policy: RestartPolicy,
+    pub created_at: i64,
+    pub last_active: i64,
+    #[ts(type = "number | null")]
+    pub last_restore: Option<i64>,
+}
+
+/// 출력 스냅샷 청크 wire 미러 — core `types::OutputChunk`({seq, data}) 와 일치.
+/// GetSnapshot 응답(AgentEvent::Snapshot)에 실린다. JSON 경로라 data 는 number[].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct SnapshotChunk {
+    #[ts(type = "number")]
+    pub seq: u64,
+    #[serde(with = "serde_bytes")]
+    #[ts(type = "number[]")]
+    pub data: Vec<u8>,
 }
