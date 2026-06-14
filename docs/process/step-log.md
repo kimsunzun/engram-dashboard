@@ -95,6 +95,12 @@
 - **검증:** unit test 38/38, `tsc` 0, `cargo fmt`, `pty/` tauri import 0, GUI 실측(9223 cdp eval — 트리 토글·이름·spawn/kill 실시간 갱신·`__engramLayout` 제어표면) 전부 PASS.
 - **보류:** tabs 구조(`content`→`tabs[]` 확장)·레이아웃 영속화·UI 동작의 완전 backend 이관(데몬화 때). `assignAgent`/`setSlotContent` 명령 중복은 편의로 유지.
 
+## S12 — 데몬화 (설계 단계, 2026-06-14)  · 별도 repo 분리
+- **repo 분리:** engram-dashboard를 Engram 모노레포에서 분리(54 커밋 history 보존, filter-repo) → `github.com/kimsunzun/engram-dashboard`(private) push. 모노레포는 추적 0(.gitignore), 폴더는 당분간 apps/engram-dashboard 잔류(나중에 이동). engram=고수준 LLM 워크스페이스 / engram-dashboard=LLM 운용 툴로 완전 분리.
+- **데몬화 결정·설계(consult 2회 교차검증):** 라이브러리 실조사(턴키 없음, 커스텀 불가피, replay=데몬 in-process, 경로 B-direct, raw tokio-tungstenite) + 세부 설계 비판. 상세: `S12-daemonization/{ipc-library-consult,daemon-design}.md`, tracking D-8.
+- **확정 핵심:** 단일 WS 연결(lane 분리 금지)·output hot path 커스텀 binary frame/control JSON·ring 잘림 truncated 분기·토큰 env/ACL portfile(arg 금지)·emit try_send=코어변경0·Job breakaway가 단일 장애점(spike #1). 두-모드 토글(Embedded/Daemon). Cargo workspace(core/protocol/daemon/tauri).
+- **상태:** 설계 완료, 구현 보류(사용자 결정 7개 대기: idle-timeout·타입생성·truncated UX·로컬 transport·throttle 주체·version mismatch·다중 인스턴스). ★최우선 spike: Job breakaway.
+
 ---
 
 ## 다음 (미진행)

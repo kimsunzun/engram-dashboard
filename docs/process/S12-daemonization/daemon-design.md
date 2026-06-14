@@ -1,0 +1,108 @@
+# S12 데몬화 — 상세 구현 설계 (consult 교차검증 병합, 구현 착수 가능 수준)
+
+날짜: 2026-06-14. 근거: `/consult` 2회(라이브러리 실조사 → 세부 설계 비판) GPT·Gemini·Claude-Opus 블라인드 + judge. 원자료: `agents/web-runner/shared/20260614-104428-consult-daemon-detail-design/`. 라이브러리 조사: `ipc-library-consult.md`.
+
+이 문서는 **판정으로 옳다고 확정된 입장만 병합**한 최종 설계다. 모순 쟁점은 judge가 단정한 쪽을 채택한다.
+
+## 0. 확정 전제 (재논쟁 없음)
+- 경로 B-direct(JS↔데몬 WS 직결, relay 금지), replay=데몬 in-process(OutputCore 재사용), 두-모드 토글(Embedded/Daemon, startup 선택), Cargo workspace 정적 링크, raw tokio-tungstenite, 1차 Windows.
+
+## 1. 핵심 판정 (모순 쟁점 — judge 단정)
+
+### 1-1. WS lane = 단일 연결, 단일 수신루프 (lane 분리 금지)
+- control과 output을 **별도 WS 연결로 분리하지 않는다.** TCP/WS 순서보장은 **연결당**이라, 별도 연결 2개는 크로스 순서보장이 없어 "Killed status가 마지막 output보다 먼저 도착"하는 인과 역전이 생긴다 → ET seq 정렬 신뢰성 붕괴.
+- **단일 127.0.0.1 WS 연결.** control 이벤트와 output을 같은 연결로, 클라는 **하나의 수신 루프**에서 처리(상대 순서 보존).
+- "PTY 폭주 시 status/ack가 backlog 뒤에 갇힌다"는 우려는 실재하나, 해법은 lane 분리가 아니라 **backpressure(§1-5)+프론트 throttle(§3-a)**다.
+
+### 1-2. wire codec = output hot path는 커스텀 고정헤더 binary frame, control은 JSON
+- base64-in-JSON 폐기(33% 팽창+CPU, 현 base64는 Tauri Channel JSON 제약 우회였음 — WS는 binary opcode 지원).
+- **output(hot path)**: WS **binary frame**, 고정 헤더 `[tag:1][agentId:16][epoch:4][seq:8][raw payload]`. 직렬화/파싱 0. `tag`가 OutputChunk variant 구분(0=TerminalBytes; 미래 API 출력은 throughput 낮아 control처럼 JSON).
+- **control(저빈도)**: WS **text frame JSON**(또는 MessagePack). 디코더 단순.
+- 종류 불가지(§2) 유지: wire 표현만 variant별로 갈릴 뿐 OutputChunk를 바이트로 굳히지 않음.
+- (전면 MessagePack도 허용 가능하나 hot path에 가변 인코딩 비용이 남아 비권장.)
+
+### 1-3. replay 기점 + ring 잘림 + raw≠화면상태 (★GPT가 잡은 결정적 보강)
+- epoch **불일치** = full reset. epoch **일치** = afterSeq+1 resume.
+- ★**replay buffer는 bounded(2MB/agent 상한 존재)** → `afterSeq < oldestSeq`(재연결 중 ring 밖으로 밀림)일 수 있다. **"seq 0부터 replay"는 물리적으로 불가능한 경우가 있다.** 분기 필수:
+  - epoch 불일치 → Reset, oldestSeq부터 replay, `truncated = oldestSeq>0`.
+  - epoch 일치 & afterSeq<oldestSeq → truncated replay(oldestSeq부터) + UI "output truncated" 표시.
+  - epoch 일치 & afterSeq≥oldestSeq → Resume(afterSeq+1부터).
+- ★**raw byte replay ≠ terminal 화면 상태**(alt-screen/cursor 위치/진행바/full-screen TUI는 중간부터 재생하면 깨짐). **v1 치명도: 치명 아님** — 정상 경로(처음부터 구독, ring 안)는 정확. truncated는 ring 밖 예외 경로에서만 degrade.
+- **v1 계약 명문화:** "exact byte resume만 보장. afterSeq가 replay window 안이면 gap/dup 0. window 밖이면 terminal state exact 복원 미보장 → clear + tail replay + 'output truncated' 표시." VT-parser snapshot/disk spool은 v2.
+
+### 1-4. 토큰 전달 = env 또는 ACL 포트파일만 (arg·query string 금지)
+- 프로세스 커맨드라인은 `wmic process`/`Get-CimInstance Win32_Process`로 **같은 사용자 타 프로세스가 읽는다** → CLI arg 토큰 노출. query string도 프록시/로그 흔적(loopback이라 위험 낮으나 0 아님).
+- 토큰은 **ACL 잠근 port.json(현 사용자 only) 또는 env**로만. 검증은 **연결 직후 첫 Auth frame**(1초 내 없으면 close).
+
+### 1-5. backpressure = bounded + emit try_send만 + slow consumer 끊기 (코어 변경 0)
+- producer(pump)가 느린 client로 **await하면 PTY read 정지 → 에이전트 멈춤.** `OutputSink.send`는 반드시 **non-blocking(try_send)**.
+- subscriber별 **bounded mpsc**. full → 그 subscriber **dead 마킹 + 소켓 close**(= 현 `output_core.rs:110-123` dead-sink 제거 메커니즘과 동형 → **코어 변경 0**). 재연결 + afterSeq replay로 회복(2MB ring 안전망).
+- drop 금지(seq 연속성·ANSI 깨짐), 무한버퍼 금지(OOM). 답은 "끊고 재연결 회복".
+
+## 2. 모듈/crate 레이아웃 (Cargo workspace, 정적 링크)
+```
+engram-dashboard/ (repo 루트 = workspace)
+  crates/
+    engram-dashboard-protocol/  [신규] AgentCommand·AgentEvent·OutputChunk·Hello·ID — serde, Tauri import 금지
+    engram-dashboard-core/      [이동] pty/ 전부 + persistence + logging. AgentManager·OutputCore·AgentTransport·backend. Tauri import 0
+  engram-dashboard-daemon/      [신규] main: lock/portfile·WS server·auth/version·AgentManager 소유·PTY Job 소유
+  src-tauri/                    [얇아짐] Embedded: core 직접 / Daemon: discovery·spawn만 + AgentClient 모드 전달
+  src/ (frontend)               AgentClient 인터페이스 신설, 컴포넌트·스토어는 인터페이스만 의존
+```
+
+## 3. protocol (engram-dashboard-protocol — linchpin)
+- `AgentCommand`(UI→core): Spawn{profileId}·Kill{agentId}·Interrupt·WriteStdin{agentId,data,**requestId**}·Resize{agentId,cols,rows,viewportId}·Subscribe{agentId,epoch?,afterSeq?}·Unsubscribe·ListAgents·StopDaemon{force,killAgents}·Profile(CRUD).
+- `AgentEvent`(core→UI): Hello{protocolVersion,daemonVersion,capabilities}·Ack{requestId}·SubscribeAck{action(Reset|TruncatedReplay|Resume),currentEpoch,oldestSeq,latestSeq,replayFrom,truncated}·Output{agentId,epoch,seq,chunk:OutputChunk}(binary frame)·ReplayComplete·StatusChanged{agentId,status,epoch}·AgentListUpdated{agents}·RestoreResult·Error.
+- `OutputChunk`: TerminalBytes(serde_bytes Vec<u8>)·TextDelta·Usage·ToolCall·Structured — 종류 불가지 유지.
+- 타입 생성: ts-rs(안정) vs tauri-specta(통합, RC 리스크) — **사용자 결정**.
+- **command idempotency**: 모든 side-effect command에 `requestId`. 데몬은 짧은 TTL dedup table. **자동 재시도 금지**(writeStdin 중복=입력 중복). send 후 ack 전 끊김 → reconnect 후 QueryCommandResult(requestId).
+
+## 3-a. 프론트 (AgentClient)
+- 공통 인터페이스: `subscribe(agentId,onEvent)` + `onConnectionStateChange(connected|reconnecting|down)`. spawn/kill/interrupt/writeStdin/resize/unsubscribe/listAgents.
+- EmbeddedClient: invoke/Channel 그대로, connectionState 항상 connected, dedup no-op.
+- DaemonClient: WS + 지수 백오프 재연결 + 재연결 시 자동 Subscribe{epoch,afterSeq:lastReceivedSeq} + seq dedup(재연결 경계 1~2개 중복 흡수). 재연결·afterSeq·dedup은 **내부 격리**(인터페이스에 안 올림 — Embedded LSP 냄새 방지).
+- **연결 직후 데몬이 전체 agent list 스냅샷 push**(재연결 중 AgentListUpdated 유실 방지 — terminal 판정 정확성).
+- ★**프론트 렌더 throttle 필수**: 고속 PTY 출력이 그대로 React로 유입되면 가상 DOM 렌더 밀려 탭 freeze/OOM. rAF/16ms 단위 chunking. **주체 결정(사용자)**: 데몬 측 16ms 묶음 vs 프론트 rAF flush.
+- ★**multi-client ControlLease**: 같은 agent에 desktop+mobile 동시 시 PTY size 하나뿐 → writeStdin/resize/interrupt는 lease owner만(ControlLease{agentId,ownerClientId,viewportId,expiresAt}). read-only viewer 분리.
+
+## 4. 데몬 생명주기 (Windows)
+- spawn: Tauri 앱이 `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB`로 detached spawn. 데몬은 자기 수명 소유.
+- ★**Job Object breakaway = 데몬화 성패의 단일 장애점.** `CREATE_BREAKAWAY_FROM_JOB`은 부모 job이 `JOB_OBJECT_LIMIT_BREAKAWAY_OK`를 설정한 경우에만 성공. IDE/VS Code 통합터미널 등이 breakaway 불허 job에 자식을 넣으면 분리 실패 → 앱 종료 시 데몬 동반 사망 → **데몬화 무효.** fallback: `cmd /c start /b` 경유 spawn. **★spike #1 — phase 1 이전 단독 실측 필수.**
+- ★**"Job 소유권 이전"은 환상 — 삭제.** Job 핸들은 프로세스 로컬, 이전 불가. 데몬 모드=데몬이 PTY를 직접 spawn하니 자기 Job(KILL_ON_JOB_CLOSE)에 넣으면 끝. 모드별 spawn 주체가 갈리므로 런타임 이전 시나리오 없음.
+- 단일 인스턴스: **`Local\` named mutex**(현 사용자 한정 — `Global\`보다 안전) + ACL 잠근 `%LOCALAPPDATA%\Engram\daemon.json`{port,pid,token,protocolVersion} atomic write(persistence tmp+rename 재사용).
+- 발견: **bind 127.0.0.1:0(랜덤 포트)** → port.json. Tauri가 읽어 /health 접속. 고정 포트 금지(충돌·stale).
+- 부팅: stale 포트파일/mutex의 pid 죽었는지 확인 후 정리.
+- 종료: UI 닫혀도 생존(목적). `StopDaemon` 커맨드(§5 LLM 제어). **idle-timeout 기본값 사용자 결정**(C=OFF / Gemini=30분; 양립안: "PTY 0 + 연결 0" N분 지속 시 자살, 활성 에이전트 있으면 무한 생존).
+- **protocolVersion 협상**: 데몬은 앱과 독립 배포 수명 → Hello로 버전 확인. incompatible → StopDaemon(old)+new spawn(자동 vs 사용자확인 = 결정).
+
+## 5. 보안
+- 127.0.0.1만 bind(0.0.0.0/LAN 금지, 모바일 켜기 전). 256-bit 토큰(env/ACL port.json). 첫 Auth frame 검증. **Origin allowlist**(Tauri origin). message size/rate limit. permessage-deflate off.
+- named pipe(ACL로 OS레벨 제한)는 데스크톱 보안 강화 v2 옵션. 모바일 v3 = wss/TLS + pairing + device allowlist.
+
+## 6. 구현 phasing
+- **★spike 0 (phase 1 이전):** Job Object breakaway 실측. 부모 job(IDE/터미널) breakaway 불허 시 분리 가능 여부 + fallback(`cmd /c start /b`) 검증. **안 풀리면 전체 무효.**
+- **phase 0:** engram-dashboard-protocol 확정. 테스트: ts-rs/tauri-specta 타입생성, codec golden frame, OutputChunk forward-compat, version mismatch.
+- **phase 1:** engram-dashboard-core workspace 추출(Tauri import 0 유지) + 프론트 AgentClient 인터페이스 + EmbeddedClient. **embedded 회귀 0**(spawn/write/resize/kill, seq monotonic, StrictMode 중복 방어). protocolVersion 포함.
+- **phase 2:** 데몬 단독 + 격리 하네스(transport_smoke 확장). 필수 케이스:
+  - 수명주기: single instance / stale port·lock / incompatible version / **UI kill→데몬 생존** / **데몬 kill→PTY child 정리** / duplicate spawn race / **breakaway 성공 확인**.
+  - 보안: token 없음·오답·Origin mismatch·oversized·auth timeout 거부.
+  - 출력: order exact / afterSeq 경계 off-by-one / afterSeq==latest / **afterSeq<oldest(truncated)** / epoch mismatch / replay중 live 경합 / **C4 gap·dup 0** / slow consumer disconnect / reconnect 복구 / ring memory cap.
+  - PTY: high throughput / resize 폭주 / interrupt / child exit·crash / stdin close.
+- **phase 3:** 하네스 CI 영구 보존(protocol golden / core contract / embedded contract / daemon contract / Windows lifecycle).
+- **phase 4:** 접합부 스왑. startup config mode=embedded|daemon → AgentClientFactory. 라이브 핫스왑 안 함.
+- **acceptance test:** Tauri 재시작 → 데몬 생존 + 무손실 복원.
+
+## 7. 사용자 결정 필요 (미해결)
+1. **idle-timeout 기본값** — OFF(항상 생존) vs "PTY 0+연결 0" N분 후 자살(30분?).
+2. **타입 생성** — ts-rs(안정) vs tauri-specta(통합, RC).
+3. **truncated replay UX** — tail+표시(v1) vs VT snapshot(v2) vs disk spool. v1 범위.
+4. **로컬 transport** — TCP+토큰 단독(v1) vs named pipe+TCP 이중(강화 시점).
+5. **프론트 throttle 주체** — 데몬 16ms 묶음 vs 프론트 rAF flush.
+6. **version mismatch 시 old daemon** — 자동 종료 vs 사용자 확인.
+7. **다중 Tauri 인스턴스** — 단일 데몬 다중 창 허용 정책(이중 spawn 가드 manager.rs:90 데몬 유지 확인).
+
+## 8. 모델별 기여 (참고)
+- Claude-Opus(가장 신뢰, 사실오류 0, 코드 직접 검증): 단일 WS·binary frame·try_send=코어변경0·"Job 소유권 이전=환상"·breakaway 단일장애점·list 스냅샷·version 협상.
+- GPT(결정적 보강): ★ring 잘림 truncated 분기·raw≠화면상태·command idempotency·control lease·named mutex 단독 위험.
+- Gemini(단독 포착): ★프론트 렌더 throttle(rAF)·zombie daemon idle-timeout.
+- 기각: GPT의 control/output lane 분리(크로스 순서보장 없음), Gemini의 "무조건 seq 0"·토큰 arg/query 허용.
