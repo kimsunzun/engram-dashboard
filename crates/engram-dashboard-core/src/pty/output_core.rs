@@ -280,11 +280,16 @@ impl OutputCore {
     }
 }
 
-/// 늦게 붙는 창을 위한 PTY 출력 ring buffer — 상한 2MB, 초과 시 앞부터 제거.
+/// 늦게 붙는 창을 위한 PTY 출력 ring buffer — 상한 2MB **그리고** event 수 상한.
+/// ★event 수 상한 이유(S12 consult, GPT 단독 catch): byte 상한만 있으면 1바이트 청크가
+/// 폭주할 때 event 수가 수백만으로 불어, 신규 구독자가 replay를 받을 때 bounded mpsc를
+/// 즉시 가득 채워 매 재연결이 slow-consumer로 끊기는 영구 루프가 생긴다. 둘 중 하나라도
+/// 초과하면 앞부터 evict. (불변식: max_events ≤ 데몬 WS 송신 큐 cap − control_slack.)
 pub struct ReplayBuffer {
     chunks: VecDeque<OutputChunk>,
     total_bytes: usize,
     max_bytes: usize,
+    max_events: usize,
 }
 
 impl ReplayBuffer {
@@ -293,13 +298,17 @@ impl ReplayBuffer {
             chunks: VecDeque::new(),
             total_bytes: 0,
             max_bytes: 2 * 1024 * 1024,
+            // 4096: 데몬 WS 송신 큐 cap(예 4608) − control_slack(512) 이하로 잡아
+            // replay만으로 신규 구독자 큐가 넘치지 않게 한다.
+            max_events: 4096,
         }
     }
 
     pub fn push(&mut self, chunk: OutputChunk) {
         self.total_bytes += chunk.data.len();
         self.chunks.push_back(chunk);
-        while self.total_bytes > self.max_bytes {
+        // byte 상한 OR event 수 상한 둘 중 하나라도 넘으면 앞부터 제거.
+        while self.total_bytes > self.max_bytes || self.chunks.len() > self.max_events {
             if let Some(oldest) = self.chunks.pop_front() {
                 self.total_bytes -= oldest.data.len();
             } else {
@@ -436,6 +445,24 @@ mod tests {
         // 이후 live emit → seq 끊김 없이 이어짐.
         core.emit(OutputEvent::TerminalBytes(b"c".to_vec()));
         assert_eq!(sink.seqs(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn replay_buffer_caps_event_count() {
+        // 1바이트 청크 폭주 → byte 상한(2MB)엔 한참 못 미치지만 event 수 상한(4096)에 걸려야 함.
+        let mut rb = ReplayBuffer::new();
+        for seq in 0..5000u64 {
+            rb.push(OutputChunk {
+                seq,
+                data: vec![b'x'],
+            });
+        }
+        let snap = rb.snapshot();
+        // 정확히 max_events(4096)로 cap.
+        assert_eq!(snap.len(), 4096);
+        // 가장 오래된 것부터 evict → 남은 첫 seq = 5000-4096 = 904.
+        assert_eq!(snap.first().unwrap().seq, 904);
+        assert_eq!(snap.last().unwrap().seq, 4999);
     }
 
     #[test]

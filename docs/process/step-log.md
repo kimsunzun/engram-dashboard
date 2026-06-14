@@ -105,7 +105,10 @@
 - **✅ phase 1 완료(2026-06-14):** Cargo workspace 추출 + 프론트 AgentClient.
   - 1a: pty/persistence/logging→`crates/engram-dashboard-core`(git mv, 내부 crate:: 무수정). examples 동반. 격리 게이트 0. 회귀 0(unit 38/headless·smoke/빌드/tauri dev target 재배치 정상). 커밋 `576c5e1`.
   - 1b: AgentClient 인터페이스+EmbeddedClient(Channel·base64·#13133 캡슐화)+clientFactory(§5 window.__ENGRAM_AGENT__). 컴포넌트 ptyApi→agentClient. GUI E2E PASS(spawn→subscribe→writeStdin 277B/3청크, kill 0, UI 정상). 커밋 `5346240`.
-- **다음:** phase 2(데몬 단독 bin + WS server + 격리 하네스). spawn=WMI(spike #1), 토큰=ACL port.json. ★구현 전 이름 충돌(SpawnSpec 개명) 처리.
+- **phase 2 consult 완료(2026-06-14):** GPT·Gemini·Claude-opus 블라인드+judge. 병합: `S12-daemonization/phase2-design-consult.md`. 핵심: "코어 변경 0"은 거짓(raw-first 필요)·try_send 안전·core protocol무의존(데몬 번역)·연결단위 cleanup·SubscribeAck 순서 race 실재·ReplayBuffer event-cap 필요(GPT)·WsStatusSink 필요(GPT). Gemini 오류 2(split Control Lane 데드락 오인·WMI를 PTY child에 오적용) 폐기.
+- **✅ phase 2 Step1(raw 경계화) 커밋 `122078f`:** OutputSink::send(OutputFrame raw), base64 책임을 ChannelOutputSink로 이동. 회귀 0(unit 38+headless+GUI E2E 285B). 
+- **✅ phase 2 Step3(ReplayBuffer event-cap) — unit 39.**
+- **다음(★사용자 결정 5개 대기 — daemon bin Step4 진입 전):** ①SubscribeAck 순서 보장 방식(데몬 단일 conn_tx[코어변경0] vs OutputCore SubscriptionSink[견고] — 권장 전자) ②seq u64 JS 표현(number 현재 vs bigint/string) ③port.json ACL 강도(보안 담당) ④송신 큐 모델(단일 conn_tx vs agent별+select! — 권장 후자) ⑤Tauri WebView2 실제 Origin 실측. 그 외 Step2(SpawnSpec 개명, serde 무영향=wire 안전)·Step4(daemon bin: mutex/port.json/WS server/auth/WsOutputSink/WsStatusSink)·Step5(WMI discovery)·Step6(하네스)는 결정 후 진행.
 
 ---
 
