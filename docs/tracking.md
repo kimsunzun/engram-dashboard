@@ -60,6 +60,28 @@
 - **출처:** dr26 ExitRequested 재확인. shutdown_all이 agent마다 kill_agent의 recv_timeout(5s) 순차 누적 → drain hang 시 N개=5Ns 지연. 정상 경로는 즉시(spike 23ms 실측).
 - **조치:** 다수 에이전트 + 비정상 hang 동시 발생 시에만 체감. 필요 시 병렬 kill(스레드/join) 또는 timeout 단축.
 
+### D-7. 레이아웃/창 영속화 저장 위치 = 프론트엔드 localStorage (2026-06-14 결정, 구현 보류)
+- **결정:** 다중창 레이아웃·테마·좌표 영속화는 **프론트엔드 localStorage**에 둔다. 백엔드 파일 불필요.
+- **사용 시나리오(확정):** 개인용(팀/공유 없음). 백엔드 1·프론트 1 코드베이스. **창마다 독립 레이아웃+독립 테마**(A창 슬롯4 / B창 슬롯3 식, 멀티모니터 배치용). 각 창의 `{id, x, y, w, h, theme, layout(슬롯 트리)}`를 저장 → 부팅 시 그대로 재생성·복원.
+- **왜 백엔드가 아니라 프론트인가(검토 결론):**
+  1. **저장 위치 ≠ 제어 표면.** §5가 요구하는 건 *커맨드(제어 표면)*의 LLM 도달성이지 상태 바이트의 백엔드 저장이 아니다. LLM은 dispatch에 커맨드만 쏘고, 저장은 프론트 구현 디테일 — 직교한다.
+  2. **콜드 부팅 다중창 복원을 프론트가 할 수 있다.** main 창 JS가 localStorage 읽고 → 자기 좌표 `getCurrentWindow().setPosition()` → 나머지 창 `new WebviewWindow(id,{x,y,w,h,url})`(`@tauri-apps/api/webviewWindow`) → 각 창이 자기 슬라이스로 hydrate. `withGlobalTauri:true`. 창 생성은 Tauri JS API 호출일 뿐 데이터는 백엔드 불요.
+  3. 좌표 추적도 프론트: 창 이벤트 `onMoved`/`onResized`/`onCloseRequested`에서 localStorage 갱신.
+- **진짜 마찰(알고 가야 함, 해결책 동반):**
+  1. localStorage는 origin 단위 창 공유 → 동시 쓰기 클로버 위험. **창 id별 키 분리**(`engram:win:<id>`)로 각 창이 자기 슬라이스만.
+  2. LLM(백엔드 두뇌)이 현재 레이아웃을 *읽으려면* localStorage 직접 접근 불가 → 프론트 query 커맨드 왕복 또는 §5 임시경로(`cdp.mjs eval`). "저장"은 무문제, "읽기"만 왕복.
+- **구현 순서(착수 시):** 세션 모델(창별 객체) 정의 → 좌표 추적(창 이벤트)+부팅 복원 시퀀스 → 단일 창 layout+theme persist부터 검증 → 다중창 동적 생성(`WebviewWindowBuilder`/JS `WebviewWindow`, 현 conf.json은 정적 3창 고정이라 신규 기능) 복원.
+- **데몬과의 관계:** 창들이 서로 독립 상태라 "창 간 실시간 동기화" 불요 → **데몬 없이 localStorage만으로 성립.** 데몬화(에이전트 생존)와 별개 트랙.
+- **보류 사유:** 데몬화를 먼저 진행하기로(2026-06-14, "걸리적거림" 해소 우선). 이 결정은 그대로 보존, 데몬 후 착수.
+
+### D-8. 데몬화 IPC — 턴키 라이브러리 없음, 커스텀 불가피 (2026-06-14 consult, 착수 보류)
+- **결론:** JS↔Rust 데몬 IPC에 핵심 불변식(replay→live 순서·seq dedup·epoch 재구독)을 공짜로 주는 성숙 라이브러리 **없음**. 커스텀 구현 불가피, 규모 MVP 1~3주 + production 3~6주+. 사용자 지시("커지면 하지 말 것")에 따라 **착수 보류**.
+- **방법:** `/consult` GPT·Gemini·Claude-Opus 블라인드 + judge. 3종+judge 만장일치: 라이브러리는 transport(전송선)만, 정확성은 데몬 session core 책임.
+- **합의(judge 검증 옳음):** ① replay=데몬 자체 보유(OutputCore source of truth, broker 위임 X) ② 경로=B-contract-first(JS↔데몬 WS 직결, envelope를 B 기준 고정, tarpc/jsonrpsee로 A 따로 구현 금지) ③ 커스텀=YES(OutputCore 재사용으로 0부터는 아님).
+- **탈락:** tarpc(JS 미도달)·tonic/grpc-web(브라우저 bidi 불가)·jsonrpsee 재연결(손실분 식별 불가)·NATS/nats.ws(브라우저 클라 2026-05-08 아카이브).
+- **★사용자 결정 필요(착수 전):** (1) raw `tokio-tungstenite` vs Socket.IO+socketioxide — judge는 raw WS(lock-in 회피·의존성 최소), 양쪽 다 seam 뒤면 후회비용 낮음 (2) 모바일 원격 TLS·인증 (3) backpressure 정책.
+- **상세:** `docs/process/S12-daemonization/ipc-library-consult.md`.
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)

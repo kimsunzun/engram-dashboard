@@ -99,7 +99,7 @@
 
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
-- **[입주 1단계] 재시작 생존 = auto-restore + UI 레이아웃 영속화** — 입주 시 백엔드 재시작이 잦은데, (a) 에이전트는 `restart_agent`/restore로 부활(claude `--resume` 실측 PASS), (b) **레이아웃·슬롯 배치는 현재 영속화 0**(slotStore plain Zustand, persist 미들웨어 없음 → 재시작 시 초기화). 둘 다 작고 즉효 — 입주 전 선결.
+- **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
 - **[입주 2단계] 에이전트 데몬화 (Rust 서버 + React 소켓 클라, tmux 모델)** — UI 재시작이 에이전트를 안 죽이게(서버가 세션 보유, 클라가 attach). **시점 결정: 에이전트 안정화(자동재시작·복원) 끝난 직후.** 공수 ~1~2주, `ptyApi.ts`/`eventBus`/`OutputSink`가 길목이라 facade swap(갈아엎기 X). 로컬 속도 영향 0(이미 직렬화 중, loopback 한 홉). 원격/모바일과 동일 인프라. **전제: "메시지 패싱·무상태 클라" 규율 유지**(공유메모리·동기 가정 금지)로 double-stabilization 방지 — facade 한 곳만 재검증.
 - **[큰 것] 원격(WS) 프론트 = 모바일 제어** — 데몬화(2단계)의 자연 연장. 에이전트는 데스크톱(데몬)에서 돌고 폰은 원격 I/O 프론트로 attach. 인증/TLS 추가. 보안 1급.
 - **[아이디어] 모드 시스템 (터미널/클로드/코덱스/api)** — 슬롯/에이전트의 "mode" 라벨이 [AgentCommand variant + transport + 기본 렌더러]를 묶어 고름. 터미널=Shell, 클로드·코덱스=콘솔(PtyTransport), api=ApiTransport(비-터미널, capability.output로 렌더러 분기). 모드 추가 = variant+backend(+api는 transport)+렌더러 하나. S10 추상화 위 UI 표현.
