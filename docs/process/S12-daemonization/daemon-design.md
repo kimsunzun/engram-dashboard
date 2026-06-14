@@ -30,9 +30,10 @@
 - ★**raw byte replay ≠ terminal 화면 상태**(alt-screen/cursor 위치/진행바/full-screen TUI는 중간부터 재생하면 깨짐). **v1 치명도: 치명 아님** — 정상 경로(처음부터 구독, ring 안)는 정확. truncated는 ring 밖 예외 경로에서만 degrade.
 - **v1 계약 명문화:** "exact byte resume만 보장. afterSeq가 replay window 안이면 gap/dup 0. window 밖이면 terminal state exact 복원 미보장 → clear + tail replay + 'output truncated' 표시." VT-parser snapshot/disk spool은 v2.
 
-### 1-4. 토큰 전달 = env 또는 ACL 포트파일만 (arg·query string 금지)
+### 1-4. 토큰 전달 = ACL 포트파일만 (arg·query string·env 금지) ★spike #1 후 갱신
 - 프로세스 커맨드라인은 `wmic process`/`Get-CimInstance Win32_Process`로 **같은 사용자 타 프로세스가 읽는다** → CLI arg 토큰 노출. query string도 프록시/로그 흔적(loopback이라 위험 낮으나 0 아님).
-- 토큰은 **ACL 잠근 port.json(현 사용자 only) 또는 env**로만. 검증은 **연결 직후 첫 Auth frame**(1초 내 없으면 close).
+- ~~env~~ 도 폐기: **WMI `Win32_Process.Create`(spike #1 채택 spawn)는 환경변수 주입 불가** → env 경로 자체가 데몬에 안 통함.
+- 토큰은 **ACL 잠근 port.json(현 사용자 only)**로만. 데몬이 부팅 시 256-bit 토큰 생성 → port.json 기록(ACL) → Tauri 가 읽어 첫 Auth frame 으로 제출. 검증은 **연결 직후 첫 Auth frame**(1초 내 없으면 close).
 
 ### 1-5. backpressure = bounded + emit try_send만 + slow consumer 끊기 (코어 변경 0)
 - producer(pump)가 느린 client로 **await하면 PTY read 정지 → 에이전트 멈춤.** `OutputSink.send`는 반드시 **non-blocking(try_send)**.
@@ -66,8 +67,12 @@ engram-dashboard/ (repo 루트 = workspace)
 - ★**multi-client ControlLease**: 같은 agent에 desktop+mobile 동시 시 PTY size 하나뿐 → writeStdin/resize/interrupt는 lease owner만(ControlLease{agentId,ownerClientId,viewportId,expiresAt}). read-only viewer 분리.
 
 ## 4. 데몬 생명주기 (Windows)
-- spawn: Tauri 앱이 `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB`로 detached spawn. 데몬은 자기 수명 소유.
-- ★**Job Object breakaway = 데몬화 성패의 단일 장애점.** `CREATE_BREAKAWAY_FROM_JOB`은 부모 job이 `JOB_OBJECT_LIMIT_BREAKAWAY_OK`를 설정한 경우에만 성공. IDE/VS Code 통합터미널 등이 breakaway 불허 job에 자식을 넣으면 분리 실패 → 앱 종료 시 데몬 동반 사망 → **데몬화 무효.** fallback: `cmd /c start /b` 경유 spawn. **★spike #1 — phase 1 이전 단독 실측 필수.**
+- ★**spike #1 완료(2026-06-14) — 결과: `spike1-breakaway-result.md`. 판정 GO, 단 spawn 방식 변경.**
+  - 측정 환경(IDE/CLI 셸) 부모 Job = `0x2000`(KILL_ON_JOB_CLOSE + breakaway 불허) = worst-case.
+  - `CREATE_BREAKAWAY_FROM_JOB` 직접 → **os error 5 실패.** `cmd /c start /b` fallback → **동반 사망(설계 가정 폐기).**
+  - **WMI `Win32_Process.Create` → in_job=false 분리 성공**(WmiPrvSE 부모, 호출자 Job 미상속).
+- **spawn = WMI `Win32_Process.Create` 채택**(또는 적응형: Job flags 조회 → KILL_ON_JOB_CLOSE 아님=normal / breakaway_ok=CREATE_BREAKAWAY / worst-case=WMI). 데몬은 자기 수명 소유.
+- ★**파생 제약: WMI Create 는 env 주입 불가**(CommandLine 만) → **토큰 전달 = ACL port.json 강제**(§1-4 env 경로 폐기). winmgmt 서비스 의존(상시 가동).
 - ★**"Job 소유권 이전"은 환상 — 삭제.** Job 핸들은 프로세스 로컬, 이전 불가. 데몬 모드=데몬이 PTY를 직접 spawn하니 자기 Job(KILL_ON_JOB_CLOSE)에 넣으면 끝. 모드별 spawn 주체가 갈리므로 런타임 이전 시나리오 없음.
 - 단일 인스턴스: **`Local\` named mutex**(현 사용자 한정 — `Global\`보다 안전) + ACL 잠근 `%LOCALAPPDATA%\Engram\daemon.json`{port,pid,token,protocolVersion} atomic write(persistence tmp+rename 재사용).
 - 발견: **bind 127.0.0.1:0(랜덤 포트)** → port.json. Tauri가 읽어 /health 접속. 고정 포트 금지(충돌·stale).

@@ -99,7 +99,9 @@
 - **repo 분리:** engram-dashboard를 Engram 모노레포에서 분리(54 커밋 history 보존, filter-repo) → `github.com/kimsunzun/engram-dashboard`(private) push. 모노레포는 추적 0(.gitignore), 폴더는 당분간 apps/engram-dashboard 잔류(나중에 이동). engram=고수준 LLM 워크스페이스 / engram-dashboard=LLM 운용 툴로 완전 분리.
 - **데몬화 결정·설계(consult 2회 교차검증):** 라이브러리 실조사(턴키 없음, 커스텀 불가피, replay=데몬 in-process, 경로 B-direct, raw tokio-tungstenite) + 세부 설계 비판. 상세: `S12-daemonization/{ipc-library-consult,daemon-design}.md`, tracking D-8.
 - **확정 핵심:** 단일 WS 연결(lane 분리 금지)·output hot path 커스텀 binary frame/control JSON·ring 잘림 truncated 분기·토큰 env/ACL portfile(arg 금지)·emit try_send=코어변경0·Job breakaway가 단일 장애점(spike #1). 두-모드 토글(Embedded/Daemon). Cargo workspace(core/protocol/daemon/tauri).
-- **상태:** 설계 완료, 구현 보류(사용자 결정 7개 대기: idle-timeout·타입생성·truncated UX·로컬 transport·throttle 주체·version mismatch·다중 인스턴스). ★최우선 spike: Job breakaway.
+- **상태:** 설계 완료, 사용자 결정 7개(+transport=8) 전부 완료(daemon-design §8-d). 구현 진입.
+- **★spike #1 완료(2026-06-14) — Job breakaway 실측, 판정 GO.** 측정 환경 부모 Job=`0x2000`(KILL_ON_JOB_CLOSE+breakaway 불허, worst-case). `CREATE_BREAKAWAY_FROM_JOB` 직접 실패(os err 5)·`start /b` fallback 동반사망(설계 가정 폐기)·**WMI `Win32_Process.Create` 분리 성공(in_job=false).** → spawn=WMI 채택, 파생제약: WMI는 env 주입 불가 → 토큰=ACL port.json 강제. 코드 `examples/spike_breakaway.rs`(보존), 결과 `S12-daemonization/spike1-breakaway-result.md`.
+- **진행 중:** phase 0(protocol crate) → phase 1(core workspace 추출 + AgentClient/EmbeddedClient).
 
 ---
 
