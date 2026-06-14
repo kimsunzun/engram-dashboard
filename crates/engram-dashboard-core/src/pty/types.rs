@@ -159,6 +159,30 @@ pub enum PtyError {
     Unsupported(String),
 }
 
+/// 구독 replay 분기 결과(코어 중립 — 데몬이 protocol::SubscribeAction 으로 매핑).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayKind {
+    /// 처음(oldest)부터 전체 replay — 신규 구독 또는 epoch 불일치.
+    FromOldest,
+    /// after_seq 가 ring oldest 보다 과거 → oldest 부터(앞부분 손실).
+    Truncated,
+    /// after_seq+1 부터 무손실 이어받기(tail 만).
+    Resumed,
+}
+
+/// subscribe_from 결과 메타(데몬이 SubscribeAck 구성에 사용).
+#[derive(Debug, Clone, Copy)]
+pub struct SubscribeOutcome {
+    pub kind: ReplayKind,
+    pub sink_id: SinkId,
+    pub oldest_seq: u64,
+    pub latest_seq: u64,
+    /// 실제 처음 전송한 chunk 의 seq. 보낼 게 없으면 "다음 live seq" 추정치.
+    pub replay_from: u64,
+    /// 실제 전송한 chunk 수(0 가능).
+    pub replayed: usize,
+}
+
 /// OutputSink 전송 실패 신호 — drain이 감지 시 해당 구독자 제거 트리거
 #[derive(Debug)]
 pub struct SinkError;

@@ -17,8 +17,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::pty::types::{
-    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputSink, SinkId, StatusSink,
-    TerminalReason,
+    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputSink, ReplayKind, SinkId,
+    StatusSink, SubscribeOutcome, TerminalReason,
 };
 
 /// 에이전트 1개의 출력 측 핵심 상태. 필드별 독립 Mutex(session.rs 모듈 주석의 분리 동기와 동일):
@@ -263,6 +263,101 @@ impl OutputCore {
         sink_id
     }
 
+    /// after_seq/epoch 기반 선택적 replay 구독. `subscribe`의 C4 패턴(subscribers lock 보유 중
+    /// replay 전송)을 그대로 따르되, 보낼 범위를 분기한다.
+    ///
+    /// 분기:
+    /// - epoch 불일치(epoch_matches=false) 또는 after_seq=None → FromOldest(전체).
+    /// - epoch 일치 & after_seq=Some(s):
+    ///     - 버퍼 비었으면 → Resumed(전송 0).
+    ///     - s < oldest → Truncated(oldest 부터 전체).
+    ///     - s >= oldest → Resumed(seq>s 인 tail 만).
+    ///
+    /// `on_ready`: 분기·메타(oldest/latest/kind/replay_from)가 확정된 뒤 **replay 를 sink 로
+    ///   전송하기 직전**에 1회 호출된다. 데몬이 이 안에서 SubscribeAck 를 먼저 큐잉해
+    ///   "Ack→replay binary" FIFO 순서(불변식 2)를 보장하면서도, Ack 필드를 이 단일 스냅샷
+    ///   기준 outcome 으로 채워 TOCTOU(스냅샷 A/B 불일치)를 제거한다. **on_ready 안에서 블로킹 금지**
+    ///   (subscribers lock 보유 중 호출 — non-blocking try_send 만).
+    pub fn subscribe_from(
+        &self,
+        sink: Arc<dyn OutputSink>,
+        after_seq: Option<u64>,
+        epoch_matches: bool,
+        on_ready: impl FnOnce(&SubscribeOutcome),
+    ) -> SubscribeOutcome {
+        let sink_id = sink.sink_id();
+        // C4: subscribers lock 보유 시작 — emit live send 와 직렬화.
+        let mut subscribers_guard = self.subscribers.lock().expect("subscribers poisoned");
+        subscribers_guard.push(sink.clone());
+        // subscribers 보유 중 replay 스냅샷(규칙3 유일 허용 예외, subscribe 와 동일).
+        let snapshot = {
+            let replay_guard = self.replay.lock().expect("replay poisoned");
+            replay_guard.snapshot()
+        };
+
+        let oldest = snapshot.first().map(|c| c.seq).unwrap_or(0);
+        let latest = snapshot.last().map(|c| c.seq).unwrap_or(0);
+
+        let (kind, start_idx) = match after_seq {
+            // epoch 불일치이거나 after_seq 미지정 → 전체 replay(안전 기본값).
+            _ if !epoch_matches => (ReplayKind::FromOldest, 0usize),
+            None => (ReplayKind::FromOldest, 0usize),
+            Some(s) => {
+                if snapshot.is_empty() {
+                    (ReplayKind::Resumed, 0usize)
+                } else if s < oldest {
+                    (ReplayKind::Truncated, 0usize)
+                } else {
+                    // seq<=s 인 prefix 를 건너뛴다(seq 연속 보장 → partition_point 안전).
+                    let idx = snapshot.partition_point(|c| c.seq <= s);
+                    (ReplayKind::Resumed, idx)
+                }
+            }
+        };
+
+        let to_send = &snapshot[start_idx..];
+
+        // 보낼 게 있으면 첫 seq, 없으면 "다음 live seq" 추정(after_seq+1 또는 latest+1).
+        // ★replay 전송 전에 미리 계산★ — on_ready 가 정확한 outcome 을 받아야 TOCTOU 가 제거된다.
+        let replay_from = to_send
+            .first()
+            .map(|c| c.seq)
+            .unwrap_or_else(|| match after_seq {
+                Some(s) => s.saturating_add(1),
+                None => latest.saturating_add(1),
+            });
+
+        let outcome = SubscribeOutcome {
+            kind,
+            sink_id,
+            oldest_seq: oldest,
+            latest_seq: latest,
+            replay_from,
+            replayed: to_send.len(),
+        };
+
+        // ★불변식 2 + TOCTOU 제거의 핵심★: replay frame 들을 sink 로 보내기 **직전**에,
+        //   여전히 subscribers lock 을 보유한 채 on_ready 를 1회 호출한다. 데몬이 이 안에서
+        //   SubscribeAck(control)를 conn_tx 에 try_send 하면, 그 enqueue 가 아래 replay 의
+        //   conn_tx try_send(binary) 보다 반드시 먼저 일어난다(단일 writer FIFO → Ack→replay 순서).
+        //   동시에 Ack 필드는 이 단일 스냅샷에서 나온 outcome 으로 채워지므로 A/B 두 스냅샷
+        //   불일치(M-A)가 원천 제거된다.
+        on_ready(&outcome);
+
+        for chunk in to_send {
+            let frame = OutputFrame {
+                agent_id: self.id,
+                epoch: self.epoch,
+                seq: chunk.seq,
+                data: &chunk.data,
+            };
+            let _ = sink.send(frame);
+        }
+        drop(subscribers_guard);
+
+        outcome
+    }
+
     /// 구독 해제 (창 닫힘 시 cleanup에서 호출). 해당 sink_id만 제거.
     pub fn unsubscribe(&self, sink_id: SinkId) {
         self.subscribers
@@ -480,6 +575,147 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert!(matches!(statuses[0], AgentStatus::Killed));
         assert!(matches!(core.status(), AgentStatus::Killed));
+    }
+
+    #[test]
+    fn subscribe_from_resume_sends_only_tail() {
+        let core = new_core(MockStatusSink::new());
+        for i in 0..5u8 {
+            core.emit(OutputEvent::TerminalBytes(vec![b'a' + i]));
+        }
+        let sink = MockSink::new();
+        let out = core.subscribe_from(sink.clone(), Some(2), true, |_| {});
+
+        // after_seq=2 → seq>2 인 [3,4] 만 전송.
+        assert_eq!(sink.seqs(), vec![3, 4]);
+        assert_eq!(out.kind, ReplayKind::Resumed);
+        assert_eq!(out.replayed, 2);
+        assert_eq!(out.replay_from, 3);
+    }
+
+    #[test]
+    fn subscribe_from_truncated_when_after_below_oldest() {
+        let core = new_core(MockStatusSink::new());
+        // 1바이트 청크 5000개 emit → event 상한(4096) 초과로 oldest=904 까지 evict.
+        for _ in 0..5000u64 {
+            core.emit(OutputEvent::TerminalBytes(vec![b'x']));
+        }
+        let sink = MockSink::new();
+        let out = core.subscribe_from(sink.clone(), Some(10), true, |_| {});
+
+        // after_seq=10 < oldest(904) → Truncated, oldest 부터 전체.
+        assert_eq!(out.kind, ReplayKind::Truncated);
+        assert_eq!(out.oldest_seq, 904);
+        assert_eq!(sink.seqs().first().copied(), Some(904));
+        assert_eq!(out.replay_from, 904);
+    }
+
+    #[test]
+    fn subscribe_from_epoch_mismatch_is_from_oldest() {
+        let core = new_core(MockStatusSink::new());
+        for i in 0..3u8 {
+            core.emit(OutputEvent::TerminalBytes(vec![b'a' + i]));
+        }
+        let sink = MockSink::new();
+        let out = core.subscribe_from(sink.clone(), Some(1), false, |_| {});
+
+        // epoch 불일치 → after_seq 무시하고 전체.
+        assert_eq!(out.kind, ReplayKind::FromOldest);
+        assert_eq!(sink.seqs(), vec![0, 1, 2]);
+        assert_eq!(out.replay_from, 0);
+    }
+
+    #[test]
+    fn subscribe_from_caught_up_sends_nothing() {
+        let core = new_core(MockStatusSink::new());
+        for i in 0..3u8 {
+            core.emit(OutputEvent::TerminalBytes(vec![b'a' + i]));
+        }
+        let sink = MockSink::new();
+        // after_seq=2(=latest) → 보낼 tail 없음.
+        let out = core.subscribe_from(sink.clone(), Some(2), true, |_| {});
+        assert_eq!(out.kind, ReplayKind::Resumed);
+        assert_eq!(out.replayed, 0);
+        assert_eq!(out.replay_from, 3);
+        assert_eq!(sink.len(), 0);
+
+        // 이후 live emit(seq3) → gap 없이 sink 가 받음(C4: 구독이 lock 보유 중 끝나 역전 없음).
+        core.emit(OutputEvent::TerminalBytes(b"d".to_vec()));
+        assert_eq!(sink.seqs(), vec![3]);
+    }
+
+    #[test]
+    fn subscribe_from_none_after_seq_is_from_oldest() {
+        let core = new_core(MockStatusSink::new());
+        for i in 0..3u8 {
+            core.emit(OutputEvent::TerminalBytes(vec![b'a' + i]));
+        }
+        let sink = MockSink::new();
+        let out = core.subscribe_from(sink.clone(), None, true, |_| {});
+
+        assert_eq!(out.kind, ReplayKind::FromOldest);
+        assert_eq!(sink.seqs(), vec![0, 1, 2]);
+        assert_eq!(out.replay_from, 0);
+    }
+
+    /// M-A fix 검증: on_ready 콜백이 (1) replay 전송 **전**에, (2) 정확히 1회 호출되고,
+    /// (3) 콜백이 받는 outcome 이 반환 outcome 과 동일(단일 스냅샷 기준)임을 확인.
+    #[test]
+    fn subscribe_from_calls_on_ready_before_replay() {
+        // send 가 처음 불릴 때 replay_started 를 true 로 세우는 sink.
+        struct OrderSink {
+            id: SinkId,
+            replay_started: Arc<AtomicBool>,
+        }
+        impl OutputSink for OrderSink {
+            fn send(&self, _frame: OutputFrame<'_>) -> Result<(), crate::pty::types::SinkError> {
+                self.replay_started.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                self.id
+            }
+        }
+
+        let core = new_core(MockStatusSink::new());
+        for i in 0..3u8 {
+            core.emit(OutputEvent::TerminalBytes(vec![b'a' + i]));
+        }
+
+        let replay_started = Arc::new(AtomicBool::new(false));
+        let sink = Arc::new(OrderSink {
+            id: uuid::Uuid::new_v4(),
+            replay_started: replay_started.clone(),
+        });
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        // 콜백이 본 outcome 을 캡처해 반환 outcome 과 비교(SubscribeOutcome 는 Copy).
+        let seen: Arc<Mutex<Option<SubscribeOutcome>>> = Arc::new(Mutex::new(None));
+
+        let cc = call_count.clone();
+        let started = replay_started.clone();
+        let seen_cb = seen.clone();
+        let out = core.subscribe_from(sink, Some(1), true, move |outcome| {
+            // (1) 콜백 시점엔 아직 어떤 frame 도 sink 로 안 나갔다.
+            assert!(
+                !started.load(Ordering::SeqCst),
+                "on_ready 는 replay 전송 전에 호출돼야 함"
+            );
+            cc.fetch_add(1, Ordering::SeqCst);
+            *seen_cb.lock().unwrap() = Some(*outcome);
+        });
+
+        // (2) 정확히 1회 호출.
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        // replay 가 실제로 전송됐는지(after_seq=1 → seq 2 전송) → started true.
+        assert!(replay_started.load(Ordering::SeqCst));
+        // (3) 콜백이 본 outcome == 반환 outcome.
+        let seen = seen.lock().unwrap().expect("콜백이 호출됨");
+        assert_eq!(seen.kind, out.kind);
+        assert_eq!(seen.oldest_seq, out.oldest_seq);
+        assert_eq!(seen.latest_seq, out.latest_seq);
+        assert_eq!(seen.replay_from, out.replay_from);
+        assert_eq!(out.kind, ReplayKind::Resumed);
     }
 
     #[test]

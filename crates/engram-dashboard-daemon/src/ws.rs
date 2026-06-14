@@ -28,7 +28,7 @@ use engram_dashboard_core::pty::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::pty::profile::SpawnMode;
 use engram_dashboard_core::pty::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputFrame, OutputSink,
-    SinkError, SinkId, StatusSink,
+    ReplayKind, SinkError, SinkId, StatusSink, SubscribeOutcome,
 };
 
 use engram_dashboard_protocol::{
@@ -721,12 +721,21 @@ async fn dispatch(
 
         AgentCommand::Subscribe {
             agent_id,
-            epoch: _,
-            after_seq: _,
+            epoch,
+            after_seq,
         } => {
-            // v1: 항상 full replay + action=Reset. afterSeq resume 최적화는 코어 subscribe_from 이
-            // 필요하므로 Step 4c 로 미룬다(아래 handle_subscribe 주석 참조).
-            handle_subscribe(agent_id, conn_tx, manager, subs, close_signal).await;
+            // Step 4c: epoch/after_seq 를 코어 subscribe_from 으로 전달 → 무손실 resume(tail 만)
+            // 또는 truncated/full replay 분기.
+            handle_subscribe(
+                agent_id,
+                epoch,
+                after_seq,
+                conn_tx,
+                manager,
+                subs,
+                close_signal,
+            )
+            .await;
         }
 
         AgentCommand::Unsubscribe { agent_id } => {
@@ -785,97 +794,115 @@ async fn dispatch(
     false
 }
 
-/// Subscribe 처리(v1 — full replay + Reset).
+/// 코어 ReplayKind → protocol SubscribeAction 매핑. SubscribeAck.action 구성에 사용한다.
+/// (옛 predict_ack 의 별도 분기 예측을 제거 — 분기는 코어 subscribe_from 단일 스냅샷이 소유한다.)
+fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
+    match kind {
+        ReplayKind::FromOldest => SubscribeAction::Reset,
+        ReplayKind::Truncated => SubscribeAction::TruncatedReplay,
+        ReplayKind::Resumed => SubscribeAction::Resume,
+    }
+}
+
+/// Subscribe 처리(Step 4c — afterSeq resume). **M-A(TOCTOU) 근본 해결판.**
 ///
-/// 순서(단일 writer 큐 FIFO 로 SubscribeAck→replay→ReplayComplete 보장):
-/// 1. snapshot/current_epoch/oldest/latest 수집.
-/// 2. conn_tx 로 SubscribeAck 전송(control, await 허용).
-/// 3. WsOutputSink 생성 → manager.subscribe → 코어가 replay 를 sink 로 동기 전송(conn_tx 에 Binary try_send).
-/// 4. conn_tx 로 ReplayComplete 전송.
+/// ★TOCTOU 제거★: 옛 구현은 get_snapshot(스냅샷 A)으로 SubscribeAck 를 예측해 보낸 뒤,
+/// subscribe_from 이 내부에서 다시 스냅샷 B 를 떠 replay 했다. A≠B(사이에 evict 가 끼면)면
+/// Ack.replay_from/latest 가 실제 첫 전송 seq 와 어긋나 클라가 손실을 인지 못 했다. 이제는
+/// SubscribeAck 의 모든 필드를 subscribe_from 의 **단일 스냅샷 outcome** 으로 채운다 —
+/// get_snapshot/predict_ack 자체를 제거했다.
 ///
-/// ★afterSeq 최적 resume 미구현 위치★: 무손실 이어받기(after_seq+1 부터)는 코어에 subscribe_from 이
-/// 필요하다(현재 subscribe 는 항상 full replay). 그래서 v1 은 항상 full replay 를 보내고 클라가 seq
-/// dedup 으로 gap 0 을 만든다. afterSeq resume 은 Step 4c.
+/// ★불변식 2(Ack→replay FIFO) 유지★: subscribe_from 은 subscribers lock 을 보유한 채,
+/// replay 를 sink 로 보내기 **직전**에 on_ready(&outcome) 콜백을 1회 호출한다. 콜백 안에서
+/// SubscribeAck(control)를 conn_tx 에 try_send 하므로, 그 enqueue 가 replay binary 의
+/// try_send 보다 반드시 먼저 일어난다(단일 writer FIFO → Ack→replay→ReplayComplete 순서).
+///
+/// 흐름:
+/// 1. agent_epoch 으로 epoch_matches 계산(없으면 error). (옛 list_agents 전체 순회 대체 — m-1.)
+/// 2. WsOutputSink 생성(close_signal/replay_dropped 공유).
+/// 3. subscribe_from(.., on_ready) — 콜백 안에서 outcome 기반 SubscribeAck 를 먼저 큐잉,
+///    이어서 코어가 replay 를 sink 로 전송.
+/// 4. 반환 outcome 으로 subs 맵 교체(옛 sid 다르면 unsubscribe).
+/// 5. 사후 truncated 보정: outcome.kind==Truncated 가 아닌데 실측 replay_dropped 이면 Error 통보.
+/// 6. ReplayComplete.
+#[allow(clippy::too_many_arguments)]
 async fn handle_subscribe(
     agent_id: AgentId,
+    requested_epoch: Option<u32>,
+    after_seq: Option<u64>,
     conn_tx: &mpsc::Sender<WsOutbound>,
     manager: &Arc<AgentManager>,
     subs: &Arc<Mutex<HashMap<AgentId, SinkId>>>,
     close_signal: &Arc<Notify>,
 ) {
-    // 1. snapshot + current_epoch.
-    let snapshot = match manager.get_snapshot(agent_id) {
-        Ok(s) => s,
+    // 1. current_epoch 경량 조회. agent 없으면 즉시 error(이 경우 subscribe_from 미호출 → Ack 안 나감).
+    let current_epoch = match manager.agent_epoch(agent_id) {
+        Some(e) => e,
+        None => {
+            send_error(
+                conn_tx,
+                None,
+                format!("subscribe failed: agent {agent_id} not found"),
+            )
+            .await;
+            return;
+        }
+    };
+    // epoch 일치 = 요청 epoch 이 현재 epoch 과 정확히 같을 때만. None(미지정)은 불일치 취급
+    // → 코어가 FromOldest 로 전체 replay(안전 기본값).
+    let epoch_matches = requested_epoch == Some(current_epoch);
+
+    // 2. WsOutputSink 생성(close_signal/replay_dropped 공유).
+    let sink = Arc::new(WsOutputSink::new(conn_tx.clone(), close_signal.clone()));
+    let replay_dropped = sink.replay_dropped_flag();
+
+    // 3. subscribe_from(.., on_ready). on_ready 는 코어가 replay 를 sink 로 보내기 직전
+    //    (subscribers lock 보유 중) 1회 호출 → 그 안에서 SubscribeAck 를 conn_tx 에 먼저 try_send.
+    //    ★콜백은 sync 클로저(await 불가) → try_send 만★. control 은 작아 보통 성공하나, full 이면
+    //    어차피 같은 큐(sink)도 막혀 replay 가 truncated 로 잡히므로 로깅 후 진행한다.
+    let conn_tx_cb = conn_tx.clone();
+    let on_ready = move |outcome: &SubscribeOutcome| {
+        if let Some(text) = event_json(&AgentEvent::SubscribeAck {
+            agent_id,
+            action: kind_to_action(outcome.kind),
+            current_epoch,
+            oldest_seq: outcome.oldest_seq,
+            latest_seq: outcome.latest_seq,
+            replay_from: outcome.replay_from,
+            // 단일 스냅샷 기준 truncated. 실측 drop 보정은 호출 후 별도(아래 5).
+            truncated: outcome.kind == ReplayKind::Truncated,
+        }) {
+            if let Err(e) = conn_tx_cb.try_send(WsOutbound::Text(text)) {
+                tracing::warn!(%agent_id, "SubscribeAck try_send 실패(느린 소비자): {e}");
+            }
+        }
+    };
+
+    let outcome = match manager.subscribe_from(agent_id, sink, after_seq, epoch_matches, on_ready) {
+        Ok(o) => o,
         Err(e) => {
+            // agent 없음 등 — 콜백 미호출이라 Ack 안 나감(정상).
             send_error(conn_tx, None, format!("subscribe failed: {e}")).await;
             return;
         }
     };
-    let current_epoch = manager
-        .list_agents()
-        .into_iter()
-        .find(|a| a.id == agent_id)
-        .map(|a| a.epoch)
-        .unwrap_or(0);
 
-    // 2. oldest/latest seq(없으면 0).
-    let oldest = snapshot.first().map(|c| c.seq).unwrap_or(0);
-    let latest = snapshot.last().map(|c| c.seq).unwrap_or(0);
-
-    // 2.5. ★M2: replay gap 사전 감지★. 코어 subscribe 는 replay 를 sink 로 **동기**(try_send)
-    //      전송한다. 그 직전 큐 가용 슬롯(capacity = 남은 permit)이 snapshot 길이보다 작으면
-    //      일부 binary 가 try_send 실패로 조용히 drop 될 것이 확정적이다. 이때 truncated 를
-    //      미리 true 로 세워 클라가 ReplayComplete 후 refresh(재구독/재요청)를 판단하게 한다.
-    //      (best-effort replay 는 그대로 진행 — 끊는 것보다 부분 복원 + truncated 통보가 단순.)
-    let avail = conn_tx.capacity();
-    let pre_truncated = oldest > 0 || avail < snapshot.len();
-
-    // 3. SubscribeAck(control). replay_from=oldest. truncated 는 사전 추정값(아래서 사후 보정).
-    if let Some(text) = event_json(&AgentEvent::SubscribeAck {
-        agent_id,
-        action: SubscribeAction::Reset,
-        current_epoch,
-        oldest_seq: oldest,
-        latest_seq: latest,
-        replay_from: oldest,
-        truncated: pre_truncated,
-    }) {
-        let _ = conn_tx.send(WsOutbound::Text(text)).await;
-    }
-
-    // 4. WsOutputSink 등록 → 코어가 replay 를 이 sink 로 동기 전송(conn_tx 에 Binary try_send).
-    //    SubscribeAck 를 이미 큐에 넣었으므로 replay binary 는 그 뒤에 FIFO 로 줄선다.
-    //    replay_dropped 플래그를 sink 와 공유 — replay 도중 실제 drop 발생을 사후 검사한다.
-    let sink = Arc::new(WsOutputSink::new(conn_tx.clone(), close_signal.clone()));
-    let sink_id = sink.sink_id();
-    let replay_dropped = sink.replay_dropped_flag();
-    match manager.subscribe(agent_id, sink) {
-        Ok(returned_id) => {
-            // 같은 agent 재구독 시 옛 sink 가 남지 않게 교체(옛 것 unsubscribe).
-            let old = subs
-                .lock()
-                .expect("subs poisoned")
-                .insert(agent_id, returned_id);
-            if let Some(old_sid) = old {
-                if old_sid != returned_id {
-                    let _ = manager.unsubscribe(agent_id, old_sid);
-                }
-            }
-        }
-        Err(e) => {
-            send_error(conn_tx, None, format!("subscribe failed: {e}")).await;
-            let _ = sink_id; // 등록 실패 — 기록하지 않음.
-            return;
+    // 4. 같은 agent 재구독 시 옛 sink 가 남지 않게 교체(옛 것 unsubscribe).
+    let old = subs
+        .lock()
+        .expect("subs poisoned")
+        .insert(agent_id, outcome.sink_id);
+    if let Some(old_sid) = old {
+        if old_sid != outcome.sink_id {
+            let _ = manager.unsubscribe(agent_id, old_sid);
         }
     }
 
     // 5. ReplayComplete 직전 사후 보정: replay 동기 전송 중 실제 drop 이 있었다면(코어가 sink 로
-    //    try_send 하다 full 을 만남) truncated 를 보정해 ReplayCorrection 으로 통보한다.
-    //    사전 추정이 false 였더라도 실측 drop 이 있으면 truncated 가 된다(더 정확).
-    let truncated = pre_truncated || replay_dropped.load(Ordering::Acquire);
-    if truncated && !pre_truncated {
-        // SubscribeAck 에는 false 로 나갔으나 실제 drop 발생 — 별도 Error 로 사후 통보.
-        // (프로토콜에 보정 전용 이벤트가 없으므로 Error 메시지로 클라 refresh 를 유도한다.)
+    //    try_send 하다 full 을 만남) Error 로 통보한다. Ack 엔 이미 정확한 kind 기반 truncated 가
+    //    나갔고, 여기선 kind!=Truncated 인데 실측 drop 이 추가로 발생한 경우만 추가 통보한다.
+    //    ★사전 capacity 추정 제거★: 단일 스냅샷이라 추정이 무의미 — replay_dropped 실측이 더 정확.
+    if outcome.kind != ReplayKind::Truncated && replay_dropped.load(Ordering::Acquire) {
         send_error(
             conn_tx,
             None,
@@ -930,6 +957,22 @@ mod tests {
             }
             _ => panic!("Auth 가 아님"),
         }
+    }
+
+    // ── 1b. kind_to_action 매핑(Step 4c — M-A fix) ──────────────────────────
+    //    옛 predict_ack(분기 예측)을 제거하고, 코어 outcome.kind → SubscribeAction 단순 매핑만
+    //    남겼다(분기는 코어 단일 스냅샷이 소유). 3 variant 전수 검증.
+    #[test]
+    fn kind_to_action_maps_all_variants() {
+        assert_eq!(
+            kind_to_action(ReplayKind::FromOldest),
+            SubscribeAction::Reset
+        );
+        assert_eq!(
+            kind_to_action(ReplayKind::Truncated),
+            SubscribeAction::TruncatedReplay
+        );
+        assert_eq!(kind_to_action(ReplayKind::Resumed), SubscribeAction::Resume);
     }
 
     // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────

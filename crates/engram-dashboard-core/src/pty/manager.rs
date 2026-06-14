@@ -27,7 +27,7 @@ use crate::pty::transport::pty::PtyTransport;
 use crate::pty::transport::AgentTransport;
 use crate::pty::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, OutputChunk, OutputSink, PtyError, SinkId,
-    StatusSink,
+    StatusSink, SubscribeOutcome,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -341,6 +341,20 @@ impl AgentManager {
         Ok(session.subscribe(sink))
     }
 
+    /// after_seq/epoch resume 구독 → SubscribeOutcome. epoch_matches 는 데몬이 요청 epoch 과
+    /// 세션 현재 epoch 을 비교해 넘긴다(코어는 protocol 무의존이라 epoch 비교를 외부에서 받는다).
+    pub fn subscribe_from(
+        &self,
+        agent_id: AgentId,
+        sink: Arc<dyn OutputSink>,
+        after_seq: Option<u64>,
+        epoch_matches: bool,
+        on_ready: impl FnOnce(&SubscribeOutcome),
+    ) -> Result<SubscribeOutcome, PtyError> {
+        let session = self.get_session(agent_id)?;
+        Ok(session.subscribe_from(sink, after_seq, epoch_matches, on_ready))
+    }
+
     /// 구독 해제 (창 닫힘 cleanup에서 호출).
     pub fn unsubscribe(&self, agent_id: AgentId, sink_id: SinkId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
@@ -409,6 +423,16 @@ impl AgentManager {
     pub fn get_snapshot(&self, agent_id: AgentId) -> Result<Vec<OutputChunk>, PtyError> {
         let session = self.get_session(agent_id)?;
         Ok(session.snapshot())
+    }
+
+    /// 단일 에이전트의 현재 epoch 경량 조회(없으면 None). list_agents 전체 순회·AgentInfo
+    /// 조립(profiles lock 등)을 피해 epoch 만 본다 — handle_subscribe 의 epoch_matches 계산용.
+    pub fn agent_epoch(&self, agent_id: AgentId) -> Option<u32> {
+        self.sessions
+            .read()
+            .expect("sessions poisoned")
+            .get(&agent_id)
+            .map(|s| s.epoch)
     }
 
     /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고, 각 kill을 병렬 실행한다.

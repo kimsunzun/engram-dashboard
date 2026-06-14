@@ -19,6 +19,7 @@ use crate::pty::output_core::OutputCore;
 use crate::pty::transport::AgentTransport;
 use crate::pty::types::{
     AgentId, AgentStatus, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError, SinkId,
+    SubscribeOutcome,
 };
 
 /// 에이전트 1개 = 출력 측(core) + 채널/자원 측(transport)의 합성. transport 종류(PTY/API)와
@@ -99,6 +100,19 @@ impl AgentSession {
     /// 구독자 등록 → core. SinkId 반환(unsubscribe용).
     pub fn subscribe(&self, sink: Arc<dyn OutputSink>) -> SinkId {
         self.core.subscribe(sink)
+    }
+
+    /// after_seq/epoch 기반 선택적 replay 구독 → core. SubscribeOutcome 반환.
+    /// `on_ready`: replay 전송 직전(subscribers lock 보유 중) 1회 호출 — core 위임(불변식 2/TOCTOU).
+    pub fn subscribe_from(
+        &self,
+        sink: Arc<dyn OutputSink>,
+        after_seq: Option<u64>,
+        epoch_matches: bool,
+        on_ready: impl FnOnce(&SubscribeOutcome),
+    ) -> SubscribeOutcome {
+        self.core
+            .subscribe_from(sink, after_seq, epoch_matches, on_ready)
     }
 
     /// 구독 해제 → core.
