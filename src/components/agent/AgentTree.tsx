@@ -2,7 +2,7 @@ import { useRef, useEffect, useState } from 'react'
 import { Tree, type NodeRendererProps } from 'react-arborist'
 import { useAgentStore } from '../../store/agentStore'
 import { useSlotStore } from '../../store/slotStore'
-import { ptyApi } from '../../api/ptyApi'
+import { agentClient } from '../../api/clientFactory'
 
 interface AgentTreeProps {
   /**
@@ -123,12 +123,12 @@ export default function AgentTree({ sourceSlotId }: AgentTreeProps) {
         {
           label: '중단(작업만 멈춤)',
           disabled: !menu.canInterrupt, // capability 미지원이면 회색 처리(§2 capability 분기)
-          action: () => ptyApi.interruptAgent(menu.agentId).catch(e => console.error('[interrupt]', e)),
+          action: () => agentClient.interruptAgent(menu.agentId).catch(e => console.error('[interrupt]', e)),
         },
         {
           label: '종료',
           disabled: false,
-          action: () => ptyApi.killAgent(menu.agentId).catch(e => console.error('[kill]', e)),
+          action: () => agentClient.killAgent(menu.agentId).catch(e => console.error('[kill]', e)),
         },
       ]
     : []

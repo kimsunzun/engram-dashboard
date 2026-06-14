@@ -1,0 +1,66 @@
+// AgentClient — 프론트가 의존하는 단일 제어 표면(S12 phase 1b, daemon-design §3-a).
+//
+// 컴포넌트·스토어는 ptyApi(invoke/Channel)를 직접 부르지 않고 이 인터페이스만 의존한다.
+// 구현 2개:
+//   - EmbeddedClient: 현 invoke/Channel 그대로(이 PC 안). connectionState 항상 'connected'.
+//   - DaemonClient(phase 4): WS + 재연결 + afterSeq 재구독 + seq dedup(내부 격리).
+// transport(Tauri Channel / WS binary frame)와 base64/디코딩은 클라이언트 내부에 숨긴다 —
+// 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
+
+import type { AgentInfo, AgentProfile } from './types'
+
+/** 클라↔백엔드 연결 상태. Embedded 는 항상 connected. Daemon 만 reconnecting/down 발생. */
+export type ConnectionState = 'connected' | 'reconnecting' | 'down'
+
+/** 디코드된 출력 청크 — transport 무관(base64/binary frame 은 클라 내부에서 이미 풀림). */
+export interface OutputChunk {
+  /** core OutputCore 발급 seq(단조 증가). 클라가 재연결 경계 dedup, 컴포넌트도 방어적 dedup. */
+  seq: number
+  /** raw 바이트(터미널 write 용). */
+  bytes: Uint8Array
+}
+
+/** 구독 해제 핸들 — 반드시 호출(unmount/재구독 시). 내부에서 transport 정리까지 수행. */
+export interface OutputSubscription {
+  unsubscribe: () => void
+}
+
+/**
+ * 에이전트 제어/구독 단일 표면. 사람 UI 클릭과 (미래) LLM 호출이 같은 진입점을 거친다(§5).
+ * 모든 side-effect 메서드는 idempotency·재시도 정책을 구현체가 책임진다.
+ */
+export interface AgentClient {
+  // ── 연결 상태 ──────────────────────────────────────────────────────────────
+  readonly connectionState: ConnectionState
+  /** 상태 변화 구독. 반환은 해제 함수. */
+  onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
+
+  // ── 출력 구독 ──────────────────────────────────────────────────────────────
+  /** 출력 구독. onChunk 로 디코드된 바이트 전달. 반환 핸들의 unsubscribe 로 해제. */
+  subscribeOutput(
+    agentId: string,
+    onChunk: (chunk: OutputChunk) => void,
+  ): Promise<OutputSubscription>
+
+  // ── 명령 ──────────────────────────────────────────────────────────────────
+  spawnAgent(cwd: string): Promise<AgentInfo>
+  killAgent(agentId: string): Promise<void>
+  interruptAgent(agentId: string): Promise<void>
+  writeStdin(agentId: string, data: Uint8Array): Promise<void>
+  resizePty(agentId: string, cols: number, rows: number): Promise<void>
+  getAgents(): Promise<AgentInfo[]>
+  getSnapshot(agentId: string): Promise<unknown[]>
+
+  // ── 프로필 CRUD ────────────────────────────────────────────────────────────
+  listProfiles(): Promise<AgentProfile[]>
+  createClaudeProfile(
+    name: string,
+    cwd: string,
+    extraArgs: string[],
+    env: [string, string][],
+    autoRestore: boolean,
+  ): Promise<AgentProfile>
+  deleteProfile(agentId: string): Promise<void>
+  spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>
+  setProfileAutoRestore(agentId: string, autoRestore: boolean): Promise<void>
+}

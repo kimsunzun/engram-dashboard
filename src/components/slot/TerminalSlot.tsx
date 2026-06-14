@@ -2,8 +2,8 @@ import { useRef, useEffect } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { ptyApi } from '../../api/ptyApi'
-import { decodeBase64Bytes } from '../../api/decodeBase64'
+import { agentClient } from '../../api/clientFactory'
+import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 
 interface TerminalSlotProps {
@@ -61,7 +61,7 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
       resizeTimerRef.current = setTimeout(() => {
         resizeTimerRef.current = null
-        void ptyApi.resizePty(aid, term.cols, term.rows)
+        void agentClient.resizePty(aid, term.cols, term.rows)
       }, 50)
     })
     ro.observe(containerRef.current)
@@ -80,33 +80,31 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return
 
-    let sinkId: string | null = null
-    let channel: unknown = null
+    let sub: OutputSubscription | null = null
     let cancelled = false
 
     terminal.reset() // C2: 재구독 시 이전 출력 제거 (StrictMode 중복 방지)
-    const lastSeq = { current: -1 } // T-2/G-2: seq dedup
+    const lastSeq = { current: -1 } // T-2/G-2: seq dedup(컴포넌트 방어 — 클라도 내부 dedup)
 
-    ptyApi
-      .subscribeOutput(agentId, event => {
+    agentClient
+      .subscribeOutput(agentId, chunk => {
         if (cancelled) return
-        if (event.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
-        lastSeq.current = event.seq
-        terminal.write(decodeBase64Bytes(event.data_b64))
+        if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
+        lastSeq.current = chunk.seq
+        terminal.write(chunk.bytes) // 디코드는 클라 내부에서 끝남(transport 캡슐화)
       })
-      .then(result => {
+      .then(handle => {
         if (cancelled) {
-          void ptyApi.unsubscribeOutput(agentId, result.sinkId)
+          handle.unsubscribe()
           return
         }
-        sinkId = result.sinkId
-        channel = result.channel
+        sub = handle
       })
 
     return () => {
       cancelled = true
-      if (channel) delete (channel as any).onmessage // G-1: null 할당 아닌 delete (#13133)
-      if (sinkId) void ptyApi.unsubscribeOutput(agentId, sinkId)
+      // unsubscribe 내부가 transport 정리(#13133 delete onmessage) + 백엔드 구독 해제까지 수행.
+      sub?.unsubscribe()
     }
     // epoch 포함 — 재spawn(같은 agentId, epoch++) 시 reset → 재구독 → replay 재생 (S9 §18-e/f)
   }, [agentId, epoch])
@@ -117,7 +115,7 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
     if (!agentId || !terminal) return
     const disp = terminal.onData(data => {
       if (isTerminatedRef.current) return
-      void ptyApi.writeStdin(agentId, new TextEncoder().encode(data)).catch(() => {})
+      void agentClient.writeStdin(agentId, new TextEncoder().encode(data)).catch(() => {})
     })
     return () => disp.dispose()
   }, [agentId])

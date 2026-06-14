@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useSlotStore, findSlot } from '../../store/slotStore'
-import { ptyApi } from '../../api/ptyApi'
+import { agentClient } from '../../api/clientFactory'
 
 interface SlotContextMenuProps {
   x: number
@@ -32,7 +32,7 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
       action: () => {
         const cwd = window.prompt('작업 디렉토리', 'C:/') ?? ''
         if (!cwd.trim()) return
-        ptyApi
+        agentClient
           .spawnAgent(cwd.trim())
           .then(agent => dispatch({ kind: 'assignAgent', slotId, agentId: agent.id }))
           .catch(e => console.error('[spawn]', e))
@@ -42,7 +42,7 @@ export default function SlotContextMenu({ x, y, slotId, onClose }: SlotContextMe
       label: '에이전트 종료',
       action: () => {
         if (!slotAgentId) return
-        ptyApi.killAgent(slotAgentId).catch(e => console.error('[kill]', e))
+        agentClient.killAgent(slotAgentId).catch(e => console.error('[kill]', e))
       },
     },
     {
