@@ -1,0 +1,62 @@
+# 설계 결정 기록 (ADR)
+
+이 폴더는 **"왜 이렇게 정했나"를 시점 무관하게 박제**한다. `docs/process/`(언제 무엇을 했나, 시간순 흐름)와 역할이 다르다 — 여기는 영구 못(декision record).
+
+## 왜 ADR인가
+
+LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸다. ADR은 **결정 + 거부한 대안 + 이유**를 적어 재론(re-litigation)을 막는다. 특히 "거부한 대안과 그 이유"가 핵심이다 — 그게 없으면 클로드가 같은 "개선 제안"을 반복한다.
+
+## 규칙 (CLAUDE.md에서 강제)
+
+1. **작업 전** 관련 ADR을 먼저 읽는다.
+2. **설계 결정을 내리면** 새 ADR을 추가한다(다음 번호).
+3. **기존 결정을 바꾸려면** 해당 ADR을 `폐기(Superseded by ADR-NNNN)`로 표시하고 새 번호로 기록한다 — ADR은 덮어쓰지 않고 누적한다(이력 보존).
+
+## 상태 범례
+
+- **확정(Accepted)** — 현재 유효, 따른다.
+- **제안(Proposed)** — 논의 중, 아직 강제 아님.
+- **폐기(Superseded)** — 다른 ADR로 대체됨. 본문은 이력으로 남긴다.
+- **거부(Rejected)** — 검토했으나 채택 안 함.
+
+## 템플릿
+
+```markdown
+# ADR-NNNN: <한 줄 제목>
+
+- 상태: 확정 (YYYY-MM-DD, 근거: spike/commit)
+- 관련: CLAUDE.md §X · <파일:라인> · step-log SN
+
+## 맥락
+무슨 문제를 풀어야 했나.
+
+## 결정
+무엇으로 정했나.
+
+## 거부한 대안
+- 대안 A — 왜 버렸나.
+- 대안 B — 왜 버렸나.
+
+## 근거
+실측·리뷰 등 결정의 뒷받침.
+
+## 영향 / 불변식
+이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+```
+
+## 인덱스
+
+| # | 제목 | 상태 |
+|---|---|---|
+| [0001](0001-kill-2동사.md) | kill = 2동사 (shutdown + join_pump) | 확정 |
+| [0002](0002-output-event-seam.md) | 출력 seam = OutputEvent (터미널 가정 금지) | 확정 |
+| [0003](0003-output-status-sink-격리.md) | OutputSink/StatusSink — 코어 Tauri 격리 | 확정 |
+| [0004](0004-agent-transport-backend-격리.md) | AgentTransport seam + backend 지식 격리 | 확정 |
+| [0005](0005-finalize-1회.md) | finalize 정확히 1회 (pump 단독) | 확정 |
+| [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 |
+| [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 |
+| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 |
+| [0009](0009-tauri-2x-핀.md) | tauri 최신 2.x 핀 (Channel 무손실 실측) | 확정 |
+| [0010](0010-cargo-workspace-분리.md) | Cargo workspace 3-crate 분리 | 확정 |
+| [0011](0011-agentclient-제어표면.md) | agentClient 제어 표면 facade (데몬 대비) | 확정 |
+| [0012](0012-테스트-격리-하네스-tdd.md) | 테스트 전략 — 모듈 격리 하네스 + TDD | 확정 |
