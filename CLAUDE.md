@@ -97,13 +97,28 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 
 ## 참조 구현 (기능 구현 시 비교 참고)
 
-새 기능(특히 데몬화·원격·스트리밍·재연결·멀티플랫폼·에이전트 영속)을 설계·구현할 때 바닥부터 짜지 말고, 아래 성숙한 오픈소스가 같은 문제를 어떻게 풀었는지 먼저 보고 트레이드오프를 비교한다. **참조 = 패턴 차용이지 코드 복붙 아님** — 코드를 그대로 옮길 때만 라이선스 법무 확인. 소스는 `I:\Engram_Workspace\references\`에 클론돼 있다(git 추적 밖).
+새 기능(데몬화·원격·스트리밍·재연결·멀티플랫폼·에이전트 영속·오케스트레이션·프론트 상태 영속 등)을 설계할 땐 바닥부터 짜지 말고 **성숙한 오픈소스가 같은 문제를 어떻게 풀었는지 먼저 조사**한다.
 
+**아래 목록은 고정 정답이 아니라 출발점(앵커)이다.** 영역마다 더 적합한 사례가 따로 있으니, 새 영역은 다음 절차를 따른다(개발 스텝의 TRD 단계):
+1. **서브에이전트로 폭넓게 조사** — 그 문제를 푼 성숙 OSS·표준을 여러 개 찾는다(아래 목록에 없는 것 포함).
+2. **트레이드오프 비교** — 각 접근의 장단·engram 제약(Rust·교체성·LLM 제어) 적합도.
+3. **사용자에게 선택지로 제시** — "이런 방법들이 있고 각각 이렇다, 무엇으로 갈까?" 형태로 **결정권을 사용자에게** 넘긴 뒤 진행. 임의 채택 금지.
+4. 채택이 굵은 결정이면 ADR로 박는다.
+
+**참조 = 패턴 차용이지 코드 복붙 아님** — 코드를 그대로 옮길 때만 라이선스 법무 확인. 클론된 앵커 소스: `I:\Engram_Workspace\references\`(git 추적 밖).
+
+### 데몬/전송 앵커 (ADR-0013)
 - **tmux** — client-server attach/detach 원형. 데몬이 세션 보유, 클라가 붙고 떨어진다. control mode 프로토콜.
 - **Zellij** (Rust) — 기술스택 최근접 멀티플렉서. 서버/클라 분리·자체 IPC·플러그인 제어 표면.
 - **Mosh** — 끊겨도 살아남는 재연결·로밍(SSP state-sync). 모바일/불안정 네트워크 회복력.
 - **ttyd / gotty** — PTY를 WebSocket으로 브라우저에 스트리밍. engram 웹 프론트의 정확한 전송 모델.
 - **Hermes Agent** (Nous Research, MIT) — 에이전트 단위 영속 기억 + 멀티플랫폼 원격 입구(Telegram/Discord/Slack).
+
+### 오케스트레이션 후보 (ADR-0014, 제안)
+- 감독/내결함 Erlang OTP·Ractor · 내구성 Temporal·Restate · 프레임워크 LangGraph·MS Agent Framework · 통신 A2A. 상세는 ADR-0014.
+
+### 그 외 영역 (프론트 상태 영속, 메시지 시스템 등)
+- 아직 앵커 미선정 — 위 절차(조사→비교→선택지 제시)로 그때 정한다.
 
 ## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/` — S12 phase 1 이동)
 > 아래 `pty/`·`persistence/`·`logging/`는 S12 phase 1에서 `src-tauri/src/`→`crates/engram-dashboard-core/src/`로 이동(git mv, history 보존). 내부 `crate::` 경로는 무수정(코어 crate 의 top-level 모듈). `src-tauri`는 `engram_dashboard_core::{pty,persistence,logging}`로 re-import. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs).
@@ -177,10 +192,6 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 `eval`로 DOM 텍스트(`document.body.innerText`)나 **백엔드 직접 호출**(`window.__TAURI__.core.invoke('spawn_agent',{cwd})` 등) 가능 → spawn/write/interrupt/kill 전 경로를 실제 IPC로 검증.
 포트는 9223 고정(9222는 Gemini 자동화 Chrome — 충돌 회피). 다른 포트는 `CDP_PORT` env.
 검증 목적이면 스샷보다 `eval` 텍스트가 토큰·정확도 유리(픽셀 해석 회피). S10 GUI E2E를 이 방식으로 회귀 0 확인함(2026-06-12).
-
-## 커뮤니케이션
-
-사용자 응답 시 생소할 만한 전문용어는 그대로 쓰되, 바로 옆이나 밑에 쉬운 한 줄 풀이를 단다. 단 모든 용어가 아니라 사용자가 막힐 만한 것만 — 흔한 용어까지 풀면 장황해진다. 코드·파일명·경로는 영문 그대로 둔다.
 
 ## 컨벤션
 - 중요 로직(동시성·kill·unsafe·비자명한 결정)에 **왜** 그런지 한국어 주석. 자명한 코드엔 주석 금지.
