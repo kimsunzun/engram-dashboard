@@ -69,12 +69,17 @@ function bytesToUuid(b: Uint8Array): string {
 // ── 내부 구독 상태 ─────────────────────────────────────────────────────────────────
 interface SubState {
   onChunk: (chunk: OutputChunk) => void
-  /** 마지막으로 onChunk 에 넘긴 seq — 재연결 시 after_seq, 평시 dedup 기준. */
-  lastSeq: number
-  /** SubscribeAck.current_epoch — binary frame epoch 매칭용(불일치 frame 은 버린다). */
-  epoch?: number
-  /** 신규(아직 한 번도 받지 못함) 여부 — 재연결 시 after_seq null vs lastSeq 분기. */
-  fresh: boolean
+  /**
+   * 마지막 SubscribeAck.current_epoch. binary frame epoch 매칭용(불일치 frame 폐기) +
+   * 재연결 resubscribe wire epoch. undefined = 아직 Ack 못 받음(첫 구독 직후).
+   */
+  epoch: number | undefined
+  /**
+   * onChunk 로 **실제 배달한** 최고 seq(high-water). 초기 -1(아무것도 배달 안 함).
+   * dedup 기준이자 재연결 after_seq. replay_from 에 의존하지 않는다(replay_from 은
+   * "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니라 off-by-one 유발 — 버그 B).
+   */
+  lastDeliveredSeq: number
 }
 
 interface Pending {
@@ -254,19 +259,23 @@ export class DaemonClient implements AgentClient {
     }, delay)
   }
 
-  /** 재연결 성공 후 모든 구독을 after_seq=lastSeq(resume)로 재전송. */
+  /**
+   * 재연결 성공 후 모든 구독 재전송. 버그 A 수정: epoch=null 을 보내면 안 된다.
+   * 데몬(ws.rs:1522-1524)은 requested_epoch==Some(current_epoch) 만 일치로 보고
+   * None(null)은 불일치 취급 → FromOldest 전체 replay(이미 본 프레임 중복). 그래서
+   * **마지막으로 알려진 epoch(st.epoch)을 wire 로 그대로 전송**해 데몬이 Resume(tail-only)
+   * 하게 한다. after_seq=lastDeliveredSeq → 데몬이 seq>lastDeliveredSeq 만 송신 →
+   * 클라 가드(seq<=lastDeliveredSeq drop)와 정합(무손실·무중복). epoch·lastDeliveredSeq
+   * 는 보존(리셋 금지) — epoch 가드는 stale frame 폐기를 계속 수행하고, epoch 가 실제로
+   * 바뀌면 새 SubscribeAck 가 lastDeliveredSeq 를 리셋한다.
+   */
   private resubscribeAll(): void {
     for (const [agentId, st] of this.subs) {
-      // Subscribe 재전송 직전 epoch 가드 무력화: 데몬 재기동 등으로 epoch 이 바뀌면
-      // 새 SubscribeAck 도착 전 binary frame 이 옛 epoch 가드로 폐기될 수 있다. epoch=undefined
-      // 로 두면 handleBinary 의 epoch 매칭을 통과 → 새 SubscribeAck(Fix #2)가 epoch+lastSeq 를
-      // 다시 정확히 세운다. after_seq resume 값은 그대로 st.lastSeq.
-      st.epoch = undefined
       this.sendJson({
         Subscribe: {
           agent_id: agentId,
-          epoch: null,
-          after_seq: st.fresh ? null : st.lastSeq,
+          epoch: st.epoch ?? null,
+          after_seq: st.lastDeliveredSeq >= 0 ? st.lastDeliveredSeq : null,
         },
       })
     }
@@ -304,16 +313,18 @@ export class DaemonClient implements AgentClient {
       }
       const st = this.subs.get(a.agent_id)
       if (st) {
-        // SubscribeAck 로 sub 상태 재동기화(Reset/Truncated/Resume 세 경우 일관 처리).
-        // 데몬은 항상 replay_from 다음(seq=replay_from+1)부터 보낸다 → dedup 기준 lastSeq 를
-        // replay_from 으로 맞추면 첫 replay frame 은 통과(replay_from+1 > replay_from), 그 이하
-        // 중복은 정확히 걸러진다. epoch 도 여기서 확정 → 이후 binary frame epoch 가드 동작.
-        // SubscribeAck 는 데몬 FIFO 보장으로 같은 구독의 binary frame 보다 먼저 도착 → fresh 는
-        // SubscribeAck 도착 전 짧은 창에서만 의미. 여기서 fresh=false 로 닫는다.
+        // 버그 B 수정: replay_from 으로 dedup 기준(lastDeliveredSeq)을 건드리지 않는다.
+        // replay_from 은 "데몬이 보내는 첫 seq"(resume 시 after_seq+1)이지 "마지막으로 본
+        // seq"가 아니다 — 그걸 dedup 기준으로 쓰면 첫 정상 프레임(seq==replay_from)을 버린다.
+        // dedup 은 클라 high-water(lastDeliveredSeq) 기준으로만 하고 replay_from 은 정보용.
+        //
+        // epoch 이 바뀌면(데몬 재기동·재시작) 새 스트림 → high-water 리셋. 첫 Ack(epoch
+        // undefined)은 리셋 불필요(이미 초기 -1).
+        if (st.epoch !== undefined && a.current_epoch !== st.epoch) {
+          st.lastDeliveredSeq = -1
+        }
         st.epoch = a.current_epoch
-        st.lastSeq = a.replay_from
-        st.fresh = false
-        // truncated 면 앞부분 손실(호출자 알릴 인터페이스 없음 — 로그만).
+        // truncated 면 앞부분 손실 — 향후 UI 경고 자리(현재 인터페이스 없어 로그만).
         if (a.truncated) console.warn('[DaemonClient] output truncated for', a.agent_id)
       }
       return
@@ -357,10 +368,9 @@ export class DaemonClient implements AgentClient {
     if (!st) return
     // epoch 불일치 frame 은 옛 세션 잔여 — 버린다(SubscribeAck.current_epoch 기준).
     if (st.epoch !== undefined && f.epoch !== st.epoch) return
-    // seq dedup — 재연결 경계 중복 방어.
-    if (f.seq <= st.lastSeq && !st.fresh) return
-    st.fresh = false
-    st.lastSeq = f.seq
+    // dedup — 클라가 실제 배달한 high-water(lastDeliveredSeq) 기준. 재연결 경계 중복 방어.
+    if (f.seq <= st.lastDeliveredSeq) return
+    st.lastDeliveredSeq = f.seq
     st.onChunk({ seq: f.seq, bytes: f.payload })
   }
 
@@ -420,8 +430,9 @@ export class DaemonClient implements AgentClient {
   ): Promise<OutputSubscription> {
     await this.ensureConnected()
     // 같은 agentId 재구독 시 이전 상태는 덮는다(컴포넌트가 epoch 바뀌면 재구독).
-    this.subs.set(agentId, { onChunk, lastSeq: 0, fresh: true })
-    // 신규 구독 — 둘 다 null(oldest 부터).
+    // epoch=undefined(Ack 전), lastDeliveredSeq=-1(아무것도 배달 안 함).
+    this.subs.set(agentId, { onChunk, epoch: undefined, lastDeliveredSeq: -1 })
+    // 첫 구독 — 둘 다 null(FromOldest, 전부 받음).
     this.sendJson({ Subscribe: { agent_id: agentId, epoch: null, after_seq: null } })
     return {
       unsubscribe: () => {
