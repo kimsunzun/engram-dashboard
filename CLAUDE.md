@@ -121,10 +121,10 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 - 아직 앵커 미선정 — 위 절차(조사→비교→선택지 제시)로 그때 정한다.
 
 ## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/` — S12 phase 1 이동)
-> 아래 `pty/`·`persistence/`·`logging/`는 S12 phase 1에서 `src-tauri/src/`→`crates/engram-dashboard-core/src/`로 이동(git mv, history 보존). 내부 `crate::` 경로는 무수정(코어 crate 의 top-level 모듈). `src-tauri`는 `engram_dashboard_core::{pty,persistence,logging}`로 re-import. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs).
+> 아래 `agent/`·`persistence/`·`logging/`는 S12 phase 1에서 `src-tauri/src/`→`crates/engram-dashboard-core/src/`로 이동(git mv, history 보존). `src-tauri`는 `engram_dashboard_core::{agent,persistence,logging}`로 re-import. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs). ※`pty/`→`agent/` rename 완료(내용=에이전트 코어 전반, 단 내부 `transport/pty.rs`·`PtyTransport` 등 실 PTY 항목은 이름 유지).
 
 ```
-pty/                          # S10 추상화: AgentManager → AgentSession(OutputCore) → dyn AgentTransport
+agent/                        # (구 pty/) S10 추상화: AgentManager → AgentSession(OutputCore) → dyn AgentTransport
 ├── types.rs          # AgentStatus/PtyEvent/AgentInfo(+epoch+capabilities)/OutputSink·StatusSink
 │                     #  + 중립 seam: OutputEvent/InputEvent(확장 enum)·TerminalReason·CommandSpec·Capabilities·OutputChunk
 ├── profile.rs        # AgentProfile/AgentCommand/SpawnMode/RestoreOutcome + ProfileRegistry(sid 단일소유자)
@@ -168,7 +168,7 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 - `windows` (Job Object) — `#[cfg(windows)]`
 
 ## 빌드·검증 명령 (Cargo workspace — S12 phase 1 이후 루트에서 실행)
-S12 phase 1 이후 **Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(pty/persistence/logging)는 `crates/engram-dashboard-core`로 이동, examples도 거기로. `target/`는 워크스페이스 루트.
+S12 phase 1 이후 **Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(agent/persistence/logging)는 `crates/engram-dashboard-core`로 이동, tests/도 거기로. `target/`는 워크스페이스 루트.
 - `cargo test -p engram-dashboard-core` — 코어 unit(55) + 통합(3, `tests/{headless,transport_smoke,session_smoke}.rs` 실 PTY 단언). 구 examples 하네스 이관(testing-strategy §0-a)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩 (현재 32건)
 - `cargo build` (루트) — 전체 workspace 빌드
