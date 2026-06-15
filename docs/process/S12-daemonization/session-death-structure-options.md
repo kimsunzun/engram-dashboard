@@ -1,6 +1,8 @@
 # 구조 선택지 — "에이전트 죽음"의 백엔드 무관 추상 (Slot ≠ Run ≠ Transport)
 
-- 상태: **선택 대기** (consult 교차검증 완료, 사용자 결정으로 ADR-0017 확정 예정)
+> **결론(2026-06-16): 사용자가 (A) 채택 → ADR-0017로 확정.** 슬롯=한 모드의 한 세션, 끝나면 슬롯도 끝(슬롯 내 백엔드 교체·zombie 슬롯 없음). 터미널(셸)은 저장/복원 안 함(이어받을 세션 없음). consult가 민 (나) 슬롯-persist 컨테이너 모델은 **도메인 혼란(in-place 모드교체·dead pane)으로 기각.** 단 consult 합의 중 "백엔드별 죽음 정의 + exit-reason 분류 + KilledByUser 재시작제외 + API stream≠death"는 채택. 아래 (가)/(나) 비교·OSS 조사는 이력으로 보존. 상세: ADR-0017.
+
+- 상태: **해소됨 → ADR-0017 (A 채택)**
 - 근거: `/consult` job `20260616-011502-consult-death-abstraction` — GPT·Gemini·Claude(opus) 블라인드 + judge. 유명 OSS 조사 포함. 원자료 `I:\Engram\agents\web-runner\shared\<job>\`.
 - 연결: ADR-0016(에이전트 수명 모델)의 "sid 인스턴스"가 여기서 말하는 **Run**에 해당 — 그 위에 **Slot** 계층을 추가하는 구조 정정.
 
