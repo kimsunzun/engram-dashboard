@@ -50,6 +50,48 @@ pub fn current_process_start_time() -> Option<u64> {
     process_creation_time(std::process::id())
 }
 
+/// HRESULT(i32) → win32 에러코드(u32) 추출(순수, 테스트 가능).
+///
+/// windows-rs 의 `OpenProcess` 실패는 `windows::core::Error` 이고, 그 `.code().0` 은
+/// `HRESULT_FROM_WIN32` 로 래핑된 HRESULT 다(예: INVALID_PARAMETER=0x80070057,
+/// ACCESS_DENIED=0x80070005). FACILITY_WIN32(0x7) HRESULT 의 하위 16비트가 원래 win32
+/// 코드이므로 `hr & 0xFFFF` 로 되돌린다. (facility 가 win32 가 아니면 의미 없는 값이 나오나,
+/// OpenProcess 실패는 사실상 win32 facility 라 호출부 분류에서 보수 기본값으로 흡수된다.)
+#[cfg(windows)]
+fn win32_from_hresult(hr: i32) -> u32 {
+    (hr as u32) & 0xFFFF
+}
+
+/// OpenProcess 실패 시의 win32 에러코드 → 생존 판정(순수, 테스트 가능).
+///
+/// ★왜 코드별 분기인가(false-live 버그 맥락)★: 기존엔 OpenProcess 실패를 무조건 live 로
+/// 봤다(`Err(_) => true`). 그 결과 "그런 프로세스 없음"(ERROR_INVALID_PARAMETER)도 살아있다고
+/// 오판 → 죽은 데몬에 앱이 붙으려다 'reconnecting' 고착(직전 세션 실제 발생). 부재와 권한부족을
+/// 구분해야 한다:
+///   - ERROR_INVALID_PARAMETER(87) = 그 PID 의 프로세스 자체가 없음 → dead(false).
+///   - ERROR_ACCESS_DENIED(5) = 프로세스는 존재하나 열 권한이 없음 → live(true).
+///   - 그 외 실패 = 원인 불명 → 보수적으로 live(true)(오탐보다 안전: 산 프로세스를 죽었다고
+///     오판하면 멀쩡한 데몬을 버리게 되므로).
+///
+/// ★왜 부재를 87 하나로만 좁혔나(의도적 비대칭)★: 죽은 PID 의 OpenProcess 실패가 항상 87 이라는
+/// MS 문서 보장은 없다(예: 방금 종료된 zombie·권한경계는 다른 코드 가능, ERROR_NOT_FOUND(1168) 등).
+/// 추측으로 dead 코드를 늘리면 산 데몬을 죽었다고 오판(false-dead)할 위험이 생기므로, "확실한 부재
+/// 시그널(87)만 dead, 나머지는 안전하게 live" 로 좁혔다. 빠진 부재 코드는 false-live 로 남지만, 이는
+/// 옛 버그의 부분 재현일 뿐 새 false-dead 를 만들지 않으며, 상위 `pid_alive_with_start_time` 의
+/// creation-time 대조가 2차 방어선이라 영구 교착까진 가지 않는다. 실측으로 부재 코드가 더 확인되면
+/// 그때 추가한다(추측 추가 금지 — 명세 오염).
+#[cfg(windows)]
+fn alive_from_open_error(win32_code: u32) -> bool {
+    // windows crate 의 ERROR_INVALID_PARAMETER.0 / ERROR_ACCESS_DENIED.0 과 동일한 리터럴.
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    match win32_code {
+        ERROR_INVALID_PARAMETER => false, // 프로세스 부재 → dead.
+        ERROR_ACCESS_DENIED => true,      // 존재하나 권한부족 → live.
+        _ => true,                        // 불명 → 보수적으로 live.
+    }
+}
+
 /// PID 단독 생존 판정(creation time 무시) — OpenProcess + GetExitCodeProcess.
 /// start_time 미상(0)일 때의 보수 fallback 으로만 쓴다.
 #[cfg(windows)]
@@ -62,10 +104,11 @@ pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    // SAFETY: 최소 권한으로 PID 핸들 open. 못 열면 부재/권한부족 — 보수적으로 살아있다고 본다.
+    // SAFETY: 최소 권한으로 PID 핸들 open. 못 열면 win32 에러코드로 부재/권한부족을 구분한다.
+    // (옛 무조건 true 는 부재도 live 로 오판 → 'reconnecting' 고착. alive_from_open_error 주석 참조.)
     let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
-        Err(_) => return true,
+        Err(e) => return alive_from_open_error(win32_from_hresult(e.code().0)),
     };
     const STILL_ACTIVE: u32 = 259;
     let mut code: u32 = 0;
@@ -283,5 +326,27 @@ mod tests {
             pid_alive_with_start_time(pid, 0),
             "미상이면 PID 생존으로 보수 판정"
         );
+    }
+
+    // ── OpenProcess 에러코드 → 생존 판정(순수, 실프로세스 비의존) ────────────────────
+
+    #[cfg(windows)]
+    #[test]
+    fn alive_from_open_error_classifies_codes() {
+        // 부재(INVALID_PARAMETER=87) → dead. false-live 버그의 핵심 수정점.
+        assert!(!alive_from_open_error(87), "부재 → dead");
+        // 권한부족(ACCESS_DENIED=5) → 프로세스는 존재하므로 live.
+        assert!(alive_from_open_error(5), "권한부족이나 존재 → live");
+        // 그 외/불명(0 등) → 보수적으로 live(오탐보다 안전).
+        assert!(alive_from_open_error(0), "불명 → 보수적 live");
+        assert!(alive_from_open_error(1234), "불명 → 보수적 live");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn win32_from_hresult_extracts_low_word() {
+        // HRESULT_FROM_WIN32 래핑 해제: 하위 16비트가 원래 win32 코드.
+        assert_eq!(win32_from_hresult(0x8007_0057u32 as i32), 87); // INVALID_PARAMETER
+        assert_eq!(win32_from_hresult(0x8007_0005u32 as i32), 5); // ACCESS_DENIED
     }
 }
