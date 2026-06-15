@@ -257,6 +257,59 @@ impl Client {
         profiles.unwrap()
     }
 
+    /// CreateProfile 응답 대기: Created(req echo, 프로필 동봉) 를 본다(phase4-2 #6).
+    /// 기존 CRUD 와 달리 Ack 가 아니라 Created 로 응답한다(requester 가 "내 것" 매칭).
+    /// broadcast 되는 ProfileListUpdated 는 흡수. 반환: Created 에 동봉된 프로필.
+    async fn await_created(&mut self, req: RequestId) -> engram_dashboard_protocol::AgentProfile {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match self.next().await {
+                Some(Incoming::Event(AgentEvent::Created {
+                    request_id,
+                    profile,
+                })) => {
+                    assert_eq!(request_id, req, "Created 의 request_id echo");
+                    return profile;
+                }
+                Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
+                    panic!("Created 기대했으나 Ack(req={request_id:?}) — Ack 중복 금지");
+                }
+                Some(Incoming::Event(AgentEvent::Error {
+                    request_id: Some(rid),
+                    message,
+                })) if rid == req => panic!("Created 기대했으나 Error(req={rid:?}): {message}"),
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        panic!("request_id={req:?} 의 Created 도달 전 timeout/close");
+    }
+
+    /// SpawnByCwd/SpawnProfile 응답 대기: Spawned(req echo, AgentInfo 동봉) 를 본다(phase4-2 #6).
+    /// 기존 Spawn 과 달리 Ack 가 아니라 Spawned 로 응답한다. broadcast 되는 AgentListUpdated 는 흡수.
+    /// 반환: Spawned 에 동봉된 AgentInfo.
+    async fn await_spawned(&mut self, req: RequestId) -> engram_dashboard_protocol::AgentInfo {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match self.next().await {
+                Some(Incoming::Event(AgentEvent::Spawned { request_id, agent })) => {
+                    assert_eq!(request_id, req, "Spawned 의 request_id echo");
+                    return agent;
+                }
+                Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
+                    panic!("Spawned 기대했으나 Ack(req={request_id:?}) — Ack 중복 금지");
+                }
+                Some(Incoming::Event(AgentEvent::Error {
+                    request_id: Some(rid),
+                    message,
+                })) if rid == req => panic!("Spawned 기대했으나 Error(req={rid:?}): {message}"),
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        panic!("request_id={req:?} 의 Spawned 도달 전 timeout/close");
+    }
+
     /// 다음 Snapshot event 의 (agent_id, chunks) 를 반환(중간 event/frame 흡수).
     async fn await_snapshot(&mut self) -> (Uuid, Vec<engram_dashboard_protocol::SnapshotChunk>) {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -1856,7 +1909,8 @@ async fn case34_no_lease_write_stdin_passes_freely() {
 //   각 case 는 EmbeddedClient(invoke)와 동일 의미인지(인자/부작용)를 dispatch 경로로 검증한다.
 // ══════════════════════════════════════════════════════════════════════════════════
 
-// ── 케이스 35: WS CreateProfile → Ack + ProfileListUpdated(새 프로필 포함) ──────────
+// ── 케이스 35: WS CreateProfile → Created(req echo, 생성 프로필 동봉) ────────────────
+// phase4-2 #6: Ack 대신 Created 로 응답. request_id 에 생성된 프로필을 동봉(DaemonClient 매칭용).
 #[tokio::test]
 async fn case35_ws_create_profile() {
     let server = start_test_server().await.unwrap();
@@ -1864,9 +1918,10 @@ async fn case35_ws_create_profile() {
     drain_handshake(&mut c).await;
 
     let req = RequestId::new();
+    let sent_cwd = std::env::temp_dir().to_string_lossy().into_owned();
     c.send(&WireCommand::CreateProfile {
         name: "p35".into(),
-        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        cwd: sent_cwd.clone(),
         extra_args: vec!["--foo".into()],
         env: vec![],
         auto_restore: true,
@@ -1874,11 +1929,10 @@ async fn case35_ws_create_profile() {
     })
     .await;
 
-    let profiles = c.await_crud(req).await;
-    let created = profiles
-        .iter()
-        .find(|p| p.name == "p35")
-        .expect("ProfileListUpdated 에 새 프로필 p35 포함");
+    // Created event 가 생성된 프로필을 직접 동봉 — request_id race 없이 "내 것" 식별.
+    let created = c.await_created(req).await;
+    assert_eq!(created.name, "p35", "Created 에 동봉된 프로필 이름 일치");
+    assert_eq!(created.cwd, sent_cwd, "Created 에 동봉된 cwd 일치");
     assert!(
         matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args } if extra_args == &vec!["--foo".to_string()]),
         "claude 프로필이 extra_args 보존"
@@ -1913,7 +1967,8 @@ async fn case36_ws_list_profiles() {
     server.shutdown().await;
 }
 
-// ── 케이스 37: WS SpawnProfile → Ack + AgentListUpdated(그 profile_id 로) ────────────
+// ── 케이스 37: WS SpawnProfile → Spawned(req echo, AgentInfo 동봉) ───────────────────
+// phase4-2 #6: Ack 대신 Spawned 로 응답. agent_id == profile_id(프로필 id 가 곧 agent id).
 #[tokio::test]
 async fn case37_ws_spawn_profile() {
     let server = start_test_server().await.unwrap();
@@ -1930,7 +1985,8 @@ async fn case37_ws_spawn_profile() {
         request_id: req,
     })
     .await;
-    c.await_spawn(profile_id, req).await;
+    let agent = c.await_spawned(req).await;
+    assert_eq!(agent.id, profile_id, "Spawned 의 agent.id == profile_id");
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
         "SpawnProfile 후 manager 에 agent 가 살아있어야"
@@ -2003,14 +2059,14 @@ async fn case39_ws_set_auto_restore() {
     server.shutdown().await;
 }
 
-// ── 케이스 40: WS SpawnByCwd → Ack + AgentListUpdated(새 ad-hoc agent) ──────────────
+// ── 케이스 40: WS SpawnByCwd → Spawned(req echo, AgentInfo 동봉) ─────────────────────
+// phase4-2 #6: Ack 대신 Spawned 로 응답 — 새 uuid 를 미리 모르던 문제를 동봉 AgentInfo 로 해소.
 #[tokio::test]
 async fn case40_ws_spawn_by_cwd() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // SpawnByCwd 는 새 uuid 를 생성하므로 id 를 미리 모른다 → Ack + (목록 증가)로 확인한다.
     let before = server.manager.list_agents().len();
     let req = RequestId::new();
     c.send(&WireCommand::SpawnByCwd {
@@ -2018,31 +2074,11 @@ async fn case40_ws_spawn_by_cwd() {
         request_id: req,
     })
     .await;
-    // Ack(req echo) 와 비어있지 않은 새 AgentListUpdated 를 둘 다 본다.
-    let mut saw_ack = false;
-    let mut saw_new = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while (!saw_ack || !saw_new) && std::time::Instant::now() < deadline {
-        match c.next().await {
-            Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
-                saw_ack = true;
-            }
-            Some(Incoming::Event(AgentEvent::AgentListUpdated { agents })) => {
-                if agents.len() > before {
-                    saw_new = true;
-                }
-            }
-            Some(Incoming::Event(AgentEvent::Error {
-                request_id: Some(rid),
-                message,
-            })) if rid == req => panic!("SpawnByCwd 실패 Error: {message}"),
-            Some(_) => continue,
-            None => break,
-        }
-    }
+    // Spawned 가 새 agent 의 AgentInfo 를 직접 동봉 → id 를 미리 몰라도 식별 가능.
+    let agent = c.await_spawned(req).await;
     assert!(
-        saw_ack && saw_new,
-        "SpawnByCwd 후 Ack({saw_ack})+증가한 AgentListUpdated({saw_new}) 둘 다 와야"
+        server.manager.agent_epoch(agent.id).is_some(),
+        "Spawned 에 동봉된 agent.id 가 manager 에 살아있어야"
     );
     assert!(
         server.manager.list_agents().len() > before,

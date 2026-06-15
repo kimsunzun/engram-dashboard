@@ -219,6 +219,19 @@ pub enum AgentEvent {
         chunks: Vec<SnapshotChunk>,
     },
 
+    /// CreateProfile 응답 — 생성된 프로필을 request_id 에 동봉(DaemonClient 가 "내 것" 매칭용).
+    /// 기존 ProfileListUpdated broadcast 와 별개(그건 전 연결 미러 갱신용, request_id 없음).
+    Created {
+        request_id: RequestId,
+        profile: AgentProfile,
+    },
+    /// SpawnByCwd/SpawnProfile 응답 — spawn 된 AgentInfo 를 request_id 에 동봉.
+    /// 기존 AgentListUpdated broadcast 와 별개(StatusSink 가 전 연결에 push, request_id 없음).
+    Spawned {
+        request_id: RequestId,
+        agent: AgentInfo,
+    },
+
     /// 오류 통지. request_id 있으면 특정 command 실패.
     Error {
         request_id: Option<RequestId>,

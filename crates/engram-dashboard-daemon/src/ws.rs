@@ -1319,12 +1319,19 @@ async fn dispatch(
                 vec![],
                 false,
             );
-            let result = manager
-                .spawn_agent(&profile, SpawnMode::Fresh)
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            // spawn_agent 성공 시 agent_list_updated 는 StatusSink 가 이미 브로드캐스트(Spawn arm 과 동일).
-            reply(conn_tx, request_id, result).await;
+            // spawn 성공 시 AgentInfo 를 request_id 에 동봉(Spawned)해 requester 가 "내 것"을 식별.
+            // agent_list_updated 는 StatusSink 가 이미 전 연결에 브로드캐스트(Spawn arm 과 동일).
+            match manager.spawn_agent(&profile, SpawnMode::Fresh) {
+                Ok(info) => {
+                    if let Some(text) = event_json(&AgentEvent::Spawned {
+                        request_id,
+                        agent: agent_info_to_wire(&info),
+                    }) {
+                        let _ = conn_tx.send(WsOutbound::Text(text)).await;
+                    }
+                }
+                Err(e) => reply(conn_tx, request_id, Err(e.to_string())).await,
+            }
         }
 
         AgentCommand::ListProfiles => {
@@ -1352,9 +1359,17 @@ async fn dispatch(
                 env,
                 auto_restore,
             );
+            // upsert 가 profile 을 move 하므로 wire 변환을 먼저 떠둔다.
+            let wire = profile_to_wire(&profile);
             manager.profiles().upsert(profile);
-            reply(conn_tx, request_id, Ok(())).await;
-            // 생성은 공유 상태 변경 → 전 연결에 갱신된 목록 push.
+            // requester 에겐 Created(생성된 프로필 동봉)로 응답 — Ack 는 보내지 않는다(중복 resolve 방지).
+            if let Some(text) = event_json(&AgentEvent::Created {
+                request_id,
+                profile: wire,
+            }) {
+                let _ = conn_tx.send(WsOutbound::Text(text)).await;
+            }
+            // 생성은 공유 상태 변경 → 나머지 연결엔 갱신된 목록 broadcast.
             broadcast_profile_list(registry, manager);
         }
 
@@ -1380,15 +1395,29 @@ async fn dispatch(
             } else {
                 SpawnMode::Fresh
             };
-            let result = match manager.profiles().get(profile_id) {
-                Some(profile) => manager
-                    .spawn_agent(&profile, mode)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                None => Err(format!("profile not found: {profile_id}")),
-            };
-            // 성공 시 agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
-            reply(conn_tx, request_id, result).await;
+            // 성공 시 Spawned(AgentInfo 동봉)로 응답, 실패/없음은 Error.
+            // agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
+            match manager.profiles().get(profile_id) {
+                Some(profile) => match manager.spawn_agent(&profile, mode) {
+                    Ok(info) => {
+                        if let Some(text) = event_json(&AgentEvent::Spawned {
+                            request_id,
+                            agent: agent_info_to_wire(&info),
+                        }) {
+                            let _ = conn_tx.send(WsOutbound::Text(text)).await;
+                        }
+                    }
+                    Err(e) => reply(conn_tx, request_id, Err(e.to_string())).await,
+                },
+                None => {
+                    reply(
+                        conn_tx,
+                        request_id,
+                        Err(format!("profile not found: {profile_id}")),
+                    )
+                    .await
+                }
+            }
         }
 
         AgentCommand::SetProfileAutoRestore {
