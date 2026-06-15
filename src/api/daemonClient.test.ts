@@ -27,6 +27,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 // import 는 mock 선언 뒤(vi.mock 은 hoist 되므로 순서 무관하나 명시).
 import { DaemonClient, decodeOutputFrame } from './daemonClient'
+import type { AgentInfo, RestoreReport } from './types'
 
 // ── 제어 가능한 FakeWebSocket ────────────────────────────────────────────────────────
 // 테스트가 인스턴스를 잡고 onopen/onmessage/onclose 를 직접 호출해 서버 동작을 흉내낸다.
@@ -452,6 +453,77 @@ describe('dedup·epoch 처리', () => {
     // Ack 전 frame — st.epoch===undefined 라 epoch 가드 무시, seq 가드만 적용.
     ws.fireBinary(buildFrame({ agentId: AGENT, epoch: 99, seq: 0 }))
     expect(received).toEqual([0])
+    client.close()
+  })
+})
+
+describe('상태/목록/복원 이벤트 라우팅(eventBus 공통 표면)', () => {
+  it('AgentListUpdated → onAgentListUpdated 등록 cb 가 agents 수신, unsubscribe 후 미수신', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const seen: AgentInfo[][] = []
+    const off = client.onAgentListUpdated((agents) => seen.push(agents))
+
+    const a1 = [{ id: 'a1' }, { id: 'a2' }] as unknown as AgentInfo[]
+    ws.fireText({ AgentListUpdated: { agents: a1 } })
+    expect(seen).toEqual([a1])
+
+    off()
+    ws.fireText({ AgentListUpdated: { agents: [{ id: 'a3' }] } })
+    // unsubscribe 후엔 추가 수신 없음.
+    expect(seen).toEqual([a1])
+    client.close()
+  })
+
+  it('StatusChanged → cb 가 (id, status, epoch) 정확히 수신', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const calls: Array<[string, unknown, number]> = []
+    const off = client.onStatusChanged((id, status, epoch) => calls.push([id, status, epoch]))
+
+    const status = { type: 'Running' }
+    // wire 필드명 agent_id/status/epoch → cb (id, status, epoch) 매핑 검증.
+    ws.fireText({ StatusChanged: { agent_id: 'agent-7', status, epoch: 3 } })
+    expect(calls).toEqual([['agent-7', status, 3]])
+
+    off()
+    ws.fireText({ StatusChanged: { agent_id: 'agent-7', status, epoch: 4 } })
+    expect(calls).toEqual([['agent-7', status, 3]])
+    client.close()
+  })
+
+  it('RestoreResult{report} → cb 가 report 수신', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const seen: RestoreReport[] = []
+    const off = client.onRestoreResult((report) => seen.push(report))
+
+    const report = {
+      agent_id: 'agent-9',
+      epoch: 1,
+      outcome: { type: 'Resumed' },
+    } as RestoreReport
+    // wire 는 {report} 래핑 → cb 는 report 만 받음.
+    ws.fireText({ RestoreResult: { report } })
+    expect(seen).toEqual([report])
+
+    off()
+    ws.fireText({ RestoreResult: { report } })
+    expect(seen).toEqual([report])
+    client.close()
+  })
+
+  it('여러 구독자에게 동시 broadcast(AgentListUpdated)', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const a: AgentInfo[][] = []
+    const b: AgentInfo[][] = []
+    client.onAgentListUpdated((x) => a.push(x))
+    client.onAgentListUpdated((x) => b.push(x))
+    const list = [{ id: 'z' }] as unknown as AgentInfo[]
+    ws.fireText({ AgentListUpdated: { agents: list } })
+    expect(a).toEqual([list])
+    expect(b).toEqual([list])
     client.close()
   })
 })

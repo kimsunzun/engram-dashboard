@@ -3,11 +3,33 @@
 // transport 디테일(Channel·base64·sinkId·#13133 정리)을 전부 여기 캡슐화한다.
 
 import { Channel, invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 import type { AgentClient, ConnectionState, OutputChunk, OutputSubscription } from './agentClient'
 import { ptyApi } from './ptyApi'
 import { decodeBase64Bytes } from './decodeBase64'
-import type { AgentInfo, AgentProfile, PtyEvent, SinkId } from './types'
+import type { AgentInfo, AgentProfile, AgentStatus, PtyEvent, RestoreReport, SinkId } from './types'
+
+/**
+ * Tauri listen(async Promise<unlisten>)을 sync disposer 로 감싼다(취소 안전).
+ * listen 이 아직 resolve 안 됐을 때 disposer 가 먼저 불릴 수 있으므로 cancelled 플래그를
+ * 둔다 — resolve 후 cancelled 면 즉시 unlisten 호출(리스너 누수 방지). connectionState 패턴.
+ */
+function syncListen<T>(event: string, handler: (payload: T) => void): () => void {
+  let unlisten: UnlistenFn | null = null
+  let cancelled = false
+  void listen<T>(event, (e) => handler(e.payload)).then((fn) => {
+    if (cancelled) fn()
+    else unlisten = fn
+  })
+  return () => {
+    cancelled = true
+    if (unlisten) {
+      unlisten()
+      unlisten = null
+    }
+  }
+}
 
 export class EmbeddedClient implements AgentClient {
   // Embedded 는 프로세스 수명=연결 수명이라 끊김 개념이 없다. 항상 connected.
@@ -36,6 +58,20 @@ export class EmbeddedClient implements AgentClient {
         void ptyApi.unsubscribeOutput(agentId, sinkId)
       },
     }
+  }
+
+  // ── 상태/목록/복원 이벤트 — Tauri listen 래핑(eventBus 가 하던 등록을 여기로 이동) ──
+  onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void {
+    return syncListen<AgentInfo[]>('agent-list-updated', cb)
+  }
+  onStatusChanged(cb: (id: string, status: AgentStatus, epoch: number) => void): () => void {
+    return syncListen<{ id: string; status: AgentStatus; epoch: number }>(
+      'agent-status-changed',
+      (p) => cb(p.id, p.status, p.epoch),
+    )
+  }
+  onRestoreResult(cb: (report: RestoreReport) => void): () => void {
+    return syncListen<RestoreReport>('agent-restore-result', cb)
   }
 
   spawnAgent(cwd: string): Promise<AgentInfo> {

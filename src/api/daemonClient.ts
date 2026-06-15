@@ -11,7 +11,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import type { AgentClient, ConnectionState, OutputChunk, OutputSubscription } from './agentClient'
-import type { AgentInfo, AgentProfile } from './types'
+import type { AgentInfo, AgentProfile, AgentStatus, RestoreReport } from './types'
 
 // ── discover_daemon DTO(discovery.rs DaemonInfoDto 미러) ──────────────────────────
 interface DaemonInfoDto {
@@ -117,6 +117,12 @@ export class DaemonClient implements AgentClient {
   private closedByUser = false
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+  // 상태/목록/복원 이벤트 콜백 레지스트리(broadcast). EmbeddedClient 의 Tauri listen 과 동일 의미를
+  // WS 이벤트(AgentListUpdated/StatusChanged/RestoreResult)로 제공한다 — eventBus 가 소비.
+  private agentListCbs = new Set<(agents: AgentInfo[]) => void>()
+  private statusCbs = new Set<(id: string, status: AgentStatus, epoch: number) => void>()
+  private restoreCbs = new Set<(report: RestoreReport) => void>()
 
   // ── 연결 상태 ──────────────────────────────────────────────────────────────────
   get connectionState(): ConnectionState {
@@ -335,6 +341,8 @@ export class DaemonClient implements AgentClient {
     }
     if ('AgentListUpdated' in msg) {
       const agents = (msg.AgentListUpdated as { agents: AgentInfo[] }).agents
+      // broadcast 구독자(트리·상태바)에게 갱신 전달 — getAgents 편승 waiter 와 별개로 항상 호출.
+      for (const cb of this.agentListCbs) cb(agents)
       const waiters = this.agentListWaiters
       this.agentListWaiters = []
       for (const w of waiters) w.resolve(agents)
@@ -357,8 +365,18 @@ export class DaemonClient implements AgentClient {
       }
       return
     }
-    // StatusChanged/InputLeaseChanged/RestoreResult/Output 등은 이벤트 버스 배선 전까지
-    // 여기서 소비하지 않는다(별건). 무시.
+    if ('StatusChanged' in msg) {
+      // wire 필드명: agent_id/status/epoch → cb 시그니처 (id, status, epoch).
+      const s = msg.StatusChanged as { agent_id: string; status: AgentStatus; epoch: number }
+      for (const cb of this.statusCbs) cb(s.agent_id, s.status, s.epoch)
+      return
+    }
+    if ('RestoreResult' in msg) {
+      const r = (msg.RestoreResult as { report: RestoreReport }).report
+      for (const cb of this.restoreCbs) cb(r)
+      return
+    }
+    // InputLeaseChanged/Output 등은 이벤트 버스 배선 전까지 여기서 소비하지 않는다(별건). 무시.
   }
 
   private handleBinary(buf: ArrayBuffer): void {
@@ -544,6 +562,26 @@ export class DaemonClient implements AgentClient {
     return this.sendCommand<void>((request_id) => ({
       SetProfileAutoRestore: { profile_id: agentId, auto_restore: autoRestore, request_id },
     }))
+  }
+
+  // ── 상태/목록/복원 이벤트 — WS 이벤트 라우팅(레지스트리 등록 + remove disposer) ──────
+  onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void {
+    this.agentListCbs.add(cb)
+    return () => {
+      this.agentListCbs.delete(cb)
+    }
+  }
+  onStatusChanged(cb: (id: string, status: AgentStatus, epoch: number) => void): () => void {
+    this.statusCbs.add(cb)
+    return () => {
+      this.statusCbs.delete(cb)
+    }
+  }
+  onRestoreResult(cb: (report: RestoreReport) => void): () => void {
+    this.restoreCbs.add(cb)
+    return () => {
+      this.restoreCbs.delete(cb)
+    }
   }
 
   // ── 명시 종료(재연결 중단) ──────────────────────────────────────────────────────

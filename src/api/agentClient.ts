@@ -7,7 +7,7 @@
 // transport(Tauri Channel / WS binary frame)와 base64/디코딩은 클라이언트 내부에 숨긴다 —
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
-import type { AgentInfo, AgentProfile } from './types'
+import type { AgentInfo, AgentProfile, AgentStatus, RestoreReport } from './types'
 
 /** 클라↔백엔드 연결 상태. Embedded 는 항상 connected. Daemon 만 reconnecting/down 발생. */
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
@@ -41,6 +41,17 @@ export interface AgentClient {
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
   ): Promise<OutputSubscription>
+
+  // ── 상태/목록/복원 이벤트 ─────────────────────────────────────────────────────
+  // 두 모드 공통 표면 — eventBus 가 소비해 store 에 연결한다(모드 무관).
+  // Embedded 는 Tauri listen 래핑, Daemon 은 WS 이벤트 라우팅으로 동일 의미를 제공한다.
+  // 각 메서드는 sync disposer 를 반환(호출 시 구독 해제). connectionState 패턴과 동일.
+  /** 권위 있는 에이전트 목록 교체(존재/제거 판정 기준). */
+  onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void
+  /** 개별 status 갱신(뱃지 표시용, 목록 제거 안 함). */
+  onStatusChanged(cb: (id: string, status: AgentStatus, epoch: number) => void): () => void
+  /** 부팅 복원 결과(S9). */
+  onRestoreResult(cb: (report: RestoreReport) => void): () => void
 
   // ── 명령 ──────────────────────────────────────────────────────────────────
   spawnAgent(cwd: string): Promise<AgentInfo>

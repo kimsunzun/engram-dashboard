@@ -1,9 +1,10 @@
-// 앱 전역 Tauri 이벤트 리스너 — 앱 시작 시 1회 호출(App.tsx).
-// HMR 재평가 시 기존 리스너 해제 후 재등록(중복 누적 방지).
+// 앱 전역 에이전트 이벤트 배선 — 앱 시작 시 1회 호출(App.tsx).
+// HMR 재평가 시 기존 구독 해제 후 재등록(중복 누적 방지).
+//
+// Tauri 이벤트를 직접 듣지 않고 agentClient(Embedded/Daemon 싱글톤)의 이벤트 구독 메서드를
+// 소비한다 — 두 모드 공통 표면이라 데몬 모드(WS 이벤트)에서도 동일하게 트리·상태바가 갱신된다.
 
-import { listen } from '@tauri-apps/api/event'
-
-import type { AgentInfo, AgentStatus, RestoreReport } from '../api/types'
+import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from './agentStore'
 import { useSlotStore } from './slotStore'
 
@@ -22,34 +23,32 @@ export function initEventBus(): Promise<void> {
         dispatch: useSlotStore.getState().dispatch,
       }
 
-      // HMR 재평가 시 기존 리스너 먼저 해제
+      // HMR 재평가 시 기존 구독 먼저 해제
       if (unlistenFns.length > 0) {
         unlistenFns.forEach(fn => fn())
         unlistenFns = []
       }
 
-      // agent-list-updated: 권위 있는 목록 교체(존재/제거 판정 기준, T-4)
+      // 등록은 sync(disposer 즉시 반환) — await 불필요. agentClient 가 모드별 transport 를 숨긴다.
+
+      // 권위 있는 목록 교체(존재/제거 판정 기준, T-4)
       unlistenFns.push(
-        await listen<AgentInfo[]>('agent-list-updated', e => {
-          useAgentStore.getState().setAgents(e.payload)
+        agentClient.onAgentListUpdated(agents => {
+          useAgentStore.getState().setAgents(agents)
         }),
       )
 
-      // agent-status-changed: 개별 status 갱신(뱃지 표시용, 목록 제거 안 함, T-4)
+      // 개별 status 갱신(뱃지 표시용, 목록 제거 안 함, T-4)
       unlistenFns.push(
-        await listen<{ id: string; status: AgentStatus; epoch: number }>(
-          'agent-status-changed',
-          e => {
-            useAgentStore.getState().onStatusChanged(e.payload.id, e.payload.status)
-          },
-        ),
+        agentClient.onStatusChanged((id, status) => {
+          useAgentStore.getState().onStatusChanged(id, status)
+        }),
       )
 
-      // agent-restore-result: 부팅 복원 결과(S9). 현재는 로그만 — UX 배너는 추후.
+      // 부팅 복원 결과(S9). 현재는 로그만 — UX 배너는 추후.
       unlistenFns.push(
-        await listen<RestoreReport>('agent-restore-result', e => {
-          const { agent_id, outcome } = e.payload
-          console.info('[restore]', agent_id, outcome.type, outcome)
+        agentClient.onRestoreResult(report => {
+          console.info('[restore]', report.agent_id, report.outcome.type, report.outcome)
         }),
       )
 
