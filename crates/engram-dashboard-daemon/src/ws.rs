@@ -1251,8 +1251,11 @@ async fn dispatch(
             }
         }
 
-        AgentCommand::ListAgents => {
-            if let Some(text) = event_json(&AgentEvent::AgentListUpdated {
+        AgentCommand::ListAgents { request_id } => {
+            // 조회 응답은 request_id 동봉 전용 reply(AgentList)로 요청 연결에만 — 편승 매칭 제거.
+            // broadcast 인 AgentListUpdated(트리 실시간 갱신)는 StatusSink/agent_list_updated 가 별도 담당.
+            if let Some(text) = event_json(&AgentEvent::AgentList {
+                request_id,
                 agents: core_agents_to_wire(manager.list_agents()),
             }) {
                 let _ = conn_tx.send(WsOutbound::Text(text)).await;
@@ -1336,9 +1339,11 @@ async fn dispatch(
             }
         }
 
-        AgentCommand::ListProfiles => {
-            // Tauri `list_profiles` 미러 — 읽기 전용 조회. 요청 연결에만 응답(ListAgents 와 동형).
-            if let Some(text) = event_json(&AgentEvent::ProfileListUpdated {
+        AgentCommand::ListProfiles { request_id } => {
+            // Tauri `list_profiles` 미러 — 읽기 전용 조회. request_id 동봉 전용 reply(ProfileList)로
+            // 요청 연결에만 응답(ListAgents 와 동형). broadcast ProfileListUpdated 는 CRUD 후 별도 push.
+            if let Some(text) = event_json(&AgentEvent::ProfileList {
+                request_id,
                 profiles: core_profiles_to_wire(manager.profiles().list()),
             }) {
                 let _ = conn_tx.send(WsOutbound::Text(text)).await;
@@ -1449,16 +1454,17 @@ async fn dispatch(
             request_id,
         } => {
             // Tauri `get_agent_snapshot` 미러: 그 시점 replay buffer 스냅샷 1회 조회. 없으면 Error.
+            // Snapshot 에 request_id 를 동봉(전용 reply)하므로 별도 Ack 는 보내지 않는다 — Created/
+            // Spawned 와 동형(응답 1건만, 중복 resolve 방지).
             match manager.get_snapshot(agent_id) {
                 Ok(chunks) => {
                     if let Some(text) = event_json(&AgentEvent::Snapshot {
+                        request_id,
                         agent_id,
                         chunks: chunks.iter().map(snapshot_chunk_to_wire).collect(),
                     }) {
                         let _ = conn_tx.send(WsOutbound::Text(text)).await;
                     }
-                    // Ack 로 요청 완료 확정(request_id echo).
-                    reply(conn_tx, request_id, Ok(())).await;
                 }
                 Err(e) => reply(conn_tx, request_id, Err(e.to_string())).await,
             }

@@ -210,19 +210,26 @@ impl Client {
         panic!("Error 도달 전 timeout/close");
     }
 
-    /// 다음 ProfileListUpdated 의 profiles 를 반환(중간 다른 event/frame 흡수). ListProfiles 응답 검증용.
-    async fn await_profile_list(&mut self) -> Vec<engram_dashboard_protocol::AgentProfile> {
+    /// ListProfiles 조회 응답(전용 reply ProfileList, req echo) 의 profiles 를 반환(중간 event/frame 흡수).
+    async fn await_profile_list(
+        &mut self,
+        req: RequestId,
+    ) -> Vec<engram_dashboard_protocol::AgentProfile> {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             match self.next().await {
-                Some(Incoming::Event(AgentEvent::ProfileListUpdated { profiles })) => {
-                    return profiles
+                Some(Incoming::Event(AgentEvent::ProfileList {
+                    request_id,
+                    profiles,
+                })) => {
+                    assert_eq!(request_id, req, "ProfileList 의 request_id echo");
+                    return profiles;
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("ProfileListUpdated 도달 전 timeout/close");
+        panic!("ProfileList 도달 전 timeout/close");
     }
 
     /// CRUD 응답을 한 번에 대기: Ack(req echo) **와** ProfileListUpdated 를 둘 다 본다(순서 무관).
@@ -310,19 +317,47 @@ impl Client {
         panic!("request_id={req:?} 의 Spawned 도달 전 timeout/close");
     }
 
-    /// 다음 Snapshot event 의 (agent_id, chunks) 를 반환(중간 event/frame 흡수).
-    async fn await_snapshot(&mut self) -> (Uuid, Vec<engram_dashboard_protocol::SnapshotChunk>) {
+    /// GetSnapshot 조회 응답(전용 reply Snapshot, req echo) 의 (agent_id, chunks) 를 반환(중간 event/frame 흡수).
+    async fn await_snapshot(
+        &mut self,
+        req: RequestId,
+    ) -> (Uuid, Vec<engram_dashboard_protocol::SnapshotChunk>) {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             match self.next().await {
-                Some(Incoming::Event(AgentEvent::Snapshot { agent_id, chunks })) => {
-                    return (agent_id, chunks)
+                Some(Incoming::Event(AgentEvent::Snapshot {
+                    request_id,
+                    agent_id,
+                    chunks,
+                })) => {
+                    assert_eq!(request_id, req, "Snapshot 의 request_id echo");
+                    return (agent_id, chunks);
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
         panic!("Snapshot 도달 전 timeout/close");
+    }
+
+    /// ListAgents 조회 응답(전용 reply AgentList, req echo) 의 agents 를 반환(중간 event/frame·
+    /// broadcast AgentListUpdated 흡수). 편승 매칭이 아니라 request_id 로만 매칭함을 검증한다.
+    async fn await_agent_list(
+        &mut self,
+        req: RequestId,
+    ) -> Vec<engram_dashboard_protocol::AgentInfo> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match self.next().await {
+                Some(Incoming::Event(AgentEvent::AgentList { request_id, agents })) => {
+                    assert_eq!(request_id, req, "AgentList 의 request_id echo");
+                    return agents;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        panic!("AgentList 도달 전 timeout/close");
     }
 
     /// Spawn 응답을 한 번에 대기: Ack(req echo) **와** wanted agent_id 포함 AgentListUpdated 를
@@ -1281,16 +1316,16 @@ async fn case17_ws_resize_no_error() {
 
     // 후속 명령(ListAgents)을 보내 그 응답 전에 Resize Error/Ack 가 끼지 않는지로 "무응답" 검증.
     // (Resize 가 잘못 Ack/Error 를 보내면 ListAgents 응답보다 먼저 그게 잡힌다.)
-    c.send(&WireCommand::ListAgents).await;
-    match c.next_event().await {
-        AgentEvent::AgentListUpdated { agents } => {
-            assert!(
-                agents.iter().any(|a| a.id == profile_id),
-                "ListAgents 응답이 와야(Resize 는 무응답이어야)"
-            );
-        }
-        ev => panic!("Resize 후 첫 control 은 ListAgents 응답이어야(Resize 무응답), got {ev:?}"),
-    }
+    let req_list = RequestId::new();
+    c.send(&WireCommand::ListAgents {
+        request_id: req_list,
+    })
+    .await;
+    let agents = c.await_agent_list(req_list).await;
+    assert!(
+        agents.iter().any(|a| a.id == profile_id),
+        "ListAgents 응답이 와야(Resize 는 무응답이어야)"
+    );
 
     server.shutdown().await;
 }
@@ -1335,10 +1370,17 @@ async fn case18_ws_unsubscribe_stops_live() {
     // unsubscribe 가 dispatch·코어에 반영될 시간을 준 뒤 새 출력 유발.
     // ★타이밍 비의존 보장★: ListAgents 를 왕복시켜 Unsubscribe 가 read_task 에서 이미 처리됐음을
     //   확정한 뒤(동일 read_task 가 FIFO 처리) 새 출력을 낸다.
-    c.send(&WireCommand::ListAgents).await;
+    let req_list = RequestId::new();
+    c.send(&WireCommand::ListAgents {
+        request_id: req_list,
+    })
+    .await;
     loop {
         match c.next().await.expect("ListAgents 응답 전 끊김") {
-            Incoming::Event(AgentEvent::AgentListUpdated { .. }) => break,
+            Incoming::Event(AgentEvent::AgentList { request_id, .. }) => {
+                assert_eq!(request_id, req_list, "ListAgents 응답 request_id echo");
+                break;
+            }
             Incoming::Frame(..) => panic!("Unsubscribe 후 잔여 frame 도착(구독이 안 끊김)"),
             _ => continue,
         }
@@ -1382,17 +1424,17 @@ async fn case19_ws_list_agents() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // 명시 WS ListAgents → AgentListUpdated(그 agent 포함).
-    c.send(&WireCommand::ListAgents).await;
-    match c.next_event().await {
-        AgentEvent::AgentListUpdated { agents } => {
-            assert!(
-                agents.iter().any(|a| a.id == profile_id),
-                "ListAgents 응답에 spawn 한 agent 포함"
-            );
-        }
-        ev => panic!("AgentListUpdated 기대, got {ev:?}"),
-    }
+    // 명시 WS ListAgents → 전용 reply AgentList(req echo, 그 agent 포함).
+    let req_list = RequestId::new();
+    c.send(&WireCommand::ListAgents {
+        request_id: req_list,
+    })
+    .await;
+    let agents = c.await_agent_list(req_list).await;
+    assert!(
+        agents.iter().any(|a| a.id == profile_id),
+        "ListAgents 응답에 spawn 한 agent 포함"
+    );
 
     server.shutdown().await;
 }
@@ -1429,11 +1471,12 @@ async fn case20_ws_stop_daemon_force_policy() {
         "force=false 거부 메시지에 active agents 명시: {msg}"
     );
     // 서버 생존 확인 — 같은 연결로 ListAgents 가 정상 응답(연결·서버 살아있음).
-    c.send(&WireCommand::ListAgents).await;
-    match c.next_event().await {
-        AgentEvent::AgentListUpdated { .. } => {}
-        ev => panic!("거부 후 서버가 살아있어 ListAgents 응답해야, got {ev:?}"),
-    }
+    let req_alive = RequestId::new();
+    c.send(&WireCommand::ListAgents {
+        request_id: req_alive,
+    })
+    .await;
+    let _ = c.await_agent_list(req_alive).await;
 
     // 2) force=true + kill_agents=true → Ack 후 종료(연결 close + 서버 watch 종료).
     let req_stop = RequestId::new();
@@ -1474,11 +1517,12 @@ async fn case21_ws_second_auth_rejected() {
         "2차 Auth 는 already authenticated Error 여야: {msg}"
     );
     // 연결은 닫히지 않고 유지(Error 만) — 후속 ListAgents 가 응답하는지로 확인.
-    c.send(&WireCommand::ListAgents).await;
-    match c.next_event().await {
-        AgentEvent::AgentListUpdated { .. } => {}
-        ev => panic!("2차 Auth Error 후에도 연결 유지·동작해야, got {ev:?}"),
-    }
+    let req_alive = RequestId::new();
+    c.send(&WireCommand::ListAgents {
+        request_id: req_alive,
+    })
+    .await;
+    let _ = c.await_agent_list(req_alive).await;
 
     server.shutdown().await;
 }
@@ -1516,11 +1560,12 @@ async fn case23_ws_parse_failure_error() {
         "파싱 실패 Error 메시지: {msg}"
     );
     // 연결 유지 확인 — 후속 ListAgents 정상 응답.
-    c.send(&WireCommand::ListAgents).await;
-    match c.next_event().await {
-        AgentEvent::AgentListUpdated { .. } => {}
-        ev => panic!("파싱 실패 Error 후에도 연결 유지·동작해야, got {ev:?}"),
-    }
+    let req_alive = RequestId::new();
+    c.send(&WireCommand::ListAgents {
+        request_id: req_alive,
+    })
+    .await;
+    let _ = c.await_agent_list(req_alive).await;
 
     server.shutdown().await;
 }
@@ -1947,7 +1992,7 @@ async fn case35_ws_create_profile() {
     server.shutdown().await;
 }
 
-// ── 케이스 36: WS ListProfiles → ProfileListUpdated ─────────────────────────────────
+// ── 케이스 36: WS ListProfiles → ProfileList(req echo, 전용 reply) ──────────────────
 #[tokio::test]
 async fn case36_ws_list_profiles() {
     let server = start_test_server().await.unwrap();
@@ -1957,8 +2002,12 @@ async fn case36_ws_list_profiles() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    c.send(&WireCommand::ListProfiles).await;
-    let profiles = c.await_profile_list().await;
+    let req_list = RequestId::new();
+    c.send(&WireCommand::ListProfiles {
+        request_id: req_list,
+    })
+    .await;
+    let profiles = c.await_profile_list(req_list).await;
     assert!(
         profiles.iter().any(|p| p.id == pre_id),
         "ListProfiles 응답에 미리 등록한 프로필 포함"
@@ -2088,7 +2137,7 @@ async fn case40_ws_spawn_by_cwd() {
     server.shutdown().await;
 }
 
-// ── 케이스 41: WS GetSnapshot → Snapshot(chunks) + Ack ──────────────────────────────
+// ── 케이스 41: WS GetSnapshot → Snapshot(req echo, chunks) — 전용 reply, Ack 없음 ────
 #[tokio::test]
 async fn case41_ws_get_snapshot() {
     let server = start_test_server().await.unwrap();
@@ -2107,11 +2156,10 @@ async fn case41_ws_get_snapshot() {
         request_id: req,
     })
     .await;
-    let (aid, chunks) = c.await_snapshot().await;
+    let (aid, chunks) = c.await_snapshot(req).await;
     assert_eq!(aid, id, "Snapshot 의 agent_id echo");
     assert!(!chunks.is_empty(), "쌓인 출력이 snapshot chunk 로 와야");
-    // Ack 도 와야(요청 완료 확정).
-    c.await_ack(req).await;
+    // Snapshot 에 request_id 동봉(전용 reply)이라 별도 Ack 는 오지 않는다(await_snapshot 이 req echo 검증).
 
     server.shutdown().await;
 }

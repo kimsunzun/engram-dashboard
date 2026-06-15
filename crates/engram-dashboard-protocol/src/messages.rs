@@ -83,7 +83,9 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
     /// 전체 에이전트 목록 조회(연결 직후 데몬이 자동 push 도 하지만 명시 조회도 허용).
-    ListAgents,
+    /// 응답은 request_id 동봉 [`AgentEvent::AgentList`](전용 reply). broadcast 인
+    /// [`AgentEvent::AgentListUpdated`](트리 실시간 갱신)와 별개 — 편승 매칭 제거.
+    ListAgents { request_id: RequestId },
     /// 데몬 종료(§5 LLM 제어). force=true 면 활성 에이전트 있어도 종료, kill_agents=true 면 함께 정리.
     StopDaemon {
         force: bool,
@@ -99,8 +101,9 @@ pub enum AgentCommand {
     SpawnByCwd { cwd: String, request_id: RequestId },
 
     /// 저장된 프로필 전체 조회. EmbeddedClient `listProfiles` = Tauri `list_profiles` 대응.
-    /// 응답은 [`AgentEvent::ProfileListUpdated`].
-    ListProfiles,
+    /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply). broadcast 인
+    /// [`AgentEvent::ProfileListUpdated`](프론트 미러 갱신)와 별개 — 편승 매칭 제거.
+    ListProfiles { request_id: RequestId },
 
     /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). EmbeddedClient `createClaudeProfile`
     /// = Tauri `create_claude_profile` 대응. ※env 에 자격증명 금지(평문 persist).
@@ -197,8 +200,16 @@ pub enum AgentEvent {
         status: AgentStatus,
         epoch: u32,
     },
-    /// 전체 목록 갱신. terminal 판정은 이걸로(status_changed 아님 — 설계 불변식).
+    /// 전체 목록 갱신(broadcast). terminal 판정은 이걸로(status_changed 아님 — 설계 불변식).
+    /// ※ 트리 실시간 갱신 전용 — request_id 없음. ListAgents 조회 응답은 [`AgentEvent::AgentList`].
     AgentListUpdated { agents: Vec<AgentInfo> },
+    /// ListAgents 조회 응답(전용 reply) — request_id 에코로 "내 요청 결과"를 정확히 매칭.
+    /// broadcast 인 AgentListUpdated 와 페이로드는 동일하나 편승 매칭(다음 도착 메시지 짝짓기)을
+    /// 제거하기 위해 request_id 를 동봉한다(Spawned/Created 와 동형).
+    AgentList {
+        request_id: RequestId,
+        agents: Vec<AgentInfo>,
+    },
     /// 복원 시도 결과.
     RestoreResult { report: RestoreReport },
     /// 입력 lease 상태 변경 통보(다중 뷰어가 "지금 잠겨있음"을 알게 함). held=true 면 누군가 보유 중,
@@ -208,12 +219,22 @@ pub enum AgentEvent {
         agent_id: AgentId,
         held: bool,
     },
-    /// 프로필 목록 갱신(phase4 1단계). ListProfiles 응답 + CRUD(생성/삭제/토글) 후 자동 push.
-    /// 프론트 ProfileRegistry 미러 갱신용. AgentListUpdated 의 프로필판.
+    /// 프로필 목록 갱신(broadcast, phase4 1단계). CRUD(생성/삭제/토글) 후 자동 push — 프론트
+    /// ProfileRegistry 미러 갱신용. AgentListUpdated 의 프로필판. request_id 없음.
+    /// ListProfiles 조회 응답은 [`AgentEvent::ProfileList`].
     ProfileListUpdated { profiles: Vec<AgentProfile> },
+    /// ListProfiles 조회 응답(전용 reply) — request_id 에코. broadcast 인 ProfileListUpdated 와
+    /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(Spawned/Created 와 동형).
+    ProfileList {
+        request_id: RequestId,
+        profiles: Vec<AgentProfile>,
+    },
 
-    /// GetSnapshot 응답 — 그 시점 replay buffer 스냅샷(phase4 1단계).
+    /// GetSnapshot 응답(전용 reply, phase4 1단계) — 그 시점 replay buffer 스냅샷.
+    /// request_id 에코로 같은 agent 동시 조회를 정확히 매칭(이전 agent_id 편승 매칭 제거).
+    /// broadcast 아님(특정 요청에만 응답).
     Snapshot {
+        request_id: RequestId,
         #[ts(type = "string")]
         agent_id: AgentId,
         chunks: Vec<SnapshotChunk>,

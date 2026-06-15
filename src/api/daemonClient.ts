@@ -87,12 +87,6 @@ interface Pending {
   reject: (e: unknown) => void
 }
 
-/** request_id 없는 broadcast 편승 조회의 일회성 waiter — 끊김/close 시 reject 하려고 reject 동봉. */
-interface Waiter<T> {
-  resolve: (v: T) => void
-  reject: (e: unknown) => void
-}
-
 // ── wire helper 타입(좁게) ─────────────────────────────────────────────────────────
 type WireEvent = Record<string, unknown>
 
@@ -105,14 +99,11 @@ export class DaemonClient implements AgentClient {
   // 진행 중 연결 시도(중복 연결 방지). resolve 는 Hello 수신(=인증 성공) 시.
   private connectPromise: Promise<void> | null = null
 
+  // 조회(getAgents/listProfiles/getSnapshot)와 side-effect(spawn/kill 등) 응답을 request_id 로
+  // 매칭하는 단일 pending map. 조회도 전용 reply variant(AgentList/ProfileList/Snapshot)가
+  // request_id 를 echo 하므로 편승 매칭 없이 정확히 짝지어진다(protocol v2).
   private pending = new Map<string, Pending>()
   private subs = new Map<string, SubState>()
-
-  // request_id 없는 응답을 기다리는 일회성 waiter(getAgents/getSnapshot/listProfiles).
-  // 끊김/close 시 reject 하려고 resolve+reject 쌍으로 보관.
-  private agentListWaiters: Array<Waiter<AgentInfo[]>> = []
-  private profileListWaiters: Array<Waiter<AgentProfile[]>> = []
-  private snapshotWaiters = new Map<string, Array<Waiter<unknown[]>>>()
 
   private closedByUser = false
   private reconnectAttempt = 0
@@ -225,12 +216,11 @@ export class DaemonClient implements AgentClient {
   private handleClose(wasHandshakeSettled: boolean): void {
     // 진행 중 명령은 전부 reject(connection lost). spawn/kill 등 1회성이라 자동 재전송은
     // 중복 부작용(중복 spawn) 위험 — 호출자가 catch 후 재시도하는 게 단순·안전(설계 택일).
+    // 조회(getAgents/listProfiles/getSnapshot)도 pending map 으로 통합됐으므로 한 번에 reject.
+    // 빈 배열 resolve 로 "조회 성공, 0건"으로 오인되지 않게 — "조회 실패"는 명확히 reject.
     const lost = new Error('connection lost')
     for (const p of this.pending.values()) p.reject(lost)
     this.pending.clear()
-    // 조회 waiter 도 reject — 빈 배열 resolve 면 호출자가 "조회 성공, 0건"(에이전트 전체 삭제)으로
-    // 오인한다. "조회 실패"와 "빈 목록"을 구분하기 위해 pending 명령과 동일하게 reject.
-    this.rejectAllWaiters(lost)
 
     this.connectPromise = null
     this.ws = null
@@ -339,30 +329,33 @@ export class DaemonClient implements AgentClient {
       // 라이브 전환 신호 — 현재 특별 처리 불필요(seq dedup 으로 충분).
       return
     }
+    if ('AgentList' in msg) {
+      // ListAgents 전용 reply(request_id echo) — getAgents 호출과 정확히 매칭(편승 매칭 제거).
+      const a = msg.AgentList as { request_id: string; agents: AgentInfo[] }
+      this.resolvePending(a.request_id, a.agents)
+      return
+    }
     if ('AgentListUpdated' in msg) {
+      // broadcast — 트리·상태바 실시간 갱신 전용(request_id 없음). 조회 응답이 아니므로 pending
+      // 과 무관하게 항상 콜백만 호출(두 경로 공존: 조회=AgentList / 갱신=AgentListUpdated).
       const agents = (msg.AgentListUpdated as { agents: AgentInfo[] }).agents
-      // broadcast 구독자(트리·상태바)에게 갱신 전달 — getAgents 편승 waiter 와 별개로 항상 호출.
       for (const cb of this.agentListCbs) cb(agents)
-      const waiters = this.agentListWaiters
-      this.agentListWaiters = []
-      for (const w of waiters) w.resolve(agents)
+      return
+    }
+    if ('ProfileList' in msg) {
+      // ListProfiles 전용 reply(request_id echo) — listProfiles 호출과 매칭.
+      const p = msg.ProfileList as { request_id: string; profiles: AgentProfile[] }
+      this.resolvePending(p.request_id, p.profiles)
       return
     }
     if ('ProfileListUpdated' in msg) {
-      const profiles = (msg.ProfileListUpdated as { profiles: AgentProfile[] }).profiles
-      const waiters = this.profileListWaiters
-      this.profileListWaiters = []
-      for (const w of waiters) w.resolve(profiles)
+      // broadcast — 프로필 미러 갱신 전용(request_id 없음). 현재 구독자 없음(향후 배선 자리).
       return
     }
     if ('Snapshot' in msg) {
-      const s = msg.Snapshot as { agent_id: string; chunks: unknown[] }
-      const arr = this.snapshotWaiters.get(s.agent_id)
-      if (arr && arr.length > 0) {
-        const w = arr.shift()!
-        if (arr.length === 0) this.snapshotWaiters.delete(s.agent_id)
-        w.resolve(s.chunks)
-      }
+      // GetSnapshot 전용 reply(request_id echo) — getSnapshot 호출과 매칭(agent_id 편승 제거).
+      const s = msg.Snapshot as { request_id: string; agent_id: string; chunks: unknown[] }
+      this.resolvePending(s.request_id, s.chunks)
       return
     }
     if ('StatusChanged' in msg) {
@@ -406,16 +399,6 @@ export class DaemonClient implements AgentClient {
       this.pending.delete(requestId)
       p.reject(err)
     }
-  }
-
-  /** list/snapshot 조회 waiter 를 전부 reject + 비움(끊김/close 공용). */
-  private rejectAllWaiters(err: unknown): void {
-    for (const w of this.agentListWaiters) w.reject(err)
-    this.agentListWaiters = []
-    for (const w of this.profileListWaiters) w.reject(err)
-    this.profileListWaiters = []
-    for (const arr of this.snapshotWaiters.values()) for (const w of arr) w.reject(err)
-    this.snapshotWaiters.clear()
   }
 
   /** side-effect 명령 전송 + request_id 등록 → 응답(Ack/Created/Spawned/Error)으로 resolve. */
@@ -489,46 +472,24 @@ export class DaemonClient implements AgentClient {
     await this.ensureConnected()
     this.sendJson({ Resize: { agent_id: agentId, cols, rows, viewport_id: null } })
   }
-  // v1 한계: 응답(AgentListUpdated)에 request_id 가 없어 broadcast 편승 매칭을 한다 — 다음
-  // 도착하는 1건으로 resolve. 동시 호출/타 연결 트리거(다른 클라가 CRUD 유발) 시 오매칭 가능.
-  // 전체 목록이라 값 자체는 정확하나, 정석 수정은 protocol 에 request_id 동봉 응답 variant 추가(추적 후속).
-  async getAgents(): Promise<AgentInfo[]> {
-    await this.ensureConnected()
-    // ListAgents = unit variant → JSON 문자열 "ListAgents".
-    return new Promise<AgentInfo[]>((resolve, reject) => {
-      this.agentListWaiters.push({ resolve, reject })
-      this.sendJson('ListAgents')
-    })
+  // protocol v2: ListAgents 응답이 request_id 동봉 전용 reply(AgentList)로 와 정확히 매칭된다
+  // (구 AgentListUpdated 편승 매칭 제거). broadcast AgentListUpdated 는 onAgentListUpdated 로 별도 유지.
+  getAgents(): Promise<AgentInfo[]> {
+    return this.sendCommand<AgentInfo[]>((request_id) => ({ ListAgents: { request_id } }))
   }
-  // v1 한계: 응답(Snapshot)에 request_id 가 없어 agent_id 로만 매칭한다 — 같은 agent_id 에 대한
-  // 동시 호출/타 연결 트리거 시 오매칭 가능. 정석 수정은 protocol 에 request_id 동봉 응답 variant 추가(추적 후속).
-  async getSnapshot(agentId: string): Promise<unknown[]> {
-    await this.ensureConnected()
-    return new Promise<unknown[]>((resolve, reject) => {
-      const w: Waiter<unknown[]> = { resolve, reject }
-      const arr = this.snapshotWaiters.get(agentId)
-      if (arr) arr.push(w)
-      else this.snapshotWaiters.set(agentId, [w])
-      this.sendCommandFireAndRegister(agentId)
-    })
-  }
-  /** GetSnapshot 은 request_id 동봉이나 응답 Snapshot 엔 request_id 없음 → agent_id 로 매칭(위 waiter). */
-  private sendCommandFireAndRegister(agentId: string): void {
-    // request_id 는 보내되(프로토콜 요구) 응답 매칭은 agent_id waiter 로. Ack/Error 가 따로
-    // 오지 않으므로 pending 엔 등록하지 않는다(Snapshot 만 응답).
-    this.sendJson({ GetSnapshot: { agent_id: agentId, request_id: crypto.randomUUID() } })
+  // protocol v2: Snapshot 응답이 request_id 를 echo → 같은 agent_id 동시 조회도 정확히 매칭
+  // (구 agent_id 편승 매칭 제거).
+  getSnapshot(agentId: string): Promise<unknown[]> {
+    return this.sendCommand<unknown[]>((request_id) => ({
+      GetSnapshot: { agent_id: agentId, request_id },
+    }))
   }
 
   // ── 프로필 CRUD ────────────────────────────────────────────────────────────────
-  // v1 한계: 응답(ProfileListUpdated)에 request_id 가 없어 broadcast 편승 매칭을 한다 — 다음
-  // 도착하는 1건으로 resolve. 동시 호출/타 연결 트리거 시 오매칭 가능. 전체 목록이라 값은 정확하나,
-  // 정석 수정은 protocol 에 request_id 동봉 응답 variant 추가(추적 후속).
-  async listProfiles(): Promise<AgentProfile[]> {
-    await this.ensureConnected()
-    return new Promise<AgentProfile[]>((resolve, reject) => {
-      this.profileListWaiters.push({ resolve, reject })
-      this.sendJson('ListProfiles')
-    })
+  // protocol v2: ListProfiles 응답이 request_id 동봉 전용 reply(ProfileList)로 와 정확히 매칭된다
+  // (구 ProfileListUpdated 편승 매칭 제거).
+  listProfiles(): Promise<AgentProfile[]> {
+    return this.sendCommand<AgentProfile[]>((request_id) => ({ ListProfiles: { request_id } }))
   }
   createClaudeProfile(
     name: string,
@@ -591,12 +552,11 @@ export class DaemonClient implements AgentClient {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    // in-flight 정리 — pending 명령/조회 waiter 를 reject 하지 않으면 promise leak.
+    // in-flight 정리 — pending(명령+조회 통합) 을 reject 하지 않으면 promise leak.
     // cleanupSocket 이 onclose 핸들러를 delete 하므로 handleClose 가 안 불릴 수 있다 → 여기서 직접 정리.
     const closed = new Error('client closed')
     for (const p of this.pending.values()) p.reject(closed)
     this.pending.clear()
-    this.rejectAllWaiters(closed)
     this.cleanupSocket()
     this.setState('down')
   }

@@ -299,6 +299,118 @@ describe('request_id pending 매칭', () => {
   })
 })
 
+describe('★ 조회 전용 reply 매칭(편승 오매칭 제거, protocol v2) ★', () => {
+  /** ws.parsedSent() 에서 주어진 variant key 를 가진 마지막 명령의 request_id 추출. */
+  function lastReqId(ws: FakeWebSocket, key: string): string {
+    const sent = ws
+      .parsedSent()
+      .filter((m): m is Record<string, { request_id: string }> => typeof m === 'object' && !!m && key in m)
+    return sent[sent.length - 1][key].request_id
+  }
+
+  it('getAgents → request_id 동봉 ListAgents 전송 + AgentList{request_id} 로 resolve', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const p = client.getAgents()
+    await Promise.resolve()
+    const rid = lastReqId(ws, 'ListAgents')
+    const agents = [{ id: 'a1' }, { id: 'a2' }] as unknown as AgentInfo[]
+    ws.fireText({ AgentList: { request_id: rid, agents } })
+    await expect(p).resolves.toEqual(agents)
+    client.close()
+  })
+
+  it('getAgents 진행 중 다른 request_id 의 broadcast AgentListUpdated 가 끼어도 편승하지 않는다', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    // broadcast 구독자도 등록 — broadcast 는 여전히 cb 로 가야 한다(두 경로 공존).
+    const broadcasts: AgentInfo[][] = []
+    client.onAgentListUpdated((a) => broadcasts.push(a))
+
+    const p = client.getAgents()
+    await Promise.resolve()
+    const rid = lastReqId(ws, 'ListAgents')
+
+    // ① 내 요청과 무관한 broadcast(다른 클라의 CRUD 트리거 흉내) — getAgents 가 편승 resolve 하면 버그.
+    const other = [{ id: 'other' }] as unknown as AgentInfo[]
+    ws.fireText({ AgentListUpdated: { agents: other } })
+    let settled = false
+    void p.then(() => (settled = true)).catch(() => (settled = true))
+    await Promise.resolve()
+    expect(settled).toBe(false) // 편승 안 함(구 버그라면 여기서 other 로 resolve)
+    expect(broadcasts).toEqual([other]) // broadcast 는 정상 라우팅
+
+    // ② 내 request_id 의 전용 reply 가 와야 resolve.
+    const mine = [{ id: 'mine' }] as unknown as AgentInfo[]
+    ws.fireText({ AgentList: { request_id: rid, agents: mine } })
+    await expect(p).resolves.toEqual(mine)
+    client.close()
+  })
+
+  it('동시 2개 getAgents 가 각자 request_id 로 정확히 짝지어진다', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const p1 = client.getAgents()
+    const p2 = client.getAgents()
+    await Promise.resolve()
+    const sent = ws
+      .parsedSent()
+      .filter((m): m is { ListAgents: { request_id: string } } => typeof m === 'object' && !!m && 'ListAgents' in m)
+    expect(sent.length).toBe(2)
+    const [rid1, rid2] = [sent[0].ListAgents.request_id, sent[1].ListAgents.request_id]
+    expect(rid1).not.toBe(rid2)
+    const list1 = [{ id: 'L1' }] as unknown as AgentInfo[]
+    const list2 = [{ id: 'L2' }] as unknown as AgentInfo[]
+    // 역순으로 응답해도 request_id 로 정확히 매칭.
+    ws.fireText({ AgentList: { request_id: rid2, agents: list2 } })
+    ws.fireText({ AgentList: { request_id: rid1, agents: list1 } })
+    await expect(p1).resolves.toEqual(list1)
+    await expect(p2).resolves.toEqual(list2)
+    client.close()
+  })
+
+  it('listProfiles → ProfileList{request_id} 로 resolve, broadcast ProfileListUpdated 는 편승 안 함', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const p = client.listProfiles()
+    await Promise.resolve()
+    const rid = lastReqId(ws, 'ListProfiles')
+    // 무관한 broadcast 가 끼어도 편승 금지.
+    ws.fireText({ ProfileListUpdated: { profiles: [{ id: 'noise' }] } })
+    let settled = false
+    void p.then(() => (settled = true)).catch(() => (settled = true))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    const profiles = [{ id: 'pX' }]
+    ws.fireText({ ProfileList: { request_id: rid, profiles } })
+    await expect(p).resolves.toEqual(profiles)
+    client.close()
+  })
+
+  it('getSnapshot → Snapshot{request_id} 로 resolve(같은 agent_id 동시 조회도 정확 매칭)', async () => {
+    const client = new DaemonClient()
+    const ws = await connect(client)
+    const p1 = client.getSnapshot(AGENT)
+    const p2 = client.getSnapshot(AGENT) // 같은 agent_id 동시 2건
+    await Promise.resolve()
+    const sent = ws
+      .parsedSent()
+      .filter((m): m is { GetSnapshot: { request_id: string; agent_id: string } } => typeof m === 'object' && !!m && 'GetSnapshot' in m)
+    expect(sent.length).toBe(2)
+    const rid1 = sent[0].GetSnapshot.request_id
+    const rid2 = sent[1].GetSnapshot.request_id
+    expect(rid1).not.toBe(rid2)
+    const chunks1 = [{ seq: 1, data: [1] }]
+    const chunks2 = [{ seq: 2, data: [2] }]
+    // 같은 agent_id 라도 request_id 로 짝지어 — 구 agent_id 매칭이면 순서대로 잘못 짝지을 위험.
+    ws.fireText({ Snapshot: { request_id: rid2, agent_id: AGENT, chunks: chunks2 } })
+    ws.fireText({ Snapshot: { request_id: rid1, agent_id: AGENT, chunks: chunks1 } })
+    await expect(p1).resolves.toEqual(chunks1)
+    await expect(p2).resolves.toEqual(chunks2)
+    client.close()
+  })
+})
+
 describe('★ 재연결 resume 회귀(버그 A/B) ★', () => {
   it('재연결 시 알려진 epoch + after_seq=마지막배달seq 로 resubscribe → seq 무손실·무중복', async () => {
     const client = new DaemonClient()
