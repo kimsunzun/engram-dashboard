@@ -80,7 +80,7 @@ pub fn read(path: &Path) -> Option<DaemonInfo> {
 /// ★PID 재사용(M2) 방어★: 데몬이 죽고 같은 PID 를 다른 프로세스가 받았어도 creation time 이
 /// 달라 dead 로 판정 → 엉뚱한 프로세스를 살아있는 데몬으로 오인하지 않는다.
 pub fn is_stale(info: &DaemonInfo) -> bool {
-    !engram_dashboard_core::pty::platform::pid_alive_with_start_time(info.pid, info.start_time)
+    !engram_dashboard_core::agent::platform::pid_alive_with_start_time(info.pid, info.start_time)
 }
 
 #[cfg(test)]
@@ -174,7 +174,7 @@ mod tests {
         let mut info = sample();
         info.pid = std::process::id();
         info.start_time =
-            engram_dashboard_core::pty::platform::current_process_start_time().unwrap();
+            engram_dashboard_core::agent::platform::current_process_start_time().unwrap();
         assert!(!is_stale(&info), "PID+creation time 일치면 not stale");
     }
 
@@ -184,7 +184,7 @@ mod tests {
         // ★PID 재사용 방어★: 같은 PID 라도 creation time 이 다르면 stale(우리 데몬 아님).
         let mut info = sample();
         info.pid = std::process::id();
-        let real = engram_dashboard_core::pty::platform::current_process_start_time().unwrap();
+        let real = engram_dashboard_core::agent::platform::current_process_start_time().unwrap();
         info.start_time = real.wrapping_add(999);
         assert!(is_stale(&info), "creation time 불일치 = 재사용 PID → stale");
     }

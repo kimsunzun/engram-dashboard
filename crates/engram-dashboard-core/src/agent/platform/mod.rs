@@ -1,7 +1,7 @@
 //! 플랫폼별 프로세스 그룹 정리 추상화.
 //!
 //! 현재는 Windows(Job Object)만 구현한다. 다른 OS는 추후(예: Unix process group).
-//! session.rs는 `use crate::pty::platform::JobObjectHandle` 로 참조한다.
+//! session.rs는 `use crate::agent::platform::JobObjectHandle` 로 참조한다.
 //!
 //! PID liveness/creation-time 헬퍼(process_creation_time/pid_alive/pid_alive_with_start_time/
 //! current_process_start_time)는 daemon(portfile)·tauri(discovery)가 공유한다 —

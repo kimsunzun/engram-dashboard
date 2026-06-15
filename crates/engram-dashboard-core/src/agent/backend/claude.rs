@@ -10,9 +10,9 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::pty::backend::{console_command, AgentBackend};
-use crate::pty::profile::{AgentCommand, SpawnMode};
-use crate::pty::types::CommandSpec;
+use crate::agent::backend::{console_command, AgentBackend};
+use crate::agent::profile::{AgentCommand, SpawnMode};
+use crate::agent::types::CommandSpec;
 
 /// claude 실행 파일명(논리값). 실제 spawn 시 Windows에선 `console_command`가 `cmd.exe /c claude`로
 /// 감싼다(npm shim 해석, error 193 회피 — backend/mod.rs 참조).

@@ -4,7 +4,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{AppState, ChannelOutputSink};
-use engram_dashboard_core::pty::types::{OutputChunk, PtyEvent, SinkId};
+use engram_dashboard_core::agent::types::{OutputChunk, PtyEvent, SinkId};
 
 #[tauri::command]
 pub async fn subscribe_agent_output(

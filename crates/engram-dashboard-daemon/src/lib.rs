@@ -15,11 +15,11 @@ pub mod ws;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use engram_dashboard_core::agent::manager::AgentManager;
+use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
+use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::logging;
 use engram_dashboard_core::persistence::FileProfileStore;
-use engram_dashboard_core::pty::manager::AgentManager;
-use engram_dashboard_core::pty::profile::{ProfileRegistry, ProfileStore};
-use engram_dashboard_core::pty::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -306,7 +306,7 @@ pub async fn run() -> Result<(), i32> {
 
     // 8) daemon.json atomic 기록. 토큰을 포함하나 파일에만 — 로그엔 port/pid 만.
     let start_time =
-        engram_dashboard_core::pty::platform::current_process_start_time().unwrap_or(0);
+        engram_dashboard_core::agent::platform::current_process_start_time().unwrap_or(0);
     let info = portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
@@ -482,14 +482,14 @@ async fn start_test_server_inner(
 /// 운영의 FileProfileStore 를 대신해 테스트 격리(디스크/Embedded 비오염)를 만든다.
 #[derive(Default)]
 struct MemProfileStore {
-    saved: std::sync::Mutex<Vec<engram_dashboard_core::pty::profile::AgentProfile>>,
+    saved: std::sync::Mutex<Vec<engram_dashboard_core::agent::profile::AgentProfile>>,
 }
 
 impl ProfileStore for MemProfileStore {
-    fn save(&self, profiles: &[engram_dashboard_core::pty::profile::AgentProfile]) {
+    fn save(&self, profiles: &[engram_dashboard_core::agent::profile::AgentProfile]) {
         *self.saved.lock().expect("mem store poisoned") = profiles.to_vec();
     }
-    fn load(&self) -> Vec<engram_dashboard_core::pty::profile::AgentProfile> {
+    fn load(&self) -> Vec<engram_dashboard_core::agent::profile::AgentProfile> {
         self.saved.lock().expect("mem store poisoned").clone()
     }
 }

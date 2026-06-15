@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::pty::profile::{AgentProfile, ProfileStore};
+use crate::agent::profile::{AgentProfile, ProfileStore};
 
 /// 파일 포맷 버전. 구조가 바뀌면 올린다. 로드 시 불일치하면 적재하지 않는다(마이그레이션 게이트).
 const SCHEMA_VERSION: u32 = 1;
@@ -166,7 +166,7 @@ fn warn_if_secret(profiles: &[AgentProfile]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pty::profile::AgentCommand;
+    use crate::agent::profile::AgentCommand;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("engram-persist-test-{name}"));

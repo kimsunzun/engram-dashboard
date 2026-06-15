@@ -35,7 +35,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::pty::types::AgentId;
+use crate::agent::types::AgentId;
 
 /// 폴링 주기. sid drift는 사용자가 `/clear`를 친 직후라 1초 지연은 무해하다.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);

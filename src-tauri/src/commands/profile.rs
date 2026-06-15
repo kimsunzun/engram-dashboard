@@ -9,8 +9,8 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::AppState;
-use engram_dashboard_core::pty::profile::{AgentCommand, AgentProfile, SpawnMode};
-use engram_dashboard_core::pty::types::AgentInfo;
+use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
+use engram_dashboard_core::agent::types::AgentInfo;
 
 /// 저장된 프로필 전체 조회.
 #[tauri::command]

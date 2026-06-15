@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use crate::pty::output_core::OutputCore;
-use crate::pty::transport::AgentTransport;
-use crate::pty::types::{
+use crate::agent::output_core::OutputCore;
+use crate::agent::transport::AgentTransport;
+use crate::agent::types::{
     Capabilities, ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps, PtyError, SessionCaps,
 };
 

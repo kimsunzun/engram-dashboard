@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::pty::profile::{AgentCommand, SpawnMode};
-use crate::pty::types::CommandSpec;
+use crate::agent::profile::{AgentCommand, SpawnMode};
+use crate::agent::types::CommandSpec;
 
 /// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
 ///

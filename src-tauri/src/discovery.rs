@@ -290,7 +290,7 @@ impl PidLiveness for RealLiveness {
     fn is_dead(&self, pid: u32, start_time: u64) -> bool {
         // ★DRY★: liveness 판정은 core 의 공유 함수에 위임한다(daemon portfile::is_stale 과 동일 로직).
         // 옛 src-tauri 사본 pid_is_dead 는 제거 — 무테스트 중복이었다(리뷰어 지적).
-        !engram_dashboard_core::pty::platform::pid_alive_with_start_time(pid, start_time)
+        !engram_dashboard_core::agent::platform::pid_alive_with_start_time(pid, start_time)
     }
 }
 

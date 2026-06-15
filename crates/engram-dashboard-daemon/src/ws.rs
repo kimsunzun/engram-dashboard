@@ -23,10 +23,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engram_dashboard_core::pty::manager::{default_shell, AgentManager};
-use engram_dashboard_core::pty::profile::RestoreReport as CoreRestoreReport;
-use engram_dashboard_core::pty::profile::SpawnMode;
-use engram_dashboard_core::pty::types::{
+use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
+use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
+use engram_dashboard_core::agent::profile::SpawnMode;
+use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputFrame, OutputSink,
     ReplayKind, SinkError, SinkId, StatusSink, SubscribeOutcome,
 };
@@ -321,11 +321,13 @@ fn smallest(views: Option<&HashMap<String, (u16, u16)>>) -> Option<(u16, u16)> {
 // 변환은 데몬 crate 에 둔다(core 는 protocol 무의존 유지 — §1 불변). orphan rule 때문에 외부 두
 // 타입 사이 `impl From` 은 불가하나, 데몬이 양쪽을 다 의존하므로 자유 함수로 직접 필드 접근한다.
 
-use engram_dashboard_core::pty::profile::{
+use engram_dashboard_core::agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
     RestartPolicy as CoreRestartPolicy, RestoreOutcome as CoreRestoreOutcome,
 };
-use engram_dashboard_core::pty::types::{Capabilities as CoreCaps, OutputChunk as CoreOutputChunk};
+use engram_dashboard_core::agent::types::{
+    Capabilities as CoreCaps, OutputChunk as CoreOutputChunk,
+};
 use engram_dashboard_protocol::{
     AgentProfile as WireProfile, AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ControlCaps as WireControlCaps, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
@@ -1821,7 +1823,7 @@ mod tests {
     // ── 7. core→wire AgentInfo 변환 roundtrip(serde 형태 일치) ────────────────
     #[test]
     fn core_agent_info_converts_to_wire() {
-        use engram_dashboard_core::pty::types::{
+        use engram_dashboard_core::agent::types::{
             AgentInfo as Ci, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
             SessionCaps,
         };
@@ -1875,7 +1877,7 @@ mod tests {
     //    JSON tag 인지 직접 비교해 "변환은 됐지만 다른 variant 로 둔갑" 도 잡는다.
     #[test]
     fn all_core_status_variants_roundtrip_to_wire() {
-        use engram_dashboard_core::pty::types::{
+        use engram_dashboard_core::agent::types::{
             AgentInfo as Ci, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
             SessionCaps,
         };
@@ -1967,7 +1969,7 @@ mod tests {
     //    특히 FreshFallback 의 Uuid→String 변환을 명시 검증(옛 reflection 의 우연 호환 제거).
     #[test]
     fn all_restore_outcomes_convert_to_wire() {
-        use engram_dashboard_core::pty::profile::RestoreOutcome as Co;
+        use engram_dashboard_core::agent::profile::RestoreOutcome as Co;
         use engram_dashboard_protocol::RestoreOutcome as Wo;
 
         let old = uuid::Uuid::new_v4();

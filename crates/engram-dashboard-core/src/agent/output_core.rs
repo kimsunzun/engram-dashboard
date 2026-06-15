@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::pty::types::{
+use crate::agent::types::{
     AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputSink, ReplayKind, SinkId,
     StatusSink, SubscribeOutcome, TerminalReason,
 };
@@ -455,7 +455,7 @@ mod tests {
     }
 
     impl OutputSink for MockSink {
-        fn send(&self, frame: OutputFrame<'_>) -> Result<(), crate::pty::types::SinkError> {
+        fn send(&self, frame: OutputFrame<'_>) -> Result<(), crate::agent::types::SinkError> {
             // raw 바이트를 복사 보관(테스트 검증용).
             self.events
                 .lock()
@@ -492,7 +492,7 @@ mod tests {
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
     }
 
-    use crate::pty::types::AgentInfo;
+    use crate::agent::types::AgentInfo;
 
     fn new_core(status_sink: Arc<dyn StatusSink>) -> OutputCore {
         OutputCore::new(uuid::Uuid::new_v4(), 0, status_sink)
@@ -668,7 +668,7 @@ mod tests {
             replay_started: Arc<AtomicBool>,
         }
         impl OutputSink for OrderSink {
-            fn send(&self, _frame: OutputFrame<'_>) -> Result<(), crate::pty::types::SinkError> {
+            fn send(&self, _frame: OutputFrame<'_>) -> Result<(), crate::agent::types::SinkError> {
                 self.replay_started.store(true, Ordering::SeqCst);
                 Ok(())
             }

@@ -17,15 +17,15 @@ use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::pty::output_core::OutputCore;
-use crate::pty::transport::AgentTransport;
-use crate::pty::types::{
+use crate::agent::output_core::OutputCore;
+use crate::agent::transport::AgentTransport;
+use crate::agent::types::{
     Capabilities, CommandSpec, ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps,
     OutputEvent, PtyError, SessionCaps, TerminalReason,
 };
 
 #[cfg(windows)]
-use crate::pty::platform::JobObjectHandle;
+use crate::agent::platform::JobObjectHandle;
 
 /// 콘솔 PTY transport. master/writer/child/job + start 전까지 보관하는 reader.
 ///
@@ -341,7 +341,7 @@ impl AgentTransport for PtyTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pty::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
+    use crate::agent::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
     use std::sync::Mutex;
 
     /// status 변경을 순서대로 수집하는 mock(격리 검증용).

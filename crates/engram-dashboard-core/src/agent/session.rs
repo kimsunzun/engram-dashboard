@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::pty::output_core::OutputCore;
-use crate::pty::transport::AgentTransport;
-use crate::pty::types::{
+use crate::agent::output_core::OutputCore;
+use crate::agent::transport::AgentTransport;
+use crate::agent::types::{
     AgentId, AgentStatus, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError, SinkId,
     SubscribeOutcome,
 };

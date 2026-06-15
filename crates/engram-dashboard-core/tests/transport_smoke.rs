@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_core::pty::manager::default_shell;
-use engram_dashboard_core::pty::output_core::OutputCore;
-use engram_dashboard_core::pty::transport::pty::PtyTransport;
-use engram_dashboard_core::pty::transport::AgentTransport;
-use engram_dashboard_core::pty::types::{
+use engram_dashboard_core::agent::manager::default_shell;
+use engram_dashboard_core::agent::output_core::OutputCore;
+use engram_dashboard_core::agent::transport::pty::PtyTransport;
+use engram_dashboard_core::agent::transport::AgentTransport;
+use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputFrame, OutputSink, SinkError,
     SinkId, StatusSink,
 };

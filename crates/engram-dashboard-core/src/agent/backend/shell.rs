@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::pty::backend::AgentBackend;
-use crate::pty::profile::{AgentCommand, SpawnMode};
-use crate::pty::types::CommandSpec;
+use crate::agent::backend::AgentBackend;
+use crate::agent::profile::{AgentCommand, SpawnMode};
+use crate::agent::types::CommandSpec;
 
 /// 셸 백엔드 unit struct. &'static으로 사용, 상태 없음.
 pub struct ShellBackend;

@@ -16,13 +16,15 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_core::persistence::FileProfileStore;
-use engram_dashboard_core::pty::manager::{default_shell, AgentManager};
-use engram_dashboard_core::pty::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
-use engram_dashboard_core::pty::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::pty::types::{
+use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
+use engram_dashboard_core::agent::profile::{
+    AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
+};
+use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_core::persistence::FileProfileStore;
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 // OutputSink + StatusSink 양쪽을 구현하는 기록형 테스트 sink.

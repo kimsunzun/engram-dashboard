@@ -1,4 +1,4 @@
-//! 도메인 타입(wire 표현). 현 `core::pty::types` / `core::pty::profile` 의 직렬화 형태를 미러.
+//! 도메인 타입(wire 표현). 현 `core::agent::types` / `core::agent::profile` 의 직렬화 형태를 미러.
 //! phase 1 에서 core 가 이 crate 에 의존하며 단일 진실원으로 합쳐진다(중복 제거).
 
 use ts_rs::TS;

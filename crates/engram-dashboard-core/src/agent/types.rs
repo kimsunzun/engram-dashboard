@@ -202,7 +202,7 @@ pub trait StatusSink: Send + Sync + 'static {
     fn status_changed(&self, id: AgentId, status: AgentStatus, epoch: u32);
     fn agent_list_updated(&self, agents: Vec<AgentInfo>);
     /// 복원 시도 결과 통지(S9 §18-d). 기본 no-op — 복원을 안 쓰는 sink는 구현 불필요.
-    fn restore_result(&self, _report: crate::pty::profile::RestoreReport) {}
+    fn restore_result(&self, _report: crate::agent::profile::RestoreReport) {}
 }
 
 // ReplayBuffer 는 session.rs 로 이동 (LLD §1/§4: session.rs 소속).

@@ -16,16 +16,16 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::pty::backend;
-use crate::pty::output_core::OutputCore;
-use crate::pty::profile::{
+use crate::agent::backend;
+use crate::agent::output_core::OutputCore;
+use crate::agent::profile::{
     AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
-use crate::pty::session::AgentSession;
-use crate::pty::session_tracker::SessionTracker;
-use crate::pty::transport::pty::PtyTransport;
-use crate::pty::transport::AgentTransport;
-use crate::pty::types::{
+use crate::agent::session::AgentSession;
+use crate::agent::session_tracker::SessionTracker;
+use crate::agent::transport::pty::PtyTransport;
+use crate::agent::transport::AgentTransport;
+use crate::agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, OutputChunk, OutputSink, PtyError, SinkId,
     StatusSink, SubscribeOutcome,
 };

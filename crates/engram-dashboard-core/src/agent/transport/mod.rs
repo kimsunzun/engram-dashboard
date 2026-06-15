@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use crate::pty::output_core::OutputCore;
-use crate::pty::types::{Capabilities, InputEvent, PtyError};
+use crate::agent::output_core::OutputCore;
+use crate::agent::types::{Capabilities, InputEvent, PtyError};
 
 pub mod api;
 pub mod pty;

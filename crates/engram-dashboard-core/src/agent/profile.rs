@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::pty::types::AgentId;
+use crate::agent::types::AgentId;
 
 /// epoch millis. 시계 역행/오류 시 0으로 강등(패닉 금지).
 fn now_millis() -> i64 {

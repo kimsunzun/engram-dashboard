@@ -1,8 +1,8 @@
 pub mod commands;
 pub mod discovery;
 
-// S12 phase 1: pty/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
-use engram_dashboard_core::{logging, persistence, pty};
+// S12 phase 1: agent(구 pty)/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
+use engram_dashboard_core::{agent, logging, persistence};
 
 use std::sync::Arc;
 
@@ -11,11 +11,11 @@ use uuid::Uuid;
 
 use base64::Engine as _;
 
+use agent::manager::AgentManager;
+use agent::profile::{ProfileRegistry, RestoreReport};
+use agent::session_tracker::{SessionTracker, TrackerConfig};
+use agent::types::{AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId};
 use persistence::FileProfileStore;
-use pty::manager::AgentManager;
-use pty::profile::{ProfileRegistry, RestoreReport};
-use pty::session_tracker::{SessionTracker, TrackerConfig};
-use pty::types::{AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId};
 
 // ── AppState ─────────────────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ pub struct AppState {
 
 // ── ChannelOutputSink ─────────────────────────────────────────────────────────
 
-use pty::types::PtyEvent;
+use agent::types::PtyEvent;
 
 /// OutputSink의 Tauri 구현 — Tauri IPC Channel을 OutputSink trait으로 래핑
 pub struct ChannelOutputSink {
@@ -78,7 +78,7 @@ pub struct TauriStatusSink {
     app: tauri::AppHandle,
 }
 
-impl pty::types::StatusSink for TauriStatusSink {
+impl agent::types::StatusSink for TauriStatusSink {
     fn status_changed(&self, id: AgentId, status: AgentStatus, epoch: u32) {
         let payload = AgentStatusChanged { id, status, epoch };
         // emit 실패는 무시(로그만) — 창이 닫히는 중일 수 있음. 패닉 금지.
