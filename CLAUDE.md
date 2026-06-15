@@ -145,7 +145,7 @@ persistence/mod.rs    # FileProfileStore — agents.json atomic(tmp+sync_all+ren
 logging/mod.rs        # tracing + 런타임 레벨 토글 + 키/토큰 마스킹(기본 OFF=warn)
 commands/             # Tauri thin wrapper (agent/pty/profile, interrupt_agent) — 비즈니스 로직 없음
 lib.rs                # AppState 배선, TauriStatusSink/ChannelOutputSink, 부팅 시 백그라운드 restore_all
-examples/             # headless.rs(manager 전체) · transport_smoke.rs/session_smoke.rs(신경로 직접 실측)
+examples/             # spike.rs/spike_breakaway.rs(throwaway 스파이크 보존). 검증 하네스는 tests/로 이관(headless/transport_smoke/session_smoke, testing-strategy §0-a)
 ```
 
 ### 핵심 불변식 (변경 금지 — 근거·거부 대안은 `docs/decisions/`)
@@ -169,10 +169,8 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 
 ## 빌드·검증 명령 (Cargo workspace — S12 phase 1 이후 루트에서 실행)
 S12 phase 1 이후 **Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(pty/persistence/logging)는 `crates/engram-dashboard-core`로 이동, examples도 거기로. `target/`는 워크스페이스 루트.
-- `cargo test -p engram-dashboard-core --lib` — 코어 unit test (현재 38건)
-- `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩 (현재 21건)
-- `cargo run -p engram-dashboard-core --example headless` — **프론트 없이** 백엔드 spawn→write→resize→kill 로그 검증
-- `cargo run -p engram-dashboard-core --example transport_smoke` / `session_smoke` — manager 없이 PtyTransport/AgentSession 직접 실측
+- `cargo test -p engram-dashboard-core` — 코어 unit(55) + 통합(3, `tests/{headless,transport_smoke,session_smoke}.rs` 실 PTY 단언). 구 examples 하네스 이관(testing-strategy §0-a)
+- `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩 (현재 32건)
 - `cargo build` (루트) — 전체 workspace 빌드
 - `cargo fmt` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E

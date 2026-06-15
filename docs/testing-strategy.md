@@ -41,8 +41,8 @@
 
 ### core (`crates/engram-dashboard-core`)
 - **① 단위**: `src/` 내 55건(OutputCore seq/replay/finalize, session, transport, backend, platform liveness, persistence 등).
-- **② 격리 하네스(bin)**: `examples/headless.rs`(manager 전체, 프론트 없이 spawn→write→resize→kill), `examples/transport_smoke.rs`·`session_smoke.rs`(manager 없이 PtyTransport/AgentSession 직접). `spike*.rs`는 throwaway 스파이크 보존.
-- 실행: `cargo test -p engram-dashboard-core --lib` · `cargo run -p engram-dashboard-core --example headless`.
+- **② 격리 통합(단언, 실 PTY)**: `tests/headless.rs`(manager 전체, 프론트 없이 spawn→subscribe→write→resize→kill — PTY out 수신·Exiting→Killed 전이·kill 후 list count=0·hang 없음 단언), `tests/transport_smoke.rs`·`tests/session_smoke.rs`(manager 없이 PtyTransport/AgentSession 직접 — shutdown→pump EOF→finish(Killed) 인과·resize cols/rows 반영 단언). 기록형 RecordingSink(받은 OutputFrame 바이트·status 전이를 `Mutex<Vec<..>>`에 push)로 로그 eyeball 대신 단언. 실 셸 spawn이지만 가볍고 전역 경합 없어 default(자동 실행). `examples/spike*.rs`는 throwaway 스파이크 보존.
+- 실행: `cargo test -p engram-dashboard-core` (단위 55 + 통합 3).
 - 격리 게이트: `rg "use tauri" crates/engram-dashboard-core/src/`(0) · `rg "engram_dashboard_protocol" .../src/`(0).
 
 ### daemon (`crates/engram-dashboard-daemon`)
@@ -84,10 +84,9 @@
 # Rust 전 층
 cargo test                                  # workspace 전체 단위+통합
 cargo test -p engram-dashboard-protocol     # ~32 (단위+golden+ts_export)
-cargo test -p engram-dashboard-core --lib   # 55
+cargo test -p engram-dashboard-core         # 단위55 + 통합3(headless/transport_smoke/session_smoke, 실 PTY)
 cargo test -p engram-dashboard-daemon       # 단위25 + ws_e2e47 (+ignored 3)
 cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture  # 실프로세스 3
-cargo run  -p engram-dashboard-core --example headless    # 코어 격리 실측
 cargo clippy --workspace --all-targets -- -D warnings
 
 # 프론트
