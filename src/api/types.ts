@@ -111,9 +111,14 @@ export interface AgentProfile {
   epoch: number
   auto_restore: boolean
   restart_policy: RestartPolicy
+  /** 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO) */
+  restart_count: number
+  /** Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속(ADR-0016). 동작 TODO */
+  failed_reason: string | null
   created_at: number
   last_active: number
-  last_restore: number | null
+  /** 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용) */
+  last_start_at: number | null
 }
 
 /** 복원 결말 — agent-restore-result event, #[serde(tag="type")] */

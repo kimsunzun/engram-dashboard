@@ -47,13 +47,14 @@ pub enum SpawnMode {
     Resume,
 }
 
-/// 자동 재시작 정책. 현재는 필드만 두고 동작은 게이트(추후 구현). 기본 `Never`.
+/// 자동 재시작 정책. 현재는 필드만 두고 동작은 게이트(추후 구현).
+/// 기본 `Always` — 사용자 결정(ADR-0016): 항상 살아있게. 동작은 TODO.
 /// 미리 필드를 둬서 추후 schema 마이그레이션 비용을 아낀다(H-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RestartPolicy {
-    #[default]
     Never,
     OnCrash,
+    #[default]
     Always,
 }
 
@@ -122,12 +123,20 @@ pub struct AgentProfile {
     #[serde(default)]
     pub restart_policy: RestartPolicy,
 
+    /// 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO).
+    #[serde(default)]
+    pub restart_count: u32,
+
+    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016). 동작 TODO.
+    #[serde(default)]
+    pub failed_reason: Option<String>,
+
     pub created_at: i64,
     pub last_active: i64,
 
-    /// 마지막 복원 시각(epoch millis). 없으면 None.
+    /// 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용). epoch millis. 없으면 None.
     #[serde(default)]
-    pub last_restore: Option<i64>,
+    pub last_start_at: Option<i64>,
 }
 
 impl AgentProfile {
@@ -151,10 +160,13 @@ impl AgentProfile {
             old_session_ids: Vec::new(),
             epoch: 0,
             auto_restore,
-            restart_policy: RestartPolicy::Never,
+            // 사용자 결정(ADR-0016): 항상 살아있게. 동작은 TODO.
+            restart_policy: RestartPolicy::Always,
+            restart_count: 0,
+            failed_reason: None,
             created_at: now,
             last_active: now,
-            last_restore: None,
+            last_start_at: None,
         }
     }
 }
@@ -397,6 +409,36 @@ mod tests {
         reg.upsert(p);
         assert_eq!(reg.bump_epoch(id), Some(1));
         assert_eq!(reg.bump_epoch(id), Some(2));
+    }
+
+    /// 하위호환: 옛 agents.json(필드명 `last_restore`, 신규 필드 부재)을 역직렬화해도
+    /// 크래시 없이 신규 필드는 default(restart_count=0, failed_reason=None, last_start_at=None)가 된다.
+    /// 옛 `last_restore` 키는 알려지지 않은 필드로 무시된다(serde 기본 deny_unknown 미적용).
+    #[test]
+    fn deserializes_legacy_profile_without_new_fields() {
+        let legacy = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "legacy",
+            "command": { "kind": "Claude", "extra_args": [] },
+            "cwd": ".",
+            "env": [],
+            "claude_session_id": null,
+            "old_session_ids": [],
+            "epoch": 3,
+            "auto_restore": true,
+            "created_at": 100,
+            "last_active": 200,
+            "last_restore": 150
+        }"#;
+        let p: AgentProfile =
+            serde_json::from_str(legacy).expect("legacy profile must deserialize");
+        assert_eq!(p.epoch, 3);
+        // restart_policy 부재 → #[serde(default)] = 신규 기본 Always
+        assert_eq!(p.restart_policy, RestartPolicy::Always);
+        assert_eq!(p.restart_count, 0);
+        assert_eq!(p.failed_reason, None);
+        // 옛 last_restore 키는 무시되고 신규 last_start_at 은 default None
+        assert_eq!(p.last_start_at, None);
     }
 
     #[test]

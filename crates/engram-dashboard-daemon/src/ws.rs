@@ -464,9 +464,11 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
         epoch: p.epoch,
         auto_restore: p.auto_restore,
         restart_policy: restart_policy_to_wire(p.restart_policy),
+        restart_count: p.restart_count,
+        failed_reason: p.failed_reason.clone(),
         created_at: p.created_at,
         last_active: p.last_active,
-        last_restore: p.last_restore,
+        last_start_at: p.last_start_at,
     }
 }
 

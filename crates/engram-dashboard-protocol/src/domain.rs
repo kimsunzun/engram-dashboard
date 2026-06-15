@@ -167,10 +167,16 @@ pub struct AgentProfile {
     pub epoch: u32,
     pub auto_restore: bool,
     pub restart_policy: RestartPolicy,
+    /// 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO).
+    pub restart_count: u32,
+    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016). 동작 TODO.
+    #[ts(type = "string | null")]
+    pub failed_reason: Option<String>,
     pub created_at: i64,
     pub last_active: i64,
+    /// 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용).
     #[ts(type = "number | null")]
-    pub last_restore: Option<i64>,
+    pub last_start_at: Option<i64>,
 }
 
 /// 출력 스냅샷 청크 wire 미러 — core `types::OutputChunk`({seq, data}) 와 일치.

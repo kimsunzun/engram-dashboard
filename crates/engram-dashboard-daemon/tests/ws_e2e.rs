@@ -46,6 +46,9 @@ struct Client {
 }
 
 /// 수신 단위 — control 이벤트(JSON) 또는 출력 frame(binary 디코드 결과).
+// AgentEvent 가 AgentProfile(failed_reason 추가로 clippy 임계 200B 초과)을 품어 variant 크기차가 크다.
+// 테스트 헬퍼라 Box indirection(동작 변경) 대신 lint 만 허용한다.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Incoming {
     Event(AgentEvent),
