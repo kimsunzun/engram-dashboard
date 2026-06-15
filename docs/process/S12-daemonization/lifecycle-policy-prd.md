@@ -4,6 +4,15 @@
 - 범위: persist 데몬이 든 claude 에이전트의 (1)부팅 복원 (2)런타임 재시작 (3)크래시 폭주 가드. **이번 단계 = 변수(스키마)만 정의, 동작 로직은 TODO.**
 - 근거: `/consult` job `20260616-001941-consult-lifecycle-policy` — GPT·Gemini·Claude(opus) 블라인드 교차검증 + judge 판정. 원자료: `I:\Engram\agents\web-runner\shared\<job>\`.
 
+## ★결정 (2026-06-16, 사용자) — 확정/잠정★
+- **B-1 restart_policy 기본값 = `Always` (확정).** "항상 살아있게"가 제품 방향. 컨설의 Never 권고는 사용자가 override.
+- **B-2 가드 = 단순 카운터 (확정).** `consecutive_failures` 시도마다 +1, 한도 5 초과 시 Failed 정지. **리셋은 수동 재시작(사람/LLM)만** — 자동 리셋·안정가동 리셋·슬라이딩 윈도·`stable_secs` **전부 폐기**(과방어). "살아남으면 자동 리셋"을 안 하므로 35초 폭주 루프도 그냥 5번에 멈춤. `last_start_at`은 기록(디버깅)용일 뿐 리셋 판정에 안 씀.
+- **B-3 Failed 콜드부팅 = 영속·`SkipUntilManualRestart` (잠정 추천).** 부팅해도 Failed 유지, 수동 재시작 전까지 자동복원 제외.
+- **B-4 복원 대상 = "꺼두지 않은 한 마지막 running 복원" (잠정).** `auto_restore` AND `last_known_state != Stopped`. 사람이 명시적으로 끈 건 부활 안 함.
+- **B-5 가드 카운터 영속 = agents.json에 영속 (잠정).** 데몬 재부팅이 카운터를 0으로 날려 무한루프 나는 것 방지(컨설 적출).
+- **폐기:** ADR-0008의 "물어보기(UI에서 복원할까 묻기)" 모드 — 컨설에서 **UI가 복원 트리거가 되는 안티패턴**으로 판정. 복원 기본은 "자동"(UI 무관). ADR-0008 정정은 후속.
+- 잠정(B-3·B-4·B-5)은 틀린 것만 사용자가 짚으면 수정. 확정(B-1·B-2)은 안 흔듦.
+
 ## 고정 제약 (재론 금지)
 - 데몬 = persist-until-kill, 콘솔=detachable 뷰어 (ADR-0015). UI 열림이 복원 트리거가 되면 안 됨.
 - 스케줄러 = 독립 캡슐, 이번 범위 밖.
