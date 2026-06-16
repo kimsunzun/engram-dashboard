@@ -612,6 +612,37 @@ mod tests {
         assert!(matches!(core.status(), AgentStatus::Killed));
     }
 
+    /// ADR-0019 reaper hook(on_terminal) 1회 보장: finalize 승자 경로(finalized.swap 통과)에서
+    /// hook 이 정확히 1회 호출되고, 중복 finish(swap 패자)에서는 0회임을 단언한다.
+    /// `finish_finalizes_exactly_once` 는 status_sink(status_changed) 횟수를 보지만, reaper hook
+    /// 은 그와 별개의 경로(on_terminal Option)라 hook 자체의 1회성은 미커버 → 여기서 신규 단언.
+    #[test]
+    fn on_terminal_hook_fires_exactly_once() {
+        let core = new_core(MockStatusSink::new());
+        let calls = Arc::new(AtomicU64::new(0));
+
+        let c = calls.clone();
+        core.set_on_terminal(Box::new(move |_reason: TerminalReason| {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // 1회차 = finalize 승자 → hook 1회.
+        core.finish(TerminalReason::Exited { code: Some(0) });
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "finalize 승자 경로에서 on_terminal hook 이 정확히 1회 호출돼야 함"
+        );
+
+        // 2회차 = finalized.swap 패자 → 즉시 return → hook 0회 추가(누계 1 유지).
+        core.finish(TerminalReason::Killed);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "중복 finish(finalize 패자)에서 on_terminal hook 이 다시 호출됨(1회 위반)"
+        );
+    }
+
     #[test]
     fn subscribe_from_resume_sends_only_tail() {
         let core = new_core(MockStatusSink::new());

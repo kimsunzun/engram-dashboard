@@ -14,19 +14,26 @@
 //!
 //! 모두 단일 셸 spawn(named-mutex/전역 경합 없음)이라 default 로 둔다.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
 use engram_dashboard_core::agent::manager::AgentManager;
+use engram_dashboard_core::agent::output_core::OutputCore;
 use engram_dashboard_core::agent::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
 };
+use engram_dashboard_core::agent::reaper::ReaperDeps;
+use engram_dashboard_core::agent::session::AgentSession;
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
+use engram_dashboard_core::agent::transport::api::ApiTransport;
+use engram_dashboard_core::agent::types::{
+    AgentId, AgentInfo, AgentStatus, ReapMsg, StatusSink, TerminalReason, TerminationIntent,
+};
 use engram_dashboard_core::persistence::FileProfileStore;
 
 /// agent_list_updated 호출 횟수만 세는 경량 status sink.
@@ -136,7 +143,7 @@ fn natural_exit_zero_reaps_and_deletes_profile() {
         let agents = manager.list_agents();
         eprintln!(
             "PROBE exit0 still present: {:?}",
-            agents.iter().map(|a| (&a.status)).collect::<Vec<_>>()
+            agents.iter().map(|a| &a.status).collect::<Vec<_>>()
         );
     }
     assert!(removed, "exit0: reaper 가 세션을 제거하지 못함");
@@ -268,5 +275,151 @@ fn shutdown_all_keeps_profiles_for_boot_restore() {
     assert!(
         p.auto_restore,
         "shutdown: auto_restore 가 false 로 떨어짐 — 부팅 복원 대상에서 탈락(KeepAsIs 위반)"
+    );
+}
+
+// ── 결정적 reap_one 단언(타이밍 무관) ─────────────────────────────────────────────
+//
+// 아래 두 테스트는 실 PTY/spawn 없이 sessions 맵을 직접 구성하고 ReapMsg 를 reap_one 에 직접
+// 먹인다. epoch race·idempotency 는 reap_one 의 write-lock 구간(epoch 검증 + remove Some 승자)
+// 특성이라, 맵 상태를 직접 만들어 호출하면 sleep 없이 결정적으로 단언된다(flaky 0).
+
+/// 테스트용 reaper deps 한 벌. 맵·프로필·sink 를 모두 공유한 ReaperDeps 를 만든다.
+/// status sink 통지(agent_list_updated) 횟수는 CountingSink 로 센다.
+fn make_reaper_deps(tag: &str) -> (Arc<ProfileRegistry>, CountingSink, ReaperDeps) {
+    let sink = CountingSink::new();
+    let sink_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
+    let store = Arc::new(FileProfileStore::new(
+        std::env::temp_dir().join(format!("engram-test-reaper-{tag}-{}", Uuid::new_v4())),
+    ));
+    let profiles = Arc::new(ProfileRegistry::new(store));
+    let sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let deps = ReaperDeps {
+        sessions,
+        profiles: profiles.clone(),
+        status_sink: sink_dyn,
+    };
+    // sessions 맵은 deps.sessions 로 접근(ReaperDeps 필드 pub) — 중복 핸들 반환을 피해 타입 단순화.
+    (profiles, sink, deps)
+}
+
+/// 주어진 id/epoch 로 PTY 없는 테스트 세션을 만든다. ApiTransport(no-op 껍데기)를 끼워
+/// 실 자원·pump 없이 맵에 넣을 수 있는 AgentSession 을 구성한다(start/kill 미호출).
+fn make_test_session(
+    id: AgentId,
+    epoch: u32,
+    status_sink: Arc<dyn StatusSink>,
+) -> Arc<AgentSession> {
+    let core = Arc::new(OutputCore::new(id, epoch, status_sink));
+    let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
+    Arc::new(AgentSession::new(
+        id,
+        PathBuf::from("."),
+        epoch,
+        80,
+        24,
+        intent,
+        core,
+        Box::new(ApiTransport::new()),
+    ))
+}
+
+// ── epoch race: 늦게 온 옛 epoch done 이 재spawn 된 현재(epoch bump) 세션을 제거 못 함 ──
+#[test]
+fn epoch_mismatch_does_not_reap_current_session() {
+    let (profiles, sink, deps) = make_reaper_deps("epoch-race");
+    let id = Uuid::new_v4();
+
+    // 맵에 epoch=1 의 "현재" 세션을 직접 구성(재spawn 으로 bump 된 상태를 모사).
+    let status_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
+    let session = make_test_session(id, 1, status_dyn);
+    deps.sessions.write().unwrap().insert(id, session);
+
+    // 현재 세션의 프로필도 등록(disposition 이 잘못 일어나면 사라질 대상).
+    let mut profile = exit_profile(0);
+    profile.id = id;
+    profiles.upsert(profile);
+
+    let updates_before = sink.list_update_count();
+
+    // 늦게 도착한 옛 epoch=0 의 유령 done. 정상 종료(exit0)라 만약 처리되면 DeleteProfile 이 일어난다.
+    let stale = ReapMsg {
+        id,
+        epoch: 0,
+        reason: TerminalReason::Exited { code: Some(0) },
+        intent_at_finish: TerminationIntent::None,
+        shutting_down_at_finish: false,
+    };
+    deps.reap_one(stale);
+
+    // (a) 현재 세션은 맵에 그대로 남는다(epoch 불일치 → remove 안 함).
+    assert!(
+        deps.sessions.read().unwrap().contains_key(&id),
+        "epoch race: epoch 불일치 done 이 현재(epoch=1) 세션을 잘못 제거함"
+    );
+    // (b) disposition 미발생 — 프로필이 삭제되지 않았다.
+    assert!(
+        profiles.get(id).is_some(),
+        "epoch race: epoch 불일치인데 disposition(DeleteProfile)이 적용됨"
+    );
+    // (b') 통지(agent_list_updated)도 안 일어났다.
+    assert_eq!(
+        sink.list_update_count(),
+        updates_before,
+        "epoch race: epoch 불일치인데 agent_list_updated 통지가 발생함"
+    );
+}
+
+// ── idempotency: 같은 (id,epoch) done 을 두 번 reap → 정확히 1회만 처리 ──────────────
+#[test]
+fn duplicate_reap_processes_exactly_once() {
+    let (profiles, sink, deps) = make_reaper_deps("idempotency");
+    let id = Uuid::new_v4();
+
+    let status_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
+    let session = make_test_session(id, 0, status_dyn);
+    deps.sessions.write().unwrap().insert(id, session);
+
+    let mut profile = exit_profile(0);
+    profile.id = id;
+    profiles.upsert(profile);
+
+    let updates_before = sink.list_update_count();
+
+    let done = ReapMsg {
+        id,
+        epoch: 0,
+        reason: TerminalReason::Exited { code: Some(0) },
+        intent_at_finish: TerminationIntent::None,
+        shutting_down_at_finish: false,
+    };
+
+    // 1회차: remove Some 승자 → disposition(DeleteProfile) + 통지 1회.
+    deps.reap_one(done.clone());
+    assert!(
+        !deps.sessions.read().unwrap().contains_key(&id),
+        "idempotency: 1회차에 세션이 맵에서 제거되지 않음"
+    );
+    assert!(
+        profiles.get(id).is_none(),
+        "idempotency: 1회차에 DeleteProfile 이 적용되지 않음"
+    );
+    assert_eq!(
+        sink.list_update_count(),
+        updates_before + 1,
+        "idempotency: 1회차 통지가 정확히 1회가 아님"
+    );
+
+    // 2회차: 같은 done 재투입 → 맵에 없으니 epoch 검사에서 return(no-op). 통지·disposition 추가 0.
+    deps.reap_one(done);
+    assert_eq!(
+        sink.list_update_count(),
+        updates_before + 1,
+        "idempotency: 2회차 중복 reap 이 통지를 추가로 발생시킴(정확히 1회 위반)"
+    );
+    assert!(
+        profiles.get(id).is_none(),
+        "idempotency: 2회차에 프로필 상태가 흔들림"
     );
 }
