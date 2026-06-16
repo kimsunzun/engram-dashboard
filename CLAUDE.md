@@ -5,16 +5,14 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 이 파일은 대시보드 폴더에서 claude를 실행할 때의 프로젝트 컨텍스트다. 작업 전 아래 **아키텍처 원칙(불변)**을 반드시 깐다.
 
-## 현재 상태 — 상세: `docs/README.md`, 타임라인: `docs/process/step-log.md`, 결정: `docs/decisions/`
+## 진행 상태는 이 파일이 아니라 docs에서 본다
 
-- **백엔드 코어 완성** — PTY spawn/drain/kill, subscribe/replay, Job Object, 로깅(키 마스킹), headless 테스트.
-- **S9 세션 저장/복원 완성** — 프로필 영속화 + claude 세션 무손실 복원(`--session-id`/`--resume`) + sid drift 추적. (ADR-0008)
-- **S10 백엔드 추상화 완성** — `AgentManager → AgentSession(OutputCore) → dyn AgentTransport`. seam을 `OutputEvent`/`InputEvent`/`CommandSpec`/`Capabilities`로 인터페이스화(교체 가능). PtyTransport(콘솔) + ApiTransport 껍데기 + codex/gemini stub. 회귀 0. (ADR-0002·0004)
-- **프론트 통합 3a~3c** — 실제 PTY ↔ xterm E2E. agentClient facade(ADR-0011) 적용. 3d(popup+monaco)·복원 UX 보류.
-- **S12 데몬화 진행 중** — phase 1 완료: Cargo workspace 3-crate 분리(protocol/core/src-tauri) + protocol 계약(ts-rs). (ADR-0010)
-- **다음** — 데몬 서버/WS 클라(tmux 모델, `docs/process/S12-daemonization/`), codex/gemini CLI spike, (게이트) 자동 재시작, 실제 claude 복원 E2E, 메시지 시스템.
+이 파일은 **기조(불변 원칙)** 만 담는다. 현재 상태·타임라인·결정은 코드와 함께 갱신되는 docs에서 추적한다:
+- **상태/상세:** `docs/README.md`
+- **타임라인(언제/무엇):** `docs/process/step-log.md`
+- **결정·거부한 대안(왜):** `docs/decisions/`
 
-검증 흐름: 코딩 → LLD 리뷰 → QA 3-게이트. 상세 강제 규약은 아래 **구현 실행 규약** 참조.
+검증 흐름(코딩 → LLD 리뷰 → QA 3-게이트)의 강제 규약은 아래 **구현 실행 규약** 참조.
 
 ---
 
@@ -51,6 +49,17 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 > **비자명한 설계 결정은 `docs/decisions/`에 ADR로 박제한다.** 작업 전 관련 ADR을 읽고, 새 결정은 새 ADR로 추가하며, 번복은 기존 ADR을 '폐기(Superseded by ADR-NNNN)'로 표시하고 새 번호로 기록한다(덮어쓰지 않고 누적). 인덱스·규칙·템플릿: `docs/decisions/README.md`.
 >
 > ADR의 핵심은 **거부한 대안 + 그 이유**다 — 그게 없으면 다음 세션이 같은 대안을 다시 꺼낸다. 아래 "핵심 불변식"·"세션 복원"은 요약일 뿐, 근거·대안은 해당 ADR에 있다.
+
+### rot 방지 — 손으로 베끼는 리스트를 만들지 않는다
+ADR 인덱스·"이 ADR 읽어라" 식 하드코딩 리스트는 한쪽만 갱신돼 rot한다. 그래서:
+- **상태는 ADR 본문 헤더에만 둔다.** 폐기는 *폐기당한 ADR*의 `상태:` 줄에 `폐기 (Superseded by ADR-NNNN)`로 박는다(새 ADR에만 적고 끝내지 말 것 — 단방향이면 옛 ADR만 읽는 다음 세션이 폐기된 결정을 따라간다).
+- **다음 세션은 열거 리스트가 아니라 두 곳을 본다:** ① 만지는 영역의 인덱스(`docs/decisions/README.md`) ② 만지는 코드의 `// ADR-NNNN` 앵커 주석(`rg "ADR-"`). 앵커는 코드와 한 몸이라 리스트처럼 rot하지 않는다 — load-bearing 코드엔 앵커 한 줄을 붙인다(신규·수정분부터 점진).
+
+### 핸드오프 종료 체크리스트 (세션 끝낼 때)
+1. 새 설계 결정 → 새 ADR 썼나
+2. 번복한 결정 → *폐기당한* ADR에 `폐기 (Superseded by ...)` 박았나
+3. `docs/decisions/README.md` 인덱스 갱신했나(번호·제목·상태)
+4. `docs/process/step-log.md`에 *언제/무엇* 추가했나
 
 ---
 
@@ -122,8 +131,8 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 ### 그 외 영역 (프론트 상태 영속, 메시지 시스템 등)
 - 아직 앵커 미선정 — 위 절차(조사→비교→선택지 제시)로 그때 정한다.
 
-## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/` — S12 phase 1 이동)
-> 아래 `agent/`·`persistence/`·`logging/`는 S12 phase 1에서 `src-tauri/src/`→`crates/engram-dashboard-core/src/`로 이동(git mv, history 보존). `src-tauri`는 `engram_dashboard_core::{agent,persistence,logging}`로 re-import. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs). ※`pty/`→`agent/` rename 완료(내용=에이전트 코어 전반, 단 내부 `transport/pty.rs`·`PtyTransport` 등 실 PTY 항목은 이름 유지).
+## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/`)
+> 코어(`agent/`·`persistence/`·`logging/`)는 `crates/engram-dashboard-core`에 있고 `src-tauri`는 `engram_dashboard_core::{agent,persistence,logging}`로 re-import한다. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs). 내부 실 PTY 항목(`transport/pty.rs`·`PtyTransport`·`PtyEvent` 등)은 PTY 이름을 유지한다(모듈 첫 마디만 `agent/`).
 
 ```
 agent/                        # (구 pty/) S10 추상화: AgentManager → AgentSession(OutputCore) → dyn AgentTransport
@@ -169,10 +178,10 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 - `portable-pty = "0.8.1"` · `uuid` · `thiserror` · `base64` · `regex`(로그 마스킹) · `tracing` · `dunce`(cwd canonicalize UNC 회피)
 - `windows` (Job Object) — `#[cfg(windows)]`
 
-## 빌드·검증 명령 (Cargo workspace — S12 phase 1 이후 루트에서 실행)
-S12 phase 1 이후 **Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(agent/persistence/logging)는 `crates/engram-dashboard-core`로 이동, tests/도 거기로. `target/`는 워크스페이스 루트.
-- `cargo test -p engram-dashboard-core` — 코어 unit(55) + 통합(3, `tests/{headless,transport_smoke,session_smoke}.rs` 실 PTY 단언). 구 examples 하네스 이관(testing-strategy §0-a)
-- `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩 (현재 32건)
+## 빌드·검증 명령 (Cargo workspace — 루트에서 실행)
+**Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(agent/persistence/logging)는 `crates/engram-dashboard-core`, tests/도 거기. `target/`는 워크스페이스 루트.
+- `cargo test -p engram-dashboard-core` — 코어 unit + 통합(`tests/{headless,transport_smoke,session_smoke}.rs` 실 PTY 단언). 검증 하네스는 전부 tests/(testing-strategy §0-a)
+- `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
 - `cargo build` (루트) — 전체 workspace 빌드
 - `cargo fmt` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E

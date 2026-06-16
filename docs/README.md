@@ -29,29 +29,10 @@ docs/
 - `reference/` = "지금 이렇게 동작한다" — 코드 동기화 정설 (살아있는 문서). **시스템 안정화 후 집필 예정.**
 - 정교한 하위 구조(step 내 분류 등)는 나중에 한 번에 정리.
 
-## 진행 상태 (2026-06-11)
+## 진행 상태
 
-| 단계 | 상태 | 커밋 |
-|------|------|------|
-| S2 Phase 0 — Spike (PTY kill 실측) | ✅ | — |
-| S3 Phase 1 — 백엔드 PTY 코어 | ✅ | 575e36d |
-| S4 Channel spike — tauri 핀 | ✅ | — |
-| S5 Phase 2 — Tauri 연결 | ✅ | f959304 |
-| S6 백엔드 마감 — 로그 마스킹 + 병렬 kill | ✅ | 26dc649 |
-| S7 Phase 3 — 프론트 통합 3a~3c (E2E claude 기동) | ✅ | ca61cbd |
-| Phase 3d — popup + monaco | ⏸ 보류 | — |
-| **세션 저장/복원** (핵심 기능) | 📐 설계 예정 | — |
-
-검증: dco23(Opus)/dcs24(Sonnet) 코딩 → dr26(Fable) LLD 리뷰 → dq25(Sonnet) QA 3-게이트.
-
-## 보류·결정 ([tracking.md](tracking.md) 상세)
-
-- **T-5** monaco optimizeDeps(3d) / **T-7** snapshot wire / **D-5** frontend LLD 경로 / **D-6** tauri 표기·마스킹 규칙
-- ✅ 해소: T-1(로그 마스킹) · T-3(tauri 핀) · T-8(병렬 kill) · T-6(cwd — claude 권한 중복으로 스킵)
-
-## 다음 작업
-
-1. **세션 저장/복원 설계** — 떠있던 에이전트(명령/cwd/레이아웃) persist + claude `--continue` 대화 복원
-2. spawn 설정화 (에이전트 프로필) — 세션 복원과 연결
-3. 프론트 마무리 (3d + 상세설계)
-4. `reference/` 정설 문서 집필 (안정화 후)
+진행 상태·타임라인은 이 파일에서 중복 관리하지 않는다(rot 방지). 단일 출처:
+- **언제/무엇 (타임라인):** [`process/step-log.md`](process/step-log.md) ★ 항상 최신
+- **결정·거부한 대안 (왜):** [`decisions/`](decisions/README.md)
+- **보류 항목 (T-*/D-*):** [`tracking.md`](tracking.md)
+- `reference/` 정설 문서 = 시스템 안정화 후 집필 예정
