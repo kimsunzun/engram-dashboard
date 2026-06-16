@@ -164,19 +164,18 @@ fn manager_spawn_write_resize_kill() {
     manager.resize(info.id, 100, 30).expect("resize failed");
 
     // 6) kill → 7) list count=0 가 타임아웃(5s) 내 완료되어야 함(hang 없음).
-    //    kill_agent 자체가 내부 join(5s) 후 sessions 맵에서 제거한다.
+    //    ADR-0019: 맵 제거가 reaper(비동기)로 옮겨졌다. kill_agent 는 join_pump(5s)까지만 동기로
+    //    기다리고, 실제 sessions 맵 제거·통지는 pump 가 보낸 ReapMsg 를 reaper 가 소비해 수행한다.
+    //    따라서 반환 직후가 아니라 폴링으로 "사라짐"을 단언한다(hang 없이 5s 내 완료).
     let kill_started = Instant::now();
     manager.kill_agent(info.id).expect("kill_agent failed");
-    let remaining = manager.list_agents().len();
+    let removed = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let kill_elapsed = kill_started.elapsed();
 
-    assert_eq!(
-        remaining, 0,
-        "kill 후 세션이 남아있음 — sessions 맵 제거 실패"
-    );
+    assert!(removed, "kill 후 세션이 남아있음 — reaper 맵 제거 실패");
     assert!(
         kill_elapsed < Duration::from_secs(5),
-        "kill→list 가 5s 안에 끝나지 않음(hang 의심): {kill_elapsed:?}"
+        "kill→reap 가 5s 안에 끝나지 않음(hang 의심): {kill_elapsed:?}"
     );
 
     // 8) status 가 종점 Killed 에 도달해야 함. 전이는 status_sink 에 기록됨.

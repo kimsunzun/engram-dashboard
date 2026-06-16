@@ -124,7 +124,9 @@ fn session_compose_resize_exiting_kill() {
     transport.start(core.clone());
 
     // 4) AgentSession 합성. 이미 start 된 core/transport 를 묶는다.
-    let session = AgentSession::new(id, cwd, 0, 80, 24, core, transport);
+    //    intent: ADR-0019 종료 의도 atomic(이 smoke 는 set_intent 안 함 → None=자연 종료 경로).
+    let intent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let session = AgentSession::new(id, cwd, 0, 80, 24, intent, core, transport);
 
     // 5) subscribe → 초기 프롬프트 대기 → echo 입력 → session-test 출력.
     let out_sink = RecordingSink::new();

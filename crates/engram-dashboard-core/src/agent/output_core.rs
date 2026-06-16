@@ -21,6 +21,10 @@ use crate::agent::types::{
     StatusSink, SubscribeOutcome, TerminalReason,
 };
 
+/// finalize 1회 종료 hook(ADR-0019). spawn_session 이 {id,epoch,intent,shutting_down,reaper_tx}
+/// 를 캡처한 클로저를 주입하고, finalize 승자 경로에서 정확히 1회 호출된다.
+type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
+
 /// 에이전트 1개의 출력 측 핵심 상태. 필드별 독립 Mutex(session.rs 모듈 주석의 분리 동기와 동일):
 /// emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등)와 교착 없이 병행 가능.
 pub struct OutputCore {
@@ -48,6 +52,14 @@ pub struct OutputCore {
     // ── pump thread 제어 (transport.start가 attach_pump로 적재) ─
     drain_handle: Mutex<Option<JoinHandle<()>>>,
     drain_done_rx: Mutex<Option<Receiver<()>>>,
+
+    // ── finalize 1회 hook (ADR-0019 reaper) ───────────────────
+    /// finalize 승자(finalized.swap 통과) 경로에서 정확히 1회 호출되는 종료 hook.
+    /// spawn_session 이 {id, epoch, intent, shutting_down, reaper_tx} 를 캡처한 클로저를
+    /// 주입한다 — 그 안에서 intent·shutting_down 을 **그 순간 snapshot** 해 ReapMsg 를 송신한다.
+    /// transport 는 이 의미를 모른다(transport 는 그냥 core.finish 만 부른다).
+    /// 단위테스트는 OutputCore::new 만 쓰고 hook 을 주입하지 않으므로 Option(None=no-op).
+    on_terminal: Mutex<Option<OnTerminalHook>>,
 }
 
 impl OutputCore {
@@ -65,7 +77,15 @@ impl OutputCore {
             status_sink,
             drain_handle: Mutex::new(None),
             drain_done_rx: Mutex::new(None),
+            on_terminal: Mutex::new(None),
         }
+    }
+
+    /// finalize-시점 hook 주입 — spawn_session 이 sessions 맵 등록 전에 1회 호출한다.
+    /// 클로저는 finalized.swap 승자 경로에서만(=정확히 1회) 불린다. ★race 방지★:
+    /// 클로저 내부에서 intent·shutting_down 을 그 순간 snapshot 해 ReapMsg 를 빌드·송신해야 한다.
+    pub fn set_on_terminal(&self, hook: OnTerminalHook) {
+        *self.on_terminal.lock().expect("on_terminal poisoned") = Some(hook);
     }
 
     /// transport(pump)가 만든 출력 이벤트를 받아 replay 저장 + 구독자 fanout.
@@ -146,7 +166,8 @@ impl OutputCore {
 
         // reason→AgentStatus 매핑(AgentStatus 변형 추가 금지, impl-spec 표):
         // Interrupted/Cancelled→Killed, StreamClosed→Exited{None}, Error(s)→Failed, 나머지 직역.
-        let new_status = match reason {
+        // ★reason 은 reaper hook 에도 넘겨야 하므로 매핑 전에 clone 해 둔다(소비 전 보존).
+        let new_status = match reason.clone() {
             TerminalReason::Exited { code } => AgentStatus::Exited { code },
             TerminalReason::Killed => AgentStatus::Killed,
             TerminalReason::Interrupted => AgentStatus::Killed,
@@ -163,6 +184,20 @@ impl OutputCore {
         // status lock 해제 후 외부 호출(§10: status lock 보유 중 외부호출 금지).
         self.status_sink
             .status_changed(self.id, new_status, self.epoch);
+
+        // ★ADR-0019 reaper hook★: finalize 승자 경로에서 정확히 1회. status_sink 통지·done_tx·
+        //   join_pump 동작은 위에서 그대로 보존하고 send 만 얹는다. 클로저 내부에서 intent·
+        //   shutting_down 을 **그 순간** snapshot 해 ReapMsg 를 송신한다(reap 시점 live read 금지).
+        //   on_terminal lock 은 짧게 잡고 즉시 clone 없이 호출 — 다른 core lock 미보유 구간이라 안전.
+        //   (단위테스트·hook 미주입 세션은 None → no-op.)
+        if let Some(hook) = self
+            .on_terminal
+            .lock()
+            .expect("on_terminal poisoned")
+            .as_ref()
+        {
+            hook(reason);
+        }
     }
 
     /// 과도기 Exiting 전이 — manager kill 0.5단계용. Exiting 알림 주체가 이 경로.

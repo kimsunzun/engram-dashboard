@@ -41,6 +41,56 @@ pub enum TerminalReason {
     Error(String),
 }
 
+/// 유저 의도 — kill 핸들러가 채운다(ADR-0019). PTY 관측 사실(TerminalReason)과 **분리**한다:
+/// 종료를 관측해 의도를 추론하면 데몬 셧다운 Job-kill 이 유저 kill 로 오분류되므로, 의도는
+/// "종료를 일으킨 행동 지점"(kill 커맨드 핸들러)에서 명시적으로 태깅한다.
+/// `#[repr(u8)]` — `Arc<AtomicU8>` 로 세션별 보관·snapshot 한다. DaemonShutdown 은 전역
+/// `shutting_down` 플래그로 분리(여기 두지 않음).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationIntent {
+    None = 0,
+    UserKill = 1,
+}
+
+impl TerminationIntent {
+    /// AtomicU8 에 저장된 raw 값에서 복원. 알 수 없는 값은 보수적으로 None(=크래시 취급 경로).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => TerminationIntent::UserKill,
+            _ => TerminationIntent::None,
+        }
+    }
+}
+
+/// pump 가 finish 승자일 때 1회 발행하는 종료 이벤트(ADR-0019 reaper). reaper 한 스레드가
+/// 소비해 sessions 맵 제거 + 프로필 disposition + 통지를 수행한다.
+///
+/// ★race 방지 핵심★: `intent_at_finish`/`shutting_down_at_finish` 는 **finish 그 순간** snapshot
+/// 한 frozen 값이다. reaper 가 reap 시점에 live 로 읽으면 "크래시로 죽은 뒤 reaper 처리 전 유저가
+/// kill→크래시를 유저kill 로 오분류→프로필 삭제(데이터 손실)" race 가 생긴다(consult GPT 적출).
+#[derive(Debug, Clone)]
+pub struct ReapMsg {
+    pub id: AgentId,
+    /// stale done 이 재spawn 된 새 세션을 오삭제 못 하게 reap 전 epoch 일치 검증(ADR-0007).
+    pub epoch: u32,
+    pub reason: TerminalReason,
+    pub intent_at_finish: TerminationIntent,
+    pub shutting_down_at_finish: bool,
+}
+
+/// 종료 분류 결과(ADR-0019 §decide). reap_one 이 lock 밖에서 ProfileRegistry 에 적용한다.
+/// **downgrade-only**: auto_restore 를 true 로 절대 올리지 않는다(하드킬 안전망 성립 조건).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// 유저 kill·정상 /exit → 프로필 완전 삭제.
+    DeleteProfile,
+    /// 크래시·EOF·exit≠0·signal → 프로필 유지 + auto_restore=false(예약 복귀).
+    KeepDisableAutoRestore,
+    /// 데몬 셧다운 → 손 안 댐(auto_restore=true 잔류 → 부팅 복원).
+    KeepAsIs,
+}
+
 /// transport에 주입하는 중립 실행 명세. backend가 산출. PtyTransport는 claude/codex를 모름.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {

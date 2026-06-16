@@ -12,8 +12,10 @@
 //! 보유 중 session 내부 lock 취득은 금지(데드락 방지).
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::agent::backend;
@@ -21,13 +23,14 @@ use crate::agent::output_core::OutputCore;
 use crate::agent::profile::{
     AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
+use crate::agent::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::agent::session::AgentSession;
 use crate::agent::session_tracker::SessionTracker;
 use crate::agent::transport::pty::PtyTransport;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
-    AgentId, AgentInfo, AgentStatus, CommandSpec, OutputChunk, OutputSink, PtyError, SinkId,
-    StatusSink, SubscribeOutcome,
+    AgentId, AgentInfo, AgentStatus, CommandSpec, OutputChunk, OutputSink, PtyError, ReapMsg,
+    SinkId, StatusSink, SubscribeOutcome, TerminalReason, TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -56,6 +59,15 @@ pub struct AgentManager {
     // S9: 프로필 단일 소유자(sid 생성·갱신·persist) + claude 세션 추적기.
     profiles: Arc<ProfileRegistry>,
     tracker: Arc<SessionTracker>,
+
+    // ── ADR-0019 reaper ──────────────────────────────────────
+    /// 데몬/앱 셧다운 전역 플래그. shutdown_all 이 각 kill **전에** set 한다 → 그 사이 종료된
+    /// 세션의 finish hook 이 true 를 snapshot 해 reaper 가 disposition 을 스킵(부팅 복원 유지).
+    shutting_down: Arc<AtomicBool>,
+    /// 세션/pump finish hook 이 ReapMsg 를 보내는 채널(단일 supervisor 가 소비).
+    reaper_tx: Sender<ReaperCmd>,
+    /// reaper 스레드 핸들. Drop 시 join(Stop 송신 후 대기) — 테스트 누수 방지.
+    reaper_handle: Option<JoinHandle<()>>,
 }
 
 impl AgentManager {
@@ -64,11 +76,25 @@ impl AgentManager {
         profiles: Arc<ProfileRegistry>,
         tracker: Arc<SessionTracker>,
     ) -> Self {
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+
+        // reaper supervisor 1개 기동 — manager 와 동일한 sessions/profiles/status_sink 를 공유한다
+        // (두 주체가 같은 모델을 본다). reap_one 이 lock 밖에서 disposition·통지를 수행한다.
+        let deps = ReaperDeps {
+            sessions: sessions.clone(),
+            profiles: profiles.clone(),
+            status_sink: status_sink.clone(),
+        };
+        let (reaper_tx, reaper_handle) = reaper::spawn_reaper(deps);
+
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions,
             status_sink,
             profiles,
             tracker,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            reaper_tx,
+            reaper_handle: Some(reaper_handle),
         }
     }
 
@@ -156,30 +182,69 @@ impl AgentManager {
         // 2. 출력 측 core 생성(status Running, seq 0). transport와 분리된 출력 fanout 담당.
         let core = Arc::new(OutputCore::new(id, epoch, self.status_sink.clone()));
 
+        // 2.5. ★ADR-0019 finish-snapshot hook 배선★. 세션별 intent atomic 신규 생성 + 전역
+        //      shutting_down·reaper_tx 를 클로저로 캡처해 core 에 주입한다. core.finish 의 finalize
+        //      승자 경로에서 1회 호출되며, **그 순간** intent·shutting_down 을 snapshot 해 ReapMsg 를
+        //      송신한다(reap 시점 live read 금지 — 크래시→유저kill 오분류 race 방지).
+        //      transport 는 이 의미를 모른다(그냥 core.finish 호출). send 실패(reaper 종료)는 무시.
+        let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
+        {
+            let intent_hook = intent.clone();
+            let shutting_down_hook = self.shutting_down.clone();
+            let reaper_tx = self.reaper_tx.clone();
+            core.set_on_terminal(Box::new(move |reason: TerminalReason| {
+                let msg = ReapMsg {
+                    id,
+                    epoch,
+                    reason,
+                    // ★snapshot★: 이 두 load 가 finish 승자 순간의 frozen 값이다.
+                    intent_at_finish: TerminationIntent::from_u8(
+                        intent_hook.load(Ordering::SeqCst),
+                    ),
+                    shutting_down_at_finish: shutting_down_hook.load(Ordering::SeqCst),
+                };
+                let _ = reaper_tx.send(ReaperCmd::Reap(msg));
+            }));
+        }
+
         // 3. transport를 trait object로 박싱.
         let transport: Box<dyn AgentTransport> = Box::new(transport);
 
-        // 4. ★순서 중요(fable M-1)★ pump 기동을 insert보다 먼저 한다(S9 원본도 drain을 sessions
-        //    insert 전에 spawn). start가 reader를 take해 pump 스레드를 띄우고 core.attach_pump로
-        //    핸들/done_rx를 적재한다 — 이후 kill의 join_pump가 이걸 쓴다.
-        transport.start(core.clone());
-
-        // 5. core + transport를 AgentSession으로 합성(cols/rows atomic은 session 보유).
+        // 4. core + transport를 AgentSession으로 합성(cols/rows atomic은 session 보유).
         let session = Arc::new(AgentSession::new(
             id,
             spec.cwd.clone(),
             epoch,
             DEFAULT_COLS,
             DEFAULT_ROWS,
+            intent,
             core,
             transport,
         ));
 
-        // 6. sessions 등록 — start 후 insert(S9 원본 순서 보존). write lock은 한 statement에서 즉시 해제.
+        // 5. ★ADR-0019 순서 변경★ sessions 등록을 pump 기동(start)보다 **먼저** 한다.
+        //    (구 S9: start 후 insert.) 이유: finish hook 이 ReapMsg 를 보내는데, pump 가 즉시
+        //    EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에 start 하면
+        //    빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화. attach_pump 는
+        //    start 내부 동기 완료라 join_pump 영향 없음(insert 순서 무관). write lock 즉시 해제.
         self.sessions
             .write()
             .expect("sessions poisoned")
             .insert(id, session.clone());
+
+        // 5.5. ★ADR-0019 활성화 — 반드시 start_pump 전★: spawn(=지금 떠 있어야 함)이면 프로필을
+        //      auto_restore=true 로 확정·persist 한다(강제종료 후 부팅 복원 대상이 되게). 이 플립을
+        //      pump 기동 **전**에 둬야 race 가 닫힌다: 즉시 크래시(`cmd /c exit 1`)는 start_pump 직후
+        //      pump 가 EOF→finish→reaper 가 auto_restore=false 로 내리는데, 이 플립이 그보다 늦으면
+        //      false 를 true 로 덮어써 크래시 세션이 부팅 복원 대상으로 잘못 남는다(크래시 루프).
+        //      순서를 "플립 true → start_pump → (크래시 시) reaper false" 로 고정해 reaper 의
+        //      downgrade(false)가 항상 **마지막**이 되게 한다. spawn 은 활성화 행동이므로 여기서만 올린다
+        //      (reaper 는 downgrade-only — true 로 올리지 않음).
+        self.profiles.update_with(id, |p| p.auto_restore = true);
+
+        // 6. pump 기동 — reader take + pump 스레드 spawn + core.attach_pump(핸들/done_rx 적재).
+        //    이제부터 출력·종료가 흐른다. 종료 시 finish hook→ReapMsg(맵에 이미 존재).
+        session.start_pump();
 
         Ok((session, child_pid))
     }
@@ -379,11 +444,20 @@ impl AgentManager {
 
     // ── kill (LLD §6 절대순서 + S9 tracker unwatch) ──────────────────────────
 
-    /// 에이전트 종료 — ★인과 순서 보존★. enter_exiting(Exiting 알림) → session.kill
-    /// (transport.shutdown → master drop → pump EOF → core.finish(Killed) → join_pump)
-    /// → sessions 제거 → tracker unwatch → 목록 알림. (spike로 검증된 순서, 변경 금지).
+    /// 에이전트 종료 — ★인과 순서 보존 + ADR-0019 reaper 위임★.
+    /// intent=UserKill 태깅(shutdown **전**) → enter_exiting(Exiting 알림) → session.kill
+    /// (transport.shutdown → master drop → pump EOF → core.finish(Killed)+finish hook→ReapMsg
+    /// → join_pump). **맵 제거·disposition·통지는 하지 않는다** — pump 가 보낸 ReapMsg 를 reaper 가
+    /// 단일 소비해 처리한다(done 단일 소비자). tracker unwatch 만 직접(reaper 는 tracker 를 모름).
+    ///
+    /// 의미 변경: 맵 제거가 reaper(비동기)로 옮겨졌다. kill_agent 반환 직후엔 아직 맵에 있을 수
+    /// 있으므로, 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
+
+        // 0. ★intent 태깅을 shutdown 전에★ — finish hook 이 finish 순간 snapshot 하므로, shutdown
+        //    이 pump 를 깨워 finish 하기 전에 UserKill 이 보여야 reaper 가 DeleteProfile 로 분류한다.
+        session.set_intent(TerminationIntent::UserKill);
 
         // 0.5. 과도기 Exiting 전이 — kill 누르면 즉시 '종료중' 알림. 전이+발행은 core 안에서
         //      이뤄진다(manager가 트리거, core가 status_changed(Exiting) 발행). 이미 terminal이면
@@ -391,19 +465,12 @@ impl AgentManager {
         let _ = session.enter_exiting();
 
         // 1~6. 자원 강제 종료 + pump 완료 대기. shutdown이 master를 drop해 pump read를 EOF로
-        //       깨우고(→core.finish(Killed)), join_pump가 그 pump 종료를 5s 대기한다. timeout이면
-        //       그냥 진행(세션 제거로 Arc 끊겨 자연 종료).
+        //       깨우고(→core.finish(Killed)+hook→ReapMsg), join_pump가 그 pump 종료를 5s 대기한다.
+        //       timeout이면 그냥 진행(세션 제거로 Arc 끊겨 자연 종료).
         session.kill(Duration::from_secs(5));
 
-        // 7. sessions에서 제거 + 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지).
-        self.sessions
-            .write()
-            .expect("sessions poisoned")
-            .remove(&agent_id);
+        // 7. 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지). 맵 제거·통지는 reaper 가 한다.
         self.tracker.unwatch(agent_id);
-
-        // 8. 목록 변경 알림 (manager 책임). 개별 status_changed(Killed)는 pump 단독.
-        self.status_sink.agent_list_updated(self.list_agents());
 
         Ok(())
     }
@@ -437,6 +504,12 @@ impl AgentManager {
 
     /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고, 각 kill을 병렬 실행한다.
     pub fn shutdown_all(&self) {
+        // ★ADR-0019★: shutting_down 을 각 kill **전에** set 한다. 이게 kill 보다 늦으면 그 틈에
+        //   종료된 세션의 finish hook 이 shutting_down=false 를 snapshot 해 크래시/유저kill 로
+        //   오분류(disposition 적용 → 부팅 복원 대상에서 탈락)하는 race 가 생긴다. set 이 먼저면
+        //   이 시점 이후 모든 finish 가 shutting_down=true 를 snapshot → reaper 가 KeepAsIs(손 안 댐).
+        self.shutting_down.store(true, Ordering::SeqCst);
+
         // S9: 세션 추적 스레드부터 정지(폴링이 정리 중인 세션을 건드리지 않게).
         self.tracker.stop();
 
@@ -488,6 +561,19 @@ impl AgentManager {
             epoch: session.epoch,
             // transport 종류별 capability — session.capabilities()가 transport.capabilities()를 위임.
             capabilities: session.capabilities(),
+        }
+    }
+}
+
+impl Drop for AgentManager {
+    /// reaper 스레드 정리 — Stop 송신 후 join. manager 의 reaper_tx 가 drop 되면 channel 이
+    /// 닫혀 recv 가 Err 로도 끝나지만(이중 안전), 세션들이 보유한 hook 클로저가 reaper_tx clone 을
+    /// 들고 있어 그것만으로는 즉시 안 닫힐 수 있다. 명시 Stop 으로 확실히 깨운 뒤 join 한다.
+    fn drop(&mut self) {
+        // Stop 송신(reaper 가 이미 죽었으면 Err — 무시).
+        let _ = self.reaper_tx.send(ReaperCmd::Stop);
+        if let Some(handle) = self.reaper_handle.take() {
+            let _ = handle.join();
         }
     }
 }

@@ -14,6 +14,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
@@ -32,7 +33,9 @@ use crate::agent::platform::JobObjectHandle;
 /// 소유권 분할(fable 저수준 취합 §2): child는 Arc<Mutex>로 pump(try_wait)와 shutdown(kill+wait)이
 /// 공유한다. shutdown flag도 Arc — shutdown이 set(Release), pump 종료부가 read(Acquire).
 pub struct PtyTransport {
-    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    /// master 는 watcher(자연 종료 감지)와 shutdown(kill) 둘 다 drop(take)할 수 있어 Arc 공유한다.
+    /// 둘 다 `take()` 라 멱등 — 먼저 take 한 쪽이 ConPTY 를 닫고, 나중 쪽은 None 을 본다.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shutdown: Arc<AtomicBool>,
@@ -103,7 +106,7 @@ impl PtyTransport {
 
         // 5. 필드 적재. reader는 start()에서 take할 때까지 보관.
         let transport = PtyTransport {
-            master: Mutex::new(Some(pair.master)),
+            master: Arc::new(Mutex::new(Some(pair.master))),
             writer: Mutex::new(writer),
             child: Arc::new(Mutex::new(child)),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -152,6 +155,55 @@ impl AgentTransport for PtyTransport {
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
+
+        // ── 자연 종료 감지 watcher(콘솔 전용 — 이 detection 은 PtyTransport 안에만 둔다) ──
+        // 문제: Windows ConPTY 는 master 가 살아있는 한 자식이 스스로 exit 해도 reader 에 EOF 를
+        //   주지 않는다. 그래서 자연 종료(cmd /c exit) 시 pump 의 blocking read 가 영원히 안 깬다
+        //   → core.finish 미호출 → reaper 신호 안 감. (kill 경로는 shutdown 이 master 를 drop 하므로
+        //   EOF 가 와서 정상.) 이를 보완: 자식 종료를 폴링 감지해 **master 를 drop** 함으로써
+        //   기존 EOF→pump break→finish→reaper 경로를 그대로 타게 한다.
+        //
+        // ★shutdown 플래그는 건드리지 않는다★ — set 하면 pump 가 Killed 로 전이한다. 자연 종료는
+        //   Exited{code} 여야 하므로(ADR-0019 disposition: 정상=DeleteProfile, 크래시=Keep) watcher 는
+        //   master drop 만 한다. reason 산출은 pump 가 try_wait 의 exit code 로 한다(코드 무변경).
+        //
+        // ★데드락/이중 wait 안전★: WinChild::try_wait/wait/kill 은 내부 proc 핸들을 try_clone 후
+        //   외부 Mutex 를 즉시 해제하므로, watcher 가 우리 child Mutex 를 **짧게만**(try_wait 1회)
+        //   잡고 sleep 한다 → shutdown 의 child.lock()+kill+wait 와 경합해도 곧 풀려 데드락 없음.
+        //   Windows 는 좀비 reaping 이 없고 핸들 보유 = 종료코드 보존이라, watcher 의 try_wait 와
+        //   이후 pump 의 try_wait 가 같은 code 를 반복 회수해도 무해(이중 reap 문제 없음).
+        // ★멱등★: master drop 은 watcher·shutdown 둘 다 take() → 먼저 take 한 쪽만 닫고 나머진 None.
+        let watcher_child = self.child.clone();
+        let watcher_master = self.master.clone();
+        let watcher_shutdown = self.shutdown.clone();
+        let watcher = std::thread::Builder::new()
+            .name("engram-pty-watcher".into())
+            .spawn(move || loop {
+                // 1. shutdown(kill) 진행 중이면 watcher 역할은 끝 — kill 경로가 master 를 drop 해
+                //    pump 를 깨운다. 자연 종료 감지가 불필요하므로 즉시 종료(자원 회수).
+                if watcher_shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                // 2. 자식 종료 폴링(child Mutex 를 짧게만 보유 — try_wait 후 즉시 drop guard).
+                let exited = {
+                    let mut child = match watcher_child.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    matches!(child.try_wait(), Ok(Some(_)))
+                };
+                if exited {
+                    // 3. 자식이 스스로 종료됨 → master drop 으로 pump read 를 EOF 로 깨운다.
+                    //    shutdown 미set 이므로 pump 는 Exited{code} 로 finish 한다(자연 종료 분류).
+                    let _ = watcher_master.lock().expect("master poisoned").take();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            })
+            .expect("spawn pty watcher thread");
+        // watcher 핸들은 detach(join 하지 않음) — kill/자연종료 어느 쪽이든 곧 return 한다.
+        // (shutdown set → 즉시 return / 자식 종료 → master drop 후 return.) 자원 자체 회수만 보장.
+        drop(watcher);
 
         let handle = std::thread::spawn(move || {
             // ── B-2: pump 본체를 catch_unwind로 감싼다 ──

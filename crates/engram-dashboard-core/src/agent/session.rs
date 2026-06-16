@@ -11,7 +11,7 @@
 //! tauri import 0.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use crate::agent::output_core::OutputCore;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
     AgentId, AgentStatus, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError, SinkId,
-    SubscribeOutcome,
+    SubscribeOutcome, TerminationIntent,
 };
 
 /// 에이전트 1개 = 출력 측(core) + 채널/자원 측(transport)의 합성. transport 종류(PTY/API)와
@@ -31,6 +31,10 @@ pub struct AgentSession {
     /// 현 터미널 폭/높이. resize 성공 시에만 갱신(실패 시 옛 값 유지) — manager.agent_info가 직접 load.
     pub cols: AtomicU16,
     pub rows: AtomicU16,
+    /// 유저 종료 의도(ADR-0019). kill_agent 가 shutdown **전에** UserKill 로 태깅하고, finalize
+    /// hook(spawn_session 이 이 Arc 를 캡처)이 finish 순간 snapshot 해 ReapMsg 에 싣는다.
+    /// 세션별 신규 atomic. `Arc` 인 이유: hook 클로저가 같은 값을 공유 캡처한다.
+    intent: Arc<AtomicU8>,
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
 }
@@ -39,12 +43,14 @@ impl AgentSession {
     /// 합성 세션 생성. **start는 여기서 호출하지 않는다** — manager가 new 이전에
     /// `transport.start(core.clone())`를 직접 부른다(impl-spec: 테스트 가시성·spawn 흐름 명시성).
     /// 즉 이 생성자는 이미 start된 transport와 core를 받아 묶기만 한다.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: AgentId,
         cwd: PathBuf,
         epoch: u32,
         cols: u16,
         rows: u16,
+        intent: Arc<AtomicU8>,
         core: Arc<OutputCore>,
         transport: Box<dyn AgentTransport>,
     ) -> Self {
@@ -54,9 +60,25 @@ impl AgentSession {
             epoch,
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
+            intent,
             core,
             transport,
         }
+    }
+
+    /// 유저 종료 의도 태깅(ADR-0019) — kill_agent 가 transport.shutdown **전에** 호출한다.
+    /// finish hook 이 이 값을 finish 순간 snapshot 하므로, shutdown 전에 set 해야 pump 가
+    /// 깨어 finish 할 때 UserKill 이 관측된다(순서가 race 방지의 핵심).
+    pub fn set_intent(&self, intent: TerminationIntent) {
+        self.intent.store(intent as u8, Ordering::SeqCst);
+    }
+
+    /// pump 기동을 위임(transport.start). ★ADR-0019 reaper 순서★: manager 는 이 세션을 sessions
+    /// 맵에 **insert 한 뒤** start 한다. pump 가 즉시 EOF→finish→ReapMsg 를 보내도 그땐 이미 맵에
+    /// 존재하므로 reaper 가 정상 reap 한다(insert 전 start 면 hook send 가 맵에 없는 id 를 가리켜
+    /// 좀비). attach_pump 는 start 내부 동기 완료라 insert 순서와 무관(join_pump 영향 없음).
+    pub fn start_pump(&self) {
+        self.transport.start(self.core.clone());
     }
 
     /// 입력 바이트 전달 → transport(PTY=writer). 콘솔은 Raw variant.
