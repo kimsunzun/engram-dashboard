@@ -4,7 +4,7 @@ import { themeManager } from './theme/ThemeManager'
 import AppLayout from './components/layout/AppLayout'
 import PopupPage from './pages/PopupPage'
 import TreePage from './pages/TreePage'
-import { initEventBus } from './store/eventBus'
+import { initEventBus, refreshProfiles } from './store/eventBus'
 import { agentClient } from './api/clientFactory'
 import { useAgentStore } from './store/agentStore'
 
@@ -20,6 +20,8 @@ function App() {
       .getAgents()
       .then(agents => useAgentStore.getState().setAgents(agents))
       .catch(err => console.warn('[App] getAgents failed:', err))
+    // 깡통(예약) 프로필 초기 로드(ADR-0018) — 트리가 예약 노드를 그리려면 필요.
+    void refreshProfiles()
   }, [])
 
   return (

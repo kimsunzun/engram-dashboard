@@ -12,6 +12,20 @@ let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
 let initPromise: Promise<void> | null = null
 
+/**
+ * 프로필 목록 갱신(ADR-0018). 백엔드에 프로필 변경 이벤트가 없으므로,
+ * 부팅 1회 + create/delete/activate(spawnProfile) 직후 명시적으로 호출해 store 를 동기화한다.
+ * (실행중 전환 자체는 기존 agent-list-updated 가 처리 — 여기선 예약 목록만 새로 받는다.)
+ */
+export async function refreshProfiles(): Promise<void> {
+  try {
+    const profiles = await agentClient.listProfiles()
+    useAgentStore.getState().setProfiles(profiles)
+  } catch (err) {
+    console.warn('[eventBus] refreshProfiles failed:', err)
+  }
+}
+
 export function initEventBus(): Promise<void> {
   if (initPromise) return initPromise
 
