@@ -131,6 +131,20 @@ pub fn run() {
             app.manage(AppState { manager, embedded });
             Ok(())
         })
+        // 버그 수정: tauri.conf.json 이 hidden 창 2개(agent-tree·slot-popup)를 시작 시 생성한다.
+        // Tauri 는 "모든 창이 닫혀야 종료"라 main(X버튼)을 닫아도 hidden 창이 남아 프로세스가 좀비로
+        // 잔존한다. main 창의 CloseRequested(WM_CLOSE/X버튼)를 Rust 측에서 받아 app.exit(0) 로 앱 전체를
+        // 종료한다 → hidden 창 포함 정리되고, 종료 시 RunEvent::ExitRequested 의 shutdown_all() 이 그대로 탄다.
+        // (label=="main": conf 첫 창은 label 미지정 → Tauri 기본 라벨 "main".)
+        // agent-tree/slot-popup 을 단독으로 닫는 경우는 기존대로(그 창만) — main 만 exit 으로 연결.
+        // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if window.label() == "main" {
+                    window.app_handle().exit(0);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면. 부팅 자동 호출은 phase4.
             commands::discover_daemon,
