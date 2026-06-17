@@ -1,8 +1,11 @@
-// clientFactory 단위테스트 — 위치 모드(Embedded/Daemon) 선택 + window 노출(§5).
+// clientFactory 단위테스트 — 위치 모드(embedded/daemon) 선택 + window 노출(§5).
 //
+// ★Stage 3★: factory 는 mode → transport(InProc/Ws) → ProtocolClient 를 만든다. 반환은 항상
+// ProtocolClient(단일 프로토콜 의미론). carrier 차이는 connectionState 로 관측한다 —
+//   embedded(InProc) = 'connected'(항상), daemon(Ws) = 'down'(lazy connect 전).
 // factory 는 모듈 로드 시점에 싱글톤(agentClient)을 만들고 resolveMode 가 window/localStorage
 // 를 읽는다 → 각 케이스마다 vi.resetModules + 환경 셋업 후 dynamic import 로 격리한다.
-// @tauri-apps/api/core 는 mock(EmbeddedClient 가 import 하나, 인스턴스화 시점엔 호출 안 함).
+// @tauri-apps/api/core 는 mock(transport 가 import 하나, 인스턴스화 시점엔 invoke 호출 안 함).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -38,37 +41,40 @@ afterEach(() => {
 })
 
 describe('clientFactory.resolveMode / getAgentClient', () => {
-  it('기본(설정 없음) → EmbeddedClient(connectionState 항상 connected)', async () => {
+  it('기본(설정 없음) → ProtocolClient over InProc(connectionState 항상 connected)', async () => {
     const factory = await import('./clientFactory')
-    const { EmbeddedClient } = await import('./embeddedClient')
+    const { ProtocolClient } = await import('./protocolClient')
     const client = factory.getAgentClient()
-    expect(client).toBeInstanceOf(EmbeddedClient)
-    // Embedded 는 항상 connected.
+    expect(client).toBeInstanceOf(ProtocolClient)
+    // InProc carrier 는 항상 connected(프로세스 수명=연결 수명).
     expect(client.connectionState).toBe('connected')
   })
 
-  it('window.__ENGRAM_MODE__ = "daemon" → DaemonClient', async () => {
+  it('window.__ENGRAM_MODE__ = "daemon" → ProtocolClient over Ws(lazy, down)', async () => {
     ;(window as Win).__ENGRAM_MODE__ = 'daemon'
     const factory = await import('./clientFactory')
-    const { DaemonClient } = await import('./daemonClient')
+    const { ProtocolClient } = await import('./protocolClient')
     const client = factory.getAgentClient()
-    expect(client).toBeInstanceOf(DaemonClient)
+    expect(client).toBeInstanceOf(ProtocolClient)
+    // Ws carrier 는 lazy connect — 명령 전 'down'.
+    expect(client.connectionState).toBe('down')
   })
 
-  it('localStorage engram_client_mode = "daemon" → DaemonClient', async () => {
+  it('localStorage engram_client_mode = "daemon" → Ws carrier(down)', async () => {
     window.localStorage.setItem('engram_client_mode', 'daemon')
     const factory = await import('./clientFactory')
-    const { DaemonClient } = await import('./daemonClient')
+    const { ProtocolClient } = await import('./protocolClient')
     const client = factory.getAgentClient()
-    expect(client).toBeInstanceOf(DaemonClient)
+    expect(client).toBeInstanceOf(ProtocolClient)
+    expect(client.connectionState).toBe('down')
   })
 
   it('전역(__ENGRAM_MODE__)이 localStorage 보다 우선', async () => {
     ;(window as Win).__ENGRAM_MODE__ = 'embedded'
     window.localStorage.setItem('engram_client_mode', 'daemon')
     const factory = await import('./clientFactory')
-    const { EmbeddedClient } = await import('./embeddedClient')
-    expect(factory.getAgentClient()).toBeInstanceOf(EmbeddedClient)
+    // embedded 우선 → InProc carrier → connected.
+    expect(factory.getAgentClient().connectionState).toBe('connected')
   })
 
   it('getAgentClient 는 싱글톤(두 번 호출 동일 인스턴스) + window.__ENGRAM_AGENT__ 노출', async () => {
@@ -80,7 +86,7 @@ describe('clientFactory.resolveMode / getAgentClient', () => {
     expect((window as Win).__ENGRAM_AGENT__).toBe(a)
   })
 
-  it('DaemonClient 는 lazy connect — 인스턴스화만으로 invoke(discover) 호출 안 함', async () => {
+  it('daemon 모드 ProtocolClient 는 lazy connect — 인스턴스화만으로 invoke(discover) 호출 안 함', async () => {
     ;(window as Win).__ENGRAM_MODE__ = 'daemon'
     const core = await import('@tauri-apps/api/core')
     const factory = await import('./clientFactory')

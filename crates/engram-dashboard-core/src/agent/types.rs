@@ -157,10 +157,17 @@ pub struct OutputChunk {
 /// 프론트로 나가는 PTY 출력 wire 포맷 — base64 인코딩으로 JSON 호환.
 /// ※S12: 이건 **Embedded(Tauri JSON Channel) 전용** 표현. base64는 JSON Channel 제약이며
 /// 코어 관심사가 아니다 — ChannelOutputSink가 OutputFrame(raw)을 받아 이걸로 인코딩한다.
+///
+/// ★epoch★: WS binary frame 헤더([tag][agentId][epoch][seq])와 동형으로 출력 frame 마다
+/// 세션 epoch 을 싣는다(OutputFrame.epoch 그대로). 인코딩 시 frame.epoch 을 **버리면**
+/// embedded 가 epoch 0 고정으로 흘러, SubscribeAck.current_epoch≥1(resume-fallback) 과
+/// 불일치해 ProtocolClient epoch 가드(f.epoch !== st.epoch)가 출력을 전멸시킨다(Stage 3
+/// BLOCKER 1). 따라서 frame.epoch 을 반드시 동봉해 WS 경로와 동형화한다.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PtyEvent {
     pub agent_id: AgentId,
     pub seq: u64,
+    pub epoch: u32,
     pub data_b64: String,
 }
 

@@ -13,6 +13,8 @@ export type AgentStatus =
 export interface PtyEvent {
   agent_id: string
   seq: number
+  /** 세션 epoch — WS binary frame 헤더와 동형(BLOCKER 1). InProc 이 이 값으로 epoch 가드를 통과시킨다. */
+  epoch: number
   data_b64: string
 }
 

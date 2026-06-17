@@ -1,10 +1,16 @@
-// AgentClient 팩토리 — 위치 모드(Embedded/Daemon) 선택 지점(daemon-design §8-d #7, phase4-2).
+// AgentClient 팩토리 — 위치 모드(embedded/daemon) 선택 지점(ADR-0020 Stage 3).
 // 부팅 시 1회 모드를 고른다 — 라이브 핫스왑 안 함. 기본 'embedded'(회귀 0, 기존 동작 불변).
 // daemon 은 명시 opt-in: window.__ENGRAM_MODE__ 전역 또는 localStorage 'engram_client_mode'.
+//
+// ★Stage 3 전환★: mode → transport(InProc/Ws) 선택 → new ProtocolClient(transport). 단일
+// ProtocolClient(프로토콜 의미론 1벌) + carrier 2개. EmbeddedClient/DaemonClient 클래스는
+// Stage 4 에서 ptyApi·옛 Tauri command 와 함께 제거(현재 파일은 잔류, factory 만 전환).
 
 import type { AgentClient } from './agentClient'
-import { EmbeddedClient } from './embeddedClient'
-import { DaemonClient } from './daemonClient'
+import { InProcTransport } from './inProcTransport'
+import { ProtocolClient } from './protocolClient'
+import type { Transport } from './transport'
+import { WsTransport } from './wsTransport'
 
 type ClientMode = 'embedded' | 'daemon'
 
@@ -27,7 +33,9 @@ let instance: AgentClient | null = null
 export function getAgentClient(): AgentClient {
   if (!instance) {
     const mode = resolveMode()
-    instance = mode === 'daemon' ? new DaemonClient() : new EmbeddedClient()
+    // mode → carrier 선택. 프로토콜 의미론은 ProtocolClient 한 곳(carrier 무관).
+    const transport: Transport = mode === 'daemon' ? new WsTransport() : new InProcTransport()
+    instance = new ProtocolClient(transport)
     // §5 LLM-우선 제어: 제어 표면을 window 에 노출 — cdp.mjs eval / (미래) 백엔드측 LLM 이
     // 사람 클릭과 동일 진입점을 호출할 수 있게 한다(임시 경로, 정식 command 버스 전까지).
     ;(window as unknown as { __ENGRAM_AGENT__?: AgentClient }).__ENGRAM_AGENT__ = instance

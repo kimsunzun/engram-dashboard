@@ -51,11 +51,14 @@ impl ChannelOutputSink {
 impl OutputSink for ChannelOutputSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
         // S12: 코어는 raw OutputFrame을 준다. base64 인코딩은 여기(Embedded sink) 책임 —
-        // Tauri JSON Channel이 바이너리를 못 실어서 base64로 우회. epoch는 Channel 경로에선
-        // 미사용(프론트가 [agentId,epoch] 재구독은 agent-list-updated로 트리거).
+        // Tauri JSON Channel이 바이너리를 못 실어서 base64로 우회.
+        // ★epoch★: frame.epoch 을 동봉한다(BLOCKER 1). 옛 subscribe_agent_output 경로는 Stage 4
+        //   에서 삭제될 코드지만 PtyEvent.epoch 필드가 생겼으니 지금 컴파일/정합을 위해 채운다
+        //   (epoch 0 고정으로 두면 새 carrier 경로와 같은 전멸 버그 재현).
         let event = PtyEvent {
             agent_id: frame.agent_id,
             seq: frame.seq,
+            epoch: frame.epoch,
             data_b64: base64::engine::general_purpose::STANDARD.encode(frame.data),
         };
         // send 실패 = 창이 닫힘 → drain이 dead sink로 감지해 구독자 목록에서 제거.

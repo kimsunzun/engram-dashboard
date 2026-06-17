@@ -109,10 +109,13 @@ impl TauriChannelOutputSink {
 impl OutputSink for TauriChannelOutputSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
         // base64 인코딩(JSON Channel 제약 우회) — 기존 embedded 인코딩 유지(lib.rs ChannelOutputSink 동일).
-        // epoch 은 Channel 경로에선 미사용(프론트는 agent-list-updated 로 재구독 트리거).
+        // ★epoch★(BLOCKER 1): frame.epoch 을 반드시 동봉한다. 이걸 버리면 InProc 이 epoch 0 고정으로
+        //   흘러 SubscribeAck.current_epoch≥1(resume-fallback)과 불일치 → ProtocolClient epoch 가드가
+        //   출력을 전멸시킨다. WS binary frame 헤더(epoch 포함)와 동형화하는 핵심 한 줄.
         let event = PtyEvent {
             agent_id: frame.agent_id,
             seq: frame.seq,
+            epoch: frame.epoch,
             data_b64: base64::engine::general_purpose::STANDARD.encode(frame.data),
         };
         // ★단일 writer 큐로만 보낸다(직접 Channel.send 금지)★ — control(command loop)과 합류해 FIFO.
@@ -163,6 +166,8 @@ impl OutboundSink for TauriOutboundSink {
                     output: PtyEvent {
                         agent_id: decoded.agent_id,
                         seq: decoded.seq,
+                        // binary frame 헤더의 epoch 을 그대로 옮긴다(epoch 동봉 일관성 — BLOCKER 1).
+                        epoch: decoded.epoch,
                         data_b64: base64::engine::general_purpose::STANDARD.encode(decoded.payload),
                     },
                 },
@@ -643,6 +648,35 @@ mod tests {
         assert_eq!(items[0]["output"]["seq"], 7);
         // base64("hello") = "aGVsbG8=".
         assert_eq!(items[0]["output"]["data_b64"], "aGVsbG8=");
+        assert_eq!(items[0]["output"]["epoch"], 0, "epoch 동봉(frame.epoch=0)");
+    }
+
+    // ── BLOCKER 1 회귀: PtyEvent.epoch 가 OutputFrame.epoch 에서 채워진다(0 고정 아님) ────────
+    //    embedded 출력이 epoch≥1 세션에서 epoch 0 으로 흐르면 ProtocolClient epoch 가드가 출력을
+    //    전멸시킨다(Stage 3 BLOCKER 1). 이 테스트는 frame.epoch=3 을 주고 PtyEvent.epoch==3 을
+    //    단언한다 → send 가 frame.epoch 을 버리고 0 으로 고정하는 mutation 이면 fail 한다.
+    #[tokio::test]
+    async fn embedded_output_sink_carries_frame_epoch() {
+        let (channel, collected) = collecting_channel();
+        let tx = outbound_to_channel(channel);
+        let sink = TauriOutboundSink::new(tx);
+        let (out_sink, _flag) = sink.make_output_sink();
+        let agent_id = uuid::Uuid::new_v4();
+        out_sink
+            .send(OutputFrame {
+                agent_id,
+                epoch: 3,
+                seq: 1,
+                data: b"x",
+            })
+            .expect("send ok");
+
+        wait_for(&collected, 1).await;
+        let items = collected.lock().unwrap();
+        assert_eq!(
+            items[0]["output"]["epoch"], 3,
+            "PtyEvent.epoch 은 OutputFrame.epoch(3)에서 채워져야 한다(0 고정 금지 — BLOCKER 1)"
+        );
     }
 
     // ── BLOCKER 1 회귀: 단일 writer 큐가 control/output enqueue 순서를 FIFO 로 보존 ──────────

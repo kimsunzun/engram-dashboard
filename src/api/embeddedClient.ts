@@ -73,6 +73,11 @@ export class EmbeddedClient implements AgentClient {
   onRestoreResult(cb: (report: RestoreReport) => void): () => void {
     return syncListen<RestoreReport>('agent-restore-result', cb)
   }
+  onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void {
+    // Stage 4 삭제 예정 클래스(테스트 호환 잔류). embedded 백엔드 broadcast 미도달 — no-op disposer.
+    void cb
+    return () => {}
+  }
 
   spawnAgent(cwd: string): Promise<AgentInfo> {
     return ptyApi.spawnAgent(cwd)

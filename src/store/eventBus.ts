@@ -66,6 +66,14 @@ export function initEventBus(): Promise<void> {
         }),
       )
 
+      // 프로필 목록 라이브 갱신(깡통/예약, ADR-0018 후속). daemon 모드는 ProfileListUpdated
+      // broadcast 로 동작, embedded 는 후속 backend broadcast 흡수 자리(현재 미도달). store 미러 교체.
+      unlistenFns.push(
+        agentClient.onProfileListUpdated(profiles => {
+          useAgentStore.getState().setProfiles(profiles)
+        }),
+      )
+
       // Vite HMR 모듈 교체 시 리스너 해제 + promise 초기화
       if (import.meta.hot) {
         import.meta.hot.dispose(() => {

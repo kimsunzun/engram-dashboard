@@ -52,6 +52,13 @@ export interface AgentClient {
   onStatusChanged(cb: (id: string, status: AgentStatus, epoch: number) => void): () => void
   /** 부팅 복원 결과(S9). */
   onRestoreResult(cb: (report: RestoreReport) => void): () => void
+  /**
+   * 프로필 목록 라이브 갱신(깡통/예약 에이전트 — ADR-0018 후속, §5).
+   * 백엔드가 프로필 변경(create/delete/activate)을 broadcast 하면 store 미러를 갱신한다.
+   * daemon 모드는 AgentEvent::ProfileListUpdated 라우팅으로 동작, embedded 는 후속 backend
+   * broadcast 흡수 자리(현재 백엔드 미도달 — 인터페이스·프론트 배선은 지금 깐다).
+   */
+  onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void
 
   // ── 명령 ──────────────────────────────────────────────────────────────────
   spawnAgent(cwd: string): Promise<AgentInfo>
