@@ -8,6 +8,7 @@
 //! → bind → 토큰 → manager 배선 → restore_all → accept loop → graceful 종료)을 `run()` 이
 //! 그대로 수행한다. accept loop 본체는 `run_accept_loop()` 로 분리해 테스트와 공유한다.
 
+pub mod connection_core;
 pub mod instance;
 pub mod portfile;
 pub mod ws;
@@ -25,7 +26,8 @@ use engram_dashboard_protocol::PROTOCOL_VERSION;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use ws::{ConnRegistry, DaemonStatusSink, KeepaliveConfig, MultiViewState};
+use connection_core::MultiViewState;
+use ws::{ConnRegistry, DaemonStatusSink, KeepaliveConfig};
 
 const DAEMON_FILE: &str = "daemon.json";
 
