@@ -63,6 +63,13 @@ export class InProcTransport implements Transport {
     return this.connectPromise
   }
 
+  // 명시 spawn 진입점(Transport.start). InProc 은 spawn 개념이 없어 ensureReady 와 동일(Channel
+  // 등록). DaemonControl.start 가 부르나 embedded 는 EmbeddedDaemonControl(no-op)이라 실제론
+  // 부팅 ensure 가 이미 Channel 을 등록한다. 인터페이스 충족 + 명시 호출 시 idempotent connect.
+  start(): Promise<void> {
+    return this.ensureReady()
+  }
+
   private async connect(): Promise<void> {
     const channel = new Channel<TauriOutbound>()
     channel.onmessage = (out: TauriOutbound) => this.onOutbound(out)

@@ -33,6 +33,20 @@ export interface AgentClient {
   /** 상태 변화 구독. 반환은 해제 함수. */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
 
+  /**
+   * **명시 연결(spawn 허용)** — ADR-0021 §1. transport.start 위임. 부팅 1회 / 사용자 daemon_start 가
+   * 부른다(DaemonControl.start). 데몬이 없으면 여기서만 spawn 한다. 명령 경로(ensureReady)는
+   * attach-only 라 spawn 못 하므로, 데몬을 띄우는 유일한 의도적 진입점이다. daemon 모드만 의미 있고
+   * embedded(InProc)는 Channel 등록(no-op spawn). 재연결로 멈췄던 상태(closedByUser/attempt)를 리셋.
+   */
+  connect(): Promise<void>
+  /**
+   * **명시 연결 해제(재연결 중단, ADR-0021 note3)** — transport.close 위임. graceful daemon_stop
+   * 후 부른다: closedByUser=true 로 즉시 'down' 정착해 5회 재연결 헛시도를 없앤다. ProtocolClient
+   * 자체(구독 라우터/콜백 레지스트리)는 유지하므로, 이후 connect 로 다시 살릴 수 있다(close 와 다름).
+   */
+  disconnect(): void
+
   // ── 출력 구독 ──────────────────────────────────────────────────────────────
   /** 출력 구독. onChunk 로 디코드된 바이트 전달. 반환 핸들의 unsubscribe 로 해제. */
   subscribeOutput(
@@ -66,6 +80,13 @@ export interface AgentClient {
   resizePty(agentId: string, cols: number, rows: number): Promise<void>
   getAgents(): Promise<AgentInfo[]>
   getSnapshot(agentId: string): Promise<unknown[]>
+  /**
+   * 데몬 graceful 종료(ADR-0021 §5). StopDaemon AgentCommand 전송 — 데몬이 자식 PTY 를 정리하고
+   * 스스로 내려간다. force=false 면 실활성 에이전트가 있을 때 데몬이 거부(Error). embedded 모드는
+   * in-proc 라 무의미(데몬 없음) → carrier 가 무시(앱 안 내림). DaemonControl.stop 이 이걸 graceful
+   * 단계로 부르고, 실패/연결없음 시 daemon_stop(fallback kill)로 보강한다.
+   */
+  stopDaemon(force: boolean): Promise<void>
 
   // ── 프로필 CRUD ────────────────────────────────────────────────────────────
   listProfiles(): Promise<AgentProfile[]>

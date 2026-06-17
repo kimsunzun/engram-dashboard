@@ -134,6 +134,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면. 부팅 자동 호출은 phase4.
             commands::discover_daemon,
+            // ADR-0021: 데몬 lifecycle 명시 제어 표면(§5). start=ensure(spawn 허용), stop=fallback kill,
+            //   status=alive/pid/port. 재연결 루프는 이걸 안 부른다(attach-only, wsTransport).
+            commands::daemon_start,
+            commands::daemon_stop,
+            commands::daemon_status,
             // ADR-0020 Stage 4a: 옛 개별 invoke(spawn/kill/profile/pty 14개)는 삭제 — 아래 generic
             //   agent_command 1개가 AgentCommand 전 variant 를 처리(embedded carrier → ConnectionCore).
             //   agent_connect 가 단일 outbound Channel 을 등록한다.

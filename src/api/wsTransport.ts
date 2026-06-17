@@ -38,6 +38,12 @@ export class WsTransport implements Transport {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+  // ADR-0021: ensure(명시 spawn)와 reconnect(attach-only)를 분리하기 위한 캐시.
+  // 최초 명시 연결에서 discover_daemon 으로 얻은 host/port/token 을 보관한다. 재연결 루프는
+  // 이 캐시로 **소켓만 재오픈**하고 절대 discover/spawn 을 호출하지 않는다(불변식: reconnect 는
+  // spawn 금지 — 데몬을 kill 하면 재연결이 못 붙어 'down' 유지, 사용자가 명시로 다시 시작).
+  private cachedInfo: DaemonInfoDto | null = null
+
   // ProtocolClient 가 등록하는 단일 수신 콜백(control/output 정규화 메시지).
   private messageCb: ((msg: InboundMessage) => void) | null = null
 
@@ -68,24 +74,78 @@ export class WsTransport implements Transport {
     for (const cb of this.stateListeners) cb(s)
   }
 
-  // ── 전송 준비 보장(lazy connect, 중복 방지) ───────────────────────────────────────
+  // ── 전송 준비 보장 = attach-only(ADR-0021 B-1) ────────────────────────────────────
+  // 명령/구독 경로(ProtocolClient.sendCommand/subscribeOutput/resizePty)가 매 호출 전에 부른다.
+  // ★불변식★: 이 경로는 절대 spawn 하지 않는다 — openSocket(false)(캐시 재오픈)만. 그래야 사용자가
+  // 데몬을 끈 뒤 키 한 번/창 리사이즈만 해도 데몬이 되살아나는 버그(B-1)가 안 난다. spawn 은 명시
+  // start() 에서만. closedByUser/attempt 리셋도 여기서 하지 않는다(그건 명시 start 의 책임).
   ensureReady(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this._state === 'connected') {
       return Promise.resolve()
     }
     if (this.connectPromise) return this.connectPromise
-    this.connectPromise = this.openSocket()
+    // 사용자가 명시 종료(close)했거나 재연결이 소진돼 down 인데도 명령이 들어오면 attach 시도조차
+    // 하지 않고 즉시 reject — 명령이 데몬을 깨우면 안 된다(꺼진 채 유지). 복구는 명시 start 로만.
+    if (this.closedByUser) {
+      return Promise.reject(
+        new Error('daemon down — daemon_start 로 명시 시작 필요 (ADR-0021: 명령은 respawn 안 함)'),
+      )
+    }
+    if (!this.cachedInfo) {
+      return Promise.reject(
+        new Error('daemon down — daemon_start 로 명시 시작 필요 (no cached daemon, ADR-0021)'),
+      )
+    }
+    // attach-only: 캐시 host:port 로 소켓만 재오픈. 데몬이 죽었으면 onclose → reject(respawn 안 함).
+    this.connectPromise = this.openSocket(false)
     return this.connectPromise
   }
 
-  /** 1회 소켓 열기 + Auth 전송 + Hello 대기. 성공 시 resolve, 실패 시 reject(상위가 처리). */
-  private openSocket(): Promise<void> {
+  // ── 명시 spawn 진입점(ADR-0021 §1) ───────────────────────────────────────────────
+  // 부팅 연결 / 사용자 daemon_start(DaemonControl.start → client.connect → 여기) 만 호출한다.
+  // discover_daemon 으로 데몬을 spawn(없으면) 하고 캐시를 채운다. 이전 close()/소진으로 멈춘
+  // 재연결 상태를 리셋(closedByUser 해제 + attempt 0 + 진행 중 타이머 정리)해 다시 살아날 수 있게.
+  start(): Promise<void> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this._state === 'connected') {
+      return Promise.resolve()
+    }
+    this.closedByUser = false
+    this.reconnectAttempt = 0
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    // 진행 중 attach 시도(connectPromise)가 있어도 명시 start 는 discover 를 강제해야 한다 —
+    // 새 openSocket(true) 로 교체(이전 attach promise 는 버려지되 소켓 onclose 가 정리).
+    this.connectPromise = this.openSocket(true)
+    return this.connectPromise
+  }
+
+  /**
+   * 1회 소켓 열기 + Auth 전송 + Hello 대기. 성공 시 resolve, 실패 시 reject(상위가 처리).
+   *
+   * ADR-0021 ensure/reconnect 분리:
+   *  - allowDiscover=true(명시 연결): discover_daemon 호출(없으면 spawn) → 결과를 cachedInfo 에 보관.
+   *  - allowDiscover=false(재연결 루프): **discover/spawn 절대 금지.** 캐시된 host/port 로 소켓만
+   *    재오픈한다. 캐시가 없으면(첫 연결도 안 한 상태) 즉시 reject — 재연결은 새 데몬을 만들지 않는다.
+   */
+  private openSocket(allowDiscover: boolean): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const run = async () => {
-        // discover_daemon 은 매 연결마다 호출(데몬 재기동 시 port/token 바뀔 수 있음).
-        const info = await invoke<DaemonInfoDto>('discover_daemon')
+        let info: DaemonInfoDto
+        if (allowDiscover) {
+          // 명시 연결만 discover(없으면 데몬 spawn). 성공 시 캐시 갱신(데몬 재기동 시 port/token 반영).
+          info = await invoke<DaemonInfoDto>('discover_daemon')
+          this.cachedInfo = info
+        } else {
+          // 재연결 = attach-only. 캐시된 정보로만 재오픈. 캐시 없으면 붙을 곳을 모른다 → reject.
+          if (!this.cachedInfo) {
+            throw new Error('no cached daemon info — reconnect cannot discover/spawn (ADR-0021)')
+          }
+          info = this.cachedInfo
+        }
         // host 는 일단 127.0.0.1 고정 가정(로컬 IPC).
-        const ws = new WebSocket('ws://127.0.0.1:' + info.port)
+        const ws = new WebSocket('ws://' + info.host + ':' + info.port)
         ws.binaryType = 'arraybuffer'
         this.ws = ws
 
@@ -170,20 +230,33 @@ export class WsTransport implements Transport {
     this.scheduleReconnect()
   }
 
+  // attach-only 재연결 최대 시도 횟수. ADR-0021: 데몬이 죽으면(graceful stop·kill·크래시) 캐시된
+  // host:port 로의 재연결이 전부 실패한다 — 무한 reconnecting 으로 매달리지 않고 이 횟수만큼 시도한
+  // 뒤 'down' 으로 정착시킨다(꺼진 채 유지). 일시적 네트워크 끊김은 이 안에서 회복된다. 복구는
+  // 사용자의 명시 daemon_start(=start(), discover 허용)로만 — 재연결·명령(ensureReady)은 spawn 금지.
+  private static readonly MAX_RECONNECT_ATTEMPTS = 5
+
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return
     if (this.closedByUser) return
+    // attach-only 재시도 소진 → 'down' 정착(데몬이 안 살아남는다). 사용자가 명시로 다시 시작.
+    if (this.reconnectAttempt >= WsTransport.MAX_RECONNECT_ATTEMPTS) {
+      this.setState('down')
+      return
+    }
     // 500ms → 1s → 2s → … 최대 10s.
     const delay = Math.min(500 * 2 ** this.reconnectAttempt, 10000)
     this.reconnectAttempt += 1
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (this.closedByUser) return
-      // ensureReady 가 새 connectPromise 를 만든다. 실패하면 다시 onclose→scheduleReconnect.
-      this.ensureReady().catch(() => {
-        // openSocket reject(예: discover 실패) — 소켓 onclose 가 안 왔을 수 있으니 직접 재스케줄.
+      // ★attach-only★: discover/spawn 금지 — 캐시된 host:port 로 소켓만 재오픈(openSocket(false)).
+      // 성공하면 connectPromise 가 Hello 로 resolve 되고 reconnectAttempt 가 0 으로 리셋된다.
+      // 실패(데몬 죽음 → 연결 거부)하면 onclose 가 와서 다시 scheduleReconnect → 소진 시 'down'.
+      this.connectPromise = this.openSocket(false)
+      this.connectPromise.catch(() => {
+        // openSocket reject(캐시 없음/소켓 onclose 미발화) — 직접 재스케줄(소진 시 'down').
         if (!this.reconnectTimer && !this.closedByUser) {
-          this.setState('reconnecting')
           this.scheduleReconnect()
         }
       })

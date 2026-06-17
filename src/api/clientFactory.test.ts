@@ -19,12 +19,14 @@ vi.mock('@tauri-apps/api/core', () => ({
 type Win = Window & {
   __ENGRAM_MODE__?: string
   __ENGRAM_AGENT__?: unknown
+  __ENGRAM_DAEMON__?: unknown
 }
 
 function clearEnv() {
   const w = window as Win
   delete w.__ENGRAM_MODE__
   delete w.__ENGRAM_AGENT__
+  delete w.__ENGRAM_DAEMON__
   try {
     window.localStorage.clear()
   } catch {
@@ -94,5 +96,23 @@ describe('clientFactory.resolveMode / getAgentClient', () => {
     expect(client.connectionState).toBe('down')
     // 명령 호출 전이므로 discover_daemon 미호출.
     expect(core.invoke).not.toHaveBeenCalled()
+  })
+
+  // ── ADR-0021: DaemonControl 노출 + mode별 구현 ───────────────────────────────────
+  it('daemon 모드 → window.__ENGRAM_DAEMON__ = DaemonDaemonControl(실제)', async () => {
+    ;(window as Win).__ENGRAM_MODE__ = 'daemon'
+    const factory = await import('./clientFactory')
+    const { DaemonDaemonControl } = await import('./daemonControl')
+    const ctrl = factory.getDaemonControl()
+    expect(ctrl).toBeInstanceOf(DaemonDaemonControl)
+    expect((window as Win).__ENGRAM_DAEMON__).toBe(ctrl)
+  })
+
+  it('embedded 모드 → DaemonControl 은 no-op(EmbeddedDaemonControl), 노출은 동일', async () => {
+    const factory = await import('./clientFactory')
+    const { EmbeddedDaemonControl } = await import('./daemonControl')
+    const ctrl = factory.getDaemonControl()
+    expect(ctrl).toBeInstanceOf(EmbeddedDaemonControl)
+    expect((window as Win).__ENGRAM_DAEMON__).toBe(ctrl)
   })
 })

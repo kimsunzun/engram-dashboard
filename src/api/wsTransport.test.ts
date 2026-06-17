@@ -27,6 +27,8 @@ import type { InboundMessage } from './transport'
 
 const OPEN = 1
 const CLOSED = 3
+// WsTransport.MAX_RECONNECT_ATTEMPTS 와 동기화(attach-only 재시도 소진 후 down).
+const WS_MAX_ATTEMPTS = 5
 
 class FakeWebSocket {
   static OPEN = OPEN
@@ -120,9 +122,10 @@ afterEach(() => {
 
 const AGENT = '12345678-9abc-def0-1234-56789abcdef0'
 
-/** ensureReady 트리거 + 핸드셰이크 완료(onopen→Auth→Hello). */
+/** 명시 start(spawn 허용) 트리거 + 핸드셰이크 완료(discover→onopen→Auth→Hello).
+ * ADR-0021 B-1: 최초 연결은 명시 start 만 가능(ensureReady 는 attach-only 라 캐시 없으면 reject). */
 async function connect(t: WsTransport): Promise<FakeWebSocket> {
-  const p = t.ensureReady().catch(() => {})
+  const p = t.start().catch(() => {})
   await Promise.resolve()
   await Promise.resolve()
   const ws = FakeWebSocket.last!
@@ -207,6 +210,122 @@ describe('WsTransport 재연결', () => {
     await new Promise((r) => setTimeout(r, 600))
     expect(FakeWebSocket.instances.length).toBe(before)
     expect(t.connectionState).toBe('down')
+  })
+})
+
+// ── ADR-0021 B-1: 명령(ensureReady=attach-only) / 명시(start=spawn) 분리 ──────────────
+describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0021)', () => {
+  // ★mutation 가드★: 이 테스트가 깨지면 ensureReady 가 spawn(discover)을 하고 있다는 뜻 =
+  // "데몬 끈 뒤 키 한 번/리사이즈로 respawn" 버그(B-1) 재발. ensureReady 를 openSocket(true)로
+  // 되돌리면 reject 대신 discover 가 불려 이 단언(spawn 0회 + reject)이 실패한다.
+  it('ensureReady = 캐시 없으면 reject + discover/spawn 0회(명령이 데몬 못 깨움)', async () => {
+    const t = new WsTransport()
+    await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
+    expect(invokeMock).not.toHaveBeenCalled() // discover(=spawn 유발) 절대 안 함
+    expect(FakeWebSocket.instances.length).toBe(0) // 소켓조차 안 엶
+    expect(t.connectionState).toBe('down')
+  })
+
+  it('close(명시 종료) 후 ensureReady = reject + spawn 0회(closedByUser 가드)', async () => {
+    const t = new WsTransport()
+    await connect(t) // 캐시 채움
+    t.close() // closedByUser=true → down
+    invokeMock.mockClear()
+    await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
+    expect(invokeMock).not.toHaveBeenCalled() // 캐시는 있지만 closedByUser 라 attach 도 안 함
+    expect(t.connectionState).toBe('down')
+  })
+
+  it('start 만 discover_daemon 호출(spawn 유발) — 명령은 호출 안 함', async () => {
+    const t = new WsTransport()
+    await connect(t) // = start()
+    expect(invokeMock).toHaveBeenCalledTimes(1)
+    expect(invokeMock).toHaveBeenCalledWith('discover_daemon')
+    t.close()
+  })
+
+  it('ensureReady = 캐시 있으면 attach(소켓 재오픈)하되 discover/spawn 은 안 함', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t) // start: 캐시 채움
+    invokeMock.mockClear()
+    ws1.fireClose() // 비의도 끊김 → reconnecting (connectPromise 정리)
+    // reconnecting 중 명령 경로가 ensureReady 호출 → 진행 중 connectPromise 또는 새 attach.
+    await new Promise((r) => setTimeout(r, 600))
+    const ws2 = FakeWebSocket.last!
+    ws2.fireOpen()
+    ws2.fireText({ Hello: { protocol_version: 1 } })
+    await Promise.resolve()
+    const er = t.ensureReady()
+    await er // 이미 connected → 즉시 resolve
+    expect(invokeMock).not.toHaveBeenCalled() // attach 경로는 discover 안 함
+    t.close()
+  })
+
+  it('재연결은 discover_daemon 을 호출하지 않고(spawn 금지) 캐시 host:port 로 소켓만 재오픈', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t)
+    expect(invokeMock).toHaveBeenCalledTimes(1) // 최초 1회만
+    invokeMock.mockClear()
+
+    // 비의도 끊김 → attach-only 재연결.
+    ws1.fireClose()
+    expect(t.connectionState).toBe('reconnecting')
+    await new Promise((r) => setTimeout(r, 600))
+
+    // ★불변식★: 재연결 경로는 discover(=spawn 유발)를 절대 호출하지 않는다.
+    expect(invokeMock).not.toHaveBeenCalled()
+    // 캐시된 host:port 로 새 소켓을 연다(같은 url).
+    const ws2 = FakeWebSocket.last!
+    expect(ws2).not.toBe(ws1)
+    expect(ws2.url).toBe('ws://127.0.0.1:9999')
+    t.close()
+  })
+
+  it('attach 재시도 소진 → discover 없이 down 정착(데몬 죽음, 안 살아남음)', async () => {
+    vi.useFakeTimers()
+    const t = new WsTransport()
+    // 최초 연결 = 명시 start(타이머 영향 없게 수동 핸드셰이크).
+    const p = t.start().catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    const ws1 = FakeWebSocket.last!
+    ws1.fireOpen()
+    ws1.fireText({ Hello: { protocol_version: 1 } })
+    await p
+    invokeMock.mockClear()
+
+    // 데몬이 죽었다고 가정 — 끊긴 뒤 매 attach 시도가 즉시 onclose(연결 거부)로 실패.
+    ws1.fireClose()
+    // 5회 백오프(500/1s/2s/4s/8s) 각각 진행 → 매번 새 소켓이 곧장 닫힘.
+    for (let i = 0; i < WS_MAX_ATTEMPTS; i++) {
+      await vi.advanceTimersByTimeAsync(11000)
+      const w = FakeWebSocket.last!
+      // attach-only 소켓이 핸드셰이크 전에 닫힘(데몬 죽음).
+      w.fireClose()
+      await Promise.resolve()
+    }
+    await vi.advanceTimersByTimeAsync(11000)
+
+    expect(invokeMock).not.toHaveBeenCalled() // 끝까지 discover/spawn 없음
+    expect(t.connectionState).toBe('down')
+    t.close()
+    vi.useRealTimers()
+  })
+
+  it('down 후 start(명시 재시작) → 다시 discover 허용 + 재연결 루프 부활', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t)
+    t.close() // 명시 종료 → down
+    expect(t.connectionState).toBe('down')
+    invokeMock.mockClear()
+
+    // 사용자 명시 재시작(daemon_start 진입점 = start) — discover 허용, closedByUser 해제.
+    const ws2 = await connect(t)
+    expect(invokeMock).toHaveBeenCalledTimes(1)
+    expect(invokeMock).toHaveBeenCalledWith('discover_daemon')
+    expect(ws2).not.toBe(ws1)
+    expect(t.connectionState).toBe('connected')
+    t.close()
   })
 })
 

@@ -187,6 +187,118 @@ fn ensure_with(
     }
 }
 
+// ── 데몬 lifecycle 상태/종료(ADR-0021 §5 command 표면) ──────────────────────────────
+
+/// 데몬 alive 판정 결과(daemon_status command 반환). 순수 — daemon.json + liveness 만으로 산출.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonStatus {
+    /// 살아있는 데몬이 발견됐는가(파일 존재 + 호환 버전 + PID live).
+    pub alive: bool,
+    /// 발견된 데몬 PID(파일이 있으면, 죽었어도 보고). 없으면 None.
+    pub pid: Option<u32>,
+    /// 발견된 데몬 포트. 없으면 None.
+    pub port: Option<u16>,
+}
+
+/// daemon.json 을 읽어 데몬 alive 여부를 판정한다(순수 — reader/liveness 주입).
+///
+/// alive=true 조건: 파일 존재 + 버전 호환 + PID live. 파일이 있으나 죽었으면 pid/port 는 보고하되
+/// alive=false. 파일이 없으면 전부 None+false. 깨진 파일/IO 오류는 "데몬 없음"으로 본다(보수).
+fn status_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> DaemonStatus {
+    match reader.read() {
+        Ok(Some(info)) => {
+            let alive = matches!(check_acceptable(&info, liveness), AcceptCheck::Accept);
+            DaemonStatus {
+                alive,
+                pid: Some(info.pid),
+                port: Some(info.port),
+            }
+        }
+        // 없음/깨짐/IO 오류 → 데몬 없음(보수). 깨진 파일은 신뢰 불가라 pid 미보고.
+        _ => DaemonStatus {
+            alive: false,
+            pid: None,
+            port: None,
+        },
+    }
+}
+
+/// 데몬 상태 조회(real 진입점). data_dir/daemon.json 을 읽어 alive/pid/port 를 반환.
+pub fn daemon_status(data_dir: &Path) -> DaemonStatus {
+    let reader = FileReader {
+        path: data_dir.join(DAEMON_FILE),
+    };
+    status_with(&reader, &RealLiveness)
+}
+
+/// 프로세스 종료자 — real 은 taskkill /F. 단위 테스트는 호출 인자를 캡처하는 가짜 주입.
+pub trait ProcessKiller {
+    /// 주어진 pid 를 강제 종료. 성공 여부는 best-effort(이미 죽었으면 Ok 취급).
+    fn kill(&self, pid: u32) -> Result<(), DiscoveryError>;
+}
+
+/// 데몬 종료 fallback(real 진입점) — daemon.json 의 pid 를 taskkill /F.
+///
+/// ★분담★: graceful 종료(StopDaemon AgentCommand)는 **연결을 쥔 프론트**가 보낸다(데몬이 자식
+/// PTY 를 정리하고 스스로 내려감). 이 command 는 연결이 없거나 graceful 이 실패했을 때의 **fallback** —
+/// daemon.json 의 pid 를 직접 kill 한다. 데몬은 KILL_ON_JOB_CLOSE Job 으로 자식을 담으므로 데몬
+/// 프로세스가 죽으면 자식 PTY 도 함께 정리된다(detach 불가, connection_core StopDaemon 주석과 동일).
+///
+/// 반환: Ok(Some(pid))=kill 시도한 pid, Ok(None)=죽일 데몬 없음(파일 없음/이미 죽음).
+pub fn daemon_stop(data_dir: &Path) -> Result<Option<u32>, DiscoveryError> {
+    stop_with(
+        &FileReader {
+            path: data_dir.join(DAEMON_FILE),
+        },
+        &RealLiveness,
+        &TaskKiller,
+    )
+}
+
+/// 데몬 종료 로직(순수 — reader/liveness/killer 주입). 살아있는 데몬만 kill 한다.
+fn stop_with(
+    reader: &dyn DaemonReader,
+    liveness: &dyn PidLiveness,
+    killer: &dyn ProcessKiller,
+) -> Result<Option<u32>, DiscoveryError> {
+    match reader.read() {
+        Ok(Some(info)) => {
+            // 이미 죽은 데몬이면 kill 불필요(None). PID 재사용 방어는 liveness 가 start_time 으로 처리.
+            if liveness.is_dead(info.pid, info.start_time) {
+                return Ok(None);
+            }
+            killer.kill(info.pid)?;
+            Ok(Some(info.pid))
+        }
+        // 파일 없음/깨짐 → 죽일 데몬 없음.
+        _ => Ok(None),
+    }
+}
+
+/// taskkill /F 로 pid 를 종료하는 real ProcessKiller(Windows). non-windows 는 SIGKILL(미지원 stub).
+struct TaskKiller;
+
+impl ProcessKiller for TaskKiller {
+    #[cfg(windows)]
+    fn kill(&self, pid: u32) -> Result<(), DiscoveryError> {
+        // taskkill /PID <pid> /F /T — /T 로 자식 트리도 정리(데몬 Job 안전망과 중복이나 무해).
+        let status = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| DiscoveryError::Io(format!("taskkill 실행 실패: {e}")))?;
+        // taskkill 은 "이미 종료됨"(exit 128)도 있으므로 성공/실패를 강제하지 않는다(best-effort).
+        let _ = status;
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn kill(&self, _pid: u32) -> Result<(), DiscoveryError> {
+        Err(DiscoveryError::Io("daemon_stop 은 Windows 전용".into()))
+    }
+}
+
 // ── 공개 진입점 ─────────────────────────────────────────────────────────────────
 
 /// 데몬을 발견(없으면 spawn)하고 DaemonInfo 를 반환한다.
@@ -197,6 +309,7 @@ pub fn ensure_daemon(
     data_dir: &Path,
     daemon_exe: &Path,
     timeout: Duration,
+    console: bool,
 ) -> Result<DaemonInfo, DiscoveryError> {
     let daemon_path = data_dir.join(DAEMON_FILE);
 
@@ -207,7 +320,8 @@ pub fn ensure_daemon(
     let reader = FileReader {
         path: daemon_path.clone(),
     };
-    let spawner = WmiSpawner;
+    // console=false(기본): windowless spawn(CREATE_NO_WINDOW). console=true: 콘솔 창과 함께(디버그).
+    let spawner = WmiSpawner { console };
     let liveness = RealLiveness;
     let clock = RealClock;
     let mut stale_cleanup = || {
@@ -360,11 +474,15 @@ impl Drop for ComGuard {
 
 // ── WMI spawn(real) ─────────────────────────────────────────────────────────────
 
-struct WmiSpawner;
+/// WMI Win32_Process.Create 스포너. `console` 으로 데몬 콘솔 창 가시성을 정한다.
+struct WmiSpawner {
+    /// true=콘솔 창과 함께(CREATE_NEW_CONSOLE, 디버그 로그 가시화), false=windowless(CREATE_NO_WINDOW, 기본).
+    console: bool,
+}
 
 impl Spawner for WmiSpawner {
     fn spawn(&self, exe: &Path) -> Result<(), DiscoveryError> {
-        wmi_spawn(exe)
+        wmi_spawn(exe, self.console)
     }
 }
 
@@ -378,8 +496,43 @@ impl Spawner for WmiSpawner {
 /// ★절대경로 필수★: 상대경로면 RV=9(Path not found). 호출자가 dunce::canonicalize 로 절대화한
 /// exe 를 받는다.
 #[cfg(windows)]
-fn wmi_spawn(exe: &Path) -> Result<(), DiscoveryError> {
-    use windows::core::{BSTR, VARIANT};
+fn wmi_spawn(exe: &Path, console: bool) -> Result<(), DiscoveryError> {
+    // ADR-0021 §C(개정): CreateFlags 로 콘솔 창 가시성 제어(Win32_ProcessStartup.CreateFlags).
+    //
+    // ★실측 확정(2026-06-17, real_wmi_spawn_flag_matrix)★: WMI Win32_Process.Create 는
+    //   CREATE_NO_WINDOW(0x08000000) 을 받으면 ReturnValue=21(Invalid Parameter) 로 거부한다
+    //   (알려진 WMI quirk — CREATE_NO_WINDOW 는 CreateProcess 직접 호출용이며 WMI Create 의
+    //   허용 플래그 집합 밖이다). 그래서 windowless 기본은 **CreateFlags 를 아예 안 넘긴다**:
+    //     - windowless(console=false) → ProcessStartupInformation 자체 생략(create_flags=None).
+    //       WMI-spawn 프로세스는 WmiPrvSE 자식이라 **비대화형 컨텍스트**에서 떠 콘솔 창이
+    //       애초에 나타나지 않는다. 플래그 불필요 → RV=0.
+    //     - console=true → CREATE_NEW_CONSOLE(0x10): 허용 플래그라 RV=0, 별도 콘솔 창과 함께
+    //       뜬다(디버그 로그 가시화).
+    const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
+    let create_flags: Option<i32> = if console {
+        Some(CREATE_NEW_CONSOLE)
+    } else {
+        None
+    };
+
+    // RV!=0 → SpawnFailed(rv) 로 변환. RV=0 → Ok.
+    let rv = wmi_create_raw(exe, create_flags)?;
+    if rv != 0 {
+        return Err(DiscoveryError::SpawnFailed { rv });
+    }
+    Ok(())
+}
+
+/// WMI Win32_Process.Create 를 실제 호출하고 **raw ReturnValue(u32)** 를 그대로 돌려준다.
+/// (RV!=0 을 에러로 승격하지 않음 — flag-matrix 실측 테스트가 RV 자체를 비교하기 위함.)
+///
+/// `create_flags`:
+///   - `None`         → ProcessStartupInformation 자체를 안 넘김(windowless 기본).
+///   - `Some(flags)`  → Win32_ProcessStartup{ CreateFlags=flags } 임베디드 오브젝트로 전달.
+#[cfg(windows)]
+fn wmi_create_raw(exe: &Path, create_flags: Option<i32>) -> Result<u32, DiscoveryError> {
+    // Interface trait — startup_inst.cast::<IUnknown>() 에 필요(임베디드 오브젝트를 VARIANT 로 박기).
+    use windows::core::{Interface, BSTR, VARIANT};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CLSCTX_INPROC_SERVER,
         COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
@@ -472,6 +625,43 @@ fn wmi_spawn(exe: &Path) -> Result<(), DiscoveryError> {
             .Put(&BSTR::from("CommandLine"), 0, &cl_value, 0)
             .map_err(wmi_err)?;
 
+        // 5b) ProcessStartupInformation = Win32_ProcessStartup{ CreateFlags } — **플래그가 있을 때만**.
+        //     console=true(CREATE_NEW_CONSOLE)일 때만 임베디드 오브젝트를 만들어 박는다.
+        //     windowless(create_flags=None)는 이 블록 전체를 건너뛴다 — WMI 는 비대화형 spawn 이라
+        //     플래그 없이도 콘솔 창이 안 뜨고, CREATE_NO_WINDOW 를 넣으면 RV=21 로 거부되기 때문.
+        if let Some(create_flags) = create_flags {
+            let startup_class_name = BSTR::from("Win32_ProcessStartup");
+            let mut startup_class: Option<IWbemClassObject> = None;
+            services
+                .GetObject(
+                    &startup_class_name,
+                    Default::default(),
+                    None,
+                    Some(&mut startup_class),
+                    None,
+                )
+                .map_err(wmi_err)?;
+            let startup_class =
+                startup_class.ok_or(DiscoveryError::SpawnFailed { rv: u32::MAX })?;
+            let startup_inst = startup_class.SpawnInstance(0).map_err(wmi_err)?;
+            // CreateFlags 는 VT_I4(부호 있는 32-bit). windows-core VARIANT::from(i32) 로 VT_I4 생성.
+            let flags_value = VARIANT::from(create_flags);
+            startup_inst
+                .Put(&BSTR::from("CreateFlags"), 0, &flags_value, 0)
+                .map_err(wmi_err)?;
+            // 임베디드 오브젝트를 IUnknown VARIANT 로 ProcessStartupInformation 에 Put.
+            let startup_unknown: windows::core::IUnknown = startup_inst.cast().map_err(wmi_err)?;
+            let startup_value = VARIANT::from(startup_unknown);
+            in_inst
+                .Put(
+                    &BSTR::from("ProcessStartupInformation"),
+                    0,
+                    &startup_value,
+                    0,
+                )
+                .map_err(wmi_err)?;
+        }
+
         // 6) ExecMethod 호출.
         let mut out: Option<IWbemClassObject> = None;
         services
@@ -486,15 +676,13 @@ fn wmi_spawn(exe: &Path) -> Result<(), DiscoveryError> {
             )
             .map_err(wmi_err)?;
 
-        // 7) ReturnValue 확인(0=성공). 토큰/pid 는 daemon.json 폴링으로 회수하므로 RV 만 본다.
+        // 7) ReturnValue 회수(0=성공, 21=Invalid Parameter 등). 토큰/pid 는 daemon.json 폴링으로
+        //    회수하므로 여기선 RV 만 본다. 승격은 호출자(wmi_spawn)가 한다.
         let rv = match out {
             Some(out) => read_u32_prop(&out, "ReturnValue").unwrap_or(u32::MAX),
             None => u32::MAX,
         };
-        if rv != 0 {
-            return Err(DiscoveryError::SpawnFailed { rv });
-        }
-        Ok(())
+        Ok(rv)
     }
 }
 
@@ -518,7 +706,7 @@ fn wmi_err(e: windows::core::Error) -> DiscoveryError {
 }
 
 #[cfg(not(windows))]
-fn wmi_spawn(_exe: &Path) -> Result<(), DiscoveryError> {
+fn wmi_spawn(_exe: &Path, _console: bool) -> Result<(), DiscoveryError> {
     Err(DiscoveryError::Io("WMI spawn 은 Windows 전용".into()))
 }
 
@@ -979,6 +1167,101 @@ mod tests {
         assert!(!needs(0x8001_0106u32 as i32), "CHANGED_MODE → no uninit");
     }
 
+    // ── ADR-0021: daemon_status / daemon_stop (attach-only, spawn 0) ───────────────────
+
+    // 호출 인자를 캡처하는 가짜 killer — kill 한 pid 목록 보관.
+    struct CountingKiller {
+        killed: RefCell<Vec<u32>>,
+    }
+    impl CountingKiller {
+        fn new() -> Self {
+            Self {
+                killed: RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl ProcessKiller for CountingKiller {
+        fn kill(&self, pid: u32) -> Result<(), DiscoveryError> {
+            self.killed.borrow_mut().push(pid);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn status_live_file_reports_alive_with_pid_port() {
+        // 살아있는 데몬 파일 → alive=true + pid/port 보고.
+        let reader = FakeReader::new(vec![Ok(Some(info(111, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let s = status_with(&reader, &liveness);
+        assert!(s.alive);
+        assert_eq!(s.pid, Some(111));
+        assert_eq!(s.port, Some(12345));
+    }
+
+    #[test]
+    fn status_dead_file_reports_not_alive_but_keeps_pid() {
+        // 죽은 데몬 파일 → alive=false 지만 pid/port 는 보고(진단용).
+        let reader = FakeReader::new(vec![Ok(Some(info(222, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![222] };
+        let s = status_with(&reader, &liveness);
+        assert!(!s.alive);
+        assert_eq!(s.pid, Some(222));
+    }
+
+    #[test]
+    fn status_version_mismatch_is_not_alive() {
+        // 버전 불일치 데몬(붙을 수 없음) → alive=false.
+        let reader = FakeReader::new(vec![Ok(Some(info(333, PROTOCOL_VERSION + 1)))]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let s = status_with(&reader, &liveness);
+        assert!(!s.alive, "버전 불일치는 붙을 수 없으므로 alive=false");
+        assert_eq!(s.pid, Some(333));
+    }
+
+    #[test]
+    fn status_missing_file_is_not_alive_no_pid() {
+        // 파일 없음 → alive=false, pid/port None.
+        let reader = FakeReader::new(vec![Ok(None)]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let s = status_with(&reader, &liveness);
+        assert!(!s.alive);
+        assert_eq!(s.pid, None);
+        assert_eq!(s.port, None);
+    }
+
+    #[test]
+    fn stop_live_daemon_kills_pid() {
+        // 살아있는 데몬 → 그 pid 를 kill.
+        let reader = FakeReader::new(vec![Ok(Some(info(444, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let killer = CountingKiller::new();
+        let got = stop_with(&reader, &liveness, &killer).unwrap();
+        assert_eq!(got, Some(444));
+        assert_eq!(killer.killed.borrow().as_slice(), &[444]);
+    }
+
+    #[test]
+    fn stop_dead_daemon_does_not_kill() {
+        // 이미 죽은 데몬 → kill 안 함(None). PID 재사용 방어.
+        let reader = FakeReader::new(vec![Ok(Some(info(555, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![555] };
+        let killer = CountingKiller::new();
+        let got = stop_with(&reader, &liveness, &killer).unwrap();
+        assert_eq!(got, None);
+        assert!(killer.killed.borrow().is_empty(), "죽은 데몬은 kill 금지");
+    }
+
+    #[test]
+    fn stop_missing_file_is_noop() {
+        // 파일 없음 → 죽일 데몬 없음(None), kill 0회.
+        let reader = FakeReader::new(vec![Ok(None)]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let killer = CountingKiller::new();
+        let got = stop_with(&reader, &liveness, &killer).unwrap();
+        assert_eq!(got, None);
+        assert!(killer.killed.borrow().is_empty());
+    }
+
     // ── locate_daemon_exe (tempfile 주입 가능 분기) ─────────────────────────────────
 
     #[test]
@@ -1013,7 +1296,7 @@ mod tests {
         let data_dir = std::env::temp_dir();
         let missing = std::env::temp_dir().join("engram-definitely-missing-daemon.exe");
         let _ = std::fs::remove_file(&missing);
-        let err = ensure_daemon(&data_dir, &missing, Duration::from_millis(50)).unwrap_err();
+        let err = ensure_daemon(&data_dir, &missing, Duration::from_millis(50), false).unwrap_err();
         assert!(matches!(err, DiscoveryError::ExeNotFound(_)), "{err:?}");
     }
 
@@ -1062,7 +1345,7 @@ mod tests {
         let _ = std::fs::remove_file(&daemon_path);
 
         // (2) 실제 WMI spawn — RV==0 이어야 성공.
-        wmi_spawn(&exe_abs).expect("WMI Win32_Process.Create 성공(RV=0)");
+        wmi_spawn(&exe_abs, false).expect("WMI Win32_Process.Create 성공(RV=0, windowless)");
 
         // (3) 데몬이 daemon.json 을 발행하는지 폴링 회수.
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -1105,6 +1388,111 @@ mod tests {
         assert_eq!(
             info.protocol_version, PROTOCOL_VERSION,
             "spawn 한 데몬의 protocol_version 일치"
+        );
+    }
+
+    // ── CreateFlags 진단 매트릭스(실측) — 어느 플래그가 RV=21 을 유발하는지 확정 ─────────────
+    //
+    // ADR-0021 #1 버그(windowless spawn RV=21) 의 근본 원인을 실증한다. wmi_create_raw 로 동일
+    // 데몬 exe 를 네 가지 CreateFlags 조합으로 spawn 하고 raw ReturnValue 를 출력/단언한다:
+    //   - None                       (ProcessStartup 생략)          → RV=0 기대(채택안 a)
+    //   - CREATE_NEW_CONSOLE(0x10)    (console=true)                 → RV=0 기대(기존 동작)
+    //   - DETACHED_PROCESS(0x08)      (대안 b)                       → 관찰만(기대 RV=0)
+    //   - CREATE_NO_WINDOW(0x08000000)(기존 windowless, 버그 플래그) → RV=21 기대(거부 재현)
+    //
+    // 각 spawn 직후 daemon.json 폴링으로 PID 회수 → 즉시 kill(데몬 누적 방지). 기존 살아있는
+    // 데몬이 있으면 단일-인스턴스로 spawn 이 무의미하므로 skip.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "실제 WMI Win32_Process.Create 플래그 매트릭스 — 데몬 exe 필요(수동 진단)"]
+    fn real_wmi_spawn_flag_matrix() {
+        const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
+        const DETACHED_PROCESS: i32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: i32 = 0x0800_0000;
+
+        let exe = locate_daemon_exe().expect("daemon exe — 먼저 `cargo build` 필요");
+        let exe_abs = dunce::canonicalize(&exe).expect("exe canonicalize");
+
+        let data_dir = dirs::data_dir()
+            .expect("data_dir")
+            .join("com.engram.dashboard");
+        std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
+        let daemon_path = data_dir.join(DAEMON_FILE);
+
+        // 기존 daemon.json 백업 + 살아있는 데몬이면 skip(단일-인스턴스로 spawn 거부됨).
+        let backup = std::fs::read(&daemon_path).ok();
+        if let Some(bytes) = &backup {
+            if let Ok(prev) = DaemonInfo::parse(bytes) {
+                if !RealLiveness.is_dead(prev.pid, prev.start_time) {
+                    eprintln!(
+                        "real_wmi_spawn_flag_matrix: 기존 데몬(pid={})이 살아있어 skip",
+                        prev.pid
+                    );
+                    return;
+                }
+            }
+        }
+
+        // 한 케이스 spawn → RV 회수 → (RV=0 이면 떠난 데몬 daemon.json 폴링으로 PID 회수 후 kill).
+        let run_case = |label: &str, flags: Option<i32>| -> u32 {
+            let _ = std::fs::remove_file(&daemon_path);
+            let rv = wmi_create_raw(&exe_abs, flags).expect("WMI create 호출 자체는 성공해야");
+            eprintln!("[flag-matrix] {label}: ReturnValue={rv}");
+            if rv == 0 {
+                // 떠난 데몬 회수 후 kill(누적 방지). 폴링 최대 8s.
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while Instant::now() < deadline {
+                    if let Ok(bytes) = std::fs::read(&daemon_path) {
+                        if let Ok(info) = DaemonInfo::parse(&bytes) {
+                            if !RealLiveness.is_dead(info.pid, info.start_time) {
+                                let _ = std::process::Command::new("taskkill")
+                                    .args(["/PID", &info.pid.to_string(), "/F"])
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .status();
+                                eprintln!("[flag-matrix] {label}: 데몬 pid={} kill", info.pid);
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            rv
+        };
+
+        let rv_none = run_case("None(ProcessStartup 생략)", None);
+        let rv_new_console = run_case("CREATE_NEW_CONSOLE(0x10)", Some(CREATE_NEW_CONSOLE));
+        let rv_detached = run_case("DETACHED_PROCESS(0x08)", Some(DETACHED_PROCESS));
+        let rv_no_window = run_case("CREATE_NO_WINDOW(0x08000000)", Some(CREATE_NO_WINDOW));
+
+        // 백업 복원.
+        match backup {
+            Some(bytes) => {
+                let _ = std::fs::write(&daemon_path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&daemon_path);
+            }
+        }
+
+        // 단언: 채택안(None) 과 기존 console(CREATE_NEW_CONSOLE)은 RV=0, 버그 플래그(CREATE_NO_WINDOW)는
+        // RV!=0(거부). DETACHED 는 관찰만(단언 안 함 — 대안 b 참고용).
+        eprintln!(
+            "[flag-matrix] 요약: None={rv_none} NEW_CONSOLE={rv_new_console} \
+             DETACHED={rv_detached} NO_WINDOW={rv_no_window}"
+        );
+        assert_eq!(
+            rv_none, 0,
+            "windowless 채택안(ProcessStartup 생략)은 RV=0 이어야"
+        );
+        assert_eq!(
+            rv_new_console, 0,
+            "console=true(CREATE_NEW_CONSOLE)는 RV=0 이어야"
+        );
+        assert_ne!(
+            rv_no_window, 0,
+            "기존 버그 플래그 CREATE_NO_WINDOW 는 거부(RV!=0)되어야 — 버그 재현"
         );
     }
 }

@@ -18,8 +18,8 @@ prior-art 조사 결론(tmux·wezterm·emacs·gpg-agent·LSP): **전부 on-deman
 2. **재연결 루프 = attach-only(절대 spawn 안 함):** 데몬이 죽으면 GUI 재연결은 **기존 데몬에 재부착만** 시도, 없으면 spawn하지 않고 `down` 상태 표시 + "시작" 제공. **이게 "kill하면 respawn" 친화성 문제의 핵심 수정** — ensure(명시)와 reconnect(attach-only)를 분리.
 3. **자동재시작 없음:** kill이든 크래시든 데몬이 죽으면 **꺼진 채 유지.** raw kill/크래시 구분 안 함(불가능하고 불필요). 복구는 다음 **명시 연결 시 fresh 데몬 + `restore_all`**(ADR-0008, sid `--resume`)로 영속 agent를 되살림 — tmux와 달리 손실이 영구 아님.
 4. **stop = 명시 종료:** `daemon_stop`(트레이/명령/우리 핸들) → StopDaemon(graceful) 또는 kill → 죽고 유지(재연결이 안 살림). systemd `systemctl stop`과 동치.
-5. **command 표면(§5 — LLM·UI·트레이 동일 핸들, 플랫폼 중립):** `daemon_start`(명시 ensure) · `daemon_stop`(StopDaemon) · `daemon_status`(alive/pid/port). `set_daemon_console(on|off)`.
-6. **콘솔(디버그 로그):** 기본 windowless(`CREATE_NO_WINDOW`류). `set_daemon_console(on)`이면 콘솔 창과 함께 spawn(로그 가시화). 데몬 수명과 무관(ADR-0015 detachable 뷰어 최소판).
+5. **command 표면(§5 — LLM·UI·트레이 동일 핸들, 플랫폼 중립):** `daemon_start`(명시 ensure) · `daemon_stop`(StopDaemon) · `daemon_status`(alive/pid/port).
+6. **콘솔(디버그 로그):** 기본 windowless(`CREATE_NO_WINDOW`류). `daemon_start(console:true)`이면 콘솔 창과 함께 spawn(로그 가시화). 데몬 수명과 무관(ADR-0015 detachable 뷰어 최소판). **콘솔 제어 = 현재 spawn-time 파라미터만**(`daemon_start` 의 console 인자). **런타임 토글(`set_daemon_console(on|off)`)은 후속** — 데몬이 이미 떠 있는 상태에서 콘솔을 켜고 끄는 건 미구현이다(M-2, 다음 세션 오인 방지: 콘솔을 바꾸려면 현재는 stop→start(console) 로만 가능).
 
 ## 거부한 대안
 - **systemd on-failure / 크래시 한정 재시작(이 ADR 초안이었음):** raw kill과 크래시를 exit code로 구분 불가 → desired-state 플래그로 우회해도 raw kill은 여전히 크래시로 오분류. 게다가 데몬 죽으면 메모리 agent도 죽어 자동재시작해도 빈 데몬 — 실익이 `restore_all`(다음 연결 복원)로 이미 대체됨. 복잡도만 추가라 폐기.
@@ -33,7 +33,10 @@ prior-art 조사 결론(tmux·wezterm·emacs·gpg-agent·LSP): **전부 on-deman
 
 ## 영향 / 불변식
 - **ensure(spawn)와 reconnect(attach-only)는 분리** — 재연결 루프는 절대 spawn 호출 금지(이게 깨지면 "못 끄는" 버그 재발).
+- **명령 경로도 attach-only(B-1 수정, 2026-06-17):** `WsTransport.ensureReady()`(명령/구독/리사이즈가 매 호출 전 부름)는 **attach-only** — 캐시 host:port 로 소켓만 재오픈하고, 캐시 없음/closedByUser/down 이면 즉시 reject("daemon_start 로 명시 시작 필요"). discover/spawn 절대 안 함. 이게 없으면 데몬 끈 뒤 키 한 번/창 리사이즈(ResizeObserver→resizePty)만 해도 데몬이 respawn 됐다(B-1, reviewer-deep 블로커).
+- **spawn 은 명시 진입점만:** `WsTransport.start()`(=`Transport.start`, `AgentClient.connect` 위임) 만 discover(없으면 spawn) + 캐시 채움 + closedByUser/attempt 리셋. 부팅 1회(`clientFactory.bootstrapDaemonIfNeeded` → `daemonControl.start`)와 사용자 `daemon_start`(`DaemonControl.start`)가 이걸 통한다 — tmux `attach` 가 서버를 띄우는 것과 동치. **부팅 ensure 는 명령의 부수효과가 아니라 명시 start 1회**(명령 경로와 안 섞임).
+- **stop = graceful → disconnect → (still-alive 확인) fallback:** `DaemonControl.stop` 은 graceful StopDaemon 후 `client.disconnect()`(closedByUser=true → 재연결 5회 헛시도 제거, note3) 하고, graceful 이 Ack 됐으면 `daemon_status` 로 still-alive 확인 후 살아있을 때만 taskkill fallback(M-1, graceful/taskkill race 완화). graceful 없었거나 실패면 곧장 fallback.
 - 데몬 죽음 = 꺼진 채 유지. 복구는 명시 연결 + restore_all. watchdog/desired-state 없음.
 - 데몬 인프라 수명 ≠ 에이전트 런타임 자동재시작(ADR-0019 폐기). 혼동 금지.
 - command는 플랫폼 중립(Q1 경계: command=중립 / 트레이·메뉴=플랫폼 뷰). 트레이(#2)는 이 command 호출만.
-- 콘솔 토글은 데몬 수명에 영향 없음.
+- **콘솔 = spawn-time 파라미터만**(`daemon_start(console)`). 런타임 토글(`set_daemon_console`)은 후속 미구현(M-2). 콘솔 토글은 데몬 수명에 영향 없음.

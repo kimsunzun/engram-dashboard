@@ -57,10 +57,22 @@ export interface Transport {
   send(payload: unknown): void | Promise<void>
 
   /**
-   * 전송 준비 보장(lazy connect). WS = ensureConnected(discover+Auth+Hello), InProc = no-op resolve.
-   * ProtocolClient 가 모든 명령/구독 전에 await 한다.
+   * 전송 준비 보장 = **attach-only**(ADR-0021 불변식). 명령/구독 경로(ProtocolClient)가 매 호출
+   * 전에 await 한다 — 이 경로는 **절대 데몬을 spawn 하지 않는다**(reconnect=attach-only 와 동치).
+   *  - WS: 캐시된 host:port 로 소켓만 재오픈(discover/spawn 금지). 캐시 없거나 down 이면 reject
+   *    ("daemon down — daemon_start 로 명시 시작 필요"). → 데몬 끈 뒤 키 한 번/리사이즈가 respawn 못 함.
+   *  - InProc: no-op resolve(프로세스 수명=연결 수명, spawn 개념 없음).
    */
   ensureReady(): Promise<void>
+
+  /**
+   * **명시 spawn 진입점**(ADR-0021 §1: ensure(spawn)=명시 시점만). 부팅 연결/사용자 daemon_start 가
+   * 이걸 통한다 — 여기서만 데몬을 띄울 수 있다(tmux `attach` 가 서버를 띄우는 것과 동치).
+   *  - WS: discover_daemon(없으면 spawn) → 캐시 갱신 → Auth/Hello. closedByUser/reconnect 상태 리셋.
+   *  - InProc: ensureReady 와 동일(Channel 등록, no-op spawn).
+   * 명령 경로(ensureReady)와 분리해 "명령의 부수효과로 respawn" 을 차단한다.
+   */
+  start(): Promise<void>
 
   /** 명시 종료(재연결 중단 + carrier 정리). 이후 connectionState='down'. */
   close(): void

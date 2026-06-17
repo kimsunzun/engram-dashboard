@@ -99,6 +99,16 @@ export class ProtocolClient implements AgentClient {
     return this.transport.onConnectionStateChange(cb)
   }
 
+  // ── 명시 연결/해제(ADR-0021 §1·note3, transport 위임) ─────────────────────────────
+  /** 명시 spawn 연결 — transport.start 위임. 부팅/daemon_start 만 호출(명령 경로와 분리). */
+  connect(): Promise<void> {
+    return this.transport.start()
+  }
+  /** 명시 연결 해제 — transport.close 위임(재연결 중단). ProtocolClient 구조는 유지(재연결 가능). */
+  disconnect(): void {
+    this.transport.close()
+  }
+
   // ── 수신 라우팅(정규화 메시지) ───────────────────────────────────────────────────
   private route(msg: InboundMessage): void {
     if (msg.kind === 'output') {
@@ -330,6 +340,14 @@ export class ProtocolClient implements AgentClient {
   getSnapshot(agentId: string): Promise<unknown[]> {
     return this.sendCommand<unknown[]>((request_id) => ({
       GetSnapshot: { agent_id: agentId, request_id },
+    }))
+  }
+  stopDaemon(force: boolean): Promise<void> {
+    // kill_agents 는 데몬 v1 에서 무시(always-kill, Job Object 가 자식 정리). force 만 의미 있음.
+    // 데몬은 Ack 후 연결을 닫는다 — sendCommand 가 Ack 로 resolve 되고, 이후 onclose 는
+    // attach-only 재연결로 가되 데몬이 죽어 못 붙어 'down' 정착(ADR-0021).
+    return this.sendCommand<void>((request_id) => ({
+      StopDaemon: { force, kill_agents: true, request_id },
     }))
   }
 

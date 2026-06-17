@@ -21,6 +21,7 @@ class MockTransport implements Transport {
   private stateCbs = new Set<(s: ConnectionState) => void>()
   private msgCb: ((m: InboundMessage) => void) | null = null
   ensureReadyCalls = 0
+  startCalls = 0
   closed = false
 
   constructor(initial: ConnectionState = 'connected') {
@@ -46,6 +47,10 @@ class MockTransport implements Transport {
   }
   ensureReady(): Promise<void> {
     this.ensureReadyCalls += 1
+    return Promise.resolve()
+  }
+  start(): Promise<void> {
+    this.startCalls += 1
     return Promise.resolve()
   }
   close(): void {
@@ -399,6 +404,25 @@ describe('close', () => {
     await Promise.resolve()
     c.close()
     await expect(p).rejects.toThrow('client closed')
+    expect(t.closed).toBe(true)
+  })
+})
+
+// ── ADR-0021: connect(명시 spawn)/disconnect(재연결 중단) 위임 ────────────────────────
+describe('connect/disconnect (ADR-0021 §1·note3)', () => {
+  it('connect() → transport.start 위임(명시 spawn, ensureReady 와 분리)', async () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    await c.connect()
+    expect(t.startCalls).toBe(1)
+    // 명령 경로(ensureReady)와 달리 spawn 은 start 만 — connect 가 ensureReady 를 부르지 않는다.
+    expect(t.ensureReadyCalls).toBe(0)
+  })
+
+  it('disconnect() → transport.close 위임(ProtocolClient 구조는 유지, close 와 다름)', () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    c.disconnect()
     expect(t.closed).toBe(true)
   })
 })

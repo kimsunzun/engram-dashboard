@@ -7,6 +7,11 @@
 // ptyApi·옛 Tauri command 삭제 완료 — 새 경로만 남음.)
 
 import type { AgentClient } from './agentClient'
+import {
+  type DaemonControl,
+  DaemonDaemonControl,
+  EmbeddedDaemonControl,
+} from './daemonControl'
 import { InProcTransport } from './inProcTransport'
 import { ProtocolClient } from './protocolClient'
 import type { Transport } from './transport'
@@ -28,19 +33,56 @@ function resolveMode(): ClientMode {
 }
 
 let instance: AgentClient | null = null
+let daemonControlInstance: DaemonControl | null = null
+let resolvedMode: ClientMode | null = null
 
 /** 단일 AgentClient 인스턴스. 컴포넌트·스토어·(미래)LLM 이 모두 이걸 통한다. */
 export function getAgentClient(): AgentClient {
   if (!instance) {
     const mode = resolveMode()
+    resolvedMode = mode
     // mode → carrier 선택. 프로토콜 의미론은 ProtocolClient 한 곳(carrier 무관).
     const transport: Transport = mode === 'daemon' ? new WsTransport() : new InProcTransport()
     instance = new ProtocolClient(transport)
+    // ADR-0021 §5: 데몬 lifecycle 제어 표면. daemon 모드만 실제 동작, embedded 는 no-op/에러.
+    daemonControlInstance =
+      mode === 'daemon' ? new DaemonDaemonControl(instance) : new EmbeddedDaemonControl()
     // §5 LLM-우선 제어: 제어 표면을 window 에 노출 — cdp.mjs eval / (미래) 백엔드측 LLM 이
     // 사람 클릭과 동일 진입점을 호출할 수 있게 한다(임시 경로, 정식 command 버스 전까지).
     ;(window as unknown as { __ENGRAM_AGENT__?: AgentClient }).__ENGRAM_AGENT__ = instance
+    // 데몬 제어(start/stop/status)도 동일하게 노출 — 트레이(#2)·LLM·cdp 가 같은 핸들을 흔든다.
+    ;(window as unknown as { __ENGRAM_DAEMON__?: DaemonControl }).__ENGRAM_DAEMON__ =
+      daemonControlInstance
   }
   return instance
+}
+
+/** 단일 DaemonControl 인스턴스. getAgentClient 와 동일 시점에 구성된다(mode 1회 결정). */
+export function getDaemonControl(): DaemonControl {
+  if (!daemonControlInstance) getAgentClient() // 동시 초기화 보장.
+  return daemonControlInstance!
+}
+
+/** 결정된 클라이언트 모드(부팅 1회). 부팅 ensure 가 daemon 모드만 명시 start 하도록 분기에 쓴다. */
+export function getClientMode(): ClientMode {
+  if (!resolvedMode) getAgentClient()
+  return resolvedMode!
+}
+
+/**
+ * 부팅 시 **명시 ensure 1회**(ADR-0021 §1: spawn=명시 시점만). daemon 모드일 때만 daemonControl.start()
+ * 를 호출해 데몬을 띄운다(tmux attach 가 서버를 띄우는 것과 동치). 명령 경로(ensureReady)는 attach-only
+ * 라 데몬을 못 깨우므로, 이 부팅 start 가 없으면 부팅 시 데몬이 안 뜬다. embedded 는 InProc 이 첫 명령
+ * 시 Channel 을 등록하므로 no-op(EmbeddedDaemonControl.start 는 에러라 호출하지 않는다).
+ * 멱등 — start 는 이미 connected 면 즉시 resolve. 실패(데몬 spawn 불가)는 삼켜 부팅을 막지 않는다.
+ */
+export async function bootstrapDaemonIfNeeded(): Promise<void> {
+  if (getClientMode() !== 'daemon') return
+  try {
+    await getDaemonControl().start()
+  } catch (err) {
+    console.warn('[clientFactory] 부팅 daemon start 실패(수동 daemon_start 필요):', err)
+  }
 }
 
 /** 모듈 로드 시점 싱글톤(대부분 컴포넌트는 이걸 import). */

@@ -68,6 +68,15 @@ describe('InProcTransport 연결/상태', () => {
     const after = invokeMock.mock.calls.filter((c) => c[0] === 'agent_connect').length
     expect(after).toBe(1)
   })
+
+  it('start() = ensureReady 와 동일(InProc 은 spawn 개념 없음, Channel 등록 멱등)', async () => {
+    const t = new InProcTransport()
+    await t.start()
+    const connectCalls = invokeMock.mock.calls.filter((c) => c[0] === 'agent_connect').length
+    expect(connectCalls).toBe(1)
+    await t.start() // 멱등 — 재등록 없음
+    expect(invokeMock.mock.calls.filter((c) => c[0] === 'agent_connect').length).toBe(1)
+  })
 })
 
 describe('InProcTransport send', () => {
