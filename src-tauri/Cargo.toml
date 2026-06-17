@@ -29,6 +29,15 @@ dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI �
 engram-dashboard-core = { path = "../crates/engram-dashboard-core" }
 # discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
+# S12 ADR-0020 Stage 2: embedded 도 ConnectionCore(transport-중립 dispatch)를 거치게 한다.
+# Tauri 어댑터(TauriOutboundSink/command loop)가 이 crate 의 ConnectionCore/OutboundSink/Outbound 를 호출.
+engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon" }
+# command loop task spawn + inbound mpsc + 단일 연결 conn 상태. Tauri 의 tokio runtime 위에서 돈다.
+# (time/rt-multi-thread 는 테스트의 sleep 폴링 + #[tokio::test] 용 — 운영은 tauri::async_runtime 사용.)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+# ADR-0020 Stage 2 blocker: command loop dispatch panic 격리(FutureExt::catch_unwind, async).
+# daemon 도 동일 버전(futures-util 0.3) 사용 — 좀비 연결 방지(panic 이 loop 를 죽이지 않게).
+futures-util = "0.3"
 
 # 데몬 발견(discovery): WMI Win32_Process.Create(부모 Job 미상속 spawn) + PID 생존 판정(OpenProcess).
 [target.'cfg(windows)'.dependencies]
@@ -45,5 +54,7 @@ windows = { version = "0.58", features = [
 # 운영 코드는 data_dir 을 호출자(lib.rs)가 주입하므로 dev-dependency 로 충분(런타임 의존 0).
 [dev-dependencies]
 dirs = "6"
+# embedded carrier conformance 테스트: TauriOutbound carrier wire(JSON) 파싱·단언.
+serde_json = "1"
 
 # profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).

@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod discovery;
+pub mod embedded_carrier;
 
 // S12 phase 1: agent(구 pty)/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
 use engram_dashboard_core::{agent, logging, persistence};
@@ -22,6 +23,10 @@ use persistence::FileProfileStore;
 /// Tauri 관리 상태 — AgentManager 접근점. 외부 Mutex 없음(M1).
 pub struct AppState {
     pub manager: Arc<AgentManager>,
+    /// ADR-0020 Stage 2: embedded 단일 in-proc 연결(ConnectionCore + inbound mpsc + command loop).
+    /// agent_connect 가 Channel 을 등록하고, agent_command 가 inbound 에 명령을 넣는다. 기존 invoke
+    /// 경로와 ★공존★(Stage 4 에서 옛 경로 제거).
+    pub embedded: embedded_carrier::EmbeddedConnection,
 }
 
 // ── ChannelOutputSink ─────────────────────────────────────────────────────────
@@ -140,7 +145,31 @@ pub fn run() {
                 mgr.restore_all();
             });
 
-            app.manage(AppState { manager });
+            // ── ADR-0020 Stage 2: embedded 단일 in-proc 연결 기동 ───────────────────────
+            // WS 의 handle_connection 1회에 대응(앱당 1개 영속). ConnectionCore 를 만들어
+            // command loop(inbound mpsc 직렬화)를 띄운다.
+            //
+            // ★ConnRegistry/shutdown_tx 는 embedded 에선 무력★:
+            //  - registry: WS conn_tx fanout 용(ProfileListUpdated/InputLeaseChanged broadcast). embedded
+            //    Channel 은 여기 등록 불가(타입 상이) → 빈 registry 라 broadcast 는 no-op. 상태/목록은
+            //    TauriStatusSink(status_changed/agent_list_updated/restore_result)가 별도로 emit 하므로
+            //    트리 갱신은 유지된다. ProfileListUpdated 갱신은 프론트가 응답(Created/Ack) 후 ListProfiles
+            //    재호출로 흡수(Stage 3) — 기존 invoke 동작과 동일. (carrier-중립 fanout 은 후속 과제.)
+            //  - shutdown_tx: StopDaemon → main 종료 트리거용. embedded 는 in-proc 라 무의미 → dummy watch.
+            let registry = engram_dashboard_daemon::ws::ConnRegistry::new();
+            let multiview = engram_dashboard_daemon::connection_core::MultiViewState::new();
+            let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+            let core = Arc::new(
+                engram_dashboard_daemon::connection_core::ConnectionCore::new(
+                    manager.clone(),
+                    multiview,
+                    registry,
+                    shutdown_tx,
+                ),
+            );
+            let embedded = embedded_carrier::spawn_embedded_connection(core);
+
+            app.manage(AppState { manager, embedded });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -161,6 +190,9 @@ pub fn run() {
             commands::set_profile_auto_restore,
             // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면. 부팅 자동 호출은 phase4.
             commands::discover_daemon,
+            // ADR-0020 Stage 2: embedded carrier(generic 명령 1개 + 단일 Channel). 기존 invoke 와 공존.
+            embedded_carrier::agent_connect,
+            embedded_carrier::agent_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

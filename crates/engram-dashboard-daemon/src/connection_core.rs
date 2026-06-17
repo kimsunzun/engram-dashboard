@@ -17,14 +17,14 @@
 //! (carrier-중립 fanout sink 로의 추상화는 Stage 2+ 작업).
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
 use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::agent::profile::SpawnMode;
 use engram_dashboard_core::agent::types::{
-    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, ReplayKind, SinkId,
+    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputSink, ReplayKind, SinkId,
     SubscribeOutcome,
 };
 
@@ -47,7 +47,7 @@ use engram_dashboard_protocol::{
 
 use tokio::sync::watch;
 
-use crate::ws::{ConnId, ConnRegistry, WsOutputSink};
+use crate::ws::{ConnId, ConnRegistry};
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
 //
@@ -96,14 +96,15 @@ pub trait OutboundSink: Send + Sync {
     /// Outbound(control/binary/close)를 큐잉. 실패(포화/닫힘)면 SinkError(어댑터가 carrier 별로 해석).
     fn enqueue(&self, out: Outbound) -> Result<(), SinkError>;
 
-    /// 코어 subscribe_from 에 넘길 output sink(코어 OutputSink 구현)를 만든다.
+    /// 코어 subscribe_from 에 넘길 output sink(코어 OutputSink 구현) + replay drop 플래그를 만든다.
     ///
-    /// ★Stage 1 트레이드오프★: output frame 평면(replay/live binary)은 코어가 `OutputSink`(코어
-    /// trait)로 받으므로, 어댑터가 그 평면용 sink 를 만들어 줘야 한다. carrier-중립이라면 반환을
-    /// 코어 OutputSink trait object 로 두는 게 이상적이나, Stage 1 은 behavior-preserving 우선 +
-    /// carrier 가 WS 1개뿐이라 구체 `WsOutputSink`(conn_tx/close_signal/replay_dropped 공유)를
-    /// 그대로 반환한다. carrier 추가(embedded/gRPC) 시 이 반환을 generic 화한다(Stage 2+).
-    fn make_output_sink(&self) -> Arc<WsOutputSink>;
+    /// ★Stage 2 generic 화★: output frame 평면(replay/live binary)은 코어가 `Arc<dyn OutputSink>`
+    /// (코어 trait)로 받는다. carrier(WS/embedded/gRPC)마다 인코딩이 달라(WS=binary frame,
+    /// embedded=base64 PtyEvent) sink 구현이 다르므로, 반환을 trait object 로 두어 carrier-중립으로
+    /// 만든다. 함께 반환하는 `Arc<AtomicBool>` 은 replay 구간 중 frame drop(try_send full) 여부 —
+    /// handle_subscribe 가 ReplayComplete 직전 검사해 SubscribeAck.truncated 를 사후 보정한다.
+    /// (Stage 1 은 구체 `Arc<WsOutputSink>` 반환이라 carrier 추가가 막혔다 — reviewer-deep 지적.)
+    fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>);
 }
 
 /// dispatch 의 연결 종료 흐름. 현 dispatch 의 bool 반환(true=StopDaemon)을 대체한다.
@@ -965,10 +966,10 @@ impl ConnectionCore {
         // → 코어가 FromOldest 로 전체 replay(안전 기본값).
         let epoch_matches = requested_epoch == Some(current_epoch);
 
-        // 2. output sink 생성(코어 OutputSink). WS 어댑터가 conn_tx/close_signal 을 묶어 만든다.
-        //    ★output frame 평면★: 이 sink 는 replay/live binary frame 을 conn_tx 로 보낸다.
-        let out_sink = sink.make_output_sink();
-        let replay_dropped = out_sink.replay_dropped_flag();
+        // 2. output sink 생성(코어 OutputSink) + replay drop 플래그. carrier 가 인코딩을 소유한다
+        //    (WS=binary frame, embedded=base64 PtyEvent). 반환은 trait object 라 carrier-중립.
+        //    ★output frame 평면★: 이 sink 는 replay/live 출력 frame 을 carrier 큐로 보낸다.
+        let (out_sink, replay_dropped) = sink.make_output_sink();
 
         // 3. subscribe_from(.., on_ready). on_ready 는 코어가 replay 를 sink 로 보내기 직전
         //    (subscribers lock 보유 중) 1회 호출 → 그 안에서 SubscribeAck 를 control sink 로 먼저 enqueue.
@@ -1137,11 +1138,13 @@ mod tests {
                 }
             }
         }
-        fn make_output_sink(&self) -> Arc<WsOutputSink> {
-            Arc::new(WsOutputSink::new(
+        fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
+            let sink = Arc::new(crate::ws::WsOutputSink::new(
                 self.conn_tx.clone(),
                 self.close_signal.clone(),
-            ))
+            ));
+            let flag = sink.replay_dropped_flag();
+            (sink, flag)
         }
     }
 

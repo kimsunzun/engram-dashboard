@@ -295,13 +295,17 @@ impl CoreOutboundSink for WsOutboundSink {
         }
     }
 
-    fn make_output_sink(&self) -> Arc<WsOutputSink> {
+    fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
         // handle_subscribe 가 코어 subscribe_from 에 넘길 output 평면 sink. 같은 conn_tx/close_signal
         // 을 공유해 control(이 sink)과 output(WsOutputSink)이 한 단일 writer 큐로 합류한다(FIFO).
-        Arc::new(WsOutputSink::new(
+        // ★Stage 2 generic★: 반환을 Arc<dyn OutputSink> trait object 로(carrier-중립). replay_dropped
+        //   플래그를 함께 돌려 handle_subscribe 가 truncated 사후 보정에 쓰게 한다.
+        let sink = Arc::new(WsOutputSink::new(
             self.conn_tx.clone(),
             self.close_signal.clone(),
-        ))
+        ));
+        let flag = sink.replay_dropped_flag();
+        (sink, flag)
     }
 }
 
