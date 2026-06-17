@@ -1,5 +1,5 @@
 // WS binary output frame 디코드 — codec.rs `encode_terminal_frame`/`decode_frame` 의 역.
-// WsTransport(신규) + DaemonClient(Stage 4 삭제 예정, re-export) 공용. 순수 함수 — 테스트 용이.
+// WsTransport 가 사용. 순수 함수 — 테스트 용이(wsFrame.test). (Stage 4a: DaemonClient re-export 제거됨.)
 //
 // 포맷(big-endian): [tag:1][agentId:16][epoch:4 BE][seq:8 BE][raw payload...].
 

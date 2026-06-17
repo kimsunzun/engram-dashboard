@@ -8,14 +8,11 @@ use engram_dashboard_core::{agent, logging, persistence};
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
-use uuid::Uuid;
-
-use base64::Engine as _;
 
 use agent::manager::AgentManager;
 use agent::profile::{ProfileRegistry, RestoreReport};
 use agent::session_tracker::{SessionTracker, TrackerConfig};
-use agent::types::{AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId};
+use agent::types::{AgentId, AgentInfo, AgentStatus};
 use persistence::FileProfileStore;
 
 // ── AppState ─────────────────────────────────────────────────────────────────
@@ -27,47 +24,6 @@ pub struct AppState {
     /// agent_connect 가 Channel 을 등록하고, agent_command 가 inbound 에 명령을 넣는다. 기존 invoke
     /// 경로와 ★공존★(Stage 4 에서 옛 경로 제거).
     pub embedded: embedded_carrier::EmbeddedConnection,
-}
-
-// ── ChannelOutputSink ─────────────────────────────────────────────────────────
-
-use agent::types::PtyEvent;
-
-/// OutputSink의 Tauri 구현 — Tauri IPC Channel을 OutputSink trait으로 래핑
-pub struct ChannelOutputSink {
-    id: SinkId,
-    channel: tauri::ipc::Channel<PtyEvent>,
-}
-
-impl ChannelOutputSink {
-    pub fn new(channel: tauri::ipc::Channel<PtyEvent>) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            channel,
-        }
-    }
-}
-
-impl OutputSink for ChannelOutputSink {
-    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // S12: 코어는 raw OutputFrame을 준다. base64 인코딩은 여기(Embedded sink) 책임 —
-        // Tauri JSON Channel이 바이너리를 못 실어서 base64로 우회.
-        // ★epoch★: frame.epoch 을 동봉한다(BLOCKER 1). 옛 subscribe_agent_output 경로는 Stage 4
-        //   에서 삭제될 코드지만 PtyEvent.epoch 필드가 생겼으니 지금 컴파일/정합을 위해 채운다
-        //   (epoch 0 고정으로 두면 새 carrier 경로와 같은 전멸 버그 재현).
-        let event = PtyEvent {
-            agent_id: frame.agent_id,
-            seq: frame.seq,
-            epoch: frame.epoch,
-            data_b64: base64::engine::general_purpose::STANDARD.encode(frame.data),
-        };
-        // send 실패 = 창이 닫힘 → drain이 dead sink로 감지해 구독자 목록에서 제거.
-        self.channel.send(event).map_err(|_| SinkError)
-    }
-
-    fn sink_id(&self) -> SinkId {
-        self.id
-    }
 }
 
 // ── TauriStatusSink ───────────────────────────────────────────────────────────
@@ -176,24 +132,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::spawn_agent,
-            commands::kill_agent,
-            commands::interrupt_agent,
-            commands::get_agents,
-            commands::subscribe_agent_output,
-            commands::unsubscribe_agent_output,
-            commands::write_stdin,
-            commands::resize_pty,
-            commands::get_agent_snapshot,
-            // S9-6: 프로필 CRUD + 프로필 기반 spawn
-            commands::list_profiles,
-            commands::create_claude_profile,
-            commands::delete_profile,
-            commands::spawn_profile,
-            commands::set_profile_auto_restore,
             // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면. 부팅 자동 호출은 phase4.
             commands::discover_daemon,
-            // ADR-0020 Stage 2: embedded carrier(generic 명령 1개 + 단일 Channel). 기존 invoke 와 공존.
+            // ADR-0020 Stage 4a: 옛 개별 invoke(spawn/kill/profile/pty 14개)는 삭제 — 아래 generic
+            //   agent_command 1개가 AgentCommand 전 variant 를 처리(embedded carrier → ConnectionCore).
+            //   agent_connect 가 단일 outbound Channel 을 등록한다.
             embedded_carrier::agent_connect,
             embedded_carrier::agent_command,
         ])

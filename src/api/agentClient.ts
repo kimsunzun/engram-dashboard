@@ -1,10 +1,8 @@
 // AgentClient — 프론트가 의존하는 단일 제어 표면(S12 phase 1b, daemon-design §3-a).
 //
-// 컴포넌트·스토어는 ptyApi(invoke/Channel)를 직접 부르지 않고 이 인터페이스만 의존한다.
-// 구현 2개:
-//   - EmbeddedClient: 현 invoke/Channel 그대로(이 PC 안). connectionState 항상 'connected'.
-//   - DaemonClient(phase 4): WS + 재연결 + afterSeq 재구독 + seq dedup(내부 격리).
-// transport(Tauri Channel / WS binary frame)와 base64/디코딩은 클라이언트 내부에 숨긴다 —
+// 컴포넌트·스토어는 invoke/Channel/WS 를 직접 부르지 않고 이 인터페이스만 의존한다.
+// 단일 구현 ProtocolClient(프로토콜 의미론 1벌) + transport 2개(InProc/Ws, ADR-0020 Stage 3~4a).
+// transport(Tauri Channel / WS binary frame)와 base64/디코딩은 transport 내부에 숨긴다 —
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
 import type { AgentInfo, AgentProfile, AgentStatus, RestoreReport } from './types'

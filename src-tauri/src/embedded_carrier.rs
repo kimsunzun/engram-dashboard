@@ -79,7 +79,7 @@ type OutboundTx = mpsc::UnboundedSender<TauriOutbound>;
 // ── TauriChannelOutputSink(코어 OutputSink, 출력 평면) ───────────────────────────────
 //
 // WS 의 WsOutputSink 대응. 코어 subscribe_from 이 replay/live 출력 frame 을 이 sink 로 보내면,
-// raw bytes 를 base64 PtyEvent 로 인코딩(기존 ChannelOutputSink 와 동일)해 control 과 같은 단일
+// raw bytes 를 base64 PtyEvent 로 인코딩(JSON Channel 제약 우회)해 control 과 같은 단일
 // 큐(OutboundTx)로 보낸다(FIFO 합류). base64 인코딩은 carrier(sink)가 소유 — ADR-0003.
 
 /// 한 연결의 출력 sink. 코어가 raw OutputFrame 을 주면 base64 PtyEvent(TauriOutbound::Output)로
@@ -108,7 +108,7 @@ impl TauriChannelOutputSink {
 
 impl OutputSink for TauriChannelOutputSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // base64 인코딩(JSON Channel 제약 우회) — 기존 embedded 인코딩 유지(lib.rs ChannelOutputSink 동일).
+        // base64 인코딩(JSON Channel 제약 우회) — embedded 출력 인코딩(WS binary frame 의 base64 대응).
         // ★epoch★(BLOCKER 1): frame.epoch 을 반드시 동봉한다. 이걸 버리면 InProc 이 epoch 0 고정으로
         //   흘러 SubscribeAck.current_epoch≥1(resume-fallback)과 불일치 → ProtocolClient epoch 가드가
         //   출력을 전멸시킨다. WS binary frame 헤더(epoch 포함)와 동형화하는 핵심 한 줄.

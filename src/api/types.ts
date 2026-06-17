@@ -18,9 +18,6 @@ export interface PtyEvent {
   data_b64: string
 }
 
-/** subscribe_agent_output 반환값 — unsubscribe 시 사용 */
-export type SinkId = string
-
 // ── Capabilities (Rust Capabilities 미러, snake_case) ──────────────────────────
 
 /** PTY 입력 채널 지원 여부 */

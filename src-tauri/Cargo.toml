@@ -22,7 +22,7 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 tracing = "0.1"
-base64 = "0.22"   # S12 raw 경계화: ChannelOutputSink(Embedded)가 raw→base64 인코딩(Tauri JSON Channel 제약)
+base64 = "0.22"   # S12 raw 경계화: embedded carrier(TauriChannelOutputSink)가 raw→base64 인코딩(Tauri JSON Channel 제약)
 thiserror = "1"   # discovery::DiscoveryError
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
 # S12 phase 1: pty/persistence/logging 코어가 이 crate 로 이동. Embedded 앱은 core 에 의존.

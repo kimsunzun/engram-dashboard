@@ -3,8 +3,8 @@
 // daemon 은 명시 opt-in: window.__ENGRAM_MODE__ 전역 또는 localStorage 'engram_client_mode'.
 //
 // ★Stage 3 전환★: mode → transport(InProc/Ws) 선택 → new ProtocolClient(transport). 단일
-// ProtocolClient(프로토콜 의미론 1벌) + carrier 2개. EmbeddedClient/DaemonClient 클래스는
-// Stage 4 에서 ptyApi·옛 Tauri command 와 함께 제거(현재 파일은 잔류, factory 만 전환).
+// ProtocolClient(프로토콜 의미론 1벌) + carrier 2개. (Stage 4a: 옛 EmbeddedClient/DaemonClient/
+// ptyApi·옛 Tauri command 삭제 완료 — 새 경로만 남음.)
 
 import type { AgentClient } from './agentClient'
 import { InProcTransport } from './inProcTransport'
