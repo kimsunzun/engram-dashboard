@@ -194,7 +194,8 @@
 - **사용자 결정 경위:** appdata 아닌 로컬 폴더(팀원 머신 안 지저분) → 상대경로 검토 → "어디서 띄워도 한 폴더"라 exe walk-up(B) 채택(데몬 cwd 불신). 디버그/릴리즈 분리(디버그=repo 공유, 릴리즈=exe 옆). ENGRAM_DATA_DIR은 "배포 노브"로 오해해 제거했다가 **테스트 격리 수단**임이 reviewer-deep 적출로 드러나 복원(+의도 상세 주석, CLAUDE.md 컨벤션에 교훈 박음).
 - **reviewer-deep 적출·수정:** M-1(env 제거로 ws_e2e 3 실프로세스 테스트 격리 깨짐+운영폴더 오염)·m-1(WMI smoke 2건 경로)·m-2(릴리즈 분기 무테스트→헬퍼 분리+테스트)·m-3(미사용 _app 제거) 전부 수정. **Codex 2번째 리뷰어는 다음 조각부터**(현재 미보유).
 - **게이트:** discovery 31·daemon 35·ws_e2e 44·core·protocol·src-tauri 9 통과, build/fmt 경고 0, env 격리·기본경로 실측 확인.
-- **다음:** tray-host stub→실제 데몬 제어 배선(ensure/stop/status→아이콘 색, 워커+proxy 비동기) · clientFactory embedded→daemon flip · UI 열기/닫기(앱 spawn).
+- **prior-art 조사(graceful 끄기):** `/prior-art` 3에이전트(Docker/Ollama/Tailscale·Discord/Steam/OneDrive·LSP/systemd/표준) → ADR-0024 "트레이 graceful StopDaemon(WS+토큰)+taskkill 폴백" 모델 재확인. 정설=데몬이 control 채널 노출+다중 클라 같은 진입점(§5 정합), graceful은 타임아웃+강제 폴백과 한 쌍, loopback+토큰 보안. 차용 후보 Tailscale(BSD). ※메인이 한때 "트레이 graceful 불가→taskkill"로 ADR 재론한 사고 있었음(ADR 재독으로 교정).
+- **다음(결정 대기):** 트레이 실제 데몬 배선 — **graceful 끄기 구현 순서 a/b 사용자 결정 필요**(트레이에 one-shot WS 접속기를 이번에 vs 다음에). 그 후 ensure/status→아이콘(워커+proxy 비동기) · graceful 끄기 · 이후 UI 열기/닫기·clientFactory flip. 상세 핸드오프: `.ccb/history/2026-06-19-S13-트레이-data_dir-연결대기-graceful결정대기.md`.
 
 ---
 
