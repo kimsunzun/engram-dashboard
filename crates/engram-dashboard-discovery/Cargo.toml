@@ -1,0 +1,30 @@
+[package]
+name = "engram-dashboard-discovery"
+version = "0.1.0"
+edition = "2021"
+description = "데몬 발견(discovery) — daemon.json 으로 데몬을 찾고, 없으면 WMI Win32_Process.Create 로 띄운 뒤 port/token 회수. status/stop 포함. 순수 로직(OS/WMI/실시간을 trait 으로 주입)이라 Embedded(src-tauri)와 tray-host 가 공통 의존한다. Tauri import 0."
+
+# 순수 launcher 로직 — OS/WMI/실시간 경계를 trait 으로 끊어 headless 단위 테스트 가능.
+[dependencies]
+thiserror = "1"   # DiscoveryError
+tracing = "0.1"   # M1 복구 warn 로그
+dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
+# liveness 판정(pid_alive_with_start_time) 공유 — daemon portfile is_stale 과 동일 로직(DRY).
+engram-dashboard-core = { path = "../engram-dashboard-core" }
+# daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
+engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
+
+# WMI Win32_Process.Create(부모 Job 미상속 spawn) + COM 초기화. windows 전용.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Wmi",
+    "Win32_System_Rpc",
+    "Win32_System_Variant",
+] }
+
+# real_wmi_spawn_smoke(#[ignore] 통합테스트)에서 운영 data_dir(%APPDATA%) 경로 산출에만 사용.
+[dev-dependencies]
+dirs = "6"

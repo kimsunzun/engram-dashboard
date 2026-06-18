@@ -1108,10 +1108,10 @@ name = "engram-dashboard"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "dirs",
  "dunce",
  "engram-dashboard-core",
  "engram-dashboard-daemon",
+ "engram-dashboard-discovery",
  "engram-dashboard-protocol",
  "futures-util",
  "serde",
@@ -1123,7 +1123,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "windows 0.58.0",
 ]
 
 [[package]]
@@ -1159,6 +1158,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "engram-dashboard-discovery"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "dunce",
+ "engram-dashboard-core",
+ "engram-dashboard-protocol",
+ "thiserror 1.0.69",
+ "tracing",
  "windows 0.58.0",
 ]
 
