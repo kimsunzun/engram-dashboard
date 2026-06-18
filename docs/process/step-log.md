@@ -180,6 +180,14 @@
 - **트레이/데몬 토폴로지 설계 — ADR-0023/0024 확정(구현 0, 설계만).** PRD/TRD 사용자 대화 + `/consult` 3종 교차검증(job `20260618-151957`, claude 최신뢰). **3프로세스: 순수-Rust tray-host(런처+lifecycle owner) + detached self-owned 데몬 + UI(X=hide).** 핵심 정정(judge 적출): 데몬은 누구의 Job 자식도 아님(C1, KILL_ON_JOB_CLOSE와 detached 모순) · 생사=WS liveness+lockfile/generation 재발견(C2) · UI 데몬 직접 ensure 금지, owner가(C3) · 전체종료=ensure차단→drain→확인→UI→tray(C4). 데이터=`.engram-data/`(gitignored, 영속, swappable). 제어=기존 WS+토큰(loopback), force=taskkill 폴백. commit `664d629`(X=종료) → X=hide로 조정. TRD: `docs/process/S13-tray-lifecycle/tray-topology-trd.md`.
 - **다음:** S13 구현 4단계(1: tray-host MVP+데몬기본화+`.engram-data/` / 2: X=hide+재입양 / 3: 데몬 견고화+종료순서+VersionMismatch / 4: lifecycle 커맨드 표면=ADR-0022 첫실증). 각 단계 코더→reviewer→QA+실측, 코더 직전 사용자 보고.
 
+### 2026-06-18 (dashboard7) — S13 sub-step 1: tray-host crate (격리 트레이, stub) + ADR 정정
+- **ADR-0025 신규 + ADR-0024 C3 폐기:** 사용자 결정으로 "UI는 데몬 직접 ensure 금지"(C3) 번복 → **UI 부팅 1회 데몬 ensure 유지**(`bootstrapDaemonIfNeeded`, "UI 켜졌는데 데몬 없음"은 모순). 자동은 부팅 1회뿐(사망 시 자동부활 없음=명령 경로 attach-only). 데몬 싱글톤(lockfile)이라 tray-host·UI 양쪽 ensure 안전. ADR-0024 C3줄 폐기 표기 + README 인덱스 갱신.
+- **`engram-tray-host` crate 신규(순수 Rust, WebView 없음)** — 코더→reviewer-deep→QA+사용자 시각확인. **격리 2겹:** `core.rs`(순수 로직, tao/tray_icon/image/windows import 0 — 단위테스트) + `main.rs`(tao 이벤트 루프 + tray-icon shell). seam=DaemonProbe/Launcher(둘 다 stub, 실제 배선은 sub-step 2). 메뉴 6개(데몬 켜기/끄기·UI 열기/닫기·트레이 종료·완전 종료), 상태=회색 아이콘(컬러=활성/회색=비활성, core::to_grayscale_rgba), 툴팁="Engram". `causes_tray_exit`(QuitTray·ShutdownAll만 true — ShutdownAll은 sub-step 2 C4 상태머신으로 분기 예정=임시 계약). 단위테스트 15개.
+- **버그 2건 실측 발견·수정:** (a) 트레이 아이콘 미표시 — tray-icon 0.24.1은 이벤트 루프 시작 후 생성해야 등록됨 → `StartCause::Init` arm으로 이동. (b) 시작 실패(TaskDialogIndirect not found) — standalone exe에 Common Controls v6 매니페스트 없음 → build.rs + embed-manifest로 임베드(Tauri는 자동, standalone은 수동). 콘솔=`windows_subsystem="windows"`(트레이 런처는 콘솔 없음).
+- **ADR-0023 메뉴 v1 갱신:** 4개(데몬 시작/UI 열기/UI 종료/전체 종료)→ **6개로 확정**(dashboard7 사용자 결정, 데몬=메인·트레이/UI=클라이언트 모델 반영, 트레이 종료=트레이만/완전 종료=전부).
+- **게이트:** cargo test -p engram-tray-host 15 green · cargo build(루트) 회귀 0·경고 0 · fmt clean · core 격리 grep 0 · 트레이 실측(회색 아이콘+메뉴 6개) 사용자 "양호".
+- **다음(sub-step 2 = 연결):** discovery.rs 공유 crate 이동 → tray-host/UI 재사용 · stub Launcher/Probe → 실제 discovery 배선(ensure_daemon/daemon_stop/daemon_status) · data_dir(`.engram-data/`) CLI arg 주입 · clientFactory 기본 embedded→daemon flip · 데몬 재발견 시 아이콘 컬러 갱신.
+
 ---
 
 ## 다음 (미진행)
