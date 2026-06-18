@@ -175,6 +175,11 @@
 - **게이트:** vitest **82(7파일)**·tsc0 · cargo(protocol·core·daemon `--test-threads=1`·build) green. 변경=프론트 TS 7파일+App.tsx, Rust 무변경(daemon/core 회귀 확인용). eslint 설정 파일 없음(프로젝트 게이트=tsc+vitest). embedded 무영향. 커밋은 사용자 확인 후.
 - **주의:** 서브에이전트 스폰 도구 부재로 메인 TDD+자체 적대 리뷰 수행(위와 동일). daemon 모드 GUI(cdp) 실측 미수행.
 
+### 2026-06-18 (dashboard6) — 백엔드 잔여 마감 + 트레이/데몬 토폴로지 설계(S13)
+- **백엔드 잔여 마감(커밋 2개):** `7ba0dfd` restart_policy/restart_count/failed_reason "예약(reserved)" 주석 명확화(순수 doc, ADR-0016 추후재검토 유효 — 제거 금지 의도 박음, ts-rs 바인딩 재생성). `3a8a52f` wsTransport `start()` race + orphan promise hang 봉합(코더→reviewer-deep→QA): start 진입 cleanupSocket 선행 + cross-socket pendingReject로 in-flight 대체 시 hang 차단(ws-null discover 윈도 포함). 테스트 4개(mutation 가드), 게이트 7/7(vitest 86·tsc0·cargo build/test·fmt·격리). stale orphan 데몬 PID 51716 정리.
+- **트레이/데몬 토폴로지 설계 — ADR-0023/0024 확정(구현 0, 설계만).** PRD/TRD 사용자 대화 + `/consult` 3종 교차검증(job `20260618-151957`, claude 최신뢰). **3프로세스: 순수-Rust tray-host(런처+lifecycle owner) + detached self-owned 데몬 + UI(X=hide).** 핵심 정정(judge 적출): 데몬은 누구의 Job 자식도 아님(C1, KILL_ON_JOB_CLOSE와 detached 모순) · 생사=WS liveness+lockfile/generation 재발견(C2) · UI 데몬 직접 ensure 금지, owner가(C3) · 전체종료=ensure차단→drain→확인→UI→tray(C4). 데이터=`.engram-data/`(gitignored, 영속, swappable). 제어=기존 WS+토큰(loopback), force=taskkill 폴백. commit `664d629`(X=종료) → X=hide로 조정. TRD: `docs/process/S13-tray-lifecycle/tray-topology-trd.md`.
+- **다음:** S13 구현 4단계(1: tray-host MVP+데몬기본화+`.engram-data/` / 2: X=hide+재입양 / 3: 데몬 견고화+종료순서+VersionMismatch / 4: lifecycle 커맨드 표면=ADR-0022 첫실증). 각 단계 코더→reviewer→QA+실측, 코더 직전 사용자 보고.
+
 ---
 
 ## 다음 (미진행)
