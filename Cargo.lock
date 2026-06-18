@@ -1145,8 +1145,8 @@ dependencies = [
 name = "engram-dashboard-daemon"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "engram-dashboard-core",
+ "engram-dashboard-discovery",
  "engram-dashboard-protocol",
  "futures-util",
  "getrandom 0.2.17",
@@ -1165,7 +1165,6 @@ dependencies = [
 name = "engram-dashboard-discovery"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "dunce",
  "engram-dashboard-core",
  "engram-dashboard-protocol",

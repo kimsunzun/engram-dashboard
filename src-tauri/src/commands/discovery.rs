@@ -31,14 +31,11 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
 
 /// 데몬을 발견(없으면 WMI spawn)하고 접속 정보를 반환한다.
 ///
-/// data_dir 은 호출자가 안 줘도 되게 Tauri app_data_dir 을 쓴다(Embedded 와 동일 경로).
+/// data_dir 은 discovery::default_data_dir()(단일 출처, ADR-0024)로 산출한다(Embedded 와 동일 경로).
 /// timeout_ms 미지정 시 5초. spawn 시 windowless(콘솔 창 없음) — 콘솔 가시화는 daemon_start(console=true).
 #[tauri::command]
-pub async fn discover_daemon(
-    app: tauri::AppHandle,
-    timeout_ms: Option<u64>,
-) -> Result<DaemonInfoDto, String> {
-    ensure_internal(app, timeout_ms, false).await
+pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
+    ensure_internal(timeout_ms, false).await
 }
 
 /// 데몬 alive/pid/port 조회(§5 LLM 제어 표면). daemon.json + PID liveness 로 판정.
@@ -54,21 +51,19 @@ pub struct DaemonStatusDto {
 /// ★재연결과 분리★: 이 command 만 spawn 을 유발한다 — 프론트 재연결 루프는 호출하지 않는다.
 #[tauri::command]
 pub async fn daemon_start(
-    app: tauri::AppHandle,
     timeout_ms: Option<u64>,
     console: Option<bool>,
 ) -> Result<DaemonInfoDto, String> {
-    ensure_internal(app, timeout_ms, console.unwrap_or(false)).await
+    ensure_internal(timeout_ms, console.unwrap_or(false)).await
 }
 
 /// 데몬 상태 조회(§5). 살아있는 데몬이 있는지 + pid/port.
+///
+/// data_dir 은 discovery::default_data_dir()(단일 출처, ADR-0024)로 산출하므로 AppHandle 불필요 →
+/// 인자를 받지 않는다(tauri command 는 미사용 인자를 요구하지 않는다 — 프론트도 인자 없이 invoke).
 #[tauri::command]
-pub fn daemon_status(app: tauri::AppHandle) -> Result<DaemonStatusDto, String> {
-    use tauri::Manager;
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir 조회 실패: {e}"))?;
+pub fn daemon_status() -> Result<DaemonStatusDto, String> {
+    let data_dir = discovery::default_data_dir();
     let s = discovery::daemon_status(&data_dir);
     Ok(DaemonStatusDto {
         alive: s.alive,
@@ -83,12 +78,8 @@ pub fn daemon_status(app: tauri::AppHandle) -> Result<DaemonStatusDto, String> {
 /// 종료)를 보내야 한다. 이 command 는 연결이 없거나 graceful 이 안 먹을 때의 fallback 이다.
 /// 반환: kill 시도한 pid(없으면 None).
 #[tauri::command]
-pub async fn daemon_stop(app: tauri::AppHandle) -> Result<Option<u32>, String> {
-    use tauri::Manager;
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir 조회 실패: {e}"))?;
+pub async fn daemon_stop() -> Result<Option<u32>, String> {
+    let data_dir = discovery::default_data_dir();
     tauri::async_runtime::spawn_blocking(move || discovery::daemon_stop(&data_dir))
         .await
         .map_err(|e| format!("daemon_stop join 실패: {e}"))?
@@ -96,17 +87,10 @@ pub async fn daemon_stop(app: tauri::AppHandle) -> Result<Option<u32>, String> {
 }
 
 /// discover/start 공통 — ensure_daemon 을 blocking 으로 호출하고 DTO 로 변환.
-async fn ensure_internal(
-    app: tauri::AppHandle,
-    timeout_ms: Option<u64>,
-    console: bool,
-) -> Result<DaemonInfoDto, String> {
-    use tauri::Manager;
-
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir 조회 실패: {e}"))?;
+///
+/// data_dir 은 discovery::default_data_dir()(단일 출처, ADR-0024)로 산출하므로 AppHandle 불필요.
+async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
+    let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| e.to_string())?;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
 

@@ -2329,8 +2329,14 @@ fn assert_seq_contiguous_from_zero(seqs: &[u64]) {
 //   cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture
 //
 // ★Step7 구현 완료★: 세 케이스 모두 실제 데몬 .exe 를 spawn 해 검증한다(이전 unimplemented! RED →
-// 이제 GREEN). 각 테스트는 ENGRAM_DATA_DIR 로 임시 data_dir 을 격리해 운영 환경(%APPDATA%)을
-// 오염시키지 않으며, 끝에서 데몬·자식 프로세스 kill + 임시 디렉토리 삭제로 자원 누수 0.
+// 이제 GREEN). 각 테스트는 ENGRAM_DATA_DIR 로 임시 data_dir 을 격리한다 — ★이 격리가 먹는 이유★:
+// 아래 spawn 은 `std::process::Command`(직접 spawn)라 자식이 **부모 env 를 상속**하므로
+// ENGRAM_DATA_DIR override 가 데몬까지 전달돼 daemon.json/agents.json 을 임시 디렉토리에 쓴다.
+// 따라서 운영 data_dir(디버그=repo 루트 `.engram-data`, 더는 %APPDATA% 가 아님)을 오염시키지 않는다.
+// ★차이 명시★: 만약 이 경로가 WMI(Win32_Process.Create) spawn 이었다면 자식이 부모 env 를 상속하지
+//   않아 이 격리가 안 먹었을 것이다(그 경우 데몬은 운영 `.engram-data` 를 본다 — discovery 의
+//   real_wmi_spawn_* smoke 가 그래서 env 격리 대신 백업/복원으로 운영 파일을 보호한다).
+// 끝에서 데몬·자식 프로세스 kill + 임시 디렉토리 삭제로 자원 누수 0.
 //
 // ★Windows 전용★: 데몬은 Windows 1차. named mutex/Job Object/child_pids 가 Windows 구현이라
 //   #[cfg(windows)] 로 한정한다(다른 OS 에선 컴파일 자체에서 제외 — 위장 PASS 없음).
@@ -2357,7 +2363,8 @@ mod real_process {
 
     /// 테스트마다 고유한 임시 data_dir + instance_key 생성(이전 잔여 정리). nanos + 테스트명 + 카운터로
     /// 유니크 — 병렬 실행 충돌 없음. ENGRAM_DATA_DIR/ENGRAM_INSTANCE_KEY 로 데몬에 주입해 운영
-    /// %APPDATA% 와 운영 USERNAME mutex 를 둘 다 건드리지 않는다.
+    /// data_dir(디버그=repo 루트 `.engram-data`)과 운영 USERNAME mutex 를 둘 다 건드리지 않는다.
+    /// (직접-spawn 이라 env 가 상속돼 ENGRAM_DATA_DIR 격리가 먹는다 — 모듈 상단 주석 참조.)
     fn fresh_iso(tag: &str) -> IsoCtx {
         use std::sync::atomic::{AtomicU64, Ordering};
         // 같은 나노초에 두 번 불려도 충돌하지 않게 프로세스 내 단조 카운터를 섞는다.

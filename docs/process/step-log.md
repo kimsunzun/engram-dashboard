@@ -188,6 +188,14 @@
 - **게이트:** cargo test -p engram-tray-host 15 green · cargo build(루트) 회귀 0·경고 0 · fmt clean · core 격리 grep 0 · 트레이 실측(회색 아이콘+메뉴 6개) 사용자 "양호".
 - **다음(sub-step 2 = 연결):** discovery.rs 공유 crate 이동 → tray-host/UI 재사용 · stub Launcher/Probe → 실제 discovery 배선(ensure_daemon/daemon_stop/daemon_status) · data_dir(`.engram-data/`) CLI arg 주입 · clientFactory 기본 embedded→daemon flip · 데몬 재발견 시 아이콘 컬러 갱신.
 
+### 2026-06-19 (dashboard7) — S13 sub-step 2(진행): discovery 공유 crate + data_dir 로컬 이전
+- **discovery 공유 crate 분리(커밋 `ab45cc5`):** `src-tauri/src/discovery.rs`(데몬 발견/spawn/stop 순수 로직) → 신규 `engram-dashboard-discovery`(git mv, 바이트 동일·회귀 0). tray-host·UI 공용. tauri 래퍼(`commands/discovery.rs`)는 src-tauri 잔류, lib.rs re-export로 호출부 무수정. reviewer-deep Blocker/Major 0.
+- **data_dir `%APPDATA%` → 로컬 `.engram-data/` 이전(미커밋):** 단일 출처 `discovery::default_data_dir()` — ① ENGRAM_DATA_DIR override(테스트 격리 전용) > ② 디버그=current_exe walk-up→repo 루트 `.engram-data/` > ③ 릴리즈=exe 폴더 옆 > cwd fallback. daemon `resolve_data_dir`·embedded(src-tauri app_data_dir 4곳+FileProfileStore) 전부 이 함수로 교체 → embedded·daemon 동일 폴더(불변식). ADR-0024 데이터위치 갱신(주입 대신 self-resolve, env=테스트격리, appdata는 배포단계 메모).
+- **사용자 결정 경위:** appdata 아닌 로컬 폴더(팀원 머신 안 지저분) → 상대경로 검토 → "어디서 띄워도 한 폴더"라 exe walk-up(B) 채택(데몬 cwd 불신). 디버그/릴리즈 분리(디버그=repo 공유, 릴리즈=exe 옆). ENGRAM_DATA_DIR은 "배포 노브"로 오해해 제거했다가 **테스트 격리 수단**임이 reviewer-deep 적출로 드러나 복원(+의도 상세 주석, CLAUDE.md 컨벤션에 교훈 박음).
+- **reviewer-deep 적출·수정:** M-1(env 제거로 ws_e2e 3 실프로세스 테스트 격리 깨짐+운영폴더 오염)·m-1(WMI smoke 2건 경로)·m-2(릴리즈 분기 무테스트→헬퍼 분리+테스트)·m-3(미사용 _app 제거) 전부 수정. **Codex 2번째 리뷰어는 다음 조각부터**(현재 미보유).
+- **게이트:** discovery 31·daemon 35·ws_e2e 44·core·protocol·src-tauri 9 통과, build/fmt 경고 0, env 격리·기본경로 실측 확인.
+- **다음:** tray-host stub→실제 데몬 제어 배선(ensure/stop/status→아이콘 색, 워커+proxy 비동기) · clientFactory embedded→daemon flip · UI 열기/닫기(앱 spawn).
+
 ---
 
 ## 다음 (미진행)

@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
+# data_dir 단일 출처(ADR-0024) — embedded·daemon 이 같은 default_data_dir() 을 보게(순환 없음).
+engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # WS 서버(step 4b): accept_hdr_async(Origin 콜백)/split/Message. rustls 등 TLS 불필요(로컬 평문 WS).
@@ -34,10 +36,6 @@ thiserror = "1"
 getrandom = "0.2"
 # WsOutputSink sink_id 생성 + AgentId 파싱. core/protocol 과 동일 1.x(AgentId=Uuid).
 uuid = { version = "1", features = ["v4"] }
-# data_dir: Tauri app_data_dir 과 동일한 RoamingAppData(%APPDATA%) 폴더 반환 → Embedded 와 경로 일치.
-# ★버전 통일★: tauri 가 쓰는 dirs 6 으로 맞춰 두 모드(Embedded/Daemon)가 같은 data_dir 을 보게 한다
-#   (tree 중복 제거). v6 도 data_dir() API 동일.
-dirs = "6"
 
 # named mutex(단일 인스턴스) + pid liveness(OpenProcess). core 와 동일 0.58 버전 고정.
 [target.'cfg(windows)'.dependencies]

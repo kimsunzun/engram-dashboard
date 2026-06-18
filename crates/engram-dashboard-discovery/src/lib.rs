@@ -24,6 +24,146 @@ use engram_dashboard_protocol::{DaemonInfo, PROTOCOL_VERSION};
 const DAEMON_FILE: &str = "daemon.json";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+// ── data_dir 단일 출처(ADR-0024) ─────────────────────────────────────────────────
+//
+// daemon·embedded(src-tauri)·tray-host 세 프로세스가 **같은 폴더**를 보게 하는 유일한 resolver.
+// 옛 `%APPDATA%\com.engram.dashboard`(dirs::data_dir) 대신 로컬 `.engram-data/` 를 쓴다.
+//
+// ★왜 디버그/릴리즈를 분리하는가★:
+//   - 디버그(개발) = 한 repo 의 여러 빌드(embedded·daemon·tray-host)가 **repo 루트 한 곳**의
+//     `.engram-data/` 를 공유해야 같은 agents.json/daemon.json 을 본다. exe 위치(target/debug
+//     등)가 빌드마다 달라도 walk-up 으로 repo 루트로 수렴시킨다.
+//   - 릴리즈(배포) = repo 가 없어 walk-up 대상이 없다. **exe 자신의 폴더**에 `.engram-data/` 를
+//     둔다 — 번들 시 세 exe 가 같은 폴더에 co-located 되므로 같은 폴더로 일치한다. 릴리즈는 exe
+//     들이 같은 폴더에 있어야 일치하며, 번들이 이를 충족한다.
+//
+// ★ENGRAM_DATA_DIR override (테스트 격리 탈출구 — 배포 노브 아님)★:
+//   우선순위 1번 분기다. 설정+non-empty 면 디버그/릴리즈 분기를 모두 건너뛰고 그 경로를 그대로 쓴다.
+//   - **유일한 용도 = 통합 테스트의 데이터 격리.** 실프로세스 통합 테스트(daemon `tests/ws_e2e.rs`)가
+//     데몬을 임시 디렉토리로 보내 운영 `<repo>/.engram-data` 오염을 막기 위함이다. 이 env 가 없으면
+//     테스트 데몬이 운영 폴더에 daemon.json/agents.json 을 쓴다(오염).
+//   - **배포용 경로 커스터마이즈 노브가 아니다.** 배포 단계의 데이터 위치는 추후 appdata 로 갈 때
+//     별도 결정한다(ADR-0024). 이 override 를 "사용자가 데이터 폴더를 바꾸는 수단"으로 쓰지 말 것.
+//   - ★중요 한계 — WMI 경로엔 닿지 않는다★: 이 override 는 **부모 env 를 상속하는 spawn 에만** 먹는다.
+//     즉 `std::process::Command` 로 데몬을 **직접** 띄우는 ws_e2e.rs 만 격리된다. discovery 의 운영
+//     spawn 경로(WMI Win32_Process.Create)는 자식이 WmiPrvSE 자식이라 **부모 env 를 상속하지 않아**
+//     이 override 가 무시된다(설계 확정 — daemon.json/ACL 외 채널 없음). 그래서 WMI 를 실제로 타는
+//     discovery 의 smoke 테스트(real_wmi_spawn_*)는 env 로 격리하지 못하고, default 경로(`.engram-data`)
+//     를 폴링하며 운영 파일은 백업/복원으로 보호한다.
+//
+//   우선순위: ENGRAM_DATA_DIR > (디버그)repo 루트 walk-up > (릴리즈)exe 폴더 > cwd fallback.
+
+/// 로컬 데이터 폴더 이름.
+const LOCAL_DATA_DIR: &str = ".engram-data";
+
+/// ENGRAM_DATA_DIR override 환경변수 이름(테스트 격리 전용 — 배포 노브 아님, 위 블록 주석 참조).
+const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
+
+/// 모든 engram 프로세스가 공유하는 데이터 디렉토리(단일 출처, ADR-0024).
+///
+/// 우선순위:
+/// 1. **`ENGRAM_DATA_DIR`(설정+non-empty)** → 그 경로 그대로(테스트 격리 탈출구 — 배포 노브 아님).
+///    WMI-spawn 데몬은 부모 env 미상속이라 이 override 가 안 먹는다(위 블록 주석의 한계 참조).
+/// 2. **디버그(`cfg!(debug_assertions)`)**: current_exe 에서 위로 올라가 repo 루트(`.git` 또는
+///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-data`. 루트 못 찾으면 exe 디렉토리
+///    fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드가 한 폴더를 공유.
+/// 3. **릴리즈(`not(debug_assertions)`)**: walk-up 안 함. **exe 자신의 디렉토리**에 `.engram-data`
+///    (`release_data_dir_from_exe`). current_exe 실패 시 cwd. → 배포 시 exe 옆 동거(번들된 exe 들이
+///    같은 폴더라 일치).
+///
+/// 어느 경로든 **절대 패닉하지 않는다**(배포·루트 미발견 상황에서도 PathBuf 를 반드시 반환).
+pub fn default_data_dir() -> PathBuf {
+    // (1) ENGRAM_DATA_DIR override — 최우선. 통합 테스트가 임시 디렉토리로 데몬을 보내 운영
+    //     `.engram-data` 오염을 막는 격리 탈출구다(배포 노브 아님). 직접-spawn(부모 env 상속)에만
+    //     먹고 WMI-spawn 에는 안 먹는다(위 블록 주석의 한계).
+    if let Some(val) = std::env::var_os(DATA_DIR_ENV) {
+        if !val.is_empty() {
+            return PathBuf::from(val);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        // 디버그: exe 기준 walk-up 으로 repo 루트 탐색.
+        // ★왜 exe-기준 walk-up 인가★: 데몬은 WMI Win32_Process.Create 로 떠 **부모의 cwd 를 상속하지
+        // 않는다**(WmiPrvSE 자식) — cwd 는 신뢰할 수 없다. 반면 exe 경로는 신뢰 가능하고, 개발 빌드
+        // 산출물은 같은 repo 의 target/ 아래라 어느 exe 에서 올라가도 같은 repo 루트로 수렴한다.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(root) = find_workspace_root(&exe) {
+                return root.join(LOCAL_DATA_DIR);
+            }
+            // 루트 못 찾음 → exe 디렉토리 fallback.
+            if let Some(dir) = exe.parent() {
+                return dir.join(LOCAL_DATA_DIR);
+            }
+        }
+        // 최종 fallback — cwd. 절대 패닉하지 않는다.
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(LOCAL_DATA_DIR)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        // 릴리즈: walk-up 안 함 — exe 자신의 폴더에 동거. 번들 시 세 exe 가 같은 폴더라 일치한다.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = release_data_dir_from_exe(&exe) {
+                return dir;
+            }
+        }
+        // current_exe 실패 시 cwd fallback. 절대 패닉하지 않는다.
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(LOCAL_DATA_DIR)
+    }
+}
+
+/// 릴리즈 data_dir 산출 헬퍼 — exe 경로의 부모 디렉토리에 `.engram-data` 를 붙인다.
+///
+/// ★빌드모드 무관 순수 함수★: `#[cfg(not(debug_assertions))]` 분기가 이걸 호출하지만, 함수 자체는
+/// 어느 빌드에서도 컴파일·호출 가능하다 → 디버그 빌드에서 도는 단위테스트로 릴리즈 경로 규칙을
+/// 검증한다(m-2: 릴리즈 분기 무테스트 보완). exe 에 부모가 없으면(루트 등) None.
+// 디버그 non-test 빌드에선 `#[cfg(not(debug_assertions))]` 호출처가 빠져 dead_code 경고가 나므로
+// 디버그에서만 allow. 릴리즈(실 호출)·테스트(단위테스트 호출)에선 사용되므로 allow 가 무해하다.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn release_data_dir_from_exe(exe: &Path) -> Option<PathBuf> {
+    exe.parent().map(|dir| dir.join(LOCAL_DATA_DIR))
+}
+
+/// `start` 경로에서 부모 방향으로 올라가며 workspace 루트를 찾는다(IO 는 마커 판정만).
+///
+/// 루트 마커: 그 디렉토리에 `.git` 이 있거나, `Cargo.toml` 이 `[workspace]` 섹션을 포함.
+/// 못 찾으면 None(호출자가 fallback). `start` 가 파일이면 그 부모부터, 디렉토리면 자신부터 본다.
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    // 파일(exe)이면 부모 디렉토리부터, 디렉토리면 그 자신부터 위로.
+    let mut cur: Option<&Path> = if start.is_dir() {
+        Some(start)
+    } else {
+        start.parent()
+    };
+    while let Some(dir) = cur {
+        if is_workspace_root(dir) {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+/// 한 디렉토리가 workspace 루트인지 판정: `.git` 존재 또는 `Cargo.toml` 에 `[workspace]` 포함.
+fn is_workspace_root(dir: &Path) -> bool {
+    if dir.join(".git").exists() {
+        return true;
+    }
+    let cargo = dir.join("Cargo.toml");
+    match std::fs::read_to_string(&cargo) {
+        // 단순 substring 검사 — `[workspace]` 헤더가 있으면 워크스페이스 루트로 본다.
+        // (주석에 박힌 `[workspace]` 문자열 같은 극단 케이스는 무시 — repo 루트는 .git 으로도 잡힌다.)
+        Ok(s) => s.contains("[workspace]"),
+        Err(_) => false,
+    }
+}
+
 // ── 에러 ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -717,6 +857,63 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
 
+    // ── data_dir resolver ─────────────────────────────────────────────────────────────
+
+    /// ENGRAM_DATA_DIR 은 프로세스 전역 env 라, 이걸 만지는 테스트끼리 병렬로 돌면 서로 set/remove 를
+    /// 짓밟는다. 한 mutex 로 직렬화한다(독·get 정리 보장).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn data_dir_env_override_returns_path_verbatim() {
+        // ENGRAM_DATA_DIR 설정 시 디버그/릴리즈 분기를 건너뛰고 그 경로를 그대로 반환한다(테스트 격리 탈출구).
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os(DATA_DIR_ENV);
+        let want = std::env::temp_dir().join("engram-data-dir-override-test");
+        std::env::set_var(DATA_DIR_ENV, &want);
+        let got = default_data_dir();
+        // env 정리(다른 테스트 오염 방지) — 단언 전에 복원해 실패해도 leak 안 되게.
+        match &prev {
+            Some(v) => std::env::set_var(DATA_DIR_ENV, v),
+            None => std::env::remove_var(DATA_DIR_ENV),
+        }
+        assert_eq!(got, want, "ENGRAM_DATA_DIR set 시 그 경로 그대로 반환");
+    }
+
+    #[test]
+    fn data_dir_empty_env_falls_through_to_default() {
+        // 빈 ENGRAM_DATA_DIR 은 override 로 치지 않고(우선순위 통과) 기본 분기 결과(`.engram-data` 로 끝)로 간다.
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os(DATA_DIR_ENV);
+        std::env::set_var(DATA_DIR_ENV, "");
+        let got = default_data_dir();
+        match &prev {
+            Some(v) => std::env::set_var(DATA_DIR_ENV, v),
+            None => std::env::remove_var(DATA_DIR_ENV),
+        }
+        assert!(
+            got.ends_with(LOCAL_DATA_DIR),
+            "빈 env 는 기본 분기로 통과 → `.engram-data` 로 끝나야: {got:?}"
+        );
+    }
+
+    #[test]
+    fn release_data_dir_from_exe_appends_local_data_dir_to_parent() {
+        // m-2: 릴리즈 분기 헬퍼는 빌드모드 무관 순수 함수 → 디버그 테스트에서도 도는 단위테스트로 검증.
+        let exe = Path::new("C:\\some\\install\\dir\\engram-dashboard.exe");
+        let got = release_data_dir_from_exe(exe).expect("부모가 있으면 Some");
+        assert_eq!(
+            got,
+            Path::new("C:\\some\\install\\dir").join(LOCAL_DATA_DIR)
+        );
+    }
+
+    #[test]
+    fn release_data_dir_from_exe_none_when_no_parent() {
+        // 부모가 없는 경로(루트 컴포넌트만)면 None(호출자가 cwd fallback).
+        let exe = Path::new("/");
+        assert!(release_data_dir_from_exe(exe).is_none());
+    }
+
     fn info(pid: u32, version: u32) -> DaemonInfo {
         DaemonInfo {
             pid,
@@ -1262,6 +1459,100 @@ mod tests {
         assert!(killer.killed.borrow().is_empty());
     }
 
+    // ── find_workspace_root / is_workspace_root (임시 디렉토리 트리, 빌드모드 무관) ──────
+    //
+    // 순수 헬퍼라 디버그/릴리즈와 무관하게 단위 검증한다: `.git` 또는 `Cargo.toml`의 `[workspace]`
+    // 를 위로 올라가며 찾고, 마커가 없으면 None.
+
+    // 테스트 격리용 고유 임시 디렉토리(테스트 끝에 정리). 충돌 회피 위해 pid+nanos 결합.
+    fn unique_tmp(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "engram-ws-root-{tag}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn find_workspace_root_detects_git_marker_walking_up() {
+        // <root>/.git, 그 아래 a/b/c — c 에서 시작하면 <root> 를 찾아야.
+        let root = unique_tmp("git");
+        let deep = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let got = find_workspace_root(&deep).expect(".git 마커를 위로 올라가며 찾아야");
+        // 임시 디렉토리는 심볼릭(예: macOS /var→/private) 일 수 있어 canonicalize 후 비교.
+        assert_eq!(
+            std::fs::canonicalize(&got).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_workspace_root_detects_cargo_workspace_marker() {
+        // <root>/Cargo.toml([workspace] 포함), 그 아래 sub — sub 에서 <root> 를 찾아야.
+        let root = unique_tmp("cargo");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers = [\"x\"]\n").unwrap();
+
+        let got = find_workspace_root(&sub).expect("[workspace] Cargo.toml 을 찾아야");
+        assert_eq!(
+            std::fs::canonicalize(&got).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_workspace_root_none_when_no_marker() {
+        // 마커 없는 트리 — None.
+        let root = unique_tmp("none");
+        let deep = root.join("x").join("y");
+        std::fs::create_dir_all(&deep).unwrap();
+        // 비-workspace Cargo.toml(=[package]) 은 마커가 아니어야 한다(오탐 방지).
+        std::fs::write(root.join("Cargo.toml"), b"[package]\nname = \"z\"\n").unwrap();
+
+        assert!(
+            find_workspace_root(&deep).is_none(),
+            "마커 없으면 None — [package] 단독은 workspace 루트가 아님"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn is_workspace_root_distinguishes_markers() {
+        // 단일 디렉토리 판정: .git → true, [workspace] → true, [package] 단독 → false, 빈 → false.
+        let base = unique_tmp("is");
+        let git_dir = base.join("g");
+        std::fs::create_dir_all(git_dir.join(".git")).unwrap();
+        assert!(is_workspace_root(&git_dir), ".git 존재 → true");
+
+        let ws_dir = base.join("w");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(ws_dir.join("Cargo.toml"), b"[workspace]\n").unwrap();
+        assert!(is_workspace_root(&ws_dir), "[workspace] → true");
+
+        let pkg_dir = base.join("p");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("Cargo.toml"), b"[package]\nname=\"q\"\n").unwrap();
+        assert!(!is_workspace_root(&pkg_dir), "[package] 단독 → false");
+
+        let empty_dir = base.join("e");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        assert!(!is_workspace_root(&empty_dir), "마커 없음 → false");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     // ── locate_daemon_exe (tempfile 주입 가능 분기) ─────────────────────────────────
 
     #[test]
@@ -1306,13 +1597,15 @@ mod tests {
     //   RV==0(성공) → 데몬이 daemon.json 을 발행하는지 폴링으로 회수 → 그 데몬을 정리(kill).
     //
     // ★운영 daemon.json 오염 방지★: WMI Create 는 자식에 env 주입이 불가(설계 확정)하므로 spawn 된
-    //   데몬은 운영 기본 data_dir(%APPDATA%\com.engram.dashboard)를 본다. ENGRAM_DATA_DIR 격리가
-    //   WMI 경로엔 닿지 않는다(한계). 그래서 테스트는 (1) 기존 운영 daemon.json 을 백업하고,
-    //   (2) ★기존 데몬이 살아있으면 단일-인스턴스 mutex 로 우리 spawn 이 거부돼 검증이 무의미하므로
-    //   그 경우 테스트를 skip(return)★ 하며, (3) 끝에서 우리가 띄운 데몬을 kill 하고 백업을 복원한다.
+    //   데몬은 **default_data_dir()**(운영 기본 = 디버그 repo 루트 `.engram-data`, 릴리즈 exe 폴더)를
+    //   본다. WMI 는 부모 env 를 상속하지 않아 ENGRAM_DATA_DIR 격리가 WMI 경로엔 닿지 않는다(한계).
+    //   그래서 이 테스트는 env 로 격리하지 못하고 **default 경로를 직접 폴링**하며, 그 경로가 곧
+    //   운영 `.engram-data` 와 같으므로 더더욱 (1) 기존 운영 daemon.json 을 백업하고, (2) ★기존 데몬이
+    //   살아있으면 단일-인스턴스 mutex 로 우리 spawn 이 거부돼 검증이 무의미하므로 그 경우 skip(return)★
+    //   하며, (3) 끝에서 우리가 띄운 데몬을 kill 하고 백업을 복원한다.
     //
-    // 한계(은폐 금지): 이 smoke 는 운영 data_dir 을 건드리므로(백업/복원으로 최소화하나 완전 격리는
-    //   아님) CI 보다는 로컬 수동 검증용이다. 기존 살아있는 데몬이 있으면 skip 된다.
+    // 한계(은폐 금지): 이 smoke 는 운영 data_dir(`.engram-data`)을 건드리므로(백업/복원으로 최소화하나
+    //   완전 격리는 아님) CI 보다는 로컬 수동 검증용이다. 기존 살아있는 데몬이 있으면 skip 된다.
     #[cfg(windows)]
     #[test]
     #[ignore = "실제 WMI Win32_Process.Create — 데몬 exe 필요(수동 통합, Windows 전용)"]
@@ -1320,10 +1613,8 @@ mod tests {
         let exe = locate_daemon_exe().expect("daemon exe — 먼저 `cargo build` 필요");
         let exe_abs = dunce::canonicalize(&exe).expect("exe canonicalize");
 
-        // 운영 data_dir/daemon.json 경로.
-        let data_dir = dirs::data_dir()
-            .expect("data_dir")
-            .join("com.engram.dashboard");
+        // 운영 data_dir/daemon.json 경로 — WMI-spawn 데몬이 실제로 쓰는 default 경로(env 미상속).
+        let data_dir = default_data_dir();
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
         let daemon_path = data_dir.join(DAEMON_FILE);
 
@@ -1413,9 +1704,8 @@ mod tests {
         let exe = locate_daemon_exe().expect("daemon exe — 먼저 `cargo build` 필요");
         let exe_abs = dunce::canonicalize(&exe).expect("exe canonicalize");
 
-        let data_dir = dirs::data_dir()
-            .expect("data_dir")
-            .join("com.engram.dashboard");
+        // WMI-spawn 데몬이 실제로 쓰는 default 경로(env 미상속 → ENGRAM_DATA_DIR 격리 불가, 위 smoke 주석 참조).
+        let data_dir = default_data_dir();
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
         let daemon_path = data_dir.join(DAEMON_FILE);
 

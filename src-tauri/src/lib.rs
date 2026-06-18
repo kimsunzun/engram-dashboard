@@ -80,11 +80,9 @@ pub fn run() {
                 app: app.handle().clone(),
             });
 
-            // 프로필 저장 위치 = 앱 데이터 디렉토리(agents.json).
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            // 프로필 저장 위치 = data_dir/agents.json. 단일 출처(ADR-0024) — daemon 과 같은
+            // `.engram-data/` 를 보게 discovery::default_data_dir() 에 위임(옛 app_data_dir 대체).
+            let data_dir = discovery::default_data_dir();
             let store = Arc::new(FileProfileStore::new(data_dir));
             let profiles = Arc::new(ProfileRegistry::new(store));
 
