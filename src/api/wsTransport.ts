@@ -34,6 +34,11 @@ export class WsTransport implements Transport {
   // 진행 중 연결 시도(중복 연결 방지). resolve 는 Hello 수신(=인증 성공) 시.
   private connectPromise: Promise<void> | null = null
 
+  // 진행 중 openSocket promise 의 reject 핸들(cross-socket). settled 는 한 소켓 안의 double-settle 만
+  // 막는다 — 소켓이 detach(cleanupSocket)되면 그 promise 의 resolve/reject 는 닫힌 closure 안에 갇혀
+  // 영영 안 불린다. 이 필드로 밖에서 깨워 await 가 hang 하지 않게 한다. settle 시 항상 null 로 비운다.
+  private pendingReject: ((e: Error) => void) | null = null
+
   private closedByUser = false
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -109,14 +114,18 @@ export class WsTransport implements Transport {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this._state === 'connected') {
       return Promise.resolve()
     }
+    // ★race 가드★: 버려진 in-flight 소켓(this.ws)의 onclose 가 나중에 발화하면 handleClose 가
+    // 새 소켓의 this.ws 를 null 로 만들고 reconnect 를 거는 race 가 난다. 새 openSocket(true) 전에
+    // cleanupSocket 으로 옛 소켓의 핸들러를 delete(#13133)·close 해 그 onclose 를 떼어낸다.
+    this.cleanupSocket()
     this.closedByUser = false
     this.reconnectAttempt = 0
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    // 진행 중 attach 시도(connectPromise)가 있어도 명시 start 는 discover 를 강제해야 한다 —
-    // 새 openSocket(true) 로 교체(이전 attach promise 는 버려지되 소켓 onclose 가 정리).
+    // 명시 start 는 discover 를 강제한다 — 위 cleanupSocket 으로 진행 중 attach 소켓을 명시적으로
+    // 정리한 뒤 새 openSocket(true) 로 연결을 다시 연다(옛 소켓 onclose 에 정리를 의존하지 않음).
     this.connectPromise = this.openSocket(true)
     return this.connectPromise
   }
@@ -131,6 +140,16 @@ export class WsTransport implements Transport {
    */
   private openSocket(allowDiscover: boolean): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      // 이 promise 의 reject 를 밖(cleanupSocket)에서도 닿게 보관. 모든 settle 경로에서 null 로 비운다.
+      this.pendingReject = reject
+      const settleResolve = (): void => {
+        this.pendingReject = null
+        resolve()
+      }
+      const settleReject = (e: Error): void => {
+        this.pendingReject = null
+        reject(e)
+      }
       const run = async () => {
         let info: DaemonInfoDto
         if (allowDiscover) {
@@ -169,14 +188,14 @@ export class WsTransport implements Transport {
               this.reconnectAttempt = 0
               // connected 전이 → ProtocolClient 가 resubscribeAll(재연결 resume).
               this.setState('connected')
-              resolve()
+              settleResolve()
               return
             }
             // 인증 전 Error = Auth 실패 → reject(연결은 데몬이 닫는다).
             if ('Error' in msg && !settled) {
               settled = true
               const m = (msg.Error as { message?: string })?.message ?? 'auth failed'
-              reject(new Error('daemon auth failed: ' + m))
+              settleReject(new Error('daemon auth failed: ' + m))
               return
             }
             // control event — ProtocolClient 로 정규화 전달.
@@ -198,7 +217,7 @@ export class WsTransport implements Transport {
         ws.onerror = () => {
           if (!settled) {
             settled = true
-            reject(new Error('daemon websocket error'))
+            settleReject(new Error('daemon websocket error'))
           }
         }
 
@@ -206,11 +225,11 @@ export class WsTransport implements Transport {
           this.handleClose(settled)
           if (!settled) {
             settled = true
-            reject(new Error('daemon websocket closed before handshake'))
+            settleReject(new Error('daemon websocket closed before handshake'))
           }
         }
       }
-      run().catch((e) => reject(e))
+      run().catch((e) => settleReject(e))
     })
   }
 
@@ -285,6 +304,21 @@ export class WsTransport implements Transport {
 
   /** #13133: 핸들러는 null 대입이 아니라 delete 로 정리한 뒤 close. */
   private cleanupSocket(): void {
+    // in-flight start()를 새 start()/close()가 대체할 때, 옛 소켓의 resolve/reject 는 곧 delete 될
+    // onclose/onmessage/onerror closure 안에만 있어 영영 settle 안 된다 → 그 promise 를 await 하던
+    // 호출자(DaemonControl.start → client.connect)가 hang 한다. 명시 reject 로 깨운다(handshake 정상
+    // 완료 시엔 pendingReject 가 이미 null 이라 healthy close 는 안 깬다).
+    //
+    // ★ws 생성 전(discover in-flight) 윈도도 포함★: pendingReject 는 openSocket 실행자에서 동기 설정되지만
+    // this.ws 는 await invoke('discover_daemon') 이후에야 대입된다. 이 settle 과 connectPromise 정리를
+    // 아래 `if (!ws) return` 위로 끌어올려 ws 가 아직 null 인 discover 윈도에서도 항상 실행되게 한다 —
+    // 안 그러면 두 번째 start()가 pendingReject 를 덮어써 첫 promise 가 영영 settle 안 되고 호출자가 hang.
+    if (this.pendingReject) {
+      const rej = this.pendingReject
+      this.pendingReject = null
+      rej(new Error('connection superseded (start/close) — ADR-0021'))
+    }
+    this.connectPromise = null
     const ws = this.ws
     if (!ws) return
     delete (ws as { onmessage?: unknown }).onmessage
@@ -297,6 +331,5 @@ export class WsTransport implements Transport {
       // 이미 닫힘 — 무시.
     }
     this.ws = null
-    this.connectPromise = null
   }
 }

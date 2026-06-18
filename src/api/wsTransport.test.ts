@@ -200,6 +200,129 @@ describe('WsTransport 재연결', () => {
     t.close()
   })
 
+  it('in-flight 소켓 중 start() 재호출 → 옛 소켓 detach(onclose 정리) → 옛 close 가 새 소켓 안 깸', async () => {
+    const t = new WsTransport()
+    // 1) in-flight: start → discover+openSocket → onopen(Auth) 까지만, Hello 미수신(connected 아님).
+    // p1 은 의도적으로 await 하지 않는다 — 2번째 start 가 ws1 을 cleanup 하면 p1(openSocket(true))의
+    // resolve/reject 는 영영 안 불린다(버려진 promise). reject 무시만 붙인다.
+    void t.start().catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    const ws1 = FakeWebSocket.last!
+    ws1.fireOpen() // Auth 전송됨, 아직 Hello 안 옴 → state != 'connected'
+
+    // 2) orphan 생성 경로: start() 재호출(이전 in-flight 소켓을 cleanup 후 새 소켓 오픈).
+    const p2 = t.start().catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    const ws2 = FakeWebSocket.last!
+    expect(ws2).not.toBe(ws1)
+
+    // ★mutation 가드★ — start()에서 cleanupSocket 선행이 빠지면 ws1.onclose 가 살아있어 이 단언이
+    // 깨지고, 이어지는 ws1.fireClose() 가 handleClose 로 새 소켓(ws2)의 this.ws 를 null 로 clobber 한다.
+    expect('onclose' in ws1).toBe(false)
+
+    // 3) 옛 소켓의 뒤늦은 close — 새 소켓을 망가뜨리면 안 됨.
+    ws1.fireClose()
+    const instancesAfterClose = FakeWebSocket.instances.length
+
+    // 4) 새 소켓 핸드셰이크 완료 → connected, ws1.close 로 인한 reconnect 없음(새 소켓 무사).
+    ws2.fireOpen()
+    ws2.fireText({ Hello: { protocol_version: 1 } })
+    await p2
+    expect(t.connectionState).toBe('connected')
+    expect(FakeWebSocket.instances.length).toBe(instancesAfterClose) // reconnect 새 소켓 안 생김
+    t.close()
+  })
+
+  it('in-flight start() 가 새 start() 로 대체되면 옛 promise 가 hang 안 하고 reject (no-hang 회귀 가드)', async () => {
+    const t = new WsTransport()
+    // 1) in-flight: start #1 → discover+openSocket → onopen(Auth) 까지만, Hello 미수신.
+    const p1 = t.start()
+    await Promise.resolve()
+    await Promise.resolve()
+    const ws1 = FakeWebSocket.last!
+    ws1.fireOpen() // Auth 전송, Hello 미수신 → in-flight(미settle)
+
+    // 2) start #2 → cleanupSocket(ws1) 이 옛 in-flight 의 pendingReject 를 호출해야 한다.
+    const p2 = t.start().catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // ★no-hang 가드★: pendingReject-settle 이 없으면 p1 은 영영 settle 안 돼 이 await 가 timeout.
+    await expect(p1).rejects.toThrow(/superseded/)
+
+    // 3) start #2 핸드셰이크 완료 → connected.
+    const ws2 = FakeWebSocket.last!
+    expect(ws2).not.toBe(ws1)
+    ws2.fireOpen()
+    ws2.fireText({ Hello: { protocol_version: 1 } })
+    await p2
+    expect(t.connectionState).toBe('connected')
+    t.close()
+  })
+
+  it('in-flight start() 가 discover 윈도(ws null)에서 새 start() 로 대체돼도 hang 안 하고 reject (pre-ws no-hang 가드)', async () => {
+    const t = new WsTransport()
+    // ★mutation 가드(pre-ws)★ — cleanupSocket 이 pendingReject 를 ws null 인 discover 윈도에서도
+    // reject 하지 않으면 이 단언이 timeout(hang). discover 가 in-flight 라 ws 는 아직 생성 전인데,
+    // 두 번째 start()가 cleanupSocket → pendingReject 를 안 깨우면 첫 promise(p1)가 영영 settle 안 됨.
+
+    // 1) discover_daemon 을 제어 가능한 deferred 로 막아 첫 start()의 await invoke 를 멈춘다(ws 미생성).
+    let resolveDiscover!: (v: typeof discoverInfo) => void
+    const deferred = new Promise<typeof discoverInfo>((r) => {
+      resolveDiscover = r
+    })
+    invokeMock.mockImplementationOnce(async (cmd: string) => {
+      if (cmd === 'discover_daemon') return deferred
+      throw new Error('unexpected invoke: ' + cmd)
+    })
+
+    // 2) p1: discover 가 pending → openSocket 실행자는 동기로 pendingReject 설정, ws 는 아직 null.
+    const p1 = t.start()
+    await Promise.resolve() // 실행자 동기 본문 + run() 진입 → await invoke 에서 멈춤
+    await Promise.resolve()
+    expect(FakeWebSocket.last).toBeNull() // ws 생성 전(discover in-flight) 확인
+
+    // 3) p2: 두 번째 start() → this.ws 가 null 인 채 cleanupSocket 진입.
+    const p2 = t.start().catch(() => {})
+
+    // ★no-hang(pre-ws) 가드★: bounded — reorder 빠지면 여기서 timeout.
+    await expect(p1).rejects.toThrow(/superseded/)
+
+    // 4) 두 번째 start 의 discover 는 기본 mock(즉시 discoverInfo) → 핸드셰이크 완료.
+    await Promise.resolve()
+    await Promise.resolve()
+    const ws2 = FakeWebSocket.last!
+    expect(ws2).not.toBeNull()
+    ws2.fireOpen()
+    ws2.fireText({ Hello: { protocol_version: 1 } })
+    await p2
+    expect(t.connectionState).toBe('connected')
+
+    // 5) 매달린 첫 deferred 정리(unhandled 방지) — p1 은 이미 reject 됐고 cachedInfo 만 갱신.
+    resolveDiscover(discoverInfo)
+    t.close()
+  })
+
+  it('정상 연결 후 close() = pendingReject 이미 null → spurious reject/throw 없음', async () => {
+    const t = new WsTransport()
+    const p = t.start()
+    await Promise.resolve()
+    await Promise.resolve()
+    const ws = FakeWebSocket.last!
+    ws.fireOpen()
+    ws.fireText({ Hello: { protocol_version: 1 } })
+    // 정상 resolve — pendingReject 가 null 로 비워졌다.
+    await expect(p).resolves.toBeUndefined()
+    expect(t.connectionState).toBe('connected')
+    // healthy close — cleanupSocket 이 아무것도 reject 하지 않아야 한다(unhandled rejection 없음).
+    expect(() => t.close()).not.toThrow()
+    expect(t.connectionState).toBe('down')
+    // 이미 resolve 된 promise 는 close 에 영향받지 않는다.
+    await expect(p).resolves.toBeUndefined()
+  })
+
   it('close() 후 onclose 가 와도 재연결 안 함(closedByUser) + 핸들러 delete(#13133)', async () => {
     const t = new WsTransport()
     const ws = await connect(t)
