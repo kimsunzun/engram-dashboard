@@ -137,6 +137,8 @@ pub enum AgentSpawnCommand {
 }
 
 /// 자동 재시작 정책 wire 미러 — core `profile::RestartPolicy` 와 동일.
+/// **예약(reserved) — 죽은 필드 아님.** 동작 미구현이나 ADR-0016 "추후 재검토" 유효(2026-06-18 결정).
+/// 제거 시 core·ts-rs 바인딩·프론트 동반 + PROTOCOL_VERSION bump 유발 → 제거 금지.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum RestartPolicy {
@@ -166,10 +168,12 @@ pub struct AgentProfile {
     pub old_session_ids: Vec<String>,
     pub epoch: u32,
     pub auto_restore: bool,
+    /// **예약(reserved)** — 동작 미구현, 제거 금지(RestartPolicy 주석 참조).
     pub restart_policy: RestartPolicy,
-    /// 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO).
+    /// 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 유효.
     pub restart_count: u32,
-    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016). 동작 TODO.
+    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016).
+    /// **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(버전 bump 유발).
     #[ts(type = "string | null")]
     pub failed_reason: Option<String>,
     pub created_at: i64,

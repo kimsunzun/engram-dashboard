@@ -22,13 +22,18 @@ claude_session_id: string | null,
 /**
  * 폐기된 과거 세션 id 이력.
  */
-old_session_ids: string[], epoch: number, auto_restore: boolean, restart_policy: RestartPolicy, 
+old_session_ids: string[], epoch: number, auto_restore: boolean, 
 /**
- * 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO).
+ * **예약(reserved)** — 동작 미구현, 제거 금지(RestartPolicy 주석 참조).
+ */
+restart_policy: RestartPolicy, 
+/**
+ * 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 유효.
  */
 restart_count: number, 
 /**
- * Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016). 동작 TODO.
+ * Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016).
+ * **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(버전 bump 유발).
  */
 failed_reason: string | null, created_at: bigint, last_active: bigint, 
 /**

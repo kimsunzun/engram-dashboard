@@ -2,5 +2,7 @@
 
 /**
  * 자동 재시작 정책 wire 미러 — core `profile::RestartPolicy` 와 동일.
+ * **예약(reserved) — 죽은 필드 아님.** 동작 미구현이나 ADR-0016 "추후 재검토" 유효(2026-06-18 결정).
+ * 제거 시 core·ts-rs 바인딩·프론트 동반 + PROTOCOL_VERSION bump 유발 → 제거 금지.
  */
 export type RestartPolicy = "Never" | "OnCrash" | "Always";

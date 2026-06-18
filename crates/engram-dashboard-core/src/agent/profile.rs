@@ -47,9 +47,12 @@ pub enum SpawnMode {
     Resume,
 }
 
-/// 자동 재시작 정책. 현재는 필드만 두고 동작은 게이트(추후 구현).
-/// 기본 `Always` — 사용자 결정(ADR-0016): 항상 살아있게. 동작은 TODO.
-/// 미리 필드를 둬서 추후 schema 마이그레이션 비용을 아낀다(H-3).
+/// 자동 재시작 정책. **예약(reserved) — 죽은 필드 아님.** 동작은 미구현(게이트)이나
+/// ADR-0016이 "부팅 복원·가드 카운터·Failed 영속은 유효(추후 재검토)"로 명시한 미래 기능용
+/// seam이다. 미리 필드를 둬서 추후 schema/wire 마이그레이션 비용을 아낀다(H-3).
+/// ※제거 금지: core→protocol wire(domain.rs)→ts-rs 바인딩→daemon 변환→프론트까지 걸쳐
+/// PROTOCOL_VERSION bump를 유발하고 ADR-0016 "추후 재검토" 의도와 충돌한다(2026-06-18 결정).
+/// "런타임 자동재시작" 해석만 폐기(ADR-0019) — 부팅 복원/가드/Failed는 유효.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RestartPolicy {
     Never,
@@ -119,15 +122,16 @@ pub struct AgentProfile {
     /// 앱 재시작 시 자동 복원 대상인지.
     pub auto_restore: bool,
 
-    /// 자동 재시작 정책(현재 필드만, 동작은 게이트).
+    /// 자동 재시작 정책. **예약(reserved)** — 동작 미구현(게이트), 제거 금지(RestartPolicy 주석 참조).
     #[serde(default)]
     pub restart_policy: RestartPolicy,
 
-    /// 크래시 가드 카운터(수동 재시작 시 0 리셋 — 동작 TODO).
+    /// 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 "추후 재검토" 유효.
     #[serde(default)]
     pub restart_count: u32,
 
-    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016). 동작 TODO.
+    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016).
+    /// **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(wire/바인딩 동반 + 버전 bump).
     #[serde(default)]
     pub failed_reason: Option<String>,
 
