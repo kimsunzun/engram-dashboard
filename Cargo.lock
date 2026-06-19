@@ -1168,8 +1168,11 @@ dependencies = [
  "dunce",
  "engram-dashboard-core",
  "engram-dashboard-protocol",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "tungstenite",
  "windows 0.58.0",
 ]
 

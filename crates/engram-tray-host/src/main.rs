@@ -20,9 +20,14 @@
 //! - 상태→아이콘: probe→IconState→Active 면 컬러, Inactive 면 회색. ensure 완료/초기 진입 시
 //!   probe 로 재확인해 [`TrayIcon::set_icon`] 으로 컬러/회색을 동적 교체한다.
 //! - 툴팁은 앱 이름("Engram")만. 상태는 텍스트가 아니라 아이콘 색(컬러=활성/회색=비활성)으로.
-//! - **이번에 의도적으로 안 한 것(2차에서 graceful 끄기로 구현):** stop_daemon/open_ui/close_ui/
-//!   shutdown_all 은 **stub 동작 유지**(로그만). 이 stub 은 미구현이 아니라 *의도적으로 다음 단계로
-//!   미룬 것* — 다음 세션이 "안 채워졌다"고 오해해 지우거나 임의 구현하지 말 것.
+//! ## S13 sub-step 2 "2차" — graceful 끄기 추가
+//! - **데몬 끄기(stop_daemon) = 실제 discovery 배선**([`discovery::send_stop`]). send_stop 도 WS 접속
+//!   (blocking)이라 ensure 와 똑같이 **워커 std::thread + [`EventLoopProxy`] 회수**로 돌린다(메인 루프
+//!   블록 방지). 끄기 워커도 켜기와 같은 [`SignalOnDrop`] 가드로 [`UserEvent::DaemonStateChanged`] 를
+//!   회수해 메인이 probe 로 아이콘을 재확인한다(panic 시에도 stale 고착 방지).
+//! - **이번에도 의도적으로 안 한 것:** open_ui/close_ui/shutdown_all 은 **stub 동작 유지**(로그만).
+//!   미구현이 아니라 *의도적으로 다음 단계로 미룬 것* — 다음 세션이 "안 채워졌다"고 오해해 지우거나
+//!   임의 구현하지 말 것. 끄기의 ack 대기/타임아웃/taskkill 폴백도 미구현(send_stop 주석 참조).
 //! - "트레이 종료"/"완전 종료" 는 (stop/shutdown stub 호출 후) 이벤트 루프 종료(causes_tray_exit==true).
 
 // core 는 플랫폼 무관 순수 로직 — 항상 컴파일(테스트도 여기서 돈다).
@@ -130,14 +135,25 @@ mod windows_main {
                 })
                 .map_err(|e| LaunchError::EnsureDaemon(e.to_string()))
         }
-        // ── 아래 4개는 이번 1차에서 **의도적으로** stub(로그만) 유지. 2차에서 graceful 끄기로 구현. ──
-        // (미구현 아님 — 다음 세션이 빈 stub 으로 오해해 지우거나 임의 구현하지 말 것.)
+        // ── 데몬 끄기 = graceful StopDaemon WS 일방 발사(S13 sub-step 2 "2차") ──────────────
         fn stop_daemon(&self) -> Result<(), LaunchError> {
-            tracing::info!(
-                "[tray-host] stop_daemon 호출됨(stub — 2차 graceful 끄기에서 구현 예정)"
-            );
-            Ok(())
+            // discovery::send_stop 이 daemon.json 을 읽어 살아있으면 ws://host:port 로 Auth →
+            // StopDaemon{force:true} 를 보내고 닫는다(일방 발사 — ack 안 기다림). 끌 데몬이 없으면
+            // (파일 없음/죽음) no-op Ok. token 은 send_stop 내부에서만 다뤄지고 로그/에러에 안 실린다.
+            //
+            // ★일방 발사의 아이콘 거동(사용자 결정 — load-bearing)★: 보낸 직후 데몬이 아직 정리
+            //   중이면 probe 가 alive=true 라 아이콘이 잠깐 컬러로 남는다. 자동 재시도/타임아웃은
+            //   없다 — 응답이 없으면 데몬은 그대로 활성으로 보이고, 사용자가 "데몬 끄기"를 다시
+            //   누르면 재발사한다(StopDaemon 은 멱등에 가깝다 — 데몬은 받으면 shutdown_all+exit).
+            //   강제 종료(taskkill=daemon_stop) 폴백·ack 대기는 send_stop 안에 나중에 붙는다.
+            discovery::send_stop(&self.data_dir)
+                .map(|()| {
+                    tracing::info!("[tray-host] 데몬 graceful stop(StopDaemon) 발사");
+                })
+                .map_err(|e| LaunchError::StopDaemon(e.to_string()))
         }
+        // ── 아래 3개는 이번 범위 아님 — **의도적으로** stub(로그만) 유지. ──
+        // (미구현 아님 — 다음 세션이 빈 stub 으로 오해해 지우거나 임의 구현하지 말 것.)
         fn open_ui(&self) -> Result<(), LaunchError> {
             tracing::info!("[tray-host] open_ui 호출됨(stub — 2차에서 구현 예정)");
             Ok(())
@@ -198,6 +214,18 @@ mod windows_main {
                 self.gray.clone()
             }
         }
+    }
+
+    /// 이 액션을 **워커 스레드**에서 돌려야 하는가(순수 분기 — 메인 루프 블록 방지 판정).
+    ///
+    /// 데몬 lifecycle 의 두 blocking 액션만 true: StartDaemon(WMI spawn + 폴링), StopDaemon
+    /// (WS 접속/flush). 둘 다 수초 블록 가능해 워커로 보내고 DaemonStateChanged 로 회수한다.
+    /// 나머지(open/close stub·QuitTray·ShutdownAll)는 즉시 끝나 메인에서 동기 dispatch 한다.
+    ///
+    /// Icon/스레드 같은 부수효과 없이 분기만 떼어내 단위테스트한다(워커 라우팅 회귀 방지) —
+    /// 실제 spawn/WS 는 QA 실측 영역.
+    fn daemon_action_runs_in_worker(action: MenuAction) -> bool {
+        matches!(action, MenuAction::StartDaemon | MenuAction::StopDaemon)
     }
 
     /// IconState → "컬러 아이콘을 쓰는가"(순수 분기). Active=컬러(true), Inactive=회색(false).
@@ -381,42 +409,45 @@ mod windows_main {
                     tracing::debug!("[tray-host] unknown menu id: {:?}", menu_event.id);
                     return;
                 };
-                // ★비동기 워커 패턴(메인 루프 블록 방지)★: ensure_daemon(StartDaemon)은
-                //   discovery 가 WMI spawn 후 daemon.json 을 blocking 폴링(최대 ENSURE_TIMEOUT 수초)
-                //   한다. 메인 스레드(tao 이벤트 루프 = 트레이 UI)에서 직접 동기 호출하면 그 수초간
-                //   트레이가 얼어붙는다 → **워커 std::thread 에서 호출**하고 완료 시
-                //   DaemonStateChanged 를 proxy 로 보내 메인이 아이콘을 갱신한다.
-                //   나머지 액션(stop/open/close 의 stub, QuitTray/ShutdownAll)은 즉시 끝나(로그/no-op)
-                //   메인에서 동기 dispatch 해도 안 막힌다.
-                if action == MenuAction::StartDaemon {
+                // ★비동기 워커 패턴(메인 루프 블록 방지)★: 데몬 lifecycle 두 액션이 blocking 이다 —
+                //   StartDaemon(ensure_daemon)은 WMI spawn + daemon.json 폴링(최대 ENSURE_TIMEOUT 수초),
+                //   StopDaemon(send_stop)은 ws://host:port 접속(blocking connect/flush). 메인 스레드(tao
+                //   이벤트 루프 = 트레이 UI)에서 직접 동기 호출하면 그동안 트레이가 얼어붙는다 → **둘 다
+                //   워커 std::thread 에서 호출**하고 완료 시 DaemonStateChanged 를 proxy 로 보내 메인이
+                //   아이콘을 갱신한다. 나머지 액션(open/close 의 stub, QuitTray/ShutdownAll)은 즉시 끝나
+                //   (로그/no-op) 메인에서 동기 dispatch 해도 안 막힌다.
+                if daemon_action_runs_in_worker(action) {
                     // data_dir 을 워커로 move(PathBuf=Send). 워커에서 RealLauncher 를 새로 구성해
-                    // ensure_daemon 을 부른다(core::dispatch 와 동일 경로지만 워커 스레드라 비동기).
+                    // 해당 액션을 dispatch 한다(core::dispatch 와 동일 경로지만 워커 스레드라 비동기).
                     //
-                    // ★연타 시 데몬 다중 spawn 은 데몬측 named mutex 가 흡수한다(load-bearing)★:
-                    //   "데몬 켜기"를 빠르게 연타하면 클릭마다 워커가 떠 각자 discovery::ensure_daemon
-                    //   → 각자 WMI 로 데몬 exe 를 spawn 한다. 그래도 데몬측이 부팅 시
-                    //   `Global\EngramDashboardDaemon-<user>` named mutex 를 잡아 **첫 데몬만 살아남고
-                    //   나머지는 즉시 self-exit** 한다(daemon.json 보호는 이중 안전망). data_dir/Probe 는
-                    //   PathBuf 값 복제라 워커 간 공유 상태 race 도 없다. 그래서 in-flight 가드 없이도
-                    //   정합성이 깨지지 않는다 — 다음 세션이 이 mutex 의존성을 모르고 "왜 중복 spawn 을
-                    //   안 막지?"라며 임의 in-flight AtomicBool 을 넣거나 데몬측 mutex 를 지우지 말 것.
-                    //   in-flight 가드/주기 동기화는 2차 owner 상태머신(ADR-0024 C4)이 흡수한다 —
-                    //   지금은 mutex 가 정합성을 보장하는 단일 장치다.
+                    // ★연타 안전(load-bearing)★:
+                    //   - 켜기 연타 → 클릭마다 워커가 각자 discovery::ensure_daemon → 각자 WMI spawn 하나,
+                    //     데몬측 `Global\EngramDashboardDaemon-<user>` named mutex 가 **첫 데몬만 살리고
+                    //     나머지는 self-exit** 시킨다(daemon.json 보호는 이중 안전망). data_dir/Probe 는
+                    //     PathBuf 값 복제라 워커 간 공유 상태 race 도 없다 — in-flight 가드 불필요.
+                    //   - 끄기 연타/없는 데몬에 끄기 → send_stop 이 daemon.json 없음/죽음을 no-op Ok 로
+                    //     흡수하고, StopDaemon 은 데몬이 받으면 shutdown_all+exit(사실상 멱등)이라 재발사가
+                    //     안전하다. 그래서 두 액션 모두 in-flight 가드 없이 정합성이 깨지지 않는다.
+                    //   다음 세션이 이 mutex/no-op 의존성을 모르고 임의 in-flight AtomicBool 을 넣거나
+                    //   데몬측 mutex 를 지우지 말 것. in-flight 가드/주기 동기화는 2차 owner 상태머신
+                    //   (ADR-0024 C4)이 흡수한다 — 지금은 위 두 장치가 정합성을 보장한다.
                     let worker_data_dir = data_dir.clone();
                     let proxy = worker_proxy.clone();
                     std::thread::spawn(move || {
-                        // ★회수 신호 RAII 가드★: 클로저 진입 즉시 가드를 만들어 두면 아래 ensure 가
-                        //   정상 끝나든 panic 으로 unwind 하든 Drop 이 DaemonStateChanged 를 정확히 1회
-                        //   보낸다(워커 panic 시에도 아이콘 stale=회색 고착 방지). 본문에서 따로 send
-                        //   하지 않는다(이중 전송 방지 — 가드가 단일 경로). 2차 끄기 워커도 이 가드 재사용.
+                        // ★회수 신호 RAII 가드(켜기·끄기 공용)★: 클로저 진입 즉시 가드를 만들어 두면
+                        //   아래 dispatch 가 정상 끝나든 panic 으로 unwind 하든 Drop 이 DaemonStateChanged
+                        //   를 정확히 1회 보낸다(워커 panic 시에도 아이콘 stale 고착 방지). 본문에서 따로
+                        //   send 하지 않는다(이중 전송 방지 — 가드가 단일 경로).
                         let _signal = SignalOnDrop(proxy);
                         let l = RealLauncher {
                             data_dir: worker_data_dir,
                         };
                         // 성공/실패 무관하게 회수는 가드가 한다 — probe 가 진실원천이라 메인은 신호를
-                        // 받아 재확인만 한다(실패해도 데몬이 이미 떠 있을 수 있고, 성공해도 probe 로 확정).
-                        if let Err(e) = core::dispatch(MenuAction::StartDaemon, &l) {
-                            tracing::error!("[tray-host] ensure_daemon(worker) 실패: {e}");
+                        // 받아 재확인만 한다(켜기: 실패해도 데몬이 이미 떠 있을 수 있고 성공해도 probe 로
+                        // 확정 / 끄기: 일방 발사라 데몬이 아직 정리 중이면 probe 가 alive 일 수 있다 —
+                        // 그땐 아이콘이 컬러로 남고 다음 클릭/refresh 때 갱신, send_stop 주석의 거동).
+                        if let Err(e) = core::dispatch(action, &l) {
+                            tracing::error!("[tray-host] 데몬 액션(worker) 실패 [{action:?}]: {e}");
                         }
                     });
                 } else if let Err(e) = core::dispatch(action, &launcher) {
@@ -471,6 +502,19 @@ mod windows_main {
             // "alive면 컬러, dead면 회색"으로 일관(중간 매핑이 뒤집히면 여기서 잡힌다).
             assert!(icon_uses_color(core::icon_state_for(true)));
             assert!(!icon_uses_color(core::icon_state_for(false)));
+        }
+
+        #[test]
+        fn daemon_lifecycle_actions_run_in_worker() {
+            // blocking 한 데몬 lifecycle 두 액션(켜기=WMI+폴링, 끄기=WS 접속)만 워커로 — 나머지는
+            // 메인 동기. 이 분기가 깨지면 메인 루프가 수초 블록(트레이 멈춤)되거나 반대로 즉시 끝나는
+            // 액션을 불필요하게 워커로 보낸다.
+            assert!(daemon_action_runs_in_worker(MenuAction::StartDaemon));
+            assert!(daemon_action_runs_in_worker(MenuAction::StopDaemon));
+            assert!(!daemon_action_runs_in_worker(MenuAction::OpenUi));
+            assert!(!daemon_action_runs_in_worker(MenuAction::CloseUi));
+            assert!(!daemon_action_runs_in_worker(MenuAction::QuitTray));
+            assert!(!daemon_action_runs_in_worker(MenuAction::ShutdownAll));
         }
     }
 }

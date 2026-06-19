@@ -57,7 +57,8 @@ pub trait DaemonProbe {
 //   - ensure_daemon = discovery::ensure_daemon(WMI Win32_Process.Create — WmiPrvSE 부모라 Job
 //     미상속 = ADR-0024 C1 detached 자동충족). 절대 std::process::Command 직접 spawn 금지
 //     (Tauri/tray-host Job 상속 위험).
-//   - stop_daemon = discovery::daemon_stop(graceful 신호 → 종료 확인). 데몬만 끈다(UI 무관).
+//   - stop_daemon = discovery::send_stop(WS 로 StopDaemon{force} 일방 발사 → 데몬이 self-exit).
+//     데몬만 끈다(UI 무관). taskkill(daemon_stop) 폴백/ack 대기는 미구현(send_stop 안에 나중에 붙음).
 //   - close_ui = UI 프로세스 종료(show/focus 의 역). UI 만 끈다(데몬 무관).
 //   - shutdown_all = 데몬 graceful → UI 종료(C4) — "완전 종료" 전용.
 //   real 구현체는 생성자에서 data_dir: PathBuf + daemon_exe 경로를 주입받는다(TRD §데이터 위치:
@@ -66,7 +67,7 @@ pub trait DaemonProbe {
 pub trait Launcher {
     /// 데몬을 detached 로 ensure(살아있으면 no-op). real = `discovery::ensure_daemon`.
     fn ensure_daemon(&self) -> Result<(), LaunchError>;
-    /// 데몬을 graceful stop(UI 는 건드리지 않음). real = `discovery::daemon_stop`.
+    /// 데몬을 graceful stop(UI 는 건드리지 않음). real = `discovery::send_stop`(WS StopDaemon 발사).
     fn stop_daemon(&self) -> Result<(), LaunchError>;
     /// UI 앱 열기 — 살아있으면 show/focus, 없으면 spawn. real = OS spawn + 신호.
     fn open_ui(&self) -> Result<(), LaunchError>;
