@@ -438,27 +438,60 @@ fn stop_with(
 // 응답이 없거나 데몬이 정리 중이면 데몬은 그대로 살아있고(probe 가 alive 로 보고), 사용자가 다시
 // 누르면 재발사한다. close 전 flush 로 메시지가 소켓에 실제 나가는 것만 보장한다.
 
+/// graceful stop 의 **결과 신호**(아이콘 결정용, S13 sub-step 2 race 수정).
+///
+/// ★왜 enum 으로 끌어올리나(load-bearing)★: 끄기 직후 트레이가 `daemon_status`(PID probe)로 아이콘을
+/// 정하면, 데몬이 죽기 직전 수 ms 동안 "아직 살아있음"으로 보여 **아이콘이 컬러로 고착**되는 race 가
+/// 있었다(QA 실측). 해결 = PID 를 다시 묻지 않고, drain read 루프에서 관측한 **"데몬이 연결을 닫음"**
+/// 을 "꺼짐 확정" 신호로 쓴다. send_stop 이 그 신호를 이 enum 으로 호출자(트레이)에게 올려, 트레이가
+/// probe 우회로 아이콘을 회색 확정한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// 데몬이 graceful 하게 **이 WS 연결을 닫았다**(drain read 에서 Message::Close / 정상 EOF /
+    /// ConnectionClosed / AlreadyClosed). 트레이는 probe 없이 회색 확정.
+    /// ★의미 한정(과신 금지)★: 이것은 정확히는 "데몬이 StopDaemon 을 처리하고 **종료 경로에 진입**해
+    /// 이 연결을 닫았다"는 신호다. 실제 프로세스 exit 는 그 직후(보통 ms)에 일어난다 — 연결 닫힘과
+    /// 프로세스 소멸은 동일 순간이 아니다. 정상 경로에선 ms 차라 회색 확정이 맞지만, 데몬의 graceful
+    /// 종료 자체가 hang/panic 하면 연결은 닫혔어도 프로세스가 잠깐 더 살 수 있다(그건 별도 버그 —
+    /// 일방 발사 재발사 모델이 다음 클릭에서 회수). 이 신호를 "프로세스 죽음 확정"으로 더 신뢰해
+    /// probe 폴백을 추가로 제거하지 말 것.
+    DaemonClosed,
+    /// STOP_WS_TIMEOUT(3s) 내 데몬이 닫지도 응답하지도 않음(read_timeout WouldBlock/TimedOut).
+    /// = 불확실(데몬이 아직 정리 중일 수 있음) → 트레이는 기존 probe 폴백.
+    Timeout,
+    /// 끌 데몬이 없었음(daemon.json 없음/죽음/깨짐/버전 불일치 — send 자체를 안 함).
+    /// = 트레이는 기존 probe 폴백(이미 회색일 것).
+    NoTarget,
+}
+
 /// StopDaemon 을 실제로 송신하는 경계(real = tungstenite WS). 순수 오케스트레이션(stop_with_sender)
 /// 이 이 trait 위에서만 동작하므로, 단위 테스트는 fake 를 주입해 "보낼 메시지/대상 판정"을 실 WS 없이
 /// 검증한다(discovery 의 DaemonReader/Spawner 주입 스타일과 동일).
 pub trait StopSender {
-    /// 살아있는 데몬 `info` 에 graceful StopDaemon 을 보낸다(Auth → StopDaemon → flush → close).
-    /// 일방 발사라 ack 는 읽지 않는다. 송신/연결 실패만 Err.
-    fn send_stop(&self, info: &DaemonInfo) -> Result<(), DiscoveryError>;
+    /// 살아있는 데몬 `info` 에 graceful StopDaemon 을 보낸다(Auth → StopDaemon → flush → drain → close).
+    /// 일방 발사라 ack **내용**은 해석하지 않지만, drain read 의 **종료 사유**로
+    /// [`StopOutcome::DaemonClosed`](연결 닫힘=꺼짐 확정) / [`StopOutcome::Timeout`](3s 무응답)을 구분해
+    /// 반환한다. 송신/연결 실패만 Err.
+    fn send_stop(&self, info: &DaemonInfo) -> Result<StopOutcome, DiscoveryError>;
 }
 
 /// 데몬에 graceful StopDaemon 을 WS 로 보낸다(real 진입점, S13 sub-step 2).
 ///
-/// 흐름: daemon.json 읽기 → 없거나 죽었으면 no-op(Ok — 끌 데몬 없음) → 살아있으면 `ws://host:port`
-/// 접속해 Auth → StopDaemon{force:true, kill_agents:true} 전송 → flush → close.
+/// 흐름: daemon.json 읽기 → 없거나 죽었으면 no-op([`StopOutcome::NoTarget`] — 끌 데몬 없음) →
+/// 살아있으면 `ws://host:port` 접속해 Auth → StopDaemon{force:true, kill_agents:true} 전송 →
+/// flush → drain read(데몬이 연결 닫을 때까지 또는 3s) → close. drain 종료 사유로
+/// [`StopOutcome::DaemonClosed`](연결 닫힘=꺼짐 확정) / [`StopOutcome::Timeout`](3s 무응답)을 구분한다.
 ///
-/// ★나중에 이어붙일 자리(load-bearing)★: 지금은 **일방 발사**다 — ack 대기/타임아웃/taskkill
-/// (daemon_stop) 폴백은 미구현이다(사용자 결정: 응답 없으면 데몬 활성 유지, 다시 누르면 재발사).
-/// 나중에 graceful-with-fallback 으로 키우려면 **이 함수(또는 TungsteniteStopSender::send_stop)
-/// 안에** "StopDaemon 후 ack(AgentEvent::Ack) 읽기 + 타임아웃 시 daemon_stop(data_dir) 호출"을
-/// 추가하면 된다 — 호출부(트레이 RealLauncher)는 send_stop 시그니처만 보므로 **수정 불필요**하다.
+/// ★ack **내용**은 여전히 해석 안 함(일방 발사 유지)★: 받은 프레임의 본문으로 폴백 결정을 하지
+/// 않는다. 단지 drain 의 **종료 사유**(연결 닫힘 vs 타임아웃)를 StopOutcome 으로 끌어올려 트레이가
+/// 아이콘을 정할 때 PID probe race 를 우회하게 한다(S13 sub-step 2 race 수정 — StopOutcome 주석).
+///
+/// ★나중에 이어붙일 자리(load-bearing)★: taskkill(daemon_stop) 강제 폴백은 미구현이다(사용자 결정:
+/// 응답 없으면 데몬 활성 유지, 다시 누르면 재발사). 나중에 graceful-with-fallback 으로 키우려면
+/// **이 함수(또는 TungsteniteStopSender::send_stop) 안에** "Timeout 시 daemon_stop(data_dir) 호출"을
+/// 추가하면 된다 — 호출부(트레이 RealLauncher)는 send_stop 시그니처만 보므로 폴백 자체는 여기서 흡수.
 /// 그래서 daemon_stop 을 지우지 말 것(이 폴백이 붙을 자리다).
-pub fn send_stop(data_dir: &Path) -> Result<(), DiscoveryError> {
+pub fn send_stop(data_dir: &Path) -> Result<StopOutcome, DiscoveryError> {
     stop_with_sender(
         &FileReader {
             path: data_dir.join(DAEMON_FILE),
@@ -473,21 +506,21 @@ pub fn send_stop(data_dir: &Path) -> Result<(), DiscoveryError> {
 /// ★대상 판정 = check_acceptable(Accept)★: 파일이 있어도 죽었거나(stale) 버전 불일치면 보내지
 /// 않는다(no-op Ok). 버전 불일치 데몬은 어차피 데몬의 Auth 가 protocol_version 검사로 거부하므로
 /// 일방 발사가 무의미하고, 그런 데몬 종료는 taskkill 폴백(daemon_stop)의 몫이다(미래 연결).
-/// 깨진/없는 파일도 "끌 데몬 없음"으로 no-op(에러 아님).
+/// 깨진/없는 파일도 "끌 데몬 없음"으로 no-op([`StopOutcome::NoTarget`], 에러 아님).
 fn stop_with_sender(
     reader: &dyn DaemonReader,
     liveness: &dyn PidLiveness,
     sender: &dyn StopSender,
-) -> Result<(), DiscoveryError> {
+) -> Result<StopOutcome, DiscoveryError> {
     match reader.read() {
         Ok(Some(info)) => match check_acceptable(&info, liveness) {
-            // live + 버전 호환 → graceful StopDaemon 발사.
+            // live + 버전 호환 → graceful StopDaemon 발사. sender 의 결과(DaemonClosed/Timeout)를 전파.
             AcceptCheck::Accept => sender.send_stop(&info),
-            // 죽었거나(stale) 버전 불일치 → 끌(graceful 로) 대상 아님. no-op(taskkill 폴백 영역).
-            AcceptCheck::DeadPid | AcceptCheck::VersionMismatch { .. } => Ok(()),
+            // 죽었거나(stale) 버전 불일치 → 끌(graceful 로) 대상 아님. NoTarget(taskkill 폴백 영역).
+            AcceptCheck::DeadPid | AcceptCheck::VersionMismatch { .. } => Ok(StopOutcome::NoTarget),
         },
-        // 파일 없음/깨짐/IO 오류 → 끌 데몬 없음(no-op).
-        _ => Ok(()),
+        // 파일 없음/깨짐/IO 오류 → 끌 데몬 없음(NoTarget).
+        _ => Ok(StopOutcome::NoTarget),
     }
 }
 
@@ -533,9 +566,9 @@ struct TungsteniteStopSender;
 const STOP_WS_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl StopSender for TungsteniteStopSender {
-    fn send_stop(&self, info: &DaemonInfo) -> Result<(), DiscoveryError> {
+    fn send_stop(&self, info: &DaemonInfo) -> Result<StopOutcome, DiscoveryError> {
         use std::net::{SocketAddr, TcpStream};
-        use tungstenite::Message;
+        use tungstenite::{Error as WsError, Message};
 
         // ws://host:port — 데몬은 로컬 평문 WS(TLS 없음, ws:// 고정). host 는 항상 127.0.0.1 loopback.
         let url = format!("ws://{}:{}", info.host, info.port);
@@ -594,22 +627,49 @@ impl StopSender for TungsteniteStopSender {
         //    ConnectionClosed/AlreadyClosed/Message::Close/EOF 가 오고, read_timeout(3s) 초과면 Io
         //    (WouldBlock/timeout) — 어느 쪽이든 루프를 빠져나온다. 3s 상한이라 데몬이 안 죽어도 send_stop
         //    은 최대 3s 후 반환(connect timeout 과 같은 워커 블록 bound).
-        loop {
+        //
+        //    ★종료 사유 분류(S13 sub-step 2 race 수정 — StopOutcome 주석)★: break 이유를 둘로 가른다.
+        //    내용은 여전히 해석하지 않지만, **연결이 닫혔는가 vs 타임아웃인가**만 본다 — 이게 트레이의
+        //    PID probe race 를 우회하는 "꺼짐 확정" 신호다.
+        //      - DaemonClosed: 데몬이 graceful 하게 연결을 닫음 = 꺼짐 확정.
+        //          · Ok(Message::Close)          — 데몬이 Close 프레임 전송.
+        //          · Err(ConnectionClosed)        — 정상 종료 후 read(닫힌 연결).
+        //          · Err(AlreadyClosed)           — 이미 닫힌 연결에 read.
+        //          · Err(Io)에서 EOF류(UnexpectedEof/BrokenPipe/ConnectionReset/ConnectionAborted)
+        //            — 데몬 프로세스가 사라져 TCP 가 끊김(정상 EOF). 이것도 꺼짐 확정으로 본다.
+        //      - Timeout: read_timeout(3s) 초과 — Err(Io)에서 WouldBlock/TimedOut. 데몬이 아직 정리
+        //          중일 수 있어 불확실 → 트레이는 기존 probe 폴백.
+        //    token 은 어느 분기에서도 로깅/반환하지 않는다(e 를 버린다 — 샐 일 없음).
+        let outcome = loop {
             match ws.read() {
-                // 데몬이 보낸 프레임. 내용 해석 없이 버린다(일방 발사). Close 면 데몬이 닫는 중 → 탈출.
-                Ok(Message::Close(_)) => break,
+                // 데몬이 Close 프레임을 보냄 = graceful 닫힘 → 꺼짐 확정.
+                Ok(Message::Close(_)) => break StopOutcome::DaemonClosed,
+                // 그 외 프레임(Ping/Pong/Text/Binary 등)은 내용 해석 없이 버리고 계속 read.
                 Ok(_) => {}
-                // ConnectionClosed/AlreadyClosed(데몬 self-exit 로 연결 닫힘) 또는 Io(read_timeout 초과,
-                // EOF) — 어느 에러든 더 받을 게 없으니 루프 종료. token 은 에러를 로깅/반환하지 않으므로 샐
-                // 일 없음(여기서 e 를 버린다).
-                Err(_) => break,
+                // 정상 종료로 연결이 닫힘 = 꺼짐 확정.
+                Err(WsError::ConnectionClosed) | Err(WsError::AlreadyClosed) => {
+                    break StopOutcome::DaemonClosed
+                }
+                // Io: ErrorKind 로 "데몬이 닫음(EOF류)" 과 "타임아웃(WouldBlock/TimedOut)" 을 가른다.
+                Err(WsError::Io(e)) => {
+                    use std::io::ErrorKind;
+                    match e.kind() {
+                        // read_timeout 초과 — 데몬이 3s 내 안 닫음 → 불확실.
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut => break StopOutcome::Timeout,
+                        // EOF/연결 끊김 — 데몬 프로세스가 사라져 소켓이 끊김 → 꺼짐 확정.
+                        _ => break StopOutcome::DaemonClosed,
+                    }
+                }
+                // 그 외 WS 에러(프로토콜/Utf8 등) — 더 받을 게 없으니 종료하되, 데몬이 닫았다고 단정할 수
+                // 없어 Timeout(불확실)으로 본다(probe 폴백으로 안전하게 회수). token 미노출(e 버림).
+                Err(_) => break StopOutcome::Timeout,
             }
-        }
+        };
 
         // close — 데몬이 자연 종료(연결 닫음) 했으면 이미 닫혔고, 아니면 drop 으로도 닫힌다. 명시적 close
         //    는 best-effort(이미 닫혔으면 무해). ack 응답으로 폴백 결정 안 함 — 일방 발사 유지.
         let _ = ws.close(None);
-        Ok(())
+        Ok(outcome)
     }
 }
 
@@ -1677,29 +1737,37 @@ mod tests {
         }
     }
     impl StopSender for CountingStopSender {
-        fn send_stop(&self, info: &DaemonInfo) -> Result<(), DiscoveryError> {
+        fn send_stop(&self, info: &DaemonInfo) -> Result<StopOutcome, DiscoveryError> {
             self.sent.borrow_mut().push(info.pid);
-            Ok(())
+            // 순수 분기 테스트에선 sender 가 "발사했다"는 표시로 DaemonClosed 를 돌려준다(실 drain 분류는
+            // QA 실 데몬 영역 — stop_smoke). 여기선 stop_with_sender 가 이 결과를 전파하는지만 본다.
+            Ok(StopOutcome::DaemonClosed)
         }
     }
 
     #[test]
     fn send_stop_live_daemon_sends() {
-        // 살아있는 호환 데몬 → StopDaemon 발사(그 info 로 1회).
+        // 살아있는 호환 데몬 → StopDaemon 발사(그 info 로 1회) + sender 결과(DaemonClosed) 전파.
         let reader = FakeReader::new(vec![Ok(Some(info(1001, PROTOCOL_VERSION)))]);
         let liveness = FakeLiveness { dead: vec![] };
         let sender = CountingStopSender::new();
-        stop_with_sender(&reader, &liveness, &sender).unwrap();
+        let outcome = stop_with_sender(&reader, &liveness, &sender).unwrap();
         assert_eq!(sender.sent.borrow().as_slice(), &[1001], "live 면 1회 발사");
+        assert_eq!(
+            outcome,
+            StopOutcome::DaemonClosed,
+            "sender 결과를 그대로 전파"
+        );
     }
 
     #[test]
     fn send_stop_dead_daemon_is_noop() {
-        // 죽은 데몬 → no-op(끌 graceful 대상 없음). 발사 0회.
+        // 죽은 데몬 → NoTarget(끌 graceful 대상 없음). 발사 0회.
         let reader = FakeReader::new(vec![Ok(Some(info(1002, PROTOCOL_VERSION)))]);
         let liveness = FakeLiveness { dead: vec![1002] };
         let sender = CountingStopSender::new();
-        stop_with_sender(&reader, &liveness, &sender).unwrap();
+        let outcome = stop_with_sender(&reader, &liveness, &sender).unwrap();
+        assert_eq!(outcome, StopOutcome::NoTarget, "죽은 데몬 → NoTarget");
         assert!(
             sender.sent.borrow().is_empty(),
             "죽은 데몬엔 graceful stop 안 보냄"
@@ -1708,34 +1776,56 @@ mod tests {
 
     #[test]
     fn send_stop_missing_file_is_noop() {
-        // 파일 없음 → 끌 데몬 없음(no-op Ok). 발사 0회.
+        // 파일 없음 → 끌 데몬 없음(NoTarget). 발사 0회.
         let reader = FakeReader::new(vec![Ok(None)]);
         let liveness = FakeLiveness { dead: vec![] };
         let sender = CountingStopSender::new();
-        stop_with_sender(&reader, &liveness, &sender).unwrap();
+        let outcome = stop_with_sender(&reader, &liveness, &sender).unwrap();
+        assert_eq!(outcome, StopOutcome::NoTarget);
         assert!(sender.sent.borrow().is_empty());
     }
 
     #[test]
     fn send_stop_corrupt_file_is_noop() {
-        // 깨진 파일 → 끌 데몬 없음(no-op Ok, 에러 아님). 발사 0회.
+        // 깨진 파일 → 끌 데몬 없음(NoTarget Ok, 에러 아님). 발사 0회.
         let reader = FakeReader::new(vec![Err(DiscoveryError::Parse("bad".into()))]);
         let liveness = FakeLiveness { dead: vec![] };
         let sender = CountingStopSender::new();
-        stop_with_sender(&reader, &liveness, &sender).expect("깨진 파일은 no-op Ok");
+        let outcome = stop_with_sender(&reader, &liveness, &sender).expect("깨진 파일은 no-op Ok");
+        assert_eq!(outcome, StopOutcome::NoTarget);
         assert!(sender.sent.borrow().is_empty());
     }
 
     #[test]
     fn send_stop_version_mismatch_is_noop() {
-        // 버전 불일치 데몬 → graceful 발사 안 함(데몬 Auth 가 거부할 대상 — taskkill 폴백 영역). 0회.
+        // 버전 불일치 데몬 → graceful 발사 안 함(데몬 Auth 가 거부할 대상 — taskkill 폴백 영역). NoTarget.
         let reader = FakeReader::new(vec![Ok(Some(info(1003, PROTOCOL_VERSION + 1)))]);
         let liveness = FakeLiveness { dead: vec![] };
         let sender = CountingStopSender::new();
-        stop_with_sender(&reader, &liveness, &sender).unwrap();
+        let outcome = stop_with_sender(&reader, &liveness, &sender).unwrap();
+        assert_eq!(outcome, StopOutcome::NoTarget, "버전 불일치 → NoTarget");
         assert!(
             sender.sent.borrow().is_empty(),
             "버전 불일치는 graceful 대상 아님"
+        );
+    }
+
+    #[test]
+    fn send_stop_propagates_sender_outcome_timeout() {
+        // sender 가 Timeout 을 돌려주면(데몬 무응답) stop_with_sender 도 그대로 Timeout 전파.
+        struct TimeoutSender;
+        impl StopSender for TimeoutSender {
+            fn send_stop(&self, _info: &DaemonInfo) -> Result<StopOutcome, DiscoveryError> {
+                Ok(StopOutcome::Timeout)
+            }
+        }
+        let reader = FakeReader::new(vec![Ok(Some(info(1005, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let outcome = stop_with_sender(&reader, &liveness, &TimeoutSender).unwrap();
+        assert_eq!(
+            outcome,
+            StopOutcome::Timeout,
+            "live 데몬 + sender Timeout → Timeout 전파"
         );
     }
 
@@ -1744,7 +1834,7 @@ mod tests {
         // sender 가 Err 면 그대로 전파(삼킴 금지 — 호출부가 실패를 인지).
         struct FailingSender;
         impl StopSender for FailingSender {
-            fn send_stop(&self, _info: &DaemonInfo) -> Result<(), DiscoveryError> {
+            fn send_stop(&self, _info: &DaemonInfo) -> Result<StopOutcome, DiscoveryError> {
                 Err(DiscoveryError::Io("send boom".into()))
             }
         }

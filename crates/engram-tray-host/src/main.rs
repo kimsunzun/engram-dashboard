@@ -77,7 +77,7 @@ mod windows_main {
     enum UserEvent {
         /// tray-icon 전역 MenuEvent(메뉴 클릭) 포워딩.
         MenuEvent(MenuEvent),
-        /// 데몬 상태가 바뀌었을 수 있으니 아이콘을 다시 산출하라는 신호(워커 스레드가 보냄).
+        /// 데몬 상태가 바뀌었을 수 있으니 아이콘을 **probe 로 재확인**하라는 신호(워커 스레드가 보냄).
         ///
         /// ★왜 이 variant 가 필요한가(load-bearing)★: 데몬 켜기(ensure_daemon)는 discovery 가
         /// WMI spawn 후 daemon.json 을 **blocking 폴링**(최대 ENSURE_TIMEOUT 수초)한다. 이걸 tao
@@ -85,22 +85,60 @@ mod windows_main {
         /// 그래서 ensure 는 워커 std::thread 에서 돌리고, **완료되면** 이 이벤트를 proxy 로 보내
         /// 메인 루프를 깨운다. 메인은 그때 probe 로 alive 를 재확인해 아이콘을 컬러/회색으로 교체한다
         /// (set_icon 은 메인 스레드 전용이라 워커가 직접 못 한다 → 회수 패턴 필수).
+        ///
+        /// 켜기(StartDaemon)·panic 폴백·끄기의 Timeout/NoTarget 이 이 경로를 쓴다(probe 가 진실원천).
         DaemonStateChanged,
+        /// 데몬 **끄기 결과**를 메인에 직접 전달(probe 우회 — S13 sub-step 2 race 수정).
+        ///
+        /// ★왜 probe 우회가 필요한가(load-bearing)★: 끄기(send_stop)가 끝난 직후 `DaemonStateChanged`
+        /// 로 probe(`daemon_status`=PID 가 OS 에 살아있나)를 다시 물으면, 데몬이 죽기 직전 수 ms 동안
+        /// "아직 살아있음"으로 보여 **아이콘이 컬러로 고착**되는 race 가 있었다(QA 실측). 그래서 끄기
+        /// 정상 종료 시엔 PID 를 다시 묻지 않고, send_stop 의 drain read 가 관측한
+        /// [`StopOutcome`](연결 닫힘=꺼짐 확정)을 이 이벤트로 올려 메인이 **probe 없이** 아이콘을 결정한다:
+        ///   - DaemonClosed → 회색 확정(연결 닫힘 = 꺼짐).
+        ///   - Timeout/NoTarget → probe 폴백(refresh_icon — 불확실하니 진실원천 재확인).
+        DaemonStopOutcome(discovery::StopOutcome),
     }
 
-    /// 워커 스레드의 "상태 재확인" 회수 신호를 **Drop 으로** 정확히 1회 보낸다(RAII 가드).
+    /// 워커 스레드의 회수 신호를 **Drop 으로** 정확히 1회 보낸다(RAII 가드).
     ///
     /// ★왜 수동 send 가 아니라 Drop 인가(load-bearing)★: 워커 클로저 본문에서 마지막 줄에
-    /// `send_event` 를 부르면, ensure 작업이 그 전에 **panic** 하면 회수 신호가 영영 안 간다 →
-    /// 데몬이 실제로 떴어도 메인이 아이콘 갱신 신호를 못 받아 **회색으로 영구 고착**된다. 가드를
+    /// `send_event` 를 부르면, 작업이 그 전에 **panic** 하면 회수 신호가 영영 안 간다 → 데몬이
+    /// 실제로 떴어도/죽었어도 메인이 아이콘 갱신 신호를 못 받아 **아이콘이 stale 로 고착**된다. 가드를
     /// 워커 진입 시 만들어 두면 정상 종료든 panic unwind 든 Drop 이 반드시 신호를 보낸다(정확히 1회).
-    /// DaemonStateChanged 는 멱등(메인은 받아서 probe 재확인만 함 — 중복 와도 무해)하지만, 이중
-    /// 전송을 피하려 회수는 이 가드의 Drop **단일 경로**로만 한다(본문에서 따로 send 하지 않는다).
-    /// 2차에서 추가될 끄기 워커도 같은 가드를 재사용한다(같은 stale 위험 → 같은 보장).
-    struct SignalOnDrop(EventLoopProxy<UserEvent>);
+    ///
+    /// ★단일 경로 + 결과 교체(load-bearing — 이중 전송/race 방지)★: 회수는 이 가드의 Drop **한 곳**
+    /// 으로만 한다(본문에서 따로 send 하지 않음). 기본 신호는 [`UserEvent::DaemonStateChanged`]
+    /// (=probe 재확인 폴백). 워커가 정상 종료하며 더 정확한 신호(예: 끄기의 [`UserEvent::DaemonStopOutcome`])
+    /// 를 보내고 싶으면, Drop 전에 [`SignalOnDrop::set_signal`] 로 보낼 이벤트를 **바꿔치기**한다.
+    /// 그러면 정상 경로는 그 결과를, panic 경로는 기본 probe 폴백을 보낸다 — 둘이 동시에 가지 않아
+    /// "끄기 결과로 회색 set 한 직후 폴백 probe 가 컬러로 다시 덮는" race 가 원천 차단된다.
+    ///   - 켜기 워커: set_signal 안 함 → 항상 DaemonStateChanged(probe 가 진실원천).
+    ///   - 끄기 워커: 정상 종료 시 set_signal(DaemonStopOutcome(결과)) → probe 우회. panic 시엔 기본
+    ///     DaemonStateChanged 폴백(probe 로 안전 회수 — 끄기가 도중 죽어도 아이콘이 stale 안 됨).
+    struct SignalOnDrop {
+        proxy: EventLoopProxy<UserEvent>,
+        // Drop 에서 보낼 이벤트. 기본 = DaemonStateChanged(probe 폴백). 정상 종료 시 set_signal 로 교체.
+        // Option 인 이유: send_event 가 UserEvent 소유를 요구해 Drop 에서 take 로 꺼내 보낸다.
+        signal: Option<UserEvent>,
+    }
+    impl SignalOnDrop {
+        fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+            Self {
+                proxy,
+                signal: Some(UserEvent::DaemonStateChanged),
+            }
+        }
+        /// 정상 종료 경로에서 Drop 이 보낼 신호를 교체(panic 시엔 호출 안 돼 기본 폴백 유지).
+        fn set_signal(&mut self, ev: UserEvent) {
+            self.signal = Some(ev);
+        }
+    }
     impl Drop for SignalOnDrop {
         fn drop(&mut self) {
-            let _ = self.0.send_event(UserEvent::DaemonStateChanged);
+            if let Some(ev) = self.signal.take() {
+                let _ = self.proxy.send_event(ev);
+            }
         }
     }
 
@@ -146,9 +184,15 @@ mod windows_main {
             //   없다 — 응답이 없으면 데몬은 그대로 활성으로 보이고, 사용자가 "데몬 끄기"를 다시
             //   누르면 재발사한다(StopDaemon 은 멱등에 가깝다 — 데몬은 받으면 shutdown_all+exit).
             //   강제 종료(taskkill=daemon_stop) 폴백·ack 대기는 send_stop 안에 나중에 붙는다.
+            //
+            // ★StopOutcome 은 여기서 버린다(load-bearing)★: 이 trait 메서드는 core::Launcher 계약상
+            //   Result<(), LaunchError> 라 결과를 못 올린다(core.rs 는 discovery 의존 0 — StopOutcome
+            //   을 알 수 없다). 그래서 아이콘 결정에 쓰는 **트레이 끄기 워커는 이 메서드를 거치지 않고
+            //   discovery::send_stop 을 직접 호출**해 StopOutcome 을 받는다(main.rs 워커 본문). 이
+            //   메서드는 결과가 불필요한 호출자(향후 ShutdownAll 단계·LLM 제어 표면)를 위해 남는다.
             discovery::send_stop(&self.data_dir)
-                .map(|()| {
-                    tracing::info!("[tray-host] 데몬 graceful stop(StopDaemon) 발사");
+                .map(|outcome| {
+                    tracing::info!(?outcome, "[tray-host] 데몬 graceful stop(StopDaemon) 발사");
                 })
                 .map_err(|e| LaunchError::StopDaemon(e.to_string()))
         }
@@ -254,11 +298,34 @@ mod windows_main {
     fn refresh_icon(tray: &Option<tray_icon::TrayIcon>, icons: &Icons, probe: &dyn DaemonProbe) {
         if let Some(tray) = tray {
             let state = core::icon_state_from_probe(probe);
-            if let Err(e) = tray.set_icon(Some(icons.for_state(state))) {
-                tracing::error!("[tray-host] set_icon 실패: {e}");
-            } else {
-                tracing::debug!("[tray-host] 아이콘 갱신 — {state:?}");
-            }
+            set_icon_state(tray, icons, state);
+        }
+    }
+
+    /// 트레이 아이콘을 **명시한 state** 로 교체한다(메인 스레드 전용, probe 우회).
+    ///
+    /// refresh_icon 은 probe(`daemon_status`=PID 생존)로 state 를 산출하지만, 끄기 직후엔 그 probe 가
+    /// race 로 false-live(컬러 고착)를 낸다 → 끄기의 [`StopOutcome::DaemonClosed`](연결 닫힘=꺼짐
+    /// 확정)일 땐 probe 를 건너뛰고 이 함수로 직접 [`IconState::Inactive`](회색)를 박는다.
+    fn set_icon_state(tray: &tray_icon::TrayIcon, icons: &Icons, state: core::IconState) {
+        if let Err(e) = tray.set_icon(Some(icons.for_state(state))) {
+            tracing::error!("[tray-host] set_icon 실패: {e}");
+        } else {
+            tracing::debug!("[tray-host] 아이콘 갱신 — {state:?}");
+        }
+    }
+
+    /// 끄기 결과(StopOutcome) → 아이콘을 어떻게 정할지(순수 분기 — probe 우회 여부 판정).
+    ///
+    /// DaemonClosed(연결 닫힘=꺼짐 확정)면 `Some(Inactive)` 로 **probe 없이 회색 확정**(race 우회).
+    /// Timeout/NoTarget 은 불확실 → `None`(호출자가 probe 폴백 refresh_icon). Icon/스레드 부수효과
+    /// 없이 분기만 떼어 단위테스트한다(race 우회 라우팅 회귀 방지).
+    fn icon_state_for_stop_outcome(outcome: discovery::StopOutcome) -> Option<core::IconState> {
+        match outcome {
+            // 연결 닫힘 = 꺼짐 확정 → probe 없이 회색.
+            discovery::StopOutcome::DaemonClosed => Some(core::IconState::Inactive),
+            // 불확실(데몬이 아직 정리 중일 수 있음) / 끌 대상 없었음 → probe 폴백.
+            discovery::StopOutcome::Timeout | discovery::StopOutcome::NoTarget => None,
         }
     }
 
@@ -396,10 +463,25 @@ mod windows_main {
                 return;
             }
 
-            // 워커(ensure_daemon)가 완료를 알리면 probe 로 재확인해 아이콘을 컬러/회색으로 교체.
+            // 워커(켜기/폴백)가 완료를 알리면 probe 로 재확인해 아이콘을 컬러/회색으로 교체.
             // set_icon 은 메인 스레드 전용이라 이 회수 지점(메인)에서만 부른다.
             if let Event::UserEvent(UserEvent::DaemonStateChanged) = event {
                 refresh_icon(&tray_icon, &icons, &probe);
+                return;
+            }
+
+            // 끄기 워커가 send_stop 결과(StopOutcome)를 올리면, probe race 를 우회해 아이콘을 결정한다.
+            //   - DaemonClosed → probe 없이 회색 확정(연결 닫힘 = 꺼짐). PID probe 의 false-live race 회피.
+            //   - Timeout/NoTarget → probe 폴백(refresh_icon — 불확실하니 진실원천 재확인).
+            if let Event::UserEvent(UserEvent::DaemonStopOutcome(outcome)) = event {
+                match icon_state_for_stop_outcome(outcome) {
+                    Some(state) => {
+                        if let Some(tray) = &tray_icon {
+                            set_icon_state(tray, &icons, state);
+                        }
+                    }
+                    None => refresh_icon(&tray_icon, &icons, &probe),
+                }
                 return;
             }
 
@@ -435,19 +517,49 @@ mod windows_main {
                     let proxy = worker_proxy.clone();
                     std::thread::spawn(move || {
                         // ★회수 신호 RAII 가드(켜기·끄기 공용)★: 클로저 진입 즉시 가드를 만들어 두면
-                        //   아래 dispatch 가 정상 끝나든 panic 으로 unwind 하든 Drop 이 DaemonStateChanged
-                        //   를 정확히 1회 보낸다(워커 panic 시에도 아이콘 stale 고착 방지). 본문에서 따로
-                        //   send 하지 않는다(이중 전송 방지 — 가드가 단일 경로).
-                        let _signal = SignalOnDrop(proxy);
-                        let l = RealLauncher {
-                            data_dir: worker_data_dir,
-                        };
-                        // 성공/실패 무관하게 회수는 가드가 한다 — probe 가 진실원천이라 메인은 신호를
-                        // 받아 재확인만 한다(켜기: 실패해도 데몬이 이미 떠 있을 수 있고 성공해도 probe 로
-                        // 확정 / 끄기: 일방 발사라 데몬이 아직 정리 중이면 probe 가 alive 일 수 있다 —
-                        // 그땐 아이콘이 컬러로 남고 다음 클릭/refresh 때 갱신, send_stop 주석의 거동).
-                        if let Err(e) = core::dispatch(action, &l) {
-                            tracing::error!("[tray-host] 데몬 액션(worker) 실패 [{action:?}]: {e}");
+                        //   아래 작업이 정상 끝나든 panic 으로 unwind 하든 Drop 이 신호를 정확히 1회 보낸다
+                        //   (워커 panic 시에도 아이콘 stale 고착 방지). 본문에서 직접 send 하지 않는다 —
+                        //   회수는 가드 Drop 단일 경로(이중 전송/race 방지, SignalOnDrop 주석).
+                        //   기본 신호 = DaemonStateChanged(probe 폴백). 끄기 정상 종료 시 set_signal 로
+                        //   DaemonStopOutcome(결과)로 바꿔 probe 우회한다.
+                        let mut signal = SignalOnDrop::new(proxy);
+                        match action {
+                            // ── 끄기: send_stop 결과(StopOutcome)로 아이콘 결정(probe race 우회) ──
+                            // core::dispatch(stop_daemon)는 결과를 버려 race 를 못 막는다 → discovery
+                            // 를 직접 호출해 StopOutcome 을 받는다(트레이 shell 은 discovery 의존 가능,
+                            // core.rs 순수성과 무관). 정상 종료면 set_signal 로 그 결과를 메인에 올린다.
+                            MenuAction::StopDaemon => {
+                                match discovery::send_stop(&worker_data_dir) {
+                                    Ok(outcome) => {
+                                        // token 미노출(send_stop 내부에서만 다룸 — 여기엔 outcome enum 만).
+                                        tracing::info!(
+                                            ?outcome,
+                                            "[tray-host] 데몬 graceful stop 결과"
+                                        );
+                                        // 정상 종료 → probe 우회 신호로 교체. DaemonClosed 면 메인이 회색
+                                        // 확정, Timeout/NoTarget 이면 메인이 probe 폴백(아래 메인 arm).
+                                        signal.set_signal(UserEvent::DaemonStopOutcome(outcome));
+                                    }
+                                    Err(e) => {
+                                        // 송신/접속 실패 — set_signal 안 함 → 기본 DaemonStateChanged(probe
+                                        // 폴백)로 안전 회수. token 은 DiscoveryError 에 안 실린다(discovery 보안).
+                                        tracing::error!("[tray-host] 데몬 끄기(worker) 실패: {e}");
+                                    }
+                                }
+                            }
+                            // ── 켜기(및 그 외 워커 액션): 기존 dispatch + probe 폴백 경로 유지 ──
+                            // ensure 는 성공해도 실패해도 probe 가 진실원천이라 가드 기본 신호
+                            // (DaemonStateChanged)로 메인이 재확인한다(set_signal 안 함).
+                            _ => {
+                                let l = RealLauncher {
+                                    data_dir: worker_data_dir,
+                                };
+                                if let Err(e) = core::dispatch(action, &l) {
+                                    tracing::error!(
+                                        "[tray-host] 데몬 액션(worker) 실패 [{action:?}]: {e}"
+                                    );
+                                }
+                            }
                         }
                     });
                 } else if let Err(e) = core::dispatch(action, &launcher) {
@@ -502,6 +614,28 @@ mod windows_main {
             // "alive면 컬러, dead면 회색"으로 일관(중간 매핑이 뒤집히면 여기서 잡힌다).
             assert!(icon_uses_color(core::icon_state_for(true)));
             assert!(!icon_uses_color(core::icon_state_for(false)));
+        }
+
+        #[test]
+        fn stop_outcome_daemon_closed_forces_gray_others_fall_back() {
+            // S13 sub-step 2 race 수정의 핵심 분기: DaemonClosed(연결 닫힘=꺼짐 확정)는 probe 우회로
+            // 회색(Inactive) 확정, Timeout/NoTarget 은 probe 폴백(None). 이 라우팅이 뒤집히면 끄기 후
+            // 아이콘이 컬러로 고착(원래 버그)되거나, 불확실 상태를 멋대로 회색 확정해 버린다.
+            assert_eq!(
+                icon_state_for_stop_outcome(discovery::StopOutcome::DaemonClosed),
+                Some(core::IconState::Inactive),
+                "DaemonClosed 는 probe 없이 회색 확정"
+            );
+            assert_eq!(
+                icon_state_for_stop_outcome(discovery::StopOutcome::Timeout),
+                None,
+                "Timeout 은 probe 폴백(None)"
+            );
+            assert_eq!(
+                icon_state_for_stop_outcome(discovery::StopOutcome::NoTarget),
+                None,
+                "NoTarget 은 probe 폴백(None)"
+            );
         }
 
         #[test]

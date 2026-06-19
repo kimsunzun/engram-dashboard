@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use std::path::PathBuf;
 
-use engram_dashboard_discovery::{daemon_status, send_stop};
+use engram_dashboard_discovery::{daemon_status, send_stop, StopOutcome};
 
 /// 빌드된 데몬 .exe 경로. discovery::locate_daemon_exe 는 current_exe(deps/) / cwd 기준이라 통합
 /// 테스트 실행 디렉토리(crate 폴더)에선 워크스페이스 target 을 못 짚는다. 여기선 CARGO_MANIFEST_DIR
@@ -157,8 +157,16 @@ fn send_stop_makes_real_daemon_self_exit() {
     );
 
     // ★핵심: send_stop 실호출★ — 살아있는 데몬에 graceful StopDaemon 일방 발사.
-    // (a) 에러 없이 반환해야 한다(일방 발사 송신 성공).
-    send_stop(&data_dir).expect("send_stop 이 에러 없이 반환(일방 발사 송신 성공)");
+    // (a) 에러 없이 반환 + (a') 데몬이 graceful 하게 연결을 닫아 DaemonClosed 여야 한다.
+    //     DaemonClosed = drain read 에서 데몬이 self-exit 하며 연결을 닫은 것을 관측 = 꺼짐 확정 신호
+    //     (트레이가 이 신호로 PID probe race 없이 아이콘을 회색 확정한다 — StopOutcome 주석).
+    let outcome = send_stop(&data_dir).expect("send_stop 이 에러 없이 반환(일방 발사 송신 성공)");
+    assert_eq!(
+        outcome,
+        StopOutcome::DaemonClosed,
+        "데몬이 graceful 하게 연결을 닫아 DaemonClosed 여야(꺼짐 확정 신호). \
+         Timeout 이면 데몬이 3s 내 연결을 안 닫은 것 — StopDaemon 처리/타이밍 의심"
+    );
 
     // (b) 데몬이 graceful self-exit 해 OS 프로세스 목록에서 사라져야 한다(진실원천 = tasklist;
     //     daemon_status 는 본 테스트 하네스의 핸들 보유로 false-live 라 쓰지 않음 — pid_in_tasklist
