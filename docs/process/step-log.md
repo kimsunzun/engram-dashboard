@@ -208,6 +208,14 @@
 - **★리뷰 rot 방지 메모(다음 세션 필독)★:** ① **끄기 진입점 비대칭** — 운영 끄기는 트레이 워커가 `discovery::send_stop`을 **직접** 호출(StopOutcome 을 LaunchError 가 못 올려서). `RealLauncher::stop_daemon`·`core::dispatch(StopDaemon)`은 운영 경로에서 미사용(테스트·향후 LLM 제어 표면용 존속). **C4 owner 상태머신(sub-step 3)에서 단일 진입점 통합 예정** — 두 경로 동작 차이 모르고 한쪽만 고치지 말 것(§5 단일 control surface 와 임시로 어긋남). ② **S13 끄기 변경 시** `cargo test -p engram-dashboard-discovery --test stop_smoke -- --ignored --test-threads=1` **필수 실행**(분류 정확성 end-to-end 검증이 #[ignore]라 자동 회귀망 밖).
 - **다음:** ① 트레이 클릭 E2E(끄기→회색) 사용자 수동 최종 확인 ② sub-step 2 나머지: UI 열기/닫기·완전 종료(C4 상태머신)·clientFactory 기본 daemon flip ③ 외부/크래시 죽음 아이콘 동기화(주기 probe 또는 상시 연결 = ADR-0024 C2 완전형).
 
+### 2026-06-19 (dashboard9) — ★토폴로지 롤백★ 3프로세스→2프로세스(트레이를 Tauri 앱에 통합), ADR-0026
+
+- **무엇/왜:** S13 "UI 열기" 설계 중, 별도 트레이 프로세스가 별도 UI 프로세스 창을 제어하려면 크로스-프로세스 IPC가 필요함이 드러남. OSS 조사(VS Code·Docker·Tailscale·Syncthing·Zellij) 결과 **트레이+GUI 별도 프로세스 선례 없음**(전부 한 프로세스). 분리 명분(WebView ~150MB 회피)은 개발 워크스테이션 + hide 수용으로 붕괴, 별도 트레이는 §5 LLM 제어/cdp 표면 밖. → **ADR-0023(3프로세스) 폐기, ADR-0026(2프로세스: 트레이를 앱에 통합, 데몬 별도) 확정.**
+- **`/consult` 교차검증(job `20260619-215927-consult-tray-app-merge`):** 3종 전원 롤백 찬성. 가장 신뢰=Claude. **버린 주장:** Gemini의 "데몬을 앱 Job KILL_ON_JOB_CLOSE로 동반 종료"=불변식(데몬 독립 생존, ADR-0024 C1) 정면 위반 → 폐기. **건진 보정:** GPT — 네이티브 트레이 팝업은 WebView DOM 아니라 cdp 직클릭 불가 → 트레이 액션을 Tauri command로 노출해 같은 surface로 LLM 검증.
+- **유지 불변식(ADR-0023의 진짜 자산):** ① 로컬 제어 평면(창/트레이/데몬 lifecycle, named pipe·함수호출) vs 원격 데이터 평면(WS/HTTPS+token) 분리 ② 데몬 detached/breakaway(앱 자식 아님) ③ X=hide ④ 데몬 선택=client측 profile/context(1:N). 여러 데몬은 데이터 평면(flip) 영역 — 트레이의 로컬 데몬 lifecycle과 직교.
+- **1단계 구현(이 커밋, 미push):** `engram-tray-host` crate 외과적 제거. 순수 로직(`MenuAction`/`IconState`/`icon_state_for`/`to_grayscale_rgba` + 테스트 **9개**)을 `src-tauri/src/tray/core.rs`로 이관(tauri/discovery import 0, load-bearing 주석 보존). 버림: `Launcher`/`DaemonProbe`/`dispatch`/`causes_tray_exit`/`icon_state_from_probe`(통합 앱은 트레이 핸들러가 discovery command 직접 호출 — seam 불필요). workspace member 제거. 동작 변경 0. 코더→reviewer-deep(회귀 없음 전항목 PASS, build/test/fmt 직접 재현)→게이트 통과.
+- **다음:** 2단계 = 트레이 재구축(Tauri 네이티브 트레이 + 메뉴[데몬 켜기/끄기·UI 보이기/숨기기·완전 종료] + X=hide + 데몬 ensure/stop 배선). 3단계 = single-instance(hidden raise: show→unminimize→set_focus + focus-stealing 회피) + autostart(`--hidden`). spike 4종(WebView2 hidden 메모리·hidden raise·updater 중 데몬 reconnect·앱 크래시 후 데몬 재발견).
+
 ---
 
 ## 다음 (미진행)
