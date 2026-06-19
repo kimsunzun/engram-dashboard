@@ -28,6 +28,10 @@
 // core 는 플랫폼 무관 순수 로직 — 항상 컴파일(테스트도 여기서 돈다).
 mod core;
 
+// 트레이 싱글 인스턴스 가드(named mutex). windows/OS 의존이라 core.rs 와 분리(core 는 순수 유지).
+// non-windows 는 stub(트레이 GUI 자체가 Windows 전용). run() 진입 직후 체크한다.
+mod instance;
+
 #[cfg(windows)]
 fn main() {
     windows_main::run();
@@ -238,6 +242,39 @@ mod windows_main {
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
             )
             .try_init();
+
+        // ★트레이 싱글 인스턴스 가드(load-bearing) — 트레이 아이콘/이벤트 루프를 만들기 전에 체크★:
+        //   두 번째 실행은 기존 트레이에 양보하고 **즉시 조용히 종료**한다(아이콘 중복 방지 —
+        //   실측: 3번 실행 → 3개 프로세스·3개 아이콘이 쌓이던 문제). 데몬 instance.rs 와 같은
+        //   named mutex 패턴이고 이름만 트레이 전용(`Global\EngramTrayHost-<user>`, 데몬과 충돌 X).
+        //   data_dir 결정·EventLoop 생성보다 앞에서 판정해 두 번째 인스턴스가 자원을 만들기 전에 빠진다.
+        //   ★가드 핸들 수명★: 반환된 `_guard` 는 이 run() 스코프 변수로 잡혀 함수가 사는 동안(=프로세스
+        //   수명 내내) 살아 있어야 한다 — drop 되면 mutex 가 풀려 다른 인스턴스가 진입 가능. run() 은
+        //   event_loop.run(...) 으로 끝에서 diverge(!)하므로 _guard 가 이 스코프에 묶여 끝까지 산다.
+        //   프로세스 종료 시 OS 가 mutex 를 자동 해제하므로 별도 정리 코드는 불필요.
+        //   ★Err 시 강행(load-bearing) — 데몬 instance 정책을 트레이에 복사하지 말 것★: 트레이는
+        //   데몬과 달리 단일성이 데이터 정합성이 아니라 UX(아이콘 중복) 문제다. 그래서 가드 생성
+        //   실패(CreateMutexW 시스템 오류, 매우 드묾) 시 미기동(아이콘 부재 = 데몬/UI 제어 진입점을
+        //   통째로 상실)보다 강행(중복 위험 감수)이 사용자에게 낫다 — 아이콘 부재 > 아이콘 중복.
+        //   타입은 Option<InstanceGuard>: None 이어도 run() 동안 그대로 살아 무해하다(아무것도 안 함).
+        //   ★`_guard` 이름 바인딩 유지(언더스코어 `_` 단독 금지)★ — `let _ = ...` 이면 가드가 즉시
+        //   drop 돼 mutex 가 곧장 풀린다. 이름 있는 변수여야 run() 끝까지 산다.
+        let _guard: Option<crate::instance::InstanceGuard> = match crate::instance::acquire() {
+            Ok(Some(guard)) => Some(guard), // 우리가 첫 트레이 인스턴스 — 가드를 끝까지 보유.
+            Ok(None) => {
+                // 이미 다른 트레이가 떠 있음 — 기존에 양보하고 즉시 종료(표준 싱글 인스턴스 동작).
+                tracing::info!("[tray-host] 이미 트레이 인스턴스가 떠 있어 종료");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                // mutex 생성 자체가 실패(시스템 오류) — 위 주석대로 미기동보다 강행이 낫다.
+                // 경고만 남기고 가드 없이(None) 계속 진행한다(중복 방지는 못 하지만 트레이는 뜬다).
+                tracing::warn!(
+                    "[tray-host] 싱글 인스턴스 가드 생성 실패 — 중복 방지 없이 강행: {e}"
+                );
+                None
+            }
+        };
 
         // data_dir(.engram-data 절대경로)을 **시작 시 1회** 결정해 Launcher/Probe 가 공유한다(매
         // 호출 재계산 X — daemon·embedded·tray-host 세 프로세스가 같은 폴더를 보는 단일 출처, ADR-0024).

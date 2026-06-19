@@ -27,6 +27,12 @@ tao = "0.31"
 tray-icon = "0.24.1"
 # icon.ico → RGBA 픽셀 디코드(tray-icon Icon::from_rgba 에 주입).
 image = { version = "0.25", features = ["ico"] }
+# 트레이 싱글 인스턴스 가드(named mutex). 데몬 instance.rs 와 동일 0.58 버전·동일 패턴
+# (CreateMutexW + ERROR_ALREADY_EXISTS). 이름만 트레이 전용(EngramTrayHost-<user>).
+windows = { version = "0.58", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }
 
 # Common Controls v6 매니페스트를 exe 에 임베드(build.rs). 이게 없으면 트레이 메뉴(muda)가
 # 참조하는 TaskDialogIndirect(comctl32 v6) 를 못 찾아 로드 타임에 시작 실패한다. Tauri 는 자동
