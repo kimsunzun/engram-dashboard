@@ -8,7 +8,6 @@ members = [
     "crates/engram-dashboard-core",
     "crates/engram-dashboard-discovery",
     "crates/engram-dashboard-daemon",
-    "crates/engram-tray-host",
     "src-tauri",
 ]
 

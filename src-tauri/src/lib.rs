@@ -3,6 +3,8 @@ pub mod commands;
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다(중복 코드 0).
 pub use engram_dashboard_discovery as discovery;
 pub mod embedded_carrier;
+// ADR-0026 1단계: 구 engram-tray-host crate 의 순수 로직만 이관(트레이 배선은 다음 단계).
+mod tray;
 
 // S12 phase 1: agent(구 pty)/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
 use engram_dashboard_core::{agent, logging, persistence};
