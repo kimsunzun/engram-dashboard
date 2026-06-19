@@ -197,6 +197,14 @@
 - **prior-art 조사(graceful 끄기):** `/prior-art` 3에이전트(Docker/Ollama/Tailscale·Discord/Steam/OneDrive·LSP/systemd/표준) → ADR-0024 "트레이 graceful StopDaemon(WS+토큰)+taskkill 폴백" 모델 재확인. 정설=데몬이 control 채널 노출+다중 클라 같은 진입점(§5 정합), graceful은 타임아웃+강제 폴백과 한 쌍, loopback+토큰 보안. 차용 후보 Tailscale(BSD). ※메인이 한때 "트레이 graceful 불가→taskkill"로 ADR 재론한 사고 있었음(ADR 재독으로 교정).
 - **다음(결정 대기):** 트레이 실제 데몬 배선 — **graceful 끄기 구현 순서 a/b 사용자 결정 필요**(트레이에 one-shot WS 접속기를 이번에 vs 다음에). 그 후 ensure/status→아이콘(워커+proxy 비동기) · graceful 끄기 · 이후 UI 열기/닫기·clientFactory flip. 상세 핸드오프: `.ccb/history/2026-06-19-S13-트레이-data_dir-연결대기-graceful결정대기.md`.
 
+### 2026-06-19 (dashboard8) — S13 sub-step 2 "1차": 트레이 실제 데몬 켜기 배선 + 콘솔/싱글인스턴스 수정
+- **CLAUDE.md 협업·브리핑 방식 초안(커밋 `12b63d7`):** 결정은 동작·정책 언어로 번역(사용자 체감=사용자 결정 / 순수 내부 구현=메인이 정하되 보고)·용어 점진 노출(처음 한 줄 풀이)·2층 브리핑(개념 합의→용어 풀 브리핑)·표준 4단(개념흐름→시나리오체크→용어브리핑→수용기준)·작은 기능 PRD/TRD 묶기. PRD/TRD 경계 논쟁이 끝없자 멈추고 "사용자 협업·브리핑 방식" 섹션으로 박음(초안, 나중 정리). 기존 "결정권은 사용자" 기조 보완(순서 불변·ADR 강제 유지).
+- **트레이 켜기 배선(커밋 `ceae813`):** StubProbe/StubLauncher → RealProbe/RealLauncher. `ensure_daemon`(discovery WMI, detached ADR-0024 C1)만 실제 구현 — stop/open/close/shutdown은 2차 graceful용 stub 유지(의도적). 워커 std::thread + EventLoopProxy로 비동기 회수(메인 루프 블록 방지), `SignalOnDrop` RAII로 워커 panic 시에도 회수 1회 보장, `StartCause::Init`에서 probe로 초기 아이콘 색. 단발 갱신 한계(ensure 실패+지연부팅 시 회색 고착)=의도적(주기감지는 2차 owner 상태머신). 연타 시 데몬 다중 spawn은 데몬 named mutex가 흡수(주석). 코더(opus)→reviewer-deep(Major 2건 적출)→QA, tray 17 test, 사용자 트레이 클릭 E2E로 켜기 실측 확인.
+- **데몬 콘솔 가시성(커밋 `e33ebaa`):** 트레이 켜기 실측에서 데몬 콘솔 창이 떴음 — 데몬이 콘솔 앱(`windows_subsystem` 미설정)이라 WMI spawn해도 OS가 콘솔 attach(디버그/릴리즈 무관, "디버그라서"가 아님). `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`로 디버그=콘솔 창(로그)/릴리즈=무창(사용자 결정). discovery WMI "콘솔 안 뜸" 단정 주석 정정(서브시스템 의존) + 릴리즈 빌드에서 드러난 dead_code(find/is_workspace_root, 디버그 전용 분기) `cfg_attr allow`. **ADR-0021 §6 보강.**
+- **트레이 싱글 인스턴스 가드(커밋 `7d5e312`):** 사용자가 트레이 3번 실행 → 프로세스 3개 = 아이콘 3개 쌓임(실측, ghost 아님). named mutex `Global\EngramTrayHost-<user>` 가드(신규 `instance.rs`) — 두 번째 실행은 즉시 `exit(0)` 양보. 데몬 패턴 차용, 이름만 트레이 전용(동시 기동 가능). ★데몬과 다른 정책★: 가드 실패(드묾) 시 데몬=미기동(exit1)이지만 트레이=강행(단일성=UX, 아이콘 부재>중복). 코더→reviewer-deep(핸들 수명 라인 증명·Err 정책 적출)→QA 실측(2·3번째 exit0 즉시, 최종 1개). **ADR-0023 보강.** tray test 18.
+- **게이트(전 단계 강제):** 비자명 변경마다 코더(opus)→reviewer-deep→QA(빌드/test+실측). 전부 fmt/build/test green, core 순수성(discovery/tao/tray_icon import 0)·ADR-0024 직접 spawn 금지 유지. master 로컬 4커밋, push 안 함.
+- **다음(2차):** 끄기 graceful — discovery에 `send_stop`(WS 일방 발사, ack 미대기) 신규 + 트레이 stop 배선. 강제 폴백/주기 감지는 이어붙일 자리만 둠(사용자 결정: 응답 없으면 활성 유지, 다시 누르면 재발사 — 강제·ack대기는 나중).
+
 ---
 
 ## 다음 (미진행)
