@@ -17,6 +17,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 트레이 GUI 의존(Windows 전용). core 로직은 이 의존을 import 하지 않는다(순수 분리).
 [target.'cfg(windows)'.dependencies]
+# S13 sub-step 2: 실제 데몬 발견/spawn/상태 조회. discovery 호출은 main.rs(GUI shell)에서만 —
+# core.rs 는 이 의존을 import 하지 않는다(순수 분리 유지). discovery 가 데몬 spawn 을 WMI 로
+# 수행하므로(detached, ADR-0024 C1) windows 전용 의존이다.
+engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
 # 이벤트 루프(Windows 에서 트레이는 메인 스레드 이벤트 루프 필수).
 tao = "0.31"
 # 트레이 아이콘 + 컨텍스트 메뉴. tao EventLoop 와 TrayIconEvent/MenuEvent 채널로 통합.

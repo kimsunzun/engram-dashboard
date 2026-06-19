@@ -1189,6 +1189,7 @@ name = "engram-tray-host"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "engram-dashboard-discovery",
  "image",
  "tao 0.31.1",
  "thiserror 1.0.69",
