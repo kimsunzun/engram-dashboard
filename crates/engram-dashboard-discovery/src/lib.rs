@@ -134,6 +134,9 @@ fn release_data_dir_from_exe(exe: &Path) -> Option<PathBuf> {
 ///
 /// 루트 마커: 그 디렉토리에 `.git` 이 있거나, `Cargo.toml` 이 `[workspace]` 섹션을 포함.
 /// 못 찾으면 None(호출자가 fallback). `start` 가 파일이면 그 부모부터, 디렉토리면 자신부터 본다.
+// 디버그 전용: default_data_dir 의 `#[cfg(debug_assertions)]` 분기에서만 호출된다(릴리즈는
+// release_data_dir_from_exe 사용). 릴리즈 빌드에선 호출처가 cfg-out 돼 dead_code 가 되므로 allow.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     // 파일(exe)이면 부모 디렉토리부터, 디렉토리면 그 자신부터 위로.
     let mut cur: Option<&Path> = if start.is_dir() {
@@ -151,6 +154,8 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// 한 디렉토리가 workspace 루트인지 판정: `.git` 존재 또는 `Cargo.toml` 에 `[workspace]` 포함.
+// 디버그 전용(find_workspace_root 와 동일 이유) — 릴리즈에선 dead_code.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn is_workspace_root(dir: &Path) -> bool {
     if dir.join(".git").exists() {
         return true;
@@ -643,11 +648,14 @@ fn wmi_spawn(exe: &Path, console: bool) -> Result<(), DiscoveryError> {
     //   CREATE_NO_WINDOW(0x08000000) 을 받으면 ReturnValue=21(Invalid Parameter) 로 거부한다
     //   (알려진 WMI quirk — CREATE_NO_WINDOW 는 CreateProcess 직접 호출용이며 WMI Create 의
     //   허용 플래그 집합 밖이다). 그래서 windowless 기본은 **CreateFlags 를 아예 안 넘긴다**:
-    //     - windowless(console=false) → ProcessStartupInformation 자체 생략(create_flags=None).
-    //       WMI-spawn 프로세스는 WmiPrvSE 자식이라 **비대화형 컨텍스트**에서 떠 콘솔 창이
-    //       애초에 나타나지 않는다. 플래그 불필요 → RV=0.
-    //     - console=true → CREATE_NEW_CONSOLE(0x10): 허용 플래그라 RV=0, 별도 콘솔 창과 함께
-    //       뜬다(디버그 로그 가시화).
+    //     - windowless(console=false) → ProcessStartupInformation 자체 생략(create_flags=None). RV=0.
+    //       ★주의(2026-06-19 실측 정정)★: 콘솔 창 노출 여부는 여기 플래그가 아니라 **데몬 exe 의
+    //       서브시스템**에 달렸다. 데몬은 디버그=콘솔 앱(`windows_subsystem` 미설정) → WMI-spawn 시
+    //       콘솔 창이 **뜬다**(로그용, 의도) / 릴리즈=windows 앱(`#![cfg_attr(not(debug_assertions),
+    //       windows_subsystem="windows")]`) → 콘솔 창 **없음**. 옛 주석은 "WmiPrvSE 자식이라 콘솔이
+    //       애초에 안 뜬다"고 단정했으나 콘솔 앱에선 거짓이었다 — windowless 는 WMI 플래그가 아니라
+    //       데몬 서브시스템으로만 달성된다(CREATE_NO_WINDOW 는 위 RV=21 로 막혀 WMI 로는 불가).
+    //     - console=true → CREATE_NEW_CONSOLE(0x10): 허용 플래그라 RV=0, 별도 콘솔 창과 함께 뜬다.
     const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
     let create_flags: Option<i32> = if console {
         Some(CREATE_NEW_CONSOLE)
