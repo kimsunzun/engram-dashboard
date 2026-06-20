@@ -6,74 +6,68 @@
 //! (통합 앱은 트레이 핸들러가 discovery command 를 직접 부르므로 이 seam 불필요 — TRD §2).
 //!
 //! core.rs 순수성 유지 — tauri/discovery import 0(슬라이스/enum 만 다룬다, CLAUDE.md §4).
-//! 아직 호출자가 없어(트레이 배선은 다음 단계) 항목마다 `#[allow(dead_code)]` 로 unused 차단.
+//!
+//! ## ADR-0026 2단계: MenuAction 5개로 재정리(트레이=앱 통합)
+//! 통합으로 "트레이 종료"(QuitTray)는 무의미해져 삭제(트레이=앱 → 트레이만 끄기 불가). 6→5:
+//! StartDaemon/StopDaemon/ShowUi/HideUi/QuitApp. 라벨도 "UI 열기/닫기" → "UI 보이기/숨기기"
+//! (창 show/hide 가 실제 동작 — destroy 가 아님), "완전 종료" → QuitApp.
 
 // ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
 
 /// 트레이 메뉴 클릭이 표현하는 **의도**(렌더링/원천과 분리된 단일 enum).
 /// 사람 클릭·LLM 호출·단축키가 모두 이 의도로 수렴한다(CLAUDE.md §5 손발/두뇌).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
 pub enum MenuAction {
-    /// "데몬 켜기" — 데몬 ensure.
+    /// "데몬 켜기" — 데몬 ensure(discovery WMI spawn). blocking → 워커.
     StartDaemon,
-    /// "데몬 끄기" — 데몬만 graceful stop(UI 무관).
+    /// "데몬 끄기" — 데몬만 graceful stop(UI 무관). blocking → 워커.
     StopDaemon,
-    /// "UI 열기" — UI open(show/focus or spawn).
-    OpenUi,
-    /// "UI 닫기" — UI 만 종료(데몬 무관).
-    CloseUi,
-    /// "트레이 종료" — 트레이 프로세스만 종료. 데몬·UI 는 detached 로 계속 돈다(Launcher 호출 없음).
-    QuitTray,
-    /// "완전 종료" — 전체 종료(데몬+UI graceful), 이후 tray-host 자기 종료(ADR-0024 C4).
-    ShutdownAll,
+    /// "UI 보이기" — main 창 show()+unminimize()+set_focus(). 프로세스 내부, IPC 없음.
+    ShowUi,
+    /// "UI 숨기기" — main 창 hide(). X=hide(prevent_close)와 같은 종착.
+    HideUi,
+    /// "완전 종료" — best-effort 데몬 graceful stop 후 app.exit(0). 진짜 종료는 이것뿐(ADR-0026).
+    QuitApp,
 }
 
 impl MenuAction {
-    /// 메뉴 항목의 안정 id(tray-icon MenuItem 의 id 문자열로 사용).
+    /// 메뉴 항목의 안정 id(Tauri MenuItem 의 id 문자열로 사용).
     /// 디스플레이 라벨과 분리 — 라벨이 바뀌어도 id 는 불변(클릭 매핑 안정).
-    #[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
     pub const fn menu_id(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "start_daemon",
             MenuAction::StopDaemon => "stop_daemon",
-            MenuAction::OpenUi => "open_ui",
-            MenuAction::CloseUi => "close_ui",
-            MenuAction::QuitTray => "quit_tray",
-            MenuAction::ShutdownAll => "shutdown_all",
+            MenuAction::ShowUi => "show_ui",
+            MenuAction::HideUi => "hide_ui",
+            MenuAction::QuitApp => "quit_app",
         }
     }
 
     /// 메뉴 항목의 고정 라벨(상태 비반영).
-    #[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
     pub const fn label(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "데몬 켜기",
             MenuAction::StopDaemon => "데몬 끄기",
-            MenuAction::OpenUi => "UI 열기",
-            MenuAction::CloseUi => "UI 닫기",
-            MenuAction::QuitTray => "트레이 종료",
-            MenuAction::ShutdownAll => "완전 종료",
+            MenuAction::ShowUi => "UI 보이기",
+            MenuAction::HideUi => "UI 숨기기",
+            MenuAction::QuitApp => "완전 종료",
         }
     }
 
-    /// v1 메뉴에 노출되는 액션들(순서 = 표시 순서).
-    /// 표시: 데몬 켜기, 데몬 끄기, UI 열기, UI 닫기, (구분선), 트레이 종료, 완전 종료.
-    /// (구분선은 GUI shell 이 QuitTray 앞에 삽입 — core 는 액션만 안다.)
-    #[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
-    pub const ALL: [MenuAction; 6] = [
+    /// v2 메뉴에 노출되는 액션들(순서 = 표시 순서).
+    /// 표시: 데몬 켜기, 데몬 끄기, UI 보이기, UI 숨기기, (구분선), 완전 종료.
+    /// (구분선은 GUI shell 이 QuitApp 앞에 삽입 — core 는 액션만 안다.)
+    pub const ALL: [MenuAction; 5] = [
         MenuAction::StartDaemon,
         MenuAction::StopDaemon,
-        MenuAction::OpenUi,
-        MenuAction::CloseUi,
-        MenuAction::QuitTray,
-        MenuAction::ShutdownAll,
+        MenuAction::ShowUi,
+        MenuAction::HideUi,
+        MenuAction::QuitApp,
     ];
 }
 
 /// 메뉴 클릭 id → [`MenuAction`] 매핑(순수). 알 수 없는 id 면 None.
-/// tray-icon 의 MenuEvent.id 문자열을 받아 의도로 환원한다.
-#[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
+/// Tauri 의 MenuEvent.id 문자열을 받아 의도로 환원한다.
 pub fn action_for_menu_id(id: &str) -> Option<MenuAction> {
     MenuAction::ALL.into_iter().find(|a| a.menu_id() == id)
 }
@@ -83,7 +77,6 @@ pub fn action_for_menu_id(id: &str) -> Option<MenuAction> {
 /// 트레이 아이콘 상태. 데몬 생존을 시각화한다(활성=컬러/비활성=회색).
 /// 실제 아이콘 두 벌은 GUI shell 이 들고, core 는 어떤 상태인지만 결정한다(렌더링 분리).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
 pub enum IconState {
     /// 데몬 alive — 활성(컬러) 아이콘.
     Active,
@@ -92,7 +85,6 @@ pub enum IconState {
 }
 
 /// 데몬 alive(bool) → [`IconState`] 매핑(순수).
-#[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
 pub fn icon_state_for(alive: bool) -> IconState {
     if alive {
         IconState::Active
@@ -115,7 +107,6 @@ pub fn icon_state_for(alive: bool) -> IconState {
 /// `Icon::from_rgba(_, w, h)` 가 `len==w*h*4` 를 요구해 잔여가 있으면 그쪽에서 Err→expect panic
 /// 이라, 잔여를 살려도 "안전망"이 못 된다(전제 위반은 호출자 버그). 그래서 chunks_exact 의
 /// 잔여는 버린다 — 전제가 지켜지면 잔여 자체가 없다.
-#[allow(dead_code)] // 다음 단계(트레이 배선)에서 사용.
 pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     debug_assert_eq!(
         rgba.len(),
@@ -143,7 +134,7 @@ mod tests {
 
     #[test]
     fn menu_id_roundtrips_to_action() {
-        // id ↔ action 매핑이 일관(각 액션의 id 로 다시 그 액션이 나온다) — 6개 전부.
+        // id ↔ action 매핑이 일관(각 액션의 id 로 다시 그 액션이 나온다) — 전부.
         for action in MenuAction::ALL {
             assert_eq!(action_for_menu_id(action.menu_id()), Some(action));
         }
@@ -175,18 +166,17 @@ mod tests {
         match MenuAction::StartDaemon {
             MenuAction::StartDaemon => assert_in_all(MenuAction::StartDaemon),
             MenuAction::StopDaemon => assert_in_all(MenuAction::StopDaemon),
-            MenuAction::OpenUi => assert_in_all(MenuAction::OpenUi),
-            MenuAction::CloseUi => assert_in_all(MenuAction::CloseUi),
-            MenuAction::QuitTray => assert_in_all(MenuAction::QuitTray),
-            MenuAction::ShutdownAll => assert_in_all(MenuAction::ShutdownAll),
+            MenuAction::ShowUi => assert_in_all(MenuAction::ShowUi),
+            MenuAction::HideUi => assert_in_all(MenuAction::HideUi),
+            MenuAction::QuitApp => assert_in_all(MenuAction::QuitApp),
         }
         // 위 match 로 강제 인지된 variant 수와 ALL 길이가 일치하는지(중복/누락 동시 차단).
-        assert_eq!(MenuAction::ALL.len(), 6, "variant 수 ↔ ALL 길이 불일치");
+        assert_eq!(MenuAction::ALL.len(), 5, "variant 수 ↔ ALL 길이 불일치");
     }
 
     #[test]
     fn menu_ids_are_unique() {
-        // id 충돌이면 클릭 라우팅이 깨진다 — 6개 모두 distinct 보장.
+        // id 충돌이면 클릭 라우팅이 깨진다 — 모두 distinct 보장.
         let ids: Vec<&str> = MenuAction::ALL.iter().map(|a| a.menu_id()).collect();
         let mut dedup = ids.clone();
         dedup.sort_unstable();
@@ -196,7 +186,7 @@ mod tests {
 
     #[test]
     fn labels_are_unique_and_nonempty() {
-        // 라벨 6개가 모두 비지 않고 distinct(메뉴 표시 혼동 방지).
+        // 라벨이 모두 비지 않고 distinct(메뉴 표시 혼동 방지).
         let labels: Vec<&str> = MenuAction::ALL.iter().map(|a| a.label()).collect();
         assert!(labels.iter().all(|l| !l.is_empty()), "빈 라벨: {labels:?}");
         let mut dedup = labels.clone();

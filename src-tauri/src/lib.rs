@@ -3,7 +3,7 @@ pub mod commands;
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다(중복 코드 0).
 pub use engram_dashboard_discovery as discovery;
 pub mod embedded_carrier;
-// ADR-0026 1단계: 구 engram-tray-host crate 의 순수 로직만 이관(트레이 배선은 다음 단계).
+// ADR-0026 2단계: 트레이를 앱에 통합(네이티브 TrayIconBuilder 배선). core=순수, actions=공유 부수효과.
 mod tray;
 
 // S12 phase 1: agent(구 pty)/persistence/logging 은 engram-dashboard-core 로 이동. 여기선 re-import 만.
@@ -131,19 +131,28 @@ pub fn run() {
             let embedded = embedded_carrier::spawn_embedded_connection(core);
 
             app.manage(AppState { manager, embedded });
+
+            // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
+            // 아이콘 두 벌 생성·메뉴·핸들러 + setup 직후 데몬 상태로 아이콘 확정. Windows 전용.
+            if let Err(e) = tray::build_tray(app) {
+                tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
+            }
             Ok(())
         })
-        // 버그 수정: tauri.conf.json 이 hidden 창 2개(agent-tree·slot-popup)를 시작 시 생성한다.
-        // Tauri 는 "모든 창이 닫혀야 종료"라 main(X버튼)을 닫아도 hidden 창이 남아 프로세스가 좀비로
-        // 잔존한다. main 창의 CloseRequested(WM_CLOSE/X버튼)를 Rust 측에서 받아 app.exit(0) 로 앱 전체를
-        // 종료한다 → hidden 창 포함 정리되고, 종료 시 RunEvent::ExitRequested 의 shutdown_all() 이 그대로 탄다.
-        // (label=="main": conf 첫 창은 label 미지정 → Tauri 기본 라벨 "main".)
-        // agent-tree/slot-popup 을 단독으로 닫는 경우는 기존대로(그 창만) — main 만 exit 으로 연결.
+        // ADR-0026 2단계: X = hide(앱 종료 아님). 트레이=앱 통합이라 main 의 X(WM_CLOSE)는 창만
+        // 숨기고 프로세스는 트레이로 상주한다 — 진짜 종료는 트레이 "완전 종료"(app.exit(0))뿐.
+        // CloseRequested 를 prevent_close 로 취소하고 window.hide() 한다.
+        // (구 동작 = app.exit(0). 폐기 — ADR-0026: X=hide.)
+        // ★main 만 hide★: agent-tree/slot-popup(hidden 창)은 기존대로 단독 close 처리. main 라벨만
+        //  prevent_close — conf 첫 창은 label 미지정이라 Tauri 기본 라벨 "main".
         // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
+        // hidden 창 좀비 우려(구 주석)는 X=hide 로 무관 — 앱이 트레이로 상주하므로 main 을 닫아도
+        // 프로세스가 살아있고, 완전 종료(app.exit)가 RunEvent::ExitRequested → shutdown_all 을 탄다.
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    window.app_handle().exit(0);
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
             }
         })
@@ -155,6 +164,11 @@ pub fn run() {
             commands::daemon_start,
             commands::daemon_stop,
             commands::daemon_status,
+            // ADR-0026 2단계 §5: 트레이 동작의 LLM/cdp 제어 표면(트레이 핸들러와 같은 actions 함수).
+            //   데몬 켜기/끄기는 위 daemon_start/daemon_stop 재사용 → 여기엔 창/종료만.
+            commands::show_main_ui,
+            commands::hide_main_ui,
+            commands::quit_app,
             // ADR-0020 Stage 4a: 옛 개별 invoke(spawn/kill/profile/pty 14개)는 삭제 — 아래 generic
             //   agent_command 1개가 AgentCommand 전 variant 를 처리(embedded carrier → ConnectionCore).
             //   agent_connect 가 단일 outbound Channel 을 등록한다.
