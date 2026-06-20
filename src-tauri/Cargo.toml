@@ -46,6 +46,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", 
 # ADR-0020 Stage 2 blocker: command loop dispatch panic 격리(FutureExt::catch_unwind, async).
 # daemon 도 동일 버전(futures-util 0.3) 사용 — 좀비 연결 방지(panic 이 loop 를 죽이지 않게).
 futures-util = "0.3"
+tauri-plugin-autostart = "2"
 
 # S13 sub-step 2: WMI/COM·dirs 는 discovery crate 로 이관됨.
 # 커밋3 single-instance: embedded 폴더별 named-mutex 가드(src/instance.rs)가 windows API 재사용.

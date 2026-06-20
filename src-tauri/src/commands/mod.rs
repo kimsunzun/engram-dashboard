@@ -3,6 +3,9 @@
 pub mod discovery;
 // ADR-0026 2단계: 트레이 동작(창 show/hide/완전종료)의 §5 LLM 제어 표면(트레이 핸들러와 같은 함수).
 pub mod tray;
+// ADR-0027 §53~55: 부팅 자동 시작 토글(set/get_autostart) + 모드 즉시전환(set_mode self-relaunch).
+pub mod autostart;
 
+pub use autostart::*;
 pub use discovery::*;
 pub use tray::*;

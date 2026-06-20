@@ -28,6 +28,9 @@ pub enum MenuAction {
     HideUi,
     /// "완전 종료" — best-effort 데몬 graceful stop 후 app.exit(0). 진짜 종료는 이것뿐(ADR-0026).
     QuitApp,
+    /// "부팅 시 자동 시작" 토글(ADR-0027 §55) — autolaunch enable/disable 반전 + 체크 동기화.
+    /// 다른 액션과 달리 CheckMenuItem(체크 상태 보유)으로 렌더된다(GUI shell 책임).
+    ToggleAutostart,
 }
 
 impl MenuAction {
@@ -40,6 +43,7 @@ impl MenuAction {
             MenuAction::ShowUi => "show_ui",
             MenuAction::HideUi => "hide_ui",
             MenuAction::QuitApp => "quit_app",
+            MenuAction::ToggleAutostart => "toggle_autostart",
         }
     }
 
@@ -51,17 +55,19 @@ impl MenuAction {
             MenuAction::ShowUi => "UI 보이기",
             MenuAction::HideUi => "UI 숨기기",
             MenuAction::QuitApp => "완전 종료",
+            MenuAction::ToggleAutostart => "부팅 시 자동 시작",
         }
     }
 
     /// v2 메뉴에 노출되는 액션들(순서 = 표시 순서).
-    /// 표시: 데몬 켜기, 데몬 끄기, UI 보이기, UI 숨기기, (구분선), 완전 종료.
+    /// 표시: 데몬 켜기, 데몬 끄기, UI 보이기, UI 숨기기, 부팅 시 자동 시작, (구분선), 완전 종료.
     /// (구분선은 GUI shell 이 QuitApp 앞에 삽입 — core 는 액션만 안다.)
-    pub const ALL: [MenuAction; 5] = [
+    pub const ALL: [MenuAction; 6] = [
         MenuAction::StartDaemon,
         MenuAction::StopDaemon,
         MenuAction::ShowUi,
         MenuAction::HideUi,
+        MenuAction::ToggleAutostart,
         MenuAction::QuitApp,
     ];
 }
@@ -141,6 +147,17 @@ mod tests {
     }
 
     #[test]
+    fn toggle_autostart_id_label_roundtrip() {
+        // ADR-0027 §55 신규 액션의 id/label/매핑 고정(회귀 가드).
+        assert_eq!(MenuAction::ToggleAutostart.menu_id(), "toggle_autostart");
+        assert_eq!(MenuAction::ToggleAutostart.label(), "부팅 시 자동 시작");
+        assert_eq!(
+            action_for_menu_id("toggle_autostart"),
+            Some(MenuAction::ToggleAutostart)
+        );
+    }
+
+    #[test]
     fn unknown_menu_id_is_none() {
         assert_eq!(action_for_menu_id("nope"), None);
         assert_eq!(action_for_menu_id(""), None);
@@ -169,9 +186,10 @@ mod tests {
             MenuAction::ShowUi => assert_in_all(MenuAction::ShowUi),
             MenuAction::HideUi => assert_in_all(MenuAction::HideUi),
             MenuAction::QuitApp => assert_in_all(MenuAction::QuitApp),
+            MenuAction::ToggleAutostart => assert_in_all(MenuAction::ToggleAutostart),
         }
         // 위 match 로 강제 인지된 variant 수와 ALL 길이가 일치하는지(중복/누락 동시 차단).
-        assert_eq!(MenuAction::ALL.len(), 5, "variant 수 ↔ ALL 길이 불일치");
+        assert_eq!(MenuAction::ALL.len(), 6, "variant 수 ↔ ALL 길이 불일치");
     }
 
     #[test]

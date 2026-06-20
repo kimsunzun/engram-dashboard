@@ -16,11 +16,13 @@ pub mod core;
 use std::time::Duration;
 
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager};
 
-use actions::TRAY_ID;
+use tauri_plugin_autostart::ManagerExt;
+
+use actions::{AutostartCheck, TRAY_ID};
 use core::{IconState, MenuAction};
 
 use crate::discovery::StopOutcome;
@@ -74,9 +76,28 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     let stop = mi(MenuAction::StopDaemon)?;
     let show = mi(MenuAction::ShowUi)?;
     let hide = mi(MenuAction::HideUi)?;
+    // ADR-0027 §55: 자동 시작은 체크 가능 항목(CheckMenuItem). 초기 체크 = 현재 레지스트리 등록 여부.
+    // 등록 인자(--mode=daemon --hidden)는 init() 에서 박았고, 여기선 활성 여부만 읽어 체크에 반영.
+    let autostart_action = MenuAction::ToggleAutostart;
+    let autostart_checked = app.autolaunch().is_enabled().unwrap_or(false);
+    let autostart = CheckMenuItem::with_id(
+        handle,
+        autostart_action.menu_id(),
+        autostart_action.label(),
+        true,
+        autostart_checked,
+        None::<&str>,
+    )?;
     let sep = PredefinedMenuItem::separator(handle)?;
     let quit = mi(MenuAction::QuitApp)?;
-    let menu = Menu::with_items(handle, &[&start, &stop, &show, &hide, &sep, &quit])?;
+    // 순서: 데몬 켜기/끄기/UI 보이기/UI 숨기기/부팅 자동 시작/(구분선)/완전 종료 — core::ALL 과 일치.
+    let menu = Menu::with_items(
+        handle,
+        &[&start, &stop, &show, &hide, &autostart, &sep, &quit],
+    )?;
+
+    // 토글 시 set_checked 동기화용으로 CheckMenuItem 핸들 보관(actions::toggle_autostart 가 재조회).
+    app.manage(AutostartCheck(autostart));
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(initial)
@@ -106,6 +127,7 @@ fn dispatch_menu(app: &AppHandle, menu_id: &str) {
         MenuAction::ShowUi => actions::show_main_ui(app),
         MenuAction::HideUi => actions::hide_main_ui(app),
         MenuAction::QuitApp => actions::quit_app(app),
+        MenuAction::ToggleAutostart => actions::toggle_autostart(app),
     }
 }
 

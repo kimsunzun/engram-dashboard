@@ -6,13 +6,24 @@
 //! 트레이 핸들러(mod.rs on_menu_event)도, command(commands/tray.rs)도 전부 이 함수들만 호출 —
 //! 동작 로직 중복 금지. core.rs(순수 판정)와 분리: 여기는 실제 창/아이콘/데몬을 만진다(불순).
 
-use tauri::{AppHandle, Manager};
+use tauri::menu::CheckMenuItem;
+use tauri::{AppHandle, Manager, Wry};
+
+use tauri_plugin_autostart::ManagerExt;
 
 use super::core::{self, IconState};
 use super::TrayIcons;
 
 /// 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
 pub const TRAY_ID: &str = "engram-main-tray";
+
+/// "부팅 시 자동 시작" CheckMenuItem 핸들 보관(ADR-0027 §55).
+///
+/// ★왜 핸들을 manage 로 들고 있나(load-bearing)★: 토글 후 체크 표시를 set_checked 로 즉시 갱신해야
+/// 하는데, CheckMenuItem 핸들이 없으면 갱신 대상을 못 잡는다. tray.menu() → id 재조회는 MenuItem 의
+/// downcast(CheckMenuItem)가 번거로워, build_tray 가 만든 핸들을 그대로 state 로 보관해 직접 set_checked 한다.
+/// 트레이는 daemon 모드 전용(build_tray 게이트)이라 이 state 도 daemon 에서만 등록된다.
+pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 
 /// main 창을 보이고 포커스(숨김/최소화 상태에서 복귀).
 ///
@@ -106,4 +117,35 @@ pub fn set_tray_icon_state(app: &AppHandle, state: IconState) {
     if let Err(e) = app.run_on_main_thread(set) {
         tracing::warn!("[tray] run_on_main_thread(set_icon) 실패: {e}");
     }
+}
+
+/// "부팅 시 자동 시작" 토글(ADR-0027 §55) — 현재 활성 여부를 읽어 반전(enable/disable)하고
+/// CheckMenuItem 체크 표시를 새 상태로 동기화한다. 트레이 클릭·command(set_autostart) 가 공유할 수
+/// 있으나, command 는 명시 bool 을 받으므로 토글(반전)은 트레이 전용 진입이다.
+///
+/// is_enabled/enable/disable·set_checked 실패는 warn 만(토글 1회 실패가 앱을 죽이면 안 됨). 갱신
+/// 누락 시 다음 클릭이 다시 토글하므로 영구 고착 아님.
+pub fn toggle_autostart(app: &AppHandle) {
+    let mgr = app.autolaunch();
+    let enabled = match mgr.is_enabled() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("[tray] autostart is_enabled 실패(토글 취소): {e}");
+            return;
+        }
+    };
+    // 반전: 켜져 있으면 끄고, 꺼져 있으면 켠다.
+    let result = if enabled { mgr.disable() } else { mgr.enable() };
+    if let Err(e) = result {
+        tracing::warn!("[tray] autostart 토글(enable/disable) 실패: {e}");
+        return;
+    }
+    let new_state = !enabled;
+    // 체크 표시 동기화 — 보관한 CheckMenuItem 핸들로 직접 set_checked.
+    if let Some(check) = app.try_state::<AutostartCheck>() {
+        if let Err(e) = check.0.set_checked(new_state) {
+            tracing::warn!("[tray] autostart CheckMenuItem set_checked 실패: {e}");
+        }
+    }
+    tracing::info!(enabled = new_state, "[tray] 부팅 자동 시작 토글");
 }

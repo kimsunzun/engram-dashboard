@@ -88,6 +88,11 @@ pub fn run() {
     // 시 빌림 끝남), setup 클로저가 그 뒤 move 캡처한다 — 순서상 충돌 없음.
     let data_dir = discovery::default_data_dir(mode);
 
+    // ADR-0027 §55: 부팅 기동(autostart 등록 인자에 --hidden 포함)은 창 없이 트레이만 상주시킨다.
+    // 사용자 직접 실행(인자 없음)은 창 표시. setup 에서 이 플래그로 main 창 hide 여부를 가른다.
+    // (--hidden 은 daemon 등록 한정 의미지만 플래그 단순 스캔 — 비-daemon 에서 우연히 붙어도 hide 일 뿐.)
+    let hidden = std::env::args().any(|a| a == "--hidden");
+
     // ADR-0027: embedded=폴더별 single-instance. 같은 데이터 폴더 2nd 실행 차단(이중복원 충돌 방지).
     // 가드는 프로세스 수명 내내 보유해야 함(Drop=mutex 해제) → run() 스코프 변수로 .run() 까지 살림.
     // raise(기존 창 포커스)는 이연 — 2nd 는 exit(0) 양보(TODO: 폴더별 raise IPC).
@@ -137,6 +142,14 @@ pub fn run() {
         .js_init_script(format!("window.__ENGRAM_MODE__ = {mode_str:?};"))
         .build();
     builder = builder.plugin(mode_plugin);
+
+    // ADR-0027 §55: autostart. 등록 인자=--mode=daemon --hidden(부팅 시 daemon 모드·창 미표시).
+    // ★플러그인 등록 ≠ 활성화★: 기본 OFF, set_autostart command/트레이 토글로만 enable(레지스트리 Run 기록).
+    // LaunchAgent 는 macOS 전용 인자라 Windows 무관(Windows 는 레지스트리 Run 키 사용).
+    builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec!["--mode=daemon", "--hidden"]),
+    ));
 
     builder
         .setup(move |app| {
@@ -211,6 +224,16 @@ pub fn run() {
                     tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
                 }
             }
+
+            // ADR-0027 §55: --hidden 기동(autostart)은 main 창을 숨겨 트레이만 상주시킨다.
+            // ★한계(주석 명시)★: main 창 conf 기본 visible=true 라 창이 잠깐 떴다 숨어 깜빡일 수 있다.
+            // 일단 수용 — 깜빡임 제거(conf visible:false + 비-hidden 시 show)는 후속으로 이연.
+            // ★embedded 는 트레이가 없어 hide 하면 창 회수 불가(좀비) → daemon 모드에서만 --hidden 적용.★
+            if hidden && mode == discovery::AppMode::Daemon {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
             Ok(())
         })
         // ADR-0026 2단계 + ADR-0027 B안/§20: main X(WM_CLOSE) 동작은 ★모드별로 갈린다★.
@@ -256,6 +279,10 @@ pub fn run() {
             commands::show_main_ui,
             commands::hide_main_ui,
             commands::quit_app,
+            // ADR-0027 §53~55: 부팅 자동 시작 토글/조회 + 모드 즉시전환(self-relaunch) — §5 LLM 제어 표면.
+            commands::set_autostart,
+            commands::get_autostart,
+            commands::set_mode,
             // ADR-0020 Stage 4a: 옛 개별 invoke(spawn/kill/profile/pty 14개)는 삭제 — 아래 generic
             //   agent_command 1개가 AgentCommand 전 variant 를 처리(embedded carrier → ConnectionCore).
             //   agent_connect 가 단일 outbound Channel 을 등록한다.
