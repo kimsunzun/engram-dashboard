@@ -21,6 +21,7 @@ use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::logging;
 use engram_dashboard_core::persistence::FileProfileStore;
+use engram_dashboard_discovery::AppMode;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -43,8 +44,12 @@ const DAEMON_FILE: &str = "daemon.json";
 /// 설정 시 그 경로로 간다. 데몬은 `std::process::Command` 로 **직접** spawn 되는 통합 테스트
 /// (`tests/ws_e2e.rs`)에서 이 env 를 상속받아 임시 디렉토리로 격리된다(운영 `.engram-data` 미오염).
 /// WMI-spawn 데몬엔 안 먹는다(부모 env 미상속, discovery 주석 참조).
-fn resolve_data_dir() -> PathBuf {
-    engram_dashboard_discovery::default_data_dir()
+///
+/// ★mode 인자(ADR-0027)★: release 에서 daemon 은 `%APPDATA%`, embedded 는 exe 폴더로 갈린다. 데몬
+/// 프로세스의 본질은 항상 daemon 이라 호출처(`run()`)가 `AppMode::Daemon` 을 하드코딩한다 — 데몬 crate
+/// 는 `--mode` 를 파싱하지 않는다(embedded 로 돌 일이 없다). debug 에선 모드 무관 동일 경로.
+fn resolve_data_dir(mode: AppMode) -> PathBuf {
+    engram_dashboard_discovery::default_data_dir(mode)
 }
 
 /// 256-bit(32B) 토큰을 OS CSPRNG 로 생성해 hex 64자 문자열로 반환.
@@ -228,8 +233,8 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 2) data_dir 결정 + 생성.
-    let data_dir = resolve_data_dir();
+    // 2) data_dir 결정 + 생성. 데몬 프로세스는 항상 Daemon 모드(ADR-0027 — release 에서 %APPDATA%).
+    let data_dir = resolve_data_dir(AppMode::Daemon);
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         tracing::error!("data_dir 생성 실패({:?}): {e}", data_dir);
         return Err(1);
@@ -509,8 +514,8 @@ mod tests {
         // override 가 새어 들어오면(다른 테스트 leak) 기본 경로 단언이 깨진다 — 명시 제거.
         let prev = std::env::var_os("ENGRAM_DATA_DIR");
         std::env::remove_var("ENGRAM_DATA_DIR");
-        let dir = resolve_data_dir();
-        let delegated = engram_dashboard_discovery::default_data_dir();
+        let dir = resolve_data_dir(AppMode::Daemon);
+        let delegated = engram_dashboard_discovery::default_data_dir(AppMode::Daemon);
         if let Some(v) = &prev {
             std::env::set_var("ENGRAM_DATA_DIR", v);
         }
@@ -533,7 +538,7 @@ mod tests {
         let prev = std::env::var_os("ENGRAM_DATA_DIR");
         let want = std::env::temp_dir().join("engram-daemon-resolve-override-test");
         std::env::set_var("ENGRAM_DATA_DIR", &want);
-        let got = resolve_data_dir();
+        let got = resolve_data_dir(AppMode::Daemon);
         match &prev {
             Some(v) => std::env::set_var("ENGRAM_DATA_DIR", v),
             None => std::env::remove_var("ENGRAM_DATA_DIR"),

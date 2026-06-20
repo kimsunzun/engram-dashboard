@@ -59,21 +59,88 @@ const LOCAL_DATA_DIR: &str = ".engram-data";
 /// ENGRAM_DATA_DIR override 환경변수 이름(테스트 격리 전용 — 배포 노브 아님, 위 블록 주석 참조).
 const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
-/// 모든 engram 프로세스가 공유하는 데이터 디렉토리(단일 출처, ADR-0024).
+/// release-daemon 데이터 폴더가 사는 %APPDATA% 하위 디렉토리 이름(ADR-0027). Tauri identifier 와 동일.
+const APP_IDENTIFIER: &str = "com.engram.dashboard";
+
+// ── 앱 실행 모드(ADR-0027) ────────────────────────────────────────────────────────
+
+/// 앱 실행 모드. ADR-0027: embedded=폴더별/폴더-로컬, daemon=전역/유저-global.
+/// data_dir 분기·single-instance 키·트레이 게이트가 이 값으로 갈린다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMode {
+    Embedded,
+    Daemon,
+}
+
+/// CLI argv + env 에서 모드 확정(순수 — std::env 미접근, 테스트 대상).
+///
+/// 우선순위: CLI `--mode=<v>` > env `ENGRAM_MODE` > 기본 `Embedded`(ADR-0027 보강).
+/// 값은 "embedded"/"daemon" 만 유효, 그 외는 무시하고 다음 우선순위로 내려간다.
+///
+/// ★등호 형태만 지원★: `--mode=daemon` 처럼 한 토큰에 값이 붙은 형태만 본다(공백 분리
+///   `--mode daemon` 미지원 — 인자 파싱 라이브러리 없이 단순 스캔, 호출처도 등호로 넘긴다).
+///   argv 를 순회해 **마지막 유효** `--mode=` 값을 채택한다(last-wins; 잘못된 값은 건너뛰고 계속 스캔).
+pub fn parse_mode(args: &[String], env_mode: Option<&str>) -> AppMode {
+    // 1) CLI `--mode=<v>` — last-wins(중복 시 마지막 우선). 잘못된 값은 무시하고 다음 인자 계속 본다.
+    //    ★왜 last 인가★: getopts/clap 같은 CLI 관행이고, 향후 self-relaunch 가 기존 argv 뒤에
+    //    `--mode=daemon` 을 덧붙여도 그 마지막 값이 이겨 의도대로 동작한다(early return 금지 — 앞쪽
+    //    값에서 멈추면 append 가 무시됨). argv 전체를 스캔하며 유효값마다 후보를 갱신한다.
+    let mut cli_mode: Option<AppMode> = None;
+    for arg in args {
+        if let Some(val) = arg.strip_prefix("--mode=") {
+            if let Some(mode) = mode_from_str(val) {
+                cli_mode = Some(mode); // 후보 갱신(마지막 유효값이 최종 승자).
+            }
+            // 유효하지 않은 --mode 값 → 후보 갱신 안 하고 계속 스캔(앞선 유효 후보를 덮지 않음).
+        }
+    }
+    if let Some(mode) = cli_mode {
+        return mode;
+    }
+    // 2) env ENGRAM_MODE — 유효하면 채택.
+    if let Some(mode) = env_mode.and_then(mode_from_str) {
+        return mode;
+    }
+    // 3) 기본 Embedded.
+    AppMode::Embedded
+}
+
+/// "embedded"/"daemon" 문자열 → AppMode. 그 외는 None(호출자가 다음 우선순위로).
+fn mode_from_str(s: &str) -> Option<AppMode> {
+    match s {
+        "embedded" => Some(AppMode::Embedded),
+        "daemon" => Some(AppMode::Daemon),
+        _ => None,
+    }
+}
+
+/// 실 프로세스 argv/env 로 모드 확정(parse_mode 위임 — std::env 격리 얇은 래퍼).
+pub fn resolve_mode() -> AppMode {
+    let args: Vec<String> = std::env::args().collect();
+    let env = std::env::var("ENGRAM_MODE").ok();
+    parse_mode(&args, env.as_deref())
+}
+
+/// engram 프로세스의 데이터 디렉토리(ADR-0027 — 모드별 분기).
 ///
 /// 우선순위:
-/// 1. **`ENGRAM_DATA_DIR`(설정+non-empty)** → 그 경로 그대로(테스트 격리 탈출구 — 배포 노브 아님).
-///    WMI-spawn 데몬은 부모 env 미상속이라 이 override 가 안 먹는다(위 블록 주석의 한계 참조).
-/// 2. **디버그(`cfg!(debug_assertions)`)**: current_exe 에서 위로 올라가 repo 루트(`.git` 또는
-///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-data`. 루트 못 찾으면 exe 디렉토리
-///    fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드가 한 폴더를 공유.
-/// 3. **릴리즈(`not(debug_assertions)`)**: walk-up 안 함. **exe 자신의 디렉토리**에 `.engram-data`
-///    (`release_data_dir_from_exe`). current_exe 실패 시 cwd. → 배포 시 exe 옆 동거(번들된 exe 들이
-///    같은 폴더라 일치).
+/// 1. **`ENGRAM_DATA_DIR`(설정+non-empty)** → 그 경로 그대로(테스트 격리 탈출구 — 배포 노브 아님,
+///    **모드 무관 불변**). WMI-spawn 데몬은 부모 env 미상속이라 이 override 가 안 먹는다(위 블록 주석).
+/// 2. **디버그(`cfg!(debug_assertions)`) — 모드 무시(ADR-0027 §22)**: dev 에선 embedded·daemon 둘 다
+///    같은 폴더-로컬 `.engram-data` 를 본다(모드 스위칭 테스트를 같은 데이터로). current_exe 에서 위로
+///    올라가 repo 루트(`.git` 또는 `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-data`. 루트
+///    못 찾으면 exe 디렉토리 fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드가 한 폴더 공유.
+/// 3. **릴리즈(`not(debug_assertions)`) — 모드 분기(ADR-0027)**:
+///    - `Embedded`: walk-up 안 함. **exe 자신의 디렉토리**에 `.engram-data`(`release_data_dir_from_exe`).
+///      ★현행 유지★ — 옛 ADR-0024 의 "exe 폴더 동거" 그대로다(ADR-0027 의 "실행 폴더/cwd" 뉘앙스는
+///      별도 확인 대기 — 지금은 동작 변경 없이 시그니처만 모드를 받게 한다).
+///    - `Daemon`: **유저 영역 `%APPDATA%\com.engram.dashboard`**(`appdata_data_dir`). 데몬은
+///      dockerd/tailscaled 처럼 per-user 서비스라 폴더에 안 묶인다.
+///    어느 쪽이든 current_exe/APPDATA 실패 시 cwd fallback.
 ///
 /// 어느 경로든 **절대 패닉하지 않는다**(배포·루트 미발견 상황에서도 PathBuf 를 반드시 반환).
-pub fn default_data_dir() -> PathBuf {
-    // (1) ENGRAM_DATA_DIR override — 최우선. 통합 테스트가 임시 디렉토리로 데몬을 보내 운영
+pub fn default_data_dir(mode: AppMode) -> PathBuf {
+    // (1) ENGRAM_DATA_DIR override — 최우선, 모드 무관. 통합 테스트가 임시 디렉토리로 데몬을 보내 운영
     //     `.engram-data` 오염을 막는 격리 탈출구다(배포 노브 아님). 직접-spawn(부모 env 상속)에만
     //     먹고 WMI-spawn 에는 안 먹는다(위 블록 주석의 한계).
     if let Some(val) = std::env::var_os(DATA_DIR_ENV) {
@@ -84,6 +151,9 @@ pub fn default_data_dir() -> PathBuf {
 
     #[cfg(debug_assertions)]
     {
+        // ★dev 는 모드 무시(ADR-0027 §22)★: embedded·daemon 모두 폴더-로컬 `.engram-data` 를 본다 —
+        // 개발 중 모드 스위칭 테스트를 같은 데이터로 하기 위해. 그래서 `mode` 를 안 쓴다(release 에서만 갈림).
+        let _ = mode;
         // 디버그: exe 기준 walk-up 으로 repo 루트 탐색.
         // ★왜 exe-기준 walk-up 인가★: 데몬은 WMI Win32_Process.Create 로 떠 **부모의 cwd 를 상속하지
         // 않는다**(WmiPrvSE 자식) — cwd 는 신뢰할 수 없다. 반면 exe 경로는 신뢰 가능하고, 개발 빌드
@@ -105,17 +175,45 @@ pub fn default_data_dir() -> PathBuf {
 
     #[cfg(not(debug_assertions))]
     {
-        // 릴리즈: walk-up 안 함 — exe 자신의 폴더에 동거. 번들 시 세 exe 가 같은 폴더라 일치한다.
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = release_data_dir_from_exe(&exe) {
-                return dir;
+        // ★release 에서만 모드 분기(ADR-0027)★: embedded=exe 폴더(현행 유지), daemon=%APPDATA%.
+        match mode {
+            AppMode::Embedded => {
+                // 릴리즈 embedded: walk-up 안 함 — exe 자신의 폴더에 동거(현행 유지, ADR-0024→0027).
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(dir) = release_data_dir_from_exe(&exe) {
+                        return dir;
+                    }
+                }
+                // current_exe 실패 시 cwd fallback. 절대 패닉하지 않는다.
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(LOCAL_DATA_DIR)
             }
+            AppMode::Daemon => appdata_data_dir(),
         }
-        // current_exe 실패 시 cwd fallback. 절대 패닉하지 않는다.
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(LOCAL_DATA_DIR)
     }
+}
+
+/// release-daemon 데이터 위치 = `%APPDATA%\com.engram.dashboard`(ADR-0027).
+///
+/// ★release-only(load-bearing)★: 이 헬퍼는 **릴리즈 daemon 분기에서만** 호출된다(dev 는 위 debug
+/// 분기가 모드 무시로 가로채고, embedded 는 exe 폴더). dirs crate 의존을 추가하지 않으려고 APPDATA
+/// env 를 직접 읽는다(의존 추가 0). APPDATA 미설정(드문 환경) 시 cwd join 으로 강등 — **절대 패닉
+/// 금지**. 디버그 빌드에선 호출처(release 분기)가 cfg-out 돼 dead_code 이므로 디버그에서만 allow.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn appdata_data_dir() -> PathBuf {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        if !appdata.is_empty() {
+            return PathBuf::from(appdata).join(APP_IDENTIFIER);
+        }
+    }
+    // APPDATA 미설정 → cwd fallback(패닉 금지). 운영 Windows 에선 사실상 항상 설정돼 있다.
+    // ★폴더명은 `.engram-data` 가 아니라 APP_IDENTIFIER(`com.engram.dashboard`)로 끝낸다(의도)★:
+    // 이 fallback 도 daemon 경로다 — daemon 은 유저-global 식별자(APP_IDENTIFIER)를 유지해 embedded 의
+    // 폴더-로컬 `.engram-data` 와 분리한다(APPDATA 가 사라져도 모드별 데이터 분리 불변).
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(APP_IDENTIFIER)
 }
 
 /// 릴리즈 data_dir 산출 헬퍼 — exe 경로의 부모 디렉토리에 `.engram-data` 를 붙인다.
@@ -1127,17 +1225,26 @@ mod tests {
     #[test]
     fn data_dir_env_override_returns_path_verbatim() {
         // ENGRAM_DATA_DIR 설정 시 디버그/릴리즈 분기를 건너뛰고 그 경로를 그대로 반환한다(테스트 격리 탈출구).
+        // ★모드 무관★(ADR-0027): override 는 우선순위 1번이라 Embedded·Daemon 둘 다 같은 경로를 반환.
         let _g = ENV_LOCK.lock().unwrap();
         let prev = std::env::var_os(DATA_DIR_ENV);
         let want = std::env::temp_dir().join("engram-data-dir-override-test");
         std::env::set_var(DATA_DIR_ENV, &want);
-        let got = default_data_dir();
+        let got_embedded = default_data_dir(AppMode::Embedded);
+        let got_daemon = default_data_dir(AppMode::Daemon);
         // env 정리(다른 테스트 오염 방지) — 단언 전에 복원해 실패해도 leak 안 되게.
         match &prev {
             Some(v) => std::env::set_var(DATA_DIR_ENV, v),
             None => std::env::remove_var(DATA_DIR_ENV),
         }
-        assert_eq!(got, want, "ENGRAM_DATA_DIR set 시 그 경로 그대로 반환");
+        assert_eq!(
+            got_embedded, want,
+            "ENGRAM_DATA_DIR set 시 그 경로 그대로 반환"
+        );
+        assert_eq!(
+            got_daemon, want,
+            "override 는 모드 무관 — Daemon 도 같은 경로(우선순위 1번)"
+        );
     }
 
     #[test]
@@ -1146,7 +1253,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let prev = std::env::var_os(DATA_DIR_ENV);
         std::env::set_var(DATA_DIR_ENV, "");
-        let got = default_data_dir();
+        let got = default_data_dir(AppMode::Embedded);
         match &prev {
             Some(v) => std::env::set_var(DATA_DIR_ENV, v),
             None => std::env::remove_var(DATA_DIR_ENV),
@@ -1155,6 +1262,93 @@ mod tests {
             got.ends_with(LOCAL_DATA_DIR),
             "빈 env 는 기본 분기로 통과 → `.engram-data` 로 끝나야: {got:?}"
         );
+    }
+
+    // ── 모드 파싱(parse_mode) — 순수, env 무접근 ─────────────────────────────────────
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_mode_cli_daemon() {
+        // ① argv `--mode=daemon` → Daemon.
+        let args = argv(&["engram.exe", "--mode=daemon"]);
+        assert_eq!(parse_mode(&args, None), AppMode::Daemon);
+    }
+
+    #[test]
+    fn parse_mode_cli_embedded() {
+        // ② argv `--mode=embedded` → Embedded.
+        let args = argv(&["engram.exe", "--mode=embedded"]);
+        assert_eq!(parse_mode(&args, None), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_env_daemon_when_no_cli() {
+        // ③ argv 에 --mode 없고 env Some("daemon") → Daemon.
+        let args = argv(&["engram.exe"]);
+        assert_eq!(parse_mode(&args, Some("daemon")), AppMode::Daemon);
+    }
+
+    #[test]
+    fn parse_mode_cli_overrides_env() {
+        // ④ CLI 우선: argv embedded + env daemon → Embedded.
+        let args = argv(&["engram.exe", "--mode=embedded"]);
+        assert_eq!(parse_mode(&args, Some("daemon")), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_defaults_embedded() {
+        // ⑤ CLI·env 둘 다 없음 → Embedded(기본).
+        let args = argv(&["engram.exe"]);
+        assert_eq!(parse_mode(&args, None), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_invalid_value_ignored() {
+        // ⑥ `--mode=xxx`(잘못된 값) → 무시, env 없으면 Embedded.
+        let args = argv(&["engram.exe", "--mode=xxx"]);
+        assert_eq!(parse_mode(&args, None), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_empty_value_ignored() {
+        // ⑦ `--mode=`(빈값) → mode_from_str None → 무시 → env 없으면 Embedded.
+        let args = argv(&["engram.exe", "--mode="]);
+        assert_eq!(parse_mode(&args, None), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_space_separated_unsupported() {
+        // ⑧ `--mode daemon`(등호 없이 공백 분리) → 등호 형태만 지원 → 둘 다 무시 → Embedded.
+        // ★회귀 가드★: 누가 strip_prefix("--mode=") 를 strip_prefix("--mode") 로 바꾸면
+        // `--mode` 다음 토큰을 값으로 오인할 위험 — 이 테스트가 그걸 잡는다(공백 분리 미지원 불변).
+        let args = argv(&["engram.exe", "--mode", "daemon"]);
+        assert_eq!(parse_mode(&args, None), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_last_wins_on_duplicate() {
+        // ⑨ 중복 `--mode` → last-wins(M1): embedded 다음 daemon → Daemon.
+        // self-relaunch 가 기존 argv 뒤에 `--mode=daemon` 을 덧붙이는 시나리오의 핵심 검증.
+        let args = argv(&["engram.exe", "--mode=embedded", "--mode=daemon"]);
+        assert_eq!(parse_mode(&args, None), AppMode::Daemon);
+    }
+
+    #[test]
+    fn parse_mode_empty_env_ignored() {
+        // ⑩ env Some("")(빈 문자열) → mode_from_str None → 무시 → Embedded.
+        // resolve_mode 가 std::env::var().ok() 로 빈 env 를 Some("") 로 흘리므로 실입력 케이스.
+        let args = argv(&["engram.exe"]);
+        assert_eq!(parse_mode(&args, Some("")), AppMode::Embedded);
+    }
+
+    #[test]
+    fn parse_mode_invalid_cli_falls_through_to_env() {
+        // ⑪ invalid CLI `--mode=xxx` + valid env Some("daemon") → CLI 무시 후 env 채택 → Daemon.
+        let args = argv(&["engram.exe", "--mode=xxx"]);
+        assert_eq!(parse_mode(&args, Some("daemon")), AppMode::Daemon);
     }
 
     #[test]
@@ -1173,6 +1367,54 @@ mod tests {
         // 부모가 없는 경로(루트 컴포넌트만)면 None(호출자가 cwd fallback).
         let exe = Path::new("/");
         assert!(release_data_dir_from_exe(exe).is_none());
+    }
+
+    #[test]
+    fn default_data_dir_debug_ignores_mode() {
+        // ADR-0027 §22: dev(debug 빌드 — 테스트는 항상 debug)에선 Embedded·Daemon 이 같은 폴더-로컬
+        // `.engram-data` 를 본다(모드 스위칭 테스트를 같은 데이터로). override 가 새어 들어오면 단언이
+        // 깨지므로 ENV_LOCK 직렬화 + 명시 제거 후 검사(다른 테스트 leak 방어 — 기존 패턴 동일).
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os(DATA_DIR_ENV);
+        std::env::remove_var(DATA_DIR_ENV);
+        let embedded = default_data_dir(AppMode::Embedded);
+        let daemon = default_data_dir(AppMode::Daemon);
+        if let Some(v) = &prev {
+            std::env::set_var(DATA_DIR_ENV, v);
+        }
+        assert_eq!(
+            embedded, daemon,
+            "debug 빌드에선 모드 무관 동일 경로여야(ADR-0027 dev): {embedded:?} vs {daemon:?}"
+        );
+        assert!(
+            embedded.ends_with(LOCAL_DATA_DIR),
+            "debug 는 폴더-로컬 `.engram-data` 로 끝나야: {embedded:?}"
+        );
+    }
+
+    #[test]
+    fn appdata_data_dir_uses_appdata_env() {
+        // release-daemon 헬퍼는 빌드모드 무관 순수 함수(release_data_dir_from_exe 와 동일 패턴) → debug
+        // 테스트로 규칙 검증. APPDATA 기준 경로가 `com.engram.dashboard` 로 끝나는지. APPDATA 는 전역
+        // env 라 ENV_LOCK 으로 직렬화하고 복원한다.
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("APPDATA");
+        let want_root = std::env::temp_dir().join("engram-appdata-test");
+        std::env::set_var("APPDATA", &want_root);
+        let got = appdata_data_dir();
+        match &prev {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
+        }
+        assert_eq!(
+            got,
+            want_root.join(APP_IDENTIFIER),
+            "APPDATA/com.engram.dashboard 이어야"
+        );
+        assert!(
+            got.ends_with(APP_IDENTIFIER),
+            "release-daemon 경로는 com.engram.dashboard 로 끝나야: {got:?}"
+        );
     }
 
     fn info(pid: u32, version: u32) -> DaemonInfo {
@@ -2039,7 +2281,8 @@ mod tests {
         let exe_abs = dunce::canonicalize(&exe).expect("exe canonicalize");
 
         // 운영 data_dir/daemon.json 경로 — WMI-spawn 데몬이 실제로 쓰는 default 경로(env 미상속).
-        let data_dir = default_data_dir();
+        // WMI-spawn 대상은 데몬 프로세스라 Daemon 모드(테스트는 debug 라 모드 무관 동일 경로지만 의미 일치).
+        let data_dir = default_data_dir(AppMode::Daemon);
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
         let daemon_path = data_dir.join(DAEMON_FILE);
 
@@ -2130,7 +2373,7 @@ mod tests {
         let exe_abs = dunce::canonicalize(&exe).expect("exe canonicalize");
 
         // WMI-spawn 데몬이 실제로 쓰는 default 경로(env 미상속 → ENGRAM_DATA_DIR 격리 불가, 위 smoke 주석 참조).
-        let data_dir = default_data_dir();
+        let data_dir = default_data_dir(AppMode::Daemon);
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
         let daemon_path = data_dir.join(DAEMON_FILE);
 

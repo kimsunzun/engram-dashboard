@@ -43,7 +43,8 @@ pub fn hide_main_ui(app: &AppHandle) {
 /// 스레드에서 발사하지 않고 동기로 부르되, 실패/무응답이어도 exit 로 진행한다.
 pub fn quit_app(app: &AppHandle) {
     // 데몬 graceful 일방 발사(결과 무시). data_dir 은 단일 출처(ADR-0024).
-    let data_dir = crate::discovery::default_data_dir();
+    // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
+    let data_dir = crate::discovery::default_data_dir(crate::discovery::AppMode::Embedded);
     match crate::discovery::send_stop(&data_dir) {
         Ok(outcome) => tracing::info!(
             ?outcome,
@@ -63,7 +64,8 @@ pub fn quit_app(app: &AppHandle) {
 /// daemon_status 는 daemon.json + PID liveness 판정(빠름, 비-blocking 수준). 외부/크래시 죽음
 /// 주기감지는 비범위(액션 직후·setup 초기 갱신만, ADR-0026/TRD §3).
 pub fn refresh_tray_icon(app: &AppHandle) {
-    let data_dir = crate::discovery::default_data_dir();
+    // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
+    let data_dir = crate::discovery::default_data_dir(crate::discovery::AppMode::Embedded);
     let alive = crate::discovery::daemon_status(&data_dir).alive;
     let state = core::icon_state_for(alive);
     set_tray_icon_state(app, state);

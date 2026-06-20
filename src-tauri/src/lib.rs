@@ -84,7 +84,8 @@ pub fn run() {
 
             // 프로필 저장 위치 = data_dir/agents.json. 단일 출처(ADR-0024) — daemon 과 같은
             // `.engram-data/` 를 보게 discovery::default_data_dir() 에 위임(옛 app_data_dir 대체).
-            let data_dir = discovery::default_data_dir();
+            // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
+            let data_dir = discovery::default_data_dir(discovery::AppMode::Embedded);
             let store = Arc::new(FileProfileStore::new(data_dir));
             let profiles = Arc::new(ProfileRegistry::new(store));
 

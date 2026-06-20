@@ -63,7 +63,8 @@ pub async fn daemon_start(
 /// 인자를 받지 않는다(tauri command 는 미사용 인자를 요구하지 않는다 — 프론트도 인자 없이 invoke).
 #[tauri::command]
 pub fn daemon_status() -> Result<DaemonStatusDto, String> {
-    let data_dir = discovery::default_data_dir();
+    // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
+    let data_dir = discovery::default_data_dir(discovery::AppMode::Embedded);
     let s = discovery::daemon_status(&data_dir);
     Ok(DaemonStatusDto {
         alive: s.alive,
@@ -79,7 +80,8 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
 /// 반환: kill 시도한 pid(없으면 None).
 #[tauri::command]
 pub async fn daemon_stop() -> Result<Option<u32>, String> {
-    let data_dir = discovery::default_data_dir();
+    // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
+    let data_dir = discovery::default_data_dir(discovery::AppMode::Embedded);
     tauri::async_runtime::spawn_blocking(move || discovery::daemon_stop(&data_dir))
         .await
         .map_err(|e| format!("daemon_stop join 실패: {e}"))?
@@ -90,7 +92,8 @@ pub async fn daemon_stop() -> Result<Option<u32>, String> {
 ///
 /// data_dir 은 discovery::default_data_dir()(단일 출처, ADR-0024)로 산출하므로 AppHandle 불필요.
 async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
-    let data_dir = discovery::default_data_dir();
+    // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
+    let data_dir = discovery::default_data_dir(discovery::AppMode::Embedded);
     let exe = locate_daemon_exe().map_err(|e| e.to_string())?;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
 
