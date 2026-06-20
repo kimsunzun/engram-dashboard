@@ -73,9 +73,13 @@ impl agent::types::StatusSink for TauriStatusSink {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ADR-0027 보강 §63: 모드는 run() 최상단 1회 확정 → 트레이 게이트·X=hide 게이트(이 커밋),
+    // single-instance·data_dir·주입(후속 커밋)이 전부 이 단일 값에 의존. 전환=self-relaunch(새 프로세스).
+    let mode = discovery::resolve_mode();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             // 기본 warn(OFF) — RUST_LOG 환경변수로 재정의 가능
             logging::init_logging();
             let status_sink = Arc::new(TauriStatusSink {
@@ -84,8 +88,8 @@ pub fn run() {
 
             // 프로필 저장 위치 = data_dir/agents.json. 단일 출처(ADR-0024) — daemon 과 같은
             // `.engram-data/` 를 보게 discovery::default_data_dir() 에 위임(옛 app_data_dir 대체).
-            // 커밋1 임시 Embedded — 커밋4 에서 AppState.mode 로 교체(ADR-0027 보강). debug 에선 모드 무관.
-            let data_dir = discovery::default_data_dir(discovery::AppMode::Embedded);
+            // ADR-0027 보강: run() 최상단에서 확정한 실 mode 를 적용(setup 클로저가 캡처). debug 에선 모드 무관.
+            let data_dir = discovery::default_data_dir(mode);
             let store = Arc::new(FileProfileStore::new(data_dir));
             let profiles = Arc::new(ProfileRegistry::new(store));
 
@@ -135,25 +139,41 @@ pub fn run() {
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // 아이콘 두 벌 생성·메뉴·핸들러 + setup 직후 데몬 상태로 아이콘 확정. Windows 전용.
-            if let Err(e) = tray::build_tray(app) {
-                tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
+            // ADR-0027 B안: 트레이는 daemon 모드 전용 — embedded 는 평범한 창 앱(트레이 미생성).
+            if mode == discovery::AppMode::Daemon {
+                if let Err(e) = tray::build_tray(app) {
+                    tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
+                }
             }
             Ok(())
         })
-        // ADR-0026 2단계: X = hide(앱 종료 아님). 트레이=앱 통합이라 main 의 X(WM_CLOSE)는 창만
-        // 숨기고 프로세스는 트레이로 상주한다 — 진짜 종료는 트레이 "완전 종료"(app.exit(0))뿐.
-        // CloseRequested 를 prevent_close 로 취소하고 window.hide() 한다.
-        // (구 동작 = app.exit(0). 폐기 — ADR-0026: X=hide.)
-        // ★main 만 hide★: agent-tree/slot-popup(hidden 창)은 기존대로 단독 close 처리. main 라벨만
-        //  prevent_close — conf 첫 창은 label 미지정이라 Tauri 기본 라벨 "main".
+        // ADR-0026 2단계 + ADR-0027 B안/§20: main X(WM_CLOSE) 동작은 ★모드별로 갈린다★.
+        // - daemon: 트레이=앱 통합이라 X=hide(창만 숨기고 트레이 상주) — 진짜 종료는 트레이 "완전 종료"(app.exit(0))뿐.
+        // - embedded: X=종료(재오픈 cold restore, §20). app.exit(0) 명시 호출이 ★필수★다.
+        //   이유: tauri.conf.json 에 보조 hidden 창(agent-tree/slot-popup, visible:false)이 부팅 시 함께 생성돼
+        //   (WindowConfig.create 기본 true) main 만 닫혀도 window store 가 비지 않는다(is_empty()==false).
+        //   → RunEvent::ExitRequested 가 emit 되지 않아 프로세스가 좀비로 남는다(embedded 는 트레이도 없어 회수 불가).
+        //   app.exit(0) → RunEvent::ExitRequested → 아래 .run() 의 shutdown_all(graceful PTY 정리)을 탄다.
+        // (구 동작 = 무조건 X=hide. ADR-0027 B안으로 daemon-gate 됨. 더 구: app.exit(0) → ADR-0026 폐기.)
+        // ★main 만 대상★: agent-tree/slot-popup(hidden 창)은 기존대로 단독 close 처리. main 라벨만
+        //  분기 — conf 첫 창은 label 미지정이라 Tauri 기본 라벨 "main".
         // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
-        // hidden 창 좀비 우려(구 주석)는 X=hide 로 무관 — 앱이 트레이로 상주하므로 main 을 닫아도
-        // 프로세스가 살아있고, 완전 종료(app.exit)가 RunEvent::ExitRequested → shutdown_all 을 탄다.
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    match mode {
+                        discovery::AppMode::Daemon => {
+                            // ADR-0027 B안: daemon=X=hide(트레이 상주). prevent_close 후 hide.
+                            api.prevent_close();
+                            let _ = window.hide();
+                        }
+                        discovery::AppMode::Embedded => {
+                            // ADR-0027 §20: embedded=X=종료(재오픈 cold restore). 보조 hidden 창
+                            // (agent-tree/slot-popup)이 상주해 main close 만으론 이벤트루프가 안 끝난다(좀비).
+                            // → app.exit(0) 명시 → RunEvent::ExitRequested → shutdown_all(graceful PTY 정리).
+                            window.app_handle().exit(0);
+                        }
+                    }
                 }
             }
         })
