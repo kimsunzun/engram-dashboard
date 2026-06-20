@@ -3,6 +3,8 @@ pub mod commands;
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다(중복 코드 0).
 pub use engram_dashboard_discovery as discovery;
 pub mod embedded_carrier;
+// 커밋3 single-instance: embedded 폴더별 named-mutex 가드(daemon instance.rs sibling 복제).
+mod instance;
 // ADR-0026 2단계: 트레이를 앱에 통합(네이티브 TrayIconBuilder 배선). core=순수, actions=공유 부수효과.
 mod tray;
 
@@ -76,9 +78,46 @@ pub fn run() {
     // ADR-0027 보강 §63: 모드는 run() 최상단 1회 확정 → 트레이 게이트·X=hide 게이트(이 커밋),
     // single-instance·data_dir·주입(후속 커밋)이 전부 이 단일 값에 의존. 전환=self-relaunch(새 프로세스).
     let mode = discovery::resolve_mode();
+    // ADR-0027 (reviewer M1): 가드 키·profile store 가 같은 폴더를 가리키도록 data_dir 를 단일 출처로
+    // 1회 계산한다. 두 번 호출하면 그 사이 cwd/ENGRAM_DATA_DIR 변동 시 가드↔store 폴더가 갈려
+    // 이중복원 위험(가드가 지키는 폴더 ≠ store 가 쓰는 폴더). 가드는 &data_dir 로 빌려 쓰고(블록 종료
+    // 시 빌림 끝남), setup 클로저가 그 뒤 move 캡처한다 — 순서상 충돌 없음.
+    let data_dir = discovery::default_data_dir(mode);
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    // ADR-0027: embedded=폴더별 single-instance. 같은 데이터 폴더 2nd 실행 차단(이중복원 충돌 방지).
+    // 가드는 프로세스 수명 내내 보유해야 함(Drop=mutex 해제) → run() 스코프 변수로 .run() 까지 살림.
+    // raise(기존 창 포커스)는 이연 — 2nd 는 exit(0) 양보(TODO: 폴더별 raise IPC).
+    // (mode==Embedded 분기 안이라 data_dir 는 Embedded 경로와 동일 — M1 단일 출처.)
+    let _instance_guard = if mode == discovery::AppMode::Embedded {
+        match instance::acquire_embedded(&data_dir) {
+            Ok(Some(g)) => Some(g),
+            Ok(None) => {
+                tracing::info!("[instance] 같은 폴더 embedded 인스턴스가 이미 실행 중 — 양보");
+                std::process::exit(0);
+            }
+            // ★가드 실패=강행(load-bearing)★: CreateMutex 시스템오류는 드물고, 기동 차단보다 강행이
+            //   UX 우위. 이중복원은 드물고 복구 가능(데몬 instance.rs 의 exit 정책과 다른 선택 — embedded
+            //   는 단일성<기동).
+            Err(e) => {
+                tracing::warn!("[instance] embedded 가드 실패(강행): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut builder = tauri::Builder::default();
+    // single-instance 플러그인은 가장 먼저 등록(플러그인 규약). daemon 모드 전용 — 전역 단일 + 콜백 raise.
+    // embedded 는 위 자체 폴더별 가드 사용(플러그인은 전역 키 하드코딩이라 폴더별 불가).
+    if mode == discovery::AppMode::Daemon {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 2nd 인스턴스 실행 → 기존 main 창 raise(show→unminimize→set_focus, focus-stealing 회피).
+            crate::tray::actions::show_main_ui(app);
+        }));
+    }
+    builder = builder.plugin(tauri_plugin_opener::init());
+    builder
         .setup(move |app| {
             // 기본 warn(OFF) — RUST_LOG 환경변수로 재정의 가능
             logging::init_logging();
@@ -88,8 +127,8 @@ pub fn run() {
 
             // 프로필 저장 위치 = data_dir/agents.json. 단일 출처(ADR-0024) — daemon 과 같은
             // `.engram-data/` 를 보게 discovery::default_data_dir() 에 위임(옛 app_data_dir 대체).
-            // ADR-0027 보강: run() 최상단에서 확정한 실 mode 를 적용(setup 클로저가 캡처). debug 에선 모드 무관.
-            let data_dir = discovery::default_data_dir(mode);
+            // ADR-0027 (reviewer M1): run() 최상단에서 1회 계산해 가드와 공유한 data_dir 를 move 캡처해
+            // 그대로 store 에 넘긴다(setup 안에서 재호출하지 않음 — 가드↔store 폴더 갈림 방지).
             let store = Arc::new(FileProfileStore::new(data_dir));
             let profiles = Arc::new(ProfileRegistry::new(store));
 
