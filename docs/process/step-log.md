@@ -220,6 +220,16 @@
 - **dev 데이터(#4 해소):** dev는 두 모드 모두 싱글(embedded) 데이터=현 debug walk-up `.engram-data` 참조. default_data_dir 모드 분기는 release에서만(구현 단순).
 - **다음 단계(3단계):** single-instance(hidden raise: show→unminimize→set_focus + focus-stealing 회피) + autostart 토글(옵션·기본OFF·command 노출) + mode-aware 트레이. spike 4종(WebView2 hidden 메모리·hidden raise·updater 중 데몬 reconnect·앱 크래시 후 데몬 재발견).
 
+### 2026-06-21 (dashboard10) — ★스텝3 모드 시스템 구현★ (mode 인지 + data_dir 분기 + 트레이 게이트 + single-instance + autostart), ADR-0027 보강
+
+- **무엇/왜:** ADR-0027(모드별 인스턴스/데이터 위치)의 구현 단계. 선결 블로커 = "앱이 시작 시점에 자기 모드(embedded/daemon)를 무엇으로 아나"가 미정(프론트 JS 전용 개념이라 Rust 가 못 봄). **사용자 결정 + 업계관행 조사(서브에이전트)로 확정** → ADR-0027 보강 섹션에 박음.
+- **모드 메커니즘 확정(사용자 결정):** **단일 exe + 실행 인자 `--mode={embedded|daemon}`**(별도 exe 아님 — 업계 선례 없음, Tauri autostart 가 인자 주입 정식 지원). 우선순위 CLI `--mode=`(last-wins) > env `ENGRAM_MODE` > 기본 embedded. Rust 가 run() 최상단 1회 확정 → `js_init_script` 로 `window.__ENGRAM_MODE__` 주입(Rust=source of truth, 프론트 localStorage 는 Tauri 밖 fallback 으로 격하). **일반 유저는 인자 안 줌**(embedded 기본, args 는 autostart 등록 문자열에 박히는 내부 배선). **daemon 즉시진입 = Windows self-relaunch**(macOS restart 버그·argv 유실은 Windows 무관 — 조사 확인).
+- **5커밋(master 로컬, push 안 함):** `6798603`(커밋1: AppMode/parse_mode/resolve_mode + default_data_dir(mode) — debug 모드무시·release 만 Embedded=exe폴더/Daemon=`%APPDATA%`), `ae1a2a3`(커밋2: 트레이·X=hide daemon 게이트 + embedded X=종료 좀비 수정), `5972432`(커밋3: daemon=single-instance 플러그인 전역 / embedded=폴더해시 named-mutex 가드 — 플러그인이 Windows 키 `{identifier}-sim` 하드코딩이라 폴더별 불가가 적출돼 자체 가드로), `21ce28b`(커밋4a: AppState.mode 정착 + 6곳 실모드 교체 + 주입 + 프론트), `02de2cb`(커밋4b: autostart 토글·set_mode self-relaunch·트레이 CheckMenuItem).
+- **게이트(전 커밋 강제):** 코더(opus)→reviewer-deep(fable 접근불가 → opus 고노력 대체, 규약대로)→QA. 리뷰 적출 수정: 커밋1 M1 parse_mode first-wins→last-wins, 커밋2 Major 좀비(embedded X=app.exit), 커밋3 M1 data_dir 단일출처·m1 dunce 정규화, 커밋4a M-1 localStorage 주석, 커밋4b M1 set_mode 명시 self-relaunch(set_var+restart 의 argv 재전달 침묵실패 해소)·M2 --hidden daemon 게이트. 전부 build/test green(discovery 53·daemon 44·src-tauri 23·npm 87).
+- **QA(cdp 실측):** embedded·daemon 두 모드 기동 → `__ENGRAM_MODE__` 주입 정확(embedded/daemon 각각)·`get_autostart` invoke(ACL 통과)·`daemon_status` 회귀 0·UI 정상. 네이티브(트레이·X 거동·set_mode self-relaunch·autostart 레지스트리·single-instance 2nd 차단·data_dir release 분기)는 cdp 원천 미관측 → **수동 확인 필요**.
+- **메인이 정하고 보고한 내부 결정/이연:** ① embedded-release data_dir = 현 exe폴더 유지(ADR "작업폴더(cwd)" 뉘앙스는 별도 확인 대기 — release-only라 dev 무영향) ② 앱-in-daemon-mode in-proc store 이중소유 = flip 이연(pre-flip 잠복) ③ embedded single-instance "기존 창 raise" 이연(2nd 는 exit 양보) ④ set_mode autostart-부팅→embedded 전환은 명시 self-relaunch 로 해결됨(argv 재작성). ⑤ --hidden 깜빡임(conf visible:false 전환) 이연.
+- **다음:** ① 스텝3 네이티브 거동 사용자 수동 검증(트레이 실재·X·트레이 autostart 토글·set_mode 재기동 후 모드) ② spike 4종(미수행 — WebView2 hidden 메모리·focus-stealing raise·updater reconnect·크래시 재발견) ③ daemon WS 부트스트랩 `connection superseded` 경고(QA 발견, phase4 transport 영역) ④ data-plane flip(에이전트를 데몬 호스트로 — 이중소유·embedded raise·daemon 모드 실사용 다수 이연 항목이 여기서 해소).
+
 ---
 
 ## 다음 (미진행)
