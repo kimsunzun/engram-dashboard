@@ -52,7 +52,8 @@ describe('clientFactory.resolveMode / getAgentClient', () => {
     expect(client.connectionState).toBe('connected')
   })
 
-  it('window.__ENGRAM_MODE__ = "daemon" → ProtocolClient over Ws(lazy, down)', async () => {
+  it('Rust 주입 window.__ENGRAM_MODE__ = "daemon" → ProtocolClient over Ws(lazy, down)', async () => {
+    // __ENGRAM_MODE__ 는 Rust 가 주입하는 source of truth(ADR-0027). 여기선 그 주입을 시뮬레이트.
     ;(window as Win).__ENGRAM_MODE__ = 'daemon'
     const factory = await import('./clientFactory')
     const { ProtocolClient } = await import('./protocolClient')
@@ -71,12 +72,23 @@ describe('clientFactory.resolveMode / getAgentClient', () => {
     expect(client.connectionState).toBe('down')
   })
 
-  it('전역(__ENGRAM_MODE__)이 localStorage 보다 우선', async () => {
+  it('Rust 주입(__ENGRAM_MODE__)이 localStorage(dev override)보다 우선', async () => {
+    // ADR-0027: Rust 주입이 source of truth → localStorage 자체결정을 덮어쓴다.
     ;(window as Win).__ENGRAM_MODE__ = 'embedded'
     window.localStorage.setItem('engram_client_mode', 'daemon')
     const factory = await import('./clientFactory')
     // embedded 우선 → InProc carrier → connected.
     expect(factory.getAgentClient().connectionState).toBe('connected')
+  })
+
+  it('Rust 주입 window.__ENGRAM_MODE__ = "embedded" → ProtocolClient over InProc(connected)', async () => {
+    // Rust embedded 부팅 → InProc carrier. localStorage 없어도 주입만으로 embedded 확정.
+    ;(window as Win).__ENGRAM_MODE__ = 'embedded'
+    const factory = await import('./clientFactory')
+    const { ProtocolClient } = await import('./protocolClient')
+    const client = factory.getAgentClient()
+    expect(client).toBeInstanceOf(ProtocolClient)
+    expect(client.connectionState).toBe('connected')
   })
 
   it('getAgentClient 는 싱글톤(두 번 호출 동일 인스턴스) + window.__ENGRAM_AGENT__ 노출', async () => {

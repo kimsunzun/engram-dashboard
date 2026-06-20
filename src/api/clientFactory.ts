@@ -1,6 +1,12 @@
 // AgentClient 팩토리 — 위치 모드(embedded/daemon) 선택 지점(ADR-0020 Stage 3).
-// 부팅 시 1회 모드를 고른다 — 라이브 핫스왑 안 함. 기본 'embedded'(회귀 0, 기존 동작 불변).
-// daemon 은 명시 opt-in: window.__ENGRAM_MODE__ 전역 또는 localStorage 'engram_client_mode'.
+// 부팅 시 1회 모드를 고른다 — 라이브 핫스왑 안 함.
+//
+// ★모드의 source of truth = Rust(ADR-0027 보강 요구1)★: Rust 가 부팅 모드를 결정해 페이지 로드 전
+// window.__ENGRAM_MODE__ 로 주입한다(lib.rs engram-mode 플러그인 js_init_script, 모드 분기 밖에서 무조건).
+// 따라서 프론트는 이 전역을 최우선으로 읽는다. localStorage 'engram_client_mode' 는 **Tauri 밖(vitest/
+// 브라우저 프리뷰) fallback** 일 뿐이다 — Tauri WebView 안에선 dev/release 무관하게 주입이 항상 있어
+// 이 경로는 도달하지 않는다("dev override" 아님). dev 모드 스위칭은 localStorage 가 아니라 --mode 인자나
+// ENGRAM_MODE env 로 한다(Rust resolve_mode). 기본 'embedded'(둘 다 없을 때 — 순수 테스트 등).
 //
 // ★Stage 3 전환★: mode → transport(InProc/Ws) 선택 → new ProtocolClient(transport). 단일
 // ProtocolClient(프로토콜 의미론 1벌) + carrier 2개. (Stage 4a: 옛 EmbeddedClient/DaemonClient/
@@ -19,8 +25,12 @@ import { WsTransport } from './wsTransport'
 
 type ClientMode = 'embedded' | 'daemon'
 
-/** 부팅 시 1회 모드 결정. 전역(__ENGRAM_MODE__) 우선, 없으면 localStorage, 그래도 없으면 embedded. */
+/**
+ * 부팅 시 1회 모드 결정. Rust 가 주입한 전역(__ENGRAM_MODE__)이 source of truth 라 최우선(ADR-0027).
+ * 주입이 없을 때만 localStorage(Tauri 밖 fallback) → 그래도 없으면 embedded(기본).
+ */
 function resolveMode(): ClientMode {
+  // Rust 주입(source of truth) — 실배포에선 항상 존재(js_init_script, 페이지 로드 전).
   const fromGlobal = (window as unknown as { __ENGRAM_MODE__?: string }).__ENGRAM_MODE__
   if (fromGlobal === 'daemon' || fromGlobal === 'embedded') return fromGlobal
   try {

@@ -30,6 +30,10 @@ pub struct AppState {
     /// agent_connect 가 Channel 을 등록하고, agent_command 가 inbound 에 명령을 넣는다. 기존 invoke
     /// 경로와 ★공존★(Stage 4 에서 옛 경로 제거).
     pub embedded: embedded_carrier::EmbeddedConnection,
+    /// ADR-0027 보강 §63: 부팅 모드(run() 최상단 1회 확정값, Copy). data_dir 산출이 필요한
+    /// command/트레이 액션이 이 단일 출처를 읽는다(재계산 금지 — cwd/ENGRAM_DATA_DIR 변동 시
+    /// 가드↔store 폴더 갈림 방지). 전환=self-relaunch(새 프로세스)라 런타임 가변 불필요.
+    pub mode: discovery::AppMode,
 }
 
 // ── TauriStatusSink ───────────────────────────────────────────────────────────
@@ -117,6 +121,23 @@ pub fn run() {
         }));
     }
     builder = builder.plugin(tauri_plugin_opener::init());
+
+    // ADR-0027 요구1: Rust 가 모드 결정의 source of truth. 프론트(clientFactory.resolveMode)가 읽는
+    // window.__ENGRAM_MODE__ 를 페이지 로드 전(init script, main frame)에 주입해 부팅 모드를 최우선으로
+    // 못박는다. 이 주입은 모드 분기 밖에서 무조건 일어나므로 Tauri 안에선 dev/release 무관하게 항상
+    // 우선 — 프론트 localStorage 'engram_client_mode' 는 Tauri 밖(테스트/브라우저) fallback 일 뿐이다.
+    // js_init_script 가 페이지 로드 전 실행을 보장하므로 프론트가 모드를 읽을 시점엔 항상 이 값이 있다.
+    let mode_str = match mode {
+        discovery::AppMode::Embedded => "embedded",
+        discovery::AppMode::Daemon => "daemon",
+    };
+    // {mode_str:?} → 따옴표 포함 JS 문자열 리터럴("daemon"/"embedded"). mode_str 은 고정 상수라 인젝션 안전.
+    // Builder<R, C=()> 의 config 타입 C 는 plugin config 미사용 시 추론 불가 → ::<_, ()> 명시.
+    let mode_plugin = tauri::plugin::Builder::<_, ()>::new("engram-mode")
+        .js_init_script(format!("window.__ENGRAM_MODE__ = {mode_str:?};"))
+        .build();
+    builder = builder.plugin(mode_plugin);
+
     builder
         .setup(move |app| {
             // 기본 warn(OFF) — RUST_LOG 환경변수로 재정의 가능
@@ -174,7 +195,13 @@ pub fn run() {
             );
             let embedded = embedded_carrier::spawn_embedded_connection(core);
 
-            app.manage(AppState { manager, embedded });
+            // mode(Copy)를 AppState 에 실어 command/트레이 액션이 data_dir 산출에 읽게 한다(단일 출처).
+            // manage 는 build_tray 보다 먼저(현 순서 유지) — 트레이 액션이 app.state::<AppState>().mode 를 읽으므로.
+            app.manage(AppState {
+                manager,
+                embedded,
+                mode,
+            });
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // 아이콘 두 벌 생성·메뉴·핸들러 + setup 직후 데몬 상태로 아이콘 확정. Windows 전용.
