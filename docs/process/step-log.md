@@ -251,7 +251,8 @@
 - **① capability 합성 정확화(ADR-0030):** `PtyTransport::capabilities()`가 `session.resume=true`를 backend 무관 하드코딩→shell도 resume=true(부정확). **transport(물리: input/output/control) ⊕ backend(프로그램: session/model) 합성**으로 분리, 타입으로 소유권 강제(`TransportCaps`/`BackendCaps`/`Capabilities::compose`). claude resume=true·shell resume=false. ADR-0002 매트릭스 구체화.
 - **게이트(규약 강제):** 코더(opus)→reviewer-deep(opus 고노력, fable 불가)→QA(cdp 실측). reviewer Blocker/Major 0(compose 5영역 1:1·소유권 타입분리·resume 정확화 확인, Minor=spec/caps dispatch drift 주의·Nit=BackendCaps clone). **QA 실측: 실제 앱 WS→데몬→프론트 IPC 경로에서 shell 에이전트 capabilities.session.resume=false / claude=true 확인**(하드코딩 아님 실증). core test 76 통과(claude/shell resume 회귀 + compose 합성 테스트)·workspace build green·fmt·tauri import 0.
 - **변경 파일:** core `agent/types.rs`(TransportCaps/BackendCaps/compose)·`transport/{mod,pty,api}.rs`·`backend/{mod,claude,shell,codex,gemini}.rs`·`session.rs`·`manager.rs`·`tests/{session_smoke,reaper}.rs` + 문서 3건(ADR-0024/0021, CLAUDE.md) + 신규 ADR-0030.
-- **다음:** 백엔드 잔여 ③④(lifecycle PRD·idle self-shutdown — 사용자 결정 대기) 또는 프론트 본작업(D-7 레이아웃 영속·§5 LLM 제어표면). capability는 프론트가 아직 control.interrupt만 소비 → 메뉴 회색처리 구현 시 session.resume 기반 분기 GUI 실측 권고(reviewer 관찰).
+- **백엔드 잔여 처리 방침(사용자 결정 2026-06-22):** ③ 자동재시작 관측 seam = **나중에 설계해도 되는 기능, 메모만**(지금 안 함). ④ idle self-shutdown = 스케줄링 등 이유로 **나중에**(보류). ⑤ codex/gemini variant = **아직 claude도 제대로 안 됨, 넘어감**(claude 성숙 후). ⑦ 메시지 시스템 = **반드시 해야 하지만 프론트엔드가 어느정도 쓸만해진 뒤 진행**(우선순위 프론트 다음). ⑥ WSS/원격 = 원격 모델 때(기존 이연 유지). → **백엔드는 여기서 일단락, 다음은 프론트 본작업.**
+- **다음 = 프론트 본작업:** D-7 레이아웃/창 영속(localStorage) · §5 LLM 제어표면(UI 액션을 command 버스로) · 멀티창·복원 배너 UX. capability는 프론트가 아직 control.interrupt만 소비 → 메뉴 회색처리 구현 시 session.resume 기반 분기 GUI 실측 권고(reviewer 관찰).
 
 ---
 
