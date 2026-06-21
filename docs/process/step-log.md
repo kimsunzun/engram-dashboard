@@ -242,6 +242,8 @@
 - **검증:** cargo test workspace 전부 green(실패 0) + npm 71 passed.
 - **메인 결정/이연·발견:** ① docs/research/control-surface-and-fleet.md·docs/README.md·docs/tracking.md 변경은 출처불명(이 작업 무관) — 커밋 안 함, 사용자 확인 대기. ② **데몬 hot-swap 재연결 버그(QA 발견):** daemon_stop→start 로 데몬 통째 교체 시 프론트 WS 가 새 port/token 에 재연결 못 함(cachedInfo stale + reconnect 소진), 리로드 필요 — ADR-0021 재연결 견고성 영역, follow-up. ③ embedded-release data_dir(cwd vs exe)·in-proc 이중소유 등 스텝3 이연 항목은 embedded 제거로 **대부분 소멸**.
 - **다음:** ① 트레이 네이티브 수동 검증(색·더블클릭·메뉴·끄기 grace) ② 데몬 hot-swap WS 재연결 버그 ③ 원격/모바일(데몬 위치 축 = WSS URL, scheme/host 파라미터화 + Origin allowlist) ④ spike·updater.
+- **후속 수정(사용자 테스트, 같은 dashboard10):** `29d1d5d` 트레이 좌클릭 메뉴 비활성(show_menu_on_left_click=false, 우클릭=메뉴) · `ac25754` **데몬 hot-swap 재연결**(read_daemon_info=no-spawn daemon.json 재조회로 옮겨간 데몬 추적, ADR-0021 보강; +reviewer Blocker 좀비소켓 race를 openGen 세대토큰 가드로 차단, 회귀테스트 2) · `d6df88d` UI 열기 더블클릭→단일 좌클릭(Left+Up) · `aacb0f2` 부팅 다중 spawn 직렬화(ensure_lock 프로세스전역 async Mutex — 콘솔창 깜빡임 제거) + 재연결 시 트리 재동기화(eventBus onConnectionStateChange→getAgents+refreshProfiles, 첫연결 스킵). 위 "다음 ②(hot-swap)"는 이로써 해소. 전부 코더→reviewer-deep→QA 통과, cargo/tsc/npm green.
+- **백엔드 잔여(프론트 전, recon):** ①capability backend별 정확화(현 transport 단일 하드코딩) ②doc rot(ADR-0024 idle문구·CLAUDE.md 모듈맵) — 권장 저비용 · ③자동재시작 관측 seam(lifecycle PRD 결정대기) ④idle self-shutdown(결정대기) · ⑤codex/gemini variant ⑥WSS/원격 TLS ⑦ApiTransport·메시지시스템 — 이연.
 
 ---
 
