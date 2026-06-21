@@ -1,7 +1,7 @@
 // DaemonControl 단위테스트 — ADR-0021 §5 lifecycle 제어 표면.
 //
 // daemon_start/stop/status Tauri command(invoke) mock + fake AgentClient 로 graceful→fallback
-// 순서·연결상태별 분기·embedded no-op 을 검증한다.
+// 순서·연결상태별 분기를 검증한다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, ...rest: unknown[]) => invokeMock(cmd, ...rest),
 }))
 
-import { DaemonDaemonControl, EmbeddedDaemonControl } from './daemonControl'
+import { DaemonDaemonControl } from './daemonControl'
 import type { AgentClient, ConnectionState } from './agentClient'
 
 // stopDaemon/connect/disconnect/connectionState 만 쓰는 최소 fake client.
@@ -126,22 +126,5 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
     const s = await ctrl.status()
     expect(invokeMock).toHaveBeenCalledWith('daemon_status')
     expect(s).toEqual({ alive: true, pid: 42, port: 9999 })
-  })
-})
-
-describe('EmbeddedDaemonControl (embedded 모드 no-op)', () => {
-  it('start/stop 은 에러(데몬 없음)', async () => {
-    const ctrl = new EmbeddedDaemonControl()
-    await expect(ctrl.start()).rejects.toThrow(/embedded/)
-    await expect(ctrl.stop()).rejects.toThrow(/embedded/)
-    // 데몬 command 를 부르지 않는다.
-    expect(invokeMock).not.toHaveBeenCalled()
-  })
-
-  it('status 는 alive=false 반환(에러 아님)', async () => {
-    const ctrl = new EmbeddedDaemonControl()
-    const s = await ctrl.status()
-    expect(s).toEqual({ alive: false, pid: null, port: null })
-    expect(invokeMock).not.toHaveBeenCalled()
   })
 })

@@ -8,7 +8,7 @@
 //   ProtocolClient → Transport.send(AgentCommand wire)        → carrier 직렬화/전송
 //   carrier 수신   → Transport.onMessage(InboundMessage)      → ProtocolClient 라우팅
 //
-// 연결 상태도 carrier 소유: WS 는 reconnecting/down 발생, InProc 은 항상 connected(no-op).
+// 연결 상태도 carrier 소유: WS 는 reconnecting/down 을 발생시킨다.
 // ProtocolClient 는 connectionState 가 connected 로 (재)전이하면 resubscribeAll 한다 —
 // carrier 별 재연결 메커니즘은 transport 내부에 숨고, ProtocolClient 는 "연결됨" 신호만 본다.
 
@@ -32,9 +32,8 @@ export type InboundMessage =
 /**
  * carrier 추상. ProtocolClient 가 의존하는 유일한 전송 표면.
  *
- * 구현은 2개:
+ * 구현(daemon-only, ADR-0029):
  *  - WsTransport: WebSocket + discover/Auth/Hello + 지수백오프 재연결. binary frame/JSON 정규화.
- *  - InProcTransport: agent_connect(Channel 등록) + invoke('agent_command'). 항상 connected.
  */
 export interface Transport {
   /** 현재 연결 상태. ProtocolClient 의 connectionState 가 이걸 그대로 노출. */
@@ -61,7 +60,6 @@ export interface Transport {
    * 전에 await 한다 — 이 경로는 **절대 데몬을 spawn 하지 않는다**(reconnect=attach-only 와 동치).
    *  - WS: 캐시된 host:port 로 소켓만 재오픈(discover/spawn 금지). 캐시 없거나 down 이면 reject
    *    ("daemon down — daemon_start 로 명시 시작 필요"). → 데몬 끈 뒤 키 한 번/리사이즈가 respawn 못 함.
-   *  - InProc: no-op resolve(프로세스 수명=연결 수명, spawn 개념 없음).
    */
   ensureReady(): Promise<void>
 
@@ -69,7 +67,6 @@ export interface Transport {
    * **명시 spawn 진입점**(ADR-0021 §1: ensure(spawn)=명시 시점만). 부팅 연결/사용자 daemon_start 가
    * 이걸 통한다 — 여기서만 데몬을 띄울 수 있다(tmux `attach` 가 서버를 띄우는 것과 동치).
    *  - WS: discover_daemon(없으면 spawn) → 캐시 갱신 → Auth/Hello. closedByUser/reconnect 상태 리셋.
-   *  - InProc: ensureReady 와 동일(Channel 등록, no-op spawn).
    * 명령 경로(ensureReady)와 분리해 "명령의 부수효과로 respawn" 을 차단한다.
    */
   start(): Promise<void>

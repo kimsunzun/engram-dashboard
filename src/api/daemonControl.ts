@@ -7,8 +7,7 @@
 // 루프는 이 표면을 절대 호출하지 않는다(attach-only). 데몬을 stop 하면 재연결이 못 붙어 'down'
 // 유지 — 사용자가 다시 start 해야 살아난다.
 //
-// embedded 모드는 데몬이 없다 → 전부 명확한 에러/no-op(daemon 모드 전용). clientFactory 가 mode 에
-// 따라 DaemonDaemonControl(실제) 또는 EmbeddedDaemonControl(no-op)을 노출한다.
+// daemon-only(ADR-0029): clientFactory 가 항상 DaemonDaemonControl 을 노출한다.
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -30,10 +29,7 @@ export interface DaemonInfo {
   protocol_version: number
 }
 
-/**
- * 데몬 lifecycle 제어. daemon 모드 전용 — embedded 는 데몬이 없어 start/stop 이 에러, status 는
- * alive=false 를 반환한다(데몬 없음).
- */
+/** 데몬 lifecycle 제어(start/stop/status). */
 export interface DaemonControl {
   /** 명시 시작(ensure). 이미 살아있으면 attach, 없으면 spawn. console=true 면 콘솔 창과 함께(디버그). */
   start(opts?: { console?: boolean; timeoutMs?: number }): Promise<DaemonInfo>
@@ -43,7 +39,7 @@ export interface DaemonControl {
   status(): Promise<DaemonStatus>
 }
 
-/** daemon 모드 실제 구현 — Tauri command + StopDaemon graceful. */
+/** 실제 구현 — Tauri command + StopDaemon graceful. */
 export class DaemonDaemonControl implements DaemonControl {
   private readonly client: AgentClient
 
@@ -100,19 +96,5 @@ export class DaemonDaemonControl implements DaemonControl {
 
   status(): Promise<DaemonStatus> {
     return invoke<DaemonStatus>('daemon_status')
-  }
-}
-
-/** embedded 모드 no-op 구현 — 데몬이 없으므로 start/stop 은 에러, status 는 alive=false. */
-export class EmbeddedDaemonControl implements DaemonControl {
-  start(): Promise<DaemonInfo> {
-    return Promise.reject(new Error('daemon_start: embedded 모드에는 데몬이 없습니다(daemon 모드 전용)'))
-  }
-  stop(): Promise<void> {
-    return Promise.reject(new Error('daemon_stop: embedded 모드에는 데몬이 없습니다(daemon 모드 전용)'))
-  }
-  status(): Promise<DaemonStatus> {
-    // embedded 는 데몬이 없다 — alive=false(에러 아님: status 조회는 항상 답을 줘야 함).
-    return Promise.resolve({ alive: false, pid: null, port: null })
   }
 }
