@@ -90,6 +90,9 @@ pub fn run() {
             commands::daemon_start,
             commands::daemon_stop,
             commands::daemon_status,
+            // ADR-0021: 재연결이 옮겨간(hot-swap·크래시 재spawn) 데몬을 따라가게 daemon.json 을
+            //   재조회(token 포함, no-spawn). ★재연결 attach-only 의 spawn-금지 유지★(read-only).
+            commands::read_daemon_info,
             // ADR-0026 2단계 §5: 트레이 동작의 LLM/cdp 제어 표면(트레이 핸들러와 같은 actions 함수).
             //   데몬 켜기/끄기는 위 daemon_start/daemon_stop 재사용 → 여기엔 창/종료만.
             commands::show_main_ui,

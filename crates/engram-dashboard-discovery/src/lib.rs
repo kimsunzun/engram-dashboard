@@ -383,6 +383,39 @@ pub fn daemon_status(data_dir: &Path) -> DaemonStatus {
     status_with(&reader, &RealLiveness)
 }
 
+/// 살아있는 데몬의 **전체 접속 정보(token 포함)** 를 daemon.json 에서 읽어 반환(순수 — reader/liveness 주입).
+///
+/// ★daemon_status 와의 차이★: daemon_status 는 pid/port 만 주는 lifecycle probe 다(token 없음). 이
+/// 함수는 **재연결이 옮겨간 데몬을 attach** 하는 데 쓰여 host/port/token 전부가 필요하다.
+///
+/// ★spawn 절대 안 함(ADR-0021)★: 단지 현재 떠 있는 daemon.json 을 읽기만 한다(read-only). 살아있는
+/// 호환 데몬이면 Some(info), 그 외(파일 없음/깨짐/IO 오류/죽은 PID/버전 불일치) 전부 None(보수).
+/// check_acceptable(Accept) 일 때만 Some — daemon_status.alive 와 같은 기준이라 일관된다.
+fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Option<DaemonInfo> {
+    match reader.read() {
+        // live + 버전 호환만 반환. 죽었거나(stale)·버전 불일치면 None(attach 대상 아님).
+        Ok(Some(info)) => match check_acceptable(&info, liveness) {
+            AcceptCheck::Accept => Some(info),
+            AcceptCheck::DeadPid | AcceptCheck::VersionMismatch { .. } => None,
+        },
+        // 없음/깨짐/IO 오류 → 살아있는 데몬 없음(보수).
+        _ => None,
+    }
+}
+
+/// 살아있는 데몬의 접속 정보(token 포함)를 daemon.json 에서 읽어 반환(real 진입점).
+///
+/// ★재연결의 "옮겨간 데몬 추적" 수단(ADR-0021)★: hot-swap(daemon_stop→start)·크래시-재spawn 으로
+/// 데몬이 새 port/token 으로 떠도, 재연결 루프가 캐시된 옛 주소 대신 이 함수로 **현재 daemon.json** 을
+/// 재조회해 그 주소로 attach 한다. ★spawn 하지 않는다★ — 단지 떠 있으면 따라갈 뿐, 깨우지 않는다.
+/// data_dir/daemon.json 을 읽어 살아있는 호환 데몬이면 Some, 없으면 None.
+pub fn read_live_daemon(data_dir: &Path) -> Option<DaemonInfo> {
+    let reader = FileReader {
+        path: data_dir.join(DAEMON_FILE),
+    };
+    read_live_with(&reader, &RealLiveness)
+}
+
 /// 프로세스 종료자 — real 은 taskkill /F. 단위 테스트는 호출 인자를 캡처하는 가짜 주입.
 pub trait ProcessKiller {
     /// 주어진 pid 를 강제 종료. 성공 여부는 best-effort(이미 죽었으면 Ok 취급).
@@ -1719,6 +1752,53 @@ mod tests {
         assert!(!s.alive);
         assert_eq!(s.pid, None);
         assert_eq!(s.port, None);
+    }
+
+    // ── read_live_daemon (token 포함 attach 정보, no-spawn) — ADR-0021 hot-swap 추적 ──────
+    //
+    // 재연결이 옮겨간 데몬을 따라가는 read-only 경로. status_with 와 같은 Accept 기준이되 token 까지
+    // 실어 준다. spawn 은 호출조차 안 한다(이 순수 함수엔 Spawner 자체가 없다 = 구조적으로 spawn 불가).
+
+    #[test]
+    fn read_live_returns_full_info_with_token() {
+        // 살아있는 호환 데몬 → Some(info) + token 포함(attach 에 필요).
+        let reader = FakeReader::new(vec![Ok(Some(info(666, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![] };
+        let got = read_live_with(&reader, &liveness).expect("live 데몬이면 Some");
+        assert_eq!(got.pid, 666);
+        assert_eq!(got.host, "127.0.0.1");
+        assert_eq!(got.port, 12345);
+        assert_eq!(
+            got.token,
+            "t".repeat(64),
+            "재연결 attach 에 token 이 실려야 함"
+        );
+    }
+
+    #[test]
+    fn read_live_dead_daemon_is_none() {
+        // 죽은 PID → None(attach 대상 아님 — 옛 stale 주소를 따라가지 않게).
+        let reader = FakeReader::new(vec![Ok(Some(info(777, PROTOCOL_VERSION)))]);
+        let liveness = FakeLiveness { dead: vec![777] };
+        assert!(read_live_with(&reader, &liveness).is_none());
+    }
+
+    #[test]
+    fn read_live_version_mismatch_is_none() {
+        // 버전 불일치(붙을 수 없음) → None.
+        let reader = FakeReader::new(vec![Ok(Some(info(888, PROTOCOL_VERSION + 1)))]);
+        let liveness = FakeLiveness { dead: vec![] };
+        assert!(read_live_with(&reader, &liveness).is_none());
+    }
+
+    #[test]
+    fn read_live_missing_or_broken_is_none() {
+        // 파일 없음 → None. 깨진 파일도 None(보수 — 신뢰 불가).
+        let liveness = FakeLiveness { dead: vec![] };
+        let none_reader = FakeReader::new(vec![Ok(None)]);
+        assert!(read_live_with(&none_reader, &liveness).is_none());
+        let broken_reader = FakeReader::new(vec![Err(DiscoveryError::Parse("bad".into()))]);
+        assert!(read_live_with(&broken_reader, &liveness).is_none());
     }
 
     #[test]

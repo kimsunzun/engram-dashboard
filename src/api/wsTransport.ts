@@ -45,9 +45,19 @@ export class WsTransport implements Transport {
 
   // ADR-0021: ensure(명시 spawn)와 reconnect(attach-only)를 분리하기 위한 캐시.
   // 최초 명시 연결에서 discover_daemon 으로 얻은 host/port/token 을 보관한다. 재연결 루프는
-  // 이 캐시로 **소켓만 재오픈**하고 절대 discover/spawn 을 호출하지 않는다(불변식: reconnect 는
-  // spawn 금지 — 데몬을 kill 하면 재연결이 못 붙어 'down' 유지, 사용자가 명시로 다시 시작).
+  // 이 캐시를 출발점으로 쓰되, 매 재시도 전에 read_daemon_info(no-spawn)로 현재 daemon.json 을
+  // 재조회해 **옮겨간 데몬(hot-swap·크래시 재spawn)의 새 주소를 따라간다**(아래 openSocket 주석).
+  // ★불변식 유지★: reconnect 는 절대 discover/spawn 을 호출하지 않는다 — read_daemon_info 는
+  // read-only 라 데몬을 깨우지 않는다. 살아있는 데몬이 없으면 backoff/소진 → 'down'(사용자 명시 start 로 복구).
   private cachedInfo: DaemonInfoDto | null = null
+
+  // ★세대 토큰(Blocker-1 좀비 소켓 가드)★: openSocket 진입마다 ++ 해 "현재 유효한 시도"를 식별한다.
+  // openSocket 본체는 await(discover_daemon·read_daemon_info) 에서 yield 하므로, 그 사이 다른
+  // start()/close()(=cleanupSocket)가 끼면 이 시도는 supersede 된다. pendingReject 는 outer promise 만
+  // settle 할 뿐 await 를 넘어 재개된 run() 본체가 new WebSocket 을 만들고 this.ws 에 박는 것(좀비)은
+  // 못 막는다 — 그래서 await 직후·소켓 생성 직전에 myGen!==openGen 으로 stale 재개를 폐기한다.
+  // cleanupSocket()도 ++ 해서, 새 openSocket 없이 cleanup 만 하는 close() 경로가 in-flight 시도를 무효화한다.
+  private openGen = 0
 
   // ProtocolClient 가 등록하는 단일 수신 콜백(control/output 정규화 메시지).
   private messageCb: ((msg: InboundMessage) => void) | null = null
@@ -135,10 +145,16 @@ export class WsTransport implements Transport {
    *
    * ADR-0021 ensure/reconnect 분리:
    *  - allowDiscover=true(명시 연결): discover_daemon 호출(없으면 spawn) → 결과를 cachedInfo 에 보관.
-   *  - allowDiscover=false(재연결 루프): **discover/spawn 절대 금지.** 캐시된 host/port 로 소켓만
-   *    재오픈한다. 캐시가 없으면(첫 연결도 안 한 상태) 즉시 reject — 재연결은 새 데몬을 만들지 않는다.
+   *  - allowDiscover=false(재연결 루프): **discover/spawn 절대 금지.** 단, read_daemon_info(no-spawn)로
+   *    현재 daemon.json 을 재조회해 **옮겨간 데몬을 따라간다**(hot-swap·크래시 재spawn — 새 port/token).
+   *    이것은 attach 대상 추적이지 spawn 이 아니다(read-only, 데몬을 깨우지 않음). 살아있는 데몬이 없으면
+   *    캐시 host/port 로 마지막 시도하고, 그것도 없으면 reject(소진→down). 재연결은 새 데몬을 만들지 않는다.
    */
   private openSocket(allowDiscover: boolean): Promise<void> {
+    // ★Blocker-1 좀비 가드★: 이 시도의 세대 토큰을 모든 await 전에 동기로 캡처한다. 아래 await 들이
+    // yield 하는 사이 다른 start()/close()가 openGen 을 올리면(supersede) 재개된 run() 본체가 stale 임을
+    // 이 값으로 판별해 new WebSocket 생성 전에 폐기한다(좀비 소켓 차단).
+    const myGen = ++this.openGen
     return new Promise<void>((resolve, reject) => {
       // 이 promise 의 reject 를 밖(cleanupSocket)에서도 닿게 보관. 모든 settle 경로에서 null 로 비운다.
       this.pendingReject = reject
@@ -150,18 +166,52 @@ export class WsTransport implements Transport {
         this.pendingReject = null
         reject(e)
       }
+      // 이 시도가 다른 start()/close()(cleanupSocket)에 의해 supersede 됐는가. true 면 호출자가 이미
+      // settleReject 후 return 해야 한다(WebSocket 생성·this.ws 대입 전 = 좀비 안 생김).
+      const isStale = (): boolean => myGen !== this.openGen
       const run = async () => {
         let info: DaemonInfoDto
         if (allowDiscover) {
           // 명시 연결만 discover(없으면 데몬 spawn). 성공 시 캐시 갱신(데몬 재기동 시 port/token 반영).
           info = await invoke<DaemonInfoDto>('discover_daemon')
+          // ★await 재개 직후 stale 검사★: discover 가 yield 한 사이 cleanupSocket(openGen++)이 끼면
+          // 이 시도는 무효 — settleReject 만 하고 빠진다(소켓 생성 금지, this.ws 미오염).
+          if (isStale()) {
+            settleReject(new Error('openSocket superseded — stale attempt discarded'))
+            return
+          }
           this.cachedInfo = info
         } else {
-          // 재연결 = attach-only. 캐시된 정보로만 재오픈. 캐시 없으면 붙을 곳을 모른다 → reject.
-          if (!this.cachedInfo) {
-            throw new Error('no cached daemon info — reconnect cannot discover/spawn (ADR-0021)')
+          // 재연결 = attach-only. ★옮겨간 데몬 추적(ADR-0021)★: spawn 대신 read_daemon_info(no-spawn)로
+          // 현재 daemon.json 을 재조회한다. hot-swap(stop→start)·크래시 재spawn 으로 데몬이 새
+          // port/token 으로 떠도 그 주소를 따라가 attach 한다(read-only — 데몬을 만들거나 깨우지 않음).
+          const fresh = await invoke<DaemonInfoDto | null>('read_daemon_info').catch(() => null)
+          // ★await 재개 직후 stale 검사(Blocker-1)★: read_daemon_info 가 yield 한 사이 close()/start()의
+          // cleanupSocket(openGen++)이 끼면 무효 — 폐기. pendingReject 만으론 outer promise 만 settle 되고
+          // 본체가 new WebSocket 까지 진행해 좀비를 만들거나 this.ws 를 hijack 하므로 여기서 끊는다.
+          if (isStale()) {
+            settleReject(new Error('openSocket superseded — stale attempt discarded'))
+            return
           }
-          info = this.cachedInfo
+          if (fresh) {
+            // 살아있는 데몬 발견(옮겨갔을 수 있음) → 캐시 갱신 후 그 주소로 attach.
+            this.cachedInfo = fresh
+            info = fresh
+          } else if (this.cachedInfo) {
+            // read_daemon_info 가 None(살아있는 데몬 없음)이지만 캐시가 있다 — 일시적 끊김일 수 있어
+            // 옛 주소로 마지막 시도(여전히 attach-only, spawn 아님). 실패하면 onclose→backoff→소진.
+            info = this.cachedInfo
+          } else {
+            // 캐시도 없고 살아있는 데몬도 없다 → 붙을 곳을 모른다. reject(재연결은 새 데몬 안 만듦).
+            throw new Error('no live/cached daemon — reconnect cannot discover/spawn (ADR-0021)')
+          }
+        }
+        // ★소켓 생성 직전 최종 stale 검사(Blocker-1)★: await 후 분기에서 동기 시간이 지났을 수 있고,
+        // 좀비 차단의 핵심 지점이다 — new WebSocket 은 반드시 "현재 시도"일 때만. 여기서 통과해야
+        // this.ws 대입이 정당하다.
+        if (isStale()) {
+          settleReject(new Error('openSocket superseded — stale attempt discarded'))
+          return
         }
         // host 는 일단 127.0.0.1 고정 가정(로컬 IPC).
         const ws = new WebSocket('ws://' + info.host + ':' + info.port)
@@ -313,6 +363,10 @@ export class WsTransport implements Transport {
     // this.ws 는 await invoke('discover_daemon') 이후에야 대입된다. 이 settle 과 connectPromise 정리를
     // 아래 `if (!ws) return` 위로 끌어올려 ws 가 아직 null 인 discover 윈도에서도 항상 실행되게 한다 —
     // 안 그러면 두 번째 start()가 pendingReject 를 덮어써 첫 promise 가 영영 settle 안 되고 호출자가 hang.
+    // ★Blocker-1 좀비 가드★: in-flight openSocket 의 세대를 무효화한다. close() 처럼 새 openSocket 없이
+    // cleanup 만 하는 경로(또는 start()의 cleanup 단계)가 await yield 중인 시도를 supersede 해, 재개 시
+    // myGen!==openGen 으로 폐기되게 한다(pendingReject 는 outer promise 만 깨우지 본체 좀비 생성은 못 막음).
+    this.openGen++
     if (this.pendingReject) {
       const rej = this.pendingReject
       this.pendingReject = null

@@ -13,8 +13,13 @@ const discoverInfo = {
   token: 'test-token',
   protocol_version: 1,
 }
+// read_daemon_info(no-spawn 재조회, ADR-0021)가 돌려줄 현재 daemon.json. 기본은 discoverInfo 와 동일
+// (hot-swap 아닌 경우 = 같은 데몬). 테스트가 hot-swap/죽음을 흉내내려면 이 값을 바꾼다(null=죽음).
+let liveDaemonInfo: typeof discoverInfo | null = discoverInfo
 const invokeMock = vi.fn(async (cmd: string, ..._rest: unknown[]) => {
   if (cmd === 'discover_daemon') return discoverInfo
+  // read_daemon_info = read-only(spawn 안 함). 재연결이 옮겨간 데몬을 따라가는 경로.
+  if (cmd === 'read_daemon_info') return liveDaemonInfo
   throw new Error('unexpected invoke: ' + cmd)
 })
 vi.mock('@tauri-apps/api/core', () => ({
@@ -109,6 +114,7 @@ beforeEach(() => {
   FakeWebSocket.last = null
   FakeWebSocket.instances = []
   invokeMock.mockClear()
+  liveDaemonInfo = discoverInfo // 매 테스트 기본: read_daemon_info 는 같은 데몬을 돌려준다.
   uuidCounter = 0
   ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
@@ -334,6 +340,103 @@ describe('WsTransport 재연결', () => {
     expect(FakeWebSocket.instances.length).toBe(before)
     expect(t.connectionState).toBe('down')
   })
+
+  // ── Blocker-1: 재연결 read_daemon_info await yield 중 좀비 소켓 생성 race (openGen 세대 가드) ──
+  // 재연결 경로 openSocket(false)에 read_daemon_info await 가 생기면서, 그 await 가 yield 한 사이
+  // close()/start()(=cleanupSocket)가 끼면 재개된 run() 본체가 new WebSocket 을 만들어 좀비가 된다.
+  // pendingReject 는 outer promise 만 settle 하지 본체 재개를 못 막는다 → 세대 토큰(openGen)으로 차단.
+
+  it('close() during read await → 재개돼도 좀비 소켓 안 생김(WS 수 불변, down 유지) [Blocker-1]', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t) // 캐시 채움 + connected
+    invokeMock.mockClear()
+
+    // 1) 비의도 끊김 → reconnecting. reconnectTimer(500ms) 만료 시 openSocket(false) 가 돈다.
+    ws1.fireClose()
+    expect(t.connectionState).toBe('reconnecting')
+
+    // 2) 재연결의 read_daemon_info 를 제어 가능한 deferred 로 막는다(await yield 윈도 생성).
+    let resolveRead!: (v: typeof discoverInfo) => void
+    const readDeferred = new Promise<typeof discoverInfo>((r) => {
+      resolveRead = r
+    })
+    invokeMock.mockImplementationOnce(async (cmd: string) => {
+      if (cmd === 'read_daemon_info') return readDeferred
+      throw new Error('unexpected invoke: ' + cmd)
+    })
+
+    // 3) reconnectTimer 만료 → openSocket(false) 진입 → read_daemon_info await 에서 멈춤(ws 미생성).
+    await new Promise((r) => setTimeout(r, 600))
+    const instancesBefore = FakeWebSocket.instances.length // 아직 새 소켓 없음(read 가 pending)
+
+    // 4) ★race★: read 가 pending 인 동안 close() — cleanupSocket 이 openGen++ 로 in-flight 시도를 무효화.
+    t.close()
+    expect(t.connectionState).toBe('down')
+
+    // 5) 멈춰있던 read 가 뒤늦게 resolve → run() 본체 재개. 세대 가드가 없으면 여기서 new WebSocket
+    //    (좀비)이 생기고 onopen/Hello 로 끊은 연결이 부활한다. 가드가 stale 로 폐기해야 한다.
+    resolveRead(discoverInfo)
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+
+    // ★좀비 차단 단언★: 새 WS 인스턴스가 안 생겼고 상태는 down 유지(부활 없음).
+    expect(FakeWebSocket.instances.length).toBe(instancesBefore)
+    expect(t.connectionState).toBe('down')
+  })
+
+  it('start() during reconnect read await → 좀비가 정식 소켓 hijack 안 함 [Blocker-1]', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t)
+    invokeMock.mockClear()
+
+    // 1) 끊김 → reconnecting.
+    ws1.fireClose()
+    expect(t.connectionState).toBe('reconnecting')
+
+    // 2) 재연결 read_daemon_info 를 deferred 로 막는다.
+    let resolveRead!: (v: typeof discoverInfo) => void
+    const readDeferred = new Promise<typeof discoverInfo>((r) => {
+      resolveRead = r
+    })
+    invokeMock.mockImplementationOnce(async (cmd: string) => {
+      if (cmd === 'read_daemon_info') return readDeferred
+      // 이후 호출(start 의 discover_daemon 등)은 기본 mock 으로.
+      if (cmd === 'discover_daemon') return discoverInfo
+      throw new Error('unexpected invoke: ' + cmd)
+    })
+
+    // 3) reconnectTimer 만료 → openSocket(false) 가 read await 에서 멈춤(좀비 후보 in-flight).
+    await new Promise((r) => setTimeout(r, 600))
+
+    // 4) ★race★: 명시 start() — cleanupSocket(openGen++) + openSocket(true)(openGen++)로 정식 소켓 생성.
+    const pStart = t.start().catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    const wsReal = FakeWebSocket.last! // 정식(start) 소켓
+    wsReal.fireOpen()
+    wsReal.fireText({ Hello: { protocol_version: 1 } })
+    await pStart
+    expect(t.connectionState).toBe('connected')
+    const instancesAfterReal = FakeWebSocket.instances.length
+
+    // 5) 멈춰있던 reconnect read 가 뒤늦게 resolve → 재개. 가드 없으면 좀비가 new WebSocket 으로
+    //    this.ws 를 hijack(정식 소켓 핸들 덮어씀)한다. 세대 가드가 stale 로 폐기해야 한다.
+    resolveRead(discoverInfo)
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+
+    // ★hijack 차단 단언★: 좀비 소켓이 안 생겼다(WS 수 불변). this.ws 가 정식 소켓을 가리키므로
+    //  정식 소켓으로 명령 전송이 정상이고, 연결은 connected 유지.
+    expect(FakeWebSocket.instances.length).toBe(instancesAfterReal)
+    expect(t.connectionState).toBe('connected')
+
+    // 정식 소켓이 살아있는지 = send 가 정식 소켓으로 나가는지 확인(this.ws hijack 안 됨).
+    const before = wsReal.sent.length
+    t.send({ ping: 1 })
+    expect(wsReal.sent.length).toBe(before + 1)
+
+    t.close()
+  })
 })
 
 // ── ADR-0021 B-1: 명령(ensureReady=attach-only) / 명시(start=spawn) 분리 ──────────────
@@ -380,14 +483,16 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     await Promise.resolve()
     const er = t.ensureReady()
     await er // 이미 connected → 즉시 resolve
-    expect(invokeMock).not.toHaveBeenCalled() // attach 경로는 discover 안 함
+    // ★spawn 금지 유지★: attach 경로는 discover_daemon(spawn 유발)을 절대 부르지 않는다.
+    // read_daemon_info(no-spawn 재조회, ADR-0021 hot-swap 추적)는 재연결 중 호출될 수 있다(허용).
+    expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
     t.close()
   })
 
-  it('재연결은 discover_daemon 을 호출하지 않고(spawn 금지) 캐시 host:port 로 소켓만 재오픈', async () => {
+  it('재연결은 discover_daemon(spawn) 금지 — read_daemon_info(no-spawn) 재조회로 현재 데몬에 attach', async () => {
     const t = new WsTransport()
     const ws1 = await connect(t)
-    expect(invokeMock).toHaveBeenCalledTimes(1) // 최초 1회만
+    expect(invokeMock).toHaveBeenCalledTimes(1) // 최초 discover 1회만
     invokeMock.mockClear()
 
     // 비의도 끊김 → attach-only 재연결.
@@ -395,12 +500,39 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     expect(t.connectionState).toBe('reconnecting')
     await new Promise((r) => setTimeout(r, 600))
 
-    // ★불변식★: 재연결 경로는 discover(=spawn 유발)를 절대 호출하지 않는다.
-    expect(invokeMock).not.toHaveBeenCalled()
-    // 캐시된 host:port 로 새 소켓을 연다(같은 url).
+    // ★불변식★: 재연결 경로는 discover_daemon(=spawn 유발)을 절대 호출하지 않는다.
+    expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
+    // ★ADR-0021 hot-swap 추적★: 대신 read_daemon_info(no-spawn)로 현재 daemon.json 을 재조회한다.
+    expect(invokeMock).toHaveBeenCalledWith('read_daemon_info')
+    // read_daemon_info 가 돌려준 host:port 로 새 소켓을 연다(여기선 같은 데몬 = 같은 url).
     const ws2 = FakeWebSocket.last!
     expect(ws2).not.toBe(ws1)
     expect(ws2.url).toBe('ws://127.0.0.1:9999')
+    t.close()
+  })
+
+  it('hot-swap: 재연결이 read_daemon_info 로 새 port/token 을 따라가 새 주소에 attach', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t) // 캐시 = 9999
+    invokeMock.mockClear()
+
+    // 데몬이 통째 교체돼 새 port 로 떴다(daemon_stop→daemon_start). daemon.json 이 갱신됨.
+    liveDaemonInfo = { ...discoverInfo, port: 7777, token: 'new-token' }
+
+    ws1.fireClose() // 옛 연결 끊김 → 재연결
+    expect(t.connectionState).toBe('reconnecting')
+    await new Promise((r) => setTimeout(r, 600))
+
+    // 캐시(9999)가 아니라 read_daemon_info 가 준 새 주소(7777)로 attach 한다(spawn 아님 — read-only).
+    expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
+    expect(invokeMock).toHaveBeenCalledWith('read_daemon_info')
+    const ws2 = FakeWebSocket.last!
+    expect(ws2.url).toBe('ws://127.0.0.1:7777')
+    // 새 데몬에 Hello 까지 가면 attempt 가 리셋되고 connected.
+    ws2.fireOpen()
+    ws2.fireText({ Hello: { protocol_version: 1 } })
+    await Promise.resolve()
+    expect(t.connectionState).toBe('connected')
     t.close()
   })
 
@@ -417,7 +549,9 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     await p
     invokeMock.mockClear()
 
-    // 데몬이 죽었다고 가정 — 끊긴 뒤 매 attach 시도가 즉시 onclose(연결 거부)로 실패.
+    // 데몬이 죽었다고 가정 — daemon.json 도 죽은 데몬이라 read_daemon_info 는 None(살아있는 데몬 없음).
+    // 끊긴 뒤 매 attach 시도가 즉시 onclose(연결 거부)로 실패.
+    liveDaemonInfo = null
     ws1.fireClose()
     // 5회 백오프(500/1s/2s/4s/8s) 각각 진행 → 매번 새 소켓이 곧장 닫힘.
     for (let i = 0; i < WS_MAX_ATTEMPTS; i++) {
@@ -429,7 +563,9 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     }
     await vi.advanceTimersByTimeAsync(11000)
 
-    expect(invokeMock).not.toHaveBeenCalled() // 끝까지 discover/spawn 없음
+    // ★spawn 금지 유지★: 죽은 데몬을 따라가려 read_daemon_info(no-spawn)는 부를 수 있지만,
+    // discover_daemon(spawn 유발)은 끝까지 0회 — 데몬이 안 살아남고 'down' 정착.
+    expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
     expect(t.connectionState).toBe('down')
     t.close()
     vi.useRealTimers()

@@ -74,6 +74,22 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
     })
 }
 
+/// 살아있는 데몬의 접속 정보(token 포함)를 daemon.json 에서 읽어 반환. ★spawn 안 함★(ADR-0021:
+/// 재연결은 깨우지 않는다 — 단지 데몬이 옮겨갔으면 새 주소를 따라가게 한다). 데몬 없거나 죽었으면 None.
+///
+/// ★재연결 hot-swap 추적용★: daemon_stop→daemon_start(통째 교체)나 크래시-재spawn 으로 데몬이 새
+/// port/token 으로 뜨면, 프론트 재연결 루프(wsTransport)가 캐시된 옛 주소 대신 이 command 로 현재
+/// daemon.json 을 재조회해 새 주소로 attach 한다. read-only 라 discover_daemon(spawn 동반)과 분리된다.
+/// data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029).
+///
+/// daemon.json 없음/깨짐/죽은 PID/버전 불일치 → Ok(None)(보수). 살아있는 호환 데몬이면 Ok(Some(DTO)).
+/// token 은 DTO 에 실리나 **로그 금지**(DaemonInfoDto 규약).
+#[tauri::command]
+pub fn read_daemon_info() -> Result<Option<DaemonInfoDto>, String> {
+    let data_dir = discovery::default_data_dir();
+    Ok(discovery::read_live_daemon(&data_dir).map(DaemonInfoDto::from))
+}
+
 /// 데몬 종료 fallback(§5). daemon.json 의 pid 를 taskkill /F.
 ///
 /// ★graceful 우선★: 연결을 쥔 프론트는 먼저 StopDaemon AgentCommand(graceful, 자식 정리 후 자진

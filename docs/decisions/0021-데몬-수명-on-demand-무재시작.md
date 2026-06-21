@@ -16,6 +16,8 @@ prior-art 조사 결론(tmux·wezterm·emacs·gpg-agent·LSP): **전부 on-deman
 
 1. **spawn(ensure) = 명시 시점만:** 부팅 연결 / 사용자 `daemon_start` / 대시보드 열기 같은 **의도적 연결**에서만 "없으면 spawn". (wezterm `no_serve_automatically=false` = 연결 실패 시 자동 spawn 패턴.)
 2. **재연결 루프 = attach-only(절대 spawn 안 함):** 데몬이 죽으면 GUI 재연결은 **기존 데몬에 재부착만** 시도, 없으면 spawn하지 않고 `down` 상태 표시 + "시작" 제공. **이게 "kill하면 respawn" 친화성 문제의 핵심 수정** — ensure(명시)와 reconnect(attach-only)를 분리.
+   - **명료화(2026-06-21): "금지"는 spawn 한정 — 재조회(no-spawn)는 허용.** reconnect 가 캐시된 host:port 만 두드리면, hot-swap(`daemon_stop`→`daemon_start`로 데몬 통째 교체) 이나 크래시-재spawn 으로 데몬이 **새 port/token** 으로 떠도 옛 주소만 두드리다 소진→`down` 됐다(QA 발견, 페이지 리로드 전까지 stale). 그래서 재연결은 `read_daemon_info`(token 포함, **no-spawn** read-only)로 daemon.json 을 **재조회**해 옮겨간/재spawn 된 데몬을 **따라갈 수 있다**(여전히 attach-only — 데몬을 만들거나 깨우지 않음). 살아있는 데몬이 없으면 backoff/소진→`down` 유지. `discover_daemon`(spawn 동반)은 **명시 start 만** 호출한다(재연결은 절대 호출 금지). 구현: `discovery::read_live_daemon`(no-spawn live reader)·`commands::read_daemon_info`·`wsTransport.openSocket(false)` 의 read_daemon_info 우선 조회.
+     - 거부 대안: **캐시 고정**(옛 동작) → hot-swap·크래시 시 새 데몬을 못 따라가 페이지 리로드(=명시 start 재discover) 전까지 stale. read-only 재조회로 spawn 불변식을 깨지 않고 해소.
 3. **자동재시작 없음:** kill이든 크래시든 데몬이 죽으면 **꺼진 채 유지.** raw kill/크래시 구분 안 함(불가능하고 불필요). 복구는 다음 **명시 연결 시 fresh 데몬 + `restore_all`**(ADR-0008, sid `--resume`)로 영속 agent를 되살림 — tmux와 달리 손실이 영구 아님.
 4. **stop = 명시 종료:** `daemon_stop`(트레이/명령/우리 핸들) → StopDaemon(graceful) 또는 kill → 죽고 유지(재연결이 안 살림). systemd `systemctl stop`과 동치.
 5. **command 표면(§5 — LLM·UI·트레이 동일 핸들, 플랫폼 중립):** `daemon_start`(명시 ensure) · `daemon_stop`(StopDaemon) · `daemon_status`(alive/pid/port).
