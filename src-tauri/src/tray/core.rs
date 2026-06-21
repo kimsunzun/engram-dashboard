@@ -11,6 +11,11 @@
 //! 통합으로 "트레이 종료"(QuitTray)는 무의미해져 삭제(트레이=앱 → 트레이만 끄기 불가). 6→5:
 //! StartDaemon/StopDaemon/ShowUi/HideUi/QuitApp. 라벨도 "UI 열기/닫기" → "UI 보이기/숨기기"
 //! (창 show/hide 가 실제 동작 — destroy 가 아님), "완전 종료" → QuitApp.
+//!
+//! ## 커밋C: 메뉴에서 ShowUi/HideUi 제거(더블클릭으로 대체)
+//! 트레이 더블클릭 = UI 열기로 대체되어 메뉴 항목 ShowUi/HideUi 를 뺀다(메뉴 항목 5→3 +
+//! ToggleAutostart + QuitApp). ★주의: show_main_ui/hide_main_ui actions·command 는 유지★ —
+//! 메뉴 *항목*만 제거한 것이고, 더블클릭·LLM/cdp 제어(CLAUDE.md §5)는 같은 actions 함수를 계속 쓴다.
 
 // ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
 
@@ -22,10 +27,6 @@ pub enum MenuAction {
     StartDaemon,
     /// "데몬 끄기" — 데몬만 graceful stop(UI 무관). blocking → 워커.
     StopDaemon,
-    /// "UI 보이기" — main 창 show()+unminimize()+set_focus(). 프로세스 내부, IPC 없음.
-    ShowUi,
-    /// "UI 숨기기" — main 창 hide(). X=hide(prevent_close)와 같은 종착.
-    HideUi,
     /// "완전 종료" — best-effort 데몬 graceful stop 후 app.exit(0). 진짜 종료는 이것뿐(ADR-0026).
     QuitApp,
     /// "부팅 시 자동 시작" 토글(ADR-0027 §55) — autolaunch enable/disable 반전 + 체크 동기화.
@@ -40,8 +41,6 @@ impl MenuAction {
         match self {
             MenuAction::StartDaemon => "start_daemon",
             MenuAction::StopDaemon => "stop_daemon",
-            MenuAction::ShowUi => "show_ui",
-            MenuAction::HideUi => "hide_ui",
             MenuAction::QuitApp => "quit_app",
             MenuAction::ToggleAutostart => "toggle_autostart",
         }
@@ -52,21 +51,18 @@ impl MenuAction {
         match self {
             MenuAction::StartDaemon => "데몬 켜기",
             MenuAction::StopDaemon => "데몬 끄기",
-            MenuAction::ShowUi => "UI 보이기",
-            MenuAction::HideUi => "UI 숨기기",
             MenuAction::QuitApp => "완전 종료",
             MenuAction::ToggleAutostart => "부팅 시 자동 시작",
         }
     }
 
     /// v2 메뉴에 노출되는 액션들(순서 = 표시 순서).
-    /// 표시: 데몬 켜기, 데몬 끄기, UI 보이기, UI 숨기기, 부팅 시 자동 시작, (구분선), 완전 종료.
+    /// 표시: 데몬 켜기, 데몬 끄기, 부팅 시 자동 시작, (구분선), 완전 종료.
     /// (구분선은 GUI shell 이 QuitApp 앞에 삽입 — core 는 액션만 안다.)
-    pub const ALL: [MenuAction; 6] = [
+    /// 커밋C: ShowUi/HideUi 는 메뉴에서 빠지고 트레이 더블클릭으로 대체(actions 함수는 유지).
+    pub const ALL: [MenuAction; 4] = [
         MenuAction::StartDaemon,
         MenuAction::StopDaemon,
-        MenuAction::ShowUi,
-        MenuAction::HideUi,
         MenuAction::ToggleAutostart,
         MenuAction::QuitApp,
     ];
@@ -183,13 +179,11 @@ mod tests {
         match MenuAction::StartDaemon {
             MenuAction::StartDaemon => assert_in_all(MenuAction::StartDaemon),
             MenuAction::StopDaemon => assert_in_all(MenuAction::StopDaemon),
-            MenuAction::ShowUi => assert_in_all(MenuAction::ShowUi),
-            MenuAction::HideUi => assert_in_all(MenuAction::HideUi),
             MenuAction::QuitApp => assert_in_all(MenuAction::QuitApp),
             MenuAction::ToggleAutostart => assert_in_all(MenuAction::ToggleAutostart),
         }
         // 위 match 로 강제 인지된 variant 수와 ALL 길이가 일치하는지(중복/누락 동시 차단).
-        assert_eq!(MenuAction::ALL.len(), 6, "variant 수 ↔ ALL 길이 불일치");
+        assert_eq!(MenuAction::ALL.len(), 4, "variant 수 ↔ ALL 길이 불일치");
     }
 
     #[test]

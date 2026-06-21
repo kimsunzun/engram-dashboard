@@ -6,8 +6,11 @@
 //! 트레이 핸들러(mod.rs on_menu_event)도, command(commands/tray.rs)도 전부 이 함수들만 호출 —
 //! 동작 로직 중복 금지. core.rs(순수 판정)와 분리: 여기는 실제 창/아이콘/데몬을 만진다(불순).
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use tauri::menu::CheckMenuItem;
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use tauri_plugin_autostart::ManagerExt;
 
@@ -16,6 +19,28 @@ use super::TrayIcons;
 
 /// 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
 pub const TRAY_ID: &str = "engram-main-tray";
+
+/// 데몬 생사 push 의 단일 소유 상태(ADR-0028 단일 채널). 모든 소스(옵저버 probe·켜기·끄기)가
+/// [`publish_daemon_liveness`] 로 들어와 여기 `last` 와 비교 → 변화 시에만 트레이+emit.
+///
+/// ★왜 manage 상태로 일원화하나(M-1 — load-bearing)★: 기존엔 옵저버(주기 probe)와 끄기 즉시확정
+/// (StopOutcome::DaemonClosed → 회색 직접 set)이 **상태를 공유하지 않아** race 가 있었다 — 끄기 클릭
+/// 후 데몬이 아직 죽는 중인 death-window(연결 닫힘 ~ 프로세스 exit 사이)에 옵저버가 그 창에서
+/// alive=true 를 probe 해 방금 회색 박은 아이콘을 컬러로 되돌렸다(S13 race 재발). 이제 모든 생사
+/// 소스가 이 단일 진입점으로 수렴하고, 끄기는 [`force_daemon_down`] 으로 억제창을 세팅해 그 race 를 닫는다.
+#[derive(Default)]
+pub struct LivenessState {
+    /// 마지막으로 push 한 alive 값(None=아직 한 번도 push 안 함). 변화 판정 기준.
+    last: Mutex<Option<bool>>,
+    /// 끄기로 회색을 강제한 직후 death-window(데몬이 연결만 닫고 아직 exit 안 함) 동안 옵저버의
+    /// alive=true 거짓 probe 가 아이콘을 컬러로 되돌리는 race(M-1) 를 차단하는 억제 만료 시각.
+    /// None=억제 없음. Some(t)=now<t 동안 alive=true probe 를 무시.
+    suppress_alive_until: Mutex<Option<Instant>>,
+}
+
+/// 끄기 직후 death-window 억제 시간. 데몬이 연결을 닫고 실제 exit 하기까지의 여유 — discovery 의
+/// stop 폴링 timeout 과 같은 5초로 잡아 그 안에 probe 가 거짓 alive 를 보고해도 무시한다.
+const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// "부팅 시 자동 시작" CheckMenuItem 핸들 보관(ADR-0027 §55).
 ///
@@ -65,20 +90,72 @@ pub fn quit_app(app: &AppHandle) {
     app.exit(0);
 }
 
-/// 데몬 alive 를 조회해 트레이 아이콘을 컬러/회색으로 갱신한다.
+/// 데몬 alive 를 probe 해 단일 publish 진입점([`publish_daemon_liveness`])으로 흘린다.
 ///
-/// ★set_icon 은 메인 스레드 보장 경로로★: TrayIcon::set_icon 은 내부적으로 메인 스레드 실행을
-/// 보장하지만, 워커 스레드(spawn_blocking)에서 호출될 수 있으므로 `run_on_main_thread` 로 감싸
-/// 명시적으로 메인에서 돌린다(플랫폼 안전). 아이콘 두 벌은 TrayIcons state 에서 clone(저렴 — Arc).
+/// ★publish 경유로 일원화(ADR-0028 단일 채널 — load-bearing)★: 예전엔 여기서 직접 set_icon 했으나,
+/// 이제 probe 결과를 publish 에 넘겨 **중복차단(변화 시에만 set)·emit·억제창 판정**을 한 곳에서
+/// 처리한다. 그래야 옵저버·켜기·끄기 모든 생사 소스가 같은 게이트(LivenessState)를 거쳐 M-1 race 와
+/// emit 비대칭(m-2)이 사라진다.
 ///
 /// daemon_status 는 daemon.json + PID liveness 판정(빠름, 비-blocking 수준). 외부/크래시 죽음
-/// 주기감지는 비범위(액션 직후·setup 초기 갱신만, ADR-0026/TRD §3).
+/// 주기감지는 옵저버가 담당(spawn_daemon_observer) — 여기는 액션 직후·setup 초기 갱신용.
 pub fn refresh_tray_icon(app: &AppHandle) {
     // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출.
     let data_dir = crate::discovery::default_data_dir();
     let alive = crate::discovery::daemon_status(&data_dir).alive;
-    let state = core::icon_state_for(alive);
-    set_tray_icon_state(app, state);
+    publish_daemon_liveness(app, alive);
+}
+
+/// 데몬 생사 단일 publish — 변화 시에만 트레이 set_icon + emit("daemon-status-changed").
+///
+/// ★억제창 중 alive=true 는 무시(M-1 race 차단 — load-bearing)★: 끄기 직후 death-window 동안
+/// 옵저버 probe 가 "연결은 닫혔지만 프로세스가 아직 살아있는" 데몬을 alive=true 로 거짓 보고해 방금
+/// 회색 박은 아이콘을 컬러로 되돌리는 race 가 있다. 억제창(suppress_alive_until) 안에서는 alive=true
+/// 를 버린다. alive=false 는 항상 통과한다(끄기 확정 — 억제 무관).
+///
+/// ★락 보유 중 set_icon/emit 금지(ADR-0006 락 순서)★: 변화 판정·억제 판정만 락 안에서 하고, 락을
+/// 드롭한 뒤에 set_icon/emit(외부 호출·메인 스레드 post)을 부른다. set_icon 자체는
+/// set_tray_icon_state 가 run_on_main_thread 로 메인 스레드 보장.
+pub fn publish_daemon_liveness(app: &AppHandle, observed_alive: bool) {
+    let st = app.state::<LivenessState>();
+
+    // 억제창 판정: alive=true 보고가 death-window 안이면 거짓일 수 있어 무시(락 짧게 잡고 드롭).
+    if observed_alive {
+        if let Some(until) = *st.suppress_alive_until.lock().unwrap() {
+            if Instant::now() < until {
+                return; // death-window — 거짓 alive 무시
+            }
+        }
+    }
+
+    // 변화 판정(락 짧게) → 드롭 → 부수효과. 변화 없으면 set_icon/emit 둘 다 생략.
+    {
+        let mut last = st.last.lock().unwrap();
+        if *last == Some(observed_alive) {
+            return;
+        }
+        *last = Some(observed_alive);
+    } // ← 여기서 last 락 드롭. 아래 부수효과는 락 미보유 상태에서 실행.
+
+    set_tray_icon_state(app, core::icon_state_for(observed_alive));
+    if let Err(e) = app.emit("daemon-status-changed", observed_alive) {
+        tracing::warn!("[tray] daemon-status-changed emit 실패: {e}");
+    }
+    tracing::debug!(alive = observed_alive, "[tray] 데몬 생사 push");
+}
+
+/// 끄기 확정(StopOutcome::DaemonClosed) — 회색을 강제하고 death-window 억제창을 설정한다.
+///
+/// ★억제창 먼저, publish(false) 나중(M-1 — load-bearing)★: suppress_alive_until 을 먼저 세팅한 뒤
+/// publish(false) 로 회색을 확정한다. false 는 억제 판정과 무관하게 통과하므로(억제는 alive=true 만
+/// 막음) 즉시 회색+emit 이 나가고, 이후 STOP_GRACE 동안 옵저버의 거짓 alive=true probe 는 publish 가
+/// 억제창에서 버린다 → 회색이 컬러로 되돌아가지 않는다.
+pub fn force_daemon_down(app: &AppHandle) {
+    *app.state::<LivenessState>()
+        .suppress_alive_until
+        .lock()
+        .unwrap() = Some(Instant::now() + STOP_GRACE);
+    publish_daemon_liveness(app, false); // false 는 억제 무관 통과 → 회색+emit, last=false
 }
 
 /// 주어진 [`IconState`] 로 트레이 아이콘을 직접 교체한다(**PID probe 없음**).

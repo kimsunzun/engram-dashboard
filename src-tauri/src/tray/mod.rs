@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager};
 
 use tauri_plugin_autostart::ManagerExt;
@@ -61,8 +61,9 @@ fn build_icons() -> tauri::Result<TrayIcons> {
 
 /// 트레이를 생성·배선한다(setup 에서 1회). 아이콘 두 벌을 manage 하고, 메뉴·핸들러를 단다.
 ///
-/// 메뉴(순서): 데몬 켜기 / 데몬 끄기 / UI 보이기 / UI 숨기기 / ──separator── / 완전 종료.
+/// 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
 /// 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
+/// 커밋C: UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 더블클릭**으로 대체(on_tray_icon_event).
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
     // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정). 두 벌은 state 로 보관.
@@ -74,8 +75,6 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     let mi = |a: MenuAction| MenuItem::with_id(handle, a.menu_id(), a.label(), true, None::<&str>);
     let start = mi(MenuAction::StartDaemon)?;
     let stop = mi(MenuAction::StopDaemon)?;
-    let show = mi(MenuAction::ShowUi)?;
-    let hide = mi(MenuAction::HideUi)?;
     // ADR-0027 §55: 자동 시작은 체크 가능 항목(CheckMenuItem). 초기 체크 = 현재 레지스트리 등록 여부.
     // 등록 인자(--mode=daemon --hidden)는 init() 에서 박았고, 여기선 활성 여부만 읽어 체크에 반영.
     let autostart_action = MenuAction::ToggleAutostart;
@@ -90,11 +89,8 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     )?;
     let sep = PredefinedMenuItem::separator(handle)?;
     let quit = mi(MenuAction::QuitApp)?;
-    // 순서: 데몬 켜기/끄기/UI 보이기/UI 숨기기/부팅 자동 시작/(구분선)/완전 종료 — core::ALL 과 일치.
-    let menu = Menu::with_items(
-        handle,
-        &[&start, &stop, &show, &hide, &autostart, &sep, &quit],
-    )?;
+    // 순서: 데몬 켜기/끄기/부팅 자동 시작/(구분선)/완전 종료 — core::ALL 과 일치.
+    let menu = Menu::with_items(handle, &[&start, &stop, &autostart, &sep, &quit])?;
 
     // 토글 시 set_checked 동기화용으로 CheckMenuItem 핸들 보관(actions::toggle_autostart 가 재조회).
     app.manage(AutostartCheck(autostart));
@@ -104,11 +100,58 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
         .tooltip("Engram")
         .menu(&menu)
         .on_menu_event(|app, event| dispatch_menu(app, event.id.as_ref()))
+        // 커밋C: 트레이 더블클릭 = UI 열기(메뉴 ShowUi 항목 대체). DoubleClick 만 처리 — 단발 Click
+        // (Windows 에서 메뉴 표시와 겹침) / Enter/Move/Leave 는 무시. show_main_ui 는 메뉴·command·
+        // 단축키와 같은 actions 함수를 공유(CLAUDE.md §5 손발/두뇌). DoubleClick 은 Windows 전용 변형.
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick { .. } = event {
+                actions::show_main_ui(tray.app_handle());
+            }
+        })
         .build(app)?;
 
     // setup 직후 데몬 상태로 아이콘 확정(컬러/회색).
     actions::refresh_tray_icon(&app.handle().clone());
     Ok(())
+}
+
+/// 데몬 생사 주기 옵저버(setup 에서 1회 spawn). 회색 고착 버그 해소 — 데몬이 부팅 후 외부에서
+/// 뜨거나 죽어도 ≤PROBE_INTERVAL 내에 트레이 아이콘·emit 가 따라간다.
+///
+/// ★주기 probe = ADR-0028 "버스 뒤 옵저버 impl(pre-flip)"(load-bearing)★: 이 폴링은 임시 우회가
+/// 아니라 **Rust 가 소유한 단일 push 소스**다. 데몬 연결(WS) 이벤트로 생사를 직접 받게 되는 flip
+/// 단계에서 *probe 메커니즘*은 그 이벤트로 교체되지만, "Rust 옵저버가 변화를 감지해 트레이(네이티브)
+/// 와 WebView(emit) 두 구독자에게 push" 라는 **버스/구독자 형태는 불변**이다. 프론트는 나중에
+/// `daemon-status-changed` 를 구독한다(ADR-0028 단일 push 채널).
+///
+/// ★StopOutcome 즉시확정 분기와의 분담★: 끄기 직후 회색 고착 race 는 dispatch 의
+/// icon_state_for_stop_outcome(probe 우회 즉시 회색)가 막고, 이 옵저버는 그걸 **대체하지 않고 보완**한다
+/// — 즉시성은 StopOutcome, 외부 변화(부팅 후 데몬 등장·크래시)는 옵저버가 ≤PROBE_INTERVAL 내 반영.
+///
+/// panic/종료 격리: probe·publish 어느 것도 옵저버 스레드를 죽이지 않게 결과를 무시(에러는 내부 warn)
+/// 하고 무한 루프를 돈다. 변화 판정·중복차단·억제창은 publish_daemon_liveness(LivenessState)가 소유 —
+/// 옵저버는 probe→publish 만 한다. 초기 아이콘은 build_tray refresh 가 publish 로 last 를 먼저 세팅하므로
+/// 옵저버 첫 루프가 같은 값이면 publish 가 자동 무시(변화 없음).
+pub fn spawn_daemon_observer(app: &AppHandle) {
+    /// probe 주기. 응답성(외부 변화 반영 지연)과 부하(daemon.json 읽기+PID probe) 절충 — 3초.
+    const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+    let app = app.clone();
+    // detached 백그라운드 스레드(앱 생애 내내 상주). tokio runtime 비의존(std::thread + sleep).
+    std::thread::Builder::new()
+        .name("engram-daemon-observer".into())
+        .spawn(move || {
+            // m-4: data_dir 은 불변값(default_data_dir)이라 루프 밖에서 1회만 산출해 캐싱.
+            let data_dir = crate::discovery::default_data_dir();
+            loop {
+                let alive = crate::discovery::daemon_status(&data_dir).alive;
+                // 단일 publish 진입점으로 흘린다 — 변화 판정·억제창(M-1)·트레이 set+emit 일원화(ADR-0028).
+                actions::publish_daemon_liveness(&app, alive);
+                std::thread::sleep(PROBE_INTERVAL);
+            }
+        })
+        .map_err(|e| tracing::warn!("[tray] 데몬 옵저버 스레드 spawn 실패: {e}"))
+        .ok();
 }
 
 /// 메뉴 클릭 id → MenuAction → 동작. 모든 동작은 actions(공유 부수효과)만 호출.
@@ -124,8 +167,6 @@ fn dispatch_menu(app: &AppHandle, menu_id: &str) {
     match action {
         MenuAction::StartDaemon => spawn_daemon_action(app, DaemonOp::Start),
         MenuAction::StopDaemon => spawn_daemon_action(app, DaemonOp::Stop),
-        MenuAction::ShowUi => actions::show_main_ui(app),
-        MenuAction::HideUi => actions::hide_main_ui(app),
         MenuAction::QuitApp => actions::quit_app(app),
         MenuAction::ToggleAutostart => actions::toggle_autostart(app),
     }
@@ -169,14 +210,18 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
             DaemonOp::Stop => match crate::discovery::send_stop(&data_dir) {
                 Ok(outcome) => {
                     tracing::info!(?outcome, "[tray] 데몬 graceful stop 발사");
-                    // ★끄기 후 아이콘 확정은 StopOutcome 으로 분기(load-bearing — S13 race 재발 방지)★:
-                    // DaemonClosed=연결닫힘=꺼짐확정 → probe 우회 회색 직접 set(probe 는 죽기 직전
-                    // 수 ms 창에서 alive=true 를 줘 컬러 고착). Timeout/NoTarget=불확실 → probe 폴백.
+                    // ★끄기 후 아이콘 확정은 StopOutcome 으로 분기(load-bearing — S13/M-1 race 방지)★:
+                    // DaemonClosed=연결닫힘=꺼짐확정 → force_daemon_down(회색 확정 + death-window 억제창
+                    // 설정). 억제창은 데몬이 아직 죽는 중(연결닫힘~exit)에 옵저버 probe 가 alive=true 를
+                    // 거짓 보고해 회색을 컬러로 되돌리는 race 를 STOP_GRACE 동안 막는다(M-1). probe 직접
+                    // set 이 아니라 publish 게이트(LivenessState)를 거쳐 옵저버와 상태를 공유.
+                    // Timeout/NoTarget=불확실 → probe 폴백(refresh_tray_icon 도 이제 publish 경유).
                     // 이 분기는 impure 층(StopOutcome=discovery 타입)이라 core 가 아니라 여기 둔다
                     // (core 순수성 — core 는 IconState 만 안다).
-                    match icon_state_for_stop_outcome(outcome) {
-                        Some(state) => actions::set_tray_icon_state(&app, state),
-                        None => actions::refresh_tray_icon(&app),
+                    if is_daemon_closed(outcome) {
+                        actions::force_daemon_down(&app);
+                    } else {
+                        actions::refresh_tray_icon(&app);
                     }
                     return; // Stop 은 위에서 아이콘을 확정했으니 아래 공통 refresh 를 타지 않는다.
                 }
@@ -195,14 +240,20 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
 /// ★core 가 아니라 여기 있는 이유(load-bearing)★: StopOutcome 은 discovery 의 타입이라 core.rs
 /// (tauri/discovery import 0, IconState 만 안다)에 넣으면 순수성이 깨진다. 그래서 이 매핑만 impure
 /// 층에 둔다.
-/// - `DaemonClosed`(연결 닫힘=꺼짐 확정) → `Some(Inactive)`: PID probe 우회하고 회색 직접 확정.
-///   probe 는 데몬 exit 직전 수 ms 창에서 alive=true 를 돌려줘 아이콘이 컬러로 고착되는 race 가 있다.
+/// - `DaemonClosed`(연결 닫힘=꺼짐 확정) → `Some(Inactive)`: 회색 확정(끄기 경로는 force_daemon_down
+///   이 이 확정 위에 death-window 억제창까지 세팅 — M-1 race 방지).
 /// - `Timeout | NoTarget`(불확실/끌 데몬 없음) → `None`: 호출자가 기존 probe 폴백(refresh)을 탄다.
 fn icon_state_for_stop_outcome(outcome: StopOutcome) -> Option<IconState> {
     match outcome {
         StopOutcome::DaemonClosed => Some(IconState::Inactive),
         StopOutcome::Timeout | StopOutcome::NoTarget => None,
     }
+}
+
+/// 끄기 결과가 "꺼짐 확정(DaemonClosed)"인지. 매핑(icon_state_for_stop_outcome)을 재사용해
+/// 끄기 경로 분기에 쓴다 — 확정이면 force_daemon_down(회색+억제창), 아니면 probe 폴백.
+fn is_daemon_closed(outcome: StopOutcome) -> bool {
+    icon_state_for_stop_outcome(outcome).is_some()
 }
 
 #[cfg(test)]

@@ -46,9 +46,15 @@ pub fn run() {
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // 아이콘 두 벌 생성·메뉴·핸들러 + setup 직후 데몬 상태로 아이콘 확정. Windows 전용.
             // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).
+            // ADR-0028: 데몬 생사 push 의 단일 소유 상태. build_tray 의 초기 refresh 가 publish 를
+            // 타려면(중복차단·억제창 판정) state 가 먼저 manage 되어 있어야 한다 → build_tray 전에 등록.
+            app.manage(tray::actions::LivenessState::default());
             if let Err(e) = tray::build_tray(app) {
                 tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
             }
+            // ADR-0028: 데몬 생사 주기 옵저버 spawn(회색 고착 해소 — 외부 변화도 트레이/emit 에 반영).
+            // build_tray 가 초기 아이콘을 확정한 뒤 변화만 push 한다(첫 관측은 push 안 함).
+            tray::spawn_daemon_observer(&app.handle().clone());
 
             // ADR-0029 §55: --hidden 기동(autostart)은 main 창을 숨겨 트레이만 상주시킨다.
             // ★한계(주석 명시)★: main 창 conf 기본 visible=true 라 창이 잠깐 떴다 숨어 깜빡일 수 있다.
