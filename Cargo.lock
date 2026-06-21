@@ -913,25 +913,19 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 name = "engram-dashboard"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "dunce",
  "engram-dashboard-core",
- "engram-dashboard-daemon",
  "engram-dashboard-discovery",
  "engram-dashboard-protocol",
- "futures-util",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "thiserror 1.0.69",
- "tokio",
  "tracing",
  "uuid",
- "windows 0.58.0",
 ]
 
 [[package]]

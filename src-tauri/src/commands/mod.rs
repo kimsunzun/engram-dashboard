@@ -1,9 +1,10 @@
-// ADR-0020 Stage 4a: 옛 개별 command(agent/pty/profile)는 agent_command(embedded_carrier)가
-// AgentCommand 전 variant 를 처리하므로 삭제됨. discovery(비-에이전트, daemon 모드 부팅)만 잔류.
+// ADR-0029: embedded(in-process 호스팅) 제거 → daemon-only. 앱은 데몬 클라이언트 셸이라
+// 에이전트 관련 command(옛 agent_command/agent_connect)는 없다 — 프론트가 WS 로 데몬에 직접 붙는다.
+// 남은 command: discovery(데몬 발견/lifecycle), tray(창 show/hide/완전종료), autostart(부팅 자동 시작).
 pub mod discovery;
 // ADR-0026 2단계: 트레이 동작(창 show/hide/완전종료)의 §5 LLM 제어 표면(트레이 핸들러와 같은 함수).
 pub mod tray;
-// ADR-0027 §53~55: 부팅 자동 시작 토글(set/get_autostart) + 모드 즉시전환(set_mode self-relaunch).
+// ADR-0027 §53~55: 부팅 자동 시작 토글(set/get_autostart). ADR-0029: set_mode(모드 전환) 제거 — 모드 없음.
 pub mod autostart;
 
 pub use autostart::*;

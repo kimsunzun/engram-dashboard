@@ -21,7 +21,6 @@ use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::logging;
 use engram_dashboard_core::persistence::FileProfileStore;
-use engram_dashboard_discovery::AppMode;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -34,22 +33,18 @@ const DAEMON_FILE: &str = "daemon.json";
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
-/// 데이터 디렉토리 결정 — discovery 의 단일 출처(ADR-0024)에 위임한다.
+/// 데이터 디렉토리 결정 — discovery 의 단일 출처(ADR-0024/0029)에 위임한다.
 ///
-/// ★Embedded 일치★: embedded(src-tauri)도 같은 `default_data_dir()` 을 쓰므로 두 모드가 같은
-/// `.engram-data/{agents.json,daemon.json}` 을 본다. 옛 `%APPDATA%\com.engram.dashboard` 분기는
-/// 제거됐다(ADR-0024). 디버그=repo 루트, 릴리즈=exe 폴더.
+/// ★app 일치★: app(src-tauri)도 같은 `default_data_dir()` 을 쓰므로 둘이 같은 폴더의
+/// `{agents.json,daemon.json}` 을 본다. ADR-0029(모드 제거): debug=repo 루트 `.engram-data`,
+/// 릴리즈=`%APPDATA%\com.engram.dashboard`.
 ///
 /// ★ENGRAM_DATA_DIR override(테스트 격리 탈출구)★: discovery 가 우선순위 1번으로 처리한다 —
 /// 설정 시 그 경로로 간다. 데몬은 `std::process::Command` 로 **직접** spawn 되는 통합 테스트
 /// (`tests/ws_e2e.rs`)에서 이 env 를 상속받아 임시 디렉토리로 격리된다(운영 `.engram-data` 미오염).
 /// WMI-spawn 데몬엔 안 먹는다(부모 env 미상속, discovery 주석 참조).
-///
-/// ★mode 인자(ADR-0027)★: release 에서 daemon 은 `%APPDATA%`, embedded 는 exe 폴더로 갈린다. 데몬
-/// 프로세스의 본질은 항상 daemon 이라 호출처(`run()`)가 `AppMode::Daemon` 을 하드코딩한다 — 데몬 crate
-/// 는 `--mode` 를 파싱하지 않는다(embedded 로 돌 일이 없다). debug 에선 모드 무관 동일 경로.
-fn resolve_data_dir(mode: AppMode) -> PathBuf {
-    engram_dashboard_discovery::default_data_dir(mode)
+fn resolve_data_dir() -> PathBuf {
+    engram_dashboard_discovery::default_data_dir()
 }
 
 /// 256-bit(32B) 토큰을 OS CSPRNG 로 생성해 hex 64자 문자열로 반환.
@@ -233,8 +228,8 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 2) data_dir 결정 + 생성. 데몬 프로세스는 항상 Daemon 모드(ADR-0027 — release 에서 %APPDATA%).
-    let data_dir = resolve_data_dir(AppMode::Daemon);
+    // 2) data_dir 결정 + 생성(ADR-0029 — release 에서 %APPDATA%, debug repo 루트 `.engram-data`).
+    let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         tracing::error!("data_dir 생성 실패({:?}): {e}", data_dir);
         return Err(1);
@@ -504,9 +499,9 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    // resolve_data_dir 는 discovery 의 단일 출처(default_data_dir)에 위임한다(ADR-0024).
+    // resolve_data_dir 는 discovery 의 단일 출처(default_data_dir)에 위임한다(ADR-0024/0029).
     // 디버그 빌드(테스트는 항상 디버그)에서 env override 가 없으면 repo 루트의 `.engram-data` 로
-    // 끝나야 한다 — embedded(src-tauri)와 같은 폴더를 가리키는 불변식. (릴리즈는 exe 폴더이며 분기
+    // 끝나야 한다 — app(src-tauri)과 같은 폴더를 가리키는 불변식. (릴리즈는 %APPDATA% 이며 분기
     // 자체는 discovery 단위테스트가 헬퍼로 검증한다.)
     #[test]
     fn resolve_data_dir_delegates_to_discovery_local_dir() {
@@ -514,16 +509,16 @@ mod tests {
         // override 가 새어 들어오면(다른 테스트 leak) 기본 경로 단언이 깨진다 — 명시 제거.
         let prev = std::env::var_os("ENGRAM_DATA_DIR");
         std::env::remove_var("ENGRAM_DATA_DIR");
-        let dir = resolve_data_dir(AppMode::Daemon);
-        let delegated = engram_dashboard_discovery::default_data_dir(AppMode::Daemon);
+        let dir = resolve_data_dir();
+        let delegated = engram_dashboard_discovery::default_data_dir();
         if let Some(v) = &prev {
             std::env::set_var("ENGRAM_DATA_DIR", v);
         }
         assert!(
             dir.ends_with(".engram-data"),
-            "디버그(override 없음)에서 `.engram-data` 로 끝나야(embedded 와 동일 폴더): {dir:?}"
+            "디버그(override 없음)에서 `.engram-data` 로 끝나야(app 과 동일 폴더): {dir:?}"
         );
-        // discovery 의 단일 출처와 바이트 단위로 일치해야(두 모드 일치 불변식).
+        // discovery 의 단일 출처와 바이트 단위로 일치해야(app·daemon 일치 불변식).
         assert_eq!(
             dir, delegated,
             "resolve_data_dir 은 discovery::default_data_dir 와 동일해야"
@@ -538,7 +533,7 @@ mod tests {
         let prev = std::env::var_os("ENGRAM_DATA_DIR");
         let want = std::env::temp_dir().join("engram-daemon-resolve-override-test");
         std::env::set_var("ENGRAM_DATA_DIR", &want);
-        let got = resolve_data_dir(AppMode::Daemon);
+        let got = resolve_data_dir();
         match &prev {
             Some(v) => std::env::set_var("ENGRAM_DATA_DIR", v),
             None => std::env::remove_var("ENGRAM_DATA_DIR"),

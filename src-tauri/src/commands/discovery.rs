@@ -2,6 +2,9 @@
 //!
 //! 비즈니스 로직 없음 — discovery::ensure_daemon 호출만. 실제 부팅 자동 호출 배선은
 //! phase4 DaemonClient(WS) 와 함께 한다(이번 단위는 command 노출까지).
+//!
+//! ADR-0029: 모드 제거 → AppState 없음. data_dir 은 `default_data_dir()`(무인자, debug=repo 루트
+//! walk-up / release=appdata)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
 
 use std::time::Duration;
 
@@ -31,14 +34,11 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
 
 /// 데몬을 발견(없으면 WMI spawn)하고 접속 정보를 반환한다.
 ///
-/// data_dir 은 default_data_dir(state.mode)(부팅 모드 단일 출처, ADR-0027)로 산출한다. State 자동 주입
-/// → 프론트 invoke 시그니처는 timeout_ms 만(무영향). timeout_ms 미지정 시 5초. spawn 시 windowless(콘솔 창 없음) — 콘솔 가시화는 daemon_start(console=true).
+/// data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출한다.
+/// timeout_ms 미지정 시 5초. spawn 시 windowless(콘솔 창 없음) — 콘솔 가시화는 daemon_start(console=true).
 #[tauri::command]
-pub async fn discover_daemon(
-    state: tauri::State<'_, crate::AppState>,
-    timeout_ms: Option<u64>,
-) -> Result<DaemonInfoDto, String> {
-    ensure_internal(state.mode, timeout_ms, false).await
+pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
+    ensure_internal(timeout_ms, false).await
 }
 
 /// 데몬 alive/pid/port 조회(§5 LLM 제어 표면). daemon.json + PID liveness 로 판정.
@@ -54,22 +54,18 @@ pub struct DaemonStatusDto {
 /// ★재연결과 분리★: 이 command 만 spawn 을 유발한다 — 프론트 재연결 루프는 호출하지 않는다.
 #[tauri::command]
 pub async fn daemon_start(
-    state: tauri::State<'_, crate::AppState>,
     timeout_ms: Option<u64>,
     console: Option<bool>,
 ) -> Result<DaemonInfoDto, String> {
-    ensure_internal(state.mode, timeout_ms, console.unwrap_or(false)).await
+    ensure_internal(timeout_ms, console.unwrap_or(false)).await
 }
 
 /// 데몬 상태 조회(§5). 살아있는 데몬이 있는지 + pid/port.
 ///
-/// data_dir 은 default_data_dir(state.mode)(부팅 모드 단일 출처, ADR-0027)로 산출한다. State 인자는
-/// Tauri 가 자동 주입하므로 프론트는 여전히 인자 없이 invoke('daemon_status') 한다.
+/// data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출한다.
 #[tauri::command]
-pub fn daemon_status(state: tauri::State<'_, crate::AppState>) -> Result<DaemonStatusDto, String> {
-    // ADR-0027: data_dir 은 부팅 모드(AppState.mode 단일 출처)로 산출. State 는 Tauri 자동 주입 →
-    // 프론트 invoke 시그니처 무영향.
-    let data_dir = discovery::default_data_dir(state.mode);
+pub fn daemon_status() -> Result<DaemonStatusDto, String> {
+    let data_dir = discovery::default_data_dir();
     let s = discovery::daemon_status(&data_dir);
     Ok(DaemonStatusDto {
         alive: s.alive,
@@ -84,9 +80,8 @@ pub fn daemon_status(state: tauri::State<'_, crate::AppState>) -> Result<DaemonS
 /// 종료)를 보내야 한다. 이 command 는 연결이 없거나 graceful 이 안 먹을 때의 fallback 이다.
 /// 반환: kill 시도한 pid(없으면 None).
 #[tauri::command]
-pub async fn daemon_stop(state: tauri::State<'_, crate::AppState>) -> Result<Option<u32>, String> {
-    // ADR-0027: data_dir 은 부팅 모드(AppState.mode 단일 출처)로 산출. State 자동 주입 → 프론트 무영향.
-    let data_dir = discovery::default_data_dir(state.mode);
+pub async fn daemon_stop() -> Result<Option<u32>, String> {
+    let data_dir = discovery::default_data_dir();
     tauri::async_runtime::spawn_blocking(move || discovery::daemon_stop(&data_dir))
         .await
         .map_err(|e| format!("daemon_stop join 실패: {e}"))?
@@ -94,16 +89,9 @@ pub async fn daemon_stop(state: tauri::State<'_, crate::AppState>) -> Result<Opt
 }
 
 /// discover/start 공통 — ensure_daemon 을 blocking 으로 호출하고 DTO 로 변환.
-///
-/// mode 는 호출 command(discover_daemon/daemon_start)가 AppState.mode 에서 꺼내 넘긴다. ensure_internal
-/// 은 command 가 아니라(직접 호출) State 자동 주입을 못 받으므로 mode 를 인자로 전달받아 단일 출처를 잇는다.
-async fn ensure_internal(
-    mode: discovery::AppMode,
-    timeout_ms: Option<u64>,
-    console: bool,
-) -> Result<DaemonInfoDto, String> {
-    // ADR-0027: data_dir 은 부팅 모드 단일 출처로 산출(Embedded 와 동일 폴더 규약).
-    let data_dir = discovery::default_data_dir(mode);
+async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
+    // ADR-0024/0029: data_dir 은 default_data_dir() 단일 출처(데몬과 동일 폴더).
+    let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| e.to_string())?;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
 

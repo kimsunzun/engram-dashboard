@@ -22,43 +22,22 @@ tauri-build = { version = "2", features = [] }
 # 아이콘을 .ico 에서 RGBA 로 풀어 컬러/회색 두 벌 생성 — 별도 image crate 불필요).
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-opener = "2"
-# 커밋3 single-instance: daemon 모드 전역 단일 인스턴스(전역 키 하드코딩이라 daemon=전역1개에 적합).
-#   embedded 는 폴더별 가드(src/instance.rs)로 별도 처리(플러그인은 폴더별 키 커스터마이즈 불가).
+# single-instance: ADR-0029(daemon-only) — 앱은 데몬 클라이언트 전역 단일 인스턴스(플러그인 무조건 등록).
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 tracing = "0.1"
-base64 = "0.22"   # S12 raw 경계화: embedded carrier(TauriChannelOutputSink)가 raw→base64 인코딩(Tauri JSON Channel 제약)
 thiserror = "1"   # discovery::DiscoveryError
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
-# S12 phase 1: pty/persistence/logging 코어가 이 crate 로 이동. Embedded 앱은 core 에 의존.
+# logging::init_logging 만 코어에서 쓴다(ADR-0029 — in-proc 에이전트 호스팅 제거).
 engram-dashboard-core = { path = "../crates/engram-dashboard-core" }
 # discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
-# S13 sub-step 2: 순수 데몬 발견/spawn/stop 로직(crate::discovery 로 re-export). tray-host 와 공유.
+# S13 sub-step 2: 순수 데몬 발견/spawn/stop 로직(crate::discovery 로 re-export).
 engram-dashboard-discovery = { path = "../crates/engram-dashboard-discovery" }
-# S12 ADR-0020 Stage 2: embedded 도 ConnectionCore(transport-중립 dispatch)를 거치게 한다.
-# Tauri 어댑터(TauriOutboundSink/command loop)가 이 crate 의 ConnectionCore/OutboundSink/Outbound 를 호출.
-engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon" }
-# command loop task spawn + inbound mpsc + 단일 연결 conn 상태. Tauri 의 tokio runtime 위에서 돈다.
-# (time/rt-multi-thread 는 테스트의 sleep 폴링 + #[tokio::test] 용 — 운영은 tauri::async_runtime 사용.)
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
-# ADR-0020 Stage 2 blocker: command loop dispatch panic 격리(FutureExt::catch_unwind, async).
-# daemon 도 동일 버전(futures-util 0.3) 사용 — 좀비 연결 방지(panic 이 loop 를 죽이지 않게).
-futures-util = "0.3"
 tauri-plugin-autostart = "2"
 
-# S13 sub-step 2: WMI/COM·dirs 는 discovery crate 로 이관됨.
-# 커밋3 single-instance: embedded 폴더별 named-mutex 가드(src/instance.rs)가 windows API 재사용.
-#   daemon/discovery/core 와 동일하게 windows 0.58 + Threading/Foundation(CreateMutexW/CloseHandle/GetLastError).
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_System_Threading",
-    "Win32_Foundation",
-] }
-
-[dev-dependencies]
-# embedded carrier conformance 테스트: TauriOutbound carrier wire(JSON) 파싱·단언.
-serde_json = "1"
+# ADR-0029: base64/futures-util/tokio/serde_json/windows(Threading,Foundation)/engram-dashboard-daemon
+#   의존은 embedded carrier·instance.rs(in-proc 호스팅·폴더별 mutex) 제거로 전부 불필요해져 삭제됐다.
 
 # profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).

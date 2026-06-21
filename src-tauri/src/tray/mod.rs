@@ -149,10 +149,8 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     // match 뿐이라 panic 면이 거의 없고, (2) 일방 발사 재발사 모델이라 다음 켜기/끄기 클릭이 probe
     // 로 상태를 회수한다(아이콘 영구 고착 아님, 한 클릭 누락에 그침). 심각도 낮음 — 한계만 명시.
     tauri::async_runtime::spawn_blocking(move || {
-        // data_dir 은 부팅 모드(AppState.mode 단일 출처, ADR-0027)로 산출. 트레이는 daemon 전용이라
-        // 항상 Daemon 이지만 하드코딩 대신 AppState.mode 로 일관 조회.
-        let mode = app.state::<crate::AppState>().mode;
-        let data_dir = crate::discovery::default_data_dir(mode);
+        // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출.
+        let data_dir = crate::discovery::default_data_dir();
         match op {
             DaemonOp::Start => match crate::discovery::locate_daemon_exe() {
                 Ok(exe) => {

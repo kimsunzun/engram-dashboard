@@ -22,7 +22,6 @@ pub const TRAY_ID: &str = "engram-main-tray";
 /// ★왜 핸들을 manage 로 들고 있나(load-bearing)★: 토글 후 체크 표시를 set_checked 로 즉시 갱신해야
 /// 하는데, CheckMenuItem 핸들이 없으면 갱신 대상을 못 잡는다. tray.menu() → id 재조회는 MenuItem 의
 /// downcast(CheckMenuItem)가 번거로워, build_tray 가 만든 핸들을 그대로 state 로 보관해 직접 set_checked 한다.
-/// 트레이는 daemon 모드 전용(build_tray 게이트)이라 이 state 도 daemon 에서만 등록된다.
 pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 
 /// main 창을 보이고 포커스(숨김/최소화 상태에서 복귀).
@@ -53,11 +52,9 @@ pub fn hide_main_ui(app: &AppHandle) {
 /// 독립 생존한다(ADR-0024). send_stop 은 수초 blocking 가능 → exit 전에 짧게만 시도하도록 별도
 /// 스레드에서 발사하지 않고 동기로 부르되, 실패/무응답이어도 exit 로 진행한다.
 pub fn quit_app(app: &AppHandle) {
-    // 데몬 graceful 일방 발사(결과 무시). data_dir 은 부팅 모드(AppState.mode 단일 출처, ADR-0027)로 산출.
-    // 트레이는 daemon 모드 전용(build_tray 게이트)이라 여기 mode 는 항상 Daemon 이지만, 하드코딩 대신
-    // AppState.mode 로 일관 조회한다(단일 출처 — 미래 변경에도 갈리지 않게).
-    let mode = app.state::<crate::AppState>().mode;
-    let data_dir = crate::discovery::default_data_dir(mode);
+    // 데몬 graceful 일방 발사(결과 무시). data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처,
+    // ADR-0024/0029)로 산출. ADR-0029: 모드 제거 → 무인자.
+    let data_dir = crate::discovery::default_data_dir();
     match crate::discovery::send_stop(&data_dir) {
         Ok(outcome) => tracing::info!(
             ?outcome,
@@ -77,10 +74,8 @@ pub fn quit_app(app: &AppHandle) {
 /// daemon_status 는 daemon.json + PID liveness 판정(빠름, 비-blocking 수준). 외부/크래시 죽음
 /// 주기감지는 비범위(액션 직후·setup 초기 갱신만, ADR-0026/TRD §3).
 pub fn refresh_tray_icon(app: &AppHandle) {
-    // data_dir 은 부팅 모드(AppState.mode 단일 출처, ADR-0027)로 산출. 트레이는 daemon 전용이라 항상
-    // Daemon 이지만 하드코딩 대신 AppState.mode 로 일관 조회.
-    let mode = app.state::<crate::AppState>().mode;
-    let data_dir = crate::discovery::default_data_dir(mode);
+    // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출.
+    let data_dir = crate::discovery::default_data_dir();
     let alive = crate::discovery::daemon_status(&data_dir).alive;
     let state = core::icon_state_for(alive);
     set_tray_icon_state(app, state);
