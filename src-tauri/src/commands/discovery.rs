@@ -6,9 +6,38 @@
 //! ADR-0029: 모드 제거 → AppState 없음. data_dir 은 `default_data_dir()`(무인자, debug=repo 루트
 //! walk-up / release=appdata)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use tauri::async_runtime::Mutex;
+
 use crate::discovery::{self, locate_daemon_exe};
+
+/// ensure(spawn 포함) 직렬화 락 — 프로세스 전역(OnceLock+tokio async Mutex).
+///
+/// ★왜 필요한가★: 창 3개(main/tree/popup)의 각 WebView 가 부팅 시 동시에
+/// discover_daemon/daemon_start(=ensure_internal)를 호출한다(StrictMode 로 2회씩 더). daemon.json
+/// 이 아직 없으니 각 호출이 제각각 데몬을 WMI spawn → 데몬 mutex 가 1개만 살리고 나머지는 즉시 exit.
+/// debug 데몬은 console 앱이라 콘솔 창이 여러 개 깜빡인다(losers).
+///
+/// 이 락으로 ensure 구간을 직렬화하면 첫 호출만 spawn+daemon.json 을 발행하고, 직렬화로 뒤따르는
+/// 호출은 ensure_daemon 이 기존 daemon.json 을 찾아 spawn 없이 attach 한다 → losers spawn 자체가
+/// 안 생긴다. 결과(살아있는 데몬 1개)는 동일, 다중 WMI spawn 만 사라진다. 이미 살아있으면 ensure 는
+/// 즉시 attach 반환이라 락 보유는 짧다. (async Mutex 라 락 보유 중 await 가능 — spawn_blocking await 를
+/// 락 안에서 해도 executor 를 막지 않는다.)
+///
+/// ★범위 한정(load-bearing)★: 이 락은 **command 경로(discover_daemon/daemon_start=ensure_internal)
+/// 한정** 직렬화다. 트레이 "데몬 켜기"(`tray/mod.rs` spawn_daemon_action)는 동기 spawn_blocking 워커라
+/// 이 async 락을 안 거치고 `discovery::ensure_daemon` 을 직접 부른다 — 즉 트레이-켜기와 부팅 ensure 가
+/// 동시에 나면 직렬화 밖이라 다중 spawn 이 날 수 있다. **그래도 정합성은 데몬 named mutex
+/// (`Global\EngramDashboardDaemon-<user>`, daemon instance.rs)가 최종 1개를 보장**한다 — 이 락은
+/// 정합성 수단이 아니라 부팅 다중-WebView 동시 ensure 의 콘솔 깜빡임(UX)을 없애는 보강이다. 트레이
+/// 경로까지 묶으려면 락을 ensure_daemon(discovery crate)으로 내리거나 트레이를 command 경유로 — 실익
+/// (트레이 켜기는 단발 사용자 클릭이라 부팅 race 와 시점 분리) 대비 비용이 커 현재는 named mutex 에 위임.
+fn ensure_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// 프론트로 넘기는 DaemonInfo. token 을 그대로 노출(로컬 IPC) 하나 **로그 금지**.
 #[derive(serde::Serialize)]
@@ -110,6 +139,11 @@ async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<Daemo
     let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| e.to_string())?;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
+
+    // ★다중 spawn 직렬화★: 다중 WebView 동시 ensure 를 프로세스 전역 락으로 줄 세운다(ensure_lock
+    // 주석 참조). 락은 ensure(spawn 포함) 구간만 — 첫 호출이 spawn+daemon.json 발행, 뒤따르는
+    // 호출은 attach 만(spawn 안 함). ADR-0024 C1(데몬 직접 spawn 금지)과 무관 — WMI 경로는 그대로.
+    let _guard = ensure_lock().lock().await;
 
     // blocking(폴링·sleep 포함) — async executor 보호 위해 tauri 런타임의 spawn_blocking 사용
     // (tokio 직접 의존 없이 tauri::async_runtime 경유).
