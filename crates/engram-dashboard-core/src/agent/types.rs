@@ -101,6 +101,12 @@ pub struct CommandSpec {
 }
 
 /// 영역별 capability (bool 폭증 금지). 콘솔 값으로 채움. 직렬화(프론트 공유, snake_case).
+///
+/// ★출처 분리(load-bearing)★: 이 합성값의 5영역은 **두 출처**에서 온다 — input/output/control은
+/// 물리 채널(transport)이, session/model은 프로그램(backend)이 결정한다. 예전엔 transport가
+/// session.resume 까지 하드코딩해(claude·shell 무관 resume=true) shell 백엔드가 부정확했다.
+/// 이제 `Capabilities::compose(TransportCaps, BackendCaps)`로만 만들어 출처를 타입으로 강제한다
+/// (CLAUDE.md §2 capability 매트릭스: resize=transport-determined, resume/model=backend-determined).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {
     pub input: InputCaps,
@@ -108,6 +114,39 @@ pub struct Capabilities {
     pub control: ControlCaps,
     pub session: SessionCaps,
     pub model: ModelCaps,
+}
+
+/// 물리 채널(transport)이 **소유·결정**하는 caps. PTY/API 등 데이터 채널의 능력만 담는다.
+/// transport는 session/model을 만들 수 없다(그 필드가 여기 없음 — 소유권을 타입으로 강제).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TransportCaps {
+    pub input: InputCaps,
+    pub output: OutputCaps,
+    pub control: ControlCaps,
+}
+
+/// 프로그램(backend: claude/shell/codex…)이 **소유·결정**하는 caps. resume 지원·모델 선택처럼
+/// 채널이 아니라 실행 대상 프로그램의 능력만 담는다. backend는 input/output/control을 만들 수 없다
+/// (그 필드가 여기 없음 — 소유권을 타입으로 강제).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackendCaps {
+    pub session: SessionCaps,
+    pub model: ModelCaps,
+}
+
+impl Capabilities {
+    /// transport(물리)와 backend(프로그램) caps를 합쳐 최종 5영역 Capabilities를 만든다.
+    /// 이게 Capabilities의 **유일한 정상 생성 경로**다 — 출처가 섞이지 않게(transport는 session을,
+    /// backend는 control을 못 채우게) 타입으로 박았다.
+    pub fn compose(t: TransportCaps, b: BackendCaps) -> Capabilities {
+        Capabilities {
+            input: t.input,
+            output: t.output,
+            control: t.control,
+            session: b.session,
+            model: b.model,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -263,3 +302,65 @@ pub trait StatusSink: Send + Sync + 'static {
 }
 
 // ReplayBuffer 는 session.rs 로 이동 (LLD §1/§4: session.rs 소속).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Capabilities::compose — 출처가 올바른 영역으로 합쳐지는지(소유권 합성 검증) ──
+    // transport가 control.resize 를, backend가 session.resume 을 각각 결정하고, compose 가
+    // 둘을 섞지 않고 제자리에 합치는지 단언한다. (이전 부정확: transport가 resume 까지 소유.)
+    #[test]
+    fn compose_merges_each_source_into_its_region() {
+        // transport: 물리 채널만(control.resize=true, session/model 필드 없음).
+        let t = TransportCaps {
+            input: InputCaps {
+                raw: true,
+                message: false,
+                attachment: false,
+            },
+            output: OutputCaps {
+                terminal_bytes: true,
+                markdown: false,
+                tool_events: false,
+                usage: false,
+            },
+            control: ControlCaps {
+                resize: true,
+                interrupt: true,
+                cancel: false,
+                graceful_shutdown: false,
+            },
+        };
+        // backend: 프로그램만(session.resume=true, model 전부 false).
+        let b = BackendCaps {
+            session: SessionCaps {
+                resume: true,
+                snapshot: false,
+                cwd_env: true,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
+            },
+        };
+
+        let caps = Capabilities::compose(t, b);
+
+        // 핵심: control.resize(transport 소유) ∧ session.resume(backend 소유)이 모두 살아 합쳐짐.
+        assert!(
+            caps.control.resize,
+            "resize 는 transport 가 결정 → 합성에 보존"
+        );
+        assert!(
+            caps.session.resume,
+            "resume 은 backend 가 결정 → 합성에 보존"
+        );
+        // 출처가 뒤섞이지 않았는지 나머지도 확인.
+        assert!(caps.input.raw);
+        assert!(caps.output.terminal_bytes);
+        assert!(caps.session.cwd_env);
+        assert!(!caps.model.select);
+    }
+}

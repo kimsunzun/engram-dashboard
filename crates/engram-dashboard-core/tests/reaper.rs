@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use engram_dashboard_core::agent::backend::{AgentBackend, ShellBackend};
 use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::output_core::OutputCore;
 use engram_dashboard_core::agent::profile::{
@@ -313,6 +314,7 @@ fn make_test_session(
 ) -> Arc<AgentSession> {
     let core = Arc::new(OutputCore::new(id, epoch, status_sink));
     let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
+    // ApiTransport(no-op)라 caps 내용은 무관 — 합성 경로를 만족시키는 더미로 셸 caps 주입.
     Arc::new(AgentSession::new(
         id,
         PathBuf::from("."),
@@ -320,6 +322,7 @@ fn make_test_session(
         80,
         24,
         intent,
+        ShellBackend.capabilities(),
         core,
         Box::new(ApiTransport::new()),
     ))

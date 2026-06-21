@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::agent::backend::AgentBackend;
 use crate::agent::profile::{AgentCommand, SpawnMode};
-use crate::agent::types::CommandSpec;
+use crate::agent::types::{BackendCaps, CommandSpec, ModelCaps, SessionCaps};
 
 /// Gemini 실행 파일명. PATH로 해석된다.
 ///
@@ -88,6 +88,23 @@ impl AgentBackend for GeminiBackend {
             args,
             env,
             cwd,
+        }
+    }
+
+    /// 보수적 stub — CLI spike 전이라 실제 resume/model 능력 미상 → 전부 false.
+    /// spike 후 실측값으로 교체. dispatch 미연결이라 현재 호출 경로 없음(테스트 외).
+    fn capabilities(&self) -> BackendCaps {
+        BackendCaps {
+            session: SessionCaps {
+                resume: false,
+                snapshot: false,
+                cwd_env: true,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
+            },
         }
     }
 }

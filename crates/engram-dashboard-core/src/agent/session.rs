@@ -18,8 +18,8 @@ use std::time::Duration;
 use crate::agent::output_core::OutputCore;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
-    AgentId, AgentStatus, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError, SinkId,
-    SubscribeOutcome, TerminationIntent,
+    AgentId, AgentStatus, BackendCaps, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError,
+    SinkId, SubscribeOutcome, TerminationIntent,
 };
 
 /// 에이전트 1개 = 출력 측(core) + 채널/자원 측(transport)의 합성. transport 종류(PTY/API)와
@@ -35,6 +35,10 @@ pub struct AgentSession {
     /// hook(spawn_session 이 이 Arc 를 캡처)이 finish 순간 snapshot 해 ReapMsg 에 싣는다.
     /// 세션별 신규 atomic. `Arc` 인 이유: hook 클로저가 같은 값을 공유 캡처한다.
     intent: Arc<AtomicU8>,
+    /// backend(프로그램)가 결정한 caps(session/model). transport caps(input/output/control)와
+    /// 합성해 최종 Capabilities 를 만든다 — capabilities()가 `Capabilities::compose` 로 매번 합성.
+    /// manager.spawn 이 profile.command 로 산출해 주입한다(transport 는 이 값을 모른다).
+    backend_caps: BackendCaps,
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
 }
@@ -51,6 +55,7 @@ impl AgentSession {
         cols: u16,
         rows: u16,
         intent: Arc<AtomicU8>,
+        backend_caps: BackendCaps,
         core: Arc<OutputCore>,
         transport: Box<dyn AgentTransport>,
     ) -> Self {
@@ -61,6 +66,7 @@ impl AgentSession {
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
             intent,
+            backend_caps,
             core,
             transport,
         }
@@ -114,9 +120,11 @@ impl AgentSession {
         self.core.enter_exiting()
     }
 
-    /// 이 transport가 지원하는 영역별 capability.
+    /// 최종 capability — transport(물리: input/output/control)와 backend(프로그램: session/model)
+    /// 의 합성. 출처가 타입으로 분리돼 있어 transport 가 resume 을, backend 가 resize 를 섞어
+    /// 채우는 사고가 구조적으로 불가능하다(예전 부정확 = transport 의 resume 하드코딩 제거).
     pub fn capabilities(&self) -> Capabilities {
-        self.transport.capabilities()
+        Capabilities::compose(self.transport.capabilities(), self.backend_caps.clone())
     }
 
     /// 구독자 등록 → core. SinkId 반환(unsubscribe용).

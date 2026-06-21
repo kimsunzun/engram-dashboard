@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use crate::agent::output_core::OutputCore;
-use crate::agent::types::{Capabilities, InputEvent, PtyError};
+use crate::agent::types::{InputEvent, PtyError, TransportCaps};
 
 pub mod api;
 pub mod pty;
@@ -39,6 +39,8 @@ pub trait AgentTransport: Send + Sync {
     /// pump 종료 대기는 여기서 안 함(core.join_pump 몫).
     fn shutdown(&self);
 
-    /// 이 transport가 지원하는 영역별 capability.
-    fn capabilities(&self) -> Capabilities;
+    /// 이 transport(물리 채널)가 결정하는 caps만 반환 — input/output/control.
+    /// session(resume)·model 은 backend 소관이라 여기서 만들지 않는다(`BackendCaps`).
+    /// 최종 Capabilities 는 AgentSession 이 `Capabilities::compose(transport, backend)` 로 합성.
+    fn capabilities(&self) -> TransportCaps;
 }

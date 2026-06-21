@@ -245,6 +245,14 @@
 - **후속 수정(사용자 테스트, 같은 dashboard10):** `29d1d5d` 트레이 좌클릭 메뉴 비활성(show_menu_on_left_click=false, 우클릭=메뉴) · `ac25754` **데몬 hot-swap 재연결**(read_daemon_info=no-spawn daemon.json 재조회로 옮겨간 데몬 추적, ADR-0021 보강; +reviewer Blocker 좀비소켓 race를 openGen 세대토큰 가드로 차단, 회귀테스트 2) · `d6df88d` UI 열기 더블클릭→단일 좌클릭(Left+Up) · `aacb0f2` 부팅 다중 spawn 직렬화(ensure_lock 프로세스전역 async Mutex — 콘솔창 깜빡임 제거) + 재연결 시 트리 재동기화(eventBus onConnectionStateChange→getAgents+refreshProfiles, 첫연결 스킵). 위 "다음 ②(hot-swap)"는 이로써 해소. 전부 코더→reviewer-deep→QA 통과, cargo/tsc/npm green.
 - **백엔드 잔여(프론트 전, recon):** ①capability backend별 정확화(현 transport 단일 하드코딩) ②doc rot(ADR-0024 idle문구·CLAUDE.md 모듈맵) — 권장 저비용 · ③자동재시작 관측 seam(lifecycle PRD 결정대기) ④idle self-shutdown(결정대기) · ⑤codex/gemini variant ⑥WSS/원격 TLS ⑦ApiTransport·메시지시스템 — 이연.
 
+### 2026-06-21 (dashboard11) — 백엔드 잔여 ② doc rot 정리 + ① capability 합성 정확화(ADR-0030)
+
+- **② doc rot 정리(문서, 코드 무변경):** (a) **ADR-0024 idle self-shutdown 정정** — C1 "고아 방지=idle self-shutdown"이 미구현·미결정인데 명제처럼 적혀 있었음. 코드 실측(`daemon/ws.rs` idle_timeout 50s는 WS 연결 half-open 정리지 데몬 self-exit 아님)·ADR-0021(idle 결정 없음, "자동재시작 없음"만) 대조 후 정정 주석 추가(현 고아방지=lockfile stale 검사뿐, idle self-shutdown은 후속 §4-④ 사용자 결정 대기). 근거절 "idle self-clean"도 미구현 표기. (b) **ADR-0021 stale 경로** — `src-tauri/src/discovery.rs`→`crates/engram-dashboard-discovery/src/lib.rs`(S12 이동). (c) **CLAUDE.md 모듈맵 갱신** — 단일 core 트리→workspace 5멤버 구조. daemon(main/lib/connection_core/ws/instance/portfile)·discovery(lib) crate 신규 추가, core 누락분(manager.rs/reaper.rs/platform/process.rs) 보강, src-tauri ADR-0029 삭제분(AppState/AgentManager/TauriStatusSink/restore_all) 제거·commands(discovery/tray/autostart)·tray 3파일 정확화. 전 서술을 실제 파일/심볼 grep으로 대조 검증(환각 거름).
+- **① capability 합성 정확화(ADR-0030):** `PtyTransport::capabilities()`가 `session.resume=true`를 backend 무관 하드코딩→shell도 resume=true(부정확). **transport(물리: input/output/control) ⊕ backend(프로그램: session/model) 합성**으로 분리, 타입으로 소유권 강제(`TransportCaps`/`BackendCaps`/`Capabilities::compose`). claude resume=true·shell resume=false. ADR-0002 매트릭스 구체화.
+- **게이트(규약 강제):** 코더(opus)→reviewer-deep(opus 고노력, fable 불가)→QA(cdp 실측). reviewer Blocker/Major 0(compose 5영역 1:1·소유권 타입분리·resume 정확화 확인, Minor=spec/caps dispatch drift 주의·Nit=BackendCaps clone). **QA 실측: 실제 앱 WS→데몬→프론트 IPC 경로에서 shell 에이전트 capabilities.session.resume=false / claude=true 확인**(하드코딩 아님 실증). core test 76 통과(claude/shell resume 회귀 + compose 합성 테스트)·workspace build green·fmt·tauri import 0.
+- **변경 파일:** core `agent/types.rs`(TransportCaps/BackendCaps/compose)·`transport/{mod,pty,api}.rs`·`backend/{mod,claude,shell,codex,gemini}.rs`·`session.rs`·`manager.rs`·`tests/{session_smoke,reaper}.rs` + 문서 3건(ADR-0024/0021, CLAUDE.md) + 신규 ADR-0030.
+- **다음:** 백엔드 잔여 ③④(lifecycle PRD·idle self-shutdown — 사용자 결정 대기) 또는 프론트 본작업(D-7 레이아웃 영속·§5 LLM 제어표면). capability는 프론트가 아직 control.interrupt만 소비 → 메뉴 회색처리 구현 시 session.resume 기반 분기 GUI 실측 권고(reviewer 관찰).
+
 ---
 
 ## 다음 (미진행)

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::agent::profile::{AgentCommand, SpawnMode};
-use crate::agent::types::CommandSpec;
+use crate::agent::types::{BackendCaps, CommandSpec};
 
 /// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
 ///
@@ -63,6 +63,11 @@ pub trait AgentBackend: Send + Sync {
         cwd: PathBuf,
         env: Vec<(String, String)>,
     ) -> CommandSpec;
+
+    /// 이 backend(프로그램)가 결정하는 caps — session(resume)·model.
+    /// transport(물리 채널)가 만드는 input/output/control 과 별개로, 최종 Capabilities 는
+    /// `Capabilities::compose(transport_caps, backend_caps)` 로 합성된다.
+    fn capabilities(&self) -> BackendCaps;
 }
 
 // ── 정적 싱글턴 ────────────────────────────────────────────────────────────────
@@ -93,4 +98,10 @@ pub fn build_command_spec(
     env: Vec<(String, String)>,
 ) -> CommandSpec {
     backend_for(c).build_spec(c, mode, session_id, cwd, env)
+}
+
+/// 이 명령의 backend(프로그램)가 결정하는 caps(session/model). manager 가 spawn 시 산출해
+/// AgentSession 에 주입하고, session 이 transport caps 와 합성한다(`Capabilities::compose`).
+pub fn backend_caps(c: &AgentCommand) -> BackendCaps {
+    backend_for(c).capabilities()
 }

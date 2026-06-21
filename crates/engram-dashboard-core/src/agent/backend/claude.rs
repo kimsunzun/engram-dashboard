@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::agent::backend::{console_command, AgentBackend};
 use crate::agent::profile::{AgentCommand, SpawnMode};
-use crate::agent::types::CommandSpec;
+use crate::agent::types::{BackendCaps, CommandSpec, ModelCaps, SessionCaps};
 
 /// claude 실행 파일명(논리값). 실제 spawn 시 Windows에선 `console_command`가 `cmd.exe /c claude`로
 /// 감싼다(npm shim 해석, error 193 회피 — backend/mod.rs 참조).
@@ -68,6 +68,23 @@ impl AgentBackend for ClaudeBackend {
                 args: args.clone(),
                 env,
                 cwd,
+            },
+        }
+    }
+
+    /// claude 는 `--resume` 으로 세션을 무손실 재개하므로 resume=true(이 backend 의 결정).
+    /// cwd_env=true(작업 디렉토리에서 실행). snapshot·model 옵션은 미지원(콘솔 CLI).
+    fn capabilities(&self) -> BackendCaps {
+        BackendCaps {
+            session: SessionCaps {
+                resume: true,
+                snapshot: false,
+                cwd_env: true,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
             },
         }
     }
@@ -156,6 +173,12 @@ mod tests {
     #[test]
     fn needs_session_is_true() {
         assert!(ClaudeBackend.needs_session());
+    }
+
+    #[test]
+    fn capabilities_resume_is_true() {
+        // claude --resume 지원 → backend 가 resume=true 를 결정.
+        assert!(ClaudeBackend.capabilities().session.resume);
     }
 
     #[test]

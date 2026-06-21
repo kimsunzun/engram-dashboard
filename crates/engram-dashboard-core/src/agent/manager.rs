@@ -29,8 +29,8 @@ use crate::agent::session_tracker::SessionTracker;
 use crate::agent::transport::pty::PtyTransport;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
-    AgentId, AgentInfo, AgentStatus, CommandSpec, OutputChunk, OutputSink, PtyError, ReapMsg,
-    SinkId, StatusSink, SubscribeOutcome, TerminalReason, TerminationIntent,
+    AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, OutputChunk, OutputSink, PtyError,
+    ReapMsg, SinkId, StatusSink, SubscribeOutcome, TerminalReason, TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -152,7 +152,12 @@ impl AgentManager {
             profile.env.clone(),
         );
 
-        let (session, child_pid) = self.spawn_session(profile.id, spec, epoch)?;
+        // backend(프로그램)가 결정하는 caps(session/model)를 spec과 별도로 산출해 흘린다.
+        // spec은 backend-neutral(program/args뿐)이라 caps를 spec에 싣지 않고 따로 전달한다 —
+        // session이 transport caps와 compose 한다(claude=resume true, shell=resume false 정확화).
+        let bcaps = backend::backend_caps(&profile.command);
+
+        let (session, child_pid) = self.spawn_session(profile.id, spec, bcaps, epoch)?;
 
         // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
         if let (Some(s), Some(pid)) = (sid, child_pid) {
@@ -174,6 +179,7 @@ impl AgentManager {
         &self,
         id: AgentId,
         spec: CommandSpec,
+        backend_caps: BackendCaps,
         epoch: u32,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
         // 1. PTY 생성 + child spawn + job 편입 + reader/writer 확보. pump는 아직 안 띄움.
@@ -218,6 +224,7 @@ impl AgentManager {
             DEFAULT_COLS,
             DEFAULT_ROWS,
             intent,
+            backend_caps,
             core,
             transport,
         ));

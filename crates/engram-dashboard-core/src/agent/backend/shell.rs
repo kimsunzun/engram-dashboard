@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::agent::backend::AgentBackend;
 use crate::agent::profile::{AgentCommand, SpawnMode};
-use crate::agent::types::CommandSpec;
+use crate::agent::types::{BackendCaps, CommandSpec, ModelCaps, SessionCaps};
 
 /// 셸 백엔드 unit struct. &'static으로 사용, 상태 없음.
 pub struct ShellBackend;
@@ -44,6 +44,24 @@ impl AgentBackend for ShellBackend {
             }
         }
     }
+
+    /// ★이번 정확화의 핵심★: 범용 셸은 `--resume` 같은 세션 재개 개념이 없다 → resume=false.
+    /// 예전엔 transport 가 backend 무관하게 resume=true 를 하드코딩해 shell 이 부정확했다.
+    /// cwd_env=true(셸도 cwd 에서 실행). model 옵션 없음.
+    fn capabilities(&self) -> BackendCaps {
+        BackendCaps {
+            session: SessionCaps {
+                resume: false,
+                snapshot: false,
+                cwd_env: true,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +85,13 @@ mod tests {
     #[test]
     fn needs_session_is_false() {
         assert!(!ShellBackend.needs_session());
+    }
+
+    #[test]
+    fn capabilities_resume_is_false() {
+        // 핵심 회귀: 범용 셸은 --resume 없음 → resume=false 여야 한다(이전 부정확 = transport
+        // 가 backend 무관하게 resume=true 하드코딩했던 것을 backend 소관으로 바로잡음).
+        assert!(!ShellBackend.capabilities().session.resume);
     }
 
     #[test]

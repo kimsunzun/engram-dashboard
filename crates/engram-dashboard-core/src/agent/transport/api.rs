@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::agent::output_core::OutputCore;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
-    Capabilities, ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps, PtyError, SessionCaps,
+    ControlCaps, InputCaps, InputEvent, OutputCaps, PtyError, TransportCaps,
 };
 
 /// HTTP 스트림 API 백엔드용 transport 껍데기.
@@ -64,9 +64,10 @@ impl AgentTransport for ApiTransport {
         // 자원 없음. 정리할 것 없음.
     }
 
-    /// 전부 false — API 모델 미연결 상태에서 지원하는 기능 없음.
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    /// 물리 채널 caps 전부 false — API 모델 미연결 상태에서 지원하는 기능 없음.
+    /// session·model 은 backend 소관이라 여기서 만들지 않는다(TransportCaps 엔 없음).
+    fn capabilities(&self) -> TransportCaps {
+        TransportCaps {
             input: InputCaps {
                 raw: false,
                 message: false,
@@ -83,16 +84,6 @@ impl AgentTransport for ApiTransport {
                 interrupt: false,
                 cancel: false,
                 graceful_shutdown: false,
-            },
-            session: SessionCaps {
-                resume: false,
-                snapshot: false,
-                cwd_env: false,
-            },
-            model: ModelCaps {
-                select: false,
-                temperature: false,
-                max_tokens: false,
             },
         }
     }

@@ -21,8 +21,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use crate::agent::output_core::OutputCore;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
-    Capabilities, CommandSpec, ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps,
-    OutputEvent, PtyError, SessionCaps, TerminalReason,
+    CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
+    TerminalReason, TransportCaps,
 };
 
 #[cfg(windows)]
@@ -355,10 +355,11 @@ impl AgentTransport for PtyTransport {
         let _ = self.master.lock().expect("master poisoned").take();
     }
 
-    /// 콘솔 capability — terminal-bytes 단방향 출력, raw 입력, resize/interrupt 가능.
-    /// resume=true(claude --resume), snapshot/model/graceful_shutdown은 미지원.
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    /// 콘솔 물리 채널 caps — terminal-bytes 단방향 출력, raw 입력, resize/interrupt 가능.
+    /// session(resume)·model 은 여기서 안 만든다 — backend 소관(claude=resume, shell=no-resume).
+    /// 최종 Capabilities 는 `Capabilities::compose(this, backend_caps)` 로 합성된다.
+    fn capabilities(&self) -> TransportCaps {
+        TransportCaps {
             input: InputCaps {
                 raw: true,
                 message: false,
@@ -375,16 +376,6 @@ impl AgentTransport for PtyTransport {
                 interrupt: true,
                 cancel: false,
                 graceful_shutdown: false,
-            },
-            session: SessionCaps {
-                resume: true,
-                snapshot: false,
-                cwd_env: true,
-            },
-            model: ModelCaps {
-                select: false,
-                temperature: false,
-                max_tokens: false,
             },
         }
     }

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use engram_dashboard_core::agent::backend::{AgentBackend, ShellBackend};
 use engram_dashboard_core::agent::manager::default_shell;
 use engram_dashboard_core::agent::output_core::OutputCore;
 use engram_dashboard_core::agent::session::AgentSession;
@@ -126,7 +127,9 @@ fn session_compose_resize_exiting_kill() {
     // 4) AgentSession 합성. 이미 start 된 core/transport 를 묶는다.
     //    intent: ADR-0019 종료 의도 atomic(이 smoke 는 set_intent 안 함 → None=자연 종료 경로).
     let intent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
-    let session = AgentSession::new(id, cwd, 0, 80, 24, intent, core, transport);
+    // 이 smoke 는 default_shell 을 띄우므로 backend caps 도 셸 기준(resume=false).
+    let backend_caps = ShellBackend.capabilities();
+    let session = AgentSession::new(id, cwd, 0, 80, 24, intent, backend_caps, core, transport);
 
     // 5) subscribe → 초기 프롬프트 대기 → echo 입력 → session-test 출력.
     let out_sink = RecordingSink::new();
