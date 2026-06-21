@@ -82,6 +82,13 @@
 - **★사용자 결정 필요(착수 전):** (1) raw `tokio-tungstenite` vs Socket.IO+socketioxide — judge는 raw WS(lock-in 회피·의존성 최소), 양쪽 다 seam 뒤면 후회비용 낮음 (2) 모바일 원격 TLS·인증 (3) backpressure 정책.
 - **상세:** `docs/process/S12-daemonization/ipc-library-consult.md`.
 
+### T-9. claude 프로세스 풀링 — 에이전트 부팅 속도 (보류)
+- **상태:** 보류(폐기 아님). headless가 메인 경로인 한 무의미.
+- **출처:** 제어표면/fleet 선행조사 논의(2026-06-21). 메모리·스폰속도 설계 갈래에서 파생.
+- **결론(현재):** 워밍된 claude.exe 풀을 다른 에이전트로 retarget하려면 cwd 변경이 필요한데 headless는 런타임 cwd 변경(`/cd`) 불가 → 풀링 무의미. (인터랙티브 풀이면 `/cd`로 가능하나 비메인 경로 + 메모리 비용.) session-id는 블로커 아님(풀 슬롯을 engram-통제 sid로 부팅 후 그 sid를 정체성으로 채택).
+- **재도입 시점(측정 가능):** ① cold spawn→first-output 지연이 실측상 병목(기준선 측정 후 확정, 후보 >~2s) · ② 동시 활성 에이전트 증가로 스폰 빈도↑ 누적지연 문제 · ③ "headless 메인" 전제 변경.
+- **조치:** 빠른 스폰은 풀링 대신 `--bare`(autoload 제거) + warm 티어(hot 에이전트 유지). 근본 출구는 API transport(claude.exe 미사용). **막다른 길·근거 상세:** `docs/research/control-surface-and-fleet.md` §6.
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)

@@ -11,6 +11,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **상태/상세:** `docs/README.md`
 - **타임라인(언제/무엇):** `docs/process/step-log.md`
 - **결정·거부한 대안(왜):** `docs/decisions/`
+- **새 문서 = 발견 체인에 연결(고아 금지).** 종류·배치 규약은 `docs/README.md`.
 
 검증 흐름(코딩 → LLD 리뷰 → QA 3-게이트)의 강제 규약은 아래 **구현 실행 규약** 참조.
 

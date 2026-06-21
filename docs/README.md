@@ -3,36 +3,32 @@
 Claude 에이전트들을 한 화면에서 관리하는 네이티브 대시보드.
 Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 
-> **언제·무엇을·어떻게 만들어왔는지 → [`process/step-log.md`](process/step-log.md) (타임라인)**
+> **문서 작업 전 이 파일부터 본다.** 어떤 문서가 있고, 새 내용을 어디에 넣는지가 여기 있다.
 
-## 문서 트리
+## 문서 종류
 
-```
-docs/
-├── README.md          이 파일 (인덱스)
-├── tracking.md        보류 항목·결정 추적 (T-*, D-*) — 현재/미래
-├── process/           과정 기록 (step별 응집, 불변)
-│   ├── step-log.md        ★ 타임라인 — 언제 무엇을 어떻게 (S0~S8)
-│   ├── S0-view-phase/     요구사항·view-spec·research (출발점)
-│   ├── S1-design/         architecture·LLD·frontend-integration + 3자 검증 9건
-│   ├── S2-phase0-spike/   PTY kill 실측
-│   ├── S3-phase1-backend/ 백엔드 코어 브리핑 m1~m6b + stage2 가이드
-│   ├── S4-channel-spike/  tauri 핀 실측
-│   ├── S5-phase2-tauri/   commands+lib 브리핑
-│   └── S7-phase3-frontend/ 프론트 통합 m8a~d
-└── reference/         (추후) 완성 통합 정설 — 코드와 동기화되는 현재 동작 문서
-```
+| 폴더/파일 | 무엇 |
+|---|---|
+| `process/SN-name/` | "이렇게 만들어왔다" — **폴더가 곧 step**(이름만 봐도 자명). 실재 목록은 `ls docs/process/`, 흐름은 `step-log.md`. *step 목록을 여기에 손으로 베끼지 않는다 — 베끼면 어긋난다(rot).* |
+| `process/step-log.md` | ★ 타임라인 — 언제 무엇을 어떻게. **step 흐름의 단일 출처.** |
+| `decisions/` | "왜 이렇게 정했나" — 결정 + 거부한 대안(ADR). 영구 누적. |
+| `tracking.md` | 보류 항목(T-)·결정 추적(D-). "재도입 시점"이 트리거. |
+| `research/` | step 착수 전 선행조사(조사·비교·미결질문). |
+| `reference/` | (추후) 코드 동기화 정설. 시스템 안정화 후 집필. |
 
-**구조 원칙:**
-- `process/` = "이렇게 만들어왔다" — step별 폴더로 응집. **폴더가 곧 step** (파일만 봐도 소속 자명).
-- **새 작업 통합 규칙:** 새 step = `process/SN-name/` 폴더 새로 만들어 그 안에 다 넣고, `step-log.md`에 SN 항목 추가. 종류별로 흩어지지 않음.
-- `reference/` = "지금 이렇게 동작한다" — 코드 동기화 정설 (살아있는 문서). **시스템 안정화 후 집필 예정.**
-- 정교한 하위 구조(step 내 분류 등)는 나중에 한 번에 정리.
+## 새 내용을 어디에 넣나
+
+- 설계 **결정**을 내렸다(+버린 대안) → `decisions/` ADR (작업 전 관련 ADR 먼저 읽기)
+- 지금 안 하고 **나중에** 다룰 것·미결 질문 → `tracking.md` (T-/D-)
+- **무엇을 언제** 했나 → `step-log.md`
+- step 착수 전 **조사** → `research/`
+- 새 기능 **설계 착수** → `process/SN-name/` 새 폴더 (관련 `research/`·ADR 먼저 참조)
+
+**★ 고아 금지:** 새 문서를 만들면 위 경로·`tracking.md`·코드앵커(`// see …`) 중 하나에 반드시 링크한다. 안 하면 다음 세션이 못 찾는다.
 
 ## 진행 상태
 
-진행 상태·타임라인은 이 파일에서 중복 관리하지 않는다(rot 방지). 단일 출처:
-- **언제/무엇 (타임라인):** [`process/step-log.md`](process/step-log.md) ★ 항상 최신
-- **결정·거부한 대안 (왜):** [`decisions/`](decisions/README.md)
-- **보류 항목 (T-*/D-*):** [`tracking.md`](tracking.md)
-- `reference/` 정설 문서 = 시스템 안정화 후 집필 예정
+이 파일에서 중복 관리하지 않는다(rot 방지). 단일 출처:
+- **언제/무엇 (타임라인):** `process/step-log.md` ★ 항상 최신
+- **왜 (결정·거부 대안):** `decisions/`
+- **보류 (T-/D-):** `tracking.md`
