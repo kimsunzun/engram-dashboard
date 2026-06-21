@@ -148,16 +148,19 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 ### 그 외 영역 (프론트 상태 영속, 메시지 시스템 등)
 - 아직 앵커 미선정 — 위 절차(조사→비교→선택지 제시)로 그때 정한다.
 
-## 백엔드 모듈 맵 (`crates/engram-dashboard-core/src/`)
-> 코어(`agent/`·`persistence/`·`logging/`)는 `crates/engram-dashboard-core`에 있고 `src-tauri`는 `engram_dashboard_core::{agent,persistence,logging}`로 re-import한다. wire 계약은 `crates/engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/codec, ts-rs). 내부 실 PTY 항목(`transport/pty.rs`·`PtyTransport`·`PtyEvent` 등)은 PTY 이름을 유지한다(모듈 첫 마디만 `agent/`).
+## 백엔드 모듈 맵 (Cargo workspace — 5 멤버)
+> **S12 이후 멤버 4 crate + src-tauri.** ADR-0029(embedded 제거→daemon-only): 에이전트 호스트=**데몬 프로세스**(`engram-dashboard-daemon`)가 `AgentManager` 소유. `src-tauri`는 에이전트를 in-process로 호스팅하지 않는 **데몬 클라이언트 셸**(창·트레이·discovery·로컬 command)이다. core(`agent/`·`persistence/`·`logging/`)는 tauri import 0이라 데몬·테스트 양쪽이 재사용한다. wire 계약은 `engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/DaemonInfo/codec, ts-rs). 내부 실 PTY 항목(`transport/pty.rs`·`PtyTransport`·`PtyEvent` 등)은 PTY 이름을 유지한다(모듈 첫 마디만 `agent/`).
 
+### crates/engram-dashboard-core/src/ — 에이전트 코어 (tauri import 0)
 ```
 agent/                        # (구 pty/) S10 추상화: AgentManager → AgentSession(OutputCore) → dyn AgentTransport
 ├── types.rs          # AgentStatus/PtyEvent/AgentInfo(+epoch+capabilities)/OutputSink·StatusSink
 │                     #  + 중립 seam: OutputEvent/InputEvent(확장 enum)·TerminalReason·CommandSpec·Capabilities·OutputChunk
 ├── profile.rs        # AgentProfile/AgentCommand/SpawnMode/RestoreOutcome + ProfileRegistry(sid 단일소유자)
+├── manager.rs        # ★AgentManager★ backend/transport/output_core/session 결합부 + restore_all(S9). StatusSink 주입(AppHandle 아님 — tauri import 0)
 ├── output_core.rs    # ★OutputCore★ seq/replay/subscribers/status/finalize — emit(variant-agnostic)/finish(finalize 1회)/join_pump/enter_exiting/subscribe(C4). transport 무관 공용 1벌
 ├── session.rs        # AgentSession(구체) = OutputCore + Box<dyn AgentTransport> 합성. write_input/resize/interrupt/kill(=shutdown+join_pump)/capabilities
+├── reaper.rs         # 종료 분류(ADR-0019) 단일 소비자 — pump가 발행한 ReapMsg를 supervisor 스레드가 소비→맵 제거(epoch 검증)→프로필 disposition→목록 통지
 ├── transport/
 │   ├── mod.rs        # trait AgentTransport (start/send_input/resize/interrupt/shutdown/capabilities) — seam
 │   ├── pty.rs        # PtyTransport(콘솔 공용) — master/writer/child/shutdown/job + pump 스레드. kill 1~5단계·drain 흡수
@@ -168,12 +171,41 @@ agent/                        # (구 pty/) S10 추상화: AgentManager → Agent
 │   ├── shell.rs      # 범용 셸 패스스루
 │   └── codex.rs/gemini.rs # stub(best-guess 플래그, dispatch 미연결 — CLI spike 후 variant 추가)
 ├── session_tracker.rs# sid drift 폴링(best-effort, PID shim 우회, 단일스레드+정지핸들)
-└── platform/windows.rs # JobObjectHandle (KILL_ON_JOB_CLOSE)
+└── platform/
+    ├── windows.rs    # JobObjectHandle (KILL_ON_JOB_CLOSE)
+    └── process.rs    # PID liveness + 프로세스 시작시각 — daemon(portfile)·tauri(discovery) 양쪽이 "데몬 PID 살아있나" 판정 시 재사용(DRY)
 persistence/mod.rs    # FileProfileStore — agents.json atomic(tmp+sync_all+rename+fsync)
 logging/mod.rs        # tracing + 런타임 레벨 토글 + 키/토큰 마스킹(기본 OFF=warn)
-commands/             # Tauri thin wrapper (agent/pty/profile, interrupt_agent) — 비즈니스 로직 없음
-lib.rs                # AppState 배선, TauriStatusSink/ChannelOutputSink, 부팅 시 백그라운드 restore_all
-examples/             # spike.rs/spike_breakaway.rs(throwaway 스파이크 보존). 검증 하네스는 tests/로 이관(headless/transport_smoke/session_smoke, testing-strategy §0-a)
+(crate 루트) examples/  # spike.rs/spike_breakaway.rs(throwaway 스파이크 보존)
+(crate 루트) tests/     # 검증 하네스: headless/transport_smoke/session_smoke/reaper (실 PTY 단언, testing-strategy §0-a)
+```
+
+### crates/engram-dashboard-daemon/src/ — 데몬 프로세스 (WS 서버, AgentManager 소유)
+```
+main.rs               # 진입점. #![cfg_attr(not(debug_assertions), windows_subsystem="windows")] — 디버그=콘솔앱/릴리즈=무콘솔 (ADR-0021 §6)
+lib.rs                # 서버 조립 — accept loop, 토큰 발급, manager 배선, panic hook
+connection_core.rs    # MultiViewState — 다중 client 뷰(여러 창/원격) 상태
+ws.rs                 # WS 핸들러 — ConnRegistry, DaemonStatusSink(이벤트버스↓ ADR-0028), KeepaliveConfig(idle_timeout=연결 half-open 정리, ≠데몬 종료)
+instance.rs           # 단일 인스턴스 guard (named mutex 등 — 데몬 1개 보장)
+portfile.rs           # daemon.json(DaemonInfo) read/write — PID·port·token·generation
+```
+
+### crates/engram-dashboard-discovery/src/ — 데몬 발견 순수 로직 (no WMI/no sleep)
+```
+lib.rs                # trait PidLiveness/DaemonReader/Spawner/Clock (seam) + ensure_daemon()(오케스트레이션) + read_live_daemon(no-spawn 재조회, ADR-0021 명료화) + default_data_dir()(ADR-0024 단일 출처)
+```
+
+### crates/engram-dashboard-protocol/src/ — wire 계약
+```
+(lib)                 # AgentCommand/AgentEvent/OutputChunk/DaemonInfo/PROTOCOL_VERSION + codec golden + ts-rs 바인딩
+```
+
+### src-tauri/src/ — 데몬 클라이언트 셸 (창·트레이·discovery). ADR-0029로 in-proc 호스팅 제거
+```
+main.rs               # 진입점
+lib.rs                # setup — single-instance/autostart 플러그인, 트레이 생성, 데몬 생사 옵저버 spawn, --hidden 처리. ★AppState/AgentManager/TauriStatusSink/ChannelOutputSink/restore_all 없음(데몬 소유)★. discovery crate re-export
+commands/             # Tauri thin wrapper — discovery.rs(데몬 발견/lifecycle) · tray.rs(창 show/hide/완전종료, §5 LLM 핸들) · autostart.rs(부팅 자동시작 토글). 옛 agent/pty command 제거(프론트가 WS로 데몬 직결)
+tray/                 # core.rs(순수 로직 — MenuAction enum/menu_id↔action 매핑/IconState/to_grayscale_rgba, 단위테스트 대상) · actions.rs(불순 공유 부수효과 — 트레이 핸들러+command가 같은 함수 호출, §5 LLM 핸들 + LivenessState) · mod.rs(트레이 조립 + on_menu_event + publish_daemon_liveness 게이트→set_icon+emit, ADR-0028)
 ```
 
 ### 핵심 불변식 (변경 금지 — 근거·거부 대안은 `docs/decisions/`)

@@ -1,7 +1,7 @@
 # ADR-0021: 데몬 수명 — on-demand spawn + 자동재시작 없음 (tmux/wezterm 모델)
 
 - 상태: 확정 (2026-06-17, 근거: 데몬-서버 prior-art 조사[tmux/wezterm/emacs/gpg-agent/LSP] + 사용자 결정 + ADR-0015 확장)
-- 관련: ADR-0015(데몬 persist-until-kill·콘솔=detachable 뷰어·ensure-on-open) **확장/정정** · ADR-0008(S9 restore_all) · `src-tauri/src/discovery.rs`(ensure_daemon/Spawner) · `src/api/wsTransport.ts`(연결/재연결) · `crates/engram-dashboard-protocol`(StopDaemon)
+- 관련: ADR-0015(데몬 persist-until-kill·콘솔=detachable 뷰어·ensure-on-open) **확장/정정** · ADR-0008(S9 restore_all) · `crates/engram-dashboard-discovery/src/lib.rs`(ensure_daemon/Spawner — S12에 src-tauri에서 discovery crate로 이동) · `src/api/wsTransport.ts`(연결/재연결) · `crates/engram-dashboard-protocol`(StopDaemon)
 - 범위: 데몬(인프라) 수명 — 자동시작/종료/크래시 처리. **에이전트 수명(ADR-0016/0019)과 다른 축.**
 
 ## 맥락
