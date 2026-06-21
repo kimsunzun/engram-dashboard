@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager};
 
 use tauri_plugin_autostart::ManagerExt;
@@ -103,11 +103,17 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
         // 기본값이 true 라 명시 false. (Tauri 2.11: menu_on_left_click 은 deprecated → show_ 사용.)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| dispatch_menu(app, event.id.as_ref()))
-        // 커밋C: 트레이 더블클릭 = UI 열기(메뉴 ShowUi 항목 대체). DoubleClick 만 처리 — 단발 Click
-        // (Windows 에서 메뉴 표시와 겹침) / Enter/Move/Leave 는 무시. show_main_ui 는 메뉴·command·
-        // 단축키와 같은 actions 함수를 공유(CLAUDE.md §5 손발/두뇌). DoubleClick 은 Windows 전용 변형.
+        // 트레이 좌클릭(단발) = UI 열기(사용자 요청 — 더블클릭에서 변경). 메뉴는 우클릭
+        // (show_menu_on_left_click=false 로 좌클릭 메뉴 비활성). Left + Up(뗄 때)만 처리 —
+        // Click 은 Down·Up 둘 다 발화하므로 Up 으로 한정해 1회만(중복 표시 방지). 우클릭/Enter/Move/
+        // Leave 무시. show_main_ui 는 메뉴·command·단축키와 같은 actions 함수 공유(CLAUDE.md §5).
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::DoubleClick { .. } = event {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 actions::show_main_ui(tray.app_handle());
             }
         })
