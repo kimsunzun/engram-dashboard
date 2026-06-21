@@ -230,6 +230,19 @@
 - **메인이 정하고 보고한 내부 결정/이연:** ① embedded-release data_dir = 현 exe폴더 유지(ADR "작업폴더(cwd)" 뉘앙스는 별도 확인 대기 — release-only라 dev 무영향) ② 앱-in-daemon-mode in-proc store 이중소유 = flip 이연(pre-flip 잠복) ③ embedded single-instance "기존 창 raise" 이연(2nd 는 exit 양보) ④ set_mode autostart-부팅→embedded 전환은 명시 self-relaunch 로 해결됨(argv 재작성). ⑤ --hidden 깜빡임(conf visible:false 전환) 이연.
 - **다음:** ① 스텝3 네이티브 거동 사용자 수동 검증(트레이 실재·X·트레이 autostart 토글·set_mode 재기동 후 모드) ② spike 4종(미수행 — WebView2 hidden 메모리·focus-stealing raise·updater reconnect·크래시 재발견) ③ daemon WS 부트스트랩 `connection superseded` 경고(QA 발견, phase4 transport 영역) ④ data-plane flip(에이전트를 데몬 호스트로 — 이중소유·embedded raise·daemon 모드 실사용 다수 이연 항목이 여기서 해소).
 
+### 2026-06-21 (dashboard10) — ★대전환: embedded(싱글) 모드 제거 → daemon-only 통일★ (ADR-0029, ADR-0027 폐기) + 트레이 마무리(ADR-0028)
+
+- **무엇/왜:** 스텝3에서 `if mode==Daemon` 비교 분기가 코드 전반에 번식(트레이/X/single-instance/data 위치) — **CLAUDE.md 1조(swappable·비교분기 금지) 위반**. 사용자 지적: transport seam 은 데이터 평면만 교체하고, embedded/daemon 은 *제품 형태가 달라*(폴더별 인프로세스 앱 vs 상주 서비스) lifecycle 에서 분기 번식. 로드맵 거의 전부 daemon-native(원격·모바일·멀티클라·오케스트레이션) → embedded 는 음의 자산. 참조(tmux·Docker, ADR-0013)는 daemon-always. **사용자 결정: embedded 제거, daemon-only.**
+- **개념 정리(사용자와 합의 — 통신 구조):** ① **양방향·역할 비대칭** — 의도/명령↑(invoke), 상태/이벤트↓(이벤트버스). ② **프로토콜(ADR-0020) = 에이전트 데이터 평면 통신 = 모드 스위칭 enabler**(운반만 InProc↔WS 교체). ③ **invoke = "내 WebView↔내 앱 Rust" 전용**(별도 데몬·원격엔 안 닿음 → WS). ④ **백엔드가 이벤트버스 소유(ADR-0028)** — 상태는 백엔드→{트레이·WebView·LLM} 아래로 push, 프론트는 구독만. 데몬 생사 = 버스의 한 이벤트. ⑤ **모드 축 소멸 → 데몬 위치 축(로컬/원격)으로 흡수** = 이미 transport seam(WS URL).
+- **안전 게이트(삭제 전 필수):** recon 서브에이전트로 데몬 호스팅 실태 확인 — ws_e2e 38+6 케이스 + 실앱 cdp 로 **데몬 단독 spawn→양방향출력→kill 입증**. `connection superseded`=의도된 무해 supersede 신호. → embedded 제거해도 에이전트 손실 0.
+- **3커밋(master 로컬, push 안 함):** `a9807c2`(커밋A: 프론트 embedded 표면 제거 — InProcTransport·EmbeddedDaemonControl·모드 결정 로직, WsTransport 고정), `ef4b53a`(커밋B: src-tauri/discovery/daemon 대수술 — AppState·in-proc AgentManager·embedded_carrier·instance.rs·모드시스템(AppMode/parse_mode/resolve_mode/--mode/set_mode/__ENGRAM_MODE__)·shutdown_all 제거, lib.rs 306→110줄, default_data_dir 무인자, 미사용 Cargo 의존 정리, **1676줄 삭제**), `80a5d04`(커밋C: 트레이 마무리 — ADR-0028 데몬생사 옵저버→단일 publish+emit, 더블클릭=show_ui, Show/Hide 메뉴 제거).
+- **게이트(전 커밋 강제):** 코더(opus)→reviewer-deep(opus 고노력, fable 불가)→QA(cdp). 리뷰 적출 수정: 커밋B reviewer Blocker 0(데몬 호스팅 무손상 확인)·M-2 conf label="main" 명시, 커밋C M-1 끄기↔옵저버 race(death-window 재컬러 — S13 race 재발) → 단일 publish + grace 억제창(5s) 차단·m-2 emit 일원화·m-4 data_dir 캐싱. QA: 데몬 spawn/출력/kill 실측 PASS·daemon-status-changed emit 정확(끄기 false/켜기 true, grace 동작)·무크래시.
+- **단순화 소멸(daemon-only 효과):** single-instance 폴더키 문제·data_dir 모드 분기·in-proc store 이중소유·모드 인자/주입·트레이 게이트 전부 소멸. 트레이 항상 on, X 항상 hide. 데몬이 데이터 단일 소유.
+- **ADR:** ADR-0029(확정, daemon-only)·ADR-0028(확정, 이벤트버스)·ADR-0027(폐기 — Superseded by 0029). ADR-0020 InProc carrier 제거(seam 개념 유지)·0026 daemon-only 로 좁힘.
+- **검증:** cargo test workspace 전부 green(실패 0) + npm 71 passed.
+- **메인 결정/이연·발견:** ① docs/research/control-surface-and-fleet.md·docs/README.md·docs/tracking.md 변경은 출처불명(이 작업 무관) — 커밋 안 함, 사용자 확인 대기. ② **데몬 hot-swap 재연결 버그(QA 발견):** daemon_stop→start 로 데몬 통째 교체 시 프론트 WS 가 새 port/token 에 재연결 못 함(cachedInfo stale + reconnect 소진), 리로드 필요 — ADR-0021 재연결 견고성 영역, follow-up. ③ embedded-release data_dir(cwd vs exe)·in-proc 이중소유 등 스텝3 이연 항목은 embedded 제거로 **대부분 소멸**.
+- **다음:** ① 트레이 네이티브 수동 검증(색·더블클릭·메뉴·끄기 grace) ② 데몬 hot-swap WS 재연결 버그 ③ 원격/모바일(데몬 위치 축 = WSS URL, scheme/host 파라미터화 + Origin allowlist) ④ spike·updater.
+
 ---
 
 ## 다음 (미진행)
