@@ -256,6 +256,12 @@
 
 ---
 
+## 검수 체계 전환 + CLAUDE.md 정리 (2026-06-22) · 커밋 `67de911`
+- Codex(GPT CLI) 도입 → 굵은 설계·리뷰 검수를 **opus + Codex 2자 적대 리뷰**로 전환(웹 consult 폐기). 단계별 특화 역할(Advocate/Adversary) 표를 CLAUDE.md에 박음. effort 메인 xhigh / 리뷰어 high. **ADR-0031.**
+- 방법론 리서치 2건(`docs/research/`): ① effort×개발단계 비교 공개데이터 부재 확인 ② 리뷰 방법론(PBR·블라인드·LLM-judge 편향·패널 다양성). 파이프라인 설계 초안도 같이.
+- CLAUDE.md 코드미러 정리(순 −65줄): 모듈맵 파일트리→아키텍처 · 프론트 표/파일트리 · 빌드 멤버목록 · 브리핑 초안 · 참조구현 4단계 · cdp 역사주석. 불변식·S9·앵커·컨벤션 예시는 유지(개념/load-bearing). 첫 dogfood = 이 정리 자체를 2자 리뷰(cut-advocate/load-bearing 수호)로 검수.
+- `.claude/settings.json` effortLevel=xhigh.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
