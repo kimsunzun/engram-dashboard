@@ -21,7 +21,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 > 새 기능·단계는 위에서 아래로 좁힌다: **(컨설)→PRD → TRD → 모듈 경계(DDD) → 구현+TDD.** 굵은 설계는 메인이 임의로 확정하지 않는다 — 컨설로 선택지를 깔고 **결정권은 사용자**가 쥔다. ADR(결정)과 step-log(흐름)는 이 과정 내내 옆에서 계속 기록된다.
 
-1. **PRD — 무엇/왜 (컨설로 선택지 → 사용자 결정).** 굵은 설계 결정은 먼저 `/consult`(교차검증) 또는 `/prior-art`로 **옵션셋 + 트레이드오프 + 놓친 대안**을 만들어 **사용자에게 제시하고, 사용자가 고른다**(임의 채택 금지). 고른 결과로 요구사항을 고정한다. (`docs/process/.../spec/`)
+1. **PRD — 무엇/왜 (컨설로 선택지 → 사용자 결정).** 굵은 설계 결정은 먼저 **교차검증(opus + Codex 2인 — 웹 consult 폐기)** 또는 `/prior-art`로 **옵션셋 + 트레이드오프 + 놓친 대안**을 만들어 **사용자에게 제시하고, 사용자가 고른다**(임의 채택 금지). 고른 결과로 요구사항을 고정한다. (`docs/process/.../spec/`)
 2. **TRD — 어떻게.** 세부 구현·인터페이스를 확정한다. 구현상 갈림길(저장 위치·네이밍·기본값 등)이 나오면 **다시 사용자에게 선택**을 받는다. 굵은 설계 결정은 이 단계부터 ADR로 박는다(끝나고가 아니라 결정 나는 즉시).
 3. **모듈 경계 긋기 (DDD).** seam으로 영역을 분할한다 — 각 모듈이 외부 의존(Tauri/네트워크/실제 프로세스)을 끊고 **단독 검증 가능**하게. (ADR-0012)
 4. **구현 + TDD.** PRD·TRD 선택을 사용자가 마친 뒤에만 코드에 들어간다. 기능 단위로 테스트를 먼저(또는 함께) 쓴다. 테스트는 *명세한 동작*을 지키는 회귀 안전망·환각 거름망이지 "완전성 보장"이 아니다(경계를 잘 그어야 강해진다). 실제 코드 변경은 아래 **구현 실행 규약**(코더→리뷰어→QA 서브에이전트)으로 수행.
@@ -32,18 +32,13 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 ---
 
-## 사용자 협업·브리핑 방식 (초안 — 나중에 정리)
+## 사용자 협업·브리핑 방식
 
-> **[초안 2026-06-19, dashboard8 세션 대화에서 합의. 정식 정리 전 임시로 박음 — 나중에 다듬을 것.]**
-> 위 개발 스텝의 "결정권은 사용자" 기조를 *어떻게 실천하는가*의 보완이다. 기조 자체(순서 불변·굵은 설계 분리·ADR 강제)는 그대로 둔다.
+> 개발 스텝의 "결정권은 사용자" 기조를 *실천하는 법*. 기조 자체(순서 불변·굵은 설계 분리·ADR 강제)는 완화 아님 — 그대로.
 
-핵심 전제: **사용자가 결정하려면, 결정을 사용자가 아는 언어로 줘야 한다.** 코드 용어로 "tungstenite 쓸까요"를 던지면 사용자는 못 고른다. 그래서:
-
-- **결정은 "동작·정책"으로 번역해 제시.** 사용자가 체감하는 동작·정책·데이터 위치는 **사용자 결정**(기존 유지 — 저장 위치·네이밍·기본값 등). 사용자에게 안 드러나는 순수 내부 구현(라이브러리 선택·내부 상수·코드 배치 등)은 메인이 정하되 **반드시 보고**한다. 결정 떠넘기기도, 무보고 독단도 아님.
-- **용어 점진 노출.** 기술 용어를 숨기지 않되 처음 나올 때 한 줄로 푼다(가능하면 비유). 이후엔 그냥 쓴다(반복 노출=학습). 용어가 쌓이면 `docs/glossary.md`로 모은다(아직 미생성 — 쌓이면 그때).
-- **2층 브리핑.** 먼저 개념(쉬운 말 흐름)으로 합의하고, 같은 내용을 용어 넣은 풀 브리핑으로 한 번 더 준다. 사용자가 흐름을 아는 상태에서 용어를 매핑하니 결정도 학습도 된다.
-- **브리핑 표준 형태:** ① 개념 흐름 → ② 시나리오 체크(상황별 동작, 엣지 포함 — BDD식) → ③ 용어 풀 브리핑(부품·시간·코드 위치 등 구현 결정) → ④ 수용 기준(이게 되면 완성). 각 선택엔 *거부한 대안 한 줄*을 붙여 ADR로 잇는다.
-- **PRD/TRD 묶기:** 작은 기능은 PRD와 TRD를 한 설계 문서로 묶어도 된다(흐름이 곧 본질이라 자연히 겹침 — "what"의 의사코드가 PRD에 섞이는 게 정상). 단 **굵은 설계는 기존대로 분리·ADR 강제.**
+- **결정은 "동작·정책" 언어로 번역해 제시.** 사용자가 체감하는 동작·정책·데이터 위치 = **사용자 결정**. 안 드러나는 순수 내부 구현(라이브러리·상수·코드 배치)은 메인이 정하되 **반드시 보고** — 결정 떠넘기기도, 무보고 독단도 아님.
+- **2층 브리핑:** ① 개념 흐름(쉬운 말) → ② 시나리오/엣지 체크(BDD식) → ③ 용어 넣은 풀 브리핑 → ④ 수용 기준. 각 선택엔 *거부한 대안 한 줄* → ADR. (용어는 처음 나올 때 한 줄로 풀고 이후 그냥 씀)
+- **PRD/TRD 묶기:** 작은 기능은 한 문서로 묶어도 됨(흐름이 곧 본질). 단 **굵은 설계는 분리·ADR 강제.**
 
 ---
 
@@ -51,13 +46,27 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 > **메인 세션은 오케스트레이터다. 비자명한 코드 변경을 메인 스레드에서 직접 짜지 않는다.** 역할을 **서브에이전트로 분리 스폰**한다 — 코더·리뷰어·QA. 이건 권장이 아니라 강제다. "진행 쭉해" 같은 자율 모드에서도 동일하게 적용한다(처리량을 이유로 생략 금지).
 
-- **코더 = 서브에이전트(opus) 스폰.** 메인은 설계·지시·취합만. 메인이 직접 구현 편집하는 건 규약 위반.
-- **리뷰어 = LLD 리뷰 서브에이전트 스폰. fable이 1순위, fable 불가 시 opus 고노력 에이전트로 대체한다(리뷰 스킵 절대 금지).** 리뷰어는 적대적으로 불변식·회귀·동시성·lifetime을 검수한다.
+- **코더 = opus(복잡)/sonnet(단순) 스폰.** 메인은 설계·지시·취합만. 메인이 직접 구현 편집하는 건 규약 위반.
+- **리뷰어 = opus + Codex 2인 적대 리뷰(다른 family). 역할은 아래 ★리뷰어 역할 표★를 매 스폰마다 따른다.** Codex=`mcp__codex__codex`. 리뷰 스킵 절대 금지. 근거·체크리스트 상세: `docs/research/review-pipeline-design-draft.md`.
 - **QA = 서브에이전트로 build/test + GUI 실측(`scripts/cdp.mjs` eval/shot) 항상 수행.** 코드(test/tsc)가 통과해도 실제 화면에서 동작 확인 전엔 미완으로 본다.
 - **TDD + 모듈 격리 — 강제.** 기능 단위로 **테스트를 먼저(또는 함께) 작성**하고, 모든 모듈은 외부 의존(Tauri/네트워크/실제 프로세스)을 seam으로 끊어 **단독 실행 가능한 격리 하네스**를 갖춘다 — 코어=Noop/테스트 sink로 headless, transport/session=smoke bin, 데몬=integration harness bin. 테스트는 누적해 `cargo test`(workspace 루트) 한 번에 전 모듈 회귀. (ADR-0012)
 - **예외(인라인 허용):** 1~2줄 사소 수정·문서·조사/탐색성 작업·스파이크(throwaway). 이때도 QA build/test는 돌린다.
 - **조사·웹서칭·대량 읽기도 서브에이전트로 일임(컨텍스트 위생 — 강제 지향).** 퀄리티에 지장 없으면 메인 스레드에서 직접 WebSearch/WebFetch·광범위 파일 스윕·OSS 조사를 하지 말고 서브에이전트(Explore/general-purpose)에 위임해 **결론만 회수**한다. 웹서칭·검색 노이즈·파일 덤프로 메인 컨텍스트를 오염시키지 않는다 — 메인은 오케스트레이션·판단·사용자 보고에 집중. (핀포인트 1~2파일 조회나 즉답 가능한 단발 확인은 인라인 허용. 판단 기준: "결론만 있으면 되는 수집성 작업인가 → 서브에이전트".)
 - 메인은 각 에이전트 결과를 취합해 사용자에게 보고하고, 커밋은 게이트 통과 후에만 한다.
+- **effort 배치:** 메인 세션 = **xhigh**(영구 effort 천장 — 그 위 ultracode는 effort↑가 아니라 워크플로우 자동화·세션한정), 코더·리뷰어 = **high**(Codex는 medium 기본, 동시성·lifetime 치명 변경만 high). 무가드 통합 노드인 메인에 검수보다 effort를 싣는다.
+
+### ★ 리뷰어 역할 — 단계별 특화 픽스 (매 스폰마다 따른다) ★
+구조 고정 = **Advocate(옹호·강화) vs Adversary(공격·대척)** 2인. 단계마다 전용 역할을 미리 박음(즉석 발명 금지). 근거·체크리스트 상세: `docs/research/review-pipeline-design-draft.md`.
+
+| 단계 | Advocate(옹호) | Adversary(대척) | 블라인드 |
+|---|---|---|---|
+| PRD/발산 | User 렌즈(Codex) — needs·완결성 | Tester 렌즈(opus) — 엣지·**놓친 대안** | ON(결정 근거 숨김) |
+| TRD/설계 | Designer(Codex) — 구조·교체성·단순 | Architect-breaker(opus,doc-aware) — 불변식·결합·ADR 위반 | OFF(Codex엔 관련 ADR 제공) |
+| 코드(게이트) | correctness·단순성 | breaker — race·lifetime·off-by-one·회귀 (opus=불변식 / Codex=엣지) | 비대칭(실험): Codex blind / opus doc-aware |
+| 문서 정리 | cut-advocate(Codex,blind) — 더 잘라 | load-bearing 수호(opus,doc-aware) — 삭제가 의미 떨구나 | Codex blind / opus doc-aware |
+| (미지정) | 목표 달성·더 나은 버전 | 뭐 깨지나·가정·worst input | Adversary doc-aware |
+
+공통: 판정 **PASS/FIX/BLOCK**(점수화 금지) · 취합 순서·라벨 무관(순서편향 차단) · **불일치 → 사용자**(반편향, 메인=Claude 계열) · 모델매핑: 맥락 필요 역할=opus(doc-aware) / 신선 blind=Codex.
 
 ---
 
@@ -127,11 +136,7 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 
 새 기능(데몬화·원격·스트리밍·재연결·멀티플랫폼·에이전트 영속·오케스트레이션·프론트 상태 영속 등)을 설계할 땐 바닥부터 짜지 말고 **성숙한 오픈소스가 같은 문제를 어떻게 풀었는지 먼저 조사**한다.
 
-**아래 목록은 고정 정답이 아니라 출발점(앵커)이다.** 영역마다 더 적합한 사례가 따로 있으니, 새 영역은 다음 절차를 따른다(개발 스텝의 TRD 단계):
-1. **서브에이전트로 폭넓게 조사** — 그 문제를 푼 성숙 OSS·표준을 여러 개 찾는다(아래 목록에 없는 것 포함).
-2. **트레이드오프 비교** — 각 접근의 장단·engram 제약(Rust·교체성·LLM 제어) 적합도.
-3. **사용자에게 선택지로 제시** — "이런 방법들이 있고 각각 이렇다, 무엇으로 갈까?" 형태로 **결정권을 사용자에게** 넘긴 뒤 진행. 임의 채택 금지.
-4. 채택이 굵은 결정이면 ADR로 박는다.
+**아래 목록은 정답이 아니라 출발점(앵커)이다.** 새 영역은(개발 스텝 TRD 단계): 서브에이전트로 **목록 밖까지 폭넓게 조사** → engram 제약(Rust·교체성·LLM 제어)으로 트레이드오프 비교 → **선택지를 사용자에게 제시(임의 채택 금지)** → 굵은 결정이면 ADR.
 
 **참조 = 패턴 차용이지 코드 복붙 아님** — 코드를 그대로 옮길 때만 라이선스 법무 확인. 클론된 앵커 소스: `I:\Engram_Workspace\references\`(git 추적 밖).
 
@@ -148,65 +153,17 @@ Engram의 **모든 기능은 LLM이 제어 가능**해야 한다. 백엔드(spaw
 ### 그 외 영역 (프론트 상태 영속, 메시지 시스템 등)
 - 아직 앵커 미선정 — 위 절차(조사→비교→선택지 제시)로 그때 정한다.
 
-## 백엔드 모듈 맵 (Cargo workspace — 5 멤버)
-> **S12 이후 멤버 4 crate + src-tauri.** ADR-0029(embedded 제거→daemon-only): 에이전트 호스트=**데몬 프로세스**(`engram-dashboard-daemon`)가 `AgentManager` 소유. `src-tauri`는 에이전트를 in-process로 호스팅하지 않는 **데몬 클라이언트 셸**(창·트레이·discovery·로컬 command)이다. core(`agent/`·`persistence/`·`logging/`)는 tauri import 0이라 데몬·테스트 양쪽이 재사용한다. wire 계약은 `engram-dashboard-protocol`(AgentCommand/AgentEvent/OutputChunk/DaemonInfo/codec, ts-rs). 내부 실 PTY 항목(`transport/pty.rs`·`PtyTransport`·`PtyEvent` 등)은 PTY 이름을 유지한다(모듈 첫 마디만 `agent/`).
+## 백엔드 모듈 맵 (Cargo workspace — 5 멤버: protocol · core · discovery · daemon · src-tauri)
+> **아키텍처 개요만.** 파일별 책임은 코드/grep(`// ADR-` 앵커 포함)이 단일 출처 — 여기 베끼지 않는다(rot 방지). 불변식은 ↓ 핵심 불변식 섹션.
 
-### crates/engram-dashboard-core/src/ — 에이전트 코어 (tauri import 0)
-```
-agent/                        # (구 pty/) S10 추상화: AgentManager → AgentSession(OutputCore) → dyn AgentTransport
-├── types.rs          # AgentStatus/PtyEvent/AgentInfo(+epoch+capabilities)/OutputSink·StatusSink
-│                     #  + 중립 seam: OutputEvent/InputEvent(확장 enum)·TerminalReason·CommandSpec·Capabilities·OutputChunk
-├── profile.rs        # AgentProfile/AgentCommand/SpawnMode/RestoreOutcome + ProfileRegistry(sid 단일소유자)
-├── manager.rs        # ★AgentManager★ backend/transport/output_core/session 결합부 + restore_all(S9). StatusSink 주입(AppHandle 아님 — tauri import 0)
-├── output_core.rs    # ★OutputCore★ seq/replay/subscribers/status/finalize — emit(variant-agnostic)/finish(finalize 1회)/join_pump/enter_exiting/subscribe(C4). transport 무관 공용 1벌
-├── session.rs        # AgentSession(구체) = OutputCore + Box<dyn AgentTransport> 합성. write_input/resize/interrupt/kill(=shutdown+join_pump)/capabilities
-├── reaper.rs         # 종료 분류(ADR-0019) 단일 소비자 — pump가 발행한 ReapMsg를 supervisor 스레드가 소비→맵 제거(epoch 검증)→프로필 disposition→목록 통지
-├── transport/
-│   ├── mod.rs        # trait AgentTransport (start/send_input/resize/interrupt/shutdown/capabilities) — seam
-│   ├── pty.rs        # PtyTransport(콘솔 공용) — master/writer/child/shutdown/job + pump 스레드. kill 1~5단계·drain 흡수
-│   └── api.rs        # ApiTransport 껍데기 — 전부 Unsupported, capabilities false (HTTP는 API 모델 때)
-├── backend/          # CommandSpec 산출(transport는 claude/codex 모름)
-│   ├── mod.rs        # trait AgentBackend + dispatch(needs_session/build_command_spec/backend_for)
-│   ├── claude.rs     # ★claude 인자 조립 격리★ --session-id/--resume
-│   ├── shell.rs      # 범용 셸 패스스루
-│   └── codex.rs/gemini.rs # stub(best-guess 플래그, dispatch 미연결 — CLI spike 후 variant 추가)
-├── session_tracker.rs# sid drift 폴링(best-effort, PID shim 우회, 단일스레드+정지핸들)
-└── platform/
-    ├── windows.rs    # JobObjectHandle (KILL_ON_JOB_CLOSE)
-    └── process.rs    # PID liveness + 프로세스 시작시각 — daemon(portfile)·tauri(discovery) 양쪽이 "데몬 PID 살아있나" 판정 시 재사용(DRY)
-persistence/mod.rs    # FileProfileStore — agents.json atomic(tmp+sync_all+rename+fsync)
-logging/mod.rs        # tracing + 런타임 레벨 토글 + 키/토큰 마스킹(기본 OFF=warn)
-(crate 루트) examples/  # spike.rs/spike_breakaway.rs(throwaway 스파이크 보존)
-(crate 루트) tests/     # 검증 하네스: headless/transport_smoke/session_smoke/reaper (실 PTY 단언, testing-strategy §0-a)
-```
+**데이터 흐름(S10 추상화):** `AgentManager → AgentSession(= OutputCore + dyn AgentTransport)`. 출력·상태는 `OutputSink`/`StatusSink` trait으로만 흐른다(코어는 Tauri·전송 방식 모름). 종료 분류는 reaper 단일 소비자(ADR-0019). 내부 실 PTY 항목은 `PtyTransport` 등 PTY 이름 유지.
 
-### crates/engram-dashboard-daemon/src/ — 데몬 프로세스 (WS 서버, AgentManager 소유)
-```
-main.rs               # 진입점. #![cfg_attr(not(debug_assertions), windows_subsystem="windows")] — 디버그=콘솔앱/릴리즈=무콘솔 (ADR-0021 §6)
-lib.rs                # 서버 조립 — accept loop, 토큰 발급, manager 배선, panic hook
-connection_core.rs    # MultiViewState — 다중 client 뷰(여러 창/원격) 상태
-ws.rs                 # WS 핸들러 — ConnRegistry, DaemonStatusSink(이벤트버스↓ ADR-0028), KeepaliveConfig(idle_timeout=연결 half-open 정리, ≠데몬 종료)
-instance.rs           # 단일 인스턴스 guard (named mutex 등 — 데몬 1개 보장)
-portfile.rs           # daemon.json(DaemonInfo) read/write — PID·port·token·generation
-```
-
-### crates/engram-dashboard-discovery/src/ — 데몬 발견 순수 로직 (no WMI/no sleep)
-```
-lib.rs                # trait PidLiveness/DaemonReader/Spawner/Clock (seam) + ensure_daemon()(오케스트레이션) + read_live_daemon(no-spawn 재조회, ADR-0021 명료화) + default_data_dir()(ADR-0024 단일 출처)
-```
-
-### crates/engram-dashboard-protocol/src/ — wire 계약
-```
-(lib)                 # AgentCommand/AgentEvent/OutputChunk/DaemonInfo/PROTOCOL_VERSION + codec golden + ts-rs 바인딩
-```
-
-### src-tauri/src/ — 데몬 클라이언트 셸 (창·트레이·discovery). ADR-0029로 in-proc 호스팅 제거
-```
-main.rs               # 진입점
-lib.rs                # setup — single-instance/autostart 플러그인, 트레이 생성, 데몬 생사 옵저버 spawn, --hidden 처리. ★AppState/AgentManager/TauriStatusSink/ChannelOutputSink/restore_all 없음(데몬 소유)★. discovery crate re-export
-commands/             # Tauri thin wrapper — discovery.rs(데몬 발견/lifecycle) · tray.rs(창 show/hide/완전종료, §5 LLM 핸들) · autostart.rs(부팅 자동시작 토글). 옛 agent/pty command 제거(프론트가 WS로 데몬 직결)
-tray/                 # core.rs(순수 로직 — MenuAction enum/menu_id↔action 매핑/IconState/to_grayscale_rgba, 단위테스트 대상) · actions.rs(불순 공유 부수효과 — 트레이 핸들러+command가 같은 함수 호출, §5 LLM 핸들 + LivenessState) · mod.rs(트레이 조립 + on_menu_event + publish_daemon_liveness 게이트→set_icon+emit, ADR-0028)
-```
+**crate 경계 + 왜** (ADR-0029: 에이전트 호스트 = 데몬 프로세스):
+- **core** — 에이전트 코어(agent·persistence·logging). **tauri import 0** → 데몬·테스트 양쪽 재사용. 내부 seam: `transport`(`AgentTransport` trait — pty 실물 / api 껍데기) · `backend`(CommandSpec 산출, claude 인자 격리, codex/gemini stub — ADR-0004).
+- **daemon** — `AgentManager` 소유, WS 서버, 단일 인스턴스 guard, portfile(`daemon.json`). 이벤트버스 single-push(ADR-0028), idle_timeout=연결 정리(≠데몬 종료).
+- **discovery** — 데몬 발견 순수 로직(no WMI/no sleep, seam trait) + `ensure_daemon` + `default_data_dir`(ADR-0024 단일 출처).
+- **protocol** — wire 계약(AgentCommand/Event/OutputChunk/DaemonInfo + codec + ts-rs).
+- **src-tauri** — 데몬 클라이언트 셸(창·트레이·discovery·로컬 command). **에이전트 in-proc 호스팅 X(AgentManager는 데몬 소유)**. tray = §5 LLM 제어 핸들.
 
 ### 핵심 불변식 (변경 금지 — 근거·거부 대안은 `docs/decisions/`)
 - **kill 인과(2동사):** `transport.shutdown()`(child.kill+wait → TerminateJobObject → master drop) → `core.join_pump(5s)`. master drop → reader EOF → pump break → `core.finish` → done_tx. (ADR-0001)
@@ -228,8 +185,8 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 - `windows` (Job Object) — `#[cfg(windows)]`
 
 ## 빌드·검증 명령 (Cargo workspace — 루트에서 실행)
-**Cargo workspace**: 루트 `Cargo.toml`(멤버 `crates/engram-dashboard-protocol`·`crates/engram-dashboard-core`·`src-tauri`). 코어(agent/persistence/logging)는 `crates/engram-dashboard-core`, tests/도 거기. `target/`는 워크스페이스 루트.
-- `cargo test -p engram-dashboard-core` — 코어 unit + 통합(`tests/{headless,transport_smoke,session_smoke}.rs` 실 PTY 단언). 검증 하네스는 전부 tests/(testing-strategy §0-a)
+**Cargo workspace**: 멤버 구성은 위 모듈맵 참조. 코어(agent/persistence/logging)·tests/는 `crates/engram-dashboard-core`, `target/`는 워크스페이스 루트.
+- `cargo test -p engram-dashboard-core` — 코어 unit + 통합 테스트(실 PTY로 단언)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
 - `cargo build` (루트) — 전체 workspace 빌드
 - `cargo fmt` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트
@@ -247,9 +204,7 @@ node scripts/cdp.mjs info                 # 페이지 목록
 node scripts/cdp.mjs shot out.png          # 스크린샷 → Read로 확인
 node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON 출력)
 ```
-`eval`로 DOM 텍스트(`document.body.innerText`)나 **백엔드 직접 호출**(`window.__TAURI__.core.invoke('spawn_agent',{cwd})` 등) 가능 → spawn/write/interrupt/kill 전 경로를 실제 IPC로 검증.
-포트는 9223 고정(9222는 Gemini 자동화 Chrome — 충돌 회피). 다른 포트는 `CDP_PORT` env.
-검증 목적이면 스샷보다 `eval` 텍스트가 토큰·정확도 유리(픽셀 해석 회피). S10 GUI E2E를 이 방식으로 회귀 0 확인함(2026-06-12).
+`eval`로 DOM 텍스트·백엔드 직접 호출(`window.__TAURI__.core.invoke(...)`) → spawn/write/interrupt/kill을 실제 IPC로 검증. **검증엔 스샷보다 `eval` 텍스트가 토큰·정확도 유리**(픽셀 해석 회피). 포트 9223 고정(9222=Gemini Chrome 충돌 회피, `CDP_PORT`로 변경).
 
 ## 컨벤션
 - 중요 로직(동시성·kill·unsafe·비자명한 결정)에 **왜** 그런지 한국어 주석. 자명한 코드엔 주석 금지.
@@ -261,39 +216,19 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 
 ## 기술 스택 (프론트)
 
-| 레이어 | 선택 |
-|---|---|
-| 앱 껍데기 | Tauri v2 (창 + invoke) |
-| UI | React 19 + TypeScript + Vite |
-| 스타일 | CSS 변수 (Tailwind 미사용) |
-| 상태 | Zustand |
-| 터미널 | @xterm/xterm + addon-fit |
-| 패널 분할 | allotment |
-| 에이전트 트리 | react-arborist |
-| Diff | @monaco-editor/react |
-| 라우팅 | react-router-dom (hash) |
+React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arborist · @monaco-editor/react · react-router(hash) · CSS 변수(Tailwind X) · Tauri v2 셸. 의존성 상세는 package.json.
 
-## 프론트 파일 구조 (`src/`)
+## 프론트 구조·제어 표면 (`src/`)
 
-```
-api/        types.ts(백엔드 타입 미러+epoch/AgentProfile/RestoreOutcome) · ptyApi.ts(invoke 저수준 래퍼) · decodeBase64.ts
-            agentClient.ts(★제어 표면 인터페이스) · embeddedClient.ts(in-process 구현, invoke/Channel 캡슐화) · clientFactory.ts(싱글톤+window.__ENGRAM_AGENT__ 노출, phase4 mode 토글 자리)
-            ※ 컴포넌트·스토어는 agentClient 인터페이스만 의존(ptyApi 직접 호출 X). DaemonClient(WS)는 phase4에 동일 인터페이스로 추가.
-store/      agentStore.ts · slotStore.ts · themeStore.ts · eventBus.ts(Tauri 이벤트 1회 등록, agent-list-updated/status-changed/restore-result)
-components/ layout/(AppLayout·Sidebar·StatusBar) · agent/AgentTree · slot/(SlotPane·TerminalSlot·SlotContextMenu) · diff/DiffPanel
-pages/      PopupPage(/popup?slotId=N) · TreePage(/tree)
-```
+- **제어 표면(★불변):** 컴포넌트·스토어는 `agentClient` 인터페이스에만 의존(`ptyApi` 직접 호출 X — ADR-0011). EmbeddedClient(invoke/Channel) ↔ DaemonClient(WS, phase4)가 같은 인터페이스로 교체.
+- `eventBus`가 Tauri 이벤트 1회 등록(agent-list-updated / status-changed / restore-result). 폴더: api · store · components(layout/agent/slot/diff) · pages. 파일별은 코드.
 
 ### 프론트 통합 규칙 (확정)
 - TerminalSlot 구독 effect deps `[agentId, epoch]` — 재spawn 시 reset→재구독→replay(§18-e/f).
 - C2 `terminal.reset()` 구독 전 / T-2 seq dedup / G-1 `delete channel.onmessage`(null 아님, #13133) / 입력 가드(terminal 상태) / resize debounce 50ms.
 
 ## 창 구성 (tauri.conf.json)
-| label | 용도 | 기본 |
-|---|---|---|
-| main | 메인 대시보드 | visible |
-| slot-popup | 슬롯 팝업 분리 | hidden, /popup?slotId=N |
-| agent-tree | 트리 분리 | hidden, /tree |
+창 3개: main(대시보드, visible) · slot-popup(`/popup?slotId=N`, hidden) · agent-tree(`/tree`, hidden).
 
 ## 테마 CSS 변수 (`data-theme` on `:root`: dark/light/e-ink)
-`--bg` `--bg-secondary` `--text` `--text-muted` `--border` `--accent` + 폰트 `--font-ui/terminal/code/claude-*`. 값은 `src/styles/theme.css`·`font.css` 참조.
+CSS 변수·폰트 정의는 `src/styles/theme.css`·`font.css` 참조.
