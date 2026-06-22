@@ -18,15 +18,11 @@ Codex(GPT CLI, `mcp__codex__codex`)를 도입했다. 그전까지 굵은 설계 
 ## 거부한 대안
 - **웹 3패밀리 consult(GPT+Gemini+Claude blind judge) 유지** — 입력 다양성(3패밀리)은 더 크나, **판단 노드가 끝까지 Claude**(blind judge도 종합도 Claude opus)라 정작 신경 쓰는 편향(메인=Claude가 Claude식 답을 옳게 봄)을 *구조적으로 못 잡는다*. 비-Claude 판단(Codex)에 구속력(teeth)을 주는 게 그 축에선 더 효과적. 부수적으로 운영비용(web-runner 패널·브라우저 로그인·~12분 폴링·orch 취약)도 큼. 폐기로 잃는 건 *입력 다양성 중 Gemini 한 패밀리*뿐 — 편향은 어차피 consult도 못 잡고 있었다.
 - **단일 리뷰어(fable/opus only)** — 교차 패밀리 부재 → 자기맹점. 적대 쌍·다양성 이점 없음.
-- **generic Advocate/Adversary만(단계 특화 없음)** — 전용 기법을 든 특화 역할이 결함 커버리지가 더 크다(PBR). "단계별 픽스 ≠ 매번 즉석 발명"이라 피로도 늘지 않음. generic은 미지정 artifact의 fallback으로만.
-- **블라인드(익명화)를 주 편향장치로** — 익명화는 앵커링을 *적당히*만 줄이고 합의(reliability)를 떨군다. 거친 루브릭(PASS/FIX/BLOCK)+체크리스트가 더 강한 debiasing.
+- **generic Advocate/Adversary만(단계 특화 없음)** — 단계별 특화 역할이 결함을 더 넓게 잡는다. "단계별 픽스 ≠ 매번 즉석 발명"이라 피로도 안 늘고, generic은 미지정 artifact의 fallback으로만.
+- **익명화를 주 편향장치로** — 안 한다. 거친 루브릭(PASS/FIX/BLOCK)+체크리스트 우선, 익명화는 보조.
 
 ## 근거
-방법론 리서치(`docs/research/review-methodology-research-2026-06-22.md`, 적대검증 통과 항목):
-- **루브릭/거친 스케일 > 익명화** (ICLR 자연실험: 4점 척도가 double-blind보다 prestige 편향 ~4× 더 감소).
-- **다중 judge는 *다양성*이 활성 성분** (PoLL — 작은 다양한 패널 > 단일 대형 judge; 후속 연구는 *상관된 같은-family 패널은 효용 작음*을 보강). → opus+opus 무의미, opus+Codus(다른 family) 유의.
-- **self-preference는 모델별 비균일**(부호 뒤집힘) → 단단한 반편향 백스톱은 블라인드가 아니라 **사람(사용자) 최종 판정**.
-- **PBR** — 전용 reading 기법을 든 특화 관점이 비구조적 읽기보다 커버리지↑(단 "관점이 항상 다르진 않다"는 한정도 있음 → 특화는 방향성 우위지 절대선 아님).
+방법론·실증 근거는 전부 `docs/research/review-methodology-research-2026-06-22.md`(설계 상세: `review-pipeline-design-draft.md`)에 둔다. 본 ADR은 결정·거부 대안만 — 근거를 중복하지 않는다(단일 출처).
 
 ## 영향 / 불변식
 - 비자명 코드 변경마다 이 2자 리뷰가 게이트(스킵 금지). 코더·리뷰어 분리(메인은 오케스트레이션).

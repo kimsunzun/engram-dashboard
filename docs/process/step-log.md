@@ -258,7 +258,7 @@
 
 ## 검수 체계 전환 + CLAUDE.md 정리 (2026-06-22) · 커밋 `67de911`
 - Codex(GPT CLI) 도입 → 굵은 설계·리뷰 검수를 **opus + Codex 2자 적대 리뷰**로 전환(웹 consult 폐기). 단계별 특화 역할(Advocate/Adversary) 표를 CLAUDE.md에 박음. effort 메인 xhigh / 리뷰어 high. **ADR-0031.**
-- 방법론 리서치 2건(`docs/research/`): ① effort×개발단계 비교 공개데이터 부재 확인 ② 리뷰 방법론(PBR·블라인드·LLM-judge 편향·패널 다양성). 파이프라인 설계 초안도 같이.
+- 방법론 리서치 2건 + 파이프라인 설계 초안 → `docs/research/`(내용은 거기에만).
 - CLAUDE.md 코드미러 정리(순 −65줄): 모듈맵 파일트리→아키텍처 · 프론트 표/파일트리 · 빌드 멤버목록 · 브리핑 초안 · 참조구현 4단계 · cdp 역사주석. 불변식·S9·앵커·컨벤션 예시는 유지(개념/load-bearing). 첫 dogfood = 이 정리 자체를 2자 리뷰(cut-advocate/load-bearing 수호)로 검수.
 - `.claude/settings.json` effortLevel=xhigh.
 
