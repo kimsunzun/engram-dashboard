@@ -292,6 +292,12 @@
 - **CLAUDE.md "빌드·검증 명령" 보강:** `cargo fmt` → `cargo fmt --check`(검사형) + 프론트 게이트(`npm test`/`tsc`) 명문화 — qa 게이트가 정본과 1:1(rot 방지).
 - **현 스킬 셋:** research✓ · review✓ · qa✓ (선행 조사 / 후행 적대검증 / 후행 실측 게이트, 전부 강도 보유). 남음 = adr · prior-art 재작성 · wrap · consult 삭제 · all-plan 폐기 판단.
 
+## 스킬 범용/바인딩 2층 분리 — qa·review (2026-06-24, dashboard-research1)
+- **사용자 지적:** qa에 engram 실명령(cargo/cdp 등)이 flow 본문에 박혀 프로젝트 전용처럼 됨 — 범용 의도와 어긋남. "범용 위에 전용, 분리해서 통합" 요구.
+- **2층 구조(CLAUDE.md 1번 원칙 = 추상 위 swappable):** 범용 골격(`SKILL.md` + `references/flow.md`, 스택 흔적 0) + 전용 바인딩(`references/bindings/engram.md`). 다른 프로젝트 = `bindings/<project>.md`만 추가하면 골격 재사용.
+- **분리 내용:** qa 바인딩 = 강도별 실명령(cargo workspace·`rg use tauri` 격리·cdp 9223·npm/tsc, 정본=CLAUDE.md 포인터). review 바인딩 = code 단계 불변식 체크리스트(kill·finalize·락순서·epoch·replay, 정본=코드 `// ADR-` 앵커 포인터). dogfood FIX 내용은 자리만 이동, 유실 0.
+- **검증:** flow.md 2개 engram 키워드 grep → 0(engram-free 확인). research는 바인딩할 전용 명령 없는 범용 엔진이라 미변경.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

@@ -10,7 +10,7 @@
 |---|---|---|---|
 | **self** | 0인 (코더 self 체크리스트만 — 역할 렌즈 X) | QA build/test만 | 1~2줄·문서 오타·자명 |
 | **light** | 1인 — 그 단계 **Adversary 렌즈만** (§2 표의 blind/doc-aware 규칙대로) | 단일 패스 | 국소·저위험·단일 관심사(위험 영역 사전 배제) |
-| **full**(기본) | 2인 — 단계 역할표 **Advocate + Adversary** | 단일 패스 병렬 | 비자명 변경(CLAUDE.md 기본 게이트) |
+| **full**(기본) | 2인 — 단계 역할표 **Advocate + Adversary** | 단일 패스 병렬 | 비자명 변경(프로젝트 기본 게이트) |
 | **deep** | 2인 + 다관점/다회 | 같은 단계를 여러 렌즈 또는 반복 | 고위험 — 동시성·kill·lifetime·보안·공개 API·마이그레이션·핫패스 |
 
 - **self는 리뷰어 0인** — 역할 렌즈를 안 쓴다. self의 단계 인자는 *렌즈*가 아니라 **self 체크리스트·QA 범위**를 고른다(code=diff+테스트 / doc=링크·중복 / trd=ADR·불변식 / prd=요구 누락). 리뷰어 렌즈는 light부터 켜진다. self도 QA(build/test, 해당하면 GUI 실측)는 돈다 — 리뷰어 스폰만 생략이다.
@@ -42,7 +42,7 @@
 |---|---|---|---|---|
 | **prd** (요구·발산) | **User 렌즈** (Codex) — use-case로 진짜 needs·완결성 옹호 | **Tester 렌즈** (opus) — equivalence/boundary·실패 시나리오·**놓친 대안** 공격 | **ON** (결정 근거 숨김 → 앵커링 차단) | PBR: User(use-case) + Tester(equivalence-class) |
 | **trd** (설계) | **Designer 렌즈** (Codex) — 인터페이스·구조·교체성 건전성·더 단순안 | **Architect-breaker** (opus, doc-aware) — 불변식 위반·결합·기존 ADR 깨기·lifetime 공격 | **OFF** (opus=ADR 자동주입 / Codex엔 관련 ADR 묶음 명시 제공) | PBR: Designer + seam·capability·교체성 |
-| **code** (게이트) | **correctness·단순성 옹호** — 목표 동작 충족·더 단순/명확한 구현 | **adversarial breaker** — race·lifetime·off-by-one·회귀·보안 공격 | **비대칭(실험)** — Codex=코드+계약만(blind 신선 breaker) / opus=doc-aware(불변식) | ODC 결함타입 + 우리 불변식(프로젝트 통합 절) |
+| **code** (게이트) | **correctness·단순성 옹호** — 목표 동작 충족·더 단순/명확한 구현 | **adversarial breaker** — race·lifetime·off-by-one·회귀·보안 공격 | **비대칭(실험)** — Codex=코드+계약만(blind 신선 breaker) / opus=doc-aware(불변식) | ODC 결함타입 + 프로젝트 코드 불변식(바인딩 파일) |
 | **doc** (문서 정리) | **cut-advocate** (Codex, blind) — 중복·죽은 참조·군더더기 더 쳐내라 | **load-bearing 수호** (opus, doc-aware) — 삭제가 불변식·"왜"·안티패턴 경고·교차참조를 떨구나 | Codex=근거 숨김(blind) / opus=코드·ADR 접근 | 삭제-안전 체크(load-bearing 의미·교차참조 보존) |
 | **(fallback) 추정 실패/복합 대상** | 목표 달성했나·더 나은/간결한 버전·빠진 것 | 뭐가 깨지나·안 적힌 가정·worst input/race·뭘 조용히 위반하나 | Adversary=doc-aware / Advocate=blind 기본 | (전용 체크리스트 없음 — 역할 일반 질문) |
 
@@ -74,22 +74,23 @@
 
 ## 5. QA 실측 게이트 (리뷰와 별개 · 항상)
 
-- 리뷰 판정과 무관하게 build/test를 돌린다(`cargo test` 워크스페이스 루트 등 프로젝트 명령).
-- 화면·동작이 걸린 변경은 GUI 실측까지 한다(`scripts/cdp.mjs` eval/shot). **코드(test/tsc)가 통과해도 실제 화면 확인 전엔 미완**으로 본다.
+- 리뷰 판정과 무관하게 build/test를 돌린다(**프로젝트 빌드·테스트 명령은 바인딩 파일** — engram은 qa 스킬 바인딩과 공유한다).
+- 화면·동작이 걸린 변경은 GUI/실제 동작 실측까지 한다(실측 도구·플랫폼 제약은 바인딩). **코드 테스트·타입체크가 통과해도 실제 화면 확인 전엔 미완**으로 본다.
 - self 강도에서도 이 게이트는 생략하지 않는다.
 
 ## 6. 결과 보고 + 후속 (결정권 = 사용자)
 
 - 메인이 단계·강도·판정(PASS/FIX/BLOCK)·미해결 쟁점을 사용자에게 보고한다. 불일치는 선택지로 제시(임의 채택 금지).
-- 커밋은 게이트(리뷰 PASS/FIX 반영 + QA) 통과 후에만. ADR·step-log 기록은 프로젝트 관례에 위임한다(이 스킬이 직접 쓰지 않는다).
+- 커밋은 게이트(리뷰 PASS/FIX 반영 + QA) 통과 후에만. 결정·흐름 기록은 프로젝트 관례(바인딩 §6)에 위임한다(이 스킬이 직접 쓰지 않는다).
 
-## 프로젝트 통합 (스킬 밖 — engram 바인딩)
+## 프로젝트 바인딩 (스킬 밖)
 
-이 스킬은 **범용 리뷰 엔진**이다. engram에 쓸 때의 바인딩만 여기 둔다(골격에 하드코딩 X):
+이 골격은 **스택을 모르는 범용 리뷰 엔진**이다. 프로젝트 전용 체크리스트·명령·연동은 `bindings/<project>.md`가 채운다(현재 engram = `bindings/engram.md`). 바인딩이 정의하는 것:
+- **code 단계 게이트의 코드 불변식** — Adversary(doc-aware breaker)가 공격 표면으로 삼는 그 프로젝트 불변식 목록(§2 code 행 "체크리스트 출처"). doc-aware 렌즈에만 주고, blind 렌즈엔 주지 않는다.
+- **QA 실측 명령** — build/test·GUI 실측 명령·플랫폼 제약(§5). engram은 qa 스킬 바인딩과 공유한다.
+- **결정 기록** — 굵은 설계 결정·흐름을 어디에 어떻게 남기는지(§6). 스킬·리뷰어는 기록하지 않고 메인이 처리.
 
-- **code 단계 체크리스트의 우리 불변식** — Adversary(opus doc-aware breaker)는 다음 불변식 위반을 공격 표면으로 삼는다: kill 인과(2동사: shutdown → join_pump) · finalize 1회(swap AcqRel) · 락 순서(Arc clone 후 해제, status lock 보유 중 외부호출 금지) · epoch 재구독(맵 교체 +1) · replay→live(subscribers lock 보유 중 replay + seq dedup) · 코어 tauri import 0. 근거·상세는 CLAUDE.md "핵심 불변식"과 각 ADR. **이 목록은 코드·ADR이 바뀌면 rot한다 — 정본은 코드의 `// ADR-` 앵커, 여기는 리뷰 포인터일 뿐.**
-- **QA 명령** — `cargo test -p engram-dashboard-core` / `-p engram-dashboard-protocol` / `cargo build`(루트) + `scripts/cdp.mjs`(WebView2 GUI).
-- **결정 기록** — 굵은 설계 결정은 ADR(`docs/decisions/`), 흐름은 step-log. 스킬은 기록하지 않고 메인이 처리.
+다른 프로젝트는 같은 골격에 바인딩 파일만 추가한다. 골격에 특정 스택·불변식을 하드코딩하지 않는다.
 
 ## 가드레일 (앞 절에 없는 금지만)
 
