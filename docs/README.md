@@ -5,6 +5,18 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 
 > **문서 작업 전 이 파일부터 본다.** 어떤 문서가 있고, 새 내용을 어디에 넣는지가 여기 있다.
 
+## 처음이면 — 읽는 순서
+
+통독이 아니라 **점프형 소비**다 — 만지는 영역으로 좁혀 필요한 곳만 본다.
+
+1. `../CLAUDE.md` — 기조·불변식·규약(항상 로드).
+2. 이 `docs/README.md` — 상태·구조 허브.
+3. 만지는 영역 좁히기 — `decisions/README.md` 인덱스 + 코드 `// ADR-NNNN` 앵커(`rg "ADR-"`).
+4. 왜 → `decisions/` — ADR(결정 + 거부 대안).
+5. 언제/무엇 → `process/step-log.md` — 타임라인.
+6. 근거 → `research/` — 선행조사.
+7. 정설/컨벤션 → `reference/` — 코드 동기화 캐논.
+
 ## 문서 종류
 
 | 폴더/파일 | 무엇 |
@@ -14,7 +26,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 | `decisions/` | "왜 이렇게 정했나" — 결정 + 거부한 대안(ADR). 영구 누적. |
 | `tracking.md` | 보류 항목(T-)·결정 추적(D-). "재도입 시점"이 트리거. |
 | `research/` | step 착수 전 선행조사(조사·비교·미결질문). |
-| `reference/` | (추후) 코드 동기화 정설. 시스템 안정화 후 집필. |
+| `reference/` | 코드 동기화 정설(진화형 캐논 — 제자리 수정). 첫 입주: `commenting-conventions.md`(주석 컨벤션, ADR-0032). |
 
 ## 새 내용을 어디에 넣나
 
@@ -22,6 +34,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 - 지금 안 하고 **나중에** 다룰 것·미결 질문 → `tracking.md` (T-/D-)
 - **무엇을 언제** 했나 → `step-log.md`
 - step 착수 전 **조사** → `research/`
+- 코드와 동기화되는 **정설(진화형 캐논)** → `reference/` (제자리 수정, ADR 아님 — ADR이 *왜*면 캐논은 *실천 규약*)
 - 새 기능 **설계 착수** → `process/SN-name/` 새 폴더 (관련 `research/`·ADR 먼저 참조)
 
 **★ 고아 금지:** 새 문서를 만들면 위 경로·`tracking.md`·코드앵커(`// see …`) 중 하나에 반드시 링크한다. 안 하면 다음 세션이 못 찾는다.

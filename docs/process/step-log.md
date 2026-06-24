@@ -271,6 +271,14 @@
 - **범위 밖(미해결, 사용자 지시로 놔둠):** codex web_search 실측·비용/loop 상한·단계 간 입출력 스키마·도구명 adapter 분리·호출 실패 분기.
 - **위치:** `.claude/skills/research/`(SKILL.md + references/flow.md). repo 커밋 = git 팀 공유. ADR 미작성(스킬 내부 결정 — 필요 시 후속).
 
+## 주석 컨벤션 적용 — 문서만 (선택지 B, ADR-0032) (2026-06-24, dashboard-research1)
+- **무엇/왜:** 어제 완료한 주석 컨벤션 리서치(가설=조건부지지: naive 상세화는 반증, "인라인 좁히기 + overview 별도계층"이 지지) 결론을 문서 체계에 편입. **코드 0줄** — 코드 정리는 boy-scout 점진 권고(soft, 대량정리 X).
+- **결정(ADR-0032):** 선택지 B — (1) 인라인 why/intent/invariant/load-bearing 좁히기 (2) load-bearing 파일 overview 헤더(`//!`) 권장(soft) (3) ADR 앵커 점진. 거부=A(암묵표준→누락반복)·C(NL-outline 자동갱신 툴링 고비용·불확실). 진화형 컨벤션 본문=살아있는 캐논, ADR=왜만(근거는 research 포인터 — ADR-0031 전례).
+- **산출(문서 6 + step-log):** 신규 `docs/reference/commenting-conventions.md`(살아있는 캐논, **첫 reference 입주**, 위치 잠정) + ADR-0032. 수정 CLAUDE.md `##컨벤션`(라우터화) · docs/README(reference 등록 + **온보딩 라우터** "읽는 순서") · decisions/README 인덱스 · research 상태줄(채택).
+- **검증(opus+Codex 2자, 문서정리 역할 cut/load-bearing):** 내용오류 0(발견 체인·인덱스 양방향·거부대안·ADR-0031 준수 PASS). FIX 반영 — ① "권장 vs 의무 vs soft" 단어통일("게이트 아님" load-bearing 의미 명확) ② CLAUDE.md 라우터 축소(캐논 본문 베끼기 제거) ③ 캐논 실측수치(22/19/85%) 하드코딩→`rg` 단일출처(살아있는 문서 rot 방지) ④ overview 예시 정본=캐논.
+- **위치 잠정(사용자 결정):** 캐논 `docs/reference/`는 잠정 — adr 등 문서 프로세스 정립 시 재조정(ADR-0032·캐논 명시). 사용자: "이해 못 따라가니 일단 적용, 세부는 나중에 천천히". 폴더 번호 prefix는 rot+점프형 부적합으로 기각, 온보딩 라우터(docs/README)로 순서 표현.
+- **커밋:** `<이 작업>`. documentation-architecture·multi-agent research 2건은 무관이라 미커밋 유지.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
