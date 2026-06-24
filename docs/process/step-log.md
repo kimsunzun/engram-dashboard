@@ -279,6 +279,13 @@
 - **위치 잠정(사용자 결정):** 캐논 `docs/reference/`는 잠정 — adr 등 문서 프로세스 정립 시 재조정(ADR-0032·캐논 명시). 사용자: "이해 못 따라가니 일단 적용, 세부는 나중에 천천히". 폴더 번호 prefix는 rot+점프형 부적합으로 기각, 온보딩 라우터(docs/README)로 순서 표현.
 - **커밋:** `<이 작업>`. documentation-architecture·multi-agent research 2건은 무관이라 미커밋 유지.
 
+## 스킬 인프라 구축 시작 — review 스킬 (2026-06-24, dashboard-research1)
+- **방침(사용자 결정):** 개발 스텝(PRD→TRD→코드→검증)을 굴릴 스킬 셋을 research에서 검증된 방식(리서치→설계→2자 적대리뷰→정련)으로 하나하나 제대로 구축. 기존 consult/all-plan/prior-art는 웹 3종(GPT·Gemini·Opus) 기준 **구버전** → 폐기/재작성 대상. **원칙: 모든 스킬은 강도(intensity)를 가진다 · research=선행, review·qa=후행.**
+- **로드맵:** research✓ → **review(이번)** → qa → adr → prior-art 재작성 → wrap. (병행: consult 삭제=폐기 잔재 ADR-0031 / all-plan 폐기 판단 / 통짜 오케스트레이터는 안 만듦 — tp/tr 전철)
+- **review 스킬 신규(`.claude/skills/review/`):** Advocate vs Adversary 2자 적대(opus doc-aware + Codex blind), **2축 = 단계(prd/trd/code/doc — draft §2 역할표) × 강도(self/light/full/deep)**. escalation-only(강도는 올라가기만). 판정 PASS/FIX/BLOCK, 불일치→사용자. 설계도 = `review-pipeline-design-draft.md`(2026-06-22) 이식.
+- **dogfood 검증(review로 review 자신을 2자 리뷰 — 문서정리 역할):** 둘 다 FIX, 결함 다수 적출(스킬 작동 증거). 반영 — self+단계 직교 수정(self는 렌즈 X, 체크리스트·QA범위)·light 모델 위임(PRD blind 역전 해소)·트리거 `[단계][강도]` 옵션화+파싱 규칙·draft §4 "PBR 코드/문서 외삽 미검증" 경고 복원·스폰 출력 스키마 추가·`FIX(1~5)` 정의·SKILL↔flow 중복 제거(research 패턴 정합). CLAUDE.md 역할표에 정본 포인터(draft §2, 3중 복제 rot 방지).
+- **tp/tr 삭제(이 세션 별건):** 다른 설치에 묻어온 AutoFlow 스킬 → core(`claude-global-shared`)+user 양쪽 제거. core repo 커밋은 사용자 몫(무관 변경 섞임).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

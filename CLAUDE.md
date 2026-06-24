@@ -58,6 +58,8 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 ### ★ 리뷰어 역할 — 단계별 특화 픽스 (매 스폰마다 따른다) ★
 구조 고정 = **Advocate(옹호·강화) vs Adversary(공격·대척)** 2인. 단계마다 전용 역할을 미리 박음(즉석 발명 금지). 근거·체크리스트 상세: `docs/research/review-pipeline-design-draft.md`.
 
+정본 = `docs/research/review-pipeline-design-draft.md` §2 / 실행 요약 = `.claude/skills/review/references/flow.md` §2. 이 표는 빠른 참조 — 갈리면 draft가 이긴다.
+
 | 단계 | Advocate(옹호) | Adversary(대척) | 블라인드 |
 |---|---|---|---|
 | PRD/발산 | User 렌즈(Codex) — needs·완결성 | Tester 렌즈(opus) — 엣지·**놓친 대안** | ON(결정 근거 숨김) |
