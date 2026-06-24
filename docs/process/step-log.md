@@ -286,6 +286,12 @@
 - **dogfood 검증(review로 review 자신을 2자 리뷰 — 문서정리 역할):** 둘 다 FIX, 결함 다수 적출(스킬 작동 증거). 반영 — self+단계 직교 수정(self는 렌즈 X, 체크리스트·QA범위)·light 모델 위임(PRD blind 역전 해소)·트리거 `[단계][강도]` 옵션화+파싱 규칙·draft §4 "PBR 코드/문서 외삽 미검증" 경고 복원·스폰 출력 스키마 추가·`FIX(1~5)` 정의·SKILL↔flow 중복 제거(research 패턴 정합). CLAUDE.md 역할표에 정본 포인터(draft §2, 3중 복제 rot 방지).
 - **tp/tr 삭제(이 세션 별건):** 다른 설치에 묻어온 AutoFlow 스킬 → core(`claude-global-shared`)+user 양쪽 제거. core repo 커밋은 사용자 몫(무관 변경 섞임).
 
+## qa 스킬 (2026-06-24, dashboard-research1)
+- **review 후행 게이트 스킬(`.claude/skills/qa/`):** 강도 quick/standard/full — quick=영향 crate `cargo test -p`(+core 닿으면 격리 게이트 포함) / standard(기본)=workspace 전회귀 + `cargo fmt --check` + `rg "use tauri"` 격리 + 프론트(vitest·tsc) / full=standard + `cdp` GUI 실측. escalation-only 자동승격. "코드 통과 ≠ 동작 보장" 정직 게이트.
+- **dogfood(review의 doc 단계로 검증):** 둘 다 FIX(Codex BLOCK 2 = npm 게이트 모호·트리거 오타 파싱). 반영 — npm 게이트 확정(package.json 실측: `test`=vitest run / typecheck·lint 스크립트 없음 → `npx tsc --noEmit`)·오타 파싱(소문자·정확히 하나)·**quick이 core 닿으면 격리 포함(false PASS 차단)**·경로→강도 매핑·escalation 자동승격 통일·SKILL↔flow 중복 제거(review 패턴).
+- **CLAUDE.md "빌드·검증 명령" 보강:** `cargo fmt` → `cargo fmt --check`(검사형) + 프론트 게이트(`npm test`/`tsc`) 명문화 — qa 게이트가 정본과 1:1(rot 방지).
+- **현 스킬 셋:** research✓ · review✓ · qa✓ (선행 조사 / 후행 적대검증 / 후행 실측 게이트, 전부 강도 보유). 남음 = adr · prior-art 재작성 · wrap · consult 삭제 · all-plan 폐기 판단.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

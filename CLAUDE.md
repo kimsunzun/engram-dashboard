@@ -191,7 +191,8 @@ spawn 시 `--session-id <uuid>`로 **우리가 sid를 통제** → 재시작 `--
 - `cargo test -p engram-dashboard-core` — 코어 unit + 통합 테스트(실 PTY로 단언)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
 - `cargo build` (루트) — 전체 workspace 빌드
-- `cargo fmt` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트
+- `cargo fmt --check` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트(게이트는 rewrite 안 하는 검사형 `--check`)
+- 프론트 게이트: `npm test`(vitest run) + `npx tsc --noEmit`(타입체크 — package.json에 별도 typecheck 스크립트 없음)
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E
 - 로그 ON: `RUST_LOG=debug` (기본 OFF=warn)
 
