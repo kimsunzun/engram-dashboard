@@ -262,6 +262,15 @@
 - CLAUDE.md 코드미러 정리(순 −65줄): 모듈맵 파일트리→아키텍처 · 프론트 표/파일트리 · 빌드 멤버목록 · 브리핑 초안 · 참조구현 4단계 · cdp 역사주석. 불변식·S9·앵커·컨벤션 예시는 유지(개념/load-bearing). 첫 dogfood = 이 정리 자체를 2자 리뷰(cut-advocate/load-bearing 수호)로 검수.
 - `.claude/settings.json` effortLevel=xhigh.
 
+## research 스킬 구축·정련 (2026-06-24, dashboard-research1)
+- **무엇/왜:** Claude×Codex 교차 리서치를 매번 손으로 스폰하던 걸 재사용 스킬 `research`로 박제(어제 빌드한 미커밋분). 이번 세션에 2자 적대 리뷰로 정련 + tier 활용을 명문화.
+- **검증(opus+Codex 2자 적대 리뷰 2라운드):** 1R — light tier가 "단일 모델"이라 스킬 정체성(cross-family 교차검증)·가드레일("반드시 Codex")과 모순(opus BLOCK / Codex FIX). → 수정 → 2R — 핵심 해소를 **양쪽 합의**로 확인(FIX). 2R가 깐 회귀 5건(light 불일치 처리·tier 표 이중화·산출 라벨·deep 문구·자기보고 정당화)도 마감.
+- **확정(사용자 결정):** light = **mini-crosscheck**(Claude 1 + Codex 1 독립, 적대검증만 생략) — 단일 모델 폐기, 2-family 유지. medium↔deep 차이 = 적대검증 범위(핵심 2~3개 vs 불일치 전수)·조사량(WebFetch)·산출(보고서 vs 인용+쟁점판정).
+- **업계 조사(medium research, 서브에이전트 교차):** 리뷰 강도 단계화 관행(Google 1인+Tricorder·Chromium Rubber Stamper·LLVM post-commit·GitLab 메인테이너 직행·Meta RADAR) → tier 분기 트리거(되돌리기 비용·불확실성·환각 피해·출처 분쟁)로 차용. 두 family 강수렴.
+- **추가(사용자 지시):** ① "실행 중 자기보고"(산출 영향 문제 즉시 보고 / 사소 개선은 최종 메모) ② **(임시) 학습용 rationale 노트** — 실행 때마다 쟁점·결론 도출 과정을 `study-notes/`에 누적(사용자가 "이해됐다" 하면 섹션·폴더 제거).
+- **범위 밖(미해결, 사용자 지시로 놔둠):** codex web_search 실측·비용/loop 상한·단계 간 입출력 스키마·도구명 adapter 분리·호출 실패 분기.
+- **위치:** `.claude/skills/research/`(SKILL.md + references/flow.md). repo 커밋 = git 팀 공유. ADR 미작성(스킬 내부 결정 — 필요 시 후속).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
