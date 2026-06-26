@@ -15,7 +15,7 @@ description: 한 주제를 Claude(Sonnet 팬아웃)와 Codex가 각각 독립(BL
 - **강도 tier(light/medium/deep)** — 팬아웃 너비·적대검증 깊이·산출을 한 번에 조절. 기본 medium. **세 tier 모두 cross-family 교차(Claude+Codex)를 유지**한다 — light도 단일 모델 단발이 아니라 Claude 1 + Codex 1의 경량 교차다. deep은 비용 경고.
 - **산출 = tier별 차등** — medium 이상은 출처 단 보고서(확신도 태그(확실/가능성 높음/불확실)·출처·교차검증표·공백/한계), light는 출처 포함 요약(보고서 X).
 
-전체 실행 절차·강도표·가드레일은 `references/flow.md`를 따른다. `$ARGUMENTS` = 조사 주제(+ 선택적 강도). 없으면 사용자에게 묻고, 강도 미지정이면 medium.
+**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 조사 에이전트 스폰 금지.** 전체 실행 절차·강도표·가드레일이 거기 있다. `$ARGUMENTS` = 조사 주제(+ 선택적 강도). 없으면 사용자에게 묻고, 강도 미지정이면 medium.
 
 **설계-결정 모드(옛 prior-art 흡수):** 설계 착수 전 "OSS는 이 문제를 어떻게 풀었나 → 우리 뭐로 갈까" 서베이도 이 스킬이 한다 — 기본 조사에 *제약 적합도 표 + 거부후보→ADR 거부대안*을 더해 선택지로 끝낸다(`references/flow.md` §7).
 
