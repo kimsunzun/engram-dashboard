@@ -298,6 +298,24 @@
 - **분리 내용:** qa 바인딩 = 강도별 실명령(cargo workspace·`rg use tauri` 격리·cdp 9223·npm/tsc, 정본=CLAUDE.md 포인터). review 바인딩 = code 단계 불변식 체크리스트(kill·finalize·락순서·epoch·replay, 정본=코드 `// ADR-` 앵커 포인터). dogfood FIX 내용은 자리만 이동, 유실 0.
 - **검증:** flow.md 2개 engram 키워드 grep → 0(engram-free 확인). research는 바인딩할 전용 명령 없는 범용 엔진이라 미변경.
 
+## adr 스킬 — 하이브리드(스크립트+얇은 스킬) (2026-06-26, dashboard-research) · 커밋 `2180b36`
+- **무엇:** ADR 기계 작업 자동화 — `scripts/adr.mjs`(채번·인덱스 재생성·supersede 양방향[전체/부분]·lint, 결정적) + 얇은 판단 스킬(2층, 오퍼레이션 축 new/supersede/lint).
+- **어떻게:** research(adr-tooling — adr-tools=thin 하이브리드 레퍼런스, 부분폐기=Amends 양방향) → 코더(opus) → `/review trd`(FIX) → 하이브리드 재설계 → `/review code`(FIX: 데이터 손상 6+건) → 수정 → **qa실측 PASS**(실데이터 32 ADR 무손실, index --write idempotent).
+- **결정:** ADR-0033. **근거:** `research/adr-tooling-hybrid-research-2026-06-26.md`.
+
+## 자기개선 피드백 인프라 — research·review·qa·adr (2026-06-26, dashboard-research) · 커밋 `26a3e5a`
+- **무엇:** 스킬 사용 중 발견한 결함은 그 자리서 안 고치고(오판 위험) `feedback.md`에 누적 → 관련 주제 재등장 시 사용자 승인 하에 반영. 4개 스킬에 절+파일(임시 복붙, 성숙 시 공용 추출).
+
+## 문서 아키텍처 frame + CLAUDE.md 슬림 (2026-06-26, dashboard-research) · 커밋 `fb4150d`,`cf92fed`
+- **무엇:** `handbook/documentation-system.md` 신설 — 개발 플로우(리서치→ADR→TRD→코드) **단계별 산출/게이트/기록** 매핑 + 불변식(SSoT·고아금지·soft/hard). 플로우 정의는 CLAUDE.md 링크(비복제).
+- **어떻게:** CLAUDE.md 라우터화(238→206줄) — 상세(리뷰표·참조구현·매트릭스·모듈맵 왜)를 정본 포인터로, 규칙·핵심불변식·빌드명령·§5는 유지(보수 슬림 A).
+- **결정:** ADR-0034. **근거:** `research/documentation-architecture-research-2026-06-24.md`.
+
+## prior-art 흡수 + 스킬 정리 + ADR 박제·마이그레이션 (2026-06-26, dashboard-research) · 커밋 예정
+- **prior-art → research 흡수:** research에 "설계-결정 모드"(OSS 서베이 → 제약 적합도 표 + 거부후보→ADR) 추가, prior-art 스킬 폐기(엔진 동일·산출만 추가·스킬 수↓). all-plan(남의 것)·consult(ADR-0031 폐기) 삭제. (core repo 커밋은 사용자 몫.)
+- **ADR 첫 실사용 dogfood:** `adr.mjs`로 ADR-0033·0034 생성·prose 채움·인덱스 재생성.
+- **레거시 단방향 마이그레이션:** supersede 단방향(0023→0026, 0027→0029)에 정형 `Supersedes` 키워드 추가 → **lint errors 0**(advisory만: 0016 부분폐기·코드 `// ADR-0027` 앵커 4).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

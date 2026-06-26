@@ -1,7 +1,7 @@
 # ADR-0029: embedded(싱글) 모드 제거 — daemon-only 통일 (ADR-0027 폐기, 0020/0026 일부 정리)
 
 - 상태: 확정 (2026-06-21, dashboard10 세션 — 사용자 결정)
-- 관련: ADR-0020(프로토콜+transport seam — InProc carrier 제거)·ADR-0026(2프로세스 토폴로지 — daemon-only 로 좁힘)·ADR-0027(모드별 인스턴스/데이터 — **본 ADR이 폐기**)·ADR-0028(이벤트버스)·ADR-0013(tmux/Docker daemon-always 참조) · `docs/process/step-log.md` dashboard10
+- 관련: ADR-0020(프로토콜+transport seam — InProc carrier 제거)·ADR-0026(2프로세스 토폴로지 — daemon-only 로 좁힘)·ADR-0027(모드별 인스턴스/데이터 — **본 ADR이 폐기**, Supersedes ADR-0027)·ADR-0028(이벤트버스)·ADR-0013(tmux/Docker daemon-always 참조) · `docs/process/step-log.md` dashboard10
 - 범위: embedded(in-process 호스팅)와 daemon(별도 프로세스 호스팅) 두 모드를 유지하느냐. **embedded 를 코드베이스에서 제거하고 daemon-only 로 통일한다.**
 
 ## 맥락
