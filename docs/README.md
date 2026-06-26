@@ -27,6 +27,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 | `tracking.md` | 보류 항목(T-)·결정 추적(D-). "재도입 시점"이 트리거. |
 | `research/` | step 착수 전 선행조사(조사·비교·미결질문). |
 | `reference/` | 코드 동기화 정설(진화형 캐논 — 제자리 수정). 첫 입주: `commenting-conventions.md`(주석 컨벤션, ADR-0032). |
+| `handbook/` | 문서·프로세스 **시스템 설명서**. 첫 입주: `documentation-system.md`(개발 플로우↔문서 매핑·불변식·자동화 맵). "문서들이 어디에 왜 박히나"의 큰 그림. |
 
 ## 새 내용을 어디에 넣나
 
