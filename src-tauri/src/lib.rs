@@ -1,4 +1,7 @@
 pub mod commands;
+// S14 모듈①(ADR-0036): 데몬 WS 연결의 src-tauri측 단일 권위(DaemonClient). 창마다 N개 직결하던
+// 전송을 여기로 끌어올린다 — 연결 1개. T2 = 연결 수립 + Auth/Hello 핸드셰이크 + connect/ensure 분리.
+pub mod daemon_client;
 // ADR-0035: 레이아웃 권위 = src-tauri(데몬 UI 불가지론). ViewManager 상태 + 순수 트리 연산 + 타입
 // (ts-rs 미러). protocol/daemon crate 에 넣지 않는다 — 레이아웃은 신규 클라(src-tauri) 관심사.
 pub mod layout;

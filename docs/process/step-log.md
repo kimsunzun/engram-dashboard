@@ -361,6 +361,14 @@
 - **ADR-0037** 전송 의미론 위치=Rust 단독 가드 — **ADR-0020 결정3 부분 폐기(Amends)** 양방향 박음(`adr.mjs supersede --mode partial`), 인덱스 재생성, lint error 0.
 - **다음:** T1(deps 복원)→T8 순차, 각 코더→`/review code deep`→`/qa`. TS 테스트 2파일(`wsTransport.test.ts`·`protocolClient.test.ts` 40+케이스)이 Rust 이식 명세서. dashboard1 공통 파일(SlotPane·SlotContextMenu)은 모듈③에서 — 건드리기 전 핑.
 
+### 모듈① T1·T2 구현 (2026-06-28, dashboard2, opus)
+- **T1 deps 복원**(`src-tauri/Cargo.toml`): ADR-0029에서 뺐던 async/WS deps 복원 — tokio·tokio-tungstenite 0.26·futures-util·serde_json·arc-swap, **daemon crate와 버전 정렬**. build green. (sonnet 코더, trivial 예외로 deep review 생략·build 게이트만.)
+- **T2 DaemonClient 연결+핸드셰이크**(`src-tauri/src/daemon_client/{mod,connection,lifecycle,tests}.rs`): connect/ensure 분리(ADR-0021 — connect=spawn 가능 / ensure=no-spawn attach)·**단일 연결 task가 split WS 단독 소유**(데몬 ws.rs 단일 writer 대칭)·Auth/Hello 핸드셰이크(Hello internal 소비). T3/T4/T5/T6 자리는 TODO.
+- **`/review code deep`**(opus doc-aware + Codex blind, 동시성-치명) → **4묶음 FIX**: ① 핸드셰이크 timeout 부재(영구 hang) → `tokio::time::timeout` ② **lifecycle race**(동시 connect/ensure·고아 task Down clobber·close-in-flight 부활) → generation 가드 ③ protocol_version echo(버전 게이트 무력화) → 컴파일 `PROTOCOL_VERSION` 송신(discovery와 동형) ④ 테스트 위양성 강화.
+- **Codex 재검증 → generation 가드 TOCTOU BLOCK 적출**(체크 load와 변경 send가 비원자 → SeqCst로도 못 묶음, 직독이 놓친 것). **`lifecycle.rs` 단일 `Mutex<{generation,cmd_tx,state_tx}>`로 "비교+변경" 원자화** — 전 메서드 `&self` 동기(락 보유 중 await 0 = ADR-0006). BREAK 실험으로 검출력 실측(iter 3 FAIL→원복) + 스트레스 테스트(400/300 iter). **Codex 최종 PASS.**
+- **게이트:** `cargo test` 전체 green(src-tauri 70 = daemon_client + stress, 0 failed)·fmt clean·build OK. GUI 실측 N/A(invoke/UI 미배선 — T6/T7).
+- **다음:** T3(protocol_state: epoch/seq dedup·resubscribe·pending) 또는 T4(재연결·백오프 — generation 씨앗 위에). dashboard1 공통 파일은 모듈③ — 건드리기 전 핑.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

@@ -40,7 +40,23 @@ engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 engram-dashboard-discovery = { path = "../crates/engram-dashboard-discovery" }
 tauri-plugin-autostart = "2"
 
-# ADR-0029: base64/futures-util/tokio/serde_json/windows(Threading,Foundation)/engram-dashboard-daemon
-#   의존은 embedded carrier·instance.rs(in-proc 호스팅·폴더별 mutex) 제거로 전부 불필요해져 삭제됐다.
+# T1(S14 모듈①): DaemonClient(비동기 WS 클라이언트) + OutputRouter(arc-swap) 신설을 위해
+#   ADR-0029에서 제거했던 async/WS 관련 deps를 복원한다. 버전은 daemon crate와 정렬(ADR-0036).
+# 데몬: tokio 1 / tokio-tungstenite 0.26 / futures-util 0.3 / serde_json 1 (Cargo.toml 실측).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+# 비동기 WS 클라이언트 — 데몬 WS 서버(ws.rs)와 동일 라이브러리(버전 정렬).
+tokio-tungstenite = "0.26"
+# SplitSink/SplitStream + StreamExt::next + SinkExt::send — WS read/write 분리에 필수.
+futures-util = "0.3"
+serde_json = "1"
+# OutputRouter 핫패스 lock-free snapshot (spike §2 FIX-F6). 데몬에 없으므로 최신 1.x 안정 버전.
+arc-swap = "1"
+
+[dev-dependencies]
+# T2(S14 모듈①) 격리 하네스: 실 데몬 없이 DaemonClient 핸드셰이크를 검증한다. daemon crate 의
+#   start_test_server(in-process WS 서버)를 재사용해 connect→Auth→Hello→connected 를 실제 서버로 단언.
+engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon" }
+# 핸드셰이크 mock WS 서버(첫 송신 프레임=Auth 단언)에서 서버측 accept/Auth 응답을 직접 흉내낸다.
+tokio-tungstenite = "0.26"
 
 # profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).
