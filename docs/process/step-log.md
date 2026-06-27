@@ -369,6 +369,15 @@
 - **게이트:** `cargo test` 전체 green(src-tauri 70 = daemon_client + stress, 0 failed)·fmt clean·build OK. GUI 실측 N/A(invoke/UI 미배선 — T6/T7).
 - **다음:** T3(protocol_state: epoch/seq dedup·resubscribe·pending) 또는 T4(재연결·백오프 — generation 씨앗 위에). dashboard1 공통 파일은 모듈③ — 건드리기 전 핑.
 
+### 로그 컨벤션 SSOT 신설 + 리뷰 관찰성 렌즈 (2026-06-28, dashboard2, opus)
+- **계기:** daemon_client(T2)에 tracing 0건 — 로그 누락이 코더 명세·리뷰 렌즈 양쪽에서 빠져 통과. 근본 = 관찰성 렌즈 부재 + 로그 규약 미명문화(인프라 `logging/mod.rs`만 있고 "무엇을 로깅하나" 규약 없음, de-facto만 76곳).
+- **`docs/reference/logging-conventions.md` 신설** — 레벨(error=데이터위험/복구불가·warn=안전폴백·info=수명주기·debug=진단)·형식(한국어+key=val 필드, `{e}` 보간 예외, span 미사용)·계측 의무·보안(토큰 금지·mask_secrets 미배선=목표). commenting-conventions.md 짝.
+- **연결(포인터, 복붙X):** `review/bindings/engram.md` code 게이트에 관찰성 항목 + doc-aware 묶음에 규약 / `CLAUDE.md` 예외 조임(load-bearing 문서는 인라인 예외 아님 → /review doc). 공용 flow.md 무수정.
+- **`/review doc full`(opus doc-aware + Codex blind) → FIX 9건 반영:** logging/mod.rs 경로 정정(core crate)·error/warn 경계·마스킹 dead-code 명시·daemon_client 미계측 표기·[component] 프리픽스 crate분기·`{e}` 보간 경계·메타섹션 cut·바인딩 bullet 축소. 둘 다 수렴.
+- **발견 버그(미수정, 다음 세션):** `daemon/src/lib.rs:207` 주석 "init_logging 재사용(키 마스킹 포함)" = 거짓(mask_secrets 호출처 0). 정정 필요.
+- **리뷰 메커니즘 정리:** 리뷰 단위=diff(커밋=리뷰됨, 마커 안 씀 — rot 방지). 서브에이전트는 CLAUDE.md 자동 안 읽음 → 오케스트레이터가 바인딩 읽고 doc-aware에 규약 주입, blind엔 안 줌(앵커링 차단).
+- **다음:** T3 진입 + daemon_client tracing backfill(규약 따라).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
