@@ -1,3 +1,8 @@
 {
-  "effortLevel": "xhigh"
+  "effortLevel": "xhigh",
+  "permissions": {
+    "allow": [
+      "mcp__codex__codex"
+    ]
+  }
 }
