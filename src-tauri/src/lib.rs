@@ -1,4 +1,7 @@
 pub mod commands;
+// ADR-0035: 레이아웃 권위 = src-tauri(데몬 UI 불가지론). ViewManager 상태 + 순수 트리 연산 + 타입
+// (ts-rs 미러). protocol/daemon crate 에 넣지 않는다 — 레이아웃은 신규 클라(src-tauri) 관심사.
+pub mod layout;
 // S13 sub-step 2: 순수 discovery 로직은 engram-dashboard-discovery crate 로 이동(tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다(중복 코드 0).
 pub use engram_dashboard_discovery as discovery;
@@ -49,6 +52,10 @@ pub fn run() {
             // ADR-0028: 데몬 생사 push 의 단일 소유 상태. build_tray 의 초기 refresh 가 publish 를
             // 타려면(중복차단·억제창 판정) state 가 먼저 manage 되어 있어야 한다 → build_tray 전에 등록.
             app.manage(tray::actions::LivenessState::default());
+
+            // ADR-0035: 레이아웃 권위 상태(ViewManager). invoke 스레드풀 동시접근 → Arc<Mutex>.
+            // 락 해제 후 emit(ADR-0006) 은 command 레이어가 보장. 초기엔 기본 View 1개.
+            app.manage(crate::layout::LayoutState::new());
             if let Err(e) = tray::build_tray(app) {
                 tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
             }
@@ -101,6 +108,15 @@ pub fn run() {
             // ADR-0027 §53~55: 부팅 자동 시작 토글/조회 — §5 LLM 제어 표면.
             commands::set_autostart,
             commands::get_autostart,
+            // ADR-0035: 레이아웃 권위(ViewManager) 상태변경 — §5 LLM 제어 표면(window.__engramLayout).
+            //   락→변형→해제→emit(ADR-0006). assign_agent 는 참조 문자열만(데몬 검증 호출 0).
+            commands::create_view,
+            commands::close_view,
+            commands::switch_view,
+            commands::split_slot,
+            commands::close_slot,
+            commands::assign_agent,
+            commands::get_view,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

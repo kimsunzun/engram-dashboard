@@ -6,7 +6,10 @@ pub mod discovery;
 pub mod tray;
 // ADR-0027 §53~55: 부팅 자동 시작 토글(set/get_autostart). ADR-0029: set_mode(모드 전환) 제거 — 모드 없음.
 pub mod autostart;
+// ADR-0035: 레이아웃 권위 = src-tauri. ViewManager 상태변경 invoke + emit(§5 LLM 제어 표면).
+pub mod layout;
 
 pub use autostart::*;
 pub use discovery::*;
+pub use layout::*;
 pub use tray::*;

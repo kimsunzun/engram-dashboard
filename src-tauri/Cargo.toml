@@ -26,6 +26,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
+# S14 ViewManager: 레이아웃 타입을 프론트로 미러(ts-rs). ★protocol/daemon crate 가 아니라 src-tauri
+# 안에서만 export★ — 데몬 UI 불가지론(ADR-0035): View/Layout/Slot 타입은 데몬·protocol 에 누설 금지.
+ts-rs = { version = "10", features = ["uuid-impl"] }
 tracing = "0.1"
 thiserror = "1"   # discovery::DiscoveryError
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
