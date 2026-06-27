@@ -7,4 +7,5 @@ target/
 .engram-data/
 
 # 세션-로컬 핸드오프 히스토리(/continue용). 머신마다 쌓이는 작업 메모 — 커밋 안 함.
+.claude/continue/
 .ccb/

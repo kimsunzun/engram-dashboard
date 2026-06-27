@@ -13,6 +13,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **타임라인(언제/무엇):** `docs/process/step-log.md`
 - **결정·거부한 대안(왜):** `docs/decisions/`
 - **새 문서 = 발견 체인에 연결(고아 금지).** 종류·배치 규약은 `docs/README.md`.
+- **세션 핸드오프(/continue 인계):** `.claude/continue/` — `history/`에 영구 기록(append-only) + `latest.md`(직전본, `/continue`가 이것만 읽음). 파일명·내용 자동. 규약 정본 = continue 스킬(`SKILL.md`/`references/flow.md`). (구 `.ccb/`·`.claude/history/` 폐기)
 
 검증 흐름(코딩 → 리뷰 → QA 게이트)의 강제 규약은 아래 **구현 실행 규약** 참조.
 
