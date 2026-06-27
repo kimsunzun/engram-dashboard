@@ -353,6 +353,14 @@
 - **TRD rev.5:** phasing 제거 + FIX 전부 반영(LayoutNode 계약·락 경계·파일정정·race version·OutputRouter lock-free snapshot·교체성 가드). 하이브리드 관련 FIX는 phasing 폐기로 자동 소멸. 구현 리스크 게이트(전송 재배치=동시성-치명) 본문 상단 명시.
 - **다음:** rev.5 = 리뷰어가 건전 판정한 목표 구조(phasing만 제거) → 코더. 단 전송 재배치 모듈은 `/review code deep`(동시성 트리거) + TDD 강제.
 
+### 모듈② 완료 + 모듈① 진입 (2026-06-27, dashboard2, opus)
+- **모듈②(레이아웃 코어) 커밋·검증 완료** (`cb951da`): src-tauri `layout/{types,tree,manager,mod}.rs` + `commands/layout.rs` — ViewManager + 순수 트리 연산 + invoke 7종 + emit 2종, 55 tests green, opus+Codex 리뷰 FIX 반영, 데몬/protocol 누설 0.
+- **모듈①(전송 재배치) spike 정독** → `module1-transport-spike.md`. 게이트 = 코딩 전 D1~D5.
+- **★D1 사용자 결정 = A (Rust 단독 가드)★** — dedup/epoch/seq 등 프로토콜 의미론을 Rust(`DaemonClient`+`protocol_state`) 단독 소유, `OutputRouter` 라우팅 전 1회. 프론트 `ProtocolClient`는 얇은 carrier로 축소(agentClient 인터페이스 불변). 거부: B(Rust+JS 2중→rot)·C(JS 단독 raw relay→창마다 N회).
+- **D2~D5(내부, 메인 결정·보고):** D2 ProtocolClient≈TauriTransport(A 종속) · D3 carrier=Tauri Channel(emit_to 거부, 멀티윈도우 안전성 context7+QA full) · D4 JS InProc mock 폐기 · D5 ensure_lock 보존→T2/T5 재평가.
+- **ADR-0037** 전송 의미론 위치=Rust 단독 가드 — **ADR-0020 결정3 부분 폐기(Amends)** 양방향 박음(`adr.mjs supersede --mode partial`), 인덱스 재생성, lint error 0.
+- **다음:** T1(deps 복원)→T8 순차, 각 코더→`/review code deep`→`/qa`. TS 테스트 2파일(`wsTransport.test.ts`·`protocolClient.test.ts` 40+케이스)이 Rust 이식 명세서. dashboard1 공통 파일(SlotPane·SlotContextMenu)은 모듈③에서 — 건드리기 전 핑.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
