@@ -316,6 +316,35 @@
 - **ADR 첫 실사용 dogfood:** `adr.mjs`로 ADR-0033·0034 생성·prose 채움·인덱스 재생성.
 - **레거시 단방향 마이그레이션:** supersede 단방향(0023→0026, 0027→0029)에 정형 `Supersedes` 키워드 추가 → **lint errors 0**(advisory만: 0016 부분폐기·코드 `// ADR-0027` 앵커 4).
 
+## S14 멀티 페이지 레이아웃 설계 (2026-06-27, dashboard2)
+
+- **무엇/왜:** 단일 레이아웃 트리(슬롯 분할)를 다중 Page/View 체계로 확장. 탭으로 여러 View 전환 + 팝업 창 독립 분할 가능.
+- **리서치(서브에이전트 위임):** 멀티탭 레이아웃 상태 관리(VS Code·Zed·react-mosaic 패턴) + 멀티창 레이아웃 동기화(Wezterm·Tauri 권장). 결론: VS Code/Zed = 단일 스토어 + `pagesById` + `activePageId`, 멀티창 공유 레이아웃 트리 직접 mutate = 모든 프레임워크 안티패턴, Tauri 공식 권장 = **Rust State + emit/listen**.
+- **TRD rev.1 → BLOCK:** JS authority 기반 설계. `/review trd`(opus+Codex)에서 F1~F8 8개 결함(SlotPane 미변경 거짓·`__engramLayout` orphan·팝업 authority 미정의·closePage agent 정책 없음·창 메커니즘 3종 혼재·cross-page slotId silent fail·dispatch 유효성 계약 없음·page 커맨드 dispatch 밖).
+- **TRD rev.2 → BLOCK 재판정:** F1~F8 반영 수정. 그러나 **아키텍처 근본 모순** 적출 — 팝업은 JS 컨텍스트 독립(Tauri 창마다 격리)이므로 메인 Zustand store를 공유 불가. `closePage` dispatch가 팝업 로컬 store만 건드리고 메인 store·Rust window는 미정리 = 자기모순. `getPageState invoke pull` = Rust는 JS pageStore 모름 → 원천 불가(emit push만 가능).
+- **★아키텍처 방향 확정(사용자 결정): Rust Authority(MVP 패턴)★**
+  - Rust 데몬이 `Vec<View>` 단일 authority 보유.
+  - 모든 Tauri 창 = 순수 렌더러(invoke로 커맨드 → Rust emit으로 상태 push).
+  - 거부한 대안: JS authority(Tauri 창마다 JS 컨텍스트 분리라 팝업 생기면 근본 불가), BroadcastChannel(Rust 상태 변화 인식 불가).
+  - Wezterm 동형: Mux가 상태 소유, GUI=MuxNotification 구독자.
+- **현재 TRD 상태:** rev.2는 JS authority 기반이라 전면 재작성 필요(rev.3 = Rust authority 기반).
+- **TRD rev.3 작성 완료 (Rust authority 기반):** `docs/process/S14-multi-page-layout/trd.md` 전면 재작성 — ViewManager/View/LayoutNode Rust 구조체, invoke handler 7종, emit 이벤트 2종, React 변경 범위(slotStore 삭제·viewStore 신규·layoutTypes·eventBus), `window.__engramLayout` LLM 제어 표면, slotId=UUID 정책.
+- **TRD rev.3 → BLOCK (3개 블로커):**
+  - **F1 BLOCK (공통):** ViewManager 소유권 딜레마 — src-tauri에 두면 ADR-0029("에이전트 in-proc 호스팅 X") 긴장, 데몬에 두면 `app_handle.emit()` 불가(별도 프로세스). **사용자 결정 대기** (A안: src-tauri=UI 상태 관리는 허용 해석 / B안: 데몬+WS 중계 복잡).
+  - **F2 BLOCK:** `layout:updated` listen 추가가 ADR-0028 단일 버스와 어긋날 소지 (F1 결정 후 자연 해소 가능).
+  - **F3 BLOCK:** 팝업 부팅 race — listener 등록 전 emit 놓침 위험, 초기 상태 pull 누락.
+  - 그 외 FIX: crate 경계 미명시·Mutex emit 순서·edge case(View 0개·팝업 crash·dangling)·영속 부재.
+- **핸드오프:** `.ccb/history/claude-20260627-s14-layout.md` 갱신됨.
+
+### rev.4 — 권위 재정립 (2026-06-27, dashboard2, opus)
+- **F1 재검토 — 데몬 authority(rev.3) 기각:** 핸드오프 A/B 프레이밍이 코드와 어긋남(eventBus는 Tauri emit 아닌 `agentClient` WS로 수신·`wsTransport.ts`=창 직결 확인). 사용자가 "데몬이 View 알 필요 없다 — 즉흥 추론 말고 관행 리서치로" 제동.
+- **`/research` deep (Claude 3갈래 + Codex 2회 BLIND 교차 → opus 적대검증, 사실 전면 수렴):** 두 관행 분기 — **터미널 멀티플렉서=서버 권위 / GUI 에디터=클라 로컬**, 이유까지 양 family 동일 진단. engram의 **에이전트/슬롯 디커플링**(close_view해도 에이전트 생존)이 결정 기준 → 에디터 모델 → **클라(src-tauri) 권위**. 보고서 `docs/research/multi-window-layout-authority-topology-research-2026-06-27.md`.
+- **★결정(사용자): 레이아웃 권위=src-tauri, 데몬=에이전트만, 모든 트래픽 src-tauri 단일 choke point.★** rev.3(데몬 authority)·A안(핸드오프) 모두 정정.
+- **ADR-0035** 레이아웃 권위=src-tauri(데몬 UI 불가지론, 에디터 모델) · **ADR-0036** 전송 중계 통일(src-tauri 단일 데몬 클라이언트 + OutputRouter, 창=Tauri IPC, carrier `WsTransport`→`TauriTransport`). `adr.mjs`로 채번·prose·인덱스(lint error 0).
+- **TRD rev.4 작성:** ADR-0035/0036 기반 전면 재작성 — ViewManager(src-tauri AppState)·invoke 핸들러·emit 2종·DaemonClient/OutputRouter(중계)·React 변경·phasing(A=레이아웃 기능 / B=전송 중계).
+- **메시지 락 등 정책 = 데몬 enforce**(단일 choke point) — 전송 중계는 나르기만, 프론트는 표시만(층 분리 확인).
+- **다음:** `/review trd` → PASS → 코더(Phase A) → QA. dashboard1에 구조 브리핑(SlotPane/SlotContextMenu 공통 수정 조율).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

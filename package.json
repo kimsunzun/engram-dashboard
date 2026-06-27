@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:richslot": "vite --port 1430 --open /richslot.html",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
