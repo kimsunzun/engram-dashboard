@@ -52,7 +52,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **QA = `/qa` 스킬로 build/test + GUI 실측(`scripts/cdp.mjs`) 수행.** 코드(test/tsc)가 통과해도 실제 화면에서 동작 확인 전엔 미완으로 본다.
 - **TDD + 모듈 격리 — 강제.** 기능 단위로 **테스트를 먼저(또는 함께) 작성**하고, 모든 모듈은 외부 의존(Tauri/네트워크/실제 프로세스)을 seam으로 끊어 **단독 실행 가능한 격리 하네스**를 갖춘다 — 코어=Noop/테스트 sink로 headless, transport/session=smoke bin, 데몬=integration harness bin. 테스트는 누적해 `cargo test`(workspace 루트) 한 번에 전 모듈 회귀. (ADR-0012)
 - **예외(인라인 허용):** 1~2줄 사소 수정·문서·조사/탐색성 작업·스파이크(throwaway). 이때도 QA build/test는 돌린다.
-- **조사·웹서칭·대량 읽기도 서브에이전트로 일임(컨텍스트 위생 — 강제 지향).** 퀄리티에 지장 없으면 메인 스레드에서 직접 WebSearch/WebFetch·광범위 파일 스윕·OSS 조사를 하지 말고 서브에이전트(Explore/general-purpose)·`/research`에 위임해 **결론만 회수**한다. 메인은 오케스트레이션·판단·사용자 보고에 집중. (핀포인트 1~2파일 조회나 즉답 가능한 단발 확인은 인라인 허용. 판단 기준: "결론만 있으면 되는 수집성 작업인가 → 서브에이전트".)
+- **조사·웹서칭·대량 읽기 = 서브에이전트 일임(컨텍스트 위생 — 강제 지향).** 범용 원칙은 global-rules `## 컨텍스트 위생`(메인 직접 WebSearch/WebFetch·광범위 스윕 금지, 결론만 회수). **engram 바인딩:** OSS·설계 조사는 `/research`에 위임. 자율 모드("진행 쭉해")에서도 생략 금지(강제 지향) — 처리량을 이유로 인라인 조사로 빠지지 않는다.
 - 메인은 각 에이전트 결과를 취합해 사용자에게 보고하고, 커밋은 게이트 통과 후에만 한다.
 - **effort 배치:** 메인 세션 = **xhigh**(영구 effort 천장 — 그 위 ultracode는 effort↑가 아니라 워크플로우 자동화·세션한정), 코더·리뷰어 = **high**(Codex는 medium 기본, 동시성·lifetime 치명 변경만 high). 무가드 통합 노드인 메인에 검수보다 effort를 싣는다.
 
