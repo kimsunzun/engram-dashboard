@@ -7,7 +7,7 @@
 ADR-0035로 레이아웃 권위가 src-tauri로 오면서 토폴로지 불일치가 드러났다. 현행은 **각 창(WebView)이 데몬에 WS 직접 연결**(`wsTransport.ts`가 브라우저 WebSocket으로 데몬 attach; src-tauri는 데몬 위치만 알려줄 뿐 데이터 경로 밖). 그런데 레이아웃은 src-tauri 경유, 에이전트 출력만 창↔데몬 직결이면 ① 토폴로지 비일관 ② 라우팅 중복(src-tauri가 이미 "어느 창이 어느 에이전트를 보는지" 레이아웃 테이블을 쥐는데 각 창이 재유도) ③ 같은 에이전트를 N창이 보면 데몬 구독 N개·출력 N중복(원격 데몬이면 네트워크로 N배).
 
 ## 결정
-**src-tauri가 데몬과 단일 WS 연결을 쥐고, 자기가 소유한 레이아웃 라우팅 테이블(ADR-0035)로 각 창에 출력을 fan-out한다.** 창은 src-tauri하고만 IPC(레이아웃 + 에이전트 둘 다) — 데몬 직결 0. 데몬엔 클라이언트 1개로 보이고, 에이전트당 데몬 구독은 1회(중복 제거, 로컬 fan-out). 입력(write/spawn/kill/resize)도 창→invoke→src-tauri→데몬. 프론트 carrier는 `WsTransport(데몬 직결)` → **`TauriTransport`(src-tauri 경유)**로 교체(ADR-0011/0020 transport seam 활용 — `agentClient`=`ProtocolClient` 인터페이스는 불변). 데몬과의 단일 WS 연결은 src-tauri가 쥔다. **단, 프로토콜 의미론(재연결·epoch·seq dedup·resubscribe)을 어디까지 Rust로 옮길지**(전면 Rust 이전 vs 얇은 프레임 라우터 + JS 의미론 유지)는 **Phase B spike에서 확정** — 본 ADR은 *토폴로지*(단일 연결·src-tauri 중계·창=IPC)만 못 박고, 그 구현 메커니즘은 미정으로 남긴다.
+**src-tauri가 데몬과 단일 WS 연결을 쥐고, 자기가 소유한 레이아웃 라우팅 테이블(ADR-0035)로 각 창에 출력을 fan-out한다.** 창은 src-tauri하고만 IPC(레이아웃 + 에이전트 둘 다) — 데몬 직결 0. 데몬엔 클라이언트 1개로 보이고, 에이전트당 데몬 구독은 1회(중복 제거, 로컬 fan-out). 입력(write/spawn/kill/resize)도 창→invoke→src-tauri→데몬. 프론트 carrier는 `WsTransport(데몬 직결)` → **`TauriTransport`(src-tauri 경유)**로 교체(ADR-0011/0020 transport seam 활용 — `agentClient`=`ProtocolClient` 인터페이스는 불변). **데몬 단일 WS 연결·재연결·구독추적·resubscribe·epoch·seq dedup·라우팅을 src-tauri Rust가 소유**한다(현 TS `wsTransport.ts`/`protocolClient.ts`의 프로토콜 의미론을 Rust로 이전). 창의 `agentClient`는 ADR-0011 인터페이스를 유지하되 구현은 TauriTransport 위 **얇은 클라이언트**(두뇌는 Rust). **phasing·레거시 interim 없음** — 각 창 직결(legacy)을 임시로도 두지 않고 목표 구조를 바로 구현한다(사용자 결정 2026-06-27: "레거시 두지 말고 제대로").
 
 ## 거부한 대안
 - **창마다 데몬 WS 직결(현행)** — N창 = N 인증/재연결/discover 중복 + 출력 N중복 전송(원격이면 네트워크 N배) + src-tauri가 이미 가진 라우팅 테이블을 각 창이 재유도. 유일 장점(고대역 출력 직통·창별 실패 격리)은 (a) 로컬 IPC라 relay 한 홉 비용 미미 (b) 원격에선 오히려 직결이 대역폭 낭비 (c) 정말 병목이면 per-pane 직통 서브채널을 후속으로 추가 가능(Codex 권고: "중앙 유지, 프로파일링 병목 시 옵션 추가"). 비용 대비 이득 없음.
@@ -18,7 +18,7 @@ ADR-0035로 레이아웃 권위가 src-tauri로 오면서 토폴로지 불일치
 ## 영향 / 불변식
 - **단일 choke point:** 모든 트래픽(레이아웃·에이전트 I/O)이 src-tauri를 지난다. 창↔데몬 직결 금지.
 - **데몬 불변:** 데몬은 클라 수를 모르고 1 연결만 본다. 데몬 코어/프로토콜 변경 없음(에이전트만).
-- **carrier 교체(ADR-0020 개정):** 프론트 daemon carrier = `WsTransport` 직결 → `TauriTransport`(src-tauri IPC). `ProtocolClient`(ADR-0011) 인터페이스·단일 프로토콜은 불변 — transport seam이 정확히 이걸 위해 존재(ADR-0020). 데몬 단일 연결은 src-tauri 소유. **프로토콜 의미론의 Rust 이전 범위는 Phase B spike에서 확정**(토폴로지만 확정, 메커니즘 미정).
+- **carrier 교체(ADR-0020 개정):** 프론트 daemon carrier = `WsTransport` 직결 → `TauriTransport`(src-tauri IPC). `agentClient`(ADR-0011) 인터페이스·단일 프로토콜은 불변 — transport seam이 정확히 이걸 위해 존재(ADR-0020). 데몬 단일 연결·프로토콜 의미론은 **src-tauri Rust 소유**(TS에서 이전). 창 `agentClient`는 thin Tauri 클라이언트(두뇌 Rust).
 - **출력 라우팅 정책:** src-tauri `OutputRouter`가 `ViewManager` 조회로 "agentId→그 에이전트를 띄운 창"에만 전달. 안 띄운 창엔 안 보냄.
 - **메시지 정책(락/게이팅)은 데몬:** 전송 중계는 정책을 enforce하지 않는다 — 에이전트 메시지 락 등은 데몬이 단일 choke point로 enforce(src-tauri는 캐시 기반 조기거부 *최적화*만 가능, 권위는 데몬).
-- **단계 분리:** 이건 전송층 재설계라 S14 레이아웃 기능과 별도 구현 단계(TRD가 phasing 규정). ADR-0035(권위)와 짝이지만 구현 순서는 TRD.
+- **phasing 없음(사용자 결정 2026-06-27):** 레거시 각자-연결을 임시로도 두지 않고 목표 구조를 바로 구현. ★전송층 재배치(연결·재연결·resubscribe·epoch·seq dedup의 Rust 이전)는 **동시성-치명** — kill 인과(ADR-0001)·finalize 1회(0005)·락 순서(0006)·epoch 재구독(0007) 불변식을 race 재현 없이 보존해야 하므로 **TDD + deep 코드리뷰 필수**(속도가 아니라 정확성 게이트).★ 구현 순서(레거시 없이, 의존성 기준): ViewManager+레이아웃(라우팅 테이블 토대) → DaemonClient+TauriTransport+OutputRouter(라우팅이 ViewManager 의존, ★동시성-치명) → 렌더러·탭·팝업.

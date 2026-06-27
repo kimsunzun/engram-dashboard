@@ -344,6 +344,14 @@
 - **TRD rev.4 작성:** ADR-0035/0036 기반 전면 재작성 — ViewManager(src-tauri AppState)·invoke 핸들러·emit 2종·DaemonClient/OutputRouter(중계)·React 변경·phasing(A=레이아웃 기능 / B=전송 중계).
 - **메시지 락 등 정책 = 데몬 enforce**(단일 choke point) — 전송 중계는 나르기만, 프론트는 표시만(층 분리 확인).
 - **다음:** `/review trd` → PASS → 코더(Phase A) → QA. dashboard1에 구조 브리핑(SlotPane/SlotContextMenu 공통 수정 조율).
+- **dashboard1 orch 교신:** 구조 브리핑 송신 → dashboard1 확인(층 분리 유효). resize(Task1 80x24) 질문 → 답신: 현 경로(WS직결) 유지, 통일 후 carrier만 교체라 carry-forward. SlotPane/SlotContextMenu 건드리기 전 핑 합의.
+
+### rev.5 — 리뷰 반영 + phasing 폐기 (2026-06-27, dashboard2, opus)
+- **`/review trd full`(rev.4):** Architect-breaker(opus doc-aware) + Designer(Codex), 둘 다 **FIX·BLOCK 없음** — 아키텍처(레이아웃 권위=src-tauri·데몬 UI 불가지론·교체성) 건전 판정. opus가 ADR-0029 무위반을 코드(`0029:40` 데이터=agent state)로 확인. FIX: `__engramLayout` 기존 dispatch 충돌·assign_agent 락 경계(0006)·LayoutNode 하드계약·switch_view 멀티창 의미·파일참조(SlotPane 2곳·LayoutRenderer 누락·tree창 Sidebar)·팝업 race 좁은윈도·OutputRouter 핫패스 락·교체성 가드.
+- **★사용자 결정: 레거시 두지 말고 제대로 → phasing(A/B) 폐기.★** "각자-연결"은 관행 아닌 현재 레거시(리서치=단일 릴레이 관행). 데드라인 없고 AI 구현이라 "빨리 쪼개기" 명분 약함 → 목표 구조(src-tauri 단일 데몬 클라+프로토콜+라우터+레이아웃 권위) 바로 구현.
+- **ADR-0036 갱신:** phasing 폐기·전송 의미론 Rust 이전 확정·동시성-치명(ADR-0001/0005/0006/0007 보존, TDD+deep 코드리뷰 필수) 명시.
+- **TRD rev.5:** phasing 제거 + FIX 전부 반영(LayoutNode 계약·락 경계·파일정정·race version·OutputRouter lock-free snapshot·교체성 가드). 하이브리드 관련 FIX는 phasing 폐기로 자동 소멸. 구현 리스크 게이트(전송 재배치=동시성-치명) 본문 상단 명시.
+- **다음:** rev.5 = 리뷰어가 건전 판정한 목표 구조(phasing만 제거) → 코더. 단 전송 재배치 모듈은 `/review code deep`(동시성 트리거) + TDD 강제.
 
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
