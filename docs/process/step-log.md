@@ -386,6 +386,12 @@
 - **게이트:** src-tauri lib 72 green(5회 flaky 0)·fmt clean·경고 0. **push 보류**(owner 외출 — 외부전송 확인 대기).
 - **미결(owner 복귀 후):** ① "비자명 기술결함은 혼자 맞추지 말고 OSS 참고" 기준 명문화(사용자가 정하자 함) ② push 승인. **다음 자율:** T3(protocol_state).
 
+### 모듈① T3 — protocol_state (2026-06-28, dashboard2, opus)
+- **구현**(`5360c70`): `daemon_client/protocol_state.rs` — ProtocolClient(TS) 프로토콜 의미론을 Rust 순수 결정 함수로 이전. `SubState`(epoch: Option<u32>·last_delivered_seq: Option<u64> = TS -1 센티넬→None) + `decide_output`(epoch 가드→seq high-water dedup `<=`→last 갱신) + `apply_subscribe_ack`(epoch 변경 시 리셋) + `resubscribe_params`(tail-only / epoch=None→전체 replay) + `PendingMap`(request_id 1회성 매칭·drain). 소켓/tokio/tauri 의존 0. mod/connection은 선언+TODO만(배선=T5/T6).
+- **`/review code full`(opus doc-aware + Codex blind):** 포팅 5대 불변식(dedup `<=`·epoch None 통과·epoch변경 리셋·버그B 가드·resubscribe None분기) **TS와 동일 확인**, `-1`→`Option` 매핑 등가 확인(parked 결정 해소). FIX(테스트 정직성): vacuous 2개(broadcast-no-consume·two-concurrent = event-routing이라 순수레이어 보호대상 없음) 제거→T5/T6 deferred 주석, sentinel(seq=0) 경계 `decide_output` 직접단언 추가, "21케이스 1:1" 과대표기 정직화(순수 20 / deferred 5).
+- **게이트:** src-tauri lib 92 green·fmt clean·tauri import 0. push 보류(owner 확인 대기).
+- **다음:** T4(재연결 백오프 + generation 가드 + ★Blocker-1 = spike 최고위험). owner go-ahead 후 착수 권장(단독 자율 보류).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
