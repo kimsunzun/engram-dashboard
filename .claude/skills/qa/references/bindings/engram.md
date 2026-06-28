@@ -73,6 +73,10 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 
 어디서 막혔는지 짚을 때 쓰는 게이트 이름: build / test(어느 테스트) / fmt / 격리(`use tauri` 매치 줄) / tsc(타입체크) / npm(프론트 테스트) / cdp 실측(어느 동작).
 
+## flaky·타이밍·perf 실패 = 매직넘버로 통과 금지 (ADR-0038)
+
+flaky/타이밍/perf 실패를 상수·임계값·재시도 튜닝으로 통과시키려 하면 중단하고 `docs/reference/debugging-conventions.md`(OSS 조사 전환)를 적용한다. (이 규약의 *발화 지점* — qa가 신호를 잡는 곳.)
+
 ## 코어 격리 불변식 (정본 = ADR-0003 + 코드의 `// ADR-` 앵커)
 
 코어 crate(`engram-dashboard-core`)는 **Tauri import 0** — `rg "use tauri" crates/engram-dashboard-core/src/` → 0줄. 이게 깨지면 코어가 전송 방식에 묶인 것 = 회귀. (근거·거부 대안은 ADR-0003.)

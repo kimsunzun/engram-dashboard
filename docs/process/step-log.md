@@ -392,6 +392,12 @@
 - **게이트:** src-tauri lib 92 green·fmt clean·tauri import 0. push 보류(owner 확인 대기).
 - **다음:** T4(재연결 백오프 + generation 가드 + ★Blocker-1 = spike 최고위험). owner go-ahead 후 착수 권장(단독 자율 보류).
 
+### ADR-0038 — 결함수정 OSS-조사-우선 규약 (2026-06-28, dashboard2, opus)
+- **계기:** flaky TOCTOU를 매직넘버(5ms→50ms) 솔로 튜닝으로 통과시키려던 안티패턴을 사용자가 막음 → "기능엔 참조구현, 결함엔?"의 갭을 규약으로 메움.
+- **4층(commenting/logging 패턴 동형):** ADR-0038(왜+거부대안) + `docs/reference/debugging-conventions.md`(실천 규약·발동조건 2신호·제외) + CLAUDE.md "참조 구현" 기조 한 줄(발견) + `qa/bindings/engram.md` 발화 한 줄(flaky/타이밍/perf 실패=매직넘버 통과 금지 → 신호 뜨는 지점). 발견↔발화 분리가 설계 핵심(self-enforced 규약은 그 순간 발화 안 되면 죽음).
+- **트리거=2신호(행동 기반):** ① 매직넘버로 증상 통과 시도 ② 추측 1회 실패 후 솔로 반복. 카테고리 트리거 거부(그 순간 인식 불가).
+- **`/review doc full`(opus 수호 + Codex cut):** 구조 PASS(4층 역할분리·교차참조 정합), FIX(중복제거: 사례/컨텍스트위생/도메인리스트 → 포인터화 · 트리거명 명확화 · qa·CLAUDE 경량화 · README reference 셀 rot 수정). ADR lint ok.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
