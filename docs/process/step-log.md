@@ -414,6 +414,15 @@
 - **이월건 해소**(`49be0e9`, push됨 — 옵션 A 선택): `supersede_connect_cancels_reconnect_before_discovery` `#[ignore]` 해제·green. **진짜 hang 원인(이전 세션 오진 정정):** 테스트가 ensure_spawn 게이트를 *최초* connect_via 전에 켰는데, connect()가 ensure_spawn을 거치고 gate_ensure_spawn은 첫 호출 1개만 잡아 블록 → 최초 연결이 게이트에 걸려 영구 hang(kill/revive 본문 도달 전). "맨 끝 connect_task 대기 hang"이 아니었음. 수정: 최초 connect를 ungated로 끝낸 뒤 게이트 설치(다음 ensure_spawn=승계 connect가 걸림). 함께 paused-time→multi_thread 재작성(시계 advance 제거, poll_until_realtime+OBSERVE 200ms 윈도우, timeout(LIMIT)로 hang→단언실패 전환).
 - **최종 게이트:** `cargo test -p engram-dashboard --lib` = **111 passed / 0 failed / 0 ignored** · fmt clean.
 
+### 모듈① T5 진입 전 — carrier/fan-out 리서치 + spike §7 확정 (2026-06-28, dashboard2/master, opus)
+- **계기:** T5(OutputRouter) 진입 전, D3 carrier(=Tauri Channel)의 미검증("멀티윈도우 안전성 context7+QA full 보류")과 fan-out 라우팅/구독 패턴 OSS 근거를 닫음. 사용자 지시(리서치→TRD→구현전 보고).
+- **`/research deep`(cross-family): Claude Sonnet 3 갈래 + Codex 2(blind) → opus 교차+적대 검증.** 보고서 `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`. study-note `…/research/study-notes/2026-06-28-…`.
+- **핵심 결론:** ① D3=Channel 확정(공식 "child process output" 용례). ② **★raw byte 함정** — 터미널 바이트는 `Channel<tauri::ipc::Response>`/`InvokeResponseBody::Raw`로(blanket `impl<T:Serialize>`가 `Channel<&[u8]>`조차 JSON으로 샘). ③ OutputRouter=`ArcSwap<RoutingSnapshot{by_agent}>`(핫패스 락0) + 구독 ref-count `Mutex<HashMap<AgentId,usize>>`(0→1/1→0, SubscriptionGuard Drop→cmd_tx enqueue, async Drop 회피). spike §6 미결 2건(snapshot 갱신·구독 union) 해소. ④ 정리: send `Err`→채널 제거·창 close→unsubscribe+unlisten(#15583 미해결). tmux/zellij/wezterm/ra-multiplex 관행 정합.
+- **적대 검증 성과(cross-family):** Claude A "Channel binary 미지원"(=#13405 이벤트 FR와 혼동한 환각)을 Codex 소스(`mod.rs` blanket impl)로 정정. #12065 순서버그 fix 버전 "불확실"→2.2.0 확정.
+- **버전 게이트:** #13133·#12065는 우리 `tauri 2.11.2`에서 해소. **단 2.11.3에서 channel-data 데드락 수정 — 한 패치 아래.** **사용자 결정:** ① 배선 범위 = **전송배선 먼저(T5~T8) 슬라이스**(모듈③ 슬롯 렌더는 별도) ② **T5 전 tauri 2.11.3+ 업글**.
+- **spike `module1-transport-spike.md` §7 추가** — 위 결정을 T5~T8 코더 명세로 박음. 상태 헤더 "T1~T4 완료 / T5~T8 코딩 전".
+- **다음:** T5 전 (1) tauri 2.11.3+ 업글(daemon crate 버전 정렬) → (2) T5 OutputRouter(arc-swap snapshot + ref-count) 코더→`/review code deep`(동시성-치명)→`/qa`. **동시성-치명 = 신선한 컨텍스트에서 시작 권장.**
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

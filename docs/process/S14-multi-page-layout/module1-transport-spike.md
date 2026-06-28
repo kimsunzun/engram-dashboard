@@ -1,8 +1,8 @@
 # 모듈① 전송 중계 통일 — 구현 설계 spike (ADR-0036)
 
-**상태:** 설계 완료 / 코딩 전 (D1~D5 사용자 결정 대기)
-**작성:** 2026-06-27 (dashboard2, opus Plan 에이전트 spike — 실제 코드 확인 기반)
-**근거:** ADR-0036(전송 중계 통일·phasing 없음·동시성-치명) · ADR-0035(레이아웃 권위=src-tauri) · TRD rev.5
+**상태:** T1~T4 구현 완료 / **T5~T8 코딩 전 — D1~D5 결정 완료 + 리서치 반영(§7)**
+**작성:** 2026-06-27 (dashboard2, opus Plan 에이전트 spike — 실제 코드 확인 기반) · **§7 추가 2026-06-28**(carrier/fan-out 리서치 반영)
+**근거:** ADR-0036(전송 중계 통일·phasing 없음·동시성-치명) · ADR-0035(레이아웃 권위=src-tauri) · ADR-0037(전송 의미론=Rust 단독) · TRD rev.5 · **리서치 `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`**
 
 > 동시성-치명 모듈. 현 TS `wsTransport.ts`(389줄)+`protocolClient.ts`(435줄)의 전송 의미론을 src-tauri Rust로 이전. 코딩은 T1~T8 단위로, 각각 코더→`/review code deep`→QA.
 
@@ -129,5 +129,36 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
 - **고대역 relay 오버헤드 실측:** 데몬→src-tauri WS(1회)→Router→창(IPC) 한 홉 추가. D3 emit_to면 JSON/base64 팽창 부활 위험. `cdp.mjs eval`로 throughput 측정(ADR-0036 "로컬 IPC 미미"는 가정, QA full 검증).
 - **미지수(코드 미확인):** Tauri 2 `ipc::Channel` 멀티윈도우 per-window 생성/정리 안전성(context7 확인) · src-tauri tokio multi-thread 재도입과 Tauri 런타임 상호작용.
 
+## 7. 리서치 반영 (2026-06-28) — T5~T8 확정 디테일
+
+> cross-family deep 리서치(보고서: `docs/research/tauri-channel-multiwindow-carrier-research-2026-06-28.md`)가 D3 carrier와 fan-out 설계의 미지수(§6)를 닫음. **현 버전 기준: `tauri = 2.11.2` / `@tauri-apps/api ^2.11.0`.**
+
+### D3 carrier — Channel 확정 + ★raw byte 함정
+- carrier 이원화 확정: **고대역 출력 = `Channel` (per-window) / 레이아웃 control = `emit`**(저빈도 JSON OK, 모듈② 현행 유지). 공식이 "child process output"을 Channel 용례로 직접 명시.
+- **★ 터미널 바이트는 `Channel<tauri::ipc::Response>`(`Response::new(bytes)`) 또는 `InvokeResponseBody::Raw`로 보낸다.** `Channel<Vec<u8>>`/`Channel<&[u8]>`는 blanket `impl<T:Serialize> IpcResponse`가 **JSON 배열로 직렬화**(공식 4096B 예제의 `Channel<&[u8]>`조차 JSON으로 샘). protocol crate `encode_terminal_frame` 바이트를 Response/Raw에 실어 보내면 정합.
+- Channel은 호출 webview에 태생 바인딩 → 창마다 Channel = per-window 라우팅 자연 해결(emit_to 불필요).
+
+### T5 OutputRouter — arc-swap snapshot (open item 해소)
+- `ArcSwap<RoutingSnapshot { by_agent: HashMap<AgentId, Arc<[WindowId]>> }>` — **핫패스(프레임마다) `load()` 락0**, 레이아웃 변경 시에만 `store(Arc::new(..))`. arc-swap 공식 "routing table read with every packet" 용례.
+- **Pitfall(테스트로 단언):** `load()` Guard를 `.await` 너머로 보유 금지(슬롯 고갈) → async 경유 시 `load_full()`. (ADR-0006 핫패스 락0 = 이미 §2 FIX-F6.)
+- 기각 대안: `RwLock`(읽기 경합), `broadcast`(느린 수신자 `Lagged` **유실** → 무손실 터미널에 위험), `left-right`/`evmap`(eventual consistency 복잡), `watch`(snapshot 배포엔 OK·핫패스 lookup 부적합).
+
+### 구독 union ref-count (§6 리스크3 "신규 동시성 표면" 해소)
+- 핫패스와 **분리**: `Mutex<HashMap<AgentId, usize>>` (레이아웃/창 수명 이벤트에만 변경). **0→1 전이 = `Subscribe` / 1→0 = `Unsubscribe`.**
+- `SubscriptionGuard { agent_id, owner }` + `Drop`으로 슬롯/창 수명에 묶음. **★ async Drop 금지** — `Drop`은 await 불가 → unsubscribe를 **DaemonClient cmd_tx로 enqueue**(actor 모델과 정합, 직접 await X).
+
+### 정리·생명주기 규약 (T6/T7)
+- **dead window:** `Channel::send`는 `Result<()>` — 소멸 webview면 `Err`(에러 타입 미문서화). **`Err` 감지 시 라우팅 registry에서 해당 채널 제거**(절대 `unwrap()` 금지).
+- **창 close:** `onCloseRequested`에서 명시 `unsubscribe` + `unlisten` — **#15583(webview 소멸 시 백엔드 리스너 미정리)이 2.11.2에서 미해결**.
+- **대용량 큐:** `ChannelDataIpcQueue` 잔류 가능(창이 fetch 전 닫힘) → close/unsubscribe 시 정리 확인.
+- **프론트 채널 정리:** `delete channel.onmessage`(null 아님 — #13133, 기존 micro-rule 유지).
+
+### ⚠️ 버전 (의존성 — 결정 보고 대상)
+- **#13133(콜백 누수, v2.5.0 fix)·#12065(순서 역전, 2.2.0 fix) = 우리 2.11.2에서 이미 해소.**
+- **tauri 2.11.3에서 channel-data 데드락 수정 — 우리는 2.11.2(한 패치 아래).** T5~T7 Channel 배선 전 **2.11.3+ 업글 검토**(의존성 변경 = 사용자 보고).
+
+### 미검증(실측 영역 — QA full)
+- raw Channel 실제 throughput·한 홉 오버헤드는 문서/소스 추정 → `cdp.mjs eval` throughput 실측으로 ADR-0036 "로컬 IPC 미미" 가정 확정(수용기준 §3 trd / spike §6).
+
 ## 참조 코드
-`src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서).
+`src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서) · `crates/engram-dashboard-protocol`(`encode_terminal_frame` → Response/Raw 적재).
