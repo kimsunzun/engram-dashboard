@@ -378,6 +378,14 @@
 - **리뷰 메커니즘 정리:** 리뷰 단위=diff(커밋=리뷰됨, 마커 안 씀 — rot 방지). 서브에이전트는 CLAUDE.md 자동 안 읽음 → 오케스트레이터가 바인딩 읽고 doc-aware에 규약 주입, blind엔 안 줌(앵커링 차단).
 - **다음:** T3 진입 + daemon_client tracing backfill(규약 따라).
 
+### daemon_client tracing backfill + TOCTOU 테스트 결정론화 (2026-06-28, dashboard2, opus)
+- **구조 변경:** git worktree 분리 — dashboard2=`apps/engram-dashboard`(master), dashboard1=`apps/engram-dashboard-a1`(wip/a1). HEAD 비공유라 충돌 없음.
+- **tracing backfill**(`dc5f3a6`): daemon_client `{connection,mod}.rs`에 연결 수립/실패/핸드셰이크/종료·generation 가드 발동 계측(logging-conventions 규약 — info/warn/debug·토큰 미노출·핫패스 제외). 직전 핸드오프 발견버그(`daemon/lib.rs:207` 마스킹 주석 거짓 = mask_secrets 미배선) 정정 동봉. `/review code full`(opus doc-aware + Codex blind) → FIX 2건(중복 warn 제거·`Err(_)` publish_if_current 반환으로 레벨 게이트) 반영.
+- **flaky 발견 → 리서치 → 결정론화**(`fa0cc3d`): QA 중 `toctou_stress_reconnect_no_stale_down_clobber`가 **baseline(T2)에서도 ~1/20 실패** 발견. 진단=가드 정상, 테스트가 서버 hold(5ms) vs assert sleep(3ms) 매직 타이밍 의존 → current task 정상 Down을 stale clobber로 오판하는 false positive. **혼자 매직넘버로 맞추지 말고 OSS 참고**(사용자 지시) → `/research medium`(cross-family): loom은 tokio::sync 사용자 검증에 tokio 재컴파일 필요=저ROI, **단위 수준 + 결정론**이 정답(보고서 `docs/research/toctou-concurrency-test-verification-research-2026-06-28.md`).
+- **교체:** 확률적 stress 2개 + `spawn_stress_server` 제거 → Lifecycle 가드(publish_if_current/store_cmd_if_current/close)를 소켓·sleep 없이 직접 순서 호출하는 결정론 단위 테스트 4개(`guard_*`). **가드 본문 무변경**(HEAD 동일), 추가=`#[cfg(test)] cmd_tx_snapshot()` 접근자+doc. `/review code full` FIX 6건(vacuity 제거·상태불변 관찰·주석 정직성·rot 라인참조) 반영, mutation-probe로 non-vacuity 실측.
+- **게이트:** src-tauri lib 72 green(5회 flaky 0)·fmt clean·경고 0. **push 보류**(owner 외출 — 외부전송 확인 대기).
+- **미결(owner 복귀 후):** ① "비자명 기술결함은 혼자 맞추지 말고 OSS 참고" 기준 명문화(사용자가 정하자 함) ② push 승인. **다음 자율:** T3(protocol_state).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
