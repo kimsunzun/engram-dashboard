@@ -20,9 +20,10 @@ const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 /// `view:list-updated` 이벤트명 — View 목록/active 가 바뀌었을 때(탭 바 미러).
 const EVT_VIEW_LIST_UPDATED: &str = "view:list-updated";
 
-/// `view:list-updated` 페이로드.
+/// `view:list-updated` 페이로드. list_views(read-only 조회) 반환 타입으로도 쓰여(부팅 init) crate
+/// 가시성 필요 — pub command 반환 타입은 private 이면 안 됨(generate_handler 매크로 확장 위치 가시성).
 #[derive(serde::Serialize, Clone)]
-struct ViewListPayload {
+pub(crate) struct ViewListPayload {
     views: Vec<ViewMeta>,
     active_view_id: Uuid,
 }
@@ -174,4 +175,19 @@ pub fn assign_agent(
 pub fn get_view(state: State<'_, LayoutState>, view_id: Uuid) -> Result<ViewSnapshot, String> {
     let mgr = state.0.lock().map_err(|e| e.to_string())?;
     mgr.snapshot(view_id).map_err(|e| e.to_string())
+}
+
+/// View 목록 + active_view_id 조회(= view:list-updated 페이로드와 동형). ★조회만★.
+///
+/// 왜 필요한가: ViewManager 는 부팅 시 기본 View("View 1")를 자동 생성하지만, 그 변경은 *부팅 전*에
+/// 일어나 emit 으로 webview 에 닿지 않는다. 변경 핸들러들은 변경 직후에만 emit 하므로, 부팅 직후의
+/// webview 는 active view id 를 발견할 경로가 없어 화면이 비어 있다(첫 create/split 전까지). 이 read-only
+/// 조회로 webview 가 부팅 때 현재 active view id 를 물어 → get_view 로 그 레이아웃을 그린다(유령 View 생성 없이).
+///
+/// 왜 emit 안 하나: 상태를 바꾸지 않는 pull 이라 version 을 올리지 않고 누구에게도 broadcast 하지 않는다
+/// (get_view 와 동형 — 락 짧게 잡아 복사 후 drop, 보유 중 외부 호출·emit 0, ADR-0006).
+#[tauri::command]
+pub fn list_views(state: State<'_, LayoutState>) -> Result<ViewListPayload, String> {
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(list_payload(&mgr))
 }

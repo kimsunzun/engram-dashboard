@@ -6,7 +6,7 @@
 
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from './agentStore'
-import { useSlotStore } from './slotStore'
+import { subscribeViewEvents, useViewStore } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
@@ -46,10 +46,18 @@ export function initEventBus(): Promise<void> {
 
   initPromise = (async () => {
     try {
-      // §5: 레이아웃 제어 표면(dispatch)을 window에 노출 → LLM(cdp eval 등)이 사람 UI와
-      // 동일한 단일 진입점을 호출할 수 있다. 정식 control surface 전까지의 임시 경로.
+      // §5: 레이아웃 제어 표면을 window에 노출 → LLM(cdp eval 등)이 사람 UI와 동일한 단일 진입점을
+      // 호출한다. ★옛 useSlotStore.dispatch(프론트 내부 처리)에서 백엔드 invoke 핸들러로 재연결★
+      // (ADR-0035: 레이아웃 권위 = src-tauri). 각 액션은 viewStore → 대응 invoke → 백엔드 emit →
+      // listen → 화면 반영 루프를 탄다. createView/split 은 Promise<id> 라 cdp eval 에서 await 가능.
+      // 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항).
       ;(globalThis as Record<string, unknown>).__engramLayout = {
-        dispatch: useSlotStore.getState().dispatch,
+        createView: useViewStore.getState().createView,
+        closeView: useViewStore.getState().closeView,
+        switchView: useViewStore.getState().switchView,
+        split: useViewStore.getState().split,
+        closeSlot: useViewStore.getState().closeSlot,
+        assignAgent: useViewStore.getState().assignAgent,
       }
 
       // HMR 재평가 시 기존 구독 먼저 해제
@@ -57,6 +65,53 @@ export function initEventBus(): Promise<void> {
         unlistenFns.forEach(fn => fn())
         unlistenFns = []
       }
+
+      // 레이아웃 emit 구독(layout:updated / view:list-updated). agentClient 이벤트와 달리 src-tauri
+      // 권위라 @tauri-apps/api listen 직접 사용(viewStore.subscribeViewEvents). dispose 를 같은
+      // unlistenFns 에 모아 HMR/재호출 시 한꺼번에 해제(중복 구독 방지) — 아래 onAgentListUpdated 등과 동일 규율.
+      // ★dispose 를 await 없이 즉시 push★(누수 가드): subscribeViewEvents 는 `{ dispose, ready }` 를 동기
+      // 반환한다. dispose 를 먼저 unlistenFns 에 넣어둬야, 아래 ready await 가 pending 인 동안 정리(HMR
+      // dispose/재-init)가 unlistenFns.forEach 를 돌려도 이 dispose 가 포함돼 늦게 끝난 등록이 누수되지
+      // 않는다(예전엔 await 완료 후에야 disposer 를 push 해 이 윈도에서 영구 누수됐다).
+      const viewSub = subscribeViewEvents()
+      unlistenFns.push(viewSub.dispose)
+
+      // ★HMR dispose 콜백을 ready await *전*에 등록★(누수 가드의 마지막 고리): 이 콜백이 unlistenFns
+      // (이미 viewSub.dispose 포함)를 정리한다. 만약 아래 `await viewSub.ready` *뒤*에 등록하면, ready 가
+      // pending 인 동안 HMR 이 와도 콜백이 아직 안 걸려 viewSub.dispose 를 부를 경로가 없다 → 늦게 등록
+      // 완료된 layout 리스너가 누수된다(dispose 를 일찍 push 해도 그걸 *호출*할 HMR 콜백이 늦으면 무효).
+      // 그래서 dispose push 직후·ready await 전에 등록해, ready pending 중 HMR 에서도 정리 경로를 보장한다.
+      // 클로저가 참조하는 unlistenFns/initPromise 는 모듈 스코프 let 이라 위치 이동 후에도 최신 값을 읽는다.
+      if (import.meta.hot) {
+        import.meta.hot.dispose(() => {
+          unlistenFns.forEach(fn => fn())
+          unlistenFns = []
+          initPromise = null
+        })
+      }
+
+      // ★등록 완료를 await★(F-listen): listen() 은 async 라 등록이 끝나기 전 도착한 init pull 결과나 백엔드
+      // emit 은 핸들러가 없어 누락된다. ready 를 기다린 뒤에야 initFromBackend 를 부른다. ready 는 dispose 가
+      // 먼저 와도·등록이 실패해도 정상 종료(hang 금지)하므로 이 await 가 막히지 않는다.
+      //
+      // ★layout 구독 실패를 agentClient 구독과 격리★(fate-sharing 차단): ready 가 reject 하면(한쪽 listen
+      // 등록 IPC 실패) layout(ADR-0035 권위)만 실패한 것이지 agentClient(ADR-0011 권위, 트리·상태바·재연결)는
+      // 무관하다. catch 하지 않으면 아래 onAgentListUpdated/onStatusChanged/... 등록이 통째로 안 돼 도메인이
+      // 죽는다. 그래서 ready 실패는 warn 으로만 로깅하고 init 은 계속 진행한다. catch 에서 viewSub.dispose()
+      // 를 명시 호출해 성공한 부분 등록분을 정리한다(idempotent + unlistenFns 에도 있어 중복 호출 noop 안전).
+      try {
+        await viewSub.ready
+      } catch (err) {
+        console.warn('[eventBus] layout 구독(subscribeViewEvents) 실패 — agentClient 구독은 계속:', err)
+        viewSub.dispose()
+      }
+
+      // 부팅 init — 백엔드 기본 View 는 부팅 전 생성돼 emit 으로 안 닿으므로(변경 직후만 emit), read-only
+      // list_views/get_view 로 현재 목록+active 레이아웃을 끌어와 화면을 즉시 그린다. ★구독을 먼저 건 뒤★
+      // 호출 — init 도중 들어온 emit 을 놓치지 않고, 더 최신이면 캐시 version 가드가 pull 결과를 덮는다(역전 방지).
+      void useViewStore.getState().initFromBackend().catch(err => {
+        console.warn('[eventBus] viewStore initFromBackend failed:', err)
+      })
 
       // 등록은 sync(disposer 즉시 반환) — await 불필요. agentClient 가 모드별 transport 를 숨긴다.
 
@@ -107,14 +162,8 @@ export function initEventBus(): Promise<void> {
         }),
       )
 
-      // Vite HMR 모듈 교체 시 리스너 해제 + promise 초기화
-      if (import.meta.hot) {
-        import.meta.hot.dispose(() => {
-          unlistenFns.forEach(fn => fn())
-          unlistenFns = []
-          initPromise = null
-        })
-      }
+      // (HMR dispose 콜백은 위 viewSub.dispose push 직후·ready await 전에 등록 — FIX-1: ready pending
+      // 중 HMR 에서도 정리 경로 보장. agentClient 핸들들도 같은 unlistenFns 에 모여 그 콜백이 함께 해제한다.)
     } catch (err) {
       console.error('[eventBus] init failed:', err)
       initPromise = null // 고착 방지 — 다음 호출 시 재시도 허용

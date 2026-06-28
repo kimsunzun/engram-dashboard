@@ -120,6 +120,9 @@ pub fn run() {
             commands::close_slot,
             commands::assign_agent,
             commands::get_view,
+            // ADR-0035: read-only 조회 — 부팅 시 webview 가 active view id 를 발견하는 유일 경로
+            //   (변경 핸들러는 변경 직후에만 emit → 부팅 직후엔 닿지 않음). 상태변경·emit 없음.
+            commands::list_views,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
