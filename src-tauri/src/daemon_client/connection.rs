@@ -246,13 +246,19 @@ async fn main_loop(
                         // ★T2★: control JSON 디코드 형태만 확인하고 소비한다(라우팅/dedup 은 T3/T5).
                         match msg {
                             Message::Text(text) => {
-                                // 데몬 control 이벤트. T3(epoch/dedup)·T5(라우팅)가 여기서 분기한다.
-                                // TODO(T3/T5): AgentEvent 파싱 → pending(request_id) 매칭 / OutputRouter.
+                                // 데몬 control 이벤트. T3 가 순수 결정 함수를 깔았다(protocol_state) — T5/T6 이
+                                // 여기서 그 함수를 호출해 배선한다.
+                                // TODO(T5/T6): AgentEvent 파싱 → variant 분기:
+                                //   Ack/Spawned/Created/Error/AgentList/ProfileList/Snapshot →
+                                //     protocol_state::take_pending(&mut pending, request_id) → oneshot resolve/reject.
+                                //   SubscribeAck → protocol_state::apply_subscribe_ack(&mut sub, current_epoch).
+                                //   StatusChanged/RestoreResult/AgentListUpdated/ProfileListUpdated → app.emit broadcast.
                                 let _ = serde_json::from_str::<AgentEvent>(&text);
                             }
                             Message::Binary(_bytes) => {
-                                // 출력 binary frame(codec). 디코드·라우팅은 T5.
-                                // TODO(T5): decode_frame → OutputRouter(arc-swap) 라우팅 + seq dedup(T3).
+                                // 출력 binary frame(codec). T3 가 seq dedup·epoch 가드(decide_output)를 깔았다.
+                                // TODO(T5): decode_frame → protocol_state::decide_output(&mut sub, epoch, seq)
+                                //   → Deliver 면 OutputRouter(arc-swap) 로 라우팅, Drop* 이면 무시.
                             }
                             // Ping/Pong 은 tungstenite 가 자동 응답(내부). Close 면 종료.
                             Message::Close(_) => break "데몬이 Close frame 송신",

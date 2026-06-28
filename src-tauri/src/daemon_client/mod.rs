@@ -32,6 +32,7 @@
 
 pub mod connection;
 mod lifecycle;
+pub mod protocol_state;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -323,9 +324,18 @@ impl DaemonClient {
     // ── T4 자리: 재연결·백오프·generation 가드·closedByUser ──────────────────────────
     // TODO(T4): 비의도 끊김 시 read_live 기반 attach-only 재연결(지수 백오프 500ms→10s MAX5→Down),
     //   generation(openGen) 가드, closedByUser 가드(명령/재연결이 spawn 안 하게).
+    //   ★resubscribe 배선★: connected 재전이 직후 subs 순회하며 각 agent 에
+    //   protocol_state::resubscribe_params(&sub) 로 Subscribe{epoch,after_seq} 산출 → wire send
+    //   (JS resubscribeAll 대응). 끊김 시 protocol_state::drain_pending(&mut pending) → 일괄 reject.
 
-    // ── T3 자리: epoch/seq dedup·resubscribe·pending(request_id) 매칭 ────────────────
-    // TODO(T3): protocol_state(SubState by agent: epoch·last_delivered_seq) + pending HashMap.
+    // ── T3 완료: protocol_state 순수 결정 함수(epoch/seq dedup·resubscribe·pending 매칭) ─────
+    // `protocol_state` 모듈이 SubState(epoch·last_delivered_seq)·PendingMap·결정 함수(decide_output·
+    // apply_subscribe_ack·resubscribe_params·take_pending·drain_pending)를 순수하게 소유한다(소켓·
+    // runtime 의존 0, 순수 결정 단위 테스트 20개 동반 — protocolClient.test.ts 의 event-routing 5케이스는
+    // 여기 순수 레이어가 아니라 T5/T6 배선 테스트로 미룸, protocol_state.rs tests mod 주석 참조).
+    // ★배선은 미완★: 연결 task 가 이 상태 맵
+    // (subs: HashMap<AgentId, SubState>, pending: HashMap<RequestId, oneshot>)을 들고 결정 함수를
+    // 호출하는 것은 T5(output 라우팅)/T6(invoke 명령) 가 한다 — connection.rs main_loop 의 TODO 참조.
 
     // ── T5 자리: OutputRouter(arc-swap 라우팅) 연결 ───────────────────────────────────
     // TODO(T5): 연결 task 가 디코드한 output frame 을 OutputRouter 로 라우팅(ViewManager 기반).
