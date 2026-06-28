@@ -160,5 +160,28 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
 ### 미검증(실측 영역 — QA full)
 - raw Channel 실제 throughput·한 홉 오버헤드는 문서/소스 추정 → `cdp.mjs eval` throughput 실측으로 ADR-0036 "로컬 IPC 미미" 가정 확정(수용기준 §3 trd / spike §6).
 
+## 8. T5 OutputRouter — TRD 상세 (2026-06-29)
+
+> 통합 표면 매핑(Explore) + carrier 리서치(§7) 반영. **순수 내부 결정은 확정(아래), 굵은 갈림길 2개(F-A/F-B)는 사용자 결정 대기.**
+
+### 확정된 seam·타입 (코드 실측)
+- **입력 seam:** `src-tauri/src/daemon_client/connection.rs:668` `Message::Binary(bytes)` 자리(현 `// TODO(T5)`). 흐름: `protocol::decode_frame(bytes) → DecodedFrame{agent_id, epoch, seq, payload:&[u8]}` → `protocol_state::decide_output(&mut sub, epoch, seq)` → **`Deliver`면 `router.route(agent_id, payload, seq)`**, `Drop*`면 무시. (`main_loop`에 `router: &OutputRouter` Arc 주입 — 재연결 넘어 app-level 공유.)
+- **라우팅 소스:** `layout/manager.rs` `ViewManager{views, active_view_id, window_bindings:HashMap<label,view_id>, version}` + `LayoutNode::Slot{agent_id:Option<String>}`. `agent_id → [window_label]` = 각 View 트리에서 해당 agent 슬롯 탐색 → (View==active_view_id면 "main") + (window_bindings에서 그 view_id에 바인딩된 label들).
+- **출력 carrier:** **per-window `Channel<tauri::ipc::Response>` 1개**가 그 창의 모든 agent 출력을 운반(프레임에 agent_id 태그). 창은 T6 invoke(`subscribe_output(channel)`)로 등록. (§7 raw byte: `Response`/`Raw`로 적재.)
+- **★타입 브리지(코더 주의):** 프레임 `agent_id`=`AgentId`(protocol, UUID newtype) ↔ 슬롯 `agent_id`=`String`. 라우팅 키를 한쪽으로 정규화(권장: `AgentId` → 슬롯 저장 시점에 동일 문자열). 기존 spawn 경로의 String↔AgentId 변환 재사용.
+
+### 내부 결정 (확정 — 보고용, 사용자 결정 아님)
+- **D1 WindowId = Tauri window label(String)** — `window_bindings` 키와 동일, 별도 numeric 레지스트리 불필요. `RoutingSnapshot{ by_agent: HashMap<AgentId, Arc<[String]>> }`.
+- **D2 rebuild-always** — 레이아웃 변경은 저빈도라 매 변경 시 snapshot 전체 재계산 후 `ArcSwap::store`. version-cache 분기 불채택(복잡도 대비 무이득).
+- **D3 rebuild 트리거 = `commands/layout.rs::emit_after_unlock`** (Mutex drop 후) 안에서 `router.rebuild(&mgr_snapshot)` 호출. 핫패스 락0 + ADR-0006 준수(락 보유 중 호출 금지). 콜백/역참조 구조 불채택(순환참조 회피).
+- **D4 carrier = per-window Channel(태그)** — §7 리서치 확정(per-(window,agent) 채널 폭증 기각 / emit 브로드캐스트 JSON·정확성 기각).
+- **D6 정리** — `Channel::send` `Err`→해당 window sink 제거 + rebuild(절대 unwrap 금지) · 창 close `onCloseRequested`→명시 unsubscribe + unlisten(#15583 2.11.3 미해결).
+
+### 굵은 갈림길 — 결정 완료 (2026-06-29, 사용자)
+- **F-A 슬라이싱 = ① T5 단독 먼저.** OutputRouter 코어(snapshot 재계산 + route)만, headless unit(ViewManager mutation→table→load·핫패스 락0 단언)으로 격리 검증 → 이후 T6(invoke+channel 등록)·T7·T8 각각 코더→`/review code deep`→`/qa`.
+- **F-B 구독 union 소스 = ① layout 파생.** 별도 카운터 없음 — snapshot rebuild마다 현재 agent union 집합을 직전과 diff해 0→1 `Subscribe`/1→0 `Unsubscribe`. **라우팅 snapshot 재계산과 같은 트리 순회에 piggyback(단일 패스: 라우팅표 + 구독 diff 동시 산출).** 근거: SSOT=ViewManager(ADR-0035), 출력 소비자=View뿐 + 데몬이 출력 보관(Unsubscribe 후 재구독=`Resume(after_seq)` tail 리플레이라 유실0)이라 ②(명시 ref-count)는 현재 무이점. **async Drop 직접 await 금지(설사 정리 경로 쓰더라도 cmd_tx enqueue).**
+  - **확장 메모(YAGNI — 지금 안 함):** 비-화면 출력 소비자(예: §5 백엔드 LLM이 다른 agent 출력을 프로그램 소비 = 목표 ⑤ 메시징 트랙, a1·연기)가 생기면 "①의 레이아웃 파생 집합 ∪ 별도 구독자 집합"으로 확장. ②를 통째로 까지 않음.
+  - **개념 분리(혼동 방지):** 출력 구독(T5, 렌더 대상) ≠ 포커스(`focused_slot_id`, 키 입력 대상) ≠ agent↔agent 메시징(목표 ⑤, data-plane). T5는 출력 구독만.
+
 ## 참조 코드
 `src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서) · `crates/engram-dashboard-protocol`(`encode_terminal_frame` → Response/Raw 적재).
