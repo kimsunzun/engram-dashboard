@@ -58,5 +58,9 @@ arc-swap = "1"
 engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon" }
 # 핸드셰이크 mock WS 서버(첫 송신 프레임=Auth 단언)에서 서버측 accept/Auth 응답을 직접 흉내낸다.
 tokio-tungstenite = "0.26"
+# T4(S14 모듈①) 재연결 백오프 테스트: tokio::time::pause()/advance() 로 가짜 시계를 돌려
+#   지수 백오프(500ms→10s MAX5)를 실벽시계 없이 결정론적으로 검증한다(ADR-0038 — 매직 sleep 금지).
+#   ★dev 전용★: 운영 빌드엔 test-util 이 안 들어간다(시계 제어는 테스트에서만).
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync", "net"] }
 
 # profile.release 는 workspace 루트(../Cargo.toml)로 이동(멤버에 두면 무시됨).

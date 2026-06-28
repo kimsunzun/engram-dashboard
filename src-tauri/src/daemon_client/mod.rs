@@ -45,8 +45,7 @@ use tokio::sync::{mpsc, watch};
 use connection::{run_connection, ConnectionCommand, HandshakeError, HANDSHAKE_TIMEOUT};
 use lifecycle::Lifecycle;
 
-/// 연결 수명 상태. 재연결 전이(connecting→reconnecting→down 백오프)는 T4 가 채운다 —
-/// T2 는 "한 번 연결해 connected 도달" + 명시 close 만 표현한다.
+/// 연결 수명 상태. T4 가 재연결 전이(connected→reconnecting→connected 회복 / 소진 시 down)를 채웠다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     /// 아직 연결 시도 전 또는 명시 종료됨(close). 재연결 소진 종착(T4)도 여기로 모인다.
@@ -55,6 +54,9 @@ pub enum ConnectionState {
     Connecting,
     /// Hello 수신 = 인증 성공. 명령/구독 가능.
     Connected,
+    /// 비의도 끊김 후 재연결 시도 중(백오프 sleep ~ 다음 attach 시도). 소진 시 Down, 성공 시 Connected.
+    /// wsTransport `reconnecting` 상태 대응 — 명시 close(Down)와 구분된다(자동 회복 진행 중).
+    Reconnecting,
 }
 
 /// 데몬 발견 경계(seam). connect 경로는 spawn 가능(`ensure_spawn`), ensure 경로는 no-spawn
@@ -167,26 +169,49 @@ impl DaemonClient {
     /// ★spawn 가능★: 데몬이 없으면 `discovery.ensure_spawn` 이 WMI 로 띄운다 — 부팅 연결/사용자
     /// 명시 시작만 이 경로를 탄다. discover → WS → Auth → Hello → connected 까지 한 번에 간다.
     /// 이미 connected 면 즉시 Ok(중복 연결 방지 — 주 가드는 generation, 이건 보조 단축).
+    ///
+    /// ## ★승계 취소를 discovery *전에* (FIX-1, T4 2차)★
+    /// 진입 즉시(느린 discovery await 전에) `bump_and_capture(Some(Connecting))` 으로 옛 세대를 취소+
+    /// 승계한다 — bump 가 cancel watch 에 신호를 쏘고 옛 cmd_tx 를 비운다. 그래야 discovery 창(spawn 가능
+    /// = 수십초까지 늘어날 수 있음) 동안 진행 중이던 옛 재연결 세대가 *그 창에서* 소켓을 열고 Auth 를
+    /// 보내지 못한다(OSS 정석: 승계 시 옛 토큰 즉시 취소). 이전엔 discovery 를 먼저 하고 start_connection
+    /// 안에서 bump 했어서 그 창이 무방비였다(Codex BLOCK). 캡처한 my_gen 을 그대로 start_connection 에
+    /// 넘겨 ★이중 bump 를 피한다★(start_connection 은 더 이상 bump 안 함).
     pub async fn connect(&self) -> Result<(), HandshakeError> {
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
         tracing::info!("데몬 연결 시작(connect — spawn 가능 경로)");
+        // ★진입 즉시 승계 취소(FIX-1)★: discovery await 전에 세대를 올려 옛 재연결을 cancel + stale 화한다.
+        //   bump_and_capture 가 (a)세대++ (b)closed_by_user=false (c)옛 cmd_tx=None (d)cancel 신호 (e)Connecting
+        //   발행을 한 락 원자로 한다. 이 my_gen 을 start_connection 에 넘겨 이중 bump 를 피한다.
+        let my_gen = self
+            .lifecycle
+            .bump_and_capture(Some(ConnectionState::Connecting));
         // ★spawn 허용 경로★: ensure_spawn(데몬 없으면 띄움). blocking 이라 spawn_blocking 으로 감싼다.
+        //   이 await 동안 옛 세대는 이미 취소·stale 이라 소켓을 못 연다(위 bump 가 닫은 창).
         let discovery = self.discovery.clone();
-        let info = self
+        let info = match self
             .rt
             .spawn_blocking(move || discovery.ensure_spawn(DEFAULT_CONNECT_TIMEOUT))
             .await
-            .map_err(|e| {
-                tracing::warn!("데몬 discovery join 실패: {e}");
-                HandshakeError::Discovery(format!("ensure join 실패: {e}"))
-            })?
-            .map_err(|e| {
+        {
+            Ok(Ok(info)) => info,
+            Ok(Err(e)) => {
                 tracing::warn!("데몬 발견/spawn 실패: {e}");
-                HandshakeError::Discovery(e)
-            })?;
-        self.start_connection(info).await
+                // 내가 올린 세대가 아직 current 면 Down 으로(가드된). 더 새 connect/close 가 끼었으면 미발행.
+                self.lifecycle
+                    .publish_if_current(my_gen, ConnectionState::Down);
+                return Err(HandshakeError::Discovery(e));
+            }
+            Err(e) => {
+                tracing::warn!("데몬 discovery join 실패: {e}");
+                self.lifecycle
+                    .publish_if_current(my_gen, ConnectionState::Down);
+                return Err(HandshakeError::Discovery(format!("ensure join 실패: {e}")));
+            }
+        };
+        self.start_connection(info, my_gen).await
     }
 
     /// attach-only 진입점(ADR-0021 B-1) = wsTransport `ensureReady()` 대응.
@@ -194,18 +219,30 @@ impl DaemonClient {
     /// ★no-spawn★: `discovery.read_live`(daemon.json read-only)만 부른다 — 데몬이 없으면 띄우지
     /// 않고 실패한다(명령이 데몬을 respawn 하면 안 됨). 살아있는 데몬에만 attach.
     /// 이미 connected 면 즉시 Ok(주 가드는 generation, 이건 보조 단축).
+    ///
+    /// ## ★승계 취소를 read_live *전에* (FIX-1, T4 2차)★
+    /// connect() 와 동형: read_live(no-spawn 이라 짧지만, 파일 IO 가 느릴 여지)를 부르기 전에 bump 로 옛
+    /// 세대를 취소·승계한다. ensure 는 attach-only(ADR-0021 — no-spawn)지만 *승계 취소* 는 동일 적용 —
+    /// read_live 창 동안 옛 재연결이 소켓을 열지 못하게. 캡처한 my_gen 을 start_connection 에 넘긴다.
     pub async fn ensure(&self) -> Result<(), HandshakeError> {
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
         tracing::info!("데몬 연결 시작(ensure — attach-only, no-spawn)");
+        // ★진입 즉시 승계 취소(FIX-1)★: read_live 전에 옛 세대를 취소·stale 화(connect 와 동형).
+        let my_gen = self
+            .lifecycle
+            .bump_and_capture(Some(ConnectionState::Connecting));
         // ★ADR-0021 no-spawn 불변식★: read_live 만 — ensure 는 절대 ensure_spawn 을 부르지 않는다.
         // 데몬이 없으면 여기서 끝(spawn 0회). 복구는 명시 connect() 로만.
         let Some(info) = self.discovery.read_live() else {
             tracing::warn!("ensure 실패 — 살아있는 데몬 없음(no-spawn, connect 로만 복구)");
+            // 내가 올린 세대가 current 면 Connecting 을 Down 으로 되돌린다(가드된).
+            self.lifecycle
+                .publish_if_current(my_gen, ConnectionState::Down);
             return Err(HandshakeError::NoLiveDaemon);
         };
-        self.start_connection(info).await
+        self.start_connection(info, my_gen).await
     }
 
     /// 주어진 접속 정보로 연결 task 를 띄우고 Hello 까지 await 한다(connect/ensure 공통 후반부).
@@ -214,32 +251,33 @@ impl DaemonClient {
     /// 신호(oneshot)만 기다린다.
     ///
     /// ## ★generation 가드(Fix B — 락으로 원자화)★
-    /// 진입 즉시 lifecycle 락 아래서 세대를 bump+캡처(`my_gen`)하고 같은 락 안에서 Connecting 전이를
-    /// 발행한다 — 동시 connect/ensure 가 둘 다 들어오면 둘 다 bump 해 서로 다른 세대를 갖고, 더 새 task
-    /// 만 current 가 된다. close() 도 같은 락 아래서 세대를 올려 진행 중 task 를 전부 stale 화한다.
+    /// 세대 bump + 캡처는 **호출자(connect/ensure)가 진입 즉시 discovery 전에** 한다(FIX-1) — 그
+    /// `my_gen` 을 여기로 넘겨받는다. ★이 함수는 더 이상 bump 하지 않는다(이중 bump 회피)★. 동시
+    /// connect/ensure 가 둘 다 들어오면 각자 진입에서 bump 해 서로 다른 세대를 갖고, 더 새 task 만
+    /// current 가 된다. close() 도 같은 락 아래서 세대를 올려 진행 중 task 를 전부 stale 화한다.
     /// 공유 상태(state watch·cmd_tx) 변경은 항상 "세대 비교 + 변경" 을 같은 critical section 으로 묶는
     /// lifecycle 메서드(`publish_if_current`/`store_cmd_if_current`)로만 한다 — 비교와 변경 사이에 다른
     /// 스레드가 세대를 못 바꾸므로 stale caller/task 는 절대 공유 상태를 못 건드린다(Connecting/Down/
     /// cmd_tx clobber 불가). ★ADR-0006★: 락 메서드는 전부 동기(await 없음)라, 아래 `ready_rx.await`
     /// 등 모든 await 는 락을 보유하지 않은 채 일어난다.
-    async fn start_connection(&self, info: DaemonInfo) -> Result<(), HandshakeError> {
-        // 세대 bump + 캡처 + Connecting 전이를 한 락 아래 원자로 묶는다(bump 후 Connecting 사이에 다른
-        // connect/close 가 끼어 내 Connecting 이 stale 한 상태를 덮는 일을 차단). 락은 이 메서드 호출
-        // 안에서만 잡혔다 즉시 풀린다 — 아래 await 들은 락 밖.
-        let my_gen = self
-            .lifecycle
-            .bump_and_capture(Some(ConnectionState::Connecting));
-
+    ///
+    /// ★my_gen 계약★: 호출자가 `bump_and_capture` 로 막 캡처해 넘긴 값이다. 그 bump 와 이 함수 진입
+    /// 사이에 다른 connect/close 가 또 끼면 내 my_gen 은 이미 stale 일 수 있다 — 그래도 모든 발행이
+    /// publish_if_current/store_cmd_if_current 가드를 통과하므로 안전하다(stale 이면 그냥 미발행).
+    async fn start_connection(&self, info: DaemonInfo, my_gen: u64) -> Result<(), HandshakeError> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConnectionCommand>(64);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), HandshakeError>>();
 
         // ★단일 연결 task 소유★: run_connection 이 WebSocketStream 을 split 해 단독 소유하고,
-        //   cmd_rx 로 들어오는 명령을 처리한다(T2 는 핸드셰이크까지, 명령 처리 로직은 T6).
-        //   my_gen + lifecycle 핸들을 넘겨, task 가 stale 이면 공유 상태를 안 건드리게 한다(Fix B).
+        //   cmd_rx 로 들어오는 명령을 처리한다(T6). 비의도 끊김 시 이 task 안에서 백오프 재연결을
+        //   돈다(T4 — discovery.read_live no-spawn + rt.spawn_blocking). my_gen + lifecycle 핸들로
+        //   stale task 가 공유 상태를 못 건드리게 한다(Fix B + reconnect_guard).
         self.rt.spawn(run_connection(
             info,
             my_gen,
             self.lifecycle.clone(),
+            self.discovery.clone(),
+            self.rt.clone(),
             self.handshake_timeout,
             cmd_rx,
             ready_tx,
@@ -321,12 +359,16 @@ impl DaemonClient {
     // oneshot await 패턴(connection.rs ConnectionCommand 의 reply 채널). T2 는 채널 스켈레톤만.
     // TODO(T6): send_command/spawn/kill/write/resize/subscribe invoke 경로.
 
-    // ── T4 자리: 재연결·백오프·generation 가드·closedByUser ──────────────────────────
-    // TODO(T4): 비의도 끊김 시 read_live 기반 attach-only 재연결(지수 백오프 500ms→10s MAX5→Down),
-    //   generation(openGen) 가드, closedByUser 가드(명령/재연결이 spawn 안 하게).
-    //   ★resubscribe 배선★: connected 재전이 직후 subs 순회하며 각 agent 에
+    // ── T4 완료: 재연결·백오프·generation 가드·closedByUser ──────────────────────────
+    // 비의도 끊김(데몬 stream 종료/오류/Close frame) 시 연결 task(connection.rs `connected_lifetime`)가
+    // **그 task 안에서** attach-only 재연결을 돈다 — read_live(no-spawn) + 지수 백오프(500ms→10s MAX5) →
+    // 성공 시 Connected 재전이, 소진 시 Down. close()(closed_by_user)·새 connect(세대 bump)는
+    // reconnect_guard(lifecycle.rs)로 Stop → 재연결 즉시 중단(좀비/respawn 차단). 백오프 sleep 은
+    // tokio::time::sleep 이라 테스트가 time::pause/advance 로 결정론 검증(ADR-0038).
+    //   ★resubscribe 배선은 T5/T6★: connected *재*전이 직후 subs 순회하며 각 agent 에
     //   protocol_state::resubscribe_params(&sub) 로 Subscribe{epoch,after_seq} 산출 → wire send
     //   (JS resubscribeAll 대응). 끊김 시 protocol_state::drain_pending(&mut pending) → 일괄 reject.
+    //   T4 는 *연결 carrier* 재연결만 — subs/pending 맵은 T5/T6 가 연결 task 에 들이면서 배선한다.
 
     // ── T3 완료: protocol_state 순수 결정 함수(epoch/seq dedup·resubscribe·pending 매칭) ─────
     // `protocol_state` 모듈이 SubState(epoch·last_delivered_seq)·PendingMap·결정 함수(decide_output·
