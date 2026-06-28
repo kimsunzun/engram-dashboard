@@ -2217,6 +2217,29 @@ async fn reconnect_close_after_auth_send_self_closes_socket() {
     );
 }
 
+// ── 실시간(multi_thread) 폴링 헬퍼 — paused-time advance_until 의 실벽시계 짝 ───────────────────
+//
+// ★왜 실시간 전용 헬퍼가 따로 필요한가★: 위 `advance_until` 은 `tokio::time::advance` 로만 시간을
+//   흘리는 **paused-clock 전용**이다(current-thread + start_paused). multi_thread + 실시간 런타임에선
+//   advance 가 무의미·유해하므로(아래 supersede_* 테스트가 왜 multi_thread 인지 그 함수 헤더 참조),
+//   조건을 실벽시계로 짧게 폴링하는 별도 헬퍼를 둔다. `advance_until` 은 손대지 않는다(다른 paused-time
+//   테스트들이 쓴다).
+
+/// `cond` 가 참이 될 때까지 실시간으로 짧게 폴링한다. 전역 상한(`limit`) 안에 충족되면 true,
+/// 안 되면 false(상한 도달 = hang 대신 호출부의 단언 실패로 귀결). multi_thread 전용.
+async fn poll_until_realtime(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    tokio::time::timeout(limit, async {
+        loop {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 // ── (c) FIX-1: 재연결 중 승계 connect() → discovery 창에도 옛 재연결이 데몬 무접촉 ──────────────────
 // ★FIX-1 직격(승계 취소를 discovery *전에*)★: 재연결 백오프 중 명시 connect() 가 들어오면, connect() 는
 //   **느린 discovery(ensure_spawn) await 전에** bump_and_capture 로 옛 세대를 취소·stale 화한다. 그래야
@@ -2225,85 +2248,112 @@ async fn reconnect_close_after_auth_send_self_closes_socket() {
 //   discovery await 에 결정론적으로 멈춘 뒤, 그 창에서 옛 재연결이 데몬에 추가 접촉(accept)을 안 함을 단언.
 // ★mutation(FIX-1 되돌림 = discovery 후 bump)★ 시: discovery 창 동안 옛 세대가 아직 current 라 cancel 이
 //   안 떠 옛 재연결이 connect_async→Auth 로 진행 → accept 가 샌다(이 단언이 깨짐).
-// ★#[ignore]: paused-time 하 이 테스트의 마지막 connect_task 완료 대기에서 hang 한다(테스트 하네스 미완 —
-//   프로덕션 코드는 handshake_timeout 이 있어 무관). FIX-1 자체는 위 mutation 단언 + connect/ensure 코드로
-//   유효하나, 이 통합 테스트의 결정론 구동을 다음 세션에서 마무리해야 한다(step-log 기록). 그때까지 격리.
-#[tokio::test(start_paused = true)]
-#[ignore = "paused-time connect_task 대기 hang — 테스트 하네스 미완(다음 세션 수정). 프로덕션 무관."]
+//
+// ★왜 multi_thread + 실시간인가(이전 #[ignore] paused-time 폐기)★: 이전엔 `start_paused`(current-thread)
+//   였는데, discovery 게이트가 풀린 뒤 승계 connect 의 *초기 핸드셰이크*(connection.rs handshake:
+//   connect_async→Auth send→wait_for_hello 의 다단계 loopback 왕복)가 advance_until 의 한 yield batch
+//   안에 못 끝나면, 다음 `tokio::time::advance(11s)` 가 `timeout(handshake_timeout=10s)` 을 발화시켜
+//   핸드셰이크 진행을 막았다 → connect_task 가 완료에 못 닿아 영구 hang(=#[ignore] 사유였음). 정상
+//   핸드셰이크 검증 테스트 `connect_sends_auth_first_frame` 가 같은 이유로 multi_thread 를 쓴다. 그래서
+//   이 테스트도 multi_thread 로 옮기고 시계 advance 를 전부 버린다 — 연결 task·서버 task·connect await 가
+//   진짜 병행해 핸드셰이크가 데드락 없이 실시간으로 완주한다.
+// ★관찰 윈도우(실시간에서 "안 일어남"을 보는 법)★: paused-clock 에선 "시계를 흘려도 accept 가 안 는다"로
+//   봤지만, 실시간엔 시계가 늘 흐르므로 **discovery 창 동안 짧은 윈도우(OBSERVE) 내내 accept 가 불변**임을
+//   확인하는 것으로 대체한다. 옛 재연결은 FIX-1 의 cancel 로 *소켓 open 이전에* 탈출했어야 하므로(loopback
+//   accept 는 sub-ms — 만약 옛 재연결이 살아 connect_async 했다면 이 윈도우 안에 accept 가 즉시 늘어난다),
+//   윈도우 내내 불변이면 무접촉이 입증된다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supersede_connect_cancels_reconnect_before_discovery() {
+    // ★관찰 윈도우(200ms)★: 옛 재연결이 (FIX-1 가 깨졌다면) 소켓을 여는 데 걸리는 loopback accept 는
+    //   sub-ms 다 — 200ms 면 누수 accept 를 충분히 포착한다. 너무 길면 테스트가 느려지고, 너무 짧으면
+    //   스케줄 지터로 누수를 놓칠 수 있어 그 중간값. backoff_delay(0)=500ms 보다 짧아, 옛 재연결이 백오프
+    //   sleep 에 머무는 동안(아직 정상 경로로도 소켓 안 엶) 관찰이 끝난다 — 즉 이 윈도우의 "불변"은 FIX-1
+    //   취소가 아니라 단지 백오프 때문일 수도 있다는 혼선을 피하려, 윈도우 시작 전에 승계 connect 가 이미
+    //   discovery 게이트에 *진입*(=bump+cancel 이 이미 발사됨)했음을 spawn_entered_rx 로 못박는다.
+    const OBSERVE: Duration = Duration::from_millis(200);
+    // ★전역 상한(5s)★: 조건 폴링이 충족 안 되면 hang 대신 단언 실패로 빠지게 하는 안전망(실시간 타이밍
+    //   테스트라 만일의 스케줄 정체 대비). 정상 경로는 전부 수백 ms 내에 끝난다.
+    const LIMIT: Duration = Duration::from_secs(5);
+
     let server = spawn_reconnect_server().await;
     let disco = Arc::new(MockDiscovery::new(
         Some(info_for(server.port, "supersede-tok")),
         Ok(info_for(server.port, "supersede-tok")),
     ));
-    let (spawn_entered_rx, spawn_release_tx) = disco.gate_ensure_spawn();
-    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+    let client = Arc::new(DaemonClient::new(Handle::current(), disco.clone()));
 
+    // ★최초 connect 는 게이트 *없이* 끝낸다★: connect() 는 ensure_spawn 을 거치는데,
+    //   gate_ensure_spawn 은 **첫 ensure_spawn 호출 1개**만 잡아 블록시킨다. 게이트를 connect_via
+    //   전에 켜면 *최초 연결*이 거기 걸려 영구 hang 한다(게이트 release 는 한참 뒤 승계 connect 용).
+    //   따라서 최초 연결을 ungated 로 connected 시킨 뒤(아래) 게이트를 설치해, 그 다음 ensure_spawn
+    //   호출(= 승계 connect, 2번째)이 discovery 창에 걸리게 한다. (재연결은 read_live=no-spawn 이라
+    //   ensure_spawn 을 안 거쳐 게이트와 무관 — 게이트가 잡는 다음 호출은 정확히 승계 connect 다.)
     connect_via(&client).await;
     assert_eq!(server.accept_count(), 1, "최초 connect 1회 accept");
 
-    // 끊김 → 재연결 진입(백오프 sleep).
+    // 최초 연결 완료 *후* discovery 게이트 설치 — 이후 승계 connect 의 ensure_spawn 이 여기 걸린다.
+    let (spawn_entered_rx, spawn_release_tx) = disco.gate_ensure_spawn();
+
+    // 끊김 → 재연결 진입(백오프 sleep — backoff_delay(0)=500ms). 옛 재연결은 이 sleep 을 cancel_rx 와
+    //   select! 중이라, 아래 승계 connect 의 bump 가 cancel 을 켜면 sleep 끝까지 안 기다리고 즉시 깨어
+    //   reconnect_guard=Stop → 소켓 open 이전에 탈출한다(FIX-1 의 실제 취소 경로).
     server.drop_current_connection();
-    let entered = advance_until_reconnecting(&client).await;
+    let entered =
+        poll_until_realtime(LIMIT, || client.state() == ConnectionState::Reconnecting).await;
     assert!(entered, "reconnecting 진입: {:?}", client.state());
     let accepts_at_disconnect = server.accept_count();
 
-    // ★승계 connect()★를 백그라운드로 시작 — ensure_spawn 게이트에 멈춘다(= discovery 창).
+    // ★승계 connect()★를 백그라운드로 시작 — ensure_spawn 게이트에 멈춘다(= discovery 창). 진입 즉시
+    //   bump_and_capture 가 옛 세대를 취소·stale 화하므로, 옛 재연결은 (위 500ms 백오프 sleep 중이라면)
+    //   여기서 cancel 을 받아 소켓 open 전에 탈출한다.
     let c2 = client.clone();
     let connect_task = tokio::spawn(async move { c2.connect().await });
 
-    // connect() 가 discovery(ensure_spawn) 창에 진입할 때까지 기다린다(=옛 세대 취소가 *이미* 발사된 시점).
-    let mut hit_discovery = false;
-    for _ in 0..40 {
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-        if spawn_entered_rx.try_recv().is_ok() {
-            hit_discovery = true;
-            break;
-        }
-        tokio::time::advance(Duration::from_secs(11)).await;
-    }
+    // connect() 가 discovery(ensure_spawn) 창에 진입할 때까지 실시간 대기(=옛 세대 취소가 *이미* 발사된
+    //   시점). spawn_entered_rx 는 ensure_spawn mock 이 게이트 진입 시 보내는 std::sync::mpsc 신호 —
+    //   spawn_blocking 스레드에서 send 되므로 try_recv 로 비차단 폴링한다.
+    let hit_discovery = poll_until_realtime(LIMIT, || spawn_entered_rx.try_recv().is_ok()).await;
     assert!(
         hit_discovery,
         "승계 connect() 가 discovery(ensure_spawn) 창에 진입해야"
     );
 
-    // ★핵심 단언(FIX-1)★: discovery 창 동안(아직 새 연결 소켓 안 열림) 옛 재연결이 데몬에 추가 접촉을
-    //   안 한다 — bump 가 discovery *전에* 옛 세대를 취소했으므로. 시계를 흘려도 accept 가 안 는다.
-    let accepts = server.accepts.clone();
-    let contacted = advance_until(20, || {
-        accepts.load(Ordering::SeqCst) > accepts_at_disconnect
-    })
-    .await;
-    assert!(
-        !contacted,
-        "discovery 창 동안 옛 재연결이 데몬에 추가 접촉하면 안 됨(FIX-1): accepts={} (끊김 시점 {})",
-        server.accept_count(),
-        accepts_at_disconnect
-    );
+    // ★핵심 단언(FIX-1)★: discovery 창 동안(승계 connect 가 게이트에 멈춰 있어 아직 새 소켓 안 열림),
+    //   옛 재연결이 데몬에 추가 접촉을 안 한다 — bump 가 discovery *전에* 옛 세대를 cancel 했으므로.
+    //   관찰 윈도우(OBSERVE) 내내 accept_count 가 끊김 시점 값에서 불변임을 본다(누수가 있다면 loopback
+    //   accept 가 sub-ms 안에 늘어나므로 이 윈도우가 잡는다).
+    let observe_start = std::time::Instant::now();
+    while observe_start.elapsed() < OBSERVE {
+        assert_eq!(
+            server.accept_count(),
+            accepts_at_disconnect,
+            "discovery 창 동안 옛 재연결이 데몬에 추가 접촉하면 안 됨(FIX-1): accepts={} (끊김 시점 {})",
+            server.accept_count(),
+            accepts_at_disconnect
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
-    // discovery 풀어줌 → 승계 connect 가 정식 연결을 수립(새 소켓 1개) → connected.
+    // discovery 풀어줌 → 승계 connect 가 정식 연결을 수립(새 소켓 1개) → connected. multi_thread 라
+    //   핸드셰이크가 실시간으로 완주한다(paused-time 처럼 hang 하지 않음).
     let _ = spawn_release_tx.send(());
-    let final_ok = advance_until(40, || {
-        client.state() == ConnectionState::Connected
-            && server.accept_count() == accepts_at_disconnect + 1
-    })
-    .await;
-    // ★paused-time 행 방지★: connect_task 완료(승계 connect 의 핸드셰이크 마무리)는 시간 advance 를
-    //   더 요구할 수 있다 — Connected/accept 단언이 먼저 충족돼 위 루프를 빠져나와도 task 가 아직
-    //   안 끝났을 수 있으므로, 맨손 .await(가짜 시계가 안 흘러 영원히 매달림) 대신 advance_until 로
-    //   is_finished() 를 시계 흘리며 폴링한 뒤, 끝난 게 보장된 다음 .await 로 결과만 회수한다.
-    let connect_finished = advance_until(40, || connect_task.is_finished()).await;
-    assert!(
-        connect_finished,
-        "승계 connect task 가 시계 advance 로 완료돼야(paused-time 행 방지)"
-    );
-    let connect_result = connect_task.await.expect("connect task panic 없이");
+
+    // 승계 connect task 완료(핸드셰이크 마무리)를 bound 내에 회수 — hang 이면 timeout 이 잡는다.
+    let connect_result = tokio::time::timeout(LIMIT, connect_task)
+        .await
+        .expect("승계 connect task 가 bound 내 완료돼야(multi_thread 라 hang 없음)")
+        .expect("connect task panic 없이");
     assert!(
         connect_result.is_ok(),
         "승계 connect 는 정식 연결로 성공해야: {connect_result:?}"
     );
+
+    // discovery 풀린 뒤 정식 연결 1개만 추가되고 connected 로 안정.
+    let final_ok = poll_until_realtime(LIMIT, || {
+        client.state() == ConnectionState::Connected
+            && server.accept_count() == accepts_at_disconnect + 1
+    })
+    .await;
     assert!(
         final_ok,
         "discovery 풀린 뒤 정식 연결 1개만 추가되고 connected: accepts={} state={:?}",
