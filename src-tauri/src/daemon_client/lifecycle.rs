@@ -260,6 +260,21 @@ impl Lifecycle {
             .subscribe()
     }
 
+    /// ★현재 활성 연결의 cmd_tx 핸들(T6a — send_command 진입점)★. 락 잡고 현재 저장된 cmd_tx 를
+    /// clone 해 돌려준다(없으면 None = 연결 task 없음/끊김). `mpsc::Sender::clone` 은 동기·경량이라
+    /// 락 안에서 OK(ADR-0006 — await 없음). 호출자는 반환된 Sender 로 **락 밖에서** `send().await` 한다
+    /// (Sender 는 cmd_rx 와 독립 채널이라, 이 락을 쥔 채 send 하지 않는다 → 락 across await 없음).
+    ///
+    /// ★stale 송신 차단★: bump_and_capture/close 가 cmd_tx 를 None 으로 비우므로(승계·종료), 이 clone 은
+    /// 항상 "현재 current 연결" 의 채널이다. 승계 직후 옛 cmd_tx 로 명령이 새는 일이 없다(lifecycle 정합).
+    pub(crate) fn current_cmd_tx(&self) -> Option<mpsc::Sender<ConnectionCommand>> {
+        self.inner
+            .lock()
+            .expect("lifecycle poisoned")
+            .cmd_tx
+            .clone()
+    }
+
     /// 현재 closed_by_user 스냅샷(테스트용 — close 가드의 단위 검증).
     #[cfg(test)]
     pub(crate) fn is_closed_by_user(&self) -> bool {

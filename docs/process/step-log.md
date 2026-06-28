@@ -430,6 +430,13 @@
 - **게이트:** 전체 workspace `cargo test` green(src-tauri 128 = 기존 111 + 신규 17 / 전 멤버 0 failed)·`cargo fmt --check` 0·`output_router.rs` tauri import 0(순수 로직). GUI 실측 N/A(T5 headless — 출력이 창에 닿는 건 T6/T7).
 - **다음:** T6(invoke 핸들러 + window Channel 등록 + rebuild를 layout critical section에 배선 + delta→cmd_tx Subscribe/Unsubscribe + connection.rs:668 route 호출) → T7(TauriTransport carrier) → T8(React 정리).
 
+### 모듈① T6a — cmd 요청/응답 평면 (2026-06-29, dashboard2/master, opus)
+- **슬라이스:** T6를 동시성-치명 출력 route(T6b) 격리 위해 T6a(cmd 평면)/T6b(출력 평면)로 분할(spike §9).
+- **구현**(코더 opus): `ConnectionCommand::SendCommand{cmd, reply: oneshot}`(+ Subscribe/Unsubscribe variant 정의·배선 T6b) · `DaemonClient::send_command`(request_id 매칭 reply await, request_id 없는 fire-and-forget[Resize/Subscribe/Unsubscribe]은 거부) · `commands/agent.rs`(신설, spawn/kill/interrupt/write_stdin/resize invoke) · main_loop cmd_rx arm(pending insert→sink.send)·Text arm(AgentEvent→take_pending→resolve) · actor가 PendingMap 단독 소유 · **끊김 시 pending drain**(no-leak §3) · owned tokio runtime(`new_real_with_owned_runtime` — Tauri setup이 tokio 컨텍스트 아님). `lib.rs` manage(Arc<DaemonClient>)+invoke 등록.
+- **`/review code deep`(opus PASS / Codex+reviewer-deep FIX — cross-family 가치):** crux(재연결 pending drain·double-resolve 불가·insert-then-send take-back) 3인 정확 확인. **FIX 6건 반영:** ① 버퍼된 cmd_rx 미drain(재연결 후 실행 위험) → 끊김 시 cmd_rx try_recv drain ② drain 메시지가 `ids.rs` no-auto-retry 의도와 모순("재시도 필요"→"결과 불명/미전송" 구분) ③ agent_resize 조용한 no-op→warn(T7 함정) ④ 중복 request_id insert→prev Err+warn+debug_assert ⑤ expect_ack 잘못된 variant→warn ⑥ crux 테스트(재연결×in-flight·버퍼-cmd) 추가. **Codex #5(owned runtime teardown)는 reviewer-deep이 app-lifetime·메인스레드 drop으로 반박 → 무수정.**
+- **게이트:** 전체 workspace `cargo test` green(src-tauri 141 = 137+4 신규 / 전 멤버 0 failed)·fmt 0·core tauri import 0. GUI 실측 N/A(프론트 아직 wsTransport 직결 — invoke 미연결, T7 cutover 때 실측).
+- **다음: T6b(출력 평면, 동시성-치명)** — Binary arm route(decode→decide→`router.targets`→window Channel fan-out) + window Channel registry(Arc<Mutex<HashMap<label, Channel<Response>>>>) + `subscribe_output` invoke + `commands/layout.rs` rebuild-under-lock 배선 + delta→Subscribe/Unsubscribe(fire-and-forget) + AppHandle emit 배선. 미해결 G1(Subscribe epoch/after_seq=SubState)·G2(Channel::send from tokio 실측)·G3(registry task 주입).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

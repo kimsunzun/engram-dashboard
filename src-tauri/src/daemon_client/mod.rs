@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_protocol::DaemonInfo;
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, DaemonInfo};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 
@@ -108,8 +108,14 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 통신하는 채널 끝(`cmd_tx`)과 상태 구독(`state_rx`)만 들고 있다 — stream 자체는 절대 들지 않는다
 /// (단일 task 소유 불변식).
 pub struct DaemonClient {
-    /// 연결 task 를 spawn 할 런타임 핸들. 운영=Tauri/전용 multi-thread, 테스트=현재 런타임.
+    /// 연결 task 를 spawn 할 런타임 핸들. 운영=전용 multi-thread(`_owned_rt`), 테스트=현재 런타임.
     rt: Handle,
+    /// ★전용 런타임 소유(운영 — T6a)★. `setup` 콜백은 tokio 런타임 컨텍스트가 아닐 수 있어
+    /// `Handle::current()` 가 패닉한다. 그래서 운영 생성자(`new_real_with_owned_runtime`)는 spike §2
+    /// "tokio multi-thread(데몬처럼)" 대로 전용 멀티스레드 런타임을 *직접 만들어* 그 Handle 을 쓴다.
+    /// 이 필드가 런타임을 살려둔다 — drop 되면 Handle 이 무효가 돼 연결 task 가 죽으므로 DaemonClient
+    /// 수명과 묶는다(`Arc<DaemonClient>` 가 app 수명). `None` = 외부 핸들 주입(테스트=현재 런타임).
+    _owned_rt: Option<Arc<tokio::runtime::Runtime>>,
     /// 데몬 발견 경계(connect=spawn 가능 / ensure=no-spawn).
     discovery: Arc<dyn DaemonDiscovery>,
     /// 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
@@ -142,6 +148,7 @@ impl DaemonClient {
         let (lifecycle, state_rx) = Lifecycle::new();
         Self {
             rt,
+            _owned_rt: None,
             discovery,
             state_rx,
             lifecycle: Arc::new(lifecycle),
@@ -152,6 +159,27 @@ impl DaemonClient {
     /// 운영 생성자 — RealDiscovery + 주어진 런타임 핸들.
     pub fn new_real(rt: Handle) -> Self {
         Self::new(rt, Arc::new(RealDiscovery))
+    }
+
+    /// ★운영 생성자(T6a — 전용 런타임 소유)★. `lib.rs` `setup` 에서 쓴다. tokio 런타임 컨텍스트 밖
+    /// (`setup` 콜백)에서 `Handle::current()` 가 패닉하지 않도록, 전용 멀티스레드 런타임을 직접 만들어
+    /// 그 Handle 로 연결 task 를 띄운다(spike §2). 런타임은 DaemonClient 가 소유(`_owned_rt`)해 app
+    /// 수명 동안 살아있다. 실패(런타임 생성 불가)면 Err — 호출자가 보고하고 데몬 명령 없이 진행한다.
+    pub fn new_real_with_owned_runtime() -> std::io::Result<Self> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("engram-daemon-client")
+            .build()?;
+        let handle = rt.handle().clone();
+        let (lifecycle, state_rx) = Lifecycle::new();
+        Ok(Self {
+            rt: handle,
+            _owned_rt: Some(Arc::new(rt)),
+            discovery: Arc::new(RealDiscovery),
+            state_rx,
+            lifecycle: Arc::new(lifecycle),
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+        })
     }
 
     /// 현재 연결 상태 스냅샷(락 없이).
@@ -354,10 +382,48 @@ impl DaemonClient {
         self.lifecycle.close();
     }
 
-    // ── T6 자리: invoke 명령(spawn/kill/write/resize/subscribe) ─────────────────────
-    // 여기에 `pub async fn send_command(&self, cmd) -> reply` 가 들어간다 — cmd_tx.send 후
-    // oneshot await 패턴(connection.rs ConnectionCommand 의 reply 채널). T2 는 채널 스켈레톤만.
-    // TODO(T6): send_command/spawn/kill/write/resize/subscribe invoke 경로.
+    // ── T6a: invoke 명령 request/reply 평면(spawn/kill/interrupt/write/resize/…) ─────────
+    /// side-effect 명령을 연결 task 로 보내고 데몬 reply(request_id 매칭)를 await 한다.
+    ///
+    /// ★계약(request_id)★: `cmd` 는 **호출자가 request_id 를 이미 박은** 명령이다(commands/agent.rs 의
+    /// 빌더가 `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency
+    /// (재시도 시 같은 키)와 정합한다 — send_command 가 임의로 채우면 호출자가 키를 모른다. request_id
+    /// 없는 명령(Auth/Subscribe/Unsubscribe/Resize)은 reply 가 안 와 hang 이므로 여기서 거른다.
+    ///
+    /// ★흐름★: (1) 현재 cmd_tx clone(없으면 not-connected Err) (2) oneshot 생성 (3) `SendCommand`
+    /// enqueue (4) reply await. 연결 task 가 reply 를 resolve(Ok/Err)하거나, 끊김 시 drain 으로 Err 를
+    /// 보낸다(no-hang). cmd_tx send 실패(채널 full/닫힘)·oneshot drop(연결 task 사망)도 Err 로 귀결.
+    ///
+    /// ★ADR-0006(락 across await 금지)★: `current_cmd_tx()` 는 락을 잡았다 즉시 풀고 Sender clone 만
+    /// 돌려준다 — 이후 `tx.send().await`·`rx.await` 는 락 미보유 상태다(Sender 는 lifecycle 락과 독립).
+    pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
+        // request_id 없는 명령은 reply 매칭 불가 → 즉시 거른다(연결 task 에서 영구 pending 방지).
+        if protocol_state::command_request_id(&cmd).is_none() {
+            return Err("send_command: request_id 없는 명령은 reply 를 기대할 수 없다".to_string());
+        }
+        // 현재 활성 연결의 cmd_tx 를 얻는다(없으면 연결 안 됨/끊김).
+        let Some(cmd_tx) = self.lifecycle.current_cmd_tx() else {
+            return Err("데몬에 연결되어 있지 않음(connect 먼저)".to_string());
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        // 연결 task 로 enqueue. send 실패 = 채널 닫힘(연결 task 종료) → not-connected 취급.
+        if cmd_tx
+            .send(ConnectionCommand::SendCommand {
+                cmd,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err("연결 task 가 명령을 받지 못함(끊김)".to_string());
+        }
+        // reply 대기. 연결 task 가 resolve(Ok/Err) 하거나 끊김 drain 으로 Err. oneshot 송신단이 reply
+        //   없이 drop(연결 task 사망 등) 되면 RecvError → not-connected 취급.
+        match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => Err("명령 응답 수신 실패(연결 task 종료)".to_string()),
+        }
+    }
 
     // ── T4 완료: 재연결·백오프·generation 가드·closedByUser ──────────────────────────
     // 비의도 끊김(데몬 stream 종료/오류/Close frame) 시 연결 task(connection.rs `connected_lifetime`)가

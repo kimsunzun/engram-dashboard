@@ -21,7 +21,77 @@
 
 use std::collections::HashMap;
 
-use engram_dashboard_protocol::RequestId;
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
+
+// ── request_id 추출(T6a — request/reply 상관) ─────────────────────────────────────────
+/// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
+/// 일부(Auth/Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
+///
+/// ★T6a 계약★: `send_command` 은 reply 를 기대하므로 request_id 가 있는 명령에만 쓴다. None 인 명령을
+/// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로, 호출자(send_command)가 None 을 거른다.
+pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
+    match cmd {
+        AgentCommand::Spawn { request_id, .. }
+        | AgentCommand::Kill { request_id, .. }
+        | AgentCommand::Interrupt { request_id, .. }
+        | AgentCommand::WriteStdin { request_id, .. }
+        | AgentCommand::AcquireInput { request_id, .. }
+        | AgentCommand::ReleaseInput { request_id, .. }
+        | AgentCommand::ListAgents { request_id }
+        | AgentCommand::StopDaemon { request_id, .. }
+        | AgentCommand::SpawnByCwd { request_id, .. }
+        | AgentCommand::ListProfiles { request_id }
+        | AgentCommand::CreateProfile { request_id, .. }
+        | AgentCommand::DeleteProfile { request_id, .. }
+        | AgentCommand::SpawnProfile { request_id, .. }
+        | AgentCommand::SetProfileAutoRestore { request_id, .. }
+        | AgentCommand::GetSnapshot { request_id, .. } => Some(*request_id),
+        // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
+        AgentCommand::Auth { .. }
+        | AgentCommand::Resize { .. }
+        | AgentCommand::Subscribe { .. }
+        | AgentCommand::Unsubscribe { .. } => None,
+    }
+}
+
+/// reply 이벤트에 실린 request_id 를 꺼낸다(매칭용). 전용 reply variant(Ack/Spawned/Created/
+/// SubscribeAck-는 request_id 없음/AgentList/ProfileList/Snapshot/Error)만 request_id 를 echo 한다 —
+/// broadcast(AgentListUpdated/StatusChanged/…)는 `None` 이라 pending 매칭을 우회한다(편승 매칭 제거).
+///
+/// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
+/// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
+/// None — T6a 의 send_command 대상이 아니다(Subscribe 는 request_id 없는 명령). T6b 가 agent_id 로 처리.
+pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
+    match ev {
+        AgentEvent::Ack { request_id }
+        | AgentEvent::AgentList { request_id, .. }
+        | AgentEvent::ProfileList { request_id, .. }
+        | AgentEvent::Snapshot { request_id, .. }
+        | AgentEvent::Created { request_id, .. }
+        | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
+        AgentEvent::Error { request_id, .. } => *request_id,
+        // request_id 없는 이벤트(broadcast 또는 agent_id 기반) — pending 매칭 대상 아님.
+        AgentEvent::Hello { .. }
+        | AgentEvent::SubscribeAck { .. }
+        | AgentEvent::Output { .. }
+        | AgentEvent::ReplayComplete { .. }
+        | AgentEvent::StatusChanged { .. }
+        | AgentEvent::AgentListUpdated { .. }
+        | AgentEvent::RestoreResult { .. }
+        | AgentEvent::InputLeaseChanged { .. }
+        | AgentEvent::ProfileListUpdated { .. } => None,
+    }
+}
+
+/// reply 이벤트가 성공(Ok)인지 실패(Err)인지 가른다(T6a — oneshot resolve). `Error{message}` 만
+/// Err(message), 나머지 전용 reply 는 Ok(event). 호출자가 take_pending 으로 꺼낸 oneshot 에 이 결과를
+/// 넣는다.
+pub fn reply_outcome(ev: AgentEvent) -> Result<AgentEvent, String> {
+    match ev {
+        AgentEvent::Error { message, .. } => Err(message),
+        other => Ok(other),
+    }
+}
 
 /// 에이전트별 출력 구독 상태(JS `protocolClient.ts` `SubState` 승격).
 ///
@@ -523,5 +593,122 @@ mod tests {
         let drained = drain_pending(&mut pending);
         assert_eq!(drained, vec!["p"]);
         assert!(pending.is_empty());
+    }
+
+    // ── T6a: request_id 추출 + reply outcome 분류 ─────────────────────────────────────
+
+    /// side-effect 명령은 request_id 를 반환하고, request_id 없는 명령(Auth/Resize/Subscribe/
+    /// Unsubscribe)은 None — send_command 가 None 을 걸러 영구 pending(hang)을 막는 계약의 단위 박제.
+    #[test]
+    fn command_request_id_extracts_or_none() {
+        let r = RequestId::new();
+        let spawn = AgentCommand::Spawn {
+            profile_id: uuid::Uuid::new_v4(),
+            request_id: r,
+        };
+        assert_eq!(
+            command_request_id(&spawn),
+            Some(r),
+            "Spawn 은 request_id 동봉"
+        );
+
+        let kill = AgentCommand::Kill {
+            agent_id: uuid::Uuid::new_v4(),
+            request_id: r,
+        };
+        assert_eq!(command_request_id(&kill), Some(r));
+
+        // request_id 없는 명령들 → None(reply 매칭 대상 아님).
+        let resize = AgentCommand::Resize {
+            agent_id: uuid::Uuid::new_v4(),
+            cols: 80,
+            rows: 24,
+            viewport_id: None,
+        };
+        assert_eq!(
+            command_request_id(&resize),
+            None,
+            "Resize 는 request_id 없음"
+        );
+        let sub = AgentCommand::Subscribe {
+            agent_id: uuid::Uuid::new_v4(),
+            epoch: None,
+            after_seq: None,
+        };
+        assert_eq!(
+            command_request_id(&sub),
+            None,
+            "Subscribe 는 request_id 없음"
+        );
+        let auth = AgentCommand::Auth {
+            token: "x".into(),
+            protocol_version: 1,
+        };
+        assert_eq!(command_request_id(&auth), None);
+    }
+
+    /// 전용 reply variant 는 request_id 를 echo(매칭 대상), broadcast 는 None(매칭 우회 = 편승 제거).
+    #[test]
+    fn event_reply_request_id_only_for_replies() {
+        let r = RequestId::new();
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::Ack { request_id: r }),
+            Some(r),
+            "Ack 은 reply"
+        );
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::Error {
+                request_id: Some(r),
+                message: "x".into()
+            }),
+            Some(r),
+            "Error{{Some}} 은 특정 명령 실패 — 매칭"
+        );
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::Error {
+                request_id: None,
+                message: "x".into()
+            }),
+            None,
+            "Error{{None}} 은 명령 무관 — 매칭 안 함"
+        );
+        // broadcast — request_id 없음(매칭 우회).
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::AgentListUpdated { agents: vec![] }),
+            None,
+            "AgentListUpdated 는 broadcast — 매칭 우회"
+        );
+        // SubscribeAck 는 agent_id 기반(request_id 없음) — T6a reply 매칭 대상 아님.
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::SubscribeAck {
+                agent_id: uuid::Uuid::new_v4(),
+                action: engram_dashboard_protocol::SubscribeAction::Reset,
+                current_epoch: 0,
+                oldest_seq: 0,
+                latest_seq: 0,
+                replay_from: 0,
+                truncated: false,
+            }),
+            None
+        );
+    }
+
+    /// reply_outcome: Error 만 Err(message), 나머지 전용 reply 는 Ok(event).
+    #[test]
+    fn reply_outcome_splits_ok_and_err() {
+        let r = RequestId::new();
+        // Ack → Ok.
+        match reply_outcome(AgentEvent::Ack { request_id: r }) {
+            Ok(AgentEvent::Ack { .. }) => {}
+            other => panic!("Ack 은 Ok 여야: {other:?}"),
+        }
+        // Error → Err(message).
+        match reply_outcome(AgentEvent::Error {
+            request_id: Some(r),
+            message: "boom".into(),
+        }) {
+            Err(m) => assert_eq!(m, "boom"),
+            other => panic!("Error 는 Err(message) 여야: {other:?}"),
+        }
     }
 }

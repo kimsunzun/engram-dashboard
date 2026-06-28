@@ -2364,3 +2364,656 @@ async fn supersede_connect_cancels_reconnect_before_discovery() {
     client.close();
     assert_eq!(client.state(), ConnectionState::Down);
 }
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// T6a: request/reply 명령 평면 (send_command).
+//
+// connection.rs main_loop 의 cmd_rx arm(SendCommand) + Text arm(reply 매칭) + 끊김 drain 을
+// 실 소켓(mock WS 서버)으로 검증한다. 핵심 불변식:
+//   - request_id ↔ oneshot 정확 매칭 → send_command 가 Ok(매칭 reply) 로 resolve.
+//   - 모르는 request_id 이벤트는 무시(pending 유지, in-flight 매칭 깨지지 않음).
+//   - 끊김 시 pending drain → Err(no-hang, tokio::time::timeout 으로 hang 적출).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+use engram_dashboard_protocol::RequestId;
+
+/// reply mock 서버가 명령 수신 시 어떻게 응답할지(테스트별 분기).
+#[derive(Clone, Copy)]
+enum ReplyBehavior {
+    /// 명령의 request_id 를 echo 한 Ack 로 응답(정상 매칭 경로).
+    AckEcho,
+    /// request_id 를 echo 한 Error 로 응답(reject 경로).
+    ErrorEcho,
+    /// 명령과 무관한(틀린) request_id 의 Ack 로 응답(모르는 id 무시 검증).
+    AckWrongId,
+    /// 명령을 받고도 응답하지 않은 채 소켓을 닫는다(끊김 drain 검증).
+    DropAfterReceive,
+}
+
+/// Auth/Hello 핸드셰이크를 마친 뒤 첫 명령 1건을 받아 `behavior` 대로 응답하는 mock 서버.
+/// 반환: port. (start_test_server 의 전체 데몬을 띄우는 대신, T6a 의 cmd/reply 배선만 정밀히 통제하려고
+/// 직접 mock 한다 — spike T2 행의 "mock WS 서버" 선택지. AckEcho/ErrorEcho/AckWrongId/DropAfterReceive
+/// 로 매칭·reject·무시·drain 경로를 결정론적으로 만든다.)
+async fn spawn_reply_mock_server(behavior: ReplyBehavior) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // 1) 첫 frame(Auth) 소비 후 Hello 응답(= connected).
+        let _ = ws.next().await;
+        let hello = serde_json::to_string(&AgentEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            capabilities: None,
+        })
+        .unwrap();
+        let _ = ws.send(Message::Text(hello.into())).await;
+
+        // 2) 명령 1건 수신 → request_id 추출.
+        let cmd_text = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => break t.to_string(),
+                Some(Ok(_)) => continue, // Ping/Pong/binary 무시
+                _ => return,             // 끊김
+            }
+        };
+        let cmd: AgentCommand = serde_json::from_str(&cmd_text).expect("명령 JSON 파싱");
+        let rid = match super::protocol_state::command_request_id(&cmd) {
+            Some(r) => r,
+            None => return,
+        };
+
+        // 3) behavior 대로 응답.
+        let reply = match behavior {
+            ReplyBehavior::AckEcho => AgentEvent::Ack { request_id: rid },
+            ReplyBehavior::ErrorEcho => AgentEvent::Error {
+                request_id: Some(rid),
+                message: "데몬측 거부(테스트)".into(),
+            },
+            ReplyBehavior::AckWrongId => AgentEvent::Ack {
+                // 명령과 다른 request_id — 클라가 매칭 못 해 무시해야 한다.
+                request_id: RequestId::new(),
+            },
+            ReplyBehavior::DropAfterReceive => {
+                // 응답 없이 소켓 닫음 → 클라 main_loop 가 Disconnected → connected_lifetime 이 drain.
+                let _ = ws.close(None).await;
+                return;
+            }
+        };
+        let _ = ws
+            .send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+            .await;
+        // 연결을 잠시 유지(클라가 reply 를 받을 시간). AckWrongId 케이스는 매칭 안 돼 매달리므로,
+        //   유지 후 drop 으로 닫혀 클라가 drain Err 로 깨어난다(테스트가 그 Err 를 본다).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    });
+    port
+}
+
+/// 테스트 공용: mock 서버로 connect 해 connected 상태의 client 를 만든다.
+async fn connected_client_to(port: u16, token: &str) -> Arc<DaemonClient> {
+    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, token))));
+    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+    client.connect().await.expect("connect → connected");
+    assert_eq!(client.state(), ConnectionState::Connected);
+    client
+}
+
+/// 테스트용 Spawn 명령(request_id 동봉) 빌더.
+fn spawn_cmd() -> AgentCommand {
+    AgentCommand::Spawn {
+        profile_id: uuid::Uuid::new_v4(),
+        request_id: RequestId::new(),
+    }
+}
+
+// ── T6a-1: send_command(Spawn) → Ack(request_id echo) → Ok 로 resolve ───────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_command_resolves_ok_on_matching_ack() {
+    let port = spawn_reply_mock_server(ReplyBehavior::AckEcho).await;
+    let client = connected_client_to(port, "t6a-ack").await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), client.send_command(spawn_cmd()))
+        .await
+        .expect("send_command 가 bound 내 반환(hang 없음)");
+    match result {
+        Ok(AgentEvent::Ack { .. }) => {} // 매칭 reply 로 Ok resolve
+        other => panic!("Ack 매칭으로 Ok 여야: {other:?}"),
+    }
+
+    client.close();
+}
+
+// ── T6a-2: send_command 가 Error(request_id echo) 를 Err 로 resolve ──────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_command_resolves_err_on_matching_error() {
+    let port = spawn_reply_mock_server(ReplyBehavior::ErrorEcho).await;
+    let client = connected_client_to(port, "t6a-err").await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), client.send_command(spawn_cmd()))
+        .await
+        .expect("send_command 가 bound 내 반환(hang 없음)");
+    assert!(
+        matches!(&result, Err(m) if m.contains("거부")),
+        "Error reply 는 Err(message) 로 resolve: {result:?}"
+    );
+
+    client.close();
+}
+
+// ── T6a-3: 모르는 request_id 이벤트는 무시(pending 유지) → 끊김 시 Err(매칭 안 깨짐) ──────
+// 서버가 명령의 request_id 와 *다른* id 의 Ack 를 보낸다. 클라는 take_pending=None 으로 그걸 무시하고
+// pending 을 유지해야 한다 — 그래서 send_command 는 매칭 reply 없이 매달리다가, 소켓이 닫히면(서버가
+// 300ms 후 drop) drain 으로 Err 가 온다. ★요점★: 틀린 id Ack 가 in-flight pending 을 *잘못* resolve
+// 하지 않는다(만약 매칭이 헐거우면 여기서 Ok 가 와 버려 이 단언이 깨진다).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_request_id_event_is_ignored() {
+    let port = spawn_reply_mock_server(ReplyBehavior::AckWrongId).await;
+    let client = connected_client_to(port, "t6a-wrongid").await;
+
+    // 틀린 id Ack 가 와도 매칭 안 됨 → 매달림. 서버가 곧 소켓을 닫아 drain Err 로 깨어난다(no-hang).
+    let result = tokio::time::timeout(Duration::from_secs(5), client.send_command(spawn_cmd()))
+        .await
+        .expect("틀린 id 무시 후에도 끊김 drain 으로 bound 내 반환(hang 없음)");
+    assert!(
+        result.is_err(),
+        "틀린 request_id Ack 로 잘못 resolve 되면 안 됨(무시 후 끊김 Err): {result:?}"
+    );
+
+    client.close();
+}
+
+// ── T6a-4: in-flight 중 끊김 → pending drain → Err(no-hang) ──────────────────────────
+// 서버가 명령을 받자마자 응답 없이 소켓을 닫는다. 연결 task 의 main_loop 가 Disconnected 로 빠지고,
+// connected_lifetime 이 pending 을 drain 해 Err 로 깨운다 — send_command 가 영구 hang 하지 않는다.
+// ★no-hang 적출★: tokio::time::timeout 으로 감싸, drain 이 안 되면 5s 후 expect 가 패닉으로 잡는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_mid_flight_drains_pending_to_err() {
+    let port = spawn_reply_mock_server(ReplyBehavior::DropAfterReceive).await;
+    let client = connected_client_to(port, "t6a-drop").await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), client.send_command(spawn_cmd()))
+        .await
+        .expect("끊김 시 pending drain 으로 send_command 가 bound 내 반환(hang 없음)");
+    assert!(
+        result.is_err(),
+        "in-flight 중 끊김은 pending 을 Err 로 drain 해야(no-leak/no-hang): {result:?}"
+    );
+
+    client.close();
+}
+
+// ── T6a-5: 연결 안 된 상태 send_command → not-connected Err(즉시) ─────────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_command_errs_when_not_connected() {
+    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(9, "nope"))));
+    let client = DaemonClient::new(Handle::current(), disco);
+    // connect 안 함 → cmd_tx 없음.
+    let result = tokio::time::timeout(Duration::from_secs(2), client.send_command(spawn_cmd()))
+        .await
+        .expect("not-connected 는 즉시 반환");
+    assert!(
+        matches!(&result, Err(m) if m.contains("연결")),
+        "연결 안 됐으면 not-connected Err: {result:?}"
+    );
+}
+
+// ── T6a-6: request_id 없는 명령은 send_command 가 거른다(영구 pending 방지) ────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_command_rejects_command_without_request_id() {
+    let port = spawn_reply_mock_server(ReplyBehavior::AckEcho).await;
+    let client = connected_client_to(port, "t6a-noid").await;
+
+    // Resize 는 wire 상 request_id 가 없다 → send_command 가 즉시 Err(매칭 불가).
+    let cmd = AgentCommand::Resize {
+        agent_id: uuid::Uuid::new_v4(),
+        cols: 80,
+        rows: 24,
+        viewport_id: None,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(2), client.send_command(cmd))
+        .await
+        .expect("request_id 없는 명령은 즉시 반환(hang 없음)");
+    assert!(
+        result.is_err(),
+        "request_id 없는 명령은 reply 매칭 불가로 거름: {result:?}"
+    );
+
+    client.close();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// T6a FIX-6: 재연결 crux + cmd_rx 버퍼 drain + 중복 request_id (review FIX 커버)
+//
+// ★왜 이게 #1 crux 였나★: 기존 T6a 스위트는 "in-flight 끊김 → drain Err"(T6a-4)와 "재연결 회복"
+//   (reconnect_*)을 *각각* 검증했지만, **둘이 한 흐름으로 엮인 경로** — in-flight 명령이 옛 소켓에서
+//   drain 된 뒤 *재연결된 새 소켓이 멀쩡히 다음 명령을 받는가* — 는 비어 있었다. drain 이 새 소켓의
+//   request/reply 배선까지 망가뜨릴(예: pending 맵 오염·actor 종료) 회귀를 이 테스트가 박는다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+/// 재연결 crux 전용 mock 서버 핸들. 한 listener 가 순차 연결을 받아:
+///   - 매 연결: Auth 소비 → Hello 송신(= connected). 그 뒤 명령 frame 을 계속 읽는다.
+///   - 명령 frame 을 받으면: `ack_replies` 가 true 면 그 request_id 로 Ack echo(정상 reply),
+///     false(첫 연결)면 **응답 없이** 그 명령을 받았다는 신호만 보내고 drop 신호까지 매달린다.
+/// 이걸로 "첫 소켓: 명령 받고 무응답 → 끊김(서버 drop) → 재연결된 둘째 소켓: 명령 Ack" 흐름을 만든다.
+struct CruxReconnectServer {
+    port: u16,
+    accepts: Arc<AtomicUsize>,
+    /// 첫 연결이 명령 frame 을 실제로 수신(= wire 로 나감 = in-flight pending)했음을 테스트에 알린다.
+    first_cmd_received: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// 가장 최근 연결을 서버측에서 끊는 신호(첫 소켓 drop = 클라 재연결 트리거).
+    drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+impl CruxReconnectServer {
+    fn accept_count(&self) -> usize {
+        self.accepts.load(Ordering::SeqCst)
+    }
+    fn drop_current_connection(&self) {
+        if let Some(tx) = self.drop_current.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// 첫 연결은 명령에 무응답(drain 유발), 둘째 이후 연결은 명령에 Ack echo 하는 mock 서버.
+async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let first_cmd_received: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
+    let accepts_srv = accepts.clone();
+    let first_cmd_srv = first_cmd_received.clone();
+    let drop_srv = drop_current.clone();
+    tokio::spawn(async move {
+        let mut conn_idx = 0u32;
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepts_srv.fetch_add(1, Ordering::SeqCst);
+            conn_idx += 1;
+            let is_first = conn_idx == 1;
+            let (dtx, drx) = tokio::sync::oneshot::channel::<()>();
+            *drop_srv.lock().unwrap() = Some(dtx);
+            let first_cmd_c = first_cmd_srv.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await; // Auth 소비
+                let hello = serde_json::to_string(&AgentEvent::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                    capabilities: None,
+                })
+                .unwrap();
+                let _ = ws.send(Message::Text(hello.into())).await;
+
+                if is_first {
+                    // 첫 소켓: 명령 frame 1건 수신(= 클라가 wire 로 보냄 = in-flight pending) → 신호만 보내고
+                    //   응답하지 않는다. drop 신호 오면 소켓 drop(클라 끊김 감지 → 재연결).
+                    loop {
+                        match ws.next().await {
+                            Some(Ok(Message::Text(_))) => {
+                                if let Some(tx) = first_cmd_c.lock().unwrap().take() {
+                                    let _ = tx.send(());
+                                }
+                                break;
+                            }
+                            Some(Ok(_)) => continue, // Ping/Pong/binary 무시
+                            _ => break,              // 끊김
+                        }
+                    }
+                    let _ = drx.await;
+                    drop(ws);
+                } else {
+                    // 재연결된 둘째 소켓: 명령 frame 을 받아 request_id echo Ack 로 응답(정상 request/reply).
+                    loop {
+                        match ws.next().await {
+                            Some(Ok(Message::Text(t))) => {
+                                let cmd: AgentCommand =
+                                    serde_json::from_str(&t).expect("명령 JSON 파싱");
+                                if let Some(rid) = super::protocol_state::command_request_id(&cmd) {
+                                    let ack =
+                                        serde_json::to_string(&AgentEvent::Ack { request_id: rid })
+                                            .unwrap();
+                                    let _ = ws.send(Message::Text(ack.into())).await;
+                                }
+                            }
+                            Some(Ok(_)) => continue,
+                            _ => break,
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    CruxReconnectServer {
+        port,
+        accepts,
+        first_cmd_received,
+        drop_current,
+    }
+}
+
+// ── FIX-6 crux: in-flight 명령이 옛 소켓에서 drain Err + 재연결된 새 소켓이 멀쩡히 동작 ──────────────
+// 스위트에 비어 있던 #1 경로: (a) 첫 소켓에서 무응답으로 끊긴 in-flight send_command 가 reconnect edge
+// 에서 drain 되어 Err 로 resolve(hang 없음) AND (b) 재연결된 새 소켓에서 FRESH send_command 가 Ok.
+// ★set_live hot-swap★: 끊김 후 read_live 가 *둘째 서버* 주소를 주게 해(다른 listener 로 재연결돼도 동작
+//   불변임을 강조) 재연결이 새 소켓을 멀쩡히 쓰는지 본다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnect_with_in_flight_command_drains_old_then_new_socket_usable() {
+    let old_server = spawn_crux_reconnect_server().await;
+    let new_server = spawn_reply_mock_server(ReplyBehavior::AckEcho).await;
+
+    // 첫 연결 = old_server, 재연결(read_live) = new_server 로 hot-swap.
+    let disco = Arc::new(MockDiscovery::new(
+        Some(info_for(old_server.port, "crux-old")),
+        Ok(info_for(old_server.port, "crux-old")),
+    ));
+    let disco_handle = disco.clone();
+    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+
+    client.connect().await.expect("connect → connected");
+    assert_eq!(client.state(), ConnectionState::Connected);
+    assert_eq!(old_server.accept_count(), 1, "최초 1회 accept(old)");
+
+    // first_cmd 수신 신호를 미리 등록(send_command 가 wire 로 나가면 서버가 보냄).
+    let (first_cmd_tx, first_cmd_rx) = tokio::sync::oneshot::channel::<()>();
+    *old_server.first_cmd_received.lock().unwrap() = Some(first_cmd_tx);
+
+    // (a) in-flight send_command — old_server 가 무응답이라 pending 에 남는다(reconnect edge 에서 drain 대상).
+    let c_inflight = client.clone();
+    let inflight = tokio::spawn(async move { c_inflight.send_command(spawn_cmd()).await });
+
+    // 명령이 wire 로 실제 나갔음(= in-flight pending 등록 완료)을 서버 신호로 확정한 뒤 끊는다.
+    tokio::time::timeout(Duration::from_secs(5), first_cmd_rx)
+        .await
+        .expect("old_server 가 in-flight 명령 frame 을 bound 내 수신")
+        .expect("first_cmd 신호");
+
+    // hot-swap: 재연결은 new_server 로. 그 뒤 old 연결을 끊어 재연결 트리거.
+    disco_handle.set_live(Some(info_for(new_server, "crux-new")));
+    old_server.drop_current_connection();
+
+    // (a) 단언: 옛 in-flight 명령이 drain 되어 Err 로 resolve(hang 없음 — drain edge 가 깨운다).
+    let inflight_result = tokio::time::timeout(Duration::from_secs(5), inflight)
+        .await
+        .expect("in-flight send_command 가 drain 으로 bound 내 반환(hang 없음)")
+        .expect("inflight task panic 없이");
+    assert!(
+        inflight_result.is_err(),
+        "옛 소켓 in-flight 명령은 reconnect edge 에서 drain Err 여야: {inflight_result:?}"
+    );
+
+    // 재연결 완료(new_server 에 attach + connected) 대기.
+    let reconnected = poll_until_realtime(Duration::from_secs(5), || {
+        client.state() == ConnectionState::Connected
+    })
+    .await;
+    assert!(reconnected, "재연결 후 connected: {:?}", client.state());
+
+    // (b) 단언: 재연결된 새 소켓에서 FRESH send_command 가 정상 Ok(request/reply 배선 무손상).
+    let fresh = tokio::time::timeout(Duration::from_secs(5), client.send_command(spawn_cmd()))
+        .await
+        .expect("재연결 후 fresh send_command 가 bound 내 반환(hang 없음)");
+    match fresh {
+        Ok(AgentEvent::Ack { .. }) => {} // 새 소켓에서 정상 매칭 Ok
+        other => panic!("재연결된 소켓에서 fresh 명령이 Ok(Ack) 여야: {other:?}"),
+    }
+
+    client.close();
+}
+
+// ── FIX-6 (FIX-1 커버): 끊김 시 cmd_rx 버퍼 명령도 drain — 재연결 후 미실행(double-apply 0) ──────────────
+// select! 경합에서 진 채(또는 actor 가 다른 명령에 묶여) cmd_rx mpsc 버퍼에 들어왔지만 actor 가 아직 안
+// 꺼낸 SendCommand 는 pending 에 없다. 끊김 시 이걸 안 비우면 재연결된 새 소켓에서 *뒤늦게 실행*된다
+// (부작용 이중 적용). FIX-1 이 끊김 edge 에서 cmd_rx 버퍼를 try_recv 로 비워 Err 로 깨우고, 그 명령이
+//   B 가 actor 에 *안 꺼내진 채* 끊김을 맞으면(버퍼 경로) "미전송(재전송 안전)" Err 가 된다.
+//
+// ★두 갈래로 검증(정직성 — loopback select! race)★: "B 가 cmd_rx 버퍼에 갇히는가 vs actor 가 즉시 꺼내
+//   pending 으로 보내는가"는 loopback 스케줄링에 달린 *진짜 race* 라 한 통합 테스트로 결정론화하기 어렵다
+//   (소켓 backpressure 로 actor 를 가두려는 시도는 OS write-error 지연에 의존해 flaky). 그래서:
+//     (1) 아래 **통합 테스트**: in-flight 명령들이 끊김 시 *어느 갈래든* Err 로 깨고(no-hang) + 재연결된
+//         새 소켓에서 *뒤늦게 실행되지 않음*(double-apply 0)을 박는다 — FIX-1 의 사용자-관측 불변식.
+//     (2) 그 아래 **결정론적 단위 테스트**(`buffered_send_command_drain_yields_unsent_message`): cmd_rx
+//         버퍼 drain 로직(try_recv → SendCommand 면 "미전송" Err)을 소켓 없이 직접 박아 메시지 문구·계약을
+//         결정론적으로 증명한다(FIX-2 의 "미전송 vs 전송됨" 구분).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn buffered_command_on_disconnect_is_drained_not_executed_post_reconnect() {
+    // new_server 가 받은 명령 수를 세는 카운터(재연결 후 끊긴 명령이 *뒤늦게* 실행되면 늘어난다).
+    let new_cmd_count = Arc::new(AtomicUsize::new(0));
+    let new_port = spawn_counting_reply_server(new_cmd_count.clone()).await;
+    // 첫 연결: 무응답 후 drop(끊김 트리거)하는 crux 서버 재사용.
+    let old_server = spawn_crux_reconnect_server().await;
+
+    let disco = Arc::new(MockDiscovery::new(
+        Some(info_for(old_server.port, "buf-old")),
+        Ok(info_for(old_server.port, "buf-old")),
+    ));
+    let disco_handle = disco.clone();
+    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+
+    client.connect().await.expect("connect → connected");
+    assert_eq!(client.state(), ConnectionState::Connected);
+
+    // 첫 명령 A 를 보내 in-flight 로 만든 뒤(서버 무응답), 둘째 명령 B 를 연달아 던진다 — B 는 actor 가
+    //   A 직후 select! 로 돌아가 꺼내든(pending) cmd_rx 버퍼에 갇히든, 끊김 시 *어느 갈래든* drain 대상이다.
+    let (first_cmd_tx, first_cmd_rx) = tokio::sync::oneshot::channel::<()>();
+    *old_server.first_cmd_received.lock().unwrap() = Some(first_cmd_tx);
+    let c_a = client.clone();
+    let inflight_a = tokio::spawn(async move { c_a.send_command(spawn_cmd()).await });
+    tokio::time::timeout(Duration::from_secs(5), first_cmd_rx)
+        .await
+        .expect("old_server 가 첫 명령을 bound 내 수신")
+        .expect("first_cmd 신호");
+    let c_b = client.clone();
+    let buffered_b = tokio::spawn(async move { c_b.send_command(spawn_cmd()).await });
+
+    // hot-swap + 끊김.
+    disco_handle.set_live(Some(info_for(new_port, "buf-new")));
+    old_server.drop_current_connection();
+
+    // ★불변식 1(no-hang)★: A·B 둘 다 끊김으로 Err 로 깨어난다(영구 hang 없음). 갈래(미전송/전송됨/송신
+    //   실패)는 race 라 종류를 안 박고 "Err 로 bound 내 깨어남"만 단언한다. 문구 구분은 (2) 단위 테스트가 박음.
+    let a_result = tokio::time::timeout(Duration::from_secs(5), inflight_a)
+        .await
+        .expect("in-flight A 가 bound 내 반환(hang 없음)")
+        .expect("inflight A task panic 없이");
+    assert!(a_result.is_err(), "in-flight A 는 끊김 Err: {a_result:?}");
+    let b_result = tokio::time::timeout(Duration::from_secs(5), buffered_b)
+        .await
+        .expect("B 가 drain 으로 bound 내 반환(hang 없음)")
+        .expect("buffered B task panic 없이");
+    assert!(b_result.is_err(), "B 도 끊김 Err: {b_result:?}");
+
+    // ★불변식 2(double-apply 0 — FIX-1 핵심)★: 재연결 완료 후, 끊긴 두 명령이 새 소켓에서 *뒤늦게 실행*되지
+    //   않는다. FIX-1 이 없으면 cmd_rx 버퍼에 남은 명령이 재연결된 소켓에서 실행돼 new_cmd_count 가 늘어난다.
+    let reconnected = poll_until_realtime(Duration::from_secs(5), || {
+        client.state() == ConnectionState::Connected
+    })
+    .await;
+    assert!(reconnected, "재연결 후 connected: {:?}", client.state());
+    tokio::time::sleep(Duration::from_millis(200)).await; // 뒤늦은 실행이 있었다면 도달했을 시간.
+    assert_eq!(
+        new_cmd_count.load(Ordering::SeqCst),
+        0,
+        "끊긴 명령이 재연결된 새 소켓에서 실행되면 안 됨(FIX-1 double-apply 0): new_cmd_count={}",
+        new_cmd_count.load(Ordering::SeqCst)
+    );
+
+    client.close();
+}
+
+// ── FIX-6 (FIX-1/FIX-2 결정론 단위): cmd_rx 버퍼 drain 로직 — 버퍼 SendCommand → "미전송" Err ────────────
+// 통합 테스트가 못 박는 loopback race 없이, connected_lifetime 의 cmd_rx 버퍼 drain 코드
+// (`while let Ok(buffered) = cmd_rx.try_recv() { if SendCommand { reply.send(Err("미전송…")) } }`)와
+// **동형의 로직**을 소켓 없이 직접 돌려 그 계약을 결정론적으로 박는다:
+//   - 버퍼에 남은 SendCommand 는 "미전송(재전송 안전)" Err 로 깨워진다(FIX-2 — wire 로 안 나갔으므로).
+//   - reply 없는 Subscribe variant 는 그냥 drop(에러 reply 없음).
+//   - try_recv 는 Empty 까지만 비우고 채널을 닫지 않는다(재연결 carry — 이후 send 가능).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffered_send_command_drain_yields_unsent_message() {
+    use super::connection::ConnectionCommand;
+
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<ConnectionCommand>(8);
+
+    // 버퍼에 SendCommand 2건 + reply 없는 Subscribe 1건을 넣는다(actor 가 아직 안 꺼낸 상태 모사).
+    // ★타입 명시★: CommandReply = oneshot::Sender<Result<AgentEvent, String>>. 수신단 타입을 pin 해 아래
+    //   match 의 Ok(ev)/Err(m) 추론이 흐르게 한다(채널 생성에서 명시 — 송신단 cast 만으론 역추론 안 됨).
+    let (r1_tx, r1_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    let (r2_tx, r2_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    cmd_tx
+        .send(ConnectionCommand::SendCommand {
+            cmd: spawn_cmd(),
+            reply: r1_tx,
+        })
+        .await
+        .unwrap();
+    cmd_tx
+        .send(ConnectionCommand::Subscribe {
+            agent_id: uuid::Uuid::new_v4(),
+            epoch: None,
+            after_seq: None,
+        })
+        .await
+        .unwrap();
+    cmd_tx
+        .send(ConnectionCommand::SendCommand {
+            cmd: spawn_cmd(),
+            reply: r2_tx,
+        })
+        .await
+        .unwrap();
+
+    // connected_lifetime 의 버퍼 drain 과 동형: try_recv 로 Empty 까지 비우며 SendCommand 만 Err.
+    let mut drained_send = 0;
+    while let Ok(buffered) = cmd_rx.try_recv() {
+        if let ConnectionCommand::SendCommand { reply, .. } = buffered {
+            drained_send += 1;
+            let _ = reply.send(Err(
+                "daemon 연결 끊김 — 명령 미전송(재전송 안전)".to_string()
+            ));
+        }
+    }
+    assert_eq!(
+        drained_send, 2,
+        "SendCommand 2건이 drain 대상(Subscribe 는 drop)"
+    );
+
+    // 두 SendCommand 의 reply 가 "미전송" Err 로 깨워졌는지(= 호출자 hang 없음, FIX-2 문구).
+    for (n, rx) in [("r1", r1_rx), ("r2", r2_rx)] {
+        let got = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .unwrap_or_else(|_| panic!("{n} 이 bound 내 깨어남"))
+            .expect("oneshot 수신");
+        match got {
+            Err(m) => assert!(
+                m.contains("미전송"),
+                "{n}: 버퍼 drain 은 '미전송(재전송 안전)' Err 여야: {m}"
+            ),
+            Ok(ev) => panic!("{n}: 버퍼 drain 명령이 Ok 면 안 됨: {ev:?}"),
+        }
+    }
+
+    // ★채널 미닫힘★: drain 후에도 cmd_tx 로 다시 send 가능(재연결 carry 계약).
+    let (r3_tx, _r3_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    cmd_tx
+        .send(ConnectionCommand::SendCommand {
+            cmd: spawn_cmd(),
+            reply: r3_tx,
+        })
+        .await
+        .expect("drain 후에도 cmd_rx 는 열려 있어야(닫지 않음 — 재연결 carry)");
+}
+
+/// 받은 명령 frame 수를 카운트하며 Ack echo 하는 mock 서버(끊긴 명령의 재연결 후 미실행 검증용). 반환: port.
+async fn spawn_counting_reply_server(count: Arc<AtomicUsize>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let count_c = count.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await; // Auth 소비
+                let hello = serde_json::to_string(&AgentEvent::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                    capabilities: None,
+                })
+                .unwrap();
+                let _ = ws.send(Message::Text(hello.into())).await;
+                // 명령 frame 마다 카운트 + Ack echo.
+                loop {
+                    match ws.next().await {
+                        Some(Ok(Message::Text(t))) => {
+                            count_c.fetch_add(1, Ordering::SeqCst);
+                            let cmd: AgentCommand =
+                                serde_json::from_str(&t).expect("명령 JSON 파싱");
+                            if let Some(rid) = super::protocol_state::command_request_id(&cmd) {
+                                let ack =
+                                    serde_json::to_string(&AgentEvent::Ack { request_id: rid })
+                                        .unwrap();
+                                let _ = ws.send(Message::Text(ack.into())).await;
+                            }
+                        }
+                        Some(Ok(_)) => continue,
+                        _ => break,
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+// ── FIX-6 (FIX-4, optional): 중복 request_id insert → 옛 pending 슬롯이 Err 로 깨워짐 ─────────────────
+// UUIDv4 충돌은 사실상 불가능하나, 가드(FIX-4)가 옛 oneshot 을 *조용히 떨어뜨리지 않고* Err 로 깨우는지를
+// connection.rs main_loop 의 cmd_rx arm 을 직접 돌려 박는다. connection.rs 내부 함수에 접근하려고
+// PendingMap + reply 채널을 직접 조립한다(소켓 없이 가드 논리만).
+//
+// ★범위(정직성)★: 이건 send_command 의 정상 경로로는 도달 불가(매번 새 UUID)다. 그래서 가드의 *논리
+//   계약*(insert 가 Some 을 반환하면 prev 를 Err 로 깨움)을 PendingMap 수준에서 결정론적으로 단언한다 —
+//   `connection.rs` 의 insert-then-take-back 패턴과 동형(중복 시 prev.send(Err)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_request_id_insert_errs_prev_slot() {
+    use super::protocol_state::PendingMap;
+
+    let rid = RequestId::new();
+    let mut pending: PendingMap<super::connection::CommandReply> = PendingMap::new();
+
+    // 첫 등록 — prev 없음.
+    let (tx1, rx1) = tokio::sync::oneshot::channel();
+    assert!(pending.insert(rid, tx1).is_none(), "첫 insert 는 prev 없음");
+
+    // 같은 request_id 재등록 — FIX-4 계약대로 prev(tx1)를 Err 로 깨워야 한다(조용히 drop 금지).
+    let (tx2, _rx2) = tokio::sync::oneshot::channel();
+    if let Some(prev) = pending.insert(rid, tx2) {
+        let _ = prev.send(Err("중복 request_id — 옛 요청 취소".to_string()));
+    } else {
+        panic!("같은 request_id 재insert 는 prev 를 반환해야");
+    }
+
+    // 옛 슬롯(rx1)이 Err 로 깨어났는지(= 호출자 hang 없음) 확인.
+    let prev_result = tokio::time::timeout(Duration::from_secs(2), rx1)
+        .await
+        .expect("옛 pending 슬롯이 bound 내 깨어남(hang 없음)")
+        .expect("oneshot 수신");
+    assert!(
+        matches!(&prev_result, Err(m) if m.contains("중복")),
+        "중복 request_id 시 옛 슬롯은 '중복' Err 로 깨워져야: {prev_result:?}"
+    );
+}

@@ -28,7 +28,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
+use super::protocol_state::{self, PendingMap};
 use super::{ConnectionState, DaemonDiscovery};
+
+/// SendCommand 의 reply 채널 타입(T6a). `Ok(event)` = 데몬이 매칭 reply(Ack/Spawned/Created/
+/// SubscribeAck/AgentList/…)를 보냄, `Err(msg)` = 데몬 Error 또는 연결 끊김(drain). 호출자
+/// (`DaemonClient::send_command`)가 이 oneshot 의 수신단을 await 한다.
+pub type CommandReply = oneshot::Sender<Result<AgentEvent, String>>;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -124,14 +130,31 @@ impl std::error::Error for HandshakeError {}
 
 /// 연결 task 로 보내는 명령(단일 task 소유 — invoke 는 이걸 보내고 task 가 처리).
 ///
-/// ★T2 범위★: 채널 스켈레톤만 깐다. 실제 명령 variant(Spawn/Kill/WriteStdin/Resize/Subscribe)와
-/// 그 reply(oneshot) 처리는 T6 가 채운다. 지금은 빈 enum 이 아니라 forward-compat 자리로 둔다.
+/// ★T6a 범위★: 요청/응답(request/reply) 평면만 배선한다. `SendCommand` = side-effect 명령
+/// (Spawn/Kill/Interrupt/WriteStdin/Resize/ListAgents/…)을 wire 로 보내고 매칭 reply 를 oneshot 으로
+/// 돌려받는다 — request_id ↔ oneshot 상관(correlation)은 main_loop 가 `PendingMap` 으로 한다.
+/// `Subscribe`/`Unsubscribe` variant 는 자리만 두고 cmd_rx 처리는 T6b(출력 라우팅 평면)에서 채운다.
 #[derive(Debug)]
 pub enum ConnectionCommand {
-    // TODO(T6): SendCommand { cmd: AgentCommand, reply: oneshot::Sender<...> } 등 invoke 명령.
-    //   현재는 variant 없음 — cmd_tx.send 호출처(T6)가 생기면 채운다. 채널/소유 구조만 T2 에서 검증.
-    #[doc(hidden)]
-    __Placeholder,
+    /// 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
+    ///   1) reply 를 PendingMap[request_id] 에 넣고 → 2) cmd 를 JSON 으로 sink.send.
+    /// 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 으로 resolve. send/끊김 실패 시 Err.
+    SendCommand {
+        cmd: AgentCommand,
+        reply: CommandReply,
+    },
+    /// 출력 구독(T6b — 자리만). cmd_rx 처리는 T6b(OutputRouter fan-out)가 채운다.
+    #[allow(dead_code)]
+    Subscribe {
+        agent_id: engram_dashboard_protocol::AgentId,
+        epoch: Option<u32>,
+        after_seq: Option<u64>,
+    },
+    /// 출력 구독 해제(T6b — 자리만). cmd_rx 처리는 T6b 가 채운다.
+    #[allow(dead_code)]
+    Unsubscribe {
+        agent_id: engram_dashboard_protocol::AgentId,
+    },
 }
 
 /// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
@@ -457,10 +480,44 @@ async fn connected_lifetime(
     handshake_timeout: Duration,
     mut cancel_rx: tokio::sync::watch::Receiver<u64>,
 ) {
+    // ★pending 소유(T6a — 단일 actor 가 단독 소유, Mutex 없음)★: request_id → reply oneshot 상관 맵을
+    //   이 task 가 소유한다. main_loop 에 `&mut` 로 빌려줘 SendCommand(insert)·reply 도착(take)·끊김
+    //   (drain→Err) 을 한 actor 안에서 직렬 처리한다. 재연결 루프(이 함수)가 owner 라 소켓이 바뀌어도
+    //   맵은 유지되지만, ★끊김마다 drain★ 한다(아래) — 옛 소켓의 in-flight 는 새 소켓에서 reply 가 안
+    //   오므로 hang 방지를 위해 Err 로 깨운다(request_id idempotency: 호출자가 재시도, spike §3 불변식).
+    let mut pending: PendingMap<CommandReply> = PendingMap::new();
     let mut attempt: u32 = 0;
     loop {
         // main_loop 가 끝난 사유로 재연결 여부를 가른다.
-        match main_loop(sink, stream, &mut cmd_rx, my_gen).await {
+        let exit = main_loop(sink, stream, &mut cmd_rx, &mut pending, my_gen).await;
+        // ★끊김/종료 시 pending drain(no-leak 불변식, spike §3)★: 이 소켓 수명이 끝났으므로 in-flight
+        //   명령은 매칭될 reply 가 더는 안 온다 → 전부 꺼내 Err 로 깨운다(호출자 hang 방지). Closed/
+        //   Disconnected 둘 다 동일(재연결되더라도 옛 request_id reply 는 새 소켓에 안 옴 — 호출자 재시도).
+        // ★정직한 drain 메시지(FIX-2 — ids.rs no-auto-retry 의도와 정합)★: pending 은 *이미 wire 로
+        //   나갔으나* reply 를 못 받은 명령이다 — 데몬이 실행했는지 불명이라, 부작용 명령(WriteStdin 등)을
+        //   맹목 재시도하면 입력 중복이 된다(ids.rs RequestId 주석). 그래서 "재시도 필요"가 아니라
+        //   "결과 불명·맹목 재시도 금지"로 명시한다(호출자가 reconnect 후 결과 조회로 판단).
+        for reply in protocol_state::drain_pending(&mut pending) {
+            let _ = reply.send(Err(
+                "daemon 연결 끊김 — 명령 전송됨·응답 못 받음(결과 불명; 부작용 명령 맹목 재시도 금지)"
+                    .to_string(),
+            ));
+        }
+        // ★cmd_rx 버퍼 drain(FIX-1 — queued-but-not-pending)★: select! 경합에서 진 채 cmd_rx mpsc 버퍼에
+        //   들어왔지만 actor 가 아직 안 꺼낸 SendCommand 는 pending 에 *없다* — 위 drain 이 못 깨운다. 그대로
+        //   두면 재연결 후 *다음 소켓* 에서 실행돼 부작용이 이중 적용된다(WriteStdin 등). 그래서 지금 버퍼에
+        //   있는 것만 try_recv 로 비워(EOF 아님 — Empty 까지) Err 로 깨운다. ★cmd_rx 는 닫지 않는다★:
+        //   재연결 너머로 carry 되는 채널이라(미래 명령용) 여기서 close 하면 안 된다. 이 명령들은 wire 로
+        //   *나간 적이 없으므로* 메시지가 그렇게 말해야 한다(FIX-2 — "미전송·재전송 안전"). reply 없는
+        //   Subscribe/Unsubscribe variant 는 그냥 drop(T6b 가 채울 자리).
+        while let Ok(buffered) = cmd_rx.try_recv() {
+            if let ConnectionCommand::SendCommand { reply, .. } = buffered {
+                let _ = reply.send(Err(
+                    "daemon 연결 끊김 — 명령 미전송(재전송 안전)".to_string()
+                ));
+            }
+        }
+        match exit {
             LoopExit::Closed => {
                 // cmd_rx EOF = 명시 close() 또는 stale 미저장 → 재연결 안 함. 종료 Down 가드.
                 // ★원자 가드(Fix B)★: stale task 의 종료가 current 의 Connected 를 Down 으로 clobber
@@ -639,10 +696,20 @@ async fn connected_lifetime(
 /// 이 함수는 sink/stream 을 빌려(`&mut cmd_rx` 포함) 루프만 돌고, 끝나면 사유만 보고한다(lifecycle
 /// 미접촉 — 상태 결정은 호출자). sink 는 소유로 받아 루프 종료 시 여기서 닫는다(재연결 시 새 소켓이
 /// 오므로 옛 소켓은 확실히 정리).
+///
+/// ## ★request/reply 상관(T6a — load-bearing)★
+/// `pending`(request_id → reply oneshot) 은 이 actor 가 단독 소유(호출자가 `&mut` 로 빌려줌, Mutex
+/// 없음). 한 select! 루프 안에서 직렬 처리하므로 두 arm 이 동시에 pending 을 만지지 않는다:
+///   - cmd_rx arm `SendCommand`: reply 를 `pending[request_id]` 에 *먼저 넣고* → JSON 인코딩 →
+///     `sink.send`. send 실패면 *방금 넣은 reply 를 take 해 되돌려* Err 로 깨운다(맵에 좀비 안 남김).
+///   - stream arm `Text`(reply): `take_pending(request_id)` 로 꺼내 `reply_outcome` 으로 resolve.
+///     broadcast(request_id 없음)는 매칭을 우회한다(T6b 가 emit 배선 — 지금은 무시).
+/// 끊김(루프 종료)시 남은 pending 은 호출자(`connected_lifetime`)가 drain→Err 한다(no-leak).
 async fn main_loop(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
     mut stream: futures_util::stream::SplitStream<Ws>,
     cmd_rx: &mut mpsc::Receiver<ConnectionCommand>,
+    pending: &mut PendingMap<CommandReply>,
     my_gen: u64,
 ) -> LoopExit {
     // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
@@ -653,21 +720,28 @@ async fn main_loop(
             incoming = stream.next() => {
                 match incoming {
                     Some(Ok(msg)) => {
-                        // ★T2★: control JSON 디코드 형태만 확인하고 소비한다(라우팅/dedup 은 T3/T5).
                         match msg {
                             Message::Text(text) => {
-                                // 데몬 control 이벤트. T3 가 순수 결정 함수를 깔았다(protocol_state) — T5/T6 이
-                                // 여기서 그 함수를 호출해 배선한다.
-                                // TODO(T5/T6): AgentEvent 파싱 → variant 분기:
-                                //   Ack/Spawned/Created/Error/AgentList/ProfileList/Snapshot →
-                                //     protocol_state::take_pending(&mut pending, request_id) → oneshot resolve/reject.
-                                //   SubscribeAck → protocol_state::apply_subscribe_ack(&mut sub, current_epoch).
-                                //   StatusChanged/RestoreResult/AgentListUpdated/ProfileListUpdated → app.emit broadcast.
-                                let _ = serde_json::from_str::<AgentEvent>(&text);
+                                // 데몬 control 이벤트. T6a: reply(request_id echo) 면 pending 매칭→resolve.
+                                //   broadcast(request_id 없음)는 매칭 우회 — T6b 가 app.emit 배선(지금은 무시).
+                                // 파싱 실패는 무시(데몬은 valid JSON 만 보낸다 — 부분/미래 프레임 방어).
+                                if let Ok(ev) = serde_json::from_str::<AgentEvent>(&text) {
+                                    if let Some(rid) = protocol_state::event_reply_request_id(&ev) {
+                                        // 내 in-flight 요청의 reply — oneshot 으로 resolve(Ok/Err).
+                                        //   모르는 request_id(take_pending=None)면 무시(편승/중복 reply 방어).
+                                        if let Some(reply) = protocol_state::take_pending(pending, &rid)
+                                        {
+                                            let _ = reply.send(protocol_state::reply_outcome(ev));
+                                        }
+                                    }
+                                    // request_id 없는 broadcast(AgentListUpdated/StatusChanged/…) +
+                                    //   SubscribeAck(agent_id 기반) → T6b 가 app.emit / OutputRouter 로 배선.
+                                    //   TODO(T6b/emit): AppHandle 을 task 에 주입해 broadcast 를 위로 emit.
+                                }
                             }
                             Message::Binary(_bytes) => {
                                 // 출력 binary frame(codec). T3 가 seq dedup·epoch 가드(decide_output)를 깔았다.
-                                // TODO(T5): decode_frame → protocol_state::decide_output(&mut sub, epoch, seq)
+                                // TODO(T5/T6b): decode_frame → protocol_state::decide_output(&mut sub, epoch, seq)
                                 //   → Deliver 면 OutputRouter(arc-swap) 로 라우팅, Drop* 이면 무시.
                             }
                             // Ping/Pong 은 tungstenite 가 자동 응답(내부). Close 면 끊김(재연결 대상).
@@ -683,8 +757,53 @@ async fn main_loop(
             // 종료(재연결 안 함). DaemonClient.close() 가 cmd_tx 를 drop → 여기로 온다.
             cmd = cmd_rx.recv() => {
                 match cmd {
-                    // TODO(T6): ConnectionCommand variant 처리(cmd 를 wire 로 인코딩해 sink.send).
-                    Some(_cmd) => { /* T6 에서 처리 */ }
+                    Some(ConnectionCommand::SendCommand { cmd, reply }) => {
+                        // ★request/reply 배선(T6a)★. request_id 추출 → pending 등록 → wire 송신.
+                        //   send_command 가 request_id 있는 명령만 넣지만, 방어적으로 None 이면 즉시 Err
+                        //   (매칭 키 없는 명령은 reply 가 안 와 영구 pending = hang 이므로).
+                        let Some(rid) = protocol_state::command_request_id(&cmd) else {
+                            let _ = reply.send(Err(
+                                "send_command: request_id 없는 명령은 reply 매칭 불가".to_string(),
+                            ));
+                            continue;
+                        };
+                        // ★send 전에 pending 등록★: 인코딩/송신 사이에 reply 가 먼저 도착해도(loopback
+                        //   극단) take 할 슬롯이 있어야 한다. 송신 실패 시 아래서 도로 꺼낸다.
+                        // ★중복 request_id 가드(FIX-4 — 계약 명시)★: UUIDv4 충돌은 사실상 불가능하나,
+                        //   insert 가 prior oneshot 을 *조용히* 떨어뜨리면 그 호출자는 영구 hang 한다. 그래서
+                        //   반환값을 잡아 Some(prev)면 그 옛 슬롯을 Err 로 깨우고(no-hang) warn + debug_assert
+                        //   로 uniqueness 계약 위반을 시끄럽게 드러낸다(prod 은 계속 진행 = 새 reply 가 승계).
+                        if let Some(prev) = pending.insert(rid, reply) {
+                            tracing::warn!(
+                                generation = my_gen,
+                                "중복 request_id 충돌 — 옛 pending 슬롯을 Err 로 깨움(UUIDv4 라 사실상 불가)"
+                            );
+                            let _ = prev.send(Err("중복 request_id — 옛 요청 취소".to_string()));
+                            debug_assert!(false, "request_id 는 UUIDv4 로 유일해야 한다(충돌 발생)");
+                        }
+                        match serde_json::to_string(&cmd) {
+                            Ok(text) => {
+                                if let Err(e) = sink.send(Message::Text(text.into())).await {
+                                    // 송신 실패(소켓 죽음) → 방금 넣은 reply 를 도로 꺼내 Err 로 깨운다
+                                    //   (맵에 좀비 안 남김). 소켓은 곧 끊겨 다음 select 가 Disconnected.
+                                    if let Some(reply) = protocol_state::take_pending(pending, &rid) {
+                                        let _ = reply.send(Err(format!("명령 송신 실패: {e}")));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // 직렬화 실패(있어선 안 됨) — pending 되돌려 Err.
+                                if let Some(reply) = protocol_state::take_pending(pending, &rid) {
+                                    let _ = reply.send(Err(format!("명령 직렬화 실패: {e}")));
+                                }
+                            }
+                        }
+                    }
+                    // T6b 자리 — 출력 구독 평면. 지금은 처리 안 함(자리만, cmd_tx 송신처도 T6b).
+                    Some(ConnectionCommand::Subscribe { .. })
+                    | Some(ConnectionCommand::Unsubscribe { .. }) => {
+                        // TODO(T6b): SubState 조회로 epoch/after_seq 채워 Subscribe wire 송신 + OutputRouter.
+                    }
                     None => break LoopExit::Closed,
                 }
             }

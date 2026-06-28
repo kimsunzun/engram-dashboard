@@ -69,6 +69,24 @@ pub fn run() {
             // ADR-0035: 레이아웃 권위 상태(ViewManager). invoke 스레드풀 동시접근 → Arc<Mutex>.
             // 락 해제 후 emit(ADR-0006) 은 command 레이어가 보장. 초기엔 기본 View 1개.
             app.manage(crate::layout::LayoutState::new());
+
+            // ── S14 모듈①(ADR-0036) T6a: DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
+            // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
+            // Handle::current() 대신 전용 런타임 — DaemonClient::new_real_with_owned_runtime).
+            // commands/agent.rs invoke(spawn/kill/…)가 State<Arc<DaemonClient>> 로 주입받아
+            // send_command 한다. ★app-startup connect 는 T6/connect 로 이연★ — 여기선 cmd 평면만
+            // 배선하고, 실제 연결 수립(connect/ensure)은 프론트/부팅 시퀀스가 부른다(현재 프론트가
+            // wsTransport 로 직접 붙는 경로와 공존, T7 에서 TauriTransport 로 전환).
+            match crate::daemon_client::DaemonClient::new_real_with_owned_runtime() {
+                Ok(client) => {
+                    app.manage(std::sync::Arc::new(client));
+                }
+                // 런타임 생성 실패(극히 드묾) — 데몬 명령은 불가하나 앱(창/트레이/레이아웃)은 계속.
+                Err(e) => {
+                    tracing::warn!("DaemonClient 런타임 생성 실패(데몬 명령 불가, 앱 계속): {e}")
+                }
+            }
+            // TODO(T6/connect): 부팅 시 DaemonClient.ensure()/connect() 호출로 자동 연결 수립.
             if let Err(e) = tray::build_tray(app) {
                 tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
             }
@@ -133,6 +151,13 @@ pub fn run() {
             // ADR-0035: read-only 조회 — 부팅 시 webview 가 active view id 를 발견하는 유일 경로
             //   (변경 핸들러는 변경 직후에만 emit → 부팅 직후엔 닿지 않음). 상태변경·emit 없음.
             commands::list_views,
+            // S14 모듈①(ADR-0036) T6a: 에이전트 명령 request/reply 평면 — §5 LLM 제어 표면.
+            //   DaemonClient::send_command(request_id 매칭). 출력 구독(subscribe_output)은 T6b.
+            commands::agent_spawn,
+            commands::agent_kill,
+            commands::agent_interrupt,
+            commands::agent_write_stdin,
+            commands::agent_resize,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

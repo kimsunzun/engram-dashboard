@@ -8,7 +8,11 @@ pub mod tray;
 pub mod autostart;
 // ADR-0035: 레이아웃 권위 = src-tauri. ViewManager 상태변경 invoke + emit(§5 LLM 제어 표면).
 pub mod layout;
+// S14 모듈①(ADR-0036) T6a: 에이전트 명령 request/reply 평면(spawn/kill/interrupt/write/resize) →
+// DaemonClient::send_command. §5 LLM 제어 표면(프론트 클릭·LLM 동일 진입점).
+pub mod agent;
 
+pub use agent::*;
 pub use autostart::*;
 pub use discovery::*;
 pub use layout::*;
