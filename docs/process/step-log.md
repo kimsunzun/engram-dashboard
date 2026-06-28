@@ -398,6 +398,12 @@
 - **트리거=2신호(행동 기반):** ① 매직넘버로 증상 통과 시도 ② 추측 1회 실패 후 솔로 반복. 카테고리 트리거 거부(그 순간 인식 불가).
 - **`/review doc full`(opus 수호 + Codex cut):** 구조 PASS(4층 역할분리·교차참조 정합), FIX(중복제거: 사례/컨텍스트위생/도메인리스트 → 포인터화 · 트리거명 명확화 · qa·CLAUDE 경량화 · README reference 셀 rot 수정). ADR lint ok.
 
+### 모듈① T4 — 자동 재연결 + in-flight 취소 (2026-06-28, dashboard2, opus)
+- **착지**(`04f635b`, push됨): T4 전체 커밋. `connected_lifetime`(비의도 끊김→지수 백오프 재연결 루프, attach-only read_live no-spawn, 매 시도 전 reconnect_guard) + `handshake_cancellable`(connect_async·Auth-send·wait_for_hello 각 await를 cancel_rx와 biased select — close/승계 시 소켓 미오픈 또는 즉시 self-close) + lifecycle `cancel_tx` watch·`closed_by_user`·`reconnect_guard`(generation과 한 락) + mod.rs connect/ensure가 discovery *전에* bump로 옛 세대 취소(FIX-1).
+- **깨진 회귀 판정(이번 세션 핵심):** FAIL이던 `reconnect_close_during_connect_async_no_stale_auth`는 **프로덕션 코드 아닌 테스트 하네스 버그**로 확정(계측 증거). `spawn_connect_gate_server`의 auth 카운트 `ws.next().await.is_some()`가, 클라가 connect_async 창에서 취소로 소켓 drop 시 발생하는 `Some(Err(ConnectionAborted))`(Windows WSAECONNABORTED 10053)를 "Auth 받음"으로 오인 → 플랫폼 의존 오탐. 계측으로 클라가 정상 취소(connect_async arm CANCELLED, Auth 미송신) 확인. `Some(Ok(Message::Text(_)))`만 카운트하도록 수정 → green.
+- **게이트:** `cargo test -p engram-dashboard --lib` = 110 passed / 0 failed / 1 ignored · fmt clean.
+- **이월(ignored):** `supersede_connect_cancels_reconnect_before_discovery`는 `#[ignore]` 유지 — `start_paused`+current-thread에서 승계 connect_task의 초기 핸드셰이크(다단계 loopback 왕복)가 yield batch 안에 안 끝나면 11s advance가 wait_for_hello의 10s timeout을 건드리는 하네스 구조 hang(프로덕션 무관 — FIX-1은 mutation 단언 + green 경로로 커버). 재작성 옵션 A(multi_thread 재구동)/B(단위 강등)/C(현행 유지) 중 사용자 결정 대기.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
