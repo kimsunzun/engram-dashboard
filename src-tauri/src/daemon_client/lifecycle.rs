@@ -31,11 +31,21 @@
 //! 반드시 락 해제 후(메서드가 반환해 guard 가 drop 된 뒤) 호출한다. 이 모듈의 어떤 메서드도 내부에서
 //! `.await` 를 하지 않는다(전부 `&self` 동기 메서드) — 그래서 호출자가 락을 await 너머로 들 수 없다.
 //!
+//! ## 계측 위치 (관찰성)
+//! 이 모듈의 메서드는 가드 판정 결과(bool)를 **호출자**에게 돌려주고, stale 폐기·전이 로그는
+//! 호출자(connection.rs run_connection / mod.rs start_connection·close)가 my_gen·맥락과 함께
+//! 남긴다 — flat event(컨벤션 §형식, span 미사용)를 유지하고 같은 가드 발동을 lifecycle/호출자
+//! 양쪽에서 이중 로깅하지 않으려는 의도다. 그래서 이 파일 자체엔 tracing 호출이 없다.
+//!
 //! ## loom 도입 가능성
-//! 결정론적 인터리빙 검증(loom)은 이 TOCTOU 류 결함의 정석 도구다. 현재는 무게(loom 전용 atomic/sync
-//! 추상화 도입 + std 동시 유지) 때문에 스트레스 반복 테스트(tests.rs `*_stress`)로 확률적 회귀 검출만
-//! 깐다. lifecycle 을 loom 의 `loom::sync::Mutex` 로 추상화하면(cfg(loom) feature) 결정론적으로 이
-//! 락의 원자성을 증명할 수 있다 — 동시성 표면이 더 커지는 T4(재연결·백오프) 합류 시 재검토 가치 높음.
+//! 결정론적 인터리빙 검증(loom)은 이 TOCTOU 류 결함의 정석 도구다. 현재는 ① 결정론적 단위 테스트
+//! (tests.rs `guard_*`)로 가드의 *논리 계약*(stale→거부, current→허용)을 검증하고 ② 실 소켓 race 의
+//! 통합 wiring 은 single-shot 결정론 회귀 테스트가 커버한다. 다만 비교+변경의 *원자성*(동시 스레드에서
+//! 진짜 안 깨짐) 자체의 결정론 증명은 아직 없다 — 그건 무게(loom 전용 atomic/sync 추상화 도입 + std 동시
+//! 유지) 때문에 보류 중이다(저ROI 판단:
+//! docs/research/toctou-concurrency-test-verification-research-2026-06-28.md). lifecycle 을 loom 의
+//! `loom::sync::Mutex` 로 추상화하면(cfg(loom) feature) 이 락의 원자성을 결정론적으로 증명할 수 있다 —
+//! 동시성 표면이 더 커지는 T4(재연결·백오프) 합류 시 재검토 가치 높음.
 
 use std::sync::Mutex;
 
@@ -148,5 +158,18 @@ impl Lifecycle {
     #[cfg(test)]
     pub(crate) fn current_generation(&self) -> u64 {
         self.inner.lock().expect("lifecycle poisoned").generation
+    }
+
+    /// 저장된 cmd_tx 의 식별자(테스트 전용 — 좀비 sender 차단의 *상태 불변* 관찰점). cmd_tx 가 private 이라
+    /// 반환 bool 만으로는 "stale 저장이 기존 current sender 를 *덮지 않았다*"를 증명 못 한다 — 저장된 sender
+    /// 의 동일성을 비교할 핸들이 필요하다. Sender 자체는 Eq 가 없고 운영 코드가 식별자를 들 이유가 없으므로,
+    /// `same_channel` 비교용 clone 을 테스트에만 노출한다(None=미저장). 운영 경로엔 이 접근자가 없다.
+    #[cfg(test)]
+    pub(crate) fn cmd_tx_snapshot(&self) -> Option<mpsc::Sender<ConnectionCommand>> {
+        self.inner
+            .lock()
+            .expect("lifecycle poisoned")
+            .cmd_tx
+            .clone()
     }
 }

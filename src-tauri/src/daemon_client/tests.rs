@@ -18,9 +18,16 @@
 //!                                     · `lifecycle_close_clears_cmd_and_blocks_stale_revival`(close 원자성)
 //!                                     · `connected_then_close_reconnect_no_down_clobber`(main_loop 종료
 //!                                     Down 가드 — connected 이후 stale 종료가 새 연결을 clobber 안 함)
-//!   - Fix B(TOCTOU 회귀 — 체크+변경 원자화) → `toctou_stress_connect_close_settles_down` ·
-//!                                     `toctou_stress_concurrent_connect_settles_connected`(race 창
-//!                                     스트레스 — Codex 지적: 기존 테스트가 체크-변경 창을 안 때림)
+//!   - Fix B(TOCTOU 회귀 — 체크+변경 원자화, 결정론적 단위) → `guard_stale_down_cannot_clobber_current_connected`
+//!                                     (stale Down 차단) · `guard_concurrent_connect_settles_to_newest_generation`
+//!                                     (최신 세대 수렴) · `guard_store_cmd_rejects_stale_generation`
+//!                                     (cmd_tx 가드) · `guard_close_blocks_stale_revival`(close 후 stale 부활
+//!                                     차단). 옛 확률적 `toctou_stress_*` 2개를 supersede — 가드 메서드를
+//!                                     소켓·서버·sleep 없이 직접 순서 호출해 가드의 *논리 계약*(stale→거부,
+//!                                     current→허용)을 결정론적으로 증명한다. 비교+변경의 *원자성*(동시
+//!                                     스레드에서 진짜 안 깨짐)은 std Mutex 가 보장하며 이 단위 테스트가
+//!                                     증명하는 게 아니다(그건 loom 영역). 실 소켓 race 통합 wiring 은 위쪽
+//!                                     single-shot 결정론 회귀 테스트가 커버한다.
 //!   - Fix A(핸드셰이크 timeout)      → `handshake_times_out_when_server_silent`
 //!
 //! ## 격리(실 데몬 없이)
@@ -666,137 +673,159 @@ async fn connected_then_close_reconnect_no_down_clobber() {
     assert_eq!(client.state(), ConnectionState::Down);
 }
 
-// ── 스트레스 mock 서버(TOCTOU 창을 실제로 때리기 위함) ───────────────────────────────────────
+// ── Fix B 회귀(결정론적 단위): TOCTOU 가드 불변식 — 소켓·서버·sleep 0, 가드 메서드 직접 순서 호출 ──
 //
-// 다수 연결을 받아 각각 **아주 짧은 지연(hello_delay) 후 Hello** 를 보낸다. 지연을 둬, 클라의
-// 핸드셰이크가 Hello 대기에서 잠깐 멈춘 사이 테스트가 close()/새 connect 로 세대를 bump 하는
-// "체크-변경 창" 을 확률적으로 자주 때린다. connected 후엔 잠시 유지하다 drop(소켓 닫힘 → 클라
-// main_loop 종료 Down 가드 경로도 함께 가열).
-async fn spawn_stress_server(hello_delay: Duration, hold: Duration) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(async move {
-                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
-                    return;
-                };
-                // 첫 frame(Auth) 소비.
-                if ws.next().await.is_none() {
-                    return;
-                }
-                // ★창 가열★: Hello 를 미세 지연시켜 핸드셰이크를 in-flight 로 잠시 묶는다.
-                if !hello_delay.is_zero() {
-                    tokio::time::sleep(hello_delay).await;
-                }
-                let hello = serde_json::to_string(&AgentEvent::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    daemon_version: "test".into(),
-                    capabilities: None,
-                })
-                .unwrap();
-                let _ = ws.send(Message::Text(hello.into())).await;
-                tokio::time::sleep(hold).await;
-            });
-        }
-    });
-    port
-}
+// ★왜 확률적 stress 를 이 결정론적 단위로 교체했나 (다음 세션이 매직타이밍 stress 를 재도입하지 말 것)★
+// 이전엔 `toctou_stress_*` 두 테스트가 mock 서버 hold(5/30ms) vs assert sleep(3ms) 의 매직 타이밍에
+// 의존해 race 창을 *확률적으로* 때렸다. 그 타이밍 가정이 깨지면 current task 의 *정상* Down 을 stale
+// clobber 로 오판하는 false positive 가 났다(baseline 에서도 ~1/20 간헐 실패). cross-family 리서치
+// (docs/research/toctou-concurrency-test-verification-research-2026-06-28.md) 결론 = loom 도입은 지금
+// 저ROI(tokio::sync 사용자 검증엔 tokio 재컴파일 필요), 대신 **단위 수준으로 내려 가드 메서드를 직접
+// 순서대로 호출**해 가드의 *논리 계약*(stale→미발행/거부, current→발행/허용)을 네트워크 타이밍 없이
+// 결정론적으로 증명한다. ★범위 한계(정직성)★: 비교+변경의 *원자성*(동시 스레드에서 진짜 안 깨짐)은
+// std Mutex 가 보장하며 이 단위 테스트가 증명하는 게 아니다 — 그건 loom 영역이다(아래 §loom). 실 소켓
+// race 를 통한 통합 wiring 커버는 위쪽 single-shot 결정론 회귀 테스트
+// (`concurrent_connect_settles_connected_no_flap` · `connected_then_close_reconnect_no_down_clobber`
+// 등)가 계속 맡는다 — 이 단위 테스트는 그 가드 *판정점*(논리 계약) 자체를 race 없이 박제한다.
 
-// ── TOCTOU 스트레스 ①: connected→close→reconnect 를 다수 반복 → stale Down 이 새 Connected clobber 금지 ──
-// ★이 테스트가 메우는 갭(Codex 지적)★: 기존 회귀 테스트(`connected_then_close_reconnect_no_down_clobber`)
-// 는 이 시나리오를 *한 번* 만 친다. TOCTOU(체크 통과 → preempt → 다른 스레드 bump → stale 가 그래도
-// write)는 타이밍 의존이라 1회로는 창을 거의 못 맞춘다. 여기선 같은 패턴을 수백 회 반복해 그 창을
-// 확률적으로 자주 친다.
-//
-// ★왜 이게 clobber 를 *검출 가능*하게 만드나★: 각 iteration 은 (a)connect→Connected →(b)close(옛 task
-// stale 화, gen bump, cmd_tx drop → 옛 task 의 main_loop 가 cmd_rx EOF 로 종료하며 종료 Down 을
-// publish 시도) →(c)곧바로 reconnect→새 task 가 Connected. 옛(stale) task 의 *종료 Down* 과 새 task 의
-// *Connected* 가 시간상 겹친다. 가드가 "세대 비교 + send" 를 원자로 하지 않으면(옛 구현의 load→send
-// 분리), 옛 task 가 자기를 current 로 오판한 직후 새 connect 가 bump 하고, 옛 task 의 Down 이 새
-// Connected 를 덮어쓴다 → 최종 Down(flap). Connected 와 Down 은 구별되는 값이라 이 clobber 는 단언으로
-// 잡힌다(connect↔connect 의 Connected-vs-Connected 와 달리 관찰 가능).
-//
-// ★확률적 한계★: 스트레스는 race 를 *결정론적으로* 증명하진 못한다(loom 이 그 역할). 결정론적 검증은
-// lifecycle 을 loom 추상화로 감싸는 후속 과제로 남긴다(lifecycle.rs 주석 참조).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn toctou_stress_reconnect_no_stale_down_clobber() {
-    // hold 를 짧게(5ms) → 옛 task 의 main_loop 가 소켓 drop/cmd EOF 로 빨리 종료해 종료 Down 을
-    // 새 connect 의 Connected 와 시간상 겹치게(창 가열). Hello 는 즉시.
-    let port = spawn_stress_server(Duration::from_millis(0), Duration::from_millis(5)).await;
-    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, "stress-tok"))));
-    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+// ── (a) stale Down 은 current Connected 를 clobber 못 함 (옛 stress① 대체) ──────────────────────
+// 더 새 세대(gen_b)가 Connected 를 발행한 뒤, 밀려난 옛 세대(gen_a)가 Down 을 발행하려 해도 거부되어
+// watch 가 Connected 로 유지됨을 단언. publish_if_current 의 "세대 비교 + send" 가 분리되면(옛 구현)
+// 이 stale Down 이 current Connected 를 덮어쓴다 → 그 회귀를 결정적으로 잡는다.
+#[test]
+fn guard_stale_down_cannot_clobber_current_connected() {
+    let (lc, rx) = Lifecycle::new();
+    // 옛 세대 진입(gen_a) → 이어서 더 새 세대 등장 모델(gen_b). gen_b > gen_a 라 gen_a 는 stale.
+    let gen_a = lc.bump_and_capture(Some(ConnectionState::Connecting));
+    let gen_b = lc.bump_and_capture(Some(ConnectionState::Connecting));
+    assert!(gen_b > gen_a, "두 번째 bump 가 더 새 세대여야");
+    assert_eq!(lc.current_generation(), gen_b, "current = 최신 세대");
 
-    const ITERS: usize = 400;
-    for i in 0..ITERS {
-        // (a) connect → Connected (옛 task 가 main_loop 진입).
-        client
-            .connect()
-            .await
-            .unwrap_or_else(|e| panic!("iteration {i}: 첫 connect 실패 {e:?}"));
-        assert_eq!(client.state(), ConnectionState::Connected);
-
-        // (b) close: gen bump(옛 task stale) + cmd_tx drop(옛 task main_loop 가 cmd_rx EOF 로 종료하며
-        //     종료 Down 을 publish 시도) + Down.
-        client.close();
-
-        // (c) 곧바로 reconnect → 새 task 가 새 소켓으로 Connected. 옛(stale) task 의 종료 Down 이
-        //     원자 가드를 뚫고 broadcast 되면 이 Connected 를 Down 으로 clobber(flap)한다.
-        client
-            .connect()
-            .await
-            .unwrap_or_else(|e| panic!("iteration {i}: reconnect 실패 {e:?}"));
-
-        // 옛 task 의 종료 Down 이 (있었다면) 도착할 짧은 시간을 준 뒤에도 Connected 유지여야 한다.
-        tokio::time::sleep(Duration::from_millis(3)).await;
-        assert_eq!(
-            client.state(),
-            ConnectionState::Connected,
-            "iteration {i}: 옛(stale) task 의 main_loop 종료 Down 이 새 Connected 를 clobber 함(TOCTOU)"
-        );
-    }
-
-    client.close();
-    assert_eq!(client.state(), ConnectionState::Down);
-}
-
-// ── TOCTOU 스트레스 ②: connect ↔ connect 를 다수 반복 동시 실행 → 최종 Connected 일관 ──────────
-// 두 connect 를 같은 iteration 에서 동시에 던지면 둘 다 세대를 bump 하고 둘 다 소켓을 연다. 더 새
-// 세대 task 만 current 가 되어 Connected 를 발행하고, 밀려난 task 는 publish_if_current 가 false 라
-// Connected 를 발행하지 않는다. 그 "체크-변경 창" 을 수백 회 친 뒤, 매 iteration 최종 상태가
-// Connected(밀려난 task 의 Down clobber 로 flap 하지 않음)임을 단언한다. 마지막에 close → Down.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn toctou_stress_concurrent_connect_settles_connected() {
-    let port = spawn_stress_server(Duration::from_millis(1), Duration::from_millis(30)).await;
-    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, "stress2-tok"))));
-    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
-
-    const ITERS: usize = 300;
-    for i in 0..ITERS {
-        let c1 = client.clone();
-        let c2 = client.clone();
-        let (r1, r2) = tokio::join!(c1.connect(), c2.connect());
-        assert!(
-            r1.is_ok() || r2.is_ok(),
-            "iteration {i}: 동시 connect 중 최신 세대 task 는 connected 로 성공해야: r1={r1:?} r2={r2:?}"
-        );
-        // 밀려난 task 의 self-close/지연 Hello 가 비동기로 끝날 짧은 시간을 준 뒤 최종 상태 확인.
-        tokio::time::sleep(Duration::from_millis(3)).await;
-        assert_eq!(
-            client.state(),
-            ConnectionState::Connected,
-            "iteration {i}: 동시 connect 후 최종 상태는 Connected(stale task 의 Down clobber 로 flap 금지)"
-        );
-        // 다음 iteration 깨끗이 시작하려 close → Down.
-        client.close();
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    // current(gen_b) 는 Connected 발행 허용.
+    assert!(
+        lc.publish_if_current(gen_b, ConnectionState::Connected),
+        "current 세대는 Connected 발행됨"
+    );
+    // stale(gen_a) 의 Down 발행은 거부 → clobber 없음.
+    assert!(
+        !lc.publish_if_current(gen_a, ConnectionState::Down),
+        "stale 세대의 Down 은 거부되어야(clobber 차단)"
+    );
     assert_eq!(
-        client.state(),
+        *rx.borrow(),
+        ConnectionState::Connected,
+        "stale Down 이 거부됐으니 watch 는 Connected 유지"
+    );
+}
+
+// ── (b) 동시 connect 는 최신 세대로 수렴 (옛 stress② 대체) ──────────────────────────────────────
+// 두 connect 가 각자 세대를 bump 한 모델(g1 < g2). 의도: 동시 connect 면 밀려난(stale) 시도는 거부되고
+// 최신 세대만 발행된다.
+//
+// ★단언 순서가 load-bearing(vacuity 회피)★: 먼저 current(g2)가 Connected 를 발행한 뒤, stale(g1)이
+// **구별 가능한 값(Down)** 을 발행 시도해 ① 거부(false) ② watch 가 여전히 Connected(clobber 안 됨)임을
+// 단언한다. stale 도 Connected 를 쏘게 두면(옛 구현) 발행값이 current 와 같아 watch 가 안 변하므로 "가드가
+// false 만 반환하고 send 는 그대로 함" 같은 mutation 이 헛 단언을 통과한다 — Down 으로 갈라 그 누수를 watch
+// 에 드러낸다(가드가 stale 을 send 하면 watch=Down 으로 떨어져 마지막 단언이 실패).
+#[test]
+fn guard_concurrent_connect_settles_to_newest_generation() {
+    let (lc, rx) = Lifecycle::new();
+    let g1 = lc.bump_and_capture(Some(ConnectionState::Connecting));
+    let g2 = lc.bump_and_capture(Some(ConnectionState::Connecting));
+    assert!(g2 > g1, "동시 connect 모델: 둘 다 bump 라 g2 > g1");
+
+    // 최신 세대(g2) 만 current → Connected 발행 성공.
+    assert!(
+        lc.publish_if_current(g2, ConnectionState::Connected),
+        "최신 세대(g2)는 Connected 발행 성공"
+    );
+    assert_eq!(
+        *rx.borrow(),
+        ConnectionState::Connected,
+        "current 발행 반영"
+    );
+
+    // 밀려난 세대(g1) 가 구별 가능한 Down 을 발행 시도 → 거부(false). Connected 와 다른 값이라, 가드가
+    // 새는 mutation 이면 watch 가 Down 으로 떨어져 아래 단언이 실패한다.
+    assert!(
+        !lc.publish_if_current(g1, ConnectionState::Down),
+        "밀려난 세대(g1)의 발행은 거부"
+    );
+    assert_eq!(
+        *rx.borrow(),
+        ConnectionState::Connected,
+        "stale 이 거부됐으니 watch 는 current 의 Connected 유지(stale Down 으로 clobber 안 됨)"
+    );
+}
+
+// ── (c) store_cmd_if_current 가드 — stale 거부, current 허용 + 기존 sender 미덮음 ────────────────────
+// 가드의 *목적* = 좀비 sender 차단(stale 저장이 current cmd_tx 를 덮으면 안 됨). 반환 bool 만 보면 그
+// 목적을 증명 못 하므로, `lifecycle_close_clears_cmd_and_blocks_stale_revival` 과 같은 기법으로 저장된
+// cmd_tx 상태를 관찰한다 — 여기선 cmd_tx_snapshot(#[cfg(test)] 접근자)으로 *어떤* sender 가 저장됐는지를
+// `same_channel` 로 본다. 순서: current 먼저 저장(true) → stale 저장 시도(false) → 저장된 cmd_tx 가 여전히
+// current 의 것(stale 로 안 덮임). (mpsc::channel(1) 더미 — 실제 송수신은 검증 대상 아님.)
+#[test]
+fn guard_store_cmd_rejects_stale_generation() {
+    let (lc, _rx) = Lifecycle::new();
+    let gen_a = lc.bump_and_capture(None);
+    let gen_b = lc.bump_and_capture(None); // gen_a 를 stale 로 만듦
+    assert!(gen_b > gen_a);
+
+    // current(gen_b) 저장 성공 — 이게 살아남아야 할 sender.
+    let (tx_cur, _rx_cur) = tokio::sync::mpsc::channel(1);
+    assert!(
+        lc.store_cmd_if_current(gen_b, tx_cur.clone()),
+        "current 세대는 cmd_tx 저장 허용(true)"
+    );
+    let stored = lc.cmd_tx_snapshot().expect("current 저장 후 cmd_tx 존재");
+    assert!(
+        stored.same_channel(&tx_cur),
+        "저장된 cmd_tx 는 current(gen_b)의 것"
+    );
+
+    // stale(gen_a) 저장 시도 → 거부(false). 그리고 저장된 sender 는 여전히 current 의 것(stale 미덮음).
+    let (tx_stale, _rx_stale) = tokio::sync::mpsc::channel(1);
+    assert!(
+        !lc.store_cmd_if_current(gen_a, tx_stale.clone()),
+        "stale 세대는 cmd_tx 저장 거부(false)"
+    );
+    let after = lc
+        .cmd_tx_snapshot()
+        .expect("거부 후에도 current cmd_tx 유지");
+    assert!(
+        after.same_channel(&tx_cur),
+        "stale 저장이 거부됐으니 저장된 cmd_tx 는 여전히 current(gen_b)의 것"
+    );
+    assert!(
+        !after.same_channel(&tx_stale),
+        "stale sender 로 덮이지 않았다(좀비 sender 차단)"
+    );
+}
+
+// ── (d) close 후 stale 부활 방지 ────────────────────────────────────────────────────────────────
+// close() 가 세대를 bump 하고 Down 을 발행한 뒤, 옛 세대(gen_a)로 Connected 를 발행하려 해도 거부되어
+// close 의 Down 이 stale 에 의해 Connected 로 되살아나지 않음을 단언. close 의 bump+Down 원자성 계약.
+#[test]
+fn guard_close_blocks_stale_revival() {
+    let (lc, rx) = Lifecycle::new();
+    let gen_a = lc.bump_and_capture(Some(ConnectionState::Connecting));
+    let gen_before_close = lc.current_generation();
+
+    lc.close(); // 세대 bump + cmd_tx=None + Down 발행(원자)
+    assert!(
+        lc.current_generation() > gen_before_close,
+        "close 가 세대를 bump 해야(stale 무력화)"
+    );
+    assert_eq!(*rx.borrow(), ConnectionState::Down, "close 후 Down");
+
+    // 옛 세대(gen_a)의 Connected 발행 = 부활 시도 → 거부.
+    assert!(
+        !lc.publish_if_current(gen_a, ConnectionState::Connected),
+        "close 로 stale 된 옛 세대는 close 의 Down 을 Connected 로 되살릴 수 없다"
+    );
+    assert_eq!(
+        *rx.borrow(),
         ConnectionState::Down,
-        "마지막 close 후 Down"
+        "stale 부활이 거부됐으니 watch 는 Down 유지"
     );
 }
