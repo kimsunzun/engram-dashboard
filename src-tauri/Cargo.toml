@@ -17,7 +17,8 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# caret resolve(현재 2.11.2). Channel spike 검증 완료 — 최신 2.x 유지.
+# caret resolve(현재 2.11.3 = 최신 2.x). 2.11.3에서 channel-data 데드락 수정 흡수
+#   (carrier 리서치 2026-06-28: docs/research/tauri-channel-multiwindow-carrier-…). Channel spike 검증 완료.
 # ADR-0026 2단계: tray-icon=네이티브 시스템 트레이, image-ico=Image::from_bytes 의 .ico 디코드(트레이
 # 아이콘을 .ico 에서 RGBA 로 풀어 컬러/회색 두 벌 생성 — 별도 image crate 불필요).
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
