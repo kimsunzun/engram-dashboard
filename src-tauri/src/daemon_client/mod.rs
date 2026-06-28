@@ -170,14 +170,21 @@ impl DaemonClient {
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
+        tracing::info!("데몬 연결 시작(connect — spawn 가능 경로)");
         // ★spawn 허용 경로★: ensure_spawn(데몬 없으면 띄움). blocking 이라 spawn_blocking 으로 감싼다.
         let discovery = self.discovery.clone();
         let info = self
             .rt
             .spawn_blocking(move || discovery.ensure_spawn(DEFAULT_CONNECT_TIMEOUT))
             .await
-            .map_err(|e| HandshakeError::Discovery(format!("ensure join 실패: {e}")))?
-            .map_err(HandshakeError::Discovery)?;
+            .map_err(|e| {
+                tracing::warn!("데몬 discovery join 실패: {e}");
+                HandshakeError::Discovery(format!("ensure join 실패: {e}"))
+            })?
+            .map_err(|e| {
+                tracing::warn!("데몬 발견/spawn 실패: {e}");
+                HandshakeError::Discovery(e)
+            })?;
         self.start_connection(info).await
     }
 
@@ -190,9 +197,11 @@ impl DaemonClient {
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
+        tracing::info!("데몬 연결 시작(ensure — attach-only, no-spawn)");
         // ★ADR-0021 no-spawn 불변식★: read_live 만 — ensure 는 절대 ensure_spawn 을 부르지 않는다.
         // 데몬이 없으면 여기서 끝(spawn 0회). 복구는 명시 connect() 로만.
         let Some(info) = self.discovery.read_live() else {
+            tracing::warn!("ensure 실패 — 살아있는 데몬 없음(no-spawn, connect 로만 복구)");
             return Err(HandshakeError::NoLiveDaemon);
         };
         self.start_connection(info).await
@@ -242,10 +251,20 @@ impl DaemonClient {
                 //   올렸으면 이 연결은 stale 이다 — cmd_tx 를 저장하면 좀비 채널이 된다. store_cmd_if_current
                 //   가 "세대 비교 + 저장" 을 원자로 해, current 일 때만 저장한다. stale 이면 저장하지 않고
                 //   cmd_tx 가 여기서 drop → 연결 task 의 cmd_rx 가 EOF → 그 task 도 곧 정리된다.
-                self.lifecycle.store_cmd_if_current(my_gen, cmd_tx);
+                if !self.lifecycle.store_cmd_if_current(my_gen, cmd_tx) {
+                    // generation 가드 발동: 핸드셰이크 사이 더 새 connect/close 가 세대를 올림 → cmd_tx
+                    //   미저장(좀비 채널 차단). 이 caller 입장에선 연결이 밀렸으나 핸드셰이크 자체는 성공.
+                    tracing::debug!(
+                        generation = my_gen,
+                        "stale 연결 — cmd_tx 미저장(더 새 connect/close 가 세대를 올림)"
+                    );
+                }
                 Ok(())
             }
             Ok(Err(e)) => {
+                // ★재로깅 안 함★: 구체 실패 사유(connect/직렬화/Auth 송신/핸드셰이크)는 run_connection 이
+                //   이미 정확한 문구로 warn 을 남겼다(connection.rs). 여기서 또 찍으면 같은 실패가 warn 2줄 +
+                //   "reject" 로 오라벨된다 — 단일 출처 유지를 위해 caller 쪽은 무로깅으로 전파만 한다.
                 // current 일 때만 Down(stale 이면 더 새 연결의 상태를 clobber 하면 안 됨) — 원자 가드.
                 self.lifecycle
                     .publish_if_current(my_gen, ConnectionState::Down);
@@ -255,8 +274,26 @@ impl DaemonClient {
             // 의 generation 가드가 ready 송신을 건너뛰고 빠짐). 둘 다 이 caller 입장에선 핸드셰이크 실패.
             // stale 한 경우 더 새 연결이 진행 중이므로 여기서 Down 을 쏘면 안 된다 → 원자 가드로 current 만.
             Err(_) => {
-                self.lifecycle
-                    .publish_if_current(my_gen, ConnectionState::Down);
+                // ★레벨을 stale 여부로 가른다★: publish_if_current 가 true(=current 였는데 ready 없이
+                //   task 가 사라짐)면 진짜 이상(panic 추정) → 사람이 봐야 함(warn). false(=stale)면 더 새
+                //   연결이 세대를 올려 publish_if_current 가 Down 을 삼킨 경우다 — stale 한 이 task 가 ready
+                //   없이 사라진 원인은 run_connection 의 가드 self-close *또는* stale task 의 panic 둘 다일 수
+                //   있으나(둘 다 false 분기로 귀결), 어느 쪽이든 이미 superseded 라 진단용 debug 로 충분하다.
+                //   Down 이 stale 이면 삼켜진다(clobber 방지 — connection.rs 의 main_loop 종료 Down 가드와 동형).
+                if self
+                    .lifecycle
+                    .publish_if_current(my_gen, ConnectionState::Down)
+                {
+                    tracing::warn!(
+                        generation = my_gen,
+                        "연결 task 가 ready 신호 전 사라짐(current 연결 — panic 추정)"
+                    );
+                } else {
+                    tracing::debug!(
+                        generation = my_gen,
+                        "stale task 소멸(ready 전 — self-close 또는 panic, 어느 쪽이든 superseded)"
+                    );
+                }
                 Err(HandshakeError::TaskGone)
             }
         }
@@ -274,6 +311,7 @@ impl DaemonClient {
     /// ★재연결 금지는 T4★: T2 는 명시 close 만. closedByUser 가드(명령/재연결이 respawn 안 하게)는
     /// 백오프 재연결과 함께 T4 가 채운다.
     pub fn close(&self) {
+        tracing::info!("데몬 연결 명시 종료(close)");
         self.lifecycle.close();
     }
 

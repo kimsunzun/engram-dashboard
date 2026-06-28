@@ -39,7 +39,7 @@
 - **동시성 전이:** 상태 변화, 가드 발동(stale 세대 폐기·재시작 등).
 - **외부 경계:** spawn, 파일 IO, 네트워크 accept/close.
 
-> S14 `daemon_client`(연결·핸드셰이크·generation 가드)는 이 의무의 **적용 대상이나 아직 tracing 미계측** — backfill 예정. 기존 계측 본보기는 `crates/.../ws.rs`(연결/인증 흐름).
+> S14 `daemon_client`(연결·핸드셰이크·generation 가드)는 이 의무에 맞춰 **계측 완료**(`src-tauri/src/daemon_client/{mod,connection}.rs`) — 연결 시작/수립/종료(info), 접속·Auth·핸드셰이크 실패(warn), stale 가드 발동(debug). 가드 판정 로그는 호출자 레이어에 두고 `lifecycle.rs`는 무계측(이중 로깅 회피, 파일 헤더 참조). 본보기는 `crates/.../ws.rs`(연결/인증 흐름).
 
 ## 보안
 

@@ -126,10 +126,13 @@ pub(crate) async fn run_connection(
 ) {
     // 1) ws://host:port 접속(host 는 항상 127.0.0.1 loopback — DaemonInfo).
     let url = format!("ws://{}:{}", info.host, info.port);
+    // ★token 미노출★: url·generation 만 필드로(DaemonInfo.token 은 절대 로그에 싣지 않음 — 보안).
+    tracing::debug!(%url, generation = my_gen, "데몬 WS 연결 시도");
     let ws = match connect_async(&url).await {
         Ok((ws, _resp)) => ws,
         Err(e) => {
             // ★token 미노출★: url 만 싣는다(DaemonInfo.token 은 절대 에러에 넣지 않음).
+            tracing::warn!(%url, generation = my_gen, "데몬 WS 접속 실패: {e}");
             let _ = ready_tx.send(Err(HandshakeError::Connect(format!("{url}: {e}"))));
             // ★원자 가드★ stale 이면 공유 상태 미접촉(고아 Down clobber 방지) — 비교+send 가 한 락 안.
             lifecycle.publish_if_current(my_gen, ConnectionState::Down);
@@ -152,12 +155,15 @@ pub(crate) async fn run_connection(
     let auth_text = match serde_json::to_string(&auth) {
         Ok(t) => t,
         Err(e) => {
+            tracing::warn!(generation = my_gen, "Auth 직렬화 실패: {e}");
             let _ = ready_tx.send(Err(HandshakeError::AuthSend(format!("직렬화: {e}"))));
             lifecycle.publish_if_current(my_gen, ConnectionState::Down);
             return;
         }
     };
     if let Err(e) = sink.send(Message::Text(auth_text.into())).await {
+        // ★token 미노출★: 송신 실패 에러만(Auth frame 내용=token 은 절대 로그 금지 — 보안).
+        tracing::warn!(generation = my_gen, "Auth frame 송신 실패: {e}");
         let _ = ready_tx.send(Err(HandshakeError::AuthSend(e.to_string())));
         lifecycle.publish_if_current(my_gen, ConnectionState::Down);
         return;
@@ -180,17 +186,31 @@ pub(crate) async fn run_connection(
             //    drop → caller 의 ready_rx.await 가 RecvError → caller 가 stale 을 인지(start_connection
             //    의 Err(_) arm). current task 만 Connected 를 broadcast + ready Ok 보고.
             if !lifecycle.publish_if_current(my_gen, ConnectionState::Connected) {
+                // ★generation 가드 발동★: Hello 까지 왔으나 더 새 connect/close 가 세대를 올려 이
+                //    연결은 stale — 공유 상태를 건드리지 않고 소켓만 닫고 조용히 종료(고아 Connected 방지).
+                tracing::debug!(
+                    generation = my_gen,
+                    "stale 연결 폐기 — Hello 수신했으나 세대가 밀림"
+                );
                 let _ = sink.close().await; // ★락 밖 await★
                 return;
             }
+            // Hello 수신 = 인증 성공 = 연결 수립. 정상 수명주기(info).
+            tracing::info!(%url, generation = my_gen, "데몬 WS 연결 수립(Hello 수신, 인증 성공)");
             // ready_tx 수신자가 사라졌으면(호출자 drop) 그대로 정리 종료.
             if ready_tx.send(Ok(())).is_err() {
+                tracing::debug!(
+                    generation = my_gen,
+                    "연결 수립 후 호출자 사라짐(ready 수신자 drop) — 정리 종료"
+                );
                 let _ = sink.close().await; // ★락 밖 await★
                 lifecycle.publish_if_current(my_gen, ConnectionState::Down);
                 return;
             }
         }
         Err(e) => {
+            // 핸드셰이크 실패(타임아웃·Auth 거부·Hello 전 close 등). 안전 폴백(warn).
+            tracing::warn!(%url, generation = my_gen, "데몬 WS 핸드셰이크 실패: {e}");
             let _ = ready_tx.send(Err(e));
             // ★원자 가드★ stale 이면 Down 미송신(current 의 Connected clobber 방지).
             lifecycle.publish_if_current(my_gen, ConnectionState::Down);
@@ -215,7 +235,9 @@ async fn main_loop(
     lifecycle: &Arc<Lifecycle>,
     my_gen: u64,
 ) {
-    loop {
+    // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
+    // 로그 미부착 — Text/Binary 청크는 per-frame 빈도라 trace 미사용 정책 유지). 종료=연결 1회뿐.
+    let reason = loop {
         tokio::select! {
             // 데몬 → 클라 수신.
             incoming = stream.next() => {
@@ -233,12 +255,12 @@ async fn main_loop(
                                 // TODO(T5): decode_frame → OutputRouter(arc-swap) 라우팅 + seq dedup(T3).
                             }
                             // Ping/Pong 은 tungstenite 가 자동 응답(내부). Close 면 종료.
-                            Message::Close(_) => break,
+                            Message::Close(_) => break "데몬이 Close frame 송신",
                             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
                         }
                     }
                     // 데몬이 연결을 닫음/오류 → 메인 루프 종료. 재연결(T4) 은 미구현이라 Down 으로.
-                    Some(Err(_)) | None => break,
+                    Some(Err(_)) | None => break "데몬 스트림 종료/오류",
                 }
             }
             // invoke → 연결 task 명령. cmd_rx 가 None(모든 sender drop = 명시 close) 이면 종료.
@@ -246,18 +268,26 @@ async fn main_loop(
                 match cmd {
                     // TODO(T6): ConnectionCommand variant 처리(cmd 를 wire 로 인코딩해 sink.send).
                     Some(_cmd) => { /* T6 에서 처리 */ }
-                    None => break, // DaemonClient.close() 가 cmd_tx 를 drop → 명시 종료.
+                    None => break "명시 close(cmd_tx drop)", // DaemonClient.close() 가 cmd_tx 를 drop.
                 }
             }
         }
-    }
+    };
+    // 연결 task 종료 = 연결 수명 끝. 정상 수명주기(info) — reason 으로 데몬 close/명시 close 등 구분.
+    tracing::info!(generation = my_gen, reason, "데몬 WS 연결 task 종료");
     // 정리: 소켓 닫고 Down 전이(재연결 전이는 T4 가 여기서 분기). ★락 밖 await★.
     let _ = sink.close().await;
     // ★원자 가드(Fix B)★: stale task(close()/새 connect 가 세대를 올림)의 종료가 current 연결의
     //    Connected 를 Down 으로 clobber 하지 않도록, publish_if_current 로 "세대 비교 + Down send" 를
     //    한 락 안에 묶는다 — 비교 후 send 전에 새 연결이 끼어 Connected 를 올려도 stale 인 이 task 는
     //    이미 false 로 빠진다(이전 load→send 분리의 TOCTOU 를 닫음). current 일 때만 Down broadcast.
-    lifecycle.publish_if_current(my_gen, ConnectionState::Down);
+    if !lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+        // stale 종료 — 더 새 연결이 이미 떠 current 를 잡았으므로 Down 을 삼켰다(clobber 방지 발동).
+        tracing::debug!(
+            generation = my_gen,
+            "stale task 종료 — Down 미발행(더 새 연결이 current)"
+        );
+    }
 }
 
 /// Hello 가 올 때까지 stream 을 읽는다(internal 소비). Hello=Ok, Error=AuthRejected, 닫힘=ClosedBeforeHello.

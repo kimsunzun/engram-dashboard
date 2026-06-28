@@ -204,7 +204,9 @@ async fn run_accept_loop(
 
 /// 데몬 본체. 반환 Err(code) 면 호출자(main)가 그 코드로 exit. 정상 종료(이미 실행 중 포함)는 Ok.
 pub async fn run() -> Result<(), i32> {
-    // 0) 기본 warn(OFF) — RUST_LOG 로 재정의. core 의 init_logging 재사용(키 마스킹 포함).
+    // 0) 기본 warn(OFF) — RUST_LOG 로 재정의. core 의 init_logging 재사용.
+    //    ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
+    //    적용은 호출자 책임이다(민감 출력 로깅 시 명시 적용). 근거: docs/reference/logging-conventions.md.
     logging::init_logging();
 
     // 0.5) panic hook 설치(B-1). 데몬 내부 스레드(pump 등)가 panic 하면 silent 정지로
