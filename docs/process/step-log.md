@@ -396,6 +396,15 @@
 - **계기:** flaky TOCTOU를 매직넘버(5ms→50ms) 솔로 튜닝으로 통과시키려던 안티패턴을 사용자가 막음 → "기능엔 참조구현, 결함엔?"의 갭을 규약으로 메움.
 - **4층(commenting/logging 패턴 동형):** ADR-0038(왜+거부대안) + `docs/reference/debugging-conventions.md`(실천 규약·발동조건 2신호·제외) + CLAUDE.md "참조 구현" 기조 한 줄(발견) + `qa/bindings/engram.md` 발화 한 줄(flaky/타이밍/perf 실패=매직넘버 통과 금지 → 신호 뜨는 지점). 발견↔발화 분리가 설계 핵심(self-enforced 규약은 그 순간 발화 안 되면 죽음).
 - **트리거=2신호(행동 기반):** ① 매직넘버로 증상 통과 시도 ② 추측 1회 실패 후 솔로 반복. 카테고리 트리거 거부(그 순간 인식 불가).
+
+### 모듈② 슬라이스 — 구독 누수 가드 재설계({dispose,ready}) + 부팅뷰 GUI 실측 (2026-06-28, dashboard2/master, opus)
+- **계기:** `/continue` 로드 시 핸드오프 stale 발견 — "다음 세션이 할 일(미수정)"로 적힌 init race 가드·dispose 가드·(a)테스트가 working tree에 **이미 존재**(do-not의 "coder spawn 거절-실행 사례" 정황). working tree 직접 검증으로 정정.
+- **dead-branch 적출(opus+Codex 적대):** `subscribeViewEvents`의 `if(disposed)` 가드는 **무효** — disposed setter가 반환 disposer뿐이라 `await` 중 set 불가. 실제 누수 = `eventBus`의 `await subscribeViewEvents()` pending 중 정리(HMR/재init)에서 disposer 누락. 거짓 주석("막힌다")이 더 위험.
+- **OSS 리서치(`/research medium`, cross-family):** 동기 teardown 핸들이 표준(RxJS·zustand·EventEmitter·useSyncExternalStore) — non-abortable Promise(Tauri `listen()`) 래핑엔 `{dispose, ready}` 적합. 보고서 `docs/research/async-subscribe-cleanup-race-2026-06-28.md`.
+- **코더 2라운드(opus):** `subscribeViewEvents` 동기 `{dispose, ready}` + 계약 4개(idempotent·늦은 핸들 즉시 호출·ready hang 금지·부분 정리). `/review code full` FIX → **HMR `import.meta.hot.dispose` 콜백을 ready await 전으로 이동**(Codex가 "ready pending 중 HMR 누수 미완" 적출 — opus 못 봄, cross-family 가치) + ready reject 격리(agentClient 도메인 분리).
+- **ADR-0039** 프론트 구독 teardown = 동기 dispose+ready(ADR-0035 후속). 거부 대안: async+`if(disposed)`(dead branch)·AbortController(listen signal 미지원)·async dispose(즉시 취소핸들 불가). `adr.mjs` 채번·인덱스, lint error 0.
+- **QA full PASS:** cargo 전체 workspace 회귀 + 프론트(vitest 111·tsc 0·fmt·코어 격리 0) + **GUI cdp 실측 — 부팅 시 기본 View 1 빈 슬롯이 `ViewLayoutRenderer`로 렌더**(`list_views` + 메인 캔버스 `Slot…empty` 확인). 슬라이스 첫 GUI 실측.
+- **다음:** 커밋·push(owner 승인 대기). slotStore→viewStore 전체 이주는 별도 슬라이스(AppLayout strand = 수용 주석).
 - **`/review doc full`(opus 수호 + Codex cut):** 구조 PASS(4층 역할분리·교차참조 정합), FIX(중복제거: 사례/컨텍스트위생/도메인리스트 → 포인터화 · 트리거명 명확화 · qa·CLAUDE 경량화 · README reference 셀 rot 수정). ADR lint ok.
 
 ### 모듈① T4 — 자동 재연결 + in-flight 취소 (2026-06-28, dashboard2, opus)
