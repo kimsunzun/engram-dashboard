@@ -5,6 +5,16 @@ pub mod daemon_client;
 // ADR-0035: 레이아웃 권위 = src-tauri(데몬 UI 불가지론). ViewManager 상태 + 순수 트리 연산 + 타입
 // (ts-rs 미러). protocol/daemon crate 에 넣지 않는다 — 레이아웃은 신규 클라(src-tauri) 관심사.
 pub mod layout;
+// S14 모듈①(ADR-0036) T5: OutputRouter — agent_id → window-label 라우팅(lock-free arc-swap 핫패스)
+// + 구독 union diff(F-B, layout 파생). 순수 로직(Tauri 의존 0, headless 테스트). T6 가 배선한다:
+//   - rebuild 트리거 = layout command 의 ViewManager 락 보유 critical section 안(layout mutation 직후,
+//     같은 락으로 router.rebuild(&mgr) → table+delta 산출). load→delta→store RMW 직렬화 + 현재 mgr
+//     일관성(ABA 방지) — emit_after_unlock 이 아니다(락 밖 동시 호출 시 델타 어긋남, FIX-1).
+//   - 델타 송신은 락 해제 후 = rebuild 반환 SubscriptionDelta 를 DaemonClient cmd_tx 로
+//     Subscribe/Unsubscribe enqueue(락 안에서 송신 금지).
+//   - targets 사용 = connection.rs:668 Message::Binary 자리(decode_frame → decide_output → route)
+// app-level 공유(재연결 task 수명 초월) → Arc<OutputRouter> 로 manage(T6).
+pub mod output_router;
 // S13 sub-step 2: 순수 discovery 로직은 engram-dashboard-discovery crate 로 이동(tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다(중복 코드 0).
 pub use engram_dashboard_discovery as discovery;

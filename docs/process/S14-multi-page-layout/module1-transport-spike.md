@@ -173,7 +173,7 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
 ### 내부 결정 (확정 — 보고용, 사용자 결정 아님)
 - **D1 WindowId = Tauri window label(String)** — `window_bindings` 키와 동일, 별도 numeric 레지스트리 불필요. `RoutingSnapshot{ by_agent: HashMap<AgentId, Arc<[String]>> }`.
 - **D2 rebuild-always** — 레이아웃 변경은 저빈도라 매 변경 시 snapshot 전체 재계산 후 `ArcSwap::store`. version-cache 분기 불채택(복잡도 대비 무이득).
-- **D3 rebuild 트리거 = `commands/layout.rs::emit_after_unlock`** (Mutex drop 후) 안에서 `router.rebuild(&mgr_snapshot)` 호출. 핫패스 락0 + ADR-0006 준수(락 보유 중 호출 금지). 콜백/역참조 구조 불채택(순환참조 회피).
+- **D3 rebuild 호출 = ViewManager 락 *보유 중*(layout mutation과 같은 critical section)에서 `router.rebuild(&mgr)`** → 반환 delta는 **unlock 후** T6가 cmd_tx로 송신. **(★rev 2026-06-29 — `/review code deep` 3인 수렴: 옛 "emit_after_unlock(락 밖) 호출"은 `load(prev)→delta→store`가 비원자라 동시 rebuild 시 델타 drift[중복 Subscribe·누락 Unsubscribe]+ABA[낡은 store가 새 store 덮음]. 기존 ViewManager 락으로 RMW 직렬화 + `&mgr` 현재성 보장.)** ADR-0006 위반 아님 — 본문=순수 계산 + lock-free `ArcSwap::store`, 락 안 외부 I/O 0(emit/DaemonClient/network 0), 송신만 unlock 후. 별도 rebuild mutex·콜백/역참조 불채택(기존 락 재사용으로 충분).
 - **D4 carrier = per-window Channel(태그)** — §7 리서치 확정(per-(window,agent) 채널 폭증 기각 / emit 브로드캐스트 JSON·정확성 기각).
 - **D6 정리** — `Channel::send` `Err`→해당 window sink 제거 + rebuild(절대 unwrap 금지) · 창 close `onCloseRequested`→명시 unsubscribe + unlisten(#15583 2.11.3 미해결).
 

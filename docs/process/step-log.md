@@ -423,6 +423,13 @@
 - **spike `module1-transport-spike.md` §7 추가** — 위 결정을 T5~T8 코더 명세로 박음. 상태 헤더 "T1~T4 완료 / T5~T8 코딩 전".
 - **다음:** T5 전 (1) tauri 2.11.3+ 업글(daemon crate 버전 정렬) → (2) T5 OutputRouter(arc-swap snapshot + ref-count) 코더→`/review code deep`(동시성-치명)→`/qa`. **동시성-치명 = 신선한 컨텍스트에서 시작 권장.**
 
+### 모듈① T5 — OutputRouter (arc-swap 라우팅 + 구독 union diff) (2026-06-29, dashboard2/master, opus)
+- **선행:** tauri 2.11.2→**2.11.3** 업글(`b4e286e`, push — channel-data 데드락 수정, carrier 리서치 결정). T5 TRD 상세 + 갈림길 확정(`f81a098`): F-A=T5 단독 먼저, F-B=layout 파생(별도 ref-count 없음 — ②는 View=화면뿐+데몬 출력보관이라 무이점, YAGNI).
+- **구현**(코더 opus, 미커밋→이 커밋): `src-tauri/src/output_router.rs` 신설 — `OutputRouter{ table: ArcSwap<RoutingSnapshot{by_agent: HashMap<AgentKey, Arc<[WindowLabel]>>}> }`. 핫패스 `targets`(락0 load+clone) + `rebuild(&ViewManager)`(트리 1회 순회로 라우팅표 + 구독 union diff 동시 산출). AgentKey=`uuid::Uuid`(protocol AgentId, 슬롯 String은 rebuild서 파싱·실패 skip). T5=코어만(headless) — Channel/IPC/connection 배선은 T6.
+- **`/review code deep`(opus doc-aware + Codex blind + reviewer-deep — 3인 cross-family) → FIX 수렴:** ① **(HIGH)** rebuild `load(prev)→delta→store` 비원자 RMW — 옛 D3 "unlock 후 호출"이면 동시 rebuild 시 델타 drift(중복 Sub·누락 Unsub)+ABA. → **D3 수정: rebuild를 ViewManager 락 보유 중 호출(직렬화), delta 송신만 unlock 후.** ADR-0006 위반 아님(순수계산+lock-free store, 락 안 외부 I/O 0). ② `Arc::from(Vec::new())` miss마다 할당(주석 "할당 0" 거짓) → `LazyLock<Arc<[_]>>` 캐시 clone(zero-alloc). ③ delta vec 순서 비결정 → sort. ④ 동시-rebuild 델타 테스트 부재 → `delta_conservation_over_sequence`(델타 보존 불변식) 추가 + 계약위반 주석. ⑤ parse-skip `tracing::debug` 1줄(ADR-0038).
+- **게이트:** 전체 workspace `cargo test` green(src-tauri 128 = 기존 111 + 신규 17 / 전 멤버 0 failed)·`cargo fmt --check` 0·`output_router.rs` tauri import 0(순수 로직). GUI 실측 N/A(T5 headless — 출력이 창에 닿는 건 T6/T7).
+- **다음:** T6(invoke 핸들러 + window Channel 등록 + rebuild를 layout critical section에 배선 + delta→cmd_tx Subscribe/Unsubscribe + connection.rs:668 route 호출) → T7(TauriTransport carrier) → T8(React 정리).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
