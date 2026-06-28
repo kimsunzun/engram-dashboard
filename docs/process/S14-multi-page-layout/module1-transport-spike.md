@@ -183,5 +183,28 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
   - **확장 메모(YAGNI — 지금 안 함):** 비-화면 출력 소비자(예: §5 백엔드 LLM이 다른 agent 출력을 프로그램 소비 = 목표 ⑤ 메시징 트랙, a1·연기)가 생기면 "①의 레이아웃 파생 집합 ∪ 별도 구독자 집합"으로 확장. ②를 통째로 까지 않음.
   - **개념 분리(혼동 방지):** 출력 구독(T5, 렌더 대상) ≠ 포커스(`focused_slot_id`, 키 입력 대상) ≠ agent↔agent 메시징(목표 ⑤, data-plane). T5는 출력 구독만.
 
+## 9. T6 — 배선 TRD (2026-06-29, 통합 표면 매핑 반영)
+
+> T5(라우팅 코어, headless) 위에 **실 IPC 배선**. 7+ 파일 통합 — 자체 `/review code deep` 라운드 필요. forks 대부분 내부 결정(보고용), 아래 확정. **동시성-치명 인접**(connection task ↔ Tauri Channel ↔ layout lock).
+
+### T6 시퀀스 (코더 단위)
+1. **`ConnectionCommand` variant 채움**(`connection.rs:~131`, 현 `__Placeholder`): `SendCommand{cmd: AgentCommand, reply: oneshot}` + `Subscribe{agent_id, epoch, after_seq, reply}` + `Unsubscribe{agent_id, reply}`. (Fork B = B1)
+2. **`DaemonClient::send_command`**(`mod.rs:~357`, 현 TODO): `cmd_tx.send` 후 oneshot await 래퍼 노출. **끊김 시 pending oneshot drain**(T4 reconnect 정리와 정합 — 확인 필요).
+3. **AppState 등록**(`lib.rs` setup): `Arc<DaemonClient>` · `Arc<OutputRouter>` · **window Channel registry** `Arc<Mutex<HashMap<WindowLabel, Channel<Response>>>>`. (Fork A = A1)
+4. **`commands/agent.rs`(신설)**: invoke spawn/kill/write/resize → `ConnectionCommand::SendCommand` 빌드+reply await. + **`subscribe_output(label, channel)`** invoke = 창 mount 시 registry insert. (Fork D/E = D1/E1)
+5. **`commands/layout.rs` 전 mutation 커맨드 수정**: critical section **락 안**에서 `router.rebuild(&mgr)` 호출(FIX-1/D3), **unlock 후** delta→`send_command(Subscribe/Unsubscribe)`. (Fork C = C1 확정)
+6. **`connection.rs` main_loop 배선**: (a) cmd_rx arm(`:686`) — variant를 wire 인코딩해 `sink.send` + reply 처리. (b) Binary arm(`:668`) — `decode_frame → decide_output → Deliver면 router.targets(agent_id) → registry 의 각 창 Channel 로 fan-out`(`Response::new(bytes)` raw, §7).
+
+### 확정 내부 결정 (forks — 보고용)
+- **A=A1** window Channel registry = `Arc<Mutex<HashMap<WindowLabel, Channel<Response>>>>` in AppState. connection task가 Arc clone 보유, route 시 lock→send. 창 close→deregister + send `Err`→registry remove(dead window). (per-(win,agent) 폭증·emit JSON 기각)
+- **B=B1** ConnectionCommand 3 variant + oneshot reply. (Box<dyn Any> 타입소거 기각)
+- **C=C1** rebuild 락 안 / delta 송신 unlock 후 (FIX-1·D3 확정).
+- **D/E=D1/E1** 창당 Channel 1개 mount 시 `subscribe_output` 등록, close 시 deregister + #15583 unlisten.
+
+### ★T6 미해결 — 코더 진입 전 해소 필요
+- **(G1) Subscribe epoch/after_seq 출처:** delta는 "agent X 구독해라"만 안다. epoch/after_seq는 **protocol_state `SubState`**(연결 task 소유, T3)에서 와야 함 — 신규=epoch None(전체 replay)/재구독=tail-only(`resubscribe_params` 재사용). delta→Subscribe 변환을 **연결 task 안에서** SubState 조회로 채울지, layout 커맨드가 채울지 결정 필요(전자가 정합 — SubState는 task 소유).
+- **(G2) `Channel::send` from tokio task:** connection task(tokio 런타임)가 Tauri `Channel::send`를 호출해도 안전한지 실측(Channel은 Send+Sync, 내부 webview.eval 마샬링 — 가능성 높음이나 미검증). `cdp.mjs`로 첫 출력 도달 실측 = T6 GUI 게이트.
+- **(G3) registry ↔ connection task 수명:** registry는 AppState(Tauri) 소유, connection task는 DaemonClient 소유 — task에 registry Arc를 어떻게 주입하나(start_connection 인자 추가). layout label("main"/"slot-popup") ↔ window_bindings label 일치 확인.
+
 ## 참조 코드
 `src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서) · `crates/engram-dashboard-protocol`(`encode_terminal_frame` → Response/Raw 적재).
