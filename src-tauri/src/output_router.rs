@@ -115,6 +115,36 @@ impl OutputRouter {
         }
     }
 
+    /// ★저빈도★ 현재 스냅샷에 라우팅 대상이 있는(= 어느 창엔가 보이는) agent 전체 목록.
+    ///
+    /// **구독해야 할 집합의 SSOT**(ADR-0035 레이아웃 권위). 연결 task 의 재연결/connect 진입 resubscribe 가
+    /// 이걸 순회해 "현재 화면에 보이는 agent = 구독해야 할 집합"을 재구독한다 — `subs`(연결 task 가 한 번
+    /// 구독한 적 있는 누적 맵)가 아니라 router 가 진실원이라, 비연결 중 layout 에 배정된 agent 도(rebuild 는
+    /// 비연결에도 호출됨 — 델타 송신만 no-op 이었음) connect 후 빠짐없이 구독된다(C1). 안 보이는 agent 는
+    /// 애초에 여기 없어 재구독 대상이 아니다(C2 — 유령 구독 0).
+    ///
+    /// ★핫패스 아님★: 재연결/connect 시에만 호출(저빈도) → `load()` 후 키 수집 비용 수용. 결정론(테스트
+    /// 재현 + 송신 순서 안정)을 위해 정렬해 반환한다(`targets` 처럼 매 프레임 호출이 아니라 무해).
+    pub fn current_agents(&self) -> Vec<AgentKey> {
+        let snap = self.table.load();
+        let mut agents: Vec<AgentKey> = snap.by_agent.keys().copied().collect();
+        agents.sort();
+        agents
+    }
+
+    /// ★테스트 전용★: ViewManager 트리 구성 없이 라우팅 스냅샷을 직접 박는다(연결 task resubscribe
+    /// 테스트가 "router 에 보이는 agent" 집합을 손쉽게 세팅하려고 쓴다). 각 agent 를 단일 "main" 창에
+    /// 매핑한다(라벨 내용은 resubscribe 검증과 무관 — current_agents 만 본다). `pub(crate)` 라 crate 내
+    /// 다른 테스트 모듈(daemon_client::tests)에서도 호출 가능.
+    #[cfg(test)]
+    pub(crate) fn set_visible_agents_for_test(&self, agents: &[AgentKey]) {
+        let mut by_agent: HashMap<AgentKey, Arc<[WindowLabel]>> = HashMap::new();
+        for a in agents {
+            by_agent.insert(*a, Arc::from(vec!["main".to_string()]));
+        }
+        self.table.store(Arc::new(RoutingSnapshot { by_agent }));
+    }
+
     /// ★저빈도★ ViewManager 스냅샷으로 라우팅 테이블을 전부 재계산하고 원자 교체한다.
     ///
     /// 같은 트리 순회 한 번에 (1) `agent → [window]` 역인덱스와 (2) 현재 보이는 agent 집합을 동시에

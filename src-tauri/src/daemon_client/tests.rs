@@ -2584,6 +2584,436 @@ async fn send_command_rejects_command_without_request_id() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
+// T6b: fire-and-forget 평면(Subscribe/Unsubscribe/Resize) — wire 송신 배선
+//
+// connection.rs main_loop 의 cmd_rx arm(Subscribe/Unsubscribe/Fire)을 실 소켓(mock WS)으로 검증한다.
+// ★핵심 불변식★:
+//   - subscribe(agent) → 연결 task 가 SubState(초기=epoch None/after_seq None)로 wire
+//     AgentCommand::Subscribe{agent_id, epoch:None, after_seq:None} 송신(신규 구독=FromOldest, G1).
+//   - unsubscribe(agent) → wire AgentCommand::Unsubscribe{agent_id} 송신.
+//   - send_fire_and_forget(Resize) → wire AgentCommand::Resize 송신(reply 없음).
+// (Binary frame fan-out 은 실 Tauri Channel 이 필요해 단위 불가 → GUI 실측 영역, 보고서 명시.)
+// ══════════════════════════════════════════════════════════════════════════════════
+
+/// Auth/Hello 핸드셰이크 후 **첫 명령 frame(Text JSON)을 캡처해 oneshot 으로 돌려주는** mock 서버.
+/// 반환: (port, 첫 명령 수신 oneshot rx). 클라가 보낸 fire-and-forget 명령의 wire 인코딩을 직접 본다.
+async fn spawn_capture_first_command_server() -> (u16, tokio::sync::oneshot::Receiver<AgentCommand>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (got_tx, got_rx) = tokio::sync::oneshot::channel::<AgentCommand>();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // 1) Auth 소비 → Hello(= connected).
+        let _ = ws.next().await;
+        let hello = serde_json::to_string(&AgentEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            capabilities: None,
+        })
+        .unwrap();
+        let _ = ws.send(Message::Text(hello.into())).await;
+        // 2) 첫 명령 frame(Text) 캡처 → oneshot 으로 테스트에 전달.
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let cmd: AgentCommand = serde_json::from_str(&t).expect("명령 JSON 파싱");
+                    let _ = got_tx.send(cmd);
+                    break;
+                }
+                Some(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        // 연결을 잠시 유지(클라가 self-close 로 빠지지 않게).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    });
+    (port, got_rx)
+}
+
+// ── T6b-1: subscribe(agent) → wire Subscribe{epoch:None, after_seq:None}(신규=FromOldest) ──
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_sends_initial_subscribe_wire() {
+    let (port, got_rx) = spawn_capture_first_command_server().await;
+    let client = connected_client_to(port, "t6b-sub").await;
+
+    let agent_id = uuid::Uuid::new_v4();
+    client.subscribe(agent_id); // fire-and-forget enqueue
+
+    let cmd = tokio::time::timeout(Duration::from_secs(5), got_rx)
+        .await
+        .expect("subscribe 가 bound 내 wire 송신")
+        .expect("서버가 명령 캡처");
+    match cmd {
+        AgentCommand::Subscribe {
+            agent_id: got,
+            epoch,
+            after_seq,
+        } => {
+            assert_eq!(got, agent_id, "구독 agent_id 일치");
+            // ★신규 구독★: SubState 기본값 → epoch/after_seq 둘 다 None(= FromOldest, G1).
+            assert_eq!(epoch, None, "신규 구독은 epoch None");
+            assert_eq!(after_seq, None, "신규 구독은 after_seq None");
+        }
+        other => panic!("Subscribe wire 여야: {other:?}"),
+    }
+
+    client.close();
+}
+
+// ── T6b-2: unsubscribe(agent) → wire Unsubscribe{agent_id} ────────────────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsubscribe_sends_unsubscribe_wire() {
+    let (port, got_rx) = spawn_capture_first_command_server().await;
+    let client = connected_client_to(port, "t6b-unsub").await;
+
+    let agent_id = uuid::Uuid::new_v4();
+    client.unsubscribe(agent_id);
+
+    let cmd = tokio::time::timeout(Duration::from_secs(5), got_rx)
+        .await
+        .expect("unsubscribe 가 bound 내 wire 송신")
+        .expect("서버가 명령 캡처");
+    match cmd {
+        AgentCommand::Unsubscribe { agent_id: got } => assert_eq!(got, agent_id),
+        other => panic!("Unsubscribe wire 여야: {other:?}"),
+    }
+
+    client.close();
+}
+
+// ── T6b-3: send_fire_and_forget(Resize) → wire Resize(reply 없음 — agent_resize 경로) ────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fire_resize_sends_resize_wire() {
+    let (port, got_rx) = spawn_capture_first_command_server().await;
+    let client = connected_client_to(port, "t6b-resize").await;
+
+    let agent_id = uuid::Uuid::new_v4();
+    client.send_fire_and_forget(AgentCommand::Resize {
+        agent_id,
+        cols: 120,
+        rows: 40,
+        viewport_id: None,
+    });
+
+    let cmd = tokio::time::timeout(Duration::from_secs(5), got_rx)
+        .await
+        .expect("Resize fire 가 bound 내 wire 송신")
+        .expect("서버가 명령 캡처");
+    match cmd {
+        AgentCommand::Resize {
+            agent_id: got,
+            cols,
+            rows,
+            ..
+        } => {
+            assert_eq!(got, agent_id);
+            assert_eq!((cols, rows), (120, 40), "resize 치수 그대로 wire 전달");
+        }
+        other => panic!("Resize wire 여야: {other:?}"),
+    }
+
+    client.close();
+}
+
+// ── T6b-4: 비연결 상태 fire-and-forget → no-op(panic/hang 없음) ──────────────────────────
+// current_cmd_tx=None 이면 조용히 no-op 해야 한다(connect 진입 시 연결 task 의 router 기반 재구독이 복구).
+// 여기선 "패닉/hang 없이 즉시 반환"만 박는다(송신 대상 서버 없음 — 관측은 GUI/통합 몫).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fire_and_forget_when_not_connected_is_noop() {
+    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(9, "nope"))));
+    let client = DaemonClient::new(Handle::current(), disco);
+    // connect 안 함 → cmd_tx 없음. 아래 호출이 패닉/블록하면 테스트가 실패(no-op 이어야).
+    client.subscribe(uuid::Uuid::new_v4());
+    client.unsubscribe(uuid::Uuid::new_v4());
+    client.send_fire_and_forget(AgentCommand::Resize {
+        agent_id: uuid::Uuid::new_v4(),
+        cols: 80,
+        rows: 24,
+        viewport_id: None,
+    });
+    // 여기 도달 = no-op 통과(비연결 fire-and-forget 는 조용히 무시).
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// T6b FIX(C1+C2): connect/재연결 진입 resubscribe 가 **router 라우팅 스냅샷**(현재 보이는 agent SSOT)을
+// 순회한다 — subs(누적 맵)가 아니다.
+//   - C1: 비연결 중 layout 에 배정된 agent(router 에 있음)가 connect 진입 시 빠짐없이 wire Subscribe.
+//   - C2: router 에 없는(안 보이는) agent 는 재구독 안 됨(유령 구독 0).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+/// 핸드셰이크 후 클라가 보낸 **모든 명령 frame(Text JSON)** 을 mpsc 로 흘리는 mock 서버.
+/// 반환: (port, 명령 수신 rx). connect 진입 resubscribe 가 여러 Subscribe 를 한꺼번에 보내므로
+/// 단발 캡처(spawn_capture_first_command_server)로는 부족 — 다건을 모은다.
+async fn spawn_collect_commands_server() -> (u16, tokio::sync::mpsc::UnboundedReceiver<AgentCommand>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentCommand>();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // Auth 소비 → Hello.
+        let _ = ws.next().await;
+        let hello = serde_json::to_string(&AgentEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            capabilities: None,
+        })
+        .unwrap();
+        let _ = ws.send(Message::Text(hello.into())).await;
+        // 이후 모든 Text 명령 frame 을 파싱해 흘린다(연결 유지).
+        while let Some(item) = ws.next().await {
+            match item {
+                Ok(Message::Text(t)) => {
+                    if let Ok(cmd) = serde_json::from_str::<AgentCommand>(&t) {
+                        let _ = tx.send(cmd);
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+    (port, rx)
+}
+
+/// rx 에서 bound 내에 Subscribe 명령들을 모아 그 agent_id 집합을 돌려준다(다른 명령은 무시).
+/// `expected` 개수만큼 Subscribe 를 받거나 타임아웃까지 모은다.
+async fn collect_subscribed_agents(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentCommand>,
+    expected: usize,
+) -> std::collections::HashSet<uuid::Uuid> {
+    let mut got = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while got.len() < expected {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(AgentCommand::Subscribe { agent_id, .. })) => {
+                got.insert(agent_id);
+            }
+            Ok(Some(_)) => continue, // 다른 명령 무시
+            Ok(None) | Err(_) => break,
+        }
+    }
+    got
+}
+
+// ── C1+C2: connect 진입 시 router 의 보이는 agent 전체 구독, 안 보이는 agent 는 미구독 ──────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_resubscribes_router_visible_agents_only() {
+    let (port, mut rx) = spawn_collect_commands_server().await;
+
+    // ★공유 router★: connect *전에* (비연결 중) layout 에 배정된 상황을 흉내 — router 에 2 agent 를 박는다.
+    let router = Arc::new(crate::output_router::OutputRouter::new());
+    let visible_a = uuid::Uuid::new_v4();
+    let visible_b = uuid::Uuid::new_v4();
+    router.set_visible_agents_for_test(&[visible_a, visible_b]);
+
+    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, "c1c2-tok"))));
+    let client = DaemonClient::new_with_router(Handle::current(), disco, router.clone());
+
+    // connect → 연결 task 가 router.current_agents() 를 순회하며 두 agent 를 wire Subscribe 해야(C1).
+    client.connect().await.expect("connect → connected");
+
+    let subscribed = collect_subscribed_agents(&mut rx, 2).await;
+    assert!(
+        subscribed.contains(&visible_a) && subscribed.contains(&visible_b),
+        "비연결 중 배정된(router 에 있는) agent 는 connect 진입 시 모두 구독돼야(C1): got={subscribed:?}"
+    );
+    // C2: router 에 없는 agent 는 절대 구독 대상이 아니다.
+    let absent = uuid::Uuid::new_v4();
+    assert!(
+        !subscribed.contains(&absent),
+        "router 에 없는(안 보이는) agent 는 재구독 안 됨(C2 — 유령 구독 0)"
+    );
+    assert_eq!(
+        subscribed.len(),
+        2,
+        "정확히 router 의 2 agent 만 구독(과·소 구독 0)"
+    );
+
+    client.close();
+}
+
+/// 재연결 mock 서버(Subscribe 수집판) — 순차 연결을 받아 Hello 응답 후, 그 연결에서 받은 **모든 Subscribe
+/// 명령의 agent_id 를 연결별 mpsc 로** 흘린다. drop 신호 시 연결 종료(재연결 트리거). 각 연결의 Subscribe
+/// 집합을 분리 관찰하려고 연결마다 새 sender 를 핸들에 등록한다.
+struct ReconnectSubServer {
+    port: u16,
+    accepts: Arc<AtomicUsize>,
+    drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// 매 연결의 Subscribe agent_id 를 흘릴 sender 를 테스트가 미리 등록(연결 순서대로 소비).
+    sub_sinks: Arc<
+        std::sync::Mutex<
+            std::collections::VecDeque<tokio::sync::mpsc::UnboundedSender<uuid::Uuid>>,
+        >,
+    >,
+}
+
+impl ReconnectSubServer {
+    fn drop_current_connection(&self) {
+        if let Some(tx) = self.drop_current.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
+    fn accept_count(&self) -> usize {
+        self.accepts.load(Ordering::SeqCst)
+    }
+    /// 다음 연결의 Subscribe 를 받을 rx 를 등록. 연결 순서대로 FIFO 소비된다.
+    fn arm_next_connection(&self) -> tokio::sync::mpsc::UnboundedReceiver<uuid::Uuid> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<uuid::Uuid>();
+        self.sub_sinks.lock().unwrap().push_back(tx);
+        rx
+    }
+}
+
+async fn spawn_reconnect_sub_server() -> ReconnectSubServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let sub_sinks: Arc<
+        std::sync::Mutex<
+            std::collections::VecDeque<tokio::sync::mpsc::UnboundedSender<uuid::Uuid>>,
+        >,
+    > = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+    let accepts_srv = accepts.clone();
+    let drop_srv = drop_current.clone();
+    let sinks_srv = sub_sinks.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepts_srv.fetch_add(1, Ordering::SeqCst);
+            let (dtx, mut drx) = tokio::sync::oneshot::channel::<()>();
+            *drop_srv.lock().unwrap() = Some(dtx);
+            // 이 연결의 Subscribe 를 흘릴 sink(테스트가 arm 한 순서대로).
+            let sink = sinks_srv.lock().unwrap().pop_front();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await; // Auth 소비
+                let hello = serde_json::to_string(&AgentEvent::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                    capabilities: None,
+                })
+                .unwrap();
+                let _ = ws.send(Message::Text(hello.into())).await;
+                // drop 신호와 명령 수신을 동시 폴링: 받은 Subscribe agent_id 를 sink 로 흘린다.
+                //   drop 신호 = 데몬이 이 연결을 끊음 → 소켓 drop(클라 재연결 트리거).
+                loop {
+                    tokio::select! {
+                        _ = &mut drx => break,
+                        item = ws.next() => {
+                            match item {
+                                Some(Ok(Message::Text(t))) => {
+                                    if let Ok(AgentCommand::Subscribe { agent_id, .. }) =
+                                        serde_json::from_str::<AgentCommand>(&t)
+                                    {
+                                        if let Some(s) = &sink { let _ = s.send(agent_id); }
+                                    }
+                                }
+                                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                drop(ws);
+            });
+        }
+    });
+
+    ReconnectSubServer {
+        port,
+        accepts,
+        drop_current,
+        sub_sinks,
+    }
+}
+
+// ── C1+C2(재연결): 재연결 진입 resubscribe 가 *그 시점 router 집합*을 따른다(subs 누적이 아님) ──────
+// 1차 connect 때 router=[X] → X 구독. 끊김. router 를 [Y] 로 교체(레이아웃이 X 를 닫고 Y 를 띄운 셈).
+// 재연결되면 2차 소켓에서 **Y 만** 재구독돼야 한다 — subs 에는 X 의 SubState 가 남아 있지만(F-B), 재구독은
+// router.current_agents() 기반이라 X(이제 안 보임)는 재구독 대상이 아니다(C2). 그리고 X 의 SubState 는
+// 재구독 직후 retain 으로 정리된다(C3 — 여기선 wire 관찰로 "X 미구독"만 단언, retain 자체는 단위가 어려움).
+#[tokio::test(start_paused = true)]
+async fn reconnect_resubscribes_current_router_set_not_stale_subs() {
+    let server = spawn_reconnect_sub_server().await;
+
+    let router = Arc::new(crate::output_router::OutputRouter::new());
+    let agent_x = uuid::Uuid::new_v4();
+    let agent_y = uuid::Uuid::new_v4();
+    router.set_visible_agents_for_test(&[agent_x]); // 1차: X 만 보임
+
+    let disco = Arc::new(MockDiscovery::new(
+        Some(info_for(server.port, "c1c2-recon")),
+        Ok(info_for(server.port, "c1c2-recon")),
+    ));
+    // 짧은 handshake 상한 주입(start_paused 에서 advance 와 무관히 즉시 핸드셰이크 진행).
+    let client = DaemonClient::new_with_router_and_timeout(
+        Handle::current(),
+        disco,
+        router.clone(),
+        Duration::from_millis(200),
+    );
+
+    // 1차 연결 Subscribe 수집 준비 후 connect → X 가 구독돼야.
+    let mut first_subs = server.arm_next_connection();
+    connect_via(&client).await;
+    assert_eq!(server.accept_count(), 1, "최초 1회 accept");
+    let got_first = tokio::time::timeout(Duration::from_secs(5), first_subs.recv())
+        .await
+        .expect("1차 연결에서 Subscribe 수신")
+        .expect("agent_x");
+    assert_eq!(got_first, agent_x, "1차: router=[X] → X 구독");
+
+    // ★레이아웃 변경(X 닫고 Y 띄움)★을 router 에 반영 + 2차 연결 수집 준비. 그 뒤 서버가 끊는다.
+    router.set_visible_agents_for_test(&[agent_y]);
+    let mut second_subs = server.arm_next_connection();
+    server.drop_current_connection();
+
+    // 재연결 진행 → 2차 accept + 2차 소켓에서 Y 구독. advance 로 백오프 만료시킨다(결정론).
+    let accepts = server.accepts.clone();
+    let reconnected = advance_until(40, || accepts.load(Ordering::SeqCst) >= 2).await;
+    assert!(
+        reconnected,
+        "재연결로 2차 소켓 열림: accepts={}",
+        server.accept_count()
+    );
+    // 2차 소켓의 첫 Subscribe = Y(router 현재 집합). X 는 stale subs 에 있어도 재구독 안 됨(C2).
+    let got_second = tokio::time::timeout(Duration::from_secs(5), second_subs.recv())
+        .await
+        .expect("2차 연결에서 Subscribe 수신")
+        .expect("agent_y");
+    assert_eq!(
+        got_second, agent_y,
+        "재연결: router=[Y] → Y 만 재구독(stale subs 의 X 가 아니라 — C1+C2)"
+    );
+    // 한 번 더 폴링해 X 가 안 오는지 확인(짧은 bound — Y 외 다른 Subscribe 없어야).
+    let extra = tokio::time::timeout(Duration::from_millis(300), second_subs.recv()).await;
+    if let Ok(Some(other)) = extra {
+        assert_ne!(
+            other, agent_x,
+            "재연결 시 stale agent_x 는 재구독되면 안 됨(C2)"
+        );
+    }
+
+    client.close();
+    assert_eq!(client.state(), ConnectionState::Down);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
 // T6a FIX-6: 재연결 crux + cmd_rx 버퍼 drain + 중복 request_id (review FIX 커버)
 //
 // ★왜 이게 #1 crux 였나★: 기존 T6a 스위트는 "in-flight 끊김 → drain Err"(T6a-4)와 "재연결 회복"
@@ -2880,8 +3310,6 @@ async fn buffered_send_command_drain_yields_unsent_message() {
     cmd_tx
         .send(ConnectionCommand::Subscribe {
             agent_id: uuid::Uuid::new_v4(),
-            epoch: None,
-            after_seq: None,
         })
         .await
         .unwrap();

@@ -10,8 +10,9 @@
 //! 정석이나, invoke 단발 호출은 매번 새 키로 충분(끊김 시 호출자가 재호출 = 새 키). writeStdin 중복
 //! 방지는 데몬측 dedup table 책임(ids.rs RequestId 주석).
 //!
-//! ## OUT OF SCOPE (= T6b)
-//! 출력 구독(`subscribe_output`)·window Channel registry·OutputRouter fan-out 은 T6b. 여기엔 없다.
+//! ## T6b 추가 (출력 평면)
+//! - `subscribe_output(channel)` — 창 mount 시 호출, 그 창의 출력 Channel 을 registry 에 등록한다.
+//! - `agent_resize` — fire-and-forget(`send_fire_and_forget(Resize)`)로 배선(reply 없는 명령).
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::daemon_client::DaemonClient;
+use crate::output_channel::WindowChannelRegistry;
 
 /// 프론트가 보낸 UUID 문자열을 파싱한다. invalid 면 명확한 Err(패닉 금지 — 잘못된 입력 방어).
 fn parse_uuid(s: &str, what: &str) -> Result<Uuid, String> {
@@ -92,29 +94,51 @@ pub async fn agent_write_stdin(
 }
 
 /// PTY 크기 변경. ★주의★: `Resize` 는 wire 상 request_id 가 없어(데몬이 reply 안 보냄) send_command 의
-/// reply 매칭 대상이 아니다 — 그래서 fire-and-forget 가 맞다. T6a 의 send_command 는 request_id 없는
-/// 명령을 거르므로(영구 pending 방지), resize 는 **별도 fire-and-forget 경로**가 필요하다. T6a 에선
-/// 이 핸들러를 노출만 하고 실제 송신은 T6b(구독/출력 평면)와 함께 배선한다(아래 TODO).
+/// reply 매칭 대상이 아니다 — 그래서 **fire-and-forget**(`send_fire_and_forget`)가 정답이다(reply 기대
+/// 경로로 보내면 영구 hang). T6b 가 그 송신 경로를 깔아 여기서 실제로 wire 송신한다.
 ///
-/// ★현재 동작★: 연결 여부만 확인하고 `Ok(())`(no-op). resize 미반영은 출력 화면 크기 어긋남일 뿐
-/// 동작 안전엔 무해 — T6b 가 fire-and-forget 송신 경로(reply 없는 명령 enqueue)를 채울 때 실제 wire
-/// 송신을 붙인다. (지금 reply 기대 경로로 보내면 영구 hang 이라 일부러 안 보낸다.)
+/// ★fire-and-forget 의미★: enqueue 만 하고 ack 를 안 기다린다(resize 미반영=화면 크기 어긋남일 뿐
+/// 동작 안전엔 무해). 비연결이면 DaemonClient 가 조용히 no-op — Resize 는 구독 델타가 아니라 단발 명령이라
+/// connect 시 자동 재동기되지 않는다(다음 resize 입력이 새 치수로 갱신). 그래서 `Ok(())` 는 "송신 시도함"
+/// 이지 "데몬 반영 확인"이 아니다.
 #[tauri::command]
 pub async fn agent_resize(
-    _client: State<'_, Arc<DaemonClient>>,
+    client: State<'_, Arc<DaemonClient>>,
     agent_id: String,
-    _cols: u16,
-    _rows: u16,
+    cols: u16,
+    rows: u16,
 ) -> Result<(), String> {
-    // TODO(T6b): reply 없는 fire-and-forget 명령(Resize/Subscribe/Unsubscribe) 송신 경로 추가 후
-    //   여기서 AgentCommand::Resize{agent_id, cols, rows, viewport_id:None} 를 enqueue.
-    // ★silent no-op 가시화(FIX-3)★: 지금은 송신 경로가 없어 no-op 이지만, Ok(()) 만 돌려주면 T7 cutover
-    //   때 "조용한 거짓"이 된다(호출자는 성공으로 믿는데 resize 가 안 감). warn 으로 미배선 상태를
-    //   진단 가능하게 남긴다 — Ok(()) 반환은 유지(호출자 깨지 않게).
-    tracing::warn!(
-        agent_id = %agent_id,
-        "agent_resize 미배선 — T6b fire-and-forget 경로 대기"
-    );
+    let agent_id: AgentId = parse_uuid(&agent_id, "agent_id")?;
+    client.send_fire_and_forget(AgentCommand::Resize {
+        agent_id,
+        cols,
+        rows,
+        viewport_id: None,
+    });
+    Ok(())
+}
+
+/// ★출력 Channel 등록(T6b)★. 창 mount 시 프론트가 `invoke('subscribe_output', { channel })` 로 호출한다 —
+/// 그 창의 출력 Channel 을 window_label → Channel registry 에 넣는다. 연결 task 가 라우팅 표를 보고 이
+/// Channel 로 그 창의 모든 agent 출력을 fan-out 한다(프레임에 agent_id 태그 내장).
+///
+/// ★window label 자동 주입★: `tauri::Window` 를 인자로 받으면 Tauri 가 **호출한 webview** 를 주입한다 →
+/// `window.label()` 로 라벨을 얻는다(프론트가 라벨을 안 넘겨도 됨, 위조 불가). Channel 도 호출 webview 에
+/// 태생 바인딩된다(spike §7) — 그래서 라벨↔Channel 짝이 항상 정합한다.
+///
+/// ★raw byte(spike §7)★: registry 타입이 `Channel<tauri::ipc::Response>` 라 연결 task 가
+/// `Response::new(bytes)` 로 raw 바이트를 보낸다(`Channel<Vec<u8>>` 의 JSON 직렬화 함정 회피).
+#[tauri::command]
+pub fn subscribe_output(
+    registry: State<'_, WindowChannelRegistry>,
+    window: tauri::Window,
+    channel: tauri::ipc::Channel<tauri::ipc::Response>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    // ★ADR-0006★: registry std Mutex — insert 는 동기, 락 보유 중 await 0. 같은 라벨 재등록(창 reload)은
+    //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해).
+    let mut reg = registry.lock().map_err(|e| e.to_string())?;
+    reg.insert(label, channel);
     Ok(())
 }
 

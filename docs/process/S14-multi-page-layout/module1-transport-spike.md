@@ -206,5 +206,19 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
 - **(G2) `Channel::send` from tokio task:** connection task(tokio 런타임)가 Tauri `Channel::send`를 호출해도 안전한지 실측(Channel은 Send+Sync, 내부 webview.eval 마샬링 — 가능성 높음이나 미검증). `cdp.mjs`로 첫 출력 도달 실측 = T6 GUI 게이트.
 - **(G3) registry ↔ connection task 수명:** registry는 AppState(Tauri) 소유, connection task는 DaemonClient 소유 — task에 registry Arc를 어떻게 주입하나(start_connection 인자 추가). layout label("main"/"slot-popup") ↔ window_bindings label 일치 확인.
 
+## 10. T6b 완료 + 잔여(T7로 이연) (2026-06-29)
+
+**완료:** 출력 평면 배선 — Binary arm fan-out(`decode_frame`→`decide_output` 가드→`router.targets`→창 `Channel<Response>`) · SubscribeAck epoch 갱신(`apply_subscribe_ack`) · Subscribe/Unsubscribe/Fire(fire-and-forget) · **`router.current_agents()` 기반 resubscribe**(C1+C2) · **`mark_delivered` 분리**(fan_out 1+창 성공 후에만 high-water 전진, C4) · layout 6 mutation rebuild+delta(락 안 rebuild/락 밖 송신) · `subscribe_output` invoke · window Channel registry(`output_channel.rs`). `cargo test --workspace` **148 green**.
+
+**검증:** `/review code deep` 2라운드(opus doc-aware ×2 + Codex blind). 1R C1~C4 적출 → 수정 → 2R 재검증 = **C1~C4 닫힘**(데이터 손상/오염 0). ADR-0006(fan_out 락 보유 중 await 0·rebuild 락안/송신 락밖)·ADR-0037(가드 라우팅 전 1회) 정상.
+
+**★잔여 = T7 영역** (현재 **dead path** — 프론트가 아직 `wsTransport` 직결, 이 경로 미사용이라 화면 안 깨짐):
+- **N1** 멀티창/늦은 mount: 같은 agent를 여러 창에 동시 표시 시 per-agent 단일 seq로 창별 진도 못 챙김 + 미배달 frame 재배달 트리거 부재.
+  - **근본(리서치 2026-06-29, `research/study-notes/`):** 우리는 출력을 **seq 큐 소비 모델**(per-agent high-water + dedup)로 다루나, 터미널 업계 표준은 **state-render 모델**(tmux/Zellij/VS Code — 서버 중앙 보관 + attach 시 redraw, 출력에 단일 consumed cursor 없음). → **seq(데몬↔게이트웨이 전송 무손실)와 렌더(창 채우기) 분리**가 N1 해소 방향.
+  - **새 창 채우기 갈림(T7 PRD/TRD에서 결정):** (A) 데몬 재요청(업계 표준·단순·2홉 loopback) vs (B) src-tauri 게이트웨이 캐시(2계층 적합·비표준·동기화 비용). 리서치 결론: 중앙 보관+재요청이 표준, 게이트웨이 캐시는 web 렌더러 편의일 뿐 authoritative store 아님.
+- **N5** subs 운영 중 정리(retain은 재연결 시에만 — 연결 유지 중 누수 잔존). **N6** resubscribe 중 동시 layout mutation → 중복 Subscribe(데몬 Subscribe 멱등성 확인 필요). **N4** fan_out Binary 배선 통합 테스트 부재(seam 도입 시 headless 가능 / 또는 T7 GUI 실측).
+
+**T7 = `TauriTransport`+`clientFactory` 교체** 시 위 전송/렌더 분리·A/B를 PRD/TRD로 결정 + GUI 실측(G2 = 실제 창 출력 도달, `cdp.mjs`).
+
 ## 참조 코드
 `src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서) · `crates/engram-dashboard-protocol`(`encode_terminal_frame` → Response/Raw 적재).

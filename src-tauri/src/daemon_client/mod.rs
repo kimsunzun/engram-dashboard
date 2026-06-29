@@ -38,12 +38,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, DaemonInfo};
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, DaemonInfo};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 
 use connection::{run_connection, ConnectionCommand, HandshakeError, HANDSHAKE_TIMEOUT};
 use lifecycle::Lifecycle;
+
+use crate::output_channel::WindowChannelRegistry;
+use crate::output_router::OutputRouter;
 
 /// 연결 수명 상태. T4 가 재연결 전이(connected→reconnecting→connected 회복 / 소진 시 down)를 채웠다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +132,12 @@ pub struct DaemonClient {
     lifecycle: Arc<Lifecycle>,
     /// 핸드셰이크(소켓 open ~ Hello) 상한. 운영=HANDSHAKE_TIMEOUT, 테스트=짧은 값 주입(Fix A).
     handshake_timeout: Duration,
+    /// ★출력 라우팅(T6b)★: agent_id → [window_label] 라우팅 표(arc-swap 핫패스). layout command 가
+    ///   rebuild 하고, 연결 task 가 frame fan-out 에 쓴다. app-level 공유(재연결 task 수명 초월).
+    router: Arc<OutputRouter>,
+    /// ★window Channel registry(T6b)★: window_label → 출력 Channel. `subscribe_output` invoke 가 insert,
+    ///   연결 task 가 fan-out 시 lookup. Arc 라 task·command 양쪽이 공유한다.
+    registry: WindowChannelRegistry,
 }
 
 impl DaemonClient {
@@ -153,6 +162,11 @@ impl DaemonClient {
             state_rx,
             lifecycle: Arc::new(lifecycle),
             handshake_timeout,
+            // ★테스트 기본값★: router/registry 를 주입받지 않는 생성자(new/new_real/테스트)는 빈 라우팅
+            //   표 + 빈 registry 로 둔다 — connection task 가 frame 을 라우팅해도 대상 0(no-op). 운영은
+            //   new_real_with_owned_runtime 이 lib.rs setup 이 만든 공유 Arc 를 주입한다.
+            router: Arc::new(OutputRouter::new()),
+            registry: WindowChannelRegistry::default(),
         }
     }
 
@@ -161,11 +175,58 @@ impl DaemonClient {
         Self::new(rt, Arc::new(RealDiscovery))
     }
 
+    /// ★테스트 전용★: 외부에서 만든 `OutputRouter` 를 주입하는 생성자(C1+C2 router 기반 resubscribe 검증).
+    /// 테스트가 router 핸들을 보관하고 set_visible_agents_for_test 로 agent 를 넣은 뒤, connect/재연결 시 그
+    /// agent 들이 wire Subscribe 되는지(= router 가 구독 SSOT)를 본다. handshake_timeout 은 운영 기본값.
+    #[cfg(test)]
+    pub fn new_with_router(
+        rt: Handle,
+        discovery: Arc<dyn DaemonDiscovery>,
+        router: Arc<OutputRouter>,
+    ) -> Self {
+        let (lifecycle, state_rx) = Lifecycle::new();
+        Self {
+            rt,
+            _owned_rt: None,
+            discovery,
+            state_rx,
+            lifecycle: Arc::new(lifecycle),
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            router,
+            registry: WindowChannelRegistry::default(),
+        }
+    }
+
+    /// ★테스트 전용★: router + handshake_timeout 둘 다 주입(재연결 resubscribe 테스트 — start_paused 에서
+    /// 짧은 상한이 필요하고 router 도 보관해야 하므로). new_with_router 와 동형 + timeout 만 추가.
+    #[cfg(test)]
+    pub fn new_with_router_and_timeout(
+        rt: Handle,
+        discovery: Arc<dyn DaemonDiscovery>,
+        router: Arc<OutputRouter>,
+        handshake_timeout: Duration,
+    ) -> Self {
+        let (lifecycle, state_rx) = Lifecycle::new();
+        Self {
+            rt,
+            _owned_rt: None,
+            discovery,
+            state_rx,
+            lifecycle: Arc::new(lifecycle),
+            handshake_timeout,
+            router,
+            registry: WindowChannelRegistry::default(),
+        }
+    }
+
     /// ★운영 생성자(T6a — 전용 런타임 소유)★. `lib.rs` `setup` 에서 쓴다. tokio 런타임 컨텍스트 밖
     /// (`setup` 콜백)에서 `Handle::current()` 가 패닉하지 않도록, 전용 멀티스레드 런타임을 직접 만들어
     /// 그 Handle 로 연결 task 를 띄운다(spike §2). 런타임은 DaemonClient 가 소유(`_owned_rt`)해 app
     /// 수명 동안 살아있다. 실패(런타임 생성 불가)면 Err — 호출자가 보고하고 데몬 명령 없이 진행한다.
-    pub fn new_real_with_owned_runtime() -> std::io::Result<Self> {
+    pub fn new_real_with_owned_runtime(
+        router: Arc<OutputRouter>,
+        registry: WindowChannelRegistry,
+    ) -> std::io::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("engram-daemon-client")
@@ -179,6 +240,11 @@ impl DaemonClient {
             state_rx,
             lifecycle: Arc::new(lifecycle),
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            // ★운영 공유 Arc 주입★: lib.rs setup 이 router/registry 를 먼저 만들어 app.manage + 여기로
+            //   같은 Arc 를 넘긴다 — layout command(rebuild)·subscribe_output(registry insert)·연결 task
+            //   (fan-out)가 *동일* 인스턴스를 본다.
+            router,
+            registry,
         })
     }
 
@@ -309,6 +375,9 @@ impl DaemonClient {
             self.handshake_timeout,
             cmd_rx,
             ready_tx,
+            // ★T6b 출력 평면 주입★: 연결 task 가 frame fan-out 에 쓴다(재연결 task 수명 초월 공유 Arc).
+            self.router.clone(),
+            self.registry.clone(),
         ));
 
         // Hello 수신(=connected) 또는 핸드셰이크 실패를 기다린다. ★락 미보유 await★.
@@ -422,6 +491,42 @@ impl DaemonClient {
         match reply_rx.await {
             Ok(result) => result,
             Err(_) => Err("명령 응답 수신 실패(연결 task 종료)".to_string()),
+        }
+    }
+
+    // ── T6b: fire-and-forget 평면(Subscribe/Unsubscribe/Resize — reply 없음) ─────────────
+    /// 출력 구독 enqueue(fire-and-forget). 연결 task 가 SubState 로 epoch/after_seq 를 채워 wire 송신한다.
+    ///
+    /// ★동기 + try_send★: layout command 는 `#[tauri::command] pub fn`(동기)이라 `async send` 를 못 한다.
+    /// cmd_tx 는 bounded(64) mpsc 라 `try_send` 로 넣는다 — 구독/해제는 저빈도(레이아웃 변경 시에만)라
+    /// full 은 사실상 안 난다. 비연결(`current_cmd_tx`=None)이면 조용히 no-op — connect 진입 시 연결 task 가
+    /// `router.current_agents()`(현재 보이는 agent SSOT)를 순회하며 재구독해 복구한다(C1, connection.rs
+    /// main_loop). full/닫힘은 debug 로깅만(같은 connect 진입 재구독이 복구).
+    pub fn subscribe(&self, agent_id: AgentId) {
+        self.try_enqueue(ConnectionCommand::Subscribe { agent_id }, "subscribe");
+    }
+
+    /// 출력 구독 해제 enqueue(fire-and-forget). 연결 task 가 wire `Unsubscribe` 송신.
+    pub fn unsubscribe(&self, agent_id: AgentId) {
+        self.try_enqueue(ConnectionCommand::Unsubscribe { agent_id }, "unsubscribe");
+    }
+
+    /// reply 없는 명령(Resize 등) enqueue(fire-and-forget). agent_resize invoke 가 쓴다.
+    pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
+        self.try_enqueue(ConnectionCommand::Fire { cmd }, "fire");
+    }
+
+    /// fire-and-forget enqueue 공통(동기 try_send). 비연결=no-op, full/닫힘=debug 로깅.
+    /// 복구 경로 = connect 진입 시 연결 task 의 router 기반 재구독(C1, connection.rs main_loop).
+    fn try_enqueue(&self, cmd: ConnectionCommand, kind: &str) {
+        let Some(cmd_tx) = self.lifecycle.current_cmd_tx() else {
+            // 비연결 — 조용히 no-op. layout 권위는 src-tauri 라(ADR-0035) connect 진입 시 연결 task 가
+            //   router.current_agents()(현재 보이는 agent SSOT)를 순회하며 재구독해 복구한다(상태 유실 없음).
+            tracing::debug!(%kind, "fire-and-forget: 비연결 — no-op(connect 진입 router 기반 재구독이 복구)");
+            return;
+        };
+        if let Err(e) = cmd_tx.try_send(cmd) {
+            tracing::debug!(%kind, "fire-and-forget enqueue 실패(full/닫힘): {e}");
         }
     }
 

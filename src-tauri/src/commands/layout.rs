@@ -9,11 +9,22 @@
 //! invalid view_id/slot_id → no-op + Err(String)(패닉·부분변경 금지).
 //!
 //! Tauri command 는 `AppHandle`(emit) 과 `State`(LayoutState) 를 동시에 주입받을 수 있다.
+//!
+//! ## ★T6b 출력 구독 배선(FIX-1/D3 — 동시성 핵심)★
+//! 각 mutation 은 **락 보유 critical section 안**에서 `router.rebuild(&mgr)` 를 호출해 라우팅 표를
+//! 재계산하고 구독 델타(`SubscriptionDelta`)를 산출한다(load→delta→store RMW 를 ViewManager 락이
+//! 직렬화 — 락 밖 호출은 ABA/델타 drift). 산출한 델타의 **송신만 락 해제 후** `client.subscribe`/
+//! `unsubscribe`(fire-and-forget enqueue)로 한다 — ★락 안에서 DaemonClient 송신 절대 금지(ADR-0006)★.
+//! read-only(get_view/list_views)는 변형이 없어 rebuild 안 한다.
+
+use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use crate::daemon_client::DaemonClient;
 use crate::layout::{LayoutState, SplitDir, ViewManager, ViewMeta, ViewSnapshot};
+use crate::output_router::{OutputRouter, SubscriptionDelta};
 
 /// `layout:updated` 이벤트명 — 한 View 의 레이아웃이 바뀌었을 때(전 창이 미러).
 const EVT_LAYOUT_UPDATED: &str = "layout:updated";
@@ -36,6 +47,19 @@ fn list_payload(mgr: &ViewManager) -> ViewListPayload {
     }
 }
 
+/// ★락 드롭 후 호출 — 구독 델타를 DaemonClient 로 송신(fire-and-forget enqueue)★. 반드시 락 미보유
+/// 상태에서(ADR-0006 — 락 안 송신 금지). 0→1 = `subscribe`(데몬에 Subscribe), 1→0 = `unsubscribe`.
+/// 비연결이면 DaemonClient 가 조용히 no-op — connect 진입 시 연결 task 가 router.current_agents()(이
+/// rebuild 가 갱신한 현재 보이는 agent SSOT)를 순회하며 재구독해 복구한다(C1, connection.rs main_loop).
+fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
+    for agent_id in delta.to_subscribe {
+        client.subscribe(agent_id);
+    }
+    for agent_id in delta.to_unsubscribe {
+        client.unsubscribe(agent_id);
+    }
+}
+
 /// 락 드롭 후 호출 — layout:updated(있으면) + view:list-updated 발행. ★반드시 락 미보유 상태에서★.
 fn emit_after_unlock(app: &AppHandle, layout: Option<ViewSnapshot>, list: ViewListPayload) {
     if let Some(snap) = layout {
@@ -53,15 +77,19 @@ fn emit_after_unlock(app: &AppHandle, layout: Option<ViewSnapshot>, list: ViewLi
 pub fn create_view(
     app: AppHandle,
     state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
     name: Option<String>,
 ) -> Result<Uuid, String> {
-    let (id, layout, list) = {
+    let (id, layout, list, delta) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         let id = mgr.create_view(name);
         let layout = mgr.snapshot(id).ok(); // 새 View 가 active → 그 레이아웃도 emit.
         let list = list_payload(&mgr);
-        (id, layout, list)
+        let delta = router.rebuild(&mgr); // ★락 안 rebuild(RMW 직렬화 — FIX-1/D3)★
+        (id, layout, list, delta)
     }; // ← 락 드롭
+    send_subscription_delta(&client, delta); // ★락 밖 송신(ADR-0006)★
     emit_after_unlock(&app, layout, list);
     Ok(id)
 }
@@ -71,17 +99,21 @@ pub fn create_view(
 pub fn close_view(
     app: AppHandle,
     state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
     view_id: Uuid,
 ) -> Result<(), String> {
-    let (layout, list) = {
+    let (layout, list, delta) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         mgr.close_view(view_id).map_err(|e| e.to_string())?;
         // 닫은 뒤 active View 의 레이아웃을 emit(전환·빈 상태 반영).
         let active = mgr.active_view_id;
         let layout = mgr.snapshot(active).ok();
         let list = list_payload(&mgr);
-        (layout, list)
+        let delta = router.rebuild(&mgr);
+        (layout, list, delta)
     }; // ← 락 드롭
+    send_subscription_delta(&client, delta);
     emit_after_unlock(&app, layout, list);
     Ok(())
 }
@@ -91,16 +123,22 @@ pub fn close_view(
 pub fn switch_view(
     app: AppHandle,
     state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
     view_id: Uuid,
 ) -> Result<(), String> {
-    let (layout, list) = {
+    let (layout, list, delta) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         mgr.switch_view(view_id).map_err(|e| e.to_string())?;
         // 전환된 active View 의 레이아웃도 emit(창이 바로 그 View 를 렌더).
         let layout = mgr.snapshot(view_id).ok();
         let list = list_payload(&mgr);
-        (layout, list)
+        // ★switch_view 도 rebuild★: active_view_id 변경으로 main 창에 보이는 agent 집합이 바뀐다
+        //   (옛 active 의 agent unsubscribe + 새 active 의 agent subscribe).
+        let delta = router.rebuild(&mgr);
+        (layout, list, delta)
     }; // ← 락 드롭
+    send_subscription_delta(&client, delta);
     emit_after_unlock(&app, layout, list);
     Ok(())
 }
@@ -110,19 +148,23 @@ pub fn switch_view(
 pub fn split_slot(
     app: AppHandle,
     state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
     view_id: Uuid,
     slot_id: Uuid,
     dir: SplitDir,
 ) -> Result<Uuid, String> {
-    let (new_id, layout, list) = {
+    let (new_id, layout, list, delta) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         let new_id = mgr
             .split_slot(view_id, slot_id, dir)
             .map_err(|e| e.to_string())?;
         let layout = mgr.snapshot(view_id).ok();
         let list = list_payload(&mgr);
-        (new_id, layout, list)
+        let delta = router.rebuild(&mgr);
+        (new_id, layout, list, delta)
     }; // ← 락 드롭
+    send_subscription_delta(&client, delta);
     emit_after_unlock(&app, layout, list);
     Ok(new_id)
 }
@@ -132,17 +174,21 @@ pub fn split_slot(
 pub fn close_slot(
     app: AppHandle,
     state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
     view_id: Uuid,
     slot_id: Uuid,
 ) -> Result<(), String> {
-    let (layout, list) = {
+    let (layout, list, delta) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         mgr.close_slot(view_id, slot_id)
             .map_err(|e| e.to_string())?;
         let layout = mgr.snapshot(view_id).ok();
         let list = list_payload(&mgr);
-        (layout, list)
+        let delta = router.rebuild(&mgr);
+        (layout, list, delta)
     }; // ← 락 드롭
+    send_subscription_delta(&client, delta);
     emit_after_unlock(&app, layout, list);
     Ok(())
 }
@@ -153,18 +199,22 @@ pub fn close_slot(
 pub fn assign_agent(
     app: AppHandle,
     state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
     view_id: Uuid,
     slot_id: Uuid,
     agent_id: String,
 ) -> Result<(), String> {
-    let (layout, list) = {
+    let (layout, list, delta) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         mgr.assign_agent(view_id, slot_id, agent_id)
             .map_err(|e| e.to_string())?;
         let layout = mgr.snapshot(view_id).ok();
         let list = list_payload(&mgr);
-        (layout, list)
+        let delta = router.rebuild(&mgr);
+        (layout, list, delta)
     }; // ← 락 드롭
+    send_subscription_delta(&client, delta);
     emit_after_unlock(&app, layout, list);
     Ok(())
 }

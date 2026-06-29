@@ -15,6 +15,10 @@ pub mod layout;
 //   - targets 사용 = connection.rs:668 Message::Binary 자리(decode_frame → decide_output → route)
 // app-level 공유(재연결 task 수명 초월) → Arc<OutputRouter> 로 manage(T6).
 pub mod output_router;
+// S14 모듈①(ADR-0036) T6b: window Channel registry 타입(window_label → 출력 Channel). Tauri Channel
+// 을 들어야 해서 output_router.rs(Tauri 의존 0 불변식)가 아니라 여기 둔다. connection task fan-out 의
+// lookup 표 + subscribe_output invoke 의 insert 대상.
+pub mod output_channel;
 // S13 sub-step 2: 순수 discovery 로직은 engram-dashboard-discovery crate 로 이동(tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다(중복 코드 0).
 pub use engram_dashboard_discovery as discovery;
@@ -70,14 +74,26 @@ pub fn run() {
             // 락 해제 후 emit(ADR-0006) 은 command 레이어가 보장. 초기엔 기본 View 1개.
             app.manage(crate::layout::LayoutState::new());
 
-            // ── S14 모듈①(ADR-0036) T6a: DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
+            // ── S14 모듈①(ADR-0036) T6b: 출력 라우팅 표면(OutputRouter + window Channel registry) ──
+            // ★단일 공유 Arc★: router(agent_id→[window_label] 라우팅)·registry(window_label→Channel)를
+            //   먼저 만들어 (a) app.manage 로 command(layout rebuild·subscribe_output)가 보고 (b) 같은
+            //   Arc 를 DaemonClient 에 주입해 연결 task 가 fan-out 에 쓴다 — 셋이 동일 인스턴스를 본다.
+            let router = std::sync::Arc::new(crate::output_router::OutputRouter::new());
+            let registry: crate::output_channel::WindowChannelRegistry = Default::default();
+            app.manage(router.clone());
+            app.manage(registry.clone());
+
+            // ── S14 모듈①(ADR-0036) T6a/T6b: DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
             // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
             // Handle::current() 대신 전용 런타임 — DaemonClient::new_real_with_owned_runtime).
             // commands/agent.rs invoke(spawn/kill/…)가 State<Arc<DaemonClient>> 로 주입받아
             // send_command 한다. ★app-startup connect 는 T6/connect 로 이연★ — 여기선 cmd 평면만
             // 배선하고, 실제 연결 수립(connect/ensure)은 프론트/부팅 시퀀스가 부른다(현재 프론트가
             // wsTransport 로 직접 붙는 경로와 공존, T7 에서 TauriTransport 로 전환).
-            match crate::daemon_client::DaemonClient::new_real_with_owned_runtime() {
+            match crate::daemon_client::DaemonClient::new_real_with_owned_runtime(
+                router.clone(),
+                registry.clone(),
+            ) {
                 Ok(client) => {
                     app.manage(std::sync::Arc::new(client));
                 }
@@ -158,6 +174,9 @@ pub fn run() {
             commands::agent_interrupt,
             commands::agent_write_stdin,
             commands::agent_resize,
+            // S14 모듈①(ADR-0036) T6b: 창 mount 시 출력 Channel 등록 — window_label → Channel registry
+            //   insert. 연결 task 가 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다(raw byte, §7).
+            commands::subscribe_output,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

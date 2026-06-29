@@ -15,10 +15,13 @@
 //! - 핸드셰이크 결과는 `ready_tx`(oneshot) 1회로 호출자에게 보고하고, 이후 상태 전이는
 //!   `state_tx`(watch) 로 broadcast 한다.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, DaemonInfo, PROTOCOL_VERSION};
+use engram_dashboard_protocol::{
+    decode_frame, AgentCommand, AgentEvent, AgentId, DaemonInfo, PROTOCOL_VERSION,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
@@ -28,8 +31,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
-use super::protocol_state::{self, PendingMap};
+use super::protocol_state::{self, OutputDecision, PendingMap, SubState};
 use super::{ConnectionState, DaemonDiscovery};
+use crate::output_channel::WindowChannelRegistry;
+use crate::output_router::OutputRouter;
 
 /// SendCommand 의 reply 채널 타입(T6a). `Ok(event)` = 데몬이 매칭 reply(Ack/Spawned/Created/
 /// SubscribeAck/AgentList/…)를 보냄, `Err(msg)` = 데몬 Error 또는 연결 끊김(drain). 호출자
@@ -130,10 +135,10 @@ impl std::error::Error for HandshakeError {}
 
 /// 연결 task 로 보내는 명령(단일 task 소유 — invoke 는 이걸 보내고 task 가 처리).
 ///
-/// ★T6a 범위★: 요청/응답(request/reply) 평면만 배선한다. `SendCommand` = side-effect 명령
-/// (Spawn/Kill/Interrupt/WriteStdin/Resize/ListAgents/…)을 wire 로 보내고 매칭 reply 를 oneshot 으로
-/// 돌려받는다 — request_id ↔ oneshot 상관(correlation)은 main_loop 가 `PendingMap` 으로 한다.
-/// `Subscribe`/`Unsubscribe` variant 는 자리만 두고 cmd_rx 처리는 T6b(출력 라우팅 평면)에서 채운다.
+/// ★평면 구분★: `SendCommand` = 요청/응답(reply 기대) — request_id ↔ oneshot 상관을 main_loop 가
+/// `PendingMap` 으로 한다. `Subscribe`/`Unsubscribe`/`Fire` = **fire-and-forget**(reply 없음).
+/// Subscribe/Unsubscribe 는 wire 인코딩 시 `SubState`(epoch/after_seq) 조회가 필요해 전용 variant 로
+/// 두고, Resize 처럼 SubState 무관한 reply 없는 명령은 그냥 `Fire` 로 wire 송신한다.
 #[derive(Debug)]
 pub enum ConnectionCommand {
     /// 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
@@ -143,18 +148,20 @@ pub enum ConnectionCommand {
         cmd: AgentCommand,
         reply: CommandReply,
     },
-    /// 출력 구독(T6b — 자리만). cmd_rx 처리는 T6b(OutputRouter fan-out)가 채운다.
-    #[allow(dead_code)]
+    /// 출력 구독(T6b). ★epoch/after_seq 필드 없음(G1)★ — layout 은 "이 agent 구독해라"만 안다.
+    /// main_loop 가 SubState(연결 task 소유)에서 `resubscribe_params` 로 epoch/after_seq 를 채워
+    /// wire `AgentCommand::Subscribe` 를 만든다(신규=FromOldest / 재구독=tail-only, 한 경로로 통일).
     Subscribe {
         agent_id: engram_dashboard_protocol::AgentId,
-        epoch: Option<u32>,
-        after_seq: Option<u64>,
     },
-    /// 출력 구독 해제(T6b — 자리만). cmd_rx 처리는 T6b 가 채운다.
-    #[allow(dead_code)]
+    /// 출력 구독 해제(T6b). main_loop 가 `AgentCommand::Unsubscribe` 를 wire 로 송신한다.
+    /// ★subs 에서 SubState 는 제거하지 않는다★(F-B: 재구독=Resume tail 정합, 유실0 — spike §8).
     Unsubscribe {
         agent_id: engram_dashboard_protocol::AgentId,
     },
+    /// reply 없는 fire-and-forget 명령(Resize 등). main_loop 가 그냥 JSON 으로 wire 송신한다.
+    /// (Subscribe/Unsubscribe 는 SubState 조회 로직이 달라 전용 variant, Resize 는 일반 fire 라 Fire.)
+    Fire { cmd: AgentCommand },
 }
 
 /// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
@@ -186,6 +193,11 @@ pub(crate) async fn run_connection(
     handshake_timeout: Duration,
     cmd_rx: mpsc::Receiver<ConnectionCommand>,
     ready_tx: oneshot::Sender<Result<(), HandshakeError>>,
+    // ★T6b 출력 평면 주입(G3)★: router=agent_id→[window_label] 라우팅(app-level 공유), registry=
+    //   window_label→Channel. 둘 다 Arc 라 재연결 task 수명을 넘어 산다 — main_loop 가 Binary frame 을
+    //   디코드해 router.targets 로 라우팅하고 registry 의 각 창 Channel 로 fan-out 한다.
+    router: Arc<OutputRouter>,
+    registry: WindowChannelRegistry,
 ) {
     // 1) 첫 핸드셰이크 — 결과를 ready_tx 로 caller(connect/ensure)에 1회 보고한다.
     let connected = handshake(&info, my_gen, handshake_timeout).await;
@@ -242,6 +254,8 @@ pub(crate) async fn run_connection(
         rt,
         handshake_timeout,
         cancel_rx,
+        router,
+        registry,
     )
     .await;
 }
@@ -479,6 +493,8 @@ async fn connected_lifetime(
     rt: Handle,
     handshake_timeout: Duration,
     mut cancel_rx: tokio::sync::watch::Receiver<u64>,
+    router: Arc<OutputRouter>,
+    registry: WindowChannelRegistry,
 ) {
     // ★pending 소유(T6a — 단일 actor 가 단독 소유, Mutex 없음)★: request_id → reply oneshot 상관 맵을
     //   이 task 가 소유한다. main_loop 에 `&mut` 로 빌려줘 SendCommand(insert)·reply 도착(take)·끊김
@@ -486,10 +502,28 @@ async fn connected_lifetime(
     //   맵은 유지되지만, ★끊김마다 drain★ 한다(아래) — 옛 소켓의 in-flight 는 새 소켓에서 reply 가 안
     //   오므로 hang 방지를 위해 Err 로 깨운다(request_id idempotency: 호출자가 재시도, spike §3 불변식).
     let mut pending: PendingMap<CommandReply> = PendingMap::new();
+    // ★subs 소유(T6b — 단일 actor 단독 소유, Mutex 없음)★: agent_id → SubState(epoch·high-water dedup).
+    //   pending 과 동형으로 이 task 가 단독 소유하고 main_loop 에 `&mut` 로 빌려준다. ★단 pending 과 달리
+    //   재연결을 넘어 *유지*한다★(끊김마다 drain 하지 않음) — 재연결 후 resubscribe 가 마지막 epoch/seq 로
+    //   tail-only Resume 해야 무손실이기 때문(F-B, spike §8). Subscribe arm 이 entry().or_default() 로 채우고
+    //   SubscribeAck 가 epoch 갱신, Binary frame 이 decide_output 으로 dedup/epoch 가드를 적용한다.
+    //   ★정리(C3)★: 재구독은 router.current_agents() 기반이라(아래 main_loop) 안 보이는 agent 는 재구독 안
+    //   되고, 그 SubState 는 main_loop 진입 resubscribe 직후 router 집합 retain 으로 제거된다(누수 방지).
+    let mut subs: HashMap<AgentId, SubState> = HashMap::new();
     let mut attempt: u32 = 0;
     loop {
         // main_loop 가 끝난 사유로 재연결 여부를 가른다.
-        let exit = main_loop(sink, stream, &mut cmd_rx, &mut pending, my_gen).await;
+        let exit = main_loop(
+            sink,
+            stream,
+            &mut cmd_rx,
+            &mut pending,
+            &mut subs,
+            my_gen,
+            &router,
+            &registry,
+        )
+        .await;
         // ★끊김/종료 시 pending drain(no-leak 불변식, spike §3)★: 이 소켓 수명이 끝났으므로 in-flight
         //   명령은 매칭될 reply 가 더는 안 온다 → 전부 꺼내 Err 로 깨운다(호출자 hang 방지). Closed/
         //   Disconnected 둘 다 동일(재연결되더라도 옛 request_id reply 는 새 소켓에 안 옴 — 호출자 재시도).
@@ -705,13 +739,75 @@ async fn connected_lifetime(
 ///   - stream arm `Text`(reply): `take_pending(request_id)` 로 꺼내 `reply_outcome` 으로 resolve.
 ///     broadcast(request_id 없음)는 매칭을 우회한다(T6b 가 emit 배선 — 지금은 무시).
 /// 끊김(루프 종료)시 남은 pending 은 호출자(`connected_lifetime`)가 drain→Err 한다(no-leak).
+///
+/// ## ★출력 라우팅(T6b — load-bearing)★
+/// - **Binary arm**: `decode_frame → decide_output(&mut subs[agent], epoch, seq)` 가 epoch/dedup 가드
+///   (ADR-0037 Rust 단독 진실원)를 통과시킨 frame 만 `router.targets(agent)` 의 각 창으로 **원본 frame
+///   bytes 그대로**(헤더=agent_id 태그 내장) fan-out. 가드 통과분만 보내므로 창측 2차 가드 없음.
+/// - **Text arm `SubscribeAck`**: `apply_subscribe_ack` 로 subs 의 epoch 갱신 + high-water 리셋.
+/// - **cmd_rx arm `Subscribe`/`Unsubscribe`/`Fire`**: subs 에서 resubscribe_params 로 epoch/after_seq 를
+///   채워 wire 송신(reply 없음 — fire-and-forget).
+/// - **connect/재연결 후 resubscribe(C1+C2)**: main_loop 진입 시 **`router.current_agents()`(현재 보이는
+///   agent = 구독해야 할 집합 SSOT, ADR-0035)** 를 순회하며 각 agent 에 wire Subscribe 를 재전송한다 —
+///   subs(누적 맵)가 아니라 router 스냅샷이 진실원이라 비연결 중 배정분도 빠짐없이 구독(C1)되고 안 보이는
+///   agent 는 순회 대상이 아니라 유령 구독 0(C2). epoch/after_seq 는 subs 의 SubState 에서(tail Resume/
+///   FromOldest). 직후 router 에 없는 agent 의 SubState 를 정리(C3). router 가 비면 no-op(첫 연결 안전).
+///
+/// ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
+#[allow(clippy::too_many_arguments)]
 async fn main_loop(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
     mut stream: futures_util::stream::SplitStream<Ws>,
     cmd_rx: &mut mpsc::Receiver<ConnectionCommand>,
     pending: &mut PendingMap<CommandReply>,
+    subs: &mut HashMap<AgentId, SubState>,
     my_gen: u64,
+    router: &Arc<OutputRouter>,
+    registry: &WindowChannelRegistry,
 ) -> LoopExit {
+    // ★connect/재연결 resubscribe — router 라우팅 스냅샷 기반(C1+C2)★. 순회 대상은 `subs`(연결 task 가
+    //   한 번이라도 구독한 적 있는 누적 맵)가 아니라 **`router.current_agents()`(현재 화면에 보이는 agent =
+    //   구독해야 할 집합의 SSOT, ADR-0035)** 다. 이유:
+    //   - (C1) subs 기반이면 connect 로 새 task 가 뜰 때 subs 가 빈 HashMap 으로 시작 → 비연결 중 layout 에
+    //     배정된 agent 가 영영 구독 안 된다(connect 후 재동기 트리거 부재). router 는 비연결 중에도 layout
+    //     command 가 rebuild 로 항상 최신화하므로(델타 송신만 no-op 이었음), 그 스냅샷을 돌면 비연결 중
+    //     배정분도 빠짐없이 구독된다.
+    //   - (C2) subs 는 Unsubscribe 해도 SubState 를 제거 안 하므로(F-B), subs 기반 재구독은 지금 안 보이는
+    //     agent 까지 유령 구독한다. router 에 없는 agent 는 애초에 순회 대상이 아니라 유령 구독 0.
+    //   각 agent 의 epoch/after_seq 는 subs 의 SubState(있으면 tail Resume, 없으면 FromOldest)에서 가져온다
+    //   → F-B 무손실 유지(재구독=tail Resume 그대로, ADR 불변). 첫 연결도 router 에 agent 있으면 구독,
+    //   없으면 no-op 이라 안전.
+    let current = router.current_agents();
+    for agent_id in &current {
+        // subs 에 없으면 or_default(=FromOldest), 있으면 마지막 epoch/seq(tail Resume).
+        let p = protocol_state::resubscribe_params(subs.entry(*agent_id).or_default());
+        let cmd = AgentCommand::Subscribe {
+            agent_id: *agent_id,
+            epoch: p.epoch,
+            after_seq: p.after_seq,
+        };
+        match serde_json::to_string(&cmd) {
+            Ok(text) => {
+                if let Err(e) = sink.send(Message::Text(text.into())).await {
+                    // 송신 실패(소켓 죽음) — 곧 다음 select 가 Disconnected 로 빠진다. 로깅만(reply 없음).
+                    tracing::debug!(generation = my_gen, "resubscribe 송신 실패: {e}");
+                }
+            }
+            Err(e) => tracing::warn!(generation = my_gen, "resubscribe 직렬화 실패: {e}"),
+        }
+    }
+    // ★subs 메모리 정리(C3 — 보수적)★: router 현재 집합에 없는(= 지금 어느 창에도 안 보이는) agent 의
+    //   SubState 를 제거한다. 이유: router 기반 재구독으로 그 agent 는 더는 구독되지 않으니 frame 도 안
+    //   오고, SubState 가 남아도 쓰이지 않아 누수다(close_slot/switch_view 로 사라진 agent 가 누적).
+    //   ★무손실 충돌 없음(F-B)★: 잠깐 안 보였다 *다시 보이는* agent 는 재표시 시 layout command 가
+    //   `subscribe` 델타(Subscribe arm)를 보내고, 거기서 `subs.entry().or_default()` 가 (정리됐으니) 새
+    //   SubState(epoch=None/after_seq=None=FromOldest)를 *항상* 만들어 전체 replay 한다 —
+    //   tail Resume 의 *효율*(중복 절감)은 잃지만 **frame 은 하나도 안 잃는다**(전체 replay → dedup 이
+    //   epoch Ack 후 중복 거름). 즉 정리는 tail-Resume 최적화를 포기할 뿐 무손실을 깨지 않는다(과한 정리로
+    //   무손실 깨는 것보다 안전). 정리 시점이 resubscribe *직후*라, 방금 구독한(router 에 있는) agent 는
+    //   절대 안 지워진다.
+    let visible: std::collections::HashSet<AgentId> = current.iter().copied().collect();
+    subs.retain(|agent_id, _| visible.contains(agent_id));
     // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
     // 로그 미부착 — Text/Binary 청크는 per-frame 빈도라 trace 미사용 정책 유지).
     let exit = loop {
@@ -733,16 +829,60 @@ async fn main_loop(
                                         {
                                             let _ = reply.send(protocol_state::reply_outcome(ev));
                                         }
+                                    } else if let AgentEvent::SubscribeAck {
+                                        agent_id,
+                                        current_epoch,
+                                        ..
+                                    } = ev
+                                    {
+                                        // ★구독 ack(T6b)★: subs 의 epoch 갱신 + (epoch 변경 시) high-water
+                                        //   리셋. apply_subscribe_ack 가 둘 다 처리한다(decide_output 의 epoch
+                                        //   가드 기준이 되고, 새 세션이면 낮은 seq 가 안 막히게 dedup 리셋).
+                                        protocol_state::apply_subscribe_ack(
+                                            subs.entry(agent_id).or_default(),
+                                            current_epoch,
+                                        );
                                     }
-                                    // request_id 없는 broadcast(AgentListUpdated/StatusChanged/…) +
-                                    //   SubscribeAck(agent_id 기반) → T6b 가 app.emit / OutputRouter 로 배선.
-                                    //   TODO(T6b/emit): AppHandle 을 task 에 주입해 broadcast 를 위로 emit.
+                                    // 그 외 request_id 없는 broadcast(AgentListUpdated/StatusChanged/…)는
+                                    //   여전히 무시 — emit 배선은 본 작업 범위 밖(T6b 출력 평면만).
+                                    //   TODO(emit): AppHandle 을 task 에 주입해 broadcast 를 위로 emit.
                                 }
                             }
-                            Message::Binary(_bytes) => {
-                                // 출력 binary frame(codec). T3 가 seq dedup·epoch 가드(decide_output)를 깔았다.
-                                // TODO(T5/T6b): decode_frame → protocol_state::decide_output(&mut sub, epoch, seq)
-                                //   → Deliver 면 OutputRouter(arc-swap) 로 라우팅, Drop* 이면 무시.
+                            Message::Binary(bytes) => {
+                                // ★출력 binary frame fan-out(T6b)★. 헤더(tag/agent_id/epoch/seq) 디코드 →
+                                //   epoch/dedup 가드(decide_output, ADR-0037 Rust 단독 진실원) → 통과분만
+                                //   router.targets 의 각 창 Channel 로 *원본 frame bytes 그대로* 보낸다
+                                //   (헤더에 agent_id 가 박혀 있어 창이 어느 agent 출력인지 안다).
+                                match decode_frame(&bytes) {
+                                    Ok(frame) => {
+                                        // 구독 안 한 agent frame 은 정상 흐름엔 없다(Subscribe arm 이 미리
+                                        //   subs 에 넣음). or_default 로 방어적 SubState(epoch=None)를 만들어
+                                        //   decide_output 이 첫 frame 도 배달하게 한다(전멸 방지).
+                                        let sub = subs.entry(frame.agent_id).or_default();
+                                        // ★C4 (판정 ≠ 전진)★: decide_output 은 판정만(high-water 미전진).
+                                        //   실제 fan_out 이 최소 1개 창에 성공 배달한 뒤에만 mark_delivered 로
+                                        //   전진한다 — 창 mount 전 race·전 창 dead 로 0건 배달된 frame 의 seq 를
+                                        //   "배달됨"으로 오기록하면 재구독 after_seq 가 미배달 frame 을 건너뛴다.
+                                        if let OutputDecision::Deliver { seq } =
+                                            protocol_state::decide_output(sub, frame.epoch, frame.seq)
+                                        {
+                                            // 핫패스 라우팅: load()만(락 0). 빈 대상이면 lock 도 안 잡는다.
+                                            let labels = router.targets(frame.agent_id);
+                                            // targets 가 비면(어디에도 안 보임) fan_out 안 함 → 미배달 →
+                                            //   미전진(방어적 — 안 보이는 agent 는 router 기반 구독으로 애초에
+                                            //   구독 자체를 안 하니 frame 도 거의 안 온다).
+                                            if !labels.is_empty()
+                                                && fan_out(&bytes, &labels, registry, my_gen)
+                                            {
+                                                // 1+창 성공 배달 확인 후에만 high-water 전진(SubState 계약).
+                                                protocol_state::mark_delivered(sub, seq);
+                                            }
+                                        }
+                                        // Drop*(epoch 불일치/중복) → 무시.
+                                    }
+                                    // 디코드 실패(부분/미래 프레임) → 무시(방어).
+                                    Err(_) => {}
+                                }
                             }
                             // Ping/Pong 은 tungstenite 가 자동 응답(내부). Close 면 끊김(재연결 대상).
                             Message::Close(_) => break LoopExit::Disconnected,
@@ -799,10 +939,28 @@ async fn main_loop(
                             }
                         }
                     }
-                    // T6b 자리 — 출력 구독 평면. 지금은 처리 안 함(자리만, cmd_tx 송신처도 T6b).
-                    Some(ConnectionCommand::Subscribe { .. })
-                    | Some(ConnectionCommand::Unsubscribe { .. }) => {
-                        // TODO(T6b): SubState 조회로 epoch/after_seq 채워 Subscribe wire 송신 + OutputRouter.
+                    // ★출력 구독(T6b — fire-and-forget, reply 없음)★. SubState 조회로 epoch/after_seq 를
+                    //   채워 wire Subscribe 송신(신규=FromOldest / 재구독=tail-only, 한 경로 통일 — G1).
+                    Some(ConnectionCommand::Subscribe { agent_id }) => {
+                        let p = protocol_state::resubscribe_params(
+                            subs.entry(agent_id).or_default(),
+                        );
+                        let cmd = AgentCommand::Subscribe {
+                            agent_id,
+                            epoch: p.epoch,
+                            after_seq: p.after_seq,
+                        };
+                        send_fire(&mut sink, &cmd, my_gen, "Subscribe").await;
+                    }
+                    // 출력 구독 해제(fire-and-forget). ★subs 에서 SubState 제거하지 않는다★(F-B: 재구독=
+                    //   Resume tail 정합, 유실0 — spike §8). 정리는 후속 작업.
+                    Some(ConnectionCommand::Unsubscribe { agent_id }) => {
+                        let cmd = AgentCommand::Unsubscribe { agent_id };
+                        send_fire(&mut sink, &cmd, my_gen, "Unsubscribe").await;
+                    }
+                    // reply 없는 일반 명령(Resize 등) — 그냥 wire 송신.
+                    Some(ConnectionCommand::Fire { cmd }) => {
+                        send_fire(&mut sink, &cmd, my_gen, "Fire").await;
                     }
                     None => break LoopExit::Closed,
                 }
@@ -814,6 +972,86 @@ async fn main_loop(
     let _ = sink.close().await;
     // 상태 전이(Down/Reconnecting)는 호출자(connected_lifetime)가 가드와 함께 결정한다 — 여기선 사유만.
     exit
+}
+
+/// ★출력 fan-out(T6b)★: 가드 통과한 frame bytes 를 `labels` 의 각 창 Channel 로 보낸다.
+///
+/// ★반환(C4)★: **최소 1개 창에 성공 배달했으면 `true`**. 호출자(Binary arm)는 이게 true 일 때만
+/// `mark_delivered` 로 high-water 를 전진시킨다 — 등록된 창이 하나도 없거나(창 mount 전 race) 전부 dead 라
+/// 0건 배달이면 false → 미전진 → 같은 seq 가 또 오면 재배달 시도된다(미배달 frame 을 after_seq 가 건너뛰는
+/// 결함 차단). 정상 연결+등록 창에선 항상 true 라 추가 비용 0.
+///
+/// ## ★ADR-0006(load-bearing)★
+/// `registry.lock()`(std Mutex)을 잡는 동안 `.await` 가 **없다** — `Channel::send` 는 동기다. 그래서 락을
+/// 짧게 잡았다 즉시 푼다. dead window(`send` Err) 라벨은 같은 lock 안에서 모았다가 곧바로 remove 한다
+/// (spike §7 D6 — 절대 unwrap 금지, 소멸 webview 는 Channel send 가 Err).
+///
+/// ## ★bytes clone★
+/// `Response::new` 는 `Vec<u8>` 소유가 필요하고 fan-out 대상이 여럿이라 각 창에 `bytes.to_vec()` clone 이
+/// 불가피하다(단순·정확 우선 — spike §4 주). 핫패스지만 라우팅 대상(보이는 창)은 소수라 수용.
+fn fan_out(
+    bytes: &[u8],
+    labels: &[crate::output_router::WindowLabel],
+    registry: &WindowChannelRegistry,
+    my_gen: u64,
+) -> bool {
+    // dead window 라벨 수집(lock 보유 중엔 remove 하며 iterate 하지 않고, 모았다가 같은 lock 에서 제거).
+    let mut dead: Vec<String> = Vec::new();
+    // ★C4★ 성공 배달 창 수. 1+ 면 호출자가 high-water 를 전진시킨다(미배달 frame seq 오기록 방지).
+    let mut delivered = 0usize;
+    {
+        // ★락 across await 없음★: 아래 블록 안에 .await 0 — send 는 동기.
+        let Ok(mut reg) = registry.lock() else {
+            // poisoned(다른 스레드 panic) — 출력 한 프레임 유실은 치명 아님. 로깅만(드묾). 미배달이므로
+            //   false 반환(high-water 미전진 — 재시도 가능).
+            tracing::warn!(
+                generation = my_gen,
+                "registry lock poisoned — 프레임 fan-out 스킵"
+            );
+            return false;
+        };
+        for label in labels {
+            if let Some(ch) = reg.get(label) {
+                if ch.send(tauri::ipc::Response::new(bytes.to_vec())).is_err() {
+                    // 소멸 webview — registry 에서 제거 대상으로 표시(절대 unwrap 금지, spike §7 D6).
+                    dead.push(label.clone());
+                } else {
+                    delivered += 1;
+                }
+            }
+            // label 은 router 에 있으나 registry 에 Channel 이 아직 없음(창 mount 전 race) = 미배달 —
+            //   delivered 안 올림(아래 false 귀결로 high-water 미전진 → 창 mount 후 재배달).
+        }
+        // dead label 제거(같은 lock 보유 중 — 동기). 다음 프레임부터 그 창엔 안 보낸다.
+        for label in &dead {
+            reg.remove(label);
+        }
+    } // ← registry lock drop
+    if !dead.is_empty() {
+        // ★주의★: registry 만 정리한다 — router 의 라우팅 표는 layout 권위(ADR-0035)라 여기서 안 건드린다.
+        //   창이 진짜 닫히면 layout command 가 rebuild 하며 정리한다(이건 Channel 만 죽은 과도 상태 방어).
+        tracing::debug!(generation = my_gen, dead = ?dead, "dead window Channel 제거");
+    }
+    delivered > 0
+}
+
+/// ★fire-and-forget 송신(T6b)★: reply 없는 명령(Subscribe/Unsubscribe/Resize)을 JSON 으로 wire 송신.
+/// 송신 실패(소켓 죽음)는 로깅만 — reply 가 없어 깨울 oneshot 이 없고, 소켓은 곧 끊겨 다음 select 가
+/// Disconnected 로 빠진다(재연결 시 layout 이 다시 rebuild/resubscribe).
+async fn send_fire(
+    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
+    cmd: &AgentCommand,
+    my_gen: u64,
+    kind: &str,
+) {
+    match serde_json::to_string(cmd) {
+        Ok(text) => {
+            if let Err(e) = sink.send(Message::Text(text.into())).await {
+                tracing::debug!(generation = my_gen, "{kind} fire 송신 실패: {e}");
+            }
+        }
+        Err(e) => tracing::warn!(generation = my_gen, "{kind} 직렬화 실패: {e}"),
+    }
 }
 
 /// Hello 가 올 때까지 stream 을 읽는다(internal 소비). Hello=Ok, Error=AuthRejected, 닫힘=ClosedBeforeHello.

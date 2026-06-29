@@ -122,11 +122,14 @@ impl SubState {
 
 /// output frame 배달 판정 결과(JS `handleOutput` 의 분기를 명시 enum 으로).
 ///
-/// 호출자(연결 task)는 `Deliver` 일 때만 `last_delivered_seq` 가 이미 갱신된 SubState 를 바탕으로
-/// 구독자/Router 에 청크를 배달한다. `Drop*` 이면 아무것도 하지 않는다.
+/// ★C4 분리(판정 ≠ 전진)★: `Deliver` 는 "가드 통과 = 배달 후보"만 뜻한다. `decide_output` 은 더 이상
+/// `last_delivered_seq` 를 전진시키지 않는다 — high-water 전진은 호출자가 **실제 fan_out 이 최소 1개 창에
+/// 성공 배달한 뒤** `mark_delivered` 로 한다. 그래야 창 mount 전 race 나 전 창 dead 로 0건 배달된 frame 의
+/// seq 를 "배달됨"으로 오기록하지 않는다(재구독 after_seq 가 미배달 frame 을 건너뛰는 결함 차단,
+/// SubState.last_delivered_seq 계약 = "실제 배달한 최고 seq").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputDecision {
-    /// 가드 통과 — 구독자에 배달. `seq` 동봉(호출자가 OutputChunk{seq,bytes} 구성).
+    /// 가드 통과 — 배달 후보. `seq` 동봉(호출자가 fan_out 성공 후 `mark_delivered(st, seq)` 로 high-water 전진).
     Deliver { seq: u64 },
     /// epoch 불일치 — 옛 세션 잔여 frame. 화면 오염 방지로 버린다.
     DropEpochMismatch,
@@ -151,13 +154,19 @@ pub struct SubscribeParams {
 pub type PendingMap<T> = HashMap<RequestId, T>;
 
 // ── output frame 배달 판정(JS handleOutput 승격) ─────────────────────────────────────
-/// epoch 가드 + high-water dedup 후 배달 여부를 결정한다. `Deliver` 면 `st.last_delivered_seq` 를
-/// frame seq 로 **갱신한 뒤** 반환한다(호출자는 갱신된 상태 위에서 배달만 하면 됨).
+/// epoch 가드 + high-water dedup 후 배달 여부를 **판정만** 한다(C4 — 전진은 호출자 몫).
+///
+/// ★C4 (판정 ≠ 전진, load-bearing)★: 이 함수는 `st` 를 **읽기만** 한다(`&SubState`) — `Deliver` 를
+/// 돌려줘도 `last_delivered_seq` 를 전진시키지 않는다. 호출자(연결 task)가 실제 fan_out 이 최소 1개 창에
+/// 성공한 뒤 `mark_delivered(st, seq)` 로 전진한다. 가드(epoch/dedup)는 라우팅 전 1회 그대로 적용된다
+/// (ADR-0037 의미 불변 — 바뀐 건 "전진 시점"뿐). ★재시도 의미★: 가드는 통과했으나 0건 배달이면
+/// high-water 가 안 올라가므로, 같은 seq 가 또 오면 다시 `Deliver` 로 판정돼 재배달 시도된다(의도).
+/// 정상 연결+등록 창에선 항상 성공 → mark_delivered 즉시 전진 → 추가 비용 0.
 ///
 /// ★가드 순서(JS 와 동일, load-bearing)★: ① epoch 불일치 → drop(옛 세션 잔여가 화면 오염) ②
 /// seq<=high-water → drop(중복). epoch 가 `None`(첫 Ack 전)이면 epoch 가드는 통과시킨다 — Ack 전
 /// 도착 frame 도 배달해야 초반 출력이 안 사라진다(JS `st.epoch !== undefined` 가드와 동형).
-pub fn decide_output(st: &mut SubState, frame_epoch: u32, frame_seq: u64) -> OutputDecision {
+pub fn decide_output(st: &SubState, frame_epoch: u32, frame_seq: u64) -> OutputDecision {
     // epoch 불일치 frame 은 옛 세션 잔여 — 버린다(SubscribeAck.current_epoch 기준). epoch=None(첫 Ack
     // 전)이면 비교를 건너뛰고 통과(아직 기준 epoch 모름 → 일단 배달).
     if let Some(cur) = st.epoch {
@@ -172,8 +181,17 @@ pub fn decide_output(st: &mut SubState, frame_epoch: u32, frame_seq: u64) -> Out
             return OutputDecision::DropDuplicate;
         }
     }
-    st.last_delivered_seq = Some(frame_seq);
     OutputDecision::Deliver { seq: frame_seq }
+}
+
+/// high-water 전진(C4) — **실제 fan_out 이 최소 1개 창에 성공 배달한 뒤** 호출한다.
+///
+/// `decide_output` 이 판정만 하도록 분리됐으므로(전진 없음), 배달 성공을 확인한 호출자가 이 함수로
+/// `last_delivered_seq` 를 frame seq 로 올린다. 이후 같은/낮은 seq 는 `decide_output` 의 dedup 가드에
+/// 걸려 drop 된다. ★전진 단조성★: 낮은 seq 로의 후퇴는 없다(가드를 통과한 seq 만 여기 도달하고, 그
+/// seq 는 항상 직전 high-water 보다 크다 — dedup 정합). 단일 task 직렬 처리라 race 없음.
+pub fn mark_delivered(st: &mut SubState, seq: u64) {
+    st.last_delivered_seq = Some(seq);
 }
 
 // ── SubscribeAck 처리(JS handleEvent 의 SubscribeAck 분기 승격) ───────────────────────
@@ -344,9 +362,12 @@ mod tests {
         st
     }
 
-    /// 배달 판정 후 Deliver 면 seq 를 누적하는 헬퍼(received 배열 = TS).
+    /// 배달 판정 후 Deliver 면 seq 를 누적하는 헬퍼(received 배열 = TS). ★C4★: 정상 배달 경로를 흉내내려
+    /// Deliver 판정 후 `mark_delivered` 로 high-water 를 전진시킨다(= fan_out 1+창 성공 가정). 이래야 dedup
+    /// 가드가 다음 frame 에서 제대로 동작한다(연결 task 의 fan_out 성공 후 mark_delivered 와 동형).
     fn feed(st: &mut SubState, received: &mut Vec<u64>, epoch: u32, seq: u64) {
         if let OutputDecision::Deliver { seq } = decide_output(st, epoch, seq) {
+            mark_delivered(st, seq);
             received.push(seq);
         }
     }
@@ -388,28 +409,28 @@ mod tests {
     fn seq_zero_sentinel_boundary_direct() {
         let mut st = subscribed_with_ack(1);
         assert_eq!(st.last_delivered_seq, None, "Ack 직후 미배달(=TS -1)");
-        // None 상태에서 seq 0 → Deliver{0} + high-water 가 Some(0) 으로 전진(None != Some(0)).
+        // ★C4★: None 상태에서 seq 0 → Deliver{0} 판정. decide_output 은 더 이상 전진 안 함(읽기만).
+        assert_eq!(decide_output(&st, 1, 0), OutputDecision::Deliver { seq: 0 });
         assert_eq!(
-            decide_output(&mut st, 1, 0),
-            OutputDecision::Deliver { seq: 0 }
+            st.last_delivered_seq, None,
+            "★C4★ decide_output 은 판정만 — high-water 미전진(fan_out 성공 전)"
         );
+        // 배달 성공을 흉내 → mark_delivered 로 전진(None != Some(0)).
+        mark_delivered(&mut st, 0);
         assert_eq!(
             st.last_delivered_seq,
             Some(0),
-            "0 배달 후 high-water=Some(0)"
+            "mark_delivered 후 high-water=Some(0)"
         );
         // 같은 seq 0 재도착 → DropDuplicate(0 <= 0) + 상태 불변(0 이 센티넬로 오인되면 안 됨).
-        assert_eq!(decide_output(&mut st, 1, 0), OutputDecision::DropDuplicate);
+        assert_eq!(decide_output(&st, 1, 0), OutputDecision::DropDuplicate);
         assert_eq!(
             st.last_delivered_seq,
             Some(0),
             "중복 drop — high-water 불변"
         );
         // epoch 불일치도 enum 직접 단언(상태 불변 확인).
-        assert_eq!(
-            decide_output(&mut st, 2, 1),
-            OutputDecision::DropEpochMismatch
-        );
+        assert_eq!(decide_output(&st, 2, 1), OutputDecision::DropEpochMismatch);
         assert_eq!(
             st.last_delivered_seq,
             Some(0),
@@ -417,18 +438,42 @@ mod tests {
         );
     }
 
-    /// TS: "epoch 안 맞는 frame → drop(stale 세션)"
+    /// TS: "epoch 안 맞는 frame → drop(stale 세션)" — 판정만(C4: decide_output 은 &SubState).
     #[test]
     fn epoch_mismatch_dropped() {
-        let mut st = subscribed_with_ack(5);
+        let st = subscribed_with_ack(5);
+        assert_eq!(decide_output(&st, 4, 0), OutputDecision::DropEpochMismatch);
+        assert_eq!(decide_output(&st, 5, 0), OutputDecision::Deliver { seq: 0 });
+    }
+
+    /// ★C4 회귀★: 가드 통과(Deliver)했으나 fan_out 0건 배달이면 high-water 가 안 올라가, 같은 seq 가 또
+    /// 와도 다시 Deliver 로 재시도된다(미배달 frame 을 건너뛰지 않음 = after_seq 결함 차단). mark_delivered
+    /// 를 부르지 않는 것 = 미배달을 흉내낸 것. 배달 성공(mark_delivered) 후엔 비로소 dedup 으로 막힌다.
+    #[test]
+    fn undelivered_frame_does_not_advance_high_water_and_retries() {
+        let mut st = subscribed_with_ack(7);
+        // 1) seq 0 가드 통과 → Deliver. ★fan_out 0건(창 mount 전)★ 가정: mark_delivered 안 부름.
+        assert_eq!(decide_output(&st, 7, 0), OutputDecision::Deliver { seq: 0 });
         assert_eq!(
-            decide_output(&mut st, 4, 0),
-            OutputDecision::DropEpochMismatch
+            st.last_delivered_seq, None,
+            "미배달이면 high-water 미전진(decide_output 은 전진 안 함)"
         );
+        // 2) 같은 seq 0 재도착 → 여전히 Deliver(dedup 에 안 걸림 — 아직 배달된 적 없으니 재시도 가능).
         assert_eq!(
-            decide_output(&mut st, 5, 0),
-            OutputDecision::Deliver { seq: 0 }
+            decide_output(&st, 7, 0),
+            OutputDecision::Deliver { seq: 0 },
+            "미배달 frame 은 같은 seq 재시도 시 다시 Deliver(건너뛰지 않음)"
         );
+        // 3) 이번엔 배달 성공(창 등록됨) → mark_delivered 로 전진. 이후 같은 seq 0 은 비로소 dedup drop.
+        mark_delivered(&mut st, 0);
+        assert_eq!(st.last_delivered_seq, Some(0));
+        assert_eq!(
+            decide_output(&st, 7, 0),
+            OutputDecision::DropDuplicate,
+            "배달 성공 후엔 같은 seq 가 중복으로 막힌다"
+        );
+        // 4) 그 다음 seq 1 은 정상 Deliver(전진은 다시 호출자 몫).
+        assert_eq!(decide_output(&st, 7, 1), OutputDecision::Deliver { seq: 1 });
     }
 
     /// TS: "SubscribeAck.current_epoch 변경 → high-water 리셋 → 새 스트림 낮은 seq 배달(R3)"
