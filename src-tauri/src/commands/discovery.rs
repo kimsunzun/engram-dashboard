@@ -119,6 +119,30 @@ pub fn read_daemon_info() -> Result<Option<DaemonInfoDto>, String> {
     Ok(discovery::read_live_daemon(&data_dir).map(DaemonInfoDto::from))
 }
 
+/// ★T7c: TauriTransport.start() 진입점(spawn 허용)★. Rust DaemonClient.connect() 를 호출한다.
+/// 프론트 TauriTransport.start() 가 invoke 로 부른다(WsTransport.openSocket(true) 대응).
+#[tauri::command]
+pub async fn daemon_connect(
+    client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
+) -> Result<(), String> {
+    client.connect().await.map_err(|e| e.to_string())
+}
+
+/// ★T7c: TauriTransport.ensureReady() 진입점(attach-only, no-spawn)★. Rust DaemonClient.ensure() 를 호출한다.
+/// 프론트 TauriTransport.ensureReady() 가 invoke 로 부른다(WsTransport.ensureReady() 대응).
+#[tauri::command]
+pub async fn daemon_ensure(
+    client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
+) -> Result<(), String> {
+    client.ensure().await.map_err(|e| e.to_string())
+}
+
+/// ★T7c: TauriTransport.close() 진입점★. Rust DaemonClient.close() 를 호출한다.
+#[tauri::command]
+pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>) {
+    client.close();
+}
+
 /// 데몬 종료 fallback(§5). daemon.json 의 pid 를 taskkill /F.
 ///
 /// ★graceful 우선★: 연결을 쥔 프론트는 먼저 StopDaemon AgentCommand(graceful, 자식 정리 후 자진

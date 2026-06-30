@@ -24,6 +24,12 @@ import type { ConnectionState } from './agentClient'
  *  - output: 디코드된 출력 frame. epoch/seq 가드 + dedup 후 OutputChunk 로 구독자에 배달.
  *
  * Auth/Hello 는 transport 내부(handshake)에서 소비되고 여기로 올라오지 않는다.
+ *
+ * ★carrier 별 출처(동형)★:
+ *  - WsTransport: control=WS Text frame, output=WS binary frame(decodeOutputFrame).
+ *  - TauriTransport: control=Tauri listen(broadcast) + forward_daemon_command 반환(reply),
+ *    output=per-window Tauri Channel(raw bytes → decodeOutputFrame). 둘 다 같은 InboundMessage 로
+ *    정규화돼 ProtocolClient 는 carrier 출처를 모른다(reply/output 처리 로직 1벌).
  */
 export type InboundMessage =
   | { kind: 'control'; event: Record<string, unknown> }

@@ -295,19 +295,17 @@ export class ProtocolClient implements AgentClient {
     // 같은 agentId 재구독 시 이전 상태는 덮는다(컴포넌트가 epoch 바뀌면 재구독).
     // epoch=undefined(Ack 전), lastDeliveredSeq=-1(아무것도 배달 안 함).
     this.subs.set(agentId, { onChunk, epoch: undefined, lastDeliveredSeq: -1 })
-    // 첫 구독 — 둘 다 null(FromOldest, 전부 받음).
-    this.transport.send({ Subscribe: { agent_id: agentId, epoch: null, after_seq: null } })
+    // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는
+    //   src-tauri 단독이다. 프론트가 `Subscribe{after_seq:null}`(FromOldest)를 데몬에 forward 하면,
+    //   같은 agent 를 N 창이 보면 데몬이 FromOldest 를 N번 replay → src-tauri 공유 버퍼에 낮은 seq 가
+    //   다시 append 돼 seq 단조(무손실 전제)가 붕괴한다. 데몬 구독은 layout 구독 델타(ViewManager 권위,
+    //   src-tauri send_subscription_delta)가 `after_seq=버퍼 최신 seq`(축 A)로 단독 트리거한다.
+    //   여기 subs(JS 콜백)는 렌더러 등록만 — output Channel 로 raw bytes 가 오면 onChunk 로 배달한다.
     return {
       unsubscribe: () => {
         this.subs.delete(agentId)
-        // 연결 살아있을 때만 Unsubscribe 전송(끊겼으면 백엔드측 구독도 이미 정리됨).
-        if (this.transport.connectionState === 'connected') {
-          try {
-            this.transport.send({ Unsubscribe: { agent_id: agentId } })
-          } catch {
-            // 전송 실패는 무시 — 재연결 시 subs 에 없으므로 재구독 안 함.
-          }
-        }
+        // ★Unsubscribe 도 데몬에 forward 안 함(BLOCK-1)★: 데몬 구독 해제도 layout 델타(1→0)가 소유한다.
+        //   여기선 JS 콜백만 떼어 더는 이 agent frame 을 렌더하지 않게 한다(렌더러 역할 한정).
       },
     }
   }

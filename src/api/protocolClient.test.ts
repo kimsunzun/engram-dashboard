@@ -339,7 +339,7 @@ describe('이벤트 라우팅(eventBus 공통 표면)', () => {
 describe('InProc no-op 수렴(항상 connected·순서보존)', () => {
   // InProc 류 carrier: 항상 connected, reconnecting 전이 없음, frame 순서 보존.
   // dedup/epoch/resubscribe 가 무해 통과하는지(우회 분기 없이 자연수렴) 검증.
-  it('연결 전이 없이도 정상 출력 배달(resubscribe 안 불림 = sent 에 Subscribe 1개만)', async () => {
+  it('연결 전이 없이도 정상 출력 배달(★BLOCK-1: subscribeOutput 은 Subscribe 를 안 보낸다★)', async () => {
     const t = new MockTransport('connected')
     const c = new ProtocolClient(t)
     const received: number[] = []
@@ -348,9 +348,12 @@ describe('InProc no-op 수렴(항상 connected·순서보존)', () => {
     // 순서 보존된 frame — dedup 이 절대 막지 않아야(전부 배달).
     for (let s = 0; s < 5; s++) t.output(AGENT, 0, s)
     expect(received).toEqual([0, 1, 2, 3, 4])
-    // 재연결이 없으므로 Subscribe 는 초기 1회만(resubscribe 미발생).
+    // ★BLOCK-1(데몬 구독 소유 = src-tauri 단독, ADR-0035/0037)★: subscribeOutput 첫 구독은 데몬에
+    //   Subscribe 를 forward 하지 않는다(데몬 구독은 layout 델타가 단독 트리거 — 프론트가 N창에서
+    //   FromOldest 를 보내면 공유 버퍼 seq 단조 붕괴). 여기 subs(JS 콜백) 등록만 하고 dedup/epoch
+    //   가드는 그대로 — SubscribeAck/output 처리(위 배달)는 변함없이 동작한다. 재연결도 없으니 0개.
     const subs = t.sent.filter((m) => !!m && typeof m === 'object' && 'Subscribe' in (m as object))
-    expect(subs.length).toBe(1)
+    expect(subs.length).toBe(0)
   })
 
   // ── BLOCKER 1 회귀: embedded carrier 의 실제 wire(epoch≥1)를 재현 ──────────────────────────

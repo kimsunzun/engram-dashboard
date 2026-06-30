@@ -3445,3 +3445,92 @@ async fn duplicate_request_id_insert_errs_prev_slot() {
         "중복 request_id 시 옛 슬롯은 '중복' Err 로 깨워져야: {prev_result:?}"
     );
 }
+
+// ── ADR-0040 2단계: 갭①② layout 버퍼 hook 배선(subscribe_agent_buffer / drop_agent_buffer) ─────────
+//
+// 검증 대상 = src-tauri 배선이 *router 스냅샷에서 slot 을 파생해* core store cursor 생명주기를 토글하는지.
+// core store 의 cursor 정합(중복 send 0·frame 독립 폐기 등)은 output_view_store 단위테스트가 회수하므로,
+// 여기선 "router.targets → (label, agent) slot → store" 의 *연결*만 본다. WS 연결·실 서버 불필요(동기).
+// ★실행 회수 제약★: src-tauri lib test 는 WebView2 DLL 링크(0xc0000139)로 *실행*이 막혀 build/--no-run
+//   까지만 회수된다(작업지시 §5) — 컴파일 회귀 그물로 둔다(store 단위테스트가 의미 회수 본판).
+
+/// router 만 주입한 비연결 client(연결 task 없이 buffer hook 만 직접 호출 — 동기 배선 검증).
+#[cfg(test)]
+fn client_with_visible_agents(agents: &[uuid::Uuid]) -> DaemonClient {
+    let router = Arc::new(crate::output_router::OutputRouter::new());
+    router.set_visible_agents_for_test(agents);
+    // discovery 는 안 쓴다(connect 안 함) — no-live mock 으로 충분.
+    let disco = Arc::new(MockDiscovery::new(None, Err("unused".to_string())));
+    DaemonClient::new_with_router(Handle::current(), disco, router)
+}
+
+// ★모델 전환(BLOCK-2 — actor 직렬화)★: 옛 subscribe_agent_buffer/drop_agent_buffer 는 invoke 스레드가
+//   buffer_store 를 *직접* 만졌다(on_frame=연결 task 스레드와 다른 스레드 → replay→live 순서 역전 위험,
+//   opus F2). 이제 replay_slots/drop_slots 가 slot 집합을 `ConnectionCommand::ReplaySlots/DropSlots` 로
+//   **연결 actor 에 enqueue** 하고, actor 가 on_frame 과 같은 select! arm 에서 직렬 store 조작한다. 그래서
+//   비연결 client(연결 task 없음)는 store 를 직접 안 만진다 — store cursor 의미 검증은 output_view_store
+//   단위테스트(subscribe/unsubscribe slot 단위)가 본판이고, slot 델타 산출은 output_router 단위테스트가
+//   본다. 여기 daemon_client 테스트는 "비연결 enqueue 가 패닉 없이 no-op(연결 task 가 채움)"만 본다.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_slots_when_disconnected_is_noop_not_panic() {
+    // ★비연결 enqueue 안전★: 연결 task(actor)가 없으면 cmd_tx None → try_enqueue 가 조용히 no-op.
+    //   store 를 직접 안 만지므로 cursor 신설 0(연결 후 layout rebuild + subscribe_output 트리거가 채움, C1).
+    let a = uuid::Uuid::new_v4();
+    let label = "main".to_string();
+    let client = client_with_visible_agents(&[a]);
+    let store = client.buffer_store_for_test();
+
+    // 콘텐츠를 먼저 채워 둬도(다른 경로가 본 것 모사) 비연결 replay_slots 는 store 를 안 만진다.
+    {
+        let mut s = store.lock().unwrap();
+        // deliverable 빈 집합 — 콘텐츠 append 는 deliverable 무관(viewer 없어 전달 0 이어도 버퍼링).
+        s.on_frame(a, 0, 0, b"x".to_vec(), &std::collections::HashSet::new());
+    }
+    client.replay_slots(vec![(label, a)], false); // 비연결 → actor enqueue no-op(fresh 무관).
+
+    assert!(
+        !store.lock().unwrap().agent_has_viewers(a),
+        "비연결 replay_slots 는 store 직접 조작 안 함(actor 가 채움 — C1)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_slots_empty_is_noop() {
+    // 빈 slot 집합 → enqueue 자체를 스킵(early return). 패닉/부작용 0.
+    let a = uuid::Uuid::new_v4();
+    let client = client_with_visible_agents(&[a]);
+    let store = client.buffer_store_for_test();
+    client.replay_slots(vec![], false);
+    assert_eq!(store.lock().unwrap().buffered_agent_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_slots_when_disconnected_is_noop_not_panic() {
+    // ★비연결 drop_slots 안전★: 연결 task 없으면 no-op(연결 task 가 없으면 store 를 만질 actor 도 없음).
+    //   빈 집합·미연결 둘 다 패닉 없이 통과(연결 후 layout rebuild 가 정합화).
+    let a = uuid::Uuid::new_v4();
+    let label = "main".to_string();
+    let client = client_with_visible_agents(&[a]);
+    let store = client.buffer_store_for_test();
+    {
+        let mut s = store.lock().unwrap();
+        // deliverable 빈 집합 — 콘텐츠 append 는 deliverable 무관(viewer 없어 전달 0 이어도 버퍼링).
+        s.on_frame(a, 0, 0, b"x".to_vec(), &std::collections::HashSet::new());
+    }
+    client.drop_slots(vec![(label, a)]); // 비연결 → no-op.
+    client.drop_slots(vec![]); // 빈 집합 → early return.
+                               // store 는 위 on_frame 이 만든 콘텐츠를 그대로 들고 있다(drop 은 actor 가 함).
+    assert_eq!(store.lock().unwrap().buffered_agent_count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resync_when_disconnected_is_noop_not_panic() {
+    // ★FIX-2 비연결 resync 안전★: 연결 task 없으면 cmd_tx None → try_enqueue 가 조용히 no-op(패닉 0).
+    //   resync 는 cmd_tx 저장 직후에만 의미가 있고(handoff 갭), 비연결이면 애초에 재동기할 연결이 없다.
+    //   ★컴파일 회귀 그물★: resync()→ConnectionCommand::Resync→main_loop resubscribe_and_sweep 배선이
+    //   타입 정합으로 컴파일됨을 보장(src-tauri 테스트 실행은 WebView2 DLL 로더로 막힘 — no-run 그물).
+    let a = uuid::Uuid::new_v4();
+    let client = client_with_visible_agents(&[a]);
+    client.resync(); // 비연결 → no-op, 패닉 없음.
+}

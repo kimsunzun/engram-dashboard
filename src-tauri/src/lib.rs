@@ -74,14 +74,17 @@ pub fn run() {
             // 락 해제 후 emit(ADR-0006) 은 command 레이어가 보장. 초기엔 기본 View 1개.
             app.manage(crate::layout::LayoutState::new());
 
-            // ── S14 모듈①(ADR-0036) T6b: 출력 라우팅 표면(OutputRouter + window Channel registry) ──
-            // ★단일 공유 Arc★: router(agent_id→[window_label] 라우팅)·registry(window_label→Channel)를
-            //   먼저 만들어 (a) app.manage 로 command(layout rebuild·subscribe_output)가 보고 (b) 같은
-            //   Arc 를 DaemonClient 에 주입해 연결 task 가 fan-out 에 쓴다 — 셋이 동일 인스턴스를 본다.
+            // ── S14 모듈①(ADR-0040) 출력 평면: OutputRouter + window Channel registry + 공유 버퍼 store ──
+            // ★단일 공유 Arc 4벌★: router(agent_id→[window_label] 라우팅)·registry(window_label→Channel)·
+            //   buffer_store(에이전트당 공유 콘텐츠 + 창별 cursor)를 먼저 만들어 (a) app.manage 로
+            //   command(layout rebuild·subscribe_output)가 보고 (b) 같은 Arc 를 DaemonClient 에 주입해
+            //   연결 task 가 on_frame fan-out·재연결 resubscribe 에 쓴다 — 동일 인스턴스를 본다.
             let router = std::sync::Arc::new(crate::output_router::OutputRouter::new());
             let registry: crate::output_channel::WindowChannelRegistry = Default::default();
+            let buffer_store = crate::output_channel::new_buffer_store();
             app.manage(router.clone());
             app.manage(registry.clone());
+            app.manage(buffer_store.clone());
 
             // ── S14 모듈①(ADR-0036) T6a/T6b: DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
             // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
@@ -93,6 +96,8 @@ pub fn run() {
             match crate::daemon_client::DaemonClient::new_real_with_owned_runtime(
                 router.clone(),
                 registry.clone(),
+                buffer_store.clone(),
+                app.handle().clone(),
             ) {
                 Ok(client) => {
                     app.manage(std::sync::Arc::new(client));
@@ -147,6 +152,12 @@ pub fn run() {
             // ADR-0021: 재연결이 옮겨간(hot-swap·크래시 재spawn) 데몬을 따라가게 daemon.json 을
             //   재조회(token 포함, no-spawn). ★재연결 attach-only 의 spawn-금지 유지★(read-only).
             commands::read_daemon_info,
+            // ★T7c: TauriTransport 진입점★ — 프론트 TauriTransport.start/ensureReady/close 가 이걸 invoke 한다.
+            commands::daemon_connect,
+            commands::daemon_ensure,
+            commands::daemon_close,
+            // ★T7c: TauriTransport.send() 진입점★ — ProtocolClient 의 AgentCommand 를 데몬으로 전달.
+            commands::forward_daemon_command,
             // ADR-0026 2단계 §5: 트레이 동작의 LLM/cdp 제어 표면(트레이 핸들러와 같은 actions 함수).
             //   데몬 켜기/끄기는 위 daemon_start/daemon_stop 재사용 → 여기엔 창/종료만.
             commands::show_main_ui,

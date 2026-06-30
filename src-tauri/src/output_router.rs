@@ -59,21 +59,40 @@ pub struct RoutingSnapshot {
     pub by_agent: HashMap<AgentKey, Arc<[WindowLabel]>>,
 }
 
-/// rebuild 1회의 구독 델타(F-B). 직전 snapshot 의 agent 집합 대비:
-/// - `to_subscribe`: 이번에 새로 보이기 시작(0→1) → T6 가 데몬에 `Subscribe` 송신.
-/// - `to_unsubscribe`: 더 이상 어느 창에도 안 보임(1→0) → T6 가 `Unsubscribe` 송신(cmd_tx enqueue).
+/// rebuild 1회의 구독 델타(F-B). 직전 snapshot 대비 두 축의 변화를 한 번의 트리 순회에서 산출한다:
+///
+/// ## 축 A — 데몬 wire 구독(agent 단위)
+/// - `to_subscribe`: 이번에 새로 보이기 시작(0→1 agent) → 데몬에 `Subscribe` 송신.
+/// - `to_unsubscribe`: 더 이상 어느 창에도 안 보임(1→0 agent) → `Unsubscribe` 송신(cmd_tx enqueue).
+///
+/// ## 축 B — 클라 공유 버퍼 cursor(slot=(window,agent) 단위 — ★FIX-3/검증2★)
+/// agent-union diff 만으론 **이미 보던 agent 에 새 창이 추가(1→2)** 되거나 **여러 창 중 하나만 닫힘
+/// (2→1)** 되는 slot 멤버십 변화를 못 잡는다 — agent 집합은 그대로라 델타가 비기 때문이다. 그러면
+/// 둘째 창이 mount replay 를 못 받아 빈 화면이고(TRD 수용기준 "같은 agent 2·3창" 위반), 부분 닫힘 시
+/// 죽은 `(window,agent)` cursor 가 영구 잔존한다(FIX-3). 그래서 **slot 쌍 단위** 변화도 같이 낸다:
+/// - `slots_to_replay`: 직전에 없던 `(window, agent)` slot(새 창이 그 agent 를 보기 시작) →
+///   그 slot 에 mount-즉시-replay(actor 경유 — on_frame 과 직렬, BLOCK-2).
+/// - `slots_to_drop`: 직전엔 있었는데 사라진 `(window, agent)` slot(그 창이 그 agent 를 더는 안 봄) →
+///   그 slot cursor 제거(마지막 cursor 면 content drop — 누수 0).
 ///
 /// ★T5 는 산출만★ — 실제 송신은 T6(actor cmd_tx). async Drop 직접 await 금지(spike §8 F-B).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionDelta {
     pub to_subscribe: Vec<AgentKey>,
     pub to_unsubscribe: Vec<AgentKey>,
+    /// 축 B: 새로 생긴 `(window_label, agent)` slot — mount replay 대상.
+    pub slots_to_replay: Vec<(WindowLabel, AgentKey)>,
+    /// 축 B: 사라진 `(window_label, agent)` slot — cursor 정리 대상.
+    pub slots_to_drop: Vec<(WindowLabel, AgentKey)>,
 }
 
 impl SubscriptionDelta {
-    /// 양쪽 다 비었으면 변화 없음(트리거 측이 송신 스킵 판단에 쓸 수 있게).
+    /// 네 축 모두 비었으면 변화 없음(트리거 측이 송신 스킵 판단에 쓸 수 있게).
     pub fn is_empty(&self) -> bool {
-        self.to_subscribe.is_empty() && self.to_unsubscribe.is_empty()
+        self.to_subscribe.is_empty()
+            && self.to_unsubscribe.is_empty()
+            && self.slots_to_replay.is_empty()
+            && self.slots_to_drop.is_empty()
     }
 }
 
@@ -113,6 +132,42 @@ impl OutputRouter {
             // 할당하므로 쓰지 않는다(FIX-2).
             None => Arc::clone(&EMPTY_TARGETS),
         }
+    }
+
+    /// ★저빈도★ 특정 window label 이 현재 보는 모든 `(label, agent)` slot 쌍. `subscribe_output`
+    /// (창 mount = Channel 등록) 직후 그 창이 보는 agent 들에 mount-즉시-replay 를 트리거할 때 쓴다.
+    ///
+    /// ## 왜 필요한가(★등록 전 유실 차단 — BLOCK-2 검증①)★
+    /// layout 델타(`slots_to_replay`)는 *배정 시점* 에 replay 를 트리거하지만, 창이 **나중에 mount** 되면
+    /// (Channel 등록이 배정보다 늦음) 그 사이 replay flush 가 registry miss 로 스킵돼 유실될 수 있다. 그래서
+    /// Channel 등록(`subscribe_output`) 시점에도 그 label 이 보는 slot 들의 replay 를 다시 트리거한다 —
+    /// store.subscribe 가 cursor 없는 slot 만 신설·replay 하는 멱등이라(이미 보던 slot 불가침) 중복 send 0.
+    /// 두 트리거(배정·등록)가 함께 "Channel 등록된 뒤 replay flush" 를 보장한다(어느 한쪽이 늦어도 다른 쪽이 메움).
+    ///
+    /// ★핫패스 아님★: 창 mount 시에만 호출(저빈도) → `load()` 후 순회 수용. 결정론 위해 정렬 반환.
+    pub fn slots_for_window(&self, label: &str) -> Vec<(WindowLabel, AgentKey)> {
+        let snap = self.table.load();
+        let mut slots: Vec<(WindowLabel, AgentKey)> = snap
+            .by_agent
+            .iter()
+            .filter(|(_, labels)| labels.iter().any(|l| l == label))
+            .map(|(agent, _)| (label.to_string(), *agent))
+            .collect();
+        slots.sort();
+        slots
+    }
+
+    /// ★저빈도★ 현재 스냅샷의 모든 `(window_label, agent)` slot 쌍 집합(FIX-1 고아 sweep 의 keep 집합).
+    ///
+    /// connect/재연결 진입 시 store cursor 와 layout 권위(router)를 정합화하는 `sweep_orphans` 의 인자다 —
+    /// `drop_slots` 가 채널 full 로 silent drop 돼 store 에 영구 잔존하는 고아 cursor 를, "현재 router 에
+    /// 실재하는 slot 집합"으로 강제 reconcile 한다(여기 없는 cursor 는 더는 viewer 아님 → 제거). `AgentBufferStore`
+    /// 의 `ViewSlotKey=(WindowLabel, AgentId)` 와 동형이라 그대로 keep 집합으로 쓴다(`flatten_slots` 재사용).
+    ///
+    /// ★핫패스 아님★: connect/재연결 시에만 호출(저빈도) → `load()` 후 평탄화 비용 수용.
+    pub fn current_slots(&self) -> HashSet<(WindowLabel, AgentKey)> {
+        let snap = self.table.load();
+        flatten_slots(&snap.by_agent)
     }
 
     /// ★저빈도★ 현재 스냅샷에 라우팅 대상이 있는(= 어느 창엔가 보이는) agent 전체 목록.
@@ -196,25 +251,54 @@ impl OutputRouter {
             snapshot.by_agent.insert(agent, Arc::from(labels));
         }
 
-        // 직전 snapshot 의 agent 집합과 diff(F-B). store 전에 옛 집합을 읽는다.
+        // 직전 snapshot 과 diff(F-B). store 전에 옛 집합을 읽는다.
         let prev = self.table.load();
         let prev_set: HashSet<AgentKey> = prev.by_agent.keys().copied().collect();
-        // new \ prev = 0→1(새로 보임) → Subscribe / prev \ new = 1→0(안 보이게 됨) → Unsubscribe.
+        // 축 A: new \ prev = 0→1(새로 보임) → Subscribe / prev \ new = 1→0(안 보이게 됨) → Unsubscribe.
         // `HashSet::difference` 순서는 비결정 — labels.sort() 와 같은 결정론 정책으로 정렬해 델타 순서를
         // 고정한다(테스트 재현성 + 송신 순서 안정, FIX-4).
         let mut to_subscribe: Vec<AgentKey> = new_set.difference(&prev_set).copied().collect();
         let mut to_unsubscribe: Vec<AgentKey> = prev_set.difference(&new_set).copied().collect();
         to_subscribe.sort();
         to_unsubscribe.sort();
+
+        // ★축 B: slot=(window_label, agent) 쌍 단위 diff(FIX-3/검증2)★. 두 snapshot 을 (label, agent)
+        //   쌍 집합으로 평탄화해 차집합을 낸다 — agent 집합은 그대로지만 *창 멤버십*이 바뀌는 1→2(새 창)·
+        //   2→1(부분 닫힘)을 잡는다. 결정론(정렬)으로 송신 순서 고정.
+        let prev_slots = flatten_slots(&prev.by_agent);
+        let new_slots = flatten_slots(&snapshot.by_agent);
+        let mut slots_to_replay: Vec<(WindowLabel, AgentKey)> =
+            new_slots.difference(&prev_slots).cloned().collect();
+        let mut slots_to_drop: Vec<(WindowLabel, AgentKey)> =
+            prev_slots.difference(&new_slots).cloned().collect();
+        slots_to_replay.sort();
+        slots_to_drop.sort();
+
         let delta = SubscriptionDelta {
             to_subscribe,
             to_unsubscribe,
+            slots_to_replay,
+            slots_to_drop,
         };
 
         // 원자 교체 — 이 시점 이후 핫패스는 새 표를 본다.
         self.table.store(Arc::new(snapshot));
         delta
     }
+}
+
+/// `agent → [window_label]` 역인덱스를 `(window_label, agent)` 쌍 집합으로 평탄화(slot diff 용).
+/// 한 slot = "한 창이 한 agent 를 봄" = `AgentBufferStore` 의 `ViewSlotKey`(output_channel.rs)와 동형.
+fn flatten_slots(
+    by_agent: &HashMap<AgentKey, Arc<[WindowLabel]>>,
+) -> HashSet<(WindowLabel, AgentKey)> {
+    let mut set = HashSet::new();
+    for (agent, labels) in by_agent {
+        for label in labels.iter() {
+            set.insert((label.clone(), *agent));
+        }
+    }
+    set
 }
 
 /// 한 View 트리를 순회하며 배정된(agent_id=Some) 슬롯의 agent 를 `windows` 전부에 매핑한다.
@@ -637,6 +721,136 @@ mod tests {
         assert_eq!(d2.to_subscribe, vec![b], "B 새로 보임");
         assert_eq!(d2.to_unsubscribe, vec![a], "A 교체돼 사라짐");
         // no-op diff 였다면 위 두 단언 모두 실패(빈 vec ≠ [b]/[a]).
+    }
+
+    // ── 축 B: slot=(window,agent) 단위 델타(FIX-3/검증2 — 1→2 mount replay·2→1 cursor 정리) ──
+
+    #[test]
+    fn slot_delta_zero_to_one_replays_slot() {
+        // 0→1 agent: slots_to_replay 에 ("main", agent) 가 들어간다(데몬 wire to_subscribe 와 동시).
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr);
+
+        let router = OutputRouter::new();
+        let delta = router.rebuild(&mgr);
+        assert_eq!(delta.to_subscribe, vec![aid], "축 A: 0→1 Subscribe");
+        assert_eq!(
+            delta.slots_to_replay,
+            vec![("main".to_string(), aid)],
+            "축 B: 새 slot mount replay"
+        );
+        assert!(delta.slots_to_drop.is_empty());
+    }
+
+    #[test]
+    fn slot_delta_one_to_two_replays_only_new_window() {
+        // ★FIX-3 핵심★: 같은 agent 가 main(active)에 보이다가 팝업 창에도 추가됨(1→2 창). agent 집합은
+        //   그대로(여전 1개)라 to_subscribe 는 비지만, slots_to_replay 에 새 창("slot-popup", agent)만
+        //   들어와 둘째 창이 mount replay 를 받는다(agent-union diff 만으론 못 잡던 케이스).
+        let mut mgr = ViewManager::new();
+        let v1 = mgr.active_view_id;
+        let v2 = mgr.create_view(None);
+        mgr.switch_view(v1).unwrap(); // active=v1(main), v2 는 팝업 전용
+        let (aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr); // main(v1)
+        let slot2 = {
+            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
+            crate::layout::tree::first_slot_id(&v.layout)
+        };
+        mgr.assign_agent(v2, slot2, astr.clone()).unwrap();
+
+        let router = OutputRouter::new();
+        let d1 = router.rebuild(&mgr); // main 만 active → slot=("main", aid) 만.
+        assert_eq!(d1.slots_to_replay, vec![("main".to_string(), aid)]);
+
+        // 팝업 창을 v2 에 바인딩 → 같은 agent 가 두 창에 보임(1→2). agent 집합 불변, slot 만 추가.
+        mgr.window_bindings.insert("slot-popup".to_string(), v2);
+        let d2 = router.rebuild(&mgr);
+        assert!(
+            d2.to_subscribe.is_empty() && d2.to_unsubscribe.is_empty(),
+            "agent 집합 불변 → 축 A 델타 0(데몬 재구독 안 함)"
+        );
+        assert_eq!(
+            d2.slots_to_replay,
+            vec![("slot-popup".to_string(), aid)],
+            "★1→2: 새 창 slot 만 mount replay(기존 main slot 은 불가침)★"
+        );
+        assert!(d2.slots_to_drop.is_empty(), "둘 다 보이므로 drop 0");
+    }
+
+    #[test]
+    fn slot_delta_two_to_one_drops_closed_window_slot() {
+        // ★FIX-3 핵심★: 같은 agent 가 두 창에 보이다 한 창(팝업)만 닫힘(2→1). agent 는 main 에 남아
+        //   to_unsubscribe 는 비지만, slots_to_drop 에 닫힌 창("slot-popup", agent) 만 들어와 죽은 cursor
+        //   가 잔존하지 않는다(부분 닫힘 cursor 누수 0).
+        let mut mgr = ViewManager::new();
+        let v1 = mgr.active_view_id;
+        let v2 = mgr.create_view(None);
+        mgr.switch_view(v1).unwrap();
+        mgr.window_bindings.insert("slot-popup".to_string(), v2);
+        let (aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr); // main
+        let slot2 = {
+            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
+            crate::layout::tree::first_slot_id(&v.layout)
+        };
+        mgr.assign_agent(v2, slot2, astr.clone()).unwrap();
+
+        let router = OutputRouter::new();
+        let d1 = router.rebuild(&mgr); // 두 창 다 보임.
+        assert_eq!(
+            d1.slots_to_replay,
+            vec![("main".to_string(), aid), ("slot-popup".to_string(), aid)],
+            "처음 두 slot 다 replay"
+        );
+
+        // 팝업 창 닫힘(바인딩 제거) → 2→1. agent 는 main 에 남음.
+        mgr.window_bindings.remove("slot-popup");
+        let d2 = router.rebuild(&mgr);
+        assert!(
+            d2.to_unsubscribe.is_empty(),
+            "agent 가 main 에 남아 축 A Unsubscribe 0(데몬 구독 유지)"
+        );
+        assert_eq!(
+            d2.slots_to_drop,
+            vec![("slot-popup".to_string(), aid)],
+            "★2→1: 닫힌 창 slot cursor 만 정리(누수 0)★"
+        );
+        assert!(d2.slots_to_replay.is_empty());
+    }
+
+    #[test]
+    fn slot_delta_one_to_zero_drops_last_slot() {
+        // 1→0 agent: 마지막 slot 닫힘 → 축 A Unsubscribe + 축 B slots_to_drop 동시.
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        let slot = assign_to_active(&mut mgr, &astr);
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        mgr.close_slot(mgr.active_view_id, slot).unwrap();
+        let delta = router.rebuild(&mgr);
+        assert_eq!(delta.to_unsubscribe, vec![aid], "축 A: 1→0 Unsubscribe");
+        assert_eq!(
+            delta.slots_to_drop,
+            vec![("main".to_string(), aid)],
+            "축 B: 마지막 slot cursor 정리"
+        );
+    }
+
+    #[test]
+    fn slot_delta_no_membership_change_is_empty() {
+        // 창 멤버십 불변(같은 agent 같은 창)이면 slot 델타도 0(중복 replay/drop 방지).
+        let mut mgr = ViewManager::new();
+        let (_aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr);
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        let delta = router.rebuild(&mgr);
+        assert!(
+            delta.slots_to_replay.is_empty() && delta.slots_to_drop.is_empty(),
+            "멤버십 불변 → slot 델타 0"
+        );
     }
 
     /// ★델타 보존 불변식 가드(FIX-3)★: **직렬화된** rebuild 시퀀스(= ViewManager 락 보유 호출, FIX-1)

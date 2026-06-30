@@ -220,5 +220,287 @@ T1 deps복원 → T2 connect/handshake → T3 protocol_state(epoch/dedup/pending
 
 **T7 = `TauriTransport`+`clientFactory` 교체** 시 위 전송/렌더 분리·A/B를 PRD/TRD로 결정 + GUI 실측(G2 = 실제 창 출력 도달, `cdp.mjs`).
 
+## 11. T7 TRD — TauriTransport cutover + N1 (seq/render 분리) (2026-06-29)
+
+> T7 목표: T6b 배선을 실활성화(clientFactory 교체)하면서, dead path 상태에서 미룬 N1(멀티창·늦은 mount)을 같이 닫는다.
+
+### 확정 결정
+
+- **N1 방향 = 안 B(데몬 프로토콜 변경 없음):** 데몬은 에이전트만 알고 창을 모른다. 창별 render cursor는 src-tauri 내부에서만 관리한다. 데몬에 window_id를 넘기는 안 A는 계층 위반이라 기각.
+- **epoch는 per-agent 그대로:** agent 세션 개념이라 창과 무관. `SubState.epoch`는 유지.
+- **render_seq는 per-window per-agent:** 새로 `WindowEntry.render_seqs`에 위치.
+
+### 현행 구조의 문제 (N1 근본)
+
+`SubState.last_delivered_seq`가 역할 두 개를 섞어 들고 있다:
+
+```
+역할 ①  재연결 after_seq 계산 (데몬↔src-tauri 전송 레벨)
+역할 ②  이 프레임이 창에 도달했는지 추적 (렌더 레벨)
+
+→ per-agent 단일 카운터라, 새 창이 Subscribe(after_seq=None) 요청을 보내도
+  기존 decide_output이 seq ≤ last_delivered_seq → DropDuplicate 처리해 버림.
+```
+
+### 구조 변경 전체 지도
+
+```
+변경 전                                변경 후
+─────────────────────────────          ──────────────────────────────────────────
+SubState                               SubState
+  epoch: Option<u32>            ───▶     epoch: Option<u32>   ← 그대로
+  last_delivered_seq: Option<u64>        (seq 필드 제거)
+
+WindowChannelRegistry                  WindowChannelRegistry
+  HashMap<WindowLabel, Channel>  ───▶   HashMap<WindowLabel, WindowEntry>
+                                          WindowEntry {
+                                            channel: Channel<Response>,
+                                            render_seqs: HashMap<AgentId, Option<u64>>,
+                                          }
+
+decide_output(st, epoch, seq)          decide_epoch(st, epoch) → EpochDecision
+  → epoch check + seq dedup    ───▶     → epoch check만 (seq 판단 제거)
+
+mark_delivered(st, seq)         ───▶   (제거 → 창별 render_seq 갱신으로 대체)
+
+fan_out: 전 창 전송 → mark             fan_out: epoch check → 창별 seq check
+                                          → send + render_seq 갱신
+
+resubscribe_params(st)          ───▶   after_seq = registry.min_render_seq(agent_id)
+  after_seq = st.last_delivered_seq       (모든 창 중 최솟값, 어느 창이라도 None → None)
+```
+
+### 파일별 변경 명세
+
+#### `protocol_state.rs`
+
+```rust
+// SubState: last_delivered_seq 제거
+pub struct SubState {
+    pub epoch: Option<u32>,
+    // last_delivered_seq 삭제
+}
+
+// decide_output → decide_epoch (seq 판단 없음)
+pub enum EpochDecision { Pass, DropEpochMismatch }
+pub fn decide_epoch(st: &SubState, frame_epoch: u32) -> EpochDecision
+
+// mark_delivered 삭제
+
+// resubscribe_params: after_seq를 호출자가 외부 주입
+pub fn resubscribe_params(st: &SubState, after_seq: Option<u64>) -> SubscribeParams
+//   after_seq = registry.min_render_seq(agent_id)로 호출자가 계산해 넘김
+```
+
+- 기존 seq dedup 테스트(dedup_same_seq_dropped 등) → `output_channel.rs` 테스트로 이전
+- epoch-only 테스트는 그대로 유지, 시그니처만 맞게 수정
+
+#### `output_channel.rs`
+
+```rust
+pub struct WindowEntry {
+    pub channel: Channel<tauri::ipc::Response>,
+    pub render_seqs: HashMap<AgentId, Option<u64>>,  // None = 아직 아무것도 렌더 안 함
+}
+
+pub type WindowChannelRegistry = Arc<Mutex<HashMap<WindowLabel, WindowEntry>>>;
+
+// 헬퍼 (Mutex 보유 중 호출 — 모두 순수 동기)
+impl WindowEntry {
+    /// seq가 last보다 크면 true (deliver 대상). None(미렌더) → 항상 true.
+    pub fn should_deliver(&self, agent_id: AgentId, seq: u64) -> bool
+
+    /// 렌더 성공 후 render_seq 전진.
+    pub fn mark_rendered(&mut self, agent_id: AgentId, seq: u64)
+
+    /// epoch 변경 시 이 창의 agent_id render_seq 리셋(None).
+    pub fn reset_agent_seq(&mut self, agent_id: AgentId)
+}
+
+// registry 수준 헬퍼
+/// 모든 창의 render_seq 중 최솟값. 어느 창이라도 None → None(처음부터).
+/// 이 agent를 보는 창이 없으면 after_seq=None(= 어차피 Subscribe 안 보내도 됨, 호출자가 판단).
+pub fn min_render_seq(registry: &HashMap<WindowLabel, WindowEntry>, agent_id: AgentId) -> Option<u64>
+
+/// epoch 변경 시 모든 창의 agent render_seq 리셋.
+pub fn reset_all_windows_for_agent(registry: &mut HashMap<WindowLabel, WindowEntry>, agent_id: AgentId)
+```
+
+단위 테스트:
+- `should_deliver`: None → true, Some(last) → seq>last=true / seq≤last=false
+- `mark_rendered`: 전진 단조성
+- `min_render_seq`: 혼재(Some/None) → None, 전부 Some → min값, 창 없음 → None
+- `reset_all_windows_for_agent`: 모든 창의 해당 agent seq = None
+
+#### `connection.rs` Binary arm (fan_out 부분)
+
+```rust
+// 변경 전
+Message::Binary(bytes) → decode_frame → decide_output(sub_state) → Deliver면 fan_out → mark_delivered
+
+// 변경 후
+Message::Binary(bytes) → decode_frame → decide_epoch(sub_state, frame_epoch)
+  → DropEpochMismatch: 폐기
+  → Pass:
+      let targets = router.targets(agent_id);   // lock-free
+      if targets.is_empty() { continue; }
+      let mut registry = registry.lock();
+      for window_label in targets.iter() {
+          let Some(entry) = registry.get_mut(window_label) else { continue; };
+          if entry.should_deliver(agent_id, frame_seq) {
+              // Channel::send는 동기 — lock 보유 중 await 없음 (ADR-0006 준수)
+              let _ = entry.channel.send(Response::new(frame_payload));  // Err → dead window
+              entry.mark_rendered(agent_id, frame_seq);
+          }
+      }
+      // dead window 정리: send Err인 창 registry에서 제거
+      // (별도 collect 후 remove — lock 보유 중 정리, send가 동기라 가능)
+```
+
+★동시성 주의★:
+- `registry.lock()` 보유 중 `Channel::send`(동기) → await 없음 → ADR-0006 미위반
+- `router.targets()`는 lock-free이므로 registry lock 전에 호출 → 락 순서 없음
+- dead window 정리: `send` Err 수집 후 동일 lock 보유 중 remove (재진입 없음)
+
+#### `connection.rs` resubscribe_all
+
+```rust
+// 변경 전
+fn resubscribe_all(subs, router, cmd_tx) {
+    for agent_id in router.current_agents() {
+        let params = resubscribe_params(&subs[agent_id]);  // last_delivered_seq 사용
+        cmd_tx.send(Subscribe { agent_id, ...params });
+    }
+}
+
+// 변경 후
+fn resubscribe_all(subs, router, registry, cmd_tx) {
+    let reg = registry.lock();
+    for agent_id in router.current_agents() {
+        let after_seq = min_render_seq(&reg, agent_id);   // 모든 창 최솟값
+        let params = resubscribe_params(&subs[agent_id], after_seq);
+        // reg lock 해제 전 cmd_tx.send — cmd_tx는 mpsc(비동기 가능성), 락 안에서 send 지양
+        // → agent_id + params를 collect 후 lock 해제 → send
+    }
+    drop(reg);
+    for (agent_id, params) in collected { cmd_tx.send(...); }
+}
+```
+
+★ADR-0006★: registry lock 보유 중 cmd_tx.send(tokio mpsc) 금지 — collect 후 lock 해제 뒤 송신.
+
+#### `connection.rs` SubscribeAck 처리 — epoch 변경 시 render_seq 리셋
+
+```rust
+AgentEvent::SubscribeAck { agent_id, current_epoch, .. } => {
+    let prev_epoch = subs.get(&agent_id).and_then(|s| s.epoch);
+    protocol_state::apply_subscribe_ack(subs.entry(agent_id).or_default(), current_epoch);
+    // epoch 변경이면 모든 창의 이 agent render_seq 리셋 (새 세션 = 처음부터)
+    if prev_epoch.is_some_and(|p| p != current_epoch) {
+        let mut reg = registry.lock();
+        reset_all_windows_for_agent(&mut reg, agent_id);
+    }
+}
+```
+
+#### `commands/agent.rs` — subscribe_output 변경
+
+```rust
+// 변경 전: channel만 registry에 insert
+// 변경 후
+#[tauri::command]
+pub fn subscribe_output(
+    window_label: String,
+    channel: Channel<Response>,
+    state: State<AppState>,
+) {
+    let entry = WindowEntry { channel, render_seqs: HashMap::new() };
+    state.registry.lock().insert(window_label.clone(), entry);
+
+    // 현재 이 창이 보여야 할 agent들에 대해 Subscribe 재발송
+    // (OutputRouter가 이미 알고 있음 — router.current_agents()는 전체이므로
+    //  실제로는 layout에서 이 창에 배정된 agent만. T7에서 단순화: 전체 resubscribe)
+    // → 연결 task에 Resubscribe 신호 전송 (cmd_tx로 새 커맨드 variant 추가)
+    state.daemon_client.request_resubscribe();
+}
+```
+
+`request_resubscribe()`: cmd_tx로 `ConnectionCommand::Resubscribe` 전송 → connection task가 `resubscribe_all` 실행.
+새 창 mount 직후 resubscribe_all 발동 → min_render_seq가 None(새 창)이므로 after_seq=None → 데몬 full replay.
+
+#### `src/api/tauriTransport.ts` (신규)
+
+```ts
+import { invoke } from '@tauri-apps/api/core'
+import { Channel } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+
+export class TauriTransport implements Transport {
+  private channel: Channel<ArrayBuffer> | null = null
+  private unlisten: (() => void) | null = null
+
+  async start(): Promise<void> { await invoke('daemon_start') }
+  async ensure(): Promise<void> { await invoke('daemon_ensure') }
+  async close(): Promise<void> { await invoke('daemon_close') }
+
+  async connect(onMessage: (bytes: Uint8Array) => void, onStateChange: (s: ConnectionState) => void) {
+    this.channel = new Channel<ArrayBuffer>()
+    this.channel.onmessage = (raw) => onMessage(new Uint8Array(raw))  // raw = Response bytes
+    await invoke('subscribe_output', { channel: this.channel })
+
+    this.unlisten = await listen<ConnectionState>('daemon-connection-state', (e) => {
+      onStateChange(e.payload)
+    })
+  }
+
+  async send(cmd: AgentCommand): Promise<AgentEvent> {
+    return invoke<AgentEvent>('agent_command', { cmd })
+  }
+
+  disconnect() {
+    delete this.channel?.onmessage  // #13133 — null 아님
+    this.channel = null
+    this.unlisten?.()
+    this.unlisten = null
+  }
+}
+```
+
+#### `src/api/clientFactory.ts`
+
+```ts
+// 변경 전
+export const agentClient = new ProtocolClient(new WsTransport(...))
+
+// 변경 후
+export const agentClient = new ProtocolClient(new TauriTransport())
+```
+
+### 구현 분해 (T7a~T7d)
+
+| 단계 | 내용 | 격리 하네스 |
+|---|---|---|
+| T7a | `protocol_state.rs` SubState 축소 + `decide_epoch` + 테스트 수정 | `cargo test -p engram-dashboard-core` |
+| T7b | `WindowEntry` 확장 + `output_channel.rs` 헬퍼 + `connection.rs` fan_out·resubscribe·epoch reset | headless unit(output_channel) + cargo test --workspace |
+| T7c | `TauriTransport.ts` + `clientFactory` 교체 | vitest mock invoke |
+| T7d | GUI 실측(G2) + N5/N6 처리 | cdp.mjs + `/qa full` |
+
+각 단계: 코더→`/review code deep`→`/qa`.
+
+### 검증 기준
+
+- **G2(T7d):** `cdp.mjs eval` → 실제 창에 에이전트 출력 도달 확인
+- **멀티창(T7d):** 같은 agent 두 창 → 두 창 모두 출력 도달, 기존 창 중복 없음
+- **늦은 mount(T7d):** 창 닫았다 다시 열기 → 기존 출력 replay 수신
+- **재연결(T7b):** mock WS 끊기 → 재연결 후 미배달 없음
+- **cargo test --workspace:** T7b 후 전체 green 유지
+
+### N5/N6 처리 (T7d 묶음)
+
+- **N5** subs 운영 중 정리: `resubscribe_all` 이후 router에 없는 agent 항목을 `subs`에서 `retain`으로 정리 (재연결 시에만 했던 것 → 매 resubscribe_all 시 실행).
+- **N6** 중복 Subscribe 멱등성: 데몬 `ws.rs` Subscribe 멱등성 확인 후 N6 닫음(코드 확인 필요, T7d 진입 전).
+
+---
+
 ## 참조 코드
 `src/api/wsTransport.ts`(이전 원본) · `protocolClient.ts`(이전 원본) · `crates/engram-dashboard-daemon/src/ws.rs`(서버 actor 대칭) · `src-tauri/src/layout/manager.rs`(라우팅 소스) · `src/api/wsTransport.test.ts`·`protocolClient.test.ts`(Rust 이식 명세서) · `crates/engram-dashboard-protocol`(`encode_terminal_frame` → Response/Raw 적재).

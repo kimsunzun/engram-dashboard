@@ -95,46 +95,38 @@ pub fn reply_outcome(ev: AgentEvent) -> Result<AgentEvent, String> {
 
 /// 에이전트별 출력 구독 상태(JS `protocolClient.ts` `SubState` 승격).
 ///
-/// epoch 가드 + high-water dedup 의 per-agent 진실원. 연결 task 가 agent_id → SubState 맵으로 들고,
+/// epoch 가드의 per-agent 진실원. 연결 task 가 agent_id → SubState 맵으로 들고,
 /// SubscribeAck/output frame 마다 아래 결정 함수에 `&mut` 로 넘긴다.
+///
+/// ★T7a 변경★: high-water(last_delivered_seq) 와 dedup 가드는 per-window 로 이동(output_channel.rs) —
+/// 창마다 독립 render_seq 를 들어 각 창이 받은 최고 seq 로 dedup 한다. 이 struct 는 epoch 가드만 담는다.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubState {
     /// 마지막 `SubscribeAck.current_epoch`. output frame epoch 매칭용(불일치 frame 폐기) +
     /// 재연결 resubscribe wire epoch. `None` = 아직 Ack 못 받음(첫 구독 직후).
     pub epoch: Option<u32>,
-    /// onChunk 로 **실제 배달한** 최고 seq(high-water). `None` = 아무것도 배달 안 함(TS 의 -1).
-    ///
-    /// dedup 기준이자 재연결 after_seq. `replay_from` 에 의존하지 않는다(replay_from 은 "데몬이 보내는
-    /// 첫 seq"이지 "마지막으로 본 seq"가 아니라 off-by-one 유발 — TS 버그 B).
-    pub last_delivered_seq: Option<u64>,
 }
 
 impl SubState {
-    /// 신규 구독 직후 초기값(JS `subscribeOutput`: epoch=undefined, lastDeliveredSeq=-1).
+    /// 신규 구독 직후 초기값(JS `subscribeOutput`: epoch=undefined).
     /// 같은 agent_id 재구독 시 이걸로 덮는다(컴포넌트가 epoch 바뀌면 재구독).
     pub fn new() -> Self {
-        Self {
-            epoch: None,
-            last_delivered_seq: None,
-        }
+        Self { epoch: None }
     }
 }
 
-/// output frame 배달 판정 결과(JS `handleOutput` 의 분기를 명시 enum 으로).
+/// output frame 의 epoch 가드 판정 결과(T7a — per-window dedup 이동 후 epoch 판정만 남음).
 ///
-/// ★C4 분리(판정 ≠ 전진)★: `Deliver` 는 "가드 통과 = 배달 후보"만 뜻한다. `decide_output` 은 더 이상
-/// `last_delivered_seq` 를 전진시키지 않는다 — high-water 전진은 호출자가 **실제 fan_out 이 최소 1개 창에
-/// 성공 배달한 뒤** `mark_delivered` 로 한다. 그래야 창 mount 전 race 나 전 창 dead 로 0건 배달된 frame 의
-/// seq 를 "배달됨"으로 오기록하지 않는다(재구독 after_seq 가 미배달 frame 을 건너뛰는 결함 차단,
-/// SubState.last_delivered_seq 계약 = "실제 배달한 최고 seq").
+/// ★T7a 변경★: T6b 까지의 `OutputDecision{Deliver{seq}/DropEpochMismatch/DropDuplicate}` 에서
+/// dedup(DropDuplicate) 판정을 per-window 레벨(output_channel::should_deliver)로 이동했다 — 창마다
+/// 다른 render_seq 를 들어 독립 dedup 해야 하기 때문(SubState 전역 high-water 는 다중 창 불가).
+/// epoch 가드만 이 레이어에 남겨 라우팅 전 1회 적용하고, dedup 은 fan_out_per_window 안에서 창별로 한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputDecision {
-    /// 가드 통과 — 배달 후보. `seq` 동봉(호출자가 fan_out 성공 후 `mark_delivered(st, seq)` 로 high-water 전진).
-    Deliver { seq: u64 },
+pub enum EpochDecision {
+    /// epoch 가드 통과 — fan-out 후보(dedup 은 창별로 추가 판정).
+    Deliver,
     /// epoch 불일치 — 옛 세션 잔여 frame. 화면 오염 방지로 버린다.
     DropEpochMismatch,
-    /// seq<=high-water — 이미 배달한 중복(재연결 경계 등). 버린다.
-    DropDuplicate,
 }
 
 /// resubscribe 시 보낼 Subscribe 파라미터(JS `resubscribeAll` 산출 + `subscribeOutput` 첫 구독).
@@ -153,84 +145,62 @@ pub struct SubscribeParams {
 /// 운영에선 `oneshot::Sender<reply>`, 테스트에선 결과를 적재하는 mock. 이 모듈은 매칭 로직만 소유한다.
 pub type PendingMap<T> = HashMap<RequestId, T>;
 
-// ── output frame 배달 판정(JS handleOutput 승격) ─────────────────────────────────────
-/// epoch 가드 + high-water dedup 후 배달 여부를 **판정만** 한다(C4 — 전진은 호출자 몫).
+// ── output frame epoch 가드(T7a — dedup 은 per-window output_channel::should_deliver 로 이동) ──
+/// epoch 가드만 판정한다. dedup(seq high-water)은 창별 `output_channel::should_deliver` 가 담당한다.
 ///
-/// ★C4 (판정 ≠ 전진, load-bearing)★: 이 함수는 `st` 를 **읽기만** 한다(`&SubState`) — `Deliver` 를
-/// 돌려줘도 `last_delivered_seq` 를 전진시키지 않는다. 호출자(연결 task)가 실제 fan_out 이 최소 1개 창에
-/// 성공한 뒤 `mark_delivered(st, seq)` 로 전진한다. 가드(epoch/dedup)는 라우팅 전 1회 그대로 적용된다
-/// (ADR-0037 의미 불변 — 바뀐 건 "전진 시점"뿐). ★재시도 의미★: 가드는 통과했으나 0건 배달이면
-/// high-water 가 안 올라가므로, 같은 seq 가 또 오면 다시 `Deliver` 로 판정돼 재배달 시도된다(의도).
-/// 정상 연결+등록 창에선 항상 성공 → mark_delivered 즉시 전진 → 추가 비용 0.
+/// ★T7a 이동 배경★: 단일 global high-water(SubState.last_delivered_seq)는 창이 여럿일 때 문제가 된다 —
+/// 창 A 가 seq 100 을 렌더하면 창 B 에게도 seq<=100 을 drop 해버린다(창 B 는 아직 0부터 필요할 수 있음).
+/// 그래서 dedup 을 per-window(output_channel::WindowEntry.render_seqs)로 낮추고 이 레이어엔 epoch 가드만
+/// 남겼다. epoch 는 세션 단위라 "창 무관, 이 epoch 의 frame 인가?" 를 1회 판정하면 충분하다.
 ///
-/// ★가드 순서(JS 와 동일, load-bearing)★: ① epoch 불일치 → drop(옛 세션 잔여가 화면 오염) ②
-/// seq<=high-water → drop(중복). epoch 가 `None`(첫 Ack 전)이면 epoch 가드는 통과시킨다 — Ack 전
-/// 도착 frame 도 배달해야 초반 출력이 안 사라진다(JS `st.epoch !== undefined` 가드와 동형).
-pub fn decide_output(st: &SubState, frame_epoch: u32, frame_seq: u64) -> OutputDecision {
-    // epoch 불일치 frame 은 옛 세션 잔여 — 버린다(SubscribeAck.current_epoch 기준). epoch=None(첫 Ack
-    // 전)이면 비교를 건너뛰고 통과(아직 기준 epoch 모름 → 일단 배달).
+/// ★epoch=None(첫 Ack 전) 통과(load-bearing)★: epoch 기준이 없으면 비교를 건너뛰고 통과시킨다 —
+/// Ack 전 도착 frame 도 배달해야 초반 출력이 사라지지 않는다(JS `st.epoch !== undefined` 가드와 동형).
+pub fn decide_epoch(st: &SubState, frame_epoch: u32) -> EpochDecision {
     if let Some(cur) = st.epoch {
         if frame_epoch != cur {
-            return OutputDecision::DropEpochMismatch;
+            return EpochDecision::DropEpochMismatch;
         }
     }
-    // dedup — 클라가 실제 배달한 high-water 기준. 재연결 경계 중복 방어. InProc(순서 보존)에선 항상
-    // seq>high-water 라 무해 통과(no-op 수렴). last=None(아무것도 배달 안 함)이면 어떤 seq 든 통과.
-    if let Some(last) = st.last_delivered_seq {
-        if frame_seq <= last {
-            return OutputDecision::DropDuplicate;
-        }
-    }
-    OutputDecision::Deliver { seq: frame_seq }
-}
-
-/// high-water 전진(C4) — **실제 fan_out 이 최소 1개 창에 성공 배달한 뒤** 호출한다.
-///
-/// `decide_output` 이 판정만 하도록 분리됐으므로(전진 없음), 배달 성공을 확인한 호출자가 이 함수로
-/// `last_delivered_seq` 를 frame seq 로 올린다. 이후 같은/낮은 seq 는 `decide_output` 의 dedup 가드에
-/// 걸려 drop 된다. ★전진 단조성★: 낮은 seq 로의 후퇴는 없다(가드를 통과한 seq 만 여기 도달하고, 그
-/// seq 는 항상 직전 high-water 보다 크다 — dedup 정합). 단일 task 직렬 처리라 race 없음.
-pub fn mark_delivered(st: &mut SubState, seq: u64) {
-    st.last_delivered_seq = Some(seq);
+    EpochDecision::Deliver
 }
 
 // ── SubscribeAck 처리(JS handleEvent 의 SubscribeAck 분기 승격) ───────────────────────
-/// SubscribeAck 수신 시 epoch 갱신 + 필요 시 high-water 리셋.
+/// SubscribeAck 수신 시 epoch 갱신. epoch 가 변경됐으면 `true`, 동일하면 `false` 반환.
 ///
-/// ★버그 B 가드★: `replay_from` 으로 dedup 기준(last_delivered_seq)을 **건드리지 않는다**. replay_from
-/// 은 "데몬이 보내는 첫 seq"(resume 시 after_seq+1)이지 "마지막으로 본 seq"가 아니다 — 그걸 dedup
-/// 기준으로 쓰면 첫 정상 프레임(seq==replay_from)을 버린다. 그래서 이 함수는 replay_from 을 인자로도
-/// 받지 않는다(호출자가 truncated 경고만 별도 처리).
+/// ★T7a 변경★: 반환값 `bool` 추가(epoch 변경 시 true). 호출자(connection.rs)가 `true` 이면
+/// `output_channel::reset_all_windows_for_agent` 로 모든 창의 render_seq 를 None(전체 replay)으로
+/// 리셋한다 — T6b 의 SubState.last_delivered_seq 리셋을 per-window 리셋으로 대체한 것.
+///
+/// ★버그 B 가드(유지)★: `replay_from` 은 "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니다 —
+/// dedup 기준으로 쓰면 첫 정상 프레임을 버린다. 그래서 이 함수는 replay_from 을 인자로 받지 않는다.
 ///
 /// ★epoch 변경 리셋(ADR-0007 epoch 재구독 대응)★: epoch 이 바뀌면(데몬 재기동·재시작) 새 스트림 →
-/// high-water 리셋(None). 안 하면 새 세션의 낮은 seq 가 옛 high-water 에 막혀 출력이 전멸한다.
-/// 첫 Ack(epoch=None)은 리셋 불필요(이미 None).
-pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) {
-    if let Some(prev) = st.epoch {
-        if current_epoch != prev {
-            // 새 세션 스트림 — high-water 리셋. 안 하면 새 낮은 seq 가 전부 dedup drop 돼 출력 전멸.
-            st.last_delivered_seq = None;
-        }
-    }
+/// 모든 창의 render_seq 를 리셋해야 새 낮은 seq 가 창별 dedup 에 막히지 않는다(호출자 책임).
+pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) -> bool {
+    let epoch_changed = match st.epoch {
+        Some(prev) => current_epoch != prev,
+        None => false, // 첫 Ack 는 리셋 불필요(render_seq 가 이미 None).
+    };
     st.epoch = Some(current_epoch);
+    epoch_changed
 }
 
 // ── resubscribe 파라미터 산출(JS resubscribeAll 승격) ────────────────────────────────
 /// connected 재전이 시 한 agent 의 Subscribe 파라미터 산출.
 ///
-/// ★버그 A 가드★: epoch=null 을 보내면 안 된다. 데몬은 `requested_epoch==Some(current)` 만 일치로
-/// 보고 None 은 불일치 취급 → FromOldest 전체 replay(이미 본 프레임 중복). 그래서 **마지막으로 알려진
-/// epoch(st.epoch)을 그대로** 보내 데몬이 Resume(tail-only) 하게 한다. after_seq=last_delivered_seq →
-/// 데몬이 seq>last 만 송신 → 클라 가드(decide_output 의 DropDuplicate)와 정합.
+/// ★T7a 변경★: `after_seq` 를 외부에서 주입받는다(T6b 까지의 `st.last_delivered_seq` 를 그대로 쓰던
+/// 것에서 변경). 호출자(connection.rs)가 `output_channel::min_render_seq` 로 모든 창의 render_seq 중
+/// 최솟값을 구해 주입한다 — 가장 뒤처진 창이 필요한 seq 부터 resume 해야 무손실이기 때문.
 ///
-/// epoch 이 `None`(첫 Ack 전에 끊겼다 재연결)이면 epoch=None + after_seq=None → 전체 replay(중복).
-/// JS 가 보존한 분기 — Ack 도 못 받았으면 기준이 없어 처음부터 받는 수밖에 없다(중복은 dedup 이 거른다).
-pub fn resubscribe_params(st: &SubState) -> SubscribeParams {
+/// ★버그 A 가드(유지)★: epoch=null 을 보내면 데몬이 FromOldest 전체 replay → 이미 본 프레임 중복.
+/// 그래서 **마지막으로 알려진 epoch(st.epoch)을 그대로** 보내 데몬이 Resume(tail-only) 하게 한다.
+///
+/// epoch 이 `None`(첫 Ack 전에 끊겼다 재연결)이면 epoch=None + after_seq=None → 전체 replay(중복은
+/// 창별 dedup 이 거른다). Ack 도 못 받았으면 기준이 없어 처음부터 받는 수밖에 없다.
+pub fn resubscribe_params(st: &SubState, after_seq: Option<u64>) -> SubscribeParams {
     SubscribeParams {
         epoch: st.epoch,
-        // JS: `after_seq: st.lastDeliveredSeq >= 0 ? st.lastDeliveredSeq : null`. None = 아무것도 배달
-        //   안 함 → 처음부터. Some(last) = 그 이후만(Resume tail-only).
-        after_seq: st.last_delivered_seq,
+        after_seq,
     }
 }
 
@@ -268,8 +238,9 @@ mod tests {
     //! (대응 TS 케이스명을 각 테스트에 주석으로 단다). 1:1 매핑이 아니다 — TS 한 케이스가 라우팅+결정을
     //! 섞으면 결정 부분만 이식한다.
     //!
-    //! ★검증 범위(순수 N=20)★: pending 매칭 4 · seq dedup/epoch 가드 6 · resubscribe/initial 5 ·
-    //!   InProc no-op + BLOCKER1 회귀 4 · close drain 1.
+    //! ★T7a 검증 범위 변경★: seq dedup/high-water 관련 테스트를 제거했다(로직이 per-window
+    //!   output_channel 레이어로 이동, T7b). 이 모듈 테스트는 epoch 가드(decide_epoch)와
+    //!   apply_subscribe_ack(bool 반환) + resubscribe_params(after_seq 외부 주입)만 박는다.
     //!
     //! ★T5/T6 로 미룬 event-routing(M=5)★: 아래는 순수 결정이 아니라 InboundMessage variant 라우팅 +
     //!   콜백 호출/unsubscribe 라 protocol_state 단독으론 보호 대상이 없다 → 실제 배선이 도는 T5/T6
@@ -353,7 +324,7 @@ mod tests {
     //   (take_pending 의 순수 매칭 자체는 위 pending_resolve_*/pending_unknown_request_id_ignored 가
     //    이미 박는다 — 위 케이스의 라우팅 분기가 추가 검증 대상.)
 
-    // ── seq dedup / epoch 가드(R2) ──────────────────────────────────────────────────
+    // ── epoch 가드(T7a — decide_epoch) ─────────────────────────────────────────────
 
     /// 구독 직후 + SubscribeAck(current_epoch) 적용 헬퍼.
     fn subscribed_with_ack(epoch: u32) -> SubState {
@@ -362,191 +333,116 @@ mod tests {
         st
     }
 
-    /// 배달 판정 후 Deliver 면 seq 를 누적하는 헬퍼(received 배열 = TS). ★C4★: 정상 배달 경로를 흉내내려
-    /// Deliver 판정 후 `mark_delivered` 로 high-water 를 전진시킨다(= fan_out 1+창 성공 가정). 이래야 dedup
-    /// 가드가 다음 frame 에서 제대로 동작한다(연결 task 의 fan_out 성공 후 mark_delivered 와 동형).
-    fn feed(st: &mut SubState, received: &mut Vec<u64>, epoch: u32, seq: u64) {
-        if let OutputDecision::Deliver { seq } = decide_output(st, epoch, seq) {
-            mark_delivered(st, seq);
-            received.push(seq);
-        }
-    }
-
-    /// TS: "같은 seq 재수신 → drop(high-water 기준)"
-    #[test]
-    fn dedup_same_seq_dropped() {
-        let mut st = subscribed_with_ack(1);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 1, 0);
-        feed(&mut st, &mut got, 1, 0); // 중복
-        feed(&mut st, &mut got, 1, 1);
-        assert_eq!(got, vec![0, 1]);
-    }
-
-    /// TS: "seq <= high-water drop, replay_from 은 dedup 기준 아님(버그 B 회귀)"
-    /// apply_subscribe_ack 은 replay_from 을 인자로조차 안 받는다 → high-water 는 여전히 None(초기).
-    #[test]
-    fn dedup_replay_from_is_not_dedup_basis() {
-        let mut st = SubState::new();
-        // replay_from=5 였더라도 dedup 기준(high-water)은 None — 첫 frame seq=0 이 버려지면 안 됨.
-        apply_subscribe_ack(&mut st, 1);
-        assert_eq!(
-            st.last_delivered_seq, None,
-            "replay_from 으로 high-water 안 건드림"
-        );
-        let mut got = vec![];
-        feed(&mut st, &mut got, 1, 0);
-        feed(&mut st, &mut got, 1, 1);
-        assert_eq!(got, vec![0, 1]);
-    }
-
-    /// seq=0 센티넬 경계(TS `lastDeliveredSeq: -1` → Rust `Option<u64> None` 매핑 등가성) 직접 박제.
-    /// feed 헬퍼는 received 배열만 보는 간접 커버라, 여기선 decide_output 반환 enum + last_delivered_seq
-    /// 상태 변화를 정면 단언한다. ★핵심★: 미배달(None) 상태에서 seq 0 이 정상 배달돼야 하고(TS 의 -1<0
-    /// 통과), 이후 같은 0 은 high-water(=Some(0))에 막혀 중복 drop 돼야 한다 — u64 가 0 을 "미배달
-    /// 센티넬"로 오인하면 첫 출력이 전멸하거나(=None 을 못 구분) 0 중복을 못 막는다.
-    #[test]
-    fn seq_zero_sentinel_boundary_direct() {
-        let mut st = subscribed_with_ack(1);
-        assert_eq!(st.last_delivered_seq, None, "Ack 직후 미배달(=TS -1)");
-        // ★C4★: None 상태에서 seq 0 → Deliver{0} 판정. decide_output 은 더 이상 전진 안 함(읽기만).
-        assert_eq!(decide_output(&st, 1, 0), OutputDecision::Deliver { seq: 0 });
-        assert_eq!(
-            st.last_delivered_seq, None,
-            "★C4★ decide_output 은 판정만 — high-water 미전진(fan_out 성공 전)"
-        );
-        // 배달 성공을 흉내 → mark_delivered 로 전진(None != Some(0)).
-        mark_delivered(&mut st, 0);
-        assert_eq!(
-            st.last_delivered_seq,
-            Some(0),
-            "mark_delivered 후 high-water=Some(0)"
-        );
-        // 같은 seq 0 재도착 → DropDuplicate(0 <= 0) + 상태 불변(0 이 센티넬로 오인되면 안 됨).
-        assert_eq!(decide_output(&st, 1, 0), OutputDecision::DropDuplicate);
-        assert_eq!(
-            st.last_delivered_seq,
-            Some(0),
-            "중복 drop — high-water 불변"
-        );
-        // epoch 불일치도 enum 직접 단언(상태 불변 확인).
-        assert_eq!(decide_output(&st, 2, 1), OutputDecision::DropEpochMismatch);
-        assert_eq!(
-            st.last_delivered_seq,
-            Some(0),
-            "epoch drop — high-water 불변"
-        );
-    }
-
-    /// TS: "epoch 안 맞는 frame → drop(stale 세션)" — 판정만(C4: decide_output 은 &SubState).
+    /// TS: "epoch 안 맞는 frame → drop(stale 세션)".
     #[test]
     fn epoch_mismatch_dropped() {
         let st = subscribed_with_ack(5);
-        assert_eq!(decide_output(&st, 4, 0), OutputDecision::DropEpochMismatch);
-        assert_eq!(decide_output(&st, 5, 0), OutputDecision::Deliver { seq: 0 });
+        assert_eq!(decide_epoch(&st, 4), EpochDecision::DropEpochMismatch);
+        assert_eq!(decide_epoch(&st, 5), EpochDecision::Deliver);
     }
 
-    /// ★C4 회귀★: 가드 통과(Deliver)했으나 fan_out 0건 배달이면 high-water 가 안 올라가, 같은 seq 가 또
-    /// 와도 다시 Deliver 로 재시도된다(미배달 frame 을 건너뛰지 않음 = after_seq 결함 차단). mark_delivered
-    /// 를 부르지 않는 것 = 미배달을 흉내낸 것. 배달 성공(mark_delivered) 후엔 비로소 dedup 으로 막힌다.
-    #[test]
-    fn undelivered_frame_does_not_advance_high_water_and_retries() {
-        let mut st = subscribed_with_ack(7);
-        // 1) seq 0 가드 통과 → Deliver. ★fan_out 0건(창 mount 전)★ 가정: mark_delivered 안 부름.
-        assert_eq!(decide_output(&st, 7, 0), OutputDecision::Deliver { seq: 0 });
-        assert_eq!(
-            st.last_delivered_seq, None,
-            "미배달이면 high-water 미전진(decide_output 은 전진 안 함)"
-        );
-        // 2) 같은 seq 0 재도착 → 여전히 Deliver(dedup 에 안 걸림 — 아직 배달된 적 없으니 재시도 가능).
-        assert_eq!(
-            decide_output(&st, 7, 0),
-            OutputDecision::Deliver { seq: 0 },
-            "미배달 frame 은 같은 seq 재시도 시 다시 Deliver(건너뛰지 않음)"
-        );
-        // 3) 이번엔 배달 성공(창 등록됨) → mark_delivered 로 전진. 이후 같은 seq 0 은 비로소 dedup drop.
-        mark_delivered(&mut st, 0);
-        assert_eq!(st.last_delivered_seq, Some(0));
-        assert_eq!(
-            decide_output(&st, 7, 0),
-            OutputDecision::DropDuplicate,
-            "배달 성공 후엔 같은 seq 가 중복으로 막힌다"
-        );
-        // 4) 그 다음 seq 1 은 정상 Deliver(전진은 다시 호출자 몫).
-        assert_eq!(decide_output(&st, 7, 1), OutputDecision::Deliver { seq: 1 });
-    }
-
-    /// TS: "SubscribeAck.current_epoch 변경 → high-water 리셋 → 새 스트림 낮은 seq 배달(R3)"
-    #[test]
-    fn epoch_change_resets_high_water() {
-        let mut st = subscribed_with_ack(10);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 10, 0);
-        feed(&mut st, &mut got, 10, 1);
-        feed(&mut st, &mut got, 10, 2);
-        assert_eq!(got, vec![0, 1, 2]);
-        // epoch 11 → 리셋. 새 스트림 seq 0 이 다시 배달돼야.
-        apply_subscribe_ack(&mut st, 11);
-        assert_eq!(st.last_delivered_seq, None, "epoch 변경 시 high-water 리셋");
-        feed(&mut st, &mut got, 11, 0);
-        feed(&mut st, &mut got, 11, 1);
-        assert_eq!(got, vec![0, 1, 2, 0, 1]);
-    }
-
-    /// TS: "SubscribeAck 전 frame(epoch undefined) → epoch 가드 통과(배달)"
+    /// TS: "SubscribeAck 전 frame(epoch undefined) → epoch 가드 통과(배달)".
     #[test]
     fn frame_before_ack_passes_epoch_guard() {
-        let mut st = SubState::new(); // Ack 전 — epoch=None
+        let st = SubState::new(); // Ack 전 — epoch=None
         assert_eq!(st.epoch, None);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 99, 0); // 임의 epoch 라도 통과
-        assert_eq!(got, vec![0]);
+        // epoch=None 이면 어떤 frame_epoch 라도 Deliver(기준 없음 → 통과).
+        assert_eq!(decide_epoch(&st, 99), EpochDecision::Deliver);
+        assert_eq!(decide_epoch(&st, 0), EpochDecision::Deliver);
     }
 
-    // ── resubscribe resume(R3) — connected 재전이 ──────────────────────────────────
-
-    /// TS: "재연결(reconnecting→connected) 시 알려진 epoch + after_seq=마지막배달seq 로 resubscribe"
-    /// 순수 핵심: resubscribe_params 가 epoch=Some(E)(null 아님 — 버그 A) + after_seq=Some(2)(버그 B).
+    /// TS: "SubscribeAck epoch=1 + output epoch=1 → 배달(전멸 안 됨)" (BLOCKER 1 회귀).
     #[test]
-    fn resubscribe_uses_known_epoch_and_last_seq() {
-        let mut st = subscribed_with_ack(5);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 5, 0);
-        feed(&mut st, &mut got, 5, 1);
-        feed(&mut st, &mut got, 5, 2);
-        assert_eq!(got, vec![0, 1, 2]);
+    fn ack_epoch1_output_epoch1_delivered() {
+        let st = subscribed_with_ack(1);
+        assert_eq!(decide_epoch(&st, 1), EpochDecision::Deliver);
+    }
 
-        // ★핵심★: resubscribe 가 epoch=5(null 아님) + after_seq=2(마지막 배달 seq).
-        let params = resubscribe_params(&st);
-        assert_eq!(params.epoch, Some(5), "버그 A: None 이면 FromOldest 중복");
-        assert_eq!(
-            params.after_seq,
-            Some(2),
-            "버그 B: None/replay_from 이면 off-by-one"
+    /// TS: "SubscribeAck epoch=1 + output epoch=0(옛 버그 재현) → epoch 가드 drop".
+    #[test]
+    fn ack_epoch1_output_epoch0_dropped() {
+        let st = subscribed_with_ack(1);
+        assert_eq!(decide_epoch(&st, 0), EpochDecision::DropEpochMismatch);
+    }
+
+    /// TS: "epoch 0 output + epoch 0 SubscribeAck 정합(fresh 세션 epoch=0)".
+    #[test]
+    fn fresh_session_epoch0_delivered() {
+        let st = subscribed_with_ack(0);
+        assert_eq!(decide_epoch(&st, 0), EpochDecision::Deliver);
+    }
+
+    // ── apply_subscribe_ack — bool 반환(T7a) ──────────────────────────────────────
+
+    /// 첫 Ack 는 epoch=None → Some(E) 전이. epoch 가 없었으므로 changed=false.
+    #[test]
+    fn first_ack_returns_false() {
+        let mut st = SubState::new();
+        let changed = apply_subscribe_ack(&mut st, 10);
+        assert!(
+            !changed,
+            "첫 Ack 는 epoch 변경 없음(None → Some 이지만 reset 불필요)"
         );
-
-        // 데몬 Resume → seq 3. 무손실·무중복(SubscribeAck epoch 동일 → 리셋 안 함).
-        apply_subscribe_ack(&mut st, 5);
-        feed(&mut st, &mut got, 5, 3);
-        assert_eq!(got, vec![0, 1, 2, 3]);
+        assert_eq!(st.epoch, Some(10));
     }
 
-    /// TS: "재연결 후 데몬이 이미 본 seq(0,1,2) 재전송해도 dedup"
+    /// 동일 epoch 재 Ack — changed=false.
     #[test]
-    fn resubscribe_then_redelivered_seqs_deduped() {
-        let mut st = subscribed_with_ack(2);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 2, 0);
-        feed(&mut st, &mut got, 2, 1);
-        feed(&mut st, &mut got, 2, 2);
-        // 재연결 후 같은 epoch SubscribeAck(리셋 안 함) → 데몬이 0,1,2 재전송 → dedup, 3 만 새로.
-        apply_subscribe_ack(&mut st, 2);
-        feed(&mut st, &mut got, 2, 0);
-        feed(&mut st, &mut got, 2, 1);
-        feed(&mut st, &mut got, 2, 2);
-        feed(&mut st, &mut got, 2, 3);
-        assert_eq!(got, vec![0, 1, 2, 3]);
+    fn same_epoch_ack_returns_false() {
+        let mut st = subscribed_with_ack(5);
+        let changed = apply_subscribe_ack(&mut st, 5);
+        assert!(!changed, "같은 epoch 재확인 — 창 리셋 불필요");
     }
+
+    /// epoch 변경 Ack — changed=true(호출자가 reset_all_windows_for_agent 해야 함).
+    #[test]
+    fn epoch_change_ack_returns_true() {
+        let mut st = subscribed_with_ack(10);
+        let changed = apply_subscribe_ack(&mut st, 11);
+        assert!(changed, "epoch 11→10 변경 — 창 render_seq 리셋 필요");
+        assert_eq!(st.epoch, Some(11));
+    }
+
+    // ── resubscribe resume(R3) — after_seq 외부 주입(T7a) ──────────────────────────
+
+    /// TS: "재연결 시 알려진 epoch + after_seq=외부주입(min_render_seq) 로 resubscribe".
+    /// ★버그 A 가드★: epoch=None(null)이면 데몬이 FromOldest 로 취급 → resubscribe 는 st.epoch 를 보낸다.
+    #[test]
+    fn resubscribe_uses_known_epoch_and_injected_seq() {
+        let st = subscribed_with_ack(5);
+        // after_seq 를 외부에서 주입(output_channel::min_render_seq 의 결과를 흉내).
+        let params = resubscribe_params(&st, Some(2));
+        assert_eq!(params.epoch, Some(5), "버그 A: None 이면 FromOldest 중복");
+        assert_eq!(params.after_seq, Some(2), "외부 주입 after_seq 그대로");
+    }
+
+    /// Ack 전 끊김 — epoch=None + after_seq=None → FromOldest 전체 replay.
+    #[test]
+    fn resubscribe_before_ack_sends_full_replay() {
+        let st = SubState::new(); // Ack 전 — epoch=None
+        let params = resubscribe_params(&st, None);
+        assert_eq!(params.epoch, None, "Ack 전엔 기준 없음 → FromOldest");
+        assert_eq!(params.after_seq, None);
+    }
+
+    /// 창이 없거나 render_seq 가 None 이면 after_seq=None(전체 replay).
+    #[test]
+    fn resubscribe_with_none_after_seq_sends_full_replay() {
+        let st = subscribed_with_ack(3);
+        let params = resubscribe_params(&st, None);
+        assert_eq!(params.epoch, Some(3));
+        assert_eq!(params.after_seq, None, "min_render_seq=None → 전체 replay");
+    }
+
+    /// JS `subscribeOutput` 첫 구독: 둘 다 null(FromOldest, 전부 받음).
+    #[test]
+    fn initial_subscribe_is_from_oldest() {
+        let params = initial_subscribe_params();
+        assert_eq!(params.epoch, None);
+        assert_eq!(params.after_seq, None);
+    }
+
+    // ── pending drain ───────────────────────────────────────────────────────────────
 
     /// TS: "connected→reconnecting 전이 시 pending 명령 reject(connection lost)"
     /// 순수 핵심: 끊김 시 drain_pending 이 **모든** in-flight 를 꺼내 비운다(호출자가 일괄 reject).
@@ -558,73 +454,6 @@ mod tests {
         let drained = drain_pending(&mut pending);
         assert_eq!(drained.len(), 2, "전부 꺼냄(1회성)");
         assert!(pending.is_empty(), "drain 후 비어야 promise leak 없음");
-    }
-
-    // ── resubscribe — Ack 전 끊김(JS resubscribeAll 의 epoch=null 분기 보존) ─────────
-
-    /// JS `resubscribeAll`: epoch=undefined 면 epoch=null + after_seq=null(전체 replay, 중복은 dedup).
-    /// (TS 21케이스엔 단독 테스트 없으나 resubscribeAll 분기 보존 — 명시 박제.)
-    #[test]
-    fn resubscribe_before_ack_sends_full_replay() {
-        let st = SubState::new(); // Ack 전 — epoch=None, last=None
-        let params = resubscribe_params(&st);
-        assert_eq!(params.epoch, None, "Ack 전엔 기준 없음 → FromOldest");
-        assert_eq!(params.after_seq, None);
-    }
-
-    /// JS `subscribeOutput` 첫 구독: 둘 다 null(FromOldest, 전부 받음).
-    #[test]
-    fn initial_subscribe_is_from_oldest() {
-        let params = initial_subscribe_params();
-        assert_eq!(params.epoch, None);
-        assert_eq!(params.after_seq, None);
-    }
-
-    // ── InProc no-op 수렴(항상 connected·순서보존) ─────────────────────────────────
-
-    /// TS: "연결 전이 없이도 정상 출력 배달" — 순서 보존 frame 은 dedup 이 절대 막지 않는다(전부 배달).
-    #[test]
-    fn inproc_ordered_frames_all_delivered() {
-        let mut st = subscribed_with_ack(0);
-        let mut got = vec![];
-        for s in 0..5u64 {
-            feed(&mut st, &mut got, 0, s);
-        }
-        assert_eq!(got, vec![0, 1, 2, 3, 4]);
-    }
-
-    /// TS: "SubscribeAck epoch=1 + output epoch=1 → 배달(전멸 안 됨)" (BLOCKER 1 회귀)
-    #[test]
-    fn ack_epoch1_output_epoch1_delivered() {
-        let mut st = subscribed_with_ack(1);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 1, 0);
-        feed(&mut st, &mut got, 1, 1);
-        assert_eq!(got, vec![0, 1]);
-    }
-
-    /// TS: "SubscribeAck epoch=1 + output epoch=0(옛 버그 재현) → epoch 가드가 전부 drop"
-    #[test]
-    fn ack_epoch1_output_epoch0_all_dropped() {
-        let mut st = subscribed_with_ack(1);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 0, 0); // 0 != 1 → epoch 가드 drop
-        feed(&mut st, &mut got, 0, 1);
-        assert_eq!(
-            got,
-            Vec::<u64>::new(),
-            "carrier 가 epoch 0 으로 버리면 화면 0건(버그 메커니즘)"
-        );
-    }
-
-    /// TS: "epoch 0 output + epoch 0 SubscribeAck 정합(fresh 세션 epoch=0)"
-    #[test]
-    fn fresh_session_epoch0_delivered() {
-        let mut st = subscribed_with_ack(0);
-        let mut got = vec![];
-        feed(&mut st, &mut got, 0, 0);
-        feed(&mut st, &mut got, 0, 1);
-        assert_eq!(got, vec![0, 1]);
     }
 
     // ── close ──────────────────────────────────────────────────────────────────────

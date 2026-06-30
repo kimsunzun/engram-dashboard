@@ -30,10 +30,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+use tauri::Emitter;
+
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
-use super::protocol_state::{self, OutputDecision, PendingMap, SubState};
+use super::protocol_state::{self, PendingMap, SubState};
 use super::{ConnectionState, DaemonDiscovery};
-use crate::output_channel::WindowChannelRegistry;
+use crate::output_channel::{self, AgentBufferStore, WindowChannelRegistry};
 use crate::output_router::OutputRouter;
 
 /// SendCommand 의 reply 채널 타입(T6a). `Ok(event)` = 데몬이 매칭 reply(Ack/Spawned/Created/
@@ -162,6 +164,51 @@ pub enum ConnectionCommand {
     /// reply 없는 fire-and-forget 명령(Resize 등). main_loop 가 그냥 JSON 으로 wire 송신한다.
     /// (Subscribe/Unsubscribe 는 SubState 조회 로직이 달라 전용 variant, Resize 는 일반 fire 라 Fire.)
     Fire { cmd: AgentCommand },
+    /// ★mount-즉시-replay(축 B — BLOCK-2 actor 직렬화)★. 새로 생긴 `(window_label, agent)` slot 집합에
+    /// 그 시점 공유 버퍼를 즉시 replay 한다. ★actor 경유인 이유(opus F2)★: mount replay 의 buffer
+    /// 락+snapshot 수집을 invoke 스레드가 직접 하면 `on_frame`(actor tokio 스레드)과 *다른 스레드* 라
+    /// replay→live 순서가 역전될 수 있다(데몬 C4 클라측 위반). 이 variant 로 actor 에 보내 on_frame 과
+    /// **같은 스레드(main_loop select! arm)** 에서 직렬 처리한다 — buffer 락 안 snapshot 수집, 락 밖 send.
+    ///
+    /// ## ★fresh 플래그 = 배정 트리거 ↔ 등록 트리거 분리(FIX-2 — mount 1회 replay 멱등)★
+    /// 같은 slot 에 두 트리거가 닿는다 — layout 배정 델타(`slots_to_replay`)와 webview 등록(`subscribe_output`
+    /// → `slots_for_window`). 옛 구현은 둘 다 무조건 fresh 리셋(`resubscribe_slot`)이라, 정상 mount(배정→
+    /// 등록)에서 같은 버퍼가 **연속 2회 전체 flush** 됐다(무중복이 프론트 `lastDeliveredSeq` dedup 에만 의존 —
+    /// ADR-0037 "Rust 단독 진실원"과 어긋남). 그래서 트리거별로 역할을 가른다:
+    ///   - `fresh=false`(**배정 트리거**): `store.subscribe` — **cursor 없을 때만** 신설+replay(있으면 불가침).
+    ///     정상 mount 의 첫 replay 1회. 이미 보던 slot(1→2 둘째 창은 cursor 없어 신설, 기존 창은 불가침)도
+    ///     중복 0.
+    ///   - `fresh=true`(**등록 트리거**): `store.resubscribe_slot` — cursor 가 있어도 None 리셋 후 전체 replay.
+    ///     webview reload(같은 label 로 Channel *교체* → 새 xterm 빈 화면)를 채운다(stale 이어보기 금지, 근원2).
+    /// 결과 불변식: **정상 mount = 전체 replay 1회**(배정 신설 1회, 등록은 cursor 있으면 fresh 지만 같은 mount
+    /// 면 배정이 먼저 신설했으니 등록 fresh 는 reload 가 아니면 안 옴 — 등록은 *Channel 등록 이벤트*에서만).
+    /// reload = fresh 1회. 재연결 = frontend dedup 2차 안전망(같은 ProtocolClient).
+    ReplaySlots {
+        slots: Vec<(
+            crate::output_router::WindowLabel,
+            engram_dashboard_protocol::AgentId,
+        )>,
+        /// `true` = 등록 트리거(Channel 등록=viewer 재시작 → cursor fresh 리셋+전체 replay, reload 대응).
+        /// `false` = 배정 트리거(layout 델타 → cursor 없을 때만 신설+replay, 불가침 — 정상 mount 1회).
+        fresh: bool,
+    },
+    /// ★slot cursor 정리(축 B — FIX-3)★. 사라진 `(window_label, agent)` slot 의 cursor 를 제거한다
+    /// (마지막 cursor 면 content drop — 누수 0). frame 도착과 독립(terminal+부분 닫힘도 정상 폐기).
+    /// actor 경유로 on_frame 의 sync_viewers 와 같은 스레드에서 처리(cursor 이중관리·race 차단).
+    DropSlots {
+        slots: Vec<(
+            crate::output_router::WindowLabel,
+            engram_dashboard_protocol::AgentId,
+        )>,
+    },
+    /// ★connect handoff race resync(FIX-2 — Codex mod.rs:464)★. main_loop 진입 resubscribe 는
+    /// `router.current_agents()` 를 *그 시점 스냅샷*으로 뜨는데, 그 직후 cmd_tx 가 lifecycle 에 저장되기
+    /// *전*에 들어온 layout invoke 는 `try_enqueue` 가 cmd_tx=None 이라 유실되고, 그 변화가 스냅샷에도
+    /// 안 잡혔으면 그 agent 는 데몬에 영영 미구독된다(handoff 창). `store_cmd_if_current` 직후 caller 가
+    /// 이 명령을 보내 main_loop 가 **현재 router 집합으로 재구독 + 고아 sweep 을 한 번 더** 돌게 한다 —
+    /// 이건 cmd_tx 저장 *후* 에만 enqueue 되므로(저장돼야 current_cmd_tx 가 Some), 그 사이 유실된 변화를
+    /// 빠짐없이 따라잡는다(저장 후 변화는 정상 enqueue, 저장 전·스냅샷 후 변화는 이 resync 가 흡수).
+    Resync,
 }
 
 /// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
@@ -198,6 +245,13 @@ pub(crate) async fn run_connection(
     //   디코드해 router.targets 로 라우팅하고 registry 의 각 창 Channel 로 fan-out 한다.
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
+    // ★ADR-0040 2단계 공유 버퍼 store★: on_frame(append+cursor read snapshot)·resubscribe(after_seq=
+    //   버퍼 최신). registry(Channel)와 분리된 락이라, on_frame 은 store 락에서 snapshot 만 뜨고 락을
+    //   푼 뒤 registry 락으로 send(TRD §1 락 규율 — buffer 락 ⊃ registry 락 중첩 0).
+    buffer_store: AgentBufferStore,
+    // ★T7c: 데몬 broadcast 이벤트를 프론트로 내보내는 AppHandle(emit 경로).
+    //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 app.emit 로 전 webview 에 push.
+    app: tauri::AppHandle,
 ) {
     // 1) 첫 핸드셰이크 — 결과를 ready_tx 로 caller(connect/ensure)에 1회 보고한다.
     let connected = handshake(&info, my_gen, handshake_timeout).await;
@@ -217,6 +271,8 @@ pub(crate) async fn run_connection(
                 generation = my_gen,
                 "데몬 WS 연결 수립(Hello 수신, 인증 성공)"
             );
+            // ★T7c★: 첫 connected 전이를 프론트에 push.
+            let _ = app.emit("daemon-connection-state", "connected");
             if ready_tx.send(Ok(())).is_err() {
                 // 호출자(connect await)가 사라짐 → 정리 종료.
                 tracing::debug!(
@@ -256,6 +312,8 @@ pub(crate) async fn run_connection(
         cancel_rx,
         router,
         registry,
+        buffer_store,
+        app,
     )
     .await;
 }
@@ -495,6 +553,8 @@ async fn connected_lifetime(
     mut cancel_rx: tokio::sync::watch::Receiver<u64>,
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
+    buffer_store: AgentBufferStore,
+    app: tauri::AppHandle,
 ) {
     // ★pending 소유(T6a — 단일 actor 가 단독 소유, Mutex 없음)★: request_id → reply oneshot 상관 맵을
     //   이 task 가 소유한다. main_loop 에 `&mut` 로 빌려줘 SendCommand(insert)·reply 도착(take)·끊김
@@ -522,6 +582,8 @@ async fn connected_lifetime(
             my_gen,
             &router,
             &registry,
+            &buffer_store,
+            &app,
         )
         .await;
         // ★끊김/종료 시 pending drain(no-leak 불변식, spike §3)★: 이 소켓 수명이 끝났으므로 in-flight
@@ -556,7 +618,9 @@ async fn connected_lifetime(
                 // cmd_rx EOF = 명시 close() 또는 stale 미저장 → 재연결 안 함. 종료 Down 가드.
                 // ★원자 가드(Fix B)★: stale task 의 종료가 current 의 Connected 를 Down 으로 clobber
                 //    하지 않게 publish_if_current 로 비교+send 를 한 락에 묶는다.
-                if !lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                    let _ = app.emit("daemon-connection-state", "down");
+                } else {
                     tracing::debug!(
                         generation = my_gen,
                         "stale task 종료(close 경로) — Down 미발행(더 새 연결이 current)"
@@ -568,7 +632,9 @@ async fn connected_lifetime(
                 // 비의도 끊김 — 재연결 대상. 먼저 closedByUser/세대 가드를 본다(끊김과 동시에 close 가
                 // 들어왔으면 재연결 금지). Stop 이면 종료 Down 가드.
                 if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
-                    if !lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                    if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                        let _ = app.emit("daemon-connection-state", "down");
+                    } else {
                         tracing::debug!(
                             generation = my_gen,
                             "끊김 직후 stale/close — Down 미발행(superseded 또는 close 가 이미 Down)"
@@ -577,7 +643,9 @@ async fn connected_lifetime(
                     return;
                 }
                 // 재연결 진입 — reconnecting 전이(가드된). stale 이면 발행 안 되고 아래 루프가 Stop 으로 종료.
-                lifecycle.publish_if_current(my_gen, ConnectionState::Reconnecting);
+                if lifecycle.publish_if_current(my_gen, ConnectionState::Reconnecting) {
+                    let _ = app.emit("daemon-connection-state", "reconnecting");
+                }
                 tracing::info!(generation = my_gen, "데몬 끊김 — 재연결 루프 진입");
             }
         }
@@ -688,6 +756,7 @@ async fn connected_lifetime(
                         let _ = conn.sink_close().await;
                         break None;
                     }
+                    let _ = app.emit("daemon-connection-state", "connected");
                     // 회복 — attempt 리셋(wsTransport `reconnectAttempt=0` on Hello). 다음 끊김은 처음부터.
                     attempt = 0;
                     tracing::info!(generation = my_gen, "데몬 재연결 성공(Hello 수신)");
@@ -709,7 +778,9 @@ async fn connected_lifetime(
             }
             None => {
                 // 소진 또는 Stop(close/stale) → Down 가드 후 종료.
-                if !lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                    let _ = app.emit("daemon-connection-state", "down");
+                } else {
                     tracing::debug!(
                         generation = my_gen,
                         "재연결 종료 — Down 미발행(stale/close 가 이미 처리)"
@@ -754,6 +825,94 @@ async fn connected_lifetime(
 ///   FromOldest). 직후 router 에 없는 agent 의 SubState 를 정리(C3). router 가 비면 no-op(첫 연결 안전).
 ///
 /// ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
+///
+/// ## ★handoff resync(FIX-2 — cmd_rx arm `Resync`)★
+/// main_loop 진입 resubscribe 는 그 시점 `router.current_agents()` 스냅샷을 쓰는데, cmd_tx 가 lifecycle 에
+/// 저장되기 전 들어온 layout 변화는 enqueue 도 유실되고 스냅샷에도 안 잡힐 수 있다(handoff 창). caller
+/// (`store_cmd_if_current` 직후)가 `Resync` 를 enqueue 하면 같은 `resubscribe_and_sweep` 을 한 번 더 돌려
+/// 그 사이 변화를 따라잡는다 — cmd_tx 저장 후에만 enqueue 되므로 갭이 닫힌다.
+/// ★진입 resubscribe + 고아 sweep 공통 경로(C1+C2+C3 / FIX-1 / handoff resync FIX-2)★. main_loop 진입과
+/// `Resync` arm 이 같이 부른다. router.current_agents() 를 순회해 각 agent 에 wire Subscribe 재전송(after_seq=
+/// 버퍼 최신, 축 A) + subs 정리(C3) + router 에 없는 store cursor 고아 sweep(FIX-1). ★ADR-0006: buffer 락은
+/// 잡았다 즉시 풀고(snapshot/after_seq 만), sink.send().await 는 buffer 락 미보유★.
+async fn resubscribe_and_sweep(
+    sink: &mut futures_util::stream::SplitSink<Ws, Message>,
+    subs: &mut HashMap<AgentId, SubState>,
+    my_gen: u64,
+    router: &Arc<OutputRouter>,
+    registry: &WindowChannelRegistry,
+    buffer_store: &AgentBufferStore,
+) {
+    // ★router 라우팅 스냅샷 기반(C1+C2)★. 순회 대상은 `subs`(누적 맵)가 아니라 router.current_agents()
+    //   (현재 화면에 보이는 agent = 구독해야 할 집합 SSOT, ADR-0035) — 비연결 중 배정분도 빠짐없이 구독(C1)
+    //   되고 안 보이는 agent 는 순회 대상이 아니라 유령 구독 0(C2). after_seq = buffer 최신(축 A, ADR-0040).
+    let current = router.current_agents();
+    for agent_id in &current {
+        let after_seq = {
+            let store = buffer_store.lock().expect("buffer_store poisoned");
+            store.resubscribe_after_seq(*agent_id)
+        }; // ★락 즉시 drop — 이후 sink.send().await 는 buffer 락 미보유★
+        let p = protocol_state::resubscribe_params(subs.entry(*agent_id).or_default(), after_seq);
+        let cmd = AgentCommand::Subscribe {
+            agent_id: *agent_id,
+            epoch: p.epoch,
+            after_seq: p.after_seq,
+        };
+        match serde_json::to_string(&cmd) {
+            Ok(text) => {
+                if let Err(e) = sink.send(Message::Text(text.into())).await {
+                    tracing::debug!(generation = my_gen, "resubscribe 송신 실패: {e}");
+                }
+            }
+            Err(e) => tracing::warn!(generation = my_gen, "resubscribe 직렬화 실패: {e}"),
+        }
+    }
+    // ★subs 메모리 정리(C3 — 보수적)★: router 현재 집합에 없는 agent 의 SubState 제거(누수 방지). 다시
+    //   보이면 layout subscribe 델타가 새 SubState(FromOldest)를 만들어 전체 replay → 무손실(효율만 포기).
+    //   resubscribe *직후*라 방금 구독한(router 에 있는) agent 는 절대 안 지워진다.
+    let visible: std::collections::HashSet<AgentId> = current.iter().copied().collect();
+    subs.retain(|agent_id, _| visible.contains(agent_id));
+    // ★양방향 slot reconcile(FIX-1 — 유실 replay 복구 + 고아 sweep)★. 옛 단방향 `sweep_orphans`(고아 제거만)
+    //   를 양방향으로 일반화한다 — `replay_slots`/`drop_slots` 둘 다 bounded mpsc try_send 라 채널 full 이면
+    //   silent drop 되는데, 옛 코드는 drop_slots 유실(고아 cursor)만 흡수하고 ★replay_slots 유실(현재 visible
+    //   한데 cursor 없는 slot = 새 창 빈 화면)은 복구 경로가 없었다★. router.current_slots()(현재 실재 slot
+    //   SSOT, ADR-0035)를 keep 으로 store 와 양방향 정합:
+    //     (a) keep 에 있는데 cursor 없는 slot → fresh 신설 + 전체 replay(유실된 replay_slots 복구).
+    //     (b) keep 에 없는 cursor → 제거(drop_slots full 누수 흡수 — 기존 동작).
+    //   ★멱등★: (a)는 cursor 없는 slot 만 건드린다 — 정상 전달 중인 cursor 는 불가침이라 중복 replay 0
+    //   (이미 잘 전달 중인 slot 을 fresh 리셋해 다시 보내지 않음). 그래서 진입·Resync·재연결마다 무해.
+    let keep: Vec<((crate::output_router::WindowLabel, AgentId), AgentId)> = router
+        .current_slots()
+        .into_iter()
+        .map(|(label, agent)| ((label, agent), agent)) // ViewSlotKey = (label, agent), agent 동봉.
+        .collect();
+    // ★deliverable 게이트(5차 FIX — reconcile 복구도 cursor advance ⟺ delivery)★: 현재 Channel 이 등록된
+    //   (label, agent) slot 집합을 buffer 락 *전*에 떠 둔다(registry 락 → 해제 → buffer 락, 중첩 0 ADR-0006 —
+    //   on_frame/ReplaySlots arm 동형). reconcile_slots 는 "값 None(신설됐으나 미전달) + deliverable" 인 slot 만
+    //   복구(전체 replay)하고, 미deliverable(미mount) slot 은 membership 만 유지한다 — 미등록 slot 을 replay 하면
+    //   전달 못 할 구간을 advance 해 다시 영구 유실(그 창은 mount 시 등록 트리거가 채움).
+    let registered = output_channel::registered_labels(registry);
+    // ★build_deliverable 는 ViewSlotKey 슬라이스를 받는다★: keep 은 `(ViewSlotKey, agent)` wrapper 라
+    //   ViewSlotKey(첫 요소)만 떼어 넘긴다(on_frame/ReplaySlots arm 과 동일 순수 필터 — drift 차단).
+    let keep_slots: Vec<crate::output_channel::ViewSlotKey> =
+        keep.iter().map(|(slot, _)| slot.clone()).collect();
+    let deliverable = output_channel::build_deliverable(&keep_slots, &registered);
+    let (replay, removed) = {
+        let mut store = buffer_store.lock().expect("buffer_store poisoned");
+        store.reconcile_slots(&keep, &deliverable)
+    }; // ★buffer 락 즉시 drop — 아래 flush_snapshot(registry 락)은 buffer 락 미보유(ADR-0006)★
+       // ★락 밖 send★: 복구된 replay snapshot 을 registry 락으로 각 창 Channel 에 flush(buffer 락 ⊃ registry
+       //   락 중첩 0 — on_frame/ReplaySlots arm 동형).
+    output_channel::flush_snapshot(registry, replay, my_gen);
+    if removed > 0 {
+        tracing::debug!(
+            generation = my_gen,
+            removed,
+            "고아 cursor sweep(drop_slots full 누수 reconcile)"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn main_loop(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
@@ -764,6 +923,8 @@ async fn main_loop(
     my_gen: u64,
     router: &Arc<OutputRouter>,
     registry: &WindowChannelRegistry,
+    buffer_store: &AgentBufferStore,
+    app: &tauri::AppHandle,
 ) -> LoopExit {
     // ★connect/재연결 resubscribe — router 라우팅 스냅샷 기반(C1+C2)★. 순회 대상은 `subs`(연결 task 가
     //   한 번이라도 구독한 적 있는 누적 맵)가 아니라 **`router.current_agents()`(현재 화면에 보이는 agent =
@@ -774,40 +935,11 @@ async fn main_loop(
     //     배정분도 빠짐없이 구독된다.
     //   - (C2) subs 는 Unsubscribe 해도 SubState 를 제거 안 하므로(F-B), subs 기반 재구독은 지금 안 보이는
     //     agent 까지 유령 구독한다. router 에 없는 agent 는 애초에 순회 대상이 아니라 유령 구독 0.
-    //   각 agent 의 epoch/after_seq 는 subs 의 SubState(있으면 tail Resume, 없으면 FromOldest)에서 가져온다
-    //   → F-B 무손실 유지(재구독=tail Resume 그대로, ADR 불변). 첫 연결도 router 에 agent 있으면 구독,
-    //   없으면 no-op 이라 안전.
-    let current = router.current_agents();
-    for agent_id in &current {
-        // subs 에 없으면 or_default(=FromOldest), 있으면 마지막 epoch/seq(tail Resume).
-        let p = protocol_state::resubscribe_params(subs.entry(*agent_id).or_default());
-        let cmd = AgentCommand::Subscribe {
-            agent_id: *agent_id,
-            epoch: p.epoch,
-            after_seq: p.after_seq,
-        };
-        match serde_json::to_string(&cmd) {
-            Ok(text) => {
-                if let Err(e) = sink.send(Message::Text(text.into())).await {
-                    // 송신 실패(소켓 죽음) — 곧 다음 select 가 Disconnected 로 빠진다. 로깅만(reply 없음).
-                    tracing::debug!(generation = my_gen, "resubscribe 송신 실패: {e}");
-                }
-            }
-            Err(e) => tracing::warn!(generation = my_gen, "resubscribe 직렬화 실패: {e}"),
-        }
-    }
-    // ★subs 메모리 정리(C3 — 보수적)★: router 현재 집합에 없는(= 지금 어느 창에도 안 보이는) agent 의
-    //   SubState 를 제거한다. 이유: router 기반 재구독으로 그 agent 는 더는 구독되지 않으니 frame 도 안
-    //   오고, SubState 가 남아도 쓰이지 않아 누수다(close_slot/switch_view 로 사라진 agent 가 누적).
-    //   ★무손실 충돌 없음(F-B)★: 잠깐 안 보였다 *다시 보이는* agent 는 재표시 시 layout command 가
-    //   `subscribe` 델타(Subscribe arm)를 보내고, 거기서 `subs.entry().or_default()` 가 (정리됐으니) 새
-    //   SubState(epoch=None/after_seq=None=FromOldest)를 *항상* 만들어 전체 replay 한다 —
-    //   tail Resume 의 *효율*(중복 절감)은 잃지만 **frame 은 하나도 안 잃는다**(전체 replay → dedup 이
-    //   epoch Ack 후 중복 거름). 즉 정리는 tail-Resume 최적화를 포기할 뿐 무손실을 깨지 않는다(과한 정리로
-    //   무손실 깨는 것보다 안전). 정리 시점이 resubscribe *직후*라, 방금 구독한(router 에 있는) agent 는
-    //   절대 안 지워진다.
-    let visible: std::collections::HashSet<AgentId> = current.iter().copied().collect();
-    subs.retain(|agent_id, _| visible.contains(agent_id));
+    //   각 agent 의 epoch 는 subs 의 SubState(있으면 마지막 epoch=tail Resume, 없으면 FromOldest)에서, ★
+    //   after_seq 는 buffer_store 최신 seq(축 A — ADR-0040)★ 에서 가져온다 → 데몬은 클라 버퍼에 없는
+    //   것만 보내 비중복 append. 첫 연결도 router 에 agent 있으면 구독, 없으면 no-op 이라 안전.
+    // ★진입 resubscribe + sweep(C1+C2+C3 / FIX-1)★. handoff resync(FIX-2)도 같은 경로를 재사용한다.
+    resubscribe_and_sweep(&mut sink, subs, my_gen, router, registry, buffer_store).await;
     // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
     // 로그 미부착 — Text/Binary 청크는 per-frame 빈도라 trace 미사용 정책 유지).
     let exit = loop {
@@ -835,50 +967,106 @@ async fn main_loop(
                                         ..
                                     } = ev
                                     {
-                                        // ★구독 ack(T6b)★: subs 의 epoch 갱신 + (epoch 변경 시) high-water
-                                        //   리셋. apply_subscribe_ack 가 둘 다 처리한다(decide_output 의 epoch
-                                        //   가드 기준이 되고, 새 세션이면 낮은 seq 가 안 막히게 dedup 리셋).
-                                        protocol_state::apply_subscribe_ack(
+                                        // ★구독 ack(ADR-0040)★: SubState.epoch 갱신만 한다 — 재연결
+                                        //   resubscribe 의 wire epoch echo(tail Resume) 용도. ★버퍼 reset 은
+                                        //   여기서 안 한다★: epoch 전환에 따른 콘텐츠/커서 reset 은 on_frame 이
+                                        //   frame.epoch 태깅으로 단독 처리한다(SubscribeAck 를 기다리지 않음 —
+                                        //   §4b, 단일 actor 직렬). 데몬 wire 가 Ack→replay→frame FIFO 를 보장
+                                        //   (단일 writer, connection_core R1)하므로 Ack 가 새 epoch frame 보다
+                                        //   먼저 오지만, on_frame 태깅이 순서 무관하게 안전해 reset 트리거를
+                                        //   frame 쪽에 둔다(두 모델 혼재 차단 — reset_all_windows 폐기).
+                                        let _changed = protocol_state::apply_subscribe_ack(
                                             subs.entry(agent_id).or_default(),
                                             current_epoch,
                                         );
                                     }
-                                    // 그 외 request_id 없는 broadcast(AgentListUpdated/StatusChanged/…)는
-                                    //   여전히 무시 — emit 배선은 본 작업 범위 밖(T6b 출력 평면만).
-                                    //   TODO(emit): AppHandle 을 task 에 주입해 broadcast 를 위로 emit.
+                                    // ★T7c: request_id 없는 broadcast 를 app.emit 으로 전 webview push.
+                                    //   Err 는 무시(webview 없음/채널 오류 등은 치명적이지 않다).
+                                    else {
+                                        emit_broadcast(app, &ev);
+                                    }
                                 }
                             }
                             Message::Binary(bytes) => {
-                                // ★출력 binary frame fan-out(T6b)★. 헤더(tag/agent_id/epoch/seq) 디코드 →
-                                //   epoch/dedup 가드(decide_output, ADR-0037 Rust 단독 진실원) → 통과분만
-                                //   router.targets 의 각 창 Channel 로 *원본 frame bytes 그대로* 보낸다
-                                //   (헤더에 agent_id 가 박혀 있어 창이 어느 agent 출력인지 안다).
+                                // ★출력 binary frame → 공유 버퍼 append + per-view cursor read(ADR-0040 2단계)★.
+                                //   헤더(tag/agent_id/epoch/seq) 디코드 → buffer_store.on_frame 이
+                                //   (a) per-agent epoch 태깅(frame.epoch ≠ 태그면 그 agent 콘텐츠/커서 reset)
+                                //   (b) append (c) 그 agent 를 보는 모든 창 cursor 부터 read → 보낼
+                                //   (WindowLabel, bytes) snapshot 을 돌려준다. ★dedup·epoch 가드가 여기로
+                                //   통합됐다(ADR-0037 Rust 단독 진실원 유지) — decide_epoch/should_deliver/
+                                //   per-window WindowSeqTracker(min 모델) 전부 폐기, 공유 버퍼 cursor 가 단일
+                                //   진실원★.
+                                //
+                                //   ★ADR-0006 락 규율(deep 리뷰 급소)★: buffer 락 안에선 snapshot 수집만,
+                                //   Channel send 는 락을 푼 뒤 flush_snapshot 이 registry 락으로 한다. buffer
+                                //   락 ⊃ registry 락 중첩이 0(데몬 output_core C4 패턴 동형, 역전 데드락 0).
+                                //   ★버퍼 저장 단위 = 원본 binary frame bytes 전체(헤더 포함)★(TRD §1·§2):
+                                //   프론트 tauriTransport.ts 가 `[tag][agentId:16][epoch:4][seq:8][payload]`
+                                //   를 받아 decodeOutputFrame 으로 푼다 — 프론트 무변경 원칙(ADR-0037)상 버퍼는
+                                //   payload 가 아니라 원본 frame `bytes` 를 그대로 저장·replay 해야 한다. epoch/
+                                //   seq 는 decode_frame 으로 뽑아 on_frame 의 태깅·cursor 인덱스로만 쓴다.
                                 match decode_frame(&bytes) {
                                     Ok(frame) => {
-                                        // 구독 안 한 agent frame 은 정상 흐름엔 없다(Subscribe arm 이 미리
-                                        //   subs 에 넣음). or_default 로 방어적 SubState(epoch=None)를 만들어
-                                        //   decide_output 이 첫 frame 도 배달하게 한다(전멸 방지).
-                                        let sub = subs.entry(frame.agent_id).or_default();
-                                        // ★C4 (판정 ≠ 전진)★: decide_output 은 판정만(high-water 미전진).
-                                        //   실제 fan_out 이 최소 1개 창에 성공 배달한 뒤에만 mark_delivered 로
-                                        //   전진한다 — 창 mount 전 race·전 창 dead 로 0건 배달된 frame 의 seq 를
-                                        //   "배달됨"으로 오기록하면 재구독 after_seq 가 미배달 frame 을 건너뛴다.
-                                        if let OutputDecision::Deliver { seq } =
-                                            protocol_state::decide_output(sub, frame.epoch, frame.seq)
-                                        {
-                                            // 핫패스 라우팅: load()만(락 0). 빈 대상이면 lock 도 안 잡는다.
-                                            let labels = router.targets(frame.agent_id);
-                                            // targets 가 비면(어디에도 안 보임) fan_out 안 함 → 미배달 →
-                                            //   미전진(방어적 — 안 보이는 agent 는 router 기반 구독으로 애초에
-                                            //   구독 자체를 안 하니 frame 도 거의 안 온다).
-                                            if !labels.is_empty()
-                                                && fan_out(&bytes, &labels, registry, my_gen)
-                                            {
-                                                // 1+창 성공 배달 확인 후에만 high-water 전진(SubState 계약).
-                                                protocol_state::mark_delivered(sub, seq);
-                                            }
+                                        // ★cursor 생명주기 동기화(router 스냅샷 파생)★: 이 agent 를 현재
+                                        //   보는 창 목록을 router.targets(lock-free load)로 받아 (창, agent)
+                                        //   slot 키를 만든다. store.sync_viewers 가 신규 slot 신설(fresh=None)·
+                                        //   사라진 slot 제거(생명주기)를 맞춘 뒤 on_frame 이 append+read 한다.
+                                        //   router.targets 는 핫패스 락 0(ArcSwap), slot 키 생성은 보이는 창
+                                        //   수만큼(소수)이라 핫패스 부담 미미.
+                                        let labels = router.targets(frame.agent_id);
+                                        // ★viewer 0 가드(FIX-4 — append 진동 차단)★: 어느 창도 이 agent 를
+                                        //   안 보면(layout 이 떼어냈는데 데몬 in-flight frame 이 더 옴) store 를
+                                        //   아예 안 만진다. 안 그러면 on_frame 이 빈 content 를 신설/append 하고
+                                        //   (보낼 slot 0 이라 出力은 0) resubscribe_after_seq 가 그 한 frame 짜리
+                                        //   seq 를 반환해 재구독 기준이 오염된다(drop_slots 로 비운 버퍼가 부활).
+                                        //   ★축 A 비회귀★: 정상 viewer 있는 agent 는 이 가드를 안 타 콘텐츠 append
+                                        //   가 그대로다(unviewed 콘텐츠 버퍼링은 *보는 동안* 만 의미 — 안 보면 폐기가
+                                        //   생명주기 정답, TRD §4).
+                                        //   ★router 빈(labels 0) = 무손실 무해(3차 재리뷰 확정)★: labels 가 비는 건
+                                        //   layout 이 그 agent 를 *떼어낸* 직후다 — 그러면 같은 layout mutation 이
+                                        //   축 A `to_unsubscribe`(데몬 Unsubscribe, 구독 소유=layout SSOT)도 곧 보내
+                                        //   데몬 스트림 자체가 멈춘다(이 in-flight frame 은 그 직전 발사분의 잔여).
+                                        //   그래서 append 를 스킵해도 ① 그 slot 은 곧 drop 대상이라 어차피 폐기될
+                                        //   cursor 고(`drop_slots`/reconcile sweep), ② 그 agent 가 *다시* 배정되면
+                                        //   데몬이 원본을 보유(장기 원본=데몬, ADR-0040)해 재구독 replay 로 무손실
+                                        //   복구된다 — 스킵된 한 frame 은 데몬 원본에 남아 있다. 즉 클라 버퍼에서만
+                                        //   누락이고 진실원(데몬)엔 보존이라 재배정 시 복구 = 무손실 무해.
+                                        if labels.is_empty() {
+                                            continue;
                                         }
-                                        // Drop*(epoch 불일치/중복) → 무시.
+                                        let slots: Vec<(String, AgentId)> = labels
+                                            .iter()
+                                            .map(|label| (label.clone(), frame.agent_id))
+                                            .collect();
+                                        // ★deliverable 게이트(근원2)★: 현재 Channel 이 등록된 (label, agent)
+                                        //   slot 집합을 buffer 락 *전*에 떠 둔다(registry 락 → 해제 → buffer
+                                        //   락 — 중첩 0, ADR-0006). on_frame 은 deliverable 에 있는 slot 만
+                                        //   cursor advance·snapshot 한다 → 미mount 창의 stale advance(전달 못
+                                        //   한 걸 전진)로 인한 영구 유실 차단(그 창은 mount 시 resubscribe_slot
+                                        //   이 fresh 리셋+전체 replay 로 무손실 복구).
+                                        let registered =
+                                            output_channel::registered_labels(registry);
+                                        let deliverable =
+                                            output_channel::build_deliverable(&slots, &registered);
+                                        let snapshot = {
+                                            // ★buffer 락 — sync + snapshot 수집까지만(.await 0, send 없음)★
+                                            let mut store =
+                                                buffer_store.lock().expect("buffer_store poisoned");
+                                            store.sync_viewers(frame.agent_id, &slots);
+                                            // ★epoch 폭 경계(wire u32 → store u64)★: wire 헤더 epoch 는 u32
+                                            //   (codec.rs), store epoch 태그는 u64 다. widening cast 라 손실 0
+                                            //   (u32 전체가 u64 에 안전히 들어감). store 가 u64 인 건 seq(u64)와
+                                            //   타입 결을 맞춰 한 자료구조에서 다루기 위함 — 값 의미는 wire u32 그대로.
+                                            store.on_frame(
+                                                frame.agent_id,
+                                                frame.epoch as u64,
+                                                frame.seq,
+                                                bytes.to_vec(), // 원본 frame bytes(헤더 포함) 저장.
+                                                &deliverable,
+                                            )
+                                        }; // ★buffer 락 drop★
+                                        // ★락 밖 send★: registry 락 잡고 각 창 Channel 로 원본 frame 전송.
+                                        output_channel::flush_snapshot(registry, snapshot, my_gen);
                                     }
                                     // 디코드 실패(부분/미래 프레임) → 무시(방어).
                                     Err(_) => {}
@@ -939,11 +1127,17 @@ async fn main_loop(
                             }
                         }
                     }
-                    // ★출력 구독(T6b — fire-and-forget, reply 없음)★. SubState 조회로 epoch/after_seq 를
-                    //   채워 wire Subscribe 송신(신규=FromOldest / 재구독=tail-only, 한 경로 통일 — G1).
+                    // ★출력 구독(ADR-0040 — fire-and-forget, reply 없음)★. SubState 의 epoch + ★버퍼
+                    //   최신 seq(축 A)★ 로 after_seq 를 채워 wire Subscribe 송신(신규 agent=버퍼 없음=None=
+                    //   FromOldest / 이미 보던 agent=tail-only). min_render_seq(창 합산) 폐기.
                     Some(ConnectionCommand::Subscribe { agent_id }) => {
+                        let after_seq = {
+                            let store = buffer_store.lock().expect("buffer_store poisoned");
+                            store.resubscribe_after_seq(agent_id)
+                        }; // ★락 즉시 drop — send_fire().await 는 buffer 락 미보유★
                         let p = protocol_state::resubscribe_params(
                             subs.entry(agent_id).or_default(),
+                            after_seq,
                         );
                         let cmd = AgentCommand::Subscribe {
                             agent_id,
@@ -962,6 +1156,75 @@ async fn main_loop(
                     Some(ConnectionCommand::Fire { cmd }) => {
                         send_fire(&mut sink, &cmd, my_gen, "Fire").await;
                     }
+                    // ★mount-즉시-replay(축 B — BLOCK-2 + 근원2)★: 새/재등록 (window, agent) slot 에 그
+                    //   시점 버퍼를 **cursor fresh 리셋 + 전체 replay**. ★on_frame 과 같은 actor 스레드라
+                    //   순서 직렬화★(opus F2 — replay→live 역전 방지).
+                    //
+                    //   ★fresh 플래그로 배정/등록 트리거 분리(FIX-2 — mount 1회 replay 멱등)★: 옛 구현은
+                    //   두 트리거(layout 배정 델타 · subscribe_output Channel 등록) 모두 무조건 fresh 리셋
+                    //   (resubscribe_slot)이라 정상 mount 에서 같은 버퍼가 연속 2회 전체 flush 됐다(무중복이
+                    //   프론트 dedup 에만 의존 — ADR-0037 어긋남). 이제:
+                    //     - fresh=false(배정 트리거): store.subscribe — cursor 없을 때만 신설+replay(불가침).
+                    //       정상 mount 의 첫 replay 1회(1→2 둘째 창은 cursor 없어 신설, 기존 창 불가침).
+                    //     - fresh=true(등록 트리거): store.resubscribe_slot — cursor 있어도 None 리셋+전체 replay.
+                    //       webview reload(Channel 교체 → 새 xterm 빈 화면)를 fresh 로 채운다(stale 이어보기 금지,
+                    //       근원2). on_frame 의 deliverable 게이트(미mount 창 advance 금지)와 짝.
+                    //
+                    //   ★ADR-0006 락 규율★: buffer 락 안에선 snapshot 수집만, Channel send 는 락 밖
+                    //   flush_snapshot(registry 락) — buffer 락 ⊃ registry 락 중첩 0(on_frame 동형).
+                    Some(ConnectionCommand::ReplaySlots { slots, fresh }) => {
+                        // ★deliverable 게이트(5차 FIX — mount replay 도 cursor advance ⟺ delivery)★: 현재
+                        //   Channel 이 등록된 (label, agent) slot 집합을 buffer 락 *전*에 떠 둔다(registry 락 →
+                        //   해제 → buffer 락 — 중첩 0, ADR-0006). subscribe/resubscribe_slot 은 deliverable 에
+                        //   있는 slot 만 advance·snapshot 한다 → 배정만 됐고 webview 미mount(Channel 미등록)인
+                        //   slot 의 stale advance(전달 못 할 구간 전진 → 영구 유실)를 차단한다(on_frame 동형).
+                        //   ★등록 트리거(fresh=true)는 subscribe_output 이 registry insert *직후* 보내므로 그
+                        //   slot 은 항상 deliverable 안 → 즉시 전체 replay(빈 화면 0). 배정 트리거(fresh=false)는
+                        //   미등록이면 cursor 만 신설(membership)해 두고, 그 창 mount 시 등록 트리거가 채운다.
+                        let registered = output_channel::registered_labels(registry);
+                        let deliverable =
+                            output_channel::build_deliverable(&slots, &registered);
+                        let snapshot = {
+                            // ★buffer 락 — subscribe/resubscribe_slot(snapshot 수집)까지만, .await/send 0★
+                            let mut store =
+                                buffer_store.lock().expect("buffer_store poisoned");
+                            let mut out: Vec<((String, AgentId), Vec<u8>)> = Vec::new();
+                            for (label, agent_id) in slots {
+                                if fresh {
+                                    // 등록 트리거: cursor 있어도 fresh 리셋+(deliverable 이면)전체 replay.
+                                    out.extend(store.resubscribe_slot(
+                                        (label, agent_id),
+                                        agent_id,
+                                        &deliverable,
+                                    ));
+                                } else {
+                                    // 배정 트리거: cursor 없을 때만 신설+(deliverable 이면)replay(불가침).
+                                    out.extend(store.subscribe(
+                                        (label, agent_id),
+                                        agent_id,
+                                        &deliverable,
+                                    ));
+                                }
+                            }
+                            out
+                        }; // ★buffer 락 drop★
+                        output_channel::flush_snapshot(registry, snapshot, my_gen);
+                    }
+                    // ★slot cursor 정리(축 B — FIX-3)★: 사라진 slot cursor 제거(마지막이면 content drop).
+                    //   frame 독립 — terminal+부분 닫힘도 정상 폐기. send 없음(폐기엔 출력 0)이라 락 밖 불필요.
+                    Some(ConnectionCommand::DropSlots { slots }) => {
+                        let mut store = buffer_store.lock().expect("buffer_store poisoned");
+                        for (label, agent_id) in slots {
+                            store.unsubscribe(&(label, agent_id));
+                        }
+                    }
+                    // ★handoff race resync(FIX-2)★: cmd_tx 저장 직후 caller 가 보낸 재동기 — 진입 resubscribe
+                    //   스냅샷과 cmd_tx 저장 사이에 유실된 layout 변화를 router 현재 집합으로 다시 따라잡는다
+                    //   (재구독 + subs 정리 + 고아 sweep). 진입 경로와 동일 함수라 정합 보장.
+                    Some(ConnectionCommand::Resync) => {
+                        resubscribe_and_sweep(&mut sink, subs, my_gen, router, registry, buffer_store)
+                            .await;
+                    }
                     None => break LoopExit::Closed,
                 }
             }
@@ -974,65 +1237,46 @@ async fn main_loop(
     exit
 }
 
-/// ★출력 fan-out(T6b)★: 가드 통과한 frame bytes 를 `labels` 의 각 창 Channel 로 보낸다.
+/// ★T7c: broadcast 이벤트(request_id 없음) → app.emit 으로 전 webview push.★
 ///
-/// ★반환(C4)★: **최소 1개 창에 성공 배달했으면 `true`**. 호출자(Binary arm)는 이게 true 일 때만
-/// `mark_delivered` 로 high-water 를 전진시킨다 — 등록된 창이 하나도 없거나(창 mount 전 race) 전부 dead 라
-/// 0건 배달이면 false → 미전진 → 같은 seq 가 또 오면 재배달 시도된다(미배달 frame 을 after_seq 가 건너뛰는
-/// 결함 차단). 정상 연결+등록 창에선 항상 true 라 추가 비용 0.
-///
-/// ## ★ADR-0006(load-bearing)★
-/// `registry.lock()`(std Mutex)을 잡는 동안 `.await` 가 **없다** — `Channel::send` 는 동기다. 그래서 락을
-/// 짧게 잡았다 즉시 푼다. dead window(`send` Err) 라벨은 같은 lock 안에서 모았다가 곧바로 remove 한다
-/// (spike §7 D6 — 절대 unwrap 금지, 소멸 webview 는 Channel send 가 Err).
-///
-/// ## ★bytes clone★
-/// `Response::new` 는 `Vec<u8>` 소유가 필요하고 fan-out 대상이 여럿이라 각 창에 `bytes.to_vec()` clone 이
-/// 불가피하다(단순·정확 우선 — spike §4 주). 핫패스지만 라우팅 대상(보이는 창)은 소수라 수용.
-fn fan_out(
-    bytes: &[u8],
-    labels: &[crate::output_router::WindowLabel],
-    registry: &WindowChannelRegistry,
-    my_gen: u64,
-) -> bool {
-    // dead window 라벨 수집(lock 보유 중엔 remove 하며 iterate 하지 않고, 모았다가 같은 lock 에서 제거).
-    let mut dead: Vec<String> = Vec::new();
-    // ★C4★ 성공 배달 창 수. 1+ 면 호출자가 high-water 를 전진시킨다(미배달 frame seq 오기록 방지).
-    let mut delivered = 0usize;
-    {
-        // ★락 across await 없음★: 아래 블록 안에 .await 0 — send 는 동기.
-        let Ok(mut reg) = registry.lock() else {
-            // poisoned(다른 스레드 panic) — 출력 한 프레임 유실은 치명 아님. 로깅만(드묾). 미배달이므로
-            //   false 반환(high-water 미전진 — 재시도 가능).
-            tracing::warn!(
-                generation = my_gen,
-                "registry lock poisoned — 프레임 fan-out 스킵"
+/// AgentListUpdated / StatusChanged / RestoreResult / ProfileListUpdated 에 대응하는 Tauri 이벤트를
+/// 발행한다. 그 외 variant(Ack·SubscribeAck·Output·ReplayComplete·AgentList/ProfileList/Snapshot 등)는
+/// request_id 있거나 Binary 평면이거나 내부 소비라 emit 대상이 아니다 → 조용히 no-op.
+/// Err 무시(webview 없음·채널 오류는 치명적이지 않음).
+fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
+    match ev {
+        AgentEvent::AgentListUpdated { agents } => {
+            let _ = app.emit("agent-list-updated", agents);
+        }
+        AgentEvent::StatusChanged {
+            agent_id,
+            status,
+            epoch,
+        } => {
+            let _ = app.emit(
+                "status-changed",
+                serde_json::json!({
+                    "agentId": agent_id,
+                    "status": status,
+                    "epoch": epoch,
+                }),
             );
-            return false;
-        };
-        for label in labels {
-            if let Some(ch) = reg.get(label) {
-                if ch.send(tauri::ipc::Response::new(bytes.to_vec())).is_err() {
-                    // 소멸 webview — registry 에서 제거 대상으로 표시(절대 unwrap 금지, spike §7 D6).
-                    dead.push(label.clone());
-                } else {
-                    delivered += 1;
-                }
-            }
-            // label 은 router 에 있으나 registry 에 Channel 이 아직 없음(창 mount 전 race) = 미배달 —
-            //   delivered 안 올림(아래 false 귀결로 high-water 미전진 → 창 mount 후 재배달).
         }
-        // dead label 제거(같은 lock 보유 중 — 동기). 다음 프레임부터 그 창엔 안 보낸다.
-        for label in &dead {
-            reg.remove(label);
+        AgentEvent::RestoreResult { report } => {
+            let _ = app.emit(
+                "restore-result",
+                serde_json::json!({
+                    "result": report,
+                }),
+            );
         }
-    } // ← registry lock drop
-    if !dead.is_empty() {
-        // ★주의★: registry 만 정리한다 — router 의 라우팅 표는 layout 권위(ADR-0035)라 여기서 안 건드린다.
-        //   창이 진짜 닫히면 layout command 가 rebuild 하며 정리한다(이건 Channel 만 죽은 과도 상태 방어).
-        tracing::debug!(generation = my_gen, dead = ?dead, "dead window Channel 제거");
+        AgentEvent::ProfileListUpdated { profiles } => {
+            let _ = app.emit("profile-list-updated", profiles);
+        }
+        // Ack / SubscribeAck / Output / ReplayComplete / Hello / AgentList / ProfileList /
+        // Snapshot / Created / Spawned / InputLeaseChanged — request_id 있거나 내부 소비 or Binary 평면.
+        _ => {}
     }
-    delivered > 0
 }
 
 /// ★fire-and-forget 송신(T6b)★: reply 없는 명령(Subscribe/Unsubscribe/Resize)을 JSON 으로 wire 송신.

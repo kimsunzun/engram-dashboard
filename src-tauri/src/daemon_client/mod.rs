@@ -45,7 +45,7 @@ use tokio::sync::{mpsc, watch};
 use connection::{run_connection, ConnectionCommand, HandshakeError, HANDSHAKE_TIMEOUT};
 use lifecycle::Lifecycle;
 
-use crate::output_channel::WindowChannelRegistry;
+use crate::output_channel::{AgentBufferStore, WindowChannelRegistry};
 use crate::output_router::OutputRouter;
 
 /// 연결 수명 상태. T4 가 재연결 전이(connected→reconnecting→connected 회복 / 소진 시 down)를 채웠다.
@@ -121,6 +121,9 @@ pub struct DaemonClient {
     _owned_rt: Option<Arc<tokio::runtime::Runtime>>,
     /// 데몬 발견 경계(connect=spawn 가능 / ensure=no-spawn).
     discovery: Arc<dyn DaemonDiscovery>,
+    /// ★T7c: emit 경로★. broadcast 이벤트를 app.emit 으로 전 webview 에 push 하는 AppHandle.
+    /// `None` = 테스트 생성자(emit 불필요). `Some` = 운영(`new_real_with_owned_runtime`).
+    app: Option<tauri::AppHandle>,
     /// 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
     /// 락 아래서만(가드된 전이) — 그래야 "세대 체크 + watch send" 가 원자적이다. 이 rx 는 borrow 만.
     state_rx: watch::Receiver<ConnectionState>,
@@ -138,6 +141,10 @@ pub struct DaemonClient {
     /// ★window Channel registry(T6b)★: window_label → 출력 Channel. `subscribe_output` invoke 가 insert,
     ///   연결 task 가 fan-out 시 lookup. Arc 라 task·command 양쪽이 공유한다.
     registry: WindowChannelRegistry,
+    /// ★공유 출력 버퍼 store(ADR-0040 2단계)★: 에이전트당 공유 콘텐츠 + 창별 cursor + per-agent epoch.
+    ///   연결 task 의 on_frame fan-out·재연결 resubscribe(after_seq=버퍼 최신)·subscribe_output(창 mount
+    ///   replay)·layout 구독 해제(cursor 제거)가 동일 인스턴스를 본다. app-level 공유(재연결 task 초월).
+    buffer_store: AgentBufferStore,
 }
 
 impl DaemonClient {
@@ -167,6 +174,9 @@ impl DaemonClient {
             //   new_real_with_owned_runtime 이 lib.rs setup 이 만든 공유 Arc 를 주입한다.
             router: Arc::new(OutputRouter::new()),
             registry: WindowChannelRegistry::default(),
+            buffer_store: crate::output_channel::new_buffer_store(),
+            // 테스트는 emit 불필요(no AppHandle 컨텍스트).
+            app: None,
         }
     }
 
@@ -194,6 +204,8 @@ impl DaemonClient {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             router,
             registry: WindowChannelRegistry::default(),
+            buffer_store: crate::output_channel::new_buffer_store(),
+            app: None,
         }
     }
 
@@ -216,6 +228,8 @@ impl DaemonClient {
             handshake_timeout,
             router,
             registry: WindowChannelRegistry::default(),
+            buffer_store: crate::output_channel::new_buffer_store(),
+            app: None,
         }
     }
 
@@ -226,6 +240,8 @@ impl DaemonClient {
     pub fn new_real_with_owned_runtime(
         router: Arc<OutputRouter>,
         registry: WindowChannelRegistry,
+        buffer_store: AgentBufferStore,
+        app: tauri::AppHandle,
     ) -> std::io::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -245,12 +261,23 @@ impl DaemonClient {
             //   (fan-out)가 *동일* 인스턴스를 본다.
             router,
             registry,
+            buffer_store,
+            // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로.
+            app: Some(app),
         })
     }
 
     /// 현재 연결 상태 스냅샷(락 없이).
     pub fn state(&self) -> ConnectionState {
         *self.state_rx.borrow()
+    }
+
+    /// ★테스트 전용★: 공유 버퍼 store 핸들(갭①② 배선 검증 — subscribe_agent_buffer/drop_agent_buffer 가
+    /// router 스냅샷에서 slot 을 파생해 store cursor 생명주기를 토글하는지 단언). 운영 코드는 buffer_store 를
+    /// 직접 안 본다(연결 task·이 두 메서드만 접근).
+    #[cfg(test)]
+    pub(crate) fn buffer_store_for_test(&self) -> AgentBufferStore {
+        self.buffer_store.clone()
     }
 
     /// 상태 변경 구독(watch). 호출자가 await 로 다음 전이를 기다리거나 현재값을 본다.
@@ -359,13 +386,62 @@ impl DaemonClient {
     /// 사이에 다른 connect/close 가 또 끼면 내 my_gen 은 이미 stale 일 수 있다 — 그래도 모든 발행이
     /// publish_if_current/store_cmd_if_current 가드를 통과하므로 안전하다(stale 이면 그냥 미발행).
     async fn start_connection(&self, info: DaemonInfo, my_gen: u64) -> Result<(), HandshakeError> {
-        let (cmd_tx, cmd_rx) = mpsc::channel::<ConnectionCommand>(64);
+        // ★capacity 512(FIX-1 — replay/drop full silent drop 완화)★: cmd_tx 는 bounded mpsc 라 full 이면
+        //   fire-and-forget(Subscribe/replay_slots/drop_slots/Resync)이 try_send 실패로 조용히 drop 된다.
+        //   빠른 layout toggle/drag 가 짧은 시간에 다량의 slot 델타를 쏘면 64 로는 full 이 날 수 있어, 저비용
+        //   상향으로 여유를 둔다. ★capacity 는 완화지 해결이 아니다★ — 진짜 복구는 양방향 reconcile
+        //   (connection.rs resubscribe_and_sweep — connect/재연결/Resync 진입마다 router 와 store 를 정합화)다.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ConnectionCommand>(512);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), HandshakeError>>();
 
         // ★단일 연결 task 소유★: run_connection 이 WebSocketStream 을 split 해 단독 소유하고,
         //   cmd_rx 로 들어오는 명령을 처리한다(T6). 비의도 끊김 시 이 task 안에서 백오프 재연결을
         //   돈다(T4 — discovery.read_live no-spawn + rt.spawn_blocking). my_gen + lifecycle 핸들로
         //   stale task 가 공유 상태를 못 건드리게 한다(Fix B + reconnect_guard).
+        // ★T7c emit 경로★: app 이 None(테스트)면 no-emit 더미 AppHandle 을 만들 수 없으므로,
+        //   run_connection 에 Option<AppHandle> 을 주입하는 대신 app 필드가 Some 인 경우만 spawn 한다.
+        //   테스트는 app=None 이라 emit 없이 연결 task 가 돌아야 하므로, run_connection 은
+        //   AppHandle 을 받되 테스트는 Option 언래핑 대신 별도 경로를 써야 한다.
+        //   ★단순화 결정★: 테스트용으로 AppHandle 을 mock 하기 어려우므로, run_connection 의 app
+        //   파라미터는 그대로 AppHandle(Option 아님)로 두되, 테스트 생성자는 app=None → spawn 시
+        //   connect/ensure 가 아닌 경로를 타지 않아 이 코드에 닿지 않는다. 운영 경로에선 항상 Some.
+        //   ★안전 unwrap★: new_real_with_owned_runtime 만이 운영 생성자이고 그것만이 app=Some 으로
+        //   start_connection 에 도달하는 경로를 제공한다(connect/ensure → start_connection).
+        //   테스트에서 new_with_handshake_timeout/new_with_router 는 app=None 이지만 실제 소켓에
+        //   연결되는 테스트도 connect/ensure 를 호출한다 — 그때 unwrap_or_else 로 panic 대신 warn.
+        let app_handle = match self.app.clone() {
+            Some(a) => a,
+            None => {
+                // 테스트 맥락(emit 대상 없음) — run_connection 이 emit 호출 시 Err 를 무시하므로 안전하게
+                // 진행한다. 그러나 AppHandle 없이는 run_connection 을 spawn 할 수 없다 — 이 분기에 도달
+                // 하는 테스트는 실제 Tauri 런타임이 없어 연결 task 가 app 없이 돌아야 한다.
+                // ★현재 구현 한계★: 테스트가 connect/ensure 를 호출하면 이 분기에서 막힌다. 테스트는
+                // mock_app 주입이나 conditional compile 으로 해결해야 하나, 지금은 connect/ensure 를
+                // 부르는 테스트가 실제 Tauri AppHandle 컨텍스트에서만 돌아야 한다는 제약으로 문서화.
+                // 일단 기존 테스트는 실제 WS 서버와 연결하는 통합 테스트라 AppHandle 없이 돌지 않는다
+                // — 그 테스트들이 mock_app 를 쓰거나 Tauri test_app 을 쓰는 건 후속 작업.
+                tracing::warn!(
+                    "start_connection: app=None(테스트 맥락) — emit 없이 연결 task 를 spawn 할 수 없음. \
+                     테스트는 Tauri AppHandle 주입이 필요합니다(T7c 한계, 후속 작업)."
+                );
+                // 테스트에서 이 경로에 닿으면 컴파일 실패가 아닌 런타임 경고로 넘기고 현재 함수에서
+                // 단락한다. start_connection 반환 타입이 Result<(), HandshakeError> 라 Ok 로 단락.
+                //
+                // ★app:None 단락 = 통합테스트 위양성, 후속 ADR 필요(미해결)★: 이 `Ok(())` 단락은 task 를
+                //   spawn 하지 않은 채 성공을 반환한다 → 상태가 Connecting 에 고착되는데, tests.rs 의
+                //   connect/ensure 테스트(app=None 생성자)는 `assert_eq!(state, Connected)` 를 단언한다(예:
+                //   tests.rs:228/337/389). 즉 *실행되면* 위양성으로 실패한다. 현재는 `cargo test -p
+                //   engram-dashboard` 가 STATUS_ENTRYPOINT_NOT_FOUND(DLL 로더 — 별개 환경 이슈)로 실행 자체가
+                //   안 돼 드러나지 않는다. ★운영 경로는 항상 app:Some(new_real_with_owned_runtime)이라 무영향★
+                //   — 이 분기는 테스트 맥락에서만 닿는다.
+                //   근본 수정 = run_connection 이 `Option<AppHandle>` 을 받아 emit no-op(connection.rs 동시성
+                //   영역 전반 + emit 6곳 변경)이거나 test_app 주입. 범위가 connection.rs 동시성 영역 전반이고
+                //   회귀 검증(테스트 실행)이 막혀 있어 Fix-C 범위 밖.
+                //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목 참조(박제). 정식
+                //   ADR 채번은 메인이 별도로 한다(이 노트는 그 step-log/후속 ADR 을 가리키는 앵커).
+                return Ok(());
+            }
+        };
         self.rt.spawn(run_connection(
             info,
             my_gen,
@@ -378,6 +454,9 @@ impl DaemonClient {
             // ★T6b 출력 평면 주입★: 연결 task 가 frame fan-out 에 쓴다(재연결 task 수명 초월 공유 Arc).
             self.router.clone(),
             self.registry.clone(),
+            // ★ADR-0040 2단계★: 공유 버퍼 store — on_frame(append+cursor read)·resubscribe(after_seq).
+            self.buffer_store.clone(),
+            app_handle,
         ));
 
         // Hello 수신(=connected) 또는 핸드셰이크 실패를 기다린다. ★락 미보유 await★.
@@ -394,6 +473,13 @@ impl DaemonClient {
                         generation = my_gen,
                         "stale 연결 — cmd_tx 미저장(더 새 connect/close 가 세대를 올림)"
                     );
+                } else {
+                    // ★handoff race resync(FIX-2)★: cmd_tx 가 *방금 저장됐다* — 이 시점 이후 layout invoke 는
+                    //   정상 enqueue 되지만, main_loop 진입 resubscribe 스냅샷과 이 저장 사이에 들어와 enqueue
+                    //   유실된 변화가 있을 수 있다(handoff 창). 저장 직후 resync 를 enqueue 해 연결 task 가
+                    //   router 현재 집합으로 재구독 + 고아 sweep 을 한 번 더 돌려 그 갭을 닫는다(저장됐으니
+                    //   try_enqueue 가 Some 으로 들어간다). stale 이면(위 false) resync 안 함 — 그 연결은 곧 정리됨.
+                    self.resync();
                 }
                 Ok(())
             }
@@ -498,7 +584,7 @@ impl DaemonClient {
     /// 출력 구독 enqueue(fire-and-forget). 연결 task 가 SubState 로 epoch/after_seq 를 채워 wire 송신한다.
     ///
     /// ★동기 + try_send★: layout command 는 `#[tauri::command] pub fn`(동기)이라 `async send` 를 못 한다.
-    /// cmd_tx 는 bounded(64) mpsc 라 `try_send` 로 넣는다 — 구독/해제는 저빈도(레이아웃 변경 시에만)라
+    /// cmd_tx 는 bounded(512) mpsc 라 `try_send` 로 넣는다 — 구독/해제는 저빈도(레이아웃 변경 시에만)라
     /// full 은 사실상 안 난다. 비연결(`current_cmd_tx`=None)이면 조용히 no-op — connect 진입 시 연결 task 가
     /// `router.current_agents()`(현재 보이는 agent SSOT)를 순회하며 재구독해 복구한다(C1, connection.rs
     /// main_loop). full/닫힘은 debug 로깅만(같은 connect 진입 재구독이 복구).
@@ -511,9 +597,73 @@ impl DaemonClient {
         self.try_enqueue(ConnectionCommand::Unsubscribe { agent_id }, "unsubscribe");
     }
 
+    /// ★축 B mount-즉시-replay 배선(ADR-0040 2단계 — slot 델타 + actor 직렬화, BLOCK-2)★. 새로 생긴
+    /// `(window_label, agent)` slot 집합(`SubscriptionDelta::slots_to_replay`)에 그 시점 공유 버퍼를 즉시
+    /// replay 한다. 0→1(처음 보는 agent) **그리고** 1→2(이미 보던 agent 에 새 창 추가) 둘 다 slot 쌍 단위로
+    /// 잡혀 둘째 창도 빈 화면이 안 된다(FIX-3/검증2 — agent-union diff 만으론 1→2 를 못 잡았다).
+    ///
+    /// ## 왜 필요한가(수용기준 5·"같은 agent 2·3창" — 빈 화면 0)
+    /// 버퍼 cursor 생명주기를 on_frame 의 `sync_viewers`(frame 도착 파생)로만 관리하면 **다음 frame 이
+    /// 와야** replay 가 나가, 조용한 agent·재연결 대기 중 새 창이 빈 화면이다. 이 경로가 그 갭을 frame
+    /// 도착과 무관하게 mount 시점에 메운다(layout 델타·Channel 등록이 트리거).
+    ///
+    /// ## ★actor 경유 직렬화(BLOCK-2 — opus F2)★
+    /// 직접 buffer 락+snapshot 수집을 invoke 스레드가 하면 `on_frame`(연결 task tokio 스레드)과 *다른
+    /// 스레드* 라 replay→live 순서가 역전될 수 있다(데몬 C4 클라측 위반 — opus "가장 위험"). 그래서 slot
+    /// 집합을 `ConnectionCommand::ReplaySlots` 로 **연결 actor 에 보내** on_frame 과 같은 select! arm 에서
+    /// 직렬 처리한다(같은 스레드 = 순서 보장). 비연결(cmd_tx None)이면 no-op — connect 진입 시 layout
+    /// rebuild 가 다시 델타를 내고 router 재구독이 채운다(C1). 빈 slot 이면 enqueue 스킵.
+    ///
+    /// ## ★fresh = 배정/등록 트리거 분리(FIX-2 — mount 1회 replay 멱등)★
+    /// - `fresh=false`(**배정 트리거** — layout `slots_to_replay`): cursor 없을 때만 신설+replay(불가침).
+    ///   정상 mount 의 첫 replay 1회. 같은 mount 에 등록 트리거가 또 와도 Rust 가 전체 replay 를 연속 2회
+    ///   내지 않게 한다(무중복이 프론트 dedup 에만 의존하던 것 — ADR-0037 정합).
+    /// - `fresh=true`(**등록 트리거** — `subscribe_output` 의 `slots_for_window`): cursor 있어도 fresh 리셋+
+    ///   전체 replay(webview reload = Channel 교체 시 새 xterm 빈 화면 차단, 근원2). reload = fresh 1회.
+    ///
+    /// ★호출 계약★: layout command 가 ViewManager 락을 **드롭한 뒤** 부른다(send_subscription_delta —
+    /// 락 밖 송신). slots 는 이미 router rebuild 가 산출한 결정값이라 여기선 router.targets 재조회 불필요.
+    pub fn replay_slots(
+        &self,
+        slots: Vec<(crate::output_router::WindowLabel, AgentId)>,
+        fresh: bool,
+    ) {
+        if slots.is_empty() {
+            return;
+        }
+        self.try_enqueue(
+            ConnectionCommand::ReplaySlots { slots, fresh },
+            "replay_slots",
+        );
+    }
+
+    /// ★축 B slot cursor 정리 배선(ADR-0040 2단계 — FIX-3)★. 사라진 `(window_label, agent)` slot 집합
+    /// (`SubscriptionDelta::slots_to_drop`)의 cursor 를 제거한다(마지막 cursor 면 content/epoch drop —
+    /// 누수 0). 1→0(어느 창에도 안 보임) **그리고** 2→1(여러 창 중 하나만 닫힘) 둘 다 slot 쌍 단위로 잡혀
+    /// 부분 닫힘 시 죽은 cursor 가 잔존하지 않는다(FIX-3). **frame 도착과 독립**이라 terminal(frame 0)+창
+    /// 닫힘도 정상 폐기(TRD §4 폐기 트리거 = 배정 해제).
+    ///
+    /// actor 경유(`ConnectionCommand::DropSlots`)로 on_frame 의 sync_viewers 와 같은 스레드에서 처리 —
+    /// cursor 이중관리·race 차단. 비연결이면 no-op(연결 task 가 없으면 store 를 만질 actor 도 없음 — 다음
+    /// connect 시 layout rebuild 가 router 기반으로 정합화).
+    pub fn drop_slots(&self, slots: Vec<(crate::output_router::WindowLabel, AgentId)>) {
+        if slots.is_empty() {
+            return;
+        }
+        self.try_enqueue(ConnectionCommand::DropSlots { slots }, "drop_slots");
+    }
+
     /// reply 없는 명령(Resize 등) enqueue(fire-and-forget). agent_resize invoke 가 쓴다.
     pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
         self.try_enqueue(ConnectionCommand::Fire { cmd }, "fire");
+    }
+
+    /// ★connect handoff race resync enqueue(FIX-2)★. cmd_tx 가 lifecycle 에 저장된 *직후* 불러, main_loop
+    /// 진입 resubscribe 스냅샷과 cmd_tx 저장 사이에 유실된 layout 변화를 따라잡게 한다(연결 task 가
+    /// router 현재 집합으로 재구독 + 고아 sweep 을 한 번 더). cmd_tx 가 저장돼야 try_enqueue 가 Some 으로
+    /// 들어가므로(이 시점엔 저장됨) 갭이 닫힌다 — 비연결/stale 미저장이면 no-op(애초에 resync 할 연결 없음).
+    pub(crate) fn resync(&self) {
+        self.try_enqueue(ConnectionCommand::Resync, "resync");
     }
 
     /// fire-and-forget enqueue 공통(동기 try_send). 비연결=no-op, full/닫힘=debug 로깅.

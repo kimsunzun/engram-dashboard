@@ -10,4 +10,6 @@
 
 pub mod agent;
 pub mod logging;
+pub mod output_view_buffer;
+pub mod output_view_store;
 pub mod persistence;
