@@ -1,0 +1,30 @@
+# ADR-0040: 출력 관리 단위 = View 독립 (중계 허브 공유 버퍼 + per-view 인덱스)
+
+- 상태: 확정 (2026-06-30, 근거: medium 리서치 cross-family 수렴 + `/review prd full` FIX 반영 + 사용자 결정)
+- 관련: ADR-0035(레이아웃 권위=src-tauri 클라)·ADR-0036(전송 중계 통일)·ADR-0037(전송 의미론 Rust 단독)·ADR-0007(epoch 재구독)·ADR-0029(데몬=데이터 단일소유, 별도 프로세스) · PRD `docs/process/S14-multi-page-layout/output-view-buffer-prd.md` · 리서치 `.claude/skills/research/study-notes/20260630-multiview-relay-2layer-medium.md` · step-log S14
+
+## 맥락
+S14 모듈①에서 단일 데몬 연결을 N창으로 fan-out하는 출력 평면을 만들었다(T5~T7, ADR-0036). 그런데 같은 에이전트를 여러 View에서 볼 때 출력이 유실되는 결함이 반복 재생산됐다. 근원은 **출력 관리 "단위"**다 — 현재는 *에이전트당 단일 구독 + 창별 진도 추적 + 재구독은 가장 뒤처진 창 기준 `min(render_seq)`*로 묶여 있다. 갓 열린 창은 min 산출에서 누락되고(키 미존재 vs 명시 `None` 비대칭), 데몬엔 앞선 창 기준 높은 seq가 가 새 창이 그 앞 출력을 영구 유실한다. 이는 특정 버그가 아니라 "에이전트당 묶음" 단위 자체의 한계라, 구독 권위 축(WebView vs src-tauri)만 바꿔선 닫히지 않는다. 업계 표준은 "콘텐츠는 중앙 단일 보관 + 진행도는 구독자별 독립 인덱스, 전송 시퀀스 ≠ 소비 진행도 분리"다.
+
+## 결정
+**출력 관리 단위를 에이전트당 묶음 → View 독립으로 전환한다.** 중계 허브(src-tauri)가 에이전트당 출력을 **한 벌 모아 보관**(공유 버퍼, 데몬 무손실 범위를 이중 상한 `min(~2MB, ~4096건)`으로 미러)하고, 각 View(창)는 그 버퍼의 *어디까지 읽었나*(인덱스)만 **독립**으로 가진다. 데몬엔 에이전트당 **한 번만** 구독하고, 데몬은 단일 무손실 스트림만 책임진다(viewer 식별자 데몬에 안 샘). 새 창은 데몬 재요청 없이 클라 버퍼에서 자기 인덱스로 채운다 — "처음부터"의 정의는 **보관 하한(가장 오래된 보관 지점)**이며, 그보다 과거는 데몬도 evict했으므로 어디서도 못 준다(기존 동작과 동일). 잘린 과거는 화면 표시 없이 그대로, 과거 스크롤 중 새 출력은 터미널 관행(스크롤 중이면 위치 유지, follow면 따라감)으로 창마다 독립 처리한다. = VS Code pty host(중계 단일 replay 버퍼) + Kafka/Redis(공유 로그 + per-consumer offset)의 결합.
+
+`min(render_seq)`의 역할이 전환된다: **데몬 재구독 지점(현재·결함 유발) → 클라 버퍼 보관 하한(eviction)**.
+
+## 거부한 대안
+- **에이전트당 단일 구독 + 창별 min 합산 (현재 구조)** — 새 창이 min 산출에서 누락돼 앞 출력 유실. 단위 자체의 구조적 결함으로, opus(FIX)+Codex(BLOCK) 두 family가 독립 수렴으로 확인.
+- **프론트(WebView)가 직접 데몬 구독** — ADR-0035 "프론트=순수 렌더러, 레이아웃 권위=src-tauri" 위반. 창마다 JS 컨텍스트 격리라 split-brain.
+- **새 창마다 데몬에 재요청** — 사용자 지적 "구조가 이상하다". 2계층 중계 모델에서 불필요한 네트워크 왕복이고, 재구독 min 합산이 곧 위 유실 결함의 원인.
+- **동적 보관 + 데몬 2-tier fallback** (붙은 창 필요분만 클라 보관, 그 너머는 데몬 ReplayBuffer에서 끌어옴) — 클라↔데몬 동기화·eviction의 OSS 선례 미조사라 고비용·불확실. 데몬 보관 범위 미러로 충분하다. 단 이 거부는 "처음부터"를 보관 하한 기준으로 낮춘 전제 위에서만 유효 — evict된 진짜 과거까지 전부 복원하는 요구는 명시적 비목표.
+- **로컬 제로카피 / 환경별(모바일 원격 vs 로컬 PC) 분기** — 데몬↔src-tauri는 로컬에서도 별도 프로세스(ADR-0029)라 경계 너머 수신 구조가 공통이고, 메모리 중복(~2MB×N)도 작아 실익이 작다. 지금 아키텍처를 굽히지 않고 transport seam에서 후속 흡수(실측 후 별도 ADR). step-log "데몬화 = 원격/모바일 동일 인프라, 로컬 loopback 한 홉"과 정합.
+
+## 근거
+medium 리서치(Claude Sonnet 3갈래 + Codex 1 BLIND 교차 → opus 적대검증)가 2계층 중계 모델의 멀티뷰 출력을 cross-family 조사: "콘텐츠 중앙 단일 보관 + per-view 독립 인덱스, 전송 시퀀스 ≠ 소비 진행도 분리"가 보편(VS Code/Kafka/Redis/Matrix 등 공식 소스 직접 인용 기반, 확신 높음). 2계층 직접 선례는 VS Code pty host가 최근접(중계가 replay 버퍼 단일 소유, 각 renderer 독립 cursor). 사용자 설계 안(공유 버퍼 1벌 + per-view 인덱스)이 이 표준과 정합. `/review prd full`에서 Codex(User 렌즈 blind)·opus(Tester 렌즈 blind) 둘 다 FIX 판정 — 방향은 옳다 인정하되 "처음부터 전부 ↔ 버퍼 상한 모순"을 독립 수렴으로 적출, PRD가 "처음부터=보관 하한"으로 정정해 닫음.
+
+## 영향 / 불변식
+- **데몬 = 에이전트당 단일 무손실 스트림만.** 데몬 crate/protocol에 View·viewer·layout 타입이 새지 않는다(ADR-0035/0036 UI 불가지론 유지). 재연결 시 데몬 Subscribe `after_seq` 산출(클라 버퍼 최신 vs oldest)이 무손실 급소 — TRD에서 선결.
+- **중계 허브(src-tauri) = 에이전트당 공유 버퍼 1벌 소유 + per-view 인덱스.** 보관량은 창 수에 비례하지 않는다(이중 상한). 핫패스 fan-out은 ViewManager 락 보유 중 send 금지(ADR-0006 보존).
+- **epoch 전환 = 버퍼 리셋 + 모든 창 인덱스 리셋**(ADR-0007). epoch 리셋과 새 창 mount가 겹치는 race를 TRD에서 순서 보장으로 차단.
+- **기존 동시성 불변식 보존** — ADR-0001(kill 2동사)·0005(finalize 1회)·0006(락 순서)·0007(epoch). 데몬 소유분은 클라 무관.
+- **★위험(retrofit 비용):** 단일 공유 버퍼는 raw byte라, 크기 다른 두 창이 같은 에이전트를 볼 때 한 창의 resize가 버퍼의 escape sequence를 다른 창에서 깨뜨릴 수 있다(PTY는 단일 cols/rows). resize 정책은 별도 열린사항이나, "단일 공유 버퍼" 가정이 멀티-resize에서 깨질 수 있음을 위험으로 박는다 — viewport별 분기가 필요해지면 이 결정을 retrofit해야 한다(두 리뷰어 공통 지적).
+- **현 `output_window_seq.rs`(에이전트당 min 모델)는 재작업/폐기 대상** — TRD에서 범위 확정. 코드 앵커는 신규 구현분에 `// ADR-0040` 부착.
