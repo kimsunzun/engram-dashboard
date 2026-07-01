@@ -33,6 +33,12 @@ interface SubState {
    * "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니라 off-by-one 유발 — 버그 B).
    */
   lastDeliveredSeq: number
+  /**
+   * stale-unsubscribe 가드용 고유 번호표(subscribeOutput 마다 ++subSeq). 반환한 unsubscribe 는
+   * "현재 subs 엔트리가 내 token 일 때만 delete" 로 가드한다 — 재구독(epoch 교체/StrictMode)으로
+   * 새 SubState 가 들어온 뒤 늦게 온 옛 unsubscribe 가 산 구독을 지우는 걸 막는다.
+   */
+  token: number
 }
 
 interface Pending {
@@ -50,6 +56,9 @@ export class ProtocolClient implements AgentClient {
   // request_id 를 echo 하므로 편승 매칭 없이 정확히 짝지어진다(protocol v2).
   private pending = new Map<string, Pending>()
   private subs = new Map<string, SubState>()
+  // 구독마다 발급하는 단조증가 번호표 — stale-unsubscribe 가드(SubState.token). 인스턴스 내 비교만
+  // 하므로 UUID 불필요, 정수로 충분.
+  private subSeq = 0
 
   // 상태/목록/복원/프로필 이벤트 콜백 레지스트리(broadcast). eventBus 가 소비.
   private agentListCbs = new Set<(agents: AgentInfo[]) => void>()
@@ -294,7 +303,9 @@ export class ProtocolClient implements AgentClient {
     await this.transport.ensureReady()
     // 같은 agentId 재구독 시 이전 상태는 덮는다(컴포넌트가 epoch 바뀌면 재구독).
     // epoch=undefined(Ack 전), lastDeliveredSeq=-1(아무것도 배달 안 함).
-    this.subs.set(agentId, { onChunk, epoch: undefined, lastDeliveredSeq: -1 })
+    // token 은 이 구독의 고유 번호표 — 아래 unsubscribe 가 stale 여부를 이걸로 판별한다.
+    const token = ++this.subSeq
+    this.subs.set(agentId, { onChunk, epoch: undefined, lastDeliveredSeq: -1, token })
     // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는
     //   src-tauri 단독이다. 프론트가 `Subscribe{after_seq:null}`(FromOldest)를 데몬에 forward 하면,
     //   같은 agent 를 N 창이 보면 데몬이 FromOldest 를 N번 replay → src-tauri 공유 버퍼에 낮은 seq 가
@@ -303,7 +314,10 @@ export class ProtocolClient implements AgentClient {
     //   여기 subs(JS 콜백)는 렌더러 등록만 — output Channel 로 raw bytes 가 오면 onChunk 로 배달한다.
     return {
       unsubscribe: () => {
-        this.subs.delete(agentId)
+        // ★현재 subs 엔트리가 내 토큰일 때만 delete — 재구독(epoch 교체/StrictMode)으로 새 SubState 가
+        //   들어온 뒤 늦게 온 옛 unsubscribe 가 새 구독을 지우는 stale-unsubscribe 방지.
+        //   subscribeOutput 이 async(ensureReady await)라 옛 unsubscribe 가 새 set 뒤에 도착할 수 있다.
+        if (this.subs.get(agentId)?.token === token) this.subs.delete(agentId)
         // ★Unsubscribe 도 데몬에 forward 안 함(BLOCK-1)★: 데몬 구독 해제도 layout 델타(1→0)가 소유한다.
         //   여기선 JS 콜백만 떼어 더는 이 agent frame 을 렌더하지 않게 한다(렌더러 역할 한정).
       },

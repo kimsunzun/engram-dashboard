@@ -235,6 +235,37 @@ describe('seq dedup / epoch 가드(R2)', () => {
   })
 })
 
+describe('stale-unsubscribe 가드(owner token) — 재구독 시 산 구독 보호', () => {
+  it('옛 구독의 unsubscribe 가 재구독(덮어쓴) 새 구독을 지우지 않는다', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const got1: number[] = []
+    const got2: number[] = []
+    // sub1 → sub2 재구독(같은 agentId): subs 엔트리를 덮어쓴다.
+    const sub1 = await c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
+    await c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
+    // stale: 옛 구독(sub1)의 unsubscribe 가 새 구독(sub2) 뒤늦게 실행 → token 가드로 무시돼야.
+    sub1.unsubscribe()
+    // 'A' 프레임 주입(Ack 전 → st.epoch undefined 로 epoch 가드 통과, seq>high-water(-1) → dedup 통과).
+    t.output(AGENT, 0, 0)
+    t.output(AGENT, 0, 1)
+    expect(got2).toEqual([0, 1]) // 새 구독 생존 — 정상 배달(stale delete 가 안 지움)
+    expect(got1).toEqual([]) // 옛 콜백은 덮여서 애초에 배달 대상 아님
+  })
+
+  it('정상 경로: 살아있는 구독의 unsubscribe 는 실제로 제거(그 뒤 배달 안 됨)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const got: number[] = []
+    const sub = await c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
+    t.output(AGENT, 0, 0)
+    expect(got).toEqual([0])
+    sub.unsubscribe() // 현재 엔트리 token == 내 token → 실제 delete
+    t.output(AGENT, 0, 1) // 구독 제거됨 → handleOutput 이 st 없음으로 무시
+    expect(got).toEqual([0])
+  })
+})
+
 describe('resubscribe resume(R3) — connected 재전이', () => {
   it('재연결(reconnecting→connected) 시 알려진 epoch + after_seq=마지막배달seq 로 resubscribe', async () => {
     const t = new MockTransport('connected')
