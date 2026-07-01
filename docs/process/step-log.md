@@ -468,6 +468,15 @@
 - **ADR:** 0041(데몬 출력 구독 = layout 델타 단독·프론트 직접 구독 차단) · 0042(구독 델타 = slot 단위 diff) · 0043(mount-replay = actor 경유 + deliverable 게이트 + 배정·등록 fresh 분기). 인덱스 재생성·lint clean(error 0; advisory 5 = 기존 0016/0027 레거시, 무관).
 - **다음:** 코드 앵커(`// ADR-0041~0043`) 점진 부착 · 모듈③ 슬롯 렌더(ViewManager 슬롯→터미널 wiring + 멀티윈도우 fan-out cdp 실측) · F2(빠른 drop→재배정 중복 send — cursor lifecycle on drop, 저심각).
 
+### 모듈③ 슬롯 렌더 — 터미널 wiring 1차 + 리뷰 FIX 3건 + cdp 실측 PASS + 2-store 이주 갭 발견 (2026-07-01, master, opus)
+- **계기:** 직전 핸드오프(모듈③ 터미널 wiring 코더완료·리뷰 FIX 반영대기·미커밋)에서 이어받음 — FIX 3건 반영 → 리뷰 재확인 → 실측 → 커밋.
+- **FIX 3건(커밋 66c1d12):** ① stale-unsubscribe(코더 opus) — `ProtocolClient.subs`에 owner `token` 도입, `unsubscribe`를 "현재 엔트리가 내 token일 때만 delete"로 가드(재구독=epoch 교체/StrictMode 시 옛 unsubscribe가 새 구독 지우던 "재시작 후 빈 터미널" 회귀 차단) + 회귀 테스트 2개 ② `<TerminalSlot key={agent_id}>`(죽은 `?? node.id` 제거) ③ 미사용 jest-dom 미포함(`@testing-library/react`만).
+- **리뷰:** `/review code` light→**full 승격**(동시성 트리거) — opus doc-aware + Codex blind, **FIX 판정·BLOCK 없음**. 불일치 1건(stale-SET 엣지: 두 subscribe async set 순서 역전 시 stale 콜백 승리)은 **선재·범위 밖**으로 로그(FIX 3가 만든 게 아니라 token 가드는 늦은 delete만 막음). 커밋 메시지·핸드오프에 known-issue.
+- **게이트:** `npx tsc --noEmit` OK + `npm test` 137(기존 135 + 회귀 2) green. **cdp 실측 PASS:** `assign_agent` invoke로 슬롯 배정 → 터미널 실제 렌더(cmd 프롬프트 xterm, hasXterm:true) — 출력 배관 end-to-end 확인.
+- **★핵심 발견 — 프론트 레이아웃 2-store 이주 미완:** 화면 캔버스=새 `viewStore`+`ViewLayoutRenderer`(UUID·백엔드 권위 ADR-0035)인데 트리·슬롯 UI("포커스 슬롯에 배치" 등)는 옛 `slotStore`로 dispatch(number id·프론트 전용) → **사람 클릭이 캔버스에 안 먹음**(LLM/invoke 경로는 정상). 사용자가 겪은 "배치 무응답/동작 이상"의 원인. 근원 `AgentTree.tsx:57-58,209-212`·`SlotContextMenu.tsx:37` / 캔버스 `AppLayout.tsx:55`+`ViewLayoutRenderer`(주석에 "전면 이주" 예고).
+- **lab 발견:** `src/lab/richslot/` = 구조화(JSON) 출력 렌더러 스파이크(stream-json 파싱→마크다운·Monaco 코드·툴콜, 독립 실행 `dev:richslot`). 통합 계획이 옛 slotStore 기준 → 이주와 한 몸.
+- **다음:** **슬롯 UI 이주 PRD**(slotStore→viewStore, 다음 세션 — Explore 스코핑 먼저) 범위 A(UI 제어 이주)+B(RichSlot 통합)+C(렌더러 선택=출력 capability로 xterm/RichSlot 분기, 백엔드 stream-json spawn=ADR). 백로그: i18n(하드코딩 한글→로컬라이징 테이블)·우클릭 통일 UX. 이월: 평면 B(案 A=프론트 subs fan-out 확정)·ADR 앵커 부착·FreshFallback 배너.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
