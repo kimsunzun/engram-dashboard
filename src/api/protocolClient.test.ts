@@ -430,6 +430,159 @@ describe('InProc no-op 수렴(항상 connected·순서보존)', () => {
   })
 })
 
+// ── ADR-0043 프론트 등가: 구독 전 도착 프레임 버퍼 → 첫 구독 flush ──────────────────────
+//    리로드 시 창 Channel 재등록(→ Rust replay flush)이 React 슬롯 마운트(subscribeOutput)보다
+//    먼저 온다. 구독자 없는 프레임을 버렸던 옛 결함(RichSlot 빈 화면)을 버퍼링으로 메운다.
+describe('pre-subscribe 버퍼(ADR-0043 deliverable 게이트 프론트 등가)', () => {
+  it('구독 전 도착 프레임 → 버퍼 → 첫 구독 시 seq 순서대로 flush', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 구독자 없는 상태로 replay 프레임 3개 도착(리로드 시 Channel 재등록이 마운트보다 먼저 온 상황).
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.output(AGENT, 1, 2)
+    // 이제 React 슬롯이 마운트되며 구독 — 보류분이 순서대로 flush 돼야.
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    expect(received).toEqual([0, 1, 2])
+  })
+
+  it('flush 후 라이브 프레임과 이음매 없이 이어짐(high-water 전진 dedup)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    expect(received).toEqual([0, 1]) // flush
+    // flush 로 high-water=1 전진 → 라이브 seq 1 재수신은 dedup, seq 2 는 배달.
+    t.output(AGENT, 1, 1)
+    t.output(AGENT, 1, 2)
+    expect(received).toEqual([0, 1, 2])
+  })
+
+  it('epoch 교체 → 옛 버퍼 폐기(새 epoch 프레임만 flush)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 옛 epoch 1 프레임 보류 → 재시작으로 epoch 2 프레임 도착(옛 스트림 무의미 → 통째 교체 by bufferPending).
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.output(AGENT, 2, 0)
+    t.output(AGENT, 2, 1)
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    // 옛 epoch 1 은 버려지고 epoch 2 프레임만 flush(seq 0,1) — 버퍼 교체가 옛 epoch 잔여를 이미 폐기.
+    expect(received).toEqual([0, 1])
+    // ★FIX 4(ADR-0007)★: flush 는 st.epoch 를 심지 않는다(epoch 권위 = SubscribeAck 단독). 그래서 지금
+    //   st.epoch 는 undefined — SubscribeAck 이 오기 전 라이브 프레임은 epoch 가드를 통과한다(seq dedup 만).
+    //   SubscribeAck 이 데몬 권위로 epoch 2 를 확정한 뒤에야 epoch 1 프레임이 stale 로 걸러진다.
+    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 2, replay_from: 0, truncated: false } })
+    t.output(AGENT, 1, 5) // SubscribeAck 후 stale epoch → drop
+    t.output(AGENT, 2, 2)
+    expect(received).toEqual([0, 1, 2])
+  })
+
+  it('버퍼 상한 초과 → 오래된 프레임 drop + warn 1회', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // 1MB 프레임 3개(총 3MB > 2MB 상한) — 구독자 없이 도착. drop-oldest 로 앞 프레임(seq 0)이 밀려남.
+    const oneMB = new Uint8Array(1024 * 1024)
+    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 0, bytes: oneMB })
+    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 1, bytes: oneMB })
+    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 2, bytes: oneMB })
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    // seq 0 은 drop-oldest 로 버려짐 → 뒤쪽만 flush(정확한 잔존 개수는 상한 산술에 달렸으나 seq 0 은 없어야).
+    expect(received).not.toContain(0)
+    expect(received.length).toBeGreaterThan(0)
+    // warn 은 이 agent 에 대해 정확히 1회(로그 스팸 방지).
+    const bufferWarns = warnSpy.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('pre-subscribe 버퍼 상한 초과'),
+    )
+    expect(bufferWarns.length).toBe(1)
+    warnSpy.mockRestore()
+  })
+
+  it('연결 끊김(connected→비connected) → 버퍼 폐기(재연결 후 낡은 프레임 미flush)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    // 끊김 — 보류분은 stale(재연결 후 데몬이 replay 새로 줌) → 폐기돼야.
+    t.setState('reconnecting')
+    t.setState('connected')
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    // 폐기됐으므로 구독 시 flush 될 게 없음(빈 배열). 이후 라이브만 배달.
+    expect(received).toEqual([])
+    t.output(AGENT, 1, 2)
+    expect(received).toEqual([2])
+  })
+
+  it('구독 후 도착 프레임은 버퍼 안 거치고 즉시 배달(회귀 — 기존 경로 불변)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    expect(received).toEqual([0, 1])
+  })
+
+  // ── FIX 2: out-of-order 도착 프레임 → seq 오름차순 flush ──────────────────────────────
+  it('out-of-order 도착[2,0,1] → seq 순서(0,1,2)로 flush(high-water drop 방지)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 도착 순서가 seq 순서와 다름 — 정렬 없이 배열 순서 flush 하면 2 를 먼저 배달해 high-water=2 →
+    //   0,1 이 dedup 탈락한다. FIX 2 는 seq 오름차순 정렬 후 flush 해 전부 배달한다.
+    t.output(AGENT, 1, 2)
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    expect(received).toEqual([0, 1, 2])
+  })
+
+  // ── FIX 3: 단일 초대형 프레임(> bound) → 버퍼 비움 ──────────────────────────────────
+  it('단일 3MB 프레임(> 2MB 상한) → 버퍼 비움 + warn 1회(bound 무한잔존 방지)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // 단일 프레임이 상한보다 큼 — drop-oldest 루프는 frames.length>1 에서 멈추므로 옛 코드는 이 1개를
+    //   영영 남긴다. FIX 3 은 마지막 1개도 bound 초과면 버려 버퍼를 비운다.
+    const threeMB = new Uint8Array(3 * 1024 * 1024)
+    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 0, bytes: threeMB })
+    const received: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    // 버퍼가 비었으므로 flush 될 게 없다.
+    expect(received).toEqual([])
+    const bufferWarns = warnSpy.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('pre-subscribe 버퍼 상한 초과'),
+    )
+    expect(bufferWarns.length).toBe(1)
+    warnSpy.mockRestore()
+  })
+
+  // ── FIX 1: unsubscribe → 버퍼 폐기(refill 누수 방지) ─────────────────────────────────
+  it('subscribe→unsubscribe→프레임 도착→remount → post-unsubscribe 프레임만 flush(stale 없음)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const got1: number[] = []
+    const sub = await c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
+    t.output(AGENT, 1, 0) // 구독 중 배달
+    expect(got1).toEqual([0])
+    // 언마운트 — subs 삭제 + 버퍼 폐기. 이후 데몬이 계속 보내는 프레임은 새 pre-subscribe 버퍼로 감.
+    sub.unsubscribe()
+    t.output(AGENT, 1, 1) // unsubscribe 후 도착 — 새 버퍼 시작(옛 stale 아님)
+    t.output(AGENT, 1, 2)
+    // remount(재구독) — 새 버퍼(seq 1,2)만 flush. 옛 seq 0 은 이미 배달됐고 버퍼에 남지 않아 중복 없음.
+    const got2: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
+    expect(got2).toEqual([1, 2])
+  })
+})
+
 describe('close', () => {
   it('close() → pending reject + transport.close 호출', async () => {
     const t = new MockTransport()

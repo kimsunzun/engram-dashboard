@@ -156,6 +156,9 @@ pub fn run() {
             commands::daemon_connect,
             commands::daemon_ensure,
             commands::daemon_close,
+            // ★Fix-D: 리로드 자가복구 pull 조회★ — 이벤트는 전이 시에만 emit 되어 이미 Connected 인
+            //   데몬에 새로 뜬 웹뷰가 연결을 못 알아채는 사각지대를 메운다(TauriTransport self-heal).
+            commands::daemon_connection_state,
             // ★T7c: TauriTransport.send() 진입점★ — ProtocolClient 의 AgentCommand 를 데몬으로 전달.
             commands::forward_daemon_command,
             // ADR-0026 2단계 §5: 트레이 동작의 LLM/cdp 제어 표면(트레이 핸들러와 같은 actions 함수).

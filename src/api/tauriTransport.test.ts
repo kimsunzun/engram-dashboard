@@ -30,6 +30,16 @@ const h = vi.hoisted(() => {
     emitConnectedOnConnect: true,
     // daemon_connect invoke 를 무한 대기시키는 게이트(close 세대 가드 테스트용). resolve 함수를 보관.
     connectGate: null as null | (() => void),
+    // ★Fix-D self-heal★: daemon_connection_state invoke 가 돌려줄 상태 문자열(리로드 pull 조회 흉내).
+    connectionStateReply: 'down',
+    // ★FIX 5 게이트★: daemon_connection_state invoke 를 대기시켜, pull 응답 전에 이벤트를 끼워넣게 한다.
+    //   resolve 함수(= 게이트 해제)를 보관. null 이면 즉시 resolve(기존 동작).
+    connectionStateGate: null as null | (() => void),
+    // ★FIX 6 게이트 큐★: subscribe_output invoke 각각을 대기시켜 완료 순서를 테스트가 통제한다. 각
+    //   invoke 는 배열에 resolve 함수를 push 하고 대기 — 테스트가 임의 순서로 호출해 풀어준다. 빈 배열이면
+    //   즉시 resolve(기존 동작).
+    subscribeOutputGate: false,
+    subscribeOutputResolvers: [] as Array<() => void>,
   }
   class FakeChannel {
     onmessage: ((m: ArrayBuffer) => void) | null = null
@@ -39,6 +49,13 @@ const h = vi.hoisted(() => {
 
 function emit(name: string, payload: unknown): void {
   for (const cb of h.listeners.get(name) ?? []) cb({ payload })
+}
+
+// ★microtask 다수 양보★: doConnect 는 registerListeners(5× await listen) → daemon_connect invoke →
+//   그 안의 connected emit → applyConnectionState → registerOutputChannel(비동기) 체인을 탄다. 게이트로
+//   중간을 막고 관측하려면 여러 microtask 틱을 흘려야 그 체인이 게이트 지점까지 진행한다.
+async function flush(ticks = 12): Promise<void> {
+  for (let i = 0; i < ticks; i++) await Promise.resolve()
 }
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -68,9 +85,25 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
     return undefined
   }
   if (cmd === 'daemon_close') return undefined
+  if (cmd === 'daemon_connection_state') {
+    // ★FIX 5 게이트★: 게이트가 있으면 그 resolve 가 불릴 때까지 대기(pull 응답 전 이벤트 끼워넣기).
+    if (h.state.connectionStateGate) {
+      await new Promise<void>((resolve) => {
+        h.state.connectionStateGate = resolve
+      })
+    }
+    return h.state.connectionStateReply
+  }
   if (cmd === 'subscribe_output') {
     h.state.subscribeOutputCalls += 1
     h.state.capturedChannel = args?.channel as { onmessage: ((m: ArrayBuffer) => void) | null }
+    // ★FIX 6 게이트★: 게이트가 켜져 있으면 완료를 보류하고 resolve 함수를 큐에 넣는다 — 테스트가 임의
+    //   순서로 풀어 Rust 도착 순서 역전을 흉내낸다.
+    if (h.state.subscribeOutputGate) {
+      await new Promise<void>((resolve) => {
+        h.state.subscribeOutputResolvers.push(resolve)
+      })
+    }
     return undefined
   }
   if (cmd === 'forward_daemon_command') {
@@ -119,6 +152,10 @@ beforeEach(() => {
   h.state.forwardShouldReject = false
   h.state.emitConnectedOnConnect = true
   h.state.connectGate = null
+  h.state.connectionStateReply = 'down'
+  h.state.connectionStateGate = null
+  h.state.subscribeOutputGate = false
+  h.state.subscribeOutputResolvers = []
   invokeMock.mockClear()
 })
 afterEach(() => {
@@ -233,6 +270,141 @@ describe('TauriTransport 재연결 출력 Channel 재등록(Fix-C ④)', () => {
     await Promise.resolve()
     await Promise.resolve()
     expect(h.state.subscribeOutputCalls).toBe(2)
+  })
+})
+
+describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
+  it('init → 조회가 connected 면 출력 Channel 을 1회 등록한다(전이 이벤트 없이도 복구)', async () => {
+    const t = new TauriTransport()
+    // 리로드 흉내: 데몬은 이미 Connected 라 전이 이벤트가 안 온다. pull 조회만 connected 를 알려준다.
+    h.state.connectionStateReply = 'connected'
+    await t.init()
+    expect(invokeMock).toHaveBeenCalledWith('daemon_connection_state', undefined)
+    expect(t.connectionState).toBe('connected')
+    // 사각지대 복구의 핵심 — 출력 Channel 이 정확히 1회 등록된다.
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    expect(h.state.capturedChannel).not.toBeNull()
+  })
+
+  it('init → 조회가 down 이면 아무 것도 하지 않는다(연결 안 됨은 정상)', async () => {
+    const t = new TauriTransport()
+    h.state.connectionStateReply = 'down'
+    await t.init()
+    expect(t.connectionState).toBe('down')
+    expect(h.state.subscribeOutputCalls).toBe(0)
+  })
+
+  it('조회로 connected 등록 후 다시 connected 이벤트가 와도 이중 등록하지 않는다(멱등)', async () => {
+    const t = new TauriTransport()
+    h.state.connectionStateReply = 'connected'
+    await t.init() // 조회 경로로 connected + 등록 1회.
+    expect(t.connectionState).toBe('connected')
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    // 이미 connected 인데 전이 이벤트가 또 와도(wasConnected 가드) 재등록 없음 — 등록 정확히 1회.
+    emit('daemon-connection-state', 'connected')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+  })
+
+  it('조회가 connected 를 반환해도 직후 down 이벤트가 오면 이벤트가 이긴다(last-write)', async () => {
+    const t = new TauriTransport()
+    h.state.connectionStateReply = 'connected'
+    await t.init() // 조회로 connected + 등록 1회.
+    expect(t.connectionState).toBe('connected')
+    // 조회 결과를 캐시하지 않으므로, 이후 실제 down 전이가 그대로 반영된다.
+    emit('daemon-connection-state', 'down')
+    expect(t.connectionState).toBe('down')
+  })
+
+  // ── FIX 5: pull 응답 *전* 이벤트가 끼면 pull(stale)을 폐기(event→pull 순서 역전 방어) ──────
+  it('조회 대기 중 down 이벤트가 끼면, 뒤늦게 온 connected 조회 결과를 폐기한다(이벤트 승)', async () => {
+    const t = new TauriTransport()
+    // pull 은 stale 'connected' 를 돌려주게 하되, 게이트로 응답을 미룬다(placeholder → 실 resolver 로 교체).
+    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateGate = () => {}
+    const initP = t.init()
+    // init 은 registerListeners → selfHeal(invoke 게이트에 막힘) 순. 리스너 등록 + pull invoke 진입 대기.
+    await flush()
+    // pull 응답 전에 실제 down 이벤트가 도착 — 최신 권위(u5 리스너 등록 완료 후).
+    emit('daemon-connection-state', 'down')
+    expect(t.connectionState).toBe('down')
+    // 이제 pull 게이트 해제 → stale 'connected' 조회 결과가 도착하지만 stateVersion 이 바뀌었으므로 폐기.
+    const release = h.state.connectionStateGate
+    h.state.connectionStateGate = null
+    release?.()
+    await initP
+    await flush()
+    // ★핵심★: 낡은 pull 이 down 을 connected 로 덮어쓰지 않는다 — 죽은 연결에 Channel 등록도 없어야.
+    expect(t.connectionState).toBe('down')
+    expect(h.state.subscribeOutputCalls).toBe(0)
+  })
+})
+
+// ── FIX 7: 미지 상태 어휘 방어(retrofit 함정) ───────────────────────────────────────────
+describe('TauriTransport 미지 연결 상태 어휘(FIX 7)', () => {
+  it('알 수 없는 상태 문자열은 down 으로 처리 + console.warn 1회', async () => {
+    const t = new TauriTransport()
+    await t.start() // connected.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // Rust 가 나중에 새 어휘('connecting')를 emit 하면 조용히 오역하지 않고 안전측(down) 강등 + 경고.
+    emit('daemon-connection-state', 'connecting')
+    expect(t.connectionState).toBe('down')
+    const unknownWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('알 수 없는 연결 상태'),
+    )
+    expect(unknownWarns.length).toBe(1)
+    warnSpy.mockRestore()
+  })
+})
+
+// ── FIX 6: 출력 Channel 등록 single-flight(겹치는 등록 시 Rust 도착 순서 역전 방어) ──────────
+describe('TauriTransport 출력 Channel 등록 single-flight(FIX 6)', () => {
+  it('진행 중 등록에 겹쳐 온 재등록은 동시 invoke 를 만들지 않고 완료 후 1회만 재실행한다', async () => {
+    const t = new TauriTransport()
+    // 첫 연결의 subscribe_output 을 게이트로 막아 in-flight 로 둔다.
+    h.state.subscribeOutputGate = true
+    const startP = t.start() // connected emit → registerOutputChannel(게이트에 막힘).
+    await flush()
+    // 첫 등록의 invoke 1건이 떠 있고 아직 미완.
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    expect(h.state.subscribeOutputResolvers.length).toBe(1)
+    // 진행 중에 재연결 전이가 겹쳐 registerOutputChannel 이 또 불린다(reconnecting→connected).
+    emit('daemon-connection-state', 'reconnecting')
+    emit('daemon-connection-state', 'connected')
+    await flush()
+    // ★핵심 1★: 두 번째 invoke 가 겹쳐 뜨지 않는다(single-flight) — 여전히 1건만 in-flight.
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    // 첫 등록 완료(게이트 해제) → rerun 플래그로 정확히 1회 재등록(직렬, 겹침 없음).
+    h.state.subscribeOutputResolvers.shift()!()
+    await startP
+    await flush()
+    // 두 번째(rerun) invoke 도 게이트에 걸린다 — 풀어준다.
+    expect(h.state.subscribeOutputCalls).toBe(2)
+    expect(h.state.subscribeOutputResolvers.length).toBe(1)
+    h.state.subscribeOutputResolvers.shift()!()
+    await flush()
+    // 총 2회 등록으로 수렴, 동시 진행은 항상 ≤1(어느 시점에도 미해결 invoke 가 2개 이상 뜬 적 없음).
+    expect(h.state.subscribeOutputCalls).toBe(2)
+  })
+
+  it('close 는 진행 중 등록의 완료 후 재등록을 취소한다(좀비 Channel 방지)', async () => {
+    const t = new TauriTransport()
+    h.state.subscribeOutputGate = true
+    const startP = t.start()
+    await flush()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    // 진행 중 재등록 요청을 쌓아 rerun 플래그를 세운다.
+    emit('daemon-connection-state', 'reconnecting')
+    emit('daemon-connection-state', 'connected')
+    await flush()
+    // close → rerun 취소.
+    t.close()
+    // 진행 중 첫 등록 완료 → rerun 이 취소됐으므로 재등록 없음(총 1회에서 멈춤).
+    h.state.subscribeOutputResolvers.shift()!()
+    await startP.catch(() => {})
+    await flush()
+    expect(h.state.subscribeOutputCalls).toBe(1)
   })
 })
 

@@ -503,6 +503,16 @@
 - **잔재:** E2E 테스트 에이전트 json-* 프로필/세션(유저 확인 후 정리) · 첫 로드 핸들 미등록 레이스(리로드 1회로 복구 — vite optimize-deps 재현 2회째, 원인 추적 백로그) · RichSlot 텍스트 저대비 폴리시.
 - **다음:** M3 후보 = 도구 권한 승인 · partial 델타 · json resume · M0 오버레이 정리 · stderr 표면화 · 스폰 UI 정식 노출(지금은 __richslot.spawnJson §5 경로만).
 
+### 리로드 출력 두절 디버깅 — 연결 self-heal + pre-subscribe 버퍼링 + 리뷰 FIX 7건 (2026-07-02~03, master, fable)
+- **증상(사용자 발견):** M2 E2E 성공 직후 어느 시점부터 RichSlot 빈 화면·응답 두절. 입력은 claude에 도달·응답은 데몬 버퍼(24청크)에 쌓임 — **배달만 두절**. 사용자가 죽은 파이프에서 친 메시지들("안녕"·"dddd"·"ㅇㅇㅇ")도 전부 도달·응답 존재(재배정 replay로 전량 복원 실측).
+- **진단(디버거 opus, 라이브 프로브):** 근본 원인 = **선재 S14 버그** — 웹뷰 리로드 시 `TauriTransport`가 `_state='down'`으로 재생성되는데, 러스트 `DaemonClient`가 이미 Connected면 connect()/ensure()가 **transition emit 없이 조기 반환** → 프론트는 영원히 down → 창 출력 Channel 미등록 → **그 창의 모든 슬롯(터미널 포함) 출력 전면 두절**. M2 결함 아님.
+- **픽스 1(자가복구, 라이브 검증 PASS):** 러스트 `daemon_connection_state` 조회 커맨드 신설 + `TauriTransport.selfHeal()`(리스너 등록 직후 1회 pull → 이미 connected면 같은 경로로 채널 등록). 리로드 후 `state:connected + channel:true` 실측.
+- **픽스 2(pre-subscribe 버퍼링):** `ProtocolClient` — 구독자 없는 프레임을 (agentId,epoch) 버퍼(2MB 상한)에 보류, 첫 구독 시 seq 순 flush(ADR-0043 deliverable 게이트의 프론트 등가물). 터미널 슬롯도 동일 레이스 있었음(타이밍으로 이겨왔을 뿐).
+- **/review code full(opus doc-aware + Codex blind) → FIX 7건 반영:** unsubscribe 시 버퍼 정리(재적재 누수) · flush seq 정렬(비순차 도착 시 high-water 드랍 방지) · 단일 초과 프레임도 드랍(상한 실효화) · **epoch 조기확정 제거**(SubscribeAck=권위, ADR-0007) · selfHeal stale-pull 폐기 가드(stateVersion 카운터) · registerOutputChannel single-flight(좀비 Channel 방지) · 미지 상태어휘 방어. 게이트: tsc·vitest 181(+14) 그린.
+- **★남은 결함(미해결·known-issue)★:** 리로드 재등록 시 **러스트측 replay가 새 Channel로 재발화 안 함** — 프론트 정상(구독 존재·lastSeq -1 = 프레임 0개 도착 실측). S13의 리로드-replay 실측은 transport 레벨 직접 측정이었고 당시 메인창 슬롯 렌더가 stub → **이 경로는 e2e로 검증된 적 없던 공백**. 다음 세션: `commands/agent.rs` subscribe_output → replay_slots(fresh) → output_router가 새 Channel에 실제 배달하는지 트레이스. **워크어라운드 = 에이전트 재배정(전량 복원됨).**
+- **부수 확인:** 클라이언트(src-tauri 셸) 재기동 시 레이아웃(메모리) 소실로 배정 풀림 — 영속화는 기존 백로그(D-7)와 한 몸.
+- **다음:** ①위 러스트 replay 재발화 트레이스 ②M3 후보(권한 승인·partial·resume·스폰 UI·M0 오버레이 정리·stderr 표면화) ③레이아웃 영속화.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

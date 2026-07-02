@@ -52,6 +52,37 @@ interface Pending {
   reject: (e: unknown) => void
 }
 
+/**
+ * ★구독 전 도착 프레임 버퍼(ADR-0043 deliverable 게이트의 프론트 등가물)★.
+ *
+ * 리로드 시 창 출력 Channel 재등록(→ Rust replay flush)이 React 컴포넌트 마운트보다 *먼저* 온다 —
+ * 그때 이 agentId 에 등록된 구독자(subs 엔트리)가 아직 없어 handleOutput 이 프레임을 버리면, 그 창의
+ * 슬롯은 리로드 후 빈 화면이 된다(TerminalSlot·RichSlot 공통 레이스). 구독자가 없을 때 프레임을 여기
+ * 보류했다가, 첫 subscribeOutput 이 오면 seq 순서대로 flush 한다("Channel 등록된 뒤 replay flush"의 프론트
+ * 등가 — Rust 는 창 단위 게이트라 개별 React 슬롯 마운트를 못 안다).
+ *
+ * ★epoch 인지★: epoch 가 바뀌면(재시작·데몬 재기동) 옛 스트림 잔여 프레임은 새 세션에 무의미 → 버퍼를
+ *   비운다(handleOutput 의 epoch 리셋). ★bound★: agent 당 대략 2MB 넘으면 가장 오래된 프레임부터 버린다
+ *   (drop-oldest) — 구독 없이 무한 성장 방지. 앞부분 손실은 어차피 리로드 후 xterm 이 전체 replay 를 새로
+ *   받는 상황이라 치명적이지 않다(bound 초과는 비정상적으로 큰 버퍼 = 구독자가 영영 안 붙는 경우).
+ */
+interface PendingBuffer {
+  /**
+   * 이 버퍼가 담고 있는 프레임들의 epoch. 다른 epoch 프레임이 오면 통째 교체(stale 폐기). bufferPending
+   * 내부 구분용일 뿐 — flush 시 st.epoch 로 심지 않는다(epoch 권위 = SubscribeAck 단독, ADR-0007).
+   */
+  epoch: number
+  /** 보류된 프레임(도착 순). flush 는 seq 오름차순으로 정렬 후 배달(out-of-order 도착 방어 — FIX 2). */
+  frames: Array<{ seq: number; bytes: Uint8Array }>
+  /** 현재 담긴 바이트 총량(bound 판정용). drop-oldest 마다 감산. */
+  bytes: number
+  /** 이 agent 에 대해 bound 초과 warn 을 이미 냈는지(한 번만 경고 — 로그 스팸 방지). */
+  warned: boolean
+}
+
+/** agent 당 pre-subscribe 버퍼 상한(대략) — 이 이상 쌓이면 가장 오래된 프레임부터 버린다. */
+const PENDING_BUFFER_MAX_BYTES = 2 * 1024 * 1024
+
 type WireEvent = Record<string, unknown>
 
 export class ProtocolClient implements AgentClient {
@@ -62,6 +93,10 @@ export class ProtocolClient implements AgentClient {
   // request_id 를 echo 하므로 편승 매칭 없이 정확히 짝지어진다(protocol v2).
   private pending = new Map<string, Pending>()
   private subs = new Map<string, SubState>()
+  // ★구독 전 도착 프레임 버퍼(ADR-0043 프론트 등가)★: agentId → PendingBuffer. handleOutput 이 구독자
+  //   없는 프레임을 여기 보류하고, subscribeOutput 이 첫 구독 시 flush 한다. transport 리셋/disconnect·
+  //   close 에서 비운다(stale 방지).
+  private pendingBuffers = new Map<string, PendingBuffer>()
   // 구독마다 발급하는 단조증가 번호표 — stale-unsubscribe 가드(SubState.token). 인스턴스 내 비교만
   // 하므로 UUID 불필요, 정수로 충분.
   private subSeq = 0
@@ -101,6 +136,10 @@ export class ProtocolClient implements AgentClient {
         const lost = new Error('connection lost')
         for (const p of this.pending.values()) p.reject(lost)
         this.pending.clear()
+        // ★pre-subscribe 버퍼 폐기(transport 리셋/끊김)★: 연결이 끊기면 보류 프레임은 stale 이다 — 재연결
+        //   후엔 데몬이 after_seq 기준 replay 를 새로 주므로, 옛 보류분을 남기면 재구독 flush 때 낡은 프레임이
+        //   섞인다. 끊김 경계에서 비운다(끊긴 창은 어차피 재등록 시 전체 replay 를 새로 받음).
+        this.pendingBuffers.clear()
       }
     })
   }
@@ -136,7 +175,13 @@ export class ProtocolClient implements AgentClient {
   /** 정규화 output frame — epoch 가드 + high-water dedup 후 구독자 배달(DaemonClient.handleBinary 승격). */
   private handleOutput(f: { agentId: string; epoch: number; seq: number; bytes: Uint8Array }): void {
     const st = this.subs.get(f.agentId)
-    if (!st) return
+    if (!st) {
+      // ★구독자 없음 = 보류(ADR-0043 deliverable 게이트의 프론트 등가)★: 리로드 시 창 Channel 재등록으로
+      //   온 replay 프레임이 React 슬롯 마운트(subscribeOutput)보다 먼저 도착한 경우다. 그냥 버리면 그 창
+      //   슬롯이 빈 화면이 되므로(옛 결함), 첫 구독자가 붙을 때까지 버퍼에 담는다. epoch 인지 + bound.
+      this.bufferPending(f)
+      return
+    }
     // epoch 불일치 frame 은 옛 세션 잔여 — 버린다(SubscribeAck.current_epoch 기준).
     if (st.epoch !== undefined && f.epoch !== st.epoch) return
     // dedup — 클라가 실제 배달한 high-water(lastDeliveredSeq) 기준. 재연결 경계 중복 방어.
@@ -144,6 +189,50 @@ export class ProtocolClient implements AgentClient {
     if (f.seq <= st.lastDeliveredSeq) return
     st.lastDeliveredSeq = f.seq
     st.onChunk({ seq: f.seq, bytes: f.bytes })
+  }
+
+  /**
+   * 구독자 없는 프레임을 pre-subscribe 버퍼에 보류한다(handleOutput 의 st 미존재 분기).
+   *
+   * ★epoch 인지★: 담긴 버퍼와 다른 epoch 프레임이 오면 옛 스트림은 무의미 → 통째 교체(stale 폐기). 재시작
+   *   (epoch++)로 옛 replay 와 새 replay 가 섞여 순서가 꼬이는 걸 막는다. ★bound★: 총량이 상한을 넘으면 가장
+   *   오래된 프레임부터 버린다(drop-oldest, agent 당 warn 1회). 앞부분 손실은 flush 대상이 어차피 리로드 후
+   *   전체 replay 를 새로 받는 xterm 이라 치명적 아님(비정상적으로 큰 버퍼 = 구독자 영영 미부착).
+   */
+  private bufferPending(f: {
+    agentId: string
+    epoch: number
+    seq: number
+    bytes: Uint8Array
+  }): void {
+    let buf = this.pendingBuffers.get(f.agentId)
+    if (!buf || buf.epoch !== f.epoch) {
+      // 첫 프레임이거나 epoch 교체 — 새 버퍼로 시작(옛 epoch 잔여는 폐기).
+      buf = { epoch: f.epoch, frames: [], bytes: 0, warned: false }
+      this.pendingBuffers.set(f.agentId, buf)
+    }
+    buf.frames.push({ seq: f.seq, bytes: f.bytes })
+    buf.bytes += f.bytes.length
+    // bound 초과 → drop-oldest. flush 는 seq dedup 이 걸리므로 앞부분을 버려도 뒤 프레임 순서는 유지된다.
+    if (buf.bytes > PENDING_BUFFER_MAX_BYTES) {
+      if (!buf.warned) {
+        console.warn(
+          `[ProtocolClient] pre-subscribe 버퍼 상한 초과(agent=${f.agentId}) — 오래된 프레임 drop`,
+        )
+        buf.warned = true
+      }
+      while (buf.bytes > PENDING_BUFFER_MAX_BYTES && buf.frames.length > 1) {
+        const dropped = buf.frames.shift()!
+        buf.bytes -= dropped.bytes.length
+      }
+      // 마지막 1개만 남았는데도 상한 초과 = 단일 프레임이 bound 보다 크다. 그것도 버려 버퍼를 비운다
+      //   (bound = 메모리 보호가 목적 — 한 프레임이라도 무한 잔존하면 상한이 무의미). 앞부분 손실은
+      //   치명적 아님: 다음 마운트는 데몬 fresh replay 로 전체를 새로 받는다.
+      if (buf.bytes > PENDING_BUFFER_MAX_BYTES && buf.frames.length === 1) {
+        buf.frames.length = 0
+        buf.bytes = 0
+      }
+    }
   }
 
   // ── JSON control event 처리(DaemonClient.handleEvent 승격) ────────────────────────
@@ -311,7 +400,31 @@ export class ProtocolClient implements AgentClient {
     // epoch=undefined(Ack 전), lastDeliveredSeq=-1(아무것도 배달 안 함).
     // token 은 이 구독의 고유 번호표 — 아래 unsubscribe 가 stale 여부를 이걸로 판별한다.
     const token = ++this.subSeq
-    this.subs.set(agentId, { onChunk, epoch: undefined, lastDeliveredSeq: -1, token })
+    const st: SubState = { onChunk, epoch: undefined, lastDeliveredSeq: -1, token }
+    this.subs.set(agentId, st)
+    // ★pre-subscribe 버퍼 flush(ADR-0043 프론트 등가)★: 구독 전 도착해 보류된 프레임을 이 첫 구독자에게
+    //   seq 순서대로 배달한다 — 라이브 프레임보다 *먼저*(리로드 replay 를 놓치지 않게). handleOutput 과 같은
+    //   dedup 규율(seq<=lastDeliveredSeq drop)을 적용하고 high-water 를 전진시켜, flush 뒤 도착하는 라이브
+    //   프레임과 이음매 없이 이어진다. flush 후 버퍼는 제거(1회성 — 재구독은 새로 채워짐).
+    const buf = this.pendingBuffers.get(agentId)
+    if (buf) {
+      this.pendingBuffers.delete(agentId)
+      // ★epoch 조기 확정 금지(ADR-0007)★: 버퍼 epoch 를 st.epoch 로 심지 않는다 — epoch 권위는
+      //   SubscribeAck(데몬) 단독이다. 버퍼는 관측치일 뿐이라, 멀티 재시작+리로드 창에서 데몬 권위와
+      //   어긋나면(SubscribeAck 이 다른 epoch) high-water 리셋이 이미 렌더한 프레임과 어긋난다. st.epoch
+      //   는 undefined(= "아직 모름")로 두고, 첫 SubscribeAck 이 권위적으로 확정하게 한다. flush 중
+      //   epoch 가드(st.epoch undefined)는 자연 통과.
+      // ★seq 오름차순 정렬 후 flush(out-of-order 방어)★: 프레임은 도착 순으로 버퍼링되나, 도착 순서가
+      //   seq 순서와 다를 수 있다(예: [2,0,1]). 배열 순서대로 flush 하면 2 를 배달해 high-water 를 2 로
+      //   올린 뒤 0,1 이 dedup(seq<=high-water)으로 탈락한다. seq 오름차순으로 정렬해 이를 막는다.
+      //   같은 seq 는 dedup(seq<=lastDeliveredSeq)이 자연 제거한다.
+      const ordered = [...buf.frames].sort((a, b) => a.seq - b.seq)
+      for (const frame of ordered) {
+        if (frame.seq <= st.lastDeliveredSeq) continue
+        st.lastDeliveredSeq = frame.seq
+        st.onChunk({ seq: frame.seq, bytes: frame.bytes })
+      }
+    }
     // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는
     //   src-tauri 단독이다. 프론트가 `Subscribe{after_seq:null}`(FromOldest)를 데몬에 forward 하면,
     //   같은 agent 를 N 창이 보면 데몬이 FromOldest 를 N번 replay → src-tauri 공유 버퍼에 낮은 seq 가
@@ -323,7 +436,15 @@ export class ProtocolClient implements AgentClient {
         // ★현재 subs 엔트리가 내 토큰일 때만 delete — 재구독(epoch 교체/StrictMode)으로 새 SubState 가
         //   들어온 뒤 늦게 온 옛 unsubscribe 가 새 구독을 지우는 stale-unsubscribe 방지.
         //   subscribeOutput 이 async(ensureReady await)라 옛 unsubscribe 가 새 set 뒤에 도착할 수 있다.
-        if (this.subs.get(agentId)?.token === token) this.subs.delete(agentId)
+        if (this.subs.get(agentId)?.token === token) {
+          this.subs.delete(agentId)
+          // ★buffer refill 누수 방지★: 데몬(layout 구독 소유)은 이 창에 계속 프레임을 fan-out 하므로,
+          //   subs 만 지우면 handleOutput 의 "구독자 없음" 분기가 다시 버퍼에 무한 재적재한다(언마운트 agent
+          //   당 최대 2MB 상주 누수). 언마운트 시 버퍼를 비운다 — 다음 마운트는 어차피 데몬 fresh replay 로
+          //   복구된다. unsubscribe 이후 도착 프레임은 pre-subscribe 케이스로 새 버퍼를 시작하나 bound 로
+          //   묶여 안전하다.
+          this.pendingBuffers.delete(agentId)
+        }
         // ★Unsubscribe 도 데몬에 forward 안 함(BLOCK-1)★: 데몬 구독 해제도 layout 델타(1→0)가 소유한다.
         //   여기선 JS 콜백만 떼어 더는 이 agent frame 을 렌더하지 않게 한다(렌더러 역할 한정).
       },
@@ -443,6 +564,7 @@ export class ProtocolClient implements AgentClient {
     for (const p of this.pending.values()) p.reject(closed)
     this.pending.clear()
     this.subs.clear()
+    this.pendingBuffers.clear()
     if (this.offMessage) {
       this.offMessage()
       this.offMessage = null

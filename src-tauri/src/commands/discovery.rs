@@ -143,6 +143,32 @@ pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client
     client.close();
 }
 
+/// ★리로드 자가복구 pull 조회(Fix-D)★. 현재 DaemonClient 연결 상태를 문자열로 반환한다.
+///
+/// ★왜 필요한가★: Rust DaemonClient 는 `daemon-connection-state` 이벤트를 상태 *전이* 시에만 emit
+/// 한다 — connect()/ensure() 는 이미 Connected 면 emit 없이 Ok 로 단락한다(connection.rs 는 전이에서만
+/// app.emit). 그래서 웹뷰가 리로드되면(TauriTransport 재생성, _state='down') 새 창은 "이미 연결됨"을
+/// 알 방법이 없어 출력 Channel 을 등록하지 못하고 replay/live 가 전부 두절된다(창 단위 사각지대).
+/// 프론트 self-heal 이 리스너 등록 후 이 command 를 1회 pull 해 현재 상태를 확인한다.
+///
+/// ★문자열 어휘 정합★: `daemon-connection-state` 이벤트 payload 와 **동일한 어휘**("connected"/
+/// "reconnecting"/"down")로 직렬화한다 — 프론트가 이벤트 핸들러와 같은 코드 경로로 먹일 수 있게.
+/// Connecting(전이 중)은 이벤트로 emit 되지 않으므로(connection.rs 는 connected/reconnecting/down 만
+/// emit) 여기서도 "down"으로 접는다 — 프론트 ConnectionState 어휘(connected/reconnecting/down)와 일치.
+#[tauri::command]
+pub fn daemon_connection_state(
+    client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
+) -> String {
+    use crate::daemon_client::ConnectionState;
+    match client.state() {
+        ConnectionState::Connected => "connected",
+        ConnectionState::Reconnecting => "reconnecting",
+        // Connecting/Down 은 이벤트 어휘에 없거나 down 으로 접힌다 — 프론트가 non-connected 로 처리.
+        ConnectionState::Connecting | ConnectionState::Down => "down",
+    }
+    .to_string()
+}
+
 /// 데몬 종료 fallback(§5). daemon.json 의 pid 를 taskkill /F.
 ///
 /// ★graceful 우선★: 연결을 쥔 프론트는 먼저 StopDaemon AgentCommand(graceful, 자식 정리 후 자진
