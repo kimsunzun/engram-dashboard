@@ -30,7 +30,8 @@ use engram_dashboard_core::agent::types::{
 
 use engram_dashboard_core::agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
-    RestartPolicy as CoreRestartPolicy, RestoreOutcome as CoreRestoreOutcome,
+    ClaudeOutputFormat as CoreClaudeOutputFormat, RestartPolicy as CoreRestartPolicy,
+    RestoreOutcome as CoreRestoreOutcome,
 };
 use engram_dashboard_core::agent::types::{
     Capabilities as CoreCaps, OutputChunk as CoreOutputChunk,
@@ -39,10 +40,11 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_protocol::{
     AgentCommand, AgentEvent, AgentInfo as WireAgentInfo, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ControlCaps as WireControlCaps, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, RestartPolicy as WireRestartPolicy,
-    RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
-    SnapshotChunk as WireSnapshotChunk, SubscribeAction, PROTOCOL_VERSION,
+    ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
+    InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
+    RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
+    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk, SubscribeAction,
+    PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -310,6 +312,7 @@ fn caps_to_wire(c: &CoreCaps) -> WireCaps {
         },
         output: WireOutputCaps {
             terminal_bytes: c.output.terminal_bytes,
+            structured: c.output.structured,
             markdown: c.output.markdown,
             tool_events: c.output.tool_events,
             usage: c.output.usage,
@@ -394,8 +397,16 @@ pub(crate) fn core_agents_to_wire(agents: Vec<CoreAgentInfo>) -> Vec<WireAgentIn
 /// core profile::AgentCommand → wire AgentSpawnCommand. 2 variant 전수 명시.
 fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
     match cmd {
-        CoreSpawnCommand::Claude { extra_args } => WireSpawnCommand::Claude {
+        CoreSpawnCommand::Claude {
+            extra_args,
+            output_format,
+        } => WireSpawnCommand::Claude {
             extra_args: extra_args.clone(),
+            // output_format(ADR-0044) 명시 매핑 — 두 enum 전수 대응(추가 시 컴파일 에러).
+            output_format: match output_format {
+                CoreClaudeOutputFormat::Terminal => WireClaudeOutputFormat::Terminal,
+                CoreClaudeOutputFormat::StreamJson => WireClaudeOutputFormat::StreamJson,
+            },
         },
         CoreSpawnCommand::Shell { program, args } => WireSpawnCommand::Shell {
             program: program.clone(),
@@ -819,7 +830,12 @@ impl ConnectionCore {
                 // Tauri `create_claude_profile` 미러: claude 프로필 생성·upsert(스폰 안 함).
                 let profile = CoreProfile::new(
                     name,
-                    CoreSpawnCommand::Claude { extra_args },
+                    // M1(ADR-0044): CreateProfile wire 커맨드엔 아직 output_format 입력이 없다 →
+                    //   기본 Terminal 로 생성(기존 동작 불변). json 프로필 생성 UI/필드는 M2.
+                    CoreSpawnCommand::Claude {
+                        extra_args,
+                        output_format: CoreClaudeOutputFormat::Terminal,
+                    },
                     std::path::PathBuf::from(cwd),
                     env,
                     auto_restore,
@@ -1531,6 +1547,7 @@ mod tests {
                 },
                 output: OutputCaps {
                     terminal_bytes: true,
+                    structured: false,
                     markdown: false,
                     tool_events: false,
                     usage: false,
@@ -1579,6 +1596,7 @@ mod tests {
             },
             output: OutputCaps {
                 terminal_bytes: true,
+                structured: false,
                 markdown: false,
                 tool_events: false,
                 usage: false,

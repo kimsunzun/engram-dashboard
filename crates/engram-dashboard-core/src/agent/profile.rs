@@ -27,15 +27,48 @@ fn now_millis() -> i64 {
 
 // ── 중립 실행 명령 ─────────────────────────────────────────────────────────────
 
+/// claude 출력 포맷 — 프로세스 기동 방식(= transport)과 프론트 렌더러를 함께 가른다(ADR-0044).
+/// `Terminal` = PTY 대화형(기존, xterm 렌더). `StreamJson` = `-p` 헤드리스 NDJSON 스트림
+/// (StdioTransport + RichSlot 렌더). `stream-json` 은 claude `-p` 전용이라 "렌더러만 스왑"이
+/// 아니라 기동 경로 자체가 다르다(ADR-0044 §맥락).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClaudeOutputFormat {
+    /// PTY 대화형(기본). 옛 agents.json(필드 부재)도 이 값으로 역직렬화(하위호환).
+    #[default]
+    Terminal,
+    /// 헤드리스 stream-json(멀티턴 지속 프로세스). MVP=텍스트 챗(ADR-0044 §MVP 범위).
+    StreamJson,
+}
+
 /// 에이전트가 실제로 무엇을 실행하는가. claude 전용 해석(세션 인자 조립)은 claude.rs가 한다.
 /// 여기선 분기 태그와 사용자 추가 인자만 보관한다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum AgentCommand {
     /// claude CLI. `extra_args`는 세션 인자(`--session-id` 등)를 제외한 사용자 추가 인자.
-    Claude { extra_args: Vec<String> },
+    /// `output_format` 은 터미널/JSON 모드 선택(ADR-0044) — `#[serde(default)]` 라 옛 프로필·
+    /// 기존 호출자는 Terminal 로 흡수돼 동작 불변.
+    Claude {
+        extra_args: Vec<String>,
+        #[serde(default)]
+        output_format: ClaudeOutputFormat,
+    },
     /// 임의 셸 프로그램(검증·범용).
     Shell { program: String, args: Vec<String> },
+}
+
+impl AgentCommand {
+    /// json(stream-json) 모드 claude 인가 — manager 의 transport 선택(StdioTransport)과
+    /// 입력 인코딩(backend::input_encoder) 분기의 단일 판정(ADR-0044). 그 외는 전부 false.
+    pub fn is_json_mode(&self) -> bool {
+        matches!(
+            self,
+            AgentCommand::Claude {
+                output_format: ClaudeOutputFormat::StreamJson,
+                ..
+            }
+        )
+    }
 }
 
 /// spawn 시 세션 처리 방식. claude.rs가 이 값에 따라 인자를 다르게 조립한다.
@@ -348,7 +381,10 @@ mod tests {
     fn sample() -> AgentProfile {
         AgentProfile::new(
             "t".into(),
-            AgentCommand::Claude { extra_args: vec![] },
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: ClaudeOutputFormat::Terminal,
+            },
             PathBuf::from("."),
             vec![],
             true,
@@ -443,6 +479,43 @@ mod tests {
         assert_eq!(p.failed_reason, None);
         // 옛 last_restore 키는 무시되고 신규 last_start_at 은 default None
         assert_eq!(p.last_start_at, None);
+    }
+
+    // ── ADR-0044: output_format serde 하위호환 + is_json_mode 판정 ──────────────
+    #[test]
+    fn claude_command_without_output_format_defaults_terminal() {
+        // 옛 wire/agents.json 은 output_format 필드가 없다 → #[serde(default)] = Terminal.
+        let legacy = r#"{ "kind": "Claude", "extra_args": ["--foo"] }"#;
+        let cmd: AgentCommand =
+            serde_json::from_str(legacy).expect("legacy claude cmd deserialize");
+        assert!(
+            matches!(
+                &cmd,
+                AgentCommand::Claude { output_format: ClaudeOutputFormat::Terminal, extra_args }
+                    if extra_args == &vec!["--foo".to_string()]
+            ),
+            "output_format 부재 → Terminal + extra_args 보존"
+        );
+        assert!(!cmd.is_json_mode(), "Terminal 은 json 모드 아님");
+    }
+
+    #[test]
+    fn stream_json_command_roundtrips_and_is_json_mode() {
+        let cmd = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::StreamJson,
+        };
+        assert!(cmd.is_json_mode(), "StreamJson 은 json 모드");
+        // 직렬화→역직렬화 왕복 보존(wire/persist 호환).
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+        // shell 은 항상 json 모드 아님.
+        assert!(!AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![]
+        }
+        .is_json_mode());
     }
 
     #[test]

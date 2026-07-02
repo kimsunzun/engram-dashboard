@@ -485,6 +485,15 @@
 - **게이트:** `npx tsc --noEmit` OK · `npm test` 143 green(+6). **cdp 실측 PASS:** `__richslot.mountFocused()` → 실제 캔버스 슬롯에 showcase fixture 렌더(thinking 접힘·tool 행·마크다운·코드블록·inline diff, 트리 무손상) — 스샷 `_wip/shots/richslot-m0-mounted.png`. ※주의: 부팅 직후 vite dep 재최적화(monaco worker)로 리로드 1회 — 핸들 확인은 리로드 뒤에.
 - **다음:** M1 = protocol(spawn mode 필드) + core(`StdioTransport` TDD·caps 합성) → M2 = E2E(입력박스→실 claude JSON 왕복). 후속: 레이아웃 스타일 폴리시(일부 텍스트 저대비)·도구권한·partial·interrupt. 스파이크라 `/review` 생략(규약 예외), M1부터 리뷰 게이트 정상 가동.
 
+### JSON 렌더 M1 — StdioTransport + claude stream-json 백엔드 seam + 적대리뷰 FIX 6건 (2026-07-02, master, fable)
+- **보관 갈림길(선행):** "백엔드 풀 파싱·보관 vs 무정제" 재확인 리서치(/research light, sonnet 수집 1 + 메인 grounding — 로컬 1차 증거: `~/.claude/projects/` CLI 자체 JSONL 보관 실확인, fixture 1턴 assistant 4줄 반복 실측). 사용자 결정: **무정제 유지·풀 보관 안 감·ADR 개정도 안 함**(나중 고려).
+- **M1 코더(opus, 2패스 — 중단된 1차가 protocol/backend/types 선작업, 2차가 StdioTransport+배선 완성):** `AgentCommand`에 `output_format: Terminal|StreamJson`(serde default=Terminal) · `StdioTransport` 신설(파이프 자식, pump→TerminalBytes 무정제, stderr 별도 드레인, Job Object) · manager `select_transport`(json→stdio) · 세션 `InputEncoder`(json이면 backend `wrap_user_turn`으로 stdin 턴 wrapping — ADR-0004 격리) · caps 합성 structured. `--verbose` 미포함(help 실측: 강제 아님, M2 QA TODO).
+- **/review code full(opus doc-aware + Codex blind) → 판정 불일치(FIX vs BLOCK) 보고:** 두 family가 **같은 셧다운 데드락을 독립 적출**(send_input이 stdin 뮤텍스 잡고 블로킹 write 중이면 shutdown이 kill까지 못 감). Codex BLOCK 프레임은 "json 모드 미도달이라 FIX" 판단으로 수렴.
+- **FIX 6건(픽스 코더 opus):** ① kill 먼저→stdin try_lock 재정렬 + **결정적 회귀 테스트**(8MB 블로킹 write 중 shutdown 10s 내 완료) ② `structured`를 조립 주입(`StdioTransport::open(spec, structured)` — manager select_transport가 유일 "모드→적재물" 지점, 사용자 (b)안 채택: 술어 `is_json_mode` protocol 단일 정의 + 소비처는 반쪽 소유권대로 분산) ③ wire `OutputCaps.structured` serde(default)(버전 2 유지) ④ stderr 드레인 규율(spawn 실패 로그·debug 강등·mask_secrets) ⑤ json 모드 `resume:false` 정직 신고(sid 재사용 충돌 예방) ⑥ 1write=1턴 계약 주석 등 3건.
+- **재검증(fresh opus): 6건 전부 CLOSED·신규 결함 0·PASS.** 게이트: core 162 · protocol 33 · build · fmt · tauri import 0 · npm 143 · tsc 전부 그린.
+- **★별건 발견 — src-tauri lib 테스트 exe 기동 실패(0xc0000139 ENTRYPOINT_NOT_FOUND):** 어서션이 아니라 DLL 로드 단계, clean 리빌드도 재현, `target\debug`에 WebView2Loader.dll 부재 단서. M1은 src-tauri 소스 무접촉 + 이 테스트는 문서화 게이트에 없던 것 → 선재 정황으로 분리 트랙(진단 서브에이전트 조사). 원인 확정 전까지 workspace 루트 `cargo test`는 이 패키지에서 깨진다.
+- **다음:** M2 = 프론트 E2E(스폰 UI json 모드 노출 + RichSlot caps 분기 + 실스트림 증분 파싱·스냅샷 병합 + 입력박스) + 실 claude 왕복 QA(`--verbose` 필요 여부 실측). Codex 지적 이월: json 에이전트가 TerminalSlot에 물리는 라우팅(M2 본체).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

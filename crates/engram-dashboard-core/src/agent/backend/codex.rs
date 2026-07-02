@@ -60,7 +60,7 @@ impl AgentBackend for CodexBackend {
         // AgentCommand 분기: Codex variant 없으므로 Shell의 extra args를 패스스루하거나,
         // Claude의 extra_args를 그대로 붙인다. 실제 Codex 라우팅 시에는 전용 분기로 교체.
         match command {
-            AgentCommand::Claude { extra_args } => {
+            AgentCommand::Claude { extra_args, .. } => {
                 args.extend(extra_args.iter().cloned());
             }
             AgentCommand::Shell {
@@ -90,8 +90,8 @@ impl AgentBackend for CodexBackend {
     }
 
     /// 보수적 stub — CLI spike 전이라 실제 resume/model 능력 미상 → 전부 false.
-    /// spike 후 실측값으로 교체. dispatch 미연결이라 현재 호출 경로 없음(테스트 외).
-    fn capabilities(&self) -> BackendCaps {
+    /// spike 후 실측값으로 교체. dispatch 미연결이라 현재 호출 경로 없음(테스트 외). (stub: command 미사용.)
+    fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {
                 resume: false,
@@ -113,7 +113,10 @@ mod tests {
 
     fn spec(mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         CodexBackend.build_spec(
-            &AgentCommand::Claude { extra_args: vec![] },
+            &AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: crate::agent::profile::ClaudeOutputFormat::Terminal,
+            },
             mode,
             sid,
             PathBuf::from("."),
@@ -159,7 +162,10 @@ mod tests {
         let cwd = PathBuf::from("C:/workspace");
         let env = vec![("BAR".to_string(), "baz".to_string())];
         let s = CodexBackend.build_spec(
-            &AgentCommand::Claude { extra_args: vec![] },
+            &AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: crate::agent::profile::ClaudeOutputFormat::Terminal,
+            },
             SpawnMode::Fresh,
             None,
             cwd.clone(),

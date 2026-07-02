@@ -128,8 +128,27 @@ fn session_compose_resize_exiting_kill() {
     //    intent: ADR-0019 종료 의도 atomic(이 smoke 는 set_intent 안 함 → None=자연 종료 경로).
     let intent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     // 이 smoke 는 default_shell 을 띄우므로 backend caps 도 셸 기준(resume=false).
-    let backend_caps = ShellBackend.capabilities();
-    let session = AgentSession::new(id, cwd, 0, 80, 24, intent, backend_caps, core, transport);
+    // FIX 5: capabilities 는 command 를 받는다(mode 별 caps) — 셸 command 주입.
+    let backend_caps = ShellBackend.capabilities(
+        &engram_dashboard_core::agent::profile::AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        },
+    );
+    // 터미널 경로라 입력 인코딩은 Raw(바이트 무변환). ADR-0044.
+    let encoder = engram_dashboard_core::agent::backend::InputEncoder::Raw;
+    let session = AgentSession::new(
+        id,
+        cwd,
+        0,
+        80,
+        24,
+        intent,
+        backend_caps,
+        encoder,
+        core,
+        transport,
+    );
 
     // 5) subscribe → 초기 프롬프트 대기 → echo 입력 → session-test 출력.
     let out_sink = RecordingSink::new();

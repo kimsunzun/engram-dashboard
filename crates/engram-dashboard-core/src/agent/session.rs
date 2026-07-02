@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent::backend::InputEncoder;
 use crate::agent::output_core::OutputCore;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
@@ -39,6 +40,11 @@ pub struct AgentSession {
     /// 합성해 최종 Capabilities 를 만든다 — capabilities()가 `Capabilities::compose` 로 매번 합성.
     /// manager.spawn 이 profile.command 로 산출해 주입한다(transport 는 이 값을 모른다).
     backend_caps: BackendCaps,
+    /// write_input 을 transport 로 넘기기 **직전** 적용하는 입력 인코딩(ADR-0044/0004).
+    /// 터미널·shell = Raw(바이트 무변환, 기존 동작 불변). json 모드 claude = ClaudeStreamJson
+    /// (텍스트 턴을 claude 유저 JSON 라인으로 감쌈 — 스키마는 backend/claude.rs 단독 소유).
+    /// session 은 이 태그만 들고 실제 스키마를 모른다(격리). manager.spawn 이 산출해 주입한다.
+    encoder: InputEncoder,
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
 }
@@ -56,6 +62,7 @@ impl AgentSession {
         rows: u16,
         intent: Arc<AtomicU8>,
         backend_caps: BackendCaps,
+        encoder: InputEncoder,
         core: Arc<OutputCore>,
         transport: Box<dyn AgentTransport>,
     ) -> Self {
@@ -67,6 +74,7 @@ impl AgentSession {
             rows: AtomicU16::new(rows),
             intent,
             backend_caps,
+            encoder,
             core,
             transport,
         }
@@ -87,9 +95,23 @@ impl AgentSession {
         self.transport.start(self.core.clone());
     }
 
-    /// 입력 바이트 전달 → transport(PTY=writer). 콘솔은 Raw variant.
+    /// 입력 바이트 전달 → (encoder 적용) → transport.
+    ///
+    /// ★배선 지점(ADR-0044)★: 여기서 encoder를 적용해 텍스트 턴을 백엔드 규약대로 감싼 뒤
+    ///   **항상 Raw 바이트**로 transport에 넘긴다. transport는 바보 파이프라 형태를 모른다.
+    ///   - Raw(터미널·shell): `encode`가 바이트를 그대로 복사 → 기존 경로와 **바이트 동일**.
+    ///   - ClaudeStreamJson(json 모드): 텍스트를 claude 유저 JSON 라인으로 감싼다(escape·스키마는
+    ///     backend/claude.rs 단독 — session은 태그만 들고 형태를 모른다, ADR-0004 격리).
+    ///
+    /// ★호출 계약(FIX 6a) — json 모드에서 `1 write_input 호출 == 완결된 유저 턴 1개`★:
+    ///   ClaudeStreamJson 인코더는 매 호출을 `{"type":"user",…}\n` 라인 **하나**로 감싼다. 즉 호출
+    ///   1회당 claude 는 유저 턴 1개를 통째로 받는다. 터미널 경로처럼 **키 입력 1글자씩** 호출하면
+    ///   글자마다 한 글자짜리 잘못된 턴이 만들어져 대화가 깨진다. 따라서 json 모드 호출자(RichSlot·M2)는
+    ///   **완성된 메시지 전체를 한 번에** 보내야 한다(부분 입력 누적은 프론트 입력창 몫). 터미널 경로는
+    ///   Raw 라 기존대로 스트리밍 바이트 호출이 정상(이 계약은 json 모드 한정).
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.transport.send_input(InputEvent::Raw(bytes.to_vec()))
+        let encoded = self.encoder.encode(bytes);
+        self.transport.send_input(InputEvent::Raw(encoded))
     }
 
     /// 터미널 크기 변경. transport.resize 성공 후에만 cols/rows atomic 갱신(? 연산자로 실패 시 옛 값 유지).
@@ -167,5 +189,159 @@ impl AgentSession {
 
     pub fn rows(&self) -> u16 {
         self.rows.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::backend::{AgentBackend, ClaudeBackend, ShellBackend};
+    use crate::agent::transport::stdio::StdioTransport;
+    use crate::agent::types::{ControlCaps, InputCaps, OutputCaps, TransportCaps};
+    use std::sync::Mutex;
+
+    /// send_input에 도착한 바이트를 그대로 기록하는 mock transport — write_input의 인코딩
+    /// 배선을 실 프로세스 없이 단언하기 위한 격리 하네스(ADR-0012).
+    struct CapturingTransport {
+        captured: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+    impl AgentTransport for CapturingTransport {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            self.captured.lock().unwrap().push(bytes);
+            Ok(())
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: true,
+                    structured: false,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+
+    struct NoopStatusSink;
+    impl crate::agent::types::StatusSink for NoopStatusSink {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<crate::agent::types::AgentInfo>) {}
+    }
+
+    fn session_with(encoder: InputEncoder) -> (AgentSession, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let id = uuid::Uuid::new_v4();
+        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let transport = Box::new(CapturingTransport {
+            captured: captured.clone(),
+        });
+        let shell_cmd = crate::agent::profile::AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let session = AgentSession::new(
+            id,
+            PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            ShellBackend.capabilities(&shell_cmd),
+            encoder,
+            core,
+            transport,
+        );
+        (session, captured)
+    }
+
+    // ── Raw 인코더: write_input이 바이트를 무변환으로 넘긴다(터미널 경로 회귀 불변) ──
+    #[test]
+    fn write_input_raw_is_byte_identical() {
+        let (session, captured) = session_with(InputEncoder::Raw);
+        let input = b"echo hi\r\n\x1b[A\x03";
+        session.write_input(input).unwrap();
+        let got = captured.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], input.to_vec(), "Raw 는 바이트 동일이어야 함");
+    }
+
+    // ── ClaudeStreamJson 인코더: write_input이 claude 유저 JSON 라인으로 감싼다(ADR-0044) ──
+    #[test]
+    fn write_input_json_mode_wraps_as_stream_json_line() {
+        let (session, captured) = session_with(InputEncoder::ClaudeStreamJson);
+        session.write_input(b"hello").unwrap();
+        let got = captured.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        let line = &got[0];
+        assert_eq!(*line.last().unwrap(), b'\n', "라인 종단 \\n");
+        let s = String::from_utf8(line.clone()).unwrap();
+        assert!(s.contains("\"type\":\"user\""), "user 턴 스키마: {s}");
+        assert!(s.contains("\"text\":\"hello\""), "text 보존: {s}");
+    }
+
+    // ── json 모드 세션 caps: StdioTransport ⊕ ClaudeBackend 합성 → 구조화 출력 + resize/interrupt false ──
+    #[cfg(windows)]
+    #[test]
+    fn json_mode_session_caps_are_structured() {
+        let id = uuid::Uuid::new_v4();
+        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
+        let spec = crate::agent::types::CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo probe".into()],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+        // json 모드 = structured 캐리어 → StdioTransport 에 structured=true 주입(조립점 매핑).
+        let (transport, _pid) = StdioTransport::open(&spec, true).expect("open");
+        // json 모드 command — backend 가 이걸 보고 mode 별 caps(resume=false, FIX 5)를 산출한다.
+        let json_cmd = crate::agent::profile::AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: crate::agent::profile::ClaudeOutputFormat::StreamJson,
+        };
+        let session = AgentSession::new(
+            id,
+            PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            // json 모드도 backend는 여전히 ClaudeBackend(resume/model은 프로그램 소관, ADR-0030).
+            ClaudeBackend.capabilities(&json_cmd),
+            InputEncoder::ClaudeStreamJson,
+            core,
+            Box::new(transport),
+        );
+        let caps = session.capabilities();
+        assert!(caps.output.structured, "json 세션 → 구조화 출력");
+        assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
+        assert!(!caps.control.resize, "resize 불가");
+        assert!(!caps.control.interrupt, "interrupt 불가(MVP)");
+        // ★FIX 5★: json 모드는 resume=false(fresh sid 강제) — 예전 true 신고는 sid 충돌 지뢰였다.
+        assert!(
+            !caps.session.resume,
+            "json 모드 세션 → resume=false(ADR-0044 후속, sid fresh 강제)"
+        );
+        session.kill(Duration::from_secs(5));
     }
 }

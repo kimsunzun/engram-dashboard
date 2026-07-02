@@ -75,6 +75,7 @@ impl AgentTransport for ApiTransport {
             },
             output: OutputCaps {
                 terminal_bytes: false,
+                structured: false,
                 markdown: false,
                 tool_events: false,
                 usage: false,

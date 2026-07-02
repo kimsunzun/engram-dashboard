@@ -7,7 +7,7 @@ import { mergeTreeNodes } from './mergeTreeNodes'
 
 const caps = (interrupt: boolean): Capabilities => ({
   input: { raw: true, message: false, attachment: false },
-  output: { terminal_bytes: true, markdown: false, tool_events: false, usage: false },
+  output: { terminal_bytes: true, structured: false, markdown: false, tool_events: false, usage: false },
   control: { resize: true, interrupt, cancel: false, graceful_shutdown: false },
   session: { resume: true, snapshot: false, cwd_env: true },
   model: { select: false, temperature: false, max_tokens: false },
@@ -35,7 +35,7 @@ function profile(id: string, name = '', createdAt = 0): AgentProfile {
   return {
     id,
     name,
-    command: { kind: 'Claude', extra_args: [] },
+    command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd: 'C:/x',
     env: [],
     claude_session_id: null,

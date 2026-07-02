@@ -19,6 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::agent::backend;
+use crate::agent::backend::InputEncoder;
 use crate::agent::output_core::OutputCore;
 use crate::agent::profile::{
     AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
@@ -27,6 +28,7 @@ use crate::agent::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::agent::session::AgentSession;
 use crate::agent::session_tracker::SessionTracker;
 use crate::agent::transport::pty::PtyTransport;
+use crate::agent::transport::stdio::StdioTransport;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
     AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, OutputChunk, OutputSink, PtyError,
@@ -50,6 +52,39 @@ pub fn default_shell() -> &'static str {
 #[cfg(not(windows))]
 pub fn default_shell() -> &'static str {
     "bash"
+}
+
+/// 모드에 따라 transport를 고른다(ADR-0044 SEAM 1 조립 분기). json 모드 = StdioTransport(파이프,
+/// 구조화 출력 캐리어), 그 외(터미널·shell) = PtyTransport(ConPTY, 기존 동작 불변).
+///
+/// 조립 규칙(양 끝 3지점 중 ①): backend가 mode 보고 CommandSpec 인자를 구성하고, manager는 여기서
+/// transport 종류를 고른다. transport 자체는 claude/json을 모른다 — spec만 받아 프로세스를 띄운다.
+/// 반환: (박싱된 transport, child_pid). 별도 함수로 뺀 이유 = 실 claude 없이 선택 로직을 단위
+/// 테스트하기 위함(ADR-0012 격리 — json→structured caps / 터미널→아님).
+///
+/// ★조립점 — "mode → 통로가 나르는 것"의 단일 위치(FIX 2, 사용자 요청: 한 곳에 모음)★:
+///   transport 종류 선택뿐 아니라 **출력이 구조화(NDJSON)인지도 여기서 결정해 주입**한다. 파이프
+///   자체는 내용을 모르므로(통로 무정제 불변) StdioTransport 는 structured 를 하드코딩하지 않고
+///   이 지점의 주입값을 받아 caps 로 신고한다. json 모드 = claude `--output-format stream-json` →
+///   NDJSON 캐리어 → structured=true. 터미널(PtyTransport)은 그 자체로 terminal-bytes(구조화 아님).
+///   출처 분리(output=transport 소유, ADR-0030)는 유지 — 값만 이 조립점에서 주입한다.
+// ADR-0044
+// ADR-0030
+fn select_transport(
+    json_mode: bool,
+    spec: &CommandSpec,
+    cols: u16,
+    rows: u16,
+) -> Result<(Box<dyn AgentTransport>, Option<u32>), PtyError> {
+    if json_mode {
+        // json 모드: PTY 없는 파이프. cols/rows는 파이프에 개념 없어 무시.
+        // structured=true 주입 — json 모드가 곧 NDJSON 캐리어라는 mode→caps 매핑(위 조립점 규칙).
+        let (t, pid) = StdioTransport::open(spec, true)?;
+        Ok((Box::new(t), pid))
+    } else {
+        let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+        Ok((Box::new(t), pid))
+    }
 }
 
 pub struct AgentManager {
@@ -157,7 +192,14 @@ impl AgentManager {
         // session이 transport caps와 compose 한다(claude=resume true, shell=resume false 정확화).
         let bcaps = backend::backend_caps(&profile.command);
 
-        let (session, child_pid) = self.spawn_session(profile.id, spec, bcaps, epoch)?;
+        // ADR-0044 조립 분기(양 끝 3지점): json 모드면 StdioTransport 선택 + 입력을 claude 유저 JSON
+        // 라인으로 감싸는 encoder. 그 외는 PtyTransport + Raw(터미널 경로 바이트 불변). 판정은
+        // 프로필 command 단일 출처(is_json_mode/input_encoder) — spawn_session은 backend를 모른다.
+        let json_mode = profile.command.is_json_mode();
+        let encoder = backend::input_encoder(&profile.command);
+
+        let (session, child_pid) =
+            self.spawn_session(profile.id, spec, bcaps, encoder, json_mode, epoch)?;
 
         // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
         if let (Some(s), Some(pid)) = (sid, child_pid) {
@@ -175,15 +217,20 @@ impl AgentManager {
 
     /// PtyTransport open + OutputCore 생성 + pump 기동(transport.start) + AgentSession 합성 +
     /// sessions 등록의 공통 기계부. 반환: 등록된 세션 Arc + child PID(Option).
+    #[allow(clippy::too_many_arguments)]
     fn spawn_session(
         &self,
         id: AgentId,
         spec: CommandSpec,
         backend_caps: BackendCaps,
+        encoder: InputEncoder,
+        json_mode: bool,
         epoch: u32,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
-        // 1. PTY 생성 + child spawn + job 편입 + reader/writer 확보. pump는 아직 안 띄움.
-        let (transport, child_pid) = PtyTransport::open(&spec, DEFAULT_COLS, DEFAULT_ROWS)?;
+        // 1. 모드에 맞는 transport 조립(json=StdioTransport 파이프 / 그 외=PtyTransport ConPTY).
+        //    child spawn + job 편입 + 파이프/reader·writer 확보. pump는 아직 안 띄움(start에서).
+        let (transport, child_pid) =
+            select_transport(json_mode, &spec, DEFAULT_COLS, DEFAULT_ROWS)?;
 
         // 2. 출력 측 core 생성(status Running, seq 0). transport와 분리된 출력 fanout 담당.
         let core = Arc::new(OutputCore::new(id, epoch, self.status_sink.clone()));
@@ -213,10 +260,10 @@ impl AgentManager {
             }));
         }
 
-        // 3. transport를 trait object로 박싱.
-        let transport: Box<dyn AgentTransport> = Box::new(transport);
+        // 3. transport는 select_transport가 이미 Box<dyn AgentTransport>로 박싱해 반환한다.
 
         // 4. core + transport를 AgentSession으로 합성(cols/rows atomic은 session 보유).
+        //    encoder(입력 인코딩 태그)도 함께 주입 — write_input이 transport로 넘기기 전 적용.
         let session = Arc::new(AgentSession::new(
             id,
             spec.cwd.clone(),
@@ -225,6 +272,7 @@ impl AgentManager {
             DEFAULT_ROWS,
             intent,
             backend_caps,
+            encoder,
             core,
             transport,
         ));
@@ -582,5 +630,53 @@ impl Drop for AgentManager {
         if let Some(handle) = self.reaper_handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// harmless 자식(cmd.exe /c echo, 즉시 종료)으로 spec을 만든다 — 실 claude 없이 transport
+    /// **선택 로직**만 검증하기 위한 격리 하네스(ADR-0012). transport의 caps로 어느 종류가
+    /// 골렸는지 판정한다(spawn한 프로세스는 shutdown으로 정리).
+    #[cfg(windows)]
+    fn probe_spec() -> CommandSpec {
+        CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo select-probe".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        }
+    }
+
+    // ── ADR-0044: manager가 json 모드엔 StdioTransport(구조화 caps)를 고른다 ──
+    #[cfg(windows)]
+    #[test]
+    fn select_transport_json_mode_picks_stdio_structured() {
+        let (transport, _pid) =
+            select_transport(true, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS).expect("select");
+        let caps = transport.capabilities();
+        assert!(
+            caps.output.structured && !caps.output.terminal_bytes,
+            "json 모드 → StdioTransport(structured 출력, 터미널 바이트 아님)"
+        );
+        assert!(!caps.control.resize, "파이프 resize 불가");
+        transport.shutdown();
+    }
+
+    // ── 회귀: 터미널 모드는 PtyTransport(터미널 바이트, resize 가능, 구조화 아님) ──
+    #[cfg(windows)]
+    #[test]
+    fn select_transport_terminal_mode_picks_pty() {
+        let (transport, _pid) =
+            select_transport(false, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS).expect("select");
+        let caps = transport.capabilities();
+        assert!(
+            caps.output.terminal_bytes && !caps.output.structured,
+            "터미널 모드 → PtyTransport(터미널 바이트, 구조화 아님)"
+        );
+        assert!(caps.control.resize, "PTY resize 가능");
+        transport.shutdown();
     }
 }

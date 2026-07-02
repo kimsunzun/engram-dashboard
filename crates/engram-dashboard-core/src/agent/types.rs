@@ -159,6 +159,14 @@ pub struct InputCaps {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OutputCaps {
     pub terminal_bytes: bool,
+    /// 출력이 구조화 스트림(NDJSON 등)이라 터미널 렌더가 아닌 파싱 렌더(RichSlot)가 필요함을 신고(ADR-0044).
+    /// ★출처(ADR-0030)★: output 은 transport 소유 영역이다 — StdioTransport(json 모드 캐리어)는 조립점
+    /// 주입값(json=true), PtyTransport(터미널)는 false 로 정직 신고한다.
+    /// ★현 배선 상태(FIX 6c)★: caps 기반 렌더러 분기(xterm vs RichSlot)는 **M2 예정이며 아직 미배선**이다
+    /// — 이 필드를 "현재 프론트 렌더 분기의 유일 근거"로 오독하지 말 것. M0 스파이크는 viewStore.richSlots
+    /// 오버레이로 슬롯을 가른다. 이 필드는 M2 에서 그 분기의 근거가 되도록 **의도된** 신호다(ADR-0002).
+    /// 내용 해석 아님(통로 무정제 불변) — "이 바이트 스트림은 터미널이 아니다"라는 렌더 힌트일 뿐.
+    pub structured: bool,
     pub markdown: bool,
     pub tool_events: bool,
     pub usage: bool,
@@ -321,6 +329,7 @@ mod tests {
             },
             output: OutputCaps {
                 terminal_bytes: true,
+                structured: false,
                 markdown: false,
                 tool_events: false,
                 usage: false,

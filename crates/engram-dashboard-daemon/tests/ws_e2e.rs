@@ -1982,7 +1982,7 @@ async fn case35_ws_create_profile() {
     assert_eq!(created.name, "p35", "Created 에 동봉된 프로필 이름 일치");
     assert_eq!(created.cwd, sent_cwd, "Created 에 동봉된 cwd 일치");
     assert!(
-        matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args } if extra_args == &vec!["--foo".to_string()]),
+        matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args, .. } if extra_args == &vec!["--foo".to_string()]),
         "claude 프로필이 extra_args 보존"
     );
     assert!(created.auto_restore, "auto_restore 반영");

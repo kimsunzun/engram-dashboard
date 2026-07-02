@@ -41,6 +41,13 @@ pub struct InputCaps {
 #[ts(export)]
 pub struct OutputCaps {
     pub terminal_bytes: bool,
+    /// 구조화 스트림(NDJSON) 여부 — M2 렌더러 분기(xterm vs RichSlot)를 위한 신호(ADR-0044). core 미러.
+    /// `#[serde(default)]`(FIX 3): M1 에서 새로 추가된 필드라, 이 필드가 없는 옛 wire(구 데몬/프론트)를
+    /// 받아도 관용적으로 false 로 역직렬화한다(sibling `output_format` 과 같은 additive·tolerant 접근 —
+    /// PROTOCOL_VERSION 유지). ts-rs 는 serde(default) 를 optional 로 표기하지 않으므로 TS 는 여전히
+    /// `structured: boolean`(non-optional) — 프론트는 손댈 필요 없다.
+    #[serde(default)]
+    pub structured: bool,
     pub markdown: bool,
     pub tool_events: bool,
     pub usage: bool,
@@ -125,13 +132,28 @@ pub struct RestoreReport {
 // 독립 타입을 두고, core↔wire 명시 변환은 데몬이 한다(reflection 왕복 금지 — agent_info_to_wire 패턴).
 // 프론트 `src/api/types.ts` 의 AgentProfile/AgentCommand/RestartPolicy 와 글자 그대로 일치.
 
+/// claude 출력 포맷 wire 미러 — core `profile::ClaudeOutputFormat` 와 동일(ADR-0044).
+/// Terminal=PTY 대화형, StreamJson=헤드리스 NDJSON. 프론트 `src/api/types.ts` 와 글자 그대로 일치.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ClaudeOutputFormat {
+    #[default]
+    Terminal,
+    StreamJson,
+}
+
 /// 에이전트 실행 명령 wire 미러 — core `profile::AgentCommand` 와 동일(`#[serde(tag="kind")]`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export)]
 pub enum AgentSpawnCommand {
     /// claude CLI. extra_args 는 세션 인자를 제외한 사용자 추가 인자.
-    Claude { extra_args: Vec<String> },
+    /// output_format 은 터미널/JSON 모드(ADR-0044) — `#[serde(default)]` 라 옛 프로필은 Terminal.
+    Claude {
+        extra_args: Vec<String>,
+        #[serde(default)]
+        output_format: ClaudeOutputFormat,
+    },
     /// 임의 셸 프로그램.
     Shell { program: String, args: Vec<String> },
 }

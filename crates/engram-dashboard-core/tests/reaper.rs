@@ -322,7 +322,15 @@ fn make_test_session(
         80,
         24,
         intent,
-        ShellBackend.capabilities(),
+        // FIX 5: capabilities 는 이제 command 를 받는다(mode 별 caps). 이 더미 세션엔 셸 command 로 충분.
+        ShellBackend.capabilities(
+            &engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+        ),
+        // 이 테스트 세션은 write_input 을 안 쓰지만 생성자가 encoder 를 요구 → Raw 더미.
+        engram_dashboard_core::agent::backend::InputEncoder::Raw,
         core,
         Box::new(ApiTransport::new()),
     ))

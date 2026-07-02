@@ -36,9 +36,9 @@ pub use codec::{
 };
 pub use discovery::DaemonInfo;
 pub use domain::{
-    AgentInfo, AgentProfile, AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, InputCaps,
-    ModelCaps, OutputCaps, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
-    SnapshotChunk,
+    AgentInfo, AgentProfile, AgentSpawnCommand, AgentStatus, Capabilities, ClaudeOutputFormat,
+    ControlCaps, InputCaps, ModelCaps, OutputCaps, RestartPolicy, RestoreOutcome, RestoreReport,
+    SessionCaps, SnapshotChunk,
 };
 pub use ids::{AgentId, ProfileId, RequestId};
 pub use messages::{AgentCommand, AgentEvent, OutputChunk, SubscribeAction};

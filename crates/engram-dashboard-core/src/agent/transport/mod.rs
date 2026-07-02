@@ -15,6 +15,7 @@ use crate::agent::types::{InputEvent, PtyError, TransportCaps};
 
 pub mod api;
 pub mod pty;
+pub mod stdio;
 
 /// 에이전트 백엔드(PTY/API)를 추상화하는 seam. AgentSession이 `Box<dyn AgentTransport>`로 보유.
 ///

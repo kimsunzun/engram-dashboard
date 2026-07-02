@@ -30,6 +30,8 @@ export interface InputCaps {
 /** 출력 포맷 지원 여부 */
 export interface OutputCaps {
   terminal_bytes: boolean
+  /** 구조화 스트림(NDJSON) 여부 — 렌더러 분기(xterm vs RichSlot) 근거 (ADR-0044) */
+  structured: boolean
   markdown: boolean
   tool_events: boolean
   usage: boolean
@@ -91,9 +93,12 @@ export interface AgentStatusChanged {
 
 // ── S9: 프로필 + 복원 ──────────────────────────────────────────────────────────
 
+/** claude 출력 포맷 — Terminal=PTY(xterm) / StreamJson=헤드리스 NDJSON(RichSlot). (ADR-0044) */
+export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
+
 /** 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치 */
 export type AgentCommand =
-  | { kind: 'Claude'; extra_args: string[] }
+  | { kind: 'Claude'; extra_args: string[]; output_format: ClaudeOutputFormat }
   | { kind: 'Shell'; program: string; args: string[] }
 
 export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'

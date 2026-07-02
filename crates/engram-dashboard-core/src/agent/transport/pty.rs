@@ -367,6 +367,8 @@ impl AgentTransport for PtyTransport {
             },
             output: OutputCaps {
                 terminal_bytes: true,
+                // PtyTransport 는 터미널 바이트 캐리어 — 구조화 아님(xterm 렌더). ADR-0030/0044.
+                structured: false,
                 markdown: false,
                 tool_events: false,
                 usage: false,

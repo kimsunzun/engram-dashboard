@@ -47,8 +47,8 @@ impl AgentBackend for ShellBackend {
 
     /// ★이번 정확화의 핵심★: 범용 셸은 `--resume` 같은 세션 재개 개념이 없다 → resume=false.
     /// 예전엔 transport 가 backend 무관하게 resume=true 를 하드코딩해 shell 이 부정확했다.
-    /// cwd_env=true(셸도 cwd 에서 실행). model 옵션 없음.
-    fn capabilities(&self) -> BackendCaps {
+    /// cwd_env=true(셸도 cwd 에서 실행). model 옵션 없음. (셸은 mode 개념이 없어 command 미사용.)
+    fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {
                 resume: false,
@@ -91,7 +91,11 @@ mod tests {
     fn capabilities_resume_is_false() {
         // 핵심 회귀: 범용 셸은 --resume 없음 → resume=false 여야 한다(이전 부정확 = transport
         // 가 backend 무관하게 resume=true 하드코딩했던 것을 backend 소관으로 바로잡음).
-        assert!(!ShellBackend.capabilities().session.resume);
+        let cmd = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        assert!(!ShellBackend.capabilities(&cmd).session.resume);
     }
 
     #[test]

@@ -81,6 +81,11 @@ impl OutputCore {
         }
     }
 
+    /// 이 core 의 agent 식별자(불변). transport 가 로그 계측(stderr drain 등)에 맥락 필드로 쓴다.
+    pub fn id(&self) -> AgentId {
+        self.id
+    }
+
     /// finalize-시점 hook 주입 — spawn_session 이 sessions 맵 등록 전에 1회 호출한다.
     /// 클로저는 finalized.swap 승자 경로에서만(=정확히 1회) 불린다. ★race 방지★:
     /// 클로저 내부에서 intent·shutting_down 을 그 순간 snapshot 해 ReapMsg 를 빌드·송신해야 한다.
