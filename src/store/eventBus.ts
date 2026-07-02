@@ -51,6 +51,14 @@ export function initEventBus(): Promise<void> {
       // (ADR-0035: 레이아웃 권위 = src-tauri). 각 액션은 viewStore → 대응 invoke → 백엔드 emit →
       // listen → 화면 반영 루프를 탄다. createView/split 은 Promise<id> 라 cdp eval 에서 await 가능.
       // 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항).
+      // ★렌더 모드 오버라이드(§5)★: 슬롯 렌더러(터미널/rich/dom)를 강제하는 프론트 전용 override.
+      // richSlots 처럼 백엔드 invoke 를 안 타고 viewStore 프론트 상태만 흔든다(override라 권위 레이아웃과 무관).
+      //   window.__engramLayout.setRenderMode('<nodeId>', 'dom'|'rich'|'terminal')  // 렌더러 강제
+      //   window.__engramLayout.clearRenderMode('<nodeId>')                          // 해제(caps 유도 기본 복귀)
+      // ★DOM 모드 별칭★: 평문 DOM(<pre>)로 렌더시켜 CDP eval/innerText 로 출력을 읽히게 한다(터미널
+      // xterm 은 canvas 라 innerText 로 안 읽힘). set/clearRenderMode 위 얇은 래퍼 — 검증 툴링이 이 이름을 씀.
+      //   window.__engramLayout.toggleDomMode('<nodeId>')   // slot node.id(=data-slot-id) 로 켬/끔(dom↔기본)
+      //   window.__engramLayout.enableDomMode('<nodeId>')   // 켬(= setRenderMode(id,'dom')) · disableDomMode 로 끔
       ;(globalThis as Record<string, unknown>).__engramLayout = {
         createView: useViewStore.getState().createView,
         closeView: useViewStore.getState().closeView,
@@ -58,6 +66,11 @@ export function initEventBus(): Promise<void> {
         split: useViewStore.getState().split,
         closeSlot: useViewStore.getState().closeSlot,
         assignAgent: useViewStore.getState().assignAgent,
+        setRenderMode: useViewStore.getState().setRenderMode,
+        clearRenderMode: useViewStore.getState().clearRenderMode,
+        enableDomMode: useViewStore.getState().enableDomMode,
+        disableDomMode: useViewStore.getState().disableDomMode,
+        toggleDomMode: useViewStore.getState().toggleDomMode,
       }
 
       // ★★★ M0 스파이크(임시) — ADR-0044 RichSlot 배선 ★★★: fixture 로 구동되는 구조화 렌더 슬롯

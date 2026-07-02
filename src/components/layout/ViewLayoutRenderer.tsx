@@ -12,6 +12,8 @@ import { useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
 import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
+import DomSlot from '../slot/DomSlot'
+import { defaultRenderMode } from '../slot/renderMode'
 
 function nodeKey(node: LayoutNode): string {
   if (node.type === 'slot') return `s${node.id}`
@@ -29,6 +31,8 @@ export default function ViewLayoutRenderer({
   // 프론트 전용(백엔드 wire LayoutNode 엔 없음) — agent 없는 빈 슬롯에만 적용(M3 에서 제거).
   const richSlots = useViewStore(s => s.richSlots)
   const mountRich = useViewStore(s => s.mountRich)
+  // ★렌더 모드 오버라이드(§5)★: caps 유도 기본(defaultRenderMode) 대신 강제할 slot node.id → RenderMode.
+  const renderModeOverride = useViewStore(s => s.renderModeOverride)
   // ★M2 caps 분기(ADR-0044)★: agent 배정 슬롯의 렌더러는 그 agent 의 output caps 로 고른다.
   // structured(NDJSON 캐리어=StdioTransport)면 라이브 RichSlot, 아니면 TerminalSlot(xterm). caps 는
   // AgentInfo 로 이미 wire 를 건너와 store 에 있다(M1) — 여기선 조회만(추가 배선 불필요).
@@ -47,7 +51,9 @@ export default function ViewLayoutRenderer({
     //   홀더는 일시적 엣지 상태다 — 터미널 replay 경로는 종전과 동일.)
     // 구조화 출력(NDJSON) = 라이브 RichSlot, 아니면 TerminalSlot(xterm) 분기 근거(ADR-0002/0044).
     const capsReady = node.agent_id != null && agent != null
-    const isStructured = agent?.capabilities.output.structured ?? false
+    // caps-ready 슬롯의 렌더러: 오버라이드가 있으면 그걸, 없으면 caps 에서 유도한 기본(defaultRenderMode).
+    // agent 는 capsReady 분기(아래 agent != null)에서만 사용되므로 여기선 null 병합만 걸어둔다.
+    const mode = agent != null ? (renderModeOverride[node.id] ?? defaultRenderMode(agent)) : null
     const isRich = node.agent_id == null && !!richSlots[node.id]
     // hasContent = 구체 렌더러/rich fixture 를 그리는 경우만(래퍼를 100% 채움). caps 대기 플레이스홀더는
     // empty 슬롯처럼 중앙정렬 스타일로 둔다(hasContent=false).
@@ -83,14 +89,28 @@ export default function ViewLayoutRenderer({
       >
         {node.agent_id != null ? (
           agent == null ? (
-            // caps(AgentInfo) 미도착 — 중립 플레이스홀더(위 replay 소유권 주석 참조). 래퍼의 empty 슬롯
-            // 스타일(중앙정렬·muted)을 그대로 상속받아 첫 구체 렌더러 마운트를 caps 확정까지 미룬다.
+            // ★caps-ready 게이팅(replay 소유권)★: caps(AgentInfo) 미도착 시 중립 플레이스홀더만(위 replay
+            // 소유권 주석 참조). 구체 렌더러(DomSlot/RichSlot/TerminalSlot) 마운트를 caps 확정까지 미뤄
+            // assign 시점 replay 를 온전히 받게 한다. 래퍼의 empty 슬롯 스타일(중앙정렬·muted)을 상속.
             <span>에이전트 연결 중…</span>
-          ) : isStructured ? (
-            // 라이브 RichSlot — 실스트림 구독([agentId,epoch]). epoch 은 재spawn 재구독 트리거.
-            <RichSlot key={node.agent_id} agentId={node.agent_id} epoch={agent.epoch} />
           ) : (
-            <TerminalSlot key={node.agent_id} agentId={node.agent_id} />
+            // caps 도착 후에만 도달 — mode 는 여기서 non-null(위 defaultRenderMode ?? 오버라이드).
+            // 오버라이드가 있으면 그 렌더러, 없으면 caps 유도 기본. 이 switch 는 위 caps-ready 게이팅 안에
+            // 있어 replay 소유권을 그대로 지킨다(caps 도착 전엔 마운트 안 함 → assign replay 온전).
+            (() => {
+              switch (mode) {
+                case 'dom':
+                  // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
+                  // 한다(터미널 xterm 은 canvas 라 관측 불가).
+                  return <DomSlot key={node.agent_id} agentId={node.agent_id} epoch={agent.epoch} />
+                case 'rich':
+                  // 라이브 RichSlot — 실스트림 구독([agentId,epoch]). epoch 은 재spawn 재구독 트리거.
+                  return <RichSlot key={node.agent_id} agentId={node.agent_id} epoch={agent.epoch} />
+                case 'terminal':
+                default:
+                  return <TerminalSlot key={node.agent_id} agentId={node.agent_id} />
+              }
+            })()
           )
         ) : isRich ? (
           <RichSlot />

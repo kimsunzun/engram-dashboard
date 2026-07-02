@@ -72,6 +72,13 @@ vi.mock('../slot/RichSlot', () => ({
   default: () => <div data-testid="rich-slot" />,
 }))
 
+// ── DomSlot stub(§5 관측용) — 구독 배선 없이 마운트 여부·agentId prop 만 확인 ──
+vi.mock('../slot/DomSlot', () => ({
+  default: ({ agentId }: { agentId: string }) => (
+    <div data-testid="dom-slot" data-agent-id={agentId} />
+  ),
+}))
+
 // ── @xterm stub — TerminalSlot 이 실제로 렌더되지 않지만 import 해소 방어용 ────
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -99,7 +106,7 @@ import { useViewStore } from '../../store/viewStore'
 
 afterEach(() => {
   cleanup()
-  useViewStore.setState({ richSlots: {} }) // 스파이크 오버레이 격리(테스트 간 누수 방지)
+  useViewStore.setState({ richSlots: {}, renderModeOverride: {} }) // 프론트 전용 오버레이 격리(테스트 간 누수 방지)
   agentStoreState.agents = [] // agent store holder 초기화(테스트 간 누수 방지)
 })
 
@@ -227,6 +234,82 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.getByTestId('rich-slot')).toBeTruthy()
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
     expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
+  })
+
+  // ── RenderMode 기본 유도(defaultRenderMode): 오버라이드 없을 때 caps 로 렌더러가 정해진다 ──────────
+  it('오버라이드 없음 + structured=true caps → 기본 유도로 RichSlot(TerminalSlot 없음)', () => {
+    const agentId = 'derive-rich'
+    seedAgents(agentInfo(agentId, true)) // defaultRenderMode → 'rich'
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('rich-slot')).toBeTruthy()
+    expect(screen.queryByTestId('terminal-slot')).toBeNull()
+  })
+
+  it('오버라이드 없음 + structured=false caps → 기본 유도로 TerminalSlot(RichSlot 없음)', () => {
+    const agentId = 'derive-terminal'
+    seedAgents(agentInfo(agentId, false)) // defaultRenderMode → 'terminal'
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('terminal-slot')).toBeTruthy()
+    expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  // ── 오버라이드가 기본을 이긴다(setRenderMode) ────────────────────────────────────────────────
+  it('setRenderMode(id,"terminal")는 structured 기본(rich)을 덮어 TerminalSlot 을 마운트한다', () => {
+    const agentId = 'override-terminal'
+    seedAgents(agentInfo(agentId, true)) // 기본은 rich 지만 오버라이드가 이긴다
+    useViewStore.getState().setRenderMode('s1', 'terminal')
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('terminal-slot')).toBeTruthy()
+    expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  it('setRenderMode(id,"rich")는 비structured 기본(terminal)을 덮어 RichSlot 을 마운트한다', () => {
+    const agentId = 'override-rich'
+    seedAgents(agentInfo(agentId, false)) // 기본은 terminal 이지만 오버라이드가 이긴다
+    useViewStore.getState().setRenderMode('s1', 'rich')
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('rich-slot')).toBeTruthy()
+    expect(screen.queryByTestId('terminal-slot')).toBeNull()
+  })
+
+  // ── DOM 오버라이드(§5 관측): caps 기본 렌더러보다 우선, caps-ready 게이팅은 유지 ──────────────
+  it('renderModeOverride=dom 인 slot(caps 도착) → DomSlot 이 마운트되고 Terminal/Rich 는 없다', () => {
+    const agentId = 'dom-agent'
+    seedAgents(agentInfo(agentId, false)) // 비structured(터미널 기본)라도 DOM 모드가 우선해야 한다
+    useViewStore.getState().setRenderMode('s1', 'dom')
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    const dom = screen.getByTestId('dom-slot')
+    expect(dom).toBeTruthy()
+    expect(dom.getAttribute('data-agent-id')).toBe(agentId)
+    expect(screen.queryByTestId('terminal-slot')).toBeNull()
+    expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  it('renderModeOverride=dom 은 structured caps 기본(rich)보다 우선(DomSlot, RichSlot 아님)', () => {
+    const agentId = 'dom-struct-agent'
+    seedAgents(agentInfo(agentId, true)) // structured=true(기본은 RichSlot)여도 DOM 모드가 우선
+    useViewStore.getState().setRenderMode('s1', 'dom')
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('dom-slot')).toBeTruthy()
+    expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  it('renderModeOverride=dom 이라도 caps 미도착 → DomSlot 안 뜨고 "에이전트 연결 중…"(replay 게이팅 유지)', () => {
+    // caps 미도착이면 오버라이드가 있어도 구체 렌더러를 마운트하지 않는다(스왑 전 바이트 유실 방지 — replay 소유권).
+    useViewStore.getState().setRenderMode('s1', 'dom')
+    render(<ViewLayoutRenderer node={slotNode('s1', 'not-in-store')} focusedSlotId={null} />)
+    expect(screen.queryByTestId('dom-slot')).toBeNull()
+    expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+  })
+
+  it('clearRenderMode(id)로 오버라이드 해제 시 caps 유도 기본으로 복귀한다', () => {
+    const agentId = 'clear-agent'
+    seedAgents(agentInfo(agentId, false)) // 기본 = terminal
+    useViewStore.getState().setRenderMode('s1', 'dom')
+    useViewStore.getState().clearRenderMode('s1') // 해제 → 기본(terminal)으로 복귀
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('terminal-slot')).toBeTruthy()
+    expect(screen.queryByTestId('dom-slot')).toBeNull()
   })
 })
 

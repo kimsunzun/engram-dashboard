@@ -24,6 +24,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 
 import type { LayoutNode, SplitDir, ViewMeta, ViewSnapshot } from '../api/layoutTypes'
+import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 
 /** view:list-updated 페이로드(ViewListPayload 미러, commands/layout.rs). */
 interface ViewListPayload {
@@ -55,6 +56,15 @@ interface ViewState {
    */
   richSlots: Record<string, true>
 
+  /**
+   * ★렌더 모드 오버라이드(§5)★: slot node.id → 강제 RenderMode. caps 유도 기본 렌더러
+   * (defaultRenderMode: structured→'rich' / else→'terminal')를 무시하고 지정한 렌더러를 마운트한다.
+   * 미지정 slot 은 여기 키가 없어 기본 유도로 떨어진다(?? defaultRenderMode).
+   * ★프론트 전용★ — richSlots 와 동형으로 백엔드 wire LayoutNode 는 이 개념을 모른다(override라 권위
+   * 레이아웃과 무관). 그래서 이 필드도 invoke→emit 권위 루프를 안 탄다(richSlots 와 같은 예외).
+   */
+  renderModeOverride: Record<string, RenderMode>
+
   // ── 액션(각각 대응 invoke 만 호출 — 상태는 emit 으로만 갱신) ──────────────────────
   /** 새 view 생성 → active. 반환 = 새 view_id(이걸로 이후 split 대상 지정). */
   createView: (name?: string) => Promise<string>
@@ -75,6 +85,20 @@ interface ViewState {
   /** slot 의 RichSlot 스파이크를 걷는다(다시 empty 로). */
   unmountRich: (slotId: string) => void
 
+  // ── ★렌더 모드 오버라이드(§5)★ 지정/해제(프론트 전용, invoke 안 탐) ──────────────────────────
+  /** slot 의 렌더러를 mode 로 강제(caps 유도 기본을 덮음). */
+  setRenderMode: (nodeId: string, mode: RenderMode) => void
+  /** slot 의 오버라이드 해제(caps 유도 기본 렌더러로 복귀). */
+  clearRenderMode: (nodeId: string) => void
+
+  // ── ★DOM 모드 얇은 별칭(§5 관측)★: setRenderMode/clearRenderMode 위 래퍼(검증 툴링이 이 이름을 씀) ──
+  /** slot 을 DOM 모드로(= setRenderMode(id,'dom')). */
+  enableDomMode: (nodeId: string) => void
+  /** slot 의 DOM 모드 해제(= clearRenderMode(id)). */
+  disableDomMode: (nodeId: string) => void
+  /** slot 의 DOM 모드 토글(dom ↔ 기본). */
+  toggleDomMode: (nodeId: string) => void
+
   // ── emit 수신 핸들러(eventBus 가 listen 콜백에서 호출) ───────────────────────────
   /** layout:updated 수신 — 그 view_id 캐시 항목을 version 가드 통과 시 갱신. */
   applyLayoutUpdated: (snap: ViewSnapshot) => void
@@ -91,14 +115,25 @@ export const useViewStore = create<ViewState>((set, get) => ({
   views: [],
   activeViewId: null,
   richSlots: {}, // ★스파이크★ 프론트 전용 오버레이(ADR-0044 M0) — 아래 mountRich/unmountRich 로만 갱신.
+  renderModeOverride: {}, // ★오버라이드★ 프론트 전용(§5) — 아래 set/clearRenderMode(+DOM 별칭)로만 갱신.
 
   createView: viewName => invoke<string>('create_view', { name: viewName ?? null }),
   closeView: viewId => invoke<void>('close_view', { viewId }),
   switchView: viewId => invoke<void>('switch_view', { viewId }),
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
-  closeSlot: (viewId, slotId) => invoke<void>('close_slot', { viewId, slotId }),
-  assignAgent: (viewId, slotId, agentId) =>
-    invoke<void>('assign_agent', { viewId, slotId, agentId }),
+  closeSlot: (viewId, slotId) => {
+    // slot 이 사라지므로 그 slot 의 렌더 오버라이드 엔트리도 즉시 제거(누수 방지 — 프론트 전용 상태라
+    // invoke→emit 권위 루프를 안 타는 richSlots/renderModeOverride 는 여기서 낙관적으로 정리한다).
+    get().clearRenderMode(slotId)
+    return invoke<void>('close_slot', { viewId, slotId })
+  },
+  assignAgent: (viewId, slotId, agentId) => {
+    // slot UUID 는 재배정에도 안정(agent_id 만 바뀐다) → 이전 agent 를 위해 건 오버라이드가 새 agent 에
+    // 조용히 적용되면 안 된다. 그래서 assign 시 그 slot 의 오버라이드를 clear 해 새 agent 는 caps 유도
+    // 기본으로 시작하게 한다(프론트 전용 낙관 갱신 — richSlots 와 동형, 권위 루프 밖).
+    get().clearRenderMode(slotId)
+    return invoke<void>('assign_agent', { viewId, slotId, agentId })
+  },
 
   // ★M0 스파이크 예외★: 다른 액션과 달리 invoke 를 안 부른다 — 백엔드가 rich 개념을 모르므로(M2 caps
   // 정식화 전) "권위=백엔드·낙관 갱신 X" 규칙의 스파이크 한정 예외로 프론트 상태를 직접 set 한다.
@@ -109,6 +144,34 @@ export const useViewStore = create<ViewState>((set, get) => ({
       delete next[slotId]
       return { richSlots: next }
     }),
+
+  // ★렌더 모드 오버라이드도 richSlots 와 같은 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set
+  // (override 라 백엔드 권위 레이아웃과 무관).
+  setRenderMode: (nodeId, mode) => {
+    // ★미타입 JS 진입 가드(FIX-4)★: window.__engramLayout 경유로 임의 문자열이 올 수 있다. 유효 mode 가
+    // 아니면 store 에 쓰지 않고 no-op — 무효 값이 오버라이드로 새면 ViewLayoutRenderer switch 가 그걸
+    // 조용히 terminal 로 떨어뜨려(default) 의도와 다른 렌더가 되므로, 쓰기 전에 걸러 경고만 남긴다.
+    if (!isRenderMode(mode)) {
+      console.warn(`[viewStore] setRenderMode: 무효 mode 무시 — ${JSON.stringify(mode)}`)
+      return
+    }
+    set(state => ({ renderModeOverride: { ...state.renderModeOverride, [nodeId]: mode } }))
+  },
+  clearRenderMode: nodeId =>
+    set(state => {
+      const next = { ...state.renderModeOverride }
+      delete next[nodeId] // 키 제거 → 렌더러가 ?? defaultRenderMode 로 caps 유도 기본으로 복귀.
+      return { renderModeOverride: next }
+    }),
+
+  // ★DOM 모드 = 얇은 별칭★(검증 툴링이 이 이름을 계속 씀 — 제거 금지). enable/disable/toggle 을
+  // set/clearRenderMode 위에 얹은 래퍼로만 정의(도메인 상태는 renderModeOverride 하나뿐).
+  enableDomMode: nodeId => get().setRenderMode(nodeId, 'dom'),
+  disableDomMode: nodeId => get().clearRenderMode(nodeId),
+  toggleDomMode: nodeId =>
+    get().renderModeOverride[nodeId] === 'dom'
+      ? get().clearRenderMode(nodeId)
+      : get().setRenderMode(nodeId, 'dom'),
 
   applyLayoutUpdated: snap => {
     // 그 view_id 캐시 항목의 version 보다 클 때만 갱신(전역 단조라 같은 view 내 단조 비교가 성립).

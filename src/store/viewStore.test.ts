@@ -543,3 +543,57 @@ describe('RichSlot 스파이크 오버레이(mountRich/unmountRich)', () => {
     expect(useViewStore.getState().richSlots['slot-A']).toBe(true)
   })
 })
+
+// ★렌더 모드 오버라이드(§5, 프론트 전용)★: set/clear + slot 생명주기 정리(FIX-1) + 미타입 진입 가드(FIX-4).
+// richSlots 처럼 invoke→emit 권위 루프를 안 타는 프론트 전용 상태라 순수 로직만 검증한다.
+describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => {
+  beforeEach(() => {
+    // 위 공통 beforeEach 는 renderModeOverride 를 초기화하지 않으므로(setState 부분 갱신) 여기서 격리.
+    useViewStore.setState({ renderModeOverride: {} })
+  })
+
+  it('closeSlot 은 그 slot 의 오버라이드를 clear 한다(slot 소멸 → 엔트리 누수 방지, FIX-1)', async () => {
+    useViewStore.getState().setRenderMode('s-close', 'dom')
+    expect(useViewStore.getState().renderModeOverride['s-close']).toBe('dom')
+    await useViewStore.getState().closeSlot('v1', 's-close')
+    // slotId 는 closeSlot 두 번째 인자에서 온다 → 그 엔트리가 제거돼야 한다.
+    expect(useViewStore.getState().renderModeOverride['s-close']).toBeUndefined()
+    // 대응 invoke 는 그대로 부른다(낙관 clear 는 invoke 와 병행).
+    expect(invokeMock).toHaveBeenCalledWith('close_slot', { viewId: 'v1', slotId: 's-close' })
+  })
+
+  it('assignAgent 은 그 slot 의 오버라이드를 clear 한다(이전 agent 오버라이드가 새 agent 에 새지 않게, FIX-1)', async () => {
+    useViewStore.getState().setRenderMode('s-assign', 'rich')
+    expect(useViewStore.getState().renderModeOverride['s-assign']).toBe('rich')
+    await useViewStore.getState().assignAgent('v1', 's-assign', 'agent-new')
+    // slotId 는 assignAgent 두 번째 인자에서 온다 → 재배정 시 그 slot 의 오버라이드 제거.
+    expect(useViewStore.getState().renderModeOverride['s-assign']).toBeUndefined()
+    expect(invokeMock).toHaveBeenCalledWith('assign_agent', {
+      viewId: 'v1',
+      slotId: 's-assign',
+      agentId: 'agent-new',
+    })
+  })
+
+  it('closeSlot 은 다른 slot 의 오버라이드는 건드리지 않는다', async () => {
+    useViewStore.getState().setRenderMode('s-keep', 'dom')
+    useViewStore.getState().setRenderMode('s-gone', 'rich')
+    await useViewStore.getState().closeSlot('v1', 's-gone')
+    expect(useViewStore.getState().renderModeOverride['s-gone']).toBeUndefined()
+    expect(useViewStore.getState().renderModeOverride['s-keep']).toBe('dom') // 무관 slot 은 유지
+  })
+
+  it('setRenderMode(무효 mode) → no-op(store 불변) + console.warn(FIX-4)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // window.__engramLayout 경유 미타입 JS 가 넘길 수 있는 잘못된 값.
+    ;(useViewStore.getState().setRenderMode as (n: string, m: unknown) => void)('s1', 'bogus')
+    expect(useViewStore.getState().renderModeOverride['s1']).toBeUndefined() // store 에 안 씀
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('setRenderMode(유효 mode) → 정상 기록', () => {
+    useViewStore.getState().setRenderMode('s1', 'dom')
+    expect(useViewStore.getState().renderModeOverride['s1']).toBe('dom')
+  })
+})
