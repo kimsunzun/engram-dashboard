@@ -47,6 +47,14 @@ interface ViewState {
   /** 메인 창 활성 탭(view:list-updated / 첫 layout emit). 렌더 대상 캐시 키. */
   activeViewId: string | null
 
+  /**
+   * ★M0 스파이크(임시) — ADR-0044★: fixture 로 구동되는 RichSlot(구조화 JSON 렌더)을 띄운 slot_id 집합.
+   * ★프론트 전용 오버레이★ — 백엔드 wire LayoutNode 는 rich 개념을 모른다(M2 에서 transport caps 로
+   * xterm↔RichSlot 를 정식 분기하기 전까지의 임시 마킹). 그래서 이 필드만은 invoke→emit 권위 루프를
+   * 타지 않는다(위 "낙관적 갱신 X" 규칙의 스파이크 한정 예외). 실슬롯 콘텐츠(agent_id)는 불변.
+   */
+  richSlots: Record<string, true>
+
   // ── 액션(각각 대응 invoke 만 호출 — 상태는 emit 으로만 갱신) ──────────────────────
   /** 새 view 생성 → active. 반환 = 새 view_id(이걸로 이후 split 대상 지정). */
   createView: (name?: string) => Promise<string>
@@ -60,6 +68,12 @@ interface ViewState {
   closeSlot: (viewId: string, slotId: string) => Promise<void>
   /** slot 에 agent 참조 배정. */
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
+
+  // ── ★M0 스파이크(임시) — ADR-0044★ RichSlot 오버레이 마운트/해제(프론트 전용, invoke 안 탐) ──────
+  /** slot 에 RichSlot(fixture 구동 JSON 모드) 스파이크를 띄운다. */
+  mountRich: (slotId: string) => void
+  /** slot 의 RichSlot 스파이크를 걷는다(다시 empty 로). */
+  unmountRich: (slotId: string) => void
 
   // ── emit 수신 핸들러(eventBus 가 listen 콜백에서 호출) ───────────────────────────
   /** layout:updated 수신 — 그 view_id 캐시 항목을 version 가드 통과 시 갱신. */
@@ -76,6 +90,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   layouts: {},
   views: [],
   activeViewId: null,
+  richSlots: {}, // ★스파이크★ 프론트 전용 오버레이(ADR-0044 M0) — 아래 mountRich/unmountRich 로만 갱신.
 
   createView: viewName => invoke<string>('create_view', { name: viewName ?? null }),
   closeView: viewId => invoke<void>('close_view', { viewId }),
@@ -84,6 +99,16 @@ export const useViewStore = create<ViewState>((set, get) => ({
   closeSlot: (viewId, slotId) => invoke<void>('close_slot', { viewId, slotId }),
   assignAgent: (viewId, slotId, agentId) =>
     invoke<void>('assign_agent', { viewId, slotId, agentId }),
+
+  // ★M0 스파이크 예외★: 다른 액션과 달리 invoke 를 안 부른다 — 백엔드가 rich 개념을 모르므로(M2 caps
+  // 정식화 전) "권위=백엔드·낙관 갱신 X" 규칙의 스파이크 한정 예외로 프론트 상태를 직접 set 한다.
+  mountRich: slotId => set(state => ({ richSlots: { ...state.richSlots, [slotId]: true } })),
+  unmountRich: slotId =>
+    set(state => {
+      const next = { ...state.richSlots }
+      delete next[slotId]
+      return { richSlots: next }
+    }),
 
   applyLayoutUpdated: snap => {
     // 그 view_id 캐시 항목의 version 보다 클 때만 갱신(전역 단조라 같은 view 내 단조 비교가 성립).

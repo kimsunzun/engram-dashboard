@@ -477,6 +477,14 @@
 - **lab 발견:** `src/lab/richslot/` = 구조화(JSON) 출력 렌더러 스파이크(stream-json 파싱→마크다운·Monaco 코드·툴콜, 독립 실행 `dev:richslot`). 통합 계획이 옛 slotStore 기준 → 이주와 한 몸.
 - **다음:** **슬롯 UI 이주 PRD**(slotStore→viewStore, 다음 세션 — Explore 스코핑 먼저) 범위 A(UI 제어 이주)+B(RichSlot 통합)+C(렌더러 선택=출력 capability로 xterm/RichSlot 분기, 백엔드 stream-json spawn=ADR). 백로그: i18n(하드코딩 한글→로컬라이징 테이블)·우클릭 통일 UX. 이월: 평면 B(案 A=프론트 subs fan-out 확정)·ADR 앵커 부착·FreshFallback 배너.
 
+### JSON 렌더 착수 — stream-json 실계약 규명 + 배선 결정(ADR-0044) + M0 RichSlot 스파이크 배선·실측 PASS (2026-07-02, master, fable)
+- **계기:** 핸드오프 트랙①(JSON 렌더 본류·미착수) 이어받음 — 조사 → 사용자 제시 → 배선 확정 → M0.
+- **리서치(서브에이전트 3병렬):** Explore(랩 매핑 — richslot = 5레이아웃 갤러리+프리셋+렌더토글, 층분리 완성) · Explore(백엔드 seam 10곳 갭맵) · general sonnet(claude CLI 실계약 스파이크). **★핵심 규명: `--output-format/--input-format stream-json`은 `-p` 전용("only works with --print" 실측, claude 2.1.170)** → PTY 대화형에선 JSON 불가, JSON 모드 = 별도 헤드리스 경로 확정.
+- **배선 결정(사용자 승인) → ADR-0044:** 모드=transport 교체(`StdioTransport` 신설) + **통로 무정제(바보 파이프)** — OutputCore·codec·데몬·프론트 transport 변경 0, 분기는 양끝 3지점(조립 인자/caps 합성/슬롯 렌더러). 멀티턴=지속 프로세스(stdin JSON 턴 주입, `--replay-user-messages` 단일출처). 거부: 턴별 재기동(-p --resume)·typed wire variant(10 seam, MVP 이득 0). MVP=텍스트 입출력만(권한승인·partial·interrupt 후속). 인덱스 재생성·lint clean(error 0).
+- **M0 스파이크(코더 opus):** `RichSlot.tsx` 신설(랩 import, 복제 0 — fixture 5종+레이아웃/렌더토글 툴바) · viewStore에 프론트 전용 오버레이 `richSlots`+`mountRich/unmountRich`(백엔드 권위 레이아웃 불가침, M2에 통째 제거 예정) · ViewLayoutRenderer 3분기(agent→터미널 우선 / rich / empty+데브버튼) · `window.__richslot` §5 임시 제어표면(eventBus 등록).
+- **게이트:** `npx tsc --noEmit` OK · `npm test` 143 green(+6). **cdp 실측 PASS:** `__richslot.mountFocused()` → 실제 캔버스 슬롯에 showcase fixture 렌더(thinking 접힘·tool 행·마크다운·코드블록·inline diff, 트리 무손상) — 스샷 `_wip/shots/richslot-m0-mounted.png`. ※주의: 부팅 직후 vite dep 재최적화(monaco worker)로 리로드 1회 — 핸들 확인은 리로드 뒤에.
+- **다음:** M1 = protocol(spawn mode 필드) + core(`StdioTransport` TDD·caps 합성) → M2 = E2E(입력박스→실 claude JSON 왕복). 후속: 레이아웃 스타일 폴리시(일부 텍스트 저대비)·도구권한·partial·interrupt. 스파이크라 `/review` 생략(규약 예외), M1부터 리뷰 게이트 정상 가동.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

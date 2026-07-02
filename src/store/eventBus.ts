@@ -6,7 +6,7 @@
 
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from './agentStore'
-import { subscribeViewEvents, useViewStore } from './viewStore'
+import { selectActiveView, subscribeViewEvents, useViewStore } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
@@ -59,6 +59,37 @@ export function initEventBus(): Promise<void> {
         closeSlot: useViewStore.getState().closeSlot,
         assignAgent: useViewStore.getState().assignAgent,
       }
+
+      // ★★★ M0 스파이크(임시) — ADR-0044 RichSlot 배선 ★★★: fixture 로 구동되는 구조화 렌더 슬롯
+      // (JSON 모드)을 캔버스 슬롯에 소환하는 임시 제어 표면(§5 — cdp.mjs eval / 콘솔이 정식 command 버스
+      // 전까지 쓰는 임시 경로). 백엔드 권위 레이아웃엔 안 닿는 프론트 전용 오버레이(viewStore.richSlots)를
+      // 흔든다 — M2(StdioTransport 실스트림 + caps 분기) 서면 이 핸들·오버레이 통째로 제거.
+      //   window.__richslot.mountFocused()  // active view 의 focused 슬롯에 RichSlot 마운트
+      //   window.__richslot.mount('<slotId>')   // 특정 슬롯(생략 시 focused)
+      //   window.__richslot.unmount('<slotId>') // 해제(생략 시 focused)
+      //   window.__richslot.list()           // 현재 rich 슬롯 id 목록
+      const focusedSlotId = (): string | null =>
+        selectActiveView(useViewStore.getState())?.focusedSlotId ?? null
+      const richslot = {
+        mount: (slotId?: string): string | null => {
+          const target = slotId ?? focusedSlotId()
+          if (!target) {
+            console.warn('[richslot] mount 대상 슬롯 없음 (focused slot 없음 — slotId 를 넘기세요)')
+            return null
+          }
+          useViewStore.getState().mountRich(target)
+          return target
+        },
+        mountFocused: (): string | null => richslot.mount(),
+        unmount: (slotId?: string): string | null => {
+          const target = slotId ?? focusedSlotId()
+          if (!target) return null
+          useViewStore.getState().unmountRich(target)
+          return target
+        },
+        list: (): string[] => Object.keys(useViewStore.getState().richSlots),
+      }
+      ;(globalThis as Record<string, unknown>).__richslot = richslot
 
       // HMR 재평가 시 기존 구독 먼저 해제
       if (unlistenFns.length > 0) {

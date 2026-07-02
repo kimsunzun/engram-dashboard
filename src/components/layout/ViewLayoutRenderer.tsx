@@ -8,7 +8,9 @@
 import { Allotment } from 'allotment'
 
 import type { LayoutNode } from '../../api/layoutTypes'
+import { useViewStore } from '../../store/viewStore'
 import TerminalSlot from '../slot/TerminalSlot'
+import RichSlot from '../slot/RichSlot'
 
 function nodeKey(node: LayoutNode): string {
   if (node.type === 'slot') return `s${node.id}`
@@ -22,8 +24,16 @@ export default function ViewLayoutRenderer({
   node: LayoutNode
   focusedSlotId: string | null
 }) {
+  // ★M0 스파이크(임시) — ADR-0044★: 이 slot 이 RichSlot(fixture 구동 JSON 모드) 오버레이인지.
+  // 프론트 전용(백엔드 wire LayoutNode 엔 없음) — M2 에서 transport caps 기반 분기로 대체될 자리.
+  const richSlots = useViewStore(s => s.richSlots)
+  const mountRich = useViewStore(s => s.mountRich)
+
   if (node.type === 'slot') {
     const isFocused = node.id === focusedSlotId
+    // agent_id 우선(실 터미널). agent 없는 빈 슬롯에만 rich 스파이크가 적용된다.
+    const isRich = node.agent_id == null && !!richSlots[node.id]
+    const hasContent = node.agent_id != null || isRich
     // ★known-limitation: 같은 webview 안에서 동일 agentId 를 두 슬롯에 배정하면 ProtocolClient.subs 가
     // agentId 당 단일 콜백이라 두 번째 마운트가 첫 슬롯 구독을 덮어써 첫 슬롯이 빈다. 이번 슬라이스
     // 범위 밖 — 별도 슬라이스에서 콜백 레지스트리를 agentId 당 다중 구독으로 확장해 해소 예정.
@@ -35,9 +45,9 @@ export default function ViewLayoutRenderer({
           background: 'var(--bg)',
           border: isFocused ? '2px solid var(--accent)' : '1px solid var(--border)',
           boxSizing: 'border-box',
-          // agent 있을 때: TerminalSlot 이 100% 채우도록 여백·정렬 제거(터미널에 center 정렬 끼면 깨짐).
-          // agent 없을 때(empty): 플레이스홀더를 중앙정렬하는 flex 유지.
-          ...(node.agent_id != null
+          // 콘텐츠(터미널/rich) 있을 때: 슬롯을 100% 채우도록 여백·정렬 제거(center 정렬 끼면 깨짐).
+          // 빈 슬롯(empty): 플레이스홀더를 중앙정렬하는 flex 유지.
+          ...(hasContent
             ? { overflow: 'hidden' }
             : {
                 display: 'flex',
@@ -55,10 +65,29 @@ export default function ViewLayoutRenderer({
       >
         {node.agent_id != null ? (
           <TerminalSlot key={node.agent_id} agentId={node.agent_id} />
+        ) : isRich ? (
+          <RichSlot />
         ) : (
           <>
             <span>Slot {node.id.slice(0, 8)}</span>
             <span>— empty —</span>
+            {/* ★M0 스파이크(임시) — ADR-0044★: 빈 슬롯에서 JSON 모드 렌더를 눈으로 보게 하는 dev 버튼.
+                window.__richslot(§5 LLM 경로)와 같은 mountRich 액션을 흔든다 — M2 에서 제거 예정. */}
+            <button
+              onClick={() => mountRich(node.id)}
+              style={{
+                marginTop: '4px',
+                cursor: 'pointer',
+                background: 'transparent',
+                border: '1px solid var(--border)',
+                color: 'var(--text-muted)',
+                borderRadius: '4px',
+                padding: '2px 8px',
+                fontSize: '11px',
+              }}
+            >
+              JSON 스파이크
+            </button>
           </>
         )}
       </div>

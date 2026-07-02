@@ -63,6 +63,11 @@ vi.mock('../slot/TerminalSlot', () => ({
   ),
 }))
 
+// ── RichSlot stub(M0 스파이크, ADR-0044) — 랩 렌더 트리/fixture import 없이 마운트 여부만 확인 ──
+vi.mock('../slot/RichSlot', () => ({
+  default: () => <div data-testid="rich-slot" />,
+}))
+
 // ── @xterm stub — TerminalSlot 이 실제로 렌더되지 않지만 import 해소 방어용 ────
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -85,9 +90,11 @@ vi.mock('@xterm/addon-fit', () => ({
 // ── 테스트 대상 ────────────────────────────────────────────────────────────────
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import type { LayoutNode } from '../../api/layoutTypes'
+import { useViewStore } from '../../store/viewStore'
 
 afterEach(() => {
   cleanup()
+  useViewStore.setState({ richSlots: {} }) // 스파이크 오버레이 격리(테스트 간 누수 방지)
 })
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────────
@@ -143,6 +150,27 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     // agent 있을 때 justifyContent: center 가 없어야 한다 — TerminalSlot 을 center 로 밀면 출력이 깨짐.
     expect(wrapper.style.justifyContent).not.toBe('center')
     expect(wrapper.style.alignItems).not.toBe('center')
+  })
+
+  // ── M0 스파이크(임시) — ADR-0044 RichSlot 분기 ──────────────────────────────────
+  it('richSlots 에 든 빈 slot → RichSlot 이 마운트되고 TerminalSlot/플레이스홀더는 없다', () => {
+    useViewStore.setState({ richSlots: { 's-rich': true } })
+    render(<ViewLayoutRenderer node={slotNode('s-rich', null)} focusedSlotId={null} />)
+    expect(screen.getByTestId('rich-slot')).toBeTruthy()
+    expect(screen.queryByTestId('terminal-slot')).toBeNull()
+    expect(screen.queryByText('— empty —')).toBeNull()
+  })
+
+  it('agent_id 있는 slot 은 rich 마킹이 있어도 TerminalSlot 우선(터미널 실슬롯 우선)', () => {
+    useViewStore.setState({ richSlots: { s1: true } })
+    render(<ViewLayoutRenderer node={slotNode('s1', 'agent-x')} focusedSlotId={null} />)
+    expect(screen.getByTestId('terminal-slot')).toBeTruthy()
+    expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  it('rich 마킹 없는 빈 slot → "JSON 스파이크" dev 버튼이 있다(사람 소환 경로)', () => {
+    render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
+    expect(screen.getByText('JSON 스파이크')).toBeTruthy()
   })
 })
 

@@ -67,6 +67,7 @@ beforeEach(() => {
     layouts: {},
     views: [],
     activeViewId: null,
+    richSlots: {},
   })
 })
 afterEach(() => {
@@ -510,5 +511,35 @@ describe('subscribeViewEvents 등록/해제', () => {
     await Promise.resolve() // adopt(.then) 마이크로태스크 flush.
     // ★핵심 단언★: ready reject 후 늦게 도착한 성공 핸들도 dispose 트리거로 해제됐다(가드 무력화 시 0 → red).
     expect(unlistenMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ★M0 스파이크(임시) — ADR-0044★: RichSlot 오버레이(프론트 전용, invoke 안 탐). M2 에서 제거될 자리라
+// 테스트도 최소 — "set/clear 가 richSlots 를 정확히 갱신하고 실슬롯 콘텐츠(agent_id)엔 안 닿는다"만 본다.
+describe('RichSlot 스파이크 오버레이(mountRich/unmountRich)', () => {
+  it('mountRich → richSlots 에 slotId 표시, invoke 는 안 부른다(권위 루프 우회)', () => {
+    useViewStore.getState().mountRich('slot-A')
+    expect(useViewStore.getState().richSlots).toEqual({ 'slot-A': true })
+    expect(invokeMock).not.toHaveBeenCalled() // 다른 액션과 달리 백엔드 invoke 없음(스파이크 예외)
+  })
+
+  it('unmountRich → 해당 slotId 만 제거(다른 rich 슬롯은 유지)', () => {
+    useViewStore.getState().mountRich('slot-A')
+    useViewStore.getState().mountRich('slot-B')
+    useViewStore.getState().unmountRich('slot-A')
+    expect(useViewStore.getState().richSlots).toEqual({ 'slot-B': true })
+  })
+
+  it('오버레이는 layout 캐시(agent_id 등 실슬롯 콘텐츠)를 건드리지 않는다', () => {
+    useViewStore.setState({
+      layouts: {
+        v1: { layout: { type: 'slot', id: 'slot-A', agent_id: null }, focusedSlotId: 'slot-A', version: 1 },
+      },
+      activeViewId: 'v1',
+    })
+    useViewStore.getState().mountRich('slot-A')
+    // rich 는 별도 오버레이 — 백엔드 권위 layout 은 불변(agent_id null 그대로).
+    expect(rendered()?.layout).toEqual({ type: 'slot', id: 'slot-A', agent_id: null })
+    expect(useViewStore.getState().richSlots['slot-A']).toBe(true)
   })
 })
