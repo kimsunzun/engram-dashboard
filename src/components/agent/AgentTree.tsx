@@ -1,15 +1,17 @@
 import { useRef, useEffect, useState } from 'react'
 import { Tree, type NodeRendererProps } from 'react-arborist'
 import { useAgentStore } from '../../store/agentStore'
-import { useSlotStore } from '../../store/slotStore'
+import { useViewStore, selectActiveView } from '../../store/viewStore'
 import { agentClient } from '../../api/clientFactory'
 import { refreshProfiles } from '../../store/eventBus'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 
 interface AgentTreeProps {
   /**
-   * 이 트리가 들어있는 슬롯 id. 있으면 그 슬롯(자기 자신)에는 배치를 금지한다 —
-   * 슬롯 안 트리에서 클릭이 자기 슬롯을 터미널로 덮어 트리가 증발하는 자기파괴 루프 방지(consult).
+   * ★현재 미사용(ADR-0035 이주 흔적)★ — 배치가 viewStore(UUID 슬롯)로 이주하며 self-배치 가드가
+   * 옛 slotStore(number id) 시대 개념이 됐다. 지금은 옛 `LayoutRenderer`(현재 어디에도 미마운트)만
+   * 이 prop 을 전달한다. LayoutRenderer/in-slot 트리를 되살릴 땐 viewStore focused slot(UUID) 기준
+   * self-배치 가드를 *재도입*해야 한다(자기 슬롯을 터미널로 덮어 트리가 증발하는 자기파괴 루프 방지).
    */
   sourceSlotId?: number
 }
@@ -40,7 +42,7 @@ function statusColor(status: string): string {
   }
 }
 
-export default function AgentTree({ sourceSlotId }: AgentTreeProps) {
+export default function AgentTree(_props: AgentTreeProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 200, height: 400 })
@@ -53,9 +55,6 @@ export default function AgentTree({ sourceSlotId }: AgentTreeProps) {
   const profiles = useAgentStore(s => s.profiles)
   const selectedAgentId = useAgentStore(s => s.selectedAgentId)
   const setSelectedAgent = useAgentStore(s => s.setSelectedAgent)
-  // 배치는 store 액션 직접 호출이 아니라 dispatch(단일 제어 표면, §5)를 거친다.
-  const dispatch = useSlotStore(s => s.dispatch)
-  const focusedSlotId = useSlotStore(s => s.focusedSlotId)
 
   useEffect(() => {
     const el = containerRef.current
@@ -206,10 +205,25 @@ export default function AgentTree({ sourceSlotId }: AgentTreeProps) {
       ]
     : [
         {
+          // ADR-0035: 이 액션은 이제 살아있는 viewStore(백엔드 권위) 경로를 쓴다. 활성 뷰의 포커스
+          // 슬롯에 assign_agent invoke → emit → 캔버스 렌더. (옛 slotStore dispatch는 죽은 경로였음.)
           label: '포커스 슬롯에 배치',
-          // 자기 슬롯에 배치하면 트리가 터미널로 덮여 사라진다 → disable.
-          disabled: sourceSlotId !== undefined && focusedSlotId === sourceSlotId,
-          action: () => dispatch({ kind: 'assignAgent', slotId: focusedSlotId, agentId: menu.agentId }),
+          disabled: false, // 메인 트리는 sourceSlotId 없음. (in-slot 트리 self-배치 가드는 옛 slotStore 경로 concern)
+          action: () => {
+            const vs = useViewStore.getState()
+            const viewId = vs.activeViewId
+            const slotId = selectActiveView(vs)?.focusedSlotId
+            const aid = menu.agentId               // menu 는 곧 닫히니 async 전에 캡처
+            if (!viewId || !slotId) {
+              setError(aid, '배치 실패: 활성 뷰/포커스 슬롯 없음')
+              return
+            }
+            clearError(aid)
+            void vs.assignAgent(viewId, slotId, aid).catch(e => {
+              console.error('[assignAgent]', e)
+              setError(aid, `배치 실패: ${String(e)}`)   // 사용자 피드백(MAJOR-3 패턴)
+            })
+          },
         },
         {
           label: '중단(작업만 멈춤)',

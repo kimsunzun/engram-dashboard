@@ -1,6 +1,7 @@
 import { useRef, useEffect } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { agentClient } from '../../api/clientFactory'
 import type { OutputSubscription } from '../../api/agentClient'
@@ -41,14 +42,31 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
   // Terminal 인스턴스 초기화 (1회)
   useEffect(() => {
     if (!containerRef.current) return
+    // WebGL/canvas 렌더러는 글리프를 canvas 2D(ctx.font)로 rasterize하는데 canvas 는 CSS var() 를
+    // 해석 못 한다 → 'var(--font-terminal)' 을 그대로 넘기면 폰트 무효로 검은 화면. 생성 시점에
+    // 실제 폰트 문자열로 해석해 넘긴다. (실측: canvas 가 '13px var(--font-terminal)' 거부→10px sans-serif)
+    const fontFamily =
+      getComputedStyle(document.documentElement).getPropertyValue('--font-terminal').trim() || 'monospace'
     const term = new Terminal({
-      fontFamily: 'var(--font-terminal)',
+      fontFamily,
       fontSize: 13,
       theme: { background: '#0a0a0a', foreground: '#e0e0e0', cursor: '#4a9eff' },
     })
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
     term.open(containerRef.current)
+    // WebGL 렌더러 — DOM 렌더러는 customGlyphs 미지원이라 블록/박스드로잉 문자를 폰트에 위임,
+    // 분수 DPI(rowHeight 비정수)에서 첫 행 상단 픽셀이 깎인다. WebGL은 이 글리프를 직접 그려
+    // 클리핑 제거(조사: xterm.js #2409/#3807/#967). 미지원/컨텍스트 소실 시 DOM 자동 폴백.
+    // open() 이후 로드 필수 — canvas 가 DOM에 붙은 뒤 WebGL 컨텍스트를 획득함.
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => webgl.dispose())
+      term.loadAddon(webgl)
+    } catch (e) {
+      // WebGL 미지원/로드 실패 → DOM 렌더러 폴백. 무로깅이면 클리핑 픽스가 조용히 무효화돼도 모르니 경고.
+      console.warn('[TerminalSlot] WebGL 비활성 → DOM 렌더러로 폴백', e)
+    }
     fitAddon.fit()
     terminalRef.current = term
     fitAddonRef.current = fitAddon
@@ -132,7 +150,14 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
   }, [agentId])
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div style={{
+      width: '100%',
+      height: '100%',
+      position: 'relative',
+      boxSizing: 'border-box',
+      padding: '4px 8px',        // 터미널 좌우 여백(wezterm 스타일). 여백만큼 inset → FitAddon이 그 크기로 cols/rows 계산.
+      background: '#0a0a0a',     // 터미널 배경(Terminal theme)과 동일 → 여백이 seamless
+    }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       {isTerminated && (
         <div
