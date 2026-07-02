@@ -9,3 +9,6 @@ target/
 # 세션-로컬 핸드오프 히스토리(/continue용). 머신마다 쌓이는 작업 메모 — 커밋 안 함.
 .claude/continue/
 .ccb/
+
+# 작업용 스크린샷 보관함(cdp shot 등) — 로컬 전용, 커밋 안 함.
+_wip/shots/
