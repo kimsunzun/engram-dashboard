@@ -17,7 +17,13 @@ import type {
   OutputSubscription,
 } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
-import type { AgentInfo, AgentProfile, AgentStatus, RestoreReport } from './types'
+import type {
+  AgentInfo,
+  AgentProfile,
+  AgentStatus,
+  ClaudeOutputFormat,
+  RestoreReport,
+} from './types'
 
 // ── 내부 구독 상태(DaemonClient.SubState 승격) ──────────────────────────────────────
 interface SubState {
@@ -373,6 +379,7 @@ export class ProtocolClient implements AgentClient {
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
+    outputFormat: ClaudeOutputFormat = 'Terminal',
   ): Promise<AgentProfile> {
     return this.sendCommand<AgentProfile>((request_id) => ({
       CreateProfile: {
@@ -381,6 +388,8 @@ export class ProtocolClient implements AgentClient {
         extra_args: extraArgs,
         env,
         auto_restore: autoRestore,
+        // ADR-0044: StreamJson 이면 데몬이 json 모드 프로필로 저장 → SpawnProfile 시 StdioTransport.
+        output_format: outputFormat,
         request_id,
       },
     }))

@@ -68,10 +68,10 @@ impl AgentBackend for ClaudeBackend {
                         args.push("--output-format".to_string());
                         args.push("stream-json".to_string());
                         args.push("--replay-user-messages".to_string());
-                        // TODO(M2 QA — cdp 실측): 일부 claude 버전은 `-p --output-format stream-json` 에
-                        //   `--verbose` 를 강제한다. claude 2.1.170 `--help` 엔 그런 강제 문구가 없어
-                        //   (--verbose = "config verbose override" 설명뿐) 지금은 넣지 않는다. 실측에서
-                        //   stream-json 출력이 안 나오면 여기에 `--verbose` 를 추가한다.
+                        // ★--verbose 필수(M2 QA 실측 확정, 2026-07-02)★: claude 2.1.170 은 --help 엔
+                        //   문구가 없지만 런타임이 "When using --print, --output-format=stream-json
+                        //   requires --verbose" 로 즉사시킨다(스폰 직후 에이전트 소멸로 발현). 빼면 안 됨.
+                        args.push("--verbose".to_string());
                         if let Some(sid) = session_id {
                             // ★json 모드 resume 은 MVP 밖(ADR-0044 후속)★: mode 와 무관하게 항상
                             //   --session-id(fresh 경로)로 고정한다. 터미널 resume(ADR-0008)은 위
@@ -307,8 +307,8 @@ mod tests {
             SpawnMode::Fresh,
             Some(sid),
         );
-        // 기대 인자(console_command 래핑 전) — -p + stream-json 입출력 + replay + session-id + extra.
-        // ★--verbose 는 넣지 않는다(2.1.170 --help 미강제, M2 QA 실측 대상 — build_spec 주석 TODO).
+        // 기대 인자(console_command 래핑 전) — -p + stream-json 입출력 + replay + verbose + session-id + extra.
+        // ★--verbose 필수(실측 확정 2026-07-02)★: 없으면 claude 가 "requires --verbose" 로 즉사(build_spec 주석).
         let (p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
@@ -318,6 +318,7 @@ mod tests {
                 "--output-format".to_string(),
                 "stream-json".to_string(),
                 "--replay-user-messages".to_string(),
+                "--verbose".to_string(),
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--model".to_string(),
@@ -326,8 +327,8 @@ mod tests {
         );
         assert_eq!(s.program, p);
         assert_eq!(s.args, a, "json 모드 인자 골든 불일치");
-        // --verbose 는 절대 포함되지 않아야 한다(현 결정).
-        assert!(!s.args.iter().any(|x| x == "--verbose"));
+        // --verbose 필수 포함(실측: 없으면 스폰 즉사).
+        assert!(s.args.iter().any(|x| x == "--verbose"));
     }
 
     #[test]

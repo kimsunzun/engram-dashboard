@@ -5,7 +5,8 @@
 use ts_rs::TS;
 
 use crate::domain::{
-    AgentInfo, AgentProfile, AgentStatus, Capabilities, RestoreReport, SnapshotChunk,
+    AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat, RestoreReport,
+    SnapshotChunk,
 };
 use crate::ids::{AgentId, ProfileId, RequestId};
 
@@ -113,6 +114,13 @@ pub enum AgentCommand {
         extra_args: Vec<String>,
         env: Vec<(String, String)>,
         auto_restore: bool,
+        /// claude 출력 포맷(ADR-0044 M2) — Terminal=PTY 대화형(기본) / StreamJson=헤드리스 NDJSON.
+        /// `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
+        /// PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
+        /// 데몬이 이 값을 저장 프로필의 AgentCommand::Claude { output_format } 로 옮기고, 이후
+        /// SpawnProfile → manager.spawn_agent 가 is_json_mode 로 StdioTransport 를 고른다.
+        #[serde(default)]
+        output_format: ClaudeOutputFormat,
         request_id: RequestId,
     },
 

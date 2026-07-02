@@ -36,9 +36,13 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — TerminalSlot 이 agents 를 읽지만 mock 컴포넌트라 불필요. 방어용. ──
+// ── agentStore stub — ViewLayoutRenderer 가 `useAgentStore(s => s.agents)` 로 caps 를 조회한다. ──
+// FIX 1(ADR-0041): 렌더러 분기가 store 의 AgentInfo 유무·caps 에 의존하므로 테스트가 agents 를 제어할 수
+// 있어야 한다. vi.hoisted 로 가변 holder 를 만들어 selector 에 흘린다(TerminalSlot/RichSlot 은 stub 이라
+// 자기 useAgentStore 호출은 무해). afterEach 에서 초기화.
+const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[] }))
 vi.mock('../../store/agentStore', () => ({
-  useAgentStore: vi.fn(() => []),
+  useAgentStore: (selector: (s: { agents: unknown[] }) => unknown) => selector(agentStoreState),
 }))
 
 // ── allotment stub — split 분기 렌더 시 jsdom 환경에서 ResizeObserver 에러 방지 ──
@@ -90,11 +94,13 @@ vi.mock('@xterm/addon-fit', () => ({
 // ── 테스트 대상 ────────────────────────────────────────────────────────────────
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import type { LayoutNode } from '../../api/layoutTypes'
+import type { AgentInfo, Capabilities } from '../../api/types'
 import { useViewStore } from '../../store/viewStore'
 
 afterEach(() => {
   cleanup()
   useViewStore.setState({ richSlots: {} }) // 스파이크 오버레이 격리(테스트 간 누수 방지)
+  agentStoreState.agents = [] // agent store holder 초기화(테스트 간 누수 방지)
 })
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────────
@@ -106,11 +112,41 @@ function splitNode(a: LayoutNode, b: LayoutNode): LayoutNode {
   return { type: 'split', dir: 'horizontal', ratio: 0.5, a, b }
 }
 
+// caps 만 관건이라 나머지 필드는 최소값. structured=true → RichSlot, false → TerminalSlot 분기.
+function caps(structured: boolean): Capabilities {
+  return {
+    input: { raw: true, message: false, attachment: false },
+    output: { terminal_bytes: !structured, structured, markdown: false, tool_events: false, usage: false },
+    control: { resize: true, interrupt: true, cancel: false, graceful_shutdown: true },
+    session: { resume: true, snapshot: false, cwd_env: true },
+    model: { select: false, temperature: false, max_tokens: false },
+  }
+}
+
+function agentInfo(id: string, structured: boolean): AgentInfo {
+  return {
+    id,
+    name: id,
+    cwd: '/tmp',
+    status: { type: 'Running' },
+    cols: 80,
+    rows: 24,
+    epoch: 0,
+    capabilities: caps(structured),
+  }
+}
+
+/** store 에 AgentInfo 를 seed(FIX 1: caps 도착 후에만 구체 렌더러가 마운트되므로 대부분 테스트가 필요). */
+function seedAgents(...infos: AgentInfo[]): void {
+  agentStoreState.agents = infos
+}
+
 // ── 테스트 케이스 ─────────────────────────────────────────────────────────────
 
 describe('ViewLayoutRenderer — slot 분기', () => {
-  it('agent_id 있는 slot → TerminalSlot 이 마운트되고 agentId prop 이 전달된다', () => {
+  it('agent_id 있는 slot(비structured caps) → TerminalSlot 이 마운트되고 agentId prop 이 전달된다', () => {
     const agentId = 'aaaa-bbbb-cccc-dddd'
+    seedAgents(agentInfo(agentId, false)) // FIX 1: caps 도착(비structured) → TerminalSlot 분기
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     const terminal = screen.getByTestId('terminal-slot')
     expect(terminal).toBeTruthy()
@@ -144,7 +180,8 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(document.querySelector(`[data-slot-id="${id}"]`)).toBeTruthy()
   })
 
-  it('agent_id 있는 slot 래퍼에는 중앙정렬 flex 가 없다(터미널 레이아웃 오염 방지)', () => {
+  it('agent_id 있는 slot(caps 도착) 래퍼에는 중앙정렬 flex 가 없다(터미널 레이아웃 오염 방지)', () => {
+    seedAgents(agentInfo('some-agent-id', false)) // caps 도착 → 구체 렌더러(hasContent=true)
     render(<ViewLayoutRenderer node={slotNode('s1', 'some-agent-id')} focusedSlotId={null} />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     // agent 있을 때 justifyContent: center 가 없어야 한다 — TerminalSlot 을 center 로 밀면 출력이 깨짐.
@@ -161,7 +198,8 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByText('— empty —')).toBeNull()
   })
 
-  it('agent_id 있는 slot 은 rich 마킹이 있어도 TerminalSlot 우선(터미널 실슬롯 우선)', () => {
+  it('agent_id 있는 slot(비structured caps)은 rich 마킹이 있어도 TerminalSlot 우선(터미널 실슬롯 우선)', () => {
+    seedAgents(agentInfo('agent-x', false))
     useViewStore.setState({ richSlots: { s1: true } })
     render(<ViewLayoutRenderer node={slotNode('s1', 'agent-x')} focusedSlotId={null} />)
     expect(screen.getByTestId('terminal-slot')).toBeTruthy()
@@ -171,6 +209,24 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   it('rich 마킹 없는 빈 slot → "JSON 스파이크" dev 버튼이 있다(사람 소환 경로)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     expect(screen.getByText('JSON 스파이크')).toBeTruthy()
+  })
+
+  // ── FIX 1(ADR-0041 replay 소유권): caps 도착 전엔 구체 렌더러를 마운트하지 않는다 ──────────────
+  it('agent 배정됐지만 store 에 AgentInfo 없음 → "에이전트 연결 중…" 플레이스홀더(TerminalSlot/RichSlot 없음)', () => {
+    // store 를 비워 두면(=caps 미도착) 스왑 시 replay 유실을 피하려 중립 플레이스홀더만 떠야 한다.
+    render(<ViewLayoutRenderer node={slotNode('s1', 'not-in-store')} focusedSlotId={null} />)
+    expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+    expect(screen.queryByTestId('terminal-slot')).toBeNull()
+    expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  it('agent 가 store 에 있고 structured caps → RichSlot(TerminalSlot 없음)', () => {
+    const agentId = 'struct-agent'
+    seedAgents(agentInfo(agentId, true)) // structured=true → 라이브 RichSlot 분기
+    render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
+    expect(screen.getByTestId('rich-slot')).toBeTruthy()
+    expect(screen.queryByTestId('terminal-slot')).toBeNull()
+    expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
   })
 })
 
@@ -183,8 +239,9 @@ describe('ViewLayoutRenderer — split 분기', () => {
     expect(document.querySelector('[data-slot-id="s2"]')).toBeTruthy()
   })
 
-  it('split 자식에 agent_id 있으면 해당 슬롯에만 TerminalSlot 이 마운트된다', () => {
+  it('split 자식에 agent_id 있으면(caps 도착) 해당 슬롯에만 TerminalSlot 이 마운트된다', () => {
     const agentId = 'zzzz-agent'
+    seedAgents(agentInfo(agentId, false))
     const node = splitNode(slotNode('s1', agentId), slotNode('s2', null))
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     const terminals = screen.getAllByTestId('terminal-slot')

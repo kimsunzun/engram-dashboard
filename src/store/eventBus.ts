@@ -64,10 +64,13 @@ export function initEventBus(): Promise<void> {
       // (JSON 모드)을 캔버스 슬롯에 소환하는 임시 제어 표면(§5 — cdp.mjs eval / 콘솔이 정식 command 버스
       // 전까지 쓰는 임시 경로). 백엔드 권위 레이아웃엔 안 닿는 프론트 전용 오버레이(viewStore.richSlots)를
       // 흔든다 — M2(StdioTransport 실스트림 + caps 분기) 서면 이 핸들·오버레이 통째로 제거.
-      //   window.__richslot.mountFocused()  // active view 의 focused 슬롯에 RichSlot 마운트
+      //   window.__richslot.mountFocused()  // active view 의 focused 슬롯에 RichSlot(fixture) 마운트
       //   window.__richslot.mount('<slotId>')   // 특정 슬롯(생략 시 focused)
       //   window.__richslot.unmount('<slotId>') // 해제(생략 시 focused)
       //   window.__richslot.list()           // 현재 rich 슬롯 id 목록
+      //   await window.__richslot.spawnJson('<cwd>')  // ★M2★ json 모드 claude 프로필 생성+spawn → agentId
+      //       반환한 agentId 를 __engramLayout.assignAgent(viewId, slotId, agentId) 로 슬롯에 배정하면
+      //       ViewLayoutRenderer 가 caps.structured 로 라이브 RichSlot 을 띄운다(전체 E2E cdp 구동 경로).
       const focusedSlotId = (): string | null =>
         selectActiveView(useViewStore.getState())?.focusedSlotId ?? null
       const richslot = {
@@ -88,6 +91,30 @@ export function initEventBus(): Promise<void> {
           return target
         },
         list: (): string[] => Object.keys(useViewStore.getState().richSlots),
+        // ★M2 임시 제어 표면(§5)★: json 모드 claude 프로필을 만들어 곧바로 spawn 하고 agentId 를 돌려준다
+        //   — 사람 UI 와 동일한 agentClient 호출(createClaudeProfile 'StreamJson' → spawnProfile)만 쓴다.
+        //   정식 command 버스 전까지 cdp/콘솔이 JSON 모드 전체 E2E 를 구동하는 경로. cwd 는 실제 작업
+        //   디렉터리를 넘긴다(생략 시 '.'=데몬 cwd). 실패 시 null(콘솔 에러 로깅).
+        spawnJson: async (cwd?: string): Promise<string | null> => {
+          try {
+            const dir = cwd ?? '.'
+            const stamp = new Date().toISOString().slice(11, 19)
+            const profile = await agentClient.createClaudeProfile(
+              `json-${stamp}`,
+              dir,
+              [],
+              [],
+              false, // auto_restore=false(부팅 자동 spawn 제외 — Sidebar 예약과 동일)
+              'StreamJson',
+            )
+            await refreshProfiles() // 트리 미러 갱신(Sidebar create 와 동일 후처리)
+            const info = await agentClient.spawnProfile(profile.id, false) // resume=false(json 은 fresh, ADR-0044)
+            return info.id
+          } catch (e) {
+            console.error('[richslot.spawnJson]', e)
+            return null
+          }
+        },
       }
       ;(globalThis as Record<string, unknown>).__richslot = richslot
 

@@ -5,7 +5,13 @@
 // transport(Tauri Channel / WS binary frame)와 base64/디코딩은 transport 내부에 숨긴다 —
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
-import type { AgentInfo, AgentProfile, AgentStatus, RestoreReport } from './types'
+import type {
+  AgentInfo,
+  AgentProfile,
+  AgentStatus,
+  ClaudeOutputFormat,
+  RestoreReport,
+} from './types'
 
 /** 클라↔백엔드 연결 상태. Embedded 는 항상 connected. Daemon 만 reconnecting/down 발생. */
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
@@ -90,12 +96,18 @@ export interface AgentClient {
 
   // ── 프로필 CRUD ────────────────────────────────────────────────────────────
   listProfiles(): Promise<AgentProfile[]>
+  /**
+   * claude 프로필 생성. outputFormat 은 렌더 모드를 가른다(ADR-0044): 'Terminal'=PTY(xterm),
+   * 'StreamJson'=헤드리스 NDJSON(RichSlot). 기본 'Terminal'(기존 호출자 동작 불변 — wire 는
+   * `#[serde(default)]`). §5 제어 표면(cdp/console)이 이 인자로 json 에이전트를 스폰한다.
+   */
   createClaudeProfile(
     name: string,
     cwd: string,
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
+    outputFormat?: ClaudeOutputFormat,
   ): Promise<AgentProfile>
   deleteProfile(agentId: string): Promise<void>
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>

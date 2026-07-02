@@ -494,6 +494,15 @@
 - **★별건 발견 — src-tauri lib 테스트 exe 기동 실패(0xc0000139 ENTRYPOINT_NOT_FOUND):** 어서션이 아니라 DLL 로드 단계, clean 리빌드도 재현, `target\debug`에 WebView2Loader.dll 부재 단서. M1은 src-tauri 소스 무접촉 + 이 테스트는 문서화 게이트에 없던 것 → 선재 정황으로 분리 트랙(진단 서브에이전트 조사). 원인 확정 전까지 workspace 루트 `cargo test`는 이 패키지에서 깨진다.
 - **다음:** M2 = 프론트 E2E(스폰 UI json 모드 노출 + RichSlot caps 분기 + 실스트림 증분 파싱·스냅샷 병합 + 입력박스) + 실 claude 왕복 QA(`--verbose` 필요 여부 실측). Codex 지적 이월: json 에이전트가 TerminalSlot에 물리는 라우팅(M2 본체).
 
+### JSON 렌더 M2 — 실스트림 E2E 완주(스폰→RichSlot 렌더→왕복) + 리뷰 FIX + --verbose 실측 확정 (2026-07-02, master, fable)
+- **M2 코더(opus):** wire `CreateProfile.output_format`(serde default) → 데몬 → 프로필 → spawn 관통 · `LiveRichSlot`(TerminalSlot 규율 미러: [agentId,epoch]·reset-before-subscribe·seq dedup·token unsubscribe) · **`StreamAccumulator`**(바이트→라인 재조립 TextDecoder streaming, message.id 병합) · ViewLayoutRenderer caps 분기 · 입력박스(Enter/Shift+Enter) · `window.__richslot.spawnJson()`. **병합 실측: 반복 assistant 라인 = 누적 스냅샷 아니라 id-키 분리 블록**(fixture 증거로 테스트 고정).
+- **/review code full(opus doc-aware + Codex blind) → 양쪽 FIX:** 교차 적출 = **caps 늦도착 스왑 시 초반 스트림 유실**(replay는 배정 델타에만 옴, ADR-0041 — 컴포넌트 스왑은 재트리거 안 함). 채택 (a)안: AgentInfo 미도착이면 "에이전트 연결 중…" 플레이스홀더 → 첫 실 렌더러가 replay 온전 수령(거부: 강제 re-replay=소유권 침범 / assign 게이트=결합). + IME 한글 Enter 오발사 가드(keyCode 229) · id 병합 멱등화 · 버퍼 4MB 상한 · trim · 테스트 8건 추가(CRLF·중복재방출·오버플로·부분 멀티바이트 reset). "스트리밍 중 전송"은 결함 아님 — **의도**(방식 A 중간 개입) 주석 박음. 게이트: tsc·vitest 164 그린.
+- **★--verbose 실측 확정(M1 TODO 해소)★:** 파이프 직접 실측 — claude 2.1.170 이 런타임에서 "When using --print, --output-format=stream-json requires --verbose"로 **즉사**(help 텍스트엔 없음 — help 만 믿으면 안 되는 사례). `backend/claude.rs` json 분기에 `--verbose` 추가 + 골든 반전. 첫 E2E 시도의 "스폰 후 에이전트 소멸"이 이 즉사였다(stderr 는 debug 로그라 무증상 — stderr 표면화 후속 과제).
+- **라이브 E2E PASS(cdp):** `spawnJson`→배정→플레이스홀더→RichSlot 전환(caps 분기 실동작)→textarea 입력→**claude 실응답 "2" 렌더**(유저 echo 포함, 스트림 단일 출처)→idle 전환. 스샷 `_wip/shots/richslot-m2-live-e2e.png`. 데몬 구버전 주의 실증: wire 필드 모르는 구데몬이면 Terminal 강등 — **데몬 재빌드+교체 필수**(`daemon_start` invoke 로 ensure).
+- **0xc0000139 트랙 종결(선재 확정):** 진단 = tauri_build 가 manifest(resource.lib, comctl32 v6)를 `-bins` 전용 링크 → 테스트 exe 는 manifest 없이 comctl32 v5.82(TaskDialogIndirect 부재) 로드 → 로더 즉사. **제안된 우회(`rustc-link-arg-tests`)는 실측 탈락**(패키지에 tests/ 타깃 없어 cargo 가 instruction 거부) → build.rs 에 KNOWN-ISSUE 주석 박고 정공법(WS 클라 테스트를 비-tauri 크레이트/tests/로 이전) 백로그.
+- **잔재:** E2E 테스트 에이전트 json-* 프로필/세션(유저 확인 후 정리) · 첫 로드 핸들 미등록 레이스(리로드 1회로 복구 — vite optimize-deps 재현 2회째, 원인 추적 백로그) · RichSlot 텍스트 저대비 폴리시.
+- **다음:** M3 후보 = 도구 권한 승인 · partial 델타 · json resume · M0 오버레이 정리 · stderr 표면화 · 스폰 UI 정식 노출(지금은 __richslot.spawnJson §5 경로만).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

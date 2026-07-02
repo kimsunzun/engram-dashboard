@@ -21,4 +21,11 @@ export type ContentBlock =
 export interface RichMessage {
   role: 'assistant' | 'user'
   blocks: ContentBlock[]
+  /**
+   * assistant 메시지의 `message.id`(Anthropic API 메시지 id). 라이브 누산(streamParse)에서
+   * 같은 id 로 재출현하는 assistant 라인의 블록을 이 메시지에 이어붙이는 병합 키다(ADR-0044:
+   * 실측 fixture 상 같은 id 라인들은 disjoint 블록 배치라 concat 이 옳다). fixture 통짜 파싱
+   * (parseStreamJson)은 채우지 않을 수 있어 optional — 렌더층은 이 필드에 의존하지 않는다.
+   */
+  id?: string
 }

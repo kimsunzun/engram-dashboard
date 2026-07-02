@@ -22,7 +22,8 @@ use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, TestServerHandle,
 };
 use engram_dashboard_protocol::{
-    decode_frame, AgentCommand as WireCommand, AgentEvent, RequestId, SubscribeAction,
+    decode_frame, AgentCommand as WireCommand, AgentEvent, ClaudeOutputFormat as WireOutputFormat,
+    RequestId, SubscribeAction,
     PROTOCOL_VERSION,
 };
 
@@ -1973,6 +1974,7 @@ async fn case35_ws_create_profile() {
         extra_args: vec!["--foo".into()],
         env: vec![],
         auto_restore: true,
+        output_format: WireOutputFormat::Terminal,
         request_id: req,
     })
     .await;
@@ -1982,14 +1984,45 @@ async fn case35_ws_create_profile() {
     assert_eq!(created.name, "p35", "Created 에 동봉된 프로필 이름 일치");
     assert_eq!(created.cwd, sent_cwd, "Created 에 동봉된 cwd 일치");
     assert!(
-        matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args, .. } if extra_args == &vec!["--foo".to_string()]),
-        "claude 프로필이 extra_args 보존"
+        matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args, output_format, .. }
+            if extra_args == &vec!["--foo".to_string()] && *output_format == WireOutputFormat::Terminal),
+        "claude 프로필이 extra_args 보존 + 기본 output_format=Terminal"
     );
     assert!(created.auto_restore, "auto_restore 반영");
     // manager(공유 레지스트리)에도 실제 등록됐는지 — dispatch 가 upsert 했다는 사실 확인.
     assert!(
         server.manager.profiles().get(created.id).is_some(),
         "create 후 manager 레지스트리에 존재해야"
+    );
+
+    // ── ADR-0044 M2: 같은 WS 경로로 output_format=StreamJson 프로필 생성 → json 모드 저장 확인 ──
+    let req_json = RequestId::new();
+    c.send(&WireCommand::CreateProfile {
+        name: "p35-json".into(),
+        cwd: sent_cwd.clone(),
+        extra_args: vec![],
+        env: vec![],
+        auto_restore: false,
+        output_format: WireOutputFormat::StreamJson,
+        request_id: req_json,
+    })
+    .await;
+    let created_json = c.await_created(req_json).await;
+    assert!(
+        matches!(&created_json.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { output_format, .. }
+            if *output_format == WireOutputFormat::StreamJson),
+        "StreamJson 으로 만든 프로필이 wire 로 json 모드로 돌아와야"
+    );
+    // 저장된 core 프로필도 json 모드인지(dispatch 가 wire→core 매핑을 정확히 옮겼나).
+    assert!(
+        server
+            .manager
+            .profiles()
+            .get(created_json.id)
+            .expect("json 프로필 등록됨")
+            .command
+            .is_json_mode(),
+        "core 레지스트리 프로필이 json 모드여야(wire output_format→core 매핑)"
     );
 
     server.shutdown().await;

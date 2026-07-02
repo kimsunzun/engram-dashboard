@@ -825,16 +825,22 @@ impl ConnectionCore {
                 extra_args,
                 env,
                 auto_restore,
+                output_format,
                 request_id,
             } => {
                 // Tauri `create_claude_profile` 미러: claude 프로필 생성·upsert(스폰 안 함).
+                // ADR-0044 M2: wire output_format → core 로 명시 매핑(spawn_command_to_wire 의 역방향).
+                //   StreamJson 이면 프로필이 json 모드로 저장돼, 이후 SpawnProfile → spawn_agent 가
+                //   is_json_mode 로 StdioTransport(구조화 caps)를 고른다. Terminal 은 기존 동작 불변.
+                let core_output_format = match output_format {
+                    WireClaudeOutputFormat::Terminal => CoreClaudeOutputFormat::Terminal,
+                    WireClaudeOutputFormat::StreamJson => CoreClaudeOutputFormat::StreamJson,
+                };
                 let profile = CoreProfile::new(
                     name,
-                    // M1(ADR-0044): CreateProfile wire 커맨드엔 아직 output_format 입력이 없다 →
-                    //   기본 Terminal 로 생성(기존 동작 불변). json 프로필 생성 UI/필드는 M2.
                     CoreSpawnCommand::Claude {
                         extra_args,
-                        output_format: CoreClaudeOutputFormat::Terminal,
+                        output_format: core_output_format,
                     },
                     std::path::PathBuf::from(cwd),
                     env,
@@ -1468,6 +1474,7 @@ mod tests {
                 extra_args: vec![],
                 env: vec![],
                 auto_restore: false,
+                output_format: WireClaudeOutputFormat::Terminal,
                 request_id: req,
             },
             &session,
@@ -1479,6 +1486,37 @@ mod tests {
             other => panic!("Created 기대: {other:?}"),
         }
         assert_eq!(core.manager.profiles().list().len(), 1, "프로필 1개 등록");
+    }
+
+    // ── ADR-0044 M2: CreateProfile(output_format=StreamJson) → 저장 프로필이 json 모드 ──
+    // wire output_format 이 저장 프로필의 core AgentCommand 로 옮겨져, is_json_mode 가 true 인지 확인한다.
+    // 이게 참이면 이후 SpawnProfile → spawn_agent 가 StdioTransport(구조화 caps)를 고른다(M1 검증분).
+    #[tokio::test]
+    async fn create_profile_stream_json_stores_json_mode() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::CreateProfile {
+                name: "json".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                extra_args: vec![],
+                env: vec![],
+                auto_restore: false,
+                output_format: WireClaudeOutputFormat::StreamJson,
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        let profiles = core.manager.profiles().list();
+        assert_eq!(profiles.len(), 1, "프로필 1개 등록");
+        assert!(
+            profiles[0].command.is_json_mode(),
+            "StreamJson 으로 만든 프로필은 json 모드여야 함"
+        );
     }
 
     // ── StopDaemon(force=false, 활성 0) → Ack + DispatchFlow::Close + watch true ──
