@@ -1,7 +1,7 @@
 # Step 타임라인 — Engram Dashboard
 
 언제·무엇을·어떻게 했는지 시간순 기록. 산출 문서와 커밋을 매핑한다.
-상세는 각 폴더 참조: `design/`(설계) · `reviews/`(검증) · `briefings/`(구현 지시) · `spec/`(요구사항) · `history/`(초안).
+상세는 각 폴더 참조: `docs/process/S0-view-phase/` ~ `S15-backend-output-refine/`(스텝별 설계·브리핑·스파이크), 핸드오프는 `.claude/continue/history/`.
 
 **검증 3-게이트:** 코더(dco23 Opus / dcs24 Sonnet) → LLD 리뷰(dr26 Fable) → QA(dq25, build/lint/test).
 
@@ -10,37 +10,37 @@
 ## S0 — View phase (이전 세션)
 - **무엇:** 더미 데이터로 UI 골격 — 테마/폰트/레이아웃/슬롯/에이전트 트리/diff/팝업 (Step 1–10 + 슬롯 동적 분할)
 - **결과:** Tauri 창에 더미 대시보드 동작 (백엔드 없이 UI 검증 완료)
-- **문서:** `spec/view-spec.md` (+ `view-spec-gpt-review.md`), `spec/requirements.md`, `spec/research.md`
+- **문서:** `S0-view-phase/view-spec.md` (+ `view-spec-gpt-review.md`), `S0-view-phase/requirements.md`, `S0-view-phase/research.md`
 
 ## S1 — 백엔드 설계 (이전 세션)
 - **무엇:** 백엔드 아키텍처 → 상세설계(LLD) → 프론트 통합 설계
 - **어떻게:** architecture 초안 → Gemini/GPT 리뷰 → final. LLD Stage 1 작성 → **fable/Gemini/GPT 3자 adversarial 검증** → GO. frontend-integration LLD도 동일 3자 검증.
 - **결과:** 구현 계약서 확정 — `pty/` Tauri 격리(OutputSink/StatusSink), kill 6단계, C4 replay→live, AppState 단일 manager
-- **문서:** `design/backend-architecture.md`, `design/backend-lld-stage1.md`, `design/frontend-integration-lld.md`, `reviews/*`
+- **문서:** `S1-design/backend-architecture.md`, `S1-design/backend-lld-stage1.md`, `S1-design/frontend-integration-lld.md`, `S1-design/*review*.md`(리뷰 덤프 — 2026-07-04 삭제, git 이력 보존)
 
 ## S2 — Phase 0: Spike (2026-06-11)
 - **무엇:** 본 구현 전 PTY kill 시퀀스를 Windows 실기기에서 실측
 - **어떻게:** dco23 — `examples/spike.rs`로 portable-pty spawn → kill 6단계 → reader join 타이밍 측정
 - **결과:** ✅ PASS. `master.take()`(ConPTY 종료)로 reader가 **17ms** 내 EOF. LLD 가정 그대로.
-- **문서:** `briefings/phase0-spike.md`
+- **문서:** `S2-phase0-spike/phase0-spike.md`
 
 ## S3 — Phase 1: 백엔드 PTY 코어  · 커밋 `575e36d`
 - **무엇:** `pty/` 6모듈 + `logging/` + headless 테스트
 - **어떻게:** m1 types → m2 session(C4 subscribe) → m3 drain(lock-밖-send) → m4 platform/windows(JobObject) → m5 manager(kill 6단계) → m6 logging → headless. 각 모듈 3-게이트 통과.
 - **결과:** ✅ headless PASS — spawn→write→resize→kill, 상태 Running→Exiting→Killed, kill **23ms**. `pty/` tauri import 0. dr26이 win_err 버그·transition race·poison 정책 등 실결함 포착.
-- **문서:** `briefings/m1-types` ~ `m6b-headless`, `design/backend-lld-stage1.md`
+- **문서:** `S3-phase1-backend/m1-types.md` ~ `m6b-headless.md`, `S1-design/backend-lld-stage1.md`
 
 ## S4 — Channel spike: tauri 핀 결정 (Phase 2 직전)
 - **무엇:** tauri 버전 확정을 위한 Channel 무손실 실측 (LLD는 "2.5 금지"였으나 caret이라 2.11.2 resolve)
 - **어떻게:** dco23 — 임시 `channel_spike` command로 1000회 연속 send, 프론트 수신 카운트
 - **결과:** ✅ 1000/1000 무손실 (이슈 #11421은 Linux 특정, Windows WebView2 미재현). **최신 2.x(2.11.2) 유지 확정.**
-- **문서:** `briefings/channel-spike.md`
+- **문서:** `S4-channel-spike/channel-spike.md`
 
 ## S5 — Phase 2: Tauri 연결 계층  · 커밋 `f959304`
 - **무엇:** commands 8개 + `lib.rs`(AppState / ChannelOutputSink / TauriStatusSink / setup)
 - **어떻게:** dcs24 — thin wrapper + OutputSink/StatusSink의 Tauri 구현. 3-게이트.
 - **결과:** ✅ dead_code 전멸(코어가 command 통해 사용됨), 앱 기동. `RunEvent::ExitRequested → shutdown_all` graceful 종료.
-- **문서:** `briefings/m7-commands-lib.md`
+- **문서:** `S5-phase2-tauri/m7-commands-lib.md`
 
 ## S6 — 백엔드 마감  · 커밋 `26dc649`
 - **무엇:** ① 로그 API키 마스킹(T-1) + ④ shutdown 병렬 kill(T-8). ② cwd 검증은 **claude 자체 권한과 중복이라 스킵**.
@@ -52,7 +52,7 @@
 - **무엇:** API 레이어(types/ptyApi) → eventBus+store → TerminalSlot 실제 PTY 연결
 - **어떻게:** dcs24 — 3a→3b→3c. C2 reset / T-2 seq dedup / G-1 cleanup / 입력가드 / resize debounce.
 - **결과:** ✅ **첫 E2E** — 실제 창에서 claude 기동, **PTY ↔ Tauri ↔ React 전체 파이프라인 실증**. 3d(popup+monaco)는 보류.
-- **문서:** `briefings/m8a-api-layer` ~ `m8d-popup`, `design/frontend-integration-lld.md`
+- **문서:** `S7-phase3-frontend/m8a-api-layer.md` ~ `m8d-popup.md`, `S1-design/frontend-integration-lld.md`
 
 ## S8 — 문서 정리  · 커밋 `fdf6d06` + 진행 중
 - **무엇:** core/dashboard 통합 → docs 트리 재편 → 과정/정설 분리 + 타임라인
@@ -70,7 +70,7 @@
 - **검증:** unit test 19, headless PASS, `cargo fmt`·`tsc` 클린, `pty/` tauri import 0.
 - **fable 리뷰(조건부 GO→수정 완료):** C-1 remove_session drain 대기(stale Killed 경합 제거), M-1 resume 조기종료 code 무관 fallback, Mn-1 status_changed epoch 동봉, Mn-2 Started variant, Mn-5 단일 persist.
 - **핵심 메커니즘:** spawn 시 `--session-id <uuid>`로 우리가 sid 통제 → 재시작 `--resume`로 무손실 복원. `/clear`로 sid 바뀌면 `sessions/<pid>.json` 폴링으로 따라잡아 즉시 persist. 복원 정확성은 우리 통제 sid에만 의존(추적 파일은 best-effort).
-- **문서:** `S9-session-restore/session-restore-lld.md`, `-code-plan.md`(§H), `spike-results.md`, `s9-*-review-*.md`
+- **문서:** `S9-session-restore/session-restore-lld.md`, `S9-session-restore/session-restore-code-plan.md`(§H), `S9-session-restore/spike-results.md`, `S9-session-restore/s9-*-review-*.md`(리뷰 덤프 — 2026-07-04 삭제, git 이력 보존)
 
 ## S10 — 백엔드 추상화 (AgentTransport/OutputEvent)  · 커밋 `60fe859`~`fb50917`
 - **무엇:** 검증된 S9 PTY 코드를 `AgentManager → AgentSession(OutputCore) → dyn AgentTransport(PtyTransport/ApiTransport)` 구조로 재편. 멀티 백엔드(claude/codex/gemini 콘솔 + API) 통합 인터페이스. **회귀 0**이 목표(기능 추가 아닌 seam 추상화).
@@ -195,7 +195,7 @@
 - **reviewer-deep 적출·수정:** M-1(env 제거로 ws_e2e 3 실프로세스 테스트 격리 깨짐+운영폴더 오염)·m-1(WMI smoke 2건 경로)·m-2(릴리즈 분기 무테스트→헬퍼 분리+테스트)·m-3(미사용 _app 제거) 전부 수정. **Codex 2번째 리뷰어는 다음 조각부터**(현재 미보유).
 - **게이트:** discovery 31·daemon 35·ws_e2e 44·core·protocol·src-tauri 9 통과, build/fmt 경고 0, env 격리·기본경로 실측 확인.
 - **prior-art 조사(graceful 끄기):** `/prior-art` 3에이전트(Docker/Ollama/Tailscale·Discord/Steam/OneDrive·LSP/systemd/표준) → ADR-0024 "트레이 graceful StopDaemon(WS+토큰)+taskkill 폴백" 모델 재확인. 정설=데몬이 control 채널 노출+다중 클라 같은 진입점(§5 정합), graceful은 타임아웃+강제 폴백과 한 쌍, loopback+토큰 보안. 차용 후보 Tailscale(BSD). ※메인이 한때 "트레이 graceful 불가→taskkill"로 ADR 재론한 사고 있었음(ADR 재독으로 교정).
-- **다음(결정 대기):** 트레이 실제 데몬 배선 — **graceful 끄기 구현 순서 a/b 사용자 결정 필요**(트레이에 one-shot WS 접속기를 이번에 vs 다음에). 그 후 ensure/status→아이콘(워커+proxy 비동기) · graceful 끄기 · 이후 UI 열기/닫기·clientFactory flip. 상세 핸드오프: `.ccb/history/2026-06-19-S13-트레이-data_dir-연결대기-graceful결정대기.md`.
+- **다음(결정 대기):** 트레이 실제 데몬 배선 — **graceful 끄기 구현 순서 a/b 사용자 결정 필요**(트레이에 one-shot WS 접속기를 이번에 vs 다음에). 그 후 ensure/status→아이콘(워커+proxy 비동기) · graceful 끄기 · 이후 UI 열기/닫기·clientFactory flip. 상세 핸드오프: `.claude/continue/history/2026-06-19-S13-트레이-data_dir-연결대기-graceful결정대기.md`.
 
 ### 2026-06-19 (dashboard8) — S13 sub-step 2 "1차": 트레이 실제 데몬 켜기 배선 + 콘솔/싱글인스턴스 수정
 - **CLAUDE.md 협업·브리핑 방식 초안(커밋 `12b63d7`):** 결정은 동작·정책 언어로 번역(사용자 체감=사용자 결정 / 순수 내부 구현=메인이 정하되 보고)·용어 점진 노출(처음 한 줄 풀이)·2층 브리핑(개념 합의→용어 풀 브리핑)·표준 4단(개념흐름→시나리오체크→용어브리핑→수용기준)·작은 기능 PRD/TRD 묶기. PRD/TRD 경계 논쟁이 끝없자 멈추고 "사용자 협업·브리핑 방식" 섹션으로 박음(초안, 나중 정리). 기존 "결정권은 사용자" 기조 보완(순서 불변·ADR 강제 유지).
@@ -334,7 +334,7 @@
   - **F2 BLOCK:** `layout:updated` listen 추가가 ADR-0028 단일 버스와 어긋날 소지 (F1 결정 후 자연 해소 가능).
   - **F3 BLOCK:** 팝업 부팅 race — listener 등록 전 emit 놓침 위험, 초기 상태 pull 누락.
   - 그 외 FIX: crate 경계 미명시·Mutex emit 순서·edge case(View 0개·팝업 crash·dangling)·영속 부재.
-- **핸드오프:** `.ccb/history/claude-20260627-s14-layout.md` 갱신됨.
+- **핸드오프:** `.claude/continue/history/claude-20260627-s14-layout.md` 갱신됨.
 
 ### rev.4 — 권위 재정립 (2026-06-27, dashboard2, opus)
 - **F1 재검토 — 데몬 authority(rev.3) 기각:** 핸드오프 A/B 프레이밍이 코드와 어긋남(eventBus는 Tauri emit 아닌 `agentClient` WS로 수신·`wsTransport.ts`=창 직결 확인). 사용자가 "데몬이 View 알 필요 없다 — 즉흥 추론 말고 관행 리서치로" 제동.
@@ -534,6 +534,12 @@
 - **★남은 결함(미해결·known-issue)★:** 리로드 재등록 시 **러스트측 replay가 새 Channel로 재발화 안 함** — 프론트 정상(구독 존재·lastSeq -1 = 프레임 0개 도착 실측). S13의 리로드-replay 실측은 transport 레벨 직접 측정이었고 당시 메인창 슬롯 렌더가 stub → **이 경로는 e2e로 검증된 적 없던 공백**. 다음 세션: `commands/agent.rs` subscribe_output → replay_slots(fresh) → output_router가 새 Channel에 실제 배달하는지 트레이스. **워크어라운드 = 에이전트 재배정(전량 복원됨).**
 - **부수 확인:** 클라이언트(src-tauri 셸) 재기동 시 레이아웃(메모리) 소실로 배정 풀림 — 영속화는 기존 백로그(D-7)와 한 몸.
 - **다음:** ①위 러스트 replay 재발화 트레이스 ②M3 후보(권한 승인·partial·resume·스폰 UI·M0 오버레이 정리·stderr 표면화) ③레이아웃 영속화.
+
+### docs 대청소 — 흡수 완료 원자료 삭제 + rot 수정 + CLAUDE.md 중복 해소 (2026-07-04, master, fable)
+- **무엇:** 결정에 흡수 완료된 외부 AI 리뷰 덤프·리서치 원자료 28파일(6,068줄) 삭제 — S1-design 10 · S9-session-restore 9 · research 9. 삭제 전 파일별 인용 0건 재검증(원문은 git 이력 보존).
+- **rot 수정:** step-log 구 경로 참조 12건(`design/`·`spec/`·`briefings/`·`.ccb/` → 현 스텝 폴더·`.claude/continue/`) 현행화, tracking.md 해소(✅) 항목을 `## 해소됨 (아카이브)`로 분리.
+- **CLAUDE.md 중복 해소:** 「리뷰어 역할 — 단계별 특화」 절 제거·구현 실행 규약 불릿으로 병합 — 실행 정본 = review 스킬 `flow.md §2`, 결정 = ADR-0031(구 "운영 표 = CLAUDE.md" 포인터도 현행화).
+- **보존(인용 확인):** `review-pipeline-design-draft`·`review-methodology-research`·`multi-window-layout-authority-topology`(ADR/CLAUDE.md 인용), `backend-lld-stage1`(확정 계약서).
 
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.

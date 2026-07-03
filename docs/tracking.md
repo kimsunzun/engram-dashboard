@@ -4,40 +4,11 @@
 
 ## 보류 (재도입 예정)
 
-### T-1. 로그 API 키 마스킹 — ✅ 구현 (2026-06-11)
-- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. LogSink에 적용. dr26 LGTM.
-- **한계(문서화):** AWS Secret Key(40자 base64)는 패턴 식별 불가 — best-effort. generic api_key= 는 오탐 리스크로 미적용.
-- **규칙(명문화 필요):** 추후 production에 PTY 텍스트 로그 추가 시 반드시 mask_secrets 적용 → CLAUDE.md/LLD 명시 예정(D-6).
-
-### D-6. tauri 버전 표기 + mask_secrets 규칙 — 문서 갱신
-- LLD §2 'tauri 2.4 고정' → 실제 Cargo.toml `tauri="2"`(2.11.2, spike 재검증). LLD §2 + CLAUDE.md 의존성 절 갱신.
-- production PTY 텍스트 로그 시 mask_secrets 필수 규칙 CLAUDE.md/LLD 한 줄 명문화.
-
-### (구) T-1 보류 메모
-- **상태:** 보류 (폐기 아님)
-- **출처:** LLD §14 `LogConfig{mask_api_keys}`. 모듈 6a logging core 구현 시 단순화하며 누락(ed12 브리핑 실수). dr26 리뷰 지적.
-- **현재 위험:** 낮음. 기본 로그 OFF(warn)라 PTY 출력이 로그로 흐르지 않음.
-- **재도입 시점:** `set_log_level("debug")`로 PTY 내용이 로그에 찍힐 수 있는 때 — headless 테스트(모듈 6b)의 debug 로깅 또는 디버깅 단계.
-- **요구사항:** 로그 출력에서 API 키/토큰 패턴(sk-…, Bearer …, Anthropic 키 등) 마스킹. 조직 보안룰(자격증명 산출물 포함 금지)과 직결.
-- **담당 결정:** ed12 — 모듈 6b 착수 전 재검토.
-
 ### T-2. 프론트 seq dedup 확인 — Phase 3
 - **상태:** 전제 조건, Phase 3에서 검증
 - **출처:** dr26 session.rs 리뷰. drain이 replay push와 subscribers lock 취득 사이에 subscribe가 끼면 새 sink에 같은 seq 중복 전달 가능(§7 고유 속성).
 - **방어:** 프론트가 seq로 dedup (frontend-integration-lld.md G-2: lastSeqRef). 백엔드는 이 전제 위에 설계됨.
 - **조치:** TerminalSlot.tsx 구현 시 lastSeqRef dedup이 실제로 들어갔는지 확인.
-
-### T-3. tauri 버전 핀 결정 — ✅ 해소 (2026-06-11, 최신 2.x 유지)
-- **결정:** Channel spike 실측 PASS(1000/1000 무손실, #11421 Windows 미재현) → **최신 2.x(2.11.2) 유지 확정.** Cargo.toml `tauri = "2"`. LLD "2.5 금지"는 폐기(Windows WebView2 무관 실측 확인).
-- **(이력) 상태:** 미결정. Phase 2(commands/lib.rs) 착수 전 결정.
-- **발견:** Cargo.toml `tauri = "2.4"` 는 caret semver라 실제 2.11.2로 resolve. LLD가 피하려던 "2.5+ Channel silent failure"가 포함될 수 있음(dco23 spike 중 발견).
-- **조사(2026-06-11):** LLD 인용 이슈 #13721은 검색에서 미확인(번호 부정확 추정). 실제 Channel 이슈:
-  - #11421 Channel 1회만 전송 — **Linux Gnome 특정**(우리는 Windows WebView2, 무관 가능성 높음)
-  - #10901 webview 미수신 시 send 비실패 — feature request
-  - #13133 Channel 메모리 누수
-- **권고:** Windows 타겟이라 핵심 이슈가 무관할 가능성. spike 방식으로 **실측 결정** — Phase 2에서 Tauri Channel 연속 send + 창 닫힘 시 동작 소규모 테스트. 우리 설계는 send 실패 감지에만 의존 안 함(명시적 unsubscribe M2 + replay).
-- **선택지:** (A) `=2.4.x` 정확 핀(보수적) (B) 최신 2.x + 실측 검증. 실측 결과로 택일.
-- **담당:** ed12 — Phase 2 착수 전.
 
 ### T-5. monaco TS worker optimizeDeps — Phase 2
 - **상태:** Phase 2 monaco 통합 시 검토.
@@ -102,11 +73,38 @@
 - **출처:** dr26 Exiting 재확인. kill의 Exiting 알림과 drain의 terminal 알림이 lock 밖 동시 발생 → 프론트가 status_changed를 역순 수신 가능. 직후 agent_list_updated가 정정함.
 - **조치:** 프론트는 `status_changed`만으로 terminal(종료) 판정하지 말 것. agent_list_updated(목록에서 사라짐) 또는 명시적 종료 신호로 판정. eventBus/store 구현 시 반영.
 
+---
+
+## 해소됨 (아카이브)
+
+### T-1. 로그 API 키 마스킹 — ✅ 구현 (2026-06-11)
+- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. LogSink에 적용. dr26 LGTM.
+- **한계(문서화):** AWS Secret Key(40자 base64)는 패턴 식별 불가 — best-effort. generic api_key= 는 오탐 리스크로 미적용.
+- **규칙(명문화 필요):** 추후 production에 PTY 텍스트 로그 추가 시 반드시 mask_secrets 적용 → CLAUDE.md/LLD 명시 예정(D-6).
+
+### (구) T-1 보류 메모
+- **상태:** 보류 (폐기 아님)
+- **출처:** LLD §14 `LogConfig{mask_api_keys}`. 모듈 6a logging core 구현 시 단순화하며 누락(ed12 브리핑 실수). dr26 리뷰 지적.
+- **현재 위험:** 낮음. 기본 로그 OFF(warn)라 PTY 출력이 로그로 흐르지 않음.
+- **재도입 시점:** `set_log_level("debug")`로 PTY 내용이 로그에 찍힐 수 있는 때 — headless 테스트(모듈 6b)의 debug 로깅 또는 디버깅 단계.
+- **요구사항:** 로그 출력에서 API 키/토큰 패턴(sk-…, Bearer …, Anthropic 키 등) 마스킹. 조직 보안룰(자격증명 산출물 포함 금지)과 직결.
+- **담당 결정:** ed12 — 모듈 6b 착수 전 재검토.
+
+### T-3. tauri 버전 핀 결정 — ✅ 해소 (2026-06-11, 최신 2.x 유지)
+- **결정:** Channel spike 실측 PASS(1000/1000 무손실, #11421 Windows 미재현) → **최신 2.x(2.11.2) 유지 확정.** Cargo.toml `tauri = "2"`. LLD "2.5 금지"는 폐기(Windows WebView2 무관 실측 확인).
+- **(이력) 상태:** 미결정. Phase 2(commands/lib.rs) 착수 전 결정.
+- **발견:** Cargo.toml `tauri = "2.4"` 는 caret semver라 실제 2.11.2로 resolve. LLD가 피하려던 "2.5+ Channel silent failure"가 포함될 수 있음(dco23 spike 중 발견).
+- **조사(2026-06-11):** LLD 인용 이슈 #13721은 검색에서 미확인(번호 부정확 추정). 실제 Channel 이슈:
+  - #11421 Channel 1회만 전송 — **Linux Gnome 특정**(우리는 Windows WebView2, 무관 가능성 높음)
+  - #10901 webview 미수신 시 send 비실패 — feature request
+  - #13133 Channel 메모리 누수
+- **권고:** Windows 타겟이라 핵심 이슈가 무관할 가능성. spike 방식으로 **실측 결정** — Phase 2에서 Tauri Channel 연속 send + 창 닫힘 시 동작 소규모 테스트. 우리 설계는 send 실패 감지에만 의존 안 함(명시적 unsubscribe M2 + replay).
+- **선택지:** (A) `=2.4.x` 정확 핀(보수적) (B) 최신 2.x + 실측 검증. 실측 결과로 택일.
+- **담당:** ed12 — Phase 2 착수 전.
+
 ## LLD 문서 갱신 — ✅ 완료 (2026-06-11, 코드 반영)
 
 §9(R-1 알림분담+Exiting), §10(D-3 poison fail-fast 규칙4), §13(D-2 JobObject API), §14(D-1 로깅+mask_api_keys 보류), §6(D-4 drain 4인자) 모두 backend-lld-stage1.md에 반영 완료.
-
----
 
 ### D-5. frontend-integration-lld 동기화 (Phase 3 중 발견)
 - **상태:** 미반영. Phase 3 마무리 시 frontend LLD 갱신.
