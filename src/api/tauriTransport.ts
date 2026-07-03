@@ -76,7 +76,6 @@ export class TauriTransport implements Transport {
   //   맞고, 이벤트 뒤 pull 이면 낡은 스냅샷이 새 상태를 덮어써 역전된다.)
   private stateVersion = 0
 
-  // ── 연결 상태 ────────────────────────────────────────────────────────────────
   get connectionState(): ConnectionState {
     return this._state
   }
@@ -392,11 +391,9 @@ export class TauriTransport implements Transport {
   // ★상태 전이 안 함(Fix-C ①)★: 이전 구현은 invoke resolve 후 `setState('connected')` 를 했으나, 이는
   //   Rust 의 실제 상태(stale 폐기·재연결)와 어긋날 수 있어 제거했다. 상태는 u5 가 단일 진실원이다.
   //
-  // ★출력 Channel 등록도 u5(Fix-C ④)★: Rust 는 connect Ok 시 `connected` emit 을 invoke resolve *보다
-  //   먼저* 한다(connection.rs: app.emit → ready_tx.send → invoke resolve). 그래서 출력 Channel 을
-  //   doConnect(invoke resolve 후)에서 등록하는 것보다, u5 의 connected 전이 핸들러에서 등록하는 게 더
-  //   이르다(등록 전 도착 출력 유실 갭이 더 일찍 닫힘 — Fix-C ④ 순서 목적). 게다가 첫 연결·Rust 내부
-  //   재연결을 *한 경로*로 통일해 doConnect 와의 멱등 중복 등록을 없앤다. registerListeners 의 u5 주석 참조.
+  // ★출력 Channel 등록도 u5(Fix-C ④)★: doConnect 가 아니라 u5 의 connected 전이 핸들러가 등록한다
+  //   (더 이른 등록 + 첫 연결/재연결 단일 경로 통일). 근거(connect Ok 시 emit↔resolve 순서)·상세 =
+  //   registerListeners 의 u5 주석 정본 참조.
   //
   // ★close 세대 가드(Fix-C ①)★: invoke await 동안 close() 가 끼면 myGen != generation. 상태·출력 Channel
   //   부활은 이미 구조적으로 막혀 있다(아래 본문 주석) — 가드는 stale doConnect 가 connectPromise 를
@@ -448,7 +445,6 @@ export class TauriTransport implements Transport {
     })
   }
 
-  // ── 명시 종료 ───────────────────────────────────────────────────────────────
   // ★세대 가드(Fix-C ①)★: generation++ 으로 in-flight doConnect 를 stale 화한다 — 뒤늦게 resolve 된
   //   doConnect 가 출력 Channel 을 등록하거나 connectPromise 를 건드리지 못하게 한다. connectPromise=null
   //   로 비워 다음 ensureReady/start 가 새 연결을 시작하게 한다(closedByUser 가 막지만 start 가 리셋).
@@ -471,16 +467,13 @@ export class TauriTransport implements Transport {
     this.setState('down')
   }
 
-  // ── 초기화(리스너 등록) ─────────────────────────────────────────────────────
   // ProtocolClient 는 transport 를 생성자에서 받는다. 리스너 등록은 async 이므로 별도 init 을
   // 호출하거나 clientFactory 에서 await 로 처리한다. doConnect 도 멱등 registerListeners 를 부르므로,
   // 부팅 시 init→connect 순서든 connect 단독이든 control 리스너는 정확히 1벌 등록된다.
   async init(): Promise<void> {
     await this.registerListeners()
-    // ★리로드 자가복구(Fix-D)★: 리스너 등록이 끝난 뒤 현재 연결 상태를 1회 pull 조회한다. 리로드된
-    //   웹뷰는 transition emit 모델의 사각지대다 — 데몬이 이미 Connected 면 어떤 전이 이벤트도 안 와
-    //   이 창은 연결을 못 알아채고 출력 Channel(subscribe_output)을 등록하지 못한다 → 창의 모든 slot
-    //   에서 replay/live 전체가 두절된다. pull 조회로 그 사각지대를 1회 메운다. selfHeal 주석 참조.
+    // ★리로드 자가복구(Fix-D)★: 리스너 등록이 끝난 뒤 현재 연결 상태를 1회 pull 조회해 리로드 웹뷰의
+    //   전이 emit 사각지대를 메운다. 결함·pull 전략·레이스 가드 = selfHeal 주석 정본 참조.
     await this.selfHeal()
   }
 }

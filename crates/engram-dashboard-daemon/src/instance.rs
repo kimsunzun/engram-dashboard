@@ -41,14 +41,14 @@ mod imp {
     ///   ★운영 회귀 0★: env 미설정 시 기존 USERNAME 동작 그대로(아래 unwrap_or_else 분기).
     ///   single-instance 거부 검증은 같은 key 2개를 일부러 주입해 충돌을 유발한다(테스트 책임).
     pub(crate) fn mutex_name() -> String {
-        // 1) 테스트 격리 override — 비어있지 않은 값이면 그 값을 식별자로 사용.
+        // 1) 테스트 격리 override.
         if let Some(key) = std::env::var_os(INSTANCE_KEY_ENV) {
             if !key.is_empty() {
                 let key = key.to_string_lossy();
                 return format!("Global\\EngramDashboardDaemon-{key}");
             }
         }
-        // 2) 운영 기본(회귀 0) — USERNAME 단위.
+        // 2) 운영 기본(회귀 0).
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
         format!("Global\\EngramDashboardDaemon-{user}")
     }

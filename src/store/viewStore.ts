@@ -65,7 +65,6 @@ interface ViewState {
    */
   renderModeOverride: Record<string, RenderMode>
 
-  // ── 액션(각각 대응 invoke 만 호출 — 상태는 emit 으로만 갱신) ──────────────────────
   /** 새 view 생성 → active. 반환 = 새 view_id(이걸로 이후 split 대상 지정). */
   createView: (name?: string) => Promise<string>
   /** view 닫기. active 면 다른 view 로 전환. */
@@ -102,7 +101,7 @@ interface ViewState {
   // ── emit 수신 핸들러(eventBus 가 listen 콜백에서 호출) ───────────────────────────
   /** layout:updated 수신 — 그 view_id 캐시 항목을 version 가드 통과 시 갱신. */
   applyLayoutUpdated: (snap: ViewSnapshot) => void
-  /** view:list-updated 수신 — 탭 목록/active 갱신(active 만 바뀌면 캐시된 그 view 가 렌더됨). */
+  /** view:list-updated 수신 — 탭 목록/active 갱신. */
   applyViewListUpdated: (payload: ViewListPayload) => void
 
   // ── 부팅 초기화(eventBus 가 구독 등록 직후 1회 호출) ──────────────────────────────
@@ -194,7 +193,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   },
 
   applyViewListUpdated: payload => {
-    // active 만 바뀌면 *이미 캐시된* 그 view layout 이 곧장 렌더된다(active-only). 목록도 함께 미러.
+    // 탭 목록·active 를 미러(active-only 렌더 메커니즘은 //! 헤더 캐시 모델 참조).
     set({ views: payload.views, activeViewId: payload.active_view_id })
   },
 

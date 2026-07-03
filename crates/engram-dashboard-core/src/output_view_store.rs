@@ -1,52 +1,29 @@
 //! 출력 평면 재설계(ADR-0040) 2단계 — core 순수 조립 struct(Tauri 무관, headless 단독 테스트).
 //!
-//! ## 무엇인가 (1단계 두 조각의 조립부 — 사용자 확정)
-//! 1단계가 만든 두 순수 자료구조([`BoundedSeqLog`](crate::output_view_buffer::BoundedSeqLog) =
-//! 에이전트당 공유 콘텐츠 ring, [`SlotCursorMap`](crate::output_view_buffer::SlotCursorMap) = 슬롯별
-//! 진도)를 **에이전트당 콘텐츠 1벌 + 슬롯별 cursor + per-agent epoch 태그**로 조립한 순수 store 다.
-//! src-tauri `AgentBufferStore`(`Arc<Mutex<OutputViewStore<WindowLabel>>>`)가 이걸 Tauri 결합부
-//! (`Channel`·`Mutex`)로 감싼다.
+//! ## 역할
+//! 1단계의 두 순수 자료구조([`BoundedSeqLog`](crate::output_view_buffer::BoundedSeqLog) = 에이전트당
+//! 공유 콘텐츠 ring, [`SlotCursorMap`](crate::output_view_buffer::SlotCursorMap) = 슬롯별 진도)를
+//! **에이전트당 콘텐츠 1벌 + 슬롯별 cursor + per-agent epoch 태그**로 조립한 순수 store. src-tauri
+//! `AgentBufferStore`(`Arc<Mutex<OutputViewStore<WindowLabel>>>`)가 Tauri 결합부(`Channel`·`Mutex`)로 감싼다.
 //!
-//! ## ★Channel 을 들지 않는다 — snapshot 반환(이 분리의 전부)★
-//! 이 store 는 Tauri `Channel`·실제 전송을 모른다. 모든 메서드는 "어느 slot 에 어떤 bytes 를
-//! 보내야 하는지"를 `Vec<(S, Vec<u8>)>` **snapshot 으로 반환만** 한다 — 실제 Channel `send` 는
-//! src-tauri 호출자가 **버퍼 락을 푼 뒤** 한다. 이게 TRD §1 락 규율(버퍼 락 안=데이터 수집만, send=
-//! 락 밖)을 코드 구조로 강제하는 동시에, 조립 로직 전체를 `cargo test -p engram-dashboard-core` 로
-//! headless 단독 회귀하게 한다(src-tauri lib test 는 WebView2 DLL 링크로 실행 자체가 막힌다 — 그 회피).
+//! ## 핵심 불변식 (어기면 미렌더 창 유실/중복 — 상세 근거는 각 메서드 `///` 정본)
+//! - **Channel 을 안 든다 — snapshot 반환.** 모든 메서드는 "어느 slot 에 어떤 bytes"를 `Vec<(S, Vec<u8>)>`
+//!   로 반환만 하고, 실제 Channel `send` 는 호출자가 **버퍼 락을 푼 뒤** 한다(TRD §1 락 규율을 구조로 강제
+//!   + headless 회귀 가능 — src-tauri lib test 는 WebView2 DLL 링크로 실행 자체가 막힘).
+//! - **두 축을 절대 안 합친다(TRD §3).** 축 A(데몬↔클라 동기화 = 재구독 `after_seq`, [`resubscribe_after_seq`])
+//!   와 축 B(창별 read 무손실 = per-view cursor, [`on_frame`])는 분리 — 합치면 미렌더 창 유실/중복.
+//! - **cursor advance ⟺ Channel delivery 성공(근원2 FIX).** ★불변식★: **전달 성공한 slot 의 cursor 만
+//!   advance 한다.** core 는 Tauri registry 를 모르므로(ADR-0012), src-tauri 가 "현재 Channel 이 등록된 slot
+//!   집합"을 `deliverable` 인자로 주입한다. deliverable 에 *없는* slot 은 **snapshot 에 안 담고 cursor
+//!   advance 도 안 한다**(전달 못 한 걸 전달한 것처럼 전진 금지). cursor 신설은 deliverable 무관하게 하되
+//!   **advance 만 게이트** — 신설과 전진을 분리해 두 축(멤버십 ↔ 진도)이 섞이지 않게 한다. 왜 두 생명주기가
+//!   어긋나나·옛 구현 유실 메커니즘 정본 = [`on_frame`] doc.
+//! - **epoch 태깅(TRD §4b — 락 아님).** [`on_frame`] 이 `frame.epoch ≠ 태그`면 그 agent 만 reset(다른 agent
+//!   보존, ADR-0007). 상세 = [`on_frame`] doc 의 (a).
 //!
-//! ## 두 축 분리(TRD §3 — ★급소, /review code deep 대상)
-//! - **축 A(데몬↔클라 동기화):** 데몬 재구독 `after_seq` = 버퍼 최신 seq([`resubscribe_after_seq`]).
-//!   데몬은 클라에 없는 것만 보내 append 한다(비중복). `min_render_seq`(가장 뒤처진 창 합산) 모델은
-//!   폐기 — 재구독 기준은 창이 아니라 버퍼 최신이다.
-//! - **축 B(창별 read 무손실):** 각 slot 은 per-view cursor 로 공유 버퍼를 read([`on_frame`] 의
-//!   slot 루프). 미렌더 창도 cursor 가 보존돼 재연결 후 무손실.
-//! - 이 둘을 **절대 합치지 않는다** — 합치면 미렌더 창 유실/중복(초안 모순, opus·Codex 수렴 지적).
-//!   [`OutputViewStore`] 는 cursor(축 B)만 들고, 축 A 는 `latest_seq` 한 줄로 분리돼 있다.
-//!
-//! ## epoch 태깅(TRD §4b — 락 아님)
-//! per-agent epoch 태그(`epochs: HashMap<AgentId, u64>`)를 든다. [`on_frame`] 이 `frame.epoch ≠ 태그`면
-//! 그 agent 콘텐츠 reset + 그 agent 의 모든 cursor reset 후 태그 갱신한다(SubscribeAck 를 기다리지
-//! 않고 frame.epoch 기준 — single actor 직렬이라 락이 아니라 태깅으로 충분, ADR-0007). epoch 태깅은
-//! **해당 agent 만** 건드린다(다른 agent 스트림 보존).
-//!
-//! ## ★cursor advance ⟺ Channel delivery 성공(근원2 FIX — /review code deep BLOCK)★
-//! cursor 의 생명주기(router 파생 viewer 집합)와 Channel 의 생명주기(webview mount = `subscribe_output`
-//! 의 registry insert)는 **다른 시점**이다 — layout 이 agent 를 배정해 router 에 (window,agent) slot 이
-//! 생겨도, 그 창 webview 가 아직 mount 안 됐으면 Channel 은 registry 에 없다. 옛 구현은 [`on_frame`] 이
-//! `sync_viewers`(router 기준)로 cursor 를 신설·advance 하고 그 snapshot 을 flush 했는데, flush 가
-//! **registry miss 로 스킵하는 동안에도 cursor 는 이미 advance** 됐다 → 이후 [`subscribe`] 가 "cursor 가
-//! 있다"고 불가침 판정해 빈 replay 를 줘 그 구간이 **영구 유실**된다(특히 webview reload 시 Channel 이
-//! 교체되는데 stale cursor 가 남아 빈 화면).
-//!
-//! ★불변식★: **전달 성공한 slot 의 cursor 만 advance 한다.** core 는 Tauri registry 를 모르므로(ADR-0012),
-//! src-tauri 가 "현재 Channel 이 등록된 slot 집합"을 [`on_frame`]·[`subscribe_agent`] 에 `deliverable`
-//! 인자로 주입한다. deliverable 에 *없는* slot 은 **snapshot 에 안 담고 cursor advance 도 안 한다**(전달
-//! 못 한 걸 전달한 것처럼 전진 금지). 그 slot 은 cursor 가 멈춰 있다가, 그 창 webview 가 mount 해
-//! `subscribe_output` 이 cursor 를 fresh(None) 리셋 + replay 트리거할 때 **처음부터 무손실**로 받는다
-//! (Channel 신규 등록 = viewer 재시작이라 stale 이어보기가 아니라 전체 replay 가 맞다 — reload 빈 화면
-//! 차단). cursor 신설(`sync_viewers`/`subscribe_agent`)은 deliverable 무관하게 하되(라우팅 멤버십 추적은
-//! frame 도착 시점이 정답), **advance 만 deliverable 게이트**를 통과시킨다 — 신설과 전진을 분리해 두 축
-//! (멤버십 ↔ 진도)이 섞이지 않게 한다.
+//! ## 진입점
+//! frame fan-out = [`on_frame`] · mount replay = [`subscribe`]/[`resubscribe_slot`] · 재연결 복구 =
+//! [`reconcile_slots`]/[`sweep_orphans`] · 생명주기 폐기 = [`unsubscribe`]/[`drop_agent`].
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -93,7 +70,8 @@ where
     /// - **(a) epoch 태깅:** 이 agent 태그 ≠ `frame_epoch` → 그 agent `content.reset()` +
     ///   `cursors.reset_cursors_for_agent(agent, None)`(모든 cursor 를 "처음부터 전체" 로) + 태그 갱신.
     ///   SubscribeAck 를 기다리지 않는다(frame.epoch 가 진실원 — `decide_epoch` 의 `st.epoch=None` 통과와
-    ///   정합). 태깅은 **이 agent 만** 건드린다(다른 agent 스트림 보존).
+    ///   정합). single actor 직렬이라 락이 아니라 per-agent 태깅으로 충분하다(ADR-0007). 태깅은 **이 agent
+    ///   만** 건드린다(다른 agent 스트림 보존).
     /// - **(b) append:** `content[agent].append(seq, bytes)`. 콘텐츠가 없으면 신설(빈 ring) 후 append.
     /// - **(c) fan-out read:** 그 agent 를 보는 slot 각각에 대해 `read_from(cursor)`:
     ///     - `Truncated`(gap) → `clamp_cursors_for_agent(agent, new_oldest)` 로 뒤처진 cursor 를
@@ -102,6 +80,14 @@ where
     ///       (`UpToDate`/빈 슬라이스면 보낼 게 없어 snapshot 에 안 담고 advance 도 안 함.)
     ///
     /// ## ★`deliverable` 게이트(근원2 FIX — cursor advance ⟺ Channel delivery)★
+    /// ★왜 두 생명주기가 어긋나나(근원2 배경 — 파일 헤더 불변식의 정본)★: cursor 의 생명주기(router 파생
+    /// viewer 집합)와 Channel 의 생명주기(webview mount = `subscribe_output` 의 registry insert)는 **다른
+    /// 시점**이다 — layout 이 agent 를 배정해 router 에 (window,agent) slot 이 생겨도, 그 창 webview 가 아직
+    /// mount 안 됐으면 Channel 은 registry 에 없다. 옛 구현은 `on_frame` 이 `sync_viewers`(router 기준)로
+    /// cursor 를 신설·advance 하고 그 snapshot 을 flush 했는데, flush 가 **registry miss 로 스킵하는 동안에도
+    /// cursor 는 이미 advance** 됐다 → 이후 [`subscribe`] 가 "cursor 가 있다"고 불가침 판정해 빈 replay 를 줘
+    /// 그 구간이 **영구 유실**된다(특히 webview reload 시 Channel 이 교체되는데 stale cursor 가 남아 빈 화면).
+    ///
     /// `deliverable` = 현재 **Channel 이 registry 에 등록된 slot 집합**(src-tauri 가 주입 — core 는 registry
     /// 무관). slot 이 deliverable 에 **없으면**(layout 이 배정했으나 그 창 webview 가 아직 mount 안 됨)
     /// 그 slot 은 read 슬라이스를 snapshot 에 **안 담고 cursor advance 도 건너뛴다** — flush 가 어차피
