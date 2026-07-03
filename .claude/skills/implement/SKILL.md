@@ -12,7 +12,7 @@ description: 비자명 코드 변경의 구현 실행 파이프라인 — 코더
 ## 핵심 설계 (불변)
 
 - **메인은 오케스트레이터 — 구현을 직접 짜지 않는다.** 라우팅·지시서·취합·보고만 메인 토큰이 쓴다. 실제 편집은 fresh 코더 서브에이전트가 한다. 이게 이 스킬의 정체성이다 — 자율 모드에서도 생략 금지.
-- **생산자 ≠ 리뷰어 (fresh 분리).** 코더가 짠 산출물은 짠 코더가 아니라 `/review code`(cross-family 적대 리뷰)가 때리고, `/qa`(기계적 게이트)가 실측한다.
+- **생산자 ≠ 리뷰어 (fresh 분리).** 코더가 짠 산출물은 짠 코더가 아니라 `/review code`가 때리고(standard/critical = cross-family 포함 full/deep · **simple = 단일 family light** — cross-family 아님), `/qa`(기계적 게이트)가 실측한다.
 - **게이트 순서 불변 — review → qa.** review("맞나", 적대 판단)가 먼저, qa("실제로 도나", 기계 게이트)가 후행. 역전·생략 금지 — qa는 review의 후행 짝이다(두 게이트 스킬의 계약).
 - **강도 = 라우팅(1축).** simple/standard/critical이 코더 슬롯과 두 게이트 강도를 한 번에 정한다. 정량은 `references/flow.md` 강도표가 정본 — 아래 표는 "언제"만.
 - **루프 상한 = 무한 리뷰 방어.** 코더 재수정(review FIX·qa 실패 합산) 상한 2회. 초과 시 사용자 에스컬레이션. 정량·리셋 정책은 `references/flow.md §3`.
