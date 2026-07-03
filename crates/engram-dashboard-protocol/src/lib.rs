@@ -41,7 +41,7 @@ pub use domain::{
     SessionCaps, SnapshotChunk,
 };
 pub use ids::{AgentId, ProfileId, RequestId};
-pub use messages::{AgentCommand, AgentEvent, OutputChunk, SubscribeAction};
+pub use messages::{AgentCommand, AgentEvent, OutputChunk, StructuredEvent, SubscribeAction};
 
 /// 프로토콜 버전. 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
 /// 지금은 상수만 두고 Hello 에 실어 보냄 — 불일치 시 팝업 가이드는 나중).

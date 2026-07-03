@@ -17,6 +17,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dunce = "1.0"
 
+# ★S15 B8 (dev-only)★: opaque replay 단위테스트가 실제 codec(encode_structured_frame/decode_frame)으로
+#   tag0/tag1 frame bytes 를 조립·검증한다. protocol 은 core 를 의존하지 않으므로(wire 순수 타입 crate)
+#   순환 아님. **dev-dependency 한정** — 코어 런타임은 protocol/wire 를 여전히 모른다(ADR-0003 격리 유지).
+[dev-dependencies]
+engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_System_JobObjects",

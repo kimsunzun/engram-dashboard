@@ -23,8 +23,7 @@ use engram_dashboard_daemon::{
 };
 use engram_dashboard_protocol::{
     decode_frame, AgentCommand as WireCommand, AgentEvent, ClaudeOutputFormat as WireOutputFormat,
-    RequestId, SubscribeAction,
-    PROTOCOL_VERSION,
+    RequestId, SubscribeAction, PROTOCOL_VERSION,
 };
 
 use futures_util::{SinkExt, StreamExt};

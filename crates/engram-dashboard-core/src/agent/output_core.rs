@@ -17,8 +17,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::agent::types::{
-    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputSink, ReplayKind, SinkId,
-    StatusSink, SubscribeOutcome, TerminalReason,
+    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputPayload, OutputSink,
+    ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
 };
 
 /// finalize 1회 종료 hook(ADR-0019). spawn_session 이 {id,epoch,intent,shutting_down,reaper_tx}
@@ -44,7 +44,8 @@ pub struct OutputCore {
     subscribers: Mutex<Vec<Arc<dyn OutputSink>>>,
 
     // ── Replay buffer (독립 lock) ─────────────────────────────
-    replay: Mutex<ReplayBuffer>,
+    // ★S15 B4★: ReplayBuffer(바이트 전용) → Ring(payload-generic, StoredOutput 저장).
+    replay: Mutex<Ring>,
 
     // ── 상태 알림 ─────────────────────────────────────────────
     status_sink: Arc<dyn StatusSink>,
@@ -73,7 +74,7 @@ impl OutputCore {
             status: Mutex::new(AgentStatus::Running),
             finalized: AtomicBool::new(false),
             subscribers: Mutex::new(Vec::new()),
-            replay: Mutex::new(ReplayBuffer::new()),
+            replay: Mutex::new(Ring::new()),
             status_sink,
             drain_handle: Mutex::new(None),
             drain_done_rx: Mutex::new(None),
@@ -94,84 +95,76 @@ impl OutputCore {
     }
 
     /// transport(pump)가 만든 출력 이벤트를 받아 replay 저장 + 구독자 fanout.
-    /// **variant-agnostic** — 콘솔은 TerminalBytes만 처리하고, 미래 variant는 `_ => {}`로 무시.
+    /// **payload-generic (S15 B4)** — 모든 OutputEvent variant(콘솔 바이트 + 구조화)를 받아
+    /// Ring 에 저장하고 payload-generic 으로 fanout 한다(ADR-0002 출력 종류 비가정). event 가
+    /// TerminalBytes 면 OutputPayload::Bytes, 그 외 구조화면 OutputPayload::Event 로 뷰를 만든다.
     ///
-    /// ★핵심 불변식 (drain.rs §10 규칙3)★
+    /// ★핵심 불변식 (ADR-0006 §10 규칙3 — payload 만 바뀌지 락 구조는 불변)★
     /// - `sink.send()` 호출 시 어떤 lock도 보유하지 않는다. subscribers를 clone으로
     ///   스냅샷 뜨고 lock을 즉시 해제한 뒤, 복사본을 돌며 send.
     /// - replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게).
     ///   두 lock 동시 취득은 subscribe 함수 단독 예외이며 emit은 절대 금지.
     pub fn emit(&self, event: OutputEvent) {
-        // B1이 구조화 variant(TextDelta/ToolCall/Usage/MessageDone/Error/Structured)를 추가해
-        // `_` 팔이 이제 실제로 도달 가능하다. 다만 현재 emit 배선은 TerminalBytes만 내보내므로
-        // 이 arm은 정상 경로에선 미도달인 dormant 안전망이다 — 구조화 이벤트가 여기 오면
-        // seq/replay/fanout 없이 조용히 사라져(침묵 유실) 상위가 눈치채지 못한다. 그래서 debug 빌드는
-        // 순서 위반으로 즉시 패닉시키고, release는 시끄럽게 로깅해 유실을 드러낸다.
-        // ADR-0045: B4가 payload-generic emit으로 이 wildcard 대체 예정.
-        // single_match: variant-agnostic 처리라 의도적으로 match 유지.
-        #[allow(clippy::single_match)]
-        match event {
-            OutputEvent::TerminalBytes(bytes) => {
-                // 3. seq 발급 (C2: 즉시 send — partial batch 정체 없음).
-                let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                let data = bytes;
+        // 3. seq 발급 (C2: 즉시 send — partial batch 정체 없음).
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
 
-                // 4. ★replay 저장 먼저★ — brief lock. **순서 중요(gap 방지)**: replay.push가
-                //    fanout보다 먼저여야, subscribe가 이 사이에 끼어들어도 새 sink는 replay에서
-                //    이 seq를 받는다(최악 dup, 프론트 seq dedup이 흡수). 역순이면 gap 발생.
-                //    raw를 replay에 1회 clone(N=1 구독 기준 구 base64 String clone과 실질 동률 — 구
-                //    emit은 replay move(0) + sink마다 String clone, 신 emit은 replay clone 1 + borrow fanout).
-                self.replay
-                    .lock()
-                    .expect("replay poisoned")
-                    .push(OutputChunk {
-                        seq,
-                        data: data.clone(),
-                    });
+        // eviction 예산(cost_bytes)을 event 참조로 미리 근사(ADR-0003: core 는 wire 크기를 모르므로
+        // payload 문자열 길이 합으로 구조적 근사 — estimate_cost_bytes 주석 참조).
+        let cost_bytes = estimate_cost_bytes(&event);
 
-                // 5. ★불변식 1★ subscribers를 clone으로 스냅샷 뜨고 즉시 lock 해제 → lock 밖에서 send.
-                //    send는 blocking/try_send 가능. lock을 쥔 채 send하면 subscribe/다른 send와 교착·정체.
-                //    raw OutputFrame(borrow)을 넘긴다 — base64/wire 인코딩은 sink 책임(코어 transport-agnostic).
-                let frame = OutputFrame {
-                    agent_id: self.id,
-                    epoch: self.epoch,
-                    seq,
-                    data: &data,
-                };
-                let sinks = self
-                    .subscribers
-                    .lock()
-                    .expect("subscribers poisoned")
-                    .clone();
+        // 4. ★replay 저장 먼저★ — brief lock(락 순서 1단계, ADR-0006). **순서 중요(gap 방지)**:
+        //    replay.push 가 fanout 보다 먼저여야, subscribe 가 이 사이에 끼어들어도 새 sink 는
+        //    replay 에서 이 seq 를 받는다(최악 dup, 프론트 seq dedup 이 흡수). 역순이면 gap 발생.
+        //    ★payload-generic★: Ring 에는 event 를 **clone 해서** 저장하고, fanout 은 로컬 원본
+        //    `event` 를 borrow 한다(원 emit 이 replay 엔 clone 넣고 로컬 `&data` 로 fanout 하던 것과
+        //    동형 — 락 밖 send 를 위해 fanout 참조를 로컬에 둔다). N=1 구독 기준 clone 1회로 구
+        //    base64 String clone 과 실질 동률.
+        self.replay
+            .lock()
+            .expect("replay poisoned")
+            .push(StoredOutput {
+                seq,
+                event: event.clone(),
+                cost_bytes,
+            });
+        // ↑ replay lock 은 push 직후 즉시 drop(임시 guard 스코프 종료). 아래 send 는 lock 미보유.
 
-                let mut dead = Vec::new();
-                for sink in sinks {
-                    if sink.send(frame).is_err() {
-                        dead.push(sink.sink_id());
-                    }
-                }
+        // event 종류로 payload 뷰 분기(ADR-0002 출력 종류 비가정): TerminalBytes→Bytes, 그 외 구조화
+        // →Event. 로컬 `event`(Ring 에 넣은 것과 별개 원본)를 borrow 하므로 lock 수명과 무관.
+        let payload = match &event {
+            OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
+            other => OutputPayload::Event(other),
+        };
 
-                // 6. 죽은 구독자 제거 — 다시 짧게 lock. (clone 시점 이후 새로 붙은 sink는 건드리지 않음)
-                if !dead.is_empty() {
-                    self.subscribers
-                        .lock()
-                        .expect("subscribers poisoned")
-                        .retain(|s| !dead.contains(&s.sink_id()));
-                }
+        // 5. ★불변식 1(ADR-0006 §10 규칙3)★ subscribers 를 clone 스냅샷 뜨고 즉시 lock 해제 →
+        //    **lock 밖에서 send**. send 는 blocking/try_send 가능하므로 lock 을 쥔 채 send 하면
+        //    subscribe/다른 send 와 교착·정체. replay lock 은 이미 위에서 drop, subscribers lock 도
+        //    clone 직후 drop → send 구간에는 **어떤 core lock 도 보유하지 않는다**(구조 불변, payload 만 바뀜).
+        let frame = OutputFrame {
+            agent_id: self.id,
+            epoch: self.epoch,
+            seq,
+            payload,
+        };
+        let sinks = self
+            .subscribers
+            .lock()
+            .expect("subscribers poisoned")
+            .clone();
+
+        let mut dead = Vec::new();
+        for sink in sinks {
+            if sink.send(frame).is_err() {
+                dead.push(sink.sink_id());
             }
-            // dormant 안전망: 구조화 이벤트가 payload-generic emit 배선(B4) 전에 도달 = 순서 위반.
-            // debug는 즉시 패닉(개발 중 조기 발견), release는 warn 로깅(침묵 유실 방지). 정상 경로 미도달.
-            _ => {
-                debug_assert!(
-                    false,
-                    "구조화 OutputEvent가 B4(payload-generic emit) 배선 전에 도달 — 순서 위반"
-                );
-                tracing::warn!(
-                    agent = %self.id,
-                    epoch = self.epoch,
-                    "구조화 OutputEvent가 emit에 도달했으나 처리 배선(B4) 부재 — 침묵 유실 방지 위해 드롭 경고"
-                );
-            }
+        }
+
+        // 6. 죽은 구독자 제거 — 다시 짧게 lock. (clone 시점 이후 새로 붙은 sink는 건드리지 않음)
+        if !dead.is_empty() {
+            self.subscribers
+                .lock()
+                .expect("subscribers poisoned")
+                .retain(|s| !dead.contains(&s.sink_id()));
         }
     }
 
@@ -302,13 +295,17 @@ impl OutputCore {
 
         // replay 전송 — snapshot의 seq와 이후 live chunk의 seq가 끊기지 않아 프론트가
         // seq로 dedup/정렬 가능. 막 등록된 sink라 send 실패는 unlikely → 무시(§7).
-        // raw OutputFrame(borrow) 전달 — 인코딩은 sink 책임.
-        for chunk in &snapshot {
+        // ★payload-generic★: StoredOutput.event 를 borrow 해 OutputPayload 뷰로 전달(인코딩은 sink 책임).
+        for stored in &snapshot {
+            let payload = match &stored.event {
+                OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
+                other => OutputPayload::Event(other),
+            };
             let frame = OutputFrame {
                 agent_id: self.id,
                 epoch: self.epoch,
-                seq: chunk.seq,
-                data: &chunk.data,
+                seq: stored.seq,
+                payload,
             };
             let _ = sink.send(frame);
         }
@@ -400,12 +397,17 @@ impl OutputCore {
         //   불일치(M-A)가 원천 제거된다.
         on_ready(&outcome);
 
-        for chunk in to_send {
+        // ★payload-generic★: StoredOutput.event borrow → OutputPayload 뷰(인코딩은 sink 책임).
+        for stored in to_send {
+            let payload = match &stored.event {
+                OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
+                other => OutputPayload::Event(other),
+            };
             let frame = OutputFrame {
                 agent_id: self.id,
                 epoch: self.epoch,
-                seq: chunk.seq,
-                data: &chunk.data,
+                seq: stored.seq,
+                payload,
             };
             let _ = sink.send(frame);
         }
@@ -422,9 +424,47 @@ impl OutputCore {
             .retain(|s| s.sink_id() != sink_id);
     }
 
-    /// replay 스냅샷 — 늦게 붙는 창의 초기 복원용.
+    /// replay 스냅샷 — 늦게 붙는 창의 초기 복원용(get_snapshot → wire SnapshotChunk 경로).
+    ///
+    /// ★계약 유지(B5)★: 이 게터는 여전히 `Vec<OutputChunk>`(바이트 전용 wire 미러)를 반환한다 —
+    /// 호출부(manager.get_snapshot → daemon snapshot_chunk_to_wire)가 이 형태에 의존한다. Ring 은
+    /// payload-generic(StoredOutput) 이지만, 이 경로의 wire 타입(OutputChunk{seq,data})은 아직 바이트
+    /// 전용이라 **TerminalBytes 만** 변환한다. 구조화 이벤트의 snapshot wire 매핑은 B7(daemon adapter)
+    /// 몫이라 여기선 스킵한다 — 현재 구조화 이벤트 생산자가 없어(B3 미배선) 런타임 유실 없음.
     pub fn snapshot(&self) -> Vec<OutputChunk> {
-        self.replay.lock().expect("replay poisoned").snapshot()
+        self.replay
+            .lock()
+            .expect("replay poisoned")
+            .snapshot()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                OutputEvent::TerminalBytes(data) => Some(OutputChunk { seq: s.seq, data }),
+                // 구조화 이벤트는 바이트 전용 wire snapshot 으로 아직 표현 불가(B7 몫) → 스킵.
+                //
+                // ★무음 유실 관측 훅★: B7 이 구조화→wire 매핑을 담당하며, 그전까지 이 경로(get_snapshot,
+                // 늦게 붙는 창의 초기 복원)로 붙는 구독자는 구조화 출력을 못 받는다. subscribe_from replay
+                // 경로는 payload-generic 이라 정상 전달돼 두 복원 경로가 비대칭 — B3 배선 순간 무음 유실이
+                // 되므로 drop 을 warn 으로 관측 가능하게 남긴다. 실제 wire 변환(B7)은 이 스코프 밖.
+                ref other => {
+                    // variant 태그만 로그(payload 내용은 로그에 싣지 않음 — 민감/대용량 회피).
+                    let kind = match other {
+                        OutputEvent::TerminalBytes(_) => "TerminalBytes", // 위 arm 이 처리 — 도달 안 함
+                        OutputEvent::TextDelta { .. } => "TextDelta",
+                        OutputEvent::ToolCall { .. } => "ToolCall",
+                        OutputEvent::Usage { .. } => "Usage",
+                        OutputEvent::MessageDone { .. } => "MessageDone",
+                        OutputEvent::Error(_) => "Error",
+                        OutputEvent::Structured { .. } => "Structured",
+                    };
+                    tracing::warn!(
+                        seq = s.seq,
+                        kind,
+                        "structured event dropped from wire snapshot (B7 미배선 — get_snapshot 경로 무음 유실)"
+                    );
+                    None
+                }
+            })
+            .collect()
     }
 
     /// 현재 상태 clone 반환.
@@ -433,49 +473,124 @@ impl OutputCore {
     }
 }
 
-/// 늦게 붙는 창을 위한 PTY 출력 ring buffer — 상한 2MB **그리고** event 수 상한.
+// ── S15 B4: payload-generic replay 버퍼 ───────────────────────────────────────────
+//
+// ReplayBuffer(OutputChunk=바이트 전용)를 일반화해 **owned OutputEvent** 를 저장한다.
+// TerminalBytes(Vec<u8>)도 OutputEvent 라 그대로 owned 저장되고, 구조화 이벤트(TextDelta·
+// ToolCall 등)도 같은 버퍼에 담긴다. replay 시 `&stored.event` 를 빌려 OutputPayload 뷰를 만든다.
+// ADR-0002: 출력 종류 비가정 — 버퍼가 바이트/이벤트를 차별하지 않는다.
+
+/// replay 버퍼 저장 단위. owned OutputEvent + seq + eviction 예산용 크기.
+#[derive(Debug, Clone)]
+pub struct StoredOutput {
+    pub seq: u64,
+    pub event: OutputEvent,
+    /// eviction 바이트 예산 산정용 근사 크기(정확한 wire 크기 아님 — 아래 estimate_cost_bytes 참조).
+    pub cost_bytes: usize,
+}
+
+/// OutputEvent 의 **eviction 예산용** 크기 근사.
+///
+/// ★왜 근사인가(TRD 핵심)★: core 는 직렬화를 못 한다(ADR-0003 — wire 변환은 daemon adapter 몫).
+/// 그래서 정확한 wire 바이트 수를 계산할 수 없다. 하지만 큰 `args_json`(도구 인자)·`json`(Structured)
+/// 이벤트가 "건수 1" 로만 세지면 max_bytes(2MB) 상한을 우회해 버퍼가 무한정 커진다. 이를 막으려
+/// **payload 문자열 필드들의 바이트 길이 합**을 구조적으로 근사해 예산에 반영한다. 이 값은 eviction
+/// 판단 전용이며 정확한 직렬화 크기가 아니다(태그·구분자·escape 오버헤드 무시).
+fn estimate_cost_bytes(event: &OutputEvent) -> usize {
+    match event {
+        OutputEvent::TerminalBytes(v) => v.len(),
+        OutputEvent::TextDelta {
+            text,
+            turn_id,
+            message_id,
+        } => text.len() + opt_len(turn_id) + opt_len(message_id),
+        OutputEvent::ToolCall {
+            name,
+            args_json,
+            id,
+            turn_id,
+            message_id,
+        } => name.len() + args_json.len() + opt_len(id) + opt_len(turn_id) + opt_len(message_id),
+        // Usage 는 고정 크기 수치 필드 — turn_id 문자열만 반영(u64 두 개는 무시).
+        OutputEvent::Usage { turn_id, .. } => opt_len(turn_id),
+        OutputEvent::MessageDone {
+            turn_id,
+            message_id,
+        } => opt_len(turn_id) + opt_len(message_id),
+        OutputEvent::Error(s) => s.len(),
+        OutputEvent::Structured { kind, json } => kind.len() + json.len(),
+    }
+}
+
+/// Option<String> 의 바이트 길이(None=0). estimate_cost_bytes 보조.
+fn opt_len(s: &Option<String>) -> usize {
+    s.as_deref().map(str::len).unwrap_or(0)
+}
+
+/// 늦게 붙는 창을 위한 출력 replay ring buffer — 상한 2MB **그리고** event 수 상한.
+/// ReplayBuffer 를 payload-generic(StoredOutput) 로 일반화한 것. StoredOutput 전용 구체 타입으로 둔다
+/// (제네릭 `Ring<T>` 는 이 프로젝트에 다른 저장 대상이 없어 과함 — 단순한 쪽).
+///
 /// ★event 수 상한 이유(S12 consult, GPT 단독 catch): byte 상한만 있으면 1바이트 청크가
 /// 폭주할 때 event 수가 수백만으로 불어, 신규 구독자가 replay를 받을 때 bounded mpsc를
 /// 즉시 가득 채워 매 재연결이 slow-consumer로 끊기는 영구 루프가 생긴다. 둘 중 하나라도
 /// 초과하면 앞부터 evict. (불변식: max_events ≤ 데몬 WS 송신 큐 cap − control_slack.)
-pub struct ReplayBuffer {
-    chunks: VecDeque<OutputChunk>,
+///
+/// ★byte 상한 = cost_bytes 합(구조화 이벤트도 예산 반영)★: 구 ReplayBuffer 는 data.len() 만 셌으나,
+/// 구조화 이벤트는 큰 args_json 을 담아도 "건수 1" 로만 세면 2MB 상한을 우회한다. Ring 은
+/// StoredOutput.cost_bytes(estimate_cost_bytes 근사) 합으로 예산을 잡아 이 우회를 막는다.
+pub struct Ring {
+    items: VecDeque<StoredOutput>,
     total_bytes: usize,
     max_bytes: usize,
     max_events: usize,
 }
 
-impl ReplayBuffer {
+impl Ring {
     pub fn new() -> Self {
         Self {
-            chunks: VecDeque::new(),
+            items: VecDeque::new(),
             total_bytes: 0,
             max_bytes: 2 * 1024 * 1024,
             // 4096: 데몬 WS 송신 큐 cap(예 4608) − control_slack(512) 이하로 잡아
-            // replay만으로 신규 구독자 큐가 넘치지 않게 한다.
+            // replay만으로 신규 구독자 큐가 넘치지 않게 한다(ReplayBuffer 와 동일 상수).
             max_events: 4096,
         }
     }
 
-    pub fn push(&mut self, chunk: OutputChunk) {
-        self.total_bytes += chunk.data.len();
-        self.chunks.push_back(chunk);
-        // byte 상한 OR event 수 상한 둘 중 하나라도 넘으면 앞부터 제거.
-        while self.total_bytes > self.max_bytes || self.chunks.len() > self.max_events {
-            if let Some(oldest) = self.chunks.pop_front() {
-                self.total_bytes -= oldest.data.len();
+    /// StoredOutput 을 뒤에 추가하고, 이중 상한(cost_bytes 합 OR 건수) 초과 시 앞부터 evict.
+    /// total_bytes 는 push 마다 cost_bytes 로 누적, evict 마다 차감해 항상 items 합과 일치한다.
+    pub fn push(&mut self, item: StoredOutput) {
+        self.total_bytes += item.cost_bytes;
+        self.items.push_back(item);
+        // byte 예산(cost_bytes 합) OR event 수 상한 둘 중 하나라도 넘으면 앞부터 제거.
+        //
+        // ★최신 1건 보존 불변식(len() > 1 가드)★: 방금 push 한 단일 이벤트의 cost_bytes 가
+        // max_bytes(2MB)를 홀로 초과하면(예: 큰 args_json/Structured.json), len() > 1 가드가 없을 때
+        // eviction 루프가 그 최신 이벤트까지 pop_front 로 빼내 버퍼가 비어 버린다 → 늦게 붙는 구독자가
+        // **최신 seq 를 통째로 놓친다**. 그래서 오래된 것만 evict 하고 마지막 1건은 항상 남긴다.
+        // 트레이드오프: 단일 이벤트가 예산을 넘으면 메모리는 "가장 큰 단일 이벤트 크기"까지 초과할 수
+        // 있으나(byte 상한 일시 위반), replay 정합(늦은 구독자가 늘 최신을 본다) > 엄격 byte 상한.
+        while self.items.len() > 1
+            && (self.total_bytes > self.max_bytes || self.items.len() > self.max_events)
+        {
+            if let Some(oldest) = self.items.pop_front() {
+                self.total_bytes -= oldest.cost_bytes;
             } else {
                 break;
             }
         }
     }
 
-    pub fn snapshot(&self) -> Vec<OutputChunk> {
-        self.chunks.iter().cloned().collect()
+    /// 현재 버퍼 전체를 clone 해 반환(seq 오름차순). 호출부가 after_seq 필터는 partition_point 로.
+    /// clone 반환 계약은 ReplayBuffer::snapshot 과 동일 — 호출부(subscribe)가 lock 밖에서 borrow 하려면
+    /// 소유 스냅샷이 필요하다(락 보유 시간 최소화).
+    pub fn snapshot(&self) -> Vec<StoredOutput> {
+        self.items.iter().cloned().collect()
     }
 }
 
-impl Default for ReplayBuffer {
+impl Default for Ring {
     fn default() -> Self {
         Self::new()
     }
@@ -486,11 +601,11 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// 받은 출력을 (seq, raw data)로 순서대로 수집하는 mock OutputSink.
-    /// raw 경계화 검증: base64 아닌 raw 바이트가 그대로 오는지 확인.
+    /// 받은 출력을 (seq, bytes, is_event)로 순서대로 수집하는 mock OutputSink.
+    /// raw 경계화 검증: base64 아닌 raw 바이트가 그대로 오는지 + payload 종류(Bytes/Event) 태그.
     struct MockSink {
         id: SinkId,
-        events: Mutex<Vec<(u64, Vec<u8>)>>,
+        events: Mutex<Vec<(u64, Vec<u8>, bool)>>,
     }
 
     impl MockSink {
@@ -512,11 +627,16 @@ mod tests {
 
     impl OutputSink for MockSink {
         fn send(&self, frame: OutputFrame<'_>) -> Result<(), crate::agent::types::SinkError> {
-            // raw 바이트를 복사 보관(테스트 검증용).
+            // payload 종류별 수집(테스트 검증용): Bytes→raw 바이트 그대로(is_event=false),
+            // Event→디버그 문자열화 후 UTF-8 바이트(is_event=true, 구조화 이벤트 도달을 단언 가능하게).
+            let (bytes, is_event) = match frame.payload {
+                OutputPayload::Bytes(b) => (b.to_vec(), false),
+                OutputPayload::Event(e) => (format!("{e:?}").into_bytes(), true),
+            };
             self.events
                 .lock()
                 .unwrap()
-                .push((frame.seq, frame.data.to_vec()));
+                .push((frame.seq, bytes, is_event));
             Ok(())
         }
         fn sink_id(&self) -> SinkId {
@@ -567,11 +687,13 @@ mod tests {
         assert_eq!(sink.seqs(), vec![0, 1]);
         // 구독자에 2건 전달.
         assert_eq!(sink.len(), 2);
-        // ★raw 경계화 검증: sink가 base64 아닌 raw 바이트를 받았는지.
+        // ★raw 경계화 검증: sink가 base64 아닌 raw 바이트를 받았는지 + payload=Bytes(is_event=false).
         {
             let ev = sink.events.lock().unwrap();
             assert_eq!(ev[0].1, b"hello");
             assert_eq!(ev[1].1, b"world");
+            assert!(!ev[0].2, "TerminalBytes 는 OutputPayload::Bytes 로 와야 함");
+            assert!(!ev[1].2);
         }
         // replay에 2건 누적.
         let snap = core.snapshot();
@@ -580,6 +702,55 @@ mod tests {
         assert_eq!(snap[1].seq, 1);
         assert_eq!(snap[0].data, b"hello");
         assert_eq!(snap[1].data, b"world");
+    }
+
+    /// S15 B4 payload-generic fanout: 구조화 이벤트를 emit 하면 (1) 구독자가 OutputPayload::Event
+    /// 로 수신하고, (2) Ring 에 저장돼 늦게 붙는 구독자의 replay 도 동일하게 Event 로 받는지 검증.
+    /// (바이트 경로 회귀는 emit_increments_seq_and_fans_out 이 커버 — 여기선 구조화 경로 신규.)
+    #[test]
+    fn emit_structured_event_fans_out_as_event_and_replays() {
+        let core = new_core(MockStatusSink::new());
+
+        // (a) live 구독자 등록 후 구조화 이벤트 emit.
+        let live = MockSink::new();
+        core.subscribe(live.clone());
+        core.emit(OutputEvent::TextDelta {
+            text: "hi".into(),
+            turn_id: None,
+            message_id: None,
+        });
+        // 바이트도 하나 섞어 payload 분기(Bytes vs Event)를 함께 본다.
+        core.emit(OutputEvent::TerminalBytes(b"raw".to_vec()));
+
+        {
+            let ev = live.events.lock().unwrap();
+            assert_eq!(ev.len(), 2);
+            // 첫 이벤트(구조화) → Event 로 수신.
+            assert!(
+                ev[0].2,
+                "구조화 이벤트는 OutputPayload::Event 로 fanout 돼야 함"
+            );
+            assert!(
+                String::from_utf8_lossy(&ev[0].1).contains("TextDelta"),
+                "Event payload 가 해당 이벤트를 담아야 함"
+            );
+            // 둘째(TerminalBytes) → Bytes 로 수신.
+            assert!(!ev[1].2, "TerminalBytes 는 Bytes 로 fanout");
+            assert_eq!(ev[1].1, b"raw");
+        }
+
+        // (b) 늦게 붙는 구독자 → replay 로 두 건을 동일 payload 종류로 받는다(seq 순서 보존).
+        let late = MockSink::new();
+        core.subscribe(late.clone());
+        {
+            let ev = late.events.lock().unwrap();
+            assert_eq!(ev.len(), 2);
+            assert_eq!(ev[0].0, 0); // 구조화, seq 0.
+            assert!(ev[0].2, "replay 된 구조화 이벤트도 Event payload");
+            assert_eq!(ev[1].0, 1); // 바이트, seq 1.
+            assert!(!ev[1].2);
+            assert_eq!(ev[1].1, b"raw");
+        }
     }
 
     #[test]
@@ -600,22 +771,162 @@ mod tests {
         assert_eq!(sink.seqs(), vec![0, 1, 2]);
     }
 
-    #[test]
-    fn replay_buffer_caps_event_count() {
-        // 1바이트 청크 폭주 → byte 상한(2MB)엔 한참 못 미치지만 event 수 상한(4096)에 걸려야 함.
-        let mut rb = ReplayBuffer::new();
-        for seq in 0..5000u64 {
-            rb.push(OutputChunk {
-                seq,
-                data: vec![b'x'],
-            });
+    // ── S15 B4 Ring 단위테스트(격리) — 구 replay_buffer_caps_event_count 는 ────────
+    //    ring_evicts_on_event_count_cap 이 대체(ReplayBuffer→Ring 일반화). ──────────
+
+    fn stored(seq: u64, event: OutputEvent) -> StoredOutput {
+        let cost_bytes = estimate_cost_bytes(&event);
+        StoredOutput {
+            seq,
+            event,
+            cost_bytes,
         }
-        let snap = rb.snapshot();
-        // 정확히 max_events(4096)로 cap.
+    }
+
+    #[test]
+    fn ring_push_snapshot_preserves_order_and_seq() {
+        let mut ring = Ring::new();
+        ring.push(stored(0, OutputEvent::TerminalBytes(b"a".to_vec())));
+        ring.push(stored(1, OutputEvent::TerminalBytes(b"bb".to_vec())));
+        ring.push(stored(2, OutputEvent::Error("boom".into())));
+
+        let snap = ring.snapshot();
+        assert_eq!(
+            snap.iter().map(|s| s.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // event 종류·내용 보존.
+        assert!(matches!(&snap[0].event, OutputEvent::TerminalBytes(v) if v == b"a"));
+        assert!(matches!(&snap[2].event, OutputEvent::Error(s) if s == "boom"));
+    }
+
+    #[test]
+    fn ring_evicts_on_byte_budget_independent_of_count() {
+        // 큰 args_json 이벤트 한 건이 max_bytes(2MB) 를 초과하면, 건수 상한(4096) 과 무관하게
+        // 오래된 것부터 evict 돼야 한다. 구 ReplayBuffer(data.len() 만 셈)라면 "건수 1" 로 새어
+        // 2MB 상한을 우회했을 케이스. cost_bytes 근사가 이를 막는지 검증.
+        let mut ring = Ring::new();
+        // 각 ~1MB args_json 이벤트 3건 → cost 합 ~3MB > 2MB → 가장 오래된 것 evict.
+        let big = "x".repeat(1024 * 1024);
+        ring.push(stored(
+            0,
+            OutputEvent::ToolCall {
+                name: "t".into(),
+                args_json: big.clone(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+            },
+        ));
+        ring.push(stored(
+            1,
+            OutputEvent::ToolCall {
+                name: "t".into(),
+                args_json: big.clone(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+            },
+        ));
+        ring.push(stored(
+            2,
+            OutputEvent::ToolCall {
+                name: "t".into(),
+                args_json: big.clone(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+            },
+        ));
+        let snap = ring.snapshot();
+        // 건수는 3보다 작아야 함(byte 예산이 먼저 걸림) — 건수 상한(4096) 과 독립.
+        assert!(
+            snap.len() < 3,
+            "cost_bytes 합이 2MB 초과 시 건수 상한과 무관하게 evict 돼야 함(len={})",
+            snap.len()
+        );
+        // 남은 것은 최신 쪽(seq 2 는 반드시 살아 있음, 방금 push).
+        assert_eq!(snap.last().unwrap().seq, 2);
+    }
+
+    #[test]
+    fn ring_evicts_on_event_count_cap() {
+        // 작은 이벤트 5000건 → byte 예산엔 한참 못 미치지만 건수 상한(4096)에 걸려 cap.
+        let mut ring = Ring::new();
+        for seq in 0..5000u64 {
+            ring.push(stored(seq, OutputEvent::TerminalBytes(vec![b'x'])));
+        }
+        let snap = ring.snapshot();
         assert_eq!(snap.len(), 4096);
         // 가장 오래된 것부터 evict → 남은 첫 seq = 5000-4096 = 904.
         assert_eq!(snap.first().unwrap().seq, 904);
         assert_eq!(snap.last().unwrap().seq, 4999);
+    }
+
+    #[test]
+    fn ring_preserves_latest_when_single_event_exceeds_byte_budget() {
+        // FIX-A: 방금 push 한 단일 이벤트의 cost_bytes 가 max_bytes(2MB)를 홀로 초과해도,
+        // 최신 1건 보존 불변식(len() > 1 가드)에 의해 그 이벤트는 replay 버퍼에 남아야 한다.
+        // 가드가 없으면 eviction 루프가 최신까지 pop_front 해 버퍼가 비고, 늦은 구독자가
+        // 최신 seq 를 통째로 놓친다.
+        let mut ring = Ring::new();
+        let huge = "y".repeat(3 * 1024 * 1024); // > 2MB (max_bytes)
+        ring.push(stored(
+            42,
+            OutputEvent::Structured {
+                kind: "big".into(),
+                json: huge,
+            },
+        ));
+        let snap = ring.snapshot();
+        assert_eq!(snap.len(), 1, "단일 초과 이벤트라도 최신 1건은 보존돼야 함");
+        assert_eq!(snap[0].seq, 42, "보존된 이벤트는 방금 push 한 최신 seq");
+    }
+
+    #[test]
+    fn ring_evicts_only_old_when_latest_exceeds_budget() {
+        // FIX-A: 오래된 작은 이벤트들 + 예산을 홀로 초과하는 큰 최신 이벤트 →
+        // 오래된 것들만 빠지고(byte 예산 회복 시도) 최신 1건은 반드시 남는다.
+        let mut ring = Ring::new();
+        ring.push(stored(0, OutputEvent::TerminalBytes(b"old0".to_vec())));
+        ring.push(stored(1, OutputEvent::TerminalBytes(b"old1".to_vec())));
+        let huge = "z".repeat(3 * 1024 * 1024); // > 2MB → 이것만으로 예산 초과
+        ring.push(stored(
+            2,
+            OutputEvent::Structured {
+                kind: "big".into(),
+                json: huge,
+            },
+        ));
+        let snap = ring.snapshot();
+        // 오래된 것(seq 0,1)은 evict, 최신(seq 2)만 남는다.
+        assert_eq!(snap.len(), 1, "오래된 것만 빠지고 최신 1건 남아야 함");
+        assert_eq!(snap[0].seq, 2, "남은 것은 최신 이벤트");
+    }
+
+    #[test]
+    fn ring_cost_bytes_reflects_terminal_and_structured() {
+        // TerminalBytes → v.len().
+        assert_eq!(
+            estimate_cost_bytes(&OutputEvent::TerminalBytes(vec![0u8; 100])),
+            100
+        );
+        // 구조화(ToolCall) → name + args_json + optional 문자열 합.
+        let cost = estimate_cost_bytes(&OutputEvent::ToolCall {
+            name: "read".into(),           // 4
+            args_json: "{\"p\":1}".into(), // 7
+            id: Some("abc".into()),        // 3
+            turn_id: None,
+            message_id: None,
+        });
+        assert_eq!(cost, 4 + 7 + 3);
+        // TextDelta → text + optional.
+        let cost2 = estimate_cost_bytes(&OutputEvent::TextDelta {
+            text: "hello".into(),       // 5
+            turn_id: Some("t1".into()), // 2
+            message_id: None,
+        });
+        assert_eq!(cost2, 5 + 2);
     }
 
     #[test]

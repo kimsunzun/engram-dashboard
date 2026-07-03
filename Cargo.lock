@@ -949,6 +949,7 @@ name = "engram-dashboard-core"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "engram-dashboard-protocol",
  "portable-pty",
  "regex",
  "serde",

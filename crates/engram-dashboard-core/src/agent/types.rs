@@ -258,15 +258,31 @@ pub struct PtyEvent {
     pub data_b64: String,
 }
 
-/// 코어→sink 출력 경계 (S12 raw 경계화). **raw 바이트를 빌려서** 전달 — base64/wire 인코딩은
-/// sink 책임(Embedded=base64 PtyEvent, Daemon=binary frame). Copy(참조만)라 fanout 시 복사 0.
-/// agent_id/epoch는 OutputCore가 보유한 불변값을 그대로 싣는다(데몬 frame 헤더용).
+/// 코어→sink 출력 payload (S15 B5 payload-generic). **빌려서** 전달 — 콘솔 raw 바이트든
+/// 구조화 이벤트든 sink 가 wire 로 인코딩한다(코어는 wire 를 모른다, ADR-0003).
+/// ★ADR-0002 (출력 종류 비가정)★: 출력을 터미널 바이트로 강제하지 않는다 — Bytes/Event 두 갈래로
+/// 나눠 sink 가 종류별로 처리(Bytes→tag0 terminal frame, Event→tag1 structured frame, B7)한다.
+/// 참조만 담아 Copy 유지(OutputFrame Copy 계약 보존) — Serialize 미부착(core 도메인 타입, ADR-0003).
+#[derive(Debug, Clone, Copy)]
+pub enum OutputPayload<'a> {
+    /// 콘솔 raw 바이트(터미널·tag0 경로). PtyTransport·터미널 모드의 payload.
+    Bytes(&'a [u8]),
+    /// 구조화 이벤트(tag1 경로 — B7 이 인코딩). backend decoder 가 파싱한 OutputEvent.
+    Event(&'a OutputEvent),
+}
+
+/// 코어→sink 출력 경계 (S12 raw 경계화 → S15 B5 payload-generic). **payload 를 빌려서** 전달 —
+/// base64/wire 인코딩은 sink 책임(Embedded=base64 PtyEvent, Daemon=binary frame). Copy(참조만)라
+/// fanout 시 복사 0. agent_id/epoch는 OutputCore가 보유한 불변값을 그대로 싣는다(데몬 frame 헤더용).
+///
+/// ★S15 B5★: `data: &[u8]` → `payload: OutputPayload<'a>` — 콘솔 바이트(Bytes)와 구조화 이벤트(Event)
+/// 를 한 경계로 흘린다(ADR-0002 출력 종류 비가정). sink 가 종류별로 인코딩(Bytes→tag0, Event→tag1).
 #[derive(Debug, Clone, Copy)]
 pub struct OutputFrame<'a> {
     pub agent_id: AgentId,
     pub epoch: u32,
     pub seq: u64,
-    pub data: &'a [u8],
+    pub payload: OutputPayload<'a>,
 }
 
 /// 에이전트 메타데이터 스냅샷 — 목록 조회 및 상태 동기화용

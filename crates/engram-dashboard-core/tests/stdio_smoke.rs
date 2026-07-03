@@ -18,8 +18,8 @@ use engram_dashboard_core::agent::output_core::OutputCore;
 use engram_dashboard_core::agent::transport::stdio::StdioTransport;
 use engram_dashboard_core::agent::transport::AgentTransport;
 use engram_dashboard_core::agent::types::{
-    AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputFrame, OutputSink, SinkError,
-    SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputFrame, OutputPayload,
+    OutputSink, SinkError, SinkId, StatusSink,
 };
 
 // ── RecordingSink: (seq, bytes) 누적 ────────────────────────────────────────────
@@ -51,10 +51,10 @@ impl RecordingSink {
 }
 impl OutputSink for RecordingSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        self.events
-            .lock()
-            .unwrap()
-            .push((frame.seq, frame.data.to_vec()));
+        // S15 B5 payload-generic: 콘솔 바이트만 수집(smoke 테스트는 구조화 이벤트를 안 다룸).
+        if let OutputPayload::Bytes(b) = frame.payload {
+            self.events.lock().unwrap().push((frame.seq, b.to_vec()));
+        }
         Ok(())
     }
     fn sink_id(&self) -> SinkId {

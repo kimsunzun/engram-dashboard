@@ -4,5 +4,8 @@
  * 출력 청크 — 종류 불가지(설계 §2). TerminalBytes 는 binary frame(codec)으로,
  * 나머지 구조화 variant 는 JSON(AgentEvent::Output)으로 흐른다.
  * (구조화 turn 단위 출력은 TUI↔구조화 스위칭 모드 설계 때 실제 채움 — 지금은 형태만 연다.)
+ *
+ * ※S15/ADR-0045: tag1 구조화 이벤트는 이 타입이 아니라 위 [`StructuredEvent`]로 흐른다(필드 유실 0
+ * 미러). 이 `OutputChunk`는 GetSnapshot 스냅샷(AgentEvent::Output/Snapshot) 계약 전용으로 남는다.
  */
 export type OutputChunk = { "TerminalBytes": number[] } | { "TextDelta": string } | { "Usage": { input_tokens: bigint, output_tokens: bigint, } } | { "ToolCall": { name: string, args_json: string, } } | { "Structured": { kind: string, json: string, } };

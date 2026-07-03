@@ -26,17 +26,17 @@ use std::time::Duration;
 use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::agent::types::{
-    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputFrame, OutputSink,
-    SinkError, SinkId, StatusSink,
+    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputFrame, OutputPayload,
+    OutputSink, SinkError, SinkId, StatusSink,
 };
 
 use engram_dashboard_protocol::{
-    encode_terminal_frame, AgentCommand, AgentEvent, PROTOCOL_VERSION,
+    encode_structured_frame, encode_terminal_frame, AgentCommand, AgentEvent, PROTOCOL_VERSION,
 };
 
 use crate::connection_core::{
     agent_list_event, core_agents_to_wire, core_report_to_wire, core_status_to_wire, event_json,
-    hello_event, ConnectionCore, ConnectionSession, MultiViewState, Outbound,
+    hello_event, output_event_to_wire, ConnectionCore, ConnectionSession, MultiViewState, Outbound,
     OutboundSink as CoreOutboundSink, SinkError as CoreSinkError,
 };
 
@@ -311,7 +311,53 @@ impl CoreOutboundSink for WsOutboundSink {
 
 impl OutputSink for WsOutputSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        let buf = encode_terminal_frame(frame.agent_id, frame.epoch, frame.seq, frame.data);
+        // ★S15 B5/B7 payload 분기(ADR-0045)★: 콘솔 바이트는 tag0 terminal frame, 구조화 이벤트는 tag1
+        //   structured frame 으로 인코딩한다. sink 가 wire 인코딩을 소유(코어는 wire 모름, ADR-0003) —
+        //   Bytes 는 raw payload 를, Event 는 core `OutputEvent` → wire `StructuredEvent`(daemon adapter)
+        //   → JSON payload 를 헤더에 실어 보낸다.
+        //   ★현 배선 상태★: 구조화 이벤트 생산자(B3 decoder→pump 배선)는 아직 미배선이라 런타임엔 Bytes 만
+        //   흐른다 — Event arm 은 B7 단위테스트(합성 OutputEvent)로만 도달·검증된다(정상).
+        let buf = match frame.payload {
+            OutputPayload::Bytes(b) => {
+                encode_terminal_frame(frame.agent_id, frame.epoch, frame.seq, b)
+            }
+            // ★tag1 인코딩(B7)★: core OutputEvent → wire StructuredEvent(adapter) → JSON payload →
+            //   tag1 structured frame. codec 은 payload 스키마 무지(opaque) — 직렬화 형식(JSON)·이벤트
+            //   타입은 여기(daemon)가 소유한다(ADR-0045 self-describing).
+            OutputPayload::Event(ev) => {
+                // (1) core→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류
+                //     배선 버그) 매핑 불가(None) → debug 는 조기 발견, release 는 warn 후 drop(연결 유지).
+                let wire = match output_event_to_wire(ev) {
+                    Some(w) => w,
+                    None => {
+                        debug_assert!(
+                            false,
+                            "TerminalBytes(tag0 전용)가 Event(tag1) arm 에 도달 — 상류 payload 분기 버그"
+                        );
+                        tracing::warn!(
+                            agent = %frame.agent_id,
+                            "tag1 인코딩 불가(TerminalBytes 가 Event arm 도달) — drop"
+                        );
+                        return Ok(());
+                    }
+                };
+                // (2) JSON 직렬화. 실패는 거의 불가능(문자열/숫자 필드뿐)하나, 나면 이 frame 만 warn 후
+                //     drop 한다(SinkError 로 연결을 죽이지 않음 — 직렬화 실패는 슬로우 소비자와 무관한
+                //     데이터 문제고, control event_json 실패 처리와 동일 관례).
+                let payload = match serde_json::to_vec(&wire) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %frame.agent_id,
+                            "StructuredEvent 직렬화 실패 — drop: {e}"
+                        );
+                        return Ok(());
+                    }
+                };
+                // (3) tag1 frame(헤더+payload). 헤더 레이아웃은 tag0 과 동일, tag=1(codec, ADR-0045).
+                encode_structured_frame(frame.agent_id, frame.epoch, frame.seq, &payload)
+            }
+        };
         // ★pump 스레드 — try_send 만(절대 block 금지). full/closed = 느린 소비자 → 코어가 이 sink 제거.
         match self.conn_tx.try_send(WsOutbound::Binary(buf)) {
             Ok(()) => Ok(()),
@@ -847,7 +893,7 @@ mod tests {
             agent_id,
             epoch: 7,
             seq: 42,
-            data,
+            payload: OutputPayload::Bytes(data),
         };
         sink.send(frame).expect("send ok");
 
@@ -861,6 +907,62 @@ mod tests {
                 assert_eq!(decoded.payload, b"abc");
             }
             _ => panic!("Binary 가 아님"),
+        }
+    }
+
+    // ── 4b. (S15 B7) WsOutputSink 가 Event(구조화) payload 를 tag1 frame 으로 인코딩하는지 ──────
+    //    합성 OutputEvent → send → conn_tx 의 Binary 를 decode_frame 으로 풀어 tag1·헤더 확인 후,
+    //    payload 를 다시 wire StructuredEvent 로 serde 파싱해 필드가 보존됐는지 단언(ADR-0045 self-describing).
+    #[tokio::test]
+    async fn ws_output_sink_encodes_event_as_tag1_structured_frame() {
+        use engram_dashboard_core::agent::types::OutputEvent as CoreOutputEvent;
+        use engram_dashboard_protocol::{
+            decode_frame, StructuredEvent as WireStructuredEvent, FRAME_TAG_STRUCTURED_EVENT,
+        };
+
+        let (tx, mut rx) = mpsc::channel::<WsOutbound>(8);
+        let sink = WsOutputSink::new(tx, Arc::new(Notify::new()));
+        let agent_id = uuid::Uuid::new_v4();
+        // 합성 구조화 이벤트(B3 미배선이라 런타임 생산자 없음 — 여기선 직접 만들어 tag1 경로를 태운다).
+        let ev = CoreOutputEvent::ToolCall {
+            name: "read".into(),
+            args_json: r#"{"path":"/x"}"#.into(),
+            id: Some("call_1".into()),
+            turn_id: Some("t9".into()),
+            message_id: None,
+        };
+        let frame = OutputFrame {
+            agent_id,
+            epoch: 3,
+            seq: 100,
+            payload: OutputPayload::Event(&ev),
+        };
+        sink.send(frame).expect("Event send ok");
+
+        match rx.recv().await.expect("one item") {
+            WsOutbound::Binary(buf) => {
+                let decoded = decode_frame(&buf).expect("decode");
+                // tag=1(structured) + 헤더 필드 그대로.
+                assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT, "tag1 이어야 함");
+                assert_eq!(decoded.agent_id, agent_id);
+                assert_eq!(decoded.epoch, 3);
+                assert_eq!(decoded.seq, 100);
+                // payload = JSON self-describing StructuredEvent. 파싱해 필드 보존 단언.
+                let parsed: WireStructuredEvent =
+                    serde_json::from_slice(decoded.payload).expect("payload JSON 파싱");
+                assert_eq!(
+                    parsed,
+                    WireStructuredEvent::ToolCall {
+                        name: "read".into(),
+                        args_json: r#"{"path":"/x"}"#.into(),
+                        id: Some("call_1".into()),
+                        turn_id: Some("t9".into()),
+                        message_id: None,
+                    },
+                    "tag1 payload 가 wire StructuredEvent 로 무손실 복원"
+                );
+            }
+            other => panic!("Binary(tag1) 여야 함: {other:?}"),
         }
     }
 
@@ -878,7 +980,7 @@ mod tests {
             agent_id,
             epoch: 0,
             seq,
-            data: b"x",
+            payload: OutputPayload::Bytes(b"x"),
         };
         // 첫 send 성공(큐 1칸 채움).
         sink.send(frame(0)).expect("first ok");

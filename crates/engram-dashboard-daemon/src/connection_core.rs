@@ -34,7 +34,7 @@ use engram_dashboard_core::agent::profile::{
     RestoreOutcome as CoreRestoreOutcome,
 };
 use engram_dashboard_core::agent::types::{
-    Capabilities as CoreCaps, OutputChunk as CoreOutputChunk,
+    Capabilities as CoreCaps, OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
 };
 
 use engram_dashboard_protocol::{
@@ -43,8 +43,8 @@ use engram_dashboard_protocol::{
     ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
     InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
     RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
-    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk, SubscribeAction,
-    PROTOCOL_VERSION,
+    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
+    StructuredEvent as WireStructuredEvent, SubscribeAction, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -456,6 +456,71 @@ fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
     WireSnapshotChunk {
         seq: c.seq,
         data: c.data.clone(),
+    }
+}
+
+/// ★S15 B7 (ADR-0045)★: core `OutputEvent` → wire `StructuredEvent`(tag1 payload). 각 core variant 를
+/// wire variant 로 **명시 매핑**(필드 그대로 옮김) — variant/필드 추가·개명 시 컴파일 에러로 강제한다
+/// (다른 `*_to_wire` 와 동일 원칙: reflection 왕복 금지, silent drop 차단). turn_id/message_id/id 는
+/// optional 그대로 옮겨 교체성(codex/gemini 가 못 채우면 None)을 보존한다.
+///
+/// ★반환이 Option 인 이유(TerminalBytes 방어)★: 정상 경로에서 `OutputEvent::TerminalBytes` 는 이 변환에
+/// **오지 않는다** — 콘솔 raw 바이트는 sink 에서 tag0 terminal frame(`OutputPayload::Bytes`)으로 갈리고,
+/// 이 함수는 `OutputPayload::Event` arm(tag1)에서만 불린다(ws.rs). wire `StructuredEvent` 에는 TerminalBytes
+/// variant 가 없으므로(tag1 payload 에 raw 바이트를 안 싣는다 — ADR-0045), 만약 TerminalBytes 가 이 arm 에
+/// 도달하면 매핑 불가다. 그때 패닉 대신 `None` 을 돌려 호출부(ws.rs)가 warn 후 drop 하게 한다(런타임 안전 —
+/// tag0/tag1 오분류는 상류 배선 버그지 이 frame 하나로 연결을 죽일 사안이 아님). debug 빌드는 호출부에서
+/// debug_assert 로 조기 발견한다.
+pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructuredEvent> {
+    match ev {
+        // tag0 전용 — tag1 payload 에 안 실린다(위 주석). 매핑 불가 → None(호출부 방어).
+        CoreOutputEvent::TerminalBytes(_) => None,
+        CoreOutputEvent::TextDelta {
+            text,
+            turn_id,
+            message_id,
+        } => Some(WireStructuredEvent::TextDelta {
+            text: text.clone(),
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        }),
+        CoreOutputEvent::ToolCall {
+            name,
+            args_json,
+            id,
+            turn_id,
+            message_id,
+        } => Some(WireStructuredEvent::ToolCall {
+            name: name.clone(),
+            args_json: args_json.clone(),
+            id: id.clone(),
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        }),
+        CoreOutputEvent::Usage {
+            input_tokens,
+            output_tokens,
+            turn_id,
+        } => Some(WireStructuredEvent::Usage {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+            turn_id: turn_id.clone(),
+        }),
+        CoreOutputEvent::MessageDone {
+            turn_id,
+            message_id,
+        } => Some(WireStructuredEvent::MessageDone {
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        }),
+        // core 는 tuple variant Error(String), wire 는 struct variant { message } — 명시 옮김.
+        CoreOutputEvent::Error(message) => Some(WireStructuredEvent::Error {
+            message: message.clone(),
+        }),
+        CoreOutputEvent::Structured { kind, json } => Some(WireStructuredEvent::Structured {
+            kind: kind.clone(),
+            json: json.clone(),
+        }),
     }
 }
 
@@ -1759,6 +1824,98 @@ mod tests {
         assert_eq!(
             restore_outcome_to_wire(&Co::Failed { reason: "f".into() }),
             Wo::Failed { reason: "f".into() }
+        );
+    }
+
+    // ── S15 B7: output_event_to_wire — core OutputEvent → wire StructuredEvent 필드 보존 ──────
+    //    각 variant 를 명시 매핑하고 turn_id/message_id/id 등 optional 필드가 그대로(None 포함) 옮겨지는지.
+    #[tokio::test]
+    async fn output_event_to_wire_maps_all_variants_preserving_fields() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+
+        // TextDelta — optional 필드 Some/None 혼합 보존.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::TextDelta {
+                text: "hi".into(),
+                turn_id: Some("t1".into()),
+                message_id: None,
+            }),
+            Some(W::TextDelta {
+                text: "hi".into(),
+                turn_id: Some("t1".into()),
+                message_id: None,
+            })
+        );
+
+        // ToolCall — id/turn_id/message_id 전부 보존.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::ToolCall {
+                name: "read".into(),
+                args_json: r#"{"p":1}"#.into(),
+                id: Some("c1".into()),
+                turn_id: None,
+                message_id: Some("m1".into()),
+            }),
+            Some(W::ToolCall {
+                name: "read".into(),
+                args_json: r#"{"p":1}"#.into(),
+                id: Some("c1".into()),
+                turn_id: None,
+                message_id: Some("m1".into()),
+            })
+        );
+
+        // Usage — 숫자 필드 보존.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::Usage {
+                input_tokens: 7,
+                output_tokens: 11,
+                turn_id: Some("t2".into()),
+            }),
+            Some(W::Usage {
+                input_tokens: 7,
+                output_tokens: 11,
+                turn_id: Some("t2".into()),
+            })
+        );
+
+        // MessageDone.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::MessageDone {
+                turn_id: Some("t3".into()),
+                message_id: Some("m2".into()),
+            }),
+            Some(W::MessageDone {
+                turn_id: Some("t3".into()),
+                message_id: Some("m2".into()),
+            })
+        );
+
+        // Error(String) → { message } 구조 변환.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::Error("boom".into())),
+            Some(W::Error {
+                message: "boom".into()
+            })
+        );
+
+        // Structured 탈출구 — kind/json 보존.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::Structured {
+                kind: "k".into(),
+                json: r#"{"a":1}"#.into(),
+            }),
+            Some(W::Structured {
+                kind: "k".into(),
+                json: r#"{"a":1}"#.into(),
+            })
+        );
+
+        // ★TerminalBytes 는 tag1 매핑 불가 → None(호출부 방어)★. 정상 경로상 tag0 로 갈려 여기 안 옴.
+        assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::TerminalBytes(vec![1, 2, 3])),
+            None,
+            "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
         );
     }
 }

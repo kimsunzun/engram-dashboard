@@ -1558,4 +1558,127 @@ mod tests {
         // 값 보존(되돌림 0).
         assert_eq!(store.cursor_for_test(&1), Some(Some(0)), "cursor 값 불가침");
     }
+
+    // ── S15 B8: opaque frame replay(tag0/tag1 무관 byte-identical 보존) ────────────────────────
+    //
+    // ★왜 이 store 가 opaque replay 대상인가★: 클라 relay(src-tauri connection.rs)는 데몬 binary frame 을
+    // decode_frame 으로 헤더(agent_id/epoch/seq)만 뽑아 on_frame 의 태깅·cursor 인덱스로 쓰고, **저장·replay
+    // 단위는 원본 frame bytes(헤더 포함) 전체**다(connection.rs 주석 §1·§2 — 프론트 tauriTransport 가 원본
+    // frame 을 다시 decode 하므로). 즉 이 store 의 bytes 는 payload 가 아니라 **opaque frame**이라, tag 종류
+    // (tag0 terminal / tag1 structured, ADR-0045)와 무관하게 넣은 그대로 무손실 반환해야 한다.
+    //
+    // ★dev-dep protocol 로 실제 codec 사용★: frame 을 손으로 조립하지 않고 encode_terminal_frame/
+    // encode_structured_frame 으로 만들어(레이아웃 표류 시 이 테스트도 함께 잡힘) codec 계약과 정합시킨다.
+    // protocol 은 core 를 의존 안 하므로 순환 아님(dev-only, ADR-0003 런타임 격리는 유지).
+    use engram_dashboard_protocol::{encode_structured_frame, encode_terminal_frame};
+
+    /// 테스트용 결정적 16바이트 agent_id(protocol AgentId=uuid).
+    fn puuid(n: u128) -> engram_dashboard_protocol::AgentId {
+        engram_dashboard_protocol::AgentId::from_u128(n)
+    }
+
+    /// on_frame 이 반환한 snapshot 에서 한 slot 이 받은 frame bytes 들을 순서대로 모은다(frame 단위 보존).
+    fn frames_for(out: &[(u32, Vec<u8>)], slot: u32) -> Vec<Vec<u8>> {
+        out.iter()
+            .filter(|(s, _)| *s == slot)
+            .map(|(_, b)| b.clone())
+            .collect()
+    }
+
+    #[test]
+    fn tag1_structured_frame_replays_byte_identical() {
+        // tag1 frame bytes(헤더+JSON payload)를 통째로 on_frame 에 넣고 → read/replay 가 헤더 포함 원본
+        //   frame 과 byte-identical 로 나오는지. store 는 payload 스키마를 모르는 opaque 버퍼임을 검증.
+        let store_aid = aid(1);
+        let mut store: OutputViewStore<u32> = OutputViewStore::new();
+        store.subscribe_all(1, store_aid);
+
+        // 실제 codec 으로 tag1 frame 조립(payload=self-describing JSON 흉내 — 내용은 opaque).
+        let payload = br#"{"type":"TextDelta","text":"hi","turn_id":null,"message_id":null}"#;
+        let frame = encode_structured_frame(puuid(1), /*epoch*/ 0, /*seq*/ 0, payload);
+
+        // live 전달: on_frame 의 bytes = 원본 frame 전체(클라 relay 와 동일 — 헤더 포함 저장).
+        let out = store.on_frame_all(store_aid, 0, 0, frame.clone());
+        let got = frames_for(&out, 1);
+        assert_eq!(got.len(), 1, "slot1 이 frame 1건 받음");
+        assert_eq!(got[0], frame, "tag1 frame 이 byte-identical 로 전달");
+
+        // 늦게 mount 한 slot2 replay 도 동일 frame 을 byte-identical 로.
+        let replay = store.subscribe_all(2, store_aid);
+        let r = frames_for(&replay, 2);
+        assert_eq!(r.len(), 1, "slot2 replay frame 1건");
+        assert_eq!(r[0], frame, "replay 도 원본 frame byte-identical");
+        // 첫 바이트 tag=1 이 보존됐는지(store 가 tag 를 안 건드림).
+        assert_eq!(r[0][0], 1u8, "tag1 바이트 보존");
+    }
+
+    #[test]
+    fn mixed_tag0_tag1_buffer_preserves_order_and_bytes() {
+        // tag0(terminal)·tag1(structured) 이 섞인 버퍼에서 cursor replay 가 seq 순서·내용·tag 를
+        //   전부 보존하는지. store 는 두 tag 를 구분하지 않는 opaque frame 버퍼임을 확인.
+        let store_aid = aid(7);
+        let mut store: OutputViewStore<u32> = OutputViewStore::new();
+        store.subscribe_all(1, store_aid);
+
+        let f0 = encode_terminal_frame(puuid(7), 0, 0, b"raw-bytes");
+        let f1 = encode_structured_frame(puuid(7), 0, 1, br#"{"type":"Usage"}"#);
+        let f2 = encode_terminal_frame(puuid(7), 0, 2, b"more");
+
+        // 순차 live 전달(seq 0,1,2). slot1 은 매 frame 을 원본 그대로 받는다.
+        assert_eq!(
+            frames_for(&store.on_frame_all(store_aid, 0, 0, f0.clone()), 1),
+            vec![f0.clone()]
+        );
+        assert_eq!(
+            frames_for(&store.on_frame_all(store_aid, 0, 1, f1.clone()), 1),
+            vec![f1.clone()]
+        );
+        assert_eq!(
+            frames_for(&store.on_frame_all(store_aid, 0, 2, f2.clone()), 1),
+            vec![f2.clone()]
+        );
+
+        // 새 slot2 가 mount → 버퍼 전체를 seq 순서로 replay(tag0,tag1,tag0 혼합 그대로).
+        let replay = frames_for(&store.subscribe_all(2, store_aid), 2);
+        assert_eq!(
+            replay,
+            vec![f0.clone(), f1.clone(), f2.clone()],
+            "혼합 tag 버퍼가 seq 순서·byte-identical 로 replay"
+        );
+        // tag 바이트 보존(0,1,0) — store 가 tag 를 해석/변형하지 않음.
+        assert_eq!(
+            replay.iter().map(|f| f[0]).collect::<Vec<_>>(),
+            vec![0u8, 1u8, 0u8],
+            "각 frame 의 tag 바이트 보존"
+        );
+    }
+
+    #[test]
+    fn tag1_cursor_resume_after_partial_read_is_lossless() {
+        // cursor 가 이미 앞선 tag1 frame 을 읽은 뒤, 새 tag1 frame 만 무손실로 이어받는지(축 B cursor).
+        let store_aid = aid(9);
+        let mut store: OutputViewStore<u32> = OutputViewStore::new();
+        store.subscribe_all(1, store_aid);
+
+        let f0 = encode_structured_frame(puuid(9), 0, 0, br#"{"type":"MessageDone"}"#);
+        store.on_frame_all(store_aid, 0, 0, f0.clone()); // slot1 cursor → seq0
+
+        // 새 창 slot2 는 mount 시 f0 전체 replay(cursor=None).
+        let r2_first = frames_for(&store.subscribe_all(2, store_aid), 2);
+        assert_eq!(r2_first, vec![f0.clone()], "mount replay = f0");
+
+        // 다음 tag1 frame(seq1) → 두 slot 모두 f1 만(이미 본 f0 재전송 없음).
+        let f1 = encode_structured_frame(puuid(9), 0, 1, br#"{"type":"Error","message":"e"}"#);
+        let out = store.on_frame_all(store_aid, 0, 1, f1.clone());
+        assert_eq!(
+            frames_for(&out, 1),
+            vec![f1.clone()],
+            "slot1 은 f1 만(무중복)"
+        );
+        assert_eq!(
+            frames_for(&out, 2),
+            vec![f1.clone()],
+            "slot2 도 f1 만(무중복)"
+        );
+    }
 }

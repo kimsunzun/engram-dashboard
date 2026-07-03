@@ -22,7 +22,8 @@ use engram_dashboard_core::agent::profile::{
 };
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::agent::types::{
-    AgentId, AgentInfo, AgentStatus, OutputFrame, OutputSink, SinkError, SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
+    StatusSink,
 };
 use engram_dashboard_core::persistence::FileProfileStore;
 
@@ -65,8 +66,10 @@ impl RecordingSink {
 
 impl OutputSink for RecordingSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // S12 raw 경계화: frame.data 는 이미 raw 바이트.
-        self.output.lock().unwrap().extend_from_slice(frame.data);
+        // S15 B5 payload-generic: 콘솔 바이트만 수집(구조화 이벤트는 이 headless 테스트가 안 다룸).
+        if let OutputPayload::Bytes(b) = frame.payload {
+            self.output.lock().unwrap().extend_from_slice(b);
+        }
         Ok(())
     }
 

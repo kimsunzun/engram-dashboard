@@ -280,9 +280,71 @@ pub enum SubscribeAction {
     Resume,
 }
 
+/// 구조화 출력 이벤트 wire 미러(ADR-0045 tag1 StructuredEvent) — core `OutputEvent`의 **충실한 미러**.
+///
+/// ★왜 새 타입인가(OutputChunk 확장 아님)★: 기존 wire `OutputChunk`(아래)는 S14 잔재라 `turn_id`/
+/// `id`/`message_id`가 없고 `MessageDone`/`Error` variant도 없다. 게다가 `AgentEvent::Output`·
+/// `export_all_to` 사용처에 묶여 있어 확장하면 그 계약이 깨질 위험이 있다. ADR-0045 "self-describing +
+/// 교체성(optional turn_id/message_id 보존)"을 만족하려면 core `OutputEvent`를 필드 유실 0으로 미러해야
+/// 하므로, 오염 없는 **새 wire 타입**을 신설한다(OutputChunk 는 GetSnapshot 스냅샷 전용으로 그대로 둔다).
+///
+/// ★core↔wire 변환은 daemon adapter★(ADR-0003 격리): core `OutputEvent`(도메인 타입, Serialize 미부착)
+/// → 이 wire 타입은 daemon `connection_core::output_event_to_wire` 가 명시 매핑한다. protocol 은 wire
+/// 타입만 소유(core 무의존).
+///
+/// ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고 tag1
+/// payload 에 실리지 않는다(codec.rs: tag0=TerminalBytes / tag1=StructuredEvent). 따라서 이 미러에는
+/// TerminalBytes variant 를 두지 않는다 — core `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가
+/// 방어적으로 흡수(근거 주석은 output_event_to_wire).
+///
+/// ★self-describing serde★: internally-tagged(`#[serde(tag="type")]`) — payload JSON 에 `"type"` 판별자가
+/// 박혀 프론트가 JSON.parse 후 variant 를 가른다(codec 은 이 스키마를 모른다 — opaque tag1 payload, ADR-0045).
+/// wire 직렬화 형식 = JSON(serde_json) — daemon adapter 가 `serde_json::to_vec` 로 tag1 payload 를 만든다.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "type")]
+#[ts(export)]
+pub enum StructuredEvent {
+    /// 어시스턴트 텍스트 증분(스트리밍 델타). core `OutputEvent::TextDelta` 미러.
+    TextDelta {
+        text: String,
+        turn_id: Option<String>,
+        message_id: Option<String>,
+    },
+    /// 도구 호출 — 이름 + 직렬화된 인자(backend별 스키마 그대로). core `OutputEvent::ToolCall` 미러.
+    ToolCall {
+        name: String,
+        args_json: String,
+        /// 호출 식별자(권한 UX·결과 매칭용). claude tool_use id 등.
+        id: Option<String>,
+        turn_id: Option<String>,
+        message_id: Option<String>,
+    },
+    /// 토큰 사용량. core `OutputEvent::Usage` 미러.
+    Usage {
+        #[ts(type = "number")]
+        input_tokens: u64,
+        #[ts(type = "number")]
+        output_tokens: u64,
+        turn_id: Option<String>,
+    },
+    /// 한 메시지(turn 응답) 종료 신호. core `OutputEvent::MessageDone` 미러.
+    MessageDone {
+        turn_id: Option<String>,
+        message_id: Option<String>,
+    },
+    /// backend 가 보고한 오류(스트림 내부 오류 — 종료 아님). core `OutputEvent::Error` 미러.
+    Error { message: String },
+    /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat). core `OutputEvent::Structured`
+    /// 미러 — kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
+    Structured { kind: String, json: String },
+}
+
 /// 출력 청크 — 종류 불가지(설계 §2). TerminalBytes 는 binary frame(codec)으로,
 /// 나머지 구조화 variant 는 JSON(AgentEvent::Output)으로 흐른다.
 /// (구조화 turn 단위 출력은 TUI↔구조화 스위칭 모드 설계 때 실제 채움 — 지금은 형태만 연다.)
+///
+/// ※S15/ADR-0045: tag1 구조화 이벤트는 이 타입이 아니라 위 [`StructuredEvent`]로 흐른다(필드 유실 0
+/// 미러). 이 `OutputChunk`는 GetSnapshot 스냅샷(AgentEvent::Output/Snapshot) 계약 전용으로 남는다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum OutputChunk {
@@ -303,4 +365,80 @@ pub enum OutputChunk {
     ToolCall { name: String, args_json: String },
     /// 임의 구조화 페이로드(forward-compat 탈출구).
     Structured { kind: String, json: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★ADR-0045★: StructuredEvent 는 core `OutputEvent` 미러이자 tag1 payload 다. self-describing
+    /// (`#[serde(tag="type")]`) JSON 직렬화가 무손실 round-trip 되는지(필드 유실 0 — 교체성 핵심) +
+    /// `"type"` 판별자가 payload 에 박히는지(프론트 variant 판별 근거) 검증한다. daemon adapter 가
+    /// `serde_json::to_vec` 로 만든 tag1 payload 를 프론트가 그대로 JSON.parse 하므로 이 계약이 wire 계약이다.
+    #[test]
+    fn structured_event_roundtrip_all_variants() {
+        let cases = vec![
+            StructuredEvent::TextDelta {
+                text: "hello".into(),
+                turn_id: Some("t1".into()),
+                message_id: None, // optional 보존(None 도 왕복)
+            },
+            StructuredEvent::ToolCall {
+                name: "read".into(),
+                args_json: r#"{"path":"/x"}"#.into(),
+                id: Some("call_1".into()),
+                turn_id: None,
+                message_id: Some("m1".into()),
+            },
+            StructuredEvent::Usage {
+                input_tokens: 123,
+                output_tokens: 456,
+                turn_id: Some("t2".into()),
+            },
+            StructuredEvent::MessageDone {
+                turn_id: Some("t3".into()),
+                message_id: Some("m2".into()),
+            },
+            StructuredEvent::Error {
+                message: "stream error".into(),
+            },
+            StructuredEvent::Structured {
+                kind: "custom".into(),
+                json: r#"{"k":1}"#.into(),
+            },
+        ];
+        for ev in cases {
+            let json = serde_json::to_string(&ev).expect("직렬화 성공");
+            // self-describing: "type" 판별자가 반드시 박힌다(프론트 variant 판별 근거).
+            assert!(
+                json.contains("\"type\""),
+                "internally-tagged 판별자 누락: {json}"
+            );
+            let back: StructuredEvent = serde_json::from_str(&json).expect("역직렬화 성공");
+            assert_eq!(ev, back, "round-trip 무손실(필드 유실 0)");
+        }
+    }
+
+    /// optional turn_id/message_id 가 None 일 때도 정확히 None 으로 복원되는지(교체성 — codex/gemini 가
+    /// 못 채우는 필드가 임의 값으로 채워지면 안 됨).
+    #[test]
+    fn structured_event_optional_fields_preserve_none() {
+        let ev = StructuredEvent::TextDelta {
+            text: "x".into(),
+            turn_id: None,
+            message_id: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: StructuredEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            StructuredEvent::TextDelta {
+                turn_id,
+                message_id,
+                ..
+            } => {
+                assert!(turn_id.is_none() && message_id.is_none(), "None 보존");
+            }
+            _ => panic!("variant 불일치"),
+        }
+    }
 }
