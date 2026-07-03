@@ -5,6 +5,7 @@
 | 날짜 | 발견 | 상태 |
 |---|---|---|
 | 2026-07-03 | **검증 상태** (SKILL.md ⚠️절에서 이동 — 방침 C). 아래 "검증 상태" 절이 정본. | 기록 (검증 상태 정본) |
+| 2026-07-03 | **재작성판 첫 실행 dogfood (`doc` full)**: SKILLS-REVIEW-INDEX 실전 리뷰 완주 — 역할명→전역 사전 해석, cut-advocate(blind)/load-bearing 수호(doc-aware) 병렬 스폰, 취합·판정 전부 flow대로 동작. 실효 확인: 양 리뷰어가 독립적으로 같은 구조 결함에 수렴 + doc-aware가 치명 사실 드리프트("미커밋" 서술 ↔ 실제 배포·푸쉬 완료) 적출. 갭 미발견 — 단 검증 범위는 doc full 경로만(code·prd·trd, light·deep 미실측). | 기록 (dogfood) |
 
 ## 검증 상태 (2026-07-03 — SKILL.md ⚠️절에서 이동)
 
