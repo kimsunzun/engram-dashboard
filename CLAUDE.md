@@ -74,7 +74,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 > **메인 세션은 오케스트레이터다. 비자명한 코드 변경을 메인 스레드에서 직접 짜지 않는다.** 역할을 **서브에이전트로 분리 스폰**한다 — 코더·리뷰어·QA. 이건 권장이 아니라 강제다. "진행 쭉해" 같은 자율 모드에서도 동일하게 적용한다(처리량을 이유로 생략 금지).
 
 - **코더 = opus(복잡)/sonnet(단순) 스폰.** 메인은 설계·지시·취합만. 메인이 직접 구현 편집하는 건 규약 위반.
-- **리뷰어 = `/review` 스킬(opus + Codex 2인 적대, 다른 family).** 단계 인자(prd/trd/code/doc)가 특화 Advocate/Adversary 렌즈를 박는다. Codex=`mcp__codex__codex`. 리뷰 스킵 절대 금지. 정본·역할표 = `.claude/skills/review/references/flow.md §2`, 근거 = `docs/research/review-pipeline-design-draft.md`.
+- **리뷰어 = `/review` 스킬(opus + Codex 2인 적대, 다른 family).** 단계 인자(prd/trd/code/doc)가 전용 Advocate/Adversary 렌즈를 박는다(즉석 발명 금지). Codex=`mcp__codex__codex`. 리뷰 스킵 절대 금지. 판정 PASS/FIX/BLOCK — **불일치는 메인 임의 판정 금지, 사용자에게.** 역할표·모델매핑·공통 규약의 실행 정본 = `.claude/skills/review/references/flow.md §2`, 결정 근거 = ADR-0031.
 - **QA = `/qa` 스킬로 build/test + GUI 실측(`scripts/cdp.mjs`) 수행.** 코드(test/tsc)가 통과해도 실제 화면에서 동작 확인 전엔 미완으로 본다.
 - **TDD + 모듈 격리 — 강제.** 기능 단위로 **테스트를 먼저(또는 함께) 작성**하고, 모든 모듈은 외부 의존(Tauri/네트워크/실제 프로세스)을 seam으로 끊어 **단독 실행 가능한 격리 하네스**를 갖춘다 — 코어=Noop/테스트 sink로 headless, transport/session=smoke bin, 데몬=integration harness bin. 테스트는 누적해 `cargo test`(workspace 루트) 한 번에 전 모듈 회귀. (ADR-0012)
 - **테스트 가능성을 위한 분리 검토 — 사용자 결정.** 중요하거나 큰 시스템 로직이 외부 의존(Tauri/환경)에 묶여 단위테스트가 막혀 있으면, 순수 로직을 seam으로 떼어 **단위테스트 가능하게 분리하는 방향을 항상 검토**한다 — 분리 여부는 메인이 임의 확정하지 않고 **사용자 판단에 맡긴다**(구현 갈림길 = 사용자 결정). (ADR-0012)
@@ -82,9 +82,6 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **조사·웹서칭·대량 읽기 = 서브에이전트 일임(컨텍스트 위생 — 강제 지향).** 범용 원칙은 global-rules `## 위임 우선`(구 컨텍스트 위생 흡수 — 메인 직접 WebSearch/WebFetch·광범위 스윕 금지, 결론만 회수). **engram 바인딩:** OSS·설계 조사는 `/research`에 위임. 자율 모드("진행 쭉해")에서도 생략 금지(강제 지향) — 처리량을 이유로 인라인 조사로 빠지지 않는다.
 - 메인은 각 에이전트 결과를 취합해 사용자에게 보고하고, 커밋은 게이트 통과 후에만 한다.
 - **effort 배치:** 메인 세션 = **xhigh**(영구 effort 천장 — 그 위 ultracode는 effort↑가 아니라 워크플로우 자동화·세션한정), 코더·리뷰어 = **high**(Codex는 medium 기본, 동시성·lifetime 치명 변경만 high). 무가드 통합 노드인 메인에 검수보다 effort를 싣는다.
-
-### 리뷰어 역할 — 단계별 특화 (정본은 review 스킬)
-구조 고정 = **Advocate(옹호·강화) vs Adversary(공격·대척)** 2인, 단계(prd/trd/code/doc)마다 전용 렌즈(즉석 발명 금지). 단계별 역할표·블라인드·모델매핑(맥락 필요=opus doc-aware / 신선=Codex blind)·공통 규약(판정 **PASS/FIX/BLOCK** 점수화 금지·취합 순서/라벨 무관·**불일치→사용자**)은 **`.claude/skills/review/references/flow.md §2`가 실행 정본**, 근거·체크리스트는 `docs/research/review-pipeline-design-draft.md §2`.
 
 ---
 

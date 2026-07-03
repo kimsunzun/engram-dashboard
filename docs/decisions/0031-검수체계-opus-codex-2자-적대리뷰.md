@@ -1,7 +1,7 @@
 # ADR-0031: 검수 체계 — opus + Codex 2자 적대 리뷰 (웹 consult 폐기, 단계별 특화 역할)
 
 - 상태: 확정 (2026-06-22, 근거: `docs/research/` 방법론 리서치 + 본 세션 합의)
-- 관련: CLAUDE.md 「구현 실행 규약 · 리뷰어 역할 표」 · `docs/research/review-pipeline-design-draft.md`(상세 설계) · `docs/research/review-methodology-research-2026-06-22.md`(근거)
+- 관련: CLAUDE.md 「구현 실행 규약」 · `.claude/skills/review/references/flow.md §2`(운영 역할표) · `docs/research/review-pipeline-design-draft.md`(상세 설계) · `docs/research/review-methodology-research-2026-06-22.md`(근거)
 
 ## 맥락
 Codex(GPT CLI, `mcp__codex__codex`)를 도입했다. 그전까지 굵은 설계 교차검증·리뷰는 **웹 consult**(GPT·Gemini·Claude-opus 3종에 동일 프롬프트 → 블라인드 judge → correctness-merge)와 fable 1순위 LLD 리뷰어로 했다. Codex가 생긴 김에 "검수를 어떻게 구성하는 게 옳은가"를 재검토했다.
@@ -9,7 +9,7 @@ Codex(GPT CLI, `mcp__codex__codex`)를 도입했다. 그전까지 굵은 설계 
 ## 결정
 웹 consult 폐기. 비자명 코드 변경·굵은 설계의 검수를 **opus + Codex 2자 적대 리뷰**로 통일한다.
 - **구조(고정):** 모든 리뷰 쌍은 **Advocate(옹호·강화) vs Adversary(공격·대척)** — devil's advocacy/dialectical 쌍. 즉석 발명 금지.
-- **특화(단계별 1회 픽스):** PRD=User/Tester · TRD=Designer/Architect-breaker · 코드=correctness/breaker · 문서정리=cut-advocate/load-bearing 수호. (운영 표 = CLAUDE.md, 상세 = 설계 문서)
+- **특화(단계별 1회 픽스):** PRD=User/Tester · TRD=Designer/Architect-breaker · 코드=correctness/breaker · 문서정리=cut-advocate/load-bearing 수호. (운영 표 = review 스킬 `flow.md §2`, 상세 = 설계 문서)
 - **모델 매핑:** 맥락(ADR·불변식) 필요 역할=opus(doc-aware), 신선 blind 역할=Codex.
 - **판정:** PASS/FIX/BLOCK(점수화 금지), 취합 순서·라벨 무관. **불일치 → 메인 임의 판정 금지, 사용자에게.**
 - **effort:** 메인 세션 xhigh / 코더·리뷰어 high(Codex medium 기본, 동시성·lifetime 치명 변경만 high).
@@ -27,5 +27,5 @@ Codex(GPT CLI, `mcp__codex__codex`)를 도입했다. 그전까지 굵은 설계 
 ## 영향 / 불변식
 - 비자명 코드 변경마다 이 2자 리뷰가 게이트(스킵 금지). 코더·리뷰어 분리(메인은 오케스트레이션).
 - **불일치는 사용자가 최종** — 메인(Claude 계열)이 임의 판정하면 반편향이 깨진다.
-- 새 단계 유형 추가 시 특화 역할은 *한 번* 픽스(CLAUDE.md 표에 추가), 즉석 발명 금지.
+- 새 단계 유형 추가 시 특화 역할은 *한 번* 픽스(review 스킬 `flow.md §2` 표에 추가), 즉석 발명 금지.
 - **미검증(실험 옵션):** 코드 단계 "Codex blind / opus doc-aware" 비대칭은 실증 근거 없는 가설 — 효과 측정 전까진 강제 아님.
