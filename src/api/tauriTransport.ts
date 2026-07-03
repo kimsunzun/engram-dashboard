@@ -1,4 +1,5 @@
-// TauriTransport — Transport 의 Tauri(app.emit/invoke/Channel) carrier 구현 (T7c, ADR-0036, Fix-B/Fix-C).
+// TauriTransport — Transport 의 Tauri(app.emit/invoke/Channel) carrier 구현 (ADR-0036).
+// (범례: 본문·테스트의 Fix-C ①/④·Fix-D 라벨 = S14 리뷰 수정 앵커 — 해당 가드 주석을 짚는다.)
 //
 // WsTransport 가 창 단위로 데몬 WS 에 직접 붙던 구조를 src-tauri DaemonClient 로 끌어올린
 // 뒤, 프론트는 이 transport 를 통해 Rust 쪽과 통신한다. 3개 통신 평면:
@@ -35,7 +36,6 @@ export class TauriTransport implements Transport {
   private stateListeners = new Set<(s: ConnectionState) => void>()
   private messageCb: ((msg: InboundMessage) => void) | null = null
 
-  // Tauri event 리스너 해제 함수 목록.
   private unlisten: Array<() => void> = []
 
   // ★출력 Channel(③-b)★: 이 창의 모든 agent 출력을 운반하는 per-window Channel(spike §7 D4 — 프레임에
@@ -333,6 +333,7 @@ export class TauriTransport implements Transport {
       if (!f) return
       this.messageCb?.({
         kind: 'output',
+        tag: f.tag, // frame 종류(0 터미널 / 1 구조화) — WsTransport binary arm 과 동형.
         agentId: f.agentId,
         epoch: f.epoch,
         seq: f.seq,

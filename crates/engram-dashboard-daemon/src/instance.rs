@@ -34,12 +34,8 @@ mod imp {
     /// 사용자 식별자(USERNAME)를 이름에 넣어 "사용자당 하나" 경계를 만든다(data_dir 단위와 일치).
     /// `Global\` mutex 는 같은 사용자가 일반 권한으로 생성·개방하는 데 문제없다.
     ///
-    /// ★ENGRAM_INSTANCE_KEY override(테스트 격리용)★: 설정 시 USERNAME 대신 그 값을 식별자로 쓴다
-    ///   → `Global\EngramDashboardDaemon-<value>`. 실프로세스 격리테스트가 테스트별 고유 key 를
-    ///   주입하면 mutex 가 서로 독립돼, cargo 의 병렬 실행에서도 다른 테스트의 데몬과 충돌하지 않는다
-    ///   (USERNAME 단위 Global mutex 는 모든 테스트 데몬이 공유 → 첫 데몬만 획득, 나머지 거부됐던 게 flaky 원인).
-    ///   ★운영 회귀 0★: env 미설정 시 기존 USERNAME 동작 그대로(아래 unwrap_or_else 분기).
-    ///   single-instance 거부 검증은 같은 key 2개를 일부러 주입해 충돌을 유발한다(테스트 책임).
+    /// INSTANCE_KEY_ENV override 설정 시 USERNAME 대신 그 값을 식별자로 쓴다(정본 = 상수 doc).
+    /// env 미설정 시 기존 USERNAME 동작 그대로(아래 unwrap_or_else 분기 — 운영 회귀 0).
     pub(crate) fn mutex_name() -> String {
         // 1) 테스트 격리 override.
         if let Some(key) = std::env::var_os(INSTANCE_KEY_ENV) {

@@ -65,7 +65,7 @@ interface ViewState {
    */
   renderModeOverride: Record<string, RenderMode>
 
-  /** 새 view 생성 → active. 반환 = 새 view_id(이걸로 이후 split 대상 지정). */
+  /** 새 view 생성 → active 로 전환(이후 split 대상은 반환 view_id 로 지정). */
   createView: (name?: string) => Promise<string>
   /** view 닫기. active 면 다른 view 로 전환. */
   closeView: (viewId: string) => Promise<void>
@@ -78,7 +78,7 @@ interface ViewState {
   /** slot 에 agent 참조 배정. */
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
 
-  // ── ★M0 스파이크(임시) — ADR-0044★ RichSlot 오버레이 마운트/해제(프론트 전용, invoke 안 탐) ──────
+  // ── RichSlot 오버레이 마운트/해제(계약 = richSlots 필드 JSDoc 정본) ──────────────────────────────
   /** slot 에 RichSlot(fixture 구동 JSON 모드) 스파이크를 띄운다. */
   mountRich: (slotId: string) => void
   /** slot 의 RichSlot 스파이크를 걷는다(다시 empty 로). */
@@ -90,7 +90,7 @@ interface ViewState {
   /** slot 의 오버라이드 해제(caps 유도 기본 렌더러로 복귀). */
   clearRenderMode: (nodeId: string) => void
 
-  // ── ★DOM 모드 얇은 별칭(§5 관측)★: setRenderMode/clearRenderMode 위 래퍼(검증 툴링이 이 이름을 씀) ──
+  // ── ★DOM 모드 별칭(§5 관측)★: 검증 툴링(window.__engramLayout)이 이 이름을 씀 — 이름 변경 금지 ──
   /** slot 을 DOM 모드로(= setRenderMode(id,'dom')). */
   enableDomMode: (nodeId: string) => void
   /** slot 의 DOM 모드 해제(= clearRenderMode(id)). */
@@ -104,8 +104,11 @@ interface ViewState {
   /** view:list-updated 수신 — 탭 목록/active 갱신. */
   applyViewListUpdated: (payload: ViewListPayload) => void
 
-  // ── 부팅 초기화(eventBus 가 구독 등록 직후 1회 호출) ──────────────────────────────
-  /** 부팅 시 백엔드의 현재 View 목록+active 를 pull 해 채우고, active 뷰 레이아웃을 캐시에 넣는다. */
+  // ── 부팅 초기화 ──────────────────────────────────────────────────────────────
+  /**
+   * 백엔드의 현재 View 목록+active 를 pull 해 채우고, active 뷰 레이아웃을 캐시에 넣는다.
+   * 호출 규약: eventBus 가 구독 등록 직후 1회 호출.
+   */
   initFromBackend: () => Promise<void>
 }
 
@@ -113,8 +116,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
   layouts: {},
   views: [],
   activeViewId: null,
-  richSlots: {}, // ★스파이크★ 프론트 전용 오버레이(ADR-0044 M0) — 아래 mountRich/unmountRich 로만 갱신.
-  renderModeOverride: {}, // ★오버라이드★ 프론트 전용(§5) — 아래 set/clearRenderMode(+DOM 별칭)로만 갱신.
+  richSlots: {}, // 갱신 경로 = mountRich/unmountRich 만(계약은 필드 JSDoc).
+  renderModeOverride: {}, // 갱신 경로 = set/clearRenderMode(+DOM 별칭)만(계약은 필드 JSDoc).
 
   createView: viewName => invoke<string>('create_view', { name: viewName ?? null }),
   closeView: viewId => invoke<void>('close_view', { viewId }),
@@ -256,12 +259,12 @@ export function selectActiveView(state: ViewState): CachedView | null {
 // ready 를 await 한 뒤에야 init 을 돌린다(F-listen). listen() 은 async 라 등록이 끝나기 전 도착한 emit 은
 // 핸들러가 없어 누락된다 → 등록 완료를 ready 로 노출해 호출자가 그 뒤에 initFromBackend 를 부른다.
 //
-// ★왜 동기 dispose 인가(이전 dead-branch 누수 수정)★: 예전엔 `await Promise.all([listen,listen])` 한 뒤에야
-// 동기 disposer 를 반환했다. 그래서 호출자(eventBus)가 그 await 가 pending 인 동안 정리(HMR dispose/재-init)를
-// 돌리면, 아직 disposer 를 *못 받아* unlisten 을 못 걸고 → 늦게 등록 완료된 리스너가 영구 누수됐다(예전
-// if(disposed) 가드는 disposed 를 true 로 만드는 게 그 반환된 disposer 뿐이라 await 중엔 절대 true 가 안 되는
-// dead branch 였다). 표준 해법(RxJS Subscription/useSyncExternalStore: teardown 핸들 동기 확보)대로,
-// dispose 를 등록 await 없이 즉시 돌려주고 등록은 백그라운드로 시작한다. 근거: docs/research/async-subscribe-cleanup-race-2026-06-28.md.
+// ★왜 동기 dispose 인가(dead-branch 누수 방지)★: 등록 await 후 disposer 반환 금지 — 호출자(eventBus)가
+// 그 await 가 pending 인 동안 정리(HMR dispose/재-init)를 돌리면 아직 disposer 를 *못 받아* unlisten 을 못 걸고
+// → 늦게 등록 완료된 리스너가 영구 누수된다(그때 if(disposed) 가드는 disposed 를 true 로 만드는 게 반환된
+// disposer 뿐이라 await 중엔 절대 true 가 안 되는 dead branch). 표준 해법(RxJS Subscription/useSyncExternalStore:
+// teardown 핸들 동기 확보)대로, dispose 를 등록 await 없이 즉시 돌려주고 등록은 백그라운드로 시작한다.
+// 근거: docs/research/async-subscribe-cleanup-race-2026-06-28.md.
 //
 // ★race 가드(실제로 동작하는 경로)★: dispose 가 ready *전에* 불려 disposed=true 가 되면, 백그라운드 등록이
 // 늦게 끝나 도착한 unlisten 핸들을 등록 콜백 안에서 disposed 확인 후 *즉시* 호출한다(cancelled 무관 — 안
@@ -291,7 +294,7 @@ export function subscribeViewEvents(): { dispose: () => void; ready: Promise<voi
   // reject 한다(hang 금지 — 호출자 await ready 가 막히지 않게). dispose 가 먼저 와도 adopt 가 도착한 핸들을
   // 즉시 해제하므로 ready 는 그대로 정상 종료한다.
   //
-  // ★계약 ④ — ready reject 시 "성공한 쪽 핸들 정리"는 *호출자의 dispose 호출 책임*★(Codex C3): Promise.all
+  // ★계약 ④ — ready reject 시 "성공한 쪽 핸들 정리"는 *호출자의 dispose 호출 책임*★: Promise.all
   // 이 한쪽 reject 로 즉시 reject 해도, 다른 쪽 listen 은 백그라운드로 계속 등록될 수 있다(아직 settle 전).
   // 이 함수는 그 늦은 성공 핸들을 *자동으로* 정리하지 않는다 — adopt 가 disposed 면 즉시 해제하므로, 호출자가
   // ready reject 를 catch 해 dispose() 만 불러주면 (이미 도착한 성공분은 handles 에서, 늦게 도착할 성공분은
