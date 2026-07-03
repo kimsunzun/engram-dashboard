@@ -499,6 +499,21 @@ impl ClaudeStreamDecoder {
     }
 }
 
+// ── S15 B3: pump→core 배선 seam (ADR-0004/0044) ──────────────────────────────────
+//
+// ★claude 지식은 계속 여기만★: transport(StdioTransport)는 `dyn OutputDecoder` 만 알고 claude 를
+//   모른다(ADR-0004). manager 가 json 모드 세션에 `Box::new(ClaudeStreamDecoder::new())` 를 만들어
+//   StdioTransport 에 주입하면, pump 가 이 트레이트 메서드로 바이트를 정제해 core 로 흘린다.
+//   inherent decode/flush(위 impl)를 그대로 위임 — 파싱 로직은 한 벌만 존재한다.
+impl crate::agent::transport::OutputDecoder for ClaudeStreamDecoder {
+    fn decode(&mut self, chunk: &[u8]) -> Vec<OutputEvent> {
+        ClaudeStreamDecoder::decode(self, chunk)
+    }
+    fn flush(&mut self) -> Vec<OutputEvent> {
+        ClaudeStreamDecoder::flush(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

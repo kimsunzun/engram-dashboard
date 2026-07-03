@@ -4,11 +4,15 @@
 // 포맷(big-endian): [tag:1][agentId:16][epoch:4 BE][seq:8 BE][raw payload...].
 
 // ── codec.rs binary frame 상수(반드시 codec.rs 와 일치) ─────────────────────────────
-const FRAME_TAG_TERMINAL_BYTES = 0
+// tag0 = 터미널 raw 바이트(xterm write), tag1 = StructuredEvent JSON(payload=serde_json, ADR-0045).
+// 헤더 포맷은 tag 무관 동일 — payload 해석만 tag 로 갈린다(소비자=ProtocolClient.handleOutput).
+export const FRAME_TAG_TERMINAL_BYTES = 0
+export const FRAME_TAG_STRUCTURED_EVENT = 1
 const FRAME_HEADER_LEN = 1 + 16 + 4 + 8 // 29
 
 /**
- * binary output frame 디코드. 미지원 tag·길이 부족 시 null(무시).
+ * binary output frame 디코드. 헤더 미만 길이·미지원 tag(≥2) 시 null(무시).
+ * tag0/tag1 은 둘 다 통과시키고 payload 는 raw 로 넘긴다 — tag 별 해석(바이트 vs JSON)은 소비자 몫.
  */
 export function decodeOutputFrame(
   buf: ArrayBuffer,
@@ -16,8 +20,9 @@ export function decodeOutputFrame(
   if (buf.byteLength < FRAME_HEADER_LEN) return null
   const view = new DataView(buf)
   const tag = view.getUint8(0)
-  // codec.rs: tag != FRAME_TAG_TERMINAL_BYTES 면 UnknownTag — 미지원 출력 variant 는 버린다.
-  if (tag !== FRAME_TAG_TERMINAL_BYTES) return null
+  // codec.rs: tag0=TerminalBytes / tag1=StructuredEvent 둘만 유효, 그 밖은 UnknownTag → 버린다.
+  // (F1 회귀: 옛 코드는 tag1 도 null-drop 해 구조화 출력이 무음 유실됐다 — tag1 도 통과시킨다.)
+  if (tag !== FRAME_TAG_TERMINAL_BYTES && tag !== FRAME_TAG_STRUCTURED_EVENT) return null
 
   // agentId: byte[1..17] = AgentId(Uuid).as_bytes() — RFC4122 network order(표준 바이트 그대로).
   // 16바이트 hex 후 8-4-4-4-12 하이픈 삽입 = 구독 시 보낸 소문자 하이픈 UUID 와 동일 표현.

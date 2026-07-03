@@ -20,7 +20,14 @@ export type ConnectionState = 'connected' | 'reconnecting' | 'down'
 export interface OutputChunk {
   /** core OutputCore 발급 seq(단조 증가). 클라가 재연결 경계 dedup, 컴포넌트도 방어적 dedup. */
   seq: number
-  /** raw 바이트(터미널 write 용). */
+  /**
+   * frame 종류(wsFrame.ts): 0=터미널 raw 바이트(xterm write) / 1=StructuredEvent JSON(ADR-0045 tag1).
+   * 단일 콜백에 tag 를 실어 소비자가 렌더 경로를 가른다(TerminalSlot=tag0 무시하고 bytes / RichSlot=
+   * tag1 이면 JSON.parse). 별도 콜백 대신 tag 필드로 통합한 이유: seq dedup·epoch 가드·pre-subscribe
+   * 버퍼가 tag 를 몰라도 되게(한 seq 공간·한 배달 경로) — 콜백 이중화는 그 규율을 두 벌로 쪼갠다.
+   */
+  tag: number
+  /** raw payload — tag0 이면 터미널 바이트, tag1 이면 StructuredEvent JSON UTF-8 바이트. */
   bytes: Uint8Array
 }
 

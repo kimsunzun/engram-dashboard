@@ -66,8 +66,23 @@ describe('decodeOutputFrame', () => {
     expect(decodeOutputFrame(buf)).toBeNull()
   })
 
-  it('tag != 0(미지원 variant)면 null', () => {
-    const buf = buildFrame({ tag: 1, agentId: AGENT, epoch: 1, seq: 1 })
+  it('tag1(StructuredEvent) 프레임 디코드: tag=1 + payload(JSON 바이트) 그대로 추출', () => {
+    // S15/ADR-0045: tag1 = 구조화 이벤트. codec 은 payload 를 opaque 로 넘긴다(JSON 해석은 소비자 몫).
+    const json = '{"type":"TextDelta","text":"hi","turn_id":null,"message_id":null}'
+    const payload = new TextEncoder().encode(json)
+    const buf = buildFrame({ tag: 1, agentId: AGENT, epoch: 2, seq: 5, payload })
+    const f = decodeOutputFrame(buf)
+    expect(f).not.toBeNull()
+    expect(f!.tag).toBe(1)
+    expect(f!.epoch).toBe(2)
+    expect(f!.seq).toBe(5)
+    expect(f!.agentId).toBe(AGENT)
+    // payload 왕복 — 소비자가 JSON.parse 로 StructuredEvent 를 복원한다.
+    expect(new TextDecoder().decode(f!.payload)).toBe(json)
+  })
+
+  it('tag >= 2(미지원 variant)면 null(tag0/tag1 만 유효)', () => {
+    const buf = buildFrame({ tag: 2, agentId: AGENT, epoch: 1, seq: 1 })
     expect(decodeOutputFrame(buf)).toBeNull()
   })
 

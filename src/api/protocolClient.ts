@@ -72,8 +72,12 @@ interface PendingBuffer {
    * 내부 구분용일 뿐 — flush 시 st.epoch 로 심지 않는다(epoch 권위 = SubscribeAck 단독, ADR-0007).
    */
   epoch: number
-  /** 보류된 프레임(도착 순). flush 는 seq 오름차순으로 정렬 후 배달(out-of-order 도착 방어 — FIX 2). */
-  frames: Array<{ seq: number; bytes: Uint8Array }>
+  /**
+   * 보류된 프레임(도착 순). flush 는 seq 오름차순으로 정렬 후 배달(out-of-order 도착 방어 — FIX 2).
+   * tag(0 터미널/1 구조화)를 보존한다 — flush 시 handleOutput 과 동일하게 onChunk 로 실어 보내야
+   * 소비자가 렌더 경로를 가른다(tag0/tag1 은 같은 seq 공간이라 버퍼는 tag 를 몰라도 담고 흘리기만).
+   */
+  frames: Array<{ tag: number; seq: number; bytes: Uint8Array }>
   /** 현재 담긴 바이트 총량(bound 판정용). drop-oldest 마다 감산. */
   bytes: number
   /** 이 agent 에 대해 bound 초과 warn 을 이미 냈는지(한 번만 경고 — 로그 스팸 방지). */
@@ -172,8 +176,21 @@ export class ProtocolClient implements AgentClient {
     this.handleEvent(msg.event)
   }
 
-  /** 정규화 output frame — epoch 가드 + high-water dedup 후 구독자 배달(DaemonClient.handleBinary 승격). */
-  private handleOutput(f: { agentId: string; epoch: number; seq: number; bytes: Uint8Array }): void {
+  /**
+   * 정규화 output frame — epoch 가드 + high-water dedup 후 구독자 배달(DaemonClient.handleBinary 승격).
+   *
+   * ★tag 무관 공통 규율★: epoch 가드·seq dedup·high-water 전진은 tag(0 터미널/1 구조화)를 안 본다 —
+   *   tag0/tag1 은 core OutputCore 의 **같은 seq 공간**을 공유하므로(한 pump 가 발급) tag 별로 쪼개면
+   *   dedup high-water 가 두 벌이 돼 순서 보장이 깨진다. tag 는 배달 시 onChunk 에 실어 소비자(TerminalSlot/
+   *   RichSlot)가 렌더 경로만 가른다.
+   */
+  private handleOutput(f: {
+    tag: number
+    agentId: string
+    epoch: number
+    seq: number
+    bytes: Uint8Array
+  }): void {
     const st = this.subs.get(f.agentId)
     if (!st) {
       // ★구독자 없음 = 보류(ADR-0043 deliverable 게이트의 프론트 등가)★: 리로드 시 창 Channel 재등록으로
@@ -188,7 +205,7 @@ export class ProtocolClient implements AgentClient {
     // InProc(순서 보존)에선 항상 seq>high-water 라 무해 통과(no-op 수렴).
     if (f.seq <= st.lastDeliveredSeq) return
     st.lastDeliveredSeq = f.seq
-    st.onChunk({ seq: f.seq, bytes: f.bytes })
+    st.onChunk({ tag: f.tag, seq: f.seq, bytes: f.bytes })
   }
 
   /**
@@ -200,6 +217,7 @@ export class ProtocolClient implements AgentClient {
    *   전체 replay 를 새로 받는 xterm 이라 치명적 아님(비정상적으로 큰 버퍼 = 구독자 영영 미부착).
    */
   private bufferPending(f: {
+    tag: number
     agentId: string
     epoch: number
     seq: number
@@ -211,7 +229,7 @@ export class ProtocolClient implements AgentClient {
       buf = { epoch: f.epoch, frames: [], bytes: 0, warned: false }
       this.pendingBuffers.set(f.agentId, buf)
     }
-    buf.frames.push({ seq: f.seq, bytes: f.bytes })
+    buf.frames.push({ tag: f.tag, seq: f.seq, bytes: f.bytes })
     buf.bytes += f.bytes.length
     // bound 초과 → drop-oldest. flush 는 seq dedup 이 걸리므로 앞부분을 버려도 뒤 프레임 순서는 유지된다.
     if (buf.bytes > PENDING_BUFFER_MAX_BYTES) {
@@ -422,7 +440,8 @@ export class ProtocolClient implements AgentClient {
       for (const frame of ordered) {
         if (frame.seq <= st.lastDeliveredSeq) continue
         st.lastDeliveredSeq = frame.seq
-        st.onChunk({ seq: frame.seq, bytes: frame.bytes })
+        // handleOutput 과 동일하게 tag 를 실어 배달 — flush 프레임도 소비자가 렌더 경로를 가른다.
+        st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
       }
     }
     // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는

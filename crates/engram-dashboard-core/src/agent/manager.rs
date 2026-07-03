@@ -29,7 +29,7 @@ use crate::agent::session::AgentSession;
 use crate::agent::session_tracker::SessionTracker;
 use crate::agent::transport::pty::PtyTransport;
 use crate::agent::transport::stdio::StdioTransport;
-use crate::agent::transport::AgentTransport;
+use crate::agent::transport::{AgentTransport, OutputDecoder};
 use crate::agent::types::{
     AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, OutputChunk, OutputSink, PtyError,
     ReapMsg, SinkId, StatusSink, SubscribeOutcome, TerminalReason, TerminationIntent,
@@ -75,13 +75,18 @@ fn select_transport(
     spec: &CommandSpec,
     cols: u16,
     rows: u16,
+    decoder: Option<Box<dyn OutputDecoder>>,
 ) -> Result<(Box<dyn AgentTransport>, Option<u32>), PtyError> {
     if json_mode {
         // json 모드: PTY 없는 파이프. cols/rows는 파이프에 개념 없어 무시.
         // structured=true 주입 — json 모드가 곧 NDJSON 캐리어라는 mode→caps 매핑(위 조립점 규칙).
-        let (t, pid) = StdioTransport::open(spec, true)?;
+        // ★decoder 주입(ADR-0004)★: backend 가 만든 출력 정제기를 통로에 꽂는다 — StdioTransport 는
+        //   이게 어떤 디코더인지 모른 채 pump 에서 적용만 한다(통로는 claude 를 모름).
+        let (t, pid) = StdioTransport::open(spec, true, decoder)?;
         Ok((Box::new(t), pid))
     } else {
+        // 터미널·shell = PtyTransport. decoder 는 여기 경로에선 항상 None(직통) — 방어적으로 무시.
+        // (backend::output_decoder 가 json 모드에만 Some 을 주므로 non-json 은 애초에 None 이 온다.)
         let (t, pid) = PtyTransport::open(spec, cols, rows)?;
         Ok((Box::new(t), pid))
     }
@@ -197,9 +202,12 @@ impl AgentManager {
         // 프로필 command 단일 출처(is_json_mode/input_encoder) — spawn_session은 backend를 모른다.
         let json_mode = profile.command.is_json_mode();
         let encoder = backend::input_encoder(&profile.command);
+        // 출력 정제기(입력 encoder 의 대칭 짝) — json 모드면 backend 가 claude decoder 를 만들고,
+        // 그 외엔 None(바이트 직통). claude 스키마 지식은 backend 단독이라 여기선 command 만 넘긴다.
+        let decoder = backend::output_decoder(&profile.command);
 
         let (session, child_pid) =
-            self.spawn_session(profile.id, spec, bcaps, encoder, json_mode, epoch)?;
+            self.spawn_session(profile.id, spec, bcaps, encoder, decoder, json_mode, epoch)?;
 
         // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
         if let (Some(s), Some(pid)) = (sid, child_pid) {
@@ -224,13 +232,15 @@ impl AgentManager {
         spec: CommandSpec,
         backend_caps: BackendCaps,
         encoder: InputEncoder,
+        decoder: Option<Box<dyn OutputDecoder>>,
         json_mode: bool,
         epoch: u32,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
         // 1. 모드에 맞는 transport 조립(json=StdioTransport 파이프 / 그 외=PtyTransport ConPTY).
         //    child spawn + job 편입 + 파이프/reader·writer 확보. pump는 아직 안 띄움(start에서).
+        //    json 모드면 출력 정제 decoder 도 함께 통로에 주입한다(ADR-0004 — 통로는 claude 모름).
         let (transport, child_pid) =
-            select_transport(json_mode, &spec, DEFAULT_COLS, DEFAULT_ROWS)?;
+            select_transport(json_mode, &spec, DEFAULT_COLS, DEFAULT_ROWS, decoder)?;
 
         // 2. 출력 측 core 생성(status Running, seq 0). transport와 분리된 출력 fanout 담당.
         let core = Arc::new(OutputCore::new(id, epoch, self.status_sink.clone()));
@@ -655,7 +665,8 @@ mod tests {
     #[test]
     fn select_transport_json_mode_picks_stdio_structured() {
         let (transport, _pid) =
-            select_transport(true, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS).expect("select");
+            select_transport(true, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS, None)
+                .expect("select");
         let caps = transport.capabilities();
         assert!(
             caps.output.structured && !caps.output.terminal_bytes,
@@ -670,7 +681,8 @@ mod tests {
     #[test]
     fn select_transport_terminal_mode_picks_pty() {
         let (transport, _pid) =
-            select_transport(false, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS).expect("select");
+            select_transport(false, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS, None)
+                .expect("select");
         let caps = transport.capabilities();
         assert!(
             caps.output.terminal_bytes && !caps.output.structured,

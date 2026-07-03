@@ -64,8 +64,15 @@ class MockTransport implements Transport {
   control(event: Record<string, unknown>): void {
     this.deliver({ kind: 'control', event })
   }
-  output(agentId: string, epoch: number, seq: number, bytes = new Uint8Array([seq & 0xff])): void {
-    this.deliver({ kind: 'output', agentId, epoch, seq, bytes })
+  // tag 기본 0(터미널) — tag1 케이스는 명시 인자로. 대부분 기존 테스트는 seq/epoch/dedup 만 보므로 tag0.
+  output(
+    agentId: string,
+    epoch: number,
+    seq: number,
+    bytes = new Uint8Array([seq & 0xff]),
+    tag = 0,
+  ): void {
+    this.deliver({ kind: 'output', tag, agentId, epoch, seq, bytes })
   }
   setState(s: ConnectionState): void {
     this._state = s
@@ -232,6 +239,60 @@ describe('seq dedup / epoch 가드(R2)', () => {
     const { t, received } = await subscribed()
     t.output(AGENT, 99, 0) // Ack 전 — st.epoch undefined
     expect(received).toEqual([0])
+  })
+})
+
+// ── S15/ADR-0045: tag(0 터미널/1 구조화) 전달 + tag0/tag1 혼재 dedup·epoch 회귀 ──────────────
+describe('tag 전달 + tag0/tag1 혼재(S15 구조화 출력)', () => {
+  async function subscribedChunks(): Promise<{ t: MockTransport; chunks: OutputChunk[] }> {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const chunks: OutputChunk[] = []
+    await c.subscribeOutput(AGENT, (chunk) => chunks.push(chunk))
+    return { t, chunks }
+  }
+
+  it('tag 를 onChunk 로 그대로 전달(tag0/tag1 구분)', async () => {
+    const { t, chunks } = await subscribedChunks()
+    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
+    t.output(AGENT, 1, 0, new Uint8Array([1]), 0) // tag0 터미널
+    t.output(AGENT, 1, 1, new Uint8Array([2]), 1) // tag1 구조화
+    expect(chunks.map((c) => c.tag)).toEqual([0, 1])
+    expect(chunks.map((c) => c.seq)).toEqual([0, 1])
+  })
+
+  it('tag0/tag1 혼재도 seq dedup 은 한 seq 공간 공통(tag 무관 high-water)', async () => {
+    const { t, chunks } = await subscribedChunks()
+    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
+    t.output(AGENT, 1, 0, new Uint8Array([0]), 0) // tag0
+    t.output(AGENT, 1, 1, new Uint8Array([0]), 1) // tag1
+    t.output(AGENT, 1, 1, new Uint8Array([0]), 0) // seq 1 중복(다른 tag 라도 같은 seq 공간 → drop)
+    t.output(AGENT, 1, 0, new Uint8Array([0]), 1) // seq 0 <= high-water → drop
+    t.output(AGENT, 1, 2, new Uint8Array([0]), 1) // 신규 → 배달
+    expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2])
+    expect(chunks.map((c) => c.tag)).toEqual([0, 1, 1])
+  })
+
+  it('tag1 도 epoch 가드 공통(옛 epoch 구조화 frame drop)', async () => {
+    const { t, chunks } = await subscribedChunks()
+    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 5, replay_from: 0, truncated: false } })
+    t.output(AGENT, 4, 0, new Uint8Array([0]), 1) // 옛 epoch tag1 → drop
+    t.output(AGENT, 5, 0, new Uint8Array([0]), 1) // 맞는 epoch tag1 → 배달
+    expect(chunks.map((c) => c.seq)).toEqual([0])
+    expect(chunks[0].tag).toBe(1)
+  })
+
+  it('pre-subscribe 버퍼도 tag 보존해 flush(구독 전 도착 tag1)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 구독자 없이 tag0/tag1 혼재 도착 → 버퍼.
+    t.output(AGENT, 1, 0, new Uint8Array([0]), 0)
+    t.output(AGENT, 1, 1, new Uint8Array([0]), 1)
+    const chunks: OutputChunk[] = []
+    await c.subscribeOutput(AGENT, (chunk) => chunks.push(chunk))
+    // flush 시 tag 가 보존돼야(handleOutput 배달과 동형).
+    expect(chunks.map((c) => c.seq)).toEqual([0, 1])
+    expect(chunks.map((c) => c.tag)).toEqual([0, 1])
   })
 })
 
@@ -488,9 +549,9 @@ describe('pre-subscribe 버퍼(ADR-0043 deliverable 게이트 프론트 등가)'
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     // 1MB 프레임 3개(총 3MB > 2MB 상한) — 구독자 없이 도착. drop-oldest 로 앞 프레임(seq 0)이 밀려남.
     const oneMB = new Uint8Array(1024 * 1024)
-    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 0, bytes: oneMB })
-    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 1, bytes: oneMB })
-    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 2, bytes: oneMB })
+    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 0, bytes: oneMB })
+    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 1, bytes: oneMB })
+    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 2, bytes: oneMB })
     const received: number[] = []
     await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
     // seq 0 은 drop-oldest 로 버려짐 → 뒤쪽만 flush(정확한 잔존 개수는 상한 산술에 달렸으나 seq 0 은 없어야).
@@ -552,7 +613,7 @@ describe('pre-subscribe 버퍼(ADR-0043 deliverable 게이트 프론트 등가)'
     // 단일 프레임이 상한보다 큼 — drop-oldest 루프는 frames.length>1 에서 멈추므로 옛 코드는 이 1개를
     //   영영 남긴다. FIX 3 은 마지막 1개도 bound 초과면 버려 버퍼를 비운다.
     const threeMB = new Uint8Array(3 * 1024 * 1024)
-    t.deliver({ kind: 'output', agentId: AGENT, epoch: 1, seq: 0, bytes: threeMB })
+    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 0, bytes: threeMB })
     const received: number[] = []
     await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
     // 버퍼가 비었으므로 flush 될 게 없다.

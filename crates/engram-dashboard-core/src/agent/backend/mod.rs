@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::agent::profile::{AgentCommand, SpawnMode};
+use crate::agent::transport::OutputDecoder;
 use crate::agent::types::{BackendCaps, CommandSpec};
 
 /// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
@@ -153,6 +154,25 @@ pub fn input_encoder(c: &AgentCommand) -> InputEncoder {
     }
 }
 
+// ── 출력 정제(ADR-0044/0004/0045) — 입력 인코더의 대칭 짝 ──────────────────────────
+
+/// 이 명령의 출력 정제 decoder(pump→core 앞에 꽂힘). json 모드 claude 만 `ClaudeStreamDecoder`
+/// (stream-json NDJSON → 구조화 OutputEvent), 그 외 전부 None(바이트 직통 = 터미널·평문 불변).
+///
+/// ★대칭★: `input_encoder`(입력 방향)의 출력 방향 짝이다. 둘 다 "claude 스키마 지식"을
+/// backend/claude.rs 에만 두는 격리(ADR-0004) — session 은 encoder 태그만, transport 는
+/// `dyn OutputDecoder` 만 알고 claude 를 모른다. manager.spawn 이 이걸 산출해 StdioTransport 에
+/// 주입한다(json→decoder, 그 외→None). `Box<dyn OutputDecoder>` 반환이라 새 backend(codex 등)는
+/// 자기 decoder 를 여기 분기에 추가하면 된다(교체성).
+pub fn output_decoder(c: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+    if c.is_json_mode() {
+        // claude stream-json 라이브 decoder. 스키마 지식은 claude.rs 단독(ADR-0004).
+        Some(Box::new(claude::ClaudeStreamDecoder::new()))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +212,54 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("\"type\":\"user\""));
         assert!(s.contains("\"text\":\"hi\""));
+    }
+
+    // ── S15 B3: output_decoder dispatch(입력 encoder 의 대칭) ──────────────────────
+    #[test]
+    fn output_decoder_dispatch_by_mode() {
+        // json claude → Some(decoder), 터미널 claude·shell → None(바이트 직통).
+        let term = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::Terminal,
+        };
+        let json = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::StreamJson,
+        };
+        let shell = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        assert!(
+            output_decoder(&term).is_none(),
+            "터미널 모드 → decoder 없음(직통)"
+        );
+        assert!(
+            output_decoder(&shell).is_none(),
+            "shell → decoder 없음(직통)"
+        );
+        assert!(
+            output_decoder(&json).is_some(),
+            "json 모드 → ClaudeStreamDecoder 주입"
+        );
+    }
+
+    #[test]
+    fn output_decoder_produces_structured_events_through_trait_object() {
+        // 배선 증명: dispatch 가 준 trait object 로 stream-json 라인을 decode 하면 구조화 이벤트가
+        //   나온다(impl OutputDecoder for ClaudeStreamDecoder 위임 확인 — decode/flush 트레이트 경로).
+        use crate::agent::types::OutputEvent;
+        let json = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::StreamJson,
+        };
+        let mut dec = output_decoder(&json).expect("json → decoder");
+        let mut ev = dec.decode(b"{\"type\":\"result\",\"subtype\":\"success\"}\n");
+        ev.extend(dec.flush());
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, OutputEvent::MessageDone { .. })),
+            "trait object decode 가 result 라인을 MessageDone 으로 정제해야 함: {ev:?}"
+        );
     }
 }

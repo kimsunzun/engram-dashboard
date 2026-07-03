@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { agentClient } from '../../api/clientFactory'
+import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 
@@ -109,6 +110,13 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
         if (cancelled) return
         if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
         lastSeq.current = chunk.seq
+        // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 터미널 raw 바이트(tag0)만 xterm 에 write 한다. tag1
+        //   (StructuredEvent JSON)이 오면 무시한다 — RichSlot 이 tag0 을 무시하는 것과 정확히 대칭.
+        //   구조화 에이전트에 터미널 슬롯이 붙거나(renderModeOverride·다중 구독) 배선 버그로 tag1 이
+        //   공유 스트림(한 seq 공간)으로 새면, 게이트가 없을 때 JSON 바이트가 그대로 xterm 에 찍혀
+        //   화면이 오염된다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) tag1 을 건너뛰어도
+        //   dedup 은 정합하다.
+        if (chunk.tag !== FRAME_TAG_TERMINAL_BYTES) return
         terminal.write(chunk.bytes) // 디코드는 클라 내부에서 끝남(transport 캡슐화)
       })
       .then(handle => {

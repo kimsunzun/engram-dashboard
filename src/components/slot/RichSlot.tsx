@@ -2,21 +2,28 @@
 //
 //  ① fixture 모드(<RichSlot />, agentId 없음) — M0 스파이크. 캡처한 stream-json 샘플을 통짜 파싱해
 //     그린다(살아있는 에이전트/데몬 없이 스타일 튜닝용). ViewLayoutRenderer 의 richSlots 오버레이가 쓴다.
-//  ② 라이브 모드(<RichSlot agentId epoch />) — M2 본체. StdioTransport 실스트림(NDJSON 바이트)을
+//  ② 라이브 모드(<RichSlot agentId epoch />) — M2 본체. 백엔드가 정제한 **구조화 출력 tag1** 프레임을
 //     TerminalSlot 과 같은 구독 규율로 받아(효과 deps [agentId,epoch], seq dedup, replay, 정확한 해제)
-//     StreamAccumulator 로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송, Shift+Enter=줄바꿈).
+//     StructuredEventAccumulator 로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송, Shift+Enter=줄바꿈).
 //
-// ★층 분리★: 라이브 모드도 파싱/병합은 순수 TS(streamParse.ts)가, 렌더는 랩 레이아웃(ChatLayout)이
-//   소유한다. 이 컴포넌트는 "바이트 구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O 배선만 한다
-//   (§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
+// ★S15 소스 전환(ADR-0045)★: 라이브 누산 소스가 S14 NDJSON 바이트(StreamAccumulator)에서 tag1
+//   StructuredEvent(StructuredEventAccumulator)로 바뀌었다. 백엔드가 출력을 정제해 self-describing
+//   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. tag0(터미널 바이트)이 이
+//   슬롯에 오면 무시한다(구조화 슬롯이라 렌더 대상 아님 — tag 게이트). NDJSON 통로/StreamAccumulator 는
+//   fixture 스파이크(FixtureRichSlot)가 계속 쓰므로 남긴다.
+//
+// ★층 분리★: 라이브 모드도 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 랩 레이아웃
+//   (ChatLayout)이 소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O
+//   배선만 한다(§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
 
 import { useEffect, useRef, useState } from 'react'
 
 import { agentClient } from '../../api/clientFactory'
+import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { parseStreamJson } from '../../lab/richslot/parse'
-import { StreamAccumulator } from '../../lab/richslot/streamParse'
+import { StructuredEventAccumulator } from './structuredAccumulator'
 import { LAYOUTS, ChatLayout, type LayoutKey } from '../../lab/richslot/layouts'
 import {
   RenderSettingsProvider,
@@ -62,8 +69,8 @@ function LiveRichSlot({ agentId, epoch }: { agentId: string; epoch: number }) {
   const [awaiting, setAwaiting] = useState(false)
   const [input, setInput] = useState('')
   // 누산기는 렌더 간 유지(마운트 1회 생성). 재구독 effect 가 reset 으로 초기화한다(replay 규율).
-  const accRef = useRef<StreamAccumulator>(null as unknown as StreamAccumulator)
-  if (accRef.current === null) accRef.current = new StreamAccumulator()
+  const accRef = useRef<StructuredEventAccumulator>(null as unknown as StructuredEventAccumulator)
+  if (accRef.current === null) accRef.current = new StructuredEventAccumulator()
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // 종료 판정(입력 비활성) — TerminalSlot 과 동일하게 store status 로 본다.
@@ -91,12 +98,17 @@ function LiveRichSlot({ agentId, epoch }: { agentId: string; epoch: number }) {
         if (cancelled) return
         if (chunk.seq <= lastSeq.current) return
         lastSeq.current = chunk.seq
-        // 바이트를 누산기에 흘린다 — 라인 재조립·파싱·병합은 누산기 소유(통로는 바보 파이프, ADR-0044).
+        // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 구조화(tag1)만 렌더한다. tag0(터미널 raw 바이트)이 오면
+        //   무시한다 — 구조화 에이전트라도 백엔드가 tag0 을 흘릴 수 있고(과도기), xterm 이 아니라 여기서
+        //   바이트를 파싱하면 깨진다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) dedup 은
+        //   tag0 를 건너뛰어도 정합하다.
+        if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) return
+        // tag1 payload = StructuredEvent JSON 1건 — 누산기가 파싱·누적(TextDelta 이어붙임)한다.
         acc.feed(chunk.bytes)
         // 새 참조로 set(누산기 내부 배열은 불변 갱신하지만, 상위 배열 참조를 새로 떠 리렌더 보장).
         setMessages([...acc.snapshot()])
         setTurnDone(acc.isTurnDone())
-        setAwaiting(false) // 응답 바이트 도착 → awaiting 해제(이후 표시는 turnDone 이 주도)
+        setAwaiting(false) // 응답 이벤트 도착 → awaiting 해제(이후 표시는 turnDone 이 주도)
       })
       .then((handle) => {
         if (cancelled) {

@@ -33,7 +33,9 @@ import type { ConnectionState } from './agentClient'
  */
 export type InboundMessage =
   | { kind: 'control'; event: Record<string, unknown> }
-  | { kind: 'output'; agentId: string; epoch: number; seq: number; bytes: Uint8Array }
+  // tag = frame 종류(0=터미널 바이트 / 1=StructuredEvent JSON, wsFrame.ts). ProtocolClient 가 tag 로
+  // 소비 경로를 가른다(tag0→바이트 chunk, tag1→구조화 이벤트). epoch/seq 가드·dedup 은 tag 무관 공통.
+  | { kind: 'output'; tag: number; agentId: string; epoch: number; seq: number; bytes: Uint8Array }
 
 /**
  * carrier 추상. ProtocolClient 가 의존하는 유일한 전송 표면.

@@ -516,6 +516,14 @@
 - **★순서 위험(리뷰 F1 — 다음 세션 필독):** tag1은 클라 relay·버퍼는 통과하나 프론트 `wsFrame.ts:20`이 null-drop(cursor 전진) → **B3(tag1 생산자) 배선을 프론트 tag1 소비(모듈6) 없이 하면 구조화 출력 영구 무음 유실.** ⑤B3은 ⑥ 프론트 tag 관용과 **묶어야** 함(TRD §6 순서 재고).
 - **다음:** ⑤ B3 decoder 주입(조립점) — 단 ⑥ 프론트와 묶기(F1). `get_snapshot` 구조화 wire 매핑도 후속(core snapshot() 변경).
 
+### S15 모듈5+6 MVP (B3 decoder 배선 + 프론트 tag1 소비) (2026-07-04, master, opus)
+- **왜 함께:** F1(리뷰) — B3(tag1 생산자)를 프론트 tag1 소비 없이 켜면 프론트가 tag1을 null-drop해 구조화 출력 무음 유실 + B3 검증 자체가 프론트 렌더 없이는 불가. wire 계약(tag1/StructuredEvent, 모듈4)이 고정돼 두 코더 병렬(백엔드 Rust ↔ 프론트 TS, 파일 겹침 0).
+- **B3(백엔드):** `OutputDecoder` 트레이트 신설(core `transport/mod.rs` — backend-agnostic seam) → `ClaudeStreamDecoder`가 impl(claude 지식은 `backend/claude.rs`만, ADR-0004) → `StdioTransport`가 `dyn OutputDecoder`만 보유(`open` 주입, trait 무참조 확인) → manager `output_decoder` dispatch(json→Some) → pump 루프서 decode→emit, break 시 flush. 터미널(Pty/None)은 `TerminalBytes` 직통(회귀 0).
+- **프론트 MVP(모듈6):** `wsFrame` tag1 통과(F1 해소) → `tag`를 transport/protocolClient 스택 전달(seq dedup·epoch 가드는 tag 무관 공통) → `structuredAccumulator`(신규, StructuredEvent JSON→TextDelta 누적) → RichSlot 소비. **DEFER:** parse.ts/streamParse 제거·비-TextDelta 렌더·turn 경계(message_id).
+- **구현 규약:** 두 코더(opus) 병렬 → `/review code deep`(opus doc-aware PASS + Codex blind) → `/qa`. **FIX 1회(Codex):** ①HIGH tag1이 TerminalSlot/DomSlot(tag0 바이트 맹목 기록)에 유출 → 두 슬롯에 tag0 게이트(RichSlot의 tag1 게이트와 대칭) ②MEDIUM shutdown flush → pump가 `shutdown.load(Acquire)`로 kill 구분해 kill 시 flush 스킵(자연 EOF만).
+- **결과:** `cargo build` OK · core 198 · protocol 43 · daemon 82 · discovery 44 / 0 failed · core `use tauri` 0 · ADR-0004 transport-claude 격리(주석만) · fmt·tsc·vitest 212 PASS. **cdp 미수행 — 마일스톤 실측(스폰 JSON 에이전트→구조화 출력 렌더→리로드 replay)은 별도 스텝.**
+- **다음:** ⑦ cdp 마일스톤 실측(end-to-end 구조화 출력 화면 확인) + `get_snapshot` 구조화 wire 매핑(후속) + 비-TextDelta 렌더·옛 파서 제거(DEFER분).
+
 ### JSON 렌더 M2 — 실스트림 E2E 완주(스폰→RichSlot 렌더→왕복) + 리뷰 FIX + --verbose 실측 확정 (2026-07-02, master, fable)
 - **M2 코더(opus):** wire `CreateProfile.output_format`(serde default) → 데몬 → 프로필 → spawn 관통 · `LiveRichSlot`(TerminalSlot 규율 미러: [agentId,epoch]·reset-before-subscribe·seq dedup·token unsubscribe) · **`StreamAccumulator`**(바이트→라인 재조립 TextDecoder streaming, message.id 병합) · ViewLayoutRenderer caps 분기 · 입력박스(Enter/Shift+Enter) · `window.__richslot.spawnJson()`. **병합 실측: 반복 assistant 라인 = 누적 스냅샷 아니라 id-키 분리 블록**(fixture 증거로 테스트 고정).
 - **/review code full(opus doc-aware + Codex blind) → 양쪽 FIX:** 교차 적출 = **caps 늦도착 스왑 시 초반 스트림 유실**(replay는 배정 델타에만 옴, ADR-0041 — 컴포넌트 스왑은 재트리거 안 함). 채택 (a)안: AgentInfo 미도착이면 "에이전트 연결 중…" 플레이스홀더 → 첫 실 렌더러가 replay 온전 수령(거부: 강제 re-replay=소유권 침범 / assign 게이트=결합). + IME 한글 Enter 오발사 가드(keyCode 229) · id 병합 멱등화 · 버퍼 4MB 상한 · trim · 테스트 8건 추가(CRLF·중복재방출·오버플로·부분 멀티바이트 reset). "스트리밍 중 전송"은 결함 아님 — **의도**(방식 A 중간 개입) 주석 박음. 게이트: tsc·vitest 164 그린.

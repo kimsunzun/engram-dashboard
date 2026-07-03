@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { agentClient } from '../../api/clientFactory'
+import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 
@@ -104,6 +105,11 @@ export default function DomSlot({ agentId, epoch }: DomSlotProps) {
         if (cancelled) return
         if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
         lastSeq.current = chunk.seq
+        // ★tag 게이트(S15/ADR-0045)★: DOM 모드는 터미널 raw 바이트(tag0)를 평문으로 그리는 관측기다.
+        //   tag1(StructuredEvent JSON)이 오면 무시한다 — TerminalSlot 과 동형(같은 tag0 소비자). 게이트가
+        //   없으면 tag1 JSON 바이트가 ANSI strip 을 거쳐 <pre> 에 그대로 새어 관측 텍스트가 오염된다.
+        //   seq 는 위에서 이미 전진시켰으므로 tag1 을 건너뛰어도 dedup 정합(tag 무관 한 seq 공간).
+        if (chunk.tag !== FRAME_TAG_TERMINAL_BYTES) return
         // 이전 청크가 남긴 미완 ESC 꼬리(pending)를 이번 디코드 앞에 이어 붙인 뒤, 새 미완 꼬리를 다시
         // 잘라낸다 — 그래야 두 청크에 쪼개진 시퀀스가 온전히 이어져 strip 된다(FIX-3).
         const decoded = pending + decoder.decode(chunk.bytes, { stream: true })

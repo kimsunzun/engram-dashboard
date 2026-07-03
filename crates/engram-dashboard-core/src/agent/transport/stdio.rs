@@ -29,7 +29,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use crate::agent::output_core::OutputCore;
-use crate::agent::transport::AgentTransport;
+use crate::agent::transport::{AgentTransport, OutputDecoder};
 use crate::agent::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps,
@@ -61,6 +61,11 @@ pub struct StdioTransport {
     /// "구조화냐"는 파이프가 아니라 claude `--output-format`(backend/mode 지식)이 정하므로,
     /// select_transport 가 mode 로부터 주입한다(하드코딩 금지 — 평문 stdio 엔 false). capabilities()가 그대로 신고.
     structured: bool,
+    /// 출력 정제 decoder(ADR-0004/0044). ★transport 는 어떤 디코더인지 모른다★: `dyn OutputDecoder`
+    /// 만 알고(claude/codex 스키마 지식 없음), manager 가 json 모드 세션에 주입한다(없으면 바이트
+    /// 직통 = 평문·터미널 경로). start()에서 take 해 pump 스레드로 move(=None 이면 이미 시작됨).
+    /// Mutex<Option<..>> 인 이유는 stdout 과 동일 — start 가 소유권을 pump 스레드로 넘기기 위함.
+    decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
     #[cfg(windows)]
     job_handle: JobObjectHandle,
 }
@@ -72,9 +77,15 @@ impl StdioTransport {
     /// PtyTransport::open과 시그니처를 맞추되 cols/rows가 없다(파이프엔 터미널 크기 개념 없음).
     /// `structured`: 이 파이프가 나르는 출력이 NDJSON(구조화)인지 — 호출자(select_transport)가
     /// mode 로부터 주입한다(파이프는 내용을 모름, ADR-0044/0030). capabilities().output.structured 로 신고.
+    /// `decoder`: 출력 정제기(ADR-0004) — json 모드면 backend 가 만든 `ClaudeStreamDecoder` 를,
+    /// 그 외(평문·터미널) 경로면 None 을 넘긴다. ★start 인자가 아니라 open 인자로 받는 이유★:
+    /// decoder 주입은 StdioTransport 전용이라 공용 `AgentTransport::start` 시그니처를 건드리지 않는다
+    /// (건드리면 Pty/Api 도 무의미한 None 인자를 강제로 받아야 함 — 파급 최소화). transport 는 이
+    /// 값이 어떤 디코더인지 모른 채 pump 에서 적용만 한다.
     pub fn open(
         spec: &CommandSpec,
         structured: bool,
+        decoder: Option<Box<dyn OutputDecoder>>,
     ) -> Result<(StdioTransport, Option<u32>), PtyError> {
         // 1. Command 구성. transport는 claude/codex를 모른다 — backend가 산출한 spec만 본다.
         //    Windows shim(claude.cmd) 처리는 backend/console_command가 이미 `cmd.exe /c claude …`로
@@ -127,6 +138,7 @@ impl StdioTransport {
             stderr: Mutex::new(stderr),
             shutdown: Arc::new(AtomicBool::new(false)),
             structured,
+            decoder: Mutex::new(decoder),
             #[cfg(windows)]
             job_handle,
         };
@@ -201,6 +213,12 @@ impl AgentTransport for StdioTransport {
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
+        // decoder 소유권을 pump 스레드로 넘긴다(&mut 배타 소유 — 단일 스레드). None 이면 바이트 직통.
+        // Mutex lock 실패(poison)여도 into_inner 로 회수(패닉 회피) — 시작 경로라 실질 경합 없음.
+        let mut decoder = match self.decoder.lock() {
+            Ok(mut g) => g.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
 
         let handle = std::thread::spawn(move || {
             // pty.rs와 동일하게 pump 본체를 catch_unwind로 감싼다(panic→Failed 가시화).
@@ -224,8 +242,40 @@ impl AgentTransport for StdioTransport {
                         break;
                     }
 
-                    // 3. ★바보 파이프★: 바이트를 해석하지 않고 그대로 emit(seq/replay/fanout은 core).
-                    pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()));
+                    // 3. ★decoder 배선(ADR-0004/0044)★: decoder 가 있으면(json 모드) 바이트를 정제해
+                    //    나온 구조화 OutputEvent 들을 순서대로 emit; 없으면(평문·터미널) 바이트를 그대로
+                    //    TerminalBytes 로 직통 emit(기존 동작 불변 — 회귀 방지). transport 는 어느 쪽이든
+                    //    "적용"만 하고 파싱 스키마를 모른다(무정제 불변은 decoder 유무로 갈림).
+                    match decoder.as_mut() {
+                        Some(dec) => {
+                            for ev in dec.decode(&buf[..n]) {
+                                pump_core.emit(ev);
+                            }
+                        }
+                        None => pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec())),
+                    }
+                }
+
+                // ★break 후 finish 전 flush — 단 kill/shutdown 경로에선 스킵(FIX-2)★:
+                //   decoder 는 개행 없이 끝난 잔여 tail 라인을 버퍼에 들고 있을 수 있다. 자연 EOF
+                //   (자식이 stdout 을 다 쓰고 정상 종료)라면 이 tail 은 실제로 마지막까지 도착한
+                //   완성 데이터일 수 있으므로 finish 전에 마저 뱉어 유실을 막는다.
+                //   ★그러나 shutdown(kill) 로 스트림이 **중간에 잘린** 경우엔 flush 하지 않는다★:
+                //   그 tail 은 우리가 프로세스를 죽여 truncate 된 조각이라 "완성 라인"이 아니다.
+                //   flush(=consume_line 1회)가 우연히 그 잘린 조각을 파싱 가능한 JSON 으로 읽어
+                //   가짜 이벤트(예: 부분 result → MessageDone)를 방출할 여지를 원천 차단한다.
+                //   실제 도착·개행 종단된 완성 라인은 loop 안 decode 에서 이미 다 emit 됐으므로
+                //   스킵해도 실데이터 손실은 없다(버퍼에 남는 건 미종결 tail 뿐).
+                //   ★shutdown flag 로 분기하는 이유★: read 레벨에선 자연 EOF 와 kill 이 둘 다
+                //   Ok(0) 이라 구분이 안 되지만, kill 은 반드시 shutdown.store(Release) 를 거치므로
+                //   여기서 Acquire 로 읽어 확실히 구분된다(아래 reason 산출과 동일 신호원).
+                //   None(직통)이면 flush 할 상태가 없어 어차피 no-op.
+                if !shutdown.load(Ordering::Acquire) {
+                    if let Some(dec) = decoder.as_mut() {
+                        for ev in dec.flush() {
+                            pump_core.emit(ev);
+                        }
+                    }
                 }
 
                 // exit code 취득(pty와 동일 규율 — poison-tolerant into_inner).
@@ -426,7 +476,7 @@ mod tests {
         };
 
         // 평문 stdio(구조화 아님) 주입 → structured=false 로 정직 신고(예전 하드코딩 true 회귀 방지).
-        let (plain, _pid) = StdioTransport::open(&spec, false).expect("open plain");
+        let (plain, _pid) = StdioTransport::open(&spec, false, None).expect("open plain");
         assert!(
             !plain.capabilities().output.structured,
             "평문 stdio 주입 → structured=false(파이프가 아니라 mode 가 결정)"
@@ -434,7 +484,7 @@ mod tests {
         plain.shutdown();
 
         // json 캐리어(구조화) 주입 → structured=true + 파이프 물리 caps 나머지 검증.
-        let (json, _pid) = StdioTransport::open(&spec, true).expect("open json");
+        let (json, _pid) = StdioTransport::open(&spec, true, None).expect("open json");
         let caps = json.capabilities();
         assert!(caps.output.structured, "json 캐리어 주입 → structured=true");
         assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
@@ -471,7 +521,7 @@ mod tests {
             env: vec![],
             cwd: std::path::PathBuf::from("."),
         };
-        let (transport, _pid) = StdioTransport::open(&spec, true).expect("open");
+        let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
         let transport = Arc::new(transport);
 
         // writer: 파이프 버퍼를 훨씬 초과하는 8MB 를 write → 자식이 안 읽으니 write_all 이 락 쥔 채 블록.

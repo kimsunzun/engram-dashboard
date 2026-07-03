@@ -313,7 +313,7 @@ mod tests {
             cwd: PathBuf::from("."),
         };
         // json 모드 = structured 캐리어 → StdioTransport 에 structured=true 주입(조립점 매핑).
-        let (transport, _pid) = StdioTransport::open(&spec, true).expect("open");
+        let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
         // json 모드 command — backend 가 이걸 보고 mode 별 caps(resume=false, FIX 5)를 산출한다.
         let json_cmd = crate::agent::profile::AgentCommand::Claude {
             extra_args: vec![],

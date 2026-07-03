@@ -256,6 +256,7 @@ export class WsTransport implements Transport {
             if (!f) return
             this.messageCb?.({
               kind: 'output',
+              tag: f.tag, // frame 종류(0 터미널 / 1 구조화) — ProtocolClient 가 소비 경로 분기.
               agentId: f.agentId,
               epoch: f.epoch,
               seq: f.seq,
