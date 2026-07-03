@@ -1,7 +1,7 @@
 # Step 타임라인 — Engram Dashboard
 
 언제·무엇을·어떻게 했는지 시간순 기록. 산출 문서와 커밋을 매핑한다.
-상세는 각 폴더 참조: `docs/process/S0-view-phase/` ~ `S15-backend-output-refine/`(스텝별 설계·브리핑·스파이크), 핸드오프는 `.claude/continue/history/`.
+상세는 각 폴더 참조: `docs/process/S0-view-phase/` ~ `S15-backend-output-refine/`(스텝별 설계·브리핑·스파이크 — 폴더 없는 스텝도 있음). 핸드오프는 continue 스킬 관할(위치·규약 = 스킬 정본).
 
 **검증 3-게이트:** 코더(dco23 Opus / dcs24 Sonnet) → LLD 리뷰(dr26 Fable) → QA(dq25, build/lint/test).
 
@@ -195,7 +195,7 @@
 - **reviewer-deep 적출·수정:** M-1(env 제거로 ws_e2e 3 실프로세스 테스트 격리 깨짐+운영폴더 오염)·m-1(WMI smoke 2건 경로)·m-2(릴리즈 분기 무테스트→헬퍼 분리+테스트)·m-3(미사용 _app 제거) 전부 수정. **Codex 2번째 리뷰어는 다음 조각부터**(현재 미보유).
 - **게이트:** discovery 31·daemon 35·ws_e2e 44·core·protocol·src-tauri 9 통과, build/fmt 경고 0, env 격리·기본경로 실측 확인.
 - **prior-art 조사(graceful 끄기):** `/prior-art` 3에이전트(Docker/Ollama/Tailscale·Discord/Steam/OneDrive·LSP/systemd/표준) → ADR-0024 "트레이 graceful StopDaemon(WS+토큰)+taskkill 폴백" 모델 재확인. 정설=데몬이 control 채널 노출+다중 클라 같은 진입점(§5 정합), graceful은 타임아웃+강제 폴백과 한 쌍, loopback+토큰 보안. 차용 후보 Tailscale(BSD). ※메인이 한때 "트레이 graceful 불가→taskkill"로 ADR 재론한 사고 있었음(ADR 재독으로 교정).
-- **다음(결정 대기):** 트레이 실제 데몬 배선 — **graceful 끄기 구현 순서 a/b 사용자 결정 필요**(트레이에 one-shot WS 접속기를 이번에 vs 다음에). 그 후 ensure/status→아이콘(워커+proxy 비동기) · graceful 끄기 · 이후 UI 열기/닫기·clientFactory flip. 상세 핸드오프: `.claude/continue/history/2026-06-19-S13-트레이-data_dir-연결대기-graceful결정대기.md`.
+- **다음(결정 대기):** 트레이 실제 데몬 배선 — **graceful 끄기 구현 순서 a/b 사용자 결정 필요**(트레이에 one-shot WS 접속기를 이번에 vs 다음에). 그 후 ensure/status→아이콘(워커+proxy 비동기) · graceful 끄기 · 이후 UI 열기/닫기·clientFactory flip. 상세 핸드오프: `2026-06-19-S13-트레이-data_dir-연결대기-graceful결정대기.md`(continue 스킬 history).
 
 ### 2026-06-19 (dashboard8) — S13 sub-step 2 "1차": 트레이 실제 데몬 켜기 배선 + 콘솔/싱글인스턴스 수정
 - **CLAUDE.md 협업·브리핑 방식 초안(커밋 `12b63d7`):** 결정은 동작·정책 언어로 번역(사용자 체감=사용자 결정 / 순수 내부 구현=메인이 정하되 보고)·용어 점진 노출(처음 한 줄 풀이)·2층 브리핑(개념 합의→용어 풀 브리핑)·표준 4단(개념흐름→시나리오체크→용어브리핑→수용기준)·작은 기능 PRD/TRD 묶기. PRD/TRD 경계 논쟁이 끝없자 멈추고 "사용자 협업·브리핑 방식" 섹션으로 박음(초안, 나중 정리). 기존 "결정권은 사용자" 기조 보완(순서 불변·ADR 강제 유지).
@@ -334,7 +334,7 @@
   - **F2 BLOCK:** `layout:updated` listen 추가가 ADR-0028 단일 버스와 어긋날 소지 (F1 결정 후 자연 해소 가능).
   - **F3 BLOCK:** 팝업 부팅 race — listener 등록 전 emit 놓침 위험, 초기 상태 pull 누락.
   - 그 외 FIX: crate 경계 미명시·Mutex emit 순서·edge case(View 0개·팝업 crash·dangling)·영속 부재.
-- **핸드오프:** `.claude/continue/history/claude-20260627-s14-layout.md` 갱신됨.
+- **핸드오프:** `claude-20260627-s14-layout.md`(continue 스킬 history) 갱신됨.
 
 ### rev.4 — 권위 재정립 (2026-06-27, dashboard2, opus)
 - **F1 재검토 — 데몬 authority(rev.3) 기각:** 핸드오프 A/B 프레이밍이 코드와 어긋남(eventBus는 Tauri emit 아닌 `agentClient` WS로 수신·`wsTransport.ts`=창 직결 확인). 사용자가 "데몬이 View 알 필요 없다 — 즉흥 추론 말고 관행 리서치로" 제동.
@@ -537,7 +537,8 @@
 
 ### docs 대청소 — 흡수 완료 원자료 삭제 + rot 수정 + CLAUDE.md 중복 해소 (2026-07-04, master, fable)
 - **무엇:** 결정에 흡수 완료된 외부 AI 리뷰 덤프·리서치 원자료 28파일(6,068줄) 삭제 — S1-design 10 · S9-session-restore 9 · research 9. 삭제 전 파일별 인용 0건 재검증(원문은 git 이력 보존).
-- **rot 수정:** step-log 구 경로 참조 12건(`design/`·`spec/`·`briefings/`·`.ccb/` → 현 스텝 폴더·`.claude/continue/`) 현행화, tracking.md 해소(✅) 항목을 `## 해소됨 (아카이브)`로 분리.
+- **rot 수정:** step-log 구 경로 참조 현행화(`design/`·`spec/`·`briefings/` → 현 스텝 폴더). 핸드오프 참조는 경로 하드코딩 대신 파일명 수준으로 완화(위치·규약 정본 = continue 스킬). `docs/tracking.md` 해소(✅) 항목을 `## 해소됨 (아카이브)`로 분리.
+- **이력 보존:** 핸드오프 저장소는 과거 `.ccb/` → `.claude/history/` → 현 continue 스킬 관할로 이관·폐기돼 왔다(옛 문서·커밋의 `.ccb/` 참조는 전부 구 구조).
 - **CLAUDE.md 중복 해소:** 「리뷰어 역할 — 단계별 특화」 절 제거·구현 실행 규약 불릿으로 병합 — 실행 정본 = review 스킬 `flow.md §2`, 결정 = ADR-0031(구 "운영 표 = CLAUDE.md" 포인터도 현행화).
 - **보존(인용 확인):** `review-pipeline-design-draft`·`review-methodology-research`·`multi-window-layout-authority-topology`(ADR/CLAUDE.md 인용), `backend-lld-stage1`(확정 계약서).
 
