@@ -1,7 +1,7 @@
 # ADR-0044: JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스
 
 - 상태: 확정 (2026-07-02, 근거: claude CLI 실측 스파이크 + 백엔드 seam 매핑 + 사용자 승인)
-- 관련: ADR-0002(출력 종류 비가정·capability 렌더러 분기) · ADR-0004(claude 지식 격리) · ADR-0030(transport ⊕ backend caps 합성) · `src/lab/richslot/`(렌더 스파이크) · step-log S? (JSON 렌더 착수)
+- 관련: ADR-0002(출력 종류 비가정·capability 렌더러 분기) · ADR-0004(claude 지식 격리) · ADR-0030(transport ⊕ backend caps 합성) · `src/lab/richslot/`(렌더 스파이크) · step-log S? (JSON 렌더 착수) · Amended by ADR-0045 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환)
 
 ## 맥락
 대시보드가 claude 출력을 구조화(JSON)로 렌더하는 모드(RichSlot)를 붙여야 한다. 실측 결과 `--output-format stream-json`·`--input-format stream-json`은 **`-p`(print/헤드리스) 전용**이다(claude 2.1.170 `--help` 명시: "only works with --print"). 즉 현행 PTY 대화형 claude는 JSON을 낼 수 없고, "터미널 렌더러를 JSON 렌더러로 스왑"이 아니라 **프로세스 기동 방식 자체가 다른 별도 경로**가 필요하다. 문제: 이 경로를 기존 파이프라인(OutputCore→codec→데몬→프론트)과 어떻게 공존시키나.
@@ -28,7 +28,7 @@
 - 사용자 승인: "일단 이 배선으로 ㄱ" (2026-07-02 세션).
 
 ## 영향 / 불변식
-- **통로 무정제 불변** — `OutputCore`·codec·데몬·프론트 transport는 JSON 모드에서도 바이트 내용을 해석하지 않는다. JSON 지식은 만드는 쪽(claude)·감싸는 쪽(`backend/claude.rs`)·그리는 쪽(RichSlot 파서)에만 존재. 어기면(통로에 JSON 파싱 삽입) swappable 원칙(ADR-0002)과 seam 격리가 깨진다.
+- **통로 무정제 불변** — `OutputCore`·codec·데몬·프론트 transport는 JSON 모드에서도 바이트 내용을 해석하지 않는다. JSON 지식은 만드는 쪽(claude)·감싸는 쪽(`backend/claude.rs`)·그리는 쪽(RichSlot 파서)에만 존재. 어기면(통로에 JSON 파싱 삽입) swappable 원칙(ADR-0002)과 seam 격리가 깨진다. **(→ ADR-0045로 개정: '통로 무정제'는 이제 transport 층에만 한한다. OutputCore/버퍼/codec/데몬은 payload-generic으로 타입 `OutputEvent`를 나르고, 파싱은 `backend/claude.rs`가 소유(프론트 RichSlot 파서는 제거). swappable 원칙은 payload 다형성으로 유지.)**
 - **입력 wrapping = backend 단독** — `{"type":"user",...}` 스키마가 `backend/claude.rs` 밖으로 새면 ADR-0004 위반.
 - **StdioTransport caps** — resize 불가·terminal_bytes 아님을 정직 신고(터미널 개념 없음). 프론트 렌더러 분기는 이 caps가 유일한 판단 근거(ADR-0002).
-- **MVP 한계 명시** — interrupt 미지원(kill만)·권한 승인 없음(텍스트 챗 전용)은 *의도된 미구현*이다. 후속 작업이 이를 "결함"으로 오독해 통로에 땜질하지 말 것 — 확장 시 pump 라인 tap + 필요 시 typed variant 재검토 경로를 따른다.
+- **MVP 한계 명시** — interrupt 미지원(kill만)·권한 승인 없음(텍스트 챗 전용)은 *의도된 미구현*이다. 후속 작업이 이를 "결함"으로 오독해 통로에 땜질하지 말 것 — 확장 시 pump 라인 tap + 필요 시 typed variant 재검토 경로를 따른다. **(→ ADR-0045가 이 확장 경로를 실행: backend 파싱 + typed variant를 binary frame tag로 wire. "통로 땜질 금지"는 transport 층 한정으로 유효 — 정제는 backend가, wire는 codec tag가 담당.)**
