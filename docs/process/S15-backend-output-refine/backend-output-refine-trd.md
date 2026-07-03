@@ -27,9 +27,9 @@ claude stdout(NDJSON bytes)
 ### 백엔드 (Rust)
 | # | 파일 | 변경 | 내용 |
 |---|---|---|---|
-| B1 | `core/agent/types.rs` | `OutputEvent` 확장 + `Serialize` | `TextDelta`/`ToolCall{name,args_json,optional id}`/`Usage`/`MessageDone`/`Error`/`Structured{kind,json}`(탈출구) + optional `turn_id`/`message_id`. `#[derive(Clone,Serialize)]` |
+| B1 | `core/agent/types.rs` | `OutputEvent` 확장 (✅모듈1) | `TextDelta`/`ToolCall{name,args_json,optional id}`/`Usage`/`MessageDone`/`Error`/`Structured{kind,json}`(탈출구) + optional `turn_id`/`message_id`. `#[derive(Debug,Clone)]` 유지 — **`Serialize`는 B7 daemon adapter서 wire 타입에 부착**(core는 wire 형식 모름 = ADR-0003, 직렬화 형식 조기확정 회피 = §0). |
 | B2 | `core/agent/backend/claude.rs` | **decoder** 신설 | `LineDecoder`(라인 재조립 상태 + claude JSON→OutputEvent). backend 소유. transport·core는 이 타입을 dyn으로만 봄 |
-| B3 | `core/agent/`(조립점: session/manager) | decoder 주입 | pump→core 사이에 decoder를 꽂는다. transport는 바이트 emit 유지. json 모드면 decoder 있음, 터미널이면 없음(bytes 직통) |
+| B3 | `core/agent/`(조립점: session/manager) | decoder 주입 | pump→core 사이에 decoder를 꽂는다. transport는 바이트 emit 유지. json 모드면 decoder 있음, 터미널이면 없음(bytes 직통). **★B4보다 먼저 하면 안 됨** — B4(payload-generic emit) 전엔 구조화 이벤트가 `output_core` `_` arm서 조용히 drop된다(모듈1이 그 arm에 `debug_assert!`+`warn` dormant guard 부착해 순서 위반을 시끄럽게). |
 | B4 | `core/agent/session.rs`(ReplayBuffer)·`output_core.rs`(emit) | `Ring<StoredOutput>` 일반화 | 저장단위 `StoredOutput{seq,payload,cost_bytes}`. `cost()`=바이트 len / 이벤트 인코딩 크기. **emit 락 규율 불변(ADR-0006)** |
 | B5 | `core/agent/types.rs` | `OutputPayload{Bytes\|Event}` | `OutputFrame.data:&[u8]`→`OutputPayload`(Copy/빌림 유지). `OutputSink::send` 시그니처 갱신 |
 | B6 | `protocol/codec.rs` | `tag1` + 헤더-only 게이트 | `tag1` encode/decode(payload=직렬화 이벤트, codec은 내용 모름). `decode_frame`이 known tag는 헤더만 파싱 payload opaque. golden |

@@ -102,10 +102,14 @@ impl OutputCore {
     /// - replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게).
     ///   두 lock 동시 취득은 subscribe 함수 단독 예외이며 emit은 절대 금지.
     pub fn emit(&self, event: OutputEvent) {
-        // 미래 variant(TextDelta/Usage/...)는 무시. 현재 enum이 단일 variant라 `_` 팔이
-        // 도달 불가하지만, variant 추가 시 자동으로 무시 동작이 되도록 의도적으로 둔다.
-        // single_match: variant-agnostic 의도(미래 variant 자동 무시)라 의도적으로 match 유지.
-        #[allow(unreachable_patterns, clippy::single_match)]
+        // B1이 구조화 variant(TextDelta/ToolCall/Usage/MessageDone/Error/Structured)를 추가해
+        // `_` 팔이 이제 실제로 도달 가능하다. 다만 현재 emit 배선은 TerminalBytes만 내보내므로
+        // 이 arm은 정상 경로에선 미도달인 dormant 안전망이다 — 구조화 이벤트가 여기 오면
+        // seq/replay/fanout 없이 조용히 사라져(침묵 유실) 상위가 눈치채지 못한다. 그래서 debug 빌드는
+        // 순서 위반으로 즉시 패닉시키고, release는 시끄럽게 로깅해 유실을 드러낸다.
+        // ADR-0045: B4가 payload-generic emit으로 이 wildcard 대체 예정.
+        // single_match: variant-agnostic 처리라 의도적으로 match 유지.
+        #[allow(clippy::single_match)]
         match event {
             OutputEvent::TerminalBytes(bytes) => {
                 // 3. seq 발급 (C2: 즉시 send — partial batch 정체 없음).
@@ -155,7 +159,19 @@ impl OutputCore {
                         .retain(|s| !dead.contains(&s.sink_id()));
                 }
             }
-            _ => {}
+            // dormant 안전망: 구조화 이벤트가 payload-generic emit 배선(B4) 전에 도달 = 순서 위반.
+            // debug는 즉시 패닉(개발 중 조기 발견), release는 warn 로깅(침묵 유실 방지). 정상 경로 미도달.
+            _ => {
+                debug_assert!(
+                    false,
+                    "구조화 OutputEvent가 B4(payload-generic emit) 배선 전에 도달 — 순서 위반"
+                );
+                tracing::warn!(
+                    agent = %self.id,
+                    epoch = self.epoch,
+                    "구조화 OutputEvent가 emit에 도달했으나 처리 배선(B4) 부재 — 침묵 유실 방지 위해 드롭 경고"
+                );
+            }
         }
     }
 

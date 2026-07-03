@@ -16,10 +16,50 @@ pub enum AgentStatus {
 }
 
 /// pump→core 내부 출력 이벤트. 확장 가능 enum. core는 variant-agnostic(_ => ignore).
+///
+/// ★ADR-0045 (출력 정제를 백엔드로)★: 콘솔은 `TerminalBytes`(VT 바이트 스트림) 그대로,
+/// 구조화 백엔드(claude stream-json 등)는 backend decoder가 파싱해 아래 구조화 variant로 emit한다.
+/// 이 타입은 **core 도메인 타입**이지 protocol wire 타입이 아니다 — core↔wire 변환은 daemon
+/// adapter가 한다(ADR-0003 격리: core는 wire를 모른다). core에 tauri import 금지(serde는 허용).
+///
+/// `turn_id`/`message_id`는 대화 추적용 optional 필드다 — claude는 안 채워도 되고, codex/gemini의
+/// turn·message 모델 누수를 흡수하려 열어 둔다(교체성). backend가 못 채우면 None.
+/// `Structured{kind,json}`은 위 정형 variant로 안 잡히는 backend별 이벤트의 탈출구다.
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
-    TerminalBytes(Vec<u8>), // 콘솔 — 지금 유일 variant
-                            // 후일: TextDelta(String) / MessageDone / Usage{..} / ToolCall{..} / Error(String)
+    /// 콘솔 raw 바이트(VT 스트림). PtyTransport·터미널 모드의 유일 payload.
+    TerminalBytes(Vec<u8>),
+    /// 어시스턴트 텍스트 증분(스트리밍 델타).
+    TextDelta {
+        text: String,
+        turn_id: Option<String>,
+        message_id: Option<String>,
+    },
+    /// 도구 호출 — 이름 + 직렬화된 인자(JSON 문자열, backend별 스키마 그대로).
+    ToolCall {
+        name: String,
+        args_json: String,
+        /// 호출 식별자(권한 UX·결과 매칭용). claude tool_use id 등.
+        id: Option<String>,
+        turn_id: Option<String>,
+        message_id: Option<String>,
+    },
+    /// 토큰 사용량.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        turn_id: Option<String>,
+    },
+    /// 한 메시지(turn 응답) 종료 신호.
+    MessageDone {
+        turn_id: Option<String>,
+        message_id: Option<String>,
+    },
+    /// backend가 보고한 오류(스트림 내부 오류 등 — TerminalReason과 별개, 종료 아님).
+    Error(String),
+    /// 위 정형 variant로 안 잡히는 backend별 구조화 이벤트의 탈출구(forward-compat).
+    /// kind=이벤트 종류 태그, json=원본 직렬화 payload. core는 내용을 해석하지 않는다.
+    Structured { kind: String, json: String },
 }
 
 /// session→transport 입력 이벤트. 확장 가능 enum.

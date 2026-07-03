@@ -5,8 +5,12 @@
 //! 그대로 PtyTransport. 같은 AgentSession 조립에서 transport만 갈아끼운다.
 //!
 //! ★바보 파이프 불변(ADR-0044)★: pump는 stdout 바이트를 **해석하지 않고** 그대로
-//!   `OutputEvent::TerminalBytes`로 core에 넘긴다(캐리어 variant 재사용 — 새 variant 금지).
-//!   NDJSON 파싱은 프론트(RichSlot) 몫이다. transport/core/데몬은 내용을 모른다.
+//!   `OutputEvent::TerminalBytes`로 core에 넘긴다(캐리어 variant 재사용). transport 층은 내용을 모른다.
+//!
+//! ADR-0045 개정: '무정제'는 transport 층 한정 — 파싱은 backend decoder(pump 출력을 core 앞에서
+//!   소비)가 맡고, 프론트가 아니다. transport 자체는 계속 바이트만 emit한다(위 불변 유지). 즉 옛
+//!   "새 variant 금지 / NDJSON 파싱은 프론트 몫" 서술은 폐기 — 구조화 variant는 추가됐고(B1),
+//!   파싱 위치는 backend decoder다.
 //!
 //! ★PTY와 결정적 차이 — watcher 불필요★: ConPTY는 master가 살아 있으면 자식이 스스로 exit해도
 //!   reader에 EOF를 안 줘서 PtyTransport가 자연 종료 감지용 watcher 스레드를 둔다. **파이프는

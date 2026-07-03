@@ -31,8 +31,8 @@ mod ids;
 mod messages;
 
 pub use codec::{
-    decode_frame, encode_terminal_frame, CodecError, DecodedFrame, FRAME_HEADER_LEN,
-    FRAME_TAG_TERMINAL_BYTES,
+    decode_frame, encode_structured_frame, encode_terminal_frame, CodecError, DecodedFrame,
+    FRAME_HEADER_LEN, FRAME_TAG_STRUCTURED_EVENT, FRAME_TAG_TERMINAL_BYTES,
 };
 pub use discovery::DaemonInfo;
 pub use domain::{
