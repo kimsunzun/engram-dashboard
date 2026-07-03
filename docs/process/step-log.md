@@ -501,6 +501,13 @@
 - **문서:** ADR-0045(신규) · ADR-0044(§31/§34 인라인 포인터) · `docs/process/S15-backend-output-refine/backend-output-refine-trd.md`.
 - **후속:** `/implement` — TRD 순서(B1 타입 + B6 codec 계약 → decoder → 버퍼 → adapter/sink → 주입 → 프론트), 코더 high → `/review code` deep(고위험 seam: ADR-0003 계약·0006 락) → `/qa` full, 모듈별 커밋.
 
+### S15 모듈2 (B2) — claude stream-json decoder (2026-07-03, master, opus)
+- **무엇:** TRD 순서 2번 — `backend/claude.rs`에 `ClaudeStreamDecoder`(NDJSON 바이트청크→`OutputEvent`) 신설. 라인 재조립 상태머신(부분 라인 버퍼, **완성 라인 전 UTF-8 미디코딩** 불변식으로 청크 경계 멀티바이트 잘림 자연 흡수) + claude stream-json 파싱. standalone 유닛 — pump/session/manager 배선(B3)·`OutputCore`/`Ring`(B4/B5)은 **손대지 않음**(B3-먼저-금지 순서 함정 회피). 스키마 정본 = 프론트 `parse.ts` + 실측 fixture(text/tool.jsonl 복사, `include_str!`).
+- **매핑:** assistant text→TextDelta · tool_use→ToolCall · thinking/tool_result/user→Structured(탈출구) · result→MessageDone(+usage→Usage; is_error 또는 subtype error계열→Error 선행).
+- **구현 규약:** `/implement standard` — 코더(opus)→`/review code full`(opus doc-aware + Codex blind)→`/qa standard`. **리뷰 2라운드 FIX:** ①오버플로 resync(`discarding` 상태 — 오염 라인 꼬리를 다음 개행까지 폐기, 단순 clear의 가짜이벤트 유발 방지) ②malformed 블록은 가짜 정형이벤트 대신 skip/Structured ③`result.is_error`/error subtype 표면화 ④interrupt 오분류 교정(**error allowlist** `starts_with("error")` — `!= "success"` denylist가 정상 `interrupted`를 실패로 위장). Codex 적출: fixtures git 스테이징 필수(`include_str!` 의존).
+- **결과:** core lib 171 + 통합 12 green(decoder 테스트 다수 — fixture 파싱·부분라인/UTF-8 경계 split·resync·malformed·is_error/interrupt 순서). `/qa standard` 전 게이트 PASS(build · protocol 39 · daemon 80 · discovery 44 · 격리 · fmt · tsc · vitest 194).
+- **다음:** 모듈3 = B4 `Ring<StoredOutput>` + B5 `OutputPayload`/`OutputSink` — ★동시성-치명(ADR-0006 락), **신선 컨텍스트 권장**(`/review code deep` · `/qa full`).
+
 ### JSON 렌더 M2 — 실스트림 E2E 완주(스폰→RichSlot 렌더→왕복) + 리뷰 FIX + --verbose 실측 확정 (2026-07-02, master, fable)
 - **M2 코더(opus):** wire `CreateProfile.output_format`(serde default) → 데몬 → 프로필 → spawn 관통 · `LiveRichSlot`(TerminalSlot 규율 미러: [agentId,epoch]·reset-before-subscribe·seq dedup·token unsubscribe) · **`StreamAccumulator`**(바이트→라인 재조립 TextDecoder streaming, message.id 병합) · ViewLayoutRenderer caps 분기 · 입력박스(Enter/Shift+Enter) · `window.__richslot.spawnJson()`. **병합 실측: 반복 assistant 라인 = 누적 스냅샷 아니라 id-키 분리 블록**(fixture 증거로 테스트 고정).
 - **/review code full(opus doc-aware + Codex blind) → 양쪽 FIX:** 교차 적출 = **caps 늦도착 스왑 시 초반 스트림 유실**(replay는 배정 델타에만 옴, ADR-0041 — 컴포넌트 스왑은 재트리거 안 함). 채택 (a)안: AgentInfo 미도착이면 "에이전트 연결 중…" 플레이스홀더 → 첫 실 렌더러가 replay 온전 수령(거부: 강제 re-replay=소유권 침범 / assign 게이트=결합). + IME 한글 Enter 오발사 가드(keyCode 229) · id 병합 멱등화 · 버퍼 4MB 상한 · trim · 테스트 8건 추가(CRLF·중복재방출·오버플로·부분 멀티바이트 reset). "스트리밍 중 전송"은 결함 아님 — **의도**(방식 A 중간 개입) 주석 박음. 게이트: tsc·vitest 164 그린.
