@@ -53,9 +53,9 @@ npm test                                    # 6) 프론트 테스트 (vitest run
 ### full — standard + GUI 실측 (cdp)
 
 standard 게이트를 전부 PASS시킨 뒤, 실제 앱을 띄워 화면 동작을 확인한다(**Windows 전용** — WebView2 CDP, 포트 9223 고정):
-```bash
-# 1) 디버그 포트 열고 앱 실행 (백그라운드)
-WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev
+```powershell
+# 1) 디버그 포트 열고 앱 실행 (백그라운드) — PowerShell (bash면: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev)
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9223"; npm run tauri dev
 # 2) 포트 뜰 때까지 대기
 curl http://127.0.0.1:9223/json/version
 # 3) 실측
@@ -66,7 +66,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - 포트 9223 고정(9222=Gemini Chrome 충돌 회피, `CDP_PORT`로 변경).
 - **검증엔 스샷보다 `eval` 텍스트가 토큰·정확도 유리**(픽셀 해석 회피) — DOM 텍스트·`window.__TAURI__.core.invoke(...)` 결과를 직접 확인. shot은 레이아웃·시각 확인이 필요할 때만.
 - 변경이 닿은 동작을 실제로 한 번 통과시켜 본다(예: spawn → 출력 도착 → kill → 상태 전이). **이게 통과해야 동작 확인 = 완료**.
-- 로그가 필요하면 `RUST_LOG=debug`(기본 OFF=warn)로 앱을 띄운다.
+- 로그가 필요하면 `$env:RUST_LOG = "debug"`(기본 OFF=warn — bash면 `RUST_LOG=debug` 접두)로 앱을 띄운다.
 - **비-Windows에선 cdp 불가** → standard까지가 한계 + "동작 미확인" 정직 보고(골격 §4).
 
 ## 실패 보고 시 게이트 명칭 (골격 §3에 주입)

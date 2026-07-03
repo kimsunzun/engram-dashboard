@@ -5,7 +5,7 @@
 | 날짜 | 발견 | 상태 |
 |---|---|---|
 | 2026-07-03 | **검증 상태** (SKILL.md ⚠️절에서 이동 — 방침 C). 아래 "검증 상태" 절이 정본. | 기록 (검증 상태 정본) |
-| 2026-07-03 | **바인딩 full의 CDP 실측 명령이 POSIX 형식** (`WEBVIEW2...=... npm run tauri dev` — env 인라인 대입): Windows PowerShell에선 그대로 안 돈다. cross-family 게이트 리뷰 적출(선존 — 재작성 무관). PowerShell 형식 병기 또는 POSIX 셸 전제 명시 필요. 바인딩 내용 정본 = 프로젝트 소유라 반영은 사용자 승인. | 미반영 |
+| 2026-07-03 | **바인딩 full의 CDP 실측 명령이 POSIX 형식** (`WEBVIEW2...=... npm run tauri dev` — env 인라인 대입): Windows PowerShell에선 그대로 안 돈다. cross-family 게이트 리뷰 적출(선존 — 재작성 무관). PowerShell 형식 병기 또는 POSIX 셸 전제 명시 필요. 바인딩 내용 정본 = 프로젝트 소유라 반영은 사용자 승인. | 반영 (2026-07-03 — 사용자 "쭉 개선" 지시로 PowerShell 형식 전환 + bash 병기, RUST_LOG 동일 처리) |
 
 ## 검증 상태 (2026-07-03 — SKILL.md ⚠️절에서 이동)
 
