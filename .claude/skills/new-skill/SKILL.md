@@ -5,6 +5,8 @@ description: 새 Claude Code 스킬을 제작한다 — 스킬화 가치 판단 
 
 # New Skill
 
+**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 인터뷰·설계 진행 금지.**
+
 반복되는 에이전트 작업 흐름을 **Claude Code 스킬로 체계화**하고 파일을 생성한다.
 
 핵심은 "빠르게 파일 만들기"가 아니라 **인터페이스를 설계 단계에서 명확히 도출해** 나중에 flow.md를 다시 써야 하는 재작업을 막는 것이다.
@@ -14,7 +16,7 @@ description: 새 Claude Code 스킬을 제작한다 — 스킬화 가치 판단 
 - **발견 → 설계 → 생성 순서** — 스킬화 가치를 먼저 판단하고, 인터페이스를 설계하고, 파일은 마지막에 만든다. 순서를 뒤집으면(파일 먼저, 내용 나중) flow.md가 껍데기가 된다.
 - **위치는 사용자가 결정** — `--global/--project` 미지정 시 자동 추정하지 않는다. §1 인터뷰 결과로 추정 근거를 제시하되, 확정은 §2 브리핑에서 사용자 확인으로 한다.
 - **기존 패턴 일관성** — 현재 스킬 생태계(research/review/qa/adr)의 구조(SKILL.md + references/flow.md + 선택적 bindings)를 따른다. 발명하지 않는다.
-- **LLM 제어 가능성 체크** — 만드는 스킬이 "모든 기능은 LLM이 제어 가능해야 한다"(§5 원칙) 요구에 걸리는지 §2에서 확인한다.
+- **LLM 제어 가능성 체크** — 만드는 스킬이 "모든 기능은 LLM이 제어 가능해야 한다"는 프로젝트 원칙에 걸리는지 §2에서 확인한다.
 
 ## 스킬화 가치 기준
 
@@ -31,8 +33,6 @@ description: 새 Claude Code 스킬을 제작한다 — 스킬화 가치 판단 
 
 `/new-skill ["<스킬명>"] [--global|--project]` — 인자는 모두 옵션. 스킬명이 없으면 인터뷰로 도출한다.
 
-**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 인터뷰·설계 진행 금지.**
-
 ## 프로젝트 바인딩
 
 현재 프로젝트 스킬로 배치됨 (추후 글로벌로 이전 예정). 스킬 루트 경로가 다른 프로젝트로 복사될 때를 위해 `references/bindings/<project>.md`로 경로 바인딩 추가 가능.
@@ -42,10 +42,6 @@ description: 새 Claude Code 스킬을 제작한다 — 스킬화 가치 판단 
 - 프로젝트 스킬: `<project-root>\.claude\skills\`
 - 공용 섹션: `<project-skills>\_shared\self-improvement-feedback.md`
 
-## ⚠️ 검증 상태
-
-신규 스킬 — 한 번도 실행되지 않았다. 인터뷰 흐름·파일 구조·생성 기준은 기존 스킬 패턴 분석에서 도출했으나, 실사용 마찰(인터뷰 질문 순서, 위치 판별 브리핑 방식, 비자명성 기준 적용)은 실행 후 feedback.md로 개선한다.
-
 ## 자기개선 피드백
 
-결함·개선점은 그 자리서 고치지 말고 작업 종료 후 `feedback.md`에 누적. 전체 규약 = 프로젝트 스킬 `_shared/self-improvement-feedback.md` 참조.
+결함·개선점은 그 자리서 고치지 말고 작업 종료 후 `feedback.md`에 누적. 검증 상태(근거 강도)도 SKILL.md에 ⚠️ 절로 두지 않고 feedback.md의 "검증 상태" 항목에 기록한다. 전체 규약 = 프로젝트 스킬 `_shared/self-improvement-feedback.md` 참조.
