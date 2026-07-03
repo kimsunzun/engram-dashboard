@@ -7,6 +7,8 @@ description: 조사 수집자(주계열)가 수집·합성하고 메인이 groun
 
 조사 수집자(주계열) 팬아웃이 수집·합성하고 메인이 grounding으로 검증한 뒤, 종합·논쟁·confident-wrong 위험이 큰 산출물만 cross-family(blind) 리뷰어가 적대 리뷰해 출처 단 보고서를 만든다. 핵심은 라우팅 — 강도(light/medium/deep)로 싸게 단일 수집으로 끝낼지 vs 적대 리뷰로 검증할지를 가른다.
 
+**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 조사/리뷰 에이전트 스폰 금지.** 전체 절차·강도표·라우팅 가이드·가드레일이 거기 있다. `$ARGUMENTS` = 조사 주제(+선택적 강도). 없으면 사용자에게 묻고, 강도 미지정이면 라우팅 가이드로 추정(기본 medium).
+
 ## 핵심 설계 (불변)
 
 - **라우팅 = 핵심 산출.** 강도가 "싸게 단일 수집이냐 vs 적대 리뷰냐"를 가른다: findable-fact → light, 종합·논쟁·confident-wrong 위험 → medium+, 비가역·고위험 → deep. (정량 = `references/flow.md`)
@@ -19,8 +21,6 @@ description: 조사 수집자(주계열)가 수집·합성하고 메인이 groun
 - **BLIND — 병렬 수집 축에만.** deep에서 cross-family 병렬 수집을 켜면 두 family는 서로 결과를 안 본다(공유하면 앵커링으로 교차 효과 소멸). 적대 리뷰는 반대로 산출물을 봐야 때린다 — BLIND는 병렬 수집에만 건다.
 
 역할→모델 = 전역 사전(`I:\Engram\core\claude-global-shared\references\dictionary.md`) 참조. 불변 = 리뷰어는 주계열과 다른 family여야 confident-wrong을 가른다.
-
-**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 조사/리뷰 에이전트 스폰 금지.** 전체 절차·강도표·라우팅 가이드·가드레일이 거기 있다. `$ARGUMENTS` = 조사 주제(+선택적 강도). 없으면 사용자에게 묻고, 강도 미지정이면 라우팅 가이드로 추정(기본 medium).
 
 **설계-결정 모드:** 설계 착수 전 "OSS는 이 문제를 어떻게 풀었나 → 우리 뭐로 갈까" 서베이도 이 스킬이 한다 — 기본 조사에 제약 적합도 표 + 거부후보→ADR 거부대안을 더해 선택지로 끝낸다(`references/flow.md §7`).
 
