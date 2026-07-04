@@ -1,7 +1,7 @@
 # ADR-0007: epoch 맵교체 재구독
 
 - 상태: 확정 (S9 §18-d)
-- 관련: CLAUDE.md 핵심 불변식·프론트 통합 규칙 · `output_core.rs(epoch)` · `TerminalSlot.tsx`
+- 관련: CLAUDE.md 핵심 불변식·프론트 통합 규칙 · `output_core.rs(epoch)` · `TerminalSlot.tsx` · Amended by ADR-0046 (프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — [agentId, epoch] 재구독 원칙은 유지)
 
 ## 맥락
 restart/fresh fallback 시 **같은 AgentId로 세션 맵을 교체**한다. 프론트가 옛 구독을 유지하면 새 세션 출력을 못 받거나 옛 세션의 stale 알림을 받는다.

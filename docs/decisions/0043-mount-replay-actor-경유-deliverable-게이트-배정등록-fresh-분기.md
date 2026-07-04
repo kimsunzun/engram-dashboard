@@ -1,7 +1,7 @@
 # ADR-0043: mount-replay = actor 경유 + deliverable 게이트 + 배정·등록 fresh 분기
 
 - 상태: 확정 (2026-07-01, 근거: S14 모듈① 5차 cross-family 리뷰 BLOCK + 재검증 + cdp 실측)
-- 관련: ADR-0040 · ADR-0006 · ADR-0007 · ADR-0042 · crates/engram-dashboard-core/src/output_view_store.rs · src-tauri/src/daemon_client/connection.rs · src-tauri/src/output_channel.rs · step-log S14
+- 관련: ADR-0040 · ADR-0006 · ADR-0007 · ADR-0042 · crates/engram-dashboard-core/src/output_view_store.rs · src-tauri/src/daemon_client/connection.rs · src-tauri/src/output_channel.rs · step-log S14 · Amended by ADR-0046 (deliverable gate·미러 cursor 메커니즘 조항: 폐기 → 뷰 buffering phase + gen 펜스로 대체 — mount-replay 원칙 자체는 전량 재replay로 승계)
 
 ## 맥락
 새 창/슬롯이 agent를 보기 시작할 때 그 시점 버퍼를 **즉시 replay**해야 한다(수용기준 5 — 조용한 agent·재연결 대기 창도 빈 화면 0; on_frame fan-out만 기다리면 다음 출력까지 빈 화면). 이 mount-replay를 어디서·어떻게 하나. 그리고 출력 평면의 핵심 불변식 **"전달 성공한 slot의 cursor만 전진한다"(cursor advance ⟺ Channel delivery)** 를 모든 진입점에서 지켜야 한다 — core는 Tauri registry(Channel 등록 여부)를 모르므로(ADR-0012) src-tauri가 "현재 등록된 창 집합"(deliverable)을 주입한다.

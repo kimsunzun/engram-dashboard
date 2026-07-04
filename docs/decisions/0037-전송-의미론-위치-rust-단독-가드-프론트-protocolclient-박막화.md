@@ -1,7 +1,7 @@
 # ADR-0037: 전송 의미론 위치 — Rust 단독 가드, 프론트 ProtocolClient 박막화
 
 - 상태: 확정 (2026-06-27, 근거: S14 모듈① spike D1 사용자 결정 — A안)
-- 관련: Amends ADR-0020 (결정3: 프로토콜 의미론 위치 — JS ProtocolClient → Rust(DaemonClient/protocol_state)) · ADR-0036(전송 중계 통일 — 이 ADR이 그 가드 위치를 확정) · ADR-0011(agentClient 제어표면 — 인터페이스 불변) · ADR-0029(daemon-only, embedded carrier 제거) · CLAUDE.md §5 · spike `docs/process/S14-multi-page-layout/module1-transport-spike.md` §5(D1)
+- 관련: Amends ADR-0020 (결정3: 프로토콜 의미론 위치 — JS ProtocolClient → Rust(DaemonClient/protocol_state)) · ADR-0036(전송 중계 통일 — 이 ADR이 그 가드 위치를 확정) · ADR-0011(agentClient 제어표면 — 인터페이스 불변) · ADR-0029(daemon-only, embedded carrier 제거) · CLAUDE.md §5 · spike `docs/process/S14-multi-page-layout/module1-transport-spike.md` §5(D1) · Amended by ADR-0046 (seq dedup/진도 거처 조항: Rust 단독 → 웹뷰 뷰 단위 lastDeliveredSeq — epoch 1차 필터는 Rust 존속)
 
 ## 맥락
 ADR-0036이 전송 중계를 src-tauri 단일 데몬 클라이언트(+`OutputRouter`)로 통일하기로 했으나, **프로토콜 의미론(dedup/epoch/seq 가드 등)을 어디서 돌릴지**는 미결로 남겼다(spike D1). ADR-0020 결정3은 이 의미론을 carrier-무관 JS `ProtocolClient` "한 곳"에 모았는데, 그 뒤 ADR-0029(daemon-only)로 embedded carrier가 사라지고 ADR-0036으로 **단일 Rust 연결이 창 N개로 fan-out**하는 구조가 됐다. 이 구조에서 의미론을 JS에 남기면 가드가 창마다 N회 돌거나(라우팅 후) 의미론이 두 곳에 중복된다 → ADR-0036의 "단일 연결·1회 처리" 이점이 사라진다. 그래서 가드 위치를 못 박아야 한다.

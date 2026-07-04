@@ -1,6 +1,6 @@
 # ADR-0040: 출력 관리 단위 = View 독립 (중계 허브 공유 버퍼 + per-view 인덱스)
 
-- 상태: 확정 (2026-06-30, 근거: medium 리서치 cross-family 수렴 + `/review prd full` FIX 반영 + 사용자 결정)
+- 상태: **폐기 (Superseded by ADR-0046)** — 미러 유지의 정당화("메모리 중복 ~2MB라 실익 작음")가 실증 반박됨: 실제 비용은 메모리가 아니라 미러↔데몬↔화면 동기화 복잡도였고, 이 지점에서 버그 3건(ca3f325·23a8c47·다중 slot 공유 유실)이 연속 발생. "환경별 분기 후속 흡수" 유보 조항도 이행되지 않아 PC 미러 제거로 전환(사용자 결정 2026-07-05). 단 "진도는 뷰 단위 독립" 원칙·데몬 단일 무손실 스트림·"처음부터=보관 하한" 의미는 ADR-0046이 승계. ~~확정 (2026-06-30, 근거: medium 리서치 cross-family 수렴 + `/review prd full` FIX 반영 + 사용자 결정)~~
 - 관련: ADR-0035(레이아웃 권위=src-tauri 클라)·ADR-0036(전송 중계 통일)·ADR-0037(전송 의미론 Rust 단독)·ADR-0007(epoch 재구독)·ADR-0029(데몬=데이터 단일소유, 별도 프로세스) · PRD `docs/process/S14-multi-page-layout/output-view-buffer-prd.md` · 리서치 `.claude/skills/research/study-notes/20260630-multiview-relay-2layer-medium.md` · step-log S14
 
 ## 맥락
