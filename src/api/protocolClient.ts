@@ -45,6 +45,17 @@ interface SubState {
    * 새 SubState 가 들어온 뒤 늦게 온 옛 unsubscribe 가 산 구독을 지우는 걸 막는다.
    */
   token: number
+  /**
+   * ★ready 게이트(FIX-2 — early set 의 seq 순서 보존)★: subs.set 은 `await ensureReady()` *이전*에
+   * 동기 실행(StrictMode 이중구독 레이스 차단)하지만, 그러면 st 가 ensureReady 대기 중에도 subs 에
+   * 올라 있어 handleOutput 이 라이브 프레임을 st.onChunk 로 **직접 배달**해 lastDeliveredSeq 를 조기
+   * 전진시킨다 → 그 뒤 flush 가 버퍼의 더 낮은 seq 프레임을 dedup(seq<=lastDeliveredSeq)으로 drop
+   * → 리로드 replay 순서 꼬임/유실. 이를 구조로 막는다: ready=false 인 동안 handleOutput 은 직접
+   * 배달 대신 pendingBuffers 로 보내고(버퍼 경유 유지), flush 직전 ready=true 로 전환한다 —
+   * 그러면 ready 전 도착 프레임은 전부 버퍼에 모여 flush 에서 seq 오름차순으로 배달되고, ready 후
+   * 프레임만 직접 배달돼 순서가 보존된다. 타이밍(ensureReady 지연/즉시)에 의존하지 않는다(ADR-0038).
+   */
+  ready: boolean
 }
 
 interface Pending {
@@ -192,10 +203,14 @@ export class ProtocolClient implements AgentClient {
     bytes: Uint8Array
   }): void {
     const st = this.subs.get(f.agentId)
-    if (!st) {
-      // ★구독자 없음 = 보류(ADR-0043 deliverable 게이트의 프론트 등가)★: 리로드 시 창 Channel 재등록으로
-      //   온 replay 프레임이 React 슬롯 마운트(subscribeOutput)보다 먼저 도착한 경우다. 그냥 버리면 그 창
-      //   슬롯이 빈 화면이 되므로(옛 결함), 첫 구독자가 붙을 때까지 버퍼에 담는다. epoch 인지 + bound.
+    if (!st || !st.ready) {
+      // ★구독자 없음 OR 아직 ready 아님 = 보류(ADR-0043 deliverable 게이트의 프론트 등가)★:
+      //   - st 없음: 리로드 시 창 Channel 재등록 replay 프레임이 React 슬롯 마운트(subscribeOutput)보다
+      //     먼저 도착. 버리면 그 창 슬롯이 빈 화면(옛 결함) → 첫 구독자가 붙을 때까지 버퍼.
+      //   - st 있으나 ready=false(FIX-2): subs.set 은 await 이전에 동기 실행되므로, ensureReady 대기 중
+      //     도착한 프레임을 여기서 st.onChunk 로 직접 배달하면 lastDeliveredSeq 가 조기 전진해 뒤이은
+      //     flush 가 버퍼의 더 낮은 seq 를 dedup drop 한다(순서 꼬임). ready 전에는 직접 배달 대신
+      //     버퍼로 보내 flush 가 seq 순서를 통합 정렬하게 한다 — 타이밍 무관 순서 보존(ADR-0038).
       this.bufferPending(f)
       return
     }
@@ -413,35 +428,70 @@ export class ProtocolClient implements AgentClient {
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
   ): Promise<OutputSubscription> {
-    await this.transport.ensureReady()
     // 같은 agentId 재구독 시 이전 상태는 덮는다(컴포넌트가 epoch 바뀌면 재구독).
     // epoch=undefined(Ack 전), lastDeliveredSeq=-1(아무것도 배달 안 함).
-    // token 은 이 구독의 고유 번호표 — 아래 unsubscribe 가 stale 여부를 이걸로 판별한다.
+    // token 은 이 구독의 고유 번호표 — 아래 unsubscribe 와 flush 가드가 stale 여부를 이걸로 판별한다.
     const token = ++this.subSeq
-    const st: SubState = { onChunk, epoch: undefined, lastDeliveredSeq: -1, token }
+    // ready=false 로 시작(FIX-2): ensureReady 대기 중 도착 프레임은 직접 배달 대신 버퍼 경유(handleOutput
+    //   의 !st.ready 분기). flush 직전에 ready=true 로 올린다.
+    const st: SubState = { onChunk, epoch: undefined, lastDeliveredSeq: -1, token, ready: false }
+    // ★subs.set 을 await *이전* 에 동기 실행(StrictMode 이중구독 레이스 차단)★: 이 함수는 async 라
+    //   `await ensureReady()` 지점에서 microtask yield 한다. React StrictMode(dev 이중 마운트)는
+    //   같은 [agentId,epoch] effect 를 급속 2회 돌려 subscribeOutput 을 2번 부른다 — 두 호출이 await
+    //   에서 갈라진 뒤 각자 subs.set 하면 나중 호출(st2)이 먼저 호출(st1)을 맵에서 교체한다. set 을
+    //   await 이전으로 끌어 올리면 두 호출의 set 이 갈라지기 전 동기 순차 실행돼, await 재개 시점엔
+    //   subs 엔트리가 이미 최종 생존 구독자(st2)로 확정돼 있다. 이 순서가 아래 flush 가드의 전제다.
     this.subs.set(agentId, st)
-    // ★pre-subscribe 버퍼 flush(ADR-0043 프론트 등가)★: 구독 전 도착해 보류된 프레임을 이 첫 구독자에게
+    // ★ensureReady 실패 시 좀비 구독 롤백(FIX-1)★: set 을 await 앞으로 옮긴 탓에, ensureReady 가
+    //   reject/hang 하면 st 가 subs 에 잔존해 이후 프레임이 죽은 구독으로 샌다(옛 순서(ready 후 set)엔
+    //   실패 시 미등록이라 없던 회귀). 실패 시 **자기 등록만** 롤백 후 rethrow 한다. token 가드로 감싸
+    //   이미 교체된 뒤(다른 구독이 subs 를 차지)엔 안 지운다(정상 재구독 보호 — stale-unsubscribe 가드와
+    //   동일 기전). 롤백으로 pendingBuffers 는 남긴다(다음 재구독이 이어받아 flush).
+    try {
+      await this.transport.ensureReady()
+    } catch (e) {
+      if (this.subs.get(agentId)?.token === token) this.subs.delete(agentId)
+      throw e
+    }
+    // ★pre-subscribe 버퍼 flush(ADR-0043 프론트 등가)★: 구독 전 도착해 보류된 프레임을 이 구독자에게
     //   seq 순서대로 배달한다 — 라이브 프레임보다 *먼저*(리로드 replay 를 놓치지 않게). handleOutput 과 같은
     //   dedup 규율(seq<=lastDeliveredSeq drop)을 적용하고 high-water 를 전진시켜, flush 뒤 도착하는 라이브
     //   프레임과 이음매 없이 이어진다. flush 후 버퍼는 제거(1회성 — 재구독은 새로 채워짐).
-    const buf = this.pendingBuffers.get(agentId)
-    if (buf) {
-      this.pendingBuffers.delete(agentId)
-      // ★epoch 조기 확정 금지(ADR-0007)★: 버퍼 epoch 를 st.epoch 로 심지 않는다 — epoch 권위는
-      //   SubscribeAck(데몬) 단독이다. 버퍼는 관측치일 뿐이라, 멀티 재시작+리로드 창에서 데몬 권위와
-      //   어긋나면(SubscribeAck 이 다른 epoch) high-water 리셋이 이미 렌더한 프레임과 어긋난다. st.epoch
-      //   는 undefined(= "아직 모름")로 두고, 첫 SubscribeAck 이 권위적으로 확정하게 한다. flush 중
-      //   epoch 가드(st.epoch undefined)는 자연 통과.
-      // ★seq 오름차순 정렬 후 flush(out-of-order 방어)★: 프레임은 도착 순으로 버퍼링되나, 도착 순서가
-      //   seq 순서와 다를 수 있다(예: [2,0,1]). 배열 순서대로 flush 하면 2 를 배달해 high-water 를 2 로
-      //   올린 뒤 0,1 이 dedup(seq<=high-water)으로 탈락한다. seq 오름차순으로 정렬해 이를 막는다.
-      //   같은 seq 는 dedup(seq<=lastDeliveredSeq)이 자연 제거한다.
-      const ordered = [...buf.frames].sort((a, b) => a.seq - b.seq)
-      for (const frame of ordered) {
-        if (frame.seq <= st.lastDeliveredSeq) continue
-        st.lastDeliveredSeq = frame.seq
-        // handleOutput 과 동일하게 tag 를 실어 배달 — flush 프레임도 소비자가 렌더 경로를 가른다.
-        st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
+    //
+    // ★생존 구독자만 flush(StrictMode 이중구독 버퍼 유실 차단 — 근본원인)★: pre-subscribe 버퍼는
+    //   **1회성**(flush 시 delete)이다. StrictMode 로 subscribeOutput 이 2회 불리면 두 호출이 await 를
+    //   함께 통과한 뒤 재개하는데, 먼저 재개한 호출(곧 폐기될 첫 컴포넌트 인스턴스의 st1)이 flush 하면
+    //   버퍼가 소진·삭제돼 나중 재개한 생존 구독자(st2)는 빈 화면이 된다(실측: enter#1/#2 bufFrames:15 →
+    //   done#1 delivered:15 → done#2 delivered:0). subs 엔트리가 내 token 일 때(= 내가 최종 생존
+    //   구독자)만 flush 하고, 교체된 옛 st 는 skip 해 버퍼를 보존한다 — 그러면 생존 구독자의 재개에서
+    //   flush 가 실행돼 버퍼가 올바른 인스턴스로 배달된다. token 가드는 unsubscribe 의 stale 가드와 동일
+    //   기전(현재 subs 엔트리 == 내 token). 단발 구독은 항상 자기 token 이라 무해 통과.
+    if (this.subs.get(agentId)?.token === token) {
+      // ★ready 게이트 개방(FIX-2)★: 이 시점부터 이 st 는 라이브 프레임을 직접 배달받는다. 버퍼 flush
+      //   *직전*에 올린다 — flush 루프는 동기 실행이라 재진입이 없고, flush 로 lastDeliveredSeq 가 버퍼
+      //   최고 seq 로 전진한 뒤 도착하는 라이브 프레임이 dedup 규율로 이음매 없이 이어진다. ready 전
+      //   도착분은 전부 pendingBuffers 에 모여 아래 정렬 flush 가 seq 순서를 통합 보장한다.
+      //   교체된 옛 st(token 불일치)는 ready=false 로 남아 직접 배달되지 않는다(곧 폐기 — 유령 배달 차단).
+      st.ready = true
+      const buf = this.pendingBuffers.get(agentId)
+      if (buf) {
+        this.pendingBuffers.delete(agentId)
+        // ★epoch 조기 확정 금지(ADR-0007)★: 버퍼 epoch 를 st.epoch 로 심지 않는다 — epoch 권위는
+        //   SubscribeAck(데몬) 단독이다. 버퍼는 관측치일 뿐이라, 멀티 재시작+리로드 창에서 데몬 권위와
+        //   어긋나면(SubscribeAck 이 다른 epoch) high-water 리셋이 이미 렌더한 프레임과 어긋난다. st.epoch
+        //   는 undefined(= "아직 모름")로 두고, 첫 SubscribeAck 이 권위적으로 확정하게 한다. flush 중
+        //   epoch 가드(st.epoch undefined)는 자연 통과.
+        // ★seq 오름차순 정렬 후 flush(out-of-order 방어)★: 프레임은 도착 순으로 버퍼링되나, 도착 순서가
+        //   seq 순서와 다를 수 있다(예: [2,0,1]). 배열 순서대로 flush 하면 2 를 배달해 high-water 를 2 로
+        //   올린 뒤 0,1 이 dedup(seq<=high-water)으로 탈락한다. seq 오름차순으로 정렬해 이를 막는다.
+        //   같은 seq 는 dedup(seq<=lastDeliveredSeq)이 자연 제거한다.
+        const ordered = [...buf.frames].sort((a, b) => a.seq - b.seq)
+        for (const frame of ordered) {
+          if (frame.seq <= st.lastDeliveredSeq) continue
+          st.lastDeliveredSeq = frame.seq
+          // handleOutput 과 동일하게 tag 를 실어 배달 — flush 프레임도 소비자가 렌더 경로를 가른다.
+          st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
+        }
       }
     }
     // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는

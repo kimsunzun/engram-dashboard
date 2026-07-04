@@ -23,6 +23,11 @@ class MockTransport implements Transport {
   ensureReadyCalls = 0
   startCalls = 0
   closed = false
+  /**
+   * ensureReady 오버라이드 훅(FIX-1/FIX-2 테스트용). null 이면 즉시 resolve(기본).
+   * 함수를 심으면 그 반환 Promise 를 ensureReady 가 그대로 반환한다 — 지연 resolve / reject 재현.
+   */
+  ensureReadyImpl: (() => Promise<void>) | null = null
 
   constructor(initial: ConnectionState = 'connected') {
     this._state = initial
@@ -47,6 +52,7 @@ class MockTransport implements Transport {
   }
   ensureReady(): Promise<void> {
     this.ensureReadyCalls += 1
+    if (this.ensureReadyImpl) return this.ensureReadyImpl()
     return Promise.resolve()
   }
   start(): Promise<void> {
@@ -641,6 +647,150 @@ describe('pre-subscribe 버퍼(ADR-0043 deliverable 게이트 프론트 등가)'
     const got2: number[] = []
     await c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
     expect(got2).toEqual([1, 2])
+  })
+
+  // ── 근본원인 회귀: StrictMode(dev 이중 마운트) 급속 이중 구독 → 생존 구독자가 버퍼를 받는다 ──
+  //    RichSlot/TerminalSlot effect(deps [agentId,epoch])가 async subscribeOutput 을 StrictMode 로 2회
+  //    부르면, 두 호출이 `await ensureReady()` 에서 갈라진 뒤 재개한다. pre-subscribe 버퍼는 1회성(flush
+  //    시 delete)이라, 옛 버그는 먼저 재개한 호출(곧 폐기될 첫 인스턴스 st1)이 버퍼를 소진·삭제 → 생존
+  //    구독자(st2)가 빈 화면이 됐다(실측: done#1 delivered:15 → done#2 delivered:0 → 리로드 후 복원 실패).
+  //    수정: subs.set 을 await 이전으로 끌어올려 최종 생존 구독자를 확정하고, flush 를 token 가드로 막아
+  //    교체된 옛 st 는 skip → 버퍼를 생존 구독자에게 배달한다. tag 무관(tag0 터미널·tag1 JSON 공통).
+  it('StrictMode 이중 subscribeOutput → 나중(생존) 구독자가 pre-subscribe 버퍼를 받는다(먼저 호출은 소진 안 함)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 구독 전 replay 프레임 도착(리로드 시 Channel 재등록이 마운트보다 먼저 온 상황) — tag0/tag1 혼재.
+    t.output(AGENT, 1, 0, new Uint8Array([0]), 0)
+    t.output(AGENT, 1, 1, new Uint8Array([1]), 1)
+    t.output(AGENT, 1, 2, new Uint8Array([2]), 0)
+
+    // ★핵심 재현★: StrictMode 이중 마운트 = 같은 effect 가 subscribeOutput 을 await 없이 급속 2회 호출.
+    //   두 Promise 를 동시에 시작(각자 ensureReady await 에서 yield)한 뒤 함께 기다린다. 나중 호출(st2)이
+    //   생존 구독자(StrictMode 가 유지하는 두 번째 컴포넌트 인스턴스), 먼저 호출(st1)은 곧 폐기된다.
+    const got1: number[] = []
+    const got2: number[] = []
+    const p1 = c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
+    const p2 = c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
+    await Promise.all([p1, p2])
+
+    // 생존 구독자(st2)가 버퍼 전량을 seq 순서로 받는다 — 이게 리로드 후 화면 복원.
+    expect(got2).toEqual([0, 1, 2])
+    // 폐기될 먼저 호출(st1)은 버퍼를 소진하지 않는다(교체됐으므로 flush skip).
+    expect(got1).toEqual([])
+
+    // 회귀 완결: flush 로 high-water 가 생존 구독자에서 전진해 이후 라이브가 이음매 없이 이어진다.
+    t.output(AGENT, 1, 2, new Uint8Array([2]), 0) // dedup(<=high-water)
+    t.output(AGENT, 1, 3, new Uint8Array([3]), 1) // 신규 → 배달
+    expect(got2).toEqual([0, 1, 2, 3])
+  })
+})
+
+// ── FIX-1(좀비 롤백) / FIX-2(early set 의 seq 순서 보존) — delayed/rejected ensureReady ──────
+//    subs.set 을 `await ensureReady()` *이전*으로 옮긴 뒤 생긴 두 회귀를 박제한다:
+//      · FIX-1: ensureReady reject → st 가 subs 에 잔존(좀비)해 이후 프레임이 죽은 구독으로 샘.
+//      · FIX-2: ensureReady 대기 중 도착 프레임이 st 로 직접 배달돼 lastDeliveredSeq 조기 전진 →
+//               flush 가 버퍼의 더 낮은 seq 를 dedup drop(순서 꼬임/유실).
+describe('delayed/rejected ensureReady (FIX-1 좀비 롤백 · FIX-2 seq 순서 보존)', () => {
+  it('FIX-1: ensureReady reject → subs 에 좀비 안 남음(이후 프레임이 죽은 구독으로 새지 않음)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    t.ensureReadyImpl = () => Promise.reject(new Error('daemon down'))
+    const got: number[] = []
+    // subscribeOutput 은 ensureReady reject 를 rethrow 해야(호출자가 실패를 인지).
+    await expect(c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))).rejects.toThrow(
+      'daemon down',
+    )
+    // 좀비 st 가 남았다면 이 프레임이 죽은 콜백으로 배달된다 — 롤백됐으면 pre-subscribe 버퍼로 감(got 빈 채).
+    t.output(AGENT, 1, 0)
+    expect(got).toEqual([])
+  })
+
+  it('FIX-1: reject 후 재구독(성공) → 새 구독이 정상 동작(롤백이 정상 재구독 막지 않음)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    t.ensureReadyImpl = () => Promise.reject(new Error('daemon down'))
+    await expect(c.subscribeOutput(AGENT, () => {})).rejects.toThrow('daemon down')
+    // 데몬 복구 — 재구독 성공.
+    t.ensureReadyImpl = null
+    const got: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    expect(got).toEqual([0, 1])
+  })
+
+  it('FIX-2: ensureReady 지연 중 도착 프레임 → 직접 배달 안 하고 버퍼 경유 → flush 가 seq 순서로 배달', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // ensureReady 를 수동 resolve 로 지연 — 그 사이 프레임을 주입해 "대기 중 직접 배달" 레이스를 재현.
+    let release!: () => void
+    t.ensureReadyImpl = () => new Promise<void>((r) => (release = r))
+    const got: number[] = []
+    const p = c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
+    // await 대기 중(subs.set 은 이미 됨). 프레임이 seq 순서와 다르게(2,0,1) 도착 — 옛 버그면 seq 2 가
+    //   직접 배달돼 high-water=2 → flush 시 0,1 이 dedup drop 된다. FIX-2 는 ready=false 라 전부 버퍼로.
+    t.output(AGENT, 1, 2)
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    expect(got).toEqual([]) // 아직 아무것도 직접 배달되지 않아야(ready=false)
+    release() // ensureReady resolve → flush
+    await p
+    // 버퍼가 seq 오름차순으로 통합 flush — 전부 배달, 순서 보존.
+    expect(got).toEqual([0, 1, 2])
+    // flush 후 ready=true → 라이브가 이음매 없이 직접 배달.
+    t.output(AGENT, 1, 3)
+    expect(got).toEqual([0, 1, 2, 3])
+  })
+
+  it('FIX-2: 지연 중 라이브 프레임(seq 0,1) 도착 → 조기 전진 없이 순서대로 배달(직접배달 조기전진 방지)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    let release!: () => void
+    t.ensureReadyImpl = () => new Promise<void>((r) => (release = r))
+    const got: number[] = []
+    const p = c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
+    t.output(AGENT, 1, 0) // 대기 중 도착 — 버퍼로
+    t.output(AGENT, 1, 1)
+    expect(got).toEqual([])
+    release()
+    await p
+    expect(got).toEqual([0, 1]) // flush 로 순서대로
+  })
+})
+
+// ── StrictMode 이중구독 + interleaving(프레임이 set 과 flush 사이 도착) — 종합 회귀 ──────────
+//    dev StrictMode 는 subscribeOutput 을 await 없이 2회 부른다. 두 호출이 ensureReady 지연으로
+//    대기 중일 때 프레임이 도착하면, early set + ready 게이트가 함께 (생존 구독자 확정 + 직접배달
+//    조기전진 차단)을 만족해야 한다.
+describe('StrictMode 이중구독 + interleaving (early set × ready 게이트 종합)', () => {
+  it('두 구독이 ensureReady 대기 중 프레임 도착(out-of-order) → 생존(나중) 구독자가 seq 순서로 전량 수신', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 두 호출이 각자 ensureReady Promise 를 만든다(호출마다 ensureReadyImpl 재실행) — releaser 를 모아
+    //   한꺼번에 resolve 해 StrictMode 두 호출을 동시 재개시킨다(실제 single-flight 여부와 무관하게
+    //   ready 게이트 + early set 조합이 순서를 보장하는지 검증).
+    const releasers: Array<() => void> = []
+    t.ensureReadyImpl = () => new Promise<void>((r) => releasers.push(r))
+    const got1: number[] = []
+    const got2: number[] = []
+    // StrictMode: await 없이 급속 2회 호출. subs.set 은 동기 실행돼 st2 가 최종 생존 구독자로 확정.
+    const p1 = c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
+    const p2 = c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
+    // set 과 flush 사이(둘 다 ready=false) 프레임이 out-of-order 로 도착 → 전부 버퍼로.
+    t.output(AGENT, 1, 2)
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    expect(got1).toEqual([])
+    expect(got2).toEqual([])
+    for (const r of releasers) r()
+    await Promise.all([p1, p2])
+    // 생존 구독자(st2)가 seq 순서로 전량 수신, 폐기될 st1 은 flush skip(token 불일치) + ready=false.
+    expect(got2).toEqual([0, 1, 2])
+    expect(got1).toEqual([])
+    // 이후 라이브도 생존 구독자에게만 직접 배달(st1 은 ready=false 라 배달 안 됨).
+    t.output(AGENT, 1, 3)
+    expect(got2).toEqual([0, 1, 2, 3])
+    expect(got1).toEqual([])
   })
 })
 
