@@ -446,6 +446,21 @@ export class TauriTransport implements Transport {
     })
   }
 
+  // ── slot (re)mount fresh replay 재요청(remount 대화 소실 FIX) ──────────────────
+  // RichSlot/TerminalSlot 이 (re)mount 하면 ProtocolClient.subscribeOutput 이 부른다. 그 창이 보는
+  // 그 agent 의 slot 에 fresh replay(cursor 리셋 + 버퍼 전체 재전송)를 src-tauri 로컬 축 B replay 로
+  // 트리거한다(BLOCK-1: 데몬 wire Subscribe 를 새로 만들지 않는다 — resync_output 은 replay_slots →
+  // ReplaySlots actor arm 만 쓴다). window_label 은 Rust 가 호출 webview 에서 자동 주입(위조 불가).
+  //
+  // ★fire-and-forget★: 반환을 기다리지 않는다(replay 는 출력 Channel 로 별도 도착). 미연결·직전 kill
+  //   등으로 invoke 가 실패해도 흡수한다 — 정상 mount 는 배정 트리거가 replay 를 이미 냈고, 재요청 유실은
+  //   다음 mount/reload/재연결 reconcile 이 따라잡는다.
+  resyncOutput(agentId: string): void {
+    void invoke('resync_output', { agentId }).catch((e: unknown) => {
+      console.warn('[TauriTransport] resync_output 실패:', e)
+    })
+  }
+
   // ★세대 가드(Fix-C ①)★: generation++ 으로 in-flight doConnect 를 stale 화한다 — 뒤늦게 resolve 된
   //   doConnect 가 출력 Channel 을 등록하거나 connectPromise 를 건드리지 못하게 한다. connectPromise=null
   //   로 비워 다음 ensureReady/start 가 새 연결을 시작하게 한다(closedByUser 가 막지만 start 가 리셋).

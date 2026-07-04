@@ -165,6 +165,66 @@ pub fn subscribe_output(
     Ok(())
 }
 
+/// ★slot (re)mount 시 fresh replay 재요청(remount 대화 소실 FIX)★. RichSlot/TerminalSlot 이 (re)mount
+/// 되면 프론트 구독 effect 가 `invoke('resync_output', { agentId })` 로 호출한다 — 그 창(label)이 보는
+/// 그 agent 의 slot 에 **fresh replay**(cursor 리셋 + 버퍼 전체 재전송)를 트리거한다.
+///
+/// ## ★왜 필요한가(근본원인)★
+/// idle tag1(JSON) slot 을 split/재배정하면 Allotment 재귀 트리 구조 변경으로 RichSlot 이 **remount**
+/// 되는데, remount 는 웹뷰 출력 Channel 재등록이 *아니라서*(`subscribe_output` 은 창 mount 시 1회) 데몬/
+/// backend 가 replay 를 재전송하지 않는다 → remount 된 컴포넌트가 seq=-1·빈 messages 로 재시작하나 replay
+/// 가 안 와 대화 소실 + 영구 streaming 고착. 웹뷰 reload 는 Channel 재등록으로 fresh replay 가 흘러 복원되므로,
+/// 이 command 가 그 reload 복원 경로(`slots_for_window` → `replay_slots(fresh=true)` → `resubscribe_slot`)를
+/// **slot (re)mount 시점에 slot 단위로 재사용**한다.
+///
+/// ## ★subscribe_output 과의 차이★
+/// - `subscribe_output`: 창 mount 시 Channel *등록* + 그 창의 **모든** slot replay.
+/// - `resync_output`: Channel 은 이미 등록됨(재등록 안 함) — 특정 **agent 의** slot 만 fresh replay.
+///
+/// ## ★BLOCK-1(ADR-0041) 준수 + `DaemonClient::resync()` 와 혼동 금지(FIX-E)★
+/// 데몬 wire `Subscribe` 를 새로 만들지 않는다 — 여기서 부르는 것은 `client.replay_slots`(src-tauri 로컬 축 B
+/// replay — 연결 actor `ReplaySlots` arm → `resubscribe_slot`)이지, 이름이 비슷한 `DaemonClient::resync()`
+/// **가 아니다**. 후자는 connect handoff race(cmd_tx 저장 갭) 재동기용 `ConnectionCommand::Resync`(→ main_loop
+/// resubscribe_and_sweep)로, 여기 slot 단위 mount replay 와 목적·경로가 다르다(다음 세션 혼동 방지). 로컬 축 B
+/// 만 쓰므로 다중 창 replay storm 이 없고, replay→live 순서는 actor 직렬화(ADR-0043)가 보장한다. 정상 mount
+/// 에서 배정 트리거 replay 와 중복될 수 있으나 프론트 seq dedup(`lastDeliveredSeq`, ADR-0037)이 흡수한다.
+///
+/// ★window label 자동 주입★: `tauri::Window` 를 인자로 받아 호출 webview 라벨을 얻는다(위조 불가 —
+/// `subscribe_output` 동형). agent_id 만 프론트가 넘긴다.
+///
+/// ★필터 로직은 `router.slots_for_window_agent` 에 격리(테스트 가능성 — FIX-A)★: 이 command 는
+/// `tauri::Window`/`State` 결합으로 headless 회귀가 막히므로(WebView2 DLL), "그 창이 그 agent 를 보는 slot 만
+/// 고른다" 는 실제 필터 배선을 순수 메서드에 모아 두고 여기선 얇게 위임만 한다. 그 메서드의 회귀 그물 =
+/// `output_router.rs` 테스트(unknown agent no-op / window 필터 / 정상 slot 선택).
+#[tauri::command]
+pub fn resync_output(
+    router: State<'_, Arc<crate::output_router::OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
+    window: tauri::Window,
+    agent_id: String,
+) -> Result<(), String> {
+    let agent_id: AgentId = parse_uuid(&agent_id, "agent_id")?;
+    let label = window.label().to_string();
+    // ★그 창이 보는 slot 중 이 agent 만 필터★: router 는 lock-free(ArcSwap) 조회. 이 창(label)이 실제로
+    //   그 agent 를 보는 slot 만 replay 대상으로 남긴다 — 안 보는 agent 를 넘겨도 slots 가 비어 no-op.
+    let slots = router.slots_for_window_agent(&label, agent_id);
+    // ★빈 slots 진단 로그(FIX-C — 조용한 성공 구분)★: 대상 slot 이 없으면(그 창이 그 agent 를 안 봄)
+    //   replay_slots 가 no-op 이라 아무 일도 안 일어난다. 정상적으로 slot 이 없는 경우(remount 와 layout
+    //   재배정이 엇갈린 순간 등)도 있어 에러는 아니지만, 조용히 Ok(())로 삼키면 "resync 를 불렀는데 화면이
+    //   안 채워진다" 진단이 막힌다 → debug 로 남긴다(저빈도 mount 경로라 핫패스 부담 0 — logging-conventions).
+    if slots.is_empty() {
+        tracing::debug!(
+            agent = %agent_id,
+            window = %label,
+            "resync_output: 그 창이 보는 해당 agent slot 이 없어 replay 미발생(no-op)"
+        );
+    }
+    // fresh=true — Channel (재)등록/remount = viewer 재시작이라 cursor 리셋 + 전체 replay(subscribe_output
+    //   등록 트리거와 동형, 근원2). slots 비면 replay_slots 가 no-op.
+    client.replay_slots(slots, true);
+    Ok(())
+}
+
 /// ★T7c: TauriTransport.send() 진입점★. 프론트 ProtocolClient 가 AgentCommand wire 객체를
 /// JSON 으로 보내면 Rust DaemonClient 를 통해 데몬으로 전달한다.
 ///

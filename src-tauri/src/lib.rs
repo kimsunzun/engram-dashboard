@@ -191,6 +191,9 @@ pub fn run() {
             // S14 모듈①(ADR-0036) T6b: 창 mount 시 출력 Channel 등록 — window_label → Channel registry
             //   insert. 연결 task 가 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다(raw byte, §7).
             commands::subscribe_output,
+            // slot (re)mount 시 fresh replay 재요청 — RichSlot/TerminalSlot remount(Allotment 재귀
+            //   트리 구조 변경)로 대화가 소실되는 걸 막는다(reload 복원 경로를 slot 단위 재사용, BLOCK-1 준수).
+            commands::resync_output,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

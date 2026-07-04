@@ -157,6 +157,33 @@ impl OutputRouter {
         slots
     }
 
+    /// ★저빈도★ 특정 window label 이 보는 slot 중 **한 agent 만** 필터링(`slots_for_window` 의 agent-한정
+    /// 변형). slot (re)mount 시 fresh replay 재요청(`resync_output` invoke)에서, 그 창(label)이 실제로 그
+    /// agent 를 보는 slot 만 replay 대상으로 좁힐 때 쓴다.
+    ///
+    /// ## 왜 command 가 아니라 여기서 조립하나(테스트 가능성 — ADR-0012)
+    /// `resync_output` command 는 `tauri::Window`/`State` 에 묶여 headless 로 못 부른다(WebView2 DLL 링크로
+    /// src-tauri lib test 자체가 막힘 — output_view_store.rs 헤더 참조). 그래서 command 의 실제 필터 배선을
+    /// **이 순수 메서드에 모아** command 는 얇게 위임만 하고, 이 메서드를 headless 로 회귀 검증한다:
+    /// - **그 창이 그 agent 를 안 보면**(unknown agent / 다른 창에만 있음) → 빈 집합 → replay_slots no-op
+    ///   (엉뚱한 slot replay·미보임 agent 오배선 차단 — remount 시 잘못된 replay 회귀 그물).
+    /// - **본다면** → `(label, agent)` 한 쌍만(다른 agent slot 은 이 remount 와 무관 → 제외).
+    ///
+    /// ★window label 필터 = `slots_for_window` 위임★: 그 label 이 보는 slot 집합을 만든 뒤 agent 로 거른다 —
+    /// 다른 창(label)이 같은 agent 를 봐도 이 창의 replay 엔 안 섞인다(창별 Channel 격리).
+    ///
+    /// ★핫패스 아님★: slot (re)mount 시에만 호출(저빈도). 결정론 위해 정렬 반환(`slots_for_window` 동형).
+    pub fn slots_for_window_agent(
+        &self,
+        label: &str,
+        agent_id: AgentKey,
+    ) -> Vec<(WindowLabel, AgentKey)> {
+        self.slots_for_window(label)
+            .into_iter()
+            .filter(|(_, a)| *a == agent_id)
+            .collect()
+    }
+
     /// ★저빈도★ 현재 스냅샷의 모든 `(window_label, agent)` slot 쌍 집합(FIX-1 고아 sweep 의 keep 집합).
     ///
     /// connect/재연결 진입 시 store cursor 와 layout 권위(router)를 정합화하는 `sweep_orphans` 의 인자다 —
@@ -918,5 +945,119 @@ mod tests {
         // 구체값 교차검증: 최종엔 C 만 보임. A·B 는 net-해제, C 는 net-구독.
         assert_eq!(final_set, HashSet::from([c]), "최종 테이블엔 C 만");
         assert!(net.contains(&c) && !net.contains(&a) && !net.contains(&b));
+    }
+
+    // ── slots_for_window_agent: resync_output(slot remount fresh replay 재요청) 필터 배선 ──
+    //    ★왜 여기서 검증하나★: `resync_output` command 는 tauri::Window/State 결합으로 headless 실행이
+    //    막힌다(WebView2 DLL — output_view_store.rs 헤더). 그래서 command 가 조립하는 실제 필터 로직을
+    //    `slots_for_window_agent` 순수 메서드로 격리했고(command 는 얇게 위임), 아래가 그 회귀 그물이다.
+    //    이 필터가 어긋나면(엉뚱한 slot·미보임 agent 오배선) remount 시 잘못된 replay 또는 빈 replay 로
+    //    대화 소실·streaming 고착이 재발한다 — command 가 부르는 것과 동일 경로라 실배선을 검증한다.
+
+    #[test]
+    fn resync_filter_returns_only_the_agents_slot_in_that_window() {
+        // 정상 케이스(요구 3): main 창에 agent 배정 → 그 창·그 agent 의 (label, agent) 한 쌍만 반환.
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr);
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+
+        assert_eq!(
+            router.slots_for_window_agent("main", aid),
+            vec![("main".to_string(), aid)],
+            "그 창이 그 agent 를 보면 (label, agent) 한 쌍만 replay 대상"
+        );
+    }
+
+    #[test]
+    fn resync_filter_empty_for_unknown_agent_is_noop() {
+        // 요구 1: 그 창에 배정 안 된(unknown) agent 를 넘기면 빈 집합 → replay_slots no-op.
+        //   remount 와 layout 재배정이 엇갈려 그 창이 그 agent 를 더는 안 보는 순간의 오배선 차단.
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr); // main 에 aid 배정
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+
+        let (other, _) = agent(); // 라우팅 표에 없는 agent
+        assert!(
+            router.slots_for_window_agent("main", other).is_empty(),
+            "그 창이 안 보는 agent → 빈 집합(no-op)"
+        );
+        // 존재하는 agent 라도 *다른* 창 라벨로 물으면 빈 집합(그 창엔 그 agent slot 없음).
+        assert!(
+            router.slots_for_window_agent("slot-popup", aid).is_empty(),
+            "그 agent 가 안 보이는 창 라벨 → 빈 집합(no-op)"
+        );
+    }
+
+    #[test]
+    fn resync_filter_isolates_by_window_label() {
+        // ★요구 2 핵심(window label 필터)★: 같은 agent 가 main + 팝업 두 창에 보일 때, 각 창 라벨로 물으면
+        //   그 창의 slot 만 반환한다 — 한 창의 remount replay 에 다른 창 slot 이 섞이면 창별 Channel 격리가
+        //   깨져 엉뚱한 webview 로 replay 가 새거나 중복 storm 이 난다. 라벨로 정확히 갈리는지 박는다.
+        let mut mgr = ViewManager::new();
+        let v1 = mgr.active_view_id;
+        let v2 = mgr.create_view(None);
+        mgr.switch_view(v1).unwrap(); // active=v1(main)
+        mgr.window_bindings.insert("slot-popup".to_string(), v2);
+
+        let (aid, astr) = agent();
+        assign_to_active(&mut mgr, &astr); // main(v1)
+        let slot2 = {
+            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
+            crate::layout::tree::first_slot_id(&v.layout)
+        };
+        mgr.assign_agent(v2, slot2, astr.clone()).unwrap();
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        // 사전조건: 같은 agent 가 두 창에 보인다(필터 전 slots_for_window 는 라벨별로 갈림).
+        assert_eq!(
+            router.slots_for_window_agent("main", aid),
+            vec![("main".to_string(), aid)],
+            "main 라벨로 물으면 main slot 만(팝업 slot 안 섞임)"
+        );
+        assert_eq!(
+            router.slots_for_window_agent("slot-popup", aid),
+            vec![("slot-popup".to_string(), aid)],
+            "팝업 라벨로 물으면 팝업 slot 만(main slot 안 섞임)"
+        );
+    }
+
+    #[test]
+    fn resync_filter_excludes_other_agents_in_same_window() {
+        // 같은 창(main)에 두 agent 가 분할 배정돼 있어도, 한 agent 로 물으면 그 agent slot 만 반환한다
+        //   (다른 agent 는 이 remount 와 무관 → 제외). 필터의 agent 축이 실제로 좁히는지 non-vacuity 로 박음.
+        let mut mgr = ViewManager::new();
+        let view_id = mgr.active_view_id;
+        let slot = {
+            let v = mgr.views.iter().find(|v| v.id == view_id).unwrap();
+            crate::layout::tree::first_slot_id(&v.layout)
+        };
+        let slot2 = mgr.split_slot(view_id, slot, SplitDir::Horizontal).unwrap();
+        let (a1, a1s) = agent();
+        let (a2, a2s) = agent();
+        mgr.assign_agent(view_id, slot, a1s).unwrap();
+        mgr.assign_agent(view_id, slot2, a2s).unwrap();
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        // 사전조건: main 창은 두 agent 를 다 본다(필터 전엔 두 쌍).
+        assert_eq!(
+            router.slots_for_window("main").len(),
+            2,
+            "main 은 두 agent 봄"
+        );
+        // a1 로 물으면 a1 쌍만(a2 제외).
+        assert_eq!(
+            router.slots_for_window_agent("main", a1),
+            vec![("main".to_string(), a1)]
+        );
+        assert_eq!(
+            router.slots_for_window_agent("main", a2),
+            vec![("main".to_string(), a2)]
+        );
     }
 }

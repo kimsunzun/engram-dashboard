@@ -342,6 +342,12 @@ export class WsTransport implements Transport {
     ws.send(JSON.stringify(payload))
   }
 
+  // ── slot (re)mount fresh replay 재요청(remount 대화 소실 FIX) ──────────────────
+  // no-op: resync_output 은 src-tauri 로컬 축 B replay 경로(invoke → replay_slots)라 WsTransport
+  // (데몬 직결, src-tauri 없음)엔 해당 경로가 없다. 운영 carrier 는 TauriTransport 고정이고 WsTransport
+  // 는 테스트 mock 흔적이라(ADR-0020/0029) no-op 이 안전하다 — remount replay 재요청은 Tauri 에서만 배선.
+  resyncOutput(_agentId: string): void {}
+
   // ── 명시 종료(재연결 중단) ──────────────────────────────────────────────────────
   close(): void {
     this.closedByUser = true

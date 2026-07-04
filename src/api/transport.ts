@@ -81,4 +81,25 @@ export interface Transport {
 
   /** 명시 종료(재연결 중단 + carrier 정리). 이후 connectionState='down'. */
   close(): void
+
+  /**
+   * ★slot (re)mount 시 fresh replay 재요청(remount 대화 소실 FIX)★. RichSlot/TerminalSlot 이
+   * (re)mount 하면 ProtocolClient.subscribeOutput 이 이걸 부른다 — 그 창이 보는 그 agent 의 slot 에
+   * cursor 리셋 + 버퍼 전체 재전송(fresh replay)을 트리거한다.
+   *
+   * ## 왜 필요한가(근본원인)
+   * idle tag1 slot 을 split/재배정하면 Allotment 재귀 트리 구조 변경으로 컴포넌트가 remount 되는데,
+   * remount 는 창 출력 Channel 재등록이 *아니라서*(`subscribe_output` 은 창 mount 시 1회) backend 가
+   * replay 를 재전송하지 않는다 → 대화 소실 + 영구 streaming 고착. reload 는 Channel 재등록으로 fresh
+   * replay 가 흘러 복원되므로, 이 훅이 그 reload 복원 경로를 (re)mount 시점에 slot 단위로 재사용한다.
+   *
+   * ## carrier 별
+   *  - TauriTransport: `invoke('resync_output', { agentId })` — src-tauri 로컬 축 B replay(BLOCK-1:
+   *    데몬 wire Subscribe 를 새로 만들지 않는다). fire-and-forget(반환 무시).
+   *  - WsTransport / mock: no-op(src-tauri 로컬 replay 경로가 없음 — 운영 carrier 는 Tauri 고정).
+   *
+   * fire-and-forget(반환 없음) — 정상 mount 에서 배정 트리거 replay 와 중복될 수 있으나 ProtocolClient
+   * seq dedup(lastDeliveredSeq)이 화면 중복을 흡수한다(ADR-0037).
+   */
+  resyncOutput(agentId: string): void
 }

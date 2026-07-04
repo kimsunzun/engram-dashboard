@@ -493,6 +493,22 @@ export class ProtocolClient implements AgentClient {
           st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
         }
       }
+      // ★(re)mount fresh replay 재요청(remount 대화 소실 FIX)★: 이 구독 effect 가 도는 이유가
+      //   컴포넌트 (re)mount 다. remount(Allotment 재귀 트리 구조 변경 → RichSlot/TerminalSlot 재시작)는
+      //   창 출력 Channel 재등록이 *아니라서* backend 가 replay 를 자동 재전송하지 않는다 → 위 pre-subscribe
+      //   버퍼가 비어(flush 대상 0) 대화 소실 + streaming 고착. backend 에 그 slot 의 fresh replay 를 재요청해
+      //   reload 복원 경로(resubscribe_slot fresh — cursor 리셋 + 버퍼 전체 재전송)를 재사용한다. replay 는
+      //   출력 Channel 로 별도 도착해 이 st(ready=true)가 소비한다. ★생존 구독자(내 token)일 때만★ 트리거해
+      //   StrictMode 이중 마운트의 중복 invoke 를 억제한다(교체된 옛 st 는 skip). 정상 mount 에서 배정 트리거
+      //   replay 와 중복될 수 있으나 위 dedup(seq<=lastDeliveredSeq)이 화면 중복을 흡수한다(ADR-0037).
+      //   ★BLOCK-1 준수★: resyncOutput 은 src-tauri 로컬 축 B replay(invoke resync_output)만 쓰고 데몬 wire
+      //   Subscribe 를 forward 하지 않는다(carrier 내부에서 격리 — WsTransport/mock 은 no-op).
+      // ★위험(B — QA 실측 대상 / ADR 후속)★: 매 mount 무조건 호출한다. remount(새 SubState seq=-1)는
+      //   안전하지만, lastDeliveredSeq 가 이미 전진해 있는 경로(pendingBuffer partial flush drop, 또는
+      //   resync-enqueue 와 live 프레임 도착 interleave)에선 backend fresh replay 가 seq dedup
+      //   (seq<=lastDeliveredSeq)으로 통째 drop 돼 복원 실패·유실이 날 수 있다. 재현 여부는 QA 실측으로
+      //   확인 후 결정할 사안이라 여기선 과잉 방어를 넣지 않는다(지금 고치지 말 것).
+      this.transport.resyncOutput(agentId)
     }
     // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는
     //   src-tauri 단독이다. 프론트가 `Subscribe{after_seq:null}`(FromOldest)를 데몬에 forward 하면,

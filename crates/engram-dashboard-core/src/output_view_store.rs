@@ -1242,6 +1242,37 @@ mod tests {
         // 대조: subscribe 였다면 빈 replay 였을 것(불가침). 그 차이가 reload 버그의 핵심.
     }
 
+    #[test]
+    fn slot_remount_resyncs_full_buffer_for_idle_tag1() {
+        // ★slot remount 대화 소실 FIX(resync_output)★: idle 상태(turn 완료 → 진도가 버퍼 끝까지 나감)의
+        //   tag1 slot 을 split/재배정하면 RichSlot 이 remount 된다(Allotment 재귀 트리 구조 변경). remount 는
+        //   Channel 재등록이 아니라 backend 가 replay 를 자동 재전송하지 않아, remount 된 컴포넌트가 빈 상태로
+        //   재시작하면 대화가 소실된다. resync_output 이 트리거하는 resubscribe_slot(fresh)이 그 시점 버퍼
+        //   전체를 다시 흘려 복원한다 — reload 와 동형(진도가 끝까지 나간 stale cursor 를 무시하고 전체 replay).
+        let a = aid(1);
+        let mut store: OutputViewStore<u32> = OutputViewStore::new();
+        store.subscribe_all(1, a);
+        let deliverable: HashSet<u32> = [1u32].into_iter().collect();
+        // 대화 3건(turn 완료 후 idle) — slot1 이 전부 소비해 cursor 가 버퍼 끝(seq 2)까지 나감.
+        store.on_frame(a, 0, 0, b"a".to_vec(), &deliverable);
+        store.on_frame(a, 0, 1, b"b".to_vec(), &deliverable);
+        store.on_frame(a, 0, 2, b"c".to_vec(), &deliverable);
+        assert_eq!(
+            store.cursor_for_test(&1),
+            Some(Some(2)),
+            "idle: 진도가 버퍼 끝"
+        );
+
+        // remount → resync_output → resubscribe_slot(fresh). ★cursor 가 끝까지 나가 subscribe 면 빈 replay
+        //   (대화 소실·streaming 고착)지만, resync 는 stale cursor 를 무시하고 전체(abc) 를 재전송★.
+        let resync = store.resubscribe_slot_all(1, a);
+        assert_eq!(
+            collected(&resync, 1),
+            b"abc",
+            "★remount resync = idle slot 도 전체 버퍼 재전송(대화 유지)★"
+        );
+    }
+
     // ── FIX-1: 고아 cursor sweep(drop_slots full 누수 reconcile) ──────────────────────────
 
     #[test]

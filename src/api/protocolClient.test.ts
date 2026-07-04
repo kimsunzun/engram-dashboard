@@ -23,6 +23,8 @@ class MockTransport implements Transport {
   ensureReadyCalls = 0
   startCalls = 0
   closed = false
+  // resyncOutput(agentId) 호출 기록 — (re)mount fresh replay 재요청 검증용.
+  resyncCalls: string[] = []
   /**
    * ensureReady 오버라이드 훅(FIX-1/FIX-2 테스트용). null 이면 즉시 resolve(기본).
    * 함수를 심으면 그 반환 Promise 를 ensureReady 가 그대로 반환한다 — 지연 resolve / reject 재현.
@@ -61,6 +63,9 @@ class MockTransport implements Transport {
   }
   close(): void {
     this.closed = true
+  }
+  resyncOutput(agentId: string): void {
+    this.resyncCalls.push(agentId)
   }
 
   // ── 테스트 구동 ──
@@ -682,6 +687,61 @@ describe('pre-subscribe 버퍼(ADR-0043 deliverable 게이트 프론트 등가)'
     t.output(AGENT, 1, 2, new Uint8Array([2]), 0) // dedup(<=high-water)
     t.output(AGENT, 1, 3, new Uint8Array([3]), 1) // 신규 → 배달
     expect(got2).toEqual([0, 1, 2, 3])
+  })
+})
+
+// ── (re)mount fresh replay 재요청(remount 대화 소실 FIX — resync_output) ──────────────────
+//    idle tag1 slot 을 split/재배정하면 Allotment 재귀 트리 구조 변경으로 RichSlot 이 remount 되는데,
+//    remount 는 창 출력 Channel 재등록이 *아니라서* backend 가 replay 를 자동 재전송하지 않는다 → 구독은
+//    빈 pre-subscribe 버퍼(flush 0)로 재시작해 대화 소실 + 영구 streaming 고착. subscribeOutput 이 매
+//    (re)mount 마다 transport.resyncOutput 으로 backend 에 fresh replay 를 재요청해 이를 메운다.
+//
+//    ★이 describe 가 검증하는 것(정확히)★: (1) subscribeOutput 이 생존 구독자 조건에서
+//    transport.resyncOutput(agentId) 을 부르는지(호출 여부·중복 억제), (2) resync 뒤 backend 가 출력
+//    Channel 로 흘리는 프레임을 새 구독자가 정상 소비하는지. ★프레임은 여기서 테스트가 수동 주입(MockTransport.output,
+//    tag 기본 0=터미널)★이라, "실제 resync 가 fresh replay 를 유발했다"까지는 검증하지 않는다(그건 backend
+//    output_router 테스트가 본다). tag1(구조화)·turnDone 판정은 이 레이어 밖 — 여기 프레임은 전부 tag0 이다.
+describe('(re)mount fresh replay 재요청(resync_output)', () => {
+  it('subscribeOutput 은 매 (re)mount 마다 resyncOutput(agentId) 을 부른다', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    await c.subscribeOutput(AGENT, () => {})
+    // 정상 최초 mount 도 무조건 재요청(최초/remount 를 프론트가 구분 못 함 — 단순안, dedup 이 중복 흡수).
+    expect(t.resyncCalls).toEqual([AGENT])
+  })
+
+  it('remount(버퍼 없음) → resync 호출 후 도착 프레임(수동 주입)을 생존 구독자가 소비', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // ★remount 재현★: 첫 mount 후 unsubscribe(버퍼까지 폐기) → backend 가 아무것도 안 보낸 채 재구독.
+    //   pre-subscribe 버퍼가 비어 flush 대상 0(대화 소실 상황의 핵심).
+    const sub = await c.subscribeOutput(AGENT, () => {})
+    sub.unsubscribe()
+    t.resyncCalls = [] // 재요청 카운트 리셋 — remount 것만 본다.
+    const got: number[] = []
+    await c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
+    // remount 가 resync 를 재요청했다 — backend 는 이걸 받아 fresh replay(cursor 리셋+전체)를 흘린다.
+    expect(t.resyncCalls).toEqual([AGENT])
+    expect(got).toEqual([]) // resync 응답 전이라 아직 빈 화면(대화 소실 상황).
+    // resync 후 도착하는 프레임(테스트가 수동 주입 — tag0 터미널)을 생존 구독자가 소비하는지 본다.
+    //   ★주의★: 이 프레임은 MockTransport.output 이 밀어넣은 것이지 resync 가 유발한 실제 backend replay 가
+    //   아니다 — "resync 배선이 fresh replay 를 실제로 트리거하는지"는 backend(output_router) 테스트가 검증한다.
+    //   여기 seq 0~2 는 전부 tag0 이라 tag1(구조화)·turnDone(result 프레임) 판정과는 무관하다.
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.output(AGENT, 1, 2)
+    expect(got).toEqual([0, 1, 2]) // 새 구독자가 seq 순서대로 프레임 소비(remount 후 배달 경로 정상)
+  })
+
+  it('StrictMode 이중 subscribeOutput → resync 는 생존 구독자에서 1회만(중복 invoke 억제)', async () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    // 두 호출을 await 없이 급속 시작(StrictMode 이중 마운트) → 생존 구독자(st2)만 resync 트리거.
+    const p1 = c.subscribeOutput(AGENT, () => {})
+    const p2 = c.subscribeOutput(AGENT, () => {})
+    await Promise.all([p1, p2])
+    // token 가드로 교체된 옛 st1 은 skip → resync 는 1회(생존 구독자). 중복 재요청 storm 방지.
+    expect(t.resyncCalls).toEqual([AGENT])
   })
 })
 
