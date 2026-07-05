@@ -1,0 +1,134 @@
+/* Originally from Cline (https://github.com/cline/cline) — Copyright Cline Bot Inc. Licensed under Apache-2.0.
+   See LICENSES/cline-Apache-2.0.txt. Modified by Netmarble F&C / Engram, 2026.
+   Changes: ported the `.inline-markdown-block` styling from Cline theme.css; remapped VSCode-derived tokens
+   (bg-code / text-preformat / bg-code-block-background / border-text-separator / border-border-panel / bg-list-hover /
+   bg-diff-added / bg-diff-removed) to our data-theme CSS variables (--bg-secondary / --text / --border / --accent).
+   The syntax-highlight palette comes from the imported highlight.js theme below. */
+
+@import 'highlight.js/styles/github-dark.css';
+
+.inline-markdown-block {
+	font-size: 13px;
+	color: var(--text);
+	font-family: inherit;
+}
+
+.inline-markdown-block pre {
+	background: var(--bg-secondary);
+	border-radius: 2px;
+	overflow-x: auto;
+	overflow-y: hidden;
+	margin: 13px 0;
+	padding: 10px 10px;
+	max-width: calc(100vw - 20px);
+	padding-right: 70px;
+}
+
+.inline-markdown-block pre > code .hljs-deletion {
+	display: inline-block;
+	width: 100%;
+	background: color-mix(in srgb, #f85149 22%, transparent);
+}
+
+.inline-markdown-block pre > code .hljs-addition {
+	display: inline-block;
+	width: 100%;
+	background: color-mix(in srgb, #3fb950 22%, transparent);
+}
+
+.inline-markdown-block code span.line:empty {
+	display: none;
+}
+
+.inline-markdown-block code {
+	word-break: break-word;
+	border-radius: 2px;
+}
+
+.inline-markdown-block p,
+.inline-markdown-block li,
+.inline-markdown-block ol,
+.inline-markdown-block ul {
+	line-height: 1.375;
+}
+
+.inline-markdown-block hr,
+.inline-markdown-block ul,
+.inline-markdown-block ol {
+	margin: 0.75rem 0;
+	margin-left: 1.25rem;
+}
+
+.inline-markdown-block li > ul,
+.inline-markdown-block li > ol {
+	margin: 0.25rem 0;
+	margin-left: 0.5rem;
+}
+
+.inline-markdown-block table {
+	border-collapse: collapse;
+	width: 100%;
+	margin: 0.75rem 0;
+}
+
+.inline-markdown-block th,
+.inline-markdown-block td {
+	padding: 0.5rem;
+	border: 1px solid var(--border);
+	text-align: left;
+}
+
+.inline-markdown-block th {
+	background: color-mix(in srgb, var(--bg-secondary) 20%, transparent);
+	font-weight: 600;
+}
+
+.inline-markdown-block tr:nth-child(even) {
+	background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+}
+
+.inline-markdown-block del {
+	text-decoration: line-through;
+	opacity: 0.7;
+}
+
+.inline-markdown-block code:not(pre > code) {
+	font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+	color: var(--accent);
+	background: var(--bg-secondary);
+	border: 1px solid var(--border);
+	border-radius: 2px;
+	padding-top: 0.125rem;
+	padding-bottom: 0.125rem;
+	white-space: pre-line;
+	word-break: break-word;
+	font-size: 0.9em;
+}
+
+.inline-markdown-block a {
+	color: var(--accent);
+	text-decoration-line: underline;
+	text-underline-offset: 4px;
+}
+
+/* Inline cursor container — adds a blinking cursor after last child (streaming affordance). */
+.inline-markdown-block .inline-cursor-container > :last-child::after {
+	content: '';
+	display: inline-block;
+	width: 0.125rem;
+	height: 1em;
+	margin-left: 0.125rem;
+	background: var(--text);
+	vertical-align: text-bottom;
+	animation: cline-cursor-blink 1s ease-in-out infinite;
+}
+
+@keyframes cline-cursor-blink {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0;
+	}
+}

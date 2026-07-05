@@ -19,19 +19,24 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { cn } from '@/lib/utils' // ADR-0047: Tailwind 클래스 병합
 import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { parseStreamJson } from '../../lab/richslot/fixtureParse'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
-import { StructuredItemStream } from './StructuredItemStream'
+// [임시] chat 레이아웃 프리뷰로 교체 — 원복 대비 보존
+// import { StructuredItemStream } from './StructuredItemStream'
 import { LAYOUTS, type LayoutKey } from '../../lab/richslot/layouts'
+// ChatLayout — FixtureRichSlot 이 LAYOUTS[layout].Comp 를 거쳐 쓰므로 직접 import 불필요. LiveRichSlot 교체로 제거.
 import {
   RenderSettingsProvider,
   type CodeRender,
   type DiffRender,
 } from '../../lab/richslot/renderSettings'
+// structuredItemsToRichMessages — LiveRichSlot 교체로 더 이상 사용하지 않음. structuredToRichMessages.ts 파일은 유지.
+import { StructuredTextView } from './StructuredTextView'
 import showcaseFixture from '../../lab/richslot/fixtures/showcase.jsonl?raw'
 import textFixture from '../../lab/richslot/fixtures/text.jsonl?raw'
 import toolFixture from '../../lab/richslot/fixtures/tool.jsonl?raw'
@@ -140,42 +145,47 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     if (!input.trim() || isTerminated) return
     // FIX 5a: 앞뒤 공백을 다듬은 텍스트를 전송(가드도 trim 으로 판정하므로 실제 전송도 trim 일관).
     const text = input.trim()
-    void agentClient.writeStdin(agentId, new TextEncoder().encode(text)).catch(() => {})
     setInput('')
     setAwaiting(true) // FIX 5b: 첫 바이트를 기다리지 않고 즉시 streaming 힌트로 전환
+    // ★write 실패 시 awaiting 해제★: writeStdin promise 가 reject 되면(전송 자체 실패) 응답 이벤트가
+    //   영영 안 온다 → awaiting 이 계속 걸려 'streaming'/Thinking 표시가 무한 고착된다. 실패 경로에서
+    //   awaiting 을 되돌려 UI 를 idle 로 복귀시킨다(파생 streaming 값만 교정 — WIRE 불변, ADR-0044/45/46).
+    void agentClient.writeStdin(agentId, new TextEncoder().encode(text)).catch((err) => {
+      console.warn('[RichSlot] writeStdin failed — clearing awaiting:', err)
+      setAwaiting(false)
+    })
   }
+
+  // 스트리밍 표시 = 방금 전송해 첫 바이트 대기 중(awaiting)이거나, 실제 응답 진행 중(!turnDone && 이미 item 존재).
+  //   ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
+  //   배지가 뜨는 오작동이 있었다. items.length>0 조건으로 좁혀 idle 을 idle 로 표시하되, (a) 실제 스트리밍 중
+  //   신호와 (b) '전송 직후 첫 토큰 대기(awaiting)' 는 그대로 살린다.
+  //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
+  const streaming = awaiting || (!turnDone && items.length > 0)
 
   return (
     <div
-      style={{
-        width: '100%',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        boxSizing: 'border-box',
-        background: 'var(--lay-bg)',
-      }}
+      className="flex h-full w-full flex-col bg-background"
       data-rich-live="1" // cdp eval 에서 라이브 RichSlot 마운트 여부 확인용
       data-agent-id={agentId}
     >
-      {/* 스트리밍/유휴 힌트(옵션) — result 라인 관측(turnDone)으로 판정(저렴) + 전송 직후 awaiting 브리지. */}
-      <div style={LIVE_HEADER}>
-        <span style={{ color: '#6aa0ff', fontWeight: 700 }}>JSON</span>
-        {/* streaming = 응답 진행 중(!turnDone) 이거나 방금 전송해 첫 바이트 대기 중(awaiting, FIX 5b). */}
-        <span style={{ color: !turnDone || awaiting ? '#caa' : '#6a6' }}>
-          {!turnDone || awaiting ? '○ streaming' : '● idle'}
+      {/* 슬림 상태 헤더 — 스트리밍/유휴 힌트(옵션). result 라인 관측(turnDone) + 전송 직후 awaiting 브리지. */}
+      <div className="flex flex-none items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted">
+        <span className="font-semibold text-accent">JSON</span>
+        <span className={cn(streaming ? 'text-foreground' : 'text-muted')}>
+          {streaming ? '○ streaming' : '● idle'}
         </span>
-        {isTerminated && <span style={{ color: '#c66' }}>— 종료됨</span>}
+        {isTerminated && <span className="text-red-500">— 종료됨</span>}
       </div>
 
-      {/* 대화 렌더(스크롤). 순서 보존 item 스트림 — text=Markdown · 칩=클릭 펼침 · 턴 경계=구분선(ADR-0045 §52). */}
-      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        <StructuredItemStream items={items} />
+      {/* 대화 렌더(스크롤). 순서 보존 item 스트림 — CC 룩 렌더는 StructuredTextView 소관. */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+        <StructuredTextView items={items} streaming={streaming} />
       </div>
 
       {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈. ★포커스 가드★: stopPropagation 으로 키 입력이
           상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}
-      <div style={INPUT_BAR}>
+      <div className="flex flex-none items-stretch gap-1.5 border-t border-border px-2 py-1.5">
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -193,58 +203,18 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
           placeholder={isTerminated ? '종료된 에이전트' : '메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)'}
           disabled={isTerminated}
           rows={2}
-          style={INPUT_FIELD}
+          className="flex-1 resize-none rounded border border-border bg-surface px-2 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"
         />
-        <button onClick={send} disabled={isTerminated || !input.trim()} style={SEND_BTN}>
+        <button
+          onClick={send}
+          disabled={isTerminated || !input.trim()}
+          className="flex-none rounded bg-accent px-3.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
           전송
         </button>
       </div>
     </div>
   )
-}
-
-const LIVE_HEADER: React.CSSProperties = {
-  flex: '0 0 auto',
-  display: 'flex',
-  gap: 10,
-  alignItems: 'center',
-  padding: '4px 8px',
-  background: '#111',
-  color: '#ccc',
-  fontFamily: 'system-ui, sans-serif',
-  fontSize: 12,
-  borderBottom: '1px solid #2a2a2a',
-}
-const INPUT_BAR: React.CSSProperties = {
-  flex: '0 0 auto',
-  display: 'flex',
-  gap: 6,
-  alignItems: 'stretch',
-  padding: '6px 8px',
-  background: '#111',
-  borderTop: '1px solid #2a2a2a',
-}
-const INPUT_FIELD: React.CSSProperties = {
-  flex: 1,
-  resize: 'none',
-  fontFamily: 'var(--font-ui, system-ui, sans-serif)',
-  fontSize: 13,
-  background: '#1a1a1a',
-  color: '#e0e0e0',
-  border: '1px solid #2a2a2a',
-  borderRadius: 4,
-  padding: '6px 8px',
-  boxSizing: 'border-box',
-}
-const SEND_BTN: React.CSSProperties = {
-  flex: '0 0 auto',
-  cursor: 'pointer',
-  background: '#2a4a8a',
-  color: '#fff',
-  border: 'none',
-  borderRadius: 4,
-  padding: '0 14px',
-  fontSize: 12,
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════

@@ -1,7 +1,7 @@
 # ADR-0047: 프론트 스타일링 = Tailwind CSS v4 + shadcn/lucide 채택 (순수 CSS 기조 전환)
 
 - 상태: 확정 (2026-07-05, 근거: /research medium + Codex 적대리뷰 + CSS 실측)
-- 관련: CLAUDE.md "기술 스택(프론트)" (`CSS 변수(Tailwind X)` 문구 갱신 대상) · `src/styles/theme.css`(data-theme 3종 테마) · step-log 2026-07-05
+- 관련: CLAUDE.md "기술 스택(프론트)" (`CSS 변수(Tailwind X)` 문구 갱신 대상) · `src/styles/theme.css`(data-theme 3종 테마) · step-log 2026-07-05 · Amended by ADR-0048 (채팅 UI 렌더 방식: CC룩 네이티브 직접 구현·OSS 참조한정(코드 복붙 아님) → Cline 잎 컴포넌트 verbatim 코드 포트(Apache-2.0 귀속))
 
 ## 맥락
 구조화 출력(StreamJson) 슬롯의 채팅 렌더를 **Claude Code VS Code 확장 룩**(세로 점선 타임라인 · 접힘 "Thought for Ns" thinking · 미니멀 툴 IN/OUT)에 맞추려 했으나, 직전 이식은 "근사"(이모지 아이콘·손수 만든 `<details>` 아코디언)에 그쳐 품질이 크게 떨어졌다.

@@ -577,6 +577,22 @@
 - **결정(사용자):** Tailwind CSS v4 + shadcn/ui(필요분) + lucide-react 채택 — 순수 CSS 기조 전환. `data-theme` 3종 테마는 CSS 변수로 유지(Tailwind 토큰이 `var()` 참조, 테마 메커니즘 불변). → **ADR-0047** 박제 + 인덱스 재생성 + CLAUDE.md 기술 스택 갱신 (**전부 미커밋**).
 - **다음:** Tailwind v4+Vite 플러그인 셋업 → 테마 변수↔토큰 매핑 → shadcn/lucide 도입 → **Claude Code 룩 네이티브 재구현**(`StructuredTextView` 후신, `// ADR-0047` 앵커) → `/review code` → `/qa`. ADR/CLAUDE.md 등 load-bearing 문서는 `/review doc` 후 커밋.
 
+### Tailwind Phase1 커밋 + 채팅 UI = Cline verbatim 포트 결정 (2026-07-05, master, opus) — 진행중
+- **Phase1 커밋(4d34c45):** ADR-0047 실행 — `@theme inline`로 data-theme 3종→Tailwind 색토큰 매핑 + cn 유틸 + lucide-react. `/review code full`(Advocate+Codex PASS) + `/qa full`(tsc·vitest 214·vite build·격리·cdp 테마 end-to-end 실측) 통과. ※Tailwind 배선 절반(deps·vite 플러그인·`@import`)은 이미 HEAD에 있었음.
+- **Phase2 첫 cut(미커밋·폐기예정):** 내가 CC-룩 손디자인한 `StructuredTextView`(점선 타임라인·접힘 Thinking/Tool IN-OUT·라이브 "Thinking…") + RichSlot Tailwind 재스타일 + `@/*` alias. cdp 실측으로 렌더 확인(Json 에이전트 슬롯 배치 후).
+- **★방향 전환(사용자 결정):** 내 손디자인이 또 "근사"란 지적 → **Cline 실코드 verbatim 포트**로 확정. Tailwind 도입으로 "Cline 코드 그대로 옮기기"가 싸짐(리서치의 네이티브-구현 추천 전제[비-Tailwind]가 뒤집힘). Apache-2.0 귀속(헤더·LICENSE·NOTICE·변경표시) 부착. 법무 게이트는 사용자가 "개인 사용·공개 시 검토"로 연기.
+- **핸드오프:** `.claude/continue/` (verbatim 포트 실행·귀속·라이브 렌더 확인법[assign_agent UUID]·replay 빈 버그 별건 포함). 다음: 포트 실행 → /review → /qa → ADR 작성.
+
+### 채팅 렌더 Cline 잎 verbatim 포트 실행 + ADR-0048 (2026-07-05, master, opus) — 구현·리뷰·QA 완료, 커밋 대기(승인)
+- **정찰·귀속 감사(서브에이전트):** Cline 채팅 컴포넌트 분류 — 최상위 `ChatRow`(1208줄)는 VSCode gRPC 강결합이라 **verbatim 복사 불가**. 복사 가능 = 잎 프레젠테이션(ThinkingRow·MarkdownBlock·MarkdownRow·CopyButton·button·ExpandHandle). **Cline NOTICE 없음 확정**(핸드오프 미확인 해소), LICENSE=Apache-2.0/`Cline Bot Inc.`, 무헤더.
+- **ADR-0048 박제:** "채팅 렌더 = Cline 잎 verbatim 포트 + 우리 dispatch(react-markdown 스택·Apache-2.0 귀속)" — **ADR-0047 채팅 렌더 조항 부분 폐기**(Tailwind 스타일링 조항 존속). 양방향 Amends 링크·인덱스 재생성·lint clean.
+- **사용자 결정:** "충실 포트"(잎 verbatim + 우리 dispatch, react-markdown 스택 수용). ChatRow 못 베끼니 dispatch/레이아웃은 우리 작성.
+- **구현(코더 opus):** Cline 잎 verbatim/적응 복사(VSCode 배선 제거) + `StructuredItem[]`→컴포넌트 dispatch 재작성(`StructuredTextView`, `// ADR-0048`) + Apache-2.0 귀속(`LICENSES/cline-Apache-2.0.txt` + 파일 헤더) + deps 7개(react-markdown·remark-gfm·rehype-highlight·unist-util-visit·marked·@radix-ui/react-slot·cva), styled-components 배제. 데이터모델(ADR-0045)·구독/send 흐름(ADR-0044/45/46) 무변경.
+- **리뷰(`/review code full` 2인 적대, 재수정 1회):** doc-aware PASS, Codex 포트 결함 적출·FIX — ① tool_result 흡수가 `label==='user'` 안에서만(다른 label 독립 렌더) → 억제를 label 게이트 밖으로 ② 펜스 이스케이프(도구 IN/OUT을 markdown 파싱 → ``` 탈출) → `InertCode`(`<pre><code>` 리터럴)로 격리 ③ streaming 행 key 누락 ④ 고아파일(ExpandHandle·CodeAccordian) 제거 ⑤ 테스트 보강. 재리뷰 doc-aware PASS.
+- **send-fix:** RichSlot `send()` write 거부 시 `awaiting` 미해제 → UI "Thinking" 영구 표시(Codex 재리뷰 적출, pre-existing) → catch에서 해제 + 회귀 테스트. streaming 파생 `awaiting || (!turnDone && items.length>0)`로 좁혀 idle 오표시 제거.
+- **QA(`/qa full`):** 프론트 기계 게이트 PASS(tsc clean · vitest 235 · vite build). **GUI 실측 PASS**(cdp) — Json 에이전트 슬롯 배치 → 새 메시지 → **Cline MarkdownBlock이 실제 마크다운(불릿 ul/li + `**bold**` strong) 라이브 렌더** + usage 칩 + idle 배지 정상. 스샷 `phase2-cline-port.png`. (Rust workspace 게이트는 프론트 전용 변경 + 미커밋 이전세션 Rust 있어 스코프 밖 — 드리프트 self-report.)
+- **잔여:** ① **mount replay 빈 버그 재현**(Running·히스토리 있으나 배치 직후 공백, 새 메시지 보내야 참) = 다음 작업 ② 중복 tool id last-write-wins = claude엔 무해(id 유일+dedup, 코드 주석) 보류 ③ 마크다운 불릿 마커(•) Tailwind reset로 비표시 = CSS 폴리시 후속 ④ 도구블록 InertCode 단순 = 하이라이트+이스케이프 리파인 후속.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
