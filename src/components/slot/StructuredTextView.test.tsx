@@ -113,10 +113,14 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(pres.some((p) => p.textContent?.includes('FILE_LISTING'))).toBe(true)
   })
 
-  it('usage item → muted 토큰 칩(in/out 표기)', () => {
-    const items: StructuredItem[] = [{ kind: 'usage', inputTokens: 10, outputTokens: 5, itemId: 0 }]
-    render(<StructuredTextView items={items} />)
-    expect(screen.getByText(/in 10 · out 5/)).toBeTruthy()
+  it('usage item → 아무것도 렌더하지 않는다(Cline 은 메시지별 토큰 칩 미표시)', () => {
+    const items: StructuredItem[] = [{ kind: 'usage', inputTokens: 2, outputTokens: 5, itemId: 0 }]
+    const { container } = render(<StructuredTextView items={items} />)
+    // 누적 item 종류는 유지하되 렌더는 생략 — in/out 텍스트가 화면에 없어야 한다.
+    expect(screen.queryByText(/in 2/)).toBeNull()
+    expect(screen.queryByText(/out 5/)).toBeNull()
+    // usage 만 있는 items 는 보이는 행을 만들지 않는다(ChatRow 래퍼도 없음).
+    expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeNull()
   })
 
   it('error item → 붉은 에러 행(메시지 노출)', () => {
@@ -125,15 +129,18 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(screen.getByText('boom happened')).toBeTruthy()
   })
 
-  it('separator item → full-width divider(border-top div)', () => {
+  it('separator item → 옅은 세로 스페이서(border-t divider 없음 — Cline 룩)', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'a', itemId: 0 },
       { kind: 'separator', itemId: 1 },
       { kind: 'text', text: 'b', itemId: 2 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
-    // separator 는 aria-hidden border-t div 로 렌더된다.
-    expect(container.querySelector('div[aria-hidden].border-t')).toBeTruthy()
+    // Cline 은 점선 레일/구분선이 없다 — separator 는 눈에 띄는 divider 가 아니라 aria-hidden 스페이서다.
+    expect(container.querySelector('div[aria-hidden].border-t')).toBeNull()
+    const spacer = container.querySelector('div[aria-hidden]')
+    expect(spacer).toBeTruthy()
+    expect(spacer?.className).toContain('h-3')
   })
 
   it('streaming=true 면 스트림 끝에 Thinking 라이브 신호(제목)를 붙인다', () => {
@@ -244,5 +251,44 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     const pres = Array.from(container.querySelectorAll('pre'))
     expect(pres.some((p) => p.textContent?.includes('# NOT_A_HEADING'))).toBe(true)
     expect(pres.some((p) => p.textContent?.includes('[link](http://evil.example)'))).toBe(true)
+  })
+
+  // ── ADR-0048 재설계: Cline 실물 룩 구조 ────────────────────────────────────────────
+  it('점선 타임라인 레일이 없다(Cline flat 스택 구조)', () => {
+    const items: StructuredItem[] = [
+      { kind: 'text', text: 'hi', itemId: 0 },
+      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 1 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    // 이전 시안의 좌측 세로 점선 border(border-dashed) 레일 세그먼트가 더 이상 없다.
+    expect(container.querySelector('.border-dashed')).toBeNull()
+    // 각 행은 Cline ChatRowContent 래퍼(relative pt-2.5 px-4)로 감싸진다.
+    expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeTruthy()
+  })
+
+  it('structured label=user → Cline UserMessage 박스(rounded-xs badge 버블)로 렌더', () => {
+    const items: StructuredItem[] = [
+      { kind: 'structured', label: 'user', json: JSON.stringify({ text: 'do the thing' }), itemId: 0 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    const bubble = screen.getByText('do the thing')
+    // Cline UserMessage 룩: p-2.5 my-1 rounded-xs + badge 버블 배경/전경(var(--vscode-badge-*) 매핑).
+    expect(bubble.className).toContain('rounded-xs')
+    expect(bubble.className).toContain('bg-badge')
+    expect(bubble.className).toContain('text-badge-foreground')
+    // 사용자 박스는 편집/토글 버튼이 없는 plain 텍스트 박스다.
+    expect(container.querySelectorAll('button').length).toBe(0)
+  })
+
+  it('tool item → Cline 헤더(아이콘 + bold 이름) + bg-surface 박스로 렌더', () => {
+    const items: StructuredItem[] = [
+      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', itemId: 0 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    // 헤더에 bold 도구명(Cline HEADER_CLASSNAMES 패턴).
+    const title = screen.getByText('Bash')
+    expect(title.className).toContain('font-bold')
+    // 도구 본문은 Cline 룩(bg-surface rounded-sm border) 박스.
+    expect(container.querySelector('.bg-surface.rounded-sm')).toBeTruthy()
   })
 })

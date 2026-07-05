@@ -7,14 +7,37 @@
 // ★이 파일의 책임★: items 스트림을 종류별로 위 이식 컴포넌트로 dispatch 하는 **순수 렌더**(구독/누적은
 //   RichSlot 소관). props = { items, streaming } 만 받는다.
 //
-// ★레이아웃(ADR-0048 — 층 분리)★: 좌측 점선 타임라인 레일 스캐폴드(Row)는 당분간 유지한다. 이번 과업의
-//   핵심은 *콘텐츠 렌더러*를 Cline 실물로 교체하는 것이지 레이아웃 재설계가 아니다(레이아웃은 이후 튜닝).
+// ★레이아웃(ADR-0048 재설계 — Cline 실물 룩)★: 이전 시안의 좌측 점선 타임라인 레일(Row)을 제거하고 Cline
+//   실제 채팅 구조로 교체한다. 메시지는 flat 세로 스택이며, 각 행은 Cline ChatRowContent 래퍼(relative pt-2.5
+//   px-4)를 쓴다. 헤더는 Cline HEADER_CLASSNAMES(flex items-center gap-2.5 mb-3): 작은 lucide 아이콘 + bold
+//   제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이 MarkdownRow full-width, user 는 Cline
+//   UserMessage 박스(p-2.5 my-1 rounded-xs text-sm), thinking 은 Cline ThinkingRow.
+//
+// ★토큰 매핑(Cline VSCode 토큰 → 우리 data-theme Tailwind 토큰)★: text-foreground→text-foreground ·
+//   text-description→text-muted · bg-code→bg-surface · border-editor-group-border→border-border ·
+//   var(--vscode-badge-background)→bg-surface(user 버블) · text-error→text-red-500 · text-success→text-accent.
+//   raw --vscode-* 변수는 우리 앱에 없으므로 절대 도입하지 않는다(우리 토큰만).
 //
 // ★안전 파서 헬퍼(pretty/extractText/contentToText/parseToolResult/buildToolResultMap/shortArgs)★는
 //   ADR-0047 시안에서 그대로 승계한다 — 우리 데이터-어댑터 로직이며 **절대 throw 하지 않는다**(bad json 폴백).
 
-import { useState, type ReactNode } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { useState, type ComponentType, type ReactNode } from 'react'
+import {
+  AlertTriangle,
+  Braces,
+  ChevronDown,
+  ChevronRight,
+  FileCode2,
+  FileMinus2,
+  FilePlus2,
+  FolderOpen,
+  Globe,
+  List,
+  Pencil,
+  Search,
+  SquareTerminal,
+  Wrench,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import type { StructuredItem } from './structuredAccumulator'
@@ -142,29 +165,65 @@ function shortArgs(argsJson: string): string {
   }
 }
 
-// ── 타임라인 레일 래퍼(ADR-0048: 레이아웃 스캐폴드는 당분간 유지) ───────────────────
+// ── Cline 룩 프리미티브(레이아웃 재설계) ──────────────────────────────────────────
 
-type DotTone = 'default' | 'accent' | 'error' | 'none'
-const DOT: Record<Exclude<DotTone, 'none'>, string> = {
-  default: 'bg-muted',
-  accent: 'bg-accent',
-  error: 'bg-red-500',
+/**
+ * Cline ChatRowContent 래퍼 — 각 메시지 행의 바깥 컨테이너. Cline 은 `relative pt-2.5 px-4`(가상 스크롤러가
+ * 감싸는 개별 row). 점선 레일 없이 flat 세로 스택으로 쌓인다. StructuredTextView 컨테이너가 이 행들을 그대로 담는다.
+ */
+function ChatRow({ children }: { children: ReactNode }) {
+  return <div className="relative pt-2.5 px-4">{children}</div>
+}
+
+/** Cline HEADER_CLASSNAMES = "flex items-center gap-2.5 mb-3" — 작은 아이콘 + bold 제목. */
+const HEADER_CLASSNAMES = 'flex items-center gap-2.5 mb-3'
+
+type LucideIcon = ComponentType<{ className?: string }>
+
+/**
+ * 도구 헤더 아이콘 휴리스틱 — 우리 tool item 은 generic(name 만) 이라 Cline 처럼 tool.tool 판별자가 없다.
+ * name 을 소문자로 보고 흔한 CC/claude 도구를 Cline 대응 아이콘(lucide)에 매핑한다. 미스는 Wrench 폴백.
+ * (Cline ChatRow 의 아이콘 선택 — Pencil=edit, FilePlus2=create, FileMinus2=delete, FileCode2=read,
+ *  FolderOpen=list, Search=search, SquareTerminal=bash, Globe=web/fetch — 을 우리 이름 규약으로 흉내.)
+ */
+function toolIconFor(name: string): LucideIcon {
+  const n = name.toLowerCase()
+  if (n.includes('multiedit') || n.includes('edit') || n.includes('write') || n.includes('replace'))
+    return Pencil
+  if (n.includes('create') || n.includes('new')) return FilePlus2
+  if (n.includes('delete') || n.includes('remove') || n.includes('rm')) return FileMinus2
+  if (n.includes('read') || n.includes('cat') || n.includes('view')) return FileCode2
+  if (n.includes('glob') || n.includes('ls') || n.includes('list') || n.includes('dir'))
+    return FolderOpen
+  if (n.includes('grep') || n.includes('search') || n.includes('find')) return Search
+  if (n.includes('bash') || n.includes('shell') || n.includes('exec') || n.includes('command'))
+    return SquareTerminal
+  if (n.includes('web') || n.includes('fetch') || n.includes('http') || n.includes('url'))
+    return Globe
+  if (n.includes('todo') || n.includes('task') || n.includes('plan')) return List
+  return Wrench
 }
 
 /**
- * 좌측 점선 타임라인 레일 — 각 행이 자기 몫의 레일 세그먼트(세로 점선 border)를 그린다.
- * 행들이 세로로 맞붙어(컨테이너 gap 없음, 간격은 콘텐츠 pb-4 로) 세그먼트가 이어져 연속된 점선이 된다.
+ * Cline 헤더 행 — 작은 아이콘 + bold 제목(semantic color). 도구/에러/generic 에 공통.
+ * Cline: `<div className={HEADER_CLASSNAMES}><Icon className="size-2" /><span className="font-bold ...">…</span></div>`.
+ * 우리 앱은 VSCode codicon 스케일이 아니라 size-3.5(≈14px)로 읽히게 키운다(Cline 룩 유지, 우리 폰트 스케일 반영).
  */
-function Row({ dot = 'default', children }: { dot?: DotTone; children: ReactNode }) {
+function RowHeader({
+  icon: Icon,
+  title,
+  tone = 'default',
+}: {
+  icon: LucideIcon
+  title: ReactNode
+  tone?: 'default' | 'error'
+}) {
   return (
-    <div className="relative flex gap-2.5">
-      <div aria-hidden className="relative flex w-3.5 flex-none justify-center">
-        <div className="pointer-events-none absolute inset-y-0 left-1/2 border-l border-dashed border-border" />
-        {dot !== 'none' && (
-          <div className={cn('relative mt-[9px] h-1.5 w-1.5 rounded-full', DOT[dot])} />
-        )}
-      </div>
-      <div className="min-w-0 flex-1 pb-4">{children}</div>
+    <div className={HEADER_CLASSNAMES}>
+      <Icon className={cn('size-3.5 flex-none', tone === 'error' ? 'text-red-500' : 'text-foreground')} />
+      <span className={cn('font-bold', tone === 'error' ? 'text-red-500' : 'text-foreground')}>
+        {title}
+      </span>
     </div>
   )
 }
@@ -205,8 +264,10 @@ function ThinkingItemRow({ content }: { content: string }) {
 }
 
 /**
- * 도구 호출 행 — 헤더(이름 + arg 힌트, 에러 배지) 접힘, 펼치면 IN(args)/OUT(result) 를 그린다.
- * IN/OUT 은 신뢰할 수 없는 텍스트이므로 InertCode(리터럴 <pre>)로만 렌더 — 마크다운 파싱 금지(FIX 2).
+ * 도구 호출 행 — Cline 도구 룩: 헤더(작은 아이콘 + bold 이름) + bg-surface rounded-sm border 박스.
+ * 박스의 클릭 sub-header(Cline: flex items-center cursor-pointer select-none py-2 px-2.5 text-description)를
+ * 눌러 IN(args)/OUT(result) 본문을 펼친다. IN/OUT 은 신뢰할 수 없는 텍스트이므로 InertCode(리터럴 <pre>)로만
+ * 렌더 — 마크다운 파싱 금지(FIX 2). 로컬 open state(itemId key 로 스트리밍 리렌더 중에도 유지).
  */
 function ToolItemRow({
   name,
@@ -220,64 +281,94 @@ function ToolItemRow({
   const [open, setOpen] = useState(false)
   const hint = shortArgs(argsJson)
   const isErr = result?.isError === true
+  const Icon = toolIconFor(name)
   return (
-    <div className={cn('rounded-lg border', isErr ? 'border-red-500/60' : 'border-border')}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
-      >
-        <span className="flex-none font-mono text-[13px] font-medium text-foreground">{name}</span>
-        {hint && <span className="truncate font-mono text-xs text-muted">{hint}</span>}
-        {isErr && (
-          <span className="ml-auto flex-none rounded border border-red-500 px-1.5 text-[10px] text-red-500">
-            Error
-          </span>
+    <div>
+      <RowHeader icon={Icon} title={name} tone={isErr ? 'error' : 'default'} />
+      <div
+        className={cn(
+          'bg-surface rounded-sm overflow-hidden border',
+          isErr ? 'border-red-500/60' : 'border-border',
         )}
-      </button>
-      {open && (
-        <div className="space-y-2 border-t border-border px-3 py-2">
-          <div>
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">In</div>
-            {/* args JSON 을 리터럴 <pre> 로 — 마크다운 파싱 없이 원문 그대로(FIX 2). */}
-            <InertCode code={pretty(argsJson)} />
-          </div>
-          {result && (
-            <div>
-              <div
-                className={cn(
-                  'mb-1 text-[10px] uppercase tracking-wide',
-                  isErr ? 'text-red-500' : 'text-muted',
-                )}
-              >
-                Out
-              </div>
-              {/* 결과 본문을 리터럴 <pre> 로 — 삼중 백틱이 있어도 inert(FIX 2). */}
-              <InertCode code={result.content || '(빈 결과)'} />
-            </div>
+      >
+        {/* Cline 클릭 sub-header — 펼침 토글. text-description(→text-muted).
+            aria-label 에 도구명을 실어 접근성 이름을 헤더와 일치시킨다(sub-header 텍스트는 인자 힌트라
+            도구명이 없으므로, 스크린리더/테스트가 "어느 도구의 세부인지" 식별하게 name 을 명시). */}
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-label={name}
+          className="flex w-full items-center gap-2 cursor-pointer select-none py-2 px-2.5 text-left text-muted"
+        >
+          {open ? (
+            <ChevronDown className="size-3.5 flex-none" />
+          ) : (
+            <ChevronRight className="size-3.5 flex-none" />
           )}
-        </div>
-      )}
+          {hint ? (
+            <span className="truncate font-mono text-xs">{hint}</span>
+          ) : (
+            <span className="truncate font-mono text-xs opacity-70">arguments</span>
+          )}
+          {isErr && (
+            <span className="ml-auto flex-none rounded border border-red-500 px-1.5 text-[10px] text-red-500">
+              Error
+            </span>
+          )}
+        </button>
+        {open && (
+          <div className="space-y-2 border-t border-border px-2.5 py-2">
+            <div>
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">In</div>
+              {/* args JSON 을 리터럴 <pre> 로 — 마크다운 파싱 없이 원문 그대로(FIX 2). */}
+              <InertCode code={pretty(argsJson)} />
+            </div>
+            {result && (
+              <div>
+                <div
+                  className={cn(
+                    'mb-1 text-[10px] uppercase tracking-wide',
+                    isErr ? 'text-red-500' : 'text-muted',
+                  )}
+                >
+                  Out
+                </div>
+                {/* 결과 본문을 리터럴 <pre> 로 — 삼중 백틱이 있어도 inert(FIX 2). */}
+                <InertCode code={result.content || '(빈 결과)'} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
-/** 탈출구(알 수 없는 label) 이벤트 — 접힘 raw json. tool 행과 동형 룩. json 은 InertCode(리터럴, FIX 2). */
+/**
+ * 탈출구(알 수 없는 label) 이벤트 — Cline 도구 박스와 동형인 접힘 raw json 블록. label 을 muted 헤더로 얹고
+ * (Braces 아이콘) bg-surface border 박스를 펼치면 json 을 InertCode(리터럴, FIX 2)로 그린다.
+ */
 function GenericItemRow({ label, json }: { label: string; json: string }) {
   const [open, setOpen] = useState(false)
   return (
-    <div className="rounded-lg border border-border">
+    <div className="bg-surface rounded-sm overflow-hidden border border-border">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        className="flex w-full items-center gap-2 cursor-pointer select-none py-2 px-2.5 text-left text-muted"
       >
-        <span className="truncate font-mono text-[13px] text-muted">{label}</span>
+        {open ? (
+          <ChevronDown className="size-3.5 flex-none" />
+        ) : (
+          <ChevronRight className="size-3.5 flex-none" />
+        )}
+        <Braces className="size-3.5 flex-none" />
+        <span className="truncate font-mono text-xs">{label}</span>
       </button>
       {open && (
-        <div className="border-t border-border px-3 py-2">
+        <div className="border-t border-border px-2.5 py-2">
           {/* raw json 을 리터럴 <pre> 로 — 마크다운 파싱 없이 원문 그대로(FIX 2). */}
           <InertCode code={pretty(json)} />
         </div>
@@ -293,11 +384,11 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
   const k = item.itemId
   switch (item.kind) {
     case 'text':
-      // assistant 본문 — Cline MarkdownRow(react-markdown + remark/rehype).
+      // assistant 본문 — Cline MarkdownRow(react-markdown + remark/rehype). 헤더 없이 full-width.
       return (
-        <Row key={k} dot="default">
+        <ChatRow key={k}>
           <MarkdownRow markdown={item.text} />
-        </Row>
+        </ChatRow>
       )
 
     case 'structured':
@@ -308,13 +399,15 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
       if (parseToolResult(item.json)) return null
 
       if (item.label === 'user') {
-        // 사용자 발화 — Cline UserMessage 는 gRPC 편집기라 이식 불가 → 은은한 보더 박스 + MarkdownRow.
+        // 사용자 발화 — Cline UserMessage 박스(p-2.5 my-1 rounded-xs, whitespace-pre-line break-word).
+        //   색은 Cline UserMessage.tsx 대로 badge 토큰(var(--vscode-badge-background)/foreground)에 매핑한다 —
+        //   기존 bg-surface(#111)는 앱 배경(#0a0a0a) 위에서 사실상 안 보였다. text-sm 을 빼 루트의 13px 를 상속.
         return (
-          <Row key={k} dot="accent">
-            <div className="rounded-lg border border-border bg-surface px-3 py-2">
-              <MarkdownRow markdown={extractText(item.json, 'user')} />
+          <ChatRow key={k}>
+            <div className="p-2.5 my-1 rounded-xs bg-badge text-badge-foreground whitespace-pre-line break-words">
+              {extractText(item.json, 'user')}
             </div>
-          </Row>
+          </ChatRow>
         )
       }
       if (item.label === 'thinking') {
@@ -322,60 +415,51 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
         const content = extractText(item.json, 'thinking')
         if (!content || !content.trim()) return null
         return (
-          <Row key={k} dot="default">
+          <ChatRow key={k}>
             <ThinkingItemRow content={content} />
-          </Row>
+          </ChatRow>
         )
       }
       // 기타 label(탈출구) — 접힘 generic 블록.
       return (
-        <Row key={k} dot="default">
+        <ChatRow key={k}>
           <GenericItemRow label={item.label} json={item.json} />
-        </Row>
+        </ChatRow>
       )
 
     case 'tool': {
       const result = item.id ? results.get(item.id) ?? null : null
       return (
-        <Row key={k} dot="default">
+        <ChatRow key={k}>
           <ToolItemRow name={item.name} argsJson={item.argsJson} result={result} />
-        </Row>
+        </ChatRow>
       )
     }
 
     case 'usage':
-      // 토큰 사용량 — Cline 대응물 없음. de-emphasized muted 배지 행 유지.
-      return (
-        <Row key={k} dot="default">
-          <div className="text-xs text-muted">
-            in {item.inputTokens} · out {item.outputTokens}
-          </div>
-        </Row>
-      )
+      // 토큰 사용량 — Cline 은 메시지별 토큰 칩을 표시하지 않는다(비용은 task 헤더에만). 렌더 안 함.
+      //   (누적 item 종류 자체는 유지 — 여기서 렌더만 생략.)
+      return null
 
     case 'error':
-      // 에러 — Cline ErrorRow 는 billing 특화라 부적합. 붉은 강조 행 + AlertTriangle 유지.
+      // 에러 — Cline 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
       return (
-        <Row key={k} dot="error">
-          <div className="flex items-start gap-1.5 text-[13px] text-red-500">
-            <AlertTriangle size={14} className="mt-0.5 flex-none" />
-            <span className="whitespace-pre-wrap break-words">{item.message}</span>
+        <ChatRow key={k}>
+          <RowHeader icon={AlertTriangle} title="Error" tone="error" />
+          <div className="text-[13px] text-red-500 whitespace-pre-wrap break-words">
+            {item.message}
           </div>
-        </Row>
+        </ChatRow>
       )
 
     case 'separator':
-      // 턴 경계 — 콘텐츠 컬럼의 아주 흐린 full-width divider(레일은 게터에서 계속 이어짐).
-      return (
-        <Row key={k} dot="none">
-          <div aria-hidden className="border-t border-border opacity-25" />
-        </Row>
-      )
+      // 턴 경계 — Cline 은 점선 레일/구분선이 없다. 아주 옅은 세로 스페이서만(눈에 띄는 divider 지양).
+      return <div key={k} aria-hidden className="h-3" />
   }
 }
 
 /**
- * ADR-0048: 구조화 채팅 렌더 — 좌측 점선 타임라인 레일 + 항목별 Cline 이식 컴포넌트.
+ * ADR-0048: 구조화 채팅 렌더 — Cline 실제 채팅 구조(flat 세로 스택, 점선 레일 없음)로 항목별 dispatch.
  * items 를 한 번 pre-scan 해 tool_use_id → tool_result 맵을 만들고(도구 OUT 흡수), standalone tool_result
  * 는 제외. streaming(턴 활성)이면 스트림 끝에 Cline ThinkingRow(isStreaming shimmer)를 붙인다.
  * 순수 렌더(props in, DOM out).
@@ -388,16 +472,20 @@ export function StructuredTextView({
   streaming?: boolean
 }) {
   const results = buildToolResultMap(items)
+  // 스트리밍 라이브 신호는 콘텐츠가 있을 때만(빈 슬롯에 Thinking shimmer 뜨는 오작동 방지 — 지시 명세).
+  const hasContent = items.length > 0
   return (
-    <div className="flex flex-col px-3 py-3 font-sans text-foreground">
+    // text-[13px] leading-[1.25] — Cline 전역 폰트/줄간격(VSCode 13px + body line-height 1.25)을 채팅 루트에만
+    //   스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
+    <div className="flex flex-col pb-3 font-sans text-foreground text-[13px] leading-[1.25]">
       {items.map((item) => renderItem(item, results))}
-      {streaming && (
+      {streaming && hasContent && (
         // ★streaming 라이브 신호★ — Cline ThinkingRow 의 isStreaming(shimmer 제목) affordance. 스트림 끝에서만.
         //   ★FIX 3★: 안정 key — 없으면 streaming 토글 시 직전 실 item 이 이 행과 자리 매칭돼 remount 되며
         //   로컬 expand state 를 잃는다. 리스트 밖 고정 노드라 상수 key 로 정체성을 못박는다.
-        <Row key="__streaming__" dot="default">
+        <ChatRow key="__streaming__">
           <ThinkingRow showTitle isVisible isExpanded={false} isStreaming title="Thinking" />
-        </Row>
+        </ChatRow>
       )}
     </div>
   )

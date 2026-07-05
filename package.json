@@ -30,7 +30,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.23.0",
-    "marked": "^15.0.12",
     "monaco-editor": "^0.55.1",
     "react": "^19.0.0",
     "react-arborist": "^3.9.0",

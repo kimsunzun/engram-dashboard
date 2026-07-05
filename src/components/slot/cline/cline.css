@@ -3,7 +3,9 @@
    Changes: ported the `.inline-markdown-block` styling from Cline theme.css; remapped VSCode-derived tokens
    (bg-code / text-preformat / bg-code-block-background / border-text-separator / border-border-panel / bg-list-hover /
    bg-diff-added / bg-diff-removed) to our data-theme CSS variables (--bg-secondary / --text / --border / --accent).
-   The syntax-highlight palette comes from the imported highlight.js theme below. */
+   Also restored Cline's @layer base rules that were missed in the initial port (index.css:15-71): paragraph margins,
+   heading sizes (h1-h4), and list markers (ul/ol) — Tailwind preflight strips these, so they must be re-declared here
+   scoped to `.inline-markdown-block`. The syntax-highlight palette comes from the imported highlight.js theme below. */
 
 @import 'highlight.js/styles/github-dark.css';
 
@@ -22,6 +24,9 @@
 	padding: 10px 10px;
 	max-width: calc(100vw - 20px);
 	padding-right: 70px;
+	/* 코드 블록 줄 리듬 — Cline 의 전역 `span { leading-5 }` 가 하이라이트 코드 라인 박스를 20px 로 밀어
+	   낸다. 우리는 그 span 규칙을 전역 이식하지 않으므로 pre 에 직접 박아 같은 줄간격을 얻는다. */
+	line-height: 20px;
 }
 
 .inline-markdown-block pre > code .hljs-deletion {
@@ -49,7 +54,41 @@
 .inline-markdown-block li,
 .inline-markdown-block ol,
 .inline-markdown-block ul {
-	line-height: 1.375;
+	line-height: 1.25; /* Cline leading-tight (theme.css:319-324) */
+}
+
+/* 문단 여백 — Cline 의 순-효과(net effect)를 직접 재현한다.
+   Cline: base layer `p { margin-block: 1em }` 를 채팅에선 유틸(`[&>p]:mt-0`·`[&_p]:mb-0`)이 상쇄해
+   최상위 문단은 0/0(밀집), li·blockquote 안의 중첩 문단만 margin-top 1em/bottom 0 이 남는다.
+   ★왜 유틸에 안 맡기고 여기서 직접 박나(load-bearing)★: cline.css 는 layer 밖(unlayered) CSS 라
+   Tailwind v4 의 `@layer utilities` 유틸(`[&>p]:mt-0` 등)보다 캐스케이드에서 무조건 이긴다(specificity
+   무관, unlayered > layered). 그래서 여기서 p 에 margin 을 주면 그 유틸로 못 지운다 → 순-효과를 직접 쓴다.
+   우리 DOM: `<div class="inline-markdown-block"><div ...>` 이라 `> div > p` = 최상위 문단.
+   결과: 최상위 0/0, 중첩 1em/0 = Cline 정확 일치. */
+.inline-markdown-block p {
+	margin: 1em 0 0 0;
+}
+.inline-markdown-block > div > p {
+	margin-top: 0;
+}
+
+/* 제목 크기 — Cline index.css:41-56(스코프). 기준 폰트는 블록의 13px.
+   (h5/h6 은 Cline 도 정의하지 않아 의도적으로 미정의로 둔다.) */
+.inline-markdown-block h1 {
+	font-size: 1.5em;
+	font-weight: 600;
+}
+.inline-markdown-block h2 {
+	font-size: 1.25em;
+	font-weight: 600;
+}
+.inline-markdown-block h3 {
+	font-size: 0.95em;
+	font-weight: 600;
+}
+.inline-markdown-block h4 {
+	font-size: 1em;
+	font-weight: 700;
 }
 
 .inline-markdown-block hr,
@@ -57,6 +96,16 @@
 .inline-markdown-block ol {
 	margin: 0.75rem 0;
 	margin-left: 1.25rem;
+}
+
+/* 리스트 마커 — Cline index.css:61-66. Tailwind preflight 가 list-style 을 제거하므로 다시 켠다. */
+.inline-markdown-block ul {
+	list-style: disc;
+	padding-left: 0.75rem;
+}
+.inline-markdown-block ol {
+	list-style: decimal;
+	padding-left: 0.75rem;
 }
 
 .inline-markdown-block li > ul,
@@ -79,7 +128,9 @@
 }
 
 .inline-markdown-block th {
-	background: color-mix(in srgb, var(--bg-secondary) 20%, transparent);
+	/* 헤더 배경 — bg-secondary 20% 는 앱 배경(#0a0a0a) 위에서 사실상 안 보인다 → text-muted 기반으로
+	   바꿔 눈에 띄게(헤더/본문 구분 복원). */
+	background: color-mix(in srgb, var(--text-muted) 18%, transparent);
 	font-weight: 600;
 }
 

@@ -5,11 +5,35 @@
 //   (InlineCodeWithFileCheck + remarkMarkPotentialFilePaths dropped; inline code renders as plain <code>);
 //   removed MermaidBlock and UnsafeImage (not ported — mermaid fences and <img> fall back to default rendering).
 //   Kept the react-markdown render path, remark-gfm/remarkPreventBoldFilenames/remarkUrlToLink plugins, the
-//   code-lang normalizer, PreWithCopyButton (WithCopyButton), and MarkdownBlock/MemoizedMarkdownBlock exports.
+//   code-lang normalizer, and PreWithCopyButton (WithCopyButton). (3) Added stripZeroWidth() sanitization of the
+//   markdown string before rendering (zero-width chars from model stream output broke fenced-code detection).
 //   The `.inline-markdown-block` styling lives in ./cline.css (token-mapped to our theme; imports the hljs palette).
-import { marked } from 'marked'
+//
+//   FIX (multi-block markdown rendering) — 2026-07: a heading + GFM table + fenced code block rendered as a single
+//   raw <pre> (##/pipes/``` shown as literal text), while simple paragraphs/lists/bold worked. Two compounding root
+//   causes, both removed here:
+//     (1) parseMarkdownIntoBlocks (Cline's streaming-perf split via marked.lexer, rendered per-block through
+//         SEPARATE <ReactMarkdown> instances) is fragile: whenever the whole doc is uniformly indented (≥4 spaces)
+//         or collapses to a list context, marked.lexer returns a SINGLE `code` token, so the entire response
+//         renders as one literal <pre> (exactly the observed single-raw-pre with rehype-highlight classes, no
+//         <h2>/<table>). We now render the ENTIRE markdown through ONE <ReactMarkdown> — no block-splitting — so
+//         the top-level structure is always parsed by remark as one coherent document.
+//     (2) The output was wrapped in an inline <span> (display:inline) that contained block-level h2/table/pre —
+//         illegal block-in-inline nesting that mis-renders in a real WebView. Now wrapped in a block <div>.
+//   Dropped the marked dependency and the MemoizedMarkdown/MemoizedMarkdownBlock split exports (no longer needed).
+//
+//   FIX (zero-width chars break fenced code) — 2026-07: real model output (streamed) carried a U+200B ZERO WIDTH
+//   SPACE immediately before each ``` fence (charcodes [...,8203,96,96,96,...]). A fenced-code opener in
+//   CommonMark/micromark must be 0–3 spaces then the backticks; a ZWSP is a NON-space character, so the opener
+//   check fails and micromark instead parses the two ``` markers as an INLINE code-span pair. AST-confirmed: with
+//   the ZWSP the mdast is `paragraph > text "<U+200B>" + inlineCode` (renders as <p><U+200B><code>js
+//   console.log(9) <U+200B></code></p>);
+//   after stripping it, the node is a proper `code lang="js"` block. (Heading/table survived either way, but the
+//   code block did not.) The ZWSP almost certainly originates upstream in the model's stream output / backend
+//   decoder — the fix here is DEFENSIVE frontend sanitization so ALL markdown rendering is protected. See
+//   stripZeroWidth below.
 import type { ComponentProps } from 'react'
-import React, { memo, useMemo, useRef } from 'react'
+import React, { memo, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight, { type Options } from 'rehype-highlight'
 import remarkGfm from 'remark-gfm'
@@ -19,68 +43,22 @@ import { cn } from '@/lib/utils'
 import { WithCopyButton } from './CopyButton'
 import './cline.css'
 
-function parseMarkdownIntoBlocks(markdown: string): string[] {
-	try {
-		const tokens = marked.lexer(markdown)
-		return tokens?.map((token) => token.raw)
-	} catch {
-		return [markdown]
-	}
-}
-
-const MemoizedMarkdownBlock = memo(
-	({ content }: { content: string }) => {
-		return (
-			<ReactMarkdown
-				components={{
-					pre: ({ children, ...preProps }: React.HTMLAttributes<HTMLPreElement>) => {
-						return <PreWithCopyButton {...preProps}>{children}</PreWithCopyButton>
-					},
-					code: (props: ComponentProps<'code'> & { [key: string]: any }) => {
-						return <code {...props} />
-					},
-				}}
-				rehypePlugins={[[rehypeHighlight as any, {} as Options]]}
-				remarkPlugins={[
-					[remarkGfm, { singleTilde: false }],
-					remarkPreventBoldFilenames,
-					remarkUrlToLink,
-					() => {
-						return (tree: any) => {
-							visit(tree, 'code', (node: any) => {
-								if (!node.lang) {
-									node.lang = 'javascript'
-								} else if (node.lang.includes('.')) {
-									node.lang = node.lang.split('.').slice(-1)[0]
-								}
-							})
-						}
-					},
-				]}>
-				{content}
-			</ReactMarkdown>
-		)
-	},
-	(prevProps, nextProps) => {
-		if (prevProps.content !== nextProps.content) return false
-		return true
-	},
-)
-
-MemoizedMarkdownBlock.displayName = 'MemoizedMarkdownBlock'
-
-const MemoizedMarkdown = memo(({ content, id }: { content: string; id: string }) => {
-	const blocks = useMemo(() => parseMarkdownIntoBlocks(content), [content])
-	return blocks?.map((block, index) => <MemoizedMarkdownBlock content={block} key={`${id}-block_${index}`} />)
-})
-
-MemoizedMarkdown.displayName = 'MemoizedMarkdown'
-
 interface MarkdownBlockProps {
 	markdown?: string
 	compact?: boolean
 	showCursor?: boolean
 }
+
+// Defensive sanitization: strip invisible zero-width characters before markdown parsing.
+// WHY: real model stream output injected U+200B ZERO WIDTH SPACE right before ``` fences; because a fenced-code
+//   opener must be 0–3 SPACES then the backticks, a non-space ZWSP makes micromark miss the fence and instead
+//   parse the two ``` as an inline code span — the code block collapses into a paragraph. These chars are never
+//   semantically meaningful in our (trusted) assistant/thinking markdown, so removing them is safe and makes
+//   rendering robust regardless of where upstream (stream decoder/backend) leaked them. Covers: U+200B ZWSP,
+//   U+200C ZWNJ, U+200D ZWJ, U+2060 WORD JOINER, U+FEFF ZWNBSP/BOM.
+//   (Written as \u escapes on purpose — literal zero-width chars in the source are an invisible edit hazard.)
+const ZERO_WIDTH_RE = /[\u200B\u200C\u200D\u2060\uFEFF]/g
+const stripZeroWidth = (text: string): string => text.replace(ZERO_WIDTH_RE, '')
 
 /**
  * Custom remark plugin that converts plain URLs in text into clickable links
@@ -200,15 +178,53 @@ const PreWithCopyButton = ({ children, ...preProps }: React.HTMLAttributes<HTMLP
 }
 
 const MarkdownBlock = memo(({ markdown, compact, showCursor }: MarkdownBlockProps) => {
+	// FIX: block container (was an inline <span>) so block-level h2/table/pre nest legally, and a SINGLE
+	//   <ReactMarkdown> over the whole doc (no marked.lexer block-splitting) so multi-block structure survives.
+	// FIX: strip zero-width chars BEFORE parsing — a leaked U+200B before a ``` fence otherwise makes micromark
+	//   miss the fenced-code opener (see stripZeroWidth). Applies to the whole doc so every construct is protected.
+	const clean = markdown ? stripZeroWidth(markdown) : markdown
 	return (
 		<div className="inline-markdown-block">
-			<span
-				className={cn('inline [&>p]:mt-0', {
+			<div
+				className={cn('[&>p]:mt-0', {
 					'inline-cursor-container': showCursor,
-					'[&>p]:m-0': compact,
+					// compact 전달 경로 미구현(현재 호출자 없음) + cline.css 언레이어드 규칙이 @layer utilities를 이기므로
+					// 중첩 <p>의 margin-top: 1em은 완전히 억제되지 않는다 — 향후 호출자가 생기면 이 제한을 확인할 것.
+				'[&>p]:m-0': compact,
 				})}>
-				{markdown ? <MemoizedMarkdown content={markdown} id="markdown-block" /> : markdown}
-			</span>
+				{clean ? (
+					<ReactMarkdown
+						components={{
+							pre: ({ children, ...preProps }: React.HTMLAttributes<HTMLPreElement>) => {
+								return <PreWithCopyButton {...preProps}>{children}</PreWithCopyButton>
+							},
+							code: (props: ComponentProps<'code'> & { [key: string]: any }) => {
+								return <code {...props} />
+							},
+						}}
+						rehypePlugins={[[rehypeHighlight as any, {} as Options]]}
+						remarkPlugins={[
+							[remarkGfm, { singleTilde: false }],
+							remarkPreventBoldFilenames,
+							remarkUrlToLink,
+							() => {
+								return (tree: any) => {
+									visit(tree, 'code', (node: any) => {
+										if (!node.lang) {
+											node.lang = 'javascript'
+										} else if (node.lang.includes('.')) {
+											node.lang = node.lang.split('.').slice(-1)[0]
+										}
+									})
+								}
+							},
+						]}>
+						{clean}
+					</ReactMarkdown>
+				) : (
+					clean
+				)}
+			</div>
 		</div>
 	)
 })
