@@ -18,8 +18,6 @@ description: 변경물을 Advocate(옹호·강화) vs Adversary(공격·대척) 
 - **불일치 → 사용자.** Advocate·Adversary가 정면으로 갈리면 메인이 임의 확정하지 않고 사용자에게 쟁점을 보고한다 — 메인은 자기 family 편향이 있어 사람이 백스톱이다.
 - **escalation-only.** 시작 강도가 하한이다. 도중 위험 트리거를 발견하면 상위로만 승격하고 알린다 — 임의 하향 금지.
 
-역할→모델·effort = 전역 사전(`I:\Engram\core\claude-global-shared\references\dictionary.md`) 참조. 본문·절차는 역할명으로만 말한다.
-
 ## 강도 (언제)
 
 > 정본 = `references/flow.md` 강도표(리뷰어 인원·깊이). 아래는 "강도·언제"만 — 여기 안 베낀다(rot 방지).

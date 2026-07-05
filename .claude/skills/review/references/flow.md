@@ -2,11 +2,11 @@
 
 `$ARGUMENTS` = 단계 `prd`|`trd`|`code`|`doc` [+ 강도 `self`|`light`|`full`|`deep`] — 둘 다 옵션. 어떤 단계·강도로 도는지 호출 시 사용자에게 한 줄 명시한다.
 
-역할→모델·effort = 전역 사전(`I:\Engram\core\claude-global-shared\references\dictionary.md`) 참조. 본문·절차는 역할명으로만 말한다. 두 리뷰어 슬롯 = **doc-aware 리뷰어**(맥락·ADR 주입) · **cross-family(blind) 리뷰어**(결정 근거 없이 신선 판단). 두 슬롯은 다른 family다.
+두 리뷰어 슬롯 = **doc-aware 리뷰어**(맥락·ADR 주입) · **cross-family(blind) 리뷰어**(결정 근거 없이 신선 판단). 두 슬롯은 다른 family다.
 
-## 0. cross-family(blind) 리뷰어 가용성 확인 (스폰 전 체크)
+## 0. 『cross-family(blind) 리뷰어』 가용성 확인 (스폰 전 체크)
 
-`mcp__codex__codex` MCP가 이 세션에 연결됐는지 확인한다. 리뷰어 구성에 cross-family(blind) 슬롯이 포함될 때 필요하다 — full·deep은 항상, light는 §2 표에서 그 단계 Adversary가 blind인 경우(prd)만.
+『cross-family(blind) 리뷰어』의 바인딩(전역 사전 "호출" 열의 MCP 툴)이 이 세션에 연결됐는지 확인한다. 리뷰어 구성에 cross-family(blind) 슬롯이 포함될 때 필요하다 — full·deep은 항상, light는 §2 표에서 그 단계 Adversary가 blind인 경우(prd)만.
 
 **미연결이면 즉시 사용자에게 알리고 진행 여부를 확인한다:**
 > "cross-family(blind) 리뷰어가 연결되지 않았습니다 — 단독 family 리뷰만 가능합니다(교차검증 불성립). 계속 진행할까요, 연결 후 재실행할까요?"
@@ -65,10 +65,10 @@
 
 ## 3. 리뷰어 스폰 (병렬 · 강도에 맞게)
 
-- full 이상: Advocate·Adversary를 **한 메시지에 동시 스폰**(병렬). cross-family(blind) 리뷰어 = `mcp__codex__codex`, doc-aware 리뷰어 = Agent 서브에이전트. (Agent 서브에이전트 불가 환경에서만 fallback으로 메인이 doc-aware 별도 패스 — 단 메인이 생산에 관여했으면 fresh 위반이니 주의.)
+- full 이상: Advocate·Adversary를 **한 메시지에 동시 스폰**(병렬). 두 슬롯의 호출 바인딩(MCP 툴·Agent 모델) = 전역 사전 "호출" 열이 정본 — 『cross-family(blind) 리뷰어』·『doc-aware 리뷰어』를 사전대로 푼다. (Agent 서브에이전트 불가 환경에서만 fallback으로 메인이 doc-aware 별도 패스 — 단 메인이 생산에 관여했으면 fresh 위반이니 주의.)
 - **blind 렌즈에는 결정 근거·관련 ADR을 주지 않는다** — 신선한 판단이 그 렌즈의 가치다(주면 앵커링으로 신선도가 죽는다). doc-aware 렌즈에는 §1에서 추린 ADR·불변식을 함께 준다.
 - 각 리뷰어는 **판정 + 항목별 근거만 구조화 반환**한다(verbose 덤프 회수 금지). 메인은 결론만 회수해 취합한다.
-- **effort** = 전역 사전 참조(리뷰어 high). 메인 세션 = xhigh(무가드 통합 노드). cross-family(blind) 리뷰어는 medium 기본 — 동시성·lifetime 치명 변경만 high.
+- **effort** = 전역 사전 참조(리뷰어 high). 메인 세션 = xhigh(무가드 통합 노드). 『cross-family(blind) 리뷰어』는 medium 기본 — 동시성·lifetime 치명 변경만 high.
 
 각 스폰 프롬프트 최소 골격(빠짐없이 채운다):
 - **역할** — §2 표의 그 단계 렌즈(예: "trd Architect-breaker — 불변식·결합·ADR 위반 공격").

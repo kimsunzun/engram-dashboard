@@ -1,26 +1,41 @@
 ---
 name: research
-description: 조사 수집자(주계열)가 수집·합성하고 메인이 grounding으로 검증한 뒤, 종합·논쟁·confident-wrong 위험이 있으면 cross-family(blind) 리뷰어가 산출물을 적대 리뷰해 출처 단 보고서를 만든다. 깊은 사실 조사·업계 관행·기술 비교처럼 한 모델만 믿기 불안한 리서치에 사용 — 단발 사실은 light, 종합·논쟁은 medium+, 고위험·비가역은 deep. 트리거 /research "<주제>" [light|medium|deep].
+description: 조사 수집자(주계열)가 수집·합성하고 메인이 grounding으로 검증한 뒤, 종합·논쟁·confident-wrong 위험이 있으면 cross-family(blind) 리뷰어가 산출물을 적대 리뷰해 출처 단 보고서를 만든다. 깊은 사실 조사·업계 관행·기술 비교처럼 한 모델만 믿기 불안한 리서치에 사용 — 단발 사실은 light, 종합·논쟁은 medium+, 고위험·비가역은 deep. 트리거 /research [<서브클래스>] [<주제>] [light|medium|deep] — 주제 생략 시 대화 컨텍스트에서 추론.
 ---
 
 # Research
 
 조사 수집자(주계열) 팬아웃이 수집·합성하고 메인이 grounding으로 검증한 뒤, 종합·논쟁·confident-wrong 위험이 큰 산출물만 cross-family(blind) 리뷰어가 적대 리뷰해 출처 단 보고서를 만든다. 핵심은 라우팅 — 강도(light/medium/deep)로 싸게 단일 수집으로 끝낼지 vs 적대 리뷰로 검증할지를 가른다.
 
-**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 조사/리뷰 에이전트 스폰 금지.** 전체 절차·강도표·라우팅 가이드·가드레일이 거기 있다. `$ARGUMENTS` = 조사 주제(+선택적 강도). 없으면 사용자에게 묻고, 강도 미지정이면 라우팅 가이드로 추정(기본 medium).
+**실행 전 `references/flow.md`를 반드시 Read 한다 — 안 읽고 조사/리뷰 에이전트 스폰 금지.** 전체 절차·강도표·라우팅 가이드·가드레일이 거기 있다.
+
+## 서브클래스 조합 (런타임 — 스폰 전 반드시 수행)
+
+이 스킬은 **Base(flow.md) + 선택된 서브클래스**로 완성된다. Base는 스택·프로젝트를 모르는 범용 엔진이고, 서브클래스가 프로젝트 특화(제약 문서 위치·출처 우선순위·산출물 저장 위치)를 채운다.
+
+**인자 파싱 (`$ARGUMENTS` — 위치가 아니라 어휘로 판별, 셋 다 생략 가능):**
+1. 첫 토큰이 `references/subclasses/`에 있는 파일명(확장자 제외)과 일치하면 → **서브클래스**(폴더가 가용 목록의 정본). 일치 없으면 서브클래스 없음(Base 실행) — 명백한 오타 변형은 의도한 서브클래스로 해석해도 되며, 어떻게 해석했든 4의 시작 선언이 드러낸다.
+2. **마지막 토큰**이 정확히 `light|medium|deep`이면 → **강도**(마지막 토큰 한정 — 주제 속 단어와 혼동 금지).
+3. **남은 전부 = 주제.** 비어 있으면 **대화 컨텍스트에서 조사 대상을 추론**한다 — 후보가 없거나 여럿이면 그때만 되묻는다(무인자 호출이 흔한 기본 경로).
+4. 강도 미지정 → 라우팅 가이드로 추정(기본 medium). 시작 시 "주제 X · tier Y[· 서브클래스 Z]로 진행"을 한 줄 명시한다(파싱·추론 오류의 즉시 정정 지점).
+
+**조합 절차 (메인 실행자 — 순서대로, 건너뛰기 금지):**
+1. `references/flow.md`(Base)를 Read 한다.
+2. 서브클래스가 선택됐으면 `references/subclasses/<서브클래스>.md`도 Read 한다.
+3. Base 안에 **🕳HOLE**로 표시된 지점을 서브클래스 내용으로 채운다. 서브클래스에 없는 HOLE은 Base 기본값(범용)으로 둔다.
+4. **🔒SEALED**로 표시된 불변식은 서브클래스가 못 덮는다 — 서브클래스가 이를 약화·생략하려 하면 **무시하고 사용자에게 "서브클래스가 sealed 불변식 X를 덮으려 함 — 무시함"을 보고**한다.
+5. 서브클래스 없이 호출되면 Base만으로 실행한다(범용 리서치 — 프로젝트 특화 없음, 유효한 실행).
 
 ## 핵심 설계 (불변)
 
 - **라우팅 = 핵심 산출.** 강도가 "싸게 단일 수집이냐 vs 적대 리뷰냐"를 가른다: findable-fact → light, 종합·논쟁·confident-wrong 위험 → medium+, 비가역·고위험 → deep. (정량 = `references/flow.md`)
-- **수집 = 단일 조사 수집자(주계열) + calibration.** 수집자는 모르면 기권하고 honest 확신도를 단다. 이 규칙이 옛 이중 수집 교차의 사실검증 몫을 대부분 대체한다 — 현대 모델은 obscure 사실에 확신-환각 대신 기권으로 self-calibrate하므로. cross-family 병렬 수집은 deep 옵션으로만 둔다.
+- **수집 = 단일 조사 수집자(주계열) + calibration.** 수집자는 모르면 기권하고 honest 확신도를 단다(현대 모델은 obscure 사실을 확신-환각 대신 기권한다 — 단일 수집으로 충분). cross-family 병렬 수집은 deep 옵션으로만.
 - **grounding = 메인 외부 체크, 상시 ON.** 클레임↔출처 함의는 수집자 셀프 체크가 아니라 메인이 외부에서 검증한다 — 모든 tier(light 포함). medium↑에선 cross-family(blind) 리뷰어도 load-bearing 함의를 스팟 재검증한다(같은 family는 메인 오독을 못 잡음 — 2차 방어선).
 - **cross-family(blind) 리뷰어 = 적대 리뷰어(수집자 아님).** medium↑에서 합성 산출물을 때린다 — 근거 없는 주장·과장·오귀속·논리공백·confident-wrong·완전성/누락. 값어치는 수집 이중화가 아니라 합성 결과 적대 리뷰다 — 같은 family는 self-consistency로 confident-wrong을 무르게 본다. 누락은 부분적으로만 되찾으니 누락이 결론을 가르면 deep 독립 수집이 백스톱. 레벨 사다리·반박=반증 강제는 `references/flow.md §4`.
 - **abstention ≠ contradiction.** 한쪽이 근거 있는 답, 다른 쪽이 단지 기권이면 grounding 통과 시 채택 — 정면으로 다른 답을 낼 때만 contested. (`references/flow.md §5`)
 - **확신도 = grounding + 리뷰에서 파생.** 자기보고 %도, 수집자 합의도도 근거가 아니다. 최상위 '확실'은 독립 교차확증(제2 1차자료/deep 독립 수집 합의)이 있어야 주고, 리뷰가 공격 안 한 단일 출처는 '가능성 높음'까지. (`references/flow.md §5`)
 - **mode-aware 에스컬레이션.** 남는 load-bearing contested/미지지는 대화 모드 = 사용자 질문 / 자율 모드 = 태그 유지 + 로그. 마이너는 메인 자율. (`references/flow.md §5`)
 - **BLIND — 병렬 수집 축에만.** deep에서 cross-family 병렬 수집을 켜면 두 family는 서로 결과를 안 본다(공유하면 앵커링으로 교차 효과 소멸). 적대 리뷰는 반대로 산출물을 봐야 때린다 — BLIND는 병렬 수집에만 건다.
-
-역할→모델 = 전역 사전(`I:\Engram\core\claude-global-shared\references\dictionary.md`) 참조. 불변 = 리뷰어는 주계열과 다른 family여야 confident-wrong을 가른다.
 
 **설계-결정 모드:** 설계 착수 전 "OSS는 이 문제를 어떻게 풀었나 → 우리 뭐로 갈까" 서베이도 이 스킬이 한다 — 기본 조사에 제약 적합도 표 + 거부후보→ADR 거부대안을 더해 선택지로 끝낸다(`references/flow.md §7`).
 
@@ -34,11 +49,7 @@ description: 조사 수집자(주계열)가 수집·합성하고 메인이 groun
 | **medium**(기본) | 여러 주장 종합·해석 · 논쟁적 · 1차자료 희소 · "확신하는데 틀리면 치명" | + 적대 리뷰 of 산출물 | 출처 단 보고서 + 리뷰 결과 |
 | **deep** | 비가역 · 고비용 · 안전치명 · 출처 분쟁 예상 | + gap 반복(loop-until-dry) + 사람 백스톱 (+옵션 cross-family 병렬수집) | 인용 보고서 + 쟁점 판정 |
 
-**라우팅 가이드 (오분류가 비용/누락을 가른다):**
-- **findable-fact**(단발·웹서 즉답·저위험) → **light**. 리뷰는 낭비(둘 다 같은 웹 → 교차 이득 0·비용 2배).
-- **종합·비교·논쟁·confident-wrong 위험** → **medium+**.
-- **비가역·고위험·안전치명** → **deep**. 사람 백스톱 필수 (+옵션 cross-family 병렬 수집).
-- 애매하면 medium. tier 트리거 = 되돌리기 비용·불확실성·confident-wrong 가능성·출처 분쟁 가능성(클수록 위 tier, escalation-only). 'findable-fact로 보이지만 확신-오류 위험이 커 light 금지'인 부류(버전·법규·통계 등)의 전체 목록은 `references/flow.md` 라우팅 가이드가 정본.
+**라우팅 판별 기준·오라우팅 함정("light처럼 보이지만 medium+" 부류 포함) = `references/flow.md` 라우팅 가이드 정본.** 애매하면 medium, escalation-only(하향 금지).
 
 ## 실행 중 자기보고
 
