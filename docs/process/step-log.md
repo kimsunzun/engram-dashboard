@@ -593,6 +593,17 @@
 - **QA(`/qa full`):** 프론트 기계 게이트 PASS(tsc clean · vitest 235 · vite build). **GUI 실측 PASS**(cdp) — Json 에이전트 슬롯 배치 → 새 메시지 → **Cline MarkdownBlock이 실제 마크다운(불릿 ul/li + `**bold**` strong) 라이브 렌더** + usage 칩 + idle 배지 정상. 스샷 `phase2-cline-port.png`. (Rust workspace 게이트는 프론트 전용 변경 + 미커밋 이전세션 Rust 있어 스코프 밖 — 드리프트 self-report.)
 - **잔여:** ① **mount replay 빈 버그 재현**(Running·히스토리 있으나 배치 직후 공백, 새 메시지 보내야 참) = 다음 작업 ② 중복 tool id last-write-wins = claude엔 무해(id 유일+dedup, 코드 주석) 보류 ③ 마크다운 불릿 마커(•) Tailwind reset로 비표시 = CSS 폴리시 후속 ④ 도구블록 InertCode 단순 = 하이라이트+이스케이프 리파인 후속.
 
+### 채팅 렌더 Cline 시각 충실도 완성 + JSON thinking 기본 활성화 + ADR-0049 (2026-07-06, master, fable) — 구현·리뷰·QA·커밋 완료
+- **발단(사용자):** "Cline이랑 계속 동일하게 못 맞춘다 — 화면 보고 개선점 내라, 묻지 말고 딱 맞춰라" + thinking이 절대 안 나옴. 스크린샷 진단: 문단 마진 0(벽)·제목 스케일 없음·리스트 불릿 없음·유저박스 비가시(#111 on #0a0a0a)·usage 칩(Cline 미표시)·thinking 부재·빈 pre 직사각형.
+- **근본 원인 규명:** Cline 룩은 `.inline-markdown-block`(포트함)만이 아니라 **base layer**(index.css p/h1-h4/ul·ol + body 1.25 + `*{text-base}`)에 분산 — 포트 때 그 몫이 통째 누락. 추가 발견: Cline 최상위 문단 마진은 utilities 상쇄로 **순효과 0**(1em 아님 — 중첩 문단만 1em), 우리 cline.css는 unlayered라 @layer utilities를 이기므로 순효과를 CSS에 직접 박아야 함.
+- **구현(코더 opus 1 + 재수정 sonnet 2):** cline.css base layer 복원(행간 1.25·h1-h4 스케일·불릿·th 가시화·pre 20px·문단 net 재현) + StructuredTextView 루트 13px/1.25 + badge 토큰 3테마(`--badge-bg/fg`) 유저박스 + usage 렌더 제거 + marked 의존성 제거. 백엔드: claude.rs json 모드 `MAX_THINKING_TOKENS=8000` 기본 주입(스파이크 실측 후 배선, 프로필 우선 explicit-skip, `// ADR-0049`).
+- **리뷰(`/review code full`, 재수정 2회):** doc-aware PASS + Codex FIX — ① env 키 비교 case-insensitive(Windows 무구분) 수정 ② 프로필 내 중복 키 정규화는 범위 밖 판정(주석 명시). 재수정 중 BOM 회귀 2건(doc-aware 델타 재리뷰 적출) → 바이트 검증으로 제거. ADR-0049는 `/review doc light` fact-check(죽은 참조·귀속 정밀화 FIX 반영).
+- **QA(`/qa full`):** workspace 게이트 green(core 143+16·protocol 42·discovery 44·daemon 82 / tsc·vitest 242·build) + cdp 실측 11 단언 전부 PASS(제목 16.25px/600·행간·불릿·th배경·pre 20px·badge 3테마 스윕·usage 부재·13px 루트). **ThinkingRow 라이브 실측 PASS**(sonnet-4-6 에이전트, 접힘→펼침·평문 1300자, `qa-thinking-sonnet.png`). env는 자식 프로세스 메모리에서 실존 확인.
+- **★업스트림 한계(중요)★:** opus-4-8은 headless stream-json에서 thinking을 **암호화(signature-only, 평문 빈 문자열)**로만 방출 — `--include-partial-messages`의 thinking_delta도 평문 없음(실측). UI는 설계대로 빈 행 억제 → **opus 에이전트에선 thinking이 계속 안 보이는 게 정상**. 평문 주는 모델(sonnet 등)에서만 가시화. ADR-0049 근거절 기록.
+- **정직 항목:** 루트 `cargo test`가 src-tauri 테스트 바이너리 DLL 로더 실패(STATUS_ENTRYPOINT_NOT_FOUND, WebView2Loader)로 중단 — 선재·변경 무관, 멤버별 전부 green(바인딩 드리프트 self-report). 격리 게이트 `rg "use tauri"`는 lib.rs:9 **주석 문자열** 1건 매치(가짜양성, 실제 import 0).
+- **부수:** QA가 구 Json 프로필(181e99d7)을 kill 과정에서 소실 → 동등 프로필 재생성(8690560a) + ThinkingRow 실측용 `JsonSonnet`(--model claude-sonnet-4-6) 프로필 추가. 빈 pre 직사각형은 fresh 대화에서 재현 안 됨(0건 — 구 대화 펜스 함정 잔재로 종결).
+- **잔여:** ① replay 빈 버그(ADR-0046 별건) ② opus thinking 가시화는 업스트림 대기(또는 "빈 thinking도 표시" 정책 = 사용자 결정 필요) ③ echo 작업(claude.rs·session.rs·mod.rs 미커밋분)은 게이트 미통과 상태로 워킹트리 유지.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

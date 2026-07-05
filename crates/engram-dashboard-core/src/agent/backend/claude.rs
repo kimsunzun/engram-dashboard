@@ -37,7 +37,7 @@ impl AgentBackend for ClaudeBackend {
         mode: SpawnMode,
         session_id: Option<Uuid>,
         cwd: PathBuf,
-        env: Vec<(String, String)>,
+        mut env: Vec<(String, String)>,
     ) -> CommandSpec {
         match command {
             AgentCommand::Claude {
@@ -82,6 +82,27 @@ impl AgentBackend for ClaudeBackend {
                             //   "session already in use" 로 거부한다.
                             args.push("--session-id".to_string());
                             args.push(sid.to_string());
+                        }
+                        // ADR-0049: json(stream-json) 슬롯은 thinking 블록을 접힘 행으로 표시하는 파이프가
+                        //   이미 있는데(decoder → Structured{kind:"thinking"} → 프론트 ThinkingRow), claude CLI 는
+                        //   기본으로 thinking 을 켜지 않는다 — 실측(2026-07-06, claude 2.1.170): 헤드리스
+                        //   stream-json 은 env MAX_THINKING_TOKENS 가 있어야 "type":"thinking" 블록을 낸다.
+                        //   그래서 json 모드에 한해 기본값 8000 을 주입해 extended thinking 을 켠다(터미널/대화형
+                        //   경로는 CLI parity 유지 — 여기서 건드리지 않는다).
+                        // ★프로필 우선(explicit-skip)★: 프로필이 같은 키를 이미 설정했으면 주입을 건너뛴다 —
+                        //   env 는 (k,v) Vec 이고 transport 가 순서대로 cmd.env(k,v) 하므로 뒤가 이기지만,
+                        //   병합 순서에 기대지 않고 "이미 있으면 건드리지 않는다"로 결정적·가독적으로 프로필이 이기게 한다.
+                        //   ★대소문자 무시(eq_ignore_ascii_case)★: Windows 환경변수는 대소문자를 구분하지 않으므로
+                        //   프로필이 `max_thinking_tokens`(소문자)로 넣어도 같은 키로 인식해 중복 주입을 막는다.
+                        //   ★프로필 내 중복 키 정규화는 이 기능 범위 밖★: 프로필 env 안에 같은 키가 여러 번 들어오는
+                        //   경우는 여기서 정규화하지 않는다 — 모든 키에 동일하게 적용되는 표준 last-wins env 의미론을
+                        //   그대로 따른다(이 기능이 한 키만 특별 처리하면 오히려 일관성이 깨진다).
+                        const MAX_THINKING_TOKENS_KEY: &str = "MAX_THINKING_TOKENS";
+                        if !env
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case(MAX_THINKING_TOKENS_KEY))
+                        {
+                            env.push((MAX_THINKING_TOKENS_KEY.to_string(), "8000".to_string()));
                         }
                     }
                 }
@@ -688,6 +709,87 @@ mod tests {
                 "터미널 모드에 json 인자 누출: {forbidden}"
             );
         }
+    }
+
+    // ── ADR-0049: json 모드 MAX_THINKING_TOKENS 기본 주입(extended thinking 활성화) ──────
+    #[test]
+    fn json_mode_injects_default_max_thinking_tokens() {
+        // json 모드는 thinking 을 켜려면 env 가 필요(실측). 프로필이 안 주면 기본 8000 을 주입해야 함.
+        let s = spec(&json(vec![]), SpawnMode::Fresh, None);
+        let vals: Vec<&str> = s
+            .env
+            .iter()
+            .filter(|(k, _)| k == "MAX_THINKING_TOKENS")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            vals,
+            vec!["8000"],
+            "json 모드는 기본 MAX_THINKING_TOKENS=8000 주입"
+        );
+    }
+
+    #[test]
+    fn json_mode_profile_max_thinking_tokens_wins() {
+        // ★프로필 우선(explicit-skip)★: 프로필이 같은 키를 주면 기본을 주입하지 않아 프로필 값이 유일하게 이긴다.
+        let env = vec![("MAX_THINKING_TOKENS".to_string(), "1234".to_string())];
+        let s = ClaudeBackend.build_spec(
+            &json(vec![]),
+            SpawnMode::Fresh,
+            None,
+            PathBuf::from("."),
+            env,
+        );
+        let vals: Vec<&str> = s
+            .env
+            .iter()
+            .filter(|(k, _)| k == "MAX_THINKING_TOKENS")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            vals,
+            vec!["1234"],
+            "프로필이 준 값이 유일하게 남아야 함(기본 미주입 — 정확히 1개)"
+        );
+    }
+
+    #[test]
+    fn json_mode_profile_lowercase_key_skips_injection() {
+        // ★대소문자 무시 회귀 가드★: Windows 환경변수는 대소문자 구분 없음 — 프로필이 소문자
+        // `max_thinking_tokens` 로 키를 줬을 때도 기본 8000 을 주입하지 않아야 한다.
+        // 대소문자 무감 검색(eq_ignore_ascii_case)이 없으면 uppercase KEY 와 불일치해
+        // 기본값이 추가로 주입되고, env 에 두 쌍이 생겨 프로필 의도가 무시된다.
+        let env = vec![("max_thinking_tokens".to_string(), "1234".to_string())];
+        let s = ClaudeBackend.build_spec(
+            &json(vec![]),
+            SpawnMode::Fresh,
+            None,
+            PathBuf::from("."),
+            env,
+        );
+        // 대소문자 무시로 스캔해 MAX_THINKING_TOKENS 관련 쌍이 정확히 1개여야 한다.
+        let vals: Vec<&str> = s
+            .env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("MAX_THINKING_TOKENS"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            vals,
+            vec!["1234"],
+            "소문자 프로필 키도 중복 주입 방지 — 정확히 1개(값은 프로필 원본 1234)"
+        );
+    }
+
+    #[test]
+    fn terminal_mode_does_not_inject_max_thinking_tokens() {
+        // 터미널/대화형은 CLI parity 유지 — thinking env 주입 없음.
+        let sid = Uuid::new_v4();
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, Some(sid));
+        assert!(
+            !s.env.iter().any(|(k, _)| k == "MAX_THINKING_TOKENS"),
+            "터미널 모드에 MAX_THINKING_TOKENS 주입 금지"
+        );
     }
 
     // ── ADR-0044/0004: 입력 wrapping(stdin 유저 턴 JSON) 골든 ─────────────────────
