@@ -8,7 +8,7 @@
 
 import { createRoot } from 'react-dom/client'
 import { useState, useRef, useEffect } from 'react'
-import { parseStreamJson } from './richslot/parse'
+import { parseStreamJson } from './richslot/fixtureParse'
 import { LAYOUTS, type LayoutKey } from './richslot/layouts'
 import { PRESETS, applyPreset } from './richslot/presets'
 import {

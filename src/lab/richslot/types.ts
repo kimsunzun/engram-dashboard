@@ -22,10 +22,10 @@ export interface RichMessage {
   role: 'assistant' | 'user'
   blocks: ContentBlock[]
   /**
-   * assistant 메시지의 `message.id`(Anthropic API 메시지 id). 라이브 누산(streamParse)에서
-   * 같은 id 로 재출현하는 assistant 라인의 블록을 이 메시지에 이어붙이는 병합 키다(ADR-0044:
-   * 실측 fixture 상 같은 id 라인들은 disjoint 블록 배치라 concat 이 옳다). fixture 통짜 파싱
-   * (parseStreamJson)은 채우지 않을 수 있어 optional — 렌더층은 이 필드에 의존하지 않는다.
+   * assistant 메시지의 `message.id`(Anthropic API 메시지 id). fixture 통짜 파서(fixtureParse)가
+   * 채우는 병합/식별 키(있으면 CardLayout 등이 tool_use↔result 를 id 로 페어링). 라이브 tag1 경로는
+   * 이 타입을 안 쓰므로(structuredAccumulator 는 StructuredItem 산출) fixture 렌더에만 의미. optional —
+   * 렌더층(layouts)은 이 필드에 의존하지 않는다.
    */
   id?: string
 }

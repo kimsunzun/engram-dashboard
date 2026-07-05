@@ -6,15 +6,16 @@
 //     TerminalSlot 과 같은 구독 규율로 받아(효과 deps [agentId,epoch], seq dedup, replay, 정확한 해제)
 //     StructuredEventAccumulator 로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송, Shift+Enter=줄바꿈).
 //
-// ★S15 소스 전환(ADR-0045)★: 라이브 누산 소스가 S14 NDJSON 바이트(StreamAccumulator)에서 tag1
+// ★S15 소스 전환(ADR-0045)★: 라이브 누산 소스가 S14 NDJSON 바이트 파서에서 tag1
 //   StructuredEvent(StructuredEventAccumulator)로 바뀌었다. 백엔드가 출력을 정제해 self-describing
-//   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. tag0(터미널 바이트)이 이
-//   슬롯에 오면 무시한다(구조화 슬롯이라 렌더 대상 아님 — tag 게이트). NDJSON 통로/StreamAccumulator 는
-//   fixture 스파이크(FixtureRichSlot)가 계속 쓰므로 남긴다.
+//   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. 구 NDJSON 라이브 파서
+//   (lab/richslot/streamParse·parse)는 S15 F5 에서 제거됐고, fixture 스파이크(FixtureRichSlot)는 통짜
+//   파서(lab/richslot/fixtureParse)만 쓴다. tag0(터미널 바이트)이 이 슬롯에 오면 무시한다(구조화 슬롯이라
+//   렌더 대상 아님 — tag 게이트).
 //
-// ★층 분리★: 라이브 모드도 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 랩 레이아웃
-//   (ChatLayout)이 소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O
-//   배선만 한다(§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
+// ★층 분리★: 라이브 모드도 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 전용 컴포넌트
+//   (StructuredItemStream)이 소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는
+//   순수 I/O 배선만 한다(§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
 
 import { useEffect, useRef, useState } from 'react'
 
@@ -22,15 +23,15 @@ import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
-import { parseStreamJson } from '../../lab/richslot/parse'
-import { StructuredEventAccumulator } from './structuredAccumulator'
-import { LAYOUTS, ChatLayout, type LayoutKey } from '../../lab/richslot/layouts'
+import { parseStreamJson } from '../../lab/richslot/fixtureParse'
+import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
+import { StructuredItemStream } from './StructuredItemStream'
+import { LAYOUTS, type LayoutKey } from '../../lab/richslot/layouts'
 import {
   RenderSettingsProvider,
   type CodeRender,
   type DiffRender,
 } from '../../lab/richslot/renderSettings'
-import type { RichMessage } from '../../lab/richslot/types'
 import showcaseFixture from '../../lab/richslot/fixtures/showcase.jsonl?raw'
 import textFixture from '../../lab/richslot/fixtures/text.jsonl?raw'
 import toolFixture from '../../lab/richslot/fixtures/tool.jsonl?raw'
@@ -56,13 +57,9 @@ export default function RichSlot({ viewId, agentId, epoch }: RichSlotProps) {
 // ② 라이브 모드 — 실스트림 구독 + 누산 + 입력창
 // ══════════════════════════════════════════════════════════════════════════════════
 
-const LIVE_RENDER_SETTINGS: { codeRender: CodeRender; diffRender: DiffRender } = {
-  codeRender: 'plain',
-  diffRender: 'inline',
-}
-
 function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: string; epoch: number }) {
-  const [messages, setMessages] = useState<RichMessage[]>([])
+  // 순서 보존 렌더 item 스트림(text/칩/구분선) — 누산기 스냅샷을 그대로 담는다(ADR-0045 §52).
+  const [items, setItems] = useState<StructuredItem[]>([])
   const [turnDone, setTurnDone] = useState(false)
   // ★로컬 awaiting 플래그(FIX 5b)★: 전송 직후~첫 응답 바이트 도착 사이의 공백을 메운다. turnDone 은
   //   누산기가 result 라인으로만 내리므로, 직전 턴이 idle 인 상태에서 새로 보내면 첫 바이트 전까지
@@ -87,7 +84,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
   useEffect(() => {
     const acc = accRef.current
     acc.reset() // 재구독 시 이전 누적 제거 → 히스토리 replay 가 동일 상태로 재구성(StrictMode 중복도 방지)
-    setMessages([])
+    setItems([])
     setTurnDone(false)
     setAwaiting(false) // 재구독 경계에서 awaiting 초기화(스트리밍 힌트 stale 방지)
 
@@ -105,10 +102,10 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
         //   바이트를 파싱하면 깨진다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) dedup 은
         //   tag0 를 건너뛰어도 정합하다.
         if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) return
-        // tag1 payload = StructuredEvent JSON 1건 — 누산기가 파싱·누적(TextDelta 이어붙임)한다.
+        // tag1 payload = StructuredEvent JSON 1건 — 누산기가 파싱·순서 보존 item 스트림에 누적한다.
         acc.feed(chunk.bytes)
-        // 새 참조로 set(누산기 내부 배열은 불변 갱신하지만, 상위 배열 참조를 새로 떠 리렌더 보장).
-        setMessages([...acc.snapshot()])
+        // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
+        setItems([...acc.snapshot()])
         setTurnDone(acc.isTurnDone())
         setAwaiting(false) // 응답 이벤트 도착 → awaiting 해제(이후 표시는 turnDone 이 주도)
       })
@@ -129,11 +126,11 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). epoch = 재spawn 재구독 트리거.
   }, [viewId, agentId, epoch])
 
-  // 새 메시지 도착 시 하단으로 스크롤(대화 UX).
+  // 새 item 도착 시 하단으로 스크롤(대화 UX).
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages])
+  }, [items])
 
   const send = (): void => {
     // ★1 전송 == 완결된 유저 턴 1개(ADR-0044/0004)★: 텍스트 전체를 한 번에 보낸다. 백엔드 encoder 가
@@ -171,11 +168,9 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
         {isTerminated && <span style={{ color: '#c66' }}>— 종료됨</span>}
       </div>
 
-      {/* 대화 렌더(스크롤). ChatLayout = 사용자 선택 레이아웃(M0 과 동일 RenderSettingsProvider 배선). */}
+      {/* 대화 렌더(스크롤). 순서 보존 item 스트림 — text=Markdown · 칩=클릭 펼침 · 턴 경계=구분선(ADR-0045 §52). */}
       <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        <RenderSettingsProvider value={LIVE_RENDER_SETTINGS}>
-          <ChatLayout messages={messages} />
-        </RenderSettingsProvider>
+        <StructuredItemStream items={items} />
       </div>
 
       {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈. ★포커스 가드★: stopPropagation 으로 키 입력이

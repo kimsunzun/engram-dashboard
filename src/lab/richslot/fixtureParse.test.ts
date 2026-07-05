@@ -1,8 +1,9 @@
-// 파싱층 단위테스트 — 실측 fixture 로 stream-json → RichMessage[] 검증.
+// fixture 파서 단위테스트 — 실측 fixture 로 stream-json → RichMessage[] 검증.
 // 순수 함수라 jsdom 불필요. vitest 가 src/ 하위에서 자동 수집(tsconfig include:["src"]).
+// (구 parse.test.ts 의 parseStreamJson 케이스를 승계 — parseStreamLine 은 S15 F5 에서 제거됨.)
 
 import { describe, it, expect } from 'vitest'
-import { parseStreamJson, parseStreamLine } from './parse'
+import { parseStreamJson } from './fixtureParse'
 import toolFixture from './fixtures/tool.jsonl?raw'
 
 describe('parseStreamJson', () => {
@@ -41,24 +42,5 @@ describe('parseStreamJson', () => {
       '{"type":"result","subtype":"success"}\n' +
       '{"type":"rate_limit_event"}'
     expect(parseStreamJson(input)).toHaveLength(0)
-  })
-})
-
-describe('parseStreamLine', () => {
-  it('assistant 라인에서 message.id 를 병합 키로 뽑는다', () => {
-    const p = parseStreamLine(
-      '{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"}]}}',
-    )
-    expect(p).toEqual({ kind: 'message', role: 'assistant', id: 'msg_1', blocks: [{ type: 'text', text: 'hi' }] })
-  })
-
-  it('result 라인은 kind:result(턴 종료 신호)', () => {
-    expect(parseStreamLine('{"type":"result","subtype":"success"}')).toEqual({ kind: 'result' })
-  })
-
-  it('메타/비-JSON/빈 줄은 null', () => {
-    expect(parseStreamLine('{"type":"system","subtype":"init"}')).toBeNull()
-    expect(parseStreamLine('Warning: no stdin')).toBeNull()
-    expect(parseStreamLine('   ')).toBeNull()
   })
 })
