@@ -27,7 +27,7 @@ export default function PopupPage() {
         Slot {slotId} — Popup
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
-        <TerminalSlot agentId={agentId} />
+        <TerminalSlot viewId={`popup-slot-${slotId}`} agentId={agentId} />
       </div>
     </div>
   )

@@ -218,9 +218,9 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 
 ## 프론트 구조·제어 표면 (`src/`)
 
-- **제어 표면(★불변):** 컴포넌트·스토어는 `agentClient` 인터페이스(단일 `ProtocolClient`)에만 의존(`ptyApi` 직접 호출 X — ADR-0011). carrier = transport seam — 운영은 `WsTransport` 고정(데몬 attach, ADR-0029 daemon-only). 교체점은 transport(InProc은 테스트 mock·ADR-0020 흔적).
+- **제어 표면(★불변):** 컴포넌트·스토어는 `agentClient` 인터페이스(단일 `ProtocolClient`)에만 의존(`ptyApi` 직접 호출 X — ADR-0011). carrier = transport seam — 운영은 `TauriTransport` 고정(clientFactory.ts:24, ADR-0036 — 데몬 연결 단일화). 교체점은 transport(WsTransport는 테스트/직결 흔적·ADR-0020/0029).
 - `eventBus`가 Tauri 이벤트 1회 등록(agent-list-updated / status-changed / restore-result). 폴더: api · store · components(layout/agent/slot/diff) · pages. 파일별은 코드.
-- **통합 micro-rules(코드와 함께):** 구독 effect deps `[agentId, epoch]`(재spawn 시 reset→재구독→replay) · `terminal.reset()` 구독 전 · seq dedup · `delete channel.onmessage`(null 아님, #13133) · 입력 가드 · resize debounce 50ms.
+- **통합 micro-rules(코드와 함께):** 구독 effect deps `[viewId, agentId, epoch]`(viewId=slot id 구독 키·ADR-0046 뷰별 독립 진도, 재spawn 시 reset→재구독→replay) · `terminal.reset()` 구독 전 · seq dedup · replay 경계 = gen 펜스 성공 마커(ADR-0046, src-tauri 미러 제거·뷰 직결 replay) · `delete channel.onmessage`(null 아님, #13133) · 입력 가드 · resize debounce 50ms.
 
 ## 창 구성 (src-tauri/tauri.conf.json)
 창 3개: main(대시보드, visible) · slot-popup(`/popup?slotId=N`, hidden) · agent-tree(`/tree`, hidden).

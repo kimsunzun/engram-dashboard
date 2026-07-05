@@ -29,7 +29,7 @@ src-tauri 중계 허브가 데몬 ring을 미러(`AgentBufferStore`/`OutputViewS
 
 ## 영향 / 불변식
 - **삭제:** `output_channel.rs` 미러부·`output_view_store.rs`·`output_view_buffer.rs`·`resync_output`·`ReplaySlots`/`DropSlots`·프론트 `pendingBuffers`/`resubscribeAll`. `ViewLayoutRenderer` 중복 워크어라운드 제거(버그 B 근본 해소).
-- **BLOCK-1 전면화(ADR-0041 강화):** 프론트는 wire Subscribe/Unsubscribe를 어떤 경로로도 안 보냄(기존 재연결 예외 삭제). wire 구독 형성 = request_replay 단독, 정리 = 라우터 Unsubscribe 단독.
+- **BLOCK-1 전면화(ADR-0041 강화):** 프론트는 wire Subscribe/Unsubscribe를 어떤 경로로도 안 보냄(기존 재연결 예외 삭제). wire 구독 형성 = request_replay 단독, 정리 = 라우터 Unsubscribe 단독. **단, BLOCK-1(프론트 wire Subscribe 금지)은 src-tauri 허브 경로(TauriTransport) 한정** — direct-daemon carrier(WsTransport, legacy/test 전용)는 1연결=1구독이라 storm 전제가 없어 자체 wire Subscribe로 replay를 형성한다(운영 carrier 아님, clientFactory.ts:24).
 - **데몬 무변경** — R1·frame 포맷·codec 그대로(에이전트당 단일 무손실 스트림·viewer 불가지 보존).
 - **재연결 = 전량 재replay(회귀 수용)** — 기존 tail-resume 대비 대역 증가. PC 수용 근거는 위. 원격 carrier 도입 시 seam에서 재설계.
 - **mid-replay drop(데몬 outbound 포화 Error) = 현행 동등 한계** — 현행도 미소비. 데몬 Error 귀속화 후 실패 마커 승격은 백로그.

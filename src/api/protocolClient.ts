@@ -1,20 +1,23 @@
-// ProtocolClient — AgentClient 의 carrier-무관 구현 (ADR-0020 결정3, TRD Stage 3).
+// ProtocolClient — AgentClient 의 carrier-무관 구현 (ADR-0020 결정3, TRD Stage 3 · ADR-0046 뷰 직결 replay).
 //
-// 프로토콜 의미론(request_id 매칭 · seq high-water dedup · epoch 가드 · resubscribe resume ·
-// on* 이벤트 라우팅)을 **한 곳**에 모은다. carrier(전송)는 Transport 가 추상화한다 —
-// WsTransport(WS+재연결) / InProcTransport(invoke+Channel, 항상 connected). 이 클래스는
-// DaemonClient(580줄)에서 carrier-무관 로직만 승격한 것이고, WS-특정(openSocket/Auth/Hello/
-// scheduleReconnect/ws.send·onmessage/binary frame 디코드)은 WsTransport 로 분리됐다.
+// 프로토콜 의미론(request_id 매칭 · 뷰별 seq dedup · epoch 가드 · replay 경계 gen 펜스 · on* 이벤트
+// 라우팅)을 **한 곳**에 모은다. carrier(전송)는 Transport 가 추상화한다 —
+// WsTransport(WS+재연결) / TauriTransport(invoke+Channel). 이 클래스는 DaemonClient 에서 carrier-무관
+// 로직만 승격한 것이고, WS-특정(openSocket/Auth/Hello/scheduleReconnect/binary frame 디코드)은 transport 로
+// 분리됐다.
 //
-// ★InProc 무해 수렴★: dedup·resubscribe·epoch 가드는 InProc 에서도 그대로 돈다 — 재연결이
-// 없어 connectionState 가 connected 에서 안 바뀌고(resubscribe 첫 1회는 subs 비어 무해),
-// Channel 은 순서 보존이라 dedup 이 항상 통과한다. `if (inproc) skip` 우회 분기 없음(ADR-0020).
+// ★ADR-0046 재설계(S16) — 뷰 직결 replay★: src-tauri 미러 버퍼를 제거하고, remount/리로드/재연결은
+//   데몬 ring 전량 재replay 로 대체했다. 진도 상태의 유일한 거처 = **웹뷰 뷰(slot) 단위**. 그래서 subs 를
+//   agentId 가 아니라 **viewId(slot id)** 로 re-key 한다(버그 B 구조 해소 — 같은 agent 를 N 뷰가 봐도
+//   각자 독립 진도). replay 경계는 transport 가 올리는 replayBoundary 제어 이벤트(tag=255 마커의 정규화)
+//   로 판정하고, 뷰는 자기 requestReplay 가 반환한 myGen 이상의 성공 마커에만 sort+dedup flush 한다.
 
 import type {
   AgentClient,
   ConnectionState,
   OutputChunk,
   OutputSubscription,
+  ViewOutputState,
 } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import type {
@@ -25,37 +28,76 @@ import type {
   RestoreReport,
 } from './types'
 
-// ── 내부 구독 상태(DaemonClient.SubState 승격) ──────────────────────────────────────
+// ── replay 상태기계 상수(ADR-0046 §2·§4) ────────────────────────────────────────────
+/** 재요청 사다리 최대 시도(bounded — 재검증 NEW-4). 소진 시 뷰를 error 상태로 전이(무한 폭주 금지). */
+const LADDER_MAX_ATTEMPTS = 3
+/** 사다리 백오프(ms) — 시도별 지수. attempts=1→1s, 2→2s, 3→4s 뒤 재요청. */
+const LADDER_BACKOFF_MS = [1000, 2000, 4000]
+/** watchdog 만료(ms) — buffering 에서 이 시간 내 성공 마커가 안 오면 재요청(flush 아님, §2). */
+const WATCHDOG_MS = 10_000
+/**
+ * 뷰 buffering 버퍼 상한 — ring 상한의 2배(§4). 버퍼가 "이전 replay 꼬리 + 자기 replay 전체"를 담을 수
+ * 있어야 하므로(Codex 재리뷰 #5). 초과 시 부분 유지(drop-oldest) 금지 → buffer 폐기 + 재요청.
+ */
+const VIEW_BUFFER_MAX_BYTES = 4 * 1024 * 1024
+const VIEW_BUFFER_MAX_FRAMES = 8192
+
+type ViewPhase = 'buffering' | 'live' | 'error'
+
+/** 버퍼링된 frame(도착 순). flush 는 seq 오름차순 정렬 후 배달(out-of-order 방어). tag 보존. */
+interface BufferedFrame {
+  tag: number
+  seq: number
+  bytes: Uint8Array
+}
+
+/**
+ * ★replayBoundary 마커의 최소 표현★: buffering 중 myGen 미확정 시 최고 gen 1개만 보관(§2 NEW-3).
+ * epoch 는 gen 펜스 재평가에 함께 필요(구 epoch 마커 무효).
+ */
+interface HeldMarker {
+  epoch: number
+  gen: bigint
+  truncated: boolean
+  failed: boolean
+}
+
+// ── 내부 구독 상태(뷰 단위, ADR-0046 F1) ──────────────────────────────────────────────
 interface SubState {
+  /** 이 뷰가 보는 agent. fan-out 은 이 값으로 대상 뷰를 고른다(같은 agent → 모든 뷰). */
+  agentId: string
   onChunk: (chunk: OutputChunk) => void
+  /** 상태 변화 통지(옵션) — 슬롯이 error 표면화·streaming 힌트에 쓴다(LLM 제어 표면과 짝). */
+  onState?: (state: ViewPhase) => void
+  phase: ViewPhase
+  /** buffering 중 축적 프레임(도착 순). live 전이 시 sort+dedup flush 후 비운다. */
+  buffer: BufferedFrame[]
+  /** buffer 총 바이트(상한 판정). */
+  bufferBytes: number
   /**
-   * 마지막 SubscribeAck.current_epoch. output frame epoch 매칭용(불일치 frame 폐기) +
-   * 재연결 resubscribe wire epoch. undefined = 아직 Ack 못 받음(첫 구독 직후).
+   * 이 뷰의 requestReplay 가 반환한 gen. **미확정(undefined)**: invoke 응답 전(Channel 이 먼저 올 수
+   * 있음 — NEW-3). gen 펜스: 자기 myGen 이상의 성공 마커에만 flush(남의/이전 replay 조기 flush 차단).
    */
-  epoch: number | undefined
+  myGen: bigint | undefined
   /**
-   * onChunk 로 **실제 배달한** 최고 seq(high-water). 초기 -1(아무것도 배달 안 함).
-   * dedup 기준이자 재연결 after_seq. replay_from 에 의존하지 않는다(replay_from 은
-   * "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니라 off-by-one 유발 — 버그 B).
+   * myGen 미확정 중 도착한 마커를 버리지 않고 최고 gen 1개 보관(§2 NEW-3). myGen 확정 시 재평가한다.
    */
+  heldMarker: HeldMarker | undefined
+  /** onChunk 로 실제 배달한 최고 seq(high-water). 초기 -1. dedup 기준(live·flush 공통). */
   lastDeliveredSeq: number
   /**
-   * stale-unsubscribe 가드용 고유 번호표(subscribeOutput 마다 ++subSeq). 반환한 unsubscribe 는
-   * "현재 subs 엔트리가 내 token 일 때만 delete" 로 가드한다 — 재구독(epoch 교체/StrictMode)으로
-   * 새 SubState 가 들어온 뒤 늦게 온 옛 unsubscribe 가 산 구독을 지우는 걸 막는다.
+   * buffering 대상 epoch. undefined = 아직 모름(첫 frame/마커가 확정). frame(epoch 더 높음)이 오면
+   * 버퍼 폐기 + 재요청(§2). live 전이 시 성공 마커 epoch 를 채택한다.
    */
+  epoch: number | undefined
+  /** stale-unsubscribe 가드용 고유 번호표(subscribeOutput 마다 ++subSeq). */
   token: number
-  /**
-   * ★ready 게이트(FIX-2 — early set 의 seq 순서 보존)★: subs.set 은 `await ensureReady()` *이전*에
-   * 동기 실행(StrictMode 이중구독 레이스 차단)하지만, 그러면 st 가 ensureReady 대기 중에도 subs 에
-   * 올라 있어 handleOutput 이 라이브 프레임을 st.onChunk 로 **직접 배달**해 lastDeliveredSeq 를 조기
-   * 전진시킨다 → 그 뒤 flush 가 버퍼의 더 낮은 seq 프레임을 dedup(seq<=lastDeliveredSeq)으로 drop
-   * → 리로드 replay 순서 꼬임/유실. 이를 구조로 막는다: ready=false 인 동안 handleOutput 은 직접
-   * 배달 대신 pendingBuffers 로 보내고(버퍼 경유 유지), flush 직전 ready=true 로 전환한다 —
-   * 그러면 ready 전 도착 프레임은 전부 버퍼에 모여 flush 에서 seq 오름차순으로 배달되고, ready 후
-   * 프레임만 직접 배달돼 순서가 보존된다. 타이밍(ensureReady 지연/즉시)에 의존하지 않는다(ADR-0038).
-   */
-  ready: boolean
+  /** 재요청 사다리 시도 횟수(watchdog/실패마커/상한 초과 누적). remount·connected 는 0 리셋. */
+  attempts: number
+  /** 진행 중인 백오프 타이머(사다리 재요청 예약). unsubscribe·전이 시 clear. */
+  backoffTimer: ReturnType<typeof setTimeout> | null
+  /** buffering watchdog 타이머(성공 마커 없이 만료 → 재요청). live/error 전이·flush 시 clear. */
+  watchdogTimer: ReturnType<typeof setTimeout> | null
 }
 
 interface Pending {
@@ -63,57 +105,21 @@ interface Pending {
   reject: (e: unknown) => void
 }
 
-/**
- * ★구독 전 도착 프레임 버퍼(ADR-0043 deliverable 게이트의 프론트 등가물)★.
- *
- * 리로드 시 창 출력 Channel 재등록(→ Rust replay flush)이 React 컴포넌트 마운트보다 *먼저* 온다 —
- * 그때 이 agentId 에 등록된 구독자(subs 엔트리)가 아직 없어 handleOutput 이 프레임을 버리면, 그 창의
- * 슬롯은 리로드 후 빈 화면이 된다(TerminalSlot·RichSlot 공통 레이스). 구독자가 없을 때 프레임을 여기
- * 보류했다가, 첫 subscribeOutput 이 오면 seq 순서대로 flush 한다("Channel 등록된 뒤 replay flush"의 프론트
- * 등가 — Rust 는 창 단위 게이트라 개별 React 슬롯 마운트를 못 안다).
- *
- * ★epoch 인지★: epoch 가 바뀌면(재시작·데몬 재기동) 옛 스트림 잔여 프레임은 새 세션에 무의미 → 버퍼를
- *   비운다(handleOutput 의 epoch 리셋). ★bound★: agent 당 대략 2MB 넘으면 가장 오래된 프레임부터 버린다
- *   (drop-oldest) — 구독 없이 무한 성장 방지. 앞부분 손실은 어차피 리로드 후 xterm 이 전체 replay 를 새로
- *   받는 상황이라 치명적이지 않다(bound 초과는 비정상적으로 큰 버퍼 = 구독자가 영영 안 붙는 경우).
- */
-interface PendingBuffer {
-  /**
-   * 이 버퍼가 담고 있는 프레임들의 epoch. 다른 epoch 프레임이 오면 통째 교체(stale 폐기). bufferPending
-   * 내부 구분용일 뿐 — flush 시 st.epoch 로 심지 않는다(epoch 권위 = SubscribeAck 단독, ADR-0007).
-   */
-  epoch: number
-  /**
-   * 보류된 프레임(도착 순). flush 는 seq 오름차순으로 정렬 후 배달(out-of-order 도착 방어 — FIX 2).
-   * tag(0 터미널/1 구조화)를 보존한다 — flush 시 handleOutput 과 동일하게 onChunk 로 실어 보내야
-   * 소비자가 렌더 경로를 가른다(tag0/tag1 은 같은 seq 공간이라 버퍼는 tag 를 몰라도 담고 흘리기만).
-   */
-  frames: Array<{ tag: number; seq: number; bytes: Uint8Array }>
-  /** 현재 담긴 바이트 총량(bound 판정용). drop-oldest 마다 감산. */
-  bytes: number
-  /** 이 agent 에 대해 bound 초과 warn 을 이미 냈는지(한 번만 경고 — 로그 스팸 방지). */
-  warned: boolean
-}
-
-/** agent 당 pre-subscribe 버퍼 상한(대략) — 이 이상 쌓이면 가장 오래된 프레임부터 버린다. */
-const PENDING_BUFFER_MAX_BYTES = 2 * 1024 * 1024
-
 type WireEvent = Record<string, unknown>
+
+// ★ViewOutputState(§5 LLM 제어 표면 — ADR-0046)★는 AgentClient 인터페이스가 정본(agentClient.ts) —
+//   getViewOutputState 가 인터페이스 메서드라 타입도 거기 둔다(LLM 이 타입으로 발견). 여기선 import 만.
 
 export class ProtocolClient implements AgentClient {
   private readonly transport: Transport
 
   // 조회(getAgents/listProfiles/getSnapshot)와 side-effect(spawn/kill 등) 응답을 request_id 로
-  // 매칭하는 단일 pending map. 조회도 전용 reply variant(AgentList/ProfileList/Snapshot)가
-  // request_id 를 echo 하므로 편승 매칭 없이 정확히 짝지어진다(protocol v2).
+  // 매칭하는 단일 pending map.
   private pending = new Map<string, Pending>()
+  // ★viewId(slot id) 키(ADR-0046)★: agentId 가 아니라 뷰 단위 — 같은 agent 를 N 뷰가 봐도 각자 독립
+  //   진도(버그 B 구조 해소). frame 은 agentId 로 대상 뷰들을 골라 fan-out 한다.
   private subs = new Map<string, SubState>()
-  // ★구독 전 도착 프레임 버퍼(ADR-0043 프론트 등가)★: agentId → PendingBuffer. handleOutput 이 구독자
-  //   없는 프레임을 여기 보류하고, subscribeOutput 이 첫 구독 시 flush 한다. transport 리셋/disconnect·
-  //   close 에서 비운다(stale 방지).
-  private pendingBuffers = new Map<string, PendingBuffer>()
-  // 구독마다 발급하는 단조증가 번호표 — stale-unsubscribe 가드(SubState.token). 인스턴스 내 비교만
-  // 하므로 UUID 불필요, 정수로 충분.
+  // 구독마다 발급하는 단조증가 번호표 — stale-unsubscribe 가드(SubState.token).
   private subSeq = 0
 
   // 상태/목록/복원/프로필 이벤트 콜백 레지스트리(broadcast). eventBus 가 소비.
@@ -126,35 +132,26 @@ export class ProtocolClient implements AgentClient {
   private offMessage: (() => void) | null = null
   private offState: (() => void) | null = null
 
-  // resubscribe 재진입 가드 — connected 전이 중복 통지 시 1회만 의미 있게 동작(idempotent 지만 명료히).
+  // connected 재전이 판정용(중복 통지 방어).
   private lastState: ConnectionState
 
   constructor(transport: Transport) {
     this.transport = transport
     this.lastState = transport.connectionState
-    // 단일 수신 라우터 등록 — control/output 정규화 메시지를 carrier 무관하게 라우팅.
+    // 단일 수신 라우터 등록 — control/output/replayBoundary 정규화 메시지를 carrier 무관하게 라우팅.
     this.offMessage = transport.onMessage((msg) => this.route(msg))
-    // 연결 상태가 connected 로 (재)전이하면 resubscribeAll. carrier 별 재연결 메커니즘은
-    // transport 내부에 숨고, ProtocolClient 는 "연결됨" 신호만 본다(WS 재연결 = 이 경로로 resume).
+    // 연결 상태가 connected 로 (재)전이하면 모든 뷰를 buffering 리셋 + 재요청(ADR-0046 §2: 재연결 =
+    //   전량 재replay·마커 재장전, buffering 고착 자가 복구). 비-connected 전이는 pending 명령 reject.
     this.offState = transport.onConnectionStateChange((s) => {
       const prev = this.lastState
       this.lastState = s
-      // down/reconnecting → connected 재전이에서만 resubscribe(첫 connected 도 포함되나 subs 비어 무해).
       if (s === 'connected' && prev !== 'connected') {
-        this.resubscribeAll()
-      }
-      // connected → 비connected 전이 = 연결 끊김. 진행 중 명령은 전부 reject(connection lost).
-      // spawn/kill 등 1회성이라 자동 재전송은 중복 부작용 위험 — 호출자가 catch 후 재시도가
-      // 단순·안전(DaemonClient.handleClose 의 pending reject 를 carrier-무관 위치로 승격).
-      // InProc 은 connected 에서 안 벗어나므로 이 경로가 안 불린다(무해).
-      else if (s !== 'connected' && prev === 'connected') {
+        // ADR-0046: pendingBuffers/resubscribeAll(wire Subscribe 송신) 삭제 — 뷰 buffering 리셋+재요청으로 대체.
+        this.reconnectResetAllViews()
+      } else if (s !== 'connected' && prev === 'connected') {
         const lost = new Error('connection lost')
         for (const p of this.pending.values()) p.reject(lost)
         this.pending.clear()
-        // ★pre-subscribe 버퍼 폐기(transport 리셋/끊김)★: 연결이 끊기면 보류 프레임은 stale 이다 — 재연결
-        //   후엔 데몬이 after_seq 기준 replay 를 새로 주므로, 옛 보류분을 남기면 재구독 flush 때 낡은 프레임이
-        //   섞인다. 끊김 경계에서 비운다(끊긴 창은 어차피 재등록 시 전체 replay 를 새로 받음).
-        this.pendingBuffers.clear()
       }
     })
   }
@@ -169,11 +166,9 @@ export class ProtocolClient implements AgentClient {
   }
 
   // ── 명시 연결/해제(ADR-0021 §1·note3, transport 위임) ─────────────────────────────
-  /** 명시 spawn 연결 — transport.start 위임. 부팅/daemon_start 만 호출(명령 경로와 분리). */
   connect(): Promise<void> {
     return this.transport.start()
   }
-  /** 명시 연결 해제 — transport.close 위임(재연결 중단). ProtocolClient 구조는 유지(재연결 가능). */
   disconnect(): void {
     this.transport.close()
   }
@@ -184,17 +179,28 @@ export class ProtocolClient implements AgentClient {
       this.handleOutput(msg)
       return
     }
+    if (msg.kind === 'replayBoundary') {
+      this.handleReplayBoundary(msg)
+      return
+    }
     this.handleEvent(msg.event)
   }
 
+  /** agentId 가 f.agentId 인 모든 뷰 SubState 를 순회(fan-out 대상 — ADR-0046 뷰별 독립 진도). */
+  private *viewsForAgent(agentId: string): Generator<SubState> {
+    for (const st of this.subs.values()) {
+      if (st.agentId === agentId) yield st
+    }
+  }
+
   /**
-   * 정규화 output frame — epoch 가드 + high-water dedup 후 구독자 배달(DaemonClient.handleBinary 승격).
+   * 정규화 output frame — agent 를 보는 모든 뷰로 fan-out(ADR-0046 §2 상태전이표).
    *
-   * ★tag 무관 공통 규율★: epoch 가드·seq dedup·high-water 전진은 tag(0 터미널/1 구조화)를 안 본다 —
-   *   tag0/tag1 은 core OutputCore 의 **같은 seq 공간**을 공유하므로(한 pump 가 발급) tag 별로 쪼개면
-   *   dedup high-water 가 두 벌이 돼 순서 보장이 깨진다. tag 는 배달 시 onChunk 에 실어 소비자(TerminalSlot/
-   *   RichSlot)가 렌더 경로만 가른다.
+   * ★tag 무관 공통 규율★: epoch 가드·seq dedup 은 tag(0 터미널/1 구조화)를 안 본다 — tag0/tag1 은 core
+   *   OutputCore 의 같은 seq 공간을 공유한다(한 pump 발급). tag 는 배달 시 onChunk 에 실어 소비자가 렌더
+   *   경로만 가른다.
    */
+  // ADR-0046: 뷰 상태전이표(frame 행) — buffering(epoch 규칙 push) / live(epoch·seq dedup 직행).
   private handleOutput(f: {
     tag: number
     agentId: string
@@ -202,73 +208,274 @@ export class ProtocolClient implements AgentClient {
     seq: number
     bytes: Uint8Array
   }): void {
-    const st = this.subs.get(f.agentId)
-    if (!st || !st.ready) {
-      // ★구독자 없음 OR 아직 ready 아님 = 보류(ADR-0043 deliverable 게이트의 프론트 등가)★:
-      //   - st 없음: 리로드 시 창 Channel 재등록 replay 프레임이 React 슬롯 마운트(subscribeOutput)보다
-      //     먼저 도착. 버리면 그 창 슬롯이 빈 화면(옛 결함) → 첫 구독자가 붙을 때까지 버퍼.
-      //   - st 있으나 ready=false(FIX-2): subs.set 은 await 이전에 동기 실행되므로, ensureReady 대기 중
-      //     도착한 프레임을 여기서 st.onChunk 로 직접 배달하면 lastDeliveredSeq 가 조기 전진해 뒤이은
-      //     flush 가 버퍼의 더 낮은 seq 를 dedup drop 한다(순서 꼬임). ready 전에는 직접 배달 대신
-      //     버퍼로 보내 flush 가 seq 순서를 통합 정렬하게 한다 — 타이밍 무관 순서 보존(ADR-0038).
-      this.bufferPending(f)
-      return
+    for (const st of this.viewsForAgent(f.agentId)) {
+      if (st.phase === 'error') continue // error 뷰는 재요청 소진 상태 — 프레임 무시(remount/재연결이 리셋).
+      if (st.phase === 'live') {
+        // live: frame(epoch 더 높음) → drop([agentId,epoch] remount 흐름이 처리). epoch 일치·seq 진도면 배달.
+        if (st.epoch !== undefined && f.epoch !== st.epoch) continue
+        if (f.seq <= st.lastDeliveredSeq) continue // dedup(중복 replay 흡수)
+        st.lastDeliveredSeq = f.seq
+        st.onChunk({ tag: f.tag, seq: f.seq, bytes: f.bytes })
+        continue
+      }
+      // buffering: epoch 규칙(§2 상태전이표).
+      if (st.epoch !== undefined && f.epoch > st.epoch) {
+        // frame(epoch 더 높음): buffer 폐기 → 새 epoch 로 buffering + requestReplay 재발행(새 myGen).
+        //   구 epoch 대상이던 기존 myGen 마커는 무효(NEW-5). 사다리는 이 재장전이 자연 리셋(startBuffering).
+        this.startBuffering(st, f.epoch, /*resetLadder*/ true)
+        // 이 frame 자체도 새 buffer 에 담는다(첫 프레임).
+        this.pushBuffer(st, f)
+        continue
+      }
+      if (st.epoch !== undefined && f.epoch < st.epoch) {
+        // 구 epoch 잔여 frame — buffering 대상 아님(무시). (상태전이표 "epoch=대기 epoch 또는 미정"만 push)
+        continue
+      }
+      // epoch 일치 또는 미정 → buffer push(상한 초과는 pushBuffer 가 폐기+재요청).
+      if (st.epoch === undefined) st.epoch = f.epoch // 첫 frame 이 대기 epoch 를 확정(마커가 최종 채택).
+      this.pushBuffer(st, f)
     }
-    // epoch 불일치 frame 은 옛 세션 잔여 — 버린다(SubscribeAck.current_epoch 기준).
-    if (st.epoch !== undefined && f.epoch !== st.epoch) return
-    // dedup — 클라가 실제 배달한 high-water(lastDeliveredSeq) 기준. 재연결 경계 중복 방어.
-    // InProc(순서 보존)에선 항상 seq>high-water 라 무해 통과(no-op 수렴).
-    if (f.seq <= st.lastDeliveredSeq) return
-    st.lastDeliveredSeq = f.seq
-    st.onChunk({ tag: f.tag, seq: f.seq, bytes: f.bytes })
+  }
+
+  /** buffering 뷰의 buffer 에 frame push. 상한 초과 시 부분 유지 금지 → buffer 폐기 + 재요청(§2·§4). */
+  private pushBuffer(
+    st: SubState,
+    f: { tag: number; seq: number; bytes: Uint8Array },
+  ): void {
+    st.buffer.push({ tag: f.tag, seq: f.seq, bytes: f.bytes })
+    st.bufferBytes += f.bytes.length
+    if (st.bufferBytes > VIEW_BUFFER_MAX_BYTES || st.buffer.length > VIEW_BUFFER_MAX_FRAMES) {
+      // ★부분 flush 금지(§4·상태전이표 "buffer 폐기 + requestReplay 재발행")★: drop-oldest 가 아니라
+      //   buffer 통째 폐기 *후* 재요청 — 병리 케이스 방어용(정상 도달 불가). ★폐기가 재요청보다 먼저★:
+      //   버리지 않으면 pre-overflow gen 성공 마커가 남아 stale·불완전 프레임을 flush 하고, 재요청한
+      //   replay 의 완전한 내용은 dedup high-water 뒤에 갇혀 유실된다(FIX-2). 폐기하면 재요청 replay 가
+      //   전량(full-from-oldest)으로 완전히 다시 채운다.
+      console.warn(`[ProtocolClient] 뷰 buffer 상한 초과(agent=${st.agentId}) — 폐기 후 재요청`)
+      st.buffer = []
+      st.bufferBytes = 0
+      // ★FIX-A: overflow 는 gen 펜스도 무효화(실패/watchdog 경로와 다르다)★. 실패 마커·watchdog 경로는
+      //   buffer 를 유지하므로 구 gen 성공 마커가 뒤늦게 와 그 온전한 buffer 를 flush 하는 게 정당하다(좀비
+      //   복구). 반면 overflow 는 buffer 를 통째 폐기했다 — 여기서 myGen/heldMarker 를 남겨두면, 재요청
+      //   백오프가 발화하기 전에 구 gen 의 성공 마커가 도착할 경우 evalMarker 가 이를 수용하고 flushToLive 가
+      //   *빈* buffer 로 live 전이(내용 유실)하며 clearTimers 가 예약된 재요청까지 취소한다. 폐기 = 구 gen
+      //   flush = 데이터 손실이므로, 재요청한 replay 의 새 gen 이 확정될 때까지 어떤 마커도 flush 못 하도록
+      //   펜스를 무효화한다.
+      st.myGen = undefined
+      st.heldMarker = undefined
+      this.ladderRerequest(st)
+    }
+  }
+
+  // ADR-0046: 뷰 상태전이표(마커 행) — gen 펜스 + 성공/실패/held 판정.
+  /**
+   * ★replay 경계 마커(ADR-0046 §2)★ — transport 가 tag=255 마커를 정규화해 올린 제어 이벤트.
+   *   agent 를 보는 모든 뷰로 fan-out 하되, 각 뷰가 자기 gen 펜스로 판정한다(남의 replay 경계는 무시).
+   */
+  private handleReplayBoundary(m: {
+    agentId: string
+    epoch: number
+    gen: bigint
+    truncated: boolean
+    failed: boolean
+  }): void {
+    for (const st of this.viewsForAgent(m.agentId)) {
+      this.evalMarker(st, m)
+    }
   }
 
   /**
-   * 구독자 없는 프레임을 pre-subscribe 버퍼에 보류한다(handleOutput 의 st 미존재 분기).
-   *
-   * ★epoch 인지★: 담긴 버퍼와 다른 epoch 프레임이 오면 옛 스트림은 무의미 → 통째 교체(stale 폐기). 재시작
-   *   (epoch++)로 옛 replay 와 새 replay 가 섞여 순서가 꼬이는 걸 막는다. ★bound★: 총량이 상한을 넘으면 가장
-   *   오래된 프레임부터 버린다(drop-oldest, agent 당 warn 1회). 앞부분 손실은 flush 대상이 어차피 리로드 후
-   *   전체 replay 를 새로 받는 xterm 이라 치명적 아님(비정상적으로 큰 버퍼 = 구독자 영영 미부착).
+   * 한 뷰에 대한 마커 판정(§2 상태전이표 — 마커 행 전부). ★평가는 마커 도착 시점★ — token/gen/epoch 를
+   * 이 순간의 SubState 로 본다(리뷰 finding: 등록 시점 아님).
    */
-  private bufferPending(f: {
-    tag: number
-    agentId: string
-    epoch: number
-    seq: number
-    bytes: Uint8Array
-  }): void {
-    let buf = this.pendingBuffers.get(f.agentId)
-    if (!buf || buf.epoch !== f.epoch) {
-      // 첫 프레임이거나 epoch 교체 — 새 버퍼로 시작(옛 epoch 잔여는 폐기).
-      buf = { epoch: f.epoch, frames: [], bytes: 0, warned: false }
-      this.pendingBuffers.set(f.agentId, buf)
+  private evalMarker(
+    st: SubState,
+    m: { epoch: number; gen: bigint; truncated: boolean; failed: boolean },
+  ): void {
+    // live 뷰: 마커(어떤 gen이든) 무시 — fan-out 으로 도달하는 남의 replay 경계. dedup 만으로 충분(§2).
+    if (st.phase !== 'buffering') return
+    // ★myGen 미확정(NEW-3)★: 마커를 버리지 않고 최고 gen 1개 보관 → myGen 확정 시 재평가(resolveMyGen).
+    //   교체 규칙(FIX-3): (a) 더 높은 gen 이면 교체 · (b) 같은 gen 인데 보관분은 failed 이고 신규는 성공이면
+    //   교체. (b)가 없으면 좀비 late-Complete 복구가 깨진다 — 같은 gen 의 실패 마커(deadline)가 먼저 오고
+    //   그 gen 의 성공 마커(늦은 Complete)가 뒤따를 때, 성공이 실패에 눌려 버려져 flush 못 하고 사다리로
+    //   빠진다. 성공이 우선(같은 gen 이면 성공 마커가 이 replay 의 최종 결말).
+    if (st.myGen === undefined) {
+      const held = st.heldMarker
+      const replace =
+        held === undefined || m.gen > held.gen || (m.gen === held.gen && held.failed && !m.failed)
+      if (replace) {
+        st.heldMarker = { epoch: m.epoch, gen: m.gen, truncated: m.truncated, failed: m.failed }
+      }
+      return
     }
-    buf.frames.push({ tag: f.tag, seq: f.seq, bytes: f.bytes })
-    buf.bytes += f.bytes.length
-    // bound 초과 → drop-oldest. flush 는 seq dedup 이 걸리므로 앞부분을 버려도 뒤 프레임 순서는 유지된다.
-    if (buf.bytes > PENDING_BUFFER_MAX_BYTES) {
-      if (!buf.warned) {
-        console.warn(
-          `[ProtocolClient] pre-subscribe 버퍼 상한 초과(agent=${f.agentId}) — 오래된 프레임 drop`,
-        )
-        buf.warned = true
-      }
-      while (buf.bytes > PENDING_BUFFER_MAX_BYTES && buf.frames.length > 1) {
-        const dropped = buf.frames.shift()!
-        buf.bytes -= dropped.bytes.length
-      }
-      // 마지막 1개만 남았는데도 상한 초과 = 단일 프레임이 bound 보다 크다. 그것도 버려 버퍼를 비운다
-      //   (bound = 메모리 보호가 목적 — 한 프레임이라도 무한 잔존하면 상한이 무의미). 앞부분 손실은
-      //   치명적 아님: 다음 마운트는 데몬 fresh replay 로 전체를 새로 받는다.
-      if (buf.bytes > PENDING_BUFFER_MAX_BYTES && buf.frames.length === 1) {
-        buf.frames.length = 0
-        buf.bytes = 0
-      }
+    // ★gen 펜스(ADR-0046)★: 자기 myGen 미만 마커 = 남의/이전 replay → 무시. epoch 불일치도 무시(구세대/구 epoch).
+    //   왜 gen≥myGen 에만 flush 하나: 같은 agent 의 후속 replay 는 항상 이전의 누적 상위집합(full-from-oldest)
+    //   이라, 늦게 mount 한 뷰의 버퍼(이전 replay 꼬리 + 자기 replay 전체)를 자기 gen 마커에 sort+dedup 하면
+    //   완전하다. 남의(이전) gen 마커에 조기 flush 하면 자기 replay 머리가 dedup 유실된다(버그 B 재유입 경로).
+    if (m.gen < st.myGen) return
+    if (st.epoch !== undefined && m.epoch !== st.epoch) return
+    if (m.failed) {
+      // ★실패 마커(§2)★: flush 금지 — buffer 는 유지한 채(sort+dedup 가 중복 흡수, 폐기 불필요) 재요청
+      //   사다리. 왜 buffer 유지: 이 replay 는 미완결이나 다음 replay 가 full-from-oldest 라 겹치는 앞부분을
+      //   dedup 가 흡수한다 — 버리면 오히려 다시 받아야 할 프레임을 손해.
+      this.ladderRerequest(st)
+      return
+    }
+    // ★성공 마커(gen≥myGen, epoch 일치)★: sort+seq dedup flush → live 전이(epoch 채택, high-water=꼬리).
+    this.flushToLive(st, m.epoch, m.truncated)
+  }
+
+  /** buffering → live: buffer 를 seq 오름차순 정렬 후 dedup 배달, epoch 채택, 타이머 정리. */
+  private flushToLive(st: SubState, epoch: number, truncated: boolean): void {
+    // ★epoch 채택★: 성공 마커의 epoch 로 확정(src-tauri decide_epoch 1차 필터를 통과한 값 — ADR-0046 은
+    //   ADR-0007 "epoch 권위=SubscribeAck 단독"을 amends: src-tauri 필터 + 프론트는 필터된 frame/마커 채택).
+    st.epoch = epoch
+    // seq 오름차순 정렬 후 flush(out-of-order 도착 방어): 배열 순서대로면 큰 seq 를 먼저 배달해 high-water 를
+    //   올린 뒤 작은 seq 가 dedup 탈락한다. 정렬로 전부 배달. 같은 seq 는 dedup 이 자연 제거.
+    const ordered = [...st.buffer].sort((a, b) => a.seq - b.seq)
+    st.buffer = []
+    st.bufferBytes = 0
+    for (const frame of ordered) {
+      if (frame.seq <= st.lastDeliveredSeq) continue
+      st.lastDeliveredSeq = frame.seq
+      st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
+    }
+    if (truncated) console.warn('[ProtocolClient] output truncated for', st.agentId)
+    st.phase = 'live'
+    st.attempts = 0
+    this.clearTimers(st)
+    st.onState?.('live')
+  }
+
+  /**
+   * 재요청 사다리(bounded — §2·§4). watchdog/실패 마커/상한 초과가 부른다. 시도 상한(3) + 지수 백오프.
+   * 소진 시 phase='error' 전이(무한 폭주 금지) + onState 표면화. remount·connected 전이가 사다리 리셋.
+   */
+  private ladderRerequest(st: SubState): void {
+    // 진행 중 백오프가 있으면 중복 예약 안 함(한 사다리 단계는 한 타이머). watchdog 도 재무장은 requestReplay 후.
+    if (st.backoffTimer) return
+    if (st.attempts >= LADDER_MAX_ATTEMPTS) {
+      // 소진 → error. buffer·타이머 정리, LLM 제어 표면·슬롯에 표면화.
+      st.phase = 'error'
+      st.buffer = []
+      st.bufferBytes = 0
+      this.clearTimers(st)
+      st.onState?.('error')
+      return
+    }
+    st.attempts += 1
+    const delay = LADDER_BACKOFF_MS[Math.min(st.attempts - 1, LADDER_BACKOFF_MS.length - 1)]
+    // watchdog 은 백오프 대기 동안 무의미(재요청 예정) → 정리하고 재요청 후 재무장.
+    this.clearWatchdog(st)
+    st.backoffTimer = setTimeout(() => {
+      st.backoffTimer = null
+      // 재요청 시점에 이 뷰가 여전히 buffering 인지 확인(그 사이 성공 마커로 live 됐을 수 있음).
+      if (st.phase !== 'buffering') return
+      this.issueReplay(st)
+    }, delay)
+  }
+
+  /**
+   * buffering 재시작 — buffer 폐기·타이머 정리, epoch 대기값 설정. resetLadder 면 attempts 0(remount/
+   * epoch 회전/connected). requestReplay 는 호출자가 별도로(issueReplay) — epoch 회전은 즉시, 사다리는
+   * 백오프 뒤.
+   */
+  private startBuffering(st: SubState, epoch: number | undefined, resetLadder: boolean): void {
+    st.phase = 'buffering'
+    st.buffer = []
+    st.bufferBytes = 0
+    st.epoch = epoch
+    st.myGen = undefined
+    st.heldMarker = undefined
+    if (resetLadder) st.attempts = 0
+    this.clearTimers(st)
+    // epoch 회전(§2 상태전이표)은 즉시 재요청(백오프 없음). issueReplay 가 watchdog 재무장.
+    this.issueReplay(st)
+  }
+
+  /**
+   * 이 뷰의 requestReplay 발행 + myGen 회수 + watchdog 무장. token 가드로 stale 재개를 막는다(그 사이
+   * unsubscribe/재구독으로 SubState 가 교체됐으면 myGen 을 심지 않는다). 발행마다 myGen·heldMarker 리셋.
+   */
+  private issueReplay(st: SubState): void {
+    st.myGen = undefined
+    st.heldMarker = undefined
+    this.armWatchdog(st)
+    const token = st.token
+    const viewId = this.findViewId(st)
+    this.transport
+      .requestReplay(st.agentId)
+      .then((gen) => {
+        // ★token/생존 가드★: 회수 사이 unsubscribe/재구독으로 이 SubState 가 교체됐으면 심지 않는다.
+        if (viewId === null || this.subs.get(viewId)?.token !== token) return
+        if (st.phase !== 'buffering') return // 이미 live/error 로 전이(늦은 회수) — 무시.
+        st.myGen = gen
+        // ★myGen 확정 시 held 마커 재평가(NEW-3)★: 마커가 invoke 응답보다 먼저 온 경우, 지금 판정한다.
+        this.resolveHeldMarker(st)
+      })
+      .catch(() => {
+        // requestReplay reject(미연결 등) — 마커가 안 온다. watchdog 이 재요청을 구동(정상 경로). 여기선
+        //   추가 처리 불필요(connected 재전이가 별도로 전량 리셋).
+      })
+  }
+
+  /** myGen 확정 후 보관 마커 재평가(§2 NEW-3). held 를 소비하고 evalMarker 규칙 재적용. */
+  private resolveHeldMarker(st: SubState): void {
+    const held = st.heldMarker
+    if (!held || st.myGen === undefined) return
+    st.heldMarker = undefined
+    // gen 펜스·epoch·failed 규칙을 held 에 그대로 적용(evalMarker 의 myGen 확정 이후 분기와 동일).
+    if (held.gen < st.myGen) return
+    if (st.epoch !== undefined && held.epoch !== st.epoch) return
+    if (held.failed) {
+      this.ladderRerequest(st)
+      return
+    }
+    this.flushToLive(st, held.epoch, held.truncated)
+  }
+
+  /** buffering watchdog 무장(재무장 시 기존 타이머 교체). 만료 = flush 금지·재요청(§2). */
+  private armWatchdog(st: SubState): void {
+    this.clearWatchdog(st)
+    st.watchdogTimer = setTimeout(() => {
+      st.watchdogTimer = null
+      if (st.phase !== 'buffering') return
+      // ★flush 금지★: watchdog 은 재요청이지 부분 flush 가 아니다(§2). 사다리로 재발행(새 myGen).
+      this.ladderRerequest(st)
+    }, WATCHDOG_MS)
+  }
+
+  private clearWatchdog(st: SubState): void {
+    if (st.watchdogTimer) {
+      clearTimeout(st.watchdogTimer)
+      st.watchdogTimer = null
     }
   }
 
-  // ── JSON control event 처리(DaemonClient.handleEvent 승격) ────────────────────────
+  private clearTimers(st: SubState): void {
+    this.clearWatchdog(st)
+    if (st.backoffTimer) {
+      clearTimeout(st.backoffTimer)
+      st.backoffTimer = null
+    }
+  }
+
+  /** SubState → viewId 역참조(issueReplay 의 token 가드용). subs 는 작아 선형 탐색 무해. */
+  private findViewId(target: SubState): string | null {
+    for (const [viewId, st] of this.subs) {
+      if (st === target) return viewId
+    }
+    return null
+  }
+
+  /** connected 재전이(재연결) → 모든 뷰 buffering 리셋(buffer 폐기) + 재요청(§2). 사다리 리셋. */
+  private reconnectResetAllViews(): void {
+    for (const st of this.subs.values()) {
+      // error 뷰도 재연결에선 회복 기회를 준다(연결이 새로 났으므로 사다리 리셋 + buffering 재시작).
+      this.startBuffering(st, undefined, /*resetLadder*/ true)
+    }
+  }
+
+  // ── JSON control event 처리 ────────────────────────────────────────────────────
   private handleEvent(msg: WireEvent): void {
     if ('Ack' in msg) {
       this.resolvePending((msg.Ack as { request_id: string }).request_id, undefined)
@@ -287,71 +494,45 @@ export class ProtocolClient implements AgentClient {
     if ('Error' in msg) {
       const e = msg.Error as { request_id?: string | null; message: string }
       if (e.request_id) this.rejectPending(e.request_id, new Error(e.message))
-      // request_id 없는 Error 는 전역 통지 경로 없음 — 로그만(인터페이스 한계).
       else console.warn('[ProtocolClient] backend error:', e.message)
       return
     }
     if ('SubscribeAck' in msg) {
-      const a = msg.SubscribeAck as {
-        agent_id: string
-        current_epoch: number
-        replay_from: number
-        truncated: boolean
-      }
-      const st = this.subs.get(a.agent_id)
-      if (st) {
-        // 버그 B 수정: replay_from 으로 dedup 기준(lastDeliveredSeq)을 건드리지 않는다.
-        // replay_from 은 "데몬이 보내는 첫 seq"(resume 시 after_seq+1)이지 "마지막으로 본
-        // seq"가 아니다 — 그걸 dedup 기준으로 쓰면 첫 정상 프레임(seq==replay_from)을 버린다.
-        //
-        // epoch 이 바뀌면(데몬 재기동·재시작) 새 스트림 → high-water 리셋. 첫 Ack(epoch
-        // undefined)은 리셋 불필요(이미 초기 -1).
-        if (st.epoch !== undefined && a.current_epoch !== st.epoch) {
-          st.lastDeliveredSeq = -1
-        }
-        st.epoch = a.current_epoch
-        // truncated 면 앞부분 손실 — 향후 UI 경고 자리(현재 인터페이스 없어 로그만).
-        if (a.truncated) console.warn('[ProtocolClient] output truncated for', a.agent_id)
-      }
+      // ADR-0046: epoch 권위는 src-tauri decide_epoch 필터 + 성공 마커 epoch 채택으로 옮겼다. SubscribeAck 은
+      //   프론트 상태기계 입력이 아니다(마커가 replay 경계·epoch 를 나른다) — 무시(관측만). truncated 는
+      //   마커 flags 로 전달된다.
       return
     }
     if ('ReplayComplete' in msg) {
-      // 라이브 전환 신호 — 현재 특별 처리 불필요(seq dedup 으로 충분).
+      // ADR-0046: 경계 판정은 replayBoundary(마커) 단독. 이 control 은 무시(carrier 가 마커로 정규화).
       return
     }
     if ('AgentList' in msg) {
-      // ListAgents 전용 reply(request_id echo) — getAgents 호출과 정확히 매칭(편승 매칭 제거).
       const a = msg.AgentList as { request_id: string; agents: AgentInfo[] }
       this.resolvePending(a.request_id, a.agents)
       return
     }
     if ('AgentListUpdated' in msg) {
-      // broadcast — 트리·상태바 실시간 갱신 전용(request_id 없음). 조회 응답이 아니므로 pending
-      // 과 무관하게 항상 콜백만 호출(두 경로 공존: 조회=AgentList / 갱신=AgentListUpdated).
       const agents = (msg.AgentListUpdated as { agents: AgentInfo[] }).agents
       for (const cb of this.agentListCbs) cb(agents)
       return
     }
     if ('ProfileList' in msg) {
-      // ListProfiles 전용 reply(request_id echo) — listProfiles 호출과 매칭.
       const p = msg.ProfileList as { request_id: string; profiles: AgentProfile[] }
       this.resolvePending(p.request_id, p.profiles)
       return
     }
     if ('ProfileListUpdated' in msg) {
-      // broadcast — 프로필 미러 라이브 갱신(깡통/예약, ADR-0018 후속). request_id 없음 → 콜백만.
       const profiles = (msg.ProfileListUpdated as { profiles: AgentProfile[] }).profiles
       for (const cb of this.profileListCbs) cb(profiles)
       return
     }
     if ('Snapshot' in msg) {
-      // GetSnapshot 전용 reply(request_id echo) — getSnapshot 호출과 매칭(agent_id 편승 제거).
       const s = msg.Snapshot as { request_id: string; agent_id: string; chunks: unknown[] }
       this.resolvePending(s.request_id, s.chunks)
       return
     }
     if ('StatusChanged' in msg) {
-      // wire 필드명: agent_id/status/epoch → cb 시그니처 (id, status, epoch).
       const s = msg.StatusChanged as { agent_id: string; status: AgentStatus; epoch: number }
       for (const cb of this.statusCbs) cb(s.agent_id, s.status, s.epoch)
       return
@@ -361,31 +542,10 @@ export class ProtocolClient implements AgentClient {
       for (const cb of this.restoreCbs) cb(r)
       return
     }
-    // Hello/InputLeaseChanged 등은 여기서 소비하지 않는다(Hello=transport handshake 내부 소비). 무시.
+    // Hello/InputLeaseChanged 등은 여기서 소비하지 않는다. 무시.
   }
 
-  // ── resubscribe(재연결 resume, DaemonClient.resubscribeAll 승격) ─────────────────
-  /**
-   * connected 재전이 후 모든 구독 재전송. 버그 A 수정: epoch=null 을 보내면 안 된다.
-   * 데몬은 requested_epoch==Some(current_epoch) 만 일치로 보고 None(null)은 불일치 취급 →
-   * FromOldest 전체 replay(이미 본 프레임 중복). 그래서 **마지막으로 알려진 epoch(st.epoch)을
-   * wire 로 그대로 전송**해 데몬이 Resume(tail-only) 하게 한다. after_seq=lastDeliveredSeq →
-   * 데몬이 seq>lastDeliveredSeq 만 송신 → 클라 가드(seq<=lastDeliveredSeq drop)와 정합. epoch·
-   * lastDeliveredSeq 는 보존(리셋 금지). InProc 은 재연결이 없어 이 경로가 사실상 안 불린다(무해).
-   */
-  private resubscribeAll(): void {
-    for (const [agentId, st] of this.subs) {
-      this.transport.send({
-        Subscribe: {
-          agent_id: agentId,
-          epoch: st.epoch ?? null,
-          after_seq: st.lastDeliveredSeq >= 0 ? st.lastDeliveredSeq : null,
-        },
-      })
-    }
-  }
-
-  // ── request_id pending 헬퍼(DaemonClient 승격) ───────────────────────────────────
+  // ── request_id pending 헬퍼 ──────────────────────────────────────────────────────
   private resolvePending(requestId: string, value: unknown): void {
     const p = this.pending.get(requestId)
     if (p) {
@@ -401,14 +561,12 @@ export class ProtocolClient implements AgentClient {
     }
   }
 
-  /** side-effect 명령 전송 + request_id 등록 → 응답(Ack/Created/Spawned/Error)으로 resolve. */
   private async sendCommand<T>(build: (requestId: string) => unknown): Promise<T> {
     await this.transport.ensureReady()
     const requestId = crypto.randomUUID()
     return new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, { resolve: resolve as (v: unknown) => void, reject })
       try {
-        // send 가 동기 throw(미연결 등)면 즉시 정리. async send 의 거부는 transport 내부 정책.
         const r = this.transport.send(build(requestId))
         if (r && typeof (r as Promise<void>).catch === 'function') {
           ;(r as Promise<void>).catch((e) => {
@@ -423,120 +581,92 @@ export class ProtocolClient implements AgentClient {
     })
   }
 
-  // ── 출력 구독(DaemonClient.subscribeOutput 승격, transport.send 로 일반화) ───────────
+  // ── 출력 구독(뷰 단위, ADR-0046 F1) ─────────────────────────────────────────────────
+  /**
+   * 뷰(slot) 단위 출력 구독. viewId = 슬롯 id(컴포넌트가 이미 가진 값). onState 는 옵션(슬롯이 error·
+   * streaming 표면화에 쓴다). frame 은 agentId 로 fan-out 되고, 이 뷰는 buffering→(gen 펜스 성공 마커)→
+   * live 로 전이하며 그때부터 onChunk 로 직행 배달한다.
+   */
   async subscribeOutput(
+    viewId: string,
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
+    onState?: (state: ViewPhase) => void,
   ): Promise<OutputSubscription> {
-    // 같은 agentId 재구독 시 이전 상태는 덮는다(컴포넌트가 epoch 바뀌면 재구독).
-    // epoch=undefined(Ack 전), lastDeliveredSeq=-1(아무것도 배달 안 함).
-    // token 은 이 구독의 고유 번호표 — 아래 unsubscribe 와 flush 가드가 stale 여부를 이걸로 판별한다.
     const token = ++this.subSeq
-    // ready=false 로 시작(FIX-2): ensureReady 대기 중 도착 프레임은 직접 배달 대신 버퍼 경유(handleOutput
-    //   의 !st.ready 분기). flush 직전에 ready=true 로 올린다.
-    const st: SubState = { onChunk, epoch: undefined, lastDeliveredSeq: -1, token, ready: false }
+    const st: SubState = {
+      agentId,
+      onChunk,
+      onState,
+      phase: 'buffering',
+      buffer: [],
+      bufferBytes: 0,
+      myGen: undefined,
+      heldMarker: undefined,
+      lastDeliveredSeq: -1,
+      epoch: undefined,
+      token,
+      attempts: 0,
+      backoffTimer: null,
+      watchdogTimer: null,
+    }
+    // ★기존 SubState 타이머 정리(FIX-1)★: 같은 viewId 재구독은 아래 subs.set 이 옛 SubState 를 맵에서
+    //   교체하지만, 옛 SubState 가 무장한 watchdog/backoff 타이머는 clear 하지 않으면 살아남아 만료 시
+    //   ladderRerequest 로 stray requestReplay 를 낸다(옛 st 는 issueReplay 의 token 가드로 재발행은 못
+    //   막지만, 이미 예약된 타이머의 콜백은 그 가드 앞에서 실행돼 재요청 storm 을 유발). 교체 전 정리한다.
+    const prev = this.subs.get(viewId)
+    if (prev) this.clearTimers(prev)
     // ★subs.set 을 await *이전* 에 동기 실행(StrictMode 이중구독 레이스 차단)★: 이 함수는 async 라
-    //   `await ensureReady()` 지점에서 microtask yield 한다. React StrictMode(dev 이중 마운트)는
-    //   같은 [agentId,epoch] effect 를 급속 2회 돌려 subscribeOutput 을 2번 부른다 — 두 호출이 await
-    //   에서 갈라진 뒤 각자 subs.set 하면 나중 호출(st2)이 먼저 호출(st1)을 맵에서 교체한다. set 을
-    //   await 이전으로 끌어 올리면 두 호출의 set 이 갈라지기 전 동기 순차 실행돼, await 재개 시점엔
-    //   subs 엔트리가 이미 최종 생존 구독자(st2)로 확정돼 있다. 이 순서가 아래 flush 가드의 전제다.
-    this.subs.set(agentId, st)
-    // ★ensureReady 실패 시 좀비 구독 롤백(FIX-1)★: set 을 await 앞으로 옮긴 탓에, ensureReady 가
-    //   reject/hang 하면 st 가 subs 에 잔존해 이후 프레임이 죽은 구독으로 샌다(옛 순서(ready 후 set)엔
-    //   실패 시 미등록이라 없던 회귀). 실패 시 **자기 등록만** 롤백 후 rethrow 한다. token 가드로 감싸
-    //   이미 교체된 뒤(다른 구독이 subs 를 차지)엔 안 지운다(정상 재구독 보호 — stale-unsubscribe 가드와
-    //   동일 기전). 롤백으로 pendingBuffers 는 남긴다(다음 재구독이 이어받아 flush).
+    //   `await ensureReady()` 에서 microtask yield 한다. StrictMode(dev 이중 마운트)는 같은 [agentId,epoch]
+    //   effect 를 급속 2회 돌린다 — 다른 viewId 면 서로 다른 SubState(공존, 정상), 같은 viewId(재구독)면
+    //   set 을 await 앞으로 끌어올려 최종 생존 SubState 를 확정한다. 아래 replay 발행 가드의 전제.
+    this.subs.set(viewId, st)
+    // ★ensureReady 실패 시 좀비 구독 롤백★: set 을 await 앞으로 옮긴 탓에 ensureReady reject/hang 시 st 가
+    //   subs 에 잔존해 프레임이 죽은 구독으로 샌다. 실패 시 자기 등록만 롤백(token 가드로 정상 재구독 보호).
     try {
       await this.transport.ensureReady()
     } catch (e) {
-      if (this.subs.get(agentId)?.token === token) this.subs.delete(agentId)
+      if (this.subs.get(viewId)?.token === token) {
+        this.clearTimers(st)
+        this.subs.delete(viewId)
+      }
       throw e
     }
-    // ★pre-subscribe 버퍼 flush(ADR-0043 프론트 등가)★: 구독 전 도착해 보류된 프레임을 이 구독자에게
-    //   seq 순서대로 배달한다 — 라이브 프레임보다 *먼저*(리로드 replay 를 놓치지 않게). handleOutput 과 같은
-    //   dedup 규율(seq<=lastDeliveredSeq drop)을 적용하고 high-water 를 전진시켜, flush 뒤 도착하는 라이브
-    //   프레임과 이음매 없이 이어진다. flush 후 버퍼는 제거(1회성 — 재구독은 새로 채워짐).
-    //
-    // ★생존 구독자만 flush(StrictMode 이중구독 버퍼 유실 차단 — 근본원인)★: pre-subscribe 버퍼는
-    //   **1회성**(flush 시 delete)이다. StrictMode 로 subscribeOutput 이 2회 불리면 두 호출이 await 를
-    //   함께 통과한 뒤 재개하는데, 먼저 재개한 호출(곧 폐기될 첫 컴포넌트 인스턴스의 st1)이 flush 하면
-    //   버퍼가 소진·삭제돼 나중 재개한 생존 구독자(st2)는 빈 화면이 된다(실측: enter#1/#2 bufFrames:15 →
-    //   done#1 delivered:15 → done#2 delivered:0). subs 엔트리가 내 token 일 때(= 내가 최종 생존
-    //   구독자)만 flush 하고, 교체된 옛 st 는 skip 해 버퍼를 보존한다 — 그러면 생존 구독자의 재개에서
-    //   flush 가 실행돼 버퍼가 올바른 인스턴스로 배달된다. token 가드는 unsubscribe 의 stale 가드와 동일
-    //   기전(현재 subs 엔트리 == 내 token). 단발 구독은 항상 자기 token 이라 무해 통과.
-    if (this.subs.get(agentId)?.token === token) {
-      // ★ready 게이트 개방(FIX-2)★: 이 시점부터 이 st 는 라이브 프레임을 직접 배달받는다. 버퍼 flush
-      //   *직전*에 올린다 — flush 루프는 동기 실행이라 재진입이 없고, flush 로 lastDeliveredSeq 가 버퍼
-      //   최고 seq 로 전진한 뒤 도착하는 라이브 프레임이 dedup 규율로 이음매 없이 이어진다. ready 전
-      //   도착분은 전부 pendingBuffers 에 모여 아래 정렬 flush 가 seq 순서를 통합 보장한다.
-      //   교체된 옛 st(token 불일치)는 ready=false 로 남아 직접 배달되지 않는다(곧 폐기 — 유령 배달 차단).
-      st.ready = true
-      const buf = this.pendingBuffers.get(agentId)
-      if (buf) {
-        this.pendingBuffers.delete(agentId)
-        // ★epoch 조기 확정 금지(ADR-0007)★: 버퍼 epoch 를 st.epoch 로 심지 않는다 — epoch 권위는
-        //   SubscribeAck(데몬) 단독이다. 버퍼는 관측치일 뿐이라, 멀티 재시작+리로드 창에서 데몬 권위와
-        //   어긋나면(SubscribeAck 이 다른 epoch) high-water 리셋이 이미 렌더한 프레임과 어긋난다. st.epoch
-        //   는 undefined(= "아직 모름")로 두고, 첫 SubscribeAck 이 권위적으로 확정하게 한다. flush 중
-        //   epoch 가드(st.epoch undefined)는 자연 통과.
-        // ★seq 오름차순 정렬 후 flush(out-of-order 방어)★: 프레임은 도착 순으로 버퍼링되나, 도착 순서가
-        //   seq 순서와 다를 수 있다(예: [2,0,1]). 배열 순서대로 flush 하면 2 를 배달해 high-water 를 2 로
-        //   올린 뒤 0,1 이 dedup(seq<=high-water)으로 탈락한다. seq 오름차순으로 정렬해 이를 막는다.
-        //   같은 seq 는 dedup(seq<=lastDeliveredSeq)이 자연 제거한다.
-        const ordered = [...buf.frames].sort((a, b) => a.seq - b.seq)
-        for (const frame of ordered) {
-          if (frame.seq <= st.lastDeliveredSeq) continue
-          st.lastDeliveredSeq = frame.seq
-          // handleOutput 과 동일하게 tag 를 실어 배달 — flush 프레임도 소비자가 렌더 경로를 가른다.
-          st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
-        }
-      }
-      // ★(re)mount fresh replay 재요청(remount 대화 소실 FIX)★: 이 구독 effect 가 도는 이유가
-      //   컴포넌트 (re)mount 다. remount(Allotment 재귀 트리 구조 변경 → RichSlot/TerminalSlot 재시작)는
-      //   창 출력 Channel 재등록이 *아니라서* backend 가 replay 를 자동 재전송하지 않는다 → 위 pre-subscribe
-      //   버퍼가 비어(flush 대상 0) 대화 소실 + streaming 고착. backend 에 그 slot 의 fresh replay 를 재요청해
-      //   reload 복원 경로(resubscribe_slot fresh — cursor 리셋 + 버퍼 전체 재전송)를 재사용한다. replay 는
-      //   출력 Channel 로 별도 도착해 이 st(ready=true)가 소비한다. ★생존 구독자(내 token)일 때만★ 트리거해
-      //   StrictMode 이중 마운트의 중복 invoke 를 억제한다(교체된 옛 st 는 skip). 정상 mount 에서 배정 트리거
-      //   replay 와 중복될 수 있으나 위 dedup(seq<=lastDeliveredSeq)이 화면 중복을 흡수한다(ADR-0037).
-      //   ★BLOCK-1 준수★: resyncOutput 은 src-tauri 로컬 축 B replay(invoke resync_output)만 쓰고 데몬 wire
-      //   Subscribe 를 forward 하지 않는다(carrier 내부에서 격리 — WsTransport/mock 은 no-op).
-      // ★위험(B — QA 실측 대상 / ADR 후속)★: 매 mount 무조건 호출한다. remount(새 SubState seq=-1)는
-      //   안전하지만, lastDeliveredSeq 가 이미 전진해 있는 경로(pendingBuffer partial flush drop, 또는
-      //   resync-enqueue 와 live 프레임 도착 interleave)에선 backend fresh replay 가 seq dedup
-      //   (seq<=lastDeliveredSeq)으로 통째 drop 돼 복원 실패·유실이 날 수 있다. 재현 여부는 QA 실측으로
-      //   확인 후 결정할 사안이라 여기선 과잉 방어를 넣지 않는다(지금 고치지 말 것).
-      this.transport.resyncOutput(agentId)
+    // ★생존 구독자만 replay 발행(StrictMode 중복 invoke 억제)★: subs 엔트리가 내 token 일 때만 requestReplay
+    //   를 낸다 — 교체된 옛 st 는 skip(중복 재요청 storm 방지). single-flight 가 병합하므로 정상 mount 의
+    //   배정 트리거 replay 와 겹쳐도 안전하다.
+    if (this.subs.get(viewId)?.token === token) {
+      this.issueReplay(st)
+    } else {
+      // 교체된 옛 st — 타이머 없이 조용히 빠진다(생존 구독자가 발행). buffer 도 안 채워짐(fan-out 은 산 st 만
+      //   맞지만, 이 st 는 subs 에서 이미 교체돼 viewsForAgent 에 안 잡힌다).
+      this.clearTimers(st)
     }
-    // ★데몬 Subscribe 를 여기서 보내지 않는다(ADR-0035/0037 — BLOCK-1)★: 데몬 구독/재구독 소유는
-    //   src-tauri 단독이다. 프론트가 `Subscribe{after_seq:null}`(FromOldest)를 데몬에 forward 하면,
-    //   같은 agent 를 N 창이 보면 데몬이 FromOldest 를 N번 replay → src-tauri 공유 버퍼에 낮은 seq 가
-    //   다시 append 돼 seq 단조(무손실 전제)가 붕괴한다. 데몬 구독은 layout 구독 델타(ViewManager 권위,
-    //   src-tauri send_subscription_delta)가 `after_seq=버퍼 최신 seq`(축 A)로 단독 트리거한다.
-    //   여기 subs(JS 콜백)는 렌더러 등록만 — output Channel 로 raw bytes 가 오면 onChunk 로 배달한다.
     return {
       unsubscribe: () => {
-        // ★현재 subs 엔트리가 내 토큰일 때만 delete — 재구독(epoch 교체/StrictMode)으로 새 SubState 가
-        //   들어온 뒤 늦게 온 옛 unsubscribe 가 새 구독을 지우는 stale-unsubscribe 방지.
-        //   subscribeOutput 이 async(ensureReady await)라 옛 unsubscribe 가 새 set 뒤에 도착할 수 있다.
-        if (this.subs.get(agentId)?.token === token) {
-          this.subs.delete(agentId)
-          // ★buffer refill 누수 방지★: 데몬(layout 구독 소유)은 이 창에 계속 프레임을 fan-out 하므로,
-          //   subs 만 지우면 handleOutput 의 "구독자 없음" 분기가 다시 버퍼에 무한 재적재한다(언마운트 agent
-          //   당 최대 2MB 상주 누수). 언마운트 시 버퍼를 비운다 — 다음 마운트는 어차피 데몬 fresh replay 로
-          //   복구된다. unsubscribe 이후 도착 프레임은 pre-subscribe 케이스로 새 버퍼를 시작하나 bound 로
-          //   묶여 안전하다.
-          this.pendingBuffers.delete(agentId)
+        // ★현재 subs 엔트리가 내 token 일 때만 delete(stale-unsubscribe 가드)★. 재구독으로 새 SubState 가
+        //   들어온 뒤 늦게 온 옛 unsubscribe 가 산 구독을 지우는 걸 막는다.
+        if (this.subs.get(viewId)?.token === token) {
+          this.clearTimers(st)
+          this.subs.delete(viewId)
         }
-        // ★Unsubscribe 도 데몬에 forward 안 함(BLOCK-1)★: 데몬 구독 해제도 layout 델타(1→0)가 소유한다.
-        //   여기선 JS 콜백만 떼어 더는 이 agent frame 을 렌더하지 않게 한다(렌더러 역할 한정).
+        // ★BLOCK-1(ADR-0046)★: wire Subscribe/Unsubscribe 를 어떤 경로로도 안 보낸다. 데몬 구독 정리는
+        //   라우터 Unsubscribe(prune) 단독. 여기선 JS 콜백만 떼어 더는 이 agent frame 을 렌더하지 않게 한다.
       },
     }
   }
 
-  // ── 명령(인터페이스 → wire, DaemonClient 승격) ───────────────────────────────────
+  /**
+   * ★LLM 제어 표면(§5)★ — 뷰별 replay 상태 조회. error 소진(재요청 3회 실패) 등을 LLM/자동화가 관측·재구동
+   * 판단에 쓴다. 없는 viewId 면 null. (최소 노출 — phase·buffered·attempts 만.)
+   */
+  getViewOutputState(viewId: string): ViewOutputState | null {
+    const st = this.subs.get(viewId)
+    if (!st) return null
+    return { agentId: st.agentId, phase: st.phase, buffered: st.buffer.length, attempts: st.attempts }
+  }
+
+  // ── 명령(인터페이스 → wire) ───────────────────────────────────────────────────────
   spawnAgent(cwd: string): Promise<AgentInfo> {
     return this.sendCommand<AgentInfo>((request_id) => ({ SpawnByCwd: { cwd, request_id } }))
   }
@@ -554,7 +684,6 @@ export class ProtocolClient implements AgentClient {
     }))
   }
   async resizePty(agentId: string, cols: number, rows: number): Promise<void> {
-    // Resize 는 protocol 에 request_id 없음 → Ack 안 옴. fire-and-forget(전송만 하고 resolve).
     await this.transport.ensureReady()
     this.transport.send({ Resize: { agent_id: agentId, cols, rows, viewport_id: null } })
   }
@@ -567,15 +696,12 @@ export class ProtocolClient implements AgentClient {
     }))
   }
   stopDaemon(force: boolean): Promise<void> {
-    // kill_agents 는 데몬 v1 에서 무시(always-kill, Job Object 가 자식 정리). force 만 의미 있음.
-    // 데몬은 Ack 후 연결을 닫는다 — sendCommand 가 Ack 로 resolve 되고, 이후 onclose 는
-    // attach-only 재연결로 가되 데몬이 죽어 못 붙어 'down' 정착(ADR-0021).
     return this.sendCommand<void>((request_id) => ({
       StopDaemon: { force, kill_agents: true, request_id },
     }))
   }
 
-  // ── 프로필 CRUD(DaemonClient 승격) ────────────────────────────────────────────────
+  // ── 프로필 CRUD ────────────────────────────────────────────────────────────────
   listProfiles(): Promise<AgentProfile[]> {
     return this.sendCommand<AgentProfile[]>((request_id) => ({ ListProfiles: { request_id } }))
   }
@@ -594,7 +720,6 @@ export class ProtocolClient implements AgentClient {
         extra_args: extraArgs,
         env,
         auto_restore: autoRestore,
-        // ADR-0044: StreamJson 이면 데몬이 json 모드 프로필로 저장 → SpawnProfile 시 StdioTransport.
         output_format: outputFormat,
         request_id,
       },
@@ -616,7 +741,7 @@ export class ProtocolClient implements AgentClient {
     }))
   }
 
-  // ── 상태/목록/복원/프로필 이벤트 — 레지스트리 등록 + remove disposer(DaemonClient 승격) ──
+  // ── 상태/목록/복원/프로필 이벤트 — 레지스트리 등록 + remove disposer ──────────────────
   onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void {
     this.agentListCbs.add(cb)
     return () => {
@@ -644,12 +769,11 @@ export class ProtocolClient implements AgentClient {
 
   // ── 명시 종료 ───────────────────────────────────────────────────────────────────
   close(): void {
-    // in-flight 정리 — pending 을 reject 하지 않으면 promise leak.
     const closed = new Error('client closed')
     for (const p of this.pending.values()) p.reject(closed)
     this.pending.clear()
+    for (const st of this.subs.values()) this.clearTimers(st)
     this.subs.clear()
-    this.pendingBuffers.clear()
     if (this.offMessage) {
       this.offMessage()
       this.offMessage = null

@@ -2699,8 +2699,9 @@ async fn fire_and_forget_when_not_connected_is_noop() {
     let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(9, "nope"))));
     let client = DaemonClient::new(Handle::current(), disco);
     // connect 안 함 → cmd_tx 없음. 아래 호출이 패닉/블록하면 테스트가 실패(no-op 이어야).
+    // ★ADR-0046 M3★: request_replay_fire(구 fire-and-forget replay alias)는 삭제됐다 — 뷰 주도
+    //   request_replay(async, Err 반환)가 유일 경로다. 여기선 남은 fire-and-forget(unsubscribe/Resize) no-op 만 본다.
     client.unsubscribe(uuid::Uuid::new_v4());
-    client.request_replay_fire(uuid::Uuid::new_v4()); // ADR-0046: 비연결 fire-and-forget replay 도 no-op.
     client.send_fire_and_forget(AgentCommand::Resize {
         agent_id: uuid::Uuid::new_v4(),
         cols: 80,

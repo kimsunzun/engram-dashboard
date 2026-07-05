@@ -29,7 +29,8 @@ export async function refreshProfiles(): Promise<void> {
 /**
  * 재연결 직후 목록/프로필 재동기화(Q2). connected *재*전이에서만 호출(첫 연결 제외 — initEventBus
  * 의 lastState 가드). 권위 목록을 다시 끌어와 store 를 새로 쓴다 → 끊긴 동안 변경(spawn/kill/프로필)
- * 반영. 출력 resubscribe(ProtocolClient.resubscribeAll)는 건드리지 않는다(이미 자동 동작).
+ * 반영. 출력 replay 재요청(ProtocolClient 가 connected 전이에서 뷰 buffering 리셋+requestReplay, ADR-0046)은
+ * 건드리지 않는다(이미 자동 동작).
  */
 async function resyncAfterReconnect(): Promise<void> {
   try {
@@ -215,8 +216,9 @@ export function initEventBus(): Promise<void> {
         }),
       )
 
-      // 재연결 시 목록/프로필 재동기화(Q2). 출력 스트림은 ProtocolClient.resubscribeAll 로 자동
-      // 복구되나, 에이전트 트리·프로필 목록은 재동기화 트리거가 없어 stale 이 된다(끊긴 동안의
+      // 재연결 시 목록/프로필 재동기화(Q2). 출력 스트림은 ProtocolClient 가 connected 전이에서 뷰
+      // buffering 리셋+requestReplay 로 자동 복구하나(ADR-0046), 에이전트 트리·프로필 목록은 재동기화
+      // 트리거가 없어 stale 이 된다(끊긴 동안의
       // spawn/kill/프로필 변경 broadcast 를 놓침). connected 로 *재*전이할 때만 권위 목록을 다시
       // 끌어와 store 를 새로 쓴다. ★첫 connected 는 스킵★ — App.tsx 부팅 로드(getAgents/
       // refreshProfiles 1회)와 중복 방지. lastState 가드는 ProtocolClient.lastState 패턴과 동일

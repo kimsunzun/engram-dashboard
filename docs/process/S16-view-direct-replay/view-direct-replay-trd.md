@@ -86,7 +86,7 @@ src-tauri: 무상태 라우터 + replay gen 채번자
 | F3 | `components/slot/*` 구독 effect | `subscribeOutput(viewId, agentId, ...)` 시그니처. `[agentId, epoch]` effect·`terminal.reset()` 구독 전·기존 micro-rules 유지 — epoch 전환 재장전이 이 effect에 걸림(race 렌즈 #4: 재시작 복구의 유일한 re-arm이므로 vitest로 고정) |
 | F4 | `ViewLayoutRenderer.tsx` | 61-63 dedup workaround 제거 |
 
-**마커 frame 규격(Channel 내부 계약):** `[tag=255][agentId:16][epoch:4][gen:8][flags:1(bit0=truncated, bit1=failed)]`. 데몬 codec 미정의 — src-tauri↔웹뷰 계층 문서화. 미지 tag는 웹뷰가 조용히 skip(전방 호환). 모든 `request_replay`는 **정확히 1개의 마커(성공 또는 실패)로 종결**된다 — Complete 수신(성공) / deadline 초과·단절(실패). 이 결정성이 프론트 상태기계의 전제다.
+**마커 frame 규격(Channel 내부 계약):** `[tag=255][agentId:16][epoch:4][gen:8][flags:1(bit0=truncated, bit1=failed)]`. 데몬 codec 미정의 — src-tauri↔웹뷰 계층 문서화. 미지 tag는 웹뷰가 조용히 skip(전방 호환). 모든 `request_replay`는 **최소 1개의 마커(성공 또는 실패)로 종결**된다 — Complete 수신(성공) / deadline 초과·단절(실패). "정확히 1개"는 아니다: 좀비 late-Complete에서 같은 gen의 실패 마커(deadline) 뒤에 성공 마커(늦은 Complete)가 뒤따르는 failed→success 쌍이 가능하며, gen 펜스가 이를 흡수한다(뷰는 실패 마커를 사다리로 넘겼다가 뒤이은 성공 마커에 flush). 이 결정성이 프론트 상태기계의 전제다.
 
 ## 4. 볼륨·트레이드오프·리스크
 
@@ -115,7 +115,7 @@ src-tauri: 무상태 라우터 + replay gen 채번자
 
 ## 7. 불변식·ADR 파급
 
-- **BLOCK-1 전면화:** 프론트는 wire Subscribe/Unsubscribe를 어떤 경로로도 안 보낸다(resubscribeAll 예외 삭제). wire 구독 형성 = request_replay 단독, 정리 = 라우터 Unsubscribe 단독.
+- **BLOCK-1 전면화:** 프론트는 wire Subscribe/Unsubscribe를 어떤 경로로도 안 보낸다(resubscribeAll 예외 삭제). wire 구독 형성 = request_replay 단독, 정리 = 라우터 Unsubscribe 단독. **단, BLOCK-1(프론트 wire Subscribe 금지)은 src-tauri 허브 경로(TauriTransport) 한정** — direct-daemon carrier(WsTransport, legacy/test 전용)는 1연결=1구독이라 storm 전제가 없어 자체 wire Subscribe로 replay를 형성한다(운영 carrier 아님, clientFactory.ts:24).
 - **src-tauri 상태 허용 범위(재도입 방지선):** per-agent `epoch`(Ack 권위) + single-flight 부기(`gen_counter`·`in_flight`·대기열·`truncated`) = **요청 부기(bookkeeping)**로 허용 — 전부 "진행 중 요청"의 수명만 갖고 단절 시 클리어(gen_counter만 단조 유지). **출력 진도 상태(seq/cursor/버퍼) 금지** — 진도의 유일한 거처 = 웹뷰 뷰 단위 `lastDeliveredSeq`.
 - **R1(데몬) 무변경.**
 - **★gen 펜스의 정합 전제 = "모든 replay는 보관 하한부터 전량"(full-from-oldest).** "gen≥myGen 마커에 flush"가 안전한 이유는 같은 에이전트의 후속 replay가 항상 이전의 누적 상위집합이기 때문이다. **원격 seam에서 after_seq 부분 resume을 도입하는 순간 이 전제가 깨진다** — 그때는 뷰별 마커 상관(정확한 gen 일치 등)을 먼저 강화해야 한다(재검증 NEW-C, ADR에 명시).

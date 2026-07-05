@@ -610,18 +610,6 @@ impl DaemonClient {
             .map_err(|_| "replay 요청 미전송(연결 끊김) — 프론트 재요청 안전".to_string())
     }
 
-    /// ★뷰 주도 replay 채번 — fire-and-forget 변형(gen 미회수)★. `resync_output`(구 프론트 호환 alias)이
-    /// 쓴다 — 그 프론트는 gen 을 안 받고 fire-and-forget 으로 replay 만 유발한다. 비연결이면 조용히 no-op.
-    pub fn request_replay_fire(&self, agent_id: AgentId) {
-        self.try_enqueue(
-            ConnectionCommand::RequestReplay {
-                agent_id,
-                reply: None,
-            },
-            "request_replay",
-        );
-    }
-
     /// fire-and-forget enqueue 공통(동기 try_send). 비연결=no-op, full/닫힘=debug 로깅.
     fn try_enqueue(&self, cmd: ConnectionCommand, kind: &str) {
         let Some(cmd_tx) = self.lifecycle.current_cmd_tx() else {
@@ -635,28 +623,22 @@ impl DaemonClient {
         }
     }
 
-    // ── T4 완료: 재연결·백오프·generation 가드·closedByUser ──────────────────────────
+    // ── 재연결·백오프·generation 가드·closedByUser ──────────────────────────────────
     // 비의도 끊김(데몬 stream 종료/오류/Close frame) 시 연결 task(connection.rs `connected_lifetime`)가
     // **그 task 안에서** attach-only 재연결을 돈다 — read_live(no-spawn) + 지수 백오프(500ms→10s MAX5) →
     // 성공 시 Connected 재전이, 소진 시 Down. close()(closed_by_user)·새 connect(세대 bump)는
     // reconnect_guard(lifecycle.rs)로 Stop → 재연결 즉시 중단(좀비/respawn 차단). 백오프 sleep 은
     // tokio::time::sleep 이라 테스트가 time::pause/advance 로 결정론 검증(ADR-0038).
-    //   ★resubscribe 배선은 T5/T6★: connected *재*전이 직후 subs 순회하며 각 agent 에
-    //   protocol_state::resubscribe_params(&sub) 로 Subscribe{epoch,after_seq} 산출 → wire send
-    //   (JS resubscribeAll 대응). 끊김 시 protocol_state::drain_pending(&mut pending) → 일괄 reject.
-    //   T4 는 *연결 carrier* 재연결만 — subs/pending 맵은 T5/T6 가 연결 task 에 들이면서 배선한다.
+    //   ★ADR-0046: eager resubscribe 삭제★ — connected 재전이 시 src-tauri 가 subs 를 순회해 wire
+    //   Subscribe 를 재발행하던 배선(구 resubscribe_params)은 제거됐다. 재요청 구동자 = 프론트 단독
+    //   (connected 전이에서 뷰 buffering 리셋 + request_replay). 라우터는 Unsubscribe(prune)만 wire 로 낸다.
 
-    // ── T3 완료: protocol_state 순수 결정 함수(epoch/seq dedup·resubscribe·pending 매칭) ─────
-    // `protocol_state` 모듈이 SubState(epoch·last_delivered_seq)·PendingMap·결정 함수(decide_output·
-    // apply_subscribe_ack·resubscribe_params·take_pending·drain_pending)를 순수하게 소유한다(소켓·
-    // runtime 의존 0, 순수 결정 단위 테스트 20개 동반 — protocolClient.test.ts 의 event-routing 5케이스는
-    // 여기 순수 레이어가 아니라 T5/T6 배선 테스트로 미룸, protocol_state.rs tests mod 주석 참조).
-    // ★배선은 미완★: 연결 task 가 이 상태 맵
-    // (subs: HashMap<AgentId, SubState>, pending: HashMap<RequestId, oneshot>)을 들고 결정 함수를
-    // 호출하는 것은 T5(output 라우팅)/T6(invoke 명령) 가 한다 — connection.rs main_loop 의 TODO 참조.
-
-    // ── T5 자리: OutputRouter(arc-swap 라우팅) 연결 ───────────────────────────────────
-    // TODO(T5): 연결 task 가 디코드한 output frame 을 OutputRouter 로 라우팅(ViewManager 기반).
+    // ── protocol_state 순수 결정 함수(epoch decide·pending 매칭) ─────────────────────────
+    // `protocol_state` 모듈이 SubState(epoch)·PendingMap·결정 함수(decide_epoch·apply_subscribe_ack·
+    // take_pending·drain_pending)를 순수하게 소유한다(소켓·runtime 의존 0). 출력 진도(seq/cursor/버퍼)는
+    // 없다 — ADR-0046 이후 진도 거처는 웹뷰 뷰 단위(프론트 lastDeliveredSeq) 단독이고, src-tauri 상태는
+    // 요청 부기(epoch·single-flight replay_flight)뿐이다. binary frame 라우팅은 connection.rs 가 OutputRouter
+    // (targets∩registered 창 Channel)로, replay 경계 마커 합성은 replay_flight 상태기계가 담당한다.
 }
 
 #[cfg(test)]

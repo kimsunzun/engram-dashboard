@@ -29,10 +29,13 @@ const captured = vi.hoisted(() => ({ onChunk: null as ((c: OutputChunk) => void)
 
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
-    subscribeOutput: vi.fn(async (_agentId: string, onChunk: (c: OutputChunk) => void) => {
-      captured.onChunk = onChunk
-      return { unsubscribe: vi.fn() }
-    }),
+    // ADR-0046: 시그니처 (viewId, agentId, onChunk, onState?). onChunk 는 3번째 인자.
+    subscribeOutput: vi.fn(
+      async (_viewId: string, _agentId: string, onChunk: (c: OutputChunk) => void) => {
+        captured.onChunk = onChunk
+        return { unsubscribe: vi.fn() }
+      },
+    ),
     writeStdin: vi.fn(async () => undefined),
     resizePty: vi.fn(async () => undefined),
     connectionState: 'connected',
@@ -101,7 +104,7 @@ afterEach(() => {
 
 describe('TerminalSlot — tag 게이트(FIX-1)', () => {
   it('tag0(터미널 바이트) chunk 는 xterm 에 write 한다(회귀)', async () => {
-    render(<TerminalSlot agentId={AGENT} />)
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
     expect(captured.onChunk).toBeTruthy()
 
@@ -112,7 +115,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
   })
 
   it('tag1(StructuredEvent JSON) chunk 는 무시한다 — xterm 에 write 하지 않는다(오염 방지)', async () => {
-    render(<TerminalSlot agentId={AGENT} />)
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
     act(() => captured.onChunk!(tag1(0, '{"kind":"TextDelta","text":"x"}')))
@@ -120,7 +123,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
   })
 
   it('tag1 을 건너뛰어도 seq dedup 은 정합 — 이어지는 tag0 은 정상 write(한 seq 공간)', async () => {
-    render(<TerminalSlot agentId={AGENT} />)
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
     act(() => captured.onChunk!(tag1(0, '{"kind":"TextDelta"}'))) // seq 0 — 무시되지만 seq 전진
@@ -132,7 +135,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
 
 describe('DomSlot — tag 게이트(FIX-1)', () => {
   it('tag0(터미널 바이트) chunk 는 <pre> 관측 텍스트에 반영한다(회귀)', async () => {
-    render(<DomSlot agentId={AGENT} epoch={0} />)
+    render(<DomSlot viewId="v1" agentId={AGENT} epoch={0} />)
     await flushSubscribe()
     expect(captured.onChunk).toBeTruthy()
 
@@ -142,7 +145,7 @@ describe('DomSlot — tag 게이트(FIX-1)', () => {
   })
 
   it('tag1(StructuredEvent JSON) chunk 는 무시한다 — 관측 텍스트를 오염시키지 않는다', async () => {
-    render(<DomSlot agentId={AGENT} epoch={0} />)
+    render(<DomSlot viewId="v1" agentId={AGENT} epoch={0} />)
     await flushSubscribe()
 
     const json = '{"kind":"TextDelta","text":"leak"}'

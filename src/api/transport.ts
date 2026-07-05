@@ -9,8 +9,9 @@
 //   carrier 수신   → Transport.onMessage(InboundMessage)      → ProtocolClient 라우팅
 //
 // 연결 상태도 carrier 소유: WS 는 reconnecting/down 을 발생시킨다.
-// ProtocolClient 는 connectionState 가 connected 로 (재)전이하면 resubscribeAll 한다 —
-// carrier 별 재연결 메커니즘은 transport 내부에 숨고, ProtocolClient 는 "연결됨" 신호만 본다.
+// ProtocolClient 는 connectionState 가 connected 로 (재)전이하면 모든 뷰를 buffering 리셋 + requestReplay
+// 한다(ADR-0046 — 옛 resubscribeAll wire 재발행 삭제) — carrier 별 재연결 메커니즘은 transport 내부에 숨고,
+// ProtocolClient 는 "연결됨" 신호만 본다.
 
 import type { ConnectionState } from './agentClient'
 
@@ -36,6 +37,19 @@ export type InboundMessage =
   // tag = frame 종류(0=터미널 바이트 / 1=StructuredEvent JSON, wsFrame.ts). ProtocolClient 가 tag 로
   // 소비 경로를 가른다(tag0→바이트 chunk, tag1→구조화 이벤트). epoch/seq 가드·dedup 은 tag 무관 공통.
   | { kind: 'output'; tag: number; agentId: string; epoch: number; seq: number; bytes: Uint8Array }
+  // ★replay 경계 마커(ADR-0046)★: src-tauri 가 각 replay 종결마다 같은 출력 Channel 로 흘리는 tag=255
+  //   프레임을 transport 가 정규화한 제어 이벤트. 공개 agentClient 표면엔 노출하지 않는다(Designer 리뷰
+  //   요구 — 마커는 프론트 내부 상태기계 전용). ProtocolClient 가 gen 펜스로 buffering→live 전이를
+  //   판정한다. gen 은 u64(BigInt) — frame 이 8바이트 BE 로 싣고 requestReplay 반환값과 같은 폭이라야
+  //   비교가 정확하다(§F2 결정). failed=true 면 이 replay 가 완결 없이 종결됨(deadline/단절).
+  | {
+      kind: 'replayBoundary'
+      agentId: string
+      epoch: number
+      gen: bigint
+      truncated: boolean
+      failed: boolean
+    }
 
 /**
  * carrier 추상. ProtocolClient 가 의존하는 유일한 전송 표면.
@@ -83,23 +97,30 @@ export interface Transport {
   close(): void
 
   /**
-   * ★slot (re)mount 시 fresh replay 재요청(remount 대화 소실 FIX)★. RichSlot/TerminalSlot 이
-   * (re)mount 하면 ProtocolClient.subscribeOutput 이 이걸 부른다 — 그 창이 보는 그 agent 의 slot 에
-   * cursor 리셋 + 버퍼 전체 재전송(fresh replay)을 트리거한다.
+   * ★뷰 주도 replay 요청(ADR-0046 F2)★. 뷰(slot)가 (re)mount·재연결·watchdog·실패 사다리에서
+   * ProtocolClient 를 통해 부른다 — src-tauri 에 그 agent 의 **데몬 ring 전량 재replay**(wire
+   * `Subscribe{after_seq:None}`)를 single-flight 로 요청하고, 부여된 **gen(u64)** 을 회수한다.
    *
-   * ## 왜 필요한가(근본원인)
-   * idle tag1 slot 을 split/재배정하면 Allotment 재귀 트리 구조 변경으로 컴포넌트가 remount 되는데,
-   * remount 는 창 출력 Channel 재등록이 *아니라서*(`subscribe_output` 은 창 mount 시 1회) backend 가
-   * replay 를 재전송하지 않는다 → 대화 소실 + 영구 streaming 고착. reload 는 Channel 재등록으로 fresh
-   * replay 가 흘러 복원되므로, 이 훅이 그 reload 복원 경로를 (re)mount 시점에 slot 단위로 재사용한다.
+   * ## gen 표현 = BigInt (설계 결정, §F2)
+   * gen 은 src-tauri per-agent 단조 카운터(u64)다. 마커 frame 이 8바이트 BE 로 gen 을 싣고
+   * ProtocolClient 가 `요청 gen ≤ 마커 gen` 펜스로 비교하므로, 두 값의 폭이 정확히 일치해야 한다 →
+   * **BigInt 로 통일**. (실용 수명에선 Number 로도 2^53 미만이라 무해하나, frame 이 u64 를 싣는 이상
+   * carrier 디코드(getBigUint64)와 invoke 반환을 BigInt 로 맞춰 정밀도 소실 가능성 자체를 제거한다.
+   * invoke 는 u64 를 JSON number 로 직렬화하므로 TauriTransport 가 반환값을 BigInt 로 변환한다 —
+   * 2^53 미만이면 무손실, 그 이상은 이론상 소실이나 replay 카운터가 그 값에 도달할 수 없어 무해.)
    *
    * ## carrier 별
-   *  - TauriTransport: `invoke('resync_output', { agentId })` — src-tauri 로컬 축 B replay(BLOCK-1:
-   *    데몬 wire Subscribe 를 새로 만들지 않는다). fire-and-forget(반환 무시).
-   *  - WsTransport / mock: no-op(src-tauri 로컬 replay 경로가 없음 — 운영 carrier 는 Tauri 고정).
+   *  - TauriTransport: `invoke('request_replay', { agentId }) -> gen(u64)`. src-tauri single-flight 가
+   *    즉시 Subscribe 를 보내거나 다음 Sub 에 병합하고 gen 을 반환한다. 종결 마커(성공/실패)는 출력
+   *    Channel 로 tag=255 프레임이 별도 도착 → transport 가 replayBoundary 로 정규화.
+   *  - WsTransport(legacy/직결): 자체 wire `Subscribe{after_seq:null}` + per-agent gen 카운터. 아래
+   *    구현 주석의 legacy 근사 참조.
    *
-   * fire-and-forget(반환 없음) — 정상 mount 에서 배정 트리거 replay 와 중복될 수 있으나 ProtocolClient
-   * seq dedup(lastDeliveredSeq)이 화면 중복을 흡수한다(ADR-0037).
+   * ★계약(FIX-6 정정)★: 모든 requestReplay 는 **최소 1개의 replayBoundary 이벤트**로 종결되거나(성공/
+   * 실패), 연결이 끊긴다(그때는 마커 미발행 — connected 재전이가 재구동). "정확히 1개"가 아니다: 좀비
+   * 의미론에서 실패 마커(deadline) 뒤에 같은 gen 의 성공 마커(늦은 Complete)가 뒤따를 수 있다 —
+   * failed→성공 쌍은 정상 경로다. gen 펜스가 이를 흡수한다(뷰는 자기 myGen 성공 마커에 flush, 실패
+   * 마커는 사다리로 넘겼다가 뒤이은 성공 마커에 복구). ProtocolClient 상태기계 전제.
    */
-  resyncOutput(agentId: string): void
+  requestReplay(agentId: string): Promise<bigint>
 }

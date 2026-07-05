@@ -62,6 +62,51 @@ export class WsTransport implements Transport {
   // ProtocolClient 가 등록하는 단일 수신 콜백(control/output 정규화 메시지).
   private messageCb: ((msg: InboundMessage) => void) | null = null
 
+  // ★legacy requestReplay single-flight(ADR-0046 F2, FIX-4)★: WsTransport 는 데몬에 직결이라 src-tauri
+  //   의 진짜 single-flight(gen 채번·acked 게이트)가 없다. 테스트/흔적 경로지만(운영 carrier =
+  //   TauriTransport 고정, ADR-0029), ★per-agent sole-outstanding★을 강제한다 — 어느 시점에도 wire
+  //   Subscribe 는 에이전트당 1개만 in-flight. 진행 중 들어온 요청은 다음 1개 gen 으로 병합(같은
+  //   promise/gen 을 모든 대기자가 공유)하고, 현재 ReplayComplete(경계) 뒤에 정확히 1회 Subscribe 를
+  //   송신한다. 경계(replayBoundary)는 그 미종결 요청의 gen 으로 각인한다 — 마지막값 각인(concurrent
+  //   요청이 두 Subscribe 를 보내고 경계에 마지막 gen 을 찍어 조기 flush)을 원천 차단(FIX-4).
+  //
+  //   상태(agentId →):
+  //    - inflight: 현재 미종결(sent, ReplayComplete 대기) 요청 {gen, truncated(Ack), epoch(Ack)}. 없으면 undefined.
+  //    - pending: inflight 중 병합된 다음 요청 {gen, waiters[]}. ReplayComplete 시 승격돼 Subscribe 송신.
+  //      waiter 는 resolve/reject 쌍 — 소켓이 ReplayComplete 전에 닫히면(handleClose) reject 로 깨운다(FIX-B).
+  private wsReplay = new Map<
+    string,
+    {
+      inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
+      pending?: {
+        gen: bigint
+        waiters: Array<{ resolve: (gen: bigint) => void; reject: (e: Error) => void }>
+      }
+    }
+  >()
+  private wsGenCounter = 0n
+
+  /** 이 agent 의 wsReplay 상태를 얻거나 생성. */
+  private wsReplayEntry(agentId: string): {
+    inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
+    pending?: {
+      gen: bigint
+      waiters: Array<{ resolve: (gen: bigint) => void; reject: (e: Error) => void }>
+    }
+  } {
+    let e = this.wsReplay.get(agentId)
+    if (!e) {
+      e = {}
+      this.wsReplay.set(agentId, e)
+    }
+    return e
+  }
+
+  /** wire Subscribe{after_seq:null}(전량 재replay) 송신. 미연결이면 throw(호출자가 계약대로 reject). */
+  private sendSubscribeFromOldest(agentId: string): void {
+    this.send({ Subscribe: { agent_id: agentId, epoch: null, after_seq: null } })
+  }
+
   // ── 연결 상태 ──────────────────────────────────────────────────────────────────
   get connectionState(): ConnectionState {
     return this._state
@@ -236,7 +281,7 @@ export class WsTransport implements Transport {
             if ('Hello' in msg && !settled) {
               settled = true
               this.reconnectAttempt = 0
-              // connected 전이 → ProtocolClient 가 resubscribeAll(재연결 resume).
+              // connected 전이 → ProtocolClient 가 뷰 buffering 리셋 + requestReplay(재연결 전량 재replay, ADR-0046).
               this.setState('connected')
               settleResolve()
               return
@@ -248,6 +293,11 @@ export class WsTransport implements Transport {
               settleReject(new Error('daemon auth failed: ' + m))
               return
             }
+            // ★legacy replay 경계 합성(ADR-0046 F2)★: 데몬 직결이라 마커 frame(tag=255)이 없다. 데몬이
+            //   흘리는 SubscribeAck(truncated/epoch 기억) → ReplayComplete(경계) wire 이벤트를 관측해
+            //   requestReplay 계약(요청당 최소 1개 boundary, sole-outstanding)을 근사한다. control 은 아래에서
+            //   그대로 위로도 올린다.
+            this.observeReplayWire(msg)
             // control event — ProtocolClient 로 정규화 전달.
             this.messageCb?.({ kind: 'control', event: msg })
           } else if (event.data instanceof ArrayBuffer) {
@@ -289,6 +339,13 @@ export class WsTransport implements Transport {
   private handleClose(wasHandshakeSettled: boolean): void {
     this.connectPromise = null
     this.ws = null
+    // ★FIX-B: replay single-flight 상태를 소켓 수명에 묶는다★. 소켓이 ReplayComplete(경계) 전에 닫히면
+    //   미종결 inflight 는 영영 종결 마커를 못 받고, 병합 대기(pending)는 승격될 소켓이 없다 — wsReplay 를
+    //   비우지 않으면 재연결 후 requestReplay 가 entry.inflight 를 보고 새 Subscribe 를 안 보내 모든
+    //   대기자가 영구 stuck 된다. 여기서 맵을 비우고 병합 대기자를 reject 한다(ProtocolClient.issueReplay 의
+    //   catch 가 흡수 → 재연결 전이가 전량 재요청을 다시 구동). onclose 는 spec 상 onerror 뒤에 발화하므로
+    //   close/error 양 경로를 이 지점이 덮는다.
+    this.rejectAllReplays(new Error('daemon websocket closed before replay complete'))
 
     if (this.closedByUser) {
       this.setState('down')
@@ -342,11 +399,98 @@ export class WsTransport implements Transport {
     ws.send(JSON.stringify(payload))
   }
 
-  // ── slot (re)mount fresh replay 재요청(remount 대화 소실 FIX) ──────────────────
-  // no-op: resync_output 은 src-tauri 로컬 축 B replay 경로(invoke → replay_slots)라 WsTransport
-  // (데몬 직결, src-tauri 없음)엔 해당 경로가 없다. 운영 carrier 는 TauriTransport 고정이고 WsTransport
-  // 는 테스트 mock 흔적이라(ADR-0020/0029) no-op 이 안전하다 — remount replay 재요청은 Tauri 에서만 배선.
-  resyncOutput(_agentId: string): void {}
+  // ── 뷰 주도 replay 요청(ADR-0046 F2 — legacy 직결 single-flight, FIX-4) ────────────────
+  // src-tauri single-flight(gen 채번·acked 게이트) 대신, 자체 wire Subscribe{after_seq:null} 를 보내고
+  // per-agent gen 카운터로 gen 을 부여한다. ★sole-outstanding★: in-flight 없으면 즉시 채번·송신하고 그
+  // gen 을 반환. in-flight 있으면 wire Subscribe 를 겹쳐 보내지 않고 다음 1개 gen 으로 병합한다 — 모든
+  // 대기자가 같은 gen/promise 를 공유하고, 현재 ReplayComplete 뒤에 그 병합 요청을 정확히 1회 송신한다.
+  // 종결 마커는 observeReplayWire 가 in-flight 의 gen 으로 각인(경계 gen = 그 replay 를 종결하는 요청과 일치).
+  requestReplay(agentId: string): Promise<bigint> {
+    const entry = this.wsReplayEntry(agentId)
+    if (entry.inflight) {
+      // 이미 미종결 Subscribe 가 있다 — wire 를 겹쳐 보내지 않는다(sole-outstanding). 다음 1회 요청에
+      //   병합: pending 이 없으면 새 gen 채번, 있으면 기존 pending gen 공유. 모든 대기자가 같은 gen 을 회수.
+      if (!entry.pending) entry.pending = { gen: ++this.wsGenCounter, waiters: [] }
+      const pending = entry.pending
+      // resolve/reject 쌍을 보관 — ReplayComplete 승격 시 resolve, 소켓이 그 전에 닫히면 reject(FIX-B).
+      return new Promise<bigint>((resolve, reject) => pending.waiters.push({ resolve, reject }))
+    }
+    // in-flight 없음 → 즉시 채번·송신. 미연결이면 send 가 throw — 계약대로 reject(boundary 없이).
+    const gen = ++this.wsGenCounter
+    try {
+      this.sendSubscribeFromOldest(agentId)
+    } catch (e) {
+      if (!entry.pending) this.wsReplay.delete(agentId) // 병합 대기자 없으면 entry 정리.
+      return Promise.reject(e instanceof Error ? e : new Error(String(e)))
+    }
+    entry.inflight = { gen, truncated: false, epoch: undefined }
+    return Promise.resolve(gen)
+  }
+
+  // 데몬 wire 이벤트를 관측해 replay 경계(replayBoundary)를 합성한다(legacy 직결 single-flight). SubscribeAck
+  // 은 미종결 요청의 epoch/truncated 를 기억하고, ReplayComplete 는 그 요청을 성공 boundary 로 종결한 뒤
+  // 병합된 다음 요청(pending)이 있으면 승격해 Subscribe 를 정확히 1회 송신한다(boundary 1개 ↔ Subscribe 1개).
+  private observeReplayWire(msg: WireEvent): void {
+    if ('SubscribeAck' in msg) {
+      const a = msg.SubscribeAck as { agent_id: string; current_epoch: number; truncated: boolean }
+      const entry = this.wsReplay.get(a.agent_id)
+      if (entry?.inflight) {
+        entry.inflight.epoch = a.current_epoch
+        entry.inflight.truncated = a.truncated
+      }
+      return
+    }
+    if ('ReplayComplete' in msg) {
+      const c = msg.ReplayComplete as { agent_id: string; epoch?: number }
+      const entry = this.wsReplay.get(c.agent_id)
+      if (!entry?.inflight) return
+      // 미종결 요청을 성공 boundary 로 종결 — 경계 gen = 이 replay 를 종결하는 요청의 gen(마지막값 오각인
+      //   방지). epoch 은 Ack 관측치, 없으면 Complete 의 epoch, 그것도 없으면 0(직결 근사).
+      const done = entry.inflight
+      entry.inflight = undefined
+      this.messageCb?.({
+        kind: 'replayBoundary',
+        agentId: c.agent_id,
+        epoch: done.epoch ?? c.epoch ?? 0,
+        gen: done.gen,
+        truncated: done.truncated,
+        failed: false,
+      })
+      // ★병합 요청 승격(sole-outstanding)★: 진행 중 들어와 병합된 다음 요청이 있으면, 지금(경계 뒤) 정확히
+      //   1회 Subscribe 를 송신해 새 in-flight 로 만든다. 대기자 전원에게 같은 gen 을 회수시킨다.
+      const pending = entry.pending
+      if (pending) {
+        entry.pending = undefined
+        try {
+          this.sendSubscribeFromOldest(c.agent_id)
+          entry.inflight = { gen: pending.gen, truncated: false, epoch: undefined }
+        } catch {
+          // 송신 실패(끊김) — in-flight 못 세운다. 대기자는 gen 은 받되(계약상 gen 반환) 마커는 재연결
+          //   전이가 구동하는 재요청이 낸다. entry 는 다음 요청 때 재사용.
+        }
+        for (const w of pending.waiters) w.resolve(pending.gen)
+      } else if (!entry.inflight) {
+        // 미종결·병합 모두 없으면 entry 정리(맵 누수 방지).
+        this.wsReplay.delete(c.agent_id)
+      }
+    }
+  }
+
+  /**
+   * ★FIX-B: 소켓 종료 시 replay single-flight 상태 전량 리셋★. wsReplay 를 비워 재연결 후 requestReplay 가
+   * 새 wire Subscribe 를 다시 보내게(stuck 해소) 하고, 병합 대기(pending.waiters)를 reject 로 깨운다 —
+   * 이 replay 는 종결 마커 없이 죽었으므로. inflight 요청의 promise 는 이미 gen 을 반환하며 resolve 된 상태라
+   * 여기서 별도 settle 대상이 아니다(ProtocolClient 뷰가 마커를 못 받아도 재연결 전이가 재요청을 구동).
+   */
+  private rejectAllReplays(err: Error): void {
+    const entries = [...this.wsReplay.values()]
+    this.wsReplay.clear()
+    for (const e of entries) {
+      if (e.pending) {
+        for (const w of e.pending.waiters) w.reject(err)
+      }
+    }
+  }
 
   // ── 명시 종료(재연결 중단) ──────────────────────────────────────────────────────
   close(): void {
@@ -380,6 +524,10 @@ export class WsTransport implements Transport {
       rej(new Error('connection superseded (start/close) — ADR-0021'))
     }
     this.connectPromise = null
+    // ★FIX-B: cleanupSocket 도 replay 상태를 리셋★. close()/start() 의 supersede 경로는 옛 소켓의 onclose 를
+    //   delete 해 handleClose 를 안 태우므로, 여기서도 비워야 재연결 후 새 Subscribe 가 나가고 병합 대기가
+    //   reject 된다. handleClose 와 중복 호출돼도 clear+빈 waiters 라 무해(idempotent).
+    this.rejectAllReplays(new Error('connection superseded (start/close) — ADR-0021'))
     const ws = this.ws
     if (!ws) return
     delete (ws as { onmessage?: unknown }).onmessage

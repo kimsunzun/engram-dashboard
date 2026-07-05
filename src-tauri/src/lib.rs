@@ -12,7 +12,8 @@ pub mod layout;
 //     일관성(ABA 방지) — emit_after_unlock 이 아니다(락 밖 동시 호출 시 델타 어긋남, FIX-1).
 //   - 델타 송신은 락 해제 후 = rebuild 반환 SubscriptionDelta 를 DaemonClient cmd_tx 로
 //     Subscribe/Unsubscribe enqueue(락 안에서 송신 금지).
-//   - targets 사용 = connection.rs:668 Message::Binary 자리(decode_frame → decide_output → route)
+//   - targets 사용 = connection.rs binary arm(frame 헤더 → decide_epoch 필터 → targets∩registered
+//     창 Channel 로 원본 bytes 통과, ADR-0046 무상태 라우팅)
 // app-level 공유(재연결 task 수명 초월) → Arc<OutputRouter> 로 manage(T6).
 pub mod output_router;
 // S14 모듈①(ADR-0036) T6b: window Channel registry 타입(window_label → 출력 Channel). Tauri Channel
@@ -191,8 +192,6 @@ pub fn run() {
             // ADR-0046 M1: 뷰 주도 replay 채번(single-flight, gen 반환) — 뷰 mount/remount 시 데몬 ring
             //   전량 재replay 를 유발하는 유일 경로(wire Subscribe 형성 = 이것 단독, BLOCK-1 전면화).
             commands::request_replay,
-            // ADR-0046: 구 프론트 호환 alias(resync_output → request_replay fire-and-forget). M3 에서 제거.
-            commands::resync_output,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

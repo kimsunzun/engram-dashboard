@@ -12,11 +12,10 @@
 //! 완전한 터미널 에뮬레이터가 목표가 아니다 — 커서 이동/화면 지우기 같은 제어열은 best-effort 로 벗겨
 //! "평문이 읽히는" 수준만 노린다(아래 ANSI strip 주석 참조).
 //!
-//! ★알려진 한계 — LIVE-forward 만★: DOM 모드는 *구독 이후 도착하는* 출력만 그린다. 이미 돌고 있는
-//! 에이전트에 DOM 모드를 뒤늦게 켜도(렌더러 스왑) 스왑 이전 출력은 backfill 되지 않는다 — assign 시점
-//! replay 는 (window,agent) 델타에서 1회만 발화하고 렌더러 스왑엔 재발화하지 않기 때문(reload-replay 와
-//! 같은 한계, ADR-0041). 정식 해결(resubscribe 시 replay / 데몬 re-hydration)은 미결 설계 결정이라 여기서
-//! 구현하지 않는다.
+//! ★backfill(ADR-0046 이후)★: DOM 모드도 구독 시 requestReplay 로 데몬 ring 전량을 backfill 받는다 —
+//! 스왑/remount 도 뷰(slot) 단위 buffering→마커 flush 경로로 전량 재replay 되어 스왑 이전 출력이 복원된다.
+//! (구 한계 "LIVE-forward 만 / 스왑 시 backfill 안 됨, ADR-0041" 은 ADR-0046 뷰 직결 replay 로 해소 —
+//! 어느 mount 든 requestReplay 전량 backfill 로 채운다.)
 
 import { useEffect, useRef, useState } from 'react'
 
@@ -26,6 +25,8 @@ import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 
 interface DomSlotProps {
+  /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 독립 구독·독립 진도(버그 B 해소). */
+  viewId: string
   agentId: string
   /** 재spawn 재구독 트리거([agentId,epoch]) — TerminalSlot 과 동일. */
   epoch: number
@@ -74,7 +75,7 @@ function splitTrailingEsc(s: string): [string, string] {
   return [s.slice(0, esc), tail]
 }
 
-export default function DomSlot({ agentId, epoch }: DomSlotProps) {
+export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
   // 누적 출력(평문). React state 로 들고 리렌더 — 관측용이라 xterm 같은 명령형 write 대신 선언적 렌더.
   const [text, setText] = useState('')
   const preRef = useRef<HTMLPreElement>(null)
@@ -101,7 +102,7 @@ export default function DomSlot({ agentId, epoch }: DomSlotProps) {
     let cancelled = false
 
     agentClient
-      .subscribeOutput(agentId, chunk => {
+      .subscribeOutput(viewId, agentId, chunk => {
         if (cancelled) return
         if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
         lastSeq.current = chunk.seq
@@ -137,9 +138,10 @@ export default function DomSlot({ agentId, epoch }: DomSlotProps) {
       sub?.unsubscribe()
     }
     // epoch 포함 — 재spawn(같은 agentId, epoch++) 시 reset → 재구독 → replay 재생(S9 §18-e/f).
-    // ★단, 렌더러 스왑(예: 실행 중 에이전트에 DOM 모드 뒤늦게 켜기)은 여기 재구독을 유발해도 assign
-    //   시점 replay 를 다시 못 받는다 → 스왑 이전 출력은 backfill 안 됨(파일 헤더 "LIVE-forward 만" 참조).
-  }, [agentId, epoch])
+    // ★렌더러 스왑/remount 도 재구독이 requestReplay 전량 backfill 로 해소(ADR-0046)★ — 스왑 이전 출력도
+    //   뷰 buffering→마커 flush 로 복원된다(구 "LIVE-forward 만" 한계는 ADR-0046 로 해소, 파일 헤더 참조).
+    // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립).
+  }, [viewId, agentId, epoch])
 
   // 새 출력 도착 시 하단으로 자동 스크롤(터미널 tail 관측 UX).
   useEffect(() => {

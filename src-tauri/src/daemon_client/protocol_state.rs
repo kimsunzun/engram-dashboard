@@ -129,18 +129,6 @@ pub enum EpochDecision {
     DropEpochMismatch,
 }
 
-/// resubscribe 시 보낼 Subscribe 파라미터(JS `resubscribeAll` 산출 + `subscribeOutput` 첫 구독).
-///
-/// wire `AgentCommand::Subscribe { agent_id, epoch: Option<u32>, after_seq: Option<u64> }` 로 그대로
-/// 매핑된다(여기선 agent_id 를 빼고 가드 산출분만 — 호출자가 agent_id 를 붙인다).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubscribeParams {
-    /// `Some(current)` = Resume(tail-only) 의도. `None` = 전체 replay(FromOldest).
-    pub epoch: Option<u32>,
-    /// `Some(last)` = 그 seq 이후만. `None` = 처음부터.
-    pub after_seq: Option<u64>,
-}
-
 /// pending request_id → reply 콜백 슬롯의 키→값 타입. 값(T)은 호출자가 정한다 —
 /// 운영에선 `oneshot::Sender<reply>`, 테스트에선 결과를 적재하는 mock. 이 모듈은 매칭 로직만 소유한다.
 pub type PendingMap<T> = HashMap<RequestId, T>;
@@ -185,33 +173,6 @@ pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) -> bool {
     epoch_changed
 }
 
-// ── resubscribe 파라미터 산출(JS resubscribeAll 승격) ────────────────────────────────
-/// connected 재전이 시 한 agent 의 Subscribe 파라미터 산출.
-///
-/// ★T7a 변경★: `after_seq` 를 외부에서 주입받는다(T6b 까지의 `st.last_delivered_seq` 를 그대로 쓰던
-/// 것에서 변경). 호출자(connection.rs)가 `output_channel::min_render_seq` 로 모든 창의 render_seq 중
-/// 최솟값을 구해 주입한다 — 가장 뒤처진 창이 필요한 seq 부터 resume 해야 무손실이기 때문.
-///
-/// ★버그 A 가드(유지)★: epoch=null 을 보내면 데몬이 FromOldest 전체 replay → 이미 본 프레임 중복.
-/// 그래서 **마지막으로 알려진 epoch(st.epoch)을 그대로** 보내 데몬이 Resume(tail-only) 하게 한다.
-///
-/// epoch 이 `None`(첫 Ack 전에 끊겼다 재연결)이면 epoch=None + after_seq=None → 전체 replay(중복은
-/// 창별 dedup 이 거른다). Ack 도 못 받았으면 기준이 없어 처음부터 받는 수밖에 없다.
-pub fn resubscribe_params(st: &SubState, after_seq: Option<u64>) -> SubscribeParams {
-    SubscribeParams {
-        epoch: st.epoch,
-        after_seq,
-    }
-}
-
-/// 첫 구독 파라미터(JS `subscribeOutput`: 둘 다 null = FromOldest, 전부 받음).
-pub fn initial_subscribe_params() -> SubscribeParams {
-    SubscribeParams {
-        epoch: None,
-        after_seq: None,
-    }
-}
-
 // ── pending request_id 매칭(JS resolvePending/rejectPending + connected→down reject 승격) ──
 /// request_id 에 대응하는 pending 슬롯을 꺼낸다(매칭 성공 시 맵에서 제거 — 1회성). `None` 이면 무시
 /// (JS `resolvePending` 의 "없으면 no-op"). 호출자가 반환된 슬롯을 resolve/reject 한다.
@@ -239,8 +200,9 @@ mod tests {
     //! 섞으면 결정 부분만 이식한다.
     //!
     //! ★T7a 검증 범위 변경★: seq dedup/high-water 관련 테스트를 제거했다(로직이 per-window
-    //!   output_channel 레이어로 이동, T7b). 이 모듈 테스트는 epoch 가드(decide_epoch)와
-    //!   apply_subscribe_ack(bool 반환) + resubscribe_params(after_seq 외부 주입)만 박는다.
+    //!   output_channel 레이어로 이동, T7b). ★ADR-0046★: resubscribe_params/initial_subscribe_params 도
+    //!   삭제됐다(eager resubscribe 제거 — replay 형성 = 프론트 request_replay 단독). 이 모듈 테스트는
+    //!   epoch 가드(decide_epoch)와 apply_subscribe_ack(bool 반환)만 박는다.
     //!
     //! ★T5/T6 로 미룬 event-routing(M=5)★: 아래는 순수 결정이 아니라 InboundMessage variant 라우팅 +
     //!   콜백 호출/unsubscribe 라 protocol_state 단독으론 보호 대상이 없다 → 실제 배선이 도는 T5/T6
@@ -403,44 +365,9 @@ mod tests {
         assert_eq!(st.epoch, Some(11));
     }
 
-    // ── resubscribe resume(R3) — after_seq 외부 주입(T7a) ──────────────────────────
-
-    /// TS: "재연결 시 알려진 epoch + after_seq=외부주입(min_render_seq) 로 resubscribe".
-    /// ★버그 A 가드★: epoch=None(null)이면 데몬이 FromOldest 로 취급 → resubscribe 는 st.epoch 를 보낸다.
-    #[test]
-    fn resubscribe_uses_known_epoch_and_injected_seq() {
-        let st = subscribed_with_ack(5);
-        // after_seq 를 외부에서 주입(output_channel::min_render_seq 의 결과를 흉내).
-        let params = resubscribe_params(&st, Some(2));
-        assert_eq!(params.epoch, Some(5), "버그 A: None 이면 FromOldest 중복");
-        assert_eq!(params.after_seq, Some(2), "외부 주입 after_seq 그대로");
-    }
-
-    /// Ack 전 끊김 — epoch=None + after_seq=None → FromOldest 전체 replay.
-    #[test]
-    fn resubscribe_before_ack_sends_full_replay() {
-        let st = SubState::new(); // Ack 전 — epoch=None
-        let params = resubscribe_params(&st, None);
-        assert_eq!(params.epoch, None, "Ack 전엔 기준 없음 → FromOldest");
-        assert_eq!(params.after_seq, None);
-    }
-
-    /// 창이 없거나 render_seq 가 None 이면 after_seq=None(전체 replay).
-    #[test]
-    fn resubscribe_with_none_after_seq_sends_full_replay() {
-        let st = subscribed_with_ack(3);
-        let params = resubscribe_params(&st, None);
-        assert_eq!(params.epoch, Some(3));
-        assert_eq!(params.after_seq, None, "min_render_seq=None → 전체 replay");
-    }
-
-    /// JS `subscribeOutput` 첫 구독: 둘 다 null(FromOldest, 전부 받음).
-    #[test]
-    fn initial_subscribe_is_from_oldest() {
-        let params = initial_subscribe_params();
-        assert_eq!(params.epoch, None);
-        assert_eq!(params.after_seq, None);
-    }
+    // ── ADR-0046: resubscribe_params/initial_subscribe_params 테스트 삭제 ──────────────
+    //    eager resubscribe(connected 재전이 시 src-tauri 가 Subscribe 재발행)와 초기 구독 파라미터 산출은
+    //    미러 버퍼와 함께 제거됐다 — replay 형성은 프론트 request_replay(뷰 주도 전량 재replay) 단독.
 
     // ── pending drain ───────────────────────────────────────────────────────────────
 

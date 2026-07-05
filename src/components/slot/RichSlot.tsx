@@ -38,6 +38,8 @@ import codeFixture from '../../lab/richslot/fixtures/code.jsonl?raw'
 import reviewFixture from '../../lab/richslot/fixtures/review.jsonl?raw'
 
 interface RichSlotProps {
+  /** 구독 키(ADR-0046) = 슬롯 id. 라이브 모드에서만 의미(같은 agentId 두 슬롯 독립 진도 — 버그 B 해소). */
+  viewId?: string
   /** 지정되면 라이브 모드(그 에이전트의 실스트림 구독). 없으면 fixture 스파이크 모드. */
   agentId?: string
   /** 재spawn 재구독 트리거([agentId,epoch]). 라이브 모드에서만 의미. */
@@ -45,8 +47,8 @@ interface RichSlotProps {
 }
 
 /** 소스 모드 분기 — agentId 있으면 라이브, 없으면 fixture 스파이크. */
-export default function RichSlot({ agentId, epoch }: RichSlotProps) {
-  if (agentId != null) return <LiveRichSlot agentId={agentId} epoch={epoch ?? 0} />
+export default function RichSlot({ viewId, agentId, epoch }: RichSlotProps) {
+  if (agentId != null) return <LiveRichSlot viewId={viewId ?? agentId} agentId={agentId} epoch={epoch ?? 0} />
   return <FixtureRichSlot />
 }
 
@@ -59,7 +61,7 @@ const LIVE_RENDER_SETTINGS: { codeRender: CodeRender; diffRender: DiffRender } =
   diffRender: 'inline',
 }
 
-function LiveRichSlot({ agentId, epoch }: { agentId: string; epoch: number }) {
+function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: string; epoch: number }) {
   const [messages, setMessages] = useState<RichMessage[]>([])
   const [turnDone, setTurnDone] = useState(false)
   // ★로컬 awaiting 플래그(FIX 5b)★: 전송 직후~첫 응답 바이트 도착 사이의 공백을 메운다. turnDone 은
@@ -94,7 +96,7 @@ function LiveRichSlot({ agentId, epoch }: { agentId: string; epoch: number }) {
     const lastSeq = { current: -1 } // seq dedup(순서 역전·중복 drop)
 
     agentClient
-      .subscribeOutput(agentId, (chunk) => {
+      .subscribeOutput(viewId, agentId, (chunk) => {
         if (cancelled) return
         if (chunk.seq <= lastSeq.current) return
         lastSeq.current = chunk.seq
@@ -124,7 +126,8 @@ function LiveRichSlot({ agentId, epoch }: { agentId: string; epoch: number }) {
       cancelled = true
       sub?.unsubscribe()
     }
-  }, [agentId, epoch])
+    // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). epoch = 재spawn 재구독 트리거.
+  }, [viewId, agentId, epoch])
 
   // 새 메시지 도착 시 하단으로 스크롤(대화 UX).
   useEffect(() => {

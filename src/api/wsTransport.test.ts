@@ -439,6 +439,118 @@ describe('WsTransport 재연결', () => {
   })
 })
 
+// ── FIX-4: requestReplay single-flight(sole-outstanding, per-agent) ──────────────────────
+describe('WsTransport requestReplay single-flight(FIX-4)', () => {
+  it('in-flight 중 동시 요청은 wire Subscribe 를 겹쳐 안 보내고 다음 1개 gen 으로 병합', async () => {
+    const t = new WsTransport()
+    const ws = await connect(t)
+    ws.sent.length = 0 // handshake Auth 제거.
+
+    // 1) 첫 요청 → 즉시 wire Subscribe 1개 송신 + gen1 반환.
+    const gen1 = await t.requestReplay(AGENT)
+    expect(gen1).toBe(1n)
+    let subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(1)
+
+    // 2) in-flight(Ack/Complete 전) 중 동시 요청 2개 → wire 안 나감(sole-outstanding). 같은 gen 공유.
+    const p2 = t.requestReplay(AGENT)
+    const p3 = t.requestReplay(AGENT)
+    subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(1) // 아직 1개(겹쳐 안 보냄)
+
+    // 3) 첫 replay 종결(Ack→Complete) → boundary gen = gen1(마지막값 오각인 없음) + 병합요청 승격 송신.
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 0, truncated: false } })
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
+    const b1 = got.find((m) => m.kind === 'replayBoundary')
+    expect(b1).toMatchObject({ kind: 'replayBoundary', agentId: AGENT, gen: 1n, epoch: 4 })
+
+    // 병합요청이 경계 뒤에 정확히 1회 Subscribe 송신 + 대기자 전원 같은 gen(=2) 회수.
+    const [g2, g3] = await Promise.all([p2, p3])
+    expect(g2).toBe(2n)
+    expect(g3).toBe(2n) // 같은 gen 공유(병합)
+    subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(2) // 경계 뒤 병합요청 1개 추가 = 총 2개
+
+    // 4) 병합 replay 종결 → boundary gen = gen2(그 replay 를 종결하는 요청과 일치).
+    got.length = 0
+    ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 0, truncated: false } })
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
+    const b2 = got.find((m) => m.kind === 'replayBoundary')
+    expect(b2).toMatchObject({ kind: 'replayBoundary', gen: 2n })
+    t.close()
+  })
+
+  it('요청 1개당 boundary 1개 — in-flight 종결 후 새 요청은 다시 즉시 송신', async () => {
+    const t = new WsTransport()
+    const ws = await connect(t)
+    ws.sent.length = 0
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+
+    await t.requestReplay(AGENT) // gen1 즉시 송신.
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 0 } })
+    expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1) // boundary 1개.
+
+    // in-flight 종결 후 새 요청 → 다시 즉시 송신(병합 아님).
+    got.length = 0
+    const gen2 = await t.requestReplay(AGENT)
+    expect(gen2).toBe(2n)
+    const subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(2) // 첫 + 두 번째 = 2개.
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 0 } })
+    expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1) // 새 요청도 boundary 1개.
+    t.close()
+  })
+})
+
+// ── FIX-B: replay single-flight 상태가 소켓 종료를 넘어 stuck 되지 않음 ──────────────────────
+describe('WsTransport replay single-flight — 소켓 종료 시 상태 리셋 + 대기자 reject(FIX-B)', () => {
+  it('gen1 in-flight + gen2 pending 중 소켓 close → pending 대기자 reject, 재연결 후 새 wire Subscribe 재송신', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t)
+    ws1.sent.length = 0 // handshake Auth 제거.
+
+    // 1) gen1 요청 → 즉시 wire Subscribe 송신 + 이미 resolve 된 promise(gen 동기 반환).
+    const gen1 = await t.requestReplay(AGENT)
+    expect(gen1).toBe(1n)
+    let subs = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(1)
+
+    // 2) gen1 in-flight(ReplayComplete 전) 중 gen2 요청 → wire 안 나감, pending 병합(미settle promise).
+    const p2 = t.requestReplay(AGENT)
+    // p2 가 reject 될 것이므로 unhandled-rejection 소음 방지용 no-op catch 를 미리 붙인다.
+    let p2Rejected: unknown = null
+    void p2.catch((e) => (p2Rejected = e))
+    subs = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(1) // 아직 1개(sole-outstanding).
+
+    // 3) ★ReplayComplete 전에 소켓 close★ → handleClose 가 wsReplay 를 비우고 pending 대기자 reject.
+    ws1.fireClose()
+    await expect(p2).rejects.toThrow(/closed before replay complete/)
+    expect(p2Rejected).not.toBeNull() // reject 관측(unhandled 아님).
+
+    // 4) 재연결 → 새 소켓 핸드셰이크 완료.
+    await new Promise((r) => setTimeout(r, 600))
+    const ws2 = FakeWebSocket.last!
+    expect(ws2).not.toBe(ws1)
+    ws2.fireOpen()
+    ws2.fireText({ Hello: { protocol_version: 1 } })
+    await Promise.resolve()
+    expect(t.connectionState).toBe('connected')
+    ws2.sent.length = 0 // 재연결 Auth 제거.
+
+    // 5) ★재연결 후 fresh requestReplay★: wsReplay 가 close 때 비워졌으므로 entry.inflight 가 없다 →
+    //   새 wire Subscribe 를 다시 송신(FIX-B 이전엔 stale inflight 때문에 안 보내 영구 stuck).
+    const gen3 = await t.requestReplay(AGENT)
+    expect(gen3).toBe(3n) // gen 카운터는 계속 증가(gen1=1, gen2=2 소각, gen3=3).
+    subs = ws2.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
+    expect(subs.length).toBe(1) // 재연결 소켓으로 새 Subscribe 1개 나감.
+    t.close()
+  })
+})
+
 // ── ADR-0021 B-1: 명령(ensureReady=attach-only) / 명시(start=spawn) 분리 ──────────────
 describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0021)', () => {
   // ★mutation 가드★: 이 테스트가 깨지면 ensureReady 가 spawn(discover)을 하고 있다는 뜻 =
@@ -588,68 +700,85 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 })
 
-// ── 통합 회귀: WsTransport + ProtocolClient 조합(기존 daemonClient.test 재연결 resume 이관) ──
-describe('WsTransport + ProtocolClient 통합(재연결 resume, R3)', () => {
-  it('재연결 시 알려진 epoch + after_seq=마지막배달seq 로 resubscribe → 무손실·무중복', async () => {
+// ── 통합 회귀: WsTransport + ProtocolClient 조합(ADR-0046 뷰 직결 replay — legacy 직결 근사 경로) ──
+//    ADR-0046 재설계 후: 프론트는 wire Subscribe/Unsubscribe 를 resubscribeAll 로 안 보낸다(BLOCK-1
+//    전면화). 뷰 mount·재연결은 transport.requestReplay 로 전량 재replay 를 요청한다. WsTransport(legacy
+//    직결)는 자체 wire Subscribe{after_seq:null} 를 보내고 per-agent gen 을 부여하며, 데몬 ReplayComplete
+//    관측 시 replayBoundary 를 합성한다. ProtocolClient 는 그 마커에 gen 펜스로 flush 한다.
+const V1 = 'view-1'
+
+describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () => {
+  it('subscribe → requestReplay 가 wire Subscribe{after_seq:null} 송신 + ReplayComplete → 마커 flush', async () => {
     const t = new WsTransport()
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
+    await c.subscribeOutput(V1, AGENT, (chunk) => received.push(chunk.seq))
     await Promise.resolve()
+
+    // requestReplay 가 legacy 직결 근사로 wire Subscribe{after_seq:null}(FromOldest) 를 보냈다.
+    const sub = ws1.parsedSent().find((m) => typeof m === 'object' && m && 'Subscribe' in m) as {
+      Subscribe: { agent_id: string; epoch: number | null; after_seq: number | null }
+    }
+    expect(sub).toBeTruthy()
+    expect(sub.Subscribe.agent_id).toBe(AGENT)
+    expect(sub.Subscribe.after_seq).toBeNull() // 전량 재replay(full-from-oldest)
 
     const E = 5
     ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 1 }))
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 2 }))
+    // 아직 buffering — 마커(ReplayComplete) 전엔 flush 안 함.
+    expect(received).toEqual([])
+    // ReplayComplete → WsTransport 가 replayBoundary 합성 → ProtocolClient flush.
+    ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
     expect(received).toEqual([0, 1, 2])
-
-    ws1.fireClose()
-    await new Promise((r) => setTimeout(r, 600))
-    const ws2 = FakeWebSocket.last!
-    ws2.fireOpen()
-    ws2.fireText({ Hello: { protocol_version: 1 } })
-    await Promise.resolve()
-
-    // resubscribe: epoch=E(null 아님) + after_seq=2.
-    const resub = ws2.parsedSent().find((m) => typeof m === 'object' && m && 'Subscribe' in m) as {
-      Subscribe: { agent_id: string; epoch: number | null; after_seq: number | null }
-    }
-    expect(resub).toBeTruthy()
-    expect(resub.Subscribe.epoch).toBe(E)
-    expect(resub.Subscribe.after_seq).toBe(2)
-
-    ws2.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 3, truncated: false } })
-    ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
+    // 이후 라이브 프레임 직행.
+    ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
     expect(received).toEqual([0, 1, 2, 3])
     c.close()
   })
 
-  it('재연결 후 데몬이 본 seq 재전송해도 dedup(중복 배달 안 함)', async () => {
+  it('재연결 → 재요청(전량 재replay) → 데몬이 본 seq 재전송해도 뷰별 dedup', async () => {
     const t = new WsTransport()
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: number[] = []
-    await c.subscribeOutput(AGENT, (ch) => received.push(ch.seq))
+    await c.subscribeOutput(V1, AGENT, (ch) => received.push(ch.seq))
     await Promise.resolve()
     const E = 2
     ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 1 }))
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 2 }))
+    ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
+    expect(received).toEqual([0, 1, 2])
+
+    // 재연결.
     ws1.fireClose()
     await new Promise((r) => setTimeout(r, 600))
     const ws2 = FakeWebSocket.last!
     ws2.fireOpen()
     ws2.fireText({ Hello: { protocol_version: 1 } })
     await Promise.resolve()
+    await Promise.resolve()
+
+    // connected 재전이 → ProtocolClient 가 뷰 재요청 → WsTransport 가 wire Subscribe{after_seq:null} 재송신.
+    const resub = ws2.parsedSent().find((m) => typeof m === 'object' && m && 'Subscribe' in m) as {
+      Subscribe: { agent_id: string; after_seq: number | null }
+    }
+    expect(resub).toBeTruthy()
+    expect(resub.Subscribe.after_seq).toBeNull() // 전량 재replay(재연결 회귀 수용, ADR-0046)
+
+    // 데몬이 0,1,2,3 전량 재전송 — 뷰 buffering 이 축적 후 마커에 flush, dedup 로 0~2 는 이미 배달분.
     ws2.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 1 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 2 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
-    expect(received).toEqual([0, 1, 2, 3])
+    ws2.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
+    expect(received).toEqual([0, 1, 2, 3]) // 무중복(dedup) — seq 3 만 새로
     c.close()
   })
 })

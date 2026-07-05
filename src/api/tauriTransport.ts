@@ -29,7 +29,7 @@ import { listen } from '@tauri-apps/api/event'
 
 import type { ConnectionState } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
-import { decodeOutputFrame } from './wsFrame'
+import { decodeOutputFrame, decodeReplayMarker } from './wsFrame'
 
 export class TauriTransport implements Transport {
   private _state: ConnectionState = 'down'
@@ -328,7 +328,23 @@ export class TauriTransport implements Transport {
     }
     const channel = new Channel<ArrayBuffer>()
     channel.onmessage = (raw: ArrayBuffer) => {
-      // raw = Rust Response::new(frame bytes) — [tag][agentId:16][epoch:4][seq:8][payload].
+      // raw = Rust Response::new(frame bytes). 두 종류가 같은 Channel 로 온다(ADR-0046 — 마커도 동일
+      //   Channel 경로라 replay 꼬리 뒤 순서가 보존됨):
+      //   - 데몬 output frame: [tag0/1][agentId:16][epoch:4][seq:8][payload]
+      //   - replay 경계 마커:  [tag255][agentId:16][epoch:4][gen:8][flags:1]
+      // ★마커 먼저 검사★: tag 로 갈린다. 마커(tag=255)면 replayBoundary 로 정규화(공개 표면 미노출).
+      const marker = decodeReplayMarker(raw)
+      if (marker) {
+        this.messageCb?.({
+          kind: 'replayBoundary',
+          agentId: marker.agentId,
+          epoch: marker.epoch,
+          gen: marker.gen,
+          truncated: marker.truncated,
+          failed: marker.failed,
+        })
+        return
+      }
       const f = decodeOutputFrame(raw)
       if (!f) return
       this.messageCb?.({
@@ -446,19 +462,25 @@ export class TauriTransport implements Transport {
     })
   }
 
-  // ── slot (re)mount fresh replay 재요청(remount 대화 소실 FIX) ──────────────────
-  // RichSlot/TerminalSlot 이 (re)mount 하면 ProtocolClient.subscribeOutput 이 부른다. 그 창이 보는
-  // 그 agent 의 slot 에 fresh replay(cursor 리셋 + 버퍼 전체 재전송)를 src-tauri 로컬 축 B replay 로
-  // 트리거한다(BLOCK-1: 데몬 wire Subscribe 를 새로 만들지 않는다 — resync_output 은 replay_slots →
-  // ReplaySlots actor arm 만 쓴다). window_label 은 Rust 가 호출 webview 에서 자동 주입(위조 불가).
+  // ── 뷰 주도 replay 요청(ADR-0046 F2) ──────────────────────────────────────────
+  // 뷰(slot)가 (re)mount·재연결·watchdog·실패 사다리에서 ProtocolClient 를 통해 부른다. src-tauri
+  // single-flight command `request_replay` 에 그 agent 의 데몬 ring 전량 재replay(wire Subscribe
+  // {after_seq:None})를 요청하고, 부여된 gen(u64)을 회수한다. window_label 은 Rust 가 호출 webview 에서
+  // 자동 주입(위조 불가). 종결 마커(성공/실패)는 출력 Channel 로 tag=255 프레임이 별도 도착한다.
   //
-  // ★fire-and-forget★: 반환을 기다리지 않는다(replay 는 출력 Channel 로 별도 도착). 미연결·직전 kill
-  //   등으로 invoke 가 실패해도 흡수한다 — 정상 mount 는 배정 트리거가 replay 를 이미 냈고, 재요청 유실은
-  //   다음 mount/reload/재연결 reconcile 이 따라잡는다.
-  resyncOutput(agentId: string): void {
-    void invoke('resync_output', { agentId }).catch((e: unknown) => {
-      console.warn('[TauriTransport] resync_output 실패:', e)
-    })
+  // ★gen = BigInt(§F2)★: invoke 는 u64 를 JSON number 로 직렬화하므로 여기서 BigInt 로 변환한다 —
+  //   마커 frame(getBigUint64) 과 폭을 맞춰 gen 펜스 비교가 정밀도 소실 없이 정확하다. reply 가 number 든
+  //   string 든(직렬화 폭에 따라) BigInt() 로 흡수한다.
+  async requestReplay(agentId: string): Promise<bigint> {
+    const gen = await invoke<number | string>('request_replay', { agentId })
+    // ★안전 정수 가드(FIX-5)★: invoke 가 u64 gen 을 JSON number 로 직렬화하면 2^53 초과분은 이미
+    //   부동소수점에서 정밀도가 깨진 채 도착한다(그 뒤 BigInt() 로 바꿔도 복원 불가). 실무상 도달 불가 —
+    //   gen 은 per-agent replay 요청마다 +1 하는 단조 카운터라 2^53(=9경) 회 요청은 수명 내 불가능. 그래도
+    //   조용한 오각인(잘못된 gen 펜스 비교)보다 1줄 경고가 낫다. BigInt 변환은 유지(정상 범위는 무손실).
+    if (typeof gen === 'number' && !Number.isSafeInteger(gen)) {
+      console.warn(`[TauriTransport] request_replay gen 이 안전 정수 범위 초과(${gen}) — 정밀도 소실 가능(실무 도달 불가)`)
+    }
+    return BigInt(gen)
   }
 
   // ★세대 가드(Fix-C ①)★: generation++ 으로 in-flight doConnect 를 stale 화한다 — 뒤늦게 resolve 된

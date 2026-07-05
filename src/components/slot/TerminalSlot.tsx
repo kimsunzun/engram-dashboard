@@ -9,10 +9,12 @@ import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 
 interface TerminalSlotProps {
+  /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 이 값으로 독립 구독·독립 진도(버그 B 해소). */
+  viewId: string
   agentId: string | null
 }
 
-export default function TerminalSlot({ agentId }: TerminalSlotProps) {
+export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -106,7 +108,7 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
     const lastSeq = { current: -1 } // T-2/G-2: seq dedup(컴포넌트 방어 — 클라도 내부 dedup)
 
     agentClient
-      .subscribeOutput(agentId, chunk => {
+      .subscribeOutput(viewId, agentId, chunk => {
         if (cancelled) return
         if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
         lastSeq.current = chunk.seq
@@ -143,8 +145,9 @@ export default function TerminalSlot({ agentId }: TerminalSlotProps) {
       // unsubscribe 내부가 transport 정리(#13133 delete onmessage) + 백엔드 구독 해제까지 수행.
       sub?.unsubscribe()
     }
-    // epoch 포함 — 재spawn(같은 agentId, epoch++) 시 reset → 재구독 → replay 재생 (S9 §18-e/f)
-  }, [agentId, epoch])
+    // epoch 포함 — 재spawn(같은 agentId, epoch++) 시 reset → 재구독 → replay 재생 (S9 §18-e/f).
+    // viewId 포함 — 구독 키(ADR-0046)라 바뀌면 재구독(실무상 key=viewId 라 slot 교체는 remount).
+  }, [viewId, agentId, epoch])
 
   // 키 입력 → writeStdin (§4-1: terminated 후 입력 차단 + catch)
   useEffect(() => {

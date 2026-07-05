@@ -166,10 +166,11 @@ pub enum ConnectionCommand {
     },
     /// reply 없는 fire-and-forget 명령(Resize 등). main_loop 가 그냥 JSON 으로 wire 송신한다.
     Fire { cmd: AgentCommand },
-    /// ★뷰 주도 replay 채번(ADR-0046 M1 — single-flight)★. 뷰 mount/remount 시 도착한다. main_loop 가
+    /// ★뷰 주도 replay 채번(ADR-0046 — single-flight)★. 뷰 mount/remount 시 도착한다. main_loop 가
     /// `ReplayFlightSet::request_replay` 로 gen 을 채번하고, idle 이면 즉시 wire `Subscribe{after_seq:None}`
     /// (epoch=SubState 현재값)를 보내거나 in-flight 중이면 다음 1회 Subscribe 에 병합한다. 배정된 gen 은
-    /// `reply`(Some)로 회수한다(`request_replay` 커맨드) — `None` 이면 fire-and-forget(구 프론트 `resync_output`).
+    /// `reply`(Some)로 회수한다(`request_replay` 커맨드). `Option` 인 것은 seam 자리 유지용 — 현재 모든
+    /// 발행이 `Some`(구 프론트 fire-and-forget alias `resync_output` 은 M3 에서 삭제).
     RequestReplay {
         agent_id: engram_dashboard_protocol::AgentId,
         reply: Option<oneshot::Sender<u64>>,
@@ -839,7 +840,11 @@ async fn main_loop(
                                         //   single-flight in-flight 를 acked 로 전이 + truncated 기억(성공 마커에
                                         //   전파) + 진행(deadline 리셋). ★ADR-0046: 버퍼/커서 reset 없음★ — epoch
                                         //   전환 재구독은 프론트 `[agentId, epoch]` remount 가 담당한다.
-                                        let _changed = protocol_state::apply_subscribe_ack(
+                                        // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로
+                                        //   reset_all_windows_for_agent(창 render_seq 리셋)를 했으나, 미러 버퍼
+                                        //   제거(ADR-0046)로 진도 상태가 src-tauri 에 없다 → 리셋 대상이 없다.
+                                        //   epoch 채택은 프론트가 성공 마커 epoch 로 한다(gen 펜스). 그래서 버린다.
+                                        let _ = protocol_state::apply_subscribe_ack(
                                             subs.entry(agent_id).or_default(),
                                             current_epoch,
                                         );
@@ -1004,8 +1009,7 @@ async fn main_loop(
                             //   방금 만든 in-flight 를 롤백한다 — 아무 것도 안 나갔으니 마커 미발행, gen_counter
                             //   는 단조 유지(다음 요청이 새 gen 으로 재시도). reply 를 drop 하면 awaiting
                             //   request_replay 커맨드가 RecvError → Err 를 받고(프론트가 connected 전이에서
-                            //   재요청), fire alias(resync_output)는 로깅만. 소켓은 곧 끊겨 다음 select 가
-                            //   Disconnected 로 빠진다.
+                            //   재요청). 소켓은 곧 끊겨 다음 select 가 Disconnected 로 빠진다.
                             if !send_fire(&mut sink, &cmd, my_gen, "Subscribe(replay)").await {
                                 flight.abort_in_flight(agent_id);
                                 continue; // reply(있으면) drop → request_replay 가 Err 반환.

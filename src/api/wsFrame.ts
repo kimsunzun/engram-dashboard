@@ -10,6 +10,15 @@ export const FRAME_TAG_TERMINAL_BYTES = 0
 export const FRAME_TAG_STRUCTURED_EVENT = 1
 const FRAME_HEADER_LEN = 1 + 16 + 4 + 8 // 29
 
+// ★replay 경계 마커 tag(ADR-0046 — Channel 내부 계약)★: 데몬 codec 엔 없다. src-tauri 가 각 replay
+//   종결마다 같은 출력 Channel 로 합성해 흘리고, transport(decodeReplayMarker)만 해석한다. 데몬 binary
+//   frame(tag0/1)과 seq 공간이 다르므로 decodeOutputFrame 은 이 tag 를 여전히 skip(전방 호환).
+export const FRAME_TAG_REPLAY_MARKER = 255
+// 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1(bit0=truncated,bit1=failed)].
+const MARKER_LEN = 1 + 16 + 4 + 8 + 1 // 30
+const MARKER_FLAG_TRUNCATED = 0x01
+const MARKER_FLAG_FAILED = 0x02
+
 /**
  * binary output frame 디코드. 헤더 미만 길이·미지원 tag(≥2) 시 null(무시).
  * tag0/tag1 은 둘 다 통과시키고 payload 는 raw 로 넘긴다 — tag 별 해석(바이트 vs JSON)은 소비자 몫.
@@ -38,6 +47,30 @@ export function decodeOutputFrame(
 
   const payload = new Uint8Array(buf, FRAME_HEADER_LEN)
   return { tag, agentId, epoch, seq, payload }
+}
+
+/**
+ * replay 경계 마커(tag=255) 디코드 — src-tauri 합성 프레임의 역(ADR-0046). 헤더 미만 길이·다른 tag 시
+ * null(비마커). gen 은 u64 라 BigInt 로 읽는다(getBigUint64) — requestReplay 반환값과 폭을 맞춰 gen 펜스
+ * 비교가 정밀도 소실 없이 정확하다.
+ */
+export function decodeReplayMarker(
+  buf: ArrayBuffer,
+): { agentId: string; epoch: number; gen: bigint; truncated: boolean; failed: boolean } | null {
+  if (buf.byteLength < MARKER_LEN) return null
+  const view = new DataView(buf)
+  if (view.getUint8(0) !== FRAME_TAG_REPLAY_MARKER) return null
+  const agentId = bytesToUuid(new Uint8Array(buf, 1, 16))
+  const epoch = view.getUint32(17, false)
+  const gen = view.getBigUint64(21, false)
+  const flags = view.getUint8(29)
+  return {
+    agentId,
+    epoch,
+    gen,
+    truncated: (flags & MARKER_FLAG_TRUNCATED) !== 0,
+    failed: (flags & MARKER_FLAG_FAILED) !== 0,
+  }
 }
 
 const HEX: string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'))

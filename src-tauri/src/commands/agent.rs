@@ -132,8 +132,8 @@ pub async fn agent_resize(
 ///
 /// ## ★ADR-0046: replay 트리거 분리★
 /// 미러 버퍼 제거로 subscribe_output 은 **Channel 등록만** 한다(옛 등록-즉시-replay 삭제). replay 는 뷰가
-/// mount 시 별도로 `request_replay`(구 프론트는 `resync_output` alias)로 유발한다 — 등록(창 단위)과 replay
-/// (뷰/agent 단위)를 분리해, 한 창의 여러 뷰가 각자 gen 펜스로 자기 replay 경계를 안다.
+/// mount 시 별도로 `request_replay` 로 유발한다 — 등록(창 단위)과 replay(뷰/agent 단위)를 분리해, 한 창의
+/// 여러 뷰가 각자 gen 펜스로 자기 replay 경계를 안다.
 #[tauri::command]
 pub fn subscribe_output(
     registry: State<'_, WindowChannelRegistry>,
@@ -161,21 +161,6 @@ pub async fn request_replay(
 ) -> Result<u64, String> {
     let agent_id: AgentId = parse_uuid(&agent_id, "agent_id")?;
     client.request_replay(agent_id).await
-}
-
-/// ★구 프론트 호환 alias(ADR-0046 — M3 에서 제거)★. 현 프론트는 뷰 mount 시 `invoke('resync_output',
-/// { agentId })` 로 replay 를 재요청한다(remount 대화 소실 FIX 의 잔재). 이제 그 경로는 `request_replay` 로
-/// 흡수됐다 — 이 alias 는 같은 single-flight 채번을 fire-and-forget 으로 유발하고 `()` 를 반환한다(구 프론트는
-/// gen 을 안 받음). 프론트가 per-view request_replay 로 넘어가면(M2) 이 alias 는 삭제한다.
-///
-/// ★차이(subscribe_output vs resync_output)★: subscribe_output = Channel *등록*(창 단위, 1회) ·
-/// resync_output = 그 agent 의 replay *재요청*(뷰 mount 마다). 미러 제거 후 둘은 완전히 분리됐다.
-#[tauri::command]
-pub fn resync_output(client: State<'_, Arc<DaemonClient>>, agent_id: String) -> Result<(), String> {
-    let agent_id: AgentId = parse_uuid(&agent_id, "agent_id")?;
-    // fire-and-forget single-flight replay 유발(gen 미회수 — 구 프론트는 gen 을 안 씀). 비연결이면 no-op.
-    client.request_replay_fire(agent_id);
-    Ok(())
 }
 
 /// ★T7c: TauriTransport.send() 진입점★. 프론트 ProtocolClient 가 AgentCommand wire 객체를

@@ -40,6 +40,10 @@ const h = vi.hoisted(() => {
     //   즉시 resolve(기존 동작).
     subscribeOutputGate: false,
     subscribeOutputResolvers: [] as Array<() => void>,
+    // request_replay invoke 횟수(gen 부여 카운터 겸 — ADR-0046 F2).
+    requestReplayCalls: 0,
+    // ★FIX-5★: request_replay 가 돌려줄 gen 을 명시 지정(null 이면 카운터). 안전 정수 초과 케이스 재현용.
+    requestReplayReply: null as number | string | null,
   }
   class FakeChannel {
     onmessage: ((m: ArrayBuffer) => void) | null = null
@@ -110,6 +114,12 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
     if (h.state.forwardShouldReject) throw new Error('연결 끊김')
     return h.state.forwardReply
   }
+  if (cmd === 'request_replay') {
+    // ADR-0046: src-tauri single-flight 가 gen(u64)을 부여 반환. mock 은 단조 카운터로 흉내.
+    h.state.requestReplayCalls += 1
+    // ★FIX-5★: 명시 지정(requestReplayReply)이 있으면 그 값(안전 정수 초과 등)을 반환.
+    return h.state.requestReplayReply ?? h.state.requestReplayCalls
+  }
   throw new Error('unexpected invoke: ' + cmd)
 })
 
@@ -143,6 +153,29 @@ function buildFrame(opts: { agentId: string; epoch: number; seq: number; payload
   return buf
 }
 
+// ADR-0046 replay 경계 마커 frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1].
+const MARKER_LEN = 30
+function buildMarker(opts: {
+  agentId: string
+  epoch: number
+  gen: bigint
+  truncated?: boolean
+  failed?: boolean
+}): ArrayBuffer {
+  const buf = new ArrayBuffer(MARKER_LEN)
+  const view = new DataView(buf)
+  view.setUint8(0, 255)
+  const idBytes = uuidToBytes(opts.agentId)
+  for (let i = 0; i < 16; i++) view.setUint8(1 + i, idBytes[i])
+  view.setUint32(17, opts.epoch, false)
+  view.setBigUint64(21, opts.gen, false)
+  let flags = 0
+  if (opts.truncated) flags |= 0x01
+  if (opts.failed) flags |= 0x02
+  view.setUint8(29, flags)
+  return buf
+}
+
 beforeEach(() => {
   h.listeners.clear()
   h.state.listenCalls = 0
@@ -156,6 +189,8 @@ beforeEach(() => {
   h.state.connectionStateGate = null
   h.state.subscribeOutputGate = false
   h.state.subscribeOutputResolvers = []
+  h.state.requestReplayCalls = 0
+  h.state.requestReplayReply = null
   invokeMock.mockClear()
 })
 afterEach(() => {
@@ -461,6 +496,84 @@ describe('TauriTransport output 평면(③-b, HIGH-1)', () => {
     const bad = new ArrayBuffer(5) // 헤더 길이 미만 → decode null.
     h.state.capturedChannel!.onmessage!(bad)
     expect(got.find((m) => m.kind === 'output')).toBeUndefined()
+  })
+})
+
+// ── ADR-0046 F2: requestReplay(invoke) + replay 경계 마커 정규화 ──────────────────────────
+describe('TauriTransport requestReplay(ADR-0046 F2)', () => {
+  it('requestReplay → invoke("request_replay",{agentId}) + gen(BigInt) 반환', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    const gen = await t.requestReplay(AGENT)
+    expect(invokeMock).toHaveBeenCalledWith('request_replay', { agentId: AGENT })
+    // u64 gen 을 BigInt 로 반환(§F2 — 마커 frame getBigUint64 와 폭 일치).
+    expect(typeof gen).toBe('bigint')
+    expect(gen).toBe(1n)
+    // 연속 호출은 단조 증가 gen.
+    expect(await t.requestReplay(AGENT)).toBe(2n)
+  })
+
+  // ── FIX-5: u64 gen 이 안전 정수 초과(number 직렬화)면 console.warn(실무 도달 불가) ──────────
+  it('gen 이 안전 정수 초과 number 로 오면 console.warn 1회(BigInt 변환은 유지)', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // 2^53 초과 number(이미 정밀도 깨진 채 도착) — 실무 도달 불가하나 조용한 오각인 대신 경고.
+    h.state.requestReplayReply = Number.MAX_SAFE_INTEGER + 2 // 안전 정수 아님.
+    const gen = await t.requestReplay(AGENT)
+    expect(typeof gen).toBe('bigint') // BigInt 변환은 유지.
+    const warns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('안전 정수'),
+    )
+    expect(warns.length).toBe(1)
+    warnSpy.mockRestore()
+    t.close()
+  })
+
+  it('gen 이 안전 정수 범위 number 면 경고 없음', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    h.state.requestReplayReply = 12345
+    await t.requestReplay(AGENT)
+    const warns = warnSpy.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].includes('안전 정수'),
+    )
+    expect(warns.length).toBe(0)
+    warnSpy.mockRestore()
+    t.close()
+  })
+})
+
+describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () => {
+  it('출력 Channel 로 온 마커 frame 은 replayBoundary 로 정규화(output 아님)', async () => {
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.start()
+    h.state.capturedChannel!.onmessage!(
+      buildMarker({ agentId: AGENT, epoch: 7, gen: 42n, truncated: true, failed: false }),
+    )
+    const marker = got.find((m) => m.kind === 'replayBoundary')
+    expect(marker).toMatchObject({
+      kind: 'replayBoundary',
+      agentId: AGENT,
+      epoch: 7,
+      gen: 42n,
+      truncated: true,
+      failed: false,
+    })
+    // 마커는 output 으로 올라오지 않는다(공개 표면 미노출 — Designer 요구).
+    expect(got.find((m) => m.kind === 'output')).toBeUndefined()
+  })
+
+  it('failed 플래그 전파', async () => {
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.start()
+    h.state.capturedChannel!.onmessage!(buildMarker({ agentId: AGENT, epoch: 1, gen: 9n, failed: true }))
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ failed: true, gen: 9n })
   })
 })
 

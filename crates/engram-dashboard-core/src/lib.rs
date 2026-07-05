@@ -10,8 +10,6 @@
 
 pub mod agent;
 pub mod logging;
-pub mod output_view_buffer;
-pub mod output_view_store;
 pub mod persistence;
 // ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri/protocol
 //   의존 0, agentId=uuid::Uuid). src-tauri 에서 이관 — 단위테스트를 headless(`cargo test -p …-core`)에서

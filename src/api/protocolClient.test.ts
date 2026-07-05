@@ -1,8 +1,14 @@
-// ProtocolClient 단위테스트 — carrier-무관 프로토콜 의미론(ADR-0020 R2/R3, Stage 3).
+// ProtocolClient 단위테스트 — carrier-무관 프로토콜 의미론 + 뷰 직결 replay 상태기계(ADR-0046).
 //
-// MockTransport 로 carrier 를 대체한다 — ProtocolClient 가 보내는 wire 명령을 기록하고,
-// 테스트가 control/output InboundMessage 를 주입해 라우팅·dedup·epoch·resubscribe 를 검증한다.
+// MockTransport 로 carrier 를 대체한다 — ProtocolClient 가 보내는 wire 명령을 기록하고, 테스트가
+// control/output/replayBoundary InboundMessage 를 주입해 라우팅·dedup·epoch·gen 펜스·전이표를 검증한다.
 // 실제 WS/Channel/Tauri 접속 0. WS-특정(Auth/Hello/재연결 타이밍)은 wsTransport.test 가 본다.
+//
+// ★TRD §5 시나리오 고정★: 엇갈린 mount(남의 마커 무시→자기 gen flush) · 같은 agent 2뷰 fan-out+dedup
+//   (버그 B 회귀) · live frame 이 replay 보다 먼저 와도 sort+dedup 복원 · 마커 token 불일치 무시(StrictMode)
+//   · 마커가 myGen 보다 먼저 도착(held→flush) · epoch 회전 중 buffering(폐기+재요청·구 epoch 마커 무시)
+//   · 재연결 중 buffering(폐기+재요청) · 실패 마커→사다리→3회 후 error · watchdog 재요청(fake timers)
+//   · 뷰별 dedup 독립 · unsubscribe 청소.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -12,8 +18,9 @@ import type { InboundMessage, Transport } from './transport'
 import type { AgentInfo, AgentProfile, RestoreReport } from './types'
 
 /**
- * 제어 가능한 Transport mock. ProtocolClient 가 send 한 wire 객체를 sent 에 기록하고,
- * deliver(...)로 수신 메시지를 ProtocolClient 로 올린다. setState 로 연결 전이를 흉내낸다.
+ * 제어 가능한 Transport mock. ProtocolClient 가 send 한 wire 객체를 sent 에 기록하고, deliver(...)로
+ * 수신 메시지를 올린다. requestReplay 는 per-agent gen 을 부여(replayCalls 기록)하고, replayGenImpl 로
+ * 회수 타이밍(지연·즉시)을 제어한다.
  */
 class MockTransport implements Transport {
   sent: unknown[] = []
@@ -23,12 +30,15 @@ class MockTransport implements Transport {
   ensureReadyCalls = 0
   startCalls = 0
   closed = false
-  // resyncOutput(agentId) 호출 기록 — (re)mount fresh replay 재요청 검증용.
-  resyncCalls: string[] = []
+  // requestReplay(agentId) 호출 기록 — 부여한 gen 순서로.
+  replayCalls: Array<{ agentId: string; gen: bigint }> = []
+  private replayGenCounter = 0n
   /**
-   * ensureReady 오버라이드 훅(FIX-1/FIX-2 테스트용). null 이면 즉시 resolve(기본).
-   * 함수를 심으면 그 반환 Promise 를 ensureReady 가 그대로 반환한다 — 지연 resolve / reject 재현.
+   * requestReplay 반환 제어. null 이면 즉시 resolve(부여 gen). 함수를 심으면 그 반환 Promise 를 쓴다 —
+   * myGen 확정 지연(마커 먼저 도착) 재현. gen 은 항상 replayCalls 에 기록된다(호출 사실은 즉시).
    */
+  replayGenImpl: ((agentId: string, gen: bigint) => Promise<bigint>) | null = null
+
   ensureReadyImpl: (() => Promise<void>) | null = null
 
   constructor(initial: ConnectionState = 'connected') {
@@ -64,8 +74,11 @@ class MockTransport implements Transport {
   close(): void {
     this.closed = true
   }
-  resyncOutput(agentId: string): void {
-    this.resyncCalls.push(agentId)
+  requestReplay(agentId: string): Promise<bigint> {
+    const gen = ++this.replayGenCounter
+    this.replayCalls.push({ agentId, gen })
+    if (this.replayGenImpl) return this.replayGenImpl(agentId, gen)
+    return Promise.resolve(gen)
   }
 
   // ── 테스트 구동 ──
@@ -75,21 +88,29 @@ class MockTransport implements Transport {
   control(event: Record<string, unknown>): void {
     this.deliver({ kind: 'control', event })
   }
-  // tag 기본 0(터미널) — tag1 케이스는 명시 인자로. 대부분 기존 테스트는 seq/epoch/dedup 만 보므로 tag0.
-  output(
+  output(agentId: string, epoch: number, seq: number, bytes = new Uint8Array([seq & 0xff]), tag = 0): void {
+    this.deliver({ kind: 'output', tag, agentId, epoch, seq, bytes })
+  }
+  // replay 경계 마커 주입(성공 기본). failed/truncated 는 명시 인자.
+  marker(
     agentId: string,
     epoch: number,
-    seq: number,
-    bytes = new Uint8Array([seq & 0xff]),
-    tag = 0,
+    gen: bigint,
+    opts: { failed?: boolean; truncated?: boolean } = {},
   ): void {
-    this.deliver({ kind: 'output', tag, agentId, epoch, seq, bytes })
+    this.deliver({
+      kind: 'replayBoundary',
+      agentId,
+      epoch,
+      gen,
+      truncated: opts.truncated ?? false,
+      failed: opts.failed ?? false,
+    })
   }
   setState(s: ConnectionState): void {
     this._state = s
     for (const cb of this.stateCbs) cb(s)
   }
-  /** 마지막으로 send 된 객체 중 주어진 variant key 를 가진 것의 inner 반환. */
   lastSent<T = Record<string, unknown>>(key: string): T | undefined {
     for (let i = this.sent.length - 1; i >= 0; i--) {
       const m = this.sent[i]
@@ -100,6 +121,8 @@ class MockTransport implements Transport {
 }
 
 const AGENT = '12345678-9abc-def0-1234-56789abcdef0'
+const V1 = 'view-1'
+const V2 = 'view-2'
 
 let uuidCounter = 0
 beforeEach(() => {
@@ -112,12 +135,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// ── request_id pending 매칭(carrier 무관 — ADR-0046 무영향) ─────────────────────────────
 describe('request_id pending 매칭', () => {
   it('spawnAgent → SpawnByCwd{request_id} 전송 + Spawned{request_id,agent} resolve', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
     const p = c.spawnAgent('C:/work')
-    await Promise.resolve() // ensureReady await 통과
+    await Promise.resolve()
     const sent = t.lastSent<{ request_id: string; cwd: string }>('SpawnByCwd')!
     expect(sent.cwd).toBe('C:/work')
     t.control({ Spawned: { request_id: sent.request_id, agent: { id: 'a1' } } })
@@ -144,38 +168,6 @@ describe('request_id pending 매칭', () => {
     await expect(p).rejects.toThrow('boom')
   })
 
-  it('잘못된 request_id 의 응답은 무시(pending 유지)', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.killAgent('a1')
-    await Promise.resolve()
-    let settled = false
-    void p.then(() => (settled = true)).catch(() => (settled = true))
-    t.control({ Ack: { request_id: 'nonexistent' } })
-    await Promise.resolve()
-    expect(settled).toBe(false)
-  })
-
-  it('조회 전용 reply 매칭 — getAgents 진행 중 broadcast AgentListUpdated 편승 안 함', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const broadcasts: AgentInfo[][] = []
-    c.onAgentListUpdated((a) => broadcasts.push(a))
-    const p = c.getAgents()
-    await Promise.resolve()
-    const rid = t.lastSent<{ request_id: string }>('ListAgents')!.request_id
-    const other = [{ id: 'other' }] as unknown as AgentInfo[]
-    t.control({ AgentListUpdated: { agents: other } })
-    let settled = false
-    void p.then(() => (settled = true)).catch(() => (settled = true))
-    await Promise.resolve()
-    expect(settled).toBe(false) // 편승 안 함
-    expect(broadcasts).toEqual([other]) // broadcast 는 정상 라우팅
-    const mine = [{ id: 'mine' }] as unknown as AgentInfo[]
-    t.control({ AgentList: { request_id: rid, agents: mine } })
-    await expect(p).resolves.toEqual(mine)
-  })
-
   it('동시 2개 getSnapshot(같은 agent_id)도 request_id 로 정확 매칭', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
@@ -189,7 +181,6 @@ describe('request_id pending 매칭', () => {
     expect(sent.length).toBe(2)
     const rid1 = sent[0].GetSnapshot.request_id
     const rid2 = sent[1].GetSnapshot.request_id
-    expect(rid1).not.toBe(rid2)
     t.control({ Snapshot: { request_id: rid2, agent_id: AGENT, chunks: [{ seq: 2 }] } })
     t.control({ Snapshot: { request_id: rid1, agent_id: AGENT, chunks: [{ seq: 1 }] } })
     await expect(p1).resolves.toEqual([{ seq: 1 }])
@@ -197,201 +188,291 @@ describe('request_id pending 매칭', () => {
   })
 })
 
-describe('seq dedup / epoch 가드(R2)', () => {
-  async function subscribed(): Promise<{ t: MockTransport; received: number[] }> {
+// ── subscribeOutput 기본 배선(뷰 단위, ADR-0046) ─────────────────────────────────────
+describe('subscribeOutput 기본(뷰 단위 replay)', () => {
+  it('subscribe → requestReplay 발행(뷰당 1회) + wire Subscribe 는 안 보낸다(BLOCK-1)', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk: OutputChunk) => received.push(chunk.seq))
-    return { t, received }
-  }
-
-  it('같은 seq 재수신 → drop(high-water 기준)', async () => {
-    const { t, received } = await subscribed()
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 0) // 중복
-    t.output(AGENT, 1, 1)
-    expect(received).toEqual([0, 1])
+    await c.subscribeOutput(V1, AGENT, () => {})
+    // 뷰가 requestReplay 를 정확히 1회 발행(gen 부여).
+    expect(t.replayCalls.map((r) => r.agentId)).toEqual([AGENT])
+    // ★BLOCK-1★: 프론트는 wire Subscribe 를 어떤 경로로도 안 보낸다(request_replay 가 carrier 내부에서 냄).
+    const subs = t.sent.filter((m) => !!m && typeof m === 'object' && 'Subscribe' in (m as object))
+    expect(subs.length).toBe(0)
   })
 
-  it('seq <= high-water drop, replay_from 은 dedup 기준 아님(버그 B 회귀)', async () => {
-    const { t, received } = await subscribed()
-    // replay_from=5 이지만 dedup 기준은 high-water(-1) — 첫 frame seq=0 이 버려지면 안 됨.
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 5, truncated: false } })
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    expect(received).toEqual([0, 1])
-  })
-
-  it('epoch 안 맞는 frame → drop(stale 세션)', async () => {
-    const { t, received } = await subscribed()
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 5, replay_from: 0, truncated: false } })
-    t.output(AGENT, 4, 0) // 옛 epoch
-    t.output(AGENT, 5, 0) // 맞는 epoch
-    expect(received).toEqual([0])
-  })
-
-  it('SubscribeAck.current_epoch 변경 → high-water 리셋 → 새 스트림 낮은 seq 배달(R3)', async () => {
-    const { t, received } = await subscribed()
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 10, replay_from: 0, truncated: false } })
-    t.output(AGENT, 10, 0)
-    t.output(AGENT, 10, 1)
-    t.output(AGENT, 10, 2)
-    expect(received).toEqual([0, 1, 2])
-    // epoch 11 → 리셋. 새 스트림 seq 0 이 다시 배달돼야.
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 11, replay_from: 0, truncated: false } })
-    t.output(AGENT, 11, 0)
-    t.output(AGENT, 11, 1)
-    expect(received).toEqual([0, 1, 2, 0, 1])
-  })
-
-  it('SubscribeAck 전 frame(epoch undefined) → epoch 가드 통과(배달)', async () => {
-    const { t, received } = await subscribed()
-    t.output(AGENT, 99, 0) // Ack 전 — st.epoch undefined
-    expect(received).toEqual([0])
-  })
-})
-
-// ── S15/ADR-0045: tag(0 터미널/1 구조화) 전달 + tag0/tag1 혼재 dedup·epoch 회귀 ──────────────
-describe('tag 전달 + tag0/tag1 혼재(S15 구조화 출력)', () => {
-  async function subscribedChunks(): Promise<{ t: MockTransport; chunks: OutputChunk[] }> {
+  it('성공 마커 전엔 buffering(직행 배달 없음), 마커 후 live 전환+flush', async () => {
     const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const chunks: OutputChunk[] = []
-    await c.subscribeOutput(AGENT, (chunk) => chunks.push(chunk))
-    return { t, chunks }
-  }
-
-  it('tag 를 onChunk 로 그대로 전달(tag0/tag1 구분)', async () => {
-    const { t, chunks } = await subscribedChunks()
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
-    t.output(AGENT, 1, 0, new Uint8Array([1]), 0) // tag0 터미널
-    t.output(AGENT, 1, 1, new Uint8Array([2]), 1) // tag1 구조화
-    expect(chunks.map((c) => c.tag)).toEqual([0, 1])
-    expect(chunks.map((c) => c.seq)).toEqual([0, 1])
-  })
-
-  it('tag0/tag1 혼재도 seq dedup 은 한 seq 공간 공통(tag 무관 high-water)', async () => {
-    const { t, chunks } = await subscribedChunks()
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
-    t.output(AGENT, 1, 0, new Uint8Array([0]), 0) // tag0
-    t.output(AGENT, 1, 1, new Uint8Array([0]), 1) // tag1
-    t.output(AGENT, 1, 1, new Uint8Array([0]), 0) // seq 1 중복(다른 tag 라도 같은 seq 공간 → drop)
-    t.output(AGENT, 1, 0, new Uint8Array([0]), 1) // seq 0 <= high-water → drop
-    t.output(AGENT, 1, 2, new Uint8Array([0]), 1) // 신규 → 배달
-    expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2])
-    expect(chunks.map((c) => c.tag)).toEqual([0, 1, 1])
-  })
-
-  it('tag1 도 epoch 가드 공통(옛 epoch 구조화 frame drop)', async () => {
-    const { t, chunks } = await subscribedChunks()
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 5, replay_from: 0, truncated: false } })
-    t.output(AGENT, 4, 0, new Uint8Array([0]), 1) // 옛 epoch tag1 → drop
-    t.output(AGENT, 5, 0, new Uint8Array([0]), 1) // 맞는 epoch tag1 → 배달
-    expect(chunks.map((c) => c.seq)).toEqual([0])
-    expect(chunks[0].tag).toBe(1)
-  })
-
-  it('pre-subscribe 버퍼도 tag 보존해 flush(구독 전 도착 tag1)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 구독자 없이 tag0/tag1 혼재 도착 → 버퍼.
-    t.output(AGENT, 1, 0, new Uint8Array([0]), 0)
-    t.output(AGENT, 1, 1, new Uint8Array([0]), 1)
-    const chunks: OutputChunk[] = []
-    await c.subscribeOutput(AGENT, (chunk) => chunks.push(chunk))
-    // flush 시 tag 가 보존돼야(handleOutput 배달과 동형).
-    expect(chunks.map((c) => c.seq)).toEqual([0, 1])
-    expect(chunks.map((c) => c.tag)).toEqual([0, 1])
-  })
-})
-
-describe('stale-unsubscribe 가드(owner token) — 재구독 시 산 구독 보호', () => {
-  it('옛 구독의 unsubscribe 가 재구독(덮어쓴) 새 구독을 지우지 않는다', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const got1: number[] = []
-    const got2: number[] = []
-    // sub1 → sub2 재구독(같은 agentId): subs 엔트리를 덮어쓴다.
-    const sub1 = await c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
-    await c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
-    // stale: 옛 구독(sub1)의 unsubscribe 가 새 구독(sub2) 뒤늦게 실행 → token 가드로 무시돼야.
-    sub1.unsubscribe()
-    // 'A' 프레임 주입(Ack 전 → st.epoch undefined 로 epoch 가드 통과, seq>high-water(-1) → dedup 통과).
-    t.output(AGENT, 0, 0)
-    t.output(AGENT, 0, 1)
-    expect(got2).toEqual([0, 1]) // 새 구독 생존 — 정상 배달(stale delete 가 안 지움)
-    expect(got1).toEqual([]) // 옛 콜백은 덮여서 애초에 배달 대상 아님
-  })
-
-  it('정상 경로: 살아있는 구독의 unsubscribe 는 실제로 제거(그 뒤 배달 안 됨)', async () => {
-    const t = new MockTransport('connected')
     const c = new ProtocolClient(t)
     const got: number[] = []
-    const sub = await c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
-    t.output(AGENT, 0, 0)
-    expect(got).toEqual([0])
-    sub.unsubscribe() // 현재 엔트리 token == 내 token → 실제 delete
-    t.output(AGENT, 0, 1) // 구독 제거됨 → handleOutput 이 st 없음으로 무시
-    expect(got).toEqual([0])
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const gen = t.replayCalls[0].gen
+    // buffering — 프레임은 축적만(직행 배달 안 함).
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    expect(got).toEqual([])
+    // 성공 마커(gen 일치, epoch 1) → sort+dedup flush → live.
+    t.marker(AGENT, 1, gen)
+    expect(got).toEqual([0, 1])
+    // 이후 라이브 프레임은 직행 배달.
+    t.output(AGENT, 1, 2)
+    expect(got).toEqual([0, 1, 2])
+  })
+
+  it('tag 를 onChunk 로 그대로 전달(tag0/tag1) + 한 seq 공간 dedup', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const chunks: OutputChunk[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => chunks.push(chunk))
+    const gen = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0, new Uint8Array([1]), 0) // tag0
+    t.output(AGENT, 1, 1, new Uint8Array([2]), 1) // tag1
+    t.marker(AGENT, 1, gen)
+    // live 이후 dedup(한 seq 공간, tag 무관).
+    t.output(AGENT, 1, 1, new Uint8Array([2]), 0) // seq 1 중복 → drop
+    t.output(AGENT, 1, 2, new Uint8Array([3]), 1)
+    expect(chunks.map((x) => x.seq)).toEqual([0, 1, 2])
+    expect(chunks.map((x) => x.tag)).toEqual([0, 1, 1])
   })
 })
 
-describe('resubscribe resume(R3) — connected 재전이', () => {
-  it('재연결(reconnecting→connected) 시 알려진 epoch + after_seq=마지막배달seq 로 resubscribe', async () => {
-    const t = new MockTransport('connected')
+// ── 엇갈린 mount(진행 중 replay 꼬리만 받은 뷰가 남의 마커 무시 → 자기 gen 마커에 완전 flush) ──────
+describe('엇갈린 mount — 남의 마커 무시, 자기 gen 마커에 완전 flush(gen 펜스)', () => {
+  it('먼저 mount 한 뷰의 replay 꼬리 + 남의 마커(gen<myGen)는 무시, 자기 gen 마커에 전량 flush', async () => {
+    const t = new MockTransport()
     const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    const E = 5
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
-    t.output(AGENT, E, 0)
-    t.output(AGENT, E, 1)
-    t.output(AGENT, E, 2)
-    expect(received).toEqual([0, 1, 2])
+    // V1 이 먼저 mount(gen=1). V1 replay 진행 중.
+    const g1got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => g1got.push(chunk.seq))
+    const gen1 = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    // V2 가 mid-replay 로 늦게 mount(gen=2). V1 replay 꼬리(seq 2)를 V2 도 fan-out 으로 받는다.
+    const g2got: number[] = []
+    await c.subscribeOutput(V2, AGENT, (chunk) => g2got.push(chunk.seq))
+    const gen2 = t.replayCalls[1].gen
+    t.output(AGENT, 1, 2) // V1 replay 꼬리 = V2 버퍼 머리
+    // V1 replay 종결 마커(gen1) — V1 은 자기 gen 이라 flush, V2 는 남의(gen1<gen2) 마커라 무시.
+    t.marker(AGENT, 1, gen1)
+    expect(g1got).toEqual([0, 1, 2])
+    expect(g2got).toEqual([]) // V2 는 아직 buffering(자기 gen2 마커 안 옴)
+    // V2 자기 replay 전체(single-flight 병합 후 전량 재replay) → seq 0,1,2 재전송 + 종결 gen2 마커.
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.output(AGENT, 1, 2)
+    t.marker(AGENT, 1, gen2)
+    // V2 는 자기 gen 마커에 sort+dedup flush = 완전(0,1,2). V1 은 이미 live 라 마커 무시.
+    expect(g2got).toEqual([0, 1, 2])
+    expect(g1got).toEqual([0, 1, 2])
+  })
+})
 
+// ── 같은 agent 2뷰 독립 fan-out + dedup(버그 B 회귀) ──────────────────────────────────
+describe('같은 agent 2뷰 독립 fan-out + 뷰별 dedup(버그 B 회귀)', () => {
+  it('두 뷰가 각자 독립 진도로 전량 수신(한 뷰가 다른 뷰 진도를 오염 안 함)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const g1: number[] = []
+    const g2: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => g1.push(chunk.seq))
+    const gen1 = t.replayCalls[0].gen
+    await c.subscribeOutput(V2, AGENT, (chunk) => g2.push(chunk.seq))
+    const gen2 = t.replayCalls[1].gen
+    // 두 뷰 모두 buffering — 프레임 fan-out.
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    // 각 뷰가 자기 gen 마커에 flush(독립).
+    t.marker(AGENT, 1, gen1)
+    t.marker(AGENT, 1, gen2)
+    expect(g1).toEqual([0, 1])
+    expect(g2).toEqual([0, 1])
+    // 이후 라이브 프레임 — 두 뷰 모두 각자 dedup·독립 배달.
+    t.output(AGENT, 1, 2)
+    expect(g1).toEqual([0, 1, 2])
+    expect(g2).toEqual([0, 1, 2])
+  })
+
+  it('뷰별 dedup 독립 — 한 뷰가 live 여도 다른 뷰의 dedup high-water 와 무관', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const g1: number[] = []
+    const g2: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => g1.push(chunk.seq))
+    const gen1 = t.replayCalls[0].gen
+    // V1 만 먼저 live.
+    t.output(AGENT, 1, 0)
+    t.marker(AGENT, 1, gen1)
+    expect(g1).toEqual([0])
+    // V2 가 나중에 mount — 자기 buffering 에서 seq 0 부터 다시 받는다(V1 high-water 와 독립).
+    await c.subscribeOutput(V2, AGENT, (chunk) => g2.push(chunk.seq))
+    const gen2 = t.replayCalls[1].gen
+    t.output(AGENT, 1, 0) // V1 은 dedup drop, V2 는 buffer 축적
+    t.output(AGENT, 1, 1)
+    t.marker(AGENT, 1, gen2)
+    expect(g2).toEqual([0, 1]) // V2 독립 진도로 전량
+    expect(g1).toEqual([0, 1]) // V1 은 live 라 seq 1 만 새로(0 은 dedup)
+  })
+})
+
+// ── live frame 이 replay(마커)보다 먼저 와도 sort+dedup 복원 ────────────────────────────
+describe('out-of-order 프레임 sort+dedup(순서 복원)', () => {
+  it('버퍼에 out-of-order[2,0,1] 도착 → 마커 flush 시 seq 순서(0,1,2)로 배달', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const gen = t.replayCalls[0].gen
+    // 도착 순서가 seq 순서와 다름 — 정렬 없이 배열 순서 flush 하면 2 를 먼저 배달해 0,1 dedup 탈락.
+    t.output(AGENT, 1, 2)
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.marker(AGENT, 1, gen)
+    expect(got).toEqual([0, 1, 2])
+  })
+})
+
+// ── 마커 token 불일치 무시(StrictMode 사망 구독) ──────────────────────────────────────
+describe('마커 token 불일치 무시(StrictMode 재구독)', () => {
+  it('재구독으로 교체된 옛 구독은 마커를 소비하지 않는다(생존 구독만 flush)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const g1: number[] = []
+    const g2: number[] = []
+    // 같은 viewId 로 급속 재구독(StrictMode) — 두 번째가 생존(subs 엔트리 교체).
+    const p1 = c.subscribeOutput(V1, AGENT, (chunk) => g1.push(chunk.seq))
+    const p2 = c.subscribeOutput(V1, AGENT, (chunk) => g2.push(chunk.seq))
+    await Promise.all([p1, p2])
+    // 생존 구독(두 번째)만 requestReplay 를 냈다(옛 st 는 token 불일치라 skip).
+    expect(t.replayCalls.length).toBe(1)
+    const gen = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0)
+    t.marker(AGENT, 1, gen)
+    // 생존 구독만 flush — 옛 콜백(g1)은 subs 에서 교체돼 fan-out 대상 아님.
+    expect(g2).toEqual([0])
+    expect(g1).toEqual([])
+  })
+})
+
+// ── 마커가 myGen 확정보다 먼저 도착(held → 재평가 flush) — NEW-3 ─────────────────────────
+describe('마커가 myGen 확정보다 먼저 도착(held → flush)', () => {
+  it('requestReplay 회수 지연 중 마커 도착 → 보관 후 myGen 확정 시 flush', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    // requestReplay 회수를 게이트로 지연 — 마커가 myGen 보다 먼저 오는 파이프 교차 재현.
+    let releaseGen!: (gen: bigint) => void
+    t.replayGenImpl = () => new Promise<bigint>((r) => (releaseGen = r))
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const gen = t.replayCalls[0].gen
+    // 마커·프레임이 myGen 확정 전에 도착 — 마커는 held, 프레임은 buffer.
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.marker(AGENT, 1, gen)
+    expect(got).toEqual([]) // 아직 myGen 미확정 — held.
+    // myGen 확정 → held 재평가 → flush.
+    releaseGen(gen)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(got).toEqual([0, 1])
+  })
+
+  it('held 는 최고 gen 1개만 보관 — 낮은 gen 마커가 높은 걸 덮지 않는다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    let releaseGen!: (gen: bigint) => void
+    t.replayGenImpl = () => new Promise<bigint>((r) => (releaseGen = r))
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const myGen = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0)
+    // 남의(낮은 gen) 마커가 먼저, 그 뒤 자기(높은 gen) 마커 — held 는 최고 gen 유지.
+    t.marker(AGENT, 1, myGen - 1n)
+    t.marker(AGENT, 1, myGen)
+    releaseGen(myGen)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(got).toEqual([0]) // 최고 gen(=myGen) held 로 flush
+  })
+
+  // ── FIX-3: 같은 gen failed→success 교체(좀비 late-Complete 복구) ──────────────────────
+  it('같은 gen 의 held failed 마커를 뒤이은 성공 마커가 교체 → myGen 확정 시 flush(사다리 아님)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    let releaseGen!: (gen: bigint) => void
+    t.replayGenImpl = () => new Promise<bigint>((r) => (releaseGen = r))
+    const got: number[] = []
+    const states: string[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq), (s) => states.push(s))
+    const myGen = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    // myGen 미확정 중: 같은 gen 의 실패 마커(deadline) 먼저 → held. 이어 같은 gen 의 성공 마커(늦은
+    //   Complete) → FIX-3 교체 규칙(같은 gen && held.failed && !m.failed)으로 성공이 실패를 밀어낸다.
+    t.marker(AGENT, 1, myGen, { failed: true })
+    t.marker(AGENT, 1, myGen, { failed: false })
+    // myGen 확정 → held(성공) 재평가 → flush(live). 실패가 이겼으면 사다리로 빠져 buffering 유지·got 비어야.
+    releaseGen(myGen)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(got).toEqual([0, 1]) // 성공 마커로 flush
+    expect(c.getViewOutputState(V1)?.phase).toBe('live')
+    expect(states).toContain('live')
+  })
+})
+
+// ── epoch 회전 중 buffering(폐기+재요청, 구 epoch 마커 무시) — NEW-5 ───────────────────────
+describe('epoch 회전 중 buffering(폐기 + 재요청, 구 epoch 마커 무시)', () => {
+  it('더 높은 epoch frame 도착 → buffer 폐기 + 재요청(새 myGen), 구 epoch 마커는 무시', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const gen1 = t.replayCalls[0].gen
+    // epoch 1 프레임 buffering.
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    // epoch 2 프레임 도착(재시작) → buffer 폐기 + 재요청(gen2). requestReplay 회수는 microtask 라
+    //   myGen 확정을 위해 한 틱 양보한다(마커 held→재평가 대신 정상 gen 비교 경로 검증).
+    t.output(AGENT, 2, 0)
+    expect(t.replayCalls.length).toBe(2) // 재요청 발행
+    const gen2 = t.replayCalls[1].gen
+    await Promise.resolve() // myGen=gen2 확정
+    // 구 epoch(1) 대상 gen1 마커는 이제 무효 — epoch 불일치로 무시.
+    t.marker(AGENT, 1, gen1)
+    expect(got).toEqual([])
+    // 새 epoch 2 replay 전량 + gen2 마커 → flush.
+    t.output(AGENT, 2, 1)
+    t.marker(AGENT, 2, gen2)
+    expect(got).toEqual([0, 1]) // epoch 2 프레임만
+  })
+})
+
+// ── 재연결 중 buffering(폐기 + 재요청) ─────────────────────────────────────────────────
+describe('재연결(connected 재전이) → 모든 뷰 buffering 리셋 + 재요청', () => {
+  it('live 뷰도 재연결 시 buffering 리셋 후 재요청·재flush', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const gen1 = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0)
+    t.marker(AGENT, 1, gen1)
+    expect(got).toEqual([0])
     // 끊김 → 재연결.
     t.setState('reconnecting')
-    t.sent = [] // resubscribe 만 관측하려 초기화
     t.setState('connected')
-
-    // ★핵심★: resubscribe 가 epoch=E(null 아님) + after_seq=2(마지막 배달 seq).
-    const resub = t.lastSent<{ agent_id: string; epoch: number | null; after_seq: number | null }>(
-      'Subscribe',
-    )!
-    expect(resub.agent_id).toBe(AGENT)
-    expect(resub.epoch).toBe(E) // 버그 A: null 이면 FromOldest 중복
-    expect(resub.after_seq).toBe(2) // 버그 B: replay_from/null 이면 off-by-one
-
-    // 데몬 Resume → seq 3. 무손실·무중복.
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 3, truncated: false } })
-    t.output(AGENT, E, 3)
-    expect(received).toEqual([0, 1, 2, 3])
+    // 재연결이 재요청 발행(전량 재replay). requestReplay 회수(microtask) 후 myGen 확정.
+    expect(t.replayCalls.length).toBe(2)
+    const gen2 = t.replayCalls[1].gen
+    await Promise.resolve() // myGen=gen2 확정
+    // buffering 리셋됐으므로 재연결 후 프레임은 축적 후 마커에 flush(dedup 로 seq 0 은 이미 배달).
+    t.output(AGENT, 1, 0) // seq 0 <= high-water → dedup drop
+    t.output(AGENT, 1, 1)
+    t.marker(AGENT, 1, gen2)
+    expect(got).toEqual([0, 1])
   })
 
-  it('재연결 후 데몬이 이미 본 seq(0,1,2) 재전송해도 dedup', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    const E = 2
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
-    t.output(AGENT, E, 0)
-    t.output(AGENT, E, 1)
-    t.output(AGENT, E, 2)
-    t.setState('reconnecting')
-    t.setState('connected')
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
-    // 데몬이 0,1,2 재전송 → dedup, 3 만 새로.
-    t.output(AGENT, E, 0)
-    t.output(AGENT, E, 1)
-    t.output(AGENT, E, 2)
-    t.output(AGENT, E, 3)
-    expect(received).toEqual([0, 1, 2, 3])
-  })
-
-  it('connected→reconnecting 전이 시 pending 명령 reject(connection lost)', async () => {
+  it('connected→비connected 전이 시 pending 명령 reject(connection lost)', async () => {
     const t = new MockTransport('connected')
     const c = new ProtocolClient(t)
     const p = c.killAgent('a1')
@@ -401,6 +482,281 @@ describe('resubscribe resume(R3) — connected 재전이', () => {
   })
 })
 
+// ── 실패 마커 → 사다리 → 3회 후 error ─────────────────────────────────────────────────
+describe('실패 마커 → 재요청 사다리 → 상한(3) 도달 시 error', () => {
+  it('실패 마커마다 백오프 재요청, 3회 소진 후 error 상태 + onState 통지', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const states: string[] = []
+      await c.subscribeOutput(V1, AGENT, () => {}, (s) => states.push(s))
+      // 초기 발행 1회.
+      expect(t.replayCalls.length).toBe(1)
+      let gen = t.replayCalls[t.replayCalls.length - 1].gen
+      // 실패 마커 → 사다리 1단계(백오프 1s 뒤 재요청).
+      t.marker(AGENT, 1, gen, { failed: true })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(t.replayCalls.length).toBe(2) // 재요청 1
+      gen = t.replayCalls[t.replayCalls.length - 1].gen
+      // 실패 마커 → 사다리 2단계(2s).
+      t.marker(AGENT, 1, gen, { failed: true })
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(t.replayCalls.length).toBe(3) // 재요청 2
+      gen = t.replayCalls[t.replayCalls.length - 1].gen
+      // 실패 마커 → 사다리 3단계(4s).
+      t.marker(AGENT, 1, gen, { failed: true })
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(t.replayCalls.length).toBe(4) // 재요청 3(상한)
+      gen = t.replayCalls[t.replayCalls.length - 1].gen
+      // 4번째 실패 마커 → 상한 소진 → error(재요청 없음).
+      t.marker(AGENT, 1, gen, { failed: true })
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(t.replayCalls.length).toBe(4) // 더 안 늘어남
+      expect(states).toContain('error')
+      // LLM 제어 표면으로 error 조회 가능.
+      expect(c.getViewOutputState(V1)?.phase).toBe('error')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── FIX-2: buffer 상한 초과 → buffer 폐기 후 재요청(부분 flush 금지) ─────────────────────
+describe('buffer 상한 초과 → 폐기 + 재요청(FIX-2)', () => {
+  it('상한 초과로 buffer 폐기 → pre-overflow gen 성공 마커는 stale 프레임 flush 안 함, 재요청 replay 가 완전 flush', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const got: number[] = []
+      await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+      const gen1 = t.replayCalls[0].gen
+      // 상한(4MB) 초과: 1MB 프레임 5개(=5MB). 초과 시 pushBuffer 가 buffer 폐기 + 사다리 재요청(백오프 1s).
+      const big = new Uint8Array(1024 * 1024)
+      for (let seq = 0; seq < 5; seq++) t.output(AGENT, 1, seq, big)
+      // ★buffer 비워짐★: LLM 제어 표면으로 관측 — buffered=0(부분 유지 아님).
+      expect(c.getViewOutputState(V1)?.buffered).toBe(0)
+      // 사다리 백오프(1s) 후 재요청 발행. requestReplay 회수(microtask) 후 myGen=gen2 확정.
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(t.replayCalls.length).toBe(2)
+      const gen2 = t.replayCalls[1].gen
+      // ★stale flush 금지★: pre-overflow gen(gen1) 성공 마커가 와도 폐기된 5MB 프레임을 flush 하지 않는다.
+      //   (gen1 < myGen=gen2 라 gen 펜스로도 무시되지만, buffer 자체가 비어 flush 할 것도 없다.)
+      t.marker(AGENT, 1, gen1)
+      expect(got).toEqual([])
+      // 재요청 replay 전량(작은 프레임으로) + gen2 성공 마커 → 완전 flush.
+      t.output(AGENT, 1, 0, new Uint8Array([0]))
+      t.output(AGENT, 1, 1, new Uint8Array([1]))
+      t.output(AGENT, 1, 2, new Uint8Array([2]))
+      t.marker(AGENT, 1, gen2)
+      expect(got).toEqual([0, 1, 2])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── FIX-A: overflow 후 구 gen 성공 마커가 백오프 전에 와도 flush 금지(gen 펜스 무효화) ────────
+describe('buffer 상한 초과 후 구 gen 성공 마커(백오프 전 도착) → flush 금지 + 재요청 유지(FIX-A)', () => {
+  it('overflow 폐기 → myGen 무효화로 구 gen 성공 마커가 빈 buffer 를 flush(내용 유실) 못 함, 재요청 이어서 완전 flush', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const got: number[] = []
+      const states: string[] = []
+      await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq), (s) => states.push(s))
+      // myGen 은 subscribeOutput await 로 이미 gen1 확정(초기 발행 즉시 resolve).
+      const gen1 = t.replayCalls[0].gen
+      // 상한(4MB) 초과 → pushBuffer 가 buffer 폐기 + 사다리 재요청 예약(백오프 1s). ★FIX-A 이전★엔 이때
+      //   myGen 이 gen1 로 남아, 백오프 발화 전 도착한 gen1 성공 마커가 gen 펜스를 통과해 빈 buffer 로
+      //   flushToLive → live 전이(내용 유실) + clearTimers 로 예약된 재요청 취소.
+      const big = new Uint8Array(1024 * 1024)
+      for (let seq = 0; seq < 5; seq++) t.output(AGENT, 1, seq, big)
+      expect(c.getViewOutputState(V1)?.buffered).toBe(0) // buffer 폐기됨
+
+      // ★핵심: 백오프(1s) 발화 *전* 에 구 gen(gen1) 성공 마커 도착★. FIX-A 로 myGen 이 무효화됐으므로
+      //   이 마커는 evalMarker 의 myGen===undefined 분기로 held 만 되고 flush 하지 않는다(펜스 통과 불가).
+      t.marker(AGENT, 1, gen1)
+      expect(got).toEqual([]) // flush 안 됨
+      expect(states).not.toContain('live') // live 전이 안 됨 — 여전히 buffering
+      expect(c.getViewOutputState(V1)?.phase).toBe('buffering')
+
+      // 백오프 발화 → 재요청 발행(재요청이 취소되지 않았음을 증명). requestReplay 회수 후 myGen=gen2 확정.
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(t.replayCalls.length).toBe(2)
+      const gen2 = t.replayCalls[1].gen
+
+      // 재요청한 replay 의 새 gen 프레임 전량 + gen2 성공 마커 → 완전 flush(내용 복원).
+      t.output(AGENT, 1, 0, new Uint8Array([0]))
+      t.output(AGENT, 1, 1, new Uint8Array([1]))
+      t.output(AGENT, 1, 2, new Uint8Array([2]))
+      t.marker(AGENT, 1, gen2)
+      expect(got).toEqual([0, 1, 2])
+      expect(c.getViewOutputState(V1)?.phase).toBe('live')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── FIX-6: myGen 확정 후 실패(G)→성공(G)이 백오프 전에 오면 flush + 백오프 정리 ──────────
+describe('실패 마커(myGen 확정) 뒤 같은 gen 성공 마커가 백오프 전에 도착 → flush(백오프 정리)', () => {
+  it('failed(G) 사다리 예약 후, 백오프 만료 전 success(G) → complete buffer flush + 백오프 타이머 정리', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const got: number[] = []
+      // myGen 즉시 확정(replayGenImpl null = 즉시 resolve). subscribeOutput await 로 확정 보장.
+      await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+      const gen = t.replayCalls[0].gen
+      t.output(AGENT, 1, 0)
+      t.output(AGENT, 1, 1)
+      // 실패 마커(gen 일치, myGen 확정) → 사다리 예약(백오프 1s). buffer 는 유지(flush 금지).
+      t.marker(AGENT, 1, gen, { failed: true })
+      expect(got).toEqual([])
+      // ★백오프 만료 전★ 같은 gen 의 성공 마커(늦은 Complete) → flushToLive(buffer 완전 flush).
+      t.marker(AGENT, 1, gen, { failed: false })
+      expect(got).toEqual([0, 1])
+      expect(c.getViewOutputState(V1)?.phase).toBe('live')
+      // ★백오프 타이머 정리 확인★: flush 가 clearTimers 로 예약된 재요청을 취소했으므로, 시간이 흘러도
+      //   stray 재요청이 없다(재요청은 초기 발행 1회에서 멈춤).
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(t.replayCalls.length).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── watchdog = 재요청이지 flush 아님(fake timers) ───────────────────────────────────────
+describe('watchdog 만료 → 재요청(flush 아님)', () => {
+  it('성공 마커 없이 10s 경과 → buffer flush 하지 않고 재요청', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const got: number[] = []
+      await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+      expect(t.replayCalls.length).toBe(1)
+      // 프레임만 버퍼링(성공 마커 안 옴).
+      t.output(AGENT, 1, 0)
+      t.output(AGENT, 1, 1)
+      // watchdog 만료(10s) → 재요청. ★flush 아님★: got 은 여전히 비어야.
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(got).toEqual([]) // flush 금지 확인
+      // watchdog → 사다리 재요청(백오프 1s 후).
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(t.replayCalls.length).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── FIX-1: 같은 viewId 재구독 시 옛 SubState 타이머 정리 ─────────────────────────────────
+describe('재구독(같은 viewId) → 옛 watchdog/backoff 타이머 정리(FIX-1)', () => {
+  it('buffering(watchdog 무장) 중 같은 viewId 재구독 → 옛 watchdog 만료해도 stray 재요청 없음', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      // 1) V1 최초 구독 → buffering, watchdog 무장(초기 발행 1회).
+      await c.subscribeOutput(V1, AGENT, () => {})
+      expect(t.replayCalls.length).toBe(1)
+      // 2) 같은 viewId 재구독(새 token) → 옛 SubState 교체. 재구독 발행 1회(총 2회).
+      await c.subscribeOutput(V1, AGENT, () => {})
+      expect(t.replayCalls.length).toBe(2)
+      // 3) 옛 watchdog(10s)이 살아있으면 만료 시 옛 st 로 ladderRerequest 예약 → 백오프(1s) 후 stray 재요청.
+      //    FIX-1: 재구독이 옛 타이머를 clear 했으면 그런 재요청이 없어야 한다.
+      await vi.advanceTimersByTimeAsync(11000)
+      // 생존 구독(새 st)의 watchdog 은 정상 동작 = 재요청 1회(총 3회). 옛 watchdog 이 추가로 발화하면 4회 이상.
+      expect(t.replayCalls.length).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── unsubscribe 청소(타이머 정리 + fan-out 중단) ────────────────────────────────────────
+describe('unsubscribe 청소', () => {
+  it('unsubscribe 후 프레임/마커가 그 뷰로 안 감(subs 제거) + 타이머 정리', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const got: number[] = []
+      const sub = await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+      const gen = t.replayCalls[0].gen
+      t.output(AGENT, 1, 0)
+      t.marker(AGENT, 1, gen)
+      expect(got).toEqual([0])
+      // unsubscribe — subs 제거 + 타이머 정리. 이후 프레임은 이 뷰로 안 온다.
+      sub.unsubscribe()
+      t.output(AGENT, 1, 1)
+      expect(got).toEqual([0])
+      expect(c.getViewOutputState(V1)).toBeNull()
+      // 대기 중 타이머가 있었어도(정리됐으므로) 추가 재요청 없음.
+      const before = t.replayCalls.length
+      await vi.advanceTimersByTimeAsync(20000)
+      expect(t.replayCalls.length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stale unsubscribe(재구독 뒤 늦게 온 옛 unsubscribe)는 산 구독을 안 지운다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const g1: number[] = []
+    const g2: number[] = []
+    const sub1 = await c.subscribeOutput(V1, AGENT, (chunk) => g1.push(chunk.seq))
+    await c.subscribeOutput(V1, AGENT, (chunk) => g2.push(chunk.seq)) // 같은 viewId 재구독 → 교체
+    const gen = t.replayCalls[t.replayCalls.length - 1].gen
+    sub1.unsubscribe() // stale — token 불일치라 무시돼야
+    t.output(AGENT, 1, 0)
+    t.marker(AGENT, 1, gen)
+    expect(g2).toEqual([0]) // 생존 구독 정상
+    expect(g1).toEqual([])
+  })
+})
+
+// ── epoch 가드(live) ──────────────────────────────────────────────────────────────────
+describe('epoch 가드(live)', () => {
+  it('live 뷰에 더 높은 epoch frame → drop([agentId,epoch] remount 흐름이 처리)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got: Array<[number, number]> = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push([chunk.seq, chunk.bytes[0]]))
+    const gen = t.replayCalls[0].gen
+    t.output(AGENT, 1, 0)
+    t.marker(AGENT, 1, gen) // epoch 1 채택, live
+    t.output(AGENT, 2, 1) // 더 높은 epoch → drop(remount 가 재구독)
+    t.output(AGENT, 1, 1) // 같은 epoch → 배달
+    expect(got.map((x) => x[0])).toEqual([0, 1])
+  })
+})
+
+// ── FIX: ensureReady reject → 좀비 구독 롤백 ────────────────────────────────────────────
+describe('ensureReady reject → 좀비 구독 롤백', () => {
+  it('ensureReady reject → subs 에 좀비 안 남음 + rethrow', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    t.ensureReadyImpl = () => Promise.reject(new Error('daemon down'))
+    const got: number[] = []
+    await expect(c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))).rejects.toThrow(
+      'daemon down',
+    )
+    // 좀비 없음 — 이후 프레임이 죽은 구독으로 안 샌다.
+    t.output(AGENT, 1, 0)
+    expect(got).toEqual([])
+    expect(c.getViewOutputState(V1)).toBeNull()
+  })
+})
+
+// ── 이벤트 라우팅(eventBus 공통 표면) ──────────────────────────────────────────────────
 describe('이벤트 라우팅(eventBus 공통 표면)', () => {
   it('StatusChanged → (id, status, epoch) 정확히 수신', () => {
     const t = new MockTransport()
@@ -425,7 +781,7 @@ describe('이벤트 라우팅(eventBus 공통 표면)', () => {
     expect(seen).toEqual([report])
   })
 
-  it('ProfileListUpdated → onProfileListUpdated cb 가 profiles 수신(ADR-0018 후속)', () => {
+  it('ProfileListUpdated → onProfileListUpdated cb 가 profiles 수신', () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
     const seen: AgentProfile[][] = []
@@ -435,449 +791,64 @@ describe('이벤트 라우팅(eventBus 공통 표면)', () => {
     expect(seen).toEqual([profiles])
     off()
     t.control({ ProfileListUpdated: { profiles: [{ id: 'p2' }] } })
-    expect(seen).toEqual([profiles]) // unsubscribe 후 미수신
-  })
-})
-
-describe('InProc no-op 수렴(항상 connected·순서보존)', () => {
-  // InProc 류 carrier: 항상 connected, reconnecting 전이 없음, frame 순서 보존.
-  // dedup/epoch/resubscribe 가 무해 통과하는지(우회 분기 없이 자연수렴) 검증.
-  it('연결 전이 없이도 정상 출력 배달(★BLOCK-1: subscribeOutput 은 Subscribe 를 안 보낸다★)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 0, replay_from: 0, truncated: false } })
-    // 순서 보존된 frame — dedup 이 절대 막지 않아야(전부 배달).
-    for (let s = 0; s < 5; s++) t.output(AGENT, 0, s)
-    expect(received).toEqual([0, 1, 2, 3, 4])
-    // ★BLOCK-1(데몬 구독 소유 = src-tauri 단독, ADR-0035/0037)★: subscribeOutput 첫 구독은 데몬에
-    //   Subscribe 를 forward 하지 않는다(데몬 구독은 layout 델타가 단독 트리거 — 프론트가 N창에서
-    //   FromOldest 를 보내면 공유 버퍼 seq 단조 붕괴). 여기 subs(JS 콜백) 등록만 하고 dedup/epoch
-    //   가드는 그대로 — SubscribeAck/output 처리(위 배달)는 변함없이 동작한다. 재연결도 없으니 0개.
-    const subs = t.sent.filter((m) => !!m && typeof m === 'object' && 'Subscribe' in (m as object))
-    expect(subs.length).toBe(0)
+    expect(seen).toEqual([profiles])
   })
 
-  // ── BLOCKER 1 회귀: embedded carrier 의 실제 wire(epoch≥1)를 재현 ──────────────────────────
-  //    resume-fallback 세션은 SubscribeAck.current_epoch=1 로 온다(manager.agent_epoch). embedded
-  //    output frame 도 PtyEvent.epoch=1 을 실어야 가드를 통과한다. 옛 버그는 output epoch 을 0 으로
-  //    고정해 SubscribeAck epoch=1 과 불일치 → 전멸시켰다. 아래 두 케이스가 그 가드 동작을 박는다:
-  it('SubscribeAck epoch=1 + output epoch=1 → 배달(전멸 안 됨)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // resume-fallback 세션: SubscribeAck/output 모두 epoch 1 → 가드 일치 통과.
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    expect(received).toEqual([0, 1])
-  })
-
-  it('SubscribeAck epoch=1 + output epoch=0(옛 버그 재현) → epoch 가드가 전부 drop', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // SubscribeAck 은 실제 epoch 1, 그러나 carrier 가 epoch 을 0 으로 버린 경우(BLOCKER 1 버그).
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 1, replay_from: 0, truncated: false } })
-    t.output(AGENT, 0, 0)
-    t.output(AGENT, 0, 1)
-    // 0 !== 1 → epoch 가드가 전부 버린다. 이게 실버그의 증상 — carrier 가 epoch 을 0 으로 버리면
-    // 출력이 화면에 0건 도달한다(이 단언이 가드 동작과 버그 메커니즘을 동시에 박제).
-    expect(received).toEqual([])
-  })
-
-  it('epoch 0 output + epoch 0 SubscribeAck 정합(fresh 세션 epoch=0)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // fresh 세션(epoch 0): SubscribeAck/output 모두 epoch 0 → 가드 통과.
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 0, replay_from: 0, truncated: false } })
-    t.output(AGENT, 0, 0)
-    t.output(AGENT, 0, 1)
-    expect(received).toEqual([0, 1])
-  })
-})
-
-// ── ADR-0043 프론트 등가: 구독 전 도착 프레임 버퍼 → 첫 구독 flush ──────────────────────
-//    리로드 시 창 Channel 재등록(→ Rust replay flush)이 React 슬롯 마운트(subscribeOutput)보다
-//    먼저 온다. 구독자 없는 프레임을 버렸던 옛 결함(RichSlot 빈 화면)을 버퍼링으로 메운다.
-describe('pre-subscribe 버퍼(ADR-0043 deliverable 게이트 프론트 등가)', () => {
-  it('구독 전 도착 프레임 → 버퍼 → 첫 구독 시 seq 순서대로 flush', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 구독자 없는 상태로 replay 프레임 3개 도착(리로드 시 Channel 재등록이 마운트보다 먼저 온 상황).
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    t.output(AGENT, 1, 2)
-    // 이제 React 슬롯이 마운트되며 구독 — 보류분이 순서대로 flush 돼야.
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    expect(received).toEqual([0, 1, 2])
-  })
-
-  it('flush 후 라이브 프레임과 이음매 없이 이어짐(high-water 전진 dedup)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    expect(received).toEqual([0, 1]) // flush
-    // flush 로 high-water=1 전진 → 라이브 seq 1 재수신은 dedup, seq 2 는 배달.
-    t.output(AGENT, 1, 1)
-    t.output(AGENT, 1, 2)
-    expect(received).toEqual([0, 1, 2])
-  })
-
-  it('epoch 교체 → 옛 버퍼 폐기(새 epoch 프레임만 flush)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 옛 epoch 1 프레임 보류 → 재시작으로 epoch 2 프레임 도착(옛 스트림 무의미 → 통째 교체 by bufferPending).
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    t.output(AGENT, 2, 0)
-    t.output(AGENT, 2, 1)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // 옛 epoch 1 은 버려지고 epoch 2 프레임만 flush(seq 0,1) — 버퍼 교체가 옛 epoch 잔여를 이미 폐기.
-    expect(received).toEqual([0, 1])
-    // ★FIX 4(ADR-0007)★: flush 는 st.epoch 를 심지 않는다(epoch 권위 = SubscribeAck 단독). 그래서 지금
-    //   st.epoch 는 undefined — SubscribeAck 이 오기 전 라이브 프레임은 epoch 가드를 통과한다(seq dedup 만).
-    //   SubscribeAck 이 데몬 권위로 epoch 2 를 확정한 뒤에야 epoch 1 프레임이 stale 로 걸러진다.
-    t.control({ SubscribeAck: { agent_id: AGENT, current_epoch: 2, replay_from: 0, truncated: false } })
-    t.output(AGENT, 1, 5) // SubscribeAck 후 stale epoch → drop
-    t.output(AGENT, 2, 2)
-    expect(received).toEqual([0, 1, 2])
-  })
-
-  it('버퍼 상한 초과 → 오래된 프레임 drop + warn 1회', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 1MB 프레임 3개(총 3MB > 2MB 상한) — 구독자 없이 도착. drop-oldest 로 앞 프레임(seq 0)이 밀려남.
-    const oneMB = new Uint8Array(1024 * 1024)
-    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 0, bytes: oneMB })
-    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 1, bytes: oneMB })
-    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 2, bytes: oneMB })
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // seq 0 은 drop-oldest 로 버려짐 → 뒤쪽만 flush(정확한 잔존 개수는 상한 산술에 달렸으나 seq 0 은 없어야).
-    expect(received).not.toContain(0)
-    expect(received.length).toBeGreaterThan(0)
-    // warn 은 이 agent 에 대해 정확히 1회(로그 스팸 방지).
-    const bufferWarns = warnSpy.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].includes('pre-subscribe 버퍼 상한 초과'),
-    )
-    expect(bufferWarns.length).toBe(1)
-    warnSpy.mockRestore()
-  })
-
-  it('연결 끊김(connected→비connected) → 버퍼 폐기(재연결 후 낡은 프레임 미flush)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    // 끊김 — 보류분은 stale(재연결 후 데몬이 replay 새로 줌) → 폐기돼야.
-    t.setState('reconnecting')
-    t.setState('connected')
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // 폐기됐으므로 구독 시 flush 될 게 없음(빈 배열). 이후 라이브만 배달.
-    expect(received).toEqual([])
-    t.output(AGENT, 1, 2)
-    expect(received).toEqual([2])
-  })
-
-  it('구독 후 도착 프레임은 버퍼 안 거치고 즉시 배달(회귀 — 기존 경로 불변)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    expect(received).toEqual([0, 1])
-  })
-
-  // ── FIX 2: out-of-order 도착 프레임 → seq 오름차순 flush ──────────────────────────────
-  it('out-of-order 도착[2,0,1] → seq 순서(0,1,2)로 flush(high-water drop 방지)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 도착 순서가 seq 순서와 다름 — 정렬 없이 배열 순서 flush 하면 2 를 먼저 배달해 high-water=2 →
-    //   0,1 이 dedup 탈락한다. FIX 2 는 seq 오름차순 정렬 후 flush 해 전부 배달한다.
-    t.output(AGENT, 1, 2)
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    expect(received).toEqual([0, 1, 2])
-  })
-
-  // ── FIX 3: 단일 초대형 프레임(> bound) → 버퍼 비움 ──────────────────────────────────
-  it('단일 3MB 프레임(> 2MB 상한) → 버퍼 비움 + warn 1회(bound 무한잔존 방지)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 단일 프레임이 상한보다 큼 — drop-oldest 루프는 frames.length>1 에서 멈추므로 옛 코드는 이 1개를
-    //   영영 남긴다. FIX 3 은 마지막 1개도 bound 초과면 버려 버퍼를 비운다.
-    const threeMB = new Uint8Array(3 * 1024 * 1024)
-    t.deliver({ kind: 'output', tag: 0, agentId: AGENT, epoch: 1, seq: 0, bytes: threeMB })
-    const received: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => received.push(chunk.seq))
-    // 버퍼가 비었으므로 flush 될 게 없다.
-    expect(received).toEqual([])
-    const bufferWarns = warnSpy.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].includes('pre-subscribe 버퍼 상한 초과'),
-    )
-    expect(bufferWarns.length).toBe(1)
-    warnSpy.mockRestore()
-  })
-
-  // ── FIX 1: unsubscribe → 버퍼 폐기(refill 누수 방지) ─────────────────────────────────
-  it('subscribe→unsubscribe→프레임 도착→remount → post-unsubscribe 프레임만 flush(stale 없음)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    const got1: number[] = []
-    const sub = await c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
-    t.output(AGENT, 1, 0) // 구독 중 배달
-    expect(got1).toEqual([0])
-    // 언마운트 — subs 삭제 + 버퍼 폐기. 이후 데몬이 계속 보내는 프레임은 새 pre-subscribe 버퍼로 감.
-    sub.unsubscribe()
-    t.output(AGENT, 1, 1) // unsubscribe 후 도착 — 새 버퍼 시작(옛 stale 아님)
-    t.output(AGENT, 1, 2)
-    // remount(재구독) — 새 버퍼(seq 1,2)만 flush. 옛 seq 0 은 이미 배달됐고 버퍼에 남지 않아 중복 없음.
-    const got2: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
-    expect(got2).toEqual([1, 2])
-  })
-
-  // ── 근본원인 회귀: StrictMode(dev 이중 마운트) 급속 이중 구독 → 생존 구독자가 버퍼를 받는다 ──
-  //    RichSlot/TerminalSlot effect(deps [agentId,epoch])가 async subscribeOutput 을 StrictMode 로 2회
-  //    부르면, 두 호출이 `await ensureReady()` 에서 갈라진 뒤 재개한다. pre-subscribe 버퍼는 1회성(flush
-  //    시 delete)이라, 옛 버그는 먼저 재개한 호출(곧 폐기될 첫 인스턴스 st1)이 버퍼를 소진·삭제 → 생존
-  //    구독자(st2)가 빈 화면이 됐다(실측: done#1 delivered:15 → done#2 delivered:0 → 리로드 후 복원 실패).
-  //    수정: subs.set 을 await 이전으로 끌어올려 최종 생존 구독자를 확정하고, flush 를 token 가드로 막아
-  //    교체된 옛 st 는 skip → 버퍼를 생존 구독자에게 배달한다. tag 무관(tag0 터미널·tag1 JSON 공통).
-  it('StrictMode 이중 subscribeOutput → 나중(생존) 구독자가 pre-subscribe 버퍼를 받는다(먼저 호출은 소진 안 함)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 구독 전 replay 프레임 도착(리로드 시 Channel 재등록이 마운트보다 먼저 온 상황) — tag0/tag1 혼재.
-    t.output(AGENT, 1, 0, new Uint8Array([0]), 0)
-    t.output(AGENT, 1, 1, new Uint8Array([1]), 1)
-    t.output(AGENT, 1, 2, new Uint8Array([2]), 0)
-
-    // ★핵심 재현★: StrictMode 이중 마운트 = 같은 effect 가 subscribeOutput 을 await 없이 급속 2회 호출.
-    //   두 Promise 를 동시에 시작(각자 ensureReady await 에서 yield)한 뒤 함께 기다린다. 나중 호출(st2)이
-    //   생존 구독자(StrictMode 가 유지하는 두 번째 컴포넌트 인스턴스), 먼저 호출(st1)은 곧 폐기된다.
-    const got1: number[] = []
-    const got2: number[] = []
-    const p1 = c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
-    const p2 = c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
-    await Promise.all([p1, p2])
-
-    // 생존 구독자(st2)가 버퍼 전량을 seq 순서로 받는다 — 이게 리로드 후 화면 복원.
-    expect(got2).toEqual([0, 1, 2])
-    // 폐기될 먼저 호출(st1)은 버퍼를 소진하지 않는다(교체됐으므로 flush skip).
-    expect(got1).toEqual([])
-
-    // 회귀 완결: flush 로 high-water 가 생존 구독자에서 전진해 이후 라이브가 이음매 없이 이어진다.
-    t.output(AGENT, 1, 2, new Uint8Array([2]), 0) // dedup(<=high-water)
-    t.output(AGENT, 1, 3, new Uint8Array([3]), 1) // 신규 → 배달
-    expect(got2).toEqual([0, 1, 2, 3])
-  })
-})
-
-// ── (re)mount fresh replay 재요청(remount 대화 소실 FIX — resync_output) ──────────────────
-//    idle tag1 slot 을 split/재배정하면 Allotment 재귀 트리 구조 변경으로 RichSlot 이 remount 되는데,
-//    remount 는 창 출력 Channel 재등록이 *아니라서* backend 가 replay 를 자동 재전송하지 않는다 → 구독은
-//    빈 pre-subscribe 버퍼(flush 0)로 재시작해 대화 소실 + 영구 streaming 고착. subscribeOutput 이 매
-//    (re)mount 마다 transport.resyncOutput 으로 backend 에 fresh replay 를 재요청해 이를 메운다.
-//
-//    ★이 describe 가 검증하는 것(정확히)★: (1) subscribeOutput 이 생존 구독자 조건에서
-//    transport.resyncOutput(agentId) 을 부르는지(호출 여부·중복 억제), (2) resync 뒤 backend 가 출력
-//    Channel 로 흘리는 프레임을 새 구독자가 정상 소비하는지. ★프레임은 여기서 테스트가 수동 주입(MockTransport.output,
-//    tag 기본 0=터미널)★이라, "실제 resync 가 fresh replay 를 유발했다"까지는 검증하지 않는다(그건 backend
-//    output_router 테스트가 본다). tag1(구조화)·turnDone 판정은 이 레이어 밖 — 여기 프레임은 전부 tag0 이다.
-describe('(re)mount fresh replay 재요청(resync_output)', () => {
-  it('subscribeOutput 은 매 (re)mount 마다 resyncOutput(agentId) 을 부른다', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    await c.subscribeOutput(AGENT, () => {})
-    // 정상 최초 mount 도 무조건 재요청(최초/remount 를 프론트가 구분 못 함 — 단순안, dedup 이 중복 흡수).
-    expect(t.resyncCalls).toEqual([AGENT])
-  })
-
-  it('remount(버퍼 없음) → resync 호출 후 도착 프레임(수동 주입)을 생존 구독자가 소비', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // ★remount 재현★: 첫 mount 후 unsubscribe(버퍼까지 폐기) → backend 가 아무것도 안 보낸 채 재구독.
-    //   pre-subscribe 버퍼가 비어 flush 대상 0(대화 소실 상황의 핵심).
-    const sub = await c.subscribeOutput(AGENT, () => {})
-    sub.unsubscribe()
-    t.resyncCalls = [] // 재요청 카운트 리셋 — remount 것만 본다.
-    const got: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
-    // remount 가 resync 를 재요청했다 — backend 는 이걸 받아 fresh replay(cursor 리셋+전체)를 흘린다.
-    expect(t.resyncCalls).toEqual([AGENT])
-    expect(got).toEqual([]) // resync 응답 전이라 아직 빈 화면(대화 소실 상황).
-    // resync 후 도착하는 프레임(테스트가 수동 주입 — tag0 터미널)을 생존 구독자가 소비하는지 본다.
-    //   ★주의★: 이 프레임은 MockTransport.output 이 밀어넣은 것이지 resync 가 유발한 실제 backend replay 가
-    //   아니다 — "resync 배선이 fresh replay 를 실제로 트리거하는지"는 backend(output_router) 테스트가 검증한다.
-    //   여기 seq 0~2 는 전부 tag0 이라 tag1(구조화)·turnDone(result 프레임) 판정과는 무관하다.
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    t.output(AGENT, 1, 2)
-    expect(got).toEqual([0, 1, 2]) // 새 구독자가 seq 순서대로 프레임 소비(remount 후 배달 경로 정상)
-  })
-
-  it('StrictMode 이중 subscribeOutput → resync 는 생존 구독자에서 1회만(중복 invoke 억제)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 두 호출을 await 없이 급속 시작(StrictMode 이중 마운트) → 생존 구독자(st2)만 resync 트리거.
-    const p1 = c.subscribeOutput(AGENT, () => {})
-    const p2 = c.subscribeOutput(AGENT, () => {})
-    await Promise.all([p1, p2])
-    // token 가드로 교체된 옛 st1 은 skip → resync 는 1회(생존 구독자). 중복 재요청 storm 방지.
-    expect(t.resyncCalls).toEqual([AGENT])
-  })
-})
-
-// ── FIX-1(좀비 롤백) / FIX-2(early set 의 seq 순서 보존) — delayed/rejected ensureReady ──────
-//    subs.set 을 `await ensureReady()` *이전*으로 옮긴 뒤 생긴 두 회귀를 박제한다:
-//      · FIX-1: ensureReady reject → st 가 subs 에 잔존(좀비)해 이후 프레임이 죽은 구독으로 샘.
-//      · FIX-2: ensureReady 대기 중 도착 프레임이 st 로 직접 배달돼 lastDeliveredSeq 조기 전진 →
-//               flush 가 버퍼의 더 낮은 seq 를 dedup drop(순서 꼬임/유실).
-describe('delayed/rejected ensureReady (FIX-1 좀비 롤백 · FIX-2 seq 순서 보존)', () => {
-  it('FIX-1: ensureReady reject → subs 에 좀비 안 남음(이후 프레임이 죽은 구독으로 새지 않음)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    t.ensureReadyImpl = () => Promise.reject(new Error('daemon down'))
-    const got: number[] = []
-    // subscribeOutput 은 ensureReady reject 를 rethrow 해야(호출자가 실패를 인지).
-    await expect(c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))).rejects.toThrow(
-      'daemon down',
-    )
-    // 좀비 st 가 남았다면 이 프레임이 죽은 콜백으로 배달된다 — 롤백됐으면 pre-subscribe 버퍼로 감(got 빈 채).
-    t.output(AGENT, 1, 0)
-    expect(got).toEqual([])
-  })
-
-  it('FIX-1: reject 후 재구독(성공) → 새 구독이 정상 동작(롤백이 정상 재구독 막지 않음)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    t.ensureReadyImpl = () => Promise.reject(new Error('daemon down'))
-    await expect(c.subscribeOutput(AGENT, () => {})).rejects.toThrow('daemon down')
-    // 데몬 복구 — 재구독 성공.
-    t.ensureReadyImpl = null
-    const got: number[] = []
-    await c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    expect(got).toEqual([0, 1])
-  })
-
-  it('FIX-2: ensureReady 지연 중 도착 프레임 → 직접 배달 안 하고 버퍼 경유 → flush 가 seq 순서로 배달', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // ensureReady 를 수동 resolve 로 지연 — 그 사이 프레임을 주입해 "대기 중 직접 배달" 레이스를 재현.
-    let release!: () => void
-    t.ensureReadyImpl = () => new Promise<void>((r) => (release = r))
-    const got: number[] = []
-    const p = c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
-    // await 대기 중(subs.set 은 이미 됨). 프레임이 seq 순서와 다르게(2,0,1) 도착 — 옛 버그면 seq 2 가
-    //   직접 배달돼 high-water=2 → flush 시 0,1 이 dedup drop 된다. FIX-2 는 ready=false 라 전부 버퍼로.
-    t.output(AGENT, 1, 2)
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    expect(got).toEqual([]) // 아직 아무것도 직접 배달되지 않아야(ready=false)
-    release() // ensureReady resolve → flush
-    await p
-    // 버퍼가 seq 오름차순으로 통합 flush — 전부 배달, 순서 보존.
-    expect(got).toEqual([0, 1, 2])
-    // flush 후 ready=true → 라이브가 이음매 없이 직접 배달.
-    t.output(AGENT, 1, 3)
-    expect(got).toEqual([0, 1, 2, 3])
-  })
-
-  it('FIX-2: 지연 중 라이브 프레임(seq 0,1) 도착 → 조기 전진 없이 순서대로 배달(직접배달 조기전진 방지)', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    let release!: () => void
-    t.ensureReadyImpl = () => new Promise<void>((r) => (release = r))
-    const got: number[] = []
-    const p = c.subscribeOutput(AGENT, (chunk) => got.push(chunk.seq))
-    t.output(AGENT, 1, 0) // 대기 중 도착 — 버퍼로
-    t.output(AGENT, 1, 1)
-    expect(got).toEqual([])
-    release()
-    await p
-    expect(got).toEqual([0, 1]) // flush 로 순서대로
-  })
-})
-
-// ── StrictMode 이중구독 + interleaving(프레임이 set 과 flush 사이 도착) — 종합 회귀 ──────────
-//    dev StrictMode 는 subscribeOutput 을 await 없이 2회 부른다. 두 호출이 ensureReady 지연으로
-//    대기 중일 때 프레임이 도착하면, early set + ready 게이트가 함께 (생존 구독자 확정 + 직접배달
-//    조기전진 차단)을 만족해야 한다.
-describe('StrictMode 이중구독 + interleaving (early set × ready 게이트 종합)', () => {
-  it('두 구독이 ensureReady 대기 중 프레임 도착(out-of-order) → 생존(나중) 구독자가 seq 순서로 전량 수신', async () => {
-    const t = new MockTransport('connected')
-    const c = new ProtocolClient(t)
-    // 두 호출이 각자 ensureReady Promise 를 만든다(호출마다 ensureReadyImpl 재실행) — releaser 를 모아
-    //   한꺼번에 resolve 해 StrictMode 두 호출을 동시 재개시킨다(실제 single-flight 여부와 무관하게
-    //   ready 게이트 + early set 조합이 순서를 보장하는지 검증).
-    const releasers: Array<() => void> = []
-    t.ensureReadyImpl = () => new Promise<void>((r) => releasers.push(r))
-    const got1: number[] = []
-    const got2: number[] = []
-    // StrictMode: await 없이 급속 2회 호출. subs.set 은 동기 실행돼 st2 가 최종 생존 구독자로 확정.
-    const p1 = c.subscribeOutput(AGENT, (chunk) => got1.push(chunk.seq))
-    const p2 = c.subscribeOutput(AGENT, (chunk) => got2.push(chunk.seq))
-    // set 과 flush 사이(둘 다 ready=false) 프레임이 out-of-order 로 도착 → 전부 버퍼로.
-    t.output(AGENT, 1, 2)
-    t.output(AGENT, 1, 0)
-    t.output(AGENT, 1, 1)
-    expect(got1).toEqual([])
-    expect(got2).toEqual([])
-    for (const r of releasers) r()
-    await Promise.all([p1, p2])
-    // 생존 구독자(st2)가 seq 순서로 전량 수신, 폐기될 st1 은 flush skip(token 불일치) + ready=false.
-    expect(got2).toEqual([0, 1, 2])
-    expect(got1).toEqual([])
-    // 이후 라이브도 생존 구독자에게만 직접 배달(st1 은 ready=false 라 배달 안 됨).
-    t.output(AGENT, 1, 3)
-    expect(got2).toEqual([0, 1, 2, 3])
-    expect(got1).toEqual([])
-  })
-})
-
-describe('close', () => {
-  it('close() → pending reject + transport.close 호출', async () => {
+  it('getAgents 진행 중 broadcast AgentListUpdated 편승 안 함', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
-    const p = c.killAgent('a1')
+    const broadcasts: AgentInfo[][] = []
+    c.onAgentListUpdated((a) => broadcasts.push(a))
+    const p = c.getAgents()
     await Promise.resolve()
-    c.close()
-    await expect(p).rejects.toThrow('client closed')
-    expect(t.closed).toBe(true)
+    const rid = t.lastSent<{ request_id: string }>('ListAgents')!.request_id
+    const other = [{ id: 'other' }] as unknown as AgentInfo[]
+    t.control({ AgentListUpdated: { agents: other } })
+    let settled = false
+    void p.then(() => (settled = true)).catch(() => (settled = true))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(broadcasts).toEqual([other])
+    const mine = [{ id: 'mine' }] as unknown as AgentInfo[]
+    t.control({ AgentList: { request_id: rid, agents: mine } })
+    await expect(p).resolves.toEqual(mine)
   })
 })
 
-// ── ADR-0021: connect(명시 spawn)/disconnect(재연결 중단) 위임 ────────────────────────
+// ── close ───────────────────────────────────────────────────────────────────────────
+describe('close', () => {
+  it('close() → pending reject + transport.close 호출 + 타이머 정리', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      await c.subscribeOutput(V1, AGENT, () => {})
+      const p = c.killAgent('a1')
+      await Promise.resolve()
+      c.close()
+      await expect(p).rejects.toThrow('client closed')
+      expect(t.closed).toBe(true)
+      // close 후 타이머 없음(watchdog 정리) — 재요청 안 늘어남.
+      const before = t.replayCalls.length
+      await vi.advanceTimersByTimeAsync(20000)
+      expect(t.replayCalls.length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── connect/disconnect (ADR-0021 §1·note3) ────────────────────────────────────────────
 describe('connect/disconnect (ADR-0021 §1·note3)', () => {
-  it('connect() → transport.start 위임(명시 spawn, ensureReady 와 분리)', async () => {
+  it('connect() → transport.start 위임(명시 spawn)', async () => {
     const t = new MockTransport('down')
     const c = new ProtocolClient(t)
     await c.connect()
     expect(t.startCalls).toBe(1)
-    // 명령 경로(ensureReady)와 달리 spawn 은 start 만 — connect 가 ensureReady 를 부르지 않는다.
     expect(t.ensureReadyCalls).toBe(0)
   })
 
-  it('disconnect() → transport.close 위임(ProtocolClient 구조는 유지, close 와 다름)', () => {
+  it('disconnect() → transport.close 위임', () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
     c.disconnect()

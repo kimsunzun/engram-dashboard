@@ -37,6 +37,20 @@ export interface OutputSubscription {
 }
 
 /**
+ * 뷰별 replay 상태 스냅샷(§5 LLM 제어 표면 — ADR-0046). getViewOutputState 가 반환한다.
+ * error(재요청 사다리 소진) 등을 LLM/자동화가 타입으로 발견·재구동 판단에 쓴다. 최소 노출.
+ */
+export interface ViewOutputState {
+  agentId: string
+  /** buffering(축적 중) / live(직행 배달) / error(재요청 소진). */
+  phase: 'buffering' | 'live' | 'error'
+  /** buffering 중 축적 프레임 수(디버그·관측). */
+  buffered: number
+  /** 재요청 사다리 시도 횟수(0=아직 재요청 안 함). */
+  attempts: number
+}
+
+/**
  * 에이전트 제어/구독 단일 표면. 사람 UI 클릭과 (미래) LLM 호출이 같은 진입점을 거친다(§5).
  * 모든 side-effect 메서드는 idempotency·재시도 정책을 구현체가 책임진다.
  */
@@ -61,11 +75,23 @@ export interface AgentClient {
   disconnect(): void
 
   // ── 출력 구독 ──────────────────────────────────────────────────────────────
-  /** 출력 구독. onChunk 로 디코드된 바이트 전달. 반환 핸들의 unsubscribe 로 해제. */
+  /**
+   * 뷰(slot) 단위 출력 구독(ADR-0046). viewId = 슬롯 id — 같은 agentId 를 N 뷰가 봐도 각자 독립 진도
+   * (버그 B 구조 해소). onChunk 로 디코드된 바이트 전달. onState(옵션)로 replay 상태(buffering/live/error)
+   * 통지 — 슬롯이 error·streaming 표면화에 쓴다. 반환 핸들의 unsubscribe 로 해제.
+   */
   subscribeOutput(
+    viewId: string,
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
+    onState?: (state: 'buffering' | 'live' | 'error') => void,
   ): Promise<OutputSubscription>
+
+  /**
+   * 뷰(slot)별 replay 상태 조회(§5 LLM 제어 표면 — ADR-0046). error 소진(재요청 3회 실패)·buffering
+   * 고착 등을 LLM/자동화가 관측·재구동 판단에 쓴다. 없는 viewId 면 null. (구현 = ProtocolClient.)
+   */
+  getViewOutputState(viewId: string): ViewOutputState | null
 
   // ── 상태/목록/복원 이벤트 ─────────────────────────────────────────────────────
   // 두 모드 공통 표면 — eventBus 가 소비해 store 에 연결한다(모드 무관).

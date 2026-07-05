@@ -58,10 +58,9 @@ export default function ViewLayoutRenderer({
     // hasContent = 구체 렌더러/rich fixture 를 그리는 경우만(래퍼를 100% 채움). caps 대기 플레이스홀더는
     // empty 슬롯처럼 중앙정렬 스타일로 둔다(hasContent=false).
     const hasContent = capsReady || isRich
-    // ★known-limitation: 같은 webview 안에서 동일 agentId 를 두 슬롯에 배정하면 ProtocolClient.subs 가
-    // agentId 당 단일 콜백이라 두 번째 마운트가 첫 슬롯 구독을 덮어써 첫 슬롯이 빈다. 이번 슬라이스
-    // 범위 밖 — 별도 슬라이스에서 콜백 레지스트리를 agentId 당 다중 구독으로 확장해 해소 예정.
-    // (옛 "unmount 시 형제 구독 동반 제거"는 ProtocolClient owner-token 가드로 이미 해소.)
+    // ★ADR-0046: 버그 B 구조 해소★: ProtocolClient.subs 가 이제 viewId(slot id) 키라 같은 agentId 를 두
+    //   슬롯에 배정해도 각 슬롯이 독립 구독·독립 진도를 갖는다(옛 agentId-당-단일-콜백 덮어쓰기 소멸).
+    //   슬롯은 아래 viewId={node.id} 로 자기 slot id 를 구독 키로 넘긴다.
     return (
       <div
         style={{
@@ -98,17 +97,20 @@ export default function ViewLayoutRenderer({
             // 오버라이드가 있으면 그 렌더러, 없으면 caps 유도 기본. 이 switch 는 위 caps-ready 게이팅 안에
             // 있어 replay 소유권을 그대로 지킨다(caps 도착 전엔 마운트 안 함 → assign replay 온전).
             (() => {
+              // ★viewId = node.id(slot id, ADR-0046)★: 슬롯이 자기 slot id 로 구독한다 — 같은 agentId 두
+              //   슬롯도 독립 진도(버그 B 해소). key 도 slot id 로 두어(옛 agent_id 키는 같은 agent 두 슬롯이
+              //   같은 React key 가 돼 remount 가 꼬였다) 슬롯 정체성을 slot 단위로 고정한다.
               switch (mode) {
                 case 'dom':
                   // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
                   // 한다(터미널 xterm 은 canvas 라 관측 불가).
-                  return <DomSlot key={node.agent_id} agentId={node.agent_id} epoch={agent.epoch} />
+                  return <DomSlot key={node.id} viewId={node.id} agentId={node.agent_id} epoch={agent.epoch} />
                 case 'rich':
                   // 라이브 RichSlot — 실스트림 구독([agentId,epoch]). epoch 은 재spawn 재구독 트리거.
-                  return <RichSlot key={node.agent_id} agentId={node.agent_id} epoch={agent.epoch} />
+                  return <RichSlot key={node.id} viewId={node.id} agentId={node.agent_id} epoch={agent.epoch} />
                 case 'terminal':
                 default:
-                  return <TerminalSlot key={node.agent_id} agentId={node.agent_id} />
+                  return <TerminalSlot key={node.id} viewId={node.id} agentId={node.agent_id} />
               }
             })()
           )

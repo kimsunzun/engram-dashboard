@@ -14,7 +14,7 @@ export default function LayoutRenderer({ node }: { node: LayoutNode }) {
     return (
       <SlotPane slotId={node.id}>
         {node.content.kind === 'terminal'
-          ? <TerminalSlot agentId={node.content.agentId} />
+          ? <TerminalSlot viewId={`slot-${node.id}`} agentId={node.content.agentId} />
           : <AgentTree sourceSlotId={node.id} />}
       </SlotPane>
     )
