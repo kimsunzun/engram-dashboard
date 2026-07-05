@@ -214,7 +214,7 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 
 ## 기술 스택 (프론트)
 
-React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arborist · @monaco-editor/react · react-router(hash) · CSS 변수(Tailwind X) · Tauri v2 셸. 의존성 상세는 package.json.
+React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arborist · @monaco-editor/react · react-router(hash) · **Tailwind CSS v4 + shadcn/ui(필요분) + lucide-react** · CSS 변수 테마(`data-theme` 3종) · Tauri v2 셸. 의존성 상세는 package.json. (스타일링 = Tailwind 채택, 기존 "순수 CSS" 기조 전환 — **ADR-0047**. 테마는 CSS 변수 유지·Tailwind 토큰이 `var()` 참조.)
 
 ## 프론트 구조·제어 표면 (`src/`)
 

@@ -2,6 +2,19 @@
 @import './styles/theme.css';
 @import './styles/font.css';
 
+/* ADR-0047: Tailwind v4 색 토큰 ↔ 기존 data-theme CSS 변수 매핑.
+   inline 이 핵심 — Tailwind 가 빌드타임에 값을 굳히지 않고 var(--*) 를 유틸에 그대로 방출한다.
+   덕분에 런타임 data-theme(dark/light/e-ink) 스왑이 bg-background/text-foreground 등 유틸에
+   그대로 전파된다(테마 전환 메커니즘 불변). 실제 존재하는 변수만 매핑(정의처 = styles/theme.css). */
+@theme inline {
+  --color-background: var(--bg);
+  --color-surface: var(--bg-secondary);
+  --color-foreground: var(--text);
+  --color-muted: var(--text-muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;

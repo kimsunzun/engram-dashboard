@@ -570,6 +570,13 @@
 - **1edbf63:** structuredAccumulator 아이템 스트림 모델(칩·구분선·멱등 재feed·안정 itemId) + StructuredItemStream(칩+클릭 펼침, 사용자 결정) + streamParse/parse 제거(-189 소스). 리뷰 2인(Codex FIX 3 반영→PASS) + `/qa full`(cdp J1~J6 PASS — **S15 §5 완료 기준 최초 실측 충족**: json 스폰→RichSlot→마크다운→칩 펼침/접힘→구분선→리로드 복원).
 - **백로그(이번 밤 발견):** ① `__engramLayout.assignAgent` JS 표면 silent no-op(직접 invoke는 동작 — §5 LLM 표면 버그) ② 구조화 렌더 `--lay-*` 팔레트 3테마 미연동(light/e-ink 가독성 부채, 선재 승계) ③ 슬롯 onState 미배선(사다리 소진 에러 표시 없음 — 기능상 안전) ④ 데몬 mid-replay drop Error 귀속화→실패 마커 승격 ⑤ tauriTransport 재연결 시 채널 재등록 순서(구 Channel이 방어, cdp 미발현) ⑥ `LayoutRenderer.tsx` stale 파일 정리 ⑦ src-tauri `subs` 맵 미정리(완만 성장) ⑧ M2 잔여: spawn UI에 json 모드 노출 + 입력박스(프론트 E2E — 이번 밤 범위 밖).
 
+### 채팅 UI 룩 재정향 + Tailwind 채택 결정 (2026-07-05, master, opus) — 진행중(구현 미착수)
+- **증상:** JSON 슬롯 채팅 렌더가 Claude Code 확장 룩 대비 품질 저하(이모지·손수 `<details>` 아코디언·Thinking 미표시) — 직전 "Cline 이식"이 근사에 그침(사용자 지적).
+- **/research(medium, 설계-결정 모드 + Codex cross-family 적대):** ① Claude Code 확장 = **폐쇄소스**(All Rights Reserved, 유출 소스도 법적 사용 불가 → 복사 불가) ② OSS 후보(Cline/Roo/Kilo-legacy/Continue) **전부 Tailwind+shadcn/Radix 강결합**·아무도 CC 시그니처 룩(점선 타임라인·Thought for Ns·미니멀 IN/OUT) 없음 ③ claude-code-webui = 아카이브(1.1k)+룩 미검증(적대 리뷰가 "최고 충실도" 과장 판정) · siteboon = **AGPL** 정정. → **CC 룩 복사 소스 없음 = 네이티브 설계 불가피.**
+- **CSS 실측:** 763줄 중 keeper 기반 ~20줄(나머지 `lab/` 스크래치 394 + 재작성 대상 채팅 렌더 348) → **Tailwind 전환 비용 최저점(now).**
+- **결정(사용자):** Tailwind CSS v4 + shadcn/ui(필요분) + lucide-react 채택 — 순수 CSS 기조 전환. `data-theme` 3종 테마는 CSS 변수로 유지(Tailwind 토큰이 `var()` 참조, 테마 메커니즘 불변). → **ADR-0047** 박제 + 인덱스 재생성 + CLAUDE.md 기술 스택 갱신 (**전부 미커밋**).
+- **다음:** Tailwind v4+Vite 플러그인 셋업 → 테마 변수↔토큰 매핑 → shadcn/lucide 도입 → **Claude Code 룩 네이티브 재구현**(`StructuredTextView` 후신, `// ADR-0047` 앵커) → `/review code` → `/qa`. ADR/CLAUDE.md 등 load-bearing 문서는 `/review doc` 후 커밋.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
