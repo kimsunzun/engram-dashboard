@@ -550,6 +550,26 @@
 - **CLAUDE.md 중복 해소:** 「리뷰어 역할 — 단계별 특화」 절 제거·구현 실행 규약 불릿으로 병합 — 실행 정본 = review 스킬 `flow.md §2`, 결정 = ADR-0031(구 "운영 표 = CLAUDE.md" 포인터도 현행화).
 - **보존(인용 확인):** `review-pipeline-design-draft`·`review-methodology-research`·`multi-window-layout-authority-topology`(ADR/CLAUDE.md 인용), `backend-lld-stage1`(확정 계약서).
 
+### S15 모듈5+6 MVP + 리로드/remount 증상 수정 + 근본원인 규명 (2026-07-04~05, master, fable) — 사후 기록
+- **S15 모듈1~6 커밋:** b716237(모듈1)·4a626c3(모듈2)·8a3e646(모듈3+4)·da9f948(모듈5+6 MVP — decoder 배선+프론트 tag1 소비, TextDelta만 end-to-end). DEFER = 비TextDelta 렌더·turn 경계·파서 제거(→ 2026-07-05 완결, 아래).
+- **리로드 replay 유실 수정:** ca3f325 — subscribeOutput StrictMode 이중구독 버퍼 유실.
+- **remount 고착 수정:** 23a8c47 — split/재배정 시 tag1/tag0 소실+streaming 고착, resync_output 신설. `/qa full` PASS. **단 사후에 증상 대응으로 판명.**
+- **★근본원인 규명(세션 후반):** 관련 버그 3건(ca3f325·23a8c47·다중 slot 공유 유실 B)이 전부 "src-tauri 미러 버퍼 ↔ 데몬/화면 동기화" 한 지점에서 발생 — 사용자 결정: PC 미러 제거·데몬 직수신 재설계(모바일/원격만 캐싱). 협업 실책 기록: 굵은 아키텍처 전제(미러 유무)를 컨펌 없이 증상 수정으로 진행 → 이후 굵은 전제는 반드시 사용자 확정 후 착수.
+
+### S16 view-direct replay — PC 미러 버퍼 제거 재설계 전체 (2026-07-05 밤샘 자율, master, fable)
+- **결정(사용자, 취침 전):** ① 뷰별 직구독(O1) ② 갭 정책 = 보관 하한 replay 유지(이력 정본 = claude 세션 `--resume`) ③ JSON 비텍스트 렌더 = 칩+클릭 펼침 ④ 밤샘 단계별 커밋 사전 승인(push 없음).
+- **리서치(medium, grounding+Codex 적대):** tmux/zellij/mosh/VS Code/wezterm/seq-resume 프로토콜 서베이 — 서버 정본+얇은 클라가 일반, 클라 캐시는 원격/오프라인 사유만. VS Code 중간계층 = 5ms 배칭 송신 버퍼뿐(미러 없음, 소스 실측).
+- **TRD rev4** (`docs/process/S16-view-direct-replay/`): `/review trd deep` 3라운드(BLOCK→BLOCK→FIX) — 마커 무상관 조기 flush 유실 → gen 펜스 → 셈 결합 desync 격파 → **single-flight 1:1 결합**(sole-outstanding 좀비·acked 게이트·진행 기반 deadline) 확정.
+- **ADR-0046** 채번: ADR-0040 전체 폐기 + 0007/0037/0043 부분 개정(양방향 링크·lint 청정). 커밋 de96ed9.
+- **M0+M1(ce8f0a8):** src-tauri 미러 전삭제 → 무상태 통과 라우팅 + replay_flight(core crate 이전, 순수·테스트 14 실행) + tag=255 마커. `/review code deep` 3인 2라운드(Codex BLOCK — 지연 Ack/Complete 오귀속 적출 → 좀비 의미론으로 해소 → PASS) + `/qa full`(cdp 스모크 PASS).
+- **M2+M3(9f3ae17):** ProtocolClient 뷰 단위 재작성(상태전이표·gen 펜스·재요청 사다리·getViewOutputState LLM 표면) + 미러 잔재/사장코드 전삭제 + CLAUDE.md 운영 carrier 정정(WsTransport→TauriTransport). `/review code deep` 3인 3라운드(Codex BLOCK 2회 — 재구독 타이머 미정리·오버플로 펜스 무효화 누락·held 마커 교체 규칙·wsTransport single-flight/close 리셋 적출·반영) + `/qa full`(cdp 8시나리오 PASS — **버그 B(동일 에이전트 2슬롯+리로드) 실측 종결**).
+- **수용한 회귀(사용자 보고 대상):** WS 재연결 = tail-resume → 전량 재replay(PC loopback·희소로 수용). 원격 carrier는 seam에서 after_seq — 단 그때 gen 펜스의 full-replay 전제 강화 필수(ADR-0046 명시).
+- **순감:** 설계+구현 4커밋 합계 약 -2,900 LOC(미러+동기화+테스트).
+
+### S15 DEFER 완결 — 비텍스트 구조화 렌더 (2026-07-05 밤샘, master, fable)
+- **1edbf63:** structuredAccumulator 아이템 스트림 모델(칩·구분선·멱등 재feed·안정 itemId) + StructuredItemStream(칩+클릭 펼침, 사용자 결정) + streamParse/parse 제거(-189 소스). 리뷰 2인(Codex FIX 3 반영→PASS) + `/qa full`(cdp J1~J6 PASS — **S15 §5 완료 기준 최초 실측 충족**: json 스폰→RichSlot→마크다운→칩 펼침/접힘→구분선→리로드 복원).
+- **백로그(이번 밤 발견):** ① `__engramLayout.assignAgent` JS 표면 silent no-op(직접 invoke는 동작 — §5 LLM 표면 버그) ② 구조화 렌더 `--lay-*` 팔레트 3테마 미연동(light/e-ink 가독성 부채, 선재 승계) ③ 슬롯 onState 미배선(사다리 소진 에러 표시 없음 — 기능상 안전) ④ 데몬 mid-replay drop Error 귀속화→실패 마커 승격 ⑤ tauriTransport 재연결 시 채널 재등록 순서(구 Channel이 방어, cdp 미발현) ⑥ `LayoutRenderer.tsx` stale 파일 정리 ⑦ src-tauri `subs` 맵 미정리(완만 성장) ⑧ M2 잔여: spawn UI에 json 모드 노출 + 입력박스(프론트 E2E — 이번 밤 범위 밖).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
