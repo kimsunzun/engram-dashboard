@@ -60,6 +60,10 @@
 - **재도입 시점(측정 가능):** ① cold spawn→first-output 지연이 실측상 병목(기준선 측정 후 확정, 후보 >~2s) · ② 동시 활성 에이전트 증가로 스폰 빈도↑ 누적지연 문제 · ③ "headless 메인" 전제 변경.
 - **조치:** 빠른 스폰은 풀링 대신 `--bare`(autoload 제거) + warm 티어(hot 에이전트 유지). 근본 출구는 API transport(claude.exe 미사용). **막다른 길·근거 상세:** `docs/research/control-surface-and-fleet.md` §6.
 
+### T-10. discovery crate 통합 — 구조 정리 (2026-07-05 논의, 저우선 보류)
+- **상태:** 보류(급하지 않음, 착수 트리거 없음). 방향까지 합의된 상태라 재논의 불필요 — 여유 생기면 그때.
+- **방향:** discovery의 `default_data_dir`(경량·공유)만 core로 내리고 나머지 앱 전용 발견 로직(ensure_daemon/status/stop/WMI)은 src-tauri 모듈로 올려 crate 삭제. 기계적 이동이라 난이도 낮음. 착수 시 ADR-0024/0029 amend + 앱 전용 테스트 이관(현 src-tauri 테스트 하네스 DLL entrypoint 이슈 동반 처리).
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)
