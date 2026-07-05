@@ -20,8 +20,11 @@ export function decodeOutputFrame(
   if (buf.byteLength < FRAME_HEADER_LEN) return null
   const view = new DataView(buf)
   const tag = view.getUint8(0)
-  // codec.rs: tag0=TerminalBytes / tag1=StructuredEvent 둘만 유효, 그 밖은 UnknownTag → 버린다.
+  // codec.rs: tag0=TerminalBytes / tag1=StructuredEvent 둘만 유효, 그 밖은 UnknownTag → 조용히 skip(null).
   // (F1 회귀: 옛 코드는 tag1 도 null-drop 해 구조화 출력이 무음 유실됐다 — tag1 도 통과시킨다.)
+  // ★ADR-0046 전방 호환(M0)★: src-tauri 가 앞으로 replay 경계 마커(tag=255, Channel 내부 계약)를 같은
+  //   출력 Channel 로 흘린다 — 현 프론트는 그 미지 tag 를 여기서 조용히 skip 해야 한다(마커 소비는 M2).
+  //   미지 tag 를 던지거나 payload 로 오해하지 않게, tag0/tag1 외는 전부 null 로 버린다(길이 무관).
   if (tag !== FRAME_TAG_TERMINAL_BYTES && tag !== FRAME_TAG_STRUCTURED_EVENT) return null
 
   // agentId: byte[1..17] = AgentId(Uuid).as_bytes() — RFC4122 network order(표준 바이트 그대로).

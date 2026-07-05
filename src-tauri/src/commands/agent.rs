@@ -118,9 +118,10 @@ pub async fn agent_resize(
     Ok(())
 }
 
-/// ★출력 Channel 등록(T6b)★. 창 mount 시 프론트가 `invoke('subscribe_output', { channel })` 로 호출한다 —
-/// 그 창의 출력 Channel 을 window_label → Channel registry 에 넣는다. 연결 task 가 라우팅 표를 보고 이
-/// Channel 로 그 창의 모든 agent 출력을 fan-out 한다(프레임에 agent_id 태그 내장).
+/// ★출력 Channel 등록(ADR-0046 — 등록만, replay 트리거 없음)★. 창 mount 시 프론트가
+/// `invoke('subscribe_output', { channel })` 로 호출한다 — 그 창의 출력 Channel 을 window_label → Channel
+/// registry 에 넣는다. 연결 task 가 라우팅 표를 보고 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다
+/// (프레임에 agent_id 태그 내장).
 ///
 /// ★window label 자동 주입★: `tauri::Window` 를 인자로 받으면 Tauri 가 **호출한 webview** 를 주입한다 →
 /// `window.label()` 로 라벨을 얻는다(프론트가 라벨을 안 넘겨도 됨, 위조 불가). Channel 도 호출 webview 에
@@ -129,99 +130,51 @@ pub async fn agent_resize(
 /// ★raw byte(spike §7)★: registry 타입이 `Channel<tauri::ipc::Response>` 라 연결 task 가
 /// `Response::new(bytes)` 로 raw 바이트를 보낸다(`Channel<Vec<u8>>` 의 JSON 직렬화 함정 회피).
 ///
-/// ## ★등록 후 mount-즉시-replay 트리거(BLOCK-2 검증① + 근원2 — 등록 전 유실·reload 빈 화면 차단)★
-/// Channel 을 registry 에 insert 한 **뒤**, 이 창(label)이 현재 보는 `(label, agent)` slot 들의 replay 를
-/// actor 경유(`client.replay_slots`)로 트리거한다. layout 델타(`slots_to_replay`)는 *배정 시점* 에
-/// replay 를 걸지만 창이 **나중에 mount** 되면 그 사이 on_frame 이 deliverable 게이트로 cursor advance 를
-/// *멈춰* 둔다(근원2 — 미등록 창 stale advance 금지). Channel 이 *등록된 뒤* 여기서 다시 트리거하면 연결
-/// task `ReplaySlots` arm 이 `resubscribe_slot`(cursor fresh 리셋 + 그 시점 버퍼 전체 replay)으로 그 멈춘
-/// cursor 를 처음부터 무손실로 채운다. ★fresh 리셋이라 webview reload(같은 label 로 Channel 교체)도 빈
-/// 화면이 안 된다★(옛 cursor 무시·전체 replay — 근원2). actor 경유라 on_frame 과 직렬(replay→live 순서
-/// 보장, BLOCK-2). 두 트리거(배정·등록)가 함께 "Channel 등록된 뒤 전체 replay" 를 보장한다.
+/// ## ★ADR-0046: replay 트리거 분리★
+/// 미러 버퍼 제거로 subscribe_output 은 **Channel 등록만** 한다(옛 등록-즉시-replay 삭제). replay 는 뷰가
+/// mount 시 별도로 `request_replay`(구 프론트는 `resync_output` alias)로 유발한다 — 등록(창 단위)과 replay
+/// (뷰/agent 단위)를 분리해, 한 창의 여러 뷰가 각자 gen 펜스로 자기 replay 경계를 안다.
 #[tauri::command]
 pub fn subscribe_output(
     registry: State<'_, WindowChannelRegistry>,
-    router: State<'_, Arc<crate::output_router::OutputRouter>>,
-    client: State<'_, Arc<DaemonClient>>,
     window: tauri::Window,
     channel: tauri::ipc::Channel<tauri::ipc::Response>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    {
-        // ★ADR-0006★: registry std Mutex — insert 는 동기, 락 보유 중 await 0. 같은 라벨 재등록(창 reload)은
-        //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해). ★cursor/seq 추적은 registry 가 아니라
-        //   AgentBufferStore 가 소유(ADR-0040)★ — registry 는 순수하게 label → Channel 만 든다.
-        let mut reg = registry.lock().map_err(|e| e.to_string())?;
-        reg.insert(label.clone(), channel);
-    } // ★registry 락 드롭 — 아래 replay_slots(actor enqueue)는 registry 락 미보유★
-      // ★등록 후 replay 트리거(fresh=true — FIX-2)★: 이 창이 보는 slot 들을 actor 경유로 fresh replay.
-      //   Channel 등록 = 그 창 viewer 의 (재)시작이라 **cursor fresh 리셋 + 전체 replay** 가 맞다 — webview
-      //   reload(같은 label 로 Channel *교체*)면 옛 xterm 진도가 새 xterm 엔 무의미해 빈 화면이 되므로, 옛
-      //   cursor 를 무시하고 버퍼 전체를 다시 줘야 한다(근원2). 배정 트리거(layout 델타 fresh=false 불가침)와
-      //   달리 등록 트리거만 fresh 라, 정상 mount 에서 전체 replay 가 연속 2회 안 나간다(중복 제거 — Rust측).
-      //   router 는 lock-free(ArcSwap) 조회. slots 비면 replay_slots 가 no-op.
-    let slots = router.slots_for_window(&label);
-    client.replay_slots(slots, true);
+    // ★ADR-0006★: registry std Mutex — insert 는 동기, 락 보유 중 await 0. 같은 라벨 재등록(창 reload)은
+    //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해). registry 는 순수하게 label → Channel 만 든다.
+    let mut reg = registry.lock().map_err(|e| e.to_string())?;
+    reg.insert(label, channel);
     Ok(())
 }
 
-/// ★slot (re)mount 시 fresh replay 재요청(remount 대화 소실 FIX)★. RichSlot/TerminalSlot 이 (re)mount
-/// 되면 프론트 구독 effect 가 `invoke('resync_output', { agentId })` 로 호출한다 — 그 창(label)이 보는
-/// 그 agent 의 slot 에 **fresh replay**(cursor 리셋 + 버퍼 전체 재전송)를 트리거한다.
+/// ★뷰 주도 replay 채번(ADR-0046 M1 — request_replay)★. 뷰(slot)가 mount/remount 시 호출한다 — 그 agent 의
+/// 데몬 ring 전량 재replay 를 single-flight 로 유발하고, 배정된 `gen`(세대)을 돌려준다. 뷰는 자기가 받은
+/// gen **이상**의 성공 마커에만 sort+dedup flush(gen 펜스 — 남의/구세대 replay 조기 flush 차단).
 ///
-/// ## ★왜 필요한가(근본원인)★
-/// idle tag1(JSON) slot 을 split/재배정하면 Allotment 재귀 트리 구조 변경으로 RichSlot 이 **remount**
-/// 되는데, remount 는 웹뷰 출력 Channel 재등록이 *아니라서*(`subscribe_output` 은 창 mount 시 1회) 데몬/
-/// backend 가 replay 를 재전송하지 않는다 → remount 된 컴포넌트가 seq=-1·빈 messages 로 재시작하나 replay
-/// 가 안 와 대화 소실 + 영구 streaming 고착. 웹뷰 reload 는 Channel 재등록으로 fresh replay 가 흘러 복원되므로,
-/// 이 command 가 그 reload 복원 경로(`slots_for_window` → `replay_slots(fresh=true)` → `resubscribe_slot`)를
-/// **slot (re)mount 시점에 slot 단위로 재사용**한다.
-///
-/// ## ★subscribe_output 과의 차이★
-/// - `subscribe_output`: 창 mount 시 Channel *등록* + 그 창의 **모든** slot replay.
-/// - `resync_output`: Channel 은 이미 등록됨(재등록 안 함) — 특정 **agent 의** slot 만 fresh replay.
-///
-/// ## ★BLOCK-1(ADR-0041) 준수 + `DaemonClient::resync()` 와 혼동 금지(FIX-E)★
-/// 데몬 wire `Subscribe` 를 새로 만들지 않는다 — 여기서 부르는 것은 `client.replay_slots`(src-tauri 로컬 축 B
-/// replay — 연결 actor `ReplaySlots` arm → `resubscribe_slot`)이지, 이름이 비슷한 `DaemonClient::resync()`
-/// **가 아니다**. 후자는 connect handoff race(cmd_tx 저장 갭) 재동기용 `ConnectionCommand::Resync`(→ main_loop
-/// resubscribe_and_sweep)로, 여기 slot 단위 mount replay 와 목적·경로가 다르다(다음 세션 혼동 방지). 로컬 축 B
-/// 만 쓰므로 다중 창 replay storm 이 없고, replay→live 순서는 actor 직렬화(ADR-0043)가 보장한다. 정상 mount
-/// 에서 배정 트리거 replay 와 중복될 수 있으나 프론트 seq dedup(`lastDeliveredSeq`, ADR-0037)이 흡수한다.
-///
-/// ★window label 자동 주입★: `tauri::Window` 를 인자로 받아 호출 webview 라벨을 얻는다(위조 불가 —
-/// `subscribe_output` 동형). agent_id 만 프론트가 넘긴다.
-///
-/// ★필터 로직은 `router.slots_for_window_agent` 에 격리(테스트 가능성 — FIX-A)★: 이 command 는
-/// `tauri::Window`/`State` 결합으로 headless 회귀가 막히므로(WebView2 DLL), "그 창이 그 agent 를 보는 slot 만
-/// 고른다" 는 실제 필터 배선을 순수 메서드에 모아 두고 여기선 얇게 위임만 한다. 그 메서드의 회귀 그물 =
-/// `output_router.rs` 테스트(unknown agent no-op / window 필터 / 정상 slot 선택).
+/// ★BLOCK-1 전면화(ADR-0046)★: wire `Subscribe{after_seq:None}`(전량)를 보내는 유일 경로다. layout 은
+/// Unsubscribe(정리)만 보낸다. 비연결이면 Err(프론트가 connected 전이에서 재요청 — M2).
 #[tauri::command]
-pub fn resync_output(
-    router: State<'_, Arc<crate::output_router::OutputRouter>>,
+pub async fn request_replay(
     client: State<'_, Arc<DaemonClient>>,
-    window: tauri::Window,
     agent_id: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let agent_id: AgentId = parse_uuid(&agent_id, "agent_id")?;
-    let label = window.label().to_string();
-    // ★그 창이 보는 slot 중 이 agent 만 필터★: router 는 lock-free(ArcSwap) 조회. 이 창(label)이 실제로
-    //   그 agent 를 보는 slot 만 replay 대상으로 남긴다 — 안 보는 agent 를 넘겨도 slots 가 비어 no-op.
-    let slots = router.slots_for_window_agent(&label, agent_id);
-    // ★빈 slots 진단 로그(FIX-C — 조용한 성공 구분)★: 대상 slot 이 없으면(그 창이 그 agent 를 안 봄)
-    //   replay_slots 가 no-op 이라 아무 일도 안 일어난다. 정상적으로 slot 이 없는 경우(remount 와 layout
-    //   재배정이 엇갈린 순간 등)도 있어 에러는 아니지만, 조용히 Ok(())로 삼키면 "resync 를 불렀는데 화면이
-    //   안 채워진다" 진단이 막힌다 → debug 로 남긴다(저빈도 mount 경로라 핫패스 부담 0 — logging-conventions).
-    if slots.is_empty() {
-        tracing::debug!(
-            agent = %agent_id,
-            window = %label,
-            "resync_output: 그 창이 보는 해당 agent slot 이 없어 replay 미발생(no-op)"
-        );
-    }
-    // fresh=true — Channel (재)등록/remount = viewer 재시작이라 cursor 리셋 + 전체 replay(subscribe_output
-    //   등록 트리거와 동형, 근원2). slots 비면 replay_slots 가 no-op.
-    client.replay_slots(slots, true);
+    client.request_replay(agent_id).await
+}
+
+/// ★구 프론트 호환 alias(ADR-0046 — M3 에서 제거)★. 현 프론트는 뷰 mount 시 `invoke('resync_output',
+/// { agentId })` 로 replay 를 재요청한다(remount 대화 소실 FIX 의 잔재). 이제 그 경로는 `request_replay` 로
+/// 흡수됐다 — 이 alias 는 같은 single-flight 채번을 fire-and-forget 으로 유발하고 `()` 를 반환한다(구 프론트는
+/// gen 을 안 받음). 프론트가 per-view request_replay 로 넘어가면(M2) 이 alias 는 삭제한다.
+///
+/// ★차이(subscribe_output vs resync_output)★: subscribe_output = Channel *등록*(창 단위, 1회) ·
+/// resync_output = 그 agent 의 replay *재요청*(뷰 mount 마다). 미러 제거 후 둘은 완전히 분리됐다.
+#[tauri::command]
+pub fn resync_output(client: State<'_, Arc<DaemonClient>>, agent_id: String) -> Result<(), String> {
+    let agent_id: AgentId = parse_uuid(&agent_id, "agent_id")?;
+    // fire-and-forget single-flight replay 유발(gen 미회수 — 구 프론트는 gen 을 안 씀). 비연결이면 no-op.
+    client.request_replay_fire(agent_id);
     Ok(())
 }
 

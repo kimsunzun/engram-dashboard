@@ -16,21 +16,17 @@
 //! 로 enqueue 까지** 한다(load→delta→store→enqueue 를 ViewManager 락이 한 critical section 으로
 //! 직렬화). read-only(get_view/list_views)는 변형이 없어 rebuild 안 한다.
 //!
-//! ## ★근원1 FIX(BLOCK) — enqueue 순서 = rebuild 순서(락 안 enqueue)★
-//! 이전 구현은 rebuild 를 락 안에서 하고 **델타 enqueue 만 락 밖**에서 했다(ADR-0006 "락 안 송신 금지"
-//! 를 근거로). 그 결과 동시 layout invoke 둘의 enqueue 가 **rebuild 순서와 무관하게 인터리브**될 수
-//! 있었다 — 예컨대 invoke#1(재배정 → `ReplaySlots`)이 먼저 rebuild 됐는데, 락을 푼 뒤 invoke#2(닫힘 →
-//! `DropSlots`)의 enqueue 가 actor 큐에 *먼저* 들어가면 drop 이 replay 를 덮어 좀비 cursor·영구 빈
-//! 화면이 난다(빠른 toggle/drag 재현, /review code deep 적출 BLOCK-1).
+//! ## ★enqueue 순서 = rebuild 순서(락 안 enqueue)★
+//! rebuild 와 델타 enqueue 를 같은 critical section 안에서 하여 동시 layout invoke 둘의 enqueue 가
+//! rebuild 순서와 어긋나 인터리브되지 않게 한다(락이 RMW+enqueue 를 통째로 직렬화). ★ADR-0046 이후★:
+//! send_subscription_delta 가 wire 로 보내는 건 `unsubscribe`(1→0 정리)뿐이고, 옛 축 B cursor 델타
+//! (`replay_slots`/`drop_slots`)와 eager `subscribe` 는 미러 버퍼와 함께 삭제됐다 — replay 형성은 뷰 주도
+//! `request_replay` 단독(BLOCK-1 전면화).
 //!
-//! ★ADR-0006 재확인 — try_send 는 금지 대상이 아니다★: `send_subscription_delta` 가 부르는 4개 메서드
-//! (`subscribe`/`unsubscribe`/`replay_slots`/`drop_slots`)는 전부 `cmd_tx.try_send`(bounded mpsc 의
-//! **동기·non-blocking** enqueue — `.await` 도 network I/O 도 아님)다. ADR-0006 이 락 보유 중 금하는
-//! 것은 **외부 await·네트워크 호출·emit**(스케줄러 양보·블로킹·재진입 위험)이지, 채널 슬롯에 값 하나
-//! 꽂는 동기 try_send 가 아니다. lifecycle 락은 이 ViewManager 락과 **독립**(겹침 0)이라 데드락도 없다.
-//! 그래서 enqueue 를 락 안으로 들여 "enqueue 순서 = 락 순서 = rebuild 순서"를 세운다 — 락이 RMW 와
-//! enqueue 를 함께 직렬화하므로 두 invoke 의 (rebuild, enqueue) 쌍이 통째로 직렬된다(인터리브 0).
-//! ★emit 은 여전히 락 밖★(`emit_after_unlock`) — emit 은 ADR-0006 금지 대상이라 락 해제 후 한다.
+//! ★ADR-0006 재확인 — try_send 는 금지 대상이 아니다★: `unsubscribe` 가 부르는 `cmd_tx.try_send` 는
+//! bounded mpsc 의 **동기·non-blocking** enqueue(`.await` 도 network I/O 도 아님)라 락 보유 중 써도
+//! ADR-0006 위반이 아니다(금지 대상 = 외부 await·네트워크·emit). lifecycle 락은 ViewManager 락과 독립
+//! (겹침 0)이라 데드락도 없다. ★emit 은 여전히 락 밖★(`emit_after_unlock`) — ADR-0006 금지 대상이라 락 해제 후.
 
 use std::sync::Arc;
 
@@ -62,46 +58,23 @@ fn list_payload(mgr: &ViewManager) -> ViewListPayload {
     }
 }
 
-/// ★ViewManager 락 보유 중 호출 — 구독 델타를 DaemonClient 로 enqueue(fire-and-forget)★. ★근원1 FIX★:
-/// rebuild 와 **같은 critical section 안**에서 불러 "enqueue 순서 = rebuild 순서"를 세운다(락 밖 호출은
-/// 동시 invoke 의 ReplaySlots↔DropSlots 인터리브로 drop 이 replay 를 덮음 — BLOCK). 부르는 4개 메서드는
-/// 전부 동기 `try_send`(await/network 0)라 락 안에서 ADR-0006 위반 아님(lifecycle 락도 독립 — 데드락 0).
-/// 0→1 = `subscribe`(데몬에 Subscribe), 1→0 = `unsubscribe`.
-/// 비연결이면 DaemonClient 가 조용히 no-op — connect 진입 시 연결 task 가 router.current_agents()(이
-/// rebuild 가 갱신한 현재 보이는 agent SSOT)를 순회하며 재구독해 복구한다(C1, connection.rs main_loop).
+/// ★ViewManager 락 보유 중 호출 — 구독 정리 델타를 DaemonClient 로 enqueue(fire-and-forget)★. rebuild 와
+/// **같은 critical section 안**에서 불러 "enqueue 순서 = rebuild 순서"를 세운다(동시 invoke 인터리브 방지).
+/// 부르는 메서드는 동기 `try_send`(await/network 0)라 락 안에서 ADR-0006 위반 아님(lifecycle 락도 독립 —
+/// 데드락 0). 비연결이면 DaemonClient 가 조용히 no-op.
 ///
-/// ## ★ADR-0040 2단계 버퍼 hook(두 축의 layout 트리거 — BLOCK-2/FIX-3)★
-/// 데몬 wire 구독(축 A — 클라가 데몬에 "이 agent 출력 보내라/멈춰라", agent 단위)과 **별개로**, 클라측
-/// 공유 버퍼의 cursor 생명주기(축 B — "어느 창이 어디까지 봤나", **slot=(window,agent) 단위**)도 같은
-/// 델타에서 토글한다:
-/// - **축 A 0→1(`to_subscribe`)**: `subscribe` 가 데몬에 wire Subscribe(epoch/after_seq=버퍼 최신은 연결
-///   task 가 채움). 1→0(`to_unsubscribe`)은 `unsubscribe`.
-/// - **축 B `slots_to_replay`**: `replay_slots` 가 새로 생긴 slot 들에 mount-즉시-replay. **agent-union
-///   diff 가 아니라 slot 쌍 diff 라** 0→1(새 agent)뿐 아니라 **1→2(이미 보던 agent 에 새 창)** 도 잡아
-///   둘째 창이 빈 화면이 안 된다(FIX-3/검증2). actor 경유 → on_frame 과 직렬(BLOCK-2 — replay→live 역전
-///   방지). 조용한 agent·재연결 대기 새 창의 빈 화면을 메운다(frame 안 와도, 수용기준 5).
-/// - **축 B `slots_to_drop`**: `drop_slots` 가 사라진 slot cursor 제거(마지막이면 content drop).
-///   2→1(부분 닫힘)도 slot 쌍 단위로 잡아 죽은 cursor 잔존 0(FIX-3). frame 도착과 **독립**이라
-///   terminal(frame 0)+창 닫힘도 정상 폐기(누수 0 — TRD §4 폐기 트리거 = 배정 해제).
-///
-/// ★순서★: 축 A(wire 구독)를 먼저, 축 B(버퍼 cursor)를 나중에 — 둘은 독립(데몬 스트림 ↔ 클라 cursor)이라
-/// 순서가 무손실에 영향 없으나, subscribe 시 데몬 wire 를 먼저 보내 두면 빈 버퍼라도 데몬 replay 가 곧
-/// 채워 on_frame 이 마저 전달한다(replay_slots 는 *이미 있는* 버퍼만 즉시 replay). 축 B 는 둘 다 actor
-/// enqueue 라 actor 안에서 도착 순서대로 직렬 처리된다.
+/// ## ★ADR-0046 — 라우터는 Unsubscribe(정리)만 발행(BLOCK-1 전면화)★
+/// 미러 버퍼 제거 후 layout 이 wire 로 보내는 건 **1→0(어느 창에도 안 보이게 된 agent)의 `Unsubscribe`**
+/// 뿐이다. wire 구독 형성(Subscribe)은 **뷰 주도 `request_replay`** 단독이고(0→1 eager Subscribe 삭제),
+/// 옛 축 B slot cursor 델타(`replay_slots`/`drop_slots`)도 cursor 와 함께 삭제됐다 — remount/새 창은 데몬
+/// ring 전량 재replay(뷰가 mount 시 requestReplay)로 대체한다. `delta.to_subscribe` 는 산출은 되나(진단/
+/// 보존 불변식 테스트용) 여기서 wire 로 보내지 않는다.
 fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
-    // 축 A: agent 단위 데몬 wire 구독/해제.
-    for agent_id in delta.to_subscribe {
-        client.subscribe(agent_id);
-    }
+    // 1→0: 더는 어느 창에도 안 보이는 agent 를 데몬에서 구독 해제(정리). 0→1(to_subscribe)은 뷰 주도
+    //   request_replay 가 형성하므로 여기서 안 보낸다(ADR-0046 BLOCK-1).
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);
     }
-    // 축 B: slot=(window,agent) 단위 버퍼 cursor 생명주기(actor 경유 — on_frame 과 직렬).
-    //   ★fresh=false(배정 트리거 — FIX-2)★: layout 배정 델타는 *불가침* 신설(cursor 없을 때만 replay)이다.
-    //   정상 mount 에서 등록 트리거(subscribe_output)와 둘 다 전체 replay 를 연속으로 내지 않게(중복 제거) —
-    //   배정은 신설 1회만, reload 시 fresh 전체 replay 는 등록 트리거(fresh=true)가 담당한다.
-    client.replay_slots(delta.slots_to_replay, false);
-    client.drop_slots(delta.slots_to_drop);
 }
 
 /// 락 드롭 후 호출 — layout:updated(있으면) + view:list-updated 발행. ★반드시 락 미보유 상태에서★.

@@ -86,6 +86,21 @@ describe('decodeOutputFrame', () => {
     expect(decodeOutputFrame(buf)).toBeNull()
   })
 
+  it('tag=255(ADR-0046 replay 경계 마커)는 조용히 skip(null) — 던지지 않음, 전방 호환(M0)', () => {
+    // src-tauri 가 흘리는 마커 프레임 규격: [tag=255][agentId:16][epoch:4][gen:8 LE][flags:1] = 30바이트.
+    //   현 프론트는 마커를 소비하지 않으므로(M2) 미지 tag 를 예외 없이 null 로 버려야 한다. 길이가
+    //   헤더(29) 이상이어도 tag 게이트에서 걸러진다(payload 로 오해 금지).
+    const marker = new ArrayBuffer(1 + 16 + 4 + 8 + 1)
+    const view = new DataView(marker)
+    view.setUint8(0, 255)
+    const idBytes = uuidToBytes(AGENT)
+    for (let i = 0; i < 16; i++) view.setUint8(1 + i, idBytes[i])
+    view.setUint32(17, 3, false) // epoch
+    // gen(8 LE) + flags(1) 은 decodeOutputFrame 이 안 읽는다 — tag 게이트에서 이미 null.
+    expect(() => decodeOutputFrame(marker)).not.toThrow()
+    expect(decodeOutputFrame(marker)).toBeNull()
+  })
+
   it('빈 payload(헤더만)도 디코드 성공(payload 길이 0)', () => {
     const buf = buildFrame({ agentId: AGENT, epoch: 3, seq: 9 })
     const f = decodeOutputFrame(buf)
