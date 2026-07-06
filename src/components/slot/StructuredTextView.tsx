@@ -171,22 +171,44 @@ function shortArgs(argsJson: string): string {
  *   줄에 맞춰 상단 정렬(pt-2.5 + mt-[3px]). 콘텐츠 컬럼은 min-w-0 라 긴 토큰/wrap-anywhere 가 넘치지 않는다.
  *   1차 근사치라 dot+indent 골격만 — 점을 잇는 세로 thread 선은 후속 시각 조정에서.
  */
-function ChatRow({ children, rail = false }: { children: ReactNode; rail?: boolean }) {
+function ChatRow({
+  children,
+  rail = false,
+  tone = 'default',
+}: {
+  children: ReactNode
+  rail?: boolean
+  tone?: 'default' | 'tool' | 'error'
+}) {
   if (rail) {
+    // 점 색 = 행 종류 신호(확장 룩 벤치마크): tool(실행)=초록 · error=red · 그 외(추론/본문)=muted.
+    const dotColor = tone === 'tool' ? 'bg-green-500' : tone === 'error' ? 'bg-red-500' : 'bg-muted'
     return (
-      <div className="relative pt-2.5 px-4 flex">
-        {/* gutter — 고정폭. 점 마커는 콘텐츠 첫 줄 baseline 근처에 맞춘다(mt 미세조정).
-            aria-hidden 은 점(span)에만 — gutter div 에 얹으면 separator 스페이서(div[aria-hidden])와
-            셀렉터가 충돌한다. 점은 순수 장식이라 접근성 트리에서 뺀다. */}
-        <div className="w-6 flex-none flex justify-center">
-          <span aria-hidden className="mt-[3px] size-1.5 rounded-full bg-muted" />
+      <div className="relative flex px-4 pt-3">
+        {/* gutter — 세로 thread 선 + 점 마커. 둘 다 span 에만 aria-hidden(순수 장식) — gutter div 에 얹으면
+            separator 스페이서(div[aria-hidden]) 셀렉터와 충돌한다. 선은 top-[-12px](outer pt-3=12px 만큼
+            위로) ~ bottom-0 으로 행 전체 높이를 덮어 인접 rail 행끼리 연속 thread 가 된다(user 버블·separator
+            는 rail 이 아니라 선이 끊겨 턴 경계가 됨). 점은 콘텐츠 첫 줄 중앙(top-[9px] center)에 절대배치해
+            선 위에 올린다. ※top-[-12px] 는 outer pt-3 과 커플링 — pt 바꾸면 같이 조정. */}
+        <div className="relative w-6 flex-none">
+          <span
+            aria-hidden
+            className="absolute left-1/2 top-[-12px] bottom-0 w-px -translate-x-1/2 bg-border"
+          />
+          <span
+            aria-hidden
+            className={cn(
+              'absolute left-1/2 top-[9px] size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full',
+              dotColor,
+            )}
+          />
         </div>
         {/* 콘텐츠 컬럼 — flex-1 min-w-0 로 긴 토큰/wrap-anywhere 오버플로 방지. */}
-        <div className="flex-1 min-w-0">{children}</div>
+        <div className="min-w-0 flex-1">{children}</div>
       </div>
     )
   }
-  return <div className="relative pt-2.5 px-4">{children}</div>
+  return <div className="relative px-4 pt-2.5">{children}</div>
 }
 
 /** 행 헤더 클래스 — 작은 아이콘 + bold 제목. */
@@ -426,7 +448,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     case 'tool': {
       const result = item.id ? results.get(item.id) ?? null : null
       return (
-        <ChatRow key={k} rail>
+        <ChatRow key={k} rail tone="tool">
           <ToolItemRow name={item.name} argsJson={item.argsJson} result={result} />
         </ChatRow>
       )
@@ -440,7 +462,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     case 'error':
       // 에러 — 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
       return (
-        <ChatRow key={k} rail>
+        <ChatRow key={k} rail tone="error">
           <RowHeader icon={AlertTriangle} title="Error" tone="error" />
           <div className="text-[13px] text-red-500 whitespace-pre-wrap break-words">
             {item.message}

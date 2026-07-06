@@ -267,15 +267,15 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     const { container } = render(<StructuredTextView items={items} />)
     // 이전 시안의 좌측 세로 점선 border(border-dashed) 레일 세그먼트는 쓰지 않는다.
     expect(container.querySelector('.border-dashed')).toBeNull()
-    // 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)로 감싸진다.
-    expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeTruthy()
+    // rail 행은 ChatRow 래퍼(relative pt-3 px-4 flex)로 감싸진다(user 버블은 pt-2.5 plain).
+    expect(container.querySelector('.relative.pt-3.px-4')).toBeTruthy()
   })
 
   it('assistant-side 행(text)은 좌측 rail gutter + 점 마커를 렌더한다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'hello', itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} />)
-    // rail 모드 래퍼는 flex 행이며 outer 패딩(relative pt-2.5 px-4) 을 유지한다.
-    const row = container.querySelector('.relative.pt-2\\.5.px-4')
+    // rail 모드 래퍼는 flex 행이며 outer 패딩(relative pt-3 px-4) 을 유지한다.
+    const row = container.querySelector('.relative.pt-3.px-4')
     expect(row).toBeTruthy()
     expect(row?.className).toContain('flex')
     // gutter 안에 점 마커(size-1.5 rounded-full bg-muted)가 있다.
@@ -283,6 +283,19 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(dot).toBeTruthy()
     // 콘텐츠 컬럼은 flex-1 min-w-0(긴 토큰 오버플로 방지).
     expect(container.querySelector('.flex-1.min-w-0')).toBeTruthy()
+    // 세로 thread 선(연결선) — gutter 의 w-px bg-border span.
+    expect(container.querySelector('.w-px.bg-border')).toBeTruthy()
+  })
+
+  it('rail 점 색 = 행 종류: tool 은 초록(bg-green-500), 추론/본문은 muted', () => {
+    const items: StructuredItem[] = [
+      { kind: 'text', text: 'hi', itemId: 0 },
+      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', itemId: 1 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    // tool 행 = 초록 점(실행 신호), text 행 = muted 점.
+    expect(container.querySelector('.rounded-full.bg-green-500')).toBeTruthy()
+    expect(container.querySelector('.rounded-full.bg-muted')).toBeTruthy()
   })
 
   it('user 버블 행은 rail gutter/점 마커가 없다(plain full-width)', () => {
