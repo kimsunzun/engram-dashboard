@@ -160,47 +160,121 @@ function shortArgs(argsJson: string): string {
   }
 }
 
+// ── dot-rail run-position(연결선 clean-ends) ────────────────────────────────────────
+
+/**
+ * ADR-0051: 렌더될 각 행의 "종류" — rail 연결선 run 계산의 입력.
+ *   - 'assistant': rail 행(text·thinking·tool·generic·error + streaming tail) — 세로 thread 로 묶인다.
+ *   - 'boundary' : user 버블·separator — rail 이 아니라 run 을 끊는다(턴 경계).
+ *   - 'skip'     : DOM 을 만들지 않는 항목(usage·흡수된 tool_result). 시각적으로 없으므로 run 을 끊지
+ *                  *않는다*(assistant 두 행 사이 usage 가 껴도 두 행은 화면상 인접 → 한 run).
+ */
+export type ChatRowKind = 'assistant' | 'boundary' | 'skip'
+
+/** ADR-0051: rail 행의 run 내 위치 — 연결선 그리기 분기의 키. */
+export type RailRunPosition = 'top' | 'mid' | 'bottom' | 'single'
+
+/**
+ * ADR-0051: run-position 순수 함수(단위테스트 대상 — StructuredTextView 순수성 유지, ADR-0050).
+ * 행 종류 배열을 받아 각 assistant 행의 run 내 위치를 반환한다(assistant 가 아니면 null).
+ * run = 'skip' 을 무시하고 이어지는 assistant 행들의 최대 연속 구간. run 경계 = 'boundary'.
+ *   첫 행 = top · 마지막 = bottom · 가운데 = mid · 혼자 = single.
+ * 이 위치로 연결선 clean-ends 를 만든다(top=아래로만, mid=관통, bottom=위로만, single=선 없음) —
+ * 기존엔 모든 rail 행이 top-[-12px] 로 위 행에 붙어 최상단 dot(예: "Thought") 위로 선 stub 이 튀어나왔다.
+ */
+export function computeRailRunPositions(kinds: ChatRowKind[]): (RailRunPosition | null)[] {
+  // 1) skip 을 제외한 "보이는 행"만 골라 run 계산 → 원래 인덱스로 되돌린다.
+  const visible: { idx: number; kind: Exclude<ChatRowKind, 'skip'> }[] = []
+  kinds.forEach((kind, idx) => {
+    if (kind !== 'skip') visible.push({ idx, kind })
+  })
+
+  const out: (RailRunPosition | null)[] = kinds.map(() => null)
+
+  for (let i = 0; i < visible.length; i++) {
+    const { idx, kind } = visible[i]
+    if (kind !== 'assistant') continue // boundary → 위치 없음
+    const prevAssistant = i > 0 && visible[i - 1].kind === 'assistant'
+    const nextAssistant = i < visible.length - 1 && visible[i + 1].kind === 'assistant'
+    out[idx] =
+      prevAssistant && nextAssistant
+        ? 'mid'
+        : !prevAssistant && nextAssistant
+          ? 'top'
+          : prevAssistant && !nextAssistant
+            ? 'bottom'
+            : 'single'
+  }
+  return out
+}
+
 // ── 채팅 룩 프리미티브 ────────────────────────────────────────────────────────────
 
 /**
- * 메시지 행의 바깥 컨테이너 — `relative pt-2.5 px-4`(세로 리듬 유지). StructuredTextView 컨테이너가
- * 이 행들을 그대로 담는다.
+ * 메시지 행의 바깥 컨테이너. 간격·폰트는 CSS 변수(--chat-*)로 참조한다(ADR-0051 — LLM 제어 + localStorage
+ * 영속. 값 권위 = chatStyleStore, 여기선 var() 소비만). StructuredTextView 컨테이너가 이 행들을 담는다.
  *
  * rail 모드(기본 false — user 버블·하위호환): assistant-side 행에 좌측 thread 구조를 준다.
- *   flex 행 = [고정폭 gutter + 점 마커] + [콘텐츠 flex-1 min-w-0]. 점(dot)은 muted 원으로 콘텐츠 첫
- *   줄에 맞춰 상단 정렬(pt-2.5 + mt-[3px]). 콘텐츠 컬럼은 min-w-0 라 긴 토큰/wrap-anywhere 가 넘치지 않는다.
- *   1차 근사치라 dot+indent 골격만 — 점을 잇는 세로 thread 선은 후속 시각 조정에서.
+ *   flex 행 = [고정폭 gutter + 점 마커] + [콘텐츠 flex-1 min-w-0]. 콘텐츠 컬럼은 min-w-0 라 긴 토큰/
+ *   wrap-anywhere 가 넘치지 않는다.
+ *
+ * ★연결선 clean-ends(ADR-0051)★: runPos 로 선 geometry 를 분기한다 — top=dot 에서 아래로만,
+ *   mid=관통(위 offset ~ 아래), bottom=위 offset ~ dot 에서 멈춤, single=선 없음. 오프셋은 outer
+ *   top-padding(--chat-rail-row-pt) 과 커플링된 --chat-rail-line-offset 을 참조(기존 top-[-12px]↔pt-3
+ *   암묵 커플링을 변수로 명시화). runPos 미지정(하위호환·streaming tail) 시 관통(mid)로 폴백.
  */
 function ChatRow({
   children,
   rail = false,
   tone = 'default',
+  runPos,
 }: {
   children: ReactNode
   rail?: boolean
   tone?: 'default' | 'tool' | 'error'
+  runPos?: RailRunPosition
 }) {
   if (rail) {
     // 점 색 = 행 종류 신호(확장 룩 벤치마크): tool(실행)=초록 · error=red · 그 외(추론/본문)=muted.
     const dotColor = tone === 'tool' ? 'bg-green-500' : tone === 'error' ? 'bg-red-500' : 'bg-muted'
+    const pos = runPos ?? 'mid'
+    // 연결선 top/bottom — position 별 clean-ends. CSS 변수 참조(inline style, var() 로 런타임 반영).
+    //   dot 위치 = --chat-rail-dot-top, 위 이어짐 오프셋 = --chat-rail-line-offset(보통 음수).
+    const lineStyle: Record<string, string> =
+      pos === 'top'
+        ? { top: 'var(--chat-rail-dot-top)', bottom: '0' } // 최상단 dot 아래로만(위 stub 제거)
+        : pos === 'bottom'
+          ? {
+              top: 'var(--chat-rail-line-offset)',
+              bottom: 'calc(100% - var(--chat-rail-dot-top))', // 위에서 내려와 이 dot 에서 멈춤
+            }
+          : { top: 'var(--chat-rail-line-offset)', bottom: '0' } // mid — 관통
     return (
-      <div className="relative flex px-4 pt-3">
+      <div
+        className="relative flex px-4"
+        style={{ paddingTop: 'var(--chat-rail-row-pt)' }}
+      >
         {/* gutter — 세로 thread 선 + 점 마커. 둘 다 span 에만 aria-hidden(순수 장식) — gutter div 에 얹으면
-            separator 스페이서(div[aria-hidden]) 셀렉터와 충돌한다. 선은 top-[-12px](outer pt-3=12px 만큼
-            위로) ~ bottom-0 으로 행 전체 높이를 덮어 인접 rail 행끼리 연속 thread 가 된다(user 버블·separator
-            는 rail 이 아니라 선이 끊겨 턴 경계가 됨). 점은 콘텐츠 첫 줄 중앙(top-[9px] center)에 절대배치해
-            선 위에 올린다. ※top-[-12px] 는 outer pt-3 과 커플링 — pt 바꾸면 같이 조정. */}
-        <div className="relative w-6 flex-none">
-          <span
-            aria-hidden
-            className="absolute left-1/2 top-[-12px] bottom-0 w-px -translate-x-1/2 bg-border"
-          />
+            separator 스페이서(div[aria-hidden]) 셀렉터와 충돌한다. 점은 콘텐츠 첫 줄 근처(--chat-rail-dot-top
+            center)에 절대배치해 선 위에 올린다. single 은 선을 아예 그리지 않는다(고립 dot). */}
+        <div
+          className="relative flex-none"
+          style={{ width: 'var(--chat-rail-gutter)' }}
+        >
+          {pos !== 'single' && (
+            <span
+              aria-hidden
+              className="absolute left-1/2 w-px -translate-x-1/2 bg-border"
+              style={lineStyle}
+            />
+          )}
           <span
             aria-hidden
             className={cn(
-              'absolute left-1/2 top-[9px] size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full',
+              'absolute left-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full',
               dotColor,
             )}
+            style={{ top: 'var(--chat-rail-dot-top)' }}
           />
         </div>
         {/* 콘텐츠 컬럼 — flex-1 min-w-0 로 긴 토큰/wrap-anywhere 오버플로 방지. */}
@@ -208,7 +282,11 @@ function ChatRow({
       </div>
     )
   }
-  return <div className="relative px-4 pt-2.5">{children}</div>
+  return (
+    <div className="relative px-4" style={{ paddingTop: 'var(--chat-plain-row-pt)' }}>
+      {children}
+    </div>
+  )
 }
 
 /** 행 헤더 클래스 — 작은 아이콘 + bold 제목. */
@@ -396,15 +474,44 @@ function GenericItemRow({ label, json }: { label: string; json: string }) {
 
 // ── 항목 dispatch ───────────────────────────────────────────────────────────────────
 
-/** 한 item 렌더. key 는 여기서 부여(itemId). standalone tool_result 는 null 로 제외. */
-function renderItem(item: StructuredItem, results: Map<string, ToolResult>): ReactNode {
+/**
+ * ADR-0051: 렌더 순서상 각 item 의 행 종류(rail run 계산 입력). renderItem 의 null 반환 규칙과 반드시
+ * 일치해야 한다(흡수된 tool_result·usage = skip = DOM 없음). computeRailRunPositions 가 이 배열을 먹는다.
+ */
+function rowKindOf(item: StructuredItem): ChatRowKind {
+  switch (item.kind) {
+    case 'text':
+    case 'tool':
+    case 'error':
+      return 'assistant'
+    case 'usage':
+      return 'skip' // 렌더 안 함(토큰 칩 미표시)
+    case 'separator':
+      return 'boundary'
+    case 'structured':
+      if (parseToolResult(item.json)) return 'skip' // 도구 OUT 에 흡수(FIX 1) — DOM 없음
+      if (item.label === 'user') return 'boundary' // 유저 버블 = run 경계
+      return 'assistant' // thinking·generic 탈출구
+  }
+}
+
+/**
+ * 한 item 렌더. key 는 여기서 부여(itemId). standalone tool_result 는 null 로 제외.
+ * runPos(ADR-0051): rail 행의 run 내 위치 — 연결선 clean-ends. assistant 가 아니면 무시된다.
+ */
+function renderItem(
+  item: StructuredItem,
+  results: Map<string, ToolResult>,
+  runPos: RailRunPosition | null,
+): ReactNode {
   const k = item.itemId
+  const pos = runPos ?? undefined
   switch (item.kind) {
     case 'text':
       // assistant 본문 — 우리 자체 Markdown(react-markdown + remark/rehype). 헤더 없이 full-width.
       //   긴 토큰(URL·경로)이 컨테이너를 넘지 않게 행 컨테이너에 wrap-anywhere overflow-hidden.
       return (
-        <ChatRow key={k} rail>
+        <ChatRow key={k} rail runPos={pos}>
           <div className="wrap-anywhere overflow-hidden">
             <Markdown markdown={item.text} />
           </div>
@@ -420,9 +527,18 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
 
       if (item.label === 'user') {
         // 사용자 발화 — 확장 룩 버블(rounded-md border bg-elevated). whitespace-pre-line 으로 줄바꿈 보존.
+        //   세로 padding/margin 은 CSS 변수(--chat-user-py/--chat-user-my) — 턴 덩어리 분리 조정용(ADR-0051).
         return (
           <ChatRow key={k}>
-            <div className="rounded-md border border-border bg-elevated px-3 py-2 my-1 whitespace-pre-line break-words text-foreground">
+            <div
+              className="rounded-md border border-border bg-elevated px-3 whitespace-pre-line break-words text-foreground"
+              style={{
+                paddingTop: 'var(--chat-user-py)',
+                paddingBottom: 'var(--chat-user-py)',
+                marginTop: 'var(--chat-user-my)',
+                marginBottom: 'var(--chat-user-my)',
+              }}
+            >
               {extractText(item.json, 'user')}
             </div>
           </ChatRow>
@@ -433,14 +549,14 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
         //   "Thought" 라벨만 렌더해 "추론이 있었다"는 존재를 노출한다(빈 행을 걸러내지 않는다).
         const content = extractText(item.json, 'thinking')
         return (
-          <ChatRow key={k} rail>
+          <ChatRow key={k} rail runPos={pos}>
             <ThoughtRow content={content} />
           </ChatRow>
         )
       }
       // 기타 label(탈출구) — 접힘 generic 블록.
       return (
-        <ChatRow key={k} rail>
+        <ChatRow key={k} rail runPos={pos}>
           <GenericItemRow label={item.label} json={item.json} />
         </ChatRow>
       )
@@ -448,7 +564,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     case 'tool': {
       const result = item.id ? results.get(item.id) ?? null : null
       return (
-        <ChatRow key={k} rail tone="tool">
+        <ChatRow key={k} rail tone="tool" runPos={pos}>
           <ToolItemRow name={item.name} argsJson={item.argsJson} result={result} />
         </ChatRow>
       )
@@ -462,11 +578,9 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     case 'error':
       // 에러 — 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
       return (
-        <ChatRow key={k} rail tone="error">
+        <ChatRow key={k} rail tone="error" runPos={pos}>
           <RowHeader icon={AlertTriangle} title="Error" tone="error" />
-          <div className="text-[13px] text-red-500 whitespace-pre-wrap break-words">
-            {item.message}
-          </div>
+          <div className="text-red-500 whitespace-pre-wrap break-words">{item.message}</div>
         </ChatRow>
       )
 
@@ -494,16 +608,27 @@ export function StructuredTextView({
   const results = buildToolResultMap(items)
   // 스트리밍 라이브 신호는 콘텐츠가 있을 때만(빈 슬롯에 Thinking 신호 뜨는 오작동 방지 — 지시 명세).
   const hasContent = items.length > 0
+  const showTail = streaming && hasContent
+  // ADR-0051: rail run 위치를 순수 계산으로 미리 뽑는다(렌더 중 파생 — state/effect 아님, ADR-0050 순수성
+  //   유지). streaming tail(ThoughtRow "Thinking…")도 마지막 assistant 행으로 함께 계산해, 직전 실 행이
+  //   tail 과 연결선으로 이어지게 한다(tail 이 없으면 bottom/single 로 clean-end).
+  const kinds = items.map(rowKindOf)
+  if (showTail) kinds.push('assistant')
+  const positions = computeRailRunPositions(kinds)
+  const tailPos = showTail ? (positions[positions.length - 1] ?? 'single') : 'single'
   return (
-    // text-[13px] leading-[1.45] — 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱
-    //   나머지는 영향 없음).
-    <div className="flex flex-col pb-3 font-sans text-foreground text-[13px] leading-[1.45]">
-      {items.map((item) => renderItem(item, results))}
-      {streaming && hasContent && (
+    // 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
+    //   font-size/line-height 는 CSS 변수(--chat-font-size/--chat-line-height) — LLM 제어(ADR-0051).
+    <div
+      className="flex flex-col pb-3 font-sans text-foreground"
+      style={{ fontSize: 'var(--chat-font-size)', lineHeight: 'var(--chat-line-height)' }}
+    >
+      {items.map((item, i) => renderItem(item, results, positions[i]))}
+      {showTail && (
         // ★streaming 라이브 신호★ — ThoughtRow streaming(pulse "Thinking…" 라벨). 스트림 끝에서만.
         //   ★FIX 3★: 안정 key — 없으면 streaming 토글 시 직전 실 item 이 이 행과 자리 매칭돼 remount 되며
         //   로컬 expand state 를 잃는다. 리스트 밖 고정 노드라 상수 key 로 정체성을 못박는다.
-        <ChatRow key="__streaming__" rail>
+        <ChatRow key="__streaming__" rail runPos={tailPos}>
           <ThoughtRow streaming label="Thinking…" />
         </ChatRow>
       )}

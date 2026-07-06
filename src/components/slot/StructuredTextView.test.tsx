@@ -5,10 +5,90 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { StructuredTextView } from './StructuredTextView'
+import {
+  computeRailRunPositions,
+  StructuredTextView,
+  type ChatRowKind,
+} from './StructuredTextView'
 import type { StructuredItem } from './structuredAccumulator'
 
 afterEach(() => cleanup())
+
+// ── ADR-0051: rail run-position 순수 함수 ──────────────────────────────────────────
+describe('computeRailRunPositions (ADR-0051 dot-rail clean-ends)', () => {
+  it('assistant 한 행만 있으면 single(고립 dot — 연결선 없음)', () => {
+    expect(computeRailRunPositions(['assistant'])).toEqual(['single'])
+  })
+
+  it('연속 assistant 3행 → top/mid/bottom', () => {
+    const kinds: ChatRowKind[] = ['assistant', 'assistant', 'assistant']
+    expect(computeRailRunPositions(kinds)).toEqual(['top', 'mid', 'bottom'])
+  })
+
+  it('boundary(user 버블/separator)가 run 을 끊는다', () => {
+    // a a | boundary | a  →  두 run: [top,bottom] 과 [single]. boundary 는 null.
+    const kinds: ChatRowKind[] = ['assistant', 'assistant', 'boundary', 'assistant']
+    expect(computeRailRunPositions(kinds)).toEqual(['top', 'bottom', null, 'single'])
+  })
+
+  it('skip(usage/흡수 tool_result)은 run 을 끊지 않는다(DOM 없음 → 시각적 인접)', () => {
+    // a skip a  →  skip 을 무시하면 두 assistant 는 인접 run → top/bottom. skip 은 null.
+    const kinds: ChatRowKind[] = ['assistant', 'skip', 'assistant']
+    expect(computeRailRunPositions(kinds)).toEqual(['top', null, 'bottom'])
+  })
+
+  it('boundary 로 시작/끝나는 혼합 시퀀스', () => {
+    // boundary a a boundary a a a
+    const kinds: ChatRowKind[] = [
+      'boundary',
+      'assistant',
+      'assistant',
+      'boundary',
+      'assistant',
+      'assistant',
+      'assistant',
+    ]
+    expect(computeRailRunPositions(kinds)).toEqual([
+      null,
+      'top',
+      'bottom',
+      null,
+      'top',
+      'mid',
+      'bottom',
+    ])
+  })
+
+  it('전부 skip 이면 위치 없음(all null)', () => {
+    expect(computeRailRunPositions(['skip', 'skip'])).toEqual([null, null])
+  })
+
+  it('선행 skip 은 top 을 무너뜨리지 않는다(맨 앞 assistant 는 여전히 top)', () => {
+    const kinds: ChatRowKind[] = ['skip', 'assistant', 'assistant']
+    expect(computeRailRunPositions(kinds)).toEqual([null, 'top', 'bottom'])
+  })
+})
+
+// ── ADR-0051: rail 연결선 clean-ends 렌더 ──────────────────────────────────────────
+describe('StructuredTextView rail line clean-ends (ADR-0051)', () => {
+  it('단일 assistant 행(single)은 연결선을 그리지 않는다(dot 만)', () => {
+    const items: StructuredItem[] = [{ kind: 'text', text: 'solo', itemId: 0 }]
+    const { container } = render(<StructuredTextView items={items} />)
+    // single = 연결선 span(w-px bg-border) 없음. dot(rounded-full)은 있다.
+    expect(container.querySelector('.w-px.bg-border')).toBeNull()
+    expect(container.querySelector('.rounded-full.bg-muted')).toBeTruthy()
+  })
+
+  it('연속 assistant 행이면 연결선(w-px bg-border)이 그려진다', () => {
+    const items: StructuredItem[] = [
+      { kind: 'text', text: 'a', itemId: 0 },
+      { kind: 'text', text: 'b', itemId: 1 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    // 두 행이 이어지므로 연결선 span 이 존재한다(최소 1개 — top 은 아래로, bottom 은 위로).
+    expect(container.querySelector('.w-px.bg-border')).toBeTruthy()
+  })
+})
 
 describe('StructuredTextView dispatch (ADR-0050)', () => {
   it('text item → assistant markdown 본문으로 렌더된다', () => {
@@ -125,7 +205,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.queryByText(/in 2/)).toBeNull()
     expect(screen.queryByText(/out 5/)).toBeNull()
     // usage 만 있는 items 는 보이는 행을 만들지 않는다(ChatRow 래퍼도 없음).
-    expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeNull()
+    expect(container.querySelector('.relative.px-4')).toBeNull()
   })
 
   it('error item → 붉은 에러 행(메시지 노출)', () => {
@@ -267,15 +347,15 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     const { container } = render(<StructuredTextView items={items} />)
     // 이전 시안의 좌측 세로 점선 border(border-dashed) 레일 세그먼트는 쓰지 않는다.
     expect(container.querySelector('.border-dashed')).toBeNull()
-    // rail 행은 ChatRow 래퍼(relative pt-3 px-4 flex)로 감싸진다(user 버블은 pt-2.5 plain).
-    expect(container.querySelector('.relative.pt-3.px-4')).toBeTruthy()
+    // rail 행은 ChatRow 래퍼(relative flex px-4)로 감싸진다 — top-padding 은 CSS 변수 inline style(ADR-0051).
+    expect(container.querySelector('.relative.flex.px-4')).toBeTruthy()
   })
 
   it('assistant-side 행(text)은 좌측 rail gutter + 점 마커를 렌더한다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'hello', itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} />)
-    // rail 모드 래퍼는 flex 행이며 outer 패딩(relative pt-3 px-4) 을 유지한다.
-    const row = container.querySelector('.relative.pt-3.px-4')
+    // rail 모드 래퍼는 flex 행(relative flex px-4) — top-padding 은 CSS 변수 inline style(ADR-0051).
+    const row = container.querySelector('.relative.flex.px-4')
     expect(row).toBeTruthy()
     expect(row?.className).toContain('flex')
     // gutter 안에 점 마커(size-1.5 rounded-full bg-muted)가 있다.
@@ -283,8 +363,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(dot).toBeTruthy()
     // 콘텐츠 컬럼은 flex-1 min-w-0(긴 토큰 오버플로 방지).
     expect(container.querySelector('.flex-1.min-w-0')).toBeTruthy()
-    // 세로 thread 선(연결선) — gutter 의 w-px bg-border span.
-    expect(container.querySelector('.w-px.bg-border')).toBeTruthy()
+    // ※연결선(w-px bg-border)은 run 길이에 따라 조건부다(single=없음) — 별도 clean-ends 테스트 참조.
   })
 
   it('rail 점 색 = 행 종류: tool 은 초록(bg-green-500), 추론/본문은 muted', () => {
@@ -306,8 +385,8 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     // 유저 버블은 plain ChatRow — 점 마커도 콘텐츠 컬럼 래퍼도 없다.
     expect(container.querySelector('.rounded-full.bg-muted')).toBeNull()
     expect(container.querySelector('.flex-1.min-w-0')).toBeNull()
-    // outer 래퍼는 여전히 relative pt-2.5 px-4(flex 아님).
-    const row = container.querySelector('.relative.pt-2\\.5.px-4')
+    // outer 래퍼는 여전히 relative px-4(flex 아님) — top-padding 은 CSS 변수 inline style(ADR-0051).
+    const row = container.querySelector('.relative.px-4')
     expect(row).toBeTruthy()
     expect(row?.className).not.toContain('flex')
   })

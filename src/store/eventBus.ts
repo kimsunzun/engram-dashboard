@@ -6,6 +6,7 @@
 
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from './agentStore'
+import { CHAT_STYLE_DEFAULTS, useChatStyleStore, type ChatStyleKey } from './chatStyleStore'
 import { selectActiveView, subscribeViewEvents, useViewStore } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
@@ -131,6 +132,24 @@ export function initEventBus(): Promise<void> {
         },
       }
       ;(globalThis as Record<string, unknown>).__richslot = richslot
+
+      // ★채팅 스타일 control surface(§5, ADR-0051)★: 채팅 렌더 간격·폰트 토큰을 LLM 이 사람 UI 와
+      //   동일한 store 액션(chatStyleStore)으로 조작한다. 프론트 전용 권위 + localStorage 영속. 값은 :root
+      //   CSS 변수로 반영돼 StructuredTextView/chat.css 가 var() 로 읽는다.
+      //   ★로드+적용은 여기가 아니라 main.tsx 최상단(loadAndApplyChatStyle)★ — 데몬 bootstrap 경로에
+      //   의존하지 않도록 분리했다(FIX-1). 여기선 핸들만 노출한다(핸들 노출과 값 로드는 독립).
+      //   window.__engramChat.get()                       // 현재 값 스냅샷(ChatStyleValues)
+      //   window.__engramChat.set('railRowPt', '1.25rem')  // 단일 키 갱신(+ 적용·저장)
+      //   window.__engramChat.patch({ fontSize:'14px', lineHeight:'1.6' })  // 부분 병합 갱신
+      //   window.__engramChat.reset()                      // 기본값으로
+      //   window.__engramChat.defaults                     // 기본값 참조(키 목록·초기값 확인용)
+      ;(globalThis as Record<string, unknown>).__engramChat = {
+        get: () => useChatStyleStore.getState().values,
+        set: (key: ChatStyleKey, value: string) => useChatStyleStore.getState().setValue(key, value),
+        patch: useChatStyleStore.getState().patch,
+        reset: useChatStyleStore.getState().reset,
+        defaults: CHAT_STYLE_DEFAULTS,
+      }
 
       // HMR 재평가 시 기존 구독 먼저 해제
       if (unlistenFns.length > 0) {

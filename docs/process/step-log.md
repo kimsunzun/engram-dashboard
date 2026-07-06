@@ -611,6 +611,13 @@
 - **게이트:** `/review code light`(doc-aware) PASS(가드 무손상·테스트 non-vacuous 실증) + `/qa`(quick→full 승격): vitest 242/242·tsc 0·BOM clean + **cdp 실측**(마크다운·KaTeX 박스·코드 하이라이트·hover 복사버튼·전송버튼 제거 라이브 확인).
 - **미완(의도) = 다음:** 확장 룩 **시각 정밀 매칭은 1차 근사(base)** — 유저 버블이 다크테마서 거의 안 보임 등. 사용자 스샷 반복으로 후속 조정(하나하나). echo Rust(claude.rs·mod.rs·session.rs)는 이 라운드 밖 = 커밋 제외·워킹트리 유지.
 
+## 채팅 렌더 간격·폰트 LLM 제어 표면 + dot-rail clean-ends (2026-07-06, master, opus) · ADR-0051 · 커밋 예정
+- **발단(사용자):** 확장과 나란히 비교 → "줄 간격 좁고 산만". 진단: ① 행간 부족 ② 유저 메시지가 턴을 안 끊음 ③ dot-rail 연결선 첫 dot 위 스텁. + "간격·폰트 설정값을 에이전트(LLM) 명령 가능하게 빼되 저장은 되게."
+- **결정(ADR-0051):** 간격+폰트 9값을 CSS 변수로 추출 + 프론트 전용 control surface. 권위=프론트, 영속=localStorage(사용자 결정). 거부: 백엔드 영속(settings.json)·하드코딩 유지·chat.css 전체 토큰화.
+- **구현(코더 opus, 재수정 2회):** `chatStyleStore`(Zustand — 값 소유·:root CSS 변수 갱신·localStorage 영속, 부팅 로드는 `main.tsx`에서 데몬 부트와 분리) + `window.__engramChat`(get/set/patch/reset — §5 단일 control surface, 런타임 키 화이트리스트 prototype-safe) + `computeRailRunPositions`(순수 top/mid/bottom/single — 첫 dot 위 선 스텁 제거) + theme.css :root 9변수(간격 상향).
+- **게이트:** `/review code full`(doc-aware reviewer-deep + Codex blind) — 취합 FIX→재리뷰 PASS. **cross-family가 doc-aware 놓친 prototype-pollution(`in` 연산자 체인) 적출**(2회차 FIX = 고정 배열 멤버십). `/qa full`: 프론트 vitest 269/tsc 0/코어 격리 PASS · cargo는 실행 중 daemon.exe 링크 잠금(이 변경 무관, 컴파일 오류 아님) · cdp 실측 PASS(control surface·CSS 변수·localStorage 영속·prototype 가드 라이브) · **dot-rail live 시각은 활성 슬롯 empty로 미측정**(로직 단위테스트 + 리뷰 2인 기하 정합으로 커버).
+- **잔여:** rail 최종 시각 = 사용자 확장 스샷 반복 루프에서 확정(방침). 스샷 아티팩트는 `_wip/shots/`로 모음(gitignore 기존 관례).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

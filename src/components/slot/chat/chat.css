@@ -5,9 +5,12 @@
 
 @import 'highlight.js/styles/github-dark.css';
 
+/* ADR-0051: base font-size/line-height 는 채팅 스타일 토큰을 참조한다(LLM 제어 시 마크다운 본문도
+   함께 반응). 값 부재 시 이전 하드코딩(13px/1.45)으로 fallback. heading/code/table margin 등 나머지는
+   이번 라운드 범위 밖이라 하드코딩 유지(ADR-0051 거부한 대안: chat.css 전체 토큰화 = YAGNI). */
 .chat-markdown {
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--chat-font-size, 13px);
+  line-height: var(--chat-line-height, 1.45);
   color: var(--text);
   font-family: inherit;
 }
