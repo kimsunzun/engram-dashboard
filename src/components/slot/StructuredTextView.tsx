@@ -6,9 +6,12 @@
 // ★이 파일의 책임★: items 스트림을 종류별로 위 leaf 컴포넌트로 dispatch 하는 **순수 렌더**(구독/누적은
 //   RichSlot 소관). props = { items, streaming } 만 받는다.
 //
-// ★레이아웃★: 메시지는 flat 세로 스택이며, 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)를 쓴다. 헤더는
-//   작은 lucide 아이콘 + bold 제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이
-//   Markdown full-width, user 는 확장 룩 버블(rounded-md border bg-elevated), thinking 은 ThoughtRow.
+// ★레이아웃★: 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)를 쓴다. assistant-side 행(text·thinking·tool·
+//   generic·error + streaming tail)은 rail 모드 — 좌측 고정폭 gutter 에 muted 점 마커를 두고 콘텐츠를
+//   그 오른쪽으로 들여쓴다(Claude Code VSCode 확장의 thread 룩 1차 근사치 — thinking+응답+도구를 한
+//   가닥으로 묶는다). user 발화(확장 룩 버블 rounded-md border bg-elevated)와 separator 는 rail 없이 plain.
+//   헤더는 작은 lucide 아이콘 + bold 제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이
+//   Markdown full-width, thinking 은 ThoughtRow.
 //
 // ★안전 파서 헬퍼(pretty/extractText/contentToText/parseToolResult/buildToolResultMap/shortArgs)★는
 //   우리 데이터-어댑터 로직이며 **절대 throw 하지 않는다**(bad json 폴백).
@@ -160,10 +163,29 @@ function shortArgs(argsJson: string): string {
 // ── 채팅 룩 프리미티브 ────────────────────────────────────────────────────────────
 
 /**
- * 메시지 행의 바깥 컨테이너 — `relative pt-2.5 px-4`. 점선 레일 없이 flat 세로 스택으로 쌓인다.
- * StructuredTextView 컨테이너가 이 행들을 그대로 담는다.
+ * 메시지 행의 바깥 컨테이너 — `relative pt-2.5 px-4`(세로 리듬 유지). StructuredTextView 컨테이너가
+ * 이 행들을 그대로 담는다.
+ *
+ * rail 모드(기본 false — user 버블·하위호환): assistant-side 행에 좌측 thread 구조를 준다.
+ *   flex 행 = [고정폭 gutter + 점 마커] + [콘텐츠 flex-1 min-w-0]. 점(dot)은 muted 원으로 콘텐츠 첫
+ *   줄에 맞춰 상단 정렬(pt-2.5 + mt-[3px]). 콘텐츠 컬럼은 min-w-0 라 긴 토큰/wrap-anywhere 가 넘치지 않는다.
+ *   1차 근사치라 dot+indent 골격만 — 점을 잇는 세로 thread 선은 후속 시각 조정에서.
  */
-function ChatRow({ children }: { children: ReactNode }) {
+function ChatRow({ children, rail = false }: { children: ReactNode; rail?: boolean }) {
+  if (rail) {
+    return (
+      <div className="relative pt-2.5 px-4 flex">
+        {/* gutter — 고정폭. 점 마커는 콘텐츠 첫 줄 baseline 근처에 맞춘다(mt 미세조정).
+            aria-hidden 은 점(span)에만 — gutter div 에 얹으면 separator 스페이서(div[aria-hidden])와
+            셀렉터가 충돌한다. 점은 순수 장식이라 접근성 트리에서 뺀다. */}
+        <div className="w-6 flex-none flex justify-center">
+          <span aria-hidden className="mt-[3px] size-1.5 rounded-full bg-muted" />
+        </div>
+        {/* 콘텐츠 컬럼 — flex-1 min-w-0 로 긴 토큰/wrap-anywhere 오버플로 방지. */}
+        <div className="flex-1 min-w-0">{children}</div>
+      </div>
+    )
+  }
   return <div className="relative pt-2.5 px-4">{children}</div>
 }
 
@@ -360,7 +382,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
       // assistant 본문 — 우리 자체 Markdown(react-markdown + remark/rehype). 헤더 없이 full-width.
       //   긴 토큰(URL·경로)이 컨테이너를 넘지 않게 행 컨테이너에 wrap-anywhere overflow-hidden.
       return (
-        <ChatRow key={k}>
+        <ChatRow key={k} rail>
           <div className="wrap-anywhere overflow-hidden">
             <Markdown markdown={item.text} />
           </div>
@@ -389,14 +411,14 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
         //   "Thought" 라벨만 렌더해 "추론이 있었다"는 존재를 노출한다(빈 행을 걸러내지 않는다).
         const content = extractText(item.json, 'thinking')
         return (
-          <ChatRow key={k}>
+          <ChatRow key={k} rail>
             <ThoughtRow content={content} />
           </ChatRow>
         )
       }
       // 기타 label(탈출구) — 접힘 generic 블록.
       return (
-        <ChatRow key={k}>
+        <ChatRow key={k} rail>
           <GenericItemRow label={item.label} json={item.json} />
         </ChatRow>
       )
@@ -404,7 +426,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     case 'tool': {
       const result = item.id ? results.get(item.id) ?? null : null
       return (
-        <ChatRow key={k}>
+        <ChatRow key={k} rail>
           <ToolItemRow name={item.name} argsJson={item.argsJson} result={result} />
         </ChatRow>
       )
@@ -418,7 +440,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     case 'error':
       // 에러 — 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
       return (
-        <ChatRow key={k}>
+        <ChatRow key={k} rail>
           <RowHeader icon={AlertTriangle} title="Error" tone="error" />
           <div className="text-[13px] text-red-500 whitespace-pre-wrap break-words">
             {item.message}
@@ -433,7 +455,9 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
 }
 
 /**
- * ADR-0050: 구조화 채팅 렌더 — flat 세로 스택(점선 레일 없음)으로 항목별 dispatch.
+ * ADR-0050: 구조화 채팅 렌더 — 세로 스택으로 항목별 dispatch. assistant-side 행(text·thinking·tool·
+ * generic·error + streaming tail)은 좌측 dot-rail gutter 로 한 thread 처럼 묶고, user 버블·separator 는
+ * rail 없이 plain.
  * items 를 한 번 pre-scan 해 tool_use_id → tool_result 맵을 만들고(도구 OUT 흡수), standalone tool_result
  * 는 제외. streaming(턴 활성)이면 스트림 끝에 ThoughtRow(pulse "Thinking…")를 붙인다.
  * 순수 렌더(props in, DOM out).
@@ -457,7 +481,7 @@ export function StructuredTextView({
         // ★streaming 라이브 신호★ — ThoughtRow streaming(pulse "Thinking…" 라벨). 스트림 끝에서만.
         //   ★FIX 3★: 안정 key — 없으면 streaming 토글 시 직전 실 item 이 이 행과 자리 매칭돼 remount 되며
         //   로컬 expand state 를 잃는다. 리스트 밖 고정 노드라 상수 key 로 정체성을 못박는다.
-        <ChatRow key="__streaming__">
+        <ChatRow key="__streaming__" rail>
           <ThoughtRow streaming label="Thinking…" />
         </ChatRow>
       )}

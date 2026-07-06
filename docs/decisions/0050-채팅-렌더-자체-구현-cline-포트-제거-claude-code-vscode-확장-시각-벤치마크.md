@@ -19,6 +19,7 @@ ADR-0048은 채팅 렌더를 "Cline 잎 컴포넌트 verbatim 포트 + 우리 di
 - **Cline 포트·귀속 완전 제거:** `slot/cline/*`(5파일) · `ui/button.tsx` · 귀속 3종(`THIRD_PARTY_NOTICES.md` · `LICENSES/cline-Apache-2.0.txt` · 복사 파일 헤더) 삭제.
 - **KaTeX 수식 렌더 추가**(remark-math + rehype-katex) — `$$…$$` 생문자열 노출 해소.
 - **전송 버튼 제거 → Enter-only.** RichSlot 입력바 전폭, "메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)".
+- **dispatch 레이아웃 = 좌측 점 레일(dot-rail).** `StructuredTextView`가 어시스턴트 계열 행(text·thinking·tool·error)을 좌측 거터 + 점 마커로 묶어 하나의 스레드처럼 그룹핑하고, 유저 버블은 레일 없이 전폭 박스로 둔다(확장 룩). 1차 근사 — 연결선(vertical thread)은 후속.
 - **진행 방식 = 1차 근사 후 반복.** base(엔진·기능)를 먼저 세워 커밋하고, 확장 룩 정밀 매칭은 사용자 스샷 반복으로 후속 조정한다.
 
 ## 거부한 대안

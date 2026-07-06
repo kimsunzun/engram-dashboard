@@ -258,17 +258,45 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(pres.some((p) => p.textContent?.includes('[link](http://evil.example)'))).toBe(true)
   })
 
-  // ── ADR-0050: flat 스택 룩 구조 ────────────────────────────────────────────────────
-  it('점선 타임라인 레일이 없다(flat 스택 구조)', () => {
+  // ── ADR-0050: dot-rail 스켈레톤 구조 ───────────────────────────────────────────────
+  it('점선(border-dashed) 레일 대신 dot-rail 골격을 쓴다', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'hi', itemId: 0 },
       { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 1 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
-    // 이전 시안의 좌측 세로 점선 border(border-dashed) 레일 세그먼트가 더 이상 없다.
+    // 이전 시안의 좌측 세로 점선 border(border-dashed) 레일 세그먼트는 쓰지 않는다.
     expect(container.querySelector('.border-dashed')).toBeNull()
     // 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)로 감싸진다.
     expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeTruthy()
+  })
+
+  it('assistant-side 행(text)은 좌측 rail gutter + 점 마커를 렌더한다', () => {
+    const items: StructuredItem[] = [{ kind: 'text', text: 'hello', itemId: 0 }]
+    const { container } = render(<StructuredTextView items={items} />)
+    // rail 모드 래퍼는 flex 행이며 outer 패딩(relative pt-2.5 px-4) 을 유지한다.
+    const row = container.querySelector('.relative.pt-2\\.5.px-4')
+    expect(row).toBeTruthy()
+    expect(row?.className).toContain('flex')
+    // gutter 안에 점 마커(size-1.5 rounded-full bg-muted)가 있다.
+    const dot = container.querySelector('.rounded-full.bg-muted')
+    expect(dot).toBeTruthy()
+    // 콘텐츠 컬럼은 flex-1 min-w-0(긴 토큰 오버플로 방지).
+    expect(container.querySelector('.flex-1.min-w-0')).toBeTruthy()
+  })
+
+  it('user 버블 행은 rail gutter/점 마커가 없다(plain full-width)', () => {
+    const items: StructuredItem[] = [
+      { kind: 'structured', label: 'user', json: JSON.stringify({ text: 'ping' }), itemId: 0 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    // 유저 버블은 plain ChatRow — 점 마커도 콘텐츠 컬럼 래퍼도 없다.
+    expect(container.querySelector('.rounded-full.bg-muted')).toBeNull()
+    expect(container.querySelector('.flex-1.min-w-0')).toBeNull()
+    // outer 래퍼는 여전히 relative pt-2.5 px-4(flex 아님).
+    const row = container.querySelector('.relative.pt-2\\.5.px-4')
+    expect(row).toBeTruthy()
+    expect(row?.className).not.toContain('flex')
   })
 
   it('structured label=user → 확장 룩 버블(rounded-md border bg-elevated)로 렌더', () => {
