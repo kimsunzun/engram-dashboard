@@ -13,8 +13,6 @@
   --color-muted: var(--text-muted);
   --color-border: var(--border);
   --color-accent: var(--accent);
-  --color-badge: var(--badge-bg);
-  --color-badge-foreground: var(--badge-fg);
 }
 
 *, *::before, *::after {

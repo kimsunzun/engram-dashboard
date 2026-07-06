@@ -1,6 +1,6 @@
-// ADR-0048: StructuredTextView dispatch 테스트 — items 스트림의 각 kind 가 기대한 Cline 이식 컴포넌트/역할로
-//   매핑되는지 단언한다(순수 렌더 — 구독/누적 무관). 결정적 어댑터 동작(매핑·흡수·필터)을 검증하고, Cline
-//   leaf 내부 렌더는 스모크 수준만 본다(react-markdown 등 세부는 이식물의 몫).
+// ADR-0049: StructuredTextView dispatch 테스트 — items 스트림의 각 kind 가 기대한 자체 채팅 컴포넌트/역할로
+//   매핑되는지 단언한다(순수 렌더 — 구독/누적 무관). 결정적 어댑터 동작(매핑·흡수·필터)을 검증하고, leaf
+//   내부 렌더(chat/*)는 스모크 수준만 본다(react-markdown 등 세부는 leaf 자체 테스트의 몫).
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -10,11 +10,11 @@ import type { StructuredItem } from './structuredAccumulator'
 
 afterEach(() => cleanup())
 
-describe('StructuredTextView dispatch (ADR-0048)', () => {
+describe('StructuredTextView dispatch (ADR-0049)', () => {
   it('text item → assistant markdown 본문으로 렌더된다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'hello **world**', itemId: 0 }]
     render(<StructuredTextView items={items} />)
-    // MarkdownRow → MarkdownBlock 이 마크다운을 렌더(bold 는 <strong>).
+    // 자체 Markdown 이 마크다운을 렌더(bold 는 <strong>).
     expect(screen.getByText('world').tagName.toLowerCase()).toBe('strong')
     expect(screen.getByText(/hello/)).toBeTruthy()
   })
@@ -43,12 +43,12 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(container.querySelectorAll('button').length).toBe(0)
   })
 
-  it('structured label=thinking → Cline ThinkingRow(제목 토글)로 렌더되고, 클릭하면 본문이 펼쳐진다', () => {
+  it('structured label=thinking(내용 있음) → ThoughtRow(제목 토글)로 렌더되고, 클릭하면 본문이 펼쳐진다', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'thinking', json: JSON.stringify({ thinking: 'let me reason' }), itemId: 0 },
     ]
     render(<StructuredTextView items={items} />)
-    const toggle = screen.getByRole('button', { name: /Thinking/ })
+    const toggle = screen.getByRole('button', { name: /Thought/ })
     expect(toggle).toBeTruthy()
     // 접힌 상태 — 본문은 아직 없다.
     expect(screen.queryByText('let me reason')).toBeNull()
@@ -56,13 +56,18 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(screen.getByText('let me reason')).toBeTruthy()
   })
 
-  it('빈 thinking(공백/누락)은 렌더하지 않는다', () => {
+  // ★NEW★: 빈 thinking(암호화 thinking — opus 는 signature 만 emit)도 "Thought" 라벨을 렌더한다(비-인터랙티브).
+  //   이전 라운드는 빈 thinking 을 아예 걸렀지만, 이제는 추론 존재를 보여야 하므로 라벨을 남긴다.
+  it('빈 thinking(공백/누락) → 비-인터랙티브 "Thought" 라벨을 렌더한다(펼침 불가)', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'thinking', json: JSON.stringify({ thinking: '   ' }), itemId: 0 },
     ]
-    const { container } = render(<StructuredTextView items={items} />)
-    expect(screen.queryByRole('button', { name: /Thinking/ })).toBeNull()
-    expect(container.querySelectorAll('button').length).toBe(0)
+    render(<StructuredTextView items={items} />)
+    // "Thought" 라벨은 있다(추론 존재 노출).
+    expect(screen.getByText('Thought')).toBeTruthy()
+    // 하지만 비-인터랙티브 — aria-expanded 가 없다(펼침 chevron 없음).
+    const btn = screen.getByText('Thought').closest('button')
+    expect(btn?.getAttribute('aria-expanded')).toBeNull()
   })
 
   it('structured 기타 label → 접힘 generic 블록(label 헤더 토글)', () => {
@@ -113,7 +118,7 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(pres.some((p) => p.textContent?.includes('FILE_LISTING'))).toBe(true)
   })
 
-  it('usage item → 아무것도 렌더하지 않는다(Cline 은 메시지별 토큰 칩 미표시)', () => {
+  it('usage item → 아무것도 렌더하지 않는다(메시지별 토큰 칩 미표시)', () => {
     const items: StructuredItem[] = [{ kind: 'usage', inputTokens: 2, outputTokens: 5, itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} />)
     // 누적 item 종류는 유지하되 렌더는 생략 — in/out 텍스트가 화면에 없어야 한다.
@@ -129,40 +134,40 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(screen.getByText('boom happened')).toBeTruthy()
   })
 
-  it('separator item → 옅은 세로 스페이서(border-t divider 없음 — Cline 룩)', () => {
+  it('separator item → 옅은 세로 스페이서(border-t divider 없음)', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'a', itemId: 0 },
       { kind: 'separator', itemId: 1 },
       { kind: 'text', text: 'b', itemId: 2 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
-    // Cline 은 점선 레일/구분선이 없다 — separator 는 눈에 띄는 divider 가 아니라 aria-hidden 스페이서다.
+    // 점선 레일/구분선이 없다 — separator 는 눈에 띄는 divider 가 아니라 aria-hidden 스페이서다.
     expect(container.querySelector('div[aria-hidden].border-t')).toBeNull()
     const spacer = container.querySelector('div[aria-hidden]')
     expect(spacer).toBeTruthy()
     expect(spacer?.className).toContain('h-3')
   })
 
-  it('streaming=true 면 스트림 끝에 Thinking 라이브 신호(제목)를 붙인다', () => {
+  it('streaming=true 면 스트림 끝에 라이브 신호("Thinking…" pulse 라벨)를 붙인다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
     render(<StructuredTextView items={items} streaming />)
-    // isStreaming ThinkingRow — 제목 "Thinking" 이 보인다.
-    expect(screen.getByText('Thinking')).toBeTruthy()
+    // streaming ThoughtRow — 라벨 "Thinking…" 이 보인다.
+    expect(screen.getByText('Thinking…')).toBeTruthy()
   })
 
   it('streaming=false(기본)면 라이브 Thinking 신호가 없다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'done', itemId: 0 }]
     render(<StructuredTextView items={items} />)
-    expect(screen.queryByText('Thinking')).toBeNull()
+    expect(screen.queryByText('Thinking…')).toBeNull()
   })
 
   it('malformed json 이 와도 throw 하지 않고 폴백 렌더한다(안전 파서)', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'thinking', json: '{bad json', itemId: 0 },
     ]
-    // extractText 폴백 = raw json → 비어있지 않으므로 ThinkingRow 가 뜬다(throw 없이).
+    // extractText 폴백 = raw json → 비어있지 않으므로 ThoughtRow(인터랙티브 "Thought")가 뜬다(throw 없이).
     expect(() => render(<StructuredTextView items={items} />)).not.toThrow()
-    expect(screen.getByRole('button', { name: /Thinking/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Thought/ })).toBeTruthy()
   })
 
   // ── FIX 1: tool_result 흡수는 label 무관 ──────────────────────────────────────────
@@ -253,8 +258,8 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     expect(pres.some((p) => p.textContent?.includes('[link](http://evil.example)'))).toBe(true)
   })
 
-  // ── ADR-0048 재설계: Cline 실물 룩 구조 ────────────────────────────────────────────
-  it('점선 타임라인 레일이 없다(Cline flat 스택 구조)', () => {
+  // ── ADR-0049: flat 스택 룩 구조 ────────────────────────────────────────────────────
+  it('점선 타임라인 레일이 없다(flat 스택 구조)', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'hi', itemId: 0 },
       { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 1 },
@@ -262,33 +267,33 @@ describe('StructuredTextView dispatch (ADR-0048)', () => {
     const { container } = render(<StructuredTextView items={items} />)
     // 이전 시안의 좌측 세로 점선 border(border-dashed) 레일 세그먼트가 더 이상 없다.
     expect(container.querySelector('.border-dashed')).toBeNull()
-    // 각 행은 Cline ChatRowContent 래퍼(relative pt-2.5 px-4)로 감싸진다.
+    // 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)로 감싸진다.
     expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeTruthy()
   })
 
-  it('structured label=user → Cline UserMessage 박스(rounded-xs badge 버블)로 렌더', () => {
+  it('structured label=user → 확장 룩 버블(rounded-md border bg-surface)로 렌더', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'user', json: JSON.stringify({ text: 'do the thing' }), itemId: 0 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     const bubble = screen.getByText('do the thing')
-    // Cline UserMessage 룩: p-2.5 my-1 rounded-xs + badge 버블 배경/전경(var(--vscode-badge-*) 매핑).
-    expect(bubble.className).toContain('rounded-xs')
-    expect(bubble.className).toContain('bg-badge')
-    expect(bubble.className).toContain('text-badge-foreground')
+    // 확장 룩 유저 버블: rounded-md border bg-surface.
+    expect(bubble.className).toContain('rounded-md')
+    expect(bubble.className).toContain('border')
+    expect(bubble.className).toContain('bg-surface')
     // 사용자 박스는 편집/토글 버튼이 없는 plain 텍스트 박스다.
     expect(container.querySelectorAll('button').length).toBe(0)
   })
 
-  it('tool item → Cline 헤더(아이콘 + bold 이름) + bg-surface 박스로 렌더', () => {
+  it('tool item → 헤더(아이콘 + bold 이름) + bg-surface 박스로 렌더', () => {
     const items: StructuredItem[] = [
       { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', itemId: 0 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
-    // 헤더에 bold 도구명(Cline HEADER_CLASSNAMES 패턴).
+    // 헤더에 bold 도구명(HEADER_CLASSNAMES 패턴).
     const title = screen.getByText('Bash')
     expect(title.className).toContain('font-bold')
-    // 도구 본문은 Cline 룩(bg-surface rounded-sm border) 박스.
+    // 도구 본문은 bg-surface rounded-sm border 박스.
     expect(container.querySelector('.bg-surface.rounded-sm')).toBeTruthy()
   })
 })

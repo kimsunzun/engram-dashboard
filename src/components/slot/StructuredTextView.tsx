@@ -1,25 +1,17 @@
-// ADR-0048: 구조화 채팅 렌더 dispatch — Cline(Apache-2.0)의 채팅 leaf 컴포넌트를 그대로 이식(verbatim port)해
-//   우리 데이터 모델(StructuredItem 스트림)을 그 컴포넌트들에 먹인다. 앞선 ADR-0047 자체구현(첫 시안)이
-//   사용자에게 근사치로 반려돼, 실제 Cline JSX+Tailwind 를 옮겨 온 것으로 교체한다.
-//   이식 컴포넌트: ./cline/{MarkdownRow,MarkdownBlock,ThinkingRow,CopyButton}
-//   + ui/button. 라이선스/귀속은 각 파일 헤더 + LICENSES/cline-Apache-2.0.txt.
+// ADR-0049: 구조화 채팅 렌더 dispatch — 우리 자체 채팅 leaf 컴포넌트(chat/*)에 우리 데이터 모델
+//   (StructuredItem 스트림)을 먹인다. 벤치마크 룩 = Claude Code VSCode 확장(1차 근사치, 사용자가
+//   스크린샷으로 후속 조정). 이전 라운드에서 도입했던 외부(Apache-2.0) 이식물은 전부 제거하고 자체
+//   구현으로 대체했다. leaf: ./chat/{Markdown,ThoughtRow,CopyButton}.
 //
-// ★이 파일의 책임★: items 스트림을 종류별로 위 이식 컴포넌트로 dispatch 하는 **순수 렌더**(구독/누적은
+// ★이 파일의 책임★: items 스트림을 종류별로 위 leaf 컴포넌트로 dispatch 하는 **순수 렌더**(구독/누적은
 //   RichSlot 소관). props = { items, streaming } 만 받는다.
 //
-// ★레이아웃(ADR-0048 재설계 — Cline 실물 룩)★: 이전 시안의 좌측 점선 타임라인 레일(Row)을 제거하고 Cline
-//   실제 채팅 구조로 교체한다. 메시지는 flat 세로 스택이며, 각 행은 Cline ChatRowContent 래퍼(relative pt-2.5
-//   px-4)를 쓴다. 헤더는 Cline HEADER_CLASSNAMES(flex items-center gap-2.5 mb-3): 작은 lucide 아이콘 + bold
-//   제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이 MarkdownRow full-width, user 는 Cline
-//   UserMessage 박스(p-2.5 my-1 rounded-xs text-sm), thinking 은 Cline ThinkingRow.
-//
-// ★토큰 매핑(Cline VSCode 토큰 → 우리 data-theme Tailwind 토큰)★: text-foreground→text-foreground ·
-//   text-description→text-muted · bg-code→bg-surface · border-editor-group-border→border-border ·
-//   var(--vscode-badge-background)→bg-surface(user 버블) · text-error→text-red-500 · text-success→text-accent.
-//   raw --vscode-* 변수는 우리 앱에 없으므로 절대 도입하지 않는다(우리 토큰만).
+// ★레이아웃★: 메시지는 flat 세로 스택이며, 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)를 쓴다. 헤더는
+//   작은 lucide 아이콘 + bold 제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이
+//   Markdown full-width, user 는 확장 룩 버블(rounded-md border bg-surface), thinking 은 ThoughtRow.
 //
 // ★안전 파서 헬퍼(pretty/extractText/contentToText/parseToolResult/buildToolResultMap/shortArgs)★는
-//   ADR-0047 시안에서 그대로 승계한다 — 우리 데이터-어댑터 로직이며 **절대 throw 하지 않는다**(bad json 폴백).
+//   우리 데이터-어댑터 로직이며 **절대 throw 하지 않는다**(bad json 폴백).
 
 import { useState, type ComponentType, type ReactNode } from 'react'
 import {
@@ -41,11 +33,11 @@ import {
 
 import { cn } from '@/lib/utils'
 import type { StructuredItem } from './structuredAccumulator'
-// ADR-0048: Cline 이식 leaf 들(verbatim/adapt). 상세·귀속은 각 파일 헤더 참조.
-//   ★MarkdownBlock(전체 마크다운) 은 assistant text 에만 쓴다(MarkdownRow 경유). 도구 IN/OUT·탈출구 json 은
-//   신뢰할 수 없는 텍스트라 마크다운 파싱을 태우지 않고 InertCode(리터럴 <pre>)로만 그린다(FIX 2 — 아래 주석).
-import { MarkdownRow } from './cline/MarkdownRow'
-import { ThinkingRow } from './cline/ThinkingRow'
+// ADR-0049: 우리 자체 채팅 leaf 들(chat/*). 상세는 각 파일 헤더 참조.
+//   ★Markdown(전체 마크다운) 은 assistant text 에만 쓴다. 도구 IN/OUT·탈출구 json 은 신뢰할 수 없는
+//   텍스트라 마크다운 파싱을 태우지 않고 InertCode(리터럴 <pre>)로만 그린다(FIX 2 — 아래 주석).
+import { Markdown } from './chat/Markdown'
+import { ThoughtRow } from './chat/ThoughtRow'
 
 // ── 안전 파서 헬퍼(절대 throw 금지 — bad json 폴백) ────────────────────────────────
 
@@ -165,26 +157,26 @@ function shortArgs(argsJson: string): string {
   }
 }
 
-// ── Cline 룩 프리미티브(레이아웃 재설계) ──────────────────────────────────────────
+// ── 채팅 룩 프리미티브 ────────────────────────────────────────────────────────────
 
 /**
- * Cline ChatRowContent 래퍼 — 각 메시지 행의 바깥 컨테이너. Cline 은 `relative pt-2.5 px-4`(가상 스크롤러가
- * 감싸는 개별 row). 점선 레일 없이 flat 세로 스택으로 쌓인다. StructuredTextView 컨테이너가 이 행들을 그대로 담는다.
+ * 메시지 행의 바깥 컨테이너 — `relative pt-2.5 px-4`. 점선 레일 없이 flat 세로 스택으로 쌓인다.
+ * StructuredTextView 컨테이너가 이 행들을 그대로 담는다.
  */
 function ChatRow({ children }: { children: ReactNode }) {
   return <div className="relative pt-2.5 px-4">{children}</div>
 }
 
-/** Cline HEADER_CLASSNAMES = "flex items-center gap-2.5 mb-3" — 작은 아이콘 + bold 제목. */
+/** 행 헤더 클래스 — 작은 아이콘 + bold 제목. */
 const HEADER_CLASSNAMES = 'flex items-center gap-2.5 mb-3'
 
 type LucideIcon = ComponentType<{ className?: string }>
 
 /**
- * 도구 헤더 아이콘 휴리스틱 — 우리 tool item 은 generic(name 만) 이라 Cline 처럼 tool.tool 판별자가 없다.
- * name 을 소문자로 보고 흔한 CC/claude 도구를 Cline 대응 아이콘(lucide)에 매핑한다. 미스는 Wrench 폴백.
- * (Cline ChatRow 의 아이콘 선택 — Pencil=edit, FilePlus2=create, FileMinus2=delete, FileCode2=read,
- *  FolderOpen=list, Search=search, SquareTerminal=bash, Globe=web/fetch — 을 우리 이름 규약으로 흉내.)
+ * 도구 헤더 아이콘 휴리스틱 — 우리 tool item 은 generic(name 만) 이라 도구 종류 판별자가 없다.
+ * name 을 소문자로 보고 흔한 CC/claude 도구를 대응 아이콘(lucide)에 매핑한다. 미스는 Wrench 폴백.
+ * (Pencil=edit, FilePlus2=create, FileMinus2=delete, FileCode2=read, FolderOpen=list, Search=search,
+ *  SquareTerminal=bash, Globe=web/fetch.)
  */
 function toolIconFor(name: string): LucideIcon {
   const n = name.toLowerCase()
@@ -205,9 +197,8 @@ function toolIconFor(name: string): LucideIcon {
 }
 
 /**
- * Cline 헤더 행 — 작은 아이콘 + bold 제목(semantic color). 도구/에러/generic 에 공통.
- * Cline: `<div className={HEADER_CLASSNAMES}><Icon className="size-2" /><span className="font-bold ...">…</span></div>`.
- * 우리 앱은 VSCode codicon 스케일이 아니라 size-3.5(≈14px)로 읽히게 키운다(Cline 룩 유지, 우리 폰트 스케일 반영).
+ * 헤더 행 — 작은 아이콘 + bold 제목(semantic color). 도구/에러/generic 에 공통.
+ * 아이콘은 size-3.5(≈14px)로 우리 폰트 스케일에 맞춘다.
  */
 function RowHeader({
   icon: Icon,
@@ -232,11 +223,10 @@ function RowHeader({
 
 /**
  * ★FIX 2 (fenced-code escape 방어)★: 도구 IN(args)/OUT(result)·탈출구 json 은 신뢰할 수 없는 텍스트다.
- *   이전 시안은 CodeAccordian → MarkdownBlock(react-markdown) 로 코드 펜스 문자열을 먹였는데, 내용에 삼중
- *   백틱(```) 줄이 있으면 펜스가 조기 종료돼 나머지가 마크다운으로 파싱된다(활성 링크/이미지·heading 주입).
- *   그래서 이 콘텐츠는 마크다운을 **절대 태우지 않고** 리터럴 <pre><code> 로만 그린다 — React 텍스트 자식은
- *   자동 이스케이프되므로 삼중 백틱·`# heading` 이 있어도 태그로 승격되지 않는다(inert). 전체 마크다운은
- *   assistant text(MarkdownRow) 에만 허용.
+ *   이 콘텐츠를 마크다운 렌더러에 먹이면 내용에 삼중 백틱(```) 줄이 있을 때 펜스가 조기 종료돼 나머지가
+ *   마크다운으로 파싱된다(활성 링크/이미지·heading 주입). 그래서 이 콘텐츠는 마크다운을 **절대 태우지 않고**
+ *   리터럴 <pre><code> 로만 그린다 — React 텍스트 자식은 자동 이스케이프되므로 삼중 백틱·`# heading` 이
+ *   있어도 태그로 승격되지 않는다(inert). 전체 마크다운은 assistant text(Markdown) 에만 허용.
  */
 function InertCode({ code }: { code: string }) {
   return (
@@ -247,27 +237,10 @@ function InertCode({ code }: { code: string }) {
 }
 
 /**
- * thinking 접힘 행 — Cline ThinkingRow(제목 토글 + 펼침 애니 본문)를 우리 데이터로 감싼다.
- * 로컬 expand state(itemId key 로 스트리밍 중에도 유지). 빈 reasoning 은 상위 dispatch 에서 이미 걸러진다.
- */
-function ThinkingItemRow({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false)
-  return (
-    <ThinkingRow
-      showTitle
-      isVisible
-      isExpanded={expanded}
-      onToggle={() => setExpanded((o) => !o)}
-      reasoningContent={content}
-    />
-  )
-}
-
-/**
- * 도구 호출 행 — Cline 도구 룩: 헤더(작은 아이콘 + bold 이름) + bg-surface rounded-sm border 박스.
- * 박스의 클릭 sub-header(Cline: flex items-center cursor-pointer select-none py-2 px-2.5 text-description)를
- * 눌러 IN(args)/OUT(result) 본문을 펼친다. IN/OUT 은 신뢰할 수 없는 텍스트이므로 InertCode(리터럴 <pre>)로만
- * 렌더 — 마크다운 파싱 금지(FIX 2). 로컬 open state(itemId key 로 스트리밍 리렌더 중에도 유지).
+ * 도구 호출 행 — 헤더(작은 아이콘 + bold 이름) + bg-surface rounded-sm border 박스.
+ * 박스의 클릭 sub-header 를 눌러 IN(args)/OUT(result) 본문을 펼친다. IN/OUT 은 신뢰할 수 없는 텍스트이므로
+ * InertCode(리터럴 <pre>)로만 렌더 — 마크다운 파싱 금지(FIX 2). 로컬 open state(itemId key 로 스트리밍
+ * 리렌더 중에도 유지).
  */
 function ToolItemRow({
   name,
@@ -291,7 +264,7 @@ function ToolItemRow({
           isErr ? 'border-red-500/60' : 'border-border',
         )}
       >
-        {/* Cline 클릭 sub-header — 펼침 토글. text-description(→text-muted).
+        {/* 클릭 sub-header — 펼침 토글(text-muted).
             aria-label 에 도구명을 실어 접근성 이름을 헤더와 일치시킨다(sub-header 텍스트는 인자 힌트라
             도구명이 없으므로, 스크린리더/테스트가 "어느 도구의 세부인지" 식별하게 name 을 명시). */}
         <button
@@ -346,7 +319,7 @@ function ToolItemRow({
 }
 
 /**
- * 탈출구(알 수 없는 label) 이벤트 — Cline 도구 박스와 동형인 접힘 raw json 블록. label 을 muted 헤더로 얹고
+ * 탈출구(알 수 없는 label) 이벤트 — 도구 박스와 동형인 접힘 raw json 블록. label 을 muted 헤더로 얹고
  * (Braces 아이콘) bg-surface border 박스를 펼치면 json 을 InertCode(리터럴, FIX 2)로 그린다.
  */
 function GenericItemRow({ label, json }: { label: string; json: string }) {
@@ -379,15 +352,18 @@ function GenericItemRow({ label, json }: { label: string; json: string }) {
 
 // ── 항목 dispatch ───────────────────────────────────────────────────────────────────
 
-/** 한 item 렌더. key 는 여기서 부여(itemId). standalone tool_result·빈 thinking 은 null 로 제외. */
+/** 한 item 렌더. key 는 여기서 부여(itemId). standalone tool_result 는 null 로 제외. */
 function renderItem(item: StructuredItem, results: Map<string, ToolResult>): ReactNode {
   const k = item.itemId
   switch (item.kind) {
     case 'text':
-      // assistant 본문 — Cline MarkdownRow(react-markdown + remark/rehype). 헤더 없이 full-width.
+      // assistant 본문 — 우리 자체 Markdown(react-markdown + remark/rehype). 헤더 없이 full-width.
+      //   긴 토큰(URL·경로)이 컨테이너를 넘지 않게 행 컨테이너에 wrap-anywhere overflow-hidden.
       return (
         <ChatRow key={k}>
-          <MarkdownRow markdown={item.text} />
+          <div className="wrap-anywhere overflow-hidden">
+            <Markdown markdown={item.text} />
+          </div>
         </ChatRow>
       )
 
@@ -399,24 +375,22 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
       if (parseToolResult(item.json)) return null
 
       if (item.label === 'user') {
-        // 사용자 발화 — Cline UserMessage 박스(p-2.5 my-1 rounded-xs, whitespace-pre-line break-word).
-        //   색은 Cline UserMessage.tsx 대로 badge 토큰(var(--vscode-badge-background)/foreground)에 매핑한다 —
-        //   기존 bg-surface(#111)는 앱 배경(#0a0a0a) 위에서 사실상 안 보였다. text-sm 을 빼 루트의 13px 를 상속.
+        // 사용자 발화 — 확장 룩 버블(rounded-md border bg-surface). whitespace-pre-line 으로 줄바꿈 보존.
         return (
           <ChatRow key={k}>
-            <div className="p-2.5 my-1 rounded-xs bg-badge text-badge-foreground whitespace-pre-line break-words">
+            <div className="rounded-md border border-border bg-surface px-3 py-2 my-1 whitespace-pre-line break-words text-foreground">
               {extractText(item.json, 'user')}
             </div>
           </ChatRow>
         )
       }
       if (item.label === 'thinking') {
-        // 빈 reasoning 은 렌더 안 함(빈 thinking 행 방지).
+        // 추론 행 — ThoughtRow. 내용이 있으면 펼침 가능, 비어 있으면(opus 암호화 thinking) 비-인터랙티브
+        //   "Thought" 라벨만 렌더해 "추론이 있었다"는 존재를 노출한다(빈 행을 걸러내지 않는다).
         const content = extractText(item.json, 'thinking')
-        if (!content || !content.trim()) return null
         return (
           <ChatRow key={k}>
-            <ThinkingItemRow content={content} />
+            <ThoughtRow content={content} />
           </ChatRow>
         )
       }
@@ -437,12 +411,12 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
     }
 
     case 'usage':
-      // 토큰 사용량 — Cline 은 메시지별 토큰 칩을 표시하지 않는다(비용은 task 헤더에만). 렌더 안 함.
+      // 토큰 사용량 — 메시지별 토큰 칩은 표시하지 않는다. 렌더 안 함.
       //   (누적 item 종류 자체는 유지 — 여기서 렌더만 생략.)
       return null
 
     case 'error':
-      // 에러 — Cline 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
+      // 에러 — 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
       return (
         <ChatRow key={k}>
           <RowHeader icon={AlertTriangle} title="Error" tone="error" />
@@ -453,15 +427,15 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
       )
 
     case 'separator':
-      // 턴 경계 — Cline 은 점선 레일/구분선이 없다. 아주 옅은 세로 스페이서만(눈에 띄는 divider 지양).
+      // 턴 경계 — 점선 레일/구분선 없이 아주 옅은 세로 스페이서만(눈에 띄는 divider 지양).
       return <div key={k} aria-hidden className="h-3" />
   }
 }
 
 /**
- * ADR-0048: 구조화 채팅 렌더 — Cline 실제 채팅 구조(flat 세로 스택, 점선 레일 없음)로 항목별 dispatch.
+ * ADR-0049: 구조화 채팅 렌더 — flat 세로 스택(점선 레일 없음)으로 항목별 dispatch.
  * items 를 한 번 pre-scan 해 tool_use_id → tool_result 맵을 만들고(도구 OUT 흡수), standalone tool_result
- * 는 제외. streaming(턴 활성)이면 스트림 끝에 Cline ThinkingRow(isStreaming shimmer)를 붙인다.
+ * 는 제외. streaming(턴 활성)이면 스트림 끝에 ThoughtRow(pulse "Thinking…")를 붙인다.
  * 순수 렌더(props in, DOM out).
  */
 export function StructuredTextView({
@@ -472,19 +446,19 @@ export function StructuredTextView({
   streaming?: boolean
 }) {
   const results = buildToolResultMap(items)
-  // 스트리밍 라이브 신호는 콘텐츠가 있을 때만(빈 슬롯에 Thinking shimmer 뜨는 오작동 방지 — 지시 명세).
+  // 스트리밍 라이브 신호는 콘텐츠가 있을 때만(빈 슬롯에 Thinking 신호 뜨는 오작동 방지 — 지시 명세).
   const hasContent = items.length > 0
   return (
-    // text-[13px] leading-[1.25] — Cline 전역 폰트/줄간격(VSCode 13px + body line-height 1.25)을 채팅 루트에만
-    //   스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
-    <div className="flex flex-col pb-3 font-sans text-foreground text-[13px] leading-[1.25]">
+    // text-[13px] leading-[1.45] — 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱
+    //   나머지는 영향 없음).
+    <div className="flex flex-col pb-3 font-sans text-foreground text-[13px] leading-[1.45]">
       {items.map((item) => renderItem(item, results))}
       {streaming && hasContent && (
-        // ★streaming 라이브 신호★ — Cline ThinkingRow 의 isStreaming(shimmer 제목) affordance. 스트림 끝에서만.
+        // ★streaming 라이브 신호★ — ThoughtRow streaming(pulse "Thinking…" 라벨). 스트림 끝에서만.
         //   ★FIX 3★: 안정 key — 없으면 streaming 토글 시 직전 실 item 이 이 행과 자리 매칭돼 remount 되며
         //   로컬 expand state 를 잃는다. 리스트 밖 고정 노드라 상수 key 로 정체성을 못박는다.
         <ChatRow key="__streaming__">
-          <ThinkingRow showTitle isVisible isExpanded={false} isStreaming title="Thinking" />
+          <ThoughtRow streaming label="Thinking…" />
         </ChatRow>
       )}
     </div>

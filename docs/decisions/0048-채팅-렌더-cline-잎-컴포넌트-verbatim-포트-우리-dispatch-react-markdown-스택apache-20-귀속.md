@@ -1,6 +1,6 @@
 # ADR-0048: 채팅 렌더 = Cline 잎 컴포넌트 verbatim 포트 + 우리 dispatch (react-markdown 스택·Apache-2.0 귀속)
 
-- 상태: 확정 (2026-07-05, 근거: Cline 정찰·귀속 감사(서브에이전트) + 사용자 결정 · 구현은 후속 /review code + /qa 게이트)
+- 상태: **폐기 (Superseded by ADR-0050)** — 벤치마크가 스샷 비교로 Cline→Claude Code VSCode 확장으로 재교정(사용자 결정 2026-07-06)되어 Cline 포트의 존재 이유가 소멸, Apache-2.0 귀속 부담만 남음 → 포트·귀속 제거하고 자체 구현으로 재작성. ~~확정 (2026-07-05, 근거: Cline 정찰·귀속 감사(서브에이전트) + 사용자 결정 · 구현은 후속 /review code + /qa 게이트)~~
 - 관련: Amends ADR-0047 (채팅 UI 렌더 방식: CC룩 네이티브 직접 구현·OSS 참조한정(코드 복붙 아님) → Cline 잎 컴포넌트 verbatim 코드 포트(Apache-2.0 귀속)) · `src/components/slot/StructuredTextView.tsx`(dispatch 후신) · `src/components/slot/structuredAccumulator.ts`(StructuredItem 모델) · Cline 클론 `I:\Engram_Workspace\references\cline` · step-log 2026-07-05
 
 ## 맥락

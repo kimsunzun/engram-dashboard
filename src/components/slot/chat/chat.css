@@ -1,0 +1,126 @@
+/* 채팅 마크다운 스타일 — 우리 자체 스타일시트. 벤치마크 = Claude Code VSCode 확장 룩(1차 근사치,
+   사용자가 스크린샷으로 후속 조정). Tailwind preflight 가 문단/제목/리스트 마커를 벗겨내므로 여기서
+   `.chat-markdown` 스코프로 다시 선언한다. 값은 확장 룩의 첫 근사치다.
+   코드 하이라이트 팔레트 = 아래 import 한 highlight.js 테마. */
+
+@import 'highlight.js/styles/github-dark.css';
+
+.chat-markdown {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  font-family: inherit;
+}
+
+/* 문단 — 밀집 리듬. 마지막 문단은 아래 여백 제거(박스 하단 정렬). */
+.chat-markdown p {
+  margin: 0 0 0.5em 0;
+}
+.chat-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+/* 제목 — 확장은 본문 대비 적당한 크기 차이만 둔다(과하지 않게). */
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4 {
+  margin: 0.8em 0 0.4em 0;
+}
+.chat-markdown h1:first-child,
+.chat-markdown h2:first-child,
+.chat-markdown h3:first-child,
+.chat-markdown h4:first-child {
+  margin-top: 0;
+}
+.chat-markdown h1 {
+  font-size: 1.3em;
+  font-weight: 600;
+}
+.chat-markdown h2 {
+  font-size: 1.15em;
+  font-weight: 600;
+}
+.chat-markdown h3 {
+  font-size: 1.05em;
+  font-weight: 600;
+}
+.chat-markdown h4 {
+  font-size: 1em;
+  font-weight: 700;
+}
+
+/* 리스트 — 마커 표시(preflight 가 지우므로 복원). */
+.chat-markdown ul,
+.chat-markdown ol {
+  padding-left: 1.5em;
+  margin: 0.4em 0;
+}
+.chat-markdown ul {
+  list-style: disc;
+}
+.chat-markdown ol {
+  list-style: decimal;
+}
+.chat-markdown li {
+  margin: 0.15em 0;
+}
+
+/* 코드 블록 */
+.chat-markdown pre {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 0.6em 0;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+/* 인라인 코드 — 확장은 accent 색이 아니라 중립색(본문색)으로 둔다. */
+.chat-markdown code:not(pre > code) {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  color: var(--text);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+  font-size: 0.9em;
+  word-break: break-word;
+}
+
+/* 표 */
+.chat-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0;
+}
+.chat-markdown th,
+.chat-markdown td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.chat-markdown th {
+  font-weight: 600;
+}
+
+/* 링크 */
+.chat-markdown a {
+  color: var(--accent);
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
+}
+
+/* 구분선 */
+.chat-markdown hr {
+  margin: 0.8em 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+/* 취소선(GFM) */
+.chat-markdown del {
+  text-decoration: line-through;
+  opacity: 0.7;
+}

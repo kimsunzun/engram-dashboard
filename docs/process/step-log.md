@@ -605,6 +605,12 @@
 - **잔여:** ① replay 빈 버그(ADR-0046 별건) ② opus thinking 가시화는 업스트림 대기(또는 "빈 thinking도 표시" 정책 = 사용자 결정 필요) ③ echo 작업(claude.rs·session.rs·mod.rs 미커밋분)은 게이트 미통과 상태로 워킹트리 유지.
 - **보안 후속(당일):** 사내 보안팀이 우리 앱 WebView2의 `--disable-features=…msSmartScreenProtection` 사용을 감지·중지 요청. 원인 규명 = **Tauri(wry)가 Windows에서 끼워 넣는 기본 인자**(우리 소스·스크립트에 없음 — 실행 프로세스 커맨드라인 + 레포 전수 검색으로 확인). 조치 = `src-tauri/tauri.conf.json` 창 3개에 `additionalBrowserArgs`를 명시해 기본값 대체(**SmartScreen만 제외**, msWebOOUI/msPdfOOUI 억제·autoplay 정책은 유지) → 클라이언트 재기동 실측으로 플래그 소멸 확인(CDP 정상).
 
+## 채팅 렌더 자체 구현 — Cline 포트 제거 + Claude Code 확장 벤치마크 (2026-07-06, master, opus) · ADR-0050 (0048 폐기) · 커밋 예정
+- **벤치마크 재교정(사용자):** 스샷 비교로 목표 룩 = Cline이 아니라 **Claude Code VSCode 확장** 확정 → ADR-0048(Cline 잎 포트 + Apache-2.0 귀속) 폐기, **ADR-0050**(자체 구현 + 확장 스샷 벤치마크)으로 supersede full.
+- **구현(코더 = 직전 세션 + 이번 세션 sonnet 테스트 수정):** 신규 `slot/chat/`(Markdown·ThoughtRow·CopyButton·chat.css) 자체 구현 — react-markdown + remark-math/rehype-katex(KaTeX) + rehype-highlight, U+200B 소독, hover 복사버튼, 빈(암호화) thinking도 "Thought" 행. Cline 포트·귀속 제거: `slot/cline/*`·`ui/button.tsx`·귀속 3종 삭제. StructuredTextView 재스타일(유저 버블·badge 토큰 제거). RichSlot 전송버튼 제거(Enter-only, 회귀테스트 Enter 경로로 갱신). deps: +katex/remark-math/rehype-katex, -cva/@radix-ui/react-slot/unist-util-visit/marked. 오펀 `structuredToRichMessages.ts` 삭제.
+- **게이트:** `/review code light`(doc-aware) PASS(가드 무손상·테스트 non-vacuous 실증) + `/qa`(quick→full 승격): vitest 242/242·tsc 0·BOM clean + **cdp 실측**(마크다운·KaTeX 박스·코드 하이라이트·hover 복사버튼·전송버튼 제거 라이브 확인).
+- **미완(의도) = 다음:** 확장 룩 **시각 정밀 매칭은 1차 근사(base)** — 유저 버블이 다크테마서 거의 안 보임 등. 사용자 스샷 반복으로 후속 조정(하나하나). echo Rust(claude.rs·mod.rs·session.rs)는 이 라운드 밖 = 커밋 제외·워킹트리 유지.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

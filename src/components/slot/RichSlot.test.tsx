@@ -74,10 +74,10 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     expect(screen.getByText('● idle')).toBeTruthy()
 
     // 입력 후 전송 — send() 는 즉시 awaiting=true 로 streaming 힌트를 켠다.
+    // ★전송 버튼 삭제 후 Enter 경로로 구동(컴포넌트 onKeyDown: Enter && !shiftKey && !isComposing → send()).
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'hello' } })
-    const sendBtn = screen.getByRole('button', { name: '전송' })
-    fireEvent.click(sendBtn)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
 
     // write 가 시도됐는지 확인(전송 경로 진입).
     expect(clientMock.writeStdin).toHaveBeenCalledTimes(1)
@@ -102,7 +102,8 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
 
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'hello' } })
-    fireEvent.click(screen.getByRole('button', { name: '전송' }))
+    // ★전송 버튼 삭제 후 Enter 경로로 구동(컴포넌트 onKeyDown: Enter && !shiftKey && !isComposing → send()).
+    fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
 
     // 성공 경로 — 아직 응답 이벤트가 없으므로 awaiting 브리지로 streaming 유지.

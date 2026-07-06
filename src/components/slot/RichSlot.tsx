@@ -35,7 +35,6 @@ import {
   type CodeRender,
   type DiffRender,
 } from '../../lab/richslot/renderSettings'
-// structuredItemsToRichMessages — LiveRichSlot 교체로 더 이상 사용하지 않음. structuredToRichMessages.ts 파일은 유지.
 import { StructuredTextView } from './StructuredTextView'
 import showcaseFixture from '../../lab/richslot/fixtures/showcase.jsonl?raw'
 import textFixture from '../../lab/richslot/fixtures/text.jsonl?raw'
@@ -183,9 +182,9 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
         <StructuredTextView items={items} streaming={streaming} />
       </div>
 
-      {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈. ★포커스 가드★: stopPropagation 으로 키 입력이
-          상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}
-      <div className="flex flex-none items-stretch gap-1.5 border-t border-border px-2 py-1.5">
+      {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
+          으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}
+      <div className="flex flex-none items-stretch border-t border-border px-2 py-1.5">
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -205,13 +204,6 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
           rows={2}
           className="flex-1 resize-none rounded border border-border bg-surface px-2 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"
         />
-        <button
-          onClick={send}
-          disabled={isTerminated || !input.trim()}
-          className="flex-none rounded bg-accent px-3.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          전송
-        </button>
       </div>
     </div>
   )
