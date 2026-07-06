@@ -3,25 +3,32 @@
 // 호출자(adr 스킬/LLM)가 한다 — 이 스크립트는 "기계가 틀리지 않게 할 수 있는 일"만 한다. (리서치: 기계/판단 경계)
 //
 // CLI:
-//   node scripts/adr.mjs new       --title "<제목>" [--status 확정|제안] [--dir <폴더>]
-//   node scripts/adr.mjs supersede --old <N> --mode full    --title "<제목>" [--status ...] [--dir ...]
-//   node scripts/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<제목>" [--dir ...]
-//   node scripts/adr.mjs index  [--check | --write] [--dir <폴더>]
-//   node scripts/adr.mjs lint   [--dir <폴더>]
+//   node <경로>/adr.mjs new       --title "<제목>" [--status 확정|제안] [--dir <폴더>]
+//   node <경로>/adr.mjs supersede --old <N> --mode full    --title "<제목>" [--status ...] [--dir ...]
+//   node <경로>/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<제목>" [--dir ...]
+//   node <경로>/adr.mjs index  [--check | --write] [--dir <폴더>]
+//   node <경로>/adr.mjs lint   [--dir <폴더>]
 //
 // 안전: index 기본 = --check(read-only diff만, README 안 고침). new/supersede는 쓰기.
-//   --dir 로 대상 폴더를 바꿔 실데이터 격리(임시 폴더 dry-run). 기본 = docs/decisions/.
+//   --dir 로 대상 폴더를 바꿔 실데이터 격리(임시 폴더 dry-run). 기본 = <cwd>/docs/decisions/.
 //   ADR_DIR 환경변수로도 지정 가능(--dir 우선).
+//
+// ── 멀티 소비처(프로젝트) 파라미터 ────────────────────────────────────────────
+// 이 스크립트는 스킬 폴더에 상주하며 여러 소비처를 하나로 섬긴다. 모든 기본값은
+//   dashboard(docs/decisions/, README.md 인덱스, 확정/제안/폐기/거부 어휘, 대시보드 템플릿)
+//   동작을 그대로 보존한다 — 플래그 없이 dashboard 루트에서 돌리면 종전과 동일.
+//   프로젝트별 실값은 스킬 바인딩(references/bindings/<project>.md)이 아래 플래그로 주입한다:
+//   --dir <폴더> · --root <스캔/상대경로 기준(기본 cwd)> · --index-name <파일명(기본 README.md)>
+//   --template <스캐폴드 템플릿 파일> · --status-vocab a,b,c · --default-status <값>
+//   --anchor-roots a,b (코드 앵커 스캔 루트; 비우면 앵커 스캔 생략)
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..');
-
-// ── 상태 어휘 (정본 = docs/decisions/README.md "상태 범례") ───────────────────
-// lint은 이 어휘만 검사한다(단서절 자유서술 무시). 추가하면 README도 같이 고친다.
-const STATUS_VOCAB = ['확정', '제안', '폐기', '거부'];
+// ── 기본값 (전부 dashboard 동작 보존) ────────────────────────────────────────
+const DEFAULT_STATUS_VOCAB = ['확정', '제안', '폐기', '거부'];
+const DEFAULT_INDEX_NAME = 'README.md';
+const DEFAULT_ANCHOR_ROOTS = ['crates', 'src', 'src-tauri', 'scripts'];
+const DEFAULT_DEFAULT_STATUS = '확정';
 
 // ── 인자 파싱 ────────────────────────────────────────────────────────────────
 // 값 검증: `--flag` 다음 토큰이 없거나 `--`로 시작하면 값으로 흡수하지 않고 에러.
@@ -59,9 +66,34 @@ function assertSingleLineField(label, value) {
   if (/[\r\n]/.test(value)) fail(`${label} 에 개행(\\r/\\n) 불가 — H1/상태줄을 쪼갬. 한 줄로 재시도.`);
 }
 
+// 스캔/상대경로 기준 루트. 스크립트가 스킬 폴더로 이사했으므로 __dirname 기준을 못 쓴다 —
+//   실행자가 워크스페이스 루트에서 돌린다는 바인딩 규약에 맞춰 cwd 기준(=dashboard 루트에서 종전과 동일).
+function repoRoot(opts) {
+  return path.resolve(opts.root || process.env.ADR_ROOT || process.cwd());
+}
+
 function adrDir(opts) {
-  const d = opts.dir || process.env.ADR_DIR || path.join(REPO_ROOT, 'docs', 'decisions');
+  const d = opts.dir || process.env.ADR_DIR || path.join(repoRoot(opts), 'docs', 'decisions');
   return path.resolve(d);
+}
+
+// 프로젝트 파라미터를 한곳에서 해석(전부 dashboard 기본값으로 폴백).
+function resolveConfig(opts) {
+  const vocab = opts['status-vocab']
+    ? opts['status-vocab'].split(',').map((s) => s.trim()).filter(Boolean)
+    : DEFAULT_STATUS_VOCAB;
+  const anchorRoots = opts['anchor-roots'] !== undefined
+    ? opts['anchor-roots'].split(',').map((s) => s.trim()).filter(Boolean)
+    : DEFAULT_ANCHOR_ROOTS;
+  return {
+    dir: adrDir(opts),
+    root: repoRoot(opts),
+    indexName: opts['index-name'] || DEFAULT_INDEX_NAME,
+    statusVocab: vocab,
+    defaultStatus: opts['default-status'] || DEFAULT_DEFAULT_STATUS,
+    anchorRoots,
+    templatePath: opts.template ? path.resolve(opts.template) : null,
+  };
 }
 
 function fail(msg) { console.log(JSON.stringify({ ok: false, error: msg }, null, 2)); process.exit(1); }
@@ -86,18 +118,33 @@ function listAdrFiles(dir) {
 //   ① 첫 em-dash(—) 이전 부분(head)에서만 어휘를 찾는다 → 부분폐기 단서절의 "폐기"를 거짓검출 안 함.
 //   ② 어휘는 head 의 *선두 토큰* 으로 앵커 매치한다(includes 금지). "미확정"·"확정안" 같은 비어휘가
 //      "확정"으로 통과하면 안 된다. 한국어엔 \b 가 안 통하므로 어휘 뒤에 한글 음절이 안 오는지로 경계를 본다.
-function extractStatusVocab(statusLineBody) {
+function extractStatusVocab(statusLineBody, vocab = DEFAULT_STATUS_VOCAB) {
   const head = statusLineBody.split('—')[0]; // em-dash 단서절 컷
   // 마크다운 강조·취소선 제거 후 앞 공백 제거 → 선두 어휘가 문자열 맨 앞에 오게.
   const stripped = head.replace(/\*\*/g, '').replace(/~~.*?~~/g, '').replace(/^\s+/, '');
   // 선두 어휘 앵커: 문자열 시작에서 어휘 매치 + 그 직후가 한글 음절이 아니어야 함(공백/괄호/구두점/끝).
-  //   (어휘+한글 = "확정안" 같은 합성어 → 비어휘로 본다.)
-  const m = stripped.match(/^(확정|제안|폐기|거부)(?![가-힣])/);
+  //   (어휘+한글 = "확정안" 같은 합성어 → 비어휘로 본다.) 어휘 목록은 프로젝트별 주입(기본 = dashboard).
+  //   긴 어휘 우선(정렬)으로 접두 충돌 방지.
+  const alt = [...vocab].sort((a, b) => b.length - a.length).map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const m = stripped.match(new RegExp(`^(${alt})(?![가-힣])`));
   return m ? m[1] : null; // 어휘 없음 = 형식 위반 후보
 }
 
-// 한 ADR 파일 헤더 파싱: H1 제목 · 상태줄 전문 · 상태 어휘 · 관련줄 전문.
-function parseAdr(dir, file) {
+// 상태 줄에서 "상태:" 뒤 값 부분만 뽑는다. 두 형식 지원:
+//   ① dashboard 단독 줄: "- 상태: 확정 (...) — ..."           → "확정 (...) — ..."
+//   ② factory 결합 메타 줄: "- 날짜: ... · 상태: 채택 · 결정자: 사용자" → "채택"( · 구분자 앞까지)
+//   결합 줄에선 다음 " · " 구분자 전까지만 값으로 본다(뒤 필드 흡수 방지).
+function extractStatusSegment(line) {
+  const single = line.match(/^-\s*상태:\s*(.*)$/); // 상태가 줄의 첫 필드(dashboard)
+  if (single) return single[1].trim();
+  const embedded = line.match(/·\s*상태:\s*([^·]*)/); // 결합 메타 줄 안의 상태 필드(factory)
+  if (embedded) return embedded[1].trim();
+  return null;
+}
+
+// 한 ADR 파일 헤더 파싱: H1 제목 · 상태줄 값 · 상태 어휘 · 관련줄 전문.
+function parseAdr(dir, file, cfg = {}) {
+  const vocab = cfg.statusVocab || DEFAULT_STATUS_VOCAB;
   const full = path.join(dir, file);
   const text = fs.readFileSync(full, 'utf8');
   const lines = text.split(/\r?\n/);
@@ -110,13 +157,17 @@ function parseAdr(dir, file) {
       const h = l.match(/^#\s+ADR-(\d+):\s*(.*)$/);
       if (h) { title = h[2].trim(); continue; }
     }
-    if (statusLine === null && /^-\s*상태:/.test(l)) { statusLine = l.replace(/^-\s*상태:\s*/, '').trim(); statusLineIdx = i; }
-    else if (relatedLine === null && /^-\s*관련:/.test(l)) { relatedLine = l.replace(/^-\s*관련:\s*/, '').trim(); relatedLineIdx = i; }
+    // 상태 필드는 단독 줄(dashboard)이든 결합 메타 줄(factory)이든 "- ...상태:..." 불릿에서 추출.
+    if (statusLine === null && /^-\s/.test(l) && /상태:/.test(l)) {
+      const seg = extractStatusSegment(l);
+      if (seg !== null) { statusLine = seg; statusLineIdx = i; }
+    }
+    if (relatedLine === null && /^-\s*관련:/.test(l)) { relatedLine = l.replace(/^-\s*관련:\s*/, '').trim(); relatedLineIdx = i; }
     if (title !== null && statusLine !== null && relatedLine !== null) break;
   }
   return {
     num, file, text, lines, title, statusLine, relatedLine, statusLineIdx, relatedLineIdx,
-    vocab: statusLine ? extractStatusVocab(statusLine) : null,
+    vocab: statusLine ? extractStatusVocab(statusLine, vocab) : null,
   };
 }
 
@@ -133,14 +184,15 @@ function slugify(title) {
 
 const pad4 = (n) => String(n).padStart(4, '0');
 
-// ── 템플릿 (정본 = docs/decisions/README.md "템플릿" 절과 섹션 구조 동일) ──────
-// 본문 prose 슬롯은 비워 둔다 — 채우는 건 스킬/LLM(결정 날조 금지). 섹션 구조만 스캐폴드.
-function scaffold({ num, title, status, related }) {
-  const today = new Date().toISOString().slice(0, 10);
-  return `# ADR-${pad4(num)}: ${title}
+// ── 템플릿 ────────────────────────────────────────────────────────────────────
+// 기본 = dashboard 내장 템플릿(정본 = docs/decisions/README.md "템플릿" 절과 섹션 구조 동일).
+//   프로젝트가 --template <파일>로 다른 스캐폴드를 주입할 수 있다(예: factory 경량 템플릿).
+//   템플릿 파일 플레이스홀더: {{NUM}} {{TITLE}} {{STATUS}} {{DATE}} {{RELATED}}.
+//   본문 prose 슬롯은 비워 둔다 — 채우는 건 스킬/LLM(결정 날조 금지). 섹션 구조만 스캐폴드.
+const DASHBOARD_TEMPLATE = `# ADR-{{NUM}}: {{TITLE}}
 
-- 상태: ${status} (${today}, 근거: TODO)
-- 관련: ${related || 'TODO — CLAUDE.md §X · <파일:라인> · step-log SN'}
+- 상태: {{STATUS}} ({{DATE}}, 근거: TODO)
+- 관련: {{RELATED}}
 
 ## 맥락
 TODO — 무슨 문제를 풀어야 했나.
@@ -158,6 +210,18 @@ TODO — 실측·리뷰 등 결정의 뒷받침.
 ## 영향 / 불변식
 TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
 `;
+
+function scaffold({ num, title, status, related }, cfg = {}) {
+  const today = new Date().toISOString().slice(0, 10);
+  const tmpl = cfg.templatePath
+    ? fs.readFileSync(cfg.templatePath, 'utf8')
+    : DASHBOARD_TEMPLATE;
+  return tmpl
+    .replaceAll('{{NUM}}', pad4(num))
+    .replaceAll('{{TITLE}}', title)
+    .replaceAll('{{STATUS}}', status)
+    .replaceAll('{{DATE}}', today)
+    .replaceAll('{{RELATED}}', related || 'TODO — CLAUDE.md §X · <파일:라인> · step-log SN');
 }
 
 // 다음 번호: 폴더 파일 max+1. 쓰기 직전 재스캔으로 호출(race 완화).
@@ -172,7 +236,7 @@ function nextNum(dir) {
 // 본문에서 복원 불가하면 보존한다(자동 손실 금지). check 모드는 diff만, write만 실제 갱신.
 
 const INDEX_HEADER = '## 인덱스';
-const README_NAME = 'README.md';
+// 인덱스 파일명은 프로젝트별(cfg.indexName, 기본 README.md).
 
 // 본문에서 인덱스 한 행의 "상태 칸"을 만든다.
 // 우선순위: ① 관련줄에 Amended by 링크(부분폐기) → "<어휘> (부분 폐기 by ADR-N: <clause>)"
@@ -228,11 +292,12 @@ function parseIndexRows(readmeText) {
 }
 
 // 본문에서 인덱스 표 전체를 재생성하고, README 갱신 텍스트 + diff/경고를 돌려준다.
-function buildIndex(dir) {
-  const readmePath = path.join(dir, README_NAME);
+function buildIndex(cfg) {
+  const dir = cfg.dir;
+  const readmePath = path.join(dir, cfg.indexName);
   const readmeText = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, 'utf8') : null;
   const oldRows = readmeText ? parseIndexRows(readmeText) : new Map();
-  const adrs = listAdrFiles(dir).map((f) => parseAdr(dir, f.file));
+  const adrs = listAdrFiles(dir).map((f) => parseAdr(dir, f.file, cfg));
 
   const newRows = [];
   const diffs = [];
@@ -323,13 +388,13 @@ function buildIndex(dir) {
 }
 
 // ── 명령 핸들러 ───────────────────────────────────────────────────────────────
-function cmdNew(opts) {
+function cmdNew(opts, cfg) {
   if (!opts.title) fail('--title 필요');
   assertSingleLineField('--title', opts.title);
   assertSingleLineField('--related', opts.related);
-  const dir = adrDir(opts);
-  const status = opts.status || '확정';
-  if (!STATUS_VOCAB.includes(status)) fail(`--status 는 ${STATUS_VOCAB.join('/')} 중 하나`);
+  const dir = cfg.dir;
+  const status = opts.status || cfg.defaultStatus;
+  if (!cfg.statusVocab.includes(status)) fail(`--status 는 ${cfg.statusVocab.join('/')} 중 하나`);
   const num = nextNum(dir); // 쓰기 직전 재스캔
   const slug = slugify(opts.title);
   // 슬러그가 비면 NNNN-.md 같은 파일명이 생긴다(파싱·재실행 깨짐) → 거부.
@@ -337,11 +402,11 @@ function cmdNew(opts) {
   const file = `${pad4(num)}-${slug}.md`;
   const full = path.join(dir, file);
   if (fs.existsSync(full)) fail(`이미 존재: ${file}`);
-  fs.writeFileSync(full, scaffold({ num, title: opts.title, status, related: opts.related }), 'utf8');
-  out({ op: 'new', num, file, path: full, status, note: '본문 prose(맥락/결정/거부한 대안/근거/영향) 슬롯은 TODO — 스킬/LLM이 채운다. 인덱스는 index --write 로 재생성.' });
+  fs.writeFileSync(full, scaffold({ num, title: opts.title, status, related: opts.related }, cfg), 'utf8');
+  out({ op: 'new', num, file, path: full, status, note: '본문 prose 슬롯은 TODO — 스킬/LLM이 채운다. 인덱스는 index --write 로 재생성.' });
 }
 
-function cmdSupersede(opts) {
+function cmdSupersede(opts, cfg) {
   if (!opts.title) fail('--title 필요');
   if (!opts.old) fail('--old <N> 필요');
   assertSingleLineField('--title', opts.title);
@@ -349,18 +414,23 @@ function cmdSupersede(opts) {
   const mode = opts.mode;
   if (mode !== 'full' && mode !== 'partial') fail('--mode full|partial 필요');
   if (mode === 'partial' && !opts.clause) fail('partial 은 --clause "<바뀐 조항>" 필요');
-  const dir = adrDir(opts);
+  const dir = cfg.dir;
   const oldNum = parseInt(opts.old, 10);
   const oldEntry = listAdrFiles(dir).find((f) => f.num === oldNum);
   if (!oldEntry) fail(`옛 ADR 없음: ${oldNum}`);
 
   // ★원자성(ADR 데이터 무손상): 옛 ADR을 *먼저 완전 검증*한 뒤에야 새 파일을 쓴다.
   //   (새 파일을 먼저 쓰고 옛 파일을 나중에 검증하면, 중간 실패 시 새 파일만 남는 반쪽 상태가 된다.)
-  const oldAdr = parseAdr(dir, oldEntry.file);
+  const oldAdr = parseAdr(dir, oldEntry.file, cfg);
   const oldLines = oldAdr.lines.slice();
   if (mode === 'full') {
     // 옛 ADR에 상태줄이 있어야 폐기 표시를 박을 수 있다.
     if (oldAdr.statusLineIdx < 0) fail(`옛 ADR-${oldNum} 에 "- 상태:" 줄이 없어 폐기 표시를 못 박음(수동 처리 필요)`);
+    // full 폐기는 상태를 *독립 "- 상태:" 줄*로 재기록한다 — 결합 메타 줄(예: "- 날짜: … · 상태: … · 결정자: …")
+    //   형식에는 안전하게 못 박으므로(다른 필드 손실) 거부하고 수동 처리로 넘긴다.
+    if (!/^-\s*상태:/.test(oldAdr.lines[oldAdr.statusLineIdx])) {
+      fail(`옛 ADR-${oldNum} 상태가 독립 "- 상태:" 줄이 아님(결합 메타 줄) — full supersede 자동화 불가(수동 처리 필요): ${oldAdr.lines[oldAdr.statusLineIdx].trim()}`);
+    }
     // ★멱등성: 이미 전체폐기(상태줄에 "폐기 (Superseded by ADR-")면 재래핑 금지(취소선 ~~ 무한 중첩 방지).
     if (/폐기\s*\(Superseded by ADR-/i.test(oldAdr.statusLine)) {
       fail(`옛 ADR-${oldNum} 은 이미 전체폐기됨 — 재래핑 거부(취소선 중첩 방지): ${oldAdr.statusLine}`);
@@ -371,8 +441,8 @@ function cmdSupersede(opts) {
   }
 
   // 새 ADR 스캐폴드 메타 검증(파일은 옛 ADR 검증을 통과한 뒤에만 쓴다).
-  const status = opts.status || '확정';
-  if (!STATUS_VOCAB.includes(status)) fail(`--status 는 ${STATUS_VOCAB.join('/')} 중 하나`);
+  const status = opts.status || cfg.defaultStatus;
+  if (!cfg.statusVocab.includes(status)) fail(`--status 는 ${cfg.statusVocab.join('/')} 중 하나`);
   const newNum = nextNum(dir);
 
   // partial 멱등성: 옛 관련줄에 동일 "Amended by ADR-N" 이 이미 있으면 중복 append 금지.
@@ -394,7 +464,7 @@ function cmdSupersede(opts) {
   const relLink = mode === 'full'
     ? `Supersedes ADR-${pad4(oldNum)}`
     : `Amends ADR-${pad4(oldNum)} (${opts.clause})`;
-  fs.writeFileSync(newFull, scaffold({ num: newNum, title: opts.title, status, related: relLink + ' · TODO 나머지 관련' }), 'utf8');
+  fs.writeFileSync(newFull, scaffold({ num: newNum, title: opts.title, status, related: relLink + ' · TODO 나머지 관련' }, cfg), 'utf8');
 
   // 옛 ADR 변형(검증 시 확인한 줄·인덱스만 사용).
   if (mode === 'full') {
@@ -416,10 +486,9 @@ function cmdSupersede(opts) {
   });
 }
 
-function cmdIndex(opts) {
-  const dir = adrDir(opts);
-  const { readmePath, readmeText, newReadme, diffs, warnings, count } = buildIndex(dir);
-  if (readmeText === null) fail(`README 없음: ${readmePath}`);
+function cmdIndex(opts, cfg) {
+  const { readmePath, readmeText, newReadme, diffs, warnings, count } = buildIndex(cfg);
+  if (readmeText === null) fail(`인덱스 파일 없음: ${readmePath}`);
 
   const write = opts.write && !opts.check;
   if (write) {
@@ -435,9 +504,9 @@ function cmdIndex(opts) {
   }
 }
 
-function cmdLint(opts) {
-  const dir = adrDir(opts);
-  const adrs = listAdrFiles(dir).map((f) => parseAdr(dir, f.file));
+function cmdLint(opts, cfg) {
+  const dir = cfg.dir;
+  const adrs = listAdrFiles(dir).map((f) => parseAdr(dir, f.file, cfg));
   const findings = [];
 
   // ① 중복·빠진 번호
@@ -509,7 +578,7 @@ function cmdLint(opts) {
   //    존재하지 않거나 폐기된 ADR을 코드가 아직 가리키면 후보.
   const validNums = new Set(adrs.map((a) => a.num));
   const deprecatedNums = new Set(adrs.filter((a) => a.vocab === '폐기').map((a) => a.num));
-  const anchors = scanCodeAnchors();
+  const anchors = scanCodeAnchors(cfg);
   for (const an of anchors) {
     if (!validNums.has(an.num)) findings.push({ kind: 'orphan-anchor-missing', num: an.num, ref: an.ref, detail: `코드 앵커 // ADR-${pad4(an.num)} 가 존재하지 않는 ADR을 가리킴` });
     else if (deprecatedNums.has(an.num)) findings.push({ kind: 'orphan-anchor-deprecated', num: an.num, ref: an.ref, advisory: true, detail: `코드 앵커 // ADR-${pad4(an.num)} 가 폐기된 ADR을 가리킴(폐기된 결정을 코드가 아직 따를 수 있음 — 확인 권고)` });
@@ -521,8 +590,11 @@ function cmdLint(opts) {
 
 // 코드 경로(crates/, src/)에서만 `// ADR-NNNN` 긁기. docs/ 제외(rg 노이즈 차단).
 // node 내장만 — 디렉터리 재귀 직접 구현. 텍스트 파일만 정규식 스캔.
-function scanCodeAnchors() {
-  const roots = ['crates', 'src', 'src-tauri', 'scripts'].map((d) => path.join(REPO_ROOT, d)).filter((d) => fs.existsSync(d));
+//   스캔 루트·기준 경로는 cfg(프로젝트별) — anchorRoots 가 비면 앵커 스캔 자체를 생략(코드 없는 소비처).
+function scanCodeAnchors(cfg) {
+  const base = cfg.root;
+  if (!cfg.anchorRoots.length) return [];
+  const roots = cfg.anchorRoots.map((d) => path.join(base, d)).filter((d) => fs.existsSync(d));
   const SKIP_DIR = new Set(['node_modules', 'target', 'dist', '.git', 'docs']);
   const CODE_EXT = new Set(['.rs', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.css', '.toml', '.json']);
   const ANCHOR_RE = /\/\/\s*ADR-(\d+)/g; // 코드 주석 // ADR-NNNN 만(문서 본문 "ADR-" 참조 제외)
@@ -539,7 +611,7 @@ function scanCodeAnchors() {
         try { text = fs.readFileSync(p, 'utf8'); } catch { continue; }
         let m;
         ANCHOR_RE.lastIndex = 0;
-        while ((m = ANCHOR_RE.exec(text))) anchors.push({ num: parseInt(m[1], 10), ref: path.relative(REPO_ROOT, p).replace(/\\/g, '/') });
+        while ((m = ANCHOR_RE.exec(text))) anchors.push({ num: parseInt(m[1], 10), ref: path.relative(base, p).replace(/\\/g, '/') });
       }
     }
   };
@@ -550,18 +622,19 @@ function scanCodeAnchors() {
 // ── 진입 ──────────────────────────────────────────────────────────────────────
 const { cmd, opts, errors } = parseArgs(process.argv.slice(2));
 if (errors.length) fail(`인자 오류: ${errors.join('; ')}`);
+const cfg = resolveConfig(opts);
 switch (cmd) {
-  case 'new': cmdNew(opts); break;
-  case 'supersede': cmdSupersede(opts); break;
-  case 'index': cmdIndex(opts); break;
-  case 'lint': cmdLint(opts); break;
+  case 'new': cmdNew(opts, cfg); break;
+  case 'supersede': cmdSupersede(opts, cfg); break;
+  case 'index': cmdIndex(opts, cfg); break;
+  case 'lint': cmdLint(opts, cfg); break;
   default:
     console.log(JSON.stringify({ ok: false, error: 'usage', usage: [
-      'node scripts/adr.mjs new --title "<제목>" [--status 확정|제안] [--dir <폴더>]',
-      'node scripts/adr.mjs supersede --old <N> --mode full --title "<제목>" [--dir <폴더>]',
-      'node scripts/adr.mjs supersede --old <N> --mode partial --clause "<조항>" --title "<제목>" [--dir <폴더>]',
-      'node scripts/adr.mjs index [--check | --write] [--dir <폴더>]',
-      'node scripts/adr.mjs lint [--dir <폴더>]',
+      'node <경로>/adr.mjs new --title "<제목>" [--status ...] [--dir <폴더>] [--template <파일>] [--index-name <이름>] [--status-vocab a,b,c] [--default-status <값>] [--root <루트>] [--anchor-roots a,b]',
+      'node <경로>/adr.mjs supersede --old <N> --mode full --title "<제목>" [--dir <폴더>]',
+      'node <경로>/adr.mjs supersede --old <N> --mode partial --clause "<조항>" --title "<제목>" [--dir <폴더>]',
+      'node <경로>/adr.mjs index [--check | --write] [--dir <폴더>] [--index-name <이름>]',
+      'node <경로>/adr.mjs lint [--dir <폴더>] [--status-vocab a,b,c] [--anchor-roots a,b]',
     ] }, null, 2));
     process.exit(1);
 }

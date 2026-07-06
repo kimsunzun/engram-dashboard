@@ -34,7 +34,7 @@
 | 노드 | 도구 | 상태 |
 |---|---|---|
 | 리서치 | `/research` | ✅ |
-| ADR(채번·양방향·인덱스·lint) | `/adr` + `scripts/adr.mjs` | ✅ |
+| ADR(채번·양방향·인덱스·lint) | `/adr` + `.claude/skills/adr/scripts/adr.mjs`(스킬 내장) | ✅ |
 | 단계 게이트 | `/review`(단계 인자) · `/qa` | ✅ |
 | step-log 기록 | (수동) | 수동 |
 | 문서 lint/CI(고아·링크·freshness) | — | 나중 (hard 보강) |

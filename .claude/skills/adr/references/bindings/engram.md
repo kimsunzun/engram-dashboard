@@ -6,27 +6,32 @@
 
 ## 스크립트 실명령 (골격 §2 "스크립트 호출"에 주입)
 
-서기 작업은 `scripts/adr.mjs`(node 내장만, JSON 출력 — cdp.mjs 결)가 결정적으로 한다. **워크스페이스 루트에서** 실행한다.
+서기 작업은 **스킬 폴더 안** `scripts/adr.mjs`(node 내장만, JSON 출력 — cdp.mjs 결)가 결정적으로 한다. 스크립트가 스킬과 함께 소비처로 이동한다(자족 스킬). **워크스페이스 루트(= dashboard repo 루트)에서** 실행한다. `<skill>` = 이 스킬 폴더 경로(배포처 `.claude/skills/adr/`).
+
+engram(dashboard)의 실값은 **전부 스크립트 기본값과 동일**하다 — 그래서 dashboard에선 파라미터 플래그 없이(폴더만 기본) 호출한다:
+
+- ADR 폴더 = `docs/decisions/`(스크립트 기본) · 인덱스 파일 = `README.md`(기본) · 상태 어휘 = `확정/제안/폐기/거부`(기본) · 기본 상태 = `확정`(기본) · 템플릿 = dashboard 내장 템플릿(기본, `<skill>/references/formats/adr.template.md`와 동일 구조) · 코드 앵커 루트 = `crates,src,src-tauri,scripts`(기본).
 
 ```bash
 # new — 채번(max+1, 쓰기 직전 재스캔) + 스캐폴드 파일 생성. 본문 prose 슬롯은 TODO(스킬이 채움).
-node scripts/adr.mjs new --title "<한 줄 제목>" [--status 확정|제안]
+node <skill>/scripts/adr.mjs new --title "<한 줄 제목>" [--status 확정|제안]
 
 # supersede 전체 — 새 ADR 스캐폴드 + 옛 status→폐기(기존 status 취소선 보존) + 양방향 Supersedes/Superseded by.
-node scripts/adr.mjs supersede --old <N> --mode full    --title "<새 제목>" [--status ...]
+node <skill>/scripts/adr.mjs supersede --old <N> --mode full    --title "<새 제목>" [--status ...]
 
 # supersede 부분 — 새 ADR 스캐폴드 + 옛 status 유지 + 양방향 Amends/Amended by (바뀐 조항 단서).
-node scripts/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<새 제목>"
+node <skill>/scripts/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<새 제목>"
 
 # index — 본문 H1·상태 스캔해 README 인덱스 표 재생성. 기본 --check(diff만, 안 고침), --write만 실제 갱신.
-node scripts/adr.mjs index --check     # 점검(read-only diff·경고)
-node scripts/adr.mjs index --write     # 실제 재생성(본문서 파생 가능한 것만, 큐레이션 셀 보존)
+node <skill>/scripts/adr.mjs index --check     # 점검(read-only diff·경고)
+node <skill>/scripts/adr.mjs index --write     # 실제 재생성(본문서 파생 가능한 것만, 큐레이션 셀 보존)
 
 # lint — 정합성 점검(보고 전용, read-only). JSON에 error/advisory 구분.
-node scripts/adr.mjs lint
+node <skill>/scripts/adr.mjs lint
 ```
 
-- **격리 테스트** — `--dir <폴더>` 또는 `ADR_DIR` 환경변수로 대상 폴더를 바꿔 실데이터 밖에서 dry-run. 기본 = `docs/decisions/`.
+- **격리 테스트** — `--dir <폴더>` 또는 `ADR_DIR` 환경변수로 대상 폴더를 바꿔 실데이터 밖에서 dry-run. 기본 = `docs/decisions/`(cwd 기준). 스캔/상대경로 기준 루트는 `--root`(기본 = cwd).
+- **파라미터 플래그(멀티 소비처)** — 스크립트는 여러 소비처를 하나로 섬긴다. dashboard는 위 기본값이 실값이라 플래그 불필요. 다른 소비처는 `--dir · --index-name · --template · --status-vocab a,b,c · --default-status · --anchor-roots a,b`로 실값을 주입한다(각 프로젝트 바인딩 소관).
 - **호출 순서** — `new`/`supersede`로 파일을 만든 뒤 **본문 prose를 채우고**, 그 다음 `index --write`로 인덱스를 재생성한다(스캐폴드만으론 prose가 TODO라 인덱스 제목이 임시값일 수 있음 — prose 먼저, 인덱스 나중).
 
 ## ADR 폴더 + 파일명 규약 (골격 §2에 주입)
@@ -38,6 +43,8 @@ node scripts/adr.mjs lint
 ## 템플릿 실체 (골격 §2 prose 채우기에 주입)
 
 `docs/decisions/README.md`의 "템플릿" 절이 정본이다 — 섹션 구조(제목 / 상태 / 관련 / 맥락 / 결정 / 거부한 대안 / 근거 / 영향·불변식). 스크립트 스캐폴드가 이 구조로 빈 슬롯(`TODO`)을 만들고, 스킬이 §1에서 받은 내용으로 TODO를 메운다. **섹션 구조는 건드리지 않는다**(스크립트·README 정본 그대로). 여기 복붙하지 않는다(rot).
+
+engram은 스크립트 **내장 기본 템플릿**을 그대로 쓴다(별도 `--template` 불필요) — 그 구조를 파일로 뽑은 사본이 `<skill>/references/formats/adr.template.md`(다른 소비처가 `--template`으로 가리킬 수 있는 형태). 내장 기본과 이 파일이 어긋나면 README.md·스크립트 내장을 정본으로 보고 이 사본을 고친다.
 
 ## 인덱스 위치·형식 + 재생성 (골격 §2 "인덱스 재생성"에 주입)
 
