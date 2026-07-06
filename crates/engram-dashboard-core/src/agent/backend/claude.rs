@@ -160,24 +160,32 @@ impl AgentBackend for ClaudeBackend {
 /// ★1 호출 = 완결된 유저 턴 1개(FIX 6a)★: `text` 를 유저 턴 1줄로 통째 감싼다 — 부분/한 글자
 ///   텍스트를 넘기면 그 조각이 그대로 한 턴이 돼 대화가 깨진다. 호출자(AgentSession.write_input →
 ///   RichSlot·M2)가 **완성된 메시지 전체**를 넘길 책임이다(계약 정본 = session.write_input 주석).
-/// ★ADR-0004/0044 불변식★: 이 JSON 스키마(`{"type":"user","message":{...}}`)는 **이 함수 안에만**
-///   존재한다. 스키마가 backend/claude.rs 밖으로 새면 ADR-0004(claude 지식 격리) 위반이다.
+/// ★ADR-0004/0044 불변식★: 이 JSON 스키마(`{"type":"user","message":{...},"uuid":…}`)는 **이 함수
+///   안에만** 존재한다. 스키마가 backend/claude.rs 밖으로 새면 ADR-0004(claude 지식 격리) 위반이다.
 ///   transport(StdioTransport)·session·통로는 최종 바이트만 알고 이 형태를 모른다.
+/// ★uuid dedup 계약(공식 VS Code 확장 방식)★: 우리가 심은 `uuid` 를 top-level 에 실으면, claude 가
+///   `--replay-user-messages` 로 되울린 user 라인이 **이 uuid 를 그대로 보존**하고 `"isReplay":true` 를
+///   단다(실측 확정, 2026-07-06). decoder 가 그 line-level uuid 를 user 블록 json 에 실어 그대로
+///   통과시키고, 프론트 accumulator 가 uuid 로 dedup 한다(합성 에코 uuid == replay uuid → 한 개).
+///   그래서 여기서 심는 uuid 는 입력-시점 합성 에코(user_text_echo_json)와 **반드시 같아야** 한다 —
+///   호출자(session.write_input)가 한 번 생성해 양쪽에 넘긴다(session 은 불투명 Uuid 토큰만 앎).
 /// ★정확한 escape★: 따옴표·개행·유니코드는 serde_json 이 처리한다 — 문자열 포맷팅으로 손조립 금지
 ///   (`"` 미escape 시 stdin JSON 파서가 깨진다).
 /// claude 는 라인 단위로 stdin 을 파싱하므로 반드시 `\n` 으로 종단한다.
 ///
 /// ★키 순서★: `serde_json::json!`(Value=BTreeMap)는 키를 알파벳순으로 재배열한다. claude 는 임의
-///   순서를 받지만, 스키마를 사양(`{"type":"user","message":{"role":"user","content":[…]}}`) 그대로
-///   드러내려고 **typed struct**로 직렬화한다 — serde 는 struct 필드를 선언 순서대로 쓰므로 순서가
-///   결정적이고 사양과 일치한다. escape 는 serde_json 이 처리(손조립 금지).
-pub(crate) fn wrap_user_turn(text: &str) -> Vec<u8> {
+///   순서를 받지만, 스키마를 사양(`{"type":"user","message":{"role":"user","content":[…]},"uuid":…}`)
+///   그대로 드러내려고 **typed struct**로 직렬화한다 — serde 는 struct 필드를 선언 순서대로 쓰므로
+///   순서가 결정적이고 사양과 일치한다. escape 는 serde_json 이 처리(손조립 금지).
+pub(crate) fn wrap_user_turn(text: &str, uuid: Uuid) -> Vec<u8> {
     // stream-json 유저 턴 스키마(선언 순서 = 직렬화 순서). `type` 은 Rust 예약어라 rename.
     #[derive(serde::Serialize)]
     struct UserTurn<'a> {
         #[serde(rename = "type")]
         kind: &'static str,
         message: UserMessage<'a>,
+        // 우리가 통제하는 메시지 uuid — replay 가 그대로 보존한다(dedup 키).
+        uuid: String,
     }
     #[derive(serde::Serialize)]
     struct UserMessage<'a> {
@@ -197,11 +205,48 @@ pub(crate) fn wrap_user_turn(text: &str) -> Vec<u8> {
             role: "user",
             content: [ContentBlock { kind: "text", text }],
         },
+        uuid: uuid.to_string(),
     };
     // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
     let mut line = serde_json::to_string(&turn).unwrap_or_default();
     line.push('\n');
     line.into_bytes()
+}
+
+/// 입력-시점 유저 에코의 `Structured{kind:"user"}` json 페이로드를 만든다(ADR-0044/0045).
+///
+/// ★왜 입력 시점에 만드나★: json(stream-json) 모드는 PTY 처럼 입력이 즉시 로컬 에코되지 않는다 —
+///   claude 가 `--replay-user-messages` 로 유저 턴을 되울릴 때까지(왕복 지연) 화면에 안 뜬다.
+///   그래서 write_input 성공 직후 세션 층(session.rs)이 **합성 유저 이벤트**를 core.emit 해 터미널의
+///   즉시 에코를 흉내낸다. 그 뒤 claude 가 되울린 replay 중복은 프론트 accumulator 가 uuid 로 dedup 한다
+///   (decoder 는 억제하지 않고 uuid 를 실어 그대로 통과 — 아래 shape 계약).
+///
+/// ★uuid dedup shape 계약(load-bearing, blunt-suppress → uuid dedup 교체)★: 이 json 은 decoder 가
+///   유저 text 블록에 대해 만드는 것과 **동일한 shape**(`{"type":"text","text":<raw>,"uuid":"X"}`)여야
+///   한다. decoder 는 replay 된 user 라인의 각 블록에 line-level uuid(우리가 stdin 에 심은 값 그대로)를
+///   `uuid` 키로 얹어 `Structured{kind:"user", json}` 로 낸다(consume_block 참조). 프론트 accumulator 는
+///   user item 을 이 `uuid` 로 dedup 한다 → 이 합성 에코(uuid=X)와 replay 에코(uuid=X)가 정확히 한 개로
+///   합쳐진다. 그래서 여기 uuid 는 같은 write_input 이 stdin(wrap_user_turn)에 심은 uuid 와 **반드시
+///   동일**하다(호출자 session.write_input 이 한 번 생성해 양쪽에 넘김).
+///   스키마(블록 형태·uuid 위치)는 claude 지식이라 이 함수(backend/claude.rs)에만 존재한다(ADR-0004 격리).
+/// ★escape★: 따옴표·개행·유니코드는 serde_json 이 처리(손조립 금지 — wrap_user_turn 과 동일 규율).
+pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
+    // decoder 가 user replay 라인에서 만드는 블록과 동형: {"type":"text","text":<raw>,"uuid":"X"}.
+    #[derive(serde::Serialize)]
+    struct TextBlock<'a> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        text: &'a str,
+        // dedup 키 — replay 에코가 실어 오는 uuid 와 같은 값(자리 대체가 아니라 uuid 로 합쳐짐).
+        uuid: String,
+    }
+    let block = TextBlock {
+        kind: "text",
+        text,
+        uuid: uuid.to_string(),
+    };
+    // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
+    serde_json::to_string(&block).unwrap_or_default()
 }
 
 // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
@@ -361,12 +406,18 @@ impl ClaudeStreamDecoder {
                     None => return,
                 };
                 let message_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
+                // ★user replay dedup 키(blunt-suppress → uuid dedup 교체)★: replay 된 user 라인은
+                //   우리가 stdin 에 심은 line-level `uuid` 를 그대로 보존한다(실측 2026-07-06). 그 uuid 를
+                //   여기서 뽑아 각 user 블록 json 에 실어 통과시키면(consume_block), 프론트 accumulator 가
+                //   합성 입력-시점 에코(같은 uuid)와 uuid 로 합친다. line-level 이라 블록 루프 밖에서 1회 추출.
+                //   assistant 라인엔 이 개념이 없어 None(consume_block 이 assistant arm 에선 uuid 미사용).
+                let line_uuid = value.get("uuid").and_then(|v| v.as_str());
                 let blocks = match msg.get("content").and_then(|c| c.as_array()) {
                     Some(arr) => arr,
                     None => return, // content 가 배열이 아니면(스키마 이탈) skip
                 };
                 for block in blocks {
-                    Self::consume_block(role, block, message_id.as_deref(), events);
+                    Self::consume_block(role, block, message_id.as_deref(), line_uuid, events);
                 }
             }
             // result = 턴 종료. usage 가 있으면 토큰을 추가 emit(선택적).
@@ -438,10 +489,14 @@ impl ClaudeStreamDecoder {
     }
 
     /// content[] 한 블록 → OutputEvent. 매핑 근거는 각 arm 주석(정본 = 과업 매핑표 + parse.ts).
+    ///
+    /// `line_uuid`: user 라인의 line-level `uuid`(replay dedup 키). user-role 블록에만 실린다 —
+    ///   assistant arm 은 무시. blunt-suppress → uuid dedup 교체(아래 user 분기 참조).
     fn consume_block(
         role: &str,
         block: &serde_json::Value,
         message_id: Option<&str>,
+        line_uuid: Option<&str>,
         events: &mut Vec<OutputEvent>,
     ) {
         // ★user 라인 블록은 통째로 Structured{kind:"user"} 로 보존★: OutputEvent 에 role 개념이
@@ -449,7 +504,30 @@ impl ClaudeStreamDecoder {
         //   표현할 수 없다 → 원본 블록을 그대로 직렬화해 탈출구로 넘긴다. (블록 type 별로 쪼개지
         //   않는다 — user 턴은 렌더층이 통째로 해석.)
         if role == "user" {
-            events.push(Self::structured("user", block));
+            // ★blunt-suppress → uuid dedup 교체(ADR-0044/0045)★: 예전엔 user-role text 블록을 **무조건
+            //   억제**했다 — 입력-시점 합성 에코와 중복이라는 이유였지만, resume(과거 대화 재개)을 켜면
+            //   과거 user text 가 전부 사라지는 버그였다(합성 에코를 만든 적 없는 라인까지 삭제). 이제
+            //   억제하지 않고, line-level uuid 를 블록 json 에 실어 그대로 통과시킨다. 프론트 accumulator 가
+            //   uuid 로 dedup 한다 — 방금 보낸 메시지의 replay(uuid == 합성 에코 uuid)만 한 개로 합쳐지고,
+            //   과거/비매칭 uuid 의 user text 는 전부 보존된다(vanish 회귀 제거).
+            //   ★tool_result 안전(불변 유지)★: user-role 라인은 (a) 유저 텍스트 입력 에코와 (b) 도구
+            //     결과(tool_result 블록)를 함께 실어 올 수 있다. 둘 다 여기서 Structured{kind:"user"} 로
+            //     보존한다(억제 없음). 우리는 라인의 **모든** 블록에 같은 line-level uuid 를 실어 통과시키지만,
+            //     프론트 accumulator 의 dedup 은 `type==="text"` 블록에만 적용된다(extractUserUuid 가 비-text
+            //     블록엔 null 반환) — 합성 에코가 만드는 블록이 단일 text 뿐이라 dedup 짝도 text 에서만 생기기
+            //     때문이다. 그래서 한 라인에 text(에코) + tool_result 가 함께 와도 tool_result 는 같은 uuid 를
+            //     공유하지만 dedup 대상이 아니라 **항상 보존**된다(multi-block tool_result 소실 방지 — HIGH FIX).
+            //   uuid 가 있으면 블록 json 에 `uuid` 키를 얹어 shape 를 합성 에코(user_text_echo_json)와
+            //   일치시킨다. 없으면(과거 라인·비-replay) 원본 그대로 — accumulator 는 uuid 없는 user item 을
+            //   dedup 하지 않고 각각 보존한다.
+            let json = match line_uuid {
+                Some(u) => Self::user_block_with_uuid(block, u),
+                None => block.to_string(),
+            };
+            events.push(OutputEvent::Structured {
+                kind: "user".to_string(),
+                json,
+            });
             return;
         }
 
@@ -516,6 +594,26 @@ impl ClaudeStreamDecoder {
         OutputEvent::Structured {
             kind: kind.to_string(),
             json: value.to_string(),
+        }
+    }
+
+    /// user replay 블록에 line-level `uuid` 를 얹어 직렬화(dedup 키 부착).
+    ///
+    /// ★shape 계약★: user_text_echo_json 이 만드는 합성 에코(`{"type":…,…,"uuid":"X"}`)와 동형이
+    ///   되도록 원본 블록 객체에 top-level `uuid` 키를 추가한다. 원본이 JSON object 가 아니면(스키마
+    ///   이탈) uuid 를 얹을 자리가 없어 원본 그대로 직렬화한다(방어적 — 정상 replay 블록은 항상 object).
+    ///   블록이 이미 `uuid` 를 갖고 있어도 line-level(우리 통제값)로 덮는다 — dedup 키의 단일 출처.
+    fn user_block_with_uuid(block: &serde_json::Value, uuid: &str) -> String {
+        match block.as_object() {
+            Some(map) => {
+                let mut owned = map.clone();
+                owned.insert(
+                    "uuid".to_string(),
+                    serde_json::Value::String(uuid.to_string()),
+                );
+                serde_json::Value::Object(owned).to_string()
+            }
+            None => block.to_string(),
         }
     }
 }
@@ -795,19 +893,180 @@ mod tests {
     // ── ADR-0044/0004: 입력 wrapping(stdin 유저 턴 JSON) 골든 ─────────────────────
     #[test]
     fn wrap_user_turn_exact_line_and_newline_terminated() {
-        let bytes = wrap_user_turn("hello");
-        // 정확한 라인 + \n 종단.
-        assert_eq!(
-            bytes,
-            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n".to_vec()
+        // ★uuid dedup 계약★: 우리가 심은 uuid 가 top-level 에 실려야 replay 가 그대로 되울린다.
+        let id = Uuid::new_v4();
+        let bytes = wrap_user_turn("hello", id);
+        // 정확한 라인 + \n 종단(선언 순서 = 직렬화 순서: type, message, uuid).
+        let expected = format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"hello\"}}]}},\"uuid\":\"{id}\"}}\n"
         );
+        assert_eq!(bytes, expected.into_bytes());
         assert_eq!(*bytes.last().unwrap(), b'\n', "라인 종단 \\n 필수");
+        // 되파싱해 uuid 가 top-level 인지 확인(replay 보존 위치).
+        let v: serde_json::Value =
+            serde_json::from_str(String::from_utf8(bytes.clone()).unwrap().trim_end()).unwrap();
+        assert_eq!(v["uuid"], id.to_string());
+    }
+
+    // ── ADR-0044/0045: 입력-시점 유저 에코 json 헬퍼(user_text_echo_json) ─────────────
+    #[test]
+    fn user_text_echo_json_matches_decoder_uuid_block_shape() {
+        // ★uuid dedup shape 계약★: 합성 유저 에코 json 은 decoder 가 replay user 블록에 대해 만드는
+        //   shape 와 동형이어야 한다(uuid dedup 키): {"type":"text","text":<raw>,"uuid":"X"}.
+        let id = Uuid::new_v4();
+        let json = user_text_echo_json("hello", id);
+        let expected = format!(r#"{{"type":"text","text":"hello","uuid":"{id}"}}"#);
+        assert_eq!(json, expected);
+        // escape 확인(serde_json 위임): 따옴표·개행·유니코드 + uuid 보존.
+        let json2 = user_text_echo_json("a\"b\nc 한글", id);
+        let v: serde_json::Value = serde_json::from_str(&json2).unwrap();
+        assert_eq!(v["type"], "text");
+        assert_eq!(v["text"], "a\"b\nc 한글");
+        assert_eq!(v["uuid"], id.to_string());
+    }
+
+    // ── ADR-0044/0045: user-role replay dedup(blunt-suppress → uuid dedup 교체) ────────
+    #[test]
+    fn user_role_text_block_passes_through_with_line_uuid() {
+        // (a)+(d) 매칭 replay 에코: claude 가 --replay-user-messages 로 되울린 user text 라인은
+        //   line-level uuid + isReplay:true 를 단다. decoder 는 **억제하지 않고** 그 uuid 를 블록 json 에
+        //   실어 Structured{kind:"user"} 로 통과시킨다(프론트가 uuid 로 합성 에코와 dedup). 예전엔 여기서
+        //   무조건 억제했다(blunt-suppress) — resume 시 과거 user text vanish 버그라 uuid dedup 으로 교체.
+        let line = concat!(
+            r#"{"type":"user","message":{"role":"user","content":["#,
+            r#"{"type":"text","text":"내가 친 메시지"}"#,
+            r#"]},"uuid":"11111111-1111-1111-1111-111111111111","isReplay":true}"#,
+            "\n",
+        );
+        let ev = decode_all(line.as_bytes());
+        assert_eq!(
+            tags(&ev),
+            vec!["structured:user"],
+            "replay user text 는 억제 아님 — uuid 실어 통과: {ev:?}"
+        );
+        // 블록 json 에 line-level uuid 가 실려야 프론트 accumulator 가 합성 에코와 dedup 한다.
+        match &ev[0] {
+            OutputEvent::Structured { kind, json } => {
+                assert_eq!(kind, "user");
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["type"], "text");
+                assert_eq!(v["text"], "내가 친 메시지");
+                assert_eq!(
+                    v["uuid"], "11111111-1111-1111-1111-111111111111",
+                    "line-level uuid 가 블록 json 에 실려야 함(dedup 키)"
+                );
+            }
+            other => panic!("expected Structured user, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_role_past_text_block_without_uuid_is_preserved_vanish_guard() {
+        // (b) vanish 회귀 가드: uuid 없는(=과거/비-replay) user text 블록은 절대 사라지면 안 된다 —
+        //   예전 blunt-suppress 는 이걸 통째로 삭제해 resume 시 과거 대화를 소실시켰다. 이제 uuid 없이
+        //   원본 그대로 보존(프론트는 uuid 없는 user item 을 dedup 하지 않고 각각 렌더).
+        let line = concat!(
+            r#"{"type":"user","message":{"role":"user","content":["#,
+            r#"{"type":"text","text":"과거에 친 메시지"}"#,
+            "]}}\n", // uuid 없음
+        );
+        let ev = decode_all(line.as_bytes());
+        assert_eq!(
+            tags(&ev),
+            vec!["structured:user"],
+            "uuid 없는 과거 user text 는 보존돼야 함(vanish 회귀 금지): {ev:?}"
+        );
+        match &ev[0] {
+            OutputEvent::Structured { json, .. } => {
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["text"], "과거에 친 메시지");
+                assert!(
+                    v.get("uuid").is_none(),
+                    "uuid 없으면 붙이지 않음(원본 보존)"
+                );
+            }
+            other => panic!("expected Structured user, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_role_tool_result_block_still_emitted_regression_guard() {
+        // ★회귀 가드★: tool_result 는 user-role 라인에 실려 오지만 유저 입력 에코가 아니라 실제 도구
+        //   결과 데이터다 — 억제하면 안 된다. type != "text" 인 user-role 블록은 그대로 Structured 로.
+        let line = concat!(
+            r#"{"type":"user","message":{"role":"user","content":["#,
+            r#"{"tool_use_id":"toolu_1","type":"tool_result","content":"파일 내용"}"#,
+            "]}}\n",
+        );
+        let ev = decode_all(line.as_bytes());
+        assert_eq!(
+            tags(&ev),
+            vec!["structured:user"],
+            "user-role tool_result 는 억제 대상 아님 — 보존돼야 함"
+        );
+        // 원본 블록이 통째 보존됐는지(tool_use_id·content 유실 없음).
+        match &ev[0] {
+            OutputEvent::Structured { kind, json } => {
+                assert_eq!(kind, "user");
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["type"], "tool_result");
+                assert_eq!(v["tool_use_id"], "toolu_1");
+                assert_eq!(v["content"], "파일 내용");
+            }
+            other => panic!("expected Structured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_role_mixed_blocks_all_preserved_with_line_uuid() {
+        // (c 확장) 한 user replay 라인에 text(에코) + tool_result 가 섞여 오면 **둘 다 보존**한다
+        //   (uuid dedup 교체 — 예전엔 text 만 억제했다). 각 블록에 line-level uuid 가 실린다.
+        let line = concat!(
+            r#"{"type":"user","message":{"role":"user","content":["#,
+            r#"{"type":"text","text":"echo"},"#,
+            r#"{"type":"tool_result","tool_use_id":"t1","content":"r"}"#,
+            r#"]},"uuid":"22222222-2222-2222-2222-222222222222","isReplay":true}"#,
+            "\n",
+        );
+        let ev = decode_all(line.as_bytes());
+        assert_eq!(
+            tags(&ev),
+            vec!["structured:user", "structured:user"],
+            "text·tool_result 둘 다 보존(각각 structured:user)"
+        );
+        // 두 블록 모두 line-level uuid 를 실어야 한다.
+        for e in &ev {
+            if let OutputEvent::Structured { json, .. } = e {
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["uuid"], "22222222-2222-2222-2222-222222222222");
+            }
+        }
+    }
+
+    #[test]
+    fn tool_fixture_user_tool_result_survives_suppression() {
+        // 실측 fixture 회귀: tool.jsonl 의 user-role tool_result 라인은 그대로 보존된다(uuid dedup 교체
+        //   후에도 시퀀스 불변 — tool_result 는 억제 대상이었던 적 없고, uuid 부착은 tags 시퀀스에 무영향).
+        let events = decode_all(TOOL_JSONL.as_bytes());
+        assert_eq!(
+            tags(&events),
+            vec![
+                "structured:thinking",
+                "tool:Read",
+                "structured:user",
+                "structured:thinking",
+                "text",
+                "usage",
+                "done",
+            ],
+            "tool_result(user-role) 는 억제 후에도 structured:user 로 보존돼야 함"
+        );
     }
 
     #[test]
     fn wrap_user_turn_escapes_quotes_newlines_unicode() {
         // 따옴표·개행·유니코드(한글)·백슬래시가 serde_json 으로 정확히 escape 돼야 stdin 파서가 안 깨진다.
-        let bytes = wrap_user_turn("a\"b\nc\\d 한글 😀");
+        let bytes = wrap_user_turn("a\"b\nc\\d 한글 😀", Uuid::new_v4());
         let line = String::from_utf8(bytes).unwrap();
         // 한 줄(마지막 \n 외 내부 개행 없음) — 개행은 \\n 으로 escape.
         assert_eq!(

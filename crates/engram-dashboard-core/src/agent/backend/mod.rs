@@ -131,16 +131,52 @@ pub enum InputEncoder {
 
 impl InputEncoder {
     /// 입력 바이트 인코딩. Raw 는 무변환 복사(passthrough) — 터미널 경로 바이트 동일 보장.
-    pub fn encode(&self, bytes: &[u8]) -> Vec<u8> {
+    ///
+    /// `msg_uuid`: 이 유저 턴의 메시지 uuid(replay dedup 키). ClaudeStreamJson 은 stdin user 라인에
+    ///   심어 claude 가 replay 시 그대로 되울리게 한다(uuid dedup 계약 — claude.rs wrap_user_turn).
+    ///   같은 write_input 이 이 uuid 를 input_echo_event 에도 넘겨 합성 에코와 replay 를 uuid 로 합친다.
+    ///   Raw(터미널·shell)는 uuid 를 쓰지 않는다(무시) — 바이트 동일 보장 유지.
+    pub fn encode(&self, bytes: &[u8], msg_uuid: Uuid) -> Vec<u8> {
         match self {
             InputEncoder::Raw => bytes.to_vec(),
             // json 모드 입력은 텍스트다 — UTF-8 로 해석(lossy)해 claude 유저 턴으로 감싼다.
-            // escape/스키마는 claude.rs 단독(ADR-0004).
+            // escape/스키마·uuid 부착은 claude.rs 단독(ADR-0004).
             // ※from_utf8_lossy(FIX 6b): 비-UTF8 입력은 U+FFFD 로 치환돼 손상될 수 있으나, json 모드
             //   입력은 텍스트 챗 메시지라 UTF-8 이 전제다(MVP=텍스트 챗, ADR-0044) → 허용.
             InputEncoder::ClaudeStreamJson => {
-                claude::wrap_user_turn(&String::from_utf8_lossy(bytes))
+                claude::wrap_user_turn(&String::from_utf8_lossy(bytes), msg_uuid)
             }
+        }
+    }
+
+    /// 입력 성공 직후 세션 층이 core.emit 할 **입력-시점 유저 에코 이벤트**를 만든다(ADR-0044/0045).
+    ///
+    /// ★왜 여기(backend) 인가★: 터미널(Raw)은 PTY 가 입력을 즉시 로컬 에코하지만, json 모드는 claude
+    ///   가 되울릴 때까지 화면에 안 뜬다. 그 왕복 지연을 없애려 write_input 직후 합성 유저 이벤트를
+    ///   emit 한다. 어떤 encoder 가 이 에코가 필요한지·이벤트의 json 스키마가 뭔지는 backend 지식이라
+    ///   session 이 아니라 여기서 판정한다(ADR-0004 — session 은 encoder 태그만 들고 형태를 모른다).
+    ///   Raw(터미널)는 None 을 돌려줘 세션이 아무 것도 emit 하지 않는다(PTY 가 이미 에코 — 중복 방지).
+    ///
+    /// ★decoder uuid dedup 과 짝(blunt-suppress → uuid dedup 교체)★: 이 이벤트는 decoder 가 replay 된
+    ///   user-role 블록에 대해 만드는 것과 동일 shape(`Structured{kind:"user", json:{"type":"text",
+    ///   "text":<raw>,"uuid":"X"}}`)이다. `msg_uuid` 가 stdin(encode)에 심은 값과 같아, 이후 claude 가
+    ///   되울린 replay(같은 uuid)를 프론트 accumulator 가 uuid 로 dedup 해 한 개로 합친다. 예전엔 decoder 가
+    ///   user text 블록을 blunt 억제해 이 합성 에코가 "자리 대체"했으나, resume 시 과거 대화가 사라지는
+    ///   버그라 uuid dedup 으로 바꿨다(과거/비매칭 uuid user text 는 전부 보존).
+    pub fn input_echo_event(
+        &self,
+        bytes: &[u8],
+        msg_uuid: Uuid,
+    ) -> Option<crate::agent::types::OutputEvent> {
+        match self {
+            // 터미널·shell: PTY 로컬 에코가 이미 있음 → 합성 에코 불필요(중복 방지).
+            InputEncoder::Raw => None,
+            // json 모드 claude: 유저 텍스트를 즉시 구조화 유저 이벤트로 에코. json 스키마·uuid 부착은
+            // claude.rs 단독(ADR-0004). from_utf8_lossy 근거는 encode 와 동일(텍스트 챗 전제).
+            InputEncoder::ClaudeStreamJson => Some(crate::agent::types::OutputEvent::Structured {
+                kind: "user".to_string(),
+                json: claude::user_text_echo_json(&String::from_utf8_lossy(bytes), msg_uuid),
+            }),
         }
     }
 }
@@ -200,18 +236,64 @@ mod tests {
 
     #[test]
     fn raw_encoder_is_byte_identical() {
-        // 터미널 경로 회귀: Raw 는 입력 바이트를 그대로 돌려준다(변형 0).
+        // 터미널 경로 회귀: Raw 는 입력 바이트를 그대로 돌려준다(변형 0). msg_uuid 는 무시된다.
         let input = b"echo hi\r\n\x1b[A\x03";
-        assert_eq!(InputEncoder::Raw.encode(input), input.to_vec());
+        assert_eq!(
+            InputEncoder::Raw.encode(input, Uuid::new_v4()),
+            input.to_vec()
+        );
+    }
+
+    // ── ADR-0044/0045: 입력-시점 유저 에코 이벤트 dispatch(input_echo_event) — uuid dedup ──────
+    #[test]
+    fn input_echo_event_json_mode_emits_structured_user_with_uuid() {
+        use crate::agent::types::OutputEvent;
+        // json 모드 → Some(Structured{kind:"user", json:{"type":"text","text":<raw>,"uuid":"X"}}).
+        //   uuid 는 write_input 이 encode 에 넘긴 것과 같은 값(dedup 키) — 여기선 부착 여부만 검증.
+        let id = Uuid::new_v4();
+        let ev = InputEncoder::ClaudeStreamJson
+            .input_echo_event(b"hi there", id)
+            .expect("json 모드 → 합성 유저 에코 이벤트");
+        match ev {
+            OutputEvent::Structured { kind, json } => {
+                assert_eq!(kind, "user");
+                let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert_eq!(v["type"], "text");
+                assert_eq!(v["text"], "hi there");
+                assert_eq!(
+                    v["uuid"],
+                    id.to_string(),
+                    "합성 에코에 msg_uuid 부착(dedup 키)"
+                );
+            }
+            other => panic!("expected Structured user, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_echo_event_raw_is_none() {
+        // 터미널·shell(Raw) → None. PTY 로컬 에코가 이미 있어 합성 에코를 추가하면 중복이 된다.
+        assert!(
+            InputEncoder::Raw
+                .input_echo_event(b"echo hi\r\n", Uuid::new_v4())
+                .is_none(),
+            "Raw 는 합성 유저 에코를 만들지 않아야 함(PTY 에코 중복 방지)"
+        );
     }
 
     #[test]
     fn claude_stream_json_encoder_wraps_and_terminates() {
-        let out = InputEncoder::ClaudeStreamJson.encode(b"hi");
+        let id = Uuid::new_v4();
+        let out = InputEncoder::ClaudeStreamJson.encode(b"hi", id);
         assert_eq!(*out.last().unwrap(), b'\n');
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("\"type\":\"user\""));
         assert!(s.contains("\"text\":\"hi\""));
+        // stdin user 라인에 msg_uuid 가 실려야 replay 가 그대로 되울린다(dedup 계약).
+        assert!(
+            s.contains(&id.to_string()),
+            "stdin user 라인에 msg_uuid 포함"
+        );
     }
 
     // ── S15 B3: output_decoder dispatch(입력 encoder 의 대칭) ──────────────────────

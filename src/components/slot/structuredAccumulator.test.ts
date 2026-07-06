@@ -20,6 +20,22 @@ function toolCall(name: string, argsJson = '{}', id: string | null = null): Stru
   return { type: 'ToolCall', name, args_json: argsJson, id, turn_id: null, message_id: null }
 }
 const messageDone: StructuredEvent = { type: 'MessageDone', turn_id: null, message_id: null }
+/** user Structured 이벤트(합성 에코·replay 공통 shape: {"type":"text","text":…,"uuid":"X"}). */
+function userEcho(text: string, uuid: string | null): StructuredEvent {
+  const block: Record<string, unknown> = { type: 'text', text }
+  if (uuid !== null) block['uuid'] = uuid
+  return { type: 'Structured', kind: 'user', json: JSON.stringify(block) }
+}
+/** user-role tool_result 블록(decoder 가 line-level uuid 를 실어 통과 — 도구 결과 데이터).
+ *  실측 fixture(tool.jsonl)의 tool_result user 라인은 top-level uuid 를 가지므로 여기서도 uuid 부착. */
+function userToolResult(toolUseId: string, content: string, uuid: string | null): StructuredEvent {
+  const block: Record<string, unknown> = { type: 'tool_result', tool_use_id: toolUseId, content }
+  if (uuid !== null) block['uuid'] = uuid
+  return { type: 'Structured', kind: 'user', json: JSON.stringify(block) }
+}
+/** item.label 시퀀스(structured item 판별용). */
+const labels = (items: StructuredItem[]): (string | undefined)[] =>
+  items.map((it) => (it.kind === 'structured' ? it.label : undefined))
 /** item.kind 시퀀스 — 순서 단언용. */
 const kinds = (items: StructuredItem[]): string[] => items.map((it) => it.kind)
 /** item.itemId 시퀀스 — id 단언용. */
@@ -71,6 +87,102 @@ describe('StructuredEventAccumulator', () => {
     expect(acc.snapshot()).toEqual([
       { kind: 'structured', label: 'CustomEvent', json: '{"x":1}', itemId: 0 },
     ])
+  })
+
+  // ── ★user uuid dedup(blunt-suppress → uuid dedup 교체)★ ──
+  it('(a) 같은 uuid 의 user 에코(합성) + replay → 정확히 한 개만 남는다', () => {
+    const acc = new StructuredEventAccumulator()
+    // 입력-시점 합성 에코(uuid=U) → 이후 claude replay 가 같은 uuid=U 로 되울림.
+    acc.feed(encode(userEcho('내 메시지', 'U')))
+    acc.feed(encode(userEcho('내 메시지', 'U')))
+    expect(labels(acc.snapshot())).toEqual(['user'])
+    expect(acc.snapshot().length).toBe(1)
+  })
+
+  it('(b) uuid 가 다른 user text 블록(과거/비매칭)은 전부 보존된다 — vanish 회귀 가드', () => {
+    const acc = new StructuredEventAccumulator()
+    // resume 로 되살아난 과거 대화: 서로 다른 uuid 를 가진 여러 user 턴.
+    acc.feed(encode(userEcho('과거 1', 'A')))
+    acc.feed(encode(userEcho('과거 2', 'B')))
+    acc.feed(encode(userEcho('현재', 'C')))
+    expect(labels(acc.snapshot())).toEqual(['user', 'user', 'user'])
+    expect(acc.snapshot().length).toBe(3)
+  })
+
+  it('(c) uuid 없는 user text item(과거 비-replay)은 dedup 하지 않고 보존', () => {
+    const acc = new StructuredEventAccumulator()
+    // uuid 없는 동일 내용 user item 두 개 → dedup 대상 아님(둘 다 남는다).
+    acc.feed(encode(userEcho('uuid 없음', null)))
+    acc.feed(encode(userEcho('uuid 없음', null)))
+    expect(labels(acc.snapshot())).toEqual(['user', 'user'])
+  })
+
+  // ── ★HIGH FIX: multi-block user 라인에서 tool_result 가 dedup 으로 소실되지 않는다★ ──
+  it('(c-real) uuid 를 가진 tool_result 도 dedup 하지 않고 보존(실측 fixture 정합)', () => {
+    const acc = new StructuredEventAccumulator()
+    // 실측 fixture(tool.jsonl)의 tool_result user 라인은 top-level uuid 를 갖는다 → 블록 json 에 uuid 실림.
+    // 그래도 tool_result 는 dedup 대상이 아니라(type!=="text") 항상 보존 — 같은 uuid 두 번 와도 둘 다 남는다.
+    acc.feed(encode(userToolResult('toolu_1', '파일 내용', 'RESULT-UUID')))
+    acc.feed(encode(userToolResult('toolu_1', '파일 내용', 'RESULT-UUID')))
+    expect(labels(acc.snapshot())).toEqual(['user', 'user'])
+  })
+
+  it('(c-multi) 같은 uuid 의 text 에코 + tool_result → 둘 다 보존(tool_result 소실 금지)', () => {
+    const acc = new StructuredEventAccumulator()
+    // 한 user replay 라인의 두 블록(text 에코 + tool_result)이 같은 line-level uuid=U 로 온다.
+    // 예전 결함: text(uuid=U)를 seenUserUuids 에 넣고 tool_result(같은 uuid U)를 "이미 본 uuid" 로
+    //   스킵 → tool_result 소실. 이제 dedup 은 text 블록에만 적용되므로 tool_result 는 항상 보존.
+    acc.feed(encode(userEcho('echo', 'U')))
+    acc.feed(encode(userToolResult('t1', 'r', 'U')))
+    // 둘 다 남는다(text 1 + tool_result 1).
+    expect(labels(acc.snapshot())).toEqual(['user', 'user'])
+    expect(acc.snapshot().length).toBe(2)
+    // 두 번째 item 이 tool_result 인지 json 으로 확인(소실 안 됨).
+    const second = acc.snapshot()[1]
+    expect(second.kind).toBe('structured')
+    if (second.kind === 'structured') {
+      const parsed = JSON.parse(second.json) as { type: string; tool_use_id: string }
+      expect(parsed.type).toBe('tool_result')
+      expect(parsed.tool_use_id).toBe('t1')
+    }
+  })
+
+  it('(c-multi) tool_result 보존 중에도 text 에코 자체는 여전히 uuid dedup 된다', () => {
+    const acc = new StructuredEventAccumulator()
+    // 합성 에코(text, uuid=U) → replay 라인의 text(uuid=U) + tool_result(uuid=U).
+    // text 에코는 합성분과 합쳐져 1개, tool_result 는 보존 → 총 2개.
+    acc.feed(encode(userEcho('echo', 'U'))) // 입력-시점 합성 에코
+    acc.feed(encode(userEcho('echo', 'U'))) // replay text — dedup 되어 스킵
+    acc.feed(encode(userToolResult('t1', 'r', 'U'))) // replay tool_result — 보존
+    expect(labels(acc.snapshot())).toEqual(['user', 'user'])
+    expect(acc.snapshot().length).toBe(2)
+    // 첫 item = text(dedup 후 1개), 둘째 = tool_result.
+    const first = acc.snapshot()[0]
+    if (first.kind === 'structured') {
+      expect((JSON.parse(first.json) as { type: string }).type).toBe('text')
+    }
+  })
+
+  it('user uuid dedup 은 kind!=="user" 탈출구 이벤트에는 영향 없다', () => {
+    const acc = new StructuredEventAccumulator()
+    // user 아닌 Structured 는 uuid 개념 없음 — 같은 json 이어도 dedup 안 됨.
+    acc.feed(encode({ type: 'Structured', kind: 'thinking', json: '{"thinking":"t"}' }))
+    acc.feed(encode({ type: 'Structured', kind: 'thinking', json: '{"thinking":"t"}' }))
+    expect(labels(acc.snapshot())).toEqual(['thinking', 'thinking'])
+  })
+
+  it('reset → uuid dedup 상태도 초기화(같은 uuid 를 다시 볼 수 있다 · replay idempotence)', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(userEcho('m', 'U')))
+    acc.feed(encode(userEcho('m', 'U')))
+    expect(acc.snapshot().length).toBe(1)
+
+    // 웹뷰 리로드 replay: reset 후 히스토리 전체가 다시 흐른다 → 동일 스냅샷으로 재수렴.
+    acc.reset()
+    acc.feed(encode(userEcho('m', 'U')))
+    acc.feed(encode(userEcho('m', 'U')))
+    expect(acc.snapshot().length).toBe(1)
+    expect(labels(acc.snapshot())).toEqual(['user'])
   })
 
   // ── ★순서 보존★: 이벤트 도착 순서 그대로 item 이 쌓인다(text↔칩 인터리브) ──

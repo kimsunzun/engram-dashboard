@@ -47,6 +47,16 @@ export class StructuredEventAccumulator {
   private turnDone = false
   // 단조 증가 item id — reset() 시 0 복귀. 같은 이벤트열을 refeed 하면 동일 id 를 재현(replay idempotence).
   private nextId = 0
+  // ★user 메시지 uuid dedup(blunt-suppress → uuid dedup 교체, text 블록 한정)★: json 모드는 write_input
+  //   직후 세션이 합성 유저 에코(Structured{kind:"user", json 에 uuid 부착})를 먼저 흘리고, 이후 claude 가
+  //   --replay-user-messages 로 **같은 uuid** 를 그대로 되울린다(백엔드 decoder 가 line-level uuid 를
+  //   블록 json 에 실어 통과). 여기서 이미 본 uuid 의 user item 은 스킵해 정확히 한 개만 남긴다.
+  //   ★dedup 대상은 `type==="text"` user 블록뿐★: 합성 에코가 만드는 블록이 text 하나뿐이라(dedup 짝도
+  //   text 에서만 발생), 같은 replay 라인의 tool_result 등 비-text 블록은 같은 uuid 를 공유해도 dedup 하지
+  //   않고 보존한다(extractUserUuid 가 non-text 에 null 반환 — multi-block tool_result 소실 방지 HIGH FIX).
+  //   uuid 없는 user item(과거/비-replay)도 dedup 하지 않고 전부 보존한다(vanish 방지).
+  //   reset() 이 비우므로 replay idempotence 유지(refeed 시 같은 uuid 를 같은 순서로 다시 보고 재수렴).
+  private seenUserUuids = new Set<string>()
 
   /**
    * tag1 payload(StructuredEvent JSON UTF-8 바이트) 1건을 먹인다. 라이브 경로는 항상 Uint8Array,
@@ -107,10 +117,25 @@ export class StructuredEventAccumulator {
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
         this.turnDone = true
         break
-      case 'Structured':
+      case 'Structured': {
+        // ★user uuid dedup(text 블록 한정)★: user 항목은 합성 입력-시점 에코와 claude replay 가
+        //   **같은 uuid** 로 두 번 온다(백엔드 uuid dedup 계약). 이미 본 uuid 면 스킵해 한 개만 남긴다.
+        //   단 dedup 대상은 `type==="text"` user 블록뿐이다 — 합성 에코가 만드는 블록이 text 하나뿐이라
+        //   dedup 짝도 text 에서만 생긴다. 한 replay 라인의 tool_result 등 비-text 블록은 같은 line-level
+        //   uuid 를 공유하더라도 extractUserUuid 가 null 을 돌려주므로 dedup 대상이 아니라 항상 보존된다
+        //   (multi-block 에서 tool_result 소실 방지 — HIGH FIX). uuid 가 없으면(과거/비-replay) 그대로 보존.
+        //   (kind!=='user' 탈출구 이벤트는 dedup 대상 아님 — uuid 개념이 없다.)
+        if (ev.kind === 'user') {
+          const uuid = extractUserUuid(ev.json)
+          if (uuid !== null) {
+            if (this.seenUserUuids.has(uuid)) break // 중복(합성 에코 ↔ replay) → 스킵
+            this.seenUserUuids.add(uuid)
+          }
+        }
         // 탈출구 이벤트 — 알 수 없는 종류(kind)를 칩으로 흘려 유실 방지. turnDone 은 건드리지 않는다.
         this.items.push({ kind: 'structured', label: ev.kind, json: ev.json, itemId: this.nextId++ })
         break
+      }
       case 'MessageDone':
         // ADR-0045: decoder(backend claude.rs)가 claude 결과 한 줄·한 턴마다 MessageDone 을 정확히 1회
         // 발행하며, turn_id 는 현재 항상 None 이다. 따라서 MessageDone 이 유일하게 신뢰할 수 있는 턴
@@ -140,5 +165,36 @@ export class StructuredEventAccumulator {
     this.items = []
     this.turnDone = false
     this.nextId = 0
+    this.seenUserUuids.clear()
+  }
+}
+
+/**
+ * user Structured item 의 json 에서 dedup 키 `uuid` 를 뽑는다(합성 에코 · replay 공통 부착). 절대 throw 안 함.
+ * 백엔드가 심는 shape: `{"type":"text","text":…,"uuid":"X"}`(합성 에코) / replay 블록도 같은 위치에 uuid.
+ * uuid 가 없거나 문자열이 아니면 null(→ 호출자가 dedup 하지 않고 보존).
+ *
+ * ★dedup 은 `type==="text"` 블록에만★(multi-block 소실 방지 — HIGH FIX): 백엔드 decoder 는
+ *   한 user replay 라인의 **모든 content 블록**(text·tool_result 등)에 같은 line-level uuid 를
+ *   실어 통과시킨다(claude.rs consume_block). 합성 에코가 만들 수 있는 블록은 오직 단일
+ *   `{"type":"text"}` 뿐이므로(user_text_echo_json), dedup 짝이 생기는 것도 text 블록뿐이다.
+ *   여기서 type 을 안 보고 uuid 만 뽑으면, 한 라인의 text(에코) + tool_result 가 **같은 uuid** 를
+ *   공유해 tool_result 가 "이미 본 uuid" 로 스킵돼 소실된다(도구 OUT 본문 사라짐). 그래서
+ *   `type==="text"` 인 user 블록만 uuid 를 반환하고, tool_result 등 비-text 블록은 null →
+ *   dedup 제외 → 항상 보존한다(uuid 유무 무관). (권장 seam — 프론트 국소 수정, dedup 의도와 일치.)
+ */
+function extractUserUuid(json: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (parsed !== null && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>
+      // 합성 에코와 dedup 짝이 되는 건 text 블록뿐 — 비-text(tool_result 등)는 dedup 제외(항상 보존).
+      if (obj['type'] !== 'text') return null
+      const uuid = obj['uuid']
+      if (typeof uuid === 'string' && uuid.length > 0) return uuid
+    }
+    return null
+  } catch {
+    return null
   }
 }

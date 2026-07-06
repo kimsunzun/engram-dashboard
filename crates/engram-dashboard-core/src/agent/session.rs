@@ -110,8 +110,30 @@ impl AgentSession {
     ///   **완성된 메시지 전체를 한 번에** 보내야 한다(부분 입력 누적은 프론트 입력창 몫). 터미널 경로는
     ///   Raw 라 기존대로 스트리밍 바이트 호출이 정상(이 계약은 json 모드 한정).
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        let encoded = self.encoder.encode(bytes);
-        self.transport.send_input(InputEvent::Raw(encoded))
+        // ★이 유저 턴의 메시지 uuid(replay dedup 키)★: 한 write_input 당 하나 생성해 (a) stdin user
+        //   라인(encode)과 (b) 입력-시점 합성 에코(input_echo_event) **양쪽에 같은 값**으로 넘긴다.
+        //   json 모드에서 claude 가 replay 로 이 uuid 를 그대로 되울리므로(실측), 프론트가 합성 에코와
+        //   replay 를 uuid 로 합쳐 하나만 남긴다(중복 제거). session 은 불투명 Uuid 토큰만 알고 json
+        //   형태·uuid 부착 위치는 모른다(ADR-0004 격리 — 스키마 지식은 backend/claude.rs 단독).
+        //   Raw(터미널) encoder 는 이 uuid 를 무시하므로 터미널 경로 바이트는 불변이다.
+        let msg_uuid = uuid::Uuid::new_v4();
+        let encoded = self.encoder.encode(bytes, msg_uuid);
+        self.transport.send_input(InputEvent::Raw(encoded))?;
+
+        // ★ADR-0044/0045 · 왜: 입력-시점 유저 에코★: 터미널(Raw)은 PTY 가 입력을 즉시 로컬 에코하지만,
+        //   json(stream-json) 모드는 claude 가 `--replay-user-messages` 로 되울릴 때까지(왕복 지연)
+        //   유저 메시지가 화면에 안 뜬다. 그래서 send_input **성공 후**, encoder 가 json 모드면 동일한
+        //   유저 이벤트를 즉시 core.emit 해 터미널의 즉시 에코를 흉내낸다(체감 반응성). 이후 claude 가
+        //   되울린 replay 중복은 프론트 accumulator 가 uuid 로 dedup 한다(같은 msg_uuid) — decoder 는
+        //   억제하지 않고 uuid 를 실어 그대로 통과시킨다(blunt-suppress → uuid dedup 교체, backend/claude.rs).
+        //   과거/비매칭 uuid 의 user text(resume 재개분)는 dedup 되지 않아 전부 보존된다(vanish 회귀 제거).
+        //   encoder=Raw 면 None → 터미널 경로는 아무 것도 추가로 emit 하지 않아 기존 동작 불변.
+        //   ★락 규율(ADR-0006)★: 새 락 없이 core.emit 재사용 — emit 이 replay/subscribers 락을 짧게만
+        //   잡고 lock 밖 send 하는 규율을 그대로 탄다. send_input 성공 후 emit 이라 순서도 자연스럽다.
+        if let Some(event) = self.encoder.input_echo_event(bytes, msg_uuid) {
+            self.core.emit(event);
+        }
+        Ok(())
     }
 
     /// 터미널 크기 변경. transport.resize 성공 후에만 cols/rows atomic 갱신(? 연산자로 실패 시 옛 값 유지).
@@ -249,6 +271,33 @@ mod tests {
         fn agent_list_updated(&self, _agents: Vec<crate::agent::types::AgentInfo>) {}
     }
 
+    /// core 로 emit 된 출력 이벤트를 (kind, is_event) 로 수집하는 mock OutputSink —
+    /// write_input 의 입력-시점 유저 에코 emit(ADR-0044/0045)을 실 프로세스 없이 단언하기 위한 하네스.
+    struct EmitCapturingSink {
+        id: SinkId,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+    impl OutputSink for EmitCapturingSink {
+        fn send(
+            &self,
+            frame: crate::agent::types::OutputFrame<'_>,
+        ) -> Result<(), crate::agent::types::SinkError> {
+            use crate::agent::types::{OutputEvent, OutputPayload};
+            // 구조화 이벤트만 태그 문자열로 수집(Structured 는 "structured:<kind>", 그 외는 variant 명).
+            if let OutputPayload::Event(e) = frame.payload {
+                let tag = match e {
+                    OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
+                    other => format!("{other:?}"),
+                };
+                self.seen.lock().unwrap().push(tag);
+            }
+            Ok(())
+        }
+        fn sink_id(&self) -> SinkId {
+            self.id
+        }
+    }
+
     fn session_with(encoder: InputEncoder) -> (AgentSession, Arc<Mutex<Vec<Vec<u8>>>>) {
         let id = uuid::Uuid::new_v4();
         let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
@@ -298,6 +347,45 @@ mod tests {
         let s = String::from_utf8(line.clone()).unwrap();
         assert!(s.contains("\"type\":\"user\""), "user 턴 스키마: {s}");
         assert!(s.contains("\"text\":\"hello\""), "text 보존: {s}");
+    }
+
+    // ── ADR-0044/0045: 입력-시점 유저 에코 — json 모드는 emit, 터미널(Raw)은 안 함 ──────────
+    #[test]
+    fn write_input_json_mode_emits_input_time_user_echo() {
+        let (session, _captured) = session_with(InputEncoder::ClaudeStreamJson);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        session.subscribe(Arc::new(EmitCapturingSink {
+            id: uuid::Uuid::new_v4(),
+            seen: seen.clone(),
+        }));
+
+        session.write_input("안녕 클로드".as_bytes()).unwrap();
+
+        // json 모드 → 입력 직후 Structured{kind:"user"} 1건이 core 로 emit 돼야 한다(즉시 에코).
+        let got = seen.lock().unwrap();
+        assert_eq!(
+            *got,
+            vec!["structured:user".to_string()],
+            "json 모드 write_input 은 입력-시점 유저 에코 1건을 emit 해야 함"
+        );
+    }
+
+    #[test]
+    fn write_input_terminal_mode_does_not_emit_user_echo() {
+        // Raw(터미널·shell)는 PTY 로컬 에코가 이미 있어 합성 에코를 emit 하면 중복 → 아무 것도 emit 안 함.
+        let (session, _captured) = session_with(InputEncoder::Raw);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        session.subscribe(Arc::new(EmitCapturingSink {
+            id: uuid::Uuid::new_v4(),
+            seen: seen.clone(),
+        }));
+
+        session.write_input(b"echo hi\r\n").unwrap();
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "터미널(Raw) 경로는 입력-시점 유저 에코를 emit 하지 않아야 함(PTY 에코 중복 방지)"
+        );
     }
 
     // ── json 모드 세션 caps: StdioTransport ⊕ ClaudeBackend 합성 → 구조화 출력 + resize/interrupt false ──

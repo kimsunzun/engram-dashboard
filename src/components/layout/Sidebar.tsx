@@ -38,6 +38,7 @@ export default function Sidebar({ onToggle }: SidebarProps) {
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState('')
   const [busy, setBusy] = useState(false)
+  const [json, setJson] = useState(false)
   // 생성 실패 인라인 메시지 — 토스트/StatusBar 시스템이 없어 폼 안에 표시(MAJOR-3).
   const [error, setError] = useState<string | null>(null)
 
@@ -46,6 +47,7 @@ export default function Sidebar({ onToggle }: SidebarProps) {
     setName('')
     setCwd('')
     setBusy(false)
+    setJson(false)
     setError(null)
   }
 
@@ -56,8 +58,9 @@ export default function Sidebar({ onToggle }: SidebarProps) {
     setBusy(true)
     setError(null)
     // auto_restore=false: 부팅 자동 spawn 제외(ADR-0018 결정 4) — 재부팅해도 깡통으로 남는다.
+    // [임시/테스트] JSON(StreamJson) 스폰 — 정식은 §5 커맨드화(백로그: M2 spawn UI json 노출)로 대체 예정.
     agentClient
-      .createClaudeProfile(n, c, [], [], false)
+      .createClaudeProfile(n, c, [], [], false, json ? 'StreamJson' : 'Terminal')
       .then(() => refreshProfiles())
       .then(reset)
       .catch(e => {
@@ -119,6 +122,10 @@ export default function Sidebar({ onToggle }: SidebarProps) {
             onChange={e => setCwd(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') reset() }}
           />
+          <label style={{ fontFamily: 'var(--font-ui)', fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+            <input type="checkbox" checked={json} disabled={busy} onChange={e => setJson(e.target.checked)} />
+            JSON 모드 (StreamJson)
+          </label>
           <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
             <button style={BTN} onClick={reset} disabled={busy}>취소</button>
             <button
