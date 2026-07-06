@@ -39,4 +39,4 @@ ADR-0048은 채팅 렌더를 "Cline 잎 컴포넌트 verbatim 포트 + 우리 di
 - **빈(암호화) thinking 행 표시** — opus-4-8의 thinking은 암호화(평문 빈 문자열)라는 업스트림 동작이라, 내용이 비어도 "Thought" 라벨 행을 표시한다(비상호작용). sonnet은 평문 정상. (재디버깅 금지 — 업스트림 동작.)
 - **전송 = Enter-only(버튼 제거)** — RichSlot의 Enter/Shift+Enter/IME 가드(`isComposing||229`)·`send()` await-catch는 load-bearing 불변(회귀테스트가 Enter 경로로 이 동작을 지킨다). 버튼 제거가 이 로직을 바꾸지 않는다.
 - **의존성 델타(변경 보고 대상)** — 추가 `katex`·`remark-math`·`rehype-katex` / 제거 `class-variance-authority`·`@radix-ui/react-slot`·`unist-util-visit`·`marked`.
-- **앵커** — `slot/chat/` load-bearing 파일에 `// ADR-0050` 앵커(신규분부터 점진). 옛 `// ADR-0048` 앵커는 0050으로 갱신한다.
+- **앵커** — 채팅 렌더 dispatch/leaf load-bearing 파일에 `// ADR-0050` 앵커. `StructuredTextView.tsx`·그 테스트에 mislabel돼 있던 `// ADR-0049`(dispatch는 0048→0050 소관, 0049는 백엔드 thinking-token 주입)를 0050으로 교정. (ThoughtRow의 "암호화 thinking 근거절" 0049 인용은 정당 — 유지.)

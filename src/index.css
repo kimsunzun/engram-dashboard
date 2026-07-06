@@ -13,6 +13,7 @@
   --color-muted: var(--text-muted);
   --color-border: var(--border);
   --color-accent: var(--accent);
+  --color-elevated: var(--surface-elevated);
 }
 
 *, *::before, *::after {

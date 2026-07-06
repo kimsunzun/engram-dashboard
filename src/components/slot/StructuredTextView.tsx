@@ -1,4 +1,4 @@
-// ADR-0049: 구조화 채팅 렌더 dispatch — 우리 자체 채팅 leaf 컴포넌트(chat/*)에 우리 데이터 모델
+// ADR-0050: 구조화 채팅 렌더 dispatch — 우리 자체 채팅 leaf 컴포넌트(chat/*)에 우리 데이터 모델
 //   (StructuredItem 스트림)을 먹인다. 벤치마크 룩 = Claude Code VSCode 확장(1차 근사치, 사용자가
 //   스크린샷으로 후속 조정). 이전 라운드에서 도입했던 외부(Apache-2.0) 이식물은 전부 제거하고 자체
 //   구현으로 대체했다. leaf: ./chat/{Markdown,ThoughtRow,CopyButton}.
@@ -8,7 +8,7 @@
 //
 // ★레이아웃★: 메시지는 flat 세로 스택이며, 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)를 쓴다. 헤더는
 //   작은 lucide 아이콘 + bold 제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이
-//   Markdown full-width, user 는 확장 룩 버블(rounded-md border bg-surface), thinking 은 ThoughtRow.
+//   Markdown full-width, user 는 확장 룩 버블(rounded-md border bg-elevated), thinking 은 ThoughtRow.
 //
 // ★안전 파서 헬퍼(pretty/extractText/contentToText/parseToolResult/buildToolResultMap/shortArgs)★는
 //   우리 데이터-어댑터 로직이며 **절대 throw 하지 않는다**(bad json 폴백).
@@ -33,7 +33,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import type { StructuredItem } from './structuredAccumulator'
-// ADR-0049: 우리 자체 채팅 leaf 들(chat/*). 상세는 각 파일 헤더 참조.
+// ADR-0050: 우리 자체 채팅 leaf 들(chat/*). 상세는 각 파일 헤더 참조.
 //   ★Markdown(전체 마크다운) 은 assistant text 에만 쓴다. 도구 IN/OUT·탈출구 json 은 신뢰할 수 없는
 //   텍스트라 마크다운 파싱을 태우지 않고 InertCode(리터럴 <pre>)로만 그린다(FIX 2 — 아래 주석).
 import { Markdown } from './chat/Markdown'
@@ -375,10 +375,10 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
       if (parseToolResult(item.json)) return null
 
       if (item.label === 'user') {
-        // 사용자 발화 — 확장 룩 버블(rounded-md border bg-surface). whitespace-pre-line 으로 줄바꿈 보존.
+        // 사용자 발화 — 확장 룩 버블(rounded-md border bg-elevated). whitespace-pre-line 으로 줄바꿈 보존.
         return (
           <ChatRow key={k}>
-            <div className="rounded-md border border-border bg-surface px-3 py-2 my-1 whitespace-pre-line break-words text-foreground">
+            <div className="rounded-md border border-border bg-elevated px-3 py-2 my-1 whitespace-pre-line break-words text-foreground">
               {extractText(item.json, 'user')}
             </div>
           </ChatRow>
@@ -433,7 +433,7 @@ function renderItem(item: StructuredItem, results: Map<string, ToolResult>): Rea
 }
 
 /**
- * ADR-0049: 구조화 채팅 렌더 — flat 세로 스택(점선 레일 없음)으로 항목별 dispatch.
+ * ADR-0050: 구조화 채팅 렌더 — flat 세로 스택(점선 레일 없음)으로 항목별 dispatch.
  * items 를 한 번 pre-scan 해 tool_use_id → tool_result 맵을 만들고(도구 OUT 흡수), standalone tool_result
  * 는 제외. streaming(턴 활성)이면 스트림 끝에 ThoughtRow(pulse "Thinking…")를 붙인다.
  * 순수 렌더(props in, DOM out).

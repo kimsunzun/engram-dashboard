@@ -1,4 +1,4 @@
-// ADR-0049: StructuredTextView dispatch 테스트 — items 스트림의 각 kind 가 기대한 자체 채팅 컴포넌트/역할로
+// ADR-0050: StructuredTextView dispatch 테스트 — items 스트림의 각 kind 가 기대한 자체 채팅 컴포넌트/역할로
 //   매핑되는지 단언한다(순수 렌더 — 구독/누적 무관). 결정적 어댑터 동작(매핑·흡수·필터)을 검증하고, leaf
 //   내부 렌더(chat/*)는 스모크 수준만 본다(react-markdown 등 세부는 leaf 자체 테스트의 몫).
 
@@ -10,7 +10,7 @@ import type { StructuredItem } from './structuredAccumulator'
 
 afterEach(() => cleanup())
 
-describe('StructuredTextView dispatch (ADR-0049)', () => {
+describe('StructuredTextView dispatch (ADR-0050)', () => {
   it('text item → assistant markdown 본문으로 렌더된다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'hello **world**', itemId: 0 }]
     render(<StructuredTextView items={items} />)
@@ -258,7 +258,7 @@ describe('StructuredTextView dispatch (ADR-0049)', () => {
     expect(pres.some((p) => p.textContent?.includes('[link](http://evil.example)'))).toBe(true)
   })
 
-  // ── ADR-0049: flat 스택 룩 구조 ────────────────────────────────────────────────────
+  // ── ADR-0050: flat 스택 룩 구조 ────────────────────────────────────────────────────
   it('점선 타임라인 레일이 없다(flat 스택 구조)', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'hi', itemId: 0 },
@@ -271,16 +271,16 @@ describe('StructuredTextView dispatch (ADR-0049)', () => {
     expect(container.querySelector('.relative.pt-2\\.5.px-4')).toBeTruthy()
   })
 
-  it('structured label=user → 확장 룩 버블(rounded-md border bg-surface)로 렌더', () => {
+  it('structured label=user → 확장 룩 버블(rounded-md border bg-elevated)로 렌더', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'user', json: JSON.stringify({ text: 'do the thing' }), itemId: 0 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     const bubble = screen.getByText('do the thing')
-    // 확장 룩 유저 버블: rounded-md border bg-surface.
+    // 확장 룩 유저 버블: rounded-md border bg-elevated(다크에서 페이지보다 한 단계 밝은 배경 — 가시성).
     expect(bubble.className).toContain('rounded-md')
     expect(bubble.className).toContain('border')
-    expect(bubble.className).toContain('bg-surface')
+    expect(bubble.className).toContain('bg-elevated')
     // 사용자 박스는 편집/토글 버튼이 없는 plain 텍스트 박스다.
     expect(container.querySelectorAll('button').length).toBe(0)
   })

@@ -89,10 +89,12 @@
   word-break: break-word;
 }
 
-/* 표 */
+/* 표 — 확장처럼 내용 크기로(content-sized). full-width 로 늘리면 셀 적은 표가 거대해져 어색하다.
+   넓은 표는 컨테이너 폭에서 멈춘다(max-width). */
 .chat-markdown table {
   border-collapse: collapse;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   margin: 0.6em 0;
 }
 .chat-markdown th,
