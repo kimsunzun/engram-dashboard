@@ -16,7 +16,8 @@
         "label": "main",
         "title": "Engram Dashboard",
         "width": 1280,
-        "height": 800
+        "height": 800,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
       },
       {
         "label": "agent-tree",
@@ -25,7 +26,8 @@
         "width": 280,
         "height": 600,
         "decorations": true,
-        "title": "Agent Tree"
+        "title": "Agent Tree",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
       },
       {
         "label": "slot-popup",
@@ -34,7 +36,8 @@
         "width": 800,
         "height": 600,
         "decorations": true,
-        "title": "Slot Popup"
+        "title": "Slot Popup",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
       }
     ],
     "security": {

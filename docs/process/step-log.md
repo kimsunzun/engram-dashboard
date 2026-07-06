@@ -603,6 +603,7 @@
 - **정직 항목:** 루트 `cargo test`가 src-tauri 테스트 바이너리 DLL 로더 실패(STATUS_ENTRYPOINT_NOT_FOUND, WebView2Loader)로 중단 — 선재·변경 무관, 멤버별 전부 green(바인딩 드리프트 self-report). 격리 게이트 `rg "use tauri"`는 lib.rs:9 **주석 문자열** 1건 매치(가짜양성, 실제 import 0).
 - **부수:** QA가 구 Json 프로필(181e99d7)을 kill 과정에서 소실 → 동등 프로필 재생성(8690560a) + ThinkingRow 실측용 `JsonSonnet`(--model claude-sonnet-4-6) 프로필 추가. 빈 pre 직사각형은 fresh 대화에서 재현 안 됨(0건 — 구 대화 펜스 함정 잔재로 종결).
 - **잔여:** ① replay 빈 버그(ADR-0046 별건) ② opus thinking 가시화는 업스트림 대기(또는 "빈 thinking도 표시" 정책 = 사용자 결정 필요) ③ echo 작업(claude.rs·session.rs·mod.rs 미커밋분)은 게이트 미통과 상태로 워킹트리 유지.
+- **보안 후속(당일):** 사내 보안팀이 우리 앱 WebView2의 `--disable-features=…msSmartScreenProtection` 사용을 감지·중지 요청. 원인 규명 = **Tauri(wry)가 Windows에서 끼워 넣는 기본 인자**(우리 소스·스크립트에 없음 — 실행 프로세스 커맨드라인 + 레포 전수 검색으로 확인). 조치 = `src-tauri/tauri.conf.json` 창 3개에 `additionalBrowserArgs`를 명시해 기본값 대체(**SmartScreen만 제외**, msWebOOUI/msPdfOOUI 억제·autoplay 정책은 유지) → 클라이언트 재기동 실측으로 플래그 소멸 확인(CDP 정상).
 
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
