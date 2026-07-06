@@ -618,6 +618,13 @@
 - **게이트:** `/review code full`(doc-aware reviewer-deep + Codex blind) — 취합 FIX→재리뷰 PASS. **cross-family가 doc-aware 놓친 prototype-pollution(`in` 연산자 체인) 적출**(2회차 FIX = 고정 배열 멤버십). `/qa full`: 프론트 vitest 269/tsc 0/코어 격리 PASS · cargo는 실행 중 daemon.exe 링크 잠금(이 변경 무관, 컴파일 오류 아님) · cdp 실측 PASS(control surface·CSS 변수·localStorage 영속·prototype 가드 라이브) · **dot-rail live 시각은 활성 슬롯 empty로 미측정**(로직 단위테스트 + 리뷰 2인 기하 정합으로 커버).
 - **잔여:** rail 최종 시각 = 사용자 확장 스샷 반복 루프에서 확정(방침). 스샷 아티팩트는 `_wip/shots/`로 모음(gitignore 기존 관례).
 
+## json 모드 유저 에코 dedup = uuid/isReplay (blunt suppress 폐기) (2026-07-07, master, opus) · ADR-0052 · 커밋 dbced5a(로컬, push 보류)
+- **발단(사용자):** "JSON UI 마저 완성" → 범위 = 현 임시 체크박스 경로 검증·게이트. 이전 세션 미커밋 "Rust echo"(claude.rs·mod.rs·session.rs)는 실은 StreamJson 입력-시점 유저 에코 메커니즘.
+- **쟁점(리뷰 불일치→조사):** 초기 blunt suppress(user text 무조건 억제)에 `/review code full`에서 doc-aware PASS vs cross-family(Codex) BLOCK. 사용자 "OSS는 어떻게 푸나" 요구 → `/research medium`(수집 3인 + Codex 적대) → 표준 = correlation-id/pending 매칭, blunt는 안티패턴. **claude CLI 실측:** stdin uuid를 replay가 보존 + `isReplay:true`. **공식 VSCode 확장 코드 실측:** uuid dedup + transcript 저장. → 사용자 B(uuid dedup) 채택 결정.
+- **구현(ADR-0052, /implement critical):** 코더(복잡) **S1** 채택 — uuid를 stdin·합성 에코 양쪽 부착, decoder 억제 제거·uuid 실어 통과, 프론트 accumulator가 `type=="text"` user 블록만 uuid dedup. `/review code deep` 적대 3인 → multi-block(text+tool_result 동일 uuid) 소실 3인 일치 적출 → dedup을 text 블록 한정 FIX → 재리뷰 2인 PASS.
+- **게이트:** full build · core 144+통합 · protocol 42 · vitest 277 · tsc · fmt · 격리 PASS. workspace `cargo test`의 src-tauri lib 테스트 로드오류(`STATUS_ENTRYPOINT_NOT_FOUND`)는 안 건드린 crate 환경성 이슈(논리 실패 아님). **GUI 실측 미완** — 자율 백그라운드 앱 launch 실패 → 동작 미확인, **push 보류**(로컬 커밋 `dbced5a`만).
+- **미커밋 이월(이 라운드 밖):** `run-dashboard-clean.bat`·`docs/reference/architecture-overview.md`(세션 시작부터 미커밋, 이 기능 무관).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
