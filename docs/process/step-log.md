@@ -1,7 +1,7 @@
 # Step 타임라인 — Engram Dashboard
 
 언제·무엇을·어떻게 했는지 시간순 기록. 산출 문서와 커밋을 매핑한다.
-상세는 각 폴더 참조: `docs/process/S0-view-phase/` ~ `S15-backend-output-refine/`(스텝별 설계·브리핑·스파이크 — 폴더 없는 스텝도 있음). 핸드오프는 continue 스킬 관할(위치·규약 = 스킬 정본).
+상세는 각 폴더 참조: `docs/process/S0-view-phase/` ~ `S15-backend-output-refine/`(스텝별 설계·브리핑·스파이크 — 폴더 없는 스텝도 있음). 핸드오프는 handoff 스킬 관할(위치·규약 = 스킬 정본).
 
 **검증 3-게이트:** 코더(dco23 Opus / dcs24 Sonnet) → LLD 리뷰(dr26 Fable) → QA(dq25, build/lint/test).
 
