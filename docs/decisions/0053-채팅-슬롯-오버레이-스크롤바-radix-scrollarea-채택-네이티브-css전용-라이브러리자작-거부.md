@@ -1,18 +1,19 @@
 # ADR-0053: 채팅 슬롯 오버레이 스크롤바 = Radix ScrollArea 채택 (네이티브 CSS·전용 라이브러리·자작 거부)
 
 - 상태: 확정 (2026-07-07, 근거: /research medium + Codex cross-family 적대 리뷰 + package.json 실측)
-- 관련: CLAUDE.md §기술스택(Tailwind+shadcn)·§5 LLM 제어 · package.json:19 · RichSlot.tsx:181 · ADR-0047·0051 · step-log S15
+- 관련: CLAUDE.md §기술스택(Tailwind+shadcn)·§5 LLM 제어 · package.json:19 · src/components/slot/chat/ChatScrollArea.tsx · RichSlot.tsx · ADR-0047·0051 · step-log S15
 
 ## 맥락
 채팅 슬롯(구조화/JSON 출력) 스크롤 영역의 스크롤바 요구 5:
-(1) 진짜 overlay — 네이티브 스크롤바 숨기고 콘텐츠 위에 떠 공간 차지 0 · (2) 평소 숨김 · (3) hover 시 등장 · (4) hover 후 ~0.5s delay 뒤 표시 · (5) 얇은 다크 thumb, CSS 변수 커스터마이즈.
+(1) 진짜 overlay — 네이티브 스크롤바 숨기고 콘텐츠 위에 떠 공간 차지 0 · (2) 평소 숨김 · (3) 스크롤할 때만 등장 · (4) 스크롤 멈춘 뒤 ~0.5s 후 숨김 · (5) 얇은 다크 thumb, CSS 변수 커스터마이즈. (초기 요구는 "hover 후 0.5s 뒤 표시"였으나, GUI 실측서 채팅이 창을 꽉 채워 "영역 hover=상시 뜸"이 확인돼 scroll-트리거로 확정.)
 현재 = `overflow-y-auto` 한 줄(RichSlot.tsx:181) → WebView2 네이티브 회색 스크롤바(공간 점유·상시 표시)로 요구 전부 미충족.
 
 ## 결정
 스크롤 컨테이너를 **Radix ScrollArea(`@radix-ui/react-scroll-area`, shadcn `scroll-area` 래퍼)** 로 교체한다.
-- 요구 (1)(2)(3)(5) = Radix 기본(overlay · `type="hover"` · Tailwind/CSS-var 테마)으로 충족.
-- 요구 (4) 0.5s-delay-before-show = **CSS `transition-delay` 비대칭 패턴**(hover-on에 delay, hover-off 즉시)으로 얹는다.
-- 얇은 `ChatScrollArea` seam으로 감싸 교체 가능성 유지(컴포넌트는 seam에만 의존, 직접 Radix Root 노출 금지).
+- 요구 (1)(2)(5) = Radix 기본(overlay · 평소 숨김 · Tailwind/CSS-var 테마)으로 충족.
+- 요구 (3)(4) = **`type="scroll"` + `scrollHideDelay=500`** — 실제 스크롤(휠/드래그)할 때만 표시, 멈추면 ~0.5s 뒤 숨김. Radix 기본 스코프라 CSS 커스텀 불필요. (트레이드오프: scroll-트리거는 thumb를 잡아 드래그하기 어렵다 — 사용자 수용.)
+- 얇은 `ChatScrollArea` seam으로 감싸 교체 가능성 유지(컴포넌트는 seam에만 의존, 직접 Radix Root 노출 금지). auto-scroll(하단 고정)은 seam이 forwardRef로 Radix **Viewport**(실제 스크롤 노드)를 노출해 보존.
+- thumb 색은 테마별(`:root[data-theme=...]`)로 둔다 — dark=밝은 반투명, light/e-ink=어두운 반투명(테마-무관 `:root`에 흰색 하나로 두면 light/e-ink서 안 보임, 실측·리뷰 적출).
 
 ## 거부한 대안
 - **네이티브 `::-webkit-scrollbar` CSS만** — 진짜 overlay 원천 불가. Chromium은 `::-webkit-scrollbar`에 width 주는 순간 클래식(거터 점유)으로 전환하고, `overflow: overlay`는 Chrome 114(2023)에서 제거돼 `auto` alias가 됨 → 요구 (1) 불가. (grounded 확실: Chrome for Developers docs · chromestatus 5194091479957504 · blink-dev intent)
@@ -27,7 +28,7 @@
 - **스택 정합** — 프로젝트 Tailwind v4 + shadcn/ui 관례와 일치(ADR-0047). shadcn `scroll-area` = Radix 얇은 래퍼 → §5 교체 seam 자연 확보.
 - **overlay 확증** — Radix 공식 문서 "sits on top of the scrollable content, taking up no space".
 - 조사 = `/research` medium(조사 수집자 3 + Radix 백스톱 1) + Codex cross-family 적대 리뷰 — 누락 후보 Radix 적출로 결정 반전(초안 추천 OverlayScrollbars → Radix).
-- **요구 (4) 공통 한계(차별점 아님)** — Radix `scrollHideDelay`·OverlayScrollbars `autoHideDelay` 모두 "숨김 지연"이지 "표시 지연"이 아님 → 어느 후보를 골라도 CSS `transition-delay`가 필요.
+- **트리거 진화(GUI 실측)** — 초안(hover + CSS 0.5s 표시-지연)은 `scrollHideDelay`가 "숨김 지연"이라 표시-지연을 CSS로 얹어야 했고, 실측서 영역 hover가 상시 뜸으로 드러나 **`type="scroll"`(스크롤 시에만 표시 + 0.5s 숨김-지연)** 로 전환 — Radix 기본 스코프라 CSS 커스텀·reduced-motion 분기 모두 불필요해짐.
 
 ## 영향 / 불변식
 - 스크롤 컨테이너는 `ChatScrollArea` seam 경유 — 직접 Radix Root를 컴포넌트에 노출하지 않는다(교체점 보존, §5 손발/두뇌 분리).

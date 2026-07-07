@@ -41,6 +41,14 @@ import type { StructuredItem } from './structuredAccumulator'
 //   텍스트라 마크다운 파싱을 태우지 않고 InertCode(리터럴 <pre>)로만 그린다(FIX 2 — 아래 주석).
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
+// ADR-0053 구조 분할: 행 컨테이너 leaf(ChatRow) + rail 위치 순수 계산(railPositions)을 분리해 이 파일은
+//   dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계). 행동 불변(리팩터).
+import { ChatRow } from './chat/ChatRow'
+import {
+  computeRailRunPositions,
+  type ChatRowKind,
+  type RailRunPosition,
+} from './chat/railPositions'
 
 // ── 안전 파서 헬퍼(절대 throw 금지 — bad json 폴백) ────────────────────────────────
 
@@ -160,134 +168,9 @@ function shortArgs(argsJson: string): string {
   }
 }
 
-// ── dot-rail run-position(연결선 clean-ends) ────────────────────────────────────────
-
-/**
- * ADR-0051: 렌더될 각 행의 "종류" — rail 연결선 run 계산의 입력.
- *   - 'assistant': rail 행(text·thinking·tool·generic·error + streaming tail) — 세로 thread 로 묶인다.
- *   - 'boundary' : user 버블·separator — rail 이 아니라 run 을 끊는다(턴 경계).
- *   - 'skip'     : DOM 을 만들지 않는 항목(usage·흡수된 tool_result). 시각적으로 없으므로 run 을 끊지
- *                  *않는다*(assistant 두 행 사이 usage 가 껴도 두 행은 화면상 인접 → 한 run).
- */
-export type ChatRowKind = 'assistant' | 'boundary' | 'skip'
-
-/** ADR-0051: rail 행의 run 내 위치 — 연결선 그리기 분기의 키. */
-export type RailRunPosition = 'top' | 'mid' | 'bottom' | 'single'
-
-/**
- * ADR-0051: run-position 순수 함수(단위테스트 대상 — StructuredTextView 순수성 유지, ADR-0050).
- * 행 종류 배열을 받아 각 assistant 행의 run 내 위치를 반환한다(assistant 가 아니면 null).
- * run = 'skip' 을 무시하고 이어지는 assistant 행들의 최대 연속 구간. run 경계 = 'boundary'.
- *   첫 행 = top · 마지막 = bottom · 가운데 = mid · 혼자 = single.
- * 이 위치로 연결선 clean-ends 를 만든다(top=아래로만, mid=관통, bottom=위로만, single=선 없음) —
- * 기존엔 모든 rail 행이 top-[-12px] 로 위 행에 붙어 최상단 dot(예: "Thought") 위로 선 stub 이 튀어나왔다.
- */
-export function computeRailRunPositions(kinds: ChatRowKind[]): (RailRunPosition | null)[] {
-  // 1) skip 을 제외한 "보이는 행"만 골라 run 계산 → 원래 인덱스로 되돌린다.
-  const visible: { idx: number; kind: Exclude<ChatRowKind, 'skip'> }[] = []
-  kinds.forEach((kind, idx) => {
-    if (kind !== 'skip') visible.push({ idx, kind })
-  })
-
-  const out: (RailRunPosition | null)[] = kinds.map(() => null)
-
-  for (let i = 0; i < visible.length; i++) {
-    const { idx, kind } = visible[i]
-    if (kind !== 'assistant') continue // boundary → 위치 없음
-    const prevAssistant = i > 0 && visible[i - 1].kind === 'assistant'
-    const nextAssistant = i < visible.length - 1 && visible[i + 1].kind === 'assistant'
-    out[idx] =
-      prevAssistant && nextAssistant
-        ? 'mid'
-        : !prevAssistant && nextAssistant
-          ? 'top'
-          : prevAssistant && !nextAssistant
-            ? 'bottom'
-            : 'single'
-  }
-  return out
-}
-
 // ── 채팅 룩 프리미티브 ────────────────────────────────────────────────────────────
-
-/**
- * 메시지 행의 바깥 컨테이너. 간격·폰트는 CSS 변수(--chat-*)로 참조한다(ADR-0051 — LLM 제어 + localStorage
- * 영속. 값 권위 = chatStyleStore, 여기선 var() 소비만). StructuredTextView 컨테이너가 이 행들을 담는다.
- *
- * rail 모드(기본 false — user 버블·하위호환): assistant-side 행에 좌측 thread 구조를 준다.
- *   flex 행 = [고정폭 gutter + 점 마커] + [콘텐츠 flex-1 min-w-0]. 콘텐츠 컬럼은 min-w-0 라 긴 토큰/
- *   wrap-anywhere 가 넘치지 않는다.
- *
- * ★연결선 clean-ends(ADR-0051)★: runPos 로 선 geometry 를 분기한다 — top=dot 에서 아래로만,
- *   mid=관통(위 offset ~ 아래), bottom=위 offset ~ dot 에서 멈춤, single=선 없음. 오프셋은 outer
- *   top-padding(--chat-rail-row-pt) 과 커플링된 --chat-rail-line-offset 을 참조(기존 top-[-12px]↔pt-3
- *   암묵 커플링을 변수로 명시화). runPos 미지정(하위호환·streaming tail) 시 관통(mid)로 폴백.
- */
-function ChatRow({
-  children,
-  rail = false,
-  tone = 'default',
-  runPos,
-}: {
-  children: ReactNode
-  rail?: boolean
-  tone?: 'default' | 'tool' | 'error'
-  runPos?: RailRunPosition
-}) {
-  if (rail) {
-    // 점 색 = 행 종류 신호(확장 룩 벤치마크): tool(실행)=초록 · error=red · 그 외(추론/본문)=muted.
-    const dotColor = tone === 'tool' ? 'bg-green-500' : tone === 'error' ? 'bg-red-500' : 'bg-muted'
-    const pos = runPos ?? 'mid'
-    // 연결선 top/bottom — position 별 clean-ends. CSS 변수 참조(inline style, var() 로 런타임 반영).
-    //   dot 위치 = --chat-rail-dot-top, 위 이어짐 오프셋 = --chat-rail-line-offset(보통 음수).
-    const lineStyle: Record<string, string> =
-      pos === 'top'
-        ? { top: 'var(--chat-rail-dot-top)', bottom: '0' } // 최상단 dot 아래로만(위 stub 제거)
-        : pos === 'bottom'
-          ? {
-              top: 'var(--chat-rail-line-offset)',
-              bottom: 'calc(100% - var(--chat-rail-dot-top))', // 위에서 내려와 이 dot 에서 멈춤
-            }
-          : { top: 'var(--chat-rail-line-offset)', bottom: '0' } // mid — 관통
-    return (
-      <div
-        className="relative flex px-4"
-        style={{ paddingTop: 'var(--chat-rail-row-pt)' }}
-      >
-        {/* gutter — 세로 thread 선 + 점 마커. 둘 다 span 에만 aria-hidden(순수 장식) — gutter div 에 얹으면
-            separator 스페이서(div[aria-hidden]) 셀렉터와 충돌한다. 점은 콘텐츠 첫 줄 근처(--chat-rail-dot-top
-            center)에 절대배치해 선 위에 올린다. single 은 선을 아예 그리지 않는다(고립 dot). */}
-        <div
-          className="relative flex-none"
-          style={{ width: 'var(--chat-rail-gutter)' }}
-        >
-          {pos !== 'single' && (
-            <span
-              aria-hidden
-              className="absolute left-1/2 w-px -translate-x-1/2 bg-border"
-              style={lineStyle}
-            />
-          )}
-          <span
-            aria-hidden
-            className={cn(
-              'absolute left-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full',
-              dotColor,
-            )}
-            style={{ top: 'var(--chat-rail-dot-top)' }}
-          />
-        </div>
-        {/* 콘텐츠 컬럼 — flex-1 min-w-0 로 긴 토큰/wrap-anywhere 오버플로 방지. */}
-        <div className="min-w-0 flex-1">{children}</div>
-      </div>
-    )
-  }
-  return (
-    <div className="relative px-4" style={{ paddingTop: 'var(--chat-plain-row-pt)' }}>
-      {children}
-    </div>
-  )
-}
+// (행 컨테이너 ChatRow 와 rail 위치 순수 계산 computeRailRunPositions 는 ADR-0053 구조 분할로
+//  ./chat/ChatRow · ./chat/railPositions 로 이사했다. 이 파일은 dispatch 오케스트레이터로만 남는다.)
 
 /** 행 헤더 클래스 — 작은 아이콘 + bold 제목. */
 const HEADER_CLASSNAMES = 'flex items-center gap-2.5 mb-3'

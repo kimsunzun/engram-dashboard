@@ -1,6 +1,6 @@
-:root[data-theme='dark']  { --bg: #0a0a0a; --bg-secondary: #111; --surface-elevated: #262626; --text: #e0e0e0; --text-muted: #888; --border: #333; --accent: #4a9eff; }
-:root[data-theme='light'] { --bg: #f5f5f5; --bg-secondary: #fff; --surface-elevated: #ffffff; --text: #1a1a1a; --text-muted: #666; --border: #ccc; --accent: #0066cc; }
-:root[data-theme='e-ink']  { --bg: #ffffff; --bg-secondary: #f0f0f0; --surface-elevated: #f0f0f0; --text: #000000; --text-muted: #444; --border: #000; --accent: #000; }
+:root[data-theme='dark']  { --bg: #0a0a0a; --bg-secondary: #111; --surface-elevated: #262626; --text: #e0e0e0; --text-muted: #888; --border: #333; --accent: #4a9eff; --scrollbar-thumb: rgba(255, 255, 255, 0.24); /* 다크 bg 위 밝은 반투명 thumb */ }
+:root[data-theme='light'] { --bg: #f5f5f5; --bg-secondary: #fff; --surface-elevated: #ffffff; --text: #1a1a1a; --text-muted: #666; --border: #ccc; --accent: #0066cc; --scrollbar-thumb: rgba(0, 0, 0, 0.28); /* 밝은 bg 위 어두운 반투명 thumb */ }
+:root[data-theme='e-ink']  { --bg: #ffffff; --bg-secondary: #f0f0f0; --surface-elevated: #f0f0f0; --text: #000000; --text-muted: #444; --border: #000; --accent: #000; --scrollbar-thumb: rgba(0, 0, 0, 0.32); /* 흰 고대비 bg 위 진한 반투명 thumb(e-ink 강조) */ }
 
 /* ADR-0051: 채팅 렌더 간격·폰트 토큰 — LLM 제어 control surface(window.__engramChat) + chatStyleStore
    가 값의 권위이며 런타임에 이 :root 변수들을 setProperty 로 덮어쓴다(localStorage 영속). 여기 값은
@@ -22,4 +22,12 @@
   --chat-rail-dot-top: 0.75rem;   /* 점 마커 top(콘텐츠 첫 줄 중앙 근사) — 이전 top-[9px] 근처, 여백↑ 반영 */
   --chat-font-size: 13px;         /* 채팅 루트 base font-size(chat.css .chat-markdown 과 동기) */
   --chat-line-height: 1.45;       /* 채팅 base line-height — 사용자 라이브 튜닝 확정값 */
+
+  /* ADR-0053: 채팅 오버레이 스크롤바(ChatScrollArea/Radix) 구조 토큰(크기·모양) — --chat-* 과 마찬가지로
+     theme 무관이라 여기에만 둔다(현재 LLM 제어 미노출 — §5 후속으로 chatStyle control surface 에 얹을 여지).
+     ★--scrollbar-thumb(색)은 테마마다 달라야 하므로 각 :root[data-theme=...] 블록에 둔다★.
+     ★--scrollbar-show-delay 제거★: type="scroll" 전환으로 hover show-delay 기법 폐기 — scrollHideDelay(500ms)
+     가 Radix 수준에서 숨김 타이밍을 제어하므로 CSS 레벨 지연 토큰 불필요. */
+  --scrollbar-size: 10px;        /* 스크롤바 트랙 폭(overlay — 콘텐츠 폭 불변, gutter 0) */
+  --scrollbar-radius: 9999px;    /* thumb 라운드(pill) */
 }

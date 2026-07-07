@@ -64,6 +64,10 @@
 }
 .chat-markdown ol {
   list-style: decimal;
+  /* outside 마커는 ol 의 padding-left 안쪽에 그려진다. 2자리 숫자("24.")가
+     1.5em(≈19.5 px)에서 좌측으로 넘쳐 ScrollArea overflow:hidden 에 잘렸던
+     것을 방지 — 3자리까지 수용 가능한 2.2em 으로 확장. (마커 클립 수정) */
+  padding-left: 2.2em;
 }
 .chat-markdown li {
   margin: 0.15em 0;
