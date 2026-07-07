@@ -526,15 +526,20 @@ function renderItem(
       if (parseToolResult(item.json)) return null
 
       if (item.label === 'user') {
-        // 사용자 발화 — 확장 룩 버블(rounded-md border bg-elevated). whitespace-pre-line 으로 줄바꿈 보존.
-        //   세로 padding/margin 은 CSS 변수(--chat-user-py/--chat-user-my) — 턴 덩어리 분리 조정용(ADR-0051).
+        // 사용자 발화 — 좌측 정렬 인셋 버블(rounded-xl border bg-elevated). whitespace-pre-line 으로 줄바꿈 보존.
+        //   세로 padding/margin 은 CSS 변수(--chat-user-py/--chat-user-my), 가로 padding 은 --chat-user-px(ADR-0051).
+        //   양쪽 0.75rem 가로 마진(인셋)·border-radius 0.75rem 은 고정(§5 후속으로 키화 여지).
         return (
           <ChatRow key={k}>
             <div
-              className="rounded-md border border-border bg-elevated px-3 whitespace-pre-line break-words text-foreground"
+              className="rounded-[0.75rem] border border-border bg-elevated whitespace-pre-line break-words text-foreground"
               style={{
+                marginLeft: '0.75rem',
+                marginRight: '0.75rem',
                 paddingTop: 'var(--chat-user-py)',
                 paddingBottom: 'var(--chat-user-py)',
+                paddingLeft: 'var(--chat-user-px)',
+                paddingRight: 'var(--chat-user-px)',
                 marginTop: 'var(--chat-user-my)',
                 marginBottom: 'var(--chat-user-my)',
               }}

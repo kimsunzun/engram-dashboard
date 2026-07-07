@@ -144,7 +144,7 @@ describe('chatStyleStore runtime key whitelist (ADR-0051 FIX-2)', () => {
 // ── ADR-0051: 프로토타입 키 화이트리스트 우회 방어(isChatStyleKey own-key 판정) ──────────────
 //   `key in CHAT_STYLE_DEFAULTS` 는 프로토타입 체인을 타서 constructor·__proto__·toString 등
 //   Object.prototype 상속 키가 화이트리스트를 통과했다. LLM/CDP 등 런타임 외부 호출이 이 이름들을
-//   set/patch 하면 store·localStorage 가 오염되므로, 고정 9키만 통과하는지 검증한다.
+//   set/patch 하면 store·localStorage 가 오염되므로, 고정 10키만 통과하는지 검증한다.
 describe('chatStyleStore prototype-key bypass (ADR-0051)', () => {
   const POLLUTING_KEYS = ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']
 
@@ -222,6 +222,7 @@ describe('theme.css ↔ CHAT_STYLE_DEFAULTS drift (ADR-0051 FIX-3)', () => {
     railRowPt: '--chat-rail-row-pt',
     plainRowPt: '--chat-plain-row-pt',
     userPy: '--chat-user-py',
+    userPx: '--chat-user-px',
     userMy: '--chat-user-my',
     railGutter: '--chat-rail-gutter',
     railLineOffset: '--chat-rail-line-offset',
@@ -230,7 +231,7 @@ describe('theme.css ↔ CHAT_STYLE_DEFAULTS drift (ADR-0051 FIX-3)', () => {
     lineHeight: '--chat-line-height',
   }
 
-  it('theme.css :root 의 9개 chat 변수 기본값이 CHAT_STYLE_DEFAULTS 와 일치한다', () => {
+  it('theme.css :root 의 10개 chat 변수 기본값이 CHAT_STYLE_DEFAULTS 와 일치한다', () => {
     // vitest 는 프로젝트 루트에서 실행 → cwd 기준 상대 경로로 theme.css 원문을 읽는다.
     const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
 

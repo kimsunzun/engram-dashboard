@@ -12,13 +12,14 @@
    top-padding(--chat-rail-row-pt)만큼 위로 끌어올려(음수) 위 행 dot 까지 선을 잇는다. 둘은 한 그룹이라
    함께 조정한다(기존 top-[-12px]↔pt-3 암묵 커플링을 변수로 대체). */
 :root {
-  --chat-rail-row-pt: 1rem;       /* rail 행 top-padding(행간 리듬) — 이전 pt-3(0.75rem)보다 넉넉 */
-  --chat-plain-row-pt: 0.875rem;  /* 비-rail 행 top-padding — 이전 pt-2.5(0.625rem)보다 넉넉 */
-  --chat-user-py: 0.5rem;         /* 유저 버블 세로 padding(이전 py-2=0.5rem 유지) */
+  --chat-rail-row-pt: 0.8rem;     /* rail 행 top-padding(행간 리듬) — 사용자 라이브 튜닝 확정값 */
+  --chat-plain-row-pt: 0.7rem;    /* 비-rail 행 top-padding — 사용자 라이브 튜닝 확정값 */
+  --chat-user-py: 7px;            /* 유저 버블 세로 padding — 사용자 라이브 튜닝 확정값 */
+  --chat-user-px: 0.9rem;         /* 유저 버블 가로 padding(§5 LLM 제어 표면 — userPy 와 대칭) */
   --chat-user-my: 0.375rem;       /* 유저 버블 세로 margin(이전 my-1=0.25rem 보다 넉넉 — 턴 덩어리 분리) */
   --chat-rail-gutter: 1.5rem;     /* rail gutter 폭(이전 w-6=1.5rem 유지) */
   --chat-rail-line-offset: -1rem; /* 연결선 top(위 행으로 이어짐) = -1 × --chat-rail-row-pt(커플링) */
   --chat-rail-dot-top: 0.75rem;   /* 점 마커 top(콘텐츠 첫 줄 중앙 근사) — 이전 top-[9px] 근처, 여백↑ 반영 */
   --chat-font-size: 13px;         /* 채팅 루트 base font-size(chat.css .chat-markdown 과 동기) */
-  --chat-line-height: 1.55;       /* 채팅 base line-height — 이전 1.45 보다 넉넉(가독성) */
+  --chat-line-height: 1.45;       /* 채팅 base line-height — 사용자 라이브 튜닝 확정값 */
 }

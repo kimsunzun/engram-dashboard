@@ -13,6 +13,7 @@ export type ChatStyleKey =
   | 'railRowPt' // rail 행 top-padding(행간 리듬)
   | 'plainRowPt' // 비-rail(user 버블·separator) 행 top-padding
   | 'userPy' // 유저 버블 세로 padding
+  | 'userPx' // 유저 버블 가로 padding(§5 LLM 제어 표면 — userPy 와 대칭)
   | 'userMy' // 유저 버블 세로 margin(턴 덩어리 분리)
   | 'railGutter' // rail gutter 폭
   | 'railLineOffset' // 연결선 top 오프셋(위 행으로 이어짐 — railRowPt 와 커플링, 보통 음수)
@@ -23,17 +24,18 @@ export type ChatStyleKey =
 export type ChatStyleValues = Record<ChatStyleKey, string>
 
 // ADR-0051: 기본값 — theme.css :root fallback 과 동기(둘 중 하나만 바뀌면 부팅 첫 프레임과 store 적용이
-//   어긋난다). 이전 하드코딩(pt-3=0.75rem/1.45 등)보다 넉넉하게(사용자 지적: 우리 렌더가 좁고 산만).
+//   어긋난다). 값은 사용자 라이브 튜닝(window.__engramChat) 확정값으로 bake(74ce001 이후 조정).
 export const CHAT_STYLE_DEFAULTS: ChatStyleValues = {
-  railRowPt: '1rem',
-  plainRowPt: '0.875rem',
-  userPy: '0.5rem',
+  railRowPt: '0.8rem',
+  plainRowPt: '0.7rem',
+  userPy: '7px',
+  userPx: '0.9rem',
   userMy: '0.375rem',
   railGutter: '1.5rem',
   railLineOffset: '-1rem',
   railDotTop: '0.75rem',
   fontSize: '13px',
-  lineHeight: '1.55',
+  lineHeight: '1.45',
 }
 
 // ADR-0051: store 키 → :root CSS 변수명. StructuredTextView/theme.css/chat.css 가 이 변수들을 var() 로 읽는다.
@@ -41,6 +43,7 @@ const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
   railRowPt: '--chat-rail-row-pt',
   plainRowPt: '--chat-plain-row-pt',
   userPy: '--chat-user-py',
+  userPx: '--chat-user-px',
   userMy: '--chat-user-my',
   railGutter: '--chat-rail-gutter',
   railLineOffset: '--chat-rail-line-offset',
@@ -89,7 +92,7 @@ const CHAT_STYLE_KEYS = Object.keys(CHAT_STYLE_DEFAULTS) as ChatStyleKey[]
 function isChatStyleKey(key: string): key is ChatStyleKey {
   // ADR-0051: 고정 배열 멤버십으로 판정한다. `key in CHAT_STYLE_DEFAULTS` 는 프로토타입 체인을 타서
   //   constructor·__proto__·toString 등 Object.prototype 상속 키가 true 로 통과 → store·localStorage 오염.
-  //   CHAT_STYLE_KEYS(고정 9키)만 own key 로 인정해 프로토타입 오염을 원천 차단한다.
+  //   CHAT_STYLE_KEYS(고정 10키)만 own key 로 인정해 프로토타입 오염을 원천 차단한다.
   return CHAT_STYLE_KEYS.includes(key as ChatStyleKey)
 }
 

@@ -391,16 +391,20 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(row?.className).not.toContain('flex')
   })
 
-  it('structured label=user → 확장 룩 버블(rounded-md border bg-elevated)로 렌더', () => {
+  it('structured label=user → 확장 룩 버블(rounded-[0.75rem] border bg-elevated, 인셋 마진)으로 렌더', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'user', json: JSON.stringify({ text: 'do the thing' }), itemId: 0 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     const bubble = screen.getByText('do the thing')
-    // 확장 룩 유저 버블: rounded-md border bg-elevated(다크에서 페이지보다 한 단계 밝은 배경 — 가시성).
-    expect(bubble.className).toContain('rounded-md')
+    // 확장 룩 유저 버블: border bg-elevated(다크에서 페이지보다 한 단계 밝은 배경 — 가시성).
+    //   border-radius 0.75rem(rounded-[0.75rem]), 양쪽 0.75rem 인셋 마진(고정 inline style).
+    expect(bubble.className).toContain('rounded-[0.75rem]')
     expect(bubble.className).toContain('border')
     expect(bubble.className).toContain('bg-elevated')
+    // 인셋 마진·가로 패딩은 inline style 로 적용된다.
+    expect((bubble as HTMLElement).style.marginLeft).toBe('0.75rem')
+    expect((bubble as HTMLElement).style.marginRight).toBe('0.75rem')
     // 사용자 박스는 편집/토글 버튼이 없는 plain 텍스트 박스다.
     expect(container.querySelectorAll('button').length).toBe(0)
   })
