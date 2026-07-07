@@ -625,6 +625,11 @@
 - **게이트:** full build · core 144+통합 · protocol 42 · vitest 277 · tsc · fmt · 격리 PASS. workspace `cargo test`의 src-tauri lib 테스트 로드오류(`STATUS_ENTRYPOINT_NOT_FOUND`)는 안 건드린 crate 환경성 이슈(논리 실패 아님). **GUI 실측 미완** — 자율 백그라운드 앱 launch 실패 → 동작 미확인, **push 보류**(로컬 커밋 `dbced5a`만).
 - **미커밋 이월(이 라운드 밖):** `run-dashboard-clean.bat`·`docs/reference/architecture-overview.md`(세션 시작부터 미커밋, 이 기능 무관).
 
+## 채팅 슬롯 UI 정비 — 스킬 개명 참조 정리 + 오버레이 스크롤바 결정 (2026-07-07, master, opus) · ADR-0053
+- **스킬 continue→handoff 개명 여파 정리:** 전역 SSOT에서 continue 스킬이 handoff로 교체(skill-lab). 세션마다 읽히는 dangling 참조 정정 — CLAUDE.md:16 핸드오프 바인딩(`/continue`→`/handoff`) + step-log:4 header(커밋 `ab536f1`, `/review doc self` PASS). 전역 룰·SSOT 측(global-rules:34 + REVIEW-NOTES 4개)은 skill-lab 처리(`b330806`, orchestra 분담). 날짜 박힌 과거 이력 서술(198/337/401/548/549/584)은 그 시점 사실이라 보존. 부수: 감사 중 제기한 SSOT drift 우려는 `.claude/skills`가 심링크(ADR-0005)라 반증·철회.
+- **오버레이 스크롤바 결정(ADR-0053):** 채팅 슬롯 스크롤바 요구(진짜 overlay·평소 숨김·hover 등장·0.5s delay·얇은 다크). `/research medium`(수집 3 + Radix 백스톱 1 + Codex 적대 리뷰) → 네이티브 CSS는 overlay 원천 불가(`overflow:overlay` Chrome114 제거·`::-webkit-scrollbar` 거터 점유) 확증. Codex가 누락 후보 **Radix ScrollArea** 적출 → 초안 추천(OverlayScrollbars) 반전. 채택 = **Radix ScrollArea(shadcn scroll-area)** — 이미 의존성(package.json:19), React19 명시, Tailwind/shadcn 정합. 요구 (4) delay는 CSS `transition-delay`(전 후보 공통). 거부: 네이티브 CSS·OverlayScrollbars(+15KB)·SimpleBar(#650)·DIY 자작·방치 라이브러리 4종.
+- **다음(진행 예정):** `/implement` — 헤더 "JSON ● idle" 제거 + Radix ScrollArea overlay 교체(`ChatScrollArea` seam) + 파일/구조 분리(SlotHeader·StructuredTextView 643줄 분할·미사용 StructuredItemStream 정리) → `/review code` → `/qa` GUI 실측.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
