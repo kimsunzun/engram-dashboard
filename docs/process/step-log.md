@@ -682,6 +682,12 @@
 - **/review prd:** User렌즈(Opus)=FIX(5) · Tester렌즈(Codex)=BLOCK(8). **방향 OK**, 명세 공백(소유 불변식·`window_bindings` 마이그레이션·엣지 상태기계·라우팅/replay ADR-0046·동시성·놓친 owner-index 3안) → PRD §10에 강화. 자율 보수취합 = **BLOCK 유지**(사용자 결정 전 구현 보류 = 설계 게이트).
 - **다음:** 사용자가 D-1~D-8 픽 → 굵은 것 ADR → TRD → `/implement`.
 
+## Phase 1 — 커맨드 시스템(command registry) 골격 구현 (2026-07-09, master, 자율 세션)
+- **발단:** WezTerm 3층 트랙의 1단계. 정본 = ADR-0055(프론트 Map 레지스트리 + handler가 기존 invoke/store로 라우팅, 신규 싱글톤 0, 골격 먼저·점진 이관). `/implement standard`로 코더→리뷰→qa 게이트.
+- **무엇:** `src/commands/` 신규 — `registry.ts`(register/run/list, `Command={id,title,category?,keybinding?,when?,run(args)}`, 인자=객체 하나) · `dispatch.ts`(공유 `fireAndForget` — try/catch + `Promise.resolve().catch`, 클릭·키바인딩 공용 안전경로) · `keybindings.ts`(전역 document keydown→id, ★포커스 가드=`isContentEditable`+`.xterm`+INPUT/TEXTAREA/SELECT, load-bearing★, `when`은 키바인딩 층만 게이트=VS Code 시맨틱) · `themeCommands.ts`(첫 어댑터 `theme.set`/`theme.toggle`→기존 `useThemeStore.setTheme`). `eventBus.ts`에 `window.__engramCmd={list,run}` 노출(§5, 기존 `__engramLayout`/`__engramChat` 패턴). `App.tsx` 어댑터 side-effect import + `installKeybindings()` useEffect. 7파일 전부 `// ADR-0055` 앵커.
+- **게이트(`/implement standard`):** 코더 Opus → `/review code full` 2R(doc-aware Opus + cross-family Codex). R1=FIX(포커스가드 plaintext-only 구멍·async reject 삼킴·리스너 window↔document·`when` 죽은계약·테스트 공백·공유 helper 부재) → 코더 재수정 #1 → R2(doc-aware PASS / Codex FIX 3: contenteditable=false 섬·`when()` throw 비방어·`getCommand` live객체 누수) → 재수정 #2 → Codex 재리뷰 PASS. `window.__engramCmd` 전면 노출 allowlist = WONTFIX(§5 LLM 전면제어). → `/qa full` PASS: 프론트 tsc 0·vitest 320(+52) · **GUI실측(cdp 실WebView2)** = `__engramCmd.list()`=[theme.set,theme.toggle]·테마 dark→light→e-ink 순환·포커스가드 매트릭스(body 발화/input·contenteditable 억제, 네이티브 `isContentEditable`=true). (Rust 델타 0 → cargo 게이트 N/A·정지조건 준수.)
+- **후속:** jsdom 29가 `isContentEditable` 미구현 → 단위테스트는 spec-faithful shim으로 계약 검증, 실동작은 cdp가 확인(과청구 방지). 팔레트 UI·백엔드 미러·커스텀 키맵·`when` 풀모델 = ADR-0055 후속. Phase 2 탭이 첫 실전 어댑터(`tab.switch`/`create`/`close`·`create_window`).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

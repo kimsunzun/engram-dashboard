@@ -5,6 +5,7 @@
 // 소비한다 — 두 모드 공통 표면이라 데몬 모드(WS 이벤트)에서도 동일하게 트리·상태바가 갱신된다.
 
 import { agentClient } from '../api/clientFactory'
+import { list as cmdList, run as cmdRun } from '../commands/registry'
 import { useAgentStore } from './agentStore'
 import { CHAT_STYLE_DEFAULTS, useChatStyleStore, type ChatStyleKey } from './chatStyleStore'
 import { resolveDefaultViewId, subscribeViewEvents, useViewStore } from './viewStore'
@@ -102,6 +103,20 @@ export function initEventBus(): Promise<void> {
         patch: useChatStyleStore.getState().patch,
         reset: useChatStyleStore.getState().reset,
         defaults: CHAT_STYLE_DEFAULTS,
+      }
+
+      // §5: command 레지스트리 제어 표면(ADR-0055) — 사람 클릭·전역 keydown 과 동일한 단일 진입점을
+      //   LLM(cdp eval)이 부른다. list() 로 등록된 command 를 introspect, run(id, args) 로 실행한다.
+      //   ★레지스트리는 상태 권위가 아니다★ — handler 가 기존 store 액션/invoke 로 라우팅한다(ADR-0035
+      //   유지). run 은 handler 반환(일부 Promise)을 그대로 흘려보내 cdp eval 에서 await 가능.
+      //   window.__engramCmd.list()                          // 등록 command 메타 목록
+      //   window.__engramCmd.run('theme.set', { theme:'light' })  // 실행(모르는 id 는 throw)
+      // ★전체 command 를 window 에 노출하는 것은 의도적이다(WONTFIX)★: CLAUDE.md §5(모든 기능은 LLM 제어
+      //   가능해야 한다) / ADR-0055 의 설계 요구다. "allowlist 로 일부만 노출" 대안은 §5(LLM 이 메인 조작
+      //   주체)와 정면 충돌해 기각됐다. 이 표면은 보안 취약점이 아니라 제어 계약이다(리뷰어 재제기 방지 앵커).
+      ;(globalThis as Record<string, unknown>).__engramCmd = {
+        list: cmdList,
+        run: cmdRun,
       }
 
       // HMR 재평가 시 기존 구독 먼저 해제

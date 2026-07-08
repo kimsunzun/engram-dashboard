@@ -7,11 +7,17 @@ import PopoutPage from './pages/PopoutPage'
 import { initEventBus, refreshProfiles } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { useAgentStore } from './store/agentStore'
+// ADR-0055: 어댑터 side-effect import — register(...) 가 부팅 시 실행돼 command 가 레지스트리에 들어간다.
+import './commands/themeCommands'
+import { installKeybindings } from './commands/keybindings'
 
 function App() {
   useEffect(() => {
     themeManager.apply('dark')
   }, [])
+
+  // ADR-0055: 전역 키바인딩 설치 — 언마운트/HMR 시 disposer 로 리스너 제거(중복 누적 방지).
+  useEffect(() => installKeybindings(), [])
 
   useEffect(() => {
     // ADR-0021 §1: 부팅 시 명시 ensure 1회 — daemon 모드면 데몬을 띄운다(명령의 부수효과가 아니라
