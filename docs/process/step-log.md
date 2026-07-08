@@ -656,6 +656,25 @@
 - **결정/가정:** 레이아웃 제어 = viewStore/`__engramLayout` 단일 권위(레거시 slotStore 폐기 — 이사 대신 재작성). "새 창"=새 View(탭)로 간주(동적 OS 창은 나중). **남은 결정거리(백엔드 권위 공백):** 슬롯 콘텐츠 종류(tree/terminal swap) 백엔드 모델 · 슬롯 포커스 권위 · 동적 창 생성 — Brick 2+에서 사용자 결정. (트리보기/터미널보기 메뉴 항목·click-focus는 `// gap:` 주석으로 이번 브릭 드롭.)
 - **다음:** Brick 2 = 최소 탭 바 UI(View 가시화 — `createView`/`switchView`는 이미 동작, UI만 부재). 이후 Brick 3 튜토리얼 클로드(cwd=exe 위치)·Brick 4 오케스트레이션 시나리오(A/B/C/D 스폰·배치·A→C 메시지).
 
+## 슬롯 → 런타임 팝업 OS 창 분리(dynamic multi-window, MOVE) (2026-07-08, master, opus 코더)
+- **발단:** Brick 1 위에 "슬롯을 별도 런타임 OS 창으로 분리"(3+ 동시). /research 사전조사로 Tauri v2·Windows 실현성 확인(하드블로커 없음). 옛 정적 slot-popup(Brick 1 폐기)과 달리 **런타임 생성**(`WebviewWindowBuilder`) + **MOVE(detach)**(미러 아님 — 원본 슬롯 제거).
+- **경험적 de-risk 2건(빌드 전 선검증):**
+  - **(a) dev 해시라우트 로드 = PASS** — 실행 중 dev 앱(localhost:1420) main 창을 `#/popup?view=…`로 CDP eval 이동 → PopoutPage 마운트('View 로딩 중…' 렌더) 확인 후 원복.
+  - **(b) CDP 가시성 = 메커니즘 확인** — CDP `/json/list`가 이미 secondary 창(agent-tree)을 main과 함께 열거 → 런타임 창도 동일 WebView2 substrate라 동일 열거. (런타임 창 자체의 라이브 열거는 old 바이너리에 신 command 부재 + 데몬-exe 락으로 fresh 빌드 불가라 미실측 — 잔여 리스크로 명시.)
+- **백엔드:** `commands/popout.rs` 신규 — `pop_out_slot`(★async fn★, WebviewWindowBuilder 데드락 회피) detach 흐름 = slot_agent 읽기 → create_view → assign_agent → 창 생성+bind_window → close_slot(원본). `bind_window`(임의 창→View 일반 표면). `cleanup_popup_window`(Destroyed 정리 = unbind+rebuild+registry remove). `PopupCounter`(단조 label `slot-popup-N`, 재사용 금지). `ViewManager`에 `slot_agent`/`bind_window`/`unbind_window` 추가(manager.rs). lib.rs = PopupCounter manage + 2 command 등록 + `on_window_event` **Destroyed arm**(팝업만 정리, main hide/agent-tree 무관 — 수명/누수 임계). `capabilities/popup.json`(`slot-popup-*` glob + core:default/event:default, gen/schemas 재생성 확인).
+- **프론트:** `/popup` 라우트(App.tsx) + `PopoutPage`(URL `?view=` 파싱 → get_view pull + layout:updated listen, 기존 ViewLayoutRenderer 재사용 — 팝업 전용 배선 0). `viewStore.popOutSlot` + `eventBus.__engramLayout.popOutSlot(slotId)`(§5, activeViewId 해소). `SlotContextMenu` "팝업으로 분리"(enabled 가드 = '에이전트 종료'와 동일 = 라이브 agent 有).
+- **라우팅 보존:** 일반 `window_bindings`/`OutputRouter.rebuild`/main(active_view_id)·agent-tree 완전 보존 — 팝업은 binding 경유라 직교(하드코딩 whitelist 없음, label-불가지 HashMap). 팝업 View는 create 후 원본 active 복원으로 main active 안 뺏음.
+- **게이트:** tsc 0 · vitest 268(+팝업 메뉴 3) · `cargo check --workspace` 0(src-tauri 컴파일 증명 — 데몬-exe 락으로 full build link 불가, force-kill 금지 준수) · 멤버 test green(protocol/core/discovery/daemon) · fmt 0 · 코어 격리 0(문서 헤더 false-positive만). ★src-tauri lib test는 선재 `0xC0000139`(WebView2Loader)로 미로드 — popout 단위테스트(라벨 단조·bind/unbind 라우팅·slot_agent)는 코드 컴파일로 검증, 로직은 output_router 기존 테스트와 동형.★
+- **잔여 리스크:** (b) 런타임 창 라이브 열거 미실측(메커니즘 확인) · 강제 프로세스 kill 시 Destroyed 정리 미발화(state 통째 소멸이라 수용) · 다중 팝업 3+ 동시 라이브 미실측(fresh 빌드 필요) — GUI 실측은 데몬 락 해제 후.
+
+## 팝업 유령 창 근본원인 수정 — WebView2 additionalBrowserArgs parity (2026-07-08, master, opus 코더 + Codex 교차)
+- **발단:** 직전 팝업 분리 기능의 잔여 리스크(런타임 창 라이브 열거 미실측)를 GUI 실측하니 치명 발견 — 런타임 `WebviewWindowBuilder::build()` 창이 build Ok·`getAllWindows` 등록에도 **실제 OS 창(HWND) 미생성**(Win32 `EnumWindows` 확정, 창 수 불변). config 창(main·agent-tree)만 뜨고 런타임 창만 유령. 순수 `about:blank` 스파이크도 동일 → 팝업 로직/URL 아닌 창 생성 자체 문제.
+- **근본원인(ADR-0054):** config 창은 `additionalBrowserArgs` 지정, 런타임 빌더는 미지정 → 같은 user-data 폴더에서 WebView2 환경 옵션 불일치 → 런타임 WebView2 환경 생성 조용히 실패(build Ok·등록됨·HWND 없음).
+- **조사 경로(ADR-0038):** 라이트 `/research` → 스레드/STA 가설 도출 → 스파이크로 `run_on_main_thread` 실측 **반증**(메인 스레드 build도 유령 = 스레드 문제 아님) → Codex(cross-family) 교차 확인이 args 불일치 지목 → repo config grounding → 스파이크에 config 동일 args **하나만** 추가(단일 변수) → `EnumWindows` 7→10 실증.
+- **수정:** `WEBVIEW2_BROWSER_ARGS` SSOT 상수(popout.rs) + `pop_out_slot` 적용. throwaway 스파이크(`spawn_hello_windows`) 제거. cascade 위치 유지(멀티모니터 클램프 = 후속).
+- **게이트(`/implement standard`):** 코더 Opus → `/review code full` 2R(doc-aware Opus + cross-family Codex) 만장 PASS → `/qa full` PASS: build(`-p engram-dashboard`)·멤버 test(core/protocol/discovery)·fmt·코어격리·tsc·vitest 282 + **GUI 실측 = 실제 `pop_out_slot` → `Engram — slot-popup-1` OS 창(유효 HWND) 확인**. (전체 `cargo build/test`는 실행 중 데몬 exe 락으로 변경 포함 범위로 스코프 — 데몬 crate 무관.)
+- **후속:** args 3중 중복(JSON×2+Rust)의 JSON→Rust silent drift = 현재 one-way 주석 강제만 → build-time assert(상수 vs 파싱 config 대조)로 양방향 강제(리뷰 지적). 멀티모니터 좌표 클램프.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

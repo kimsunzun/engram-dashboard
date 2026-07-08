@@ -66,10 +66,17 @@ impl ViewManager {
 
     // ── 조회 ───────────────────────────────────────────────────────────────
 
-    /// 탭 바용 메타 목록.
+    /// 탭 바용 메타 목록. ★Fix 2B: 창에 바인딩된 View 는 제외★ — 팝업 등 별도 창에 묶인 View 는 main 탭
+    /// 바에 유령 탭으로 뜨면 안 된다(window_bindings 에 있는 view_id 는 그 창 전용). 단 **active_view_id 는
+    /// 절대 제외하지 않는다**(방어 가드): 미래에 어떤 창이 active/main View 에 바인딩되더라도 main 탭은 항상
+    /// 남아야 한다(agent-tree 가 active 를 바인딩하는 함정 방지). 즉 v 유지 = active 이거나 어떤 바인딩에도
+    /// 안 걸릴 때.
     pub fn view_metas(&self) -> Vec<ViewMeta> {
         self.views
             .iter()
+            .filter(|v| {
+                v.id == self.active_view_id || !self.window_bindings.values().any(|&bv| bv == v.id)
+            })
             .map(|v| ViewMeta {
                 id: v.id,
                 name: v.name.clone(),
@@ -97,6 +104,39 @@ impl ViewManager {
             .iter_mut()
             .find(|v| v.id == view_id)
             .ok_or(LayoutError::ViewNotFound(view_id))
+    }
+
+    /// view 안 slot_id 슬롯에 배정된 agent_id(참조 문자열)를 반환. 빈 슬롯이면 Ok(None).
+    /// ★팝업 분리(pop_out_slot)용★: 원본 슬롯의 agent 를 읽어 새 View 로 옮길 때 쓴다(조회만 — 변형·version 불변).
+    /// invalid view_id/slot_id → Err(no-op).
+    pub fn slot_agent(&self, view_id: Uuid, slot_id: Uuid) -> Result<Option<String>, LayoutError> {
+        let v = self
+            .views
+            .iter()
+            .find(|v| v.id == view_id)
+            .ok_or(LayoutError::ViewNotFound(view_id))?;
+        tree::find_slot(&v.layout, slot_id)
+            .cloned()
+            .ok_or(LayoutError::SlotNotFound(slot_id))
+    }
+
+    /// window_label → view_id 바인딩을 삽입(팝업 창을 특정 View 에 고정). ★일반 라우팅 메커니즘(ADR-0046)★:
+    /// OutputRouter.rebuild 가 이 맵을 읽어 그 label 로 View 의 agent 출력을 라우팅한다. close_view 가
+    /// retain 으로, Destroyed 이벤트가 unbind_window 로 정리한다(누수 방지). version 은 올리지 않는다
+    /// (바인딩은 탭 목록/레이아웃 트리와 무관 — 라우팅 표만 재계산하면 됨, 호출자가 rebuild).
+    pub fn bind_window(&mut self, label: String, view_id: Uuid) -> Result<(), LayoutError> {
+        if !self.views.iter().any(|v| v.id == view_id) {
+            return Err(LayoutError::ViewNotFound(view_id));
+        }
+        self.window_bindings.insert(label, view_id);
+        Ok(())
+    }
+
+    /// window_label 바인딩 제거(팝업 창 Destroyed 시 라우팅 정리). 없던 label 이면 조용히 no-op.
+    /// ★수명/누수 임계(load-bearing)★: 이걸 안 부르면 죽은 창 label 이 window_bindings 에 남아
+    /// OutputRouter 가 그 label 로 계속 라우팅을 시도한다(registry 미등록이라 실질 no-op 이나 stale binding).
+    pub fn unbind_window(&mut self, label: &str) {
+        self.window_bindings.remove(label);
     }
 
     /// active View 의 focus 가 유효한 슬롯을 가리키게 보정(없으면 첫 슬롯). 초기화·연산 후 호출.
@@ -141,8 +181,8 @@ impl ViewManager {
         id
     }
 
-    /// View 닫기. active 면 다른 View 로 전환(목록 첫 View), 마지막이면 새 빈 View 생성(빈 상태).
-    /// invalid view_id → no-op + Err.
+    /// View 닫기. active 면 다른 View 로 전환(★첫 *언바인딩* View★ — ADR-0035), 남은 언바인딩 View 가
+    /// 없거나 마지막이면 새 빈 View 생성(빈 상태). invalid view_id → no-op + Err.
     pub fn close_view(&mut self, view_id: Uuid) -> Result<(), LayoutError> {
         let idx = self
             .views
@@ -153,22 +193,38 @@ impl ViewManager {
         // 이 View 에 바인딩된 창(팝업/tree)들의 바인딩 정리.
         self.window_bindings.retain(|_, vid| *vid != view_id);
 
-        if self.views.is_empty() {
-            // 마지막 View 닫음 → 빈 상태 유지: 새 빈 View 1개 생성(빈 화면 + `+`).
-            let id = Uuid::new_v4();
-            let first_slot = LayoutNode::new_empty_slot();
-            let focus = tree::first_slot_id(&first_slot);
-            self.views.push(View {
-                id,
-                name: "View 1".to_string(),
-                layout: first_slot,
-                focused_slot_id: Some(focus),
-            });
-            self.active_view_id = id;
-        } else if self.active_view_id == view_id {
-            // 닫은 게 active 면 목록 첫 View 로 전환.
-            self.active_view_id = self.views[0].id;
+        // 닫은 게 active 였으면 새 active 를 다시 고른다. ★ADR-0035: window_bindings 에 묶인 View(팝업 등)
+        //   는 절대 active(=main 창 전용 개념)로 승격하면 안 된다★ — 승격하면 view_metas 의 active-예외가
+        //   그 View 를 탭으로 되살리고 OutputRouter 가 같은 agent 표면을 main-active + 팝업-bound 양쪽으로
+        //   라우팅한다(직교 붕괴). 그래서 "첫 *언바인딩* View"를 고르고, 언바인딩 View 가 하나도 없으면
+        //   (전부 창에 묶임) 새 빈 언바인딩 View 를 만들어 active 로 삼는다(마지막 View 닫힘 분기와 동형).
+        if self.active_view_id == view_id {
+            let first_unbound = self
+                .views
+                .iter()
+                .find(|v| !self.window_bindings.values().any(|&bv| bv == v.id))
+                .map(|v| v.id);
+            match first_unbound {
+                Some(id) => self.active_view_id = id,
+                None => {
+                    // 남은 언바인딩 View 0(빈 목록이거나 전부 바인딩됨) → 새 빈 언바인딩 View 생성.
+                    //   (옛 "마지막 View 닫음" 분기를 흡수 — 빈 목록도 여기로 떨어진다. 새 View 는 어떤
+                    //   window_bindings 에도 없으니 언바인딩 불변식 자동 성립.)
+                    let id = Uuid::new_v4();
+                    let first_slot = LayoutNode::new_empty_slot();
+                    let focus = tree::first_slot_id(&first_slot);
+                    self.views.push(View {
+                        id,
+                        name: "View 1".to_string(),
+                        layout: first_slot,
+                        focused_slot_id: Some(focus),
+                    });
+                    self.active_view_id = id;
+                }
+            }
         }
+        // 닫은 게 비-active 면 active 는 유지된다(active 는 방금 지운 view 가 아니므로 여전히 유효).
+        //   비-active 를 닫아 목록이 비는 경우는 없다(단일 View 는 항상 active).
         self.bump_version();
         Ok(())
     }
@@ -305,6 +361,72 @@ mod tests {
             LayoutNode::Slot { agent_id: None, .. }
         ));
         assert_eq!(mgr.active_view_id, mgr.views[0].id);
+    }
+
+    #[test]
+    fn close_active_never_promotes_bound_popup_view_to_active() {
+        // Finding 2(ADR-0035): main active A(언바인딩) + 팝업 백킹 View P(바인딩). A 를 닫으면 새 active 는
+        //   P 가 절대 아니어야 한다 — P 는 window_bindings 에 묶여 있어 main active 로 승격 금지. 남은
+        //   언바인딩 View 가 없으므로(P 뿐) 새 빈 언바인딩 View 가 생겨 그게 active 가 된다.
+        let mut mgr = ViewManager::new();
+        let a = mgr.active_view_id; // main active(언바인딩)
+        let p = mgr.create_view(Some("Popup 1".into())); // create_view 가 active 를 P 로 바꿈
+        let _ = mgr.switch_view(a); // active=A 복원(팝업은 바인딩 전용, pop_out_slot 과 동형)
+        mgr.bind_window("slot-popup-1".into(), p).unwrap(); // P 를 팝업 창에 바인딩
+
+        mgr.close_view(a).unwrap(); // main 탭(A) 닫음
+
+        // ★핵심 단언★: 새 active 는 P(바인딩된 팝업 View)가 아니다.
+        assert_ne!(
+            mgr.active_view_id, p,
+            "바인딩된 팝업 View 를 active 로 승격 금지(ADR-0035)"
+        );
+        // 새 active 는 어떤 window_bindings 에도 안 걸린 언바인딩 View 여야 한다.
+        assert!(
+            !mgr.window_bindings
+                .values()
+                .any(|&bv| bv == mgr.active_view_id),
+            "새 active 는 언바인딩 View"
+        );
+        // 그리고 그 새 active 는 방금 만든 빈 View(P 도, 닫은 A 도 아님).
+        assert_ne!(mgr.active_view_id, a, "닫은 View 는 active 가 될 수 없음");
+        // view_metas 는 P 를 노출하지 않는다(바인딩 + 비활성이라 탭 바에서 제외 — Fix 2B 유지).
+        let metas = mgr.view_metas();
+        assert!(
+            !metas.iter().any(|m| m.id == p),
+            "바인딩된 팝업 View 는 탭 목록에 뜨지 않음(active-예외에도 안 걸림)"
+        );
+        // 새 active 는 탭 목록에 있다(main 탭 존재 보장).
+        assert!(
+            metas.iter().any(|m| m.id == mgr.active_view_id),
+            "새 active(언바인딩)는 탭 목록에 있음"
+        );
+    }
+
+    #[test]
+    fn close_active_picks_first_unbound_when_one_exists() {
+        // 언바인딩 View 가 하나 남아 있으면 새 빈 View 를 만들지 말고 그 언바인딩 View 를 active 로.
+        // 배치: A(active,언바인딩), B(언바인딩), P(바인딩). A 닫음 → active = B(첫 언바인딩), 새 View 생성 X.
+        let mut mgr = ViewManager::new();
+        let a = mgr.active_view_id;
+        let b = mgr.create_view(Some("B".into()));
+        let p = mgr.create_view(Some("Popup".into()));
+        let _ = mgr.switch_view(a);
+        mgr.bind_window("slot-popup-1".into(), p).unwrap();
+        let count_before = mgr.views.len(); // A,B,P = 3
+
+        mgr.close_view(a).unwrap();
+
+        assert_eq!(
+            mgr.active_view_id, b,
+            "첫 언바인딩 View(B)로 전환 — 새 View 안 만듦"
+        );
+        assert_eq!(
+            mgr.views.len(),
+            count_before - 1,
+            "A 만 제거(새 View 생성 없음)"
+        );
+        assert_ne!(mgr.active_view_id, p, "바인딩 View 는 active 금지");
     }
 
     #[test]
@@ -488,10 +610,45 @@ mod tests {
 
     #[test]
     fn view_metas_lists_all() {
+        // 바인딩이 없으면 모든 View 를 나열한다(Fix 2B 필터가 무바인딩 상태는 안 건드림).
         let mut mgr = ViewManager::new();
         mgr.create_view(Some("Second".into()));
         let metas = mgr.view_metas();
         assert_eq!(metas.len(), 2);
         assert_eq!(metas[1].name, "Second");
+    }
+
+    #[test]
+    fn view_metas_excludes_window_bound_view() {
+        // Fix 2B: 팝업 창에 바인딩된 (비활성) View 는 main 탭 바 메타에서 제외된다(유령 탭 방지).
+        let mut mgr = ViewManager::new();
+        let main = mgr.active_view_id;
+        let popup_view = mgr.create_view(Some("Popup 1".into()));
+        let _ = mgr.switch_view(main); // active=main 유지(팝업은 바인딩 전용)
+        mgr.bind_window("slot-popup-1".into(), popup_view).unwrap();
+
+        let metas = mgr.view_metas();
+        assert_eq!(metas.len(), 1, "바인딩된 팝업 View 는 탭 목록에서 빠짐");
+        assert_eq!(metas[0].id, main, "남는 건 active/main View 뿐");
+        assert!(
+            !metas.iter().any(|m| m.id == popup_view),
+            "바인딩된 View id 는 메타에 없음"
+        );
+    }
+
+    #[test]
+    fn view_metas_never_excludes_active_even_if_bound() {
+        // Fix 2B 방어 가드: active_view_id 는 어떤 창이 바인딩하더라도 절대 제외되지 않는다
+        // (agent-tree 가 active 를 바인딩하는 함정 방지 — main 탭은 항상 남아야 한다).
+        let mut mgr = ViewManager::new();
+        let main = mgr.active_view_id;
+        // active(main) 자신을 바인딩해도 탭에서 사라지면 안 된다.
+        mgr.bind_window("some-window".into(), main).unwrap();
+
+        let metas = mgr.view_metas();
+        assert!(
+            metas.iter().any(|m| m.id == main),
+            "active View 는 바인딩돼도 탭에 남는다(방어 가드)"
+        );
     }
 }

@@ -24,9 +24,14 @@ function nodeKey(node: LayoutNode): string {
 export default function ViewLayoutRenderer({
   node,
   focusedSlotId,
+  viewIdOverride,
 }: {
   node: LayoutNode
   focusedSlotId: string | null
+  // ★Fix 3: 이 렌더러가 그리는 View id 오버라이드(선택).★ 팝업 창(PopoutPage)이 자기 고정 view 를 넘겨
+  //   내부 SlotContextMenu 의 액션 좌표를 그 view 로 고정한다. 메인 창은 안 넘김 → 메뉴가 activeViewId 폴백
+  //   (하위호환). 재귀 split 렌더에도 그대로 전파해 하위 슬롯 메뉴까지 같은 view 를 쓰게 한다.
+  viewIdOverride?: string | null
 }) {
   // ★렌더 모드 오버라이드(§5)★: caps 유도 기본(defaultRenderMode) 대신 강제할 slot node.id → RenderMode.
   const renderModeOverride = useViewStore(s => s.renderModeOverride)
@@ -135,6 +140,7 @@ export default function ViewLayoutRenderer({
             y={contextMenu.y}
             slotId={node.id}
             agentId={node.agent_id}
+            viewIdOverride={viewIdOverride}
             onClose={() => setContextMenu(null)}
           />
         )}
@@ -146,10 +152,10 @@ export default function ViewLayoutRenderer({
     <div style={{ height: '100%' }}>
       <Allotment vertical={node.dir === 'vertical'}>
         <Allotment.Pane key={nodeKey(node.a)}>
-          <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} />
+          <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
         <Allotment.Pane key={nodeKey(node.b)}>
-          <ViewLayoutRenderer node={node.b} focusedSlotId={focusedSlotId} />
+          <ViewLayoutRenderer node={node.b} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
       </Allotment>
     </div>

@@ -41,6 +41,14 @@ use crate::output_router::{OutputRouter, SubscriptionDelta};
 const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 /// `view:list-updated` 이벤트명 — View 목록/active 가 바뀌었을 때(탭 바 미러).
 const EVT_VIEW_LIST_UPDATED: &str = "view:list-updated";
+/// `view:closed` 이벤트명 — 특정 View 가 close_view 로 *제거*됐을 때(닫힌 view_id 를 실어 emit).
+/// ★왜 별도 양성 신호인가(Finding 1)★: 팝업 창(PopoutPage)은 자기 백킹 View 가 닫히면 창을 자가종료해야
+/// 하는데, view:list-updated 의 목록(view_metas)은 *창 바인딩 View 를 제외한 탭 바 필터*라 팝업 자기 view
+/// 는 애초에 목록에 없다 → "목록에 없음"을 닫힘 신호로 쓰면 모든 팝업이 첫 emit 에 자가종료·연쇄 붕괴한다.
+/// 그래서 "이 view 가 닫혔다"는 명시적 양성 신호를 close_view 경로에서만 emit 하고, 팝업은 그 id 가 자기
+/// view 와 일치할 때만 닫는다. (창 Destroyed→백엔드 정리 경로 cleanup_popup_window 에선 emit 안 함 —
+/// 창이 이미 소멸한 뒤라 자가종료가 무의미 + 재진입 위험.)
+const EVT_VIEW_CLOSED: &str = "view:closed";
 
 /// `view:list-updated` 페이로드. list_views(read-only 조회) 반환 타입으로도 쓰여(부팅 init) crate
 /// 가시성 필요 — pub command 반환 타입은 private 이면 안 됨(generate_handler 매크로 확장 위치 가시성).
@@ -48,6 +56,12 @@ const EVT_VIEW_LIST_UPDATED: &str = "view:list-updated";
 pub(crate) struct ViewListPayload {
     views: Vec<ViewMeta>,
     active_view_id: Uuid,
+}
+
+/// `view:closed` 페이로드 — 방금 close_view 로 제거된 view_id(팝업 자가종료용 양성 신호, Finding 1).
+#[derive(serde::Serialize, Clone)]
+struct ViewClosedPayload {
+    id: Uuid,
 }
 
 /// 락 보유 중 mgr 에서 복사한 뷰목록 페이로드(락 드롭 후 emit 에 사용).
@@ -123,6 +137,8 @@ pub fn close_view(
 ) -> Result<(), String> {
     let (layout, list) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        // close_view 가 Ok 면 view_id 가 실재했고 제거됐다(Err 면 여기서 early-return → 아래 view:closed
+        //   emit 도 안 탐). 그래서 emit 할 "닫힌 id" = 요청 view_id 그대로다.
         mgr.close_view(view_id).map_err(|e| e.to_string())?;
         // 닫은 뒤 active View 의 레이아웃을 emit(전환·빈 상태 반영).
         let active = mgr.active_view_id;
@@ -133,6 +149,11 @@ pub fn close_view(
         (layout, list)
     }; // ← 락 드롭
     emit_after_unlock(&app, layout, list);
+    // ★view:closed 양성 신호(Finding 1, 락 밖 emit — ADR-0006)★: 이 view 에 바인딩된 팝업 창이 있으면
+    //   그 창이 이 id 로 자기 백킹 view 소멸을 감지해 자가종료한다. emit_after_unlock 뒤(락 미보유)에 쏜다.
+    if let Err(e) = app.emit(EVT_VIEW_CLOSED, ViewClosedPayload { id: view_id }) {
+        tracing::warn!("[layout] {EVT_VIEW_CLOSED} emit 실패: {e}");
+    }
     Ok(())
 }
 

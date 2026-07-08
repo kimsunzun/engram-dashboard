@@ -32,7 +32,13 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: (event: string, handler: (e: { payload: unknown }) => void) => listenMock(event, handler),
 }))
 
-import { selectActiveView, subscribeViewEvents, useViewStore } from './viewStore'
+import {
+  readViewIdFromHash,
+  resolveDefaultViewId,
+  selectActiveView,
+  subscribeViewEvents,
+  useViewStore,
+} from './viewStore'
 
 /** 백엔드 emit 흉내 — subscribeViewEvents 가 등록한 핸들러로 payload 를 흘려보낸다. */
 function emit(event: string, payload: unknown): void {
@@ -565,5 +571,56 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
   it('setRenderMode(유효 mode) → 정상 기록', () => {
     useViewStore.getState().setRenderMode('s1', 'dom')
     expect(useViewStore.getState().renderModeOverride['s1']).toBe('dom')
+  })
+})
+
+// ★Fix 3(§5): 팝업 컨텍스트 view id 해소★ — window.__engramLayout·SlotContextMenu 가 공유하는 단일
+// 리졸버. 팝업 창(hash `?view=`)에서는 그 창의 고정 view 로, 메인 창(팝업 hash 없음)에서는 activeViewId
+// 로 떨어져야 한다(팝업 안 LLM/CDP 호출이 main 의 activeViewId 를 잘못 집는 것을 막음).
+describe('resolveDefaultViewId + readViewIdFromHash (팝업 컨텍스트 해소, Fix 3)', () => {
+  const origHash = window.location.hash
+  afterEach(() => {
+    window.location.hash = origHash
+  })
+
+  it('readViewIdFromHash: 팝업 hash(#/popup?view=<id>)에서 view id 파싱', () => {
+    window.location.hash = '#/popup?view=popup-view-abc'
+    expect(readViewIdFromHash()).toBe('popup-view-abc')
+  })
+
+  it('readViewIdFromHash: 쿼리 없는 메인 hash(#/)면 null', () => {
+    window.location.hash = '#/'
+    expect(readViewIdFromHash()).toBeNull()
+  })
+
+  // ★라우트 스코핑(cross-family 리뷰 방어)★: 팝업이 아닌 라우트의 stray `?view=` 는 무시.
+  it('readViewIdFromHash: 메인 라우트의 stray ?view=(#/?view=abc)는 무시하고 null', () => {
+    window.location.hash = '#/?view=abc'
+    expect(readViewIdFromHash()).toBeNull()
+  })
+
+  it('resolveDefaultViewId: 메인 라우트에 stray ?view= 가 붙어도 activeViewId 로 폴백', () => {
+    useViewStore.setState({ activeViewId: 'MAIN-active-view' })
+    window.location.hash = '#/?view=abc'
+    expect(resolveDefaultViewId()).toBe('MAIN-active-view')
+  })
+
+  it('resolveDefaultViewId: 팝업 컨텍스트면 자기 ?view= id(activeViewId 아님)', () => {
+    // main 의 activeViewId 를 세팅해도, 팝업 hash 가 있으면 그걸 이긴다(엉뚱한 main view 방지).
+    useViewStore.setState({ activeViewId: 'MAIN-active-view' })
+    window.location.hash = '#/popup?view=POPUP-own-view'
+    expect(resolveDefaultViewId()).toBe('POPUP-own-view')
+  })
+
+  it('resolveDefaultViewId: 메인 창(팝업 hash 없음)이면 activeViewId 로 폴백', () => {
+    useViewStore.setState({ activeViewId: 'MAIN-active-view' })
+    window.location.hash = '#/'
+    expect(resolveDefaultViewId()).toBe('MAIN-active-view')
+  })
+
+  it('resolveDefaultViewId: 팝업도 아니고 activeViewId 도 없으면 null', () => {
+    useViewStore.setState({ activeViewId: null })
+    window.location.hash = '#/'
+    expect(resolveDefaultViewId()).toBeNull()
   })
 })

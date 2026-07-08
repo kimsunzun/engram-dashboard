@@ -7,7 +7,7 @@
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from './agentStore'
 import { CHAT_STYLE_DEFAULTS, useChatStyleStore, type ChatStyleKey } from './chatStyleStore'
-import { subscribeViewEvents, useViewStore } from './viewStore'
+import { resolveDefaultViewId, subscribeViewEvents, useViewStore } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
@@ -68,6 +68,17 @@ export function initEventBus(): Promise<void> {
         split: useViewStore.getState().split,
         closeSlot: useViewStore.getState().closeSlot,
         assignAgent: useViewStore.getState().assignAgent,
+        // ★슬롯 팝업 분리(§5, Fix 3)★: popOutSlot(slotId) 단일 인자 표면 — LLM 이 slot id 만으로 부를 수
+        //   있게 viewId 는 resolveDefaultViewId() 로 해소한다. ★팝업 창 안에서 호출되면 그 창의 고정 view
+        //   (hash `?view=`)로, 메인 창에서는 activeViewId 로 떨어진다★ — 팝업 안 LLM/CDP 가 main 의
+        //   activeViewId 를 잘못 집어 엉뚱한 view 를 pop-out(SlotNotFound·오변형)하는 것을 막는다.
+        //   slotId 가 그 view 밖이면 백엔드가 SlotNotFound Err(방어). 명시적 (viewId, slotId) 호출은
+        //   viewStore.popOutSlot 을 직접 부르면 되고(우클릭 메뉴가 그 경로) 그건 종전과 동일.
+        popOutSlot: (slotId: string) => {
+          const viewId = resolveDefaultViewId()
+          if (!viewId) return Promise.reject(new Error('view id 미확정 — pop-out 대상 뷰 없음'))
+          return useViewStore.getState().popOutSlot(viewId, slotId)
+        },
         setRenderMode: useViewStore.getState().setRenderMode,
         clearRenderMode: useViewStore.getState().clearRenderMode,
         enableDomMode: useViewStore.getState().enableDomMode,

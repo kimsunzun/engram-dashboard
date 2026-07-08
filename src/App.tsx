@@ -3,6 +3,7 @@ import { HashRouter, Routes, Route } from 'react-router-dom'
 import { themeManager } from './theme/ThemeManager'
 import AppLayout from './components/layout/AppLayout'
 import TreePage from './pages/TreePage'
+import PopoutPage from './pages/PopoutPage'
 import { initEventBus, refreshProfiles } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { useAgentStore } from './store/agentStore'
@@ -34,6 +35,8 @@ function App() {
         <Routes>
           <Route path="/" element={<AppLayout />} />
           <Route path="/tree" element={<TreePage />} />
+          {/* 슬롯 팝업 분리(pop-out)로 런타임 생성된 창 — ?view=<id> 의 단일 View 만 렌더. */}
+          <Route path="/popup" element={<PopoutPage />} />
         </Routes>
       </div>
     </HashRouter>

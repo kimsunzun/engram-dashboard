@@ -85,6 +85,12 @@ pub fn run() {
             app.manage(router.clone());
             app.manage(registry.clone());
 
+            // 슬롯 팝업 분리(pop_out_slot)용 label 카운터 — 창 label 재사용 금지 불변식을 강제하는 단조
+            // 카운터(닫아도 안 되돌림). app-level 공유라 Arc 로 manage(여러 pop_out_slot 호출이 같은 카운터).
+            app.manage(std::sync::Arc::new(
+                crate::commands::popout::PopupCounter::default(),
+            ));
+
             // ── S14 모듈①(ADR-0036) T6a/T6b: DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
             // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
             // Handle::current() 대신 전용 런타임 — DaemonClient::new_real_with_owned_runtime).
@@ -131,12 +137,40 @@ pub fn run() {
         //  분기 — conf 첫 창은 label 미지정이라 Tauri 기본 라벨 "main".
         // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
         .on_window_event(move |window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    // X=hide(트레이 상주). prevent_close 후 hide.
-                    api.prevent_close();
-                    let _ = window.hide();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        // X=hide(트레이 상주). prevent_close 후 hide.
+                        // 팝업(slot-popup-*)·agent-tree 는 prevent 안 함 → 실제로 닫히고, 닫히면 아래 Destroyed
+                        // arm 이 라우팅/구독/Channel 을 정리한다(팝업만 정리 대상).
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
                 }
+                // ★팝업 창 Destroyed 정리(수명/누수 임계)★: 팝업이 실제로 소멸하면(정상 close 또는 프로그램
+                //   destroy) window_bindings·데몬 구독·출력 Channel 을 정리한다. main/agent-tree 는 대상 아님
+                //   (main 은 위에서 hide 만 하니 애초에 Destroyed 안 남, agent-tree 도 팝업 prefix 아님).
+                //   강제 프로세스 kill 은 모든 state 를 통째로 죽여 이 경로가 안 타지만(수용) 정상 close·
+                //   프로그램 destroy 는 여기서 확실히 정리한다. (ADR-0046: 일반 라우팅 메커니즘 정리.)
+                tauri::WindowEvent::Destroyed => {
+                    let label = window.label().to_string();
+                    if crate::commands::popout::is_popup_label(&label) {
+                        let app = window.app_handle();
+                        // 정리에 필요한 공유 상태(Arc)들을 app.state 로 꺼낸다 — 하나라도 없으면(초기화 실패
+                        //   극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
+                        if let (Some(state), Some(router), Some(registry), Some(client)) = (
+                            app.try_state::<crate::layout::LayoutState>(),
+                            app.try_state::<std::sync::Arc<crate::output_router::OutputRouter>>(),
+                            app.try_state::<crate::output_channel::WindowChannelRegistry>(),
+                            app.try_state::<std::sync::Arc<crate::daemon_client::DaemonClient>>(),
+                        ) {
+                            crate::commands::popout::cleanup_popup_window(
+                                &app, &label, &state, &router, &registry, &client,
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -192,6 +226,11 @@ pub fn run() {
             // ADR-0046 M1: 뷰 주도 replay 채번(single-flight, gen 반환) — 뷰 mount/remount 시 데몬 ring
             //   전량 재replay 를 유발하는 유일 경로(wire Subscribe 형성 = 이것 단독, BLOCK-1 전면화).
             commands::request_replay,
+            // 슬롯 팝업 분리(§5 LLM 제어 표면) — 슬롯 agent 를 런타임 생성 OS 창으로 MOVE(detach). async fn
+            //   필수(WebviewWindowBuilder 데드락 회피). ★노출 제어 표면은 pop_out_slot 하나뿐★: 옛
+            //   bind_window command 는 임의 창→임의 View 바인딩을 무가드로 열어 라우팅 오염 위험이라 제거했다
+            //   (dead code — 프론트 호출자 0, pop_out_slot 은 ViewManager.bind_window 를 직접 호출). Fix 4.
+            commands::pop_out_slot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -69,6 +69,12 @@ interface ViewState {
   closeSlot: (viewId: string, slotId: string) => Promise<void>
   /** slot 에 agent 참조 배정. */
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
+  /**
+   * slot 의 agent 를 새 런타임 팝업 OS 창으로 분리(MOVE, not mirror). 백엔드 pop_out_slot 이 새 View 생성
+   * → agent 이전 → 팝업 창 생성·바인딩 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는 emit(layout:updated)으로
+   * 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). §5: window.__engramLayout.popOutSlot 으로 LLM 도 호출.
+   */
+  popOutSlot: (viewId: string, slotId: string) => Promise<void>
 
   // ── ★렌더 모드 오버라이드(§5)★ 지정/해제(프론트 전용, invoke 안 탐) ──────────────────────────
   /** slot 의 렌더러를 mode 로 강제(caps 유도 기본을 덮음). */
@@ -120,6 +126,12 @@ export const useViewStore = create<ViewState>((set, get) => ({
     // 기본으로 시작하게 한다(프론트 전용 낙관 갱신 — renderModeOverride, 권위 루프 밖).
     get().clearRenderMode(slotId)
     return invoke<void>('assign_agent', { viewId, slotId, agentId })
+  },
+  popOutSlot: (viewId, slotId) => {
+    // slot 이 메인에서 사라지므로(MOVE) 그 slot 의 렌더 오버라이드 엔트리도 즉시 정리(누수 방지 — 프론트
+    // 전용 상태라 emit 루프 밖). 실제 슬롯 제거·새 창 생성은 백엔드 pop_out_slot 이 하고 emit 으로 반영된다.
+    get().clearRenderMode(slotId)
+    return invoke<void>('pop_out_slot', { viewId, slotId })
   },
 
   // ★렌더 모드 오버라이드 = 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set(override 라 백엔드
@@ -227,6 +239,39 @@ function markExternalViewEvent(): void {
 /** 현재 active view 의 캐시 항목(없으면 null) — 메인 창 렌더 selector 의 단일 출처(active-only). */
 export function selectActiveView(state: ViewState): CachedView | null {
   return state.activeViewId ? (state.layouts[state.activeViewId] ?? null) : null
+}
+
+// ── 팝업 컨텍스트 view id 해소(§5, Fix 3) ──────────────────────────────────────────────────
+/**
+ * 해시 쿼리(`#/popup?view=<id>`)에서 이 창의 고정 view id 파싱. HashRouter 라 window.location.hash 뒤에
+ * 쿼리가 붙는다. 팝업 창이 아니면(메인 창 = `#/` 등) null. ★단일 출처★: PopoutPage 와 resolveDefaultViewId
+ * 가 같은 이 함수를 써 "팝업 컨텍스트 판정"을 한 곳으로 모은다(둘이 어긋나면 §5 제어 표면이 갈라진다).
+ */
+export function readViewIdFromHash(): string | null {
+  // hash 예: "#/popup?view=<uuid>". '?' 뒤를 URLSearchParams 로 파싱.
+  const hash = window.location.hash
+  const qIndex = hash.indexOf('?')
+  if (qIndex < 0) return null
+  // ★라우트 스코핑(cross-family 리뷰 방어)★: `?view=` 는 팝업 라우트에서만 신뢰한다.
+  // 라우트 경로(= '#' 과 '?' 사이)가 정확히 `/popup`(pop_out 이 만드는 URL, App.tsx 등록 경로)일 때만
+  // 파싱. 그 외 hash(메인 `#/?view=<x>` 같은 도달불가 상태 포함)는 null → resolveDefaultViewId 가
+  // activeViewId 로 폴백해 메인 창이 엉뚱한 view 를 집지 않는다.
+  const path = hash.slice(0, qIndex)
+  if (path !== '#/popup') return null
+  const params = new URLSearchParams(hash.slice(qIndex + 1))
+  return params.get('view')
+}
+
+/**
+ * ★Fix 3(§5)★: viewId 를 명시하지 않은 레이아웃 제어 호출의 기본 좌표를 해소한다.
+ *   - 팝업 창(hash 에 `?view=<id>`)에서는 그 창의 고정 view(자기 `?view=` id) — activeViewId(=main 창
+ *     개념, ADR-0035)를 쓰면 팝업 안 LLM/CDP 호출이 엉뚱한 main view 를 건드린다(SlotNotFound·오변형).
+ *   - 메인 창(팝업 hash 없음)에서는 종전대로 store 의 activeViewId.
+ * SlotContextMenu(Fix 3)와 window.__engramLayout(이 함수 사용)이 같은 판정을 공유해 사람 클릭·LLM 이
+ * 팝업 창 안에서 동일하게 "자기 view"로 동작한다.
+ */
+export function resolveDefaultViewId(): string | null {
+  return readViewIdFromHash() ?? useViewStore.getState().activeViewId
 }
 
 // ── emit 구독 등록(eventBus 에서 1회 호출, HMR/중복 가드는 eventBus 가 dispose 로 관리) ──────────
