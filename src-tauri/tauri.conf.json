@@ -28,16 +28,6 @@
         "decorations": true,
         "title": "Agent Tree",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
-      },
-      {
-        "label": "slot-popup",
-        "url": "index.html#/popup",
-        "visible": false,
-        "width": 800,
-        "height": 600,
-        "decorations": true,
-        "title": "Slot Popup",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
       }
     ],
     "security": {

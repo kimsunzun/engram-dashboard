@@ -9,8 +9,8 @@
 // 전략: TerminalSlot 을 vi.mock 으로 stub — xterm DOM 직접 의존 없이 마운트 여부만 단언.
 // agentClient(clientFactory) / @tauri-apps/api/core / allotment / @xterm 계열도 mock 처리.
 
-import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── Tauri / transport 계층 stub ────────────────────────────────────────────────
 vi.mock('@tauri-apps/api/core', () => ({
@@ -26,11 +26,19 @@ vi.mock('@tauri-apps/api/event', () => ({
 // ── agentClient / clientFactory stub ─────────────────────────────────────────
 // TerminalSlot 이 내부에서 agentClient 를 import 하지만 이번 테스트에선 TerminalSlot 자체를
 // mock 하므로 실제 호출은 일어나지 않는다. clientFactory 도 Tauri invoke 를 사용하므로 stub.
+// spawnAgent/killAgent 도 stub — SlotContextMenu 의 '에이전트 생성'(spawn→assign)·'에이전트 종료'(kill)
+// 경로가 이들을 부른다. 컨텍스트 메뉴 테스트에서 spawn 결과 id 를 제어하려 spawnAgent 를 가변으로 둔다.
+const clientMock = vi.hoisted(() => ({
+  spawnAgent: vi.fn(async () => ({ id: 'spawned-agent-id' })),
+  killAgent: vi.fn(async () => undefined),
+}))
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
     subscribeOutput: vi.fn(async () => ({ unsubscribe: vi.fn() })),
     writeStdin: vi.fn(async () => undefined),
     resizePty: vi.fn(async () => undefined),
+    spawnAgent: (...args: unknown[]) => clientMock.spawnAgent(...(args as [])),
+    killAgent: (...args: unknown[]) => clientMock.killAgent(...(args as [])),
     connectionState: 'down',
   },
   getAgentClient: vi.fn(),
@@ -67,7 +75,7 @@ vi.mock('../slot/TerminalSlot', () => ({
   ),
 }))
 
-// ── RichSlot stub(M0 스파이크, ADR-0044) — 랩 렌더 트리/fixture import 없이 마운트 여부만 확인 ──
+// ── RichSlot stub(라이브 구조화 슬롯) — 실스트림 구독/누산 없이 마운트 여부만 확인 ──
 vi.mock('../slot/RichSlot', () => ({
   default: () => <div data-testid="rich-slot" />,
 }))
@@ -106,7 +114,7 @@ import { useViewStore } from '../../store/viewStore'
 
 afterEach(() => {
   cleanup()
-  useViewStore.setState({ richSlots: {}, renderModeOverride: {} }) // 프론트 전용 오버레이 격리(테스트 간 누수 방지)
+  useViewStore.setState({ renderModeOverride: {} }) // 프론트 전용 오버라이드 격리(테스트 간 누수 방지)
   agentStoreState.agents = [] // agent store holder 초기화(테스트 간 누수 방지)
 })
 
@@ -194,28 +202,6 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     // agent 있을 때 justifyContent: center 가 없어야 한다 — TerminalSlot 을 center 로 밀면 출력이 깨짐.
     expect(wrapper.style.justifyContent).not.toBe('center')
     expect(wrapper.style.alignItems).not.toBe('center')
-  })
-
-  // ── M0 스파이크(임시) — ADR-0044 RichSlot 분기 ──────────────────────────────────
-  it('richSlots 에 든 빈 slot → RichSlot 이 마운트되고 TerminalSlot/플레이스홀더는 없다', () => {
-    useViewStore.setState({ richSlots: { 's-rich': true } })
-    render(<ViewLayoutRenderer node={slotNode('s-rich', null)} focusedSlotId={null} />)
-    expect(screen.getByTestId('rich-slot')).toBeTruthy()
-    expect(screen.queryByTestId('terminal-slot')).toBeNull()
-    expect(screen.queryByText('— empty —')).toBeNull()
-  })
-
-  it('agent_id 있는 slot(비structured caps)은 rich 마킹이 있어도 TerminalSlot 우선(터미널 실슬롯 우선)', () => {
-    seedAgents(agentInfo('agent-x', false))
-    useViewStore.setState({ richSlots: { s1: true } })
-    render(<ViewLayoutRenderer node={slotNode('s1', 'agent-x')} focusedSlotId={null} />)
-    expect(screen.getByTestId('terminal-slot')).toBeTruthy()
-    expect(screen.queryByTestId('rich-slot')).toBeNull()
-  })
-
-  it('rich 마킹 없는 빈 slot → "JSON 스파이크" dev 버튼이 있다(사람 소환 경로)', () => {
-    render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
-    expect(screen.getByText('JSON 스파이크')).toBeTruthy()
   })
 
   // ── FIX 1(ADR-0041 replay 소유권): caps 도착 전엔 구체 렌더러를 마운트하지 않는다 ──────────────
@@ -333,5 +319,104 @@ describe('ViewLayoutRenderer — split 분기', () => {
     expect(terminals[0].getAttribute('data-agent-id')).toBe(agentId)
     // s2 는 empty 플레이스홀더만.
     expect(screen.getByText('— empty —')).toBeTruthy()
+  })
+})
+
+// ── ★우클릭 컨텍스트 메뉴(§5, ADR-0035)★ ─────────────────────────────────────────────────
+// ★이 스위트가 실제로 막는 것★: 캔버스 슬롯 우클릭 → SlotContextMenu 마운트 + 그 메뉴 액션이
+// viewStore(=window.__engramLayout 이 노출하는 것과 동일 함수)로 (activeViewId, slotId) 좌표를 흘리는지.
+// (Brick 1 에서 옛 LayoutRenderer→SlotPane 래핑 경로가 삭제돼 메뉴가 캔버스에서 닿지 않던 갭의 회귀 안전망.)
+//
+// 전략: split/closeSlot/assignAgent 를 store 에 spy 로 주입(SlotContextMenu 는 useViewStore(s=>s.split) 로
+// 이 함수들을 읽는다 → window.__engramLayout 이 부르는 것과 물리적으로 동일). '에이전트 생성'은
+// window.prompt + agentClient.spawnAgent(hoisted mock)를 거쳐 assignAgent 로 이어지므로 둘을 stub.
+describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어 표면)', () => {
+  const ACTIVE_VIEW = 'active-view-9'
+  const splitSpy = vi.fn(async () => 'new-slot')
+  const closeSlotSpy = vi.fn(async () => undefined)
+  const assignAgentSpy = vi.fn(async () => undefined)
+
+  beforeEach(() => {
+    splitSpy.mockClear()
+    closeSlotSpy.mockClear()
+    assignAgentSpy.mockClear()
+    clientMock.spawnAgent.mockClear()
+    clientMock.killAgent.mockClear()
+    // activeViewId + 레이아웃 액션을 store 에 주입 — SlotContextMenu 가 그대로 읽어 부른다(단일 표면).
+    useViewStore.setState({
+      activeViewId: ACTIVE_VIEW,
+      split: splitSpy,
+      closeSlot: closeSlotSpy,
+      assignAgent: assignAgentSpy,
+    })
+  })
+
+  /** 슬롯 우클릭 → 메뉴 오픈. 대상 슬롯 wrapper 를 반환. */
+  function openMenu(slotId: string, agentId: string | null): HTMLElement {
+    render(<ViewLayoutRenderer node={slotNode(slotId, agentId)} focusedSlotId={null} />)
+    const wrapper = document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement
+    fireEvent.contextMenu(wrapper)
+    return wrapper
+  }
+
+  it('빈 슬롯 우클릭 → SlotContextMenu 항목들이 뜬다(캔버스에서 도달 가능)', () => {
+    openMenu('s1', null)
+    // 메뉴 대표 항목들이 렌더된다 = 메뉴가 캔버스에 마운트됨(Brick 1 갭 메움 검증).
+    expect(screen.getByText('가로 분할')).toBeTruthy()
+    expect(screen.getByText('세로 분할')).toBeTruthy()
+    expect(screen.getByText('닫기')).toBeTruthy()
+    expect(screen.getByText('에이전트 생성')).toBeTruthy()
+  })
+
+  it('우클릭 전에는 메뉴가 없다(preventDefault 후 상태 기반 마운트)', () => {
+    render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
+    expect(screen.queryByText('가로 분할')).toBeNull()
+  })
+
+  it('"가로 분할" → split(activeViewId, slotId, "horizontal") 호출(§5 __engramLayout 경로)', () => {
+    openMenu('slot-A', null)
+    fireEvent.click(screen.getByText('가로 분할'))
+    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-A', 'horizontal')
+  })
+
+  it('"세로 분할" → split(activeViewId, slotId, "vertical") 호출', () => {
+    openMenu('slot-B', null)
+    fireEvent.click(screen.getByText('세로 분할'))
+    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-B', 'vertical')
+  })
+
+  it('"닫기" → closeSlot(activeViewId, slotId) 호출', () => {
+    openMenu('slot-C', null)
+    fireEvent.click(screen.getByText('닫기'))
+    expect(closeSlotSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-C')
+  })
+
+  it('"에이전트 생성" → spawnAgent 후 assignAgent(activeViewId, slotId, 새 agentId) 호출', async () => {
+    clientMock.spawnAgent.mockResolvedValueOnce({ id: 'brand-new-agent' })
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('C:/work')
+    openMenu('slot-D', null)
+    fireEvent.click(screen.getByText('에이전트 생성'))
+    // spawnAgent 는 prompt 로 받은 cwd(trim)로 불린다.
+    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work')
+    // spawn 이 resolve 된 뒤 assignAgent 가 그 agentId 로 이 슬롯에 배정한다(마이크로태스크 flush 대기).
+    await vi.waitFor(() =>
+      expect(assignAgentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-D', 'brand-new-agent'),
+    )
+    promptSpy.mockRestore()
+  })
+
+  it('agent 배정 슬롯 우클릭 → "에이전트 종료" 클릭 시 killAgent(그 agentId) 호출', () => {
+    seedAgents(agentInfo('assigned-agent', false)) // 종료 항목 활성 조건 = store 에 그 agent 존재
+    openMenu('slot-E', 'assigned-agent')
+    fireEvent.click(screen.getByText('에이전트 종료'))
+    expect(clientMock.killAgent).toHaveBeenCalledWith('assigned-agent')
+  })
+
+  it('비활성 "에이전트 종료"(store 에 agent 없음) 클릭 → killAgent 를 부르지 않는다(enabled 가드)', () => {
+    // agents store 를 비워 두면(=배정 agentId 가 실행중 목록에 없음) 종료 항목이 흐려지고 비활성이어야 한다.
+    // 시각만 흐리고 action 은 그대로 도는 버그의 회귀 안전망 — 비활성 항목 클릭은 no-op 여야 한다.
+    openMenu('slot-F', 'gone-agent') // store 에 'gone-agent' 없음 → 종료 항목 disabled
+    fireEvent.click(screen.getByText('에이전트 종료'))
+    expect(clientMock.killAgent).not.toHaveBeenCalled()
   })
 })

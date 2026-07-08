@@ -67,7 +67,7 @@ beforeEach(() => {
     layouts: {},
     views: [],
     activeViewId: null,
-    richSlots: {},
+    renderModeOverride: {},
   })
 })
 afterEach(() => {
@@ -514,41 +514,11 @@ describe('subscribeViewEvents 등록/해제', () => {
   })
 })
 
-// ★M0 스파이크(임시) — ADR-0044★: RichSlot 오버레이(프론트 전용, invoke 안 탐). M2 에서 제거될 자리라
-// 테스트도 최소 — "set/clear 가 richSlots 를 정확히 갱신하고 실슬롯 콘텐츠(agent_id)엔 안 닿는다"만 본다.
-describe('RichSlot 스파이크 오버레이(mountRich/unmountRich)', () => {
-  it('mountRich → richSlots 에 slotId 표시, invoke 는 안 부른다(권위 루프 우회)', () => {
-    useViewStore.getState().mountRich('slot-A')
-    expect(useViewStore.getState().richSlots).toEqual({ 'slot-A': true })
-    expect(invokeMock).not.toHaveBeenCalled() // 다른 액션과 달리 백엔드 invoke 없음(스파이크 예외)
-  })
-
-  it('unmountRich → 해당 slotId 만 제거(다른 rich 슬롯은 유지)', () => {
-    useViewStore.getState().mountRich('slot-A')
-    useViewStore.getState().mountRich('slot-B')
-    useViewStore.getState().unmountRich('slot-A')
-    expect(useViewStore.getState().richSlots).toEqual({ 'slot-B': true })
-  })
-
-  it('오버레이는 layout 캐시(agent_id 등 실슬롯 콘텐츠)를 건드리지 않는다', () => {
-    useViewStore.setState({
-      layouts: {
-        v1: { layout: { type: 'slot', id: 'slot-A', agent_id: null }, focusedSlotId: 'slot-A', version: 1 },
-      },
-      activeViewId: 'v1',
-    })
-    useViewStore.getState().mountRich('slot-A')
-    // rich 는 별도 오버레이 — 백엔드 권위 layout 은 불변(agent_id null 그대로).
-    expect(rendered()?.layout).toEqual({ type: 'slot', id: 'slot-A', agent_id: null })
-    expect(useViewStore.getState().richSlots['slot-A']).toBe(true)
-  })
-})
-
 // ★렌더 모드 오버라이드(§5, 프론트 전용)★: set/clear + slot 생명주기 정리(FIX-1) + 미타입 진입 가드(FIX-4).
-// richSlots 처럼 invoke→emit 권위 루프를 안 타는 프론트 전용 상태라 순수 로직만 검증한다.
+// invoke→emit 권위 루프를 안 타는 프론트 전용 상태라 순수 로직만 검증한다.
 describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => {
   beforeEach(() => {
-    // 위 공통 beforeEach 는 renderModeOverride 를 초기화하지 않으므로(setState 부분 갱신) 여기서 격리.
+    // 공통 beforeEach 가 renderModeOverride 를 이미 리셋하지만, 이 블록의 격리를 명시적으로 재보장.
     useViewStore.setState({ renderModeOverride: {} })
   })
 

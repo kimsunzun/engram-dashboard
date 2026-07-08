@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요).",
-  "windows": ["main", "agent-tree", "slot-popup"],
+  "windows": ["main", "agent-tree"],
   "permissions": [
     "core:default",
     "core:event:default"

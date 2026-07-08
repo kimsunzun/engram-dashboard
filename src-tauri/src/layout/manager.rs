@@ -26,10 +26,12 @@ pub enum LayoutError {
 /// 레이아웃 권위 상태. invoke 스레드풀 동시접근 → AppState 가 Mutex 로 감싼다.
 pub struct ViewManager {
     pub views: Vec<View>,
-    /// 메인 창의 활성 탭(ADR-0035/TRD: switch_view 가 이걸 바꾼다). 팝업·tree 창은 window_bindings.
+    /// 메인 창의 활성 탭(ADR-0035/TRD: switch_view 가 이걸 바꾼다). 보조 창(tree 등)은 window_bindings.
     pub active_view_id: Uuid,
-    /// window_label → view_id. 팝업/tree 창이 고정 View 에 바인딩(자기 뷰만 렌더). 모듈②에선 미사용
-    /// 이나 권위 상태의 일부라 미리 둔다(다음 모듈 open_view_in_popup 이 채운다).
+    /// window_label → view_id. ★일반 라우팅 메커니즘(ADR-0046)★: 메인 외 창(예: agent-tree)이 고정
+    /// View 에 바인딩돼 자기 뷰만 렌더한다. OutputRouter.rebuild 가 이 맵을 읽어 (active=main) + (바인딩된
+    /// label 들)로 출력을 라우팅한다 — 특정 창에 묶이지 않은 범용 표면이라 미래 창(임의 view→창 pop 등)도
+    /// 이 맵에 label 을 넣기만 하면 흡수된다. (옛 정적 slot-popup 창은 제거됐고 그 정적 target 도 사라졌다.)
     pub window_bindings: HashMap<String, Uuid>,
     /// 변경마다 +1(get_view race 용 — 팝업 pull↔listen 윈도). 0 부터 시작, 첫 변경에서 1.
     pub version: u64,

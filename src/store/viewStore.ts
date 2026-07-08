@@ -49,19 +49,11 @@ interface ViewState {
   activeViewId: string | null
 
   /**
-   * ★M0 스파이크(임시) — ADR-0044★: fixture 로 구동되는 RichSlot(구조화 JSON 렌더)을 띄운 slot_id 집합.
-   * ★프론트 전용 오버레이★ — 백엔드 wire LayoutNode 는 rich 개념을 모른다(M2 에서 transport caps 로
-   * xterm↔RichSlot 를 정식 분기하기 전까지의 임시 마킹). 그래서 이 필드만은 invoke→emit 권위 루프를
-   * 타지 않는다(위 "낙관적 갱신 X" 규칙의 스파이크 한정 예외). 실슬롯 콘텐츠(agent_id)는 불변.
-   */
-  richSlots: Record<string, true>
-
-  /**
    * ★렌더 모드 오버라이드(§5)★: slot node.id → 강제 RenderMode. caps 유도 기본 렌더러
    * (defaultRenderMode: structured→'rich' / else→'terminal')를 무시하고 지정한 렌더러를 마운트한다.
    * 미지정 slot 은 여기 키가 없어 기본 유도로 떨어진다(?? defaultRenderMode).
-   * ★프론트 전용★ — richSlots 와 동형으로 백엔드 wire LayoutNode 는 이 개념을 모른다(override라 권위
-   * 레이아웃과 무관). 그래서 이 필드도 invoke→emit 권위 루프를 안 탄다(richSlots 와 같은 예외).
+   * ★프론트 전용★ — 백엔드 wire LayoutNode 는 렌더 모드 개념을 모른다(override라 권위 레이아웃과 무관).
+   * 그래서 이 필드는 invoke→emit 권위 루프를 안 탄다(위 "낙관적 갱신 X" 규칙의 프론트 전용 예외).
    */
   renderModeOverride: Record<string, RenderMode>
 
@@ -77,12 +69,6 @@ interface ViewState {
   closeSlot: (viewId: string, slotId: string) => Promise<void>
   /** slot 에 agent 참조 배정. */
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
-
-  // ── RichSlot 오버레이 마운트/해제(계약 = richSlots 필드 JSDoc 정본) ──────────────────────────────
-  /** slot 에 RichSlot(fixture 구동 JSON 모드) 스파이크를 띄운다. */
-  mountRich: (slotId: string) => void
-  /** slot 의 RichSlot 스파이크를 걷는다(다시 empty 로). */
-  unmountRich: (slotId: string) => void
 
   // ── ★렌더 모드 오버라이드(§5)★ 지정/해제(프론트 전용, invoke 안 탐) ──────────────────────────
   /** slot 의 렌더러를 mode 로 강제(caps 유도 기본을 덮음). */
@@ -116,7 +102,6 @@ export const useViewStore = create<ViewState>((set, get) => ({
   layouts: {},
   views: [],
   activeViewId: null,
-  richSlots: {}, // 갱신 경로 = mountRich/unmountRich 만(계약은 필드 JSDoc).
   renderModeOverride: {}, // 갱신 경로 = set/clearRenderMode(+DOM 별칭)만(계약은 필드 JSDoc).
 
   createView: viewName => invoke<string>('create_view', { name: viewName ?? null }),
@@ -124,31 +109,21 @@ export const useViewStore = create<ViewState>((set, get) => ({
   switchView: viewId => invoke<void>('switch_view', { viewId }),
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
   closeSlot: (viewId, slotId) => {
-    // slot 이 사라지므로 그 slot 의 렌더 오버라이드 엔트리도 즉시 제거(누수 방지 — 프론트 전용 상태라
-    // invoke→emit 권위 루프를 안 타는 richSlots/renderModeOverride 는 여기서 낙관적으로 정리한다).
+    // slot 이 사라지므로 그 slot 의 렌더 오버라이드 엔트리도 즉시 제거(누수 방지 — 프론트 전용 상태인
+    // renderModeOverride 는 invoke→emit 권위 루프를 안 타므로 여기서 낙관적으로 정리한다).
     get().clearRenderMode(slotId)
     return invoke<void>('close_slot', { viewId, slotId })
   },
   assignAgent: (viewId, slotId, agentId) => {
     // slot UUID 는 재배정에도 안정(agent_id 만 바뀐다) → 이전 agent 를 위해 건 오버라이드가 새 agent 에
     // 조용히 적용되면 안 된다. 그래서 assign 시 그 slot 의 오버라이드를 clear 해 새 agent 는 caps 유도
-    // 기본으로 시작하게 한다(프론트 전용 낙관 갱신 — richSlots 와 동형, 권위 루프 밖).
+    // 기본으로 시작하게 한다(프론트 전용 낙관 갱신 — renderModeOverride, 권위 루프 밖).
     get().clearRenderMode(slotId)
     return invoke<void>('assign_agent', { viewId, slotId, agentId })
   },
 
-  // ★M0 스파이크 예외★: 다른 액션과 달리 invoke 를 안 부른다 — 백엔드가 rich 개념을 모르므로(M2 caps
-  // 정식화 전) "권위=백엔드·낙관 갱신 X" 규칙의 스파이크 한정 예외로 프론트 상태를 직접 set 한다.
-  mountRich: slotId => set(state => ({ richSlots: { ...state.richSlots, [slotId]: true } })),
-  unmountRich: slotId =>
-    set(state => {
-      const next = { ...state.richSlots }
-      delete next[slotId]
-      return { richSlots: next }
-    }),
-
-  // ★렌더 모드 오버라이드도 richSlots 와 같은 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set
-  // (override 라 백엔드 권위 레이아웃과 무관).
+  // ★렌더 모드 오버라이드 = 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set(override 라 백엔드
+  // 권위 레이아웃과 무관 — 백엔드 wire LayoutNode 는 렌더 모드 개념을 모른다).
   setRenderMode: (nodeId, mode) => {
     // ★미타입 JS 진입 가드(FIX-4)★: window.__engramLayout 경유로 임의 문자열이 올 수 있다. 유효 mode 가
     // 아니면 store 에 쓰지 않고 no-op — 무효 값이 오버라이드로 새면 ViewLayoutRenderer switch 가 그걸

@@ -646,6 +646,16 @@
 - **gitignore 정리:** 스킬 continue→handoff 개명으로 `.gitignore`의 `.claude/continue/`(물리 부재)가 stale → `.claude/handoff/`로 교체(세션-로컬 핸드오프 노트 = 원래 커밋 안 하는 의도 복원).
 - **게이트:** 소스 코드 무변경(bat/문서/gitignore/step-log만) → build/test 회귀 불가 = 인라인 정리 예외 조항. 미푸시 커밋 push(이전 5 + 이번 3).
 
+## B(레이아웃) 착수 — Brick 1: 레거시 퍼지 + 우클릭 메뉴=커맨드 마운트 + slot-popup 폐기 (2026-07-08, master, opus)
+- **발단(사용자, B 착수):** 레이아웃 재설계 B 시작. 구상 = ① 모든 건 슬롯(에이전트 트리도 슬롯화) ② 우클릭 메뉴 = **커맨드**(§5 실현, 나중에 프리셋 — 구조 여지만) ③ 초기 메뉴 = 튜토리얼 클로드·가로/세로 분할+합치기·클로드 생성 ④ 에이전트 트리는 일단 슬롯화만. **1차 목표(수용 시나리오):** 튜토리얼 클로드 생성 → 채팅 지시로 C드라이브 포커싱 A/B/C/D 스폰 → A는 현재 창·C/D는 새 창(="새 창"=새 View 가정) → A→C 메시지. 현 구조 유지한 채 이 기능 위주. Brick 분해(1 퍼지·2 탭바·3 튜토리얼·4 오케스트레이션). 착수 전 실측 2회(레이아웃/창/슬롯/트리 구조 + 레거시 잔재 인벤토리).
+- **Brick 1(`/implement standard`→Opus 코더):** 레거시 프론트 레이아웃 이중화(split-brain) 제거 + 커맨드 표면 단일화. 사용자 결정 = "예전건 다 지워"(이사 아닌 삭제·재작성) + slot-popup 백엔드까지 청소.
+  - **삭제:** 레거시 `slotStore`(numeric id·dispatch(LayoutCommand)) + 죽은 `LayoutRenderer`·`layout/SlotPane`·`slot/SlotPane` + `PopupPage`+`/popup` 라우트 + `src/lab/richslot/` 전체 + M0 스파이크(`richSlots`/`mountRich`/`__richslot`, RichSlot FixtureRichSlot 절반) + 죽은 `StructuredItemStream`.
+  - **재배선(§5 실현):** `ViewLayoutRenderer` 슬롯 래퍼 우클릭 → `SlotContextMenu` 인라인 마운트 → `window.__engramLayout`(split/closeSlot/assignAgent, activeViewId 키, 문자열 UUID slotId; spawn/kill은 agentClient ADR-0011) = 단일 control surface(메뉴 항목 = LLM이 부르는 동일 커맨드). `// ADR-0035` 앵커.
+  - **slot-popup 창 폐기:** `/popup` 라우트 삭제로 죽은 정적 창 → tauri.conf.json + capabilities/default.json(+regen gen/schemas → `["main","agent-tree"]`) + output_router 테스트 픽스처(slot-popup→agent-tree)·주석에서 제거. **일반 `window_bindings`/`OutputRouter::rebuild`/main·agent-tree 라우팅 보존.** CLAUDE.md "창 3개→2개" 동기. `open_view_in_popup`는 코드 미존재(주석·TRD뿐).
+- **게이트:** 코더 Opus → `/review code full` 2R(doc-aware Opus + cross-family Codex) — R1 FIX(메뉴 orphaned·라이브 캔버스 미마운트 + slot-popup 죽은 라우트 → 사용자 결정으로 마운트+완전제거) → R2 Codex FIX(비활성 메뉴항목이 `enabled` 무시하고 `action()` 발화 → 가드 + 테스트) → PASS. `/qa full` PASS: tsc 0·vitest 265·cargo build·멤버별 cargo test green(src-tauri lib은 선재 `0xC0000139` 로더 이슈로 미실행 — output_router는 컴파일+리뷰 정독 검증, 변경 무관)·fmt·격리·**GUI 실측(cdp): 우클릭 메뉴 5항목 마운트 + 가로분할 슬롯 1→2 + 닫기 2→1 엔드투엔드**.
+- **결정/가정:** 레이아웃 제어 = viewStore/`__engramLayout` 단일 권위(레거시 slotStore 폐기 — 이사 대신 재작성). "새 창"=새 View(탭)로 간주(동적 OS 창은 나중). **남은 결정거리(백엔드 권위 공백):** 슬롯 콘텐츠 종류(tree/terminal swap) 백엔드 모델 · 슬롯 포커스 권위 · 동적 창 생성 — Brick 2+에서 사용자 결정. (트리보기/터미널보기 메뉴 항목·click-focus는 `// gap:` 주석으로 이번 브릭 드롭.)
+- **다음:** Brick 2 = 최소 탭 바 UI(View 가시화 — `createView`/`switchView`는 이미 동작, UI만 부재). 이후 Brick 3 튜토리얼 클로드(cwd=exe 위치)·Brick 4 오케스트레이션 시나리오(A/B/C/D 스폰·배치·A→C 메시지).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

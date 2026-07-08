@@ -223,7 +223,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - **통합 micro-rules(코드와 함께):** 구독 effect deps `[viewId, agentId, epoch]`(viewId=slot id 구독 키·ADR-0046 뷰별 독립 진도, 재spawn 시 reset→재구독→replay) · `terminal.reset()` 구독 전 · seq dedup · replay 경계 = gen 펜스 성공 마커(ADR-0046, src-tauri 미러 제거·뷰 직결 replay) · `delete channel.onmessage`(null 아님, #13133) · 입력 가드 · resize debounce 50ms.
 
 ## 창 구성 (src-tauri/tauri.conf.json)
-창 3개: main(대시보드, visible) · slot-popup(`/popup?slotId=N`, hidden) · agent-tree(`/tree`, hidden).
+창 2개: main(대시보드, visible) · agent-tree(`/tree`, hidden). (옛 정적 slot-popup 창은 제거 — `/popup` 라우트·PopupPage 삭제 후 dead route 였다.)
 
 ## 테마 CSS 변수 (`data-theme` on `:root`: dark/light/e-ink)
 CSS 변수·폰트 정의는 `src/styles/theme.css`·`font.css` 참조.

@@ -7,7 +7,7 @@
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from './agentStore'
 import { CHAT_STYLE_DEFAULTS, useChatStyleStore, type ChatStyleKey } from './chatStyleStore'
-import { selectActiveView, subscribeViewEvents, useViewStore } from './viewStore'
+import { subscribeViewEvents, useViewStore } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
@@ -49,12 +49,12 @@ export function initEventBus(): Promise<void> {
   initPromise = (async () => {
     try {
       // §5: 레이아웃 제어 표면을 window에 노출 → LLM(cdp eval 등)이 사람 UI와 동일한 단일 진입점을
-      // 호출한다. ★옛 useSlotStore.dispatch(프론트 내부 처리)에서 백엔드 invoke 핸들러로 재연결★
-      // (ADR-0035: 레이아웃 권위 = src-tauri). 각 액션은 viewStore → 대응 invoke → 백엔드 emit →
+      // 호출한다. ★레이아웃 권위 = src-tauri(ADR-0035)★. 각 액션은 viewStore → 대응 invoke → 백엔드 emit →
       // listen → 화면 반영 루프를 탄다. createView/split 은 Promise<id> 라 cdp eval 에서 await 가능.
-      // 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항).
+      // 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항). 우클릭 슬롯 메뉴(SlotContextMenu)도
+      // 이 동일 액션(viewStore split/closeSlot/assignAgent)을 호출한다 — 사람 클릭과 LLM 이 한 표면(§5).
       // ★렌더 모드 오버라이드(§5)★: 슬롯 렌더러(터미널/rich/dom)를 강제하는 프론트 전용 override.
-      // richSlots 처럼 백엔드 invoke 를 안 타고 viewStore 프론트 상태만 흔든다(override라 권위 레이아웃과 무관).
+      // 백엔드 invoke 를 안 타고 viewStore 프론트 상태만 흔든다(override라 권위 레이아웃과 무관).
       //   window.__engramLayout.setRenderMode('<nodeId>', 'dom'|'rich'|'terminal')  // 렌더러 강제
       //   window.__engramLayout.clearRenderMode('<nodeId>')                          // 해제(caps 유도 기본 복귀)
       // ★DOM 모드 별칭★: 평문 DOM(<pre>)로 렌더시켜 CDP eval/innerText 로 출력을 읽히게 한다(터미널
@@ -74,64 +74,6 @@ export function initEventBus(): Promise<void> {
         disableDomMode: useViewStore.getState().disableDomMode,
         toggleDomMode: useViewStore.getState().toggleDomMode,
       }
-
-      // ★★★ M0 스파이크(임시) — ADR-0044 RichSlot 배선 ★★★: fixture 로 구동되는 구조화 렌더 슬롯
-      // (JSON 모드)을 캔버스 슬롯에 소환하는 임시 제어 표면(§5 — cdp.mjs eval / 콘솔이 정식 command 버스
-      // 전까지 쓰는 임시 경로). 백엔드 권위 레이아웃엔 안 닿는 프론트 전용 오버레이(viewStore.richSlots)를
-      // 흔든다 — M2(StdioTransport 실스트림 + caps 분기) 서면 이 핸들·오버레이 통째로 제거.
-      //   window.__richslot.mountFocused()  // active view 의 focused 슬롯에 RichSlot(fixture) 마운트
-      //   window.__richslot.mount('<slotId>')   // 특정 슬롯(생략 시 focused)
-      //   window.__richslot.unmount('<slotId>') // 해제(생략 시 focused)
-      //   window.__richslot.list()           // 현재 rich 슬롯 id 목록
-      //   await window.__richslot.spawnJson('<cwd>')  // ★M2★ json 모드 claude 프로필 생성+spawn → agentId
-      //       반환한 agentId 를 __engramLayout.assignAgent(viewId, slotId, agentId) 로 슬롯에 배정하면
-      //       ViewLayoutRenderer 가 caps.structured 로 라이브 RichSlot 을 띄운다(전체 E2E cdp 구동 경로).
-      const focusedSlotId = (): string | null =>
-        selectActiveView(useViewStore.getState())?.focusedSlotId ?? null
-      const richslot = {
-        mount: (slotId?: string): string | null => {
-          const target = slotId ?? focusedSlotId()
-          if (!target) {
-            console.warn('[richslot] mount 대상 슬롯 없음 (focused slot 없음 — slotId 를 넘기세요)')
-            return null
-          }
-          useViewStore.getState().mountRich(target)
-          return target
-        },
-        mountFocused: (): string | null => richslot.mount(),
-        unmount: (slotId?: string): string | null => {
-          const target = slotId ?? focusedSlotId()
-          if (!target) return null
-          useViewStore.getState().unmountRich(target)
-          return target
-        },
-        list: (): string[] => Object.keys(useViewStore.getState().richSlots),
-        // ★M2 임시 제어 표면(§5)★: json 모드 claude 프로필을 만들어 곧바로 spawn 하고 agentId 를 돌려준다
-        //   — 사람 UI 와 동일한 agentClient 호출(createClaudeProfile 'StreamJson' → spawnProfile)만 쓴다.
-        //   정식 command 버스 전까지 cdp/콘솔이 JSON 모드 전체 E2E 를 구동하는 경로. cwd 는 실제 작업
-        //   디렉터리를 넘긴다(생략 시 '.'=데몬 cwd). 실패 시 null(콘솔 에러 로깅).
-        spawnJson: async (cwd?: string): Promise<string | null> => {
-          try {
-            const dir = cwd ?? '.'
-            const stamp = new Date().toISOString().slice(11, 19)
-            const profile = await agentClient.createClaudeProfile(
-              `json-${stamp}`,
-              dir,
-              [],
-              [],
-              false, // auto_restore=false(부팅 자동 spawn 제외 — Sidebar 예약과 동일)
-              'StreamJson',
-            )
-            await refreshProfiles() // 트리 미러 갱신(Sidebar create 와 동일 후처리)
-            const info = await agentClient.spawnProfile(profile.id, false) // resume=false(json 은 fresh, ADR-0044)
-            return info.id
-          } catch (e) {
-            console.error('[richslot.spawnJson]', e)
-            return null
-          }
-        },
-      }
-      ;(globalThis as Record<string, unknown>).__richslot = richslot
 
       // ★채팅 스타일 control surface(§5, ADR-0051)★: 채팅 렌더 간격·폰트 토큰을 LLM 이 사람 UI 와
       //   동일한 store 액션(chatStyleStore)으로 조작한다. 프론트 전용 권위 + localStorage 영속. 값은 :root

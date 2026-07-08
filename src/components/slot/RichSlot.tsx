@@ -1,21 +1,21 @@
-// RichSlot — 구조화(JSON 모드) 렌더 슬롯. 두 소스 모드(ADR-0044):
+// RichSlot — 구조화(JSON 모드) 라이브 렌더 슬롯(ADR-0044/0045).
 //
-//  ① fixture 모드(<RichSlot />, agentId 없음) — M0 스파이크. 캡처한 stream-json 샘플을 통짜 파싱해
-//     그린다(살아있는 에이전트/데몬 없이 스타일 튜닝용). ViewLayoutRenderer 의 richSlots 오버레이가 쓴다.
-//  ② 라이브 모드(<RichSlot agentId epoch />) — M2 본체. 백엔드가 정제한 **구조화 출력 tag1** 프레임을
-//     TerminalSlot 과 같은 구독 규율로 받아(효과 deps [agentId,epoch], seq dedup, replay, 정확한 해제)
-//     StructuredEventAccumulator 로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송, Shift+Enter=줄바꿈).
+//  라이브 모드(<RichSlot agentId epoch />) — 백엔드가 정제한 **구조화 출력 tag1** 프레임을 TerminalSlot 과
+//  같은 구독 규율로 받아(효과 deps [agentId,epoch], seq dedup, replay, 정확한 해제) StructuredEventAccumulator
+//  로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송, Shift+Enter=줄바꿈).
+//
+// ★M0 fixture 스파이크 제거(Brick 1)★: 살아있는 에이전트/데몬 없이 stream-json 샘플을 통짜 파싱해 그리던
+//   FixtureRichSlot(<RichSlot />, agentId 없음)과 그 lab/richslot 의존은 레거시 프론트 레이아웃 정리와 함께
+//   제거됐다. 스타일 튜닝은 lab 엔트리(별도)로 하고, 이 컴포넌트는 라이브 경로만 소유한다.
 //
 // ★S15 소스 전환(ADR-0045)★: 라이브 누산 소스가 S14 NDJSON 바이트 파서에서 tag1
 //   StructuredEvent(StructuredEventAccumulator)로 바뀌었다. 백엔드가 출력을 정제해 self-describing
-//   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. 구 NDJSON 라이브 파서
-//   (lab/richslot/streamParse·parse)는 S15 F5 에서 제거됐고, fixture 스파이크(FixtureRichSlot)는 통짜
-//   파서(lab/richslot/fixtureParse)만 쓴다. tag0(터미널 바이트)이 이 슬롯에 오면 무시한다(구조화 슬롯이라
-//   렌더 대상 아님 — tag 게이트).
+//   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. tag0(터미널 바이트)이 이 슬롯에
+//   오면 무시한다(구조화 슬롯이라 렌더 대상 아님 — tag 게이트).
 //
-// ★층 분리★: 라이브 모드도 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 전용 컴포넌트
-//   (StructuredItemStream)이 소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는
-//   순수 I/O 배선만 한다(§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
+// ★층 분리★: 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 전용 컴포넌트(StructuredTextView)가
+//   소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O 배선만 한다
+//   (§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
 
 import { useEffect, useRef, useState } from 'react'
 
@@ -23,38 +23,22 @@ import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
-import { parseStreamJson } from '../../lab/richslot/fixtureParse'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
-// [임시] chat 레이아웃 프리뷰로 교체 — 원복 대비 보존
-// import { StructuredItemStream } from './StructuredItemStream'
-import { LAYOUTS, type LayoutKey } from '../../lab/richslot/layouts'
-// ChatLayout — FixtureRichSlot 이 LAYOUTS[layout].Comp 를 거쳐 쓰므로 직접 import 불필요. LiveRichSlot 교체로 제거.
-import {
-  RenderSettingsProvider,
-  type CodeRender,
-  type DiffRender,
-} from '../../lab/richslot/renderSettings'
 import { StructuredTextView } from './StructuredTextView'
 import { ChatScrollArea } from './chat/ChatScrollArea' // ADR-0053: Radix 오버레이 스크롤바 seam
-import showcaseFixture from '../../lab/richslot/fixtures/showcase.jsonl?raw'
-import textFixture from '../../lab/richslot/fixtures/text.jsonl?raw'
-import toolFixture from '../../lab/richslot/fixtures/tool.jsonl?raw'
-import codeFixture from '../../lab/richslot/fixtures/code.jsonl?raw'
-import reviewFixture from '../../lab/richslot/fixtures/review.jsonl?raw'
 
 interface RichSlotProps {
-  /** 구독 키(ADR-0046) = 슬롯 id. 라이브 모드에서만 의미(같은 agentId 두 슬롯 독립 진도 — 버그 B 해소). */
+  /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯 독립 진도 — 버그 B 해소. */
   viewId?: string
-  /** 지정되면 라이브 모드(그 에이전트의 실스트림 구독). 없으면 fixture 스파이크 모드. */
-  agentId?: string
-  /** 재spawn 재구독 트리거([agentId,epoch]). 라이브 모드에서만 의미. */
+  /** 라이브 대상 에이전트(그 에이전트의 실스트림 구독). */
+  agentId: string
+  /** 재spawn 재구독 트리거([agentId,epoch]). */
   epoch?: number
 }
 
-/** 소스 모드 분기 — agentId 있으면 라이브, 없으면 fixture 스파이크. */
+/** 라이브 구조화 슬롯 — agentId 의 실스트림을 구독해 누적·렌더한다. */
 export default function RichSlot({ viewId, agentId, epoch }: RichSlotProps) {
-  if (agentId != null) return <LiveRichSlot viewId={viewId ?? agentId} agentId={agentId} epoch={epoch ?? 0} />
-  return <FixtureRichSlot />
+  return <LiveRichSlot viewId={viewId ?? agentId} agentId={agentId} epoch={epoch ?? 0} />
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
@@ -200,117 +184,6 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
           rows={2}
           className="flex-1 resize-none rounded border border-border bg-surface px-2 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"
         />
-      </div>
-    </div>
-  )
-}
-
-// ══════════════════════════════════════════════════════════════════════════════════
-// ① fixture 모드(M0 스파이크) — 캡처 stream-json 통짜 파싱, 스타일 튜닝용(라이브 아님)
-// ══════════════════════════════════════════════════════════════════════════════════
-
-// 실측 stream-json 캡처(랩과 동일 Vite raw import). showcase = kitchen-sink(모든 블록 종류 1개씩).
-const FIXTURES: Record<string, string> = {
-  showcase: showcaseFixture,
-  text: textFixture,
-  tool: toolFixture,
-  code: codeFixture,
-  review: reviewFixture,
-}
-
-const TOOLBAR: React.CSSProperties = {
-  flex: '0 0 auto',
-  display: 'flex',
-  gap: 10,
-  alignItems: 'center',
-  flexWrap: 'wrap',
-  padding: '4px 8px',
-  background: '#111',
-  color: '#ccc',
-  fontFamily: 'system-ui, sans-serif',
-  fontSize: 12,
-  borderBottom: '1px solid #2a2a2a',
-}
-const SELECT: React.CSSProperties = { fontFamily: 'inherit', fontSize: 12 }
-const DIM: React.CSSProperties = { color: '#888' }
-
-function FixtureRichSlot() {
-  const [fixture, setFixture] = useState('showcase')
-  const [layout, setLayout] = useState<LayoutKey>('chat') // 기본 = 대화형(가독 결과)
-  // 코드/diff 렌더 — 기본은 가벼운 자체 렌더. 'monaco' 로 켜야 무거운 Monaco 청크가 lazy 로드된다.
-  const [codeRender, setCodeRender] = useState<CodeRender>('plain')
-  const [diffRender, setDiffRender] = useState<DiffRender>('inline')
-
-  const LayoutComp = LAYOUTS[layout].Comp
-  const messages = parseStreamJson(FIXTURES[fixture]) // 통짜 파싱(라이브 아님) — layout 변경 시 재파싱
-
-  return (
-    <div
-      style={{
-        width: '100%',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        boxSizing: 'border-box',
-        background: 'var(--lay-bg)', // chat 레이아웃은 배경이 없어 랩 다크 톤(#0a0a0a)을 슬롯이 깐다
-      }}
-      data-rich-spike="1" // cdp eval 에서 RichSlot 마운트 여부 확인용
-    >
-      <div style={TOOLBAR}>
-        <span style={{ color: '#6aa0ff', fontWeight: 700 }}>JSON 스파이크</span>
-        <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <span style={DIM}>fixture:</span>
-          <select value={fixture} onChange={e => setFixture(e.target.value)} style={SELECT}>
-            {Object.keys(FIXTURES).map(k => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
-        </span>
-        <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <span style={DIM}>layout:</span>
-          <select
-            value={layout}
-            onChange={e => setLayout(e.target.value as LayoutKey)}
-            style={SELECT}
-          >
-            {(Object.keys(LAYOUTS) as LayoutKey[]).map(k => (
-              <option key={k} value={k}>
-                {LAYOUTS[k].label}
-              </option>
-            ))}
-          </select>
-        </span>
-        <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <span style={DIM}>code:</span>
-          <select
-            value={codeRender}
-            onChange={e => setCodeRender(e.target.value as CodeRender)}
-            style={SELECT}
-          >
-            <option value="plain">plain</option>
-            <option value="monaco">monaco</option>
-          </select>
-        </span>
-        <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <span style={DIM}>diff:</span>
-          <select
-            value={diffRender}
-            onChange={e => setDiffRender(e.target.value as DiffRender)}
-            style={SELECT}
-          >
-            <option value="inline">inline</option>
-            <option value="monaco">monaco</option>
-          </select>
-        </span>
-      </div>
-
-      {/* 선택한 layout 이 선택한 fixture 를 렌더(스크롤). 레이아웃 컴포넌트가 자체 overflow-y 를 가짐. */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        <RenderSettingsProvider value={{ codeRender, diffRender }}>
-          <LayoutComp messages={messages} />
-        </RenderSettingsProvider>
       </div>
     </div>
   )

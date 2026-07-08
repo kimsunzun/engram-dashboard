@@ -6,15 +6,10 @@ import { agentClient } from '../../api/clientFactory'
 import { refreshProfiles } from '../../store/eventBus'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 
-interface AgentTreeProps {
-  /**
-   * ★현재 미사용(ADR-0035 이주 흔적)★ — 배치가 viewStore(UUID 슬롯)로 이주하며 self-배치 가드가
-   * 옛 slotStore(number id) 시대 개념이 됐다. 지금은 옛 `LayoutRenderer`(현재 어디에도 미마운트)만
-   * 이 prop 을 전달한다. LayoutRenderer/in-slot 트리를 되살릴 땐 viewStore focused slot(UUID) 기준
-   * self-배치 가드를 *재도입*해야 한다(자기 슬롯을 터미널로 덮어 트리가 증발하는 자기파괴 루프 방지).
-   */
-  sourceSlotId?: number
-}
+// ★self-배치 가드 개념 메모(옛 sourceSlotId prop 제거 — Brick 1)★: in-slot 트리(슬롯 안에 뜬 트리)를
+// 되살릴 땐 viewStore focused slot(UUID) 기준 self-배치 가드를 *재도입*해야 한다 — 트리가 자기 슬롯을
+// 터미널로 덮어 트리가 증발하는 자기파괴 루프 방지. 지금은 트리가 사이드바/전용 창에만 뜨고 유일 caller 였던
+// 옛 LayoutRenderer 가 삭제돼 이 가드가 필요 없어 prop 을 뺐다.
 
 // 트리 노드 데이터 = 머지 결과(running ∪ reserved). mergeTreeNodes 와 동일 형태.
 type AgentNodeData = AgentTreeNode
@@ -42,7 +37,7 @@ function statusColor(status: string): string {
   }
 }
 
-export default function AgentTree(_props: AgentTreeProps) {
+export default function AgentTree() {
   const containerRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 200, height: 400 })
@@ -208,7 +203,7 @@ export default function AgentTree(_props: AgentTreeProps) {
           // ADR-0035: 이 액션은 이제 살아있는 viewStore(백엔드 권위) 경로를 쓴다. 활성 뷰의 포커스
           // 슬롯에 assign_agent invoke → emit → 캔버스 렌더. (옛 slotStore dispatch는 죽은 경로였음.)
           label: '포커스 슬롯에 배치',
-          disabled: false, // 메인 트리는 sourceSlotId 없음. (in-slot 트리 self-배치 가드는 옛 slotStore 경로 concern)
+          disabled: false, // 트리는 항상 활성 뷰의 포커스 슬롯에 배치(in-slot self-배치 가드는 위 메모 참조)
           action: () => {
             const vs = useViewStore.getState()
             const viewId = vs.activeViewId

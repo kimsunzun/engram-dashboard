@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { HashRouter, Routes, Route } from 'react-router-dom'
 import { themeManager } from './theme/ThemeManager'
 import AppLayout from './components/layout/AppLayout'
-import PopupPage from './pages/PopupPage'
 import TreePage from './pages/TreePage'
 import { initEventBus, refreshProfiles } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
@@ -34,7 +33,6 @@ function App() {
       <div style={{ height: '100vh' }}>
         <Routes>
           <Route path="/" element={<AppLayout />} />
-          <Route path="/popup" element={<PopupPage />} />
           <Route path="/tree" element={<TreePage />} />
         </Routes>
       </div>

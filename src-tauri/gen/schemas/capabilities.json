@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요).","local":true,"windows":["main","agent-tree","slot-popup"],"permissions":["core:default","core:event:default"]}}
+{"default":{"identifier":"default","description":"Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요).","local":true,"windows":["main","agent-tree"],"permissions":["core:default","core:event:default"]}}

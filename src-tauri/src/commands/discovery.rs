@@ -15,7 +15,7 @@ use crate::discovery::{self, locate_daemon_exe};
 
 /// ensure(spawn 포함) 직렬화 락 — 프로세스 전역(OnceLock+tokio async Mutex).
 ///
-/// ★왜 필요한가★: 창 3개(main/tree/popup)의 각 WebView 가 부팅 시 동시에
+/// ★왜 필요한가★: 창들(main/agent-tree)의 각 WebView 가 부팅 시 동시에
 /// discover_daemon/daemon_start(=ensure_internal)를 호출한다(StrictMode 로 2회씩 더). daemon.json
 /// 이 아직 없으니 각 호출이 제각각 데몬을 WMI spawn → 데몬 mutex 가 1개만 살리고 나머지는 즉시 exit.
 /// debug 데몬은 console 앱이라 콘솔 창이 여러 개 깜빡인다(losers).

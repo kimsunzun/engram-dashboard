@@ -44,7 +44,7 @@ static EMPTY_TARGETS: LazyLock<Arc<[WindowLabel]>> = LazyLock::new(|| Arc::from(
 /// Slot 의 `String` 은 rebuild 경계에서 이 타입으로 파싱·정규화한다(위 모듈 주석 AgentKey 결정).
 pub type AgentKey = uuid::Uuid;
 
-/// Tauri window label(예: "main", "slot-popup"). `window_bindings` 키와 동일 타입 → 별도 numeric
+/// Tauri window label(예: "main", "agent-tree"). `window_bindings` 키와 동일 타입 → 별도 numeric
 /// 레지스트리 불필요(spike §8 D1).
 pub type WindowLabel = String;
 
@@ -326,13 +326,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_in_bound_popup_routes_to_popup_label() {
-        // View2 를 팝업 창("slot-popup")에 바인딩 → active 아니어도 그 창으로 라우팅.
+    fn agent_in_bound_window_routes_to_bound_label() {
+        // ★일반 window_bindings 메커니즘(ADR-0046)★: View2 를 보조 창("agent-tree")에 바인딩 → active
+        //   아니어도 그 창으로 라우팅. (label 은 임의의 바인딩된 창을 대표 — 정적 slot-popup 제거와 무관.)
         let mut mgr = ViewManager::new();
         let v1 = mgr.active_view_id;
         let v2 = mgr.create_view(None);
-        mgr.switch_view(v1).unwrap(); // active=v1, v2 는 팝업 전용
-        mgr.window_bindings.insert("slot-popup".to_string(), v2);
+        mgr.switch_view(v1).unwrap(); // active=v1, v2 는 바인딩 창 전용
+        mgr.window_bindings.insert("agent-tree".to_string(), v2);
 
         let (aid, astr) = agent();
         let slot = {
@@ -343,17 +344,17 @@ mod tests {
 
         let router = OutputRouter::new();
         router.rebuild(&mgr);
-        assert_eq!(targets_set(&router, aid), vec!["slot-popup".to_string()]);
+        assert_eq!(targets_set(&router, aid), vec!["agent-tree".to_string()]);
     }
 
     #[test]
-    fn same_agent_in_active_and_popup_routes_to_both_windows() {
-        // 같은 agent 가 active View(=main) 와 팝업 바인딩 View 양쪽 슬롯에 → 두 창 모두로.
+    fn same_agent_in_active_and_bound_window_routes_to_both_windows() {
+        // 같은 agent 가 active View(=main) 와 바인딩 View 양쪽 슬롯에 → 두 창 모두로(일반 메커니즘).
         let mut mgr = ViewManager::new();
         let v1 = mgr.active_view_id;
         let v2 = mgr.create_view(None);
         mgr.switch_view(v1).unwrap();
-        mgr.window_bindings.insert("slot-popup".to_string(), v2);
+        mgr.window_bindings.insert("agent-tree".to_string(), v2);
 
         let (aid, astr) = agent();
         assign_to_active(&mut mgr, &astr); // main 창(v1)
@@ -367,7 +368,7 @@ mod tests {
         router.rebuild(&mgr);
         assert_eq!(
             targets_set(&router, aid),
-            vec!["main".to_string(), "slot-popup".to_string()],
+            vec!["agent-tree".to_string(), "main".to_string()],
             "같은 agent 가 두 창에 보이면 둘 다 라우팅"
         );
     }
@@ -522,12 +523,12 @@ mod tests {
 
     #[test]
     fn diff_agent_in_two_windows_one_closes_stays_subscribed() {
-        // §6 리스크3: 같은 agent 가 main+팝업 두 창에 → 한 창(팝업) 닫혀도 다른 창에 남으면 구독 유지.
+        // §6 리스크3: 같은 agent 가 main+바인딩 창 두 곳에 → 한 창 닫혀도 다른 창에 남으면 구독 유지.
         let mut mgr = ViewManager::new();
         let v1 = mgr.active_view_id;
         let v2 = mgr.create_view(None);
         mgr.switch_view(v1).unwrap();
-        mgr.window_bindings.insert("slot-popup".to_string(), v2);
+        mgr.window_bindings.insert("agent-tree".to_string(), v2);
 
         let (aid, astr) = agent();
         assign_to_active(&mut mgr, &astr); // main
@@ -541,8 +542,8 @@ mod tests {
         let d1 = router.rebuild(&mgr);
         assert_eq!(d1.to_subscribe, vec![aid], "처음 0→1 Subscribe 한 번");
 
-        // 팝업 창 닫힘 = 그 바인딩 제거(close_view 가 window_bindings retain 으로 정리하는 동작 모사).
-        mgr.window_bindings.remove("slot-popup");
+        // 바인딩 창 닫힘 = 그 바인딩 제거(close_view 가 window_bindings retain 으로 정리하는 동작 모사).
+        mgr.window_bindings.remove("agent-tree");
         let d2 = router.rebuild(&mgr);
         assert!(
             d2.is_empty(),

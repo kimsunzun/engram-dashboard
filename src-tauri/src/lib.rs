@@ -127,7 +127,7 @@ pub fn run() {
         // ADR-0026 2단계: main X(WM_CLOSE)=hide(창만 숨기고 트레이 상주) — 진짜 종료는 트레이
         // "완전 종료"(app.exit(0))뿐. ADR-0029: 앱이 항상 트레이를 갖는 daemon 클라이언트라 모드 분기
         // 없이 무조건 prevent_close + hide.
-        // ★main 만 대상★: agent-tree/slot-popup(hidden 창)은 기존대로 단독 close 처리. main 라벨만
+        // ★main 만 대상★: agent-tree(hidden 창)은 기존대로 단독 close 처리. main 라벨만
         //  분기 — conf 첫 창은 label 미지정이라 Tauri 기본 라벨 "main".
         // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
         .on_window_event(move |window, event| {
