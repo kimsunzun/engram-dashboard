@@ -9,6 +9,8 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 
 통독이 아니라 **점프형 소비**다 — 만지는 영역으로 좁혀 필요한 곳만 본다.
 
+> **전체 그림이 먼저 필요하면** → `reference/architecture-overview.md`(클라이언트~데몬~에이전트 조감도 — 프로세스 경계·4대 seam·E2E 시퀀스). 그림 위주 orientation.
+
 1. `../CLAUDE.md` — 기조·불변식·규약(항상 로드).
 2. 이 `docs/README.md` — 상태·구조 허브.
 3. 만지는 영역 좁히기 — `decisions/README.md` 인덱스 + 코드 `// ADR-NNNN` 앵커(`rg "ADR-"`).
