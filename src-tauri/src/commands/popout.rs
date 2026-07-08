@@ -39,6 +39,7 @@ const POPUP_LABEL_PREFIX: &str = "slot-popup-";
 /// 생성이 조용히 실패(build() 는 Ok·창 등록됨·HWND 없음 = 유령 창)한다. 그래서 런타임 창 생성자는 반드시
 /// 이 상수를 config 문자열과 동일하게 쓴다. ★wry 의 더 넓은 기본값(추가로 msSmartScreenProtection 비활성)은
 /// 금지★ — config 창과 새 불일치를 만들어 버그를 재발시킨다. tauri.conf.json 값 변경 시 여기도 함께 갱신할 것.
+/// 결정·거부한 대안·불변식 정본 = ADR-0054.
 const WEBVIEW2_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required";
 
