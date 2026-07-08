@@ -131,8 +131,16 @@ export class StructuredEventAccumulator {
             if (this.seenUserUuids.has(uuid)) break // 중복(합성 에코 ↔ replay) → 스킵
             this.seenUserUuids.add(uuid)
           }
+          // ★새 유저 턴 시작 → turnDone(=idle) 해제★: 직전 MessageDone 이 turnDone=true 로 뒀는데, 새 유저
+          //   메시지가 오면 어시스턴트 응답을 기다리는 중이다(더는 idle 아님). 이걸 안 내리면 후속 전송 시
+          //   합성 user 에코가 awaiting 을 해제하는 순간(RichSlot 구독 콜백 setAwaiting(false)) 파생
+          //   streaming 이 false 로 떨어져, 첫 assistant 토큰 전까지 대기 인디케이터(WaitRow)가 깜빡 꺼진다
+          //   (후속 전송 flicker). replay 멱등 유지: 완결 히스토리의 최종 MessageDone 이 다시 turnDone=true 로
+          //   세우므로 refeed 후 최종 상태 불변 — 중간 전이만 정확해진다. (dedup 스킵분은 위 break 로 여기 못 옴.)
+          this.turnDone = false
         }
-        // 탈출구 이벤트 — 알 수 없는 종류(kind)를 칩으로 흘려 유실 방지. turnDone 은 건드리지 않는다.
+        // 탈출구 이벤트 — 알 수 없는 종류(kind)를 칩으로 흘려 유실 방지. (user 는 위에서 turnDone 해제,
+        //   그 외 kind 의 turnDone 은 건드리지 않는다.)
         this.items.push({ kind: 'structured', label: ev.kind, json: ev.json, itemId: this.nextId++ })
         break
       }

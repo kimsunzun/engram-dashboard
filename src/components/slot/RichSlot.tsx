@@ -173,7 +173,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
       {/* 대화 렌더(스크롤) — ChatScrollArea seam(ADR-0053: Radix 오버레이 스크롤바). 순서 보존 item 스트림.
           ★scrollRef 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 아래 하단 고정 auto-scroll
           이 그 Viewport 노드를 겨눠야 새 출력이 바닥에 붙는다(회귀 주의). CC 룩 렌더는 StructuredTextView 소관.
-          (구 "JSON ● idle" 슬림 헤더는 제거 — 상태 힌트는 스트림 끝 "Thinking…" tail 로 대체.) */}
+          (구 "JSON ● idle" 슬림 헤더는 제거 — 상태 힌트는 스트림 끝 대기 인디케이터(WaitRow "Wait" tail) 로 대체.) */}
       <ChatScrollArea ref={scrollRef} className="min-h-0 flex-1">
         <StructuredTextView items={items} streaming={streaming} />
       </ChatScrollArea>

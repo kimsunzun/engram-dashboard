@@ -79,18 +79,18 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.getByText('let me reason')).toBeTruthy()
   })
 
-  // ★NEW★: 빈 thinking(암호화 thinking — opus 는 signature 만 emit)도 "Thought" 라벨을 렌더한다(비-인터랙티브).
-  //   이전 라운드는 빈 thinking 을 아예 걸렀지만, 이제는 추론 존재를 보여야 하므로 라벨을 남긴다.
-  it('빈 thinking(공백/누락) → 비-인터랙티브 "Thought" 라벨을 렌더한다(펼침 불가)', () => {
+  // ★빈 thinking(암호화 thinking — opus 는 signature 만 emit)은 아무 행도 렌더하지 않는다★: 빈 "Thought"
+  //   클러터가 매 응답마다 뜨는 걸 막는다. rowKindOf 도 'skip' 으로 동기화해 rail 계산과 DOM 이 일치(ADR-0051).
+  it('빈 thinking(공백/누락) → 아무 행도 렌더하지 않는다(빈 "Thought" 클러터 제거)', () => {
     const items: StructuredItem[] = [
       { kind: 'structured', label: 'thinking', json: JSON.stringify({ thinking: '   ' }), itemId: 0 },
     ]
-    render(<StructuredTextView items={items} />)
-    // "Thought" 라벨은 있다(추론 존재 노출).
-    expect(screen.getByText('Thought')).toBeTruthy()
-    // 하지만 비-인터랙티브 — aria-expanded 가 없다(펼침 chevron 없음).
-    const btn = screen.getByText('Thought').closest('button')
-    expect(btn?.getAttribute('aria-expanded')).toBeNull()
+    const { container } = render(<StructuredTextView items={items} />)
+    // "Thought" 라벨이 없다(빈 thinking 은 그리지 않음).
+    expect(screen.queryByText('Thought')).toBeNull()
+    // 보이는 행이 아예 없다(rail gutter/점 마커도 없음 — rowKindOf 가 'skip' → DOM 미생성).
+    expect(container.querySelector('.rounded-full.bg-muted')).toBeNull()
+    expect(container.querySelector('.relative.flex.px-4')).toBeNull()
   })
 
   it('structured 기타 label → 접힘 generic 블록(label 헤더 토글)', () => {
@@ -171,17 +171,26 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(spacer?.className).toContain('h-3')
   })
 
-  it('streaming=true 면 스트림 끝에 라이브 신호("Thinking…" pulse 라벨)를 붙인다', () => {
+  it('streaming=true 면 스트림 끝에 대기 인디케이터(WaitRow "Wait" 라벨)를 붙인다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
     render(<StructuredTextView items={items} streaming />)
-    // streaming ThoughtRow — 라벨 "Thinking…" 이 보인다.
-    expect(screen.getByText('Thinking…')).toBeTruthy()
+    // 대기 인디케이터 — "Wait" 라벨이 보인다(경과 초는 타이머 flakiness 회피로 단언 안 함).
+    expect(screen.getByText('Wait')).toBeTruthy()
   })
 
-  it('streaming=false(기본)면 라이브 Thinking 신호가 없다', () => {
+  it('streaming=true 면 items 가 비어도 대기 인디케이터를 즉시 보여준다(showTail = streaming)', () => {
+    // 빈 슬롯이라도 streaming(전송 직후 awaiting)이면 곧바로 "Wait" tail 이 뜬다(첫 바이트 전 무표시 갭 제거).
+    const { container } = render(<StructuredTextView items={[]} streaming />)
+    expect(screen.getByText('Wait')).toBeTruthy()
+    // rail 경로 크래시 없음: kinds=['assistant'] → single, tailPos='single'(연결선 없음).
+    expect(container.querySelector('.relative.flex.px-4')).toBeTruthy()
+    expect(container.querySelector('.w-px.bg-border')).toBeNull()
+  })
+
+  it('streaming=false(기본)면 대기 인디케이터가 없다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'done', itemId: 0 }]
     render(<StructuredTextView items={items} />)
-    expect(screen.queryByText('Thinking…')).toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
   })
 
   it('malformed json 이 와도 throw 하지 않고 폴백 렌더한다(안전 파서)', () => {

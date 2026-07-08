@@ -631,6 +631,15 @@
 - **구현 완료(2026-07-08, `/implement` standard):** 코더(복잡 opus)로 헤더 "JSON ● idle" 제거 + 스크롤 컨테이너를 Radix ScrollArea `ChatScrollArea` seam으로 교체 + StructuredTextView(643줄) 분할(`railPositions` 순수 util + `ChatRow` leaf). 미사용 `StructuredItemStream`은 참조(자체 테스트·롤백 대비 주석) 있어 미삭제(보고). `/review code full`(reviewer-deep + Codex) → F1(스크롤바 thumb 색이 theme-무관 흰색이라 light/e-ink서 안 보임) 단일 FIX → 테마별 `--scrollbar-thumb` 분리.
 - **GUI 실측(cdp)서 트리거 진화 + 부수 픽스:** hover(`type="hover"`)는 채팅이 창을 꽉 채워 영역 상시 뜸 → **`type="scroll"` + `scrollHideDelay=500`**(스크롤 시에만 표시·멈추면 0.5s 뒤 숨김)로 사용자 결정 전환. 부수 실측 픽스 = reduced-motion 분기의 즉시표시 제거(초기)·이후 scroll 전환으로 분기 자체 삭제 · 순서목록 2자리 숫자 좌측 잘림(`ol` padding 1.5em→2.2em, ScrollArea overflow clip). 실측 PASS = 헤더 제거·overlay 공간0(gutterPx 0)·자동스크롤 하단고정·스크롤 시 표시·숫자 온전(스샷). **트레이드오프:** scroll-트리거는 thumb 드래그가 어려움 — 사용자 수용. 게이트: tsc 0 · vitest 279 · 코어 격리 0. Radix 상호작용(hover/scroll 표시)은 CDP 합성/신뢰 입력으로 재현 불가 → 사용자 실조작 실측으로 확정.
 
+## 채팅 대기표시 재설계 + rail dot 정렬 (2026-07-08, master, opus)
+- **발단(사용자):** 채팅 슬롯 대기표시를 임시·간단 재설계 — "wait + 경과초 + 역동적 표시"(추후 정식 재설계 전제). `/implement standard`.
+- **구현(코더 복잡 opus):** ① 빈 "Thought(내용 비공개)" 행(opus 암호화 thinking) 렌더 제거 — 매 응답 clutter 삭제(`isEmptyThinking` → rowKindOf 'skip' ↔ renderItem null, ADR-0051 rail parity 유지). ② tail "Thinking…" → `WaitRow`(임시): "Wait" + 애니메이션 … + 마운트부터 경과 초(자족 타이머, 안정 key `__streaming__`로 턴 도중 리셋 방지). ③ `showTail = streaming`(콘텐츠 게이트 제거) → 전송 즉시 표시.
+- **flicker 수정(리뷰 적출):** `/review code full` 2라운드(doc-aware Opus + cross-family Codex) — Codex가 후속 전송 flicker 적출: 합성 user 에코가 turnDone=true인 채 awaiting 해제 → 인디케이터가 첫 응답 토큰 전까지 깜빡 꺼짐. 근본 수정 = 누산기에서 **새 user 메시지 = 새 턴 → turnDone=false**(replay 멱등 유지 — 최종 MessageDone이 다시 true). 재리뷰 2인 PASS.
+- **라이브 GUI 튜닝(cdp 실측 반복, 사용자):** 대기표시↔입력창 "딱 붙음". 원인 = 일반 메시지는 턴 종료 separator(h-3)로 하단 여백을 얻지만 awaiting Wait은 turnDone 전이라 없음. ★실측 gotcha: **Radix ScrollArea `display:table` 래퍼가 마지막 요소의 하단 *패딩*을 scrollHeight에 안 넣어**(+하단고정 auto-scroll) 패딩은 뷰포트 밖으로 밀림 — pb-4/pb-8 다 갭 0★ → 패딩 대신 **실제 높이 블록(h-3 스페이서)**을 tail 뒤에 추가해 일반 메시지와 동일한 12px 하단 여백. (중간 시도한 ChatRow `rowPt` 오버라이드·WaitRow 패딩은 dead-end라 전부 원복.)
+- **rail dot 정렬(사용자 지적):** dot이 첫 줄 정중앙보다 3px 아래(원래부터·af2063b 동일). cdp Range 실측으로 `--chat-rail-dot-top` 0.75rem→0.5625rem(dotVs첫줄중앙 3→0). **theme.css ↔ chatStyleStore 동기**(ADR-0051 drift 가드 테스트가 강제 — 값 권위 = store).
+- **게이트:** tsc 0 · vitest 282(+flicker guard·turnDone 전이 테스트) · 코어 격리 0 · **라이브 GUI 실측**(실 JSON 에이전트로 렌더·간격·flicker 없음·dot 정중앙 실측). 워크스페이스 `cargo build`는 공유 데몬 바이너리 락으로 미실행(프론트-only·Rust 무변경 — 스코프 `-p core/protocol` 203 PASS로 회귀 확인).
+- **WaitRow = 임시/provisional**(헤더 주석 명시) — 다음 세션이 정식 재설계.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

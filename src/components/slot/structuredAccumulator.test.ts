@@ -210,6 +210,23 @@ describe('StructuredEventAccumulator', () => {
     expect(acc.isTurnDone()).toBe(false)
   })
 
+  // ── ★후속 전송 flicker FIX★: 새 유저 메시지(합성 에코 포함)는 turnDone(=idle) 을 해제한다 ──
+  it('MessageDone(turnDone=true) 뒤 user Structured 가 오면 turnDone 이 다시 false 로 내려간다', () => {
+    const acc = new StructuredEventAccumulator()
+    // 직전 턴 완결 → turnDone=true.
+    acc.feed(encode(textDelta('prev turn')))
+    acc.feed(encode(messageDone))
+    expect(acc.isTurnDone()).toBe(true)
+    // 후속 전송의 합성 user 에코(첫 assistant 토큰보다 먼저 도착) → 새 유저 턴 시작 → idle 해제.
+    //   (이걸 안 내리면 RichSlot 파생 streaming 이 이 순간 false 로 떨어져 WaitRow 가 깜빡 꺼진다.)
+    acc.feed(encode(userEcho('follow-up', 'U')))
+    expect(acc.isTurnDone()).toBe(false)
+    // 이후 어시스턴트 응답이 끝나면 MessageDone 이 다시 turnDone=true 로 세운다(멱등 종점 불변).
+    acc.feed(encode(textDelta('assistant reply')))
+    acc.feed(encode(messageDone))
+    expect(acc.isTurnDone()).toBe(true)
+  })
+
   it('연속 MessageDone(빈 턴)은 구분선을 겹쳐 쌓지 않는다', () => {
     const acc = new StructuredEventAccumulator()
     acc.feed(encode(textDelta('x')))

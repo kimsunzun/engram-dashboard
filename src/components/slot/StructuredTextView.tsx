@@ -41,6 +41,7 @@ import type { StructuredItem } from './structuredAccumulator'
 //   텍스트라 마크다운 파싱을 태우지 않고 InertCode(리터럴 <pre>)로만 그린다(FIX 2 — 아래 주석).
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
+import { WaitRow } from './chat/WaitRow'
 // ADR-0053 구조 분할: 행 컨테이너 leaf(ChatRow) + rail 위치 순수 계산(railPositions)을 분리해 이 파일은
 //   dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계). 행동 불변(리팩터).
 import { ChatRow } from './chat/ChatRow'
@@ -358,8 +359,17 @@ function GenericItemRow({ label, json }: { label: string; json: string }) {
 // ── 항목 dispatch ───────────────────────────────────────────────────────────────────
 
 /**
+ * ADR-0051: thinking item 의 추출 추론 텍스트가 비었나(공백만 = opus 암호화 thinking — signature 만 옴,
+ * 평문 없음). rowKindOf 와 renderItem 이 **같은** 판정을 써야 rail 계산(computeRailRunPositions)과 실제
+ * DOM 이 일치한다(빈 thinking = skip = 렌더 안 함). extractText 는 절대 throw 하지 않으므로 안전.
+ */
+function isEmptyThinking(json: string): boolean {
+  return extractText(json, 'thinking').trim() === ''
+}
+
+/**
  * ADR-0051: 렌더 순서상 각 item 의 행 종류(rail run 계산 입력). renderItem 의 null 반환 규칙과 반드시
- * 일치해야 한다(흡수된 tool_result·usage = skip = DOM 없음). computeRailRunPositions 가 이 배열을 먹는다.
+ * 일치해야 한다(흡수된 tool_result·usage·빈 thinking = skip = DOM 없음). computeRailRunPositions 가 이 배열을 먹는다.
  */
 function rowKindOf(item: StructuredItem): ChatRowKind {
   switch (item.kind) {
@@ -374,7 +384,8 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
     case 'structured':
       if (parseToolResult(item.json)) return 'skip' // 도구 OUT 에 흡수(FIX 1) — DOM 없음
       if (item.label === 'user') return 'boundary' // 유저 버블 = run 경계
-      return 'assistant' // thinking·generic 탈출구
+      if (item.label === 'thinking' && isEmptyThinking(item.json)) return 'skip' // 빈 thinking = DOM 없음
+      return 'assistant' // 내용 있는 thinking·generic 탈출구
   }
 }
 
@@ -433,8 +444,11 @@ function renderItem(
         )
       }
       if (item.label === 'thinking') {
-        // 추론 행 — ThoughtRow. 내용이 있으면 펼침 가능, 비어 있으면(opus 암호화 thinking) 비-인터랙티브
-        //   "Thought" 라벨만 렌더해 "추론이 있었다"는 존재를 노출한다(빈 행을 걸러내지 않는다).
+        // 추론 행 — ThoughtRow. 내용이 있으면 펼침 가능(실 추론 텍스트, 가치 있음). 내용이 비면(opus
+        //   암호화 thinking — signature 만 옴) 빈 "Thought" 클러터가 매 응답마다 뜨므로 아무것도 그리지
+        //   않는다(null). rowKindOf 도 같은 isEmptyThinking 검사로 'skip' 을 반환해야 rail 계산과 DOM 이
+        //   일치한다(ADR-0051).
+        if (isEmptyThinking(item.json)) return null
         const content = extractText(item.json, 'thinking')
         return (
           <ChatRow key={k} rail runPos={pos}>
@@ -483,7 +497,7 @@ function renderItem(
  * generic·error + streaming tail)은 좌측 dot-rail gutter 로 한 thread 처럼 묶고, user 버블·separator 는
  * rail 없이 plain.
  * items 를 한 번 pre-scan 해 tool_use_id → tool_result 맵을 만들고(도구 OUT 흡수), standalone tool_result
- * 는 제외. streaming(턴 활성)이면 스트림 끝에 ThoughtRow(pulse "Thinking…")를 붙인다.
+ * 는 제외. streaming(턴 활성)이면 스트림 끝에 대기 인디케이터(WaitRow — "Wait" + 경과 초)를 붙인다.
  * 순수 렌더(props in, DOM out).
  */
 export function StructuredTextView({
@@ -494,12 +508,14 @@ export function StructuredTextView({
   streaming?: boolean
 }) {
   const results = buildToolResultMap(items)
-  // 스트리밍 라이브 신호는 콘텐츠가 있을 때만(빈 슬롯에 Thinking 신호 뜨는 오작동 방지 — 지시 명세).
-  const hasContent = items.length > 0
-  const showTail = streaming && hasContent
+  // ★showTail = streaming★: 콘텐츠 유무 게이트 없이 streaming 이면 곧바로 대기 인디케이터(WaitRow)를 붙인다 —
+  //   전송 즉시(awaiting=true, items 아직 빔) 인디케이터가 뜬다("첫 바이트 전엔 무표시" 갭 제거). fresh/idle
+  //   슬롯 오작동은 상류 streaming 파생(awaiting || (!turnDone && items.length>0), RichSlot FIX 5)이 이미
+  //   막으므로(never-sent 슬롯 = streaming=false) 여기서 재게이트 불필요.
+  const showTail = streaming
   // ADR-0051: rail run 위치를 순수 계산으로 미리 뽑는다(렌더 중 파생 — state/effect 아님, ADR-0050 순수성
-  //   유지). streaming tail(ThoughtRow "Thinking…")도 마지막 assistant 행으로 함께 계산해, 직전 실 행이
-  //   tail 과 연결선으로 이어지게 한다(tail 이 없으면 bottom/single 로 clean-end).
+  //   유지). streaming tail(WaitRow)도 마지막 assistant 행으로 함께 계산해, 직전 실 행이 tail 과 연결선으로
+  //   이어지게 한다(tail 이 없으면 bottom/single 로 clean-end). items 가 비면 kinds=['assistant'] → single.
   const kinds = items.map(rowKindOf)
   if (showTail) kinds.push('assistant')
   const positions = computeRailRunPositions(kinds)
@@ -513,12 +529,22 @@ export function StructuredTextView({
     >
       {items.map((item, i) => renderItem(item, results, positions[i]))}
       {showTail && (
-        // ★streaming 라이브 신호★ — ThoughtRow streaming(pulse "Thinking…" 라벨). 스트림 끝에서만.
-        //   ★FIX 3★: 안정 key — 없으면 streaming 토글 시 직전 실 item 이 이 행과 자리 매칭돼 remount 되며
-        //   로컬 expand state 를 잃는다. 리스트 밖 고정 노드라 상수 key 로 정체성을 못박는다.
+        // ★대기 인디케이터 tail(WaitRow)★ — 스트림 끝에서만. 구 "Thinking…" pulse 라벨을 임시 "Wait + 점 +
+        //   경과 초" 로 대체(임시·추후 재설계 — WaitRow 헤더 참조).
+        //   ★FIX 3(안정 key)★: key="__streaming__" — 없으면 streaming 토글/리렌더 시 직전 실 item 이 이 행과
+        //   자리 매칭돼 remount 되며 WaitRow 타이머(경과 초)가 턴 도중 리셋된다. 리스트 밖 고정 노드라 상수
+        //   key 로 정체성을 못박는다(변경 금지).
         <ChatRow key="__streaming__" rail runPos={tailPos}>
-          <ThoughtRow streaming label="Thinking…" />
+          <WaitRow />
         </ChatRow>
+      )}
+      {showTail && (
+        // 대기 tail 하단 여백 — 일반 메시지는 턴 종료 시 뒤에 깔리는 separator(h-3)로 입력창과 간격이 생기지만,
+        //   awaiting Wait 은 아직 turnDone 이 아니라(응답 대기) separator 가 없어 입력창에 딱 붙는다. 같은 높이의
+        //   빈 스페이서로 일반 메시지와 동일한 하단 간격(12px)을 준다. ★패딩이 아니라 실제 높이 블록★: Radix
+        //   ScrollArea 의 display:table 래퍼가 마지막 요소의 하단 패딩을 scrollHeight 에 안 넣어(+ 하단 고정
+        //   auto-scroll) 패딩은 뷰포트 밖으로 밀려 안 보인다. 높이 가진 블록은 표가 세므로 정상 반영된다.
+        <div aria-hidden className="h-3" />
       )}
     </div>
   )
