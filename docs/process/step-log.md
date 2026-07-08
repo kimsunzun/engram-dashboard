@@ -675,6 +675,13 @@
 - **게이트(`/implement standard`):** 코더 Opus → `/review code full` 2R(doc-aware Opus + cross-family Codex) 만장 PASS → `/qa full` PASS: build(`-p engram-dashboard`)·멤버 test(core/protocol/discovery)·fmt·코어격리·tsc·vitest 282 + **GUI 실측 = 실제 `pop_out_slot` → `Engram — slot-popup-1` OS 창(유효 HWND) 확인**. (전체 `cargo build/test`는 실행 중 데몬 exe 락으로 변경 포함 범위로 스코프 — 데몬 crate 무관.)
 - **후속:** args 3중 중복(JSON×2+Rust)의 JSON→Rust silent drift = 현재 one-way 주석 강제만 → build-time assert(상수 vs 파싱 config 대조)로 양방향 강제(리뷰 지적). 멀티모니터 좌표 클램프.
 
+## WezTerm 창>탭>슬롯 설계 착수 — PRD 초안 + 적대 리뷰 (2026-07-09, master, 자율 세션)
+- **발단:** 팝업(런타임 창) 완성 후 사용자가 **WezTerm식 3층(창>탭>슬롯)** 방향 확정 — 여러 창, 각 창에 탭 줄, 각 탭 안 분할 슬롯. "메인창 왼쪽 스폰 슬롯화 + 미니 오케스트레이션(메시지만)"까지 한 사이클 목표. (용어: 사용자 "탭"=코드 "View", 사용자 "창"=OS 팝업.)
+- **조사(위임 3):** ① 현재 모델 실측 = 전역 View 풀 + 단일 `active_view_id` + 팝업 1뷰 고정 = **창별 탭 소유 없음** ② 메인창 왼쪽 Sidebar(스폰+AgentTree)는 **슬롯 밖 고정 패널**(프론트 로컬) ③ OSS 서베이(WezTerm/tmux/zellij/VS Code) = **창별 탭 소유 + 전역 UUID 탭 ID** 권고.
+- **PRD:** `docs/process/B-wezterm-tabs/PRD.md` — 창별 탭 소유 모델 + 결정거리 D-1~D-8 + Phase 2(스폰 슬롯화)/3(미니 오케스트레이션) 스케치.
+- **/review prd:** User렌즈(Opus)=FIX(5) · Tester렌즈(Codex)=BLOCK(8). **방향 OK**, 명세 공백(소유 불변식·`window_bindings` 마이그레이션·엣지 상태기계·라우팅/replay ADR-0046·동시성·놓친 owner-index 3안) → PRD §10에 강화. 자율 보수취합 = **BLOCK 유지**(사용자 결정 전 구현 보류 = 설계 게이트).
+- **다음:** 사용자가 D-1~D-8 픽 → 굵은 것 ADR → TRD → `/implement`.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
