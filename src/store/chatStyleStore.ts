@@ -33,7 +33,7 @@ export const CHAT_STYLE_DEFAULTS: ChatStyleValues = {
   userMy: '0.375rem',
   railGutter: '1.5rem',
   railLineOffset: '-1rem',
-  railDotTop: '0.75rem',
+  railDotTop: '0.5625rem',
   fontSize: '13px',
   lineHeight: '1.45',
 }
