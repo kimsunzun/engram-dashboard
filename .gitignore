@@ -6,8 +6,8 @@ target/
 # 로컬 런타임 데이터(데몬 토큰·프로필 등) — 절대 커밋 금지. data_dir 기본 위치(S13 TRD).
 .engram-data/
 
-# 세션-로컬 핸드오프 히스토리(/continue용). 머신마다 쌓이는 작업 메모 — 커밋 안 함.
-.claude/continue/
+# 세션-로컬 핸드오프 히스토리(/handoff용). 머신마다 쌓이는 작업 메모 — 커밋 안 함.
+.claude/handoff/
 .ccb/
 
 # 작업용 스크린샷 보관함(cdp shot 등) — 로컬 전용, 커밋 안 함.

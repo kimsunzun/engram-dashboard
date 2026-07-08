@@ -640,6 +640,12 @@
 - **게이트:** tsc 0 · vitest 282(+flicker guard·turnDone 전이 테스트) · 코어 격리 0 · **라이브 GUI 실측**(실 JSON 에이전트로 렌더·간격·flicker 없음·dot 정중앙 실측). 워크스페이스 `cargo build`는 공유 데몬 바이너리 락으로 미실행(프론트-only·Rust 무변경 — 스코프 `-p core/protocol` 203 PASS로 회귀 확인).
 - **WaitRow = 임시/provisional**(헤더 주석 명시) — 다음 세션이 정식 재설계.
 
+## 이월 산출물 커밋 + 핸드오프 gitignore 정리 (2026-07-08, master, opus)
+- **발단(사용자):** "커밋 있는거 다 하고 다 정리하고 B로 가자" — 미푸시 커밋 push + 세션 시작부터 이월된 미커밋 산출물(위 2026-07-07 절 "미커밋 이월") 정리. 핸드오프의 "커밋 말 것"은 이전 세션 자체 판단(사용자 지시 아님)으로 확인 → 커밋 진행.
+- **이월분 커밋:** ① `run-dashboard-clean.bat` — 데몬 리빌드 스텝 추가(`tauri dev` beforeDevCommand는 클라이언트 셸 exe만 리빌드, 데몬 바이너리는 stale 재사용 → Rust 변경 무효화 방지, ADR-0029 근거 주석). ② `docs/reference/architecture-overview.md` — 클라이언트~데몬~에이전트 조감도(용어 규율·4대 seam 지도·출력/입력/죽음 흐름·E2E 시퀀스·ADR 근거맵, S16 스냅샷). README "처음이면 읽는 순서"에 포인터로 발견체인 연결(고아 금지). 실이미지 첨부 고도화는 backlog(사용자 결정 보류).
+- **gitignore 정리:** 스킬 continue→handoff 개명으로 `.gitignore`의 `.claude/continue/`(물리 부재)가 stale → `.claude/handoff/`로 교체(세션-로컬 핸드오프 노트 = 원래 커밋 안 하는 의도 복원).
+- **게이트:** 소스 코드 무변경(bat/문서/gitignore/step-log만) → build/test 회귀 불가 = 인라인 정리 예외 조항. 미푸시 커밋 push(이전 5 + 이번 3).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
