@@ -734,6 +734,12 @@
 - **follow-up(미착수):** 실제 비-에이전트 variant(FileTree·ControlPanel) + 렌더러 + 배치 command(UX=사용자 결정) · capability 표 · 영속화 시 version/Unknown/migration · 중첩 레이아웃 여부. TRD `docs/process/C-slot-content/TRD.md` "Out(follow-up)".
 - **관찰:** 부팅 warm-up 레이스(첫 데몬 command "미연결" 가능, 재시도 정상 — 스테이지 5서 기관찰, 이번도 재현) — 별도 추적.
 
+## 렌더모드 디폴트 정책 노트 — 콘텐츠 종류 기준 내부 결정, 사용자 미노출 (2026-07-10, master, 대화 세션)
+- **결정(사용자):** 슬롯 렌더모드(dom/terminal)는 **콘텐츠 종류 기준 내부 디폴트로 자동 결정** — Agent 콘텐츠 = xterm/rich(터미널·구조화), 비-에이전트 콘텐츠(FileTree·ControlPanel 등) = dom. **사용자 선택권은 UI에 노출하지 않는다**(렌더모드 셀렉터 없음). 오버라이드 여지는 **내부 command만**(`__engramLayout.setRenderMode`/`toggleDomMode`, 후속 ADR-0055 레지스트리 command화) — 사람·LLM이 동일 핸들로 호출(§5).
+- **근거:** 렌더모드는 사용자가 체감·결정할 정책이 아니라 콘텐츠 종류에서 파생되는 내부 구현. 노출하면 "왜 이 슬롯만 평문?" 혼란 + WebGL 좌석 관리(ADR-0056)와 충돌. 디폴트는 콘텐츠가 정하고, 예외 조정은 LLM/스크립트 레버로 충분.
+- **범위:** ADR-0056(렌더모드 교체 레버 = command)의 **디폴트 정책만 명시**하는 노트다(ADR amend 아님 — 사용자가 note 선택). ADR-0056 §영향/불변식 "슬롯 콘텐츠가 터미널이 아닌 것은 애초에 DOM"·ADR-0060(SlotContent 종류 모델)과 정합. 정본 불변식 = ADR-0056.
+- **미착수 함의:** SlotContent variant별 디폴트 렌더모드 매핑(Agent→terminal/rich, 비-에이전트→dom)은 실제 variant + 렌더러 구현(C-slot-content follow-up) 때 코드로 박음 — 현재는 seam만.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
