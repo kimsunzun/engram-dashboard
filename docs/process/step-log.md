@@ -740,6 +740,19 @@
 - **범위:** ADR-0056(렌더모드 교체 레버 = command)의 **디폴트 정책만 명시**하는 노트다(ADR amend 아님 — 사용자가 note 선택). ADR-0056 §영향/불변식 "슬롯 콘텐츠가 터미널이 아닌 것은 애초에 DOM"·ADR-0060(SlotContent 종류 모델)과 정합. 정본 불변식 = ADR-0056.
 - **미착수 함의:** SlotContent variant별 디폴트 렌더모드 매핑(Agent→terminal/rich, 비-에이전트→dom)은 실제 variant + 렌더러 구현(C-slot-content follow-up) 때 코드로 박음 — 현재는 seam만.
 
+## 에이전트 트리·프리셋 방향 탐색 (설계-결정 리서치, pre-PRD) (2026-07-10, master, 대화 세션)
+- **성격:** pre-PRD 탐색/컨설 — `/research medium`(설계-결정 모드, OSS 서베이 4갈래 Sonnet 병렬 + Codex 적대 리뷰 FIX 반영). **미확정, 방향만 잠정.** 굵은 결정은 PRD 고정 시 ADR로.
+- **컨셉(사용자):** 에이전트 = 1급 엔티티(세션 아님). 세션 차면 auto-handoff로 존속 — **별도 큰 결정(ADR 필요)**, 현 ADR-0016/0017 세션-귀속 슬롯 모델("슬롯=한 세션, 끝나면 슬롯도 끝")과 충돌. 폴더(cwd) = 생성 입력일 뿐 귀속 아님.
+- **에이전트 트리(메인 뷰) 잠정 shape:** 평평한 목록 + 상태 기호(`●◐○◻✗` — **색 아닌 모양으로 구분 = e-ink 대비**). 줄 = `[상태][이름]`. cwd 표시 **아예 제거**(나중 필요 방향으로 재추가). 최초 이름 = 폴더 basename. 우클릭 2메뉴(에이전트 메뉴 / 배경 메뉴=에이전트 생성→**등록된 경로(프리셋) 선택 또는 새 경로 직접**) = 로드맵 data-driven 우클릭 메뉴(§5)와 동일물.
+- **그룹핑 모델(사용자 · 둘 다 나중):** 트리 = 메인 = **소유/오케스트레이션 위상**(표시 트리 = 소유 트리, *통합안* 채택). **폴더 = 묶는 장식이지만 위치는 의미를 탐** — 폴더를 에이전트 A 밑에 파고 그 안에 B를 넣으면 B는 A에 종속(장식 컨테이너 + 상속된 부모). 거부: **cwd 자동 트리**(cwd로 자동 종속 — 앞서 거부, 유효). 트리 오케스트레이션(메시지·제어)은 자체 PRD/ADR + ADR-0014. 정직표기: 프레임워크 계층-오케 세부(CrewAI hierarchical/LangGraph supervisor)는 일반지식 비중 = 착수 시 재리서치.
+- **테마 granularity 결정(사용자):** 스타일 변경 단위 = **팝업(창) 단위. 슬롯 단위 불필요.** = D-7 창별 독립 테마(현 미구현·데몬화 뒤 보류)와 정합. 현 상태(실측): 모든 창 `dark` 부팅(`App.tsx:17`, localStorage 영속 없음), e-ink 테마는 존재하고 흑백(순수 B&W)이나 **창별 선택 스위치 없음** + 하드코딩 색 일부(`TerminalSlot.tsx:56` xterm·`AgentTree.tsx:33` 상태색·`ChatRow` bg-green/red)가 테마 우회 = 위험 중간. 신규 UI는 **변수-only**로 지어 e-ink 대비.
+- **프리셋(확정 — 사용자, MVP 최소):** 프리셋 = **경로(cwd)만 등록**(model·icon·backend·inject 전부 나중, 스폰은 defaults=claude). 저장 = 백엔드 data-dir(`.engram-data/presets.json`, 단일 권위 → 멀티창 동기화·§5 두뇌 소유). front localStorage 거부(창별 갈림·멀티모니터 동기화와 충돌). LLM 제어 = `preset.list/create/delete` + `agent.spawn({preset|cwd, parent?})`(spawn_into 재사용, parent는 시그니처만·nesting 나중). 첫 백엔드-영속 유저 데이터. Goose recipes = 나중 리치화 참조.
+- **배치 확정(사용자):** AgentList = **SlotContent variant** — 기존 슬롯+팝업 재사용(별도 사이드패널/기능 아님, 트리 슬롯을 팝업 창에 띄우는 것뿐).
+- **command surface = core 요건(사용자):** 트리 조작 + 에이전트 생성 + **서브에이전트 소환·하위 배치**가 핵심(에이전트가 프리셋에서 서브에이전트 spawn→자기 하위로). command 시그니처에 parent 파라미터 설계(nesting 실행은 나중이라도).
+- **테마(사용자):** 기존 컴포넌트 미수정. 신규 UI만 **변수-only**. 테마 *선택/전환*은 LLM 제어 유지(§5·themeCommands), per-token 미세튜닝은 비-LLM(사람/config).
+- **에이전트-간 핸드오프(나중·개념):** A 존속 중 B 생성 → (전이간) A를 하위로 → A가 B에 핸드오프 문서 전달 → B가 A에 Q&A → A 세션오프. 저장 위치 미정.
+- **미결(다음):** PRD 고정(트리+프리셋 MVP — 필드·command·수용기준) → `/implement`(코더→리뷰→QA). 구현 진입은 PRD 후.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
