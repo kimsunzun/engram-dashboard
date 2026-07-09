@@ -37,10 +37,10 @@ pub use codec::{
 pub use discovery::DaemonInfo;
 pub use domain::{
     AgentInfo, AgentProfile, AgentSpawnCommand, AgentStatus, Capabilities, ClaudeOutputFormat,
-    ControlCaps, InputCaps, ModelCaps, OutputCaps, RestartPolicy, RestoreOutcome, RestoreReport,
-    SessionCaps, SnapshotChunk,
+    ControlCaps, InputCaps, ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome,
+    RestoreReport, SessionCaps, SnapshotChunk,
 };
-pub use ids::{AgentId, ProfileId, RequestId};
+pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{AgentCommand, AgentEvent, OutputChunk, StructuredEvent, SubscribeAction};
 
 /// 프로토콜 버전. 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,

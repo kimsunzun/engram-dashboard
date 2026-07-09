@@ -28,6 +28,7 @@ use engram_dashboard_core::agent::types::{
     SubscribeOutcome,
 };
 
+use engram_dashboard_core::agent::preset::Preset as CorePreset;
 use engram_dashboard_core::agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
     ClaudeOutputFormat as CoreClaudeOutputFormat, RestartPolicy as CoreRestartPolicy,
@@ -42,8 +43,8 @@ use engram_dashboard_protocol::{
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
     InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
-    RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
-    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
+    Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
+    RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
     StructuredEvent as WireStructuredEvent, SubscribeAction, PROTOCOL_VERSION,
 };
 
@@ -449,6 +450,19 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
 
 fn core_profiles_to_wire(profiles: Vec<CoreProfile>) -> Vec<WireProfile> {
     profiles.iter().map(profile_to_wire).collect()
+}
+
+/// core Preset → wire(ADR-0061). profile_to_wire 와 동일 원칙 — PathBuf→String 명시 변환
+/// (reflection 왕복 금지, 필드 추가/개명 시 컴파일 에러). 이름은 wire 에 없다(cwd basename 파생 — ADR-0061).
+fn preset_to_wire(p: &CorePreset) -> WirePreset {
+    WirePreset {
+        id: p.id,
+        cwd: p.cwd.to_string_lossy().into_owned(),
+    }
+}
+
+fn core_presets_to_wire(presets: Vec<CorePreset>) -> Vec<WirePreset> {
+    presets.iter().map(preset_to_wire).collect()
 }
 
 /// core OutputChunk → wire SnapshotChunk. {seq, data} 명시 매핑.
@@ -1004,6 +1018,36 @@ impl ConnectionCore {
                     Err(e) => reply(sink, request_id, Err(e.to_string())),
                 }
             }
+
+            // ── 프리셋 CRUD(ADR-0061) — 프로필 arm 미러 ─────────────────────────────
+            AgentCommand::ListPresets { request_id } => {
+                // 읽기 전용 조회. request_id 동봉 전용 reply(PresetList)로 요청 연결에만 응답
+                // (ListProfiles 와 동형). broadcast PresetListUpdated 는 CRUD 후 별도 push.
+                let _ = sink.enqueue(Outbound::event(AgentEvent::PresetList {
+                    request_id,
+                    presets: core_presets_to_wire(manager.presets().list()),
+                }));
+            }
+
+            AgentCommand::CreatePreset { cwd, request_id } => {
+                // 프리셋 생성·persist(스폰 안 함). cwd 정규화(dunce::canonicalize)는 PresetRegistry 가 한다.
+                // remove/create 는 무조건 성공(중복 판정 없음 — MVP) → Ack. 생성은 공유 상태 변경이므로
+                // 전 연결에 갱신 목록 broadcast(모든 창 동기화, ADR-0061 불변식).
+                manager.presets().create(std::path::PathBuf::from(cwd));
+                reply(sink, request_id, Ok(()));
+                broadcast_preset_list(registry, manager);
+            }
+
+            AgentCommand::DeletePreset {
+                preset_id,
+                request_id,
+            } => {
+                // 등록 해제·persist. ★프리셋 삭제 ≠ 에이전트 종료★(ADR-0061) — remove 는 프리셋만 지운다.
+                // 없는 id 면 no-op(프로필 DeleteProfile 과 동일하게 Ack). 이후 broadcast.
+                manager.presets().remove(preset_id);
+                reply(sink, request_id, Ok(()));
+                broadcast_preset_list(registry, manager);
+            }
         }
         DispatchFlow::Continue
     }
@@ -1139,6 +1183,18 @@ fn broadcast_profile_list(registry: &ConnRegistry, manager: &Arc<AgentManager>) 
     }
 }
 
+/// 현재 프리셋 목록을 전 연결에 브로드캐스트(PresetListUpdated, ADR-0061). 프리셋 CRUD(생성/삭제)는
+/// 공유 PresetRegistry 상태를 바꾸므로 모든 창이 최신 목록을 보게 한다(broadcast_profile_list 와 동형).
+/// ★create/delete 는 반드시 이 broadcast 로 이어진다★(안 그러면 다른 창이 stale — ADR-0061 불변식).
+fn broadcast_preset_list(registry: &ConnRegistry, manager: &Arc<AgentManager>) {
+    let ev = AgentEvent::PresetListUpdated {
+        presets: core_presets_to_wire(manager.presets().list()),
+    };
+    if let Some(text) = event_json(&ev) {
+        registry.broadcast_text(text);
+    }
+}
+
 /// Error 이벤트를 sink 로 enqueue(control).
 fn send_error(
     sink: &dyn OutboundSink,
@@ -1237,6 +1293,7 @@ mod tests {
 
     fn test_core() -> (ConnectionCore, watch::Receiver<bool>) {
         // in-memory manager 배선(lib.rs build_manager_with_store 와 같은 결, 여기선 직접).
+        use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 
@@ -1253,15 +1310,31 @@ mod tests {
             }
         }
 
+        // ADR-0061: 프리셋 store 도 in-memory 로 배선(프로필과 동형).
+        #[derive(Default)]
+        struct MemPresetStore {
+            saved: StdMutex<Vec<engram_dashboard_core::agent::preset::Preset>>,
+        }
+        impl PresetStore for MemPresetStore {
+            fn save(&self, p: &[engram_dashboard_core::agent::preset::Preset]) {
+                *self.saved.lock().unwrap() = p.to_vec();
+            }
+            fn load(&self) -> Vec<engram_dashboard_core::agent::preset::Preset> {
+                self.saved.lock().unwrap().clone()
+            }
+        }
+
         let registry = ConnRegistry::new();
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore::default());
+        let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
         let status_sink = Arc::new(crate::ws::DaemonStatusSink::new(registry.clone()));
         let profiles = Arc::new(ProfileRegistry::new(store));
+        let presets = Arc::new(PresetRegistry::new(preset_store));
         let tracker = Arc::new(SessionTracker::new(
             TrackerConfig::default(),
             Arc::new(|_aid, _sid| {}),
         ));
-        let manager = Arc::new(AgentManager::new(status_sink, profiles, tracker));
+        let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let core = ConnectionCore::new(manager, MultiViewState::new(), registry, shutdown_tx);
         (core, shutdown_rx)

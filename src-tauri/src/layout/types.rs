@@ -39,6 +39,14 @@ pub enum SlotContent {
     Empty,
     /// 데몬 에이전트 참조(바인딩만 — 소유 아님, ADR-0035). resolve_spawn_slot 에서 "점유"(ADR-0059).
     Agent { agent_id: String },
+    /// 에이전트 트리(전체 에이전트 목록) 뷰. MVP=필드 없는 unit — 렌더 대상만 지정하고 데이터는
+    /// agentStore 가 쥔다(콘텐츠 종류만 표현, ADR-0060). 후속 리치화(필터·정렬 기준 등)는
+    /// FileTree/ControlPanel 선례처럼 variant 내부 config 필드 추가로 확장한다(enum 폭발 아님). // ADR-0060
+    AgentList,
+    /// 프리셋 팔레트(등록된 cwd 프리셋 버튼셋) 뷰. MVP=필드 없는 unit — 프리셋 목록 데이터는
+    /// 데몬 소유(presets.json, ADR-0061)라 여기 담지 않고 PresetRegistry wire 로 별도 흐른다.
+    /// 후속 config(레이아웃·표시 옵션 등)는 variant 내부 필드로 확장한다(ADR-0060 선례). // ADR-0060
+    PresetPalette,
 }
 
 impl SlotContent {
@@ -47,11 +55,12 @@ impl SlotContent {
         matches!(self, SlotContent::Empty)
     }
 
-    /// 배정된 agent_id(참조). 빈 슬롯이면 None(Empty). 라우팅·조회 호출부 단순화용.
+    /// 배정된 agent_id(참조). 에이전트 바인딩이 아니면 None. 라우팅·조회 호출부 단순화용.
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             SlotContent::Agent { agent_id } => Some(agent_id),
-            SlotContent::Empty => None,
+            // ADR-0060: 비-에이전트 콘텐츠(Empty/AgentList/PresetPalette)는 agent_id 없음.
+            SlotContent::Empty | SlotContent::AgentList | SlotContent::PresetPalette => None,
         }
     }
 }

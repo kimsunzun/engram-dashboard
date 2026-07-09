@@ -3,7 +3,7 @@
 
 use ts_rs::TS;
 
-use crate::ids::{AgentId, ProfileId};
+use crate::ids::{AgentId, PresetId, ProfileId};
 
 /// 에이전트 생명주기 상태 — internally-tagged(`type`). 프론트 discriminated union.
 /// core(types.rs) AgentStatus 와 글자 그대로 일치.
@@ -203,6 +203,24 @@ pub struct AgentProfile {
     /// 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용).
     #[ts(type = "number | null")]
     pub last_start_at: Option<i64>,
+}
+
+// ── 프리셋 wire 미러(ADR-0061) ──────────────────────────────────────────────────
+//
+// core(preset.rs) 의 Preset 직렬화 형태를 그대로 미러한다. core 는 protocol 무의존(§1 불변)이라
+// core 타입을 여기 쓸 수 없다 — 같은 JSON 형태의 독립 타입을 두고, core↔wire 명시 변환은 데몬이
+// 한다(profile_to_wire 패턴 동일). 프로필과 1:1 대응하는 최소 스키마 `{ id, cwd }`(이름 파생 — ADR-0061).
+
+/// 영속 프리셋 wire 미러 — core `preset::Preset` 의 직렬화 형태와 일치(ADR-0061). 프리셋 CRUD
+/// command/event(PresetList/PresetListUpdated)에 실린다. cwd 는 PathBuf 의 JSON 표현(문자열).
+/// 이름은 저장하지 않고 프론트가 cwd basename 으로 파생한다(ADR-0061).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct Preset {
+    #[ts(type = "string")]
+    pub id: PresetId,
+    /// 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
+    pub cwd: String,
 }
 
 /// 출력 스냅샷 청크 wire 미러 — core `types::OutputChunk`({seq, data}) 와 일치.

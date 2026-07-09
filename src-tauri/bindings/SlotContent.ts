@@ -13,4 +13,4 @@
  * epoch(재spawn 재구독 트리거)도 레이아웃 트리 밖(agentStore 소유 — ADR-0007/0046). 즉 이 타입은
  * "슬롯이 어떤 에이전트에 묶였나"라는 정적 바인딩만 표현하고, 수명·스트림은 직교 축이 다룬다.
  */
-export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, };
+export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "preset_palette" };

@@ -528,7 +528,10 @@ pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, Spawn
         // ADR-0059/0060 3-way 점유 판정: Empty=빈(Ok) / Agent=점유(SlotOccupied) / 부재=SlotNotFound.
         Some(target) => match tree::find_slot(&view.layout, target) {
             Some(SlotContent::Empty) => Ok(target),
-            Some(SlotContent::Agent { .. }) => Err(SpawnSlotError::SlotOccupied(target)),
+            // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
+            Some(SlotContent::Agent { .. })
+            | Some(SlotContent::AgentList)
+            | Some(SlotContent::PresetPalette) => Err(SpawnSlotError::SlotOccupied(target)),
             None => Err(SpawnSlotError::SlotNotFound(target)),
         },
         // slot=None(2b): 첫 빈 슬롯을 스캔한다. 없으면 NoEmptySlot(자동 split·덮어쓰기 안 함).

@@ -1086,8 +1086,14 @@ fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
         AgentEvent::ProfileListUpdated { profiles } => {
             let _ = app.emit("profile-list-updated", profiles);
         }
+        // ADR-0061: 프리셋 CRUD(생성/삭제) 후 데몬 broadcast → 전 webview push(profile 미러).
+        //   프론트 소비(preset-list-updated 리스너)는 후속 슬라이스지만, broadcast 가 창까지
+        //   닿아야 멀티창 동기화 불변식이 성립하므로 emit 배선은 여기서 함께 깐다.
+        AgentEvent::PresetListUpdated { presets } => {
+            let _ = app.emit("preset-list-updated", presets);
+        }
         // Ack / SubscribeAck / Output / ReplayComplete / Hello / AgentList / ProfileList /
-        // Snapshot / Created / Spawned / InputLeaseChanged — request_id 있거나 내부 소비 or Binary 평면.
+        // PresetList / Snapshot / Created / Spawned / InputLeaseChanged — request_id 있거나 내부 소비 or Binary 평면.
         _ => {}
     }
 }

@@ -17,10 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::manager::AgentManager;
+use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
 use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::logging;
-use engram_dashboard_core::persistence::FileProfileStore;
+use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -102,20 +103,25 @@ fn install_panic_hook() {
 /// `registry` 는 호출자가 만들어 주입한다 — DaemonStatusSink 와 accept loop 가 같은 인스턴스를
 /// 공유해야 status 브로드캐스트 대상(전 연결 conn_tx)이 일치한다.
 fn build_manager(data_dir: &std::path::Path, registry: ConnRegistry) -> Arc<AgentManager> {
-    // 프로필 저장 = data_dir/agents.json (FileProfileStore 는 디렉토리를 받고 내부에서 파일명 결합).
-    let store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
-    build_manager_with_store(store, registry)
+    // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
+    // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
+    let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
+    let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
+    build_manager_with_store(profile_store, preset_store, registry)
 }
 
 /// build_manager 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리할 수
-/// 있게 store 를 인자로 받는다(운영 경로는 위 build_manager 가 FileProfileStore 를 넘김).
-/// 배선 로직(status_sink/profiles/tracker)은 운영과 동일 — 회귀 없음.
+/// 있게 store 를 인자로 받는다(운영 경로는 위 build_manager 가 File{Profile,Preset}Store 를 넘김).
+/// 배선 로직(status_sink/profiles/presets/tracker)은 운영과 동일 — 회귀 없음.
 fn build_manager_with_store(
     store: Arc<dyn ProfileStore>,
+    preset_store: Arc<dyn PresetStore>,
     registry: ConnRegistry,
 ) -> Arc<AgentManager> {
     let status_sink = Arc::new(DaemonStatusSink::new(registry));
     let profiles = Arc::new(ProfileRegistry::new(store));
+    // ADR-0061: 프리셋 레지스트리도 데몬이 소유. 프로필과 동일하게 store 에서 로드해 초기화.
+    let presets = Arc::new(PresetRegistry::new(preset_store));
 
     // 세션 추적: sid 변경(/clear 등) 관측 시 레지스트리에 반영(즉시 persist).
     let profiles_cb = profiles.clone();
@@ -127,7 +133,7 @@ fn build_manager_with_store(
     ));
     tracker.start();
 
-    Arc::new(AgentManager::new(status_sink, profiles, tracker))
+    Arc::new(AgentManager::new(status_sink, profiles, presets, tracker))
 }
 
 // ── accept loop (main + 테스트 공유) ──────────────────────────────────────────────
@@ -435,7 +441,10 @@ async fn start_test_server_inner(
 
     let registry = ConnRegistry::new();
     let multiview = MultiViewState::new();
-    let manager = build_manager_with_store(store, registry.clone());
+    // 프리셋 store 는 테스트마다 새 in-memory(디스크 비오염). 프리셋 persist 를 검증하는 테스트는
+    // 별도 store 주입형이 필요하면 추후 추가한다(현재 프리셋 unit 은 core 에서 격리 검증).
+    let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
+    let manager = build_manager_with_store(store, preset_store, registry.clone());
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let accept_handle = {
@@ -479,6 +488,25 @@ impl ProfileStore for MemProfileStore {
     }
     fn load(&self) -> Vec<engram_dashboard_core::agent::profile::AgentProfile> {
         self.saved.lock().expect("mem store poisoned").clone()
+    }
+}
+
+/// 테스트 전용 in-memory PresetStore(ADR-0061). MemProfileStore 의 프리셋판 — 디스크 IO 없이
+/// 프리셋 배선(PresetRegistry) 을 격리한다. 운영의 FilePresetStore 를 대신한다.
+#[derive(Default)]
+struct MemPresetStore {
+    saved: std::sync::Mutex<Vec<engram_dashboard_core::agent::preset::Preset>>,
+}
+
+impl PresetStore for MemPresetStore {
+    fn save(&self, presets: &[engram_dashboard_core::agent::preset::Preset]) {
+        *self.saved.lock().expect("mem preset store poisoned") = presets.to_vec();
+    }
+    fn load(&self) -> Vec<engram_dashboard_core::agent::preset::Preset> {
+        self.saved
+            .lock()
+            .expect("mem preset store poisoned")
+            .clone()
     }
 }
 

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use crate::agent::backend;
 use crate::agent::backend::InputEncoder;
 use crate::agent::output_core::OutputCore;
+use crate::agent::preset::PresetRegistry;
 use crate::agent::profile::{
     AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
@@ -98,6 +99,9 @@ pub struct AgentManager {
     status_sink: Arc<dyn StatusSink>,
     // S9: 프로필 단일 소유자(sid 생성·갱신·persist) + claude 세션 추적기.
     profiles: Arc<ProfileRegistry>,
+    // ADR-0061: 프리셋(cwd 북마크) 단일 소유자. 프로필과 동일하게 데몬이 보유(유저 데이터 단일 소유,
+    // ADR-0029)한다. reaper 는 프리셋을 안 보므로(에이전트 수명과 무관) manager 필드로만 둔다.
+    presets: Arc<PresetRegistry>,
     tracker: Arc<SessionTracker>,
 
     // ── ADR-0019 reaper ──────────────────────────────────────
@@ -114,6 +118,7 @@ impl AgentManager {
     pub fn new(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
+        presets: Arc<PresetRegistry>,
         tracker: Arc<SessionTracker>,
     ) -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
@@ -131,6 +136,7 @@ impl AgentManager {
             sessions,
             status_sink,
             profiles,
+            presets,
             tracker,
             shutting_down: Arc::new(AtomicBool::new(false)),
             reaper_tx,
@@ -141,6 +147,11 @@ impl AgentManager {
     /// 프로필 레지스트리 접근(commands에서 CRUD에 사용).
     pub fn profiles(&self) -> &Arc<ProfileRegistry> {
         &self.profiles
+    }
+
+    /// 프리셋 레지스트리 접근(connection_core 의 프리셋 CRUD 에 사용, ADR-0061). profiles() 와 동형.
+    pub fn presets(&self) -> &Arc<PresetRegistry> {
+        &self.presets
     }
 
     // ── spawn ──────────────────────────────────────────────────────────────

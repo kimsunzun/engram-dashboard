@@ -18,6 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::profile::{AgentProfile, ProfileStore};
 
+// 프리셋 영속(presets.json) — 이 파일(agents.json)의 프리셋판(ADR-0061). 같은 atomic write·손상보존
+// 전략을 복제한다. 호출부 단순화를 위해 여기서 재-export(persistence::FilePresetStore).
+pub mod presets;
+pub use presets::FilePresetStore;
+
 /// 파일 포맷 버전. 구조가 바뀌면 올린다. 로드 시 불일치하면 적재하지 않는다(마이그레이션 게이트).
 const SCHEMA_VERSION: u32 = 1;
 const FILE_NAME: &str = "agents.json";

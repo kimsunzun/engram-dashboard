@@ -5,10 +5,10 @@
 use ts_rs::TS;
 
 use crate::domain::{
-    AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat, RestoreReport,
+    AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat, Preset, RestoreReport,
     SnapshotChunk,
 };
-use crate::ids::{AgentId, ProfileId, RequestId};
+use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
 /// UI→core 요청 envelope(설계 §3). side-effect 명령은 `request_id` 로 idempotent.
 /// (Profile CRUD 는 phase 1 에서 core profile 타입 합류 후 추가 — 지금은 보류.)
@@ -155,6 +155,25 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
+
+    // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────────────
+    // 프로필 CRUD(ListProfiles/CreateProfile/DeleteProfile)와 1:1 대응하는 프리셋판. 프리셋 =
+    // 스폰 전 "cwd 북마크"(인스턴스 아님). 데몬이 presets.json 을 단일 소유하고 wire 로만 CRUD 한다.
+    /// 저장된 프리셋 전체 조회. 응답은 request_id 동봉 전용 reply [`AgentEvent::PresetList`]
+    /// (요청 연결에만). broadcast 인 [`AgentEvent::PresetListUpdated`](CRUD 후)와 별개 — 편승 매칭 제거.
+    ListPresets { request_id: RequestId },
+
+    /// 프리셋 생성(등록·persist만 — 스폰하지 않음). cwd 는 데몬이 정규화(dunce::canonicalize)해 저장.
+    /// 이름은 저장 안 함(cwd basename 파생 — ADR-0061). 성공 후 [`AgentEvent::PresetListUpdated`] broadcast.
+    CreatePreset { cwd: String, request_id: RequestId },
+
+    /// 프리셋 삭제(등록 해제·persist). ★프리셋 삭제 ≠ 에이전트 종료★(ADR-0061) — 그 프리셋으로 이미
+    /// 스폰된 에이전트는 무관하게 산다. 없는 id 면 no-op. 성공 후 [`AgentEvent::PresetListUpdated`] broadcast.
+    DeletePreset {
+        #[ts(type = "string")]
+        preset_id: PresetId,
+        request_id: RequestId,
+    },
 }
 
 /// core→UI 이벤트 envelope(설계 §3, JSON 경로). TerminalBytes 출력은 여기 없음(binary frame).
@@ -236,6 +255,16 @@ pub enum AgentEvent {
     ProfileList {
         request_id: RequestId,
         profiles: Vec<AgentProfile>,
+    },
+
+    /// 프리셋 목록 갱신(broadcast, ADR-0061). CRUD(생성/삭제) 후 자동 push — 모든 창의 프리셋 미러
+    /// 동기화용. ProfileListUpdated 의 프리셋판. request_id 없음. ListPresets 조회 응답은 [`AgentEvent::PresetList`].
+    PresetListUpdated { presets: Vec<Preset> },
+    /// ListPresets 조회 응답(전용 reply, ADR-0061) — request_id 에코. broadcast 인 PresetListUpdated 와
+    /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(ProfileList 와 동형).
+    PresetList {
+        request_id: RequestId,
+        presets: Vec<Preset>,
     },
 
     /// GetSnapshot 응답(전용 reply, phase4 1단계) — 그 시점 replay buffer 스냅샷.
@@ -370,6 +399,7 @@ pub enum OutputChunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     /// ★ADR-0045★: StructuredEvent 는 core `OutputEvent` 미러이자 tag1 payload 다. self-describing
     /// (`#[serde(tag="type")]`) JSON 직렬화가 무손실 round-trip 되는지(필드 유실 0 — 교체성 핵심) +
@@ -439,6 +469,89 @@ mod tests {
                 assert!(turn_id.is_none() && message_id.is_none(), "None 보존");
             }
             _ => panic!("variant 불일치"),
+        }
+    }
+
+    // ── 프리셋 wire 계약(ADR-0061) — JSON envelope golden + round-trip ─────────────
+    //
+    // AgentCommand/AgentEvent 는 externally-tagged(serde 기본) JSON envelope 다. 프리셋 CRUD 가
+    // 프로필과 동형 형태(variant 이름 태그 + 필드)로 직렬화되는지 고정한다 — wire 포맷이 조용히
+    // 바뀌면(필드 개명/누락) 프론트 미러가 깨지므로 golden 문자열로 회귀를 막는다.
+
+    #[test]
+    fn create_preset_command_json_golden() {
+        let request_id = RequestId(Uuid::nil());
+        let cmd = AgentCommand::CreatePreset {
+            cwd: "C:/proj".into(),
+            request_id,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        // externally-tagged: variant 이름이 최상위 키.
+        assert_eq!(
+            json,
+            r#"{"CreatePreset":{"cwd":"C:/proj","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "CreatePreset wire 형태가 golden 과 불일치"
+        );
+        // round-trip 무손실.
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::CreatePreset { cwd, .. } if cwd == "C:/proj"
+        ));
+    }
+
+    #[test]
+    fn list_delete_preset_commands_roundtrip() {
+        let cases = vec![
+            AgentCommand::ListPresets {
+                request_id: RequestId(Uuid::nil()),
+            },
+            AgentCommand::DeletePreset {
+                preset_id: Uuid::nil(),
+                request_id: RequestId(Uuid::nil()),
+            },
+        ];
+        for cmd in cases {
+            let json = serde_json::to_string(&cmd).unwrap();
+            let back: AgentCommand = serde_json::from_str(&json).unwrap();
+            // 재직렬화가 동일해야(round-trip 무손실).
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        }
+    }
+
+    #[test]
+    fn preset_list_events_json_golden_and_roundtrip() {
+        let preset = Preset {
+            id: Uuid::nil(),
+            cwd: "C:/proj".into(),
+        };
+        // PresetList(전용 reply — request_id 동봉).
+        let list = AgentEvent::PresetList {
+            request_id: RequestId(Uuid::nil()),
+            presets: vec![preset.clone()],
+        };
+        let list_json = serde_json::to_string(&list).unwrap();
+        assert_eq!(
+            list_json,
+            r#"{"PresetList":{"request_id":"00000000-0000-0000-0000-000000000000","presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj"}]}}"#,
+            "PresetList wire 형태가 golden 과 불일치"
+        );
+
+        // PresetListUpdated(broadcast — request_id 없음).
+        let updated = AgentEvent::PresetListUpdated {
+            presets: vec![preset],
+        };
+        let updated_json = serde_json::to_string(&updated).unwrap();
+        assert_eq!(
+            updated_json,
+            r#"{"PresetListUpdated":{"presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj"}]}}"#,
+            "PresetListUpdated wire 형태가 golden 과 불일치"
+        );
+
+        // 둘 다 round-trip 무손실.
+        for json in [list_json, updated_json] {
+            let back: AgentEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
     }
 }

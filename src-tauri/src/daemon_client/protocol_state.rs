@@ -45,7 +45,11 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::DeleteProfile { request_id, .. }
         | AgentCommand::SpawnProfile { request_id, .. }
         | AgentCommand::SetProfileAutoRestore { request_id, .. }
-        | AgentCommand::GetSnapshot { request_id, .. } => Some(*request_id),
+        | AgentCommand::GetSnapshot { request_id, .. }
+        // 프리셋 CRUD(ADR-0061) — 셋 다 request_id 동봉(reply 매칭 대상).
+        | AgentCommand::ListPresets { request_id }
+        | AgentCommand::CreatePreset { request_id, .. }
+        | AgentCommand::DeletePreset { request_id, .. } => Some(*request_id),
         // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
         AgentCommand::Auth { .. }
         | AgentCommand::Resize { .. }
@@ -66,6 +70,8 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         AgentEvent::Ack { request_id }
         | AgentEvent::AgentList { request_id, .. }
         | AgentEvent::ProfileList { request_id, .. }
+        // PresetList = 전용 reply(request_id echo, ADR-0061). PresetListUpdated 는 broadcast(아래 None).
+        | AgentEvent::PresetList { request_id, .. }
         | AgentEvent::Snapshot { request_id, .. }
         | AgentEvent::Created { request_id, .. }
         | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
@@ -79,7 +85,9 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::AgentListUpdated { .. }
         | AgentEvent::RestoreResult { .. }
         | AgentEvent::InputLeaseChanged { .. }
-        | AgentEvent::ProfileListUpdated { .. } => None,
+        | AgentEvent::ProfileListUpdated { .. }
+        // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
+        | AgentEvent::PresetListUpdated { .. } => None,
     }
 }
 

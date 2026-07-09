@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
+use engram_dashboard_core::agent::preset::PresetRegistry;
 use engram_dashboard_core::agent::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -25,7 +26,7 @@ use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
     StatusSink,
 };
-use engram_dashboard_core::persistence::FileProfileStore;
+use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 // OutputSink + StatusSink 양쪽을 구현하는 기록형 테스트 sink.
@@ -109,6 +110,11 @@ fn manager_spawn_write_resize_kill() {
         std::env::temp_dir().join(format!("engram-test-headless-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
+    // ADR-0061: 프리셋 레지스트리(이 테스트와 무관 — 빈 상태). 임시 디렉토리 store 로 배선.
+    let preset_store = Arc::new(FilePresetStore::new(
+        std::env::temp_dir().join(format!("engram-test-headless-preset-{}", Uuid::new_v4())),
+    ));
+    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             sessions_dir: None,
@@ -117,7 +123,7 @@ fn manager_spawn_write_resize_kill() {
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = AgentManager::new(status_dyn, profiles, tracker);
+    let manager = AgentManager::new(status_dyn, profiles, presets, tracker);
 
     // 1) spawn — 기본 셸(Fresh). 생성 직후 Running.
     let profile = AgentProfile::new(

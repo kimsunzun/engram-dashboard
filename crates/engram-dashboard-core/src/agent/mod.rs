@@ -2,6 +2,7 @@ pub mod backend;
 pub mod manager;
 pub mod output_core;
 pub mod platform;
+pub mod preset;
 pub mod profile;
 pub mod reaper;
 pub mod session;
