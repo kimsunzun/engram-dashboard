@@ -505,7 +505,7 @@ pub enum SpawnSlotError {
     /// 지정 slot 이 이 view 트리에 없음.
     #[error("슬롯 {0} 없음")]
     SlotNotFound(Uuid),
-    /// slot=None 인데 이 탭에 빈 슬롯이 하나도 없음(USER DECISION 2b — 자동 split/덮어쓰기 안 함).
+    /// slot=None 인데 이 탭에 빈 슬롯이 하나도 없음(USER DECISION 2b — 자동 split/덮어쓰기 안 함). // ADR-0059
     #[error("이 탭에 빈 슬롯 없음(slot 미지정 — split_slot 으로 빈 슬롯을 만들거나 다른 탭 사용)")]
     NoEmptySlot,
 }

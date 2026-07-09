@@ -714,6 +714,16 @@
 - **핫패스 정직 note:** GUI 실측 1회 통과 = smoke(존재 증거), race-free 증명 아님(동시성 경로).
 - **미완:** 스테이지 5 = `spawn_into`(D-7 배치 지정 스폰, 얇은 합성 command). 로드맵 순서 3~7(렌더모드 커맨드화·트리→슬롯 설계·트리 정교화·우클릭 메뉴·메시지 시스템)은 후속. origin 미푸시(TRD/ADR·백엔드·프론트 3커밋).
 
+## Phase 2 탭 — 구현 스테이지 5(spawn_into) + ADR-0058/0059 박제 (2026-07-09, master, 대화 세션)
+- **커밋:** `88134e2` feat(layout): spawn_into 배치 지정 스폰 command (D-7·스테이지 5). origin/master 푸시 완료. ADR 박제는 후속(이 항목).
+- **무엇:** `spawn_into(window, tab?, slot?, backend?, cwd) -> AgentId` 얇은 합성 command(스폰→create_tab→슬롯 배정, 단일 임계구역 ADR-0006). `resolve_spawn_slot`(순수·`manager.rs`) + `SpawnSlotError`(SlotOccupied/SlotNotFound/NoEmptySlot) + 신규 `tree::first_empty_slot_id`(전위 a-우선). JS 래퍼 `agent.spawnInto`(tabCommands.ts, UUID 사전검증). 스폰 뒤 실패는 `alive_err`로 에이전트 생존·보고(하드 롤백 X).
+- **게이트(`/implement`·게이트만):** `/review code full` 2-family(doc-aware reviewer-deep/Opus + blind Codex/gpt) — 1R FIX(orphan탭·alive_err·JS검증·테스트) 반영 → 2R Codex PASS·doc-aware FIX(backend 거짓말) 교정 → 폐쇄 **PASS**. `/qa full` PASS: 멤버 test(core/protocol/discovery/daemon **327**) + throwaway verbatim-mount 하네스 **80**(resolve_spawn_slot/first_empty_slot/spawn_into_assembly) + build/fmt/코어격리/tsc/vitest **352** + **GUI 실측(cdp)** = spawn_into 해피패스(탭 1→2→3 root 슬롯 셸 Running·AgentId 반환) + 가드 fail-loud 2종(backend='claude' 거부·tab없이 slot 지정 거부, 무부작용).
+- **ADR-0058(확정) — backend fail-loud:** spawn_into 명시 `backend`는 데몬 `SpawnByCwd` wire 부재(cwd만, 기본 셸 스폰)로 **pre-spawn 거부**(claude 포함 어떤 명시값도). 조용한 셸 대체 = 오작동 → fail-loud. 거부: 지금 프로토콜 확장(1b, 범위초과·미검증)·조용히 무시. 후속 = 데몬 spawn-protocol 확장 시 supersede. 사용자 결정 "1-a".
+- **ADR-0059(확정) — slot=None 정책:** `slot` 미지정 = 트리 전위 순회 **첫 빈 슬롯**(신규 `first_empty_slot_id`), 없으면 `NoEmptySlot`(자동 split/덮어쓰기 X). TRD §6 G9 "빈 root 슬롯" 모호문구를 이 해석으로 확정. 거부: leftmost-root-only(a, split 탭 우측 못 봄)·자동 split/덮어쓰기(의도 밖 파괴). 사용자 결정 "2-b".
+- **정합:** `/adr index --write`로 인덱스 재생성(0058·0059 추가) + `/adr lint` **clean**(error 0, advisory 5 = 기존 레거시 ADR-0016/0027, 무관). 코드 앵커 `// ADR-0058`(layout.rs) · `// ADR-0059`(manager.rs·tree.rs) 부착(rot 방지, 신규분 점진).
+- **관찰(spawn_into 결함 아님):** 부팅 warm-up 레이스 — 부팅 직후 첫 데몬 command가 "데몬 미연결"로 실패 가능(daemon_connection_state=connected인데 current_cmd_tx 미준비). daemon_ensure 재스폰 안 함(ADR-0021), 연결 확보 후 재시도 정상. 별도 추적 후보.
+- **다음:** 로드맵 스테이지 6~ (렌더모드 커맨드화→트리→슬롯 설계→트리 정교화→우클릭 메뉴 command화→메시지 시스템).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

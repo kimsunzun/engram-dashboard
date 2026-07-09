@@ -48,7 +48,7 @@ pub fn first_slot_id(node: &LayoutNode) -> Uuid {
 
 /// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(agent_id==None)의 id** 를
 /// 반환한다. 빈 슬롯이 하나도 없으면 None. spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의
-/// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다.
+/// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
 pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     match node {
         LayoutNode::Slot { id, agent_id } => {

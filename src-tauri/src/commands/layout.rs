@@ -343,7 +343,7 @@ pub fn assign_agent(
 /// 않는다**(하드 롤백 없음). 에이전트는 데몬에 살아 있고 list_agents 로 재부착 가능하다 — 스폰 뒤 모든
 /// early-return 은 `alive_err` 로 생존 agent id 를 박아 invisible 에이전트를 막는다(락 획득 실패 포함).
 ///
-/// ## ★backend fail-loud(USER DECISION 1a)★
+/// ## ★backend fail-loud(USER DECISION 1a — ADR-0058)★
 /// 현 데몬 스폰 wire(`SpawnByCwd{cwd}`)는 **cwd 만** 받고 backend 선택 인자가 없다 → 요청한 `backend` 는
 /// 데몬까지 흐르지 못한다. 데몬의 `SpawnByCwd` 핸들러는 **무조건 데몬 기본 백엔드(현재 셸 =
 /// `default_shell()`)** 를 스폰한다(claude 가 아니다 — connection_core.rs `SpawnByCwd` arm). 이전엔 warn 후
@@ -364,7 +364,7 @@ pub async fn spawn_into(
     cwd: String,
 ) -> Result<String, String> {
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
-    // ★FIX 1(1a) backend fail-loud★: SpawnByCwd wire 에 backend 선택 인자가 없다 → 데몬은 무조건 기본
+    // ADR-0058 ★FIX 1(1a) backend fail-loud★: SpawnByCwd wire 에 backend 선택 인자가 없다 → 데몬은 무조건 기본
     //   백엔드(현재 셸)를 스폰한다("claude" 도 스폰 안 됨). 명시된 backend 값을 통과시키면 호출자가 원한 것과
     //   다른 에이전트를 조용히 받는다 → 통과 = 미지정(None/빈/공백)뿐, "claude" 포함 어떤 명시값도 거부한다.
     if let Some(b) = &backend {
