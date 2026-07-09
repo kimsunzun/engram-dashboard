@@ -313,12 +313,15 @@ pub async fn run() -> Result<(), i32> {
     );
 
     // 9) 복원은 blocking(3s 조기종료 윈도·stagger). spawn_blocking 으로 async executor 보호.
-    let restore_handle = {
-        let mgr = manager.clone();
-        tokio::task::spawn_blocking(move || {
-            mgr.restore_all();
-        })
-    };
+    // ★자동 부팅 resume 기본 OFF (2026-07-09, 사용자 결정)★ — 부팅 시 auto_restore=true 프로필을
+    //   전부 되살리던 mgr.restore_all() 을 비활성화한다. 기본 = "부팅 자동 복원 안 함"(이벤트성으로
+    //   꼭 떠야 하는 일부만 명시 복원). auto_restore 필드·reaper disposition·restore_all() 구현은
+    //   그대로 유지(호출만 끔) — 특정 에이전트 이벤트성 복원은 향후 명시 command(RestoreAgents 류)에서
+    //   restore_all() 을 부른다. handle 은 아래 abort/await 계약 유지용 no-op.
+    //   (ADR-0016 "부팅 복원" 기본을 이 stopgap 이 뒤집음 — 정식 opt-in 설계 시 ADR 로 박을 것.)
+    let restore_handle = tokio::task::spawn_blocking(|| {
+        // manager.restore_all();  // ← 자동 부팅 복원 비활성 (위 주석)
+    });
 
     // 10) 종료 신호 채널(watch). StopDaemon 명령이 이 watch 로 종료를 트리거한다.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
