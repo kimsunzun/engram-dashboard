@@ -15,7 +15,7 @@ pub use manager::{
     resolve_spawn_slot, CloseTabOutcome, LayoutError, SpawnSlotError, ViewManager,
     WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
-pub use types::{LayoutNode, SplitDir, View, ViewMeta, ViewSnapshot};
+pub use types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
 
 use std::sync::{Arc, Mutex};
 

@@ -3,6 +3,7 @@
 // — bindings 는 tsconfig include("src") 밖이라, 컴포넌트/스토어가 src-tauri 상대경로를 흩뿌리지 않도록
 // 단일 진입점으로 모은다(경로 변경 시 여기만). 재정의가 아니라 재노출이므로 "직접 재정의 금지"와 무충돌.
 export type { LayoutNode } from '../../src-tauri/bindings/LayoutNode'
+export type { SlotContent } from '../../src-tauri/bindings/SlotContent'
 export type { SplitDir } from '../../src-tauri/bindings/SplitDir'
 export type { View } from '../../src-tauri/bindings/View'
 export type { ViewMeta } from '../../src-tauri/bindings/ViewMeta'

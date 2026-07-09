@@ -20,7 +20,7 @@
 //! - **rebuild-always**(D2): 레이아웃 변경은 저빈도라 매 변경 시 snapshot 전체를 재계산하고
 //!   `ArcSwap::store` 로 원자 교체한다. version-cache 분기 불채택(복잡도 대비 무이득).
 //! - **AgentKey = `AgentId`(= `uuid::Uuid`)**: 프레임 `agent_id` 가 이미 `AgentId` 라 핫패스 변환 0.
-//!   Slot 은 `agent_id: Option<String>` 을 저장하므로 **rebuild(저빈도)에서 String→Uuid 파싱**해
+//!   Slot 은 `SlotContent::Agent{agent_id: String}`(ADR-0060) 를 저장하므로 **rebuild(저빈도)에서 String→Uuid 파싱**해
 //!   경계에서 정규화한다. 파싱 실패 슬롯은 어차피 실 프레임과 매칭 불가라 무시. 이 선택은
 //!   `protocol_state` 의 기존 `HashMap<AgentId, SubState>` 키와도 정합(연결 task 가 같은 키로 dedup).
 //! - **F-B 구독 union = layout 파생**(ADR-0035, spike §8 F-B): 별도 ref-count 맵 없이 snapshot 의
@@ -40,7 +40,7 @@ use std::sync::{Arc, LazyLock};
 use arc_swap::ArcSwap;
 
 use crate::layout::manager::ViewManager;
-use crate::layout::types::LayoutNode;
+use crate::layout::types::{LayoutNode, SlotContent};
 
 /// 캐시된 빈 라우팅 결과(미스 시 반환). `Arc::from(Vec::new())` 는 매번 Arc 헤더(refcount 블록)를
 /// 힙에 할당한다 — 미스가 핫패스에서 빈번하면 그게 누적 비용이다. 한 번만 만들어 `Arc::clone`(refcount
@@ -239,19 +239,25 @@ pub fn cleanup_window_core(
     router.rebuild(mgr)
 }
 
-/// 한 View 트리를 순회하며 배정된(agent_id=Some) 슬롯의 agent 를 `windows` 전부에 매핑한다.
+/// 한 View 트리를 순회하며 배정된(SlotContent::Agent) 슬롯의 agent 를 `windows` 전부에 매핑한다.
 ///
-/// Slot 의 `agent_id: String` 을 `AgentKey`(Uuid)로 파싱 — 실패하면 무시(실 프레임과 매칭 불가).
+/// Slot 의 agent 참조 문자열을 `AgentKey`(Uuid)로 파싱 — 실패하면 무시(실 프레임과 매칭 불가).
 /// rebuild(저빈도)에서만 호출되므로 파싱 비용은 핫패스와 무관(AgentKey 결정 근거).
+///
+/// ★load-bearing 라우팅 불변식(ADR-0041/0042/0046 · ADR-0060)★: **배정 슬롯(SlotContent::Agent)만**
+/// 라우팅 대상이다 — `SlotContent::Empty` 는 명시적으로 무시한다(빈 슬롯엔 출력을 흘리지 않는다). 콘텐츠
+/// 종류(SlotContent)와 바이트 라우팅은 이 지점에서만 교차하며, 여기선 Agent 의 바인딩(agent_id)만 추출한다.
+// ADR-0060
 fn collect_agents(
     node: &LayoutNode,
     windows: &[&str],
     by_agent: &mut HashMap<AgentKey, Vec<WindowLabel>>,
 ) {
     match node {
-        LayoutNode::Slot { agent_id, .. } => {
-            if let Some(s) = agent_id {
-                match s.parse::<AgentKey>() {
+        // ADR-0060: Agent variant 만 라우팅. Empty 는 명시 무시(배정 슬롯만 수신 — ADR-0041/0042/0046).
+        LayoutNode::Slot { content, .. } => {
+            if let SlotContent::Agent { agent_id } = content {
+                match agent_id.parse::<AgentKey>() {
                     Ok(key) => {
                         let entry = by_agent.entry(key).or_default();
                         for w in windows {
@@ -261,7 +267,7 @@ fn collect_agents(
                     // 파싱 실패 슬롯은 실 프레임과 매칭 불가라 무시하되, 조용히 버리면 디버깅 단서가
                     // 사라진다(ADR-0038). rebuild 는 저빈도라 debug 로그가 핫패스 부담 0(logging-conventions).
                     Err(_) => {
-                        tracing::debug!(agent_id = %s, "rebuild: 슬롯 agent_id 가 UUID 아님 — 라우팅 스킵");
+                        tracing::debug!(agent_id = %agent_id, "rebuild: 슬롯 agent_id 가 UUID 아님 — 라우팅 스킵");
                     }
                 }
             }

@@ -55,7 +55,7 @@ function emit(event: string, payload: unknown): void {
 function snap(overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
   return {
     view_id: 'v1',
-    layout: { type: 'slot', id: 's1', agent_id: null },
+    layout: { type: 'slot', id: 's1', content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: 's1',
     version: 1,
     ...overrides,
@@ -175,7 +175,7 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     const cached = useViewStore.getState().layouts['v1']
     expect(cached.version).toBe(3)
     expect(cached.focusedSlotId).toBe('s2')
-    expect(cached.layout).toEqual({ type: 'slot', id: 's1', agent_id: null })
+    expect(cached.layout).toEqual({ type: 'slot', id: 's1', content: { type: 'empty' } })
   })
 
   it('window:tabs-updated → windows[label].{tabs,active,version} 갱신', async () => {
@@ -293,7 +293,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       view_id: 'v1',
       version: 5,
       focused_slot_id: 's-new',
-      layout: { type: 'slot', id: 's-new', agent_id: null },
+      layout: { type: 'slot', id: 's-new', content: { type: 'empty' } },
     }))
     // 그 뒤 늦게 완료된 init 의 get_view pull(낡은 version 0)이 도착 — 캐시 version(5) 이하라 폐기돼야 한다.
     invokeMock.mockImplementation(async (cmd: string) => {

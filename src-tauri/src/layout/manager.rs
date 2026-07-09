@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::tree;
-use super::types::{LayoutNode, SplitDir, View, ViewMeta, ViewSnapshot};
+use super::types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
 
 /// 메인 창 label. 부팅 시 1탭으로 초기화되고 non-closable(불변식 4).
 pub const MAIN_WINDOW_LABEL: &str = "main";
@@ -183,8 +183,10 @@ impl ViewManager {
             .views
             .get(&view_id)
             .ok_or(LayoutError::ViewNotFound(view_id))?;
+        // ADR-0060: find_slot 은 SlotContent 를 돌려주므로 agent_id(참조)만 Option<String> 으로 유도.
+        //   슬롯 부재(None)와 빈 슬롯(Some(Empty)→None)을 구분: 부재만 SlotNotFound.
         tree::find_slot(&v.layout, slot_id)
-            .cloned()
+            .map(|content| content.agent_id().map(str::to_string))
             .ok_or(LayoutError::SlotNotFound(slot_id))
     }
 
@@ -523,9 +525,10 @@ pub enum SpawnSlotError {
 pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, SpawnSlotError> {
     match slot {
         // slot 지정: 그 슬롯이 트리에 있고 비어 있어야 함(점유=덮어쓰기 금지, G9).
+        // ADR-0059/0060 3-way 점유 판정: Empty=빈(Ok) / Agent=점유(SlotOccupied) / 부재=SlotNotFound.
         Some(target) => match tree::find_slot(&view.layout, target) {
-            Some(None) => Ok(target),
-            Some(Some(_)) => Err(SpawnSlotError::SlotOccupied(target)),
+            Some(SlotContent::Empty) => Ok(target),
+            Some(SlotContent::Agent { .. }) => Err(SpawnSlotError::SlotOccupied(target)),
             None => Err(SpawnSlotError::SlotNotFound(target)),
         },
         // slot=None(2b): 첫 빈 슬롯을 스캔한다. 없으면 NoEmptySlot(자동 split·덮어쓰기 안 함).
@@ -746,7 +749,10 @@ mod tests {
         let new_id = wt.tabs[0];
         assert!(matches!(
             mgr.views.get(&new_id).unwrap().layout,
-            LayoutNode::Slot { agent_id: None, .. }
+            LayoutNode::Slot {
+                content: SlotContent::Empty,
+                ..
+            }
         ));
         assert_eq!(wt.active, new_id);
         assert_invariants(&mgr);
@@ -890,7 +896,13 @@ mod tests {
         mgr.assign_agent(view_id, slot, "agent-x".into()).unwrap();
         mgr.close_slot(view_id, slot).unwrap();
         let v = mgr.views.get(&view_id).unwrap();
-        assert!(matches!(v.layout, LayoutNode::Slot { agent_id: None, .. }));
+        assert!(matches!(
+            v.layout,
+            LayoutNode::Slot {
+                content: SlotContent::Empty,
+                ..
+            }
+        ));
         assert!(v.focused_slot_id.is_some());
         assert_invariants(&mgr);
     }
@@ -912,7 +924,7 @@ mod tests {
         mgr.assign_agent(view_id, slot, "agent-42".into()).unwrap();
         let v = mgr.views.get(&view_id).unwrap();
         assert_eq!(
-            tree::find_slot(&v.layout, slot).unwrap().as_deref(),
+            tree::find_slot(&v.layout, slot).unwrap().agent_id(),
             Some("agent-42")
         );
         assert_invariants(&mgr);

@@ -60,7 +60,7 @@ import type { ViewSnapshot } from '../../api/layoutTypes'
 function slotSnap(viewId: string, version: number): ViewSnapshot {
   return {
     view_id: viewId,
-    layout: { type: 'slot', id: `s-${viewId}`, agent_id: null },
+    layout: { type: 'slot', id: `s-${viewId}`, content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: `s-${viewId}`,
     version,
   }

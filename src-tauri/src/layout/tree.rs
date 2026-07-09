@@ -6,25 +6,25 @@
 //! ★불변식★
 //! - split: 대상 Slot 을 Split{a=원래 슬롯, b=새 빈 슬롯, ratio=0.5}로 치환. 새 슬롯 id 반환.
 //! - close: 닫는 Slot 의 형제를 부모 자리로 승격(2-자식 Split 붕괴). root 슬롯이면 빈 슬롯으로 리셋.
-//! - assign: 대상 Slot 의 agent_id 만 교체(트리 구조 불변).
+//! - assign: 대상 Slot 의 content(SlotContent) 만 교체(트리 구조 불변, ADR-0060).
 //! - ratio: 0.0~1.0 클램프(split 기본 0.5).
 
 use uuid::Uuid;
 
-use super::types::LayoutNode;
+use super::types::{LayoutNode, SlotContent};
 
 /// ratio 를 [0.0, 1.0] 으로 클램프. split 기본값은 0.5.
 pub fn clamp_ratio(r: f32) -> f32 {
     r.clamp(0.0, 1.0)
 }
 
-/// 트리에서 slot_id 를 가진 Slot 을 찾아 그 agent_id(참조) 를 반환.
-/// 반환: Some(Some(agent)) = 배정됨 · Some(None) = 빈 슬롯 · None = 그 slot_id 없음.
-pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&Option<String>> {
+/// 트리에서 slot_id 를 가진 Slot 을 찾아 그 콘텐츠(점유자) 를 반환.
+/// 반환: Some(SlotContent::Agent{..}) = 배정됨 · Some(SlotContent::Empty) = 빈 슬롯 · None = 그 slot_id 없음.
+pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&SlotContent> {
     match node {
-        LayoutNode::Slot { id, agent_id } => {
+        LayoutNode::Slot { id, content } => {
             if *id == slot_id {
-                Some(agent_id)
+                Some(content)
             } else {
                 None
             }
@@ -46,13 +46,14 @@ pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     }
 }
 
-/// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(agent_id==None)의 id** 를
+/// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(SlotContent::Empty)의 id** 를
 /// 반환한다. 빈 슬롯이 하나도 없으면 None. spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의
 /// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
 pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     match node {
-        LayoutNode::Slot { id, agent_id } => {
-            if agent_id.is_none() {
+        LayoutNode::Slot { id, content } => {
+            // ADR-0060: 빈 슬롯 = SlotContent::Empty(옛 agent_id.is_none()).
+            if content.is_empty() {
                 Some(*id)
             } else {
                 None
@@ -151,13 +152,18 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
     false
 }
 
-/// slot_id 슬롯에 agent_id(참조 문자열) 를 배정. agent_id=None 이면 해제(빈 슬롯).
+/// slot_id 슬롯에 agent_id(참조 문자열) 를 배정. agent=None 이면 해제(빈 슬롯 = SlotContent::Empty).
 /// 데몬에 실재 검증 안 함(ADR-0035/0006 — 락 보유 중 외부 호출 0). slot_id 없으면 no-op(false).
+/// ★덮어쓰기 시맨틱 유지(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 resolve_spawn_slot 층).
+/// ADR-0060: 입력 Option<String> 을 SlotContent(Some→Agent / None→Empty)로 매핑해 콘텐츠를 통째 치환한다.
 pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String>) -> bool {
     match node {
-        LayoutNode::Slot { id, agent_id } => {
+        LayoutNode::Slot { id, content } => {
             if *id == slot_id {
-                *agent_id = agent;
+                *content = match agent {
+                    Some(agent_id) => SlotContent::Agent { agent_id },
+                    None => SlotContent::Empty,
+                };
                 true
             } else {
                 false
@@ -176,8 +182,18 @@ pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::SplitDir;
+    use super::super::types::{SlotContent, SplitDir};
     use super::*;
+
+    /// 배정된 슬롯 노드(테스트 헬퍼) — id + Agent{agent_id}.
+    fn agent_slot(id: Uuid, agent: &str) -> LayoutNode {
+        LayoutNode::Slot {
+            id,
+            content: SlotContent::Agent {
+                agent_id: agent.to_string(),
+            },
+        }
+    }
 
     /// 단일 빈 슬롯 트리 + 그 슬롯 id 반환.
     fn single_slot() -> (LayoutNode, Uuid) {
@@ -197,12 +213,44 @@ mod tests {
     #[test]
     fn find_slot_returns_agent_ref() {
         let id = Uuid::new_v4();
-        let node = LayoutNode::Slot {
-            id,
-            agent_id: Some("agent-x".into()),
-        };
+        let node = agent_slot(id, "agent-x");
         let found = find_slot(&node, id).expect("슬롯 찾아야 함");
-        assert_eq!(found.as_deref(), Some("agent-x"));
+        assert_eq!(found.agent_id(), Some("agent-x"));
+    }
+
+    // ── SlotContent 편의 메서드 + serde round-trip(golden, ADR-0060) ─────────────
+
+    #[test]
+    fn slot_content_is_empty_and_agent_id() {
+        assert!(SlotContent::Empty.is_empty());
+        assert_eq!(SlotContent::Empty.agent_id(), None);
+        let a = SlotContent::Agent {
+            agent_id: "a-1".into(),
+        };
+        assert!(!a.is_empty());
+        assert_eq!(a.agent_id(), Some("a-1"));
+    }
+
+    #[test]
+    fn slot_content_serde_round_trip_golden() {
+        // 내부태깅 JSON golden — 프론트 discriminated union 과 정합(ADR-0060).
+        let empty = SlotContent::Empty;
+        let empty_json = serde_json::to_string(&empty).unwrap();
+        assert_eq!(empty_json, r#"{"type":"empty"}"#);
+        assert_eq!(
+            serde_json::from_str::<SlotContent>(&empty_json).unwrap(),
+            empty
+        );
+
+        let agent = SlotContent::Agent {
+            agent_id: "abc".into(),
+        };
+        let agent_json = serde_json::to_string(&agent).unwrap();
+        assert_eq!(agent_json, r#"{"type":"agent","agent_id":"abc"}"#);
+        assert_eq!(
+            serde_json::from_str::<SlotContent>(&agent_json).unwrap(),
+            agent
+        );
     }
 
     // ── split ────────────────────────────────────────────────────────────────
@@ -303,16 +351,13 @@ mod tests {
     #[test]
     fn close_root_slot_resets_to_empty() {
         let id = Uuid::new_v4();
-        let mut node = LayoutNode::Slot {
-            id,
-            agent_id: Some("agent-x".into()),
-        };
+        let mut node = agent_slot(id, "agent-x");
         assert!(close_in_tree(&mut node, id), "root 슬롯 close 는 true");
-        // 빈 슬롯으로 리셋(새 id, agent None) — View 는 빈 상태 유지.
+        // 빈 슬롯으로 리셋(새 id, content Empty) — View 는 빈 상태 유지.
         match &node {
-            LayoutNode::Slot { id: rid, agent_id } => {
+            LayoutNode::Slot { id: rid, content } => {
                 assert_ne!(*rid, id, "새 빈 슬롯 id");
-                assert!(agent_id.is_none(), "빈 슬롯");
+                assert!(content.is_empty(), "빈 슬롯");
             }
             _ => panic!("root 슬롯 close 후에도 단일 슬롯"),
         }
@@ -335,7 +380,7 @@ mod tests {
     fn assign_sets_agent_ref() {
         let (mut node, id) = single_slot();
         assert!(assign_in_tree(&mut node, id, Some("agent-7".into())));
-        assert_eq!(find_slot(&node, id).unwrap().as_deref(), Some("agent-7"));
+        assert_eq!(find_slot(&node, id).unwrap().agent_id(), Some("agent-7"));
     }
 
     #[test]
@@ -345,21 +390,28 @@ mod tests {
         assert!(assign_in_tree(&mut node, new_id, Some("agent-b".into())));
         // 대상만 바뀌고 형제는 빈 채.
         assert_eq!(
-            find_slot(&node, new_id).unwrap().as_deref(),
+            find_slot(&node, new_id).unwrap().agent_id(),
             Some("agent-b")
         );
-        assert_eq!(find_slot(&node, id).unwrap().as_deref(), None);
+        assert!(find_slot(&node, id).unwrap().is_empty());
     }
 
     #[test]
     fn assign_can_clear_agent() {
         let id = Uuid::new_v4();
-        let mut node = LayoutNode::Slot {
-            id,
-            agent_id: Some("agent-x".into()),
-        };
+        let mut node = agent_slot(id, "agent-x");
+        // ADR-0060: agent=None 은 SlotContent::Empty 로 해제.
         assert!(assign_in_tree(&mut node, id, None));
-        assert!(find_slot(&node, id).unwrap().is_none());
+        assert!(find_slot(&node, id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn assign_overwrites_occupied_slot() {
+        // ★ADR-0058 덮어쓰기 시맨틱 유지★: 점유 슬롯에 재배정하면 무조건 교체(점유 방어는 상위 층).
+        let id = Uuid::new_v4();
+        let mut node = agent_slot(id, "old");
+        assert!(assign_in_tree(&mut node, id, Some("new".into())));
+        assert_eq!(find_slot(&node, id).unwrap().agent_id(), Some("new"));
     }
 
     #[test]
@@ -406,10 +458,7 @@ mod tests {
     #[test]
     fn first_empty_slot_id_single_occupied_is_none() {
         let id = Uuid::new_v4();
-        let node = LayoutNode::Slot {
-            id,
-            agent_id: Some("a".into()),
-        };
+        let node = agent_slot(id, "a");
         assert_eq!(
             first_empty_slot_id(&node),
             None,

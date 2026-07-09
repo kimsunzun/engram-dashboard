@@ -1,7 +1,7 @@
 // ViewLayoutRenderer — 백엔드 권위 레이아웃(ViewManager) 트리를 그리는 메인 캔버스 렌더러(ADR-0035).
 //
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
-// 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + agent_id, src-tauri/bindings)만 그린다 —
+// 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
 // 사람 우클릭(SlotContextMenu)이든 LLM(window.__engramLayout)이든 같은 invoke→emit 권위 루프로 갱신된다.
 
 import { useState } from 'react'
@@ -47,8 +47,9 @@ export default function ViewLayoutRenderer({
 
   if (node.type === 'slot') {
     const isFocused = node.id === focusedSlotId
-    // agent_id 있는 슬롯만 실 렌더러가 붙는다(빈 슬롯 = 플레이스홀더).
-    const agent = node.agent_id != null ? (agents.find(a => a.id === node.agent_id) ?? null) : null
+    // ADR-0060: 슬롯 점유자 = SlotContent 태그드 유니온. Agent variant 만 실 렌더러가 붙는다(Empty = 플레이스홀더).
+    const slotAgentId = node.content.type === 'agent' ? node.content.agent_id : null
+    const agent = slotAgentId != null ? (agents.find(a => a.id === slotAgentId) ?? null) : null
     // ★caps 도착 후에만 구체 렌더러를 마운트한다(ADR-0041 replay 소유권)★: 데몬 replay 는 slot-assign
     //   델타((window,agent) 키)에서 단 1회만 발화하고, 컴포넌트 스왑(TerminalSlot→RichSlot)엔 재발화하지
     //   않는다. 그래서 caps 미도착 상태에서 TerminalSlot 을 먼저 띄웠다가 caps 도착 후 RichSlot 으로 갈아끼면,
@@ -57,7 +58,7 @@ export default function ViewLayoutRenderer({
     //   시점 replay 를 온전히 받게 한다. (터미널 에이전트는 보통 assign 전에 AgentInfo 가 오므로 이 플레이스
     //   홀더는 일시적 엣지 상태다 — 터미널 replay 경로는 종전과 동일.)
     // 구조화 출력(NDJSON) = 라이브 RichSlot, 아니면 TerminalSlot(xterm) 분기 근거(ADR-0002/0044).
-    const capsReady = node.agent_id != null && agent != null
+    const capsReady = slotAgentId != null && agent != null
     // caps-ready 슬롯의 렌더러: 오버라이드가 있으면 그걸, 없으면 caps 에서 유도한 기본(defaultRenderMode).
     // agent 는 capsReady 분기(아래 agent != null)에서만 사용되므로 여기선 null 병합만 걸어둔다.
     const mode = agent != null ? (renderModeOverride[node.id] ?? defaultRenderMode(agent)) : null
@@ -98,7 +99,7 @@ export default function ViewLayoutRenderer({
           setContextMenu({ x: e.clientX, y: e.clientY })
         }}
       >
-        {node.agent_id != null ? (
+        {node.content.type === 'agent' ? (
           agent == null ? (
             // ★caps-ready 게이팅(replay 소유권)★: caps(AgentInfo) 미도착 시 중립 플레이스홀더만(위 replay
             // 소유권 주석 참조). 구체 렌더러(DomSlot/RichSlot/TerminalSlot) 마운트를 caps 확정까지 미뤄
@@ -115,14 +116,14 @@ export default function ViewLayoutRenderer({
               switch (mode) {
                 case 'dom':
                   // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
-                  // 한다(터미널 xterm 은 canvas 라 관측 불가).
-                  return <DomSlot key={node.id} viewId={node.id} agentId={node.agent_id} epoch={agent.epoch} />
+                  // 한다(터미널 xterm 은 canvas 라 관측 불가). agentId = capsReady 확정된 slotAgentId(non-null).
+                  return <DomSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={agent.epoch} />
                 case 'rich':
                   // 라이브 RichSlot — 실스트림 구독([agentId,epoch]). epoch 은 재spawn 재구독 트리거.
-                  return <RichSlot key={node.id} viewId={node.id} agentId={node.agent_id} epoch={agent.epoch} />
+                  return <RichSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={agent.epoch} />
                 case 'terminal':
                 default:
-                  return <TerminalSlot key={node.id} viewId={node.id} agentId={node.agent_id} />
+                  return <TerminalSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
               }
             })()
           )
@@ -133,13 +134,13 @@ export default function ViewLayoutRenderer({
           </>
         )}
         {contextMenu && (
-          // ADR-0035: 이 슬롯의 우클릭 메뉴 — slotId=node.id, agentId=node.agent_id 를 넘겨
-          //   viewStore(백엔드 권위) 경로로 분할/닫기/배정을 흘린다(§5 단일 제어 표면).
+          // ADR-0035: 이 슬롯의 우클릭 메뉴 — slotId=node.id, agentId=slotAgentId(SlotContent 유도, ADR-0060)
+          //   를 넘겨 viewStore(백엔드 권위) 경로로 분할/닫기/배정을 흘린다(§5 단일 제어 표면).
           <SlotContextMenu
             x={contextMenu.x}
             y={contextMenu.y}
             slotId={node.id}
-            agentId={node.agent_id}
+            agentId={slotAgentId}
             viewIdOverride={viewIdOverride}
             onClose={() => setContextMenu(null)}
           />

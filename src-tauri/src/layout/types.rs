@@ -19,19 +19,57 @@ pub enum SplitDir {
     Vertical,
 }
 
+/// 슬롯 점유자 = 타입드 유니온(ADR-0060). 슬롯이 "무엇을 담는가"의 종류를 나타낸다.
+///
+/// `LayoutNode` 와 **동일한 내부태깅**(`#[serde(tag="type")]` + snake_case)이라 ts-rs 가 프론트
+/// discriminated union(`{type:"empty"}` / `{type:"agent",agent_id:"…"}`)으로 생성한다. 후속 콘텐츠
+/// 종류(FileTree/ControlPanel)는 variant 추가로 확장하고, 사용자 커스텀(프리셋 버튼셋)은 새 variant 가
+/// 아니라 variant 내부 config 데이터로 표현한다(enum 폭발 방지 — ADR-0060 핵심 통찰).
+///
+/// ★불변식(ADR-0060)★: `Agent` variant 는 데몬 에이전트의 **바인딩(agent_id 참조 문자열)만** 담는다 —
+/// 라이브 출력 스트림은 여기 담지 않고 `OutputRouter` 가 agent_id 로 별도 라우팅한다(ADR-0041/0042/0046).
+/// epoch(재spawn 재구독 트리거)도 레이아웃 트리 밖(agentStore 소유 — ADR-0007/0046). 즉 이 타입은
+/// "슬롯이 어떤 에이전트에 묶였나"라는 정적 바인딩만 표현하고, 수명·스트림은 직교 축이 다룬다.
+// ADR-0060
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export)]
+pub enum SlotContent {
+    /// 빈 슬롯(미배정 = 플레이스홀더). resolve_spawn_slot 점유 판정에서 "빈"(ADR-0059).
+    Empty,
+    /// 데몬 에이전트 참조(바인딩만 — 소유 아님, ADR-0035). resolve_spawn_slot 에서 "점유"(ADR-0059).
+    Agent { agent_id: String },
+}
+
+impl SlotContent {
+    /// 빈 슬롯인가(점유 판정 · 첫 빈 슬롯 스캔에서 씀 — ADR-0059).
+    pub fn is_empty(&self) -> bool {
+        matches!(self, SlotContent::Empty)
+    }
+
+    /// 배정된 agent_id(참조). 빈 슬롯이면 None(Empty). 라우팅·조회 호출부 단순화용.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            SlotContent::Agent { agent_id } => Some(agent_id),
+            SlotContent::Empty => None,
+        }
+    }
+}
+
 /// 레이아웃 트리 노드 — 말단 Slot / 내부 Split 의 재귀 enum.
 ///
 /// `#[serde(tag = "type")]` + snake_case → 프론트 discriminated union(`{type:"slot",...}`/
-/// `{type:"split",...}`). agent_id 는 데몬 에이전트 참조 문자열(소유 아님, ADR-0035).
+/// `{type:"split",...}`). content 는 슬롯 점유자(Empty/Agent, ADR-0060) — 옛 `agent_id: Option<String>`
+/// 을 타입드 유니온으로 대체(콘텐츠 종류 확장 seam).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum LayoutNode {
-    /// 말단 슬롯. id = 창 간 전역 고유(UUID). agent_id None = 미배정(빈 슬롯).
+    /// 말단 슬롯. id = 창 간 전역 고유(UUID). content = 점유자(SlotContent::Empty = 빈 슬롯). // ADR-0060
     Slot {
         #[ts(type = "string")]
         id: Uuid,
-        agent_id: Option<String>,
+        content: SlotContent,
     },
     /// 내부 분할 노드. ratio = a 가 차지하는 비율(0.0~1.0 클램프, 기본 0.5).
     Split {
@@ -85,7 +123,7 @@ impl LayoutNode {
     pub fn new_empty_slot() -> Self {
         LayoutNode::Slot {
             id: Uuid::new_v4(),
-            agent_id: None,
+            content: SlotContent::Empty, // ADR-0060: 빈 슬롯 = Empty variant.
         }
     }
 }

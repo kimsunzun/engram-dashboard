@@ -120,7 +120,12 @@ afterEach(() => {
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────────
 function slotNode(id: string, agentId: string | null): LayoutNode {
-  return { type: 'slot', id, agent_id: agentId }
+  // ADR-0060: 슬롯 점유자 = SlotContent 태그드 유니온(Empty / Agent{agent_id}).
+  return {
+    type: 'slot',
+    id,
+    content: agentId != null ? { type: 'agent', agent_id: agentId } : { type: 'empty' },
+  }
 }
 
 function splitNode(a: LayoutNode, b: LayoutNode): LayoutNode {
