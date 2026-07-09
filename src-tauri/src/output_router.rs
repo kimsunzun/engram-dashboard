@@ -4,8 +4,15 @@
 //! ## 역할
 //! 데몬에서 온 출력 프레임(`DecodedFrame{agent_id, ...}`)을 그 agent 가 현재 화면에 보이는
 //! **모든 창(window label)** 으로 fan-out 하기 위한 라우팅 표를 제공한다. 표의 권위 소스는
-//! `ViewManager`(ADR-0035) — 각 View 의 split 트리에서 agent 가 박힌 Slot 을 찾아
-//! `agent_id → [window_label]` 로 역인덱싱한다.
+//! `ViewManager`(ADR-0035/0057) — **각 창의 모든 탭**(활성뿐 아니라 숨은 탭도)의 split 트리에서
+//! agent 가 박힌 Slot 을 찾아 `agent_id → [window_label]` 로 역인덱싱한다.
+//!
+//! ## ★라우팅 반전(ADR-0057/0056 keep-alive)★
+//! 옛 모델은 `active_view_id`(main 전용) + `window_bindings`(팝업 고정)로 라우팅했다 — active flag 가
+//! 라우팅에 들어가 전환 시 노출 집합이 바뀌었다. 새 모델은 **각 창의 tabs 전부**를 walk 한다(숨은 탭도
+//! 수신·전환 무손실, ADR-0056). `active_view_id`·`MAIN_WINDOW_LABEL` 라우팅 분기는 **전면 제거** —
+//! 더는 active flag 가 `by_agent` 에 안 들어간다. 유니크 소유(ADR-0057 불변식 2)라 한 View 는 한 창에만
+//! → "한 View 두 창" 이중 집계 없음.
 //!
 //! ## 핵심 불변식
 //! - **핫패스(`targets`) 락 0** (ADR-0006): `ArcSwap::load()` 만 — 프레임마다 호출되므로 Mutex 금지.
@@ -44,12 +51,9 @@ static EMPTY_TARGETS: LazyLock<Arc<[WindowLabel]>> = LazyLock::new(|| Arc::from(
 /// Slot 의 `String` 은 rebuild 경계에서 이 타입으로 파싱·정규화한다(위 모듈 주석 AgentKey 결정).
 pub type AgentKey = uuid::Uuid;
 
-/// Tauri window label(예: "main", "agent-tree"). `window_bindings` 키와 동일 타입 → 별도 numeric
-/// 레지스트리 불필요(spike §8 D1).
+/// Tauri window label(예: "main", "slot-popup-3"). `ViewManager.windows` 키와 동일 타입 → 별도
+/// numeric 레지스트리 불필요(spike §8 D1).
 pub type WindowLabel = String;
-
-/// 메인 창의 활성 View 를 가리키는 window label. active_view_id 에 박힌 agent 는 이 창으로 간다.
-const MAIN_WINDOW_LABEL: &str = "main";
 
 /// 라우팅 스냅샷. `Arc<[WindowLabel]>` 로 값을 공유 — 핫패스에서 clone 해도 포인터 복사뿐(요소 복사 X).
 ///
@@ -149,27 +153,20 @@ impl OutputRouter {
     ///  락 보유 중 외부 호출(emit / DaemonClient / network I/O)이 0 이다. 반환된 델타의 **송신만** 락 해제
     ///  후 T6 가 cmd_tx 로 enqueue 한다(락 안에서 송신 금지).
     pub fn rebuild(&self, mgr: &ViewManager) -> SubscriptionDelta {
-        // 새 역인덱스 + agent 집합을 한 번의 View/트리 순회로 만든다.
+        // 새 역인덱스 + agent 집합을 한 번의 창/탭/트리 순회로 만든다.
         let mut by_agent: HashMap<AgentKey, Vec<WindowLabel>> = HashMap::new();
 
-        for view in &mgr.views {
-            // 이 View 가 렌더되는 창 목록: active_view_id 면 메인 창 + window_bindings 의 매칭 label 들.
-            // (한 View 가 메인 탭이면서 동시에 팝업에 바인딩될 수도 있어 양쪽 다 모은다.)
-            let mut windows: Vec<&str> = Vec::new();
-            if view.id == mgr.active_view_id {
-                windows.push(MAIN_WINDOW_LABEL);
-            }
-            for (label, vid) in &mgr.window_bindings {
-                if *vid == view.id {
-                    windows.push(label.as_str());
+        // ★라우팅 반전(ADR-0057/0056)★: 각 창의 **모든 탭**(활성뿐 아니라 숨은 탭도)을 walk 한다.
+        //   active flag 는 라우팅에 안 들어간다(옛 active_view_id/MAIN_WINDOW_LABEL 분기 제거). 유니크
+        //   소유라 한 View 는 한 창에만 → 이중 집계 없음. 숨은 탭도 프레임을 버퍼에 계속 쌓아 전환 무손실.
+        for (label, wt) in &mgr.windows {
+            let windows = [label.as_str()];
+            for vid in &wt.tabs {
+                // 유니크 소유 불변식이라 각 vid 는 실재 View(고아 없음). 방어적으로 lookup 실패는 스킵.
+                if let Some(view) = mgr.views.get(vid) {
+                    collect_agents(&view.layout, &windows, &mut by_agent);
                 }
             }
-            // 이 View 가 어느 창에도 안 걸리면(active 도 아니고 바인딩도 없음) 출력 소비자 없음 → 스킵.
-            if windows.is_empty() {
-                continue;
-            }
-            // 이 View 트리의 모든 배정된 슬롯을 모아 각 agent 를 위 창들에 매핑.
-            collect_agents(&view.layout, &windows, &mut by_agent);
         }
 
         // Vec → Arc<[_]> 확정(이후 핫패스가 clone). agent 집합도 동시에 추린다.
@@ -209,6 +206,39 @@ impl OutputRouter {
     }
 }
 
+/// ★창 정리 코어(Tauri-free — G1 headless 필수, TRD §8 스테이지1)★. `label` 창의 **모든 탭 View 를
+/// 통째로 드롭**(views + view_owner + windows 엔트리) 후 `rebuild` 1회 → 그 델타를 반환한다. 반환된
+/// `to_unsubscribe`(어느 창에도 안 남은 agent)는 **호출자가 락 안에서** 데몬에 발화한다(F1 — 델타 계산과
+/// 발화 사이 재추가로 stale 1→0 unsubscribe 가 라이브 구독을 죽이는 것 방지).
+///
+/// ★이 함수는 Tauri·DaemonClient·registry 를 모른다★ — `ViewManager`(모델) + `OutputRouter`(라우팅)만
+///   받아 순수하게 모델·라우팅 표만 갱신한다(headless 단독 테스트 가능). command 핸들러
+///   `cleanup_popup_window` 가 이 코어를 ViewManager 락 안에서 호출하고, 델타 발화·registry.remove(Tauri
+///   부분)는 핸들러가 맡는다.
+///
+/// - `label == MAIN_WINDOW_LABEL`: 정리 대상 아님(불변식 4) — no-op, 빈 델타(방어적, 호출자도 선차단).
+/// - `windows` 에 `label` 없음(close_tab/close_window command 가 먼저 모델을 지운 정상 경로): close 스킵,
+///   `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
+/// - `windows` 에 `label` 있음(titlebar/강제 Destroyed — 멀티탭 잔류 위험, G1): `close_window` 로 tabs
+///   전부 순회 드롭 후 `rebuild`.
+pub fn cleanup_window_core(
+    mgr: &mut ViewManager,
+    router: &OutputRouter,
+    label: &str,
+) -> SubscriptionDelta {
+    use crate::layout::manager::MAIN_WINDOW_LABEL;
+    // main 은 절대 정리 대상 아님(불변식 4). 방어적 no-op(호출자도 선차단하지만 코어 단독 안전성 확보).
+    if label == MAIN_WINDOW_LABEL {
+        return SubscriptionDelta::default();
+    }
+    // 창이 아직 모델에 있으면 close_window 로 tabs 전부 순회 드롭(G1 멀티탭). 이미 없으면 rebuild 만.
+    if mgr.windows.contains_key(label) {
+        // close_window 는 main 거부 Err 를 낼 수 있으나 위에서 main 을 이미 걸렀으니 여기선 성공만.
+        let _ = mgr.close_window(label);
+    }
+    router.rebuild(mgr)
+}
+
 /// 한 View 트리를 순회하며 배정된(agent_id=Some) 슬롯의 agent 를 `windows` 전부에 매핑한다.
 ///
 /// Slot 의 `agent_id: String` 을 `AgentKey`(Uuid)로 파싱 — 실패하면 무시(실 프레임과 매칭 불가).
@@ -246,6 +276,7 @@ fn collect_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::manager::MAIN_WINDOW_LABEL;
     use crate::layout::types::SplitDir;
     use uuid::Uuid;
 
@@ -257,14 +288,21 @@ mod tests {
         (id, id.to_string())
     }
 
-    /// 단일 슬롯 View 트리를 가진 ViewManager(기본). active = 그 View.
-    /// active View 의 첫(유일) 슬롯에 agent 를 배정한다. 슬롯 id 반환.
-    fn assign_to_active(mgr: &mut ViewManager, agent_str: &str) -> Uuid {
-        let view_id = mgr.active_view_id;
-        let slot = {
-            let v = mgr.views.iter().find(|v| v.id == view_id).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
+    /// main 창의 활성 탭 id.
+    fn main_active(mgr: &ViewManager) -> Uuid {
+        mgr.windows.get(MAIN_WINDOW_LABEL).unwrap().active
+    }
+
+    /// view 의 첫(유일) 슬롯 id.
+    fn first_slot(mgr: &ViewManager, view_id: Uuid) -> Uuid {
+        let v = mgr.views.get(&view_id).unwrap();
+        crate::layout::tree::first_slot_id(&v.layout)
+    }
+
+    /// main 창 활성 탭의 첫(유일) 슬롯에 agent 를 배정한다. 슬롯 id 반환.
+    fn assign_to_main(mgr: &mut ViewManager, agent_str: &str) -> Uuid {
+        let view_id = main_active(mgr);
+        let slot = first_slot(mgr, view_id);
         mgr.assign_agent(view_id, slot, agent_str.to_string())
             .unwrap();
         slot
@@ -279,10 +317,10 @@ mod tests {
     // ── 라우팅: targets 가 올바른 window label 반환 ──────────────────────────
 
     #[test]
-    fn agent_in_active_view_routes_to_main() {
+    fn agent_in_main_tab_routes_to_main() {
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();
-        assign_to_active(&mut mgr, &astr);
+        assign_to_main(&mut mgr, &astr);
 
         let router = OutputRouter::new();
         router.rebuild(&mgr);
@@ -303,85 +341,66 @@ mod tests {
     }
 
     #[test]
-    fn agent_in_non_active_view_not_routed_without_binding() {
-        // View1(active) 빈 슬롯, View2(비활성)에 agent 배정 — 어느 창에도 안 걸림 → 빈 결과.
+    fn agent_in_hidden_tab_still_routes_keep_alive() {
+        // ★라우팅 반전(ADR-0056 keep-alive)★: main 에 탭 2개, 숨은(비활성) 탭의 agent 도 라우팅된다.
+        //   옛 모델은 active 탭만 라우팅했으나 이제 모든 탭 walk.
         let mut mgr = ViewManager::new();
-        let v1 = mgr.active_view_id;
-        let v2 = mgr.create_view(None); // active 가 v2 로 바뀜
-                                        // 다시 v1 을 active 로 → v2 는 비활성, 바인딩도 없음.
-        mgr.switch_view(v1).unwrap();
+        // 활성 탭(비움) — 숨은 탭에 agent 를 넣고 활성은 다른 탭으로.
+        let hidden = main_active(&mgr);
         let (aid, astr) = agent();
-        let slot = {
-            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
-        mgr.assign_agent(v2, slot, astr).unwrap();
-
-        let router = OutputRouter::new();
-        router.rebuild(&mgr);
-        assert!(
-            router.targets(aid).is_empty(),
-            "비활성·미바인딩 View 의 agent 는 라우팅 대상 0"
-        );
-    }
-
-    #[test]
-    fn agent_in_bound_window_routes_to_bound_label() {
-        // ★일반 window_bindings 메커니즘(ADR-0046)★: View2 를 보조 창("agent-tree")에 바인딩 → active
-        //   아니어도 그 창으로 라우팅. (label 은 임의의 바인딩된 창을 대표 — 정적 slot-popup 제거와 무관.)
-        let mut mgr = ViewManager::new();
-        let v1 = mgr.active_view_id;
-        let v2 = mgr.create_view(None);
-        mgr.switch_view(v1).unwrap(); // active=v1, v2 는 바인딩 창 전용
-        mgr.window_bindings.insert("agent-tree".to_string(), v2);
-
-        let (aid, astr) = agent();
-        let slot = {
-            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
-        mgr.assign_agent(v2, slot, astr).unwrap();
-
-        let router = OutputRouter::new();
-        router.rebuild(&mgr);
-        assert_eq!(targets_set(&router, aid), vec!["agent-tree".to_string()]);
-    }
-
-    #[test]
-    fn same_agent_in_active_and_bound_window_routes_to_both_windows() {
-        // 같은 agent 가 active View(=main) 와 바인딩 View 양쪽 슬롯에 → 두 창 모두로(일반 메커니즘).
-        let mut mgr = ViewManager::new();
-        let v1 = mgr.active_view_id;
-        let v2 = mgr.create_view(None);
-        mgr.switch_view(v1).unwrap();
-        mgr.window_bindings.insert("agent-tree".to_string(), v2);
-
-        let (aid, astr) = agent();
-        assign_to_active(&mut mgr, &astr); // main 창(v1)
-        let slot2 = {
-            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
-        mgr.assign_agent(v2, slot2, astr.clone()).unwrap();
+        let hslot = first_slot(&mgr, hidden);
+        mgr.assign_agent(hidden, hslot, astr).unwrap();
+        // 새 탭 만들어 활성화 → hidden 은 숨은 탭이 됨.
+        let _active = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
 
         let router = OutputRouter::new();
         router.rebuild(&mgr);
         assert_eq!(
             targets_set(&router, aid),
-            vec!["agent-tree".to_string(), "main".to_string()],
+            vec!["main".to_string()],
+            "숨은 탭의 agent 도 라우팅(keep-alive)"
+        );
+    }
+
+    #[test]
+    fn agent_in_popup_window_routes_to_popup_label() {
+        // 팝업 창의 탭 agent 는 그 창 label 로 라우팅(active 아니어도 — 유니크 소유 창별 탭).
+        let mut mgr = ViewManager::new();
+        let pv = mgr.create_window("slot-popup-1").unwrap();
+        let (aid, astr) = agent();
+        let slot = first_slot(&mgr, pv);
+        mgr.assign_agent(pv, slot, astr).unwrap();
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        assert_eq!(targets_set(&router, aid), vec!["slot-popup-1".to_string()]);
+    }
+
+    #[test]
+    fn same_agent_in_two_windows_routes_to_both() {
+        // ★불변식 5★: 같은 agent 가 main 탭과 팝업 창 탭 양쪽에 → 두 창 모두로(진도 독립·ADR-0046).
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        assign_to_main(&mut mgr, &astr); // main
+        let pv = mgr.create_window("slot-popup-1").unwrap();
+        let slot2 = first_slot(&mgr, pv);
+        mgr.assign_agent(pv, slot2, astr.clone()).unwrap();
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        assert_eq!(
+            targets_set(&router, aid),
+            vec!["main".to_string(), "slot-popup-1".to_string()],
             "같은 agent 가 두 창에 보이면 둘 다 라우팅"
         );
     }
 
     #[test]
     fn split_view_with_two_agents_routes_each() {
-        // active View 를 분할해 두 슬롯에 서로 다른 agent → 각자 main 으로(같은 창, 다른 agent).
+        // main 활성 탭을 분할해 두 슬롯에 서로 다른 agent → 각자 main 으로(같은 창, 다른 agent).
         let mut mgr = ViewManager::new();
-        let view_id = mgr.active_view_id;
-        let slot = {
-            let v = mgr.views.iter().find(|v| v.id == view_id).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
+        let view_id = main_active(&mgr);
+        let slot = first_slot(&mgr, view_id);
         let slot2 = mgr.split_slot(view_id, slot, SplitDir::Horizontal).unwrap();
         let (a1, a1s) = agent();
         let (a2, a2s) = agent();
@@ -398,7 +417,7 @@ mod tests {
     fn invalid_uuid_slot_string_is_skipped() {
         // Slot agent_id 가 UUID 가 아니면 라우팅 키로 못 들어감(실 프레임과 매칭 불가) → 무시.
         let mut mgr = ViewManager::new();
-        assign_to_active(&mut mgr, "not-a-uuid");
+        assign_to_main(&mut mgr, "not-a-uuid");
         let router = OutputRouter::new();
         let delta = router.rebuild(&mgr);
         // 어떤 키도 안 생김 → 구독 델타도 비어야.
@@ -424,7 +443,7 @@ mod tests {
 
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();
-        assign_to_active(&mut mgr, &astr);
+        assign_to_main(&mut mgr, &astr);
         let router = StdArc::new(OutputRouter::new());
         router.rebuild(&mgr);
 
@@ -468,7 +487,7 @@ mod tests {
 
         for _ in 0..200 {
             let mut mgr = ViewManager::new();
-            assign_to_active(&mut mgr, &astr);
+            assign_to_main(&mut mgr, &astr);
             router.rebuild(&mgr);
             // 빈 표로도 한 번씩 교체(0→1→0 토글)해 동시성 표면 넓힘.
             router.rebuild(&ViewManager::new());
@@ -482,7 +501,7 @@ mod tests {
     fn diff_zero_to_one_subscribes() {
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();
-        assign_to_active(&mut mgr, &astr);
+        assign_to_main(&mut mgr, &astr);
 
         let router = OutputRouter::new();
         let delta = router.rebuild(&mgr);
@@ -494,12 +513,13 @@ mod tests {
     fn diff_one_to_zero_unsubscribes() {
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();
-        let slot = assign_to_active(&mut mgr, &astr);
+        let view = main_active(&mgr);
+        let slot = assign_to_main(&mut mgr, &astr);
 
         let router = OutputRouter::new();
         router.rebuild(&mgr); // 1 visible
                               // 슬롯을 닫아(agent 사라짐) 다시 rebuild → 1→0.
-        mgr.close_slot(mgr.active_view_id, slot).unwrap();
+        mgr.close_slot(view, slot).unwrap();
         let delta = router.rebuild(&mgr);
         assert!(delta.to_subscribe.is_empty());
         assert_eq!(delta.to_unsubscribe, vec![aid], "1→0 = Unsubscribe");
@@ -509,7 +529,7 @@ mod tests {
     fn diff_no_change_is_empty() {
         let mut mgr = ViewManager::new();
         let (_aid, astr) = agent();
-        assign_to_active(&mut mgr, &astr);
+        assign_to_main(&mut mgr, &astr);
 
         let router = OutputRouter::new();
         router.rebuild(&mgr);
@@ -523,27 +543,20 @@ mod tests {
 
     #[test]
     fn diff_agent_in_two_windows_one_closes_stays_subscribed() {
-        // §6 리스크3: 같은 agent 가 main+바인딩 창 두 곳에 → 한 창 닫혀도 다른 창에 남으면 구독 유지.
+        // ★불변식 5★: 같은 agent 가 main 탭 + 팝업 창 두 곳에 → 팝업 닫혀도 main 에 남으면 구독 유지.
         let mut mgr = ViewManager::new();
-        let v1 = mgr.active_view_id;
-        let v2 = mgr.create_view(None);
-        mgr.switch_view(v1).unwrap();
-        mgr.window_bindings.insert("agent-tree".to_string(), v2);
-
         let (aid, astr) = agent();
-        assign_to_active(&mut mgr, &astr); // main
-        let slot2 = {
-            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
-        mgr.assign_agent(v2, slot2, astr.clone()).unwrap();
+        assign_to_main(&mut mgr, &astr); // main
+        let pv = mgr.create_window("slot-popup-1").unwrap();
+        let slot2 = first_slot(&mgr, pv);
+        mgr.assign_agent(pv, slot2, astr.clone()).unwrap();
 
         let router = OutputRouter::new();
         let d1 = router.rebuild(&mgr);
         assert_eq!(d1.to_subscribe, vec![aid], "처음 0→1 Subscribe 한 번");
 
-        // 바인딩 창 닫힘 = 그 바인딩 제거(close_view 가 window_bindings retain 으로 정리하는 동작 모사).
-        mgr.window_bindings.remove("agent-tree");
+        // 팝업 창 닫힘(close_window 가 그 창 탭 View 를 드롭 → 라우팅에서 빠짐).
+        mgr.close_window("slot-popup-1").unwrap();
         let d2 = router.rebuild(&mgr);
         assert!(
             d2.is_empty(),
@@ -554,35 +567,64 @@ mod tests {
     }
 
     #[test]
-    fn diff_switch_view_changes_visible_set() {
-        // View1(agentA), View2(agentB). active=v1 → A 구독. switch_view(v2) → A 빠지고 B 들어옴.
+    fn diff_switch_tab_is_noop_keep_alive() {
+        // ★G5 — 옛 diff_switch_view_changes_visible_set 반전★: keep-alive(ADR-0056)에선 모든 탭이 이미
+        //   라우팅되므로 switch_tab 은 노출 집합을 안 바꾼다 → 델타 no-op. active flag 는 by_agent 에서
+        //   완전히 배제됨(옛 "switch → A 빠지고 B 들어옴"은 정면 위배).
         let mut mgr = ViewManager::new();
-        let v1 = mgr.active_view_id;
+        // 탭1(A) 활성, 탭2(B) 숨김 — 둘 다 이미 라우팅.
+        let v1 = main_active(&mgr);
         let (a1, a1s) = agent();
-        assign_to_active(&mut mgr, &a1s); // v1 의 슬롯에 A
+        let s1 = first_slot(&mgr, v1);
+        mgr.assign_agent(v1, s1, a1s).unwrap();
 
-        let v2 = mgr.create_view(None); // active=v2 (create 가 전환)
+        let v2 = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap(); // 활성=v2
         let (b1, b1s) = agent();
-        let slot2 = {
-            let v = mgr.views.iter().find(|v| v.id == v2).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
-        mgr.assign_agent(v2, slot2, b1s).unwrap();
+        let s2 = first_slot(&mgr, v2);
+        mgr.assign_agent(v2, s2, b1s).unwrap();
 
         let router = OutputRouter::new();
-        // active=v2 상태로 첫 rebuild → B 보임(A 안 보임).
-        mgr.switch_view(v2).unwrap();
-        let d1 = router.rebuild(&mgr);
-        assert_eq!(d1.to_subscribe, vec![b1]);
-        assert!(d1.to_unsubscribe.is_empty());
-
-        // active 를 v1 으로 → A 들어오고 B 빠짐.
-        mgr.switch_view(v1).unwrap();
-        let d2 = router.rebuild(&mgr);
-        assert_eq!(d2.to_subscribe, vec![a1], "switch 로 A 가 보이기 시작");
-        assert_eq!(d2.to_unsubscribe, vec![b1], "B 는 안 보이게 됨");
+        let d0 = router.rebuild(&mgr);
+        // 첫 rebuild 에 A·B 둘 다 구독(둘 다 라우팅). 순서는 sort 되니 집합으로 확인.
+        let subs: std::collections::HashSet<_> = d0.to_subscribe.iter().copied().collect();
+        assert_eq!(subs, std::collections::HashSet::from([a1, b1]));
+        // 두 agent 모두 main 으로 라우팅(active 무관).
         assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
+        assert_eq!(targets_set(&router, b1), vec!["main".to_string()]);
+
+        // ★switch_tab → 노출 집합 불변 → 델타 no-op★.
+        mgr.switch_tab(MAIN_WINDOW_LABEL, v1).unwrap();
+        let d1 = router.rebuild(&mgr);
+        assert!(d1.is_empty(), "switch_tab 은 keep-alive 라 델타 no-op");
+        // 여전히 둘 다 라우팅(active 가 라우팅에 안 들어감).
+        assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
+        assert_eq!(targets_set(&router, b1), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn close_tab_removes_agent_and_unsubscribes() {
+        // 탭을 닫으면 그 탭의 agent 가 어느 창에도 안 남으면 1→0 Unsubscribe.
+        let mut mgr = ViewManager::new();
+        let v1 = main_active(&mgr);
+        let (a1, a1s) = agent();
+        let s1 = first_slot(&mgr, v1);
+        mgr.assign_agent(v1, s1, a1s).unwrap();
+
+        let v2 = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let (b1, b1s) = agent();
+        let s2 = first_slot(&mgr, v2);
+        mgr.assign_agent(v2, s2, b1s).unwrap();
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr); // A·B 구독
+
+        // v2(B 탭) 닫음 → B 1→0.
+        mgr.close_tab(MAIN_WINDOW_LABEL, v2).unwrap();
+        let d = router.rebuild(&mgr);
+        assert_eq!(d.to_unsubscribe, vec![b1], "닫힌 탭 agent Unsubscribe");
+        assert!(d.to_subscribe.is_empty());
         assert!(router.targets(b1).is_empty());
+        assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
     }
 
     #[test]
@@ -595,11 +637,12 @@ mod tests {
         assert!(d0.is_empty());
 
         let (aid, astr) = agent();
-        let slot = assign_to_active(&mut mgr, &astr);
+        let view = main_active(&mgr);
+        let slot = assign_to_main(&mut mgr, &astr);
         let d1 = router.rebuild(&mgr);
         assert_eq!(d1.to_subscribe, vec![aid]);
 
-        mgr.close_slot(mgr.active_view_id, slot).unwrap();
+        mgr.close_slot(view, slot).unwrap();
         let d2 = router.rebuild(&mgr);
         assert_eq!(d2.to_unsubscribe, vec![aid]);
     }
@@ -612,18 +655,15 @@ mod tests {
         let router = OutputRouter::new();
 
         let (a, as_) = agent();
-        assign_to_active(&mut mgr, &as_);
+        assign_to_main(&mut mgr, &as_);
         let d1 = router.rebuild(&mgr);
         // 만약 diff 가 no-op 이면 d1.to_subscribe 가 비어 이 단언에서 실패.
         assert_eq!(d1.to_subscribe, vec![a]);
         assert!(d1.to_unsubscribe.is_empty());
 
         // A 를 B 로 교체(같은 슬롯에 재배정) → A unsubscribe + B subscribe 동시 발생.
-        let view_id = mgr.active_view_id;
-        let slot = {
-            let v = mgr.views.iter().find(|v| v.id == view_id).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
+        let view_id = main_active(&mgr);
+        let slot = first_slot(&mgr, view_id);
         let (b, bs) = agent();
         mgr.assign_agent(view_id, slot, bs).unwrap();
         let d2 = router.rebuild(&mgr);
@@ -650,10 +690,10 @@ mod tests {
         let mut unsubscribed: HashSet<Uuid> = HashSet::new();
 
         // 누적 헬퍼: 한 번의 rebuild 델타를 합집합에 접는다.
-        let mut fold = |router: &OutputRouter,
-                        mgr: &ViewManager,
-                        sub: &mut HashSet<Uuid>,
-                        unsub: &mut HashSet<Uuid>| {
+        let fold = |router: &OutputRouter,
+                    mgr: &ViewManager,
+                    sub: &mut HashSet<Uuid>,
+                    unsub: &mut HashSet<Uuid>| {
             let d = router.rebuild(mgr);
             for a in d.to_subscribe {
                 sub.insert(a);
@@ -663,12 +703,9 @@ mod tests {
             }
         };
 
-        // step1: active View 첫 슬롯에 A, 분할해 둘째 슬롯에 B (둘 다 0→1).
-        let view_id = mgr.active_view_id;
-        let slot_a = {
-            let v = mgr.views.iter().find(|v| v.id == view_id).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
+        // step1: main 활성 탭 첫 슬롯에 A, 분할해 둘째 슬롯에 B (둘 다 0→1).
+        let view_id = main_active(&mgr);
+        let slot_a = first_slot(&mgr, view_id);
         let slot_b = mgr
             .split_slot(view_id, slot_a, SplitDir::Horizontal)
             .unwrap();
@@ -683,10 +720,7 @@ mod tests {
         fold(&router, &mgr, &mut subscribed, &mut unsubscribed);
 
         // step3: A 가 있던 슬롯에 C 재배정(A 1→0, C 0→1 동시).
-        let slot_a2 = {
-            let v = mgr.views.iter().find(|v| v.id == view_id).unwrap();
-            crate::layout::tree::first_slot_id(&v.layout)
-        };
+        let slot_a2 = first_slot(&mgr, view_id);
         let (c, cs) = agent();
         mgr.assign_agent(view_id, slot_a2, cs).unwrap();
         fold(&router, &mgr, &mut subscribed, &mut unsubscribed);
@@ -706,4 +740,221 @@ mod tests {
     // ★ADR-0046: resync_filter_*(slots_for_window_agent) 테스트 삭제★ — 그 메서드는 옛 slot 단위 mount
     //   replay 필터용이었다. resync_output 은 이제 agent 단위 request_replay(뷰 주도 전량 재replay)로 흡수돼
     //   window·slot 필터가 필요 없다(라우팅은 targets() 가, 마커 순서는 single-flight 가 담당).
+
+    // ── cleanup_window_core(G1 멀티탭 정리 headless 필수, TRD §8 스테이지1) ────────────────────
+
+    /// 창 `label` 의 활성 탭 첫 슬롯에 agent 배정(팝업/main 공통).
+    fn assign_to_window(mgr: &mut ViewManager, label: &str, agent_str: &str) -> Uuid {
+        let view_id = mgr.windows.get(label).unwrap().active;
+        let slot = first_slot(mgr, view_id);
+        mgr.assign_agent(view_id, slot, agent_str.to_string())
+            .unwrap();
+        slot
+    }
+
+    #[test]
+    fn cleanup_core_multitab_popup_drops_all_and_unsubscribes() {
+        // ★G1★: 멀티탭 팝업(탭 2개, 각 탭에 서로 다른 그 창 전용 agent) 강제 정리(Destroyed) →
+        //   모든 View 가 views+view_owner 에서 빠지고(잔류 0), windows 엔트리 제거,
+        //   델타 to_unsubscribe 에 그 창 전용 agent 전부 포함.
+        let mut mgr = ViewManager::new();
+        // 팝업 창 + 탭1 agent A.
+        let p0 = mgr.create_window("slot-popup-1").unwrap();
+        let (a_id, a_str) = agent();
+        assign_to_window(&mut mgr, "slot-popup-1", &a_str);
+        // 탭2 agent B(그 창 전용).
+        let p1 = mgr.create_tab("slot-popup-1", None).unwrap();
+        let (b_id, b_str) = agent();
+        let p1_slot = first_slot(&mgr, p1);
+        mgr.assign_agent(p1, p1_slot, b_str).unwrap();
+
+        let router = OutputRouter::new();
+        let d0 = router.rebuild(&mgr);
+        // 처음 A·B 둘 다 이 창에서 보임(0→1).
+        let subs: HashSet<_> = d0.to_subscribe.iter().copied().collect();
+        assert_eq!(subs, HashSet::from([a_id, b_id]));
+
+        // 강제 Destroyed 정리 코어(창은 아직 모델에 있음 — titlebar/강제 종료 경로).
+        let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1");
+
+        // 잔류 0: 두 탭 View 모두 views+view_owner 에서 빠짐.
+        for v in [p0, p1] {
+            assert!(!mgr.views.contains_key(&v), "View 잔류 0");
+            assert!(!mgr.view_owner.contains_key(&v), "view_owner 잔류 0");
+        }
+        // windows 엔트리 제거.
+        assert!(!mgr.windows.contains_key("slot-popup-1"), "창 엔트리 제거");
+        // 그 창 전용 agent 전부 1→0 Unsubscribe.
+        let unsub: HashSet<_> = delta.to_unsubscribe.iter().copied().collect();
+        assert_eq!(
+            unsub,
+            HashSet::from([a_id, b_id]),
+            "창 전용 agent 전부 Unsubscribe"
+        );
+        // 라우팅 표에서도 빠짐.
+        assert!(router.targets(a_id).is_empty());
+        assert!(router.targets(b_id).is_empty());
+    }
+
+    #[test]
+    fn cleanup_core_keeps_agent_shared_with_main() {
+        // ★불변식 5★: 팝업 창 정리해도 같은 agent 가 main 에도 있으면 1→1 → Unsubscribe 금지(아직 보임).
+        let mut mgr = ViewManager::new();
+        let (shared, shared_str) = agent();
+        assign_to_main(&mut mgr, &shared_str); // main 탭
+        mgr.create_window("slot-popup-1").unwrap();
+        assign_to_window(&mut mgr, "slot-popup-1", &shared_str); // 팝업도 같은 agent
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+
+        let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1");
+        assert!(
+            delta.to_unsubscribe.is_empty(),
+            "main 에 남은 shared agent 는 Unsubscribe 금지"
+        );
+        assert_eq!(targets_set(&router, shared), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn cleanup_core_main_is_noop() {
+        // ★불변식 4★: cleanup_window_core("main") 은 방어적 no-op(모델 불변, 빈 델타).
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        assign_to_main(&mut mgr, &astr);
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+
+        let before_views = mgr.views.len();
+        let delta = cleanup_window_core(&mut mgr, &router, MAIN_WINDOW_LABEL);
+        assert!(delta.is_empty(), "main 정리 요청은 빈 델타(no-op)");
+        assert_eq!(mgr.views.len(), before_views, "main View 불변");
+        assert!(mgr.windows.contains_key(MAIN_WINDOW_LABEL), "main 창 유지");
+        assert_eq!(targets_set(&router, aid), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn cleanup_core_already_removed_window_only_rebuilds() {
+        // 정상 경로: close_window command 가 먼저 모델을 지운 뒤 OS Destroyed 가 뒤늦게 도착 →
+        //   windows 에 label 없음 → close 스킵, rebuild 만(빈 델타 — 이미 라우팅에서 빠졌으니).
+        let mut mgr = ViewManager::new();
+        let (aid, astr) = agent();
+        mgr.create_window("slot-popup-1").unwrap();
+        assign_to_window(&mut mgr, "slot-popup-1", &astr);
+        let router = OutputRouter::new();
+        router.rebuild(&mgr); // popup agent 구독됨
+
+        // command 가 먼저 모델에서 창 제거 + rebuild(여기서 이미 1→0 Unsubscribe 나감).
+        mgr.close_window("slot-popup-1").unwrap();
+        let d_cmd = router.rebuild(&mgr);
+        assert_eq!(d_cmd.to_unsubscribe, vec![aid]);
+
+        // 뒤늦은 Destroyed 코어 호출: 이미 없으니 rebuild 만 → 델타 없음(이중 Unsubscribe 금지).
+        let d_late = cleanup_window_core(&mut mgr, &router, "slot-popup-1");
+        assert!(d_late.is_empty(), "이미 정리된 창 재정리는 빈 델타");
+    }
+
+    // ── move_slot_to_window phase-C 모델 레벨(F4 엣지 + 타깃 소멸) ────────────────────────────
+
+    #[test]
+    fn move_phase_c_target_vanished_drops_detached_and_keeps_source() {
+        // move phase-C: 기존창 타깃이 phase B(언락) 중 소멸 → insert_tab_into Err → drop_detached_view,
+        //   소스 슬롯 유지(사용자 슬롯 안 잃음). 라우팅은 소스만.
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let slot = first_slot(&mgr, src);
+        let (aid, astr) = agent();
+        mgr.assign_agent(src, slot, astr).unwrap();
+
+        // phase A: 임시 View 예약.
+        let tmp = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        // phase C: 타깃 창이 없음(소멸 모델) → Err.
+        let err = mgr.insert_tab_into("gone-window", tmp).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::layout::manager::LayoutError::WindowNotFound(_)
+        ));
+        // 롤백: 임시 View drop, 소스 유지.
+        mgr.drop_detached_view(tmp);
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        // 소스 슬롯에 여전히 agent → 라우팅 살아있음.
+        assert_eq!(mgr.slot_agent(src, slot).unwrap(), Some(aid.to_string()));
+        assert_eq!(targets_set(&router, aid), vec!["main".to_string()]);
+        assert!(!mgr.views.contains_key(&tmp), "임시 View 제거");
+    }
+
+    #[test]
+    fn move_phase_c_source_reassigned_becomes_copy_invariant5_benign() {
+        // ★F4 엣지★: MOVE 중 소스 슬롯이 phase B(언락) 동안 **다른 agent 로 재배정**되면, phase C 의
+        //   still_ours 가드(모델 레벨: slot_agent(src,slot) == 옮긴 agent 인지)가 실패 → 소스 close 스킵.
+        //   결과: 옮긴 agent 가 타깃 탭 + (재배정된) 소스 슬롯에 공존이 아니라, 옮긴 agent 는 타깃에만,
+        //   소스엔 엉뚱한 새 agent — 즉 "엉뚱한 agent 삭제 방지"가 우선(load-bearing). 원래 agent 관점에선
+        //   타깃에만 남으므로 데이터 손실 0. 아래는 "소스가 원래 agent 그대로면 MOVE(소스 삭제)"와
+        //   대비해 재배정 시 close 가 스킵됨을 모델 수준에서 검증.
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let slot = first_slot(&mgr, src);
+        let (moved, moved_str) = agent();
+        mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
+
+        // phase A: 옮길 agent 를 임시 View 로.
+        let tmp = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        // 타깃 팝업 창 존재.
+        mgr.create_window("slot-popup-1").unwrap();
+
+        // ★phase B 동안 소스 슬롯이 다른 agent 로 재배정됨(gap race 시뮬)★.
+        let (other, other_str) = agent();
+        mgr.assign_agent(src, slot, other_str).unwrap();
+
+        // phase C: 타깃에 삽입 성공.
+        mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
+        // still_ours 판정(command 레이어 로직 재현): 소스 슬롯 agent == 옮긴 agent 인가?
+        let still_ours = matches!(
+            mgr.slot_agent(src, slot),
+            Ok(Some(ref a)) if *a == moved_str
+        );
+        assert!(!still_ours, "재배정됐으니 still_ours=false → close 스킵");
+        // close 스킵이므로 소스 슬롯은 그대로(엉뚱한 other 를 지우지 않음).
+        assert_eq!(mgr.slot_agent(src, slot).unwrap(), Some(other.to_string()));
+
+        // 라우팅: moved 는 타깃(팝업)으로, other 는 소스(main)로 — 둘 다 살아있음.
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        assert_eq!(
+            targets_set(&router, moved),
+            vec!["slot-popup-1".to_string()]
+        );
+        assert_eq!(targets_set(&router, other), vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn move_phase_c_source_intact_move_removes_source() {
+        // 대비: 소스가 gap 중 안 건드려졌으면 still_ours=true → close(진짜 MOVE). moved 는 타깃에만.
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let slot = first_slot(&mgr, src);
+        let (moved, moved_str) = agent();
+        mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
+
+        let tmp = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        mgr.create_window("slot-popup-1").unwrap();
+        mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
+
+        let still_ours = matches!(
+            mgr.slot_agent(src, slot),
+            Ok(Some(ref a)) if *a == moved_str
+        );
+        assert!(still_ours, "소스 그대로면 still_ours=true");
+        mgr.close_slot(src, slot).unwrap(); // MOVE close
+
+        let router = OutputRouter::new();
+        router.rebuild(&mgr);
+        // moved 는 팝업(타깃)에만 — main 소스 슬롯은 비었음.
+        assert_eq!(
+            targets_set(&router, moved),
+            vec!["slot-popup-1".to_string()]
+        );
+    }
 }

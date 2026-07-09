@@ -11,7 +11,9 @@ pub mod manager;
 pub mod tree;
 pub mod types;
 
-pub use manager::{LayoutError, ViewManager};
+pub use manager::{
+    CloseTabOutcome, LayoutError, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+};
 pub use types::{LayoutNode, SplitDir, View, ViewMeta, ViewSnapshot};
 
 use std::sync::{Arc, Mutex};

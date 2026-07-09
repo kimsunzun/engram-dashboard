@@ -201,18 +201,23 @@ pub fn run() {
             // ADR-0027 §53~55: 부팅 자동 시작 토글/조회 — §5 LLM 제어 표면.
             commands::set_autostart,
             commands::get_autostart,
-            // ADR-0035: 레이아웃 권위(ViewManager) 상태변경 — §5 LLM 제어 표면(window.__engramLayout).
-            //   락→변형→해제→emit(ADR-0006). assign_agent 는 참조 문자열만(데몬 검증 호출 0).
-            commands::create_view,
-            commands::close_view,
-            commands::switch_view,
+            // ADR-0035/0057: 레이아웃 권위(ViewManager) 탭 소유 모델 상태변경 — §5 LLM 제어 표면
+            //   (window.__engramLayout). 락→변형→해제→emit(ADR-0006). 창별 탭 command(ADR-0057):
+            //   create_tab/switch_tab/close_tab 은 창 label 을 받고, close_window 는 main 을 거부한다.
+            //   assign_agent 는 참조 문자열만(데몬 검증 호출 0).
+            commands::create_tab,
+            commands::create_window,
+            commands::switch_tab,
+            commands::close_tab,
+            commands::close_window,
             commands::split_slot,
             commands::close_slot,
             commands::assign_agent,
             commands::get_view,
-            // ADR-0035: read-only 조회 — 부팅 시 webview 가 active view id 를 발견하는 유일 경로
-            //   (변경 핸들러는 변경 직후에만 emit → 부팅 직후엔 닿지 않음). 상태변경·emit 없음.
-            commands::list_views,
+            // ADR-0057: read-only 조회 — 창 mount 시 자기 활성 탭을 확정하는 경로(list_tabs) + 창 목록.
+            //   (변경 핸들러는 변경 직후에만 emit → mount 직후엔 닿지 않음). 상태변경·emit 없음.
+            commands::list_tabs,
+            commands::list_windows,
             // S14 모듈①(ADR-0036) T6a: 에이전트 명령 request/reply 평면 — §5 LLM 제어 표면.
             //   DaemonClient::send_command(request_id 매칭). 출력 구독(subscribe_output)은 T6b.
             commands::agent_spawn,
@@ -226,11 +231,10 @@ pub fn run() {
             // ADR-0046 M1: 뷰 주도 replay 채번(single-flight, gen 반환) — 뷰 mount/remount 시 데몬 ring
             //   전량 재replay 를 유발하는 유일 경로(wire Subscribe 형성 = 이것 단독, BLOCK-1 전면화).
             commands::request_replay,
-            // 슬롯 팝업 분리(§5 LLM 제어 표면) — 슬롯 agent 를 런타임 생성 OS 창으로 MOVE(detach). async fn
-            //   필수(WebviewWindowBuilder 데드락 회피). ★노출 제어 표면은 pop_out_slot 하나뿐★: 옛
-            //   bind_window command 는 임의 창→임의 View 바인딩을 무가드로 열어 라우팅 오염 위험이라 제거했다
-            //   (dead code — 프론트 호출자 0, pop_out_slot 은 ViewManager.bind_window 를 직접 호출). Fix 4.
-            commands::pop_out_slot,
+            // 슬롯 이동(§5 LLM 제어 표면, ADR-0057) — 슬롯 agent 를 다른 창의 새 탭으로 MOVE(detach).
+            //   to_window 미지정 시 새 팝업 창. async fn 필수(WebviewWindowBuilder 데드락 회피). 2-phase
+            //   롤백 + 기존창 phase-C 삽입 재검증(G4). 반환 {window, tab}.
+            commands::move_slot_to_window,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
