@@ -696,6 +696,14 @@
 - **부팅 자동 resume OFF (stopgap, 사용자 결정):** 데몬 부팅이 `restore_all()`로 auto_restore=true 프로필을 전부 되살리던 것을 **주석 처리**(`daemon/src/lib.rs:315`). 기본 = "부팅 자동 복원 안 함". `auto_restore` 필드·reaper disposition·`restore_all()` 구현은 유지(호출만 끔) → 후속으로 특정 에이전트만 이벤트성 복원하는 opt-in command 추가. `cargo check -p daemon` clean. **후속:** ADR-0016 "부팅 복원" 기본을 뒤집으므로 정식 opt-in 설계 시 ADR로 박기 + `tests/ws_e2e.rs:ignored_daemon_kill_cleans_pty_child`(현 `#[ignore]`, 부팅 복원 의존)는 opt-in 경로로 갱신.
 - **작업 순서(사용자 확정):** 탭 레이아웃 → dom/xterm 렌더선택 커맨드화(기존 setRenderMode 감쌈, 가벼움) → **에이전트 트리→슬롯(설계 논의 지점, 슬롯 콘텐츠 종류 모델 필요)** → 트리 정교화 → View 우클릭 메뉴 정교화(=커맨드) → 메시지 시스템(write_input 재사용). Phase 2(탭)는 다음 세션 fresh 승계.
 
+## Phase 2 탭 — TRD 확정(§10-3 스펙갭 해소) + ADR-0057(탭 소유 모델) 박제 (2026-07-09, master, 대화 세션)
+- **발단:** Phase 2(탭) 착수 = TRD 먼저(렌더 전략은 ADR-0056으로 이미 확정). 정본 PRD B-tabs §10-3이 요구한 "TRD 전 확정 명세 공백"(모델 마이그레이션·라우팅/replay·동시성·롤백·불변식) 해소가 목표.
+- **사용자 결정:** D-7(배치 지정 스폰) = **Phase 1 편입**(얇은 `spawn_into` 래퍼, 탭 모델 완성 뒤 마지막 슬라이스). 나머지(D-1 C·D-2·D-3·D-6·D-8)는 이전 세션 확정.
+- **무엇(TRD `docs/process/B-wezterm-tabs/TRD.md` 신규):** 새 `ViewManager` 모델(`views: HashMap` + `view_owner`(유니크 소유) + `windows[label].{tabs,active}`, 전역 `active_view_id` 제거) · 라우팅 = 창의 **모든 탭** 수신(ADR-0056 keep-alive) · 동시성 단일 임계구역(ADR-0006) · `move_slot` phase-C 롤백 · command 표면(create_window/create_tab/switch_tab/close_tab/move_slot_to_window/spawn_into) · 프론트 단일 `WindowLayout(label)` 통일 · 구현 스테이징.
+- **게이트(`/review trd deep`, 3인):** Designer(blind Codex) + Architect-breaker + 마이그/동시성 전문(doc-aware Opus) → **전원 FIX**(방향 PASS, 명세공백). G1(멀티탭 정리 누수)·G2(자가닫힘 이중발화)·G3(팝업 활성탭 학습 부재)·G4(move_slot orphan)·G5(라우팅 반전 테스트)·G6~G11. → 코더(Opus) revision 반영 → **light 재리뷰**(Architect-breaker): G1·G3~G11 LANDED, G2 잔여(`view:closed` 은퇴 미명시) → 인라인 적용(emit·리스너·테스트 제거). TRD effective PASS.
+- **ADR-0057(ADR-0035 부분 supersede):** 탭 소유 모델 = 창별 탭 + 유니크 소유(owner-index 하이브리드). 거부 A(ref-list=소유)·B(글로벌풀). ADR-0035 `active_view_id`=main-전용 절만 개정(핵심=레이아웃 권위 src-tauri는 불변). 양방향 `Amends` 박음·index 재생성·lint clean(0 error).
+- **다음:** `/implement critical`로 `ViewManager` 모델 마이그레이션(스테이징 §8: 모델→라우팅→command→프론트→spawn_into→GUI실측).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

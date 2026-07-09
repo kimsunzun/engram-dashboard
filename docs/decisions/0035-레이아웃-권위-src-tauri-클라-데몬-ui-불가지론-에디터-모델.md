@@ -1,7 +1,7 @@
 # ADR-0035: 레이아웃 권위 = src-tauri 클라 (데몬 UI 불가지론, 에디터 모델)
 
 - 상태: 확정 (2026-06-27, 근거: `/research` deep 보고서 + 사용자 결정)
-- 관련: CLAUDE.md §5(LLM 제어)·§아키텍처 0~5 · ADR-0029(데몬=데이터 단일소유)·ADR-0004(backend 격리)·ADR-0006(락 순서)·ADR-0011(agentClient 제어표면)·ADR-0036(전송 중계 — 이 결정의 토폴로지 짝) · `docs/research/multi-window-layout-authority-topology-research-2026-06-27.md` · step-log S14
+- 관련: CLAUDE.md §5(LLM 제어)·§아키텍처 0~5 · ADR-0029(데몬=데이터 단일소유)·ADR-0004(backend 격리)·ADR-0006(락 순서)·ADR-0011(agentClient 제어표면)·ADR-0036(전송 중계 — 이 결정의 토폴로지 짝) · `docs/research/multi-window-layout-authority-topology-research-2026-06-27.md` · step-log S14 · Amended by ADR-0057 (ViewManager 내부 모델: 전역 active_view_id(main-전용)+window_bindings → 창별 active + view_owner/windows 탭 소유)
 
 ## 맥락
 S14 멀티 페이지 레이아웃 — 단일 슬롯 트리를 다중 View(탭 전환 + 팝업 창 독립 분할)로 확장. 핵심 미결: **레이아웃 상태(Views·split 트리·slot→agent 바인딩)의 single source of truth를 어디에 두나** — (a) 에이전트 데몬 / (b) src-tauri Rust / (c) 각 창 JS. rev.1·rev.2는 JS authority(c)였고 `/review trd`에서 2회 BLOCK — Tauri는 창마다 JS 컨텍스트가 격리되어(공유 메모리 없음) 팝업이 생기는 순간 메인·팝업 store가 별개 인스턴스가 되는 split-brain이 원인. rev.3은 데몬 권위(a)로 기울었으나 "데몬이 UI를 알아야 하나"라는 층 섞임 논란으로 재검토.
