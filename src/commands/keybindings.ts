@@ -51,9 +51,11 @@ export function comboOf(e: KeyboardEvent): string {
   return parts.join('+')
 }
 
-// combo → command id 매핑(골격 최소 — 커스텀 키맵은 후속). 첫 어댑터: 테마 순환.
+// combo → command id 매핑(골격 최소 — 커스텀 키맵은 후속).
 const BINDINGS: Record<string, string> = {
   'ctrl+shift+t': 'theme.toggle',
+  // ★Ctrl+Tab(D-8, ADR-0057)★: 포커스된 창의 탭 순환 → tab.next(= switch_tab, 사람 클릭과 동일 경로).
+  'ctrl+tab': 'tab.next',
 }
 
 /**

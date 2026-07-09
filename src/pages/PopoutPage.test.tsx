@@ -1,17 +1,15 @@
-// PopoutPage 자가종료(self-close) 단위테스트 — Finding 1 재작업 회귀 안전망.
+// PopoutPage 단위테스트 — 탭 소유 모델(ADR-0057)로 재작성.
 //
-// ★이 스위트가 막는 것★: 팝업 창은 자기 백킹 View 가 *실제로 닫혔을 때만*(view:closed 의 id 가 자기
-// ?view= id 와 정확히 일치) 창을 자가종료해야 한다. 옛 버그(view:list-updated 목록에서 자기 view 가
-// 빠지면 닫기)는 view_metas 필터가 팝업 view 를 항상 제외하므로 모든 팝업이 첫 emit 에 자가종료·연쇄
-// 붕괴했다. 그래서 여기서 검증하는 불변식:
-//   1. view:closed{id: 자기 view} → getCurrentWindow().close() 호출(자가종료).
-//   2. view:closed{id: 다른 view} → close() 안 부름(무관 view 는 무시).
-//   3. view:list-updated 는 자가종료 트리거가 아니다 — 어떤 payload 든 close() 안 부름.
+// ★이 스위트가 검증하는 것★: PopoutPage 는 이제 "고정 단일 View" 팝업이 아니라 **탭 가진 창**의 얇은
+// 껍데기다. URL `?window=<label>` 에서 자기 창 label 을 뽑아 WindowLayout(label) 을 마운트한다(§7-1).
+//   1. ?window=<label> → WindowLayout 이 그 label 로 마운트된다.
+//   2. ★view:closed 은퇴(G2)★: PopoutPage 는 view:closed 를 구독하지 않는다(자가종료는 WindowLayout 의
+//      0탭 신호로만 — 옛 view:closed→close() 리스너 제거를 이 스위트가 회귀 안전망으로 못박는다).
 
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// ── listen mock: 이벤트명별 핸들러를 보관해 테스트가 직접 emit 을 흉내낸다 ──
+// ── listen mock: 이벤트명별 등록을 기록(view:closed 구독이 없음을 단언) ──
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 const unlistenMock = vi.fn()
 vi.mock('@tauri-apps/api/event', () => ({
@@ -21,7 +19,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }))
 
-// ── invoke mock: get_view(초기 pull) 응답 ──
+// ── invoke mock: list_tabs/get_view 응답(WindowLayout mount 시 pull) ──
 const invokeMock = vi.fn(async (_cmd: string, ..._rest: unknown[]) => undefined as unknown)
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, ...rest: unknown[]) => invokeMock(cmd, ...rest),
@@ -30,37 +28,20 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }))
 
-// ── getCurrentWindow().close() mock — 자가종료 여부만 관측 ──
+// ── getCurrentWindow mock — WindowLayout 0탭 자가닫힘 경로가 참조(이 테스트에선 안 불림) ──
 const closeMock = vi.fn(async () => undefined)
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: closeMock }),
+  getCurrentWindow: () => ({ close: closeMock, label: () => 'slot-popup-1' }),
 }))
 
-// ── ViewLayoutRenderer stub — 렌더 자체는 이 테스트 관심 밖(자가종료 로직만 본다) ──
-vi.mock('../components/layout/ViewLayoutRenderer', () => ({
-  default: () => <div data-testid="view-layout-renderer" />,
+// ── WindowLayout stub — PopoutPage 가 넘기는 label prop 만 관측(내부 로직은 WindowLayout.test 가 커버) ──
+vi.mock('../components/layout/WindowLayout', () => ({
+  default: ({ label }: { label: string }) => <div data-testid="window-layout" data-label={label} />,
 }))
 
 import PopoutPage from './PopoutPage'
-import type { ViewSnapshot } from '../api/layoutTypes'
 
-const OWN_VIEW = 'popup-own-view-uuid'
-
-function slotSnap(viewId: string, version: number): ViewSnapshot {
-  return {
-    view_id: viewId,
-    layout: { type: 'slot', id: 's1', agent_id: null },
-    focused_slot_id: 's1',
-    version,
-  }
-}
-
-/** listen 이 등록한 핸들러로 payload 를 흘려보낸다(백엔드 emit 흉내). */
-function emit(event: string, payload: unknown): void {
-  const h = listeners.get(event)
-  if (!h) throw new Error(`no listener for ${event} — 구독 등록 전인가?`)
-  h({ payload })
-}
+const POPUP_LABEL = 'slot-popup-1'
 
 const origHash = window.location.hash
 
@@ -69,13 +50,9 @@ beforeEach(() => {
   unlistenMock.mockClear()
   closeMock.mockClear()
   invokeMock.mockReset()
-  // 초기 pull(get_view)은 자기 view 스냅샷을 준다.
-  invokeMock.mockImplementation(async (cmd: string) => {
-    if (cmd === 'get_view') return slotSnap(OWN_VIEW, 1)
-    return undefined
-  })
-  // 팝업 컨텍스트 hash 설정 — readViewIdFromHash 가 OWN_VIEW 를 파싱하게.
-  window.location.hash = `#/popup?view=${OWN_VIEW}`
+  invokeMock.mockImplementation(async () => undefined)
+  // 팝업 컨텍스트 hash — readWindowLabelFromHash 가 POPUP_LABEL 을 파싱하게.
+  window.location.hash = `#/popup?window=${POPUP_LABEL}`
 })
 
 afterEach(() => {
@@ -83,29 +60,17 @@ afterEach(() => {
   window.location.hash = origHash
 })
 
-describe('PopoutPage 자가종료(Finding 1: view:closed 양성 신호)', () => {
-  it('view:closed{id: 자기 view} → 창을 자가종료한다(close 호출)', async () => {
+describe('PopoutPage (탭 소유 모델, ADR-0057)', () => {
+  it('?window=<label> → WindowLayout 이 그 label 로 마운트된다', () => {
     render(<PopoutPage />)
-    // 구독 등록 완료(listen 은 async)까지 대기.
-    await waitFor(() => expect(listeners.has('view:closed')).toBe(true))
-    emit('view:closed', { id: OWN_VIEW })
-    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
+    const wl = screen.getByTestId('window-layout')
+    expect(wl.getAttribute('data-label')).toBe(POPUP_LABEL)
   })
 
-  it('view:closed{id: 다른 view} → 자가종료하지 않는다(close 미호출)', async () => {
+  it('★view:closed 은퇴(G2)★: PopoutPage 는 view:closed 를 구독하지 않는다(자가종료 리스너 제거)', () => {
     render(<PopoutPage />)
-    await waitFor(() => expect(listeners.has('view:closed')).toBe(true))
-    emit('view:closed', { id: 'some-other-view' })
-    // 마이크로태스크 flush 후에도 close 는 안 불려야 한다.
-    await Promise.resolve()
-    expect(closeMock).not.toHaveBeenCalled()
-  })
-
-  it('view:list-updated 는 자가종료 트리거가 아니다 — 자기 view 가 목록에 없어도 close 안 부름(옛 버그 회귀 안전망)', async () => {
-    render(<PopoutPage />)
-    await waitFor(() => expect(listeners.has('view:closed')).toBe(true))
-    // 팝업은 view:list-updated 를 아예 구독하지 않는다 — 그래서 listeners 에 없어야 한다(옛 트리거 제거 확인).
-    expect(listeners.has('view:list-updated')).toBe(false)
+    // 옛 버그: view:closed 리스너로 창 자가종료 → 이중 발화/재진입. 이제 구독 자체가 없어야 한다.
+    expect(listeners.has('view:closed')).toBe(false)
     expect(closeMock).not.toHaveBeenCalled()
   })
 })

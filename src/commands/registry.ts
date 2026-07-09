@@ -22,7 +22,7 @@ export interface Command {
   when?: () => boolean
   /**
    * 실행 handler. 기존 store 액션/invoke 로 라우팅한다. 반환은 그대로 흘려보낸다 —
-   * 일부는 Promise(예: layout createView → Promise<id>)라 cdp/호출부가 await 할 수 있어야 한다.
+   * 일부는 Promise(예: layout createTab → Promise<id>)라 cdp/호출부가 await 할 수 있어야 한다.
    */
   run: (args?: CommandArgs) => unknown
 }

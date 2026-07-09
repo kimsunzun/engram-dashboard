@@ -2,21 +2,21 @@ import { useState } from 'react'
 import { Allotment } from 'allotment'
 import 'allotment/dist/style.css'
 import Sidebar from './Sidebar'
-import ViewLayoutRenderer from './ViewLayoutRenderer'
+import WindowLayout from './WindowLayout'
 import DiffPanel from '../diff/DiffPanel'
 import StatusBar from './StatusBar'
-import { selectActiveView, useViewStore } from '../../store/viewStore'
+import { MAIN_WINDOW_LABEL } from '../../store/viewStore'
 
 export default function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [diffOpen, setDiffOpen] = useState(false)
-  // 메인 캔버스는 ★항상 백엔드 권위 레이아웃(ADR-0035)★ — active view 의 캐시 항목만 그린다(active-only).
-  // 부팅 직후 init(list_views/get_view) 전엔 active 캐시가 비어 null → 빈 화면이고, init 이 기본 View 1
-  // (빈 슬롯 1개)을 캐시에 넣으면 곧장 그려진다.
+  // ★탭 소유 모델(ADR-0057)★: main 창의 슬롯 영역은 WindowLayout("main") 이 소유한다 — 탭바 + 활성 탭
+  //   슬롯 캔버스(keep-alive). 창 크롬(Sidebar/DiffPanel/StatusBar)만 AppLayout 이 감싸고, 슬롯 영역만
+  //   교체한다(§7-1). main·팝업이 같은 WindowLayout 을 마운트해 D-2 "동일 코드경로"를 만든다.
   //
-  // ★단일 레이아웃 권위(Brick 1)★: 옛 프론트 전용 slotStore/LayoutRenderer 는 제거됐다. 메인 캔버스·
-  //   슬롯 우클릭 메뉴(SlotContextMenu)·트리 배정 모두 viewStore(=백엔드 ViewManager 미러)로 단일화됐다.
-  const activeView = useViewStore(selectActiveView)
+  // ★단일 레이아웃 권위(Brick 1 / ADR-0035·0057)★: 옛 프론트 전용 slotStore/LayoutRenderer 는 제거됐다.
+  //   메인 캔버스·슬롯 우클릭 메뉴(SlotContextMenu)·트리 배정 모두 viewStore(=백엔드 ViewManager 미러)로
+  //   단일화됐다. 전역 activeViewId 는 창별 windows[label].active 로 대체됐다(ADR-0057).
 
   return (
     <div style={{ height: '100%', position: 'relative' }}>
@@ -46,12 +46,7 @@ export default function AppLayout() {
         <Allotment.Pane>
           <Allotment vertical>
             <Allotment.Pane>
-              {activeView && (
-                <ViewLayoutRenderer
-                  node={activeView.layout}
-                  focusedSlotId={activeView.focusedSlotId}
-                />
-              )}
+              <WindowLayout label={MAIN_WINDOW_LABEL} />
             </Allotment.Pane>
             <Allotment.Pane preferredSize={300} minSize={300} maxSize={300} visible={diffOpen}>
               <DiffPanel />

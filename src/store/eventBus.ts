@@ -8,7 +8,13 @@ import { agentClient } from '../api/clientFactory'
 import { list as cmdList, run as cmdRun } from '../commands/registry'
 import { useAgentStore } from './agentStore'
 import { CHAT_STYLE_DEFAULTS, useChatStyleStore, type ChatStyleKey } from './chatStyleStore'
-import { resolveDefaultViewId, subscribeViewEvents, useViewStore } from './viewStore'
+import {
+  currentViewId,
+  initMainWindowFromBackend,
+  readWindowLabelFromHash,
+  subscribeViewEvents,
+  useViewStore,
+} from './viewStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지 — 진행 중인 promise가 있으면 재사용
@@ -50,10 +56,10 @@ export function initEventBus(): Promise<void> {
   initPromise = (async () => {
     try {
       // §5: 레이아웃 제어 표면을 window에 노출 → LLM(cdp eval 등)이 사람 UI와 동일한 단일 진입점을
-      // 호출한다. ★레이아웃 권위 = src-tauri(ADR-0035)★. 각 액션은 viewStore → 대응 invoke → 백엔드 emit →
-      // listen → 화면 반영 루프를 탄다. createView/split 은 Promise<id> 라 cdp eval 에서 await 가능.
-      // 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항). 우클릭 슬롯 메뉴(SlotContextMenu)도
-      // 이 동일 액션(viewStore split/closeSlot/assignAgent)을 호출한다 — 사람 클릭과 LLM 이 한 표면(§5).
+      // 호출한다. ★레이아웃 권위 = src-tauri(ADR-0035/0057)★. 각 액션은 viewStore → 대응 invoke → 백엔드
+      // emit → listen → 화면 반영 루프를 탄다. createTab/split/createWindow 는 Promise<id/label> 라 cdp
+      // eval 에서 await 가능. 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항). 우클릭 슬롯
+      // 메뉴(SlotContextMenu)·탭바(TabBar)도 이 동일 액션을 호출한다 — 사람 클릭과 LLM 이 한 표면(§5).
       // ★렌더 모드 오버라이드(§5)★: 슬롯 렌더러(터미널/rich/dom)를 강제하는 프론트 전용 override.
       // 백엔드 invoke 를 안 타고 viewStore 프론트 상태만 흔든다(override라 권위 레이아웃과 무관).
       //   window.__engramLayout.setRenderMode('<nodeId>', 'dom'|'rich'|'terminal')  // 렌더러 강제
@@ -62,23 +68,31 @@ export function initEventBus(): Promise<void> {
       // xterm 은 canvas 라 innerText 로 안 읽힘). set/clearRenderMode 위 얇은 래퍼 — 검증 툴링이 이 이름을 씀.
       //   window.__engramLayout.toggleDomMode('<nodeId>')   // slot node.id(=data-slot-id) 로 켬/끔(dom↔기본)
       //   window.__engramLayout.enableDomMode('<nodeId>')   // 켬(= setRenderMode(id,'dom')) · disableDomMode 로 끔
+      // ★탭 소유 모델(ADR-0057)★: 탭/창 조작은 창 label 을 받는 탭-언어 표면이다. LLM 편의로 window 를
+      //   생략하면 이 웹뷰 창(readWindowLabelFromHash — main·팝업 label)으로 떨어진다. 사람 클릭(TabBar·
+      //   SlotContextMenu)이 부르는 store 액션과 물리적으로 동일 함수라 §5 단일 제어 표면이 유지된다.
       ;(globalThis as Record<string, unknown>).__engramLayout = {
-        createView: useViewStore.getState().createView,
-        closeView: useViewStore.getState().closeView,
-        switchView: useViewStore.getState().switchView,
+        // 탭/창 command(window 생략 시 이 웹뷰 창).
+        createTab: (window?: string, name?: string) =>
+          useViewStore.getState().createTab(window ?? readWindowLabelFromHash(), name),
+        closeTab: (viewId: string, window?: string) =>
+          useViewStore.getState().closeTab(window ?? readWindowLabelFromHash(), viewId),
+        switchTab: (viewId: string, window?: string) =>
+          useViewStore.getState().switchTab(window ?? readWindowLabelFromHash(), viewId),
+        createWindow: useViewStore.getState().createWindow,
+        closeWindow: useViewStore.getState().closeWindow,
         split: useViewStore.getState().split,
         closeSlot: useViewStore.getState().closeSlot,
         assignAgent: useViewStore.getState().assignAgent,
-        // ★슬롯 팝업 분리(§5, Fix 3)★: popOutSlot(slotId) 단일 인자 표면 — LLM 이 slot id 만으로 부를 수
-        //   있게 viewId 는 resolveDefaultViewId() 로 해소한다. ★팝업 창 안에서 호출되면 그 창의 고정 view
-        //   (hash `?view=`)로, 메인 창에서는 activeViewId 로 떨어진다★ — 팝업 안 LLM/CDP 가 main 의
-        //   activeViewId 를 잘못 집어 엉뚱한 view 를 pop-out(SlotNotFound·오변형)하는 것을 막는다.
-        //   slotId 가 그 view 밖이면 백엔드가 SlotNotFound Err(방어). 명시적 (viewId, slotId) 호출은
-        //   viewStore.popOutSlot 을 직접 부르면 되고(우클릭 메뉴가 그 경로) 그건 종전과 동일.
-        popOutSlot: (slotId: string) => {
-          const viewId = resolveDefaultViewId()
-          if (!viewId) return Promise.reject(new Error('view id 미확정 — pop-out 대상 뷰 없음'))
-          return useViewStore.getState().popOutSlot(viewId, slotId)
+        // ★슬롯 이동(§5)★: moveSlotToWindow(slotId, toWindow?) 표면 — LLM 이 slot id 만으로 부를 수 있게
+        //   원본 viewId 는 currentViewId()(이 웹뷰 창의 active 탭)로 해소한다. toWindow 미지정 → 새 팝업 창.
+        //   팝업 창 안에서 호출되면 그 창의 active 탭으로, 메인 창에서는 main active 탭으로 떨어진다 —
+        //   팝업 안 LLM/CDP 가 엉뚱한 main view 를 집는 것을 막는다. slotId 가 그 view 밖이면 백엔드가
+        //   SlotNotFound Err(방어). 명시적 (viewId, slotId, toWindow) 호출은 viewStore.moveSlotToWindow 직접.
+        moveSlotToWindow: (slotId: string, toWindow?: string) => {
+          const viewId = currentViewId()
+          if (!viewId) return Promise.reject(new Error('view id 미확정 — move 대상 뷰 없음'))
+          return useViewStore.getState().moveSlotToWindow(viewId, slotId, toWindow)
         },
         setRenderMode: useViewStore.getState().setRenderMode,
         clearRenderMode: useViewStore.getState().clearRenderMode,
@@ -125,7 +139,7 @@ export function initEventBus(): Promise<void> {
         unlistenFns = []
       }
 
-      // 레이아웃 emit 구독(layout:updated / view:list-updated). agentClient 이벤트와 달리 src-tauri
+      // 레이아웃 emit 구독(layout:updated / window:tabs-updated). agentClient 이벤트와 달리 src-tauri
       // 권위라 @tauri-apps/api listen 직접 사용(viewStore.subscribeViewEvents). dispose 를 같은
       // unlistenFns 에 모아 HMR/재호출 시 한꺼번에 해제(중복 구독 방지) — 아래 onAgentListUpdated 등과 동일 규율.
       // ★dispose 를 await 없이 즉시 push★(누수 가드): subscribeViewEvents 는 `{ dispose, ready }` 를 동기
@@ -150,8 +164,8 @@ export function initEventBus(): Promise<void> {
       }
 
       // ★등록 완료를 await★(F-listen): listen() 은 async 라 등록이 끝나기 전 도착한 init pull 결과나 백엔드
-      // emit 은 핸들러가 없어 누락된다. ready 를 기다린 뒤에야 initFromBackend 를 부른다. ready 는 dispose 가
-      // 먼저 와도·등록이 실패해도 정상 종료(hang 금지)하므로 이 await 가 막히지 않는다.
+      // emit 은 핸들러가 없어 누락된다. ready 를 기다린 뒤에야 initMainWindowFromBackend 를 부른다. ready 는
+      // dispose 가 먼저 와도·등록이 실패해도 정상 종료(hang 금지)하므로 이 await 가 막히지 않는다.
       //
       // ★layout 구독 실패를 agentClient 구독과 격리★(fate-sharing 차단): ready 가 reject 하면(한쪽 listen
       // 등록 IPC 실패) layout(ADR-0035 권위)만 실패한 것이지 agentClient(ADR-0011 권위, 트리·상태바·재연결)는
@@ -166,10 +180,11 @@ export function initEventBus(): Promise<void> {
       }
 
       // 부팅 init — 백엔드 기본 View 는 부팅 전 생성돼 emit 으로 안 닿으므로(변경 직후만 emit), read-only
-      // list_views/get_view 로 현재 목록+active 레이아웃을 끌어와 화면을 즉시 그린다. ★구독을 먼저 건 뒤★
-      // 호출 — init 도중 들어온 emit 을 놓치지 않고, 더 최신이면 캐시 version 가드가 pull 결과를 덮는다(역전 방지).
-      void useViewStore.getState().initFromBackend().catch(err => {
-        console.warn('[eventBus] viewStore initFromBackend failed:', err)
+      // list_tabs("main")/get_view 로 main 창의 탭+active 레이아웃을 끌어와 화면을 즉시 그린다. ★구독을
+      // 먼저 건 뒤★ 호출 — init 도중 들어온 emit 을 놓치지 않고, 더 최신이면 창/캐시 version 가드가 pull
+      // 결과를 덮는다(역전 방지). (팝업 창의 탭 상태는 각 WindowLayout 이 mount 시 자기 label 로 pull.)
+      void initMainWindowFromBackend().catch(err => {
+        console.warn('[eventBus] initMainWindowFromBackend failed:', err)
       })
 
       // 등록은 sync(disposer 즉시 반환) — await 불필요. agentClient 가 모드별 transport 를 숨긴다.

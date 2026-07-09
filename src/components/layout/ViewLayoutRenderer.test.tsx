@@ -335,23 +335,31 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   const splitSpy = vi.fn(async () => 'new-slot')
   const closeSlotSpy = vi.fn(async () => undefined)
   const assignAgentSpy = vi.fn(async () => undefined)
-  const popOutSlotSpy = vi.fn(async () => undefined)
+  const moveSlotToWindowSpy = vi.fn(async () => ({ window: 'slot-popup-1', tab: 'v-new' }))
+  const origHash = window.location.hash
 
   beforeEach(() => {
     splitSpy.mockClear()
     closeSlotSpy.mockClear()
     assignAgentSpy.mockClear()
-    popOutSlotSpy.mockClear()
+    moveSlotToWindowSpy.mockClear()
     clientMock.spawnAgent.mockClear()
     clientMock.killAgent.mockClear()
-    // activeViewId + 레이아웃 액션을 store 에 주입 — SlotContextMenu 가 그대로 읽어 부른다(단일 표면).
+    // ★탭 소유 모델(ADR-0057)★: SlotContextMenu 는 viewIdOverride 없으면 useCurrentViewId()(이 웹뷰 창의
+    //   active 탭)로 폴백한다. 메인 창(#/) 컨텍스트로 두고 windows["main"].active=ACTIVE_VIEW 를 주입 →
+    //   폴백 경로가 ACTIVE_VIEW 를 집는다. 레이아웃 액션도 store 에 주입(단일 표면).
+    window.location.hash = '#/'
     useViewStore.setState({
-      activeViewId: ACTIVE_VIEW,
+      windows: { main: { tabs: [{ id: ACTIVE_VIEW, name: 'View' }], active: ACTIVE_VIEW, version: 1 } },
       split: splitSpy,
       closeSlot: closeSlotSpy,
       assignAgent: assignAgentSpy,
-      popOutSlot: popOutSlotSpy,
+      moveSlotToWindow: moveSlotToWindowSpy,
     })
+  })
+
+  afterEach(() => {
+    window.location.hash = origHash
   })
 
   /** 슬롯 우클릭 → 메뉴 오픈. 대상 슬롯 wrapper 를 반환. viewIdOverride 를 넘기면 그 view 로 렌더한다(Fix 3). */
@@ -434,26 +442,26 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   })
 
   // ── ★슬롯 팝업 분리(pop-out) 메뉴★ — enabled 가드('에이전트 종료'와 동일) + 올바른 좌표로 invoke ──
-  it('agent 배정 슬롯 우클릭 → "팝업으로 분리" 클릭 시 popOutSlot(activeViewId, slotId) 호출', () => {
+  it('agent 배정 슬롯 우클릭 → "팝업으로 분리" 클릭 시 moveSlotToWindow(activeViewId, slotId) 호출', () => {
     seedAgents(agentInfo('live-agent', false)) // 활성 조건 = store 에 그 agent 존재(라이브)
     openMenu('slot-P', 'live-agent')
     fireEvent.click(screen.getByText('팝업으로 분리'))
-    // §5: window.__engramLayout.popOutSlot 과 동일 store 함수를 (activeViewId, slotId)로 부른다.
-    expect(popOutSlotSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
+    // §5: window.__engramLayout.moveSlotToWindow 와 동일 store 함수를 (activeViewId, slotId)로 부른다.
+    expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
   })
 
-  it('빈 슬롯(agent 미배정) "팝업으로 분리" 클릭 → popOutSlot 를 부르지 않는다(enabled 가드)', () => {
+  it('빈 슬롯(agent 미배정) "팝업으로 분리" 클릭 → moveSlotToWindow 를 부르지 않는다(enabled 가드)', () => {
     // agent 없는 슬롯은 분리 대상이 없으므로 항목이 흐려지고 비활성이어야 한다(클릭 no-op).
     openMenu('slot-Q', null)
     fireEvent.click(screen.getByText('팝업으로 분리'))
-    expect(popOutSlotSpy).not.toHaveBeenCalled()
+    expect(moveSlotToWindowSpy).not.toHaveBeenCalled()
   })
 
-  it('배정됐지만 store 에 없는 agent(죽음) "팝업으로 분리" → popOutSlot 안 부름(에이전트 종료와 동일 가드)', () => {
+  it('배정됐지만 store 에 없는 agent(죽음) "팝업으로 분리" → moveSlotToWindow 안 부름(에이전트 종료와 동일 가드)', () => {
     // slotAgentId 는 있으나 실행중 목록에 없음 → hasLiveAgent=false → 비활성.
     openMenu('slot-R', 'dead-agent') // store 비어 있음
     fireEvent.click(screen.getByText('팝업으로 분리'))
-    expect(popOutSlotSpy).not.toHaveBeenCalled()
+    expect(moveSlotToWindowSpy).not.toHaveBeenCalled()
   })
 
   // ── ★Fix 3: viewIdOverride 스레딩★ — 팝업 창 경로는 activeViewId(=main) 대신 넘겨받은 view 로 액션한다 ──
@@ -475,11 +483,11 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(closeSlotSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-pc')
   })
 
-  it('viewIdOverride 있으면 "팝업으로 분리"가 오버라이드 view 로 popOutSlot 을 부른다', () => {
+  it('viewIdOverride 있으면 "팝업으로 분리"가 오버라이드 view 로 moveSlotToWindow 를 부른다', () => {
     seedAgents(agentInfo('po-agent', false)) // 활성 조건
     openMenu('slot-pp', 'po-agent', POPUP_VIEW)
     fireEvent.click(screen.getByText('팝업으로 분리'))
-    expect(popOutSlotSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-pp')
+    expect(moveSlotToWindowSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-pp')
   })
 
   it('viewIdOverride 없으면(메인 창 경로) 종전대로 activeViewId 로 폴백한다(하위호환)', () => {

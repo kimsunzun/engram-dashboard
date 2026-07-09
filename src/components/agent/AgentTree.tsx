@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState } from 'react'
 import { Tree, type NodeRendererProps } from 'react-arborist'
 import { useAgentStore } from '../../store/agentStore'
-import { useViewStore, selectActiveView } from '../../store/viewStore'
+import { currentViewId, selectView, useViewStore } from '../../store/viewStore'
 import { agentClient } from '../../api/clientFactory'
 import { refreshProfiles } from '../../store/eventBus'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
@@ -200,14 +200,16 @@ export default function AgentTree() {
       ]
     : [
         {
-          // ADR-0035: 이 액션은 이제 살아있는 viewStore(백엔드 권위) 경로를 쓴다. 활성 뷰의 포커스
-          // 슬롯에 assign_agent invoke → emit → 캔버스 렌더. (옛 slotStore dispatch는 죽은 경로였음.)
+          // ADR-0035/0057: 이 액션은 살아있는 viewStore(백엔드 권위) 경로를 쓴다. ★agent-tree 는 탭 모델
+          // 밖(config 창)이라 자기 창엔 슬롯 캔버스가 없다★ → currentViewId() 가 main 폴백(readWindowLabel
+          // FromHash 가 #/tree 를 main 으로 봄, §3-4/G7)으로 windows["main"].active 를 준다. 그 view 의
+          // 포커스 슬롯에 assign_agent invoke → emit → 메인 캔버스 렌더.
           label: '포커스 슬롯에 배치',
-          disabled: false, // 트리는 항상 활성 뷰의 포커스 슬롯에 배치(in-slot self-배치 가드는 위 메모 참조)
+          disabled: false, // 트리는 항상 main 활성 뷰의 포커스 슬롯에 배치(in-slot self-배치 가드는 위 메모 참조)
           action: () => {
             const vs = useViewStore.getState()
-            const viewId = vs.activeViewId
-            const slotId = selectActiveView(vs)?.focusedSlotId
+            const viewId = currentViewId() // agent-tree → windows["main"].active(main 폴백)
+            const slotId = selectView(vs, viewId)?.focusedSlotId
             const aid = menu.agentId               // menu 는 곧 닫히니 async 전에 캡처
             if (!viewId || !slotId) {
               setError(aid, '배치 실패: 활성 뷰/포커스 슬롯 없음')

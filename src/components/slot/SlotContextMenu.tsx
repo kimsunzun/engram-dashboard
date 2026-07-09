@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useViewStore } from '../../store/viewStore'
+import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
 import { agentClient } from '../../api/clientFactory'
 import type { SplitDir } from '../../api/layoutTypes'
@@ -12,10 +12,9 @@ interface SlotContextMenuProps {
   /** 이 슬롯에 배정된 에이전트(있으면 종료 메뉴 활성). 렌더러가 wire LayoutNode.agent_id 로 넘긴다. */
   agentId?: string | null
   /**
-   * ★Fix 3: 이 메뉴가 조작할 View id 오버라이드(선택).★ 팝업 창(PopoutPage)은 자기 고정 view 를 그리므로
-   * 전역 activeViewId(=main 창 개념, ADR-0035)로 액션을 흘리면 엉뚱한 View 를 건드린다(SlotNotFound·오변형).
-   * 이 값이 있으면 분할/닫기/pop-out 좌표의 view 로 이걸 쓰고, 없으면(메인 창 경로) 종전대로 activeViewId 로
-   * 폴백한다(하위호환 — 메인은 아무것도 안 넘김).
+   * ★이 메뉴가 조작할 View id 오버라이드(선택).★ WindowLayout 이 각 탭 캔버스에 그 탭 view 를 내려꽂아
+   * (§3-4/G7) 분할/닫기/pop-out 액션이 이 탭 좌표를 쓰게 한다 — 이 컴포넌트는 "어느 창인지" 무지로 남는다.
+   * 값이 없으면(직접 마운트 등) 이 웹뷰 창의 active 탭(useCurrentViewId)으로 폴백한다(엉뚱한 view 방지).
    */
   viewIdOverride?: string | null
   onClose: () => void
@@ -27,16 +26,16 @@ interface SlotContextMenuProps {
 // (낙관적 갱신 X). 옛 slotStore.dispatch(프론트 전용 권위)는 제거됐다(Brick 1).
 export default function SlotContextMenu({ x, y, slotId, agentId, viewIdOverride, onClose }: SlotContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null)
-  // 활성 뷰 id — 레이아웃 mutation 은 (viewId, slotId) 쌍으로 지정한다(백엔드 권위 좌표계).
-  const activeViewId = useViewStore(s => s.activeViewId)
-  // ★Fix 3: 이 메뉴가 실제로 조작할 View 좌표★ — 팝업이 넘긴 오버라이드가 있으면 그걸, 없으면(메인 창)
-  //   전역 activeViewId. 아래 모든 레이아웃 액션(spawn→assign·split·closeSlot·popOut)이 이 값을 쓴다.
-  const targetViewId = viewIdOverride ?? activeViewId
+  // 이 웹뷰 창의 active 탭 id — 레이아웃 mutation 은 (viewId, slotId) 쌍으로 지정한다(백엔드 권위 좌표계).
+  const currentViewId = useCurrentViewId()
+  // ★이 메뉴가 실제로 조작할 View 좌표★ — WindowLayout 이 넘긴 탭 오버라이드가 있으면 그걸, 없으면 이
+  //   웹뷰 창의 active 탭(§3-4). 아래 모든 레이아웃 액션(spawn→assign·split·closeSlot·move)이 이 값을 쓴다.
+  const targetViewId = viewIdOverride ?? currentViewId
   // 레이아웃 액션(viewStore) — 단일 제어 표면. window.__engramLayout 이 노출하는 것과 동일 함수.
   const split = useViewStore(s => s.split)
   const closeSlot = useViewStore(s => s.closeSlot)
   const assignAgent = useViewStore(s => s.assignAgent)
-  const popOutSlot = useViewStore(s => s.popOutSlot)
+  const moveSlotToWindow = useViewStore(s => s.moveSlotToWindow)
   const agents = useAgentStore(s => s.agents)
 
   useEffect(() => {
@@ -79,22 +78,22 @@ export default function SlotContextMenu({ x, y, slotId, agentId, viewIdOverride,
     {
       label: '팝업으로 분리',
       action: () => {
-        // ADR-0035: 슬롯 agent 를 새 런타임 팝업 OS 창으로 MOVE(detach) — viewStore.popOutSlot →
-        //   invoke(pop_out_slot) → 백엔드가 새 View 생성·이전·창 생성·바인딩·원본 슬롯 제거 후 emit.
-        //   §5: window.__engramLayout.popOutSlot 과 동일 표면(사람 클릭 = LLM 한 표면).
-        if (!targetViewId) return console.warn('[SlotContextMenu] view id 없음 — pop-out 무시')
+        // ADR-0057: 슬롯 agent 를 새 런타임 팝업 창의 새 탭으로 MOVE(detach) — viewStore.moveSlotToWindow →
+        //   invoke(move_slot_to_window, toWindow=null) → 백엔드가 새 View 생성·이전·새 팝업 창·탭 삽입·원본
+        //   슬롯 제거 후 emit. §5: window.__engramLayout.moveSlotToWindow 와 동일 표면(사람 클릭 = LLM 한 표면).
+        if (!targetViewId) return console.warn('[SlotContextMenu] view id 없음 — move 무시')
         if (!slotAgentId) return
-        void popOutSlot(targetViewId, slotId).catch(e => console.error('[popOut]', e))
+        void moveSlotToWindow(targetViewId, slotId).catch(e => console.error('[moveSlotToWindow]', e))
       },
     },
     // gap: 옛 "에이전트 트리 보기"/"터미널 보기"(slotStore.setSlotContent)는 대응 백엔드 wire 가 없다.
     //   렌더 모드 오버라이드(terminal/rich/dom)는 *렌더러* 강제일 뿐 슬롯 콘텐츠(트리↔터미널) 교체가 아니라
     //   깔끔히 매핑되지 않는다 → Brick 1 에서 두 항목을 뺀다. in-slot 트리를 되살릴 땐 백엔드 슬롯 콘텐츠
     //   개념(또는 전용 command)을 먼저 정의해야 한다(AgentTree self-배치 가드 주석 참조).
-    // ADR-0035: 분할 = viewStore.split(activeViewId, slotId, dir) → invoke(split_slot) → emit 반영.
+    // ADR-0035: 분할 = viewStore.split(targetViewId, slotId, dir) → invoke(split_slot) → emit 반영.
     { label: '가로 분할', action: () => dispatchSplit('horizontal') },
     { label: '세로 분할', action: () => dispatchSplit('vertical') },
-    // ADR-0035: 닫기 = viewStore.closeSlot(activeViewId, slotId) → invoke(close_slot)(형제 승격).
+    // ADR-0035: 닫기 = viewStore.closeSlot(targetViewId, slotId) → invoke(close_slot)(형제 승격).
     { label: '닫기', action: () => dispatchCloseSlot() },
   ]
 

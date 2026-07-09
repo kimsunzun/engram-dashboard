@@ -9,6 +9,7 @@ import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { useAgentStore } from './store/agentStore'
 // ADR-0055: 어댑터 side-effect import — register(...) 가 부팅 시 실행돼 command 가 레지스트리에 들어간다.
 import './commands/themeCommands'
+import './commands/tabCommands'
 import { installKeybindings } from './commands/keybindings'
 
 function App() {
@@ -41,7 +42,7 @@ function App() {
         <Routes>
           <Route path="/" element={<AppLayout />} />
           <Route path="/tree" element={<TreePage />} />
-          {/* 슬롯 팝업 분리(pop-out)로 런타임 생성된 창 — ?view=<id> 의 단일 View 만 렌더. */}
+          {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(WindowLayout, ADR-0057). */}
           <Route path="/popup" element={<PopoutPage />} />
         </Routes>
       </div>

@@ -28,9 +28,9 @@ export default function ViewLayoutRenderer({
 }: {
   node: LayoutNode
   focusedSlotId: string | null
-  // ★Fix 3: 이 렌더러가 그리는 View id 오버라이드(선택).★ 팝업 창(PopoutPage)이 자기 고정 view 를 넘겨
-  //   내부 SlotContextMenu 의 액션 좌표를 그 view 로 고정한다. 메인 창은 안 넘김 → 메뉴가 activeViewId 폴백
-  //   (하위호환). 재귀 split 렌더에도 그대로 전파해 하위 슬롯 메뉴까지 같은 view 를 쓰게 한다.
+  // ★이 렌더러가 그리는 View id 오버라이드(선택).★ WindowLayout(main·팝업)이 각 탭 캔버스에 그 탭 view 를
+  //   넘겨(ADR-0057) 내부 SlotContextMenu 의 액션 좌표를 그 탭 view 로 고정한다. 없으면 메뉴가
+  //   useCurrentViewId(이 웹뷰 창의 active 탭) 폴백. 재귀 split 렌더에도 전파해 하위 슬롯 메뉴까지 같은 view.
   viewIdOverride?: string | null
 }) {
   // ★렌더 모드 오버라이드(§5)★: caps 유도 기본(defaultRenderMode) 대신 강제할 slot node.id → RenderMode.
