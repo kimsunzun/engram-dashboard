@@ -724,6 +724,16 @@
 - **관찰(spawn_into 결함 아님):** 부팅 warm-up 레이스 — 부팅 직후 첫 데몬 command가 "데몬 미연결"로 실패 가능(daemon_connection_state=connected인데 current_cmd_tx 미준비). daemon_ensure 재스폰 안 함(ADR-0021), 연결 확보 후 재시도 정상. 별도 추적 후보.
 - **다음:** 로드맵 스테이지 6~ (렌더모드 커맨드화→트리→슬롯 설계→트리 정교화→우클릭 메뉴 command화→메시지 시스템).
 
+## 슬롯 콘텐츠 모델 (C-slot-content) — 설계(ADR-0060) + seam 구현 (2026-07-09~10, master, 자율 세션)
+- **발단:** 로드맵 "트리→슬롯"(슬롯이 에이전트만 아니라 이질 콘텐츠를 담는 문제) 착수. 현 모델은 `LayoutNode::Slot{agent_id}`로 "슬롯=에이전트 하나"에 고착 → 콘텐츠 종류 개념 부재.
+- **설계 조사(`/research medium`, 설계-결정 모드):** 조사 수집자 4명(Sonnet 병렬) OSS 서베이(VS Code·JupyterLab/Lumino·Theia·Obsidian·Tabby·tmux·Zellij) + Codex cross-family 적대 리뷰(FIX). 3패턴 도출: P1 태그드 유니온·P2 view-type 레지스트리(대형 GUI 앱 관행)·P3 URI. **관행=P2(플러그인 생태계 전제)인데 우리 전제(백엔드 통제·타입안전)가 달라 소수파 P1 채택.**
+- **ADR-0060(확정):** 슬롯 콘텐츠 = 타입드 유니온 `SlotContent`(내부태깅, LayoutNode와 동일). 거부 P2(불투명 state·타입안전 포기)·P3(URI 파싱). 커스텀(버튼셋)=`ControlPanel` config 데이터(variant 아님, enum 폭발 방지). Codex 지적 반영 불변식: 직교성 부분참(수명·의미는 콘텐츠가 좌우)·capability 표(후속)·영속화 시 version/Unknown/migration(현 영속화 없어 이연). 커밋 `1d5be9c`.
+- **seam 구현(`/implement critical`, 커밋 `d694bae`):** `Slot.agent_id → content: SlotContent(Empty|Agent{agent_id})` behavior-identical 리팩터. 백엔드 types/tree/manager/mod/output_router + ts-rs 재생성(LayoutNode.ts + 신규 SlotContent.ts) + 프론트 ViewLayoutRenderer `switch(content.type)`. resolve_spawn_slot 3-way(ADR-0059)·collect_agents 라우팅(ADR-0041/42/46)·assign 덮어쓰기(ADR-0058) 불변 유지.
+  - **게이트:** 코더(Opus) → `/review code deep` 2-family[doc-aware reviewer-deep **PASS**(라우팅·점유·byte-identity 검증) + Codex **FIX**=신규 바인딩 git 미추적] → FIX 반영(SlotContent.ts add) + 경미 인라인(mod.rs pub use·tree.rs docstring rot) → `/qa full` **PASS**(build/member-test core160·discovery44·protocol42/fmt/격리0/tsc/vitest352 + throwaway harness **79** + **cdp 실측**: spawn_into→`{type:agent}`·빈슬롯→`{type:empty}`·tab/split 무회귀).
+  - **환경 배리어(회귀 아님):** `cargo test` bare·`-p engram-dashboard --lib` = 0xc0000139(WebView2Loader, launch만 사망) → member-scoped + throwaway verbatim-mount 우회(핸드오프 do-not 계승). daemon exe 잠금(기존 데몬 프로세스)으로 full re-link 막힘 — daemon 소스 미변경·cargo check 통과라 무관.
+- **follow-up(미착수):** 실제 비-에이전트 variant(FileTree·ControlPanel) + 렌더러 + 배치 command(UX=사용자 결정) · capability 표 · 영속화 시 version/Unknown/migration · 중첩 레이아웃 여부. TRD `docs/process/C-slot-content/TRD.md` "Out(follow-up)".
+- **관찰:** 부팅 warm-up 레이스(첫 데몬 command "미연결" 가능, 재시도 정상 — 스테이지 5서 기관찰, 이번도 재현) — 별도 추적.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
