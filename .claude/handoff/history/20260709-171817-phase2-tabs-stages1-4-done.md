@@ -35,4 +35,4 @@
 - **정본:** `docs/process/B-wezterm-tabs/TRD.md`(§6 spawn_into·§8 스테이징) · `docs/decisions/0057-*.md`(모델·불변식) · PRD B-tabs(§7 후속 Phase 스케치).
 - **코드 포인터:** `src-tauri/src/layout/manager.rs`(모델·불변식·assert_invariants) · `output_router.rs`(라우팅·`cleanup_window_core`) · `commands/layout.rs`·`commands/popout.rs`(move_slot 2-phase·cleanup_popup_window) · `lib.rs`(invoke_handler·Destroyed arm) · `src/components/layout/WindowLayout.tsx`·`TabBar.tsx` · `src/commands/tabCommands.ts` · `src/store/viewStore.ts`(창별·useCurrentViewId).
 - **로드맵 순서(스테이지 5 이후):** 3=렌더모드 커맨드화(`setRenderMode`→ADR-0055 레지스트리) · 4=**트리→슬롯(★설계 논의★ 슬롯 콘텐츠 종류 모델 필요)** · 5=트리 정교화 · 6=우클릭 메뉴 command화 · 7=메시지 시스템(`write_input` 재사용).
-- **마이너(qa 바인딩 rot):** 격리 게이트 `rg "use tauri" crates/engram-dashboard-core/src/`가 core `lib.rs`의 self-documenting `//!` 주석을 false-match → `^\s*use tauri`로 좁혀야 0줄 정확. qa.md 바인딩 갱신 후보(사용자 승인 하).
+- **마이너(qa 바인딩 rot):** 격리 게이트 `rg "use tauri" crates/engram-dashboard-core/src/`가 core `lib.rs`의 self-documenting `//!` 주석("...rg \"use tauri\"...")을 false-match → `^\s*use tauri`로 좁혀야 0줄 정확. qa.md 바인딩 갱신 후보(사용자 승인 하).
