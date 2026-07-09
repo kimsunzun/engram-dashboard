@@ -5,6 +5,8 @@
 // ★window 해소★: command args 로 window 를 받되, 생략하면 이 웹뷰 창(readWindowLabelFromHash — main·팝업
 //   label)으로 떨어진다. 그래서 Ctrl+Tab 같은 "포커스된 창" 소비자가 별도 label 계산 없이 부를 수 있다.
 
+import { invoke } from '@tauri-apps/api/core'
+
 import { register } from './registry'
 import { readWindowLabelFromHash, useViewStore } from '../store/viewStore'
 
@@ -94,4 +96,44 @@ register({
   category: 'window',
   // args.window(생략 시 이 창) 닫기. main 은 백엔드가 거부(hide only, 불변식 4).
   run: args => useViewStore.getState().closeWindow(resolveWindow(args)),
+})
+
+/** UUID(8-4-4-4-12 hex) 형식 검사 — tab/slot 는 백엔드 ViewId/slot id(Uuid) 라 형식이 맞아야 한다. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * ★spawn_into 인자 정규화(FIX 5)★: tab/slot 는 "있으면 UUID 문자열, 없으면 미지정(null)"이다. 이전엔
+ * 잘못된 타입(숫자 등)을 조용히 null 로 강등해 "스폰은 됐는데 엉뚱한 곳에 배치"로 이어졌다 → present-but-invalid
+ * 는 invoke **전에** throw 해 side-effecting 스폰을 막는다. 부재(undefined/null)는 정상("미지정").
+ */
+function optionalUuidArg(v: unknown, name: string): string | null {
+  if (v === undefined || v === null) return null // 미지정 — 정상.
+  if (typeof v !== 'string' || !UUID_RE.test(v)) {
+    throw new Error(`[agent.spawnInto] ${name} 는 UUID 문자열이어야 함(받음: ${JSON.stringify(v)})`)
+  }
+  return v
+}
+
+register({
+  id: 'agent.spawnInto',
+  title: '스폰 + 배치',
+  category: 'agent',
+  // ★spawn_into(D-7, TRD §6 G9)★: 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방으로 조립하는 백엔드
+  //   합성 command 를 직접 invoke 한다(store 상태 없이 backend 권위 — ADR-0057). 성공 시 새 AgentId 반환.
+  //   args: window(생략 시 이 창)·cwd(필수)·tab?·slot?·backend?. 슬롯 정책·실패 가시성은 backend 가 강제.
+  //   ★FIX 5★: tab/slot 은 invoke 전에 UUID 형식 검증(잘못된 값 → 스폰 전 throw, 오배치 방지).
+  run: args => {
+    const cwd = args?.cwd
+    if (typeof cwd !== 'string' || cwd.length === 0) throw new Error('[agent.spawnInto] cwd 필요')
+    const tab = optionalUuidArg(args?.tab, 'tab')
+    const slot = optionalUuidArg(args?.slot, 'slot')
+    const backend = typeof args?.backend === 'string' ? args.backend : null
+    return invoke<string>('spawn_into', {
+      window: resolveWindow(args),
+      tab,
+      slot,
+      backend,
+      cwd,
+    })
+  },
 })

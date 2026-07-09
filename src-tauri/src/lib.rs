@@ -213,6 +213,9 @@ pub fn run() {
             commands::split_slot,
             commands::close_slot,
             commands::assign_agent,
+            // ADR-0057 D-7(§6 spawn_into): 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방 합성 command.
+            //   실패 관대(spawn-first — 배치 실패해도 에이전트 생존·보고). slot 정책 = G9(점유 시 덮어쓰기 X).
+            commands::spawn_into,
             commands::get_view,
             // ADR-0057: read-only 조회 — 창 mount 시 자기 활성 탭을 확정하는 경로(list_tabs) + 창 목록.
             //   (변경 핸들러는 변경 직후에만 emit → mount 직후엔 닿지 않음). 상태변경·emit 없음.

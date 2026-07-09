@@ -494,6 +494,45 @@ impl ViewManager {
     }
 }
 
+/// `spawn_into`(D-7) 슬롯 해소 실패 사유(TRD §6 G9). command 레이어가 문자열로 옮긴다.
+/// ★load-bearing★: `SlotOccupied` 는 스폰이 이미 성공한 뒤 배정 단계에서 나므로, command 는 이 에러를
+///   에이전트 생존(list_agents 재부착) 문구와 함께 호출자에게 전달한다(§5 실패 가시성 — 하드 롤백=kill 안 함).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SpawnSlotError {
+    /// 지정 slot 이 이미 점유됨(덮어쓰기 금지 — 호출자가 split_slot 후 재시도, G9).
+    #[error("슬롯 {0} 이미 점유됨(덮어쓰기 금지 — split_slot 으로 빈 슬롯을 만든 뒤 재시도)")]
+    SlotOccupied(Uuid),
+    /// 지정 slot 이 이 view 트리에 없음.
+    #[error("슬롯 {0} 없음")]
+    SlotNotFound(Uuid),
+    /// slot=None 인데 이 탭에 빈 슬롯이 하나도 없음(USER DECISION 2b — 자동 split/덮어쓰기 안 함).
+    #[error("이 탭에 빈 슬롯 없음(slot 미지정 — split_slot 으로 빈 슬롯을 만들거나 다른 탭 사용)")]
+    NoEmptySlot,
+}
+
+/// ★spawn_into 슬롯 해소(순수·Tauri-free — 단독 테스트 가능, TRD §6 G9)★.
+/// 주어진 View 트리 안에서 스폰된 agent 를 배정할 **빈 슬롯 id** 를 정책대로 고른다(배정은 하지 않음 — 순수
+/// 조회). // ADR-0057
+/// - `slot=None`(USER DECISION 2b): 트리를 전위 순회(좌측 우선)해 **첫 번째 빈 슬롯**을 타깃한다. 빈 슬롯이
+///   하나도 없으면 `NoEmptySlot`(자동 split·덮어쓰기 안 함). ★2b 이전(leftmost-only)과 다름★ — split 된
+///   탭에서 좌측이 점유돼도 다른 빈 슬롯이 있으면 거기로 간다. create_tab 직후(빈 root 1개)면 그 root.
+/// - `slot=Some(s)`: `s` 가 트리에 없으면 `SlotNotFound`, 비어 있으면 `s`, 점유돼 있으면 `SlotOccupied`.
+///
+/// ★왜 순수 함수로 분리했나★: 스폰(데몬 async)·락·emit 은 command 레이어가 다루고, 여기 "정책 판정"만 떼어
+///   Tauri 무링크 throwaway-mount 로 회귀 단언한다(ADR-0012 격리). 배정 자체는 assign_agent 가 한다.
+pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, SpawnSlotError> {
+    match slot {
+        // slot 지정: 그 슬롯이 트리에 있고 비어 있어야 함(점유=덮어쓰기 금지, G9).
+        Some(target) => match tree::find_slot(&view.layout, target) {
+            Some(None) => Ok(target),
+            Some(Some(_)) => Err(SpawnSlotError::SlotOccupied(target)),
+            None => Err(SpawnSlotError::SlotNotFound(target)),
+        },
+        // slot=None(2b): 첫 빈 슬롯을 스캔한다. 없으면 NoEmptySlot(자동 split·덮어쓰기 안 함).
+        None => tree::first_empty_slot_id(&view.layout).ok_or(SpawnSlotError::NoEmptySlot),
+    }
+}
+
 /// close_tab 결과 — 창이 살아남았나(빈 탭 강제/인접 승계) vs 팝업 마지막 탭이라 창을 닫아야 하나.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseTabOutcome {
@@ -1085,5 +1124,157 @@ mod tests {
         mgr.drop_detached_view(tmp);
         assert!(!mgr.views.contains_key(&tmp), "임시 View 제거");
         assert_invariants(&mgr);
+    }
+
+    // ── resolve_spawn_slot (spawn_into 순수 슬롯 정책 — TRD §6 G9) ─────────────────
+
+    #[test]
+    fn resolve_none_targets_empty_root_slot() {
+        // 새 탭(빈 root 슬롯) — slot=None 이면 그 root 슬롯을 고른다.
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, None).unwrap(),
+            root,
+            "slot=None → 빈 root 슬롯"
+        );
+    }
+
+    #[test]
+    fn resolve_none_on_single_occupied_slot_is_no_empty_slot() {
+        // ★USER DECISION 2b★: slot=None 인데 (분할 안 된) 유일 슬롯이 점유 → 다른 빈 슬롯이 없으므로
+        //   NoEmptySlot(자동 split·덮어쓰기 안 함). 2b 이전엔 SlotOccupied 였으나, 이제 "빈 슬롯 스캔"이라
+        //   빈 슬롯 부재를 NoEmptySlot 으로 신고한다.
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        mgr.assign_agent(v, root, "existing".into()).unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, None),
+            Err(SpawnSlotError::NoEmptySlot)
+        );
+    }
+
+    #[test]
+    fn resolve_none_on_split_tab_picks_first_empty_not_leftmost() {
+        // ★USER DECISION 2b 회귀★: split 된 탭에서 좌측(root)이 점유, 우측이 빈 채 → slot=None 은
+        //   좌측을 건너뛰고 첫 빈 슬롯(우측)을 고른다(2b 이전엔 leftmost-only 라 SlotOccupied 였다).
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        let right = mgr.split_slot(v, root, SplitDir::Horizontal).unwrap();
+        mgr.assign_agent(v, root, "occupied".into()).unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, None).unwrap(),
+            right,
+            "slot=None → 점유 좌측 건너뛰고 첫 빈 슬롯(우측)"
+        );
+    }
+
+    #[test]
+    fn resolve_none_on_fully_occupied_split_tab_is_no_empty_slot() {
+        // split 된 탭이 전부 점유 → slot=None 은 NoEmptySlot(자동 split·덮어쓰기 안 함).
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        let right = mgr.split_slot(v, root, SplitDir::Horizontal).unwrap();
+        mgr.assign_agent(v, root, "a".into()).unwrap();
+        mgr.assign_agent(v, right, "b".into()).unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, None),
+            Err(SpawnSlotError::NoEmptySlot)
+        );
+    }
+
+    #[test]
+    fn resolve_none_after_create_tab_targets_fresh_root() {
+        // create_tab 직후(빈 root 1개) — slot=None 은 그 root(빈 슬롯)을 고른다(2b 에서도 유지).
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(resolve_spawn_slot(view, None).unwrap(), root);
+    }
+
+    #[test]
+    fn resolve_then_assign_holds_invariants() {
+        // 조립 성공 경로 회귀: create_tab → resolve_spawn_slot(None) → assign_agent → 불변식 유지.
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let target = {
+            let view = mgr.views.get(&v).unwrap();
+            resolve_spawn_slot(view, None).unwrap()
+        };
+        mgr.assign_agent(v, target, "spawned-agent".into()).unwrap();
+        assert_eq!(
+            mgr.slot_agent(v, target).unwrap().as_deref(),
+            Some("spawned-agent")
+        );
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn owner_of_rejects_view_from_other_window() {
+        // ★spawn_into tab=Some 소유 검증 predicate★: 다른 창이 소유한 view 를 대상 창(window)의 탭이라
+        //   주장하면 owner_of 불일치로 거부해야 한다(spawn_into 가 이 predicate 로 배치 전 검증).
+        let mut mgr = ViewManager::new();
+        let popup_view = mgr.create_window("slot-popup-1").unwrap();
+        // popup_view 는 slot-popup-1 소유 — "main" 이 자기 탭이라 주장하면 불일치.
+        assert_eq!(
+            mgr.owner_of(popup_view).map(|s| s.as_str()),
+            Some("slot-popup-1")
+        );
+        assert_ne!(
+            mgr.owner_of(popup_view).map(|s| s.as_str()),
+            Some(MAIN_WINDOW_LABEL),
+            "다른 창 소유 view 는 main 의 탭이 아님(spawn_into 배치 전 거부)"
+        );
+    }
+
+    #[test]
+    fn resolve_some_empty_returns_that_slot() {
+        // split 으로 빈 슬롯 2개 → 지정한 (빈) 슬롯을 그대로 돌려준다.
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        let new_slot = mgr.split_slot(v, root, SplitDir::Horizontal).unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, Some(new_slot)).unwrap(),
+            new_slot,
+            "slot=Some+빈 → 그 슬롯"
+        );
+    }
+
+    #[test]
+    fn resolve_some_occupied_errors_no_overwrite() {
+        // 지정 슬롯이 점유 → SlotOccupied(자동 split/replace 안 함, G9).
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        mgr.assign_agent(v, root, "existing".into()).unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, Some(root)),
+            Err(SpawnSlotError::SlotOccupied(root))
+        );
+    }
+
+    #[test]
+    fn resolve_some_missing_slot_errors() {
+        // 트리에 없는 slot id → SlotNotFound.
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let bogus = Uuid::new_v4();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, Some(bogus)),
+            Err(SpawnSlotError::SlotNotFound(bogus))
+        );
     }
 }

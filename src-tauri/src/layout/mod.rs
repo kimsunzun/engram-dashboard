@@ -12,7 +12,8 @@ pub mod tree;
 pub mod types;
 
 pub use manager::{
-    CloseTabOutcome, LayoutError, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    resolve_spawn_slot, CloseTabOutcome, LayoutError, SpawnSlotError, ViewManager,
+    WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 pub use types::{LayoutNode, SplitDir, View, ViewMeta, ViewSnapshot};
 

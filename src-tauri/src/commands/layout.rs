@@ -29,10 +29,12 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
+
 use crate::daemon_client::DaemonClient;
 use crate::layout::{
-    CloseTabOutcome, LayoutState, SplitDir, ViewManager, ViewMeta, ViewSnapshot,
-    WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    resolve_spawn_slot, CloseTabOutcome, LayoutState, SplitDir, ViewManager, ViewMeta,
+    ViewSnapshot, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 
@@ -317,6 +319,136 @@ pub fn assign_agent(
     }; // ← 락 드롭
     emit_after_unlock(&app, layout, tabs);
     Ok(())
+}
+
+// ── 합성 command: spawn_into(D-7 배치 지정 스폰) ──────────────────────────────
+
+/// ★spawn_into(D-7) — 스폰 + 탭 생성(필요 시) + 슬롯 배정을 한 방으로 조립★(TRD §6 · G9).
+/// 데몬에 에이전트를 스폰하고, 그 agent 를 `window` 의 탭 슬롯에 배정한다. 성공 시 새 AgentId(String) 반환.
+///
+/// ## ★ordering(ADR-0006 동시성 계약 — CRITICAL)★
+/// 스폰은 데몬 왕복(async)이라 **ViewManager 락을 잡지 않은 채** 먼저 끝낸다. 그 다음에만 락을 잡아
+/// (탭/슬롯 해소 + 점유 검사 + 배정 + rebuild + 구독 델타)를 단일 임계구역으로 돌리고, emit 은 락을 드롭한
+/// 뒤 한다(락 보유 중 await/emit 0). 옛 command(assign_agent/create_tab)의 임계구역 패턴을 그대로 따른다.
+///
+/// ## ★슬롯 정책(G9 — 추측 금지, USER DECISION 2b)★
+/// - `tab=None`: 먼저 create_tab(window) 로 새 탭(빈 root 슬롯)을 만들고 거기 배정. (`slot=Some` 동반은
+///   ★스폰 전에 거부★ — 새로 만들 탭엔 그 slot 이 없어 orphan 탭이 생긴다. 아래 pre-spawn 가드.)
+/// - `tab=Some`·`slot=None`: 그 탭의 **첫 빈 슬롯**에 배정(빈 슬롯 없으면 에러 — 자동 split 안 함, 2b).
+/// - `slot=Some`·비어있음: 그 슬롯에 배정.
+/// - `slot=Some`·점유: **에러**(덮어쓰기 안 함 — 호출자가 split_slot 후 재시도).
+///
+/// ## ★실패 가시성(§5 손발-두뇌 분리 — spawn-first)★
+/// 스폰이 먼저 일어나므로, 이후 배치(점유 슬롯·invalid view/window 등)가 실패해도 **에이전트를 kill 하지
+/// 않는다**(하드 롤백 없음). 에이전트는 데몬에 살아 있고 list_agents 로 재부착 가능하다 — 스폰 뒤 모든
+/// early-return 은 `alive_err` 로 생존 agent id 를 박아 invisible 에이전트를 막는다(락 획득 실패 포함).
+///
+/// ## ★backend fail-loud(USER DECISION 1a)★
+/// 현 데몬 스폰 wire(`SpawnByCwd{cwd}`)는 **cwd 만** 받고 backend 선택 인자가 없다 → 요청한 `backend` 는
+/// 데몬까지 흐르지 못한다. 데몬의 `SpawnByCwd` 핸들러는 **무조건 데몬 기본 백엔드(현재 셸 =
+/// `default_shell()`)** 를 스폰한다(claude 가 아니다 — connection_core.rs `SpawnByCwd` arm). 이전엔 warn 후
+/// 무시(요청 backend 조용히 무시하고 셸 스폰)였으나, **명시된 backend 요청은 스폰 전에 거부**한다(호출자가
+/// 원한 것과 다른 에이전트를 조용히 받는 것 방지). 통과 = `backend` 미지정(`None`/빈/공백)뿐 —
+/// **`"claude"` 포함 어떤 명시값도 거부**(현재 스폰되는 건 셸이므로 "claude 지원"은 거짓말). backend 선택은
+/// 데몬 spawn-protocol 확장이 필요하다(미구현 — 별도 ADR/후속).
+#[tauri::command]
+pub async fn spawn_into(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
+    window: String,
+    tab: Option<Uuid>,
+    slot: Option<Uuid>,
+    backend: Option<String>,
+    cwd: String,
+) -> Result<String, String> {
+    // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
+    // ★FIX 1(1a) backend fail-loud★: SpawnByCwd wire 에 backend 선택 인자가 없다 → 데몬은 무조건 기본
+    //   백엔드(현재 셸)를 스폰한다("claude" 도 스폰 안 됨). 명시된 backend 값을 통과시키면 호출자가 원한 것과
+    //   다른 에이전트를 조용히 받는다 → 통과 = 미지정(None/빈/공백)뿐, "claude" 포함 어떤 명시값도 거부한다.
+    if let Some(b) = &backend {
+        let norm = b.trim();
+        if !norm.is_empty() {
+            return Err(format!(
+                "backend '{b}' 선택은 아직 spawn_into 로 지원되지 않음 — 데몬 SpawnByCwd 는 항상 기본 백엔드(현재 셸)를 스폰하며 backend 선택 wire 가 없다(데몬 spawn-protocol 확장 필요, 후속). backend 를 생략하면 기본 백엔드로 스폰된다. 스폰 안 함."
+            ));
+        }
+    }
+    // ★FIX 3 orphan-tab 가드★: tab 미지정(새 탭 생성) + slot 지정은 모순이다 — 새로 만들 탭엔 그 slot 이
+    //   없어 스폰 후 resolve 가 실패하고 빈 orphan 탭만 남는다. 스폰 전에 거부한다(탭 생성·스폰 0).
+    if tab.is_none() && slot.is_some() {
+        return Err(
+            "새로 생성될 탭에 특정 slot 을 지정할 수 없음 — slot 을 생략하거나 tab 을 지정하시오. 스폰 안 함."
+                .to_string(),
+        );
+    }
+
+    // ── 1) 스폰(락 미보유 async — 데몬 왕복). Spawned 에 동봉된 AgentInfo.id 를 캡처 ────────────────
+    let reply = client
+        .send_command(AgentCommand::SpawnByCwd {
+            cwd,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    let agent_id = match reply {
+        // SpawnByCwd 응답 = Spawned(AgentInfo 동봉) — 그 id 가 우리가 배정할 실제 agent id.
+        AgentEvent::Spawned { agent, .. } => agent.id.to_string(),
+        AgentEvent::Error { message, .. } => return Err(format!("spawn 실패: {message}")),
+        other => return Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}")),
+    };
+
+    // ── 2) 배치(락 보유 단일 임계구역 — 탭/슬롯 해소 + 점유 검사 + 배정 + rebuild + 델타). emit 은 락 밖 ──
+    // ★spawn-first 실패 가시성★: 여기서 실패해도 에이전트는 데몬에 살아있다 → 에러 문자열에 agent id 를 박아
+    //   호출자가 list_agents 로 재부착할 수 있게 한다(kill 안 함). alive_err 헬퍼로 문구 통일.
+    //   ★FIX 4★: 스폰 뒤 모든 early-return(락 획득 실패 포함)은 반드시 alive_err 를 지난다.
+    let alive_err = |detail: String| {
+        format!("배치 실패({detail}) — 에이전트 {agent_id} 는 살아있음(list_agents 로 재부착 가능)")
+    };
+    let (view_id, layout, tabs) = {
+        // 락 획득 실패(mutex poison)도 생존 agent id 를 남긴다(FIX 4 — id 유실 금지).
+        let mut mgr = state
+            .0
+            .lock()
+            .map_err(|e| alive_err(format!("레이아웃 락 획득 실패: {e}")))?;
+
+        // 탭 해소: tab 미지정이면 새 탭(빈 root 슬롯) 생성(위 가드로 slot=None 확정). 지정이면 그 view.
+        let view_id = match tab {
+            Some(v) => {
+                // 이 창의 탭인지 검증(소속 불일치·없는 view → 배치 실패, 에이전트 생존).
+                if mgr.owner_of(v).map(|l| l.as_str()) != Some(window.as_str()) {
+                    return Err(alive_err(format!("view {v} 가 창 {window} 의 탭이 아님")));
+                }
+                v
+            }
+            // tab=None → 새 탭(빈 root 1개). slot 은 위 가드에서 None 확정 → resolve 는 항상 그 빈 root 로
+            // 성공한다(orphan 탭 불가 — FIX 3). create_tab 만이 여기서 유일한 실패 지점(창 부재).
+            None => mgr
+                .create_tab(&window, None)
+                .map_err(|e| alive_err(e.to_string()))?,
+        };
+
+        // 슬롯 해소(순수 정책 — G9/2b): slot=None→첫 빈 슬롯 / Some+빈=그 슬롯 / 점유·부재=에러(덮어쓰기 X).
+        let view = mgr
+            .views
+            .get(&view_id)
+            .ok_or_else(|| alive_err(format!("view {view_id} 없음")))?;
+        let target_slot = resolve_spawn_slot(view, slot).map_err(|e| alive_err(e.to_string()))?;
+
+        // 배정(점유 검사는 위 resolve 가 이미 함 — assign 은 빈 슬롯 확정 후에만 닿음).
+        mgr.assign_agent(view_id, target_slot, agent_id.clone())
+            .map_err(|e| alive_err(e.to_string()))?;
+
+        let layout = mgr.snapshot(view_id).ok();
+        let tabs = tabs_payload(&mgr, &window);
+        let delta = router.rebuild(&mgr); // ★락 안 rebuild(RMW 직렬화)★
+        send_subscription_delta(&client, delta);
+        (view_id, layout, tabs)
+    }; // ← 락 드롭
+    emit_after_unlock(&app, layout, tabs); // ★emit 은 락 밖(ADR-0006)★
+
+    tracing::info!(agent = %agent_id, window = %window, view = %view_id, "spawn_into 완료(스폰+배치)");
+    Ok(agent_id)
 }
 
 // ── read-only 조회 ───────────────────────────────────────────────────────────

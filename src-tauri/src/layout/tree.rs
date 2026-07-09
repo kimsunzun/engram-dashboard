@@ -46,6 +46,23 @@ pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     }
 }
 
+/// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(agent_id==None)의 id** 를
+/// 반환한다. 빈 슬롯이 하나도 없으면 None. spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의
+/// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다.
+pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
+    match node {
+        LayoutNode::Slot { id, agent_id } => {
+            if agent_id.is_none() {
+                Some(*id)
+            } else {
+                None
+            }
+        }
+        // a 먼저(전위·좌측 우선), 없으면 b.
+        LayoutNode::Split { a, b, .. } => first_empty_slot_id(a).or_else(|| first_empty_slot_id(b)),
+    }
+}
+
 /// slot_id 슬롯을 Split 으로 분할한다.
 ///
 /// 대상 Slot 을 `Split{dir, ratio:0.5, a=원래 슬롯, b=새 빈 슬롯}` 으로 치환하고 **새 빈 슬롯의
@@ -372,5 +389,53 @@ mod tests {
         let _new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
         // a 가 원래 슬롯(id) → 전위 순회 첫 슬롯은 id.
         assert_eq!(first_slot_id(&node), id);
+    }
+
+    // ── first_empty_slot_id (spawn_into slot=None 정책 — USER DECISION 2b) ────────
+
+    #[test]
+    fn first_empty_slot_id_single_empty() {
+        let (node, id) = single_slot();
+        assert_eq!(
+            first_empty_slot_id(&node),
+            Some(id),
+            "빈 단일 슬롯은 자기 자신"
+        );
+    }
+
+    #[test]
+    fn first_empty_slot_id_single_occupied_is_none() {
+        let id = Uuid::new_v4();
+        let node = LayoutNode::Slot {
+            id,
+            agent_id: Some("a".into()),
+        };
+        assert_eq!(
+            first_empty_slot_id(&node),
+            None,
+            "점유 단일 슬롯은 빈 슬롯 0"
+        );
+    }
+
+    #[test]
+    fn first_empty_slot_id_skips_occupied_leftmost() {
+        // 좌측(a=id)을 점유, 우측(b=new_id)은 빈 채 → 좌측을 건너뛰고 우측을 고른다(2b).
+        let (mut node, id) = single_slot();
+        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        assert!(assign_in_tree(&mut node, id, Some("occupied".into())));
+        assert_eq!(
+            first_empty_slot_id(&node),
+            Some(new_id),
+            "점유된 좌측 건너뛰고 첫 빈 슬롯(우측)"
+        );
+    }
+
+    #[test]
+    fn first_empty_slot_id_all_occupied_is_none() {
+        let (mut node, id) = single_slot();
+        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        assert!(assign_in_tree(&mut node, id, Some("x".into())));
+        assert!(assign_in_tree(&mut node, new_id, Some("y".into())));
+        assert_eq!(first_empty_slot_id(&node), None, "전부 점유 → None");
     }
 }
