@@ -704,6 +704,16 @@
 - **ADR-0057(ADR-0035 부분 supersede):** 탭 소유 모델 = 창별 탭 + 유니크 소유(owner-index 하이브리드). 거부 A(ref-list=소유)·B(글로벌풀). ADR-0035 `active_view_id`=main-전용 절만 개정(핵심=레이아웃 권위 src-tauri는 불변). 양방향 `Amends` 박음·index 재생성·lint clean(0 error).
 - **다음:** `/implement critical`로 `ViewManager` 모델 마이그레이션(스테이징 §8: 모델→라우팅→command→프론트→spawn_into→GUI실측).
 
+## Phase 2 탭 — 구현 스테이지 1~4 (백엔드 모델 + 프론트 UI) (2026-07-09, master, 대화 세션)
+- **커밋:** `bd8dfb2`(백엔드 스테이지 1~3) · `9a6f5b8`(프론트 스테이지 4). ADR-0057 탭 소유 모델 구현.
+- **백엔드(1~3):** `ViewManager` 새 모델(views HashMap + view_owner 유니크소유 + windows[label].{tabs,active}, 전역 active_view_id·window_bindings 제거) · `OutputRouter.rebuild` 라우팅 반전(창의 모든 탭 수신, ADR-0056 keep-alive) · command 개명·단일 임계구역(ADR-0006) · `move_slot_to_window` phase-C 롤백(orphan 방지) · `cleanup_popup_window` 멀티탭 정리(G1 누수 수정) · `view:closed` 엔드투엔드 은퇴.
+- **프론트(4):** 단일 `WindowLayout(label)` main·팝업 통일(D-2) · `TabBar` · `PopoutPage` `?view=→?window=` · `viewStore` 창별 상태·`useCurrentViewId` · keep-alive(숨은탭 마운트·display:none) · Ctrl+Tab(D-8) · `active_view_id` 소비처 이관(AgentTree/SlotContextMenu/resolveDefaultViewId).
+- **게이트(각 `/implement critical`):**
+  - 백엔드: `/review code deep` 3인 — **blind Codex(다른 family)가 cleanup/rollback stale-unsubscribe race 적출**(doc-aware 2인 놓침) → 팩트 검증 후 FIX 취합(§90) → 발화 락 안으로 수정 → 재리뷰 PASS. `/qa full`: build/회귀/fmt/격리/tsc/vitest PASS, src-tauri 85 헤드리스(0xc0000139=WebView2Loader 부재 환경블록, throwaway-mount 우회검증).
+  - 프론트: `/review code deep` 3인 — contract PASS + Codex/검증전문 FIX 5(tab.close 타깃창 오해·preload effort deps·race/no-remount 테스트 공백) → 재수정 → 재리뷰 PASS. `/qa full`: tsc·vitest 352 + **GUI 실측(cdp 실앱)** — create/switch/close_tab·create_window(slot-popup-1·`?window=`)·close_window E2E 통과. 앱 실행가능 복구.
+- **핫패스 정직 note:** GUI 실측 1회 통과 = smoke(존재 증거), race-free 증명 아님(동시성 경로).
+- **미완:** 스테이지 5 = `spawn_into`(D-7 배치 지정 스폰, 얇은 합성 command). 로드맵 순서 3~7(렌더모드 커맨드화·트리→슬롯 설계·트리 정교화·우클릭 메뉴·메시지 시스템)은 후속. origin 미푸시(TRD/ADR·백엔드·프론트 3커밋).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
