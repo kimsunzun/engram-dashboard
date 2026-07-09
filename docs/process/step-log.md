@@ -753,6 +753,14 @@
 - **에이전트-간 핸드오프(나중·개념):** A 존속 중 B 생성 → (전이간) A를 하위로 → A가 B에 핸드오프 문서 전달 → B가 A에 Q&A → A 세션오프. 저장 위치 미정.
 - **미결(다음):** PRD 고정(트리+프리셋 MVP — 필드·command·수용기준) → `/implement`(코더→리뷰→QA). 구현 진입은 PRD 후.
 
+## 에이전트 트리·프리셋 MVP — Slice A: 백엔드 foundation (2026-07-10, master, 자율 세션) · ADR-0061 · 커밋 예정
+- **무엇:** ① SlotContent 유니온에 `AgentList`/`PresetPalette` unit variant 추가(ADR-0060 확장 — FileTree/ControlPanel 선례와 동류). ② **데몬 소유 프리셋 영속**(`.engram-data/presets.json`) — 프로필(agents.json) 시스템을 end-to-end 미러(ADR-0061). 백엔드 전용(프론트 소비 = Slice B/C).
+- **어떻게:** `/implement` critical — 코더(Opus) → `/review code deep`(리뷰어 3인) → `/qa full`(코드 게이트). 확정 스펙은 pre-PRD 컨설(위 항목)에서 사용자 결정 완료라 재론 없이 구현 스펙만 정리해 진입.
+- **회수물(코드):** core `agent/preset.rs`(`Preset{id,cwd}`·`PresetRegistry` list/create/remove, cwd `dunce::canonicalize`) + `persistence/presets.rs`(`FilePresetStore` — atomic write tmp→sync_all→rename→parent fsync, 버전게이트, 손상보존; FileProfileStore 미러) · protocol `AgentCommand::{ListPresets,CreatePreset,DeletePreset}` + `AgentEvent::{PresetList(reply),PresetListUpdated(broadcast)}` + wire `Preset`(domain.rs)·ts-rs 바인딩 · daemon `connection_core` 3-arm + `broadcast_preset_list` + `build_manager` 배선(AgentManager `presets()` 필드, `profiles` 미러) · src-tauri `emit_broadcast`에 `preset-list-updated` 배선.
+- **게이트:** **review PASS** — doc-aware 2인(불변식 breaker + 영속/wire-contract 전문) PASS. cross-family blind(Codex) FIX 4건 적출했으나 전부 프로필 shipped 패턴의 충실한 미러(프리셋만 고치면 미러 비대칭) → 미러된 패턴의 잠재 한계로 판정, 양-경로 하드닝은 **사용자 결정 follow-up**으로 분리(§아래). **QA 코드게이트 PASS** — member-scoped 빌드(core/protocol/daemon-lib/src-tauri-lib) + `cargo test -p core`(153+9신규) `-p protocol`(신규 golden) + `cargo fmt --check` + 코어 격리(`use tauri` 0줄) + `npx tsc --noEmit` + `npm test`(352) 전부 green. 전체 `cargo build` 최종 링크만 실행 중 데몬.exe 락(os error 5, env — 코드 결함 아님). **GUI 실측은 신규 IPC 소비자가 없어(Slice B/C 예정) 이월**(데몬 재시작=강제종료=사용자 승인 필요).
+- **do-not(계승):** bare `cargo test`/`-p engram-dashboard --lib` = 0xc0000139(WebView2Loader) → member-scoped만. 프리셋 localStorage 거부(멀티창 desync). 확정 스펙 재론 금지.
+- **미결:** Slice B(프론트 `ProtocolClient` 프리셋 메서드 + `PresetPalette` variant + presetCommands) · Slice C(`AgentTree`→`AgentList` variant + 5-glyph 상태 pure 매핑 + 우클릭 2메뉴 + spawn picker + `agent.spawn`) · **영속 하드닝(프로필+프리셋 양 경로 — Codex FIX 1~4) = 사용자 결정 대기.**
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
