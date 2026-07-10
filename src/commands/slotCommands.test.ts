@@ -127,10 +127,31 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(clientMock.killAgent).not.toHaveBeenCalled()
   })
 
-  it('empty 콘텐츠 메뉴 = 트리/팔레트/생성(content) 순', () => {
-    const ids = buildSlotMenu('empty').map(i => i.id)
-    // content 그룹이 앞(공통보다 먼저) — fill 3항목 순서.
-    expect(ids.slice(0, 3)).toEqual(['slot.fill.agentList', 'slot.fill.presetPalette', 'slot.createAgentHere'])
+  it('empty 콘텐츠 메뉴 최상위 = 새 콘텐츠(컨테이너) → 가로/세로 분할 → 닫기 (ADR-0065 트림)', () => {
+    const items = buildSlotMenu('empty')
+    // ADR-0065: 채움 3항목은 "새 콘텐츠" 컨테이너로 접히고, popout/empty 는 hideOn 으로 트림된다.
+    expect(items.map(i => i.id)).toEqual([
+      'container:새 콘텐츠',
+      'slot.split.h',
+      'slot.split.v',
+      'slot.close',
+    ])
+    // 컨테이너 자식 = 트리/팔레트/생성(기존 상대 순서 유지).
+    expect(items[0].children?.map(c => c.id)).toEqual([
+      'slot.fill.agentList',
+      'slot.fill.presetPalette',
+      'slot.createAgentHere',
+    ])
+    // hideOn 트림 확인: 빈 슬롯엔 비우기/팝업 없음.
+    expect(items.map(i => i.id)).not.toContain('slot.empty')
+    expect(items.map(i => i.id)).not.toContain('slot.popout')
+  })
+
+  it('§5 불변: 접힌 slot.fill.* 도 registry 로 여전히 직접 실행 가능', () => {
+    run('slot.fill.agentList', CTX)
+    run('slot.fill.presetPalette', CTX)
+    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
+    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
   })
   it('agent 콘텐츠 메뉴 = 종료(content) 먼저', () => {
     expect(buildSlotMenu('agent')[0].id).toBe('agent.kill')

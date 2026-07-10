@@ -86,10 +86,13 @@ register({
 
 // ★공통 슬롯 ops 기여 = '*'(모든 슬롯) 단일소스★(ADR-0064). group='slot-ops'(콘텐츠 항목 아래에 렌더).
 //   order 는 분할→팝업→비우기→닫기 순(닫기는 관례상 맨 아래라 99).
+// ★hideOn 트림(ADR-0065)★: slot.popout(빈 칸 팝아웃 실익 낮음)·slot.empty(빈 슬롯 재비우기 = no-op)는
+//   빈 슬롯에서 무의미하므로 hideOn:['empty'] 로 제외한다. '*' 보편 등록은 유지(공통 ops 단일소스 불변식) —
+//   콘텐츠 타입별 재선언이 아니라 subtraction 필터일 뿐이다(ADR-0065 거부 대안 참조).
 registerSlotMenu('*', [
   { commandId: 'slot.split.h', group: 'slot-ops', order: 10 },
   { commandId: 'slot.split.v', group: 'slot-ops', order: 20 },
-  { commandId: 'slot.popout', group: 'slot-ops', order: 30 },
-  { commandId: 'slot.empty', group: 'slot-ops', order: 40 },
+  { commandId: 'slot.popout', group: 'slot-ops', order: 30, hideOn: ['empty'] },
+  { commandId: 'slot.empty', group: 'slot-ops', order: 40, hideOn: ['empty'] },
   { commandId: 'slot.close', group: 'slot-ops', order: 99 },
 ])

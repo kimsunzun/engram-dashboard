@@ -70,11 +70,22 @@ register({
   },
 })
 
-// empty 슬롯 전용 기여(group='content' — 공통 slot-ops 위에 렌더). 트리·팔레트·생성 순.
+// empty 슬롯 전용 기여(group='content' — 공통 slot-ops 위에 렌더).
+// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 3항목(트리·팔레트·생성)을 컨테이너 하나로 접어
+//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식은 기존 상대 순서(트리→팔레트→생성)
+//   유지. command 는 registry 단일소스로 그대로 직접 호출 가능(§5 불변) — 서브메뉴는 presentation 일 뿐이다.
+//   향후 백엔드 타입(codex/gemini) 추가 시 자식으로 붙는 확장 자리.
 registerSlotMenu('empty', [
-  { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
-  { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
-  { commandId: 'slot.createAgentHere', group: 'content', order: 30 },
+  {
+    title: '새 콘텐츠',
+    group: 'content',
+    order: 10,
+    children: [
+      { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
+      { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
+      { commandId: 'slot.createAgentHere', group: 'content', order: 30 },
+    ],
+  },
 ])
 
 // ── agent 슬롯 전용 ────────────────────────────────────────────────────────────

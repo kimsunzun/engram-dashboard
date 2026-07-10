@@ -9,6 +9,7 @@
 //   제거하고 이 하나로 통합했다. group 경계(콘텐츠 → 구분선 → 공통)는 buildSlotMenu 가 separatorBefore 로 표시.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties, SyntheticEvent } from 'react'
 
 import { fireAndForget } from '../../commands/dispatch'
 import type { ResolvedSlotMenuItem } from '../../commands/slotMenu'
@@ -35,6 +36,34 @@ export function clampMenuPosition(
   const left = x + w > vw ? Math.max(MENU_MARGIN, Math.min(x, vw - w - MENU_MARGIN)) : x
   const top = y + h > vh ? Math.max(MENU_MARGIN, Math.min(y, vh - h - MENU_MARGIN)) : y
   return { top, left }
+}
+
+/**
+ * ADR-0065 서브메뉴 flyout 배치 — 부모 항목 rect(anchor) 기준으로 자식 목록(fw×fh)이 어디로 열지 결정한다.
+ * 기본은 부모의 오른쪽 가장자리(right)에서 오른쪽으로 펴되(clampMenuPosition 의 우측 오버플로 처리 결),
+ * 오른쪽으로 펴면 뷰포트 우측을 넘칠 때만 왼쪽(부모 left 가장자리 - fw)으로 뒤집는다. 세로는 부모 top 에서
+ * 시작하되 하단 넘침을 clamp(음수 방지 상단 고정 = clampMenuPosition 과 동형).
+ * ★clampMenuPosition 재사용 결(aebfa86)★: 순수 함수(측정값만) — 컴포넌트 밖에서 단위테스트 가능.
+ */
+export function flyoutPosition(
+  anchorLeft: number,
+  anchorRight: number,
+  anchorTop: number,
+  fw: number,
+  fh: number,
+  vw: number,
+  vh: number,
+): { top: number; left: number } {
+  // 오른쪽으로 펴면 우측을 넘치나? 넘치고 왼쪽에 자리가 있으면 왼쪽으로 뒤집는다.
+  const overflowRight = anchorRight + fw > vw
+  const fitsLeft = anchorLeft - fw >= MENU_MARGIN
+  const left = overflowRight && fitsLeft ? anchorLeft - fw : anchorRight
+  // 좌측도 clamp(뒤집어도 여전히 넘칠 극단 방어): 최소 MARGIN, 최대 vw-fw-MARGIN(음수면 MARGIN 고정).
+  const clampedLeft = Math.max(MENU_MARGIN, Math.min(left, Math.max(MENU_MARGIN, vw - fw - MENU_MARGIN)))
+  // 세로: 부모 top 에서 시작, 하단 넘침이면 밀어올리고 상단 음수 방지.
+  const top =
+    anchorTop + fh > vh ? Math.max(MENU_MARGIN, Math.min(anchorTop, vh - fh - MENU_MARGIN)) : anchorTop
+  return { top, left: clampedLeft }
 }
 
 /** 메뉴 항목 클릭 시 command.run 에 넘길 실행 컨텍스트(ADR-0064). viewId/slotId 필수, agentId 는 배정 슬롯만. */
@@ -104,27 +133,129 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
           {item.separatorBefore && (
             <div style={{ height: '1px', background: 'var(--border)', margin: '2px 0' }} />
           )}
-          <div
-            data-slot-menu-item={item.id}
-            style={{ padding: '6px 12px', cursor: 'pointer', color: 'var(--text)' }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'color-mix(in srgb, var(--accent) 20%, transparent)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            // ADR-0064/0055: 클릭 = 공유 dispatch 경로(fireAndForget)로 command 를 id 로 실행한다. 팔레트·
-            //   키바인딩·LLM 소비자와 동일한 helper 를 재사용해 안전망(sync throw·async reject·thenable
-            //   삼킴)을 재구현하지 않는다. item.id === 등록된 command id(buildSlotMenu resolve). ctx 는
-            //   command 인자 가방(단일 객체). 메뉴는 항상 닫는다.
-            // TODO(deferred): ctx.viewId===null(활성 view 없음)이면 공통 op 가 실패 — 이제 fireAndForget 이
-            //   일관되게 warn 으로 로깅한다. agent_list/preset_palette 슬롯은 보통 활성 view 를 가져 저빈도 엣지.
-            onClick={e => {
-              e.stopPropagation()
-              fireAndForget(item.id, { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId })
-              onClose()
-            }}
-          >
-            {item.title}
-          </div>
+          <MenuRow item={item} ctx={ctx} onClose={onClose} />
         </div>
       ))}
+    </div>
+  )
+}
+
+/** 항목 행 hover/focus 시 배경 강조. leaf·container·flyout-child 공통. */
+const ROW_STYLE: CSSProperties = { padding: '6px 12px', cursor: 'pointer', color: 'var(--text)' }
+function highlightOn(e: SyntheticEvent<HTMLElement>) {
+  e.currentTarget.style.background = 'color-mix(in srgb, var(--accent) 20%, transparent)'
+}
+function highlightOff(e: SyntheticEvent<HTMLElement>) {
+  e.currentTarget.style.background = 'transparent'
+}
+
+/** command 실행 = 공유 dispatch(fireAndForget)로 id 를 흘린다(§5 단일 제어 표면). 항상 메뉴를 닫는다. */
+function runItem(id: string, ctx: SlotMenuCtx, onClose: () => void) {
+  // ADR-0064/0055: 팔레트·키바인딩·LLM 소비자와 동일 helper 재사용(sync throw·async reject·thenable 삼킴
+  //   안전망을 재구현하지 않는다). id === 등록된 command id. ctx 는 command 인자 가방(단일 객체).
+  // TODO(deferred): ctx.viewId===null(활성 view 없음)이면 공통 op 실패 — fireAndForget 이 warn 로깅한다.
+  fireAndForget(id, { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId })
+  onClose()
+}
+
+/**
+ * 메뉴 한 행 — leaf(실행 항목) 또는 container(1단 서브메뉴, ADR-0065).
+ * container 는 hover/focus 시 오른쪽으로 flyout 을 펴고(우측 오버플로면 flyoutPosition 이 왼쪽으로 뒤집음),
+ * 자식은 leaf 와 동일한 공유 dispatch 경로로 실행한다(§5 불변 — 서브메뉴는 presentation 일 뿐).
+ */
+function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: SlotMenuCtx; onClose: () => void }) {
+  const isContainer = !!item.children && item.children.length > 0
+  const rowRef = useRef<HTMLDivElement>(null)
+  const flyoutRef = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  // flyout 위치 — 열릴 때 부모 rect + 실측 flyout 크기로 계산(페인트 전 useLayoutEffect).
+  const [flyoutPos, setFlyoutPos] = useState<{ top: number; left: number } | null>(null)
+
+  useLayoutEffect(() => {
+    if (!isContainer || !open || !rowRef.current || !flyoutRef.current) return
+    const anchor = rowRef.current.getBoundingClientRect()
+    const fly = flyoutRef.current.getBoundingClientRect()
+    setFlyoutPos(
+      flyoutPosition(anchor.left, anchor.right, anchor.top, fly.width, fly.height, window.innerWidth, window.innerHeight),
+    )
+  }, [isContainer, open])
+
+  if (!isContainer) {
+    return (
+      <div
+        data-slot-menu-item={item.id}
+        style={ROW_STYLE}
+        onMouseEnter={highlightOn}
+        onMouseLeave={highlightOff}
+        onClick={e => {
+          e.stopPropagation()
+          runItem(item.id, ctx, onClose)
+        }}
+      >
+        {item.title}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      ref={rowRef}
+      // hover/focus 로 flyout 을 연다(마우스 이탈 시 닫음). data-attr 로 cdp/테스트가 컨테이너를 식별.
+      data-slot-menu-container={item.id}
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => {
+        setOpen(false)
+        setFlyoutPos(null)
+      }}
+    >
+      <div
+        style={{ ...ROW_STYLE, display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}
+        tabIndex={0}
+        onFocus={() => setOpen(true)}
+        onMouseEnter={highlightOn}
+        onMouseLeave={highlightOff}
+      >
+        <span>{item.title}</span>
+        {/* 서브메뉴 표식(▶) — 콘텐츠 색보다 흐리게. */}
+        <span style={{ opacity: 0.6 }}>▶</span>
+      </div>
+      {open && (
+        <div
+          ref={flyoutRef}
+          data-slot-menu-flyout={item.id}
+          style={{
+            position: 'fixed',
+            // 첫 페인트는 측정 전이라 임시로 부모 오른쪽 근처(0,0 대신 화면 밖 방지). useLayoutEffect 가 즉시 보정.
+            top: flyoutPos?.top ?? 0,
+            left: flyoutPos?.left ?? 0,
+            // 측정 전(flyoutPos=null)엔 숨겨 점프를 감춘다(clamp 완료 후 노출).
+            visibility: flyoutPos ? 'visible' : 'hidden',
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border)',
+            borderRadius: '4px',
+            zIndex: 1001,
+            minWidth: '150px',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+          }}
+        >
+          {item.children!.map(child => (
+            <div
+              key={child.id}
+              data-slot-menu-item={child.id}
+              style={ROW_STYLE}
+              onMouseEnter={highlightOn}
+              onMouseLeave={highlightOff}
+              onClick={e => {
+                e.stopPropagation()
+                runItem(child.id, ctx, onClose)
+              }}
+            >
+              {child.title}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

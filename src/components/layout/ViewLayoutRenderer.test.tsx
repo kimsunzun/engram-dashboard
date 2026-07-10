@@ -519,18 +519,27 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
 
   const POPUP_VIEW = 'popup-view-77'
 
-  it('빈 슬롯 우클릭 → 콘텐츠(fill-ops) + 공통 슬롯 ops 항목이 한 메뉴에 뜬다', () => {
+  /** ADR-0065: 빈 슬롯 fill-ops 는 "새 콘텐츠" 컨테이너로 접혔다 — hover 로 flyout 을 펴야 자식이 보인다. */
+  function openNewContentFlyout(): void {
+    fireEvent.mouseEnter(screen.getByText('새 콘텐츠'))
+  }
+
+  it('빈 슬롯 우클릭 → 최상위 = 새 콘텐츠(컨테이너) + 공통 슬롯 ops, 채움은 flyout 안 (ADR-0065)', () => {
     openMenu('s1', null)
-    // 콘텐츠 전용(empty fill-ops).
+    // 최상위: 콘텐츠 컨테이너 + 공통 slot-ops(단, empty 는 popout/비우기 트림).
+    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
+    expect(screen.getByText('가로 분할')).toBeTruthy()
+    expect(screen.getByText('세로 분할')).toBeTruthy()
+    expect(screen.getByText('닫기')).toBeTruthy()
+    // ADR-0065 트림: 빈 슬롯엔 비우기/팝업으로 분리 없음(hideOn:['empty']).
+    expect(screen.queryByText('비우기')).toBeNull()
+    expect(screen.queryByText('팝업으로 분리')).toBeNull()
+    // 채움 3항목은 hover 전엔 미노출(서브메뉴 안).
+    expect(screen.queryByText('에이전트 트리 열기')).toBeNull()
+    openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
     expect(screen.getByText('프리셋 팔레트 열기')).toBeTruthy()
     expect(screen.getByText('에이전트 생성')).toBeTruthy()
-    // 공통 '*' 슬롯 ops.
-    expect(screen.getByText('가로 분할')).toBeTruthy()
-    expect(screen.getByText('세로 분할')).toBeTruthy()
-    expect(screen.getByText('팝업으로 분리')).toBeTruthy()
-    expect(screen.getByText('비우기')).toBeTruthy()
-    expect(screen.getByText('닫기')).toBeTruthy()
   })
 
   it('우클릭 전에는 메뉴가 없다(preventDefault 후 상태 기반 마운트)', () => {
@@ -556,37 +565,39 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(closeSlotSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-C')
   })
 
-  // ── ★empty fill-ops(ADR-0063/0064)★: 트리/팔레트 열기 → setSlotContent(view, slot, {type}) ──────────
-  it('"에이전트 트리 열기" → setSlotContent(viewId, slotId, {type:agent_list})', () => {
+  // ── ★empty fill-ops(ADR-0063/0064/0065)★: "새 콘텐츠" flyout 안 → setSlotContent(view, slot, {type}) ──
+  it('"에이전트 트리 열기"(flyout) → setSlotContent(viewId, slotId, {type:agent_list})', () => {
     openMenu('slot-T', null)
+    openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-T', { type: 'agent_list' })
   })
 
-  it('"프리셋 팔레트 열기" → setSlotContent(viewId, slotId, {type:preset_palette})', () => {
+  it('"프리셋 팔레트 열기"(flyout) → setSlotContent(viewId, slotId, {type:preset_palette})', () => {
     openMenu('slot-U', null)
+    openNewContentFlyout()
     fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U', { type: 'preset_palette' })
   })
 
-  it('"비우기"(공통) → setSlotContent(viewId, slotId, {type:empty})', () => {
-    // empty 슬롯에도 공통 '비우기'가 뜬다(멱등 — 이미 비어 있어도 command 자체는 발화).
+  it('빈 슬롯엔 "비우기"가 없다(ADR-0065 hideOn:["empty"] 트림 — 이미 빈 슬롯 재비우기는 no-op)', () => {
     openMenu('slot-V', null)
-    fireEvent.click(screen.getByText('비우기'))
-    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-V', { type: 'empty' })
+    expect(screen.queryByText('비우기')).toBeNull()
   })
 
-  it('viewIdOverride 있으면 "에이전트 트리 열기"가 오버라이드 view 로 setSlotContent 를 부른다', () => {
+  it('viewIdOverride 있으면 "에이전트 트리 열기"(flyout)가 오버라이드 view 로 setSlotContent 를 부른다', () => {
     openMenu('slot-to', null, POPUP_VIEW)
+    openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-to', { type: 'agent_list' })
   })
 
-  // ── ★"에이전트 생성"(slot.createAgentHere): 폴더 다이얼로그 → spawnAgent → assignAgent★ ──────────
-  it('"에이전트 생성" → 폴더 다이얼로그 고른 cwd 로 spawnAgent 후 assignAgent(viewId, slotId, 새 id)', async () => {
+  // ── ★"에이전트 생성"(slot.createAgentHere): flyout → 폴더 다이얼로그 → spawnAgent → assignAgent★ ──────
+  it('"에이전트 생성"(flyout) → 폴더 다이얼로그 고른 cwd 로 spawnAgent 후 assignAgent(viewId, slotId, 새 id)', async () => {
     dialogMock.open.mockResolvedValue('C:/work')
     clientMock.spawnAgent.mockResolvedValueOnce({ id: 'brand-new-agent' })
     openMenu('slot-D', null)
+    openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 생성'))
     await vi.waitFor(() => expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work'))
     await vi.waitFor(() =>
@@ -594,9 +605,10 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     )
   })
 
-  it('"에이전트 생성" → 다이얼로그 취소(null) 시 spawn/assign 없음(no-op)', async () => {
+  it('"에이전트 생성"(flyout) → 다이얼로그 취소(null) 시 spawn/assign 없음(no-op)', async () => {
     dialogMock.open.mockResolvedValue(null)
     openMenu('slot-D2', null)
+    openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 생성'))
     await vi.waitFor(() => expect(dialogMock.open).toHaveBeenCalled())
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
@@ -622,9 +634,10 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('에이전트 종료')).toBeNull()
   })
 
-  // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 콘텐츠 종류와 무관하게 뜨고 (viewId, slotId)로 move ──────
-  it('"팝업으로 분리"(공통) → moveSlotToWindow(viewId, slotId) 호출', () => {
-    openMenu('slot-P', null) // agent 없어도(빈 슬롯) 공통이라 뜬다
+  // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 콘텐츠 종류와 무관하게 뜨고 (viewId, slotId)로 move.
+  //    단 ADR-0065 로 빈 슬롯에선 트림(hideOn:['empty']) — 비-empty(agent) 슬롯으로 라우팅을 검증한다. ──
+  it('"팝업으로 분리"(공통, 비-empty) → moveSlotToWindow(viewId, slotId) 호출', () => {
+    openMenu('slot-P', 'agent-p') // agent 슬롯 — 빈 슬롯은 popout 트림(ADR-0065)
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
   })

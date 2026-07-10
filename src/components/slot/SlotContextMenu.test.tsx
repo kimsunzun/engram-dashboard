@@ -22,7 +22,7 @@ vi.mock('../../commands/dispatch', () => ({
   fireAndForget: (...args: unknown[]) => dispatchMock.fireAndForget(...args),
 }))
 
-import SlotContextMenu, { clampMenuPosition } from './SlotContextMenu'
+import SlotContextMenu, { clampMenuPosition, flyoutPosition } from './SlotContextMenu'
 
 function item(id: string, over: Partial<ResolvedSlotMenuItem> = {}): ResolvedSlotMenuItem {
   return { id, title: id, run: vi.fn(), group: 'slot-ops', separatorBefore: false, ...over }
@@ -57,6 +57,37 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
     })
     // resolve 된 run 은 메뉴가 직접 부르지 않는다(공유 경로로만).
     expect(it0.run).not.toHaveBeenCalled()
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('컨테이너(children) 항목: hover 로 flyout 이 열리고 자식 클릭 → fireAndForget(child.id, ctx)', () => {
+    const onClose = vi.fn()
+    const container = item('container:새 콘텐츠', {
+      title: '새 콘텐츠',
+      children: [item('slot.fill.agentList', { title: '트리' })],
+    })
+    render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[container]}
+        ctx={{ viewId: 'v1', slotId: 's1', agentId: null }}
+        onClose={onClose}
+      />,
+    )
+    // 컨테이너 title 은 항상 보인다. hover 전엔 자식 flyout 미마운트.
+    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
+    expect(screen.queryByText('트리')).toBeNull()
+    // hover(mouseEnter) → flyout 열림.
+    fireEvent.mouseEnter(screen.getByText('새 콘텐츠'))
+    const child = screen.getByText('트리')
+    expect(child).toBeTruthy()
+    fireEvent.click(child)
+    expect(dispatchMock.fireAndForget).toHaveBeenCalledWith('slot.fill.agentList', {
+      viewId: 'v1',
+      slotId: 's1',
+      agentId: null,
+    })
     expect(onClose).toHaveBeenCalled()
   })
 
@@ -123,6 +154,38 @@ describe('clampMenuPosition — 뷰포트 안으로 clamp', () => {
   })
 })
 
+// ── ★서브메뉴 flyout 배치(ADR-0065)★: 순수 helper flyoutPosition — 기본 우측 전개, 우측 오버플로 시 좌측 뒤집기. ──
+describe('flyoutPosition — 서브메뉴 우측/좌측 전개', () => {
+  const VW = 1000
+  const VH = 800
+  const FW = 150 // flyout 폭
+  const FH = 200 // flyout 높이
+
+  it('우측 공간 충분 → 부모 오른쪽 가장자리(anchorRight)에서 오른쪽으로 편다', () => {
+    // 부모 rect: left=100, right=250, top=100. right(250)+FW(150)=400 <= 1000 → 오른쪽.
+    expect(flyoutPosition(100, 250, 100, FW, FH, VW, VH)).toEqual({ top: 100, left: 250 })
+  })
+
+  it('우측 오버플로 + 좌측 공간 有 → 왼쪽(anchorLeft - FW)으로 뒤집는다', () => {
+    // 부모 rect: left=900, right=980. right(980)+150=1130 > 1000 넘침, left(900)-150=750 >= margin → 왼쪽.
+    const { left } = flyoutPosition(900, 980, 100, FW, FH, VW, VH)
+    expect(left).toBe(900 - FW) // 750
+    expect(left + FW).toBeLessThanOrEqual(VW)
+  })
+
+  it('하단 오버플로 → top 을 밀어올려 flyout 전체가 뷰포트 안', () => {
+    // top=700, FH=200 → 700+200=900 > 800 넘침 → top = min(700, 800-200-4)=596.
+    const { top } = flyoutPosition(100, 250, 700, FW, FH, VW, VH)
+    expect(top).toBe(VH - FH - 4)
+    expect(top + FH).toBeLessThanOrEqual(VH)
+  })
+
+  it('flyout 이 뷰포트보다 큼(FH>VH) → top 은 최소 margin 으로 상단 고정(음수 방지)', () => {
+    const { top } = flyoutPosition(100, 250, 700, FW, 900, VW, VH)
+    expect(top).toBe(4)
+  })
+})
+
 // ── 컴포넌트 경로: useLayoutEffect 가 getBoundingClientRect 를 재 helper 로 위치를 계산한다.
 //    getBoundingClientRect 를 모킹해 하단 넘침을 만들고, 렌더된 메뉴의 top 이 clamp 됐는지 단언한다. ──
 describe('SlotContextMenu — 마운트 후 뷰포트 clamp 적용(Bug1)', () => {
@@ -146,13 +209,11 @@ describe('SlotContextMenu — 마운트 후 뷰포트 clamp 적용(Bug1)', () =>
         onClose={vi.fn()}
       />,
     )
-    const menu = screen.getByText('slot.close').closest('[style]')?.parentElement?.parentElement as HTMLElement
     // 렌더된 컨테이너(position:fixed)를 찾아 top 이 vh-300-4 로 clamp 됐는지 확인.
     const fixed = document.querySelector('div[style*="fixed"]') as HTMLElement
     expect(fixed).toBeTruthy()
     const topPx = parseInt(fixed.style.top, 10)
     expect(topPx).toBe(vh - 300 - 4)
     expect(topPx + 300).toBeLessThanOrEqual(vh)
-    void menu
   })
 })
