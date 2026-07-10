@@ -19,11 +19,6 @@ import SlotContextMenu from '../slot/SlotContextMenu'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode } from '../slot/renderMode'
 
-function nodeKey(node: LayoutNode): string {
-  if (node.type === 'slot') return `s${node.id}`
-  return `p[${node.dir}:${nodeKey(node.a)},${nodeKey(node.b)}]`
-}
-
 export default function ViewLayoutRenderer({
   node,
   focusedSlotId,
@@ -179,13 +174,20 @@ export default function ViewLayoutRenderer({
   //   0.5 → "50%" = 50/50. 컨테이너 실측 픽셀을 몰라도 되고 높이는 Allotment 가 컨테이너로 채운다.
   //   ★초기 사이징만★: 드래그 리사이즈→백엔드 ratio 되쓰기는 이 슬라이스 범위 밖(ADR-0063).
   // TODO(follow-up): drag→backend ratio writeback (layout:updated 권위 루프 = 별도 슬라이스)
+  // ★Allotment.Pane key = 위치 고정(pane-a/pane-b), 콘텐츠 파생 금지★: 옛 key 는 nodeKey(node.a) 로
+  //   *서브트리 구조*에서 파생됐다 — 어느 pane 안의 슬롯이 split 으로 재구조화되면 그 pane 의 nodeKey 가
+  //   바뀌어 React 가 Pane 을 unmount+remount 했고, Allotment 는 pane 이탈+합류로 보아 전 pane 을 균등
+  //   재분배(형제의 비율 소실 — 예: 왼 20% → 50% 점프)했다. split 은 항상 a/b 두 자식을 이 순서로만
+  //   가지므로 위치 기반 안정 key("pane-a"/"pane-b")를 쓴다 → 콘텐츠 재구조화에도 Pane 이 마운트 유지 →
+  //   Allotment 가 사이즈를 보존한다. (형제 2개 사이에서만 유일하면 됨 — 중첩 Allotment 는 각자 짝을 가짐.)
+  //   preferredSize(=ratio 파생 초기 사이징 %)는 첫 pane(a)에만 — 마운트 시 1회 적용·이후 보존(ADR-0063).
   return (
     <div style={{ height: '100%' }}>
       <Allotment vertical={node.dir === 'vertical'}>
-        <Allotment.Pane key={nodeKey(node.a)} preferredSize={`${Math.round(node.ratio * 100)}%`}>
+        <Allotment.Pane key="pane-a" preferredSize={`${Math.round(node.ratio * 100)}%`}>
           <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
-        <Allotment.Pane key={nodeKey(node.b)}>
+        <Allotment.Pane key="pane-b">
           <ViewLayoutRenderer node={node.b} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
       </Allotment>

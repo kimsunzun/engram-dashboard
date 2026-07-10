@@ -791,6 +791,11 @@
 - **게이트:** review PASS(doc-aware+Codex; 렌더 throw→앱크래시 HIGH·중복 미dedup·공유dispatch 미사용 3건 적출→코더 재수정 1회 반영). QA: tsc 0·npm test 453·**GUI 실측**(프리셋 슬롯 우클릭 = 추가+구분선+공통5, 닫기 복원 스샷 확인).
 - **미해결(파킹):** ① 슬롯별 메뉴 세부 curation은 사용자가 incremental 스펙 ② AgentList 배경 "에이전트 생성"이 폴더 다이얼로그로 일관화되며 프리셋-리스트 spawn 드롭 → "이 프리셋으로 생성" 프리셋-행 액션 후속 ③ ctx.viewId null(활성탭 없는 순간) 공통 ops 무반응(저빈도 엣지, fireAndForget 로깅) ④ when-DSL(복합 조건) 미도입.
 
+## 레이아웃 버그 2건 수정 (2026-07-10, master, 대화 세션) — 사용자 실측 제보
+- **Bug1 메뉴 하단 잘림:** SlotContextMenu가 `{top:y,left:x}` 무클램프 → 창 하단 근처 우클릭 시 메뉴가 뷰포트 밖으로 넘쳐 잘림. 수정: pure `clampMenuPosition(x,y,w,h,vw,vh)` + `useLayoutEffect`(deps `[x,y,items.length]`)로 마운트 직후 실측→뷰포트 안으로 clamp(하단 넘치면 위로). GUI 실측: 커서 y=780/vh=800 → 메뉴 top=610/bottom=796(안쪽·위로 뒤집힘).
+- **Bug2 분할 시 형제 pane ratio 리셋:** `Allotment.Pane key={nodeKey(...)}`(콘텐츠 파생) → 슬롯 분할로 형제 pane subtree 재구조 시 key 변경→remount→Allotment 전 pane 균등 재분배 → 좌측 20% pane이 ~50%로 튐. 수정: pane key를 위치 기반 안정값(`pane-a`/`pane-b`)으로(nodeKey 제거). GUI 실측: 우측 empty 분할해도 좌측 agent_list 256px(20%) 그대로 유지.
+- **게이트:** `/implement` — 코더(Opus) → `/review code`(Codex blind 단독, focused 2-fix 비례; LOW deps 누락 1건→인라인 반영) → `/qa`(tsc 0·npm test 461·**GUI 스샷 실측** 두 버그). Bug2 실제 Allotment 사이즈 유지는 jsdom 불가라 GUI가 정본.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

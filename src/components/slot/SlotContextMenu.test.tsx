@@ -22,7 +22,7 @@ vi.mock('../../commands/dispatch', () => ({
   fireAndForget: (...args: unknown[]) => dispatchMock.fireAndForget(...args),
 }))
 
-import SlotContextMenu from './SlotContextMenu'
+import SlotContextMenu, { clampMenuPosition } from './SlotContextMenu'
 
 function item(id: string, over: Partial<ResolvedSlotMenuItem> = {}): ResolvedSlotMenuItem {
   return { id, title: id, run: vi.fn(), group: 'slot-ops', separatorBefore: false, ...over }
@@ -76,5 +76,83 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       slotId: 's1',
       agentId: null,
     })
+  })
+})
+
+// ── ★뷰포트 clamp(Bug1)★: 순수 helper clampMenuPosition 을 폭넓게 단위테스트한다. jsdom 은
+//    getBoundingClientRect 가 0을 돌려 컴포넌트 경로로는 넘침을 못 만들므로, 실제 clamp 로직은 이 helper
+//    테스트가 소유한다(컴포넌트는 이 helper 를 호출만 — GUI 실측은 별도). ──
+describe('clampMenuPosition — 뷰포트 안으로 clamp', () => {
+  const VW = 1000
+  const VH = 800
+  const W = 150
+  const H = 300
+
+  it('넘치지 않으면 커서 좌표 그대로', () => {
+    expect(clampMenuPosition(100, 100, W, H, VW, VH)).toEqual({ top: 100, left: 100 })
+  })
+
+  it('하단 넘침 → top 을 vh-h-margin 으로 밀어올린다(전체 보이게)', () => {
+    // y=700, h=300 → 700+300=1000 > 800 넘침 → top = min(700, 800-300-4)=496
+    const { top } = clampMenuPosition(100, 700, W, H, VW, VH)
+    expect(top).toBe(VH - H - 4)
+    expect(top + H).toBeLessThanOrEqual(VH) // 하단이 뷰포트 안
+  })
+
+  it('우측 넘침 → left 를 vw-w-margin 으로 밀어들인다', () => {
+    // x=950, w=150 → 950+150=1100 > 1000 넘침 → left = min(950, 1000-150-4)=846
+    const { left } = clampMenuPosition(950, 100, W, H, VW, VH)
+    expect(left).toBe(VW - W - 4)
+    expect(left + W).toBeLessThanOrEqual(VW)
+  })
+
+  it('우하단 코너 넘침 → top·left 둘 다 clamp', () => {
+    const { top, left } = clampMenuPosition(950, 700, W, H, VW, VH)
+    expect(top).toBe(VH - H - 4)
+    expect(left).toBe(VW - W - 4)
+  })
+
+  it('메뉴가 뷰포트보다 큼(h>vh) → top 은 최소 margin 으로 상단 고정(음수 방지)', () => {
+    // h=900 > vh=800 → vh-h-4 = -104 인데 max(4, ...) 로 4 고정
+    const { top } = clampMenuPosition(100, 700, W, 900, VW, VH)
+    expect(top).toBe(4)
+  })
+
+  it('가장자리 정확히 맞음(y+h===vh)은 넘침 아님 → 그대로', () => {
+    expect(clampMenuPosition(0, VH - H, W, H, VW, VH).top).toBe(VH - H)
+  })
+})
+
+// ── 컴포넌트 경로: useLayoutEffect 가 getBoundingClientRect 를 재 helper 로 위치를 계산한다.
+//    getBoundingClientRect 를 모킹해 하단 넘침을 만들고, 렌더된 메뉴의 top 이 clamp 됐는지 단언한다. ──
+describe('SlotContextMenu — 마운트 후 뷰포트 clamp 적용(Bug1)', () => {
+  const origRect = HTMLElement.prototype.getBoundingClientRect
+  afterEach(() => {
+    HTMLElement.prototype.getBoundingClientRect = origRect
+  })
+
+  it('하단 근처 우클릭 → 메뉴 top 이 뷰포트 안으로 clamp 된다', () => {
+    // 메뉴 크기 150×300 을 강제. window.innerHeight 는 jsdom 기본(768)로 두고 y=700 → 넘침.
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return { width: 150, height: 300, top: 0, left: 0, right: 150, bottom: 300, x: 0, y: 0, toJSON() {} } as DOMRect
+    }
+    const vh = window.innerHeight
+    render(
+      <SlotContextMenu
+        x={10}
+        y={vh - 50}
+        items={[item('slot.close')]}
+        ctx={{ viewId: 'v1', slotId: 's1', agentId: null }}
+        onClose={vi.fn()}
+      />,
+    )
+    const menu = screen.getByText('slot.close').closest('[style]')?.parentElement?.parentElement as HTMLElement
+    // 렌더된 컨테이너(position:fixed)를 찾아 top 이 vh-300-4 로 clamp 됐는지 확인.
+    const fixed = document.querySelector('div[style*="fixed"]') as HTMLElement
+    expect(fixed).toBeTruthy()
+    const topPx = parseInt(fixed.style.top, 10)
+    expect(topPx).toBe(vh - 300 - 4)
+    expect(topPx + 300).toBeLessThanOrEqual(vh)
+    void menu
   })
 })

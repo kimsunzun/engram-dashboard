@@ -69,18 +69,28 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 // preferredSize(=ratio 파생 초기 사이징 %, ADR-0063)를 Pane 의 data 속성으로 노출해 테스트가 단언할 수 있게
 // 한다. ★Allotment 의 defaultSizes 는 비율이 아니라 픽셀이라 [0.2,0.8]=0.2px/0.8px 로 붕괴한다 — 대신
 //   첫 Pane 에 preferredSize="20%"(퍼센트 문자열)로 준다(실측 스샷 회귀 수정).
+// ★Bug2 key 안정성 관측★: React key 는 props 로 새 나오지 않아 DOM 에서 직접 못 읽는다. 대신 Pane 이
+//   마운트마다 유일 인스턴스 id 를 만들어(useRef + 모듈 카운터) data-pane-instance 로 노출한다 —
+//   key 가 바뀌어 remount 되면 새 id 가, key 가 안정하면 같은 id 가 유지된다. 콘텐츠 재구조화(slot→중첩
+//   split) 리렌더 후 같은 인스턴스 id 면 = Pane 이 마운트 유지 = key 안정 = Allotment 가 사이즈 보존.
+let paneInstanceCounter = 0
 vi.mock('allotment', async () => {
   const React = (await import('react')).default
-  const Pane = ({ children, preferredSize }: { children: React.ReactNode; preferredSize?: number | string }) =>
-    React.createElement(
+  const Pane = ({ children, preferredSize }: { children: React.ReactNode; preferredSize?: number | string }) => {
+    const instance = React.useRef<number | null>(null)
+    if (instance.current === null) instance.current = ++paneInstanceCounter
+    return React.createElement(
       'div',
       {
         'data-testid': 'allotment-pane',
         // pane 초기 사이징(예: "20%") — split 렌더 테스트가 첫 pane 에서 읽어 단언.
         'data-preferred-size': preferredSize != null ? String(preferredSize) : undefined,
+        // 마운트별 유일 id — remount 시 증가. key 안정성 테스트가 리렌더 전후로 비교.
+        'data-pane-instance': String(instance.current),
       },
       children,
     )
+  }
   const Allotment = Object.assign(
     ({ children }: { children: React.ReactNode }) =>
       React.createElement('div', { 'data-testid': 'allotment' }, children),
@@ -400,6 +410,46 @@ describe('ViewLayoutRenderer — split 분기', () => {
     const firstPane = screen.getAllByTestId('allotment-pane')[0]
     expect(firstPane.getAttribute('data-preferred-size')).toBe('50%')
   })
+
+  // ── ★Bug2: Allotment.Pane key 안정화 — 형제 콘텐츠 재구조화에도 pane 이 remount 되지 않는다★ ──────
+  // 이 스위트가 막는 것: 옛 nodeKey(node.b) 파생 key 는 b pane 안 슬롯이 split 으로 재구조화되면 key 가
+  // 바뀌어 pane 이 unmount+remount → Allotment 가 전 pane 을 균등 재분배 → 형제(a=왼 20%)의 비율 소실.
+  // 위치 기반 안정 key("pane-a"/"pane-b")면 pane 이 마운트 유지(같은 인스턴스 id) → 사이즈 보존.
+  it('b pane 콘텐츠가 slot→중첩 split 으로 재구조화돼도 두 pane 인스턴스 id 가 유지된다(remount 없음)', () => {
+    // 초기: 왼(a=20%) slot + 오(b) slot.
+    const initial = splitNode(slotNode('left', null), slotNode('right', null), 0.2)
+    const { rerender } = render(<ViewLayoutRenderer node={initial} focusedSlotId={null} />)
+    // 최상위 Allotment 의 직속 두 pane(중첩 것 제외) — 첫 Allotment 자식만 집는다.
+    const outerPanesBefore = topLevelPanes()
+    expect(outerPanesBefore).toHaveLength(2)
+    const [aBefore, bBefore] = outerPanesBefore.map(p => p.getAttribute('data-pane-instance'))
+    const preferredBefore = outerPanesBefore[0].getAttribute('data-preferred-size')
+
+    // b(오) 슬롯이 다른 곳에서 split 돼 중첩 split 이 됨(=b 서브트리 재구조화). a(왼)는 그대로.
+    const restructured = splitNode(
+      slotNode('left', null),
+      splitNode(slotNode('right', null), slotNode('right-2', null)),
+      0.2,
+    )
+    rerender(<ViewLayoutRenderer node={restructured} focusedSlotId={null} />)
+
+    const outerPanesAfter = topLevelPanes()
+    const [aAfter, bAfter] = outerPanesAfter.map(p => p.getAttribute('data-pane-instance'))
+    // ★핵심 단언★: 두 최상위 pane 인스턴스 id 가 리렌더 전후로 동일 = key 안정 = remount 없음.
+    expect(aAfter).toBe(aBefore)
+    expect(bAfter).toBe(bBefore)
+    // preferredSize(=왼 20%)도 첫 pane 에 그대로.
+    expect(outerPanesAfter[0].getAttribute('data-preferred-size')).toBe(preferredBefore)
+    expect(preferredBefore).toBe('20%')
+  })
+
+  /** 최상위 Allotment 의 직속 Pane 두 개만(중첩 Allotment 의 pane 은 제외). */
+  function topLevelPanes(): HTMLElement[] {
+    const outer = screen.getAllByTestId('allotment')[0]
+    return Array.from(outer.children).filter(
+      c => (c as HTMLElement).getAttribute('data-testid') === 'allotment-pane',
+    ) as HTMLElement[]
+  }
 })
 
 // ── ★우클릭 통합 컨텍스트 메뉴(§5, ADR-0064)★ ─────────────────────────────────────────────────
