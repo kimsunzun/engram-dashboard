@@ -11,6 +11,7 @@
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { agentClient } from '../api/clientFactory'
+import { useMonitoringPickerStore } from '../store/monitoringPickerStore'
 import { useViewStore } from '../store/viewStore'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
@@ -70,11 +71,28 @@ register({
   },
 })
 
+// ADR-0067: slot 우클릭 "에이전트 모니터링" — 검색 팝업(실행중 에이전트)을 우클릭한 그 slot 을 타깃으로 연다.
+register({
+  id: 'slot.assignRunningAgent',
+  title: '에이전트 모니터링',
+  category: 'slot',
+  // ★배치 타깃 = 우클릭한 slot(명시)★(ADR-0067): ctx.viewId/slotId 가 우클릭한 slot 좌표다(포커스 비의존
+  //   — focus-steal 원천 차단). 여기선 팝업을 그 좌표로 열기만 하고, 실제 배치(assign_agent)는 팝업의
+  //   on-select 가 viewStore.assignAgent 로 흘린다(§5 단일 제어 표면 — 별도 배치 상태 없음). 팝업 열기 자체는
+  //   focused_slot_id 를 건드리지 않는다(우클릭 포커스 불변식). requireCoords 로 좌표를 검증(fail-loud).
+  run: args => {
+    const { viewId, slotId } = requireCoords(args, 'slot.assignRunningAgent')
+    useMonitoringPickerStore.getState().open(viewId, slotId)
+  },
+})
+
 // empty 슬롯 전용 기여(group='content' — 공통 slot-ops 위에 렌더).
-// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 3항목(트리·팔레트·생성)을 컨테이너 하나로 접어
-//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식은 기존 상대 순서(트리→팔레트→생성)
+// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 항목(트리·팔레트)을 컨테이너 하나로 접어
+//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식은 기존 상대 순서(트리→팔레트)
 //   유지. command 는 registry 단일소스로 그대로 직접 호출 가능(§5 불변) — 서브메뉴는 presentation 일 뿐이다.
 //   향후 백엔드 타입(codex/gemini) 추가 시 자식으로 붙는 확장 자리.
+// ★ADR-0067: "생성"(slot.createAgentHere) 제거★ — 스폰은 트리 소관으로 이관(reserved 프로필 더블클릭 +
+//   agent_list 슬롯 메뉴 agentlist.createAgent). command 정의 자체는 남긴다(직접 호출·향후 재사용 가능).
 registerSlotMenu('empty', [
   {
     title: '새 콘텐츠',
@@ -83,8 +101,20 @@ registerSlotMenu('empty', [
     children: [
       { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
       { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
-      { commandId: 'slot.createAgentHere', group: 'content', order: 30 },
     ],
+  },
+])
+
+// ADR-0067: "에이전트 모니터링" 기여 — empty·agent 슬롯에 노출(우클릭한 slot 에 실행중 에이전트 배정).
+//   ★hideOn = ['agent_list','preset_palette']★: 소스 슬롯(트리·팔레트)에서 "여기에 에이전트를 모니터링"
+//   은 무의미하다(그 슬롯은 콘텐츠 자체가 소스 UI). '*' 보편 등록으로 empty·agent 를 함께 덮되 소스 두
+//   타입만 subtraction 으로 뺀다(ADR-0065 hideOn — allowlist 아님, 공통 단일소스 유지). group='content'.
+registerSlotMenu('*', [
+  {
+    commandId: 'slot.assignRunningAgent',
+    group: 'content',
+    order: 5,
+    hideOn: ['agent_list', 'preset_palette'],
   },
 ])
 

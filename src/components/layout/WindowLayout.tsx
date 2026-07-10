@@ -26,6 +26,8 @@ import {
 } from '../../store/viewStore'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
+import AgentMonitoringPicker from '../slot/AgentMonitoringPicker'
+import { useMonitoringPickerStore } from '../../store/monitoringPickerStore'
 
 interface WindowLayoutProps {
   /** 이 창의 label(main·slot-popup-N). 모든 탭 command·이벤트 필터가 이 label 을 쓴다. */
@@ -34,6 +36,8 @@ interface WindowLayoutProps {
 
 export default function WindowLayout({ label }: WindowLayoutProps) {
   const win = useViewStore(s => s.windows[label])
+  // ADR-0067: fresh remount on each open — key 변경이 stale query/activeIndex 플래시를 방지한다.
+  const openId = useMonitoringPickerStore(s => s.openId)
   const applyWindowTabsUpdated = useViewStore(s => s.applyWindowTabsUpdated)
   const applyLayoutUpdated = useViewStore(s => s.applyLayoutUpdated)
   const switchTab = useViewStore(s => s.switchTab)
@@ -156,6 +160,12 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
           </div>
         ))}
       </div>
+      {/* ADR-0067: 에이전트 모니터링 검색 팝업 — 창당 하나 마운트. slot 우클릭 "에이전트 모니터링"
+          (slot.assignRunningAgent)이 monitoringPickerStore 로 열고, on-select 는 assign_agent 로 흘린다(§5).
+          닫힘 상태(target=null)면 아무것도 렌더하지 않는다.
+          key={openId}: open() 마다 key 가 바뀌어 fresh remount → query/activeIndex 가 useState 초기값으로
+          재설정된다(stale 플래시 없음, monitoringPickerStore.openId ADR-0067). */}
+      <AgentMonitoringPicker key={openId} />
     </div>
   )
 }

@@ -529,9 +529,10 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     fireEvent.mouseEnter(screen.getByText('새 콘텐츠'))
   }
 
-  it('빈 슬롯 우클릭 → 최상위 = 새 콘텐츠(컨테이너) + 공통 슬롯 ops, 채움은 flyout 안 (ADR-0065)', () => {
+  it('빈 슬롯 우클릭 → 최상위 = 에이전트 모니터링 + 새 콘텐츠(컨테이너) + 공통 슬롯 ops, 채움은 flyout 안 (ADR-0067/0065)', () => {
     openMenu('s1', null)
-    // 최상위: 콘텐츠 컨테이너 + 공통 slot-ops(단, empty 는 popout/비우기 트림).
+    // 최상위: 에이전트 모니터링(ADR-0067) + 콘텐츠 컨테이너 + 공통 slot-ops(단, empty 는 popout/비우기 트림).
+    expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
     expect(screen.getByText('새 콘텐츠')).toBeTruthy()
     expect(screen.getByText('가로 분할')).toBeTruthy()
     expect(screen.getByText('세로 분할')).toBeTruthy()
@@ -539,12 +540,13 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     // ADR-0065 트림: 빈 슬롯엔 비우기/팝업으로 분리 없음(hideOn:['empty']).
     expect(screen.queryByText('비우기')).toBeNull()
     expect(screen.queryByText('팝업으로 분리')).toBeNull()
-    // 채움 3항목은 hover 전엔 미노출(서브메뉴 안).
+    // 채움 항목은 hover 전엔 미노출(서브메뉴 안).
     expect(screen.queryByText('에이전트 트리 열기')).toBeNull()
     openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
     expect(screen.getByText('프리셋 팔레트 열기')).toBeTruthy()
-    expect(screen.getByText('에이전트 생성')).toBeTruthy()
+    // ADR-0067: "에이전트 생성"은 서브메뉴에서 제거됐다(스폰 = 트리 소관).
+    expect(screen.queryByText('에이전트 생성')).toBeNull()
   })
 
   it('우클릭 전에는 메뉴가 없다(preventDefault 후 상태 기반 마운트)', () => {
@@ -597,28 +599,9 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(setSlotContentSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-to', { type: 'agent_list' })
   })
 
-  // ── ★"에이전트 생성"(slot.createAgentHere): flyout → 폴더 다이얼로그 → spawnAgent → assignAgent★ ──────
-  it('"에이전트 생성"(flyout) → 폴더 다이얼로그 고른 cwd 로 spawnAgent 후 assignAgent(viewId, slotId, 새 id)', async () => {
-    dialogMock.open.mockResolvedValue('C:/work')
-    clientMock.spawnAgent.mockResolvedValueOnce({ id: 'brand-new-agent' })
-    openMenu('slot-D', null)
-    openNewContentFlyout()
-    fireEvent.click(screen.getByText('에이전트 생성'))
-    await vi.waitFor(() => expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work'))
-    await vi.waitFor(() =>
-      expect(assignAgentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-D', 'brand-new-agent'),
-    )
-  })
-
-  it('"에이전트 생성"(flyout) → 다이얼로그 취소(null) 시 spawn/assign 없음(no-op)', async () => {
-    dialogMock.open.mockResolvedValue(null)
-    openMenu('slot-D2', null)
-    openNewContentFlyout()
-    fireEvent.click(screen.getByText('에이전트 생성'))
-    await vi.waitFor(() => expect(dialogMock.open).toHaveBeenCalled())
-    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
-    expect(assignAgentSpy).not.toHaveBeenCalled()
-  })
+  // ADR-0067: "에이전트 생성"(slot.createAgentHere)은 슬롯 콘텐츠-채움 메뉴에서 제거됐다(스폰 = 트리
+  //   소관). command 정의는 남지만 이 메뉴 경로가 없어져 옛 flyout spawn 테스트 2개는 삭제했다 —
+  //   command 직접 라우팅 회귀는 slotCommands.test.ts 가 계속 커버한다.
 
   // ── ★agent 슬롯: 콘텐츠 전용 "에이전트 종료" + 공통 ops 공존(ADR-0064)★ ──────────────────────
   it('agent 배정 슬롯 우클릭 → "에이전트 종료"(콘텐츠) 클릭 시 killAgent(그 agentId) 호출', () => {

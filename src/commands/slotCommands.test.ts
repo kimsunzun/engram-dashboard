@@ -127,21 +127,23 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(clientMock.killAgent).not.toHaveBeenCalled()
   })
 
-  it('empty 콘텐츠 메뉴 최상위 = 새 콘텐츠(컨테이너) → 가로/세로 분할 → 닫기 (ADR-0065 트림)', () => {
+  it('empty 콘텐츠 메뉴 최상위 = 에이전트 모니터링 → 새 콘텐츠(컨테이너) → 가로/세로 분할 → 닫기 (ADR-0067/0065 트림)', () => {
     const items = buildSlotMenu('empty')
-    // ADR-0065: 채움 3항목은 "새 콘텐츠" 컨테이너로 접히고, popout/empty 는 hideOn 으로 트림된다.
+    // ADR-0067: content 그룹 맨 위 = 에이전트 모니터링(order 5). ADR-0065: 채움 2항목은 "새 콘텐츠"
+    //   컨테이너(order 10)로 접히고, popout/empty 는 hideOn 으로 트림된다.
     expect(items.map(i => i.id)).toEqual([
+      'slot.assignRunningAgent',
       'container:새 콘텐츠',
       'slot.split.h',
       'slot.split.v',
       'slot.close',
     ])
-    // 컨테이너 자식 = 트리/팔레트/생성(기존 상대 순서 유지).
-    expect(items[0].children?.map(c => c.id)).toEqual([
+    // ADR-0067: 컨테이너 자식 = 트리/팔레트만("생성" 제거 — 스폰은 트리 소관).
+    expect(items[1].children?.map(c => c.id)).toEqual([
       'slot.fill.agentList',
       'slot.fill.presetPalette',
-      'slot.createAgentHere',
     ])
+    expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
     // hideOn 트림 확인: 빈 슬롯엔 비우기/팝업 없음.
     expect(items.map(i => i.id)).not.toContain('slot.empty')
     expect(items.map(i => i.id)).not.toContain('slot.popout')
@@ -153,7 +155,10 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
   })
-  it('agent 콘텐츠 메뉴 = 종료(content) 먼저', () => {
-    expect(buildSlotMenu('agent')[0].id).toBe('agent.kill')
+  it('agent 콘텐츠 메뉴 = 에이전트 모니터링(order 5) → 종료(order 10) 순 (ADR-0067)', () => {
+    const items = buildSlotMenu('agent')
+    // content 그룹 안에서 order 로 정렬: assignRunningAgent(5) 먼저, agent.kill(10) 나중.
+    expect(items[0].id).toBe('slot.assignRunningAgent')
+    expect(items[1].id).toBe('agent.kill')
   })
 })
