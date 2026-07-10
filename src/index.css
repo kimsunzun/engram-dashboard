@@ -16,6 +16,15 @@
   --color-elevated: var(--surface-elevated);
 }
 
+/* html/body/#root 배경을 var(--bg)로 고정.
+   WebView2 기본 흰 배경이 Allotment 신규 pane 마운트 1-2프레임 동안 투시되는 현상 제거.
+   폴백 #0a0a0a = 다크 --bg 값. data-theme 는 App 마운트 후 useEffect 로 붙으므로 first-paint 순간엔 미적용 → 이 폴백이 쓰인다.
+   부팅 테마가 항상 dark 인 현재는 정확; 향후 테마 영속 도입 시 폴백을 저장 테마와 맞춰야 함.
+   var(--bg)가 이미 있으면 폴백은 무시되고 현재 테마 배경이 사용된다(세 테마 모두 --bg 정의). */
+html, body, #root {
+  background: var(--bg, #0a0a0a);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;

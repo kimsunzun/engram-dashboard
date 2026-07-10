@@ -810,6 +810,12 @@
 - **게이트:** review full PASS(2인, FIX 0 — agent 경로 value-identical·MOVE→COPY 가드 intact·구독 델타 불변 검증). QA full PASS: cargo build 링크 OK · fmt · 격리 0 · tsc 0 · npm test 482 · **GUI 실측** agent_list/preset 팝업→새 창 렌더·빈 슬롯 팝업 미노출·**agent 팝업 회귀 없음(스폰→팝업→라이브 터미널·구독 이관)**. src-tauri 레이아웃 테스트는 WebView2 배리어로 cargo test 불가 → build+GUI가 정본.
 - **미해결(파킹, 비차단 리뷰 노트):** ① src-tauri 순수 레이아웃/라우터 테스트가 WebView2 배리어로 CI 미실행(rot 리스크) → core crate로 seam 분리 검토(ADR-0012, 사용자 결정) ② `prepare_detached_view`가 missing-slot과 Empty를 같은 에러로 뭉뚱그림(진단 손실, low).
 
+## 슬롯 UI 폴리시 — 분할 흰 플래시 제거 + 포커스 표시 은은화 (2026-07-10, master, 대화 세션)
+- **무엇(사용자 제보):** ① 가로/세로 분할 시 흰 화면 1~2프레임 플래시 ② 포커스 슬롯 2px 밝은 파랑 테두리가 너무 강함.
+- **원인:** ① `html`/`body`/`#root` 배경 투명(rgba0) → 분할로 새로 마운트된 Allotment pane(투명) 통해 WebView2 기본 흰 배경 비침 ② ViewLayoutRenderer border `2px solid var(--accent)`.
+- **수정(프론트 CSS/스타일만):** `index.css`에 `html,body,#root { background: var(--bg,#0a0a0a) }`(테마색 비침 + cold-start dark 폴백) · ViewLayoutRenderer 포커스 = border 항상 `1px solid var(--border)` + `box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent)`(레이아웃 이동 0). 포커스 강도는 최초 "가장 은은(40%)"에서 `/research` 경고("GUI 에디터의 너무 약한 포커스 표시가 반복 UX 불만" — VS Code #24586) 반영해 **65%로 상향**(사용자 재결정). ADR 없음(비-ADR급 폴리시 — 코더가 넣은 잘못된 ADR-0065 앵커는 리뷰 지적으로 제거).
+- **게이트:** `/implement simple`(코더 Sonnet → `/review code light` PASS[NIT: 잘못된 ADR-0065 앵커 제거 + cold-start 문구 정정 = comment-only FIX 반영] → `/qa` GUI PASS[html/body/#root computed=rgb(10,10,10) 불투명·포커스 슬롯 1px border+inset accent40% 실측]).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

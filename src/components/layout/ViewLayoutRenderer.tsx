@@ -81,7 +81,12 @@ export default function ViewLayoutRenderer({
         style={{
           height: '100%',
           background: 'var(--bg)',
-          border: isFocused ? '2px solid var(--accent)' : '1px solid var(--border)',
+          // border 폭을 항상 1px 고정해 포커스 이동 시 layout shift 제거.
+          // 포커스 표시는 inset box-shadow(65% 반투명 accent) — 세 테마 모두 color-mix 로 자동 적응.
+          //   ★강도 65%★: GUI 에디터의 너무 약한 포커스 표시가 반복 UX 불만이라(VS Code #24586 등, /research)
+          //   "은은하되 확실히 식별"되게 40%→65%로 올림(사용자 결정). WebView2 최신 Chromium = color-mix 지원.
+          border: '1px solid var(--border)',
+          boxShadow: isFocused ? 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent)' : 'none',
           boxSizing: 'border-box',
           // 콘텐츠(터미널/rich) 있을 때: 슬롯을 100% 채우도록 여백·정렬 제거(center 정렬 끼면 깨짐).
           // 빈 슬롯(empty): 플레이스홀더를 중앙정렬하는 flex 유지.

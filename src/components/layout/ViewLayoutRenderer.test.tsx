@@ -227,19 +227,24 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.getByText('— empty —')).toBeTruthy()
   })
 
-  it('focusedSlotId == node.id → 포커스 테두리(accent border)가 적용된다', () => {
+  it('focusedSlotId == node.id → 포커스 인디케이터(inset box-shadow, accent 65%)가 적용된다', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s1" />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper).toBeTruthy()
-    // isFocused=true 일 때 border 에 'accent' 가 포함되어야 한다(CSS 변수 참조 형태 검사).
-    expect(wrapper.style.border).toContain('accent')
+    // ADR-0065(focus-ring): border 폭은 항상 1px(layout shift 없음), 포커스는 inset box-shadow 로 표시.
+    // box-shadow 에 accent 가 포함되고 border 에는 포함되지 않아야 한다.
+    expect(wrapper.style.boxShadow).toContain('accent')
+    expect(wrapper.style.border).toContain('border')
+    expect(wrapper.style.border).not.toContain('accent')
   })
 
-  it('focusedSlotId != node.id → 비포커스 테두리(border 변수)가 적용된다', () => {
+  it('focusedSlotId != node.id → 비포커스: border=var(--border), box-shadow=none', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s-other" />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper.style.border).toContain('border')
     expect(wrapper.style.border).not.toContain('accent')
+    // 비포커스 시 box-shadow 는 none
+    expect(wrapper.style.boxShadow).toBe('none')
   })
 
   // ── ADR-0060/0061/0062: preset_palette·agent_list variant → 각 실 렌더러 마운트(hasContent=true) ──
