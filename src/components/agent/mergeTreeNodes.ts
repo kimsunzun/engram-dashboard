@@ -10,6 +10,8 @@ import type { AgentInfo, AgentProfile } from '../../api/types'
 export type AgentTreeNode = {
   id: string
   name: string
+  /** 작업 디렉토리(cwd). AgentList 가 이 값의 basename 으로 표시명을 파생한다(이름 미저장 정책). */
+  cwd: string
   /** 'running' = AgentStatus.type 문자열, 'reserved' = 깡통(미spawn 프로필). */
   status: string
   /** 'running'=실행중(또는 종료 등 세션 보유) / 'reserved'=저장만 된 깡통. */
@@ -42,6 +44,7 @@ export function mergeTreeNodes(
     .map(a => ({
       id: a.id,
       name: a.name || a.id.slice(0, 8),
+      cwd: a.cwd,
       status: a.status.type,
       kind: 'running' as const,
       canInterrupt: a.capabilities?.control?.interrupt ?? false,
@@ -62,6 +65,7 @@ export function mergeTreeNodes(
     .map(p => ({
       id: p.id,
       name: p.name || p.id.slice(0, 8),
+      cwd: p.cwd,
       status: 'Reserved',
       kind: 'reserved' as const,
       canInterrupt: false,

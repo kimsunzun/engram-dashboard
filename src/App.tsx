@@ -11,6 +11,7 @@ import { useAgentStore } from './store/agentStore'
 import './commands/themeCommands'
 import './commands/tabCommands'
 import './commands/presetCommands'
+import './commands/agentCommands'
 import { installKeybindings } from './commands/keybindings'
 
 function App() {

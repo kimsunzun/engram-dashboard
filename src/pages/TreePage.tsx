@@ -1,4 +1,4 @@
-import AgentTree from '../components/agent/AgentTree'
+import AgentList from '../components/agent/AgentList'
 
 export default function TreePage() {
   return (
@@ -22,7 +22,7 @@ export default function TreePage() {
       }}>
         Agent Tree
       </div>
-      <AgentTree />
+      <AgentList />
     </div>
   )
 }

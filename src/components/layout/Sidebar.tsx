@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import AgentTree from '../agent/AgentTree'
+import AgentList from '../agent/AgentList'
 import { agentClient } from '../../api/clientFactory'
 import { refreshProfiles } from '../../store/eventBus'
 
@@ -141,7 +141,7 @@ export default function Sidebar({ onToggle }: SidebarProps) {
           )}
         </div>
       )}
-      <AgentTree />
+      <AgentList />
     </div>
   )
 }

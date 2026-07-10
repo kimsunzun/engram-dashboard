@@ -17,35 +17,15 @@ import { useRef, useState } from 'react'
 
 import { agentClient } from '../../api/clientFactory'
 import { useAgentStore } from '../../store/agentStore'
+import { basename } from '../../util/basename'
 
 /**
- * cwd 의 basename(마지막 경로 세그먼트)을 파생한다(ADR-0061 — 이름 미저장). Windows(`\`)·POSIX(`/`)
- * 구분자를 모두 다루고, 후행 구분자는 무시한다(예: "C:/proj/" → "proj").
- *
- * ★반환값은 절대 blank(빈/공백-only) 가 아니다★: 라벨은 이 반환값 하나로만 그려지므로 blank 면 행이
- *   빈 칸으로 보인다. cwd 가 비었거나 공백-only 여서 파생할 basename 도 raw cwd 도 없을 때는 안정적
- *   placeholder("(경로 없음)") 로 degrade 한다. 그 외 non-empty cwd 는 아래 기존 규칙대로 처리한다.
- *
- * 엣지 케이스(basename 이 없거나 misleading 할 때)는 파생하지 않고 raw cwd 로 degrade 한다:
- *   - 빈/공백-only 문자열 → "(경로 없음)" placeholder(blank 라벨 방지 — 상위가 이 값만 그린다)
- *   - drive-root "C:\\" / "C:/" → 원본 유지("C:" 로 collapse 하면 오해 소지)
- *   - posix root "/" · UNC "\\\\server\\share" 처럼 후행 구분자 제거 후 세그먼트가 없거나 원본과
- *     같아지는 경우 → raw cwd 반환(잘못된 세그먼트로 붕괴 방지).
+ * 프리셋 표시명 = cwd basename(프론트 파생, ADR-0061 — 이름 미저장). 실제 파생 규칙은 공용 `basename`
+ * 유틸에 있다(AgentList 행 표시명과 단일 출처 공유 — 복제 시 win/posix·root 엣지가 갈린다). 여기선
+ * 도메인 의미(프리셋 표시명)를 이름으로 노출만 하고 규칙은 위임한다.
  */
-const PRESET_NAME_PLACEHOLDER = '(경로 없음)'
-
 export function presetDisplayName(cwd: string): string {
-  // 빈/공백-only cwd: 파생할 basename 도 raw cwd 도 없음 → blank 라벨 대신 안정적 placeholder.
-  if (!cwd || cwd.trim().length === 0) return PRESET_NAME_PLACEHOLDER
-  const trimmed = cwd.replace(/[\\/]+$/, '') // 후행 구분자 제거
-  // 후행 구분자만 있던 root-like 경로("/", "C:\\", "\\\\srv\\share\\") → trim 후 비거나
-  //   drive-only 로 남음. 이럴 땐 잘못된 세그먼트로 붕괴시키지 말고 raw cwd 로 degrade.
-  if (trimmed.length === 0) return cwd
-  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
-  const base = idx >= 0 ? trimmed.slice(idx + 1) : trimmed
-  // base 가 비면(root 직후) 또는 drive-root("C:") 면 misleading — raw cwd 로 fallback.
-  if (base.length === 0 || /^[A-Za-z]:$/.test(base)) return cwd
-  return base
+  return basename(cwd)
 }
 
 export default function PresetPalette() {

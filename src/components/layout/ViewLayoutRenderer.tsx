@@ -14,6 +14,7 @@ import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
 import PresetPalette from '../slot/PresetPalette'
+import AgentList from '../agent/AgentList'
 import SlotContextMenu from '../slot/SlotContextMenu'
 import { defaultRenderMode } from '../slot/renderMode'
 
@@ -66,8 +67,11 @@ export default function ViewLayoutRenderer({
     // hasContent = 구체 렌더러를 그리는 경우만(래퍼를 100% 채움). caps 대기 플레이스홀더는 empty 슬롯처럼
     // 중앙정렬 스타일로 둔다(hasContent=false). ADR-0060/0061: preset_palette variant 도 슬롯을 100% 채우는
     // 실 렌더러(PresetPalette)라 hasContent=true(중앙정렬 스타일이 팔레트 레이아웃을 깨지 않게).
+    // preset_palette·agent_list variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
+    //   플레이스홀더 스타일이 이들 레이아웃을 깨지 않게, ADR-0060/0061/0062).
     const isPresetPalette = node.content.type === 'preset_palette'
-    const hasContent = capsReady || isPresetPalette
+    const isAgentList = node.content.type === 'agent_list'
+    const hasContent = capsReady || isPresetPalette || isAgentList
     // ★ADR-0046: 버그 B 구조 해소★: ProtocolClient.subs 가 이제 viewId(slot id) 키라 같은 agentId 를 두
     //   슬롯에 배정해도 각 슬롯이 독립 구독·독립 진도를 갖는다(옛 agentId-당-단일-콜백 덮어쓰기 소멸).
     //   슬롯은 아래 viewId={node.id} 로 자기 slot id 를 구독 키로 넘긴다.
@@ -133,10 +137,14 @@ export default function ViewLayoutRenderer({
         ) : node.content.type === 'preset_palette' ? (
           // ADR-0060/0061: 프리셋 팔레트 variant — 슬롯을 100% 채우는 실 렌더러(hasContent=true).
           //   목록/추가/삭제는 PresetPalette 내부에서 agentClient(단일 제어 표면)로 흐른다.
-          //   (agent_list variant 는 Slice C — 여기서 구현하지 않고 아래 empty 플레이스홀더로 흘려보낸다.)
           <PresetPalette />
+        ) : node.content.type === 'agent_list' ? (
+          // ADR-0060/0062: 에이전트 목록 variant(Slice C) — 슬롯을 100% 채우는 실 렌더러(hasContent=true).
+          //   사이드바 고정 마운트와 동일 컴포넌트(향후 슬롯 배치도 이 케이스로 렌더). 조작은 AgentList
+          //   내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
+          <AgentList />
         ) : (
-          // empty(및 미구현 agent_list) 슬롯 플레이스홀더 — 중앙정렬 스타일(hasContent=false) 상속.
+          // empty 슬롯 플레이스홀더 — 중앙정렬 스타일(hasContent=false) 상속.
           <>
             <span>Slot {node.id.slice(0, 8)}</span>
             <span>— empty —</span>

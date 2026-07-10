@@ -91,6 +91,10 @@ vi.mock('../slot/DomSlot', () => ({
 vi.mock('../slot/PresetPalette', () => ({
   default: () => <div data-testid="preset-palette" />,
 }))
+// ── AgentList stub(ADR-0060/0062) — agent_list variant 마운트 여부만 확인(내부 배선은 AgentList.test 담당) ──
+vi.mock('../agent/AgentList', () => ({
+  default: () => <div data-testid="agent-list" />,
+}))
 
 // ── @xterm stub — TerminalSlot 이 실제로 렌더되지 않지만 import 해소 방어용 ────
 vi.mock('@xterm/xterm', () => ({
@@ -204,7 +208,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(wrapper.style.border).not.toContain('accent')
   })
 
-  // ── ADR-0060/0061: preset_palette variant → PresetPalette 마운트, agent_list 는 fall-through ──
+  // ── ADR-0060/0061/0062: preset_palette·agent_list variant → 각 실 렌더러 마운트(hasContent=true) ──
   it('content.type=preset_palette slot → PresetPalette 가 마운트된다', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'preset_palette' })} focusedSlotId={null} />)
     expect(screen.getByTestId('preset-palette')).toBeTruthy()
@@ -213,11 +217,13 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(wrapper.style.justifyContent).not.toBe('center')
   })
 
-  it('content.type=agent_list slot(Slice C 미구현) → PresetPalette 없이 empty 플레이스홀더로 흘려보낸다', () => {
+  it('content.type=agent_list slot(Slice C) → AgentList 가 마운트된다(hasContent=true)', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
-    // Slice B 범위 밖 — agent_list 는 구현하지 않고 기존 empty 플레이스홀더로 fall-through(깨지지 않음).
-    expect(screen.queryByTestId('preset-palette')).toBeNull()
-    expect(screen.getByText('— empty —')).toBeTruthy()
+    expect(screen.getByTestId('agent-list')).toBeTruthy()
+    // empty 플레이스홀더가 아니라 실 렌더러 — 중앙정렬 flex 없어야 목록 레이아웃이 안 깨진다.
+    expect(screen.queryByText('— empty —')).toBeNull()
+    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
+    expect(wrapper.style.justifyContent).not.toBe('center')
   })
 
   it('data-slot-id 속성이 node.id 로 설정된다(cdp 검증용 불변식)', () => {
