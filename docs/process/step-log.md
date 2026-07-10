@@ -816,6 +816,19 @@
 - **수정(프론트 CSS/스타일만):** `index.css`에 `html,body,#root { background: var(--bg,#0a0a0a) }`(테마색 비침 + cold-start dark 폴백) · ViewLayoutRenderer 포커스 = border 항상 `1px solid var(--border)` + `box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent)`(레이아웃 이동 0). 포커스 강도는 최초 "가장 은은(40%)"에서 `/research` 경고("GUI 에디터의 너무 약한 포커스 표시가 반복 UX 불만" — VS Code #24586) 반영해 **65%로 상향**(사용자 재결정). ADR 없음(비-ADR급 폴리시 — 코더가 넣은 잘못된 ADR-0065 앵커는 리뷰 지적으로 제거).
 - **게이트:** `/implement simple`(코더 Sonnet → `/review code light` PASS[NIT: 잘못된 ADR-0065 앵커 제거 + cold-start 문구 정정 = comment-only FIX 반영] → `/qa` GUI PASS[html/body/#root computed=rgb(10,10,10) 불투명·포커스 슬롯 1px border+inset accent40% 실측]).
 
+## 슬롯 포커스 제어 표면 — ADR-0066 크로스-윈도우 active 타깃 해소 (2026-07-10, master, 대화 세션)
+- **무엇:** ADR-0066(포커스·배치·geometry §5, 커밋 `25834c7`)이 열어둔 "멀티창 focus 미실측"을 사용자 결정으로 확정. 사용자 선택 = **last-focused-wins**("마지막 클릭한 슬롯이 배치 타깃").
+- **어떻게:** `/research medium` 설계-결정 재서베이(수집 3갈래 병렬 Sonnet: VS Code·JetBrains / tmux·wezterm·Zellij / i3·sway·browser → grounding → Codex 적대 리뷰). 결론: last-focused-wins = 표준(확신도 확실, 다수 독립 툴 교차확증, VS Code active editor group이 최근접 동형). Codex FIX 1건 = "창 넘는 단일 전역 변수"는 표준 아님(전부 per-window+메모리) → 모델을 **(마지막 focus 창)→(창별 active 탭)→(`focused_slot_id`) 파생**으로 정정.
+- **회수물:** ADR-0066 부분 개정(결정 5 신설 + 거부 대안 2건[JetBrains 반대편 split·Emacs 정책 배치, 창 넘는 단일 전역 변수] + 근거[재서베이] + 불변식[active 타깃 백엔드 파생]). 코드 변경 없음(설계 확정만). first slice = click-to-focus는 후속 `/implement`.
+- **게이트:** `/review doc light`(doc-aware reviewer-deep) → **FIX 3건**: (FIX-1 높음) 최초 개정이 `active_view` 크로스-윈도우 포인터를 도입해 **ADR-0057이 제거한 전역 `active_view_id`와 충돌** → (마지막 focus 창)→(창별 active)→(focused_slot_id) 파생 모델로 재작성 + ADR-0057 관련·근거·불변식에 명시. FIX-2(폐기된 ADR-0035 조항 인용) → 근거를 ADR-0035 권위 + ADR-0057 창별 모델로 분리. FIX-3(to-be-built 프레이밍) → "신설 예정" 명시. 반영 후 재검 PASS.
+
+## 슬롯 click-to-focus 제어 표면 — ADR-0066 first slice 구현 (2026-07-10, master, 대화 세션)
+- **무엇:** ADR-0066 결정 1(click-to-focus) 구현. 슬롯 클릭/LLM 커맨드가 백엔드 `focused_slot_id`를 이동 → 링 재렌더(백엔드 권위 emit, 낙관 X). 순수 포커스만(active_view/place/geometry는 후속 슬라이스).
+- **어떻게:** `/implement standard`(코더 Opus → `/review code full`[doc-aware reviewer-deep + cross-family blind Codex, 둘 다 PASS] → `/qa`[standard 코드 게이트 + 재시작 후 GUI 실측]).
+- **회수물(6파일):** `manager.rs` `set_focused_slot`(tree::contains_slot 가드 + bump_version, 유닛테스트 3) · `commands/layout.rs` `focus_slot`(lock→set→snapshot→emit layout:updated, router.rebuild 생략=focus는 출력 라우팅 불변, collect_agents가 Agent만 순회로 검증) · `lib.rs` generate_handler 등록 · `viewStore.ts` `focusSlot`(낙관 X, layout:updated 리스너 의존) · `slotCommands.ts` `slot.focus`(§5 사람/팔레트/LLM 동일 핸들) · `ViewLayoutRenderer.tsx` 슬롯 pane onClick + `data-slot-id`(leaf만, stopPropagation 없음).
+- **게이트:** review full PASS(2인, FIX 0 — 저심각도 관찰 2건[재포커스 시 불필요 emit·tabs-updated 중복]은 선택 최적화라 미반영). QA: cargo build 링크 OK(재시작 시 전체 exe 빌드 완료) · fmt · 격리 0(core 미접촉) · tsc 0 · npm test 482 · **GUI 실측 PASS**(CDP 9223): slot.focus 커맨드 경로 focus 이동·DOM 클릭 경로 focus 이동(~30ms, 100ms 목표 내)·65% inset 링이 focused 슬롯으로 이동·비포커스 슬롯 링 clear. do-not: bare cargo test = WebView2 배리어(member-scoped만).
+- **후속:** active_view(마지막-focus-창 추적)+focus-then-place(결정 2)·slot geometry(결정 3)·방향 sugar·드래그앤드롭·키보드 포커스 이동.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
