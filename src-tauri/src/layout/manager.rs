@@ -457,30 +457,54 @@ impl ViewManager {
 
     // ── move_slot_to_window 2-phase 지원(§5-3, G4) ───────────────────────────
 
-    /// ★phase A★: 소스 슬롯 agent 를 담은 임시 View 를 만든다(아직 **어느 창 tabs 에도 안 넣음** — orphan
-    /// 방지, phase C 에서 삽입). 새 View id 반환. 소스 슬롯은 안 건드림(phase C 에서 close).
-    /// 빈 슬롯이면 Err(pop-out 대상 없음).
+    /// view 안 slot_id 슬롯의 콘텐츠(SlotContent)를 clone 해 반환한다(참조 아님 — 락 밖 반출용).
+    /// ★슬롯 팝업 분리(move_slot_to_window)용(ADR-0064)★: agent_id 뿐 아니라 콘텐츠 종류 전체
+    /// (Empty/Agent/AgentList/PresetPalette)를 새 창으로 옮기기 위해 원본 슬롯의 SlotContent 를 통째로
+    /// 읽는다(조회만). invalid view_id/slot_id → Err(no-op).
+    pub fn slot_content(&self, view_id: Uuid, slot_id: Uuid) -> Result<SlotContent, LayoutError> {
+        let v = self
+            .views
+            .get(&view_id)
+            .ok_or(LayoutError::ViewNotFound(view_id))?;
+        tree::find_slot(&v.layout, slot_id)
+            .cloned()
+            .ok_or(LayoutError::SlotNotFound(slot_id))
+    }
+
+    /// ★phase A★: 소스 슬롯 콘텐츠를 담은 임시 View 를 만든다(아직 **어느 창 tabs 에도 안 넣음** — orphan
+    /// 방지, phase C 에서 삽입). 새 View id + 옮겨 담은 SlotContent 반환. 소스 슬롯은 안 건드림(phase C
+    /// 에서 close). 빈 슬롯(Empty)이면 Err(pop-out 대상 없음 — 메뉴가 empty 를 hideOn 으로 숨기나 코어도 방어).
+    ///
+    /// ★ADR-0064 — 콘텐츠 일반화★: 옛 코드는 agent_id 만 읽어 assign_in_tree(agent 전용)로 배정해
+    /// 비-에이전트 콘텐츠(agent_list/preset_palette)를 옮길 수 없었다. 이제 SlotContent 전체를 읽어
+    /// set_in_tree(제네릭 콘텐츠 배치, ADR-0063)로 새 View 슬롯에 그대로 넣는다 → 모든 슬롯 종류가 팝업
+    /// 가능(불변식 5 — 다중 참조 허용은 Agent 뿐 아니라 콘텐츠 일반에 적용). 반환한 SlotContent 로 호출자가
+    /// agent 구독 마이그레이션(still-ours close 가드)이 필요한지(= Agent 인지)를 판별한다.
+    // ADR-0064
     pub fn prepare_detached_view(
         &mut self,
         src_view: ViewId,
         src_slot: Uuid,
         name: String,
-    ) -> Result<ViewId, LayoutError> {
-        let agent_id = self
-            .slot_agent(src_view, src_slot)?
-            .ok_or(LayoutError::SlotNotFound(src_slot))?;
+    ) -> Result<(ViewId, SlotContent), LayoutError> {
+        // ADR-0064: agent_id 가 아니라 SlotContent 전체를 읽는다. Empty 만 거부(팝업 대상 없음).
+        let content = self.slot_content(src_view, src_slot)?;
+        if content.is_empty() {
+            return Err(LayoutError::SlotNotFound(src_slot));
+        }
         let id = self.make_view(name);
-        // 새 View 의 (유일) 슬롯에 원본 agent 배정(불변식 5 — 다중 참조 허용).
+        // 새 View 의 (유일) 슬롯에 원본 콘텐츠 배치(불변식 5 — 다중 참조 허용).
         let slot = {
             let v = self.views.get(&id).expect("방금 만든 View");
             tree::first_slot_id(&v.layout)
         };
-        // view_owner 미배정(아직 어느 창에도 안 속함 — phase C 에서 삽입). 그래서 assign 은 tree 직접.
+        // view_owner 미배정(아직 어느 창에도 안 속함 — phase C 에서 삽입). 그래서 배치는 tree 직접.
+        // ADR-0064: assign_in_tree(agent 전용) 대신 set_in_tree(제네릭)로 콘텐츠 종류 전체를 옮긴다.
         if let Some(v) = self.views.get_mut(&id) {
-            let _ = tree::assign_in_tree(&mut v.layout, slot, Some(agent_id));
+            let _ = tree::set_in_tree(&mut v.layout, slot, content.clone());
         }
         self.bump_version();
-        Ok(id)
+        Ok((id, content))
     }
 
     /// ★phase A 롤백★: prepare_detached_view 로 만든 임시 View 를 제거(창 삽입 전이라 tabs 갱신 불필요).
@@ -1168,9 +1192,16 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let tmp = mgr
+        let (tmp, content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
+        // ADR-0064: 반환 콘텐츠 = 소스 슬롯 그대로(Agent).
+        assert_eq!(
+            content,
+            SlotContent::Agent {
+                agent_id: "moving".into()
+            }
+        );
         // 임시 View 슬롯에 agent 담김.
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
@@ -1190,7 +1221,33 @@ mod tests {
     }
 
     #[test]
+    fn prepare_detached_view_moves_agent_list_content() {
+        // ★ADR-0064★: 비-에이전트 콘텐츠(agent_list)도 팝업 가능 — SlotContent 전체를 임시 View 로 옮긴다.
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let slot = first_slot_of(&mgr, src);
+        mgr.set_slot_content(src, slot, SlotContent::AgentList)
+            .unwrap();
+        let (tmp, content) = mgr
+            .prepare_detached_view(src, slot, "Popup".into())
+            .unwrap();
+        assert_eq!(content, SlotContent::AgentList, "반환 콘텐츠 = AgentList");
+        // 임시 View 슬롯에 AgentList 담김(agent 가 아니라 콘텐츠 종류 그대로).
+        let tslot = first_slot_of(&mgr, tmp);
+        assert_eq!(
+            tree::find_slot(&mgr.views.get(&tmp).unwrap().layout, tslot).unwrap(),
+            &SlotContent::AgentList
+        );
+        // 소스는 아직 그대로(phase C 에서 close).
+        assert_eq!(
+            tree::find_slot(&mgr.views.get(&src).unwrap().layout, slot).unwrap(),
+            &SlotContent::AgentList
+        );
+    }
+
+    #[test]
     fn prepare_detached_view_empty_slot_is_err() {
+        // ADR-0064: Empty 만 거부(팝업 대상 없음). agent_list/preset_palette 는 위 테스트대로 허용.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
@@ -1206,7 +1263,7 @@ mod tests {
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
         // 기존 팝업 창.
         let existing = mgr.create_window("slot-popup-1").unwrap();
-        let tmp = mgr
+        let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
@@ -1224,7 +1281,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let tmp = mgr
+        let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
         // to_window 가 존재 안 함 → Err.
@@ -1246,7 +1303,7 @@ mod tests {
         let eslot = first_slot_of(&mgr, existing);
         mgr.assign_agent(existing, eslot, "shared".into()).unwrap();
         // src 슬롯의 shared 를 그 창으로 옮김 → 두 탭이 같은 agent(dedup 없이 허용).
-        let tmp = mgr
+        let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
@@ -1261,7 +1318,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let tmp = mgr
+        let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
         mgr.attach_view_as_new_window("slot-popup-1", tmp).unwrap();
@@ -1278,7 +1335,7 @@ mod tests {
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        let tmp = mgr
+        let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
         mgr.drop_detached_view(tmp);

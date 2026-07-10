@@ -3,8 +3,10 @@
 //! ★§5 LLM 제어 표면★: 사람 우클릭(window.__engramLayout.moveSlotToWindow)과 LLM 이 같은 command 를 흔든다.
 //!
 //! ## 무엇을 하나 (MOVE, not mirror)
-//! 원본 슬롯의 agent 를 **새 탭**(새 창 or 지정 기존 창)으로 옮기고, 원본 슬롯을 원본 View 에서 제거한다.
-//! agent 자체(데몬 프로세스)는 안 건드린다 — 순수 I/O 표시 표면만 이동(§5 손발/두뇌 분리).
+//! 원본 슬롯의 **콘텐츠(SlotContent)** 를 **새 탭**(새 창 or 지정 기존 창)으로 옮기고, 원본 슬롯을 원본
+//! View 에서 제거한다. ADR-0064: agent 슬롯뿐 아니라 agent_list/preset_palette 슬롯도 옮긴다(Empty 만 제외).
+//! agent 자체(데몬 프로세스)는 안 건드린다 — 순수 I/O 표시 표면만 이동(§5 손발/두뇌 분리). 비-에이전트
+//! 콘텐츠는 백엔드 출력 구독이 없어(프론트 렌더 콘텐츠) 구독 마이그레이션이 자연히 no-op 이다.
 //!
 //! ## 라우팅은 일반 메커니즘(ADR-0046 — 하드코딩 whitelist 금지)
 //! 새 탭이 그 창의 `tabs` 에 들어가면 OutputRouter.rebuild 가 그 창 label 로 새 View 의 agent 출력을
@@ -160,7 +162,12 @@ pub async fn create_empty_window(
 
 /// ★슬롯을 다른 창의 새 탭으로 MOVE(move_slot_to_window)★. §5-3 2-phase 롤백(G4).
 ///   `to_window` 지정 → 그 기존 창 새 탭으로(phase C 삽입·재검증). 미지정 → 새 팝업 창 생성.
-/// 반환 = `{ window, tab }`(호출자가 옮겨간 창·탭을 안다, G4). 빈 슬롯이면 Err.
+/// 반환 = `{ window, tab }`(호출자가 옮겨간 창·탭을 안다, G4). 빈 슬롯(Empty)이면 Err.
+///
+/// ★ADR-0064 — 모든 슬롯 콘텐츠 팝업★: agent 슬롯뿐 아니라 agent_list/preset_palette 슬롯도 새 창으로
+///   옮긴다(SlotContent 전체를 옮김). 비-에이전트 콘텐츠는 백엔드 출력 구독이 없어 구독 마이그레이션이
+///   자연히 no-op(rebuild 가 Agent 슬롯만 라우팅 — collect_agents). Empty 만 거부(메뉴가 empty 를 hideOn 으로
+///   숨기지만 코어도 방어).
 ///
 /// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(새 창 타깃은 phase B 에서 빌드).
 #[tauri::command]
@@ -178,28 +185,29 @@ pub async fn move_slot_to_window(
     let is_new_window = to_window.is_none();
     let target_label = to_window.clone().unwrap_or_else(|| counter.next_label());
 
-    // ── phase A(락): 소스 agent → 임시 View(아직 어느 창 tabs 에도 안 넣음 — orphan 방지) ──────────
-    // ★agent_id 를 락 밖으로 반출★(MOVE 원자성): 창 build 로 락이 풀린 사이 원본 슬롯이 다른 agent 로
-    //   재배정될 수 있다 — 2차 락에서 close 전에 이 값과 재조회 결과를 대조해 "옮긴 그 agent 그대로일 때만"
-    //   원본을 닫는다(엉뚱한 agent 삭제 방지).
+    // ── phase A(락): 소스 콘텐츠 → 임시 View(아직 어느 창 tabs 에도 안 넣음 — orphan 방지) ──────────
+    // ★SlotContent 를 락 밖으로 반출★(MOVE 원자성): 창 build 로 락이 풀린 사이 원본 슬롯이 다른 콘텐츠로
+    //   재배정될 수 있다 — 2차 락에서 close 전에 이 값과 재조회 결과를 대조해 "옮긴 그 콘텐츠 그대로일 때만"
+    //   원본을 닫는다(엉뚱한 콘텐츠 삭제 방지).
+    //
+    // ★ADR-0064 — 모든 슬롯 콘텐츠 팝업★: 옛 코드는 agent_id 만 반출해 agent 슬롯만 옮길 수 있었다. 이제
+    //   SlotContent 전체(Agent/AgentList/PresetPalette)를 반출한다. Empty 만 prepare_detached_view 가 거부.
+    //   비-에이전트 콘텐츠(agent_list/preset_palette)는 백엔드 출력 구독이 없어(프론트 렌더 콘텐츠) 구독
+    //   델타(still-ours close 가드의 agent 대조)가 불필요 — 아래 phase C 에서 Agent 일 때만 구독 마이그레이션.
     //
     // ★owner-less tmp_view 가 phase B(언락) 동안 views 에 있어도 안전한 이유(F3 — BLOCK-1 해소)★:
     //   prepare_detached_view 가 만든 tmp_view 는 `views` 에는 있으나 `view_owner`/`windows[*].tabs`
     //   어디에도 없다(불변식 1·2 의 "모든 View 는 owner 1개"를 phase B 동안 일시 위배). 그럼에도 이 상태는
     //   안전하다: ① 이 view id 는 이 op 만 손에 쥔다(다른 command 는 uuid 를 모르니 건드릴 수 없음) ② 어느
-    //   창 tabs 에도 없어 rebuild 라우팅 순회(창→tabs walk)에 안 걸린다(구독/출력 영향 0) ③ 소스 agent 는
+    //   창 tabs 에도 없어 rebuild 라우팅 순회(창→tabs walk)에 안 걸린다(구독/출력 영향 0) ③ 소스 콘텐츠는
     //   소스 슬롯이 아직 살아있어 그 경유로 계속 표시된다(사용자 화면 손실 없음) ④ 종점은 항상 둘 중 하나 —
     //   phase C attach(owner 부여 → 불변식 복구) 또는 rollback drop_detached_view(views 에서도 제거).
     //   ⚠️ 다음 세션 주의: rebuild/정리 로직에 "views 전체를 순회하며 owner 를 요구/가정"하는 코드를 넣을
     //   때는 이 일시 owner-less 창(phase B)을 전제로 깔아야 한다(무조건 owner 있음 가정 = 이 op 중 패닉).
-    let (tmp_view, agent_id) = {
+    let (tmp_view, src_content) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        // ① 원본 슬롯 agent 읽기(빈 슬롯이면 거부).
-        let agent_id = mgr
-            .slot_agent(view_id, slot_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "빈 슬롯은 다른 창으로 옮길 수 없음(agent 미배정)".to_string())?;
-        // ② 임시 View 생성(agent 담김, 창 미배정 — phase C 에서 삽입).
+        // ① 임시 View 생성(소스 콘텐츠 담김, 창 미배정 — phase C 에서 삽입). Empty 면 prepare 가 Err.
+        //    ADR-0064: 빈 슬롯만 거부(agent 미배정도 이제 AgentList/PresetPalette 는 유효 팝업 대상).
         let name = if is_new_window {
             format!(
                 "Popup {}",
@@ -208,12 +216,12 @@ pub async fn move_slot_to_window(
         } else {
             "Tab".to_string()
         };
-        let tmp_view = mgr
+        let (tmp_view, src_content) = mgr
             .prepare_detached_view(view_id, slot_id, name)
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "빈 슬롯은 다른 창으로 옮길 수 없음(콘텐츠 없음)".to_string())?;
         let delta = router.rebuild(&mgr);
         send_subscription_delta(&client, delta);
-        (tmp_view, agent_id)
+        (tmp_view, src_content)
     }; // ← 락 드롭
 
     // ── phase B(락 밖): 새 창 타깃이면 웹뷰 빌드 / 기존 창 타깃이면 존재 확인만 ─────────────────
@@ -260,23 +268,27 @@ pub async fn move_slot_to_window(
         }
 
         // 소스 슬롯 close(MOVE 완성 — still-ours 가드). 창 build 로 락이 풀린 사이 재배정됐으면 스킵.
-        // ★F4 — MOVE→COPY 열화는 의도된 best-effort★: phase B(언락) 동안 소스 슬롯이 다른 agent 로
-        //   재배정되면(Ok(Some(other))) still_ours=false → close 스킵. 즉 "재배정된 엉뚱한 agent 를 지우지
-        //   않는 것"이 최우선이고, 그 대가로 원래 agent 가 타깃 탭 + 소스 슬롯 양쪽에 남는다(MOVE 가 사실상
-        //   COPY 로 열화). 이 중복은 불변식 5(같은 agent 두 View 허용, 진도 독립·ADR-0046)로 무해하므로
+        // ★F4 — MOVE→COPY 열화는 의도된 best-effort★: phase B(언락) 동안 소스 슬롯이 다른 콘텐츠로
+        //   재배정되면(다른 SlotContent) still_ours=false → close 스킵. 즉 "재배정된 엉뚱한 콘텐츠를 지우지
+        //   않는 것"이 최우선이고, 그 대가로 원래 콘텐츠가 타깃 탭 + 소스 슬롯 양쪽에 남는다(MOVE 가 사실상
+        //   COPY 로 열화). 이 중복은 불변식 5(같은 콘텐츠 두 View 허용, 진도 독립·ADR-0046)로 무해하므로
         //   엄격 롤백(타깃 되돌리기) 대신 이대로 둔다.
-        // ★load-bearing★: 소스 View 자체가 gap 중 소멸(탭/창 닫힘)했으면 slot_agent 가 `Err`(ViewNotFound/
-        //   SlotNotFound)를 준다 → `matches!(_, Ok(Some(..)))` 가 실패 → still_ours=false → close 스킵.
-        //   이 `Err→스킵`이 이미-사라진 소스를 다시 close 하려다 나는 오작동/패닉을 막는다(수정 금지).
+        // ★ADR-0064 — 콘텐츠 종류 무관 대조★: 옛 코드는 slot_agent(agent_id)만 비교해 agent 슬롯만 다뤘다.
+        //   이제 slot_content(SlotContent 전체)를 phase A 반출값(src_content)과 비교한다 →
+        //   agent_list/preset_palette 도 동일 still-ours 시맨틱. Agent 케이스는 SlotContent::Agent{agent_id}
+        //   동등성이 옛 agent_id 문자열 비교와 정확히 일치(동작 불변 — 회귀 없음).
+        // ★load-bearing★: 소스 View 자체가 gap 중 소멸(탭/창 닫힘)했으면 slot_content 가 `Err`(ViewNotFound/
+        //   SlotNotFound)를 준다 → `matches!(_, Ok(ref c)) if *c == src_content` 가 실패 → still_ours=false →
+        //   close 스킵. 이 `Err→스킵`이 이미-사라진 소스를 다시 close 하려다 나는 오작동/패닉을 막는다(수정 금지).
         let still_ours = matches!(
-            mgr.slot_agent(view_id, slot_id),
-            Ok(Some(ref a)) if *a == agent_id
+            mgr.slot_content(view_id, slot_id),
+            Ok(ref c) if *c == src_content
         );
         if still_ours {
             let _ = mgr.close_slot(view_id, slot_id);
         } else {
             tracing::warn!(
-                view = %view_id, slot = %slot_id, agent = %agent_id,
+                view = %view_id, slot = %slot_id,
                 "원본 슬롯이 창 생성 중 재배정/제거됨 — MOVE 의 close 스킵(대상 탭은 그대로 유지)"
             );
         }

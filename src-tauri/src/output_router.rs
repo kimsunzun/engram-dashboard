@@ -873,7 +873,7 @@ mod tests {
         mgr.assign_agent(src, slot, astr).unwrap();
 
         // phase A: 임시 View 예약.
-        let tmp = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, _src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
         // phase C: 타깃 창이 없음(소멸 모델) → Err.
         let err = mgr.insert_tab_into("gone-window", tmp).unwrap_err();
         assert!(matches!(
@@ -893,20 +893,19 @@ mod tests {
 
     #[test]
     fn move_phase_c_source_reassigned_becomes_copy_invariant5_benign() {
-        // ★F4 엣지★: MOVE 중 소스 슬롯이 phase B(언락) 동안 **다른 agent 로 재배정**되면, phase C 의
-        //   still_ours 가드(모델 레벨: slot_agent(src,slot) == 옮긴 agent 인지)가 실패 → 소스 close 스킵.
-        //   결과: 옮긴 agent 가 타깃 탭 + (재배정된) 소스 슬롯에 공존이 아니라, 옮긴 agent 는 타깃에만,
-        //   소스엔 엉뚱한 새 agent — 즉 "엉뚱한 agent 삭제 방지"가 우선(load-bearing). 원래 agent 관점에선
-        //   타깃에만 남으므로 데이터 손실 0. 아래는 "소스가 원래 agent 그대로면 MOVE(소스 삭제)"와
-        //   대비해 재배정 시 close 가 스킵됨을 모델 수준에서 검증.
+        // ★F4 엣지★: MOVE 중 소스 슬롯이 phase B(언락) 동안 **다른 콘텐츠로 재배정**되면, phase C 의
+        //   still_ours 가드(모델 레벨: slot_content(src,slot) == 옮긴 콘텐츠인지, ADR-0064)가 실패 → 소스
+        //   close 스킵. 결과: 옮긴 콘텐츠는 타깃에만, 소스엔 엉뚱한 새 콘텐츠 — 즉 "엉뚱한 콘텐츠 삭제 방지"가
+        //   우선(load-bearing). 원래 콘텐츠 관점에선 타깃에만 남으므로 데이터 손실 0. 아래는 "소스가 원래
+        //   그대로면 MOVE(소스 삭제)"와 대비해 재배정 시 close 가 스킵됨을 모델 수준에서 검증.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot(&mgr, src);
         let (moved, moved_str) = agent();
         mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
 
-        // phase A: 옮길 agent 를 임시 View 로.
-        let tmp = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        // phase A: 옮길 콘텐츠를 임시 View 로(src_content = 반출한 SlotContent — still_ours 대조 기준).
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
         // 타깃 팝업 창 존재.
         mgr.create_window("slot-popup-1").unwrap();
 
@@ -916,10 +915,10 @@ mod tests {
 
         // phase C: 타깃에 삽입 성공.
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
-        // still_ours 판정(command 레이어 로직 재현): 소스 슬롯 agent == 옮긴 agent 인가?
+        // still_ours 판정(command 레이어 로직 재현, ADR-0064): 소스 슬롯 콘텐츠 == 옮긴 콘텐츠인가?
         let still_ours = matches!(
-            mgr.slot_agent(src, slot),
-            Ok(Some(ref a)) if *a == moved_str
+            mgr.slot_content(src, slot),
+            Ok(ref c) if *c == src_content
         );
         assert!(!still_ours, "재배정됐으니 still_ours=false → close 스킵");
         // close 스킵이므로 소스 슬롯은 그대로(엉뚱한 other 를 지우지 않음).
@@ -944,13 +943,13 @@ mod tests {
         let (moved, moved_str) = agent();
         mgr.assign_agent(src, slot, moved_str.clone()).unwrap();
 
-        let tmp = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
         mgr.create_window("slot-popup-1").unwrap();
         mgr.insert_tab_into("slot-popup-1", tmp).unwrap();
 
         let still_ours = matches!(
-            mgr.slot_agent(src, slot),
-            Ok(Some(ref a)) if *a == moved_str
+            mgr.slot_content(src, slot),
+            Ok(ref c) if *c == src_content
         );
         assert!(still_ours, "소스 그대로면 still_ours=true");
         mgr.close_slot(src, slot).unwrap(); // MOVE close
@@ -962,5 +961,49 @@ mod tests {
             targets_set(&router, moved),
             vec!["slot-popup-1".to_string()]
         );
+    }
+
+    #[test]
+    fn move_non_agent_content_produces_no_subscription_delta() {
+        // ★ADR-0064★: agent_list 슬롯을 팝업으로 옮기는 전 과정에서 구독 델타가 0이어야 한다 —
+        //   비-에이전트 콘텐츠는 백엔드 출력 구독이 없어(collect_agents 가 Agent 만 라우팅) rebuild 가
+        //   어떤 Subscribe/Unsubscribe 도 산출하지 않는다. 즉 "구독 델타는 Agent 콘텐츠에만 유의미"가
+        //   구조적으로 보장됨을 회귀로 박는다(agent 케이스 로직은 위 테스트들이 그대로 커버 = 무회귀).
+        use crate::layout::types::SlotContent;
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let slot = first_slot(&mgr, src);
+        mgr.set_slot_content(src, slot, SlotContent::AgentList)
+            .unwrap();
+
+        let router = OutputRouter::new();
+        // 초기 rebuild(agent_list 배치 후) — Agent 가 없으니 델타 0.
+        assert!(
+            router.rebuild(&mgr).is_empty(),
+            "agent_list 배치는 구독 델타 0"
+        );
+
+        // phase A: agent_list 콘텐츠를 임시 View 로 반출.
+        let (tmp, src_content) = mgr.prepare_detached_view(src, slot, "Tab".into()).unwrap();
+        assert_eq!(src_content, SlotContent::AgentList);
+        assert!(
+            router.rebuild(&mgr).is_empty(),
+            "phase A rebuild 도 델타 0(비-에이전트)"
+        );
+
+        // phase C: 새 창 삽입 + 소스 close(진짜 MOVE — still_ours=true).
+        mgr.attach_view_as_new_window("slot-popup-1", tmp).unwrap();
+        let still_ours = matches!(
+            mgr.slot_content(src, slot),
+            Ok(ref c) if *c == src_content
+        );
+        assert!(still_ours);
+        mgr.close_slot(src, slot).unwrap();
+        assert!(
+            router.rebuild(&mgr).is_empty(),
+            "phase C rebuild 도 델타 0(비-에이전트 이동 전체가 구독 무관)"
+        );
+        // 라우팅 표엔 어떤 agent 도 없음(agent_list 는 라우팅 대상 아님).
+        assert!(router.table.load().by_agent.is_empty(), "agent 라우팅 0");
     }
 }

@@ -803,6 +803,13 @@
 - **게이트:** review full PASS — 1차 FIX(양 리뷰어 수렴 = 자식 전멸 시 죽은-leaf 컨테이너 + Codex = hideOn 자식 미적용 + doc-aware = 부팅검증 shape 갭 하드닝) → 코더 재수정 1회 → 재리뷰 2인 PASS(회귀 없음). QA full: tsc 0 · npm test 482(+5, FIX-1/2/3 케이스) · 코어 격리 0줄 · **GUI 스샷 실측**(빈 슬롯 = 새 콘텐츠▶·가로/세로 분할·닫기 4항목, 비우기/팝업 미노출, flyout 3자식, 우측 가장자리 좌측 clamp, §5 command bus 생존).
 - **미해결(파킹):** ① "이 프리셋으로 에이전트 생성" 프리셋-행 spawn 이관(여전) ② 슬롯 종류별 메뉴 curation 계속 ③ 전체 when-DSL은 hideOn으로 부분 실현·복합조건 등장 시 승격.
 
+## 팝업 분리 = 모든 SlotContent 이동으로 일반화 (2026-07-10, master, 대화 세션) — ADR-0064 백엔드 완성
+- **무엇(사용자 제보):** 에이전트 트리(agent_list)·프리셋(preset_palette) 슬롯에서 "팝업으로 분리"가 조용히 실패("빈 슬롯은 다른 창으로 옮길 수 없음"). agent 슬롯만 동작. 원인 = 백엔드 `move_slot_to_window`가 agent_id 필수(popout.rs:199 slot_agent → types.rs agent_id()가 non-agent에 None). ADR-0064가 메뉴에선 agent 게이팅을 제거했지만 백엔드는 non-agent 이동을 구현 안 한 갭(이번 hideOn/서브메뉴 변경과 무관).
+- **어떻게:** 조사 위임(근본원인 회수) → 사용자 선택("A. 백엔드 확장") → `/implement standard`(코더 Opus → `/review code full` doc-aware+Codex → `/qa full`). 새 ADR 없음(ADR-0064 의도 완성 = 버그수정, `// ADR-0064` 앵커).
+- **회수물:** `manager.rs` 신규 `slot_content()`(전체 SlotContent 읽기, slot_agent의 일반화) + `prepare_detached_view`가 agent_id assign 대신 `set_in_tree`로 SlotContent 자체를 새 View 슬롯에 배치, `(ViewId, SlotContent)` 반환. `popout.rs` phase A가 SlotContent export(Empty만 거부), still_ours 가드가 `slot_content == src_content` 비교(agent는 value-identical). 구독 델타 = `output_router.rs` collect_agents가 Agent만 라우팅해 non-agent는 empty-by-construction(코드 변경 0, 구조적으로 조건부). agent_list/preset은 ViewLayoutRenderer가 팝업에서 이미 렌더 → 프론트 무변경.
+- **게이트:** review full PASS(2인, FIX 0 — agent 경로 value-identical·MOVE→COPY 가드 intact·구독 델타 불변 검증). QA full PASS: cargo build 링크 OK · fmt · 격리 0 · tsc 0 · npm test 482 · **GUI 실측** agent_list/preset 팝업→새 창 렌더·빈 슬롯 팝업 미노출·**agent 팝업 회귀 없음(스폰→팝업→라이브 터미널·구독 이관)**. src-tauri 레이아웃 테스트는 WebView2 배리어로 cargo test 불가 → build+GUI가 정본.
+- **미해결(파킹, 비차단 리뷰 노트):** ① src-tauri 순수 레이아웃/라우터 테스트가 WebView2 배리어로 CI 미실행(rot 리스크) → core crate로 seam 분리 검토(ADR-0012, 사용자 결정) ② `prepare_detached_view`가 missing-slot과 Empty를 같은 에러로 뭉뚱그림(진단 손실, low).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
