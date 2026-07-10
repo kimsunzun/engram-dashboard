@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "popup",
-  "description": "슬롯 팝업 분리(pop-out)로 런타임 생성되는 창(slot-popup-*)의 권한 — 메인 창과 동일한 IPC 표면(subscribe_output/request_replay/forward_daemon_command/layout 조회)을 쓸 수 있어야 자기 View 를 구독·렌더한다. core:default(invoke/window) + core:event:default(layout:updated 등 emit listen) + core:window:allow-close(PopoutPage가 자기 View가 닫힐 때 view:closed 이벤트 수신 후 getCurrentWindow().close()로 자기 창을 닫는 self-close 동작 및 §5 LLM/프로그래밍 방식 팝업 닫기에 필요).",
+  "description": "슬롯 팝업 분리(pop-out)로 런타임 생성되는 창(slot-popup-*)의 권한 — 메인 창과 동일한 IPC 표면(subscribe_output/request_replay/forward_daemon_command/layout 조회)을 쓸 수 있어야 자기 View 를 구독·렌더한다. core:default(invoke/window) + core:event:default(layout:updated 등 emit listen) + core:window:allow-close(PopoutPage가 자기 View가 닫힐 때 view:closed 이벤트 수신 후 getCurrentWindow().close()로 자기 창을 닫는 self-close 동작 및 §5 LLM/프로그래밍 방식 팝업 닫기에 필요). dialog:allow-open — PresetPalette variant 는 팝업 슬롯에도 배치될 수 있어(set_slot_content) 우클릭 '추가' 폴더 픽커가 팝업 창에서도 동작해야 한다(최소 권한: open 만).",
   "windows": ["slot-popup-*"],
   "permissions": [
     "core:default",
     "core:event:default",
-    "core:window:allow-close"
+    "core:window:allow-close",
+    "dialog:allow-open"
   ]
 }

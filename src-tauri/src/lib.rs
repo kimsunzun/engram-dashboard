@@ -50,6 +50,9 @@ pub fn run() {
         crate::tray::actions::show_main_ui(app);
     }));
     builder = builder.plugin(tauri_plugin_opener::init());
+    // 네이티브 폴더 선택 다이얼로그(프리셋 경로 추가) — 프론트 PresetPalette 우클릭 "추가"가
+    //   open({directory:true}) 로 호출한다. 권한은 default.json 의 dialog:allow-open 으로 최소 부여.
+    builder = builder.plugin(tauri_plugin_dialog::init());
 
     // ADR-0029 §55: autostart. 등록 인자=--hidden(부팅 시 창 미표시·트레이 상주). 모드 인자 없음.
     // ★플러그인 등록 ≠ 활성화★: 기본 OFF, set_autostart command/트레이 토글로만 enable(레지스트리 Run 기록).

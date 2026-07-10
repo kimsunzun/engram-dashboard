@@ -23,6 +23,9 @@ tauri-build = { version = "2", features = [] }
 # 아이콘을 .ico 에서 RGBA 로 풀어 컬러/회색 두 벌 생성 — 별도 image crate 불필요).
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-opener = "2"
+# 프리셋 경로 추가 = 네이티브 폴더 선택 다이얼로그(webview 밖 OS 창). 프론트 PresetPalette 우클릭 "추가"가
+#   @tauri-apps/plugin-dialog 의 open({directory:true}) 로 호출한다. 권한은 dialog:allow-open 만 부여(default.json).
+tauri-plugin-dialog = "2"
 # single-instance: ADR-0029(daemon-only) — 앱은 데몬 클라이언트 전역 단일 인스턴스(플러그인 무조건 등록).
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }

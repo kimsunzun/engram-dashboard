@@ -775,6 +775,14 @@
 - **게이트:** review PASS(초기 ratio 미배선 MAJOR 적출→수정 · `__engramLayout` 노출 누락→수정 · command shape 검증→추가). QA full: `cargo build` 링크 OK · tsc 0 · npm test 432 · **GUI 실측**: 부팅 좌 256px(20%)/우 1024px(80%) 분할·좌 AgentList·set_slot_content로 우측에 PresetPalette 렌더·사이드패널/diff바 부재.
 - **미해결(플래그):** ① Split 드래그→백엔드 ratio 되쓰기(현재 초기 사이징만·TODO 노트) ② monaco 의존성이 DiffPanel 삭제로 미사용(package.json 정리 후보) ③ 영속·ProtocolClient 하드닝(TaskList #5, 사용자 결정) ④ agent rename/restart(백엔드 부재) ⑤ 메뉴 화면밖 클램프.
 
+## 프리셋 경로 추가 = 네이티브 폴더 다이얼로그 (2026-07-10, master, 대화 세션) · 의존성 추가
+- **무엇(사용자 요청):** PresetPalette의 탑바 텍스트 입력(경로 타이핑) 제거 → 팔레트 pane 우클릭 "추가" → **네이티브 OS 폴더 선택 다이얼로그**로 골라 `createPreset`.
+- **어떻게:** `/implement`(코더 Opus → `/review code full` doc-aware+Codex → `/qa` 재빌드+GUI).
+- **★의존성 추가(보고)★:** `@tauri-apps/plugin-dialog@2.7.1`(JS) + `tauri-plugin-dialog 2.7.1`(Rust, `tauri = "2"` 정합) + `lib.rs` `.plugin(tauri_plugin_dialog::init())` + capability `dialog:allow-open`(최소 권한 — open만, save/message/ask 제외). CLAUDE.md 의존성 절에 미반영(추후 정리 대상).
+- **capability windows:** `default.json`(main·agent-tree) + `popup.json`(slot-popup-*) 둘 다 `dialog:allow-open` — PresetPalette가 팝업 슬롯에도 배치될 수 있어(set_slot_content) 팝업 창에서도 픽커가 동작해야 함(Codex 리뷰 High 지적 반영). agent-tree 과다 부여는 저위험(폴더 픽커, fs 권한 무관)이라 잔존(minor 노트).
+- **게이트:** review PASS(doc-aware PASS · Codex FIX=popup capability 누락→반영). QA: `cargo build` 링크 OK · tsc 0 · npm test 433(픽커→createPreset·취소→no-op·탑바제거 회귀 테스트 포함) · GUI 실측(탑바 제거 + 우클릭 "추가" 메뉴, 스샷). 네이티브 다이얼로그 자체는 OS 창이라 cdp 밖 — 수동 확인 몫.
+- **파킹(#1/#2):** 슬롯별 우클릭 메뉴 차별화는 사용자가 하나씩 스펙 예정 — 프리셋 메뉴는 지금 "추가"만, 에이전트 트리 메뉴는 Slice C 상태 유지.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

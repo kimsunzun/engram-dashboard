@@ -3,14 +3,17 @@
 // 검증 불변식:
 //   1. presetDisplayName: cwd basename 파생(win/posix 구분자·후행 슬래시·빈 세그먼트).
 //   2. store.presets 를 행으로 렌더 + 표시명 = basename(이름 미저장 — 프론트 파생).
-//   3. add-path 입력 → 추가 → agentClient.createPreset(cwd) 호출(trim).
-//   4. 행 삭제 → agentClient.deletePreset(id) 호출.
-//   5. 스타일 = 변수-only(하드코딩 색 리터럴 없음) — 대표 요소 background 가 var(...) 참조.
+//   3. pane 우클릭 → 메뉴 "추가" → 네이티브 폴더 다이얼로그(open) → 고른 경로로 createPreset 호출.
+//   4. 다이얼로그 취소(open→null) 시 createPreset 미호출.
+//   5. 행 삭제 → agentClient.deletePreset(id) 호출.
+//   6. 스타일 = 변수-only(하드코딩 색 리터럴 없음) — 대표 요소 background 가 var(...) 참조.
 //
-// 전략: agentClient(clientFactory) 의 프리셋 메서드를 mock. store 는 실제 useAgentStore 를 setState 로
-//   seed(= onPresetListUpdated → setPresets 가 반영하는 것과 동일 경로의 store 상태 검증).
+// 전략: agentClient(clientFactory) 의 프리셋 메서드 + @tauri-apps/plugin-dialog 의 open 을 mock.
+//   store 는 실제 useAgentStore 를 setState 로 seed(= onPresetListUpdated → setPresets 반영과 동일 경로).
+//   ★네이티브 폴더 다이얼로그는 OS 창(webview 밖)이라 cdp 로 검증 불가 — open→createPreset 배선만
+//   여기서 단언한다(폴더 픽커 UI 자체는 orchestrator QA 대상 아님).
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const clientMock = vi.hoisted(() => ({
@@ -25,6 +28,14 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
+// 네이티브 폴더 다이얼로그 mock — 테스트마다 반환(고른 경로 / null)을 갈아끼운다.
+const dialogMock = vi.hoisted(() => ({
+  open: vi.fn(async () => null as string | null),
+}))
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: (...args: unknown[]) => dialogMock.open(...(args as [])),
+}))
+
 import PresetPalette, { presetDisplayName } from './PresetPalette'
 import { useAgentStore } from '../../store/agentStore'
 import type { Preset } from '../../api/types'
@@ -32,6 +43,8 @@ import type { Preset } from '../../api/types'
 beforeEach(() => {
   clientMock.createPreset.mockClear()
   clientMock.deletePreset.mockClear()
+  dialogMock.open.mockClear()
+  dialogMock.open.mockResolvedValue(null)
   useAgentStore.setState({ presets: [] })
 })
 
@@ -42,6 +55,12 @@ afterEach(() => {
 
 function seedPresets(...presets: Preset[]): void {
   useAgentStore.setState({ presets })
+}
+
+/** pane 우클릭 → 메뉴 열기(AgentList 동형 fixed 메뉴). */
+function openPaneMenu(): void {
+  const pane = document.querySelector('[data-preset-palette]') as HTMLElement
+  fireEvent.contextMenu(pane)
 }
 
 describe('presetDisplayName (basename 파생 — ADR-0061)', () => {
@@ -110,27 +129,44 @@ describe('PresetPalette 렌더', () => {
     expect((nameEl.textContent ?? '').trim().length).toBeGreaterThan(0) // 행 라벨이 blank 가 아님
   })
 
-  it('add-path 입력 → 추가 → createPreset(trim 된 cwd) 호출', () => {
+  it('탑바 텍스트 입력·추가 버튼은 제거됨(우클릭 메뉴로 대체)', () => {
     render(<PresetPalette />)
-    const input = document.querySelector('[data-preset-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: '  C:/new/path  ' } })
-    fireEvent.click(document.querySelector('[data-preset-add]') as HTMLElement)
-    expect(clientMock.createPreset).toHaveBeenCalledWith('C:/new/path')
+    // 옛 탑바 요소가 더 이상 존재하지 않아야 한다(폴더 다이얼로그로 대체 — 회귀 방지).
+    expect(document.querySelector('[data-preset-input]')).toBeNull()
+    expect(document.querySelector('[data-preset-add]')).toBeNull()
   })
 
-  it('Enter 키로도 createPreset 호출', () => {
+  it('pane 우클릭 → 메뉴 "추가" 항목 표시', () => {
     render(<PresetPalette />)
-    const input = document.querySelector('[data-preset-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'C:/via/enter' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-    expect(clientMock.createPreset).toHaveBeenCalledWith('C:/via/enter')
+    // 우클릭 전엔 메뉴 없음.
+    expect(document.querySelector('[data-preset-menu-add]')).toBeNull()
+    openPaneMenu()
+    const addItem = document.querySelector('[data-preset-menu-add]') as HTMLElement
+    expect(addItem).toBeTruthy()
+    expect(addItem.textContent).toContain('추가')
   })
 
-  it('빈/공백 입력은 createPreset 을 부르지 않는다', () => {
+  it('"추가" → 폴더 다이얼로그(open) → 고른 경로로 createPreset 호출', async () => {
+    dialogMock.open.mockResolvedValue('C:/picked/dir')
     render(<PresetPalette />)
-    const input = document.querySelector('[data-preset-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: '   ' } })
-    fireEvent.click(document.querySelector('[data-preset-add]') as HTMLElement)
+    openPaneMenu()
+    fireEvent.click(document.querySelector('[data-preset-menu-add]') as HTMLElement)
+    // open 은 directory:true, multiple:false 로 호출된다(폴더 단일 선택).
+    await waitFor(() => expect(dialogMock.open).toHaveBeenCalledTimes(1))
+    expect(dialogMock.open).toHaveBeenCalledWith(
+      expect.objectContaining({ directory: true, multiple: false }),
+    )
+    // 고른 디렉토리(non-null 문자열)를 그대로 createPreset 에 넘긴다(ADR-0011 — agentClient 경로).
+    await waitFor(() => expect(clientMock.createPreset).toHaveBeenCalledWith('C:/picked/dir'))
+  })
+
+  it('"추가" → 다이얼로그 취소(open→null) 시 createPreset 미호출', async () => {
+    dialogMock.open.mockResolvedValue(null)
+    render(<PresetPalette />)
+    openPaneMenu()
+    fireEvent.click(document.querySelector('[data-preset-menu-add]') as HTMLElement)
+    await waitFor(() => expect(dialogMock.open).toHaveBeenCalledTimes(1))
+    // 취소(null)면 no-op — createPreset 을 절대 부르지 않는다.
     expect(clientMock.createPreset).not.toHaveBeenCalled()
   })
 
