@@ -56,22 +56,24 @@ vi.mock('../../store/agentStore', () => ({
 // ── allotment stub — split 분기 렌더 시 jsdom 환경에서 ResizeObserver 에러 방지 ──
 // Allotment / Allotment.Pane 을 단순 div 로 대체해 자식을 그대로 렌더한다.
 // vi.mock factory 는 호이스팅되므로 React import 를 직접 쓸 수 없다 — importOriginal 패턴으로 우회.
-// defaultSizes(=ratio 파생 초기 사이징, ADR-0063)를 data 속성으로 노출해 테스트가 단언할 수 있게 한다.
+// preferredSize(=ratio 파생 초기 사이징 %, ADR-0063)를 Pane 의 data 속성으로 노출해 테스트가 단언할 수 있게
+// 한다. ★Allotment 의 defaultSizes 는 비율이 아니라 픽셀이라 [0.2,0.8]=0.2px/0.8px 로 붕괴한다 — 대신
+//   첫 Pane 에 preferredSize="20%"(퍼센트 문자열)로 준다(실측 스샷 회귀 수정).
 vi.mock('allotment', async () => {
   const React = (await import('react')).default
-  const Pane = ({ children }: { children: React.ReactNode }) =>
-    React.createElement('div', { 'data-testid': 'allotment-pane' }, children)
+  const Pane = ({ children, preferredSize }: { children: React.ReactNode; preferredSize?: number | string }) =>
+    React.createElement(
+      'div',
+      {
+        'data-testid': 'allotment-pane',
+        // pane 초기 사이징(예: "20%") — split 렌더 테스트가 첫 pane 에서 읽어 단언.
+        'data-preferred-size': preferredSize != null ? String(preferredSize) : undefined,
+      },
+      children,
+    )
   const Allotment = Object.assign(
-    ({ children, defaultSizes }: { children: React.ReactNode; defaultSizes?: number[] }) =>
-      React.createElement(
-        'div',
-        {
-          'data-testid': 'allotment',
-          // ratio 파생 초기 사이징을 문자열로 노출(예: "0.2,0.8") — split 렌더 테스트가 읽어 단언.
-          'data-default-sizes': defaultSizes != null ? defaultSizes.join(',') : undefined,
-        },
-        children,
-      ),
+    ({ children }: { children: React.ReactNode }) =>
+      React.createElement('div', { 'data-testid': 'allotment' }, children),
     { Pane },
   )
   return { Allotment }
@@ -367,23 +369,23 @@ describe('ViewLayoutRenderer — split 분기', () => {
     expect(screen.getByText('— empty —')).toBeTruthy()
   })
 
-  // ── ★ADR-0063: node.ratio → Allotment defaultSizes 초기 사이징★ ──────────────────────────────
-  // 이 스위트가 막는 것: split 렌더러가 node.ratio 를 [ratio, 1-ratio] 로 Allotment 에 넘겨 부팅
-  // 레이아웃의 narrow-left(0.2)가 실제로 20/80 으로 뜨는지(50/50 무시 회귀 안전망). 드래그→백엔드
-  // 되쓰기는 이 슬라이스 밖(초기 사이징만).
-  it('split(ratio=0.2) → Allotment defaultSizes=[0.2,0.8] 로 초기 사이징이 전달된다', () => {
+  // ── ★ADR-0063: node.ratio → 첫 Pane 의 preferredSize % 초기 사이징★ ──────────────────────────────
+  // 이 스위트가 막는 것: split 렌더러가 node.ratio 를 첫 pane(a=왼/위)의 preferredSize="<pct>%" 로 넘겨
+  // 부팅 레이아웃 narrow-left(0.2)가 실제로 20/80 으로 뜨는지(50/50 무시 + defaultSizes-px-붕괴 회귀 안전망).
+  // 드래그→백엔드 되쓰기는 이 슬라이스 밖(초기 사이징만).
+  it('split(ratio=0.2) → 첫 pane preferredSize="20%" 로 초기 사이징이 전달된다', () => {
     const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.2)
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    const allotment = screen.getByTestId('allotment')
-    // ratio=0.2 → a(왼)=0.2, b(오)=0.8. mock 이 defaultSizes 를 "0.2,0.8" 로 노출.
-    expect(allotment.getAttribute('data-default-sizes')).toBe('0.2,0.8')
+    // 첫 pane(a=왼)에 ratio 파생 퍼센트가 붙는다. b(오)는 나머지 채움(preferredSize 없음).
+    const firstPane = screen.getAllByTestId('allotment-pane')[0]
+    expect(firstPane.getAttribute('data-preferred-size')).toBe('20%')
   })
 
-  it('split(ratio=0.5) → defaultSizes=[0.5,0.5] (기존 50/50 스플릿은 그대로 유지)', () => {
+  it('split(ratio=0.5) → 첫 pane preferredSize="50%" (기존 50/50 스플릿은 그대로 유지)', () => {
     const node = splitNode(slotNode('s1', null), slotNode('s2', null)) // 기본 ratio=0.5
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    const allotment = screen.getByTestId('allotment')
-    expect(allotment.getAttribute('data-default-sizes')).toBe('0.5,0.5')
+    const firstPane = screen.getAllByTestId('allotment-pane')[0]
+    expect(firstPane.getAttribute('data-preferred-size')).toBe('50%')
   })
 })
 

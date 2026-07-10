@@ -2,6 +2,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
+// ★Allotment 전역 CSS(회귀 수정)★: split-view 패널의 절대배치·높이 채움은 이 CSS 가 있어야 동작한다.
+// 옛 AppLayout 이 이걸 import 했는데 ADR-0063 셸 재작성에서 누락돼 부팅 split 이 높이 붕괴했다. 모든 창
+// (main·팝업·tree)이 공유하는 엔트리(main.tsx)에서 전역 로드해 ViewLayoutRenderer 의 Allotment 를 살린다.
+import "allotment/dist/style.css";
 import { useThemeStore } from "./store/themeStore";
 import { useAgentStore } from "./store/agentStore";
 import { loadAndApplyChatStyle, useChatStyleStore } from "./store/chatStyleStore"; // ADR-0051

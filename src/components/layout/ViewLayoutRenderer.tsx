@@ -166,17 +166,17 @@ export default function ViewLayoutRenderer({
     )
   }
   // split: a/b 두 자식을 방향대로 분할. dir='vertical' = 상하(allotment vertical).
-  // ★ratio 초기 사이징(ADR-0063)★: node.ratio = a(왼/위) 자식의 비율. Allotment 의 defaultSizes 는
-  //   "각 요소의 초기 크기"이며 컨테이너 실측 픽셀에 맞춰 비율대로 정규화된다 — 절대 픽셀을 몰라도
-  //   [ratio, 1-ratio] 만 주면 원하는 비율(예: 0.2 → 20/80)로 초기 배치된다. 부팅 레이아웃의 narrow-left
-  //   (0.2)가 무시되고 50/50 으로 뜨던 갭을 메운다(리뷰 FIX MAJOR). 0.5 스플릿은 [0.5,0.5]=50/50 그대로.
-  //   ★초기 사이징만★: 드래그 리사이즈→백엔드 ratio 되쓰기는 이 슬라이스 범위 밖(ADR-0063). layout:updated
-  //   권위 루프로 resize 를 흘리는 것은 별도 슬라이스다.
+  // ★ratio 초기 사이징(ADR-0063)★: node.ratio = a(왼/위) 자식의 비율. ★Allotment 의 `defaultSizes` 는
+  //   비율이 아니라 *픽셀*이다★ — [0.2,0.8] 을 주면 0.2px/0.8px 로 먹어 split-view 가 ~1px 로 붕괴하고
+  //   자식들이 흐름 밖으로 쌓인다(실측 스샷으로 확인한 회귀). 대신 첫 pane(a=왼/위)에 `preferredSize` 를
+  //   *퍼센트 문자열*로 줘 컨테이너 대비 비율로 배치한다(b 는 나머지 채움). 0.2 → "20%" = 20/80,
+  //   0.5 → "50%" = 50/50. 컨테이너 실측 픽셀을 몰라도 되고 높이는 Allotment 가 컨테이너로 채운다.
+  //   ★초기 사이징만★: 드래그 리사이즈→백엔드 ratio 되쓰기는 이 슬라이스 범위 밖(ADR-0063).
   // TODO(follow-up): drag→backend ratio writeback (layout:updated 권위 루프 = 별도 슬라이스)
   return (
     <div style={{ height: '100%' }}>
-      <Allotment vertical={node.dir === 'vertical'} defaultSizes={[node.ratio, 1 - node.ratio]}>
-        <Allotment.Pane key={nodeKey(node.a)}>
+      <Allotment vertical={node.dir === 'vertical'}>
+        <Allotment.Pane key={nodeKey(node.a)} preferredSize={`${Math.round(node.ratio * 100)}%`}>
           <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
         <Allotment.Pane key={nodeKey(node.b)}>
