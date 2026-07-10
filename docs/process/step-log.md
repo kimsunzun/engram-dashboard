@@ -829,6 +829,12 @@
 - **게이트:** review full PASS(2인, FIX 0 — 저심각도 관찰 2건[재포커스 시 불필요 emit·tabs-updated 중복]은 선택 최적화라 미반영). QA: cargo build 링크 OK(재시작 시 전체 exe 빌드 완료) · fmt · 격리 0(core 미접촉) · tsc 0 · npm test 482 · **GUI 실측 PASS**(CDP 9223): slot.focus 커맨드 경로 focus 이동·DOM 클릭 경로 focus 이동(~30ms, 100ms 목표 내)·65% inset 링이 focused 슬롯으로 이동·비포커스 슬롯 링 clear. do-not: bare cargo test = WebView2 배리어(member-scoped만).
 - **후속:** active_view(마지막-focus-창 추적)+focus-then-place(결정 2)·slot geometry(결정 3)·방향 sugar·드래그앤드롭·키보드 포커스 이동.
 
+## 슬롯 콘텐츠 배치 재설계 — 우클릭 컨텍스트 메뉴 2경로 + 검색 팝업 (ADR-0067, focus-then-place 대체) (2026-07-10, master, 대화 세션)
+- **무엇:** click-to-focus(ADR-0066 결정 1) 구현 후 focus-then-place(결정 2)의 근본 결함 발견 — 트리도 slot이라 **트리 클릭이 포커스를 트리 slot으로 뺏어**("포커스 슬롯에 배치"가 트리 자신을 가리킴, focus-steal) 배치가 깨짐. 배치를 우클릭 컨텍스트 메뉴로 재설계.
+- **어떻게:** `/research medium`(수집 3갈래 병렬 Sonnet: 에디터 소스/타깃 분리 · 균일-pane 타깃팅 · 듀얼패널+드래그/WCAG → grounding → Codex 적대 리뷰 FIX 4건). 결론: 모든 성숙 툴이 소스≠타깃 분리로 소스 클릭이 타깃 안 덮게 함, 비-드래그 표준 = 컨텍스트 메뉴 "open in…". Codex FIX: 포커스≠배치타깃 · WCAG 2.5.7은 단일 포인터 대안 · 콘텐츠 종류 특수취급 지양 · 크로스-윈도우 last-focus는 우연 배치 위험. 사용자 결정: 우클릭 2경로 + 검색 팝업, 스폰=트리 소관.
+- **결정(ADR-0067 — ADR-0066 결정 2·5 부분 폐기):** 경로1 = slot 우클릭 → "에이전트 모니터링" → 검색 팝업 → 그 slot에 assign · 경로2 = 트리 에이전트 우클릭 "열기"(openInFocusedSlot) 유지 · 스폰 = 트리(slot 콘텐츠-채움 "생성" 제거) · 드래그 후속 · §5 단일 `assign_agent`. 거부 대안: focus-then-place(focus-steal)·arm-then-drop(비표준)·last_focused_window(우클릭이 target-explicit이라 불필요)·역할 태깅(균일성 훼손)·드래그-only(WCAG). click-to-focus는 폐기 아님(시각 선택 지시자로 재해석, 배치 역할만 벗음).
+- **게이트:** ADR `/review doc` → 구현 `/implement standard` 예정.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

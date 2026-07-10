@@ -1,8 +1,8 @@
 # ADR-0066: 슬롯 포커스·배치 제어 표면 — click-to-focus + focus-then-place + slot geometry 노출 (§5 LLM 제어)
 
-- 상태: 확정 (2026-07-10, 근거: 사용자 결정 2건(배치=focus-then-place 먼저+드래그 나중 · 포커스 강도 65%) + `/research medium` OSS 서베이(VS Code·JetBrains·tmux·Zellij·i3/sway·wezterm) + Codex 적대 리뷰)
+- 상태: 확정 · 부분 폐기 by ADR-0067 (결정 2 focus-then-place · 결정 5 크로스-윈도우 place 타깃 → 우클릭 컨텍스트 메뉴) (2026-07-10, 근거: 사용자 결정 2건(배치=focus-then-place 먼저+드래그 나중 · 포커스 강도 65%) + `/research medium` OSS 서베이(VS Code·JetBrains·tmux·Zellij·i3/sway·wezterm) + Codex 적대 리뷰)
 - 개정: 2026-07-10 — 크로스-윈도우 active 타깃 미결 해소(§결정 5 신설, `/research medium` 재서베이 + Codex/doc 리뷰 FIX 반영 — ADR-0057 창별 active 모델과 정합). 사용자 결정: last-focused-wins.
-- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0035(레이아웃 권위=백엔드 ViewManager) · ADR-0057(창별 탭·active 소유 모델 — 크로스-윈도우 active 타깃 정본) · ADR-0022/0055(command registry) · ADR-0011(agentClient assign) · ADR-0060(SlotContent 유니온) · `src-tauri/src/layout/manager.rs`(focused_slot_id) · `src/components/layout/ViewLayoutRenderer.tsx` · step-log "슬롯 포커스·배치 제어 표면"
+- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0035(레이아웃 권위=백엔드 ViewManager) · ADR-0057(창별 탭·active 소유 모델 — 크로스-윈도우 active 타깃 정본) · ADR-0022/0055(command registry) · ADR-0011(agentClient assign) · ADR-0060(SlotContent 유니온) · `src-tauri/src/layout/manager.rs`(focused_slot_id) · `src/components/layout/ViewLayoutRenderer.tsx` · step-log "슬롯 포커스·배치 제어 표면" · Amended by ADR-0067 (결정 2(focus-then-place 배치) + 결정 5(크로스-윈도우 place 타깃) → 우클릭 컨텍스트 메뉴 배치로 대체)
 
 ## 맥락
 
