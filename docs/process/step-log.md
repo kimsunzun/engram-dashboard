@@ -783,6 +783,14 @@
 - **게이트:** review PASS(doc-aware PASS · Codex FIX=popup capability 누락→반영). QA: `cargo build` 링크 OK · tsc 0 · npm test 433(픽커→createPreset·취소→no-op·탑바제거 회귀 테스트 포함) · GUI 실측(탑바 제거 + 우클릭 "추가" 메뉴, 스샷). 네이티브 다이얼로그 자체는 OS 창이라 cdp 밖 — 수동 확인 몫.
 - **파킹(#1/#2):** 슬롯별 우클릭 메뉴 차별화는 사용자가 하나씩 스펙 예정 — 프리셋 메뉴는 지금 "추가"만, 에이전트 트리 메뉴는 Slice C 상태 유지.
 
+## 슬롯 컨텍스트 메뉴 = 단일 기여 API (2026-07-10, master, 대화 세션) · ADR-0064
+- **무엇(사용자 결정):** 프리셋/트리 슬롯이 자체 메뉴로 제네릭 메뉴를 억제해 공통 슬롯 조작(닫기 등)이 사라진 버그. → 메뉴 항목 = command 단일소스 참조 + 단일 기여 API로 조립. 공통은 하드코딩 말고 한 곳에 모으고, 콘텐츠별은 각 콘텐츠에서 기여(A안), 등록 일원화.
+- **어떻게:** `/research light`(VS Code contribution point + when-clause = 정석, 우리 command registry와 1:1) → ADR-0064 → `/implement`(코더 Opus → `/review code full` doc-aware+Codex → `/qa`).
+- **회수물:** `slotMenu.ts`(`registerSlotMenu(target: SlotContentType|'*', items{commandId,group,order})` + `buildSlotMenu` 결정적 정렬·dedupe·fail-loud skip+log + `validateSlotMenuContributions` 부팅 검증) · `slotCommands.ts`(공통 slot.split.h/v·popout·empty·close → '*' 기여) · `slotContentCommands.ts`(empty fill-ops + agent.kill) · `presetCommands`(preset.add→preset_palette)·`agentCommands`(agentlist.createAgent→agent_list) co-location · `SlotContextMenu` = resolved-items+ctx 순수 렌더러(공유 `dispatch.fireAndForget(id,ctx)` 경유) · `ViewLayoutRenderer`가 buildSlotMenu 호출 · `contributions.ts` 단일 매니페스트(App.tsx 산발 4-import 제거) · PresetPalette/AgentList pane 메뉴 제거(AgentList 행 메뉴 유지).
+- **슬롯별 메뉴:** empty=[트리 열기·팔레트 열기·에이전트 생성] · agent=[종료] · agent_list=[에이전트 생성] · preset_palette=[추가], 각각 + 공통(분할h·v/팝업/비우기/닫기).
+- **게이트:** review PASS(doc-aware+Codex; 렌더 throw→앱크래시 HIGH·중복 미dedup·공유dispatch 미사용 3건 적출→코더 재수정 1회 반영). QA: tsc 0·npm test 453·**GUI 실측**(프리셋 슬롯 우클릭 = 추가+구분선+공통5, 닫기 복원 스샷 확인).
+- **미해결(파킹):** ① 슬롯별 메뉴 세부 curation은 사용자가 incremental 스펙 ② AgentList 배경 "에이전트 생성"이 폴더 다이얼로그로 일관화되며 프리셋-리스트 spawn 드롭 → "이 프리셋으로 생성" 프리셋-행 액션 후속 ③ ctx.viewId null(활성탭 없는 순간) 공통 ops 무반응(저빈도 엣지, fireAndForget 로깅) ④ when-DSL(복합 조건) 미도입.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
