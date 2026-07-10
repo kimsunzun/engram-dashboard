@@ -409,6 +409,25 @@ impl ViewManager {
         }
     }
 
+    /// view 안 slot_id 슬롯을 포커스로 지정(click-to-focus — ADR-0066 결정 1). ★그 슬롯이 이 View 트리에
+    /// 실재할 때만★ `focused_slot_id` 를 갱신하고 version 을 올린다 — 부재면 no-op + SlotNotFound(부분변경
+    /// 금지). split/close 의 사이드이펙트로만 옮겨지던 포커스를 명시 command 로 옮기는 경로다.
+    ///
+    /// ★백엔드 권위(ADR-0035/0066)★: focused_slot_id 는 백엔드가 소유하고, 프론트는 emit(layout:updated)로만
+    /// 반영한다(낙관 갱신 금지 — command 레이어가 스냅샷 emit). 이 메서드는 순수 로직(Tauri 무관)이라 단독
+    /// unit 테스트된다. auto-focus-on-split(split_slot)은 그대로 유지 — 이건 클릭 리포커스를 추가할 뿐 대체 아님.
+    // ADR-0066
+    pub fn set_focused_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
+        let v = self.view_mut(view_id)?;
+        // 트리에 실재하는 슬롯만 포커스 대상(fixup_focus 가 쓰는 것과 동일 가드). 부재 = SlotNotFound(no-op).
+        if !tree::contains_slot(&v.layout, slot_id) {
+            return Err(LayoutError::SlotNotFound(slot_id));
+        }
+        v.focused_slot_id = Some(slot_id);
+        self.bump_version();
+        Ok(())
+    }
+
     /// view 안 slot_id 슬롯을 닫음(형제 승격, root 슬롯이면 빈 슬롯 리셋). focus 보정.
     /// invalid view_id/slot_id → no-op + Err.
     pub fn close_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
@@ -1030,6 +1049,64 @@ mod tests {
         let ver = mgr.version;
         assert!(mgr.close_slot(view_id, Uuid::new_v4()).is_err());
         assert_eq!(mgr.version, ver);
+    }
+
+    // ── set_focused_slot (click-to-focus — ADR-0066 결정 1) ───────────────────
+
+    #[test]
+    fn set_focused_slot_updates_focus_and_bumps_version() {
+        // 부팅 기본은 Split[AgentList·Empty] 라 좌측 슬롯이 focus. 우측(Empty) 슬롯으로 클릭 포커스 이동.
+        let mut mgr = ViewManager::new();
+        let view_id = main_active(&mgr);
+        // 좌/우 슬롯 id 를 트리에서 뽑는다(좌 = first_slot_id, 우 = split 의 b 슬롯).
+        let (left, right) = {
+            let v = mgr.views.get(&view_id).unwrap();
+            match &v.layout {
+                LayoutNode::Split { a, b, .. } => (tree::first_slot_id(a), tree::first_slot_id(b)),
+                _ => panic!("부팅 기본은 Split"),
+            }
+        };
+        // 사전조건: 좌측이 focus.
+        assert_eq!(mgr.views.get(&view_id).unwrap().focused_slot_id, Some(left));
+        let ver = mgr.version;
+        mgr.set_focused_slot(view_id, right).unwrap();
+        assert_eq!(
+            mgr.views.get(&view_id).unwrap().focused_slot_id,
+            Some(right),
+            "포커스가 클릭한 슬롯으로 이동"
+        );
+        assert_eq!(mgr.version, ver + 1, "성공 시 version +1");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn set_focused_slot_invalid_view_is_err() {
+        let mut mgr = ViewManager::new();
+        assert!(matches!(
+            mgr.set_focused_slot(Uuid::new_v4(), Uuid::new_v4())
+                .unwrap_err(),
+            LayoutError::ViewNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn set_focused_slot_absent_slot_is_err_noop() {
+        // 트리에 없는 slot → SlotNotFound + 상태 불변(no-op — 부분변경 금지).
+        let mut mgr = ViewManager::new();
+        let view_id = main_active(&mgr);
+        let before = mgr.views.get(&view_id).unwrap().focused_slot_id;
+        let ver = mgr.version;
+        assert!(matches!(
+            mgr.set_focused_slot(view_id, Uuid::new_v4()).unwrap_err(),
+            LayoutError::SlotNotFound(_)
+        ));
+        assert_eq!(
+            mgr.views.get(&view_id).unwrap().focused_slot_id,
+            before,
+            "실패 시 focused_slot_id 불변"
+        );
+        assert_eq!(mgr.version, ver, "실패 시 version 불변(no-op)");
+        assert_invariants(&mgr);
     }
 
     #[test]

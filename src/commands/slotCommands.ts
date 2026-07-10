@@ -51,6 +51,19 @@ registerSplit('slot.split.h', '가로 분할', 'horizontal')
 registerSplit('slot.split.v', '세로 분할', 'vertical')
 
 register({
+  id: 'slot.focus',
+  title: '포커스',
+  category: 'slot',
+  // ADR-0066: click-to-focus — 슬롯 pane 클릭·팔레트·키바인딩·LLM(__engramCmd)이 모두 이 command 를 통해
+  //   viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) 로 링을 갱신한다(낙관 갱신 X, §5 단일
+  //   제어 표면). ViewLayoutRenderer 의 pane onClick 도 같은 viewStore.focusSlot 을 부른다(동일 핸들).
+  run: args => {
+    const { viewId, slotId } = requireCoords(args, 'slot.focus')
+    return useViewStore.getState().focusSlot(viewId, slotId)
+  },
+})
+
+register({
   id: 'slot.popout',
   title: '팝업으로 분리',
   category: 'slot',

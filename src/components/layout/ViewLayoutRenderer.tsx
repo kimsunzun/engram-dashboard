@@ -105,6 +105,15 @@ export default function ViewLayoutRenderer({
         }}
         // 슬롯 식별용 data 속성 — cdp eval 에서 DOM 으로 split 결과(슬롯 수)를 셀 수 있게.
         data-slot-id={node.id}
+        // ADR-0066: click-to-focus — 슬롯 pane 클릭 시 이 슬롯을 포커스로 지정한다. viewStore.focusSlot →
+        //   invoke(focus_slot) → emit(layout:updated) 단일 제어 표면(사람 클릭 = LLM = slot.focus command, §5).
+        //   ★낙관 갱신 X★: 링(isFocused)은 백엔드 emit 스냅샷으로만 갱신된다(권위 = src-tauri, ADR-0035).
+        //   ★버블 허용(stopPropagation/preventDefault 안 함)★: 내부 상호작용(터미널 포커스·AgentList 버튼 등)을
+        //   가로채지 않는다 — pane 어디를 눌러도 그 슬롯이 focus 되고 내부 핸들러도 그대로 발화한다.
+        //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
+        onClick={() => {
+          if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
+        }}
         // ADR-0035: 우클릭 → SlotContextMenu 마운트. 메뉴 액션(분할/닫기/배정)은 viewStore(=window.__engramLayout)
         //   단일 제어 표면으로만 흐른다(사람 클릭 = LLM 이 한 표면, §5). 기본 컨텍스트 메뉴는 막는다.
         onContextMenu={e => {

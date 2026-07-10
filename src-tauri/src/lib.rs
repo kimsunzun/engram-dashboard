@@ -215,6 +215,9 @@ pub fn run() {
             commands::close_window,
             commands::split_slot,
             commands::close_slot,
+            // ADR-0066: click-to-focus — 슬롯 클릭 시 그 View 의 focused_slot_id 를 백엔드가 갱신하고
+            //   layout:updated 로 emit(낙관 프론트 갱신 없음, ADR-0035). §5 slot.focus 제어 표면.
+            commands::focus_slot,
             commands::assign_agent,
             // ADR-0063: 슬롯 콘텐츠 제네릭 배치 command(§5) — Empty/Agent/AgentList/PresetPalette 어느 것으로도
             //   슬롯 콘텐츠 교체. assign_agent(에이전트 전용)의 배치 패턴 미러(락→변형→해제→emit). 트리/팔레트를

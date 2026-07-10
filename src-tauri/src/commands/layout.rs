@@ -292,6 +292,38 @@ pub fn close_slot(
     Ok(())
 }
 
+/// view 안 slot_id 슬롯을 포커스로 지정(click-to-focus — ADR-0066 결정 1). ★백엔드 권위(ADR-0035)★:
+/// focused_slot_id 를 백엔드가 소유하고, 프론트는 layout:updated emit 으로만 링을 갱신한다(낙관 프론트
+/// 갱신 금지). 사람 클릭·팔레트·키바인딩·LLM(`__engramCmd.run('slot.focus', …)`)이 같은 이 핸들을 흔든다(§5).
+///
+/// ★라우팅 불변 → rebuild/구독 델타 없음★: 포커스 이동은 어느 슬롯이 어떤 agent 를 보는지(=출력 라우팅)를
+/// 바꾸지 않는다 → split/close/assign 과 달리 `router.rebuild` 도 구독 델타도 필요 없다(layout:updated 만
+/// emit). 락→변형→해제→emit 순서(ADR-0006)는 형제 command 와 동형. invalid view_id/slot_id → Err(no-op).
+// ADR-0066
+#[tauri::command]
+pub fn focus_slot(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    view_id: Uuid,
+    slot_id: Uuid,
+) -> Result<(), String> {
+    let (layout, tabs) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        mgr.set_focused_slot(view_id, slot_id)
+            .map_err(|e| e.to_string())?;
+        let layout = mgr.snapshot(view_id).ok();
+        // 탭 이름·목록은 안 바뀌나 형제 command 와 동형으로 창 탭바도 계약상 갱신(view_owner 파생).
+        let tabs = mgr
+            .owner_of(view_id)
+            .cloned()
+            .and_then(|label| tabs_payload(&mgr, &label));
+        // 라우팅 불변이라 router.rebuild/send_subscription_delta 안 부른다(위 주석).
+        (layout, tabs)
+    }; // ← 락 드롭
+    emit_after_unlock(&app, layout, tabs); // ★emit 은 락 밖(ADR-0006)★
+    Ok(())
+}
+
 /// view 안 slot_id 슬롯에 agent_id(참조 문자열) 배정. ★데몬에 실재 검증 안 함(ADR-0035/0006).
 /// 같은 agent 가 다른 View 에도 배정될 수 있음(불변식 5). invalid → Err(no-op).
 #[tauri::command]

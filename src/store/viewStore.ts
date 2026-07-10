@@ -92,6 +92,12 @@ interface ViewState {
   // ── View 내부 조작(view_id 전역 유니크라 시그니처 유지 — 소속 창은 백엔드 view_owner 파생) ──
   /** slot 분할 → 새 slot_id 반환. */
   split: (viewId: string, slotId: string, dir: SplitDir) => Promise<string>
+  /**
+   * slot 을 포커스로 지정(click-to-focus — ADR-0066 결정 1). 백엔드 focus_slot 을 invoke 하고 실제 링
+   * 갱신은 layout:updated emit 으로만(낙관 갱신 X — focused_slot_id 권위 = src-tauri, ADR-0035/0066).
+   * 사람 클릭·팔레트·키바인딩·LLM(window.__engramCmd → slot.focus)이 같은 이 핸들을 흔든다(§5).
+   */
+  focusSlot: (viewId: string, slotId: string) => Promise<void>
   /** slot 닫기(형제 승격). */
   closeSlot: (viewId: string, slotId: string) => Promise<void>
   /** slot 에 agent 참조 배정. */
@@ -148,6 +154,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
   closeWindow: window => invoke<void>('close_window', { window }),
 
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
+  // ADR-0066: 낙관 갱신 X — invoke 만 부르고 링은 layout:updated emit 으로만 갱신(백엔드 권위, ADR-0035).
+  focusSlot: (viewId, slotId) => invoke<void>('focus_slot', { viewId, slotId }),
   closeSlot: (viewId, slotId) => {
     // slot 이 사라지므로 그 slot 의 렌더 오버라이드 엔트리도 즉시 제거(누수 방지 — 프론트 전용 상태인
     // renderModeOverride 는 invoke→emit 권위 루프를 안 타므로 여기서 낙관적으로 정리한다).
