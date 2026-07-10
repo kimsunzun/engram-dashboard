@@ -142,6 +142,22 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
+  it('setSlotContent → set_slot_content invoke(viewId/slotId/content) (ADR-0063 제네릭 배치)', async () => {
+    const s = useViewStore.getState()
+    await s.setSlotContent('v1', 's1', { type: 'agent_list' })
+    expect(invokeMock).toHaveBeenCalledWith('set_slot_content', {
+      viewId: 'v1',
+      slotId: 's1',
+      content: { type: 'agent_list' },
+    })
+    await s.setSlotContent('v1', 's2', { type: 'empty' })
+    expect(invokeMock).toHaveBeenCalledWith('set_slot_content', {
+      viewId: 'v1',
+      slotId: 's2',
+      content: { type: 'empty' },
+    })
+  })
+
   it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + {window,tab} 반환', async () => {
     invokeMock.mockResolvedValueOnce({ window: 'slot-popup-2', tab: 'v-new' })
     const res = await useViewStore.getState().moveSlotToWindow('v1', 's1')
@@ -425,6 +441,18 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
       viewId: 'v1',
       slotId: 's-assign',
       agentId: 'agent-new',
+    })
+  })
+
+  it('setSlotContent 은 그 slot 의 오버라이드를 clear 한다(콘텐츠 통째 교체 → 누수 방지, ADR-0063)', async () => {
+    useViewStore.getState().setRenderMode('s-set', 'dom')
+    expect(useViewStore.getState().renderModeOverride['s-set']).toBe('dom')
+    await useViewStore.getState().setSlotContent('v1', 's-set', { type: 'agent_list' })
+    expect(useViewStore.getState().renderModeOverride['s-set']).toBeUndefined()
+    expect(invokeMock).toHaveBeenCalledWith('set_slot_content', {
+      viewId: 'v1',
+      slotId: 's-set',
+      content: { type: 'agent_list' },
     })
   })
 

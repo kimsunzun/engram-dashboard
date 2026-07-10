@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
 import { agentClient } from '../../api/clientFactory'
-import type { SplitDir } from '../../api/layoutTypes'
+import type { SlotContent, SplitDir } from '../../api/layoutTypes'
 
 interface SlotContextMenuProps {
   x: number
@@ -36,6 +36,7 @@ export default function SlotContextMenu({ x, y, slotId, agentId, viewIdOverride,
   const closeSlot = useViewStore(s => s.closeSlot)
   const assignAgent = useViewStore(s => s.assignAgent)
   const moveSlotToWindow = useViewStore(s => s.moveSlotToWindow)
+  const setSlotContent = useViewStore(s => s.setSlotContent)
   const agents = useAgentStore(s => s.agents)
 
   useEffect(() => {
@@ -86,10 +87,14 @@ export default function SlotContextMenu({ x, y, slotId, agentId, viewIdOverride,
         void moveSlotToWindow(targetViewId, slotId).catch(e => console.error('[moveSlotToWindow]', e))
       },
     },
-    // gap: 옛 "에이전트 트리 보기"/"터미널 보기"(slotStore.setSlotContent)는 대응 백엔드 wire 가 없다.
-    //   렌더 모드 오버라이드(terminal/rich/dom)는 *렌더러* 강제일 뿐 슬롯 콘텐츠(트리↔터미널) 교체가 아니라
-    //   깔끔히 매핑되지 않는다 → Brick 1 에서 두 항목을 뺀다. in-slot 트리를 되살릴 땐 백엔드 슬롯 콘텐츠
-    //   개념(또는 전용 command)을 먼저 정의해야 한다(AgentTree self-배치 가드 주석 참조).
+    // ★슬롯 콘텐츠 배치(ADR-0063)★: 옛 갭("트리/터미널 보기는 백엔드 wire 없음")이 set_slot_content 제네릭
+    //   command 로 해소됐다. 이제 빈 슬롯(또는 어느 슬롯)에 트리(agent_list)·팔레트(preset_palette)를
+    //   배치하거나 비운다(empty) — viewStore.setSlotContent → invoke(set_slot_content) → emit 반영(§5
+    //   단일 제어 표면, window.__engramLayout.setSlotContent 와 동일 함수). ADR-0060: SlotContent 유니온
+    //   discriminated 태그로 넘긴다.
+    { label: '에이전트 트리 열기', action: () => dispatchSetContent({ type: 'agent_list' }) },
+    { label: '프리셋 팔레트 열기', action: () => dispatchSetContent({ type: 'preset_palette' }) },
+    { label: '비우기', action: () => dispatchSetContent({ type: 'empty' }) },
     // ADR-0035: 분할 = viewStore.split(targetViewId, slotId, dir) → invoke(split_slot) → emit 반영.
     { label: '가로 분할', action: () => dispatchSplit('horizontal') },
     { label: '세로 분할', action: () => dispatchSplit('vertical') },
@@ -105,6 +110,13 @@ export default function SlotContextMenu({ x, y, slotId, agentId, viewIdOverride,
   function dispatchCloseSlot(): void {
     if (!targetViewId) return console.warn('[SlotContextMenu] view id 없음 — closeSlot 무시')
     void closeSlot(targetViewId, slotId).catch(e => console.error('[closeSlot]', e))
+  }
+
+  // ADR-0063: 슬롯 콘텐츠 배치 = viewStore.setSlotContent(targetViewId, slotId, content) →
+  //   invoke(set_slot_content) → emit 반영(백엔드 권위, 낙관 갱신 X).
+  function dispatchSetContent(content: SlotContent): void {
+    if (!targetViewId) return console.warn('[SlotContextMenu] view id 없음 — setSlotContent 무시')
+    void setSlotContent(targetViewId, slotId, content).catch(e => console.error('[setSlotContent]', e))
   }
 
   // agent-필요 항목('에이전트 종료'·'팝업으로 분리')은 슬롯에 실행중 에이전트가 있을 때만 유효 — 없으면

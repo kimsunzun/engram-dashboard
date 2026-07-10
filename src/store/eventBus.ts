@@ -98,6 +98,11 @@ export function initEventBus(): Promise<void> {
         split: useViewStore.getState().split,
         closeSlot: useViewStore.getState().closeSlot,
         assignAgent: useViewStore.getState().assignAgent,
+        // ★슬롯 콘텐츠 배치(§5, ADR-0063)★: setSlotContent(viewId, slotId, content) — assignAgent 미러.
+        //   트리(agent_list)·팔레트(preset_palette)·비우기(empty)·에이전트 배정을 SlotContent 유니온으로
+        //   교체한다. 사람 우클릭(SlotContextMenu)이 부르는 store 액션과 물리적으로 동일(§5 단일 제어 표면).
+        //   invoke→emit 권위 루프(ADR-0035 낙관 갱신 X). __engramCmd.run('layout.setSlotContent') 와 병행 경로.
+        setSlotContent: useViewStore.getState().setSlotContent,
         // ★슬롯 이동(§5)★: moveSlotToWindow(slotId, toWindow?) 표면 — LLM 이 slot id 만으로 부를 수 있게
         //   원본 viewId 는 currentViewId()(이 웹뷰 창의 active 탭)로 해소한다. toWindow 미지정 → 새 팝업 창.
         //   팝업 창 안에서 호출되면 그 창의 active 탭으로, 메인 창에서는 main active 탭으로 떨어진다 —

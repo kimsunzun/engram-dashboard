@@ -56,13 +56,22 @@ vi.mock('../../store/agentStore', () => ({
 // ── allotment stub — split 분기 렌더 시 jsdom 환경에서 ResizeObserver 에러 방지 ──
 // Allotment / Allotment.Pane 을 단순 div 로 대체해 자식을 그대로 렌더한다.
 // vi.mock factory 는 호이스팅되므로 React import 를 직접 쓸 수 없다 — importOriginal 패턴으로 우회.
+// defaultSizes(=ratio 파생 초기 사이징, ADR-0063)를 data 속성으로 노출해 테스트가 단언할 수 있게 한다.
 vi.mock('allotment', async () => {
   const React = (await import('react')).default
   const Pane = ({ children }: { children: React.ReactNode }) =>
     React.createElement('div', { 'data-testid': 'allotment-pane' }, children)
   const Allotment = Object.assign(
-    ({ children }: { children: React.ReactNode }) =>
-      React.createElement('div', { 'data-testid': 'allotment' }, children),
+    ({ children, defaultSizes }: { children: React.ReactNode; defaultSizes?: number[] }) =>
+      React.createElement(
+        'div',
+        {
+          'data-testid': 'allotment',
+          // ratio 파생 초기 사이징을 문자열로 노출(예: "0.2,0.8") — split 렌더 테스트가 읽어 단언.
+          'data-default-sizes': defaultSizes != null ? defaultSizes.join(',') : undefined,
+        },
+        children,
+      ),
     { Pane },
   )
   return { Allotment }
@@ -137,8 +146,8 @@ function slotNode(id: string, agentId: string | null): LayoutNode {
   }
 }
 
-function splitNode(a: LayoutNode, b: LayoutNode): LayoutNode {
-  return { type: 'split', dir: 'horizontal', ratio: 0.5, a, b }
+function splitNode(a: LayoutNode, b: LayoutNode, ratio = 0.5): LayoutNode {
+  return { type: 'split', dir: 'horizontal', ratio, a, b }
 }
 
 /** SlotContent variant 를 직접 지정하는 슬롯 노드(preset_palette / agent_list 분기 검증용, ADR-0060). */
@@ -357,6 +366,25 @@ describe('ViewLayoutRenderer — split 분기', () => {
     // s2 는 empty 플레이스홀더만.
     expect(screen.getByText('— empty —')).toBeTruthy()
   })
+
+  // ── ★ADR-0063: node.ratio → Allotment defaultSizes 초기 사이징★ ──────────────────────────────
+  // 이 스위트가 막는 것: split 렌더러가 node.ratio 를 [ratio, 1-ratio] 로 Allotment 에 넘겨 부팅
+  // 레이아웃의 narrow-left(0.2)가 실제로 20/80 으로 뜨는지(50/50 무시 회귀 안전망). 드래그→백엔드
+  // 되쓰기는 이 슬라이스 밖(초기 사이징만).
+  it('split(ratio=0.2) → Allotment defaultSizes=[0.2,0.8] 로 초기 사이징이 전달된다', () => {
+    const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.2)
+    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
+    const allotment = screen.getByTestId('allotment')
+    // ratio=0.2 → a(왼)=0.2, b(오)=0.8. mock 이 defaultSizes 를 "0.2,0.8" 로 노출.
+    expect(allotment.getAttribute('data-default-sizes')).toBe('0.2,0.8')
+  })
+
+  it('split(ratio=0.5) → defaultSizes=[0.5,0.5] (기존 50/50 스플릿은 그대로 유지)', () => {
+    const node = splitNode(slotNode('s1', null), slotNode('s2', null)) // 기본 ratio=0.5
+    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
+    const allotment = screen.getByTestId('allotment')
+    expect(allotment.getAttribute('data-default-sizes')).toBe('0.5,0.5')
+  })
 })
 
 // ── ★우클릭 컨텍스트 메뉴(§5, ADR-0035)★ ─────────────────────────────────────────────────
@@ -372,6 +400,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   const splitSpy = vi.fn(async () => 'new-slot')
   const closeSlotSpy = vi.fn(async () => undefined)
   const assignAgentSpy = vi.fn(async () => undefined)
+  const setSlotContentSpy = vi.fn(async () => undefined)
   const moveSlotToWindowSpy = vi.fn(async () => ({ window: 'slot-popup-1', tab: 'v-new' }))
   const origHash = window.location.hash
 
@@ -379,6 +408,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     splitSpy.mockClear()
     closeSlotSpy.mockClear()
     assignAgentSpy.mockClear()
+    setSlotContentSpy.mockClear()
     moveSlotToWindowSpy.mockClear()
     clientMock.spawnAgent.mockClear()
     clientMock.killAgent.mockClear()
@@ -391,6 +421,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
       split: splitSpy,
       closeSlot: closeSlotSpy,
       assignAgent: assignAgentSpy,
+      setSlotContent: setSlotContentSpy,
       moveSlotToWindow: moveSlotToWindowSpy,
     })
   })
@@ -447,6 +478,31 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     openMenu('slot-C', null)
     fireEvent.click(screen.getByText('닫기'))
     expect(closeSlotSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-C')
+  })
+
+  // ── ★슬롯 콘텐츠 배치(ADR-0063)★: 트리/팔레트/비우기 → setSlotContent(view, slot, {type}) ──────────
+  it('"에이전트 트리 열기" → setSlotContent(activeViewId, slotId, {type:agent_list})', () => {
+    openMenu('slot-T', null)
+    fireEvent.click(screen.getByText('에이전트 트리 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-T', { type: 'agent_list' })
+  })
+
+  it('"프리셋 팔레트 열기" → setSlotContent(activeViewId, slotId, {type:preset_palette})', () => {
+    openMenu('slot-U', null)
+    fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U', { type: 'preset_palette' })
+  })
+
+  it('"비우기" → setSlotContent(activeViewId, slotId, {type:empty})', () => {
+    openMenu('slot-V', null)
+    fireEvent.click(screen.getByText('비우기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-V', { type: 'empty' })
+  })
+
+  it('viewIdOverride 있으면 "에이전트 트리 열기"가 오버라이드 view 로 setSlotContent 를 부른다', () => {
+    openMenu('slot-to', null, POPUP_VIEW)
+    fireEvent.click(screen.getByText('에이전트 트리 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-to', { type: 'agent_list' })
   })
 
   it('"에이전트 생성" → spawnAgent 후 assignAgent(activeViewId, slotId, 새 agentId) 호출', async () => {

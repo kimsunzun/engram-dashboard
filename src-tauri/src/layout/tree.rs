@@ -180,6 +180,31 @@ pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String
     }
 }
 
+/// slot_id 슬롯의 콘텐츠(SlotContent)를 통째로 교체한다(제네릭 — Empty/Agent/AgentList/PresetPalette 어느
+/// variant 든). assign_in_tree 의 미러이나 Option<String> agent 래핑 없이 SlotContent 를 직접 받는다 —
+/// 비-에이전트 콘텐츠(AgentList/PresetPalette)를 슬롯에 배치하는 배치 경로(ADR-0063 set_slot_content).
+/// slot_id 없으면 no-op(false). ★덮어쓰기 시맨틱★: 점유 슬롯이어도 무조건 교체(assign_in_tree 와 동형).
+pub fn set_in_tree(node: &mut LayoutNode, slot_id: Uuid, content: SlotContent) -> bool {
+    match node {
+        LayoutNode::Slot { id, content: c } => {
+            if *id == slot_id {
+                *c = content;
+                true
+            } else {
+                false
+            }
+        }
+        LayoutNode::Split { a, b, .. } => {
+            // a 먼저(전역 고유 — 한쪽에서 처리됐으면 다른 쪽 안 봄). content 소유권 분기 이동.
+            if contains_slot(a, slot_id) {
+                set_in_tree(a, slot_id, content)
+            } else {
+                set_in_tree(b, slot_id, content)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::types::{SlotContent, SplitDir};
@@ -420,6 +445,66 @@ mod tests {
         let before = node.clone();
         assert!(!assign_in_tree(&mut node, Uuid::new_v4(), Some("x".into())));
         assert_eq!(node, before);
+    }
+
+    // ── set_in_tree (제네릭 콘텐츠 교체 — ADR-0063 set_slot_content) ─────────────────
+
+    #[test]
+    fn set_in_tree_replaces_with_agent_list() {
+        // 빈 슬롯을 AgentList 로 교체(비-에이전트 콘텐츠 배치 — set_in_tree 만의 경로).
+        let (mut node, id) = single_slot();
+        assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
+        assert_eq!(find_slot(&node, id).unwrap(), &SlotContent::AgentList);
+    }
+
+    #[test]
+    fn set_in_tree_replaces_with_preset_palette() {
+        let (mut node, id) = single_slot();
+        assert!(set_in_tree(&mut node, id, SlotContent::PresetPalette));
+        assert_eq!(find_slot(&node, id).unwrap(), &SlotContent::PresetPalette);
+    }
+
+    #[test]
+    fn set_in_tree_can_clear_to_empty() {
+        // 점유(Agent) 슬롯을 Empty 로 되돌린다(덮어쓰기 시맨틱).
+        let id = Uuid::new_v4();
+        let mut node = agent_slot(id, "occupant");
+        assert!(set_in_tree(&mut node, id, SlotContent::Empty));
+        assert!(find_slot(&node, id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_in_tree_overwrites_occupied_slot() {
+        // 점유 슬롯도 무조건 교체(assign_in_tree 와 동형 — 점유 방어는 상위 층).
+        let id = Uuid::new_v4();
+        let mut node = agent_slot(id, "old");
+        assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
+        assert_eq!(find_slot(&node, id).unwrap(), &SlotContent::AgentList);
+    }
+
+    #[test]
+    fn set_in_tree_targets_correct_slot_in_split() {
+        // split 트리에서 지정 슬롯만 바뀌고 형제는 불변.
+        let (mut node, id) = single_slot();
+        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        assert!(set_in_tree(&mut node, new_id, SlotContent::PresetPalette));
+        assert_eq!(
+            find_slot(&node, new_id).unwrap(),
+            &SlotContent::PresetPalette
+        );
+        assert!(find_slot(&node, id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_in_tree_missing_slot_is_noop() {
+        let (mut node, _id) = single_slot();
+        let before = node.clone();
+        assert!(!set_in_tree(
+            &mut node,
+            Uuid::new_v4(),
+            SlotContent::AgentList
+        ));
+        assert_eq!(node, before, "없는 slot set 은 트리 불변");
     }
 
     // ── ratio clamp ────────────────────────────────────────────────────────

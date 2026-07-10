@@ -109,6 +109,61 @@ describe('tabCommands 라우팅 (window 해소)', () => {
   })
 })
 
+// ── ★layout.setSlotContent variant 형태 검증(FIX LOW)★ ─────────────────────────────────────────
+// 이 스위트가 막는 것: tag(type)만 화이트리스트로 걸던 경계에 variant 별 필수 필드 검증을 더해,
+// {type:'agent'}(agent_id 누락) 같은 malformed 값이 레지스트리를 통과해 Rust 역직렬화에서야 늦게
+// 터지는 걸 막는다 — invoke 전에 loud fail(오배치 진단 지연 회귀 안전망).
+describe('layout.setSlotContent variant 형태 검증', () => {
+  const setSlotContentSpy = vi.fn(async () => undefined)
+  beforeEach(() => {
+    setSlotContentSpy.mockClear()
+    useViewStore.setState({ setSlotContent: setSlotContentSpy })
+  })
+
+  it('agent variant 에 agent_id 없으면 throw(레지스트리 경계에서 loud fail, invoke 전)', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent' } }),
+    ).toThrow(/agent_id/)
+    // ★invoke 전 throw★ — 잘못된 값이 store/백엔드로 흘러가면 안 된다.
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
+  })
+
+  it('agent variant 의 agent_id 가 비문자열(숫자)이면 throw', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent', agent_id: 42 } }),
+    ).toThrow(/agent_id/)
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
+  })
+
+  it('agent variant 의 agent_id 가 빈 문자열이면 throw', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent', agent_id: '' } }),
+    ).toThrow(/agent_id/)
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
+  })
+
+  it('알 수 없는 type 은 여전히 throw(화이트리스트)', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'bogus' } }),
+    ).toThrow(/SlotContent variant/)
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
+  })
+
+  it('정상 agent variant(agent_id 문자열) → setSlotContent 로 라우팅', () => {
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent', agent_id: 'a-1' } })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'a-1' })
+  })
+
+  it('unit variant(empty/agent_list/preset_palette)는 추가 필드 없이 통과', () => {
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'empty' } })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'agent_list' } })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'preset_palette' } })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'empty' })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
+  })
+})
+
 describe('tab.next (Ctrl+Tab 순환)', () => {
   it('탭 여러 개 → 오른쪽 순환(active 다음 탭으로 switch)', () => {
     useViewStore.setState({

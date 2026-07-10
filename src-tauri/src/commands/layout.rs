@@ -33,7 +33,7 @@ use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
 
 use crate::daemon_client::DaemonClient;
 use crate::layout::{
-    resolve_spawn_slot, CloseTabOutcome, LayoutState, SplitDir, ViewManager, ViewMeta,
+    resolve_spawn_slot, CloseTabOutcome, LayoutState, SlotContent, SplitDir, ViewManager, ViewMeta,
     ViewSnapshot, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
@@ -318,6 +318,36 @@ pub fn assign_agent(
         (layout, tabs)
     }; // ← 락 드롭
     emit_after_unlock(&app, layout, tabs);
+    Ok(())
+}
+
+/// view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체(ADR-0063 배치 제어 표면). assign_agent
+/// 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette)를 받는다 — 트리·팔레트를
+/// 슬롯에 배치하는 §5 LLM/사람 공용 command. ★락→변형→해제→emit(ADR-0006)은 assign_agent 와 동형★. invalid → Err(no-op).
+#[tauri::command]
+pub fn set_slot_content(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
+    view_id: Uuid,
+    slot_id: Uuid,
+    content: SlotContent,
+) -> Result<(), String> {
+    let (layout, tabs) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        mgr.set_slot_content(view_id, slot_id, content)
+            .map_err(|e| e.to_string())?;
+        let layout = mgr.snapshot(view_id).ok();
+        let tabs = mgr
+            .owner_of(view_id)
+            .cloned()
+            .and_then(|label| tabs_payload(&mgr, &label));
+        let delta = router.rebuild(&mgr);
+        send_subscription_delta(&client, delta);
+        (layout, tabs)
+    }; // ← 락 드롭
+    emit_after_unlock(&app, layout, tabs); // ★emit 은 락 밖(ADR-0006)★
     Ok(())
 }
 

@@ -213,6 +213,10 @@ pub fn run() {
             commands::split_slot,
             commands::close_slot,
             commands::assign_agent,
+            // ADR-0063: 슬롯 콘텐츠 제네릭 배치 command(§5) — Empty/Agent/AgentList/PresetPalette 어느 것으로도
+            //   슬롯 콘텐츠 교체. assign_agent(에이전트 전용)의 배치 패턴 미러(락→변형→해제→emit). 트리/팔레트를
+            //   슬롯에 배치하는 LLM/사람 공용 표면(set_slot_content).
+            commands::set_slot_content,
             // ADR-0057 D-7(§6 spawn_into): 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방 합성 command.
             //   실패 관대(spawn-first — 배치 실패해도 에이전트 생존·보고). slot 정책 = G9(점유 시 덮어쓰기 X).
             commands::spawn_into,

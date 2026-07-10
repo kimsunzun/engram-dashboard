@@ -92,13 +92,20 @@ impl Default for ViewManager {
 }
 
 impl ViewManager {
-    /// 부팅 초기 상태: main 창 1탭(빈 슬롯 View 1개 + 그게 active). agent-tree 는 windows 밖. // ADR-0057
+    /// 부팅 초기 상태: main 창 1탭(가로 분할 [AgentList(좌, 소) · Empty(우)] View 1개 + 그게 active).
+    /// agent-tree 는 windows 밖. // ADR-0057
+    ///
+    /// ★부팅 기본 = 슬롯화된 트리(ADR-0063)★: 옛 고정 좌측 사이드패널(AppLayout Sidebar)이 하던 "트리 좌측
+    /// 상시 노출"을 슬롯으로 재현한다 — 좌측 AgentList 슬롯 + 우측 Empty 슬롯의 Split. 이제 트리 슬롯도
+    /// 이동·분할·닫기 가능하고 §5 LLM 제어 표면(set_slot_content)으로 재배치된다. 좌측을 작게(ratio 0.2)
+    /// 두어 사이드패널 UX(좁은 트리 + 넓은 작업 영역)를 무손실 대체한다. ★main 첫 뷰만★ — create_tab 로 만드는
+    /// 새 탭은 종전대로 단일 빈 슬롯이다(트리를 모든 탭에 강제하지 않음).
     pub fn new() -> Self {
         let mut views = HashMap::new();
         let v0 = View {
             id: Uuid::new_v4(),
             name: "View 1".to_string(),
-            layout: LayoutNode::new_empty_slot(),
+            layout: Self::default_main_layout(),
             focused_slot_id: None,
         };
         let v0_id = v0.id;
@@ -215,6 +222,21 @@ impl ViewManager {
 
     fn bump_version(&mut self) {
         self.version += 1;
+    }
+
+    /// 부팅 시 main 창 첫 뷰의 기본 레이아웃 = 가로 분할 [AgentList(좌, ratio 0.2) · Empty(우)] (ADR-0063).
+    /// ★직접 Split 구성★: split_in_tree 는 ratio 0.5 고정 + 새 슬롯이 항상 Empty 라 여기 요구(좌=AgentList,
+    ///   ratio 0.2)를 못 맞춘다 → LayoutNode::Split 을 직접 짓는다(types.rs Split 노드 형태 그대로).
+    fn default_main_layout() -> LayoutNode {
+        LayoutNode::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.2, // 좌측(AgentList)을 작게 — 사이드패널 폭 재현.
+            a: Box::new(LayoutNode::Slot {
+                id: Uuid::new_v4(),
+                content: SlotContent::AgentList,
+            }),
+            b: Box::new(LayoutNode::new_empty_slot()),
+        }
     }
 
     // ── 내부 헬퍼(불변식 유지 — 쌍 갱신) ─────────────────────────────────────
@@ -409,6 +431,24 @@ impl ViewManager {
     ) -> Result<(), LayoutError> {
         let v = self.view_mut(view_id)?;
         if !tree::assign_in_tree(&mut v.layout, slot_id, Some(agent_id)) {
+            return Err(LayoutError::SlotNotFound(slot_id));
+        }
+        self.bump_version();
+        Ok(())
+    }
+
+    /// view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체한다(ADR-0063 배치 제어 표면).
+    /// assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette)를
+    /// 받는다 — 트리(에이전트)·팔레트를 슬롯에 배치하는 §5 LLM/사람 공용 경로. ★덮어쓰기 시맨틱(assign 과
+    /// 동형)★: 점유 슬롯도 무조건 교체(점유 방어는 없음 — 배치 command 는 명시적 교체 의도). invalid → Err(no-op).
+    pub fn set_slot_content(
+        &mut self,
+        view_id: Uuid,
+        slot_id: Uuid,
+        content: SlotContent,
+    ) -> Result<(), LayoutError> {
+        let v = self.view_mut(view_id)?;
+        if !tree::set_in_tree(&mut v.layout, slot_id, content) {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
         self.bump_version();
@@ -628,6 +668,55 @@ mod tests {
         // agent-tree 는 windows 밖.
         assert!(!mgr.windows.contains_key("agent-tree"));
         assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn new_main_default_layout_is_agent_list_split_empty() {
+        // ★ADR-0063 부팅 기본★: main 첫 뷰 = 가로 분할 [AgentList(좌, ratio 0.2) · Empty(우)].
+        let mgr = ViewManager::new();
+        let v0 = main_active(&mgr);
+        let layout = &mgr.views.get(&v0).unwrap().layout;
+        match layout {
+            LayoutNode::Split { dir, ratio, a, b } => {
+                assert_eq!(*dir, SplitDir::Horizontal, "가로 분할");
+                assert_eq!(*ratio, 0.2, "좌측(트리)을 작게");
+                assert!(
+                    matches!(
+                        a.as_ref(),
+                        LayoutNode::Slot {
+                            content: SlotContent::AgentList,
+                            ..
+                        }
+                    ),
+                    "좌측 = AgentList 슬롯"
+                );
+                assert!(
+                    matches!(
+                        b.as_ref(),
+                        LayoutNode::Slot {
+                            content: SlotContent::Empty,
+                            ..
+                        }
+                    ),
+                    "우측 = Empty 슬롯"
+                );
+            }
+            _ => panic!("부팅 기본은 Split 이어야 함"),
+        }
+    }
+
+    #[test]
+    fn create_tab_stays_single_empty_slot() {
+        // ★ADR-0063★: 부팅 기본만 분할 — 새 탭은 종전대로 단일 빈 슬롯(트리를 모든 탭에 강제 안 함).
+        let mut mgr = ViewManager::new();
+        let t = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        assert!(matches!(
+            mgr.views.get(&t).unwrap().layout,
+            LayoutNode::Slot {
+                content: SlotContent::Empty,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -955,6 +1044,62 @@ mod tests {
         assert!(mgr
             .assign_agent(Uuid::new_v4(), Uuid::new_v4(), "x".into())
             .is_err());
+    }
+
+    // ── set_slot_content (제네릭 배치 command — ADR-0063) ─────────────────────
+
+    #[test]
+    fn set_slot_content_places_agent_list() {
+        // 빈 슬롯을 AgentList 로 배치(비-에이전트 콘텐츠 — assign_agent 로는 불가한 경로).
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let slot = first_slot_of(&mgr, v);
+        let ver = mgr.version;
+        mgr.set_slot_content(v, slot, SlotContent::AgentList)
+            .unwrap();
+        assert_eq!(
+            tree::find_slot(&mgr.views.get(&v).unwrap().layout, slot).unwrap(),
+            &SlotContent::AgentList
+        );
+        assert_eq!(mgr.version, ver + 1, "성공 시 version +1");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn set_slot_content_can_clear_to_empty() {
+        // Agent 배정 슬롯을 set_slot_content(Empty)로 비운다(제네릭 — 어느 variant 로도 교체).
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let slot = first_slot_of(&mgr, v);
+        mgr.assign_agent(v, slot, "occupant".into()).unwrap();
+        mgr.set_slot_content(v, slot, SlotContent::Empty).unwrap();
+        assert!(tree::find_slot(&mgr.views.get(&v).unwrap().layout, slot)
+            .unwrap()
+            .is_empty());
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn set_slot_content_invalid_view_is_err() {
+        let mut mgr = ViewManager::new();
+        assert!(matches!(
+            mgr.set_slot_content(Uuid::new_v4(), Uuid::new_v4(), SlotContent::AgentList)
+                .unwrap_err(),
+            LayoutError::ViewNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn set_slot_content_invalid_slot_is_err_noop() {
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let ver = mgr.version;
+        assert!(matches!(
+            mgr.set_slot_content(v, Uuid::new_v4(), SlotContent::PresetPalette)
+                .unwrap_err(),
+            LayoutError::SlotNotFound(_)
+        ));
+        assert_eq!(mgr.version, ver, "실패 시 version 불변(no-op)");
     }
 
     #[test]

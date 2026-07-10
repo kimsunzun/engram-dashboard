@@ -30,7 +30,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 
-import type { LayoutNode, SplitDir, ViewMeta, ViewSnapshot } from '../api/layoutTypes'
+import type { LayoutNode, SlotContent, SplitDir, ViewMeta, ViewSnapshot } from '../api/layoutTypes'
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 
 /** 메인 창 label(백엔드 MAIN_WINDOW_LABEL 미러). agent-tree 폴백·기본 대상. */
@@ -97,6 +97,13 @@ interface ViewState {
   /** slot 에 agent 참조 배정. */
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
   /**
+   * slot 의 콘텐츠를 SlotContent 유니온 어느 것으로도 교체(ADR-0063 배치 제어 표면). 트리(agent_list)·
+   * 팔레트(preset_palette)·비우기(empty)를 슬롯에 배치한다. 백엔드 set_slot_content 를 invoke 하고 실제
+   * 반영은 layout:updated emit 으로만(낙관 갱신 X — 레이아웃 권위 = src-tauri, ADR-0035).
+   * §5: window.__engramLayout.setSlotContent 로 LLM 도 호출.
+   */
+  setSlotContent: (viewId: string, slotId: string, content: SlotContent) => Promise<void>
+  /**
    * slot 의 agent 를 다른 창의 새 탭으로 MOVE(detach, not mirror). 백엔드 move_slot_to_window 가 새 View
    * 생성 → agent 이전 → 대상 창(미지정 시 새 팝업 창) 새 탭 삽입 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는
    * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4).
@@ -153,6 +160,13 @@ export const useViewStore = create<ViewState>((set, get) => ({
     // 기본으로 시작하게 한다(프론트 전용 낙관 갱신 — renderModeOverride, 권위 루프 밖).
     get().clearRenderMode(slotId)
     return invoke<void>('assign_agent', { viewId, slotId, agentId })
+  },
+  setSlotContent: (viewId, slotId, content) => {
+    // slot 콘텐츠가 통째 바뀌므로(에이전트→트리 등) 그 slot 의 렌더 오버라이드도 즉시 정리(assignAgent 와
+    // 동형 — 프론트 전용 상태라 emit 권위 루프 밖). 실제 콘텐츠 교체는 백엔드 set_slot_content 가 하고
+    // layout:updated emit 으로 반영된다(낙관 갱신 X, ADR-0035).
+    get().clearRenderMode(slotId)
+    return invoke<void>('set_slot_content', { viewId, slotId, content })
   },
   moveSlotToWindow: (viewId, slotId, toWindow) => {
     // slot 이 원본 창에서 사라지므로(MOVE) 그 slot 의 렌더 오버라이드 엔트리도 즉시 정리(누수 방지 —

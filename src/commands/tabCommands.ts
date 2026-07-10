@@ -114,6 +114,64 @@ function optionalUuidArg(v: unknown, name: string): string | null {
   return v
 }
 
+/** SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063). */
+const SLOT_CONTENT_TYPES = new Set(['empty', 'agent', 'agent_list', 'preset_palette'])
+
+/**
+ * ★SlotContent variant 형태 검증(FIX LOW)★: 태그(type)만 화이트리스트로 걸면 `{type:'agent'}` 처럼
+ * agent_id 가 빠진 malformed 값이 레지스트리를 통과해 Rust 역직렬화에서야 늦게 터진다(오배치 진단 지연).
+ * variant 별 필수 필드를 레지스트리 경계에서 미리 검증해 잘못된 값은 invoke **전에** throw 한다
+ * (agent.spawnInto 의 optionalUuidArg 와 동형 — side-effecting invoke 전 loud fail). tag 는 이미
+ * SLOT_CONTENT_TYPES 로 검증된 상태로 들어온다. 반환은 store 로 흘릴 SlotContent(정상 형태만 통과).
+ */
+function validateSlotContent(content: { type: string } & Record<string, unknown>): void {
+  switch (content.type) {
+    case 'agent':
+      // agent variant 는 문자열 agent_id 필수 — 빠지면 Rust 역직렬화 실패 대신 여기서 loud fail.
+      if (typeof content.agent_id !== 'string' || content.agent_id.length === 0) {
+        throw new Error(
+          `[layout.setSlotContent] agent variant 는 string agent_id 필요(받음: ${JSON.stringify(content)})`,
+        )
+      }
+      break
+    case 'empty':
+    case 'agent_list':
+    case 'preset_palette':
+      // 추가 필드 없는 unit variant — tag 만 맞으면 통과(여분 필드는 백엔드가 무시).
+      break
+    // default 는 도달 불가(호출부에서 SLOT_CONTENT_TYPES 로 이미 걸러짐) — 방어만.
+  }
+}
+
+register({
+  id: 'layout.setSlotContent',
+  title: '슬롯 콘텐츠 배치',
+  category: 'layout',
+  // ★set_slot_content(ADR-0063)★: 슬롯 콘텐츠를 SlotContent 유니온 어느 것으로도 교체한다(트리/팔레트/비우기).
+  //   viewStore.setSlotContent 로 라우팅(사람 우클릭 = LLM 한 표면, §5). args: viewId(필수)·slotId(필수)·
+  //   content(필수, discriminated 태그 {type:...}). content.type 은 화이트리스트로 검증(오배치 방지).
+  run: args => {
+    const viewId = args?.viewId
+    const slotId = args?.slotId
+    const content = args?.content
+    if (typeof viewId !== 'string') throw new Error('[layout.setSlotContent] viewId 필요')
+    if (typeof slotId !== 'string') throw new Error('[layout.setSlotContent] slotId 필요')
+    const type = (content as { type?: unknown } | undefined)?.type
+    if (typeof type !== 'string' || !SLOT_CONTENT_TYPES.has(type)) {
+      throw new Error(
+        `[layout.setSlotContent] content.type 이 SlotContent variant 여야 함(받음: ${JSON.stringify(content)})`,
+      )
+    }
+    // ★variant 형태 검증(FIX)★: tag 통과 후 variant 별 필수 필드까지 레지스트리 경계에서 검증한다 —
+    //   {type:'agent'} 처럼 agent_id 없는 malformed 값이 Rust 역직렬화까지 흘러가지 않게 여기서 loud fail.
+    validateSlotContent(content as { type: string } & Record<string, unknown>)
+    // content 는 이미 discriminated 태그 형태 — store 가 그대로 invoke 로 흘린다.
+    return useViewStore
+      .getState()
+      .setSlotContent(viewId, slotId, content as import('../api/layoutTypes').SlotContent)
+  },
+})
+
 register({
   id: 'agent.spawnInto',
   title: '스폰 + 배치',
