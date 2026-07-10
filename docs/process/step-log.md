@@ -767,6 +767,13 @@
 - **인프라 사실:** 데몬 재빌드·재시작(사용자 승인 후 PID 34284/37664 종료) — Slice A 이월됐던 전체 `cargo build` 링크 게이트 이로써 PASS 확인. 신규 데몬(프리셋 handling)으로 B·C GUI 실측 완료.
 - **미해결(플래그):** ① 영속·ProtocolClient 하드닝(프로필+프리셋 양 경로 — Codex 지적: save 순서 race·save실패 삼킴·broadcast drop·sendCommand 타임아웃 부재·version bump) = **사용자 결정** ② 비-에이전트 SlotContent variant 슬롯 placement command(현재 고정 사이드패널 마운트) ③ agent rename(이름 저장 필요) ④ agent restart 전용 command ⑤ 메뉴 위치 화면-밖 클램프(SlotContextMenu 공통).
 
+## 에이전트 트리 완전 슬롯화 + 앱 셸 정리 (Slice D) (2026-07-10, master, 대화 세션) · ADR-0063 · 커밋 예정
+- **무엇(사용자 결정):** ① 에이전트 트리를 고정 사이드패널 → **진짜 SlotContent 슬롯**으로 완전 전환 ② 하단 StatusBar + 더미 DiffPanel(S0 잔재) 제거.
+- **어떻게:** `/implement` standard — 코더(Opus) → `/review code full`(doc-aware + Codex blind, 재수정 1회) → `/qa` full(재빌드 + GUI 실측).
+- **회수물:** 백엔드 `tree::set_in_tree` + `ViewManager::set_slot_content` + `#[tauri::command] set_slot_content`(assign_agent 미러: lock→mutate→rebuild→delta→emit-after-unlock, ADR-0006) + `generate_handler` 등록 · 부팅 기본 레이아웃을 가로 분할 `{ratio:0.2, AgentList | Empty}`로(`ViewManager::new`만, create_tab은 단일 Empty 유지). 프론트 `viewStore.setSlotContent`(invoke-only, 로컬 변조 0·ADR-0035) + `window.__engramLayout.setSlotContent` 노출 + SlotContextMenu 배치 메뉴(트리/팔레트/비우기) + `layout.setSlotContent` command(variant shape 검증) + `ViewLayoutRenderer`가 Split `ratio`→Allotment `defaultSizes` 반영. AppLayout에서 Sidebar/StatusBar/DiffPanel pane 제거 + 세 컴포넌트 파일 삭제.
+- **게이트:** review PASS(초기 ratio 미배선 MAJOR 적출→수정 · `__engramLayout` 노출 누락→수정 · command shape 검증→추가). QA full: `cargo build` 링크 OK · tsc 0 · npm test 432 · **GUI 실측**: 부팅 좌 256px(20%)/우 1024px(80%) 분할·좌 AgentList·set_slot_content로 우측에 PresetPalette 렌더·사이드패널/diff바 부재.
+- **미해결(플래그):** ① Split 드래그→백엔드 ratio 되쓰기(현재 초기 사이징만·TODO 노트) ② monaco 의존성이 DiffPanel 삭제로 미사용(package.json 정리 후보) ③ 영속·ProtocolClient 하드닝(TaskList #5, 사용자 결정) ④ agent rename/restart(백엔드 부재) ⑤ 메뉴 화면밖 클램프.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
