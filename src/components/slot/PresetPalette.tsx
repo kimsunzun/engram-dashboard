@@ -101,6 +101,23 @@ export default function PresetPalette() {
         overflow: 'hidden',
       }}
     >
+      {/* 슬롯 콘텐츠 라벨(사용자 요청) — 이 슬롯 = 프리셋 팔레트임을 표시. 공용 슬롯 헤더가 아니라
+          PresetPalette·AgentList 이 2개 variant 컴포넌트에만 각자 넣는다(터미널 등 다른 슬롯 무영향). 변수-only. */}
+      <div
+        data-slot-label="preset"
+        style={{
+          padding: '6px 8px',
+          borderBottom: '1px solid var(--border)',
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--font-ui)',
+          fontSize: '11px',
+          fontWeight: 600,
+          letterSpacing: '0.03em',
+          flexShrink: 0,
+        }}
+      >
+        프리셋
+      </div>
       {/* add-path 입력 행 — Enter 또는 추가 버튼으로 createPreset(cwd). */}
       <div
         style={{

@@ -286,6 +286,26 @@ export default function AgentList() {
         setBgMenu({ x: e.clientX, y: e.clientY })
       }}
     >
+      {/* 슬롯 콘텐츠 라벨(사용자 요청) — 이 슬롯 = 에이전트 트리. 공용 슬롯 헤더가 아니라 PresetPalette·
+          AgentList 이 2개 variant 컴포넌트에만 각자 넣는다. root 가 스크롤 컨테이너라 sticky 로 상단 고정. 변수-only. */}
+      <div
+        data-slot-label="agent-list"
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 1,
+          padding: '6px 8px',
+          borderBottom: '1px solid var(--border)',
+          background: 'var(--bg-secondary)',
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--font-ui)',
+          fontSize: '11px',
+          fontWeight: 600,
+          letterSpacing: '0.03em',
+        }}
+      >
+        에이전트 트리
+      </div>
       {rows.length === 0 ? (
         <div
           style={{
