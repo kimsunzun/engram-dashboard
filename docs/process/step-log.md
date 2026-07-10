@@ -796,6 +796,13 @@
 - **Bug2 분할 시 형제 pane ratio 리셋:** `Allotment.Pane key={nodeKey(...)}`(콘텐츠 파생) → 슬롯 분할로 형제 pane subtree 재구조 시 key 변경→remount→Allotment 전 pane 균등 재분배 → 좌측 20% pane이 ~50%로 튐. 수정: pane key를 위치 기반 안정값(`pane-a`/`pane-b`)으로(nodeKey 제거). GUI 실측: 우측 empty 분할해도 좌측 agent_list 256px(20%) 그대로 유지.
 - **게이트:** `/implement` — 코더(Opus) → `/review code`(Codex blind 단독, focused 2-fix 비례; LOW deps 누락 1건→인라인 반영) → `/qa`(tsc 0·npm test 461·**GUI 스샷 실측** 두 버그). Bug2 실제 Allotment 사이즈 유지는 jsdom 불가라 GUI가 정본.
 
+## 빈 슬롯 메뉴 정리 — 콘텐츠-채움 서브메뉴 + hideOn 트림 (2026-07-10, master, 대화 세션) · ADR-0065
+- **무엇(사용자 제보):** 빈 슬롯 우클릭 메뉴가 8항목 플랫로 난잡("너무 난잡해, 다른 곳 참조해봐, 2단 추가해야 되나?"). 원인 = 콘텐츠-채움 3(트리/팔레트/생성)과 공통 slot-ops 5가 평면 혼재 + `비우기`(빈 슬롯에 no-op)·`팝업 분리`가 무조건 노출.
+- **어떻게:** `/research light`(OSS 서베이 — VS Code·JetBrains·iTerm2·Windows Terminal·GNOME HIG: 성숙 앱 모두 플랫 구분선, 레이아웃-ops 서브메뉴화는 의도적 회피, 서브메뉴는 "New >" 동적 콘텐츠에만) → 사용자 선택("트림 + 콘텐츠 서브메뉴") → ADR-0065(0064 부분개정) → `/implement standard`(코더 Opus → `/review code full` doc-aware+Codex → `/qa full`).
+- **회수물:** `slotMenu.ts`(descriptor에 `hideOn?: SlotContentType[]` 제외조건 + `children?` 1단 서브메뉴 컨테이너; buildSlotMenu가 hideOn 필터(최상위+자식)·children 1단 resolve·빈-컨테이너 skip·1단 nesting 강제·XOR shape 검증; validateSlotMenuContributions가 부팅에 shape 검증 재귀) · `slotCommands.ts`(slot.popout/slot.empty에 `hideOn:['empty']`, '*' 등록 유지) · `slotContentCommands.ts`(fill 3항목 → "새 콘텐츠" 컨테이너) · `SlotContextMenu.tsx`(hover flyout 렌더 + `flyoutPosition` 우측 오버플로 시 좌측 전개). fail-loud = console.error+skip(crash-free — 렌더 시점 호출·error boundary 부재, throw 불가). 하위호환(hideOn/children 옵셔널).
+- **게이트:** review full PASS — 1차 FIX(양 리뷰어 수렴 = 자식 전멸 시 죽은-leaf 컨테이너 + Codex = hideOn 자식 미적용 + doc-aware = 부팅검증 shape 갭 하드닝) → 코더 재수정 1회 → 재리뷰 2인 PASS(회귀 없음). QA full: tsc 0 · npm test 482(+5, FIX-1/2/3 케이스) · 코어 격리 0줄 · **GUI 스샷 실측**(빈 슬롯 = 새 콘텐츠▶·가로/세로 분할·닫기 4항목, 비우기/팝업 미노출, flyout 3자식, 우측 가장자리 좌측 clamp, §5 command bus 생존).
+- **미해결(파킹):** ① "이 프리셋으로 에이전트 생성" 프리셋-행 spawn 이관(여전) ② 슬롯 종류별 메뉴 curation 계속 ③ 전체 when-DSL은 hideOn으로 부분 실현·복합조건 등장 시 승격.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

@@ -1,7 +1,7 @@
 # ADR-0064: 슬롯 컨텍스트 메뉴 = 단일 기여 API (공통 target=별 + 콘텐츠 co-location + 등록 일원화, command 단일소스)
 
 - 상태: 확정 (2026-07-10, 근거: 사용자 결정 + `/research light`(VS Code/JetBrains/Zellij/Obsidian 프리아트 서베이))
-- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0055/0022(command registry) · ADR-0060(SlotContent 유니온) · ADR-0035(레이아웃 권위=src-tauri) · `src/commands/registry.ts` · `src/components/slot/SlotContextMenu.tsx` · `src/components/layout/ViewLayoutRenderer.tsx` · step-log "슬롯 메뉴 기여"
+- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0055/0022(command registry) · ADR-0060(SlotContent 유니온) · ADR-0035(레이아웃 권위=src-tauri) · `src/commands/registry.ts` · `src/components/slot/SlotContextMenu.tsx` · `src/components/layout/ViewLayoutRenderer.tsx` · step-log "슬롯 메뉴 기여" · Amended by ADR-0065 (descriptor 스키마 확장: hideOn 제외조건 + children 1단 서브메뉴 (when-DSL 연기를 hideOn으로 부분 실현))
 
 ## 맥락
 
