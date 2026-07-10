@@ -25,6 +25,7 @@ import type {
   AgentProfile,
   AgentStatus,
   ClaudeOutputFormat,
+  Preset,
   RestoreReport,
 } from './types'
 
@@ -127,6 +128,7 @@ export class ProtocolClient implements AgentClient {
   private statusCbs = new Set<(id: string, status: AgentStatus, epoch: number) => void>()
   private restoreCbs = new Set<(report: RestoreReport) => void>()
   private profileListCbs = new Set<(profiles: AgentProfile[]) => void>()
+  private presetListCbs = new Set<(presets: Preset[]) => void>()
 
   // transport 구독 해제 핸들.
   private offMessage: (() => void) | null = null
@@ -527,6 +529,18 @@ export class ProtocolClient implements AgentClient {
       for (const cb of this.profileListCbs) cb(profiles)
       return
     }
+    // 프리셋(ADR-0061) — ProfileList/ProfileListUpdated 와 동형. PresetList=전용 reply(request_id 매칭),
+    //   PresetListUpdated=CRUD 후 broadcast(콜백 fan-out).
+    if ('PresetList' in msg) {
+      const p = msg.PresetList as { request_id: string; presets: Preset[] }
+      this.resolvePending(p.request_id, p.presets)
+      return
+    }
+    if ('PresetListUpdated' in msg) {
+      const presets = (msg.PresetListUpdated as { presets: Preset[] }).presets
+      for (const cb of this.presetListCbs) cb(presets)
+      return
+    }
     if ('Snapshot' in msg) {
       const s = msg.Snapshot as { request_id: string; agent_id: string; chunks: unknown[] }
       this.resolvePending(s.request_id, s.chunks)
@@ -741,6 +755,19 @@ export class ProtocolClient implements AgentClient {
     }))
   }
 
+  // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────────────
+  listPresets(): Promise<Preset[]> {
+    return this.sendCommand<Preset[]>((request_id) => ({ ListPresets: { request_id } }))
+  }
+  createPreset(cwd: string): Promise<void> {
+    // 백엔드 reply=Ack(void). 생성된 프리셋은 뒤이은 PresetListUpdated broadcast 로 store 에 들어온다
+    //   (createClaudeProfile 이 Created{profile} 를 돌려주는 것과 다름 — 프리셋은 이름을 안 실어 reply 가 Ack).
+    return this.sendCommand<void>((request_id) => ({ CreatePreset: { cwd, request_id } }))
+  }
+  deletePreset(id: string): Promise<void> {
+    return this.sendCommand<void>((request_id) => ({ DeletePreset: { preset_id: id, request_id } }))
+  }
+
   // ── 상태/목록/복원/프로필 이벤트 — 레지스트리 등록 + remove disposer ──────────────────
   onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void {
     this.agentListCbs.add(cb)
@@ -764,6 +791,12 @@ export class ProtocolClient implements AgentClient {
     this.profileListCbs.add(cb)
     return () => {
       this.profileListCbs.delete(cb)
+    }
+  }
+  onPresetListUpdated(cb: (presets: Preset[]) => void): () => void {
+    this.presetListCbs.add(cb)
+    return () => {
+      this.presetListCbs.delete(cb)
     }
   }
 

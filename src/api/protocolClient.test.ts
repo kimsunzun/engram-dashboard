@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProtocolClient } from './protocolClient'
 import type { ConnectionState, OutputChunk } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
-import type { AgentInfo, AgentProfile, RestoreReport } from './types'
+import type { AgentInfo, AgentProfile, Preset, RestoreReport } from './types'
 
 /**
  * 제어 가능한 Transport mock. ProtocolClient 가 send 한 wire 객체를 sent 에 기록하고, deliver(...)로
@@ -185,6 +185,42 @@ describe('request_id pending 매칭', () => {
     t.control({ Snapshot: { request_id: rid1, agent_id: AGENT, chunks: [{ seq: 1 }] } })
     await expect(p1).resolves.toEqual([{ seq: 1 }])
     await expect(p2).resolves.toEqual([{ seq: 2 }])
+  })
+})
+
+// ── 프리셋 CRUD(ADR-0061 — wire 명령/reply 매칭) ─────────────────────────────────────
+describe('프리셋 CRUD(ADR-0061)', () => {
+  it('listPresets → ListPresets{request_id} 전송 + PresetList{request_id,presets} resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.listPresets()
+    await Promise.resolve()
+    const rid = t.lastSent<{ request_id: string }>('ListPresets')!.request_id
+    const presets = [{ id: 'pr1', cwd: 'C:/proj' }] as Preset[]
+    t.control({ PresetList: { request_id: rid, presets } })
+    expect(await p).toEqual(presets)
+  })
+
+  it('createPreset(cwd) → CreatePreset{cwd,request_id} 전송 + Ack 로 void resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.createPreset('C:/work')
+    await Promise.resolve()
+    const sent = t.lastSent<{ request_id: string; cwd: string }>('CreatePreset')!
+    expect(sent.cwd).toBe('C:/work')
+    t.control({ Ack: { request_id: sent.request_id } })
+    await expect(p).resolves.toBeUndefined()
+  })
+
+  it('deletePreset(id) → DeletePreset{preset_id,request_id} 전송 + Ack 로 void resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.deletePreset('pr1')
+    await Promise.resolve()
+    const sent = t.lastSent<{ request_id: string; preset_id: string }>('DeletePreset')!
+    expect(sent.preset_id).toBe('pr1')
+    t.control({ Ack: { request_id: sent.request_id } })
+    await expect(p).resolves.toBeUndefined()
   })
 })
 
@@ -792,6 +828,19 @@ describe('이벤트 라우팅(eventBus 공통 표면)', () => {
     off()
     t.control({ ProfileListUpdated: { profiles: [{ id: 'p2' }] } })
     expect(seen).toEqual([profiles])
+  })
+
+  it('PresetListUpdated → onPresetListUpdated cb 가 presets 수신(ADR-0061)', () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const seen: Preset[][] = []
+    const off = c.onPresetListUpdated((p) => seen.push(p))
+    const presets = [{ id: 'pr1', cwd: 'C:/proj' }] as Preset[]
+    t.control({ PresetListUpdated: { presets } })
+    expect(seen).toEqual([presets])
+    off()
+    t.control({ PresetListUpdated: { presets: [{ id: 'pr2', cwd: 'C:/x' }] } })
+    expect(seen).toEqual([presets]) // 해제 후 미수신
   })
 
   it('getAgents 진행 중 broadcast AgentListUpdated 편승 안 함', async () => {

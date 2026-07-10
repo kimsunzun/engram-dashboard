@@ -246,6 +246,16 @@ export class TauriTransport implements Transport {
           })
         }),
       )
+      // 프리셋 목록 broadcast(ADR-0061) — profile-list-updated 와 동형. src-tauri 가 PresetListUpdated →
+      //   Tauri event "preset-list-updated" 로 emit 한 payload(presets 배열)를 control 로 정규화.
+      registered.push(
+        await listen<unknown>('preset-list-updated', (e) => {
+          this.messageCb?.({
+            kind: 'control',
+            event: { PresetListUpdated: { presets: e.payload } },
+          })
+        }),
+      )
       // ★연결 상태 동기화(단일 진실원)★: Rust 쪽 연결 task 가 상태 전이(connected/reconnecting/down)
       //   시 이 이벤트를 emit 한다. 프론트는 이 이벤트로만 상태를 바꾼다(doConnect 임의 전이 없음).
       //

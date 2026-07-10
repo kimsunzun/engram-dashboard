@@ -10,6 +10,7 @@ import type {
   AgentProfile,
   AgentStatus,
   ClaudeOutputFormat,
+  Preset,
   RestoreReport,
 } from './types'
 
@@ -110,6 +111,11 @@ export interface AgentClient {
    * broadcast 흡수 자리(현재 백엔드 미도달 — 인터페이스·프론트 배선은 지금 깐다).
    */
   onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void
+  /**
+   * 프리셋 목록 라이브 갱신(ADR-0061 — 프로필판과 동형, §5). 백엔드가 프리셋 CRUD(create/delete)를
+   * broadcast 하면 store 미러를 갱신한다. daemon 모드는 AgentEvent::PresetListUpdated 라우팅으로 동작.
+   */
+  onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
 
   // ── 명령 ──────────────────────────────────────────────────────────────────
   spawnAgent(cwd: string): Promise<AgentInfo>
@@ -145,4 +151,17 @@ export interface AgentClient {
   deleteProfile(agentId: string): Promise<void>
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>
   setProfileAutoRestore(agentId: string, autoRestore: boolean): Promise<void>
+
+  // ── 프리셋 CRUD(ADR-0061 — cwd 북마크, 스폰 안 함) ─────────────────────────────
+  /** 저장된 프리셋 전체 조회. PresetList 전용 reply(request_id echo)로 회수. */
+  listPresets(): Promise<Preset[]>
+  /**
+   * 프리셋 생성(cwd 북마크). ★이름은 넘기지 않는다★ — 백엔드는 {id,cwd}만 저장하고 표시명은 프론트가
+   * cwd basename 으로 파생한다(ADR-0061). 백엔드 reply=Ack(void) — 생성된 Preset 은 뒤이은
+   * PresetListUpdated broadcast 로 store 에 반영된다(프로필 CreateProfile 이 Created{profile} 를 돌려주는
+   * 것과 다름 — 프리셋은 broadcast 로만 목록에 들어온다).
+   */
+  createPreset(cwd: string): Promise<void>
+  /** 프리셋 삭제(에이전트는 무관하게 산다 — ADR-0061). 없는 id 면 no-op(Ack). */
+  deletePreset(id: string): Promise<void>
 }

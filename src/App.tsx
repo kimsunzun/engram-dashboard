@@ -4,12 +4,13 @@ import { themeManager } from './theme/ThemeManager'
 import AppLayout from './components/layout/AppLayout'
 import TreePage from './pages/TreePage'
 import PopoutPage from './pages/PopoutPage'
-import { initEventBus, refreshProfiles } from './store/eventBus'
+import { initEventBus, refreshProfiles, refreshPresets } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { useAgentStore } from './store/agentStore'
 // ADR-0055: 어댑터 side-effect import — register(...) 가 부팅 시 실행돼 command 가 레지스트리에 들어간다.
 import './commands/themeCommands'
 import './commands/tabCommands'
+import './commands/presetCommands'
 import { installKeybindings } from './commands/keybindings'
 
 function App() {
@@ -33,6 +34,8 @@ function App() {
         .catch(err => console.warn('[App] getAgents failed:', err))
       // 깡통(예약) 프로필 초기 로드(ADR-0018) — 트리가 예약 노드를 그리려면 필요.
       void refreshProfiles()
+      // 프리셋 초기 로드(ADR-0061) — PresetPalette 가 목록을 그리려면 필요(refreshProfiles 미러).
+      void refreshPresets()
     })()
   }, [])
 

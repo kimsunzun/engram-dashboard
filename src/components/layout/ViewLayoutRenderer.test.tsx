@@ -87,6 +87,11 @@ vi.mock('../slot/DomSlot', () => ({
   ),
 }))
 
+// ── PresetPalette stub(ADR-0060/0061) — 프리셋 CRUD 배선 없이 preset_palette variant 마운트 여부만 확인 ──
+vi.mock('../slot/PresetPalette', () => ({
+  default: () => <div data-testid="preset-palette" />,
+}))
+
 // ── @xterm stub — TerminalSlot 이 실제로 렌더되지 않지만 import 해소 방어용 ────
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -108,7 +113,7 @@ vi.mock('@xterm/addon-fit', () => ({
 
 // ── 테스트 대상 ────────────────────────────────────────────────────────────────
 import ViewLayoutRenderer from './ViewLayoutRenderer'
-import type { LayoutNode } from '../../api/layoutTypes'
+import type { LayoutNode, SlotContent } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
 import { useViewStore } from '../../store/viewStore'
 
@@ -130,6 +135,11 @@ function slotNode(id: string, agentId: string | null): LayoutNode {
 
 function splitNode(a: LayoutNode, b: LayoutNode): LayoutNode {
   return { type: 'split', dir: 'horizontal', ratio: 0.5, a, b }
+}
+
+/** SlotContent variant 를 직접 지정하는 슬롯 노드(preset_palette / agent_list 분기 검증용, ADR-0060). */
+function contentSlotNode(id: string, content: SlotContent): LayoutNode {
+  return { type: 'slot', id, content }
 }
 
 // caps 만 관건이라 나머지 필드는 최소값. structured=true → RichSlot, false → TerminalSlot 분기.
@@ -192,6 +202,22 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper.style.border).toContain('border')
     expect(wrapper.style.border).not.toContain('accent')
+  })
+
+  // ── ADR-0060/0061: preset_palette variant → PresetPalette 마운트, agent_list 는 fall-through ──
+  it('content.type=preset_palette slot → PresetPalette 가 마운트된다', () => {
+    render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'preset_palette' })} focusedSlotId={null} />)
+    expect(screen.getByTestId('preset-palette')).toBeTruthy()
+    // 프리셋 팔레트는 실 콘텐츠(hasContent=true) — 중앙정렬 flex 가 없어야 팔레트 레이아웃이 안 깨진다.
+    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
+    expect(wrapper.style.justifyContent).not.toBe('center')
+  })
+
+  it('content.type=agent_list slot(Slice C 미구현) → PresetPalette 없이 empty 플레이스홀더로 흘려보낸다', () => {
+    render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
+    // Slice B 범위 밖 — agent_list 는 구현하지 않고 기존 empty 플레이스홀더로 fall-through(깨지지 않음).
+    expect(screen.queryByTestId('preset-palette')).toBeNull()
+    expect(screen.getByText('— empty —')).toBeTruthy()
   })
 
   it('data-slot-id 속성이 node.id 로 설정된다(cdp 검증용 불변식)', () => {

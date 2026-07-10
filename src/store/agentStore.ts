@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-import type { AgentInfo, AgentProfile, AgentStatus } from '../api/types'
+import type { AgentInfo, AgentProfile, AgentStatus, Preset } from '../api/types'
 
 // AgentTree가 직접 참조하는 더미 데이터 — 3c에서 실제 트리 연결 전까지 유지.
 export const dummyAgents = [
@@ -20,6 +20,12 @@ interface AgentState {
    * 트리는 이 profiles ∖ agents 를 "예약(Reserved)" 노드로 합성한다(mergeTreeNodes).
    */
   profiles: AgentProfile[]
+  /**
+   * 저장된 프리셋 전체(ADR-0061 — cwd 북마크). 부팅 1회 로드 + create/delete 후 PresetListUpdated
+   * broadcast 로 교체한다(프로필 미러). PresetPalette 가 이 목록을 그리고 각 행 표시명은 cwd basename
+   * 으로 파생한다(이름 미저장 — ADR-0061).
+   */
+  presets: Preset[]
   groups: typeof dummyGroups
   selectedAgentId: string | null
   setSelectedAgent: (id: string | null) => void
@@ -27,6 +33,8 @@ interface AgentState {
   setAgents: (agents: AgentInfo[]) => void
   /** listProfiles refetch 결과로 프로필 전체 교체. */
   setProfiles: (profiles: AgentProfile[]) => void
+  /** listPresets / PresetListUpdated broadcast 결과로 프리셋 전체 교체(ADR-0061). */
+  setPresets: (presets: Preset[]) => void
   /**
    * agent-status-changed 수신 시 해당 agent의 status만 갱신(뱃지 표시용).
    * T-4: Killed/Exited를 받아도 목록에서 제거하지 않는다.
@@ -38,11 +46,13 @@ interface AgentState {
 export const useAgentStore = create<AgentState>(set => ({
   agents: [],
   profiles: [],
+  presets: [],
   groups: dummyGroups,
   selectedAgentId: null,
   setSelectedAgent: id => set({ selectedAgentId: id }),
   setAgents: agents => set({ agents }),
   setProfiles: profiles => set({ profiles }),
+  setPresets: presets => set({ presets }),
   onStatusChanged: (id, status) =>
     set(state => ({
       agents: state.agents.map(a => (a.id === id ? { ...a, status } : a)),

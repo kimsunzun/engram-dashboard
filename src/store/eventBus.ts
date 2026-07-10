@@ -35,6 +35,19 @@ export async function refreshProfiles(): Promise<void> {
 }
 
 /**
+ * 프리셋 목록 갱신(ADR-0061 — refreshProfiles 미러). 부팅 1회 + 재연결 resync 에서 호출해 store 미러를
+ * 권위 목록으로 동기화한다. create/delete 직후 반영은 PresetListUpdated broadcast 가 담당(별도 pull 불필요).
+ */
+export async function refreshPresets(): Promise<void> {
+  try {
+    const presets = await agentClient.listPresets()
+    useAgentStore.getState().setPresets(presets)
+  } catch (err) {
+    console.warn('[eventBus] refreshPresets failed:', err)
+  }
+}
+
+/**
  * 재연결 직후 목록/프로필 재동기화(Q2). connected *재*전이에서만 호출(첫 연결 제외 — initEventBus
  * 의 lastState 가드). 권위 목록을 다시 끌어와 store 를 새로 쓴다 → 끊긴 동안 변경(spawn/kill/프로필)
  * 반영. 출력 replay 재요청(ProtocolClient 가 connected 전이에서 뷰 buffering 리셋+requestReplay, ADR-0046)은
@@ -48,6 +61,7 @@ async function resyncAfterReconnect(): Promise<void> {
     console.warn('[eventBus] resync getAgents failed:', err)
   }
   await refreshProfiles()
+  await refreshPresets()
 }
 
 export function initEventBus(): Promise<void> {
@@ -215,6 +229,14 @@ export function initEventBus(): Promise<void> {
       unlistenFns.push(
         agentClient.onProfileListUpdated(profiles => {
           useAgentStore.getState().setProfiles(profiles)
+        }),
+      )
+
+      // 프리셋 목록 라이브 갱신(ADR-0061 — 프로필판 미러). daemon 모드는 PresetListUpdated broadcast 로
+      // 동작. create/delete 후 전 창이 이 이벤트로 store 미러를 교체한다(멀티창 동기화).
+      unlistenFns.push(
+        agentClient.onPresetListUpdated(presets => {
+          useAgentStore.getState().setPresets(presets)
         }),
       )
 
