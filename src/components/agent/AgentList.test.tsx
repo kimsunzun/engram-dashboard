@@ -1,18 +1,20 @@
-// AgentList 단위테스트 — statusGlyph 전 분기(pure, ADR-0062) + 평면 목록 렌더 스모크 + 픽커 상호작용.
+// AgentList 단위테스트 — statusGlyph 전 분기(pure, ADR-0062) + 평면 목록 렌더 스모크 + 행 메뉴 상호작용.
 //
 // ★검증 불변식★:
 //   1. statusGlyph: Running/Exiting/Exited/Failed/Killed/Reserved + 미지 status 전 분기 고정.
 //      ◐(입력대기)는 어떤 입력으로도 반환되지 않는다(어휘로만 존재, 미점등).
 //   2. 평면 렌더: running ∪ reserved 행이 뜨고, 표시명 = cwd basename(이름 미저장), glyph 가 상태 모양.
-//   3. 배경 우클릭 → "에이전트 생성" → 픽커(프리셋 목록 + 경로 입력) → agent.spawn command 라우팅.
+//   3. ★ROW 메뉴만 유지(ADR-0064)★: 배경(bg) 메뉴 + 프리셋 픽커는 제거됐다(배경 우클릭 = 통합 슬롯 메뉴로
+//      버블 — agentlist.createAgent command). 행 우클릭 메뉴(활성화/예약취소 · 열기/종료/이름변경/재시작)는
+//      item-targeted 라 그대로 유지되고 여전히 stopPropagation 한다.
 //   4. 스타일 = 변수-only(하드코딩 색 없음).
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// ── clientFactory / registry stub ────────────────────────────────────────────
-// AgentList 는 agentClient(spawnProfile/killAgent) + commands/registry.run('agent.spawn') 를 부른다.
-//   registry.run 을 mock 해 command 라우팅만 검증한다(실제 agentCommands 배선은 agentCommands.test 담당).
+// ── clientFactory stub ────────────────────────────────────────────────────────
+// AgentList 는 agentClient(spawnProfile/killAgent/deleteProfile) 를 부른다(spawn 은 이제 통합 슬롯 메뉴의
+//   agentlist.createAgent command 로 이전 — AgentList 는 더 이상 registry.run 을 부르지 않는다, ADR-0064).
 const clientMock = vi.hoisted(() => ({
   spawnProfile: vi.fn(async () => ({ id: 'a' })),
   killAgent: vi.fn(async () => undefined),
@@ -25,10 +27,6 @@ vi.mock('../../api/clientFactory', () => ({
     deleteProfile: (...args: unknown[]) => clientMock.deleteProfile(...(args as [])),
   },
   getAgentClient: vi.fn(),
-}))
-const runMock = vi.hoisted(() => vi.fn(() => Promise.resolve({ id: 'spawned' })))
-vi.mock('../../commands/registry', () => ({
-  run: (...args: unknown[]) => runMock(...(args as [])),
 }))
 vi.mock('../../store/eventBus', () => ({ refreshProfiles: vi.fn() }))
 // viewStore 는 assignAgent(열기 경로)만 참조 — getState 로 접근하므로 실제 store 를 얕게 stub.
@@ -45,7 +43,7 @@ vi.mock('../../store/viewStore', () => ({
 
 import AgentList, { statusGlyph } from './AgentList'
 import { useAgentStore } from '../../store/agentStore'
-import type { AgentInfo, AgentProfile, Capabilities, Preset } from '../../api/types'
+import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 
 const caps = (): Capabilities => ({
   input: { raw: true, message: false, attachment: false },
@@ -72,8 +70,6 @@ beforeEach(() => {
   clientMock.killAgent.mockClear()
   clientMock.deleteProfile.mockClear()
   assignAgentMock.mockClear()
-  runMock.mockClear()
-  runMock.mockImplementation(() => Promise.resolve({ id: 'spawned' }))
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
 })
 afterEach(() => {
@@ -142,34 +138,24 @@ describe('AgentList 평면 렌더', () => {
   })
 })
 
-// ── 배경 메뉴 → 픽커 → agent.spawn 라우팅 ────────────────────────────────────
-describe('에이전트 생성 픽커', () => {
-  it('배경 우클릭 → "에이전트 생성" → 픽커 표시', () => {
+// ── ★배경(bg) 메뉴 제거 = 통합 슬롯 메뉴로 버블(ADR-0064)★ ──────────────────────
+describe('배경 우클릭 = 자체 메뉴 없음(통합 슬롯 메뉴로 버블)', () => {
+  it('배경 우클릭 → 옛 bg "에이전트 생성" 메뉴/픽커가 뜨지 않는다(제거됨)', () => {
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    expect(document.querySelector('[data-agent-picker]')).toBeTruthy()
+    // 옛 자체 배경 메뉴·픽커 요소는 더 이상 없다(agentlist.createAgent = 통합 메뉴 command 로 이전).
+    expect(document.querySelector('[data-agent-create]')).toBeNull()
+    expect(document.querySelector('[data-agent-picker]')).toBeNull()
   })
 
-  it('픽커에서 프리셋 선택 → run("agent.spawn",{preset:id})', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram' } as Preset] })
+  it('배경 우클릭 이벤트는 stopPropagation 하지 않는다(상위 통합 슬롯 메뉴가 받게 버블)', () => {
     render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    // 프리셋 표시명 = basename.
-    expect(document.querySelector('[data-agent-picker-preset="pr1"]')?.textContent).toBe('engram')
-    fireEvent.click(document.querySelector('[data-agent-picker-preset="pr1"]') as HTMLElement)
-    expect(runMock).toHaveBeenCalledWith('agent.spawn', { preset: 'pr1' })
-  })
-
-  it('픽커에 경로 입력 + 생성 → run("agent.spawn",{cwd})', () => {
-    render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    const input = document.querySelector('[data-agent-picker-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: '  C:/new/path  ' } })
-    fireEvent.click(document.querySelector('[data-agent-picker-go]') as HTMLElement)
-    expect(runMock).toHaveBeenCalledWith('agent.spawn', { cwd: 'C:/new/path' })
+    const pane = document.querySelector('[data-agent-list]') as HTMLElement
+    // stopPropagation 여부를 관측 — 배경(pane) 우클릭은 버블해야 한다(옛 stopPropagation 제거 회귀 안전망).
+    const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+    const stopSpy = vi.spyOn(ev, 'stopPropagation')
+    pane.dispatchEvent(ev)
+    expect(stopSpy).not.toHaveBeenCalled()
   })
 })
 
@@ -232,46 +218,6 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
   })
 })
 
-// ── FIX#2: 생성 실패 시 픽커 유지 + 인라인 에러(동기 throw·async reject 모두) ───────
-describe('에이전트 생성 실패 표시(FIX#2)', () => {
-  it('run async reject → 픽커 유지 + 에러 표시', async () => {
-    runMock.mockImplementationOnce(() => Promise.reject(new Error('boom-async')))
-    render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    const input = document.querySelector('[data-agent-picker-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'C:/x' } })
-    fireEvent.click(document.querySelector('[data-agent-picker-go]') as HTMLElement)
-    await waitFor(() => expect(document.querySelector('[data-agent-picker-error]')).toBeTruthy())
-    // 픽커는 닫히지 않는다(재시도 가능).
-    expect(document.querySelector('[data-agent-picker]')).toBeTruthy()
-    expect(document.querySelector('[data-agent-picker-error]')?.textContent).toContain('boom-async')
-  })
-
-  it('run 동기 throw → Promise.resolve.catch 로 못 잡던 케이스도 잡아 픽커 유지 + 에러 표시', async () => {
-    // ★핵심★: run 이 동기 throw 하면 옛 Promise.resolve(run()).catch 는 못 잡는다(unhandled). async try/catch 로 잡힘.
-    runMock.mockImplementationOnce(() => { throw new Error('boom-sync') })
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram' } as Preset] })
-    render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-picker-preset="pr1"]') as HTMLElement)
-    await waitFor(() => expect(document.querySelector('[data-agent-picker-error]')).toBeTruthy())
-    expect(document.querySelector('[data-agent-picker]')).toBeTruthy()
-    expect(document.querySelector('[data-agent-picker-error]')?.textContent).toContain('boom-sync')
-  })
-
-  it('성공 시 픽커 닫힘(에러 없음)', async () => {
-    render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    const input = document.querySelector('[data-agent-picker-input]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'C:/ok' } })
-    fireEvent.click(document.querySelector('[data-agent-picker-go]') as HTMLElement)
-    await waitFor(() => expect(document.querySelector('[data-agent-picker]')).toBeFalsy())
-  })
-})
-
 // ── FIX#3: 예약 행 "예약 취소" → deleteProfile(리그레션 복원) ────────────────────
 describe('예약 취소(deleteProfile, FIX#3)', () => {
   it('예약 행 우클릭 → "예약 취소" → deleteProfile(id) 호출', () => {
@@ -290,34 +236,21 @@ describe('예약 취소(deleteProfile, FIX#3)', () => {
   })
 })
 
-// ── FIX#4: 픽커 ↔ 메뉴 상호배타 ─────────────────────────────────────────────
-describe('픽커 ↔ 메뉴 상호배타(FIX#4)', () => {
-  it('픽커 열림 상태에서 행 우클릭 → 픽커 닫히고 행 메뉴만', () => {
+// ── 행(ROW) 메뉴는 stopPropagation 유지(item-targeted, ADR-0064) ─────────────────
+describe('행 우클릭 stopPropagation(통합 메뉴 대신 행 메뉴가 이긴다)', () => {
+  it('행 우클릭 이벤트는 stopPropagation 한다(상위 통합 슬롯 메뉴가 안 뜨게)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
-    // 픽커 연다.
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    expect(document.querySelector('[data-agent-picker]')).toBeTruthy()
-    // 행 우클릭 → 픽커 닫힘.
-    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
-    expect(document.querySelector('[data-agent-picker]')).toBeFalsy()
-    expect(screen.getByText('열기')).toBeTruthy() // 행 메뉴 떠 있음
-  })
-
-  it('픽커 열림 상태에서 배경 우클릭 → 픽커 닫히고 배경 메뉴만', () => {
-    render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    fireEvent.click(document.querySelector('[data-agent-create]') as HTMLElement)
-    expect(document.querySelector('[data-agent-picker]')).toBeTruthy()
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    expect(document.querySelector('[data-agent-picker]')).toBeFalsy()
-    expect(document.querySelector('[data-agent-create]')).toBeTruthy() // 배경 메뉴 떠 있음
+    const row = document.querySelector('[data-agent-row="a1"]') as HTMLElement
+    const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+    const stopSpy = vi.spyOn(ev, 'stopPropagation')
+    row.dispatchEvent(ev)
+    expect(stopSpy).toHaveBeenCalled() // 행 메뉴가 pane 통합 메뉴를 가로챈다(의도)
   })
 })
 
-// ── FIX#5: Escape 로 열린 메뉴 닫기 ─────────────────────────────────────────
-describe('Escape 로 메뉴 닫기(FIX#5)', () => {
+// ── Escape 로 열린 행 메뉴 닫기 ──────────────────────────────────────────────
+describe('Escape 로 행 메뉴 닫기', () => {
   it('행 메뉴 열림 → Escape → 닫힘', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
@@ -325,13 +258,5 @@ describe('Escape 로 메뉴 닫기(FIX#5)', () => {
     expect(screen.getByText('열기')).toBeTruthy()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByText('열기')).toBeNull()
-  })
-
-  it('배경 메뉴 열림 → Escape → 닫힘', () => {
-    render(<AgentList />)
-    fireEvent.contextMenu(document.querySelector('[data-agent-list]') as HTMLElement)
-    expect(document.querySelector('[data-agent-create]')).toBeTruthy()
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(document.querySelector('[data-agent-create]')).toBeFalsy()
   })
 })

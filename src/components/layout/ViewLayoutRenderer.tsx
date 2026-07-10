@@ -8,7 +8,7 @@ import { useState } from 'react'
 import { Allotment } from 'allotment'
 
 import type { LayoutNode } from '../../api/layoutTypes'
-import { useViewStore } from '../../store/viewStore'
+import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
 import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
@@ -16,6 +16,7 @@ import DomSlot from '../slot/DomSlot'
 import PresetPalette from '../slot/PresetPalette'
 import AgentList from '../agent/AgentList'
 import SlotContextMenu from '../slot/SlotContextMenu'
+import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode } from '../slot/renderMode'
 
 function nodeKey(node: LayoutNode): string {
@@ -46,6 +47,11 @@ export default function ViewLayoutRenderer({
   //   LayoutRenderer→SlotPane 래핑 경로가 Brick 1 에서 삭제돼 메뉴가 캔버스에서 닿지 않던 갭을 메운다.
   //   ★hooks 무조건 호출★: split/slot 분기 이전에 부른다(조건부 호출 금지).
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  // ★이 메뉴가 조작할 View 좌표(ADR-0064)★: WindowLayout 이 넘긴 탭 오버라이드가 있으면 그걸, 없으면 이
+  //   웹뷰 창의 active 탭(useCurrentViewId, §3-4). command.run(ctx) 의 viewId 로 흘러 분할/닫기/배정이 이
+  //   좌표를 쓴다. 옛 SlotContextMenu 내부 폴백을 여기(ctx 조립처)로 끌어올렸다.
+  const currentViewId = useCurrentViewId()
+  const targetViewId = viewIdOverride ?? currentViewId
 
   if (node.type === 'slot') {
     const isFocused = node.id === focusedSlotId
@@ -151,14 +157,14 @@ export default function ViewLayoutRenderer({
           </>
         )}
         {contextMenu && (
-          // ADR-0035: 이 슬롯의 우클릭 메뉴 — slotId=node.id, agentId=slotAgentId(SlotContent 유도, ADR-0060)
-          //   를 넘겨 viewStore(백엔드 권위) 경로로 분할/닫기/배정을 흘린다(§5 단일 제어 표면).
+          // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
+          //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId)를 넘겨 각 command.run 이 백엔드
+          //   권위 경로(viewStore/agentClient)로 흐르게 한다(§5 단일 제어 표면). content 종류가 가시성 게이트.
           <SlotContextMenu
             x={contextMenu.x}
             y={contextMenu.y}
-            slotId={node.id}
-            agentId={slotAgentId}
-            viewIdOverride={viewIdOverride}
+            items={buildSlotMenu(node.content.type)}
+            ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId }}
             onClose={() => setContextMenu(null)}
           />
         )}

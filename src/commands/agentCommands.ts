@@ -1,10 +1,16 @@
 // ADR-0055 / ADR-0011: 에이전트 command 어댑터 — register 로 agentClient(단일 제어 표면) 스폰 경로에
-//   라우팅만 한다(새 상태 경로 0). import 부수효과로 등록되므로 부팅 경로(App.tsx)에서 side-effect
-//   import 한다(presetCommands 미러). 검증: window.__engramCmd.run('agent.spawn',{cwd:'C:/work'}).
+//   라우팅만 한다(새 상태 경로 0). import 부수효과로 등록되므로 단일 매니페스트(contributions.ts)에서
+//   side-effect import 한다. 검증: window.__engramCmd.run('agent.spawn',{cwd:'C:/work'}).
+//
+// ★ADR-0064 슬롯 메뉴 기여 co-location★: agentlist.createAgent(폴더 다이얼로그 → agent.spawn)를 등록하고
+//   agent_list 슬롯 메뉴에 기여한다 — 트리(agent_list) 콘텐츠 지식이 이 모듈에 응집(공통은 '*'이 소유).
+
+import { open } from '@tauri-apps/plugin-dialog'
 
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
-import { register } from './registry'
+import { register, run } from './registry'
+import { registerSlotMenu } from './slotMenu'
 
 register({
   id: 'agent.spawn',
@@ -42,3 +48,23 @@ register({
     return agentClient.spawnAgent(cwd.trim())
   },
 })
+
+register({
+  id: 'agentlist.createAgent',
+  title: '에이전트 생성',
+  category: 'agent',
+  // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴의 "에이전트 생성" — 네이티브 폴더 다이얼로그로 cwd 를 고른
+  //   뒤 agent.spawn({cwd}) 로 라우팅해 트리에 새 에이전트를 추가한다(특정 슬롯 배정 아님 — 트리 전역 spawn).
+  //   ★이것이 옛 AgentList 인-컴포넌트 bg 픽커를 대체★: 프리셋-리스트 기반 spawn 은 이 흐름에서 빠진다
+  //   (후속으로 프리셋 행 액션 "이 프리셋으로 생성" 추가 예정, ADR-0064). 취소(null)면 no-op. run 은 미지
+  //   preset·빈 cwd 등에 동기 throw 할 수 있어 async 로 감싸 회수부(cdp/메뉴)가 await·catch 가능하게 한다.
+  run: async () => {
+    const picked = await open({ directory: true, multiple: false, title: '에이전트 작업 디렉토리 선택' })
+    const cwd = typeof picked === 'string' ? picked : null
+    if (!cwd) return // 취소 — no-op
+    return run('agent.spawn', { cwd })
+  },
+})
+
+// ADR-0064: agent_list 슬롯 메뉴에 agentlist.createAgent 기여(group='content' — 공통 slot-ops 위에 렌더).
+registerSlotMenu('agent_list', [{ commandId: 'agentlist.createAgent', group: 'content', order: 10 }])

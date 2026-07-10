@@ -48,9 +48,19 @@ vi.mock('../../api/clientFactory', () => ({
 // FIX 1(ADR-0041): 렌더러 분기가 store 의 AgentInfo 유무·caps 에 의존하므로 테스트가 agents 를 제어할 수
 // 있어야 한다. vi.hoisted 로 가변 holder 를 만들어 selector 에 흘린다(TerminalSlot/RichSlot 은 stub 이라
 // 자기 useAgentStore 호출은 무해). afterEach 에서 초기화.
-const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[] }))
+const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], presets: [] as unknown[] }))
 vi.mock('../../store/agentStore', () => ({
-  useAgentStore: (selector: (s: { agents: unknown[] }) => unknown) => selector(agentStoreState),
+  useAgentStore: Object.assign(
+    (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
+    { getState: () => agentStoreState },
+  ),
+}))
+
+// ── 네이티브 폴더 다이얼로그 stub(ADR-0064) — slot.createAgentHere / preset.add / agentlist.createAgent 가
+//    @tauri-apps/plugin-dialog open 을 부른다. 테스트마다 반환(경로/null)을 갈아끼운다. ──
+const dialogMock = vi.hoisted(() => ({ open: vi.fn(async () => null as string | null) }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: (...args: unknown[]) => dialogMock.open(...(args as [])),
 }))
 
 // ── allotment stub — split 분기 렌더 시 jsdom 환경에서 ResizeObserver 에러 방지 ──
@@ -127,6 +137,9 @@ vi.mock('@xterm/addon-fit', () => ({
 }))
 
 // ── 테스트 대상 ────────────────────────────────────────────────────────────────
+// ADR-0064: 통합 메뉴는 buildSlotMenu(content.type) 로 command 참조를 resolve 한다 → command·기여가
+//   레지스트리에 등록돼 있어야 한다. 매니페스트를 side-effect import 해 부팅과 동일하게 등록한다.
+import '../../commands/contributions'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import type { LayoutNode, SlotContent } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
@@ -389,14 +402,16 @@ describe('ViewLayoutRenderer — split 분기', () => {
   })
 })
 
-// ── ★우클릭 컨텍스트 메뉴(§5, ADR-0035)★ ─────────────────────────────────────────────────
-// ★이 스위트가 실제로 막는 것★: 캔버스 슬롯 우클릭 → SlotContextMenu 마운트 + 그 메뉴 액션이
-// viewStore(=window.__engramLayout 이 노출하는 것과 동일 함수)로 (activeViewId, slotId) 좌표를 흘리는지.
-// (Brick 1 에서 옛 LayoutRenderer→SlotPane 래핑 경로가 삭제돼 메뉴가 캔버스에서 닿지 않던 갭의 회귀 안전망.)
+// ── ★우클릭 통합 컨텍스트 메뉴(§5, ADR-0064)★ ─────────────────────────────────────────────────
+// ★이 스위트가 실제로 막는 것★: 캔버스 슬롯 우클릭 → 통합 SlotContextMenu 마운트(buildSlotMenu(content.type)
+// 산출) + 각 항목 클릭이 그 command.run(ctx) 를 통해 viewStore/agentClient 로 (viewId, slotId, agentId)를
+// 흘리는지. 메뉴 항목 = command id 참조(ADR-0064) — 콘텐츠 전용(에이전트 종료·트리/팔레트 열기·생성) +
+// 공통 '*'(가로/세로 분할·팝업 분리·비우기·닫기)가 한 메뉴에 공존한다.
 //
-// 전략: split/closeSlot/assignAgent 를 store 에 spy 로 주입(SlotContextMenu 는 useViewStore(s=>s.split) 로
-// 이 함수들을 읽는다 → window.__engramLayout 이 부르는 것과 물리적으로 동일). '에이전트 생성'은
-// window.prompt + agentClient.spawnAgent(hoisted mock)를 거쳐 assignAgent 로 이어지므로 둘을 stub.
+// 전략: split/closeSlot/assignAgent/setSlotContent/moveSlotToWindow 를 real viewStore 에 spy 로 주입한다
+// (command 는 useViewStore.getState().split(...) 로 이들을 부른다 → LLM/__engramCmd 와 물리적으로 동일).
+// '에이전트 생성'(slot.createAgentHere)은 폴더 다이얼로그(open, hoisted mock) → agentClient.spawnAgent →
+// assignAgent, '에이전트 종료'(agent.kill)는 agentClient.killAgent 로 이어진다.
 describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어 표면)', () => {
   const ACTIVE_VIEW = 'active-view-9'
   const splitSpy = vi.fn(async () => 'new-slot')
@@ -414,9 +429,11 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     moveSlotToWindowSpy.mockClear()
     clientMock.spawnAgent.mockClear()
     clientMock.killAgent.mockClear()
-    // ★탭 소유 모델(ADR-0057)★: SlotContextMenu 는 viewIdOverride 없으면 useCurrentViewId()(이 웹뷰 창의
-    //   active 탭)로 폴백한다. 메인 창(#/) 컨텍스트로 두고 windows["main"].active=ACTIVE_VIEW 를 주입 →
-    //   폴백 경로가 ACTIVE_VIEW 를 집는다. 레이아웃 액션도 store 에 주입(단일 표면).
+    dialogMock.open.mockClear()
+    dialogMock.open.mockResolvedValue(null)
+    // ★탭 소유 모델(ADR-0057)★: ViewLayoutRenderer 는 viewIdOverride 없으면 useCurrentViewId()(이 웹뷰 창의
+    //   active 탭)로 폴백해 ctx.viewId 를 채운다. 메인 창(#/) 컨텍스트로 두고 windows["main"].active=ACTIVE_VIEW
+    //   를 주입 → 폴백 경로가 ACTIVE_VIEW 를 집는다. 레이아웃 액션도 store 에 주입(단일 표면).
     window.location.hash = '#/'
     useViewStore.setState({
       windows: { main: { tabs: [{ id: ACTIVE_VIEW, name: 'View' }], active: ACTIVE_VIEW, version: 1 } },
@@ -450,13 +467,20 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     return wrapper
   }
 
-  it('빈 슬롯 우클릭 → SlotContextMenu 항목들이 뜬다(캔버스에서 도달 가능)', () => {
+  const POPUP_VIEW = 'popup-view-77'
+
+  it('빈 슬롯 우클릭 → 콘텐츠(fill-ops) + 공통 슬롯 ops 항목이 한 메뉴에 뜬다', () => {
     openMenu('s1', null)
-    // 메뉴 대표 항목들이 렌더된다 = 메뉴가 캔버스에 마운트됨(Brick 1 갭 메움 검증).
+    // 콘텐츠 전용(empty fill-ops).
+    expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
+    expect(screen.getByText('프리셋 팔레트 열기')).toBeTruthy()
+    expect(screen.getByText('에이전트 생성')).toBeTruthy()
+    // 공통 '*' 슬롯 ops.
     expect(screen.getByText('가로 분할')).toBeTruthy()
     expect(screen.getByText('세로 분할')).toBeTruthy()
+    expect(screen.getByText('팝업으로 분리')).toBeTruthy()
+    expect(screen.getByText('비우기')).toBeTruthy()
     expect(screen.getByText('닫기')).toBeTruthy()
-    expect(screen.getByText('에이전트 생성')).toBeTruthy()
   })
 
   it('우클릭 전에는 메뉴가 없다(preventDefault 후 상태 기반 마운트)', () => {
@@ -464,38 +488,39 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  it('"가로 분할" → split(activeViewId, slotId, "horizontal") 호출(§5 __engramLayout 경로)', () => {
+  it('"가로 분할" → split(viewId, slotId, "horizontal") 호출(§5 command 경로)', () => {
     openMenu('slot-A', null)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-A', 'horizontal')
   })
 
-  it('"세로 분할" → split(activeViewId, slotId, "vertical") 호출', () => {
+  it('"세로 분할" → split(viewId, slotId, "vertical") 호출', () => {
     openMenu('slot-B', null)
     fireEvent.click(screen.getByText('세로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-B', 'vertical')
   })
 
-  it('"닫기" → closeSlot(activeViewId, slotId) 호출', () => {
+  it('"닫기" → closeSlot(viewId, slotId) 호출', () => {
     openMenu('slot-C', null)
     fireEvent.click(screen.getByText('닫기'))
     expect(closeSlotSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-C')
   })
 
-  // ── ★슬롯 콘텐츠 배치(ADR-0063)★: 트리/팔레트/비우기 → setSlotContent(view, slot, {type}) ──────────
-  it('"에이전트 트리 열기" → setSlotContent(activeViewId, slotId, {type:agent_list})', () => {
+  // ── ★empty fill-ops(ADR-0063/0064)★: 트리/팔레트 열기 → setSlotContent(view, slot, {type}) ──────────
+  it('"에이전트 트리 열기" → setSlotContent(viewId, slotId, {type:agent_list})', () => {
     openMenu('slot-T', null)
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-T', { type: 'agent_list' })
   })
 
-  it('"프리셋 팔레트 열기" → setSlotContent(activeViewId, slotId, {type:preset_palette})', () => {
+  it('"프리셋 팔레트 열기" → setSlotContent(viewId, slotId, {type:preset_palette})', () => {
     openMenu('slot-U', null)
     fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U', { type: 'preset_palette' })
   })
 
-  it('"비우기" → setSlotContent(activeViewId, slotId, {type:empty})', () => {
+  it('"비우기"(공통) → setSlotContent(viewId, slotId, {type:empty})', () => {
+    // empty 슬롯에도 공통 '비우기'가 뜬다(멱등 — 이미 비어 있어도 command 자체는 발화).
     openMenu('slot-V', null)
     fireEvent.click(screen.getByText('비우기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-V', { type: 'empty' })
@@ -507,67 +532,58 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(setSlotContentSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-to', { type: 'agent_list' })
   })
 
-  it('"에이전트 생성" → spawnAgent 후 assignAgent(activeViewId, slotId, 새 agentId) 호출', async () => {
+  // ── ★"에이전트 생성"(slot.createAgentHere): 폴더 다이얼로그 → spawnAgent → assignAgent★ ──────────
+  it('"에이전트 생성" → 폴더 다이얼로그 고른 cwd 로 spawnAgent 후 assignAgent(viewId, slotId, 새 id)', async () => {
+    dialogMock.open.mockResolvedValue('C:/work')
     clientMock.spawnAgent.mockResolvedValueOnce({ id: 'brand-new-agent' })
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('C:/work')
     openMenu('slot-D', null)
     fireEvent.click(screen.getByText('에이전트 생성'))
-    // spawnAgent 는 prompt 로 받은 cwd(trim)로 불린다.
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work')
-    // spawn 이 resolve 된 뒤 assignAgent 가 그 agentId 로 이 슬롯에 배정한다(마이크로태스크 flush 대기).
+    await vi.waitFor(() => expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work'))
     await vi.waitFor(() =>
       expect(assignAgentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-D', 'brand-new-agent'),
     )
-    promptSpy.mockRestore()
   })
 
-  it('agent 배정 슬롯 우클릭 → "에이전트 종료" 클릭 시 killAgent(그 agentId) 호출', () => {
-    seedAgents(agentInfo('assigned-agent', false)) // 종료 항목 활성 조건 = store 에 그 agent 존재
+  it('"에이전트 생성" → 다이얼로그 취소(null) 시 spawn/assign 없음(no-op)', async () => {
+    dialogMock.open.mockResolvedValue(null)
+    openMenu('slot-D2', null)
+    fireEvent.click(screen.getByText('에이전트 생성'))
+    await vi.waitFor(() => expect(dialogMock.open).toHaveBeenCalled())
+    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+    expect(assignAgentSpy).not.toHaveBeenCalled()
+  })
+
+  // ── ★agent 슬롯: 콘텐츠 전용 "에이전트 종료" + 공통 ops 공존(ADR-0064)★ ──────────────────────
+  it('agent 배정 슬롯 우클릭 → "에이전트 종료"(콘텐츠) 클릭 시 killAgent(그 agentId) 호출', () => {
     openMenu('slot-E', 'assigned-agent')
     fireEvent.click(screen.getByText('에이전트 종료'))
     expect(clientMock.killAgent).toHaveBeenCalledWith('assigned-agent')
   })
 
-  it('비활성 "에이전트 종료"(store 에 agent 없음) 클릭 → killAgent 를 부르지 않는다(enabled 가드)', () => {
-    // agents store 를 비워 두면(=배정 agentId 가 실행중 목록에 없음) 종료 항목이 흐려지고 비활성이어야 한다.
-    // 시각만 흐리고 action 은 그대로 도는 버그의 회귀 안전망 — 비활성 항목 클릭은 no-op 여야 한다.
-    openMenu('slot-F', 'gone-agent') // store 에 'gone-agent' 없음 → 종료 항목 disabled
-    fireEvent.click(screen.getByText('에이전트 종료'))
-    expect(clientMock.killAgent).not.toHaveBeenCalled()
+  it('agent 슬롯에도 공통 슬롯 ops(닫기·분할·팝업)가 함께 뜬다(공통 소실 버그 방지)', () => {
+    openMenu('slot-E2', 'some-agent')
+    expect(screen.getByText('에이전트 종료')).toBeTruthy() // 콘텐츠
+    expect(screen.getByText('닫기')).toBeTruthy() // 공통
+    expect(screen.getByText('팝업으로 분리')).toBeTruthy() // 공통(agent 게이팅 제거)
   })
 
-  // ── ★슬롯 팝업 분리(pop-out) 메뉴★ — enabled 가드('에이전트 종료'와 동일) + 올바른 좌표로 invoke ──
-  it('agent 배정 슬롯 우클릭 → "팝업으로 분리" 클릭 시 moveSlotToWindow(activeViewId, slotId) 호출', () => {
-    seedAgents(agentInfo('live-agent', false)) // 활성 조건 = store 에 그 agent 존재(라이브)
-    openMenu('slot-P', 'live-agent')
+  it('빈 슬롯 메뉴엔 "에이전트 종료"가 없다(agent 전용 콘텐츠 항목)', () => {
+    openMenu('slot-empty-x', null)
+    expect(screen.queryByText('에이전트 종료')).toBeNull()
+  })
+
+  // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 콘텐츠 종류와 무관하게 뜨고 (viewId, slotId)로 move ──────
+  it('"팝업으로 분리"(공통) → moveSlotToWindow(viewId, slotId) 호출', () => {
+    openMenu('slot-P', null) // agent 없어도(빈 슬롯) 공통이라 뜬다
     fireEvent.click(screen.getByText('팝업으로 분리'))
-    // §5: window.__engramLayout.moveSlotToWindow 와 동일 store 함수를 (activeViewId, slotId)로 부른다.
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
   })
 
-  it('빈 슬롯(agent 미배정) "팝업으로 분리" 클릭 → moveSlotToWindow 를 부르지 않는다(enabled 가드)', () => {
-    // agent 없는 슬롯은 분리 대상이 없으므로 항목이 흐려지고 비활성이어야 한다(클릭 no-op).
-    openMenu('slot-Q', null)
-    fireEvent.click(screen.getByText('팝업으로 분리'))
-    expect(moveSlotToWindowSpy).not.toHaveBeenCalled()
-  })
-
-  it('배정됐지만 store 에 없는 agent(죽음) "팝업으로 분리" → moveSlotToWindow 안 부름(에이전트 종료와 동일 가드)', () => {
-    // slotAgentId 는 있으나 실행중 목록에 없음 → hasLiveAgent=false → 비활성.
-    openMenu('slot-R', 'dead-agent') // store 비어 있음
-    fireEvent.click(screen.getByText('팝업으로 분리'))
-    expect(moveSlotToWindowSpy).not.toHaveBeenCalled()
-  })
-
-  // ── ★Fix 3: viewIdOverride 스레딩★ — 팝업 창 경로는 activeViewId(=main) 대신 넘겨받은 view 로 액션한다 ──
-  // 이 스위트가 막는 것: PopoutPage → ViewLayoutRenderer → SlotContextMenu 로 viewId 오버라이드가 흘러
-  // 팝업 안 분할/닫기/pop-out 이 엉뚱한 main view 가 아니라 자기 팝업 view 좌표를 쓰는지(SlotNotFound·오변형 방지).
-  const POPUP_VIEW = 'popup-view-77'
-
-  it('viewIdOverride 있으면 "가로 분할"이 activeViewId 가 아니라 오버라이드 view 로 split 을 부른다', () => {
+  // ── ★viewIdOverride 스레딩★ — 팝업 창 경로는 activeViewId(=main) 대신 넘겨받은 view 로 액션한다 ──
+  // ViewLayoutRenderer 가 ctx.viewId = viewIdOverride ?? currentViewId 로 조립해 command.run 에 넘긴다.
+  it('viewIdOverride 있으면 "가로 분할"이 오버라이드 view 로 split 을 부른다', () => {
     openMenu('slot-po', null, POPUP_VIEW)
     fireEvent.click(screen.getByText('가로 분할'))
-    // 좌표의 view = 오버라이드(POPUP_VIEW), main 의 ACTIVE_VIEW 가 아님.
     expect(splitSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-po', 'horizontal')
     expect(splitSpy).not.toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-po', 'horizontal')
   })
@@ -579,7 +595,6 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   })
 
   it('viewIdOverride 있으면 "팝업으로 분리"가 오버라이드 view 로 moveSlotToWindow 를 부른다', () => {
-    seedAgents(agentInfo('po-agent', false)) // 활성 조건
     openMenu('slot-pp', 'po-agent', POPUP_VIEW)
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-pp')

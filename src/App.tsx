@@ -7,11 +7,9 @@ import PopoutPage from './pages/PopoutPage'
 import { initEventBus, refreshProfiles, refreshPresets } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
 import { useAgentStore } from './store/agentStore'
-// ADR-0055: 어댑터 side-effect import — register(...) 가 부팅 시 실행돼 command 가 레지스트리에 들어간다.
-import './commands/themeCommands'
-import './commands/tabCommands'
-import './commands/presetCommands'
-import './commands/agentCommands'
+// ADR-0055/0064: command + 슬롯 메뉴 기여 등록 매니페스트 단일 import — 부팅 시 모든 register(...)·
+//   registerSlotMenu(...) 가 실행돼 레지스트리·슬롯 메뉴 기여부가 채워진다(산발 import 일원화, ADR-0064 §4).
+import './commands/contributions'
 import { installKeybindings } from './commands/keybindings'
 
 function App() {
