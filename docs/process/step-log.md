@@ -841,6 +841,12 @@
 - **결정(ADR-0068 — ADR-0066 결정 3 부분 폐기):** 1차 표면 = ViewManager 논리 트리 파생 방향·이웃(neighbor)·순서(ordinal) 핸들(픽셀/DPI 무관·프론트 왕복 0·§5/ADR-0035 정합). 실측 픽셀(getBoundingClientRect)·좌표계 신설 = 보류(진짜 픽셀공간 use case 등장 시, 프론트가 versioned 관측값으로 보고·권위는 ViewManager). 거부 대안: 프론트 getBoundingClientRect 1차(권위 역전·staleness·DPI)·백엔드 투영 px(gutter/sash/min-size 모델링=렌더 중복)·geometry 좌표 1차(OSS 논리좌표는 엔진 내부사정이라 LLM 근거 약함, 실제 타깃은 심볼릭 방향/이웃)·정규화 완전충족(과장).
 - **게이트:** ADR 기록(lint clean, 인덱스 68) + step-log. 커밋·`/review doc`·구현은 미진행(사용자 선택).
 
+## LLM 공간 타깃 핸들 구현·검증 완료 — neighbor/ordinal/방향 command + slot_spatial 스냅샷 필드 (ADR-0068 구현 슬라이스) (2026-07-11, master, 대화 세션 — 승계)
+- **무엇:** ADR-0068이 연 슬라이스(neighbor/ordinal/방향 토큰 command 실제 구현)를 구현·검증·커밋(`f57e4e5`). `ViewManager`(클라이언트 Rust)가 논리 트리에서 각 leaf 슬롯의 이웃(up/down/left/right slot id)·ordinal(center 전역 정렬)·코너/방향 토큰 해소를 산출(픽셀 무관), `ViewSnapshot.slot_spatial` 필드 + `resolve_spatial` read-only Tauri command + 프론트 `slot.resolveSpatial` registry(§5)로 노출. 신규 `src-tauri/src/layout/spatial.rs`(순수 로직 + 단위테스트) · ts-rs 바인딩 3개(수기).
+- **어떻게:** `/implement standard`(코더 Opus, 직전 세션) → `/review code` 2인 적대. **doc-aware(Opus)** FIX-2(ordinal 명세=center 정렬 확정)·FIX-4(ratio clamp `[EPS,1-EPS]` 폭0 leaf 방어) 반영. **cross-family(Codex blind)** 3건 grounding: ①② 절대 epsilon·clamp 하한 결합 결함 = sub-EPS leaf(현재 미발생, 미래 resize)에서만 발현 → "resize command가 최소 칸 크기 강제" 제약으로 `spatial.rs`·ADR-0068에 명시. ③ 대표 이웃 비대칭 = 단일 대표 이웃 모델 by-design(수용).
+- **검증(QA full PASS):** `cargo build`(workspace) · `cargo test -p engram-dashboard-core`(169) `-protocol`(46) · `cargo fmt --check`(긴 줄 1건 교정) · 코어 격리(`use tauri` 0) · `npx tsc --noEmit` · `npm test`(491) + **GUI 실측**(cdp): `get_view`의 `slot_spatial` 라이브 직렬화 · `resolve_spatial` 코너/방향/null/잘못된 토큰 fail-loud · split 후 이웃 갱신·상호성. 최고위험이던 ts-rs 바인딩 왕복 실앱 검증.
+- **게이트:** 커밋 `f57e4e5`(14 files). `docs/reference/architecture-overview.md`(타 세션)·handoff 제외. **미래 슬라이스(미진행):** resize command+최소 칸 크기(cross-family ①②) · 실측 픽셀 capability(보류) · 공간 핸들의 배치/이동 흐름 실사용 연결(ADR-0067 경로).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
