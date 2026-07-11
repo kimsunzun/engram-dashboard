@@ -1,7 +1,7 @@
 # ADR-0053: 채팅 슬롯 오버레이 스크롤바 = Radix ScrollArea 채택 (네이티브 CSS·전용 라이브러리·자작 거부)
 
 - 상태: 확정 (2026-07-07, 근거: /research medium + Codex cross-family 적대 리뷰 + package.json 실측)
-- 관련: CLAUDE.md §기술스택(Tailwind+shadcn)·§5 LLM 제어 · package.json:19 · src/components/slot/chat/ChatScrollArea.tsx · RichSlot.tsx · ADR-0047·0051 · step-log S15
+- 관련: CLAUDE.md §기술스택(Tailwind+shadcn)·§5 LLM 제어 · package.json:19 · src/components/ui/scroll-area.tsx (앱 전역 승격 2026-07-12 — 구 slot/chat/ChatScrollArea.tsx) · RichSlot.tsx · ADR-0047·0051 · step-log S15
 
 ## 맥락
 채팅 슬롯(구조화/JSON 출력) 스크롤 영역의 스크롤바 요구 5:
@@ -34,3 +34,5 @@
 - 스크롤 컨테이너는 `ChatScrollArea` seam 경유 — 직접 Radix Root를 컴포넌트에 노출하지 않는다(교체점 보존, §5 손발/두뇌 분리).
 - 헤더 "JSON ● idle" 제거는 이 결정과 **별건**(단순 UI 변경, ADR 무관 — 흐름은 step-log에만).
 - §5: 스크롤바 스타일이 LLM 제어 대상이 되면 chatStyle control surface(ADR-0051)에 얹는다(현재는 CSS 변수 고정, 미노출).
+- **스코프 확장 (2026-07-12):** 이 seam은 더 이상 chat 전용이 아니라 **앱 전역 스크롤 primitive** `src/components/ui/scroll-area.tsx`(`ScrollArea`)다 — 구 `slot/chat/ChatScrollArea.tsx`를 중립 이름으로 승격. DOM 스크롤 표면(에이전트 트리·프리셋·모니터링 픽커·DomSlot·ThoughtRow·RichSlot)이 전부 이 하나를 경유 → 스크롤 동작·토큰 한 곳 변경이 전역 전파. 위 불변식(overlay·`type=scroll`·500ms·ref→Viewport·Root 비노출) 전부 그대로 적용. 새 결정이 아니라 기존 seam의 적용 범위 확장이라 별도 ADR 없이 여기 기록.
+  - **예외 (seam 밖 — 의도적):** xterm 터미널은 자체 스크롤바를 소유해 컴포넌트로 못 감싼다 → `.xterm-viewport`를 동일 theme 토큰(`--scrollbar-*`)으로 전역 CSS(`src/index.css`) 통일(컴포넌트 아니어도 토큰 공유). `StructuredTextView` 코드블록 가로 스크롤·`TabBar` 가로 스크롤은 세로 오버레이 패턴 대상이 아니라 raw overflow 유지.

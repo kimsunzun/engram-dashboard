@@ -23,6 +23,7 @@ import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
+import { ScrollArea } from '../ui/scroll-area'
 
 interface DomSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 독립 구독·독립 진도(버그 B 해소). */
@@ -78,7 +79,10 @@ function splitTrailingEsc(s: string): [string, string] {
 export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
   // 누적 출력(평문). React state 로 들고 리렌더 — 관측용이라 xterm 같은 명령형 write 대신 선언적 렌더.
   const [text, setText] = useState('')
-  const preRef = useRef<HTMLPreElement>(null)
+  // ★scrollRef = ScrollArea Viewport(공용 seam 이 forward, ADR-0053)★: 실제 overflow/scrollTop 노드는
+  //   Radix Viewport 다. 하단 고정 auto-scroll(scrollTop=scrollHeight)이 이 노드를 겨눠야 tail 이 붙는다
+  //   (구 raw <pre overflow:auto> 는 pre 자신이 스크롤 노드였음 — seam 전환으로 대상이 Viewport 로 이동).
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   // 종료 판정(오버레이 표시용) — TerminalSlot/RichSlot 과 동일하게 store status 로 본다.
   const agents = useAgentStore(s => s.agents)
@@ -143,37 +147,40 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립).
   }, [viewId, agentId, epoch])
 
-  // 새 출력 도착 시 하단으로 자동 스크롤(터미널 tail 관측 UX).
+  // 새 출력 도착 시 하단으로 자동 스크롤(터미널 tail 관측 UX). ★대상 = ScrollArea Viewport★(위 scrollRef 주석).
   useEffect(() => {
-    const el = preRef.current
+    const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [text])
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', boxSizing: 'border-box' }}>
-      {/* data-dom-mode / data-agent-id: cdp eval 에서 DOM 모드 마운트 여부·대상 확인용 마커(RichSlot 관례 동형). */}
-      {/* 입력 처리 없음 — read-only 관측기(입력은 TerminalSlot/agentClient.writeStdin 경로, 파일 헤더 참조). */}
-      <pre
-        ref={preRef}
-        data-dom-mode="1"
-        data-agent-id={agentId}
-        style={{
-          width: '100%',
-          height: '100%',
-          margin: 0,
-          padding: '4px 8px',
-          boxSizing: 'border-box',
-          overflow: 'auto',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-          background: 'var(--bg)',
-          color: 'var(--text)',
-          fontFamily: 'var(--font-terminal)',
-          fontSize: '13px',
-        }}
+      {/* 스크롤 표면 = 공용 ScrollArea seam(ADR-0053) — 구 raw <pre overflow:auto> 를 오버레이 스크롤바로
+          교체. ref 는 Viewport(실제 스크롤 노드)로 forward 되어 하단 고정 auto-scroll 대상이 된다.
+          data-dom-mode / data-agent-id: cdp eval·테스트에서 DOM 모드 마운트 여부·대상 확인용 마커는 안쪽
+          <pre>(관측 텍스트 노드)에 유지한다(RichSlot 관례 동형 — textContent 로 읽힌다).
+          입력 처리 없음 — read-only 관측기(입력은 TerminalSlot/agentClient.writeStdin 경로, 파일 헤더 참조). */}
+      <ScrollArea
+        ref={scrollRef}
+        style={{ width: '100%', height: '100%', background: 'var(--bg)' }}
       >
-        {text}
-      </pre>
+        <pre
+          data-dom-mode="1"
+          data-agent-id={agentId}
+          style={{
+            margin: 0,
+            padding: '4px 8px',
+            boxSizing: 'border-box',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            color: 'var(--text)',
+            fontFamily: 'var(--font-terminal)',
+            fontSize: '13px',
+          }}
+        >
+          {text}
+        </pre>
+      </ScrollArea>
       {isTerminated && (
         <div
           style={{

@@ -9,7 +9,7 @@
 //      item-targeted 라 그대로 유지되고 여전히 stopPropagation 한다.
 //   4. 스타일 = 변수-only(하드코딩 색 없음).
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── clientFactory stub ────────────────────────────────────────────────────────
@@ -97,6 +97,26 @@ describe('AgentList 평면 렌더', () => {
   it('빈 목록 → 안내 문구', () => {
     render(<AgentList />)
     expect(screen.getByText(/에이전트 없음/)).toBeTruthy()
+  })
+
+  // ★FIX-A: 빈 상태 안내는 ScrollArea 밖의 flex-1 센터링 div★ — Radix Viewport 자식이 display:table 로
+  //   감싸져 height:100% 세로 중앙이 WebView2 에서 안 먹던 회귀 방지. 행이 없으면 스크롤 표면도 마운트 안 함.
+  it('빈 목록 → 안내 문구는 ScrollArea(스크롤 표면) 밖에 있고 스크롤 표면은 마운트되지 않는다(FIX-A)', () => {
+    render(<AgentList />)
+    const scroll = document.querySelector('[data-testid="agent-list-scroll"]')
+    expect(scroll).toBeNull() // 스크롤할 행이 없으면 ScrollArea 자체가 없다
+    const empty = screen.getByText(/에이전트 없음/)
+    // 안내 문구는 바깥 컬럼(data-agent-list)의 직속 자식(스크롤 표면 안이 아님).
+    expect(empty.closest('[data-testid="agent-list-scroll"]')).toBeNull()
+    expect(empty.closest('[data-agent-list]')).toBeTruthy()
+  })
+
+  it('비빈 목록 → ScrollArea(스크롤 표면) 마운트 + 행이 그 안에 있다(FIX-A)', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    const scroll = document.querySelector('[data-testid="agent-list-scroll"]')
+    expect(scroll).toBeTruthy()
+    expect(scroll?.querySelector('[data-agent-row="a1"]')).toBeTruthy()
   })
 
   it('running ∪ reserved 행 렌더 + 표시명 = cwd basename(이름 미저장)', () => {
@@ -257,6 +277,45 @@ describe('Escape 로 행 메뉴 닫기', () => {
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     expect(screen.getByText('열기')).toBeTruthy()
     fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByText('열기')).toBeNull()
+  })
+})
+
+// ── 타깃이 목록에서 사라지면 행 메뉴가 닫힌다(stale-target 가드) ──────────────────
+//   rowMenu 상태는 대상 행보다 오래 산다: 목록이 바뀌어 대상 agentId 가 rows 에서 빠져도(kill/삭제/
+//   마지막 에이전트 제거) rowMenu 는 남는다. empty 전이로 ScrollArea 가 언마운트돼 메뉴가 잠깐 사라졌다가
+//   새 에이전트 등장으로 non-empty 재마운트되면 stale 좌표에 떠난 agentId 를 겨눈 메뉴가 되살아난다.
+describe('타깃 사라지면 행 메뉴 닫힘(stale-target 가드)', () => {
+  it('행 메뉴 열림 → 대상 에이전트 제거(목록 empty) → 메뉴 사라짐', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    expect(screen.getByText('열기')).toBeTruthy() // 메뉴 열림
+    // 마지막 에이전트 제거 → empty 전이(ScrollArea 언마운트). act 로 감싸 리셋 effect 를 flush.
+    act(() => useAgentStore.setState({ agents: [] }))
+    expect(screen.queryByText('열기')).toBeNull() // 메뉴 사라짐
+  })
+
+  it('대상 제거 후 다른 에이전트 등장(non-empty 재마운트) → stale 메뉴가 되살아나지 않는다', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    expect(screen.getByText('열기')).toBeTruthy()
+    // a1 제거 → empty → 새 에이전트 a2 등장(non-empty 재마운트). 각 전이를 act 로 flush.
+    act(() => useAgentStore.setState({ agents: [] }))
+    act(() => useAgentStore.setState({ agents: [agent('a2', 'C:/x')] }))
+    // 떠난 a1 을 겨눈 stale 메뉴가 되살아나면 안 된다(rowMenu 가 리셋됐어야 함).
+    expect(screen.queryByText('열기')).toBeNull()
+    expect(document.querySelector('[data-agent-row="a2"]')).toBeTruthy() // 새 행은 렌더
+  })
+
+  it('여러 행 중 대상만 제거(목록은 non-empty 유지) → 메뉴 사라짐', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w'), agent('a2', 'C:/x')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    expect(screen.getByText('열기')).toBeTruthy()
+    // a1 만 제거(a2 는 남음 — empty 전이 없이도 대상 부재로 닫혀야 함). act 로 flush.
+    act(() => useAgentStore.setState({ agents: [agent('a2', 'C:/x')] }))
     expect(screen.queryByText('열기')).toBeNull()
   })
 })

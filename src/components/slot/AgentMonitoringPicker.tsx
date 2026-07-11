@@ -18,6 +18,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { ScrollArea } from '../ui/scroll-area'
 import { useAgentStore } from '../../store/agentStore'
 import { useMonitoringPickerStore } from '../../store/monitoringPickerStore'
 import { useViewStore } from '../../store/viewStore'
@@ -160,8 +161,9 @@ export default function AgentMonitoringPicker() {
           }}
         />
 
-        {/* 후보 목록 — 실행중 필터 + 검색어 좁힘. 빈 상태 메시지 분기. */}
-        <div style={{ overflow: 'auto', flex: 1 }}>
+        {/* 후보 목록 — 실행중 필터 + 검색어 좁힘. 빈 상태 메시지 분기. 공용 ScrollArea seam(ADR-0053)으로
+            스크롤(raw overflow:auto → 오버레이 스크롤바). 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
+        <ScrollArea style={{ flex: 1, minHeight: 0 }}>
           {candidates.length === 0 ? (
             <div
               data-monitoring-picker-empty="1"
@@ -207,7 +209,7 @@ export default function AgentMonitoringPicker() {
               </div>
             ))
           )}
-        </div>
+        </ScrollArea>
       </div>
     </div>
   )

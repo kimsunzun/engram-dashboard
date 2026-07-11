@@ -16,6 +16,7 @@
 
 import { useRef, useState } from 'react'
 
+import { ScrollArea } from '../ui/scroll-area'
 import { agentClient } from '../../api/clientFactory'
 import { useAgentStore } from '../../store/agentStore'
 import { basename } from '../../util/basename'
@@ -97,8 +98,9 @@ export default function PresetPalette() {
         프리셋
       </div>
 
-      {/* 프리셋 목록 — 각 행: cwd basename(표시명) + 전체 cwd(muted) + 삭제. */}
-      <div style={{ flex: 1, overflow: 'auto' }}>
+      {/* 프리셋 목록 — 각 행: cwd basename(표시명) + 전체 cwd(muted) + 삭제. 공용 ScrollArea seam(ADR-0053)
+          으로 스크롤(raw overflow:auto → 오버레이 스크롤바). 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
+      <ScrollArea style={{ flex: 1, minHeight: 0 }}>
         {presets.length === 0 ? (
           <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
             프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.
@@ -163,7 +165,7 @@ export default function PresetPalette() {
             )
           })
         )}
-      </div>
+      </ScrollArea>
     </div>
   )
 }

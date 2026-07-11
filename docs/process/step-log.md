@@ -847,6 +847,12 @@
 - **검증(QA full PASS):** `cargo build`(workspace) · `cargo test -p engram-dashboard-core`(169) `-protocol`(46) · `cargo fmt --check`(긴 줄 1건 교정) · 코어 격리(`use tauri` 0) · `npx tsc --noEmit` · `npm test`(491) + **GUI 실측**(cdp): `get_view`의 `slot_spatial` 라이브 직렬화 · `resolve_spatial` 코너/방향/null/잘못된 토큰 fail-loud · split 후 이웃 갱신·상호성. 최고위험이던 ts-rs 바인딩 왕복 실앱 검증.
 - **게이트:** 커밋 `f57e4e5`(14 files). `docs/reference/architecture-overview.md`(타 세션)·handoff 제외. **미래 슬라이스(미진행):** resize command+최소 칸 크기(cross-family ①②) · 실측 픽셀 capability(보류) · 공간 핸들의 배치/이동 흐름 실사용 연결(ADR-0067 경로).
 
+## 스크롤바 공용화 — ChatScrollArea seam을 앱 전역 ScrollArea primitive로 승격 (ADR-0053 스코프 확장) (2026-07-12, master, 대화 세션)
+- **무엇:** 사용자 피드백(에이전트 트리 스크롤바가 네이티브 상시표시·gutter 점유)에서 출발 → "한 곳 바꾸면 전역 반영" 요구로 확장. ADR-0053 스크롤 seam(chat 전용)을 중립 공용 primitive `src/components/ui/scroll-area.tsx`(`ScrollArea`)로 승격, DOM 스크롤 표면 6곳(트리·프리셋·모니터링 픽커·DomSlot·ThoughtRow·RichSlot)을 이 하나로 라우팅. xterm은 자체 스크롤바라 예외 — `.xterm-viewport`를 동일 theme 토큰으로 전역 CSS 통일.
+- **어떻게:** `/implement standard`(코더 Opus) → `/review code full` 2인 적대(doc-aware Opus + cross-family Codex blind) → `/qa full`(cdp 실측). 리뷰 수렴 3라운드: R1 FIX 2건(ThoughtRow 스크롤 범위·AgentList 라벨 sticky 회귀) → R2 doc-aware FIX-A(빈-상태 중앙정렬 회귀) → R3 blind FIX(행메뉴 stale-target 가드). cross-family(Codex)가 doc-aware가 "아마 OK"로 넘긴 기능 버그 2건(ThoughtRow 스크롤 불가·stale 메뉴)을 적출 — 교차검증 값 실증.
+- **결정 기록:** 새 ADR 없음(새 결정 아니라 기존 seam 적용 범위 확장) — ADR-0053 본문에 스코프 확장 + 예외(xterm=CSS 토큰 통일 · 코드블록/TabBar 가로=raw 유지) 기록.
+- **게이트:** QA full PASS(tsc·vitest 501·코어 격리 + GUI cdp 실측: 빈-상태 중앙정렬·gutter0 오버레이·xterm 토큰·행메뉴 비클리핑). 커밋 = 이 스크롤바 공용화 커밋. `architecture-overview.md`(타 세션)·handoff 제외.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

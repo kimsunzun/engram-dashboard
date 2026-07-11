@@ -19,6 +19,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { ScrollArea } from '../ui/scroll-area'
 import { agentClient } from '../../api/clientFactory'
 import { useAgentStore } from '../../store/agentStore'
 import { currentViewId, selectView, useViewStore } from '../../store/viewStore'
@@ -107,6 +108,15 @@ export default function AgentList() {
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
   }, [rowMenu])
+
+  // ★타깃 사라지면 메뉴 닫기★: rowMenu 상태는 대상 행보다 오래 산다 — 목록이 바뀌어(kill/deleteProfile/
+  //   마지막 에이전트 제거로 empty 전이) 대상 agentId 가 rows 에서 빠져도 rowMenu 는 그대로 남는다. 특히
+  //   empty→ScrollArea 언마운트로 메뉴가 잠깐 사라졌다가 새 에이전트 등장으로 non-empty 가 다시 마운트되면
+  //   stale 좌표에 떠난 agentId 를 겨눈 메뉴가 되살아난다. 대상이 목록에서 사라지면 즉시 null 로 리셋해
+  //   떠난 agentId 를 겨눈 메뉴가 절대 렌더되지 않게 한다.
+  useEffect(() => {
+    if (rowMenu && !rows.some(r => r.id === rowMenu.agentId)) setRowMenu(null)
+  }, [rowMenu, rows])
 
   // in-flight 시작 — busyRef(동기 권위 가드)로 같은 tick 재호출 즉시 차단, busyIds(state)는 시각용 병행.
   const beginInFlight = (id: string): boolean => {
@@ -231,21 +241,32 @@ export default function AgentList() {
         ]
 
   return (
+    // ★구조 = 라벨(고정) 바깥 + 목록만 ScrollArea 안(PresetPalette/AgentMonitoringPicker 동형, ADR-0053)★:
+    //   옛 구조는 sticky 라벨을 Radix Viewport 안에 넣었으나, Radix 가 Viewport 자식을 display:table 로 감싸
+    //   그 안의 position:sticky 가 Chromium/WebView2 에서 불안정하게 핀됐다(회귀). 그래서 라벨은 스크롤 밖
+    //   flex 형제로 올려 상단 고정을 확실히 하고(스크롤과 무관), 스크롤 대상은 목록 행만 ScrollArea 에 담는다.
+    //   ★pane 배경 마커 = 이 바깥 flex 컨테이너(data-agent-list)★: pane 배경 우클릭은 상위 통합 슬롯 메뉴로
+    //   버블(ADR-0064 — 옛 자체 배경 메뉴/stopPropagation 제거). 행 우클릭만 행 핸들러가 stopPropagation 으로
+    //   가로챈다. background:var(--bg-secondary) 는 전체 높이 컨테이너에 둔다(변수-only, 테스트 단언).
     <div
       data-agent-list="1"
-      style={{ flex: 1, overflow: 'auto', minHeight: 0, height: '100%', background: 'var(--bg-secondary)' }}
-      // ★pane 배경 우클릭 = 상위 통합 슬롯 메뉴로 버블(ADR-0064)★: 옛 자체 배경 메뉴 + stopPropagation 을
-      //   제거했다 — 배경 우클릭은 ViewLayoutRenderer 의 통합 SlotContextMenu 가 받는다(agent_list 전용
-      //   "에이전트 생성" + 공통 슬롯 ops). 행에서의 우클릭만 행 핸들러가 stopPropagation 으로 가로챈다.
+      data-testid="agent-list"
+      style={{
+        flex: 1,
+        minHeight: 0,
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: 'var(--bg-secondary)',
+      }}
     >
       {/* 슬롯 콘텐츠 라벨(사용자 요청) — 이 슬롯 = 에이전트 트리. 공용 슬롯 헤더가 아니라 PresetPalette·
-          AgentList 이 2개 variant 컴포넌트에만 각자 넣는다. root 가 스크롤 컨테이너라 sticky 로 상단 고정. 변수-only. */}
+          AgentList 이 2개 variant 컴포넌트에만 각자 넣는다. 스크롤 밖 flex 형제라 항상 상단 고정(display:table
+          자식 sticky 불안정 회피 — 위 구조 주석). 변수-only. */}
       <div
         data-slot-label="agent-list"
         style={{
-          position: 'sticky',
-          top: 0,
-          zIndex: 1,
+          flexShrink: 0,
           padding: '6px 8px',
           borderBottom: '1px solid var(--border)',
           background: 'var(--bg-secondary)',
@@ -258,10 +279,18 @@ export default function AgentList() {
       >
         에이전트 트리
       </div>
+      {/* ★빈 목록 = ScrollArea 밖의 flex-1 센터링 div(FIX-A)★: 옛 구조는 이 안내 문구를 ScrollArea(Radix
+          Viewport) 안에 넣고 height:100% 로 세로 중앙 정렬했으나, Radix 가 Viewport 자식을 display:table 로
+          감싸 그 table 박스 높이는 콘텐츠 기반이라 Chromium/WebView2 에서 height:100% 가 Viewport 높이로
+          해소되지 않아 문구가 상단에 붙는 회귀가 났다. 스크롤할 행이 없을 땐 스크롤 컨테이너 자체가 불필요하므로,
+          바깥 flex 컬럼(data-agent-list)의 직속 flex-1 자식으로 문구를 그려 진짜 세로 중앙 정렬을 복원한다
+          (ScrollArea 는 행이 있을 때만 마운트 — 스크롤 없을 때 스크롤 표면도 없음). 배경 우클릭 버블은 바깥
+          컨테이너가 그대로 소유하므로 빈/비빈 무관하게 유지된다. */}
       {rows.length === 0 ? (
         <div
           style={{
-            height: '100%',
+            flex: 1,
+            minHeight: 0,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -273,7 +302,11 @@ export default function AgentList() {
           에이전트 없음 — 우클릭으로 생성
         </div>
       ) : (
-        rows.map(node => {
+        // 스크롤 표면 = 공용 ScrollArea seam(ADR-0053) — 목록 행·행메뉴만 담는다. 옛 raw overflow:auto div
+        //   (네이티브 always-on 스크롤바 + gutter)를 앱 전역 오버레이 스크롤바로 교체(스크롤 중에만 뜨고 gutter 0).
+        //   가상화 없는 평면 목록이라 Radix Viewport 로 감싸도 스크롤 소유 충돌 없음(react-arborist 미사용).
+        <ScrollArea data-testid="agent-list-scroll" style={{ flex: 1, minHeight: 0 }}>
+        {rows.map(node => {
           const isReserved = node.kind === 'reserved'
           const isBusy = busyIds.has(node.id)
           const err = errorById[node.id]
@@ -330,8 +363,7 @@ export default function AgentList() {
               )}
             </div>
           )
-        })
-      )}
+        })}
 
       {/* ── 행 우클릭 메뉴 ─────────────────────────────────────────────── */}
       {rowMenu && (
@@ -356,6 +388,8 @@ export default function AgentList() {
             </div>
           ))}
         </div>
+      )}
+        </ScrollArea>
       )}
     </div>
   )

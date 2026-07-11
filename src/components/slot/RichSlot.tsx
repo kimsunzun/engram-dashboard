@@ -25,7 +25,7 @@ import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import { StructuredTextView } from './StructuredTextView'
-import { ChatScrollArea } from './chat/ChatScrollArea' // ADR-0053: Radix 오버레이 스크롤바 seam
+import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
 
 interface RichSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯 독립 진도 — 버그 B 해소. */
@@ -114,7 +114,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). epoch = 재spawn 재구독 트리거.
   }, [viewId, agentId, epoch])
 
-  // 새 item 도착 시 하단으로 스크롤(대화 UX). ★scrollRef = Radix Viewport(ChatScrollArea 가 forward)★:
+  // 새 item 도착 시 하단으로 스크롤(대화 UX). ★scrollRef = Radix Viewport(ScrollArea seam 이 forward)★:
   //   Radix ScrollArea 의 실제 스크롤 엘리먼트는 Root 가 아니라 Viewport 다(ADR-0053). auto-scroll 이
   //   이 Viewport 노드의 scrollTop 을 겨눠야 새 출력이 바닥에 붙는다(Root 를 겨누면 스크롤 안 됨 — 회귀 주의).
   useEffect(() => {
@@ -154,13 +154,13 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
       data-rich-live="1" // cdp eval 에서 라이브 RichSlot 마운트 여부 확인용
       data-agent-id={agentId}
     >
-      {/* 대화 렌더(스크롤) — ChatScrollArea seam(ADR-0053: Radix 오버레이 스크롤바). 순서 보존 item 스트림.
+      {/* 대화 렌더(스크롤) — ScrollArea seam(ADR-0053: 앱 전역 Radix 오버레이 스크롤바). 순서 보존 item 스트림.
           ★scrollRef 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 아래 하단 고정 auto-scroll
           이 그 Viewport 노드를 겨눠야 새 출력이 바닥에 붙는다(회귀 주의). CC 룩 렌더는 StructuredTextView 소관.
           (구 "JSON ● idle" 슬림 헤더는 제거 — 상태 힌트는 스트림 끝 대기 인디케이터(WaitRow "Wait" tail) 로 대체.) */}
-      <ChatScrollArea ref={scrollRef} className="min-h-0 flex-1">
+      <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
         <StructuredTextView items={items} streaming={streaming} />
-      </ChatScrollArea>
+      </ScrollArea>
 
       {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
           으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}

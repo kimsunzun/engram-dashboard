@@ -1,25 +1,36 @@
-/* ChatScrollArea — Radix ScrollArea 오버레이 스크롤바 스타일 (ADR-0053).
+/* ScrollArea — Radix ScrollArea 오버레이 스크롤바 스타일 (ADR-0053, 앱 전역 seam).
    색·크기는 CSS 변수(theme.css :root 의 --scrollbar-*)로 참조 — 얇은 다크 thumb, LLM 제어 여지(§5).
+   xterm(.xterm-viewport)도 같은 토큰을 index.css 전역 규칙에서 참조해 시각 통일한다(단일 출처).
 
    ★scroll-triggered 모델(type="scroll")★
    Radix 가 스크롤 중에만 스크롤바를 DOM 에 마운트하고, 스크롤 멈춤 후 scrollHideDelay(500ms) 뒤 언마운트한다.
    hover 에는 반응하지 않는다(이전 type="hover" + animation-delay 0.5s show-delay 기법 폐기 — ADR-0053).
    마운트 중에는 항상 보이도록 opacity:1 — 별도 fade-in 불필요(Radix 가 마운트 타이밍을 제어). */
 
-.chat-scrollbar {
+.engram-scrollbar {
   display: flex;
   /* touch/drag 중 텍스트 선택·스크롤 제스처 방지(Radix 권장). */
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
   padding: 2px;
-  width: var(--scrollbar-size, 10px);
   /* 마운트 중 항상 표시 — type="scroll" 이므로 DOM 에 있을 때가 곧 "보여야 할 때"다. */
   opacity: 1;
   z-index: 1;
 }
 
-.chat-scrollbar-thumb {
+/* 세로 스크롤바 — 폭 = 트랙 두께. */
+.engram-scrollbar[data-orientation='vertical'] {
+  width: var(--scrollbar-size, 10px);
+}
+
+/* 가로 스크롤바 — 높이 = 트랙 두께, thumb 를 가로로 눕힌다. */
+.engram-scrollbar[data-orientation='horizontal'] {
+  flex-direction: column;
+  height: var(--scrollbar-size, 10px);
+}
+
+.engram-scrollbar-thumb {
   position: relative;
   flex: 1;
   /* 얇은 다크 thumb — 색은 CSS 변수(theme.css). */
@@ -28,7 +39,7 @@
 }
 
 /* Radix 권장 최소 히트 영역(44×44) — 시각 두께는 얇게 두되 포인터 타깃만 넓힌다(::before 는 투명). */
-.chat-scrollbar-thumb::before {
+.engram-scrollbar-thumb::before {
   content: '';
   position: absolute;
   top: 50%;

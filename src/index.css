@@ -30,3 +30,27 @@ html, body, #root {
   margin: 0;
   padding: 0;
 }
+
+/* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).
+   xterm 은 자체 .xterm-viewport 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서
+   같은 theme.css 토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은
+   theme 마다 다른 --scrollbar-thumb, 폭/라운드는 --scrollbar-size/-radius). WebView2=Chromium 이므로
+   ::-webkit-scrollbar 로 트랙/thumb 를 커스텀한다(overlay 스타일 근사 — 트랙 투명, 얇은 pill thumb). */
+.xterm .xterm-viewport {
+  scrollbar-width: thin; /* Firefox 폴백(WebView2 는 -webkit-* 사용) */
+  scrollbar-color: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24)) transparent;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: var(--scrollbar-size, 10px);
+  height: var(--scrollbar-size, 10px);
+}
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24));
+  border-radius: var(--scrollbar-radius, 9999px);
+  /* 트랙 폭보다 얇게 보이도록 투명 border 로 안쪽 여백(overlay pill 근사). */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}

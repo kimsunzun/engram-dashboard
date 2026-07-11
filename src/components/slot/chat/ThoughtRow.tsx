@@ -9,6 +9,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
 interface ThoughtRowProps {
   /** 추론 평문. 비어 있으면(암호화 thinking) 비-인터랙티브 라벨만 렌더. */
@@ -46,9 +47,20 @@ export function ThoughtRow({ content, streaming = false, label = 'Thought' }: Th
       </button>
 
       {interactive && expanded && (
-        <div className="mt-1 border-l border-border pl-3 max-h-[200px] overflow-y-auto text-[13px] text-muted whitespace-pre-wrap break-words">
-          {content}
-        </div>
+        // 공용 ScrollArea seam(ADR-0053)으로 스크롤(구 raw overflow-y-auto → 오버레이 스크롤바).
+        //   ★max-h 는 Viewport(실제 스크롤 노드)에 얹는다(Root 아님)★: Radix Viewport 는 overflowY:scroll 을
+        //   inline 으로 갖지만 높이 상한이 없으면 콘텐츠 높이만큼 늘어나 스크롤 범위가 0이 된다 — Root 에만
+        //   max-h 를 걸면 Viewport(height:100%)가 *비확정* 부모(Root=max-height only)에 대해 auto 로 풀려
+        //   여전히 콘텐츠 높이로 자라고, Root 의 overflow-hidden 이 200px 에서 잘라 스크롤로 닿지 못한다(회귀).
+        //   Viewport 에 직접 max-height 를 걸어야 overflowY:scroll 과 맞물려 진짜 스크롤 컨테이너가 된다
+        //   (~100줄 추론 → 박스 ≤200px 유지 + 마지막 줄까지 휠·드래그 스크롤 도달). border/padding 은 시각
+        //   프레임이라 Root 에 둔다.
+        <ScrollArea
+          className="mt-1 border-l border-border pl-3"
+          viewportClassName="max-h-[200px]"
+        >
+          <div className="text-[13px] text-muted whitespace-pre-wrap break-words">{content}</div>
+        </ScrollArea>
       )}
     </div>
   )

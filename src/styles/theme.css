@@ -23,8 +23,9 @@
   --chat-font-size: 13px;         /* 채팅 루트 base font-size(chat.css .chat-markdown 과 동기) */
   --chat-line-height: 1.45;       /* 채팅 base line-height — 사용자 라이브 튜닝 확정값 */
 
-  /* ADR-0053: 채팅 오버레이 스크롤바(ChatScrollArea/Radix) 구조 토큰(크기·모양) — --chat-* 과 마찬가지로
-     theme 무관이라 여기에만 둔다(현재 LLM 제어 미노출 — §5 후속으로 chatStyle control surface 에 얹을 여지).
+  /* ADR-0053: 앱 전역 오버레이 스크롤바(ScrollArea seam/Radix + xterm) 구조 토큰(크기·모양) — --chat-* 과
+     마찬가지로 theme 무관이라 여기에만 둔다(현재 LLM 제어 미노출 — §5 후속으로 chatStyle control surface 에 얹을 여지).
+     이 토큰은 공용 ScrollArea(components/ui/scroll-area.css)와 xterm(index.css .xterm-viewport)이 함께 참조한다.
      ★--scrollbar-thumb(색)은 테마마다 달라야 하므로 각 :root[data-theme=...] 블록에 둔다★.
      ★--scrollbar-show-delay 제거★: type="scroll" 전환으로 hover show-delay 기법 폐기 — scrollHideDelay(500ms)
      가 Radix 수준에서 숨김 타이밍을 제어하므로 CSS 레벨 지연 토큰 불필요. */
