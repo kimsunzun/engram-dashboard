@@ -231,6 +231,9 @@ pub fn run() {
             //   (변경 핸들러는 변경 직후에만 emit → mount 직후엔 닿지 않음). 상태변경·emit 없음.
             commands::list_tabs,
             commands::list_windows,
+            // ADR-0068: 공간/방향 토큰 → slot id 해소(§5 백엔드 권위 resolver). 논리 도면(split·ratio) 파생 —
+            //   픽셀 무관. 프론트 slot.resolveSpatial command 가 이걸 invoke 한다(조회만·emit 0).
+            commands::resolve_spatial,
             // S14 모듈①(ADR-0036) T6a: 에이전트 명령 request/reply 평면 — §5 LLM 제어 표면.
             //   DaemonClient::send_command(request_id 매칭). 출력 구독(subscribe_output)은 T6b.
             commands::agent_spawn,

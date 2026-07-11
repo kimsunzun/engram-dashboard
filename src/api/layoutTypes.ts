@@ -8,3 +8,6 @@ export type { SplitDir } from '../../src-tauri/bindings/SplitDir'
 export type { View } from '../../src-tauri/bindings/View'
 export type { ViewMeta } from '../../src-tauri/bindings/ViewMeta'
 export type { ViewSnapshot } from '../../src-tauri/bindings/ViewSnapshot'
+// ADR-0068: 슬롯 공간 타깃 파생(방향 이웃 + 읽기 순서) — ViewSnapshot.slot_spatial 에 실린다.
+export type { SlotSpatial } from '../../src-tauri/bindings/SlotSpatial'
+export type { Neighbors } from '../../src-tauri/bindings/Neighbors'

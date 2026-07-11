@@ -62,6 +62,7 @@ function slotSnap(viewId: string, version: number): ViewSnapshot {
     view_id: viewId,
     layout: { type: 'slot', id: `s-${viewId}`, content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: `s-${viewId}`,
+    slot_spatial: [], // ADR-0068: 공간 파생(이 테스트는 안 씀 — 빈 배열로 타입 충족)
     version,
   }
 }

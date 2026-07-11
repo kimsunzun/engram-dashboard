@@ -169,6 +169,7 @@ impl ViewManager {
     }
 
     /// view_id 의 스냅샷(get_view·layout:updated 페이로드). 없으면 Err.
+    /// ADR-0068: 슬롯 공간 파생(neighbors/ordinal)을 논리 트리에서 산출해 함께 싣는다(픽셀 무관 — 백엔드 권위).
     pub fn snapshot(&self, view_id: Uuid) -> Result<ViewSnapshot, LayoutError> {
         let v = self
             .views
@@ -178,6 +179,8 @@ impl ViewManager {
             view_id: v.id,
             layout: v.layout.clone(),
             focused_slot_id: v.focused_slot_id,
+            // ADR-0068: 각 말단 슬롯의 방향 이웃·읽기 순서를 트리에서 파생(프론트 왕복·좌표 노출 0).
+            slot_spatial: super::spatial::compute_spatial(&v.layout),
             version: self.version,
         })
     }

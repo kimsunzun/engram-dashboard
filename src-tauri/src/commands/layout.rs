@@ -33,8 +33,9 @@ use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
 
 use crate::daemon_client::DaemonClient;
 use crate::layout::{
-    resolve_spawn_slot, CloseTabOutcome, LayoutState, SlotContent, SplitDir, ViewManager, ViewMeta,
-    ViewSnapshot, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    resolve_spatial as resolve_spatial_token, resolve_spawn_slot, CloseTabOutcome, LayoutState,
+    SlotContent, SpatialToken, SplitDir, ViewManager, ViewMeta, ViewSnapshot, WindowTabsSnapshot,
+    MAIN_WINDOW_LABEL,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 
@@ -544,6 +545,39 @@ pub fn list_tabs(
 pub fn list_windows(state: State<'_, LayoutState>) -> Result<Vec<String>, String> {
     let mgr = state.0.lock().map_err(|e| e.to_string())?;
     Ok(mgr.list_windows())
+}
+
+/// ★공간/방향 토큰 → slot id 해소(ADR-0068 — §5 백엔드 권위 resolver)★. ★조회만★(변형·emit 0).
+/// `view_id` 지정이면 그 View, 미지정(None)이면 `window`(미지정 시 main) 의 활성 탭 View 를 대상으로 한다.
+/// - 모서리 토큰 `top-left`/`top-right`/`bottom-left`/`bottom-right`: 트리 전체에서 그 코너에 가장 가까운 슬롯.
+/// - 상대 방향 `left`/`right`/`up`/`down`: 그 View 의 `focused_slot_id` 기준 방향 이웃(없으면 null).
+///
+/// 논리 도면(split 방향·ratio) 파생이라 픽셀·창크기 무관(ADR-0068). 사람·팔레트·LLM(`__engramCmd.run`/
+/// `slot.resolveSpatial`)이 같은 이 핸들을 흔든다(§5 단일 제어 표면). 모르는 토큰/없는 View → Err(fail-loud).
+// ADR-0068
+#[tauri::command]
+pub fn resolve_spatial(
+    state: State<'_, LayoutState>,
+    token: String,
+    window: Option<String>,
+    view_id: Option<Uuid>,
+) -> Result<Option<Uuid>, String> {
+    let tok = SpatialToken::parse(&token)
+        .ok_or_else(|| format!("알 수 없는 공간 토큰: '{token}' (top-left/top-right/bottom-left/bottom-right/left/right/up/down)"))?;
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    // 대상 View 해소: view_id 우선, 없으면 window(미지정 시 main) 의 활성 탭.
+    let vid = match view_id {
+        Some(v) => v,
+        None => {
+            let label = window.as_deref().unwrap_or(MAIN_WINDOW_LABEL);
+            mgr.list_tabs(label).map_err(|e| e.to_string())?.active
+        }
+    };
+    let v = mgr
+        .views
+        .get(&vid)
+        .ok_or_else(|| format!("view 없음: {vid}"))?;
+    Ok(resolve_spatial_token(&v.layout, v.focused_slot_id, tok))
 }
 
 // close_window("main") 거부는 ViewManager::close_window 가 LayoutError::MainNotClosable 로 강제한다

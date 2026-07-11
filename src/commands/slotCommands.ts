@@ -14,7 +14,9 @@
 //
 // import 부수효과로 등록되므로 단일 매니페스트(contributions.ts)에서 side-effect import 한다.
 
-import { useViewStore } from '../store/viewStore'
+import { invoke } from '@tauri-apps/api/core'
+
+import { useViewStore, readWindowLabelFromHash } from '../store/viewStore'
 import type { SplitDir } from '../api/layoutTypes'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
@@ -94,6 +96,26 @@ register({
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.close')
     return useViewStore.getState().closeSlot(viewId, slotId)
+  },
+})
+
+register({
+  id: 'slot.resolveSpatial',
+  title: '공간 타깃 해소',
+  category: 'slot',
+  // ★공간/방향 토큰 → slot id 해소(ADR-0068 — §5 백엔드 권위 resolver)★: "우하단"·"이 슬롯 오른쪽" 같은
+  //   공간 지시를 논리 도면(split 방향·ratio) 파생으로 slot id 에 매핑한다(픽셀·getBoundingClientRect 무관 —
+  //   레이아웃 진실은 백엔드 ViewManager, ADR-0035). 프론트는 계산하지 않고 백엔드 resolve_spatial 을 invoke 만
+  //   한다(낙관 프론트 계산 금지 — §5 단일 제어 표면). 사람·팔레트·LLM(__engramCmd.run('slot.resolveSpatial',…))이
+  //   같은 이 핸들을 흔든다. token 필수, viewId 지정이면 그 View, 미지정이면 이 웹뷰 창(readWindowLabelFromHash)의
+  //   활성 탭이 대상(상대 방향은 그 View 의 focused_slot_id 기준). 반환 = 해소된 slot id(문자열) 또는 null.
+  run: args => {
+    const token = args?.token
+    if (typeof token !== 'string' || token.length === 0) throw new Error('[slot.resolveSpatial] token 필요')
+    const viewId = typeof args?.viewId === 'string' && args.viewId.length > 0 ? args.viewId : undefined
+    // viewId 미지정이면 이 웹뷰 창(main·팝업 label)을 넘겨 백엔드가 그 창의 활성 탭을 대상 삼게 한다.
+    const window = viewId ? undefined : readWindowLabelFromHash()
+    return invoke<string | null>('resolve_spatial', { token, window: window ?? null, viewId: viewId ?? null })
   },
 })
 

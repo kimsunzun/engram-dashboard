@@ -10,6 +10,8 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
+use super::spatial::SlotSpatial;
+
 /// 분할 방향. Horizontal = 좌우(│로 가름), Vertical = 상하(─로 가름).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +122,12 @@ pub struct ViewSnapshot {
     pub layout: LayoutNode,
     #[ts(type = "string | null")]
     pub focused_slot_id: Option<Uuid>,
+    /// ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
+    /// 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
+    /// ordinal 순(중심점 `(center_y, center_x)` 전역 사전순 — 위→아래·동률 왼쪽→오른쪽, 트리 전위 아님)으로
+    /// 담긴다. 좌표 자체는 노출 안 함(ADR-0068 결정 3 — 좌표 보류).
+    /// 프론트는 이걸 그대로 받아 "우하단"·"이 슬롯 오른쪽" 같은 공간 지시를 slot id 로 옮긴다.
+    pub slot_spatial: Vec<SlotSpatial>,
     /// 변경마다 +1(ViewManager.version). 팝업이 pull 한 version 이하 emit 은 폐기(초기 유실·중복 방지).
     /// ts-rs u64 기본 매핑=bigint 이나 serde_json 은 number 로 직렬화(런타임=JS number) → 타입도 number 로 고정
     /// (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.
