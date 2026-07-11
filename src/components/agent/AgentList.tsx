@@ -352,7 +352,17 @@ export default function AgentList() {
               {/* 표시명 = cwd basename(프론트 파생 — 이름 미저장). cwd 는 노출 안 함(title 로만). */}
               <span
                 data-agent-name="1"
-                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                // flex:1+minWidth:0 = 행 폭을 채워 ellipsis 가 제대로 걸리게(콘텐츠 폭이면 짧은 이름도
+                //   텍스트 오른쪽 끝이 곧 overflow:hidden 클립 경계라 italic overhang 이 잘린다). paddingRight
+                //   2px = italic 글리프의 오른쪽 overhang 여유(ellipsis 경우에도 마지막 글자 꼬리 안 잘리게).
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  paddingRight: '2px',
+                }}
               >
                 {basename(node.cwd)}
               </span>
