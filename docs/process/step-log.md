@@ -859,6 +859,10 @@
 - **검증(QA full PASS):** `cargo build` · `cargo test -p engram-dashboard-core`(169) `-protocol`(46) · `cargo fmt --check` · 코어 격리(`use tauri` 0) · `npx tsc --noEmit` · `npm test`(514) + **GUI 실측**(cdp, live): LLM `invoke('rename_tab')` → backend name·version + DOM 갱신 · 사람 더블클릭→타이핑→Enter 커밋 · Esc 취소(version 불변) · field-sizing 폭 44px("View 1")↔140px(긴 CJK) auto-size. ※src-tauri unit(manager.rs rename 테스트)은 WebView2 크래시로 실행 불가 → cargo build 컴파일 검증 + GUI 실측 대체.
 - **게이트:** 커밋 = 이 탭 rename 커밋(10 files + step-log). `architecture-overview.md`(타 세션)·handoff 제외. **후속(비차단):** blur-only commit 전용 테스트 보강(재리뷰 공통 nit).
 
+## UI 문자열 중앙화 결정 (ADR-0069) — i18n-ready strings 모듈, 완전 i18n 보류 (2026-07-12, master, 대화 세션)
+- **무엇:** 사용자 지적(메뉴/UI 문자열이 한글로 인라인 하드코딩 — i18n 인프라 0, `src/commands`만 ~59곳)에서 출발. 결정 = **일단 중앙화**(`src/i18n/` 타입세이프 `t(key, params?)` + `ko` 네임스페이스드 테이블), **나중에 그 중앙 소스를 로컬화 베이스로**. 완전 i18n(react-i18next)은 보류(내부 한국어 전용 툴 YAGNI — 폐기 아니라 이 소스 위에 나중에 얹음). ADR-0069 박제.
+- **상태:** **결정만 확정 + ADR 커밋. 구현(모듈 구축 + UI 문자열 마이그레이션) 미착수** — 세션 길이(탭 rename 파이프라인 완주 후)로 fresh 승계 예정. 승계 슬라이스: ① `src/i18n/` 기반(ko 테이블 + 타입세이프 t() + 보간 + 테스트) ② command 문자열 파일럿 마이그레이션 ③ 컴포넌트 스윕. 새 UI 문자열은 인라인 금지·`t()` 경유(ADR-0069 불변식).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
