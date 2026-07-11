@@ -835,6 +835,12 @@
 - **결정(ADR-0067 — ADR-0066 결정 2·5 부분 폐기):** 경로1 = slot 우클릭 → "에이전트 모니터링" → 검색 팝업 → 그 slot에 assign · 경로2 = 트리 에이전트 우클릭 "열기"(openInFocusedSlot) 유지 · 스폰 = 트리(slot 콘텐츠-채움 "생성" 제거) · 드래그 후속 · §5 단일 `assign_agent`. 거부 대안: focus-then-place(focus-steal)·arm-then-drop(비표준)·last_focused_window(우클릭이 target-explicit이라 불필요)·역할 태깅(균일성 훼손)·드래그-only(WCAG). click-to-focus는 폐기 아님(시각 선택 지시자로 재해석, 배치 역할만 벗음).
 - **게이트:** ADR `/review doc` → 구현 `/implement standard` 예정.
 
+## LLM 공간 타깃 재설계 — 논리 도면 방향·이웃·순서 핸들 우선, geometry 좌표 노출 보류 (ADR-0068, ADR-0066 결정 3 부분 폐기) (2026-07-11, master, 대화 세션)
+- **무엇:** ADR-0066 결정 3(슬롯 geometry `{x,y,w,h}` 좌표를 LLM 공간 타깃 표면으로 노출, 방향 sugar 후순위)을 구현 착수 전 재검 → 우선순위 뒤집음. "우하단→slot id"는 좌표 산술이 아니라 상대 위치·순서 판정이라 ViewManager(클라이언트 Rust)가 이미 소유한 논리 트리에서 풀림(프론트 왕복·픽셀 불필요). "백엔드=데몬" 용어 혼동도 교정(레이아웃은 클라이언트 Rust ViewManager 소유, 에이전트 호스팅 데몬과 무관).
+- **어떻게:** `/research medium`(설계-결정 모드, 수집 2갈래 병렬 Sonnet: ①터미널/WM geometry 노출[tmux·zellij·kitty·i3/sway·wezterm] ②GUI/웹 split 레이아웃[VS Code·JetBrains·CDP·allotment/mosaic/golden-layout·AX/UIA]) → 메인 grounding → Codex 적대 리뷰(FIX). Codex 적출: VS Code #94817 closed(픽셀부재 근거는 #208658)·allotment onChange px 문서 미명시·"정규 논리 완전충족"은 과장(min-size/collapse/chrome로 렌더≠비율, i3가 percent·rect 둘 다 노출). 사용자 결정: "도면만으로 충분".
+- **결정(ADR-0068 — ADR-0066 결정 3 부분 폐기):** 1차 표면 = ViewManager 논리 트리 파생 방향·이웃(neighbor)·순서(ordinal) 핸들(픽셀/DPI 무관·프론트 왕복 0·§5/ADR-0035 정합). 실측 픽셀(getBoundingClientRect)·좌표계 신설 = 보류(진짜 픽셀공간 use case 등장 시, 프론트가 versioned 관측값으로 보고·권위는 ViewManager). 거부 대안: 프론트 getBoundingClientRect 1차(권위 역전·staleness·DPI)·백엔드 투영 px(gutter/sash/min-size 모델링=렌더 중복)·geometry 좌표 1차(OSS 논리좌표는 엔진 내부사정이라 LLM 근거 약함, 실제 타깃은 심볼릭 방향/이웃)·정규화 완전충족(과장).
+- **게이트:** ADR 기록(lint clean, 인덱스 68) + step-log. 커밋·`/review doc`·구현은 미진행(사용자 선택).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
