@@ -853,6 +853,12 @@
 - **결정 기록:** 새 ADR 없음(새 결정 아니라 기존 seam 적용 범위 확장) — ADR-0053 본문에 스코프 확장 + 예외(xterm=CSS 토큰 통일 · 코드블록/TabBar 가로=raw 유지) 기록.
 - **게이트:** QA full PASS(tsc·vitest 501·코어 격리 + GUI cdp 실측: 빈-상태 중앙정렬·gutter0 오버레이·xterm 토큰·행메뉴 비클리핑). 커밋 = 이 스크롤바 공용화 커밋. `architecture-overview.md`(타 세션)·handoff 제외.
 
+## 탭 이름 변경 — 더블클릭 인라인 편집 + tab.rename LLM 제어 표면 (ADR-0057 확장, §5) (2026-07-12, master, 대화 세션)
+- **무엇:** 탭 이름(`View.name`)을 사람(탭 더블클릭 → 인라인 input, Enter 확정/Esc·빈값 취소)과 LLM(`tab.rename` command)이 같은 store 액션 `renameTab`으로 바꾼다(§5 단일 제어 표면 수렴). 백엔드 `ViewManager::rename_tab`(view-id-keyed) + `rename_tab` Tauri command(`window:tabs-updated`만 emit — name은 ViewMeta에만 있고 ViewSnapshot엔 없음, 라우팅·레이아웃 불변이라 rebuild/layout emit 없음) + generate_handler 등록. 편집 input은 `field-sizing:content`로 글자 폭에 맞춤(사용자 피드백). 기존 create/switch/close 미러라 새 ADR 없음(ADR-0057 확장).
+- **어떻게:** `/implement standard`(코더 worker-senior Opus·xhigh) → `/review code full` 2인 적대(doc-aware Opus + cross-family Codex blind). doc-aware=PASS(불변식 ADR-0057/0006/0035·§5 clean). **cross-family(Codex)가 FIX 2건 적출** — ① 인라인 `ref={el=>el?.select()}`가 매 렌더 재실행돼 다중 문자 입력 붕괴("New"→"w") ② name span 더블클릭의 선행 click이 부모 onClick=switch로 버블. → fresh 코더 재수정(useRef+useEffect[editingId] select 1회 · span onClick `e.detail>=2` stopPropagation · commitEdit idempotent 가드) → 재리뷰 양쪽 PASS. field-sizing 폭 트윅은 1줄 CSS라 인라인.
+- **검증(QA full PASS):** `cargo build` · `cargo test -p engram-dashboard-core`(169) `-protocol`(46) · `cargo fmt --check` · 코어 격리(`use tauri` 0) · `npx tsc --noEmit` · `npm test`(514) + **GUI 실측**(cdp, live): LLM `invoke('rename_tab')` → backend name·version + DOM 갱신 · 사람 더블클릭→타이핑→Enter 커밋 · Esc 취소(version 불변) · field-sizing 폭 44px("View 1")↔140px(긴 CJK) auto-size. ※src-tauri unit(manager.rs rename 테스트)은 WebView2 크래시로 실행 불가 → cargo build 컴파일 검증 + GUI 실측 대체.
+- **게이트:** 커밋 = 이 탭 rename 커밋(10 files + step-log). `architecture-overview.md`(타 세션)·handoff 제외. **후속(비차단):** blur-only commit 전용 테스트 보강(재리뷰 공통 nit).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

@@ -83,6 +83,25 @@ register({
 })
 
 register({
+  id: 'tab.rename',
+  title: '탭 이름 변경',
+  category: 'tab',
+  // ★rename(ADR-0057)★: 탭(View) 이름 교체. viewStore.renameTab 으로 라우팅(사람 더블클릭 인라인 편집 = LLM
+  //   한 표면, §5). args: view(필수 non-empty view id)·name(필수 문자열). name 은 trim 후 넘긴다 — 빈/공백은
+  //   invoke 전에 throw(백엔드로 흘려보내지 않음, TabBar 경계와 동일 정규화). view 는 백엔드 view_owner 파생이라
+  //   window 불필요.
+  run: args => {
+    const view = args?.view
+    if (typeof view !== 'string' || view.length === 0) throw new Error('[tab.rename] view(탭 id) 필요')
+    const name = args?.name
+    if (typeof name !== 'string') throw new Error('[tab.rename] name(문자열) 필요')
+    const trimmed = name.trim()
+    if (trimmed.length === 0) throw new Error('[tab.rename] name 은 공백일 수 없음')
+    return useViewStore.getState().renameTab(view, trimmed)
+  },
+})
+
+register({
   id: 'window.create',
   title: '새 창',
   category: 'window',

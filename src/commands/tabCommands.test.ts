@@ -23,6 +23,7 @@ const switchTabSpy = vi.fn(async () => undefined)
 const closeTabSpy = vi.fn(async () => undefined)
 const createWindowSpy = vi.fn(async () => 'slot-popup-1')
 const closeWindowSpy = vi.fn(async () => undefined)
+const renameTabSpy = vi.fn(async () => undefined)
 
 const origHash = window.location.hash
 
@@ -32,6 +33,7 @@ beforeEach(() => {
   closeTabSpy.mockClear()
   createWindowSpy.mockClear()
   closeWindowSpy.mockClear()
+  renameTabSpy.mockClear()
   window.location.hash = '#/' // main 창 컨텍스트
   useViewStore.setState({
     windows: {},
@@ -40,6 +42,7 @@ beforeEach(() => {
     closeTab: closeTabSpy,
     createWindow: createWindowSpy,
     closeWindow: closeWindowSpy,
+    renameTab: renameTabSpy,
   })
 })
 afterEach(() => {
@@ -96,6 +99,27 @@ describe('tabCommands 라우팅 (window 해소)', () => {
   it('tab.close(view 미확정 — 그 창 상태 없음) → throw(닫을 탭 미확정)', () => {
     useViewStore.setState({ windows: {} })
     expect(() => run('tab.close', { window: 'slot-popup-9' })).toThrow()
+  })
+
+  // ── ★tab.rename(ADR-0057)★: view(필수)·name(trim, 공백거부) 검증 후 renameTab 라우팅 ──
+  it('tab.rename(view/name 지정) → renameTab(view, trim된 name)', () => {
+    run('tab.rename', { view: 'v7', name: '  My Tab  ' })
+    expect(renameTabSpy).toHaveBeenCalledWith('v7', 'My Tab')
+  })
+
+  it('tab.rename(view 누락) → throw(renameTab 안 부름)', () => {
+    expect(() => run('tab.rename', { name: 'x' })).toThrow()
+    expect(renameTabSpy).not.toHaveBeenCalled()
+  })
+
+  it('tab.rename(name 누락) → throw', () => {
+    expect(() => run('tab.rename', { view: 'v1' })).toThrow()
+    expect(renameTabSpy).not.toHaveBeenCalled()
+  })
+
+  it('tab.rename(공백 name) → throw(invoke 전 loud fail)', () => {
+    expect(() => run('tab.rename', { view: 'v1', name: '   ' })).toThrow()
+    expect(renameTabSpy).not.toHaveBeenCalled()
   })
 
   it('window.create → createWindow()', () => {

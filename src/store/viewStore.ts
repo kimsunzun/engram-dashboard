@@ -84,6 +84,13 @@ interface ViewState {
   closeTab: (window: string, viewId: string) => Promise<void>
   /** 창 `window` 의 활성 탭 변경(그 창만). */
   switchTab: (window: string, viewId: string) => Promise<void>
+  /**
+   * 탭(View) 이름 교체. view_id 전역 유니크라 window 는 안 받는다(백엔드 view_owner 파생). 백엔드
+   * rename_tab 을 invoke 하고 실제 이름 반영은 window:tabs-updated emit 으로만(낙관 갱신 X — 이름 권위
+   * = src-tauri, ADR-0035). §5 단일 표면: 사람 더블클릭 인라인 편집(TabBar)·LLM(__engramCmd → tab.rename)이
+   * 같은 이 핸들로 수렴한다. 이름 정규화(trim/공백거부)는 호출부 경계(TabBar·tab.rename)가 담당.
+   */
+  renameTab: (viewId: string, name: string) => Promise<void>
   /** 빈 새 창(빈 탭 1개) 생성 → 새 창 label 반환(D-6). */
   createWindow: () => Promise<string>
   /** 창 `window` 통째 닫기(main 금지). */
@@ -154,6 +161,9 @@ export const useViewStore = create<ViewState>((set, get) => ({
   closeWindow: window => invoke<void>('close_window', { window }),
 
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
+  // ADR-0057/0035: 낙관 갱신 X — invoke 만 부르고 이름은 window:tabs-updated emit 으로만 반영(백엔드 권위).
+  //   §5 단일 표면(사람 더블클릭 + LLM tab.rename 이 여기로 수렴). trim/공백거부는 호출부(TabBar·tab.rename).
+  renameTab: (viewId, name) => invoke<void>('rename_tab', { viewId, name }),
   // ADR-0066: 낙관 갱신 X — invoke 만 부르고 링은 layout:updated emit 으로만 갱신(백엔드 권위, ADR-0035).
   focusSlot: (viewId, slotId) => invoke<void>('focus_slot', { viewId, slotId }),
   closeSlot: (viewId, slotId) => {

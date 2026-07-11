@@ -111,6 +111,11 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(invokeMock).toHaveBeenCalledWith('switch_tab', { window: 'main', view: 'v2' })
   })
 
+  it('renameTab → rename_tab invoke({ viewId, name })', async () => {
+    await useViewStore.getState().renameTab('v1', 'New Name')
+    expect(invokeMock).toHaveBeenCalledWith('rename_tab', { viewId: 'v1', name: 'New Name' })
+  })
+
   it('createWindow/closeWindow → 대응 invoke', async () => {
     invokeMock.mockResolvedValueOnce('slot-popup-3')
     const label = await useViewStore.getState().createWindow()

@@ -43,6 +43,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const switchTab = useViewStore(s => s.switchTab)
   const createTab = useViewStore(s => s.createTab)
   const closeTab = useViewStore(s => s.closeTab)
+  const renameTab = useViewStore(s => s.renameTab)
 
   // 자가닫힘 재진입 가드 — 0탭 신호가 두 번 와도 close 를 한 번만 시도(idempotent, §5-2/G2).
   const closingRef = useRef(false)
@@ -140,6 +141,9 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
         onSwitch={viewId => void switchTab(label, viewId).catch(e => console.error('[switchTab]', e))}
         onCreate={() => void createTab(label).catch(e => console.error('[createTab]', e))}
         onClose={viewId => void closeTab(label, viewId).catch(e => console.error('[closeTab]', e))}
+        onRename={(viewId, name) =>
+          void renameTab(viewId, name).catch(e => console.error('[renameTab]', e))
+        }
       />
       {/* keep-alive 슬롯 캔버스 영역 — 모든 탭 마운트, 활성만 표시(display). */}
       <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>

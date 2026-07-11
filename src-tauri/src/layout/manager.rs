@@ -431,6 +431,18 @@ impl ViewManager {
         Ok(())
     }
 
+    /// View 이름(탭 라벨) 교체. view-id-키(name 은 View 속성 — split_slot 과 동형으로 소속 창은 view_owner
+    /// 파생). ★이름 정규화는 프론트 경계 몫★: 여기선 받은 문자열을 그대로 저장한다(trim/공백거부는 사람 UI·
+    /// LLM command 어댑터가 invoke 전에 처리). invalid view_id → Err(ViewNotFound) no-op(version 안 올림).
+    /// 이름은 ViewMeta.name 에만 반영되므로 command 레이어는 window:tabs-updated 만 emit(layout 스냅샷엔
+    /// name 없음 — 라우팅·트리 불변). // ADR-0057
+    pub fn rename_tab(&mut self, view_id: Uuid, name: String) -> Result<(), LayoutError> {
+        let v = self.view_mut(view_id)?;
+        v.name = name;
+        self.bump_version();
+        Ok(())
+    }
+
     /// view 안 slot_id 슬롯을 닫음(형제 승격, root 슬롯이면 빈 슬롯 리셋). focus 보정.
     /// invalid view_id/slot_id → no-op + Err.
     pub fn close_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
@@ -1108,6 +1120,37 @@ mod tests {
             before,
             "실패 시 focused_slot_id 불변"
         );
+        assert_eq!(mgr.version, ver, "실패 시 version 불변(no-op)");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn rename_tab_renames_and_bumps_version() {
+        // 새 탭 생성 후 이름 교체 → View.name 반영 + version +1. // ADR-0057
+        let mut mgr = ViewManager::new();
+        let view_id = mgr
+            .create_tab(MAIN_WINDOW_LABEL, Some("Old".to_string()))
+            .unwrap();
+        let ver = mgr.version;
+        mgr.rename_tab(view_id, "New Name".to_string()).unwrap();
+        assert_eq!(
+            mgr.views.get(&view_id).unwrap().name,
+            "New Name",
+            "View.name 이 교체됨"
+        );
+        assert_eq!(mgr.version, ver + 1, "성공 시 version +1");
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn rename_tab_invalid_view_is_err_noop() {
+        // 없는 view_id → ViewNotFound + version 불변(no-op — 부분변경 금지). // ADR-0057
+        let mut mgr = ViewManager::new();
+        let ver = mgr.version;
+        assert!(matches!(
+            mgr.rename_tab(Uuid::new_v4(), "X".to_string()).unwrap_err(),
+            LayoutError::ViewNotFound(_)
+        ));
         assert_eq!(mgr.version, ver, "실패 시 version 불변(no-op)");
         assert_invariants(&mgr);
     }

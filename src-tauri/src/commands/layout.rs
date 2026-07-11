@@ -325,6 +325,38 @@ pub fn focus_slot(
     Ok(())
 }
 
+/// View 이름(탭 라벨) 교체 — §5 LLM 제어 표면(사람 더블클릭 인라인 편집 ↔ LLM `tab.rename` 이 같은 이
+/// 핸들을 흔든다). ★백엔드 권위(ADR-0035)★: 이름은 백엔드 ViewManager 가 소유하고, 프론트는 emit 으로만
+/// 반영한다(낙관 프론트 갱신 X). 소속 창은 view_owner 파생(split_slot 과 동형 — view-id-키).
+///
+/// ★탭 페이로드만 emit★: 이름은 `ViewMeta.name`(= window:tabs-updated 페이로드)에만 있고 `ViewSnapshot`
+/// (layout:updated)엔 없다 → layout 스냅샷 emit 안 한다. 그리고 rename 은 어느 슬롯이 어떤 agent 를
+/// 보는지(=출력 라우팅)도, 레이아웃 트리도 바꾸지 않는다 → `router.rebuild`/구독 델타도 필요 없다
+/// (focus_slot 의 "라우팅 불변" 주석과 동형이나, focus 는 layout 을 emit 하는 반면 rename 은 tabs 만).
+/// 그래서 router/client State 도 안 받는다(get_view/focus_slot 처럼 미사용 State 생략). 락→변형→해제→emit
+/// 순서(ADR-0006)는 형제 command 와 동형. invalid view_id → Err(no-op).
+// ADR-0057
+#[tauri::command]
+pub fn rename_tab(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    view_id: Uuid,
+    name: String,
+) -> Result<(), String> {
+    let tabs = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        mgr.rename_tab(view_id, name).map_err(|e| e.to_string())?;
+        // 소속 창의 탭바만 갱신(이름은 ViewMeta.name 에만 — view_owner 파생). layout 스냅샷·rebuild 없음(위 주석).
+        mgr.owner_of(view_id)
+            .cloned()
+            .and_then(|label| tabs_payload(&mgr, &label))
+    }; // ← 락 드롭
+    if let Some(tabs) = tabs {
+        emit_window_tabs(&app, &tabs); // ★emit 은 락 밖(ADR-0006)★ — window:tabs-updated 만.
+    }
+    Ok(())
+}
+
 /// view 안 slot_id 슬롯에 agent_id(참조 문자열) 배정. ★데몬에 실재 검증 안 함(ADR-0035/0006).
 /// 같은 agent 가 다른 View 에도 배정될 수 있음(불변식 5). invalid → Err(no-op).
 #[tauri::command]
