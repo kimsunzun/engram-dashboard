@@ -1,6 +1,6 @@
 # ADR-0062: AgentList MVP 상태 표현 = 5-glyph 어휘 / 현 백엔드 3-state 매핑
 
-- 상태: 확정 (2026-07-10, 근거: pre-PRD 사용자 결정(5-glyph 어휘) + grounding으로 확인한 실제 status enum)
+- 상태: 확정 (2026-07-10, 근거: pre-PRD 사용자 결정(5-glyph 어휘) + grounding으로 확인한 실제 status enum) · 색 결정 부분 개정 by ADR-0075(색 허용·e-ink 중립화)
 - 관련: CLAUDE.md §5 · ADR-0005(상태 알림 분담) · ADR-0002/0030(capability) · `crates/engram-dashboard-core/src/agent/*`(AgentStatus enum) · `src/components/agent/AgentList.tsx`(statusGlyph) · step-log "에이전트 트리·프리셋"
 
 ## 맥락

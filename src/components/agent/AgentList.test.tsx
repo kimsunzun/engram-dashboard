@@ -72,7 +72,7 @@ vi.mock('../../store/viewStore', () => ({
   selectView: () => selectViewMock(),
 }))
 
-import AgentList, { statusGlyph } from './AgentList'
+import AgentList, { statusGlyph, statusGlyphColor } from './AgentList'
 import { useAgentStore } from '../../store/agentStore'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 import type { LayoutNode } from '../../api/layoutTypes'
@@ -140,6 +140,21 @@ describe('statusGlyph (pure, 전 분기)', () => {
     const inputs = ['Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', 'unknown', '']
     for (const s of inputs) expect(statusGlyph(s)).not.toBe('◐')
   })
+})
+
+// ── statusGlyphColor: 색 부가(pure, ADR-0062 색 개정) ─────────────────────────
+// Running 만 green(--status-running theme var), 그 외 전부 muted. 색은 변수만(리터럴 금지) — e-ink 는
+// theme.css 에서 --status-running 을 var(--text-muted) 로 중립화하므로 여기 로직은 테마 무관 단일.
+describe('statusGlyphColor (pure)', () => {
+  it('Running → var(--status-running) (활성 green)', () =>
+    expect(statusGlyphColor('Running')).toBe('var(--status-running)'))
+  it('Exited → var(--text-muted)', () => expect(statusGlyphColor('Exited')).toBe('var(--text-muted)'))
+  it('Killed → var(--text-muted)', () => expect(statusGlyphColor('Killed')).toBe('var(--text-muted)'))
+  it('Failed → var(--text-muted)', () => expect(statusGlyphColor('Failed')).toBe('var(--text-muted)'))
+  it('Exiting → var(--text-muted)', () => expect(statusGlyphColor('Exiting')).toBe('var(--text-muted)'))
+  it('Reserved → var(--text-muted)', () => expect(statusGlyphColor('Reserved')).toBe('var(--text-muted)'))
+  it('미지 status → var(--text-muted) (default)', () =>
+    expect(statusGlyphColor('???')).toBe('var(--text-muted)'))
 })
 
 // ── 트리 렌더(react-arborist, ADR-0072) ────────────────────────────────────────
