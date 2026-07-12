@@ -2,15 +2,16 @@
 //   라우팅만 한다(새 상태 경로 0). import 부수효과로 등록되므로 단일 매니페스트(contributions.ts)에서
 //   side-effect import 한다. 검증: window.__engramCmd.run('agent.spawn',{cwd:'C:/work'}).
 //
-// ★ADR-0064 슬롯 메뉴 기여 co-location★: agentlist.createAgent(폴더 다이얼로그 → agent.spawn)를 등록하고
-//   agent_list 슬롯 메뉴에 기여한다 — 트리(agent_list) 콘텐츠 지식이 이 모듈에 응집(공통은 '*'이 소유).
+// ★ADR-0064 슬롯 메뉴 기여 co-location★: agentlist.createAgent(폴더 다이얼로그 → reserved claude 프로필 등록)를
+//   등록하고 agent_list 슬롯 메뉴에 기여한다 — 트리(agent_list) 콘텐츠 지식이 이 모듈에 응집(공통은 '*'이 소유).
 
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { t } from '../i18n'
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
-import { register, run } from './registry'
+import { refreshProfiles } from '../store/eventBus'
+import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
 
 register({
@@ -74,15 +75,29 @@ register({
   title: t('agent.create'),
   category: 'agent',
   // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴의 "에이전트 생성" — 네이티브 폴더 다이얼로그로 cwd 를 고른
-  //   뒤 agent.spawn({cwd}) 로 라우팅해 트리에 새 에이전트를 추가한다(특정 슬롯 배정 아님 — 트리 전역 spawn).
-  //   ★이것이 옛 AgentList 인-컴포넌트 bg 픽커를 대체★: 프리셋-리스트 기반 spawn 은 이 흐름에서 빠진다
-  //   (후속으로 프리셋 행 액션 "이 프리셋으로 생성" 추가 예정, ADR-0064). 취소(null)면 no-op. run 은 미지
-  //   preset·빈 cwd 등에 동기 throw 할 수 있어 async 로 감싸 회수부(cdp/메뉴)가 await·catch 가능하게 한다.
+  //   뒤 claude reserved(비활성) 프로필을 등록한다(스폰하지 않음). 트리에 예약 노드로 뜨고, 활성화(더블클릭/
+  //   우클릭 활성화 → spawnProfile)에서 비로소 claude 를 spawn 한다.
+  // ★동작 변경(WHY)★: 옛 흐름은 agent.spawn({cwd}) → SpawnByCwd 로 *즉시* 셸(cmd.exe) 에이전트를 띄웠다
+  //   (kind='running', claude 아님·예약 아님) — 사용자 확정 의도(생성=claude reserved, 활성화=claude spawn)와
+  //   어긋났다. 그래서 여기서 즉시 스폰 대신 createClaudeProfile 로 등록만 한다. agent.spawn 원시명령은
+  //   그대로 둔다(LLM/cdp 즉시-스폰 프리미티브로 유효 — 별개 관심사).
+  //   ★옛 AgentList 인-컴포넌트 bg 픽커를 대체★: 프리셋-리스트 기반 spawn 은 이 흐름에서 빠진다(후속으로
+  //   프리셋 행 액션 "이 프리셋으로 생성" 추가 예정, ADR-0064). 취소(null)면 no-op. async 로 감싸 회수부
+  //   (cdp/메뉴)가 await·catch 가능. 인자: name=cwd(옛 SpawnByCwd 관례 — 트리 표시명은 cwd basename 파생이라
+  //   name 은 표시가 아님), extraArgs/env=[], autoRestore=false, outputFormat='StreamJson'(헤드리스
+  //   stream-json — RichSlot 구조화 렌더; resume 지원됨, ADR-0044 후속 완료 spike-verified).
+  //   예약 노드 반영은 CreateProfile 뒤이은 ProfileListUpdated broadcast → store.setProfiles(eventBus)
+  //   + 유실 대비 생성 직후 명시 refetch(run body 아래 — broadcast 단독 의존 아님).
   run: async () => {
     const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
     const cwd = typeof picked === 'string' ? picked : null
     if (!cwd) return // 취소 — no-op
-    return run('agent.spawn', { cwd })
+    const profile = await agentClient.createClaudeProfile(cwd, cwd, [], [], false, 'StreamJson')
+    // broadcast 는 유실 가능(ws 큐 포화, ws.rs:145)·구독이 레이아웃 초기화 이후(eventBus.ts)라, 생성 직후
+    // 명시 refetch 로 예약 노드 표시를 보장한다(activateReserved 의 .then(refreshProfiles) 와 동형
+    // belt-and-suspenders). 생성 프로필은 그대로 반환(회수부 cdp/메뉴가 계속 사용 가능).
+    await refreshProfiles()
+    return profile
   },
 })
 

@@ -12,13 +12,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const clientMock = vi.hoisted(() => ({
   spawnAgent: vi.fn(async () => ({ id: 'new-agent' })),
   renameProfile: vi.fn(async () => undefined),
+  createClaudeProfile: vi.fn(async () => ({ id: 'new-profile' })),
+  // refreshProfiles(eventBus) 가 부르는 listProfiles — 생성 직후 store/tree 반영 검증용. 기본 []
+  //   (테스트별로 mockResolvedValueOnce 로 생성 프로필을 실어 반환).
+  listProfiles: vi.fn(async () => [] as unknown[]),
 }))
 vi.mock('../api/clientFactory', () => ({
   agentClient: {
     spawnAgent: (...args: unknown[]) => clientMock.spawnAgent(...(args as [])),
     renameProfile: (...args: unknown[]) => clientMock.renameProfile(...(args as [])),
+    createClaudeProfile: (...args: unknown[]) => clientMock.createClaudeProfile(...(args as [])),
+    listProfiles: (...args: unknown[]) => clientMock.listProfiles(...(args as [])),
   },
   getAgentClient: vi.fn(),
+}))
+
+// agentlist.createAgent 는 폴더 다이얼로그(open)로 cwd 를 고른다 — 픽/취소를 테스트별로 제어.
+const dialogMock = vi.hoisted(() => ({ open: vi.fn(async () => null as string | null) }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: (...args: unknown[]) => dialogMock.open(...(args as [])),
 }))
 
 import './agentCommands' // side-effect register
@@ -28,10 +40,13 @@ import { useAgentStore } from '../store/agentStore'
 beforeEach(() => {
   clientMock.spawnAgent.mockClear()
   clientMock.renameProfile.mockClear()
-  useAgentStore.setState({ presets: [] })
+  clientMock.createClaudeProfile.mockClear()
+  clientMock.listProfiles.mockClear()
+  dialogMock.open.mockReset()
+  useAgentStore.setState({ presets: [], profiles: [] })
 })
 afterEach(() => {
-  useAgentStore.setState({ presets: [] })
+  useAgentStore.setState({ presets: [], profiles: [] })
 })
 
 describe('agent.spawn 라우팅', () => {
@@ -86,5 +101,41 @@ describe('agent.rename 라우팅', () => {
   it('빈 id → throw(조용한 no-op 금지)', () => {
     expect(() => run('agent.rename', { name: 'x' })).toThrow(/id 가 비어 있음/)
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
+  })
+})
+
+// ── agentlist.createAgent 어댑터(ADR-0064) ────────────────────────────────────────
+// ★동작 변경★: 옛 즉시 셸(cmd.exe) 스폰(agent.spawn) → 이제 claude reserved(비활성) 프로필 등록.
+//   폴더 다이얼로그로 cwd 를 고른 뒤 createClaudeProfile(name=cwd, [], [], autoRestore=false, 'StreamJson').
+//   활성화(더블클릭/우클릭)에서 비로소 claude 를 spawn 한다.
+describe('agentlist.createAgent 라우팅', () => {
+  // 생성 프로필의 최소 형태(AgentProfile) — refreshProfiles → setProfiles 로 store/tree 에 실릴 값.
+  const createdProfile = { id: 'p-created', cwd: 'C:/work/engram', display_name: null }
+
+  it('폴더 픽 → createClaudeProfile(reserved claude) 로 라우팅 + 생성 직후 store 반영(refetch)', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    // refreshProfiles(eventBus) 가 부르는 listProfiles 가 생성 프로필을 담아 돌려준다 → setProfiles 로 store 반영.
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    await run('agentlist.createAgent', {})
+
+    expect(clientMock.createClaudeProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'StreamJson',
+    )
+    // ★핵심 FIX 검증★: broadcast 유실에 대비한 명시 refetch 로 예약 노드가 store(=트리 소스)에 실린다.
+    expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
+    expect(useAgentStore.getState().profiles).toEqual([createdProfile])
+    // 옛 즉시 스폰 경로는 더 이상 타지 않는다.
+    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+  })
+
+  it('취소(다이얼로그 null) → no-op(클라이언트·refetch 미호출)', async () => {
+    dialogMock.open.mockResolvedValueOnce(null)
+    await run('agentlist.createAgent', {})
+    expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
+    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+    // 취소면 refreshProfiles(→listProfiles)도 타지 않고 store 는 그대로.
+    expect(clientMock.listProfiles).not.toHaveBeenCalled()
+    expect(useAgentStore.getState().profiles).toEqual([])
   })
 })
