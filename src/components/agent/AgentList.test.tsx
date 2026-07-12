@@ -52,18 +52,30 @@ vi.mock('../../store/eventBus', () => ({ refreshProfiles: refreshProfilesMock })
 // viewStore 는 assignAgent(열기 경로)만 참조 — getState 로 접근하므로 실제 store 를 얕게 stub.
 //   assignAgent 는 hoisted 한 곳에 두고 getState/셀렉터가 동일 인스턴스를 반환하게 한다(호출 검증용).
 const assignAgentMock = vi.hoisted(() => vi.fn(async () => undefined))
+// selectView 는 CachedView({layout, focusedSlotId})를 반환한다 — openInFocusedSlot 이 selectOpenTarget
+//   (layout, focusedSlotId)로 대상 슬롯을 고른다. 기본은 포커스 슬롯('slot-1')을 empty 콘텐츠 슬롯으로 둬
+//   기본 경로(포커스 슬롯 배정)가 성립하게 한다. 제어 슬롯/빈 슬롯 없음 엣지는 안전망 스위트가
+//   selectViewMock 반환을 갈아끼워 검증한다(hoisted 라 per-test 로 변경 가능).
+const selectViewMock = vi.hoisted(() =>
+  vi.fn<() => { layout: LayoutNode; focusedSlotId: string | null } | null>(() => ({
+    layout: { type: 'slot', id: 'slot-1', content: { type: 'empty' } },
+    focusedSlotId: 'slot-1',
+  })),
+)
+const currentViewIdMock = vi.hoisted(() => vi.fn(() => 'main-view' as string | null))
 vi.mock('../../store/viewStore', () => ({
   useViewStore: Object.assign(
     (sel: (s: unknown) => unknown) => sel({ assignAgent: assignAgentMock }),
     { getState: () => ({ assignAgent: assignAgentMock }) },
   ),
-  currentViewId: () => 'main-view',
-  selectView: () => ({ focusedSlotId: 'slot-1' }),
+  currentViewId: () => currentViewIdMock(),
+  selectView: () => selectViewMock(),
 }))
 
 import AgentList, { statusGlyph } from './AgentList'
 import { useAgentStore } from '../../store/agentStore'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
+import type { LayoutNode } from '../../api/layoutTypes'
 
 const caps = (): Capabilities => ({
   input: { raw: true, message: false, attachment: false },
@@ -100,6 +112,14 @@ beforeEach(() => {
   clientMock.reparentProfile.mockClear()
   refreshProfilesMock.mockClear()
   assignAgentMock.mockClear()
+  // 기본 selectView/currentViewId 로 리셋(안전망 스위트가 per-test 로 갈아끼운 것 격리).
+  selectViewMock.mockReset()
+  selectViewMock.mockReturnValue({
+    layout: { type: 'slot', id: 'slot-1', content: { type: 'empty' } },
+    focusedSlotId: 'slot-1',
+  })
+  currentViewIdMock.mockReset()
+  currentViewIdMock.mockReturnValue('main-view')
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
 })
 afterEach(() => {
@@ -358,6 +378,62 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     fireEvent.click(screen.getByText('열기')) // 2nd — in-flight, busyRef 차단
     expect(assignAgentMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── ★"열기" 안전망: 제어 슬롯 포커스 제외(selectOpenTarget 통합, ADR-0066 정제)★ ──────────────
+//   click-to-focus 게이트가 앞으로는 포커스를 제어 슬롯에 안 앉히지만, 기존/엣지 백엔드 상태(이미 트리
+//   슬롯이 포커스됐거나 focus=null)에서도 "열기"가 트리/팔레트를 덮지 않고 빈 슬롯으로 폴백해야 한다.
+//   빈 슬롯도 없으면 배정 안 함(실패 인라인, 클로버 금지).
+describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)', () => {
+  function openRow(agentId: string): void {
+    fireEvent.contextMenu(document.querySelector(`[data-agent-row="${agentId}"]`) as HTMLElement)
+    fireEvent.click(screen.getByText('열기'))
+  }
+
+  it('포커스가 트리(agent_list) + 빈 슬롯 존재 → 트리 대신 빈 슬롯으로 assignAgent', () => {
+    // 포커스 = 트리 슬롯(제어). 오른쪽에 empty 슬롯 존재 → selectOpenTarget 이 empty 로 폴백.
+    selectViewMock.mockReturnValue({
+      layout: {
+        type: 'split', dir: 'horizontal', ratio: 0.3,
+        a: { type: 'slot', id: 'tree', content: { type: 'agent_list' } },
+        b: { type: 'slot', id: 'empty', content: { type: 'empty' } },
+      },
+      focusedSlotId: 'tree', // 트리가 포커스된 엣지 상태
+    })
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    openRow('a1')
+    expect(assignAgentMock).toHaveBeenCalledWith('main-view', 'empty', 'a1') // 트리(tree) 아님
+  })
+
+  it('포커스가 팔레트(preset_palette) + 빈 슬롯 없음 → assignAgent 미호출 + 실패 인라인 배지', () => {
+    // 포커스 = 팔레트(제어), 나머지도 agent 슬롯 → 빈 슬롯 없음 → null → 실패(클로버 금지).
+    selectViewMock.mockReturnValue({
+      layout: {
+        type: 'split', dir: 'horizontal', ratio: 0.5,
+        a: { type: 'slot', id: 'palette', content: { type: 'preset_palette' } },
+        b: { type: 'slot', id: 'busy', content: { type: 'agent', agent_id: 'other' } },
+      },
+      focusedSlotId: 'palette',
+    })
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    openRow('a1')
+    expect(assignAgentMock).not.toHaveBeenCalled()
+    // 실패 인라인 배지('실패')가 그 행에 뜬다(openFailedNoEmptySlot → setError → rowFailedBadge).
+    const row = document.querySelector('[data-agent-row="a1"]') as HTMLElement
+    expect(row.textContent).toContain('실패')
+  })
+
+  it('활성 뷰/캐시 부재(selectView=null) → assignAgent 미호출 + 실패 인라인', () => {
+    selectViewMock.mockReturnValue(null)
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    openRow('a1')
+    expect(assignAgentMock).not.toHaveBeenCalled()
+    const row = document.querySelector('[data-agent-row="a1"]') as HTMLElement
+    expect(row.textContent).toContain('실패')
   })
 })
 

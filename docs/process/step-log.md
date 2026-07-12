@@ -931,6 +931,15 @@
 - **드리프트 자기보고(feedback):** qa 바인딩 standard가 bare `cargo test`인데 프로젝트 do-not(WebView2 크래시)라 member-scoped로 대체(정본 우선). 코어격리 `rg "use tauri"`가 게이트 문서 주석에 false-positive. 둘 다 바인딩 정제 여지.
 - **게이트:** 커밋 = 프론트 4파일(AgentList·mergeTreeNodes + 테스트 2) + 이 step-log. **defer 잔여:** #2(로드 normalize)·#3(dedup 무효) + C1 defer 3건(오케스트레이션 때). Spawning 글리프(신호 생기면).
 
+## 제어 슬롯(트리·팔레트) 포커스 제외 — "열기"가 트리 덮는 버그 수정 (2026-07-13, master, 승계 세션) · ADR-0073
+- **무엇:** 사용자 보고 버그 — 좌상단 에이전트 트리 노드 우클릭 "열기"를 누르면 트리가 에이전트 터미널로 덮이고 빈 중앙 슬롯은 그대로. 라이브 DOM으로 재현·근본원인 확정: 슬롯 pane click-to-focus(ADR-0066, 버블 허용)라 트리 노드 좌클릭이 트리 슬롯을 focused로 만들고, 우클릭 "열기"(우클릭은 포커스 안 건드림·ADR-0067)가 그 트리 슬롯(`focusedSlotId`)에 배정 → 트리 클로버. 제 push한 드래그 가드(C2)와 무관한 선존 UX 버그.
+- **결정(사용자):** 제어 슬롯(트리/팔레트)을 포커스 개념에서 제외 — 프론트만. "그냥 프론트만 막으면 됨, 백엔드 트리/프리셋 구성은 나중에." (ADR-0073)
+- **수정(프론트 전용):** ① `ViewLayoutRenderer` onClick click-to-focus를 **allowlist**로(콘텐츠 슬롯 empty/agent만 focusSlot, 제어·미래 variant 스킵 — 판별기 `isContentSlot` 공유). ② `selectOpenTarget(layout, focusedSlotId)` 순수 함수 분리(신규): 포커스가 콘텐츠 슬롯이면 그 슬롯 → 아니면 첫 empty → 없으면 null(실패 토스트 `openFailedNoEmptySlot`). 구조적으로 제어 슬롯 배제 → 백엔드 포커스 상태 무관하게 클로버 불가.
+- **어떻게:** 설계 3턴(사용자와 근본원인·A(열기필터)vs B(포커스제외) 논의 → B 채택, 프론트만) → 코더(worker-senior) → `/review code full` 2인 다른 family: doc-aware(worker-senior)=FIX(백엔드 강제=defer·테스트=이미존재) · cross-family(Codex high)=PASS(nit: allowlist·재귀). FIX 반영(코더 2차 — denylist→allowlist `isContentSlot` 공유). 取합 FIX→반영.
+- **검증(qa full PASS — 이번엔 실 UX 실측):** Rust 0파일(프론트 전용) · `npx tsc --noEmit` · `npm test`(vitest **598**) · **GUI 실측(cdp, 실제 DOM)**: 트리 실클릭→트리 슬롯 `focused:false`(게이트 동작) · 우클릭→"열기" 실클릭→트리 `treeStillPresent:true`(미클로버). 지난 C2 qa의 "invoke smoke" 과청구를 사용자가 지적 → 이번엔 실 클릭·컨텍스트 메뉴·메뉴 클릭까지 몰아 검증.
+- **열화 라벨(정직):** 프론트만이라 **백엔드 `fixup_focus`가 기본 레이아웃(첫 슬롯=AgentList)에서 트리를 focused로 emit하면 포커스 링이 트리에 뜨는 시각 잔존** — 동작(클로버)엔 무영향(selectOpenTarget이 차단), 완전 정합은 백엔드 강제(사용자 defer). 라이브 관측된 건 아니고 코드상 가능성(리뷰어 지적).
+- **게이트:** ADR-0073 신설 + 인덱스(lint error 0) + 이 step-log. 커밋 = 프론트 4(ViewLayoutRenderer·AgentList·selectOpenTarget·ko.ts) + 테스트 3 + ADR + step-log. **후속(사용자 메모):** 백엔드 에이전트 트리/프리셋 구성 방식 재검토(그때 focus 강제도 함께).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

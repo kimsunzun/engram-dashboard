@@ -78,6 +78,7 @@ export const ko = {
     activateFailed: '활성화 실패: {err}', // spawnProfile 실패.
     openFailed: '열기 실패: {err}', // assignAgent 실패.
     openFailedNoSlot: '열기 실패: 활성 뷰/포커스 슬롯 없음', // 활성 뷰/포커스 슬롯 부재로 조기 실패(보간 없음, openFailed 와 별개 텍스트).
+    openFailedNoEmptySlot: '열기 실패: 빈 슬롯이 없습니다 — 슬롯을 비우거나 새로 분할하세요', // 포커스가 제어 슬롯(트리/팔레트)이고 빈 슬롯도 없어 배정할 곳이 없음(제어·타 에이전트 슬롯 임의 클로버 금지).
     killFailed: '종료 실패: {err}', // killAgent 실패.
     cancelReservedFailed: '삭제 실패: {err}', // deleteProfile 실패 — rowCancelReserved('삭제')와 어휘 통일.
     renameFailed: '이름 변경 실패: {err}', // renameProfile 실패(ADR-0061 리치화).

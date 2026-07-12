@@ -457,6 +457,58 @@ describe('ViewLayoutRenderer — split 분기', () => {
   }
 })
 
+// ── ★click-to-focus 게이트(제어 슬롯 포커스 제외 — ADR-0066 정제)★ ─────────────────────────────
+// ★이 스위트가 막는 것★: 트리(agent_list)·팔레트(preset_palette) 슬롯 pane 클릭이 focusSlot 을 부르면
+// 안 된다(작업 슬롯이 아니라 포커스 대상 아님). 이어지는 우클릭 "열기"가 그 제어 슬롯을 대상으로 잡아
+// 트리를 에이전트 터미널로 덮어쓰던 선존 UX 버그의 뿌리. 콘텐츠 슬롯(empty/agent)은 기존대로 focusSlot 호출.
+//
+// 전략: real viewStore 에 focusSlot spy 를 주입하고(사람 클릭 = LLM = 단일 표면), windows["main"].active 를
+//   채워 targetViewId 폴백이 성립하게 한다(컨텍스트 메뉴 스위트와 동형 세팅).
+describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커스 제외)', () => {
+  const FOCUS_VIEW = 'focus-view-1'
+  const focusSlotSpy = vi.fn(async () => undefined)
+  const origHash = window.location.hash
+
+  beforeEach(() => {
+    focusSlotSpy.mockClear()
+    window.location.hash = '#/'
+    useViewStore.setState({
+      windows: { main: { tabs: [{ id: FOCUS_VIEW, name: 'View' }], active: FOCUS_VIEW, version: 1 } },
+      focusSlot: focusSlotSpy,
+    })
+  })
+  afterEach(() => {
+    window.location.hash = origHash
+  })
+
+  function clickSlot(content: SlotContent): void {
+    render(<ViewLayoutRenderer node={contentSlotNode('s1', content)} focusedSlotId={null} />)
+    fireEvent.click(document.querySelector('[data-slot-id="s1"]') as HTMLElement)
+  }
+
+  it('empty 슬롯 클릭 → focusSlot(viewId, slotId) 호출(콘텐츠 슬롯 = 포커스 대상)', () => {
+    clickSlot({ type: 'empty' })
+    expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
+  })
+
+  it('agent 슬롯 클릭 → focusSlot 호출(콘텐츠 슬롯)', () => {
+    seedAgents(agentInfo('a-focus', false)) // caps 도착(무해 — 게이트는 content.type 만 본다)
+    render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent', agent_id: 'a-focus' })} focusedSlotId={null} />)
+    fireEvent.click(document.querySelector('[data-slot-id="s1"]') as HTMLElement)
+    expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
+  })
+
+  it('agent_list(트리) 슬롯 클릭 → focusSlot 미호출(제어 슬롯 = 포커스 제외)', () => {
+    clickSlot({ type: 'agent_list' })
+    expect(focusSlotSpy).not.toHaveBeenCalled()
+  })
+
+  it('preset_palette(팔레트) 슬롯 클릭 → focusSlot 미호출(제어 슬롯 = 포커스 제외)', () => {
+    clickSlot({ type: 'preset_palette' })
+    expect(focusSlotSpy).not.toHaveBeenCalled()
+  })
+})
+
 // ── ★우클릭 통합 컨텍스트 메뉴(§5, ADR-0064)★ ─────────────────────────────────────────────────
 // ★이 스위트가 실제로 막는 것★: 캔버스 슬롯 우클릭 → 통합 SlotContextMenu 마운트(buildSlotMenu(content.type)
 // 산출) + 각 항목 클릭이 그 command.run(ctx) 를 통해 viewStore/agentClient 로 (viewId, slotId, agentId)를
