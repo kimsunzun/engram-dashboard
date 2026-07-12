@@ -230,7 +230,12 @@ export default function AgentList() {
   const cancelEdit = () => setEditingId(null)
   // 확정: trim 후 비었거나 현재 표시명과 같으면 no-op(revert), 아니면 renameProfile. 어느 경우든 편집 종료.
   // ★멱등★: editingId 가 이 행이 아니면 즉시 return — Enter 가 언마운트→blur→commitEdit 재발화를 막는다(TabBar 동형).
-  //   동기 중복 발화 차단은 beginInFlight(busyRef). rename 은 백엔드 persist → ProfileListUpdated broadcast 반영(낙관 X).
+  //   동기 중복 발화 차단은 beginInFlight(busyRef).
+  // ★성공 시 refreshProfiles() — spawnProfile/deleteProfile 과 대칭★: 표시명 반영은 원칙적으로 백엔드
+  //   RenameProfile → ProfileListUpdated broadcast 로 온다(낙관 갱신 X). 그러나 rename 만 이 refetch 안전망이
+  //   없으면 broadcast 를 놓쳤을 때(재연결 창·이벤트 유실) 이 창만 stale 표시명으로 남는다 — activateReserved/
+  //   cancelReserved 는 이미 성공 시 refreshProfiles 로 권위 목록을 다시 끌어와 대칭을 맞춘다. rename 도 같은
+  //   안전망을 달아 세 경로를 일관되게 만든다(broadcast 가 정상 도달하면 같은 전체 목록 재적용이라 무해·멱등).
   const commitEdit = (node: AgentTreeNode) => {
     if (editingId !== node.id) return
     const trimmed = draft.trim()
@@ -240,6 +245,7 @@ export default function AgentList() {
     clearError(node.id)
     agentClient
       .renameProfile(node.id, trimmed)
+      .then(() => refreshProfiles())
       .catch(e => {
         console.error('[renameProfile]', e)
         setError(node.id, t('agent.renameFailed', { err: String(e) }))

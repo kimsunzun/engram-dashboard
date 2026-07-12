@@ -30,7 +30,10 @@ vi.mock('../../api/clientFactory', () => ({
   },
   getAgentClient: vi.fn(),
 }))
-vi.mock('../../store/eventBus', () => ({ refreshProfiles: vi.fn() }))
+// refreshProfiles 는 rename/activate/cancel 성공 후 권위 목록 재적용 안전망(broadcast 유실 대비) — hoisted
+//   mock 으로 호출을 검증한다(증상4 회귀 안전망 테스트에서 사용).
+const refreshProfilesMock = vi.hoisted(() => vi.fn(async () => undefined))
+vi.mock('../../store/eventBus', () => ({ refreshProfiles: refreshProfilesMock }))
 // viewStore 는 assignAgent(열기 경로)만 참조 — getState 로 접근하므로 실제 store 를 얕게 stub.
 //   assignAgent 는 hoisted 한 곳에 두고 getState/셀렉터가 동일 인스턴스를 반환하게 한다(호출 검증용).
 const assignAgentMock = vi.hoisted(() => vi.fn(async () => undefined))
@@ -73,6 +76,7 @@ beforeEach(() => {
   clientMock.killAgent.mockClear()
   clientMock.deleteProfile.mockClear()
   clientMock.renameProfile.mockClear()
+  refreshProfilesMock.mockClear()
   assignAgentMock.mockClear()
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
 })
@@ -238,6 +242,55 @@ describe('행 우클릭 메뉴', () => {
   })
 })
 
+// ── 증상4 회귀 안전망: 한 노드 조작이 형제 노드를 떨어뜨리지 않는다 ────────────────────
+//   버그 리포트("트리에 3개 있을 때 하나를 조작하면 나머지 2개가 사라진다")를 겨눈다. rename 경로는
+//   낙관 갱신 없이 store 미러(agents/profiles 전체)를 그대로 두므로, mergeTreeNodes 가 그리는 형제 행은
+//   렌더에서 사라지면 안 된다. 또한 rename 성공은 refreshProfiles(권위 목록 재적용 안전망 — broadcast 유실
+//   대비)로 이어져 spawn/delete 와 대칭이어야 한다. 옛 회귀(부분 목록 덮어쓰기)가 재발하면 이 단언이 깨진다.
+describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지 않는다', () => {
+  it('3노드(running 1 + reserved 2) 중 하나 rename → 나머지 2 노드 행 유지 + refreshProfiles 호출', () => {
+    // running 1(a1) + reserved 2(p1, p2). p1 을 rename 확정한다.
+    useAgentStore.setState({
+      agents: [agent('a1', 'C:/work/aaa')],
+      profiles: [profile('p1', 'C:/r/bbb', 1), profile('p2', 'C:/r/ccc', 2)],
+    })
+    render(<AgentList />)
+    // 사전: 3행 모두 존재.
+    expect(document.querySelector('[data-agent-row="a1"]')).toBeTruthy()
+    expect(document.querySelector('[data-agent-row="p1"]')).toBeTruthy()
+    expect(document.querySelector('[data-agent-row="p2"]')).toBeTruthy()
+
+    // p1 을 rename → 확정(Enter).
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '새이름' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    // 발화 검증 + 형제 노드가 사라지지 않았는지(증상4) 검증.
+    expect(clientMock.renameProfile).toHaveBeenCalledWith('p1', '새이름')
+    expect(document.querySelector('[data-agent-row="a1"]')).toBeTruthy() // 형제 running 유지
+    expect(document.querySelector('[data-agent-row="p1"]')).toBeTruthy() // 대상 유지
+    expect(document.querySelector('[data-agent-row="p2"]')).toBeTruthy() // 형제 reserved 유지
+    expect(document.querySelectorAll('[data-agent-row]').length).toBe(3) // 총 3행 불변
+  })
+
+  it('rename 성공 → refreshProfiles(권위 목록 재적용 안전망) 호출 — spawn/delete 와 대칭', async () => {
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r/bbb', 1)] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '새이름' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+      // renameProfile Promise resolve 후 .then(refreshProfiles) 가 도는 microtask 를 flush.
+      await Promise.resolve()
+    })
+    expect(refreshProfilesMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 // ── FIX#1: 동기 in-flight 가드(useRef) — 연타 더블파이어 1회로 접힘 ─────────────
 describe('동기 in-flight 가드(useRef, FIX#1)', () => {
   // spawnProfile 을 미해결 Promise 로 잡아 두 번째 doubleClick 이 아직 in-flight 인 상태에서 들어오게 한다.
@@ -280,21 +333,22 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
   })
 })
 
-// ── FIX#3: 예약 행 "예약 취소" → deleteProfile(리그레션 복원) ────────────────────
-describe('예약 취소(deleteProfile, FIX#3)', () => {
-  it('예약 행 우클릭 → "예약 취소" → deleteProfile(id) 호출', () => {
+// ── FIX#3: 예약 행 "삭제" → deleteProfile(리그레션 복원) ────────────────────────
+//   메뉴 라벨은 '삭제'(rowCancelReserved — preset.deleteBtn 과 어휘 통일). 동작은 deleteProfile 그대로.
+describe('삭제(deleteProfile, FIX#3)', () => {
+  it('예약 행 우클릭 → "삭제" → deleteProfile(id) 호출', () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
-    fireEvent.click(screen.getByText('예약 취소'))
+    fireEvent.click(screen.getByText('삭제'))
     expect(clientMock.deleteProfile).toHaveBeenCalledWith('p1')
   })
 
-  it('실행중 행 메뉴엔 "예약 취소" 없음(reserved 전용)', () => {
+  it('실행중 행 메뉴엔 "삭제" 없음(reserved 전용)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
-    expect(screen.queryByText('예약 취소')).toBeNull()
+    expect(screen.queryByText('삭제')).toBeNull()
   })
 })
 

@@ -21,6 +21,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ScrollArea } from '../ui/scroll-area'
 import { agentClient } from '../../api/clientFactory'
 import { useAgentStore } from '../../store/agentStore'
+import { refreshPresets } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import type { Preset } from '../../api/types'
 import { t } from '../../i18n'
@@ -104,6 +105,10 @@ export default function PresetPalette() {
     })
     agentClient
       .deletePreset(id)
+      // ★성공 시 refreshPresets() 안전망(AgentList delete/rename 과 대칭)★: 목록 반영은 원칙적으로
+      //   PresetListUpdated broadcast 로 오나, 그걸 놓쳤을 때(재연결 창·이벤트 유실) 이 창만 stale 로 남는다.
+      //   권위 목록을 다시 끌어와 전체 교체(broadcast 정상 도달 시 같은 목록 재적용 — 무해·멱등).
+      .then(() => refreshPresets())
       .catch(e => console.error('[PresetPalette] deletePreset 실패:', e))
       .finally(() => {
         deletingRef.current.delete(id) // 성공·실패 무관 lock 해제(에러가 UI 영구 잠금 방지)
@@ -140,6 +145,9 @@ export default function PresetPalette() {
     })
     agentClient
       .renamePreset(preset.id, trimmed)
+      // ★성공 시 refreshPresets() 안전망(deletePreset 과 대칭)★: 표시명 반영은 PresetListUpdated broadcast
+      //   로 오나, 놓쳤을 때 이 창만 stale 로 남는다 — 권위 목록 재적용으로 대칭·멱등 보장(위 delete 주석 참조).
+      .then(() => refreshPresets())
       .catch(e => console.error('[PresetPalette] renamePreset 실패:', e))
       .finally(() => {
         renamingRef.current.delete(preset.id)

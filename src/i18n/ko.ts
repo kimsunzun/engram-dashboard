@@ -65,9 +65,9 @@ export const ko = {
     treeLabel: '에이전트 트리', // AgentList 슬롯 콘텐츠 라벨.
     emptyList: '에이전트 없음 — 우클릭으로 생성', // AgentList 빈 상태 안내.
     terminatedOverlay: '종료됨', // TerminalSlot/DomSlot 종료 오버레이 — placeholder '종료된 에이전트'와 별개.
-    // AgentList 행 우클릭 메뉴 라벨(reserved: 활성화/예약취소 · running: 열기/종료/이름변경/재시작).
+    // AgentList 행 우클릭 메뉴 라벨(reserved: 활성화/이름변경/삭제 · running: 열기/종료/이름변경/재시작).
     rowActivate: '활성화(spawn)', // reserved 행 활성화(spawnProfile) 메뉴 라벨.
-    rowCancelReserved: '예약 취소', // reserved 행 예약취소(deleteProfile) 메뉴 라벨.
+    rowCancelReserved: '삭제', // reserved 행 삭제(deleteProfile) 메뉴 라벨 — preset.deleteBtn 과 어휘 통일.
     rowOpen: '열기', // running 행 "열기"(포커스 슬롯 배정) 메뉴 라벨.
     rowKill: '종료', // running 행 "종료"(kill) 메뉴 라벨.
     rowRename: '이름 변경', // running/reserved 행 이름변경(RenameProfile command — ADR-0061 리치화).
@@ -79,7 +79,7 @@ export const ko = {
     openFailed: '열기 실패: {err}', // assignAgent 실패.
     openFailedNoSlot: '열기 실패: 활성 뷰/포커스 슬롯 없음', // 활성 뷰/포커스 슬롯 부재로 조기 실패(보간 없음, openFailed 와 별개 텍스트).
     killFailed: '종료 실패: {err}', // killAgent 실패.
-    cancelReservedFailed: '예약 취소 실패: {err}', // deleteProfile 실패.
+    cancelReservedFailed: '삭제 실패: {err}', // deleteProfile 실패 — rowCancelReserved('삭제')와 어휘 통일.
     renameFailed: '이름 변경 실패: {err}', // renameProfile 실패(ADR-0061 리치화).
     rename: '에이전트 이름 변경', // agent.rename command 제목(§5 LLM 제어 — RenameProfile).
   },
