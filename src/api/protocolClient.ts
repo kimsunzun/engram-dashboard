@@ -760,6 +760,13 @@ export class ProtocolClient implements AgentClient {
       RenameProfile: { profile_id: agentId, name, request_id },
     }))
   }
+  reparentProfile(childId: string, parentId: string | null): Promise<void> {
+    // 백엔드 reply=Ack(void). 계층 반영은 뒤이은 ProfileListUpdated broadcast(낙관 갱신 X, ADR-0072).
+    //   invalid move(cycle/self/2단/존재하지 않는 parent)는 백엔드가 Error → sendCommand reject.
+    return this.sendCommand<void>((request_id) => ({
+      ReparentProfile: { child_id: childId, parent_id: parentId, request_id },
+    }))
+  }
 
   // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────────────
   listPresets(): Promise<Preset[]> {

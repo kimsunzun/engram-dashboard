@@ -81,6 +81,7 @@ export const ko = {
     killFailed: '종료 실패: {err}', // killAgent 실패.
     cancelReservedFailed: '삭제 실패: {err}', // deleteProfile 실패 — rowCancelReserved('삭제')와 어휘 통일.
     renameFailed: '이름 변경 실패: {err}', // renameProfile 실패(ADR-0061 리치화).
+    reparentFailed: '이동 실패: {err}', // reparentProfile 실패(ADR-0072 트리 계층 — 드래그 재부모화).
     rename: '에이전트 이름 변경', // agent.rename command 제목(§5 LLM 제어 — RenameProfile).
   },
   /** 프리셋(cwd 프리셋) 관련 — command 제목·우클릭 메뉴 라벨. */

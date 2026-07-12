@@ -1,7 +1,12 @@
-//! AgentList — 실행중 에이전트 ∪ 예약(Reserved) 프로필을 그리는 FLAT 목록(ADR-0062 상태 글리프 / ADR-0018 머지).
+//! AgentList — 실행중 에이전트 ∪ 예약(Reserved) 프로필을 계층(트리)으로 그린다(ADR-0072 / ADR-0062 상태
+//! 글리프 / ADR-0018 머지).
 //!
-//! ★AgentTree(react-arborist) 대체★: MVP 는 계층이 없어 트리 대신 평면 목록이다. 머지 로직(running ∪
-//! reserved)은 순수 함수 mergeTreeNodes 를 그대로 재사용하고(트리 렌더링만 버린다), 각 행 = [glyph][name].
+//! ★react-arborist 부활(ADR-0072)★: 평면 목록에서 트리로 복귀 — parent_id 로 자식을 부모 밑에 중첩(1단).
+//!   머지+계층화는 순수 함수 mergeTreeNodes(running ∪ reserved → forest)가 담당하고, 여기선 <Tree>가
+//!   들여쓰기·접기/펼치기·드래그 재부모화를 준다. 각 행 = [토글][glyph][name]. 드래그로 onMove →
+//!   reparentProfile command(§5 — 사람 드래그·LLM 호출이 같은 핸들). 낙관 갱신 없음: 백엔드 broadcast 가
+//!   목록을 새로 그린다(rename 과 동형). 행 클릭·더블클릭·우클릭 메뉴·인라인 rename·in-flight 가드는 평면
+//!   목록과 동일 로직을 NodeRenderer 안에서 그대로 쓴다(리그레션 금지).
 //!
 //! ★상태 = 색이 아니라 모양(글리프)★(ADR-0062): e-ink(흑백)에서도 상태가 구분되도록 색 리터럴 대신
 //! statusGlyph 로 모양을 고른다. 5-glyph 어휘 중 백엔드가 실제 구분 가능한 3개(●/◻/✗)만 점등, ○(유휴)·
@@ -14,13 +19,13 @@
 //! ★행(ROW) 우클릭 메뉴만 소유(ADR-0064)★: 옛 pane 배경 메뉴("에이전트 생성" 프리셋 픽커) + pane
 //! stopPropagation 은 제거됐다 — pane 배경 우클릭은 상위 통합 슬롯 메뉴로 버블(agent_list 전용
 //! "에이전트 생성" = agentlist.createAgent command + 공통 슬롯 ops). 행 우클릭만 stopPropagation 으로
-//! 가로채 item-targeted 메뉴(활성화/예약취소/이름변경 · 열기/종료/이름변경/재시작)를 띄운다(VS Code view/item/context 결).
+//! 가로채 item-targeted 메뉴(활성화/열기/종료/이름변경/삭제)를 띄운다(VS Code view/item/context 결).
 //! 조작은 agentClient / viewStore(백엔드 권위 invoke→emit)로만 흐른다 — raw invoke/ptyApi 없음(ADR-0011).
 //! 이름변경 = RenameProfile command(ADR-0061 리치화, 인라인 편집). 재시작은 대응 command 부재 → "준비 중" 비활성.
 
 import { useEffect, useRef, useState } from 'react'
+import { Tree, type NodeRendererProps } from 'react-arborist'
 
-import { ScrollArea } from '../ui/scroll-area'
 import { agentClient } from '../../api/clientFactory'
 import { useAgentStore } from '../../store/agentStore'
 import { currentViewId, selectView, useViewStore } from '../../store/viewStore'
@@ -61,7 +66,7 @@ export function statusGlyph(status: string): string {
   }
 }
 
-/** 행 우클릭 메뉴 — 가상화 없는 평면 목록이지만 AgentTree 와 동형으로 primitive snapshot 만 든다. */
+/** 행 우클릭 메뉴 — react-arborist 가상화로 row 가 unmount 될 수 있어 NodeApi 대신 primitive snapshot 만 든다. */
 type RowMenu = {
   x: number
   y: number
@@ -69,9 +74,18 @@ type RowMenu = {
   kind: 'running' | 'reserved'
 }
 
+/** react-arborist 행 높이·들여쓰기(px). 옛 AgentTree 와 동일 값(리그레션 없이 부활). */
+const ROW_HEIGHT = 24
+const INDENT = 12
+
 export default function AgentList() {
   const rowMenuRef = useRef<HTMLDivElement>(null)
   const [rowMenu, setRowMenu] = useState<RowMenu | null>(null)
+  // ★react-arborist(react-window)는 명시 width/height 를 요구★(가상화 스크롤). ResizeObserver 로 컨테이너
+  //   실측을 추적하되, jsdom(테스트)엔 ResizeObserver 가 없어 콜백이 안 돌 수 있으므로 초기값을 비-0 으로
+  //   둬 트리가 첫 렌더부터 행을 그린다(옛 AgentTree 동형 — 테스트가 data-agent-row 를 관측).
+  const treeContainerRef = useRef<HTMLDivElement>(null)
+  const [dimensions, setDimensions] = useState({ width: 240, height: 400 })
   // ★ref = 권위적 double-fire 가드, state(busyIds) = 시각(disabled/opacity)★ (PresetPalette 패턴 동형):
   //   useState 가드만으로는 re-render commit 전 두 번째 호출이 stale closure 로 busyIds 를 아직 비어있게 읽어
   //   둘 다 통과하는 창이 있다(빠른 더블클릭). ref 는 동기 mutable 이라 같은 tick 두 번째 호출도 즉시 차단한다.
@@ -96,8 +110,23 @@ export default function AgentList() {
   const selectedAgentId = useAgentStore(s => s.selectedAgentId)
   const setSelectedAgent = useAgentStore(s => s.setSelectedAgent)
 
-  // 예약(프로필) ∪ 실행중(agents) 머지 — 순수 함수 재사용(트리 렌더링만 버림).
-  const rows: AgentTreeNode[] = mergeTreeNodes(profiles, agents)
+  // 예약(프로필) ∪ 실행중(agents) 머지 + parent_id 계층화 — 순수 함수(ADR-0018 + ADR-0072). forest 반환.
+  const forest: AgentTreeNode[] = mergeTreeNodes(profiles, agents)
+  // 트리 존재/부재·메뉴 stale 판정용 평탄화(1단이라 루트 + 각 children). react-arborist 는 forest 를 직접 순회.
+  const flatRows: AgentTreeNode[] = forest.flatMap(n => [n, ...n.children])
+
+  // 컨테이너 실측 추적(react-window 가상화용). jsdom 은 ResizeObserver 미제공 → 초기 비-0 값이 폴백.
+  useEffect(() => {
+    const el = treeContainerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(entries => {
+      const { width, height } = entries[0].contentRect
+      // 0 은 무시(레이아웃 전/언마운트 순간) — 마지막 유효 크기 유지.
+      if (width > 0 && height > 0) setDimensions({ width: Math.floor(width), height: Math.floor(height) })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   // 행 메뉴 바깥 클릭으로 닫기(자기 ref 밖 mousedown 이면 닫는다). 항목 클릭의 mousedown 이 먼저 메뉴를 닫아
   //   onClick 이 무산되는 것을 막기 위해 자기 컨테이너 내부 클릭은 예외(SlotContextMenu 가드 동형).
@@ -122,13 +151,11 @@ export default function AgentList() {
   }, [rowMenu])
 
   // ★타깃 사라지면 메뉴 닫기★: rowMenu 상태는 대상 행보다 오래 산다 — 목록이 바뀌어(kill/deleteProfile/
-  //   마지막 에이전트 제거로 empty 전이) 대상 agentId 가 rows 에서 빠져도 rowMenu 는 그대로 남는다. 특히
-  //   empty→ScrollArea 언마운트로 메뉴가 잠깐 사라졌다가 새 에이전트 등장으로 non-empty 가 다시 마운트되면
-  //   stale 좌표에 떠난 agentId 를 겨눈 메뉴가 되살아난다. 대상이 목록에서 사라지면 즉시 null 로 리셋해
-  //   떠난 agentId 를 겨눈 메뉴가 절대 렌더되지 않게 한다.
+  //   마지막 에이전트 제거로 empty 전이) 대상 agentId 가 트리에서 빠져도 rowMenu 는 그대로 남는다. 대상이
+  //   flatRows 에서 사라지면 즉시 null 로 리셋해 떠난 agentId 를 겨눈 메뉴가 절대 렌더되지 않게 한다.
   useEffect(() => {
-    if (rowMenu && !rows.some(r => r.id === rowMenu.agentId)) setRowMenu(null)
-  }, [rowMenu, rows])
+    if (rowMenu && !flatRows.some(r => r.id === rowMenu.agentId)) setRowMenu(null)
+  }, [rowMenu, flatRows])
 
   // in-flight 시작 — busyRef(동기 권위 가드)로 같은 tick 재호출 즉시 차단, busyIds(state)는 시각용 병행.
   const beginInFlight = (id: string): boolean => {
@@ -218,6 +245,27 @@ export default function AgentList() {
       .finally(() => endInFlight(agentId))
   }
 
+  // ★드래그 재부모화(ADR-0072 §5 — 사람 드래그·LLM 호출이 같은 reparentProfile 핸들)★: react-arborist onMove
+  //   가 dropParentId(null=루트) 를 준다. 낙관 갱신 없음 — 백엔드 ReparentProfile → ProfileListUpdated
+  //   broadcast 가 forest 를 새로 그린다(rename 동형). invalid move(cycle/self/2단/존재하지 않는 parent)는
+  //   백엔드가 Error 로 거부 → 트리는 옛 배치 유지 + 인라인 에러. 동기 가드로 연타 중복 발화 차단.
+  const reparent = (childId: string, parentId: string | null) => {
+    // no-op 억제: 이미 그 부모(또는 이미 루트)면 발화하지 않는다(불필요 command).
+    const node = flatRows.find(r => r.id === childId)
+    const currentParentId = forest.find(root => root.children.some(c => c.id === childId))?.id ?? null
+    if (!node || currentParentId === parentId) return
+    if (!beginInFlight(childId)) return
+    clearError(childId)
+    agentClient
+      .reparentProfile(childId, parentId)
+      .then(() => refreshProfiles())
+      .catch(e => {
+        console.error('[reparentProfile]', e)
+        setError(childId, t('agent.reparentFailed', { err: String(e) }))
+      })
+      .finally(() => endInFlight(childId))
+  }
+
   // 표시명 = display_name override ?? cwd basename(ADR-0061 리치화 — 트리 rename). PresetPalette 와 동일
   //   precedence(override 우선, 없으면 basename 파생). rename 시작·확정 시 이 값을 draft 시드/미변경 판정에 쓴다.
   const displayNameOf = (node: AgentTreeNode): string => node.displayName ?? basename(node.cwd)
@@ -253,11 +301,11 @@ export default function AgentList() {
       .finally(() => endInFlight(node.id))
   }
 
-  // 행 우클릭 메뉴 항목 — kind 로 분기. reserved 는 활성화/예약취소/이름변경, running 은 열기/종료/이름변경/재시작.
+  // 행 우클릭 메뉴 항목 — kind 로 분기. reserved 는 활성화/이름변경/삭제, running 은 열기/종료/이름변경/재시작.
   //   이름변경 = RenameProfile command(ADR-0061 리치화 — 인라인 편집 진입). 재시작은 백엔드 command 부재 →
   //   disabled "준비 중"(날조 금지). disabled 시각 판정은 busyIds(state), 실제 중복 발화 차단은 busyRef 동기 가드.
-  //   ★대상 node 조회★: 메뉴는 agentId 만 들고 있으므로 rows 에서 찾아 rename 진입에 넘긴다(타깃-gone 은 effect 가 닫음).
-  const menuNode = rowMenu ? rows.find(r => r.id === rowMenu.agentId) : undefined
+  //   ★대상 node 조회★: 메뉴는 agentId 만 들고 있으므로 flatRows 에서 찾아 rename 진입에 넘긴다(타깃-gone 은 effect 가 닫음).
+  const menuNode = rowMenu ? flatRows.find(r => r.id === rowMenu.agentId) : undefined
   const rowMenuItems: Array<{ label: string; disabled: boolean; action: () => void }> = !rowMenu
     ? []
     : rowMenu.kind === 'reserved'
@@ -301,14 +349,147 @@ export default function AgentList() {
           { label: t('agent.rowRestart'), disabled: true, action: () => {} },
         ]
 
+  // NodeRenderer — 컴포넌트 안에 두어 select/busy/error/편집 핸들러를 클로저로 접근(옛 AgentTree 동형).
+  //   react-arborist 가 style(가상화 위치·높이)·node(NodeApi)·dragHandle 을 준다. 각 행 = [토글][glyph][name].
+  const NodeRenderer = ({ node, style, dragHandle }: NodeRendererProps<AgentTreeNode>) => {
+    const data = node.data
+    const isReserved = data.kind === 'reserved'
+    const isBusy = busyIds.has(data.id)
+    const err = errorById[data.id]
+    // 1단이라 자식 유무 = isInternal(부모). 부모만 토글(펼치기/접기)을 그린다.
+    const hasChildren = data.children.length > 0
+    return (
+      <div
+        ref={dragHandle}
+        data-agent-row={data.id}
+        style={{
+          ...style, // react-arborist 가상화 위치/높이(top/height). 들여쓰기는 아래 paddingLeft 로 level 반영.
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          // level*INDENT + 기본 padding. 토글이 없는 leaf 도 부모와 글리프 정렬이 맞게 토글 폭만큼 고정 확보.
+          paddingLeft: `${8 + node.level * INDENT}px`,
+          paddingRight: '8px',
+          cursor: isBusy ? 'wait' : 'pointer',
+          background:
+            selectedAgentId === data.id
+              ? 'color-mix(in srgb, var(--accent) 15%, transparent)'
+              : 'transparent',
+          fontFamily: 'var(--font-ui)',
+          fontSize: '12px',
+          // 예약(깡통)은 흐리게 + 이탤릭 — 미spawn 시각 구분(색 리터럴 없이 muted 변수·기울임).
+          color: isReserved ? 'var(--text-muted)' : 'var(--text)',
+          fontStyle: isReserved ? 'italic' : 'normal',
+          opacity: isBusy ? 0.6 : 1,
+          userSelect: 'none',
+        }}
+        onClick={() => setSelectedAgent(data.id)}
+        // 더블클릭: 예약 행 → 활성화(spawn). 실행중 행 → no-op(AgentTree 동작 유지).
+        onDoubleClick={() => {
+          if (data.kind === 'reserved') activateReserved(data.id)
+        }}
+        // ★인라인 편집 키(Enter 확정 / Escape 취소)는 입력이 아니라 이 행 div 에서 처리★: react-window
+        //   가상화 안에서 조건부로 mount 되는 <input> 의 onKeyDown 은 React 19 이벤트 위임이 2번째 이후
+        //   재-mount 되는 root 에 keydown 리스너를 붙이지 못해 synthetic 이 안 뜬다(react-window+jsdom 상호작용
+        //   — click/blur/change 는 정상, keydown 만). 항상 렌더되는 이 행 div 에 핸들러를 두면 초기 mount 부터
+        //   keydown 이 등록돼 안정적으로 동작한다(input 키는 버블로 여기 올라옴). 편집 중일 때만 stopPropagation
+        //   으로 react-arborist 키 네비게이션·전역 키바인딩 누수를 막는다(TabBar 버블 차단과 동형).
+        onKeyDown={e => {
+          if (editingId !== data.id) return
+          e.stopPropagation()
+          if (e.key === 'Enter') commitEdit(data)
+          else if (e.key === 'Escape') cancelEdit() // 취소(revert — renameProfile 안 부름).
+        }}
+        title={err ?? (isReserved ? t('agent.doubleClickToActivate') : data.cwd)}
+        onContextMenu={e => {
+          e.preventDefault()
+          e.stopPropagation() // ★행 메뉴가 이긴다(ADR-0064)★: 상위 통합 슬롯 메뉴가 안 뜨게 여기서 멈춘다.
+          setSelectedAgent(data.id)
+          setRowMenu({ x: e.clientX, y: e.clientY, agentId: data.id, kind: data.kind })
+        }}
+      >
+        {/* 접기/펼치기 토글 — 부모(자식 보유)만 클릭 가능한 ▸/▾. leaf 는 같은 폭의 빈 칸(글리프 정렬 유지). */}
+        <span
+          data-agent-toggle={hasChildren ? '1' : undefined}
+          onClick={e => {
+            if (!hasChildren) return
+            e.stopPropagation() // 토글은 선택/편집으로 새지 않는다.
+            node.toggle()
+          }}
+          style={{
+            width: '10px',
+            flexShrink: 0,
+            textAlign: 'center',
+            fontSize: '9px',
+            color: 'var(--text-muted)',
+            cursor: hasChildren ? 'pointer' : 'default',
+          }}
+        >
+          {hasChildren ? (node.isOpen ? '▾' : '▸') : ''}
+        </span>
+        {/* 상태 = 글리프 모양(색 아님, ADR-0062). muted 변수로만 렌더 — 모양이 상태를 담는다. */}
+        <span data-agent-glyph="1" style={{ fontSize: '11px', color: 'var(--text-muted)', flexShrink: 0 }}>
+          {statusGlyph(data.status)}
+        </span>
+        {/* 표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화). 편집 중이면 인라인 input.
+            cwd 는 노출 안 함(title 로만). */}
+        {editingId === data.id ? (
+          <input
+            data-agent-rename-input={data.id}
+            value={draft}
+            autoFocus
+            ref={inputRef}
+            onChange={e => setDraft(e.target.value)}
+            // ★Enter/Escape 라우팅은 행 div onKeyDown 이 소유★(위 주석 — react-window+React19 keydown 위임
+            //   회피). 여기선 라우팅하지 않고, 키는 버블로 행 div 에 올라간다. blur 확정만 입력이 직접 소유.
+            onBlur={() => commitEdit(data)}
+            onClick={e => e.stopPropagation()}
+            onDoubleClick={e => e.stopPropagation()}
+            style={{
+              // 내용 폭에 맞춤 — TabBar rename input 동형. minWidth/maxWidth 로 상·하한.
+              flex: 1,
+              minWidth: '3ch',
+              maxWidth: '180px',
+              font: 'inherit',
+              color: 'var(--text)',
+              background: 'var(--bg)',
+              border: '1px solid var(--accent)',
+              borderRadius: '2px',
+              padding: '0 2px',
+              outline: 'none',
+            }}
+          />
+        ) : (
+          <span
+            data-agent-name="1"
+            // flex:1+minWidth:0 = 행 폭을 채워 ellipsis 가 제대로 걸리게. paddingRight 2px = italic overhang 여유.
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              paddingRight: '2px',
+            }}
+          >
+            {displayNameOf(data)}
+          </span>
+        )}
+        {err && (
+          <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '10px', flexShrink: 0 }}>
+            {t('agent.rowFailedBadge')}
+          </span>
+        )}
+      </div>
+    )
+  }
+
   return (
-    // ★구조 = 라벨(고정) 바깥 + 목록만 ScrollArea 안(PresetPalette/AgentMonitoringPicker 동형, ADR-0053)★:
-    //   옛 구조는 sticky 라벨을 Radix Viewport 안에 넣었으나, Radix 가 Viewport 자식을 display:table 로 감싸
-    //   그 안의 position:sticky 가 Chromium/WebView2 에서 불안정하게 핀됐다(회귀). 그래서 라벨은 스크롤 밖
-    //   flex 형제로 올려 상단 고정을 확실히 하고(스크롤과 무관), 스크롤 대상은 목록 행만 ScrollArea 에 담는다.
+    // ★구조 = 라벨(고정) 바깥 + 트리만 아래 영역★(PresetPalette/AgentMonitoringPicker 동형, ADR-0053):
+    //   라벨은 스크롤 밖 flex 형제로 올려 상단 고정. react-arborist(react-window)는 자기 가상화 스크롤을
+    //   소유하므로 ScrollArea 로 감싸지 않는다(스크롤 소유 충돌 회피 — 옛 flat 목록과 다른 점).
     //   ★pane 배경 마커 = 이 바깥 flex 컨테이너(data-agent-list)★: pane 배경 우클릭은 상위 통합 슬롯 메뉴로
-    //   버블(ADR-0064 — 옛 자체 배경 메뉴/stopPropagation 제거). 행 우클릭만 행 핸들러가 stopPropagation 으로
-    //   가로챈다. background:var(--bg-secondary) 는 전체 높이 컨테이너에 둔다(변수-only, 테스트 단언).
+    //   버블(ADR-0064 — 옛 자체 배경 메뉴/stopPropagation 제거). 행 우클릭만 행 핸들러가 stopPropagation.
     <div
       data-agent-list="1"
       data-testid="agent-list"
@@ -321,9 +502,7 @@ export default function AgentList() {
         background: 'var(--bg-secondary)',
       }}
     >
-      {/* 슬롯 콘텐츠 라벨(사용자 요청) — 이 슬롯 = 에이전트 트리. 공용 슬롯 헤더가 아니라 PresetPalette·
-          AgentList 이 2개 variant 컴포넌트에만 각자 넣는다. 스크롤 밖 flex 형제라 항상 상단 고정(display:table
-          자식 sticky 불안정 회피 — 위 구조 주석). 변수-only. */}
+      {/* 슬롯 콘텐츠 라벨(사용자 요청) — 이 슬롯 = 에이전트 트리. 스크롤 밖 flex 형제라 항상 상단 고정. 변수-only. */}
       <div
         data-slot-label="agent-list"
         style={{
@@ -340,14 +519,9 @@ export default function AgentList() {
       >
         {t('agent.treeLabel')}
       </div>
-      {/* ★빈 목록 = ScrollArea 밖의 flex-1 센터링 div(FIX-A)★: 옛 구조는 이 안내 문구를 ScrollArea(Radix
-          Viewport) 안에 넣고 height:100% 로 세로 중앙 정렬했으나, Radix 가 Viewport 자식을 display:table 로
-          감싸 그 table 박스 높이는 콘텐츠 기반이라 Chromium/WebView2 에서 height:100% 가 Viewport 높이로
-          해소되지 않아 문구가 상단에 붙는 회귀가 났다. 스크롤할 행이 없을 땐 스크롤 컨테이너 자체가 불필요하므로,
-          바깥 flex 컬럼(data-agent-list)의 직속 flex-1 자식으로 문구를 그려 진짜 세로 중앙 정렬을 복원한다
-          (ScrollArea 는 행이 있을 때만 마운트 — 스크롤 없을 때 스크롤 표면도 없음). 배경 우클릭 버블은 바깥
-          컨테이너가 그대로 소유하므로 빈/비빈 무관하게 유지된다. */}
-      {rows.length === 0 ? (
+      {/* ★빈 목록 = 트리 대신 flex-1 센터링 div★: 그릴 노드가 없으면 react-arborist 를 마운트하지 않고 안내
+          문구를 세로 중앙 정렬(옛 FIX-A 취지 유지 — 빈 상태엔 스크롤/가상화 표면 없음). */}
+      {flatRows.length === 0 ? (
         <div
           style={{
             flex: 1,
@@ -363,111 +537,41 @@ export default function AgentList() {
           {t('agent.emptyList')}
         </div>
       ) : (
-        // 스크롤 표면 = 공용 ScrollArea seam(ADR-0053) — 목록 행·행메뉴만 담는다. 옛 raw overflow:auto div
-        //   (네이티브 always-on 스크롤바 + gutter)를 앱 전역 오버레이 스크롤바로 교체(스크롤 중에만 뜨고 gutter 0).
-        //   가상화 없는 평면 목록이라 Radix Viewport 로 감싸도 스크롤 소유 충돌 없음(react-arborist 미사용).
-        <ScrollArea data-testid="agent-list-scroll" style={{ flex: 1, minHeight: 0 }}>
-        {rows.map(node => {
-          const isReserved = node.kind === 'reserved'
-          const isBusy = busyIds.has(node.id)
-          const err = errorById[node.id]
-          return (
-            <div
-              key={node.id}
-              data-agent-row={node.id}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '4px 8px',
-                cursor: isBusy ? 'wait' : 'pointer',
-                background:
-                  selectedAgentId === node.id
-                    ? 'color-mix(in srgb, var(--accent) 15%, transparent)'
-                    : 'transparent',
-                fontFamily: 'var(--font-ui)',
-                fontSize: '12px',
-                // 예약(깡통)은 흐리게 + 이탤릭 — 미spawn 시각 구분(색 리터럴 없이 muted 변수·기울임).
-                color: isReserved ? 'var(--text-muted)' : 'var(--text)',
-                fontStyle: isReserved ? 'italic' : 'normal',
-                opacity: isBusy ? 0.6 : 1,
-                userSelect: 'none',
-              }}
-              onClick={() => setSelectedAgent(node.id)}
-              // 더블클릭: 예약 행 → 활성화(spawn). 실행중 행 → no-op(AgentTree 동작 유지).
-              onDoubleClick={() => {
-                if (node.kind === 'reserved') activateReserved(node.id)
-              }}
-              title={err ?? (isReserved ? t('agent.doubleClickToActivate') : node.cwd)}
-              onContextMenu={e => {
-                e.preventDefault()
-                e.stopPropagation() // ★행 메뉴가 이긴다(ADR-0064)★: 상위 통합 슬롯 메뉴가 안 뜨게 여기서 멈춘다.
-                setSelectedAgent(node.id)
-                setRowMenu({ x: e.clientX, y: e.clientY, agentId: node.id, kind: node.kind })
-              }}
-            >
-              {/* 상태 = 글리프 모양(색 아님, ADR-0062). muted 변수로만 렌더 — 모양이 상태를 담는다. */}
-              <span data-agent-glyph="1" style={{ fontSize: '11px', color: 'var(--text-muted)', flexShrink: 0 }}>
-                {statusGlyph(node.status)}
-              </span>
-              {/* 표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화). 편집 중이면 인라인 input.
-                  cwd 는 노출 안 함(title 로만). */}
-              {editingId === node.id ? (
-                <input
-                  data-agent-rename-input={node.id}
-                  value={draft}
-                  autoFocus
-                  ref={inputRef}
-                  onChange={e => setDraft(e.target.value)}
-                  onKeyDown={e => {
-                    // ★버블 차단★: 편집 중 키가 부모 행(onClick=select)·전역 키바인딩으로 새면 안 된다(TabBar 동형).
-                    e.stopPropagation()
-                    if (e.key === 'Enter') commitEdit(node)
-                    else if (e.key === 'Escape') cancelEdit() // 취소(revert — renameProfile 안 부름).
-                  }}
-                  onBlur={() => commitEdit(node)}
-                  onClick={e => e.stopPropagation()}
-                  onDoubleClick={e => e.stopPropagation()}
-                  style={{
-                    // 내용 폭에 맞춤(field-sizing:content) — TabBar rename input 동형. minWidth/maxWidth 로 상·하한.
-                    flex: 1,
-                    minWidth: '3ch',
-                    maxWidth: '180px',
-                    font: 'inherit',
-                    color: 'var(--text)',
-                    background: 'var(--bg)',
-                    border: '1px solid var(--accent)',
-                    borderRadius: '2px',
-                    padding: '0 2px',
-                    outline: 'none',
-                  }}
-                />
-              ) : (
-                <span
-                  data-agent-name="1"
-                  // flex:1+minWidth:0 = 행 폭을 채워 ellipsis 가 제대로 걸리게(콘텐츠 폭이면 짧은 이름도
-                  //   텍스트 오른쪽 끝이 곧 overflow:hidden 클립 경계라 italic overhang 이 잘린다). paddingRight
-                  //   2px = italic 글리프의 오른쪽 overhang 여유(ellipsis 경우에도 마지막 글자 꼬리 안 잘리게).
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    paddingRight: '2px',
-                  }}
-                >
-                  {displayNameOf(node)}
-                </span>
-              )}
-              {err && (
-                <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '10px', flexShrink: 0 }}>
-                  {t('agent.rowFailedBadge')}
-                </span>
-              )}
-            </div>
-          )
-        })}
+        // 트리 컨테이너 = 실측 대상(ResizeObserver). react-arborist 가 이 폭·높이 안에서 가상화 스크롤한다.
+        <div ref={treeContainerRef} data-testid="agent-tree" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <Tree<AgentTreeNode>
+            data={forest}
+            idAccessor="id"
+            childrenAccessor="children"
+            width={dimensions.width}
+            height={dimensions.height}
+            rowHeight={ROW_HEIGHT}
+            indent={INDENT}
+            openByDefault
+            // ★rename 은 우클릭→인라인 input 자체 구현★: react-arborist 내장 edit(onRename) 대신 우리 draft
+            //   상태를 쓰므로 내장 편집은 끈다(중복 편집 UI 방지). 선택 다중선택도 불필요 → 단일선택 유지.
+            disableEdit
+            disableMultiSelection
+            // ★1단 상한 UI 가드(ADR-0072 · review FIX)★: 부모가 루트 아닌 곳(=자식 밑)으로의 드롭, 또는 이미
+            //   자식을 가진 노드를 남의 밑으로 드롭하는 것을 UI 에서 막는다(둘 다 2단이 됨). 백엔드도 거부하지만
+            //   (Error), 먼저 차단해 흔한 오조작에서 불필요한 실패 커맨드·에러 토스트를 없앤다. leaf 도
+            //   children:[] 라 react-arborist 가 isInternal 로 봐 중앙 드롭이 걸리므로 이 가드가 필요.
+            disableDrop={({ parentNode, dragNodes }) =>
+              (parentNode != null && parentNode.level > 0) ||
+              dragNodes.some(n => Array.isArray(n.data.children) && n.data.children.length > 0)
+            }
+            // ★드래그 재부모화 = onMove(§5)★. dropParentId(null=루트)로 reparentProfile 발화(낙관 갱신 X).
+            onMove={({ dragIds, parentId }) => {
+              // disableMultiSelection 으로 단일 드래그 전제 — [0]만 처리(다중선택 재활성 시 이 라인 재검토).
+              if (dragIds.length !== 1) return
+              const childId = dragIds[0]
+              if (childId) reparent(childId, parentId)
+            }}
+          >
+            {NodeRenderer}
+          </Tree>
+        </div>
+      )}
 
       {/* ── 행 우클릭 메뉴 ─────────────────────────────────────────────── */}
       {rowMenu && (
@@ -492,8 +596,6 @@ export default function AgentList() {
             </div>
           ))}
         </div>
-      )}
-        </ScrollArea>
       )}
     </div>
   )

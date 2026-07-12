@@ -915,6 +915,13 @@
 - **검증(qa PASS):** `cargo test -p engram-dashboard-core --lib` **182** · `-p protocol` golden 38 · daemon `--lib` 39 · `cargo fmt --check` · `cargo check --workspace` clean · 코어격리 0 · `npx tsc --noEmit` · `npm test`(vitest **554**). daemon **bin** 링크는 실행 중 데몬 exe 락으로 블록(코드 오류 아님 — `--lib`로 검증).
 - **게이트:** ADR-0072 신설 + 인덱스(lint clean) + 이 step-log. 커밋 = 백엔드/bindings 8 + types.ts + 픽스처 2 + ADR + README + step-log. `.tauri-dev-qa.log` 제외. **후속:** C2(프론트 react-arborist 부활 + 중첩 렌더 + 드래그 재부모화 + 상태 글리프 — 눈에 보이는 부분) + defer 3건(오케스트레이션 때).
 
+## 에이전트 트리 정교화 Slice C2 — 프론트 중첩 렌더(react-arborist 부활) + 드래그 재부모화 (2026-07-13, master, 승계 세션) · ADR-0072
+- **무엇:** 눈에 보이는 계층 트리. `AgentList`를 평면 목록 → react-arborist `<Tree>`(중첩·들여쓰기·접기/펼치기)로 복귀. `mergeTreeNodes`가 parent_id로 1단 forest 생성(running ∪ reserved 머지 유지·레벨별 결정적 정렬). 드래그 재부모화 = `onMove → reparentProfile`(§5 — 사람 드래그·LLM 명령이 같은 핸들). 낙관 갱신 없음(백엔드 broadcast가 재그림, rename 동형). 기존 동작(글리프·인라인 rename·우클릭 메뉴·더블클릭·in-flight 가드·refetch) 전부 보존. mergeTreeNodes·client reparentProfile·i18n은 이전 세션 선작업, 코더가 AgentList 부활+테스트 얹음.
+- **어떻게:** 코더(worker-senior) → `/review code`: doc-aware(reviewer-deep)=**FIX 1**(자식 노드가 children:[]라 isInternal로 취급돼 leaf 중앙 드롭이 2단 시도→백엔드 거부→불필요 에러 토스트; 데이터 손상 아님·UX 잡음). cross-family(Codex)는 **사용자 시간압박으로 중단** → 단독 family 리뷰(교차검증 미완 라벨). FIX = `disableDrop` UI 가드(부모 비루트 또는 자식보유 노드 드롭 차단) + onMove 다중드래그 가드 — 메인 인라인 적용(8줄, 시간압박·특정 FIX 대응).
+- **Spawning 글리프:** 미추가(◐) — busyIds가 다액션(kill/rename/delete/spawn)이라 spawn 전용 신호 없음, fabrication 회피(ADR-0062/0072 정합, front-synthesized는 후속).
+- **검증:** `npx tsc --noEmit` clean · vitest 568(코더) → 가드 후 agent-dir 60 pass 재확인 · GUI 실측(cdp 9223): 부모 토글+자식 들여쓰기(20px)·접기/펼치기·글리프 확인. **미검증:** reparent 왕복 E2E — 실행 중 데몬이 stale 바이너리(C1 ReparentProfile 핸들러 이전)라 invoke 30s 타임아웃. **데몬 rebuild+restart(앱 재시작) 후 드래그/명령 왕복 실측 필요**(백엔드 처리는 C1 유닛테스트가 커버).
+- **게이트:** 커밋 = 프론트 8파일(AgentList·mergeTreeNodes·agentClient·protocolClient·ko.ts + 테스트 3) + 이 step-log. **열화 라벨: cross-family 리뷰 미완(사용자 중단) + reparent 라이브 E2E 미검증(데몬 stale).** 후속: 데몬 재빌드 후 reparent 실측 · defer 3건(오케스트레이션 때) · Spawning 글리프(신호 생기면).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

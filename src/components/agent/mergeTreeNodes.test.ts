@@ -31,12 +31,18 @@ function agent(
   }
 }
 
-function profile(id: string, name = '', createdAt = 0, displayName: string | null = null): AgentProfile {
+function profile(
+  id: string,
+  name = '',
+  createdAt = 0,
+  displayName: string | null = null,
+  parentId: string | null = null,
+): AgentProfile {
   return {
     id,
     name,
     display_name: displayName,
-    parent_id: null,
+    parent_id: parentId,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd: 'C:/x',
     env: [],
@@ -173,5 +179,97 @@ describe('mergeTreeNodes', () => {
         expect(node.name).toBe('세션이름')
       })
     }
+  })
+
+  // ── ADR-0072: parent_id 계층화(1단 중첩) ──────────────────────────────────────
+  //   parent_id 로 자식을 부모 children 에 꽂는 forest 반환. 1단만(자식의 children 은 항상 빈 배열).
+  //   백엔드가 cycle/2단을 강제하지만 프론트는 데이터가 어긋나도 방어적으로 루트 승격(2단 금지).
+  describe('계층화(parent_id, ADR-0072)', () => {
+    it('parent_id 없으면 전부 루트(children 빈 배열)', () => {
+      const out = mergeTreeNodes([profile('p1', 'A'), profile('p2', 'B')], [])
+      expect(out).toHaveLength(2)
+      expect(out.every(n => n.children.length === 0)).toBe(true)
+    })
+
+    it('자식이 부모 children 으로 중첩(A > B·C) — 루트는 부모만', () => {
+      // A(부모), B·C(자식). created_at 으로 결정적 순서 보장.
+      const out = mergeTreeNodes(
+        [
+          profile('A', '부모', 1),
+          profile('B', '자식B', 2, null, 'A'),
+          profile('C', '자식C', 3, null, 'A'),
+        ],
+        [],
+      )
+      // 루트 = A 1개.
+      expect(out.map(n => n.id)).toEqual(['A'])
+      // A 의 children = [B, C] (created_at 오름차순).
+      expect(out[0].children.map(n => n.id)).toEqual(['B', 'C'])
+    })
+
+    it('running 부모 + reserved 자식 혼합(머지 계층 유지, ADR-0018 ⊕ ADR-0072)', () => {
+      // A 는 실행중, 자식 B 는 예약. parent_id 는 프로필에서만 오므로 자식 프로필이 A 를 가리킨다.
+      const out = mergeTreeNodes(
+        [profile('A', '', 1, null, null), profile('B', '', 2, null, 'A')],
+        [agent('A', '실행부모')],
+      )
+      expect(out.map(n => n.id)).toEqual(['A'])
+      expect(out[0].kind).toBe('running')
+      expect(out[0].children.map(n => n.id)).toEqual(['B'])
+      expect(out[0].children[0].kind).toBe('reserved')
+    })
+
+    it('running 자식도 매칭 프로필의 parent_id 를 이어받아 중첩(AgentInfo 엔 parent_id 없음)', () => {
+      // 자식 B 가 실행중이면서 매칭 프로필이 parent_id=A 를 가짐 → running 노드가 parent 를 이어받아 A 밑으로.
+      const out = mergeTreeNodes(
+        [profile('A', '', 1), profile('B', '', 2, null, 'A')],
+        [agent('A'), agent('B')],
+      )
+      expect(out.map(n => n.id)).toEqual(['A'])
+      expect(out[0].children.map(n => n.id)).toEqual(['B'])
+      expect(out[0].children[0].kind).toBe('running')
+    })
+
+    it('존재하지 않는 parent_id → 자식이 루트로 승격(고아 방어)', () => {
+      const out = mergeTreeNodes([profile('B', '', 1, null, 'GHOST')], [])
+      expect(out.map(n => n.id)).toEqual(['B'])
+      expect(out[0].children).toHaveLength(0)
+    })
+
+    it('self-parent → 루트로 승격(cycle 방어)', () => {
+      const out = mergeTreeNodes([profile('B', '', 1, null, 'B')], [])
+      expect(out.map(n => n.id)).toEqual(['B'])
+      expect(out[0].children).toHaveLength(0)
+    })
+
+    it('2단 방지(A>B>C) — B 가 이미 자식이면 C 는 B 밑에 안 붙고 루트로 승격', () => {
+      // A 루트, B 는 A 의 자식, C 는 B 를 부모로 지정. 백엔드는 금지하지만 프론트는 방어적으로 C 를 루트로.
+      const out = mergeTreeNodes(
+        [
+          profile('A', '', 1),
+          profile('B', '', 2, null, 'A'),
+          profile('C', '', 3, null, 'B'),
+        ],
+        [],
+      )
+      // 루트 = A, C (B 는 A 자식). C 는 절대 B 밑에 중첩 안 함(2단 금지).
+      expect(out.map(n => n.id).sort()).toEqual(['A', 'C'])
+      const a = out.find(n => n.id === 'A')!
+      expect(a.children.map(n => n.id)).toEqual(['B'])
+      // B 는 자식을 갖지 않는다(C 가 B 밑에 안 붙음).
+      expect(a.children[0].children).toHaveLength(0)
+    })
+
+    it('자식 정렬도 결정적(created_at 오름차순 → id tiebreaker), 입력 순서 무관', () => {
+      // 고정 created_at: x=30, y=20, z=10 → 정렬은 항상 [z, y, x]. 입력 순서만 뒤집어도 동일.
+      const cx = profile('x', '', 30, null, 'A')
+      const cy = profile('y', '', 20, null, 'A')
+      const cz = profile('z', '', 10, null, 'A')
+      const parent = profile('A', '', 1)
+      const forward = mergeTreeNodes([parent, cx, cy, cz], [])[0].children.map(n => n.id)
+      const reversed = mergeTreeNodes([parent, cz, cy, cx], [])[0].children.map(n => n.id)
+      expect(forward).toEqual(['z', 'y', 'x']) // created_at 오름차순
+      expect(reversed).toEqual(forward) // 입력 순서 무관
+    })
   })
 })

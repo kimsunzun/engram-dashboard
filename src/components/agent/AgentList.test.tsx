@@ -1,16 +1,29 @@
-// AgentList 단위테스트 — statusGlyph 전 분기(pure, ADR-0062) + 평면 목록 렌더 스모크 + 행 메뉴 상호작용.
+// AgentList 단위테스트 — statusGlyph 전 분기(pure, ADR-0062) + 트리 렌더 스모크 + 행 메뉴 상호작용 +
+// 계층 중첩(ADR-0072) + 드래그 재부모화(onMove→reparentProfile) 경로.
 //
 // ★검증 불변식★:
 //   1. statusGlyph: Running/Exiting/Exited/Failed/Killed/Reserved + 미지 status 전 분기 고정.
 //      ◐(입력대기)는 어떤 입력으로도 반환되지 않는다(어휘로만 존재, 미점등).
-//   2. 평면 렌더: running ∪ reserved 행이 뜨고, 표시명 = cwd basename(이름 미저장), glyph 가 상태 모양.
+//   2. 트리 렌더: running ∪ reserved 행이 뜨고, 표시명 = cwd basename(이름 미저장), glyph 가 상태 모양.
+//      parent_id 로 자식이 부모 밑에 중첩(1단, react-arborist) — 자식 행은 부모 토글로 접기/펼치기.
 //   3. ★ROW 메뉴만 유지(ADR-0064)★: 배경(bg) 메뉴 + 프리셋 픽커는 제거됐다(배경 우클릭 = 통합 슬롯 메뉴로
-//      버블 — agentlist.createAgent command). 행 우클릭 메뉴(활성화/예약취소 · 열기/종료/이름변경/재시작)는
+//      버블 — agentlist.createAgent command). 행 우클릭 메뉴(활성화/삭제 · 열기/종료/이름변경/재시작)는
 //      item-targeted 라 그대로 유지되고 여전히 stopPropagation 한다.
 //   4. 스타일 = 변수-only(하드코딩 색 없음).
+//   5. reparentProfile: onMove 배선(드래그 재부모화)이 reparentProfile(childId, parentId) 를 올바른 형태로
+//      부른다(§5 — 사람 드래그·LLM 이 같은 핸들). no-op(이미 그 부모) 억제.
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// ── react-arborist(react-window) jsdom 보정 ──────────────────────────────────────
+// jsdom 은 ResizeObserver 를 제공하지 않는다 — Tree 컨테이너 실측 훅이 참조하므로 no-op stub.
+//   (콜백은 안 돌지만 AgentList 는 dimensions 초기값이 비-0 이라 트리가 첫 렌더부터 행을 그린다.)
+globalThis.ResizeObserver ||= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver
 
 // ── clientFactory stub ────────────────────────────────────────────────────────
 // AgentList 는 agentClient(spawnProfile/killAgent/deleteProfile) 를 부른다(spawn 은 이제 통합 슬롯 메뉴의
@@ -20,6 +33,7 @@ const clientMock = vi.hoisted(() => ({
   killAgent: vi.fn(async () => undefined),
   deleteProfile: vi.fn(async () => undefined),
   renameProfile: vi.fn(async () => undefined),
+  reparentProfile: vi.fn(async () => undefined),
 }))
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
@@ -27,6 +41,7 @@ vi.mock('../../api/clientFactory', () => ({
     killAgent: (...args: unknown[]) => clientMock.killAgent(...(args as [])),
     deleteProfile: (...args: unknown[]) => clientMock.deleteProfile(...(args as [])),
     renameProfile: (...args: unknown[]) => clientMock.renameProfile(...(args as [])),
+    reparentProfile: (...args: unknown[]) => clientMock.reparentProfile(...(args as [])),
   },
   getAgentClient: vi.fn(),
 }))
@@ -61,9 +76,15 @@ const caps = (): Capabilities => ({
 function agent(id: string, cwd: string, status: AgentInfo['status'] = { type: 'Running' }): AgentInfo {
   return { id, name: '', cwd, status, cols: 80, rows: 24, epoch: 1, capabilities: caps() }
 }
-function profile(id: string, cwd: string, createdAt = 0, displayName: string | null = null): AgentProfile {
+function profile(
+  id: string,
+  cwd: string,
+  createdAt = 0,
+  displayName: string | null = null,
+  parentId: string | null = null,
+): AgentProfile {
   return {
-    id, name: '', display_name: displayName, parent_id: null,
+    id, name: '', display_name: displayName, parent_id: parentId,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
     restart_policy: 'Never', restart_count: 0, failed_reason: null, created_at: createdAt,
@@ -76,6 +97,7 @@ beforeEach(() => {
   clientMock.killAgent.mockClear()
   clientMock.deleteProfile.mockClear()
   clientMock.renameProfile.mockClear()
+  clientMock.reparentProfile.mockClear()
   refreshProfilesMock.mockClear()
   assignAgentMock.mockClear()
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
@@ -100,31 +122,31 @@ describe('statusGlyph (pure, 전 분기)', () => {
   })
 })
 
-// ── 평면 목록 렌더 ─────────────────────────────────────────────────────────
-describe('AgentList 평면 렌더', () => {
+// ── 트리 렌더(react-arborist, ADR-0072) ────────────────────────────────────────
+describe('AgentList 트리 렌더', () => {
   it('빈 목록 → 안내 문구', () => {
     render(<AgentList />)
     expect(screen.getByText(/에이전트 없음/)).toBeTruthy()
   })
 
-  // ★FIX-A: 빈 상태 안내는 ScrollArea 밖의 flex-1 센터링 div★ — Radix Viewport 자식이 display:table 로
-  //   감싸져 height:100% 세로 중앙이 WebView2 에서 안 먹던 회귀 방지. 행이 없으면 스크롤 표면도 마운트 안 함.
-  it('빈 목록 → 안내 문구는 ScrollArea(스크롤 표면) 밖에 있고 스크롤 표면은 마운트되지 않는다(FIX-A)', () => {
+  // ★빈 상태 안내는 트리(react-arborist) 밖의 flex-1 센터링 div★ — 그릴 노드가 없으면 트리(가상화 스크롤)를
+  //   마운트하지 않고 안내 문구만 세로 중앙 정렬(옛 FIX-A 취지 유지 — 빈 상태엔 스크롤 표면 없음).
+  it('빈 목록 → 안내 문구는 트리 컨테이너 밖에 있고 트리는 마운트되지 않는다', () => {
     render(<AgentList />)
-    const scroll = document.querySelector('[data-testid="agent-list-scroll"]')
-    expect(scroll).toBeNull() // 스크롤할 행이 없으면 ScrollArea 자체가 없다
+    const tree = document.querySelector('[data-testid="agent-tree"]')
+    expect(tree).toBeNull() // 그릴 노드가 없으면 트리 컨테이너 자체가 없다
     const empty = screen.getByText(/에이전트 없음/)
-    // 안내 문구는 바깥 컬럼(data-agent-list)의 직속 자식(스크롤 표면 안이 아님).
-    expect(empty.closest('[data-testid="agent-list-scroll"]')).toBeNull()
+    // 안내 문구는 바깥 컬럼(data-agent-list)의 직속 자식(트리 안이 아님).
+    expect(empty.closest('[data-testid="agent-tree"]')).toBeNull()
     expect(empty.closest('[data-agent-list]')).toBeTruthy()
   })
 
-  it('비빈 목록 → ScrollArea(스크롤 표면) 마운트 + 행이 그 안에 있다(FIX-A)', () => {
+  it('비빈 목록 → 트리 컨테이너 마운트 + 행이 그 안에 있다', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
-    const scroll = document.querySelector('[data-testid="agent-list-scroll"]')
-    expect(scroll).toBeTruthy()
-    expect(scroll?.querySelector('[data-agent-row="a1"]')).toBeTruthy()
+    const tree = document.querySelector('[data-testid="agent-tree"]')
+    expect(tree).toBeTruthy()
+    expect(tree?.querySelector('[data-agent-row="a1"]')).toBeTruthy()
   })
 
   it('running ∪ reserved 행 렌더 + 표시명 = cwd basename(이름 미저장)', () => {
@@ -202,6 +224,11 @@ describe('행 우클릭 메뉴', () => {
     expect(clientMock.killAgent).toHaveBeenCalledWith('a1')
   })
 
+  // ★인라인 편집 키(Enter/Escape)는 ROW div 에서 발화★: keydown 핸들러는 항상 렌더되는 행 div 에 있다
+  //   (input 이 아니라). react-window 가상화 안에서 조건부 mount 되는 input 의 onKeyDown 은 React 19 이벤트
+  //   위임이 2번째 이후 재-mount root 에 keydown 리스너를 못 붙여 synthetic 이 안 뜬다(react-window+jsdom
+  //   상호작용 — click/blur/change 정상, keydown 만). 그래서 컴포넌트가 keydown 을 행 div 로 올렸고, 테스트도
+  //   실제 핸들러 소유 요소(행 div)에 keydown 을 쏜다(input 값 변경은 change 로 그대로 검증).
   it('실행중 행 이름변경 → 인라인 입력 → Enter 확정 → renameProfile(id, trimmed) 호출', () => {
     // 프로필 없는 ad-hoc running 이면 rename 대상이 없지만, 여기선 매칭 프로필을 둬 override 저장 경로를 검증.
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')], profiles: [profile('a1', 'C:/w')] })
@@ -211,7 +238,7 @@ describe('행 우클릭 메뉴', () => {
     const input = document.querySelector('[data-agent-rename-input="a1"]') as HTMLInputElement
     expect(input).toBeTruthy()
     fireEvent.change(input, { target: { value: '  내 에이전트  ' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.keyDown(document.querySelector('[data-agent-row="a1"]') as HTMLElement, { key: 'Enter' })
     // trim 후 값으로 renameProfile 발화(§5 백엔드 저장 — 낙관 갱신 X).
     expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', '내 에이전트')
   })
@@ -223,7 +250,7 @@ describe('행 우클릭 메뉴', () => {
     fireEvent.click(screen.getByText('이름 변경'))
     const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
     fireEvent.change(input, { target: { value: '바뀐이름' } })
-    fireEvent.keyDown(input, { key: 'Escape' })
+    fireEvent.keyDown(document.querySelector('[data-agent-row="p1"]') as HTMLElement, { key: 'Escape' })
     // Esc = 취소 → 백엔드 발화 없음(revert).
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
     expect(document.querySelector('[data-agent-rename-input="p1"]')).toBeNull() // 편집 종료
@@ -235,9 +262,8 @@ describe('행 우클릭 메뉴', () => {
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="p2"]') as HTMLElement)
     fireEvent.click(screen.getByText('이름 변경'))
-    const input = document.querySelector('[data-agent-rename-input="p2"]') as HTMLInputElement
     // 시드된 draft = 현재 표시명('고정명'). 그대로 Enter → 미변경이라 발화 없음.
-    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.keyDown(document.querySelector('[data-agent-row="p2"]') as HTMLElement, { key: 'Enter' })
     expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
 })
@@ -265,7 +291,8 @@ describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지
     fireEvent.click(screen.getByText('이름 변경'))
     const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
     fireEvent.change(input, { target: { value: '새이름' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
+    // Enter 확정은 행 div keydown 소유(위 주석 — react-window+React19 회피). 행 div 에 발화.
+    fireEvent.keyDown(document.querySelector('[data-agent-row="p1"]') as HTMLElement, { key: 'Enter' })
 
     // 발화 검증 + 형제 노드가 사라지지 않았는지(증상4) 검증.
     expect(clientMock.renameProfile).toHaveBeenCalledWith('p1', '새이름')
@@ -283,7 +310,8 @@ describe('증상4 회귀: 한 노드 rename 이 형제 노드를 떨어뜨리지
     const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
     fireEvent.change(input, { target: { value: '새이름' } })
     await act(async () => {
-      fireEvent.keyDown(input, { key: 'Enter' })
+      // Enter 확정은 행 div keydown 소유(위 주석). 행 div 에 발화.
+      fireEvent.keyDown(document.querySelector('[data-agent-row="p1"]') as HTMLElement, { key: 'Enter' })
       // renameProfile Promise resolve 후 .then(refreshProfiles) 가 도는 microtask 를 flush.
       await Promise.resolve()
     })
@@ -415,3 +443,43 @@ describe('타깃 사라지면 행 메뉴 닫힘(stale-target 가드)', () => {
     expect(screen.queryByText('열기')).toBeNull()
   })
 })
+
+// ── 계층 중첩 렌더 + 접기/펼치기(react-arborist, ADR-0072) ──────────────────────────
+describe('계층 중첩(parent_id → 부모 밑 자식, ADR-0072)', () => {
+  it('자식(parent_id=A)이 부모 A 밑에 중첩 렌더 + 자식 행이 더 들여쓰기됨', () => {
+    // A 부모, B 자식(parent_id=A). openByDefault 라 자식도 펼쳐진 상태로 렌더.
+    useAgentStore.setState({
+      profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2, null, 'A')],
+    })
+    render(<AgentList />)
+    const parentRow = document.querySelector('[data-agent-row="A"]') as HTMLElement
+    const childRow = document.querySelector('[data-agent-row="B"]') as HTMLElement
+    expect(parentRow).toBeTruthy()
+    expect(childRow).toBeTruthy()
+    // 부모는 토글(펼치기/접기)을 갖는다(자식 보유). 자식은 leaf 라 토글 활성 없음.
+    expect(parentRow.querySelector('[data-agent-toggle="1"]')).toBeTruthy()
+    expect(childRow.querySelector('[data-agent-toggle="1"]')).toBeNull()
+    // 들여쓰기: 자식 paddingLeft > 부모 paddingLeft(level*INDENT 반영).
+    const parentPad = parseInt(parentRow.style.paddingLeft || '0', 10)
+    const childPad = parseInt(childRow.style.paddingLeft || '0', 10)
+    expect(childPad).toBeGreaterThan(parentPad)
+  })
+
+  it('부모 토글 클릭 → 자식 접힘(사라짐), 다시 클릭 → 펼쳐짐', () => {
+    useAgentStore.setState({
+      profiles: [profile('A', 'C:/a', 1), profile('B', 'C:/b', 2, null, 'A')],
+    })
+    render(<AgentList />)
+    // 초기(openByDefault): 자식 보임.
+    expect(document.querySelector('[data-agent-row="B"]')).toBeTruthy()
+    const toggle = document.querySelector('[data-agent-row="A"] [data-agent-toggle="1"]') as HTMLElement
+    // 접기 → 자식 사라짐.
+    act(() => { fireEvent.click(toggle) })
+    expect(document.querySelector('[data-agent-row="B"]')).toBeNull()
+    // 다시 펼치기 → 자식 복귀(토글은 재조회 — 접힘 상태에서 부모 행은 유지).
+    const toggle2 = document.querySelector('[data-agent-row="A"] [data-agent-toggle="1"]') as HTMLElement
+    act(() => { fireEvent.click(toggle2) })
+    expect(document.querySelector('[data-agent-row="B"]')).toBeTruthy()
+  })
+})
+

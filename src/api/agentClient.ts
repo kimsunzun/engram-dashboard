@@ -158,6 +158,13 @@ export interface AgentClient {
    * broadcast(낙관 갱신 X). 없는 id 면 Error(setProfileAutoRestore 와 동형).
    */
   renameProfile(agentId: string, name: string | null): Promise<void>
+  /**
+   * 프로필 부모 재지정(ADR-0072 트리 계층, §5 LLM 제어 표면). childId 를 parentId 밑으로 이동
+   * (null → 루트로 승격). 1단 중첩만 — 백엔드가 cycle/self/2단/존재하지 않는 parent 를 거부(Error).
+   * renameProfile 과 동형 additive: reply=Ack(void), 계층 반영은 뒤이은 ProfileListUpdated broadcast
+   * (낙관 갱신 X). 사람 드래그와 LLM 호출이 같은 진입점(§5 손발/두뇌 분리 — 트리 구성은 두뇌가 쥐는 핸들).
+   */
+  reparentProfile(childId: string, parentId: string | null): Promise<void>
 
   // ── 프리셋 CRUD(ADR-0061 — cwd 북마크, 스폰 안 함) ─────────────────────────────
   /** 저장된 프리셋 전체 조회. PresetList 전용 reply(request_id echo)로 회수. */
