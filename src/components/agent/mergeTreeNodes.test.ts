@@ -121,6 +121,36 @@ describe('mergeTreeNodes', () => {
     expect(out.find(n => n.id === 'a')?.displayName).toBeNull()
   })
 
+  // ── ADR-0072 드롭 가드: hasProfile(프로필 유무) ─────────────────────────────────
+  //   reparent 는 child·parent 둘 다 실 프로필이 있어야 성립(백엔드가 no-profile op 를 거부).
+  //   hasProfile 은 프론트 드래그/드롭 pre-filter 의 근거 필드다.
+  describe('hasProfile(드롭 가드, ADR-0072)', () => {
+    it('reserved 노드 → hasProfile=true(프로필에서 생성)', () => {
+      const out = mergeTreeNodes([profile('p1', '예약')], [])
+      expect(out.find(n => n.id === 'p1')?.hasProfile).toBe(true)
+    })
+
+    it('매칭 프로필 있는 running 노드 → hasProfile=true', () => {
+      const out = mergeTreeNodes([profile('a', '', 1)], [agent('a')])
+      expect(out.find(n => n.id === 'a')?.hasProfile).toBe(true)
+    })
+
+    it('프로필 없는 ad-hoc running 노드(SpawnByCwd) → hasProfile=false', () => {
+      const out = mergeTreeNodes([], [agent('adhoc')])
+      expect(out.find(n => n.id === 'adhoc')?.hasProfile).toBe(false)
+    })
+
+    it('혼합: ad-hoc(false) + 매칭 running(true) + reserved(true) 동시 판정', () => {
+      const out = mergeTreeNodes(
+        [profile('run', '', 1), profile('res', '', 2)],
+        [agent('run'), agent('adhoc')],
+      )
+      expect(out.find(n => n.id === 'run')?.hasProfile).toBe(true)
+      expect(out.find(n => n.id === 'adhoc')?.hasProfile).toBe(false)
+      expect(out.find(n => n.id === 'res')?.hasProfile).toBe(true)
+    })
+  })
+
   // ── MINOR-2: 결정적 정렬 회귀 가드 ──────────────────────────────────────────
   // 백엔드 listProfiles/agents 가 HashMap iteration(비결정적) 순서로 올 수 있어,
   // 정렬이 없으면 refetch 마다 노드가 튄다. "같은 입력 집합이면 항상 같은 순서" 보장.

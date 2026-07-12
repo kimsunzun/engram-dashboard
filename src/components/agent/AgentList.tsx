@@ -552,14 +552,38 @@ export default function AgentList() {
             //   상태를 쓰므로 내장 편집은 끈다(중복 편집 UI 방지). 선택 다중선택도 불필요 → 단일선택 유지.
             disableEdit
             disableMultiSelection
-            // ★1단 상한 UI 가드(ADR-0072 · review FIX)★: 부모가 루트 아닌 곳(=자식 밑)으로의 드롭, 또는 이미
-            //   자식을 가진 노드를 남의 밑으로 드롭하는 것을 UI 에서 막는다(둘 다 2단이 됨). 백엔드도 거부하지만
-            //   (Error), 먼저 차단해 흔한 오조작에서 불필요한 실패 커맨드·에러 토스트를 없앤다. leaf 도
-            //   children:[] 라 react-arborist 가 isInternal 로 봐 중앙 드롭이 걸리므로 이 가드가 필요.
-            disableDrop={({ parentNode, dragNodes }) =>
-              (parentNode != null && parentNode.level > 0) ||
-              dragNodes.some(n => Array.isArray(n.data.children) && n.data.children.length > 0)
-            }
+            // ★드래그 불가 = 프로필 없는 노드(ADR-0072 드롭 가드)★: ad-hoc(SpawnByCwd, 프로필 없는 running)은
+            //   reparent 대상 프로필이 없어 백엔드가 no-profile 을 Error 로 거부한다 → 애초에 드래그를 막아
+            //   불필요한 실패 커맨드·에러 토스트를 없앤다(reserved·프로필 있는 running 은 드래그 가능).
+            disableDrag={(data: AgentTreeNode) => !data.hasProfile}
+            // ★1단 상한 + 프로필 유무 + 부모-불변 UI 가드(ADR-0072 · review FIX)★: UI 에서 막는 3가지 —
+            //   ① 부모가 루트 아닌 곳(=자식 밑)으로의 드롭, 또는 이미 자식을 가진 노드를 남의 밑으로 드롭(둘 다
+            //      2단이 됨). leaf 도 children:[] 라 react-arborist 가 isInternal 로 봐 중앙 드롭이 걸리므로 필요.
+            //   ② 프로필 없는 노드(ad-hoc)를 부모로 하는 드롭 — 그 위엔 자식 못 붙임(reparent 대상 프로필 부재).
+            //   ③ 현재 부모와 동일한 부모로의 드롭(루트↔루트 reorder 포함) — 백엔드 정렬은 created_at 기반이라
+            //      reorder 미지원이다. react-arborist 는 same-parent reorder 를 유효 드롭(커서 표시)으로 주지만
+            //      드롭해도 아무 일 없어 혼란 → 유효 드롭처럼 보이지 않게 비활성(onMove 도 이미 no-op 억제).
+            //   ★루트 드롭 정규화★: canDrop 은 루트 드롭 때 parentNode 를 내부 루트 pseudo-node(isRoot,
+            //     level=-1, data={id:ROOT_ID})로 준다(null 이 아님). 그래서 ②·③ 은 실 부모(isRoot 아님)에만
+            //     적용하고, 루트-대상 비교는 dropParentId(루트=null)로 정규화해 판정한다.
+            disableDrop={({ parentNode, dragNodes }) => {
+              const isRootDrop = parentNode == null || parentNode.isRoot
+              // dropParentId: 루트 드롭이면 null, 아니면 실 부모 id(reparent 가 받는 것과 동일 정규화).
+              const dropParentId = isRootDrop ? null : parentNode.id
+              // 현재 부모 id: 루트 레벨 노드의 parent 는 내부 루트(isRoot)라 null 로 정규화.
+              const dragParent = dragNodes[0]?.parent
+              const currentParentId = dragParent && !dragParent.isRoot ? dragParent.id : null
+              return (
+                // ① 실 부모가 루트 아닌 곳(=자식 밑) → 2단 방지.
+                (!isRootDrop && parentNode.level > 0) ||
+                // ② 실 부모가 프로필 없는 노드(ad-hoc) → 그 위엔 자식 못 붙임.
+                (!isRootDrop && !parentNode.data.hasProfile) ||
+                // ① 이미 자식을 가진 노드를 남의 밑으로 → 2단 방지.
+                dragNodes.some(n => Array.isArray(n.data.children) && n.data.children.length > 0) ||
+                // ③ 부모가 안 바뀌는 드롭(same-parent reorder / 루트↔루트) → 유효 드롭처럼 안 보이게.
+                currentParentId === dropParentId
+              )
+            }}
             // ★드래그 재부모화 = onMove(§5)★. dropParentId(null=루트)로 reparentProfile 발화(낙관 갱신 X).
             onMove={({ dragIds, parentId }) => {
               // disableMultiSelection 으로 단일 드래그 전제 — [0]만 처리(다중선택 재활성 시 이 라인 재검토).

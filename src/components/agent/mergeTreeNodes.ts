@@ -30,6 +30,13 @@ export type AgentTreeNode = {
   /** 우클릭 중단 가능 여부(running 전용). reserved 는 항상 false. */
   canInterrupt: boolean
   /**
+   * 매칭 프로필 보유 여부(ADR-0072 드롭 가드용). reserved = 항상 true(프로필에서 생성), running =
+   * 매칭 프로필 존재 여부(ad-hoc SpawnByCwd 셸은 프로필 없어 false). 왜: reparent 는 child·parent 둘 다
+   * 실 프로필이 있어야 성립한다(백엔드가 no-profile op 를 Error 로 거부) → 프론트 드래그/드롭 pre-filter 에
+   * 쓴다(false 인 노드는 드래그 불가·드롭 부모로 불가). 계층 판정(parent_id)이 아니라 프로필 유무만 담는다.
+   */
+  hasProfile: boolean
+  /**
    * 자식 노드(ADR-0072 — react-arborist childrenAccessor). 항상 배열(빈 배열 = leaf). 1단 중첩만이라
    * 자식은 항상 빈 children 을 갖지만, 타입은 재귀 트리로 둔다(react-arborist 가 forest 를 순회).
    */
@@ -47,8 +54,9 @@ export type AgentTreeNode = {
  * 정렬(각 레벨 독립 적용): 실행중 먼저, 그다음 예약 프로필 — 사람이 활성 세션을 위에서 먼저 보게.
  *       각 그룹 내부는 결정적으로 정렬한다(MINOR-2): 백엔드 listProfiles/agents 가
  *       HashMap iteration(비결정적) 순서로 올 수 있어, 그대로 쓰면 refetch 마다 노드가 튄다.
- *       - reserved: created_at 오름차순(생성 순) → tiebreaker id. profile 은 created_at 보유.
- *       - running: AgentInfo 엔 created_at 이 없으므로 id 오름차순(안정 키).
+ *       - created_at 은 매칭 프로필에서 조회(createdAtOf). reserved·프로필 있는 running 은 프로필의
+ *         created_at 으로 정렬된다. ad-hoc running(프로필 없음)은 조회 미스 → 0 으로 떨어져 id tiebreaker 로만.
+ *       - tiebreaker(created_at 동률): id 오름차순(안정 키).
  *       목표 = "같은 입력 집합이면 항상 같은 순서". 루트·자식 모두 같은 비교자로 정렬한다.
  *
  * 계층(ADR-0072): 평면 노드 목록을 만든 뒤 parent_id 로 자식을 부모 children 에 꽂는다(nestByParent).
@@ -71,6 +79,8 @@ export function mergeTreeNodes(
     status: a.status.type,
     kind: 'running' as const,
     canInterrupt: a.capabilities?.control?.interrupt ?? false,
+    // 매칭 프로필 존재 여부 = 드롭 가드 pre-filter(ad-hoc 셸은 프로필 없어 false → 드래그/드롭 부모 불가).
+    hasProfile: profileById.has(a.id),
     children: [],
   }))
 
@@ -85,12 +95,13 @@ export function mergeTreeNodes(
       status: 'Reserved',
       kind: 'reserved' as const,
       canInterrupt: false,
+      hasProfile: true, // reserved 는 프로필에서 생성 → 항상 프로필 보유.
       children: [],
     }))
 
   // 평면 노드 전체(계층화 입력) — parent_id·created_at 조회는 profileById 로. running 노드도 매칭 프로필의
   //   parent_id 를 이어받는다(ad-hoc 은 프로필 없음 → parent_id 없음 = 루트). created_at 도 매칭 프로필에서
-  //   (running AgentInfo 엔 created_at 없음 → 0 = 정렬 시 id tiebreaker 로 떨어짐, 기존 동작 동형).
+  //   조회: 프로필 있는 running 은 그 프로필의 created_at 으로 정렬, ad-hoc(프로필 없음)만 0 → id tiebreaker.
   const flat = [...runningNodes, ...reservedNodes]
   const parentOf = (id: string): string | null => profileById.get(id)?.parent_id ?? null
   const createdAtOf = (id: string): number => profileById.get(id)?.created_at ?? 0
