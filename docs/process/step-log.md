@@ -886,6 +886,12 @@
 - **검증(qa full PASS):** `npx tsc --noEmit` clean · `npm test`(vitest **530**) · **cdp 실측**(live 포트 9223): `t()` dynamic import로 24개 마이그레이션 key 반환값 실측 — 보간(`창 로딩 중… (label: X)`·`활성화 실패: E`·`탭 닫기: MyTab`)·em-dash·ellipsis·중점·이스케이프 quote 전부 byte-identical, fallback 0(running 앱 반영 확인) + DOM 렌더 `에이전트 트리`·`— empty —` 실측. Rust 게이트 N/A(변경 Rust 0 = 인과 격리, bare `cargo test`=WebView2 크래시 do-not).
 - **게이트:** 커밋 = 14파일(`ko.ts` + 컴포넌트 13) + step-log. **후속:** ADR-0069 UI 문자열 중앙화 구현 3슬라이스(그릇·command·컴포넌트) 완료 — 새 UI 문자열은 인라인 금지·`t()` 경유(ADR-0069 불변식).
 
+## 멀티 에이전트 오케스트레이션 — OSS 서베이 자료 (설계-결정용, 결정 아님) (2026-07-12, master, 대화→자율 세션) · ADR-0014 심화
+- **무엇:** 로드맵 복귀 전 사용자가 외출하며 "오케스트레이션 리서치→자료로 남겨" 지시 → `/research design-decision deep` 실행, `docs/research/orchestration-survey-2026-07-12.md` 산출. ADR-0014(제안) 후보들을 층별(A 감독·B 내구성·C 조율·D 통신) 서베이 + engram 기존자산 매핑(build-on vs 새로) + 옵션셋 3개(감독우선 최소증분 / 중앙 오케스트레이터 / 메시징우선) + 거부 대안. **결정 아님 — 다음 세션 PRD/TRD 재료.**
+- **어떻게:** 주계열 수집자 5명 병렬(sonnet, 층별 by-candidate: OTP/Ractor/Actix · Temporal/Restate/Inngest · LangGraph/AutoGen/CrewAI/Swarm/ClaudeCodeWorkflow · A2A/actor/pubsub · engram 내부 grounding) → 메인 grounding → **Codex(cross-family blind, effort high) 적대 리뷰 = 초판 BLOCK, findings 12건(high 3) 전부 반증근거 동반** → v2 개정 반영. 주요 교정: A0 네이티브 baseline(tokio+기존PTY/reaper+직접supervisor) 신설 · 프로세스 트리 격리 축(engram 이미 Windows Job Object 보유·ADR-0001) · "Claude Code Workflow"=공개OSS 아닌 내장툴 귀속 교정 · Temporal 로컬 dev server 뉘앙스 · deadlock(supervision≠live deadlock 방어)·ACK(큐수용≠end-to-end) confident-wrong 교정 · 순서 1→3→2 내부모순→1→2→(3필요시).
+- **핵심 결론(자료):** engram이 오케스트레이션 하부 절반 보유(reaper·epoch·S9사다리·예약필드 RestartPolicy·이벤트버스·command registry 골격). 새로 짤 것 = 런타임 자동재시작 실행·에이전트간 주소지정/메시징·태스크그래프·오케스트레이터 브레인(§5). 프레임워크는 채택 아닌 패턴 차용, 내구성 엔진은 현 규모 과함. 관련 기존 문서 = `docs/research/control-surface-and-fleet.md`·`llm-control-surface-message-command-scope-2026-06-28.md`.
+- **게이트:** 문서만(로직 무변). 발견체인 = ADR-0014에 back-pointer + 이 step-log. **결정·구현 미착수(사용자 선택 대기).** 열화 라벨: cross-family 병렬수집 미실행(Codex omission 렌즈로 부분 백스톱), 버전숫자 시간민감.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
