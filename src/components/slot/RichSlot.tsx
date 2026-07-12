@@ -26,6 +26,7 @@ import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import { StructuredTextView } from './StructuredTextView'
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
+import { basename } from '../../util/basename'
 import { t } from '../../i18n'
 
 interface RichSlotProps {
@@ -67,6 +68,17 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
   const isTerminated =
     agent != null &&
     (agent.status.type === 'Exited' || agent.status.type === 'Killed' || agent.status.type === 'Failed')
+
+  // ★정체성 라벨(§ user request)★: json 모드는 터미널의 claude 웰컴 배너 같은 "어느 에이전트인지" 신호가
+  //   없다. 우측 상단에 작은 라벨을 오버랩해 이름만 표시한다(아래 render — 줄을 차지하지 않음). 표시명은
+  //   트리(displayNameOf)와 동일 규칙: display_name override ?? agent.name ?? cwd basename(중복 이름 허용).
+  const profiles = useAgentStore((s) => s.profiles)
+  // profiles 는 실 store 에선 항상 배열([])이지만, 일부 단위테스트 mock 은 s.profiles 를 안 채운다 → 방어적 옵셔널.
+  const profile = profiles?.find((p) => p.id === agentId) ?? null
+  const cwd = agent?.cwd ?? profile?.cwd ?? ''
+  // ★basename 만★: agent.name 은 프로필의 name(=우리가 createClaudeProfile 에 넘긴 full cwd)이라 풀 경로가
+  //   뜬다 → 트리(displayNameOf)와 동일하게 display_name override 없으면 basename(cwd)만 쓴다("Filter Library").
+  const headerName = profile?.display_name ?? basename(cwd)
 
   // 출력 구독 — TerminalSlot 규율 미러: [agentId,epoch] deps, 구독 전 누산기 reset(=terminal.reset()),
   // seq dedup(컴포넌트 방어 — 클라도 내부 dedup), 정확한 unsubscribe(stale 가드 토큰은 클라 소유).
@@ -165,7 +177,17 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
 
       {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
           으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}
-      <div className="flex flex-none items-stretch border-t border-border px-2 py-1.5">
+      <div className="relative flex flex-none items-stretch border-t border-border px-2 py-1.5">
+        {/* ★정체성 라벨(§ user request)★: claude-code 터미널처럼 입력창 바로 위(우측)에 작은 라벨을 오버랩
+            (absolute -top — 줄을 차지하지 않음)해 어느 에이전트인지 이름만 표시(중복 이름 허용). pointer-events-none
+            으로 입력·스크롤을 막지 않는다. 상태 글리프는 트리가 담당. */}
+        <div
+          data-rich-label="1"
+          title={headerName}
+          className="pointer-events-none absolute -top-5 right-3 z-10 max-w-[70%] truncate rounded border border-border bg-surface px-1.5 py-0.5 text-[11px] text-muted"
+        >
+          {headerName}
+        </div>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -183,7 +205,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
           placeholder={isTerminated ? t('agent.terminatedPlaceholder') : t('agent.inputPlaceholder')}
           disabled={isTerminated}
           rows={2}
-          className="flex-1 resize-none rounded border border-border bg-surface px-2 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"
+          className="flex-1 resize-none rounded border border-border bg-surface px-4 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"
         />
       </div>
     </div>
