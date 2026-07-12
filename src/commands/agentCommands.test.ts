@@ -11,10 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const clientMock = vi.hoisted(() => ({
   spawnAgent: vi.fn(async () => ({ id: 'new-agent' })),
+  renameProfile: vi.fn(async () => undefined),
 }))
 vi.mock('../api/clientFactory', () => ({
   agentClient: {
     spawnAgent: (...args: unknown[]) => clientMock.spawnAgent(...(args as [])),
+    renameProfile: (...args: unknown[]) => clientMock.renameProfile(...(args as [])),
   },
   getAgentClient: vi.fn(),
 }))
@@ -25,6 +27,7 @@ import { useAgentStore } from '../store/agentStore'
 
 beforeEach(() => {
   clientMock.spawnAgent.mockClear()
+  clientMock.renameProfile.mockClear()
   useAgentStore.setState({ presets: [] })
 })
 afterEach(() => {
@@ -33,7 +36,7 @@ afterEach(() => {
 
 describe('agent.spawn 라우팅', () => {
   it('preset(id) → store.presets 에서 cwd 해소 → spawnAgent(cwd)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram' }] })
+    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram', name: null }] })
     run('agent.spawn', { preset: 'pr1' })
     expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work/engram')
   })
@@ -55,14 +58,33 @@ describe('agent.spawn 라우팅', () => {
   })
 
   it('없는 preset id → throw(조용한 no-op 금지)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work' }] })
+    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work', name: null }] })
     expect(() => run('agent.spawn', { preset: 'nope' })).toThrow(/알 수 없는 preset/)
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
   it('preset 이 cwd 보다 우선(둘 다 주면 preset 해소값 사용)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/from/preset' }] })
+    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/from/preset', name: null }] })
     run('agent.spawn', { preset: 'pr1', cwd: 'C:/ignored' })
     expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/from/preset')
+  })
+})
+
+// ── agent.rename 어댑터(§5 LLM 제어 — ADR-0061 리치화) ────────────────────────────
+describe('agent.rename 라우팅', () => {
+  it('id + name → renameProfile(id, trimmed)', () => {
+    run('agent.rename', { id: '  a1  ', name: '  내 에이전트  ' })
+    expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', '내 에이전트')
+  })
+  it('name 생략/빈문자열 → null(override 해제)', () => {
+    run('agent.rename', { id: 'a1' })
+    expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', null)
+    clientMock.renameProfile.mockClear()
+    run('agent.rename', { id: 'a1', name: '   ' })
+    expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', null)
+  })
+  it('빈 id → throw(조용한 no-op 금지)', () => {
+    expect(() => run('agent.rename', { name: 'x' })).toThrow(/id 가 비어 있음/)
+    expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
 })

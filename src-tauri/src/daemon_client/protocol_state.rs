@@ -45,11 +45,15 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::DeleteProfile { request_id, .. }
         | AgentCommand::SpawnProfile { request_id, .. }
         | AgentCommand::SetProfileAutoRestore { request_id, .. }
+        // 트리 rename(ADR-0061 리치화) — Ack 매칭 대상(SetProfileAutoRestore 와 동형).
+        | AgentCommand::RenameProfile { request_id, .. }
         | AgentCommand::GetSnapshot { request_id, .. }
-        // 프리셋 CRUD(ADR-0061) — 셋 다 request_id 동봉(reply 매칭 대상).
+        // 프리셋 CRUD(ADR-0061) — 넷 다 request_id 동봉(reply 매칭 대상).
         | AgentCommand::ListPresets { request_id }
         | AgentCommand::CreatePreset { request_id, .. }
-        | AgentCommand::DeletePreset { request_id, .. } => Some(*request_id),
+        | AgentCommand::DeletePreset { request_id, .. }
+        // 프리셋 rename(ADR-0061 리치화) — Ack 매칭 대상.
+        | AgentCommand::RenamePreset { request_id, .. } => Some(*request_id),
         // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
         AgentCommand::Auth { .. }
         | AgentCommand::Resize { .. }

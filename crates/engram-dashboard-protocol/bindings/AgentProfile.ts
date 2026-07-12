@@ -6,7 +6,13 @@ import type { RestartPolicy } from "./RestartPolicy";
  * 영속 프로필 wire 미러 — core `profile::AgentProfile` 의 직렬화 형태와 일치.
  * 프로필 CRUD command/event(ProfileListUpdated)에 실린다.
  */
-export type AgentProfile = { id: string, name: string, command: AgentSpawnCommand, 
+export type AgentProfile = { id: string, name: string, 
+/**
+ * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). `Some` → 그대로 표시, `None` → cwd
+ * basename 파생(기존 동작 불변). core `AgentProfile::display_name` 미러. 프론트 트리가 `name` 대신
+ * 이 값을 우선 표시명으로 쓴다(`name` 은 CreateProfile 이름/ad-hoc cwd 문자열이라 표시명 부적합).
+ */
+display_name: string | null, command: AgentSpawnCommand, 
 /**
  * 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
  */

@@ -10,8 +10,14 @@ import type { AgentInfo, AgentProfile } from '../../api/types'
 export type AgentTreeNode = {
   id: string
   name: string
-  /** 작업 디렉토리(cwd). AgentList 가 이 값의 basename 으로 표시명을 파생한다(이름 미저장 정책). */
+  /** 작업 디렉토리(cwd). AgentList 가 표시명 override 없으면 이 값의 basename 으로 파생한다. */
   cwd: string
+  /**
+   * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). Some → 그대로 표시, null → cwd basename
+   * 파생(기존 동작 불변). ★AgentProfile.display_name 에서만 온다★: reserved 노드는 프로필 직접, running
+   * 노드는 매칭 프로필이 있으면 그 override 를 이어받는다(AgentInfo wire 엔 display_name 이 없어 프로필 조회).
+   */
+  displayName: string | null
   /** 'running' = AgentStatus.type 문자열, 'reserved' = 깡통(미spawn 프로필). */
   status: string
   /** 'running'=실행중(또는 종료 등 세션 보유) / 'reserved'=저장만 된 깡통. */
@@ -39,12 +45,17 @@ export function mergeTreeNodes(
   agents: AgentInfo[],
 ): AgentTreeNode[] {
   const runningIds = new Set(agents.map(a => a.id))
+  // 표시명 override(display_name)는 AgentProfile 에만 있다(AgentInfo wire 엔 없음). running 노드가 매칭
+  //   프로필의 override 를 이어받게 id→display_name 맵을 만든다(reserved 는 프로필을 직접 매핑).
+  const overrideById = new Map(profiles.map(p => [p.id, p.display_name ?? null]))
 
   const runningNodes: AgentTreeNode[] = agents
     .map(a => ({
       id: a.id,
       name: a.name || a.id.slice(0, 8),
       cwd: a.cwd,
+      // ad-hoc(SpawnByCwd)은 프로필이 없을 수 있다 → 맵 미스 시 null(basename 파생, 기존 동작 불변).
+      displayName: overrideById.get(a.id) ?? null,
       status: a.status.type,
       kind: 'running' as const,
       canInterrupt: a.capabilities?.control?.interrupt ?? false,
@@ -66,6 +77,7 @@ export function mergeTreeNodes(
       id: p.id,
       name: p.name || p.id.slice(0, 8),
       cwd: p.cwd,
+      displayName: p.display_name ?? null, // 프로필 override 직접 매핑.
       status: 'Reserved',
       kind: 'reserved' as const,
       canInterrupt: false,

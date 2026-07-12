@@ -222,6 +222,41 @@ describe('프리셋 CRUD(ADR-0061)', () => {
     t.control({ Ack: { request_id: sent.request_id } })
     await expect(p).resolves.toBeUndefined()
   })
+
+  it('renamePreset(id, name) → RenamePreset{preset_id,name,request_id} 전송 + Ack 로 void resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.renamePreset('pr1', '내 프리셋')
+    await Promise.resolve()
+    const sent = t.lastSent<{ request_id: string; preset_id: string; name: string | null }>('RenamePreset')!
+    expect(sent.preset_id).toBe('pr1')
+    expect(sent.name).toBe('내 프리셋')
+    t.control({ Ack: { request_id: sent.request_id } })
+    await expect(p).resolves.toBeUndefined()
+  })
+
+  it('renamePreset(id, null) → name=null 로 전송(override 해제)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.renamePreset('pr1', null)
+    await Promise.resolve()
+    const sent = t.lastSent<{ request_id: string; preset_id: string; name: string | null }>('RenamePreset')!
+    expect(sent.name).toBeNull()
+    t.control({ Ack: { request_id: sent.request_id } })
+    await expect(p).resolves.toBeUndefined()
+  })
+
+  it('renameProfile(id, name) → RenameProfile{profile_id,name,request_id} 전송 + Ack 로 void resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.renameProfile('a1', '내 에이전트')
+    await Promise.resolve()
+    const sent = t.lastSent<{ request_id: string; profile_id: string; name: string | null }>('RenameProfile')!
+    expect(sent.profile_id).toBe('a1')
+    expect(sent.name).toBe('내 에이전트')
+    t.control({ Ack: { request_id: sent.request_id } })
+    await expect(p).resolves.toBeUndefined()
+  })
 })
 
 // ── subscribeOutput 기본 배선(뷰 단위, ADR-0046) ─────────────────────────────────────

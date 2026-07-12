@@ -148,6 +148,18 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
+    /// 프로필 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `name=Some` → override 저장,
+    /// `None` → 해제(cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 프론트가 확정 직전 처리
+    /// (TabBar rename 과 동형) — 여기엔 유효 값 또는 명시 None 만 온다. 없는 id 면 Error(SetProfileAutoRestore
+    /// 와 동형). 성공 후 [`AgentEvent::ProfileListUpdated`] broadcast(낙관 갱신 X — 모든 창 동기화).
+    RenameProfile {
+        #[ts(type = "string")]
+        profile_id: ProfileId,
+        #[ts(type = "string | null")]
+        name: Option<String>,
+        request_id: RequestId,
+    },
+
     /// replay buffer 스냅샷 조회. EmbeddedClient `getSnapshot` = Tauri `get_agent_snapshot` 대응.
     /// 응답은 [`AgentEvent::Snapshot`]. (Subscribe replay 와 별개의 1회성 조회.)
     GetSnapshot {
@@ -172,6 +184,18 @@ pub enum AgentCommand {
     DeletePreset {
         #[ts(type = "string")]
         preset_id: PresetId,
+        request_id: RequestId,
+    },
+
+    /// 프리셋 표시명 override 설정/해제(ADR-0061 리치화). `name=Some` → override 저장, `None` → 해제
+    /// (cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 프론트가 확정 직전 처리 — 여기엔 유효 값
+    /// 또는 명시 None 만 온다. 없는 id 면 no-op(DeletePreset 과 동형 Ack). 성공 후 [`AgentEvent::PresetListUpdated`]
+    /// broadcast(낙관 갱신 X — 모든 창 동기화, ADR-0061 불변식).
+    RenamePreset {
+        #[ts(type = "string")]
+        preset_id: PresetId,
+        #[ts(type = "string | null")]
+        name: Option<String>,
         request_id: RequestId,
     },
 }
@@ -521,9 +545,11 @@ mod tests {
 
     #[test]
     fn preset_list_events_json_golden_and_roundtrip() {
+        // name=None(override 없음 — 신규 필드는 null 로 직렬화, ADR-0061 리치화).
         let preset = Preset {
             id: Uuid::nil(),
             cwd: "C:/proj".into(),
+            name: None,
         };
         // PresetList(전용 reply — request_id 동봉).
         let list = AgentEvent::PresetList {
@@ -533,7 +559,7 @@ mod tests {
         let list_json = serde_json::to_string(&list).unwrap();
         assert_eq!(
             list_json,
-            r#"{"PresetList":{"request_id":"00000000-0000-0000-0000-000000000000","presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj"}]}}"#,
+            r#"{"PresetList":{"request_id":"00000000-0000-0000-0000-000000000000","presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj","name":null}]}}"#,
             "PresetList wire 형태가 golden 과 불일치"
         );
 
@@ -544,7 +570,7 @@ mod tests {
         let updated_json = serde_json::to_string(&updated).unwrap();
         assert_eq!(
             updated_json,
-            r#"{"PresetListUpdated":{"presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj"}]}}"#,
+            r#"{"PresetListUpdated":{"presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj","name":null}]}}"#,
             "PresetListUpdated wire 형태가 golden 과 불일치"
         );
 
@@ -553,5 +579,59 @@ mod tests {
             let back: AgentEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
+    }
+
+    /// ADR-0061 리치화: RenamePreset wire 형태 golden(externally-tagged) + round-trip. name=Some 케이스로
+    /// 실제 override 값이 전달되는 형태를 고정한다(필드 개명/누락 회귀 차단).
+    #[test]
+    fn rename_preset_command_json_golden_and_roundtrip() {
+        let cmd = AgentCommand::RenamePreset {
+            preset_id: Uuid::nil(),
+            name: Some("내 프리셋".into()),
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"RenamePreset":{"preset_id":"00000000-0000-0000-0000-000000000000","name":"내 프리셋","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "RenamePreset wire 형태가 golden 과 불일치"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::RenamePreset { name: Some(ref n), .. } if n == "내 프리셋"
+        ));
+
+        // name=None(override 해제) round-trip 무손실.
+        let clear = AgentCommand::RenamePreset {
+            preset_id: Uuid::nil(),
+            name: None,
+            request_id: RequestId(Uuid::nil()),
+        };
+        let clear_json = serde_json::to_string(&clear).unwrap();
+        let clear_back: AgentCommand = serde_json::from_str(&clear_json).unwrap();
+        assert_eq!(clear_json, serde_json::to_string(&clear_back).unwrap());
+    }
+
+    /// ADR-0061 리치화: RenameProfile(트리 rename) wire golden + round-trip. SetProfileAutoRestore 와
+    /// 동형 형태(profile_id + 값 + request_id)를 고정한다.
+    #[test]
+    fn rename_profile_command_json_golden_and_roundtrip() {
+        let cmd = AgentCommand::RenameProfile {
+            profile_id: Uuid::nil(),
+            name: Some("내 에이전트".into()),
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"RenameProfile":{"profile_id":"00000000-0000-0000-0000-000000000000","name":"내 에이전트","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "RenameProfile wire 형태가 golden 과 불일치"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::RenameProfile { name: Some(ref n), .. } if n == "내 에이전트"
+        ));
     }
 }

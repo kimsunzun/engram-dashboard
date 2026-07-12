@@ -177,6 +177,12 @@ pub struct AgentProfile {
     #[ts(type = "string")]
     pub id: ProfileId,
     pub name: String,
+    /// 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). `Some` → 그대로 표시, `None` → cwd
+    /// basename 파생(기존 동작 불변). core `AgentProfile::display_name` 미러. 프론트 트리가 `name` 대신
+    /// 이 값을 우선 표시명으로 쓴다(`name` 은 CreateProfile 이름/ad-hoc cwd 문자열이라 표시명 부적합).
+    #[serde(default)]
+    #[ts(type = "string | null")]
+    pub display_name: Option<String>,
     pub command: AgentSpawnCommand,
     /// 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
     pub cwd: String,
@@ -221,6 +227,11 @@ pub struct Preset {
     pub id: PresetId,
     /// 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
     pub cwd: String,
+    /// 사용자 지정 표시명 override(ADR-0061 리치화). `Some` → 그대로 표시, `None` → cwd basename 파생
+    /// (기존 동작 불변). core `preset::Preset::name` 미러. rename command 가 set/clear 한다.
+    #[serde(default)]
+    #[ts(type = "string | null")]
+    pub name: Option<String>,
 }
 
 /// 출력 스냅샷 청크 wire 미러 — core `types::OutputChunk`({seq, data}) 와 일치.

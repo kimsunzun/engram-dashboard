@@ -51,6 +51,25 @@ register({
 })
 
 register({
+  id: 'agent.rename',
+  title: t('agent.rename'),
+  category: 'agent',
+  // ADR-0061 리치화(§5 LLM 제어): 에이전트(프로필) 표시명 override set/clear. args={ id, name }.
+  //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
+  //   반영은 ProfileListUpdated broadcast(낙관 갱신 X). 없는 id 는 백엔드 Error. 이것이 rename 을 프론트
+  //   전용이 아니라 백엔드 저장으로 두는 이유 — LLM 이 같은 표면(command)으로 트리 표시명을 바꿀 수 있다.
+  run: (args) => {
+    const id = args?.id as string | undefined
+    if (!id || !id.trim()) {
+      throw new Error(`[agent.rename] id 가 비어 있음: ${String(id)}`)
+    }
+    const raw = args?.name
+    const name = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
+    return agentClient.renameProfile(id.trim(), name)
+  },
+})
+
+register({
   id: 'agentlist.createAgent',
   title: t('agent.create'),
   category: 'agent',

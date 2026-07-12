@@ -432,6 +432,8 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
     WireProfile {
         id: p.id,
         name: p.name.clone(),
+        // ADR-0061 리치화: 표시명 override(트리 rename). None 이면 프론트가 cwd basename 파생(기존 동작 불변).
+        display_name: p.display_name.clone(),
         command: spawn_command_to_wire(&p.command),
         cwd: p.cwd.to_string_lossy().into_owned(),
         env: p.env.clone(),
@@ -453,11 +455,13 @@ fn core_profiles_to_wire(profiles: Vec<CoreProfile>) -> Vec<WireProfile> {
 }
 
 /// core Preset → wire(ADR-0061). profile_to_wire 와 동일 원칙 — PathBuf→String 명시 변환
-/// (reflection 왕복 금지, 필드 추가/개명 시 컴파일 에러). 이름은 wire 에 없다(cwd basename 파생 — ADR-0061).
+/// (reflection 왕복 금지, 필드 추가/개명 시 컴파일 에러). 표시명 override(name)는 그대로 옮기고,
+/// None 이면 프론트가 cwd basename 을 파생한다(리치화 전 동작 불변, ADR-0061).
 fn preset_to_wire(p: &CorePreset) -> WirePreset {
     WirePreset {
         id: p.id,
         cwd: p.cwd.to_string_lossy().into_owned(),
+        name: p.name.clone(),
     }
 }
 
@@ -1000,6 +1004,27 @@ impl ConnectionCore {
                 }
             }
 
+            AgentCommand::RenameProfile {
+                profile_id,
+                name,
+                request_id,
+            } => {
+                // ADR-0061 리치화(트리 rename): 표시명 override set/clear. SetProfileAutoRestore 와 동형 —
+                // update_with(persist 일원화) 로 mutate 후 없으면 Error. 성공 시 전 연결에 broadcast(모든 창
+                // 동기화·낙관 갱신 X — 프론트는 broadcast 로만 표시명 반영).
+                let ok = manager.profiles().rename(profile_id, name);
+                if ok {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_profile_list(registry, manager);
+                } else {
+                    reply(
+                        sink,
+                        request_id,
+                        Err(format!("profile not found: {profile_id}")),
+                    );
+                }
+            }
+
             AgentCommand::GetSnapshot {
                 agent_id,
                 request_id,
@@ -1045,6 +1070,18 @@ impl ConnectionCore {
                 // 등록 해제·persist. ★프리셋 삭제 ≠ 에이전트 종료★(ADR-0061) — remove 는 프리셋만 지운다.
                 // 없는 id 면 no-op(프로필 DeleteProfile 과 동일하게 Ack). 이후 broadcast.
                 manager.presets().remove(preset_id);
+                reply(sink, request_id, Ok(()));
+                broadcast_preset_list(registry, manager);
+            }
+
+            AgentCommand::RenamePreset {
+                preset_id,
+                name,
+                request_id,
+            } => {
+                // ADR-0061 리치화: 표시명 override set/clear. DeletePreset 과 동형 — 없는 id 면 no-op(Ack).
+                // 변경은 공유 PresetRegistry 상태를 바꾸므로 전 연결에 broadcast(모든 창 동기화·낙관 갱신 X).
+                manager.presets().rename(preset_id, name);
                 reply(sink, request_id, Ok(()));
                 broadcast_preset_list(registry, manager);
             }

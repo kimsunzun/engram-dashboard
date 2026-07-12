@@ -754,6 +754,12 @@ export class ProtocolClient implements AgentClient {
       SetProfileAutoRestore: { profile_id: agentId, auto_restore: autoRestore, request_id },
     }))
   }
+  renameProfile(agentId: string, name: string | null): Promise<void> {
+    // 백엔드 reply=Ack(void). 표시명 반영은 뒤이은 ProfileListUpdated broadcast(낙관 갱신 X, ADR-0061).
+    return this.sendCommand<void>((request_id) => ({
+      RenameProfile: { profile_id: agentId, name, request_id },
+    }))
+  }
 
   // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────────────
   listPresets(): Promise<Preset[]> {
@@ -766,6 +772,10 @@ export class ProtocolClient implements AgentClient {
   }
   deletePreset(id: string): Promise<void> {
     return this.sendCommand<void>((request_id) => ({ DeletePreset: { preset_id: id, request_id } }))
+  }
+  renamePreset(id: string, name: string | null): Promise<void> {
+    // 백엔드 reply=Ack(void). 표시명 반영은 뒤이은 PresetListUpdated broadcast(낙관 갱신 X, ADR-0061).
+    return this.sendCommand<void>((request_id) => ({ RenamePreset: { preset_id: id, name, request_id } }))
   }
 
   // ── 상태/목록/복원/프로필 이벤트 — 레지스트리 등록 + remove disposer ──────────────────

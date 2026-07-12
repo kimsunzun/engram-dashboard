@@ -31,10 +31,11 @@ function agent(
   }
 }
 
-function profile(id: string, name = '', createdAt = 0): AgentProfile {
+function profile(id: string, name = '', createdAt = 0, displayName: string | null = null): AgentProfile {
   return {
     id,
     name,
+    display_name: displayName,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd: 'C:/x',
     env: [],
@@ -90,6 +91,27 @@ describe('mergeTreeNodes', () => {
     expect(same.name).toBe('실행중이름')
     // 안 겹친 p2 는 예약으로 남음
     expect(out.find(n => n.id === 'p2')).toMatchObject({ kind: 'reserved' })
+  })
+
+  // ── ADR-0061 리치화: display_name override 전파 ──────────────────────────────
+  it('display_name override → reserved 노드는 프로필 직접, running 노드는 매칭 프로필에서 이어받음', () => {
+    const out = mergeTreeNodes(
+      // p-run 은 실행중이기도 함(매칭) → running 노드가 override 를 이어받아야 함.
+      [profile('p-run', '', 0, '실행override'), profile('p-res', '', 0, '예약override')],
+      [agent('p-run'), agent('adhoc')], // adhoc = 프로필 없는 ad-hoc → override 없음(null).
+    )
+    // running 노드: 매칭 프로필의 display_name 이어받음.
+    expect(out.find(n => n.id === 'p-run')?.displayName).toBe('실행override')
+    // ad-hoc running(프로필 없음): override 없음 → null(basename 파생).
+    expect(out.find(n => n.id === 'adhoc')?.displayName).toBeNull()
+    // reserved 노드: 프로필 직접 매핑.
+    expect(out.find(n => n.id === 'p-res')?.displayName).toBe('예약override')
+  })
+
+  it('display_name 없으면 노드 displayName=null(basename 파생, 기존 동작 불변)', () => {
+    const out = mergeTreeNodes([profile('p1', '예약1')], [agent('a', '실행')])
+    expect(out.find(n => n.id === 'p1')?.displayName).toBeNull()
+    expect(out.find(n => n.id === 'a')?.displayName).toBeNull()
   })
 
   // ── MINOR-2: 결정적 정렬 회귀 가드 ──────────────────────────────────────────

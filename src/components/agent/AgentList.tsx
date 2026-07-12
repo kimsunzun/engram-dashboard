@@ -7,15 +7,16 @@
 //! statusGlyph 로 모양을 고른다. 5-glyph 어휘 중 백엔드가 실제 구분 가능한 3개(●/◻/✗)만 점등, ○(유휴)·
 //! ◐(입력대기)는 어휘로만 정의(◐ 는 백엔드 신호 없어 절대 점등 안 함).
 //!
-//! ★표시명 = cwd basename(프론트 파생)★: 이름을 저장하지 않고 cwd 의 마지막 세그먼트를 쓴다(공용 basename
-//! 유틸 — PresetPalette 표시명과 단일 출처). cwd 미노출(요구: name 만, cwd 표시 안 함).
+//! ★표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화)★: 프로필 표시명 override
+//! (display_name)가 있으면 그대로, 없으면 cwd 의 마지막 세그먼트를 쓴다(공용 basename 유틸 — PresetPalette
+//! 표시명과 단일 출처). cwd 미노출(요구: name 만, cwd 표시 안 함). 이름 변경 = RenameProfile command.
 //!
 //! ★행(ROW) 우클릭 메뉴만 소유(ADR-0064)★: 옛 pane 배경 메뉴("에이전트 생성" 프리셋 픽커) + pane
 //! stopPropagation 은 제거됐다 — pane 배경 우클릭은 상위 통합 슬롯 메뉴로 버블(agent_list 전용
 //! "에이전트 생성" = agentlist.createAgent command + 공통 슬롯 ops). 행 우클릭만 stopPropagation 으로
-//! 가로채 item-targeted 메뉴(활성화/예약취소 · 열기/종료/이름변경/재시작)를 띄운다(VS Code view/item/context 결).
+//! 가로채 item-targeted 메뉴(활성화/예약취소/이름변경 · 열기/종료/이름변경/재시작)를 띄운다(VS Code view/item/context 결).
 //! 조작은 agentClient / viewStore(백엔드 권위 invoke→emit)로만 흐른다 — raw invoke/ptyApi 없음(ADR-0011).
-//! 이름변경·재시작은 대응 백엔드 command 부재 → "준비 중" 비활성(날조 금지).
+//! 이름변경 = RenameProfile command(ADR-0061 리치화, 인라인 편집). 재시작은 대응 command 부재 → "준비 중" 비활성.
 
 import { useEffect, useRef, useState } from 'react'
 
@@ -79,6 +80,16 @@ export default function AgentList() {
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   // 액션 실패 메시지 — 토스트/StatusBar 가 없어 행 옆 인라인 표시(AgentTree MAJOR-3 패턴).
   const [errorById, setErrorById] = useState<Record<string, string>>({})
+
+  // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★:
+  //   editingId=편집 중 행 id(없으면 null), draft=입력 중 문자열. 확정(Enter/blur) 시에만 renameProfile.
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  // ★안정 ref★: 편집 진입 시점에만 정확히 1회 select() — 인라인 콜백 ref 는 매 렌더 재부착돼 타이핑을 깬다(TabBar FIX 1).
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (editingId !== null) inputRef.current?.select()
+  }, [editingId])
 
   const agents = useAgentStore(s => s.agents)
   const profiles = useAgentStore(s => s.profiles)
@@ -207,9 +218,40 @@ export default function AgentList() {
       .finally(() => endInFlight(agentId))
   }
 
-  // 행 우클릭 메뉴 항목 — kind 로 분기. reserved 는 활성화/예약취소, running 은 열기/종료/이름변경/재시작.
-  //   이름변경·재시작은 백엔드 command 부재 → disabled "준비 중"(날조 금지, ADR-0011).
-  //   disabled 시각 판정은 busyIds(state)로 — 실제 중복 발화 차단은 각 핸들러의 busyRef 동기 가드가 담당.
+  // 표시명 = display_name override ?? cwd basename(ADR-0061 리치화 — 트리 rename). PresetPalette 와 동일
+  //   precedence(override 우선, 없으면 basename 파생). rename 시작·확정 시 이 값을 draft 시드/미변경 판정에 쓴다.
+  const displayNameOf = (node: AgentTreeNode): string => node.displayName ?? basename(node.cwd)
+
+  // 편집 진입: 현재 표시명을 draft 로 시드(우클릭 "이름 변경"). 행 메뉴는 호출부에서 닫는다.
+  const beginEdit = (node: AgentTreeNode) => {
+    setEditingId(node.id)
+    setDraft(displayNameOf(node))
+  }
+  const cancelEdit = () => setEditingId(null)
+  // 확정: trim 후 비었거나 현재 표시명과 같으면 no-op(revert), 아니면 renameProfile. 어느 경우든 편집 종료.
+  // ★멱등★: editingId 가 이 행이 아니면 즉시 return — Enter 가 언마운트→blur→commitEdit 재발화를 막는다(TabBar 동형).
+  //   동기 중복 발화 차단은 beginInFlight(busyRef). rename 은 백엔드 persist → ProfileListUpdated broadcast 반영(낙관 X).
+  const commitEdit = (node: AgentTreeNode) => {
+    if (editingId !== node.id) return
+    const trimmed = draft.trim()
+    setEditingId(null)
+    if (trimmed.length === 0 || trimmed === displayNameOf(node)) return // 미변경·빈값 → 발화 안 함
+    if (!beginInFlight(node.id)) return
+    clearError(node.id)
+    agentClient
+      .renameProfile(node.id, trimmed)
+      .catch(e => {
+        console.error('[renameProfile]', e)
+        setError(node.id, t('agent.renameFailed', { err: String(e) }))
+      })
+      .finally(() => endInFlight(node.id))
+  }
+
+  // 행 우클릭 메뉴 항목 — kind 로 분기. reserved 는 활성화/예약취소/이름변경, running 은 열기/종료/이름변경/재시작.
+  //   이름변경 = RenameProfile command(ADR-0061 리치화 — 인라인 편집 진입). 재시작은 백엔드 command 부재 →
+  //   disabled "준비 중"(날조 금지). disabled 시각 판정은 busyIds(state), 실제 중복 발화 차단은 busyRef 동기 가드.
+  //   ★대상 node 조회★: 메뉴는 agentId 만 들고 있으므로 rows 에서 찾아 rename 진입에 넘긴다(타깃-gone 은 effect 가 닫음).
+  const menuNode = rowMenu ? rows.find(r => r.id === rowMenu.agentId) : undefined
   const rowMenuItems: Array<{ label: string; disabled: boolean; action: () => void }> = !rowMenu
     ? []
     : rowMenu.kind === 'reserved'
@@ -218,6 +260,12 @@ export default function AgentList() {
             label: t('agent.rowActivate'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => activateReserved(rowMenu.agentId),
+          },
+          // 이름 변경(RenameProfile) — reserved 프로필도 표시명 override 가능(트리 rename, ADR-0061).
+          {
+            label: t('agent.rowRename'),
+            disabled: busyIds.has(rowMenu.agentId) || !menuNode,
+            action: () => menuNode && beginEdit(menuNode),
           },
           // ★예약 취소(삭제) — AgentTree reserved-row 리그레션 복원★: 이 항목 외엔 stale 예약 프로필을 지울
           //   UI 가 없다(deleteProfile 유일 경로). 동기 가드는 cancelReserved 내부 busyRef.
@@ -234,10 +282,16 @@ export default function AgentList() {
             disabled: busyIds.has(rowMenu.agentId),
             action: () => killAgentGuarded(rowMenu.agentId),
           },
-          // ★준비 중(백엔드 command 없음)★: 이름은 cwd basename 으로 파생돼 저장 이름 자체가 없다(rename
-          //   대상 부재). 재시작 전용 command 도 protocolClient 에 없다(kill→re-spawn 조합뿐). 날조 금지 —
-          //   실제 command 가 생기면 배선한다(ADR-0011).
-          { label: t('agent.rowRename'), disabled: true, action: () => {} },
+          // 이름 변경(RenameProfile) — ad-hoc(프로필 없는 running)은 rename 대상 부재라 disabled(menuNode 는
+          //   있으나 백엔드 프로필이 없어 RenameProfile 이 Error → 발화 자체를 막는 게 아니라, 프로필 있으면
+          //   override 저장). 여기선 항목을 열되 백엔드가 no-profile 이면 Error 를 인라인 표시한다(날조 아님).
+          {
+            label: t('agent.rowRename'),
+            disabled: busyIds.has(rowMenu.agentId) || !menuNode,
+            action: () => menuNode && beginEdit(menuNode),
+          },
+          // ★준비 중(백엔드 command 없음)★: 재시작 전용 command 가 protocolClient 에 없다(kill→re-spawn 조합뿐).
+          //   날조 금지 — 실제 command 가 생기면 배선한다(ADR-0011).
           { label: t('agent.rowRestart'), disabled: true, action: () => {} },
         ]
 
@@ -350,23 +404,56 @@ export default function AgentList() {
               <span data-agent-glyph="1" style={{ fontSize: '11px', color: 'var(--text-muted)', flexShrink: 0 }}>
                 {statusGlyph(node.status)}
               </span>
-              {/* 표시명 = cwd basename(프론트 파생 — 이름 미저장). cwd 는 노출 안 함(title 로만). */}
-              <span
-                data-agent-name="1"
-                // flex:1+minWidth:0 = 행 폭을 채워 ellipsis 가 제대로 걸리게(콘텐츠 폭이면 짧은 이름도
-                //   텍스트 오른쪽 끝이 곧 overflow:hidden 클립 경계라 italic overhang 이 잘린다). paddingRight
-                //   2px = italic 글리프의 오른쪽 overhang 여유(ellipsis 경우에도 마지막 글자 꼬리 안 잘리게).
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  paddingRight: '2px',
-                }}
-              >
-                {basename(node.cwd)}
-              </span>
+              {/* 표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화). 편집 중이면 인라인 input.
+                  cwd 는 노출 안 함(title 로만). */}
+              {editingId === node.id ? (
+                <input
+                  data-agent-rename-input={node.id}
+                  value={draft}
+                  autoFocus
+                  ref={inputRef}
+                  onChange={e => setDraft(e.target.value)}
+                  onKeyDown={e => {
+                    // ★버블 차단★: 편집 중 키가 부모 행(onClick=select)·전역 키바인딩으로 새면 안 된다(TabBar 동형).
+                    e.stopPropagation()
+                    if (e.key === 'Enter') commitEdit(node)
+                    else if (e.key === 'Escape') cancelEdit() // 취소(revert — renameProfile 안 부름).
+                  }}
+                  onBlur={() => commitEdit(node)}
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => e.stopPropagation()}
+                  style={{
+                    // 내용 폭에 맞춤(field-sizing:content) — TabBar rename input 동형. minWidth/maxWidth 로 상·하한.
+                    flex: 1,
+                    minWidth: '3ch',
+                    maxWidth: '180px',
+                    font: 'inherit',
+                    color: 'var(--text)',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--accent)',
+                    borderRadius: '2px',
+                    padding: '0 2px',
+                    outline: 'none',
+                  }}
+                />
+              ) : (
+                <span
+                  data-agent-name="1"
+                  // flex:1+minWidth:0 = 행 폭을 채워 ellipsis 가 제대로 걸리게(콘텐츠 폭이면 짧은 이름도
+                  //   텍스트 오른쪽 끝이 곧 overflow:hidden 클립 경계라 italic overhang 이 잘린다). paddingRight
+                  //   2px = italic 글리프의 오른쪽 overhang 여유(ellipsis 경우에도 마지막 글자 꼬리 안 잘리게).
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    paddingRight: '2px',
+                  }}
+                >
+                  {displayNameOf(node)}
+                </span>
+              )}
               {err && (
                 <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '10px', flexShrink: 0 }}>
                   {t('agent.rowFailedBadge')}

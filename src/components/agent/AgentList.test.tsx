@@ -19,12 +19,14 @@ const clientMock = vi.hoisted(() => ({
   spawnProfile: vi.fn(async () => ({ id: 'a' })),
   killAgent: vi.fn(async () => undefined),
   deleteProfile: vi.fn(async () => undefined),
+  renameProfile: vi.fn(async () => undefined),
 }))
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
     spawnProfile: (...args: unknown[]) => clientMock.spawnProfile(...(args as [])),
     killAgent: (...args: unknown[]) => clientMock.killAgent(...(args as [])),
     deleteProfile: (...args: unknown[]) => clientMock.deleteProfile(...(args as [])),
+    renameProfile: (...args: unknown[]) => clientMock.renameProfile(...(args as [])),
   },
   getAgentClient: vi.fn(),
 }))
@@ -56,9 +58,10 @@ const caps = (): Capabilities => ({
 function agent(id: string, cwd: string, status: AgentInfo['status'] = { type: 'Running' }): AgentInfo {
   return { id, name: '', cwd, status, cols: 80, rows: 24, epoch: 1, capabilities: caps() }
 }
-function profile(id: string, cwd: string, createdAt = 0): AgentProfile {
+function profile(id: string, cwd: string, createdAt = 0, displayName: string | null = null): AgentProfile {
   return {
-    id, name: '', command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
+    id, name: '', display_name: displayName,
+    command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
     restart_policy: 'Never', restart_count: 0, failed_reason: null, created_at: createdAt,
     last_active: 0, last_start_at: null,
@@ -69,6 +72,7 @@ beforeEach(() => {
   clientMock.spawnProfile.mockClear()
   clientMock.killAgent.mockClear()
   clientMock.deleteProfile.mockClear()
+  clientMock.renameProfile.mockClear()
   assignAgentMock.mockClear()
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
 })
@@ -179,20 +183,58 @@ describe('배경 우클릭 = 자체 메뉴 없음(통합 슬롯 메뉴로 버블
   })
 })
 
-// ── 행 우클릭 메뉴: 종료 wired / 이름변경·재시작 disabled ──────────────────────
+// ── 행 우클릭 메뉴: 종료·이름변경 wired / 재시작 disabled(ADR-0061 리치화) ──────────
 describe('행 우클릭 메뉴', () => {
-  it('실행중 행: 종료는 killAgent 호출, 이름변경·재시작은 "준비 중" 비활성(no-op)', () => {
+  it('실행중 행: 종료는 killAgent 호출, 재시작은 "준비 중" 비활성(no-op)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
-    // 준비 중 항목 클릭해도 아무 command/agentClient 호출 없음(disabled no-op).
-    fireEvent.click(screen.getByText('이름변경 (준비 중)'))
+    // 재시작은 여전히 준비 중(백엔드 command 부재) — 클릭해도 no-op.
     fireEvent.click(screen.getByText('재시작 (준비 중)'))
     expect(clientMock.killAgent).not.toHaveBeenCalled()
     // 종료 → killAgent.
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     fireEvent.click(screen.getByText('종료'))
     expect(clientMock.killAgent).toHaveBeenCalledWith('a1')
+  })
+
+  it('실행중 행 이름변경 → 인라인 입력 → Enter 확정 → renameProfile(id, trimmed) 호출', () => {
+    // 프로필 없는 ad-hoc running 이면 rename 대상이 없지만, 여기선 매칭 프로필을 둬 override 저장 경로를 검증.
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')], profiles: [profile('a1', 'C:/w')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-agent-rename-input="a1"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    fireEvent.change(input, { target: { value: '  내 에이전트  ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    // trim 후 값으로 renameProfile 발화(§5 백엔드 저장 — 낙관 갱신 X).
+    expect(clientMock.renameProfile).toHaveBeenCalledWith('a1', '내 에이전트')
+  })
+
+  it('예약 행 이름변경 → Esc 취소 → renameProfile 미발화(revert)', () => {
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '바뀐이름' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    // Esc = 취소 → 백엔드 발화 없음(revert).
+    expect(clientMock.renameProfile).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-agent-rename-input="p1"]')).toBeNull() // 편집 종료
+  })
+
+  it('이름변경 미변경(표시명과 동일) → renameProfile 미발화', () => {
+    // display_name override 가 이미 "고정명" → 같은 값으로 확정하면 발화 안 함(불필요 command 억제).
+    useAgentStore.setState({ profiles: [profile('p2', 'C:/x', 0, '고정명')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="p2"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-agent-rename-input="p2"]') as HTMLInputElement
+    // 시드된 draft = 현재 표시명('고정명'). 그대로 Enter → 미변경이라 발화 없음.
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(clientMock.renameProfile).not.toHaveBeenCalled()
   })
 })
 

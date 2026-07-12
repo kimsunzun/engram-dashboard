@@ -107,6 +107,12 @@ export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'
 export interface AgentProfile {
   id: string
   name: string
+  /**
+   * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). Some → 그대로 표시, null → cwd basename
+   * 파생(기존 동작 불변). 트리는 `name`(CreateProfile 이름/ad-hoc cwd 문자열, 표시명 부적합) 대신 이 값을
+   * 우선한다. wire `AgentProfile.display_name` 미러(#[serde(default)] — 옛 agents.json 은 null).
+   */
+  display_name: string | null
   command: AgentCommand
   cwd: string
   env: [string, string][]
@@ -134,8 +140,13 @@ export interface AgentProfile {
  */
 export interface Preset {
   id: string
-  /** 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열). 표시명은 이 값의 basename 으로 파생. */
+  /** 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열). name override 가 없으면 이 값의 basename 으로 파생. */
   cwd: string
+  /**
+   * 사용자 지정 표시명 override(ADR-0061 리치화). Some → 그대로 표시, null → cwd basename 파생(기존
+   * 동작 불변). wire `Preset.name` 미러(#[serde(default)] — 옛 presets.json 은 null). rename command 가 set/clear.
+   */
+  name: string | null
 }
 
 /** 복원 결말 — agent-restore-result event, #[serde(tag="type")] */

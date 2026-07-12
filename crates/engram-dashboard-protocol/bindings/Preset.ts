@@ -9,4 +9,9 @@ export type Preset = { id: string,
 /**
  * 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
  */
-cwd: string, };
+cwd: string, 
+/**
+ * 사용자 지정 표시명 override(ADR-0061 리치화). `Some` → 그대로 표시, `None` → cwd basename 파생
+ * (기존 동작 불변). core `preset::Preset::name` 미러. rename command 가 set/clear 한다.
+ */
+name: string | null, };

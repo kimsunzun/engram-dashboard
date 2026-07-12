@@ -151,6 +151,13 @@ export interface AgentClient {
   deleteProfile(agentId: string): Promise<void>
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>
   setProfileAutoRestore(agentId: string, autoRestore: boolean): Promise<void>
+  /**
+   * 프로필 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename, §5). name=문자열 → override 저장,
+   * null → 해제(cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 호출부(UI)가 확정 직전 처리 —
+   * 여기엔 유효 값 또는 명시 null 만 온다. 백엔드 reply=Ack(void), 표시명 반영은 뒤이은 ProfileListUpdated
+   * broadcast(낙관 갱신 X). 없는 id 면 Error(setProfileAutoRestore 와 동형).
+   */
+  renameProfile(agentId: string, name: string | null): Promise<void>
 
   // ── 프리셋 CRUD(ADR-0061 — cwd 북마크, 스폰 안 함) ─────────────────────────────
   /** 저장된 프리셋 전체 조회. PresetList 전용 reply(request_id echo)로 회수. */
@@ -164,4 +171,10 @@ export interface AgentClient {
   createPreset(cwd: string): Promise<void>
   /** 프리셋 삭제(에이전트는 무관하게 산다 — ADR-0061). 없는 id 면 no-op(Ack). */
   deletePreset(id: string): Promise<void>
+  /**
+   * 프리셋 표시명 override 설정/해제(ADR-0061 리치화, §5). name=문자열 → override 저장, null → 해제
+   * (cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 호출부(UI)가 확정 직전 처리. 백엔드
+   * reply=Ack(void), 표시명 반영은 뒤이은 PresetListUpdated broadcast(낙관 갱신 X). 없는 id 면 no-op(Ack).
+   */
+  renamePreset(id: string, name: string | null): Promise<void>
 }

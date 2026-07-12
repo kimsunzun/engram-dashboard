@@ -133,6 +133,15 @@ pub struct AgentProfile {
     /// 불변 키. 프로세스·세션이 바뀌어도 이 id는 평생 유지된다(프론트 구독 키).
     pub id: AgentId,
     pub name: String,
+
+    /// 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). **기존 `name` 과 별개 축**: `name` 은
+    /// CreateProfile 시 넘어온 이름(claude 프로필) 또는 ad-hoc spawn 의 cwd 문자열이라 "깔끔한 표시명"이
+    /// 아니어서 프론트 트리는 이를 무시하고 cwd basename 을 그려왔다. 이 `display_name` 은 그 표시명을
+    /// 사람이 직접 덮어쓰는 override 다. `Some` → 그대로 표시, `None` → cwd basename 파생(기존 동작 불변).
+    /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None` 으로 흡수(마이그레이션 불필요).
+    #[serde(default)]
+    pub display_name: Option<String>,
+
     pub command: AgentCommand,
 
     /// 저장 전 `dunce::canonicalize`로 정규화된 cwd(UNC `\\?\` 회피 + 표기 고정).
@@ -190,6 +199,8 @@ impl AgentProfile {
         Self {
             id: Uuid::new_v4(),
             name,
+            // 생성 시엔 표시명 override 없음 — 트리는 cwd basename 파생(ADR-0061). rename 으로 나중에 set.
+            display_name: None,
             command,
             cwd,
             env,
@@ -224,8 +235,17 @@ pub trait ProfileStore: Send + Sync + 'static {
 /// 프로필 인메모리 **단일 소유자**. 모든 CRUD·세션 id 갱신이 이곳을 거치고,
 /// 변경 즉시 store로 영속화한다. 세션 id의 생성·갱신 책임도 여기 있다(spawn_agent 아님 — H-1.4).
 ///
-/// 락 규율: 디스크 IO(`store.save`)를 profiles lock 보유 중에 하지 않는다.
-/// lock 안에서 변경 후 스냅샷만 떠서 lock을 풀고, 그 스냅샷으로 save한다.
+/// 락 규율: 디스크 IO(`store.save`)를 profiles lock **보유 중에** 한다.
+/// ★변경 이유(§5 동시성 정합성 > lock-hold 시간)★: 옛 설계는 lock 안에서 스냅샷만 뜨고 lock 을 푼 뒤
+/// save 했다. 그러면 두 mutation 이 겹칠 때 "A 스냅샷 → unlock → B 스냅샷 → unlock → B save → A save"
+/// 순서로 인메모리·broadcast 는 최신(B)인데 디스크는 stale(A)로 남아, 재시작 시 옛 값이 로드된다
+/// (persisted ≠ observed 데이터 정합성 결함). §5 로 LLM/오케스트레이터가 rename/create/delete 를
+/// **프로그래밍적으로 동시·연속** 호출하면 사람은 못 여는 이 창을 실제로 친다. 그래서 mutate+save 를
+/// 한 임계구역으로 묶어, 마지막 커밋된 인메모리 상태가 곧 디스크 상태가 되게 한다.
+/// **데드락 없음(ADR-0006 무관):** `store.save` 는 store 내부 leaf mutex(`write_lock`)만 잡고 registry
+/// 로 재진입하지 않는다 → 락 순서는 `profiles → write_lock` 단방향, 순환 없음. profiles lock 은 세션
+/// (sessions/core/status) 락 도메인과도 분리라 ADR-0006 순서에 얽히지 않는다. 로컬 소형 파일이라
+/// lock 보유 중 IO 비용도 무시 가능.
 pub struct ProfileRegistry {
     profiles: Mutex<HashMap<AgentId, AgentProfile>>,
     store: Arc<dyn ProfileStore>,
@@ -242,17 +262,30 @@ impl ProfileRegistry {
         }
     }
 
-    /// 변경 클로저를 lock 안에서 실행하고, lock 해제 후 스냅샷을 save한다.
-    /// 디스크 IO를 lock 밖으로 빼는 공통 경로(상단 락 규율 참조).
+    /// 변경 클로저를 실행하고, **같은 lock 보유 중** 현재 맵을 그대로 save한다.
+    /// ★lock 을 풀기 전에 save★ — 두 동시 mutation 이 "각자 스냅샷 → 각자 save" 로 교차해
+    /// 디스크가 stale 로 덮이는 race 를 닫는다(상단 락 규율의 §5 근거). 저장하는 스냅샷은
+    /// 방금 커밋한 최신 맵이라 persisted == observed 가 보장된다. 모든 mutation 경로의 공통 경로.
     fn mutate<R>(&self, f: impl FnOnce(&mut HashMap<AgentId, AgentProfile>) -> R) -> R {
-        let (result, snapshot) = {
-            let mut guard = self.profiles.lock().expect("profiles poisoned");
-            let result = f(&mut guard);
-            let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
-            (result, snapshot)
-        };
+        let mut guard = self.profiles.lock().expect("profiles poisoned");
+        let result = f(&mut guard);
+        let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
+        // lock 보유 중 save — 커밋과 영속화를 한 임계구역으로 직렬화(데드락 근거는 struct 주석). ADR-0071.
         self.store.save(&snapshot);
         result
+    }
+
+    /// `mutate` 의 조건부 변형 — 클로저가 `true`(실제 변경 있음)를 반환할 때만 lock 보유 중 save 한다.
+    /// 변경이 없으면 디스크 쓰기를 건너뛴다(observe_session_id 의 no-op 절약 유지). save 는 mutate 와
+    /// 동일하게 lock 보유 중이라 stale-overwrite race 가 없다(struct 주석 §5, ADR-0071).
+    fn mutate_if(&self, f: impl FnOnce(&mut HashMap<AgentId, AgentProfile>) -> bool) -> bool {
+        let mut guard = self.profiles.lock().expect("profiles poisoned");
+        let changed = f(&mut guard);
+        if changed {
+            let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
+            self.store.save(&snapshot);
+        }
+        changed
     }
 
     /// 전체 프로필 스냅샷(읽기 — persist 없음).
@@ -299,6 +332,14 @@ impl ProfileRegistry {
         });
     }
 
+    /// 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `Some(name)` → override 저장, `None` →
+    /// 해제(cwd basename 파생 복귀). 존재하면 변경 후 persist·true, 없는 id 면 no-op·false.
+    /// ★정규화는 호출자(프론트) 책임★: trim·빈 문자열 거부·미변경 스킵은 프론트가 확정 직전에 처리한다
+    /// (TabBar rename 과 동형) — 여기엔 이미 유효 값 또는 명시적 None 만 온다. update_with 위임(persist 일원화).
+    pub fn rename(&self, id: AgentId, display_name: Option<String>) -> bool {
+        self.update_with(id, |p| p.display_name = display_name)
+    }
+
     /// 임의 필드 수정. 존재하면 클로저 적용 후 persist, 없으면 false.
     pub fn update_with(&self, id: AgentId, f: impl FnOnce(&mut AgentProfile)) -> bool {
         self.mutate(|m| match m.get_mut(&id) {
@@ -326,27 +367,21 @@ impl ProfileRegistry {
     /// watcher가 세션 id 변경을 관측했을 때 호출 — 옛 sid를 이력으로 넘기고 새 값으로 교체,
     /// 변경 즉시 persist한다(1-b: clear→관측→persist 전 크래시 시 stale 복원 방지).
     /// 같은 값으로의 호출은 no-op(불필요한 디스크 쓰기 회피).
+    /// ★lock 보유 중 save★: mutate 로 위임해 커밋과 영속화를 한 임계구역으로 직렬화한다 — 옛 코드는
+    /// lock 을 푼 뒤 `list()` + save 라 다른 mutation 과 stale-overwrite race 가 있었다(struct 주석 §5).
+    /// 변경 없을 때는 디스크 쓰기를 건너뛰어 기존 no-op 절약을 유지한다.
     pub fn observe_session_id(&self, id: AgentId, new_sid: Uuid) -> bool {
-        let changed = {
-            let mut guard = self.profiles.lock().expect("profiles poisoned");
-            match guard.get_mut(&id) {
-                Some(p) if p.claude_session_id != Some(new_sid) => {
-                    if let Some(old) = p.claude_session_id.take() {
-                        p.old_session_ids.push(old);
-                    }
-                    p.claude_session_id = Some(new_sid);
-                    p.last_active = now_millis();
-                    true
+        self.mutate_if(|m| match m.get_mut(&id) {
+            Some(p) if p.claude_session_id != Some(new_sid) => {
+                if let Some(old) = p.claude_session_id.take() {
+                    p.old_session_ids.push(old);
                 }
-                _ => false,
+                p.claude_session_id = Some(new_sid);
+                p.last_active = now_millis();
+                true
             }
-        };
-        if changed {
-            // lock 해제 후 즉시 persist.
-            let snapshot = self.list();
-            self.store.save(&snapshot);
-        }
-        changed
+            _ => false,
+        })
     }
 
     /// epoch 증가 후 새 값 반환. "같은 AgentId 맵 교체"가 일어나는 **모든 지점**에서
@@ -451,6 +486,121 @@ mod tests {
         assert_eq!(reg.bump_epoch(id), Some(2));
     }
 
+    // ── 표시명 override(ADR-0061 리치화 — 트리 rename) ──────────────────────────────
+
+    #[test]
+    fn new_profile_has_no_display_name_override() {
+        // 생성 직후엔 override 없음(트리는 cwd basename 파생).
+        assert_eq!(sample().display_name, None);
+    }
+
+    #[test]
+    fn rename_sets_and_persists_display_name() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        assert!(reg.rename(id, Some("내 에이전트".to_string())));
+        assert_eq!(
+            reg.get(id).unwrap().display_name,
+            Some("내 에이전트".to_string())
+        );
+        // 즉시 persist(store 에도 반영).
+        assert_eq!(
+            store.load()[0].display_name,
+            Some("내 에이전트".to_string())
+        );
+    }
+
+    #[test]
+    fn rename_none_clears_display_name() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        reg.rename(id, Some("x".to_string()));
+        // None 재설정 → override 해제(basename 파생 복귀).
+        assert!(reg.rename(id, None));
+        assert_eq!(reg.get(id).unwrap().display_name, None);
+    }
+
+    #[test]
+    fn rename_missing_is_noop_false() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        // 없는 id rename 은 false·no-op.
+        assert!(!reg.rename(Uuid::new_v4(), Some("y".to_string())));
+    }
+
+    // ── 동시성: persisted == latest (stale-overwrite race 봉인) ────────────────────
+
+    /// save 가 lock 보유 중 **현재 맵**을 쓰는지 직접 단언 — 커밋 직후 상태가 곧바로 persist 됨을 본다.
+    #[test]
+    fn save_writes_current_map_not_stale_snapshot() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        reg.rename(id, Some("final".to_string()));
+        let disk = store.load();
+        let mem = reg.list();
+        assert_eq!(disk.len(), mem.len());
+        assert_eq!(disk[0].display_name, Some("final".to_string()));
+        assert_eq!(
+            disk[0].display_name, mem[0].display_name,
+            "persisted == observed"
+        );
+    }
+
+    /// 여러 스레드가 서로 다른 프로필을 동시에 upsert/rename → 마지막 save 스냅샷이 최종 인메모리 맵과
+    /// 개수·내용까지 일치해야 한다. 옛 racy 설계(lock 밖 save)에선 stale 스냅샷이 디스크를 덮어써
+    /// 엔트리 누락이 가능했다(persisted ≠ observed). 이제 mutate+save 가 한 임계구역이라 봉인된다.
+    #[test]
+    fn concurrent_mutations_persisted_equals_final_map() {
+        use std::thread;
+
+        let store = Arc::new(MemStore::default());
+        let reg = Arc::new(ProfileRegistry::new(store.clone()));
+
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let r = reg.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..50 {
+                    let p = sample();
+                    let id = p.id;
+                    r.upsert(p);
+                    r.rename(id, Some(format!("t{t}-{i}")));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mem = reg.list();
+        let disk = store.load();
+        assert_eq!(mem.len(), 200, "인메모리 upsert 200건");
+        assert_eq!(
+            disk.len(),
+            mem.len(),
+            "디스크 개수 == 인메모리 개수 (stale 스냅샷으로 엔트리 누락 없음)"
+        );
+
+        let mut mem_sorted: Vec<_> = mem.iter().map(|p| (p.id, p.display_name.clone())).collect();
+        let mut disk_sorted: Vec<_> = disk
+            .iter()
+            .map(|p| (p.id, p.display_name.clone()))
+            .collect();
+        mem_sorted.sort();
+        disk_sorted.sort();
+        assert_eq!(
+            disk_sorted, mem_sorted,
+            "동시 mutation 후 디스크 == 최신 인메모리 (persisted == observed)"
+        );
+    }
+
     /// 하위호환: 옛 agents.json(필드명 `last_restore`, 신규 필드 부재)을 역직렬화해도
     /// 크래시 없이 신규 필드는 default(restart_count=0, failed_reason=None, last_start_at=None)가 된다.
     /// 옛 `last_restore` 키는 알려지지 않은 필드로 무시된다(serde 기본 deny_unknown 미적용).
@@ -479,6 +629,8 @@ mod tests {
         assert_eq!(p.failed_reason, None);
         // 옛 last_restore 키는 무시되고 신규 last_start_at 은 default None
         assert_eq!(p.last_start_at, None);
+        // 신규 display_name 부재 → #[serde(default)] = None(마이그레이션 불필요, 트리 basename 파생 불변).
+        assert_eq!(p.display_name, None);
     }
 
     // ── ADR-0044: output_format serde 하위호환 + is_json_mode 판정 ──────────────

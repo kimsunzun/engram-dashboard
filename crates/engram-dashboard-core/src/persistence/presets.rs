@@ -157,6 +157,7 @@ mod tests {
         Preset {
             id: Uuid::new_v4(),
             cwd: PathBuf::from("."),
+            name: None,
         }
     }
 

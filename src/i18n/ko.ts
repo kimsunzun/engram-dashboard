@@ -70,7 +70,7 @@ export const ko = {
     rowCancelReserved: '예약 취소', // reserved 행 예약취소(deleteProfile) 메뉴 라벨.
     rowOpen: '열기', // running 행 "열기"(포커스 슬롯 배정) 메뉴 라벨.
     rowKill: '종료', // running 행 "종료"(kill) 메뉴 라벨.
-    rowRename: '이름변경 (준비 중)', // running 행 이름변경 — 백엔드 command 부재로 비활성.
+    rowRename: '이름 변경', // running/reserved 행 이름변경(RenameProfile command — ADR-0061 리치화).
     rowRestart: '재시작 (준비 중)', // running 행 재시작 — 백엔드 command 부재로 비활성.
     doubleClickToActivate: '더블클릭으로 활성화(spawn)', // reserved 행 title 힌트(더블클릭 = spawn).
     rowFailedBadge: '실패', // AgentList 행 옆 인라인 실패 배지 텍스트(err 있을 때).
@@ -80,6 +80,8 @@ export const ko = {
     openFailedNoSlot: '열기 실패: 활성 뷰/포커스 슬롯 없음', // 활성 뷰/포커스 슬롯 부재로 조기 실패(보간 없음, openFailed 와 별개 텍스트).
     killFailed: '종료 실패: {err}', // killAgent 실패.
     cancelReservedFailed: '예약 취소 실패: {err}', // deleteProfile 실패.
+    renameFailed: '이름 변경 실패: {err}', // renameProfile 실패(ADR-0061 리치화).
+    rename: '에이전트 이름 변경', // agent.rename command 제목(§5 LLM 제어 — RenameProfile).
   },
   /** 프리셋(cwd 프리셋) 관련 — command 제목·우클릭 메뉴 라벨. */
   preset: {
@@ -87,6 +89,7 @@ export const ko = {
     list: '프리셋 목록 조회', // preset.list command 제목.
     delete: '프리셋 삭제', // preset.delete command 제목 겸 PresetPalette 행 삭제 aria-label(값 동일 — 재사용).
     add: '추가', // preset.add command 제목(preset_palette 슬롯 메뉴 "추가").
+    rename: '이름 변경', // preset.rename command 제목 겸 PresetPalette 행 우클릭 메뉴 "이름 변경"(값 동일 — 재사용).
     label: '프리셋', // PresetPalette 슬롯 콘텐츠 라벨.
     empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.', // PresetPalette 빈 상태 안내.
     deleteBtn: '삭제', // PresetPalette 행 삭제 버튼 텍스트.
