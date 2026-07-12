@@ -402,7 +402,7 @@ mod tests {
         };
         // json 모드 = structured 캐리어 → StdioTransport 에 structured=true 주입(조립점 매핑).
         let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
-        // json 모드 command — backend 가 이걸 보고 mode 별 caps(resume=false, FIX 5)를 산출한다.
+        // json 모드 command — backend 가 이걸 보고 caps(resume=true, ADR-0044 후속 완료)를 산출한다.
         let json_cmd = crate::agent::profile::AgentCommand::Claude {
             extra_args: vec![],
             output_format: crate::agent::profile::ClaudeOutputFormat::StreamJson,
@@ -425,10 +425,12 @@ mod tests {
         assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
         assert!(!caps.control.resize, "resize 불가");
         assert!(!caps.control.interrupt, "interrupt 불가(MVP)");
-        // ★FIX 5★: json 모드는 resume=false(fresh sid 강제) — 예전 true 신고는 sid 충돌 지뢰였다.
+        // ★ADR-0044 후속 완료★: json 모드도 --resume 지원(spike-verified, claude 2.1.170) → resume=true.
+        //   build_spec 이 SpawnMode::Resume 에서 --resume 을 내고 통제-sid(ADR-0008)를 재사용하므로 sid
+        //   충돌 없음. 옛 resume=false(fresh sid 강제) 가정은 폐기.
         assert!(
-            !caps.session.resume,
-            "json 모드 세션 → resume=false(ADR-0044 후속, sid fresh 강제)"
+            caps.session.resume,
+            "json 모드 세션 → resume=true(--resume 지원, spike-verified)"
         );
         session.kill(Duration::from_secs(5));
     }

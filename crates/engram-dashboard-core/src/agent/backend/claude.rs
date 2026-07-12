@@ -72,15 +72,21 @@ impl AgentBackend for ClaudeBackend {
                         //   문구가 없지만 런타임이 "When using --print, --output-format=stream-json
                         //   requires --verbose" 로 즉사시킨다(스폰 직후 에이전트 소멸로 발현). 빼면 안 됨.
                         args.push("--verbose".to_string());
+                        // ADR-0044 후속 완료 / ADR-0008 재사용: json(stream-json) resume 활성화.
                         if let Some(sid) = session_id {
-                            // ★json 모드 resume 은 MVP 밖(ADR-0044 후속)★: mode 와 무관하게 항상
-                            //   --session-id(fresh 경로)로 고정한다. 터미널 resume(ADR-0008)은 위
-                            //   Terminal 분기에서 그대로 동작 — 여기서 건드리지 않는다.
-                            // ★sid 재사용 충돌 위험(FIX 5)★: 여기서 매번 fresh sid 를 강제하므로
-                            //   caps.session.resume 도 반드시 false 로 신고해야 한다(capabilities 참조)
-                            //   — true 로 두면 M2 가 같은 sid 로 재사용/이어받기를 시도해 claude 가
-                            //   "session already in use" 로 거부한다.
-                            args.push("--session-id".to_string());
+                            // ★json 모드 resume 배선(spike-verified)★: 과거엔 mode 무관 항상
+                            //   --session-id(fresh)로 고정했다(sid 재사용 충돌 회피 명목). 그러나 spike
+                            //   실측(2026-07-13, claude 2.1.170)으로 stream-json 헤드리스도 `--resume <sid>`
+                            //   를 지원함이 확인됐다 — `-p`/`--input-format stream-json`/`--output-format
+                            //   stream-json` 과 공존하고, "session already in use" 없이 과거 대화를 무손실
+                            //   재개한다. 그래서 터미널 분기와 동일하게 mode 로 세션 플래그를 가른다:
+                            //   Fresh → --session-id(우리가 sid 통제), Resume → --resume(무손실 이어받기).
+                            //   통제-sid 인프라(ADR-0008)를 그대로 재사용 — json 전용 신규 기계 없음.
+                            let flag = match mode {
+                                SpawnMode::Fresh => "--session-id",
+                                SpawnMode::Resume => "--resume",
+                            };
+                            args.push(flag.to_string());
                             args.push(sid.to_string());
                         }
                         // ADR-0049: json(stream-json) 슬롯은 thinking 블록을 접힘 행으로 표시하는 파이프가
@@ -127,19 +133,21 @@ impl AgentBackend for ClaudeBackend {
         }
     }
 
-    /// 터미널 claude 는 `--resume` 으로 세션을 무손실 재개하므로 resume=true(이 backend 의 결정).
-    /// cwd_env=true(작업 디렉토리에서 실행). snapshot·model 옵션은 미지원(콘솔 CLI).
+    /// claude 는 터미널·json(stream-json) 모드 **둘 다** `--resume <sid>` 로 세션을 무손실 재개하므로
+    /// resume=true(이 backend 의 결정). cwd_env=true(작업 디렉토리에서 실행). snapshot·model 옵션은
+    /// 미지원(콘솔 CLI).
     ///
-    /// ★json 모드 resume 정직 신고(FIX 5 / ADR-0044 후속)★: json(stream-json) 경로는 build_spec 이
-    ///   SpawnMode 와 무관하게 **항상 --session-id(fresh)** 로 고정한다(위 StreamJson 분기) — 매 spawn
-    ///   새 sid. 그런데 caps 를 resume=true 로 신고하면 M2 가 "이 세션은 이어받기 가능"으로 오인해
-    ///   같은 sid 로 --resume/재사용을 시도하고, claude 가 sid 충돌("session already in use")로 거부하는
-    ///   지뢰가 된다. 통제-sid resume(ADR-0008)은 **터미널 경로 전용** 인프라이므로 json 모드는
-    ///   resume=false 로 내린다. 터미널 모드는 그대로 true. mode 는 command 에서 읽는다(backend 가
-    ///   session caps 의 출처 — ADR-0030, type split 유지).
-    fn capabilities(&self, command: &AgentCommand) -> BackendCaps {
-        // json 모드면 resume 불가(위 사유). 그 외(터미널 claude, 방어적 Shell)는 resume 가능.
-        let resume = !command.is_json_mode();
+    /// ★json 모드 resume 활성화(ADR-0044 후속 완료 / ADR-0008 재사용)★: 과거엔 json 경로가 build_spec 에서
+    ///   SpawnMode 무관 항상 --session-id(fresh)로 고정돼 caps 도 resume=false 로 내려야 했다. 이제 spike
+    ///   실측(2026-07-13, claude 2.1.170)으로 stream-json 헤드리스도 `--resume` 를 지원함이 확인돼 build_spec
+    ///   이 mode 로 세션 플래그를 가른다(StreamJson 분기: Fresh→--session-id, Resume→--resume). 따라서 두
+    ///   모드 모두 정직하게 resume=true 로 신고한다 — 통제-sid resume(ADR-0008) 인프라를 그대로 재사용하므로
+    ///   sid 충돌("session already in use")도 없다. command 는 여기서 mode 판정에 쓰지 않지만(두 모드 동일),
+    ///   backend 가 session caps 의 출처라는 시그니처(ADR-0030, type split)는 유지한다.
+    fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
+        // 터미널·json 모드 모두 --resume 지원(spike-verified) → resume=true. 방어적 Shell 도 여기선
+        //   claude backend 경로라 resume 가능(실제 Shell resume caps 는 ShellBackend 소관 — 건드리지 않음).
+        let resume = true;
         BackendCaps {
             session: SessionCaps {
                 resume,
@@ -717,12 +725,13 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_json_mode_resume_is_false() {
-        // ★FIX 5★: json(stream-json) 모드는 매 spawn fresh --session-id 강제(build_spec) →
-        //   resume 을 true 로 신고하면 sid 재사용 충돌 지뢰. backend 가 mode 를 보고 resume=false.
+    fn capabilities_json_mode_resume_is_true() {
+        // ★ADR-0044 후속 완료★: json(stream-json) 모드도 --resume 지원(spike-verified, claude 2.1.170) →
+        //   build_spec 이 SpawnMode::Resume 에서 --resume 을 낸다. 따라서 caps 도 resume=true 로 정직 신고
+        //   (통제-sid ADR-0008 재사용 — sid 충돌 없음). 옛 resume=false(sid fresh 강제) 가정은 폐기.
         assert!(
-            !ClaudeBackend.capabilities(&json(vec![])).session.resume,
-            "json 모드 claude 는 resume=false(sid fresh 강제)"
+            ClaudeBackend.capabilities(&json(vec![])).session.resume,
+            "json 모드 claude 도 resume=true(--resume 지원, spike-verified)"
         );
     }
 
@@ -782,17 +791,24 @@ mod tests {
     }
 
     #[test]
-    fn json_mode_resume_falls_back_to_session_id_not_resume() {
-        // ★ADR-0044 후속★: json 모드는 resume 미지원 → SpawnMode::Resume 이어도 --session-id(fresh).
+    fn json_mode_resume_uses_resume_flag() {
+        // ★ADR-0044 후속 완료 / ADR-0008 재사용★: json 모드도 --resume 지원(spike-verified, claude 2.1.170) →
+        //   SpawnMode::Resume 이면 --resume <sid> 를 낸다(터미널 claude_resume_uses_resume_flag 와 동형).
+        //   옛 "resume 은 --session-id 로 폴백" 동작은 폐기.
         let sid = Uuid::new_v4();
         let s = spec(&json(vec![]), SpawnMode::Resume, Some(sid));
         assert!(
-            s.args.iter().any(|x| x == "--session-id"),
-            "json resume 은 --session-id(fresh) 로 가야 함"
+            s.args.iter().any(|x| x == "--resume"),
+            "json resume 은 --resume 로 가야 함(spike-verified)"
         );
         assert!(
-            !s.args.iter().any(|x| x == "--resume"),
-            "json 모드에서 --resume 을 쓰면 안 됨(MVP 밖)"
+            !s.args.iter().any(|x| x == "--session-id"),
+            "json Resume 모드에서 --session-id(fresh) 를 쓰면 안 됨"
+        );
+        // resume 인 sid 가 --resume 인자로 실려야 한다(터미널 분기와 동일 계약).
+        assert!(
+            s.args.iter().any(|x| x == &sid.to_string()),
+            "resume sid 가 인자에 실려야 함"
         );
     }
 

@@ -1,6 +1,6 @@
 # ADR-0044: JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스
 
-- 상태: 확정 (2026-07-02, 근거: claude CLI 실측 스파이크 + 백엔드 seam 매핑 + 사용자 승인)
+- 상태: 확정 (2026-07-02, 근거: claude CLI 실측 스파이크 + 백엔드 seam 매핑 + 사용자 승인) · resume 후속 완료 by ADR-0074
 - 관련: ADR-0002(출력 종류 비가정·capability 렌더러 분기) · ADR-0004(claude 지식 격리) · ADR-0030(transport ⊕ backend caps 합성) · `src/lab/richslot/`(렌더 스파이크) · step-log S? (JSON 렌더 착수) · Amended by ADR-0045 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환)
 
 ## 맥락
