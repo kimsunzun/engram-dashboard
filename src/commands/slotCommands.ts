@@ -16,6 +16,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import { t } from '../i18n'
 import { useViewStore, readWindowLabelFromHash } from '../store/viewStore'
 import type { SplitDir } from '../api/layoutTypes'
 import { register } from './registry'
@@ -49,12 +50,12 @@ function registerSplit(id: string, title: string, dir: SplitDir): void {
   })
 }
 
-registerSplit('slot.split.h', '가로 분할', 'horizontal')
-registerSplit('slot.split.v', '세로 분할', 'vertical')
+registerSplit('slot.split.h', t('slot.splitH'), 'horizontal')
+registerSplit('slot.split.v', t('slot.splitV'), 'vertical')
 
 register({
   id: 'slot.focus',
-  title: '포커스',
+  title: t('slot.focus'),
   category: 'slot',
   // ADR-0066: click-to-focus — 슬롯 pane 클릭·팔레트·키바인딩·LLM(__engramCmd)이 모두 이 command 를 통해
   //   viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) 로 링을 갱신한다(낙관 갱신 X, §5 단일
@@ -67,7 +68,7 @@ register({
 
 register({
   id: 'slot.popout',
-  title: '팝업으로 분리',
+  title: t('slot.popout'),
   category: 'slot',
   // ADR-0057/0064: 슬롯을 새 런타임 팝업 창의 새 탭으로 MOVE(detach) — viewStore.moveSlotToWindow →
   //   invoke(move_slot_to_window, toWindow=null). 콘텐츠 종류 무관(agent 게이팅 제거, ADR-0064).
@@ -79,7 +80,7 @@ register({
 
 register({
   id: 'slot.empty',
-  title: '비우기',
+  title: t('slot.empty'),
   category: 'slot',
   // ADR-0063: 슬롯 콘텐츠를 empty 로 교체 = viewStore.setSlotContent(…,{type:'empty'}) → invoke → emit.
   run: args => {
@@ -90,7 +91,7 @@ register({
 
 register({
   id: 'slot.close',
-  title: '닫기',
+  title: t('slot.close'),
   category: 'slot',
   // ADR-0035: 닫기 = viewStore.closeSlot(viewId, slotId) → invoke(close_slot)(형제 승격).
   run: args => {
@@ -101,7 +102,7 @@ register({
 
 register({
   id: 'slot.resolveSpatial',
-  title: '공간 타깃 해소',
+  title: t('slot.resolveSpatial'),
   category: 'slot',
   // ★공간/방향 토큰 → slot id 해소(ADR-0068 — §5 백엔드 권위 resolver)★: "우하단"·"이 슬롯 오른쪽" 같은
   //   공간 지시를 논리 도면(split 방향·ratio) 파생으로 slot id 에 매핑한다(픽셀·getBoundingClientRect 무관 —

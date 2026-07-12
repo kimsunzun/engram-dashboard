@@ -29,6 +29,8 @@ beforeEach(() => {
 describe('slot.assignRunningAgent 등록·라우팅 (ADR-0067)', () => {
   it('registry 에 등록된다', () => {
     expect(getCommand('slot.assignRunningAgent')).toBeDefined()
+    // 리터럴 기대값 — t('agent.monitor')로 비교하면 production·assert 둘 다 ko.ts 참조라 순환(잘못된 값도 통과).
+    //   화면에 실제로 나가는 문자열을 리터럴로 못 박아 ko.ts 값 회귀를 잡는다.
     expect(getCommand('slot.assignRunningAgent')!.title).toBe('에이전트 모니터링')
   })
 

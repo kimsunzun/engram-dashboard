@@ -7,6 +7,7 @@
 
 import { open } from '@tauri-apps/plugin-dialog'
 
+import { t } from '../i18n'
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
 import { register, run } from './registry'
@@ -14,7 +15,7 @@ import { registerSlotMenu } from './slotMenu'
 
 register({
   id: 'agent.spawn',
-  title: '에이전트 생성(spawn)',
+  title: t('agent.spawn'),
   category: 'agent',
   // 단일 객체 가방(ADR-0055): { preset?, cwd?, parent? }.
   //   - preset(id) 주어지면 store.presets 에서 cwd 를 해소(프리셋 = cwd 북마크, ADR-0061).
@@ -51,7 +52,7 @@ register({
 
 register({
   id: 'agentlist.createAgent',
-  title: '에이전트 생성',
+  title: t('agent.create'),
   category: 'agent',
   // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴의 "에이전트 생성" — 네이티브 폴더 다이얼로그로 cwd 를 고른
   //   뒤 agent.spawn({cwd}) 로 라우팅해 트리에 새 에이전트를 추가한다(특정 슬롯 배정 아님 — 트리 전역 spawn).
@@ -59,7 +60,7 @@ register({
   //   (후속으로 프리셋 행 액션 "이 프리셋으로 생성" 추가 예정, ADR-0064). 취소(null)면 no-op. run 은 미지
   //   preset·빈 cwd 등에 동기 throw 할 수 있어 async 로 감싸 회수부(cdp/메뉴)가 await·catch 가능하게 한다.
   run: async () => {
-    const picked = await open({ directory: true, multiple: false, title: '에이전트 작업 디렉토리 선택' })
+    const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
     const cwd = typeof picked === 'string' ? picked : null
     if (!cwd) return // 취소 — no-op
     return run('agent.spawn', { cwd })

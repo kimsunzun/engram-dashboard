@@ -2,6 +2,7 @@
 //   한다(새 상태 경로 0). import 부수효과로 등록되므로 부팅 경로(App.tsx)에서 side-effect import 한다.
 //   검증: window.__engramCmd.run('theme.set',{theme:'light'}) → document.documentElement.dataset.theme.
 
+import { t } from '../i18n'
 import { type ThemeName, useThemeStore } from '../store/themeStore'
 import { register } from './registry'
 
@@ -9,7 +10,7 @@ const THEMES: readonly ThemeName[] = ['dark', 'light', 'e-ink']
 
 register({
   id: 'theme.set',
-  title: '테마 설정',
+  title: t('theme.set'),
   category: 'theme',
   // args.theme 만 destructure(단일 객체 가방, ADR-0055). 유효 테마명 검증 후 기존 setter 로 라우팅.
   run: (args) => {
@@ -23,7 +24,7 @@ register({
 
 register({
   id: 'theme.toggle',
-  title: '테마 순환',
+  title: t('theme.toggle'),
   category: 'theme',
   keybinding: 'Ctrl+Shift+T',
   // 현재 테마 다음 것으로 순환. 상태는 읽기만 하고 실행은 기존 setter 로 라우팅(권위는 store 유지).

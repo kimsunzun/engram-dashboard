@@ -874,6 +874,12 @@
 - **어떻게:** 조사 수집자 3명 병렬(sonnet, by-candidate 팬아웃) → 메인 grounding. cross-family(Codex) 적대 리뷰는 시간 과다(사용자 판단)로 생략 — **medium (적대 리뷰 생략 — cross-family 검증 없음)** degraded 라벨. 결론은 다수 독립 출처(Tolgee·Phrase·i18next docs·typesafe-i18n 등) 지지라 견고. 번들 수치는 bundlephobia 직접 확인 실패로 "가능성 높음".
 - **게이트:** 주석·문서만(로직 무변) → tsc/vitest 회귀 후 커밋+**푸시**.
 
+## UI 문자열 마이그레이션 슬라이스 ② — `src/commands/` (command 제목·메뉴 라벨) (2026-07-12, master, 대화 세션) · ADR-0069 구현 ②
+- **무엇:** `src/commands/`의 사용자 노출 UI 문자열 **27개**(command 제목 25 + 서브메뉴 라벨 + native OS dialog 제목 2)를 인라인 한글 → `t()` 경유로 교체. `ko.ts`에 엔트리 추가(기존 네임스페이스 tab/slot/window/agent/preset 확장 + 신규 `theme`/`dialog`). 값 byte-identical, command 로직 무변(문자열만). 내부 `console`/`throw` 진단은 범위 밖(제외 — ADR-0069). `preset.create` seed 값 재사용(consumer 0이라 안전, 리뷰 확인).
+- **어떻게:** 코더(worker-senior Opus·xhigh) → 직접 파이프라인 `review code full` 2인(doc-aware Opus=PASS + cross-family Codex blind). **Codex FIX 1건** = `slotContentCommands.test.ts` 순환 테스트 오라클(`t()` vs `ko.ts` 커플링 → 잘못된 값도 통과) → 리터럴 기대값 `'에이전트 모니터링'` 복원(1줄, 인라인) + unused import 제거 → codex 종결 PASS.
+- **검증(qa full PASS):** `npx tsc --noEmit` clean · `npm test`(vitest 530) · **cdp 실측**(live 포트 9223): `t()` dynamic import로 마이그레이션 key 반환값 실측 — `agent.monitor`="에이전트 모니터링", `slot.splitH`="가로 분할", `tab.closeCmd`="탭 닫기", `agent.spawn`="에이전트 생성(spawn)", `dialog.pickAgentCwd` 정상. Rust 게이트는 변경 Rust 0 = 인과 격리 스킵.
+- **게이트:** 커밋 = 8파일(`ko.ts` + command 6 + test 1) + step-log. **후속:** 슬라이스 ③ 컴포넌트 스윕(aria-label·라벨·기본 탭명·빈상태 ~40곳).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

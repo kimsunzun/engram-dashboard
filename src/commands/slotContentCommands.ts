@@ -10,6 +10,7 @@
 
 import { open } from '@tauri-apps/plugin-dialog'
 
+import { t } from '../i18n'
 import { agentClient } from '../api/clientFactory'
 import { useMonitoringPickerStore } from '../store/monitoringPickerStore'
 import { useViewStore } from '../store/viewStore'
@@ -32,7 +33,7 @@ function requireCoords(
 
 register({
   id: 'slot.fill.agentList',
-  title: '에이전트 트리 열기',
+  title: t('slot.fillAgentList'),
   category: 'slot',
   // ADR-0063: 이 슬롯 콘텐츠를 agent_list 로 교체 → invoke(set_slot_content) → emit 반영.
   run: args => {
@@ -43,7 +44,7 @@ register({
 
 register({
   id: 'slot.fill.presetPalette',
-  title: '프리셋 팔레트 열기',
+  title: t('slot.fillPresetPalette'),
   category: 'slot',
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.fill.presetPalette')
@@ -53,7 +54,7 @@ register({
 
 register({
   id: 'slot.createAgentHere',
-  title: '에이전트 생성',
+  title: t('agent.create'),
   category: 'slot',
   // ★spawn + 이 슬롯에 배정★(ADR-0011 + ADR-0035): 네이티브 폴더 다이얼로그로 cwd 를 고른 뒤(preset.add·
   //   PresetPalette 와 동일 open({directory:true}) 패턴) agentClient.spawnAgent(cwd)(데몬 권위) → 성공 id 를
@@ -62,7 +63,7 @@ register({
   run: async args => {
     const { viewId, slotId } = requireCoords(args, 'slot.createAgentHere')
     // 네이티브 OS 폴더 선택 창(webview 밖). directory+multiple:false → 반환은 string | null.
-    const picked = await open({ directory: true, multiple: false, title: '에이전트 작업 디렉토리 선택' })
+    const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
     const cwd = typeof picked === 'string' ? picked : null
     if (!cwd) return // 취소 — no-op
     const agent = await agentClient.spawnAgent(cwd)
@@ -74,7 +75,7 @@ register({
 // ADR-0067: slot 우클릭 "에이전트 모니터링" — 검색 팝업(실행중 에이전트)을 우클릭한 그 slot 을 타깃으로 연다.
 register({
   id: 'slot.assignRunningAgent',
-  title: '에이전트 모니터링',
+  title: t('agent.monitor'),
   category: 'slot',
   // ★배치 타깃 = 우클릭한 slot(명시)★(ADR-0067): ctx.viewId/slotId 가 우클릭한 slot 좌표다(포커스 비의존
   //   — focus-steal 원천 차단). 여기선 팝업을 그 좌표로 열기만 하고, 실제 배치(assign_agent)는 팝업의
@@ -95,7 +96,7 @@ register({
 //   agent_list 슬롯 메뉴 agentlist.createAgent). command 정의 자체는 남긴다(직접 호출·향후 재사용 가능).
 registerSlotMenu('empty', [
   {
-    title: '새 콘텐츠',
+    title: t('slot.newContent'),
     group: 'content',
     order: 10,
     children: [
@@ -122,7 +123,7 @@ registerSlotMenu('*', [
 
 register({
   id: 'agent.kill',
-  title: '에이전트 종료',
+  title: t('agent.kill'),
   category: 'agent',
   // ADR-0011: 종료 = 에이전트 명령(agentClient.killAgent). 슬롯은 그대로 두고(레이아웃 불변) agent 만 kill.
   //   agentId 는 실행 컨텍스트(ctx)에서 온다 — 메뉴가 슬롯의 배정 agentId 를 넘긴다.

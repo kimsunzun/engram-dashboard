@@ -7,6 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import { t } from '../i18n'
 import { register } from './registry'
 import { readWindowLabelFromHash, useViewStore } from '../store/viewStore'
 
@@ -28,7 +29,7 @@ function activeViewOf(window: string): string | null {
 
 register({
   id: 'tab.create',
-  title: '새 탭',
+  title: t('tab.create'),
   category: 'tab',
   // args.window(생략 시 이 창) 에 빈-슬롯 탭 추가. name 옵션.
   run: args => {
@@ -39,7 +40,7 @@ register({
 
 register({
   id: 'tab.switch',
-  title: '탭 전환',
+  title: t('tab.switch'),
   category: 'tab',
   // args.view(필수) 로 그 창 active 탭 교체.
   run: args => {
@@ -51,7 +52,7 @@ register({
 
 register({
   id: 'tab.close',
-  title: '탭 닫기',
+  title: t('tab.closeCmd'),
   category: 'tab',
   // args.view(생략 시 ★그 창의★ active 탭, S4-F1) 를 닫는다.
   run: args => {
@@ -66,7 +67,7 @@ register({
 
 register({
   id: 'tab.next',
-  title: '다음 탭(순환)',
+  title: t('tab.next'),
   category: 'tab',
   keybinding: 'Ctrl+Tab',
   // ★Ctrl+Tab(D-8)★: 포커스된 창의 탭을 순환한다 = switch_tab(이 창, 다음 탭). 사람 키·클릭과 동일 command
@@ -84,7 +85,7 @@ register({
 
 register({
   id: 'tab.rename',
-  title: '탭 이름 변경',
+  title: t('tab.rename'),
   category: 'tab',
   // ★rename(ADR-0057)★: 탭(View) 이름 교체. viewStore.renameTab 으로 라우팅(사람 더블클릭 인라인 편집 = LLM
   //   한 표면, §5). args: view(필수 non-empty view id)·name(필수 문자열). name 은 trim 후 넘긴다 — 빈/공백은
@@ -103,7 +104,7 @@ register({
 
 register({
   id: 'window.create',
-  title: '새 창',
+  title: t('window.create'),
   category: 'window',
   // 빈 새 창(빈 탭 1개) 생성 → label 반환(D-6).
   run: () => useViewStore.getState().createWindow(),
@@ -111,7 +112,7 @@ register({
 
 register({
   id: 'window.close',
-  title: '창 닫기',
+  title: t('window.close'),
   category: 'window',
   // args.window(생략 시 이 창) 닫기. main 은 백엔드가 거부(hide only, 불변식 4).
   run: args => useViewStore.getState().closeWindow(resolveWindow(args)),
@@ -164,7 +165,7 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
 
 register({
   id: 'layout.setSlotContent',
-  title: '슬롯 콘텐츠 배치',
+  title: t('slot.setContent'),
   category: 'layout',
   // ★set_slot_content(ADR-0063)★: 슬롯 콘텐츠를 SlotContent 유니온 어느 것으로도 교체한다(트리/팔레트/비우기).
   //   viewStore.setSlotContent 로 라우팅(사람 우클릭 = LLM 한 표면, §5). args: viewId(필수)·slotId(필수)·
@@ -193,7 +194,7 @@ register({
 
 register({
   id: 'agent.spawnInto',
-  title: '스폰 + 배치',
+  title: t('agent.spawnInto'),
   category: 'agent',
   // ★spawn_into(D-7, TRD §6 G9)★: 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방으로 조립하는 백엔드
   //   합성 command 를 직접 invoke 한다(store 상태 없이 backend 권위 — ADR-0057). 성공 시 새 AgentId 반환.

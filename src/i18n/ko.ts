@@ -21,28 +21,56 @@
 export const ko = {
   /** 탭(View) 관련 — command 제목·라벨. */
   tab: {
-    create: '새 탭',
-    switch: '탭 전환',
-    close: '탭 닫기: {name}', // 보간 시드 — ADR-0069 예시.
-    next: '다음 탭(순환)',
-    rename: '탭 이름 변경',
+    create: '새 탭', // tab.create command 제목.
+    switch: '탭 전환', // tab.switch command 제목.
+    close: '탭 닫기: {name}', // 보간 시드 — ADR-0069 예시(닫기 확인 등 name 을 붙이는 소비자용).
+    closeCmd: '탭 닫기', // tab.close command 제목(보간 없는 팔레트/메뉴 표기 — close 시드와 별개 키).
+    next: '다음 탭(순환)', // tab.next command 제목.
+    rename: '탭 이름 변경', // tab.rename command 제목.
   },
-  /** 슬롯(레이아웃 한 칸) 관련. */
+  /** 슬롯(레이아웃 한 칸) 관련 — command 제목·우클릭 메뉴 라벨. */
   slot: {
-    setContent: '슬롯 콘텐츠 배치',
+    setContent: '슬롯 콘텐츠 배치', // layout.setSlotContent command 제목.
+    splitH: '가로 분할', // slot.split.h command 제목.
+    splitV: '세로 분할', // slot.split.v command 제목.
+    focus: '포커스', // slot.focus command 제목.
+    popout: '팝업으로 분리', // slot.popout command 제목.
+    empty: '비우기', // slot.empty command 제목.
+    close: '닫기', // slot.close command 제목(슬롯 닫기 — 우클릭 메뉴).
+    resolveSpatial: '공간 타깃 해소', // slot.resolveSpatial command 제목.
+    fillAgentList: '에이전트 트리 열기', // slot.fill.agentList command 제목.
+    fillPresetPalette: '프리셋 팔레트 열기', // slot.fill.presetPalette command 제목.
+    newContent: '새 콘텐츠', // empty 슬롯 우클릭 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨(ADR-0065).
   },
   /** 창(WebView2 윈도우) 관련. */
   window: {
-    create: '새 창',
-    close: '창 닫기',
+    create: '새 창', // window.create command 제목.
+    close: '창 닫기', // window.close command 제목.
   },
-  /** 에이전트(claude 프로세스) 관련. */
+  /** 에이전트(claude 프로세스) 관련 — command 제목·우클릭 메뉴 라벨. */
   agent: {
-    spawnInto: '스폰 + 배치',
+    spawn: '에이전트 생성(spawn)', // agent.spawn command 제목.
+    create: '에이전트 생성', // agentlist.createAgent / slot.createAgentHere command 제목(폴더 다이얼로그 스폰).
+    spawnInto: '스폰 + 배치', // agent.spawnInto command 제목.
+    kill: '에이전트 종료', // agent.kill command 제목.
+    monitor: '에이전트 모니터링', // slot.assignRunningAgent command 제목(실행중 에이전트 배치).
   },
-  /** 프리셋(cwd 프리셋) 관련. */
+  /** 프리셋(cwd 프리셋) 관련 — command 제목·우클릭 메뉴 라벨. */
   preset: {
-    create: '프리셋 추가',
+    create: '프리셋 생성', // preset.create command 제목.
+    list: '프리셋 목록 조회', // preset.list command 제목.
+    delete: '프리셋 삭제', // preset.delete command 제목.
+    add: '추가', // preset.add command 제목(preset_palette 슬롯 메뉴 "추가").
+  },
+  /** 테마 관련 — command 제목. */
+  theme: {
+    set: '테마 설정', // theme.set command 제목.
+    toggle: '테마 순환', // theme.toggle command 제목.
+  },
+  /** 네이티브 OS 다이얼로그 제목(폴더 선택 창 — webview 밖 사용자 노출 텍스트). */
+  dialog: {
+    pickAgentCwd: '에이전트 작업 디렉토리 선택', // 에이전트 스폰용 cwd 폴더 선택.
+    pickPresetPath: '프리셋 경로 선택', // 프리셋 등록용 폴더 선택.
   },
   /** 도메인 공통 — 기본명·빈상태 등. */
   common: {
