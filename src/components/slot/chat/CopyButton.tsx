@@ -4,6 +4,8 @@
 import { Check, Copy } from 'lucide-react'
 import { useCallback, useState } from 'react'
 
+import { t } from '../../../i18n'
+
 const COPIED_MS = 1500
 
 interface CopyButtonProps {
@@ -13,7 +15,7 @@ interface CopyButtonProps {
 }
 
 /** hover 시 나타나는 우상단 복사 버튼. group-hover 로 부모(.group)에서 노출을 제어한다. */
-export function CopyButton({ getText, label = '복사' }: CopyButtonProps) {
+export function CopyButton({ getText, label = t('common.copy') }: CopyButtonProps) {
   const [copied, setCopied] = useState(false)
 
   const onClick = useCallback(() => {
@@ -32,7 +34,7 @@ export function CopyButton({ getText, label = '복사' }: CopyButtonProps) {
     <button
       type="button"
       onClick={onClick}
-      aria-label={copied ? '복사됨' : label}
+      aria-label={copied ? t('common.copied') : label}
       className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity rounded p-1 text-muted hover:text-foreground hover:bg-surface"
     >
       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}

@@ -28,6 +28,7 @@ import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
 import AgentMonitoringPicker from '../slot/AgentMonitoringPicker'
 import { useMonitoringPickerStore } from '../../store/monitoringPickerStore'
+import { t } from '../../i18n'
 
 interface WindowLayoutProps {
   /** 이 창의 label(main·slot-popup-N). 모든 탭 command·이벤트 필터가 이 label 을 쓴다. */
@@ -127,7 +128,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
     // 창 상태 미도착(부팅 직후 pull 전) 또는 유효 label 못 찾음(dev 리로드 stale 팝업, §3-3/G3).
     return (
       <div style={centerStyle}>
-        <span>창 로딩 중… (label: {label})</span>
+        <span>{t('window.loading', { label })}</span>
       </div>
     )
   }
@@ -183,7 +184,7 @@ function TabCanvas({ viewId }: { viewId: string }) {
   if (!cached) {
     return (
       <div style={centerStyle}>
-        <span>View 로딩 중…</span>
+        <span>{t('common.viewLoading')}</span>
       </div>
     )
   }

@@ -26,6 +26,7 @@ import { currentViewId, selectView, useViewStore } from '../../store/viewStore'
 import { refreshProfiles } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
+import { t } from '../../i18n'
 
 /**
  * 상태 → 글리프(모양) 매핑 — PURE(외부 의존 0, ADR-0062). 색이 아닌 모양이 상태를 담아 e-ink 에서도
@@ -151,7 +152,7 @@ export default function AgentList() {
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[spawnProfile]', e)
-        setError(agentId, `활성화 실패: ${String(e)}`)
+        setError(agentId, t('agent.activateFailed', { err: String(e) }))
       })
       .finally(() => endInFlight(agentId))
   }
@@ -164,7 +165,7 @@ export default function AgentList() {
     const viewId = currentViewId()
     const slotId = selectView(vs, viewId)?.focusedSlotId
     if (!viewId || !slotId) {
-      setError(agentId, '열기 실패: 활성 뷰/포커스 슬롯 없음')
+      setError(agentId, t('agent.openFailedNoSlot'))
       endInFlight(agentId) // 조기 반환에도 lock 해제(영구 잠금 방지)
       return
     }
@@ -173,7 +174,7 @@ export default function AgentList() {
       .assignAgent(viewId, slotId, agentId)
       .catch(e => {
         console.error('[assignAgent]', e)
-        setError(agentId, `열기 실패: ${String(e)}`)
+        setError(agentId, t('agent.openFailed', { err: String(e) }))
       })
       .finally(() => endInFlight(agentId))
   }
@@ -186,7 +187,7 @@ export default function AgentList() {
       .killAgent(agentId)
       .catch(e => {
         console.error('[kill]', e)
-        setError(agentId, `종료 실패: ${String(e)}`)
+        setError(agentId, t('agent.killFailed', { err: String(e) }))
       })
       .finally(() => endInFlight(agentId))
   }
@@ -201,7 +202,7 @@ export default function AgentList() {
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[deleteProfile]', e)
-        setError(agentId, `예약 취소 실패: ${String(e)}`)
+        setError(agentId, t('agent.cancelReservedFailed', { err: String(e) }))
       })
       .finally(() => endInFlight(agentId))
   }
@@ -214,30 +215,30 @@ export default function AgentList() {
     : rowMenu.kind === 'reserved'
       ? [
           {
-            label: '활성화(spawn)',
+            label: t('agent.rowActivate'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => activateReserved(rowMenu.agentId),
           },
           // ★예약 취소(삭제) — AgentTree reserved-row 리그레션 복원★: 이 항목 외엔 stale 예약 프로필을 지울
           //   UI 가 없다(deleteProfile 유일 경로). 동기 가드는 cancelReserved 내부 busyRef.
           {
-            label: '예약 취소',
+            label: t('agent.rowCancelReserved'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => cancelReserved(rowMenu.agentId),
           },
         ]
       : [
-          { label: '열기', disabled: busyIds.has(rowMenu.agentId), action: () => openInFocusedSlot(rowMenu.agentId) },
+          { label: t('agent.rowOpen'), disabled: busyIds.has(rowMenu.agentId), action: () => openInFocusedSlot(rowMenu.agentId) },
           {
-            label: '종료',
+            label: t('agent.rowKill'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => killAgentGuarded(rowMenu.agentId),
           },
           // ★준비 중(백엔드 command 없음)★: 이름은 cwd basename 으로 파생돼 저장 이름 자체가 없다(rename
           //   대상 부재). 재시작 전용 command 도 protocolClient 에 없다(kill→re-spawn 조합뿐). 날조 금지 —
           //   실제 command 가 생기면 배선한다(ADR-0011).
-          { label: '이름변경 (준비 중)', disabled: true, action: () => {} },
-          { label: '재시작 (준비 중)', disabled: true, action: () => {} },
+          { label: t('agent.rowRename'), disabled: true, action: () => {} },
+          { label: t('agent.rowRestart'), disabled: true, action: () => {} },
         ]
 
   return (
@@ -277,7 +278,7 @@ export default function AgentList() {
           letterSpacing: '0.03em',
         }}
       >
-        에이전트 트리
+        {t('agent.treeLabel')}
       </div>
       {/* ★빈 목록 = ScrollArea 밖의 flex-1 센터링 div(FIX-A)★: 옛 구조는 이 안내 문구를 ScrollArea(Radix
           Viewport) 안에 넣고 height:100% 로 세로 중앙 정렬했으나, Radix 가 Viewport 자식을 display:table 로
@@ -299,7 +300,7 @@ export default function AgentList() {
             fontSize: '12px',
           }}
         >
-          에이전트 없음 — 우클릭으로 생성
+          {t('agent.emptyList')}
         </div>
       ) : (
         // 스크롤 표면 = 공용 ScrollArea seam(ADR-0053) — 목록 행·행메뉴만 담는다. 옛 raw overflow:auto div
@@ -337,7 +338,7 @@ export default function AgentList() {
               onDoubleClick={() => {
                 if (node.kind === 'reserved') activateReserved(node.id)
               }}
-              title={err ?? (isReserved ? '더블클릭으로 활성화(spawn)' : node.cwd)}
+              title={err ?? (isReserved ? t('agent.doubleClickToActivate') : node.cwd)}
               onContextMenu={e => {
                 e.preventDefault()
                 e.stopPropagation() // ★행 메뉴가 이긴다(ADR-0064)★: 상위 통합 슬롯 메뉴가 안 뜨게 여기서 멈춘다.
@@ -368,7 +369,7 @@ export default function AgentList() {
               </span>
               {err && (
                 <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '10px', flexShrink: 0 }}>
-                  실패
+                  {t('agent.rowFailedBadge')}
                 </span>
               )}
             </div>

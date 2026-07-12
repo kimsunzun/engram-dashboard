@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 
 import { CopyButton } from './CopyButton'
+import { t } from '../../../i18n'
 import './chat.css'
 import 'katex/dist/katex.min.css'
 
@@ -57,7 +58,7 @@ function PreBlock({ children, ...preProps }: HTMLAttributes<HTMLPreElement>) {
       <pre {...preProps} ref={preRef}>
         {children}
       </pre>
-      <CopyButton getText={getText} label="코드 복사" />
+      <CopyButton getText={getText} label={t('common.codeCopy')} />
     </div>
   )
 }

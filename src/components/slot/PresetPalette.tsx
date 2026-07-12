@@ -20,6 +20,7 @@ import { ScrollArea } from '../ui/scroll-area'
 import { agentClient } from '../../api/clientFactory'
 import { useAgentStore } from '../../store/agentStore'
 import { basename } from '../../util/basename'
+import { t } from '../../i18n'
 
 /**
  * 프리셋 표시명 = cwd basename(프론트 파생, ADR-0061 — 이름 미저장). 실제 파생 규칙은 공용 `basename`
@@ -95,7 +96,7 @@ export default function PresetPalette() {
           flexShrink: 0,
         }}
       >
-        프리셋
+        {t('preset.label')}
       </div>
 
       {/* 프리셋 목록 — 각 행: cwd basename(표시명) + 전체 cwd(muted) + 삭제. 공용 ScrollArea seam(ADR-0053)
@@ -103,7 +104,7 @@ export default function PresetPalette() {
       <ScrollArea style={{ flex: 1, minHeight: 0 }}>
         {presets.length === 0 ? (
           <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
-            프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.
+            {t('preset.empty')}
           </div>
         ) : (
           presets.map(preset => {
@@ -143,7 +144,7 @@ export default function PresetPalette() {
               </div>
               <button
                 data-preset-delete={preset.id}
-                aria-label="프리셋 삭제"
+                aria-label={t('preset.delete')}
                 onClick={() => removePreset(preset.id)}
                 disabled={isDeleting}
                 style={{
@@ -159,7 +160,7 @@ export default function PresetPalette() {
                   opacity: isDeleting ? 0.6 : 1, // in-flight 시각 표시(색 리터럴 없이 opacity 만)
                 }}
               >
-                삭제
+                {t('preset.deleteBtn')}
               </button>
             </div>
             )

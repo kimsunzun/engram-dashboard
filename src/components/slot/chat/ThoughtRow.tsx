@@ -10,6 +10,7 @@ import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { t } from '../../../i18n'
 
 interface ThoughtRowProps {
   /** 추론 평문. 비어 있으면(암호화 thinking) 비-인터랙티브 라벨만 렌더. */
@@ -31,7 +32,7 @@ export function ThoughtRow({ content, streaming = false, label = 'Thought' }: Th
         type="button"
         onClick={interactive ? () => setExpanded((o) => !o) : undefined}
         aria-expanded={interactive ? expanded : undefined}
-        title={interactive ? undefined : '내용 비공개'}
+        title={interactive ? undefined : t('common.contentPrivate')}
         className={cn(
           'flex items-center gap-1 text-[13px] text-muted select-none',
           interactive ? 'cursor-pointer' : 'cursor-default',

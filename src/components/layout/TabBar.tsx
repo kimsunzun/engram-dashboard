@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { ViewMeta } from '../../api/layoutTypes'
+import { t } from '../../i18n'
 
 interface TabBarProps {
   /** 이 탭바가 속한 창 label(main·slot-popup-N). 모든 액션이 이 label 을 백엔드에 넘긴다. */
@@ -166,7 +167,7 @@ export default function TabBar({
             )}
             <button
               type="button"
-              aria-label={`탭 닫기: ${tab.name}`}
+              aria-label={t('tab.close', { name: tab.name })}
               data-testid="tab-close"
               // ★탭 닫기★: 부모 onClick(전환)로 버블 금지 → stopPropagation. close_tab command 경로.
               onClick={e => {
@@ -190,7 +191,7 @@ export default function TabBar({
       })}
       <button
         type="button"
-        aria-label="새 탭"
+        aria-label={t('tab.create')}
         data-testid="tab-add"
         onClick={onCreate}
         style={{

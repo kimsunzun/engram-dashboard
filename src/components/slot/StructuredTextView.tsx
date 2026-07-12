@@ -35,6 +35,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { t } from '../../i18n'
 import type { StructuredItem } from './structuredAccumulator'
 // ADR-0050: 우리 자체 채팅 leaf 들(chat/*). 상세는 각 파일 헤더 참조.
 //   ★Markdown(전체 마크다운) 은 assistant text 에만 쓴다. 도구 IN/OUT·탈출구 json 은 신뢰할 수 없는
@@ -314,7 +315,7 @@ function ToolItemRow({
                   Out
                 </div>
                 {/* 결과 본문을 리터럴 <pre> 로 — 삼중 백틱이 있어도 inert(FIX 2). */}
-                <InertCode code={result.content || '(빈 결과)'} />
+                <InertCode code={result.content || t('common.emptyResult')} />
               </div>
             )}
           </div>

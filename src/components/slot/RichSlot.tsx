@@ -26,6 +26,7 @@ import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import { StructuredTextView } from './StructuredTextView'
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
+import { t } from '../../i18n'
 
 interface RichSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯 독립 진도 — 버그 B 해소. */
@@ -179,7 +180,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
               send()
             }
           }}
-          placeholder={isTerminated ? '종료된 에이전트' : '메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)'}
+          placeholder={isTerminated ? t('agent.terminatedPlaceholder') : t('agent.inputPlaceholder')}
           disabled={isTerminated}
           rows={2}
           className="flex-1 resize-none rounded border border-border bg-surface px-2 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"

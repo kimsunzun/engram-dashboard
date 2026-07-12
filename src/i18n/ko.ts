@@ -46,6 +46,7 @@ export const ko = {
   window: {
     create: '새 창', // window.create command 제목.
     close: '창 닫기', // window.close command 제목.
+    loading: '창 로딩 중… (label: {label})', // WindowLayout: 창 상태 미도착 시 로딩 플레이스홀더(보간 label).
   },
   /** 에이전트(claude 프로세스) 관련 — command 제목·우클릭 메뉴 라벨. */
   agent: {
@@ -54,13 +55,41 @@ export const ko = {
     spawnInto: '스폰 + 배치', // agent.spawnInto command 제목.
     kill: '에이전트 종료', // agent.kill command 제목.
     monitor: '에이전트 모니터링', // slot.assignRunningAgent command 제목(실행중 에이전트 배치).
+    connecting: '에이전트 연결 중…', // ViewLayoutRenderer: caps 미도착 슬롯의 중립 플레이스홀더.
+    monitoringLabel: '에이전트 모니터링 — 이 슬롯에 실행중 에이전트 배정', // AgentMonitoringPicker 팝업 라벨.
+    monitoringSearch: '에이전트 검색 (이름·경로)', // AgentMonitoringPicker 검색창 placeholder.
+    noCandidates: '검색 결과 없음', // AgentMonitoringPicker: 실행중은 있으나 검색 미스.
+    noRunning: '실행중 에이전트 없음 — 트리에서 에이전트를 생성/활성화하세요.', // AgentMonitoringPicker: 실행중 0.
+    terminatedPlaceholder: '종료된 에이전트', // RichSlot 입력창 placeholder(종료 상태) — 오버레이 '종료됨'과 별개.
+    inputPlaceholder: '메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)', // RichSlot 입력창 placeholder(활성).
+    treeLabel: '에이전트 트리', // AgentList 슬롯 콘텐츠 라벨.
+    emptyList: '에이전트 없음 — 우클릭으로 생성', // AgentList 빈 상태 안내.
+    terminatedOverlay: '종료됨', // TerminalSlot/DomSlot 종료 오버레이 — placeholder '종료된 에이전트'와 별개.
+    // AgentList 행 우클릭 메뉴 라벨(reserved: 활성화/예약취소 · running: 열기/종료/이름변경/재시작).
+    rowActivate: '활성화(spawn)', // reserved 행 활성화(spawnProfile) 메뉴 라벨.
+    rowCancelReserved: '예약 취소', // reserved 행 예약취소(deleteProfile) 메뉴 라벨.
+    rowOpen: '열기', // running 행 "열기"(포커스 슬롯 배정) 메뉴 라벨.
+    rowKill: '종료', // running 행 "종료"(kill) 메뉴 라벨.
+    rowRename: '이름변경 (준비 중)', // running 행 이름변경 — 백엔드 command 부재로 비활성.
+    rowRestart: '재시작 (준비 중)', // running 행 재시작 — 백엔드 command 부재로 비활성.
+    doubleClickToActivate: '더블클릭으로 활성화(spawn)', // reserved 행 title 힌트(더블클릭 = spawn).
+    rowFailedBadge: '실패', // AgentList 행 옆 인라인 실패 배지 텍스트(err 있을 때).
+    // AgentList 액션 실패 인라인 메시지 — 각 액션별 distinct 키({err} = 원인 문자열 보간). collapse 금지.
+    activateFailed: '활성화 실패: {err}', // spawnProfile 실패.
+    openFailed: '열기 실패: {err}', // assignAgent 실패.
+    openFailedNoSlot: '열기 실패: 활성 뷰/포커스 슬롯 없음', // 활성 뷰/포커스 슬롯 부재로 조기 실패(보간 없음, openFailed 와 별개 텍스트).
+    killFailed: '종료 실패: {err}', // killAgent 실패.
+    cancelReservedFailed: '예약 취소 실패: {err}', // deleteProfile 실패.
   },
   /** 프리셋(cwd 프리셋) 관련 — command 제목·우클릭 메뉴 라벨. */
   preset: {
     create: '프리셋 생성', // preset.create command 제목.
     list: '프리셋 목록 조회', // preset.list command 제목.
-    delete: '프리셋 삭제', // preset.delete command 제목.
+    delete: '프리셋 삭제', // preset.delete command 제목 겸 PresetPalette 행 삭제 aria-label(값 동일 — 재사용).
     add: '추가', // preset.add command 제목(preset_palette 슬롯 메뉴 "추가").
+    label: '프리셋', // PresetPalette 슬롯 콘텐츠 라벨.
+    empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.', // PresetPalette 빈 상태 안내.
+    deleteBtn: '삭제', // PresetPalette 행 삭제 버튼 텍스트.
   },
   /** 테마 관련 — command 제목. */
   theme: {
@@ -78,6 +107,13 @@ export const ko = {
     defaultTabName: 'View {index}', // 보간 시드 — 기본 탭명(예: "View 1").
     // 반복 placeholder 시드 — 같은 토큰 2회. 전역 치환(global replace) 회귀 검증용(index.test.ts). ADR-0069.
     duplicatePreview: '{name} / {name}',
+    viewLoading: 'View 로딩 중…', // WindowLayout TabCanvas: 뷰 캐시 미도착 로딩 플레이스홀더.
+    viewEmpty: '— empty —', // ViewLayoutRenderer: empty 슬롯 플레이스홀더(em-dash — emptySlot '- 비어있음 -'과 별개 텍스트).
+    emptyResult: '(빈 결과)', // StructuredTextView: 도구 결과 본문이 빈 경우 대체 표기.
+    copied: '복사됨', // CopyButton: 복사 완료 aria-label.
+    copy: '복사', // CopyButton: 기본 복사 aria-label(label prop 기본값).
+    codeCopy: '코드 복사', // Markdown PreBlock: 코드블록 CopyButton label(aria-label).
+    contentPrivate: '내용 비공개', // ThoughtRow: 암호화 thinking(펼칠 내용 없음) title.
   },
 } as const
 

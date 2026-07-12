@@ -24,6 +24,7 @@ import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { ScrollArea } from '../ui/scroll-area'
+import { t } from '../../i18n'
 
 interface DomSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 독립 구독·독립 진도(버그 B 해소). */
@@ -196,7 +197,7 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
         >
           {agent!.status.type === 'Failed'
             ? `Failed: ${(agent!.status as { type: 'Failed'; message: string }).message}`
-            : '종료됨'}
+            : t('agent.terminatedOverlay')}
         </div>
       )}
     </div>

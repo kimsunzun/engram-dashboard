@@ -18,6 +18,7 @@ import AgentList from '../agent/AgentList'
 import SlotContextMenu from '../slot/SlotContextMenu'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode } from '../slot/renderMode'
+import { t } from '../../i18n'
 
 export default function ViewLayoutRenderer({
   node,
@@ -126,7 +127,7 @@ export default function ViewLayoutRenderer({
             // ★caps-ready 게이팅(replay 소유권)★: caps(AgentInfo) 미도착 시 중립 플레이스홀더만(위 replay
             // 소유권 주석 참조). 구체 렌더러(DomSlot/RichSlot/TerminalSlot) 마운트를 caps 확정까지 미뤄
             // assign 시점 replay 를 온전히 받게 한다. 래퍼의 empty 슬롯 스타일(중앙정렬·muted)을 상속.
-            <span>에이전트 연결 중…</span>
+            <span>{t('agent.connecting')}</span>
           ) : (
             // caps 도착 후에만 도달 — mode 는 여기서 non-null(위 defaultRenderMode ?? 오버라이드).
             // 오버라이드가 있으면 그 렌더러, 없으면 caps 유도 기본. 이 switch 는 위 caps-ready 게이팅 안에
@@ -162,7 +163,7 @@ export default function ViewLayoutRenderer({
           // empty 슬롯 플레이스홀더 — 중앙정렬 스타일(hasContent=false) 상속.
           <>
             <span>Slot {node.id.slice(0, 8)}</span>
-            <span>— empty —</span>
+            <span>{t('common.viewEmpty')}</span>
           </>
         )}
         {contextMenu && (

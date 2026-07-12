@@ -23,6 +23,7 @@ import { useAgentStore } from '../../store/agentStore'
 import { useMonitoringPickerStore } from '../../store/monitoringPickerStore'
 import { useViewStore } from '../../store/viewStore'
 import { filterMonitoringCandidates } from './monitoringPickerFilter'
+import { t } from '../../i18n'
 
 export default function AgentMonitoringPicker() {
   const target = useMonitoringPickerStore(s => s.target)
@@ -136,7 +137,7 @@ export default function AgentMonitoringPicker() {
             flexShrink: 0,
           }}
         >
-          에이전트 모니터링 — 이 슬롯에 실행중 에이전트 배정
+          {t('agent.monitoringLabel')}
         </div>
 
         {/* 검색창 — 자동 포커스(위 effect). 표시명·cwd 부분일치. */}
@@ -146,7 +147,7 @@ export default function AgentMonitoringPicker() {
           value={query}
           onChange={e => setQuery(e.target.value)}
           onKeyDown={onInputKeyDown}
-          placeholder="에이전트 검색 (이름·경로)"
+          placeholder={t('agent.monitoringSearch')}
           style={{
             margin: '8px',
             padding: '6px 8px',
@@ -170,8 +171,8 @@ export default function AgentMonitoringPicker() {
               style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}
             >
               {agents.some(a => a.status.type === 'Running')
-                ? '검색 결과 없음'
-                : '실행중 에이전트 없음 — 트리에서 에이전트를 생성/활성화하세요.'}
+                ? t('agent.noCandidates')
+                : t('agent.noRunning')}
             </div>
           ) : (
             candidates.map((c, i) => (
