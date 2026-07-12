@@ -434,6 +434,8 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
         name: p.name.clone(),
         // ADR-0061 리치화: 표시명 override(트리 rename). None 이면 프론트가 cwd basename 파생(기존 동작 불변).
         display_name: p.display_name.clone(),
+        // ADR-0072: 트리 계층 부모 id. None 이면 루트. AgentId/ProfileId 는 동일 Uuid alias 라 그대로 복사.
+        parent_id: p.parent_id,
         command: spawn_command_to_wire(&p.command),
         cwd: p.cwd.to_string_lossy().into_owned(),
         env: p.env.clone(),
@@ -1025,6 +1027,29 @@ impl ConnectionCore {
                 }
             }
 
+            AgentCommand::ReparentProfile {
+                child_id,
+                parent_id,
+                request_id,
+            } => {
+                // ADR-0072 트리 계층 reparent: 부모 지정/해제. 검증(self-parent·nonexistent parent·1단 상한·
+                // 2단 금지)은 ProfileRegistry::reparent 가 한 임계구역에서 수행 — 위반이면 false 로 Error,
+                // 성공이면 Ack + 전 연결 broadcast(RenameProfile 와 동형, 모든 창 동기화·낙관 갱신 X).
+                let ok = manager.profiles().reparent(child_id, parent_id);
+                if ok {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_profile_list(registry, manager);
+                } else {
+                    reply(
+                        sink,
+                        request_id,
+                        Err(format!(
+                            "reparent rejected (missing/self-parent/cycle/2-level): child={child_id}"
+                        )),
+                    );
+                }
+            }
+
             AgentCommand::GetSnapshot {
                 agent_id,
                 request_id,
@@ -1517,6 +1542,58 @@ mod tests {
             }] => assert_eq!(*r, req, "Error 에 request_id 동봉"),
             other => panic!("Error(request_id) 1건 기대: {other:?}"),
         }
+    }
+
+    // ── ReparentProfile: 거부(false) → Error(request_id 동봉), Ack/broadcast 없음 (ADR-0072) ──
+    //    broadcast_profile_list 는 registry.broadcast_text 로 나가고 mock sink 은 registry 에
+    //    등록돼 있지 않다 → 거부 경로에서 mock 이 받는 control 은 Error 딱 1건이어야 한다.
+    //    (성공 경로였다면 mock 에 Ack 가 enqueue 된다 — Ack 부재로 broadcast 분기 스킵을 방증.)
+    #[tokio::test]
+    async fn reparent_rejected_emits_error_no_ack_no_broadcast() {
+        let (core, _rx) = test_core();
+        // 실존 child 하나 등록(존재하지 않는 부모로 reparent → reparent==false).
+        let child = engram_dashboard_core::agent::profile::AgentProfile::new(
+            "c".into(),
+            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                program: default_shell().to_string(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        let cid = child.id;
+        core.manager.profiles().upsert(child);
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let req = rid();
+        core.dispatch(
+            AgentCommand::ReparentProfile {
+                child_id: cid,
+                parent_id: Some(uuid::Uuid::new_v4()), // 존재하지 않는 부모 → 거부.
+                request_id: req,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        // control 은 Error 1건뿐(Ack 없음 = broadcast 분기 스킵).
+        match mock.events().as_slice() {
+            [AgentEvent::Error {
+                request_id: Some(r),
+                ..
+            }] => assert_eq!(*r, req, "거부 Error 에 request_id 동봉"),
+            other => panic!("거부 시 Error 1건만 기대(Ack/broadcast 없음): {other:?}"),
+        }
+        // 부작용 없음: child 의 parent_id 는 여전히 None(거부 = no-op).
+        assert_eq!(
+            core.manager.profiles().get(cid).unwrap().parent_id,
+            None,
+            "거부된 reparent 는 상태를 바꾸지 않아야 함"
+        );
     }
 
     // ── Kill: 없는 agent → Error(request_id 동봉) ─────────────────────────────────

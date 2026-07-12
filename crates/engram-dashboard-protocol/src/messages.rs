@@ -160,6 +160,20 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
+    /// 트리 부모 지정/해제(ADR-0072 계층 reparent). `parent_id=Some(pid)` → child 를 pid 의 자식으로
+    /// (1단 중첩), `None` → 루트 승격. 검증(self-parent·nonexistent parent·1단 상한·2단 금지)은 데몬이
+    /// `ProfileRegistry::reparent` 로 한 임계구역에서 수행 — 위반이면 Error, 성공이면 Ack +
+    /// [`AgentEvent::ProfileListUpdated`] broadcast(RenameProfile 와 동형 — 모든 창 동기화, 낙관 갱신 X).
+    /// §5로 LLM/사용자가 같은 command 로 트리를 구성한다(사람 드래그는 보조 입력).
+    // ADR-0072
+    ReparentProfile {
+        #[ts(type = "string")]
+        child_id: ProfileId,
+        #[ts(type = "string | null")]
+        parent_id: Option<ProfileId>,
+        request_id: RequestId,
+    },
+
     /// replay buffer 스냅샷 조회. EmbeddedClient `getSnapshot` = Tauri `get_agent_snapshot` 대응.
     /// 응답은 [`AgentEvent::Snapshot`]. (Subscribe replay 와 별개의 1회성 조회.)
     GetSnapshot {
@@ -633,5 +647,112 @@ mod tests {
             back,
             AgentCommand::RenameProfile { name: Some(ref n), .. } if n == "내 에이전트"
         ));
+    }
+
+    /// ADR-0072: ReparentProfile wire golden(externally-tagged) + round-trip. parent_id=Some(부모 지정)와
+    /// None(루트 승격) 두 경우 모두 형태를 고정한다(필드 개명/누락 회귀 차단, RenameProfile 과 동형).
+    #[test]
+    fn reparent_profile_command_json_golden_and_roundtrip() {
+        let child = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let parent = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        // Some(부모 지정).
+        let cmd = AgentCommand::ReparentProfile {
+            child_id: child,
+            parent_id: Some(parent),
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"ReparentProfile":{"child_id":"11111111-1111-1111-1111-111111111111","parent_id":"22222222-2222-2222-2222-222222222222","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "ReparentProfile(Some) wire 형태가 golden 과 불일치"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::ReparentProfile { parent_id: Some(p), .. } if p == parent
+        ));
+
+        // None(루트 승격) — parent_id 는 null 로 직렬화.
+        let clear = AgentCommand::ReparentProfile {
+            child_id: child,
+            parent_id: None,
+            request_id: RequestId(Uuid::nil()),
+        };
+        let clear_json = serde_json::to_string(&clear).unwrap();
+        assert_eq!(
+            clear_json,
+            r#"{"ReparentProfile":{"child_id":"11111111-1111-1111-1111-111111111111","parent_id":null,"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "ReparentProfile(None) wire 형태가 golden 과 불일치"
+        );
+        let clear_back: AgentCommand = serde_json::from_str(&clear_json).unwrap();
+        assert!(matches!(
+            clear_back,
+            AgentCommand::ReparentProfile {
+                parent_id: None,
+                ..
+            }
+        ));
+    }
+
+    /// ADR-0072: 프로필 wire 미러 round-trip 이 parent_id 를 보존하는지(Some/None). display_name 과 동형
+    /// additive 필드 — 직렬화→역직렬화 무손실 + parent_id 없는 옛 wire 는 #[serde(default)]=None 흡수.
+    #[test]
+    fn agent_profile_wire_roundtrip_includes_parent_id() {
+        use crate::domain::{AgentProfile as WireProfile, AgentSpawnCommand, RestartPolicy};
+
+        let parent = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let mk = |parent_id: Option<Uuid>| WireProfile {
+            id: Uuid::nil(),
+            name: "p".into(),
+            display_name: None,
+            parent_id,
+            command: AgentSpawnCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+            cwd: "C:/proj".into(),
+            env: vec![],
+            claude_session_id: None,
+            old_session_ids: vec![],
+            epoch: 0,
+            auto_restore: true,
+            restart_policy: RestartPolicy::Always,
+            restart_count: 0,
+            failed_reason: None,
+            created_at: 1,
+            last_active: 1,
+            last_start_at: None,
+        };
+
+        for parent_id in [Some(parent), None] {
+            let p = mk(parent_id);
+            let json = serde_json::to_string(&p).unwrap();
+            let back: WireProfile = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.parent_id, parent_id, "parent_id 왕복 보존");
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        }
+
+        // parent_id 없는 옛 wire → default None(무마이그레이션).
+        let legacy = r#"{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "legacy",
+            "command": { "kind": "Shell", "program": "cmd.exe", "args": [] },
+            "cwd": "C:/proj",
+            "env": [],
+            "claude_session_id": null,
+            "old_session_ids": [],
+            "epoch": 0,
+            "auto_restore": true,
+            "restart_policy": "Always",
+            "restart_count": 0,
+            "failed_reason": null,
+            "created_at": 1,
+            "last_active": 1,
+            "last_start_at": null
+        }"#;
+        let p: WireProfile = serde_json::from_str(legacy).expect("parent_id 없는 wire 역직렬화");
+        assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
     }
 }

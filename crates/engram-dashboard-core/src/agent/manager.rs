@@ -177,7 +177,10 @@ impl AgentManager {
         }
 
         // 프로필을 레지스트리에 등록(idempotent + 즉시 persist). 복원 경로는 기존 프로필을 그대로 넘긴다.
-        self.profiles.upsert(profile.clone());
+        // ★hierarchy-preserving★: profile 은 SpawnProfile 등에서 뜬 **스냅샷**이라, spawn 사이 다른 연결이
+        // reparent/rename 한 최신 parent_id/display_name 을 덮어쓰면 안 된다(lost update). 그 두 트리 메타는
+        // live 엔트리 값을 보존하고 나머지(cwd/command/env/session)만 반영한다(ADR-0070/0072).
+        self.profiles.upsert_preserving_hierarchy(profile.clone());
 
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());

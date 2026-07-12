@@ -63,7 +63,7 @@ function agent(id: string, cwd: string, status: AgentInfo['status'] = { type: 'R
 }
 function profile(id: string, cwd: string, createdAt = 0, displayName: string | null = null): AgentProfile {
   return {
-    id, name: '', display_name: displayName,
+    id, name: '', display_name: displayName, parent_id: null,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
     restart_policy: 'Never', restart_count: 0, failed_reason: null, created_at: createdAt,

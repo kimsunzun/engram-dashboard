@@ -142,6 +142,16 @@ pub struct AgentProfile {
     #[serde(default)]
     pub display_name: Option<String>,
 
+    /// 트리 계층의 부모 프로필 id(ADR-0072 — 오케스트레이션 시각·데이터 토대). `Some(pid)` → 이 프로필은
+    /// pid 의 자식(트리에서 pid 밑에 들여쓰기), `None` → 최상위(루트). **1단 중첩만 허용**: 자식은 다시
+    /// 부모가 될 수 없고(cycle 방지 단순화), 부모는 반드시 루트여야 한다 — 검증은 `ProfileRegistry::reparent`.
+    /// 부모 삭제 시 자식은 여기서 `None` 으로 풀려 루트로 승격한다(orphan-to-root, cascade 삭제 아님). §5로
+    /// LLM/사용자가 `ReparentProfile` command 로 이 값을 조작한다. `#[serde(default)]` 라 이 필드 없는 옛
+    /// agents.json 은 `None`(루트)으로 흡수(마이그레이션 불필요, ADR-0070 rename 과 동형 additive 규율).
+    // ADR-0072
+    #[serde(default)]
+    pub parent_id: Option<AgentId>,
+
     pub command: AgentCommand,
 
     /// 저장 전 `dunce::canonicalize`로 정규화된 cwd(UNC `\\?\` 회피 + 표기 고정).
@@ -201,6 +211,8 @@ impl AgentProfile {
             name,
             // 생성 시엔 표시명 override 없음 — 트리는 cwd basename 파생(ADR-0061). rename 으로 나중에 set.
             display_name: None,
+            // 생성 시엔 최상위(루트) — 부모 없음(ADR-0072). reparent 로 나중에 특정 부모 밑으로 옮긴다.
+            parent_id: None,
             command,
             cwd,
             env,
@@ -228,6 +240,61 @@ pub trait ProfileStore: Send + Sync + 'static {
     fn save(&self, profiles: &[AgentProfile]);
     /// 부팅 시 1회 로드. 부재·손상 시 빈 목록.
     fn load(&self) -> Vec<AgentProfile>;
+}
+
+// ── 계층 정규화(ADR-0072) ────────────────────────────────────────────────────────
+
+/// 맵 전체를 "유효한 1단 forest" 불변식으로 강제 복구한다 — **모든 save 직전**(`mutate`/`mutate_if`)
+/// 에서 lock 보유 중 호출된다. 어떤 mutation 경로(upsert/update_with/spawn 스냅샷 재삽입/reparent)든
+/// `parent_id` 를 임의로 써도 여기서 위반을 잡아 `None`(루트)으로 되돌리므로, forest 불변식이 쓰기
+/// 경계에서 유지된다.
+///
+/// ★왜 경로마다가 아니라 경계에서★: reparent 는 자체 검증이 있지만 upsert/update_with 는 임의
+/// parent_id 를 받는다 — 예) A.parent=B + B.parent=A(cycle), update_with(x,|p| p.parent_id=missing)
+/// (dangling). 검증을 reparent 에만 두면 이 경로들이 우회해 cycle·dangling 을 persist 한다.
+/// spawn 경로는 연결 A 가 뜬 stale 스냅샷을 다시 upsert 하는데, 그 사이 연결 B 가 부모를 삭제했다면
+/// stale 스냅샷이 삭제된 부모(dangling)를 되살린다 — 이것도 여기서 잡힌다.
+///
+/// **규칙**(parent_id=Some(p) 인 각 프로필): 아래 중 하나라도 해당하면 `parent_id`→`None`.
+/// - `p` 가 맵에 없음(dangling) · `p == self`(self-parent) · 부모 `p` 자신이 부모를 가짐(2단) ·
+///   이 노드 자신이 누군가의 부모임(자식을 가진 노드는 자식이 될 수 없음 — 1단 상한).
+///
+/// **idempotent + 유효 계층 불변**: 이미 유효한 1단 forest(정상 reparent 결과)는 어떤 규칙에도
+/// 걸리지 않아 그대로 살아남는다 — 두 번 돌려도 결과가 같다. 프로필 수가 작아 O(n²) 도 무해.
+// ADR-0072
+fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
+    // 판정은 변경 전 스냅샷 기준(같은 pass 안에서의 clear 가 다른 노드 판정을 오염시키지 않게).
+    // 두 집합은 서로 다른 축이라 반드시 구분한다:
+    //   ① existing        — 맵에 실존하는 id (dangling 판정용)
+    //   ② has_own_parent  — 자기 parent_id 가 Some 인 노드(= "자식") — 2단 판정용
+    //   ③ is_a_parent     — 누군가가 parent 로 가리키는 id(= "자식을 가진 노드") — 1단 상한 판정용
+    // (has_own_parent 과 is_a_parent 를 섞으면 정상 자식이 오검출된다.)
+    let existing: std::collections::HashSet<AgentId> = map.keys().copied().collect();
+    let has_own_parent: std::collections::HashSet<AgentId> = map
+        .values()
+        .filter(|p| p.parent_id.is_some())
+        .map(|p| p.id)
+        .collect();
+    let is_a_parent: std::collections::HashSet<AgentId> =
+        map.values().filter_map(|p| p.parent_id).collect();
+
+    let mut clear: Vec<AgentId> = Vec::new();
+    for p in map.values() {
+        if let Some(pid) = p.parent_id {
+            let dangling = !existing.contains(&pid); // 부모가 맵에 없음
+            let self_parent = pid == p.id; // 자기 자신을 부모로
+            let two_level = has_own_parent.contains(&pid); // 부모 pid 자신이 또 부모를 가짐 → 2단
+            let node_is_parent = is_a_parent.contains(&p.id); // 이 노드가 누군가의 부모 → 자식이 될 수 없음
+            if dangling || self_parent || two_level || node_is_parent {
+                clear.push(p.id);
+            }
+        }
+    }
+    for id in clear {
+        if let Some(p) = map.get_mut(&id) {
+            p.parent_id = None;
+        }
+    }
 }
 
 // ── ProfileRegistry ────────────────────────────────────────────────────────────
@@ -266,9 +333,15 @@ impl ProfileRegistry {
     /// ★lock 을 풀기 전에 save★ — 두 동시 mutation 이 "각자 스냅샷 → 각자 save" 로 교차해
     /// 디스크가 stale 로 덮이는 race 를 닫는다(상단 락 규율의 §5 근거). 저장하는 스냅샷은
     /// 방금 커밋한 최신 맵이라 persisted == observed 가 보장된다. 모든 mutation 경로의 공통 경로.
+    ///
+    /// ★계층 정규화는 save 직전 여기서★(ADR-0072): 클로저가 어떤 경로(upsert/update_with/spawn
+    /// 스냅샷 재삽입/reparent)든 `parent_id` 를 임의로 써도, 저장 전에 forest 불변식을 강제로 복구한다.
+    /// reparent 에만 검증을 두면 upsert/update_with/spawn 이 그 검증을 우회해 cycle·dangling 을
+    /// persist 할 수 있다(경계 불변식 vs 경로별 검증 — 경계에서 막아야 새는 창이 없다).
     fn mutate<R>(&self, f: impl FnOnce(&mut HashMap<AgentId, AgentProfile>) -> R) -> R {
         let mut guard = self.profiles.lock().expect("profiles poisoned");
         let result = f(&mut guard);
+        normalize_hierarchy(&mut guard);
         let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
         // lock 보유 중 save — 커밋과 영속화를 한 임계구역으로 직렬화(데드락 근거는 struct 주석). ADR-0071.
         self.store.save(&snapshot);
@@ -278,10 +351,12 @@ impl ProfileRegistry {
     /// `mutate` 의 조건부 변형 — 클로저가 `true`(실제 변경 있음)를 반환할 때만 lock 보유 중 save 한다.
     /// 변경이 없으면 디스크 쓰기를 건너뛴다(observe_session_id 의 no-op 절약 유지). save 는 mutate 와
     /// 동일하게 lock 보유 중이라 stale-overwrite race 가 없다(struct 주석 §5, ADR-0071).
+    /// save 하는 경로에선 mutate 와 동일하게 계층 정규화를 먼저 돌린다(ADR-0072 경계 불변식).
     fn mutate_if(&self, f: impl FnOnce(&mut HashMap<AgentId, AgentProfile>) -> bool) -> bool {
         let mut guard = self.profiles.lock().expect("profiles poisoned");
         let changed = f(&mut guard);
         if changed {
+            normalize_hierarchy(&mut guard);
             let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
             self.store.save(&snapshot);
         }
@@ -325,10 +400,42 @@ impl ProfileRegistry {
         });
     }
 
-    /// 프로필 삭제. 변경 즉시 persist.
+    /// spawn 전용 upsert — 스냅샷을 삽입하되 **오케스트레이션 메타데이터(`parent_id`·`display_name`)는
+    /// 이미 맵에 있는 live 엔트리 값을 보존**한다(ADR-0070/0072). 없던 id(ad-hoc spawn)면 스냅샷 그대로.
+    ///
+    /// ★왜 spawn 스냅샷을 그대로 안 쓰나(lost-update 봉인)★: `spawn_agent` 은 호출 시점에 뜬 프로필
+    /// **스냅샷**을 넘겨받아 여기서 재삽입한다. 그 사이 다른 연결이 reparent/rename 을 커밋했다면,
+    /// stale 스냅샷의 옛 `parent_id`/`display_name` 이 최신 값을 덮어써 동시 편집이 유실된다(lost update).
+    /// `parent_id`/`display_name` 은 프로세스 기동과 무관한 순수 트리 메타라 spawn 이 author 할 이유가
+    /// 없으므로, live 엔트리가 있으면 그 두 필드만 보존하고 나머지(cwd/command/env/session 등 spawn 이
+    /// 실제로 확정하는 필드)는 스냅샷을 반영한다. 삭제된 부모(dangling)는 이어지는 normalize 가 정리한다.
+    /// 보존·판정·save 가 한 임계구역(mutate)이라 TOCTOU 없이 원자적이다(ADR-0071 락 규율).
+    // ADR-0070 ADR-0072
+    pub fn upsert_preserving_hierarchy(&self, mut profile: AgentProfile) {
+        self.mutate(|m| {
+            if let Some(live) = m.get(&profile.id) {
+                profile.parent_id = live.parent_id;
+                profile.display_name = live.display_name.clone();
+            }
+            m.insert(profile.id, profile);
+        });
+    }
+
+    /// 프로필 삭제. 변경 즉시 persist. **부모 삭제 시 자식 루트 승격(orphan-to-root, ADR-0072):**
+    /// 삭제 대상을 부모로 가리키던 자식들의 `parent_id` 를 **같은 임계구역에서** `None` 으로 푼다 —
+    /// 존재하지 않는 부모를 가리키는 고아 참조(dangling parent)를 남기지 않는다(트리 렌더·복원 불변식).
+    /// cascade 삭제가 아니라 승격이라 자식 데이터는 보존된다(사용자 결정 — 실수로 그룹 전체 소실 방지).
+    // ADR-0072
     pub fn remove(&self, id: AgentId) {
         self.mutate(|m| {
             m.remove(&id);
+            // 삭제된 부모를 가리키던 자식들을 루트로 승격(고아 참조 제거). 1단 중첩이라 자식은 부모가
+            // 아니므로 재귀 승격은 불필요 — 한 번의 훑기로 충분하다.
+            for p in m.values_mut() {
+                if p.parent_id == Some(id) {
+                    p.parent_id = None;
+                }
+            }
         });
     }
 
@@ -338,6 +445,52 @@ impl ProfileRegistry {
     /// (TabBar rename 과 동형) — 여기엔 이미 유효 값 또는 명시적 None 만 온다. update_with 위임(persist 일원화).
     pub fn rename(&self, id: AgentId, display_name: Option<String>) -> bool {
         self.update_with(id, |p| p.display_name = display_name)
+    }
+
+    /// 트리 부모 지정/해제(ADR-0072 — 계층 reparent). `Some(pid)` → child_id 를 pid 의 자식으로,
+    /// `None` → 루트로 승격. 검증 전부를 **한 임계구역(mutate)** 안에서 하고 성공 시에만 persist·true,
+    /// 위반이면 no-op·false(rename/update_with 와 동형 bool 반환). §5로 LLM/사용자가 같은 command 로 조작.
+    ///
+    /// **1단 중첩 규칙(cycle 방지):**
+    /// - child 가 존재해야 한다(없으면 false).
+    /// - `Some(pid)`: ① pid 프로필이 실존해야 함 ② `pid != child_id`(self-parent 금지) ③ child 가 현재
+    ///   누군가의 부모가 아니어야 함(부모를 가진 노드는 자식이 될 수 없음 — 1단 상한) ④ 대상 부모 pid
+    ///   자신이 루트여야 함(`parent_id == None` — 부모가 부모를 갖는 2단 금지). 하나라도 위반이면 false.
+    /// - `None`: child 가 존재하면 항상 허용(루트 승격).
+    ///
+    /// ★검증을 lock 안에서★: 존재/부모여부 판정과 쓰기가 한 임계구역이라, 동시 reparent/delete 와
+    /// TOCTOU(검사-후-변경 사이 상태 변동)로 cycle·고아가 새는 창을 닫는다(ADR-0071 락 규율 경유).
+    // ADR-0072
+    pub fn reparent(&self, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
+        self.mutate(|m| {
+            // child 실존 확인(없으면 no-op).
+            if !m.contains_key(&child_id) {
+                return false;
+            }
+            if let Some(pid) = parent_id {
+                // self-parent 금지.
+                if pid == child_id {
+                    return false;
+                }
+                // 대상 부모 실존 + 그 자신이 루트여야 함(2단 금지). get 으로 한 번에 확인.
+                match m.get(&pid) {
+                    Some(parent) if parent.parent_id.is_none() => {}
+                    _ => return false,
+                }
+                // child 가 누군가의 부모면 자식이 될 수 없음(1단 상한 — child 밑에 자식이 있으면 거부).
+                if m.values().any(|p| p.parent_id == Some(child_id)) {
+                    return false;
+                }
+            }
+            // 검증 통과 — 실제 반영.
+            match m.get_mut(&child_id) {
+                Some(c) => {
+                    c.parent_id = parent_id;
+                    true
+                }
+                None => false,
+            }
+        })
     }
 
     /// 임의 필드 수정. 존재하면 클로저 적용 후 persist, 없으면 false.
@@ -532,6 +685,399 @@ mod tests {
         assert!(!reg.rename(Uuid::new_v4(), Some("y".to_string())));
     }
 
+    // ── 트리 계층 reparent(ADR-0072) ────────────────────────────────────────────
+
+    /// child 를 root 부모 밑으로 옮기면 parent_id 가 set 되고 즉시 persist 된다.
+    #[test]
+    fn reparent_sets_and_persists() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let parent = sample();
+        let child = sample();
+        let (pid, cid) = (parent.id, child.id);
+        reg.upsert(parent);
+        reg.upsert(child);
+
+        assert!(reg.reparent(cid, Some(pid)));
+        assert_eq!(reg.get(cid).unwrap().parent_id, Some(pid));
+        // 즉시 persist(store 에도 반영).
+        let disk = store.load();
+        let persisted_child = disk.iter().find(|p| p.id == cid).unwrap();
+        assert_eq!(persisted_child.parent_id, Some(pid));
+    }
+
+    /// parent_id=None 은 루트로 승격(항상 허용, child 존재 시).
+    #[test]
+    fn reparent_none_promotes_to_root() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let parent = sample();
+        let child = sample();
+        let (pid, cid) = (parent.id, child.id);
+        reg.upsert(parent);
+        reg.upsert(child);
+        reg.reparent(cid, Some(pid));
+        // None 재설정 → 루트 승격.
+        assert!(reg.reparent(cid, None));
+        assert_eq!(reg.get(cid).unwrap().parent_id, None);
+    }
+
+    /// self-parent 거부(pid == child_id).
+    #[test]
+    fn reparent_rejects_self_parent() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        assert!(!reg.reparent(id, Some(id)), "self-parent 는 거부");
+        assert_eq!(reg.get(id).unwrap().parent_id, None);
+    }
+
+    /// 존재하지 않는 부모 거부(고아 참조 방지).
+    #[test]
+    fn reparent_rejects_nonexistent_parent() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let child = sample();
+        let cid = child.id;
+        reg.upsert(child);
+        assert!(
+            !reg.reparent(cid, Some(Uuid::new_v4())),
+            "없는 부모 지정은 거부"
+        );
+        assert_eq!(reg.get(cid).unwrap().parent_id, None);
+    }
+
+    /// child 가 없으면 no-op·false.
+    #[test]
+    fn reparent_rejects_missing_child() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let parent = sample();
+        let pid = parent.id;
+        reg.upsert(parent);
+        assert!(
+            !reg.reparent(Uuid::new_v4(), Some(pid)),
+            "없는 child 는 거부"
+        );
+    }
+
+    /// 자식을 가진 노드(= 이미 부모)를 다른 부모의 자식으로 만들면 거부(1단 상한).
+    #[test]
+    fn reparent_rejects_making_a_node_with_children_a_child() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let a = sample(); // 미래의 부모
+        let b = sample(); // a 의 자식
+        let c = sample(); // a 를 자식으로 만들려는 새 루트
+        let (aid, bid, cid) = (a.id, b.id, c.id);
+        reg.upsert(a);
+        reg.upsert(b);
+        reg.upsert(c);
+        // b 를 a 밑으로 → a 는 이제 부모.
+        assert!(reg.reparent(bid, Some(aid)));
+        // a(자식 b 보유)를 c 밑으로 → 1단 위반, 거부.
+        assert!(
+            !reg.reparent(aid, Some(cid)),
+            "자식을 가진 노드는 자식이 될 수 없음(1단)"
+        );
+        assert_eq!(reg.get(aid).unwrap().parent_id, None);
+    }
+
+    /// 부모를 가진 노드(자식)를 다른 노드의 부모로 지정하려 하면 거부(2단 금지).
+    #[test]
+    fn reparent_rejects_parent_that_has_a_parent() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let a = sample(); // 루트
+        let b = sample(); // a 의 자식
+        let c = sample(); // b 를 부모로 삼으려는 노드
+        let (aid, bid, cid) = (a.id, b.id, c.id);
+        reg.upsert(a);
+        reg.upsert(b);
+        reg.upsert(c);
+        // b 를 a 밑으로 → b 는 자식(parent_id=Some).
+        assert!(reg.reparent(bid, Some(aid)));
+        // c 를 b 밑으로 → b 가 루트가 아니므로 거부(2단 금지).
+        assert!(
+            !reg.reparent(cid, Some(bid)),
+            "부모가 부모를 가진 경우 자식 지정 거부(1단)"
+        );
+        assert_eq!(reg.get(cid).unwrap().parent_id, None);
+    }
+
+    /// 부모 삭제 시 자식들이 루트로 승격(parent_id → None)되고 persist 된다(orphan-to-root).
+    #[test]
+    fn delete_parent_orphans_children_to_root() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let a = sample();
+        let b = sample();
+        let c = sample();
+        let (aid, bid, cid) = (a.id, b.id, c.id);
+        reg.upsert(a);
+        reg.upsert(b);
+        reg.upsert(c);
+        reg.reparent(bid, Some(aid));
+        reg.reparent(cid, Some(aid));
+
+        // 부모 a 삭제 → b·c 는 루트로 승격, a 는 사라짐(cascade 아님, 데이터 보존).
+        reg.remove(aid);
+        assert!(reg.get(aid).is_none());
+        assert_eq!(reg.get(bid).unwrap().parent_id, None, "b 는 루트 승격");
+        assert_eq!(reg.get(cid).unwrap().parent_id, None, "c 는 루트 승격");
+
+        // persist 에도 반영 — 고아 참조(존재 안 하는 aid) 없음.
+        let disk = store.load();
+        assert!(!disk.iter().any(|p| p.id == aid));
+        assert!(disk
+            .iter()
+            .filter(|p| p.id == bid || p.id == cid)
+            .all(|p| p.parent_id.is_none()));
+    }
+
+    // ── 쓰기 경계 정규화(ADR-0072) — reparent 를 우회하는 경로도 불변식 유지 ───────────
+
+    /// cycle(A.parent=B, B.parent=A)이 map 에 동시에 존재하면 save 직전 정규화가 양쪽을 루트로 푼다.
+    /// ★재현 경로★: store 에 이미 cyclic 쌍이 있는 상태(손상된/손편집 agents.json, 또는 reparent 검증을
+    /// 우회하는 legacy write)를 load 로 그대로 들여온 뒤(load 는 정규화 안 함), 아무 write 나 한 번 트리거하면
+    /// 경계 정규화가 cycle 을 healing 한다. **normalize_hierarchy 없이는 실패한다** — 두 parent_id 가 그대로
+    /// 남아 인메모리·디스크에 cycle 이 persist 된다.
+    #[test]
+    fn cycle_in_map_is_normalized_at_write_boundary() {
+        let mut a = sample();
+        let mut b = sample();
+        let (aid, bid) = (a.id, b.id);
+        a.parent_id = Some(bid);
+        b.parent_id = Some(aid);
+        // store 를 cyclic 상태로 시드 → 새 registry 는 이걸 그대로 로드(load 는 정규화 안 함).
+        let store = Arc::new(MemStore::default());
+        store.save(&[a, b]);
+        let reg = ProfileRegistry::new(store.clone());
+        assert_eq!(
+            reg.get(aid).unwrap().parent_id,
+            Some(bid),
+            "로드 직후엔 cycle 잔존"
+        );
+
+        // 아무 write(무관한 rename) 한 번 → 경계 정규화가 cycle 을 푼다.
+        reg.rename(aid, Some("touch".into()));
+
+        // 인메모리: 둘 다 루트로 정규화(cycle 봉인).
+        assert_eq!(reg.get(aid).unwrap().parent_id, None, "cycle 참여 A→루트");
+        assert_eq!(reg.get(bid).unwrap().parent_id, None, "cycle 참여 B→루트");
+        // 디스크: store.load() 도 정규화된 상태(persisted == 불변식).
+        let disk = store.load();
+        assert!(
+            disk.iter().all(|p| p.parent_id.is_none()),
+            "디스크에도 cycle 없음"
+        );
+    }
+
+    /// update_with 로 dangling(존재하지 않는 부모)을 심어도 경계 정규화가 None 으로 되돌린다.
+    /// ★정규화 없이는 실패★: update_with 는 임의 클로저라 검증이 없다.
+    #[test]
+    fn update_with_dangling_parent_is_normalized() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let child = sample();
+        let cid = child.id;
+        reg.upsert(child);
+
+        let missing = Uuid::new_v4();
+        assert!(reg.update_with(cid, |p| p.parent_id = Some(missing)));
+        // 존재하지 않는 부모 → 정규화가 None 으로 clear.
+        assert_eq!(
+            reg.get(cid).unwrap().parent_id,
+            None,
+            "dangling 참조는 루트로 정규화"
+        );
+        assert!(
+            store
+                .load()
+                .iter()
+                .find(|p| p.id == cid)
+                .unwrap()
+                .parent_id
+                .is_none(),
+            "디스크에도 dangling 없음"
+        );
+    }
+
+    /// 정규화는 idempotent + 유효 계층 불변: 정상 reparent 결과(1단 forest)는 어떤 재-write 로도
+    /// 훼손되지 않는다. rename(무관한 write)이 자식의 parent_id 를 건드리지 않아야 한다.
+    #[test]
+    fn normalization_preserves_valid_hierarchy() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let parent = sample();
+        let child = sample();
+        let (pid, cid) = (parent.id, child.id);
+        reg.upsert(parent);
+        reg.upsert(child);
+        assert!(reg.reparent(cid, Some(pid)));
+        // 무관한 mutation(rename)이 여러 번 save 를 거쳐도 유효 계층은 그대로.
+        reg.rename(cid, Some("x".into()));
+        reg.rename(pid, Some("y".into()));
+        assert_eq!(
+            reg.get(cid).unwrap().parent_id,
+            Some(pid),
+            "정상 부모 관계는 정규화로 훼손되지 않음(idempotent)"
+        );
+    }
+
+    /// 동시성: reparent(child→parent) 와 remove(parent) 를 경쟁시켜도 최종 persisted 에 dangling 없음.
+    /// 부모가 사라지면 자식은 루트여야 한다(orphan-to-root + 경계 정규화 이중 안전망).
+    #[test]
+    fn concurrent_reparent_vs_remove_no_dangling() {
+        use std::thread;
+
+        // 반복해 인터리빙을 넓게 흔든다(레이스 재현 확률↑).
+        for _ in 0..200 {
+            let store = Arc::new(MemStore::default());
+            let reg = Arc::new(ProfileRegistry::new(store.clone()));
+            let parent = sample();
+            let child = sample();
+            let (pid, cid) = (parent.id, child.id);
+            reg.upsert(parent);
+            reg.upsert(child);
+
+            let r1 = reg.clone();
+            let r2 = reg.clone();
+            let h1 = thread::spawn(move || {
+                r1.reparent(cid, Some(pid));
+            });
+            let h2 = thread::spawn(move || {
+                r2.remove(pid);
+            });
+            h1.join().unwrap();
+            h2.join().unwrap();
+
+            // 최종 상태: 부모는 제거됐다(remove 는 항상 수행됨).
+            let disk = store.load();
+            assert!(!disk.iter().any(|p| p.id == pid), "부모는 삭제됨");
+            // child 는 남아 있고, 그 parent_id 는 절대 삭제된 pid(dangling)를 가리키지 않는다.
+            if let Some(c) = disk.iter().find(|p| p.id == cid) {
+                assert_ne!(
+                    c.parent_id,
+                    Some(pid),
+                    "삭제된 부모를 가리키는 dangling 참조가 persist 되면 안 됨"
+                );
+            }
+            // 어떤 인터리빙이든 존재하는 모든 parent_id 는 맵 안 실존 id 여야 한다(불변식).
+            let ids: std::collections::HashSet<_> = disk.iter().map(|p| p.id).collect();
+            assert!(
+                disk.iter()
+                    .filter_map(|p| p.parent_id)
+                    .all(|pp| ids.contains(&pp)),
+                "persisted 계층에 dangling 부모 참조 없음"
+            );
+        }
+    }
+
+    /// ADR-0070/0072 lost-update 봉인: spawn 스냅샷이 최신 parent_id/display_name 을 덮지 않는다.
+    /// upsert_preserving_hierarchy 는 live 엔트리의 트리 메타를 보존하고 나머지만 반영한다.
+    #[test]
+    fn spawn_preserving_upsert_does_not_revert_concurrent_reparent_or_rename() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let root = sample();
+        let child = sample();
+        let (rid, cid) = (root.id, child.id);
+        reg.upsert(root);
+        reg.upsert(child);
+
+        // spawn 직전 스냅샷을 뜬다(이 시점엔 child 가 루트·표시명 없음).
+        let stale_snapshot = reg.get(cid).unwrap();
+        assert_eq!(stale_snapshot.parent_id, None);
+        assert_eq!(stale_snapshot.display_name, None);
+
+        // 그 사이 다른 연결이 reparent + rename 을 커밋.
+        assert!(reg.reparent(cid, Some(rid)));
+        assert!(reg.rename(cid, Some("live".into())));
+
+        // 이제 spawn 이 stale 스냅샷으로 preserving-upsert → 트리 메타는 live 값이 보존돼야 함.
+        reg.upsert_preserving_hierarchy(stale_snapshot);
+        let after = reg.get(cid).unwrap();
+        assert_eq!(
+            after.parent_id,
+            Some(rid),
+            "stale spawn 스냅샷이 최신 parent_id 를 되돌리면 안 됨(lost update 봉인)"
+        );
+        assert_eq!(
+            after.display_name,
+            Some("live".into()),
+            "stale spawn 스냅샷이 최신 display_name 을 되돌리면 안 됨(ADR-0070 latent)"
+        );
+    }
+
+    /// (대조군) 일반 upsert 는 트리 메타를 보존하지 않는다 — spawn 만 preserving 경로를 쓴다는 걸 고정.
+    /// ad-hoc spawn(맵에 없던 id)은 preserving-upsert 여도 스냅샷 그대로 삽입됨을 함께 확인.
+    #[test]
+    fn preserving_upsert_inserts_snapshot_when_no_live_entry() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let mut p = sample();
+        let id = p.id;
+        p.display_name = Some("adhoc".into());
+        // 맵에 없던 id → 보존할 live 엔트리가 없으니 스냅샷 그대로.
+        reg.upsert_preserving_hierarchy(p);
+        assert_eq!(reg.get(id).unwrap().display_name, Some("adhoc".into()));
+    }
+
+    /// serde default: parent_id 없는 JSON → None(무마이그레이션, ADR-0072).
+    #[test]
+    fn deserializes_profile_without_parent_id_as_none() {
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000002",
+            "name": "no-parent",
+            "command": { "kind": "Claude", "extra_args": [] },
+            "cwd": ".",
+            "env": [],
+            "claude_session_id": null,
+            "old_session_ids": [],
+            "epoch": 0,
+            "auto_restore": true,
+            "created_at": 1,
+            "last_active": 1
+        }"#;
+        let p: AgentProfile = serde_json::from_str(json).expect("parent_id 없는 프로필 역직렬화");
+        assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
+    }
+
+    /// 동시성: 여러 스레드가 서로 다른 자식을 같은 루트에 동시 reparent 해도 persisted == 최신 인메모리.
+    /// mutate+save 한 임계구역이라 stale-overwrite·검증 race 없음(struct 주석 §5, ADR-0071).
+    #[test]
+    fn concurrent_reparent_persisted_equals_final_map() {
+        use std::thread;
+
+        let store = Arc::new(MemStore::default());
+        let reg = Arc::new(ProfileRegistry::new(store.clone()));
+        // 공통 루트 하나.
+        let root = sample();
+        let root_id = root.id;
+        reg.upsert(root);
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let r = reg.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..50 {
+                    let child = sample();
+                    let cid = child.id;
+                    r.upsert(child);
+                    r.reparent(cid, Some(root_id));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mem = reg.list();
+        let disk = store.load();
+        assert_eq!(mem.len(), 201, "루트 1 + 자식 200");
+        assert_eq!(disk.len(), mem.len(), "디스크 개수 == 인메모리(누락 없음)");
+        // 루트 외 200 자식 전부 parent_id == root_id.
+        let children_ok = mem
+            .iter()
+            .filter(|p| p.id != root_id)
+            .all(|p| p.parent_id == Some(root_id));
+        assert!(children_ok, "동시 reparent 후 모든 자식이 루트를 부모로");
+    }
+
     // ── 동시성: persisted == latest (stale-overwrite race 봉인) ────────────────────
 
     /// save 가 lock 보유 중 **현재 맵**을 쓰는지 직접 단언 — 커밋 직후 상태가 곧바로 persist 됨을 본다.
@@ -631,6 +1177,8 @@ mod tests {
         assert_eq!(p.last_start_at, None);
         // 신규 display_name 부재 → #[serde(default)] = None(마이그레이션 불필요, 트리 basename 파생 불변).
         assert_eq!(p.display_name, None);
+        // 신규 parent_id 부재 → #[serde(default)] = None(루트, ADR-0072 무마이그레이션).
+        assert_eq!(p.parent_id, None);
     }
 
     // ── ADR-0044: output_format serde 하위호환 + is_json_mode 판정 ──────────────

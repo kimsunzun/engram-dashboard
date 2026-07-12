@@ -47,6 +47,8 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::SetProfileAutoRestore { request_id, .. }
         // 트리 rename(ADR-0061 리치화) — Ack 매칭 대상(SetProfileAutoRestore 와 동형).
         | AgentCommand::RenameProfile { request_id, .. }
+        // 트리 reparent(ADR-0072 계층) — Ack 매칭 대상(RenameProfile 와 동형).
+        | AgentCommand::ReparentProfile { request_id, .. }
         | AgentCommand::GetSnapshot { request_id, .. }
         // 프리셋 CRUD(ADR-0061) — 넷 다 request_id 동봉(reply 매칭 대상).
         | AgentCommand::ListPresets { request_id }

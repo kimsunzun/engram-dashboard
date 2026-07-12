@@ -36,6 +36,7 @@ function profile(id: string, name = '', createdAt = 0, displayName: string | nul
     id,
     name,
     display_name: displayName,
+    parent_id: null,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd: 'C:/x',
     env: [],
