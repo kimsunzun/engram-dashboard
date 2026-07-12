@@ -869,6 +869,11 @@
 - **검증:** `npx tsc --noEmit` clean(`@ts-expect-error` 타입 게이트 포함) · `npm test`(vitest 530). **GUI 실측 N/A**(UI 미연결 순수 로직 그릇 — 화면 동작 0, 실측 대상은 마이그레이션 커밋에서 생김). Rust 게이트(build/test·코어 격리)는 변경이 Rust 0 = 인과 격리라 스킵(bare `cargo test`는 정본 do-not = WebView2 크래시).
 - **게이트:** 커밋 = `src/i18n/` 3파일 + step-log. **후속:** 슬라이스 ② `src/commands/` 문자열 마이그레이션 → ③ 컴포넌트 스윕(aria-label·라벨·기본 탭명·빈상태).
 
+## i18n 방식 재검증(/research) + 자체 t() 유지 확정 — 코드에 "잠정 구현" 문구 박음 (2026-07-12, master, 대화 세션) · ADR-0069 재확인
+- **무엇:** "자체 t()가 야매 아니냐"는 사용자 우려에 `/research medium`(설계-결정 모드, 후보 4: react-i18next/i18next · react-intl(FormatJS) · LinguiJS · 자체 t())로 서베이. **결론 = 자체 t()는 단일언어·내부툴·~100 문자열엔 정당**(anti-pattern 아님) — "TS union key + `as const` + typed t()"는 인정된 패턴(typesafe-i18n이 라이브러리화한 것과 동일)이고, 우리 t()는 **파라미터까지 타입세이프**(라이브러리들은 key만 옵트인·파라미터 런타임). 다국어 본격화 시 seam 뒤에서 **Lingui**(경량·Vite 공식)/**i18next**(최대 생태계)로 교체가 표준 경로. **사용자 결정 = 자체 유지 + 코드에 "잠정(interim) 구현" 문구 명시**(`index.ts` 헤더).
+- **어떻게:** 조사 수집자 3명 병렬(sonnet, by-candidate 팬아웃) → 메인 grounding. cross-family(Codex) 적대 리뷰는 시간 과다(사용자 판단)로 생략 — **medium (적대 리뷰 생략 — cross-family 검증 없음)** degraded 라벨. 결론은 다수 독립 출처(Tolgee·Phrase·i18next docs·typesafe-i18n 등) 지지라 견고. 번들 수치는 bundlephobia 직접 확인 실패로 "가능성 높음".
+- **게이트:** 주석·문서만(로직 무변) → tsc/vitest 회귀 후 커밋+**푸시**.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
