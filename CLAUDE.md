@@ -82,6 +82,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **조사·웹서칭·대량 읽기 = 서브에이전트 일임.** 범용 원칙 = global-rules 「위임 우선」(여기 안 베낌). engram 바인딩: OSS·설계 조사는 `/research`. 자율 모드("진행 쭉해")에서도 생략 금지.
 - 메인은 각 에이전트 결과를 취합해 보고하고, 커밋은 게이트 통과 후에만.
 - **역할→모델·effort 배치 = 전역 사전이 정본**(경로는 global-rules 「전역 사전」이 정의 — 여기 안 베낌). 메인 세션만 예외 명시 = **xhigh**(무가드 통합 노드 — 검수보다 메인에 싣는다; 그 위 ultracode는 effort↑가 아니라 워크플로우 자동화·세션한정).
+- **standalone fallback:** global-rules가 없는 환경(이 repo만 분리)에선 전역 사전 = `.claude/references/dictionary.md` 사본, 스킬·프리셋 = `.claude/skills/`·`.claude/agents/worker-senior.md` 사본을 쓴다. 사본은 읽기 전용 — 수정은 원 소유처(Engram)에서만.
 
 ---
 

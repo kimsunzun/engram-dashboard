@@ -1,0 +1,21 @@
+# handoff (구 continue) — 개선 히스토리
+
+이 스킬을 쓰다 발견한 결함·개선점을 누적한다(덮어쓰기 금지). 반영은 관련 주제 재등장 시 사용자 승인 하에. 규약 = `../_shared/self-improvement-feedback.md`.
+
+## 이력
+
+| 날짜 | 발견 | 상태 |
+|---|---|---|
+| 2026-07-03 | **검증 상태** (SKILL.md ⚠️절에서 이동 — 방침 C). *단단함:* `history/` append-only 기록 보존 + `latest.md` 고정 읽기 = 단순·결정적이라 실패 여지가 작다. "핸드오프에 *검증 안 된 항목*·*실패한 접근*을 꼭 넣어라"는 cross-family 조사 수렴(`docs/research/session-handoff-continue-resume-research-2026-06-27.md`). *약함/미검증:* 멀티스트림·자동선택은 **의도적 미구현**(현재 비목표) — 나중에 바인딩으로 붙일 때 별도 설계·검증이 필요하다. | 기록 (검증 상태 정본) |
+| 2026-07-03 | **미지 인자 처리 긴장** — flow 상단 계약은 "op 외 인자는 받지 않는다"인데 파싱 절은 "그 외 인자는 무시"(조용히 통과). cross-family 게이트 리뷰 적출(선존). 거부/보고로 바꿀지 무시 유지할지 = 동작 변경이라 사용자 결정. | 미반영 |
+| 2026-07-03 | **외부 비교 조사(/research medium, 적대 리뷰 통과)**: 설계 재확증 — HANDOFF.md 패턴에 커뮤니티 독립 수렴(실물 4: ykdojo·reheat·parcadei·REMvisual), "실패한 접근 필수"는 3실물 명시 일치, append-only 누적도 흔한 설계(수집자의 "소수파" 주장은 리뷰가 반증). 공식 --resume/Auto Memory는 보완재지 대체재 아님. **차용 후보 3**: ① 컨텍스트 임계 훅 자동 save(parcadei 90% 훅 — 글로벌 룰 "50% 제안"의 자동화) ② 정지 조건(stop conditions) 필드 ③ 참조 경로에 코드 포인터(파일:라인) 권장 보강. **역신호 1**: Amp는 핸드오프 도입(2025-10) 후 compaction으로 회귀(2026-05, 모델 개선 사유) — 단 감사·크로스머신·실패기록 가치엔 반증 아님. | 미반영 (차용 3건 = 사용자 승인 대기) |
+| 2026-07-07 | 사용자 결정: 전역 `continue`를 폐기하고 이 `handoff`가 후계로 전역 배포된다. continue 시절 feedback을 아래에 그대로 승계한다(유실 금지). | 기록 |
+| 2026-07-07 | **(continue에서 승계) load op의 `@<latestFile>` 자동로드가 실측상 미동작.** flow §1 load가 확인 1줄 + `@<latestFile>` 출력으로 로드하도록 설계됐으나, **어시스턴트가 출력한 `@경로`는 자동 확장되지 않는다**(`@mention` 자동로드 = 사용자 입력 시점 전용 — 실측 `experiments/2026-07-07-binding-cwd-relative-read.md`, skill-factory). 실세션에서 load가 동작해 보이는 건 세션이 Read 툴로 직접 읽기 때문. **수정안:** flow §1을 "`latestFile`을 **Read**해 확인·요약"으로 바꾸고 `@` 출력 의존 제거. | **반영 (2026-07-07 저녁 — 사용자 포괄 위임)**: flow §1을 Read 정본으로 개정 |
+| 2026-07-07 | **전역 배포 후 fresh 세션 첫 실측(검증 상태 갱신):** 재시작한 진짜 fresh 세션(skill-factory)에서 전역 handoff 스킬이 스킬 목록에 정상 로드됐고, `/handoff`(load) 트리거 첫 실사용 완주 — flow.md Read → 바인딩 부재 시 기본 경로 fallback → `latest.md` Read → 확인 1줄 + 요약. 직전 핸드오프의 미검 항목 2건("`/handoff` 트리거 실사용 0회"·"fresh 세션 전역 로드 미확인") 해소. | 기록 (실측) |
+| 2026-07-07 | **차용 2건 반영(사용자 포괄 위임 — 07-03 외부 비교 조사분):** §2-2 체크리스트에 ① **정지 조건(stop conditions)** 항목 신설(다음 세션이 멈추고 물어야 할 조건 — 있을 때만) ② 참조 경로에 **`파일:라인` 코드 포인터 권장** 단서. 잔여 차용 1건(컨텍스트 임계 훅 자동 save)은 hook 자동화 묶음(이월 #10)으로 유지 — 스킬 문서가 아니라 settings 훅 소관. | 반영 (2026-07-07) |
+| 2026-07-07 | **공용 규칙 정합 정리(사용자 결정):** SKILL.md 자기개선 절에 `../_shared/self-improvement-feedback.md` 포인터 추가 — 배포 6스킬 중 handoff만 누락(감사 적출: 정본 진화 시 조용한 발산 위험). | 반영 (2026-07-07) |
+| 2026-07-07 | **문구 담백화(사용자 지시):** flow 가드레일 "(진짜 기록은 history/에 남는다)" 괄호 삭제 — SKILL.md §불변 소유. 의미 불변. | 반영 (2026-07-07) |
+| 2026-07-07 | **최종 보고 피드백 한 줄 의무(사용자 결정):** flow 최종/결과 보고 절에 "피드백: 없음"도 보고하는 한 줄 의무 추가(파일엔 발견 시만 — 조용한 스킵 관측). 규약 정본 = _shared/self-improvement-feedback.md. 게이트 = review doc full(Opus PASS · Codex FIX 반영: 축약 + "최종 보고" 통일) + qa 등가 실행 PASS. | 반영 (2026-07-07) |
+| 2026-07-08 | **기본 경로 rename `.claude/continue` → `.claude/handoff`(사용자 결정, engram-dashboard 경유 요청):** 스킬명과 데이터 폴더 불일치(naming rot) 해소. ADR-0005 거부 대안("경로도 rename") 부분 개정 = ADR-0007. 스킬에 이관·폴백 규칙은 넣지 않는다 — 기존 `.claude/continue` 데이터 정리는 스킬 밖에서 처리(사용자 지시). 게이트 = review doc full(doc-aware Opus PASS · cut Codex FIX는 전부 diff 밖 선존 문구 — 아래 행) + qa 등가(절대경로 0·구 경로 잔재 0) PASS. | 반영 (2026-07-08) |
+| 2026-07-08 | **기본 경로 rename 미landing 실측(engram-dashboard 세션):** 위 07-08 "기본 경로 `.claude/continue`→`.claude/handoff` 반영" 기록과 달리, 현재 전역 `flow.md §0`(`handoffRoot = .claude/continue`) + `SKILL.md §프로젝트 바인딩`(골격 기본값 `.claude/continue`)은 **여전히 continue로 서술**. 실데이터는 `.claude/handoff/latest.md`에 존재 → flow.md대로 기본 경로 `/handoff load` 시 빈 `.claude/continue`를 읽어 "핸드오프 없음"이 뜬다(사용자가 "handoff/latest 읽어"로 직접 지정해 해소). 프로젝트 바인딩 `.claude/skill-bindings/handoff.md`도 부재. rename 결정이 feedback 서술엔 있으나 골격 문구엔 안 landing — 골격 기본값 ↔ 실데이터 경로 불일치. | 기각 (2026-07-11 실물 재확인 — 전역 flow §0·SKILL 기본값 이미 `.claude/handoff`, landing 커밋 = `18f5c2a`. 관측이 landing 이전 시점이거나 stale 사본으로 추정) |
+| 2026-07-08 | **cut-advocate(Codex) 다듬기 후보 5(전부 선존 문구, 이번 rename과 무관):** ① 후계 언급 frontmatter·본문 중복(SKILL:3,10) ② append-only/latest 고정 3곳 재진술(SKILL§불변·flow§1·flow§가드레일 — 골격 설계상 의도 여부 판단 필요) ③ flow §2-2 체크리스트 필수 항목이 bullet과 blockquote에 반복 ④ "외부 선례 차용 2026-07-07" 괄호 ⑤ "@출력 방식 폐기" 실측 이력 괄호. 담백화 원칙과 "운용 중 안 지켜질 때만 보강" 원칙이 갈리는 지점 — 반영은 사용자 승인 대기. | 미반영 |
