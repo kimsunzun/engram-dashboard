@@ -940,6 +940,10 @@
 - **열화 라벨(정직):** 프론트만이라 **백엔드 `fixup_focus`가 기본 레이아웃(첫 슬롯=AgentList)에서 트리를 focused로 emit하면 포커스 링이 트리에 뜨는 시각 잔존** — 동작(클로버)엔 무영향(selectOpenTarget이 차단), 완전 정합은 백엔드 강제(사용자 defer). 라이브 관측된 건 아니고 코드상 가능성(리뷰어 지적).
 - **게이트:** ADR-0073 신설 + 인덱스(lint error 0) + 이 step-log. 커밋 = 프론트 4(ViewLayoutRenderer·AgentList·selectOpenTarget·ko.ts) + 테스트 3 + ADR + step-log. **후속(사용자 메모):** 백엔드 에이전트 트리/프리셋 구성 방식 재검토(그때 focus 강제도 함께).
 
+## json 모드 resume 활성화 + 활성 글리프 녹색 + 트리 에이전트 생성 예약 전환 (2026-07-13, master, 승계 세션) · ADR-0074 · ADR-0075
+- **무엇:** (1) 트리 "에이전트 생성" = 즉시 셸 스폰 방식에서 claude 예약(비활성) 프로필 등록으로 전환 + 기본 output_format StreamJson 으로 변경. (2) json(stream-json) 모드 resume 배선 — build_spec 이 SpawnMode 로 `--session-id`/`--resume` 가르고 caps=resume:true(ADR-0074, CLI spike 실측). (3) 활성(Running) 글리프 녹색 추가 — theme var `--status-running`, e-ink 중립화, `statusGlyph.ts` pure 모듈 분리(ADR-0075). (4) RichSlot 정체성 라벨(입력창 우측 위 오버랩) + 입력 패딩 조정.
+- **게이트:** ADR-0074·0075 신설 + 인덱스 + ADR-0044(resume 후속 완료 마커) + ADR-0062(색 개정 마커) + 이 step-log.
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
