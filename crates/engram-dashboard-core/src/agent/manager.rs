@@ -32,8 +32,9 @@ use crate::agent::transport::pty::PtyTransport;
 use crate::agent::transport::stdio::StdioTransport;
 use crate::agent::transport::{AgentTransport, OutputDecoder};
 use crate::agent::types::{
-    AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, OutputChunk, OutputSink, PtyError,
-    ReapMsg, SinkId, StatusSink, SubscribeOutcome, TerminalReason, TerminationIntent,
+    AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, OutputChunk, OutputEvent,
+    OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
+    TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -232,8 +233,28 @@ impl AgentManager {
         // 그 외엔 None(바이트 직통). claude 스키마 지식은 backend 단독이라 여기선 command 만 넘긴다.
         let decoder = backend::output_decoder(&profile.command);
 
-        let (session, child_pid) =
-            self.spawn_session(profile.id, spec, bcaps, encoder, decoder, json_mode, epoch)?;
+        // ADR-0079: resume(=과거 대화 이어받기) 스폰이면 `.jsonl` transcript 에서 과거 이벤트를 읽어
+        //   버퍼에 seed 한다(pump 전). Fresh 는 이어받을 대화가 없으므로 빈 Vec(기존 동작 불변). json
+        //   모드 claude 만 실제로 읽고(터미널은 TUI PTY repaint 로 복원, shell 은 대화 없음), 그 외엔
+        //   backend dispatch 가 빈 Vec 을 돌려준다. transcript 경로·파싱 지식은 backend 단독(ADR-0004).
+        let seed_events = match mode {
+            SpawnMode::Resume => match sid {
+                Some(s) => backend::resume_transcript_events(&profile.command, &cwd, s),
+                None => Vec::new(),
+            },
+            SpawnMode::Fresh => Vec::new(),
+        };
+
+        let (session, child_pid) = self.spawn_session(
+            profile.id,
+            spec,
+            bcaps,
+            encoder,
+            decoder,
+            json_mode,
+            epoch,
+            seed_events,
+        )?;
 
         // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
         if let (Some(s), Some(pid)) = (sid, child_pid) {
@@ -302,6 +323,9 @@ impl AgentManager {
         decoder: Option<Box<dyn OutputDecoder>>,
         json_mode: bool,
         epoch: u32,
+        // ADR-0079: resume 시 `.jsonl` 에서 복원한 과거 이벤트. pump 전에 core 버퍼에 seed 한다.
+        //   Fresh(및 비-json)는 빈 Vec → seed 안 함(기존 fresh 버퍼 동작 불변).
+        seed_events: Vec<OutputEvent>,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
         // 1. 모드에 맞는 transport 조립(json=StdioTransport 파이프 / 그 외=PtyTransport ConPTY).
         //    child spawn + job 편입 + 파이프/reader·writer 확보. pump는 아직 안 띄움(start에서).
@@ -311,6 +335,26 @@ impl AgentManager {
 
         // 2. 출력 측 core 생성(status Running, seq 0). transport와 분리된 출력 fanout 담당.
         let core = Arc::new(OutputCore::new(id, epoch, self.status_sink.clone()));
+
+        // 2.1. ★ADR-0079 seed-before-publish(load-bearing 순서 — cross-family review 2026-07-13)★:
+        //      resume 복원 과거 이벤트를 **세션이 관측 가능해지기 전에**(= sessions 맵 insert 전) core
+        //      Ring 에 seed 한다. 지금 core 는 이 함수 로컬 Arc 뿐이라 다른 스레드가 닿을 수 없다(구독·emit
+        //      경로 모두 sessions 맵 조회를 거친다). 그래서 seed 를 여기서 끝내면 다음 두 윈도가 원천 차단된다:
+        //        (a) empty-ring replay: insert 후 seed 전에 재접속 구독이 끼면 빈 Ring 을 replay 하고
+        //            seed 는 fanout 안 하므로 과거를 영구 유실 → insert 전 seed 로 제거.
+        //        (b) seq interleave: 그 윈도의 동시 emit/write 가 seed 와 seq 를 뒤섞어 Ring 순서를
+        //            [0,2,1] 로 깨 replay 의 partition_point 전제를 위반 → seed 선행으로 제거.
+        //      seed 는 여전히 start_pump 전이다(라이브 emit 은 pump 가 켜야 시작). seed_events 가 비면
+        //      (Fresh·비-json·transcript 부재) no-op → 기존 fresh 버퍼 동작 불변.
+        if !seed_events.is_empty() {
+            tracing::info!(
+                agent = %id,
+                epoch,
+                count = seed_events.len(),
+                "ADR-0079: resume transcript seed (before publish)"
+            );
+            core.seed(seed_events);
+        }
 
         // 2.5. ★ADR-0019 finish-snapshot hook 배선★. 세션별 intent atomic 신규 생성 + 전역
         //      shutting_down·reaper_tx 를 클로저로 캡처해 core 에 주입한다. core.finish 의 finalize

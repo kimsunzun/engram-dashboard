@@ -209,6 +209,28 @@ pub fn output_decoder(c: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
     }
 }
 
+// ── ADR-0079: resume 시 `.jsonl` transcript → 과거 이벤트 seed (backend dispatch) ──────
+
+/// ADR-0079: resume 스폰 시 이 명령의 과거 대화를 복원한 `OutputEvent` 목록. json 모드 claude 만
+/// `.jsonl` transcript 를 읽어 seed 한다(터미널 claude 는 TUI 가 PTY repaint 로 복원하므로 불필요,
+/// shell 은 대화 개념 없음). 그 외 전부 빈 Vec(seed 안 함 = 기존 fresh 버퍼 동작 불변).
+///
+/// ★claude 지식 격리(ADR-0004)★: transcript 경로(cwd→슬러그)·파싱은 claude.rs 단독. manager 는 이
+///   dispatch 만 부르고 파일 포맷·경로 규칙을 모른다. `output_decoder`(라이브 정제)의 resume 방향 짝.
+pub fn resume_transcript_events(
+    c: &AgentCommand,
+    cwd: &std::path::Path,
+    session_id: Uuid,
+) -> Vec<crate::agent::types::OutputEvent> {
+    // json 모드 claude 만 해당(터미널·shell 은 seed 불필요/불가). command 로 판정해 backend 격리 유지.
+    match c {
+        AgentCommand::Claude { .. } if c.is_json_mode() => {
+            claude::read_transcript_events(cwd, session_id)
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

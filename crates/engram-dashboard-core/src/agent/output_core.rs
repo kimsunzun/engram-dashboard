@@ -94,6 +94,38 @@ impl OutputCore {
         *self.on_terminal.lock().expect("on_terminal poisoned") = Some(hook);
     }
 
+    /// ADR-0079: resume 스폰 시 `.jsonl` transcript 에서 복원한 과거 이벤트를 replay 버퍼에 **seed**한다.
+    ///
+    /// ★seed-before-publish 불변식(ADR-0079, load-bearing — seed before publish: closes
+    ///   empty-ring-replay + seq-interleave window, cross-family review 2026-07-13)★: manager.
+    ///   spawn_session 이 이 core 를 **sessions 맵에 insert 하기 전에**(= 세션이 관측 가능해지기 전에)
+    ///   호출한다. 구독·emit 경로 모두 sessions 맵 조회(get_session)를 거치므로, insert 전이면 다른
+    ///   스레드가 이 core 에 닿을 수 없다 → seed 도중 재접속 구독이 빈 Ring 을 replay 하거나(seed 는
+    ///   fanout 안 함 → 과거 영구 유실), 동시 emit 이 seq 를 뒤섞는(Ring 순서 [0,2,1]) 윈도가 원천 차단된다.
+    ///   insert 전이니 당연히 pump(라이브 emit) 시작 전이기도 하다 — 그래서 아직 구독자·라이브 이벤트가 없다.
+    ///
+    /// ★fanout 없음(seed 시점 특성)★: emit 과 달리 subscribers 로 send 하지 않는다 — 구독자가 아직
+    ///   없으므로 무의미하고, 있더라도 seed 는 "버퍼 사전 적재"라 replay 경로(subscribe→replay)로만
+    ///   전달돼야 한다(라이브 fanout 이 아니다). 그래서 replay lock 만 짧게 잡아 Ring 에 push 하고 seq 만
+    ///   전진시킨다(ADR-0006 락 규율 유지 — subscribers lock 미취득).
+    ///
+    /// ★seq 연속성★: seed 한 이벤트마다 emit 과 동일하게 `seq.fetch_add(1)` 로 seq 를 발급한다. 그래서
+    ///   seed 뒤 첫 라이브 emit 의 seq 가 seed 마지막 seq+1 로 자연히 이어진다(gap·중복 없음).
+    ///   finalize·status 는 건드리지 않는다(ADR-0005 — seed 는 종료 전이가 아니다).
+    pub fn seed(&self, events: Vec<OutputEvent>) {
+        // replay lock 을 한 번 잡고 순서대로 push(각 이벤트에 연속 seq 발급). subscribers 는 만지지 않는다.
+        let mut replay = self.replay.lock().expect("replay poisoned");
+        for event in events {
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            let cost_bytes = estimate_cost_bytes(&event);
+            replay.push(StoredOutput {
+                seq,
+                event,
+                cost_bytes,
+            });
+        }
+    }
+
     /// transport(pump)가 만든 출력 이벤트를 받아 replay 저장 + 구독자 fanout.
     /// **payload-generic (S15 B4)** — 모든 OutputEvent variant(콘솔 바이트 + 구조화)를 받아
     /// Ring 에 저장하고 payload-generic 으로 fanout 한다(ADR-0002 출력 종류 비가정). event 가
@@ -105,29 +137,40 @@ impl OutputCore {
     /// - replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게).
     ///   두 lock 동시 취득은 subscribe 함수 단독 예외이며 emit은 절대 금지.
     pub fn emit(&self, event: OutputEvent) {
-        // 3. seq 발급 (C2: 즉시 send — partial batch 정체 없음).
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-
         // eviction 예산(cost_bytes)을 event 참조로 미리 근사(ADR-0003: core 는 wire 크기를 모르므로
         // payload 문자열 길이 합으로 구조적 근사 — estimate_cost_bytes 주석 참조).
         let cost_bytes = estimate_cost_bytes(&event);
 
-        // 4. ★replay 저장 먼저★ — brief lock(락 순서 1단계, ADR-0006). **순서 중요(gap 방지)**:
-        //    replay.push 가 fanout 보다 먼저여야, subscribe 가 이 사이에 끼어들어도 새 sink 는
-        //    replay 에서 이 seq 를 받는다(최악 dup, 프론트 seq dedup 이 흡수). 역순이면 gap 발생.
+        // 3~4. ★seq 발급 + replay push 를 replay 락 안에서 원자적으로★ — brief lock(락 순서 1단계,
+        //    ADR-0006). **순서 중요(gap 방지)**: replay.push 가 fanout 보다 먼저여야, subscribe 가
+        //    이 사이에 끼어들어도 새 sink 는 replay 에서 이 seq 를 받는다(최악 dup, 프론트 seq dedup 이
+        //    흡수). 역순이면 gap 발생.
         //    ★payload-generic★: Ring 에는 event 를 **clone 해서** 저장하고, fanout 은 로컬 원본
         //    `event` 를 borrow 한다(원 emit 이 replay 엔 clone 넣고 로컬 `&data` 로 fanout 하던 것과
         //    동형 — 락 밖 send 를 위해 fanout 참조를 로컬에 둔다). N=1 구독 기준 clone 1회로 구
         //    base64 String clone 과 실질 동률.
-        self.replay
-            .lock()
-            .expect("replay poisoned")
-            .push(StoredOutput {
+        //
+        // ★ADR-0079: seq 발급을 replay 락 안에서 push 직전에 한다(왜 락 밖이면 안 되나)★
+        //    pump 스레드(transport stdio/pty)와 write_input 의 synthetic user-echo(session.rs)가
+        //    동시에 emit 을 호출한다. seq 를 락 밖에서 fetch_add 하면 두 caller 가 N/N+1 을 발급받고도
+        //    락 진입 순서가 뒤집혀 ring 에 N+1 을 N 보다 먼저 push 할 수 있다 → ring 이 seq 로 정렬
+        //    깨짐. subscribe_from 은 `partition_point(|c| c.seq <= s)`(seq 오름차순 전제)로 replay
+        //    slice 를 자르므로, ring 비단조면 replay 슬라이싱이 무너진다. 발급+push 를 같은 락 구간에
+        //    묶어 원자화하면 락 획득 순서가 곧 seq 순서 = ring 항상 단조. (cross-family review 2026-07-13
+        //    발견 — seed() 도 동일하게 락 안에서 발급하므로 두 경로가 일치한다.)
+        //    Ordering::Relaxed 유지: 락이 순서(happens-before)를 제공하므로 atomic 은 유일성만 담당.
+        let seq;
+        {
+            let mut replay = self.replay.lock().expect("replay poisoned");
+            seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            replay.push(StoredOutput {
                 seq,
                 event: event.clone(),
                 cost_bytes,
             });
-        // ↑ replay lock 은 push 직후 즉시 drop(임시 guard 스코프 종료). 아래 send 는 lock 미보유.
+        }
+        // ↑ replay lock 은 push 직후 즉시 drop(블록 스코프 종료). 아래 send 는 lock 미보유.
+        //   seq 는 로컬에 캡처해 락 밖 fanout 이 그대로 사용(ADR-0006 규칙3: send 는 무락).
 
         // event 종류로 payload 뷰 분기(ADR-0002 출력 종류 비가정): TerminalBytes→Bytes, 그 외 구조화
         // →Event. 로컬 `event`(Ring 에 넣은 것과 별개 원본)를 borrow 하므로 lock 수명과 무관.
@@ -753,6 +796,85 @@ mod tests {
         }
     }
 
+    /// ADR-0079 seed: resume 시 seed 한 과거 이벤트가 (1) Ring 에 순서대로 쌓이고, (2) seed 시점엔
+    /// 구독자가 없어 fanout 이 일어나지 않으며(구독 전이므로), (3) seed 뒤 첫 라이브 emit 의 seq 가
+    /// seed 마지막 seq+1 로 이어지는지(seq 연속성) 검증. 헤드리스(mock sink) — 실 프로세스 없음.
+    #[test]
+    fn seed_pushes_to_ring_in_order_without_fanout_then_live_seq_continues() {
+        let core = new_core(MockStatusSink::new());
+
+        // (1) 구독자 없는 상태에서 과거 이벤트 3건 seed(=resume 시 .jsonl 복원분 흉내).
+        core.seed(vec![
+            OutputEvent::Structured {
+                kind: "user".into(),
+                json: r#"{"type":"text","text":"과거 질문"}"#.into(),
+            },
+            OutputEvent::TextDelta {
+                text: "과거 답변".into(),
+                turn_id: None,
+                message_id: None,
+            },
+            OutputEvent::MessageDone {
+                turn_id: None,
+                message_id: None,
+            },
+        ]);
+
+        // Ring 에 seq 0,1,2 로 순서대로 적재됐는지(snapshot 은 TerminalBytes 만 변환하므로 seq 검증은
+        // 아래 늦은 구독자 replay 로 한다 — snapshot() 은 구조화 이벤트를 스킵).
+        // (2) fanout 없음: seed 후 뒤늦게 붙는 구독자가 replay 로 3건을 seq 0,1,2 순서로 받는다.
+        let late = MockSink::new();
+        core.subscribe(late.clone());
+        assert_eq!(
+            late.seqs(),
+            vec![0, 1, 2],
+            "seed 한 과거 3건이 Ring 에 seq 0,1,2 로 순서대로 있어야 하고 replay 로 전달됨"
+        );
+
+        // (3) seq 연속성: seed 뒤 첫 라이브 emit 은 seq 3(= seed 마지막 2 + 1).
+        core.emit(OutputEvent::TextDelta {
+            text: "새 라이브 토큰".into(),
+            turn_id: None,
+            message_id: None,
+        });
+        assert_eq!(
+            late.seqs(),
+            vec![0, 1, 2, 3],
+            "seed 뒤 라이브 emit 의 seq 가 seed 마지막+1 로 이어져야 함(gap·중복 없음)"
+        );
+    }
+
+    /// ADR-0079 seed: seed 시점에 (설령) 구독자가 이미 있어도 fanout 하지 않음을 명시 검증.
+    /// seed 는 "버퍼 사전 적재"라 라이브 send 경로를 타지 않는다 — 구독자는 나중 replay 로만 과거를 받는다.
+    #[test]
+    fn seed_does_not_fanout_to_existing_subscriber() {
+        let core = new_core(MockStatusSink::new());
+        // (비정상 순서지만 방어 검증용) 구독자를 먼저 붙인 뒤 seed 한다.
+        let sink = MockSink::new();
+        core.subscribe(sink.clone());
+
+        core.seed(vec![OutputEvent::TextDelta {
+            text: "seed".into(),
+            turn_id: None,
+            message_id: None,
+        }]);
+
+        // seed 는 fanout 하지 않으므로 이미 붙은 구독자는 seed 시점에 아무 것도 못 받는다.
+        assert_eq!(sink.len(), 0, "seed 는 기존 구독자로 fanout 하지 않아야 함");
+
+        // 이후 라이브 emit 은 정상 fanout — seq 는 seed(0) 다음인 1.
+        core.emit(OutputEvent::TextDelta {
+            text: "live".into(),
+            turn_id: None,
+            message_id: None,
+        });
+        assert_eq!(
+            sink.seqs(),
+            vec![1],
+            "라이브 emit 만 fanout, seq 는 seed 다음"
+        );
+    }
+
     #[test]
     fn subscribe_replays_then_lives_without_seq_gap() {
         let core = new_core(MockStatusSink::new());
@@ -1132,5 +1254,50 @@ mod tests {
         // terminal로 전이 후 → false(덮어쓰지 않음).
         core.finish(TerminalReason::Exited { code: Some(0) });
         assert!(!core.enter_exiting());
+    }
+
+    /// ADR-0079 회귀 방지: 동시 emit 하에서도 replay ring 이 seq 오름차순(단조)을 유지하는지.
+    ///
+    /// ★왜 이 테스트가 성립하나(hermetic)★: pump 스레드와 write_input synthetic echo 가 동시에 emit 을
+    ///   부르는 실제 상황을 여러 스레드의 emit 루프로 재현한다. FIX 전에는 seq 발급(fetch_add)이 replay
+    ///   락 **밖**이라, 두 스레드가 N/N+1 을 발급받고도 락 진입 순서가 뒤집혀 ring 에 N+1 이 N 보다 먼저
+    ///   push 될 수 있었다 → ring 비단조 → subscribe_from 의 partition_point(seq 오름차순 전제) 붕괴.
+    ///   발급+push 를 같은 락 구간에 묶은 뒤에는 락 획득 순서 = seq 순서 = ring 항상 단조.
+    ///   확률적이지만 스레드×반복이 크면 발급/push 역전 창을 거의 확실히 밟아 회귀를 잡는다(플래키하지
+    ///   않게 반복 수를 넉넉히 잡음). max_events(4096) 이하로 유지해 eviction 없이 전량을 검사한다.
+    #[test]
+    fn concurrent_emit_keeps_replay_ring_monotonic() {
+        let core = Arc::new(new_core(MockStatusSink::new()));
+        const THREADS: u64 = 4;
+        const PER_THREAD: u64 = 500; // 4*500 = 2000 < max_events(4096) → eviction 없음.
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let core = core.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..PER_THREAD {
+                        // 작은 payload — 2MB max_bytes 도 안 건드림. emit 이 유일한 seq 소비자.
+                        core.emit(OutputEvent::TerminalBytes(vec![b'x']));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("emit thread panicked");
+        }
+
+        // ring 을 직접 들여다봐 seq 가 push 순서대로 엄격 오름차순인지 단언(fanout 순서가 아니라 저장 순서).
+        let stored = core.replay.lock().expect("replay poisoned").snapshot();
+        let seqs: Vec<u64> = stored.iter().map(|s| s.seq).collect();
+        assert_eq!(
+            seqs.len() as u64,
+            THREADS * PER_THREAD,
+            "eviction 없이 전량 저장돼야(검사 완전성)"
+        );
+        // 엄격 단조 증가(중복·역전 없음) — FIX 가 빠지면 여기서 역전이 잡힌다.
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "replay ring 은 seq 로 엄격 오름차순이어야 한다(동시 emit 원자성): {seqs:?}"
+        );
     }
 }

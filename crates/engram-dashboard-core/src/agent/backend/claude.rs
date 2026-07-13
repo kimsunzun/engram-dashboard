@@ -626,6 +626,167 @@ impl ClaudeStreamDecoder {
     }
 }
 
+// ── ADR-0079: resume 시 `.jsonl` transcript → OutputEvent seed (claude 지식 격리) ──────
+//
+// ★층 소속(ADR-0004)★: `.jsonl` transcript 의 위치(cwd→프로젝트 슬러그 인코딩)·라인 타입 필터·
+//   과거 턴 매핑 지식은 **이 파일 안에만** 있다. manager 는 `read_transcript_events(cwd, sid)` 만
+//   부르고 claude 파일 포맷을 모른다. core/transport 도 모른다.
+//
+// ★매핑 재사용(디코더 한 벌)★: transcript 의 `assistant`/`user` 라인은 라이브 stream-json 과 **동일한**
+//   봉투(top-level `type` + `message.content[]` 블록)를 갖는다(실측 2026-07-13, claude 2.1.170). 그래서
+//   과거 턴 매핑을 새로 짜지 않고 라이브 디코더의 `consume_line` 을 그대로 재사용한다. transcript 는
+//   봉투에 추가 top-level 키(`parentUuid`/`uuid`/`timestamp`/`sessionId`/`isSidechain` …)와 라이브에
+//   없는 라인 타입(`summary`/`file-history-snapshot`/`queue-operation`/`attachment`/`ai-title`)을 더 싣지만,
+//   `consume_line` 의 catch-all(`_ => {}`)이 모르는 타입을 이미 무해히 스킵하므로 그 라인들은 자연 배제된다.
+//   유일한 추가 필터는 `isSidechain:true`(sub-agent 턴) — 이건 `type` 이 여전히 user/assistant 라
+//   consume_line 이 안 걸러내므로 여기서 라인 레벨로 스킵한다.
+
+/// transcript seed 시 파싱할 최대 바이트(파일 끝에서부터). Ring 상한(2MB/4096 events)에 맞춰
+/// **파일 끝(tail)에서 이만큼만** 읽어 파싱한다 — 거대한 `.jsonl`(수십 MB)을 통째 파싱한 뒤 Ring 이
+/// 어차피 버릴 오래된 것까지 훑으면 spawn 지연이 폭발한다. 상한 초과분(오래된 과거)은 잘려도 수용
+/// (ADR-0079 — Ring 도 어차피 오래된 것부터 evict). 2MB + 여유로 4MB(seek 지점의 잘린 첫 부분 라인은
+/// read_transcript_events 가 첫 `\n` 까지 명시 폐기하므로 안전).
+const TRANSCRIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// cwd 를 claude 프로젝트 디렉토리 슬러그로 인코딩한다.
+///
+/// ★인코딩 규칙(실측 확정 2026-07-13)★: cwd 의 **모든 비-영숫자 문자**(`:` `\` `/` `.` `_` 공백 등)를
+///   `-` 로 치환한다. 예: `C:\Users\X\AppData\Local\Temp\engram-resume-test` →
+///   `C--Users-X-AppData-Local-Temp-engram-resume-test`(콜론+백슬래시 = `--`), `I:\Engram_Workspace\a`
+///   → `I--Engram-Workspace-a`. claude 가 `~/.claude/projects/<slug>/` 디렉토리를 이 규칙으로 만든다
+///   (로컬 45개 프로젝트 디렉토리 대조로 100% 일치 확인). 손실적(다른 cwd 가 같은 슬러그가 될 수 있음)이나
+///   claude 실제 동작과 일치시키는 것이 목적이라 그대로 따른다.
+fn project_slug(cwd: &std::path::Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// `~/.claude/projects/<slug>/<sid>.jsonl` 경로. `CLAUDE_CONFIG_DIR` 이 설정돼 있으면 우선한다
+/// (session_tracker 의 default_sessions_dir 과 동일 규약). home 을 못 찾으면 None.
+fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
+    let base = if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if dir.is_empty() {
+            claude_home()?.join(".claude")
+        } else {
+            PathBuf::from(dir)
+        }
+    } else {
+        claude_home()?.join(".claude")
+    };
+    Some(
+        base.join("projects")
+            .join(project_slug(cwd))
+            .join(format!("{sid}.jsonl")),
+    )
+}
+
+#[cfg(windows)]
+fn claude_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").map(PathBuf::from)
+}
+#[cfg(not(windows))]
+fn claude_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// ADR-0079: transcript 원문(라인 NDJSON) → 과거 `OutputEvent` 목록. **순수 함수(외부 의존 0)** — 실
+/// 픽스처로 단위 테스트한다. 파일 I/O 는 `read_transcript_events` 가 담당하고 이 함수는 이미 읽은
+/// 문자열만 받는다(ADR-0012 seam 격리).
+///
+/// - `isSidechain:true`(sub-agent 턴) 라인은 스킵한다 — 원본 대화만 복원한다.
+/// - 나머지 라인은 파일(append) 순서 그대로 라이브 디코더 `consume_line` 에 통과시킨다. summary·
+///   file-history-snapshot·queue-operation 등 non-conversation 라인 타입은 consume_line 의 catch-all
+///   이 스킵하므로 별도 필터가 필요 없다(user/assistant/result 만 이벤트가 된다).
+/// - result 라인은 라이브와 동일하게 MessageDone(+usage) 로 매핑돼 턴 경계 구분선이 생긴다.
+pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
+    let mut events = Vec::new();
+    for line in transcript.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // sub-agent(sidechain) 턴 스킵 — 라인 레벨에서만 판단 가능(consume_line 은 isSidechain 을 모른다).
+        //   전체 JSON 파싱까지 가지 않고 top-level 필드만 훑어도 되지만, 이미 라인 하나라 파싱 비용이
+        //   작고 정확도가 높아 serde 로 판정한다(비-JSON 라인은 어차피 consume_line 이 스킵).
+        if is_sidechain_line(trimmed) {
+            continue;
+        }
+        // 라이브 디코더 재사용 — transcript 라인도 완성된 한 줄이므로 consume_line 이 그대로 처리한다.
+        ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events);
+    }
+    events
+}
+
+/// 라인이 `isSidechain:true` 인가(sub-agent 턴). 비-JSON/필드 부재는 false(=원본 턴 취급, 보존).
+fn is_sidechain_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("isSidechain").and_then(|s| s.as_bool()))
+        .unwrap_or(false)
+}
+
+/// ADR-0079: resume 스폰 시 데몬이 부르는 진입점 — cwd·sid 로 `.jsonl` transcript 를 찾아 파일 끝에서
+/// 최대 `TRANSCRIPT_TAIL_BYTES` 만큼 읽어 과거 이벤트로 변환한다. 파일이 없거나(신규 세션) 읽기 실패면
+/// 빈 Vec(seed 안 함 = fresh 와 동일). **여기가 유일한 파일 I/O 지점**이고, 파싱은 순수 함수에 위임한다.
+///
+/// ★tail 읽기(spawn 지연 방지)★: 파일이 상한보다 크면 끝에서 TRANSCRIPT_TAIL_BYTES 만 읽는다. 그 경우
+///   seek 지점의 첫 (부분) 라인은 오브젝트 중간에서 잘렸으므로 **명시적으로 폐기**한다 — 첫 `\n` 까지의
+///   바이트를 버린 뒤 파싱한다(cross-family review 2026-07-13). "부분 라인은 어차피 비-JSON"이라는 암묵
+///   가정에 의존하지 않는다: 잘린 조각이 우연히 유효한 JSON suffix 로 끝나면 가짜 이벤트가 합성될 수 있어서다.
+///   seek offset 이 0(파일 ≤ 상한)이면 첫 라인은 온전하므로 폐기하지 않는다.
+///
+/// ★bounded read(동시 성장 방어)★: `read_to_end` 는 파일이 읽는 도중 커지면 무한정 읽는다. `take` 로
+///   최대 TRANSCRIPT_TAIL_BYTES 만 읽어 상한을 하드하게 건다(seek 지점부터 딱 그만큼). seek 실패는
+///   조용히 임의 위치에서 읽지 않고 명시적으로 빈 Vec 을 돌린다(오프셋 오염 방지).
+pub(crate) fn read_transcript_events(cwd: &std::path::Path, sid: Uuid) -> Vec<OutputEvent> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Some(path) = transcript_path(cwd, sid) else {
+        return Vec::new();
+    };
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        // 신규/미대화 세션 등 파일 부재는 정상 — seed 없이 fresh 버퍼로 시작.
+        return Vec::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // 상한 초과분은 끝에서부터만 읽는다(오래된 과거 truncate 수용 — Ring 상한과 동형).
+    //   seek offset 이 0 이면 파일 전체가 상한 이하 → 첫 라인이 온전(부분 라인 폐기 안 함).
+    let seeked = len > TRANSCRIPT_TAIL_BYTES;
+    if seeked {
+        // seek 실패면 파일 포인터가 어디를 가리키는지 불명 → 임의 위치 읽기 대신 포기(빈 Vec).
+        if file
+            .seek(SeekFrom::Start(len - TRANSCRIPT_TAIL_BYTES))
+            .is_err()
+        {
+            return Vec::new();
+        }
+    }
+    // ★bounded★: seek 지점부터 최대 상한 바이트만. 파일이 동시에 커져도 여기서 하드 상한이 걸린다.
+    let mut buf = Vec::new();
+    if file
+        .take(TRANSCRIPT_TAIL_BYTES)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    // 바이트→문자열은 lossy(잘린 첫 라인의 부분 멀티바이트 문자를 흡수 — 그 라인은 아래서 폐기).
+    let text = String::from_utf8_lossy(&buf);
+    // ★부분 첫 라인 명시 폐기★: seek 했으면 첫 `\n` 이후부터 파싱(그 앞은 잘린 오브젝트 조각).
+    //   `\n` 이 없으면(= 상한 안에 개행 하나도 없는 초장문 단일 라인) 온전한 라인이 없다고 보고 빈 Vec.
+    let to_parse: &str = if seeked {
+        match text.find('\n') {
+            Some(idx) => &text[idx + 1..],
+            None => "",
+        }
+    } else {
+        &text
+    };
+    parse_transcript_events(to_parse)
+}
+
 // ── S15 B3: pump→core 배선 seam (ADR-0004/0044) ──────────────────────────────────
 //
 // ★claude 지식은 계속 여기만★: transport(StdioTransport)는 `dyn OutputDecoder` 만 알고 claude 를
@@ -1106,6 +1267,31 @@ mod tests {
 
     const TEXT_JSONL: &str = include_str!("fixtures/claude_text.jsonl");
     const TOOL_JSONL: &str = include_str!("fixtures/claude_tool.jsonl");
+    // ADR-0079: resume seed 용 transcript 픽스처(실측 봉투 재현: parentUuid/uuid/timestamp/isSidechain +
+    //   summary/queue-operation/file-history-snapshot/ai-title 라인, sidechain 턴 1개 포함).
+    const TRANSCRIPT_JSONL: &str = include_str!("fixtures/claude_transcript.jsonl");
+
+    /// ★env 직렬화 락★: `CLAUDE_CONFIG_DIR` 은 프로세스 전역이라 cargo 기본 병렬 실행에서 이 키를
+    ///   만지는 테스트끼리 경합한다(한 테스트가 set 한 값을 다른 테스트가 읽음). 그래서 이 키를 건드리는
+    ///   테스트는 모두 이 락을 잡고 set→호출→remove 를 원자 구간으로 만든다(poison 무시 = 다른 테스트
+    ///   panic 이 이 테스트를 오염시키지 않게).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 지정 cwd/sid 로 `transcript_path` 가 가리킬 위치에 `content` 를 쓴 임시 transcript 파일을 만든다.
+    ///   반환한 임시 base 디렉토리(`CLAUDE_CONFIG_DIR` 로 넘길 값)는 호출자가 drop 시 정리한다.
+    ///   ENV_LOCK 을 잡은 상태에서만 호출할 것(경로 파생이 env 에 의존).
+    fn write_temp_transcript(cwd: &std::path::Path, sid: Uuid, content: &[u8]) -> PathBuf {
+        // 유니크 base(pid+sid) — 병렬이라도 파일 경로가 겹치지 않게(락은 env 파생 구간만 보호).
+        let base = std::env::temp_dir().join(format!(
+            "engram-transcript-test-{}-{sid}",
+            std::process::id()
+        ));
+        std::env::set_var("CLAUDE_CONFIG_DIR", &base);
+        let path = transcript_path(cwd, sid).expect("temp transcript path");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir temp transcript dir");
+        std::fs::write(&path, content).expect("write temp transcript");
+        base
+    }
 
     /// 이벤트를 사람이 읽기 쉬운 태그 문자열로 요약(시퀀스 단언용 — 매핑을 그대로 검증).
     fn tags(events: &[OutputEvent]) -> Vec<String> {
@@ -1535,5 +1721,338 @@ mod tests {
         );
         let ev = decode_all(line.as_bytes());
         assert_eq!(tags(&ev), vec!["usage", "error", "done"]);
+    }
+
+    // ── ADR-0079: `.jsonl` transcript → 과거 이벤트(순수 함수 parse_transcript_events) ────────
+
+    #[test]
+    fn transcript_maps_conversation_turns_and_skips_meta_and_sidechain() {
+        // 실측 봉투 픽스처를 파싱하면 대화 턴만 순서대로 이벤트가 되고, non-conversation 라인
+        //   (summary/queue-operation/file-history-snapshot/ai-title)과 sidechain 턴은 배제돼야 한다.
+        //   기대 시퀀스:
+        //     user "첫 질문"                   → structured:user
+        //     assistant thinking               → structured:thinking
+        //     assistant tool_use Read          → tool:Read
+        //     user tool_result                 → structured:user
+        //     assistant [text + tool_use Write]→ text, tool:Write  (한 메시지 다중 블록 — 둘 다 매핑)
+        //     (sidechain assistant text        → 제외)
+        //     assistant text "최종 답변"        → text
+        //     result(usage) success            → usage, done
+        let events = parse_transcript_events(TRANSCRIPT_JSONL);
+        assert_eq!(
+            tags(&events),
+            vec![
+                "structured:user",
+                "structured:thinking",
+                "tool:Read",
+                "structured:user",
+                "text",
+                "tool:Write",
+                "text",
+                "usage",
+                "done",
+            ],
+            "대화 턴만 매핑 + 다중블록 턴 둘 다 매핑 + 메타·sidechain 배제: {events:?}"
+        );
+
+        // ★다중 블록 턴★: content[] 에 text+tool_use 2블록을 가진 단일 assistant 메시지가 두 이벤트로
+        //   순서대로 펼쳐지는지(블록별 매핑) — text "확인했습니다" 직후 tool_use Write.
+        let mb_text_idx = events
+            .iter()
+            .position(
+                |e| matches!(e, OutputEvent::TextDelta { text, .. } if text == "확인했습니다"),
+            )
+            .expect("다중블록 턴의 text 블록이 매핑돼야 함");
+        match &events[mb_text_idx + 1] {
+            OutputEvent::ToolCall { name, id, .. } => {
+                assert_eq!(
+                    name, "Write",
+                    "같은 메시지의 2번째 블록이 tool_use Write 로 이어져야 함"
+                );
+                assert_eq!(id.as_deref(), Some("toolu_2"));
+            }
+            other => panic!("다중블록 턴의 2번째 블록이 ToolCall 이어야 함, got {other:?}"),
+        }
+
+        // 라이브 디코더 재사용 확인 — tool_use 세부(name/id/args_json)가 라이브와 동일하게 보존.
+        let tool = events
+            .iter()
+            .find(|e| matches!(e, OutputEvent::ToolCall { .. }))
+            .unwrap();
+        match tool {
+            OutputEvent::ToolCall {
+                name,
+                id,
+                args_json,
+                ..
+            } => {
+                assert_eq!(name, "Read");
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                let v: serde_json::Value = serde_json::from_str(args_json).unwrap();
+                assert_eq!(v["file_path"], "C:\\Users\\X\\proj\\a.txt");
+            }
+            _ => unreachable!(),
+        }
+
+        // 첫 user 텍스트가 보존되는지(resume 시 과거 user vanish 회귀 가드).
+        match &events[0] {
+            OutputEvent::Structured { kind, json } => {
+                assert_eq!(kind, "user");
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["text"], "첫 질문");
+            }
+            other => panic!("expected Structured user, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transcript_empty_or_meta_only_yields_no_events() {
+        // 빈 문자열·메타 전용(대화 없음)은 이벤트 0개 → seed 없음(fresh 버퍼와 동일).
+        assert!(parse_transcript_events("").is_empty());
+        let meta_only = concat!(
+            "{\"type\":\"summary\",\"summary\":\"x\"}\n",
+            "{\"type\":\"file-history-snapshot\",\"messageId\":\"m\",\"snapshot\":{}}\n",
+            "\n",
+        );
+        assert!(
+            parse_transcript_events(meta_only).is_empty(),
+            "메타 전용 transcript 는 이벤트 0개"
+        );
+    }
+
+    #[test]
+    fn transcript_sidechain_line_is_filtered_even_with_valid_content() {
+        // sidechain:true 인 assistant text 라인은 유효한 content 를 담고 있어도 제외돼야 한다.
+        let line = concat!(
+            r#"{"isSidechain":true,"type":"assistant","message":{"id":"m","role":"assistant",""#,
+            r#"content":[{"type":"text","text":"sub"}]},"uuid":"x"}"#,
+            "\n",
+        );
+        assert!(
+            parse_transcript_events(line).is_empty(),
+            "sidechain 턴은 제외(sub-agent 출력 복원 안 함)"
+        );
+    }
+
+    #[test]
+    fn project_slug_matches_claude_encoding() {
+        // 실측 확정 슬러그 규칙: 비-영숫자 전부 `-`. (로컬 프로젝트 디렉토리 대조로 확인)
+        use std::path::Path;
+        assert_eq!(
+            project_slug(Path::new(
+                r"C:\Users\X\AppData\Local\Temp\engram-resume-test"
+            )),
+            "C--Users-X-AppData-Local-Temp-engram-resume-test"
+        );
+        assert_eq!(project_slug(Path::new(r"C:\")), "C--");
+        // 언더스코어·점도 `-` 로(Engram_Workspace → Engram-Workspace).
+        assert_eq!(
+            project_slug(Path::new(r"I:\Engram_Workspace\a")),
+            "I--Engram-Workspace-a"
+        );
+    }
+
+    #[test]
+    fn transcript_path_uses_projects_slug_and_sid() {
+        // CLAUDE_CONFIG_DIR 을 세팅해 결정적으로 경로를 구성(테스트가 실제 home 에 의존하지 않게).
+        //   ★env 는 프로세스 전역이라, 이 키를 만지는 여러 테스트가 cargo 기본 병렬에서 경합한다. 그래서
+        //     ENV_LOCK 을 잡아 set→호출→remove 를 직렬화한다(락 정의·이유는 ENV_LOCK 주석 참조).
+        let sid = Uuid::parse_str("d75b7f40-a13a-4cf3-b872-e4d5ba2cec55").unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("CLAUDE_CONFIG_DIR", r"C:\claude-cfg");
+        let p = transcript_path(std::path::Path::new(r"C:\proj\a"), sid).unwrap();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let s = p.to_string_lossy().replace('/', "\\");
+        assert!(s.contains("projects"), "projects 디렉토리 경유: {s}");
+        assert!(s.contains("C--proj-a"), "cwd 슬러그: {s}");
+        assert!(
+            s.ends_with(&format!("{sid}.jsonl")),
+            "파일명 = <sid>.jsonl: {s}"
+        );
+    }
+
+    #[test]
+    fn read_transcript_events_missing_file_is_empty() {
+        // 존재하지 않는 세션(신규/미대화) → 파일 부재 → 빈 Vec(seed 없음, fresh 동작).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("CLAUDE_CONFIG_DIR", r"C:\nonexistent-claude-cfg-xyz");
+        let ev =
+            read_transcript_events(std::path::Path::new(r"C:\no-such-proj-xyz"), Uuid::new_v4());
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        assert!(ev.is_empty(), "파일 없으면 빈 Vec(seed 안 함)");
+    }
+
+    /// ADR-0079 read_transcript_events: 상한 이하 파일(작은 파일)은 tail seek 없이 전량 파싱된다 —
+    ///   첫 라인부터 온전히 파싱되고 부분 라인 폐기가 일어나지 않는다(seek offset 0).
+    #[test]
+    fn read_transcript_events_small_file_reads_whole() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let cwd = std::path::Path::new(r"C:\proj\small");
+        let sid = Uuid::new_v4();
+        // 실측 픽스처 전체(상한보다 훨씬 작음)를 그대로 파일로 → include_str 파싱과 동일 결과여야.
+        let base = write_temp_transcript(cwd, sid, TRANSCRIPT_JSONL.as_bytes());
+        let ev = read_transcript_events(cwd, sid);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            tags(&ev),
+            tags(&parse_transcript_events(TRANSCRIPT_JSONL)),
+            "작은 파일은 전량 읽어 순수 파싱과 동일(부분 라인 폐기 없음)"
+        );
+    }
+
+    /// ADR-0079 read_transcript_events: 빈 파일은 빈 Vec(seek 없음, 첫 라인 폐기 없음).
+    #[test]
+    fn read_transcript_events_empty_file_is_empty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let cwd = std::path::Path::new(r"C:\proj\empty");
+        let sid = Uuid::new_v4();
+        let base = write_temp_transcript(cwd, sid, b"");
+        let ev = read_transcript_events(cwd, sid);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(ev.is_empty(), "빈 파일 → 빈 Vec");
+    }
+
+    /// ADR-0079 read_transcript_events: 상한 초과 파일 → tail seek 발생 + seek 지점의 부분 첫 라인이
+    ///   **명시 폐기**되고, 그 폐기된 조각이 그 자체로 **유효한 JSON 라인**이어도 가짜 이벤트가 안 생긴다.
+    ///
+    /// ★테스트가 실제로 폐기를 증명하는 구성(cross-family review 2026-07-13 FIX B)★: seek 지점(= len-4MB)이
+    ///   **함정 라인 안의 내부 유효 JSON 오브젝트 시작 바이트**에 정확히 떨어지게 맞춘다. 그래서 seek 후 첫 `\n`
+    ///   전까지의 앞조각(= drop 대상)은 **그 자체로 온전히 파싱되는 유효 대화 라인**(phantom "text" 이벤트를
+    ///   합성함)이다. 이렇게 하면 폐기가 없으면 phantom 이 나타나고, 폐기가 있으면 사라진다 — drop 을 빼면
+    ///   테스트가 실패한다(옛 구성은 앞조각이 비-JSON 이라 drop 유무와 무관하게 스킵돼 아무것도 증명 못 했음).
+    ///   ★paired 반증★: 아래에서 drop 없이 파싱(`parse_transcript_events(leading)`)하면 phantom 이 실제로
+    ///   생긴다는 것을 함께 단언해, "앞조각이 유효 라인"이라는 전제가 참임을 고정한다.
+    #[test]
+    fn read_transcript_events_tail_drops_partial_leading_line_no_phantom() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let cwd = std::path::Path::new(r"C:\proj\big");
+        let sid = Uuid::new_v4();
+
+        // ★함정 라인★ = [잘려나갈 접두 쓰레기][내부 유효 JSON 라인]. seek 지점을 내부 유효 JSON 시작 바이트에
+        //   맞추면 seek 후 첫 `\n` 전 앞조각 = 내부 유효 JSON 라인 그대로가 된다(= drop 대상이 phantom 을
+        //   합성하는 온전 라인). 접두 쓰레기는 seek 지점 앞이라 read buffer 에 들어오지 않는다.
+        let junk_prefix =
+            br#"{"type":"summary","summary":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}garbage"#;
+        // 이 inner_valid 는 그 자체로 완결된 유효 대화 라인이라, 폐기 안 하면 "phantom" text 이벤트가 된다.
+        let inner_valid = br#"{"type":"assistant","message":{"id":"phantom","content":[{"type":"text","text":"phantom"}]}}"#;
+        let real = r#"{"isSidechain":false,"type":"assistant","message":{"id":"real","content":[{"type":"text","text":"진짜 답변"}]}}"#.as_bytes();
+
+        // seek 지점은 EOF 로부터 고정 거리(4MB)다. 그래서 "inner_valid 시작 ~ EOF" 바이트 수를 정확히 4MB 로
+        //   맞추면 seek 지점 = inner_valid 시작 바이트가 된다. inner_valid 시작~EOF = inner + \n + real + \n + trail.
+        let inner_start_to_eof = TRANSCRIPT_TAIL_BYTES as usize;
+        let trail_len = inner_start_to_eof - (inner_valid.len() + 1 + real.len() + 1);
+        let mut content: Vec<u8> =
+            Vec::with_capacity(inner_start_to_eof + junk_prefix.len() + 4096);
+        // 함정 라인 = junk_prefix + inner_valid (한 줄, 내부 개행 없음). seek 이 inner_valid 시작을 가른다.
+        content.extend_from_slice(junk_prefix);
+        content.extend_from_slice(inner_valid);
+        content.push(b'\n');
+        content.extend_from_slice(real);
+        content.push(b'\n');
+        let pad_line =
+            b"{\"type\":\"file-history-snapshot\",\"messageId\":\"pad\",\"snapshot\":{}}\n";
+        let trail_start = content.len();
+        while content.len() - trail_start < trail_len {
+            content.extend_from_slice(pad_line);
+        }
+        content.truncate(trail_start + trail_len); // 후행 패딩 길이를 정확히 맞춰 seek 지점 = inner_valid 시작.
+
+        // ★paired 반증★: seek 후 read buffer 의 앞조각(= inner_valid, drop 대상)을 그대로 파싱하면 phantom 이
+        //   실제로 합성됨을 확인한다. 이 단언이 "앞조각이 유효 라인"이라는 전제(=이 테스트가 유효)를 고정한다.
+        let leading = String::from_utf8(inner_valid.to_vec()).unwrap();
+        assert_eq!(
+            tags(&parse_transcript_events(&leading)),
+            vec!["text"],
+            "전제: 앞조각(drop 대상)은 그 자체로 phantom text 를 합성하는 유효 라인이어야 한다"
+        );
+
+        let base = write_temp_transcript(cwd, sid, &content);
+        let ev = read_transcript_events(cwd, sid);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 첫 (잘린) 라인 폐기 → phantom 이벤트 없음. 온전한 "진짜 답변" text 하나만 남아야 한다.
+        //   drop 을 빼면 여기 앞에 phantom text 가 하나 더 붙어 이 단언이 실패한다(= drop 의 존재를 증명).
+        assert_eq!(
+            tags(&ev),
+            vec!["text"],
+            "부분 첫 라인 폐기 → phantom 없이 온전 라인만: {ev:?}"
+        );
+        match &ev[0] {
+            OutputEvent::TextDelta { text, .. } => assert_eq!(text, "진짜 답변"),
+            other => panic!("expected TextDelta 진짜 답변, got {other:?}"),
+        }
+    }
+
+    /// ADR-0079 read_transcript_events: seek 오프셋이 정확히 멀티바이트(UTF-8) 문자 중간을 가르는 경우 —
+    ///   from_utf8_lossy 로 깨진 앞부분을 흡수하고 부분 첫 라인 폐기로 온전 라인만 남는지(panic 없음).
+    #[test]
+    fn read_transcript_events_tail_utf8_split_is_safe() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let cwd = std::path::Path::new(r"C:\proj\utf8");
+        let sid = Uuid::new_v4();
+
+        // 패딩을 한글(3바이트/문자) 라인으로 채워 seek 지점(len-4MB)이 멀티바이트 문자 경계를 비껴가게 한다.
+        //   길이를 홀수 바이트로 밀어 4MB 경계가 문자 중간에 떨어질 확률을 높인다.
+        let pad_line = "{\"type\":\"summary\",\"summary\":\"가나다라마\"}\n".as_bytes();
+        let mut content: Vec<u8> = Vec::with_capacity((TRANSCRIPT_TAIL_BYTES as usize) + 4096);
+        while (content.len() as u64) < TRANSCRIPT_TAIL_BYTES + 1 {
+            content.extend_from_slice(pad_line);
+        }
+        content.push(b'x'); // 경계를 1바이트 밀어 문자 중간 절단 유도.
+        content.extend_from_slice(pad_line); // 잘린 첫 라인이 될 조각.
+        content.extend_from_slice(
+            r#"{"isSidechain":false,"type":"assistant","message":{"id":"real","content":[{"type":"text","text":"안녕"}]}}"#.as_bytes(),
+        );
+        content.push(b'\n');
+
+        let base = write_temp_transcript(cwd, sid, &content);
+        let ev = read_transcript_events(cwd, sid); // panic 없이 반환돼야(lossy 흡수 + 부분 라인 폐기).
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 패딩(summary)은 이벤트 0 → 온전 대화 라인 "안녕" 하나만.
+        assert_eq!(
+            tags(&ev),
+            vec!["text"],
+            "UTF-8 절단 경계에서도 온전 라인만: {ev:?}"
+        );
+    }
+
+    /// ADR-0079 read_transcript_events: 파일이 정확히 상한(4MB)이면 seek 없음(len > 상한 아님) →
+    ///   첫 라인부터 온전 파싱(경계 off-by-one 가드). 온전한 대화 라인이 첫 줄부터 이벤트가 돼야 한다.
+    #[test]
+    fn read_transcript_events_exact_boundary_no_seek() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let cwd = std::path::Path::new(r"C:\proj\boundary");
+        let sid = Uuid::new_v4();
+
+        // 첫 줄을 온전한 대화 라인으로 두고, 뒤를 패딩으로 채워 총 길이를 정확히 4MB 로 맞춘다.
+        let first = r#"{"isSidechain":false,"type":"assistant","message":{"id":"first","content":[{"type":"text","text":"경계"}]}}"#;
+        let mut content: Vec<u8> = Vec::with_capacity(TRANSCRIPT_TAIL_BYTES as usize);
+        content.extend_from_slice(first.as_bytes());
+        content.push(b'\n');
+        // 나머지를 스킵되는 comment-free 패딩으로: 정확히 상한 바이트가 되도록 마지막을 잘라 맞춘다.
+        let pad = b"{\"type\":\"summary\",\"summary\":\"p\"}\n";
+        while (content.len() as u64) < TRANSCRIPT_TAIL_BYTES {
+            content.extend_from_slice(pad);
+        }
+        content.truncate(TRANSCRIPT_TAIL_BYTES as usize); // 정확히 4MB.
+        assert_eq!(content.len() as u64, TRANSCRIPT_TAIL_BYTES);
+
+        let base = write_temp_transcript(cwd, sid, &content);
+        let ev = read_transcript_events(cwd, sid);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // len == 상한 → seek 안 함 → 첫 라인 온전 → "경계" text 가 첫 이벤트.
+        assert_eq!(
+            ev.first()
+                .map(|e| matches!(e, OutputEvent::TextDelta { text, .. } if text == "경계")),
+            Some(true),
+            "정확히 상한이면 seek 없이 첫 라인부터 파싱: {ev:?}"
+        );
     }
 }
