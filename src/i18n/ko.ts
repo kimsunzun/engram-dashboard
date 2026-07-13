@@ -51,7 +51,9 @@ export const ko = {
   /** 에이전트(claude 프로세스) 관련 — command 제목·우클릭 메뉴 라벨. */
   agent: {
     spawn: '에이전트 생성(spawn)', // agent.spawn command 제목.
-    create: '에이전트 생성', // agentlist.createAgent / slot.createAgentHere command 제목(폴더 다이얼로그 스폰).
+    create: '에이전트 생성', // agentlist.createAgent / slot.createAgentHere command 제목 겸 ADR-0078 생성 서브메뉴 컨테이너 라벨(값 재사용).
+    createTerminal: '클로드 터미널 생성', // agentlist.createTerminal command 제목 — 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
+    createJson: '클로드 JSON 생성', // agentlist.createJson command 제목 — 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
     spawnInto: '스폰 + 배치', // agent.spawnInto command 제목.
     kill: '에이전트 종료', // agent.kill command 제목.
     monitor: '에이전트 모니터링', // slot.assignRunningAgent command 제목(실행중 에이전트 배치).

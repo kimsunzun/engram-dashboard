@@ -8,11 +8,38 @@
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { t } from '../i18n'
+import type { ClaudeOutputFormat } from '../api/types'
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
+
+// ★ADR-0078★: 렌더 모드(Terminal=xterm PTY / StreamJson=headless NDJSON→RichSlot)는 생성 시점에 고정하고
+//   이후 불변이다 — pane "에이전트 생성" 서브메뉴에서 모드를 골라 예약 프로필을 만든다(활성화-시점 override 는
+//   거부됨: 활성화 행 메뉴는 단일 "활성화" 유지). 세 생성 command 가 공유하는 헬퍼 — 폴더 다이얼로그로 cwd 를
+//   고른 뒤 claude reserved(비활성) 프로필을 outputFormat 고정으로 등록한다(스폰하지 않음). 취소(null)면 no-op.
+async function createReservedProfile(outputFormat: ClaudeOutputFormat) {
+  const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
+  const cwd = typeof picked === 'string' ? picked : null
+  if (!cwd) return // 취소 — no-op
+  const profile = await agentClient.createClaudeProfile(cwd, cwd, [], [], false, outputFormat)
+  // broadcast 는 유실 가능(ws 큐 포화, ws.rs:145)·구독이 레이아웃 초기화 이후(eventBus.ts)라, 생성 직후
+  // 명시 refetch 로 예약 노드 표시를 보장한다(activateReserved 의 .then(refreshProfiles) 와 동형
+  // belt-and-suspenders). 생성 프로필은 그대로 반환(회수부 cdp/메뉴가 계속 사용 가능).
+  await refreshProfiles()
+  return profile
+}
+
+// ★ADR-0078★: ClaudeOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
+//   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이
+//   아니면 조용한 no-op·백엔드 전달 대신 명시 throw(잘못된 값 포함 — §5 LLM/cdp 디버깅).
+const VALID_OUTPUT_FORMATS: readonly ClaudeOutputFormat[] = ['Terminal', 'StreamJson']
+function coerceOutputFormat(raw: unknown): ClaudeOutputFormat {
+  if (raw === undefined || raw === null) return 'StreamJson'
+  if (VALID_OUTPUT_FORMATS.includes(raw as ClaudeOutputFormat)) return raw as ClaudeOutputFormat
+  throw new Error(`agentlist.createAgent: 잘못된 outputFormat: ${String(raw)} (유효: 'Terminal' | 'StreamJson')`)
+}
 
 register({
   id: 'agent.spawn',
@@ -74,32 +101,50 @@ register({
   id: 'agentlist.createAgent',
   title: t('agent.create'),
   category: 'agent',
-  // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴의 "에이전트 생성" — 네이티브 폴더 다이얼로그로 cwd 를 고른
-  //   뒤 claude reserved(비활성) 프로필을 등록한다(스폰하지 않음). 트리에 예약 노드로 뜨고, 활성화(더블클릭/
-  //   우클릭 활성화 → spawnProfile)에서 비로소 claude 를 spawn 한다.
+  // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴 "에이전트 생성" 계열의 파라미터형 §5 LLM 프리미티브 —
+  //   폴더 다이얼로그로 cwd 를 고른 뒤 claude reserved(비활성) 프로필을 등록한다(스폰하지 않음). 트리에 예약
+  //   노드로 뜨고, 활성화(더블클릭/우클릭 활성화 → spawnProfile)에서 비로소 claude 를 spawn 한다.
   // ★동작 변경(WHY)★: 옛 흐름은 agent.spawn({cwd}) → SpawnByCwd 로 *즉시* 셸(cmd.exe) 에이전트를 띄웠다
   //   (kind='running', claude 아님·예약 아님) — 사용자 확정 의도(생성=claude reserved, 활성화=claude spawn)와
-  //   어긋났다. 그래서 여기서 즉시 스폰 대신 createClaudeProfile 로 등록만 한다. agent.spawn 원시명령은
+  //   어긋났다. 그래서 여기서 즉시 스폰 대신 createReservedProfile 로 등록만 한다. agent.spawn 원시명령은
   //   그대로 둔다(LLM/cdp 즉시-스폰 프리미티브로 유효 — 별개 관심사).
-  //   ★옛 AgentList 인-컴포넌트 bg 픽커를 대체★: 프리셋-리스트 기반 spawn 은 이 흐름에서 빠진다(후속으로
-  //   프리셋 행 액션 "이 프리셋으로 생성" 추가 예정, ADR-0064). 취소(null)면 no-op. async 로 감싸 회수부
-  //   (cdp/메뉴)가 await·catch 가능. 인자: name=cwd(옛 SpawnByCwd 관례 — 트리 표시명은 cwd basename 파생이라
-  //   name 은 표시가 아님), extraArgs/env=[], autoRestore=false, outputFormat='StreamJson'(헤드리스
-  //   stream-json — RichSlot 구조화 렌더; resume 지원됨, ADR-0044 후속 완료 spike-verified).
-  //   예약 노드 반영은 CreateProfile 뒤이은 ProfileListUpdated broadcast → store.setProfiles(eventBus)
-  //   + 유실 대비 생성 직후 명시 refetch(run body 아래 — broadcast 단독 의존 아님).
-  run: async () => {
-    const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
-    const cwd = typeof picked === 'string' ? picked : null
-    if (!cwd) return // 취소 — no-op
-    const profile = await agentClient.createClaudeProfile(cwd, cwd, [], [], false, 'StreamJson')
-    // broadcast 는 유실 가능(ws 큐 포화, ws.rs:145)·구독이 레이아웃 초기화 이후(eventBus.ts)라, 생성 직후
-    // 명시 refetch 로 예약 노드 표시를 보장한다(activateReserved 의 .then(refreshProfiles) 와 동형
-    // belt-and-suspenders). 생성 프로필은 그대로 반환(회수부 cdp/메뉴가 계속 사용 가능).
-    await refreshProfiles()
-    return profile
-  },
+  // ★ADR-0078★: outputFormat 은 args.outputFormat 으로 받되 미지정 시 'StreamJson' 기본(back-compat — 옛
+  //   호출·테스트·LLM 참조가 인자 없이 부르면 종전 동작 유지). 사람 메뉴 경로는 아래 두 leaf command
+  //   (createTerminal/createJson)가 모드를 명시 고정한다. command id 는 보존(하위호환).
+  //   ★경계 검증(§5 LLM/cdp 프리미티브)★: outputFormat 은 외부 입력이라 무검증 캐스트 금지 — 런타임
+  //   allowlist(ClaudeOutputFormat 은 컴파일타임 union 이라 런타임 enum 없음)로 걸러, 미지정이면 기본,
+  //   잘못된 값이면 조용히 백엔드로 흘리지 않고 명시 throw(agent.spawn/rename 과 동일 fail-loud — LLM/cdp
+  //   디버깅 위해 잘못된 값 포함).
+  run: async (args) => createReservedProfile(coerceOutputFormat(args?.outputFormat)),
 })
 
-// ADR-0064: agent_list 슬롯 메뉴에 agentlist.createAgent 기여(group='content' — 공통 slot-ops 위에 렌더).
-registerSlotMenu('agent_list', [{ commandId: 'agentlist.createAgent', group: 'content', order: 10 }])
+register({
+  id: 'agentlist.createTerminal',
+  title: t('agent.createTerminal'),
+  category: 'agent',
+  // ★ADR-0078★: 렌더 모드 Terminal(xterm PTY) 고정 생성 — 서브메뉴 leaf. 생성 시점에 모드 확정·이후 불변.
+  run: async () => createReservedProfile('Terminal'),
+})
+
+register({
+  id: 'agentlist.createJson',
+  title: t('agent.createJson'),
+  category: 'agent',
+  // ★ADR-0078★: 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성 — 서브메뉴 leaf. 생성 시점 확정·불변.
+  run: async () => createReservedProfile('StreamJson'),
+})
+
+// ★ADR-0078★: agent_list pane 메뉴 "에이전트 생성"을 1단 서브메뉴 컨테이너로 — 렌더 모드를 *생성 시점*에
+//   고르게(이후 불변). children 은 flat leaf(선언 순서 보존, ADR-0065) — 활성화-시점 override 는 거부됨.
+// ADR-0064: group='content' — 공통 slot-ops 위에 렌더.
+registerSlotMenu('agent_list', [
+  {
+    title: t('agent.create'),
+    group: 'content',
+    order: 10,
+    children: [
+      { commandId: 'agentlist.createTerminal', group: 'content', order: 10 },
+      { commandId: 'agentlist.createJson', group: 'content', order: 20 },
+    ],
+  },
+])

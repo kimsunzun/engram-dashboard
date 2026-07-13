@@ -944,6 +944,14 @@
 - **무엇:** (1) 트리 "에이전트 생성" = 즉시 셸 스폰 방식에서 claude 예약(비활성) 프로필 등록으로 전환 + 기본 output_format StreamJson 으로 변경. (2) json(stream-json) 모드 resume 배선 — build_spec 이 SpawnMode 로 `--session-id`/`--resume` 가르고 caps=resume:true(ADR-0074, CLI spike 실측). (3) 활성(Running) 글리프 녹색 추가 — theme var `--status-running`, e-ink 중립화, `statusGlyph.ts` pure 모듈 분리(ADR-0075). (4) RichSlot 정체성 라벨(입력창 우측 위 오버랩) + 입력 패딩 조정.
 - **게이트:** ADR-0074·0075 신설 + 인덱스 + ADR-0044(resume 후속 완료 마커) + ADR-0062(색 개정 마커) + 이 step-log.
 
+## 활성화 모드 선택 → 생성 시 모드 선택으로 전환 (per-activation 오버라이드 폐기) (2026-07-13, master, 승계 세션) · ADR-0078
+- **무엇:** 트리 우클릭 "활성화" 서브메뉴[터미널/JSON]로 매 활성화마다 모드를 고르던 per-activation 오버라이드(미커밋 ADR-0078 초기 시도)를 폐기하고, **모드 선택을 에이전트 생성 단계로 이동**. pane 배경 우클릭 "에이전트 생성"을 1단 서브메뉴 [클로드 터미널 생성 / 클로드 JSON 생성] container로 확장(각 자식이 createClaudeProfile을 'Terminal'/'StreamJson'으로 — 생성 시 output_format 고정, 이후 불변). 활성화는 단일 "활성화"로 복귀.
+- **경위:** 사용자가 GUI 실측 진행 중 per-activation 방식에 의문 제기("생성 이후 고정이 맞지") → 설계 재정의. 라이브 실측에서 per-activation이 fresh-fallback(ADR-0077) 경로에서 Terminal→StreamJson으로 새어 반쯤만 작동함을 확인(폐기 근거 보강).
+- **되돌림/보존:** 미커밋 16파일(코어/데몬/프로토콜/프론트 오버라이드 배선)을 `git stash@{0}`로 보존 후 working tree를 HEAD로 복귀. HEAD엔 createClaudeProfile(...,output_format)가 이미 존재(ADR-0044)라 신규는 프론트만.
+- **어떻게:** `/implement standard` → 코더(worker-senior) → `/review code full` 2인 **다른 family**: doc-aware(worker-senior)=PASS(ADR-0078/0064/0065·§5 정합·회귀 없음) · cross-family blind(Codex high)=FIX(파라미터화 createAgent의 무검증 `as` 캐스트 — invalid outputFormat이 백엔드로 새어감). 取합 FIX(상호보완, §90). 코더 2차: `coerceOutputFormat`(invalid→fail-loud throw, 다이얼로그 열기 전) + 테스트 보강. Codex 재리뷰 PASS(finding closed).
+- **검증(qa full PASS):** 프론트 전용(crates/** diff 없음) · `npx tsc --noEmit` 0 · `npm test`(vitest **613**) · 코어격리(실 import 0) · **라이브 GUI 실측(cdp 9223)**: pane 배경 우클릭→"에이전트 생성" container→flyout [클로드 터미널 생성/클로드 JSON 생성] 렌더 + command 3종 등록 + invalid outputFormat fail-loud throw(다이얼로그 전) 확인.
+- **게이트:** ADR-0078 신설(본문·인덱스, lint error 0) + 이 step-log. 커밋 = 프론트 3파일(agentCommands·agentCommands.test·ko.ts) + ADR-0078 + 인덱스(README) + step-log. **보존:** `stash@{0}`(per-activation 시도 — ADR 거부-대안 근거, 폐기 여부 사용자 판단 대기).
+
 ## 다음 (미진행)
 - **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
