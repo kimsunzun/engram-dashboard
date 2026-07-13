@@ -960,23 +960,33 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // Tauri `spawn_profile` 미러: 저장된 프로필을 Resume/Fresh 로 spawn. 없으면 Error.
-                let mode = if resume {
-                    SpawnMode::Resume
-                } else {
-                    SpawnMode::Fresh
-                };
+                //
+                // ★모드 = 세션 존재 여부로 유도(ADR-0076 — "activate=resume, fresh=new agent")★:
+                //   사용자 결정 — "에이전트 활성화 = 기존 세션 이어받기, 새로 로드할 거면 새 에이전트를 만든다".
+                //   그래서 저장된 세션이 있는 프로필을 활성화하면 wire `resume` 플래그(프론트가 false 로 보냄)와
+                //   무관하게 **항상 Resume** 으로 이어받는다. 세션이 없는(진짜 신규) 프로필만 Fresh 로 시작한다.
+                //   ★resume=true 는 존중★: 명시적 resume 요청은 세션이 없어도 Resume 로 남긴다 — 그 경우
+                //     spawn_agent(Resume)가 ensure_session_id 로 최초 sid 를 발급하므로 안전하다(sid 발급은
+                //     spawn_agent 단일 권위점, ADR-0076). 즉 mode = resume-요청 OR 세션-존재.
                 // 성공 시 Spawned(AgentInfo 동봉)로 응답, 실패/없음은 Error.
                 // agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
                 match manager.profiles().get(profile_id) {
-                    Some(profile) => match manager.spawn_agent(&profile, mode) {
-                        Ok(info) => {
-                            let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
-                                request_id,
-                                agent: agent_info_to_wire(&info),
-                            }));
+                    Some(profile) => {
+                        let mode = if resume || profile.claude_session_id.is_some() {
+                            SpawnMode::Resume
+                        } else {
+                            SpawnMode::Fresh
+                        };
+                        match manager.spawn_agent(&profile, mode) {
+                            Ok(info) => {
+                                let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
+                                    request_id,
+                                    agent: agent_info_to_wire(&info),
+                                }));
+                            }
+                            Err(e) => reply(sink, request_id, Err(e.to_string())),
                         }
-                        Err(e) => reply(sink, request_id, Err(e.to_string())),
-                    },
+                    }
                     None => reply(
                         sink,
                         request_id,

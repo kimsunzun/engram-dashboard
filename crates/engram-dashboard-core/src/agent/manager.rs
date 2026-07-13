@@ -185,11 +185,23 @@ impl AgentManager {
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
 
-        // backend가 세션 추적 대상인지 판단(claude=true, shell=false). true면 세션 id 확보
-        // (없으면 생성·persist). 생성 책임은 ProfileRegistry(H-1.4).
+        // backend가 세션 추적 대상인지 판단(claude=true, shell=false). true면 세션 id 확보.
+        // 생성 책임은 ProfileRegistry(H-1.4).
+        //
+        // ★mode 별 sid 발급 규칙(ADR-0076 — "activate=resume, fresh=new sid" 봉인)★:
+        //   - Resume: 저장된 sid 를 그대로 써야 기존 대화를 이어받는다 → ensure_session_id(있으면 그대로,
+        //     드물게 없으면 최초 발급). backend 가 `--resume <sid>` 로 무손실 복원(ADR-0008).
+        //   - Fresh: **반드시 새 sid**. ensure_session_id 를 쓰면 저장된 sid 를 재사용해
+        //     `--session-id <저장 sid>` 로 떠 디스크 세션과 충돌한다("Session ID already in use" → claude
+        //     즉사, 이 세션의 재현 버그). new_session_id 가 항상 새 uuid 를 발급(옛 sid 는 이력 보존).
+        //   spawn_agent 이 이 판정의 단일 권위점이라 어떤 호출자(Spawn/SpawnProfile/restore/fallback)든
+        //   mode 만 맞게 넘기면 sid 충돌이 원천 봉인된다(FIX 2 backend-authoritative).
         let needs = backend::needs_session(&profile.command);
         let sid = if needs {
-            self.profiles.ensure_session_id(profile.id)
+            match mode {
+                SpawnMode::Resume => self.profiles.ensure_session_id(profile.id),
+                SpawnMode::Fresh => self.profiles.new_session_id(profile.id),
+            }
         } else {
             None
         };
@@ -390,21 +402,24 @@ impl AgentManager {
         }
     }
 
-    /// resume 실패 시: 기존 세션 정리 → 새 sid 발급(old 이력) → epoch++ → fresh spawn.
+    /// resume 실패 시: 기존 세션 정리 → epoch++ → fresh spawn(새 sid 는 spawn_agent 이 발급).
     /// fresh마저 실패하면 `Failed`로 종결(재귀 금지 — H-1.7 종점).
+    ///
+    /// ★sid 발급을 spawn_agent 에 위임(ADR-0076 — 이중 발급 봉인)★: 예전엔 여기서 새 sid 를 미리 만들어
+    ///   profile 에 심고 spawn_agent(Fresh)를 불렀다. 그러나 이제 spawn_agent 이 Fresh 모드에서 반드시
+    ///   `new_session_id` 로 새 sid 를 발급한다 — 여기서 또 심으면 sid 가 두 번 발급돼(내 sid 가 곧장
+    ///   old_session_ids 로 밀림) 인과가 꼬인다. 그래서 여기선 **epoch 만 bump**(맵 교체, H-1.5)하고
+    ///   sid 발급은 spawn_agent 에 일임한 뒤, spawn 성공 후 확정된 sid 를 프로필에서 읽어 보고한다.
+    ///   이렇게 하면 "새 sid → 옛 sid 는 이력" 인과가 spawn_agent 단일 지점에서만 일어난다.
+    // ADR-0076
     fn fallback_fresh(&self, profile: &AgentProfile, reason: String) -> RestoreOutcome {
         tracing::warn!(agent = %profile.id, %reason, "resume 실패 → fresh fallback");
         self.remove_session(profile.id);
 
         let old_sid = profile.claude_session_id;
-        let new_sid = uuid::Uuid::new_v4();
-        // sid 교체 + epoch++(맵 교체, H-1.5)를 한 번의 mutate로 — 단일 atomic persist
-        // (crash window를 둘로 쪼개지 않음, fable Mn-5).
+        // epoch++(맵 교체, H-1.5). sid 는 건드리지 않는다 — spawn_agent(Fresh)가 new_session_id 로
+        // 새로 발급하며 옛 sid 를 이력으로 민다(단일 발급점, ADR-0076).
         self.profiles.update_with(profile.id, |p| {
-            if let Some(old) = p.claude_session_id.take() {
-                p.old_session_ids.push(old);
-            }
-            p.claude_session_id = Some(new_sid);
             p.epoch = p.epoch.wrapping_add(1);
         });
 
@@ -414,11 +429,19 @@ impl AgentManager {
             .unwrap_or_else(|| profile.clone());
 
         match self.spawn_agent(&updated, SpawnMode::Fresh) {
-            Ok(_) => RestoreOutcome::FreshFallback {
-                old_sid,
-                new_sid,
-                reason,
-            },
+            Ok(_) => {
+                // spawn_agent(Fresh)이 발급·persist 한 새 sid 를 읽어 보고한다(발급 주체가 아니라 관측).
+                let new_sid = self
+                    .profiles
+                    .get(profile.id)
+                    .and_then(|p| p.claude_session_id)
+                    .unwrap_or_else(uuid::Uuid::new_v4);
+                RestoreOutcome::FreshFallback {
+                    old_sid,
+                    new_sid,
+                    reason,
+                }
+            }
             Err(e) => RestoreOutcome::Failed {
                 reason: format!("fresh fallback도 실패: {e}"),
             },

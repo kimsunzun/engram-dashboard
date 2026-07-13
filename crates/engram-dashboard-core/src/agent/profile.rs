@@ -507,6 +507,11 @@ impl ProfileRegistry {
     /// 세션 id 확보 — claude_session_id가 None이면 새로 생성·persist하고 반환한다.
     /// 이미 있으면 그대로 반환한다. **세션 id 생성 책임은 ProfileRegistry**(H-1.4):
     /// spawn_agent은 이 값을 받아 인자만 조립한다.
+    ///
+    /// ★Resume 전용(ADR-0076)★: spawn_agent 은 **Resume 모드에서만** 이걸 부른다 — 기존 대화를
+    ///   이어받으려면 저장된 sid 를 그대로 써야 하기 때문이다. Fresh 모드는 절대 이걸 쓰면 안 된다:
+    ///   기존 sid 를 그대로 돌려주므로 Fresh 가 `--session-id <저장된 sid>` 로 떠 디스크 세션과
+    ///   충돌한다("Session ID already in use" — claude 즉사). Fresh 는 `new_session_id`(항상 새 uuid).
     pub fn ensure_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
@@ -514,6 +519,30 @@ impl ProfileRegistry {
                 p.claude_session_id = Some(Uuid::new_v4());
             }
             p.claude_session_id
+        })
+    }
+
+    /// **Fresh spawn 전용** 세션 id 발급 — 항상 새 uuid 를 만들어 set·persist 하고 반환한다.
+    /// 기존 sid 가 있으면 이력(`old_session_ids`)으로 밀어 넣는다(감사·디버깅용, observe_session_id 패턴).
+    ///
+    /// ★왜 ensure_session_id 와 분리했나(ADR-0076 — 이 세션의 핵심 결함 봉인)★: `ensure_session_id` 는
+    ///   "있으면 그대로" 라 Fresh 가 그걸 쓰면 저장된 sid 를 재사용해 `--session-id <저장 sid>` 로 뜨고,
+    ///   디스크에 이미 그 세션 파일이 있으면 claude 가 "Session ID <sid> is already in use" 로 즉사한다
+    ///   (데몬 콜드부팅 후 예약 프로필 활성화 시 재현). Fresh = "진짜 새 대화" 이므로 반드시 새 sid 여야 한다.
+    ///   이 메서드는 그 계약을 강제한다 — Fresh 경로(spawn_agent Fresh, fresh-fallback)가 여기만 부른다.
+    /// ★fresh-fallback 충돌도 함께 봉인★: resume 조기종료 → fresh fallback 시에도 옛 sid 를 재사용하면
+    ///   같은 "already in use" 로 재충돌한다. fallback 이 이걸 부르면 새 sid 라 재충돌이 없다(ADR-0008 §fallback).
+    // ADR-0076 ADR-0008
+    pub fn new_session_id(&self, id: AgentId) -> Option<Uuid> {
+        self.mutate(|m| {
+            let p = m.get_mut(&id)?;
+            // 기존 sid 는 이력으로 보존(silent 소실 금지 — observe_session_id 와 동형).
+            if let Some(old) = p.claude_session_id.take() {
+                p.old_session_ids.push(old);
+            }
+            let fresh = Uuid::new_v4();
+            p.claude_session_id = Some(fresh);
+            Some(fresh)
         })
     }
 
@@ -627,6 +656,69 @@ mod tests {
         // store에도 반영됐는지(즉시 persist)
         let persisted = store.load();
         assert_eq!(persisted[0].claude_session_id, Some(sid2));
+    }
+
+    /// ADR-0076: new_session_id 는 항상 **새** sid 를 발급하고 옛 sid 를 이력으로 민다.
+    /// (Fresh spawn 이 저장된 sid 를 재사용하는 "Session ID already in use" 버그를 봉인.)
+    #[test]
+    fn new_session_id_mints_fresh_and_pushes_old() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+
+        // 최초 sid 발급(Resume 경로가 쓰는 ensure).
+        let sid1 = reg.ensure_session_id(id).unwrap();
+        // Fresh 발급 → 반드시 sid1 과 달라야 하고, sid1 은 이력으로 이동.
+        let sid2 = reg.new_session_id(id).unwrap();
+        assert_ne!(
+            sid1, sid2,
+            "Fresh 는 새 sid 여야 함(저장된 sid 재사용 금지)"
+        );
+        let got = reg.get(id).unwrap();
+        assert_eq!(
+            got.claude_session_id,
+            Some(sid2),
+            "현재 sid = 새로 발급한 값"
+        );
+        assert!(
+            got.old_session_ids.contains(&sid1),
+            "옛 sid 는 이력으로 밀려야 함"
+        );
+        // 즉시 persist(디스크에도 새 sid).
+        assert_eq!(store.load()[0].claude_session_id, Some(sid2));
+    }
+
+    /// ADR-0076: sid 가 없던(진짜 신규) 프로필에 new_session_id → 새 sid 발급, 이력은 비어 있음.
+    #[test]
+    fn new_session_id_on_fresh_profile_has_no_history() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let sid = reg.new_session_id(id).unwrap();
+        let got = reg.get(id).unwrap();
+        assert_eq!(got.claude_session_id, Some(sid));
+        assert!(
+            got.old_session_ids.is_empty(),
+            "세션 없던 프로필은 밀 옛 sid 가 없음"
+        );
+    }
+
+    /// ADR-0076: 두 번 연속 new_session_id → 매번 새 sid(재사용 없음), 이력이 누적된다.
+    #[test]
+    fn new_session_id_always_differs_and_accumulates_history() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let a = reg.new_session_id(id).unwrap();
+        let b = reg.new_session_id(id).unwrap();
+        assert_ne!(a, b, "연속 Fresh 는 매번 다른 sid");
+        let got = reg.get(id).unwrap();
+        assert_eq!(got.claude_session_id, Some(b));
+        assert!(got.old_session_ids.contains(&a), "직전 sid 는 이력에");
     }
 
     #[test]

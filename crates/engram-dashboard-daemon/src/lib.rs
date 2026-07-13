@@ -62,6 +62,50 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
     Ok(s)
 }
 
+// ── ENGRAM_EXE 주입 (설계 §5 · ADR-0014 방향, CLI 이식성) ─────────────────────────────
+//
+// ★왜 데몬 프로세스 env 에 넣는가★: 스폰된 에이전트(claude)가 다른 에이전트를 조종하려면 CLI exe
+// (`engram-dashboard.exe`) 절대경로를 알아야 하는데, 매뉴얼에 하드코딩하면 머신마다 깨진다. 데몬은
+// 자기 exe 폴더를 알고 앱 exe 는 그 **형제**다(locate_daemon_exe 와 대칭 — 배포 시 두 exe 동거). 그래서
+// 데몬이 부팅 시 자기 env 에 ENGRAM_EXE 를 세팅해 두면, 이후 스폰되는 모든 PTY 자식이 이 env 를
+// **상속**한다(portable-pty CommandBuilder::new 는 std::env::vars_os() 로 부모 env 를 시드한다 — 실측).
+// 그러면 에이전트 매뉴얼은 `"$ENGRAM_EXE" send DEF "..."` 로 어느 머신에서든 동작한다.
+//
+// ★왜 core spawn 경로를 안 건드리나★: env 를 CommandSpec/manager.spawn_agent 로 threading 하면 core
+// crate 가 "형제 exe 경로" 개념을 알게 돼 tauri-import-0 격리 원칙과 무관하게 관심사가 샌다. 데몬 프로세스
+// env 1회 세팅은 자식 전파를 공짜로 얻고 core 를 순수하게 둔다(부수효과는 데몬 부팅 1지점에 국한).
+//
+// ★best-effort★: 앱 exe 를 못 찾아도(개발 중 부분 빌드 등) 데몬은 계속 뜬다 — env 미세팅이면 에이전트
+// CLI 호출만 실패하고, 그건 매뉴얼이 fallback(직접 exe 지정)을 안내하면 된다(데몬 기동을 막지 않는다).
+
+/// 데몬 프로세스 env 에 `ENGRAM_EXE`(앱 CLI exe 절대경로)를 세팅한다. 자식 PTY 가 상속한다(위 블록 주석).
+/// current_exe(데몬)의 형제 `engram-dashboard.exe` 를 찾는다(locate_daemon_exe 대칭). 못 찾으면 no-op.
+///
+/// ★SAFETY(std::env::set_var)★: 부팅 최초(run 진입 직후, 다른 스레드 spawn 전)에 1회만 호출한다 —
+/// 이 시점엔 tokio worker 외 경쟁 스레드가 env 를 동시 읽지 않으므로 data race 위험이 없다.
+fn set_engram_exe_env() {
+    const APP_EXE: &str = if cfg!(windows) {
+        "engram-dashboard.exe"
+    } else {
+        "engram-dashboard"
+    };
+    // 이미 세팅돼 있으면(상위가 명시 주입) 존중 — 덮어쓰지 않는다.
+    if std::env::var_os("ENGRAM_EXE").is_some() {
+        return;
+    }
+    if let Ok(daemon_exe) = std::env::current_exe() {
+        if let Some(dir) = daemon_exe.parent() {
+            let app_exe = dir.join(APP_EXE);
+            if app_exe.is_file() {
+                std::env::set_var("ENGRAM_EXE", &app_exe);
+                tracing::info!(path = %app_exe.display(), "ENGRAM_EXE 주입(자식 PTY 상속)");
+                return;
+            }
+        }
+    }
+    tracing::warn!("ENGRAM_EXE 미주입 — 앱 exe 형제를 못 찾음(에이전트 CLI 호출은 fallback 필요)");
+}
+
 // ── panic hook (B-1) ──────────────────────────────────────────────────────────────
 
 /// 데몬 전역 panic hook 설치. panic 한 스레드명·위치·메시지를 tracing::error! 로 남긴다.
@@ -221,6 +265,11 @@ pub async fn run() -> Result<(), i32> {
     //   동작을 잃지 않게 이전 hook 도 이어서 호출한다(연쇄). 데몬 전체는 죽이지 않는다 —
     //   연결 task panic 은 tokio 가 이미 격리하고, pump panic 은 B-2 가 Failed 로 전이시킨다.
     install_panic_hook();
+
+    // 0.6) ENGRAM_EXE 주입(설계 §5 · ADR-0014 방향) — 스폰될 자식 PTY 가 상속할 수 있게 부팅 최초 1회.
+    //   ★반드시 에이전트 spawn 전★: 이 env 를 세팅한 뒤에야 이후 spawn_agent 의 PTY 자식이 상속한다.
+    //   다른 스레드 spawn 전(run 진입 직후)이라 set_var data race 안전(set_engram_exe_env SAFETY 주석).
+    set_engram_exe_env();
 
     // 1) 단일 인스턴스 가드. 이미 실행 중이면 로그 남기고 정상 종료(exit 0).
     //    ★_guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 mutex 해제 = 단일성 깨짐).

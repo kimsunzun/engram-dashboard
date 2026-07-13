@@ -11,3 +11,10 @@ target/
 
 # 작업용 스크린샷 보관함(cdp shot 등) — 로컬 전용, 커밋 안 함.
 _wip/shots/
+
+# dev/데몬 디버그 로그 — 로컬 런타임 산출물, 커밋 금지.
+*.log
+
+# 임시 테스트/디버깅 산출물(로컬 전용).
+.resume-test-aid.txt
+/tree-nested*.png

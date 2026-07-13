@@ -1,3 +1,6 @@
+// headless CLI 모드(설계 §5 · ADR-0014 방향): 릴리즈 exe 를 데몬 제어 CLI 로 겸용. main.rs 가 argv
+// 첫 인자를 보고 CLI verb 면 run_cli 로 분기(창/트레이 없이 one-shot), 아니면 아래 run()으로 GUI 기동.
+pub mod cli;
 pub mod commands;
 // S14 모듈①(ADR-0036): 데몬 WS 연결의 src-tauri측 단일 권위(DaemonClient). 창마다 N개 직결하던
 // 전송을 여기로 끌어올린다 — 연결 1개. T2 = 연결 수립 + Auth/Hello 핸드셰이크 + connect/ensure 분리.

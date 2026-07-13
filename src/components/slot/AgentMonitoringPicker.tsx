@@ -29,13 +29,16 @@ export default function AgentMonitoringPicker() {
   const target = useMonitoringPickerStore(s => s.target)
   const close = useMonitoringPickerStore(s => s.close)
   const agents = useAgentStore(s => s.agents)
+  // ADR-0061: 표시명은 트리와 동일하게 프로필의 display_name 에서 파생한다(filterMonitoringCandidates 가 조인).
+  //   agents 와 같은 store(useAgentStore)에서 profiles 를 가져온다 — 트리(mergeTreeNodes)와 단일 출처.
+  const profiles = useAgentStore(s => s.profiles)
 
   const [query, setQuery] = useState('')
   // 키보드 선택 하이라이트(Enter 로 배정) — 목록 인덱스. 검색어 변경 시 0 으로 리셋.
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const candidates = filterMonitoringCandidates(agents, query)
+  const candidates = filterMonitoringCandidates(agents, profiles, query)
 
   // 마운트 직후 검색창 자동 포커스. key={openId} 로 open() 마다 fresh remount 되므로(ADR-0067 — monitoringPickerStore.openId)
   // query/activeIndex 리셋은 useState 초기값이 담당한다 — 여기선 포커스만.
