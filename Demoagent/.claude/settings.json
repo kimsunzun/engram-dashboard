@@ -1,0 +1,11 @@
+﻿{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(curl:*)",
+      "Read(//C:/engram-dashboard/**)",
+      "Glob(//C:/engram-dashboard/**)",
+      "Grep(//C:/engram-dashboard/**)"
+    ]
+  }
+}

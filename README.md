@@ -10,7 +10,13 @@
 
 > 현재 개발 중입니다. Windows와 Claude Code만 지원하며 내부 API는 변경될 수 있습니다.
 
-<!-- TODO: 스크린샷 또는 짧은 시연 영상 추가 -->
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=_tpWiXSIWFM">
+    <img src="https://img.youtube.com/vi/_tpWiXSIWFM/hqdefault.jpg" alt="Engram Dashboard 시연 영상" width="640">
+  </a>
+  <br>
+  <em>▶ 시연 영상 보기 (YouTube)</em>
+</p>
 
 ## 주요 기능
 
