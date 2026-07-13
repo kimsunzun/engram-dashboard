@@ -1,7 +1,7 @@
 # ADR-0076: 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련
 
 - 상태: 확정 (2026-07-13, 근거: 데몬 콜드부팅 후 예약 프로필 활성화 재현 — "Session ID <sid> is already in use" 즉사)
-- 관련: ADR-0008(세션복원 sid 통제) 정련 · `agent/manager.rs::spawn_agent`/`fallback_fresh` · `agent/profile.rs::new_session_id`/`ensure_session_id` · `daemon/connection_core.rs::SpawnProfile` · step-log
+- 관련: ADR-0008(세션복원 sid 통제) 정련 · `agent/manager.rs::spawn_agent`/`fallback_fresh` · `agent/profile.rs::new_session_id`/`ensure_session_id` · `daemon/connection_core.rs::SpawnProfile` · step-log · Amended by ADR-0077 (수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다)
 
 ## 맥락
 사용자 결정: **"에이전트를 활성화하면 기존 세션으로 이어져야 한다. 새로 로드될 거면 에이전트를 새로 만든다."** 활성화(activate)는 대화 이어받기(resume)이고, Fresh 시작은 진짜 신규 에이전트(이전 세션 없음)에게만 해당한다.
