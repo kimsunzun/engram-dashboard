@@ -2055,4 +2055,43 @@ mod tests {
             "정확히 상한이면 seek 없이 첫 라인부터 파싱: {ev:?}"
         );
     }
+
+    // ── ADR-0084: 재활성화(Resume) 시 `--resume <sid>` 조립 실증(dispatch 레벨) ──────────────────
+    //
+    // ADR-0083 회귀 ③의 약한 Shell 테스트 보강: activation.rs 통합 테스트는 셸(needs_session=false)
+    // 이라 실제 --resume 를 부착하지 않는다. 재활성화가 통제 sid 를 `--resume` 인자로 실제 흘리는지는
+    // **공개 dispatch `build_command_spec`** 를 통해 backend 계약으로 직접 단언한다(실 claude 프로세스
+    // 없음). manager.spawn_agent(Resume) 이 이 dispatch 를 부르므로, 여기서 --resume<sid> 를 검증하면
+    // 재활성화 respawn 이 이어받기 sid 를 무손실 전달함이 증명된다(ADR-0008).
+    #[test]
+    fn build_command_spec_resume_emits_resume_flag_with_sid() {
+        use crate::agent::backend::build_command_spec;
+
+        let sid = Uuid::new_v4();
+        // 공개 dispatch(backend_for → ClaudeBackend.build_spec) 경로로 조립.
+        let spec = build_command_spec(
+            &terminal(vec![]),
+            SpawnMode::Resume,
+            Some(sid),
+            PathBuf::from("."),
+            vec![],
+        );
+
+        // --resume 플래그가 있고, 그 **바로 뒤** 인자가 정확히 통제 sid(uuid 문자열)여야 한다.
+        let pos = spec
+            .args
+            .iter()
+            .position(|x| x == "--resume")
+            .expect("Resume 모드 dispatch 는 --resume 를 조립해야 함");
+        assert_eq!(
+            spec.args.get(pos + 1).map(String::as_str),
+            Some(sid.to_string().as_str()),
+            "--resume 바로 뒤에 통제 sid(uuid)가 실려야 함(ADR-0008 무손실 이어받기)"
+        );
+        // Resume 모드는 fresh 전용 --session-id 를 쓰면 안 된다(sid 충돌 회피 — ADR-0076).
+        assert!(
+            !spec.args.iter().any(|x| x == "--session-id"),
+            "Resume 모드에서 --session-id(fresh)가 누출되면 안 됨"
+        );
+    }
 }

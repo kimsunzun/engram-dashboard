@@ -164,8 +164,10 @@ impl AgentTransport for PtyTransport {
         //   기존 EOF→pump break→finish→reaper 경로를 그대로 타게 한다.
         //
         // ★shutdown 플래그는 건드리지 않는다★ — set 하면 pump 가 Killed 로 전이한다. 자연 종료는
-        //   Exited{code} 여야 하므로(ADR-0019 disposition: 정상=DeleteProfile, 크래시=Keep) watcher 는
-        //   master drop 만 한다. reason 산출은 pump 가 try_wait 의 exit code 로 한다(코드 무변경).
+        //   Exited{code} 로 정확히 산출돼야 status·로그가 맞으므로(ADR-0083 이후 reaper disposition 은
+        //   셧다운만 KeepAsIs·그 외 전부 KeepDisableAutoRestore 라 삭제엔 무영향이나, exit code 구분은
+        //   status/진단에 여전히 필요) watcher 는 master drop 만 한다. reason 산출은 pump 가 try_wait 의
+        //   exit code 로 한다(코드 무변경).
         //
         // ★데드락/이중 wait 안전★: WinChild::try_wait/wait/kill 은 내부 proc 핸들을 try_clone 후
         //   외부 Mutex 를 즉시 해제하므로, watcher 가 우리 child Mutex 를 **짧게만**(try_wait 1회)

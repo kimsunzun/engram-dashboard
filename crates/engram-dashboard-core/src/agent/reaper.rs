@@ -1,16 +1,18 @@
 //! 세션 reaper — 종료 분류(ADR-0019)의 단일 소비자.
 //!
 //! pump 가 finish 승자일 때 발행한 `ReapMsg` 를 **단일 supervisor 스레드**가 소비해 다음을 수행한다:
-//! sessions 맵에서 제거(epoch 일치 검증 후) → 프로필 disposition(삭제 / auto_restore=false /
-//! 손 안 댐) → 목록 통지. kill_agent 가 직접 하던 맵 제거·통지를 여기로 위임해 done 단일 소비자로
-//! 만든다.
+//! sessions 맵에서 제거(epoch 일치 검증 후) → 프로필 disposition(auto_restore=false 다운그레이드 /
+//! 손 안 댐 — ADR-0083 으로 자동 삭제 폐지) → 목록 통지. kill_agent 가 직접 하던 맵 제거·통지를
+//! 여기로 위임해 done 단일 소비자로 만든다.
 //!
 //! 불변식:
 //! - kill 2동사(ADR-0001)·finalize 1회(ADR-0005)는 reaper 가 건드리지 않는다 — done 신호를
 //!   소비할 뿐. ReapMsg 발행은 finalize 승자 경로 1회.
 //! - 락 순서(ADR-0006): sessions write lock 구간 = epoch 검증 + remove 만. ProfileRegistry
 //!   mutate(디스크 IO)·status_sink 통지는 lock 밖.
-//! - epoch(ADR-0007): reap 전 epoch 일치 검증 → 재spawn 된 새 세션을 옛 done 이 오삭제 못 함.
+//! - epoch(ADR-0007/0084): reap 전 epoch 일치 검증 → 재spawn 된 새 세션을 옛 done 이 오삭제 못 함.
+//!   같은 epoch-guard 를 apply_disposition 까지 확장(ADR-0084) → stale reap 이 재활성화(epoch bump)로
+//!   붙은 산 세션의 auto_restore 를 강등 못 함.
 //! - idempotency: sessions.remove() Some 승자 1명만 disposition·통지(같은 done 2회 와도 1회).
 //!
 //! tauri import 0.
@@ -22,9 +24,7 @@ use std::thread::JoinHandle;
 
 use crate::agent::profile::ProfileRegistry;
 use crate::agent::session::AgentSession;
-use crate::agent::types::{
-    AgentId, AgentInfo, Disposition, ReapMsg, StatusSink, TerminalReason, TerminationIntent,
-};
+use crate::agent::types::{AgentId, AgentInfo, Disposition, ReapMsg, StatusSink};
 
 /// reaper 스레드로 보내는 메시지. ReapMsg(정상 종료 이벤트) + 명시 Stop(셧다운).
 /// Stop 없이도 모든 Sender drop 시 recv 가 Err 로 끝나 루프가 종료된다(이중 안전).
@@ -74,9 +74,12 @@ impl ReaperDeps {
 
         // 3. 셧다운 종료가 아니면 disposition 적용. 셧다운이면 손대지 않음(auto_restore=true 잔류
         //    → 부팅 복원). lock 밖에서 ProfileRegistry mutate(디스크 IO) — 락 순서 준수.
+        //    ★msg.epoch 를 함께 넘긴다(ADR-0084 epoch-guard)★: sessions.remove 는 이미 epoch 검증을
+        //    거쳤지만, remove 와 이 lock-free disposition 사이 창에서 재활성화(epoch bump)가 일어나면
+        //    stale reap 이 산 세션을 강등할 수 있어 disposition 계층까지 epoch-guard 를 확장한다.
         if !msg.shutting_down_at_finish {
             let disposition = decide(&msg);
-            apply_disposition(&self.profiles, msg.id, disposition);
+            apply_disposition(&self.profiles, msg.id, msg.epoch, disposition);
         }
 
         // 4. 목록 변경 통지(lock 밖, 외부 콜백). list_agents 와 동치인 스냅샷을 만든다.
@@ -92,38 +95,58 @@ impl ReaperDeps {
     }
 }
 
-/// 종료 분류(ADR-0019 §decide). frozen snapshot(intent/shutting_down)으로만 판정한다.
+/// 종료 분류(ADR-0019 §decide, ADR-0083 개정). frozen snapshot(intent/shutting_down)으로만 판정.
 ///
 /// ```text
-/// shutting_down_at_finish        => KeepAsIs               // 데몬 셧다운: 부팅 복원
-/// (UserKill, _)                  => DeleteProfile          // 유저 kill
-/// (None, Exited{code:0})         => DeleteProfile          // 정상 /exit
-/// (None, _)                      => KeepDisableAutoRestore // 크래시/EOF/exit≠0/signal: 보수적
+/// shutting_down_at_finish        => KeepAsIs               // 데몬 셧다운: 부팅 복원(auto_restore 그대로)
+/// 그 외 모든 종료(유저 kill·정상 exit·크래시·EOF·signal)
+///                                => KeepDisableAutoRestore // 시체 보존 + auto_restore=false
 /// ```
-/// exit code 불명(EOF/StreamClosed/Error)도 크래시 취급(code 0 확실할 때만 삭제) — consult 합의.
+/// ★ADR-0083: 자동 삭제 폐지★ — 어떤 종료도 프로필을 지우지 않는다(옛 유저 kill·정상 exit(code0)
+///   → DeleteProfile 조항 폐지). 사용자 정책(ADR-0082 계승 "삭제하지마, 시체로라도 남겨")대로
+///   모든 런타임 종료는 세션만 맵에서 수거하고 프로필은 시체로 보존(claude_session_id 유지 →
+///   재활성화 시 --resume 로 이어받음). 프로필 삭제는 자동 처분이 아니라 **명시적 사용자 명령**
+///   (AgentCommand::DeleteProfile / Tauri delete_profile — apply_disposition 을 거치지 않고
+///   ProfileRegistry::remove 직접 호출)으로만 일어난다.
+// ADR-0083
 pub fn decide(msg: &ReapMsg) -> Disposition {
     if msg.shutting_down_at_finish {
         return Disposition::KeepAsIs;
     }
-    match (msg.intent_at_finish, &msg.reason) {
-        (TerminationIntent::UserKill, _) => Disposition::DeleteProfile,
-        (TerminationIntent::None, TerminalReason::Exited { code: Some(0) }) => {
-            Disposition::DeleteProfile
-        }
-        (TerminationIntent::None, _) => Disposition::KeepDisableAutoRestore,
-    }
+    // 셧다운이 아니면 종료 원인(유저 kill·정상 exit·크래시·EOF 무관) 전부 시체 보존.
+    // intent/reason 으로 삭제를 가르던 분기는 ADR-0083 으로 폐지.
+    Disposition::KeepDisableAutoRestore
 }
 
-/// disposition 을 ProfileRegistry 에 적용(ADR-0019). **downgrade-only**: auto_restore 를 절대
-/// true 로 올리지 않는다 — KeepDisableAutoRestore 는 false 로만 내린다. KeepAsIs 는 무동작.
-fn apply_disposition(profiles: &ProfileRegistry, id: AgentId, disposition: Disposition) {
+/// disposition 을 ProfileRegistry 에 적용(ADR-0019, ADR-0083 개정, ADR-0084 epoch-guard).
+/// **downgrade-only**: auto_restore 를 절대 true 로 올리지 않는다 — KeepDisableAutoRestore 는 false 로만
+/// 내린다. KeepAsIs 는 무동작. ADR-0083: 자동 삭제(옛 DeleteProfile) 폐지 — reaper 는 프로필을 지우지
+/// 않는다(수거 + 다운그레이드만).
+///
+/// ★ADR-0084 epoch-guard★: `reaped_epoch`(= ReapMsg.epoch = 죽은 세션이 spawn 될 때 읽은 프로필
+///   epoch. session.epoch 과 동일 값)와 **현재 프로필 epoch 이 일치할 때만** auto_restore 를 내린다.
+///   sessions.remove 후 이 lock-free disposition 사이에 재활성화가 `bump_epoch`(manager.rs Resume
+///   갈래)로 프로필 epoch 를 올렸다면, `p.epoch != reaped_epoch` → 다운그레이드를 **건너뛴다**(그
+///   사이 새로 붙은 산 세션을 stale reap 이 강등하지 못하게). sessions.remove 의 epoch-guard(ADR-0007)
+///   와 같은 원리를 disposition 계층까지 확장한 것이다.
+/// ★lock 순서(ADR-0006)★: 비교를 **update_with 클로저 안**(프로필 락 보유 중)에서 한다 —
+///   sessions 락은 여기서 절대 잡지 않는다(disposition 은 sessions lock-free 유지). epoch 판정을
+///   프로필의 in-memory 필드로만 하므로 sessions 맵을 볼 필요가 없다.
+fn apply_disposition(
+    profiles: &ProfileRegistry,
+    id: AgentId,
+    reaped_epoch: u32,
+    disposition: Disposition,
+) {
     match disposition {
-        Disposition::DeleteProfile => {
-            profiles.remove(id);
-        }
         Disposition::KeepDisableAutoRestore => {
-            // 존재할 때만 false 로 내린다. 이미 false 면 그대로(올리지 않음).
-            profiles.update_with(id, |p| p.auto_restore = false);
+            // 존재 + epoch 일치할 때만 false 로 내린다(이미 false 면 그대로 — 올리지 않음).
+            // epoch 불일치 = 그 사이 재활성화로 epoch 가 올라간 새 산 세션 → 손대지 않는다(ADR-0084).
+            profiles.update_with(id, |p| {
+                if p.epoch == reaped_epoch {
+                    p.auto_restore = false;
+                }
+            });
         }
         Disposition::KeepAsIs => {}
     }
@@ -208,6 +231,8 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // decide 는 이제 셧다운 여부만 보므로 lib 본문은 이 두 타입을 쓰지 않는다(테스트에서만 구성).
+    use crate::agent::types::{TerminalReason, TerminationIntent};
 
     fn msg(intent: TerminationIntent, shutting_down: bool, reason: TerminalReason) -> ReapMsg {
         ReapMsg {
@@ -220,19 +245,21 @@ mod tests {
     }
 
     #[test]
-    fn decide_user_kill_deletes() {
+    fn decide_user_kill_keeps_corpse() {
+        // ADR-0083: 유저 kill 도 삭제 아님 — 시체 보존(KeepDisableAutoRestore). 재활성화 resume 가능.
         let m = msg(TerminationIntent::UserKill, false, TerminalReason::Killed);
-        assert_eq!(decide(&m), Disposition::DeleteProfile);
+        assert_eq!(decide(&m), Disposition::KeepDisableAutoRestore);
     }
 
     #[test]
-    fn decide_clean_exit_deletes() {
+    fn decide_clean_exit_keeps_corpse() {
+        // ADR-0083: 정상 exit(code0) 도 삭제 아님 — 시체 보존. code-0 갭(ADR-0082 §열린항목 ②) 닫힘.
         let m = msg(
             TerminationIntent::None,
             false,
             TerminalReason::Exited { code: Some(0) },
         );
-        assert_eq!(decide(&m), Disposition::DeleteProfile);
+        assert_eq!(decide(&m), Disposition::KeepDisableAutoRestore);
     }
 
     #[test]

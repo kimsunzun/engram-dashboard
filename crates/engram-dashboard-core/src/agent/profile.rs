@@ -410,12 +410,21 @@ impl ProfileRegistry {
     /// 없으므로, live 엔트리가 있으면 그 두 필드만 보존하고 나머지(cwd/command/env/session 등 spawn 이
     /// 실제로 확정하는 필드)는 스냅샷을 반영한다. 삭제된 부모(dangling)는 이어지는 normalize 가 정리한다.
     /// 보존·판정·save 가 한 임계구역(mutate)이라 TOCTOU 없이 원자적이다(ADR-0071 락 규율).
-    // ADR-0070 ADR-0072
+    ///
+    /// ★epoch 도 live 보존(ADR-0084)★: epoch 역시 프로세스 기동과 무관한 순수 런타임 메타로, spawn 이
+    ///   넘긴 **스냅샷**이 author 하면 안 된다. 재활성화 respawn 은 이 upsert **직전** `bump_epoch`
+    ///   (activate_profile Resume 갈래)로 registry epoch 를 올려두는데, 옛 스냅샷(epoch 그대로)을 여기서
+    ///   그대로 삽입하면 그 bump 가 되돌려져(lost update) 새 세션이 죽은 세션과 같은 epoch 를 재사용한다
+    ///   → 프론트 재구독 누락(빈 슬롯). 그래서 parent_id/display_name 과 동일하게 live 값을 보존한다.
+    ///   신규 id(live 없음)면 스냅샷 epoch(0)를 그대로 써 첫 spawn 은 여전히 epoch=0(bump 는 재활성화만).
+    // ADR-0070 ADR-0072 ADR-0084
     pub fn upsert_preserving_hierarchy(&self, mut profile: AgentProfile) {
         self.mutate(|m| {
             if let Some(live) = m.get(&profile.id) {
                 profile.parent_id = live.parent_id;
                 profile.display_name = live.display_name.clone();
+                // ADR-0084: 재활성화 bump_epoch 로 올린 registry epoch 를 stale 스냅샷이 되돌리지 못하게.
+                profile.epoch = live.epoch;
             }
             m.insert(profile.id, profile);
         });
@@ -567,7 +576,12 @@ impl ProfileRegistry {
     }
 
     /// epoch 증가 후 새 값 반환. "같은 AgentId 맵 교체"가 일어나는 **모든 지점**에서
-    /// 호출해야 한다(restart + fresh fallback respawn 포함 — H-1.5).
+    /// 호출해야 한다(ADR-0007). ★현 프로덕션 호출점★: `activate_profile` 의 Resume 갈래
+    /// (시체 재활성화 = reap 으로 빠진 세션을 같은 id 로 재spawn = 맵 교체 — manager.rs `// ADR-0084`).
+    /// 옛 유일 호출자 fresh-fallback `fallback_fresh` 는 ADR-0082 로 제거됐다 — 이 재활성화 호출점이
+    /// 그 자리를 잇는다. dead code 아님(오인해 지우지 말 것 — 지우면 재활성화가 epoch 재사용→프론트
+    /// 재구독 누락으로 빈 슬롯이 되고 apply_disposition epoch-guard 도 구분자를 잃는다).
+    // ADR-0084
     pub fn bump_epoch(&self, id: AgentId) -> Option<u32> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;

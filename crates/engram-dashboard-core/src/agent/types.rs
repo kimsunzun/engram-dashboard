@@ -119,13 +119,17 @@ pub struct ReapMsg {
     pub shutting_down_at_finish: bool,
 }
 
-/// 종료 분류 결과(ADR-0019 §decide). reap_one 이 lock 밖에서 ProfileRegistry 에 적용한다.
-/// **downgrade-only**: auto_restore 를 true 로 절대 올리지 않는다(하드킬 안전망 성립 조건).
+/// 종료 분류 결과(ADR-0019 §decide, ADR-0083 개정). reap_one 이 lock 밖에서 ProfileRegistry 에
+/// 적용한다. **downgrade-only**: auto_restore 를 true 로 절대 올리지 않는다(하드킬 안전망 성립 조건).
+///
+/// ★ADR-0083: 자동 삭제 폐지★ — 옛 `DeleteProfile`(유저 kill·정상 exit → 프로필 완전 삭제)
+///   variant 를 제거했다. reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않으므로 삭제 처분을
+///   산출하지 않는다. 프로필 삭제는 명시적 사용자 명령(AgentCommand::DeleteProfile /
+///   Tauri delete_profile)이 ProfileRegistry::remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
-    /// 유저 kill·정상 /exit → 프로필 완전 삭제.
-    DeleteProfile,
-    /// 크래시·EOF·exit≠0·signal → 프로필 유지 + auto_restore=false(예약 복귀).
+    /// 모든 런타임 종료(유저 kill·정상 exit·크래시·EOF·signal) → 프로필 유지 + auto_restore=false
+    /// (시체 보존 — 재활성화 시 --resume 로 이어받음). ADR-0083 으로 유저 kill·정상 exit 도 이리로.
     KeepDisableAutoRestore,
     /// 데몬 셧다운 → 손 안 댐(auto_restore=true 잔류 → 부팅 복원).
     KeepAsIs,

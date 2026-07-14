@@ -331,6 +331,20 @@ impl AgentManager {
 
         // 3. Resume: 이어받기만 시도(fresh-fallback 폐지). resume_no_fallback 이 RestoreOutcome 을
         //    돌려주므로 결말을 AgentInfo/Err 로 번역한다.
+        //
+        // ★재활성화 = epoch++★: 여기 도달했다는 건 위 가드에서 산 세션이 **없음**을 이미 확인했다는
+        //   뜻이다 — 즉 reap 으로 세션이 맵에서 빠진 **시체**를 같은 AgentId 로 다시 띄우는 맵 교체다.
+        //   ADR-0007 불변식("같은 AgentId 맵 교체마다 epoch +1")을 그대로 적용해, 새 세션이 죽은
+        //   세션과 다른 `[agentId, epoch]` 를 갖게 한다 → 프론트 구독(deps [viewId,agentId,epoch])이
+        //   재발화해 resume 출력이 화면에 붙고, 옛 seq/cursor 가 새 스트림에 오적용되지 않는다.
+        //   spawn_agent(L223)이 이 bump **뒤** 프로필 epoch 를 읽으므로 순서가 load-bearing 이다.
+        //   (산 세션 재활성화는 위 가드에서 이미 걸러졌으므로 절대 여기 오지 않는다 — bump 안전.)
+        //   또 이 bump 는 stale reap 의 apply_disposition epoch-guard(reaper.rs)가 재활성화된 산
+        //   세션을 강등 못 하게 하는 구분자이기도 하다.
+        // ADR-0084
+        // ADR-0007
+        self.profiles.bump_epoch(profile.id);
+
         match self.resume_no_fallback(profile) {
             // resume 성공 — 살아있는 세션의 info 반환.
             RestoreOutcome::Resumed => self.agent_info_by_id(profile.id),

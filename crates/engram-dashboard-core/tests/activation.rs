@@ -221,11 +221,15 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         run_count(&count)
     );
 
-    // (c) epoch 불변 — fallback 이 하던 epoch++ 가 사라졌다.
+    // (c) ★ADR-0084 갱신★: 재활성화(Resume)는 성패와 무관하게 진입 시 epoch 를 bump 한다(맵 교체
+    //     불변식 — activate_profile Resume 갈래). resume 이 조기종료로 Failed 가 돼도 그 사이 새 세션이
+    //     맵에 insert→reap 됐으므로 epoch++ 가 옳다. 옛 ADR-0082 가정(epoch 불변=0)은 폐기됐다.
+    //     (fresh-fallback 이 하던 "kill 후 fresh 재spawn 시 bump" 와는 다른 경로 — 여기선 재활성화 진입
+    //      자체가 bump 주체이고, 자동 fresh 재생성은 여전히 없다(위 run-count==1 로 별도 단언).)
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
-        Some(0),
-        "resume 실패로 epoch 가 bump 되면 안 됨(fresh-fallback 폐지)"
+        Some(1),
+        "재활성화(Resume) 진입은 epoch 를 0→1 로 bump 해야 함(ADR-0084 맵 교체 불변식)"
     );
 
     // (d) sid 이력 불변 — 새 sid 발급(fresh)이 없어 claude_session_id/old_session_ids 가 그대로.
@@ -380,6 +384,179 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
         1,
         "재활성화는 산 에이전트를 재spawn 하면 안 됨(배치 start 는 여전히 1회여야 함) — got {}",
         run_count(&count)
+    );
+
+    // 정리.
+    let _ = manager.kill_agent(id);
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// ★ADR-0084 핵심★: 죽은 시체를 같은 슬롯에서 재활성화(Resume)하면 **epoch 가 엄격히 증가**한다.
+/// reap 으로 세션이 맵에서 빠졌다가 재활성화로 새 세션이 같은 AgentId 로 들어오는 건 맵 교체이므로
+/// ADR-0007("같은 AgentId 맵 교체마다 epoch +1")를 적용한다. epoch 가 안 오르면 프론트 구독
+/// (deps [viewId,agentId,epoch])이 재발화하지 않아 resume 출력이 화면에 안 붙는다(빈 슬롯).
+///
+/// ★step 1 이 없으면(bump_epoch 미호출) 이 테스트는 실패한다★: spawn_agent 은 프로필 epoch 를 읽기만
+///   하므로, bump 가 없으면 재활성화된 새 세션이 죽은 세션과 동일 epoch(E)를 갖는다 → 아래 `> E` 단언 실패.
+///
+/// 실 claude 없이 셸로 모사: 셸은 needs_session=false 라 --resume 플래그를 붙이진 않지만(그건 별도
+///   backend 단위 테스트가 실증), 이 테스트가 겨냥하는 "재활성화 = 맵 교체 = epoch++" 는 backend
+///   무관하게 성립한다. 셸은 조기종료하지 않아 Resume 재활성화가 Ok(살아있는 세션)로 성공한다.
+#[test]
+fn reactivate_after_kill_bumps_epoch() {
+    let (manager, _sink, profiles) = make_manager("reactivate-epoch-bump");
+
+    // 윈도(EARLY_EXIT_WINDOW)를 넘겨 사는 셸(≈19s) — 재활성화 시 조기종료로 오판되지 않게 한다.
+    let (profile, batch, count) = long_lived_profile("reactivate-epoch-bump");
+    let id = profile.id;
+    profiles.upsert(profile.clone());
+
+    // 1) 최초 활성화(세션 없음 → Fresh 갈래) → 오래 사는 셸 spawn. epoch=E(신규 프로필이라 0).
+    let first = manager
+        .activate_profile(&profile, SpawnMode::Fresh)
+        .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
+    let epoch_e = first.epoch;
+    assert_eq!(
+        epoch_e, 0,
+        "신규 프로필 첫 spawn(Fresh)은 epoch=0(재활성화 아님 → bump 없음)"
+    );
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "최초 활성화 세션이 살아있어야 함"
+    );
+
+    // 2) 유저 kill → reaper 가 세션을 맵에서 수거(시체 보존, ADR-0083). 프로필 epoch 는 아직 E.
+    manager.kill_agent(id).expect("kill_agent failed");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "유저 kill 후 세션이 맵에서 수거돼야 함"
+    );
+    // kill 수거 완료(맵 비었고 프로필은 시체) 확인 — epoch 는 여전히 E(재활성화 전).
+    assert_eq!(
+        profiles.get(id).map(|p| p.epoch),
+        Some(epoch_e),
+        "kill 만으로는 epoch 가 오르지 않는다(재활성화 respawn 이 bump 의 주체)"
+    );
+
+    // 3) ★재활성화(Resume)★: 시체를 같은 슬롯에서 재spawn = 맵 교체 → epoch++ 여야 한다.
+    let reactivated = manager
+        .activate_profile(&profile, SpawnMode::Resume)
+        .expect("재활성화가 resume 경로로 Ok(살아있는 세션)여야 함(셸은 조기종료 안 함)");
+
+    // (a) 반환된 산 세션의 epoch 가 죽은 세션(E)보다 엄격히 크다(맵 교체 재구독 트리거, ADR-0007).
+    assert!(
+        reactivated.epoch > epoch_e,
+        "ADR-0084: 재활성화 세션 epoch({}) 가 죽은 세션 epoch({}) 보다 커야 함(맵 교체=epoch++)",
+        reactivated.epoch,
+        epoch_e
+    );
+    // (b) 레지스트리 epoch 도 함께 올랐다(반환 info 만 보면 맵 교체를 못 잡는다).
+    assert_eq!(
+        profiles.get(id).map(|p| p.epoch),
+        Some(reactivated.epoch),
+        "재활성화 후 레지스트리 epoch 와 세션 epoch 가 일치해야 함(bump 가 spawn_agent 읽기 전에 반영)"
+    );
+
+    // 정리.
+    let _ = manager.kill_agent(id);
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// ★ADR-0083 회귀★: 유저 kill 후 재활성화가 "profile not found"(=화면 "실패")로 깨지던 버그를 막는다.
+/// 옛 동작: 유저 kill → reaper `(UserKill,_) => DeleteProfile` → `profiles.remove`(claude_session_id
+/// 포함 삭제) → 재활성화 시 프로필이 없어 resume 진입도 못 하고 실패. ADR-0083 은 유저 kill 도 시체로
+/// 보존하므로, kill 후에도 프로필 + claude_session_id 가 남아 재활성화가 resume 경로로 정상 진입한다.
+///
+/// 검증(★이 테스트가 증명하는 건 "프로필 조회 경로가 온전함"까지다 — 실제 `--resume <sid>` 조립은
+/// backend/claude.rs 의 `build_command_spec(Resume, sid)` 단위 테스트가 실증한다. ADR-0084 로 그
+/// 백엔드 단위 테스트가 추가돼 이 통합 테스트가 --resume 조립을 오버셀할 필요가 없어졌다):
+///   (a) 유저 kill 후 세션은 맵에서 수거되지만 프로필은 보존되고 auto_restore=false 로 다운그레이드.
+///   (b) claude_session_id 가 그대로 남아 있다(--resume 로 이어받기 위한 필수 조건 — 보존만 단언).
+///   (c) `activate_profile(Resume)` 가 "profile not found" 없이 **프로필 조회를 통과해** 재활성화된다
+///       — 셸은 조기종료하지 않으므로 Ok(살아있는 세션). 즉 이 테스트의 결정적 단언은 "삭제로 조회
+///       경로가 깨지지 않았다"이지, 셸이 실제 --resume 를 부착한다는 게 아니다(셸은 needs_session=false).
+#[test]
+fn user_kill_then_reactivate_finds_profile_and_resumes() {
+    let (manager, _sink, profiles) = make_manager("kill-reactivate");
+
+    // 윈도(EARLY_EXIT_WINDOW)를 넘겨 사는 셸(≈19s) — 재활성화 시 조기종료로 오판되지 않게 한다.
+    let (profile, batch, count) = long_lived_profile("kill-reactivate");
+    let id = profile.id;
+
+    // ★claude_session_id 를 심은 프로필★: 유저 kill 후에도 이 sid 가 살아남아야 재활성화 resume 가
+    //   성립한다(ADR-0083 의 헤드라인 — 시체 + sid 보존). auto_restore=true 로 둬서 kill 수거가 false 로
+    //   다운그레이드하는지도 함께 단언한다. ★spawn 경로가 upsert_preserving_hierarchy 로 넘긴 프로필을
+    //   그대로 레지스트리에 심으므로(session_id 포함), activate/kill 에도 이 seeded 프로필을 써야 sid 가
+    //   보존된다★(원본 profile 은 claude_session_id=None 이라 그걸 넘기면 spawn 이 sid 를 덮어써 유실).
+    let sid = Uuid::new_v4();
+    let mut seeded = profile.clone();
+    seeded.claude_session_id = Some(sid);
+    seeded.auto_restore = true;
+    profiles.upsert(seeded.clone());
+
+    // 1) 최초 활성화(세션 없음 → Fresh 갈래) → 오래 사는 셸 spawn.
+    manager
+        .activate_profile(&seeded, SpawnMode::Fresh)
+        .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "최초 활성화 세션이 살아있어야 함"
+    );
+
+    // 2) 유저 kill(UserKill intent 태깅) → reaper 가 세션 수거 + 시체 보존(ADR-0083).
+    manager.kill_agent(id).expect("kill_agent failed");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "유저 kill 후 세션이 맵에서 수거돼야 함"
+    );
+
+    // (a) 프로필 보존 + auto_restore=false 다운그레이드(삭제 아님).
+    assert!(
+        wait_until(Duration::from_secs(2), || {
+            profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false)
+        }),
+        "유저 kill 시체는 프로필 유지 + auto_restore=false 여야 함(ADR-0083 — 삭제 아님)"
+    );
+    assert!(
+        profiles.get(id).is_some(),
+        "유저 kill 후 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083 회귀)"
+    );
+    // (b) claude_session_id 보존 — 재활성화 resume 의 필수 조건.
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.claude_session_id),
+        Some(sid),
+        "유저 kill 로 claude_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
+    );
+
+    // (c) ★재활성화가 "profile not found" 없이 resume 경로로 진입★. 프로필이 살아 있으므로 조회 경로가
+    //   온전하고, 셸은 조기종료하지 않아 Ok(살아있는 세션)로 재활성화된다. 옛 버그였다면 프로필이 없어
+    //   재활성화가 실패(진입 불가)했을 것이다.
+    let reactivated = manager
+        .activate_profile(&seeded, SpawnMode::Resume)
+        .expect("재활성화가 profile not found 없이 resume 경로로 진입해 Ok 여야 함(ADR-0083)");
+    assert_eq!(
+        reactivated.id, id,
+        "재활성화는 같은 에이전트(보존된 시체 프로필)를 가리켜야 함"
+    );
+    assert!(
+        !matches!(
+            reactivated.status,
+            AgentStatus::Failed { .. } | AgentStatus::Killed | AgentStatus::Exited { .. }
+        ),
+        "재활성화된 세션이 종점 상태면 resume 진입 실패 — 살아있어야 함: {:?}",
+        reactivated.status
     );
 
     // 정리.

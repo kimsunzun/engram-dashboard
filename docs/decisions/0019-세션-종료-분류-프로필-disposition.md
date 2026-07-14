@@ -1,7 +1,7 @@
 # ADR-0019: 세션 종료 분류 — 의도는 "행동 지점"에서, 프로필 disposition으로 죽음/예약/복원 가름
 
 - 상태: 확정 (2026-06-16, dashboard4 세션 — 사용자 결정)
-- 관련: ADR-0016(수명 모델 — restart_policy 런타임 해석 **일부 폐기**), ADR-0017(죽음 정의 — **구체화**), ADR-0001(kill 2동사), ADR-0005(finalize 1회), ADR-0015(데몬 persist)
+- 관련: ADR-0016(수명 모델 — restart_policy 런타임 해석 **일부 폐기**), ADR-0017(죽음 정의 — **구체화**), ADR-0001(kill 2동사), ADR-0005(finalize 1회), ADR-0015(데몬 persist) · Amended by ADR-0083 (유저 kill·정상 exit(code0) → 프로필 삭제 조항 폐지: 모든 종료는 프로필 시체 보존(KeepDisableAutoRestore), 자동 삭제 없음 — 삭제는 명시적 사용자 명령으로만) · Amended by ADR-0084 (apply_disposition epoch-guard 추가 — stale reap 이 재활성화된 산 세션을 auto_restore=false 로 강등 못 하게(reaped msg.epoch 가 현재 세션 epoch 와 일치할 때만 적용). 재활성화(resume)는 맵 교체이므로 epoch bump(ADR-0007 재확인).)
 - 범위: claude 세션이 "끝났을 때" 무엇을 죽음으로 보고, 프로필을 지울지 남길지, 어떻게 복원할지. 진행중 죽음과 부팅 복원을 분리한다.
 
 ## 맥락
