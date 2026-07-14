@@ -76,6 +76,28 @@
 - **리뷰 재도전 + 사용자 재확인 (2026-07-14):** `/review prd`에서 cross-family(blind) 리뷰어(codex)가 이 보류를 BLOCK으로 재도전 — 근거: prompt-injection된 child 하나가 공유 마스터 토큰으로 **형제 agent kill·write·전 UI 조작**(child↔child 횡이동) 가능, "single PC"는 외부 경계만 덮고 내부 오염은 못 덮음. **사용자 재확인 = 보류 유지(수용된 알려진 위험)** — 현 작업에 지장 없음, 제약은 한참 나중. 전제 = 로컬·신뢰 콘텐츠.
 - **더 큰 그림 (사용자 프레이밍 2026-07-14):** 권한/제약은 R7(child 토큰 스코프) 하나가 아니라 **오케스트레이션 제약·명령 제약까지 아우르는 별도 후기 단계**다 — 핵심 줄기와 직교하며 나중에 통째로 착수. T-11은 그 제약 레이어의 첫 항목으로 본다.
 
+### T-12. JSON 라이브 상태 표시 정식 재설계 ("wait"/경과/토큰 인디케이터) — 리서치 완료, 착수 보류 (2026-07-14)
+- **상태:** 보류(폐기 아님). 착수 트리거 = resume-wait 버그수정·메시지 시스템 후 여유. 리서치(설계-결정 모드 medium + codex 적대리뷰 BLOCK→반영)는 완료 — 착수 시 이 항목 + 아래 선결조건부터.
+- **목표:** 현재 임시(PROVISIONAL) WaitRow(`src/components/slot/chat/WaitRow.tsx` — 마운트부터 초만 세는 벽시계, 뭘 하는지 0정보)를 성숙 도구급 라이브 상태 표시로 교체 — "지금 뭘 하는지(thinking/도구 X 실행/응답 작성)" + 경과 + 토큰흐름 + 완료 요약. **사용자 방향(2026-07-14):** "많이 나올수록 좋다 + 뭐에 따른 기다림인지(내부적으로 뭘 하는지) 알면 좋다" → 리치 상태(gemini-cli/codex급).
+- **레퍼런스(OSS 조사 결과):** gemini-cli(상태텍스트가 Thinking/도구/실제 추론요약으로 바뀜, Idle 진입 시 타이머 정지·리셋) · OpenAI codex-rs(머리말 Thinking/Executing Hook(N/M), 완료 separator "Worked for Xs", 서버 duration 우선, 승인대기 중 타이머 pause) · aider(완료 시 "Tokens: … Cost: …" 요약 줄, 캐시 분해) · Claude Code(랜덤 스피너 동사+경과+↓↑토큰, 상태 무구분). **공통 패턴** = `{스피너}{상태텍스트}({경과}·esc to interrupt)` + 완료 요약, **타이머는 done 이벤트에 정지**(우리는 unmount에만 정지 = 버그 원천).
+- **★선결조건(codex 적대리뷰 적출 — 이것 없이는 리치 불가):**
+  - **`--include-partial-messages` 미활성**(`backend/claude.rs:64`) → 현재 디코더는 **완료 블록만** 받음(`claude.rs:543` 완료 텍스트를 TextDelta로 relabel) → "지금 thinking중"과 "방금 끝남" 구별 불가. 리치 상태는 이 옵션 켜고 부분 SSE 델타를 프론트까지 스레딩해야.
+  - **turn 식별자 부재**(`turn_id`/`message_id` 항상 null, `claude.rs:439/489`) + mid-turn 유저 개입 허용(`RichSlot.tsx:138`) → replay·steering·usage·요약을 한 턴에 묶을 안정 키 없음. 요약/푸터의 선결.
+  - **Error terminal/recoverable 판별자 없음**(`StructuredEvent.ts`) → 복구가능 디코더 오버플로 Error(`claude.rs:349`)도 프론트가 turnDone=true 처리(`structuredAccumulator.ts:115`). 계약에 판별자 필요.
+  - **경과 "의미" 미정의** — fixture에 `duration_ms`/`duration_api_ms`/`ttft_ms`/`ttft_stream_ms`/`time_to_request_ms` 5시계 존재. "유저전송→result / CLI처리 / API합 / 활성모델 / phase별" 중 무엇인지 먼저 정의. **타이머 scope(범위)와 source(출처)는 별도 축.**
+  - **done fallback = `status_changed` 금지 → `agent-list-updated`(목록제거)만**(CLAUDE.md:169 불변식 / T-4).
+  - **다중턴 fixture 없음** — "지속 프로세스가 턴마다 result 냄"을 증명할 fixture 필요(경험적으론 기존 다중턴 동작이 성립).
+- **옵션셋(사용자 결정 대기):** A 최소견고화(이진+done견고화, resume-wait 버그수정 탑승) / B 서버-권위 요약푸터(버려지던 duration/cost/usage를 turn-id 단 `ResultSummary` 이벤트로) / C 풀 리치(위 선결조건 전부). **B·C = 굵은설계 → PRD/TRD/ADR 트랙.**
+- **거부한 대안:** 종료-상태(`status_changed`) fallback(불변식 위반) · 클라 재계산 토큰/비용(캐시·비용 회계 불가) · 완료블록 관찰로 세분상태(현재-vs-과거 구별 불가).
+- **관련:** ADR-0044/0045(StructuredEvent 계약)·0049(thinking)·0051(채팅 렌더 LLM 제어표면 선례)·§5. 리서치 원본 = 이 세션 핸드오프.
+
+### T-13. 메시지 시스템 — MVP=전송 길만(S17 탑승), 풀 메일박스는 보류 (2026-07-14 사용자 결정)
+- **상태:** MVP 착수 예정(S17 구현 세션에 시나리오로 탑승) / 풀 버전 보류.
+- **사용자 결정(2026-07-14):** "일단 메시지 전송 길만 뚫으면 됨. 기본 메시지 보내기·별도 창 띄움 등은 기존 커맨드라 보너스 구현. 기존 인프라 이용." — 풀 메일박스(에이전트별 받은편지함·영속·ACK)는 나중(T-11 '더 큰 그림'과 같은 후기 갈래).
+- **MVP 실체(코드 근거):** 전송 길 = 보내는 에이전트(Bash) → `engram-ctl`(S17) → 데몬 WS `WriteStdin` → `AgentManager` → 대상 세션. JSON 모드 `write_input`이 평문을 stream-json 유저 턴으로 감싸고(1 호출=1 완결 턴, `session.rs:106`; wrap 테스트 `session.rs:338`) 합성 에코로 대상 RichSlot에 즉시 표시 — **미구현 조각 = engram-ctl뿐**. 별도 메시지 PRD 불필요, S17 인터페이스 표에 message-send 수용 시나리오로 포함.
+- **TRD 때 정할 얇은 결정 2개(사용자):** ① 발신자 표기 규약(사람 vs 에이전트 구분, 예: `[from: <agent>]` 프리픽스) ② 대상 busy 시 거동(MVP=stdin 큐잉=다음 턴 처리).
+- **서베이 정합:** orchestration-survey §6 "메시징 단독은 용처 적음(조율자 필요)" → 조율자 = LLM이 engram-ctl로 직접 = S17과 한 몸이라 경고 자동 해소. 전송·에이전틱 레이어 풀 설계는 `docs/research/agent-messaging-survey-2026-06-28.md`(tokio now/NATS later·supervised actor·control/data plane 논리분리) — 풀 버전 착수 때 입력.
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)

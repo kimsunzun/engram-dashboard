@@ -45,6 +45,7 @@
 - **토큰 주입 + discoverability = spawn env 오버레이 (인프라 기존).** `CommandSpec.env: Vec<(String,String)>`가 이미 `profile.env → build_spec → transport pty cmd.env(k,v)`로 흐른다(`manager.rs:254-260` · `backend/claude.rs` · `transport/pty.rs:74`). 주입 seam = `manager.rs` spawn 직전(build_command_spec 전). **비영속 오버레이**(profile.env에 안 넣음 — agents.json 평문 저장 금지, CLAUDE.md). 주입 항목:
   - **제어 토큰** = env var(예 `ENGRAM_CONTROL_TOKEN`) = 현행 마스터 토큰(MVP; per-child = R7 보류/T-11).
   - **engram-ctl discoverability = PATH prepend**(전용 env var 아님) — LLM Bash가 `engram-ctl`을 이름으로 자연 해소, 별도 CLI 인지 불요(env var면 `$ENGRAM_CTL` 명시 호출 필요 = UX 열등). 번들 dir을 PATH 앞에.
+  - **자기 정체(발신자 표기 원천 — 슬라이스 1 결정 2026-07-14)** = `ENGRAM_AGENT_ID`(+`ENGRAM_AGENT_NAME`) 추가 주입 — `agent write` 자동 `[from: …]` 표기(§6)가 읽는다. 이름은 스폰 시점 스냅샷(rename 시 스테일 수용 — 표기는 정보용, 주소 아님).
 - **write(stdin) ⟂ lease = per-call 자동 획득 (결정 (a), 2026-07-14).** engram-ctl `write`는 lease가 **비어 있으면 그 단일 호출 범위로 자동 획득**한다(한 호출 안에서 acquire→write→release). 사람(또는 다른 보유자)이 쥐고 있으면 → `LEASE_DENIED`(정직한 실패). ★이 설계가 per-connection lease 증발과 디커플링★: engram-ctl은 호출마다 새 WS 연결을 여니 per-connection lease는 호출 사이에 사라진다 — 그래서 LLM `write` 경로는 **호출 간 lease 보유에 의존하지 않는다**. (명시적 사람식 보유를 위한 standalone `input acquire`/`release`는 여전히 존재할 수 있으나, LLM write는 거기에 의존 안 함.)
 - **dedup store = 데몬-전역 맵(request_id → 캐시 결과), 수명 = 바운드(재시도 창 규모 — 세션/데몬 lifetime 아님).** ★핵심: engram-ctl은 per-call 스폰(호출마다 새 WS 연결)이라 per-connection dedup 불가 → **반드시 데몬-전역**.★
   - **단일 request_id로 상관+dedup 통합(C):** at-most-once는 **호출자가 안정 키를 줘야** 성립한다(새 engram-ctl 호출 = 새 uuid → dedup 안 됨). engram-ctl은 **재사용 가능한 `--request-id <k>`**(옵션)를 노출해 **상관과 dedup을 한 정체성으로** 굴린다(옛 별도 `--idempotency-key` 대체). 있으면 데몬이 그 request_id로 dedup(at-most-once, 캐시 결과·`ALREADY_APPLIED`), 없으면 engram-ctl이 fresh uuid 생성 → at-least-once(재시도 이중적용 가능). PRD R6 스탠스 정합.
@@ -57,12 +58,51 @@
 - **mixed-version:** engram-ctl↔데몬 = 기존 `PROTOCOL_VERSION` handshake(Auth 불일치 거부)로 커버. relay payload(앱이 파싱하는 UI 명령 JSON) = 봉투 `v` 필드로 버전, 앱이 미지원 `v`면 정직한 에러. MVP 단일 v, 필드로 예약.
 - **부분적용 원자성(다중 명령 의도) = 열림(hard).** 하나의 논리 의도가 여러 engram-ctl 호출로 쪼개졌을 때 중간 실패 원자성 — MVP는 각 명령 개별 정직 결과 + LLM이 read로 재조정(트랜잭션 미도입). 배치/트랜잭션은 후속.
 
+## 6. 인터페이스 상세 표 — 슬라이스 1: 메시지 길 (2026-07-14, 구현 세션)
+
+> **슬라이스 분할(사용자 결정 2026-07-14, tracking.md T-13):** 메시지 전송 길(`agent list`/`agent write`/`list-commands` = 백엔드 직행)을 **슬라이스 1**로 먼저 구현·실측한다. 관찰(`obs tail/poll/wait`)·UI relay(`view *`)의 표는 **슬라이스 2로 이월** — 설계(§3~§5)는 잠금 유지, 표만 나중. 근거: 전송 길의 미구현 조각은 engram-ctl뿐(JSON `write_input`이 이미 평문→stream-json 유저 턴 wrap + 합성 에코 — `session.rs:106` 계약·`:338` 테스트), UI relay 기계(§3)는 백엔드 직행 명령에 불요.
+
+### 6-0. 공통 계약 (전 서브커맨드 — /review trd FIX 반영 v2, 2026-07-14)
+- **연결 수명 = per-call:** portfile(`daemon.json`) discovery → WS connect → Auth(`ENGRAM_CONTROL_TOKEN`) → 명령 1건 send → reply 매칭(request_id) → stdout 출력 → exit. (§1)
+- **stdout = 한 줄 JSON 봉투:** 성공 `{v:1, ok:true, requestId, result}` · 실패 `{v:1, ok:false, requestId, error:{code, message, retryMode}}`. **exit code = 0(성공)/1(실패)** — 실패 세분은 `error.code`가 정본(exit code로 분기 금지, LLM은 JSON을 읽는다).
+- **v1 결과 사상(호출자 절연 — blind 리뷰 HIGH):** wire 명령·reply는 기존 것 직송·재사용(variant·필드명 정본 = `messages.rs`)하되, **stdout `result`는 각 서브커맨드의 v1 CLI 스키마로 사상**한다 — 내부 wire 타입을 그대로 노출하면 백엔드 리팩터가 CLI 호출자를 깨뜨린다.
+- **에러 코드 합성(실물 — doc-aware 리뷰 실측):** 데몬은 현재 실패를 자유 문자열 `Error{message}`로만 응답한다(typed variant 없음, `connection_core.rs` reply). engram-ctl이 메시지 패턴매칭으로 `error.code`를 **best-effort 합성**하고 미매칭 = `INTERNAL`. 문자열 계약은 취약 → 매칭 패턴은 데몬 실문자열 golden 테스트로 고정, typed 에러 variant 승격은 후속(슬라이스 1 밖).
+- **공통 에러 코드:** `INVALID_ARGUMENT`(인자·본문 규약 위반 — ctl 로컬 판정) · `AUTH_FAILED` · `PROTOCOL_MISMATCH`(PROTOCOL_VERSION 불일치) · `DAEMON_UNREACHABLE`(portfile 없음/WS 실패) · `REQUEST_ID_CONFLICT`(아래) · `OUTCOME_UNKNOWN`(아래) · `INTERNAL`(미분류).
+- **`retryMode`(모든 에러에 필수 — bool retryable 대체, §5 확실성 인코딩의 기계가독형):** `never` | `same-request-id` | `after-condition`. 매핑 전수: INVALID_ARGUMENT·STALE_REF·REQUEST_ID_CONFLICT·ALREADY_APPLIED(이미 적용 = 사실상 성공)·INTERNAL = `never` / AUTH_FAILED(토큰 교정)·PROTOCOL_MISMATCH(버전 정렬)·DAEMON_UNREACHABLE(데몬 기동)·LEASE_DENIED(점유 해제) = `after-condition`(조건은 message에 명시) / OUTCOME_UNKNOWN = `same-request-id`(같은 id 재시도만 안전).
+- **`--request-id <uuid>`(옵션) + 재시도 계약(중복 주입 차단 — blind 리뷰 BLOCK 해소):** 상관+dedup 통합키(§5). **백엔드 명령 dedup store(§2·§5 잠긴 설계)를 슬라이스 1 구현 범위에 포함한다.** 같은 request-id 재도착: 완료분 = **캐시된 원 결과 봉투 재생**(멱등 replay) · in-flight = 같은 pending 결과에 coalesce · **같은 id + 다른 명령/페이로드**(fingerprint 불일치) = `REQUEST_ID_CONFLICT` · 캐시 재생 불가 경계 = `ALREADY_APPLIED`(적용 사실만 확인). **재시도 창 = `retryWindowMs`(dedup TTL, 기본 300000 = 5분 — 구현 상수, config화 후속):** 창 경과 후 같은 id = 신규 취급(중복 주입 가능) → **재시도는 창 안에서 즉시**. `OUTCOME_UNKNOWN` 응답의 error에 `retryWindowMs`를 실어 호출자가 안전 창을 안다. **`--timeout <ms>`(기본 10000):** deadline 내 reply 미도달·연결 유실 = `OUTCOME_UNKNOWN`(적용 여부 불명) — **재시도는 반드시 같은 request-id로**(새 id 재시도 = at-least-once = 같은 유저 턴이 두 번 주입될 위험). request-id 미지정 = fresh uuid = at-least-once(문서화된 기본).
+
+### 6-1. `agent list`
+- **인자:** 없음(MVP — 필터·포맷 옵션은 후속).
+- **결과(v1 고정 — 타입·널러블 포함):** `{agents:[{id: string(UUID)·비null, name: string·비null, status: string(enum), cwd: string·비null, structured: bool, epoch: number(u32 — 재활성화마다 증가, 신선도 판별용)}]}` — **`structured`는 wire `capabilities.output`에서 파생**(`mode` 필드는 wire `AgentInfo`에 없음 — doc-aware 리뷰 실측 `domain.rs`, 무재정의 원칙 준수). **`status` enum = wire `AgentStatus` variant 문자열의 v1 스냅샷** — 값 나열은 구현 시 `messages.rs`에서 대조·명시하고 golden 테스트로 고정(여기 날조 금지), 미지 신규 값은 문자열 그대로 통과(forward-compat, 호출자는 미지 값 허용 필수). **주소지정 원천**: LLM은 여기서 이름→id를 해소한다.
+- **에러:** 공통 코드만(§6-0).
+
+### 6-2. `agent write <agent-id>`
+- **인자:** `<agent-id>` = **UUID byId 고정**(이름 주소지정 미지원 — 표시이름은 유일성 보장 없음, ADR-0070). **본문 소스 = 정확히 하나:** `--text <msg>` XOR stdin 파이프. 규약 위반 = `INVALID_ARGUMENT`: 둘 다 지정 · 둘 다 부재 · stdin이 파이프 아닌 TTY(**대기 없이 즉시 오류** — LLM 무한 대기 차단) · 빈 본문 · 비UTF-8 · 상한(1 MiB) 초과. 개행 보존.
+- **동작 체인:** 발신자 표기 부착(§6-4) → 기존 `WriteStdin` 직송 → ack. JSON 모드 wrap+합성 에코 = 백엔드 기존 경로 그대로(**1 write = 1 완결 유저 턴**, `session.rs:106`).
+- **lease(실물 정정 — doc-aware 리뷰 실측 `connection_core.rs`):** 별도 acquire/release 왕복 **없음** — **빈 lease면 `WriteStdin`이 그대로 통과**(`check_input` Allow), **타 연결(사람 뷰어 등) 보유 시 `LEASE_DENIED`**. §5 "per-call 자동 획득"의 실구현 = 이 empty-lease 통과다. ★acquire→write→release 3커맨드 구현 금지★ — 중간 크래시 시 lease 고아(사람 입력 잠김) 창을 새로 만든다.
+- **busy 거동 = 기존 상속(신규 결정 아님):** 대상이 턴 진행 중이어도 사람의 mid-turn 개입과 동일 경로(`RichSlot.tsx:138` 허용 선례) — stdin 큐잉/steering, 별도 대기·거부 없음.
+- **터미널 모드 대상 = raw 전달·자동 제출 없음:** ctl은 `\r`을 붙이지 않는다 — 제출까지 원하면 호출자가 본문에 개행을 포함한다. ack("written")는 **세션 stdin 반영 완료**이지 제출·턴 발화 보장이 아니다(모드별 거동 명시). MVP 주 대상 = JSON 에이전트.
+- **에러:** 공통(§6-0) + `STALE_REF`(미존재/종료 id) · `LEASE_DENIED`(사람·타 보유자 점유) · `ALREADY_APPLIED`(dedup 경계, §6-0).
+- **결과(v1 고정):** `{agentId, status:"written"}` — `written` = 세션 반영 완료, **대상 LLM의 소비·응답 보장 아님**(그건 관찰 = 슬라이스 2 소관).
+
+### 6-3. `list-commands`
+- **결과(v1 고정):** `{commands:[{name: string, args:[{name, required: bool, type: string, summary}], result: string(shape 한 줄 서술 또는 §6 참조), errors:[string(코드)], summary: string}]}` — 셀프 디스커버리가 "읽고 바로 쓸 수 있는" 수준(blind 리뷰 반영). MVP = 빌드 시점 정적 카탈로그.
+
+### 6-4. 발신자 표기 — 자동 표기 (FORK-3, 사용자 결정 2026-07-14)
+- `agent write`는 메시지 앞에 `[from: <발신자 이름> (<풀 UUID>)] `를 **자동 부착**한다. 원천 = spawn env 오버레이의 `ENGRAM_AGENT_ID`/`ENGRAM_AGENT_NAME`(§5). **id는 풀 UUID**(id8 → 변경 — 회신 대상 결정성, blind 리뷰 반영). **이름은 한 줄 강제 escape**(개행·`]` 제거, 64자 캡 — 헤더 파괴 방지).
+- **env에 자기 정체 없음(사람이 셸에서 직접 호출) = 무표기** — 사람 메시지를 에이전트발로 위장하지 않는다.
+- **표기는 위조 방지가 아니다(advisory):** 본문에 가짜 `[from:]`을 심는 위조를 막지 못한다 — 신뢰 모델 없는 로컬 MVP의 수용된 위험(인증 표기는 R7/T-11 갈래). "사람 지시 오인 방지"는 관례적 힌트 수준이지 보증이 아님.
+- **표기는 정보용, 주소 아님:** 이름 스테일(rename) 수용, 회신 주소는 `agent list` 재해소.
+- **거부한 대안:** `--from` 수동(LLM이 누락 시 수신측이 사람 지시로 오인 — 오케스트레이션 기본기로 부적합) · 무표기 순수 전달(출처 소실, 프롬프트 규약 의존 = 신뢰성 최저) · 구조화 메타데이터 표기(blind 리뷰 제안 — claude stream-json 입력엔 모델에 닿는 메타데이터 자리가 없어 in-band가 유일한 도달 경로).
+- **QA 실측 항목:** 한글 표시이름 env 왕복(UTF-8, Windows·portable-pty) — doc-aware 리뷰 플래그.
+
 ## 결정 맵 (fork = 사용자 / 내부 = 메인 결정·보고 / ADR = 박제)
 
 | 항목 | 종류 | 상태 |
 |---|---|---|
 | engram-ctl CLI 문법 | FORK-1 | ✔ noun-verb(agent/view/obs) |
 | UI relay 앱 적용 경로 | FORK-2 / ADR | ✔ (A) 공유 `ViewCommand` 적용 서비스 + async 상관(§3) |
+| 발신자 표기(메시지) | FORK-3 | ✔ 자동 표기 `[from:]` + env 자기정체 주입(§6-4, 슬라이스 1) |
 | "앱 = 데몬 명령 수신 WS peer" | ADR | ✔ ADR-0081 박제 |
 | relay 봉투 wire 변형·라우팅 표 | 내부 | ✔ 설계(§3 — single request_id·opaque value·비블로킹·수명 바운드) |
 | 앱 role 등록 방식 | 내부 | ✔ `RegisterRole{UiApp}` + 재연결 재전송·last-wins(§3) |
@@ -80,4 +120,4 @@
 - **FORK-2** = (A) 사람 Tauri 경로와 공유하는 transport-중립 `ViewCommand` 적용 서비스(단일 경로, §5) + relay는 액터 밖 적용·async 상관(/review trd 정밀화 — 순수 invoke-shim 재진입이 compound `spawn_into`에서 self-deadlock).
 - **ADR-0081** 박제(UI relay 아키텍처: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + 공유 적용 서비스; 개정 2026-07-14 /review trd).
 - **내부 미결 전부 소진**(§5): 토큰/discoverability(spawn env 오버레이) · write⟂lease(per-call 자동 획득) · dedup(데몬-전역 + `--request-id` 통합 + 바운드 수명 + 적용후 커밋) · events cursor(ring 저널 + RESET) · 순서(공유 적용 서비스 + async 상관) · stale-ref 코드(+확실성 인코딩) · mixed-version. 남은 열림 = 부분적용 원자성(hard, 후속).
-- **다음(인터페이스 상세 표 — 구현 세션 이월):** engram-ctl 서브커맨드별 인자·결과 스키마 + 관찰 계약(tail start-cursor 결속, done/pending/terminal/reset 결과, next-cursor, poll 배치 shape) + relay wire 변형 정의는 **인터페이스 상세 표**로 구현 세션에 이월한다 — 그 뒤의 **설계 결정은 이 리뷰(/review trd)로 잠금**(표는 그 설계를 스키마로 옮기는 작업). 이어 모듈 경계(DDD) → 구현+TDD. step-log(흐름) 갱신은 이 TRD 커밋 시.
+- **다음(인터페이스 상세 표 — 슬라이스 분할, 2026-07-14 갱신):** **슬라이스 1(메시지 길: `agent list`/`agent write`/`list-commands`) 표 = §6 작성 완료**(구현 세션) — 이어 `/review trd`(슬라이스 1 분량) → 모듈 경계(DDD) → 구현+TDD. **슬라이스 2(관찰 계약: tail start-cursor 결속·done/pending/terminal/reset·next-cursor·poll 배치 shape + relay wire 변형 + `view *` 표) = 이월** — 설계(§3~§5)는 리뷰로 잠금 유지, 표만 나중. step-log(흐름) 갱신은 이 TRD 커밋 시.

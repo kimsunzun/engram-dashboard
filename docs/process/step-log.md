@@ -972,6 +972,12 @@
 - **경위/어떻게:** 로그·코드 dig(핸드오프 history + reaper/manager 실측) → 후보 A(삭제) 확정. `/implement` critical ×2 — 코더(복잡) 스폰 → `/review code deep` 3인(doc-aware PASS · codex FIX · deep lifecycle FIX → epoch 갭 적출, 사용자 "지금 같이 고침" 결정) → 2차 코더(epoch fix; `upsert_preserving_hierarchy`가 bump된 epoch를 stale 스냅샷으로 덮던 것도 적출·수정) → 재리뷰(doc-aware PASS · codex FIX-minor: never-run bump·wrap·delete-recreate 전부 도달불가/무해로 판별).
 - **게이트:** `cargo test -p core`(200 lib + activation 4 + reaper 8 + backend `--resume` 신규 · TDD로 `reactivate_after_kill_bumps_epoch` 수정 전 실패 실증) · `-p protocol`(38+11) green · `cargo check --workspace` clean · fmt · 격리 0. **daemon 링크·GUI 실측 = 러닝 앱 exe-lock으로 이월(사용자 재기동 후 실측)** — 변경 core-only. 커밋 = 내 파일만(code 8 + ADR 0019/0083/0084 + 인덱스 + step-log). S17 안 섞임.
 
+## S17 슬라이스 1 — 메시지 길 스코프 확정 + 인터페이스 표 §6 (2026-07-14, master, 승계 세션) · tracking T-12/T-13 · 커밋 이 항목과 함께
+- **무엇:** ① "wait" 표시 정식 재설계 리서치(/research medium 설계-결정 + codex 적대리뷰 BLOCK→반영) → **T-12** 백로그 박제(착수 보류 — 선결조건: --include-partial-messages 미활성·turn_id 부재·Error 판별자·경과 5시계 의미). ② 메시지 시스템 성숙도 정정(독립 PRD/TRD 없음 — 서베이 2건뿐) + 스코프 **사용자 확정** = "전송 길만"(풀 메일박스 보류) → **T-13**. 전송 길의 미구현 조각 = engram-ctl뿐(JSON write_input이 이미 평문→유저 턴 wrap, `session.rs:106/:338`) → 별도 PRD 없이 **S17에 수직 슬라이스로 탑승**. ③ TRD **§6 인터페이스 상세 표(슬라이스 1: agent list/write + list-commands)** 작성 — 슬라이스 2(obs/view 표)는 이월.
+- **결정:** (사용자) 슬라이스 1 우선 · **FORK-3 발신자 표기 = 자동 `[from: <이름> (<풀UUID>)]`**(env `ENGRAM_AGENT_ID/NAME` 주입, advisory·위조방지 아님) · busy = 기존 mid-turn 상속. (내부·보고) v1 결과 사상(내부 wire 절연) · 에러코드 = ctl best-effort 합성(데몬 typed 에러 없음 — golden 고정) · `retryMode` enum(never/same-request-id/after-condition) · 재시도 계약 = dedup store 슬라이스 1 포함 + `retryWindowMs`(기본 5분) + `OUTCOME_UNKNOWN`은 같은 request-id 재시도만 안전 + `REQUEST_ID_CONFLICT` · lease = 실물 정정(빈 lease면 WriteStdin 통과 — acquire 댄스 금지) · 터미널 대상 = raw·자동 제출 없음.
+- **경위/어떻게:** `/review trd` full 2인 — doc-aware(Claude 상급) FIX 5건(mode 필드 부재·에러 문자열 실물·lease 실물·터미널 \r·ALREADY_APPLIED 누락, 전부 코드 실측) / blind(codex) BLOCK(결과불명 재시도=중복 주입 계약 부재)+HIGH 4. 전 항목 반영 → codex 재확인 **BLOCK→FIX 해제**, 잔여 3건(retryWindow 노출·retryMode enum·타입 고정)도 반영. 라벨 대립(FIX vs BLOCK)은 findings 상호보완 판별 + 사용자 승인("수정가능하면 그냥 해")으로 FIX 취합.
+- **게이트:** 문서만(코드 diff 0) — build/test 해당 없음. 다음 = 모듈 경계(DDD: engram-ctl crate 신설·데몬 dedup store·spawn env 오버레이) → `/implement` 구현+TDD. 그다음 = resume-wait 버그(T-12 최소판과 동일 지점).
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 다음 = ADR-0080 + /review prd + TRD.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
@@ -983,7 +989,7 @@
 - **codex/gemini CLI spike** — 실제 CLI 구독 후 플래그 확정 → `AgentCommand`에 Codex/Gemini variant 추가 + `backend_for` 라우팅 연결(현재 stub은 best-guess+미연결).
 - **[게이트] 자동 재시작** — `restart_agent` 전용 태스크(사다리 resume→fresh→정지, backoff). 코어 안정 후.
 - **실제 claude 복원 E2E** — headless는 shell만 실증. claude `--session-id`/`--resume` + `sessions/<pid>.json` PID 일치를 실제 claude로 실측(spike) 필요.
-- 메시지 시스템(에이전트 간 통신) — 백엔드 추가 설계.
+- 메시지 시스템(에이전트 간 통신) — **MVP(전송 길) = S17 슬라이스 1로 흡수(T-13, 2026-07-14)**. 풀 메일박스(받은편지함·영속·ACK)만 여기 남음 — 착수 시 입력 = `docs/research/agent-messaging-survey-2026-06-28.md`.
 - Phase 3d (popup URL 전달 + monaco) + 프론트 상세(복원 배너 UX).
 - `reference/` 정설 문서 집필 (시스템 안정화 후)
 - **[정리] `pty/` 폴더명·구성 재고** — S10 후 `pty/`가 PTY 전용이 아니라 에이전트 코어 전반(AgentManager/AgentSession/OutputCore/transport/backend) 보유. 폴더명이 내용과 불일치(에이전트 공용 매니저가 pty/ 안). 다른 모듈 배치도 같이 점검(사용자 지적 2026-06-14, 트리 슬롯화 작업 끝난 뒤).
