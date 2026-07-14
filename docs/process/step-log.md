@@ -952,8 +952,22 @@
 - **검증(qa full PASS):** 프론트 전용(crates/** diff 없음) · `npx tsc --noEmit` 0 · `npm test`(vitest **613**) · 코어격리(실 import 0) · **라이브 GUI 실측(cdp 9223)**: pane 배경 우클릭→"에이전트 생성" container→flyout [클로드 터미널 생성/클로드 JSON 생성] 렌더 + command 3종 등록 + invalid outputFormat fail-loud throw(다이얼로그 전) 확인.
 - **게이트:** ADR-0078 신설(본문·인덱스, lint error 0) + 이 step-log. 커밋 = 프론트 3파일(agentCommands·agentCommands.test·ko.ts) + ADR-0078 + 인덱스(README) + step-log. **보존:** `stash@{0}`(per-activation 시도 — ADR 거부-대안 근거, 폐기 여부 사용자 판단 대기).
 
+## S17 — LLM 제어 표면 PRD (release-safe) (2026-07-13, master) · PRD 초안
+- **무엇:** release에서 LLM(스폰된 child claude)이 앱을 제어 못 하는 갭(§5)을 푸는 정식 제어 표면 PRD 작성. 진단: 제어 핸들(`window.__*`)은 살아 있으나 외부→웹뷰 유일 브리지가 CDP(dev 전용)라 release에서 붕괴. `scripts/engram.mjs`(ADR-0014 방향)가 release-safe 경로(portfile→데몬 WS)를 이미 증명(THROWAWAY).
+- **결정된 방향:** 호출 = `claude Bash → Rust engram-ctl → 데몬 WS(토큰)`, MCP-HTTP 배제(로컬 stdio MCP은 보류·금지 아님), chat-text 배제. 권위 2도메인 — 백엔드=데몬 직행 / UI=**데몬 opaque-relay → 앱 ViewManager**(ADR-0035 무지 보존, 데몬은 두 클라 사이 브로커로 역할 확장). 명령 = 의미적 논리트리 연산(좌표 금지, ADR-0068) + 기기별 capability 게이트. 관찰 primitive(wait/events poll/output tail) + 정직 JSON 봉투. 산출물 = 컴파일 Rust `engram-ctl`(Node 스파이크 대체).
+- **경위/어떻게:** 사용자 주도 대화로 좁힘. `/research`(medium — 후보군 4 병렬: CLI→소켓·로컬RPC·HTTP/WS·MCP공정평가 + grounding) → Codex 적대 리뷰 2회(repo 실측: 기존 WS 토큰 auth·engram.mjs·ViewManager 권위 갭 적출, BLOCK→정정) → `claude-code-guide`로 Claude 툴 메커니즘 grounding. "MCP 토큰·지연" 전제는 tool-search defer로 약화됨을 확인했으나, 로컬 부모-자식엔 MCP ceremony 불필요라는 사용자 판단 채택. UI 갭은 "기존 데몬↔앱 WS opaque-relay"로 축소(사용자 지적 — 채널 이미 존재).
+- **게이트:** PRD 초안 = `docs/process/S17-llm-control-surface/spec/prd.md` + 이 step-log. **다음 = ADR-0080(제어표면 아키텍처, 거부대안 포함) + `/review prd` + TRD.** 굵은 설계라 리뷰 전 미확정.
+
+## S17 (계속) — PRD 통과 + ADR-0081(UI relay) + TRD 설계 확정 (2026-07-14, master) · 미커밋
+- **무엇:** S17 PRD를 BLOCK에서 통과로 마감하고 TRD(어떻게·인터페이스) 설계 결정을 전부 잠금. 구현은 다음 세션.
+- **PRD:** R7(child 권한 스코프) = **보류**(로컬 단일 PC = 수용된 위험, prompt-injection 횡이동 명시, `tracking.md` T-11) → "opaque-relay ↔ child 스코프" 모순 해소(=BLOCK 해소). MVP 범위 = 이미 구현된 권위 커맨드 전량(AgentManager ~27 + ViewManager ~15), 프론트 전용(테마·저장복원·트리·렌더모드)은 §5 갭 명시 보류. `/review prd` full **3라운드** 통과 — 관찰 턴경계·라우팅 실패 3종·멱등성·stale-ref·§5 완료측정성 FIX 반영.
+- **ADR:** ADR-0080(제어표면 아키텍처)에 R7 수용위험·단일앱 전제 반영(상태 제안). **ADR-0081 신설(확정)** = UI relay(앱=데몬 명령 수신 WS peer + opaque relay 봉투 + 공유 `ViewCommand` 적용 서비스). 인덱스 재생성(0081 추가).
+- **TRD 설계 결정(잠금):** fork 2 = CLI 문법 `noun-verb`(agent/view/obs) · 앱 적용 = 공유 ViewCommand 서비스(§5). 내부 = 토큰/discoverability(spawn env 오버레이·PATH prepend) · dedup(데몬-전역, 단일 `--request-id`, TTL/LRU 바운드, UiResult 후 커밋) · events cursor(ring 저널+RESET) · 순서(async 상관, 재진입 데드락 회피) · lease(per-call 자동획득) · error 확실성 코드 · mixed-version. 부분적용 원자성만 열림(후속).
+- **경위/어떻게:** 지형 실측(Explore) — request_id correlation·백엔드 명령·portfile 이미 있음, UI relay만 net-new. `/review trd` full 2인(reviewer-deep=FIX: 2 코드-그라운드 버그[`spawn_into` 재진입 데드락·head-of-line 블록]+lifetime 갭 / codex blind=BLOCK: 주로 인터페이스 표 미작성=다음세션 이관). 수정 전부 TRD·ADR-0081 반영.
+- **게이트:** 문서(prd/trd/ADR-0080·0081/tracking/step-log) 전부 **미커밋** — 병렬 ADR-0079 에이전트와 공유파일(README 인덱스·이 step-log) 얽힘이라 커밋은 얽힘 풀고 **내 파일만** stage(다음 세션). QA = 코드 0(문서뿐)이라 build/test 해당 없음. **다음 = 구현 세션**: 인터페이스 상세 표 → 완성 TRD `/review trd` 재검 → 코더·QA 구현+TDD.
+
 ## 다음 (미진행)
-- **[원칙→구현] LLM 제어 표면** — CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 새 UI 기능마다 제어 경로 동반.
+- **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 다음 = ADR-0080 + /review prd + TRD.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
 - **[입주 2단계] 에이전트 데몬화 (Rust 서버 + React 소켓 클라, tmux 모델)** — UI 재시작이 에이전트를 안 죽이게(서버가 세션 보유, 클라가 attach). **시점 결정: 에이전트 안정화(자동재시작·복원) 끝난 직후.** 공수 ~1~2주, `ptyApi.ts`/`eventBus`/`OutputSink`가 길목이라 facade swap(갈아엎기 X). 로컬 속도 영향 0(이미 직렬화 중, loopback 한 홉). 원격/모바일과 동일 인프라. **전제: "메시지 패싱·무상태 클라" 규율 유지**(공유메모리·동기 가정 금지)로 double-stabilization 방지 — facade 한 곳만 재검증.
 - **[큰 것] 원격(WS) 프론트 = 모바일 제어** — 데몬화(2단계)의 자연 연장. 에이전트는 데스크톱(데몬)에서 돌고 폰은 원격 I/O 프론트로 attach. 인증/TLS 추가. 보안 1급.
