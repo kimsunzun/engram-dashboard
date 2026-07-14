@@ -969,13 +969,16 @@ impl ConnectionCore {
                 //     spawn_agent(Resume)가 ensure_session_id 로 최초 sid 를 발급하므로 안전하다(sid 발급은
                 //     spawn_agent 단일 권위점, ADR-0076). 즉 mode = resume-요청 OR 세션-존재.
                 //
-                // ★조기종료 → fresh-fallback(ADR-0076)★: 이어받을 수 없는 세션(빈/미대화/손상 —
-                //   claude 가 "No conversation found ..." 로 즉사)을 Resume 하면 그냥 죽었다(재현 버그).
-                //   그래서 spawn_agent 이 아니라 activate_profile 을 부른다 — restore_one(부팅 복원)과
-                //   동일한 resume→조기종료→fresh-fallback 규율을 적용해, 못 이어받는 세션은 새 sid 로
-                //   새로 시작한다(사용자 결정: "스폰만 하고 한마디도 안 한 건 그냥 새로 시작"). Fresh 는
-                //   그대로 즉시 spawn(감지 무의미). blocking(EARLY_EXIT_WINDOW)은 이 연결 응답만 지연.
-                // 성공 시 Spawned(AgentInfo 동봉)로 응답, 실패/없음은 Error.
+                // ★이어받기 전용 + 재활성화 가드(ADR-0082 — fresh-fallback 폐지)★:
+                //   spawn_agent 이 아니라 activate_profile 을 부른다. activate_profile 이 세 갈래를 처리한다:
+                //   ① 이미 실행 중이면 산 에이전트를 놔두고 현재 AgentInfo 를 그대로 반환(재활성화 가드 —
+                //      a4aac1a 회귀 수정: 이중-spawn 가드 Err 가 옛 fresh-fallback 을 발화해 산 에이전트를
+                //      파괴하던 경로를 원천 차단). ② Fresh(세션 없음)는 정상 신규 spawn. ③ Resume 은
+                //      이어받기만 시도하고, 이어받을 수 없으면(빈/미대화/손상 — claude "No conversation
+                //      found ...") **새 대화를 만들지 않고** Failed(시체)로 남기고 원인을 로그로 남긴다
+                //      (LLM 이 읽어 사용자에게 에스컬레이션 — 사용자 결정: "아무것도 죽지마, 새로 만들지마").
+                //   Resume 은 blocking(EARLY_EXIT_WINDOW)이라 이 연결 응답만 지연(다른 세션 무영향).
+                // 성공(resume·재활성화·fresh) 시 Spawned(AgentInfo 동봉)로 응답, 실패/없음은 Error.
                 // agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
                 match manager.profiles().get(profile_id) {
                     Some(profile) => {

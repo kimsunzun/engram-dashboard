@@ -40,8 +40,10 @@ use crate::agent::types::{
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
-/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하면 resume 실패로 보고
-/// fresh로 fallback한다(H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하면 resume 실패로 판정한다
+/// (H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+/// ★ADR-0082★: 옛날엔 이 신호를 fresh-fallback(새 대화 자동 생성)으로 번역했으나, 이제는
+/// **Failed(시체) 종점 + 원인 로그**로 번역한다 — 자동으로 새 대화를 만들지 않는다.
 const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
@@ -165,6 +167,16 @@ impl AgentManager {
         mode: SpawnMode,
     ) -> Result<AgentInfo, PtyError> {
         // 이중 spawn 가드 — 같은 id가 이미 살아있으면 거부(맵 교체는 복원/재시작 경로 전용).
+        // ★ADR-0082★: 이 Err 는 순수 방어선일 뿐 파괴 트리거가 아니다. activate_profile 이 진입 시
+        //   contains_key 를 **선제로** 검사해 산 에이전트면 여기 닿기 전에 무해한 재활성화로 처리한다
+        //   (옛날엔 이 Err 가 resume_with_fresh_fallback 에 의해 "resume 실패"로 오인돼 산 에이전트를
+        //   kill 하는 a4aac1a 회귀를 낳았다 — 이제 그 오인 경로 자체가 없다).
+        // ★잔여 레이스(ADR-0082 미해결·후속)★: 이 가드는 여기서 read lock 을 잡아 contains_key 를 본 뒤
+        //   놓고, 실제 등록(sessions.insert)은 아래에서 별개 write lock 으로 한다 — 그 사이 창이 있다.
+        //   같은 id 를 **서로 다른 연결**이 동시에 SpawnProfile 하면 둘 다 이 검사와 activate_profile 의
+        //   pre-check 를 통과해 double-spawn 이 날 수 있다(데몬 명령 처리는 연결당 직렬일 뿐 연결 간엔
+        //   아니다 — 각 연결이 제 read_task 에서 dispatch 를 await 한다). 이 window 는 ADR-0082 이전부터
+        //   있던 **선재(pre-existing) 레이스**이며 이번 변경이 도입하지도 닫지도 않았다(후속 과제로 flag).
         if self
             .sessions
             .read()
@@ -270,41 +282,61 @@ impl AgentManager {
         Ok(info)
     }
 
-    /// ★수동 활성화 진입점 — resume 조기종료 시 fresh-fallback(ADR-0076)★.
-    /// SpawnProfile 핸들러가 `spawn_agent` 대신 이걸 부른다. `spawn_agent` 은 프로세스를 띄우기만
-    /// 하고 조기종료를 감지하지 않는다 — 빈/미대화 세션(claude 가 "No conversation found ..." 로
-    /// 즉사)을 resume 하면 그냥 죽었다(이 세션의 재현 버그). 이 메서드가 restore_one 과 **동일한**
-    /// resume→조기종료→fresh-fallback 규율을 적용해, 이어받을 수 없는 세션은 새 sid 로 새로 시작한다.
+    /// ★수동 활성화 진입점 — 이어받기(resume) 전용, fresh-fallback 폐지(ADR-0082)★.
+    /// SpawnProfile 핸들러가 `spawn_agent` 대신 이걸 부른다. 세 갈래로 나뉜다:
+    ///
+    /// 1. **이미 실행 중(재활성화 가드)** — 같은 id 세션이 살아 있으면 **아무것도 죽이거나
+    ///    재spawn 하지 않고** 그 세션의 AgentInfo 를 그대로 돌려준다(무해한 "이미 실행 중" 신호,
+    ///    epoch 불변). ★이게 a4aac1a 회귀의 핵심 수정★: 예전엔 이 경로가 `spawn_agent` 이중-spawn
+    ///    가드의 "already running" Err 를 만나 `resume_with_fresh_fallback` 이 그걸 "resume 실패"로
+    ///    오인 → `fallback_fresh` 가 **멀쩡히 돌던 산 에이전트를 kill** → epoch++ → 빈 fresh 로 교체
+    ///    (유저 실측 회귀). 이제 가드 Err 에 닿기 전에 선제 contains_key 로 걸러 산 에이전트를 놔둔다.
+    ///    (이 pre-check 는 흔한 경로 — **같은 연결**에서 직렬로 들어오는 재활성화 — 를 닫는다. spawn_agent
+    ///    의 이중-spawn 가드는 최후 방어선으로 남지만, pre-check 와 실제 spawn 사이의 TOCTOU 를 완전히
+    ///    닫지는 못한다: **다른 연결**이 같은 id 를 동시에 활성화하면 둘 다 pre-check 와 contains_key 를
+    ///    통과해 double-spawn 이 날 수 있다(데몬 명령 처리는 연결당 직렬일 뿐 연결 간엔 아님). 이 레이스는
+    ///    ADR-0082 이전부터 있던 선재(pre-existing) window 로, 이번 변경이 닫지 않는다 — 후속 과제.)
+    /// 2. **Fresh(진짜 신규 — 세션 없음)** — `spawn_agent(Fresh)` 위임(이어받을 대화 없음, 기존 동작
+    ///    보존). 이건 실패-fallback 이 아니라 정상 신규 생성이다(ADR-0076 "Fresh=새 sid" 유효).
+    /// 3. **Resume** — `resume_no_fallback` 로 이어받기만 시도한다. 이어받을 수 없으면(빈/미대화/손상 —
+    ///    claude 가 "No conversation found ..." 로 즉사) **새 대화를 만들지 않고** Failed(시체)로
+    ///    남기고 사유를 로그로 남긴다(ADR-0082 — 원인은 LLM 이 읽어 에스컬레이션). 여기선 Err 로 노출.
     ///
     /// ★blocking★: Resume 모드는 EARLY_EXIT_WINDOW(현 3s)만큼 조기종료를 폴링하므로 호출이 그만큼
     ///   블록될 수 있다(restore_all 과 동일 성질). 데몬의 명령 처리 스레드에서 호출되므로 그 연결의
-    ///   응답만 지연되고 다른 세션에는 영향 없다. Fresh 모드는 폴링 없이 즉시 반환한다.
-    ///
-    /// 반환: 최종 살아있는 세션의 AgentInfo. Resume 성공 → resume 세션, fresh-fallback 성공 →
-    ///   새 세션, 둘 다 실패 → Err(사유). Fresh 모드는 spawn_agent 을 그대로 위임(변화 없음).
-    // ADR-0077
+    ///   응답만 지연되고 다른 세션에는 영향 없다. Fresh 모드·재활성화 가드는 폴링 없이 즉시 반환한다.
+    // ADR-0082
+    // ADR-0076
     pub fn activate_profile(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<AgentInfo, PtyError> {
-        // Fresh(진짜 신규 — 세션 없음)는 조기종료 감지가 무의미하다(이어받을 대화가 없다).
-        // spawn_agent 을 그대로 위임해 기존 동작을 보존한다.
+        // 1. ★재활성화 가드(ADR-0082) — 산 에이전트를 절대 건드리지 않는다★. 같은 id 세션이 이미
+        //    살아 있으면 kill/재spawn/epoch-bump 없이 현재 세션의 AgentInfo 를 무해하게 돌려준다.
+        //    이중-spawn 가드 Err 가 파괴 트리거(옛 fresh-fallback)로 번역되던 회귀를 원천 차단한다.
+        //    (read lock 은 clone 후 즉시 해제 — §10 락 순서 준수, agent_info 는 lock 미보유로 호출.)
+        if let Ok(session) = self.get_session(profile.id) {
+            tracing::info!(
+                agent = %profile.id,
+                "activate_profile: 이미 실행 중 — 재활성화 무시(산 에이전트 보존, ADR-0082)"
+            );
+            return Ok(self.agent_info(&session));
+        }
+
+        // 2. Fresh(진짜 신규 — 세션 없음)는 이어받을 대화가 없으므로 spawn_agent 위임(정상 신규 생성).
         if mode == SpawnMode::Fresh {
             return self.spawn_agent(profile, SpawnMode::Fresh);
         }
 
-        // Resume: restore_one 과 동일한 조기종료→fresh-fallback 규율.
-        // resume_with_fresh_fallback 은 RestoreOutcome 을 돌려주므로, 결말을 AgentInfo/Err 로 번역한다.
-        // fallback 성공 시 세션 맵에는 새 세션이 이미 등록돼 있어 id 로 AgentInfo 를 다시 조립한다.
-        match self.resume_with_fresh_fallback(profile) {
-            // resume 성공 또는 (조기종료 후) fresh-fallback 성공 — 살아있는 세션의 info 반환.
-            RestoreOutcome::Resumed | RestoreOutcome::FreshFallback { .. } => {
-                self.agent_info_by_id(profile.id)
-            }
-            // resume 도 fresh-fallback 도 실패 → 종점 Failed. 호출자(핸들러)엔 Err 로 노출.
+        // 3. Resume: 이어받기만 시도(fresh-fallback 폐지). resume_no_fallback 이 RestoreOutcome 을
+        //    돌려주므로 결말을 AgentInfo/Err 로 번역한다.
+        match self.resume_no_fallback(profile) {
+            // resume 성공 — 살아있는 세션의 info 반환.
+            RestoreOutcome::Resumed => self.agent_info_by_id(profile.id),
+            // resume 실패/조기종료 → 종점 Failed(시체). 새 대화 안 만듦. 호출자(핸들러)엔 Err 로 노출.
             RestoreOutcome::Failed { reason } => Err(PtyError::SpawnFailed(reason)),
-            // resumable 프로필로만 진입하므로 Started/Blocked 는 도달 불가(방어적 Err).
+            // resumable 프로필로만 진입하므로 Started/Blocked/FreshFallback 은 도달 불가(방어적 Err).
             other => Err(PtyError::SpawnFailed(format!(
                 "activate_profile: 예상 밖 결말 {other:?}"
             ))),
@@ -455,7 +487,7 @@ impl AgentManager {
         reports
     }
 
-    /// 프로필 1개 복원. claude+sid 있으면 resume 시도 후 조기종료면 fresh fallback,
+    /// 프로필 1개 복원. claude+sid 있으면 resume 시도(실패 시 Failed 시체, fresh-fallback 폐지),
     /// 그 외(shell 등)는 fresh로 시작.
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
         let resumable =
@@ -471,78 +503,55 @@ impl AgentManager {
             };
         }
 
-        // claude resume 시도 → 조기종료면 fresh fallback(공용 규율, ADR-0076).
-        self.resume_with_fresh_fallback(profile)
+        // claude resume 시도 → 실패/조기종료면 Failed(시체) 종점(fresh-fallback 폐지, ADR-0082).
+        self.resume_no_fallback(profile)
     }
 
-    /// ★resume→조기종료→fresh-fallback 공용 규율(ADR-0076 — 부팅복원·수동활성화 공유)★.
+    /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
     /// 전제: 호출 시점에 이 프로필은 resumable(claude + sid 존재)이라고 이미 판정됐다.
     ///
     /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 비정상 종료(빈/미대화/손상
-    /// 세션이면 claude 가 "No conversation found ..." 로 즉사)하면 새 sid 로 fresh fallback 한다.
-    /// 이 로직을 restore_one(부팅 복원)과 activate_profile(수동 활성화)이 **똑같이** 재사용한다 —
-    /// 예전엔 restore 경로에만 있어 수동 활성화가 조기종료 시 그냥 죽었다(이 세션의 재현 버그).
-    // ADR-0077
-    // ADR-0076
+    /// 세션이면 claude 가 "No conversation found ..." 로 즉사)하면 **새 대화(fresh)를 자동으로
+    /// 만들지 않고** Failed(시체) 종점으로 직행한다 — 사유를 로그로 남겨 LLM 이 읽고 에스컬레이션한다.
+    /// ★아무것도 kill·재spawn 하지 않는다★: resume child 는 자기 pump 가 EOF→finish 하고, reaper 가
+    ///   그 세션을 맵에서 수거하며 프로필을 `auto_restore=false`(KeepDisableAutoRestore)로 내려
+    ///   트리에 `Failed` 시체로 남긴다(profile 은 지워지지 않음 — exit≠0/불명은 삭제 대상이 아님).
+    ///   이 헬퍼는 종료를 관측만 하고 어떤 파괴 동작도 하지 않는다(옛 fallback_fresh 의 remove_session·
+    ///   epoch++·respawn 을 전부 걷어냈다 — ADR-0082 사용자 결정: "아무것도 죽지마, 새로 만들지마").
+    /// 이 로직을 restore_one(부팅 복원)과 activate_profile(수동 활성화)이 **똑같이** 재사용한다.
+    // ADR-0082
     // ADR-0008
-    fn resume_with_fresh_fallback(&self, profile: &AgentProfile) -> RestoreOutcome {
+    fn resume_no_fallback(&self, profile: &AgentProfile) -> RestoreOutcome {
         match self.spawn_agent(profile, SpawnMode::Resume) {
-            Err(e) => self.fallback_fresh(profile, format!("resume spawn 실패: {e}")),
+            Err(e) => {
+                // resume spawn 자체 실패 — 원인을 로그로 남긴다(삼키면 §5 위반). 새 대화 안 만듦.
+                let reason = format!("resume spawn 실패: {e}");
+                tracing::warn!(
+                    agent = %profile.id,
+                    %reason,
+                    "ADR-0082: resume 실패 → Failed(시체), fresh-fallback 없음"
+                );
+                RestoreOutcome::Failed { reason }
+            }
             // ★fable M-1★: 성공한 claude resume은 TUI라 윈도 안에 종료하지 않는다.
             // 따라서 윈도 내 terminal 진입은 code와 무관하게 resume 실패 신호다
             // (code==0 조기 종료를 Resumed로 오판하면 빈 화면을 "복원 성공"으로 오보).
             // None(여전히 Running)만 Resumed.
             Ok(_) => match self.early_terminal_status(profile.id, EARLY_EXIT_WINDOW) {
                 Some(status) => {
-                    self.fallback_fresh(profile, format!("resume 조기 종료({status:?})"))
+                    // resume 조기종료 = 이어받을 수 없는 세션(claude "No conversation found ...").
+                    // ★원인 로그(제어 표면 입력)★: LLM 에이전트가 이 로그를 읽어 사용자에게
+                    //   에스컬레이션한다(ADR-0082 §5). 자동 fresh 대체 없음 — Failed 시체로 남긴다.
+                    //   세션은 이미 스스로 종료했으므로 여기서 remove/kill 하지 않는다(reaper 가 수거).
+                    let reason = format!("resume 조기 종료({status:?})");
+                    tracing::warn!(
+                        agent = %profile.id,
+                        %reason,
+                        "ADR-0082: resume 조기종료 → Failed(시체), fresh-fallback 없음 — LLM 에스컬레이션 대상"
+                    );
+                    RestoreOutcome::Failed { reason }
                 }
                 None => RestoreOutcome::Resumed,
-            },
-        }
-    }
-
-    /// resume 실패 시: 기존 세션 정리 → epoch++ → fresh spawn(새 sid 는 spawn_agent 이 발급).
-    /// fresh마저 실패하면 `Failed`로 종결(재귀 금지 — H-1.7 종점).
-    ///
-    /// ★sid 발급을 spawn_agent 에 위임(ADR-0076 — 이중 발급 봉인)★: 예전엔 여기서 새 sid 를 미리 만들어
-    ///   profile 에 심고 spawn_agent(Fresh)를 불렀다. 그러나 이제 spawn_agent 이 Fresh 모드에서 반드시
-    ///   `new_session_id` 로 새 sid 를 발급한다 — 여기서 또 심으면 sid 가 두 번 발급돼(내 sid 가 곧장
-    ///   old_session_ids 로 밀림) 인과가 꼬인다. 그래서 여기선 **epoch 만 bump**(맵 교체, H-1.5)하고
-    ///   sid 발급은 spawn_agent 에 일임한 뒤, spawn 성공 후 확정된 sid 를 프로필에서 읽어 보고한다.
-    ///   이렇게 하면 "새 sid → 옛 sid 는 이력" 인과가 spawn_agent 단일 지점에서만 일어난다.
-    // ADR-0076
-    fn fallback_fresh(&self, profile: &AgentProfile, reason: String) -> RestoreOutcome {
-        tracing::warn!(agent = %profile.id, %reason, "resume 실패 → fresh fallback");
-        self.remove_session(profile.id);
-
-        let old_sid = profile.claude_session_id;
-        // epoch++(맵 교체, H-1.5). sid 는 건드리지 않는다 — spawn_agent(Fresh)가 new_session_id 로
-        // 새로 발급하며 옛 sid 를 이력으로 민다(단일 발급점, ADR-0076).
-        self.profiles.update_with(profile.id, |p| {
-            p.epoch = p.epoch.wrapping_add(1);
-        });
-
-        let updated = self
-            .profiles
-            .get(profile.id)
-            .unwrap_or_else(|| profile.clone());
-
-        match self.spawn_agent(&updated, SpawnMode::Fresh) {
-            Ok(_) => {
-                // spawn_agent(Fresh)이 발급·persist 한 새 sid 를 읽어 보고한다(발급 주체가 아니라 관측).
-                let new_sid = self
-                    .profiles
-                    .get(profile.id)
-                    .and_then(|p| p.claude_session_id)
-                    .unwrap_or_else(uuid::Uuid::new_v4);
-                RestoreOutcome::FreshFallback {
-                    old_sid,
-                    new_sid,
-                    reason,
-                }
-            }
-            Err(e) => RestoreOutcome::Failed {
-                reason: format!("fresh fallback도 실패: {e}"),
             },
         }
     }
@@ -574,26 +583,9 @@ impl AgentManager {
         }
     }
 
-    /// 세션을 조용히 정리(상태 알림 없이) — fallback 전 옛 세션 제거 전용.
-    ///
-    /// ★fable C-1★: 단순 kill/take만 하고 반환하면 옛 pump 스레드가 아직 살아 있다가
-    /// 뒤늦게 `status_changed(id, Killed)`를 emit한다. 직후 같은 id로 fresh respawn하면
-    /// 그 stale Killed가 갓 살아난 새 세션을 덮을 수 있다. 따라서 여기서도 kill_agent처럼
-    /// session.kill로 **pump 완료를 동기 대기**(join_pump)해 옛 pump의 terminal 알림이
-    /// respawn보다 먼저 끝나게 한다. enter_exiting/agent_list_updated는 호출하지 않는다(silent).
-    fn remove_session(&self, id: AgentId) {
-        self.tracker.unwatch(id);
-        let removed = self
-            .sessions
-            .write()
-            .expect("sessions poisoned")
-            .remove(&id);
-        if let Some(session) = removed {
-            // shutdown(자원 폐쇄, master drop) + join_pump(완료 대기). pump의 finish(Killed)는
-            // 정상 발행되고 join으로 소진된다 — stale Killed가 respawn 전에 끝남(원본 C-1 동작 동일).
-            session.kill(Duration::from_secs(5));
-        }
-    }
+    // (옛 remove_session 삭제 — ADR-0082 fresh-fallback 폐지로 유일 호출자 fallback_fresh 가
+    //  사라져 dead code 가 됐다. "옛 세션 kill 후 fresh 로 교체" 자체가 폐지된 동작이라 이 silent
+    //  cleanup 헬퍼도 함께 제거한다. 정식 kill 은 kill_agent(reaper 위임)가 담당한다.)
 
     // ── 구독/입출력 ────────────────────────────────────────────────────────
 
@@ -739,10 +731,10 @@ impl AgentManager {
             .ok_or(PtyError::NotFound(agent_id))
     }
 
-    /// id 로 세션을 찾아 AgentInfo 를 조립(없으면 NotFound). activate_profile 이 fresh-fallback
-    /// 후 새 세션의 info 를 얻는 데 쓴다 — fallback 은 세션을 맵에 등록만 하고 info 를 돌려주지
-    /// 않으므로(RestoreOutcome 반환) id 로 재조회한다. §10 락 순서 준수(get_session 이 read lock
-    /// 즉시 해제 → agent_info 는 lock 미보유 상태에서 호출).
+    /// id 로 세션을 찾아 AgentInfo 를 조립(없으면 NotFound). activate_profile 이 resume 성공 후
+    /// 살아있는 세션의 info 를 얻는 데 쓴다 — resume_no_fallback 은 세션을 맵에 등록만 하고 info 를
+    /// 돌려주지 않으므로(RestoreOutcome 반환) id 로 재조회한다. §10 락 순서 준수(get_session 이 read
+    /// lock 즉시 해제 → agent_info 는 lock 미보유 상태에서 호출).
     fn agent_info_by_id(&self, id: AgentId) -> Result<AgentInfo, PtyError> {
         let session = self.get_session(id)?;
         Ok(self.agent_info(&session))

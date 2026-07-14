@@ -1,6 +1,6 @@
 # ADR-0077: 수동 활성화도 resume 조기종료 시 fresh-fallback 공유 — ADR-0076 정련
 
-- 상태: 확정 (2026-07-13, 근거: 데몬 콜드부팅 후 미대화 프로필 활성화 → claude "No conversation found with session ID <sid>" 로 즉사, fresh-fallback 미발화(daemon-debug.log))
+- 상태: **폐기 (Superseded by ADR-0082)** — fresh-fallback 정책 자체가 번복됐다. 이 ADR 의 존재 이유(수동 활성화도 resume 조기종료 시 fresh-fallback 공유)가 통째로 무효 — 사용자 결정: resume 실패는 자동 fresh 대체 없이 Failed(시체)로 남기고 원인 로그·LLM 에스컬레이션. 게다가 이 확장이 산 에이전트 재활성화 시 파괴하는 회귀(a4aac1a)의 직접 원인이었다. ~~확정 (2026-07-13, 근거: 데몬 콜드부팅 후 미대화 프로필 활성화 → claude "No conversation found with session ID <sid>" 로 즉사, fresh-fallback 미발화(daemon-debug.log))~~
 - 관련: Amends ADR-0076 (수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다) · ADR-0008(세션복원 sid 통제) · `agent/manager.rs::activate_profile`/`resume_with_fresh_fallback`/`restore_one`/`fallback_fresh` · `daemon/connection_core.rs::SpawnProfile` · step-log
 
 ## 맥락
