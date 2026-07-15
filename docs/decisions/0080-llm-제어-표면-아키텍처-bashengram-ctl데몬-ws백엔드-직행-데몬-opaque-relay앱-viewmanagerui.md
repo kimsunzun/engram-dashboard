@@ -1,6 +1,6 @@
 # ADR-0080: LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI)
 
-- 상태: 제안 (2026-07-13, 근거: `/research` medium + Codex 적대리뷰 2회 + claude-code-guide grounding — `/review prd` 통과 시 확정)
+- 상태: **폐기 (Superseded by ADR-0085)** — 제어 채널 ingress를 engram-ctl CLI(토큰·WS)에서 in-band 출력 마커(M3)로 피벗(보안·속도). 이 ADR은 제안(미확정)에 머문 채 headline 기제가 대체됨. **주의: 폐기 = engram-ctl ingress 한정** — 아래 정의된 UI opaque-relay·권위 2도메인은 ADR-0081(확정)로 존속한다. ~~제안 (2026-07-13, 근거: `/research` medium + Codex 적대리뷰 2회 + claude-code-guide grounding — `/review prd` 통과 시 확정)~~
 - 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0014(데몬 CLI-via-Bash 방향) · ADR-0035(레이아웃 권위=src-tauri ViewManager) · ADR-0068(슬롯 공간 어휘) · ADR-0011(agentClient 제어표면) · PRD `docs/process/S17-llm-control-surface/spec/prd.md` · step-log S17 · 스파이크 `scripts/engram.mjs` · 데몬 WS auth `crates/engram-dashboard-daemon/src/ws.rs`
 
 ## 맥락

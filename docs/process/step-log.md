@@ -984,6 +984,12 @@
 - **실측(근거):** M4 hook 우리 헤드리스 호출서 발화·`tool_input.command`+`session_id` 캡처·`--settings` 주입·deny 차단 ✓. M3 마커 38/38 완벽 방출(단일라인)·유일 함정=펜스 예시 false-trigger→펜스스킵 파서로 해결 ✓. 라이브/리플레이 경계 코드 확인(seed=fanout 없음 → 마커 파서는 라이브만, ADR-0079).
 - **게이트:** 문서만(결정 노트 `S17-llm-control-surface/control-channel-deliberation-m3.md` + 이 항목). **미승격**: 정식 ADR(0014/0080 supersede)·PRD/TRD 갱신·Unit 재설계는 추가 논의 후. **★병렬 세션이 engram-ctl 크레이트 미커밋 생성 중** — 조율 필요.
 
+## S17 제어 채널 — M3 결정 정식 ADR 박제 (ADR-0085 신설 + ADR-0080 폐기) (2026-07-15, master, 승계 세션) · 커밋 이 항목과 함께
+- **무엇:** 직전 항목("피벗")이 남긴 "ADR 미승격"을 닫는다. M3(in-band 출력 마커) 채널 결정을 정식 ADR로 박제하고 engram-ctl 원안 ADR을 폐기 처리. 코드 diff 0(문서만).
+- **결정(박제):** **ADR-0085 신설(확정)** = "CLI 백엔드 제어 채널 = in-band 출력 마커(M3) — engram-ctl 폐기". CLI=마커·API=직접 콜백·M4(hook)=문서화 폴백(capability matrix ADR-0002) + M3 단방향 fire-and-forget + 세부 설계(프로토콜·파서·ControlSignal·라우팅·표시억제)는 후속 ADR로 이관. **ADR-0080 전체 폐기(Superseded by 0085)** — 제안(미확정)에 머문 채 headline 기제(engram-ctl ingress)가 대체됨. **폐기 = engram-ctl ingress 한정** — 0080이 정의한 UI opaque-relay·권위 2도메인은 **ADR-0081(확정)로 존속**(본문·인덱스에 오독 방지 단서 박음).
+- **경위/판단:** supersede 범위는 호출자(메인) 판단 — 0080은 **full**(제안·headline 사망), **ADR-0014는 손대지 않음**(실독 결과 "오케스트레이션 참조 후보 목록"일 뿐 engram-ctl을 결정하지 않아 M3와 무충돌 — 직전 "0014/0080" 묶음은 0080 cross-ref의 오기재). 병렬 세션의 engram-ctl 크레이트는 이미 커밋 `7543126`에서 삭제 정리 완료(잔여 없음).
+- **게이트:** `/adr supersede` 스크립트로 채번(0085)·스캐폴드·0080↔0085 양방향 링크·인덱스 재생성 → **lint clean(error 0**; advisory 5는 전부 기존 레거시=ADR-0016 부분폐기 링크·ADR-0027 폐기 앵커 4, 이번 변경 무관). 문서만이라 build/test 해당 없음. **다음 = M3 세부 파싱 설계**(마커 프로토콜·펜스스킵 파서·`OutputEvent::ControlSignal`·데몬 라우팅·표시 억제) → `/implement`+TDD.
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 다음 = ADR-0080 + /review prd + TRD.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
