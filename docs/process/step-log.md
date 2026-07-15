@@ -978,6 +978,12 @@
 - **경위/어떻게:** `/review trd` full 2인 — doc-aware(Claude 상급) FIX 5건(mode 필드 부재·에러 문자열 실물·lease 실물·터미널 \r·ALREADY_APPLIED 누락, 전부 코드 실측) / blind(codex) BLOCK(결과불명 재시도=중복 주입 계약 부재)+HIGH 4. 전 항목 반영 → codex 재확인 **BLOCK→FIX 해제**, 잔여 3건(retryWindow 노출·retryMode enum·타입 고정)도 반영. 라벨 대립(FIX vs BLOCK)은 findings 상호보완 판별 + 사용자 승인("수정가능하면 그냥 해")으로 FIX 취합.
 - **게이트:** 문서만(코드 diff 0) — build/test 해당 없음. 다음 = 모듈 경계(DDD: engram-ctl crate 신설·데몬 dedup store·spawn env 오버레이) → `/implement` 구현+TDD. 그다음 = resume-wait 버그(T-12 최소판과 동일 지점).
 
+## S17 제어 채널 피벗 — engram-ctl → in-band 출력 마커(M3) 방향 확정 (2026-07-15, master, 대화 세션) · 쟁점 정리 (ADR 미승격)
+- **무엇:** 에이전트→데몬 메시지 채널을 원안 engram-ctl(CLI+WS+토큰)에서 **in-band 출력 마커(M3)**로 피벗. 사용자 제기(보안: 토큰/포트 미노출 · 속도: per-call 스폰/핸드셰이크 0 · 고빈도)로 재검토. 옵션 M1~M5 + Claude Code "모든 구멍"(hook·출력·강제양식·파일드롭·MCP) 전수 조사 + **실측 스파이크**(claude 2.1.170, `.spike-control/`).
+- **결정(방향):** (사용자) **M3 = 주 경로**(Claude Code CLI 백엔드 — 데몬이 출력 스트림 원래 소유 → 마커 줍기가 최단; hook은 인프로세스 콜백 아닌 간접 릴레이). **M4(hook) = 문서화 폴백**(터미널모드·포맷붕괴 헤지, 지금 구현 X). **engram-ctl(ADR-0014/0080) 폐기 방향.** 진짜 콜백 = API 백엔드에서만 → capability matrix(ADR-0002) 백엔드별 구현.
+- **실측(근거):** M4 hook 우리 헤드리스 호출서 발화·`tool_input.command`+`session_id` 캡처·`--settings` 주입·deny 차단 ✓. M3 마커 38/38 완벽 방출(단일라인)·유일 함정=펜스 예시 false-trigger→펜스스킵 파서로 해결 ✓. 라이브/리플레이 경계 코드 확인(seed=fanout 없음 → 마커 파서는 라이브만, ADR-0079).
+- **게이트:** 문서만(결정 노트 `S17-llm-control-surface/control-channel-deliberation-m3.md` + 이 항목). **미승격**: 정식 ADR(0014/0080 supersede)·PRD/TRD 갱신·Unit 재설계는 추가 논의 후. **★병렬 세션이 engram-ctl 크레이트 미커밋 생성 중** — 조율 필요.
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 다음 = ADR-0080 + /review prd + TRD.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
