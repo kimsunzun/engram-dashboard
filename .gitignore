@@ -18,3 +18,5 @@ _wip/shots/
 # 임시 테스트/디버깅 산출물(로컬 전용).
 .resume-test-aid.txt
 /tree-nested*.png
+# 루트로 새는 디버그 스크린샷(cdp shot 등은 _wip/shots/로 라우팅) — 재발 방지.
+/*.png

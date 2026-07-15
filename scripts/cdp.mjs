@@ -1,6 +1,6 @@
 // Raw CDP helper — node 18+ 전역 WebSocket로 9223(WebView2)에 직접 붙는다. MCP 불필요.
 // 사용:
-//   node scripts/cdp.mjs shot <out.png>     메인 페이지 스크린샷 저장
+//   node scripts/cdp.mjs shot <out.png>     메인 페이지 스크린샷 저장(파일명만 주면 _wip/shots/로 라우팅)
 //   node scripts/cdp.mjs eval "<js>"        메인 페이지에서 JS 평가 후 결과 출력(JSON)
 //   node scripts/cdp.mjs info               타깃 목록
 // 환경: CDP_PORT(기본 9223), CDP_MATCH(기본 메인=hash 없는 localhost:1420/).
@@ -60,9 +60,15 @@ if (!main) { console.error('메인 페이지 없음'); process.exit(1); }
 const c = await cdp(main.webSocketDebuggerUrl);
 
 if (cmd === 'shot') {
-  const out = arg || 'cdp-shot.png';
+  // 스크린샷 기본 보관함 = _wip/shots/ (gitignore됨). 디렉토리 없이 파일명만 주면 그쪽으로 라우팅해 repo 루트 오염 방지.
+  let out = arg || 'cdp-shot.png';
+  if (!/[\\/]/.test(out)) {
+    fs.mkdirSync('_wip/shots', { recursive: true });
+    out = `_wip/shots/${out}`;
+  }
   const { data } = await c.send('Page.captureScreenshot', { format: 'png' });
   fs.writeFileSync(out, Buffer.from(data, 'base64'));
+  console.error('saved →', out);
   console.log('saved ' + out + ' (' + main.url + ')');
 } else if (cmd === 'eval') {
   const { result, exceptionDetails } = await c.send('Runtime.evaluate', {
