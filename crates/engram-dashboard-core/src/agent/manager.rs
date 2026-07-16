@@ -11,10 +11,10 @@
 //! lock을 즉시 해제한 뒤에야 session 내부 lock(core/transport)을 취득한다. sessions lock
 //! 보유 중 session 내부 lock 취득은 금지(데드락 방지).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -32,9 +32,9 @@ use crate::agent::transport::pty::PtyTransport;
 use crate::agent::transport::stdio::StdioTransport;
 use crate::agent::transport::{AgentTransport, OutputDecoder};
 use crate::agent::types::{
-    AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, OutputChunk, OutputEvent,
-    OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
-    TerminationIntent,
+    AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, ControlChannel, NoopControlChannel,
+    OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome,
+    TerminalReason, TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -115,23 +115,127 @@ pub struct AgentManager {
     reaper_tx: Sender<ReaperCmd>,
     /// reaper 스레드 핸들. Drop 시 join(Stop 송신 후 대기) — 테스트 누수 방지.
     reaper_handle: Option<JoinHandle<()>>,
+
+    /// ADR-0086 제어 채널 provisioning seam. spawn 시 provision(토큰+mcp-config 발급), terminal 시
+    /// reaper 가 revoke(폐기+파일 삭제). 데몬만 실제 구현(`DaemonControlChannel`)을 주입하고, 기본은
+    /// NoopControlChannel(제어 채널 없음 — headless 테스트·shell-only 경로). Arc 라 reaper 와 공유.
+    control: Arc<dyn ControlChannel>,
+
+    /// ADR-0086 provision 레이스 가드(FIX 6) — 현재 spawn 진행 중인 AgentId 예약 집합. contains_key
+    /// 가드(read lock)와 실제 sessions.insert(write lock) 사이의 TOCTOU 창에서 **다른 연결**이 같은
+    /// AgentId 를 동시에 spawn 하면, 둘 다 provision 을 불러 같은 (AgentId,epoch) config 경로에 쓰고
+    /// 한쪽 reaper 가 상대 산 세션을 오삭제할 수 있다. 진입 시 이 집합에 원자적으로 예약(이미 있으면 즉시
+    /// Err)해 두 번째 동시 spawn 을 깨끗이 거부한다. 예약은 성공(등록 완료)·실패(어느 조기 반환)든
+    /// SpawnReservation(RAII)이 drop 시 해제한다. ★sessions 맵과 별개 leaf lock★: 이 Mutex 보유 중
+    /// sessions/status 락을 잡지 않는다(ADR-0006 — 짧은 임계구역, 순수 HashSet 조작).
+    spawning: Arc<Mutex<HashSet<AgentId>>>,
+}
+
+/// spawn 진행 중 AgentId 예약을 잡고, drop 시 자동 해제하는 RAII 가드(ADR-0086 FIX 6). spawn_agent
+/// 의 어느 조기 반환(provision 실패·PTY 실패·`?`)에서도 예약이 새지 않게 한다. `reserve` 가 이미 예약된
+/// id 면 None(두 번째 동시 spawn 거부).
+struct SpawnReservation {
+    spawning: Arc<Mutex<HashSet<AgentId>>>,
+    id: AgentId,
+}
+
+impl SpawnReservation {
+    /// (AgentId) 예약 시도. 이미 다른 spawn 이 예약 중이면 None. 성공 시 가드 반환(drop 에 해제).
+    fn reserve(spawning: Arc<Mutex<HashSet<AgentId>>>, id: AgentId) -> Option<Self> {
+        {
+            let mut set = spawning.lock().expect("spawning set poisoned");
+            if !set.insert(id) {
+                return None; // 이미 진행 중 — 두 번째 동시 spawn 거부.
+            }
+        }
+        Some(Self { spawning, id })
+    }
+}
+
+impl Drop for SpawnReservation {
+    fn drop(&mut self) {
+        // 예약 해제(성공·실패 무관). 없어도 무해(remove 는 없으면 false).
+        let _ = self
+            .spawning
+            .lock()
+            .expect("spawning set poisoned")
+            .remove(&self.id);
+    }
+}
+
+/// provision 성공 후 세션 등록 **전에** 실패(exe/PTY 오류·`?` 조기 반환)하면 발급된 토큰+config
+/// 파일이 영원히 샌다(세션이 없어 reaper 가 영영 revoke 안 함) — 이를 막는 RAII 가드(ADR-0086 FIX 3).
+/// provision 이 실제 endpoint 를 돌려줬을 때만 arm 되고, 세션 등록이 끝나면 `disarm()` 으로 무장 해제한다.
+/// drop 시 아직 armed 면 revoke(폐기+파일 삭제)를 부른다 — 모든 pre-registration 실패 경로를 커버한다.
+///
+/// ★lock 미보유(ADR-0006)★: drop 은 sessions/status 락을 잡지 않는 지점(spawn_agent 조기 반환)에서만
+///   일어나므로 revoke(registry leaf lock + 파일 IO)가 락 순서를 깨지 않는다.
+struct ProvisionGuard {
+    control: Arc<dyn ControlChannel>,
+    id: AgentId,
+    epoch: u32,
+    /// true 인 동안 drop 하면 revoke. 세션 등록 성공 시 disarm() 이 false 로 내려 revoke 를 막는다
+    /// (등록된 세션의 revoke 는 이제 kill_agent/reaper 소관 — 이중 revoke 방지, 정상 수명으로 이관).
+    armed: bool,
+}
+
+impl ProvisionGuard {
+    /// 세션 등록 완료 후 호출 — 무장 해제(정상 수명으로 이관). 이후 drop 은 revoke 하지 않는다.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProvisionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // 세션 등록 전 실패 — 새는 토큰+config 를 회수한다(revoke 는 idempotent).
+            tracing::warn!(
+                agent = %self.id,
+                epoch = self.epoch,
+                "ADR-0086: spawn 실패(세션 등록 전) — 발급된 제어 채널 토큰/config 회수(revoke)"
+            );
+            self.control.revoke(self.id, self.epoch);
+        }
+    }
 }
 
 impl AgentManager {
+    /// 기본 생성자 — 제어 채널 없음(NoopControlChannel). headless 테스트·제어 채널 미사용 경로.
     pub fn new(
         status_sink: Arc<dyn StatusSink>,
         profiles: Arc<ProfileRegistry>,
         presets: Arc<PresetRegistry>,
         tracker: Arc<SessionTracker>,
     ) -> Self {
+        Self::new_with_control(
+            status_sink,
+            profiles,
+            presets,
+            tracker,
+            Arc::new(NoopControlChannel),
+        )
+    }
+
+    /// 제어 채널 주입형(ADR-0086) — 데몬이 `DaemonControlChannel` 을 끼운다. reaper 도 같은 Arc 를
+    /// 공유해 terminal 수렴 지점에서 revoke 한다(spawn=provision / terminal=revoke 인과 대칭).
+    pub fn new_with_control(
+        status_sink: Arc<dyn StatusSink>,
+        profiles: Arc<ProfileRegistry>,
+        presets: Arc<PresetRegistry>,
+        tracker: Arc<SessionTracker>,
+        control: Arc<dyn ControlChannel>,
+    ) -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
 
         // reaper supervisor 1개 기동 — manager 와 동일한 sessions/profiles/status_sink 를 공유한다
         // (두 주체가 같은 모델을 본다). reap_one 이 lock 밖에서 disposition·통지를 수행한다.
+        // ★control 도 공유(ADR-0086)★: reaper 가 terminal(단일 소비자) 시 revoke 를 부른다.
         let deps = ReaperDeps {
             sessions: sessions.clone(),
             profiles: profiles.clone(),
             status_sink: status_sink.clone(),
+            control: control.clone(),
         };
         let (reaper_tx, reaper_handle) = reaper::spawn_reaper(deps);
 
@@ -144,6 +248,8 @@ impl AgentManager {
             shutting_down: Arc::new(AtomicBool::new(false)),
             reaper_tx,
             reaper_handle: Some(reaper_handle),
+            control,
+            spawning: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -189,6 +295,20 @@ impl AgentManager {
             )));
         }
 
+        // ★provision 레이스 가드(FIX 6)★: 위 contains_key(read lock)와 아래 sessions.insert(write lock)
+        //   사이의 TOCTOU 창에서 **다른 연결**이 같은 AgentId 를 동시에 spawn 하면, 둘 다 provision 을
+        //   불러 같은 (AgentId,epoch) config 경로에 쓰고 한쪽 reaper 가 상대 산 세션을 오삭제할 수 있다.
+        //   진입 즉시 (AgentId) 를 원자적으로 예약해 두 번째 동시 spawn 을 깨끗이 거부한다. 예약은 아래
+        //   어느 조기 반환(provision 실패·PTY 실패)에서도 SpawnReservation drop 이 해제한다(RAII).
+        //   ★leaf lock(ADR-0006)★: spawning Mutex 는 짧게 잡고 sessions/status 락과 겹치지 않는다.
+        let _reservation = SpawnReservation::reserve(self.spawning.clone(), profile.id)
+            .ok_or_else(|| {
+                PtyError::SpawnFailed(format!(
+                    "agent {} spawn already in progress (concurrent spawn rejected)",
+                    profile.id
+                ))
+            })?;
+
         // 프로필을 레지스트리에 등록(idempotent + 즉시 persist). 복원 경로는 기존 프로필을 그대로 넘긴다.
         // ★hierarchy-preserving★: profile 은 SpawnProfile 등에서 뜬 **스냅샷**이라, spawn 사이 다른 연결이
         // reparent/rename 한 최신 parent_id/display_name 을 덮어쓰면 안 된다(lost update). 그 두 트리 메타는
@@ -222,13 +342,50 @@ impl AgentManager {
         // epoch는 레지스트리의 현재값(fallback respawn 등에서 미리 bump됨).
         let epoch = self.profiles.get(profile.id).map(|p| p.epoch).unwrap_or(0);
 
+        // ADR-0086: 제어 채널 provisioning. 데몬이 (AgentId,epoch)용 토큰+mcp-config 를 발급해
+        //   ControlEndpoint 를 돌려준다. ★spec 조립 직전에 부른다★ — build_command_spec 이 endpoint 를
+        //   받아 backend 방식(claude=`--mcp-config`, ADR-0004)으로 명령줄에 주입해야 하므로. epoch 는
+        //   위에서 확정된 현재값이라 재활성화(bump) 때마다 새 토큰이 발급된다(토큰 수명=(AgentId,epoch)).
+        //
+        // ★backend-conditional(round-2 F3)★: 제어 채널을 **소비하는** backend(claude)에만 provision 을
+        //   부른다 — shell 은 supports_control_channel=false 라 provision 을 아예 건드리지 않는다(registry
+        //   미접촉). 이렇게 하면 config-write 실패가 MCP 가 필요 없던 셸 스폰을 중단시키는 회귀가 없다.
+        //   판정은 backend dispatch(ADR-0004) — manager 가 command 를 직접 matches! 하지 않는다.
+        // ★fail-closed(FIX 2)★: provision 을 **부르는** backend 에서 provision 3-값(Ok(Some)/Ok(None)/
+        //   Err) 중 Err(CSPRNG/파일 write 실패)면 **스폰을 중단**한다(제어 채널 없이 몰래 도는 에이전트
+        //   금지 — health 위장 방지). Ok(None)=제어 채널을 안 쓰는 정당한 부재(Noop)라 그대로 진행.
+        //   Ok(Some)=발급 성공 → 아래 ProvisionGuard 로 arm 해, 세션 등록 전 어느 실패에서든 발급된
+        //   토큰/config 를 회수한다(FIX 3 leak 방지). supports_control_channel=false 인 backend 는 provision
+        //   을 건너뛰므로 None(부재)과 동일하게 흐른다 — 그 backend 엔 fail-closed 계약이 적용되지 않는다.
+        // ADR-0086
+        let control_endpoint = if backend::supports_control_channel(&profile.command) {
+            self.control.provision(profile.id, epoch).map_err(|e| {
+                PtyError::SpawnFailed(format!(
+                    "control channel provision failed (fail-closed): {e}"
+                ))
+            })?
+        } else {
+            // 제어 채널 미소비 backend(shell): provision 미호출 → registry 미접촉 → endpoint 없음.
+            None
+        };
+        // provision 이 실제 endpoint 를 줬으면 회수 가드를 arm(세션 등록 성공 시 disarm). None(부재)이면
+        //   회수할 게 없어 arm 하지 않는다.
+        let mut provision_guard = control_endpoint.as_ref().map(|_| ProvisionGuard {
+            control: self.control.clone(),
+            id: profile.id,
+            epoch,
+            armed: true,
+        });
+
         // backend가 program/args/env/cwd를 중립 CommandSpec으로 산출. transport는 claude/shell을 모른다.
+        // control_endpoint(추상 descriptor)를 함께 넘긴다 — backend 가 자기 프로그램 방식으로 주입한다.
         let spec = backend::build_command_spec(
             &profile.command,
             mode,
             sid,
             cwd.clone(),
             profile.env.clone(),
+            control_endpoint,
         );
 
         // backend(프로그램)가 결정하는 caps(session/model)를 spec과 별도로 산출해 흘린다.
@@ -267,6 +424,14 @@ impl AgentManager {
             epoch,
             seed_events,
         )?;
+
+        // ★provision 가드 무장 해제(FIX 3)★: 여기 도달 = spawn_session 이 sessions 맵에 세션을 등록 완료.
+        //   이제 이 토큰/config 의 수명은 세션에 붙어(kill_agent 선제 revoke + reaper terminal revoke 가
+        //   책임진다) — 가드가 이중 revoke 하지 않게 무장 해제한다. 이 줄 위의 어느 `?` 조기 반환이든
+        //   가드가 armed 인 채 drop 돼 revoke 가 발급 자원을 회수한다.
+        if let Some(g) = provision_guard.as_mut() {
+            g.disarm();
+        }
 
         // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
         if let (Some(s), Some(pid)) = (sid, child_pid) {
@@ -661,8 +826,20 @@ impl AgentManager {
     /// 있으므로, 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
+        // 대상 세션 epoch 을 Arc clone 직후(락 해제 상태) 확정한다 — revoke 대상 (AgentId,epoch).
+        let epoch = session.epoch;
 
-        // 0. ★intent 태깅을 shutdown 전에★ — finish hook 이 finish 순간 snapshot 하므로, shutdown
+        // 0. ★제어 채널 토큰 즉시 폐기 — 블로킹 kill **전에**(FIX 4)★. get_session 이 Arc 를 clone 하고
+        //    sessions read lock 을 이미 해제했으므로(§10), 여기서 revoke 를 불러도 락 보유 중이 아니다
+        //    (ADR-0006 — registry 는 leaf lock, sessions/status 락 미보유). 예전엔 이 revoke 가
+        //    session.kill(최대 5s join) **뒤**라, 죽어가는 에이전트의 토큰이 그 5s 창 동안 유효했다 —
+        //    그 사이 에이전트가 제어 채널로 명령을 낼 수 있었다(TOCTOU). 이제 kill 을 시작하기 전에 먼저
+        //    폐기해 그 창을 없앤다. revoke 는 idempotent(remove-if-present)라 아래 pump/reaper 의
+        //    terminal revoke 와 겹쳐도 무해(그게 backstop). 산 세션이므로 이 epoch 토큰이 지금 폐기 대상.
+        // ADR-0086
+        self.control.revoke(agent_id, epoch);
+
+        // 0.1. ★intent 태깅을 shutdown 전에★ — finish hook 이 finish 순간 snapshot 하므로, shutdown
         //    이 pump 를 깨워 finish 하기 전에 UserKill 이 보여야 reaper 가 DeleteProfile 로 분류한다.
         session.set_intent(TerminationIntent::UserKill);
 
@@ -673,10 +850,13 @@ impl AgentManager {
 
         // 1~6. 자원 강제 종료 + pump 완료 대기. shutdown이 master를 drop해 pump read를 EOF로
         //       깨우고(→core.finish(Killed)+hook→ReapMsg), join_pump가 그 pump 종료를 5s 대기한다.
-        //       timeout이면 그냥 진행(세션 제거로 Arc 끊겨 자연 종료).
+        //       timeout이면 그냥 진행(세션 제거로 Arc 끊겨 자연 종료). ★revoke 배치가 이 인과를 건드리지
+        //       않는다(ADR-0001)★: revoke 는 registry/파일만 만지고 shutdown 체인(child.kill→master
+        //       drop→pump EOF→finish)에 개입하지 않는다 — kill 을 블록/재정렬하지 않는다.
         session.kill(Duration::from_secs(5));
 
         // 7. 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지). 맵 제거·통지는 reaper 가 한다.
+        //    (제어 채널 revoke 는 위 0단계에서 선제 완료 — reaper terminal revoke 가 idempotent backstop.)
         self.tracker.unwatch(agent_id);
 
         Ok(())

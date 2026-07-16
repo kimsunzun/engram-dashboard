@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::agent::backend::AgentBackend;
 use crate::agent::profile::{AgentCommand, SpawnMode};
-use crate::agent::types::{BackendCaps, CommandSpec, ModelCaps, SessionCaps};
+use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
 /// 셸 백엔드 unit struct. &'static으로 사용, 상태 없음.
 pub struct ShellBackend;
@@ -21,6 +21,12 @@ impl AgentBackend for ShellBackend {
         false
     }
 
+    fn supports_control_channel(&self) -> bool {
+        // 셸은 제어 채널(MCP)을 쓰지 않는다(ADR-0086 F3) → manager 가 provision 을 건너뛴다.
+        //   그래서 config-write 실패가 MCP 불필요한 셸 스폰을 중단시키지 않는다(round-2 F3 회귀 차단).
+        false
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -28,6 +34,8 @@ impl AgentBackend for ShellBackend {
         _session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
+        // ADR-0086: shell 은 제어 채널(MCP)을 쓰지 않는다(needs_session=false) → 무시.
+        _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         match command {
             AgentCommand::Shell { program, args } => CommandSpec {
@@ -69,7 +77,14 @@ mod tests {
     use super::*;
 
     fn spec(command: &AgentCommand) -> CommandSpec {
-        ShellBackend.build_spec(command, SpawnMode::Fresh, None, PathBuf::from("."), vec![])
+        ShellBackend.build_spec(
+            command,
+            SpawnMode::Fresh,
+            None,
+            PathBuf::from("."),
+            vec![],
+            None,
+        )
     }
 
     #[test]
@@ -111,6 +126,7 @@ mod tests {
             None,
             cwd.clone(),
             env.clone(),
+            None,
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);

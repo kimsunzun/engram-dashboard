@@ -144,6 +144,85 @@ pub struct CommandSpec {
     pub cwd: std::path::PathBuf,
 }
 
+// ── ADR-0086: 제어 채널 입구(MCP) — core seam ──────────────────────────────────────
+//
+// ★왜 core 에 추상 descriptor + seam 을 두는가★: 스폰되는 에이전트가 데몬의 제어 채널(MCP 입구)에
+//   붙으려면 (a) 데몬이 (AgentId,epoch)별 토큰을 발급하고 (b) 그 토큰+엔드포인트를 backend 명령줄에
+//   주입해야 한다. 그러나 **토큰 발급·MCP 서버·mcp-config 파일**은 전부 데몬 관심사(rmcp/axum/HTTP)라
+//   core 에 들어오면 tauri-import-0 격리와 같은 정신(전송·인프라 무의존)이 깨진다. 그래서 OutputSink/
+//   StatusSink 와 **동일한 idiom(ADR-0003)** 으로, core 는 순수 trait(`ControlChannel`) + 추상
+//   descriptor(`ControlEndpoint`)만 알고 실제 구현은 데몬(`DaemonControlChannel`)이 준다.
+//
+// ★인과 airtight(ADR-0086 토큰 수명 = (AgentId,epoch))★: provision 은 spawn 경로(spec 조립 직전)에서,
+//   revoke 는 **reaper 단일 소비자**(ADR-0019 — 모든 terminal 이 수렴하는 유일 지점) + kill_agent 에서
+//   부른다. 그래서 epoch 회전(재활성화 bump)마다 새 토큰, 크래시/kill/EOF 어떤 terminal 이든 정확히
+//   1회 revoke 가 보장된다(reaper 가 epoch 검증 후 remove 하는 그 자리에서 revoke).
+
+/// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
+/// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude.rs 단독,
+/// ADR-0004). core/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
+#[derive(Debug, Clone)]
+pub struct ControlEndpoint {
+    /// 데몬 MCP Streamable HTTP 엔드포인트 URL(예: `http://127.0.0.1:<port>/mcp`).
+    pub url: String,
+    /// 이 (AgentId,epoch) 전용 bearer 토큰(HTTP Authorization 헤더에 실린다).
+    /// ★보안★: 이 값은 로그에 찍지 않는다(mcp-config 파일에만 기록 — 파일은 revoke 시 삭제).
+    pub token: String,
+    /// backend 가 생성한 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다).
+    /// backend/claude.rs 가 이 파일에 url+token 을 써서 `--mcp-config` 로 주입한다.
+    pub config_path: std::path::PathBuf,
+}
+
+/// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일
+/// **의도가 있었으나 실패**"한 경우다 — spawn 이 이 Err 를 만나면 fail-closed 로 스폰을 중단한다(제어
+/// 채널 없이 도는 에이전트를 만들지 않는다). ★absence 와 구분★: Ok(None)=제어 채널을 안 쓰는 정당한
+/// 부재(Noop·shell), Err=쓰려다 실패(치명). core 는 문자열만 나른다(rmcp/io 타입 누수 방지, ADR-0003).
+#[derive(Debug)]
+pub struct ProvisionError(pub String);
+
+impl std::fmt::Display for ProvisionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "control channel provision failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for ProvisionError {}
+
+/// 제어 채널 provisioning seam(ADR-0086). 구현은 데몬(`DaemonControlChannel`)이, core 는 이 trait 만
+/// 안다(OutputSink/StatusSink 와 동형 — ADR-0003 격리). 기본 구현체 = `NoopControlChannel`(제어 채널
+/// 없는 경로·테스트용 — provision 이 Ok(None) 을 돌려 backend 가 아무 것도 주입하지 않는다).
+pub trait ControlChannel: Send + Sync + 'static {
+    /// (AgentId,epoch)용 토큰을 발급하고 mcp-config 파일을 만들어 엔드포인트를 돌려준다. spawn 경로에서
+    /// spec 조립 직전 호출. 반환 3-값(fail-closed 계약, ADR-0086):
+    ///   - `Ok(Some(ep))` — 제어 채널 발급 성공(backend 가 주입).
+    ///   - `Ok(None)`     — 제어 채널을 **안 쓰는 정당한 부재**(Noop·shell-only·미구성). 스폰 계속.
+    ///   - `Err(_)`       — 제어 채널을 쓰려다 **실패**(CSPRNG/파일 write 오류). ★치명★ — 스폰은
+    ///     이 Err 를 만나면 fail-closed 로 중단한다(제어 채널 없이 몰래 도는 에이전트 금지, health 위장 방지).
+    fn provision(&self, id: AgentId, epoch: u32)
+        -> Result<Option<ControlEndpoint>, ProvisionError>;
+
+    /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
+    /// 종료)에서든 reaper 단일 소비자가 부른다 → 정확히 1회 revoke. epoch 를 함께 받아 stale terminal 이
+    /// 재활성화(epoch bump)로 새로 붙은 산 토큰을 지우지 못하게 한다(ADR-0007/0084 epoch-guard 정신).
+    fn revoke(&self, id: AgentId, epoch: u32);
+}
+
+/// 제어 채널을 안 쓰는 경로(headless 테스트·shell-only)용 no-op 구현. provision 은 항상 Ok(None)
+/// (정당한 부재 — 실패가 아님), revoke 는 무동작. AgentManager 기본값 — 데몬만 실제
+/// `DaemonControlChannel` 을 주입한다.
+pub struct NoopControlChannel;
+
+impl ControlChannel for NoopControlChannel {
+    fn provision(
+        &self,
+        _id: AgentId,
+        _epoch: u32,
+    ) -> Result<Option<ControlEndpoint>, ProvisionError> {
+        Ok(None)
+    }
+    fn revoke(&self, _id: AgentId, _epoch: u32) {}
+}
+
 /// 영역별 capability (bool 폭증 금지). 콘솔 값으로 채움. 직렬화(프론트 공유, snake_case).
 ///
 /// ★출처 분리(load-bearing)★: 이 합성값의 5영역은 **두 출처**에서 온다 — input/output/control은

@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::agent::profile::{AgentCommand, SpawnMode};
 use crate::agent::transport::OutputDecoder;
-use crate::agent::types::{BackendCaps, CommandSpec};
+use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint};
 
 /// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
 ///
@@ -54,8 +54,22 @@ pub trait AgentBackend: Send + Sync {
     /// true면 manager(stage 6)가 sid를 발급·watcher를 부착한다.
     fn needs_session(&self) -> bool;
 
+    /// 이 백엔드가 데몬 제어 채널(MCP 입구)을 **소비**하는가(ADR-0086 F3).
+    /// true 면 manager 가 spawn 전에 provision 을 부르고(토큰+mcp-config 발급), 그 endpoint 를
+    /// build_spec 에 넘긴다(claude=`--mcp-config`). false 면 manager 가 provision 을 **아예 건드리지
+    /// 않는다** — shell 처럼 제어 채널을 안 쓰는 backend 는 registry 에 손대지 않아, config-write 실패가
+    /// MCP 가 필요 없던 스폰을 중단시키는 회귀(round-2 F3)가 생기지 않는다.
+    ///
+    /// ★fail-closed 는 provision 을 **부르는** backend 에만★: true 인 backend 는 provision 이 Err 면
+    ///   스폰이 중단된다(제어 채널 없이 몰래 도는 에이전트 금지). false 인 backend 는 그 계약과 무관하다.
+    fn supports_control_channel(&self) -> bool;
+
     /// 프로필 + 모드 → CommandSpec.
     /// cwd·env는 manager가 정규화한 값을 전달한다(stage 6에서 주입 예정).
+    ///
+    /// `control`(ADR-0086): 데몬이 발급한 제어 채널 엔드포인트(추상 descriptor). 있으면 backend 가
+    ///   자기 프로그램 방식으로 명령줄에 주입한다(claude=`--mcp-config <path>` — 그 지식은 claude.rs
+    ///   단독, ADR-0004). None 이거나 제어 채널을 안 쓰는 backend(shell)면 무시한다.
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -63,6 +77,7 @@ pub trait AgentBackend: Send + Sync {
         session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
+        control: Option<ControlEndpoint>,
     ) -> CommandSpec;
 
     /// 이 backend(프로그램)가 결정하는 caps — session(resume)·model.
@@ -95,15 +110,24 @@ pub fn needs_session(c: &AgentCommand) -> bool {
     backend_for(c).needs_session()
 }
 
+/// 이 명령의 backend 가 데몬 제어 채널(MCP)을 소비하는가(ADR-0086 F3). manager 가 provision 호출 여부를
+/// 이 dispatch 로 판정한다 — true(claude)면 provision, false(shell)면 registry 미접촉. ★backend dispatch
+/// 로 판정(ADR-0004)★: manager 가 `matches!(command, ...)` 로 직접 분기하지 않고 backend 지식에 위임한다.
+pub fn supports_control_channel(c: &AgentCommand) -> bool {
+    backend_for(c).supports_control_channel()
+}
+
 /// 프로필 → CommandSpec. manager가 stage 6에서 호출한다.
+/// `control`(ADR-0086): 데몬 제어 채널 엔드포인트 — backend 가 자기 방식으로 주입(claude=`--mcp-config`).
 pub fn build_command_spec(
     c: &AgentCommand,
     mode: SpawnMode,
     session_id: Option<Uuid>,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    control: Option<ControlEndpoint>,
 ) -> CommandSpec {
-    backend_for(c).build_spec(c, mode, session_id, cwd, env)
+    backend_for(c).build_spec(c, mode, session_id, cwd, env, control)
 }
 
 /// 이 명령의 backend(프로그램)가 결정하는 caps(session/model). manager 가 spawn 시 산출해

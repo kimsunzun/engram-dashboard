@@ -24,7 +24,7 @@ use std::thread::JoinHandle;
 
 use crate::agent::profile::ProfileRegistry;
 use crate::agent::session::AgentSession;
-use crate::agent::types::{AgentId, AgentInfo, Disposition, ReapMsg, StatusSink};
+use crate::agent::types::{AgentId, AgentInfo, ControlChannel, Disposition, ReapMsg, StatusSink};
 
 /// reaper 스레드로 보내는 메시지. ReapMsg(정상 종료 이벤트) + 명시 Stop(셧다운).
 /// Stop 없이도 모든 Sender drop 시 recv 가 Err 로 끝나 루프가 종료된다(이중 안전).
@@ -39,6 +39,9 @@ pub struct ReaperDeps {
     pub sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     pub profiles: Arc<ProfileRegistry>,
     pub status_sink: Arc<dyn StatusSink>,
+    /// ADR-0086: 제어 채널 seam(manager 와 공유 Arc). terminal 수렴 지점(여기)에서 revoke 를 부른다 —
+    /// 크래시·EOF·정상 종료 등 kill 이 아닌 모든 terminal 을 커버한다(kill 은 kill_agent 가 선제 revoke).
+    pub control: Arc<dyn ControlChannel>,
 }
 
 impl ReaperDeps {
@@ -71,6 +74,14 @@ impl ReaperDeps {
             return;
         }
         drop(removed); // Arc<AgentSession> 폐기 — 여기서 transport/core 자원이 마지막으로 끊긴다.
+
+        // 2.5. ADR-0086: 제어 채널 토큰 폐기 + mcp-config 삭제. ★여기가 모든 terminal 의 단일 수렴점★
+        //   (ADR-0019 reaper) — 크래시·EOF·정상 exit·유저 kill 어떤 경로든 정확히 1회 이 지점을 지난다.
+        //   epoch 검증을 통과한 승자(msg.epoch == session.epoch)만 여기 오므로, stale terminal 이
+        //   재활성화(epoch bump)로 새로 붙은 산 토큰을 지우는 일이 없다(remove epoch-guard 와 같은 원리).
+        //   revoke 는 idempotent(remove-if-present)라 kill_agent 의 선제 revoke 와 겹쳐도 무해.
+        // ADR-0086
+        self.control.revoke(msg.id, msg.epoch);
 
         // 3. 셧다운 종료가 아니면 disposition 적용. 셧다운이면 손대지 않음(auto_restore=true 잔류
         //    → 부팅 복원). lock 밖에서 ProfileRegistry mutate(디스크 IO) — 락 순서 준수.

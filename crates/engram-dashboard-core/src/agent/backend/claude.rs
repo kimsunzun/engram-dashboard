@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::agent::backend::{console_command, AgentBackend};
 use crate::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
-use crate::agent::types::{BackendCaps, CommandSpec, ModelCaps, OutputEvent, SessionCaps};
+use crate::agent::types::{
+    BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps,
+};
 
 /// claude 실행 파일명(논리값). 실제 spawn 시 Windows에선 `console_command`가 `cmd.exe /c claude`로
 /// 감싼다(npm shim 해석, error 193 회피 — backend/mod.rs 참조).
@@ -31,6 +33,11 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
+    fn supports_control_channel(&self) -> bool {
+        // claude 는 `--mcp-config` 로 데몬 제어 채널에 붙는다(ADR-0086) → provision 소비.
+        true
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -38,13 +45,14 @@ impl AgentBackend for ClaudeBackend {
         session_id: Option<Uuid>,
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
+        control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         match command {
             AgentCommand::Claude {
                 extra_args,
                 output_format,
             } => {
-                let mut args = Vec::with_capacity(6 + extra_args.len());
+                let mut args = Vec::with_capacity(8 + extra_args.len());
                 match output_format {
                     // ── 터미널(PTY 대화형) — 기존 경로, 바이트/인자 완전 불변(회귀 금지) ──
                     ClaudeOutputFormat::Terminal => {
@@ -111,6 +119,20 @@ impl AgentBackend for ClaudeBackend {
                             env.push((MAX_THINKING_TOKENS_KEY.to_string(), "8000".to_string()));
                         }
                     }
+                }
+                // ADR-0086: 제어 채널(MCP) 주입 — `--mcp-config <path>`. ★claude 플래그 지식은
+                //   이 파일에만★(ADR-0004 격리): generic 층(manager/backend dispatch)은 추상
+                //   ControlEndpoint(url/token/config_path)만 나르고 "MCP"·플래그 문자열을 모른다. 여기서
+                //   claude 방식으로 번역한다. 데몬(DaemonControlChannel.provision)이 config_path 파일에
+                //   {mcpServers:{engram:{type:http,url,headers:{Authorization:Bearer <token>}}}} 를 이미
+                //   기록해 뒀다 — 우리는 그 경로를 `--mcp-config` 로 가리키기만 한다. 터미널·json 모드
+                //   둘 다 연결 대상이라 mode 무관 동일 주입(claude 2.1.170 실측: headers Authorization 을
+                //   initialize/tools/list/tools/call 전 요청에 실전송). None(제어 채널 미구성·shell)이면 미주입.
+                //   ★보안★: config_path 만 args 에 실린다(토큰은 파일 안 — args/로그에 토큰 평문 없음).
+                // ADR-0086
+                if let Some(endpoint) = &control {
+                    args.push("--mcp-config".to_string());
+                    args.push(endpoint.config_path.to_string_lossy().into_owned());
                 }
                 args.extend(extra_args.iter().cloned());
                 // Windows shim 회피: cmd /c claude … 로 감싼다(비Windows는 그대로).
@@ -811,7 +833,17 @@ mod tests {
     // 기존 claude.rs 테스트는 그대로 두고, stage 6에서 claude.rs 제거 시 이쪽만 남는다.
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
-        ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![])
+        ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], None)
+    }
+
+    /// control endpoint 주입형 — `--mcp-config` 주입(ADR-0086)을 검증하는 테스트용.
+    fn spec_with_control(
+        command: &AgentCommand,
+        mode: SpawnMode,
+        sid: Option<Uuid>,
+        control: Option<ControlEndpoint>,
+    ) -> CommandSpec {
+        ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], control)
     }
 
     /// 터미널 모드 claude 명령(기존 경로 회귀 테스트용).
@@ -848,6 +880,70 @@ mod tests {
             vec!["--resume".to_string(), sid.to_string()],
         );
         assert_eq!(s.args, a);
+    }
+
+    // ── ADR-0086: `--mcp-config` 주입(제어 채널 입구) ─────────────────────────────────
+    fn ep() -> ControlEndpoint {
+        ControlEndpoint {
+            url: "http://127.0.0.1:54321/mcp".to_string(),
+            token: "deadbeef".to_string(),
+            config_path: PathBuf::from("C:/data/mcp/agent-x.json"),
+        }
+    }
+
+    #[test]
+    fn claude_control_endpoint_injects_mcp_config_flag() {
+        // control 이 있으면 세션 플래그 뒤에 `--mcp-config <config_path>` 가 붙어야 한다(터미널 모드).
+        let sid = Uuid::new_v4();
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, Some(sid), Some(ep()));
+        let (_p, a) = console_command(
+            CLAUDE_PROGRAM,
+            vec![
+                "--session-id".to_string(),
+                sid.to_string(),
+                "--mcp-config".to_string(),
+                "C:/data/mcp/agent-x.json".to_string(),
+            ],
+        );
+        assert_eq!(s.args, a, "터미널 모드 claude 에 --mcp-config 주입");
+    }
+
+    #[test]
+    fn claude_control_endpoint_token_never_in_args() {
+        // ★보안 회귀 가드★: 토큰은 args 에 절대 실리지 않는다(config_path 파일 안에만). 오직 파일
+        //   경로만 args 에 온다 → args/프로세스 목록/로그에 토큰 평문 노출 없음.
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        assert!(
+            !s.args.iter().any(|a| a.contains("deadbeef")),
+            "토큰이 args 에 새면 안 됨: {:?}",
+            s.args
+        );
+        assert!(
+            s.args.iter().any(|a| a == "--mcp-config"),
+            "--mcp-config 플래그는 있어야 함"
+        );
+    }
+
+    #[test]
+    fn claude_no_control_endpoint_no_mcp_config() {
+        // control=None(제어 채널 미구성)이면 --mcp-config 를 주입하지 않는다(기존 동작 불변).
+        let s = spec(&terminal(vec!["--debug"]), SpawnMode::Fresh, None);
+        assert!(
+            !s.args.iter().any(|a| a == "--mcp-config"),
+            "control 없으면 --mcp-config 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_json_mode_control_endpoint_injects_mcp_config() {
+        // json(stream-json) 모드도 MCP 연결 대상 — --mcp-config 가 주입돼야 한다.
+        let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        assert!(
+            s.args.iter().any(|a| a == "--mcp-config"),
+            "json 모드에도 --mcp-config 주입: {:?}",
+            s.args
+        );
     }
 
     #[test]
@@ -906,6 +1002,7 @@ mod tests {
             None,
             cwd.clone(),
             env.clone(),
+            None,
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);
@@ -1014,6 +1111,7 @@ mod tests {
             None,
             PathBuf::from("."),
             env,
+            None,
         );
         let vals: Vec<&str> = s
             .env
@@ -1041,6 +1139,7 @@ mod tests {
             None,
             PathBuf::from("."),
             env,
+            None,
         );
         // 대소문자 무시로 스캔해 MAX_THINKING_TOKENS 관련 쌍이 정확히 1개여야 한다.
         let vals: Vec<&str> = s
@@ -2075,6 +2174,7 @@ mod tests {
             Some(sid),
             PathBuf::from("."),
             vec![],
+            None,
         );
 
         // --resume 플래그가 있고, 그 **바로 뒤** 인자가 정확히 통제 sid(uuid 문자열)여야 한다.

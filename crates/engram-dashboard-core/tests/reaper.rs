@@ -340,6 +340,8 @@ fn make_reaper_deps(tag: &str) -> (Arc<ProfileRegistry>, CountingSink, ReaperDep
         sessions,
         profiles: profiles.clone(),
         status_sink: sink_dyn,
+        // ADR-0086: 제어 채널 미사용 테스트 → Noop(revoke no-op).
+        control: Arc::new(engram_dashboard_core::agent::types::NoopControlChannel),
     };
     // sessions 맵은 deps.sessions 로 접근(ReaperDeps 필드 pub) — 중복 핸들 반환을 피해 타입 단순화.
     (profiles, sink, deps)

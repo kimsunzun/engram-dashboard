@@ -37,9 +37,35 @@ getrandom = "0.2"
 # WsOutputSink sink_id 생성 + AgentId 파싱. core/protocol 과 동일 1.x(AgentId=Uuid).
 uuid = { version = "1", features = ["v4"] }
 
+# ── ADR-0086: 제어 채널 MCP 입구 ────────────────────────────────────────────────
+# rmcp = 공식 Rust MCP SDK. Streamable HTTP 서버 role(StreamableHttpService = Tower service, axum 에 nest).
+#   server/macros(#[tool]/#[tool_router]/#[tool_handler]) + schemars(툴 input schema) + streamable-http-server.
+#   ★OAuth 메타데이터 미광고★: StreamableHttpService 는 `.well-known` 라우트를 만들지 않는다 — claude 가
+#   정적 Bearer 를 무시하는 #59467 조건을 원천 회피(초기화 실측 근거는 ADR-0086 §근거).
+rmcp = { version = "2.2.0", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+# axum = MCP 라우터 호스트(rmcp 가 axum 0.8 겨냥). 로컬 평문 HTTP — TLS 불필요.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# tower = MCP /mcp 라우트에 bearer auth 미들웨어를 얹는 layer 조립(공식 auth 패턴).
+tower = "0.5"
+# tower-http(limit) = RequestBodyLimitLayer — axum DefaultBodyLimit 는 extractor 만 제한하나
+#   rmcp StreamableHttpService 는 raw body 를 직접 소비하므로(extractor 미경유) 그 상한이 안 먹힌다.
+#   이 레이어는 body 자체를 감싸 하위 소비자 전부에 상한을 강제한다(round-2 F4). limit feature 만.
+tower-http = { version = "0.6", default-features = false, features = ["limit"] }
+# CancellationToken(StreamableHttpServerConfig) + graceful shutdown 신호.
+tokio-util = { version = "0.7", features = ["rt"] }
+# http = axum 미들웨어에서 StatusCode/HeaderMap 직접 조작(rmcp 와 동일 1.x wire 타입).
+http = "1"
+
 # named mutex(단일 인스턴스) + pid liveness(OpenProcess). core 와 동일 0.58 버전 고정.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_Foundation",
 ] }
+
+# ── ADR-0086 통합 테스트 전용(dev) ─────────────────────────────────────────────
+[dev-dependencies]
+# 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# happy-path handshake(initialize + tools/list + tools/call)는 rmcp 클라이언트 role 로 정직하게 검증.
+rmcp = { version = "2.2.0", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }

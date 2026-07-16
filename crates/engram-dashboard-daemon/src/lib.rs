@@ -9,6 +9,7 @@
 //! 그대로 수행한다. accept loop 본체는 `run_accept_loop()` 로 분리해 테스트와 공유한다.
 
 pub mod connection_core;
+pub mod control;
 pub mod instance;
 pub mod portfile;
 pub mod ws;
@@ -146,21 +147,27 @@ fn install_panic_hook() {
 /// 차이: StatusSink 가 TauriStatusSink 대신 DaemonStatusSink(연결된 WS 클라이언트에 push).
 /// `registry` 는 호출자가 만들어 주입한다 — DaemonStatusSink 와 accept loop 가 같은 인스턴스를
 /// 공유해야 status 브로드캐스트 대상(전 연결 conn_tx)이 일치한다.
-fn build_manager(data_dir: &std::path::Path, registry: ConnRegistry) -> Arc<AgentManager> {
+fn build_manager(
+    data_dir: &std::path::Path,
+    registry: ConnRegistry,
+    control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+) -> Arc<AgentManager> {
     // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
     // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
     let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
     let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
-    build_manager_with_store(profile_store, preset_store, registry)
+    build_manager_with_store(profile_store, preset_store, registry, control)
 }
 
 /// build_manager 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리할 수
 /// 있게 store 를 인자로 받는다(운영 경로는 위 build_manager 가 File{Profile,Preset}Store 를 넘김).
 /// 배선 로직(status_sink/profiles/presets/tracker)은 운영과 동일 — 회귀 없음.
+/// `control`(ADR-0086): 제어 채널 seam — 운영은 DaemonControlChannel, 제어 채널 미사용 테스트는 Noop.
 fn build_manager_with_store(
     store: Arc<dyn ProfileStore>,
     preset_store: Arc<dyn PresetStore>,
     registry: ConnRegistry,
+    control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
 ) -> Arc<AgentManager> {
     let status_sink = Arc::new(DaemonStatusSink::new(registry));
     let profiles = Arc::new(ProfileRegistry::new(store));
@@ -177,7 +184,14 @@ fn build_manager_with_store(
     ));
     tracker.start();
 
-    Arc::new(AgentManager::new(status_sink, profiles, presets, tracker))
+    // ADR-0086: 제어 채널 seam 을 주입해 spawn=provision / terminal=revoke 인과를 코어에 잇는다.
+    Arc::new(AgentManager::new_with_control(
+        status_sink,
+        profiles,
+        presets,
+        tracker,
+        control,
+    ))
 }
 
 // ── accept loop (main + 테스트 공유) ──────────────────────────────────────────────
@@ -332,13 +346,57 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
+    // ADR-0086: 제어 채널 토큰 레지스트리 — MCP auth 미들웨어(검증)와 DaemonControlChannel(발급)이
+    //   공유하는 단일 출처. daemon.json 의 WS 토큰과는 완전히 다른 관심사(혼용 금지 — ADR-0086 §맥락).
+    let control_registry = Arc::new(control::registry::ControlRegistry::new());
+
     // 5) 연결 레지스트리(status 브로드캐스트용) — DaemonStatusSink 와 accept loop 가 공유한다.
     let registry = ConnRegistry::new();
     // 5b) 멀티뷰어 협상 상태(resize smallest + 입력 lease) — 전 연결이 공유한다.
     let multiview = MultiViewState::new();
 
+    // 5b.5) ADR-0086 부팅 스윕(FIX 5): 이전 데몬 크래시/실패 스폰이 남긴 stale mcp-config 를 청소한다.
+    //   ★반드시 MCP 서버·provision 시작 전★: registry 는 방금 빈 상태로 만들었으니(위 5b) 이 시점의
+    //   모든 기존 파일은 dead credential(토큰이 registry 에 없음)이다. 부팅 초입에 일괄 삭제해 평문 토큰
+    //   파일을 방치하지 않는다. (삭제 실패는 warn 만 — 청소 실패로 데몬 기동을 막지 않는다.)
+    control::mcp_config::sweep_stale_configs(&data_dir);
+
+    // 5c) ADR-0086: 제어 채널 MCP 서버 기동(WS 서버와 나란히). 스폰될 에이전트가 mcp-config 로 붙는
+    //     입구다. 토큰 레지스트리는 auth 미들웨어(검증)와 provision(발급)이 공유한다.
+    //     ★fail-closed(FIX 1)★: bind/start 실패는 **치명**이다 — 데몬을 NoopControlChannel 로 조용히
+    //     계속 띄우면(옛 동작) 제어 채널 없이 도는데도 health 를 위장한다. 대신 이미 만든 자원(WS
+    //     listener·control_registry)을 drop 하고 Err(1) 로 데몬 시작을 중단한다. 데몬은 자기 제어
+    //     엔드포인트 없이는 뜨지 않는다(에이전트 오케스트레이션이 §5 LLM-우선 제어의 근간이라, 그게
+    //     없는 반쪽 데몬은 정상 상태가 아니다). ★반드시 에이전트 spawn 전★.
+    // MCP 서버 핸들 — Some 이면 프로세스 수명 동안 살아 있어야 서버가 유지된다(drop=종료). fail-closed
+    //   라 실패 시 아래 match 가 early-return 하므로, 여기 도달하면 항상 살아 있는 핸들을 든다.
+    let (control, mut mcp_server_handle): (
+        Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+        Option<control::mcp_server::McpServerHandle>,
+    ) = match control::mcp_server::start_mcp_server(control_registry.clone()).await {
+        Ok(handle) => {
+            let url = handle.url.clone();
+            let channel = Arc::new(control::DaemonControlChannel::new(
+                control_registry.clone(),
+                url,
+                data_dir.clone(),
+            ));
+            // 핸들을 살려 둔다(drop 시 서버 종료). 프로세스 수명 동안 유지.
+            (channel, Some(handle))
+        }
+        Err(e) => {
+            // fail-closed: 이미 만든 자원 정리(listener·registry 는 이 스코프 drop 로 회수) 후 중단.
+            //   daemon.json 은 아직 안 썼으므로(아래 8단계) 남는 stale portfile 도 없다.
+            tracing::error!(
+                "MCP 서버 기동 실패 — 제어 채널 없이는 데몬을 띄우지 않는다(fail-closed): {e}"
+            );
+            drop(listener);
+            return Err(1);
+        }
+    };
+
     // 6) AgentManager 배선(src-tauri 미러). status_sink = DaemonStatusSink(registry).
-    let manager = build_manager(&data_dir, registry.clone());
+    let manager = build_manager(&data_dir, registry.clone(), control);
 
     // 7) auth 비교용 토큰을 Arc 로 보관(daemon.json 에 token 을 move 하므로 그 전에 공유본을 뜸).
     //    보안: 이 값은 로그/외부 노출 금지(handle_connection 내부 비교 전용).
@@ -357,6 +415,9 @@ pub async fn run() -> Result<(), i32> {
     };
     if let Err(e) = portfile::write_atomic(&daemon_path, &info) {
         tracing::error!("daemon.json 기록 실패: {e}");
+        // ADR-0086 F5: 여기서 Err 로 반환하면 mcp_server_handle(Some)이 스코프 종료로 drop 되며
+        //   McpServerHandle::drop 이 cancel 토큰을 발화해 detached serve 태스크를 확실히 내린다
+        //   (프로세스 종료가 대개 무의미하게 만들지만 태스크 누수를 airtight 하게 막는다).
         return Err(1);
     }
     tracing::info!(
@@ -404,6 +465,12 @@ pub async fn run() -> Result<(), i32> {
     let mgr = manager.clone();
     if let Err(e) = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await {
         tracing::warn!("shutdown_all join 실패: {e}");
+    }
+
+    // ADR-0086: 제어 채널 MCP 서버 graceful 종료(에이전트 정리 후 — 남은 세션도 함께 정리된다).
+    if let Some(handle) = mcp_server_handle.take() {
+        handle.shutdown().await;
+        tracing::info!("MCP 서버 종료 완료");
     }
 
     // daemon.json 은 남겨둔다 — 다음 부팅이 stale 판정으로 무시한다.
@@ -493,7 +560,10 @@ async fn start_test_server_inner(
     // 프리셋 store 는 테스트마다 새 in-memory(디스크 비오염). 프리셋 persist 를 검증하는 테스트는
     // 별도 store 주입형이 필요하면 추후 추가한다(현재 프리셋 unit 은 core 에서 격리 검증).
     let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
-    let manager = build_manager_with_store(store, preset_store, registry.clone());
+    // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 별도 control::mcp_server 테스트가 담당).
+    let control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel> =
+        Arc::new(engram_dashboard_core::agent::types::NoopControlChannel);
+    let manager = build_manager_with_store(store, preset_store, registry.clone(), control);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let accept_handle = {

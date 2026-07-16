@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::agent::backend::AgentBackend;
 use crate::agent::profile::{AgentCommand, SpawnMode};
-use crate::agent::types::{BackendCaps, CommandSpec, ModelCaps, SessionCaps};
+use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
 /// Gemini 실행 파일명. PATH로 해석된다.
 ///
@@ -31,6 +31,13 @@ impl AgentBackend for GeminiBackend {
         true
     }
 
+    fn supports_control_channel(&self) -> bool {
+        // 보수적 stub(ADR-0086 F3) — Gemini CLI 의 MCP 지원 여부는 CLI spike 전이라 미상이다.
+        //   capabilities stub 가 전부 false 인 것과 같은 정신으로 false(미측정 backend 는 제어 채널을
+        //   소비한다고 주장하지 않는다). dispatch 미연결 — spike 후 실측값으로 교체.
+        false
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -38,6 +45,8 @@ impl AgentBackend for GeminiBackend {
         session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
+        // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
+        _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         // AgentCommand에 Gemini variant가 없으므로 Claude/Shell만 들어올 수 있다.
         // dispatch(backend_for)에서 이 backend로 오는 경로가 현재 없음 — 라우팅 미연결.
@@ -123,6 +132,7 @@ mod tests {
             sid,
             PathBuf::from("."),
             vec![],
+            None,
         )
     }
 
@@ -172,6 +182,7 @@ mod tests {
             None,
             cwd.clone(),
             env.clone(),
+            None,
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);
