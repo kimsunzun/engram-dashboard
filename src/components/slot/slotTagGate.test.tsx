@@ -23,6 +23,18 @@ globalThis.ResizeObserver = class {
   disconnect() {}
 } as unknown as typeof ResizeObserver
 
+// jsdom 은 IntersectionObserver 도 없다 — TerminalSlot 이 마운트 시 WebGL 가시성 연동(ADR-0056)으로
+// new IntersectionObserver 한다. 콜백을 한 번도 발화하지 않는 no-op stub → WebGL 은 부착되지 않고
+// 데이터 경로(tag 게이트)만 검사된다. WebGL 라이프사이클 자체는 TerminalSlot.test.tsx 에서 별도 검증.
+globalThis.IntersectionObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() {
+    return []
+  }
+} as unknown as typeof IntersectionObserver
+
 // ── subscribeOutput 콜백 캡처 holder ─────────────────────────────────────────────
 // vi.hoisted 로 만들어 mock factory 와 테스트 본문이 같은 참조를 공유한다.
 const captured = vi.hoisted(() => ({ onChunk: null as ((c: OutputChunk) => void) | null }))

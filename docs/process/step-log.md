@@ -990,6 +990,11 @@
 - **경위/판단:** supersede 범위는 호출자(메인) 판단 — 0080은 **full**(제안·headline 사망), **ADR-0014는 손대지 않음**(실독 결과 "오케스트레이션 참조 후보 목록"일 뿐 engram-ctl을 결정하지 않아 M3와 무충돌 — 직전 "0014/0080" 묶음은 0080 cross-ref의 오기재). 병렬 세션의 engram-ctl 크레이트는 이미 커밋 `7543126`에서 삭제 정리 완료(잔여 없음).
 - **게이트:** `/adr supersede` 스크립트로 채번(0085)·스캐폴드·0080↔0085 양방향 링크·인덱스 재생성 → **lint clean(error 0**; advisory 5는 전부 기존 레거시=ADR-0016 부분폐기 링크·ADR-0027 폐기 앵커 4, 이번 변경 무관). 문서만이라 build/test 해당 없음. **다음 = M3 세부 파싱 설계**(마커 프로토콜·펜스스킵 파서·`OutputEvent::ControlSignal`·데몬 라우팅·표시 억제) → `/implement`+TDD.
 
+## WebGL 좌석 가시성 연동 구현 — 숨긴 슬롯 WebGL 반납 (2026-07-16, master, 대화 세션) · ADR-0056 구현·검증
+- **무엇:** ADR-0056(탭 keep-alive + 보이는 슬롯만 WebGL 좌석)의 Phase 2 가시성 연동을 실제 구현·검증. `TerminalSlot`의 WebGL을 마운트-고정 → IntersectionObserver 가시성 연동 생명주기로 전환(숨김=loseContext+dispose 좌석 반납, 표시=재부착+fit+refresh). Terminal 인스턴스·버퍼는 계속 살려 데이터 손실 0. + 부수(사용자 요청): agent_list "에이전트 생성" 서브메뉴 순서 Json↔Terminal 스왑.
+- **결정 세부(ADR-0056 §구현 확정·검증에 박제):** ① loseContext-before-dispose(xterm `WebglAddon.dispose()`가 loseContext 미호출 → dispose만으론 좌석 GC까지 점유) ② GL 컨텍스트 attach 시점 캡처(React가 passive cleanup 이전에 host ref를 null 화 → containerRef 의존 불가) ③ 트리거=IntersectionObserver(display:none 조상 토글 발화 실측). 거부(구현 중): detach-DOM(메모리 이득 ≈0)·dispose-instance(warm 버퍼 상실).
+- **게이트:** 코더(worker-senior) 2라운드 → `/review code` full(doc-aware Claude + cross-family blind Codex/web-off, 판정 FIX → C1 언마운트 좌석누수·C2 부분생성 leak·C3 숨김중 resize·F4 refresh 가드 수정) → `/qa` full. npm test 621+130 PASS · tsc clean. 실 WebView2 cdp 실측: loseContext 좌석 결정적 반납(상한 16 재확인)·IO display:none 발화·E2E(스폰 터미널 attach→탭숨김 반납→복귀 재부착) 무손실 전부 PASS.
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 다음 = ADR-0080 + /review prd + TRD.
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
