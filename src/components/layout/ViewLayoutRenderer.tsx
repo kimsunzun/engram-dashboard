@@ -84,11 +84,11 @@ export default function ViewLayoutRenderer({
           height: '100%',
           background: 'var(--bg)',
           // border 폭을 항상 1px 고정해 포커스 이동 시 layout shift 제거.
-          // 포커스 표시는 inset box-shadow(65% 반투명 accent) — 세 테마 모두 color-mix 로 자동 적응.
-          //   ★강도 65%★: GUI 에디터의 너무 약한 포커스 표시가 반복 UX 불만이라(VS Code #24586 등, /research)
-          //   "은은하되 확실히 식별"되게 40%→65%로 올림(사용자 결정). WebView2 최신 Chromium = color-mix 지원.
           border: '1px solid var(--border)',
-          boxShadow: isFocused ? 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent)' : 'none',
+          // ★포커스 링은 여기(래퍼)가 아니라 아래 absolute 오버레이로 그린다★: inset box-shadow 를 래퍼에
+          //   직접 주면 overflow:hidden 슬롯에서 100% 채운 자식 컨텐츠(터미널 canvas·RichSlot)가 덮어 안
+          //   보였다(빈 슬롯만 보이던 버그, 사용자 제보 2026-07-16). position:relative 로 오버레이 앵커만 잡는다.
+          position: 'relative',
           boxSizing: 'border-box',
           // 콘텐츠(터미널/rich) 있을 때: 슬롯을 100% 채우도록 여백·정렬 제거(center 정렬 끼면 깨짐).
           // 빈 슬롯(empty): 플레이스홀더를 중앙정렬하는 flex 유지.
@@ -186,6 +186,23 @@ export default function ViewLayoutRenderer({
             items={buildSlotMenu(node.content.type)}
             ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId }}
             onClose={() => setContextMenu(null)}
+          />
+        )}
+        {isFocused && (
+          // ADR-0066 포커스 링 — 컨텐츠(터미널 canvas·RichSlot) *위*에 그리는 absolute 오버레이.
+          //   inset box-shadow 를 래퍼에 직접 주면 overflow:hidden 슬롯에서 100% 채운 자식이 덮어 안 보인다
+          //   → 별도 오버레이(inset 0)로 올리고 pointerEvents:none 으로 상호작용은 그대로 통과시킨다.
+          //   ★강도 65%★: 너무 약한 포커스 표시가 반복 UX 불만이라(VS Code #24586 등, /research) "은은하되
+          //   확실히 식별"되게 65%(사용자 결정). 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
+          //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 트리/프리셋 제외).
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              pointerEvents: 'none',
+              boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent)',
+              zIndex: 10,
+            }}
           />
         )}
       </div>

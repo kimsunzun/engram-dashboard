@@ -227,24 +227,30 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.getByText('— empty —')).toBeTruthy()
   })
 
-  it('focusedSlotId == node.id → 포커스 인디케이터(inset box-shadow, accent 65%)가 적용된다', () => {
+  it('focusedSlotId == node.id → 포커스 링 오버레이(inset box-shadow, accent 65%)가 컨텐츠 위에 뜬다', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s1" />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper).toBeTruthy()
-    // ADR-0065(focus-ring): border 폭은 항상 1px(layout shift 없음), 포커스는 inset box-shadow 로 표시.
-    // box-shadow 에 accent 가 포함되고 border 에는 포함되지 않아야 한다.
-    expect(wrapper.style.boxShadow).toContain('accent')
+    // ADR-0066(focus-ring): 링은 래퍼가 아니라 컨텐츠 *위* absolute 오버레이로 그린다(overflow:hidden
+    //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정). accent inset box-shadow +
+    //   pointerEvents:none 오버레이가 존재해야 한다.
+    const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
+    expect(overlay).toBeTruthy()
+    expect(overlay!.style.pointerEvents).toBe('none')
+    expect(overlay!.style.position).toBe('absolute')
+    // 래퍼 자신엔 accent 링을 두지 않는다(border 는 항상 1px, accent 아님).
     expect(wrapper.style.border).toContain('border')
     expect(wrapper.style.border).not.toContain('accent')
   })
 
-  it('focusedSlotId != node.id → 비포커스: border=var(--border), box-shadow=none', () => {
+  it('focusedSlotId != node.id → 비포커스: 링 오버레이 없음', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s-other" />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper.style.border).toContain('border')
     expect(wrapper.style.border).not.toContain('accent')
-    // 비포커스 시 box-shadow 는 none
-    expect(wrapper.style.boxShadow).toBe('none')
+    // 비포커스면 accent 링 오버레이가 없어야 한다.
+    const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
+    expect(overlay).toBeUndefined()
   })
 
   // ── ADR-0060/0061/0062: preset_palette·agent_list variant → 각 실 렌더러 마운트(hasContent=true) ──
