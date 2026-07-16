@@ -1,5 +1,7 @@
 # S17 제어 채널 — engram-ctl → in-band 출력 마커(M3) 피벗 (쟁점 정리)
 
+> **⚠️ 이 문서의 M3 결론은 이후 번복되었다.** 최종 결정 = [ADR-0086](../../decisions/0086-제어-채널-듀얼-typed-입구mcpcli-sqlite-메일박스-first-마커m3-폐기.md) · 조사 상세 = [통합 조사 보고서](./control-channel-research-consolidated.md).
+
 > **상태: 방향 확정 = M3 · 정식 박제 완료 = ADR-0085**(2026-07-15 — ADR-0080 전체 폐기, ADR-0014는 무관해 손대지 않음). **PRD/TRD §6 갱신·Unit 재설계는 아직**(추가 작업). 이 문서 = 결정에 이른 쟁점·옵션·실측의 스냅샷 — 결정 정본은 이제 **ADR-0085**.
 > 날짜: 2026-07-15 · 앵커: ADR-0014(CLI-via-Bash)·ADR-0080(제어표면)·ADR-0002(capability matrix)·ADR-0079(resume seed 경계)·ADR-0003(core 격리).
 

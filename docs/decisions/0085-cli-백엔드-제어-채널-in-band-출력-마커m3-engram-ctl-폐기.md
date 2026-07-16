@@ -1,6 +1,6 @@
 # ADR-0085: CLI 백엔드 제어 채널 = in-band 출력 마커(M3) — engram-ctl 폐기
 
-- 상태: 확정 (2026-07-15, 근거: 사용자 결정(보안·속도) + claude 2.1.170 스파이크 실측(마커 38/38) + 라이브/리플레이 경계 코드 확인 · Supersedes ADR-0080)
+- 상태: **폐기 (Superseded by ADR-0086)** — 두 독립 조사(메인 /research 팬아웃 + 사용자 별도 Codex 조사)가 수렴: 자유 텍스트 마커 stdout 스크랩을 주채널로 채택한 사례 0건 + 후속 스파이크에서 컴플라이언스 66%(따옴표 body 깨짐·nonce 오기재). 제어 채널은 듀얼 typed 입구(MCP+CLI) + SQLite 메일박스로 전환. ~~확정 (2026-07-15, 근거: 사용자 결정(보안·속도) + claude 2.1.170 스파이크 실측(마커 38/38) + 라이브/리플레이 경계 코드 확인 · Supersedes ADR-0080)~~
 - 관련: Supersedes ADR-0080(engram-ctl ingress 폐기) · CLAUDE.md §5(LLM-우선 제어)·아키텍처 §2(capability matrix) · ADR-0002(capability = transport ⊕ backend)·ADR-0081(UI opaque-relay 존속)·ADR-0079(resume seed 경계)·ADR-0003(core 격리) · 결정 노트 `docs/process/S17-llm-control-surface/control-channel-deliberation-m3.md` · step-log S17
 
 ## 맥락
