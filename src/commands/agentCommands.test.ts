@@ -186,14 +186,14 @@ describe('agent_list 생성 계열 라우팅', () => {
 // ── agent_list pane 메뉴 = 1단 서브메뉴 컨테이너(ADR-0078 / ADR-0065) ──────────────
 // side-effect import 로 registerSlotMenu 가 이미 컨테이너를 기여했다 — buildSlotMenu 로 형태를 검증한다.
 describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
-  it('"에이전트 생성" 컨테이너 + 자식 2개(선언 순서 Terminal→Json)', () => {
+  it('"에이전트 생성" 컨테이너 + 자식 2개(선언 순서 Json→Terminal)', () => {
     const items = buildSlotMenu('agent_list')
     const container = items.find(i => i.title === '에이전트 생성')
     expect(container).toBeDefined()
     expect(container?.children?.length).toBe(2)
     expect(container?.children?.map(c => c.id)).toEqual([
-      'agentlist.createTerminal',
       'agentlist.createJson',
+      'agentlist.createTerminal',
     ])
   })
 })

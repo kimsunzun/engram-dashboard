@@ -143,8 +143,8 @@ registerSlotMenu('agent_list', [
     group: 'content',
     order: 10,
     children: [
-      { commandId: 'agentlist.createTerminal', group: 'content', order: 10 },
-      { commandId: 'agentlist.createJson', group: 'content', order: 20 },
+      { commandId: 'agentlist.createJson', group: 'content', order: 10 },
+      { commandId: 'agentlist.createTerminal', group: 'content', order: 20 },
     ],
   },
 ])
