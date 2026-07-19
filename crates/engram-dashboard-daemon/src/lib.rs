@@ -10,6 +10,10 @@
 
 pub mod connection_core;
 pub mod control;
+// ADR-0090: Stage 2 컨텍스트 포화 파일럿의 순수 실험 로직. test-harness feature 뒤 — 운영 빌드
+//   미포함(saturation-pilot bin 도 required-features=["test-harness"]). experiment/mod.rs 헤더 참조.
+#[cfg(feature = "test-harness")]
+pub mod experiment;
 pub mod instance;
 pub mod portfile;
 pub mod ws;

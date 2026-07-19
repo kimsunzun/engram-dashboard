@@ -32,6 +32,16 @@ path = "src/main.rs"
 name = "engram-send"
 path = "src/bin/engram-send.rs"
 
+# ★ADR-0090 Stage 2 파일럿 실험 드라이버★: 실 claude 를 스폰해 컨텍스트 포화·주입·프로브를 실측하고
+#   JSONL 로 영속하는 실험 전용 bin. required-features 로 **운영/릴리즈 빌드가 절대 컴파일하지 않게**
+#   막는다 — 실험 코드가 릴리즈 아티팩트에 유입되면 ADR-0090 위반(위 [dev-dependencies] 의 --all-targets
+#   경고와 같은 계열). 통상 `cargo build` 는 이 bin 을 건너뛰고, 오직
+#   `cargo build --features test-harness --bin saturation-pilot` 로만 만들어진다.
+[[bin]]
+name = "saturation-pilot"
+path = "src/bin/saturation_pilot.rs"
+required-features = ["test-harness"]
+
 [dependencies]
 engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
