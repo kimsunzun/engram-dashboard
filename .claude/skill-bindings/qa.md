@@ -43,7 +43,7 @@ cargo test  -p engram-dashboard-core        # 영향 crate 테스트
 순서대로:
 ```bash
 cargo build                                 # 1) 빌드 (루트, 전 workspace)
-cargo test                                  # 2) 전 멤버 회귀 (core unit/통합 + protocol codec/ts-rs 등)
+cargo test -p engram-dashboard-core -p engram-dashboard-protocol -p engram-dashboard-discovery -p engram-dashboard-daemon   # 2) 전 멤버 회귀 — 루트 bare cargo test 금지(src-tauri WebView2 크래시, 정본 CLAUDE.md·2026-07-19 드리프트 수정)
 cargo fmt --check                           # 3) 포맷 게이트 (검사형 — rewrite 안 함)
 rg "use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
