@@ -1,7 +1,7 @@
 # ADR-0086: 제어 채널 = 듀얼 typed 입구(MCP+CLI) + SQLite 메일박스-first — 마커(M3) 폐기
 
 - 상태: 확정 (2026-07-16, 근거: 두 독립 조사 수렴(메인 /research 팬아웃 + 사용자 별도 Codex 조사 — cross-family 확증) + 스파이크 실측 4건 + 사용자 풀 브리핑 승인)
-- 관련: Supersedes ADR-0085(마커=주채널 — 전체 폐기) · ADR-0080(engram-ctl ingress — typed CLI 발상은 부활, 이름은 재사용 금지) · ADR-0081(UI opaque-relay·권위 2도메인 존속 — 이 번복과 무관하게 유효) · ADR-0007(epoch — 토큰 회전 연동) · ADR-0029(데몬=에이전트 호스트) · ADR-0002/0030(capability matrix) · CLAUDE.md §5(LLM-우선 제어) · 결정 노트 `docs/process/S17-llm-control-surface/control-channel-deliberation-m3.md` · Codex 조사 원본 `I:\claude-code-multiagent-messaging-research.md`(repo 밖)
+- 관련: Supersedes ADR-0085(마커=주채널 — 전체 폐기) · ADR-0080(engram-ctl ingress — typed CLI 발상은 부활, 이름은 재사용 금지) · ADR-0081(UI opaque-relay·권위 2도메인 존속 — 이 번복과 무관하게 유효) · ADR-0007(epoch — 토큰 회전 연동) · ADR-0029(데몬=에이전트 호스트) · ADR-0002/0030(capability matrix) · CLAUDE.md §5(LLM-우선 제어) · 결정 노트 `docs/process/S17-llm-control-surface/control-channel-deliberation-m3.md` · Codex 조사 원본 `I:\claude-code-multiagent-messaging-research.md`(repo 밖) · Amended by ADR-0087 (스텝 사다리 ②③④ 분할 순서 → 2-min 최소 전송 일괄 선행 + SQLite 메일박스 보류(사용자 학습 후 재개))
 
 ## 맥락
 에이전트 A→B 메시지(및 향후 제어 커맨드)의 채널을 정해야 한다. ADR-0085는 "데몬이 이미 stdout을 소유하니 in-band 출력 마커(M3)가 최단 경로"로 채택했으나, 근거였던 38/38 실측은 엄격 통제 조건이었다. 이후 두 독립 조사(메인 /research 3갈래 팬아웃 + 사용자 별도 Codex 조사)가 같은 결론으로 수렴했다:
