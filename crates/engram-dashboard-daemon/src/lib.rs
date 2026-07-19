@@ -107,6 +107,43 @@ fn set_engram_exe_env() {
     tracing::warn!("ENGRAM_EXE 미주입 — 앱 exe 형제를 못 찾음(에이전트 CLI 호출은 fallback 필요)");
 }
 
+// ── engram-send CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
+//
+// ★왜 형제 exe 를 찾아야 하나★: 스폰된 claude 에이전트가 다른 에이전트에게 메시지를 보내려면 CLI
+// (`engram-send[.exe]`)를 Bash 로 불러야 하는데, 이 바이너리는 **PATH 에 없다**(데몬과 함께 배포되는
+// 내부 도구라 bare 이름 `engram-send` 로는 Bash 가 못 찾는다 — 옛 claude.rs 주석이 "bare 로 된다"고
+// 오도했다). 그래서 데몬이 자기 exe 폴더의 **형제**에서 절대경로를 찾아(set_engram_exe_env·locate_daemon_exe
+// 와 동일 대칭 — 배포 시 세 exe 동거), provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다.
+// backend/claude.rs 가 그걸 ENGRAM_SEND_EXE env 로 주입해 에이전트가 `"$ENGRAM_SEND_EXE" --to … --body …`
+// 로 부른다.
+//
+// ★best-effort(fail-open)★: 못 찾아도(개발 중 부분 빌드 등) None 을 돌려주고 데몬은 계속 뜬다 — CLI 입구만
+// 비활성이고 MCP 입구는 정상(token/url 은 그래도 주입된다). warn 로그로 원인을 남긴다(관측성).
+
+/// current_exe(데몬)의 형제 `engram-send[.exe]` 절대경로를 찾는다. 못 찾으면 None(warn 로그).
+/// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다 — 그 값은
+/// DaemonControlChannel 로 흘러 provision 마다 ControlEndpoint.send_exe 에 담긴다(env 주입은 backend 소유).
+fn locate_send_exe() -> Option<PathBuf> {
+    const SEND_EXE: &str = if cfg!(windows) {
+        "engram-send.exe"
+    } else {
+        "engram-send"
+    };
+    if let Ok(daemon_exe) = std::env::current_exe() {
+        if let Some(dir) = daemon_exe.parent() {
+            let send_exe = dir.join(SEND_EXE);
+            if send_exe.is_file() {
+                tracing::info!(path = %send_exe.display(), "engram-send CLI 위치 확정(ADR-0086 F1)");
+                return Some(send_exe);
+            }
+        }
+    }
+    tracing::warn!(
+        "engram-send CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
+    );
+    None
+}
+
 // ── panic hook (B-1) ──────────────────────────────────────────────────────────────
 
 /// 데몬 전역 panic hook 설치. panic 한 스레드명·위치·메시지를 tracing::error! 로 남긴다.
@@ -368,18 +405,29 @@ pub async fn run() -> Result<(), i32> {
     //     listener·control_registry)을 drop 하고 Err(1) 로 데몬 시작을 중단한다. 데몬은 자기 제어
     //     엔드포인트 없이는 뜨지 않는다(에이전트 오케스트레이션이 §5 LLM-우선 제어의 근간이라, 그게
     //     없는 반쪽 데몬은 정상 상태가 아니다). ★반드시 에이전트 spawn 전★.
+    // ADR-0086 스텝 2: send_message 의 relay 대상(AgentManager)을 MCP 서버·CLI 라우트에 늦게 주입하는
+    //   슬롯. ★순환 해소★: MCP 서버는 manager 보다 **먼저** 떠야 한다(그 URL 로 mcp-config 를 발급하는
+    //   DaemonControlChannel 을 만들려면). 그래서 빈 슬롯을 서버에 넘기고, manager 조립 직후 set 한다.
+    //   에이전트가 붙어 send 를 부르는 건 accept loop 이후라 그 시점엔 항상 채워져 있다.
+    let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
+
     // MCP 서버 핸들 — Some 이면 프로세스 수명 동안 살아 있어야 서버가 유지된다(drop=종료). fail-closed
     //   라 실패 시 아래 match 가 early-return 하므로, 여기 도달하면 항상 살아 있는 핸들을 든다.
     let (control, mut mcp_server_handle): (
         Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
-    ) = match control::mcp_server::start_mcp_server(control_registry.clone()).await {
+    ) = match control::mcp_server::start_mcp_server(control_registry.clone(), manager_slot.clone())
+        .await
+    {
         Ok(handle) => {
             let url = handle.url.clone();
+            // F1: 형제 engram-send CLI 경로를 부팅 시 1회 탐색해 채널에 넘긴다(provision 마다 endpoint 로 실림).
+            let send_exe = locate_send_exe();
             let channel = Arc::new(control::DaemonControlChannel::new(
                 control_registry.clone(),
                 url,
                 data_dir.clone(),
+                send_exe,
             ));
             // 핸들을 살려 둔다(drop 시 서버 종료). 프로세스 수명 동안 유지.
             (channel, Some(handle))
@@ -397,6 +445,9 @@ pub async fn run() -> Result<(), i32> {
 
     // 6) AgentManager 배선(src-tauri 미러). status_sink = DaemonStatusSink(registry).
     let manager = build_manager(&data_dir, registry.clone(), control);
+    // ADR-0086 스텝 2: manager 를 슬롯에 주입 → 이제 send_message/`/control/send` 가 relay 를 수행할 수
+    //   있다(에이전트 spawn·send 이전에 완료). accept loop 이후의 어떤 send 도 채워진 슬롯을 본다.
+    manager_slot.set(manager.clone());
 
     // 7) auth 비교용 토큰을 Arc 로 보관(daemon.json 에 token 을 move 하므로 그 전에 공유본을 뜸).
     //    보안: 이 값은 로그/외부 노출 금지(handle_connection 내부 비교 전용).

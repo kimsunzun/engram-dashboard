@@ -90,6 +90,21 @@ impl ControlRegistry {
             .copied()
     }
 
+    /// 발신자 생존 "관측"용 (게이트 아님 — 배달은 막지 않고 기록만, 사용자 결정 2026-07-19).
+    ///
+    /// ★동작★: 그 AgentId 의 **현재** 산 토큰의 epoch 이 신원 epoch 과 같으면 true(생존), 아니면 false
+    ///   (kill/rotate 로 토큰이 폐기·교체됨). relay 시점엔 원본 토큰 문자열이 남아 있지 않으므로
+    ///   agent_to_token → token_to_identity 로 되짚어 epoch 일치를 본다(read lock 만, 순수 조회).
+    pub fn is_identity_live(&self, identity: BoundIdentity) -> bool {
+        let inner = self.inner.read().expect("control registry poisoned");
+        inner
+            .agent_to_token
+            .get(&identity.agent_id)
+            .and_then(|token| inner.token_to_identity.get(token))
+            .map(|bound| bound.epoch == identity.epoch)
+            .unwrap_or(false)
+    }
+
     /// Mcp-Session-Id → **미들웨어가 검증한 신원**을 바인딩한다(ADR-0086). auth 미들웨어가 initialize
     /// 응답에서 Mcp-Session-Id 를 발견했을 때 부른다 — 그 세션 키에 이 신원을 매단다. 이후 그 세션으로
     /// 오는 요청의 신원 확인·acceptance 관측·revoke 정리 대상이 된다.
@@ -248,6 +263,52 @@ mod tests {
     fn unknown_token_is_none() {
         let reg = ControlRegistry::new();
         assert!(reg.validate("nope").is_none());
+    }
+
+    #[test]
+    fn is_identity_live_tracks_revoke_and_rotation() {
+        // ★F3 회귀★: commit-point 재검증용. 산 토큰이 있으면 live, revoke/회전 후엔 그 신원은 dead.
+        let reg = ControlRegistry::new();
+        let id = AgentId::new_v4();
+        tok(&reg, id, 0);
+        let ident0 = BoundIdentity {
+            agent_id: id,
+            epoch: 0,
+        };
+        assert!(reg.is_identity_live(ident0), "발급 직후 신원은 live");
+
+        // 회전(epoch bump) → 옛 신원(epoch 0)은 dead, 새 신원(epoch 1)은 live.
+        tok(&reg, id, 1);
+        assert!(
+            !reg.is_identity_live(ident0),
+            "회전 후 옛 epoch 신원은 dead(F3)"
+        );
+        assert!(
+            reg.is_identity_live(BoundIdentity {
+                agent_id: id,
+                epoch: 1
+            }),
+            "새 epoch 신원은 live"
+        );
+
+        // revoke → 완전히 dead.
+        reg.revoke(id, 1);
+        assert!(
+            !reg.is_identity_live(BoundIdentity {
+                agent_id: id,
+                epoch: 1
+            }),
+            "revoke 후 신원은 dead(F3)"
+        );
+
+        // 아예 발급된 적 없는 신원도 dead.
+        assert!(
+            !reg.is_identity_live(BoundIdentity {
+                agent_id: AgentId::new_v4(),
+                epoch: 0
+            }),
+            "미발급 신원은 dead"
+        );
     }
 
     #[test]

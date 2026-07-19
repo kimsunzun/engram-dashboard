@@ -16,6 +16,12 @@ path = "src/lib.rs"
 name = "engram-dashboard-daemon"
 path = "src/main.rs"
 
+# ADR-0086 스텝 2: CLI 입구. 스폰된 claude 가 Bash 로 부르는 최소 클라이언트 — env(ENGRAM_TOKEN/
+# ENGRAM_CONTROL_URL)를 읽어 데몬 /control/send 로 POST 한다. 의존성 최소화(std TcpStream 손조립 HTTP).
+[[bin]]
+name = "engram-send"
+path = "src/bin/engram-send.rs"
+
 [dependencies]
 engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
@@ -44,7 +50,8 @@ uuid = { version = "1", features = ["v4"] }
 #   정적 Bearer 를 무시하는 #59467 조건을 원천 회피(초기화 실측 근거는 ADR-0086 §근거).
 rmcp = { version = "2.2.0", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 # axum = MCP 라우터 호스트(rmcp 가 axum 0.8 겨냥). 로컬 평문 HTTP — TLS 불필요.
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+#   json = /control/send 핸들러의 Json extractor/응답(ADR-0086 스텝 2 CLI 입구).
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # tower = MCP /mcp 라우트에 bearer auth 미들웨어를 얹는 layer 조립(공식 auth 패턴).
 tower = "0.5"
 # tower-http(limit) = RequestBodyLimitLayer — axum DefaultBodyLimit 는 extractor 만 제한하나

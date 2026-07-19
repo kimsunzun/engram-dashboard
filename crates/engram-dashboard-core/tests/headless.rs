@@ -123,6 +123,7 @@ impl ControlChannel for CountingControl {
             url: "http://127.0.0.1:1/mcp".into(),
             token: format!("tok-{id}-{epoch}"),
             config_path: PathBuf::from("."),
+            send_exe: None,
         }))
     }
     fn revoke(&self, id: AgentId, epoch: u32) {

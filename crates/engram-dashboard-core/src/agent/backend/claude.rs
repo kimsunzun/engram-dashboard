@@ -133,6 +133,45 @@ impl AgentBackend for ClaudeBackend {
                 if let Some(endpoint) = &control {
                     args.push("--mcp-config".to_string());
                     args.push(endpoint.config_path.to_string_lossy().into_owned());
+                    // ADR-0086 스텝 2(CLI 입구): MCP(mcp-config) 입구와 **별개로**, PTY env 에 CLI 크레덴셜을
+                    //   주입한다. 스폰된 claude 가 Bash 로 CLI(`engram-send`)를 부를 때 이 env 를 읽어 데몬 제어
+                    //   라우트에 Bearer 토큰으로 POST 한다. env 는 CommandSpec.env → transport 가 cmd.env(k,v)
+                    //   로 심고, portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
+                    //   (Bash·그 손자)까지 상속**한다(lib.rs ENGRAM_EXE 주석과 동일 메커니즘).
+                    //   ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: `engram-send` 는 PATH 에 없다(데몬 exe
+                    //   의 형제로 배포되는 내부 바이너리라 bare 이름으론 Bash 에서 못 찾는다). 데몬이 부팅 시
+                    //   자기 exe 형제에서 위치를 찾아 endpoint.send_exe 로 실어 보내면, 여기서 그 **절대경로**를
+                    //   env 로 주입한다 → 에이전트 매뉴얼은 `"$ENGRAM_SEND_EXE" --to <name> --body "…"` 로 부른다.
+                    //   send_exe 가 None(부분 빌드 등 형제 부재)이면 이 env 만 생략한다 — token/url 은 그래도
+                    //   주입해 MCP 입구는 살리고, CLI 입구만 못 쓰게 한다(데몬은 그때 warn 로그 — lib.rs).
+                    //   ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
+                    //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를
+                    //   벗겨 base 만 남긴다 — CLI 가 `<base>/control/send` 를 조립한다(라우트 경로 지식은 CLI 소유).
+                    //   suffix 가 없으면(형태 변주) url 을 그대로 base 로 쓴다(방어적).
+                    //   ★keep-in-sync(M5)★: 아래 strip_suffix 의 리터럴 "/mcp" 는 데몬측 MCP_PATH 상수와
+                    //   **손으로 맞춰진** 값이다 — 정본 = `crates/engram-dashboard-daemon/src/control/
+                    //   mcp_server.rs`(const MCP_PATH). 그쪽 경로를 바꾸면 여기 리터럴도 함께 고쳐야 한다
+                    //   (빌드가 강제 못 함 → 어긋나면 base 파생이 틀어져 CLI 가 조용히 404). 두 곳 상호 앵커.
+                    //   ★claude 지식 격리(ADR-0004)와의 관계★: env 키(ENGRAM_TOKEN/ENGRAM_CONTROL_URL/
+                    //   ENGRAM_SEND_EXE)는 claude 플래그가 아니라 제어 채널 규약이지만, "control endpoint 를
+                    //   프로세스에 어떻게 먹이나"는 backend 별 방식(claude=mcp-config+env)이라 이 파일이 소유한다.
+                    //   generic 층은 여전히 추상 ControlEndpoint 만 나른다(send_exe 도 그 descriptor 필드).
+                    //   ★보안★: 토큰이 env 로 노출되나, 같은 OS 유저의 자식 프로세스에만 상속되고(하드 격리는
+                    //   원래 불가 — ADR-0086 §불변식), 로그엔 찍지 않는다.
+                    let base = endpoint
+                        .url
+                        .strip_suffix("/mcp")
+                        .unwrap_or(&endpoint.url)
+                        .to_string();
+                    env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
+                    env.push(("ENGRAM_CONTROL_URL".to_string(), base));
+                    // send_exe 가 있을 때만 CLI 경로를 env 로 노출(없으면 CLI 입구 비활성 — MCP 입구는 유지).
+                    if let Some(send_exe) = &endpoint.send_exe {
+                        env.push((
+                            "ENGRAM_SEND_EXE".to_string(),
+                            send_exe.to_string_lossy().into_owned(),
+                        ));
+                    }
                 }
                 args.extend(extra_args.iter().cloned());
                 // Windows shim 회피: cmd /c claude … 로 감싼다(비Windows는 그대로).
@@ -888,6 +927,16 @@ mod tests {
             url: "http://127.0.0.1:54321/mcp".to_string(),
             token: "deadbeef".to_string(),
             config_path: PathBuf::from("C:/data/mcp/agent-x.json"),
+            // 기본 헬퍼는 send_exe 를 담아 ENGRAM_SEND_EXE 주입 경로를 검증할 수 있게 한다.
+            send_exe: Some(PathBuf::from("C:/app/engram-send.exe")),
+        }
+    }
+
+    /// send_exe=None 변주(형제 바이너리 부재 모사) — token/url 은 주입하되 ENGRAM_SEND_EXE 는 생략됨을 검증.
+    fn ep_no_send() -> ControlEndpoint {
+        ControlEndpoint {
+            send_exe: None,
+            ..ep()
         }
     }
 
@@ -932,6 +981,75 @@ mod tests {
             !s.args.iter().any(|a| a == "--mcp-config"),
             "control 없으면 --mcp-config 없음: {:?}",
             s.args
+        );
+    }
+
+    // ── ADR-0086 스텝 2: CLI 크레덴셜 env 주입(ENGRAM_TOKEN / ENGRAM_CONTROL_URL) ──────────────
+    #[test]
+    fn claude_control_endpoint_injects_cli_env() {
+        // control 이 있으면 env 에 ENGRAM_TOKEN(토큰) + ENGRAM_CONTROL_URL(base=/mcp 벗긴 값)이 실린다.
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        let token = s
+            .env
+            .iter()
+            .find(|(k, _)| k == "ENGRAM_TOKEN")
+            .map(|(_, v)| v.as_str());
+        let url = s
+            .env
+            .iter()
+            .find(|(k, _)| k == "ENGRAM_CONTROL_URL")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(token, Some("deadbeef"), "ENGRAM_TOKEN = endpoint 토큰");
+        assert_eq!(
+            url,
+            Some("http://127.0.0.1:54321"),
+            "ENGRAM_CONTROL_URL = MCP url 에서 /mcp 를 벗긴 base"
+        );
+        // F1: send_exe 가 있으면 ENGRAM_SEND_EXE(절대경로)도 주입된다.
+        let send_exe = s
+            .env
+            .iter()
+            .find(|(k, _)| k == "ENGRAM_SEND_EXE")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            send_exe,
+            Some("C:/app/engram-send.exe"),
+            "ENGRAM_SEND_EXE = endpoint.send_exe 절대경로"
+        );
+    }
+
+    #[test]
+    fn claude_control_endpoint_without_send_exe_omits_send_env() {
+        // F1: send_exe=None(형제 바이너리 부재)이면 ENGRAM_SEND_EXE 는 생략하되 token/url 은 주입한다.
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_no_send()),
+        );
+        assert!(
+            s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN")
+                && s.env.iter().any(|(k, _)| k == "ENGRAM_CONTROL_URL"),
+            "send_exe 없어도 token/url 은 주입(MCP 입구 유지): {:?}",
+            s.env
+        );
+        assert!(
+            !s.env.iter().any(|(k, _)| k == "ENGRAM_SEND_EXE"),
+            "send_exe=None 이면 ENGRAM_SEND_EXE 는 생략: {:?}",
+            s.env
+        );
+    }
+
+    #[test]
+    fn claude_no_control_endpoint_no_cli_env() {
+        // control=None 이면 CLI env 도 주입하지 않는다(기존 동작 불변 — env 오염 없음).
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        assert!(
+            !s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN"
+                || k == "ENGRAM_CONTROL_URL"
+                || k == "ENGRAM_SEND_EXE"),
+            "control 없으면 CLI env 없음: {:?}",
+            s.env
         );
     }
 

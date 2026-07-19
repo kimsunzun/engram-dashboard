@@ -3,7 +3,8 @@
 //! 구성:
 //! - `registry` — (AgentId, epoch)별 bearer 토큰 발급·검증·폐기 + 세션 바인딩.
 //! - `mcp_config` — 에이전트별 mcp-config JSON 생성·삭제(claude `--mcp-config` 대상).
-//! - `mcp_server` — 데몬 MCP Streamable HTTP 서버(auth 미들웨어 + `engram_ping` 툴).
+//! - `ingress` — ControlIngress seam(스텝 2): 듀얼 입구(MCP+CLI) 공통 파이프라인(정규화→Validator→relay→ACK).
+//! - `mcp_server` — 데몬 MCP Streamable HTTP 서버(auth 미들웨어 + `engram_ping`/`send_message` 툴 + `/control/send`).
 //! - `DaemonControlChannel`(이 파일) — core `ControlChannel` seam 구현체. spawn=provision(토큰+config
 //!   발급), terminal=revoke(폐기+config 삭제). core 는 이 구현을 모르고 trait 만 안다(ADR-0003 idiom).
 //!
@@ -13,6 +14,7 @@
 //!
 //! tauri import 0(daemon crate).
 
+pub mod ingress;
 pub mod mcp_config;
 pub mod mcp_server;
 pub mod registry;
@@ -36,14 +38,24 @@ pub struct DaemonControlChannel {
     mcp_url: String,
     /// mcp-config 파일이 사는 데이터 디렉토리(파일은 <data_dir>/mcp-config/ 아래).
     data_dir: PathBuf,
+    /// ADR-0086 스텝 2(F1): 데몬이 부팅 시 형제 exe 에서 찾아낸 `engram-send` CLI 절대경로(없으면 None).
+    /// provision 이 이 값을 그대로 ControlEndpoint.send_exe 로 실어, backend(claude.rs)가 ENGRAM_SEND_EXE
+    /// env 로 주입한다. None(형제 부재)이면 CLI 입구만 비활성 — MCP 입구는 정상.
+    send_exe: Option<PathBuf>,
 }
 
 impl DaemonControlChannel {
-    pub fn new(registry: Arc<ControlRegistry>, mcp_url: String, data_dir: PathBuf) -> Self {
+    pub fn new(
+        registry: Arc<ControlRegistry>,
+        mcp_url: String,
+        data_dir: PathBuf,
+        send_exe: Option<PathBuf>,
+    ) -> Self {
         Self {
             registry,
             mcp_url,
             data_dir,
+            send_exe,
         }
     }
 
@@ -89,6 +101,8 @@ impl ControlChannel for DaemonControlChannel {
             url: self.mcp_url.clone(),
             token,
             config_path,
+            // F1: 형제 CLI 경로를 endpoint 로 실어 backend 가 ENGRAM_SEND_EXE 로 주입하게 한다(부팅 때 1회 탐색).
+            send_exe: self.send_exe.clone(),
         }))
     }
 

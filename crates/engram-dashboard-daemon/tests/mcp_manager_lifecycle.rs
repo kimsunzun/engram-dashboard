@@ -25,7 +25,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::mcp_config;
-use engram_dashboard_daemon::control::mcp_server::start_mcp_server;
+use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
@@ -58,7 +58,7 @@ async fn make_manager_with_control(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), Arc::new(ManagerSlot::new()))
         .await
         .expect("start mcp server");
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-mgr-{tag}-{}", AgentId::new_v4()));
@@ -67,6 +67,7 @@ async fn make_manager_with_control(
         registry.clone(),
         handle.url.clone(),
         data_dir.clone(),
+        None, // send_exe: 이 테스트는 CLI 입구 불요.
     ));
 
     let (manager, registry, data_dir, handle) =
@@ -86,7 +87,7 @@ async fn make_manager_with_control_channel(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), Arc::new(ManagerSlot::new()))
         .await
         .expect("start mcp server");
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-mgr-{tag}-{}", AgentId::new_v4()));
@@ -254,7 +255,8 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
     let (_manager, registry, data_dir, handle) =
         make_manager_with_control("provision-reclaim").await;
     // guard drop 이 부르는 그 경로(control.revoke)를 실 DaemonControlChannel 로 직접 돌린다.
-    let channel = DaemonControlChannel::new(registry.clone(), handle.url.clone(), data_dir.clone());
+    let channel =
+        DaemonControlChannel::new(registry.clone(), handle.url.clone(), data_dir.clone(), None);
     let id = AgentId::new_v4();
 
     // provision — 실 토큰 발급 + 실 config 파일 write(guard 가 arm 되는 시점의 상태와 동일).

@@ -11,8 +11,13 @@
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::types::AgentId;
-use engram_dashboard_daemon::control::mcp_server::start_mcp_server;
+use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
 use engram_dashboard_daemon::control::registry::ControlRegistry;
+
+/// 빈 manager 슬롯(스텝 1 테스트는 send 를 안 부르므로 relay 대상 불필요). 헬퍼로 반복 제거.
+fn empty_slot() -> Arc<ManagerSlot> {
+    Arc::new(ManagerSlot::new())
+}
 
 /// initialize JSON-RPC 바디(POST /mcp). rmcp 는 Accept: application/json+text/event-stream 를 요구하나,
 /// 401 검증은 auth 미들웨어가 handshake **전에** 막으므로 Accept 헤더 유무와 무관하게 401 이 나야 한다.
@@ -157,7 +162,7 @@ async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     // epoch 회전(재활성화) — epoch 0 토큰은 폐기되고 epoch 1 이 산 토큰.
     registry.issue(id, 1, "valid-token-epoch1".to_string());
 
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -203,7 +208,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     let id = AgentId::new_v4();
     registry.issue(id, 7, "good-token".to_string());
 
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
 
@@ -253,7 +258,9 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
 #[tokio::test]
 async fn get_and_delete_without_token_are_rejected() {
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry).await.expect("start mcp server");
+    let handle = start_mcp_server(registry, empty_slot())
+        .await
+        .expect("start mcp server");
     let url = &handle.url;
 
     // GET(SSE) 무토큰 → 401(auth 미들웨어가 세션 조회 전 차단).
@@ -281,7 +288,7 @@ async fn cross_token_session_takeover_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string());
     registry.issue(id_b, 0, "token-b".to_string());
 
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -315,7 +322,7 @@ async fn revoked_mid_session_request_is_rejected() {
     let id = AgentId::new_v4();
     registry.issue(id, 0, "live-token".to_string());
 
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -352,12 +359,13 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_daemon::control::DaemonControlChannel;
 
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
 
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-rotate-{}", AgentId::new_v4()));
-    let channel = DaemonControlChannel::new(registry.clone(), handle.url.clone(), data_dir.clone());
+    let channel =
+        DaemonControlChannel::new(registry.clone(), handle.url.clone(), data_dir.clone(), None);
 
     let id = AgentId::new_v4();
     // epoch 0 provision — 토큰 발급 + config 파일 기록.
@@ -409,7 +417,7 @@ async fn orphaned_session_attach_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string());
     registry.issue(id_b, 0, "token-b".to_string());
 
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -446,7 +454,9 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "valid".to_string());
-    let handle = start_mcp_server(registry).await.expect("start mcp server");
+    let handle = start_mcp_server(registry, empty_slot())
+        .await
+        .expect("start mcp server");
     let url = &handle.url;
 
     // 유효 토큰이지만 한 번도 바인딩된 적 없는 세션 id → 404(inner 로 forward 하지 않음).
@@ -467,7 +477,9 @@ async fn malformed_session_id_header_is_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "malformtok".to_string());
-    let handle = start_mcp_server(registry).await.expect("start mcp server");
+    let handle = start_mcp_server(registry, empty_slot())
+        .await
+        .expect("start mcp server");
     let url = &handle.url;
 
     // 비-UTF-8 바이트를 담은 Mcp-Session-Id 헤더(HeaderValue::from_bytes 로만 만들 수 있는 malformed 값).
@@ -503,7 +515,9 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "optok".to_string());
-    let handle = start_mcp_server(registry).await.expect("start mcp server");
+    let handle = start_mcp_server(registry, empty_slot())
+        .await
+        .expect("start mcp server");
     let url = &handle.url;
 
     // 유효 토큰 + GET(SSE) + 세션 id 없음 → 400(세션 operation 은 세션을 지목해야).
@@ -531,7 +545,7 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "inittok".to_string());
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -564,7 +578,7 @@ async fn oversize_body_is_rejected_with_413() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "sizetok".to_string());
-    let handle = start_mcp_server(registry.clone())
+    let handle = start_mcp_server(registry.clone(), empty_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;

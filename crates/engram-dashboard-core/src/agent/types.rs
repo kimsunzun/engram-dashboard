@@ -171,6 +171,11 @@ pub struct ControlEndpoint {
     /// backend 가 생성한 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다).
     /// backend/claude.rs 가 이 파일에 url+token 을 써서 `--mcp-config` 로 주입한다.
     pub config_path: std::path::PathBuf,
+    /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram-send` CLI 바이너리 절대경로(있으면).
+    /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
+    /// 그 env(claude=`ENGRAM_SEND_EXE`)를 주입하지 않는다(token/url 은 그래도 주입 — CLI 만 못 씀).
+    /// core 는 이 값을 해석하지 않고 문자열 경로만 나른다(형제 exe 탐색 지식은 데몬 소유 — lib.rs).
+    pub send_exe: Option<std::path::PathBuf>,
 }
 
 /// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일
