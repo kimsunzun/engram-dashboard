@@ -1036,6 +1036,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "engram-dashboard-core",
+ "engram-dashboard-daemon",
  "engram-dashboard-discovery",
  "engram-dashboard-protocol",
  "futures-util",

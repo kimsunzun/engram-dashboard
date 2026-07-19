@@ -62,6 +62,15 @@ pub struct DeliveryObservation {
     pub bytes_written: Option<usize>,
     /// 이 유저 턴의 session-level replay-dedup 키(write 성공 시 Some). msg_id 와 상관되는 다른 한 축.
     pub msg_uuid: Option<uuid::Uuid>,
+    /// ★write 가 실제로 착지한 수신자 incarnation 의 epoch(ADR-0088 Stage 1, write 성공 시 Some)★.
+    /// core `WriteOutcome.epoch` 를 그대로 실은 값 = write 를 **집행한** 세션의 epoch(resolve 시점
+    /// 스냅샷 epoch 이 아니다 — 그 비대칭이 핵심, 아래 성공 갈래 주석 참조). 이 필드가 오라클 5 가 남긴
+    /// **관측 한계**("DeliveryObservation 이 수신자 epoch 을 안 담아 어느 incarnation 이 받았는지 레코드
+    /// 만으로 단정 못 한다")를 닫는다 — mid-flight epoch race(resolve↔write 사이 재시작)에서 메시지가
+    /// 새 incarnation 에 착지했음을 레코드만으로(record-self-sufficient) 직접 단언할 수 있게 한다.
+    /// write 실패 시 None(꽂힌 데 없으니 착지 epoch 도 없음 — msg_uuid/bytes_written 실패 시맨틱과 정합).
+    /// ★완결성 판정 레버 아님★: `is_delivered()` 는 이 값을 보지 않는다(배달 유효성 게이트가 아니라 관측 축).
+    pub to_epoch: Option<u32>,
     /// write 결과 — 성공이면 None, 실패면 에러 문자열(PtyError Display). 실패를 성공으로 삼키지 않음의 증거.
     /// ★배달 완결성의 1차 증거는 이 필드다(바이트 비교 아님)★ — `None` = 세션 write_all 이 Ok.
     pub error: Option<String>,
@@ -274,6 +283,19 @@ pub fn handle_send(
     //   여기서 넘기는 바이트가 곧 세션이 받았을 논리 메시지라 정의상 일치, 아래 실패 갈래 주석 참조).
     let body_bytes = cmd.body.len();
 
+    // ★mid-send yield-seam(ADR-0088 Stage 1 — test-harness 전용, 운영 빌드엔 컴파일 안 됨)★:
+    //   resolve/reachability/wrap 를 다 끝낸 **resolve↔write 갭의 가장 늦은 지점**에서 test hook 을 발화한다.
+    //   결정적 mid-flight epoch race 재현용 — hook 안에서 같은 AgentId 를 새 epoch incarnation 으로 교체
+    //   주입하면 위 resolve 는 구 incarnation(epoch N)을 봤는데 아래 write 는 교체된 새 incarnation
+    //   (epoch N+1)에 착지한다. ★이 race 는 ADR-0086 §F5 가 design-accepted 로 표시★: 메일은 **논리
+    //   에이전트**(이름/AgentId = epoch 교체에도 유지되는 안정 주소)를 향하므로 새 incarnation 착지가 곧
+    //   올바른 동작이다. 이 seam 은 그 동작을 **결정적으로 관측**할 뿐 epoch 를 pin 하지 않는다(feature OFF
+    //   면 handle_send 동작은 오늘과 byte-identical — hook 발화 코드가 아예 사라진다). fire_mid_send_hook
+    //   은 hook Arc 를 lock 밖에서 호출한다(ADR-0006 — record_delivery 와 동일 규율).
+    // ADR-0088
+    #[cfg(feature = "test-harness")]
+    registry.fire_mid_send_hook();
+
     // ADR-0088: write 경계 계측판(write_stdin_observed)으로 논리 메시지 바이트 + 이 턴 msg_uuid 를 회수한다
     //   (완결성은 Ok/Err — 바이트 비교 아님, WriteOutcome 주석).
     //   write_stdin 은 json 모드 세션에선 encoder 가 텍스트를 claude user-message 라인으로 감싼다(ADR-0044)
@@ -300,6 +322,12 @@ pub fn handle_send(
             // ★요청/실제 바이트는 재계산 없이 outcome 을 단일 출처로 쓴다(FIX-1c) — 세션 경계가 실제 받은
             //   논리 메시지 바이트. bytes_written 은 outcome 의 by-construction 복사(WriteOutcome 주석).
             // ADR-0088
+            // ★to_epoch = write 가 실제 착지한 incarnation 의 epoch(outcome.epoch)이지, resolve 시점
+            //   스냅샷의 epoch 이 아니다★(ADR-0088). 이 비대칭이 record-self-sufficiency 의 핵심 —
+            //   resolve↔write 사이 재시작(mid-flight epoch race)으로 착지 incarnation 이 바뀌면 레코드가
+            //   **실제 받은** 쪽을 담아야 한다. resolve-time epoch 을 실으면 그 race 를 레코드만으로
+            //   단정할 수 없어 관측 한계가 다시 생긴다(오라클 5 가 지적한 그 한계).
+            // ADR-0088
             registry.record_delivery(DeliveryObservation {
                 msg_id: msg_id.clone(),
                 to_id,
@@ -309,6 +337,7 @@ pub fn handle_send(
                 bytes_requested: outcome.bytes_requested,
                 bytes_written: Some(outcome.bytes_written),
                 msg_uuid: Some(outcome.msg_uuid),
+                to_epoch: Some(outcome.epoch),
                 error: None,
             });
             ControlResult::Enqueued {
@@ -343,6 +372,11 @@ pub fn handle_send(
                 bytes_requested: wrapped.len(),
                 bytes_written: None,
                 msg_uuid: None,
+                // ADR-0088: write 실패 = **완결된 write 가 없음** → attest 할 착지 incarnation 이 없다(None).
+                //   0바이트 이동 주장이 아니다 — write_all 이 Err 전에 prefix 를 물리적으로 흘렸을 수 있다
+                //   (core stdio_physical_pipe 부분-write 하네스가 그 축을 증명). 완결성 교리(Ok=완결/Err=실패,
+                //   바이트 비교 아님)와 정합: msg_uuid/bytes_written 이 None 인 것과 같은 이유로 to_epoch 도 None.
+                to_epoch: None,
                 error: Some(e.to_string()),
             });
             ControlResult::Error {

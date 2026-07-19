@@ -10,6 +10,16 @@ description = "Engram Dashboard 데몬 — 단일 인스턴스, 랜덤 포트 + 
 name = "engram_dashboard_daemon"
 path = "src/lib.rs"
 
+# ★test-harness (ADR-0088 Stage 1)★: handle_send 의 결정적 mid-flight epoch race 재현용 yield-seam
+#   (resolve↔write 갭에서 발화하는 test hook)을 여는 기능 플래그. 기본 OFF — 운영(production) 빌드는
+#   이 hook 을 **아예 컴파일하지 않는다**(feature OFF = handle_send 동작이 오늘과 byte-identical). core 의
+#   같은-이름 기능도 함께 켜 `insert_test_session` seam 을 딸려 연다. 통합 테스트에서 켜는 방식 =
+#   아래 [dev-dependencies] 의 self-dev-dependency(자기 crate 를 features=["test-harness"] 로 재선언) —
+#   그러면 `cargo test -p engram-dashboard-daemon` 이 별도 --features 플래그 없이 hook 을 컴파일하고,
+#   운영 dep 그래프(무-feature)엔 유니피케이션되지 않는다.
+[features]
+test-harness = ["engram-dashboard-core/test-harness"]
+
 # 데몬 실행 진입점. AgentManager 를 daemon 프로세스가 소유하고, src-tauri(Embedded)와
 # 같은 core/protocol 을 공유한다. lib 의 run() 만 호출하는 thin entry.
 [[bin]]
@@ -72,6 +82,20 @@ windows = { version = "0.58", features = [
 
 # ── ADR-0086 통합 테스트 전용(dev) ─────────────────────────────────────────────
 [dev-dependencies]
+# ★ADR-0088 self-dev-dependency 트릭★: 자기 crate(daemon lib)를 features=["test-harness"] 로 dev 그래프에
+#   재선언한다 → `cargo test -p engram-dashboard-daemon` 이 lib 을 그 feature 로 컴파일해 handle_send 의
+#   yield-seam hook 을 별도 --features 플래그 없이 켠다. dev 그래프에만 있으므로 운영 daemon 바이너리
+#   (위 [dependencies] 무-feature)엔 유니피케이션되지 않는다 — 운영 빌드엔 hook 이 존재하지 않는다(no-leak).
+#   daemon test-harness 는 core 의 test-harness 로 전이(forward)되므로 `insert_test_session` seam 도 함께
+#   열린다(아래 core 재선언은 명시적 backup — daemon feature 미경유 경로에서도 seam 이 켜지게).
+# ★운영 빌드 주의(feature 유니피케이션)★: cargo 는 한 번의 호출 안에서 같은 crate 의 feature 를
+#   **합집합**한다. 그래서 `cargo build --release --all-targets` 처럼 lib 과 (dev-dependency 를 끌어오는)
+#   test/bench 타깃을 **한 호출**로 빌드하면, 이 self-dev-dependency 의 `test-harness` 가 공유 lib 빌드에
+#   유니피케이션돼 **그 호출로 나온 daemon 바이너리에 yield-seam hook 이 박힌다**. 통상 운영 경로
+#   (`cargo build [--release]`, tauri 번들링)는 dev-dependency 를 안 끌어오므로 무해하다.
+#   ▶ 규칙: 배포용 릴리스 바이너리는 `--all-targets` 로 만들지 않는다(core 의 test-harness dev-dep 도 동일
+#     위험군 — 여기서 문서화만, 재설계 아님).
+engram-dashboard-daemon = { path = ".", features = ["test-harness"] }
 # ★ADR-0088 배달 관측 seam★: 통합 테스트가 `AgentManager::insert_test_session`(하네스 전용 세션 주입
 #   seam)을 cross-crate 로 쓰려면 core 의 `test-harness` 기능을 켜야 한다. dev-dependency 로만 켜므로
 #   운영 daemon 바이너리 의존 그래프(위 [dependencies] 의 무-feature core)엔 유니피케이션되지 않는다 —

@@ -465,6 +465,16 @@ pub struct WriteOutcome {
     /// 배달 하네스가 ingress 의 논리 msg_id 와 이 값을 상관시켜 "claude 가 이 턴을 replay 했나"(=
     /// 실제 파싱했나)를 판정한다(ADR-0088). 값·의미는 여기서 바꾸지 않는다 — 노출만 한다.
     pub msg_uuid: uuid::Uuid,
+    /// ★write 가 실제로 착지한 incarnation 의 epoch(ADR-0088 Stage 1)★. 이 write 를 수행한 세션의
+    /// `self.epoch` 를 by-construction 으로 실은 값이다(bytes_written 과 같은 성격 — 독립 측정이 아니라
+    /// write 를 집행한 세션이 자기 epoch 을 그대로 채운다). ★왜 필요한가★: 제어 채널 배달 관측 레코드가
+    /// **자기충족(record-self-sufficient)** 이려면 "이 메시지가 어느 incarnation 에 꽂혔나" 를 레코드
+    /// 안에서 직접 답할 수 있어야 한다 — resolve 시점 스냅샷 epoch 이 아니라 **write 가 실제로 착지한**
+    /// 세션의 epoch 을 담아야 mid-flight epoch race(resolve↔write 사이 재시작) 를 레코드만으로 단정할 수
+    /// 있다(그 race 는 ADR-0086 §F5 가 design-accepted 로 표시 — 메일은 논리 에이전트를 향하므로 새
+    /// incarnation 착지가 올바른 동작이다). 값은 write 를 집행한 세션에서만 채워지므로(성공 경로 한정)
+    /// resolve-time 과 어긋날 수 있고, 바로 그 어긋남을 관측하려고 존재한다.
+    pub epoch: u32,
 }
 
 /// OutputSink 전송 실패 신호 — drain이 감지 시 해당 구독자 제거 트리거

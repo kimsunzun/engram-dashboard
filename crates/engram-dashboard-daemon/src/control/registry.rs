@@ -49,6 +49,17 @@ pub struct ControlRegistry {
     /// 배달-경계 관측 싱크(ADR-0088) — 설치되지 않으면 None(운영 기본). RwLock: 설치는 드물고(테스트
     ///   셋업 1회) 조회는 relay 마다지만 짧다. Debug 파생 안 함(위 Inner 와 함께 — 이 struct 는 Debug 없음).
     delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
+    /// ★mid-send yield-seam hook(ADR-0088 Stage 1 — test-harness 전용)★: `handle_send` 가 resolve↔write
+    ///   갭의 **가장 늦은 지점**(write_stdin_observed 직전)에서 발화하는 test hook. 결정적 mid-flight
+    ///   epoch race 재현용 — hook 안에서 같은 AgentId 를 새 epoch incarnation 으로 교체 주입하면 resolve 는
+    ///   구 incarnation 을 봤는데 write 는 새 incarnation 에 착지한다. ★race 는 ADR-0086 §F5 가
+    ///   design-accepted 로 표시★(메일은 **논리 에이전트**를 향하므로 새 incarnation 착지가 올바른 동작이다)
+    ///   — 이 seam 은 그 동작을 **결정적으로 관측**하려는 것이지 epoch 를 pin 하려는 게 아니다.
+    ///   운영 빌드 = feature OFF → 이 필드 자체가 존재하지 않는다(hook 발화 코드도 컴파일 안 됨,
+    ///   handle_send 동작 byte-identical). RwLock: 설치 드물고 조회 짧다(observer 와 동형).
+    // ADR-0088
+    #[cfg(feature = "test-harness")]
+    mid_send_hook: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -285,6 +296,39 @@ impl ControlRegistry {
                     "ADR-0088: DeliveryObserver.observe 가 panic — 격리 삼킴(배달/ACK 는 영향 없음). 관측 싱크 버그."
                 );
             }
+        }
+    }
+
+    /// ★mid-send yield-seam hook 설치/해제(ADR-0088 Stage 1 — test-harness 전용)★. `Some(hook)` 로 설치,
+    ///   `None` 으로 해제한다. 결정적 mid-flight epoch race 오라클이 이걸로 resolve↔write 갭에 개입한다.
+    ///   운영 빌드엔 이 메서드 자체가 없다(feature OFF).
+    // ADR-0088
+    #[cfg(feature = "test-harness")]
+    pub fn set_mid_send_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        // ★락 규율(ADR-0006 정신)★: 새 hook 을 꽂고 옛 hook Arc 는 **lock 밖에서** drop 한다. 락 보유 중
+        //   drop 하면 옛 hook 의 소멸자(캡처한 Drop)가 registry 로 재진입할 때 deadlock, panic 하면 lock
+        //   poison — foreign code(Drop 포함)를 lock 아래에서 돌리지 않는다. `_old` 는 guard scope 를 벗어난
+        //   뒤(락 해제 후) 이 함수 끝에서 drop 된다.
+        let _old = {
+            let mut guard = self.mid_send_hook.write().expect("mid-send hook poisoned");
+            std::mem::replace(&mut *guard, hook)
+        };
+    }
+
+    /// ★mid-send yield-seam hook 발화(ADR-0088 Stage 1 — test-harness 전용)★: `handle_send` 가
+    ///   write_stdin_observed **직전**에 부른다. ★락 규율(ADR-0006)★: hook Arc 를 short read lock 밑에서
+    ///   clone 해 lock 을 즉시 놓은 뒤 **lock 밖에서** 호출한다 — foreign code(hook)를 registry lock 보유
+    ///   중에 절대 부르지 않는다(record_delivery 와 동일 규율). 설치 안 됐으면 no-op.
+    // ADR-0088
+    #[cfg(feature = "test-harness")]
+    pub fn fire_mid_send_hook(&self) {
+        let hook = self
+            .mid_send_hook
+            .read()
+            .expect("mid-send hook poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }

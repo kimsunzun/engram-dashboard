@@ -152,10 +152,14 @@ impl AgentSession {
         //   주석). bytes_written 은 독립 측정이 아니라 bytes_requested 의 by-construction 복사다(transport
         //   가 written 카운트를 안 돌려주고, write_all 계약상 Ok 면 항등). 둘 다 논리 메시지 바이트 수(char 아님).
         let n = bytes.len();
+        // ADR-0088: write 가 착지한 incarnation 의 epoch = 이 write 를 집행한 세션의 self.epoch.
+        //   bytes_written 과 같은 by-construction 값(독립 측정 아님) — write 를 수행한 세션이 자기 epoch 을
+        //   그대로 실는다. 배달 관측 레코드가 "어느 incarnation 이 받았나" 를 레코드만으로 답하게 하려는 것.
         Ok(WriteOutcome {
             bytes_requested: n,
             bytes_written: n,
             msg_uuid,
+            epoch: self.epoch,
         })
     }
 
@@ -382,6 +386,11 @@ mod tests {
         assert!(
             !outcome.msg_uuid.is_nil(),
             "이 유저 턴의 msg_uuid 를 노출해야(상관 키)"
+        );
+        // ADR-0088: epoch 은 write 를 집행한 세션의 self.epoch by-construction 복사(여기선 0).
+        assert_eq!(
+            outcome.epoch, 0,
+            "WriteOutcome.epoch = write 를 수행한 세션의 epoch(by-construction)"
         );
         // 바이트는 여전히 그대로 통과(계측판이 Raw 바이트 동일성을 깨지 않음).
         assert_eq!(captured.lock().unwrap()[0], input.to_vec());

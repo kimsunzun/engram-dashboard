@@ -913,11 +913,16 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 ///       write 로 합치는 등 **handoff 를 오염시키면** 여기서 깨진다. (encoder **내부** 정확성은 이 검사가
 ///       증명하지 않는다 — actual·expected 가 같은 encoder 를 쓰므로. FIX-2 참조: encoder 정확성은
 ///       claude.rs 의 golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 가 커버.)
-/// ★증명하지 않는다(커버리지 공백 — follow-up)★: **물리 OS-pipe 바이트 무인터리브**. 그 직렬화는
+/// ★증명하지 않는다(커버리지 공백)★: **물리 OS-pipe 바이트 무인터리브**. 그 직렬화는
 ///   운영 StdioTransport 의 `stdin.lock()`(write_all+flush 내내 보유, stdio.rs ~322)이 담당하는데
-///   이 seam 은 그 계층을 **우회**한다(SeamTransport 는 완결 Vec 을 원자 push). 그 lock 을 지우는 회귀는
-///   여기서 **안 잡힌다** → 진짜 물리 인터리브 검증은 실 StdioTransport+실 pipe(강제 부분 write/느린
-///   reader) 하네스가 필요(반환 follow-up).
+///   이 seam 은 그 계층을 **우회**한다(SeamTransport 는 완결 Vec 을 원자 push). 그 응용계층 직렬화를
+///   지우는 회귀는 여기서 **안 잡힌다**.
+///   ▶ follow-up 존재: 실 StdioTransport+실 pipe(느린 reader/backpressure) 하네스가 이 물리 계층을
+///     커버한다 — core 크레이트 `tests/stdio_physical_pipe.rs` ::
+///     `physical_pipe_concurrent_sends_no_interleave`(런렝스로 무인터리브 단언). 단 그 테스트가 잡는
+///     회귀 형태는 **"한 논리 메시지를 배타 락 없이 여러 OS write 로 쓰는 것"(응용계층 직렬화 회귀)**
+///     로 한정된다 — 락 없는 단일-WriteFile 구현은 NPFS 커널 직렬화(문서화 안 됨) 가능성 때문에
+///     잡는다고 주장하지 않는다(그 테스트 docstring 의 "증명하지 않는다" 참조).
 #[tokio::test]
 async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     use engram_dashboard_core::agent::backend::InputEncoder;
@@ -1380,12 +1385,14 @@ async fn stage1_lifecycle_recipient_absent_not_found_no_observation() {
 /// ── ADR-0088 Stage 1-오라클 4(write 실패): 실패 **관측 형태** — 단일 실패 레코드(부분/중복 관측 없음) ──
 /// 수신자가 도달 가능(structured)하나 relay write(send_input)가 Err.
 /// ★증명한다★: 실패의 **관측 형태(observation shape)** — send_input 이 Err 를 낼 때 레코드가 정확히
-///   1건 + error=Some + bytes_written=None + msg_uuid=None + !is_delivered(성공 필드가 하나도 새지
-///   않음). 봉투 바이트(bytes_requested)는 실려도(무엇을 배달하려다 실패했나의 forensic) 성공 신호는 안 샌다.
-/// ★증명하지 않는다(커버리지 공백 — follow-up)★: **실제 OS write 가 prefix 를 쓴 뒤 Err 를 내는
+///   1건 + error=Some + bytes_written=None + msg_uuid=None + **to_epoch=None** + !is_delivered(성공 필드가
+///   하나도 새지 않음). 봉투 바이트(bytes_requested)는 실려도(무엇을 배달하려다 실패했나의 forensic) 성공 신호는 안 샌다.
+/// ★증명하지 않는다(커버리지 공백)★: **실제 OS write 가 prefix 를 쓴 뒤 Err 를 내는
 ///   부분 배달/truncation 부재**. 이 seam 은 send_input 이 push **전에** 통째로 Err 를 반환하므로(원자
-///   all-or-nothing 모사) "prefix 만 쓰이고 실패" 상황 자체가 발생하지 않는다 — 그 축은 실 pipe(접두를
-///   받아들인 뒤 끊기는)를 쓰는 하네스가 필요(반환 follow-up).
+///   all-or-nothing 모사) "prefix 만 쓰이고 실패" 상황 자체가 발생하지 않는다.
+///   ▶ follow-up 존재: 실 pipe(자식이 K 바이트만 읽고 종료 → prefix 를 물리적으로 받아들인 뒤 끊김)
+///     하네스가 이 축을 커버한다 — core 크레이트 `tests/stdio_physical_pipe.rs` ::
+///     `physical_pipe_partial_write_then_err_surfaces_as_err`(prefix 쓴 뒤에도 WriteFailed 로 표면화).
 #[tokio::test]
 async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
@@ -1436,6 +1443,12 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
         "실패 = bytes_written None(성공 필드 누출 없음)"
     );
     assert_eq!(obs.msg_uuid, None, "실패 = msg_uuid None");
+    // ★None 계약 고정(ADR-0088)★: 실패 분기가 to_epoch 를 Some(epoch)으로 뒤집으면(완결 write 없이 착지
+    //   incarnation 을 참칭) 성공 필드 누출이다 — 이 단언이 그 회귀를 잡는다.
+    assert_eq!(
+        obs.to_epoch, None,
+        "실패 = to_epoch None(완결 write 없음 → attest 할 착지 incarnation 없음, 성공 필드 누출 없음)"
+    );
     assert!(!obs.is_delivered(), "실패 = !is_delivered()");
     // fail seam 은 send_input 에서 Err 를 내기 전 push 하지 않으므로 캡처는 비어야(바이트가 안 꽂혔다).
     assert!(
@@ -1456,19 +1469,19 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
 ///   있는 그 AgentId 의 incarnation** 으로 배달되고(유실 없음), 교체된 맵 상태에서 wrong-epoch 로 이중
 ///   배달되지 않는다(레코드 1건). 배달 실패 시 조용히 유실되지 않고 도달 에러로 표면화돼야 한다.
 ///
-/// ★증명하지 않는다(커버리지 공백 — follow-up)★: **진짜 mid-flight epoch race** — resolve 가 epoch 0 을
-///   보고, 그 직후 재시작으로 epoch 1 이 current 가 된 뒤 write 가 epoch 1 로 도착하는 시나리오. 이건
-///   순차 교체가 아니라 resolve↔write **사이**의 경쟁인데, handle_send 안에서 list_agents(해석)와
-///   write_stdin_observed(write) 사이에 외부가 끼어들 **yield seam 이 프로덕션에 없어**(둘 다 동기, 그
-///   사이 yield point 없음) 결정적으로 재현할 수 없다. ★ADR-0086 §F5 는 이 race 를 **design-accepted**
-///   로 표시한다 — 이 테스트는 그 race 가 안전하다고 **주장하지 않는다**(주장할 근거를 만들지 못함).
-///   결정적 커버리지는 프로덕션에 test-hookable yield-seam(설계 결정)이 필요(반환 follow-up).
+/// ★진짜 mid-flight epoch race 는 별도 오라클이 결정적으로 커버(follow-up 닫힘)★: resolve 가 epoch 0 을
+///   보고 그 직후 재시작으로 epoch 1 이 current 가 된 뒤 write 가 epoch 1 로 착지하는 resolve↔write
+///   **사이**의 경쟁은 이 순차 교체 테스트가 다루는 범위가 아니다. 그 race 는 이제
+///   `stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_deterministic` 가 프로덕션
+///   yield-seam(handle_send 의 write 직전 test hook — ControlRegistry::set_mid_send_hook, ADR-0088)으로
+///   **결정적으로** 재현·단언한다. ★ADR-0086 §F5 는 이 race 를 design-accepted 로 표시★(메일은 논리
+///   에이전트를 향하므로 새 incarnation 착지가 올바른 동작) — seam 은 그 동작을 **관측**할 뿐 epoch 를
+///   pin 하지 않는다.
 ///
-/// ★관측 한계(follow-up)★: 현재 DeliveryObservation 은 수신자의 **epoch 을 담지 않는다**
-///   (to_id·to_name·msg_id·msg_uuid 만). 그래서 "정확히 어느 epoch 의 incarnation 이 받았나" 를 레코드
-///   **만으로는** 단정할 수 없다 — 여기선 (i) 배달 성사(레코드 1건·is_delivered) (ii) 교체된 새 incarnation
-///   의 캡처 버퍼에 바이트가 꽂혔고 구 버퍼엔 안 꽂힘 으로 **간접** 확인한다(레코드에 수신자 epoch 필드가
-///   있으면 직접 단언 가능 — 관측-레코드 스키마 변경 = follow-up).
+/// ★관측 한계 닫힘(follow-up)★: DeliveryObservation 이 이제 착지 incarnation 의 epoch(`to_epoch`)을
+///   담는다(ADR-0088 — core WriteOutcome.epoch 를 실은 값 = write 를 집행한 세션의 epoch). 그래서 이
+///   테스트는 "현재 incarnation(epoch 1)이 받았다" 를 (i) 배달 성사·(ii) 새 버퍼에만 바이트 착지 라는
+///   간접 증거에 더해 **레코드의 `to_epoch == Some(1)` 로 직접** 단언한다(record-self-sufficient).
 #[tokio::test]
 async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     use engram_dashboard_core::agent::backend::InputEncoder;
@@ -1616,6 +1629,13 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
         *g
     );
     assert_eq!(g[0].to_id, id, "레코드 수신자 = 그 안정 AgentId");
+    // ADR-0088: 착지 incarnation epoch 을 레코드가 직접 담는다 — 교체된 현재 incarnation(epoch 1)에 배달됐음을
+    //   레코드만으로 단언(record-self-sufficient, 옛 docstring 의 "간접 확인" 한계 제거).
+    assert_eq!(
+        g[0].to_epoch,
+        Some(1),
+        "레코드 to_epoch = 착지한 현재 incarnation(epoch 1) — 직접 단언"
+    );
     drop(g);
 
     // 바이트는 **현재(B, epoch 1)** incarnation 버퍼에만 꽂혀야 — 구(A) 버퍼엔 안 꽂힘.
@@ -1633,6 +1653,246 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
         "현재 incarnation 버퍼에 봉투 본체가 온전히 담겨야"
     );
 
+    manager.kill_agent(id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// ── ADR-0088 Stage 1-오라클(mid-flight epoch race): **결정적** resolve↔write 경쟁 재현 ──────────────
+/// ★증명한다★: handle_send 가 수신자를 해석(list_agents 스냅샷)한 **직후**, write_stdin_observed **직전**에
+///   같은 AgentId 가 새 epoch incarnation 으로 교체되면(재시작=epoch bump 모사), write 는 resolve 가 본
+///   구 incarnation(epoch 0)이 아니라 **write 해석 시점의** incarnation(epoch 1)에 착지한다. (엄밀히는
+///   get_session 이후 한 번 더 동시 교체가 끼면 그 사이 "직전"이 된 incarnation 에 바이트가 갈 수도 있다 —
+///   그래도 to_epoch 는 실제 착지 incarnation 을 정확히 담으므로 record-self-sufficiency 는 유지된다.) 이 race 는 순차 교체
+///   (오라클 5)가 아니라 resolve↔write **사이**의 진짜 경쟁이다 — 프로덕션 yield-seam
+///   (ControlRegistry::set_mid_send_hook, feature=test-harness)이 write 직전에 hook 을 발화해 그 갭에
+///   결정적으로 개입한다(스케줄러 타이밍 의존 없음). ★ADR-0086 §F5 = design-accepted★: 메일은 논리
+///   에이전트(안정 주소)를 향하므로 새 incarnation 착지가 **올바른** 동작이다 — 유실 없음, 현재
+///   incarnation 배달. 그 F5 설계 의도를 레코드의 `to_epoch == Some(1)` 로 **직접 입증**한다
+///   (record-self-sufficient — 오라클 5 옛 docstring 이 "불가능"이라 했던 바로 그 단언).
+///
+/// ★증명하지 않는다(정직 범위)★: 실 StdioTransport/실 claude 는 개입하지 않는다(seam 레벨 — EpochSeam 이
+///   write 를 캡처만). 여기서 주입한 그 한 지점(write 직전) 외의 다른 스케줄링 race(예: reachability↔write
+///   사이, 물리 OS-pipe 인터리브)는 다루지 않는다. 이 테스트가 잡는 것은 **resolve 스냅샷과 실제 write
+///   착지 incarnation 이 어긋날 수 있고, 그때 write 가 current 로 가며 레코드가 그 사실을 자기충족적으로
+///   담는다**는 계약이다.
+#[tokio::test]
+async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_deterministic() {
+    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_core::agent::output_core::OutputCore;
+    use engram_dashboard_core::agent::session::AgentSession;
+    use engram_dashboard_core::agent::transport::AgentTransport;
+    use engram_dashboard_core::agent::types::{
+        AgentId as CoreAgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent,
+        ModelCaps, OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
+    };
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+    // epoch 별 다른 캡처 버퍼를 심어 incarnation 을 구분한다(오라클 5 의 EpochSeam 과 동형, 인라인).
+    struct NoopStatus;
+    impl StatusSink for NoopStatus {
+        fn status_changed(&self, _id: CoreAgentId, _s: AgentStatus, _e: u32) {}
+        fn agent_list_updated(&self, _a: Vec<engram_dashboard_core::agent::types::AgentInfo>) {}
+    }
+    struct EpochSeam {
+        captured: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+    impl AgentTransport for EpochSeam {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            self.captured.lock().unwrap().push(bytes);
+            Ok(())
+        }
+        fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: false,
+                    structured: true,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+    fn backend_caps() -> BackendCaps {
+        BackendCaps {
+            session: SessionCaps {
+                resume: true,
+                snapshot: false,
+                cwd_env: true,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
+            },
+        }
+    }
+    fn insert_epoch(
+        manager: &Arc<AgentManager>,
+        id: CoreAgentId,
+        epoch: u32,
+    ) -> Arc<Mutex<Vec<Vec<u8>>>> {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let core = Arc::new(OutputCore::new(id, epoch, Arc::new(NoopStatus)));
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from("."),
+            epoch,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            backend_caps(),
+            InputEncoder::ClaudeStreamJson,
+            core,
+            Box::new(EpochSeam {
+                captured: captured.clone(),
+            }),
+        ));
+        // insert_test_session 은 같은 id 를 교체하므로 hook 안 재주입이 곧 incarnation 교체.
+        manager.insert_test_session(session);
+        captured
+    }
+
+    let (manager, registry, _base, data_dir, handle) = wire("stage1-midflight").await;
+
+    let id = CoreAgentId::new_v4();
+    let to_name = obs_seam::fallback_name(id);
+
+    // incarnation A(epoch 0) 주입 → resolve 가 이걸 본다. old_buf = 그 캡처 버퍼.
+    let old_buf = insert_epoch(&manager, id, 0);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    // ★mid-send hook: resolve↔write 갭에서 incarnation 을 epoch 1 로 교체 주입★. hook 은 write 직전 1회
+    //   발화한다 — AtomicBool 가드로 정확히 한 번만 교체하고(방어적: 재발화해도 이중 rotate 없음), 교체 후
+    //   생성한 새 버퍼를 공유 슬롯(new_buf_slot)에 실어 본체가 회수한다. self-clearing: 가드가 이미 켜지면
+    //   이후 발화는 no-op이라 이 send 한 번에만 실효(별도 clear 불필요).
+    let new_buf_slot: Arc<Mutex<Option<Arc<Mutex<Vec<Vec<u8>>>>>>> = Arc::new(Mutex::new(None));
+    let rotated = Arc::new(AtomicBool::new(false));
+    // ★Arc 순환 차단★: registry 는 hook(클로저)을 저장하고, registry 는 manager-side wiring 이 전이 소유한다.
+    //   여기서 hook 이 manager 를 Arc 로 강하게 잡으면 manager↔hook 참조 순환이 생겨, cleanup
+    //   (set_mid_send_hook(None)) 전에 단언이 panic 하면 manager(와 reaper 스레드)가 프로세스 수명 내내
+    //   누수된다. 그래서 Weak 로 잡고 발화 때 upgrade 한다(실패 시 comment 후 조기 반환).
+    let mgr_weak = Arc::downgrade(&manager);
+    let slot_for_hook = new_buf_slot.clone();
+    let rotated_for_hook = rotated.clone();
+    registry.set_mid_send_hook(Some(Arc::new(move || {
+        // compare_exchange: 딱 한 번만 rotate(재발화 방어). 이미 rotate 됐으면 즉시 반환.
+        if rotated_for_hook
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        // Weak → Arc 승격. handle_send 진행 중이면 manager 는 살아 있어 항상 성공하나, 이미 drop 됐다면
+        //   rotate 없이 빠진다(순환 차단의 대가 — 발화 시점엔 산 상태라 사실상 발생 안 함).
+        let Some(mgr_for_hook) = mgr_weak.upgrade() else {
+            return;
+        };
+        // 같은 AgentId 를 epoch 1 로 교체 주입 → 맵엔 이제 B(epoch 1)만 남는다(A 는 빠진다).
+        let new_buf = insert_epoch(&mgr_for_hook, id, 1);
+        *slot_for_hook.lock().unwrap() = Some(new_buf);
+    })));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "stage1-midflight-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    // handle_send: resolve 는 epoch 0 을 보고, write 직전 hook 이 epoch 1 로 rotate, write 는 epoch 1 착지.
+    let result = handle_send(
+        &manager,
+        &registry,
+        Entrance::Cli,
+        ControlCommand {
+            from,
+            to: to_name,
+            body: "mid-flight-race-body".to_string(),
+        },
+    );
+    let v = result.to_json();
+    assert_eq!(
+        v["status"], "enqueued",
+        "mid-flight 교체 후에도 현재 incarnation 으로 배달돼야(유실 없음, ADR-0086 §F5): {v}"
+    );
+    let ack_id = v["id"].as_str().expect("msg-id 동봉").to_string();
+
+    // 관측 레코드 1건 — wrong-epoch 이중배달 없음.
+    let obs = {
+        let g = seen.lock().unwrap();
+        assert_eq!(
+            g.len(),
+            1,
+            "논리 메시지 1건 → 관측 레코드 1건(mid-flight 이중배달 없음): {:?}",
+            *g
+        );
+        g[0].clone()
+    };
+    assert!(obs.is_delivered(), "is_delivered() = true(전량 수용)");
+    assert_eq!(obs.to_id, id, "레코드 수신자 = 안정 AgentId");
+    // ★핵심(record-self-sufficient)★: write 가 실제 착지한 incarnation 의 epoch = 1(resolve 가 본 0 아님).
+    //   오라클 5 옛 docstring 이 "레코드만으로는 불가능"이라 한 바로 그 직접 단언.
+    assert_eq!(
+        obs.to_epoch,
+        Some(1),
+        "write 는 교체된 현재 incarnation(epoch 1)에 착지 — resolve 시점(epoch 0)이 아님. to_epoch={:?}",
+        obs.to_epoch
+    );
+    // 상관 축: 레코드 msg_id = ACK id · msg_uuid 존재.
+    assert_eq!(obs.msg_id, ack_id, "레코드 msg_id = ACK id(상관 축 1)");
+    assert!(
+        obs.msg_uuid.is_some(),
+        "성공 배달은 msg_uuid 를 담아야(상관 축 2)"
+    );
+
+    // 바이트는 **epoch 1** 버퍼에만 — resolve 가 본 epoch 0 버퍼엔 안 꽂힘.
+    let new_buf = new_buf_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("hook 이 epoch 1 incarnation 을 교체 주입했어야");
+    assert_eq!(
+        new_buf.lock().unwrap().len(),
+        1,
+        "현재 incarnation(epoch 1) 이 바이트를 받아야"
+    );
+    assert!(
+        old_buf.lock().unwrap().is_empty(),
+        "resolve 가 본 구 incarnation(epoch 0) 은 바이트를 받지 않아야(mid-flight 착지는 current)"
+    );
+    assert!(
+        String::from_utf8_lossy(&new_buf.lock().unwrap()[0]).contains("mid-flight-race-body"),
+        "현재 incarnation 버퍼에 봉투 본체가 온전히 담겨야"
+    );
+
+    // hook 해제(다른 테스트 격리 — 이 registry 는 이 테스트 전용이지만 명시적으로 clear).
+    registry.set_mid_send_hook(None);
     manager.kill_agent(id).ok();
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
