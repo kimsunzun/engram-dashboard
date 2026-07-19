@@ -98,6 +98,14 @@
 - **TRD 때 정할 얇은 결정 2개(사용자):** ① 발신자 표기 규약(사람 vs 에이전트 구분, 예: `[from: <agent>]` 프리픽스) ② 대상 busy 시 거동(MVP=stdin 큐잉=다음 턴 처리).
 - **서베이 정합:** orchestration-survey §6 "메시징 단독은 용처 적음(조율자 필요)" → 조율자 = LLM이 engram-ctl로 직접 = S17과 한 몸이라 경고 자동 해소. 전송·에이전틱 레이어 풀 설계는 `docs/research/agent-messaging-survey-2026-06-28.md`(tokio now/NATS later·supervised actor·control/data plane 논리분리) — 풀 버전 착수 때 입력.
 
+### T-14. 데이터 저장/메모리 시스템 — 그린필드 선행조사 완료, 착수 보류 (2026-07-19)
+- **상태:** 조사만 완료(결정 없음). 착수 트리거 = "에이전트 데이터를 영속 저장/기억하게 할" 스텝이 실제로 올 때(오케스트레이션/공유 메모리 갈래, T-11 '더 큰 그림'·T-13 풀 메일박스와 인접).
+- **전제(확실):** 현재 engram엔 **범용 데이터 저장 시스템이 없다**(그린필드) — agents.json=프로필 얇은 포인터, replay 링=휘발, SQLite 메일박스=미구현(종이 결정). "있는 걸 확장"이 아니라 백지에서 설계.
+- **핵심 프레이밍(3층):** ① 저장 엔진(거의 결론·저위험·seam 뒤 교체) / ② 데이터 모델·스키마(백지·고위험·거미줄 — 지금 신중히) / ③ 데이터 제어·메모리 관리(프론티어·LLM 제어 직결). 착수 순서 ②→③.
+- **현재 lean(가능성높음, 확정 아님):** SQLite 정본 + **FTS5(BM25) 먼저** → 필요 시 sqlite-vec(pre-v1, storage trait seam 뒤) → 벡터/그래프 라이브러리는 시기상조. 서버형 전부 제외. 그래프는 SQLite 재귀 CTE로 충분. bi-temporal edge·중요도/감쇠/reflection·consolidation은 **패턴만 차용**(Rust 네이티브 프레임워크 0).
+- **착수 시 필수(적대리뷰 적출):** claude 자체 auto-memory/resume이 이미 커버하는 것과의 경계부터 계산 · 누락 후보(SurrealDB·로컬 MCP 메모리 서버·sleep-time) 포함 · deep 재조사(독립 병렬수집) · 벤더 벤치마크 미검증 주의 · 크레이트 버전/라이선스 재확인.
+- **상세:** `docs/research/agent-persistence-memory-storage-survey-2026-07-19.md` (5갈래 서베이·적대리뷰 정정·engram fit·미결질문 5개).
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)
