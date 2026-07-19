@@ -24,6 +24,68 @@ use engram_dashboard_core::agent::types::{AgentId, AgentStatus};
 
 use super::registry::{BoundIdentity, ControlRegistry};
 
+/// ★배달-경계 관측 레코드(ADR-0088 Stage 0)★ — 제어 채널 relay 1건의 write 경계에서 남기는
+///   **기계 소비용** 증거다. 배달 정확성 하네스가 이걸로 "전송 실패(바이트가 안 꽂힘)" vs "모델이
+///   받고도 무시" 를 가른다 — 그 판정의 전제 계측이다.
+///
+/// ★왜 in-proc 레코드인가(로그 아님)★: 운영 데몬은 detached 로 돌아 로그 스크레이핑이 do-not 다
+///   (ADR-0088 HARD CONSTRAINT). 그래서 이 레코드를 `ControlRegistry` 에 설치한 in-proc 싱크
+///   (`DeliveryObserver`)로 흘려 통합 하네스(ADR-0012)가 직접 회수하게 한다. 같은 정보를 사람 눈용
+///   tracing 으로도 남기지만(운영 forensic), 하네스는 tracing 이 아니라 이 레코드를 단언한다.
+///
+/// ★필드 상관(핵심)★: `msg_id`(ingress 논리 메시지 uuid — 봉투 텍스트 `id:<msg_id>`) 와
+///   `msg_uuid`(session.write_input 이 만든 replay-dedup 키)를 **한 레코드에** 담아 상관시킨다.
+///   하네스는 "데몬이 논리 메시지 msg_id 를 write 했다" → "claude 가 user-turn msg_uuid 를 replay 했다
+///   (= 실제로 파싱함)" 를 이 쌍으로 잇는다. 실패(write 에러) 시 msg_uuid 는 없다(None).
+///
+/// ★보안★: body 텍스트·토큰은 절대 담지 않는다(tracing 규율과 동일 — 바이트 수만).
+#[derive(Debug, Clone)]
+pub struct DeliveryObservation {
+    /// ingress 논리 메시지 id(봉투에 `id:<msg_id>` 로 심긴 uuid). 하네스 상관의 한 축.
+    pub msg_id: String,
+    /// 해석된 수신자 AgentId.
+    pub to_id: AgentId,
+    /// 해석된 수신자 표시 이름(profile name).
+    pub to_name: String,
+    /// 발신자 신원(토큰 파생 — 페이로드 아님, ADR-0086).
+    pub from: BoundIdentity,
+    /// 어느 입구로 들어왔나(mcp/cli) — 라벨 전용.
+    pub entrance: Entrance,
+    /// 넘긴 논리 메시지(`wrap_message` 로 만든 봉투 문자열)의 바이트 수 = write 요청 바이트(char 수 아님).
+    /// core `WriteOutcome.bytes_requested` 와 같은 "논리 메시지 바이트" 의미다(그 계층의 논리 메시지 =
+    /// 이 봉투 문자열). encoder 가 감싸는 실제 wire 바이트가 아니다.
+    pub bytes_requested: usize,
+    /// ★완결성 판정 레버 아님(중요)★: 배달 성공/실패는 이 값이 아니라 `error`(= 세션 write 의 Ok/Err)로
+    /// 본다. write 성공 시 `Some(bytes_requested)` — core `WriteOutcome.bytes_written` 을 그대로 실은
+    /// by-construction 복사값이라 `bytes_requested` 와 항상 같다(short-write 탐지 아님, 비교하면 항상 동일).
+    /// write 실패 시 `None`(요청 바이트가 수용됐다는 증거 없음). `is_delivered()` 참조.
+    pub bytes_written: Option<usize>,
+    /// 이 유저 턴의 session-level replay-dedup 키(write 성공 시 Some). msg_id 와 상관되는 다른 한 축.
+    pub msg_uuid: Option<uuid::Uuid>,
+    /// write 결과 — 성공이면 None, 실패면 에러 문자열(PtyError Display). 실패를 성공으로 삼키지 않음의 증거.
+    /// ★배달 완결성의 1차 증거는 이 필드다(바이트 비교 아님)★ — `None` = 세션 write_all 이 Ok.
+    pub error: Option<String>,
+}
+
+impl DeliveryObservation {
+    /// write 가 성공(전량 수용)했나 — 하네스가 "전송 실패" vs "모델 무시" 를 가르는 1차 스위치.
+    /// ★완결성의 근거는 `error.is_none()`(= 세션 write_all 이 Ok)★. 뒤의 바이트 등식은 short-write 를
+    ///   잡는 게 아니라(비교하면 항상 같다 — WriteOutcome by-construction) 성공 레코드가 잘 채워졌는지의
+    ///   by-construction 정합성 방어일 뿐이다(성공인데 bytes_written=None 같은 구성 버그를 거른다).
+    pub fn is_delivered(&self) -> bool {
+        self.error.is_none() && self.bytes_written == Some(self.bytes_requested)
+    }
+}
+
+/// 배달-경계 관측 싱크(ADR-0088) — `OutputSink`/`StatusSink` 스타일의 in-proc 콜백. 통합 하네스가
+///   `ControlRegistry::set_delivery_observer` 로 설치하고, `handle_send` 가 relay 마다 `observe` 를
+///   호출한다. 운영 데몬은 설치하지 않아 no-op(오버헤드 0). Send+Sync — Arc 로 공유·다른 스레드 회수.
+pub trait DeliveryObserver: Send + Sync {
+    /// relay 1건의 배달 관측 레코드를 소비한다. 구현은 짧게(하네스는 보통 Vec 에 push) — relay 스레드가
+    ///   호출하므로 블로킹 I/O 를 하지 않는다.
+    fn observe(&self, obs: DeliveryObservation);
+}
+
 /// body 상한(64 KiB). 최소 버전의 방어적 상한 — 초과 시 BODY_TOO_LARGE 로 교정 에러(같은 shape).
 /// (MCP 라우트의 전송 계층 상한(RequestBodyLimitLayer 1MB)과 별개 — 여기선 body **문자열** 자체의 상한.)
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -206,14 +268,21 @@ pub fn handle_send(
 
     let sender_name = sender_display_name(manager, cmd.from);
     let wrapped = wrap_message(&sender_name, &msg_id, &cmd.body);
+    // body_bytes(순수 본문 바이트)는 기존 tracing 유지용. ★관측 레코드의 요청 바이트는 여기서 재계산하지
+    //   않는다(FIX-1c)★ — 성공 경로에선 `outcome.bytes_requested`(= 세션 경계가 실제 받은 논리 메시지
+    //   바이트, 단일 출처)를 쓴다. 실패 경로는 outcome 이 없으므로 `wrapped.len()` 로 대체한다(같은 값 —
+    //   여기서 넘기는 바이트가 곧 세션이 받았을 논리 메시지라 정의상 일치, 아래 실패 갈래 주석 참조).
     let body_bytes = cmd.body.len();
 
-    // write_stdin 은 json 모드 세션에선 encoder 가 텍스트를 claude user-message 라인으로 감싼다(ADR-0044)
+    // ADR-0088: write 경계 계측판(write_stdin_observed)으로 논리 메시지 바이트 + 이 턴 msg_uuid 를 회수한다
+    //   (완결성은 Ok/Err — 바이트 비교 아님, WriteOutcome 주석).
+    //   write_stdin 은 json 모드 세션에선 encoder 가 텍스트를 claude user-message 라인으로 감싼다(ADR-0044)
     //   — 우리는 완성된 텍스트(래퍼)를 통째로 넘긴다(1 write = 완결된 유저 턴 1개 계약).
-    match manager.write_stdin(to_id, wrapped.as_bytes()) {
-        Ok(()) => {
+    match manager.write_stdin_observed(to_id, wrapped.as_bytes()) {
+        Ok(outcome) => {
             // ★F6 계측(logging-conventions info = 정상 수명 이벤트)★: enqueue/relay 성공. from·to·msg-id·
-            //   entrance·body 바이트수만 구조화 필드로 남긴다 — ★body 텍스트·토큰은 절대 로깅 금지★(보안).
+            //   entrance·바이트수·msg_uuid 만 구조화 필드로 남긴다 — ★body 텍스트·토큰은 절대 로깅 금지★(보안).
+            //   ADR-0088: bytes_written·msg_uuid 를 추가로 실어 사람 forensic 에서도 상관 가능하게.
             tracing::info!(
                 from = %cmd.from.agent_id,
                 to = %to_id,
@@ -221,8 +290,27 @@ pub fn handle_send(
                 msg_id = %msg_id,
                 entrance = entrance.as_str(),
                 body_bytes,
-                "제어 채널 메시지 relay(enqueued, ADR-0086)"
+                bytes_requested = outcome.bytes_requested,
+                bytes_written = outcome.bytes_written,
+                msg_uuid = %outcome.msg_uuid,
+                "제어 채널 메시지 relay(enqueued, ADR-0086·0088)"
             );
+            // ADR-0088: 기계 소비용 배달 관측 레코드를 in-proc 싱크로 발행(설치 안 됐으면 no-op).
+            // ADR-0006: registry.record_delivery 가 observer Arc 를 clone 후 lock 밖에서 observe 호출.
+            // ★요청/실제 바이트는 재계산 없이 outcome 을 단일 출처로 쓴다(FIX-1c) — 세션 경계가 실제 받은
+            //   논리 메시지 바이트. bytes_written 은 outcome 의 by-construction 복사(WriteOutcome 주석).
+            // ADR-0088
+            registry.record_delivery(DeliveryObservation {
+                msg_id: msg_id.clone(),
+                to_id,
+                to_name: to_name.clone(),
+                from: cmd.from,
+                entrance,
+                bytes_requested: outcome.bytes_requested,
+                bytes_written: Some(outcome.bytes_written),
+                msg_uuid: Some(outcome.msg_uuid),
+                error: None,
+            });
             ControlResult::Enqueued {
                 id: msg_id,
                 to: to_name,
@@ -235,9 +323,28 @@ pub fn handle_send(
             tracing::warn!(
                 to = %to_id,
                 to_name = %to_name,
+                msg_id = %msg_id,
                 entrance = entrance.as_str(),
                 "제어 채널 relay 실패(write_stdin) — 도달 불가로 교정: {e}"
             );
+            // ADR-0088: 실패도 기계 소비용 레코드로 남긴다 — 하네스가 "성공으로 삼켜지지 않음"을 단언한다.
+            //   bytes_written=None·msg_uuid=None·error=Some(...) = 배달 실패의 명시 증거.
+            // ★요청 바이트(FIX-1c)★: 실패 경로엔 outcome 이 없으므로 `wrapped.len()`(넘기려던 논리 메시지
+            //   바이트)를 쓴다. 성공 경로의 `outcome.bytes_requested` 와 값은 정의상 같다(= 세션에 넘긴
+            //   `wrapped.as_bytes().len()`) — write_input_observed 가 그 len 을 그대로 요청량으로 삼기 때문.
+            //   여기선 그 세션 호출이 Err 로 끝나 outcome 이 없을 뿐이라, 넘기려던 요청량으로 대체한다.
+            // ADR-0088
+            registry.record_delivery(DeliveryObservation {
+                msg_id: msg_id.clone(),
+                to_id,
+                to_name: to_name.clone(),
+                from: cmd.from,
+                entrance,
+                bytes_requested: wrapped.len(),
+                bytes_written: None,
+                msg_uuid: None,
+                error: Some(e.to_string()),
+            });
             ControlResult::Error {
                 code: "RECIPIENT_NOT_REACHABLE",
                 hint: format!("Delivery to '{to_name}' failed: {e}"),

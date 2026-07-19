@@ -431,6 +431,42 @@ pub struct SubscribeOutcome {
     pub replayed: usize,
 }
 
+/// 입력 write 의 배달-경계 계측 산출물(ADR-0088 Stage 0).
+///
+/// ★왜 존재하나★: `write_input`/`write_stdin` 이 `Ok(())` 만 돌려주면 "전송 실패로 안 꽂힘" 과
+///   "다 꽂혔는데 모델이 무시" 를 구별할 증거가 없다. 배달 정확성 하네스(ADR-0088)가 이 둘을
+///   가르려면 write 경계에서 **완결성 신호**(전량 수용 vs 실패)와 이 유저 턴의 replay-dedup 키
+///   (`msg_uuid`)를 관측 가능하게 올려야 한다. 이 값이 그 산출물이다(성공 경로에서만 반환).
+///
+/// ★완결성 신호 = Ok-vs-Err 이지 바이트 비교가 아니다(중요)★: transport 의 `send_input` 은
+///   `write_all`(+`flush`)로 쓴다 — `write_all` 은 요청 바이트를 **전부** 쓰거나 `Err` 를 낸다
+///   (부분 write 를 `Ok` 로 숨기지 않는다, std 계약). 따라서 "전량 수용됐나"의 유일한 증거는
+///   `Ok(WriteOutcome)` **자체**(vs `Err`)다 — 아래 두 바이트 필드의 비교가 아니다. 진짜 written
+///   바이트 수는 transport 밖으로 스레드되지 않으므로(write_all 계약상 불필요), `bytes_written` 은
+///   독립 계측값이 아니라 `bytes_requested` 를 **구성상 그대로 복사**한 값이다(short-write 탐지 불가 —
+///   비교하면 항상 같다, 동어반복). 이 필드가 있는 이유는 관측 레코드의 자기설명(로그·forensic 에서
+///   "이만큼을 write 요청했고 write_all 이 Ok 였다"는 by-construction 항등)일 뿐, 완결성 판정 레버가
+///   아니다. 완결성은 `Ok` 를 봐야 한다.
+///
+/// ★바이트 단위·계층★: 여기 두 값은 **호출자가 세션 경계에 넘긴 논리 메시지의 바이트 길이**
+///   (`bytes.len()` — encoder 감싸기 **전**, char 수 아님)다. encoder 가 텍스트를 감싸면(json 모드)
+///   실제 wire 바이트는 이보다 크지만, 그 encoded wire 카운트는 여기서 재지 않는다(이 계층의 논리
+///   단위가 아님). daemon 레이어의 `DeliveryObservation` 도 같은 "논리 메시지 바이트" 의미를 쓴다
+///   (거기선 그 논리 메시지 = `wrap_message` 로 만든 봉투 문자열의 바이트).
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOutcome {
+    /// 호출자가 세션 경계에 넘긴 논리 메시지 바이트 수(`bytes.len()` — encoder 감싸기 **전**, char 수 아님).
+    pub bytes_requested: usize,
+    /// `bytes_requested` 의 by-construction 복사값. ★독립 측정이 아니다★: write_all 계약상 written 카운트가
+    /// transport 밖으로 나오지 않아, `Ok` 면 요청 = 수용이 항등으로 성립하므로 그대로 복사한다. 완결성은 이
+    /// 값이 아니라 `Ok`(vs `Err`)로 판정한다(struct 주석 참조). 비교는 short-write 를 못 잡는다(항상 같음).
+    pub bytes_written: usize,
+    /// 이 유저 턴의 메시지 uuid(replay-dedup 키, session.write_input 이 생성 — LOAD-BEARING).
+    /// 배달 하네스가 ingress 의 논리 msg_id 와 이 값을 상관시켜 "claude 가 이 턴을 replay 했나"(=
+    /// 실제 파싱했나)를 판정한다(ADR-0088). 값·의미는 여기서 바꾸지 않는다 — 노출만 한다.
+    pub msg_uuid: uuid::Uuid,
+}
+
 /// OutputSink 전송 실패 신호 — drain이 감지 시 해당 구독자 제거 트리거
 #[derive(Debug)]
 pub struct SinkError;

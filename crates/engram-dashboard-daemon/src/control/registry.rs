@@ -20,9 +20,11 @@
 //! tauri import 0(daemon crate).
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use engram_dashboard_core::agent::types::AgentId;
+
+use super::ingress::{DeliveryObservation, DeliveryObserver};
 
 /// 검증 성공 시 되돌리는 신원 — 토큰이 묶인 (AgentId, epoch). `from` 파생의 단일 출처(ADR-0086).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,9 +35,20 @@ pub struct BoundIdentity {
 
 /// (AgentId, epoch)별 제어 채널 토큰 레지스트리. 데몬이 1개 소유(Arc 공유). 내부 RwLock —
 /// 읽기(validate, 툴 호출마다)가 쓰기(issue/revoke, 스폰·종료 때)보다 훨씬 잦다.
+///
+/// ★ADR-0088 배달 관측 슬롯★: `delivery_observer` 는 제어 채널 relay 의 배달-경계 관측 레코드를
+///   받는 **선택적 in-process 싱크**다. 왜 여기 사나 = registry 는 이미 `handle_send` 를 포함한 모든
+///   제어-플레인 경로에 `Arc` 로 스레드되는 유일한 공유 객체라, 관측 싱크를 여기 매달면 `handle_send`
+///   시그니처(+ 3개 호출부)를 건드리지 않고 in-proc 하네스가 관측을 설치할 수 있다(최소 풋프린트).
+///   운영 데몬은 이 슬롯을 비워 둔다(observer=None) → 기존 tracing 경로만 남고 오버헤드 0. 하네스는
+///   `set_delivery_observer` 로 설치해 **detached 데몬 로그 스크레이핑 없이** 레코드를 직접 회수한다
+///   (ADR-0088 HARD CONSTRAINT · ADR-0012 인프로세스 하네스 결).
 #[derive(Default)]
 pub struct ControlRegistry {
     inner: RwLock<Inner>,
+    /// 배달-경계 관측 싱크(ADR-0088) — 설치되지 않으면 None(운영 기본). RwLock: 설치는 드물고(테스트
+    ///   셋업 1회) 조회는 relay 마다지만 짧다. Debug 파생 안 함(위 Inner 와 함께 — 이 struct 는 Debug 없음).
+    delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
 }
 
 #[derive(Default)]
@@ -224,6 +237,55 @@ impl ControlRegistry {
             .expect("control registry poisoned")
             .session_to_identity
             .len()
+    }
+
+    /// 배달-경계 관측 싱크 설치(ADR-0088) — in-proc 하네스가 relay 관측 레코드를 회수하려고 부른다.
+    /// 운영 데몬은 부르지 않는다(observer=None 유지 → 오버헤드 0). 재호출은 마지막 것으로 교체.
+    pub fn set_delivery_observer(&self, observer: Arc<dyn DeliveryObserver>) {
+        *self
+            .delivery_observer
+            .write()
+            .expect("delivery observer poisoned") = Some(observer);
+    }
+
+    /// 배달 관측 레코드 발행(ADR-0088) — `handle_send` 가 relay 성공/실패마다 부른다. 싱크가 설치돼
+    /// 있으면 넘기고, 없으면 no-op(운영 경로). ★락 규율(ADR-0006)★: observer Arc 를 clone 해 lock 을
+    /// 즉시 놓은 뒤 lock 밖에서 `observe` 를 호출한다(external call 을 lock 보유 중 하지 않는다).
+    ///
+    /// ★관측은 배달·ACK 를 절대 교란하지 않는다(FIX-2 — 즉시 push 불변식)★: 유저 공급 `observe` 가
+    ///   panic 하면 그 panic 이 `handle_send` 를 타고 올라가 relay(바이트는 이미 write 됨) 뒤 ACK 를
+    ///   못 내보내고, 발신자가 재시도해 **중복 배달**이 날 수 있다 — 관측을 켰다는 이유만으로 배달
+    ///   시맨틱이 바뀌면 안 된다. 그래서 `observe` 호출을 `catch_unwind` 로 격리해 panic 을 여기서
+    ///   삼키고(warn 만 남김) record_delivery 는 항상 정상 반환한다. RwLock 보유 중이 아니라 clone 후
+    ///   lock 밖에서 잡으므로 poison 도 전파하지 않는다(락 규율과도 정합).
+    ///
+    /// ★catch_unwind 는 unwind 프로파일 의존(FIX-R2-3)★: `catch_unwind` 는 unwinding panic 만 잡는다 —
+    ///   workspace `[profile.release] panic = "abort"`(루트 Cargo.toml)에선 panic 이 unwind 하지 않고
+    ///   즉시 abort 하므로 이 격리는 사실상 **테스트/디버그 프로파일 한정**이다. 지금은 무해하다: 운영은
+    ///   observer 를 설치하지 않아(observer=None) 아래 `if let Some(sink)` 가 catch_unwind 전에 단락된다.
+    ///   운영 observer 를 언젠가 붙인다면 이 보장이 release 에서 사라진다는 점을 재검토해야 한다.
+    pub fn record_delivery(&self, obs: DeliveryObservation) {
+        let sink = self
+            .delivery_observer
+            .read()
+            .expect("delivery observer poisoned")
+            .clone();
+        if let Some(sink) = sink {
+            // observe 는 유저(하네스) 코드다 → panic 이 배달 스레드를 오염시키지 않게 격리.
+            // AssertUnwindSafe: panic 시 obs 는 소비돼 사라지고 우리는 로그만 남긴다(공유 불변식을
+            //   깨진 채로 관측하지 않는다 — sink/obs 어느 것도 catch 이후 재사용하지 않음).
+            let msg_id = obs.msg_id.clone();
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || sink.observe(obs)));
+            if result.is_err() {
+                // ★배달은 이미 완료됐고 ACK 는 정상 진행된다★ — 이 warn 은 관측 싱크 버그의 forensic 이지
+                //   배달 실패가 아니다. body/토큰은 없다(레코드에 애초 안 담김, 보안).
+                tracing::warn!(
+                    msg_id = %msg_id,
+                    "ADR-0088: DeliveryObserver.observe 가 panic — 격리 삼킴(배달/ACK 는 영향 없음). 관측 싱크 버그."
+                );
+            }
+        }
     }
 }
 

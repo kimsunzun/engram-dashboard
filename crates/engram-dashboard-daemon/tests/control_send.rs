@@ -427,6 +427,441 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     handle.shutdown().await;
 }
 
+// ── ADR-0088 Stage 0: 배달-경계 관측 레코드 — in-proc 싱크로 회수(detached 로그 스크레이핑 없이) ──
+// ★왜 in-proc observer 인가★: 운영 데몬은 detached 로 돌아 로그 스크레이핑이 do-not(ADR-0088 HARD
+//   CONSTRAINT). registry 에 DeliveryObserver 를 설치하고 handle_send 를 직접 부르면(공통 핸들러 격리)
+//   레코드를 로그 없이 직접 단언할 수 있다.
+// ★커버리지 구조(FIX-4)★: 관측 레코드의 core 단언은 위 seam 테스트(`..._via_seam_no_claude`)가
+//   claude 없이 **항상** 실행해 green-when-skipped 를 없앤다. 아래 claude-gated 테스트는 그에 더해 산
+//   json 수신자로 end-to-end(실 encoder/transport) 경로까지 관측이 성립함을 확인한다(있으면 실행, 없으면
+//   loud skip). 두 축이 상보적이다 — seam=바이너리 독립 core, gated=실경로 e2e.
+struct DeliveryCapture {
+    seen: Arc<Mutex<Vec<engram_dashboard_daemon::control::ingress::DeliveryObservation>>>,
+}
+impl engram_dashboard_daemon::control::ingress::DeliveryObserver for DeliveryCapture {
+    fn observe(&self, obs: engram_dashboard_daemon::control::ingress::DeliveryObservation) {
+        self.seen.lock().unwrap().push(obs);
+    }
+}
+
+// ── ADR-0088(FIX-3/FIX-4): claude 바이너리 없이 배달-경계 관측을 구동하는 세션 seam ──────────────
+// ★왜 seam 인가★: 위 e2e 테스트는 산 claude 스폰이 필요해(claude 부재 머신에선 skip) 배달 관측의
+//   core 단언이 바이너리 유무에 매인다(FIX-4). 여기 helper 는 `AgentManager::insert_test_session` 으로
+//   **structured=true(도달 가능) 캐리어를 흉내 내되 write 성공/실패를 우리가 정하는** 세션을 맵에 직접
+//   꽂는다 — claude 없이 handle_send 의 성공/실패 두 갈래를 모두 실측한다. 운영 경로는 이 seam 을 절대
+//   부르지 않는다(spawn_session 만 정규 등록점, insert_test_session doc 참조).
+mod obs_seam {
+    use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, Mutex};
+
+    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_core::agent::manager::AgentManager;
+    use engram_dashboard_core::agent::output_core::OutputCore;
+    use engram_dashboard_core::agent::session::AgentSession;
+    use engram_dashboard_core::agent::transport::AgentTransport;
+    use engram_dashboard_core::agent::types::{
+        AgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent, ModelCaps,
+        OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
+    };
+
+    struct NoopStatus;
+    impl StatusSink for NoopStatus {
+        fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+        fn agent_list_updated(&self, _a: Vec<engram_dashboard_core::agent::types::AgentInfo>) {}
+    }
+
+    /// 테스트 transport — structured=true 로 신고(도달 가능)하되 send_input 은 `fail` 플래그에 따라
+    /// Ok 또는 WriteFailed(Err). 실제 자식·파이프 없음(pump 미기동). captured 로 성공 write 바이트 확인 가능.
+    struct SeamTransport {
+        fail: bool,
+        captured: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+    impl AgentTransport for SeamTransport {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            if self.fail {
+                // ★FIX-3★: relay write 실패를 강제 — handle_send 의 Err 갈래를 탄다.
+                return Err(PtyError::WriteFailed("seam: recipient stdin closed".into()));
+            }
+            let InputEvent::Raw(bytes) = input;
+            self.captured.lock().unwrap().push(bytes);
+            Ok(())
+        }
+        fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                // ★도달성 게이트(handle_send step 4)★: structured=true 라야 reachable 로 통과한다.
+                output: OutputCaps {
+                    terminal_bytes: false,
+                    structured: true,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+
+    fn backend_caps() -> BackendCaps {
+        BackendCaps {
+            session: SessionCaps {
+                resume: true,
+                snapshot: false,
+                cwd_env: true,
+            },
+            model: ModelCaps {
+                select: false,
+                temperature: false,
+                max_tokens: false,
+            },
+        }
+    }
+
+    /// structured 캐리어 세션을 조립해 매니저 맵에 꽂고 그 AgentId 를 돌려준다. `fail=true` 면 write 실패.
+    /// captured 로 성공 경로의 write 바이트를 검사할 수 있다(멀티바이트 회귀 등).
+    pub fn insert_seam_recipient(
+        manager: &Arc<AgentManager>,
+        fail: bool,
+    ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let id = AgentId::new_v4();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatus)));
+        // ClaudeStreamJson encoder — json 모드 캐리어를 흉내(래핑된 봉투가 stream-json 라인으로 감싸짐).
+        //   요청 바이트(WriteOutcome.bytes_requested)는 감싸기 **전** 논리 메시지 = wrap_message 봉투 그대로다.
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            backend_caps(),
+            InputEncoder::ClaudeStreamJson,
+            core,
+            Box::new(SeamTransport {
+                fail,
+                captured: captured.clone(),
+            }),
+        ));
+        manager.insert_test_session(session);
+        (id, captured)
+    }
+
+    /// 성공 write 로 캡처된 마지막 바이트(래핑된 stream-json 라인 전체)를 돌려준다(디코딩 없이 바이트 검사용).
+    pub fn last_written(captured: &Arc<Mutex<Vec<Vec<u8>>>>) -> Vec<u8> {
+        captured.lock().unwrap().last().cloned().unwrap_or_default()
+    }
+
+    /// insert_test_session 은 profiles 에 이름을 안 넣으므로, agent 이름 = id 앞 8자(agent_info fallback).
+    pub fn fallback_name(id: AgentId) -> String {
+        id.to_string()[..8].to_string()
+    }
+}
+
+// ── ADR-0088(FIX-4): 배달 관측 core 단언을 claude 없이 — seam 수신자에 성공 relay ──────────────
+// 위 e2e 테스트가 claude 부재 시 skip 되는 것과 달리, 이 테스트는 seam 으로 structured 수신자를 꽂아
+//   **항상** 관측 레코드(요청/실제 바이트·msg_id↔msg_uuid 상관·is_delivered)를 단언한다(green-when-skipped 제거).
+#[tokio::test]
+async fn control_send_delivery_observation_via_seam_no_claude() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle) = wire("obs-seam-ok").await;
+
+    let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "seam-ok-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    // ★FIX-5: 멀티바이트 본체★ — 요청 바이트가 char 수가 아니라 바이트 수임을 세션→관측 계층까지 관통 검증.
+    let body = "안녕-msg-α"; // 한글 2자(6B) + "-msg-"(5B) + α(2B) = 13B.
+    let cmd = ControlCommand {
+        from,
+        to: to_name.clone(),
+        body: body.to_string(),
+    };
+    let result = handle_send(&manager, &registry, Entrance::Cli, cmd);
+    let v = result.to_json();
+    assert_eq!(v["status"], "enqueued", "seam 성공 배달 ACK: {v}");
+    let ack_id = v["id"].as_str().expect("msg-id 동봉").to_string();
+
+    let obs = {
+        let g = seen.lock().unwrap();
+        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        g[0].clone()
+    };
+
+    // 상관 축.
+    assert_eq!(obs.msg_id, ack_id, "레코드 msg_id = ACK id(상관 축 1)");
+    assert!(
+        obs.msg_uuid.is_some(),
+        "성공 배달은 msg_uuid 를 담아야(상관 축 2)"
+    );
+
+    // ★FIX-5: exact 바이트 회계★ — 요청 = wrap_message 봉투의 정확한 바이트 수. 봉투 문자열을 재구성해
+    //   기대치를 정확히 계산한다(발신자 표시이름 = sender id 앞8자 fallback, ack_id 는 봉투에 심긴 msg_id).
+    let sender_name = obs_seam::fallback_name(sender);
+    let expected_wrapped = format!("[message from {sender_name} id:{ack_id}] {body}");
+    let expected_bytes = expected_wrapped.len(); // String::len = UTF-8 바이트 수(char 수 아님).
+    assert_eq!(
+        obs.bytes_requested, expected_bytes,
+        "요청 바이트 = 봉투의 정확한 UTF-8 바이트 수(멀티바이트 관통): got={} expect={} wrapped={:?}",
+        obs.bytes_requested, expected_bytes, expected_wrapped
+    );
+    assert_eq!(
+        obs.bytes_written,
+        Some(obs.bytes_requested),
+        "by-construction 복사(bytes_written = 요청) — short-write 탐지 아님"
+    );
+    assert!(obs.error.is_none(), "성공 배달은 error None");
+    assert!(obs.is_delivered(), "is_delivered() = true");
+    assert_eq!(obs.to_id, b_id, "레코드 수신자 AgentId");
+    assert_eq!(obs.to_name, to_name, "레코드 수신자 이름(fallback)");
+    assert_eq!(obs.from, from, "레코드 발신자 신원(토큰 파생)");
+
+    // ★계층 관통★: 세션이 실제 받은 write 바이트(래핑된 stream-json 라인)에 멀티바이트 본체가 온전히
+    //   담겼는지 — 라인은 봉투 텍스트를 감싼 것이라 그 안에 봉투 문자열이 부분열로 들어있다.
+    let written = obs_seam::last_written(&captured);
+    let written_str = String::from_utf8_lossy(&written);
+    assert!(
+        written_str.contains(&expected_wrapped),
+        "세션이 받은 stream-json 라인이 래핑된 봉투를 포함해야: {written_str}"
+    );
+
+    manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── ADR-0088(FIX-2): 관측 싱크 panic 격리 — 배달/ACK 는 영향 없음(즉시 push 불변식) ───────────────
+// panic 하는 observer 를 설치하고 seam 수신자에 성공 배달을 돌려도 handle_send 는 여전히 Enqueued 를
+//   돌려줘야 한다(관측을 켰다는 이유로 ACK 유실 → 발신자 재시도 → 중복 배달, 이 회귀를 막는다).
+#[tokio::test]
+async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
+    use engram_dashboard_daemon::control::ingress::{
+        handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance,
+    };
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    struct PanicObserver;
+    impl DeliveryObserver for PanicObserver {
+        fn observe(&self, _obs: DeliveryObservation) {
+            panic!("seam: observer boom (의도된 panic — 격리돼야 함)");
+        }
+    }
+
+    let (manager, registry, _base, data_dir, handle) = wire("obs-panic").await;
+    let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    registry.set_delivery_observer(Arc::new(PanicObserver));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "panic-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    let cmd = ControlCommand {
+        from,
+        to: to_name,
+        body: "trigger-panic-observer".to_string(),
+    };
+    // panic 이 record_delivery 에서 격리되지 않으면 여기서 unwind 로 테스트가 죽는다.
+    let result = handle_send(&manager, &registry, Entrance::Cli, cmd);
+    let v = result.to_json();
+    assert_eq!(
+        v["status"], "enqueued",
+        "observer panic 이 있어도 배달/ACK 는 정상(Enqueued)이어야: {v}"
+    );
+
+    manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── ADR-0088(FIX-3): relay write 실패 → 관측 레코드가 실패를 성공으로 삼키지 않는다 ────────────────
+// seam 수신자의 send_input 을 강제 실패시켜 handle_send 의 Err 갈래를 탄다. 관측 레코드는 error=Some,
+//   bytes_written=None, msg_uuid=None, is_delivered()==false — "don't swallow failure as success" 증거.
+#[tokio::test]
+async fn control_send_delivery_failure_observation_records_error_not_success() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle) = wire("obs-fail").await;
+
+    // ★fail=true★: 도달성(structured)은 통과하지만 relay write 가 Err — handle_send Err 갈래를 강제.
+    let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, true);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "fail-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    let body = "this-delivery-will-fail";
+    let cmd = ControlCommand {
+        from,
+        to: to_name.clone(),
+        body: body.to_string(),
+    };
+    let result = handle_send(&manager, &registry, Entrance::Cli, cmd);
+    let v = result.to_json();
+    // 실패는 교정 에러(RECIPIENT_NOT_REACHABLE)로 나가야 한다(성공 ACK 아님).
+    assert_eq!(v["status"], "error", "write 실패는 error 로 나가야: {v}");
+    assert_eq!(
+        v["code"], "RECIPIENT_NOT_REACHABLE",
+        "write 실패 교정 코드: {v}"
+    );
+
+    let obs = {
+        let g = seen.lock().unwrap();
+        assert_eq!(g.len(), 1, "실패 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        g[0].clone()
+    };
+
+    // ★실패의 명시 증거(성공으로 삼키지 않음)★.
+    assert!(
+        obs.error.is_some(),
+        "실패 배달은 error=Some 이어야(성공으로 삼키지 않음): {obs:?}"
+    );
+    assert_eq!(obs.bytes_written, None, "실패면 bytes_written=None");
+    assert_eq!(obs.msg_uuid, None, "실패면 msg_uuid=None(write 안 됨)");
+    assert!(!obs.is_delivered(), "실패는 is_delivered()==false");
+    // 요청 바이트는 여전히 실려야(넘기려던 봉투 크기 — 무엇을 배달하려다 실패했나의 forensic).
+    assert!(
+        obs.bytes_requested > body.len(),
+        "실패 레코드도 요청 바이트(봉투 크기)는 실려야: req={} body={}",
+        obs.bytes_requested,
+        body.len()
+    );
+    // 상관 축(수신자·발신자)은 실패 레코드에도 실린다.
+    assert_eq!(obs.to_id, b_id, "실패 레코드 수신자 AgentId");
+    assert_eq!(obs.from, from, "실패 레코드 발신자 신원");
+
+    manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle) = wire("delivery-obs").await;
+
+    // 산 json(stream-json) 수신자 B. 없으면 relay 실측 불가 → loud skip.
+    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "obs-target") else {
+        skip_no_claude("control_send_delivery_observation_records_bytes_and_correlated_ids");
+        let _ = std::fs::remove_dir_all(&data_dir);
+        handle.shutdown().await;
+        return;
+    };
+
+    // 배달 관측 싱크 설치(ADR-0088) — handle_send 가 relay 마다 여기로 레코드를 흘린다.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    // 발신자 신원(유효).
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "obs-sender-tok".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    // ★FIX-5: 멀티바이트 본체★ — 바이트 vs char 회귀를 e2e 경로에서도 잡는다.
+    let body = "observe-me-안녕-α"; // ASCII 11자 + 한글2자(6B) + '-'(1B) + α(2B).
+    let cmd = ControlCommand {
+        from,
+        to: "obs-target".to_string(),
+        body: body.to_string(),
+    };
+    let result = handle_send(&manager, &registry, Entrance::Cli, cmd);
+    let v = result.to_json();
+    assert_eq!(v["status"], "enqueued", "배달 성공 ACK: {v}");
+    let ack_id = v["id"].as_str().expect("msg-id 동봉").to_string();
+
+    // 관측 레코드 1건이 나와야 한다.
+    let obs = {
+        let g = seen.lock().unwrap();
+        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        g[0].clone()
+    };
+
+    // (a) msg_id ↔ ACK id 상관: 레코드 msg_id 가 ACK 로 나간 논리 메시지 id 와 같아야 한다.
+    assert_eq!(
+        obs.msg_id, ack_id,
+        "레코드 msg_id 는 ACK id 와 같아야(상관 축 1)"
+    );
+    // (b) msg_uuid 상관 축: write_input 이 만든 session-level replay-dedup 키가 실려야 한다.
+    assert!(
+        obs.msg_uuid.is_some(),
+        "성공 배달은 correlated msg_uuid 를 담아야(상관 축 2)"
+    );
+    // (c) ★FIX-5: exact 바이트 회계★ — 요청 = wrap_message 봉투의 정확한 UTF-8 바이트 수. 발신자 표시이름은
+    //     profile 부재라 sender id 앞8자 fallback, msg_id 는 ack_id 라 봉투를 정확히 재구성할 수 있다.
+    //     bytes_written 은 by-construction 복사(short-write 탐지 아님 — 완결성은 error None 으로 본다).
+    let sender_name = sender.to_string()[..8].to_string();
+    let expected_wrapped = format!("[message from {sender_name} id:{ack_id}] {body}");
+    assert_eq!(
+        obs.bytes_requested,
+        expected_wrapped.len(), // String::len = UTF-8 바이트 수(char 수 아님).
+        "요청 바이트 = 봉투의 정확 UTF-8 바이트 수(멀티바이트 관통): got={} wrapped={:?}",
+        obs.bytes_requested,
+        expected_wrapped
+    );
+    assert_eq!(
+        obs.bytes_written,
+        Some(obs.bytes_requested),
+        "by-construction 복사(bytes_written = 요청) — short-write 탐지 아님"
+    );
+    // (d) 성공은 error None + is_delivered().
+    assert!(obs.error.is_none(), "성공 배달은 error None");
+    assert!(obs.is_delivered(), "is_delivered() = true(전송 완결)");
+    // 수신자 신원/이름도 실렸는지.
+    assert_eq!(obs.to_id, b_info.id, "레코드 수신자 AgentId");
+    assert_eq!(obs.to_name, "obs-target", "레코드 수신자 이름");
+    assert_eq!(obs.from, from, "레코드 발신자 신원(토큰 파생)");
+
+    manager.kill_agent(b_info.id).ok();
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
 // ── MCP send_message 툴: happy path + 교정 에러(rmcp 클라이언트) ─────────────────────────────
 #[tokio::test]
 async fn mcp_send_message_tool_happy_and_error() {

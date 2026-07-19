@@ -804,6 +804,42 @@ impl AgentManager {
         self.get_session(agent_id)?.write_input(data)
     }
 
+    /// `write_stdin` 의 배달-경계 계측판(ADR-0088 Stage 0) — 성공 시 `WriteOutcome`(논리 메시지 바이트 +
+    ///   이 턴의 `msg_uuid`)을 반환한다. 동작은 `write_stdin` 과 동일하고 관측 산출물만 삼키지 않는다.
+    ///   제어 채널 relay(ingress::handle_send)가 배달 관측 레코드를 만들 때 쓴다("전송 실패" vs
+    ///   "모델 무시" 구별의 전제 — ADR-0088). 완결성 = Ok-vs-Err(바이트 비교 아님)은 `WriteOutcome` 주석 참조.
+    pub fn write_stdin_observed(
+        &self,
+        agent_id: AgentId,
+        data: &[u8],
+    ) -> Result<crate::agent::types::WriteOutcome, PtyError> {
+        self.get_session(agent_id)?.write_input_observed(data)
+    }
+
+    /// ★하네스 전용 세션 주입 seam(ADR-0088 / ADR-0012)★ — 미리 조립한 `AgentSession`(테스트 transport
+    ///   포함)을 sessions 맵에 직접 등록한다. spawn 파이프(실 PTY·claude 바이너리)를 거치지 않고
+    ///   배달-경계 관측 테스트(reachable=structured 캐리어인데 write 성공/실패)를 **바이너리 의존 없이**
+    ///   구동하려는 목적이다 — daemon 통합 테스트가 cross-crate 로 봐야 하므로 `test-harness` 기능으로
+    ///   게이트한다(`#[doc(hidden)]` 은 접근을 막지 못한다 — 임의 `AgentSession` 주입은 spawn 예약·
+    ///   profile+epoch 조율·control-token 발급·pump/reaper 배선·tracker 수명을 통째로 우회하므로,
+    ///   운영 빌드에는 아예 컴파일되지 않아야 한다). 기능 OFF = 운영 빌드에 이 메서드 부재. 기능은
+    ///   daemon 의 `[dev-dependencies]` 에서만 켜지므로(운영 dep 아님) 운영 daemon 바이너리로 유니피케이션
+    ///   되지 않는다. 런타임/운영 경로는 절대 부르지 않는다 — spawn_session 만이 정규 등록점.
+    ///
+    /// ★안전/불변식★: (a) reaper 미배선 — 주입 세션은 pump 를 start 하지 않으므로 finish hook 이 없고,
+    ///   ReapMsg 가 나가지 않아 manager Drop 까지 sessions 맵에 남는다(노출된 remove 없음, `kill_agent` 도
+    ///   주입 세션을 맵에서 빼지 않는다 — 각 테스트가 fresh manager 를 쓰고 그 Drop 으로 정리된다).
+    ///   (b) 락 규율(ADR-0006) — sessions write lock 을 잡아 insert 후 즉시 해제, 내부 lock 미취득.
+    ///   (c) profiles 미터치 — auto_restore 플립·persist 없음(순수 맵 등록). 같은 id 재주입은 교체.
+    #[cfg(feature = "test-harness")]
+    #[doc(hidden)]
+    pub fn insert_test_session(&self, session: Arc<AgentSession>) {
+        self.sessions
+            .write()
+            .expect("sessions poisoned")
+            .insert(session.id, session);
+    }
+
     /// PTY cols/rows 변경. resize 성공 시에만 cols/rows atomic 갱신(AgentSession 책임).
     pub fn resize(&self, agent_id: AgentId, cols: u16, rows: u16) -> Result<(), PtyError> {
         self.get_session(agent_id)?.resize(cols, rows)

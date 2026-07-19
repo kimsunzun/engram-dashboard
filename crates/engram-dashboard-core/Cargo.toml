@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "Engram Dashboard 에이전트 코어 — AgentManager·OutputCore·AgentTransport·backend·persistence·logging. Tauri import 0(headless)."
 
+# ★test-harness (ADR-0088 / ADR-0012)★: 하네스 전용 세션 주입 seam(`AgentManager::insert_test_session`)을
+#   여는 기능 플래그. 기본 OFF — 운영(production) 빌드는 이 seam 을 컴파일하지 않는다(임의 AgentSession
+#   주입으로 spawn 예약·profile+epoch 조율·control-token·pump/reaper 배선을 우회하는 것 차단). daemon
+#   통합 테스트가 cross-crate 로 seam 을 봐야 하므로 dev-dependency 에서만 이 기능을 켠다(아래 daemon
+#   Cargo.toml [dev-dependencies]) → 기능 요청이 dev 그래프에만 있어 운영 daemon 바이너리엔 유니피케이션되지
+#   않는다. core 자체 in-crate 테스트는 이 seam 을 쓰지 않으므로 plain `cargo test -p ...-core` 도 무영향.
+[features]
+test-harness = []
+
 # src-tauri 에서 그대로 이동한 모듈(pty/persistence/logging). 의존성도 동일하게 옮김.
 # Embedded(src-tauri)와 미래 daemon(별도 bin)이 공통으로 의존하는 lib.
 [dependencies]

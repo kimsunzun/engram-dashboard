@@ -72,6 +72,11 @@ windows = { version = "0.58", features = [
 
 # ── ADR-0086 통합 테스트 전용(dev) ─────────────────────────────────────────────
 [dev-dependencies]
+# ★ADR-0088 배달 관측 seam★: 통합 테스트가 `AgentManager::insert_test_session`(하네스 전용 세션 주입
+#   seam)을 cross-crate 로 쓰려면 core 의 `test-harness` 기능을 켜야 한다. dev-dependency 로만 켜므로
+#   운영 daemon 바이너리 의존 그래프(위 [dependencies] 의 무-feature core)엔 유니피케이션되지 않는다 —
+#   운영 빌드는 seam 을 컴파일하지 않는다(no-leak). (feature-only dev-dep 재선언 — path 는 위와 동일 crate.)
+engram-dashboard-core = { path = "../engram-dashboard-core", features = ["test-harness"] }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # happy-path handshake(initialize + tools/list + tools/call)는 rmcp 클라이언트 role 로 정직하게 검증.

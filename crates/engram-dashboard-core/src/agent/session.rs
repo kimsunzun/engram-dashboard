@@ -20,7 +20,7 @@ use crate::agent::output_core::OutputCore;
 use crate::agent::transport::AgentTransport;
 use crate::agent::types::{
     AgentId, AgentStatus, BackendCaps, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError,
-    SinkId, SubscribeOutcome, TerminationIntent,
+    SinkId, SubscribeOutcome, TerminationIntent, WriteOutcome,
 };
 
 /// 에이전트 1개 = 출력 측(core) + 채널/자원 측(transport)의 합성. transport 종류(PTY/API)와
@@ -110,12 +110,27 @@ impl AgentSession {
     ///   **완성된 메시지 전체를 한 번에** 보내야 한다(부분 입력 누적은 프론트 입력창 몫). 터미널 경로는
     ///   Raw 라 기존대로 스트리밍 바이트 호출이 정상(이 계약은 json 모드 한정).
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        self.write_input_observed(bytes).map(|_| ())
+    }
+
+    /// `write_input` 의 배달-경계 계측판(ADR-0088 Stage 0) — 성공 시 `WriteOutcome`(논리 메시지 바이트 +
+    ///   이 턴의 `msg_uuid`)을 돌려준다. 동작·바이트는 `write_input` 과 **완전히 동일**하고(같은 본체),
+    ///   차이는 **관측 산출물을 삼키지 않고 반환**하는 것뿐이다. 제어 채널 relay(ingress::handle_send)가
+    ///   이 산출물로 배달 관측 레코드를 만든다("전송 실패" vs "모델 무시" 구별의 전제 — ADR-0088).
+    ///
+    /// ★완결성 = Ok-vs-Err★: `send_input` 이 `Ok(())` 를 돌려주면(내부 `write_all`) 요청 바이트가 전량
+    ///   수용된 것이다(std write_all 계약 — 부분 write 를 `Ok` 로 숨기지 않음). 전량 미수용은 이 함수가
+    ///   `Err` 로 반환하지 `Ok` 로 축소 반환하지 않는다. `WriteOutcome.bytes_written` 은 written 카운트를
+    ///   transport 밖으로 스레드해 얻은 독립 측정이 아니라 `bytes_requested` 의 by-construction 복사값이다
+    ///   (완결성 판정 레버 아님 — `WriteOutcome` 주석). 완결성은 이 함수의 `Ok`/`Err` 로 본다.
+    pub fn write_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
         // ★이 유저 턴의 메시지 uuid(replay dedup 키)★: 한 write_input 당 하나 생성해 (a) stdin user
         //   라인(encode)과 (b) 입력-시점 합성 에코(input_echo_event) **양쪽에 같은 값**으로 넘긴다.
         //   json 모드에서 claude 가 replay 로 이 uuid 를 그대로 되울리므로(실측), 프론트가 합성 에코와
         //   replay 를 uuid 로 합쳐 하나만 남긴다(중복 제거). session 은 불투명 Uuid 토큰만 알고 json
         //   형태·uuid 부착 위치는 모른다(ADR-0004 격리 — 스키마 지식은 backend/claude.rs 단독).
         //   Raw(터미널) encoder 는 이 uuid 를 무시하므로 터미널 경로 바이트는 불변이다.
+        // ADR-0088: 이 msg_uuid 를 WriteOutcome 으로 노출한다(ingress msg_id 와 상관 — 값·의미 불변, 노출만).
         let msg_uuid = uuid::Uuid::new_v4();
         let encoded = self.encoder.encode(bytes, msg_uuid);
         self.transport.send_input(InputEvent::Raw(encoded))?;
@@ -133,7 +148,15 @@ impl AgentSession {
         if let Some(event) = self.encoder.input_echo_event(bytes, msg_uuid) {
             self.core.emit(event);
         }
-        Ok(())
+        // send_input Ok = write_all 성공 = 요청 바이트 전량 수용(완결성은 이 Ok 자체가 증거, WriteOutcome
+        //   주석). bytes_written 은 독립 측정이 아니라 bytes_requested 의 by-construction 복사다(transport
+        //   가 written 카운트를 안 돌려주고, write_all 계약상 Ok 면 항등). 둘 다 논리 메시지 바이트 수(char 아님).
+        let n = bytes.len();
+        Ok(WriteOutcome {
+            bytes_requested: n,
+            bytes_written: n,
+            msg_uuid,
+        })
     }
 
     /// 터미널 크기 변경. transport.resize 성공 후에만 cols/rows atomic 갱신(? 연산자로 실패 시 옛 값 유지).
@@ -333,6 +356,121 @@ mod tests {
         let got = captured.lock().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0], input.to_vec(), "Raw 는 바이트 동일이어야 함");
+    }
+
+    // ── ADR-0088: write_input_observed 가 배달-경계 계측(논리 메시지 바이트 + msg_uuid)을 반환한다 ──
+    #[test]
+    fn write_input_observed_surfaces_bytes_and_msg_uuid() {
+        // Raw: 논리 메시지 바이트 = 넘긴 입력 길이(exact). msg_uuid 는 유효값. 완결성은 Ok 자체가 증거.
+        let (session, captured) = session_with(InputEncoder::Raw);
+        let input = b"hello-observed"; // 14바이트 ASCII.
+        let outcome = session
+            .write_input_observed(input)
+            .expect("write_input_observed ok");
+        // ★exact 카운트(FIX-5)★: 요청 바이트는 넘긴 입력 길이와 **정확히** 같아야 한다(off-by-one/계층 회귀 거름).
+        assert_eq!(
+            outcome.bytes_requested, 14,
+            "요청 바이트 = 넘긴 입력의 정확 바이트 수"
+        );
+        assert_eq!(outcome.bytes_requested, input.len(), "요청 = 입력 len");
+        // bytes_written 은 bytes_requested 의 by-construction 복사(독립 측정 아님 — WriteOutcome 주석).
+        //   이 등식은 short-write 를 못 잡는다(항상 성립) — 완결성 증거가 아니라 by-construction 항등 확인일 뿐.
+        assert_eq!(
+            outcome.bytes_written, outcome.bytes_requested,
+            "by-construction 항등(bytes_written = bytes_requested 복사) — short-write 탐지 아님"
+        );
+        assert!(
+            !outcome.msg_uuid.is_nil(),
+            "이 유저 턴의 msg_uuid 를 노출해야(상관 키)"
+        );
+        // 바이트는 여전히 그대로 통과(계측판이 Raw 바이트 동일성을 깨지 않음).
+        assert_eq!(captured.lock().unwrap()[0], input.to_vec());
+    }
+
+    // ── ADR-0088(FIX-5): 멀티바이트(UTF-8) 본체 — 요청 바이트는 **바이트 수**(char 수 아님)여야 한다 ──
+    #[test]
+    fn write_input_observed_counts_bytes_not_chars_multibyte() {
+        // "안녕" = 한글 2자, 각 3바이트 UTF-8 = 6바이트. char 수(2)로 세면 여기서 깨진다.
+        let (session, _captured) = session_with(InputEncoder::Raw);
+        let input = "안녕".as_bytes();
+        assert_eq!(input.len(), 6, "UTF-8 로 6바이트여야(테스트 전제)");
+        let outcome = session
+            .write_input_observed(input)
+            .expect("write_input_observed ok");
+        assert_eq!(
+            outcome.bytes_requested, 6,
+            "멀티바이트 요청은 char 수(2)가 아니라 바이트 수(6)여야"
+        );
+        assert_eq!(
+            outcome.bytes_written, 6,
+            "by-construction 복사도 바이트 수(6)"
+        );
+    }
+
+    // ── ADR-0088: send_input 실패는 write_input_observed 에서 Err 로 표면화(성공으로 삼키지 않음) ──
+    #[test]
+    fn write_input_observed_surfaces_transport_error() {
+        // send_input 이 항상 Err 를 내는 mock transport — write 실패가 Ok(축소)로 숨지 않고 Err 로 올라와야 한다.
+        struct FailingTransport;
+        impl AgentTransport for FailingTransport {
+            fn start(&self, _core: Arc<OutputCore>) {}
+            fn send_input(&self, _input: InputEvent) -> Result<(), PtyError> {
+                Err(PtyError::WriteFailed("stdin closed".into()))
+            }
+            fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
+                Ok(())
+            }
+            fn interrupt(&self) -> Result<(), PtyError> {
+                Ok(())
+            }
+            fn shutdown(&self) {}
+            fn capabilities(&self) -> crate::agent::types::TransportCaps {
+                use crate::agent::types::{ControlCaps, InputCaps, OutputCaps, TransportCaps};
+                TransportCaps {
+                    input: InputCaps {
+                        raw: true,
+                        message: false,
+                        attachment: false,
+                    },
+                    output: OutputCaps {
+                        terminal_bytes: true,
+                        structured: false,
+                        markdown: false,
+                        tool_events: false,
+                        usage: false,
+                    },
+                    control: ControlCaps {
+                        resize: false,
+                        interrupt: false,
+                        cancel: false,
+                        graceful_shutdown: false,
+                    },
+                }
+            }
+        }
+        let id = uuid::Uuid::new_v4();
+        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
+        let shell_cmd = crate::agent::profile::AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let session = AgentSession::new(
+            id,
+            PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            ShellBackend.capabilities(&shell_cmd),
+            InputEncoder::Raw,
+            core,
+            Box::new(FailingTransport),
+        );
+        let err = session.write_input_observed(b"x");
+        assert!(
+            matches!(err, Err(PtyError::WriteFailed(_))),
+            "send_input 실패는 Err 로 표면화돼야(성공으로 삼키지 않음): {err:?}"
+        );
     }
 
     // ── ClaudeStreamJson 인코더: write_input이 claude 유저 JSON 라인으로 감싼다(ADR-0044) ──
