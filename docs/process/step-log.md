@@ -1077,6 +1077,14 @@
 - **커밋:** `422b526`(grant) 위에 `chore(daemon) 봉투 스파이크 seam`. 실험 프라이밍 변형 `prompts/experiments/agent-priming-format-agnostic.md` 추가.
 - **다음(미실행):** 포맷 × 다모델·다샘플 오차율, 최종 봉투 포맷 사용자 결정(→ADR), 그 뒤 포화 등 비정상. CLI 자율화 별도 추적.
 
+## S17 봉투 포맷 스파이크 2차 — 포맷 × 다모델 × 다샘플 오차율 (2026-07-21, master, 자율 세션)
+- **무엇:** `ENGRAM_WRAP_FORMAT` seam으로 포맷 3종 × 모델 3종 실측 — haiku n=3 · sonnet n=2 · opus n=2 / 포맷 = **21런 전부 VALID**(SETUP-FAIL/SKIP 0·재시도 0). 실행 = 러너 서브에이전트 3개(모델별) 병렬·러너 내부 순차, 메인이 원로그 grep 대조로 grounding(기계 판정 21/21 일치 + 실패 로그 정성 직접 확인). 템플릿 이번엔 명시 고정(1차는 colon만 기록 남음): colon `{sender}: {body}` / bracket = 프로덕션 기본(env unset, `[message from {sender} id:{id}] {body}`) / xml `<message from="{sender}" id="{id}">{body}</message>`.
+- **★핵심 발견 — 오차 축 분해★:** ① **봉투 수용(파싱) 실패 = 0/21** — haiku 포함 전 모델·전 포맷이 발신자·내용을 정확 파싱(봉투 echo·태그 혼란·인젝션 취급 0). 실패 런에서도 B가 "Alice가 묻고 있네요"식으로 발신자 인지. ② **실패는 전부 발신 라우팅** — B가 MCP 툴 대신 자기 턴 텍스트로 응답하거나 사용자 확인을 기다림. 라우팅 성공률은 **모델 의존이 지배적**: haiku 2/9 · sonnet 5/6 · opus 5/6.
+- **포맷별 라우팅(참고 — n 작아 미검증):** 2차 기준 colon 3/7 < bracket 4/7 < xml 5/7 (1차 sonnet 합산 colon 4/8 < bracket 5/8 < xml 6/8). "구조 봉투가 툴-답신 신호를 더 준다" 가설 시사 수준 — haiku 노이즈 지배라 단정 불가.
+- **정성 이상(하네스 아티팩트):** opus bracket-2에서 A가 "그런 질문 보낸 적 없다"고 시드 저자성 부인(하네스가 A 모르게 A명의 시드를 주입한 설계 산물 — 포맷 무관, 후속 하네스 개선 노트).
+- **판정축(ADR-0092 결정3: 수용>토큰) 적용:** 수용 동률(전 포맷 0 실패) → 2순위 토큰이 갈라 **colon 우세**(오버헤드 ~7B vs bracket ~61B vs xml ~72B). 사용자 가설(양식↓) 수용 축에선 재확증. 단 라우팅-신호 축은 판정축 밖 신규 발견 — **최종 포맷 = 사용자 결정 대기**.
+- **로그:** `target/format-spike2/<model>/<fmt>-<n>.log` (target/ 하위라 휘발 — cargo clean 시 소실, 요약은 이 항목이 정본).
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 채널 아키텍처 확정 = ADR-0086(듀얼 typed 입구 + 메일박스). 다음 = /implement 스텝 1 → 스텝 사다리 2~6. PRD/TRD §6은 engram-ctl 전제라 갱신 필요(이월).
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
