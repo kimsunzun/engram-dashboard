@@ -533,13 +533,37 @@ fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> Stri
         })
 }
 
-/// ★메시지 래퍼(의도적 최소 placeholder — ADR-0086 §7)★: B stdin 에 주입할 텍스트를 만든다.
+/// ★메시지 래퍼(의도적 최소 placeholder — ADR-0086 §7 · 실험 seam ADR-0093)★: B stdin 에 주입할 텍스트를
+/// 만든다. 봉투 조립의 **단일 wrap point**(ADR-0086)라는 불변식은 유지된다 — 형식이 어디서 오든(하드코딩
+/// 기본 vs 아래 실험 env) 이 함수 하나가 여전히 감싼다.
 ///
 /// 최종 봉투 형식(발신자·id·스레드·구조화)은 **범위 밖**이고 후속 스파이크가 정한다. 그때 이 함수 하나만
-/// 갈아끼우면 되도록 래퍼 조립을 **여기 한 곳에** 가둔다(호출부는 wrap_message 만 부른다). 형태:
+/// 갈아끼우면 되도록 래퍼 조립을 **여기 한 곳에** 가둔다(호출부는 wrap_message 만 부른다). 기본 형태:
 ///   `[message from <sender> id:<msg-id>] <body>`
+///
+/// ★실험 전용 env override(ADR-0093 format spike)★: `ENGRAM_WRAP_FORMAT` 가 설정돼 있고 비어있지 않으면
+/// 그 값을 **템플릿 문자열**로 보고 placeholder(`{sender}`/`{id}`/`{body}`)를 치환해 반환한다. 미설정/빈 값
+/// 이면 위 기본 형식을 **바이트 단위로 동일하게** 반환한다(프로덕션 무변경 — zero-regression no-op).
+/// 이 env 는 **하네스 운영자가 설정**하는 것이지 에이전트가 통제하지 않는다 — 그래서 치환은 순진한 문자열
+/// replace 로 충분하다(인젝션 우려 없음, 스파이크 범위).
+// ADR-0093
 fn wrap_message(sender: &str, msg_id: &str, body: &str) -> String {
-    format!("[message from {sender} id:{msg_id}] {body}")
+    match std::env::var("ENGRAM_WRAP_FORMAT") {
+        Ok(t) if !t.is_empty() => apply_wrap_template(&t, sender, msg_id, body),
+        _ => format!("[message from {sender} id:{msg_id}] {body}"),
+    }
+}
+
+/// ★순수 템플릿 치환(ADR-0093 — env-driven 실험 봉투 형식)★: 템플릿 안의 placeholder 를 실제 값으로 바꾼다.
+///   `{sender}`→발신자, `{id}`→msg_id, `{body}`→본문(모든 출현 치환). env I/O 를 타지 않는 순수 함수라
+///   단위 테스트로 형식 변형별 결과를 직접 단언할 수 있다(wrap_message 는 env 읽고 이 함수에 위임).
+/// ★순진한 replace★: 치환 순서상 앞서 넣은 값 안에 `{...}` 가 있으면 뒤 치환이 다시 건드릴 수 있으나,
+///   env 는 운영자 통제(에이전트 아님)라 스파이크에선 무해하다(위 wrap_message 주석 참조).
+fn apply_wrap_template(template: &str, sender: &str, id: &str, body: &str) -> String {
+    template
+        .replace("{sender}", sender)
+        .replace("{id}", id)
+        .replace("{body}", body)
 }
 
 #[cfg(test)]
@@ -719,6 +743,54 @@ mod tests {
     fn wrap_message_shape() {
         let w = wrap_message("alice", "mid-1", "hello world");
         assert_eq!(w, "[message from alice id:mid-1] hello world");
+    }
+
+    // ── ADR-0093: env-driven 실험 봉투 형식 seam ─────────────────────────────────
+    // env 미설정/빈 값 = 기존 형식 **바이트 동일**(프로덕션 무변경). ★env I/O 는 프로세스 전역이라
+    //   테스트 간 경쟁을 피하려고 순수 헬퍼(apply_wrap_template)로 형식 변형을 단언하고, wrap_message
+    //   기본 경로는 env 를 만지지 않는 단순 호출(테스트 환경에서 env 미설정)로만 확인한다.
+    #[test]
+    fn apply_wrap_template_substitutes_all_placeholders() {
+        // 기본 형식과 동형인 템플릿 → 기존 봉투와 바이트 동일한 결과.
+        assert_eq!(
+            apply_wrap_template(
+                "[message from {sender} id:{id}] {body}",
+                "alice",
+                "abc",
+                "hello"
+            ),
+            "[message from alice id:abc] hello"
+        );
+        // 콜론 형식 변형.
+        assert_eq!(
+            apply_wrap_template("{sender}: {body}", "alice", "abc", "hello"),
+            "alice: hello"
+        );
+        // id 를 body 뒤에 두는 변형(순서 무관·모든 출현 치환).
+        assert_eq!(
+            apply_wrap_template("<{sender}> {body} (#{id})", "bob", "xyz", "hi there"),
+            "<bob> hi there (#xyz)"
+        );
+    }
+
+    #[test]
+    fn apply_wrap_template_replaces_repeated_placeholder() {
+        // 같은 placeholder 여러 번 → 모두 치환(naive replace 시맨틱).
+        assert_eq!(
+            apply_wrap_template("{sender}/{sender}: {body}", "alice", "abc", "hi"),
+            "alice/alice: hi"
+        );
+    }
+
+    #[test]
+    fn wrap_message_env_unset_is_current_format_byte_identical() {
+        // env 미설정 시 wrap_message 는 하드코딩 기본 형식과 바이트 단위로 동일해야 한다(zero-regression).
+        // (테스트 프로세스는 ENGRAM_WRAP_FORMAT 을 설정하지 않는다 — 실험 env 는 하네스 운영자만 켠다.)
+        assert!(std::env::var("ENGRAM_WRAP_FORMAT").is_err());
+        assert_eq!(
+            wrap_message("alice", "abc", "hello"),
+            "[message from alice id:abc] hello"
+        );
     }
 
     // ── ControlResult wire shape(양 입구 동일) ──────────────────────────────────
