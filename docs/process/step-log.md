@@ -1071,7 +1071,7 @@
 - **다음:** 형식 비교 스파이크(봉투 후보·무양식 본문 포함 — ADR-0093 결정4) → 포화 등 비정상. CLI 입구 자율화는 별도 추적.
 
 ## S17 발신 채널 진단 + 봉투 포맷 스파이크 1차 (2026-07-20, master, 자율 세션 연속)
-- **CLI 채널 진단(확실):** C3(CLI 프라이밍) 재실측 — B가 CLI를 **시도조차 안 하고** "어떻게 답할까요?"로 물어봄(pre-grant의 "시스템 차단"과 다름). CLI 실패 = Bash 패턴 차단이 아니라 **B가 셸 CLI를 자신 있게 안 씀 — 구조화 MCP 툴 선호**. Bash 패턴은 미시도라 미검증. → CLI 자율 발신 저가치(MCP가 자연 경로) 확정, 별도 추적.
+- **CLI 채널 — 판정 보류(테스트 confound · "저가치" 철회):** C3(CLI 프라이밍)에서 B_SENT=false지만, **grant(ADR-0094)가 MCP·CLI를 항상 둘 다 열어줘 CLI를 단독 격리 못 함** — B에겐 MCP 툴이 노출·허용된 채였고 프라이밍만 CLI였다. B가 셸 CLI를 안 쓴 게 "선호" 때문인지 "프라이밍↔노출툴 불일치" 때문인지 **불명**. Bash 풀경로 패턴도 미시도라 미검증. **초판의 "CLI 자율 발신 저가치" 결론은 confound 기반 편향이라 철회.** 유효한 발견은 "둘 다 열렸을 때(C1) B가 MCP 선택"뿐. 클린 테스트 = MCP send_message를 grant/노출에서 빼고(`--disallowedTools mcp__engram__send_message`) CLI-only로 재실측(B의 CLI 사용 + Bash 패턴 매칭 동시 확인). engram-send 듀얼 입구(ADR-0086)는 비-MCP 맥락용으로 유지.
 - **봉투 포맷 스파이크 1차(seam=`ENGRAM_WRAP_FORMAT` override + 포맷-무관 프라이밍, sonnet 1샘플):** 세 후보 전부 B 자연 수용·MCP 답장·A 처리(왕복 닫힘). B→A 배달 바이트 = colon `{sender}: {body}` **266** < bracket+uuid **315** < xml+uuid **402**. **사용자 가설(양식↓) 지지** — 최소 포맷도 동일 수용 + 더 쌈. **uuid id가 최대 오버헤드고 수용엔 불요**(발신자 prefix만으로 충분). 포맷-무관 프라이밍이면 수신자가 형식 예시 없이도 파싱·수용.
 - **한계(정직):** 1샘플·sonnet만 — "양식↓ → 오차율↓"의 오차율 차이는 미검증(n=1은 전부 수용, 차이는 반복에서만 드러남). 봉투 최종 포맷은 **사용자 결정**(데이터만 수집). id는 배달 dedup 내부용(msg_id)이라 "봉투에 안 보임"이지 msg_id 제거가 아님.
 - **커밋:** `422b526`(grant) 위에 `chore(daemon) 봉투 스파이크 seam`. 실험 프라이밍 변형 `prompts/experiments/agent-priming-format-agnostic.md` 추가.

@@ -14,12 +14,13 @@
 
 ## 핵심 실측 결과 (확실 — 단 표본 작음)
 - 왕복 안 닫히던 원인 = **claude 런타임 툴-권한 게이트**(발신 툴 승인자 없어 차단). 프롬프트로 self-grant 불가(공식 문서 + C0~C3 실측 교차확증). 해결 = 스폰 시 `--allowedTools`로 **발신 입구만 최소권한 pre-auth**. C1/C2에서 B_SENT=true(mcp) + A 수용까지 → **왕복 닫힘**.
-- 발신엔 **프라이밍(발신 의사) + grant(발신 허용) 둘 다** 필요. B는 **MCP 선호**(C1에서 둘 다 줘도 mcp). CLI(engram-send)는 B가 셸 CLI를 자신 있게 안 써 미작동 = **저가치**(별도 추적).
+- 발신엔 **프라이밍(발신 의사) + grant(발신 허용) 둘 다** 필요. **둘 다 열렸을 때(C1) B가 MCP를 선택** — 이것만 유효한 발견.
+- **⚠ CLI 판정 보류(테스트 confound — "저가치" 결론 철회):** grant가 MCP·CLI를 **항상 둘 다** 열어주므로 CLI를 단독 격리한 적이 없다(C3도 MCP 툴이 노출·허용된 채였고 프라이밍만 CLI). B가 셸 CLI를 안 쓴 게 선호 때문인지 프라이밍↔노출툴 불일치 때문인지 불명. Bash 풀경로 패턴 작동도 미검증(B가 시도 안 함). **CLI 사용성 = 미검증**(engram-send 듀얼 입구 ADR-0086는 비-MCP 맥락용으로 유지 — 없애지 않는다). 클린 테스트 = MCP send_message를 grant/노출에서 빼고(`--disallowedTools mcp__engram__send_message`) CLI-only로 재실측.
 - 봉투 포맷(B→A 배달 바이트): colon `{sender}: {body}` **266** / bracket+uuid **315** / xml+uuid **402** — 전부 수용. **uuid id가 최대 오버헤드고 수용엔 불요**(발신자 prefix만으로 충분). 포맷-무관 프라이밍이면 수신자가 형식 예시 없이 파싱. **사용자 가설(양식↓) 지지.**
 
 ## 검증 상태 (쌍)
 - **한 것(전부 PASS):** 각 슬라이스 `/implement standard`(코더복잡=worker-senior) + `/review code full`(doc-aware + cross-family codex — blind가 실 결함 적출: 하네스 pre-seed 오탐·A liveness·`--allowedTools` variadic 흡수 → 전부 하드닝 폐쇄) + `/qa standard`(전 멤버 0 failed·fmt·코어격리0·프론트 재사용). C0~C3 + C4(pre-auth 후) + 포맷 3후보 실 claude(sonnet) 실행. **재실행:** `cargo build -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke` → `target/debug/roundtrip-smoke.exe --priming <C0|C1|C2|C3|경로> [--model M]`. 포맷은 앞에 `ENGRAM_WRAP_FORMAT='{sender}: {body}'`.
-- **안 한 것(정직):** ① 다모델(sonnet만)·다샘플(케이스당 1회) → **오차율 미검증**(n=1은 전부 수용). ② 최종 봉투 포맷 **미결정**(데이터만 수집). ③ CLI Bash 풀경로 패턴 실제 매칭 미검증(B가 시도조차 안 해서). ④ 포화·인젝션 비정상 미착수. ⑤ codex/gemini 발신 번역 TODO 스텁(미구현).
+- **안 한 것(정직):** ① 다모델(sonnet만)·다샘플(케이스당 1회) → **오차율 미검증**(n=1은 전부 수용). ② 최종 봉투 포맷 **미결정**(데이터만 수집). ③ **CLI 단독 격리 미실측(confound)** — MCP send_message가 항상 grant/노출돼 CLI-only를 못 만들었다. 클린 테스트 = MCP 툴을 grant/노출에서 빼고(`--disallowedTools mcp__engram__send_message`) CLI 프라이밍+grant로 재실측 → B의 CLI 사용 + Bash 풀경로 패턴 매칭 동시 확인. ④ 포화·인젝션 비정상 미착수. ⑤ codex/gemini 발신 번역 TODO 스텁(미구현).
 
 ## do-not (누적)
 - 루트 bare `cargo test` 금지(멤버별 `-p`). 릴리즈 `--all-targets` 금지(test-harness 유니피케이션).
