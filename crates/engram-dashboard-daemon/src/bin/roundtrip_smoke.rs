@@ -416,6 +416,11 @@ async fn run() -> i32 {
     // ★B→A relay baseline(FIX round-2 #1)★: 씨앗 주입 **직전**에 관측 레코드 수를 잡는다. B 가 원과제 턴에서
     //   A 에게 흘린 pre-seed 레코드가 답신으로 오인되는 걸 막는다 — 이후 도착분만 답신 후보.
     let reply_baseline = observer.record_count();
+    // ★진단(탐색)★: B 가 씨앗을 받고 자기 턴에 응답은 하는데 send 로 라우팅만 안 하는지 보려고 B 의 씨앗-후
+    //   턴 텍스트를 캡처한다. begin_turn 은 text 만 비우고 done_count 는 누적이라, reply 대기 동안 B 턴이
+    //   끝나면 response_text 에 씨앗-후 출력이 담긴다.
+    obs_b.begin_turn();
+    let baseline_b = obs_b.done_snapshot();
 
     let seed = ControlCommand {
         from: from_a,
@@ -492,6 +497,12 @@ async fn run() -> i32 {
     }
     println!("[A responded within cap] {a_responded}");
     println!("[A full response text]\n{}", a_response.trim());
+    // 진단: B 가 씨앗을 받고 자기 턴에 낸 응답(send 라우팅과 무관 — B_SENT=false 여도 여기 텍스트가 있으면
+    //   "B 는 답했으나 send 로 안 보냄"이고, 비면 "B 가 씨앗에 반응 안 함").
+    let b_turn_ended = obs_b.done_snapshot() > baseline_b;
+    let b_seed_response = obs_b.response_text();
+    println!("[B post-seed turn ended] {b_turn_ended}");
+    println!("[B post-seed turn text]\n{}", b_seed_response.trim());
     println!("===== END ROUNDTRIP (orchestrator judges qualitatively) =====\n");
 
     // ── 정리 ──────────────────────────────────────────────────────────────────────
