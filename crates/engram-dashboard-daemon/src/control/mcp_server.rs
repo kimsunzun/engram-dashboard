@@ -188,8 +188,11 @@ impl EngramMcpHandler {
     /// 어댑터일 뿐이다(entrance-agnostic).
     // ADR-0086
     #[tool(
-        description = "Send a text message to another live agent by name (or agent id). \
-        The sender identity is taken from your bound session, not from arguments."
+        description = "Send a message to a teammate agent. You are one agent on a team; use this \
+        tool to reply to or reach another live agent. Pass `to` = the teammate's name (or agent id) \
+        and `body` = your message text. The sender envelope (who you are, message id) is added \
+        automatically by the broker — your identity comes from your bound session, not from \
+        arguments, so just write the body naturally."
     )]
     async fn send_message(
         &self,
