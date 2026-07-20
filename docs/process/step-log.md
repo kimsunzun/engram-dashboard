@@ -1049,6 +1049,14 @@
 - **★결정 대기(사용자 갈림길 — 본런 진입 전)★:** (a) 지표를 **태스크 채널 회수**(원과제 완주+DOC-1 회상, 정책 격리 밖)로 전환 · (b) 주입을 일반 유저턴으로(ADR-0090 d2 위반) · (c) 격리 자체를 Stage 2 결론으로 확정하고 **봉투/신뢰 설계(Stage 4)를 앞당김**. 메인 권고 = (a)+(c) 병행(운영 경로 보존).
 - **프로세스 노트:** 코더 5+1 라운드(빌드3+통합FIX+집중FIX+마이크로). 리뷰어 정면대립(FIX vs BLOCK)은 Codex가 상위집합(실 버그 적출)이라 증거기반으로 보수취합·재작업 처리 — 자율모드 백스톱은 핸드오프로 사용자 에스컬레이션.
 
+## S17 수신 계약 설계 전환 + 프라이밍 첫 슬라이스 (2026-07-20, master, 대화 세션·사용자 재설계) · ADR-0091·0092 신규
+- **설계 전환:** 사용자가 Stage 2 파일럿 "정책 격리=기능 막힘" 결론을 **confound로 반박** — (a) 파일럿 프로브가 "코드워드 기억·보고" 인젝션 모양 + (b) 수신 에이전트에 **프라이밍(팀/메시지 계약 안내) 부재**. 보통 orchestration은 정상 동작(스폰 과제=신뢰 채널). 즉 기능이 아니라 **수신 절반이 미설계**였음. → **happy-path-first 재편**: 정상 수용 baseline 먼저, 포화·인젝션 등 비정상은 후순위(크면 미루고 작으면 병행). 이스케이프(위조 방어)는 Stage 4 유보(우선순위 낮음). 사다리 순서 = ADR-0091(포화를 포맷-수용부 뒤로), 수신 계약·프라이밍 아키텍처·원인 정정 = **ADR-0092**.
+- **결정(사용자):** 토폴로지 = 최종 그룹챗+메일(1:1·다중·단체), **1:1 먼저·다중수신 추상** 위에. 프라이밍 = **외부 MD**(`prompts/agent-priming.md`)를 스폰 시 `--append-system-prompt-file`로 시스템프롬프트 주입(코드엔 경로만·하드코딩 0·seam이라 미래 인젝션 시스템으로 교체), 임시판 전원 주입. 형식 선택 = 비교 스파이크(수용>토큰). CLI 플래그 `--append-system-prompt[-file]` 실존 확인.
+- **구현(첫 슬라이스, /implement standard):** `daemon/src/control/priming.rs`(PrimingProvider seam·`find_install_root` exe-walk-up로 경로 해석·absolute-or-None·cmd-metachar/non-UTF8 가드) + 스폰 배선(daemon→core `backend/claude.rs` `--append-system-prompt-file`, 코어 격리 유지=경로를 데이터로만) + 다중수신 seam(`ingress.rs` resolve→수신자 목록, 1:1=길이1 동일 동작) + happy-path 스모크 bin(`priming_smoke.rs`, test-harness) + `prompts/agent-priming.md` 초안. discovery에 `find_install_root` 추가.
+- **★baseline 성립(핵심 결과)★:** 프라이밍 깐 실 claude에 자연 1:1 메시지("모듈 auth 리뷰 끝, 이슈 2개") 보내니 **인젝션 취급 없이 팀원 메시지로 수용·협업 반응**("이슈 2개 공유해 주시면 확인하겠습니다"). 신뢰 채널(시스템프롬프트) 프라이밍이 인젝션 반사를 해소함 실측 — 파일럿 confound 확증.
+- **게이트:** `/review code full` 2인 적대 — R1 doc-aware FIX(1)+Codex BLOCK(5: base-dir cwd·cmd.exe metachar·absolute계약·TOCTOU·non-UTF8) → 하드닝 fix(base-dir=exe-walk-up 재사용·가드·계약엄격화·문서화) → R2 Codex diff-집중 PASS(5 CLOSED·회귀 0). `/qa`: 워크스페이스 빌드·daemon 153+44·core 214·discovery 45·fmt·격리0 PASS. cmd.exe escaping 전반은 선재 이슈(--mcp-config 공유)로 별도 추적.
+- **다음:** 답장 왕복(다음 슬라이스) → 형식 비교 스파이크(수용>토큰) → 포화 등 비정상. 프라이밍 MD 문구는 사용자 다듬기 대기. 프로덕션(WMI-spawn) 프라이밍 실적용은 exe-walk-up로 해결됐으나 패키징 레이아웃 미검증.
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 채널 아키텍처 확정 = ADR-0086(듀얼 typed 입구 + 메일박스). 다음 = /implement 스텝 1 → 스텝 사다리 2~6. PRD/TRD §6은 engram-ctl 전제라 갱신 필요(이월).
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.

@@ -137,13 +137,35 @@ fn appdata_data_dir() -> PathBuf {
         .join(APP_IDENTIFIER)
 }
 
+/// exe 기준으로 해석한 **설치/repo 루트 절대경로**(빌드모드 무관). 데몬이 상대 리소스(예: ADR-0092
+/// 프라이밍 `prompts/agent-priming.md`)를 붙일 **신뢰 가능한 base** 로 쓴다.
+///
+/// ★왜 이 함수인가(ADR-0092)★: 데몬은 WMI Win32_Process.Create 로 떠 **부모의 cwd 를 상속하지
+///   않는다**(WmiPrvSE 자식 → cwd 가 System32). 그래서 `std::env::current_dir()` 기준 상대해석은
+///   운영에서 조용히 어긋난다. 반면 `current_exe()` 경로는 신뢰 가능하다 — `default_data_dir` 이
+///   `.engram-data` 를 anchor 할 때 쓰는 것과 **동일한 exe-walk-up 패턴**을 여기서 재사용한다.
+///
+/// 해석(default_data_dir 의 디버그/릴리즈 분기와 동형):
+///   - exe 에서 위로 올라가 workspace 루트(`.git` 또는 `Cargo.toml [workspace]`)를 찾으면 그것
+///     (개발: `<repo>` — target/debug 어느 exe 에서 올라가도 repo 루트로 수렴).
+///   - 루트 못 찾으면 exe 디렉토리(릴리즈: 번들 exe 들이 co-located 되는 폴더 — 리소스도 동거).
+///   - exe 조차 못 얻으면 None(호출자가 처리 — 프라이밍은 그때 None 을 산출).
+/// ★절대경로 보장★: current_exe 는 절대경로를 주고 walk-up/parent 는 그 절대성을 보존한다.
+pub fn find_install_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    if let Some(root) = find_workspace_root(&exe) {
+        return Some(root); // 개발: repo 루트.
+    }
+    // 릴리즈/루트 미발견: exe 디렉토리(번들 리소스 동거 폴더).
+    exe.parent().map(|p| p.to_path_buf())
+}
+
 /// `start` 경로에서 부모 방향으로 올라가며 workspace 루트를 찾는다(IO 는 마커 판정만).
 ///
 /// 루트 마커: 그 디렉토리에 `.git` 이 있거나, `Cargo.toml` 이 `[workspace]` 섹션을 포함.
 /// 못 찾으면 None(호출자가 fallback). `start` 가 파일이면 그 부모부터, 디렉토리면 자신부터 본다.
-// 디버그 전용: default_data_dir 의 `#[cfg(debug_assertions)]` 분기에서만 호출된다(릴리즈는
-// release_data_dir_from_exe 사용). 릴리즈 빌드에선 호출처가 cfg-out 돼 dead_code 가 되므로 allow.
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
+// default_data_dir 의 `#[cfg(debug_assertions)]` 분기 + 빌드모드 무관 find_install_root(ADR-0092)에서
+// 호출된다. 후자가 릴리즈에서도 부르므로 더는 debug 전용이 아니다(dead_code allow 제거).
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     // 파일(exe)이면 부모 디렉토리부터, 디렉토리면 그 자신부터 위로.
     let mut cur: Option<&Path> = if start.is_dir() {
@@ -161,8 +183,7 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// 한 디렉토리가 workspace 루트인지 판정: `.git` 존재 또는 `Cargo.toml` 에 `[workspace]` 포함.
-// 디버그 전용(find_workspace_root 와 동일 이유) — 릴리즈에선 dead_code.
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
+// find_workspace_root(빌드모드 무관 find_install_root 경유)에서 호출되므로 릴리즈에서도 live(dead_code 아님).
 fn is_workspace_root(dir: &Path) -> bool {
     if dir.join(".git").exists() {
         return true;
@@ -2065,6 +2086,18 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_install_root_yields_absolute_path() {
+        // ADR-0092: 데몬이 프라이밍 base 로 쓰는 exe-기준 루트. current_exe 기반이라 어느 빌드모드든
+        //   **절대경로**를 준다(테스트 실행 exe 는 항상 존재 → Some). 그 절대성만 계약으로 검증한다
+        //   (구체 경로는 실행 환경 의존 — 값은 단언하지 않는다).
+        let root = find_install_root().expect("테스트 실행 중이면 current_exe 존재 → Some");
+        assert!(
+            root.is_absolute(),
+            "find_install_root 는 절대경로여야(cwd 불신 계약): {root:?}"
+        );
     }
 
     #[test]

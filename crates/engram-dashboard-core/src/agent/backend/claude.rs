@@ -173,6 +173,21 @@ impl AgentBackend for ClaudeBackend {
                         ));
                     }
                 }
+                // ADR-0092: 프라이밍(수신 계약) 주입 — `--append-system-prompt-file <abs-path>`.
+                //   ★claude 플래그 지식은 이 파일 단독(ADR-0004)★: 데몬 PrimingProvider seam 이 프라이밍
+                //   MD 의 **절대경로**를 ControlEndpoint.priming_file 로 실어 보내면(내용은 안 읽음), 여기서
+                //   claude 방식(`--append-system-prompt-file`)으로 번역한다. claude CLI(2.1.170)가 그 파일을
+                //   **직접 읽어** 기본 시스템 프롬프트 뒤에 덧붙인다 — 우리는 내용을 문자열로 넘기지 않는다.
+                //   터미널·json 모드 둘 다 시스템 프롬프트를 받으므로 mode 무관 동일 주입. None(파일 부재·
+                //   미구성)이면 미주입(프라이밍 없이 스폰 진행 — 데몬 seam 이 warn 로그, ADR-0092 graceful).
+                //   ★core 는 여기서도 파일을 열지 않는다★: args 에 경로 문자열만 싣는다(격리 유지).
+                // ADR-0092
+                if let Some(endpoint) = &control {
+                    if let Some(priming) = &endpoint.priming_file {
+                        args.push("--append-system-prompt-file".to_string());
+                        args.push(priming.to_string_lossy().into_owned());
+                    }
+                }
                 args.extend(extra_args.iter().cloned());
                 // Windows shim 회피: cmd /c claude … 로 감싼다(비Windows는 그대로).
                 let (program, args) = console_command(CLAUDE_PROGRAM, args);
@@ -929,6 +944,16 @@ mod tests {
             config_path: PathBuf::from("C:/data/mcp/agent-x.json"),
             // 기본 헬퍼는 send_exe 를 담아 ENGRAM_SEND_EXE 주입 경로를 검증할 수 있게 한다.
             send_exe: Some(PathBuf::from("C:/app/engram-send.exe")),
+            // 기본 헬퍼는 프라이밍 파일을 담지 않는다(ADR-0092) — 프라이밍 주입 테스트가 명시로 채운다.
+            priming_file: None,
+        }
+    }
+
+    /// 프라이밍 파일 경로를 담은 변주(ADR-0092) — `--append-system-prompt-file` 주입 검증용.
+    fn ep_with_priming() -> ControlEndpoint {
+        ControlEndpoint {
+            priming_file: Some(PathBuf::from("C:/repo/prompts/agent-priming.md")),
+            ..ep()
         }
     }
 
@@ -1050,6 +1075,68 @@ mod tests {
                 || k == "ENGRAM_SEND_EXE"),
             "control 없으면 CLI env 없음: {:?}",
             s.env
+        );
+    }
+
+    // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────
+    #[test]
+    fn claude_priming_file_injects_append_system_prompt_flag_terminal() {
+        // priming_file 이 있으면 터미널 모드 args 에 `--append-system-prompt-file <abs>` 가 붙는다.
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_priming()),
+        );
+        let pos = s
+            .args
+            .iter()
+            .position(|a| a == "--append-system-prompt-file")
+            .expect("프라이밍 파일 있으면 --append-system-prompt-file 주입");
+        assert_eq!(
+            s.args.get(pos + 1).map(|s| s.as_str()),
+            Some("C:/repo/prompts/agent-priming.md"),
+            "플래그 다음 인자 = 프라이밍 MD 절대경로: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_priming_file_injects_flag_json_mode() {
+        // json(stream-json) 모드도 시스템 프롬프트를 받으므로 프라이밍 주입 대상.
+        let s = spec_with_control(
+            &json(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_priming()),
+        );
+        assert!(
+            s.args.iter().any(|a| a == "--append-system-prompt-file"),
+            "json 모드에도 프라이밍 주입: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_no_priming_file_no_append_flag() {
+        // priming_file=None(파일 부재·미구성)이면 플래그를 주입하지 않는다(graceful — 프라이밍 없이 스폰).
+        //   control endpoint 는 있으나(=MCP 는 붙음) 프라이밍만 없는 경우를 검증한다.
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        assert!(
+            !s.args.iter().any(|a| a == "--append-system-prompt-file"),
+            "프라이밍 없으면 append-system-prompt-file 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_no_control_endpoint_no_priming_flag() {
+        // control=None(제어 채널 자체 미구성)이면 프라이밍 플래그도 당연히 없다.
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        assert!(
+            !s.args.iter().any(|a| a == "--append-system-prompt-file"),
+            "control 없으면 프라이밍 플래그 없음: {:?}",
+            s.args
         );
     }
 

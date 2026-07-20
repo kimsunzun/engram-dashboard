@@ -124,6 +124,7 @@ impl ControlChannel for CountingControl {
             token: format!("tok-{id}-{epoch}"),
             config_path: PathBuf::from("."),
             send_exe: None,
+            priming_file: None,
         }))
     }
     fn revoke(&self, id: AgentId, epoch: u32) {

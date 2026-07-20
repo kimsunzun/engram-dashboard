@@ -42,6 +42,14 @@ name = "saturation-pilot"
 path = "src/bin/saturation_pilot.rs"
 required-features = ["test-harness"]
 
+# ★ADR-0092 프라이밍 수용 baseline 스모크 드라이버★: 실 primed claude 1개를 스폰하고 자연스러운 1:1
+#   메시지를 실 control 경로(handle_send)로 보낸 뒤 응답을 PRINT 한다(수용 판정용 — pass/fail 단언 아님).
+#   required-features 로 릴리즈 빌드가 컴파일하지 않게 막는다(실험/검증 전용, saturation-pilot 과 동일 계열).
+[[bin]]
+name = "priming-smoke"
+path = "src/bin/priming_smoke.rs"
+required-features = ["test-harness"]
+
 [dependencies]
 engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }

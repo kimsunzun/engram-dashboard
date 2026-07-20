@@ -356,6 +356,7 @@ async fn revoked_mid_session_request_is_rejected() {
 async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_core::agent::types::ControlChannel;
     use engram_dashboard_daemon::control::mcp_config;
+    use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
     use engram_dashboard_daemon::control::DaemonControlChannel;
 
     let registry = Arc::new(ControlRegistry::new());
@@ -364,8 +365,13 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
         .expect("start mcp server");
 
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-rotate-{}", AgentId::new_v4()));
-    let channel =
-        DaemonControlChannel::new(registry.clone(), handle.url.clone(), data_dir.clone(), None);
+    let channel = DaemonControlChannel::new(
+        registry.clone(),
+        handle.url.clone(),
+        data_dir.clone(),
+        None,
+        Arc::new(NoopPrimingProvider), // ADR-0092: epoch 회전 테스트 — 프라이밍 무관.
+    );
 
     let id = AgentId::new_v4();
     // epoch 0 provision — 토큰 발급 + config 파일 기록.

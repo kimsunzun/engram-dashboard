@@ -173,6 +173,30 @@ enum Resolution {
     Err(ControlResult),
 }
 
+/// ★다중수신 seam(ADR-0092)★: 배달 1건의 해석된 수신자 = (id, 표시이름). 배달은 **수신자 목록**(현재
+///   길이 1)을 iterate 하며 흐른다 — 1:1 은 길이 1 이라 오늘 동작과 byte-identical 이고, 그룹·단체가
+///   나중에 이 목록을 길이 N 으로 채우면 배달 루프가 그대로 여러 명에게 흐른다("다중수신 추상", ADR-0092).
+///   ★1:1 선행★: 지금은 그룹 로직을 구현하지 않는다 — 그룹 주소(@)는 여전히 GROUPS_NOT_SUPPORTED 로
+///   막힌다(ADR-0086 group reserved). 이 struct 는 그 seam 을 **모양만** 깔아 둔다(저위험·장기, CLAUDE.md §0).
+#[derive(Debug, Clone)]
+struct Recipient {
+    id: AgentId,
+    name: String,
+}
+
+/// `to` → **수신자 목록**(ADR-0092 다중수신 seam). 1:1 은 단일 해석을 길이-1 Vec 으로 감싼다 — 그룹·
+///   단체가 오면 여기서 여러 Recipient 를 채운다(배달 루프는 그대로). 해석 실패는 첫 실패 교정 에러.
+/// ★현재 동작★: `resolve_recipient`(단일) 결과를 그대로 1원소 Vec 으로 승격 — 로직·에러는 동일.
+fn resolve_recipients(
+    to: &str,
+    agents: &[engram_dashboard_core::agent::types::AgentInfo],
+) -> Result<Vec<Recipient>, ControlResult> {
+    match resolve_recipient(to, agents) {
+        Resolution::Ok { id, name } => Ok(vec![Recipient { id, name }]),
+        Resolution::Err(e) => Err(e),
+    }
+}
+
 /// ★듀얼 입구 공통 핸들러(ADR-0086)★: 정규화된 ControlCommand → Validator → Relay → ACK. 두 어댑터
 /// (MCP 툴 · HTTP 라우트)가 유일하게 부르는 진입점이다 — 이 아래는 입구를 모른다(entrance-agnostic).
 ///
@@ -215,7 +239,7 @@ pub fn handle_send(
         };
     }
 
-    // 3+4. 수신자 해석 + 도달성. list_agents 스냅샷 1회로 판정(락 미보유 상태).
+    // 3. 수신자 해석 → **수신자 목록**(ADR-0092 다중수신 seam). 1:1 은 길이 1. list_agents 스냅샷 1회로 판정.
     // ★epoch 경쟁을 의도적으로 수용(F5 — ADR-0086/0007)★: 여기서 해석한 수신자가 epoch N 인데 아래
     //   write_stdin 이 도는 사이 재시작으로 epoch N+1 이 되면 메시지는 **새 incarnation** 에 꽂힌다.
     //   이건 버그가 아니라 설계 의도다 — 메일은 **논리 에이전트**(이름/AgentId 는 epoch 교체에도 유지되는
@@ -223,11 +247,41 @@ pub fn handle_send(
     //   epoch pinning 을 하지 않는다(다음 세션이 "고쳐" epoch 를 고정하면 재시작 중 유실이 생긴다).
     //   재시작 중이라 write_stdin 이 실패하면 아래 Err 갈래(RECIPIENT_NOT_REACHABLE)가 이미 덮는다.
     let agents = manager.list_agents();
-    let resolved = match resolve_recipient(&cmd.to, &agents) {
-        Resolution::Ok { id, name } => (id, name),
-        Resolution::Err(e) => return e,
+    let recipients = match resolve_recipients(&cmd.to, &agents) {
+        Ok(list) => list,
+        Err(e) => return e,
     };
-    let (to_id, to_name) = resolved;
+
+    // ★배달 = 수신자 목록 iterate(ADR-0092)★: 1:1 은 길이 1 이라 루프가 정확히 1회 돌고 오늘 동작과
+    //   byte-identical(ACK = 그 유일 수신자). 그룹·단체가 오면 여기서 여러 명에게 흐른다 — 지금은 그
+    //   경로를 **모양만** 깔아 둔다(로직 미구현, @ 는 위에서 이미 GROUPS_NOT_SUPPORTED 로 막힘).
+    //   ★1:1 계약(현 스코프)★: recipients 는 항상 길이 1 이므로 last 결과가 곧 유일 결과다. 미래에 길이
+    //   N 이 되면 부분 실패 취합(누가 성공/실패) 정책을 여기에 얹는다 — 지금은 그 정책을 만들지 않는다.
+    let mut result = ControlResult::Error {
+        // recipients 가 비면(있을 수 없음 — resolve_recipients 는 Ok 면 최소 1개) 방어적 교정.
+        code: "RECIPIENT_NOT_FOUND",
+        hint: "No recipient resolved.".to_string(),
+    };
+    for recipient in &recipients {
+        result = deliver_to_recipient(manager, registry, entrance, &cmd, &agents, recipient);
+    }
+    result
+}
+
+/// ★단일 수신자 배달(ADR-0092 배달 루프 1 스텝)★: 도달성 검사 → 발신자 생존 관측 → relay → 관측 레코드
+///   → ACK/교정. `handle_send` 가 수신자 목록을 iterate 하며 각 원소에 대해 부른다(1:1 은 1회). 이 함수는
+///   **한 명**에게의 배달만 안다 — 목록·그룹 개념은 호출자 소유(seam 분리). 로직·관측 시맨틱은 다중수신
+///   seam 도입 전과 동일하다(1:1 은 byte-identical).
+fn deliver_to_recipient(
+    manager: &Arc<AgentManager>,
+    registry: &Arc<ControlRegistry>,
+    entrance: Entrance,
+    cmd: &ControlCommand,
+    agents: &[engram_dashboard_core::agent::types::AgentInfo],
+    recipient: &Recipient,
+) -> ControlResult {
+    let to_id = recipient.id;
+    let to_name = recipient.name.clone();
 
     // 4. 도달성 — StreamJson(structured 출력) 캐리어라야 stdin 주입이 유효한 user-message 라인이 된다.
     //    ADR-0086: 제어 채널은 TUI(터미널) 를 제외한다(파싱 안 되니 자연 제외). structured=true =
@@ -261,6 +315,8 @@ pub fn handle_send(
     //    텍스트·토큰은 절대 로깅 금지(보안). (msg_id 는 아래 relay 에서 만들어 함께 싣는다.)
 
     // 6. Relay — B stdin 에 래핑된 user-message 를 즉시 주입. msg-id 는 uuid(추적·ACK 동봉).
+    //    ★수신자별 msg_id★: 다중수신에서도 각 배달이 자기 논리 메시지 id 를 갖도록 recipient 마다 생성한다
+    //      (1:1 은 1개 — 오늘과 동일).
     let msg_id = AgentId::new_v4().to_string();
 
     // ★발신자 생존 관측(위 5번 — 기록용만, 배달은 그대로 진행)★: 발신자 신원이 이미 산 토큰을 잃었으면
@@ -540,6 +596,28 @@ mod tests {
                     max_tokens: false,
                 },
             },
+        }
+    }
+
+    // ── ADR-0092: 다중수신 seam — 1:1 은 단일-원소 목록으로 흐른다 ────────────────────────
+    #[test]
+    fn resolve_recipients_1to1_is_single_element_list() {
+        // 1:1(단일 이름) 해석은 정확히 길이 1 목록으로 승격된다 — 그룹 회귀(단일-수신자 좁힘) 방지.
+        let id = AgentId::new_v4();
+        let agents = vec![info(id, "alice", true, AgentStatus::Running)];
+        let list = resolve_recipients("alice", &agents).expect("1:1 해석 성공");
+        assert_eq!(list.len(), 1, "1:1 은 길이 1 목록이어야: {list:?}");
+        assert_eq!(list[0].id, id);
+        assert_eq!(list[0].name, "alice");
+    }
+
+    #[test]
+    fn resolve_recipients_propagates_not_found_error() {
+        // 목록 승격이 단일 해석의 교정 에러를 그대로 전파한다(로직 동일 — seam 은 모양만 바꿈).
+        let agents = vec![info(AgentId::new_v4(), "alice", true, AgentStatus::Running)];
+        match resolve_recipients("bob", &agents) {
+            Err(ControlResult::Error { code, .. }) => assert_eq!(code, "RECIPIENT_NOT_FOUND"),
+            other => panic!("없는 수신자는 NOT_FOUND 에러여야: {other:?}"),
         }
     }
 

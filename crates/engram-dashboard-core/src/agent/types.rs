@@ -176,6 +176,14 @@ pub struct ControlEndpoint {
     /// 그 env(claude=`ENGRAM_SEND_EXE`)를 주입하지 않는다(token/url 은 그래도 주입 — CLI 만 못 씀).
     /// core 는 이 값을 해석하지 않고 문자열 경로만 나른다(형제 exe 탐색 지식은 데몬 소유 — lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
+    /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
+    /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
+    /// backend/claude.rs 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
+    /// 파일을 **직접 읽음** — 데몬/core 는 내용을 안 읽는다). ★core 격리(ADR-0003/0004)★: core 는 이
+    /// 경로를 **데이터로만 나른다** — 파일을 열지 않고 "프라이밍/시스템프롬프트" 개념도 모른다(claude
+    /// 플래그 번역은 backend/claude.rs 단독). MCP 와 직교하는 broker-주입 데이터지만, 데몬이 이미
+    /// 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지 않는다.
+    pub priming_file: Option<std::path::PathBuf>,
 }
 
 /// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일

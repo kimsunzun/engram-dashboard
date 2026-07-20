@@ -427,11 +427,20 @@ pub async fn run() -> Result<(), i32> {
             let url = handle.url.clone();
             // F1: 형제 engram-send CLI 경로를 부팅 시 1회 탐색해 채널에 넘긴다(provision 마다 endpoint 로 실림).
             let send_exe = locate_send_exe();
+            // ADR-0092: 프라이밍 seam — exe 기준 설치/repo 루트(discovery::find_install_root, default_data_dir
+            //   과 동일 exe-walk-up 패턴) 기준으로 prompts/agent-priming.md 를 해석한다. ★cwd 를 쓰지 않는
+            //   이유★: 운영 데몬은 WMI-spawn 이라 cwd=System32 를 상속해 cwd 기준 해석이 조용히 어긋난다
+            //   (두 리뷰어 PRIMARY). ENGRAM_PRIMING_FILE env 로 override 가능(최우선). 절대화 불가/cmd
+            //   메타문자/파일 부재면 provider 가 warn 후 None(프라이밍 없이 스폰 진행 — graceful). 미래
+            //   에이전트별 인젝션 시스템으로 구현만 교체(seam).
+            let priming: Arc<dyn control::priming::PrimingProvider> =
+                Arc::new(control::priming::FilePrimingProvider::from_install_root());
             let channel = Arc::new(control::DaemonControlChannel::new(
                 control_registry.clone(),
                 url,
                 data_dir.clone(),
                 send_exe,
+                priming,
             ));
             // 핸들을 살려 둔다(drop 시 서버 종료). 프로세스 수명 동안 유지.
             (channel, Some(handle))

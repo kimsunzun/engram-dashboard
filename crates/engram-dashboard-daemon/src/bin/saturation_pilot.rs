@@ -817,6 +817,8 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         url,
         data_dir.clone(),
         None, // send_exe: 파일럿은 handle_send 직접 호출이라 CLI 경로 불요.
+        // ADR-0092: 파일럿은 프라이밍 무관(주입 확립은 priming_smoke bin) — Noop 으로 오늘 동작 불변.
+        Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
     ));
 
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);

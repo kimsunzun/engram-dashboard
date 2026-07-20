@@ -17,6 +17,7 @@
 pub mod ingress;
 pub mod mcp_config;
 pub mod mcp_server;
+pub mod priming;
 pub mod registry;
 
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use engram_dashboard_core::agent::types::{
     AgentId, ControlChannel, ControlEndpoint, ProvisionError,
 };
 
+use priming::PrimingProvider;
 use registry::ControlRegistry;
 
 /// core `ControlChannel` seam 의 데몬 구현(ADR-0086). MCP 엔드포인트 URL·토큰 레지스트리·데이터
@@ -42,6 +44,10 @@ pub struct DaemonControlChannel {
     /// provision 이 이 값을 그대로 ControlEndpoint.send_exe 로 실어, backend(claude.rs)가 ENGRAM_SEND_EXE
     /// env 로 주입한다. None(형제 부재)이면 CLI 입구만 비활성 — MCP 입구는 정상.
     send_exe: Option<PathBuf>,
+    /// ADR-0092(수신 계약): 스폰 시 시스템 프롬프트에 주입할 프라이밍 파일 경로를 산출하는 seam.
+    /// provision 마다 `priming_file()` 을 물어 ControlEndpoint.priming_file 로 실어 보낸다(있으면).
+    /// seam 이라 미래 에이전트별 인젝션 시스템으로 구현만 교체된다("길은 뚫어둠", ADR-0092).
+    priming: Arc<dyn PrimingProvider>,
 }
 
 impl DaemonControlChannel {
@@ -50,12 +56,14 @@ impl DaemonControlChannel {
         mcp_url: String,
         data_dir: PathBuf,
         send_exe: Option<PathBuf>,
+        priming: Arc<dyn PrimingProvider>,
     ) -> Self {
         Self {
             registry,
             mcp_url,
             data_dir,
             send_exe,
+            priming,
         }
     }
 
@@ -97,12 +105,18 @@ impl ControlChannel for DaemonControlChannel {
                 ProvisionError(format!("mcp-config write failed: {e}"))
             })?;
         self.registry.issue(id, epoch, token.clone());
+        // ADR-0092: 프라이밍 파일 경로를 seam 으로 해석해 endpoint 에 싣는다(있으면). 부재/미구성이면
+        //   None — 프라이밍 provider 가 이미 warn 로그를 남겼고, 스폰은 막지 않는다(graceful, 제어 채널
+        //   provision 의 fail-closed 와 다른 정책). 내용은 안 읽고 경로만 나른다(하드코딩 금지).
+        let priming_file = self.priming.priming_file();
         Ok(Some(ControlEndpoint {
             url: self.mcp_url.clone(),
             token,
             config_path,
             // F1: 형제 CLI 경로를 endpoint 로 실어 backend 가 ENGRAM_SEND_EXE 로 주입하게 한다(부팅 때 1회 탐색).
             send_exe: self.send_exe.clone(),
+            // ADR-0092: 프라이밍 MD 절대경로(backend 가 --append-system-prompt-file 로 주입).
+            priming_file,
         }))
     }
 
