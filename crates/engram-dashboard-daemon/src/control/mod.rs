@@ -24,9 +24,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::types::{
-    AgentId, ControlChannel, ControlEndpoint, ProvisionError,
+    AgentId, ControlChannel, ControlEndpoint, ProvisionError, ToolGrant,
 };
 
+use mcp_config::MCP_SERVER_NAME;
+use mcp_server::SEND_MESSAGE_TOOL;
 use priming::PrimingProvider;
 use registry::ControlRegistry;
 
@@ -65,6 +67,31 @@ impl DaemonControlChannel {
             send_exe,
             priming,
         }
+    }
+
+    /// ADR-0094: 발신 입구 pre-authorization grant 목록을 만든다(순수 — 단위 테스트 대상). 발신 입구
+    /// **이름의 단일 출처**는 컨트롤 채널 정의다: MCP 서버명 = `MCP_SERVER_NAME`(mcp_config), 발신 툴 =
+    /// `SEND_MESSAGE_TOOL`(mcp_server). CLI 는 send_exe(형제 바이너리 절대경로)가 있을 때만 grant 한다.
+    ///
+    /// ★최소권한(ADR-0094)★: 발신 입구만 담는다 — 나머지 툴은 backend 가 아무 것도 안 주입해 게이트 유지.
+    /// ★send_exe 부재★: None(부분 빌드 등)이면 CLI grant 를 생략한다 — MCP grant 만으로 발신 입구가 열린다
+    ///   (ENGRAM_SEND_EXE env 미주입과 대칭 — CLI 입구 자체가 없으니 그 권한도 없다).
+    fn build_grants(send_exe: Option<&std::path::Path>) -> Vec<ToolGrant> {
+        // MCP 발신 입구는 항상 grant(제어 채널이 붙는 한 send_message 는 존재).
+        let mut grants = vec![ToolGrant::Mcp {
+            server: MCP_SERVER_NAME.to_string(),
+            tool: SEND_MESSAGE_TOOL.to_string(),
+        }];
+        // CLI 발신 입구는 형제 바이너리가 있을 때만. exe 는 backend 가 그대로 `Bash(<exe> *)` 로 쓴다 —
+        //   ★caveat(ADR-0094)★: 여기서 넘기는 값은 endpoint.send_exe 와 동일한 **절대경로 원문**이다.
+        //   에이전트가 실제로 부르는 명령($ENGRAM_SEND_EXE = 이 절대경로)의 prefix 와 문자열로 일치해야
+        //   claude Bash 권한이 매칭된다(backend/claude.rs 의 패턴 번역 주석 참조). 이름 재타이핑 금지.
+        if let Some(exe) = send_exe {
+            grants.push(ToolGrant::Cli {
+                exe: exe.to_string_lossy().into_owned(),
+            });
+        }
+        grants
     }
 
     /// 256-bit(32B) 토큰을 OS CSPRNG 로 생성해 hex 64자로. lib.rs generate_token 과 동일 방식이나
@@ -109,6 +136,11 @@ impl ControlChannel for DaemonControlChannel {
         //   None — 프라이밍 provider 가 이미 warn 로그를 남겼고, 스폰은 막지 않는다(graceful, 제어 채널
         //   provision 의 fail-closed 와 다른 정책). 내용은 안 읽고 경로만 나른다(하드코딩 금지).
         let priming_file = self.priming.priming_file();
+        // ADR-0094: 발신 입구 pre-authorization grant 를 **여기서**(입구 정의 옆) 채운다 — 이름의 정본은
+        //   컨트롤 채널이다. backend(claude.rs)는 이 목록을 자기 문법(--allowedTools mcp__{s}__{t} /
+        //   Bash({e} *))으로 번역만 한다(형식 규칙만 앎 — ADR-0004 격리 + ADR-0094 단일 출처).
+        //   ★최소권한★: 발신 입구 2개만 담는다(MCP send_message + engram-send CLI). 나머지 툴은 게이트 유지.
+        let grants = Self::build_grants(self.send_exe.as_deref());
         Ok(Some(ControlEndpoint {
             url: self.mcp_url.clone(),
             token,
@@ -117,6 +149,8 @@ impl ControlChannel for DaemonControlChannel {
             send_exe: self.send_exe.clone(),
             // ADR-0092: 프라이밍 MD 절대경로(backend 가 --append-system-prompt-file 로 주입).
             priming_file,
+            // ADR-0094: 발신 입구 pre-authorization(위 build_grants).
+            grants,
         }))
     }
 
@@ -125,5 +159,62 @@ impl ControlChannel for DaemonControlChannel {
     fn revoke(&self, id: AgentId, epoch: u32) {
         self.registry.revoke(id, epoch);
         mcp_config::remove_config(&self.data_dir, id, epoch);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── ADR-0094: build_grants — 발신 입구 pre-authorization grant 산출(단일 출처·최소권한) ──────
+
+    #[test]
+    fn build_grants_mcp_always_present_with_channel_names() {
+        // send_exe 유무와 무관하게 MCP 발신 입구(send_message)는 항상 grant 된다. server/tool 이름은
+        //   컨트롤 채널 const(단일 출처)에서 온다 — 리터럴을 재타이핑하지 않고 그 const 로 단언한다.
+        let grants = DaemonControlChannel::build_grants(None);
+        assert_eq!(
+            grants,
+            vec![ToolGrant::Mcp {
+                server: MCP_SERVER_NAME.to_string(),
+                tool: SEND_MESSAGE_TOOL.to_string(),
+            }],
+            "send_exe=None 이면 MCP grant 하나만(CLI 입구 없음)"
+        );
+    }
+
+    #[test]
+    fn build_grants_includes_cli_when_send_exe_present() {
+        // send_exe 가 있으면 CLI 발신 입구도 grant 에 추가된다 — exe 는 절대경로 원문 그대로.
+        let exe = Path::new("C:/app/engram-send.exe");
+        let grants = DaemonControlChannel::build_grants(Some(exe));
+        assert_eq!(
+            grants,
+            vec![
+                ToolGrant::Mcp {
+                    server: MCP_SERVER_NAME.to_string(),
+                    tool: SEND_MESSAGE_TOOL.to_string(),
+                },
+                ToolGrant::Cli {
+                    exe: "C:/app/engram-send.exe".to_string(),
+                },
+            ],
+            "send_exe 있으면 MCP + CLI 두 grant"
+        );
+    }
+
+    #[test]
+    fn build_grants_is_minimal_privilege() {
+        // ★최소권한 회귀 가드★: 발신 입구 외 다른 툴(Read/Write/Edit/Bash 일반 등)이 grant 에 절대
+        //   섞이지 않는다 — 최대 2개(MCP + CLI)이고 둘 다 발신 입구다.
+        let grants = DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram-send.exe")));
+        assert!(grants.len() <= 2, "발신 입구만 — 최대 2개: {grants:?}");
+        for g in &grants {
+            match g {
+                ToolGrant::Mcp { tool, .. } => assert_eq!(tool, SEND_MESSAGE_TOOL),
+                ToolGrant::Cli { .. } => {} // CLI 는 send_exe 로만 파생(발신 전용)
+            }
+        }
     }
 }

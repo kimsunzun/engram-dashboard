@@ -45,6 +45,8 @@ impl AgentBackend for CodexBackend {
         cwd: PathBuf,
         env: Vec<(String, String)>,
         // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
+        // TODO(ADR-0094): translate ControlEndpoint.grants to codex permission flags
+        //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e} *); codex 방언은 CLI spike 후 확정).
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         // AgentCommand에 Codex variant가 없으므로 Claude/Shell만 들어올 수 있다.

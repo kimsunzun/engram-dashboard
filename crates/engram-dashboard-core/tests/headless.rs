@@ -125,6 +125,8 @@ impl ControlChannel for CountingControl {
             config_path: PathBuf::from("."),
             send_exe: None,
             priming_file: None,
+            // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록(SpawnReservation 인과만 격리).
+            grants: vec![],
         }))
     }
     fn revoke(&self, id: AgentId, epoch: u32) {

@@ -79,6 +79,15 @@ impl ManagerSlot {
 /// claude 가 Authorization 헤더로 실어 보내는 세션 식별 헤더명(rmcp/스펙 표준, 소문자 비교).
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
+/// ★`send_message` MCP 툴 이름 = **단일 출처(ADR-0094)**★. 아래 `#[tool]` 메서드명이 곧 rmcp 가
+///   `tools/list` 에 노출하는 툴 이름이다 — 이 const 는 그 이름의 **정본**으로, ADR-0094 발신 권한
+///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 tool 로 쓴다(DaemonControlChannel.provision).
+///   ★메서드명과의 일치는 하위 테스트(`tools_list_exposes_send_message_tool`)가 강제한다★ — rmcp
+///   `#[tool]` 매크로가 메서드명을 툴 이름으로 쓰므로 여기 const 를 매크로 attr 로 주입할 수 없어,
+///   대신 런타임 tools/list 에 이 const 이름의 툴이 실제로 있는지 단언해 두 곳을 묶는다(rot 방지).
+///   claude 문법(`mcp__..`) 지식은 backend/claude.rs 단독 — 이 const 는 이름만 제공한다(ADR-0004/0094).
+pub const SEND_MESSAGE_TOOL: &str = "send_message";
+
 /// 실행 중 MCP 서버 핸들 — 에이전트가 붙을 엔드포인트 URL + graceful 종료 토큰.
 pub struct McpServerHandle {
     /// mcp-config 에 박아 넣을 엔드포인트 URL(예: `http://127.0.0.1:54321/mcp`).
@@ -186,7 +195,17 @@ impl EngramMcpHandler {
     /// 결과는 ACK/에러 JSON(CLI 경로와 **동일 shape**)을 text content 로 되돌린다. 정규화·검증·relay 는
     /// 공통 핸들러(control::ingress::handle_send)가 한다 — 이 툴은 신원+인자를 ControlCommand 로 싸는
     /// 어댑터일 뿐이다(entrance-agnostic).
-    // ADR-0086
+    ///
+    /// ★★이 메서드명(`send_message`)은 반드시 `SEND_MESSAGE_TOOL` 상수와 같아야 한다(ADR-0094 단일
+    ///   출처)★★. rmcp `#[tool]` 매크로가 **메서드명**을 `tools/list` 툴 이름으로 그대로 쓰므로(2.2.0
+    ///   tool.rs: `name = attribute.name.unwrap_or_else(|| fn_ident.to_string())`, 매크로 attr 는 String
+    ///   **리터럴**만 받아 const 주입 불가 — 검증함), 이름 정본인 그 const 를 컴파일타임에 여기 붙일 방법이
+    ///   없다. 대신 아래 세 갈래로 결합을 강제한다: (1) 이 주석(리네임하는 사람이 커플링을 즉시 본다),
+    ///   (2) 런타임 테스트 `tools_list_exposes_send_message_tool`(실제 tools/list 에 그 const 이름의 툴이
+    ///   있는지 단언 — rot 방지 강제선), (3) grant 패턴 생성이 그 const 를 tool 로 씀(backend/claude.rs).
+    ///   ⚠️ 이 메서드명을 바꾸려면 `SEND_MESSAGE_TOOL` const 도 함께 바꿔라 — 안 그러면 grant 가 존재하지
+    ///   않는 툴을 가리켜 발신 입구가 조용히 막히고, 테스트만 이를 잡는다.
+    // ADR-0086 / ADR-0094(단일 출처 결합)
     #[tool(
         description = "Send a message to a teammate agent. You are one agent on a team; use this \
         tool to reply to or reach another live agent. Pass `to` = the teammate's name (or agent id) \
@@ -640,6 +659,20 @@ mod tests {
         assert!(
             !s.contains("\"from\""),
             "send_message 스키마에 from 필드가 없어야: {s}"
+        );
+    }
+
+    #[test]
+    fn tools_list_exposes_send_message_tool() {
+        // ★단일 출처 tie(ADR-0094)★: SEND_MESSAGE_TOOL const 가 실제 등록된 툴 이름과 일치하는지
+        //   런타임 라우터로 강제한다. rmcp #[tool] 매크로가 메서드명(send_message)을 툴 이름으로 쓰므로
+        //   const 를 매크로 attr 로 주입할 수 없다 → 대신 라우터가 이 const 이름의 route 를 갖는지 단언해
+        //   두 곳(const ↔ 메서드명)이 어긋나면 이 테스트가 깨지게 묶는다(발신 권한 grant 가 이 const 를
+        //   mcp__{server}__{tool} 의 tool 로 쓴다 — 어긋나면 pre-auth 패턴이 실제 툴명과 불일치).
+        let router = EngramMcpHandler::tool_router();
+        assert!(
+            router.has_route(SEND_MESSAGE_TOOL),
+            "라우터에 '{SEND_MESSAGE_TOOL}' 툴이 등록돼 있어야(const ↔ #[tool] 메서드명 일치 강제)"
         );
     }
 

@@ -158,6 +158,24 @@ pub struct CommandSpec {
 //   부른다. 그래서 epoch 회전(재활성화 bump)마다 새 토큰, 크래시/kill/EOF 어떤 terminal 이든 정확히
 //   1회 revoke 가 보장된다(reaper 가 epoch 검증 후 remove 하는 그 자리에서 revoke).
 
+/// ADR-0094: 스폰 에이전트에 **사전 승인**할 툴 1개의 추상 명세(backend-agnostic). 데몬 컨트롤 채널이
+/// 자기 입구 정의 옆에서 채우고, backend 가 자기 프로그램 문법으로 번역한다(claude = `--allowedTools`).
+///
+/// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
+///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
+///   core 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
+///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe} *)`)으로만
+///   번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
+/// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 나머지 툴은 게이트 유지. 여기에 툴을
+///   추가하려면 명시적 결정(ADR-0094 개정). 전부-허용(bypassPermissions)으로 넓히지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolGrant {
+    /// MCP 서버의 툴 1개. backend 가 `mcp__{server}__{tool}` 로 번역한다(claude).
+    Mcp { server: String, tool: String },
+    /// CLI 실행 파일 1개(그 exe 로 시작하는 명령을 허용). backend 가 `Bash({exe} *)` 로 번역한다(claude).
+    Cli { exe: String },
+}
+
 /// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
 /// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude.rs 단독,
 /// ADR-0004). core/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
@@ -184,6 +202,12 @@ pub struct ControlEndpoint {
     /// 플래그 번역은 backend/claude.rs 단독). MCP 와 직교하는 broker-주입 데이터지만, 데몬이 이미
     /// 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지 않는다.
     pub priming_file: Option<std::path::PathBuf>,
+    /// ADR-0094(발신 권한 pre-authorization): 스폰 에이전트에 **사전 승인**할 툴 목록(추상). 데몬
+    /// 컨트롤 채널이 발신 입구(MCP `send_message` / `engram-send` CLI)를 채우고, backend/claude.rs 가
+    /// `--allowedTools` 로 번역한다(형식만 — 이름은 컨트롤 채널이 정본, ADR-0094 단일 출처). 빈 Vec
+    /// 이면 backend 가 아무 것도 주입하지 않는다(권한 플래그 없음 = 기존 게이트 유지). core 는 이
+    /// 목록을 데이터로만 나른다 — "권한"·claude 문법을 모른다(ADR-0004 격리).
+    pub grants: Vec<ToolGrant>,
 }
 
 /// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일

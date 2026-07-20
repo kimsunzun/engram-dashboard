@@ -30,9 +30,13 @@ use engram_dashboard_core::agent::types::AgentId;
 /// 않게 전용 폴더로 격리한다. revoke 시 파일만 지우고 폴더는 남긴다(재사용).
 const MCP_CONFIG_SUBDIR: &str = "mcp-config";
 
-// ★서버 논리명(mcpServers 키) = `engram`★: render_config 의 `Servers.engram` 필드명이 곧 이 키다
-//   (serde 는 필드 식별자를 JSON 키로 쓴다). claude 의 `system:init` 에 이 이름으로 서버가 뜬다.
-//   ADR-0086 §engram-ctl 이름 재사용 금지 — 데몬 자체 브랜드로 `engram` 사용(폐기된 크레이트명 아님).
+/// ★서버 논리명(mcpServers 키) = `engram`★ — **단일 출처(ADR-0094)**. claude 의 `system:init` 에 이
+///   이름으로 서버가 뜨고, mcp-config JSON 의 `mcpServers.<이 값>` 키도 이 값이다. ADR-0094 발신 권한
+///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 이 상수를 server 로 쓴다(DaemonControlChannel.provision).
+///   ADR-0086 §engram-ctl 이름 재사용 금지 — 데몬 자체 브랜드로 `engram`(폐기된 크레이트명 아님).
+///   ★rot 방지★: 예전엔 render_config 의 `Servers.engram` 필드명이 암묵 키였다 — 이제 이 const 를
+///   mcpServers 맵의 키로 직접 써서(아래 render_config) grant·mcp-config 가 같은 출처를 공유한다.
+pub const MCP_SERVER_NAME: &str = "engram";
 
 /// (AgentId, epoch)용 mcp-config 파일 경로. epoch 를 파일명에 넣어 회전 시 옛 파일과 충돌하지 않게 한다
 /// (구 파일은 revoke 가 지운다). `<data_dir>/mcp-config/<agent_id>-<epoch>.json`.
@@ -50,12 +54,12 @@ pub fn config_path(data_dir: &Path, id: AgentId, epoch: u32) -> PathBuf {
 pub fn render_config(url: &str, token: &str) -> String {
     #[derive(serde::Serialize)]
     struct Root<'a> {
+        // ★단일 출처(ADR-0094)★: mcpServers 맵의 키는 `MCP_SERVER_NAME` const 하나에서만 온다.
+        //   BTreeMap 키로 그 const 를 직접 써서, grant(`mcp__{server}__..`)와 이 config 가 같은 출처를
+        //   공유한다(예전 `Servers.engram` 필드명 암묵 키 → const 직접 사용으로 rot 제거). 맵은 서버
+        //   1개라 순서 이슈 없음. escape 는 serde_json 이 처리(손조립 금지).
         #[serde(rename = "mcpServers")]
-        mcp_servers: Servers<'a>,
-    }
-    #[derive(serde::Serialize)]
-    struct Servers<'a> {
-        engram: Server<'a>,
+        mcp_servers: std::collections::BTreeMap<&'a str, Server<'a>>,
     }
     #[derive(serde::Serialize)]
     struct Server<'a> {
@@ -69,17 +73,18 @@ pub fn render_config(url: &str, token: &str) -> String {
         #[serde(rename = "Authorization")]
         authorization: String,
     }
-    let root = Root {
-        mcp_servers: Servers {
-            engram: Server {
-                kind: "http",
-                url,
-                headers: Headers {
-                    authorization: format!("Bearer {token}"),
-                },
+    let mut mcp_servers = std::collections::BTreeMap::new();
+    mcp_servers.insert(
+        MCP_SERVER_NAME,
+        Server {
+            kind: "http",
+            url,
+            headers: Headers {
+                authorization: format!("Bearer {token}"),
             },
         },
-    };
+    );
+    let root = Root { mcp_servers };
     // to_string_pretty 는 이 형태에선 실패하지 않음 — 방어적 unwrap_or_default.
     serde_json::to_string_pretty(&root).unwrap_or_default()
 }

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::agent::backend::{console_command, AgentBackend};
 use crate::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
 use crate::agent::types::{
-    BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps,
+    BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
 };
 
 /// claude 실행 파일명(논리값). 실제 spawn 시 Windows에선 `console_command`가 `cmd.exe /c claude`로
@@ -188,7 +188,38 @@ impl AgentBackend for ClaudeBackend {
                         args.push(priming.to_string_lossy().into_owned());
                     }
                 }
+                // ★순서 불변(load-bearing, ADR-0094 최소권한)★: `extra_args`(호출자 패스스루)를
+                //   **`--allowedTools` 주입보다 먼저** 잇는다. 이유는 `--allowedTools <tools...>` 가
+                //   claude(2.1.170 실측)에서 **variadic** 이라서다 — 이 플래그 뒤에 오는 positional
+                //   argv 값들을 다음 `--flag` 가 나올 때까지 전부 "허용 툴"로 흡수한다. 만약 grant 그룹
+                //   뒤에 extra_args 가 오고 그 첫 요소가 bare positional(예: `Bash`)이면, 그 값이
+                //   **추가 허용 툴**로 빨려 들어가 blanket Bash 권한을 부여한다(ADR-0094 최소권한 위반).
+                //   그래서 extra_args 를 먼저 소진하고, `--allowedTools` 그룹을 args 벡터의 **맨 끝**에
+                //   둔다. 두 spawn 모드(Terminal PTY 대화형 / StreamJson `-p`) 모두 프롬프트를 stdin
+                //   (write_input)으로 먹이므로 argv 에 **trailing positional 이 없다**(AgentCommand::Claude
+                //   에 프롬프트 필드 없음) — 따라서 grant 그룹 뒤로 아무 positional 도 오지 않아 흡수가
+                //   구조적으로 불가능하다. (extra_args 안에 자체 `--flag <val...>` variadic 이 있어도 그건
+                //   호출자 의도한 값이고, 우리 grant 패턴을 삼키진 않는다 — grant 가 뒤에 있으므로.)
                 args.extend(extra_args.iter().cloned());
+                // ADR-0094: 발신 입구 pre-authorization — `--allowedTools <pattern>...`.
+                //   ★claude 문법 지식 단독(ADR-0004)★: grants(추상 ToolGrant)를 claude allowlist 패턴으로
+                //   번역하는 규칙(`mcp__{server}__{tool}` / `Bash({exe} *)`)은 이 파일만 안다. 툴/서버 이름은
+                //   데몬 컨트롤 채널이 정본(ADR-0094 단일 출처) — 여기선 형식만 만든다. grants 가 비면 아무
+                //   플래그도 안 붙인다(권한 플래그 없음 = 기존 게이트 유지 — 회귀 없음). NEVER bypassPermissions.
+                //   ★arg shape★: `--allowedTools` 한 요소 뒤에 각 패턴을 **개별 args 요소**로 잇는다
+                //   (공백 포함 절대경로 패턴 `Bash(C:\Program Files\… *)` 이 한 argv 요소로 유지돼야 claude
+                //   가 공백을 값 구분자로 쪼개지 않는다 — comma-join 단일 값으로 합치지 않는 이유). 터미널·
+                //   json 모드 둘 다 동일 주입(권한 게이트는 mode 무관).
+                //   ★맨 끝 배치(variadic 흡수 방지)★: 위 extra_args 소진 뒤에 둬서 이 그룹 뒤로 positional
+                //   이 절대 오지 않게 한다(회귀 가드 = 테스트 claude_allowed_tools_group_is_last_and_*).
+                // ADR-0094
+                if let Some(endpoint) = &control {
+                    let patterns = grants_to_allowed_tools(&endpoint.grants);
+                    if !patterns.is_empty() {
+                        args.push("--allowedTools".to_string());
+                        args.extend(patterns);
+                    }
+                }
                 // Windows shim 회피: cmd /c claude … 로 감싼다(비Windows는 그대로).
                 let (program, args) = console_command(CLAUDE_PROGRAM, args);
                 CommandSpec {
@@ -237,6 +268,32 @@ impl AgentBackend for ClaudeBackend {
             },
         }
     }
+}
+
+/// ADR-0094: 추상 `ToolGrant` 목록 → claude `--allowedTools` 패턴 문자열 목록(순수 — 단위 테스트 대상).
+///
+/// ★claude 지식 격리(ADR-0004)★: 이 함수만 claude allowlist **문법**을 안다 — 툴/서버 이름은 모른다
+///   (데몬 컨트롤 채널이 grants 에 실어 넘긴 값을 그대로 끼워 넣을 뿐). 번역 규칙:
+///   - `Mcp{server,tool}` → `mcp__{server}__{tool}` (claude MCP 툴 네이밍 규약 — `mcp__<server>__<tool>`).
+///   - `Cli{exe}`         → `Bash({exe} *)`         (그 exe 로 **시작하는** Bash 명령만 허용 — 전체 Bash 아님).
+///
+/// ★CLI Bash 패턴 caveat(ADR-0094 — best-effort)★: `Bash(<X> *)` 는 에이전트가 실제로 실행하는 명령
+///   문자열의 **prefix** 로 매칭된다. 에이전트는 `$ENGRAM_SEND_EXE --to .. --body ..` 로 부르고 그
+///   env 는 engram-send 의 **절대경로**(예: `C:\...\engram-send.exe`)로 전개된다. 따라서 exe 는 그
+///   절대경로 원문이어야 매칭된다(데몬 build_grants 가 endpoint.send_exe 원문을 그대로 넘김 — bare
+///   이름이 아니라). Windows 절대경로는 백슬래시·`.exe`·공백(경로 내)을 포함할 수 있어, claude Bash
+///   권한 매처가 이를 어떻게 정규화하는지 **미검증**이다(실제 에이전트 왕복으로 후속 검증 — ADR-0094).
+///   그래서 CLI grant 는 best-effort 이고, **MCP grant(`mcp__engram__send_message`)가 1차 확실 경로**다.
+///   여기선 패턴을 그대로 만들되(값 왜곡 금지) 매칭 한계를 이 주석으로 남긴다.
+/// 빈 grants → 빈 Vec(호출자가 `--allowedTools` 플래그 자체를 안 붙인다 = 권한 플래그 없음).
+pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
+    grants
+        .iter()
+        .map(|g| match g {
+            ToolGrant::Mcp { server, tool } => format!("mcp__{server}__{tool}"),
+            ToolGrant::Cli { exe } => format!("Bash({exe} *)"),
+        })
+        .collect()
 }
 
 /// claude stream-json stdin 의 유저 턴 1줄(라인 종단 `\n`)을 만든다(ADR-0044 §4).
@@ -946,6 +1003,25 @@ mod tests {
             send_exe: Some(PathBuf::from("C:/app/engram-send.exe")),
             // 기본 헬퍼는 프라이밍 파일을 담지 않는다(ADR-0092) — 프라이밍 주입 테스트가 명시로 채운다.
             priming_file: None,
+            // ADR-0094: 기본 헬퍼는 grants 를 비워둔다 — grant 주입 테스트가 명시로 채운다(회귀 격리:
+            //   기존 mcp-config/priming 테스트가 --allowedTools 영향을 안 받게).
+            grants: vec![],
+        }
+    }
+
+    /// 발신 입구 grant(MCP + CLI)를 담은 변주(ADR-0094) — `--allowedTools` 주입 검증용.
+    fn ep_with_grants() -> ControlEndpoint {
+        ControlEndpoint {
+            grants: vec![
+                ToolGrant::Mcp {
+                    server: "engram".to_string(),
+                    tool: "send_message".to_string(),
+                },
+                ToolGrant::Cli {
+                    exe: "C:/app/engram-send.exe".to_string(),
+                },
+            ],
+            ..ep()
         }
     }
 
@@ -1138,6 +1214,239 @@ mod tests {
             "control 없으면 프라이밍 플래그 없음: {:?}",
             s.args
         );
+    }
+
+    // ── ADR-0094: 발신 권한 pre-authorization(`--allowedTools`) ─────────────────────────
+    #[test]
+    fn grants_to_allowed_tools_mcp_pattern() {
+        // Mcp{server,tool} → mcp__{server}__{tool}. 이름은 그대로 끼워 넣는다(형식만).
+        let out = grants_to_allowed_tools(&[ToolGrant::Mcp {
+            server: "engram".to_string(),
+            tool: "send_message".to_string(),
+        }]);
+        assert_eq!(out, vec!["mcp__engram__send_message".to_string()]);
+    }
+
+    #[test]
+    fn grants_to_allowed_tools_cli_pattern() {
+        // Cli{exe} → Bash({exe} *). exe 는 절대경로 원문 그대로(caveat: 매칭은 실 에이전트로 후속 검증).
+        let out = grants_to_allowed_tools(&[ToolGrant::Cli {
+            exe: "C:/app/engram-send.exe".to_string(),
+        }]);
+        assert_eq!(out, vec!["Bash(C:/app/engram-send.exe *)".to_string()]);
+    }
+
+    #[test]
+    fn grants_to_allowed_tools_both_preserve_order() {
+        // MCP + CLI 모두 → 두 패턴을 grants 순서대로. (build_spec 이 이 순서로 args 에 잇는다.)
+        let out = grants_to_allowed_tools(&[
+            ToolGrant::Mcp {
+                server: "engram".to_string(),
+                tool: "send_message".to_string(),
+            },
+            ToolGrant::Cli {
+                exe: "C:/app/engram-send.exe".to_string(),
+            },
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                "mcp__engram__send_message".to_string(),
+                "Bash(C:/app/engram-send.exe *)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn grants_to_allowed_tools_empty_is_empty() {
+        // 빈 grants → 빈 Vec(호출자가 --allowedTools 자체를 안 붙인다).
+        assert!(grants_to_allowed_tools(&[]).is_empty());
+    }
+
+    #[test]
+    fn claude_grants_inject_allowed_tools_flag_terminal() {
+        // grants 가 있으면 터미널 모드 args 에 `--allowedTools` + 패턴들이 붙는다(세션/mcp-config 뒤).
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        let pos = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("grants 있으면 --allowedTools 주입");
+        assert_eq!(
+            s.args.get(pos + 1).map(|s| s.as_str()),
+            Some("mcp__engram__send_message"),
+            "첫 패턴 = MCP 발신 입구(1차 확실 경로): {:?}",
+            s.args
+        );
+        assert_eq!(
+            s.args.get(pos + 2).map(|s| s.as_str()),
+            Some("Bash(C:/app/engram-send.exe *)"),
+            "둘째 패턴 = CLI 발신 입구(best-effort): {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_grants_inject_allowed_tools_flag_json_mode() {
+        // json(stream-json) 모드도 권한 게이트를 받으므로 --allowedTools 주입 대상.
+        let s = spec_with_control(
+            &json(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        assert!(
+            s.args.iter().any(|a| a == "--allowedTools"),
+            "json 모드에도 --allowedTools 주입: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_empty_grants_no_allowed_tools_flag() {
+        // grants 가 빈 endpoint(기본 ep()) 면 --allowedTools 를 주입하지 않는다(권한 플래그 없음 = 게이트 유지).
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        assert!(
+            !s.args.iter().any(|a| a == "--allowedTools"),
+            "grants 비면 --allowedTools 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_no_control_endpoint_no_allowed_tools_flag() {
+        // control=None(제어 채널 미구성)이면 --allowedTools 도 당연히 없다.
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        assert!(
+            !s.args.iter().any(|a| a == "--allowedTools"),
+            "control 없으면 --allowedTools 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_never_uses_bypass_permissions() {
+        // ★안전 회귀 가드(ADR-0094)★: 어떤 경로로도 bypass 계열 플래그를 내지 않는다(최소권한 불변).
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        for forbidden in [
+            "--dangerously-skip-permissions",
+            "bypassPermissions",
+            "--permission-mode",
+        ] {
+            assert!(
+                !s.args.iter().any(|a| a.contains(forbidden)),
+                "금지 플래그 누출: {forbidden} in {:?}",
+                s.args
+            );
+        }
+    }
+
+    /// terminal 변주(extra_args 포함) — variadic 흡수 회귀 테스트용.
+    fn terminal_extra(extra: Vec<&str>) -> AgentCommand {
+        terminal(extra)
+    }
+
+    /// grants=[MCP,CLI] 시 기대되는 정확한 allowedTools 값 run(순서 고정). 회귀 테스트 공유 앵커.
+    fn expected_grant_patterns() -> Vec<String> {
+        grants_to_allowed_tools(&ep_with_grants().grants)
+    }
+
+    #[test]
+    fn claude_allowed_tools_group_is_last_and_exact_terminal() {
+        // ★FIX #1 회귀(variadic 흡수 방지)★: `--allowedTools <tools...>` 는 variadic 이라 뒤에 오는
+        //   positional 을 전부 삼킨다. 그래서 grant 그룹은 args 벡터의 **맨 끝**에 있어야 하고,
+        //   `--allowedTools` 바로 뒤 토큰들은 **정확히 grant 패턴들뿐**이어야 한다(그 뒤에 아무것도 없음).
+        //   extra_args 에 bare positional("Bash")을 넣어 그게 grant 값 run 에 인접-후행하지 않음을 단언.
+        let s = spec_with_control(
+            &terminal_extra(vec!["Bash", "--debug"]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        let pos = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("grants 있으면 --allowedTools 주입");
+        let patterns = expected_grant_patterns();
+        // `--allowedTools` 바로 뒤 run = 정확히 patterns, 그리고 그게 args 의 끝이어야 한다.
+        assert_eq!(
+            &s.args[pos + 1..],
+            &patterns[..],
+            "allowedTools 뒤 토큰 run 은 정확히 grant 패턴들이고 그 뒤엔 아무것도 없어야 함(변주 흡수 방지): {:?}",
+            s.args
+        );
+        // bare positional "Bash" 는 grant 값 run 에 인접-후행하지 않는다(= 흡수 불가).
+        //   "Bash" 는 --allowedTools 앞(extra_args 구간)에 있어야 한다.
+        let bash_pos = s
+            .args
+            .iter()
+            .position(|a| a == "Bash")
+            .expect("extra_args 의 bare positional 'Bash' 는 args 에 존재");
+        assert!(
+            bash_pos < pos,
+            "bare 'Bash' 는 --allowedTools 앞에 있어야 함(뒤면 variadic 에 흡수돼 blanket Bash grant): bash={bash_pos} allowedTools={pos} args={:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_allowed_tools_group_is_last_and_exact_json_mode() {
+        // json(stream-json) 모드도 동일 불변 — grant 그룹이 맨 끝, positional 흡수 불가.
+        let s = spec_with_control(
+            &AgentCommand::Claude {
+                extra_args: vec!["Bash".to_string()],
+                output_format: ClaudeOutputFormat::StreamJson,
+            },
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        let pos = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("json 모드 grants 주입");
+        let patterns = expected_grant_patterns();
+        assert_eq!(
+            &s.args[pos + 1..],
+            &patterns[..],
+            "json 모드: allowedTools 뒤 run 은 정확히 grant 패턴들이고 그 뒤엔 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_space_containing_bash_pattern_stays_single_argv_element() {
+        // ★공백 포함 절대경로 grant 는 한 argv 요소로 유지★: `Bash(C:\Program Files\eng\engram-send.exe *)`
+        //   은 내부 공백이 있어도 하나의 값 요소여야 한다(claude 는 공백을 값 구분자로도 씀 → 쪼개지면
+        //   패턴이 깨진다). comma-join 단일 값으로 합치지 않고 개별 요소로 두는 이유의 회귀 가드.
+        let ep = ControlEndpoint {
+            grants: vec![ToolGrant::Cli {
+                exe: "C:\\Program Files\\eng\\engram-send.exe".to_string(),
+            }],
+            ..ep()
+        };
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep));
+        let pos = s.args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(
+            s.args.get(pos + 1).map(|s| s.as_str()),
+            Some("Bash(C:\\Program Files\\eng\\engram-send.exe *)"),
+            "공백 포함 절대경로 패턴은 한 argv 요소로 유지(쪼개지지 않음): {:?}",
+            s.args
+        );
+        // 그리고 그게 마지막 요소(뒤로 positional 없음).
+        assert_eq!(pos + 2, s.args.len(), "패턴이 args 의 마지막: {:?}", s.args);
     }
 
     #[test]
