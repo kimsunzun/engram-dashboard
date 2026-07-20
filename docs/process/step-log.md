@@ -1063,6 +1063,13 @@
 - **핵심 하네스 불변(하드닝 산물):** baseline 이후 from=B·to=A 레코드만 답장 판정(pre-seed 오탐 방지) · A·B 둘 다 생존해야 valid negative(A 사망=SETUP-FAIL) · CLI-요구 프라이밍인데 engram-send 부재=SETUP-SKIP(정상 negative 아님, 해석된 파일 basename으로 판정) · MessageDone은 mutex 하 카운터+notify(lost-wakeup 제거).
 - **다음(실행 대기):** C0~C3 실 claude 매트릭스 실행(각 실 에이전트 2개 스폰·케이스별 정성 판정) → 수용>토큰·entrance 선택 집계 → 최적 발신 구성·프라이밍 양방향화 결정. 그 뒤 형식 비교 스파이크(무양식 후보 포함, ADR-0093 결정4).
 
+## S17 발신 입구 런타임 pre-authorization + 왕복 C4 검증 (2026-07-20, master, 자율위임 세션) · ADR-0094 신규
+- **무엇:** 왕복 실험(ADR-0093)에서 전 케이스 B_SENT=false의 원인 = claude 런타임 툴-권한 게이트(승인자 없는 헤드리스에서 발신 툴 호출 차단). `/research`(medium, cross-family codex 리뷰 — 프레임워크 분류·통계 정정 후)로 확증: **권한은 런타임 강제, 프롬프트로 self-grant 불가**(공식 문서 + 우리 실측 교차확증). → 발신 입구(`send_message` MCP / `engram-send` CLI)를 스폰 시 `--allowedTools`로 **최소권한 pre-authorize**. grant seam = `ControlEndpoint.grants`(추상 `ToolGrant{Mcp,Cli}`), 컨트롤 채널이 단일 출처(`MCP_SERVER_NAME`/`SEND_MESSAGE_TOOL` const), 백엔드가 형식만 번역(claude=`--allowedTools mcp__{s}__{t}`+`Bash({exe} *)`, codex/gemini TODO). 결정 = **ADR-0094**.
+- **게이트:** `/implement standard`(코더복잡) → `/review code full`(doc-aware PASS + blind FIX: **`--allowedTools` variadic이 뒤 `extra_args` positional을 흡수해 blanket Bash 권한이 새는 결함**(bare `Bash` 시나리오) + 단일출처 test-강제 2건 → 하드닝: grant 그룹을 args 맨 끝 배치·흡수 회귀테스트 3개·메서드↔const 결합주석 → 폐쇄) → `/qa standard`(core 226·daemon 157 lib·전멤버 0 failed·fmt·격리0, 프론트 무변경 재사용) PASS. 커밋 `422b526`.
+- **★C4 실측 — 왕복 A→B→A 닫힘 확인★:** grant 적용 후 재실행 — **C2(MCP 발신 프라이밍) B_SENT=true(mcp)**, **C1(둘 다) B_SENT=true(mcp — B가 MCP 선호)**. 둘 다 A가 B 답장을 stdin으로 자연 수용·회신까지 성립. B가 "허가 필요" 없이 **자율 발신** → 런타임 게이트가 유일 블로커였음 확증(프롬프트 pre-auth 줄 불요). **C3(CLI만) B_SENT=false** — best-effort CLI Bash 풀경로 패턴 미작동(caveat 현실화).
+- **한계/do-not:** CLI 입구 자율 발신 미해결(Windows 절대경로 Bash 권한 매칭 — 별도 추적. 단 B가 MCP 선호라 우선순위 낮음). C0(발신 프라이밍 없음)은 grant 있어도 자발 발신 안 함(재실행 생략) — **발신엔 프라이밍(발신 의사)+grant(발신 허용) 둘 다 필요**가 매트릭스 결론.
+- **다음:** 형식 비교 스파이크(봉투 후보·무양식 본문 포함 — ADR-0093 결정4) → 포화 등 비정상. CLI 입구 자율화는 별도 추적.
+
 ## 다음 (미진행)
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 채널 아키텍처 확정 = ADR-0086(듀얼 typed 입구 + 메일박스). 다음 = /implement 스텝 1 → 스텝 사다리 2~6. PRD/TRD §6은 engram-ctl 전제라 갱신 필요(이월).
 - **[입주 1단계-b] UI 레이아웃/창 영속화** — **저장위치 결정 완료(D-7): 프론트 localStorage**(백엔드 아님). 다중창(창별 독립 layout+theme+좌표, 멀티모니터)·창 id별 키·Tauri JS `WebviewWindow`로 부팅 복원. 현 conf.json 정적 3창→동적 창 생성 신규 기능. **데몬화 뒤로 보류**(2026-06-14, 데몬 우선 결정). 상세: tracking.md D-7.
