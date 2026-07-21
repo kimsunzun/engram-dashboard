@@ -5,8 +5,8 @@
 use ts_rs::TS;
 
 use crate::domain::{
-    AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat, Preset, RestoreReport,
-    SnapshotChunk,
+    AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat, EnvelopeFormat, Preset,
+    RestoreReport, SnapshotChunk,
 };
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
@@ -210,6 +210,18 @@ pub enum AgentCommand {
         preset_id: PresetId,
         #[ts(type = "string | null")]
         name: Option<String>,
+        request_id: RequestId,
+    },
+
+    /// 봉투 포맷 전역 스위치(ADR-0096) — A→B 메시지 봉투를 colon/xml 로 전환한다. 데몬이 **전역 상태
+    /// 하나**(기본 colon)를 들고, 이후 모든 `wrap_message` 조립이 그 값을 읽는다(ADR-0086 단일 wrap point
+    /// 불변 유지 — 상태는 입력일 뿐 조립은 여전히 한 곳). ★조종 표면 전용★: 이 커맨드는 src-tauri Tauri
+    /// command `set_envelope_format` 가 데몬으로 전달하는 경로로만 온다 — 워커 MCP 채널엔 노출하지 않는다
+    /// (관리당하는 에이전트가 팀-전역 포맷을 바꾸면 안 됨, ADR-0096 결정 3·ADR-0094 최소권한). request_id
+    /// 동봉 → Ack 매칭(다른 side-effect 커맨드와 동형). 지속성 없음(데몬 재시작 시 colon 리셋 — 백로그).
+    // ADR-0096
+    SetEnvelopeFormat {
+        format: EnvelopeFormat,
         request_id: RequestId,
     },
 }
@@ -647,6 +659,63 @@ mod tests {
             back,
             AgentCommand::RenameProfile { name: Some(ref n), .. } if n == "내 에이전트"
         ));
+    }
+
+    /// ADR-0096: SetEnvelopeFormat wire golden(externally-tagged) + round-trip + enum lowercase serde.
+    /// ★invoke JSON 계약★: 오퍼레이터/LLM 이 `set_envelope_format({format:"xml"})` 로 부르므로 format 은
+    /// **소문자**(`"colon"`/`"xml"`)로 직렬화돼야 한다 — golden 문자열로 그 계약을 고정한다(대문자로
+    /// drift 하면 invoke JSON 이 역직렬화 실패). request_id 동봉(Ack 매칭, 다른 side-effect 커맨드 동형).
+    #[test]
+    fn set_envelope_format_command_json_golden_and_roundtrip() {
+        // xml 로 전환하는 커맨드.
+        let cmd = AgentCommand::SetEnvelopeFormat {
+            format: EnvelopeFormat::Xml,
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"SetEnvelopeFormat":{"format":"xml","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "SetEnvelopeFormat wire 형태가 golden 과 불일치(format 은 소문자 xml 이어야 — invoke JSON 계약)"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::SetEnvelopeFormat {
+                format: EnvelopeFormat::Xml,
+                ..
+            }
+        ));
+
+        // colon 도 소문자로 직렬화 + 왕복 무손실.
+        let colon = AgentCommand::SetEnvelopeFormat {
+            format: EnvelopeFormat::Colon,
+            request_id: RequestId(Uuid::nil()),
+        };
+        let colon_json = serde_json::to_string(&colon).unwrap();
+        assert_eq!(
+            colon_json,
+            r#"{"SetEnvelopeFormat":{"format":"colon","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "colon variant 도 소문자여야"
+        );
+        let colon_back: AgentCommand = serde_json::from_str(&colon_json).unwrap();
+        assert_eq!(colon_json, serde_json::to_string(&colon_back).unwrap());
+    }
+
+    /// ADR-0096: EnvelopeFormat 기본값 = Colon(데몬 전역 상태 초기값과 정합) + `{format:"xml"}` 형태의
+    /// bare 객체 JSON 이 그대로 역직렬화되는지(invoke 페이로드가 이 형태) 확인.
+    #[test]
+    fn envelope_format_default_is_colon_and_lowercase_deserializes() {
+        assert_eq!(
+            EnvelopeFormat::default(),
+            EnvelopeFormat::Colon,
+            "기본 봉투 포맷 = colon(ADR-0095 결정 2·ADR-0096 결정 1)"
+        );
+        // invoke 가 넘기는 소문자 문자열이 역직렬화된다.
+        let xml: EnvelopeFormat = serde_json::from_str(r#""xml""#).unwrap();
+        assert_eq!(xml, EnvelopeFormat::Xml);
+        let colon: EnvelopeFormat = serde_json::from_str(r#""colon""#).unwrap();
+        assert_eq!(colon, EnvelopeFormat::Colon);
     }
 
     /// ADR-0072: ReparentProfile wire golden(externally-tagged) + round-trip. parent_id=Some(부모 지정)와

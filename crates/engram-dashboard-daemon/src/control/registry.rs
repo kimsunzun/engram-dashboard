@@ -20,11 +20,12 @@
 //! tauri import 0(daemon crate).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use engram_dashboard_core::agent::types::AgentId;
 
-use super::ingress::{DeliveryObservation, DeliveryObserver};
+use super::ingress::{DeliveryObservation, DeliveryObserver, EnvelopeFormat};
 
 /// 검증 성공 시 되돌리는 신원 — 토큰이 묶인 (AgentId, epoch). `from` 파생의 단일 출처(ADR-0086).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,19 @@ pub struct BoundIdentity {
 #[derive(Default)]
 pub struct ControlRegistry {
     inner: RwLock<Inner>,
+    /// ★봉투 포맷 전역 상태(ADR-0096)★ — A→B 메시지 봉투를 colon/xml 로 전환하는 **데몬 전역 상태
+    ///   하나**다(수신자별/메타데이터-유무별 아님 — ADR-0096 결정 1). 왜 여기 사나 = registry 는 이미
+    ///   `handle_send`(MCP·CLI 두 입구)와 WS dispatch 에 `Arc` 로 스레드되는 유일한 공유 객체라, 이
+    ///   상태를 매달면 별도 상태 소유자를 새로 배선하지 않고 두 봉투 조립 경로가 같은 값을 읽는다.
+    ///   ★소유 = 데몬(ADR-0029)★: registry 는 AgentManager 를 소유한 데몬 프로세스에 산다 — src-tauri
+    ///   (클라이언트 셸)는 이 상태를 소유하지 않고 invoke 커맨드를 데몬으로 전달만 한다.
+    ///   ★AtomicU8(락 불요)★: 단순 스칼라 토글이라 RwLock 이 과하다 — 0=Colon(기본)·1=Xml. `Default`
+    ///   가 0 이라 초기값이 Colon 으로 정합한다(ADR-0096 결정 1·4). ★메모리-only★: 데몬 재시작 시 0(colon)
+    ///   으로 리셋(영속화는 백로그 — ADR-0096 결정 4). read=relay 마다(Acquire), write=set_envelope_format
+    ///   커맨드(드묾, Release) — Release/Acquire 짝으로 스위치 이후 첫 메시지가 새 포맷을 확실히 보게
+    ///   한다(FIX-4). 단일 스칼라라 찢김은 없으나 cross-thread 가시성을 명시적으로 성립시킨다.
+    // ADR-0096
+    envelope_format: AtomicU8,
     /// 배달-경계 관측 싱크(ADR-0088) — 설치되지 않으면 None(운영 기본). RwLock: 설치는 드물고(테스트
     ///   셋업 1회) 조회는 relay 마다지만 짧다. Debug 파생 안 함(위 Inner 와 함께 — 이 struct 는 Debug 없음).
     delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
@@ -297,6 +311,39 @@ impl ControlRegistry {
                 );
             }
         }
+    }
+
+    // ── 봉투 포맷 전역 상태(ADR-0096) ────────────────────────────────────────────────
+    //
+    // A→B 메시지 봉투 형식(colon/xml)의 데몬 전역 스위치. `handle_send` 가 relay 마다 read 하고,
+    // WS dispatch 의 SetEnvelopeFormat 커맨드가 write 한다. AtomicU8 0=Colon·1=Xml(Default=Colon).
+
+    /// 현재 봉투 포맷(ADR-0096) — `handle_send` 가 봉투 조립 시 읽어 wrap_message 에 넘긴다.
+    /// ★알 수 없는 값 방어★: 저장은 아래 set_envelope_format 만 하므로 항상 0/1 이나, 방어적으로
+    ///   1(Xml)만 Xml, 그 외는 Colon 으로 접는다(기본 안전 = 운영 정상값 colon).
+    pub fn envelope_format(&self) -> EnvelopeFormat {
+        // ★Acquire(FIX-4)★: set_envelope_format 의 Release store 와 짝지어, 스위치 이후 첫 메시지가
+        //   새 포맷을 명확히 보게 한다(cross-thread 가시성 애매함 제거). 단일 스칼라라 Relaxed 로도
+        //   찢김은 없지만, 스위치 순간의 happens-before 를 명시적으로 성립시킨다.
+        match self.envelope_format.load(Ordering::Acquire) {
+            1 => EnvelopeFormat::Xml,
+            _ => EnvelopeFormat::Colon,
+        }
+    }
+
+    /// 봉투 포맷 전역 상태를 설정한다(ADR-0096) — WS dispatch 의 SetEnvelopeFormat 커맨드가 부른다.
+    /// ★조종 표면 전용★: 이 setter 로 이어지는 유일 경로는 src-tauri Tauri command `set_envelope_format`
+    ///   → 데몬 SetEnvelopeFormat 커맨드다. 워커 MCP 채널엔 노출하지 않는다(ADR-0096 결정 3·ADR-0094).
+    ///   ★메모리-only★: 영속화하지 않는다 — 데몬 재시작 시 Colon 으로 리셋(백로그).
+    pub fn set_envelope_format(&self, format: EnvelopeFormat) {
+        let v = match format {
+            EnvelopeFormat::Colon => 0u8,
+            EnvelopeFormat::Xml => 1u8,
+        };
+        // ★Release(FIX-4)★: envelope_format() 의 Acquire load 와 짝. 스위치 write 가 이후 relay 의
+        //   read 에 확실히 보이도록 happens-before 를 성립시킨다.
+        self.envelope_format.store(v, Ordering::Release);
+        tracing::info!(?format, "봉투 포맷 전역 상태 전환(ADR-0096)");
     }
 
     /// ★mid-send yield-seam hook 설치/해제(ADR-0088 Stage 1 — test-harness 전용)★. `Some(hook)` 로 설치,
@@ -616,6 +663,30 @@ mod tests {
             "revoke 는 세션 바인딩도 지운다"
         );
         assert_eq!(reg.bound_session_count(), 0);
+    }
+
+    // ── ADR-0096: 봉투 포맷 전역 상태 ────────────────────────────────────────────────
+    #[test]
+    fn envelope_format_defaults_to_colon_and_toggles() {
+        // 기본 = Colon(데몬 전역 상태 초기값, ADR-0096 결정 1·4). set 으로 Xml 전환, 다시 Colon 복귀.
+        let reg = ControlRegistry::new();
+        assert_eq!(
+            reg.envelope_format(),
+            EnvelopeFormat::Colon,
+            "새 registry 기본 봉투 포맷은 colon 이어야"
+        );
+        reg.set_envelope_format(EnvelopeFormat::Xml);
+        assert_eq!(
+            reg.envelope_format(),
+            EnvelopeFormat::Xml,
+            "set(Xml) 후 xml 로 읽혀야"
+        );
+        reg.set_envelope_format(EnvelopeFormat::Colon);
+        assert_eq!(
+            reg.envelope_format(),
+            EnvelopeFormat::Colon,
+            "set(Colon) 후 colon 으로 복귀"
+        );
     }
 
     #[test]

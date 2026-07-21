@@ -1,7 +1,7 @@
 # ADR-0095: 봉투 포맷 스위칭 구조 — 기본 colon·대체 xml (bracket 기각)
 
 - 상태: 확정 (2026-07-21, 근거: 사용자 결정 — 스파이크 실측 3종 + sonnet 스트레스 증량 동률 확인 후)
-- 관련: ADR-0086(단일 wrap point — placeholder는 "후속 스파이크가 교체" 예정 조항이었고 본 ADR이 그 이행) · ADR-0092(판정축 수용>토큰) · ADR-0093(결정4 형식 스파이크) · `crates/engram-dashboard-daemon/src/control/ingress.rs::wrap_message` · step-log S17(포맷 스파이크 1·2차, 라우팅 신뢰화, 리치-메타 가독성)
+- 관련: ADR-0086(단일 wrap point — placeholder는 "후속 스파이크가 교체" 예정 조항이었고 본 ADR이 그 이행) · ADR-0092(판정축 수용>토큰) · ADR-0093(결정4 형식 스파이크) · `crates/engram-dashboard-daemon/src/control/ingress.rs::wrap_message` · step-log S17(포맷 스파이크 1·2차, 라우팅 신뢰화, 리치-메타 가독성) · Amended by ADR-0096 (봉투 포맷 스위치 저장 위치·노출 방식 (결정 5))
 
 ## 맥락
 

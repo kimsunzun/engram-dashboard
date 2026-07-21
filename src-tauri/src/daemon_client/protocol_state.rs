@@ -55,7 +55,9 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::CreatePreset { request_id, .. }
         | AgentCommand::DeletePreset { request_id, .. }
         // 프리셋 rename(ADR-0061 리치화) — Ack 매칭 대상.
-        | AgentCommand::RenamePreset { request_id, .. } => Some(*request_id),
+        | AgentCommand::RenamePreset { request_id, .. }
+        // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
+        | AgentCommand::SetEnvelopeFormat { request_id, .. } => Some(*request_id),
         // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
         AgentCommand::Auth { .. }
         | AgentCommand::Resize { .. }

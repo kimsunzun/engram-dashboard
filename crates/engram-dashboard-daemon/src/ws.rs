@@ -438,6 +438,9 @@ pub async fn handle_connection(
     manager: Arc<AgentManager>,
     registry: ConnRegistry,
     multiview: MultiViewState,
+    // ADR-0096: 제어 채널 레지스트리(봉투 포맷 전역 상태 거처) — SetEnvelopeFormat dispatch 가 쓴다.
+    //   handle_send(MCP/CLI)가 relay 마다 읽는 그 같은 Arc(전역 상태 하나).
+    control_registry: Arc<crate::control::registry::ControlRegistry>,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     keepalive: KeepaliveConfig,
@@ -532,6 +535,7 @@ pub async fn handle_connection(
         manager.clone(),
         multiview.clone(),
         registry.clone(),
+        control_registry.clone(),
         shutdown_tx,
     ));
 

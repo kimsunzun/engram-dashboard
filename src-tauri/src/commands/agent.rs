@@ -16,7 +16,9 @@
 
 use std::sync::Arc;
 
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, ProfileId, RequestId};
+use engram_dashboard_protocol::{
+    AgentCommand, AgentEvent, AgentId, EnvelopeFormat, ProfileId, RequestId,
+};
 use tauri::State;
 use uuid::Uuid;
 
@@ -116,6 +118,32 @@ pub async fn agent_resize(
         viewport_id: None,
     });
     Ok(())
+}
+
+/// ★봉투 포맷 전역 스위치(ADR-0096) — 조종/invoke 제어 표면★. 오퍼레이터(또는 §5 LLM/상주
+/// 오케스트레이터)가 `invoke('set_envelope_format', { format: 'colon' | 'xml' })` 로 부르면 데몬 전역
+/// 봉투 포맷 상태를 바꾼다 — 이후 모든 A→B 메시지 봉투가 그 포맷으로 렌더된다(colon=`{sender}: {body}`
+/// 기본, xml=`<message from="{sender}">{body}</message>`). reply = `Ack`(데몬 상태 변경 확인). 성공 시 `()`.
+///
+/// ★src-tauri = 클라이언트 셸(ADR-0029)★: 이 command 는 상태를 소유하지 않고 `AgentCommand::SetEnvelopeFormat`
+/// 를 데몬으로 전달만 한다(다른 agent_* command 와 동형 — 얇은 빌더 + send_command). 상태 소유·조립은
+/// 데몬(AgentManager 소유 프로세스)이다. ★워커 MCP 채널엔 미노출★(관리당하는 에이전트가 팀-전역 포맷을
+/// 바꾸면 안 됨 — ADR-0096 결정 3·ADR-0094 최소권한). 이 invoke 표면이 정식 활성 경로이고, 사람용
+/// 트리거(단축키/UI 버튼)는 나중 옵션이다(ADR-0096 결정 5 — cdp.mjs eval 로 이 invoke 를 임시 호출·검증).
+///
+/// ★format 역직렬화★: `EnvelopeFormat` 는 serde lowercase 라 invoke JSON `{format:"xml"}` 이 그대로
+/// 들어온다(wire enum 계약, ADR-0096). Tauri 가 command 인자를 이 타입으로 역직렬화한다.
+// ADR-0096
+#[tauri::command]
+pub async fn set_envelope_format(
+    client: State<'_, Arc<DaemonClient>>,
+    format: EnvelopeFormat,
+) -> Result<(), String> {
+    let cmd = AgentCommand::SetEnvelopeFormat {
+        format,
+        request_id: RequestId::new(),
+    };
+    expect_ack(client.send_command(cmd).await)
 }
 
 /// ★출력 Channel 등록(ADR-0046 — 등록만, replay 트리거 없음)★. 창 mount 시 프론트가

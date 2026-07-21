@@ -42,14 +42,17 @@ use engram_dashboard_protocol::{
     AgentCommand, AgentEvent, AgentInfo as WireAgentInfo, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
-    InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
-    Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
-    RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
-    StructuredEvent as WireStructuredEvent, SubscribeAction, PROTOCOL_VERSION,
+    EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
+    OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
+    RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
+    SnapshotChunk as WireSnapshotChunk, StructuredEvent as WireStructuredEvent, SubscribeAction,
+    PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
 
+use crate::control::ingress::EnvelopeFormat as CoreEnvelopeFormat;
+use crate::control::registry::ControlRegistry;
 use crate::ws::{ConnId, ConnRegistry};
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
@@ -591,6 +594,12 @@ pub struct ConnectionCore {
     /// status/lease/profile 브로드캐스트용. ★Stage 1 한정★: ADR-0020 R6/§5 대로 fanout 은
     /// carrier 디테일이라 추상 sink 로 안 올리고, behavior-preserving 위해 registry 를 그대로 든다.
     registry: ConnRegistry,
+    /// ★제어 채널 레지스트리(ADR-0086)★ — 봉투 포맷 전역 상태(ADR-0096)의 거처. SetEnvelopeFormat
+    ///   dispatch 가 여기 `set_envelope_format` 을 부른다. handle_send(MCP/CLI 입구)가 relay 마다 읽는
+    ///   그 **같은 Arc** 다(전역 상태 하나 — 두 봉투 조립 경로가 동일 값을 본다). ConnRegistry(위)와
+    ///   다른 타입임에 주의: 저건 연결 fanout, 이건 제어 채널 토큰·봉투 포맷 상태.
+    // ADR-0096
+    control_registry: Arc<ControlRegistry>,
     /// StopDaemon 수신 시 main 종료를 트리거하는 watch(어댑터가 주입).
     shutdown_tx: watch::Sender<bool>,
 }
@@ -600,12 +609,14 @@ impl ConnectionCore {
         manager: Arc<AgentManager>,
         multiview: MultiViewState,
         registry: ConnRegistry,
+        control_registry: Arc<ControlRegistry>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
             manager,
             multiview,
             registry,
+            control_registry,
             shutdown_tx,
         }
     }
@@ -1130,6 +1141,22 @@ impl ConnectionCore {
                 reply(sink, request_id, Ok(()));
                 broadcast_preset_list(registry, manager);
             }
+
+            AgentCommand::SetEnvelopeFormat { format, request_id } => {
+                // ADR-0096: 봉투 포맷 전역 상태 전환. src-tauri Tauri command set_envelope_format 이 이
+                //   커맨드를 데몬으로 전달하는 **조종 표면 전용** 경로다(워커 MCP 채널엔 미노출 —
+                //   ADR-0096 결정 3·ADR-0094). control_registry(handle_send 가 relay 마다 읽는 그 Arc)에
+                //   써서, 이후 모든 A→B 봉투 조립이 새 포맷으로 렌더된다(단일 wrap point 유지 — 상태는
+                //   입력일 뿐). wire enum → 데몬 렌더 enum 명시 매핑(다른 *_to_wire 와 동일 원칙 — variant
+                //   추가 시 컴파일 에러). 상태 변경뿐이라 reply=Ack(broadcast 없음 — 전역 상태는 다음
+                //   메시지에서 관측되지 별도 목록 push 대상이 아니다).
+                let core_format = match format {
+                    WireEnvelopeFormat::Colon => CoreEnvelopeFormat::Colon,
+                    WireEnvelopeFormat::Xml => CoreEnvelopeFormat::Xml,
+                };
+                self.control_registry.set_envelope_format(core_format);
+                reply(sink, request_id, Ok(()));
+            }
         }
         DispatchFlow::Continue
     }
@@ -1418,8 +1445,25 @@ mod tests {
         ));
         let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let core = ConnectionCore::new(manager, MultiViewState::new(), registry, shutdown_tx);
+        // ADR-0096: dispatch 가 SetEnvelopeFormat 를 쓸 봉투 포맷 전역 상태 거처. 테스트가 read 로 검증할
+        //   수 있게 별도 clone 을 든다(같은 Arc — dispatch 가 쓴 값을 그대로 관측).
+        let control_registry = Arc::new(ControlRegistry::new());
+        let core = ConnectionCore::new(
+            manager,
+            MultiViewState::new(),
+            registry,
+            control_registry,
+            shutdown_tx,
+        );
         (core, shutdown_rx)
+    }
+
+    /// test_core 의 확장 — dispatch 가 쓴 봉투 포맷 상태를 read 로 검증하려는 테스트용. control_registry
+    /// 핸들을 함께 돌려준다(같은 Arc). ADR-0096 dispatch↔send-path 상태 공유 검증에 쓴다.
+    fn test_core_with_control_registry() -> (ConnectionCore, Arc<ControlRegistry>) {
+        let (core, _rx) = test_core();
+        let control_registry = core.control_registry.clone();
+        (core, control_registry)
     }
 
     // ── R1: Subscribe 시 [Ack, (replay)Binary..., ReplayComplete] 순서가 conn_tx 기록에 그대로 ──
@@ -1729,6 +1773,60 @@ mod tests {
             [AgentEvent::AgentList { request_id, .. }] => assert_eq!(*request_id, req),
             other => panic!("AgentList 기대: {other:?}"),
         }
+    }
+
+    // ── ADR-0096: SetEnvelopeFormat → Ack + 전역 상태 변이(send path 가 읽는 그 상태) ──────────
+    #[tokio::test]
+    async fn set_envelope_format_acks_and_mutates_send_path_state() {
+        // dispatch 의 SetEnvelopeFormat 이 (a) Ack 를 돌려주고 (b) control_registry(= handle_send 가
+        //   relay 마다 읽는 봉투 포맷 전역 상태)를 실제로 바꾸는지 검증한다. 이게 dispatch↔send-path
+        //   상태 공유의 회귀 가드다(같은 Arc — dispatch 가 쓴 값을 read 로 관측).
+        let (core, control_registry) = test_core_with_control_registry();
+        assert_eq!(
+            control_registry.envelope_format(),
+            CoreEnvelopeFormat::Colon,
+            "초기 봉투 포맷은 colon(기본)"
+        );
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let req = rid();
+        core.dispatch(
+            AgentCommand::SetEnvelopeFormat {
+                format: WireEnvelopeFormat::Xml,
+                request_id: req,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        // (a) Ack echo.
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+            other => panic!("SetEnvelopeFormat 는 Ack 를 돌려줘야: {other:?}"),
+        }
+        // (b) send path 가 읽는 전역 상태가 Xml 로 바뀌었다.
+        assert_eq!(
+            control_registry.envelope_format(),
+            CoreEnvelopeFormat::Xml,
+            "dispatch 후 봉투 포맷 전역 상태가 xml 로 바뀌어야(send path 가 이 값을 읽음)"
+        );
+
+        // 되돌리기(colon)도 반영된다.
+        core.dispatch(
+            AgentCommand::SetEnvelopeFormat {
+                format: WireEnvelopeFormat::Colon,
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        assert_eq!(
+            control_registry.envelope_format(),
+            CoreEnvelopeFormat::Colon,
+            "colon 재전환도 반영"
+        );
     }
 
     // ── CreateProfile → Created(request_id 동봉) + 목록 변경 ───────────────────────

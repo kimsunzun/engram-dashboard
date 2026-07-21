@@ -142,6 +142,28 @@ pub enum ClaudeOutputFormat {
     StreamJson,
 }
 
+/// 봉투 포맷 wire 타입(ADR-0096) — 데몬이 A→B 메시지를 감쌀 때 쓰는 형식 스위치의 값.
+/// `Colon` = `{sender}: {body}`(운영 기본), `Xml` = `<message from="{sender}">{body}</message>`(대체).
+/// 렌더 규칙(정확한 문자열)은 데몬 `control::ingress` 단독 소유 — 이 wire 타입은 스위치 값만 나른다
+/// (설계·조립은 데몬, 이 crate 는 순수 wire 계약). 실제 렌더 enum(데몬측)과 이름은 같으나 별개 타입이다.
+///
+/// ★serde lowercase(load-bearing)★: `#[serde(rename_all="lowercase")]` 라 wire JSON 이 `"colon"`/`"xml"`
+/// (variant 이름 소문자)로 직렬화된다 — `set_envelope_format({format:"xml"})` invoke JSON 이 그대로
+/// 역직렬화되게 하는 계약(오퍼레이터/LLM 이 손으로 부르는 표면이라 소문자가 자연스럽다). 다른 wire
+/// enum(ClaudeOutputFormat 등)은 PascalCase 지만, 이 타입은 invoke 표면에 직접 노출되므로 lowercase 로 둔다.
+/// ★기본 = Colon★: `#[default]` — 데몬 전역 상태 초기값과 정합(ADR-0096 결정 1·4, 메모리-only 리셋 기본).
+// ADR-0096
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum EnvelopeFormat {
+    /// `{sender}: {body}` — 인간 채팅 관례, 운영 기본(ADR-0095 결정 2).
+    #[default]
+    Colon,
+    /// `<message from="{sender}">{body}</message>` — 구조 봉투, 대체 스위치(ADR-0095 결정 3).
+    Xml,
+}
+
 /// 에이전트 실행 명령 wire 미러 — core `profile::AgentCommand` 와 동일(`#[serde(tag="kind")]`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]

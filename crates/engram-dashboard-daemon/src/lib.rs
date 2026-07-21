@@ -249,6 +249,9 @@ async fn run_accept_loop(
     manager: Arc<AgentManager>,
     registry: ConnRegistry,
     multiview: MultiViewState,
+    // ADR-0096: 봉투 포맷 전역 상태 거처(제어 채널 레지스트리) — 연결마다 handle_connection 에 넘겨
+    //   SetEnvelopeFormat dispatch 가 쓰게 한다. handle_send(MCP/CLI)와 같은 Arc(전역 상태 하나).
+    control_registry: Arc<control::registry::ControlRegistry>,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -264,6 +267,7 @@ async fn run_accept_loop(
                         let manager = manager.clone();
                         let registry = registry.clone();
                         let multiview = multiview.clone();
+                        let control_registry = control_registry.clone();
                         let expected_token = expected_token.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
@@ -273,6 +277,7 @@ async fn run_accept_loop(
                                 manager,
                                 registry,
                                 multiview,
+                                control_registry,
                                 expected_token,
                                 shutdown_tx,
                                 keepalive,
@@ -513,6 +518,7 @@ pub async fn run() -> Result<(), i32> {
         manager.clone(),
         registry,
         multiview,
+        control_registry, // ADR-0096: 봉투 포맷 전역 상태 거처(handle_send 와 같은 Arc)
         expected_token,
         shutdown_tx,
         shutdown_rx,
@@ -621,6 +627,10 @@ async fn start_test_server_inner(
 
     let registry = ConnRegistry::new();
     let multiview = MultiViewState::new();
+    // ADR-0096: WS dispatch(SetEnvelopeFormat)가 쓰는 봉투 포맷 전역 상태 거처. 테스트 서버는 MCP 서버·
+    //   제어 채널을 배선하지 않으므로(아래 Noop) accept loop 전용 standalone registry 를 새로 만든다 —
+    //   같은 Arc 라 dispatch 가 쓴 값을 그 서버 수명 동안 관측할 수 있다(운영은 control_registry 공유).
+    let control_registry = Arc::new(control::registry::ControlRegistry::new());
     // 프리셋 store 는 테스트마다 새 in-memory(디스크 비오염). 프리셋 persist 를 검증하는 테스트는
     // 별도 store 주입형이 필요하면 추후 추가한다(현재 프리셋 unit 은 core 에서 격리 검증).
     let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
@@ -639,6 +649,7 @@ async fn start_test_server_inner(
                 manager,
                 registry,
                 multiview,
+                control_registry, // ADR-0096: standalone 봉투 포맷 상태 거처(테스트 accept loop 전용)
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,

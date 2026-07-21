@@ -329,12 +329,22 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     assert_eq!(v["to"], "bee", "해석된 수신자 이름 동봉");
     assert!(v["id"].is_string(), "msg-id 동봉");
 
-    // 래핑된 라인이 B 의 입력 에코로 관측돼야 한다(`[message from … id:…] ping-body-XYZ`).
+    // 래핑된 라인이 B 의 입력 에코로 관측돼야 한다. ADR-0095/0096: 운영 기본 봉투 = colon
+    //   (`{sender}: {body}`). 발신자는 profile 부재라 표시이름 = sender id 앞 8자(sender_display_name
+    //   fallback)로 결정적이다.
+    // ★앵커 단언(느슨한 substring 금지)★: 관측 sink 가 잡는 `j` 는 유저 에코 이벤트의 **전체 JSON**
+    //   (`{"type":"text","text":"<봉투>","uuid":"X"}`)이라 봉투는 그 안 `"text":"` 필드 값으로 박혀 있다.
+    //   그래서 봉투를 통째로 `j` 와 equality 비교할 수 없다 — 대신 `"text":"` 접두로 **봉투 시작에 발신자를
+    //   핀**한다: 봉투 값이 정확히 `<발신자>: ` 로 시작해야 통과한다. 이러면 `wrong-sender: <발신자>: body`
+    //   처럼 발신자를 앞에 덧댄 잘못된 렌더는 `"text":"<발신자>: ` 를 포함하지 못해 실패한다(느슨한
+    //   substring `<발신자>: body` 는 그런 렌더를 통과시켰다 — 이 앵커가 그걸 막는다).
+    let sender_display = &sender.to_string()[..8];
+    let anchored_envelope = format!(r#""text":"{sender_display}: ping-body-XYZ"#);
     let observed = wait_until(Duration::from_secs(3), || {
         seen.lock()
             .unwrap()
             .iter()
-            .any(|j| j.contains("ping-body-XYZ") && j.contains("message from"))
+            .any(|j| j.contains(&anchored_envelope))
     });
     assert!(
         observed,
@@ -411,11 +421,18 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     assert!(v["id"].is_string(), "msg-id 동봉");
 
     // 배달됨 — 래핑 라인이 B 입력 에코로 관측돼야 한다(폐기 발신자여도 relay 진행).
+    //   ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`). 발신자는 profile 부재라 표시이름 =
+    //   sender id 앞 8자로 결정적이다.
+    // ★앵커 단언(느슨한 substring 금지)★: `j` = 유저 에코 전체 JSON(`{"type":"text","text":"<봉투>",…}`)
+    //   이라 `"text":"` 접두로 봉투 **시작에 발신자를 핀**한다 — `<발신자>: ` 로 시작해야 통과. `wrong: <발신자>:
+    //   body` 처럼 발신자를 덧댄 렌더는 이 앵커를 통과 못 한다(위 relay 테스트와 동일 근거).
+    let sender_display = &sender.to_string()[..8];
+    let anchored_envelope = format!(r#""text":"{sender_display}: revoked-but-DELIVERED"#);
     let delivered = wait_until(Duration::from_secs(3), || {
         seen.lock()
             .unwrap()
             .iter()
-            .any(|j| j.contains("revoked-but-DELIVERED") && j.contains("message from"))
+            .any(|j| j.contains(&anchored_envelope))
     });
     assert!(
         delivered,
@@ -640,9 +657,11 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     );
 
     // ★FIX-5: exact 바이트 회계★ — 요청 = wrap_message 봉투의 정확한 바이트 수. 봉투 문자열을 재구성해
-    //   기대치를 정확히 계산한다(발신자 표시이름 = sender id 앞8자 fallback, ack_id 는 봉투에 심긴 msg_id).
+    //   기대치를 정확히 계산한다(발신자 표시이름 = sender id 앞8자 fallback).
+    // ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — msg_id/ack_id 는 봉투에 심기지 않는다
+    //   (봉투에서 uuid 제거, ADR-0095 거부 대안). 그래서 재구성도 colon 이다(ack_id 미사용).
     let sender_name = obs_seam::fallback_name(sender);
-    let expected_wrapped = format!("[message from {sender_name} id:{ack_id}] {body}");
+    let expected_wrapped = format!("{sender_name}: {body}");
     let expected_bytes = expected_wrapped.len(); // String::len = UTF-8 바이트 수(char 수 아님).
     assert_eq!(
         obs.bytes_requested, expected_bytes,
@@ -848,10 +867,11 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
         "성공 배달은 correlated msg_uuid 를 담아야(상관 축 2)"
     );
     // (c) ★FIX-5: exact 바이트 회계★ — 요청 = wrap_message 봉투의 정확한 UTF-8 바이트 수. 발신자 표시이름은
-    //     profile 부재라 sender id 앞8자 fallback, msg_id 는 ack_id 라 봉투를 정확히 재구성할 수 있다.
+    //     profile 부재라 sender id 앞8자 fallback.
+    //     ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — 봉투에 msg_id 미포함(uuid 제거).
     //     bytes_written 은 by-construction 복사(short-write 탐지 아님 — 완결성은 error None 으로 본다).
     let sender_name = sender.to_string()[..8].to_string();
-    let expected_wrapped = format!("[message from {sender_name} id:{ack_id}] {body}");
+    let expected_wrapped = format!("{sender_name}: {body}");
     assert_eq!(
         obs.bytes_requested,
         expected_wrapped.len(), // String::len = UTF-8 바이트 수(char 수 아님).
@@ -1076,7 +1096,9 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         // ★FIX-1: 수신 본체 다중집합에 적재(치환 버그 차단용 — 루프 뒤 발신 마커 집합과 대조)★.
         received_bodies.push(body.clone());
         // ★정확-바이트 재구성★: 이 봉투가 session 에 넘어갔을 바로 그 바이트 = encoder(봉투, 그 msg_uuid).
-        let wrapped = format!("[message from {sender_name} id:{}] {body}", obs.msg_id);
+        //   ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — 봉투에 msg_id 미포함(uuid 제거).
+        //   (obs 는 위 msg_uuid→레코드 매칭·유령 write 검증에 여전히 쓰인다 — msg_id 만 봉투에서 빠짐.)
+        let wrapped = format!("{sender_name}: {body}");
         let expected_line = InputEncoder::ClaudeStreamJson.encode(wrapped.as_bytes(), line_uuid);
         assert_eq!(
             w, &expected_line,
@@ -1185,21 +1207,18 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         let v = result.to_json();
         let obs = seen.lock().unwrap().first().cloned();
         let written = obs_seam::last_written(&captured);
-        // 기대 봉투 바이트 = "[message from <sender8> id:<msg_id>] <body>" 의 UTF-8 len.
-        //   msg_id 는 ACK 로 나온 것(성공 시)만 알 수 있으므로 성공 케이스에서만 정확 계산에 쓴다.
+        // ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — 봉투에 msg_id 미포함(uuid 제거).
+        //   기대 봉투 바이트 = colon 봉투의 UTF-8 len. (봉투가 msg_id 를 안 쓰므로 성공/실패 무관 계산 가능.)
         let sender_name = obs_seam::fallback_name(from.agent_id);
-        let expected_env_bytes = v["id"]
-            .as_str()
-            .map(|mid| format!("[message from {sender_name} id:{mid}] {body}").len())
-            .unwrap_or(0);
+        let expected_env_bytes = format!("{sender_name}: {body}").len();
         // ★기대 encoded 라인 재구성★: 성공 시 봉투를 관측 레코드의 msg_uuid 로 재-encode 한다(= session 이
-        //   실제 send_input 에 넘긴 바이트). msg_id·msg_uuid 둘 다 있어야 하므로 성공 레코드에서만 만든다.
-        let expected_line = match (v["id"].as_str(), obs.as_ref().and_then(|o| o.msg_uuid)) {
-            (Some(mid), Some(uuid)) => {
-                let wrapped = format!("[message from {sender_name} id:{mid}] {body}");
+        //   실제 send_input 에 넘긴 바이트). msg_uuid 가 있어야 encode 하므로 성공 레코드에서만 만든다.
+        let expected_line = match obs.as_ref().and_then(|o| o.msg_uuid) {
+            Some(uuid) => {
+                let wrapped = format!("{sender_name}: {body}");
                 InputEncoder::ClaudeStreamJson.encode(wrapped.as_bytes(), uuid)
             }
-            _ => Vec::new(),
+            None => Vec::new(),
         };
         (v, obs, written, expected_env_bytes, expected_line, b_id)
     }

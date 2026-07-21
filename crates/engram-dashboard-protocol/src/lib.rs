@@ -37,8 +37,8 @@ pub use codec::{
 pub use discovery::DaemonInfo;
 pub use domain::{
     AgentInfo, AgentProfile, AgentSpawnCommand, AgentStatus, Capabilities, ClaudeOutputFormat,
-    ControlCaps, InputCaps, ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome,
-    RestoreReport, SessionCaps, SnapshotChunk,
+    ControlCaps, EnvelopeFormat, InputCaps, ModelCaps, OutputCaps, Preset, RestartPolicy,
+    RestoreOutcome, RestoreReport, SessionCaps, SnapshotChunk,
 };
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{AgentCommand, AgentEvent, OutputChunk, StructuredEvent, SubscribeAction};
@@ -50,4 +50,10 @@ pub use messages::{AgentCommand, AgentEvent, OutputChunk, StructuredEvent, Subsc
 /// 매칭에서 request_id 동봉 전용 reply(AgentList/ProfileList)로 전환 + Snapshot 에 request_id 추가.
 /// ListAgents/ListProfiles 커맨드도 unit→request_id 동봉으로 변경(reply 계약 변경). 구데몬(v1)은
 /// 구 응답만 보내 신클라가 무한 대기할 수 있으므로 version mismatch 로 거부한다(자동재기동 정책은 별건).
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// v3: `AgentCommand::SetEnvelopeFormat`(UI→daemon 봉투 포맷 스위치, ADR-0096) 추가. 이 커맨드는
+/// **비관용 additive** — 같은 v2 데몬이라도 이 variant 를 디코드할 수 없어(unknown externally-tagged
+/// 키) deserialize 에서 막힌다. 그러면 신클라가 Ack 를 기다리며 무한 대기할 수 있으므로(v2 bump 사유와
+/// 동일한 시나리오), auth 의 version check(ws.rs) + discovery 의 version-mismatch 거부가 구 데몬을
+/// **재사용하지 않고 거부/재기동**하게 강제한다.
+pub const PROTOCOL_VERSION: u32 = 3;

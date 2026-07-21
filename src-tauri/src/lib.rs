@@ -247,6 +247,10 @@ pub fn run() {
             commands::agent_interrupt,
             commands::agent_write_stdin,
             commands::agent_resize,
+            // ADR-0096: 봉투 포맷 전역 스위치(colon/xml) — 조종/invoke 제어 표면(§5 백엔드 동작 = invoke
+            //   LLM 제어). src-tauri 는 AgentCommand::SetEnvelopeFormat 를 데몬으로 전달만(상태 소유=데몬).
+            //   워커 MCP 채널엔 미노출(ADR-0096 결정 3·ADR-0094).
+            commands::set_envelope_format,
             // S14 모듈①(ADR-0036) T6b: 창 mount 시 출력 Channel 등록 — window_label → Channel registry
             //   insert. 연결 task 가 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다(raw byte, §7).
             commands::subscribe_output,

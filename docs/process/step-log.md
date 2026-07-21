@@ -1103,6 +1103,13 @@
 - **결정(사용자) = ADR-0095:** 봉투 포맷 **스위칭 구조**(wrap_message 템플릿 선택) · 일반 기본 **colon** `{sender}: {body}` · 대체 **xml**(약모델·타 백엔드 이상·옵션 확장 시 전환) · **bracket 기각**(colon 대비 토큰 이득도 xml 대비 확장 보험도 실측 무). uuid 봉투 노출·봉투 내 지시문·LLM 봉투 생성·단일 고정 포맷도 기각(사유 = ADR).
 - **다음(후속 슬라이스):** 기본 템플릿 colon 교체 + 정식 스위치 구현(저장 위치·노출 = 구현 갈림길, 사용자 결정 대기) + 프라이밍 v3 정식 채택 여부 확인 — 코더→리뷰→QA 게이트로.
 
+## S17 봉투 포맷 운영 스위치 구현 — ADR-0096 (colon 기본 + invoke 커맨드) (2026-07-21, master, 대화 세션 연속) · 사용자 결정
+- **무엇:** ADR-0095가 이월한 스위치 저장위치·노출방식을 사용자 결정(ADR-0096 — ADR-0095 결정5 부분개정) 후 구현 슬라이스 실행. 갈림길 결정: 스위치 = **데몬 전역 하나** · 노출 = **invoke 커맨드(조종 표면 전용, 워커 MCP 미노출)** · 지속성 = 메모리만(재시작 colon 리셋, 영속화 백로그) · 프라이밍 v3 채택 · 사람용 트리거(단축키/UI)는 후속. colon-now / xml은 약모델 문제 시 꺼내는 대체.
+- **구현(코더→리뷰→QA):** `wrap_message` 기본 bracket→colon(`{sender}: {body}`) + 데몬 전역 EnvelopeFormat 상태(ControlRegistry AtomicU8, 기본 Colon) + `AgentCommand::SetEnvelopeFormat` + src-tauri Tauri command `set_envelope_format` + **PROTOCOL_VERSION 2→3**. xml 대체 = `<message from="{sender}">{body}</message>`(이스케이프). `ENGRAM_WRAP_FORMAT` env는 스파이크 전용 존치. 단일 wrap point(ADR-0086)·데몬 소유(ADR-0029) 유지.
+- **게이트:** 코더(worker-senior) → `/review code full`(doc-aware[Claude] PASS + blind[codex/GPT] FIX) → FIX 2라운드 → `/qa full`. 리뷰 적출·반영: ① PROTOCOL_VERSION 미범프(구 v2 데몬 재사용 시 신클라 무한대기 — v2 선례 시나리오) ② **xml 무이스케이프 발신자 스푸핑**(body `</message>…` — "발신자 오인 0" 훼손, 보안) ③ 테스트 단언 약화(substring→앵커) ④ atomic ordering Relaxed→Release/Acquire ⑤ 중복 `#[allow]`.
+- **QA full PASS:** build · test(전멤버 0실패) · fmt · 격리(코어 tauri import 0) · tsc · vitest(621) + **cdp 실측**: 커맨드 등록·arg 검증(`bogus` 거부) 확인 · **FIX 1 실전검증**(구 v2 데몬 버전불일치 거부 실관측 `데몬=2 기대=3`) · happy-path E2E(fresh v3 데몬 스폰 + `set_envelope_format` xml/colon Ack).
+- **잔여(후속·별도 결정):** colon 개행 주입(다중행 body가 `\nfake:` 스푸핑 가능 — 다중행 메시지 정당성 + ADR-0095 최소-colon 결정 영역이라 이번 슬라이스 제외). **프라이밍 영어화 + CLI-only 실측(하네스 MCP disallow 노브)은 이번 슬라이스 미착수 = 다음.**
+
 ## 다음 (미진행)
 - **[S17 확정 지시 2026-07-21·구현 슬라이스에 포함] 에이전트 대면 텍스트 영어화** — 사용자 재확인 지시("양식은 영어로 하고 마크다운도 영어로"): 프라이밍 md·하네스 시드를 영어화(봉투 양식 자체는 이미 영어/언어중립 — colon 무단어·옵션 라벨·xml 속성 영어). v3 라우팅 수치는 한국어 기준이므로 영어판 재검증 동반. 온오프 토글은 후속. **CLI 입구 검증도 사용자 재확인 요청** — MCP는 실측 완료, CLI는 grant confound로 단독 격리 미실측(클린 테스트 = MCP disallow 노브 추가 후 CLI-only 재실측).
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 채널 아키텍처 확정 = ADR-0086(듀얼 typed 입구 + 메일박스). 다음 = /implement 스텝 1 → 스텝 사다리 2~6. PRD/TRD §6은 engram-ctl 전제라 갱신 필요(이월).
