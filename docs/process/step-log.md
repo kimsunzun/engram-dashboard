@@ -1110,6 +1110,19 @@
 - **QA full PASS:** build · test(전멤버 0실패) · fmt · 격리(코어 tauri import 0) · tsc · vitest(621) + **cdp 실측**: 커맨드 등록·arg 검증(`bogus` 거부) 확인 · **FIX 1 실전검증**(구 v2 데몬 버전불일치 거부 실관측 `데몬=2 기대=3`) · happy-path E2E(fresh v3 데몬 스폰 + `set_envelope_format` xml/colon Ack).
 - **잔여(후속·별도 결정):** colon 개행 주입(다중행 body가 `\nfake:` 스푸핑 가능 — 다중행 메시지 정당성 + ADR-0095 최소-colon 결정 영역이라 이번 슬라이스 제외). **프라이밍 영어화 + CLI-only 실측(하네스 MCP disallow 노브)은 이번 슬라이스 미착수 = 다음.**
 
+## S17 프라이밍 v3 영어화·정식 채택 + CLI-only 실측 (2026-07-21, master, 대화 세션 연속) · 사용자 결정
+- **무엇:** ADR-0092 임시 프라이밍(drifted — 옛 bracket 봉투 서술·"인젝션 아니다" 방어문구·메타주석 = 전부 v3 do-not)을 **영어 v3로 교체 정식 채택**(`prompts/agent-priming.md`). 사용자 확정 지시(에이전트 대면 텍스트 영어화). 하네스에 CLI-only 측정 노브 추가.
+- **구현(Track B, worker-senior 코더):** `roundtrip_smoke` 시드 영어화(TASK_PROMPT_B·SEED_A_TO_B) + `ENGRAM_DISALLOW_MCP_SEND` test-seam(`control/mod.rs::build_grants` — env 게이트·remove-only·ADR-0094) + `--disallow-mcp` arg. 단위테스트 포함. build/test/fmt green.
+- **재검증 실측(sonnet, roundtrip-smoke, 봉투=colon 기본):**
+  - MCP 노출 + send_message(v3) → **mcp 10/10** ✅ (영어화 회귀 0 — 채택 근거)
+  - MCP 제거 + send_message(v3) → none 0/1
+  - MCP 제거 + engram-send(v3-cli) → cli 1/1 ✅ (CLI 입구 격리 실증)
+  - MCP 노출 + engram-send(v3-cli) → none ~6/7 (지시-도구 불일치로 얼어붙음)
+- **★발견:** ① 영어화가 라우팅 신뢰성 유지(10/10). ② CLI 입구 자체 정상. ③ **프라이밍이 가리키는 채널 = 실제 쥔 주력 도구여야 함** — 어긋나면 대부분 안 보냄. → CLI-only(MCP 없는 런타임)엔 CLI-teaching 프라이밍 필요.
+- **게이트:** Track B build/test/fmt green + `/review doc light`(load-bearing 프라이밍 교체) PASS(do-not 재유입 0·4속성 보존).
+- **채택 확정:** `agent-priming.md` = 영어 v3(send_message-teaching, MCP 프로덕션 기본). do-not 유지: 메타주석·인젝션 방어문구·봉투내 지시문·하드코딩 포맷 금지. 실험 아티팩트 = `prompts/experiments/agent-priming-routing-v3-en{,-cli}.md`.
+- **잔여/다음:** ① "둘 다 가르치기(both)" 프라이밍 검증(send_message 주력 + engram-send 폴백 — MCP-less 런타임 robustness, 별도 실측) ② O3 데몬 detect-and-nudge 백스톱(답신-기대 표시 + 턴 윈도우 + nudge→에스컬레이션 — 핸드오프 때 설계노트).
+
 ## 다음 (미진행)
 - **[S17 확정 지시 2026-07-21·구현 슬라이스에 포함] 에이전트 대면 텍스트 영어화** — 사용자 재확인 지시("양식은 영어로 하고 마크다운도 영어로"): 프라이밍 md·하네스 시드를 영어화(봉투 양식 자체는 이미 영어/언어중립 — colon 무단어·옵션 라벨·xml 속성 영어). v3 라우팅 수치는 한국어 기준이므로 영어판 재검증 동반. 온오프 토글은 후속. **CLI 입구 검증도 사용자 재확인 요청** — MCP는 실측 완료, CLI는 grant confound로 단독 격리 미실측(클린 테스트 = MCP disallow 노브 추가 후 CLI-only 재실측).
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 채널 아키텍처 확정 = ADR-0086(듀얼 typed 입구 + 메일박스). 다음 = /implement 스텝 1 → 스텝 사다리 2~6. PRD/TRD §6은 engram-ctl 전제라 갱신 필요(이월).

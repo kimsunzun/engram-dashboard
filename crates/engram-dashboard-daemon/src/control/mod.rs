@@ -76,12 +76,27 @@ impl DaemonControlChannel {
     /// ★최소권한(ADR-0094)★: 발신 입구만 담는다 — 나머지 툴은 backend 가 아무 것도 안 주입해 게이트 유지.
     /// ★send_exe 부재★: None(부분 빌드 등)이면 CLI grant 를 생략한다 — MCP grant 만으로 발신 입구가 열린다
     ///   (ENGRAM_SEND_EXE env 미주입과 대칭 — CLI 입구 자체가 없으니 그 권한도 없다).
+    ///
+    /// ★ADR-0094 CLI-only 측정 test-seam(`ENGRAM_DISALLOW_MCP_SEND`)★: ingress.rs 의 `ENGRAM_WRAP_FORMAT`
+    ///   스파이크-seam 선례와 동일한 **env 게이트·하네스/운영자 통제·test-only** 노브다(운영 스위치 아님).
+    ///   env 가 설정되고 **비어있지 않으면** MCP send_message grant 를 **뺀다** → 에이전트는 CLI(engram-send)
+    ///   로만 발신할 수 있어 순수 CLI-only 라우팅을 실측할 수 있다. env 미설정/빈 값이면 오늘과 **바이트 동일**
+    ///   (MCP grant 존재) — 운영 회귀 0. ★최소권한 불변식★: 이 seam 은 grant 를 **오직 제거만** 한다(절대
+    ///   확장 X) — env 를 켠 하네스라도 오늘보다 더 넓은 권한을 얻지 못한다. env 게이트라 운영 호출자는 무영향.
     fn build_grants(send_exe: Option<&std::path::Path>) -> Vec<ToolGrant> {
-        // MCP 발신 입구는 항상 grant(제어 채널이 붙는 한 send_message 는 존재).
-        let mut grants = vec![ToolGrant::Mcp {
-            server: MCP_SERVER_NAME.to_string(),
-            tool: SEND_MESSAGE_TOOL.to_string(),
-        }];
+        // ADR-0094 test-seam: MCP 발신 입구를 뺄지(CLI-only 측정). env 미설정/빈 값 = 오늘 동작(포함).
+        let disallow_mcp_send = std::env::var("ENGRAM_DISALLOW_MCP_SEND")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        // MCP 발신 입구는 기본 항상 grant(제어 채널이 붙는 한 send_message 는 존재). CLI-only 측정 seam 이
+        //   켜졌을 때만 이 grant 를 생략한다(최소권한: 제거 방향 — 절대 확장 X).
+        let mut grants = Vec::new();
+        if !disallow_mcp_send {
+            grants.push(ToolGrant::Mcp {
+                server: MCP_SERVER_NAME.to_string(),
+                tool: SEND_MESSAGE_TOOL.to_string(),
+            });
+        }
         // CLI 발신 입구는 형제 바이너리가 있을 때만. exe 는 backend 가 그대로 `Bash(<exe> *)` 로 쓴다 —
         //   ★caveat(ADR-0094)★: 여기서 넘기는 값은 endpoint.send_exe 와 동일한 **절대경로 원문**이다.
         //   에이전트가 실제로 부르는 명령($ENGRAM_SEND_EXE = 이 절대경로)의 prefix 와 문자열로 일치해야
@@ -167,12 +182,25 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// ★ENV_LOCK(ingress.rs ENV_LOCK 선례)★: `build_grants` 는 `ENGRAM_DISALLOW_MCP_SEND`(프로세스 전역
+    /// env)를 읽으므로, set/remove·미설정 단언 테스트끼리 직렬화한다 — 병렬 실행 시 한 테스트의 set 이
+    /// 다른 테스트의 "미설정(= MCP grant 존재)" 단언을 짓밟지 않게. 각 env-touching 테스트는 진입 시
+    /// leak 없음을 단언하고, 끝에서 반드시 remove 한다.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const DISALLOW_MCP_ENV: &str = "ENGRAM_DISALLOW_MCP_SEND";
+
     // ── ADR-0094: build_grants — 발신 입구 pre-authorization grant 산출(단일 출처·최소권한) ──────
 
     #[test]
     fn build_grants_mcp_always_present_with_channel_names() {
-        // send_exe 유무와 무관하게 MCP 발신 입구(send_message)는 항상 grant 된다. server/tool 이름은
-        //   컨트롤 채널 const(단일 출처)에서 온다 — 리터럴을 재타이핑하지 않고 그 const 로 단언한다.
+        // send_exe 유무와 무관하게 MCP 발신 입구(send_message)는 (기본 env 하에) 항상 grant 된다. server/
+        //   tool 이름은 컨트롤 채널 const(단일 출처)에서 온다 — 리터럴 재타이핑 없이 그 const 로 단언한다.
+        // ENV_LOCK: build_grants 는 ENGRAM_DISALLOW_MCP_SEND 를 읽으므로 seam 테스트와 경쟁 — 직렬화.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(
+            std::env::var(DISALLOW_MCP_ENV).is_err(),
+            "테스트 진입 시 env 미설정이어야(leak 감지)"
+        );
         let grants = DaemonControlChannel::build_grants(None);
         assert_eq!(
             grants,
@@ -187,6 +215,9 @@ mod tests {
     #[test]
     fn build_grants_includes_cli_when_send_exe_present() {
         // send_exe 가 있으면 CLI 발신 입구도 grant 에 추가된다 — exe 는 절대경로 원문 그대로.
+        // ENV_LOCK: 기본 env(MCP grant 포함) 가정 — seam 테스트의 set_var 와 경쟁하지 않게 직렬화.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         let exe = Path::new("C:/app/engram-send.exe");
         let grants = DaemonControlChannel::build_grants(Some(exe));
         assert_eq!(
@@ -208,6 +239,9 @@ mod tests {
     fn build_grants_is_minimal_privilege() {
         // ★최소권한 회귀 가드★: 발신 입구 외 다른 툴(Read/Write/Edit/Bash 일반 등)이 grant 에 절대
         //   섞이지 않는다 — 최대 2개(MCP + CLI)이고 둘 다 발신 입구다.
+        // ENV_LOCK: 기본 env 가정 — seam 테스트와 경쟁하지 않게 직렬화.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         let grants = DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram-send.exe")));
         assert!(grants.len() <= 2, "발신 입구만 — 최대 2개: {grants:?}");
         for g in &grants {
@@ -216,5 +250,69 @@ mod tests {
                 ToolGrant::Cli { .. } => {} // CLI 는 send_exe 로만 파생(발신 전용)
             }
         }
+    }
+
+    // ── ADR-0094 test-seam: ENGRAM_DISALLOW_MCP_SEND — CLI-only 측정용 MCP grant 제거 ──────────────
+
+    #[test]
+    fn build_grants_disallow_mcp_env_removes_mcp_but_keeps_cli() {
+        // ★핵심 seam 회귀(ADR-0094)★: env 가 켜지면(non-empty) MCP send_message grant 는 빠지고, CLI grant
+        //   (send_exe 있을 때)는 그대로 남는다 → 에이전트는 engram-send CLI 로만 발신(순수 CLI-only 측정).
+        //   env 는 프로세스 전역이라 set→단언→remove 를 한 흐름에서 직렬로 하고 끝에서 반드시 제거한다.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(
+            std::env::var(DISALLOW_MCP_ENV).is_err(),
+            "테스트 진입 시 env 미설정이어야(leak 감지)"
+        );
+        std::env::set_var(DISALLOW_MCP_ENV, "1");
+        let exe = Path::new("C:/app/engram-send.exe");
+        let grants = DaemonControlChannel::build_grants(Some(exe));
+        std::env::remove_var(DISALLOW_MCP_ENV); // 반드시 제거(다른 테스트로 새지 않게).
+        assert_eq!(
+            grants,
+            vec![ToolGrant::Cli {
+                exe: "C:/app/engram-send.exe".to_string(),
+            }],
+            "env 켜짐 → MCP grant 제거, CLI grant 만 남아야(CLI-only)"
+        );
+    }
+
+    #[test]
+    fn build_grants_disallow_mcp_env_with_no_send_exe_yields_empty() {
+        // ★최소권한(제거만)★: env 켜짐 + send_exe 부재면 발신 grant 가 하나도 없다 — seam 은 오직 제거만
+        //   하지 절대 다른 권한을 추가하지 않는다(CLI 인프라가 없으면 그 grant 도 없음).
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
+        std::env::set_var(DISALLOW_MCP_ENV, "1");
+        let grants = DaemonControlChannel::build_grants(None);
+        std::env::remove_var(DISALLOW_MCP_ENV);
+        assert!(
+            grants.is_empty(),
+            "env 켜짐 + send_exe 부재 → 발신 grant 0(제거만, 추가 없음): {grants:?}"
+        );
+    }
+
+    #[test]
+    fn build_grants_disallow_mcp_empty_value_is_production_default() {
+        // ★운영 회귀 0★: env 가 설정돼도 **빈 값**이면 seam 미발동 = 오늘과 바이트 동일(MCP grant 포함).
+        //   ENGRAM_WRAP_FORMAT 선례와 동일한 non-empty 게이트(빈 값 = 미설정 취급).
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
+        std::env::set_var(DISALLOW_MCP_ENV, "");
+        let grants = DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram-send.exe")));
+        std::env::remove_var(DISALLOW_MCP_ENV);
+        assert_eq!(
+            grants,
+            vec![
+                ToolGrant::Mcp {
+                    server: MCP_SERVER_NAME.to_string(),
+                    tool: SEND_MESSAGE_TOOL.to_string(),
+                },
+                ToolGrant::Cli {
+                    exe: "C:/app/engram-send.exe".to_string(),
+                },
+            ],
+            "빈 값 = seam 미발동 → 오늘과 동일(MCP + CLI)"
+        );
     }
 }

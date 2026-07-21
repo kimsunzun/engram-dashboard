@@ -24,6 +24,13 @@
 //!   - C3 = `prompts/experiments/agent-priming-send-cli.md`(CLI 만).
 //!   - `--priming <abs-or-rel-path>` 로 명시 override 가능(케이스 셀렉터를 덮는다).
 //!
+//! ## CLI-only 측정 노브(ADR-0094 — `--disallow-mcp`)
+//!   `--disallow-mcp` 를 주면 `ENGRAM_DISALLOW_MCP_SEND` env 를 세워 두 에이전트가 MCP `send_message`
+//!   grant **없이** 스폰된다 → 발신은 `engram-send` CLI 로만 가능(순수 CLI-only 라우팅 실측). 이 노브는
+//!   test-only 측정 seam 이고(운영 스위치 아님) MCP grant 를 **제거만** 한다(권한 확장 X, ADR-0094 최소권한).
+//!   CLI 입구가 살아 있어야 하므로 send_exe(engram-send 형제 빌드) 필수 — 없으면 SETUP-SKIP.
+//!   미지정이면 오늘 동작(MCP grant 포함)과 바이트 동일.
+//!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
 //! ★CLI 입구를 쓰는 케이스(C3=CLI 전용, C1=둘 다 안내)는 먼저 `engram-send` 를 빌드해야 한다★ — 이
 //!   하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아 CLI 입구를 켠다. 형제에 없으면 B 가
@@ -96,13 +103,13 @@ const NAME_B: &str = "bob";
 
 /// B 원과제(일하는 팀원 맥락) — auth 모듈 작업 중. 자연스러운 협업 셋업.
 const TASK_PROMPT_B: &str =
-    "너는 지금 auth 모듈(로그인/세션) 작업을 맡고 있다. 시작 준비가 됐으면 한 줄로 알려줘.";
+    "You are currently working on the auth module (login/session). When you're ready to start, reply in one line.";
 
 /// ★씨앗 A→B(ADR-0092 — 자연 팀원 질문, 기계적 "툴 X 써라" 아님)★: A 가 B 에게 진행 상황을 묻는
 ///   평범한 협업 질문 → 답을 A 에게 돌려주는 게 자연스러운 반응이 되도록 만든다. 발신 방법(툴/CLI)은
 ///   본문이 아니라 **프라이밍 변형**이 가르친다(C0 는 순수 툴 발견).
 const SEED_A_TO_B: &str =
-    "auth 모듈 진행 상황 알려줄래? 로그인 경로에서 막힌 부분 있으면 뭐가 필요한지도 같이.";
+    "Can you share the status of the auth module? If you're stuck anywhere on the login path, tell me what you need too.";
 
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -165,6 +172,10 @@ struct Args {
     priming: Option<String>,
     /// `--model` 값(기본 sonnet).
     model: String,
+    /// `--disallow-mcp` 플래그(ADR-0094 CLI-only 측정): 켜지면 `ENGRAM_DISALLOW_MCP_SEND` env 를 세워
+    ///   두 에이전트가 MCP send_message grant **없이** 스폰 → engram-send CLI 로만 발신하게 강제한다.
+    ///   test-only 측정 노브(운영 스위치 아님). 미지정이면 오늘 동작(MCP grant 포함).
+    disallow_mcp: bool,
 }
 
 /// 배달 관측 싱크(ADR-0088) — relay 레코드를 스레드 안전 Vec 에 모은다. 하네스가 registry 에 설치하고
@@ -245,6 +256,14 @@ async fn run() -> i32 {
         resolved_priming.display(),
         priming_selector
     );
+    // ★ADR-0094 CLI-only 측정 seam★: `--disallow-mcp` 가 켜지면 provision 전에 env 를 세워, 두 에이전트가
+    //   MCP send_message grant **없이** 스폰돼 engram-send CLI 로만 발신하게 강제한다. build_grants 가 이
+    //   env 를 읽는다(control/mod.rs). 프라이밍 env 와 같은 지점(provider·manager 배선 전)에 세워야 두
+    //   에이전트 모두 같은 grant 셋으로 provision 된다. (CLI 입구 활성 = send_exe 존재는 아래에서 가드.)
+    if args.disallow_mcp {
+        std::env::set_var("ENGRAM_DISALLOW_MCP_SEND", "1");
+        eprintln!("[roundtrip] --disallow-mcp → MCP send grant 제거(CLI-only 측정, ENGRAM_DISALLOW_MCP_SEND=1)");
+    }
 
     // 배선(priming_smoke 미러) — 실 FilePrimingProvider·MCP 서버·AgentManager.
     let registry = Arc::new(ControlRegistry::new());
@@ -290,6 +309,19 @@ async fn run() -> i32 {
             "engram-send not built, CLI inlet unavailable (case={:?} requires the CLI send path). 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
             priming_selector
         ));
+    }
+    // ★--disallow-mcp 는 CLI 입구가 반드시 살아 있어야 한다(ADR-0094)★: MCP send grant 를 빼는데 CLI grant
+    //   마저 없으면(send_exe=None) 두 에이전트는 발신 경로가 **하나도** 없어, B_SENT=false 는 정상 negative
+    //   가 아니라 인프라 부재다. priming_requires_cli 스킵과 같은 이유로 스폰 **전에** 요란히 SETUP-SKIP.
+    if args.disallow_mcp && send_exe.is_none() {
+        handle.shutdown().await;
+        let dirs = [&data_dir, &ws_a, &ws_b];
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        return setup_skip(
+            "--disallow-mcp requires the CLI inlet (engram-send) but it is not built — MCP grant removed AND no CLI grant means agents have no send path. 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
+        );
     }
 
     let priming_provider: Arc<dyn PrimingProvider> = Arc::new(FilePrimingProvider::new(repo_root));
@@ -528,6 +560,9 @@ async fn run() -> i32 {
 fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     let mut priming = None;
     let mut model = "sonnet".to_string();
+    // ADR-0094: `--disallow-mcp` 는 값 없는 불리언 플래그(존재 = 켜짐) — take_flag_value 로 다음 토큰을
+    //   삼키지 않는다(그 자체로 완결).
+    let mut disallow_mcp = false;
     let mut it = iter.peekable();
     while let Some(tok) = it.next() {
         match tok.as_str() {
@@ -541,10 +576,15 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
                     model = v;
                 }
             }
+            "--disallow-mcp" => disallow_mcp = true,
             _ => {}
         }
     }
-    Args { priming, model }
+    Args {
+        priming,
+        model,
+        disallow_mcp,
+    }
 }
 
 /// 플래그 값 하나를 소비하되, 다음 토큰이 또 다른 플래그(`--`)면 소비하지 않는다(FIX round-2 #7).
@@ -826,6 +866,24 @@ mod tests {
         let a = parse_args(s(&[]));
         assert_eq!(a.priming, None);
         assert_eq!(a.model, "sonnet");
+        assert!(!a.disallow_mcp, "기본은 MCP 허용(오늘 동작)");
+    }
+
+    #[test]
+    fn parse_args_disallow_mcp_flag_is_boolean() {
+        // ★ADR-0094★: `--disallow-mcp` 는 값 없는 불리언 플래그(존재 = 켜짐). 뒤 토큰(--model)을 값으로
+        //   삼키지 않고, model 은 정상 파싱돼야 한다.
+        let a = parse_args(s(&["--disallow-mcp", "--model", "opus"]));
+        assert!(a.disallow_mcp, "--disallow-mcp 존재 → 켜짐");
+        assert_eq!(a.model, "opus", "--disallow-mcp 뒤 --model 은 정상 파싱");
+        assert_eq!(a.priming, None);
+    }
+
+    #[test]
+    fn parse_args_disallow_mcp_absent_is_false() {
+        // 플래그 미지정이면 오늘 동작(MCP 허용) 유지 — 운영 회귀 0.
+        let a = parse_args(s(&["--priming", "C2", "--model", "haiku"]));
+        assert!(!a.disallow_mcp);
     }
 
     #[test]
