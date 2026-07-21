@@ -43,10 +43,11 @@
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming C0
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming C1 --model sonnet
 //! ```
-//! CLI 입구가 필요한 프라이밍(C1/C3 셀렉터 **또는** 명시 `--priming <send-cli/send-both.md>`)인데
+//! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — C1/C3·v3-en-cli·명시 경로 무관)인데
 //!   `engram-send` 가 형제에 없으면, 하네스는 normal negative 가 아니라 **SETUP-SKIP**(engram-send not
 //!   built) 라벨로 요란히 알리고 종료한다 — 인프라 부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. 판정은
-//!   셀렉터 문자열이 아니라 **해석된 프라이밍 파일 basename** 이라 명시 경로 override 도 잡힌다(FIX round-2 #2).
+//!   셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문(content)** 이라 명시 경로 override 와 새 CLI-지시
+//!   프라이밍(basename 리스트에서 누락되던 것)까지 모두 잡힌다(ADR-0094).
 //!
 //! ## 핵심 불변식(ADR-0092/0086/0088)
 //! - **required-features = ["test-harness"]** — 운영/릴리즈 빌드는 이 bin 을 컴파일하지 않는다.
@@ -58,7 +59,7 @@
 //!   (detached 데몬 로그 스크레이핑 금지). registry 에 read accessor 를 추가하지 않고 이 싱크로만 회수한다.
 //! - **결과 3분류(FIX round-2 #2/#4/#5)** — ① **valid negative**(setup 성공했으나 B 가 안 보냄) = 구조화
 //!   결과 출력 후 exit 0(유효한 실험 결과). ② **SETUP-SKIP**(exit 1) = 케이스가 요구하는 인프라 부재
-//!   (CLI-지시 프라이밍인데 engram-send 미빌드 — 판정은 셀렉터가 아니라 **해석된 프라이밍 파일** basename)
+//!   (CLI-지시 프라이밍인데 engram-send 미빌드 — 판정은 셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**)
 //!   — normal negative 로 오귀속 금지. ③ **SETUP-FAIL**(exit 1) = 준비 단계 실패(A/B 출력 구독 실패 /
 //!   B 원과제 턴 실패 / A·B process death / 씨앗 ACK 에러 / priming 파일 부재). valid negative 는 setup 이
 //!   온전히 성공했고 **A·B 가 모두 살아 있을 때만** 보고한다(A 死 → B 답신이 도달할 대상 없음).
@@ -149,20 +150,23 @@ fn setup_fail(reason: &str) -> i32 {
     1
 }
 
-/// ★CLI-요구 프라이밍 판정(FIX round-2 #2 — 셀렉터가 아니라 **해석된 프라이밍**으로)★: 이 실행이 B 를
-///   CLI 입구(engram-send)로 보내도록 지시하는가. 여기 true 인데 send_exe 가 None 이면 SETUP-SKIP(정상
-///   negative 아님). MCP-전용(C0/C2) 은 CLI 없이도 유효 → false.
-///
-///   ★왜 셀렉터가 아니라 파일 basename 인가★: 이전 판본은 C1/C3 셀렉터 문자열만 봤다. 그러면
-///   `--priming prompts/experiments/agent-priming-send-cli.md`(또는 -send-both.md) 같은 **명시 경로
-///   override** 가 CLI-지시 프라이밍으로 해석되는데도 셀렉터 가드를 우회해, engram-send 부재가 SETUP-SKIP
-///   대신 normal negative(B_SENT=false)로 오귀속됐다. 그래서 `resolve_priming_path` 가 실제로 고른
-///   파일의 basename 을 본다 — C1/C3 셀렉터도 명시 send-cli/send-both 경로도 모두 잡힌다.
-fn priming_requires_cli(resolved: &std::path::Path) -> bool {
-    matches!(
-        resolved.file_name().and_then(|n| n.to_str()),
-        Some("agent-priming-send-cli.md") | Some("agent-priming-send-both.md")
-    )
+/// ★프라이밍 본문이 CLI 발신 경로를 지시하는가(순수·단위테스트 대상)★: 텍스트가 `engram-send` 또는
+///   `ENGRAM_SEND_EXE` 를 언급하면 CLI 입구(engram-send)로 보내라는 프라이밍이다. 둘 중 하나만 있어도 true.
+///   ★대소문자 무시(FIX)★: 본문 산문이 `ENGRAM-SEND`/`Engram-Send` 처럼 대소문자를 섞어 써도 잡아야 한다 —
+///   놓치면 false negative(CLI 지시인데 미검출) → 인프라 부재를 정상 negative 로 오귀속. 본문을 한 번
+///   lowercase 로 복사(단일 할당)해 소문자 리터럴과 대조한다.
+///   ★basename 이 아니라 본문(content)인 이유★: 이전 판본은 하드코딩된 basename 리스트
+///   (`agent-priming-send-cli.md`/`-send-both.md`)만 봤다. 그런 리스트는 rot 한다 — 새 CLI-지시 프라이밍
+///   (v3-en-cli 등)이 리스트에서 누락돼 가드가 조용히 우회됐고, engram-send 부재(인프라 부재)가 SETUP-SKIP
+///   대신 정상 negative(B_SENT=false)로 오귀속됐다. 그래서 파일명이 아니라 실제 본문을 진실의 출처로 본다 —
+///   어느 프라이밍이든 CLI 발신을 지시하면 basename 과 무관하게 잡힌다.
+///   ★의도적으로 보수적(부정문 false positive 는 수용)★: "engram-send 를 쓰지 마라" 같은 부정문도 substring
+///   존재만으로 true → 헛된 SETUP-SKIP 이 될 수 있다. 그러나 SETUP-SKIP 은 요란한 exit-1 로, 틀릴 수 있는
+///   데이터 발화를 거부하는 안전한 방향이다(실 프라이밍에 그런 부정문은 없다). 부정 파싱은 넣지 않는다 —
+///   substring 존재 ⇒ CLI-지시로 취급, 헛된 skip 이 안전한 쪽.
+fn priming_text_directs_cli(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    lower.contains("engram-send") || lower.contains("engram_send_exe")
 }
 
 /// CLI 인자 파싱 결과(순수) — 케이스/priming 셀렉터 + 모델. `run` 이 이걸로 env·스폰을 배선한다.
@@ -248,6 +252,21 @@ async fn run() -> i32 {
             priming_selector
         ));
     }
+    // ★프라이밍 본문 단일 읽기 + fail-closed(FIX)★: 여기서 딱 한 번 읽어 아래 CLI-요구 가드가 재사용한다.
+    //   이전 판본은 존재 검사(위)와 가드에서 파일을 두 번 만졌고(TOCTOU 창), 가드 쪽은
+    //   `read_to_string(...).unwrap_or(false)` 라 읽기 실패(공유 위반·권한·검사 후 삭제/교체·비-UTF-8)를
+    //   전부 "CLI 요구 아님" 으로 삼켜 헛된 정상 negative 를 낼 수 있었다. 프라이밍 파일은 실험의 본질이므로
+    //   읽을 수 없으면 조용히 진행하지 않고 SETUP-FAIL(exit 1). is_file 통과 후 여기서 즉시 읽어 그 창을 좁힌다.
+    let priming_content = match std::fs::read_to_string(&resolved_priming) {
+        Ok(c) => c,
+        Err(e) => {
+            return setup_fail(&format!(
+                "priming 파일 읽기 실패: {} (case={:?}): {e} — 프라이밍은 실험 필수라 읽을 수 없으면 진행 불가",
+                resolved_priming.display(),
+                priming_selector
+            ));
+        }
+    };
     // ★env 로 넘겨 FilePrimingProvider 생성 전에 set★: provision 마다 priming_file() 이 이 env 를
     //   최우선 override 로 읽어 두 에이전트(A·B) 모두 같은 변형을 받는다.
     std::env::set_var("ENGRAM_PRIMING_FILE", &resolved_priming);
@@ -294,12 +313,14 @@ async fn run() -> i32 {
         Some(p) => eprintln!("[roundtrip] engram-send = {}", p.display()),
         None => eprintln!("[roundtrip] engram-send 형제 바이너리 없음 — CLI 입구 비활성(MCP 만)."),
     }
-    // ★CLI 요구 프라이밍인데 engram-send 부재 = SETUP-SKIP(FIX round-2 #2)★: send-cli/send-both 프라이밍은
+    // ★CLI 요구 프라이밍인데 engram-send 부재 = SETUP-SKIP(ADR-0094)★: CLI 발신을 지시하는 프라이밍은
     //   B 가 CLI 입구로 보내도록 지시한다. send_exe 가 None 이면 B 는 그 경로로 물리적으로 못 보내므로,
-    //   결과 B_SENT=false 는 "B 가 안 보내기로 함"(정상 negative)이 아니라 인프라 부재다. 판정은 셀렉터가
-    //   아니라 **해석된 프라이밍 파일**로 한다 — 명시 `--priming <send-cli/send-both>` 경로도 잡힌다. 실
-    //   claude 2개를 스폰하기 **전에** 요란히 SETUP-SKIP 하고 종료한다 — 헛된 스폰·오귀속 둘 다 막는다.
-    if priming_requires_cli(&resolved_priming) && send_exe.is_none() {
+    //   결과 B_SENT=false 는 "B 가 안 보내기로 함"(정상 negative)이 아니라 인프라 부재다. 판정은 셀렉터·
+    //   basename 이 아니라 **해석된 프라이밍 파일 본문**으로 한다 — 명시 경로 override 도, basename 리스트에서
+    //   누락되던 새 CLI-지시 프라이밍도 잡힌다. 위에서 단 한 번 읽어 둔 `priming_content` 를 순수 판정자
+    //   `priming_text_directs_cli` 에 넘긴다(재읽기·TOCTOU 없음). 실 claude 2개를 스폰하기 **전에** 요란히
+    //   SETUP-SKIP 하고 종료한다 — 헛된 스폰·오귀속 둘 다 막는다.
+    if priming_text_directs_cli(&priming_content) && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
         for d in dirs {
@@ -312,7 +333,7 @@ async fn run() -> i32 {
     }
     // ★--disallow-mcp 는 CLI 입구가 반드시 살아 있어야 한다(ADR-0094)★: MCP send grant 를 빼는데 CLI grant
     //   마저 없으면(send_exe=None) 두 에이전트는 발신 경로가 **하나도** 없어, B_SENT=false 는 정상 negative
-    //   가 아니라 인프라 부재다. priming_requires_cli 스킵과 같은 이유로 스폰 **전에** 요란히 SETUP-SKIP.
+    //   가 아니라 인프라 부재다. 위 CLI-요구 프라이밍 스킵과 같은 이유로 스폰 **전에** 요란히 SETUP-SKIP.
     if args.disallow_mcp && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -997,49 +1018,71 @@ mod tests {
         );
     }
 
-    // ★FIX round-2 #2★: CLI-요구 판정은 셀렉터가 아니라 **해석된 프라이밍 파일 basename** 으로 한다 —
-    //   C1/C3 셀렉터도, 명시 send-cli/send-both 경로도 잡히고, C0/C2·기타 경로는 false.
-    fn resolved(selector: Option<&str>) -> PathBuf {
-        let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
-        resolve_priming_path(selector, &root).expect("resolve")
-    }
-
+    // ★ADR-0094★: CLI-요구 판정은 basename 리스트가 아니라 프라이밍 **본문(content)** 으로 한다 —
+    //   `engram-send` 또는 `ENGRAM_SEND_EXE` 를 언급하면 CLI 발신 지시. basename 리스트는 rot 하므로
+    //   (새 CLI-지시 프라이밍이 누락돼 가드 우회 → 인프라 부재 오귀속) 본문을 진실의 출처로 삼는다.
     #[test]
-    fn priming_requires_cli_mcp_only_cases_are_false() {
-        // C0(=None/현행)·C2(MCP 만) 은 CLI 없이도 유효 → SETUP-SKIP 트리거 안 함.
-        assert!(!priming_requires_cli(&resolved(None)), "C0(None)");
-        assert!(!priming_requires_cli(&resolved(Some("C0"))), "C0");
-        assert!(!priming_requires_cli(&resolved(Some("C2"))), "C2 MCP-only");
-    }
-
-    #[test]
-    fn priming_requires_cli_cli_selector_cases_are_true() {
-        // C1(둘 다 안내 = send-both) · C3(CLI 전용 = send-cli) 셀렉터 → true.
-        assert!(priming_requires_cli(&resolved(Some("C1"))), "C1 send-both");
-        assert!(priming_requires_cli(&resolved(Some("C3"))), "C3 send-cli");
-    }
-
-    #[test]
-    fn priming_requires_cli_explicit_send_paths_are_true() {
-        // ★핵심 회귀(FIX round-2 #2)★: 셀렉터가 아니라 명시 경로로도 CLI-지시 프라이밍을 잡아야 한다.
-        let cli = resolved(Some("prompts/experiments/agent-priming-send-cli.md"));
-        let both = resolved(Some("prompts/experiments/agent-priming-send-both.md"));
-        assert!(priming_requires_cli(&cli), "명시 send-cli 경로");
-        assert!(priming_requires_cli(&both), "명시 send-both 경로");
-    }
-
-    #[test]
-    fn priming_requires_cli_other_explicit_path_is_false() {
-        // MCP-전용 파일이나 무관한 override 경로는 CLI 요구 아님.
+    fn priming_text_directs_cli_true_for_engram_send_mention() {
+        // engram-send CLI 를 언급하는 본문 → true(ENGRAM_SEND_EXE 와 engram-send 둘 다 등장).
+        let text = "To reply, run in your shell: `$ENGRAM_SEND_EXE --to alice --body ...`\n\
+                    i.e. run the engram-send command with the recipient name.";
         assert!(
-            !priming_requires_cli(&resolved(Some(
-                "prompts/experiments/agent-priming-send-mcp.md"
-            ))),
-            "명시 send-mcp 경로"
+            priming_text_directs_cli(text),
+            "engram-send 언급 → CLI 지시"
+        );
+    }
+
+    #[test]
+    fn priming_text_directs_cli_true_for_env_var_only() {
+        // ENGRAM_SEND_EXE 만 있어도(engram-send 리터럴 없이) CLI 지시.
+        let text = "Invoke the binary referenced by ENGRAM_SEND_EXE to deliver your message.";
+        assert!(
+            priming_text_directs_cli(text),
+            "ENGRAM_SEND_EXE 언급 → CLI 지시"
+        );
+    }
+
+    #[test]
+    fn priming_text_directs_cli_false_for_mcp_only() {
+        // MCP send_message 만 언급하고 CLI 경로는 없음 → false(CLI 없이도 유효한 실험).
+        let text = "To reply, call the MCP tool `send_message` with the recipient and body.";
+        assert!(
+            !priming_text_directs_cli(text),
+            "MCP send_message 만 → CLI 지시 아님"
+        );
+    }
+
+    #[test]
+    fn priming_text_directs_cli_false_for_empty() {
+        // 빈 본문(발신 지시 없음) → false.
+        assert!(!priming_text_directs_cli(""), "빈 본문 → CLI 지시 아님");
+    }
+
+    #[test]
+    fn priming_text_directs_cli_case_insensitive() {
+        // ★FIX★: 대소문자 무시 — 산문이 대문자/혼합으로 써도 CLI 지시로 잡아야 한다(놓치면 false negative).
+        assert!(
+            priming_text_directs_cli("Reply via ENGRAM-SEND right away."),
+            "대문자 ENGRAM-SEND → CLI 지시"
         );
         assert!(
-            !priming_requires_cli(&resolved(Some("sub/custom.md"))),
-            "무관한 override 경로"
+            priming_text_directs_cli("Use the Engram-Send helper to deliver."),
+            "혼합 Engram-Send → CLI 지시"
+        );
+        assert!(
+            priming_text_directs_cli("The var Engram_Send_Exe points to the binary."),
+            "혼합 Engram_Send_Exe → CLI 지시"
+        );
+    }
+
+    #[test]
+    fn priming_text_directs_cli_negation_is_intentionally_true() {
+        // ★수용된 false positive(문서화)★: "engram-send 를 쓰지 마라" 같은 부정문도 substring 존재만으로
+        //   true → 헛된 SETUP-SKIP. 이는 의도된 보수적 방향이다(요란한 exit-1 로 틀릴 수 있는 발화 거부).
+        //   실 프라이밍엔 그런 부정문이 없고, 부정 파싱은 넣지 않는다. 순수 레벨의 현 동작을 못박아 둔다.
+        assert!(
+            priming_text_directs_cli("Do NOT use engram-send; use MCP instead."),
+            "부정문도 substring 존재로 true — 의도된 보수적 skip 방향"
         );
     }
 }
