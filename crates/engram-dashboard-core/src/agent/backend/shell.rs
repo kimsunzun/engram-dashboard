@@ -27,6 +27,13 @@ impl AgentBackend for ShellBackend {
         false
     }
 
+    fn accepts_mcp_config(&self) -> bool {
+        // 셸은 mcp-config 를 받지 않는다(ADR-0099). 애초에 provision 을 안 부르므로(위 false) 이 값은
+        //   실제 소비되지 않지만, 계약 완결성 위해 정직하게 false.
+        // ADR-0099
+        false
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,

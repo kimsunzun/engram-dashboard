@@ -64,6 +64,21 @@ pub trait AgentBackend: Send + Sync {
     ///   스폰이 중단된다(제어 채널 없이 몰래 도는 에이전트 금지). false 인 backend 는 그 계약과 무관하다.
     fn supports_control_channel(&self) -> bool;
 
+    /// 이 backend(프로그램)가 **MCP config 를 받아들일 수 있는가**(ADR-0099). claude=true(mcp-config 파일을
+    /// `--mcp-config` 로 붙임), 그 외(shell·codex·gemini stub)=false. ★backend 지식(ADR-0004)★: "어느
+    /// 프로그램이 MCP config 를 소비하나"는 backend-kind 지식이라 여기서 선언한다 — manager 가 `matches!`
+    /// 로 직접 분기하지 않는다.
+    ///
+    /// 이 플래그 하나가 provision 의 채널 물리 배선·grant·프라이밍 변형을 전부 구동한다(ADR-0099 정합
+    /// 불변식 = 깐 채널 == 프라이밍이 가르치는 채널). true 면 `DaemonControlChannel::provision` 이 mcp-config
+    /// 를 쓰고 MCP bits 를 endpoint 에 실으며 both-teaching 프라이밍을, false 면 mcp-config 미기록 + CLI-only
+    /// 프라이밍을 고른다.
+    ///
+    /// ★`supports_control_channel` 과의 관계★: 후자는 "provision 을 **부르나**"(제어 채널 자체를 소비하나),
+    ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 현재 claude 는 둘 다 true,
+    ///   codex/gemini 는 둘 다 false 지만, 미래 "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 다.
+    fn accepts_mcp_config(&self) -> bool;
+
     /// 프로필 + 모드 → CommandSpec.
     /// cwd·env는 manager가 정규화한 값을 전달한다(stage 6에서 주입 예정).
     ///
@@ -115,6 +130,14 @@ pub fn needs_session(c: &AgentCommand) -> bool {
 /// 로 판정(ADR-0004)★: manager 가 `matches!(command, ...)` 로 직접 분기하지 않고 backend 지식에 위임한다.
 pub fn supports_control_channel(c: &AgentCommand) -> bool {
     backend_for(c).supports_control_channel()
+}
+
+/// 이 명령의 backend 가 MCP config 를 받아들일 수 있는가(ADR-0099). manager 가 spawn 조립 시 이 dispatch 로
+/// 판정해 `ControlChannel::provision` 에 넘기면, 데몬 구현이 이 플래그로 mcp-config 기록·MCP endpoint bits·
+/// 프라이밍 변형·grant 를 한꺼번에 가른다(정합 불변식). ★backend dispatch 로 판정(ADR-0004)★: manager 가
+/// command 를 직접 matches! 하지 않고 backend 지식에 위임한다(supports_control_channel 선례와 동형).
+pub fn accepts_mcp_config(c: &AgentCommand) -> bool {
+    backend_for(c).accepts_mcp_config()
 }
 
 /// 프로필 → CommandSpec. manager가 stage 6에서 호출한다.

@@ -50,10 +50,11 @@ name = "priming-smoke"
 path = "src/bin/priming_smoke.rs"
 required-features = ["test-harness"]
 
-# ★ADR-0092 A→B→A 왕복(reply round-trip) 실측 드라이버★: 실 primed claude 2개(A·B)를 스폰해 B 가 발신
-#   절반(MCP send_message OR engram-send CLI)을 스스로 호출하고 A 가 답신을 수용하는지 실측한다. 케이스
-#   (C0..C3 = 발신 학습 프라이밍 변형)로 파라미터화. required-features 로 릴리즈 빌드가 컴파일하지 않게
-#   막는다(실험/검증 전용, priming-smoke·saturation-pilot 과 동일 계열).
+# ★ADR-0092/0099 A→B→A 왕복(reply round-trip) 실측 드라이버★: 실 primed claude 2개(A·B)를 스폰해 B 가 발신
+#   절반(MCP send_message OR engram-send CLI)을 스스로 호출하고 A 가 답신을 수용하는지 실측한다. 프라이밍은
+#   `--priming <경로>`(예: prompts/agent-priming-cli.md)로, CLI-only false-path 는 `--cli-only`(provision
+#   강제 비-MCP)로 파라미터화한다(옛 C1~C3 실험 별칭은 ADR-0099 로 제거). required-features 로 릴리즈 빌드가
+#   컴파일하지 않게 막는다(실험/검증 전용, priming-smoke·saturation-pilot 과 동일 계열).
 [[bin]]
 name = "roundtrip-smoke"
 path = "src/bin/roundtrip_smoke.rs"

@@ -374,9 +374,9 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     );
 
     let id = AgentId::new_v4();
-    // epoch 0 provision — 토큰 발급 + config 파일 기록.
+    // epoch 0 provision — 토큰 발급 + config 파일 기록. ADR-0099: MCP-capable(true)로 config 파일 기록.
     let ep0 = channel
-        .provision(id, 0)
+        .provision(id, 0, true)
         .expect("provision ok")
         .expect("epoch0 endpoint");
     let old_token = ep0.token.clone();
@@ -386,7 +386,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
 
     // 재활성화(epoch 1) provision — registry.issue 가 구 토큰을 evict, 새 config 파일 기록.
     let ep1 = channel
-        .provision(id, 1)
+        .provision(id, 1, true)
         .expect("provision ok")
         .expect("epoch1 endpoint");
     let new_path = mcp_config::config_path(&data_dir, id, 1);

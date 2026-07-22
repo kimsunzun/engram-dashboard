@@ -108,6 +108,9 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
 struct CountingControl {
     live: Arc<Mutex<std::collections::HashSet<(AgentId, u32)>>>,
     provisions: Arc<std::sync::atomic::AtomicUsize>,
+    /// ADR-0099(FIX 5): provision 이 전달받은 `accepts_mcp_config` 플래그를 도착 순서대로 기록한다 —
+    ///   manager 가 backend capability 를 provision 으로 올바로 전달하는지 못박는다(옛 doubles 는 버렸다).
+    seen_flags: Arc<Mutex<Vec<bool>>>,
 }
 
 impl ControlChannel for CountingControl {
@@ -115,14 +118,17 @@ impl ControlChannel for CountingControl {
         &self,
         id: AgentId,
         epoch: u32,
+        accepts_mcp_config: bool,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         self.provisions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.seen_flags.lock().unwrap().push(accepts_mcp_config);
         self.live.lock().unwrap().insert((id, epoch));
         Ok(Some(ControlEndpoint {
             url: "http://127.0.0.1:1/mcp".into(),
             token: format!("tok-{id}-{epoch}"),
-            config_path: PathBuf::from("."),
+            // ADR-0099: config_path 는 Option — 이 테스트 double 은 MCP 채널 물리를 검증하지 않으므로 None.
+            config_path: None,
             send_exe: None,
             priming_file: None,
             // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록(SpawnReservation 인과만 격리).
@@ -243,14 +249,18 @@ fn concurrent_same_id_spawn_does_not_clobber() {
 #[derive(Clone, Default)]
 struct FailingControl {
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    /// ADR-0099(FIX 5): provision 이 받은 `accepts_mcp_config` 를 기록 — claude 스폰이 true 를 전달하는지 pin.
+    seen_flags: Arc<Mutex<Vec<bool>>>,
 }
 impl ControlChannel for FailingControl {
     fn provision(
         &self,
         _id: AgentId,
         _epoch: u32,
+        accepts_mcp_config: bool,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.seen_flags.lock().unwrap().push(accepts_mcp_config);
         Err(ProvisionError("injected".into()))
     }
     fn revoke(&self, _id: AgentId, _epoch: u32) {}
@@ -301,6 +311,11 @@ fn shell_spawn_ignores_failing_control_channel() {
         0,
         "셸 경로는 provision 을 호출하지 않아야(F3 backend-conditional)"
     );
+    // ADR-0099(FIX 5): shell 의 실 manager 계약 = provision 미호출 → 전달된 플래그도 없다(비어 있음).
+    assert!(
+        control.seen_flags.lock().unwrap().is_empty(),
+        "shell → provision 미호출이라 전달된 accepts_mcp_config 플래그가 없어야"
+    );
     let id = manager.list_agents()[0].id;
     manager.kill_agent(id).expect("kill ok");
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -328,6 +343,13 @@ fn claude_spawn_fails_closed_on_provision_error() {
         control.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "claude 경로는 provision 을 정확히 1회 호출해야"
+    );
+    // ADR-0099(FIX 5): claude 는 MCP-capable(accepts_mcp_config=true) → manager 가 provision 에 true 를
+    //   전달해야 한다(backend::accepts_mcp_config 가 claude=true 를 반환하고 그 값이 배관을 타고 도착).
+    assert_eq!(
+        *control.seen_flags.lock().unwrap(),
+        vec![true],
+        "claude 스폰은 provision 에 accepts_mcp_config=true 를 전달해야(MCP-capable)"
     );
     assert!(
         manager.list_agents().is_empty(),

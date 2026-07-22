@@ -150,6 +150,7 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
             &self,
             _id: CoreAgentId,
             _epoch: u32,
+            _accepts_mcp_config: bool,
         ) -> Result<Option<ControlEndpoint>, ProvisionError> {
             Err(ProvisionError("injected provision failure".to_string()))
         }
@@ -202,6 +203,7 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
             &self,
             _id: CoreAgentId,
             _epoch: u32,
+            _accepts_mcp_config: bool,
         ) -> Result<Option<ControlEndpoint>, ProvisionError> {
             Err(ProvisionError("must not be called for shell".to_string()))
         }
@@ -267,15 +269,18 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
     let id = AgentId::new_v4();
 
     // provision — 실 토큰 발급 + 실 config 파일 write(guard 가 arm 되는 시점의 상태와 동일).
+    //   ADR-0099: MCP-capable(true)로 provision 해야 mcp-config 파일이 실제로 쓰인다(이 테스트가 검증하는 상태).
     let ep = channel
-        .provision(id, 0)
+        .provision(id, 0, true)
         .expect("provision ok")
         .expect("endpoint");
     assert_eq!(registry.live_token_count(), 1, "provision 후 산 토큰 1개");
-    assert!(
-        ep.config_path.exists(),
-        "provision 이 실제 config 파일을 씀"
-    );
+    // ADR-0099: config_path 는 Option — MCP-capable(true) → Some(실파일).
+    let cfg = ep
+        .config_path
+        .clone()
+        .expect("MCP-capable → config_path Some");
+    assert!(cfg.exists(), "provision 이 실제 config 파일을 씀");
 
     // ProvisionGuard::drop 이 부르는 것과 동일한 revoke — 발급된 토큰/config 를 회수한다.
     channel.revoke(id, 0);
@@ -285,7 +290,7 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
         "revoke 후 산 토큰 0(FIX 3 가 회수하는 자원 = 실 토큰)"
     );
     assert!(
-        !ep.config_path.exists(),
+        !cfg.exists(),
         "revoke 후 config 파일 삭제(FIX 3 가 회수하는 자원 = 실 파일)"
     );
 

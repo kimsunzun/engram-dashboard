@@ -21,13 +21,28 @@
 
 use std::path::PathBuf;
 
-/// 프라이밍 파일 경로를 산출하는 seam. 구현은 스폰 시점에 `priming_file()` 로 **절대경로 or None** 을
-/// 돌려준다. Send+Sync+'static — DaemonControlChannel 이 Arc 로 들고 provision 마다 부른다.
+/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식**: 이 변형이
+/// 가르치는 채널 집합은 provision 이 물리적으로 깐 채널 집합과 일치해야 한다(어기면 발신 freeze 재발 —
+/// MCP 노출 + CLI-only 지시 = ~6/7 미발신 실측). 그래서 백엔드 capability 하나가 이 변형과 채널 배선을
+/// 함께 움직인다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimingVariant {
+    /// MCP-capable 백엔드(claude). send_message 툴 주력 + engram-send CLI 폴백을 가르친다(both-teaching).
+    ///   → `prompts/agent-priming.md`.
+    McpPrimary,
+    /// 비-MCP 백엔드(codex/gemini 등 미래). engram-send CLI 만 가르친다(send_message 단어 자체 부재).
+    ///   → `prompts/agent-priming-cli.md`.
+    CliOnly,
+}
+
+/// 프라이밍 파일 경로를 산출하는 seam. 구현은 스폰 시점에 `priming_file(variant)` 로 **절대경로 or None**
+/// 을 돌려준다. Send+Sync+'static — DaemonControlChannel 이 Arc 로 들고 provision 마다 부른다.
 pub trait PrimingProvider: Send + Sync + 'static {
     /// 이번 스폰에 주입할 프라이밍 MD 파일의 **절대경로**. 없거나(파일 부재) 미구성이면 `None`.
     /// ★절대경로 계약★: 에이전트의 cwd 는 데몬/repo 와 다르므로(각 워크스페이스) 반드시 절대경로여야
     ///   claude 가 파일을 찾는다 — 상대경로면 에이전트 cwd 기준으로 해석돼 어긋난다.
-    fn priming_file(&self) -> Option<PathBuf>;
+    /// `variant`(ADR-0099): 백엔드 MCP-capability 가 고른 프라이밍 축. 구현이 이 값으로 파일을 가른다.
+    fn priming_file(&self, variant: PrimingVariant) -> Option<PathBuf>;
 }
 
 /// 고정 파일 로더(ADR-0092 임시판 — 전원 무조건 같은 공용 MD 주입).
@@ -54,9 +69,14 @@ pub struct FilePrimingProvider {
     base_dir: PathBuf,
 }
 
-/// 고정 상대경로(repo·버전관리, ADR-0092). base_dir 에 이걸 붙여 해석한다.
-const FIXED_RELATIVE: &str = "prompts/agent-priming.md";
-/// env override 키(설정 시 base_dir 무시하고 이 경로를 절대화해 쓴다).
+/// 프라이밍 정적 파일 2개(repo·버전관리, ADR-0099). base_dir 에 붙여 해석한다. 변형(PrimingVariant)이
+///   MCP-capable→both-teaching, 비-MCP→CLI-only 를 가른다.
+/// ★정합 불변식(ADR-0099)★: 두 파일이 가르치는 채널 집합은 provision 이 그 변형에 물리적으로 까는 채널
+///   집합과 일치해야 한다 — MCP_PRIMARY 는 send_message + engram-send 를, CLI_ONLY 는 engram-send 만
+///   (send_message 단어 부재) 가르친다.
+const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
+const REL_CLI_ONLY: &str = "prompts/agent-priming-cli.md";
+/// env override 키(설정 시 base_dir·변형 무시하고 이 경로를 절대화해 쓴다 — 아래 override 우선 참조).
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
 /// ★cmd.exe 부패 위험 문자(ADR-0092, Codex #1+#5)★: Windows 에서 claude 인자는 `console_command`
@@ -158,18 +178,28 @@ impl FilePrimingProvider {
 }
 
 impl PrimingProvider for FilePrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
+    fn priming_file(&self, variant: PrimingVariant) -> Option<PathBuf> {
         // 1) env override(비어 있지 않을 때만) — 절대화 + CLI-안전 + 존재 검사.
         //    ★override 실패는 fixed 로 폴백하지 않는다★: 명시 override 를 조용히 다른 파일로 갈아치우면
         //      혼란스럽다. 어느 관문에서 걸리든 None(프라이밍 없이 진행 — resolve_checked 가 warn).
+        //    ★env override 는 두 변형을 아우르는 **단일 전역 승자**(ADR-0099 test-seam)★: 설정되면 variant
+        //      와 무관하게 이 경로가 이긴다 — 하네스/운영자가 어떤 백엔드에도 특정 프라이밍을 강제할 수 있는
+        //      test-seam 이다(roundtrip_smoke `--priming` 이 이 env 로 넘긴다). 운영은 미설정이라 아래 변형별
+        //      정적 파일이 산다.
+        //    ★이 override 를 ENGRAM_FORCE_CLI_ONLY_SEND 와 손으로 조합 금지★: override→MCP-teaching 파일 +
+        //      force→CLI-only 물리 = 정합 불변식 위반(tooling 이 막던 pairing 위반 부활 — roundtrip_smoke 가 둘을 함께 거부).
         if let Some(v) = std::env::var_os(ENV_OVERRIDE) {
             if !v.is_empty() {
                 return self.resolve_checked(PathBuf::from(v), "override");
             }
         }
 
-        // 2) 고정 상대경로 → base_dir(exe 기준 루트) 기준 절대화 + CLI-안전 + 존재 검사.
-        self.resolve_checked(PathBuf::from(FIXED_RELATIVE), "fixed")
+        // 2) 변형별 고정 상대경로 → base_dir(exe 기준 루트) 기준 절대화 + CLI-안전 + 존재 검사(ADR-0099).
+        let rel = match variant {
+            PrimingVariant::McpPrimary => REL_MCP_PRIMARY,
+            PrimingVariant::CliOnly => REL_CLI_ONLY,
+        };
+        self.resolve_checked(PathBuf::from(rel), "fixed")
     }
 }
 
@@ -179,7 +209,7 @@ impl PrimingProvider for FilePrimingProvider {
 pub struct NoopPrimingProvider;
 
 impl PrimingProvider for NoopPrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
+    fn priming_file(&self, _variant: PrimingVariant) -> Option<PathBuf> {
         None
     }
 }
@@ -189,7 +219,8 @@ impl PrimingProvider for NoopPrimingProvider {
 pub struct FixedPrimingProvider(pub PathBuf);
 
 impl PrimingProvider for FixedPrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
+    fn priming_file(&self, _variant: PrimingVariant) -> Option<PathBuf> {
+        // 테스트 전용 — 변형과 무관하게 주어진 경로를 그대로 돌려준다(배선 도달만 검증).
         Some(self.0.clone())
     }
 }
@@ -204,15 +235,18 @@ mod tests {
     ///   서로를 지운다(플레이키). 이 mutex 로 그 테스트들을 직렬화한다(cargo 는 기본 병렬이라 필수).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// 임시 dir 에 프라이밍 MD 를 만들고 (dir, 그 안 상대구조) 를 준비한다.
-    /// `prompts/agent-priming.md` 실물을 만들어 base_dir 해석을 검증한다.
+    /// 임시 dir 에 두 변형 프라이밍 MD 실물을 만들고 dir 을 돌려준다(ADR-0099).
+    /// `prompts/agent-priming.md`(McpPrimary) + `prompts/agent-priming-cli.md`(CliOnly)를 만들어 base_dir
+    ///   해석·변형 매핑을 검증한다.
     fn make_fixture_dir() -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("engram-priming-test-{}", uuid::Uuid::new_v4()));
         let prompts = dir.join("prompts");
         std::fs::create_dir_all(&prompts).unwrap();
         let mut f = std::fs::File::create(prompts.join("agent-priming.md")).unwrap();
-        writeln!(f, "# 테스트 프라이밍").unwrap();
+        writeln!(f, "# 테스트 프라이밍 (mcp-primary)").unwrap();
+        let mut f2 = std::fs::File::create(prompts.join("agent-priming-cli.md")).unwrap();
+        writeln!(f2, "# 테스트 프라이밍 (cli-only)").unwrap();
         dir
     }
 
@@ -223,12 +257,40 @@ mod tests {
         let provider = FilePrimingProvider::new(dir.clone());
         // env override 가 없어야 fixed 경로를 본다(테스트 격리 — 명시 remove).
         std::env::remove_var(ENV_OVERRIDE);
-        let got = provider.priming_file().expect("고정 파일이 있으면 Some");
+        let got = provider
+            .priming_file(PrimingVariant::McpPrimary)
+            .expect("고정 파일이 있으면 Some");
         assert!(got.is_absolute(), "해석 결과는 절대경로여야: {got:?}");
         assert!(
             got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md")
         );
         assert!(got.is_file(), "실제 파일을 가리켜야");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── ADR-0099: 변형 매핑 — McpPrimary → agent-priming.md / CliOnly → agent-priming-cli.md ──────
+    #[test]
+    fn variant_maps_to_distinct_files() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = make_fixture_dir();
+        std::env::remove_var(ENV_OVERRIDE);
+        let provider = FilePrimingProvider::new(dir.clone());
+        let mcp = provider
+            .priming_file(PrimingVariant::McpPrimary)
+            .expect("McpPrimary 파일");
+        let cli = provider
+            .priming_file(PrimingVariant::CliOnly)
+            .expect("CliOnly 파일");
+        assert!(
+            mcp.ends_with("prompts/agent-priming.md") || mcp.ends_with("prompts\\agent-priming.md"),
+            "McpPrimary → agent-priming.md: {mcp:?}"
+        );
+        assert!(
+            cli.ends_with("prompts/agent-priming-cli.md")
+                || cli.ends_with("prompts\\agent-priming-cli.md"),
+            "CliOnly → agent-priming-cli.md: {cli:?}"
+        );
+        assert_ne!(mcp, cli, "두 변형은 서로 다른 파일을 가리켜야");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -241,7 +303,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::env::remove_var(ENV_OVERRIDE);
         let provider = FilePrimingProvider::new(dir.clone());
-        assert!(provider.priming_file().is_none(), "부재 파일 → None");
+        assert!(
+            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
+            "부재 파일 → None"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -259,11 +324,23 @@ mod tests {
         //   하므로, 이 테스트는 set → 검증 → remove 를 한 스레드 안에서 순차로 하고, 검증 직전에 set 한다.
         std::env::set_var(ENV_OVERRIDE, &override_file);
         let provider = FilePrimingProvider::new(dir.clone());
-        let got = provider.priming_file().expect("override 파일 존재 → Some");
+        // ★env override 는 두 변형을 아우르는 단일 전역 승자(ADR-0099)★ — 어떤 variant 로 물어도 override 가
+        //   이긴다. 여기선 McpPrimary 로 물어도 override 파일이 나오는지 확인.
+        let got = provider
+            .priming_file(PrimingVariant::McpPrimary)
+            .expect("override 파일 존재 → Some");
         assert!(got.is_absolute());
         assert!(
             got.ends_with("custom-priming.md"),
             "override 경로가 이겨야: {got:?}"
+        );
+        // CliOnly 로 물어도 동일 override(단일 전역 승자).
+        let got_cli = provider
+            .priming_file(PrimingVariant::CliOnly)
+            .expect("override 파일 존재 → Some");
+        assert!(
+            got_cli.ends_with("custom-priming.md"),
+            "CliOnly 로 물어도 override 가 이겨야(단일 전역 승자): {got_cli:?}"
         );
         std::env::remove_var(ENV_OVERRIDE);
         let _ = std::fs::remove_dir_all(&dir);
@@ -279,7 +356,7 @@ mod tests {
         std::env::set_var(ENV_OVERRIDE, &ghost);
         let provider = FilePrimingProvider::new(dir.clone());
         assert!(
-            provider.priming_file().is_none(),
+            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
             "override 파일 부재 → None(fixed 폴백 안 함)"
         );
         std::env::remove_var(ENV_OVERRIDE);
@@ -295,7 +372,7 @@ mod tests {
         //   상대경로를 Some 으로 흘리면 claude 가 에이전트 cwd 기준으로 잘못 해석하므로 절대 금지(계약).
         let provider = FilePrimingProvider::new(PathBuf::from("relative-base"));
         assert!(
-            provider.priming_file().is_none(),
+            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
             "상대 base → 절대화 불가 → None(상대경로 유출 금지)"
         );
     }
@@ -317,7 +394,7 @@ mod tests {
         std::env::remove_var(ENV_OVERRIDE);
         let provider = FilePrimingProvider::new(meta_base.clone());
         assert!(
-            provider.priming_file().is_none(),
+            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
             "cmd 메타문자(% &) 포함 경로 → None(부패 위험 미주입)"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -338,6 +415,46 @@ mod tests {
         assert!(
             path_is_cli_safe(std::path::Path::new("C:/base/prompts/agent-priming.md")),
             "메타문자 없는 경로는 안전"
+        );
+    }
+
+    // ── ADR-0099: 정합 불변식 pin(content-based) — 운영 프라이밍 파일이 실제로 가르치는 채널 ──────────
+    /// repo 루트(이 크레이트 매니페스트 두 단계 위). roundtrip_smoke 의 repo_root_from_manifest 와 동형 —
+    ///   테스트는 항상 컴파일타임 소스 트리 안에서 도므로 MANIFEST_DIR 이 신뢰 가능하다.
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")) // .../crates/engram-dashboard-daemon
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo 루트")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn production_priming_files_pin_taught_channels() {
+        // ★정합 불변식(ADR-0099)★: 물리적으로 깐 채널 집합 == 프라이밍이 가르치는 채널 집합. 여기선 파일
+        //   수준에서 그 불변식을 못박는다 —
+        //   - A(McpPrimary, agent-priming.md): send_message **와** engram-send 를 모두 가르쳐야(both-teaching).
+        //   - B(CliOnly, agent-priming-cli.md): engram-send 는 가르치되 send_message 단어는 **부재**여야
+        //     (MCP 입구를 프롬프트에서 완전히 삭제 — 지시-도구 불일치 freeze 방지).
+        //   문구가 드리프트하면 이 테스트가 깨져 프라이밍-배선 정합을 강제한다.
+        let root = repo_root();
+        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
+        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
+        assert!(
+            a.contains("send_message"),
+            "A(McpPrimary)는 send_message 를 가르쳐야(both-teaching)"
+        );
+        assert!(
+            a.contains("engram-send"),
+            "A(McpPrimary)는 engram-send 폴백도 가르쳐야(both-teaching)"
+        );
+        assert!(
+            b.contains("engram-send"),
+            "B(CliOnly)는 engram-send 를 가르쳐야"
+        );
+        assert!(
+            !b.contains("send_message"),
+            "B(CliOnly)는 send_message 단어가 부재여야(MCP 입구 완전 삭제 — freeze 방지)"
         );
     }
 }

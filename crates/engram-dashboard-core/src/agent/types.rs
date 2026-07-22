@@ -189,9 +189,14 @@ pub struct ControlEndpoint {
     /// 이 (AgentId,epoch) 전용 bearer 토큰(HTTP Authorization 헤더에 실린다).
     /// ★보안★: 이 값은 로그에 찍지 않는다(mcp-config 파일에만 기록 — 파일은 revoke 시 삭제).
     pub token: String,
-    /// backend 가 생성한 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다).
-    /// backend/claude.rs 가 이 파일에 url+token 을 써서 `--mcp-config` 로 주입한다.
-    pub config_path: std::path::PathBuf,
+    /// 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다). backend/claude.rs 가 이 파일에
+    /// url+token 을 써서 `--mcp-config` 로 주입한다.
+    /// ★Option = 부재를 타입으로 인코딩(ADR-0099)★: MCP-capable 백엔드(claude)면 `Some(path)`(mcp-config
+    ///   물리 존재), 비-MCP 백엔드(codex/gemini stub)면 `None` — mcp-config 를 **아예 쓰지 않는다**(MCP
+    ///   입구 물리 삭제). 옛 빈 `PathBuf::new()` sentinel 대신 `None` 으로 "없음"을 타입으로 못박아,
+    ///   backend 가 `--mcp-config` 를 `Some` 일 때만 주입한다(빈 경로 방어 코드 불필요 — 타입이 강제).
+    ///   core 는 이 값을 데이터로만 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003/0004 격리).
+    pub config_path: Option<std::path::PathBuf>,
     /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram-send` CLI 바이너리 절대경로(있으면).
     /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
     /// 그 env(claude=`ENGRAM_SEND_EXE`)를 주입하지 않는다(token/url 은 그래도 주입 — CLI 만 못 씀).
@@ -232,14 +237,25 @@ impl std::error::Error for ProvisionError {}
 /// 안다(OutputSink/StatusSink 와 동형 — ADR-0003 격리). 기본 구현체 = `NoopControlChannel`(제어 채널
 /// 없는 경로·테스트용 — provision 이 Ok(None) 을 돌려 backend 가 아무 것도 주입하지 않는다).
 pub trait ControlChannel: Send + Sync + 'static {
-    /// (AgentId,epoch)용 토큰을 발급하고 mcp-config 파일을 만들어 엔드포인트를 돌려준다. spawn 경로에서
-    /// spec 조립 직전 호출. 반환 3-값(fail-closed 계약, ADR-0086):
+    /// (AgentId,epoch)용 토큰을 발급하고 (MCP-capable 이면) mcp-config 파일을 만들어 엔드포인트를 돌려준다.
+    /// spawn 경로에서 spec 조립 직전 호출. 반환 3-값(fail-closed 계약, ADR-0086):
     ///   - `Ok(Some(ep))` — 제어 채널 발급 성공(backend 가 주입).
     ///   - `Ok(None)`     — 제어 채널을 **안 쓰는 정당한 부재**(Noop·shell-only·미구성). 스폰 계속.
     ///   - `Err(_)`       — 제어 채널을 쓰려다 **실패**(CSPRNG/파일 write 오류). ★치명★ — 스폰은
     ///     이 Err 를 만나면 fail-closed 로 중단한다(제어 채널 없이 몰래 도는 에이전트 금지, health 위장 방지).
-    fn provision(&self, id: AgentId, epoch: u32)
-        -> Result<Option<ControlEndpoint>, ProvisionError>;
+    ///
+    /// `accepts_mcp_config`(ADR-0099): 이 backend 가 mcp-config 를 받아들이는가(= MCP-capable 인가). manager 가
+    ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **채널 물리 배선·
+    ///   프라이밍 변형·grant 를 한꺼번에 가른다**(정합 불변식 = 물리적으로 깐 채널 집합 == 프라이밍이 가르치는
+    ///   채널 집합 — 어기면 발신 freeze 재발). true → mcp-config 기록 + MCP endpoint bits + both-teaching
+    ///   프라이밍 + `[Mcp, Cli]` grant. false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant.
+    ///   core 는 이 값을 **불투명 bool 로만** 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003 격리).
+    fn provision(
+        &self,
+        id: AgentId,
+        epoch: u32,
+        accepts_mcp_config: bool,
+    ) -> Result<Option<ControlEndpoint>, ProvisionError>;
 
     /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
     /// 종료)에서든 reaper 단일 소비자가 부른다 → 정확히 1회 revoke. epoch 를 함께 받아 stale terminal 이
@@ -257,6 +273,7 @@ impl ControlChannel for NoopControlChannel {
         &self,
         _id: AgentId,
         _epoch: u32,
+        _accepts_mcp_config: bool,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         Ok(None)
     }

@@ -38,6 +38,13 @@ impl AgentBackend for GeminiBackend {
         false
     }
 
+    fn accepts_mcp_config(&self) -> bool {
+        // 보수적 stub(ADR-0099) — 미측정 backend 는 MCP-capable 을 주장하지 않는다 → false(비-MCP 스폰).
+        //   Gemini 의 실제 MCP config 지원은 CLI spike 후 실측값으로 교체(ADR-0004 backend 지식).
+        // ADR-0099
+        false
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,

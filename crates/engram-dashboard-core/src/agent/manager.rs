@@ -359,11 +359,18 @@ impl AgentManager {
         //   을 건너뛰므로 None(부재)과 동일하게 흐른다 — 그 backend 엔 fail-closed 계약이 적용되지 않는다.
         // ADR-0086
         let control_endpoint = if backend::supports_control_channel(&profile.command) {
-            self.control.provision(profile.id, epoch).map_err(|e| {
-                PtyError::SpawnFailed(format!(
-                    "control channel provision failed (fail-closed): {e}"
-                ))
-            })?
+            // ADR-0099: backend 의 MCP-capability 를 provision 에 넘겨 채널 물리 배선·프라이밍 변형·grant 를
+            //   한꺼번에 가르게 한다(정합 불변식 = 깐 채널 == 프라이밍이 가르치는 채널). 판정은 backend
+            //   dispatch(ADR-0004) — manager 는 command 를 직접 matches! 하지 않는다.
+            // ADR-0099
+            let accepts_mcp = backend::accepts_mcp_config(&profile.command);
+            self.control
+                .provision(profile.id, epoch, accepts_mcp)
+                .map_err(|e| {
+                    PtyError::SpawnFailed(format!(
+                        "control channel provision failed (fail-closed): {e}"
+                    ))
+                })?
         } else {
             // 제어 채널 미소비 backend(shell): provision 미호출 → registry 미접촉 → endpoint 없음.
             None

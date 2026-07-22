@@ -10,49 +10,64 @@
 //!   1. B 에게 짧은 원과제 턴을 줘 "일하는 팀원" 맥락을 만든다.
 //!   2. A→B 로 자연스러운 질문 하나를 실 control 경로(`handle_send`, Entrance::Cli)로 **씨앗 주입**한다
 //!      — B 는 봉투 `[message from alice id:..]` 에서 A 의 이름을 배운다(본문엔 "툴 X 를 써라" 같은 기계적
-//!      지시를 넣지 않는다 — 발신 학습은 프라이밍 변형이 하고, C0 는 순수 툴 발견을 본다).
+//!      지시를 넣지 않는다 — 발신 학습은 프라이밍 변형이 하고, 기본(no-priming/both) 은 순수 툴 발견을 본다).
 //!   3. 하네스는 **B 의 답신에 대해 handle_send 를 부르지 않는다** — B(실 claude)가 스스로 MCP/CLI 입구를
 //!      호출하고, 그 요청이 **실제 입구 → handle_send → wrap → A stdin** 으로 흐른다.
 //!   4. 관측: (a) 기계적 = registry `DeliveryObservation`(from=B, to=A)이 실제로 생겼는지 + B 가 고른
 //!      입구(Mcp/Cli). (b) 정성적 = A 의 `TurnObserver` 가 A 가 답신을 처리하며 낸 텍스트를 누적.
 //!   5. 구조화 stdout 마커로 오케스트레이터 판정용 결과를 출력한다.
 //!
-//! ## 케이스(발신 학습 변형 — priming 파일로 조절)
-//!   - C0 = `prompts/agent-priming.md`(현행, 발신 지시 없음) — **순수 툴 발견** 테스트.
-//!   - C1 = `prompts/experiments/agent-priming-send-both.md`(MCP+CLI 둘 다 안내).
-//!   - C2 = `prompts/experiments/agent-priming-send-mcp.md`(MCP 만).
-//!   - C3 = `prompts/experiments/agent-priming-send-cli.md`(CLI 만).
-//!   - `--priming <abs-or-rel-path>` 로 명시 override 가능(케이스 셀렉터를 덮는다).
+//! ## 프라이밍 선택(발신 학습 변형 — priming 파일로 조절, ADR-0099 이후)
+//!   - 미지정(또는 `--priming C0`) = `prompts/agent-priming.md`(운영 A = both-teaching: send_message +
+//!     engram-send). "C0" 는 no-priming 기본과 동의어인 편의 별칭일 뿐이다(그 하나만 남았다).
+//!   - `--priming <abs-or-rel-path>` 로 임의 프라이밍 파일 직접 지정(예: 운영 B `prompts/agent-priming-cli.md`).
+//!     절대면 그대로, 상대면 repo 루트 기준.
+//!   ※ 옛 C1~C3 케이스 별칭(`prompts/experiments/agent-priming-send-*.md` 로 매핑되던)은 ADR-0099 로 제거됐다
+//!     — 실험 변형 파일이 정리됐고(git 이력 보존), 채널 변형은 이제 백엔드 capability 가 정적 2파일로 가른다.
+//!     C1~C3 문자열을 `--priming` 에 넘기면 이제 "그 이름의 파일 경로"로 해석돼 하류에서 부재로 걸린다(특수
+//!     매핑 없음).
 //!
-//! ## CLI-only 측정 노브(ADR-0094 — `--disallow-mcp`)
-//!   `--disallow-mcp` 를 주면 `ENGRAM_DISALLOW_MCP_SEND` env 를 세워 두 에이전트가 MCP `send_message`
-//!   grant **없이** 스폰된다 → 발신은 `engram-send` CLI 로만 가능(순수 CLI-only 라우팅 실측). 이 노브는
-//!   test-only 측정 seam 이고(운영 스위치 아님) MCP grant 를 **제거만** 한다(권한 확장 X, ADR-0094 최소권한).
-//!   CLI 입구가 살아 있어야 하므로 send_exe(engram-send 형제 빌드) 필수 — 없으면 SETUP-SKIP.
-//!   미지정이면 오늘 동작(MCP grant 포함)과 바이트 동일.
+//! ## CLI-only 측정 노브 2종(측정 축이 다르다)
+//!   - **`--disallow-mcp`(ADR-0094)** — `ENGRAM_DISALLOW_MCP_SEND` env 를 세워 MCP `send_message` **grant 만**
+//!     뺀다. MCP 서버는 여전히 mcp-config 로 부착되고 프라이밍도 both-teaching 이라, 물리(MCP 살아있음)와
+//!     교육/권한(CLI 만)이 **갈린다** — 프롬프트-도구 불일치를 일부러 만들어 순수 CLI 라우팅을 측정한다.
+//!   - **`--cli-only`(ADR-0099 FIX 3)** — `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 을 **비-MCP 로
+//!     강제**한다. mcp-config 미부착 + CliOnly 프라이밍(`prompts/agent-priming-cli.md`) + [Cli] grant 가 함께
+//!     움직여 정합 불변식을 **보존한 채** false path 전체를 실측한다(실 claude 를 비-MCP 백엔드처럼 굴림).
+//!     이 모드는 `--priming` override 를 주지 않는다(상속된 `ENGRAM_PRIMING_FILE` env 도 거부 = SETUP-FAIL,
+//!     조용히 clear 하지 않는다) — provision 이 CliOnly 파일을 auto-select 하는 걸 보는 게 목적이고,
+//!     entrance=cli 를 기대한다(mcp 관측 시 SETUP-FAIL = 강제 seam 결함).
+//!     ★엄격 판정(다른 모드와 다르다)★: `--cli-only` 는 B 가 실제로 CLI 입구로 보냈을 때만(b_sent=true AND
+//!     entrance=cli) exit 0(PASS). 아무것도 안 보낸 경우(B_SENT=false/ENTRANCE=none)는 일반 모드의
+//!     valid-negative 와 달리 **exit 1**(FAIL — 강제 false path 가 도는 걸 못 봤으니 목적 미달)이고, 전용
+//!     `VERDICT [... --cli-only]:` 줄로 결과를 낸다.
+//!   둘 다 test-only 노브(운영 스위치 아님)이고 CLI 입구(send_exe = engram-send 형제 빌드)가 필수다 — 없으면
+//!   SETUP-SKIP. 미지정이면 오늘 동작(MCP 경로)과 바이트 동일.
 //!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
-//! ★CLI 입구를 쓰는 케이스(C3=CLI 전용, C1=둘 다 안내)는 먼저 `engram-send` 를 빌드해야 한다★ — 이
-//!   하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아 CLI 입구를 켠다. 형제에 없으면 B 가
-//!   그 경로로 못 보내 **인프라 부재를 실험적 negative 로 오인**할 수 있다. `cargo run` 은 dep bin 을 안
-//!   만들므로 별도로 빌드한다(같은 profile/target 이어야 형제로 co-locate 된다):
+//! ★CLI 입구를 쓰는 실험(운영 B `prompts/agent-priming-cli.md` 또는 `--cli-only`)은 먼저 `engram-send` 를
+//!   빌드해야 한다★ — 이 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아 CLI 입구를 켠다.
+//!   형제에 없으면 B 가 그 경로로 못 보내 **인프라 부재를 실험적 negative 로 오인**할 수 있다. `cargo run` 은
+//!   dep bin 을 안 만들므로 별도로 빌드한다(같은 profile/target 이어야 형제로 co-locate 된다):
 //! ```text
-//! # 1) CLI 입구 바이너리 먼저 빌드(C1/C3 필수 — 형제 위치에 놓이게)
+//! # 1) CLI 입구 바이너리 먼저 빌드(CLI 경로 실험 필수 — 형제 위치에 놓이게)
 //! cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send
 //! # 2) 하네스 실행
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming C0
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming C1 --model sonnet
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke                 # 기본(both, MCP)
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming prompts/agent-priming-cli.md --model sonnet
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --cli-only    # provision 강제 비-MCP(false path 전체)
 //! ```
-//! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — C1/C3·v3-en-cli·명시 경로 무관)인데
-//!   `engram-send` 가 형제에 없으면, 하네스는 normal negative 가 아니라 **SETUP-SKIP**(engram-send not
-//!   built) 라벨로 요란히 알리고 종료한다 — 인프라 부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. 판정은
-//!   셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문(content)** 이라 명시 경로 override 와 새 CLI-지시
-//!   프라이밍(basename 리스트에서 누락되던 것)까지 모두 잡힌다(ADR-0094).
+//! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — 명시 경로 무관)인데 `engram-send`
+//!   가 형제에 없으면, 하네스는 normal negative 가 아니라 **SETUP-SKIP**(engram-send not built) 라벨로 요란히
+//!   알리고 종료한다 — 인프라 부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. 판정은 셀렉터·basename 이 아니라
+//!   **해석된 프라이밍 파일 본문(content)** 이라 명시 경로 override 와 CLI-지시 프라이밍까지 모두 잡힌다(ADR-0094).
 //!
 //! ## 핵심 불변식(ADR-0092/0086/0088)
 //! - **required-features = ["test-harness"]** — 운영/릴리즈 빌드는 이 bin 을 컴파일하지 않는다.
 //! - **프라이밍은 실물 파일에서**(ADR-0092) — 하드코딩 금지. 여기선 케이스→경로 매핑만 하고 `ENGRAM_PRIMING_FILE`
 //!   env 로 FilePrimingProvider 에 넘긴다(두 에이전트가 같은 변형을 받게 provider 생성 **전에** set).
+//!   ★`--cli-only` 예외★: 그 모드는 override 를 세우지 않고 `ENGRAM_FORCE_CLI_ONLY_SEND` 만 세운다 —
+//!   provision 이 CliOnly 파일을 스스로 고르는 걸 관측한다(ADR-0099 FIX 3).
 //! - **from 은 토큰 파생**(ADR-0086) — 씨앗 A→B 의 from = A 의 실 발급 신원(BoundIdentity), 본문 문자열 아님.
 //! - **B 의 답신은 실 입구로만**(하네스가 handle_send 를 대신 부르지 않는다) — 이게 이 하네스의 핵심 새 검증.
 //! - **배달 관측 = ADR-0088 in-proc 싱크** — registry 에 `DeliveryObserver` 를 설치해 relay 레코드를 회수한다
@@ -108,7 +123,7 @@ const TASK_PROMPT_B: &str =
 
 /// ★씨앗 A→B(ADR-0092 — 자연 팀원 질문, 기계적 "툴 X 써라" 아님)★: A 가 B 에게 진행 상황을 묻는
 ///   평범한 협업 질문 → 답을 A 에게 돌려주는 게 자연스러운 반응이 되도록 만든다. 발신 방법(툴/CLI)은
-///   본문이 아니라 **프라이밍 변형**이 가르친다(C0 는 순수 툴 발견).
+///   본문이 아니라 **프라이밍 변형**이 가르친다(C0/기본 = 프로덕션 both-teaching `prompts/agent-priming.md`).
 const SEED_A_TO_B: &str =
     "Can you share the status of the auth module? If you're stuck anywhere on the login path, tell me what you need too.";
 
@@ -169,10 +184,31 @@ fn priming_text_directs_cli(content: &str) -> bool {
     lower.contains("engram-send") || lower.contains("engram_send_exe")
 }
 
-/// CLI 인자 파싱 결과(순수) — 케이스/priming 셀렉터 + 모델. `run` 이 이걸로 env·스폰을 배선한다.
+/// ★--cli-only 가 상속된 ENGRAM_PRIMING_FILE override 와 충돌하는가(순수·단위테스트 대상, ADR-0099)★:
+///   cli-only 모드는 provision 이 CliOnly 파일을 스스로 고르는 걸 관측하는 게 목적이라, 부모 env 에 미리
+///   깔린 비어 있지 않은 override 는 그 auto-select 를 덮어써 관측을 무의미하게 만든다 → 충돌(true)로 본다.
+///   `--priming` co-pass 거부와 대칭인 순수 판정자다. cli_only=false 면 env 값과 무관하게 충돌 아님(false)
+///   — 운영/일반 모드는 override 를 정당히 쓴다. env 값이 비어 있으면(미설정 취급) 충돌 아님.
+fn cli_only_env_override_conflicts(cli_only: bool, env_value: Option<&std::ffi::OsStr>) -> bool {
+    cli_only && matches!(env_value, Some(v) if !v.is_empty())
+}
+
+/// ★--cli-only 성공 판정(순수·단위테스트 대상, ADR-0099)★: cli-only 모드에서 이 실측이 **성공(pass)** 인가.
+///   이 모드는 provision 을 비-MCP 로 강제해 false path 전체가 정합하게 도는지를 실측하는 게 목적이므로,
+///   B 가 실제로 발신했고(b_sent) 그 입구가 반드시 `cli` 여야만 성공이다 — 아무것도 안 보낸(b_sent=false,
+///   entrance="none") 경우는 이 모드에선 **실패**로 본다(일반 모드의 valid-negative 와 다르다: 강제 false
+///   path 가 도는 걸 못 봤으니 실측 목적 미달). entrance="mcp"(강제 seam 이 MCP 를 못 지움)는 앞선
+///   SETUP-FAIL 이 이미 잡지만, 순수 판정자 수준에서도 cli 아닌 건 전부 실패로 매핑해 이중 안전망을 둔다.
+fn cli_only_run_passed(b_sent: bool, entrance_label: &str) -> bool {
+    b_sent && entrance_label == "cli"
+}
+
+/// CLI 인자 파싱 결과(순수) — priming 셀렉터 + 모델. `run` 이 이걸로 env·스폰을 배선한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
-    /// `--priming` 값(케이스 셀렉터 C0..C3 또는 경로). 미지정이면 None(= C0 기본).
+    /// `--priming` 값(프라이밍 파일 경로 — 절대/상대, 또는 편의 별칭 `C0`). 미지정이면 None(= 기본 both
+    ///   프라이밍 `prompts/agent-priming.md`, `C0` 별칭과 동일). C1~C3 는 ADR-0099 로 별칭이 제거돼 이제 그냥
+    ///   파일 경로로 해석된다(특수 매핑 없음 — 부재로 걸림).
     priming: Option<String>,
     /// `--model` 값(기본 sonnet).
     model: String,
@@ -180,6 +216,14 @@ struct Args {
     ///   두 에이전트가 MCP send_message grant **없이** 스폰 → engram-send CLI 로만 발신하게 강제한다.
     ///   test-only 측정 노브(운영 스위치 아님). 미지정이면 오늘 동작(MCP grant 포함).
     disallow_mcp: bool,
+    /// `--cli-only` 플래그(ADR-0099 FIX 3): 켜지면 `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 이
+    ///   실 claude 스폰을 **비-MCP 백엔드로 강제**한다 → false path 전체(no mcp-config + CliOnly 프라이밍 +
+    ///   [Cli] grant)가 돈다. ★`--disallow-mcp` 와 다른 점★: 후자는 MCP grant 만 빼고 MCP 서버는 여전히
+    ///   부착·both-teaching 프라이밍이라 물리/교육 채널이 갈린다(측정용 불일치). `--cli-only` 는 provision
+    ///   자체를 CLI-only 로 정렬해 정합 불변식을 보존한 채 false path 를 실측한다. ★이 모드는 `--priming`
+    ///   override 를 주지 않아야 한다★ — provision 이 자동으로 `prompts/agent-priming-cli.md` 를 고르는 걸
+    ///   보는 게 목적이다(entrance=cli 기대). test-only 노브(운영 스위치 아님).
+    cli_only: bool,
 }
 
 /// 배달 관측 싱크(ADR-0088) — relay 레코드를 스레드 안전 Vec 에 모은다. 하네스가 registry 에 설치하고
@@ -229,10 +273,39 @@ impl DeliveryObserver for CapturingObserver {
 async fn run() -> i32 {
     let args = parse_args(std::env::args().skip(1));
 
-    // 케이스→priming 파일 경로. repo 루트 기준으로 해석해 절대화한다. env 로 넘겨 두 에이전트가 같은 변형.
     let repo_root = repo_root_from_manifest();
     let priming_selector = args.priming.clone();
-    let resolved_priming = match resolve_priming_path(priming_selector.as_deref(), &repo_root) {
+    // ★--cli-only 는 priming override 를 주지 않아야 한다(ADR-0099 FIX 3)★: 이 모드의 목적은 provision 이
+    //   자동으로 `prompts/agent-priming-cli.md`(CliOnly 변형)를 고르는 걸 보는 것이다. 그래서 여기서는
+    //   ENGRAM_PRIMING_FILE override 를 세우지 않고, 보고·CLI-요구 판정용으로 그 CLI-only 운영 파일을
+    //   effective priming 으로 해석만 한다. `--priming` 을 함께 주면 목적(auto-select 관측)과 충돌하므로
+    //   fail-fast 한다(오해 방지).
+    if args.cli_only && priming_selector.is_some() {
+        return setup_fail(
+            "--cli-only 는 --priming override 와 함께 쓸 수 없다 — 이 모드는 provision 이 자동으로 prompts/agent-priming-cli.md 를 고르는 걸 관측하는 게 목적이다(override 를 주면 그 관측이 무의미)",
+        );
+    }
+    // ★--cli-only 는 **상속된** ENGRAM_PRIMING_FILE 도 거부한다(ADR-0099)★: 부모 env 에 이 override 가 미리
+    //   깔려 있으면 provider(priming.rs)가 그걸 최우선으로 읽어 provision 의 CliOnly auto-select 를 조용히
+    //   덮어쓴다 — `--priming` co-pass 거부와 같은 구멍이 env 로 들어온다. **조용히 clear 하지 않는다**
+    //   (operator 가 일부러 세운 값일 수 있어 지우면 숨은 의도 파괴) — 어느 값이든(비어 있지 않으면) 그 이름을
+    //   박아 SETUP-FAIL 로 요란히 거부하고 operator 가 직접 걷어내게 한다. co-pass 거부와 대칭이다.
+    if cli_only_env_override_conflicts(
+        args.cli_only,
+        std::env::var_os("ENGRAM_PRIMING_FILE").as_deref(),
+    ) {
+        return setup_fail(
+            "--cli-only 인데 부모 env 에 ENGRAM_PRIMING_FILE 이 설정돼 있다 — 이 override 가 provision 의 CliOnly auto-select 를 덮어써 관측을 무의미하게 만든다. 조용히 지우지 않으니(숨은 의도 파괴 방지) 실행 전에 직접 unset 하라",
+        );
+    }
+    // effective priming 경로: cli-only 면 CliOnly 운영 파일(provision 이 auto-select 할 그 파일), 아니면
+    //   셀렉터 해석 결과. 두 경우 모두 repo 루트 기준 절대화.
+    let priming_selector_for_resolve = if args.cli_only {
+        Some("prompts/agent-priming-cli.md")
+    } else {
+        priming_selector.as_deref()
+    };
+    let resolved_priming = match resolve_priming_path(priming_selector_for_resolve, &repo_root) {
         Some(p) => p,
         None => {
             // 절대화조차 못 함(비정상 셀렉터) — 프라이밍은 실험 필수라 fail-fast.
@@ -269,11 +342,17 @@ async fn run() -> i32 {
     };
     // ★env 로 넘겨 FilePrimingProvider 생성 전에 set★: provision 마다 priming_file() 이 이 env 를
     //   최우선 override 로 읽어 두 에이전트(A·B) 모두 같은 변형을 받는다.
-    std::env::set_var("ENGRAM_PRIMING_FILE", &resolved_priming);
+    //   ★--cli-only 예외(ADR-0099 FIX 3)★: 이 모드는 override 를 **세우지 않는다** — provision 이 강제된
+    //     비-MCP 분기에서 CliOnly 변형(prompts/agent-priming-cli.md)을 스스로 고르는 걸 관측하는 게 목적이다.
+    //     override 를 세우면 그 auto-select 를 우회하므로 일부러 뺀다.
+    if !args.cli_only {
+        std::env::set_var("ENGRAM_PRIMING_FILE", &resolved_priming);
+    }
     eprintln!(
-        "[roundtrip] priming = {} (case={:?})",
+        "[roundtrip] priming = {} (case={:?}, cli_only={})",
         resolved_priming.display(),
-        priming_selector
+        priming_selector,
+        args.cli_only
     );
     // ★ADR-0094 CLI-only 측정 seam★: `--disallow-mcp` 가 켜지면 provision 전에 env 를 세워, 두 에이전트가
     //   MCP send_message grant **없이** 스폰돼 engram-send CLI 로만 발신하게 강제한다. build_grants 가 이
@@ -282,6 +361,15 @@ async fn run() -> i32 {
     if args.disallow_mcp {
         std::env::set_var("ENGRAM_DISALLOW_MCP_SEND", "1");
         eprintln!("[roundtrip] --disallow-mcp → MCP send grant 제거(CLI-only 측정, ENGRAM_DISALLOW_MCP_SEND=1)");
+    }
+    // ★ADR-0099 FIX 3 CLI-only 강제 seam★: `--cli-only` 가 켜지면 provision 전에 env 를 세워, provision 이
+    //   실 claude 스폰을 **비-MCP 로 강제**한다 → false path 전체(no mcp-config + CliOnly 프라이밍 + [Cli]
+    //   grant)가 돈다. control/mod.rs::provision 이 이 env 를 분기 맨 위에서 읽어 effective flag 를 false 로
+    //   덮는다. --disallow-mcp 와 달리 물리/교육 채널이 정합(둘 다 CLI)이라 실 claude 를 비-MCP 백엔드처럼
+    //   굴려 false 분기를 실측한다(CLI 입구 활성 = send_exe 필수 — 아래에서 가드).
+    if args.cli_only {
+        std::env::set_var("ENGRAM_FORCE_CLI_ONLY_SEND", "1");
+        eprintln!("[roundtrip] --cli-only → provision 을 비-MCP 로 강제(false path 전체, ENGRAM_FORCE_CLI_ONLY_SEND=1); entrance=cli 기대");
     }
 
     // 배선(priming_smoke 미러) — 실 FilePrimingProvider·MCP 서버·AgentManager.
@@ -305,7 +393,7 @@ async fn run() -> i32 {
     let _ = std::fs::create_dir_all(&ws_a);
     let _ = std::fs::create_dir_all(&ws_b);
 
-    // ★send_exe 배선(CLI 입구 활성화 — C3/C1 에 필수)★: engram-send 는 데몬 exe 형제로 배포된다. 이
+    // ★send_exe 배선(CLI 입구 활성화 — CLI-지시 프라이밍/`--cli-only`/`--disallow-mcp` 에 필수)★: engram-send 는 데몬 exe 형제로 배포된다. 이
     //   하네스는 cargo 가 만든 target 디렉토리(현재 exe 형제)에서 engram-send 를 찾아 endpoint 에 싣는다.
     //   못 찾으면 None(CLI 입구 비활성 — MCP 만).
     let send_exe = sibling_send_exe();
@@ -342,6 +430,19 @@ async fn run() -> i32 {
         }
         return setup_skip(
             "--disallow-mcp requires the CLI inlet (engram-send) but it is not built — MCP grant removed AND no CLI grant means agents have no send path. 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
+        );
+    }
+    // ★--cli-only 는 CLI 입구가 반드시 살아 있어야 한다(ADR-0099 FIX 3)★: 이 모드는 provision 을 비-MCP 로
+    //   강제하므로 MCP 입구가 물리적으로 없다 — send_exe 마저 없으면 provision 이 fail-closed edge(Err)로
+    //   스폰을 막는다(control/mod.rs). 그걸 SETUP-FAIL 로 늦게 만나기 전에 스폰 **전에** 요란히 SETUP-SKIP.
+    if args.cli_only && send_exe.is_none() {
+        handle.shutdown().await;
+        let dirs = [&data_dir, &ws_a, &ws_b];
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        return setup_skip(
+            "--cli-only requires the CLI inlet (engram-send) but it is not built — forced non-MCP spawn has no MCP inlet, and no CLI grant means agents have no send path (provision would fail-closed). 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
         );
     }
 
@@ -521,6 +622,17 @@ async fn run() -> i32 {
         Some(o) => entrance_str(o.entrance),
         None => "none",
     };
+    // ★--cli-only 판정(ADR-0099 FIX 3)★: 이 모드는 provision 을 비-MCP 로 강제해 MCP 입구가 물리적으로
+    //   없다 — B 가 보냈다면(b_sent) entrance 는 반드시 `cli` 여야 한다. `mcp` 가 관측되면 강제 seam 이
+    //   실제로 MCP 를 제거하지 못한 것(배관 결함)이므로 SETUP-FAIL(setup 결함)로 요란히 알린다.
+    //   ★entrance=none(B 미발신)은 여기서 안 잡고 끝의 엄격 VERDICT 가 FAIL(exit 1)로 처리한다★ —
+    //   여기 SETUP-FAIL 은 "seam 배관 결함"(mcp 새어나옴) 전용이고, "강제 false path 미실증"(아무도 안 보냄)은
+    //   결과 판정이라 최종 VERDICT 로 분리한다(라벨이 서로 다른 실패 원인을 섞지 않게).
+    if args.cli_only && b_sent && entrance_label != "cli" {
+        fail_setup!(&format!(
+            "--cli-only 인데 B 가 entrance={entrance_label} 로 발신 — 강제 seam 이 MCP 입구를 제거 못 함(배관 결함, 정상 negative 아님)"
+        ));
+    }
 
     // ── 4) A 가 B 답신을 처리하며 낸 텍스트 대기(정성 관측) ───────────────────────────
     //    B 가 보냈으면 그 relay 가 A stdin 에 꽂혀 A 턴이 돈다. 남은 시간만큼 A 턴 종료를 기다린다.
@@ -533,7 +645,13 @@ async fn run() -> i32 {
     let a_response = obs_a.response_text();
 
     // ── 5) 구조화 stdout 마커(오케스트레이터 판정용) ────────────────────────────────
-    let case_label = priming_selector.as_deref().unwrap_or("C0");
+    // cli-only 모드는 셀렉터가 없으므로(override 금지) 전용 라벨을 단다 — 오케스트레이터가 이 실측이
+    //   false-path(provision 강제 비-MCP) 임을 구분하게.
+    let case_label = if args.cli_only {
+        "CLI-ONLY(forced non-MCP)"
+    } else {
+        priming_selector.as_deref().unwrap_or("C0")
+    };
     println!("\n===== ROUNDTRIP CASE={case_label} B_SENT={b_sent} ENTRANCE={entrance_label} =====");
     println!("[model] {}", args.model);
     // 존재 검사를 통과한 실제 in-effect 경로만 출력한다(FIX round-2 #5 — 거짓 라벨 금지).
@@ -568,12 +686,29 @@ async fn run() -> i32 {
     let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
     cleanup(&manager, &[agent_a.id, agent_b.id], &dirs).await;
     handle.shutdown().await;
+    // ★--cli-only 는 엄격 판정(ADR-0099)★: 이 모드는 provision 을 비-MCP 로 강제해 false path 전체가
+    //   정합하게 도는지를 실측하는 게 목적이라, B 가 실제로 CLI 입구로 보냈을 때만(b_sent && entrance=cli)
+    //   성공이다. 아무것도 안 보낸 경우(B_SENT=false/ENTRANCE=none)는 일반 모드의 valid-negative 와 달리
+    //   **실패**로 본다(강제 false path 가 도는 걸 못 봤으니 목적 미달). 일반 모드는 종전대로 negative 도 exit 0.
+    if args.cli_only {
+        if cli_only_run_passed(b_sent, entrance_label) {
+            println!("VERDICT [roundtrip-smoke --cli-only]: PASS — B 가 CLI 입구로 발신(b_sent=true, entrance=cli)");
+            return 0;
+        }
+        let line = format!(
+            "VERDICT [roundtrip-smoke --cli-only]: FAIL — 강제 false path 미실증(b_sent={b_sent}, entrance={entrance_label}); cli-only 는 b_sent=true AND entrance=cli 여야 pass"
+        );
+        println!("{line}");
+        eprintln!("{line}");
+        return 1;
+    }
     // ★negative(B did not send)도 정상 exit 0★: 유효한 실험 결과지 하네스 실패가 아니다(ADR-0092).
     0
 }
 
-/// ★인자 파싱(순수·단위테스트 대상)★: `--priming <값>` 과 `--model <값>` 만 인식한다. 미지정 model=sonnet,
-///   미지정 priming=None(= C0). 알 수 없는 토큰은 무시(하네스라 관대). `iter` 로 받아 std::env 의존을 뺀다.
+/// ★인자 파싱(순수·단위테스트 대상)★: `--priming <값>`·`--model <값>`·불리언 `--disallow-mcp`/`--cli-only`
+///   를 인식한다. 미지정 model=sonnet, 미지정 priming=None(= 기본 both 프라이밍). 알 수 없는 토큰은 무시
+///   (하네스라 관대). `iter` 로 받아 std::env 의존을 뺀다.
 /// ★플래그를 값으로 삼키지 않는다(FIX round-2 #7)★: `--priming --model opus` 처럼 다음 토큰이 또 플래그
 ///   (`--` 로 시작)면 그건 값이 아니라 새 플래그다 — peek 해서 값으로 소비하지 않고 넘긴다(그 플래그는
 ///   다음 루프에서 제대로 처리, priming 은 미지정 유지). 이렇게 안 하면 `--model` 이 priming 값으로 먹혀
@@ -584,6 +719,8 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     // ADR-0094: `--disallow-mcp` 는 값 없는 불리언 플래그(존재 = 켜짐) — take_flag_value 로 다음 토큰을
     //   삼키지 않는다(그 자체로 완결).
     let mut disallow_mcp = false;
+    // ADR-0099 FIX 3: `--cli-only` 도 값 없는 불리언 플래그(존재 = 켜짐).
+    let mut cli_only = false;
     let mut it = iter.peekable();
     while let Some(tok) = it.next() {
         match tok.as_str() {
@@ -598,6 +735,7 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
                 }
             }
             "--disallow-mcp" => disallow_mcp = true,
+            "--cli-only" => cli_only = true,
             _ => {}
         }
     }
@@ -605,6 +743,7 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
         priming,
         model,
         disallow_mcp,
+        cli_only,
     }
 }
 
@@ -618,20 +757,18 @@ fn take_flag_value<I: Iterator<Item = String>>(it: &mut std::iter::Peekable<I>) 
     }
 }
 
-/// ★케이스→priming 파일 경로(순수·단위테스트 대상)★: 셀렉터를 repo 루트 기준 경로로 매핑한다.
-///   - C0(또는 None) → `prompts/agent-priming.md`(현행, 발신 지시 없음)
-///   - C1 → `prompts/experiments/agent-priming-send-both.md`
-///   - C2 → `prompts/experiments/agent-priming-send-mcp.md`
-///   - C3 → `prompts/experiments/agent-priming-send-cli.md`
-///   - 그 외 = **경로로 간주**(절대면 그대로, 상대면 repo 루트 기준 join) — 명시 override.
+/// ★셀렉터→priming 파일 경로(순수·단위테스트 대상, ADR-0099)★: repo 루트 기준 경로로 매핑한다.
+///   - C0(또는 None) → `prompts/agent-priming.md`(운영 A = both-teaching).
+///   - 그 외 = **파일 경로로 간주**(절대면 그대로, 상대면 repo 루트 기준 join) — 명시 override. 운영 B
+///     (`prompts/agent-priming-cli.md`)나 임시 실험 파일을 이 경로로 직접 지정한다.
 /// 반환은 항상 절대경로(존재 검사는 하지 않는다 — FilePrimingProvider 가 최종 존재/CLI-안전 검사).
 ///   절대화조차 못 하면 None.
+///   ※ 옛 C1~C3 실험 별칭은 ADR-0099 로 제거됐다(실험 변형 파일 정리 — git 이력 보존). C1~C3 문자열을
+///     넘기면 이제 "그 이름의 파일 경로"로 해석돼 repo 루트 기준 join 되고(존재하지 않아 하류에서 None),
+///     별도 특수 매핑은 없다.
 fn resolve_priming_path(selector: Option<&str>, repo_root: &std::path::Path) -> Option<PathBuf> {
     let rel: &str = match selector {
         None | Some("C0") | Some("c0") => "prompts/agent-priming.md",
-        Some("C1") | Some("c1") => "prompts/experiments/agent-priming-send-both.md",
-        Some("C2") | Some("c2") => "prompts/experiments/agent-priming-send-mcp.md",
-        Some("C3") | Some("c3") => "prompts/experiments/agent-priming-send-cli.md",
         Some(path) => {
             // 명시 경로 override. 절대면 그대로, 상대면 repo 루트 기준.
             let p = PathBuf::from(path);
@@ -888,6 +1025,24 @@ mod tests {
         assert_eq!(a.priming, None);
         assert_eq!(a.model, "sonnet");
         assert!(!a.disallow_mcp, "기본은 MCP 허용(오늘 동작)");
+        assert!(!a.cli_only, "기본은 cli-only 강제 없음(오늘 동작)");
+    }
+
+    #[test]
+    fn parse_args_cli_only_flag_is_boolean() {
+        // ★ADR-0099 FIX 3★: `--cli-only` 는 값 없는 불리언 플래그(존재 = 켜짐). 뒤 토큰(--model)을 값으로
+        //   삼키지 않고, model 은 정상 파싱돼야 한다.
+        let a = parse_args(s(&["--cli-only", "--model", "opus"]));
+        assert!(a.cli_only, "--cli-only 존재 → 켜짐");
+        assert_eq!(a.model, "opus", "--cli-only 뒤 --model 은 정상 파싱");
+        assert_eq!(a.priming, None);
+    }
+
+    #[test]
+    fn parse_args_cli_only_absent_is_false() {
+        // 플래그 미지정이면 오늘 동작(강제 없음) 유지 — 운영 회귀 0.
+        let a = parse_args(s(&["--priming", "C0", "--model", "haiku"]));
+        assert!(!a.cli_only);
     }
 
     #[test]
@@ -903,21 +1058,27 @@ mod tests {
     #[test]
     fn parse_args_disallow_mcp_absent_is_false() {
         // 플래그 미지정이면 오늘 동작(MCP 허용) 유지 — 운영 회귀 0.
-        let a = parse_args(s(&["--priming", "C2", "--model", "haiku"]));
+        let a = parse_args(s(&["--priming", "some/priming.md", "--model", "haiku"]));
         assert!(!a.disallow_mcp);
     }
 
     #[test]
     fn parse_args_priming_and_model() {
-        let a = parse_args(s(&["--priming", "C2", "--model", "opus"]));
-        assert_eq!(a.priming.as_deref(), Some("C2"));
+        let a = parse_args(s(&["--priming", "some/priming.md", "--model", "opus"]));
+        assert_eq!(a.priming.as_deref(), Some("some/priming.md"));
         assert_eq!(a.model, "opus");
     }
 
     #[test]
     fn parse_args_order_independent_and_ignores_unknown() {
-        let a = parse_args(s(&["--model", "haiku", "junk", "--priming", "C1"]));
-        assert_eq!(a.priming.as_deref(), Some("C1"));
+        let a = parse_args(s(&[
+            "--model",
+            "haiku",
+            "junk",
+            "--priming",
+            "other/priming.md",
+        ]));
+        assert_eq!(a.priming.as_deref(), Some("other/priming.md"));
         assert_eq!(a.model, "haiku");
     }
 
@@ -966,34 +1127,8 @@ mod tests {
         assert_eq!(got, got2);
     }
 
-    #[test]
-    fn resolve_cases_c1_c2_c3_map_to_experiment_files() {
-        let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
-        for (sel, tail_unix, tail_win) in [
-            (
-                "C1",
-                "prompts/experiments/agent-priming-send-both.md",
-                "prompts\\experiments\\agent-priming-send-both.md",
-            ),
-            (
-                "C2",
-                "prompts/experiments/agent-priming-send-mcp.md",
-                "prompts\\experiments\\agent-priming-send-mcp.md",
-            ),
-            (
-                "C3",
-                "prompts/experiments/agent-priming-send-cli.md",
-                "prompts\\experiments\\agent-priming-send-cli.md",
-            ),
-        ] {
-            let got = resolve_priming_path(Some(sel), &root).expect("case 경로");
-            assert!(got.is_absolute());
-            assert!(
-                got.ends_with(tail_unix) || got.ends_with(tail_win),
-                "{sel} 매핑 오류: {got:?}"
-            );
-        }
-    }
+    // ADR-0099: 옛 C1~C3 실험 별칭 매핑 테스트는 별칭 제거와 함께 삭제됐다. C1~C3 는 이제 파일 경로로
+    //   해석돼 repo 루트 기준 join 될 뿐 특수 매핑이 없다(아래 명시 경로 override 테스트가 그 동작을 커버).
 
     #[test]
     fn resolve_explicit_absolute_path_passthrough() {
@@ -1083,6 +1218,75 @@ mod tests {
         assert!(
             priming_text_directs_cli("Do NOT use engram-send; use MCP instead."),
             "부정문도 substring 존재로 true — 의도된 보수적 skip 방향"
+        );
+    }
+
+    // ── ADR-0099: --cli-only 가 상속된 ENGRAM_PRIMING_FILE override 를 거부하는가(순수 판정) ──────────
+    #[test]
+    fn cli_only_rejects_inherited_priming_env() {
+        use std::ffi::OsStr;
+        // cli-only + 비어 있지 않은 env override → 충돌(true, SETUP-FAIL 유발). `--priming` co-pass 거부와 대칭.
+        assert!(
+            cli_only_env_override_conflicts(true, Some(OsStr::new("prompts/agent-priming.md"))),
+            "cli-only 인데 상속 env override 있음 → 거부(충돌)"
+        );
+    }
+
+    #[test]
+    fn cli_only_ignores_empty_or_absent_priming_env() {
+        use std::ffi::OsStr;
+        // env 미설정(None) 또는 빈 값이면(미설정 취급) 충돌 아님 — 정상 진행.
+        assert!(
+            !cli_only_env_override_conflicts(true, None),
+            "cli-only 인데 env 미설정 → 충돌 아님"
+        );
+        assert!(
+            !cli_only_env_override_conflicts(true, Some(OsStr::new(""))),
+            "cli-only 인데 env 빈 값(미설정 취급) → 충돌 아님"
+        );
+    }
+
+    #[test]
+    fn non_cli_only_never_conflicts_with_priming_env() {
+        use std::ffi::OsStr;
+        // 일반 모드(cli_only=false)는 env override 를 정당히 쓴다 — 값이 있어도 충돌 아님.
+        assert!(
+            !cli_only_env_override_conflicts(false, Some(OsStr::new("prompts/agent-priming.md"))),
+            "일반 모드는 env override 정당 → 충돌 아님(cli_only=false)"
+        );
+    }
+
+    // ── ADR-0099: --cli-only 엄격 성공 판정(순수) — b_sent && entrance=cli 여야 pass ────────────────
+    #[test]
+    fn cli_only_pass_only_when_sent_via_cli() {
+        // 유일한 pass 조합: 실제 발신 + CLI 입구.
+        assert!(
+            cli_only_run_passed(true, "cli"),
+            "b_sent=true & entrance=cli → PASS"
+        );
+    }
+
+    #[test]
+    fn cli_only_fail_when_nothing_sent() {
+        // ★핵심(FIX 4)★: 아무것도 안 보낸 경우(b_sent=false/entrance=none)는 일반 모드의 valid-negative 와
+        //   달리 cli-only 에선 FAIL(강제 false path 미실증) — pass 아님.
+        assert!(
+            !cli_only_run_passed(false, "none"),
+            "b_sent=false/entrance=none → FAIL(pass 아님)"
+        );
+    }
+
+    #[test]
+    fn cli_only_fail_when_sent_via_non_cli_entrance() {
+        // entrance=mcp(강제 seam 이 MCP 를 못 지움)나 그 밖의 입구는 pass 아님(이중 안전망 — 앞선 SETUP-FAIL 과
+        //   별개로 순수 판정자도 cli 아닌 건 전부 실패로).
+        assert!(
+            !cli_only_run_passed(true, "mcp"),
+            "entrance=mcp → pass 아님"
+        );
+        assert!(
+            !cli_only_run_passed(true, "none"),
+            "b_sent=true 라도 entrance=none 이면 pass 아님"
         );
     }
 }

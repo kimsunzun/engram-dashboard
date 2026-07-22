@@ -34,7 +34,9 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
 use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
-use engram_dashboard_daemon::control::priming::{FilePrimingProvider, PrimingProvider};
+use engram_dashboard_daemon::control::priming::{
+    FilePrimingProvider, PrimingProvider, PrimingVariant,
+};
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
@@ -74,7 +76,8 @@ async fn run() -> i32 {
     //   기준 repo 루트(cargo run 은 크레이트 dir 이 cwd 일 수 있어 명시). ENGRAM_PRIMING_FILE override 존중.
     let repo_root = repo_root_from_manifest();
     let priming = FilePrimingProvider::new(repo_root.clone());
-    let priming_path = priming.priming_file();
+    // ADR-0099: 이 진단 bin 은 claude(MCP-capable) 를 스폰하므로 McpPrimary(both-teaching) 변형을 본다.
+    let priming_path = priming.priming_file(PrimingVariant::McpPrimary);
     match &priming_path {
         Some(p) => eprintln!("[smoke] priming file = {}", p.display()),
         None => eprintln!(

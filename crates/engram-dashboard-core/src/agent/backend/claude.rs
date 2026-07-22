@@ -38,6 +38,14 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
+    fn accepts_mcp_config(&self) -> bool {
+        // claude 는 mcp-config 를 `--mcp-config` 로 부착한다(ADR-0099) → MCP-capable.
+        //   이 true 하나가 provision 에서 mcp-config 기록 + MCP endpoint bits + both-teaching 프라이밍 +
+        //   [Mcp, Cli] grant 를 구동한다(정합 불변식: 깐 채널 == 프라이밍이 가르치는 채널).
+        // ADR-0099
+        true
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -143,10 +151,18 @@ impl AgentBackend for ClaudeBackend {
                 //   둘 다 연결 대상이라 mode 무관 동일 주입(claude 2.1.170 실측: headers Authorization 을
                 //   initialize/tools/list/tools/call 전 요청에 실전송). None(제어 채널 미구성·shell)이면 미주입.
                 //   ★보안★: config_path 만 args 에 실린다(토큰은 파일 안 — args/로그에 토큰 평문 없음).
-                // ADR-0086
+                //   ★config_path = Option(ADR-0099)★: MCP-capable(claude)이면 데몬이 `Some(path)`로 실어
+                //     보내 여기서 `--mcp-config <path>` 를 붙인다. 비-MCP 백엔드(codex/gemini)는 데몬이
+                //     `None` 을 실어 이 플래그가 아예 붙지 않는다(부재를 타입으로 인코딩 — 빈-경로 sentinel
+                //     방어 코드 불필요). CLI 크레덴셜 env(ENGRAM_TOKEN/URL/SEND_EXE·PATH)는 control endpoint
+                //     자체가 있으면(=제어 채널 소비 backend) 주입하므로 config_path 유무와 직교한다.
+                // ADR-0086 / ADR-0099
                 if let Some(endpoint) = &control {
-                    args.push("--mcp-config".to_string());
-                    args.push(endpoint.config_path.to_string_lossy().into_owned());
+                    // ADR-0099: mcp-config 경로는 MCP-capable 스폰에만 존재(Some) — 있을 때만 플래그 주입.
+                    if let Some(config_path) = &endpoint.config_path {
+                        args.push("--mcp-config".to_string());
+                        args.push(config_path.to_string_lossy().into_owned());
+                    }
                     // ADR-0086 스텝 2(CLI 입구): MCP(mcp-config) 입구와 **별개로**, PTY env 에 CLI 크레덴셜을
                     //   주입한다. 스폰된 claude 가 Bash 로 CLI(`engram-send`)를 부를 때 이 env 를 읽어 데몬 제어
                     //   라우트에 Bearer 토큰으로 POST 한다. env 는 CommandSpec.env → transport 가 cmd.env(k,v)
@@ -1137,7 +1153,8 @@ mod tests {
         ControlEndpoint {
             url: "http://127.0.0.1:54321/mcp".to_string(),
             token: "deadbeef".to_string(),
-            config_path: PathBuf::from("C:/data/mcp/agent-x.json"),
+            // ADR-0099: config_path 는 Option — MCP-capable(claude) 케이스라 Some.
+            config_path: Some(PathBuf::from("C:/data/mcp/agent-x.json")),
             // 기본 헬퍼는 send_exe 를 담아 ENGRAM_SEND_EXE 주입 경로를 검증할 수 있게 한다.
             send_exe: Some(PathBuf::from("C:/app/engram-send.exe")),
             // 기본 헬퍼는 프라이밍 파일을 담지 않는다(ADR-0092) — 프라이밍 주입 테스트가 명시로 채운다.
@@ -1224,6 +1241,29 @@ mod tests {
             !s.args.iter().any(|a| a == "--mcp-config"),
             "control 없으면 --mcp-config 없음: {:?}",
             s.args
+        );
+    }
+
+    #[test]
+    fn claude_control_endpoint_none_config_path_no_mcp_config_flag() {
+        // ★ADR-0099★: control endpoint 는 있으되 config_path=None(비-MCP 백엔드가 준 endpoint 모사)이면
+        //   --mcp-config 플래그가 붙지 않는다 — 부재를 타입(Option)으로 인코딩해 backend 가 Some 일 때만
+        //   주입한다(빈-경로 sentinel 방어 코드 없이 타입이 강제). CLI env(ENGRAM_TOKEN 등)는 endpoint 가
+        //   있으면 여전히 주입되므로 config_path 유무와 직교함도 함께 확인.
+        let no_cfg = ControlEndpoint {
+            config_path: None,
+            ..ep()
+        };
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(no_cfg));
+        assert!(
+            !s.args.iter().any(|a| a == "--mcp-config"),
+            "config_path=None → --mcp-config 미주입: {:?}",
+            s.args
+        );
+        // endpoint 자체는 있으므로 CLI 크레덴셜 env 는 주입된다(config 유무와 직교).
+        assert!(
+            s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN"),
+            "endpoint 존재 → ENGRAM_TOKEN 은 그래도 주입(직교)"
         );
     }
 
