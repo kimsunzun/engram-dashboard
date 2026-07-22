@@ -166,8 +166,10 @@ pub struct CommandSpec {
 ///   core 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
 ///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
 ///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
-/// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 나머지 툴은 게이트 유지. 여기에 툴을
-///   추가하려면 명시적 결정(ADR-0094 개정). 전부-허용(bypassPermissions)으로 넓히지 않는다.
+/// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 이 *목록*을 넓히려면 명시적 결정(ADR-0094 개정).
+///   주의: 2026-07-22 사용자 결정으로 스폰 자체는 `--permission-mode bypassPermissions`(auto) 하에 돈다 —
+///   이 grant 는 지금 런타임 게이트가 아니라 **미래 공용 제약 레이어용 정책 표면 + 문서화**로 남는 것이다
+///   (backend/claude.rs 참조, step-log 백로그 "전 LLM 공용 제약 레이어").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGrant {
     /// MCP 서버의 툴 1개. backend 가 `mcp__{server}__{tool}` 로 번역한다(claude).

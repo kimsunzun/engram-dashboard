@@ -53,6 +53,20 @@ impl AgentBackend for ClaudeBackend {
                 output_format,
             } => {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
+                // ★AUTO 권한 모드 — `--permission-mode bypassPermissions`(사용자 결정 2026-07-22)★:
+                //   스폰되는 claude 는 헤드리스 워커라 승인자(approver)가 없다 — 기본 거부(default-deny)
+                //   + per-tool grant 배선은 승인 프롬프트를 띄울 사람이 없어 구조적으로 성립하지 않는다
+                //   (CLI 실측 0/38 전량 permission-block). 그래서 스폰 시 auto 모드를 켠다. 이건 **임시 체제**
+                //   이며, 정식 대체는 전 LLM 공용 제약 레이어다(step-log 백로그 — 그때 이 base 플래그를 걷고
+                //   제약 레이어로 대체). 결정 근거·거부한 대안은 이 결정의 전용 ADR 에 박제된다(메인 세션 작성).
+                //   ★두 argv 요소(flag+value, NON-variadic)★: `--permission-mode` 와 `bypassPermissions`
+                //   두 요소를 base 플래그로 **맨 앞**에 둔다 — extra_args 확장·`--allowedTools` variadic 그룹
+                //   보다 훨씬 앞이라 그 그룹의 맨-끝 불변식(테스트 claude_allowed_tools_group_is_last_*)을
+                //   건드리지 않는다. control endpoint 유무와 무관하게 **무조건** 주입(두 spawn 모드 공통).
+                // 사용자 결정 2026-07-22
+                // ADR-0097
+                args.push("--permission-mode".to_string());
+                args.push("bypassPermissions".to_string());
                 match output_format {
                     // ── 터미널(PTY 대화형) — 기존 경로, 바이트/인자 완전 불변(회귀 금지) ──
                     ClaudeOutputFormat::Terminal => {
@@ -299,7 +313,13 @@ impl AgentBackend for ClaudeBackend {
                 //   번역하는 규칙(`mcp__{server}__{tool}` / `Bash({exe}:*)`+`PowerShell({exe}:*)`)은 이
                 //   파일만 안다. 툴/서버 이름은
                 //   데몬 컨트롤 채널이 정본(ADR-0094 단일 출처) — 여기선 형식만 만든다. grants 가 비면 아무
-                //   플래그도 안 붙인다(권한 플래그 없음 = 기존 게이트 유지 — 회귀 없음). NEVER bypassPermissions.
+                //   플래그도 안 붙인다(권한 플래그 없음 — 회귀 없음).
+                //   ★grant 유지 이유(bypass 가 스폰 기본값이 된 뒤에도)★: 사용자 결정 2026-07-22 로
+                //   `--permission-mode bypassPermissions`(위 base 플래그)가 스폰 기본값이 됐다 — 그래서
+                //   실질 인가는 bypass 가 판다. 그럼에도 이 최소권한 grant 주입은 **유지**한다: (a) bypass
+                //   아래선 무해하고(중복 인가일 뿐), (b) 미래 전 LLM 공용 제약 레이어가 bypass 를 걷을 때
+                //   재사용할 **결정적 정책 표면**이며, (c) "이 에이전트가 어떤 발신 입구를 갖는가"를 드러내는
+                //   문서화 표면이다. 즉 이 그룹은 지금 게이트가 아니라 정책 선언으로 남는다.
                 //   ★arg shape★: `--allowedTools` 한 요소 뒤에 각 패턴을 **개별 args 요소**로 잇는다
                 //   (공백 포함 패턴 `Bash(C:\Program Files\…:*)` 이 한 argv 요소로 유지돼야 claude
                 //   가 공백을 값 구분자로 쪼개지 않는다 — comma-join 단일 값으로 합치지 않는 이유). 터미널·
@@ -388,6 +408,7 @@ impl AgentBackend for ClaudeBackend {
 ///   MCP grant(`mcp__engram__send_message`)는 여전히 병행 발신 경로다(직교 입구).
 /// ★패턴 순서(Cli)★: Bash 먼저, PowerShell 다음 — build_spec 이 이 순서로 args 에 잇는다(테스트 앵커).
 /// 빈 grants → 빈 Vec(호출자가 `--allowedTools` 플래그 자체를 안 붙인다 = 권한 플래그 없음).
+// ADR-0098
 pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
     let mut out = Vec::with_capacity(grants.len());
     for g in grants {
@@ -1078,9 +1099,13 @@ mod tests {
         let sid = Uuid::new_v4();
         let s = spec(&terminal(vec!["--verbose"]), SpawnMode::Fresh, Some(sid));
         // Windows면 cmd /c claude … 로 래핑되므로 기대값도 console_command로 계산.
+        // ★AUTO 권한 모드(사용자 결정 2026-07-22)★: 모든 spawn 은 `--permission-mode bypassPermissions`
+        //   를 base 플래그로 **맨 앞**에 낸다(무조건). 그래서 골든도 그 pair 로 시작한다.
         let (p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--verbose".to_string(),
@@ -1094,9 +1119,15 @@ mod tests {
     fn claude_resume_uses_resume_flag() {
         let sid = Uuid::new_v4();
         let s = spec(&terminal(vec![]), SpawnMode::Resume, Some(sid));
+        // AUTO 권한 모드 pair 가 맨 앞(사용자 결정 2026-07-22).
         let (_p, a) = console_command(
             CLAUDE_PROGRAM,
-            vec!["--resume".to_string(), sid.to_string()],
+            vec![
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
+                "--resume".to_string(),
+                sid.to_string(),
+            ],
         );
         assert_eq!(s.args, a);
     }
@@ -1154,9 +1185,12 @@ mod tests {
         // control 이 있으면 세션 플래그 뒤에 `--mcp-config <config_path>` 가 붙어야 한다(터미널 모드).
         let sid = Uuid::new_v4();
         let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, Some(sid), Some(ep()));
+        // AUTO 권한 모드 pair 가 맨 앞, 그 뒤 세션·mcp-config(사용자 결정 2026-07-22).
         let (_p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--mcp-config".to_string(),
@@ -1702,26 +1736,89 @@ mod tests {
         );
     }
 
+    /// args 벡터에서 `--permission-mode` 바로 뒤에 `bypassPermissions` 가 오는(연속 pair) 위치를
+    /// 찾는다. 없으면 None. 새 auto-권한 회귀 테스트들이 공유한다.
+    fn permission_mode_pair_index(args: &[String]) -> Option<usize> {
+        args.windows(2)
+            .position(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions")
+    }
+
     #[test]
-    fn claude_never_uses_bypass_permissions() {
-        // ★안전 회귀 가드(ADR-0094)★: 어떤 경로로도 bypass 계열 플래그를 내지 않는다(최소권한 불변).
+    fn claude_terminal_injects_auto_permission_mode_pair() {
+        // ★AUTO 권한 모드(사용자 결정 2026-07-22)★: 헤드리스 워커는 승인자 부재로 기본 거부가 구조적
+        //   한계(CLI 0/38 실측)라, 모든 spawn 이 `--permission-mode bypassPermissions` 를 **무조건**
+        //   낸다 — control endpoint 유무와 무관. 옛 "NEVER bypassPermissions" 가드는 이 결정으로 폐기.
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        // ★첫 `--` 플래그 = pair 핀★: 절대 인덱스는 Windows console_command 래퍼(`cmd.exe /c claude`)가
+        //   앞에 토큰을 넣어 플랫폼마다 다르다. 대신 "args 의 첫 번째 플래그가 이 pair" 를 단언 —
+        //   extra_args 패스스루가 우연히 pair 를 만들어도 base 주입 회귀를 못 가린다(base 가 항상 먼저).
+        let first_flag = s.args.iter().position(|a| a.starts_with("--"));
+        assert!(
+            first_flag.is_some()
+                && permission_mode_pair_index(&s.args) == first_flag,
+            "터미널 spawn 의 첫 플래그는 pair `--permission-mode bypassPermissions` 여야 함(control 없어도): {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_json_injects_auto_permission_mode_pair() {
+        // json(stream-json) 모드도 동일 — auto 권한 pair 무조건 주입(control 없어도).
+        let s = spec(&json(vec![]), SpawnMode::Fresh, None);
+        // 첫 `--` 플래그 = pair 핀(터미널 테스트와 동일 근거 — 래퍼 오프셋 무관).
+        let first_flag = s.args.iter().position(|a| a.starts_with("--"));
+        assert!(
+            first_flag.is_some()
+                && permission_mode_pair_index(&s.args) == first_flag,
+            "json spawn 의 첫 플래그는 pair `--permission-mode bypassPermissions` 여야 함(control 없어도): {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_auto_permission_mode_precedes_allowed_tools_terminal() {
+        // ★순서 불변(사용자 결정 2026-07-22 × ADR-0094)★: auto 권한 pair 는 base 플래그라 variadic
+        //   `--allowedTools` 그룹보다 **앞**에 와야 한다(그래야 그 그룹의 맨-끝 불변식이 안 깨진다 —
+        //   pair 가 뒤에 오면 variadic 에 흡수될 수 있다). grants 있을 때 인덱스 순서로 단언.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
             None,
             Some(ep_with_grants()),
         );
-        for forbidden in [
-            "--dangerously-skip-permissions",
-            "bypassPermissions",
-            "--permission-mode",
-        ] {
-            assert!(
-                !s.args.iter().any(|a| a.contains(forbidden)),
-                "금지 플래그 누출: {forbidden} in {:?}",
-                s.args
-            );
-        }
+        let pair = permission_mode_pair_index(&s.args).expect("auto 권한 pair 존재");
+        let allowed = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("grants 있으면 --allowedTools 존재");
+        assert!(
+            pair + 1 < allowed,
+            "auto 권한 pair 는 --allowedTools 그룹보다 앞이어야 함: pair={pair} allowedTools={allowed} args={:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_auto_permission_mode_precedes_allowed_tools_json() {
+        // json(stream-json) 모드도 동일 순서 불변.
+        let s = spec_with_control(
+            &json(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        let pair = permission_mode_pair_index(&s.args).expect("auto 권한 pair 존재");
+        let allowed = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("grants 있으면 --allowedTools 존재");
+        assert!(
+            pair + 1 < allowed,
+            "json 모드: auto 권한 pair 는 --allowedTools 그룹보다 앞이어야 함: pair={pair} allowedTools={allowed} args={:?}",
+            s.args
+        );
     }
 
     /// terminal 변주(extra_args 포함) — variadic 흡수 회귀 테스트용.
@@ -1845,8 +1942,16 @@ mod tests {
     #[test]
     fn claude_no_session_id_produces_no_flags() {
         let s = spec(&terminal(vec!["--debug"]), SpawnMode::Fresh, None);
-        // sid 없으면 세션 플래그 없이 extra_args만(Windows면 cmd /c 래핑).
-        let (p, a) = console_command(CLAUDE_PROGRAM, vec!["--debug".to_string()]);
+        // sid 없으면 세션 플래그 없이 base(auto 권한 pair) + extra_args만(Windows면 cmd /c 래핑).
+        //   AUTO 권한 모드 pair 는 무조건 맨 앞(사용자 결정 2026-07-22).
+        let (p, a) = console_command(
+            CLAUDE_PROGRAM,
+            vec![
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
+                "--debug".to_string(),
+            ],
+        );
         assert_eq!(s.program, p);
         assert_eq!(s.args, a);
     }
@@ -1920,11 +2025,14 @@ mod tests {
             SpawnMode::Fresh,
             Some(sid),
         );
-        // 기대 인자(console_command 래핑 전) — -p + stream-json 입출력 + replay + verbose + session-id + extra.
+        // 기대 인자(console_command 래핑 전) — auto 권한 pair + -p + stream-json 입출력 + replay + verbose + session-id + extra.
         // ★--verbose 필수(실측 확정 2026-07-02)★: 없으면 claude 가 "requires --verbose" 로 즉사(build_spec 주석).
+        // ★AUTO 권한 모드(사용자 결정 2026-07-22)★: json 모드도 base 로 맨 앞에 pair 를 낸다.
         let (p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
                 "-p".to_string(),
                 "--input-format".to_string(),
                 "stream-json".to_string(),
