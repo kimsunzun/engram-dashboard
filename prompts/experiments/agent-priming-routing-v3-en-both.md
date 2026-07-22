@@ -16,8 +16,8 @@ When you receive one:
 **Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** To reach a teammate:
 
 - **Primary:** use the send_message tool — pass the recipient's name (or id) and the body.
-- **Fallback:** if the send_message tool is not available to you, run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables.
+- **Fallback:** if the send_message tool is not available to you, or a send_message call is blocked or errors, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables.
 
 Either way the envelope (the "from" label) is attached automatically by the broker.
 
-**Sending was already authorized by your principal when they launched you** (both paths are included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message, or engram-send if the tool is absent.
+**Sending was already authorized by your principal when they launched you** (both paths are included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message, or engram-send if that path is absent or blocked.

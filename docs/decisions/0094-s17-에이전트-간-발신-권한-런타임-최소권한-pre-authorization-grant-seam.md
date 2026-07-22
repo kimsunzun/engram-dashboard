@@ -1,7 +1,7 @@
 # ADR-0094: S17 에이전트 간 발신 권한 — 런타임 최소권한 pre-authorization (grant seam)
 
 - 상태: 확정 (2026-07-20, 근거: 사용자 결정 + /research medium(cross-family 리뷰) + C0~C3 실측)
-- 관련: ADR-0093(왕복 실험·C0~C3) · ADR-0092(수신 계약·프라이밍) · ADR-0086(듀얼 입구·토큰 파생 from) · ADR-0004(백엔드 지식 격리) · `crates/engram-dashboard-core/src/agent/backend/claude.rs`(번역) · `crates/engram-dashboard-core/src/agent/types.rs`(ControlEndpoint) · daemon 컨트롤 채널(grant 소유) · step-log S17
+- 관련: ADR-0093(왕복 실험·C0~C3) · ADR-0092(수신 계약·프라이밍) · ADR-0086(듀얼 입구·토큰 파생 from) · ADR-0004(백엔드 지식 격리) · `crates/engram-dashboard-core/src/agent/backend/claude.rs`(번역) · `crates/engram-dashboard-core/src/agent/types.rs`(ControlEndpoint) · daemon 컨트롤 채널(grant 소유) · step-log S17 · Amended by ADR-0097 (발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지) · Amended by ADR-0098 (CLI 발신 grant 번역을 절대경로 Bash({exe} *)에서 bare-name Bash/PowerShell({exe}:*) + PATH 주입으로 정렬(claude 권한 매처 미매칭 0/38 해소·배포 이식성))
 
 ## 맥락
 왕복 실험(ADR-0093, C0~C3)에서 **전 케이스 B_SENT=false**. 진단(B의 seed-후 턴 캡처)으로 원인 규명: claude 런타임 툴-권한 게이트가 스폰 에이전트의 발신 툴 호출(`send_message` MCP / `engram-send` CLI)을 차단(승인자 없는 헤드리스). B는 메시지를 정상 수신하고 답할 의사·발신법도 있으나 "사람 승인 필요"로 멈춤. `backend/claude.rs` 스폰 args엔 권한 플래그가 전무했다. `/research`(medium, cross-family codex 리뷰 VERDICT FIX로 세부 정정)로 확증: **Claude Code 권한은 런타임 강제 — 프롬프트·CLAUDE.md로 self-grant 불가**(공식 문서). 발신을 열려면 런타임 pre-authorization이 필수.
