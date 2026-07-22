@@ -47,7 +47,7 @@ impl AgentBackend for GeminiBackend {
         env: Vec<(String, String)>,
         // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
         // TODO(ADR-0094): translate ControlEndpoint.grants to gemini permission flags
-        //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e} *); gemini 방언은 CLI spike 후 확정).
+        //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e}:*)+PowerShell({e}:*); gemini 방언은 CLI spike 후 확정).
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         // AgentCommand에 Gemini variant가 없으므로 Claude/Shell만 들어올 수 있다.

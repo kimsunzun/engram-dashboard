@@ -164,15 +164,16 @@ pub struct CommandSpec {
 /// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
 ///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
 ///   core 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
-///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe} *)`)으로만
-///   번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
+///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
+///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
 /// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 나머지 툴은 게이트 유지. 여기에 툴을
 ///   추가하려면 명시적 결정(ADR-0094 개정). 전부-허용(bypassPermissions)으로 넓히지 않는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGrant {
     /// MCP 서버의 툴 1개. backend 가 `mcp__{server}__{tool}` 로 번역한다(claude).
     Mcp { server: String, tool: String },
-    /// CLI 실행 파일 1개(그 exe 로 시작하는 명령을 허용). backend 가 `Bash({exe} *)` 로 번역한다(claude).
+    /// CLI 실행 파일 1개(그 exe 로 시작하는 명령을 허용 — bare 이름, backend 주입 PATH 로 해석).
+    /// backend 가 `Bash({exe}:*)` **와** `PowerShell({exe}:*)` 두 패턴으로 번역한다(claude — 두 shell 도구 모양).
     Cli { exe: String },
 }
 

@@ -138,10 +138,12 @@ impl AgentBackend for ClaudeBackend {
                     //   라우트에 Bearer 토큰으로 POST 한다. env 는 CommandSpec.env → transport 가 cmd.env(k,v)
                     //   로 심고, portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
                     //   (Bash·그 손자)까지 상속**한다(lib.rs ENGRAM_EXE 주석과 동일 메커니즘).
-                    //   ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: `engram-send` 는 PATH 에 없다(데몬 exe
-                    //   의 형제로 배포되는 내부 바이너리라 bare 이름으론 Bash 에서 못 찾는다). 데몬이 부팅 시
-                    //   자기 exe 형제에서 위치를 찾아 endpoint.send_exe 로 실어 보내면, 여기서 그 **절대경로**를
-                    //   env 로 주입한다 → 에이전트 매뉴얼은 `"$ENGRAM_SEND_EXE" --to <name> --body "…"` 로 부른다.
+                    //   ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: `engram-send` 는 원래 PATH 에 없다(데몬
+                    //   exe 의 형제로 배포되는 내부 바이너리). 데몬이 부팅 시 자기 exe 형제에서 위치를 찾아
+                    //   endpoint.send_exe 로 실어 보내면, 여기서 그 **절대경로**를 env 로 주입한다. 프라이밍은
+                    //   이제 bare `engram-send`(주입 PATH 로 해석 — 아래 PATH 주입 참조)를 가르친다 — 에이전트가
+                    //   그 이름을 shell 에서 그대로 부른다. ENGRAM_SEND_EXE(절대경로) env 는 하위호환으로 유지
+                    //   (기존 진단·대체 소비자용 — ADR-0094 정렬은 PATH 로 이루되 이 env 는 병행 보존).
                     //   send_exe 가 None(부분 빌드 등 형제 부재)이면 이 env 만 생략한다 — token/url 은 그래도
                     //   주입해 MCP 입구는 살리고, CLI 입구만 못 쓰게 한다(데몬은 그때 warn 로그 — lib.rs).
                     //   ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
@@ -167,10 +169,101 @@ impl AgentBackend for ClaudeBackend {
                     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
                     // send_exe 가 있을 때만 CLI 경로를 env 로 노출(없으면 CLI 입구 비활성 — MCP 입구는 유지).
                     if let Some(send_exe) = &endpoint.send_exe {
+                        // ★ENGRAM_SEND_EXE(절대경로) 유지(하위호환)★: grant·프라이밍이 bare `engram-send`
+                        //   로 정렬됐어도 이 절대경로 env 는 계속 주입한다 — 기존 소비자(진단·대체 경로)가
+                        //   있을 수 있어 제거하지 않는다(ADR-0094 정렬은 PATH 로 이룬다, 이건 병행 보존).
                         env.push((
                             "ENGRAM_SEND_EXE".to_string(),
                             send_exe.to_string_lossy().into_owned(),
                         ));
+                        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(engram-send:*)`)와 프라이밍이
+                        //   모두 bare `engram-send` 를 가르치므로, 스폰된 에이전트의 shell(및 그 자식 Bash
+                        //   도구)이 그 이름을 실제로 **찾을** 수 있어야 한다. `engram-send` 는 PATH 에 없는
+                        //   내부 형제 바이너리라, send_exe 의 **부모 디렉토리**를 PATH **맨 앞**에 붙여
+                        //   자식이 상속할 PATH 로 심는다. transport(portable-pty)가 부모 env 를 먼저 시드한
+                        //   뒤 CommandSpec.env 를 순서대로 덮으므로, 이 PATH 항목이 자식이 상속한 PATH 를
+                        //   대체한다. 에이전트의 자식들(Bash 도구 등)도 이 PATH 를 상속한다.
+                        //   부모 디렉토리를 못 구하면(경로 형태 이상) PATH 주입을 건너뛴다(오늘 동작 유지).
+                        //
+                        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이
+                        //   지점보다 **먼저** env 벡터에 들어와 있다(spawn 경로가 profile.env 를 먼저 push).
+                        //   base 로 데몬 프로세스 PATH(std::env::var_os) 대신 **env 벡터에 이미 있는 마지막
+                        //   PATH** 를 쓴다 — 프로필이 커스텀 PATH 를 실었으면 그 값이 base 가 돼 tail 로
+                        //   보존된다(데몬 PATH 로 리빌드하면 프로필 PATH 가 통째로 증발한다). env 벡터에
+                        //   PATH 가 없을 때만 데몬 프로세스 PATH 로 폴백한다.
+                        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수라
+                        //   Windows(=대소문자 무시)에선 eq_ignore_ascii_case 로, 그 외 OS 에선 정확 일치로
+                        //   찾는다.
+                        //   ★last-match-wins + dedupe(load-bearing)★: transport(portable-pty)는 env 를
+                        //   **순서대로** cmd.env(k,v) 하므로, 같은 변수의 중복 항목이 있으면 자식엔
+                        //   **마지막** 값이 산다(예: Windows 에서 `[("PATH", 데몬), ("Path", 프로필)]`).
+                        //   그래서 base 로 **마지막 case-equivalent PATH 의 값**(= 실제로 자식이 받았을 값)을
+                        //   쓰고, 그 항목의 **키 표기**를 유지해 제자리 교체한다. 그리고 **나머지 case-equivalent
+                        //   PATH 항목은 전부 제거**해 최종 spec env 에 PATH 가 **정확히 하나**(그 승리 항목)만
+                        //   남게 한다 — 중복을 남겨두면, 우리가 앞쪽 항목만 고치고 뒤쪽 미수정 항목이 last-wins
+                        //   로 이겨 send_exe 부모가 빠진 PATH 가 자식에 실리며 주입이 **조용히 무력화**된다
+                        //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제
+                        //   디렉토리가 **맨 앞**(shadowing 방어: 우리 형제 바이너리가 먼저 해석), 프로필/데몬
+                        //   PATH 는 **tail 로 생존**.
+                        if let Some(parent) = send_exe.parent() {
+                            let is_path_key = |k: &str| {
+                                if cfg!(windows) {
+                                    k.eq_ignore_ascii_case("PATH")
+                                } else {
+                                    k == "PATH"
+                                }
+                            };
+                            // env 벡터의 **마지막** case-equivalent PATH 를 찾는다 — 순차 적용 시 자식이 받는
+                            //   값이 이 마지막 항목이므로 그 값을 base 로, 그 키 표기를 승리 항목으로 삼는다.
+                            let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
+                            // base = 마지막 env PATH 값(자식이 실제 받았을 값) → 없으면 데몬 프로세스 PATH →
+                            //   둘 다 없으면 빈 값.
+                            let base_os = winner_idx
+                                .map(|i| std::ffi::OsString::from(env[i].1.clone()))
+                                .or_else(|| std::env::var_os("PATH"));
+                            let mut dirs = vec![parent.to_path_buf()];
+                            if let Some(base) = &base_os {
+                                dirs.extend(std::env::split_paths(base));
+                            }
+                            match std::env::join_paths(dirs)
+                                .ok()
+                                .and_then(|j| j.into_string().ok())
+                            {
+                                Some(joined) => match winner_idx {
+                                    Some(i) => {
+                                        // 승리(마지막) 항목의 값을 교체(그 키 표기 유지).
+                                        env[i].1 = joined;
+                                        // 나머지 case-equivalent PATH 항목을 모두 제거 → PATH 정확히 하나.
+                                        //   승리 인덱스(i)만 남기고 다른 PATH 키 항목을 걸러낸다.
+                                        let mut seen = 0usize;
+                                        env.retain(|(k, _)| {
+                                            if is_path_key(k) {
+                                                let keep = seen == i;
+                                                seen += 1;
+                                                keep
+                                            } else {
+                                                seen += 1;
+                                                true
+                                            }
+                                        });
+                                    }
+                                    // 기존 PATH 부재 → 새 항목 push.
+                                    None => env.push(("PATH".to_string(), joined)),
+                                },
+                                // ★loud skip(FIX-2/3)★: join 실패 또는 결과가 valid UTF-8 이 아니면 주입을
+                                //   **통째 건너뛴다** — lossy 변환한 PATH 를 절대 push 하지 않는다(비-Unicode
+                                //   PATH 항목을 조용히 손상시키면 skip 보다 더 나쁘다). skip 시에는 기존 PATH
+                                //   항목을 제거·수정하지 않고 env 벡터를 **원래 그대로** 둔다 — 오늘 동작
+                                //   (상속 PATH 그대로)이 유지돼 안전 폴백이 되고, warn 으로 promise-mismatch
+                                //   (grant·프라이밍은 bare `engram-send` 를 약속했는데 이 병적 설치에선 자식이
+                                //   그 이름을 해석 못 함)를 **관측 가능**하게 만든다(조용한 실패 방지).
+                                None => {
+                                    tracing::warn!(
+                                        "engram-send PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `engram-send` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 // ADR-0092: 프라이밍(수신 계약) 주입 — `--append-system-prompt-file <abs-path>`.
@@ -203,11 +296,12 @@ impl AgentBackend for ClaudeBackend {
                 args.extend(extra_args.iter().cloned());
                 // ADR-0094: 발신 입구 pre-authorization — `--allowedTools <pattern>...`.
                 //   ★claude 문법 지식 단독(ADR-0004)★: grants(추상 ToolGrant)를 claude allowlist 패턴으로
-                //   번역하는 규칙(`mcp__{server}__{tool}` / `Bash({exe} *)`)은 이 파일만 안다. 툴/서버 이름은
+                //   번역하는 규칙(`mcp__{server}__{tool}` / `Bash({exe}:*)`+`PowerShell({exe}:*)`)은 이
+                //   파일만 안다. 툴/서버 이름은
                 //   데몬 컨트롤 채널이 정본(ADR-0094 단일 출처) — 여기선 형식만 만든다. grants 가 비면 아무
                 //   플래그도 안 붙인다(권한 플래그 없음 = 기존 게이트 유지 — 회귀 없음). NEVER bypassPermissions.
                 //   ★arg shape★: `--allowedTools` 한 요소 뒤에 각 패턴을 **개별 args 요소**로 잇는다
-                //   (공백 포함 절대경로 패턴 `Bash(C:\Program Files\… *)` 이 한 argv 요소로 유지돼야 claude
+                //   (공백 포함 패턴 `Bash(C:\Program Files\…:*)` 이 한 argv 요소로 유지돼야 claude
                 //   가 공백을 값 구분자로 쪼개지 않는다 — comma-join 단일 값으로 합치지 않는 이유). 터미널·
                 //   json 모드 둘 다 동일 주입(권한 게이트는 mode 무관).
                 //   ★맨 끝 배치(variadic 흡수 방지)★: 위 extra_args 소진 뒤에 둬서 이 그룹 뒤로 positional
@@ -275,25 +369,39 @@ impl AgentBackend for ClaudeBackend {
 /// ★claude 지식 격리(ADR-0004)★: 이 함수만 claude allowlist **문법**을 안다 — 툴/서버 이름은 모른다
 ///   (데몬 컨트롤 채널이 grants 에 실어 넘긴 값을 그대로 끼워 넣을 뿐). 번역 규칙:
 ///   - `Mcp{server,tool}` → `mcp__{server}__{tool}` (claude MCP 툴 네이밍 규약 — `mcp__<server>__<tool>`).
-///   - `Cli{exe}`         → `Bash({exe} *)`         (그 exe 로 **시작하는** Bash 명령만 허용 — 전체 Bash 아님).
+///   - `Cli{exe}`         → `Bash({exe}:*)` **와** `PowerShell({exe}:*)` (그 exe 로 **시작하는** 명령만
+///                          — 두 shell 도구 모양 모두. bare 이름은 backend 주입 PATH 로 해석).
 ///
-/// ★CLI Bash 패턴 caveat(ADR-0094 — best-effort)★: `Bash(<X> *)` 는 에이전트가 실제로 실행하는 명령
-///   문자열의 **prefix** 로 매칭된다. 에이전트는 `$ENGRAM_SEND_EXE --to .. --body ..` 로 부르고 그
-///   env 는 engram-send 의 **절대경로**(예: `C:\...\engram-send.exe`)로 전개된다. 따라서 exe 는 그
-///   절대경로 원문이어야 매칭된다(데몬 build_grants 가 endpoint.send_exe 원문을 그대로 넘김 — bare
-///   이름이 아니라). Windows 절대경로는 백슬래시·`.exe`·공백(경로 내)을 포함할 수 있어, claude Bash
-///   권한 매처가 이를 어떻게 정규화하는지 **미검증**이다(실제 에이전트 왕복으로 후속 검증 — ADR-0094).
-///   그래서 CLI grant 는 best-effort 이고, **MCP grant(`mcp__engram__send_message`)가 1차 확실 경로**다.
-///   여기선 패턴을 그대로 만들되(값 왜곡 금지) 매칭 한계를 이 주석으로 남긴다.
+/// ★CLI 패턴 문법(ADR-0094)★: `Bash(<X>:*)` 의 **colon-star** 는 Claude Code 권한 시스템의 문서화된
+///   **prefix 와일드카드** 문법이다 — 예: `Bash(engram-send:*)` 는 `engram-send` 로 **시작하는** 모든
+///   명령을 허용한다(전체 Bash 아님 = 최소권한). exe 는 데몬 컨트롤 채널이 넘긴 bare 명령 이름
+///   (`engram-send`)이고, 스폰된 에이전트는 그 bare 이름을 shell 에서 부른다(backend 가 주입한 PATH 로
+///   해석 — build_spec 의 PATH 주입 참조). 프라이밍이 가르치는 명령·이 grant 패턴·실제 invocation 이
+///   모두 bare `engram-send` 로 정렬된다.
+///   ★Windows PowerShell 도구 커버(FIX-4)★: Windows 의 Claude Code 는 **PowerShell 도구**를 별도로
+///     노출하고, 에이전트가 거기서 명령을 실행하기도 한다(실측: 에이전트가 "PowerShell 로 보내겠다"). 그래서
+///     각 `Cli{exe}` 는 `Bash({exe}:*)` **와** `PowerShell({exe}:*)` **두 패턴**을 낸다 — 같은 발신 입구의
+///     두 shell 모양일 뿐 새 명령은 없다(ADR-0094 최소권한 유지 — 발신 입구 전용). PowerShell 도구가 없는
+///     환경에선 이 여분 패턴이 무해한 no-op 다(무조건 추가해도 안전).
+///   ★옛 `Bash(<abs> *)`(space-star + 절대경로) 폐기★: 라이브 측정에서 0/38 로 전부 permission-blocked
+///     됐다(미매칭 문법 + 배포 비친화적 절대 좌표). colon-star + bare 이름 + 주입 PATH 로 교체했다.
+///   MCP grant(`mcp__engram__send_message`)는 여전히 병행 발신 경로다(직교 입구).
+/// ★패턴 순서(Cli)★: Bash 먼저, PowerShell 다음 — build_spec 이 이 순서로 args 에 잇는다(테스트 앵커).
 /// 빈 grants → 빈 Vec(호출자가 `--allowedTools` 플래그 자체를 안 붙인다 = 권한 플래그 없음).
 pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
-    grants
-        .iter()
-        .map(|g| match g {
-            ToolGrant::Mcp { server, tool } => format!("mcp__{server}__{tool}"),
-            ToolGrant::Cli { exe } => format!("Bash({exe} *)"),
-        })
-        .collect()
+    let mut out = Vec::with_capacity(grants.len());
+    for g in grants {
+        match g {
+            ToolGrant::Mcp { server, tool } => out.push(format!("mcp__{server}__{tool}")),
+            // ★두 shell 모양(FIX-4)★: 같은 발신 입구를 Bash 도구·PowerShell 도구 양쪽에서 인가한다.
+            //   순서 = Bash → PowerShell(테스트 앵커). PowerShell 도구가 없는 환경엔 무해한 no-op.
+            ToolGrant::Cli { exe } => {
+                out.push(format!("Bash({exe}:*)"));
+                out.push(format!("PowerShell({exe}:*)"));
+            }
+        }
+    }
+    out
 }
 
 /// claude stream-json stdin 의 유저 턴 1줄(라인 종단 `\n`)을 만든다(ADR-0044 §4).
@@ -1018,7 +1126,7 @@ mod tests {
                     tool: "send_message".to_string(),
                 },
                 ToolGrant::Cli {
-                    exe: "C:/app/engram-send.exe".to_string(),
+                    exe: "engram-send".to_string(),
                 },
             ],
             ..ep()
@@ -1154,6 +1262,255 @@ mod tests {
         );
     }
 
+    // ── ADR-0094: PATH 주입(bare `engram-send` 해석 — send_exe 부모 디렉토리 prepend) ──────────
+    #[test]
+    fn claude_control_endpoint_injects_path_with_send_exe_dir_prepended() {
+        // send_exe 가 있으면 PATH env 항목이 실리고, 그 값은 send_exe 부모 디렉토리로 **시작**하며
+        //   기존 프로세스 PATH 를 그 뒤에 보존한다(상위집합 — 아무것도 제거 안 함). ep() 의 send_exe =
+        //   C:/app/engram-send.exe → 부모 = C:/app.
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        let path = s
+            .env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_str())
+            .expect("send_exe 있으면 PATH env 주입");
+        // 부모 디렉토리(C:/app)가 첫 요소여야 한다 — split_paths 로 분해해 첫 컴포넌트 확인
+        //   (구분자·표기 차를 흡수: 문자열 prefix 비교 대신 경로 분해로 단언).
+        let first = std::env::split_paths(path)
+            .next()
+            .expect("PATH 에 최소 한 요소");
+        assert_eq!(
+            first,
+            std::path::PathBuf::from("C:/app"),
+            "PATH 첫 요소 = send_exe 부모 디렉토리: {path}"
+        );
+        // 기존 프로세스 PATH 가 뒤에 보존됐는지: 주입값의 요소 수가 (부모 1개 + 원래 PATH 요소들)이라
+        //   부모-only(요소 1개, 원래 PATH 가 비었을 때)를 제외하면 원래 PATH 를 포함한다. 원래 PATH 의
+        //   첫 컴포넌트가 주입값 뒤쪽(index>=1)에 나타나는지로 "prepend + 원본 보존"을 확인한다.
+        if let Some(orig) = std::env::var_os("PATH") {
+            if let Some(orig_first) = std::env::split_paths(&orig).next() {
+                let injected: Vec<std::path::PathBuf> = std::env::split_paths(path).collect();
+                assert!(
+                    injected.iter().skip(1).any(|c| *c == orig_first),
+                    "원래 PATH 의 첫 컴포넌트가 주입값의 부모 뒤에 보존돼야 함: injected={injected:?} orig_first={orig_first:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_control_endpoint_without_send_exe_omits_path_env() {
+        // send_exe=None(형제 부재)이면 PATH 도 주입하지 않는다(오늘 동작 유지 — CLI 입구 자체가 없음).
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_no_send()),
+        );
+        assert!(
+            !s.env.iter().any(|(k, _)| k == "PATH"),
+            "send_exe=None 이면 PATH env 미주입: {:?}",
+            s.env
+        );
+    }
+
+    #[test]
+    fn claude_no_control_endpoint_no_path_env() {
+        // control=None 이면 PATH 주입도 없다(env 오염 없음).
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        assert!(
+            !s.env.iter().any(|(k, _)| k == "PATH"),
+            "control 없으면 PATH env 없음: {:?}",
+            s.env
+        );
+    }
+
+    /// 프로필 env(초기 env 벡터)를 주입하는 build_spec 헬퍼 — 프로필 PATH 우선(FIX-1) 검증용.
+    ///   spec_with_control 은 항상 빈 env 로 시작하므로, 프로필이 미리 심은 env 를 재현하려면
+    ///   build_spec 을 직접 호출한다(spawn 경로가 profile.env 를 먼저 push 하는 상황 모사).
+    fn spec_with_env(
+        command: &AgentCommand,
+        control: Option<ControlEndpoint>,
+        profile_env: Vec<(String, String)>,
+    ) -> CommandSpec {
+        ClaudeBackend.build_spec(
+            command,
+            SpawnMode::Fresh,
+            None,
+            PathBuf::from("."),
+            profile_env,
+            control,
+        )
+    }
+
+    /// PATH env 항목을 전부 골라낸다(중복 검출용). 승리 PATH 는 정확히 하나여야 한다.
+    fn path_entries(s: &CommandSpec) -> Vec<&str> {
+        s.env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn claude_profile_path_survives_as_tail_uppercase_key() {
+        // ★FIX-1(프로필 PATH 우선)★: 프로필이 커스텀 PATH("C:\\custom;C:\\other")를 실었으면, 주입된
+        //   PATH 는 send_exe 부모(C:/app)를 **맨 앞**에, 그 프로필 값을 **tail** 로 보존해야 한다 —
+        //   데몬 프로세스 PATH 로 리빌드하면 프로필 PATH 가 증발하므로 그러면 안 된다. 또 승리 PATH 는
+        //   spec env 에 정확히 하나(기존 프로필 항목을 제자리 교체 — 새 PATH 를 뒤에 또 쌓지 않음).
+        let profile_env = vec![("PATH".to_string(), "C:\\custom;C:\\other".to_string())];
+        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let entries = path_entries(&s);
+        assert_eq!(
+            entries.len(),
+            1,
+            "승리 PATH 는 정확히 하나(기존 프로필 항목 제자리 교체): {:?}",
+            s.env
+        );
+        let components: Vec<std::path::PathBuf> = std::env::split_paths(entries[0]).collect();
+        // 첫 컴포넌트 = send_exe 부모(shadowing 방어 — 우리 형제가 먼저 해석).
+        assert_eq!(
+            components.first(),
+            Some(&std::path::PathBuf::from("C:/app")),
+            "PATH 첫 컴포넌트 = send_exe 부모(C:/app): {:?}",
+            components
+        );
+        // tail = 프로필 PATH(C:\custom, C:\other) — 데몬 프로세스 PATH 가 아니라 프로필 값이 생존.
+        assert!(
+            components.contains(&std::path::PathBuf::from("C:\\custom"))
+                && components.contains(&std::path::PathBuf::from("C:\\other")),
+            "프로필 PATH(C:\\custom;C:\\other)가 tail 로 생존해야 함: {:?}",
+            components
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_profile_path_survives_with_windows_path_key_casing() {
+        // ★FIX-1(Windows 키 대소문자)★: 프로필이 "Path"(혼합 표기)로 PATH 를 실어도 같은 변수로
+        //   인식해(eq_ignore_ascii_case) 그 값을 base 로 쓰고 제자리 교체한다 — 데몬 PATH 로 리빌드
+        //   하거나 별도 "PATH" 항목을 추가하지 않는다. Windows 전용(대소문자 무시 의미론).
+        let profile_env = vec![("Path".to_string(), "C:\\custom;C:\\other".to_string())];
+        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let entries = path_entries(&s);
+        assert_eq!(
+            entries.len(),
+            1,
+            "Windows: 'Path' 키를 같은 변수로 인식 → 승리 PATH 정확히 하나: {:?}",
+            s.env
+        );
+        let components: Vec<std::path::PathBuf> = std::env::split_paths(entries[0]).collect();
+        assert_eq!(
+            components.first(),
+            Some(&std::path::PathBuf::from("C:/app")),
+            "PATH 첫 컴포넌트 = send_exe 부모: {:?}",
+            components
+        );
+        assert!(
+            components.contains(&std::path::PathBuf::from("C:\\custom"))
+                && components.contains(&std::path::PathBuf::from("C:\\other")),
+            "프로필 'Path' 값이 tail 로 생존: {:?}",
+            components
+        );
+        // 키 표기는 프로필 것을 유지(제자리 교체) — 새 "PATH" 항목을 추가하지 않았음을 확인.
+        assert!(
+            s.env.iter().any(|(k, _)| k == "Path"),
+            "제자리 교체라 프로필 키 표기('Path')를 유지: {:?}",
+            s.env
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_duplicate_case_variant_path_uses_last_value_and_dedupes() {
+        // ★must-fix 회귀(last-match-wins + dedupe)★: env 에 case-variant 중복 PATH 두 개가 오면
+        //   (`("PATH", 데몬)` 다음 `("Path", 프로필)`), transport 는 순차 적용이라 자식엔 **마지막**
+        //   값(프로필)이 산다. 그래서 base 는 **마지막** 값이어야 하고(첫 값 아님), 승리 키 표기는
+        //   마지막 것("Path")을 유지하며, 최종 spec env 엔 case-equivalent PATH 가 **정확히 하나**만
+        //   남아야 한다(나머지 중복 제거). 중복을 남기면 우리가 앞 항목만 고쳐도 뒤 미수정 항목이
+        //   last-wins 로 이겨 주입이 조용히 무력화된다.
+        let profile_env = vec![
+            ("PATH".to_string(), "C:\\daemon".to_string()),
+            ("Path".to_string(), "C:\\profile".to_string()),
+        ];
+        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let entries = path_entries(&s);
+        assert_eq!(
+            entries.len(),
+            1,
+            "case-equivalent PATH 는 정확히 하나(중복 제거): {:?}",
+            s.env
+        );
+        // 승리 키 표기 = 마지막 항목("Path") — 제자리 교체라 그 표기가 남는다.
+        assert!(
+            s.env.iter().any(|(k, _)| k == "Path") && !s.env.iter().any(|(k, _)| k == "PATH"),
+            "승리 키 표기 = 마지막 항목('Path'), 'PATH' 는 제거됨: {:?}",
+            s.env
+        );
+        let components: Vec<std::path::PathBuf> = std::env::split_paths(entries[0]).collect();
+        // 첫 컴포넌트 = send_exe 부모(shadowing 방어).
+        assert_eq!(
+            components.first(),
+            Some(&std::path::PathBuf::from("C:/app")),
+            "PATH 첫 컴포넌트 = send_exe 부모(C:/app): {:?}",
+            components
+        );
+        // tail = **마지막** 값(C:\profile) — 첫 값(C:\daemon)이 아니어야 한다.
+        assert!(
+            components.contains(&std::path::PathBuf::from("C:\\profile")),
+            "tail = 마지막 PATH 값(C:\\profile) 보존: {:?}",
+            components
+        );
+        assert!(
+            !components.contains(&std::path::PathBuf::from("C:\\daemon")),
+            "첫 PATH 값(C:\\daemon)은 base 로 쓰이지 않아야 함(마지막이 이김): {:?}",
+            components
+        );
+    }
+
+    #[test]
+    fn claude_duplicate_same_key_path_uses_last_value_and_dedupes() {
+        // ★must-fix 회귀(정확히 같은 키 중복 — 모든 OS)★: 같은 "PATH" 키가 두 번 오면 순차 적용에서
+        //   마지막 값이 자식에 산다. base = 마지막 값(C:\second), 승리 항목 정확히 하나로 dedupe.
+        //   case-insensitive 매칭에 의존하지 않아 어느 OS 에서도 돈다.
+        let profile_env = vec![
+            ("PATH".to_string(), "C:\\first".to_string()),
+            ("PATH".to_string(), "C:\\second".to_string()),
+        ];
+        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let entries = path_entries(&s);
+        assert_eq!(
+            entries.len(),
+            1,
+            "PATH 는 정확히 하나(중복 제거): {:?}",
+            s.env
+        );
+        let components: Vec<std::path::PathBuf> = std::env::split_paths(entries[0]).collect();
+        assert_eq!(
+            components.first(),
+            Some(&std::path::PathBuf::from("C:/app")),
+            "PATH 첫 컴포넌트 = send_exe 부모: {:?}",
+            components
+        );
+        assert!(
+            components.contains(&std::path::PathBuf::from("C:\\second")),
+            "tail = 마지막 PATH 값(C:\\second) 보존: {:?}",
+            components
+        );
+        assert!(
+            !components.contains(&std::path::PathBuf::from("C:\\first")),
+            "첫 PATH 값(C:\\first)은 base 로 쓰이지 않아야 함(마지막이 이김): {:?}",
+            components
+        );
+    }
+
+    // ★비-UTF8/join-failure skip 은 이식성 있게 재현 불가★: join_paths 실패(경로에 세퍼레이터 문자
+    //   포함)나 비-UTF8 PATH 를 CommandSpec.env(=Vec<(String,String)>) 경계에서 만들려면 이미 유효
+    //   UTF-8 String 이어야 해 모순이고, OsString 비-UTF8 주입 경로가 없다. 그래서 이 스킵 분기는
+    //   단위 테스트로 강제하지 않는다(FIX-2/3 주석·loud warn 으로 관측성 확보). 실패 시 오늘 동작
+    //   (상속 PATH 유지)이라 안전 폴백 — 회귀 위험 낮음.
+
     // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────
     #[test]
     fn claude_priming_file_injects_append_system_prompt_flag_terminal() {
@@ -1229,30 +1586,40 @@ mod tests {
 
     #[test]
     fn grants_to_allowed_tools_cli_pattern() {
-        // Cli{exe} → Bash({exe} *). exe 는 절대경로 원문 그대로(caveat: 매칭은 실 에이전트로 후속 검증).
+        // Cli{exe} → Bash({exe}:*) + PowerShell({exe}:*) (colon-star prefix 와일드카드 — Claude Code
+        //   문법; 두 shell 도구 모양, 순서 = Bash → PowerShell). exe 는 데몬이 넘긴 bare 명령 이름
+        //   (`engram-send`). 함수는 이름-무관(값 왜곡 없이 그대로 끼움) — 여기선 bare 이름 검증(FIX-4).
         let out = grants_to_allowed_tools(&[ToolGrant::Cli {
-            exe: "C:/app/engram-send.exe".to_string(),
+            exe: "engram-send".to_string(),
         }]);
-        assert_eq!(out, vec!["Bash(C:/app/engram-send.exe *)".to_string()]);
+        assert_eq!(
+            out,
+            vec![
+                "Bash(engram-send:*)".to_string(),
+                "PowerShell(engram-send:*)".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn grants_to_allowed_tools_both_preserve_order() {
-        // MCP + CLI 모두 → 두 패턴을 grants 순서대로. (build_spec 이 이 순서로 args 에 잇는다.)
+        // MCP + CLI 모두 → grants 순서대로. CLI 는 Bash → PowerShell 두 패턴으로 전개(FIX-4).
+        //   (build_spec 이 이 순서로 args 에 잇는다.)
         let out = grants_to_allowed_tools(&[
             ToolGrant::Mcp {
                 server: "engram".to_string(),
                 tool: "send_message".to_string(),
             },
             ToolGrant::Cli {
-                exe: "C:/app/engram-send.exe".to_string(),
+                exe: "engram-send".to_string(),
             },
         ]);
         assert_eq!(
             out,
             vec![
                 "mcp__engram__send_message".to_string(),
-                "Bash(C:/app/engram-send.exe *)".to_string(),
+                "Bash(engram-send:*)".to_string(),
+                "PowerShell(engram-send:*)".to_string(),
             ]
         );
     }
@@ -1285,8 +1652,14 @@ mod tests {
         );
         assert_eq!(
             s.args.get(pos + 2).map(|s| s.as_str()),
-            Some("Bash(C:/app/engram-send.exe *)"),
-            "둘째 패턴 = CLI 발신 입구(best-effort): {:?}",
+            Some("Bash(engram-send:*)"),
+            "둘째 패턴 = CLI 발신 입구 Bash 모양(bare 이름 colon-star): {:?}",
+            s.args
+        );
+        assert_eq!(
+            s.args.get(pos + 3).map(|s| s.as_str()),
+            Some("PowerShell(engram-send:*)"),
+            "셋째 패턴 = CLI 발신 입구 PowerShell 모양(FIX-4 — 같은 입구의 두 shell 도구): {:?}",
             s.args
         );
     }
@@ -1428,9 +1801,11 @@ mod tests {
 
     #[test]
     fn claude_space_containing_bash_pattern_stays_single_argv_element() {
-        // ★공백 포함 절대경로 grant 는 한 argv 요소로 유지★: `Bash(C:\Program Files\eng\engram-send.exe *)`
+        // ★공백 포함 grant 는 한 argv 요소로 유지★: `Bash(C:\Program Files\eng\engram-send.exe:*)`
         //   은 내부 공백이 있어도 하나의 값 요소여야 한다(claude 는 공백을 값 구분자로도 씀 → 쪼개지면
         //   패턴이 깨진다). comma-join 단일 값으로 합치지 않고 개별 요소로 두는 이유의 회귀 가드.
+        //   (grants_to_allowed_tools 는 이름-무관이라 공백 포함 값도 그대로 colon-star 로 감싼다 —
+        //    운영 grant 는 bare `engram-send` 지만 argv 무결성 회귀는 공백 케이스로 검증한다.)
         let ep = ControlEndpoint {
             grants: vec![ToolGrant::Cli {
                 exe: "C:\\Program Files\\eng\\engram-send.exe".to_string(),
@@ -1441,12 +1816,19 @@ mod tests {
         let pos = s.args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(
             s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("Bash(C:\\Program Files\\eng\\engram-send.exe *)"),
-            "공백 포함 절대경로 패턴은 한 argv 요소로 유지(쪼개지지 않음): {:?}",
+            Some("Bash(C:\\Program Files\\eng\\engram-send.exe:*)"),
+            "공백 포함 Bash 패턴은 한 argv 요소로 유지(쪼개지지 않음): {:?}",
             s.args
         );
-        // 그리고 그게 마지막 요소(뒤로 positional 없음).
-        assert_eq!(pos + 2, s.args.len(), "패턴이 args 의 마지막: {:?}", s.args);
+        // FIX-4: PowerShell 모양도 같은 공백-무결성으로 한 argv 요소.
+        assert_eq!(
+            s.args.get(pos + 2).map(|s| s.as_str()),
+            Some("PowerShell(C:\\Program Files\\eng\\engram-send.exe:*)"),
+            "공백 포함 PowerShell 패턴도 한 argv 요소로 유지: {:?}",
+            s.args
+        );
+        // 그리고 그게 마지막 요소(뒤로 positional 없음) — CLI grant 1개 = 패턴 2개.
+        assert_eq!(pos + 3, s.args.len(), "패턴이 args 의 마지막: {:?}", s.args);
     }
 
     #[test]

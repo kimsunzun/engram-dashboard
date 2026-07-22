@@ -13,6 +13,6 @@ When you receive one:
 
 ## Replying to teammates — run the engram-send command
 
-**Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** The only way to reach a teammate is to run, in your shell, `$ENGRAM_SEND_EXE --to <name> --body "<your message>"` — the auth token and address are already injected as environment variables. The envelope (the "from" label) is attached automatically by the broker.
+**Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** The only way to reach a teammate is to run, in your shell, `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected as environment variables. The envelope (the "from" label) is attached automatically by the broker.
 
 **Sending was already authorized by your principal when they launched you** (running that command is in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly by running engram-send.

@@ -97,13 +97,20 @@ impl DaemonControlChannel {
                 tool: SEND_MESSAGE_TOOL.to_string(),
             });
         }
-        // CLI 발신 입구는 형제 바이너리가 있을 때만. exe 는 backend 가 그대로 `Bash(<exe> *)` 로 쓴다 —
-        //   ★caveat(ADR-0094)★: 여기서 넘기는 값은 endpoint.send_exe 와 동일한 **절대경로 원문**이다.
-        //   에이전트가 실제로 부르는 명령($ENGRAM_SEND_EXE = 이 절대경로)의 prefix 와 문자열로 일치해야
-        //   claude Bash 권한이 매칭된다(backend/claude.rs 의 패턴 번역 주석 참조). 이름 재타이핑 금지.
-        if let Some(exe) = send_exe {
+        // CLI 발신 입구는 형제 바이너리가 있을 때만(send_exe 존재 = CLI 입구가 배포됨). exe 값 자체는
+        //   ★bare 명령 이름(`engram-send`)★을 담는다 — 절대경로가 아니다.
+        //   ★불변식(ADR-0094)★: grant 는 bare 명령 이름을 실어 backend 가 `Bash(engram-send:*)`(prefix
+        //     와일드카드)로 번역하고, 스폰된 에이전트는 bare `engram-send` 를 shell 에서 부른다(backend 가
+        //     주입한 PATH 로 해석 — claude.rs 참조). 이 세 문자열(grant · 프라이밍이 가르치는 명령 · 실제
+        //     invocation)이 모두 bare `engram-send` 로 정렬돼야 claude 권한 게이트를 통과한다.
+        //   ★WHY bare 이름(절대경로 폐기)★: 옛 절대경로 grant(`Bash(<abs> *)`, space-star)는 라이브
+        //     측정에서 0/38 로 전부 permission-blocked 됐고(패턴 미매칭), 절대 좌표를 grant 에 박아 배포
+        //     비친화적(머신마다 경로가 다름)이었다. bare 이름 + 주입 PATH 로 배포 가능하게 정렬한다.
+        //   ★단일 출처★: send_exe 는 CLI 입구 **존재 여부**(Some/None)만 판정에 쓴다 — grant 문자열은
+        //     프라이밍이 가르치는 명령 이름과 반드시 일치해야 하므로 bare 이름을 여기서 정본으로 박는다.
+        if send_exe.is_some() {
             grants.push(ToolGrant::Cli {
-                exe: exe.to_string_lossy().into_owned(),
+                exe: "engram-send".to_string(),
             });
         }
         grants
@@ -153,7 +160,9 @@ impl ControlChannel for DaemonControlChannel {
         let priming_file = self.priming.priming_file();
         // ADR-0094: 발신 입구 pre-authorization grant 를 **여기서**(입구 정의 옆) 채운다 — 이름의 정본은
         //   컨트롤 채널이다. backend(claude.rs)는 이 목록을 자기 문법(--allowedTools mcp__{s}__{t} /
-        //   Bash({e} *))으로 번역만 한다(형식 규칙만 앎 — ADR-0004 격리 + ADR-0094 단일 출처).
+        //   Bash({e}:*) + PowerShell({e}:*))으로 번역만 한다 — CLI grant 는 Bash 도구·PowerShell 도구
+        //   **두 shell 모양**으로 인가된다(Windows Claude Code 는 PowerShell 도구를 별도 노출; 같은 발신
+        //   입구의 두 모양일 뿐 새 명령 없음). 형식 규칙만 앎 — ADR-0004 격리 + ADR-0094 단일 출처.
         //   ★최소권한★: 발신 입구 2개만 담는다(MCP send_message + engram-send CLI). 나머지 툴은 게이트 유지.
         let grants = Self::build_grants(self.send_exe.as_deref());
         Ok(Some(ControlEndpoint {
@@ -214,7 +223,8 @@ mod tests {
 
     #[test]
     fn build_grants_includes_cli_when_send_exe_present() {
-        // send_exe 가 있으면 CLI 발신 입구도 grant 에 추가된다 — exe 는 절대경로 원문 그대로.
+        // send_exe 가 있으면(= CLI 입구 배포됨) CLI 발신 입구도 grant 에 추가된다 — exe 값은 bare 명령
+        //   이름 `engram-send`(절대경로 아님). send_exe 는 존재 여부만 판정에 쓰인다(ADR-0094 bare 정렬).
         // ENV_LOCK: 기본 env(MCP grant 포함) 가정 — seam 테스트의 set_var 와 경쟁하지 않게 직렬화.
         let _g = ENV_LOCK.lock().unwrap();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
@@ -228,10 +238,10 @@ mod tests {
                     tool: SEND_MESSAGE_TOOL.to_string(),
                 },
                 ToolGrant::Cli {
-                    exe: "C:/app/engram-send.exe".to_string(),
+                    exe: "engram-send".to_string(),
                 },
             ],
-            "send_exe 있으면 MCP + CLI 두 grant"
+            "send_exe 있으면 MCP + CLI 두 grant(CLI 는 bare 이름 engram-send)"
         );
     }
 
@@ -271,9 +281,9 @@ mod tests {
         assert_eq!(
             grants,
             vec![ToolGrant::Cli {
-                exe: "C:/app/engram-send.exe".to_string(),
+                exe: "engram-send".to_string(),
             }],
-            "env 켜짐 → MCP grant 제거, CLI grant 만 남아야(CLI-only)"
+            "env 켜짐 → MCP grant 제거, CLI grant(bare engram-send)만 남아야(CLI-only)"
         );
     }
 
@@ -309,10 +319,10 @@ mod tests {
                     tool: SEND_MESSAGE_TOOL.to_string(),
                 },
                 ToolGrant::Cli {
-                    exe: "C:/app/engram-send.exe".to_string(),
+                    exe: "engram-send".to_string(),
                 },
             ],
-            "빈 값 = seam 미발동 → 오늘과 동일(MCP + CLI)"
+            "빈 값 = seam 미발동 → 오늘과 동일(MCP + CLI bare engram-send)"
         );
     }
 }
