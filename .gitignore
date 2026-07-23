@@ -20,3 +20,9 @@ _wip/shots/
 /tree-nested*.png
 # 루트로 새는 디버그 스크린샷(cdp shot 등은 _wip/shots/로 라우팅) — 재발 방지.
 /*.png
+
+# Visual Studio IDE 스크래치(솔루션 캐시·창 상태) — 로컬 전용, 커밋 금지.
+.vs/
+
+# 측정·리뷰 스크래치(roundtrip phase 런·codex 리뷰 산출) — disposable, 재측정 시 참고 후 청소 가능.
+.codex/
