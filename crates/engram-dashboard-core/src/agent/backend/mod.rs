@@ -111,6 +111,7 @@ pub trait AgentBackend: Send + Sync {
 static CLAUDE_BACKEND: ClaudeBackend = ClaudeBackend;
 static SHELL_BACKEND: ShellBackend = ShellBackend;
 
+// 새 variant 연결 시: tests::expected_channel_matrix(tripwire)가 의식적 capability 선언을 강제한다 — ADR-0099
 fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
     match c {
         AgentCommand::Claude { .. } => &CLAUDE_BACKEND,
@@ -282,6 +283,61 @@ pub fn resume_transcript_events(
 mod tests {
     use super::*;
     use crate::agent::profile::ClaudeOutputFormat;
+
+    // ── ADR-0099 트립와이어: 새 AgentCommand variant 배선 시 capability 의식적 선언 강제 ──────
+    //
+    // ★ 와일드카드를 절대 추가하지 말 것 ★ — 새 AgentCommand variant가 생기면 이 match가
+    // 컴파일 에러를 내서 아래 체크리스트를 강제로 방문하게 하는 장치다(목록 rot 방지 —
+    // 갱신이 컴파일로 강제되는 목록은 rot하지 않는다).
+    //
+    // 새 variant 배선 시 체크리스트:
+    //   ① 새 백엔드의 두 capability는 stub 복붙 금지 — CLI spike로 실측한 값으로 채울 것.
+    //   ② supports_control_channel=false로 연결하면 메시징 없는 단독 에이전트가 된다(의도인지 확인).
+    //   ③ 비-MCP(accepts_mcp_config=false)면 provision이 CLI판 프라이밍·[Cli] grant를 자동 선택한다
+    //      — `roundtrip-smoke --cli-only`로 실측.
+    //   ④ MCP-capable이면 기본 roundtrip으로 실측.
+    //   참조: ADR-0099.
+    fn expected_channel_matrix(c: &AgentCommand) -> (bool, bool) {
+        // (supports_control_channel, accepts_mcp_config) — CLI spike 실측값
+        match c {
+            AgentCommand::Claude { .. } => (true, true),
+            AgentCommand::Shell { .. } => (false, false),
+        }
+    }
+
+    // ADR-0099: 모든 AgentCommand variant의 채널 capability가 expected_channel_matrix와 일치하는지 검증.
+    // 이 테스트가 깨지면 — expected_channel_matrix의 체크리스트를 따라 capability를 의식적으로 채워야 한다.
+    #[test]
+    fn backend_channel_matrix_is_consciously_declared() {
+        let variants: Vec<AgentCommand> = vec![
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: ClaudeOutputFormat::Terminal,
+            },
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+        ];
+
+        for c in &variants {
+            let (expected_control, expected_mcp) = expected_channel_matrix(c);
+            let actual_control = supports_control_channel(c);
+            let actual_mcp = accepts_mcp_config(c);
+            assert_eq!(
+                actual_control,
+                expected_control,
+                "variant {:?}: supports_control_channel 불일치 — backend mod.rs 상단 expected_channel_matrix 체크리스트를 따라 capability를 의식적으로 선언할 것(ADR-0099)",
+                c
+            );
+            assert_eq!(
+                actual_mcp,
+                expected_mcp,
+                "variant {:?}: accepts_mcp_config 불일치 — backend mod.rs 상단 expected_channel_matrix 체크리스트를 따라 capability를 의식적으로 선언할 것(ADR-0099)",
+                c
+            );
+        }
+    }
 
     #[test]
     fn input_encoder_dispatch_by_mode() {

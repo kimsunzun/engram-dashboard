@@ -1148,6 +1148,7 @@
 - **게이트:** build·전 멤버 회귀(28+12스위트 0fail)·fmt·코어격리(주석 매치만)·tsc·vitest 621 전부 green. **라이브 실측: `--cli-only`(진짜 MCP-부재) 3/3 PASS(entrance=cli — 옛 노브로 불가능했던 측정, 백로그 해소) + MCP 기본 1/1(entrance=mcp, 회귀 0).**
 - **부수 실측(이 세션 앞):** CLI 지연 정량(exe warm ~33ms/bash ~110-130ms/체인 ~200-500ms, 추론과 직렬이나 수 % — "CLI 느림" 결정 변수 탈락) — 위 "설계 착수" 항목.
 - **잔여:** ① both 폴백 실측(MCP-부재+both 프라이밍 = seam+`ENGRAM_PRIMING_FILE` 조합으로 이제 가능하나 수동 조합 금지 주석 유의 — 별도 측정 슬라이스) ② opus 채널 측정 ③ 봉투 포맷 영속화(이월).
+- **후속(같은 날, 사용자 제안 "까먹음 방지"):** 배선 tripwire 테스트 — `expected_channel_matrix`(와일드카드 없는 exhaustive match)로 새 AgentCommand variant 연결 시 **컴파일부터 깨져** capability 의식적 선언 강제(stub false/false 복붙 → 벙어리 팀원 차단). 체크리스트는 문서가 아니라 테스트 주석(실행물)에 박음 — CI 도입 시 자동 발화. 런타임 assert 대안은 거부(발화 늦음 + 의도적 무채널 백엔드 구분에 허용목록 필요 = rot 회귀). `/implement simple`(코더=sonnet 경량 → review light PASS → qa quick PASS).
 
 ## 다음 (미진행)
 - **[사용자 결정 2026-07-22] 전 LLM 공용 제약 레이어 (제약 공용화)** — 지금은 스폰 에이전트에 auto mode(권한 승인 생략)를 깔고, **나중에** 모든 LLM(claude·codex·gemini…)이 공통 적용받는 공용 제약 시스템을 만든다: 공용 셋팅 정본을 두고, 특정 LLM 실행 시 그 정본을 **파싱해 해당 LLM의 설정 파일 형식으로 폴더에 생성**(예: codex 실행 → codex용 설정 파일 materialize). 구성은 **셋(set) + 상속**으로 조합해 주입 가능하게. 배경: 기본 거부+grant 배관은 워커형에 구조적 한계(헤드리스 승인자 부재·도구별 grant 반복— 2026-07-22 CLI 0/38 실측), 업계 방향은 승인 완화+경계(containment) 담당. Windows 경계(WSL2/컨테이너+PTY) 스파이크는 이 레이어의 전제 후보. auto mode 적용 자체는 별도 슬라이스(ADR 동반 — ADR-0094 "NEVER bypassPermissions" 스탠스 부분 개정).
