@@ -1,10 +1,10 @@
 # 핸드오프: 릴리즈 실행 가능화 완주 — 패키징(0100)·메시징 이름(0101)·부팅 레이스(0102) 3커밋, 다음 = push/후속 선택
 
 ## 한 줄 상태 · 다음 첫 액션
-- **상태:** 이번 세션 3개 작업 **완주**(전부 `/review code full` 2R + `/qa` 게이트 통과, 각 ADR 박제·step-log 기록). 코드 3커밋 + 이 핸드오프 커밋 **origin/master(GitHub `kimsunzun/engram-dashboard`) push 완료.** 워킹트리 클린. `release/` 폴더 = 3커밋 전부 반영본으로 재빌드됨(ADR-0102 QA에서 `scripts/build-release.ps1` 실행) → `release/engram-dashboard.exe` 실행 시 실 UI 부팅 **3/3 확인**.
-- **다음 첫 액션(사용자 선택):** 코드 3커밋 + 이 핸드오프 = **origin/master(GitHub `kimsunzun/engram-dashboard`)로 push 완료.** 후속 중 택1: **DaemonClient 부팅-레이스 resilience 확인**(아래 미결 #1) / **이름 유일성 ②**(동명 자동 suffix) / **릴리즈 GUI 실사용 추가 확인**(메시지 전송 클릭 경로 — 사용자 GUI 양방향 전송 이미 확인함).
+- **상태:** 이번 세션 3개 작업 **완주**(전부 `/review code full` 2R + `/qa` 게이트 통과, 각 ADR 박제·step-log 기록). 전부 **로컬 커밋(master), 미push.** 워킹트리 클린. `release/` 폴더 = 3커밋 전부 반영본으로 재빌드됨(ADR-0102 QA에서 `scripts/build-release.ps1` 실행) → `release/engram-dashboard.exe` 실행 시 실 UI 부팅 **3/3 확인**.
+- **다음 첫 액션(사용자 선택):** ① **push**(GitLab, 코드) 여부 결정 → ② 후속 중 택1: **DaemonClient 부팅-레이스 resilience 확인**(아래 미결 #1) / **이름 유일성 ②**(동명 자동 suffix) / **릴리즈 GUI 실사용 추가 확인**(메시지 전송 클릭 경로).
 
-## 이번 세션 커밋 (master, origin/master push 완료)
+## 이번 세션 커밋 (master, 미push)
 - `336299f` **feat(release): 포터블 릴리즈 폴더 조립 스크립트 (ADR-0100)** — `scripts/build-release.ps1`(Windows PS): 프론트+릴리즈 3바이너리 빌드 후 `release/`에 정확히 3 exe(engram-dashboard·daemon·send)+`prompts/`(agent-priming[-cli].md)만 조립+매니페스트 tripwire. UI 앱은 `npm run tauri -- build --no-bundle`(프로덕션 컨텍스트·frontendDist embed)로 빌드. `.gitignore`에 `release/`.
 - `5f9adf0` **fix(messaging): canonical 이름 통일 (ADR-0101)** — 메시지 주소가 트리 표시 이름으로 안 가던 버그. `crates/engram-dashboard-core/src/agent/name.rs`(신규) 공유 코어(`cwd_basename`[프론트 `basename.ts` 1:1]·`canonical_name_or_id_fallback`). `AgentInfo.name` = `display_name ?? basename(session.cwd)`로 통일 — manager(`agent_info`/`resolve_canonical_name`/`canonical_name`)·reaper(`session_info`)·ingress(`sender_display_name`)·`src-tauri/src/cli.rs` 전부 **session.cwd 기반 공유 resolution** 사용(WYSIWYA). id-우선 매칭(ADR-0087) 유지.
 - `45b6ed8` **fix(boot): 부팅 레이스 (ADR-0102)** — release exe main 창 "창 로딩 중" 영구 고착. 근본(가능성 높음)=Tauri v2 부팅 레이스(webview가 build 중 `setup()`의 `app.manage(LayoutState)` 전에 `invoke('list_tabs')` 조기 발화→state 미존재 Err→프론트 삼킴+재시도 없음+main 복구이벤트 없음). fix: (1)`LayoutState`를 `builder.manage()`(build 전) 이동=레이스 by-construction 제거(`lib.rs` `// ADR-0102` 앵커, setup으로 되돌리지 말 것) (2)`src/util/retryInvoke.ts` 유계 재시도+실패 표면화(WindowLayout·initMainWindowFromBackend 부팅 pull).
