@@ -305,6 +305,38 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   })
 
+  // ★ADR-0102: list_tabs 가 조기 transient 로 몇 번 실패해도 재시도로 회수해 창 상태를 채운다★.
+  //   main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭 변형 시에만) 이 pull 이 one-shot 이면 안 된다.
+  it('list_tabs 가 2번 reject 후 resolve → 재시도로 회수해 windows["main"] 이 채워진다(ADR-0102)', async () => {
+    let listTabsCalls = 0
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') {
+        listTabsCalls += 1
+        if (listTabsCalls <= 2) throw new Error(`state not ready ${listTabsCalls}`)
+        return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1' }], active: 'v1', version: 0 })
+      }
+      if (cmd === 'get_view') return snap({ view_id: 'v1', version: 0, focused_slot_id: 's1' })
+      return undefined
+    })
+    await initMainWindowFromBackend()
+    expect(listTabsCalls).toBeGreaterThanOrEqual(3) // 첫 시도 + 재시도 2회 이상.
+    const st = useViewStore.getState()
+    expect(st.windows['main'].active).toBe('v1') // 재시도가 성공을 회수 → 상태가 채워짐(undefined 아님).
+    expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
+  }, 10000)
+
+  // ★ADR-0102: 재시도 소진 후에도 실패하면 조용히 삼키지 않고 throw 로 최종 실패를 전파한다★
+  //   (호출자 eventBus 가 console.error 로 표면화 — win 이 영영 안 채워지는데 신호가 없으면 원인 불명 고착).
+  it('list_tabs 가 계속 reject → 재시도 소진 후 throw(최종 실패 전파, ADR-0102)', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      return undefined
+    })
+    await expect(initMainWindowFromBackend()).rejects.toThrow('backend down')
+    // 상태는 채워지지 않는다(신호 없이 조용히 undefined 로 남는 게 아니라 throw 로 알린다).
+    expect(useViewStore.getState().windows['main']).toBeUndefined()
+  }, 10000)
+
   it('init pull 이 더 최신 emit 을 덮지 않는다(역전 방지)', async () => {
     {
       const { ready } = subscribeViewEvents()

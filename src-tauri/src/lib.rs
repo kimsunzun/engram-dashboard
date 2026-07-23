@@ -65,6 +65,16 @@ pub fn run() {
         Some(vec!["--hidden"]),
     ));
 
+    // ADR-0102: ★LayoutState 는 반드시 pre-build(빌더)에서 manage 한다★ — setup() 이 아니라 여기서.
+    //   부팅 레이스: 웹뷰는 builder.build() *도중* JS 를 로드해 setup() 실행 전에 invoke('list_tabs',
+    //   {window:"main"}) 를 쏠 수 있다. 그 상태 등록이 setup() 안에 있으면(과거 배치) command 가 미등록
+    //   managed state 를 만나 Err 로 떨어지고, main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭
+    //   변형 시에만 발화) 로딩 플레이스홀더에 영구 고착된다. LayoutState::new() 는 결정적(app handle·런타임
+    //   불필요 — ViewManager::new() 가 기본 View 1개를 동기 생성)이라 빌더에서 등록 가능 → 웹뷰 첫 invoke
+    //   전에 상태가 반드시 존재해 레이스가 구조적으로 불가능. ★setup 으로 되돌리지 말 것★(레이스 재발).
+    //   대조: DaemonClient 는 tokio 런타임이 필요해 setup 에 남는다(그쪽 조기 invoke 는 프론트 retry 가 커버).
+    builder = builder.manage(crate::layout::LayoutState::new());
+
     builder
         .setup(move |app| {
             // 기본 warn(OFF) — RUST_LOG 환경변수로 재정의 가능
@@ -77,9 +87,9 @@ pub fn run() {
             // 타려면(중복차단·억제창 판정) state 가 먼저 manage 되어 있어야 한다 → build_tray 전에 등록.
             app.manage(tray::actions::LivenessState::default());
 
-            // ADR-0035: 레이아웃 권위 상태(ViewManager). invoke 스레드풀 동시접근 → Arc<Mutex>.
-            // 락 해제 후 emit(ADR-0006) 은 command 레이어가 보장. 초기엔 기본 View 1개.
-            app.manage(crate::layout::LayoutState::new());
+            // ADR-0035: 레이아웃 권위 상태(ViewManager)는 이제 pre-build(빌더)에서 manage 한다 —
+            //   ADR-0102 부팅 레이스 해소(위 builder.manage(LayoutState::new()) 주석 참조). setup 여기서
+            //   다시 등록하지 않는다(웹뷰 첫 invoke 가 이미 등록된 상태를 봐야 함).
 
             // ── 출력 평면(ADR-0046 — 무상태 통과): OutputRouter + window Channel registry ──
             // ★단일 공유 Arc 2벌★: router(agent_id→[window_label] 라우팅)·registry(window_label→Channel)를

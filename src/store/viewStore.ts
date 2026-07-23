@@ -32,6 +32,7 @@ import { create } from 'zustand'
 
 import type { LayoutNode, SlotContent, SplitDir, ViewMeta, ViewSnapshot } from '../api/layoutTypes'
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
+import { retryAsync } from '../util/retryInvoke'
 
 /** 메인 창 label(백엔드 MAIN_WINDOW_LABEL 미러). agent-tree 폴백·기본 대상. */
 export const MAIN_WINDOW_LABEL = 'main'
@@ -378,11 +379,19 @@ export function subscribeViewEvents(): { dispose: () => void; ready: Promise<voi
  * 걸러낸다(옛 pull 이 새 emit 을 덮지 않음).
  */
 export async function initMainWindowFromBackend(): Promise<void> {
-  const payload = await invoke<WindowTabsPayload>('list_tabs', { window: MAIN_WINDOW_LABEL })
+  // ADR-0102: 두 부팅 pull 을 유계 재시도로 감싼다 — main 창은 이벤트 복구 경로가 없어(window:tabs-updated 는
+  //   탭 변형 시에만 발화) 이 read-only pull 이 조기 transient 로 한 번 실패하면 화면이 채워지지 않는다.
+  //   재시도 소진 시엔 throw 로 최종 실패를 호출자(eventBus)에게 전파해 console.error 로 표면화한다(조용히
+  //   삼키지 않음). 성공 시 캐시/창 version 가드가 그 사이 도착한 더 최신 emit 을 덮지 않게 막는다(역전 방지).
+  const payload = await retryAsync(() =>
+    invoke<WindowTabsPayload>('list_tabs', { window: MAIN_WINDOW_LABEL }),
+  )
   useViewStore.getState().applyWindowTabsUpdated(payload)
   // active 탭 레이아웃도 pull — 부팅 즉시 캔버스가 그려지게. (keep-alive 라 나머지 탭은 WindowLayout
-  // 이 마운트 시 각자 get_view 로 채운다. main 부팅 렌더엔 active 만 있으면 충분.)
-  const snap = await invoke<ViewSnapshot>('get_view', { viewId: payload.active })
+  // 이 마운트 시 각자 get_view 로 채운다. main 부팅 렌더엔 active 만 있으면 충분.) 이것도 재시도한다.
+  const snap = await retryAsync(() =>
+    invoke<ViewSnapshot>('get_view', { viewId: payload.active }),
+  )
   useViewStore.getState().applyLayoutUpdated(snap)
 }
 

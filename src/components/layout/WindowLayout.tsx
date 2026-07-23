@@ -13,7 +13,7 @@
 // close_window→destroy_window(단일 소스, §5-2/G2) — 프론트 0탭 자가닫힘은 그 신호가 어쩌다 닿았을 때의
 // 방어적 idempotent fallback 이다(정상 흐름에선 dead — S4-F3, 아래 effect 주석 상술).
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -24,6 +24,7 @@ import {
   useViewStore,
   type WindowTabsPayload,
 } from '../../store/viewStore'
+import { retryAsync, RetryCancelledError } from '../../util/retryInvoke'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
 import AgentMonitoringPicker from '../slot/AgentMonitoringPicker'
@@ -49,6 +50,11 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   // 자가닫힘 재진입 가드 — 0탭 신호가 두 번 와도 close 를 한 번만 시도(idempotent, §5-2/G2).
   const closingRef = useRef(false)
 
+  // ADR-0102: 부팅 pull 최종 실패 표면화 — 재시도 소진 후에도 이 창 상태(win)가 안 채워지면 로딩
+  //   플레이스홀더에 영구 고착되므로(main 은 이벤트 복구 경로 없음), 조용한 console.warn 대신 이 플래그로
+  //   가시적 에러 상태를 렌더한다. 그 사이 emit 으로 win 이 채워지면(경합) 아래 렌더가 정상 경로를 택한다.
+  const [bootFailed, setBootFailed] = useState(false)
+
   // ── mount: 자기 창 탭 상태 초기 pull + window:tabs-updated listen(자기 label 만) ────────────────
   // ★구독 먼저, pull 나중★(F-listen 동형): listen 등록 완료 전 도착한 emit 을 놓치지 않게 구독을 먼저
   // 걸고 그 뒤 pull 한다. 더 최신 emit 이 pull 을 덮으면 applyWindowTabsUpdated 의 version 가드가 역전을 막는다.
@@ -56,22 +62,44 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
     let disposed = false
     let unlisten: (() => void) | null = null
 
+    // ADR-0102(FIX-2): ★부팅 경로 전체★를 하나의 try 로 감싼다 — 옛 구조는 listen() await 가 이 try
+    //   밖이라, 부팅 중 리스너 등록이 reject 하면 async IIFE 가 unhandled 로 죽고 list_tabs pull 자체가
+    //   시작조차 안 돼 bootFailed 가 영영 안 걸린다(로딩 플레이스홀더 영구 고착 — 무신호). listen() 실패도
+    //   pull 실패와 동일하게 bootFailed 로 표면화해 "조용한 영구 고착" 불변식(ADR-0102)을 지킨다.
+    //   ★구독 먼저, pull 나중★(F-listen) 순서와 disposed unlisten 정리는 그대로 유지한다.
     void (async () => {
-      const off = await listen<WindowTabsPayload>('window:tabs-updated', e => {
-        if (e.payload.label !== label) return // 자기 창만 반응(§7-1)
-        applyWindowTabsUpdated(e.payload)
-      })
-      if (disposed) {
-        off() // 등록 완료 전 unmount 됐으면 즉시 해제(누수 가드)
-        return
-      }
-      unlisten = off
-      // 초기 pull — 이 창의 현재 탭+active+version. 없는 창(list_tabs Err)이면 무시(자가닫힘 신호로만 닫음).
       try {
-        const payload = await invoke<WindowTabsPayload>('list_tabs', { window: label })
-        if (!disposed) applyWindowTabsUpdated(payload)
+        const off = await listen<WindowTabsPayload>('window:tabs-updated', e => {
+          if (e.payload.label !== label) return // 자기 창만 반응(§7-1)
+          applyWindowTabsUpdated(e.payload)
+        })
+        if (disposed) {
+          off() // 등록 완료 전 unmount 됐으면 즉시 해제(누수 가드)
+          return
+        }
+        unlisten = off
+        // ADR-0102: 초기 pull 을 유계 재시도로 감싼다 — main 은 이벤트 복구 경로가 없어(window:tabs-updated 는
+        //   탭 변형 시에만 발화) 이 pull 이 one-shot 이면 조기 실패 = 영구 고착이다. 성공하면 채우고, 재시도
+        //   소진 시엔 bootFailed 로 가시화한다(조용히 삼키지 않음). disposed(unmount)면 재시도를 즉시 끊는다.
+        const payload = await retryAsync(
+          () => invoke<WindowTabsPayload>('list_tabs', { window: label }),
+          {
+            isCancelled: () => disposed,
+            onRetry: (err, attempt) =>
+              console.warn(`[WindowLayout] list_tabs(${label}) 재시도 ${attempt}:`, err),
+          },
+        )
+        if (!disposed) {
+          applyWindowTabsUpdated(payload)
+          setBootFailed(false)
+        }
       } catch (err) {
-        console.warn(`[WindowLayout] list_tabs(${label}) 실패:`, err)
+        // unmount 로 취소된 건 정상 종료(RetryCancelledError) — 에러 표면화 대상 아님.
+        if (err instanceof RetryCancelledError) return
+        // listen 등록 실패 or 재시도 소진 최종 실패 — 로딩 고착 대신 가시적 에러 상태로 전환(main 복구
+        //   경로 부재 방어). 둘 다 동일 처리: 부팅 경로 어디서 깨져도 무신호 고착은 없다.
+        console.error(`[WindowLayout] 부팅 실패(listen 등록 or list_tabs 재시도 소진, ${label}):`, err)
+        if (!disposed) setBootFailed(true)
       }
     })()
 
@@ -94,11 +122,23 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
     let cancelled = false
     for (const tabId of tabIdsKey.split(',')) {
       if (useViewStore.getState().layouts[tabId]) continue // 이미 캐시 있음 → skip
-      void invoke<ViewSnapshot>('get_view', { viewId: tabId })
+      // ADR-0102(FIX-3): 이 pull 도 유계 재시도로 감싼다 — 옛 one-shot 은 transient 실패 시 console.warn
+      //   뿐이고, tabIdsKey 가 그대로라 재실행 트리거가 없어 그 탭 캔버스가 무관한 layout:updated 가 올
+      //   때까지 "View 로딩 중"에 갇힌다. 재시도로 순간적 미준비를 스스로 회복한다. ★창 전체 bootFailed
+      //   와는 분리★: 단일 (대개 숨은) 탭의 최종 실패는 앱 전체 고착이 아니므로 console.error 로만 남긴다.
+      void retryAsync(() => invoke<ViewSnapshot>('get_view', { viewId: tabId }), {
+        isCancelled: () => cancelled,
+        onRetry: (err, attempt) =>
+          console.warn(`[WindowLayout] get_view(${tabId}) 재시도 ${attempt}:`, err),
+      })
         .then(snap => {
           if (!cancelled) applyLayoutUpdated(snap)
         })
-        .catch(err => console.warn(`[WindowLayout] get_view(${tabId}) 실패:`, err))
+        .catch(err => {
+          // unmount/탭변경 취소는 정상 — 조용히 무시. 그 외는 재시도 소진 최종 실패로 로깅만(탭 단위).
+          if (err instanceof RetryCancelledError) return
+          console.error(`[WindowLayout] get_view(${tabId}) 최종 실패(재시도 소진):`, err)
+        })
     }
     return () => {
       cancelled = true
@@ -125,7 +165,16 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   }, [win])
 
   if (!win) {
-    // 창 상태 미도착(부팅 직후 pull 전) 또는 유효 label 못 찾음(dev 리로드 stale 팝업, §3-3/G3).
+    // ADR-0102: 부팅 pull 재시도 소진 후에도 win 미도착이면 로딩 대신 가시적 에러(main 은 이벤트 복구
+    //   경로가 없어 여기서 표면화하지 않으면 영구 고착). 그 외엔 로딩 플레이스홀더(부팅 직후 pull 전 또는
+    //   유효 label 못 찾음 — dev 리로드 stale 팝업, §3-3/G3).
+    if (bootFailed) {
+      return (
+        <div style={centerStyle} data-testid="window-boot-error">
+          <span>{t('window.loadFailed', { label })}</span>
+        </div>
+      )
+    }
     return (
       <div style={centerStyle}>
         <span>{t('window.loading', { label })}</span>

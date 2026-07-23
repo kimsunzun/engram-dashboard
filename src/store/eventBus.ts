@@ -202,8 +202,11 @@ export function initEventBus(): Promise<void> {
       // list_tabs("main")/get_view 로 main 창의 탭+active 레이아웃을 끌어와 화면을 즉시 그린다. ★구독을
       // 먼저 건 뒤★ 호출 — init 도중 들어온 emit 을 놓치지 않고, 더 최신이면 창/캐시 version 가드가 pull
       // 결과를 덮는다(역전 방지). (팝업 창의 탭 상태는 각 WindowLayout 이 mount 시 자기 label 로 pull.)
+      // ADR-0102: 최종 실패(initMainWindowFromBackend 가 유계 재시도 소진 후 throw)는 조용한 warn 이
+      //   아니라 error 로 표면화한다 — main 은 이벤트 복구 경로가 없어 여기서 신호를 안 남기면 로딩 고착이
+      //   원인 불명이 된다. (가시적 UI 에러는 main WindowLayout 이 자기 pull 재시도 소진 시 렌더한다.)
       void initMainWindowFromBackend().catch(err => {
-        console.warn('[eventBus] initMainWindowFromBackend failed:', err)
+        console.error('[eventBus] initMainWindowFromBackend 최종 실패(재시도 소진):', err)
       })
 
       // 등록은 sync(disposer 즉시 반환) — await 불필요. agentClient 가 모드별 transport 를 숨긴다.

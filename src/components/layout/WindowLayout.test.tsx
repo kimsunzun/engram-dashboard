@@ -13,8 +13,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // ── listen mock: 이벤트명별 핸들러 보관 → 테스트가 직접 emit ──
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 const unlistenMock = vi.fn()
+// listenShouldReject: FIX-2 테스트가 부팅 중 리스너 등록 reject 를 흉내낼 때 켠다(기본 false).
+let listenShouldReject = false
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (event: string, handler: (e: { payload: unknown }) => void) => {
+    if (listenShouldReject) throw new Error('listen registration failed')
     listeners.set(event, handler)
     return unlistenMock
   }),
@@ -80,6 +83,7 @@ beforeEach(() => {
   closeMock.mockClear()
   invokeMock.mockReset()
   mountCounts.clear()
+  listenShouldReject = false
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   // 기본: list_tabs → 탭 2개(v1 active), get_view → 그 view 스냅샷.
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -172,6 +176,108 @@ describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () =>
     const win = useViewStore.getState().windows['slot-popup-1']
     expect(win.version).toBe(5)
     expect(win.active).toBe('v2')
+  })
+})
+
+// ── ★ADR-0102: 부팅 pull 유계 재시도 + 최종 실패 표면화★ ──────────────────────────────────────
+// main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭 변형 시에만 발화) 부팅 list_tabs pull 이
+//   one-shot 이면 조기 실패 = 로딩 영구 고착이다. (1) N번 reject 후 resolve → 창 상태가 채워져 탭바가
+//   뜬다(재시도가 회수). (2) 계속 reject → 재시도 소진 후 로딩 대신 가시적 에러 상태(window-boot-error)를
+//   렌더한다(조용히 로딩에 안 머문다).
+describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
+  it('list_tabs 가 2번 reject 후 resolve → 재시도로 회수해 탭바가 뜬다', async () => {
+    let listTabsCalls = 0
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        listTabsCalls += 1
+        if (listTabsCalls <= 2) throw new Error(`state not ready ${listTabsCalls}`)
+        return {
+          label: (args as { window: string }).window,
+          tabs: [{ id: 'v1', name: 'Tab 1' }],
+          active: 'v1',
+          version: 1,
+        }
+      }
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+
+    render(<WindowLayout label="main" />)
+    // 재시도가 성공을 회수하면 로딩이 걷히고 탭바가 뜬다(backoff 대기 포함 → 넉넉한 timeout).
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy(), { timeout: 3000 })
+    expect(listTabsCalls).toBeGreaterThanOrEqual(3) // 첫 시도 + 재시도 2회 이상.
+    // 에러 상태는 뜨지 않는다(성공 회수).
+    expect(screen.queryByTestId('window-boot-error')).toBeNull()
+  })
+
+  it('list_tabs 가 계속 reject → 재시도 소진 후 가시적 에러 상태 렌더(로딩 고착 아님)', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_tabs') throw new Error('backend down')
+      return undefined
+    })
+
+    render(<WindowLayout label="main" />)
+    // 재시도 소진 후 로딩이 아니라 boot-error 가 표면화된다.
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), {
+      timeout: 3000,
+    })
+    // 창 상태(win)는 끝내 안 채워져 탭바는 없다.
+    expect(screen.queryByTestId('tab-bar')).toBeNull()
+  })
+
+  // ★FIX-2: listen() 등록 reject → 부팅 경로 전체가 깨져도 무신호 고착이 아니라 boot-error 표면화★
+  // 옛 구조는 listen() await 가 try 밖이라, 리스너 등록이 reject 하면 async IIFE 가 unhandled 로 죽고
+  //   list_tabs pull 이 시작조차 안 돼 bootFailed 가 영영 안 걸렸다(로딩 플레이스홀더 영구 고착 — 무신호).
+  //   이제 listen 실패도 pull 실패와 동일하게 bootFailed 로 표면화한다.
+  it('listen 등록이 reject → 조용한 로딩 고착이 아니라 boot-error 표면화(FIX-2)', async () => {
+    listenShouldReject = true // 부팅 중 리스너 등록이 reject.
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), {
+      timeout: 3000,
+    })
+    // 로딩에 조용히 머물지 않고(로딩 플레이스홀더 부재), 탭바도 없다(창 상태 미도착).
+    expect(screen.queryByTestId('tab-bar')).toBeNull()
+  })
+})
+
+// ── ★FIX-3: 탭별 get_view keep-alive pull 도 유계 재시도로 self-heal★ ──────────────────────────
+// 옛 one-shot get_view 는 transient 실패 시 console.warn 뿐이고 tabIdsKey 불변이라 재발행 트리거가 없어
+//   그 탭 캔버스가 무관한 layout:updated 가 올 때까지 "View 로딩 중"에 갇혔다. 재시도로 순간적 미준비를
+//   스스로 회복하는지, 재발행이 실제로 일어났는지(호출 재시도)를 단언한다.
+describe('WindowLayout — get_view keep-alive 재시도 self-heal(FIX-3)', () => {
+  it('get_view 가 처음엔 reject, 재시도로 성공 → 그 탭 캔버스가 회복(재발행 관측)', async () => {
+    let v1Calls = 0
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') {
+        return {
+          label: (args as { window: string }).window,
+          tabs: [{ id: 'v1', name: 'Tab 1' }],
+          active: 'v1',
+          version: 1,
+        }
+      }
+      if (cmd === 'get_view') {
+        const viewId = (args as { viewId: string }).viewId
+        if (viewId === 'v1') {
+          v1Calls += 1
+          if (v1Calls <= 2) throw new Error(`view not ready ${v1Calls}`) // 처음 2회 transient 실패.
+        }
+        return slotSnap(viewId, 1)
+      }
+      return undefined
+    })
+
+    render(<WindowLayout label="main" />)
+    // 재시도가 성공을 회수하면 그 탭 캔버스(v1)가 로딩을 벗고 실제 렌더러로 채워진다.
+    await waitFor(
+      () => {
+        const renderers = screen.queryAllByTestId('view-renderer')
+        expect(renderers.some(r => r.getAttribute('data-view-id') === 'v1')).toBe(true)
+      },
+      { timeout: 3000 },
+    )
+    // ★핵심★: get_view(v1)가 한 번이 아니라 여러 번(재시도) 발행됐다 — one-shot 이었으면 1회로 갇힌다.
+    expect(v1Calls).toBeGreaterThanOrEqual(3)
   })
 })
 

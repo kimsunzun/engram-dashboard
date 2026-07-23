@@ -47,6 +47,8 @@ export const ko = {
     create: '새 창', // window.create command 제목.
     close: '창 닫기', // window.close command 제목.
     loading: '창 로딩 중… (label: {label})', // WindowLayout: 창 상태 미도착 시 로딩 플레이스홀더(보간 label).
+    // ADR-0102: 부팅 pull(list_tabs) 유계 재시도 소진 후 최종 실패 표면화(조용히 로딩에 고착 금지).
+    loadFailed: '창을 불러오지 못했습니다 (label: {label}). 백엔드 연결을 확인하세요.',
   },
   /** 에이전트(claude 프로세스) 관련 — command 제목·우클릭 메뉴 라벨. */
   agent: {
