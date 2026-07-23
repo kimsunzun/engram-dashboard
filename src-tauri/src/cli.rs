@@ -22,7 +22,7 @@
 use std::time::Duration;
 
 use engram_dashboard_protocol::{
-    AgentCommand, AgentEvent, AgentInfo, AgentProfile, DaemonInfo, RequestId, PROTOCOL_VERSION,
+    AgentCommand, AgentEvent, AgentInfo, DaemonInfo, RequestId, PROTOCOL_VERSION,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -172,8 +172,8 @@ async fn cmd_kill(rest: &[String]) -> Result<(), String> {
 
 // ── name resolution (engram.mjs resolveAgent 미러) ────────────────────────────────
 
-/// 에이전트 + 트리 표시명(label)을 합친 뷰. label 은 AgentInfo 에 없어(AgentInfo.name 은 ad-hoc 의 cwd)
-/// AgentProfile.display_name 을 join 해 만든다.
+/// 에이전트 + 트리 표시명(label)을 합친 뷰. label = canonical AgentInfo.name(ADR-0101 이후 데몬이
+/// display_name ?? basename(session.cwd)로 파생 — 트리·라우팅과 동일 문자열).
 struct ResolvedAgent {
     id: uuid::Uuid,
     label: String,
@@ -182,22 +182,22 @@ struct ResolvedAgent {
     status: String,
 }
 
-/// ListAgents + ListProfiles 를 조회해 **id 로 join** 한다.
-/// ★profile.id == agent.id (spawn 후 불변, mergeTreeNodes.ts)★ 라 id 로 조인한다.
-/// label = display_name → profile.name → agent.name → id[:8] 순으로 첫 유효값.
+/// ListAgents 를 조회해 canonical label 을 만든다.
+/// ★ADR-0101 (WYSIWYA): label = canonical AgentInfo.name★ — 데몬이 이미 display_name ?? basename(
+///   session.cwd)로 파생한 값이라, 이게 트리·라우팅(resolve_recipient)이 쓰는 문자열과 동일하다.
+///   예전엔 profile.name(종종 full-path 라벨)을 우선해 display_name 미설정 시 옛 경로 문자열을
+///   노출·지목해 트리와 어긋났다 — profile.name 우선을 제거하고 canonical name 을 정본으로 쓴다.
+///   (name 이 빈 값일 때만 id 앞 8자로 degrade — 방어용.)
 async fn fetch_agents(conn: &mut Connection) -> Result<Vec<ResolvedAgent>, String> {
     let agents = list_agents(conn).await?;
-    let profiles = list_profiles(conn).await?;
     let out = agents
         .into_iter()
         .map(|a| {
-            let p = profiles.iter().find(|p| p.id == a.id);
-            let label = p
-                .and_then(|p| p.display_name.clone().or_else(|| Some(p.name.clone())))
-                .filter(|s| !s.is_empty())
-                .or_else(|| Some(a.name.clone()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| a.id.to_string().chars().take(8).collect());
+            let label = if a.name.is_empty() {
+                a.id.to_string().chars().take(8).collect()
+            } else {
+                a.name.clone()
+            };
             let status = status_str(&a);
             ResolvedAgent {
                 id: a.id,
@@ -261,16 +261,6 @@ async fn list_agents(conn: &mut Connection) -> Result<Vec<AgentInfo>, String> {
     match conn.wait_reply(request_id, Duration::from_secs(5)).await? {
         AgentEvent::AgentList { agents, .. } => Ok(agents),
         other => Err(format!("unexpected reply to ListAgents: {other:?}")),
-    }
-}
-
-async fn list_profiles(conn: &mut Connection) -> Result<Vec<AgentProfile>, String> {
-    let request_id = RequestId::new();
-    conn.send(&AgentCommand::ListProfiles { request_id })
-        .await?;
-    match conn.wait_reply(request_id, Duration::from_secs(5)).await? {
-        AgentEvent::ProfileList { profiles, .. } => Ok(profiles),
-        other => Err(format!("unexpected reply to ListProfiles: {other:?}")),
     }
 }
 

@@ -525,16 +525,32 @@ fn is_live(status: &AgentStatus) -> bool {
     matches!(status, AgentStatus::Running | AgentStatus::Exiting)
 }
 
-/// 발신자 표시 이름 — profile name(단일 진실원). 없으면 id 앞 8자(agent_info fallback 과 동형).
+/// 발신자 표시 이름 — canonical 표시명(display_name ?? basename(session.cwd)). 없으면 id 앞 8자.
+///
+/// ADR-0101 (WYSIWYA): 봉투 sender 이름은 수신자가 로스터·트리·라우팅에서 보는 이름과 **byte-identical**
+///   해야 한다 — 안 그러면 "A: 안녕" 봉투를 받고도 로스터엔 A 가 다른 문자열로 떠 지목이 어긋난다.
+///
+/// ★단일 출처 = manager.canonical_name(session.cwd 기반)★: 예전엔 여기서 profile.cwd(raw)로 재파생해
+///   agent_info(session.cwd 기반)와 갈릴 수 있었다. 이제 라우팅(resolve_recipient)이 쓰는 AgentInfo.name
+///   과 **정확히 같은 계산**을 manager 한 곳에서 얻어 로직 복제·어긋남을 없앤다. 산 세션이면 그 값을 쓰고,
+///   relay 시점에 세션이 이미 수거됐으면(발신자 terminal — line 328 케이스) 프로필+공유 fallback 으로
+///   best-effort 표시(이 봉투는 이미 인증된 발신자의 표시용이라 라우팅 어긋남과 무관).
 fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> String {
-    manager
-        .profiles()
-        .get(from.agent_id)
-        .map(|p| p.name)
-        .unwrap_or_else(|| {
-            let s = from.agent_id.to_string();
-            s[..8.min(s.len())].to_string()
-        })
+    // 산 세션이면 AgentInfo.name 과 byte-identical 한 canonical 이름(session.cwd 기반).
+    if let Some(name) = manager.canonical_name(from.agent_id) {
+        return name;
+    }
+    // 세션 수거됨(발신자 terminal) → 프로필 있으면 공유 fallback 으로 best-effort. profile.cwd 는 raw 라
+    //   canonical 과 다를 수 있으나, 이 경로는 산 세션이 없어 라우팅 대상도 아니다(표시 전용).
+    if let Some(p) = manager.profiles().get(from.agent_id) {
+        return engram_dashboard_core::agent::name::canonical_name_or_id_fallback(
+            p.display_name.as_deref(),
+            &p.cwd.to_string_lossy(),
+            from.agent_id,
+        );
+    }
+    let s = from.agent_id.to_string();
+    s[..8.min(s.len())].to_string()
 }
 
 /// ★봉투 포맷 렌더 enum(ADR-0095/0096)★ — `wrap_message` 가 조립할 봉투 모양을 고르는 스위치 값.

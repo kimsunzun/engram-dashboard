@@ -839,9 +839,11 @@ fn spawn_named(
     model: &str,
     workspace: &std::path::Path,
 ) -> Option<AgentInfo> {
-    // ★profile.name = 봉투 발신자 표시 이름★: sender_display_name 이 profile name 을 읽으므로, A 의
-    //   name 이 곧 B 가 답신에 쓸 `to` 다. 그래서 이름을 alice/bob 로 **결정적으로** 고정한다.
-    let profile = AgentProfile::new(
+    // ★canonical name = display_name(ADR-0101 WYSIWYA)★: 라우팅·로스터·봉투 sender 가 쓰는 이름 =
+    //   display_name ?? basename(session.cwd) 다(profile.name 은 더 이상 주소축 아님). 두 에이전트는
+    //   같은 workspace cwd 를 공유해 basename 이 동일 → cwd 파생이면 alice/bob 이 같은 이름으로 충돌·
+    //   오라우팅(bob 로 답신)한다. 그래서 이름을 display_name 에 심어 **결정적으로** 구분한다.
+    let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Claude {
             extra_args: vec!["--model".to_string(), model.to_string()],
@@ -851,6 +853,7 @@ fn spawn_named(
         vec![],
         false,
     );
+    profile.display_name = Some(name.to_string());
     let info = manager.spawn_agent(&profile, SpawnMode::Fresh).ok()?;
     let deadline = Instant::now() + SPAWN_APPEAR_TIMEOUT;
     while Instant::now() < deadline {

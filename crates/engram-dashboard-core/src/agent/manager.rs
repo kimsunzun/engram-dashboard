@@ -977,19 +977,45 @@ impl AgentManager {
         Ok(self.agent_info(&session))
     }
 
+    /// id 로 canonical 표시명만 조회(없으면 None). 봉투 sender 등 AgentInfo 전체가 필요 없는
+    /// 호출부(daemon ingress::sender_display_name)가 **agent_info 와 byte-identical** 한 이름을
+    /// 얻게 하는 단일 출처다 — session.cwd 기반 resolve 를 여기 한 곳에 모아 로직 복제를 막는다.
+    /// §10 락 순서: get_session 이 read lock 을 즉시 해제 → resolve 는 lock 미보유에서 수행.
+    // ADR-0101
+    pub fn canonical_name(&self, id: AgentId) -> Option<String> {
+        let session = self.get_session(id).ok()?;
+        Some(self.resolve_canonical_name(&session))
+    }
+
+    /// session → canonical 표시명(display_name ?? basename(session.cwd)). agent_info·canonical_name
+    /// 공유 코어 — 이름 파생을 한 곳으로 모아 reaper/ingress/cli 와 어긋나지 않게 한다.
+    ///
+    /// ADR-0101 (WYSIWYA — canonical 이름 통일): AgentInfo.name = "사람이 트리에서 보는 이름"으로
+    ///   맞춘다. 예전엔 profile.name(= createClaudeProfile 에 넘긴 full cwd 문자열, 종종 경로)을 그대로
+    ///   써서 라우팅/로스터가 기대하는 주소와 트리 표시명(display_name ?? basename(cwd))이 어긋났다.
+    ///   라우팅(resolve_recipient)·로스터·봉투 sender·프론트 트리가 **같은 문자열**을 써야 "보이는
+    ///   이름으로 지목하면 그 에이전트에게 간다"가 성립한다.
+    ///
+    /// ★cwd 출처 = session.cwd(profile.cwd 아님)★: 프론트 트리는 `display_name ?? basename(AgentInfo.cwd)`
+    ///   로 그리고 AgentInfo.cwd = session.cwd(spawn 시 canonicalize). profile.cwd 는 raw("."·".."·심링크)
+    ///   라 여기서 파생하면 basename 이 갈려 트리 표시 ≠ 라우팅 주소가 된다. 그래서 AgentInfo.cwd 와
+    ///   **같은 값**(session.cwd)에서 파생한다.
+    // ADR-0101
+    fn resolve_canonical_name(&self, session: &Arc<AgentSession>) -> String {
+        // session.cwd = AgentInfo.cwd 와 동일 출처(canonical). 프론트 basename 규칙과 1:1.
+        let cwd = session.cwd.to_string_lossy();
+        // get()이 profiles lock을 잡아 clone 후 즉시 해제하므로 sessions lock과 동시에 보유하지 않는다
+        //   (§10 락 순서, 이 함수는 sessions lock 미보유 상태에서만 호출).
+        let display_name = self.profiles.get(session.id).and_then(|p| p.display_name);
+        // 프로필 부재(ad-hoc / 산 세션에 DeleteProfile) 시에도 트리는 basename(cwd)를 그리므로 여기도
+        //   cwd basename 으로 파생해야 트리 ≠ 라우팅 이 안 생긴다. cwd 가 placeholder/빈값을 낼 때만
+        //   id 앞 8자로 degrade(blank·경로없음 라벨을 주소로 쓰지 않게).
+        crate::agent::name::canonical_name_or_id_fallback(display_name.as_deref(), &cwd, session.id)
+    }
+
     /// session 스냅샷 → AgentInfo. (sessions lock을 보유하지 않은 상태에서만 호출)
     fn agent_info(&self, session: &Arc<AgentSession>) -> AgentInfo {
-        // name은 ProfileRegistry(단일 진실원)에서 조회한다. get()이 profiles lock을 잡아 clone 후
-        // 즉시 해제하므로 sessions lock과 동시에 보유하지 않는다(§10 락 순서, agent_info는 sessions
-        // lock 미보유 상태에서만 호출). 프로필이 없으면 id 앞 8자로 fallback.
-        let name = self
-            .profiles
-            .get(session.id)
-            .map(|p| p.name)
-            .unwrap_or_else(|| {
-                let s = session.id.to_string();
-                s[..8].to_string()
-            });
+        let name = self.resolve_canonical_name(session);
         AgentInfo {
             id: session.id,
             name,

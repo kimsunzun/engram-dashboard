@@ -177,7 +177,7 @@ fn spawn_json_agent(
     registry: &Arc<ControlRegistry>,
     name: &str,
 ) -> Option<(AgentInfo, String)> {
-    let profile = AgentProfile::new(
+    let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Claude {
             extra_args: vec![],
@@ -187,6 +187,10 @@ fn spawn_json_agent(
         vec![],
         false,
     );
+    // ADR-0101 (WYSIWYA): 라우팅/로스터가 쓰는 canonical name = display_name ?? cwd basename 이다
+    //   (profile.name 은 더 이상 주소축 아님). 테스트가 이 `name` 으로 지목하므로 display_name 에 심어
+    //   "보이는 이름 = 주소" 를 성립시킨다(cwd="." 의 basename 은 "." 이라 name 으로 매치 불가).
+    profile.display_name = Some(name.to_string());
     let info = manager.spawn_agent(&profile, SpawnMode::Fresh).ok()?;
     if !wait_until(Duration::from_secs(5), || {
         manager.list_agents().iter().any(|a| a.id == info.id)
@@ -265,7 +269,7 @@ async fn control_send_shell_recipient_not_reachable() {
     registry.issue(sender, 0, "valid-sender".to_string());
 
     // shell 에이전트(structured=false = 도달 불가) 스폰.
-    let profile = AgentProfile::new(
+    let mut profile = AgentProfile::new(
         "sheller".to_string(),
         AgentCommand::Shell {
             program: engram_dashboard_core::agent::manager::default_shell().to_string(),
@@ -275,6 +279,8 @@ async fn control_send_shell_recipient_not_reachable() {
         vec![],
         false,
     );
+    // ADR-0101 (WYSIWYA): "sheller" 로 지목하므로 canonical name(display_name)에 심는다(cwd 는 ".").
+    profile.display_name = Some("sheller".to_string());
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("shell spawn");
@@ -562,11 +568,16 @@ mod obs_seam {
         let id = AgentId::new_v4();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatus)));
+        // ADR-0101 (WYSIWYA): canonical name = display_name ?? basename(session.cwd) 이고 seam 세션엔
+        //   프로필(=display_name)이 없다. 그래서 cwd 의 basename 이 곧 이 세션의 addressable name 이 된다.
+        //   테스트는 fallback_name(id)=id[:8] 로 지목하므로, cwd basename 을 id[:8] 로 맞춰 "보이는 이름
+        //   = 주소" 를 성립시킨다(옛 cwd="." 는 basename="." 이라 지목 불가·동명 충돌).
+        let cwd = std::path::PathBuf::from(format!("seam-root/{}", &id.to_string()[..8]));
         // ClaudeStreamJson encoder — json 모드 캐리어를 흉내(래핑된 봉투가 stream-json 라인으로 감싸짐).
         //   요청 바이트(WriteOutcome.bytes_requested)는 감싸기 **전** 논리 메시지 = wrap_message 봉투 그대로다.
         let session = Arc::new(AgentSession::new(
             id,
-            std::path::PathBuf::from("."),
+            cwd,
             0,
             80,
             24,
@@ -1585,9 +1596,13 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     ) -> Arc<Mutex<Vec<Vec<u8>>>> {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(id, epoch, Arc::new(NoopStatus)));
+        // ADR-0101 (WYSIWYA): 프로필 없는 seam 세션의 canonical name = basename(session.cwd) 이므로,
+        //   테스트가 fallback_name(id)=id[:8] 로 지목하려면 cwd basename 을 id[:8] 로 맞춰야 한다
+        //   (옛 cwd="." 는 basename="." 이라 id[:8] 지목이 RECIPIENT_NOT_FOUND 로 튄다).
+        let cwd = std::path::PathBuf::from(format!("seam-root/{}", &id.to_string()[..8]));
         let session = Arc::new(AgentSession::new(
             id,
-            std::path::PathBuf::from("."),
+            cwd,
             epoch,
             80,
             24,
@@ -1778,9 +1793,13 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     ) -> Arc<Mutex<Vec<Vec<u8>>>> {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(id, epoch, Arc::new(NoopStatus)));
+        // ADR-0101 (WYSIWYA): 프로필 없는 seam 세션의 canonical name = basename(session.cwd) 이므로,
+        //   테스트가 fallback_name(id)=id[:8] 로 지목하려면 cwd basename 을 id[:8] 로 맞춰야 한다
+        //   (옛 cwd="." 는 basename="." 이라 id[:8] 지목이 RECIPIENT_NOT_FOUND 로 튄다).
+        let cwd = std::path::PathBuf::from(format!("seam-root/{}", &id.to_string()[..8]));
         let session = Arc::new(AgentSession::new(
             id,
-            std::path::PathBuf::from("."),
+            cwd,
             epoch,
             80,
             24,

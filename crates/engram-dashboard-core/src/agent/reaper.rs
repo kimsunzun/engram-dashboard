@@ -180,13 +180,26 @@ fn list_agents(
     snapshot.iter().map(|s| session_info(s, profiles)).collect()
 }
 
-/// session → AgentInfo(manager.agent_info 와 동일 매핑). sessions lock 미보유 상태에서만 호출.
+/// session → AgentInfo(manager.agent_info 와 **byte-identical** 매핑). sessions lock 미보유에서만 호출.
+///
+/// ★ADR-0101 (WYSIWYA): manager.agent_info 와 반드시 같은 이름 사슬을 써야 한다★ — reap_one 은 세션
+///   종료마다 이 스냅샷을 agent_list_updated 로 브로드캐스트하는 hot path 라, 여기서 옛 규칙(profile.name)
+///   을 쓰면 아무 reap 때마다 트리 이름이 예전 full-path 라벨로 되돌아간다. 그래서 canonical name 을
+///   agent_info 와 동일하게 display_name(override) ?? basename(session.cwd) 로 파생하고, 프로필 부재
+///   fallback 도 같은 공유 코어(name::canonical_name_or_id_fallback)로 맞춘다(로직 복제 금지).
+///
+/// ★cwd 출처 = session.cwd★: AgentInfo.cwd 에 넣는 값과 동일(canonical). profile.cwd(raw)에서
+///   파생하면 트리 basename 과 어긋난다 — agent_info 와 같은 이유(manager.rs resolve_canonical_name 참조).
+// ADR-0101
 fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) -> AgentInfo {
     use std::sync::atomic::Ordering;
-    let name = profiles.get(session.id).map(|p| p.name).unwrap_or_else(|| {
-        let s = session.id.to_string();
-        s[..8].to_string()
-    });
+    let cwd = session.cwd.to_string_lossy();
+    let display_name = profiles.get(session.id).and_then(|p| p.display_name);
+    let name = crate::agent::name::canonical_name_or_id_fallback(
+        display_name.as_deref(),
+        &cwd,
+        session.id,
+    );
     AgentInfo {
         id: session.id,
         name,
