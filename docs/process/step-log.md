@@ -1148,6 +1148,7 @@
 - **게이트:** build·전 멤버 회귀(28+12스위트 0fail)·fmt·코어격리(주석 매치만)·tsc·vitest 621 전부 green. **라이브 실측: `--cli-only`(진짜 MCP-부재) 3/3 PASS(entrance=cli — 옛 노브로 불가능했던 측정, 백로그 해소) + MCP 기본 1/1(entrance=mcp, 회귀 0).**
 - **부수 실측(이 세션 앞):** CLI 지연 정량(exe warm ~33ms/bash ~110-130ms/체인 ~200-500ms, 추론과 직렬이나 수 % — "CLI 느림" 결정 변수 탈락) — 위 "설계 착수" 항목.
 - **잔여:** ① both 폴백 실측(MCP-부재+both 프라이밍 = seam+`ENGRAM_PRIMING_FILE` 조합으로 이제 가능하나 수동 조합 금지 주석 유의 — 별도 측정 슬라이스) ② opus 채널 측정 ③ 봉투 포맷 영속화(이월).
+- **측정 마감(같은 날, push 후):** ① both 폴백 실측 — 물리 MCP-부재(`ENGRAM_FORCE_CLI_ONLY_SEND` 수동 + `--priming agent-priming.md`, --cli-only 아님) = **3/3 cli 폴백 성공**(both 프라이밍 폴백 조항 실증 — 이월 백로그 해소). ② opus 채널 — cli-only **2/2** · 기본 MCP **1/1**(entrance=mcp). 전 모델(sonnet/haiku/opus) 스위치 준수 확인. 잔여 = ③봉투 포맷 영속화만(저장 위치 결정 필요).
 - **후속(같은 날, 사용자 제안 "까먹음 방지"):** 배선 tripwire 테스트 — `expected_channel_matrix`(와일드카드 없는 exhaustive match)로 새 AgentCommand variant 연결 시 **컴파일부터 깨져** capability 의식적 선언 강제(stub false/false 복붙 → 벙어리 팀원 차단). 체크리스트는 문서가 아니라 테스트 주석(실행물)에 박음 — CI 도입 시 자동 발화. 런타임 assert 대안은 거부(발화 늦음 + 의도적 무채널 백엔드 구분에 허용목록 필요 = rot 회귀). `/implement simple`(코더=sonnet 경량 → review light PASS → qa quick PASS).
 
 ## 다음 (미진행)
