@@ -1175,6 +1175,14 @@
 - **qa(`/qa`, release 실측):** 코드 게이트 6/6 green(build·전 멤버 회귀·fmt·격리·tsc·vitest 634) + `scripts/build-release.ps1`로 **release/ 재빌드(fix 반영)** + 재빌드 exe **3/3 실 UI 부팅**(`tauri.localhost`·실 대시보드·"창 로딩 중" 미발생)·`list_tabs('main')` OK·데몬 release/서 spawn. → release exe 실사용 가능.
 - **잔여/이월:** ① **DaemonClient 부팅-레이스 resilience 별도 확인**(연결 실패 시 재시도/재연결 경로 점검 — out-of-scope로 미수정) ② retry의 in-flight `fn()`/backoff 타이머 취소 granularity 경계 한계(문서화됨, 미해결) ③ (앞 이월) 이름 유일성 ②·vestigial 제거.
 
+## 릴리즈 조작 launch/ 통합 + 부팅 데몬연결 재시도 + GUI 메시징 실측 (2026-07-24, master, 대화 세션) · 커밋 `5c7b62e`·`cae3ccc`·`8afcf58`·`6a1bca6`
+- **무엇:** ① `build-release.ps1 -OutDir` 파라미터화(+드라이브루트/ProjectRoot 삭제 가드) + 사용자 조작 폴더 `launch/`(빌드.bat·실행.bat 커밋, `launch/release/`만 gitignore) ② 프로젝트 모델 핀 opus→fable ③ 부팅 데몬 연결 경로 유계 재시도(ADR-0102 패턴 확장 — daemon start·transport init·getAgents, review light PASS·634 테스트 green) ④ **release GUI 메시징 양방향 실측 PASS**(qa-alpha↔qa-bravo ping/pong, 실 UI DOM 관측) — 직전 세션의 "출력 구독 error" 회색 1건은 검증 도구의 API 오용(viewId 누락)으로 판명, 클라이언트 버그 아님. 핸드오프 carry-over "DaemonClient 부팅 resilience"도 ③으로 닫힘.
+
+## S18 메시징 v1 설계 확정 — 봉투·회신계약·그룹·메일박스·입구 (2026-07-24, master, 대화 세션 연속) · 사용자 결정 · ADR-0103 신규 · 커밋 이 항목과 함께
+- **무엇:** 풀 메일박스 착수 전 설계 전체 확정. `/research`(medium, 5갈래: 이메일·액터·FIPA·AMQP·LLM 프로토콜 + codex 적대 리뷰 FIX 13건 반영) → 사용자 결정 누적(XML 봉투 단일화·`<notice>` 태그 분리·타입 최소형(request/기본/notice)·회신=`in_reply_to` 필드·그룹=런타임 등록+`@all` 내장·인메모리 파킹(TTL 1h·cap 100)·MCP 주력 3툴+CLI 예비).
+- **실측 근거:** 데몬 HTTP ~3ms·exe 스폰 ~105ms·bash ~120ms(속도 비결격) · MCP 디퍼드 로딩 라이브 확인(이름만 상주) · `allowedMcpServers: []`(유저 전역)가 스폰 에이전트 send_message 툴 부재의 원인으로 판명(ADR-0099 배선 정상) → 데몬 스폰 시 `--settings` 세션 주입으로 우회 결정.
+- **산출:** `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`(구현 계약 정본) + ADR-0103(결정·거부 대안 16건). `/review doc light` FIX 2건 반영(in-reply-to 매핑 명시·미검증 표기). **다음 = fresh 세션에서 v1 구현**(/implement, 수용 기준 = spec §7).
+
 ## 다음 (미진행)
 - **[사용자 결정 2026-07-22] 전 LLM 공용 제약 레이어 (제약 공용화)** — 지금은 스폰 에이전트에 auto mode(권한 승인 생략)를 깔고, **나중에** 모든 LLM(claude·codex·gemini…)이 공통 적용받는 공용 제약 시스템을 만든다: 공용 셋팅 정본을 두고, 특정 LLM 실행 시 그 정본을 **파싱해 해당 LLM의 설정 파일 형식으로 폴더에 생성**(예: codex 실행 → codex용 설정 파일 materialize). 구성은 **셋(set) + 상속**으로 조합해 주입 가능하게. 배경: 기본 거부+grant 배관은 워커형에 구조적 한계(헤드리스 승인자 부재·도구별 grant 반복— 2026-07-22 CLI 0/38 실측), 업계 방향은 승인 완화+경계(containment) 담당. Windows 경계(WSL2/컨테이너+PTY) 스파이크는 이 레이어의 전제 후보. auto mode 적용 자체는 별도 슬라이스(ADR 동반 — ADR-0094 "NEVER bypassPermissions" 스탠스 부분 개정).
 - **[S17 확정 지시 2026-07-21·구현 슬라이스에 포함] 에이전트 대면 텍스트 영어화** — 사용자 재확인 지시("양식은 영어로 하고 마크다운도 영어로"): 프라이밍 md·하네스 시드를 영어화(봉투 양식 자체는 이미 영어/언어중립 — colon 무단어·옵션 라벨·xml 속성 영어). v3 라우팅 수치는 한국어 기준이므로 영어판 재검증 동반. 온오프 토글은 후속. **CLI 입구 검증도 사용자 재확인 요청** — MCP는 실측 완료, CLI는 grant confound로 단독 격리 미실측(클린 테스트 = MCP disallow 노브 추가 후 CLI-only 재실측).
@@ -1188,7 +1196,7 @@
 - **codex/gemini CLI spike** — 실제 CLI 구독 후 플래그 확정 → `AgentCommand`에 Codex/Gemini variant 추가 + `backend_for` 라우팅 연결(현재 stub은 best-guess+미연결).
 - **[게이트] 자동 재시작** — `restart_agent` 전용 태스크(사다리 resume→fresh→정지, backoff). 코어 안정 후.
 - **실제 claude 복원 E2E** — headless는 shell만 실증. claude `--session-id`/`--resume` + `sessions/<pid>.json` PID 일치를 실제 claude로 실측(spike) 필요.
-- 메시지 시스템(에이전트 간 통신) — **MVP(전송 길) = S17 슬라이스 1로 흡수(T-13, 2026-07-14)**. 풀 메일박스(받은편지함·영속·ACK)만 여기 남음 — 착수 시 입력 = `docs/research/agent-messaging-survey-2026-06-28.md`.
+- 메시지 시스템(에이전트 간 통신) — **MVP(전송 길) = S17 슬라이스 1로 흡수(T-13, 2026-07-14)**. **풀 메일박스 설계 확정 = S18(2026-07-24, ADR-0103)** — 착수 시 입력 = `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`(영속·ACK 심화는 에이전트 시스템 메모리 설계 때).
 - Phase 3d (popup URL 전달 + monaco) + 프론트 상세(복원 배너 UX).
 - `reference/` 정설 문서 집필 (시스템 안정화 후)
 - **[정리] `pty/` 폴더명·구성 재고** — S10 후 `pty/`가 PTY 전용이 아니라 에이전트 코어 전반(AgentManager/AgentSession/OutputCore/transport/backend) 보유. 폴더명이 내용과 불일치(에이전트 공용 매니저가 pty/ 안). 다른 모듈 배치도 같이 점검(사용자 지적 2026-06-14, 트리 슬롯화 작업 끝난 뒤).

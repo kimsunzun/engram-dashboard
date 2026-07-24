@@ -150,3 +150,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0100](0100-릴리즈-패키징-포터블-폴더-조립-스크립트-co-location-불변식.md) | 릴리즈 패키징 — 포터블 폴더 조립 스크립트 (co-location 불변식) | 확정 |
 | [0101](0101-에이전트-canonical-이름-표시-이름display-name-cwd-basename-라우팅표시발신자명-단일화-adr-0087-이름주소-step-1.md) | 에이전트 canonical 이름 = 표시 이름(display_name ?? cwd basename) — 라우팅·표시·발신자명 단일화 (ADR-0087 이름주소 step 1) | 확정 |
 | [0102](0102-부팅-레이스-방지-managed-state는-build-전-등록-프론트-부팅-pull-재시도-main-창-무한-로딩-근절.md) | 부팅 레이스 방지 — managed state는 build 전 등록 + 프론트 부팅 pull 재시도 (main 창 무한 로딩 근절) | 확정 |
+| [0103](0103-메시징-v1-xml-봉투회신계약그룹인메모리-메일박스mcp-주력-입구.md) | 메시징 v1 — XML 봉투·회신계약·그룹·인메모리 메일박스·MCP 주력 입구 | 확정 |
