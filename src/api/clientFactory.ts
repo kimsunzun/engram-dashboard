@@ -10,6 +10,7 @@ import type { AgentClient } from './agentClient'
 import { type DaemonControl, DaemonDaemonControl } from './daemonControl'
 import { ProtocolClient } from './protocolClient'
 import { TauriTransport } from './tauriTransport'
+import { retryAsync } from '../util/retryInvoke'
 
 let instance: AgentClient | null = null
 let daemonControlInstance: DaemonControl | null = null
@@ -35,8 +36,16 @@ export function getAgentClient(): AgentClient {
     // 유실될 수 있으나, 부팅 직후 bootstrapDaemonIfNeeded 가 connect 를 보장하므로 그 이후 이벤트는
     // 안전하다. 리스너 등록 완료 전엔 connection 상태가 'down' 이므로 ProtocolClient 가 명령을 보내지
     // 않는다(ensureReady reject).
-    initPromise = transport.init().catch((e: unknown) => {
-      console.warn('[clientFactory] TauriTransport 리스너 등록 실패:', e)
+    //
+    // ★재시도 안전성★: init() 내부 registerListeners() 는 부분 실패 시 등록분을 즉시 정리하고 throw
+    // 한다(unlisten 을 비운 채 나옴). 그러면 다음 시도에서 registerListeners() 는 처음부터 재등록하므로
+    // 이중 리스너 위험이 없다. ADR-0102 패턴을 init 경로까지 확장한다.
+    initPromise = retryAsync(() => transport.init(), {
+      onRetry: (err, attempt) => {
+        console.warn(`[clientFactory] TauriTransport 리스너 등록 재시도 #${attempt}:`, err)
+      },
+    }).catch((e: unknown) => {
+      console.error('[clientFactory] TauriTransport 리스너 등록 최종 실패 — 이벤트 수신 불가:', e)
     })
   }
   return instance
@@ -61,10 +70,17 @@ export function getDaemonControl(): DaemonControl {
  * 멱등 — start 는 이미 connected 면 즉시 resolve. 실패(데몬 spawn 불가)는 삼켜 부팅을 막지 않는다.
  */
 export async function bootstrapDaemonIfNeeded(): Promise<void> {
+  // ADR-0102: 부팅 레이스로 인한 일시적 실패를 재시도로 자가복구한다(초기 IPC 준비 전 순간 거부 방어).
+  // 최종 실패는 console.error 로 표면화 — 이 함수가 throw 하면 이후 getAgents/구독이 전부 막히므로
+  // 삼켜 부팅을 이어가되, 로그는 warn(일시실패) → error(수동 복구 필요)로 강도를 높인다.
   try {
-    await getDaemonControl().start()
+    await retryAsync(() => getDaemonControl().start(), {
+      onRetry: (err, attempt) => {
+        console.warn(`[clientFactory] daemon start 재시도 #${attempt}:`, err)
+      },
+    })
   } catch (err) {
-    console.warn('[clientFactory] 부팅 daemon start 실패(수동 daemon_start 필요):', err)
+    console.error('[clientFactory] 부팅 daemon start 최종 실패 — 수동 daemon_start 필요:', err)
   }
 }
 

@@ -6,6 +6,7 @@ import TreePage from './pages/TreePage'
 import PopoutPage from './pages/PopoutPage'
 import { initEventBus, refreshProfiles, refreshPresets } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
+import { retryAsync } from './util/retryInvoke'
 import { useAgentStore } from './store/agentStore'
 // ADR-0055/0064: command + 슬롯 메뉴 기여 등록 매니페스트 단일 import — 부팅 시 모든 register(...)·
 //   registerSlotMenu(...) 가 실행돼 레지스트리·슬롯 메뉴 기여부가 채워진다(산발 import 일원화, ADR-0064 §4).
@@ -27,10 +28,15 @@ function App() {
     void (async () => {
       await bootstrapDaemonIfNeeded()
       void initEventBus()
-      agentClient
-        .getAgents()
+      // ADR-0102: 부팅 pull 을 재시도로 감싼다 — bootstrapDaemonIfNeeded 와 동일 패턴.
+      // 데몬 연결 직후 IPC 가 일시적으로 미준비 상태일 수 있어 one-shot 실패가 그대로 공란이 된다.
+      retryAsync(() => agentClient.getAgents(), {
+        onRetry: (err, attempt) => {
+          console.warn(`[App] getAgents 재시도 #${attempt}:`, err)
+        },
+      })
         .then(agents => useAgentStore.getState().setAgents(agents))
-        .catch(err => console.warn('[App] getAgents failed:', err))
+        .catch(err => console.warn('[App] getAgents 최종 실패:', err))
       // 깡통(예약) 프로필 초기 로드(ADR-0018) — 트리가 예약 노드를 그리려면 필요.
       void refreshProfiles()
       // 프리셋 초기 로드(ADR-0061) — PresetPalette 가 목록을 그리려면 필요(refreshProfiles 미러).
