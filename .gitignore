@@ -6,8 +6,8 @@ target/
 # 릴리즈 조립 산출물(scripts/build-release.ps1 이 clean 재생성) — 로컬 빌드물, 커밋 금지(ADR-0100).
 release/
 
-# local/ = 사용자 조작용 ops 폴더(런처+release 산출물), 로컬 전용.
-local/
+# launch/ = 릴리즈 로컬 빌드+실행 폴더. 런처(빌드/실행 .bat)는 커밋하고, 빌드 산출물만 무시.
+launch/release/
 
 # 로컬 런타임 데이터(데몬 토큰·프로필 등) — 절대 커밋 금지. data_dir 기본 위치(S13 TRD).
 .engram-data/
