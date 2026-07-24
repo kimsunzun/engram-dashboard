@@ -1,6 +1,7 @@
 # S18 메시징 v1 — 봉투·타입·그룹·메일박스 spec (PRD+TRD 통합)
 
 > 2026-07-24 사용자 결정 완료. 결정 근거·거부 대안의 정본 = ADR-0103. 이 문서는 구현 계약(무엇을 어떻게)의 정본.
+> 2026-07-24(2차) 보완 결정 — 그룹 해석 seam·wake 연기·idle 게이트 일괄 주입. 근거 정본 = ADR-0104.
 > 배경 리서치(이메일·액터·FIPA·AMQP·LLM 프로토콜 5갈래 서베이 + cross-family 적대 리뷰)는 §9 요약 참조.
 
 ## 0. 스코프 한 줄
@@ -48,6 +49,7 @@
 ## 4. 그룹
 
 - **명단 소스 = 런타임 등록**(데몬 인메모리): `group` 툴/CLI로 생성·증감·삭제. 데몬 재시작 시 소멸(인메모리 단계 정합).
+- **그룹 해석 = seam**(ADR-0104): "그룹 이름 → 멤버 목록" 해석기(GroupRegistry)를 소스 플러그인 구조로 짠다 — v1 소스 = 런타임 명단 + `@all`. **폴더가 데몬 소유로 생기면 폴더 = 추가 소스**(`@폴더명` — 조직 방송의 정본 단위 예정). 하위 에이전트 계층은 주소 단위 **비채택**(오케스트레이터가 스폰하며 런타임 그룹을 등록하면 동일 효과 + 동적 명단은 스냅샷 원칙과 마찰 — ADR-0104 거부 대안).
 - **멤버십 = 이름 기반**(id 아님) — 주소 체계(WYSIWYA, ADR-0101)와 동일 원칙, 재스폰 생존.
 - **`@all` = 내장 그룹**(멤버 = 발송 순간 살아있는 수신 가능 전원, 관리 불요). `@` 네임스페이스는 기예약(GROUPS_NOT_SUPPORTED 자리 대체).
 - **발송 = 순간 스냅샷 fan-out**: 살아있는 멤버만 개별 배달, 죽은 멤버 `skipped`(파킹 없음 — 방송 소급 금지). 장부 = 메시지 1 : 배달기록 N.
@@ -57,11 +59,17 @@
 ## 5. 메일박스 (인메모리)
 
 **단일 수신자 발송의 3분기:**
-1. 수신 가능 → 즉시 주입 = `delivered`
-2. 부재(미스폰·죽음·unreachable) → **파킹** = `pending` (반려 아님 — "없는 이름"도 파킹, 오타는 TTL이 방어. 스폰 전 선지시 지원)
+1. 수신 가능 → 주입 = `delivered` — 단 턴 진행 중(busy)이면 메일박스 대기 = **`pending`**(부재 파킹과 상태 어휘 공유 — 새 상태 발명 금지, idle 진입 시 일괄 flush: 아래 주입 타이밍, ADR-0104)
+2. 부재(미스폰·죽음·unreachable) → **파킹** = `pending` (반려 아님 — "없는 이름"도 파킹, 오타는 TTL이 방어. 스폰 전 선지시 지원. **깨우기(wake) 없음** — 잠든 수신자도 파킹으로 동일 취급, wake-on-request는 v2 후보로 연기: ADR-0104)
 3. 보관함 초과 → 반려 `MAILBOX_FULL` (오래된 것 조용히 버리기 금지)
 
-**파킹의 운명:** 수신자 등장(스폰/epoch 교체) 시 자동 주입 `delivered` / TTL 초과 `expired`(장부 잔존).
+**파킹의 운명:** 수신자 등장(스폰/epoch 교체) 시 자동 주입 `delivered`(**일괄·오래된 순** — 아래 주입 타이밍의 flush 규칙과 동일: 경로 2벌 금지, ADR-0104) / TTL 초과 `expired`(장부 잔존).
+
+**주입 타이밍 = idle 게이트 + 일괄 flush (ADR-0104):**
+- 수신자가 턴 진행 중(busy)이면 주입하지 않고 메일박스 대기 — `delivered`는 실제 주입 시점에만 찍는다(CLI 내부 stdin 큐로 밀어넣지 않음: 장부 정확성 + 배치 제어권 유지).
+- idle 진입(턴 종료)·등장(스폰/epoch) 시 쌓인 메시지 **전부 일괄 주입**(오래된 순, 메시지마다 자기 봉투 — XML이라 배치 내 경계 명확). 1건씩 드리블 금지.
+- busy/idle 관측 = 백엔드 capability(stream-json 턴 이벤트 기반) — 관측 불가 백엔드는 즉시 주입 폴백(§2 capability 원칙 정합).
+- `reply_by` 시계는 발송 기준 유지(수신 지연과 무관 — 발신자 관점 계약).
 
 **정책 상수:** TTL **1h** · 수신자당 **100건** · notice는 cap 예외.
 
@@ -97,6 +105,8 @@ engram-send group list | group update @g --add a,b [--remove c] [--delete]
 ## 7. 수용 기준
 
 - 파킹→스폰→자동배달 시나리오 하네스(roundtrip-smoke 확장) green
+- **idle 게이트·배치(중점 검증 — 2026-07-24 사용자 지시로 강화):** busy 중 도착 → 미주입·턴 종료 시 flush 관측 / 다건 누적 순서 보존(오래된 순)·일괄 주입 / 배치 내 request 포함 케이스 / 잠든 수신자 wake 미발동(파킹 유지) 회귀 — 단위 + 실 claude 하네스 양쪽
+- 턴 진행 중 stdin 주입 시 CLI(stream-json) 큐잉 동작 실측(즉시 주입 폴백 설계의 근거 데이터)
 - request→회신→`replied` 전이 + `reply_by` 초과→notice 주입 관측
 - XML 봉투로 실 claude 왕복(포맷 전환 재검증) green
 - 그룹 스냅샷 fan-out + skipped 기록 단위테스트
@@ -105,7 +115,7 @@ engram-send group list | group update @g --add a,b [--remove c] [--delete]
 
 ## 8. v2+ 확장 경로 (봉투 = XML 속성이라 전부 무파괴)
 
-cc(수신자 역할 — 역할 명시 주입 필수, 리뷰 지적) · 그룹 request(수신자별 계약 + any/all 집계) · 장부 사유 칸(refused/failed 구분) · thread_id(대화 묶음 — v1은 in_reply_to로 충분, 장부 TTL 확장 시 재검토) · ACL/수신거부 · 영속화(SQLite 예상) · 시스템 조작 버스 `engram_control`(S17).
+cc(수신자 역할 — 역할 명시 주입 필수, 리뷰 지적) · 그룹 request(수신자별 계약 + any/all 집계) · 장부 사유 칸(refused/failed 구분) · thread_id(대화 묶음 — v1은 in_reply_to로 충분, 장부 TTL 확장 시 재검토) · ACL/수신거부 · 영속화(SQLite 예상) · 시스템 조작 버스 `engram_control`(S17) · **wake-on-request**(잠든 수신자를 request 한정 깨워 배달 — 2026-07-24 연기, ADR-0104) · **폴더 그룹 소스**(트리/폴더 데몬 소유화 시 `@폴더명` — GroupRegistry seam에 소스 추가).
 
 ## 9. 리서치 근거 요약 (2026-07-24, medium tier + cross-family 적대 리뷰)
 
