@@ -15,6 +15,9 @@ pub mod control;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 pub mod instance;
+// ADR-0103/0104: S18 메시징 v1 순수 데이터 구조(mailbox·ledger·groups). 오케스트레이션(MessagingService)
+//   은 후속 increment — 여기선 모듈만 등록해 컴파일에 태운다(단위 테스트도 함께 돈다).
+pub mod messaging;
 pub mod portfile;
 pub mod ws;
 
