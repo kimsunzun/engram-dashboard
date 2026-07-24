@@ -12,13 +12,25 @@
 #   위 동거 불변식이 깨지지 않는지 반드시 재검토한다. tauri.conf.json 은 건드리지 않는다(정식 번들은 유예).
 #
 # 사용: 프로젝트 루트 어디서든 `pwsh scripts/build-release.ps1`. cwd 무관(경로는 스크립트 위치 기준).
+#   -OutDir 로 조립 위치를 지정하면 repo 밖으로도 산출 가능(테스트 편의 — local\ 런처가 사용).
+
+# param() 은 스크립트의 첫 실행문이어야 한다(주석·빈 줄은 앞서도 됨) — 이 아래에 어떤 문도 오면 파싱 실패.
+param([string]$OutDir = '')
 
 $ErrorActionPreference = 'Stop'
 
 # ── 경로 앵커 (cwd 불신 — 스크립트 자기 위치 기준으로 프로젝트 루트를 잡는다) ─────────────
 $ScriptDir   = $PSScriptRoot                              # <root>/scripts
 $ProjectRoot = Split-Path -Parent $ScriptDir             # <root>
-$ReleaseDir  = Join-Path $ProjectRoot 'release'          # 조립 산출물(clean 재생성)
+# 조립 산출물(clean 재생성). -OutDir 로 조립 위치를 repo 밖으로도 돌릴 수 있게 파라미터화한다.
+#   미지정 시 기존 repo 루트 release/ 하위호환(bare 호출은 종전과 동일 동작).
+#   GetFullPath 2-arg 오버로드로 상대경로는 caller cwd 기준 절대화한다 — Resolve-Path 는 아직 없는 경로에서
+#   throw 하지만 release 디렉토리는 이 시점에 없을 수 있으므로 쓰지 않는다.
+if (-not [string]::IsNullOrWhiteSpace($OutDir)) {
+    $ReleaseDir = [System.IO.Path]::GetFullPath($OutDir, (Get-Location).Path)
+} else {
+    $ReleaseDir = Join-Path $ProjectRoot 'release'
+}
 $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
 # $TargetRel(cargo 산출 release 디렉토리)은 하드코딩하지 않는다 — 아래에서 cargo metadata 로 실측 확정(FIX-2).
 
@@ -43,6 +55,14 @@ function Invoke-Step([string]$label, [scriptblock]$block) {
 }
 
 Write-Host "[build-release] ADR-0100 portable release 조립 시작 — root=$ProjectRoot" -ForegroundColor Green
+Write-Host "[build-release] 조립 위치(release dir) = $ReleaseDir" -ForegroundColor Green
+
+# 안전 가드: $ReleaseDir 는 아래 (b) 단계에서 Remove-Item -Recurse -Force 로 통째 지운다 — -OutDir 가 이제
+#   caller 제공 경로라 드라이브 루트나 프로젝트 루트로 실수하면 그 폴더가 통째로 날아간다. 파국적 값(드라이브
+#   루트·ProjectRoot)만 거부하고 정상 하위폴더는 그대로 통과시킨다(신뢰된 로컬 사용에 마찰 없음).
+if ($ReleaseDir -eq [System.IO.Path]::GetPathRoot($ReleaseDir) -or $ReleaseDir -eq $ProjectRoot) {
+    Fail "위험한 -OutDir: '$ReleaseDir' — 드라이브 루트/프로젝트 루트는 clean 재생성(재귀 삭제) 대상이 될 수 없다"
+}
 
 # ── cargo 산출 디렉토리 실측 (FIX-2: 가정 금지) ──────────────────────────────────────────────
 #   `target/release` 는 기본값일 뿐 — CARGO_TARGET_DIR / .cargo/config.toml build.target-dir 이
