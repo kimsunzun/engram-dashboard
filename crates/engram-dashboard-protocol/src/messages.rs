@@ -702,16 +702,16 @@ mod tests {
         assert_eq!(colon_json, serde_json::to_string(&colon_back).unwrap());
     }
 
-    /// ADR-0096: EnvelopeFormat 기본값 = Colon(데몬 전역 상태 초기값과 정합) + `{format:"xml"}` 형태의
-    /// bare 객체 JSON 이 그대로 역직렬화되는지(invoke 페이로드가 이 형태) 확인.
+    /// ADR-0103: EnvelopeFormat wire 기본값 = Xml(데몬 운영 기본과 정합, 기본 flip) + `{format:"xml"}`
+    /// 형태의 소문자 문자열이 그대로 역직렬화되는지(invoke 페이로드가 이 형태) 확인.
     #[test]
-    fn envelope_format_default_is_colon_and_lowercase_deserializes() {
+    fn envelope_format_default_is_xml_and_lowercase_deserializes() {
         assert_eq!(
             EnvelopeFormat::default(),
-            EnvelopeFormat::Colon,
-            "기본 봉투 포맷 = colon(ADR-0095 결정 2·ADR-0096 결정 1)"
+            EnvelopeFormat::Xml,
+            "기본 봉투 포맷 = xml(ADR-0103 기본 flip — 데몬 운영 기본과 정합)"
         );
-        // invoke 가 넘기는 소문자 문자열이 역직렬화된다.
+        // invoke 가 넘기는 소문자 문자열이 역직렬화된다(양방향 모두 유지).
         let xml: EnvelopeFormat = serde_json::from_str(r#""xml""#).unwrap();
         assert_eq!(xml, EnvelopeFormat::Xml);
         let colon: EnvelopeFormat = serde_json::from_str(r#""colon""#).unwrap();

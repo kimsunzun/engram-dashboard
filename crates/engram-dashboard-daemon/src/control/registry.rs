@@ -53,11 +53,14 @@ pub struct ControlRegistry {
     ///   상태를 매달면 별도 상태 소유자를 새로 배선하지 않고 두 봉투 조립 경로가 같은 값을 읽는다.
     ///   ★소유 = 데몬(ADR-0029)★: registry 는 AgentManager 를 소유한 데몬 프로세스에 산다 — src-tauri
     ///   (클라이언트 셸)는 이 상태를 소유하지 않고 invoke 커맨드를 데몬으로 전달만 한다.
-    ///   ★AtomicU8(락 불요)★: 단순 스칼라 토글이라 RwLock 이 과하다 — 0=Colon(기본)·1=Xml. `Default`
-    ///   가 0 이라 초기값이 Colon 으로 정합한다(ADR-0096 결정 1·4). ★메모리-only★: 데몬 재시작 시 0(colon)
+    ///   ★AtomicU8(락 불요)★: 단순 스칼라 토글이라 RwLock 이 과하다 — **0=Xml(기본)·1=Colon**. `Default`
+    ///   가 0 이라 초기값이 Xml 로 정합한다(ADR-0103 — S18 봉투 XML 단일화로 기본 flip). ★값 매핑을 뒤집은
+    ///   이유★: `#[derive(Default)]` AtomicU8=0 을 새 기본값 Xml 에 매달아야 하므로 Xml 을 0 에, Colon 을 1 에
+    ///   배정한다(별도 seed 없이 파생 Default 만으로 기본 = Xml 성립). ★메모리-only★: 데몬 재시작 시 0(Xml)
     ///   으로 리셋(영속화는 백로그 — ADR-0096 결정 4). read=relay 마다(Acquire), write=set_envelope_format
     ///   커맨드(드묾, Release) — Release/Acquire 짝으로 스위치 이후 첫 메시지가 새 포맷을 확실히 보게
     ///   한다(FIX-4). 단일 스칼라라 찢김은 없으나 cross-thread 가시성을 명시적으로 성립시킨다.
+    // ADR-0103 (기본 flip Colon→Xml — 값 매핑 0=Xml·1=Colon 으로 재배정)
     // ADR-0096
     envelope_format: AtomicU8,
     /// 배달-경계 관측 싱크(ADR-0088) — 설치되지 않으면 None(운영 기본). RwLock: 설치는 드물고(테스트
@@ -313,32 +316,36 @@ impl ControlRegistry {
         }
     }
 
-    // ── 봉투 포맷 전역 상태(ADR-0096) ────────────────────────────────────────────────
+    // ── 봉투 포맷 전역 상태(ADR-0096·0103) ──────────────────────────────────────────
     //
-    // A→B 메시지 봉투 형식(colon/xml)의 데몬 전역 스위치. `handle_send` 가 relay 마다 read 하고,
-    // WS dispatch 의 SetEnvelopeFormat 커맨드가 write 한다. AtomicU8 0=Colon·1=Xml(Default=Colon).
+    // A→B 메시지 봉투 형식(xml/colon)의 데몬 전역 스위치. `handle_send` 가 relay 마다 read 하고,
+    // WS dispatch 의 SetEnvelopeFormat 커맨드가 write 한다. AtomicU8 **0=Xml·1=Colon(Default=Xml)**
+    // — ADR-0103 으로 기본 flip 하며 파생 Default(0) 를 새 기본값 Xml 에 매달려고 값 매핑을 뒤집었다.
 
-    /// 현재 봉투 포맷(ADR-0096) — `handle_send` 가 봉투 조립 시 읽어 wrap_message 에 넘긴다.
-    /// ★알 수 없는 값 방어★: 저장은 아래 set_envelope_format 만 하므로 항상 0/1 이나, 방어적으로
-    ///   1(Xml)만 Xml, 그 외는 Colon 으로 접는다(기본 안전 = 운영 정상값 colon).
+    /// 현재 봉투 포맷(ADR-0096·0103) — `handle_send` 가 봉투 조립 시 읽어 wrap_message 에 넘긴다.
+    /// ★알 수 없는 값 방어(fold-unknown = Xml)★: 저장은 아래 set_envelope_format 만 하므로 항상 0/1 이나,
+    ///   방어적으로 **1(Colon)만 Colon, 그 외는 Xml** 로 접는다 — 기본 안전 = 운영 정상값이 이제 xml
+    ///   이므로(ADR-0103) fold-unknown 도 Xml 로 정합시킨다(파생 Default 0 도 이 갈래로 Xml).
+    // ADR-0103 (fold-unknown → Xml)
     pub fn envelope_format(&self) -> EnvelopeFormat {
         // ★Acquire(FIX-4)★: set_envelope_format 의 Release store 와 짝지어, 스위치 이후 첫 메시지가
         //   새 포맷을 명확히 보게 한다(cross-thread 가시성 애매함 제거). 단일 스칼라라 Relaxed 로도
         //   찢김은 없지만, 스위치 순간의 happens-before 를 명시적으로 성립시킨다.
         match self.envelope_format.load(Ordering::Acquire) {
-            1 => EnvelopeFormat::Xml,
-            _ => EnvelopeFormat::Colon,
+            1 => EnvelopeFormat::Colon,
+            _ => EnvelopeFormat::Xml,
         }
     }
 
     /// 봉투 포맷 전역 상태를 설정한다(ADR-0096) — WS dispatch 의 SetEnvelopeFormat 커맨드가 부른다.
     /// ★조종 표면 전용★: 이 setter 로 이어지는 유일 경로는 src-tauri Tauri command `set_envelope_format`
     ///   → 데몬 SetEnvelopeFormat 커맨드다. 워커 MCP 채널엔 노출하지 않는다(ADR-0096 결정 3·ADR-0094).
-    ///   ★메모리-only★: 영속화하지 않는다 — 데몬 재시작 시 Colon 으로 리셋(백로그).
+    ///   ★메모리-only★: 영속화하지 않는다 — 데몬 재시작 시 Xml 로 리셋(ADR-0103·백로그).
     pub fn set_envelope_format(&self, format: EnvelopeFormat) {
+        // ADR-0103: 값 매핑 재배정(0=Xml·1=Colon) — envelope_format() fold 와 대칭.
         let v = match format {
-            EnvelopeFormat::Colon => 0u8,
-            EnvelopeFormat::Xml => 1u8,
+            EnvelopeFormat::Xml => 0u8,
+            EnvelopeFormat::Colon => 1u8,
         };
         // ★Release(FIX-4)★: envelope_format() 의 Acquire load 와 짝. 스위치 write 가 이후 relay 의
         //   read 에 확실히 보이도록 happens-before 를 성립시킨다.
@@ -665,27 +672,29 @@ mod tests {
         assert_eq!(reg.bound_session_count(), 0);
     }
 
-    // ── ADR-0096: 봉투 포맷 전역 상태 ────────────────────────────────────────────────
+    // ── ADR-0096·0103: 봉투 포맷 전역 상태 ────────────────────────────────────────────
     #[test]
-    fn envelope_format_defaults_to_colon_and_toggles() {
-        // 기본 = Colon(데몬 전역 상태 초기값, ADR-0096 결정 1·4). set 으로 Xml 전환, 다시 Colon 복귀.
+    fn envelope_format_defaults_to_xml_and_toggles() {
+        // ★ADR-0103 기본 flip★: 새 registry 기본 = **Xml**(데몬 전역 상태 초기값, 파생 Default AtomicU8=0
+        //   → Xml). set 으로 Colon(잔존 스위치) 전환, 다시 Xml 복귀.
         let reg = ControlRegistry::new();
         assert_eq!(
             reg.envelope_format(),
+            EnvelopeFormat::Xml,
+            "새 registry 기본 봉투 포맷은 xml 이어야(ADR-0103 flip)"
+        );
+        // colon 은 잔존 스위치 — 여전히 선택 가능.
+        reg.set_envelope_format(EnvelopeFormat::Colon);
+        assert_eq!(
+            reg.envelope_format(),
             EnvelopeFormat::Colon,
-            "새 registry 기본 봉투 포맷은 colon 이어야"
+            "set(Colon) 후 colon 으로 읽혀야(잔존 스위치)"
         );
         reg.set_envelope_format(EnvelopeFormat::Xml);
         assert_eq!(
             reg.envelope_format(),
             EnvelopeFormat::Xml,
-            "set(Xml) 후 xml 로 읽혀야"
-        );
-        reg.set_envelope_format(EnvelopeFormat::Colon);
-        assert_eq!(
-            reg.envelope_format(),
-            EnvelopeFormat::Colon,
-            "set(Colon) 후 colon 으로 복귀"
+            "set(Xml) 후 xml 로 복귀"
         );
     }
 

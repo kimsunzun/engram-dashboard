@@ -1782,18 +1782,20 @@ mod tests {
         //   relay 마다 읽는 봉투 포맷 전역 상태)를 실제로 바꾸는지 검증한다. 이게 dispatch↔send-path
         //   상태 공유의 회귀 가드다(같은 Arc — dispatch 가 쓴 값을 read 로 관측).
         let (core, control_registry) = test_core_with_control_registry();
+        // ★ADR-0103 기본 flip★: 초기 봉투 포맷 = Xml(기본). colon 은 잔존 스위치.
         assert_eq!(
             control_registry.envelope_format(),
-            CoreEnvelopeFormat::Colon,
-            "초기 봉투 포맷은 colon(기본)"
+            CoreEnvelopeFormat::Xml,
+            "초기 봉투 포맷은 xml(기본, ADR-0103)"
         );
         let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
+        // colon 으로 전환(잔존 스위치) — 관측 가능한 변경.
         core.dispatch(
             AgentCommand::SetEnvelopeFormat {
-                format: WireEnvelopeFormat::Xml,
+                format: WireEnvelopeFormat::Colon,
                 request_id: req,
             },
             &session,
@@ -1805,17 +1807,17 @@ mod tests {
             [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
             other => panic!("SetEnvelopeFormat 는 Ack 를 돌려줘야: {other:?}"),
         }
-        // (b) send path 가 읽는 전역 상태가 Xml 로 바뀌었다.
+        // (b) send path 가 읽는 전역 상태가 Colon 으로 바뀌었다.
         assert_eq!(
             control_registry.envelope_format(),
-            CoreEnvelopeFormat::Xml,
-            "dispatch 후 봉투 포맷 전역 상태가 xml 로 바뀌어야(send path 가 이 값을 읽음)"
+            CoreEnvelopeFormat::Colon,
+            "dispatch 후 봉투 포맷 전역 상태가 colon 으로 바뀌어야(send path 가 이 값을 읽음)"
         );
 
-        // 되돌리기(colon)도 반영된다.
+        // 되돌리기(xml)도 반영된다.
         core.dispatch(
             AgentCommand::SetEnvelopeFormat {
-                format: WireEnvelopeFormat::Colon,
+                format: WireEnvelopeFormat::Xml,
                 request_id: rid(),
             },
             &session,
@@ -1824,8 +1826,8 @@ mod tests {
         .await;
         assert_eq!(
             control_registry.envelope_format(),
-            CoreEnvelopeFormat::Colon,
-            "colon 재전환도 반영"
+            CoreEnvelopeFormat::Xml,
+            "xml 재전환도 반영"
         );
     }
 

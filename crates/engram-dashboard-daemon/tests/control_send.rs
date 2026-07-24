@@ -335,26 +335,28 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     assert_eq!(v["to"], "bee", "해석된 수신자 이름 동봉");
     assert!(v["id"].is_string(), "msg-id 동봉");
 
-    // 래핑된 라인이 B 의 입력 에코로 관측돼야 한다. ADR-0095/0096: 운영 기본 봉투 = colon
-    //   (`{sender}: {body}`). 발신자는 profile 부재라 표시이름 = sender id 앞 8자(sender_display_name
-    //   fallback)로 결정적이다.
-    // ★앵커 단언(느슨한 substring 금지)★: 관측 sink 가 잡는 `j` 는 유저 에코 이벤트의 **전체 JSON**
-    //   (`{"type":"text","text":"<봉투>","uuid":"X"}`)이라 봉투는 그 안 `"text":"` 필드 값으로 박혀 있다.
-    //   그래서 봉투를 통째로 `j` 와 equality 비교할 수 없다 — 대신 `"text":"` 접두로 **봉투 시작에 발신자를
-    //   핀**한다: 봉투 값이 정확히 `<발신자>: ` 로 시작해야 통과한다. 이러면 `wrong-sender: <발신자>: body`
-    //   처럼 발신자를 앞에 덧댄 잘못된 렌더는 `"text":"<발신자>: ` 를 포함하지 못해 실패한다(느슨한
-    //   substring `<발신자>: body` 는 그런 렌더를 통과시켰다 — 이 앵커가 그걸 막는다).
+    // 래핑된 라인이 B 의 입력 에코로 관측돼야 한다. ADR-0103: 운영 기본 봉투 = **xml**
+    //   (`<message from="{sender}">{body}</message>`). 발신자는 profile 부재라 표시이름 = sender id 앞
+    //   8자(sender_display_name fallback)로 결정적이다.
+    // ★정확 일치 단언(느슨한 substring 금지 — 리뷰 지적)★: 관측 sink 가 잡는 `j` 는 유저 에코 이벤트의
+    //   **전체 JSON**(`{"type":"text","text":"<봉투>","uuid":"X"}`)이라 봉투는 그 안 `text` 필드 값으로
+    //   박혀 있다. 예전엔 raw 라인에 substring `contains` 를 썼는데, 그러면 `</message>` 뒤에 잘림·오염이
+    //   덧붙어도 통과했다(트레일링 corruption 미탐). 그래서 `j` 를 JSON 파싱해 `text` 필드를 뽑아 기대 봉투
+    //   문자열과 **정확(==) 비교**한다 — 프레이밍(uuid 등)은 필드 밖이라 무관하고 봉투 자체의 온전성만 본다.
     let sender_display = &sender.to_string()[..8];
-    let anchored_envelope = format!(r#""text":"{sender_display}: ping-body-XYZ"#);
+    let expected_envelope = obs_seam::expected_default_envelope(sender_display, "ping-body-XYZ");
     let observed = wait_until(Duration::from_secs(3), || {
-        seen.lock()
-            .unwrap()
-            .iter()
-            .any(|j| j.contains(&anchored_envelope))
+        seen.lock().unwrap().iter().any(|j| {
+            serde_json::from_str::<serde_json::Value>(j)
+                .ok()
+                .and_then(|v| v["text"].as_str().map(|t| t == expected_envelope))
+                .unwrap_or(false)
+        })
     });
     assert!(
         observed,
-        "relay 가 래핑된 라인을 B stdin 에 주입(입력 에코 관측): {:?}",
+        "relay 가 래핑된 라인을 B stdin 에 주입(입력 에코의 text 필드 = 기대 봉투 정확 일치): expect={:?} seen={:?}",
+        expected_envelope,
         seen.lock().unwrap()
     );
 
@@ -427,13 +429,14 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     assert!(v["id"].is_string(), "msg-id 동봉");
 
     // 배달됨 — 래핑 라인이 B 입력 에코로 관측돼야 한다(폐기 발신자여도 relay 진행).
-    //   ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`). 발신자는 profile 부재라 표시이름 =
-    //   sender id 앞 8자로 결정적이다.
+    //   ADR-0103: 운영 기본 봉투 = **xml**(`<message from="{sender}">{body}</message>`). 발신자는 profile
+    //   부재라 표시이름 = sender id 앞 8자로 결정적이다.
     // ★앵커 단언(느슨한 substring 금지)★: `j` = 유저 에코 전체 JSON(`{"type":"text","text":"<봉투>",…}`)
-    //   이라 `"text":"` 접두로 봉투 **시작에 발신자를 핀**한다 — `<발신자>: ` 로 시작해야 통과. `wrong: <발신자>:
-    //   body` 처럼 발신자를 덧댄 렌더는 이 앵커를 통과 못 한다(위 relay 테스트와 동일 근거).
+    //   이라 봉투 안 `"` 는 JSON 인코딩으로 `\"` 다 — `"text":"<message from=\"발신자\">` 로 봉투 **시작에
+    //   발신자를 핀**한다(발신자를 덧댄 잘못된 렌더는 이 앵커를 통과 못 한다).
     let sender_display = &sender.to_string()[..8];
-    let anchored_envelope = format!(r#""text":"{sender_display}: revoked-but-DELIVERED"#);
+    let anchored_envelope =
+        format!(r#""text":"<message from=\"{sender_display}\">revoked-but-DELIVERED</message>"#);
     let delivered = wait_until(Duration::from_secs(3), || {
         seen.lock()
             .unwrap()
@@ -617,6 +620,14 @@ mod obs_seam {
     pub fn fallback_name(id: AgentId) -> String {
         id.to_string()[..8].to_string()
     }
+
+    /// ★기대 봉투 재구성(ADR-0103 — 운영 기본 = xml)★: 데몬이 기본 포맷으로 감싸는 봉투를 테스트가
+    ///   바이트-정확 회계하려고 재구성한다. 기본 = plain `<message from="{sender}">{body}</message>`
+    ///   (속성 없음 — 현 스코프 increment A). ★주의★: 이 헬퍼는 XML 이스케이프를 하지 않으므로 sender/body
+    ///   에 `<`/`>`/`&`/`"` 가 없는 테스트 픽스처에서만 데몬 렌더와 바이트 일치한다(현 호출부 전부 해당).
+    pub fn expected_default_envelope(sender: &str, body: &str) -> String {
+        format!("<message from=\"{sender}\">{body}</message>")
+    }
 }
 
 // ── ADR-0088(FIX-4): 배달 관측 core 단언을 claude 없이 — seam 수신자에 성공 relay ──────────────
@@ -624,6 +635,7 @@ mod obs_seam {
 //   **항상** 관측 레코드(요청/실제 바이트·msg_id↔msg_uuid 상관·is_delivered)를 단언한다(green-when-skipped 제거).
 #[tokio::test]
 async fn control_send_delivery_observation_via_seam_no_claude() {
+    use engram_dashboard_core::agent::backend::InputEncoder;
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
@@ -669,10 +681,10 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
 
     // ★FIX-5: exact 바이트 회계★ — 요청 = wrap_message 봉투의 정확한 바이트 수. 봉투 문자열을 재구성해
     //   기대치를 정확히 계산한다(발신자 표시이름 = sender id 앞8자 fallback).
-    // ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — msg_id/ack_id 는 봉투에 심기지 않는다
-    //   (봉투에서 uuid 제거, ADR-0095 거부 대안). 그래서 재구성도 colon 이다(ack_id 미사용).
+    // ADR-0103: 운영 기본 봉투 = xml(`<message from="{sender}">{body}</message>`) — msg_id 는 봉투에
+    //   심기지 않는다(봉투에서 uuid 제거, ADR-0095 거부 대안). 그래서 재구성도 xml plain 이다.
     let sender_name = obs_seam::fallback_name(sender);
-    let expected_wrapped = format!("{sender_name}: {body}");
+    let expected_wrapped = obs_seam::expected_default_envelope(&sender_name, body);
     let expected_bytes = expected_wrapped.len(); // String::len = UTF-8 바이트 수(char 수 아님).
     assert_eq!(
         obs.bytes_requested, expected_bytes,
@@ -690,13 +702,19 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     assert_eq!(obs.to_name, to_name, "레코드 수신자 이름(fallback)");
     assert_eq!(obs.from, from, "레코드 발신자 신원(토큰 파생)");
 
-    // ★계층 관통★: 세션이 실제 받은 write 바이트(래핑된 stream-json 라인)에 멀티바이트 본체가 온전히
-    //   담겼는지 — 라인은 봉투 텍스트를 감싼 것이라 그 안에 봉투 문자열이 부분열로 들어있다.
+    // ★계층 관통(exact bytes)★: 세션이 실제 받은 write 바이트 = encoder(봉투, msg_uuid). XML 봉투의 `"` 는
+    //   stream-json JSON 인코딩에서 `\"` 로 이스케이프되므로 raw 봉투 문자열 substring 비교는 성립하지
+    //   않는다 — 그래서 encoder 로 기대 라인을 재구성해 바이트-정확 일치를 단언한다(멀티바이트 본체 온전성
+    //   + handoff 잘림/오염 탐지). msg_uuid 는 성공 레코드라 항상 Some.
     let written = obs_seam::last_written(&captured);
-    let written_str = String::from_utf8_lossy(&written);
-    assert!(
-        written_str.contains(&expected_wrapped),
-        "세션이 받은 stream-json 라인이 래핑된 봉투를 포함해야: {written_str}"
+    let msg_uuid = obs.msg_uuid.expect("성공 배달 msg_uuid");
+    let expected_line =
+        InputEncoder::ClaudeStreamJson.encode(expected_wrapped.as_bytes(), msg_uuid);
+    assert_eq!(
+        written,
+        expected_line,
+        "세션이 받은 stream-json 라인이 기대 encoded 봉투와 바이트-정확 일치해야: {}",
+        String::from_utf8_lossy(&written)
     );
 
     manager.kill_agent(b_id).ok();
@@ -879,10 +897,10 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
     );
     // (c) ★FIX-5: exact 바이트 회계★ — 요청 = wrap_message 봉투의 정확한 UTF-8 바이트 수. 발신자 표시이름은
     //     profile 부재라 sender id 앞8자 fallback.
-    //     ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — 봉투에 msg_id 미포함(uuid 제거).
+    //     ADR-0103: 운영 기본 봉투 = xml(`<message from="{sender}">{body}</message>`) — 봉투에 msg_id 미포함.
     //     bytes_written 은 by-construction 복사(short-write 탐지 아님 — 완결성은 error None 으로 본다).
     let sender_name = sender.to_string()[..8].to_string();
-    let expected_wrapped = format!("{sender_name}: {body}");
+    let expected_wrapped = obs_seam::expected_default_envelope(&sender_name, body);
     assert_eq!(
         obs.bytes_requested,
         expected_wrapped.len(), // String::len = UTF-8 바이트 수(char 수 아님).
@@ -1107,9 +1125,10 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         // ★FIX-1: 수신 본체 다중집합에 적재(치환 버그 차단용 — 루프 뒤 발신 마커 집합과 대조)★.
         received_bodies.push(body.clone());
         // ★정확-바이트 재구성★: 이 봉투가 session 에 넘어갔을 바로 그 바이트 = encoder(봉투, 그 msg_uuid).
-        //   ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — 봉투에 msg_id 미포함(uuid 제거).
+        //   ADR-0103: 운영 기본 봉투 = xml(`<message from="{sender}">{body}</message>`) — 봉투에 msg_id 미포함.
         //   (obs 는 위 msg_uuid→레코드 매칭·유령 write 검증에 여전히 쓰인다 — msg_id 만 봉투에서 빠짐.)
-        let wrapped = format!("{sender_name}: {body}");
+        //   body 마커는 XML 특수문자를 안 쓰므로(BODY-NNNN) 이스케이프 없이 데몬 렌더와 바이트 일치.
+        let wrapped = obs_seam::expected_default_envelope(&sender_name, body);
         let expected_line = InputEncoder::ClaudeStreamJson.encode(wrapped.as_bytes(), line_uuid);
         assert_eq!(
             w, &expected_line,
@@ -1218,15 +1237,16 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         let v = result.to_json();
         let obs = seen.lock().unwrap().first().cloned();
         let written = obs_seam::last_written(&captured);
-        // ADR-0095/0096: 운영 기본 봉투 = colon(`{sender}: {body}`) — 봉투에 msg_id 미포함(uuid 제거).
-        //   기대 봉투 바이트 = colon 봉투의 UTF-8 len. (봉투가 msg_id 를 안 쓰므로 성공/실패 무관 계산 가능.)
+        // ADR-0103: 운영 기본 봉투 = xml(`<message from="{sender}">{body}</message>`) — 봉투에 msg_id 미포함.
+        //   기대 봉투 바이트 = xml 봉투의 UTF-8 len. body 는 XML 특수문자 없는 픽스처라 이스케이프 무영향.
+        //   ★MAX 게이트는 body 기준★: 64 KiB 는 body 길이라 게이트를 통과하고, 봉투 wrapper 는 그 위에 얹힌다.
         let sender_name = obs_seam::fallback_name(from.agent_id);
-        let expected_env_bytes = format!("{sender_name}: {body}").len();
+        let expected_env_bytes = obs_seam::expected_default_envelope(&sender_name, &body).len();
         // ★기대 encoded 라인 재구성★: 성공 시 봉투를 관측 레코드의 msg_uuid 로 재-encode 한다(= session 이
         //   실제 send_input 에 넘긴 바이트). msg_uuid 가 있어야 encode 하므로 성공 레코드에서만 만든다.
         let expected_line = match obs.as_ref().and_then(|o| o.msg_uuid) {
             Some(uuid) => {
-                let wrapped = format!("{sender_name}: {body}");
+                let wrapped = obs_seam::expected_default_envelope(&sender_name, &body);
                 InputEncoder::ClaudeStreamJson.encode(wrapped.as_bytes(), uuid)
             }
             None => Vec::new(),
