@@ -25,7 +25,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::mcp_config;
-use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
+use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -59,9 +59,13 @@ async fn make_manager_with_control(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry.clone(), Arc::new(ManagerSlot::new()))
-        .await
-        .expect("start mcp server");
+    let handle = start_mcp_server(
+        registry.clone(),
+        Arc::new(ManagerSlot::new()),
+        Arc::new(MessagingSlot::new()),
+    )
+    .await
+    .expect("start mcp server");
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-mgr-{tag}-{}", AgentId::new_v4()));
 
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
@@ -89,9 +93,13 @@ async fn make_manager_with_control_channel(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry.clone(), Arc::new(ManagerSlot::new()))
-        .await
-        .expect("start mcp server");
+    let handle = start_mcp_server(
+        registry.clone(),
+        Arc::new(ManagerSlot::new()),
+        Arc::new(MessagingSlot::new()),
+    )
+    .await
+    .expect("start mcp server");
     let data_dir = std::env::temp_dir().join(format!("engram-mcp-mgr-{tag}-{}", AgentId::new_v4()));
     make_manager_with_injected(tag, registry, control, data_dir, handle)
 }

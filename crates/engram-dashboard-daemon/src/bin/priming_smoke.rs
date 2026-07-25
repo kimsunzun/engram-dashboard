@@ -33,12 +33,13 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
-use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
+use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::priming::{
     FilePrimingProvider, PrimingProvider, PrimingVariant,
 };
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
+use engram_dashboard_daemon::messaging::service::MessagingService;
 
 /// 스폰 후 목록 등장 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -89,13 +90,15 @@ async fn run() -> i32 {
     // 배선(control_send.rs / saturation_pilot wire() 미러) — 실 FilePrimingProvider 를 채널에 끼운다.
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
-    let handle = match start_mcp_server(registry.clone(), slot.clone()).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("[smoke] MCP 서버 기동 실패: {e}");
-            return 1;
-        }
-    };
+    let messaging_slot = Arc::new(MessagingSlot::new());
+    let handle =
+        match start_mcp_server(registry.clone(), slot.clone(), messaging_slot.clone()).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[smoke] MCP 서버 기동 실패: {e}");
+                return 1;
+            }
+        };
     let url = handle.url.clone();
     let data_dir = std::env::temp_dir().join(format!("engram-priming-smoke-{}", AgentId::new_v4()));
     let workspace =
@@ -133,6 +136,12 @@ async fn run() -> i32 {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
+    // C1: MessagingService 조립 후 슬롯 주입(handle_send 위임 경로). 이 스모크는 산 수신자 = delivered.
+    let messaging = Arc::new(MessagingService::for_manager(
+        manager.clone(),
+        registry.clone(),
+    ));
+    messaging_slot.set(messaging.clone());
 
     // 모델 핀 — 인자 없으면 sonnet(빠르고 저렴, 파일럿과 동일 계열). 첫 인자로 override 가능.
     let model = std::env::args()
@@ -225,7 +234,7 @@ async fn run() -> i32 {
         to: agent.id.to_string(), // 정확한 AgentId 로 지목(이름 충돌 회피).
         body: NATURAL_MESSAGE.to_string(),
     };
-    let ack = handle_send(&manager, &registry, Entrance::Cli, cmd);
+    let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     eprintln!("[smoke] inject ACK = {}", ack.to_json());
 
     // 응답 대기(자연 수용이면 에이전트가 이 메시지에 팀원처럼 반응한다).

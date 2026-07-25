@@ -11,12 +11,17 @@
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::types::AgentId;
-use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
+use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 
 /// 빈 manager 슬롯(스텝 1 테스트는 send 를 안 부르므로 relay 대상 불필요). 헬퍼로 반복 제거.
 fn empty_slot() -> Arc<ManagerSlot> {
     Arc::new(ManagerSlot::new())
+}
+
+/// 빈 messaging 슬롯(auth/handshake 테스트는 send/flush 미호출 — C1). 헬퍼로 반복 제거.
+fn empty_messaging_slot() -> Arc<MessagingSlot> {
+    Arc::new(MessagingSlot::new())
 }
 
 /// initialize JSON-RPC 바디(POST /mcp). rmcp 는 Accept: application/json+text/event-stream 를 요구하나,
@@ -162,7 +167,7 @@ async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     // epoch 회전(재활성화) — epoch 0 토큰은 폐기되고 epoch 1 이 산 토큰.
     registry.issue(id, 1, "valid-token-epoch1".to_string());
 
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -208,7 +213,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     let id = AgentId::new_v4();
     registry.issue(id, 7, "good-token".to_string());
 
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
 
@@ -258,7 +263,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
 #[tokio::test]
 async fn get_and_delete_without_token_are_rejected() {
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry, empty_slot())
+    let handle = start_mcp_server(registry, empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -288,7 +293,7 @@ async fn cross_token_session_takeover_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string());
     registry.issue(id_b, 0, "token-b".to_string());
 
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -322,7 +327,7 @@ async fn revoked_mid_session_request_is_rejected() {
     let id = AgentId::new_v4();
     registry.issue(id, 0, "live-token".to_string());
 
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -360,7 +365,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_daemon::control::DaemonControlChannel;
 
     let registry = Arc::new(ControlRegistry::new());
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
 
@@ -423,7 +428,7 @@ async fn orphaned_session_attach_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string());
     registry.issue(id_b, 0, "token-b".to_string());
 
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -460,7 +465,7 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "valid".to_string());
-    let handle = start_mcp_server(registry, empty_slot())
+    let handle = start_mcp_server(registry, empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -483,7 +488,7 @@ async fn malformed_session_id_header_is_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "malformtok".to_string());
-    let handle = start_mcp_server(registry, empty_slot())
+    let handle = start_mcp_server(registry, empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -521,7 +526,7 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "optok".to_string());
-    let handle = start_mcp_server(registry, empty_slot())
+    let handle = start_mcp_server(registry, empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -551,7 +556,7 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "inittok".to_string());
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;
@@ -584,7 +589,7 @@ async fn oversize_body_is_rejected_with_413() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "sizetok".to_string());
-    let handle = start_mcp_server(registry.clone(), empty_slot())
+    let handle = start_mcp_server(registry.clone(), empty_slot(), empty_messaging_slot())
         .await
         .expect("start mcp server");
     let url = &handle.url;

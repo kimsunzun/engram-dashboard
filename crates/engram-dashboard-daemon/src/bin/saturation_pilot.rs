@@ -218,6 +218,7 @@ async fn run_one(
     let Wiring {
         manager,
         registry,
+        messaging,
         mcp_handle,
         data_dir,
         profile_dir,
@@ -371,6 +372,7 @@ async fn run_one(
     let run_ctx = RunDriveCtx {
         manager: &manager,
         registry: &registry,
+        messaging: &messaging,
         agent: &agent,
         obs: &obs,
         delivery_seen: &delivery_seen,
@@ -448,6 +450,8 @@ async fn run_one(
 struct RunDriveCtx<'a> {
     manager: &'a Arc<AgentManager>,
     registry: &'a Arc<ControlRegistry>,
+    /// C1: 발송 3분기 담당(do_injection → handle_send). Wiring.messaging 참조.
+    messaging: &'a Arc<engram_dashboard_daemon::messaging::service::MessagingService>,
     agent: &'a AgentInfo,
     obs: &'a Arc<TurnObserver>,
     delivery_seen: &'a Arc<Mutex<Vec<DeliveryObservation>>>,
@@ -483,6 +487,7 @@ fn drive_run(
     let RunDriveCtx {
         manager,
         registry,
+        messaging,
         agent,
         obs,
         delivery_seen,
@@ -552,6 +557,7 @@ fn drive_run(
                     match do_injection(
                         manager,
                         registry,
+                        messaging,
                         obs,
                         agent.id,
                         agent.epoch,
@@ -795,6 +801,8 @@ fn drive_run(
 struct Wiring {
     manager: Arc<AgentManager>,
     registry: Arc<ControlRegistry>,
+    /// C1: 발송 3분기 담당(handle_send 에 넘긴다). manager 를 감싼 서비스.
+    messaging: Arc<engram_dashboard_daemon::messaging::service::MessagingService>,
     mcp_handle: McpServerHandle,
     data_dir: PathBuf,
     /// ★finding 9★: per-run profile/preset 임시 dir(cleanup 이 이것도 제거해야 함 — 이전엔 누수).
@@ -806,7 +814,9 @@ struct Wiring {
 async fn wire(tag: &str) -> Result<Wiring, String> {
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
-    let handle = start_mcp_server(registry.clone(), slot.clone())
+    let messaging_slot =
+        Arc::new(engram_dashboard_daemon::control::mcp_server::MessagingSlot::new());
+    let handle = start_mcp_server(registry.clone(), slot.clone(), messaging_slot.clone())
         .await
         .map_err(|e| format!("start mcp server: {e}"))?;
     let url = handle.url.clone();
@@ -843,10 +853,19 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
+    // C1: MessagingService 조립 후 슬롯 주입. 파일럿은 handle_send 직접 호출 경로만 쓴다(산 수신자).
+    let messaging = Arc::new(
+        engram_dashboard_daemon::messaging::service::MessagingService::for_manager(
+            manager.clone(),
+            registry.clone(),
+        ),
+    );
+    messaging_slot.set(messaging.clone());
 
     Ok(Wiring {
         manager,
         registry,
+        messaging,
         mcp_handle: handle,
         data_dir,
         profile_dir,
@@ -1336,6 +1355,7 @@ enum InjectOutcome {
 fn do_injection(
     manager: &Arc<AgentManager>,
     registry: &Arc<ControlRegistry>,
+    messaging: &Arc<engram_dashboard_daemon::messaging::service::MessagingService>,
     obs: &Arc<TurnObserver>,
     agent_id: AgentId,
     agent_epoch: u32,
@@ -1381,6 +1401,7 @@ fn do_injection(
     let result = handle_send(
         manager,
         registry,
+        messaging,
         Entrance::Cli,
         ControlCommand { from, to, body },
     );
@@ -1400,7 +1421,8 @@ fn do_injection(
             o.to_epoch,
             o.error.clone(),
         ),
-        None => (v["status"] == "enqueued", 0, None, None, None),
+        // C1: 성공 응답은 results 배열(spec §6) — 관측 레코드 부재 시 접수 성공을 그것으로 판정.
+        None => (v.get("results").is_some(), 0, None, None, None),
     };
 
     writer.write(&Record::Injection(InjectionRecord {

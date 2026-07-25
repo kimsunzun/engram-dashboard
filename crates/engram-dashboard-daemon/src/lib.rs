@@ -195,12 +195,16 @@ fn build_manager(
     data_dir: &std::path::Path,
     registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+    flush_tx: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        engram_dashboard_core::agent::types::AgentId,
+    )>,
 ) -> Arc<AgentManager> {
     // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
     // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
     let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
     let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
-    build_manager_with_store(profile_store, preset_store, registry, control)
+    build_manager_with_store(profile_store, preset_store, registry, control, flush_tx)
 }
 
 /// build_manager 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리할 수
@@ -212,8 +216,19 @@ fn build_manager_with_store(
     preset_store: Arc<dyn PresetStore>,
     registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+    flush_tx: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        engram_dashboard_core::agent::types::AgentId,
+    )>,
 ) -> Arc<AgentManager> {
-    let status_sink = Arc::new(DaemonStatusSink::new(registry));
+    // ADR-0104(C1): status sink 를 MessagingFlushSink 로 감싼다 — 로스터 등장/epoch bump 를 데몬측에서
+    //   diff 해 파킹 flush 를 건다(코어 seam 무변경). 감싼 DaemonStatusSink 가 프론트 broadcast 를 그대로
+    //   수행하고, wrapper 는 그 전에 flush 대상을 채널로 flush worker 에 넘긴다(finding 5 — 콜백 blocking
+    //   분리). flush worker·MessagingService 는 이 manager 조립 후 부팅에서 배선된다(slot 늦은 주입).
+    let status_sink = Arc::new(ws::MessagingFlushSink::new(
+        DaemonStatusSink::new(registry),
+        flush_tx,
+    ));
     let profiles = Arc::new(ProfileRegistry::new(store));
     // ADR-0061: 프리셋 레지스트리도 데몬이 소유. 프로필과 동일하게 store 에서 로드해 초기화.
     let presets = Arc::new(PresetRegistry::new(preset_store));
@@ -422,14 +437,27 @@ pub async fn run() -> Result<(), i32> {
     //   DaemonControlChannel 을 만들려면). 그래서 빈 슬롯을 서버에 넘기고, manager 조립 직후 set 한다.
     //   에이전트가 붙어 send 를 부르는 건 accept loop 이후라 그 시점엔 항상 채워져 있다.
     let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
+    // C1: MessagingService(발송 3분기·flush·sweep) 늦은 주입 슬롯. manager 를 감싸므로 manager 조립
+    //   후에야 서비스가 생긴다 — MCP 서버·flush worker 엔 빈 슬롯을 넘기고 아래에서 set(순환 해소).
+    let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
+    // finding 5: flush 작업을 status-sink 콜백에서 분리하는 채널. sink(status 콜백)는 diff 대상만 push 하고
+    //   즉시 반환하며, 아래 flush worker(sweep task 옆)가 소비해 실제 flush_for(blocking write)를 돈다.
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        String,
+        engram_dashboard_core::agent::types::AgentId,
+    )>();
 
     // MCP 서버 핸들 — Some 이면 프로세스 수명 동안 살아 있어야 서버가 유지된다(drop=종료). fail-closed
     //   라 실패 시 아래 match 가 early-return 하므로, 여기 도달하면 항상 살아 있는 핸들을 든다.
     let (control, mut mcp_server_handle): (
         Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
-    ) = match control::mcp_server::start_mcp_server(control_registry.clone(), manager_slot.clone())
-        .await
+    ) = match control::mcp_server::start_mcp_server(
+        control_registry.clone(),
+        manager_slot.clone(),
+        messaging_slot.clone(),
+    )
+    .await
     {
         Ok(handle) => {
             let url = handle.url.clone();
@@ -464,11 +492,42 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 6) AgentManager 배선(src-tauri 미러). status_sink = DaemonStatusSink(registry).
-    let manager = build_manager(&data_dir, registry.clone(), control);
+    // 6) AgentManager 배선(src-tauri 미러). status_sink = MessagingFlushSink(DaemonStatusSink) — C1
+    //    파킹 flush 트리거를 로스터 이벤트에 얹는다(messaging_slot 늦은 주입).
+    let manager = build_manager(&data_dir, registry.clone(), control, flush_tx);
     // ADR-0086 스텝 2: manager 를 슬롯에 주입 → 이제 send_message/`/control/send` 가 relay 를 수행할 수
     //   있다(에이전트 spawn·send 이전에 완료). accept loop 이후의 어떤 send 도 채워진 슬롯을 본다.
     manager_slot.set(manager.clone());
+
+    // 6.5) C1: MessagingService 조립(발송 3분기·flush·sweep). manager 를 DeliveryPort 로 감싸고
+    //    control_registry(봉투 포맷·배달 관측)를 공유한다 — handle_send·flush sink 와 같은 Arc.
+    let messaging = Arc::new(messaging::service::MessagingService::for_manager(
+        manager.clone(),
+        control_registry.clone(),
+    ));
+    // 슬롯 주입 → 이제 send/flush 가 서비스에 닿는다(accept loop·에이전트 등장 이전에 완료).
+    messaging_slot.set(messaging.clone());
+
+    // 6.6) C1 TTL sweep task — 주기적으로 만료 파킹분을 걷어 ledger `expired` 로 남긴다(spec §5). 데몬
+    //    수명 동안 도는 long-lived tokio task(accept loop 와 나란히). ★주기 = 60s(내부 선택 — 보고)★:
+    //    TTL(1h)에 비해 촘촘해 만료가 크게 지연되지 않고, 극저 메시지율이라 부하가 무의미하다. sweep 은
+    //    lock 하나만 짧게 잡는 순수 조작이라 async executor 를 막지 않는다(blocking 불요).
+    const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let sweep_messaging = messaging.clone();
+    let sweep_task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        // 첫 tick 즉발을 건너뛴다(부팅 직후 파킹 없음 — 첫 주기 뒤부터 sweep).
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            sweep_messaging.sweep(std::time::Instant::now());
+        }
+    });
+
+    // 6.7) finding 5: flush worker task — MessagingFlushSink 가 채널로 보낸 등장/epoch flush 대상을 소비해
+    //    실제 flush_for(messaging 락 + inject blocking write)를 수행한다. status-sink 콜백을 blocking write
+    //    에서 떼어내 spawn/reap/프론트 업데이트가 배치 flush 에 물리지 않게 한다(sweep task 옆, 종료 시 abort).
+    let flush_worker = tokio::spawn(ws::run_flush_worker(flush_rx, messaging_slot.clone()));
 
     // 7) auth 비교용 토큰을 Arc 로 보관(daemon.json 에 token 을 move 하므로 그 전에 공유본을 뜸).
     //    보안: 이 값은 로그/외부 노출 금지(handle_connection 내부 비교 전용).
@@ -534,10 +593,38 @@ pub async fn run() -> Result<(), i32> {
     restore_handle.abort();
     let _ = restore_handle.await; // abort/완료 결과 무시(Cancelled 또는 Ok)
 
-    // 모든 에이전트 정리(PTY kill + tracker 정지). blocking 이므로 spawn_blocking 으로 실행하고 대기.
+    // C1: TTL sweep task 종료(데몬 수명 동안 도는 long-lived task — 여기서 abort). 인메모리 파킹이라
+    //    남은 만료 처리는 불요(프로세스 종료 = 상태 소멸, spec §0 "영속화 없음"). sweep 은 락만 짧게
+    //    잡는 순수 조작이라 abort 가 항상 즉시 먹는다(blocking write 없음 — flush worker 와 다름).
+    sweep_task.abort();
+    let _ = sweep_task.await;
+
+    // ★종료 순서(BLOCK — round-3 finding 1)★: 에이전트 정리(shutdown_all)를 **flush worker 종료보다
+    //   먼저** 한다. 왜: flush worker 는 flush_for 안에서 inject = transport.send_input 을 부르는데,
+    //   그건 자식 stdin 으로의 **동기 blocking write_all+flush**다(pty.rs:302-308 / stdio.rs:322-332 —
+    //   논블록 채널 send 가 아니라 실제 파이프 write). worker 는 이 blocking 을 spawn_blocking 으로 던지지만
+    //   (round-4 finding 1 — executor 굶주림 격리, ws.rs::run_flush_worker), spawn_blocking 클로저 자체는
+    //   abort 불가다 — worker 의 .await 를 abort 해도 blocking pool 스레드의 write_all 은 자식이 stdin 을
+    //   안 비우고 파이프 버퍼가 가득 차면 계속 걸려 있다(tokio abort 는 .await 지점에서만 취소되지, blocking
+    //   syscall 중인 pool 스레드는 못 끊는다). 그래서 abort 를 flush 보다 먼저 걸고 await 하면 데몬 종료가
+    //   영영 hang 한다. shutdown_all 이 자식을 kill 하고 파이프를 닫으면 막힌 write 가 에러로 풀려 pool
+    //   스레드가 flush_for 를 빠져나온다 → 그 다음 abort/await 가 먹는다. (spawn_blocking 은 executor
+    //   굶주림만 없앴을 뿐 이 종료 순서 의존은 그대로 — pool 스레드 회수는 여전히 자식 kill 에 달렸다.)
     let mgr = manager.clone();
     if let Err(e) = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await {
         tracing::warn!("shutdown_all join 실패: {e}");
+    }
+
+    // finding 5/1: flush worker 종료. 위 shutdown_all 로 막힌 inject 가 이미 풀렸으므로 abort 가 먹는다.
+    //   ★belt(finding 1)★: 그래도 join 을 5s 타임아웃으로 감싼다 — 만일 abort 후에도 어떤 이유로 worker
+    //   가 안 끝나면(예측 못 한 blocking) 데몬 종료를 hang 시키는 대신 warn 로그만 남기고 detach 한다
+    //   (프로세스 종료가 곧 그 스레드를 회수하므로 안전). ADR-0006(락 규율·종료 인과).
+    flush_worker.abort();
+    match tokio::time::timeout(std::time::Duration::from_secs(5), flush_worker).await {
+        Ok(_) => {}
+        Err(_) => tracing::warn!(
+            "flush worker 종료 5s 타임아웃 — detach(데몬 종료 hang 방지, round-3 finding 1)"
+        ),
     }
 
     // ADR-0086: 제어 채널 MCP 서버 graceful 종료(에이전트 정리 후 — 남은 세션도 함께 정리된다).
@@ -574,16 +661,32 @@ pub struct TestServerHandle {
     accept_handle: tokio::task::JoinHandle<()>,
     /// accept loop 종료 신호(watch). shutdown() 이 true 로 보낸다.
     shutdown_tx: watch::Sender<bool>,
+    /// finding 5: flush worker task 핸들 — shutdown 시 abort(운영 run() 과 동일 패턴).
+    flush_worker: tokio::task::JoinHandle<()>,
 }
 
 impl TestServerHandle {
-    /// 서버를 graceful 하게 내린다: 종료 신호 → accept loop join → 전 에이전트 kill.
-    /// 좀비 PTY 방지를 위해 shutdown_all 까지 동기 대기한다.
+    /// 서버를 graceful 하게 내린다: 종료 신호 → accept loop join → **전 에이전트 kill → flush worker
+    /// 종료**(이 순서가 load-bearing). 좀비 PTY 방지를 위해 shutdown_all 까지 동기 대기한다.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
         let _ = self.accept_handle.await;
+        // ★종료 순서(BLOCK — round-3 finding 1, run() 미러)★: shutdown_all 을 flush worker 종료보다
+        //   **먼저** 한다. flush worker 는 flush_for→inject 에서 자식 stdin 으로 동기 blocking write 를
+        //   하는데(pty.rs/stdio.rs), 이제 그걸 spawn_blocking 으로 던진다(round-4 finding 1 — executor
+        //   굶주림 격리). 하지만 spawn_blocking 클로저는 abort 불가라, 자식이 살아 stdin 을 안 비우면 pool
+        //   스레드가 write 에 걸려 worker abort 후에도 안 끝난다. shutdown_all 이 먼저 자식을 kill·파이프를
+        //   닫아 막힌 write 를 에러로 풀어야 pool 스레드가 빠져나온다(굶주림만 없앴지 이 순서 의존은 그대로).
         let mgr = self.manager.clone();
         let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
+        // flush worker 종료. shutdown_all 로 막힌 inject 가 풀렸으므로 abort 가 먹는다. belt: 5s 타임아웃.
+        self.flush_worker.abort();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), self.flush_worker)
+            .await
+            .is_err()
+        {
+            tracing::warn!("테스트 서버 flush worker 종료 5s 타임아웃 — detach(round-3 finding 1)");
+        }
     }
 }
 
@@ -640,7 +743,22 @@ async fn start_test_server_inner(
     // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 별도 control::mcp_server 테스트가 담당).
     let control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel> =
         Arc::new(engram_dashboard_core::agent::types::NoopControlChannel);
-    let manager = build_manager_with_store(store, preset_store, registry.clone(), control);
+    // C1: MessagingFlushSink 용 messaging 슬롯. WS 테스트는 send/flush 를 검증하지 않지만 status sink
+    //   wrapper 가 채널을 요구하므로 배선하고 manager 조립 후 서비스를 채운다(부재여도 worker 가 flush 스킵).
+    let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
+    // finding 5: flush 채널 + worker(운영 run() 과 동일 패턴). status 콜백은 대상만 push, worker 가 flush.
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        String,
+        engram_dashboard_core::agent::types::AgentId,
+    )>();
+    let manager =
+        build_manager_with_store(store, preset_store, registry.clone(), control, flush_tx);
+    // 서비스 주입(manager 를 감싸므로 조립 후). WS 테스트에선 파킹이 없어 flush 는 사실상 no-op.
+    messaging_slot.set(Arc::new(messaging::service::MessagingService::for_manager(
+        manager.clone(),
+        control_registry.clone(),
+    )));
+    let flush_worker = tokio::spawn(ws::run_flush_worker(flush_rx, messaging_slot.clone()));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let accept_handle = {
@@ -669,6 +787,7 @@ async fn start_test_server_inner(
         manager,
         accept_handle,
         shutdown_tx,
+        flush_worker,
     })
 }
 

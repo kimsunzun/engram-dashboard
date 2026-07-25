@@ -22,3 +22,6 @@
 pub mod groups;
 pub mod ledger;
 pub mod mailbox;
+// C1: 순수 구조를 발송 파이프라인에 엮는 오케스트레이터(MessagingService + delivery seam). tokio·락은
+//   여기서 소유(위 순수 구조는 무동시성). ADR-0103/0104.
+pub mod service;

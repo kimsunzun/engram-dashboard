@@ -136,25 +136,54 @@ pub struct ControlCommand {
     pub body: String,
 }
 
-/// 제어 커맨드 처리 결과 — 성공(enqueued ACK) 또는 교정 에러. 두 입구 모두 이 값을 그대로 JSON 직렬화해
-/// 열린 요청에 돌려준다(동일 shape 보장). `to_json` 이 wire JSON 을 만든다.
+/// 한 수신자에 대한 발송 결과(spec §6 `results[]` 원소). status = delivered|pending, hint 선택.
+///
+/// ★spec §6 shape★: 발송 성공 응답은 `{ id, results: [{to, status, hint?}] }` 다. C1 은 단일 수신자라
+///   results 길이 1 이지만, 그룹(C4)이 오면 이 배열이 길이 N 이 된다(다중수신 seam — ADR-0092 정신).
+#[derive(Debug, Clone)]
+pub struct SendResult {
+    /// 해석된 수신자 이름(부재 파킹이면 발신자가 지목한 원 이름).
+    pub to: String,
+    /// `"delivered"`(실제 주입) 또는 `"pending"`(파킹) — spec §5 상태 어휘.
+    pub status: &'static str,
+    /// 자기교정용 힌트(파킹 사유 등). None 이면 응답에서 생략.
+    pub hint: Option<String>,
+}
+
+/// 제어 커맨드 처리 결과 — 성공(수신자별 결과 배열) 또는 교정 에러(반려). 두 입구 모두 이 값을 그대로
+/// JSON 직렬화해 열린 요청에 돌려준다(동일 shape 보장, spec §6). `to_json` 이 wire JSON 을 만든다.
+///
+/// ★spec §6 응답 계약(ADR-0103 — 옛 "enqueued" 폐기)★: 성공 = `{ id, results: [{to, status, hint?}] }`,
+///   반려 = `{ status:"error", code, hint }`. S18 메시징 v1 이 파킹(pending)을 도입하며 옛 단일-상태
+///   "enqueued" ACK 를 이 다중-결과 shape 로 교체했다(성공에 delivered/pending 이 섞일 수 있으므로).
 #[derive(Debug, Clone)]
 pub enum ControlResult {
-    /// 배달 성공(장부 forward-compat 워딩 "enqueued") — id·해석된 수신자 이름 동봉.
-    Enqueued { id: String, to: String },
-    /// 교정 에러 — code + hint(자기교정용). 발신자가 이걸 보고 재시도한다.
+    /// 발송 접수 성공 — 논리 메시지 id + 수신자별 결과 배열(spec §6). delivered/pending 이 섞일 수 있다.
+    Ok {
+        id: String,
+        results: Vec<SendResult>,
+    },
+    /// 교정 에러(반려) — code + hint(자기교정용). 발신자가 이걸 보고 재시도한다.
     Error { code: &'static str, hint: String },
 }
 
 impl ControlResult {
-    /// wire JSON(serde_json::Value). 두 입구가 이 값을 직렬화해 응답 body/툴 결과로 쓴다.
+    /// wire JSON(serde_json::Value). 두 입구가 이 값을 직렬화해 응답 body/툴 결과로 쓴다(spec §6 shape).
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            ControlResult::Enqueued { id, to } => serde_json::json!({
-                "status": "enqueued",
-                "id": id,
-                "to": to,
-            }),
+            ControlResult::Ok { id, results } => {
+                let arr: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|r| {
+                        let mut obj = serde_json::json!({ "to": r.to, "status": r.status });
+                        if let Some(h) = &r.hint {
+                            obj["hint"] = serde_json::Value::String(h.clone());
+                        }
+                        obj
+                    })
+                    .collect();
+                serde_json::json!({ "id": id, "results": arr })
+            }
             ControlResult::Error { code, hint } => serde_json::json!({
                 "status": "error",
                 "code": code,
@@ -163,67 +192,57 @@ impl ControlResult {
         }
     }
 
-    /// 성공(enqueued)인가 — CLI 가 exit code(0/1) 매핑에 쓴다.
-    pub fn is_enqueued(&self) -> bool {
-        matches!(self, ControlResult::Enqueued { .. })
+    /// 발송 접수 성공(반려 아님)인가 — CLI 가 exit code(0/1) 매핑에 쓴다. delivered·pending 모두 성공.
+    /// ★pending 도 성공★: 파킹은 "데몬이 접수해 배달 보장"(등장 시 flush)이라 발신자에겐 성공이다 —
+    ///   반려(MAILBOX_FULL/AMBIGUOUS 등)만 실패로 본다(spec §5·§6).
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, ControlResult::Ok { .. })
     }
 }
 
 /// 수신자 해석 결과(Validator 내부). 성공 시 산 세션의 (id, 표시이름), 실패 시 교정 에러.
+///
+/// ★C1 이후 Ok 필드는 handle_send 비-테스트 경로에서 안 읽힌다★: handle_send 는 이제 `Resolution::Err`
+///   의 AMBIGUOUS 여부만 보고(부재·해석은 MessagingService 가 재수행), Ok 의 id/name 을 소비하지 않는다.
+///   그 필드는 ingress 단위 테스트(`resolve_by_unique_name` 등)가 여전히 읽으므로 유지한다 — 비-테스트
+///   빌드의 dead_code 경고만 억제한다(로직 삭제가 아니라 관측 표면 유지).
+#[allow(dead_code)]
 enum Resolution {
     Ok { id: AgentId, name: String },
     Err(ControlResult),
 }
 
-/// ★다중수신 seam(ADR-0092)★: 배달 1건의 해석된 수신자 = (id, 표시이름). 배달은 **수신자 목록**(현재
-///   길이 1)을 iterate 하며 흐른다 — 1:1 은 길이 1 이라 오늘 동작과 byte-identical 이고, 그룹·단체가
-///   나중에 이 목록을 길이 N 으로 채우면 배달 루프가 그대로 여러 명에게 흐른다("다중수신 추상", ADR-0092).
-///   ★1:1 선행★: 지금은 그룹 로직을 구현하지 않는다 — 그룹 주소(@)는 여전히 GROUPS_NOT_SUPPORTED 로
-///   막힌다(ADR-0086 group reserved). 이 struct 는 그 seam 을 **모양만** 깔아 둔다(저위험·장기, CLAUDE.md §0).
-#[derive(Debug, Clone)]
-struct Recipient {
-    id: AgentId,
-    name: String,
-}
-
-/// `to` → **수신자 목록**(ADR-0092 다중수신 seam). 1:1 은 단일 해석을 길이-1 Vec 으로 감싼다 — 그룹·
-///   단체가 오면 여기서 여러 Recipient 를 채운다(배달 루프는 그대로). 해석 실패는 첫 실패 교정 에러.
-/// ★현재 동작★: `resolve_recipient`(단일) 결과를 그대로 1원소 Vec 으로 승격 — 로직·에러는 동일.
-fn resolve_recipients(
-    to: &str,
-    agents: &[engram_dashboard_core::agent::types::AgentInfo],
-) -> Result<Vec<Recipient>, ControlResult> {
-    match resolve_recipient(to, agents) {
-        Resolution::Ok { id, name } => Ok(vec![Recipient { id, name }]),
-        Resolution::Err(e) => Err(e),
-    }
-}
-
-/// ★듀얼 입구 공통 핸들러(ADR-0086)★: 정규화된 ControlCommand → Validator → Relay → ACK. 두 어댑터
-/// (MCP 툴 · HTTP 라우트)가 유일하게 부르는 진입점이다 — 이 아래는 입구를 모른다(entrance-agnostic).
+/// ★듀얼 입구 공통 핸들러(ADR-0086 · S18 메시징 v1 C1)★: 정규화된 ControlCommand → Validator → 발송
+/// 3분기(MessagingService) → 응답(spec §6). 두 어댑터(MCP 툴 · HTTP 라우트)가 유일하게 부르는 진입점이다
+/// — 이 아래는 입구를 모른다(entrance-agnostic).
 ///
 /// 검사 순서(첫 실패에서 교정 에러 반환 — 같은 shape 양 입구):
-///   1. 그룹 주소(`@`) → GROUPS_NOT_SUPPORTED(미래 브로드캐스트 예약 슬롯).
+///   1. 그룹 주소(`@`) → GROUPS_NOT_SUPPORTED(그룹 발송은 C4).
 ///   2. body 상한(64 KiB) → BODY_TOO_LARGE.
-///   3. 수신자 해석(AgentId 우선/이름 정확 매치, 산 에이전트) → RECIPIENT_NOT_FOUND / RECIPIENT_AMBIGUOUS.
-///   4. 도달성(StreamJson + 제어 채널) → RECIPIENT_NOT_REACHABLE.
-///   5. ★발신자 생존 관측(기록용만 — 게이트 아님)★ — relay 직전에 발신자가 아직 산 신원인지 registry 로
-///      조회하되, 죽었어도 **거부하지 않는다**(작성 시점 인증으로 유효성 성립 — 사용자 결정 2026-07-19,
-///      6번 relay 주석 참조). 죽은 발신자 배달은 forensic 로그만 남긴다.
-/// 통과하면 relay(B stdin 주입) 후 Enqueued ACK.
+///   3. ★동명 다수 → RECIPIENT_AMBIGUOUS(유지, spec §5 주의)★ — 산 로스터에 같은 이름이 여럿이면
+///      파킹/배달 이전에 반려한다(발신자가 exact id 로 재지목). 파킹 대상이 모호하면 안 되므로 여기서 먼저.
+///   4. ★그 외 전부 MessagingService 위임(spec §5 3분기)★:
+///      - 산·도달 수신자 해석 + inject 성공 → `delivered`.
+///      - 부재("없는 이름" 포함)·inject 실패 → **파킹** = `pending`(RECIPIENT_NOT_FOUND 소멸, spec §5 주의).
+///      - cap 초과 → `MAILBOX_FULL` 반려.
 ///
+/// ★발신자 생존 관측(기록용만 — 게이트 아님, 사용자 결정 2026-07-19)★: relay 직전에 발신자가 아직 산
+///   신원인지 registry 로 조회하되 죽었어도 거부하지 않는다(작성 시점 인증으로 유효). 죽은 발신자 배달은
+///   forensic 로그만 남긴다. 이 관측은 delivered 갈래에만 의미가 있어 여기(위임 전)서 한 번 남긴다.
 /// ★self-send 허용★: to == 발신자여도 특수 처리 없이 정상 배달(테스트·자가 메시지 유용 — ADR-0086 §7).
-/// ★락 규율(ADR-0006)★: manager 의 공개 API(list_agents/write_stdin)만 부른다 — 각 호출이 내부에서
-///   sessions RwLock 을 Arc clone 후 즉시 해제하는 규율을 그대로 탄다. registry 조회(is_identity_live)도
-///   read lock 을 잡았다 즉시 해제하는 순수 조회라, 그 lock 을 든 채 manager 를 부르지 않는다(값 반환 후 호출).
+/// ★락 규율(ADR-0006)★: 여기선 manager.list_agents(동명 검사)만 직접 부른다(내부에서 sessions lock 을
+///   clone 후 즉시 해제). 파킹/주입/장부는 MessagingService 가 자기 단일 락 규율로 처리한다(그 락을 든 채
+///   manager 를 부르지 않음 — service.rs 헤더).
 // ADR-0086
+// ADR-0103
 pub fn handle_send(
     manager: &Arc<AgentManager>,
     registry: &Arc<ControlRegistry>,
+    messaging: &Arc<crate::messaging::service::MessagingService>,
     entrance: Entrance,
     cmd: ControlCommand,
 ) -> ControlResult {
-    // 1. 그룹 주소(@) — 미래 브로드캐스트 예약. 지금은 명시 교정.
+    // 1. 그룹 주소(@) — 그룹 발송은 C4. 지금은 명시 교정(자리 예약).
     if cmd.to.starts_with('@') {
         return ControlResult::Error {
             code: "GROUPS_NOT_SUPPORTED",
@@ -241,221 +260,68 @@ pub fn handle_send(
         };
     }
 
-    // 3. 수신자 해석 → **수신자 목록**(ADR-0092 다중수신 seam). 1:1 은 길이 1. list_agents 스냅샷 1회로 판정.
-    // ★epoch 경쟁을 의도적으로 수용(F5 — ADR-0086/0007)★: 여기서 해석한 수신자가 epoch N 인데 아래
-    //   write_stdin 이 도는 사이 재시작으로 epoch N+1 이 되면 메시지는 **새 incarnation** 에 꽂힌다.
-    //   이건 버그가 아니라 설계 의도다 — 메일은 **논리 에이전트**(이름/AgentId 는 epoch 교체에도 유지되는
-    //   안정 주소)를 향하고, 같은 이름의 재시작된 에이전트도 여전히 그 메일의 정당한 수신자다. 그래서
-    //   epoch pinning 을 하지 않는다(다음 세션이 "고쳐" epoch 를 고정하면 재시작 중 유실이 생긴다).
-    //   재시작 중이라 write_stdin 이 실패하면 아래 Err 갈래(RECIPIENT_NOT_REACHABLE)가 이미 덮는다.
+    // 3. 동명 다수 → RECIPIENT_AMBIGUOUS(파킹/배달 전에 — spec §5 "AMBIGUOUS 유지"). 산 로스터 스냅샷 1회.
+    //    ★왜 여기서(위임 전)★: 파킹은 이름 기반이라 동명이 여럿이면 어느 큐로 갈지 모호하다 — 반려로 발신
+    //    자가 exact id 로 재지목하게 한다. `to` 가 exact AgentId 이거나 유일 이름이면 통과(service 가 처리).
     let agents = manager.list_agents();
-    let recipients = match resolve_recipients(&cmd.to, &agents) {
-        Ok(list) => list,
-        Err(e) => return e,
-    };
-
-    // ★배달 = 수신자 목록 iterate(ADR-0092)★: 1:1 은 길이 1 이라 루프가 정확히 1회 돌고 오늘 동작과
-    //   byte-identical(ACK = 그 유일 수신자). 그룹·단체가 오면 여기서 여러 명에게 흐른다 — 지금은 그
-    //   경로를 **모양만** 깔아 둔다(로직 미구현, @ 는 위에서 이미 GROUPS_NOT_SUPPORTED 로 막힘).
-    //   ★1:1 계약(현 스코프)★: recipients 는 항상 길이 1 이므로 last 결과가 곧 유일 결과다. 미래에 길이
-    //   N 이 되면 부분 실패 취합(누가 성공/실패) 정책을 여기에 얹는다 — 지금은 그 정책을 만들지 않는다.
-    let mut result = ControlResult::Error {
-        // recipients 가 비면(있을 수 없음 — resolve_recipients 는 Ok 면 최소 1개) 방어적 교정.
-        code: "RECIPIENT_NOT_FOUND",
-        hint: "No recipient resolved.".to_string(),
-    };
-    for recipient in &recipients {
-        result = deliver_to_recipient(manager, registry, entrance, &cmd, &agents, recipient);
-    }
-    result
-}
-
-/// ★단일 수신자 배달(ADR-0092 배달 루프 1 스텝)★: 도달성 검사 → 발신자 생존 관측 → relay → 관측 레코드
-///   → ACK/교정. `handle_send` 가 수신자 목록을 iterate 하며 각 원소에 대해 부른다(1:1 은 1회). 이 함수는
-///   **한 명**에게의 배달만 안다 — 목록·그룹 개념은 호출자 소유(seam 분리). 로직·관측 시맨틱은 다중수신
-///   seam 도입 전과 동일하다(1:1 은 byte-identical).
-fn deliver_to_recipient(
-    manager: &Arc<AgentManager>,
-    registry: &Arc<ControlRegistry>,
-    entrance: Entrance,
-    cmd: &ControlCommand,
-    agents: &[engram_dashboard_core::agent::types::AgentInfo],
-    recipient: &Recipient,
-) -> ControlResult {
-    let to_id = recipient.id;
-    let to_name = recipient.name.clone();
-
-    // 4. 도달성 — StreamJson(structured 출력) 캐리어라야 stdin 주입이 유효한 user-message 라인이 된다.
-    //    ADR-0086: 제어 채널은 TUI(터미널) 를 제외한다(파싱 안 되니 자연 제외). structured=true =
-    //    StdioTransport(json 모드 claude) 이고, 그게 곧 제어 채널 소비 backend 다(claude).
-    let reachable = agents
-        .iter()
-        .find(|a| a.id == to_id)
-        .map(|a| a.capabilities.output.structured)
-        .unwrap_or(false);
-    if !reachable {
-        return ControlResult::Error {
-            code: "RECIPIENT_NOT_REACHABLE",
-            hint: format!(
-                "Agent '{to_name}' cannot receive messages; only stream-json claude agents (not TUI) are reachable via the control channel."
-            ),
-        };
+    if let Resolution::Err(e) = resolve_recipient(&cmd.to, &agents) {
+        // resolve_recipient 는 부재를 NOT_FOUND 로 내지만, C1 은 부재를 **파킹**으로 처리한다 —
+        //   그래서 여기선 **AMBIGUOUS 만** 조기 반환하고, NOT_FOUND(부재)는 아래 위임으로 흘려 파킹시킨다.
+        if let ControlResult::Error { code, .. } = &e {
+            if *code == "RECIPIENT_AMBIGUOUS" {
+                return e;
+            }
+        }
     }
 
-    // 5. ★발신자 생존 관측(기록용만 — 게이트 아님, 사용자 결정 2026-07-19)★
-    //    메시지의 유효성은 **작성 시점 인증**(입구 auth = bearer_auth 가 발신자 토큰을 검증한 순간)으로
-    //    이미 성립한다. 그 뒤 발신자가 죽거나 재시작해도(토큰 revoke/회전) 그 메시지가 무효가 되지는
-    //    않는다 — "최종 결과를 보내고 종료" 는 멀티에이전트의 핵심 패턴이고(유언이 가장 중요한 메시지인
-    //    경우가 많다; cf. Orca worker_done), 미래 메일박스 시맨틱도 장부 append(=커밋) 후 발신자 사망이
-    //    메시지를 되돌리지 않는 방식으로 이미 이렇게 동작한다. 그래서 **발신자 생존을 배달 게이트로 쓰지
-    //    않는다** — 여기서 거부하지 않고 그대로 relay 한다.
-    //    다만 is_identity_live 조회는 **관측용으로 남긴다**: 발신자가 더 이상 산 신원이 아닌 채 배달되는
-    //    경우를 로그로 기록한다(포렌식 / 미래 제품화 고려용 — 사용자 결정). ★레벨=warn★: 배달 자체는
-    //    정상 경로지만 "죽은 발신자의 메시지 배달" 이라는 **비정상이나 안전하게 진행되는** 엣지라
-    //    logging-conventions §레벨 의 warn 정의(비정상이나 안전하게 폴백/진행)에 해당한다(info=평범한 정상
-    //    수명 이벤트보다 눈에 띄어야 하는 관측점). ★필드★: from·from_epoch·msg_id·entrance 만 — body
-    //    텍스트·토큰은 절대 로깅 금지(보안). (msg_id 는 아래 relay 에서 만들어 함께 싣는다.)
-
-    // 6. Relay — B stdin 에 래핑된 user-message 를 즉시 주입. msg-id 는 uuid(추적·ACK 동봉).
-    //    ★수신자별 msg_id★: 다중수신에서도 각 배달이 자기 논리 메시지 id 를 갖도록 recipient 마다 생성한다
-    //      (1:1 은 1개 — 오늘과 동일).
+    // ★발신자 생존 관측(기록용만 — 게이트 아님, 사용자 결정 2026-07-19)★: 죽은 발신자여도 배달·파킹은
+    //   진행한다("결과 보내고 종료" 유언 패턴 + 파킹 커밋 시맨틱). body/토큰 미로깅(보안).
     let msg_id = AgentId::new_v4().to_string();
-
-    // ★발신자 생존 관측(위 5번 — 기록용만, 배달은 그대로 진행)★: 발신자 신원이 이미 산 토큰을 잃었으면
-    //   (relay 직전 revoke/회전) 배달은 막지 않되 forensic 로그를 남긴다. body/토큰은 싣지 않는다(보안).
     if !registry.is_identity_live(cmd.from) {
         tracing::warn!(
             from = %cmd.from.agent_id,
             from_epoch = cmd.from.epoch,
             msg_id = %msg_id,
             entrance = entrance.as_str(),
-            "제어 채널 메시지 배달 — 발신자가 relay 시점에 더 이상 산 신원 아님(작성 시점 인증으로 유효, 게이트 아님·기록용 관측, ADR-0086·사용자 결정 2026-07-19)"
+            "제어 채널 메시지 발송 — 발신자가 relay 시점에 더 이상 산 신원 아님(작성 시점 인증으로 유효, 게이트 아님·기록용 관측, ADR-0086·사용자 결정 2026-07-19)"
         );
     }
 
+    // 봉투 sender 표시 이름 = canonical(WYSIWYA ADR-0101) — 라우팅/로스터가 보는 이름과 byte-identical.
     let sender_name = sender_display_name(manager, cmd.from);
-    // ADR-0096: 봉투 조립 시 데몬 전역 포맷 상태를 읽어 wrap_message 에 넘긴다(단일 wrap point 유지 —
-    //   상태는 입력일 뿐, 조립은 여전히 wrap_message 한 곳). 운영 기본 = xml(ADR-0103), colon 은
-    //   set_envelope_format 커맨드로 선택 가능(잔존 스위치). ENGRAM_WRAP_FORMAT env 가 있으면
-    //   wrap_message 안에서 그게 우선(spike seam).
-    let format = registry.envelope_format();
-    // ADR-0103: 현 스코프(increment A)는 sender+body 만 있는 plain `<message from>` 을 렌더한다 —
-    //   id/type/reply-by/in-reply-to/to 속성은 후속 increment(메일박스·request·그룹)가 채운다. 여기선
-    //   빈 EnvelopeFields 를 넘겨 seam 만 연결한다(단일 wrap point 유지 — ADR-0096).
-    let wrapped = wrap_message(
-        &sender_name,
-        &msg_id,
-        &cmd.body,
-        format,
-        &EnvelopeFields::default(),
-    );
-    // body_bytes(순수 본문 바이트)는 기존 tracing 유지용. ★관측 레코드의 요청 바이트는 여기서 재계산하지
-    //   않는다(FIX-1c)★ — 성공 경로에선 `outcome.bytes_requested`(= 세션 경계가 실제 받은 논리 메시지
-    //   바이트, 단일 출처)를 쓴다. 실패 경로는 outcome 이 없으므로 `wrapped.len()` 로 대체한다(같은 값 —
-    //   여기서 넘기는 바이트가 곧 세션이 받았을 논리 메시지라 정의상 일치, 아래 실패 갈래 주석 참조).
-    let body_bytes = cmd.body.len();
 
-    // ★mid-send yield-seam(ADR-0088 Stage 1 — test-harness 전용, 운영 빌드엔 컴파일 안 됨)★:
-    //   resolve/reachability/wrap 를 다 끝낸 **resolve↔write 갭의 가장 늦은 지점**에서 test hook 을 발화한다.
-    //   결정적 mid-flight epoch race 재현용 — hook 안에서 같은 AgentId 를 새 epoch incarnation 으로 교체
-    //   주입하면 위 resolve 는 구 incarnation(epoch N)을 봤는데 아래 write 는 교체된 새 incarnation
-    //   (epoch N+1)에 착지한다. ★이 race 는 ADR-0086 §F5 가 design-accepted 로 표시★: 메일은 **논리
-    //   에이전트**(이름/AgentId = epoch 교체에도 유지되는 안정 주소)를 향하므로 새 incarnation 착지가 곧
-    //   올바른 동작이다. 이 seam 은 그 동작을 **결정적으로 관측**할 뿐 epoch 를 pin 하지 않는다(feature OFF
-    //   면 handle_send 동작은 오늘과 byte-identical — hook 발화 코드가 아예 사라진다). fire_mid_send_hook
-    //   은 hook Arc 를 lock 밖에서 호출한다(ADR-0006 — record_delivery 와 동일 규율).
-    // ADR-0088
+    // 4. 발송 3분기 위임(spec §5). MessagingService 가 resolve/inject/park/ledger 를 소유한다.
+    //    ★mid-send yield-seam(ADR-0088)은 이제 MessagingService.inject 경로가 아니라 이 위임 직전이
+    //      resolve↔inject 갭의 관측 지점이다★ — test-harness 전용이라 운영 빌드엔 컴파일 안 됨. hook 을
+    //      여기서 발화해 위임 안 inject 착지 incarnation 을 결정적으로 관측한다(동작 byte-identical when OFF).
     #[cfg(feature = "test-harness")]
     registry.fire_mid_send_hook();
 
-    // ADR-0088: write 경계 계측판(write_stdin_observed)으로 논리 메시지 바이트 + 이 턴 msg_uuid 를 회수한다
-    //   (완결성은 Ok/Err — 바이트 비교 아님, WriteOutcome 주석).
-    //   write_stdin 은 json 모드 세션에선 encoder 가 텍스트를 claude user-message 라인으로 감싼다(ADR-0044)
-    //   — 우리는 완성된 텍스트(래퍼)를 통째로 넘긴다(1 write = 완결된 유저 턴 1개 계약).
-    match manager.write_stdin_observed(to_id, wrapped.as_bytes()) {
-        Ok(outcome) => {
-            // ★F6 계측(logging-conventions info = 정상 수명 이벤트)★: enqueue/relay 성공. from·to·msg-id·
-            //   entrance·바이트수·msg_uuid 만 구조화 필드로 남긴다 — ★body 텍스트·토큰은 절대 로깅 금지★(보안).
-            //   ADR-0088: bytes_written·msg_uuid 를 추가로 실어 사람 forensic 에서도 상관 가능하게.
-            tracing::info!(
-                from = %cmd.from.agent_id,
-                to = %to_id,
-                to_name = %to_name,
-                msg_id = %msg_id,
-                entrance = entrance.as_str(),
-                body_bytes,
-                bytes_requested = outcome.bytes_requested,
-                bytes_written = outcome.bytes_written,
-                msg_uuid = %outcome.msg_uuid,
-                "제어 채널 메시지 relay(enqueued, ADR-0086·0088)"
-            );
-            // ADR-0088: 기계 소비용 배달 관측 레코드를 in-proc 싱크로 발행(설치 안 됐으면 no-op).
-            // ADR-0006: registry.record_delivery 가 observer Arc 를 clone 후 lock 밖에서 observe 호출.
-            // ★요청/실제 바이트는 재계산 없이 outcome 을 단일 출처로 쓴다(FIX-1c) — 세션 경계가 실제 받은
-            //   논리 메시지 바이트. bytes_written 은 outcome 의 by-construction 복사(WriteOutcome 주석).
-            // ADR-0088
-            // ★to_epoch = write 가 실제 착지한 incarnation 의 epoch(outcome.epoch)이지, resolve 시점
-            //   스냅샷의 epoch 이 아니다★(ADR-0088). 이 비대칭이 record-self-sufficiency 의 핵심 —
-            //   resolve↔write 사이 재시작(mid-flight epoch race)으로 착지 incarnation 이 바뀌면 레코드가
-            //   **실제 받은** 쪽을 담아야 한다. resolve-time epoch 을 실으면 그 race 를 레코드만으로
-            //   단정할 수 없어 관측 한계가 다시 생긴다(오라클 5 가 지적한 그 한계).
-            // ADR-0088
-            registry.record_delivery(DeliveryObservation {
-                msg_id: msg_id.clone(),
-                to_id,
-                to_name: to_name.clone(),
-                from: cmd.from,
-                entrance,
-                bytes_requested: outcome.bytes_requested,
-                bytes_written: Some(outcome.bytes_written),
-                msg_uuid: Some(outcome.msg_uuid),
-                to_epoch: Some(outcome.epoch),
-                error: None,
-            });
-            ControlResult::Enqueued {
-                id: msg_id,
-                to: to_name,
-            }
-        }
-        // 배달 실패(세션이 그 사이 사라짐·재시작 중 등) — 도달성 통과 후의 드문 경쟁. 도달 불가로 교정.
-        Err(e) => {
-            // ★F6 계측(warn = 비정상이나 안전 폴백)★: write_stdin 실패. 에러 디테일({e})은 메시지 끝
-            //   보간 허용(식별자·수치만 필드 — logging-conventions §형식). body/토큰은 안 싣는다.
-            tracing::warn!(
-                to = %to_id,
-                to_name = %to_name,
-                msg_id = %msg_id,
-                entrance = entrance.as_str(),
-                "제어 채널 relay 실패(write_stdin) — 도달 불가로 교정: {e}"
-            );
-            // ADR-0088: 실패도 기계 소비용 레코드로 남긴다 — 하네스가 "성공으로 삼켜지지 않음"을 단언한다.
-            //   bytes_written=None·msg_uuid=None·error=Some(...) = 배달 실패의 명시 증거.
-            // ★요청 바이트(FIX-1c)★: 실패 경로엔 outcome 이 없으므로 `wrapped.len()`(넘기려던 논리 메시지
-            //   바이트)를 쓴다. 성공 경로의 `outcome.bytes_requested` 와 값은 정의상 같다(= 세션에 넘긴
-            //   `wrapped.as_bytes().len()`) — write_input_observed 가 그 len 을 그대로 요청량으로 삼기 때문.
-            //   여기선 그 세션 호출이 Err 로 끝나 outcome 이 없을 뿐이라, 넘기려던 요청량으로 대체한다.
-            // ADR-0088
-            registry.record_delivery(DeliveryObservation {
-                msg_id: msg_id.clone(),
-                to_id,
-                to_name: to_name.clone(),
-                from: cmd.from,
-                entrance,
-                bytes_requested: wrapped.len(),
-                bytes_written: None,
-                msg_uuid: None,
-                // ADR-0088: write 실패 = **완결된 write 가 없음** → attest 할 착지 incarnation 이 없다(None).
-                //   0바이트 이동 주장이 아니다 — write_all 이 Err 전에 prefix 를 물리적으로 흘렸을 수 있다
-                //   (core stdio_physical_pipe 부분-write 하네스가 그 축을 증명). 완결성 교리(Ok=완결/Err=실패,
-                //   바이트 비교 아님)와 정합: msg_uuid/bytes_written 이 None 인 것과 같은 이유로 to_epoch 도 None.
-                to_epoch: None,
-                error: Some(e.to_string()),
-            });
-            ControlResult::Error {
-                code: "RECIPIENT_NOT_REACHABLE",
-                hint: format!("Delivery to '{to_name}' failed: {e}"),
-            }
-        }
+    match messaging.handle_single_send(&msg_id, cmd.from, &sender_name, &cmd.to, &cmd.body, entrance)
+    {
+        Ok(crate::messaging::service::SendOutcome::Delivered) => ControlResult::Ok {
+            id: msg_id,
+            results: vec![SendResult {
+                to: cmd.to,
+                status: "delivered",
+                hint: None,
+            }],
+        },
+        Ok(crate::messaging::service::SendOutcome::Parked { hint }) => ControlResult::Ok {
+            id: msg_id,
+            results: vec![SendResult {
+                to: cmd.to,
+                status: "pending",
+                hint: Some(hint),
+            }],
+        },
+        Err(crate::messaging::service::SendReject::MailboxFull) => ControlResult::Error {
+            code: "MAILBOX_FULL",
+            hint: format!(
+                "Recipient '{}' mailbox is full; oldest parked messages expire by TTL — retry later.",
+                cmd.to
+            ),
+        },
     }
 }
 
@@ -471,12 +337,26 @@ fn deliver_to_recipient(
 ///
 /// ★산(live) 판정★: 종료된 세션은 reaper 가 곧 맵에서 제거하나, 스냅샷 순간에 terminal 상태가 남아 있을
 ///   수 있어 명시적으로 non-terminal(Running/Exiting)만 후보로 본다.
+///
+/// ★도달성(structured) 정렬(finding 6 · load-bearing)★: 후보 집합은 산(live) **AND 도달 가능(structured)**
+///   이다 — MessagingService::live_reachable_agents 와 **정확히 같은** 판정이다. 예전엔 여기서 is_live 만
+///   봐서, 같은 이름의 structured 1개 + TUI(비-structured) 1개가 있으면 AMBIGUOUS 로 반려됐다 — 실제로는
+///   service resolver 가 도달 가능(structured) 후보 1개만 보므로 **유일하게 배달 가능**한데도 막힌 것이다.
+///   두 곳의 후보 집합을 일치시켜 그 위양성 반려를 없앤다.
+/// ★남은 check-then-act TOCTOU(accepted)★: 이 AMBIGUOUS 사전 검사(ingress)와 이후 service resolve 는 서로
+///   다른 로스터 스냅샷을 본다 — 그 사이 같은 이름의 도달 후보가 새로 등장하면 ingress 는 통과시켰는데 service
+///   가 동명 다수를 만날 수 있다(반대도 성립). 이 창은 극히 좁고(사람 대화 수준 메시지율) 최악이라도 파킹/
+///   재지목으로 수렴하므로(유실 없음) v1 에선 **의도적으로 수용**한다 — 두 조회를 하나의 원자 스냅샷으로
+///   묶는 건 seam 을 넘는 과설계라 v2 로 미룬다.
 fn resolve_recipient(
     to: &str,
     agents: &[engram_dashboard_core::agent::types::AgentInfo],
 ) -> Resolution {
-    let live: Vec<&engram_dashboard_core::agent::types::AgentInfo> =
-        agents.iter().filter(|a| is_live(&a.status)).collect();
+    // 산 AND 도달 가능(structured) — service resolver 와 동일 후보 집합(finding 6).
+    let live: Vec<&engram_dashboard_core::agent::types::AgentInfo> = agents
+        .iter()
+        .filter(|a| is_live(&a.status) && a.capabilities.output.structured)
+        .collect();
 
     // ★F2: AgentId 문자열 정확 일치를 이름보다 **먼저** 시도★ — 이름=UUID 충돌이 ID 지목을 가로채지 못하게.
     if let Some(a) = live.iter().find(|a| a.id.to_string() == to) {
@@ -589,6 +469,12 @@ pub enum EnvelopeFormat {
 /// ★봉투 속성 필드(ADR-0103 S18 메시징 v1 — Xml 변형 전용 확장)★: XML `<message>` 태그에 조건부로
 ///   렌더되는 속성들의 내부 struct. `wrap_message` 가 sender/body 외에 이걸 받아 XML 렌더 시 속성을 붙인다.
 ///
+/// ★가시성 = `pub(crate)`(C1 — MessagingService seam 재사용)★: S18 메시징 v1 increment C1 이 파킹된
+///   메시지를 **주입 시점에** 봉투로 감싸므로(park 시점이 아니라), `MessagingService`(service.rs)가 이
+///   struct 와 `wrap_message` 를 호출한다. 봉투 조립의 단일 wrap point(ADR-0096)를 유지하려고 별도
+///   조립기를 만들지 않고 이 seam 을 crate 내부로만 노출한다(외부 crate 미노출 — 여전히 봉투 조립은
+///   `wrap_message`/`wrap_notice` 두 함수에만 있다).
+///
 /// ★노출 원칙(spec §1 · ADR-0103 결정 1)★: **수신 LLM 의 행동을 바꾸는 필드만** 봉투에 나타난다 —
 ///   각 필드는 `Option` 이고 `Some` 일 때만 그 속성이 렌더된다(`None` = 속성 생략). `id` 는 request 에만,
 ///   `to` 는 그룹 방송에만 실린다(호출부가 그때만 `Some` 을 채운다) — 시각·장부 상태는 여기 없다(내부 데이터).
@@ -604,17 +490,17 @@ pub enum EnvelopeFormat {
 ///   XML 렌더 경로에서만 소비된다.
 // ADR-0103 (XML 봉투 속성 확장 — 노출 원칙 = 행동 바꾸는 필드만)
 #[derive(Debug, Clone, Default)]
-struct EnvelopeFields {
+pub(crate) struct EnvelopeFields {
     /// 메시지 id — **request 봉투에만** 실린다(회신 상관용, spec §1). XML 속성 `id`.
-    id: Option<String>,
+    pub(crate) id: Option<String>,
     /// 메시지 타입 — 현재 유일 값은 `"request"`(장부 미회신 오픈). XML 속성 `type`. `None` = 통보(기본).
-    msg_type: Option<String>,
+    pub(crate) msg_type: Option<String>,
     /// 회신 기한(기간 표기 "10m"/"1h" — spec §3). XML 속성 `reply-by`(kebab). request 부속.
-    reply_by: Option<String>,
+    pub(crate) reply_by: Option<String>,
     /// 어느 요청의 회신인가 — 발신 인자 `reply_to` 가 수신 봉투 속성 `in-reply-to` 로 나타난다(spec §1).
-    in_reply_to: Option<String>,
+    pub(crate) in_reply_to: Option<String>,
     /// 그룹 방송 대상(`@coders` 등) — **그룹일 때만** 실린다(방송임을 수신자에게 알림, spec §1). XML 속성 `to`.
-    to: Option<String>,
+    pub(crate) to: Option<String>,
 }
 
 /// ★메시지 래퍼(단일 wrap point — ADR-0086 §7 · 포맷 스위칭 ADR-0095/0096 · 속성 확장 ADR-0103 · 실험 seam ADR-0093)★:
@@ -638,7 +524,7 @@ struct EnvelopeFields {
 // ADR-0103 (envelope attribute extension — Xml variant only)
 // ADR-0096 (envelope format switch — reads the daemon-global format via param)
 // ADR-0093 (spike env override — preserved verbatim as the highest-precedence seam)
-fn wrap_message(
+pub(crate) fn wrap_message(
     sender: &str,
     msg_id: &str,
     body: &str,
@@ -805,29 +691,9 @@ mod tests {
         }
     }
 
-    // ── ADR-0092: 다중수신 seam — 1:1 은 단일-원소 목록으로 흐른다 ────────────────────────
-    #[test]
-    fn resolve_recipients_1to1_is_single_element_list() {
-        // 1:1(단일 이름) 해석은 정확히 길이 1 목록으로 승격된다 — 그룹 회귀(단일-수신자 좁힘) 방지.
-        let id = AgentId::new_v4();
-        let agents = vec![info(id, "alice", true, AgentStatus::Running)];
-        let list = resolve_recipients("alice", &agents).expect("1:1 해석 성공");
-        assert_eq!(list.len(), 1, "1:1 은 길이 1 목록이어야: {list:?}");
-        assert_eq!(list[0].id, id);
-        assert_eq!(list[0].name, "alice");
-    }
-
-    #[test]
-    fn resolve_recipients_propagates_not_found_error() {
-        // 목록 승격이 단일 해석의 교정 에러를 그대로 전파한다(로직 동일 — seam 은 모양만 바꿈).
-        let agents = vec![info(AgentId::new_v4(), "alice", true, AgentStatus::Running)];
-        match resolve_recipients("bob", &agents) {
-            Err(ControlResult::Error { code, .. }) => assert_eq!(code, "RECIPIENT_NOT_FOUND"),
-            other => panic!("없는 수신자는 NOT_FOUND 에러여야: {other:?}"),
-        }
-    }
-
     // ── Validator: resolve_recipient ────────────────────────────────────────────
+    // (구 `resolve_recipients_*`(ADR-0092 다중수신 seam) 제거 — C1 이 부재를 파킹으로 옮기며 그 1:1 목록
+    //  승격 seam 은 MessagingService 로 이사했다. 부재/파킹 로직 회귀는 service.rs 단위 테스트가 커버한다.)
     #[test]
     fn resolve_by_unique_name() {
         let id = AgentId::new_v4();
@@ -904,6 +770,73 @@ mod tests {
             }
             Resolution::Err(_) => panic!("exact-ID 매치가 이름 매치를 선행해야(F2)"),
         }
+    }
+
+    #[test]
+    fn resolve_name_with_structured_and_tui_is_not_ambiguous() {
+        // ★finding 6 회귀★: 같은 이름의 structured 1개 + TUI(비-structured) 1개는 AMBIGUOUS 가 아니다 —
+        //   도달 가능(structured) 후보가 유일하므로 그것으로 해석된다(service resolver 와 후보 집합 일치).
+        let s = AgentId::new_v4();
+        let t = AgentId::new_v4();
+        let agents = vec![
+            info(s, "dup", true, AgentStatus::Running),  // 도달 가능
+            info(t, "dup", false, AgentStatus::Running), // TUI(비-도달)
+        ];
+        match resolve_recipient("dup", &agents) {
+            Resolution::Ok { id, name } => {
+                assert_eq!(
+                    id, s,
+                    "도달 가능(structured) 후보로 해석 — TUI 는 후보 아님"
+                );
+                assert_eq!(name, "dup");
+            }
+            Resolution::Err(_) => {
+                panic!("structured 유일이면 AMBIGUOUS 아님(finding 6)")
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_two_structured_same_name_is_still_ambiguous() {
+        // finding 6 경계: 도달 가능(structured) 후보가 **둘** 이면 여전히 AMBIGUOUS(정상 반려).
+        let a = AgentId::new_v4();
+        let b = AgentId::new_v4();
+        let agents = vec![
+            info(a, "dup", true, AgentStatus::Running),
+            info(b, "dup", true, AgentStatus::Running),
+        ];
+        assert!(
+            matches!(
+                resolve_recipient("dup", &agents),
+                Resolution::Err(ControlResult::Error {
+                    code: "RECIPIENT_AMBIGUOUS",
+                    ..
+                })
+            ),
+            "도달 후보 2개는 AMBIGUOUS 유지"
+        );
+    }
+
+    #[test]
+    fn resolve_only_tui_same_name_is_not_found_not_ambiguous() {
+        // finding 6 경계: 같은 이름이 전부 TUI(비-도달)면 도달 후보 0 → NOT_FOUND(부재 → 상위가 파킹).
+        //   AMBIGUOUS 가 아니다(모호할 도달 후보가 없음).
+        let a = AgentId::new_v4();
+        let b = AgentId::new_v4();
+        let agents = vec![
+            info(a, "dup", false, AgentStatus::Running),
+            info(b, "dup", false, AgentStatus::Running),
+        ];
+        assert!(
+            matches!(
+                resolve_recipient("dup", &agents),
+                Resolution::Err(ControlResult::Error {
+                    code: "RECIPIENT_NOT_FOUND",
+                    ..
+                })
+            ),
+            "TUI 만 있는 이름은 도달 후보 0 → NOT_FOUND(AMBIGUOUS 아님)"
+        );
     }
 
     #[test]
@@ -1332,18 +1265,48 @@ mod tests {
         );
     }
 
-    // ── ControlResult wire shape(양 입구 동일) ──────────────────────────────────
+    // ── ControlResult wire shape(양 입구 동일 — spec §6) ──────────────────────────────
     #[test]
-    fn enqueued_json_shape() {
-        let r = ControlResult::Enqueued {
+    fn ok_delivered_json_shape() {
+        // spec §6: 성공 = `{ id, results: [{to, status}] }`. delivered 는 hint 없음.
+        let r = ControlResult::Ok {
             id: "mid".to_string(),
-            to: "bob".to_string(),
+            results: vec![SendResult {
+                to: "bob".to_string(),
+                status: "delivered",
+                hint: None,
+            }],
         };
         let v = r.to_json();
-        assert_eq!(v["status"], "enqueued");
         assert_eq!(v["id"], "mid");
-        assert_eq!(v["to"], "bob");
-        assert!(r.is_enqueued());
+        assert_eq!(v["results"][0]["to"], "bob");
+        assert_eq!(v["results"][0]["status"], "delivered");
+        assert!(
+            v["results"][0].get("hint").is_none(),
+            "delivered 는 hint 생략"
+        );
+        assert!(
+            v.get("status").is_none(),
+            "성공 응답엔 최상위 status 없음(spec §6)"
+        );
+        assert!(r.is_accepted());
+    }
+
+    #[test]
+    fn ok_pending_json_shape_includes_hint() {
+        // spec §6: 파킹 = `{ id, results: [{to, status:"pending", hint}] }`.
+        let r = ControlResult::Ok {
+            id: "mid".to_string(),
+            results: vec![SendResult {
+                to: "ghost".to_string(),
+                status: "pending",
+                hint: Some("parked".to_string()),
+            }],
+        };
+        let v = r.to_json();
+        assert_eq!(v["results"][0]["status"], "pending");
+        assert_eq!(v["results"][0]["hint"], "parked");
+        assert!(r.is_accepted(), "pending 도 접수 성공(반려 아님)");
     }
 
     #[test]
@@ -1356,7 +1319,7 @@ mod tests {
         assert_eq!(v["status"], "error");
         assert_eq!(v["code"], "GROUPS_NOT_SUPPORTED");
         assert_eq!(v["hint"], "h");
-        assert!(!r.is_enqueued());
+        assert!(!r.is_accepted(), "반려는 접수 성공 아님");
     }
 
     // ── ControlCommand 정규화: from 은 값(신원)으로만 들어온다(페이로드 아님) ──────────────

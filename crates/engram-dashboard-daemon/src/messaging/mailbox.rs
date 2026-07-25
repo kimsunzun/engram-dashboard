@@ -131,6 +131,34 @@ impl Mailbox {
         Ok(())
     }
 
+    /// ★재파킹(무손실 복원) primitive — cap 우회 + FRONT 삽입(ADR-0103/0104 · finding 1)★: flush 배치
+    ///   도중 inject 실패로 아직 배달 못 한 **이미 admitted 된** 항목들을 큐 **앞쪽**에 원래 순서로 되돌린다.
+    ///
+    /// ★왜 `park` 가 아니라 별도 primitive 인가(load-bearing — 조용한 유실 금지)★: `park` 는 **신규
+    ///   admission** 통제라 cap 을 세고 초과 시 반려한다. 그런데 재파킹은 이미 장부에 `pending` 으로 들어간
+    ///   (admitted) 항목의 **보류 복원**이지 신규 발송이 아니다 — cap 은 유입 통제일 뿐 **보관 통제가 아니다**.
+    ///   drain↔inject 사이 동시 park 로 큐가 다시 cap 까지 찼을 때 `park` 로 되돌리면 `MailboxFull` 이 나고,
+    ///   그 에러를 무시하면 admitted 메시지가 조용히 유실된다(ledger 는 pending 인데 큐엔 없음 — 유령 pending).
+    ///   그래서 재파킹은 cap 을 **우회**한다(보관은 무제한 — 유입만 cap). 상한 위반이 걱정되면 그건 유입
+    ///   경로(`park`)가 이미 막고 있고, 재파킹분은 원래 그 cap 안에서 admitted 됐던 것이다.
+    /// ★왜 FRONT 삽입인가(FIFO 역전 방지 — finding 1)★: 재파킹분은 동시 park 된 신규분보다 **먼저** 파킹된
+    ///   더 오래된 항목이다. 큐 뒤(push_back)에 붙이면 신규분(더 최근)이 앞서게 돼 "오래된 순" 이 깨진다.
+    ///   그래서 원래 순서 그대로 큐 **앞**에 되꽂아, 이후 drain 이 여전히 오래된 순(재파킹분 → 동시 park 분)을
+    ///   낸다. `parked_at` 은 **원래 값 유지**(호출자가 원본 ParkedMessage 를 그대로 넘김) — TTL 이 연장되지
+    ///   않는다(오배송 방어).
+    /// ★notice/message 무관 무조건 수용★: 재파킹은 kind 를 안 본다(이미 admitted). cap 회계는 신규 park 만.
+    pub fn restore_front(&mut self, recipient: &str, items: Vec<ParkedMessage>) {
+        if items.is_empty() {
+            return;
+        }
+        let queue = self.queues.entry(recipient.to_string()).or_default();
+        // 원래 순서 보존하며 앞쪽에 되꽂기: 역순으로 push_front 하면 최종 순서가 items 순서 그대로 앞에 온다
+        //   (마지막 항목을 먼저 push_front → 그 앞에 이전 항목 → … → 첫 항목이 최종 front).
+        for item in items.into_iter().rev() {
+            queue.push_front(item);
+        }
+    }
+
     /// 수신자 큐를 통째로 비워 주입 가능분·만료분을 **둘 다** 오래된 순으로 반환(flush primitive).
     ///
     /// ★왜 만료분도 반환하나(조용한 유실 금지 — spec §5)★: idle 진입/등장 flush 시 이미 TTL 지난 메시지를
@@ -395,6 +423,81 @@ mod tests {
         let expired = mb.sweep_expired(now);
         assert_eq!(expired.len(), 1);
         assert!(mb.is_empty(), "전부 만료돼 비면 큐가 맵에서 제거돼야");
+    }
+
+    // ── restore_front(재파킹 무손실 복원 — finding 1) ────────────────────────────────
+    #[test]
+    fn restore_front_bypasses_cap_no_loss() {
+        // ★조용한 유실 금지(ADR-0103 · finding 1)★: 큐가 이미 cap(100) 이면 park 는 반려하지만, restore_front
+        //   는 cap 을 우회해 admitted 항목을 무조건 되돌린다(유령 pending 방지).
+        let mut mb = Mailbox::new();
+        let t0 = Instant::now();
+        for i in 0..MAILBOX_CAP {
+            mb.park("r", parked(&format!("new{i}"), ParkKind::Message, t0))
+                .unwrap();
+        }
+        assert_eq!(mb.len("r"), MAILBOX_CAP);
+        // park 는 이제 반려된다(cap 도달).
+        assert_eq!(
+            mb.park("r", parked("would-reject", ParkKind::Message, t0)),
+            Err(ParkError::MailboxFull)
+        );
+        // restore_front 는 cap 을 넘어서라도 되돌린다(유실 0).
+        let older = vec![
+            parked("old0", ParkKind::Message, t0),
+            parked("old1", ParkKind::Message, t0),
+        ];
+        mb.restore_front("r", older);
+        assert_eq!(
+            mb.len("r"),
+            MAILBOX_CAP + 2,
+            "재파킹은 cap 을 우회해 admitted 항목을 되돌린다(유실 0)"
+        );
+    }
+
+    #[test]
+    fn restore_front_preserves_oldest_first_before_concurrent_parks() {
+        // ★FIFO 역전 방지(finding 1)★: 재파킹분(더 오래됨)은 동시 park 된 신규분보다 앞서야 한다.
+        //   시나리오: drain 으로 [old0,old1,old2] 를 꺼냈고 그 사이 new0·new1 이 park 됐다 → old0 배달 후
+        //   실패 → [old1,old2] 재파킹. 이때 큐 = [new0,new1] 이므로 restore_front 후 = [old1,old2,new0,new1].
+        let mut mb = Mailbox::new();
+        let t0 = Instant::now();
+        // drain↔inject 사이 동시 park 된 신규분(더 최근).
+        mb.park(
+            "r",
+            parked("new0", ParkKind::Message, t0 + Duration::from_secs(10)),
+        )
+        .unwrap();
+        mb.park(
+            "r",
+            parked("new1", ParkKind::Message, t0 + Duration::from_secs(11)),
+        )
+        .unwrap();
+        // 재파킹할 오래된 항목(원래 순서 유지).
+        let older = vec![
+            parked("old1", ParkKind::Message, t0 + Duration::from_secs(1)),
+            parked("old2", ParkKind::Message, t0 + Duration::from_secs(2)),
+        ];
+        mb.restore_front("r", older);
+        // drain 하면 재파킹분(오래됨) → 동시 park 분(최근) 순서.
+        let drained = mb.drain("r", t0 + Duration::from_secs(20));
+        let ids: Vec<&str> = drained
+            .deliverable
+            .iter()
+            .map(|m| m.msg_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["old1", "old2", "new0", "new1"],
+            "재파킹분이 동시 park 신규분보다 앞서야(오래된 순 보존)"
+        );
+    }
+
+    #[test]
+    fn restore_front_empty_is_noop() {
+        let mut mb = Mailbox::new();
+        mb.restore_front("r", Vec::new());
+        assert!(mb.is_empty(), "빈 재파킹은 큐를 만들지 않는다");
     }
 
     #[test]

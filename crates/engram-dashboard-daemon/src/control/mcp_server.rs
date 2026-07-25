@@ -76,6 +76,30 @@ impl ManagerSlot {
     }
 }
 
+/// ★MessagingService 늦은 주입 슬롯(순환 해소 — C1)★: ManagerSlot 과 동형. MessagingService 는
+/// AgentManager 를 감싸므로(DeliveryPort) manager 조립 **후**에야 만들어진다 — 그런데 MCP 서버는 manager
+/// 보다 먼저 뜬다(그 URL 로 mcp-config 발급). 그래서 서버엔 빈 슬롯을 넘기고, manager+service 조립 직후
+/// `set` 으로 채운다. send 요청은 accept loop 이후라 항상 채워져 있다. 미설정이면 핸들러가 방어적 거부.
+#[derive(Default)]
+pub struct MessagingSlot {
+    inner: std::sync::OnceLock<Arc<crate::messaging::service::MessagingService>>,
+}
+
+impl MessagingSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// MessagingService 를 1회 주입(데몬 조립 직후). 이미 설정됐으면 무시(멱등).
+    pub fn set(&self, svc: Arc<crate::messaging::service::MessagingService>) {
+        let _ = self.inner.set(svc);
+    }
+    /// 주입된 서비스 참조(미설정이면 None — 정상 흐름엔 없음). ws.rs 의 MessagingFlushSink 도 부르므로
+    /// crate 내부에 노출한다(mcp_server 밖에서 접근).
+    pub(crate) fn get(&self) -> Option<&Arc<crate::messaging::service::MessagingService>> {
+        self.inner.get()
+    }
+}
+
 /// claude 가 Authorization 헤더로 실어 보내는 세션 식별 헤더명(rmcp/스펙 표준, 소문자 비교).
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
@@ -140,20 +164,28 @@ impl Drop for McpServerHandle {
 #[derive(Clone)]
 pub struct EngramMcpHandler {
     tool_router: ToolRouter<Self>,
-    /// 수신자 해석·relay 대상 슬롯. 요청 시점(에이전트 접속 후)엔 항상 채워져 있다.
+    /// 수신자 해석·relay 대상 슬롯(동명 검사용). 요청 시점(에이전트 접속 후)엔 항상 채워져 있다.
     manager: Arc<ManagerSlot>,
     /// 발신자 신원 commit-point 재검증용(F3). 미들웨어와 공유하는 동일 Arc.
     registry: Arc<ControlRegistry>,
+    /// ★발송 3분기 담당(C1)★: send_message 가 handle_send 에 넘기는 MessagingService 슬롯. manager 와
+    ///   같은 늦은 주입(순환 해소).
+    messaging: Arc<MessagingSlot>,
 }
 
 #[tool_router]
 impl EngramMcpHandler {
-    /// manager 슬롯 + registry 주입 생성자 — factory 가 세션마다 Arc clone 으로 부른다.
-    pub fn new(manager: Arc<ManagerSlot>, registry: Arc<ControlRegistry>) -> Self {
+    /// manager+messaging 슬롯 + registry 주입 생성자 — factory 가 세션마다 Arc clone 으로 부른다.
+    pub fn new(
+        manager: Arc<ManagerSlot>,
+        registry: Arc<ControlRegistry>,
+        messaging: Arc<MessagingSlot>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             manager,
             registry,
+            messaging,
         }
     }
 
@@ -245,9 +277,20 @@ impl EngramMcpHandler {
                 None,
             ));
         };
+        // 발송 3분기 담당 MessagingService 슬롯 조회(C1) — manager 와 같은 시점에 채워진다.
+        let Some(messaging) = self.messaging.get() else {
+            tracing::error!(
+                entrance = "mcp",
+                "제어 채널 send 불가 — messaging 슬롯 미설정(배선 순서 이상, C1)"
+            );
+            return Err(ErrorData::internal_error(
+                "control channel not ready (messaging not wired)",
+                None,
+            ));
+        };
         let Parameters(SendArgs { to, body }) = params;
         let cmd = ControlCommand { from, to, body };
-        let result = handle_send(manager, &self.registry, Entrance::Mcp, cmd);
+        let result = handle_send(manager, &self.registry, messaging, Entrance::Mcp, cmd);
         // ACK/에러 JSON 을 text content 로. CLI(/control/send)와 같은 to_json shape 를 그대로 실어 보낸다.
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -494,6 +537,8 @@ struct SendRequest {
 struct ControlSendState {
     manager: Arc<ManagerSlot>,
     registry: Arc<ControlRegistry>,
+    /// 발송 3분기 담당(C1) — MCP factory 와 같은 늦은 주입 슬롯 Arc.
+    messaging: Arc<MessagingSlot>,
 }
 
 /// `/control/send` 핸들러 — CLI 입구. 신원(extensions)+바디 → ControlCommand → 공통 핸들러 → ACK/에러 JSON.
@@ -526,12 +571,23 @@ async fn control_send_handler(
             .body(axum::body::Body::empty())
             .expect("valid 503 response");
     };
+    // 발송 3분기 담당 MessagingService 슬롯 조회(C1) — manager 와 같은 시점에 채워진다.
+    let Some(messaging) = state.messaging.get() else {
+        tracing::error!(
+            entrance = "cli",
+            "제어 채널 send 불가 — messaging 슬롯 미설정(배선 순서 이상, C1)"
+        );
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(axum::body::Body::empty())
+            .expect("valid 503 response");
+    };
     let cmd = ControlCommand {
         from,
         to: req.to,
         body: req.body,
     };
-    let result = handle_send(manager, &state.registry, Entrance::Cli, cmd);
+    let result = handle_send(manager, &state.registry, messaging, Entrance::Cli, cmd);
     // 성공/교정 에러 모두 200 + JSON(CLI 가 status 필드로 성패 판정). MCP 툴 경로와 같은 to_json shape.
     Json(result.to_json()).into_response()
 }
@@ -545,6 +601,7 @@ async fn control_send_handler(
 pub async fn start_mcp_server(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
+    messaging: Arc<MessagingSlot>,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr: SocketAddr = listener.local_addr()?;
@@ -563,11 +620,13 @@ pub async fn start_mcp_server(
         StreamableHttpServerConfig::default().with_cancellation_token(cancel.child_token());
     let factory_manager = manager.clone();
     let factory_registry = registry.clone();
+    let factory_messaging = messaging.clone();
     let mcp_service = StreamableHttpService::new(
         move || {
             Ok(EngramMcpHandler::new(
                 factory_manager.clone(),
                 factory_registry.clone(),
+                factory_messaging.clone(),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -596,6 +655,7 @@ pub async fn start_mcp_server(
             axum::routing::post(control_send_handler).with_state(ControlSendState {
                 manager: manager.clone(),
                 registry: registry.clone(),
+                messaging: messaging.clone(),
             }),
         )
         .layer(axum::middleware::from_fn_with_state(
@@ -646,6 +706,11 @@ mod tests {
         Arc::new(ManagerSlot::new())
     }
 
+    /// 빈 messaging 슬롯(위와 동일 — start/drop 테스트용, send 미호출).
+    fn empty_messaging_slot() -> Arc<MessagingSlot> {
+        Arc::new(MessagingSlot::new())
+    }
+
     #[test]
     fn send_args_schema_builds() {
         // send_message input schema({to,body})가 schemars 로 빌드되는지(tool 매크로 컴파일 간접 확인).
@@ -679,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn server_starts_and_reports_local_url() {
         let reg = Arc::new(ControlRegistry::new());
-        let handle = start_mcp_server(reg, empty_slot())
+        let handle = start_mcp_server(reg, empty_slot(), empty_messaging_slot())
             .await
             .expect("start mcp server");
         assert!(
@@ -694,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_handle_cancels_serve_task() {
         let reg = Arc::new(ControlRegistry::new());
-        let handle = start_mcp_server(reg, empty_slot())
+        let handle = start_mcp_server(reg, empty_slot(), empty_messaging_slot())
             .await
             .expect("start mcp server");
         // 핸들에서 serve JoinHandle 을 관측용으로 미리 복제할 수는 없으므로(1개뿐), cancel 토큰을

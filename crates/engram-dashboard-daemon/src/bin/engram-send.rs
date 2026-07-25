@@ -151,16 +151,22 @@ fn build_request_body(to: &str, body: &str) -> String {
     serde_json::json!({ "to": to, "body": body }).to_string()
 }
 
-/// (HTTP status, body) → exit code. 성공 조건 = **HTTP 2xx** 이고 body `"status":"enqueued"` 일 때만 0.
-/// ★비-2xx 는 항상 1★: 서버가 200 이 아닌데 body 만 enqueued 로 보일 수는 없으나(공통 핸들러가 200 을
-/// 씀), status 를 무시하면 프레이밍 오류를 성공으로 오인할 위험이 있어 status 게이트를 둔다. body 파싱
-/// 실패(비-JSON)도 1.
+/// (HTTP status, body) → exit code. 성공 조건 = **HTTP 2xx** 이고 body 가 발송 접수 성공 shape(spec §6:
+/// `{ id, results: [...] }`)일 때만 0. 반려(`{status:"error",...}`)·프레이밍 오류·비-2xx 는 1.
+///
+/// ★spec §6 shape 판정(ADR-0103 — 옛 "enqueued" 폐기)★: S18 메시징 v1 이 성공 응답을 `{ id, results }` 로
+///   바꿨다(파킹 pending 포함). `results` 배열이 있으면 접수 성공(delivered·pending 모두 발신자에겐 성공 —
+///   파킹은 등장 시 배달 보장). 반려는 `{status:"error"}` 라 results 가 없다. 그래서 **results 존재 =
+///   성공(exit 0)** 으로 판정한다(개별 항목의 delivered/pending 은 CLI 가 구분하지 않음 — 둘 다 접수됨).
+/// ★비-2xx 는 항상 1★: status 를 무시하면 프레이밍 오류를 성공으로 오인할 위험이 있어 게이트를 둔다.
+///   body 파싱 실패(비-JSON)도 1.
 fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
     if !(200..300).contains(&status) {
         return 1;
     }
     match serde_json::from_str::<serde_json::Value>(resp_body) {
-        Ok(v) if v.get("status").and_then(|s| s.as_str()) == Some("enqueued") => 0,
+        // 성공 = results 배열 존재(spec §6). error shape 엔 results 가 없다.
+        Ok(v) if v.get("results").map(|r| r.is_array()).unwrap_or(false) => 0,
         _ => 1,
     }
 }
@@ -413,19 +419,36 @@ mod tests {
 
     // ── exit code 매핑 ─────────────────────────────────────────────────────────────
     #[test]
-    fn exit_code_enqueued_2xx_is_zero() {
+    fn exit_code_delivered_2xx_is_zero() {
+        // spec §6 성공 shape: `{ id, results: [{to, status:"delivered"}] }` → exit 0.
         assert_eq!(
-            exit_code_for_response(200, r#"{"status":"enqueued","id":"x","to":"bob"}"#),
+            exit_code_for_response(
+                200,
+                r#"{"id":"x","results":[{"to":"bob","status":"delivered"}]}"#
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn exit_code_pending_2xx_is_zero() {
+        // 파킹(pending)도 접수 성공 → exit 0(등장 시 배달 보장).
+        assert_eq!(
+            exit_code_for_response(
+                200,
+                r#"{"id":"x","results":[{"to":"ghost","status":"pending","hint":"parked"}]}"#
+            ),
             0
         );
     }
 
     #[test]
     fn exit_code_error_is_one() {
+        // 반려(error shape — results 없음) → exit 1.
         assert_eq!(
             exit_code_for_response(
                 200,
-                r#"{"status":"error","code":"RECIPIENT_NOT_FOUND","hint":"h"}"#
+                r#"{"status":"error","code":"MAILBOX_FULL","hint":"h"}"#
             ),
             1
         );
@@ -437,10 +460,13 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_non_2xx_is_one_even_if_body_looks_enqueued() {
-        // ★F4★: 비-2xx 는 body 가 enqueued 처럼 보여도 실패(프레이밍 오류를 성공으로 오인 방지).
+    fn exit_code_non_2xx_is_one_even_if_body_looks_ok() {
+        // ★F4★: 비-2xx 는 body 가 성공 shape 처럼 보여도 실패(프레이밍 오류를 성공으로 오인 방지).
         assert_eq!(
-            exit_code_for_response(500, r#"{"status":"enqueued","id":"x","to":"bob"}"#),
+            exit_code_for_response(
+                500,
+                r#"{"id":"x","results":[{"to":"bob","status":"delivered"}]}"#
+            ),
             1
         );
         assert_eq!(exit_code_for_response(401, ""), 1);

@@ -100,10 +100,11 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_daemon::control::ingress::{
     handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance,
 };
-use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot};
+use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::priming::{FilePrimingProvider, PrimingProvider};
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
+use engram_dashboard_daemon::messaging::service::MessagingService;
 
 /// 스폰 후 목록 등장 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -379,13 +380,16 @@ async fn run() -> i32 {
     registry.set_delivery_observer(observer.clone());
 
     let slot = Arc::new(ManagerSlot::new());
-    let handle = match start_mcp_server(registry.clone(), slot.clone()).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("[roundtrip] MCP 서버 기동 실패: {e}");
-            return 1;
-        }
-    };
+    // C1: MessagingService 늦은 주입 슬롯 — send/flush 담당(manager 조립 후 채운다).
+    let messaging_slot = Arc::new(MessagingSlot::new());
+    let handle =
+        match start_mcp_server(registry.clone(), slot.clone(), messaging_slot.clone()).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[roundtrip] MCP 서버 기동 실패: {e}");
+                return 1;
+            }
+        };
     let url = handle.url.clone();
     let data_dir = std::env::temp_dir().join(format!("engram-roundtrip-{}", AgentId::new_v4()));
     let ws_a = std::env::temp_dir().join(format!("engram-roundtrip-ws-a-{}", AgentId::new_v4()));
@@ -477,6 +481,14 @@ async fn run() -> i32 {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
+    // C1: MessagingService 조립(발송 3분기·flush) — manager 를 DeliveryPort 로 감싼다. 이 하네스는
+    //   flush sink 를 배선하지 않으므로(NoopStatus) 파킹 시나리오는 handle_single_send 직접 경로만 탄다.
+    //   씨앗 A→B 는 산 수신자라 delivered 경로.
+    let messaging = Arc::new(MessagingService::for_manager(
+        manager.clone(),
+        registry.clone(),
+    ));
+    messaging_slot.set(messaging.clone());
 
     // ── A·B 스폰(둘 다 실 primed claude, stream-json, Fresh) ─────────────────────────
     // A 는 이름 alice(B 가 봉투에서 배워 to=alice 로 답신), B 는 bob.
@@ -581,13 +593,14 @@ async fn run() -> i32 {
         to: NAME_B.to_string(), // 이름으로 지목(alice→bob).
         body: SEED_A_TO_B.to_string(),
     };
-    let ack = handle_send(&manager, &registry, Entrance::Cli, seed);
+    let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, seed);
     eprintln!("[roundtrip] seed A→B ACK = {}", ack.to_json());
     // ★씨앗 ACK 에러 = setup 실패(FIX round-2 #4)★: ACK 가 error(수신자 미해석·write 실패 등)면 B 는 애초에
-    //   씨앗을 못 받았다 — 그 뒤 B_SENT=false 는 "B 가 답 안 함" 이 아니라 씨앗 배달 실패다.
-    if !ack.is_enqueued() {
+    //   씨앗을 못 받았다 — 그 뒤 B_SENT=false 는 "B 가 답 안 함" 이 아니라 씨앗 배달 실패다. B 는 산 수신자라
+    //   접수(delivered) 되어야 한다(파킹이 아님 — is_accepted 로 반려만 거른다).
+    if !ack.is_accepted() {
         fail_setup!(&format!(
-            "씨앗 A→B ACK 가 enqueued 아님(배달 실패): {}",
+            "씨앗 A→B ACK 가 접수 실패(반려): {}",
             ack.to_json()
         ));
     }

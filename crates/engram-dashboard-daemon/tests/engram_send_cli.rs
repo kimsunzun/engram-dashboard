@@ -45,9 +45,10 @@ fn run_send(control_url: &str, to: &str, body: &str) -> (String, i32) {
 }
 
 #[test]
-fn engram_send_enqueued_prints_ack_and_exits_zero() {
-    // 200 + enqueued JSON(Content-Length) → stdout ACK + exit 0.
-    let body = r#"{"status":"enqueued","id":"m1","to":"bob"}"#;
+fn engram_send_delivered_prints_ack_and_exits_zero() {
+    // ★C1(spec §6)★: 200 + 성공 shape `{ id, results:[{to,status:"delivered"}] }`(Content-Length)
+    //   → stdout ACK + exit 0. 옛 `{"status":"enqueued"}` 는 S18 메시징 v1 이 이 shape 로 교체(ADR-0103).
+    let body = r#"{"id":"m1","results":[{"to":"bob","status":"delivered"}]}"#;
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
@@ -60,10 +61,13 @@ fn engram_send_enqueued_prints_ack_and_exits_zero() {
     let (stdout, code) = run_send(&url, "bob", "hi");
     let _ = handle.join();
 
-    assert_eq!(code, 0, "enqueued → exit 0. stdout={stdout}");
+    assert_eq!(code, 0, "성공 shape(results) → exit 0. stdout={stdout}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
-    assert_eq!(v["status"], "enqueued", "stdout 에 ACK JSON: {stdout}");
-    assert_eq!(v["to"], "bob");
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "stdout 에 ACK JSON: {stdout}"
+    );
+    assert_eq!(v["results"][0]["to"], "bob");
 }
 
 #[test]

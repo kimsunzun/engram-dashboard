@@ -214,6 +214,205 @@ impl StatusSink for DaemonStatusSink {
     }
 }
 
+// ── MessagingFlushSink(등장/epoch flush 트리거, ADR-0104 — C1) ──────────────────────────
+
+/// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: `DaemonStatusSink` 를 **감싸** 로스터 변화를
+///   데몬측에서 관측하고, 새로 살아났거나 epoch 이 bump 된 이름 앞으로 파킹된 메시지를 flush 시킨다.
+///
+/// ★왜 sink 를 감싸나(core seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
+///   AgentManager 의 상태 sink 가 이미 `agent_list_updated(Vec<AgentInfo>)` 로 로스터 스냅샷을 push 하므로
+///   (ADR-0028 single-push broadcast), 그 사실을 **데몬측에서 diff** 해 flush 를 건다 — 코어에 새 seam 을
+///   내지 않고 이미 흐르는 이벤트에 얹는다. wrap 이라 기존 broadcast(프론트 fanout)는 그대로 delegate 된다.
+///
+/// ★diff 규칙(load-bearing)★: 직전 스냅샷의 (name→epoch) 와 새 스냅샷을 비교해, **새로 등장**(이전에 없던
+///   이름)하거나 **epoch bump**(같은 이름 epoch 증가 = 재스폰/재활성화)한 이름을 flush 대상으로 본다. 그
+///   이름의 현재 id 로 `messaging.flush_for(name, id)` 를 부른다 — 서비스가 파킹 큐를 오래된 순 일괄 주입.
+///   ★epoch 감소·동일은 flush 안 함★(같은 incarnation 재-push = 노이즈, 이미 flush 됐거나 busy).
+///
+/// ★flush 작업을 status-sink 콜백에서 분리(finding 5 · load-bearing)★: 예전엔 이 sink 가
+///   `agent_list_updated` **안에서 동기적으로** `flush_for` 를 돌렸다 — 이 콜백은 manager/reaper 스레드가
+///   부르는 block 금지 경로인데, 큰 배치가 여러 blocking write 를 마칠 때까지 로스터 이벤트 forwarding 이
+///   막혀 spawn/reap/프론트 업데이트가 지연됐다. 이제 sink 는 **싼 diff 만** 하고 대상 (name, id) 를
+///   unbounded 채널에 push 한 뒤 status 이벤트를 **즉시** forward 한다. 실제 flush 는 데몬 부팅 때 sweep
+///   task 옆에 띄우는 전용 flush worker(종료 시 abort)가 채널을 소비하며 수행한다.
+///
+/// ★messaging 늦은 주입(순환)★: MessagingService 는 manager 를 감싸 manager 조립 후에야 만들어지므로,
+///   sink 는 이 wrapper 생성 시점엔 아직 서비스를 모른다 → flush worker 가 `MessagingSlot`(OnceLock)로 받아
+///   나중에 소비한다. set 전(부팅 초기 짧은 창)엔 worker 가 flush 를 건너뛴다(그 시점엔 파킹이 없으니 무해).
+///
+/// ★락 규율(ADR-0006)★: prev 스냅샷 Mutex 를 잡아 diff 대상(name,id)을 **수집**한 뒤 lock 을 놓고, 그 뒤
+///   채널 send(락 미보유)만 한다 — prev lock 을 든 채 외부 호출 없음. 실제 flush(messaging 락 + port 호출)는
+///   worker 스레드로 완전히 옮겨졌다.
+/// ★호출 컨텍스트 = pump/manager 동기 스레드★: `agent_list_updated` 는 block 금지 경로다. 이제 여기선
+///   diff(HashMap 조작) + unbounded send(논블록)만 하므로 배치 크기와 무관하게 짧다.
+pub struct MessagingFlushSink {
+    /// 감싼 실제 sink — status_changed/agent_list_updated/restore_result 를 그대로 delegate.
+    /// ★Box<dyn>★: 운영은 DaemonStatusSink(프론트 broadcast), 통합 테스트는 NoopSink 를 감싸 flush 만
+    ///   검증한다 — 감싼 대상이 무엇이든 diff/flush 로직은 동일하므로 trait object 로 받는다.
+    inner: Box<dyn StatusSink>,
+    /// flush 대상 (name, id) 을 flush worker 로 보내는 채널(unbounded — status 콜백을 절대 막지 않게).
+    ///   worker 미가동/드롭이어도 send 실패는 무시(파킹은 다음 등장에 재시도 — 무손실 유지).
+    flush_tx: mpsc::UnboundedSender<(String, AgentId)>,
+    /// 직전 로스터 스냅샷(name→(epoch, id)). diff 로 newly-live/epoch-bump 를 판정.
+    prev: Mutex<HashMap<String, (u32, AgentId)>>,
+}
+
+impl MessagingFlushSink {
+    /// 운영 생성자 — DaemonStatusSink 를 감싼다(프론트 broadcast delegate + flush 트리거). `flush_tx` 는
+    ///   flush worker 로 이어지는 채널의 송신단(부팅에서 만든다).
+    pub fn new(
+        inner: DaemonStatusSink,
+        flush_tx: mpsc::UnboundedSender<(String, AgentId)>,
+    ) -> Self {
+        Self::new_boxed(Box::new(inner), flush_tx)
+    }
+
+    /// 테스트 생성자 — 임의 inner StatusSink(NoopSink 등)를 감싼다. flush 로직만 검증할 때.
+    pub fn new_test(
+        inner: Box<dyn StatusSink>,
+        flush_tx: mpsc::UnboundedSender<(String, AgentId)>,
+    ) -> Self {
+        Self::new_boxed(inner, flush_tx)
+    }
+
+    fn new_boxed(
+        inner: Box<dyn StatusSink>,
+        flush_tx: mpsc::UnboundedSender<(String, AgentId)>,
+    ) -> Self {
+        Self {
+            inner,
+            flush_tx,
+            prev: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// ★flush worker(finding 5)★: `MessagingFlushSink` 가 채널로 보낸 flush 대상 (name, id) 을 소비해 실제
+///   `flush_for`(messaging 락 + inject 블로킹 write)를 수행하는 전용 tokio task. 데몬 부팅에서 sweep task
+///   옆에 띄우고 종료 시 abort 한다(start_test_server_inner 도 동일 패턴). status-sink 콜백을 blocking write
+///   에서 떼어내 spawn/reap/프론트 업데이트가 배치 flush 에 물리지 않게 한다.
+///
+/// ★spawn_blocking 격리(round-4 finding 1 — executor starvation)★: `flush_for` 안의 `inject` 는
+///   transport.send_input = **동기 blocking write_all+flush**다(논블록 채널 send 가 아니라 실제 자식
+///   stdin 파이프 write — pty.rs:302-308 / stdio.rs:322-332). 이걸 async task 본문에서 **직접** 부르면
+///   그 blocking 이 runtime worker 스레드를 점유한다 — current-thread/단일 worker 런타임에선 이 한 task 가
+///   executor 를 독점해 다른 task(종료 시 shutdown_all·5s join belt 등)가 폴링될 틈이 없다(실제로 통합
+///   테스트가 이 굶주림 때문에 multi_thread 로 우회해야 했다). 그래서 각 flush 를 `spawn_blocking` 으로
+///   던져 blocking pool 스레드에서 돌린다: (1) blocking write 는 runtime worker 가 아닌 blocking pool 을
+///   점유하고 (2) abort 는 아래 `.await` 지점에서 즉시 먹으며 (3) 5s join belt·종료 task 가 계속 폴링돼
+///   current-thread 런타임도 건강하게 유지된다.
+///   ※주의(종료 순서는 그대로 load-bearing): spawn_blocking 클로저 자체는 abort 불가 — worker 의 .await 를
+///     abort 해도 pool 스레드의 blocking write 는 자식이 stdin 을 비울(또는 파이프가 닫힐) 때까지 계속 돈다.
+///     그래서 lib.rs 종료 경로의 "shutdown_all 로 자식 kill·파이프 닫기 → 그 다음 worker abort" 순서는
+///     여전히 필수다(막힌 write 를 에러로 풀어 pool 스레드를 회수). 이 fix 가 고치는 건 executor 굶주림뿐.
+///
+/// ★slot 늦은 주입★: MessagingService 는 manager 조립 후 생기므로 worker 도 slot(OnceLock)로 받아, 대상이
+///   와도 slot 미설정이면 건너뛴다(부팅 초기 짧은 창엔 파킹 없음 — 무해). 채널 닫힘(sink 드롭)이면 종료.
+pub async fn run_flush_worker(
+    mut flush_rx: mpsc::UnboundedReceiver<(String, AgentId)>,
+    messaging: Arc<crate::control::mcp_server::MessagingSlot>,
+) {
+    while let Some((name, id)) = flush_rx.recv().await {
+        let Some(svc) = messaging.get() else {
+            // 서비스 미주입(부팅 초기) — 파킹이 없으니 스킵. 다음 등장 이벤트에 다시 온다.
+            continue;
+        };
+        // flush_for 의 inject 는 blocking write(자식 stdin) — runtime worker 를 굶기지 않게 blocking pool
+        //   로 던지고 그 완료를 await 한다(위 헤더 rationale). Arc·name 을 move-in.
+        let svc = svc.clone();
+        let join = tokio::task::spawn_blocking(move || svc.flush_for(&name, id));
+        if let Err(e) = join.await {
+            // blocking task panic(예: 서비스 내부 poison). worker 는 죽지 않고 다음 대상으로 계속 —
+            //   한 flush 의 패닉이 이후 배달을 막지 않게(유계 격리). abort(Cancelled)면 worker 자체가
+            //   함께 취소되므로 이 경로엔 오지 않는다.
+            tracing::warn!("flush blocking task 실패(패닉 격리 — worker 계속): {e}");
+        }
+    }
+    tracing::debug!("flush worker 종료(채널 닫힘)");
+}
+
+impl StatusSink for MessagingFlushSink {
+    fn status_changed(&self, id: AgentId, status: CoreStatus, epoch: u32) {
+        self.inner.status_changed(id, status, epoch);
+    }
+
+    fn agent_list_updated(&self, agents: Vec<CoreAgentInfo>) {
+        // ★flush 대상 수집(prev lock 보유 구간 — 순수 조작만, 외부 호출 금지)★.
+        let to_flush: Vec<(String, AgentId)> = {
+            let mut prev = self.prev.lock().expect("flush prev poisoned");
+            let mut targets = Vec::new();
+            // 1) 산(Running|Exiting) + structured(도달 가능) 후보를 **이름별로 그룹핑**한다 — 파킹은 이 조건의
+            //   수신자 앞으로만 배달 가능(비-도달 이름은 애초에 파킹 수신 대상 아님).
+            // ★finding 2(BLOCK): 동명 다수 skip(last-write-wins 금지)★: 예전엔 같은 이름을 마지막 것으로
+            //   덮어(last-write-wins) 임의 incarnation 으로 flush 했다 — 이름-키 파킹이 엉뚱한 동명 에이전트로
+            //   갈 수 있어 send-side RECIPIENT_AMBIGUOUS 정책과 어긋난다. 이제 그 이름을 지닌 도달 가능
+            //   후보가 **정확히 1개**일 때만 flush 대상으로 삼고, 동명 다수는 건너뛴다(tracing::debug) — 파킹
+            //   메일은 그 이름이 다시 유일해지거나 TTL 로 만료될 때까지 대기한다.
+            let mut by_name: HashMap<String, Vec<(u32, AgentId)>> = HashMap::new();
+            for a in &agents {
+                let reachable = matches!(a.status, CoreStatus::Running | CoreStatus::Exiting)
+                    && a.capabilities.output.structured;
+                if !reachable {
+                    continue;
+                }
+                by_name
+                    .entry(a.name.clone())
+                    .or_default()
+                    .push((a.epoch, a.id));
+            }
+            // 2) 유일 이름만 다음 스냅샷·flush 후보로 승격. 동명 다수는 skip(prev 에도 안 남긴다 — 다시
+            //   유일해지면 "새로 등장" 으로 잡혀 flush 되게).
+            let mut next: HashMap<String, (u32, AgentId)> = HashMap::new();
+            for (name, candidates) in by_name {
+                if candidates.len() != 1 {
+                    tracing::debug!(
+                        name = %name,
+                        count = candidates.len(),
+                        "flush skip: 동명 도달 후보 다수 — 유일해질 때까지 파킹 대기(finding 2)"
+                    );
+                    continue;
+                }
+                next.insert(name, candidates[0]);
+            }
+            for (name, (epoch, id)) in &next {
+                // ★flush 트리거 조건(finding 3 — id 반영)★: ① 새로 등장(이전에 없던 이름/동명 해소로 재-유일)
+                //   OR ② **id 변경**(같은 이름의 **다른** 에이전트 = 새 AgentId — 예: 같은 이름의 새 프로필)
+                //   OR ③ 같은 id + epoch bump(같은 incarnation 재스폰/재활성화). ②가 load-bearing: 옛 diff 는
+                //   이름별 epoch 만 비교해, id 가 다른데 epoch 이 이전 것보다 ≤ 이면(새 프로필 epoch 0 < 옛
+                //   epoch 3) "새로 살아남" 을 놓쳐 그 이름 앞 파킹이 영영 stranded 됐다. id 가 바뀌면 그건
+                //   별개 에이전트의 등장이니 epoch 대소와 무관하게 flush 후보다.
+                let trigger = match prev.get(name) {
+                    None => true, // ① 새로 등장(또는 동명 해소로 다시 유일).
+                    Some((prev_epoch, prev_id)) => {
+                        id != prev_id // ② 동명 다른 에이전트(새 AgentId) — epoch 대소와 무관.
+                            || epoch > prev_epoch // ③ 같은 id + epoch bump(재스폰/재활성화).
+                    }
+                };
+                if trigger {
+                    targets.push((name.clone(), *id));
+                }
+            }
+            *prev = next;
+            targets
+        };
+
+        // ★flush 대상을 worker 로 넘기고 즉시 반환(finding 5)★: lock 밖에서 채널 send(논블록)만 한다 —
+        //   실제 flush(blocking write)는 flush worker 가 수행하므로 이 콜백은 배치 크기와 무관하게 짧다.
+        //   채널 닫힘/worker 부재면 send 실패는 무시(파킹은 다음 등장에 재시도 — 무손실 유지).
+        for (name, id) in to_flush {
+            let _ = self.flush_tx.send((name, id));
+        }
+
+        // 프론트 fanout 은 그대로 delegate(감싼 sink 의 본래 책임 — broadcast). flush 를 worker 로 뺐으므로
+        //   이 forwarding 이 blocking write 뒤로 밀리지 않는다(spawn/reap/프론트 업데이트 지연 제거).
+        self.inner.agent_list_updated(agents);
+    }
+
+    fn restore_result(&self, report: CoreRestoreReport) {
+        self.inner.restore_result(report);
+    }
+}
+
 // ── WsOutputSink(연결당 출력 sink, pump 스레드에서 호출) ───────────────────────────
 
 /// 한 연결의 한 에이전트 구독에 대응하는 OutputSink. pump 스레드가 `send` 를 호출한다.
@@ -1055,6 +1254,207 @@ mod tests {
             WsOutbound::Text(s) => assert!(s.contains("ReplayComplete")),
             _ => panic!("3번째는 ReplayComplete Text 여야 함"),
         }
+    }
+
+    // ── 7. MessagingFlushSink diff/enqueue 로직(finding 2·5) — worker 없이 순수 diff 검증 ──────────
+    //    sink 는 flush 대상 (name, id) 만 채널로 push 한다(실제 flush 는 worker). 여기선 그 diff 를
+    //    직접 단언한다: 유일 이름만 enqueue, 동명 다수는 skip(finding 2), 콜백은 blocking 없이 즉시 반환.
+    use engram_dashboard_core::agent::types::{
+        AgentInfo as TAgentInfo, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
+        SessionCaps,
+    };
+
+    /// 테스트용 AgentInfo — 이름·epoch·structured(도달성)·상태를 지정.
+    fn flush_info(
+        id: AgentId,
+        name: &str,
+        epoch: u32,
+        structured: bool,
+        status: CoreStatus,
+    ) -> TAgentInfo {
+        TAgentInfo {
+            id,
+            name: name.to_string(),
+            cwd: ".".to_string(),
+            status,
+            cols: 80,
+            rows: 24,
+            epoch,
+            capabilities: Capabilities {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: !structured,
+                    structured,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+                session: SessionCaps {
+                    resume: false,
+                    snapshot: false,
+                    cwd_env: false,
+                },
+                model: ModelCaps {
+                    select: false,
+                    temperature: false,
+                    max_tokens: false,
+                },
+            },
+        }
+    }
+
+    /// 테스트용 no-op inner StatusSink — broadcast 는 무관(diff 만 검증). 3 콜백 모두 아무것도 안 한다.
+    struct TestNoopSink;
+    impl StatusSink for TestNoopSink {
+        fn status_changed(&self, _: AgentId, _: CoreStatus, _: u32) {}
+        fn agent_list_updated(&self, _: Vec<CoreAgentInfo>) {}
+        fn restore_result(&self, _: CoreRestoreReport) {}
+    }
+
+    /// flush 대상만 뽑는 sink + 그 채널 수신단을 만든다(worker 미배선 — diff 만 관측).
+    fn flush_sink() -> (
+        MessagingFlushSink,
+        mpsc::UnboundedReceiver<(String, AgentId)>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel::<(String, AgentId)>();
+        let sink = MessagingFlushSink::new_test(Box::new(TestNoopSink), tx);
+        (sink, rx)
+    }
+
+    fn drain_targets(
+        rx: &mut mpsc::UnboundedReceiver<(String, AgentId)>,
+    ) -> Vec<(String, AgentId)> {
+        let mut out = Vec::new();
+        while let Ok(t) = rx.try_recv() {
+            out.push(t);
+        }
+        out
+    }
+
+    #[test]
+    fn flush_sink_enqueues_newly_live_unique_name() {
+        // 새로 등장한 유일 도달 이름 → flush 대상으로 enqueue.
+        let (sink, mut rx) = flush_sink();
+        let id = AgentId::new_v4();
+        sink.agent_list_updated(vec![flush_info(id, "alice", 0, true, CoreStatus::Running)]);
+        let targets = drain_targets(&mut rx);
+        assert_eq!(
+            targets,
+            vec![("alice".to_string(), id)],
+            "유일 등장 이름 flush"
+        );
+    }
+
+    #[test]
+    fn flush_sink_skips_ambiguous_name() {
+        // ★finding 2(BLOCK) 회귀★: 같은 이름 도달 후보 2개 → skip(last-write-wins 금지). 임의 incarnation
+        //   으로 flush 하지 않는다 — send-side RECIPIENT_AMBIGUOUS 정책과 정합.
+        let (sink, mut rx) = flush_sink();
+        let a = AgentId::new_v4();
+        let b = AgentId::new_v4();
+        sink.agent_list_updated(vec![
+            flush_info(a, "dup", 0, true, CoreStatus::Running),
+            flush_info(b, "dup", 0, true, CoreStatus::Running),
+        ]);
+        assert!(
+            drain_targets(&mut rx).is_empty(),
+            "동명 다수는 flush 대상에서 제외(임의 incarnation 배달 금지)"
+        );
+    }
+
+    #[test]
+    fn flush_sink_reflushes_when_name_becomes_unique_again() {
+        // 동명(skip) → 하나가 사라져 유일해지면 "새로 등장" 으로 다시 flush 대상(파킹 대기 해소).
+        let (sink, mut rx) = flush_sink();
+        let a = AgentId::new_v4();
+        let b = AgentId::new_v4();
+        // 1) 동명 다수 — skip, prev 에도 안 남는다.
+        sink.agent_list_updated(vec![
+            flush_info(a, "dup", 0, true, CoreStatus::Running),
+            flush_info(b, "dup", 0, true, CoreStatus::Running),
+        ]);
+        assert!(drain_targets(&mut rx).is_empty());
+        // 2) b 사라짐 → dup 유일 → 새로 등장으로 flush.
+        sink.agent_list_updated(vec![flush_info(a, "dup", 0, true, CoreStatus::Running)]);
+        assert_eq!(
+            drain_targets(&mut rx),
+            vec![("dup".to_string(), a)],
+            "동명 해소로 유일해지면 다시 flush 대상"
+        );
+    }
+
+    #[test]
+    fn flush_sink_enqueues_on_epoch_bump_but_not_same_epoch() {
+        // epoch bump(재스폰) → flush. 같은 epoch 재-push → skip(노이즈).
+        let (sink, mut rx) = flush_sink();
+        let id = AgentId::new_v4();
+        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
+        assert_eq!(drain_targets(&mut rx), vec![("a".to_string(), id)]);
+        // 같은 epoch 재-push → flush 안 함.
+        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
+        assert!(
+            drain_targets(&mut rx).is_empty(),
+            "같은 epoch 재-push 는 flush 안 함"
+        );
+        // epoch bump → flush.
+        sink.agent_list_updated(vec![flush_info(id, "a", 1, true, CoreStatus::Running)]);
+        assert_eq!(
+            drain_targets(&mut rx),
+            vec![("a".to_string(), id)],
+            "epoch bump 은 flush(재스폰/재활성화)"
+        );
+    }
+
+    #[test]
+    fn flush_sink_enqueues_when_same_name_different_id_lower_epoch() {
+        // ★finding 3 회귀★: 같은 이름의 **다른** 에이전트(새 AgentId)가 등장하면, 그 epoch 이 이전
+        //   incarnation 보다 낮아도(새 프로필 epoch 0 < 옛 epoch 3) flush 대상이어야 한다. 옛 diff 는
+        //   이름별 epoch 만 비교해 이 등장을 놓쳐 파킹이 stranded 됐다. id 변경을 감지해 flush 를 건다.
+        let (sink, mut rx) = flush_sink();
+        let old = AgentId::new_v4();
+        let new = AgentId::new_v4();
+        // 1) 옛 에이전트 epoch 3 등장 → flush.
+        sink.agent_list_updated(vec![flush_info(old, "svc", 3, true, CoreStatus::Running)]);
+        assert_eq!(drain_targets(&mut rx), vec![("svc".to_string(), old)]);
+        // 2) 같은 이름의 다른 에이전트(new id) epoch 0 등장(옛 것은 사라짐) → epoch 이 낮아도 flush.
+        sink.agent_list_updated(vec![flush_info(new, "svc", 0, true, CoreStatus::Running)]);
+        assert_eq!(
+            drain_targets(&mut rx),
+            vec![("svc".to_string(), new)],
+            "동명 다른 에이전트(새 id)는 epoch 이 낮아도 flush(finding 3)"
+        );
+        // 3) 같은 (id,epoch) 재-push → skip(노이즈 — id·epoch 모두 불변).
+        sink.agent_list_updated(vec![flush_info(new, "svc", 0, true, CoreStatus::Running)]);
+        assert!(
+            drain_targets(&mut rx).is_empty(),
+            "같은 id+epoch 재-push 는 flush 안 함"
+        );
+    }
+
+    #[test]
+    fn flush_sink_skips_non_reachable() {
+        // 비-structured(TUI) 또는 terminal 상태는 flush 후보 아님(파킹 수신 대상 아님).
+        let (sink, mut rx) = flush_sink();
+        let tui = AgentId::new_v4();
+        let dead = AgentId::new_v4();
+        sink.agent_list_updated(vec![
+            flush_info(tui, "tui", 0, false, CoreStatus::Running), // 비-structured
+            flush_info(dead, "dead", 0, true, CoreStatus::Killed), // terminal
+        ]);
+        assert!(
+            drain_targets(&mut rx).is_empty(),
+            "비-도달·terminal 은 flush 대상 아님"
+        );
     }
 
     // ── 10. (적용4-1) OriginCheck::on_request 분기 — 무방비 였던 거부/허용 분기 검증 ──────
