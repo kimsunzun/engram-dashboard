@@ -9,22 +9,34 @@
 //!
 //! ★불변식★:
 //!   - **FIFO(오래된 순)** — `drain`/`sweep_expired` 는 park 순서를 보존한다(ADR-0104 일괄·오래된 순 flush).
+//!   - **큐 정렬축 = admission 순번(`ParkedMessage.admission_seq`)** — 큐는 앞→뒤로 순번이 **강한 증가**다
+//!     (`park` 는 새 순번을 뒤에 붙이고, `restore_ordered` 는 순번 기준 merge 로 되꽂는다). "오래된 순" 의
+//!     정본 축이 시계가 아니라 이 순번인 이유는 `admission_seq` 주석 참조(round-4 finding 1).
 //!   - **cap = 수신자당 100건, 초과 = 반려**(오래된 것 몰래 드롭 금지, spec §5 분기 3). 단 **notice 는 cap
 //!     예외**(회신 계약의 타임아웃 통지가 가득 찬 메일박스에 막히면 계약이 반쪽 — spec §5 · ADR-0103 불변식).
-//!   - **TTL = 1h** — 초과 항목은 `sweep_expired` 가 걷어내 상위가 장부에 `expired` 로 남긴다.
+//!   - **TTL = 24h** — 초과 항목은 `sweep_expired` 가 걷어내 상위가 장부에 `expired` 로 남긴다(ADR-0105 —
+//!     1h → 24h 상향, 인메모리 단계 한정).
 //!   - **순수 + 주입 시계** — 만료 판정은 `park` 시각과 인자 `now` 의 차로만 한다(모듈 헤더 순수성 불변식).
 // ADR-0103
 // ADR-0104
+// ADR-0105
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use engram_dashboard_core::agent::types::AgentId;
+
 /// TTL — 파킹 항목의 최대 생존 기간. 초과분은 `sweep_expired` 가 걷어낸다.
 ///
-/// ★왜 1h(spec §5 정책 상수)★: 오타·미스폰 수신자로 향한 메시지가 영원히 쌓이지 않게 하는 상한이다.
-///   너무 짧으면 "스폰 전 선지시"(아직 안 뜬 에이전트 앞으로 미리 보냄)가 만료돼 버리고, 너무 길면 오배송이
-///   오래 잔류한다 — 1h 는 그 절충(사용자 결정, ADR-0103). 상위 서비스가 sweep 주기를 정한다(여기선 값만).
-const PARK_TTL: Duration = Duration::from_secs(60 * 60);
+/// ★왜 24h(spec §5 정책 상수, ADR-0105 — 1h 에서 상향)★: 선례 조사(/research light, 2026-07-25) 상
+///   업계 관행이 일 단위다(SQS 4일·Kafka 7일·Postfix 5일 — 1h 는 그 대비 이례적으로 짧았다). "살아있는
+///   수신자는 TTL 면제"(liveness-aware) 는 조사한 6개 시스템(RabbitMQ·SQS·Kafka·Postfix·ejabberd·LLM
+///   프레임워크) 어디에도 선례가 없어 채택하지 않는다 — 부재든 busy 대기든 시계 기반 단일 규칙을 그대로
+///   유지한다. 인메모리 단계 + cap 100(아래 `MAILBOX_CAP`) 이라 긴 TTL 의 비용은 ~0(데몬 재시작 시 전부
+///   소멸) — **영속화(디스크) 단계가 오면 재설계 전제**(사용자 결정, 2026-07-25). 상위 서비스가 sweep
+///   주기를 정한다(여기선 값만).
+// ADR-0105
+const PARK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// 수신자당 파킹 상한 — 초과 시 `MailboxFull` 반려(오래된 것 몰래 드롭 금지, spec §5 분기 3).
 ///
@@ -62,14 +74,37 @@ pub struct ParkedMessage {
     pub kind: ParkKind,
     /// park 시각(주입된 now). TTL 판정 기준.
     pub parked_at: Instant,
+    /// ★admission 순번 — 큐 정렬축(round-4 finding 1)★: `park` 이 수용 시점에 부여하는 단조 증가 번호다.
+    ///   **호출자가 넣은 값은 무시·덮어쓴다**(저장소가 유일한 부여자 — 두 부여자가 있으면 순서가 갈린다).
+    ///
+    /// ★왜 `parked_at`(시계)이 아니라 별도 순번인가(load-bearing)★: 재파킹 merge 와 만료 판정은 **서로 다른
+    ///   축**이다. 만료는 시계(`parked_at`)로 봐야 하지만, "누가 먼저 큐에 들어왔나" 를 시계로 판정하면 두
+    ///   군데서 틀어진다: ① `park_pending` 은 락 **획득 전에** `Instant::now()` 를 뜨므로 두 발송이 경합하면
+    ///   시각과 실제 수용 순서가 역전될 수 있다 ② 시계 분해능이 거친 환경에선 연속 park 의 `parked_at` 이
+    ///   **같은 값**이 돼 순서가 결정 불가다. 순번은 저장소 안에서 락 보유 중 부여되므로 두 문제 모두 없다 —
+    ///   그래서 `restore_ordered` 의 merge 키는 순번이고, 큐는 항상 순번 강한 증가다.
+    pub admission_seq: u64,
+    /// ★해석된 수신자 id 힌트(있을 때만 — C2 리뷰 fix 2)★: 이 메시지를 park 할 때 발송이 **구체적인 산
+    ///   수신자를 이미 해석했다면** 그 AgentId. busy 대기·주입 실패 파킹은 항상 값이 있고, 부재 파킹
+    ///   ("없는 이름" 앞 선지시)은 `None` 이다.
+    ///
+    /// ★왜 필요한가(이름-키 파킹의 사각지대)★: 파킹의 주소 단위는 **이름**이다(respawn 생존 —
+    ///   근거는 service.rs `canonical_park_key`). 그런데 flush 는 "그 이름의 도달 후보가 **정확히 1개**" 일 때만 배달한다(동명
+    ///   다수는 보류). 여기서 구멍이 생긴다: exact-AgentId 로 지목한 발송은 동명 모호성을 **의도적으로
+    ///   통과**하는데(id 가 명시적 승자), 그 수신자가 turn 중이라 이름-키로 park 되면 동명이 둘인 동안
+    ///   flush 가 영영 보류돼 TTL 까지 blackhole 이 된다. 그래서 park 시점에 해석된 id 를 힌트로 함께
+    ///   보관해, flush 가 **그 id 가 아직 살아 있으면 이름 유일성과 무관하게** 그쪽으로 배달한다.
+    /// ★힌트는 권위가 아니라 우선순위다★: 그 id 가 죽었으면(재스폰 등) 무시하고 이름 규칙으로 되돌아간다
+    ///   — 그래서 "재스폰된 동명이 파킹을 이어받는다" 는 이름-키 설계가 그대로 유지된다.
+    pub hinted_id: Option<AgentId>,
 }
 
 impl ParkedMessage {
-    /// `now` 기준으로 TTL(1h)에 도달했나. 경계(정확히 TTL)는 **만료**(`>=` 비교 — 아래 테스트 고정).
+    /// `now` 기준으로 TTL 에 도달했나. 경계(정확히 TTL)는 **만료**(`>=` 비교 — 아래 테스트 고정).
     ///
-    /// ★경계 규약(load-bearing)★: `elapsed >= PARK_TTL` 이라 정확히 1h 가 지난 순간부터 만료다(경계 포함).
+    /// ★경계 규약(load-bearing)★: `elapsed >= PARK_TTL` 이라 정확히 TTL 이 지난 순간부터 만료다(경계 포함).
     ///   `>` 가 아니라 `>=` 를 쓰는 이유는 "TTL = 최대 생존 기간" 이라는 상한 의미와 정합하기 위함이다 —
-    ///   1h 를 꽉 채운 항목은 더 살려 둘 이유가 없다(경계에서 즉시 만료가 상한 의미에 부합). 이 경계는 단위
+    ///   TTL 을 꽉 채운 항목은 더 살려 둘 이유가 없다(경계에서 즉시 만료가 상한 의미에 부합). 이 경계는 단위
     ///   테스트(`ttl_boundary_*`)가 고정한다 — 바꾸면 회귀.
     fn is_expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.parked_at) >= PARK_TTL
@@ -105,6 +140,10 @@ pub struct DrainOutcome {
 pub struct Mailbox {
     /// 수신자 이름별 FIFO 큐. `VecDeque` 는 push_back(park)·drain(앞에서부터) 모두 오래된 순 보존.
     queues: HashMap<String, std::collections::VecDeque<ParkedMessage>>,
+    /// 다음 admission 순번(전 수신자 공유 단조 카운터 — `ParkedMessage.admission_seq` 부여자).
+    ///   수신자별이 아니라 저장소 전역인 이유: 한 이름 큐에 여러 타깃 몫이 섞여도(동명 다수) 순번 하나로
+    ///   전역 수용 순서를 표현할 수 있고, u64 라 실질적으로 소진되지 않는다.
+    next_seq: u64,
 }
 
 impl Mailbox {
@@ -118,7 +157,7 @@ impl Mailbox {
     /// ★cap 회계(spec §5)★: 큐의 **message 항목 수**가 cap 이상이면 신규 message 를 반려한다. notice 는
     ///   개수와 무관하게 항상 수용한다(회신 계약 통지가 막히면 안 됨 — ADR-0103 불변식). 그래서 cap 검사는
     ///   `kind == Message` 일 때만, 그리고 기존 **message 개수**만 센다(notice 는 분모에서도 제외).
-    pub fn park(&mut self, recipient: &str, msg: ParkedMessage) -> Result<(), ParkError> {
+    pub fn park(&mut self, recipient: &str, mut msg: ParkedMessage) -> Result<(), ParkError> {
         let queue = self.queues.entry(recipient.to_string()).or_default();
         // notice 는 cap 예외 — message 만 상한 검사(분모도 message 만 센다).
         if msg.kind == ParkKind::Message {
@@ -127,12 +166,17 @@ impl Mailbox {
                 return Err(ParkError::MailboxFull);
             }
         }
+        // admission 순번은 **수용이 확정된 뒤** 저장소가 부여한다(반려분은 번호를 태우지 않는다). 호출자 값은
+        //   덮어쓴다 — 부여자가 여기 하나여야 큐의 "순번 강한 증가" 불변식이 성립한다.
+        msg.admission_seq = self.next_seq;
+        self.next_seq += 1;
         queue.push_back(msg);
         Ok(())
     }
 
-    /// ★재파킹(무손실 복원) primitive — cap 우회 + FRONT 삽입(ADR-0103/0104 · finding 1)★: flush 배치
-    ///   도중 inject 실패로 아직 배달 못 한 **이미 admitted 된** 항목들을 큐 **앞쪽**에 원래 순서로 되돌린다.
+    /// ★재파킹(무손실 복원) primitive — cap 우회 + admission 순번 merge(ADR-0103/0104 · finding 1)★: flush
+    ///   배치 도중 배달하지 못한 **이미 admitted 된** 항목들을, 큐의 나머지와 **전역 수용 순서대로 섞어**
+    ///   되돌린다(단순 앞쪽 삽입이 아니다 — 아래 "왜 merge 인가").
     ///
     /// ★왜 `park` 가 아니라 별도 primitive 인가(load-bearing — 조용한 유실 금지)★: `park` 는 **신규
     ///   admission** 통제라 cap 을 세고 초과 시 반려한다. 그런데 재파킹은 이미 장부에 `pending` 으로 들어간
@@ -141,22 +185,53 @@ impl Mailbox {
     ///   그 에러를 무시하면 admitted 메시지가 조용히 유실된다(ledger 는 pending 인데 큐엔 없음 — 유령 pending).
     ///   그래서 재파킹은 cap 을 **우회**한다(보관은 무제한 — 유입만 cap). 상한 위반이 걱정되면 그건 유입
     ///   경로(`park`)가 이미 막고 있고, 재파킹분은 원래 그 cap 안에서 admitted 됐던 것이다.
-    /// ★왜 FRONT 삽입인가(FIFO 역전 방지 — finding 1)★: 재파킹분은 동시 park 된 신규분보다 **먼저** 파킹된
-    ///   더 오래된 항목이다. 큐 뒤(push_back)에 붙이면 신규분(더 최근)이 앞서게 돼 "오래된 순" 이 깨진다.
-    ///   그래서 원래 순서 그대로 큐 **앞**에 되꽂아, 이후 drain 이 여전히 오래된 순(재파킹분 → 동시 park 분)을
-    ///   낸다. `parked_at` 은 **원래 값 유지**(호출자가 원본 ParkedMessage 를 그대로 넘김) — TTL 이 연장되지
-    ///   않는다(오배송 방어).
+    /// ★왜 단순 FRONT 삽입이 아니라 merge 인가(전역 오래된 순 — round-4 finding 1)★: 한 flush 는 같은 이름
+    ///   큐에 대해 **재파킹을 여러 번** 부를 수 있다 — ① busy/도달불가 스킵분(락 안, 배치 시작 전) ② 타깃별
+    ///   inject 실패분(락 밖, 타깃마다 따로). 한 이름 큐에 동명 다수의 몫이 섞여 있으면(exact-id 발송 + 동명
+    ///   respawn) 이 호출들이 **각각** 앞쪽에 꽂히는데, 그러면 나중 호출이 앞선 호출보다 앞에 놓여 호출 간
+    ///   나이 순서가 **뒤집힌다**(예: A 몫 [m0,m2] 복원 → B 몫 [m1,m3] 복원 = [m1,m3,m0,m2]). 그래서 앞쪽
+    ///   삽입 대신 **admission 순번 기준 merge** 로 되꽂아, 몇 번을 부르든 큐가 항상 전역 수용 순서(오래된
+    ///   순)를 유지하게 한다. 재파킹분은 신규 park 분보다 순번이 작으므로, 단일 호출·빈 큐 케이스에선
+    ///   merge 결과가 옛 FRONT 삽입과 동일하다(동작 회귀 없음).
+    /// ★왜 순서가 정확해야 하나(두 가지 손해)★: ① 수신자가 보는 배달 순서가 뒤집힌다(ADR-0104 "오래된 순
+    ///   일괄" 은 큐 내부가 아니라 **수신자가 보는 순서**에 대한 약속) ② `handle_single_send` 의 FIFO 합류
+    ///   판정이 큐 앞머리를 기준으로 하므로 나이 역전은 직발송 끼어들기로 번진다.
+    /// ★전제(호출자 계약)★: `items` 는 **순번 오름차순**이어야 한다(drain 이 낸 순서 그대로거나 그 부분열 —
+    ///   호출자가 인덱스 정렬로 보장한다). merge 는 두 오름차순 열을 합치는 것이라 이 전제가 깨지면 결과도
+    ///   깨진다.
+    /// ★`parked_at`·순번 모두 원래 값 유지★: 호출자가 원본 ParkedMessage 를 그대로 넘긴다 — TTL 이 연장되지
+    ///   않고(오배송 방어) 수용 순서도 재부여되지 않는다(뒤로 밀리지 않는다).
     /// ★notice/message 무관 무조건 수용★: 재파킹은 kind 를 안 본다(이미 admitted). cap 회계는 신규 park 만.
-    pub fn restore_front(&mut self, recipient: &str, items: Vec<ParkedMessage>) {
+    pub fn restore_ordered(&mut self, recipient: &str, items: Vec<ParkedMessage>) {
         if items.is_empty() {
             return;
         }
         let queue = self.queues.entry(recipient.to_string()).or_default();
-        // 원래 순서 보존하며 앞쪽에 되꽂기: 역순으로 push_front 하면 최종 순서가 items 순서 그대로 앞에 온다
-        //   (마지막 항목을 먼저 push_front → 그 앞에 이전 항목 → … → 첫 항목이 최종 front).
-        for item in items.into_iter().rev() {
-            queue.push_front(item);
+        if queue.is_empty() {
+            // 흔한 경로(락 안 복원 = drain 직후라 큐가 비어 있다) — merge 불요.
+            queue.extend(items);
+            return;
         }
+        // 두 오름차순 열(재파킹분 · 큐 잔여)을 순번으로 merge. 동률은 구조적으로 없다(순번은 저장소가 유일
+        //   부여자이고 강한 증가) — 그래도 방어적으로 재파킹분을 먼저 둔다(더 오래된 쪽).
+        let existing = std::mem::take(queue);
+        let mut merged = std::collections::VecDeque::with_capacity(existing.len() + items.len());
+        let mut restored = items.into_iter().peekable();
+        let mut remaining = existing.into_iter().peekable();
+        loop {
+            let take_restored = match (restored.peek(), remaining.peek()) {
+                (Some(r), Some(q)) => r.admission_seq <= q.admission_seq,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if take_restored {
+                merged.push_back(restored.next().expect("peek 직후"));
+            } else {
+                merged.push_back(remaining.next().expect("peek 직후"));
+            }
+        }
+        *queue = merged;
     }
 
     /// 수신자 큐를 통째로 비워 주입 가능분·만료분을 **둘 다** 오래된 순으로 반환(flush primitive).
@@ -186,19 +261,25 @@ impl Mailbox {
     ///
     /// ★반환 = 걷어낸 만료분(오래된 순, 수신자 무관 평탄화)★: 상위는 이 목록을 순회하며 ledger 에 expired
     ///   전이를 남긴다(spec §5 "TTL 초과 expired, 장부 잔존"). 비워진 큐는 맵에서 제거한다.
+    /// ★전량 스캔이다 — front 조기 종료 안 한다(round-4 finding 1 · load-bearing)★: 옛 구현은 "FIFO 니까
+    ///   front 가 미만료면 뒤도 미만료" 로 첫 미만료에서 break 했다. 그 전제는 **큐 정렬축(admission 순번)과
+    ///   만료축(`parked_at`)이 같다** 는 가정인데, 둘은 같지 않다: ① `park` 의 `parked_at` 은 **호출자가 주는
+    ///   값**이라 저장소가 단조성을 보장할 수 없다 ② `park_pending` 은 락 획득 **전에** 시각을 떠서 경합 시
+    ///   수용 순서와 시각이 역전될 수 있다. 그 경우 더 최근 항목이 앞에 서면 **뒤에 있는 만료 항목이 sweep
+    ///   에서 영구히 가려진다**(TTL 이 무력화되고 장부에도 안 남는다 = 조용한 유실의 다른 얼굴). 그래서 전량
+    ///   스캔으로 바꿨다 — 비용은 큐 길이 선형이고 규모가 극소해(수신자당 cap 100, 큐 수는 소수) 무의미하다.
+    ///   `drain` 도 같은 이유로 전량 분할이다(그쪽은 원래부터).
     /// ★순수★: 만료 판정은 인자 `now` 로만 한다(모듈 헤더 불변식).
     pub fn sweep_expired(&mut self, now: Instant) -> Vec<ParkedMessage> {
         let mut expired = Vec::new();
-        // 큐를 순회하며 만료분을 앞에서부터 분리(오래된 순 유지). 비면 제거.
+        // 큐를 순회하며 만료분을 분리. 남는 항목은 원래 상대 순서(admission 순번 증가)를 그대로 유지한다.
         self.queues.retain(|_recipient, queue| {
-            // 오래된 순 보존: 만료(front 쪽에 몰림)를 앞에서부터 뽑는다.
-            while let Some(front) = queue.front() {
-                if front.is_expired(now) {
-                    // pop_front 는 위 front 존재 확인 직후라 항상 Some.
-                    expired.push(queue.pop_front().expect("front 존재 확인 직후"));
+            let scanned = std::mem::take(queue);
+            for m in scanned {
+                if m.is_expired(now) {
+                    expired.push(m);
                 } else {
-                    // FIFO 라 front 가 안 만료면 뒤도 안 만료(더 최근) — 조기 종료.
-                    break;
+                    queue.push_back(m);
                 }
             }
             !queue.is_empty()
@@ -211,6 +292,34 @@ impl Mailbox {
         self.queues.get(recipient).map(|q| q.len()).unwrap_or(0)
     }
 
+    /// 수신자 큐의 현재 순서를 msg_id 로(앞→뒤, 관측·테스트용). 큐가 없으면 빈 목록.
+    ///   순서 단언용 — 길이만으로는 재파킹의 나이 순서 역전이 안 잡힌다(round-4 finding 1).
+    pub fn msg_ids(&self, recipient: &str) -> Vec<String> {
+        self.queues
+            .get(recipient)
+            .map(|q| q.iter().map(|m| m.msg_id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// ★이 id 를 힌트로 지목한 항목이 있는 큐 이름 목록(round-3 finding 2 — rename 고아 방지)★.
+    ///
+    /// ★왜 필요한가★: 파킹의 주소 축은 **이름**이라(service.rs `canonical_park_key`) busy 파킹은 **발송
+    ///   시점의** canonical 이름 큐에 들어간다. 그런데 턴 종료 flush 는 그 에이전트의 **현재** 이름으로
+    ///   진입하므로(tap 은 id 만 안다), 턴 중에 이름이 바뀌면(display_name 변경·cwd 파생 이름 변화) 옛 이름
+    ///   큐를 아무도 열지 않아 그 배치가 TTL 까지 고아가 된다. 힌트로 역방향 조회를 하면 그 큐를 찾아낸다
+    ///   (항목별 힌트 우선 해석은 flush 가 이미 하므로, 여기선 **어느 큐를 열어야 하나**만 답한다).
+    /// ★비용(의도적 선택 — 인덱스 안 만든다)★: 전 큐 × 전 항목 선형 스캔이다. 규모가 극소하기 때문이다 —
+    ///   큐는 파킹된 수신자 수(사람 대화 수준의 소수), 항목은 수신자당 cap 100. 별도 (id→큐) 인덱스를 두면
+    ///   park/drain/restore_ordered/sweep 네 경로가 모두 인덱스를 정확히 갱신해야 하고, 한 곳만 놓쳐도 배달이
+    ///   조용히 멈춘다(무손실 불변식과 정면 충돌). 유지 비용 대비 이득이 없어 스캔을 택했다.
+    pub fn queues_with_hint(&self, id: AgentId) -> Vec<String> {
+        self.queues
+            .iter()
+            .filter(|(_, q)| q.iter().any(|m| m.hinted_id == Some(id)))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// 저장소 전체가 비었나(전 수신자 큐 없음). 관측/테스트용.
     pub fn is_empty(&self) -> bool {
         self.queues.is_empty()
@@ -221,14 +330,69 @@ impl Mailbox {
 mod tests {
     use super::*;
 
-    /// 테스트용 파킹 항목 생성 — id·kind·park 시각을 지정한다.
+    /// 테스트용 파킹 항목 생성 — id·kind·park 시각을 지정한다(id 힌트 없음 = 부재 파킹 모양).
+    ///   `admission_seq` 는 `park` 이 덮어쓰므로 여기선 0(placeholder).
     fn parked(id: &str, kind: ParkKind, at: Instant) -> ParkedMessage {
         ParkedMessage {
             msg_id: id.to_string(),
             envelope: format!("<message>{id}</message>"),
             kind,
             parked_at: at,
+            hinted_id: None,
+            admission_seq: 0,
         }
+    }
+
+    #[test]
+    fn hinted_id_survives_park_drain_and_restore_ordered() {
+        // ★fix 2 회귀★: id 힌트는 저장소를 왕복(park→drain, 재파킹→drain)해도 보존돼야 한다 —
+        //   힌트가 사라지면 exact-id 발송의 동명 blackhole 방어가 조용히 무력화된다.
+        let mut mb = Mailbox::new();
+        let t0 = Instant::now();
+        let hint = AgentId::new_v4();
+        let mut m = parked("m0", ParkKind::Message, t0);
+        m.hinted_id = Some(hint);
+        mb.park("alice", m).expect("park");
+        let drained = mb.drain("alice", t0);
+        assert_eq!(drained.deliverable[0].hinted_id, Some(hint), "drain 보존");
+        mb.restore_ordered("alice", drained.deliverable);
+        let again = mb.drain("alice", t0);
+        assert_eq!(
+            again.deliverable[0].hinted_id,
+            Some(hint),
+            "restore_ordered 왕복 후에도 보존"
+        );
+    }
+
+    #[test]
+    fn queues_with_hint_finds_only_queues_holding_that_id() {
+        // ★round-3 finding 2★: 턴 중 이름이 바뀌면 옛 이름 큐를 열 단서는 id 힌트뿐이다 — 그 역방향 조회.
+        let mut mb = Mailbox::new();
+        let t0 = Instant::now();
+        let target = AgentId::new_v4();
+        let other = AgentId::new_v4();
+        let mut hinted = parked("m0", ParkKind::Message, t0);
+        hinted.hinted_id = Some(target);
+        mb.park("old-name", hinted).unwrap();
+        let mut other_hint = parked("m1", ParkKind::Message, t0);
+        other_hint.hinted_id = Some(other);
+        mb.park("someone-else", other_hint).unwrap();
+        // 힌트 없는 부재 파킹은 잡히지 않아야(그건 이름 규칙으로만 배달된다).
+        mb.park("absent-name", parked("m2", ParkKind::Message, t0))
+            .unwrap();
+
+        assert_eq!(
+            mb.queues_with_hint(target),
+            vec!["old-name".to_string()],
+            "그 id 를 힌트로 든 큐만"
+        );
+        assert!(
+            mb.queues_with_hint(AgentId::new_v4()).is_empty(),
+            "무관한 id 는 빈 목록"
+        );
+        // drain 으로 비면 더 이상 잡히지 않는다(빈 큐는 맵에서 제거).
+        let _ = mb.drain("old-name", t0);
+        assert!(mb.queues_with_hint(target).is_empty());
     }
 
     #[test]
@@ -368,7 +532,7 @@ mod tests {
         // 조용한 유실 금지(spec §5): 큐에 만료+미만료가 섞여도 만료분은 버려지지 않고 expired 로 나온다.
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        // old 는 만료되게(t0), recent 는 살아 있게(t0 + 30m). now = t0 + 1h.
+        // old 는 만료되게(t0), recent 는 살아 있게(t0 + 30m). now = t0 + TTL.
         mb.park("h", parked("old", ParkKind::Message, t0)).unwrap();
         mb.park(
             "h",
@@ -396,7 +560,7 @@ mod tests {
     fn sweep_expired_removes_and_returns_expired_only() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        // 오래된 것(t0) + 최근 것(t0 + 30m). now = t0 + 1h + 1ns 면 오래된 것만 만료.
+        // 오래된 것(t0) + 최근 것(t0 + 30m). now = t0 + TTL + 1ns 면 오래된 것만 만료.
         mb.park("e", parked("old", ParkKind::Message, t0)).unwrap();
         mb.park(
             "e",
@@ -425,10 +589,10 @@ mod tests {
         assert!(mb.is_empty(), "전부 만료돼 비면 큐가 맵에서 제거돼야");
     }
 
-    // ── restore_front(재파킹 무손실 복원 — finding 1) ────────────────────────────────
+    // ── restore_ordered(재파킹 무손실 복원 — finding 1 · round-4 finding 1) ─────────────
     #[test]
-    fn restore_front_bypasses_cap_no_loss() {
-        // ★조용한 유실 금지(ADR-0103 · finding 1)★: 큐가 이미 cap(100) 이면 park 는 반려하지만, restore_front
+    fn restore_ordered_bypasses_cap_no_loss() {
+        // ★조용한 유실 금지(ADR-0103 · finding 1)★: 큐가 이미 cap(100) 이면 park 는 반려하지만, restore_ordered
         //   는 cap 을 우회해 admitted 항목을 무조건 되돌린다(유령 pending 방지).
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
@@ -442,12 +606,12 @@ mod tests {
             mb.park("r", parked("would-reject", ParkKind::Message, t0)),
             Err(ParkError::MailboxFull)
         );
-        // restore_front 는 cap 을 넘어서라도 되돌린다(유실 0).
+        // restore_ordered 는 cap 을 넘어서라도 되돌린다(유실 0).
         let older = vec![
             parked("old0", ParkKind::Message, t0),
             parked("old1", ParkKind::Message, t0),
         ];
-        mb.restore_front("r", older);
+        mb.restore_ordered("r", older);
         assert_eq!(
             mb.len("r"),
             MAILBOX_CAP + 2,
@@ -456,10 +620,10 @@ mod tests {
     }
 
     #[test]
-    fn restore_front_preserves_oldest_first_before_concurrent_parks() {
+    fn restore_ordered_preserves_oldest_first_before_concurrent_parks() {
         // ★FIFO 역전 방지(finding 1)★: 재파킹분(더 오래됨)은 동시 park 된 신규분보다 앞서야 한다.
         //   시나리오: drain 으로 [old0,old1,old2] 를 꺼냈고 그 사이 new0·new1 이 park 됐다 → old0 배달 후
-        //   실패 → [old1,old2] 재파킹. 이때 큐 = [new0,new1] 이므로 restore_front 후 = [old1,old2,new0,new1].
+        //   실패 → [old1,old2] 재파킹. 이때 큐 = [new0,new1] 이므로 restore_ordered 후 = [old1,old2,new0,new1].
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         // drain↔inject 사이 동시 park 된 신규분(더 최근).
@@ -478,7 +642,7 @@ mod tests {
             parked("old1", ParkKind::Message, t0 + Duration::from_secs(1)),
             parked("old2", ParkKind::Message, t0 + Duration::from_secs(2)),
         ];
-        mb.restore_front("r", older);
+        mb.restore_ordered("r", older);
         // drain 하면 재파킹분(오래됨) → 동시 park 분(최근) 순서.
         let drained = mb.drain("r", t0 + Duration::from_secs(20));
         let ids: Vec<&str> = drained
@@ -494,9 +658,100 @@ mod tests {
     }
 
     #[test]
-    fn restore_front_empty_is_noop() {
+    fn restore_ordered_merges_two_batches_into_global_age_order() {
+        // ★round-4 finding 1 회귀(핵심 버그)★: 한 flush 가 같은 이름 큐에 재파킹을 **두 번** 부르는 상황
+        //   (동명 다수 = 타깃 2그룹이 각각 실패). 옛 FRONT 삽입은 두 번째 호출이 첫 번째보다 앞에 꽂혀
+        //   [m1,m3,m0,m2] 로 나이 순서를 뒤집었다. merge 는 전역 수용 순서 [m0,m1,m2,m3] 를 유지한다.
         let mut mb = Mailbox::new();
-        mb.restore_front("r", Vec::new());
+        let t0 = Instant::now();
+        for i in 0..4 {
+            mb.park("dup", parked(&format!("m{i}"), ParkKind::Message, t0))
+                .unwrap();
+        }
+        // 그룹 분할 = drain 이 낸 순서의 부분열(A = 짝수 인덱스, B = 홀수 인덱스).
+        let drained = mb.drain("dup", t0).deliverable;
+        let group_a: Vec<ParkedMessage> = drained.iter().step_by(2).cloned().collect();
+        let group_b: Vec<ParkedMessage> = drained.iter().skip(1).step_by(2).cloned().collect();
+        assert_eq!(
+            group_a
+                .iter()
+                .map(|m| m.msg_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m0", "m2"]
+        );
+        // 두 그룹이 각각(= 별개 호출로) 되돌아온다.
+        mb.restore_ordered("dup", group_a);
+        mb.restore_ordered("dup", group_b);
+        assert_eq!(
+            mb.msg_ids("dup"),
+            vec!["m0", "m1", "m2", "m3"],
+            "여러 번 복원해도 큐는 전역 수용 순서(오래된 순)를 유지해야"
+        );
+        // 이후 park 된 신규분은 항상 뒤에 붙는다(순번이 더 크다).
+        mb.park("dup", parked("new", ParkKind::Message, t0))
+            .unwrap();
+        assert_eq!(
+            mb.msg_ids("dup"),
+            vec!["m0", "m1", "m2", "m3", "new"],
+            "재파킹분이 신규분보다 앞"
+        );
+    }
+
+    #[test]
+    fn restore_ordered_interleaves_with_concurrently_parked_newer_items() {
+        // 락 밖 복원 경로: 복원 대기 중 신규 park 가 끼어든 큐에 되돌려도 순번 순서가 지켜진다.
+        let mut mb = Mailbox::new();
+        let t0 = Instant::now();
+        for i in 0..3 {
+            mb.park("r", parked(&format!("old{i}"), ParkKind::Message, t0))
+                .unwrap();
+        }
+        let drained = mb.drain("r", t0).deliverable; // old0..old2 (순번 0..2)
+        mb.park("r", parked("new0", ParkKind::Message, t0)).unwrap(); // 순번 3
+        mb.restore_ordered("r", drained);
+        assert_eq!(
+            mb.msg_ids("r"),
+            vec!["old0", "old1", "old2", "new0"],
+            "동시 park 된 신규분은 재파킹분 뒤"
+        );
+    }
+
+    #[test]
+    fn sweep_surfaces_expired_hidden_behind_newer_front() {
+        // ★round-4 finding 1 회귀(가려진 만료)★: 큐 정렬축(admission 순번)과 만료축(parked_at)은 다르다 —
+        //   `park` 의 시각은 호출자가 주고(park_pending 은 락 밖에서 뜬다) 경합 시 역전될 수 있다. 옛 sweep 은
+        //   front 가 미만료면 조기 종료해 **뒤에 있는 만료 항목을 영구히 가렸다**(TTL 무력화 + 장부 미기록).
+        let mut mb = Mailbox::new();
+        let t0 = Instant::now();
+        // 수용 순서는 newer → older(역전) — front 는 미만료, 그 뒤가 만료.
+        mb.park(
+            "z",
+            parked("newer", ParkKind::Message, t0 + Duration::from_secs(3600)),
+        )
+        .unwrap();
+        mb.park("z", parked("older", ParkKind::Message, t0))
+            .unwrap();
+        let now = t0 + PARK_TTL;
+        let expired = mb.sweep_expired(now);
+        assert_eq!(
+            expired
+                .iter()
+                .map(|m| m.msg_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["older"],
+            "미만료 항목 뒤에 숨은 만료분도 sweep 이 걷어내야(전량 스캔)"
+        );
+        assert_eq!(
+            mb.msg_ids("z"),
+            vec!["newer"],
+            "미만료분은 순서 그대로 잔존"
+        );
+    }
+
+    #[test]
+    fn restore_ordered_empty_is_noop() {
+        let mut mb = Mailbox::new();
+        mb.restore_ordered("r", Vec::new());
         assert!(mb.is_empty(), "빈 재파킹은 큐를 만들지 않는다");
     }
 

@@ -108,6 +108,8 @@ async fn wire(
     std::path::PathBuf,
     McpServerHandle,
     Arc<MessagingService>,
+    // C2: idle 게이트 관측기 — c2 테스트가 턴 이벤트를 직접 먹여(tap_for_test) busy/idle 을 구동한다.
+    Arc<engram_dashboard_daemon::messaging::busy::BusyTracker>,
 ) {
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
@@ -134,14 +136,18 @@ async fn wire(
     // finding 5: sink 는 flush 대상만 채널로 push, 실제 flush 는 flush worker 가 수행한다(status 콜백 blocking
     //   분리). 테스트도 운영과 동일 배선 — worker 를 detached 로 띄운다(manager 가 sink 로 flush_tx 를 살려
     //   두므로 worker 는 manager 수명 동안 산다; 테스트 종료 시 프로세스와 함께 정리).
-    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<(String, AgentId)>();
-    let sink: Arc<dyn StatusSink> = Arc::new(
-        engram_dashboard_daemon::ws::MessagingFlushSink::new_test(Box::new(NoopSink), flush_tx),
-    );
-    tokio::spawn(engram_dashboard_daemon::ws::run_flush_worker(
-        flush_rx,
-        messaging_slot.clone(),
-    ));
+    let (flush_tx, flush_rx) =
+        tokio::sync::mpsc::unbounded_channel::<engram_dashboard_daemon::ws::FlushMsg>();
+    // C2 리뷰 fix 7/10: 운영 run() 과 동일하게 diff 시퀀싱 상태·Idle coalescer 를 sink/worker 가 공유한다
+    //   (스냅샷 갱신과 enqueue 를 한 락에서 = 순서 보장 · attach 실패 피드백으로 재시도 개방 · Idle 접기).
+    let roster_diff = Arc::new(engram_dashboard_daemon::ws::RosterDiff::new());
+    let idle_coalescer = Arc::new(engram_dashboard_daemon::ws::IdleCoalescer::new());
+    let sink: Arc<dyn StatusSink> =
+        Arc::new(engram_dashboard_daemon::ws::MessagingFlushSink::new_test(
+            Box::new(NoopSink),
+            flush_tx.clone(),
+            roster_diff.clone(),
+        ));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-send-prof-{tag}-{}", AgentId::new_v4())),
     ))));
@@ -160,16 +166,42 @@ async fn wire(
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
-    // C1: MessagingService 조립 후 슬롯 주입(manager 를 감싼다) — 이제 send/flush 가 서비스에 닿는다.
-    let messaging = Arc::new(MessagingService::for_manager(
-        manager.clone(),
-        registry.clone(),
+    // C2: idle 게이트 관측기(운영 run() 미러) — manager 조립 후에 만든다(tap 부착이 manager.subscribe).
+    //   flush worker 는 이 tracker 를 받아 Attach/Detach/Idle 을 집행하므로 tracker 보다 뒤에 띄운다.
+    let idle_notifier = Arc::new(engram_dashboard_daemon::ws::ChannelIdleNotifier::new(
+        flush_tx,
+        idle_coalescer.clone(),
     ));
+    let busy = Arc::new(
+        engram_dashboard_daemon::messaging::busy::BusyTracker::for_manager(
+            manager.clone(),
+            idle_notifier.clone(),
+        ),
+    );
+    // C1: MessagingService 조립 후 슬롯 주입(manager 를 감싼다) — 이제 send/flush 가 서비스에 닿는다.
+    //   C2: idle 게이트를 함께 주입(busy 수신자 → 파킹) + flush 도어벨(fix 11 — 자가치유 배치 write 를
+    //   발신 스레드에서 떼어 flush 레인으로 넘긴다). 운영 배선과 동일하게 유지한다.
+    let messaging = Arc::new(
+        MessagingService::for_manager_gated(manager.clone(), registry.clone(), busy.clone())
+            .with_flush_trigger(idle_notifier),
+    );
     messaging_slot.set(messaging.clone());
+    // finding 5 + fix 3: 2-레인 flush worker(운영과 동일 배선) — 생애주기는 main lane, 배달은 flush 레인.
+    //   round-3 finding 1: 조립은 `spawn_flush_worker` 단일 지점(두 레인 핸들 묶음). 이 하네스는 핸들을
+    //   detach 한다(테스트 종료 = 프로세스 종료로 회수 — 운영 종료 경로는 lib.rs 가 belt 로 내린다).
+    drop(engram_dashboard_daemon::ws::spawn_flush_worker(
+        flush_rx,
+        engram_dashboard_daemon::ws::FlushWiring {
+            messaging: messaging_slot.clone(),
+            busy: busy.clone(),
+            diff: roster_diff,
+            idle: idle_coalescer,
+        },
+    ));
 
     // base URL(/mcp 벗김) — /control/send 요청에 쓴다.
     let base = url.strip_suffix("/mcp").unwrap_or(&url).to_string();
-    (manager, registry, base, data_dir, handle, messaging)
+    (manager, registry, base, data_dir, handle, messaging, busy)
 }
 
 /// /control/send 로 POST → (상태코드, body 텍스트). bearer None 이면 헤더 미첨부.
@@ -230,7 +262,7 @@ fn spawn_json_agent(
 // ── /control/send: 인증 ────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn control_send_missing_token_is_401() {
-    let (_m, _r, base, data_dir, handle, _messaging) = wire("auth-missing").await;
+    let (_m, _r, base, data_dir, handle, _messaging, _busy) = wire("auth-missing").await;
     let (status, _body) = post_send(&base, None, "bob", "hi").await;
     assert_eq!(
         status,
@@ -243,7 +275,7 @@ async fn control_send_missing_token_is_401() {
 
 #[tokio::test]
 async fn control_send_wrong_token_is_401() {
-    let (_m, _r, base, data_dir, handle, _messaging) = wire("auth-wrong").await;
+    let (_m, _r, base, data_dir, handle, _messaging, _busy) = wire("auth-wrong").await;
     let (status, _body) = post_send(&base, Some("bogus-token"), "bob", "hi").await;
     assert_eq!(
         status,
@@ -257,7 +289,7 @@ async fn control_send_wrong_token_is_401() {
 // ── /control/send: 교정 에러(수신자 없음·그룹·대용량) — 유효 토큰 필요 ────────────────────────
 #[tokio::test]
 async fn control_send_corrective_errors() {
-    let (_m, registry, base, data_dir, handle, _messaging) = wire("corrective").await;
+    let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("corrective").await;
     // 유효 토큰(발신자 신원) — 아무 (id, epoch) 로 issue. 수신자 없음이라 relay 엔 안 간다.
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "valid-sender".to_string());
@@ -298,7 +330,8 @@ async fn control_send_corrective_errors() {
 //   같은 이름의 도달 가능한 에이전트가 나중에 뜨면 등장 flush 로 배달된다(오타·비-도달은 TTL 이 방어).
 #[tokio::test]
 async fn control_send_shell_recipient_parks_pending() {
-    let (manager, registry, base, data_dir, handle, _messaging) = wire("not-reachable").await;
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) =
+        wire("not-reachable").await;
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "valid-sender".to_string());
 
@@ -340,7 +373,7 @@ async fn control_send_shell_recipient_parks_pending() {
 // 실 claude(stream-json) 스폰 + write_input 동기 입력 에코 관측(claude 왕복 이전이라 결정적).
 #[tokio::test]
 async fn control_send_relays_wrapped_line_to_json_agent() {
-    let (manager, registry, base, data_dir, handle, _messaging) = wire("relay").await;
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("relay").await;
 
     // 산 json 에이전트 B 스폰. 스폰 실패(claude 부재 등)면 이 테스트는 무의미 — 건너뛴다(loud skip).
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "bee") else {
@@ -422,7 +455,8 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("revoked-delivers").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("revoked-delivers").await;
 
     // 도달 가능한 수신자 B(json claude). 없으면 relay 를 못 관측해 스킵.
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "target-b") else {
@@ -674,7 +708,7 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("obs-seam-ok").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-seam-ok").await;
 
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
@@ -777,7 +811,7 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
         }
     }
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("obs-panic").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-panic").await;
     let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
@@ -816,7 +850,7 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("obs-fail").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-fail").await;
 
     // ★fail=true★: 도달성(structured)은 통과하지만 relay write 가 Err — handle_send Err 갈래를 강제.
     let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, true);
@@ -882,7 +916,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("delivery-obs").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("delivery-obs").await;
 
     // 산 json(stream-json) 수신자 B. 없으면 relay 실측 불가 → loud skip.
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "obs-target") else {
@@ -1019,7 +1053,8 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     use engram_dashboard_daemon::control::registry::BoundIdentity;
     use std::sync::Barrier;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("stage1-concurrency").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("stage1-concurrency").await;
 
     // 하나의 seam 수신자(성공 경로). captured 는 순서 있는 다중 write 를 그대로 담는다.
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
@@ -1238,7 +1273,8 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
 
     const MAX: usize = 64 * 1024; // = MAX_BODY_BYTES(ingress 상수 — 여기 미러; 값 드리프트 시 아래가 잡는다).
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("stage1-boundary").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("stage1-boundary").await;
 
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "stage1-boundary-sender".to_string());
@@ -1450,7 +1486,8 @@ async fn stage1_lifecycle_recipient_absent_parks_pending_no_observation() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("stage1-absent").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("stage1-absent").await;
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
@@ -1506,7 +1543,8 @@ async fn c1_park_then_spawn_auto_delivers() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("c1-park-spawn").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("c1-park-spawn").await;
 
     // 배달 관측 싱크 — flush 자동 배달을 여기로 회수(로그 스크레이핑 없이).
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1571,6 +1609,355 @@ async fn c1_park_then_spawn_auto_delivers() {
     handle.shutdown().await;
 }
 
+// ── S18 메시징 v1 C2 수용 시나리오(spec §7 "배치 검증 강화"): busy 중 도착 → 미주입 → 턴 종료 시 일괄 flush ──
+// ★무엇을 증명하나★: idle 게이트 배선 **전 구간**이 실제로 이어져 있음 — 턴 tap(OutputSink) → BusyTracker →
+//   MessagingService 게이트(파킹) → IdleNotifier → flush 채널 → flush worker → flush_for_agent → 주입.
+//   단언은 ① busy 중 도착분이 **주입되지 않고** pending ② 턴 종료(MessageDone) 후 **한 배치로 오래된 순**
+//   주입 ③ 장부가 pending→delivered 로만 전이(유령 delivered 없음).
+// ★왜 claude 없이 결정적인가★: 수신자는 obs_seam 의 structured 세션(실 PTY·claude 불요, write 캡처 가능)이고,
+//   턴 이벤트는 tap 에 **직접** 먹인다(`tap_for_test`) — 실 claude 턴의 타이밍(응답 지연·인증)에 의존하지
+//   않는다. 실경로 e2e 축은 아래 `c2_live_*` 가 담당한다(claude-gated). 두 축이 상보적이다.
+// ★multi_thread 런타임★: flush 는 flush worker(tokio task)가 수행하고 이 본문의 `wait_until` 은 동기
+//   블로킹 폴링이다 — c1 테스트와 같은 사유(현재 스레드를 붙잡으면 worker 가 폴링될 틈이 없다).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_daemon::messaging::ledger::DeliveryStatus;
+
+    let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-idle-gate").await;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c2-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    // 도달 가능(structured) 수신자 — write 성공 + 바이트 캡처.
+    let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    // ★턴 tap 을 직접 붙인다★: `insert_test_session` 은 로스터 이벤트(agent_list_updated)를 내지 않으므로
+    //   운영 경로의 Attach diff 가 발동하지 않는다. 하네스 seam(`tap_for_test`)으로 같은 tap 을 만들어
+    //   프레임을 먹인다 — 부착 정책(중복/실패)은 busy.rs 단위 테스트가, 여기선 **배선과 게이트 효과**를 본다.
+    // ★양성 attach 게이트(C2 리뷰 fix 9)★: 부착 표시가 없는 키의 busy 관측은 무시된다(rotation 후
+    //   유령 busy 방지). 하네스 tap 도 그 게이트를 통과해야 하므로 부착 표시만 등록한다(subscribe 없이).
+    busy.mark_attached_for_test(b_id, 0);
+    let tap = busy.tap_for_test();
+    let feed = |ev: &OutputEvent| {
+        tap.send(OutputFrame {
+            agent_id: b_id,
+            epoch: 0,
+            seq: 1,
+            payload: OutputPayload::Event(ev),
+        })
+        .expect("tap 은 항상 Ok");
+    };
+
+    // ── 1) 턴 시작 관측(어시스턴트 델타) → busy ────────────────────────────────────────
+    feed(&OutputEvent::TextDelta {
+        text: "thinking...".to_string(),
+        turn_id: None,
+        message_id: None,
+    });
+    assert!(
+        busy.is_busy(b_id, 0),
+        "턴 이벤트 관측 후 게이트가 busy 로 보여야(tap → tracker 배선)"
+    );
+
+    // ── 2) 턴 중 2건 발송 → 둘 다 pending(주입 0) ───────────────────────────────────────
+    let mut ids = Vec::new();
+    for body in ["first", "second"] {
+        let v = handle_send(
+            &manager,
+            &registry,
+            &messaging,
+            Entrance::Cli,
+            ControlCommand {
+                from,
+                to: to_name.clone(),
+                body: body.to_string(),
+            },
+        )
+        .to_json();
+        assert_eq!(
+            v["results"][0]["status"], "pending",
+            "턴 진행 중 도착은 파킹(pending) — CLI stdin 선주입 금지(ADR-0104): {v}"
+        );
+        ids.push(v["id"].as_str().expect("msg id").to_string());
+    }
+    assert!(
+        obs_seam::all_written(&captured).is_empty(),
+        "턴 중에는 수신자 stdin 에 아무것도 쓰지 않는다"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "주입이 없으므로 배달 관측도 없다(유령 delivered 금지)"
+    );
+    assert_eq!(messaging.parked_len(&to_name), 2, "2건이 메일박스에 대기");
+    for id in &ids {
+        assert_eq!(messaging.ledger_statuses(id), vec![DeliveryStatus::Pending]);
+    }
+
+    // ── 3) 턴 종료(MessageDone) → idle 트리거 → 일괄 flush ─────────────────────────────
+    feed(&OutputEvent::MessageDone {
+        turn_id: None,
+        message_id: None,
+    });
+    assert!(!busy.is_busy(b_id, 0), "MessageDone → idle");
+    let flushed = wait_until(Duration::from_secs(10), || {
+        obs_seam::all_written(&captured).len() == 2
+    });
+    let written = obs_seam::all_written(&captured);
+    assert!(
+        flushed,
+        "턴 종료 시 파킹분이 **한 배치로** 주입돼야(idle 게이트 flush): 실제 {}건",
+        written.len()
+    );
+    // 오래된 순 — 각 write 는 개별 봉투(stream-json 라인)로 분리돼 있다.
+    let first = String::from_utf8_lossy(&written[0]).to_string();
+    let second = String::from_utf8_lossy(&written[1]).to_string();
+    assert!(
+        first.contains("first") && !first.contains("second"),
+        "배치 첫 주입 = 가장 오래된 메시지(개별 봉투): {first}"
+    );
+    assert!(
+        second.contains("second"),
+        "배치 둘째 주입 = 그 다음 메시지: {second}"
+    );
+    // 장부는 실제 주입 시점에만 delivered(ADR-0104) + 배달 관측 2건.
+    for id in &ids {
+        assert_eq!(
+            messaging.ledger_statuses(id),
+            vec![DeliveryStatus::Delivered],
+            "flush 주입 후 pending→delivered 전이"
+        );
+    }
+    assert_eq!(messaging.parked_len(&to_name), 0, "flush 후 큐 비움");
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.to_name == to_name && o.is_delivered())
+            .count(),
+        2,
+        "배달 관측 2건(배치 각 항목)"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── C2 리뷰 fix 1: 턴 tap 은 **live-only** — 과거 replay 로 busy 를 부트스트랩하지 않는다 ──────────
+// ★무엇을 막는 회귀인가(치명)★: 옛 C2 는 `manager.subscribe`(구독 시점 링 과거 전체 replay)로 tap 을 붙여
+//   "과거를 먹으면 현재 상태로 수렴한다" 는 부트스트랩을 노렸다. 그런데 resume 스폰은 transcript 를 링에
+//   seed 하고(core ADR-0079 seed-before-publish), 그 transcript 가 **턴 중간에 끊긴** 것이면 MessageDone 이
+//   없다 → tap 이 (id, epoch) 를 busy 로 찍는데 그 턴 종료 통지는 **영원히 오지 않는다** → 그 수신자 앞
+//   모든 발송이 TTL(1h)까지 파킹된다(깨울 수 없는 false-busy = 배달 정지).
+// ★어떻게 결정적으로 재현하나(claude 불요)★: seam 세션의 `write_stdin_observed` 는 성공 직후 입력 시점
+//   유저 에코(`Structured{kind:"user"}`)를 **동기로** core 에 emit 한다 — 즉 링에 "MessageDone 없이 끝난
+//   과거" 를 정확히 만들 수 있다. 그 뒤 운영 경로(`BusyTracker::attach` → `ManagerTapHost::subscribe_output`)
+//   로 tap 을 붙여 ① 과거를 먹지 않았는지 ② 그래도 live 프레임은 받는지 ③ 결과적으로 발송이 즉시
+//   배달되는지를 본다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c2_tap_is_live_only_and_never_bootstraps_busy_from_replay() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_daemon::messaging::busy::AttachOutcome;
+
+    let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-live-only").await;
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c2-liveonly-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    // 1) 링에 "턴 중간에서 끝난 과거"(유저 에코만, MessageDone 없음)를 쌓는다 = 죽은 incarnation 의
+    //    transcript 를 seed 한 상태와 같은 모양.
+    manager
+        .write_stdin_observed(b_id, b"past mid-turn")
+        .expect("seam write ok");
+
+    // 2) 운영 경로로 tap 부착(로스터 diff 가 하는 일 = flush worker 의 Attach 집행).
+    assert_eq!(
+        busy.attach(b_id, 0),
+        AttachOutcome::Attached,
+        "현재 epoch 이므로 부착 성공(epoch 검증 통과 — fix 6)"
+    );
+
+    // 3) ★핵심 단언★: 과거 replay 를 먹지 않았으므로 busy 가 아니다.
+    assert!(
+        !busy.is_busy(b_id, 0),
+        "live-only 구독 — 링에 남은 과거(MessageDone 없는 턴)로 busy 를 부트스트랩하면 그 busy 는          깨울 수 없다(TTL 까지 배달 정지). 반드시 idle 이어야 한다"
+    );
+
+    // 4) 사용자 관점 결과: 발송이 파킹되지 않고 즉시 배달된다(false-busy 가 없다는 증거).
+    let written_before = obs_seam::all_written(&captured).len();
+    let v = handle_send(
+        &manager,
+        &registry,
+        &messaging,
+        Entrance::Cli,
+        ControlCommand {
+            from,
+            to: to_name.clone(),
+            body: "hello".to_string(),
+        },
+    )
+    .to_json();
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "replay 부트스트랩이 없으니 즉시 배달: {v}"
+    );
+    assert_eq!(messaging.parked_len(&to_name), 0, "파킹 0");
+
+    // 5) 그러나 구독은 살아 있다 — 방금 그 주입이 만든 **live** 유저 에코를 tap 이 관측해 busy 가 된다.
+    //    (4 의 주입은 write_stdin_observed 경로라 반환 시점에 이미 emit 됐다 = 결정적.)
+    assert!(
+        obs_seam::all_written(&captured).len() > written_before,
+        "주입이 실제로 일어났어야(전제)"
+    );
+    assert!(
+        busy.is_busy(b_id, 0),
+        "live 프레임은 받는다 — live-only 가 '아무것도 안 본다' 가 아님을 못 박는다"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── C2 실경로 축(claude-gated): 실 claude 턴 중 발송이 파킹되는지 ────────────────────────────────
+// ★위 결정적 테스트와의 차이★: 여기선 tap 을 **로스터 등장 diff → Attach → flush worker** 가 붙이고,
+//   busy 관측도 **실 claude decoder** 가 만든 이벤트로 일어난다(합성 프레임 아님). 즉 "capability 프록시
+//   (structured=turn 이벤트 있음)" 가 실제로 성립하는지의 실측이다.
+// ★어디까지 결정적인가(정직 범위)★: 첫 주입 직후의 busy 관측은 결정적이다 — `write_input_observed` 가
+//   send_input 성공 직후 **동기로** 입력-시점 유저 에코(`Structured{kind:"user"}`)를 core.emit 하므로,
+//   handle_send 가 반환한 시점에 tap 은 이미 그 이벤트를 받았다(claude 응답·인증과 무관). 그래서 "턴 중
+//   발송 → pending" 까지는 hard assert 한다.
+//   반면 **턴 종료 후 배달**은 claude 가 실제로 응답해 `result` 라인을 내야 한다(인증·네트워크·모델 지연에
+//   의존) — 그건 관측되면 단언하고, 시간 내 안 오면 loud 경고 후 넘어간다(`ENGRAM_TEST_REQUIRE_CLAUDE=1`
+//   레인에선 panic 으로 승격 — silent skip 금지 정책 정합). 그 축의 결정적 커버리지는 위 테스트가 갖는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-live").await;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c2-live-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    let target = "c2-live-recv";
+    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target) else {
+        skip_no_claude("c2_live_mid_turn_send_parks_and_delivers_after_turn_end");
+        let _ = std::fs::remove_dir_all(&data_dir);
+        handle.shutdown().await;
+        return;
+    };
+
+    // 1) 로스터 등장 diff 가 Attach 를 걸고 worker 가 tap 을 붙일 때까지 대기. ★부착 전엔 게이트가
+    //    구조적으로 idle 폴백★(positive-knowledge-only)이라, 부착을 확인하지 않으면 이 테스트가
+    //    "게이트가 없어서 통과" 하는 위약이 된다.
+    assert!(
+        wait_until(Duration::from_secs(10), || busy.attached_len() > 0),
+        "로스터 등장 diff → Attach → worker 가 턴 tap 을 붙여야(C2 배선)"
+    );
+    // 입력 전 claude 는 조용하다(system/init 은 decoder 가 흘린다) → 시작 상태 = idle 확인.
+    assert!(
+        wait_until(Duration::from_secs(5), || !busy
+            .is_busy(info.id, info.epoch)),
+        "입력 전 수신자는 idle 로 관측돼야(턴 이벤트 없음)"
+    );
+
+    // 2) 첫 발송 → idle 이라 즉시 배달. 이 write 가 동기 유저 에코를 내므로 반환 시점에 tap 은 busy.
+    let v1 = handle_send(
+        &manager,
+        &registry,
+        &messaging,
+        Entrance::Cli,
+        ControlCommand {
+            from,
+            to: target.to_string(),
+            body: "say OK".to_string(),
+        },
+    )
+    .to_json();
+    assert_eq!(
+        v1["results"][0]["status"], "delivered",
+        "idle 수신자에게는 즉시 주입: {v1}"
+    );
+    assert!(
+        busy.is_busy(info.id, info.epoch),
+        "주입 = 턴 시작 — 입력-시점 유저 에코(Structured)를 실 decoder 경로로 관측해야"
+    );
+
+    // 3) 턴 진행 중 두 번째 발송 → 파킹(pending). 실 claude 턴 중 주입 금지의 e2e 증거.
+    let v2 = handle_send(
+        &manager,
+        &registry,
+        &messaging,
+        Entrance::Cli,
+        ControlCommand {
+            from,
+            to: target.to_string(),
+            body: "and then say DONE".to_string(),
+        },
+    )
+    .to_json();
+    assert_eq!(
+        v2["results"][0]["status"], "pending",
+        "실 claude 턴 진행 중 도착은 파킹: {v2}"
+    );
+    let msg2 = v2["id"].as_str().expect("msg id").to_string();
+    assert_eq!(messaging.parked_len(target), 1, "턴 중 도착분이 대기");
+
+    // 4) 턴 종료(claude 의 result 라인)를 기다린다 → idle 트리거 → 파킹분 배달.
+    let delivered = wait_until(Duration::from_secs(90), || {
+        seen.lock().unwrap().iter().any(
+            |o: &engram_dashboard_daemon::control::ingress::DeliveryObservation| {
+                o.msg_id == msg2 && o.is_delivered()
+            },
+        )
+    });
+    if delivered {
+        assert_eq!(messaging.parked_len(target), 0, "턴 종료 flush 로 큐 비움");
+    } else {
+        // 실 claude 왕복(인증·네트워크·모델)에 달린 축 — 결정적 커버리지는 위 c2_busy_* 가 갖는다.
+        eprintln!(
+            "[c2_live] 턴 종료(result)가 90s 내 관측되지 않아 turn-end 배달 축은 미확인 \
+             (parked={}) — 실 claude 응답 의존 축, 결정적 단언은 c2_busy_recipient_parks_* 가 담당",
+            messaging.parked_len(target)
+        );
+        if std::env::var("ENGRAM_TEST_REQUIRE_CLAUDE").as_deref() == Ok("1") {
+            panic!(
+                "ENGRAM_TEST_REQUIRE_CLAUDE=1 레인에서 실 claude 턴 종료 후 파킹 배달이 관측되지 않음 \
+                 (턴 이벤트 관측/idle flush 회귀 의심)"
+            );
+        }
+    }
+
+    manager.kill_agent(info.id).ok();
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
 /// ── ADR-0088 Stage 1-오라클 4(write 실패): 실패 **관측 형태** — 단일 실패 레코드(부분/중복 관측 없음) ──
 /// 수신자가 도달 가능(structured)하나 relay write(send_input)가 Err.
 /// ★증명한다★: 실패의 **관측 형태(observation shape)** — send_input 이 Err 를 낼 때 레코드가 정확히
@@ -1587,7 +1974,8 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("stage1-write-err").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("stage1-write-err").await;
 
     // fail=true → 도달성(structured) 통과하되 send_input 이 Err.
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, true);
@@ -1779,7 +2167,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
         captured
     }
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("stage1-epoch").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("stage1-epoch").await;
 
     let id = CoreAgentId::new_v4();
     let to_name = obs_seam::fallback_name(id);
@@ -1978,7 +2366,8 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
         captured
     }
 
-    let (manager, registry, _base, data_dir, handle, messaging) = wire("stage1-midflight").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("stage1-midflight").await;
 
     let id = CoreAgentId::new_v4();
     let to_name = obs_seam::fallback_name(id);
@@ -2110,7 +2499,7 @@ async fn mcp_send_message_tool_happy_and_error() {
     };
     use rmcp::ServiceExt;
 
-    let (manager, registry, _base, data_dir, handle, _messaging) = wire("mcp-tool").await;
+    let (manager, registry, _base, data_dir, handle, _messaging, _busy) = wire("mcp-tool").await;
 
     // 수신자 B(산 json 에이전트) 스폰. 실패 시 스킵.
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "recv") else {

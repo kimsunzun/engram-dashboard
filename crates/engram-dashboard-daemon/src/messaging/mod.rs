@@ -25,3 +25,8 @@ pub mod mailbox;
 // C1: 순수 구조를 발송 파이프라인에 엮는 오케스트레이터(MessagingService + delivery seam). tokio·락은
 //   여기서 소유(위 순수 구조는 무동시성). ADR-0103/0104.
 pub mod service;
+// C2: idle 게이트 — 수신자 턴 상태 관측(BusyTracker + 출력 스트림 tap) + 서비스가 묻는 BusyGate seam.
+//   ★위 "순수성 불변식" 의 예외 구역★: 이 모듈은 core 의 `OutputSink` 콜백(pump 스레드)에 붙고 락·통지
+//   채널을 다루므로 무동시성이 아니다(service.rs 와 같은 오케스트레이션 층). 대신 시간·tokio 를 쓰지
+//   않으므로 결정적 단위 테스트는 유지된다(프레임을 손으로 먹여 상태머신을 단언). ADR-0104 결정 3.
+pub mod busy;

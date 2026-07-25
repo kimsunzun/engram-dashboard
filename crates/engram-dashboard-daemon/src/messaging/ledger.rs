@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 /// 이력 링버퍼 용량 — 초과 시 가장 오래된 레코드부터 evict(spec §5 "이력 링버퍼").
 ///
 /// ★조율 대상(사용자 비준 필요)★: 1024 는 "데몬 1회 수명의 메시지 이력을 담기에 충분" 이라는 어림값이다 —
-///   spec 은 "이력 링버퍼" 만 명시하고 정확한 수는 정하지 않았다(TTL 1h·cap 100 만 못박음). 인메모리 단계라
+///   spec 은 "이력 링버퍼" 만 명시하고 정확한 수는 정하지 않았다(TTL 24h·cap 100 만 못박음, ADR-0105). 인메모리 단계라
 ///   메모리 상한 겸 evict 경계이므로 실사용 관측 후 사용자가 조정한다(v1 스코프: 값 하나, 무파괴 변경 가능).
 /// ★evict 와 request 추적의 관계(finding 6 보정)★: request 추적은 별도 맵(`requests`)이지만 **이력 evict 에
 ///   결박된다** — evict 되는 레코드의 msg_id 와 같은 request_id 의 오픈 추적 항목을 함께 드롭한다(`record`
@@ -43,7 +43,7 @@ pub enum DeliveryStatus {
     Delivered,
     /// request 에 회신이 도착해 닫힘(엄격 매칭 성공).
     Replied,
-    /// TTL(1h) 초과로 파킹 만료(장부 잔존, spec §5).
+    /// TTL(24h) 초과로 파킹 만료(장부 잔존, spec §5, ADR-0105).
     Expired,
     /// 그룹 방송에서 죽은 멤버라 배달 안 함(spec §4 — 방송 소급 금지).
     Skipped,
