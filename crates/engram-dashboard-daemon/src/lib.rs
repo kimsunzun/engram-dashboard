@@ -545,12 +545,19 @@ pub async fn run() -> Result<(), i32> {
 
     // 6.6) C1 TTL sweep task — 주기적으로 만료 파킹분을 걷어 ledger `expired` 로 남긴다(spec §5). 데몬
     //    수명 동안 도는 long-lived tokio task(accept loop 와 나란히). ★주기 = 60s(내부 선택 — 보고)★:
-    //    TTL(1h)에 비해 촘촘해 만료가 크게 지연되지 않고, 극저 메시지율이라 부하가 무의미하다. sweep 은
-    //    lock 하나만 짧게 잡는 순수 조작이라 async executor 를 막지 않는다(blocking 불요).
+    //    TTL(24h)에 비해 촘촘해 만료가 크게 지연되지 않고, 극저 메시지율이라 부하가 무의미하다.
+    //    ★C3 이후 sweep 은 "순수 조작" 이 아니다(리뷰 fix 8 — 옛 주석 보정)★: 만료 장부화에 더해
+    //    **기한 초과 request 통지**를 만든다. 그 경로는 ① 로스터 스냅샷 1회(list_agents — 짧은 락 후 clone)
+    //    ② notice 파킹(짧은 messaging 락) ③ flush 도어벨(논블록 채널 send) 이다. ★여전히 executor 를
+    //    막지 않는 이유★: 자식 stdin **blocking write 를 하지 않는다** — 실제 주입은 도어벨을 받은 flush
+    //    레인이 blocking pool 에서 한다(service.rs `deliver_notice` 주석). 그래서 `spawn_blocking` 없이
+    //    이 async task 에 남겨도 안전하고, abort 도 즉시 먹는다.
     //    ★C2 round-3 finding 4: 같은 주기가 **busy 상한 sweep** 도 돈다★ — MessageDone 이 영영 오지 않는
     //    비정상 턴(파싱 실패·decoder 이상)은 busy 표시를 영구화해 그 수신자 앞 배달을 TTL 까지 막는다.
     //    `BUSY_MAX_TURN`(30분) 을 넘긴 잔해를 청소하고 그 id 를 flush 도어벨로 깨운다(busy.rs 헤더 —
-    //    fail-open 안전 밸브). 둘 다 짧은 락 조작 + 논블록 채널 send 뿐이라 executor 를 막지 않는다.
+    //    fail-open 안전 밸브).
+    //    ★reply_by 하한과의 결합★: 기한 초과 판정 해상도가 곧 이 주기다 — ingress 의 `MIN_REPLY_BY_SECS`
+    //    (1분)가 이 값과 짝이므로, 주기를 바꾸면 그 하한도 함께 봐야 한다.
     const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let sweep_messaging = messaging.clone();
     let sweep_busy = busy.clone();
@@ -561,8 +568,22 @@ pub async fn run() -> Result<(), i32> {
         loop {
             ticker.tick().await;
             let now = std::time::Instant::now();
-            sweep_messaging.sweep(now);
-            sweep_busy.sweep_stale_busy(now);
+            // ★틱 본체 패닉 격리(리뷰 fix 9 · load-bearing)★: 이 루프가 죽으면 **두 안전장치가 동시에**
+            //   멈춘다 — 파킹 TTL 만료 처리와 busy 상한 fail-open(멈춘 턴 깨우기). 즉 한 번의 패닉이
+            //   "그 뒤로 아무도 배달을 못 받는" 조용한 정지로 번진다. 그래서 틱 본체를 unwind 경계로 감싸
+            //   경고만 남기고 다음 틱을 계속 돈다.
+            //   ★release 빌드는 panic=abort 라 여기 Err 갈래가 아예 도달 불가하다★(워크스페이스 Cargo.toml
+            //   `[profile.release] panic = "abort"` — 패닉하면 프로세스가 즉시 죽는다). 이 가드가 실제로
+            //   의미 있는 건 **debug/테스트 빌드**이고, 거기서 조용한 정지를 막는 게 목적이다.
+            let ticked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sweep_messaging.sweep(now);
+                sweep_busy.sweep_stale_busy(now);
+            }));
+            if ticked.is_err() {
+                tracing::warn!(
+                    "sweep 틱이 패닉했다 — 이번 틱만 건너뛰고 계속(다음 주기에 재시도). TTL 만료·busy fail-open 이 함께 멈추지 않게 하는 격리(debug 빌드 한정 — release 는 panic=abort)"
+                );
+            }
         }
     });
 
@@ -651,8 +672,9 @@ pub async fn run() -> Result<(), i32> {
     let _ = restore_handle.await; // abort/완료 결과 무시(Cancelled 또는 Ok)
 
     // C1: TTL sweep task 종료(데몬 수명 동안 도는 long-lived task — 여기서 abort). 인메모리 파킹이라
-    //    남은 만료 처리는 불요(프로세스 종료 = 상태 소멸, spec §0 "영속화 없음"). sweep 은 락만 짧게
-    //    잡는 순수 조작이라 abort 가 항상 즉시 먹는다(blocking write 없음 — flush worker 와 다름).
+    //    남은 만료 처리는 불요(프로세스 종료 = 상태 소멸, spec §0 "영속화 없음"). sweep 은 짧은 락 조작 +
+    //    로스터 스냅샷 + 논블록 도어벨뿐이라(6.6 주석 — C3 이후 "순수 조작" 은 아니지만 blocking write 는
+    //    여전히 없다) abort 가 항상 즉시 먹는다(flush worker 와 다른 점).
     sweep_task.abort();
     let _ = sweep_task.await;
 

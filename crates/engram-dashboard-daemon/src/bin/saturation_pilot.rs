@@ -1403,7 +1403,12 @@ fn do_injection(
         registry,
         messaging,
         Entrance::Cli,
-        ControlCommand { from, to, body },
+        ControlCommand {
+            from,
+            to,
+            body,
+            contract: Default::default(),
+        },
     );
     let v = result.to_json();
     let msg_id = v["id"].as_str().unwrap_or("").to_string();

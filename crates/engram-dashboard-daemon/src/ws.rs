@@ -612,8 +612,9 @@ pub async fn run_flush_worker(
                 // ★send 실패를 삼키지 않는다(round-3 finding 1)★: 레인이 죽었다면(패닉 등) 이 경로의 조용한
                 //   `let _ =` 는 **모든 배달이 영구 정지**한 사실을 감춘다(파킹만 쌓이다 TTL 로 만료 —
                 //   메시징 최악 실패 모드인데 로그 한 줄도 없다). 그래서 warn 으로 표면화한다. 여기서
-                //   복구(레인 재기동)는 하지 않는다 — 레인은 내부에서 패닉을 격리하므로(run_flush_lane) 이
-                //   실패는 "종료 중" 이거나 진짜 버그이고, 후자면 로그가 유일한 단서다.
+                //   복구(레인 재기동)는 하지 않는다 — 레인은 개별 flush 의 패닉을 격리하므로(run_flush_lane,
+                //   단 **debug 한정** — release 는 panic=abort 라 패닉 = 프로세스 종료다) 이 실패는
+                //   "종료 중" 이거나 진짜 버그이고, 후자면 로그가 유일한 단서다.
                 if let Err(e) = lane_tx.send(other) {
                     tracing::warn!("flush 레인 forward 실패(레인 종료/패닉 — 이후 배달 정지): {e}");
                 }
@@ -771,10 +772,14 @@ async fn run_flush_lane(
                 let svc = svc.clone();
                 let join = tokio::task::spawn_blocking(move || svc.flush_for(&name, id));
                 if let Err(e) = join.await {
-                    // blocking task panic(예: 서비스 내부 poison). 레인은 죽지 않고 다음 대상으로 계속 —
-                    //   한 flush 의 패닉이 이후 배달을 막지 않게(유계 격리). abort(Cancelled)면 레인 자체가
-                    //   함께 취소되므로 이 경로엔 오지 않는다.
-                    tracing::warn!("flush blocking task 실패(패닉 격리 — 레인 계속): {e}");
+                    // blocking task 실패(패닉 또는 취소). 레인은 죽지 않고 다음 대상으로 계속 — 한 flush 의
+                    //   실패가 이후 배달을 막지 않게(유계 격리).
+                    // ★release 빌드엔 **패닉 갈래가 없다**(리뷰 fix 9 — 옛 주석 보정)★: 워크스페이스
+                    //   `[profile.release] panic = "abort"` 라 blocking task 가 패닉하면 프로세스가 즉시
+                    //   죽는다(JoinError::is_panic 을 볼 기회 자체가 없다). 즉 이 격리가 실제로 작동하는
+                    //   건 **debug/테스트 빌드**이고, release 에서 이 갈래는 사실상 abort(Cancelled) —
+                    //   런타임 종료 중 — 뿐이다. "패닉해도 운영에서 레인이 살아남는다" 로 읽지 말 것.
+                    tracing::warn!("flush blocking task 실패(레인 계속 — 패닉 격리는 debug 한정, release=abort): {e}");
                 }
             }
             FlushMsg::Idle { id } => {
@@ -790,7 +795,8 @@ async fn run_flush_lane(
                 let svc = svc.clone();
                 let join = tokio::task::spawn_blocking(move || svc.flush_for_agent(id));
                 if let Err(e) = join.await {
-                    tracing::warn!("idle flush blocking task 실패(패닉 격리 — 레인 계속): {e}");
+                    // 위 Appear 갈래와 동일 — release 는 panic=abort 라 패닉 갈래가 도달 불가하다(fix 9).
+                    tracing::warn!("idle flush blocking task 실패(레인 계속 — 패닉 격리는 debug 한정, release=abort): {e}");
                 }
             }
             // 생애주기 메시지는 main lane 이 처리한다(여기 오지 않는다 — forward 분기 참조).

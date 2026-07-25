@@ -1,8 +1,9 @@
 //! service — MessagingService: 순수 구조(mailbox·ledger·groups)를 tokio 위에서 발송 파이프라인에
 //! 엮는 오케스트레이터(S18 메시징 v1 increment C1 · ADR-0103/0104).
 //!
-//! ★역할(C1+C2 스코프)★: 단일 수신자 발송의 3분기(spec §5)와 등장/idle flush(ADR-0104), TTL sweep,
-//!   **idle 게이트**(C2)를 담당한다. request/reply(C3)·그룹(C4)은 **범위 밖** — 여기 넣지 않는다.
+//! ★역할(C1+C2+C3 스코프)★: 단일 수신자 발송의 3분기(spec §5)와 등장/idle flush(ADR-0104), TTL sweep,
+//!   **idle 게이트**(C2), **회신 계약**(C3 — request 장부 오픈·회신 닫기·기한 초과 notice)을 담당한다.
+//!   그룹(C4)은 **범위 밖** — 여기 넣지 않는다.
 //!     ① resolve+inject 성공 → `delivered`(실제 주입 시점에만, ADR-0104)
 //!        — 단 수신자가 **턴 진행 중(busy)** 이면 주입하지 않고 **파킹** = `pending`(C2 idle 게이트)
 //!        — 또한 그 이름 앞에 **이미 파킹이 쌓여 있으면** 직발송이 큐를 앞지르지 않게 **함께 파킹**하고
@@ -33,28 +34,92 @@
 //!   너머로 부른다 — 운영은 `ManagerDeliveryPort`(Arc<AgentManager> 얇은 래퍼), 단위 테스트는
 //!   `FakeDeliveryPort` 를 끼워 claude 바이너리·실 PTY 없이 3분기·flush·sweep 을 결정적으로 단언한다.
 //!
-//! ★봉투 = 주입 시점 조립(단일 wrap point, ADR-0096)★: 파킹은 **감싸지 않은 body + 발신자 이름**을
-//!   저장하고, 봉투는 **주입할 때** `wrap_message`(ingress.rs 단일 wrap point)로 만든다. 왜: 파킹과 flush
-//!   사이 봉투 포맷(colon/xml 전역 스위치)이 바뀔 수 있고, 그때 flush 는 **현재** 포맷으로 감싸야 한다.
-//!   park 시점에 미리 감싸면 옛 포맷이 굳어 버린다. 그래서 raw body 를 나르고 조립은 주입 순간 한 곳에서.
+//! ★봉투 = 주입 시점 조립(단일 wrap point, ADR-0096)★: 파킹은 **감싸지 않은 body + 발신자 이름 + 회신
+//!   계약 메타**를 저장하고, 봉투는 **주입할 때** `wrap_message`/`wrap_notice`(ingress.rs 단일 wrap point)로
+//!   만든다. 왜: 파킹과 flush 사이 봉투 포맷(colon/xml 전역 스위치)이 바뀔 수 있고, 그때 flush 는 **현재**
+//!   포맷으로 감싸야 한다. park 시점에 미리 감싸면 옛 포맷이 굳어 버린다. 그래서 raw body + 속성 재료를
+//!   나르고(`ParkPayload`) 조립은 주입 순간 한 곳에서 — 즉시 배달과 늦은 배달의 봉투가 **같아야** 한다.
+//!
+//! ★회신 계약(C3 · spec §3 · ADR-0103 결정 2/3)★:
+//!   - **request 발송** → 배달이든 파킹이든 **접수되면 계약이 열린다**(`Ledger::open_request`). 예약은 배달
+//!     시도 **전에** 하고(발송 기준 시계 — spec §3), 반려(MAILBOX_FULL)로 끝나면 즉시 닫아 유령 타임아웃을
+//!     막는다. 봉투에는 `id`/`type="request"`/`reply-by` 속성이 붙는다(노출 원칙 — spec §1).
+//!   - **회신 발송**(`reply_to`) → 정상 배달/파킹 뒤 `Ledger::close_on_reply`(엄격 매칭). 매칭 실패는
+//!     **배달에 영향 없다** — 메시지는 그대로 가고 계약만 안 닫힌다(응답 shape 도 그대로).
+//!   - **기한 초과** → sweep 이 `due_timeouts` 로 걷어 **발신자에게** `<notice>` 를 보낸다(수신자 재촉
+//!     아님). 배달은 `ParkKind::Notice` 파킹 + flush 도어벨로 일원화한다 — **cap 예외**(통지가 막히면
+//!     계약이 반쪽)이고, sweep task 에서 blocking write 를 하지 않기 위함이다(`deliver_notice` 주석).
 //!
 //! tauri import 0(daemon crate).
 // ADR-0103
 // ADR-0104
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::types::{AgentId, AgentStatus, WriteOutcome};
 
 use super::busy::{AlwaysIdleGate, BusyGate};
-use super::ledger::{DeliveryStatus, Ledger};
+use super::ledger::{DeliveryStatus, DropOutcome, DueTimeout, Ledger, OpenOutcome, ReplyOutcome};
 use super::mailbox::{Mailbox, ParkError, ParkKind, ParkedMessage};
 use crate::control::ingress::{
-    wrap_message, DeliveryObservation, Entrance, EnvelopeFields, EnvelopeFormat,
+    new_msg_id, wrap_message, wrap_notice, DeliveryObservation, Entrance, EnvelopeFields,
+    EnvelopeFormat,
 };
 use crate::control::registry::{BoundIdentity, ControlRegistry};
+
+/// ★notice 의 장부상 발신자 라벨(C3)★ — `<notice>` 는 **from 이 없는** 데몬 통지라 진짜 발신자가 없다.
+///   그래도 장부 레코드는 `from` 칸을 요구하므로(조용한 유실 금지 — notice 도 반드시 장부에 남는다) 데몬
+///   출처임을 나타내는 고정 라벨을 쓴다. ★주소가 아니다★: 이 문자열로 메시지를 보낼 수 없고(로스터 이름이
+///   아님) 봉투에도 절대 렌더되지 않는다(notice 봉투엔 from 속성 자체가 없다 — ADR-0103 불변식).
+const NOTICE_SENDER_LABEL: &str = "engram";
+
+/// ★C3 발송 메타(회신 계약 축)★ — ingress 가 구문 검증을 마친 인자를 서비스가 쓸 형태로 정규화한 값.
+///
+/// ★raw 표기와 파싱값을 **둘 다** 나르는 이유(load-bearing)★: 봉투 속성 `reply-by` 는 발신자가 쓴 **표기
+///   그대로**(`"10m"`) 보여야 하고(spec §1 — 수신 LLM 이 읽는 계약), 장부 타이머는 **절대 기한**을 계산할
+///   `Duration` 이 필요하다(spec §3 "데몬이 절대시각 환산"). 한쪽만 나르면 다른 쪽에서 재파싱·재렌더가
+///   생겨 표기가 미묘하게 달라진다(`60m` → `1h`).
+/// ★`Default` = 통보★: 전 필드 비활성이 곧 기본 메시지(type 없음)다 — 기존 C1/C2 경로와 byte-identical.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SendMeta {
+    /// request 인가 — 장부 미회신 오픈 + 봉투 `type="request"`(+ `id`).
+    pub request: bool,
+    /// 발신자가 쓴 기한 표기 그대로(`"10m"`). 봉투 `reply-by` 속성 값. `request` 일 때만 의미 있다.
+    pub reply_by_raw: Option<String>,
+    /// 파싱된 기한 — 장부가 `발송시각 + 이것` 으로 절대 기한을 굳힌다. raw 가 Some 이면 반드시 Some.
+    pub reply_by: Option<Duration>,
+    /// 어느 request 의 회신인가(원본 id) — 봉투 `in-reply-to` + 장부 엄격 매칭 닫기.
+    pub reply_to: Option<String>,
+}
+
+impl SendMeta {
+    /// 이 발송이 봉투에 붙일 속성(spec §1 노출 원칙 — **행동을 바꾸는 필드만**).
+    ///
+    /// - request → `id`(회신에 필요) + `type="request"` + (있으면) `reply-by`.
+    /// - 회신 → `in-reply-to` 만(발신 인자 `reply_to` 가 수신 속성 `in-reply-to` 로 나타난다 — spec §1 표기 매핑).
+    /// - 통보 → 전부 None(속성 없는 plain `<message from>`).
+    ///
+    /// ★`id` 는 request 에만★: 통보/회신 봉투에 id 를 실으면 수신 LLM 이 "이건 회신해야 하나" 를 헷갈린다 —
+    ///   노출 필드가 곧 행동 신호라 필요 없는 축은 아예 숨긴다(spec §1 · ADR-0103 결정 1).
+    /// ★가시성 `pub(crate)`★: ingress 단위 테스트가 "검증된 인자 → 봉투" 를 한 줄로 단언한다(속성 조립
+    ///   규칙의 단일 출처를 테스트가 우회해 재구현하지 않게).
+    pub(crate) fn envelope_fields(&self, msg_id: &str) -> EnvelopeFields {
+        EnvelopeFields {
+            id: self.request.then(|| msg_id.to_string()),
+            msg_type: self.request.then(|| "request".to_string()),
+            reply_by: if self.request {
+                self.reply_by_raw.clone()
+            } else {
+                None
+            },
+            in_reply_to: self.reply_to.clone(),
+            // C4(그룹 방송) 자리 — 단일 수신자 발송은 `to` 속성을 싣지 않는다(방송이 아님, spec §1).
+            to: None,
+        }
+    }
+}
 
 /// 발송 1건의 결과(spec §6 응답 shape 의 한 수신자 축). 상위(handle_send)가 `results[]` 원소로 싼다.
 ///
@@ -73,6 +138,20 @@ pub enum SendOutcome {
 pub enum SendReject {
     /// 수신자 보관함이 cap(100)에 도달 — 신규 message 반려(spec §5 분기 3). 오래된 것은 TTL 로 소멸.
     MailboxFull,
+    /// ★C3 — 논리 메시지 id 가 장부에 이미 존재★(사실상 불가: 2.8×10^12 공간). 이력 레코드든 request
+    ///   추적이든 **어느 쪽에든** 같은 id 가 있으면 이 값이다(종류 무관 — 리뷰 fix 12).
+    ///
+    /// ★부작용 없음 보장(load-bearing — 호출자 재시도 계약)★: id 예약은 이 함수의 **첫 부작용**이라,
+    ///   이 값을 돌려줄 때 배달·파킹·장부 레코드는 하나도 일어나지 않았다. 그래서 호출자(ingress)가 새 id 로
+    ///   그대로 다시 부르면 중복 배달 없이 안전하게 재시도된다.
+    IdCollision,
+    /// ★C3 리뷰 fix 3 — 오픈 계약 수가 상한(`MAX_OPEN_REQUESTS`)에 도달★. request 발송만 해당한다
+    ///   (통보/회신은 계약을 열지 않으므로 이 반려를 받지 않는다).
+    ///
+    /// ★왜 반려인가★: 오픈 계약은 이제 이력 evict 를 견디므로(ledger.rs `record`) 상한이 필요하고, 상한에서
+    ///   **오래된 계약을 밀어내는 대신 새 발송을 거절**한다 — 이미 기다리는 계약을 조용히 없애는 건 유실이고,
+    ///   반려는 발신자가 즉시 알고 조정할 수 있는 가시적 실패다. `IdCollision` 과 마찬가지로 **부작용 0**이다.
+    RequestCapacity,
 }
 
 /// 배달 경계 seam(ADR-0012) — MessagingService 가 AgentManager 를 직접 부르지 않고 이 너머로 부른다.
@@ -263,8 +342,22 @@ impl MessagingService {
     ///      (spec: unreachable → 파킹). 조용한 유실 금지 — 반드시 ledger 에 남긴다.
     ///   cap 초과 → `Err(MailboxFull)`(반려).
     ///
+    /// ★C3 회신 계약(spec §3)★ — 3분기 **바깥**을 감싸는 두 겹:
+    ///   - `meta.request` 면 3분기에 들어가기 **전에** 장부 계약을 연다(`open_request`). 왜 먼저인가:
+    ///     `reply_by` 시계는 **발송 기준**이라(spec §3·§5) 배달 지연·파킹과 무관해야 하고, 계약은 "배달됐든
+    ///     파킹됐든 접수되면 열린다"(spec §3 단계 2)라 분기별로 4곳에 흩뿌리면 한 갈래가 새기 쉽다.
+    ///     예약 실패(`DuplicateId`)는 **부작용 0 상태**에서 `IdCollision` 으로 즉시 반려한다(호출자가 새 id 로 재시도).
+    ///     반려(cap 초과)로 끝나면 열어 둔 계약을 그 자리에서 닫는다 — 안 닫으면 배달된 적 없는 요청이
+    ///     기한 초과 notice 를 쏜다(유령 타임아웃).
+    ///   - `meta.reply_to` 면 발송이 **접수된 뒤** 엄격 매칭으로 계약을 닫는다(`close_on_reply`). 매칭 실패
+    ///     (NoMatch/AlreadyClosed)는 **에러가 아니다** — 회신 메시지는 정상 배달되고 계약만 안 닫힌다
+    ///     (엄격 매칭의 정의 — spec §2). 응답 shape 은 어느 경우든 동일하다(새 필드 없음).
+    ///
     /// ★락 규율(모듈 헤더)★: 로스터 조회·resolve 는 port 호출(락 밖) → 그 결과로 락을 잡아 ledger record +
     ///   (필요 시)park 결정 → **락 해제** → inject(락 밖) → 결과에 따라 다시 짧게 락 잡아 transition/park.
+    ///   계약 오픈/닫기도 순수 장부 조작이라 **짧은 단독 락 구간**에서 하고, 로깅은 락 밖에서 한다.
+    // ADR-0103 (C3 — request/reply 계약)
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_single_send(
         &self,
         msg_id: &str,
@@ -273,20 +366,204 @@ impl MessagingService {
         to: &str,
         body: &str,
         entrance: Entrance,
+        meta: &SendMeta,
     ) -> Result<SendOutcome, SendReject> {
+        // ★상호배타는 ingress 가 **유일한** 검증자다(리뷰 fix 11)★: 이 함수와 `SendMeta` 는 pub 이라 다른
+        //   조립(스모크 bin·미래 입구)이 직접 부를 수 있는데, request+reply_to 를 동시에 실으면 한 발송이
+        //   계약을 열면서 남의 계약을 닫는 뒤엉킨 상태가 된다(spec §6 상호배타). 여기서 검증을 **복제하지
+        //   않는 이유**는 반려 코드/문구가 입구마다 갈리면 안 되기 때문이고(entrance-agnostic — ingress
+        //   `validate_contract` 가 정본), 대신 디버그 빌드에서 배선 실수를 즉시 터뜨린다.
+        debug_assert!(
+            !(meta.request && meta.reply_to.is_some()),
+            "ingress가 유일 검증자 — request와 reply_to는 상호배타(spec §6)"
+        );
+        // 기한이 있으면 표기도 반드시 함께 온다(SendMeta 주석) — 장부는 통지 문구에 표기 원본을 쓴다.
+        debug_assert_eq!(
+            meta.reply_by.is_some(),
+            meta.reply_by_raw.is_some(),
+            "reply_by 는 파싱값과 표기 원본을 쌍으로 나른다(SendMeta)"
+        );
+
         // 1) 로스터 조회(락 밖 — port 호출) → 이름/AgentId 해석.
         let roster = self.port.live_reachable_agents();
         let resolved = resolve_live(to, &roster);
 
+        // ★park 키 정규화(finding 4 · load-bearing)★: 등장 flush 는 canonical **NAME** 으로 keyed 이다
+        //   (flush observer 가 로스터 diff 로 이름을 넘긴다). 그런데 `to` 가 exact AgentId 이고 그 에이전트가
+        //   살아는 있으나 **비-도달**(TUI 등 non-structured)이면 resolve_live 는 None 을 내고, 여기서 UUID
+        //   문자열 그대로 park 하면 park 키(UUID) ≠ flush 키(canonical name) 라 그 파킹은 **영영 flush 안 됨**.
+        //   그래서 park 전에 `to` 를 AgentId 로 파싱해 그 에이전트가 존재하면 canonical_name 으로 park 키를
+        //   바꾼다(그 이름이 도달 가능해지면 flush 가 잡게). 파싱 실패/미존재면 리터럴 문자열 그대로(이름 지목).
+        // ★C3 에서 앞당김★: 계약 오픈이 "누구에게 건 요청인가"(recipient)를 3분기 **전에** 알아야 해서
+        //   여기서 한 번 계산한다. 해석에 성공했으면 그 canonical 이름이 곧 장부/파킹 키다.
+        let recipient_key = match &resolved {
+            Some(t) => t.name.clone(),
+            None => self.canonical_park_key(to),
+        };
+
+        // 2) ★id 예약 + C3 계약 예약(발송 기준 시계)★ — 배달 시도 전, 부작용 0 지점에서 **한 락 구간**.
+        //
+        // ★id 충돌은 발송 종류를 안 가린다(리뷰 fix 12 · load-bearing)★: 예전엔 request 만 충돌을 봤다
+        //   (`open_request` 의 DuplicateId). 그런데 msg_id 는 이력 레코드 키((msg_id,to))이자 관측 상관 키라,
+        //   통보/회신이 기존 id 와 겹치면 `transition` 이 남의 레코드를 집고 장부·관측이 두 메시지를 한 id 로
+        //   뭉갠다 — request 가 아니어도 똑같이 해롭다. 그래서 종류 무관 같은 검사를 먼저 한다.
+        // ★한 락 안에서 검사+예약(원자성)★: 검사와 open_request 사이에 락을 놓으면 그 틈에 같은 id 가
+        //   기록될 수 있다(사실상 불가하지만 검사의 의미가 사라진다).
+        // ★남는 창: "동시에 뽑힌 같은 fresh id" — 전면 예약(reservation)을 **거부한 결정**(round-final fix 2)★
+        //   이 검사는 **이미 장부에 있는 id** 와의 충돌만 잡는다. 두 발송이 같은 값을 **동시에 뽑아** 둘 다
+        //   검사를 통과하고(둘 다 아직 미기록) 뒤이어 각자 record 하는 창은 남는다. 이걸 없애려면 검사
+        //   시점에 id 를 장부에 **선점(reserve)** 해 두고 배달 성패에 따라 커밋/해제해야 하는데:
+        //     · 발생 확률 = 36^8(2.8×10^12) 공간에서 같은 값을 마이크로초 창 안에 두 번 뽑는 경우 — 실질 0.
+        //     · 피해 = 이력 레코드 하나가 두 메시지를 한 id 로 뭉갠다(**관측상** 오염). 배달·회신 계약은
+        //       (msg_id, to) 키라 수신자가 다르면 서로를 덮지도 않는다.
+        //     · 비용 = 예약 생명주기(커밋/해제/누수 회수)가 mailbox·flush·반려 경로 전부와 락으로 얽힌다 —
+        //       drop_request 급 회수 경로를 하나 더 만드는 셈이고, 그 배선 버그가 위 확률보다 훨씬 크다.
+        //   그래서 **검사만** 하고 예약은 두지 않는다. 걸리면 호출자(ingress)가 새 id 로 1회 재시도한다.
+        let now = Instant::now();
+        let reservation = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            if st.ledger.msg_id_in_use(msg_id) {
+                Err(SendReject::IdCollision)
+            } else if meta.request {
+                // 기한은 (Duration, 표기 원본) 쌍으로 넘긴다 — 통지 문구가 발신자 표기를 그대로 쓰게(fix 6).
+                let reply_by = meta.reply_by.zip(meta.reply_by_raw.clone());
+                match st.ledger.open_request(
+                    msg_id,
+                    sender_name,
+                    from.agent_id,
+                    &recipient_key,
+                    reply_by,
+                    now,
+                ) {
+                    OpenOutcome::Opened => Ok(()),
+                    OpenOutcome::DuplicateId => Err(SendReject::IdCollision),
+                    OpenOutcome::Full => Err(SendReject::RequestCapacity),
+                }
+            } else {
+                Ok(())
+            }
+        };
+        // ★락 보유 중 tracing 금지★ — 락을 놓은 뒤 찍는다(모듈 헤더 규율).
+        match reservation {
+            Ok(()) => {}
+            Err(SendReject::IdCollision) => {
+                tracing::error!(
+                    msg_id = %msg_id,
+                    "메시지 id 예약 실패 — 장부(이력/계약)에 같은 id 가 이미 있음(사실상 불가). 호출자가 새 id 로 재시도(ADR-0103)"
+                );
+                return Err(SendReject::IdCollision);
+            }
+            Err(reject) => {
+                tracing::warn!(
+                    msg_id = %msg_id,
+                    "request 계약 오픈 실패 — 미회신 계약이 상한에 도달(ADR-0103 · ledger MAX_OPEN_REQUESTS)"
+                );
+                return Err(reject);
+            }
+        }
+
+        let result = self.dispatch_single(
+            msg_id,
+            from,
+            sender_name,
+            to,
+            body,
+            entrance,
+            meta,
+            resolved,
+            &recipient_key,
+        );
+
+        match &result {
+            Ok(_) => {
+                // 3) ★C3 회신 닫기(엄격 매칭)★ — 접수된 회신만 계약을 닫는다.
+                if let Some(in_reply_to) = &meta.reply_to {
+                    self.close_reply_contract(in_reply_to);
+                }
+            }
+            Err(_) => {
+                // 4) ★반려 시 예약 회수(누수 방지 — load-bearing)★: cap 초과로 **아예 접수되지 않은** 요청의
+                //    계약이 열린 채 남으면 (a) 기한이 지나 발신자에게 "회신 없음" notice 가 가고(보낸 적 없는
+                //    요청에 대해) (b) 이력 레코드가 없어 evict 계기도 없으니 추적이 무계 증식한다. 그래서
+                //    반려 갈래에서 그 자리에서 예약을 **지운다**(닫는 게 아니라 제거 — 반려는 "계약 이행" 이
+                //    아니라 "계약 미성립": ledger.rs `drop_request` 주석).
+                // ★이 회수가 막는 것과 못 막는 것(리뷰 fix 5 — 과대 주장 보정)★: 이건 **누수 방지**지
+                //    "통지가 먼저 나가는 레이스" 방지가 아니다. 예약(위 2단계)과 여기 사이에 sweep 이 끼어들어
+                //    기한 초과를 판정하면 통지는 이미 파킹돼 나간다 — 그 통지는 회수할 수 없다(이미 발신자
+                //    큐에 있는 메시지다). 남는 잔여: 반려된 발송에 대해 통지가 한 번 갈 수 있다. 실제로는
+                //    reply_by 최소 1분(ingress) vs 이 구간 마이크로초라 사실상 도달 불가하고, 발생하면
+                //    아래 warn 로그가 그 이중 결말을 관측 가능하게 남긴다.
+                if meta.request {
+                    let outcome = {
+                        let mut st = self.state.lock().expect("messaging state poisoned");
+                        st.ledger.drop_request(msg_id)
+                    };
+                    // 락 밖 로깅(모듈 헤더 규율).
+                    if outcome == (DropOutcome::Removed { notified: true }) {
+                        tracing::warn!(
+                            msg_id = %msg_id,
+                            "반려된 request 의 계약이 **이미 기한 초과 통지된** 상태였다 — 통지는 회수 불가(발신자에게 이미 감). 예약↔반려 사이 sweep 이 끼어든 희귀 레이스(ADR-0103)"
+                        );
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// ★회신 계약 닫기(C3)★ — 엄격 매칭 결과에 따라 **로깅만** 갈린다(배달·응답에는 영향 없음).
+    ///
+    /// - `Closed` = 정상(첫 유효 회신).
+    /// - `ClosedHistoryAnomaly` = 계약은 닫혔으나 이력이 `Delivered → Replied` 간선을 못 탐(예: 회신이
+    ///   원본보다 먼저 처리돼 원본이 아직 `pending`). 계약 정본은 추적이므로 그대로 두고 **관측**만 한다
+    ///   (ledger.rs `ReplyOutcome` 주석 — anomaly = observable, not silent).
+    /// - `NoMatch`/`AlreadyClosed` = 틀린 id 이거나 이미 닫힘. **정상 경로**다 — 엄격 매칭이 아무 것도 닫지
+    ///   않았을 뿐 회신 메시지 자체는 이미 배달/파킹됐다(spec §2). 발신자에게 새 에러를 만들지 않는다:
+    ///   "회신은 갔는데 계약이 안 닫혔다" 는 발신자가 고칠 수 없는 상태이고, 반려하면 이미 배달된 메시지에
+    ///   대해 재시도를 유발해 중복이 난다.
+    /// ★락 규율★: 짧은 단독 락 구간에서 장부만 만지고, 로깅은 **락을 놓은 뒤** 한다.
+    fn close_reply_contract(&self, in_reply_to: &str) {
+        let outcome = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            st.ledger.close_on_reply(in_reply_to, Instant::now())
+        };
+        match outcome {
+            ReplyOutcome::Closed => {}
+            ReplyOutcome::ClosedHistoryAnomaly { from } => tracing::warn!(
+                in_reply_to,
+                history_status = ?from,
+                "회신으로 계약은 닫혔으나 이력이 Replied 로 전이 못 함(불법 간선) — 계약 정본은 추적, 이력만 미반영(ADR-0103)"
+            ),
+            ReplyOutcome::NoMatch => tracing::debug!(
+                in_reply_to,
+                "reply_to 가 오픈된 request 를 가리키지 않음 — 메시지는 정상 배달, 닫힌 계약 없음(엄격 매칭, spec §2)"
+            ),
+            ReplyOutcome::AlreadyClosed => tracing::debug!(
+                in_reply_to,
+                "이미 닫힌 request 에 대한 추가 회신 — 메시지는 정상 배달, no-op(spec §2)"
+            ),
+        }
+    }
+
+    /// 발송 3분기 본체(C1/C2) — `handle_single_send` 가 계약 예약/닫기로 감싸는 안쪽.
+    ///
+    /// 인자 `resolved`/`park_key` 는 호출자가 이미 계산해 넘긴다(계약 오픈이 recipient 를 먼저 알아야 하므로
+    /// 로스터 해석을 밖으로 끌어올렸다 — 여기서 재조회하면 두 판정이 서로 다른 스냅샷을 보게 된다).
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_single(
+        &self,
+        msg_id: &str,
+        from: BoundIdentity,
+        sender_name: &str,
+        to: &str,
+        body: &str,
+        entrance: Entrance,
+        meta: &SendMeta,
+        resolved: Option<LiveAgent>,
+        park_key: &str,
+    ) -> Result<SendOutcome, SendReject> {
         // 2) 부재 → 파킹(spec §5 분기 2). "없는 이름"도 파킹(스폰 전 선지시 지원, TTL 방어).
         let Some(target) = resolved else {
-            // ★park 키 정규화(finding 4 · load-bearing)★: 등장 flush 는 canonical **NAME** 으로 keyed 이다
-            //   (flush observer 가 로스터 diff 로 이름을 넘긴다). 그런데 `to` 가 exact AgentId 이고 그 에이전트가
-            //   살아는 있으나 **비-도달**(TUI 등 non-structured)이면 resolve_live 는 None 을 내고, 여기서 UUID
-            //   문자열 그대로 park 하면 park 키(UUID) ≠ flush 키(canonical name) 라 그 파킹은 **영영 flush 안 됨**.
-            //   그래서 park 전에 `to` 를 AgentId 로 파싱해 그 에이전트가 존재하면 canonical_name 으로 park 키를
-            //   바꾼다(그 이름이 도달 가능해지면 flush 가 잡게). 파싱 실패/미존재면 리터럴 문자열 그대로(이름 지목).
-            let park_key = self.canonical_park_key(to);
             let hint = format!(
                 "No live reachable agent named '{to}' — parked; it will be delivered when that name appears (expires after TTL)."
             );
@@ -296,16 +573,18 @@ impl MessagingService {
                 sender_name,
                 from,
                 entrance,
-                &park_key,
+                park_key,
                 body,
                 hint,
                 None,
+                ParkKind::Message,
+                meta,
             )?;
             // ★park/appearance TOCTOU self-heal(finding 3)★: resolve↔park 사이 그 이름이 등장했으면 flush
             //   observer 는 빈 큐를 이미 flush 하고 지나가, 방금 park 한 메일이 다음 등장/TTL 까지 발이 묶인다.
             //   그래서 park 직후(락 해제 상태) 그 park_key 가 지금 유일 도달이면 즉시 flush 를 돌려 자가치유한다.
             //   drain 이 큐를 비우므로 flush observer 와 겹쳐도 idempotent(둘 다 drain — 한쪽이 빈 큐를 본다).
-            self.self_heal_if_live(&park_key);
+            self.self_heal_if_live(park_key);
             return Ok(outcome);
         };
 
@@ -331,6 +610,8 @@ impl MessagingService {
                 // ★id 힌트(fix 2)★: 이 발송은 구체적 산 수신자를 해석했다 — 동명 다수여도(exact-id 지목은
                 //   AMBIGUOUS 를 의도적으로 통과한다) 그 id 로 배달될 길을 flush 에 남긴다.
                 Some(target.id),
+                ParkKind::Message,
+                meta,
             )?;
             // ★busy-park TOCTOU self-heal(C1 finding 3 와 대칭)★: 게이트 확인↔park 사이에 그 턴이 끝났으면
             //   (MessageDone) idle 트리거는 **빈 큐**를 이미 flush 하고 지나가, 방금 park 한 메일이 다음 턴
@@ -366,6 +647,8 @@ impl MessagingService {
                 body,
                 hint,
                 Some(target.id),
+                ParkKind::Message,
+                meta,
             )?;
             self.request_flush(target.id);
             return Ok(outcome);
@@ -374,7 +657,7 @@ impl MessagingService {
         // 4) idle + 큐 비어 있음 → 주입 시도. 봉투는 **주입 시점**에 현재 포맷으로 감싼다(단일 wrap point).
         //    ledger 는 주입 **후** 성공/실패에 따라 delivered/pending 을 찍는다(delivered=실제 주입, ADR-0104).
         let now = Instant::now();
-        let wrapped = self.wrap_now(sender_name, msg_id, body);
+        let wrapped = self.wrap_now(sender_name, msg_id, body, &meta.envelope_fields(msg_id));
         let inject_result = self.port.inject(target.id, wrapped.as_bytes());
 
         match inject_result {
@@ -417,6 +700,8 @@ impl MessagingService {
                     // 해석된 산 수신자가 있었으므로 힌트를 남긴다 — 그 id 가 여전히 로스터에 있으면(일시적
                     //   write 오류) 이름 유일성과 무관하게 그쪽으로 재시도되고, 죽었으면 이름 규칙으로 돌아간다.
                     Some(target.id),
+                    ParkKind::Message,
+                    meta,
                 )
             }
         }
@@ -440,6 +725,11 @@ impl MessagingService {
     ///   안 남긴다(발신자에게 반려로 즉시 가시화 — spec §5 "오래된 것 조용히 버리기 금지" 와 정합).
     /// ★락 규율★: 이 함수는 park+record 를 한 락 구간에서 하되(둘 다 순수 구조 조작, 외부 호출 없음) 그
     ///   구간에서 port 를 부르지 않는다.
+    /// ★kind(C3)★: `Notice` 는 **cap 예외**라 이 함수가 절대 `MailboxFull` 을 내지 않는다(mailbox.rs `park`).
+    ///   그래서 notice 호출부는 반환값을 무시해도 안전하다.
+    /// ★meta(C3)★: 회신 계약 속성은 **payload 에 실려 flush 까지 살아남는다** — 늦게 배달되는 request/회신도
+    ///   즉시 배달과 **같은 봉투**(같은 속성)로 나가야 하기 때문이다(park 시점에 봉투를 굳히지 않는 설계라
+    ///   속성 재료를 함께 날라야 한다 — 모듈 헤더 "봉투 = 주입 시점 조립").
     #[allow(clippy::too_many_arguments)]
     fn park_pending(
         &self,
@@ -451,22 +741,25 @@ impl MessagingService {
         body: &str,
         hint: String,
         hinted_id: Option<AgentId>,
+        kind: ParkKind,
+        meta: &SendMeta,
     ) -> Result<SendOutcome, SendReject> {
         let now = Instant::now();
         let mut st = self.state.lock().expect("messaging state poisoned");
-        // park 는 raw body + 봉투/관측에 필요한 최소 메타(sender 이름·발신자 신원·입구)를 나른다(봉투는
-        //   flush 주입 시점 조립 — 단일 wrap point). ParkedMessage.envelope 계약이 "완성 봉투"라 여기선
-        //   ParkPayload 로 인코딩해 그 문자열 슬롯에 실어 보관하고, flush 때 decode 한다.
+        // park 는 raw body + 봉투/관측에 필요한 최소 메타(sender 이름·발신자 신원·입구·회신 계약)를
+        //   나른다(봉투는 flush 주입 시점 조립 — 단일 wrap point). ParkedMessage.envelope 계약이 "완성 봉투"라
+        //   여기선 ParkPayload 로 인코딩해 그 문자열 슬롯에 실어 보관하고, flush 때 decode 한다.
         let payload = ParkPayload {
             sender_name: sender_name.to_string(),
             from,
             entrance,
             body: body.to_string(),
+            meta: meta.clone(),
         };
         let parked = ParkedMessage {
             msg_id: msg_id.to_string(),
             envelope: payload.encode(),
-            kind: ParkKind::Message,
+            kind,
             parked_at: now,
             // admission 순번은 `park` 이 수용 시점에 부여한다(저장소가 유일 부여자 — mailbox 주석). 여기 값은
             //   무시되므로 placeholder.
@@ -672,7 +965,19 @@ impl MessagingService {
             for (n, parked) in items.iter().enumerate() {
                 let to_id = target.id;
                 let payload = ParkPayload::decode(&parked.envelope);
-                let wrapped = self.wrap_now(&payload.sender_name, &parked.msg_id, &payload.body);
+                // ★늦은 배달도 같은 봉투(C3 — load-bearing)★: 파킹된 항목의 종류·계약 속성을 그대로 되살려
+                //   감싼다. notice 는 `<notice>`(from 없음), request/회신은 자기 속성(id/type/reply-by/
+                //   in-reply-to)이 붙은 `<message>` 다 — 즉시 배달과 flush 배달의 봉투가 갈리면 수신 LLM 이
+                //   같은 메시지를 다르게 읽는다(회신 불가한 request 등).
+                let wrapped = match parked.kind {
+                    ParkKind::Notice => wrap_notice(&payload.body),
+                    ParkKind::Message => self.wrap_now(
+                        &payload.sender_name,
+                        &parked.msg_id,
+                        &payload.body,
+                        &payload.meta.envelope_fields(&parked.msg_id),
+                    ),
+                };
                 match self.port.inject(to_id, wrapped.as_bytes()) {
                     Ok(outcome) => {
                         {
@@ -844,26 +1149,178 @@ impl MessagingService {
         unique_reachable_in(&self.port.live_reachable_agents(), name)
     }
 
-    /// ★TTL sweep(spec §5 — C1)★: 전 수신자에 걸쳐 만료 파킹분을 걷어 ledger `pending→expired` 로 남긴다.
-    ///   sweep task 가 주기적으로 부른다(lib.rs). notice 는 cap 예외지만 TTL 은 적용된다(spec) — mailbox
-    ///   가 kind 무관하게 만료를 판정하므로 여기선 구분 불요.
-    /// ★락 규율★: sweep+transition 은 순수 조작이라 한 락 구간에서 한다(외부 호출 없음).
+    /// ★TTL sweep + 회신 기한 초과 통지(spec §5·§3 — C1/C3)★: 주기 task(lib.rs)가 부르는 단일 유지보수 진입점.
+    ///   ① 전 수신자 만료 파킹분을 걷어 ledger `pending→expired` 로 남기고(장부 잔존)
+    ///   ② 기한 초과된 미회신 request 를 걷어 **발신자에게** `<notice>` 를 배달한다(spec §3 단계 4).
+    ///
+    /// ★notice 는 수신자 재촉이 아니다★: 통지는 요청을 **건 쪽**에게 간다 — 재촉할지 포기할지는 발신 LLM 의
+    ///   판단이라(ADR-0103 결정 3) 데몬은 사실만 알린다.
+    /// ★정확히 1회(spec §7)★: `due_timeouts` 가 반환하며 `notified` 를 세우므로 같은 request 는 다음 sweep 에
+    ///   다시 나오지 않는다 — 이중 통지 방지 책임은 장부에 있고 여기선 걷은 것만 배달한다.
+    /// ★논블록(load-bearing — sweep task 보호)★: 이 함수는 **주입하지 않는다**. notice 는 파킹 + 도어벨까지만
+    ///   하고(`deliver_notice` 주석) 실제 배치 write 는 flush 레인이 한다 — 이 함수는 60초 주기 tokio task 에서
+    ///   돌고, 그 task 는 busy 상한 sweep(멈춘 턴의 fail-open 깨우기)도 함께 돌리므로 여기서 자식 stdin
+    ///   blocking write 를 하면 그 안전장치까지 같이 멈춘다.
+    /// ★락 규율(load-bearing)★: 만료 전이·due 산출은 **한 락 구간**(순수 조작)에서 끝내고, notice 파킹은
+    ///   **락을 놓은 뒤** 한다 — 파킹 전 로스터 조회가 DeliveryPort 호출이라 락 안에서 부르면 모듈 헤더의
+    ///   절대 규율(messaging 락 보유 중 port 금지)을 어겨 락 순서 역전 위험이 생긴다.
+    /// ★로스터는 **틱당 한 번**만 뜬다(리뷰 fix 8)★: 예전엔 due 항목마다 `live_reachable_agents`(= 전 세션
+    ///   순회)를 다시 불러, 한 틱 안에서 항목별로 **다른 스냅샷**을 보고 판정했다(같은 틱인데 앞 항목은
+    ///   배달, 뒤 항목은 부재로 갈릴 수 있었다). 한 번 떠서 전 항목에 같은 스냅샷을 쓴다 — 비용도 O(due)
+    ///   에서 O(1) 로 준다. due 가 비면 아예 뜨지 않는다(대부분의 틱).
     pub fn sweep(&self, now: Instant) {
-        let mut st = self.state.lock().expect("messaging state poisoned");
-        let expired = st.mailbox.sweep_expired(now);
-        for ex in expired {
-            // 파킹은 어느 수신자 큐에 있었는지 sweep 반환에 없다 — ledger 레코드는 (msg_id, recipient) 키라
-            //   recipient 를 알아야 전이한다. sweep_expired 는 recipient 를 안 돌려주므로, msg_id 로 레코드를
-            //   찾아 그 to 로 전이한다(records_for → 첫 pending 레코드). 조용한 유실 금지.
-            transition_expired_by_msg_id(&mut st.ledger, &ex.msg_id, now);
+        let due: Vec<DueTimeout> = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            let expired = st.mailbox.sweep_expired(now);
+            for ex in expired {
+                // 파킹은 어느 수신자 큐에 있었는지 sweep 반환에 없다 — ledger 레코드는 (msg_id, recipient) 키라
+                //   recipient 를 알아야 전이한다. sweep_expired 는 recipient 를 안 돌려주므로, msg_id 로 레코드를
+                //   찾아 그 to 로 전이한다(records_for → 첫 pending 레코드). 조용한 유실 금지.
+                transition_expired_by_msg_id(&mut st.ledger, &ex.msg_id, now);
+            }
+            st.ledger.due_timeouts(now)
+        };
+        if due.is_empty() {
+            return;
+        }
+        // 락 밖 · 틱당 1회 스냅샷(위 주석). 아래 전 항목이 이 한 장으로 판정한다.
+        let roster = self.port.live_reachable_agents();
+        for d in due {
+            // spec §1 notice 템플릿(한국어 계약 — 문구를 바꾸면 프라이밍·수용 기준과 어긋난다).
+            //   기한 표기는 **발신자가 쓴 원본**을 그대로 쓴다(fix 6 — 봉투 `reply-by` 와 어긋나지 않게).
+            let body = format!(
+                "요청 {} 기한({}) 초과 — {} 회신 없음",
+                d.request_id, d.reply_by_raw, d.recipient
+            );
+            self.deliver_notice(&d, &body, &roster);
         }
     }
 
-    /// 봉투를 **현재** 전역 포맷으로 감싼다(단일 wrap point ADR-0096). C1 은 plain `<message from>` 만
-    ///   (id/type/reply-by/in-reply-to/to 는 C3/C4). registry 에서 현재 포맷을 읽어 wrap_message 에 넘긴다.
-    fn wrap_now(&self, sender: &str, msg_id: &str, body: &str) -> String {
+    /// ★`<notice>` 배달(C3)★ — 데몬 통지를 한 수신자에게 보낸다. **항상 파킹 + 도어벨**이다.
+    ///
+    /// ★왜 여기서 직접 inject 하지 않나(load-bearing — sweep task 보호)★: 이 함수의 유일한 호출자는
+    ///   `sweep` 이고, sweep 은 데몬 수명 동안 도는 **tokio task** 에서 60초마다 돈다(lib.rs). `inject` 는
+    ///   자식 stdin 의 **blocking write** 라, 여기서 직접 부르면 한 수신자의 막힌 파이프가 sweep task 를
+    ///   통째로 잡아먹는다 — TTL 만료 처리와 **busy 상한 sweep**(멈춘 턴의 fail-open 깨우기)까지 함께
+    ///   멈춘다. 그래서 `FlushTrigger`(fix 11)와 **같은 규율**을 따른다: 큐에 넣고 도어벨만 누른 뒤 즉시
+    ///   반환하고, 실제 배치 write 는 flush 레인(전용 스레드)이 한다.
+    /// ★경로 1벌(ADR-0104 "flush = 일괄·오래된 순" 공유)★: 파킹으로 일원화하면 즉시/늦은 배달의 봉투
+    ///   조립·관측·장부 전이가 전부 기존 flush 경로 하나를 탄다(두 벌 유지 금지). 봉투는 `ParkKind::Notice`
+    ///   를 보고 `wrap_notice` 로 감싸진다.
+    /// ★cap 예외★: `ParkKind::Notice` 라 보관함이 가득 차도 반드시 수용된다(회신 계약 통지가 막히면 계약이
+    ///   반쪽 — ADR-0103 불변식). 그래서 반려 갈래가 없고 반환값도 없다.
+    /// ★FIFO 정합★: 앞선 파킹이 있으면 notice 도 그 뒤에 붙는다 — 통지가 앞선 메일을 앞지르지 않는다.
+    /// ★조용한 유실 금지★: park 와 함께 장부에 `pending` 을 남기고, 실제 주입 때 flush 가 `delivered` 로
+    ///   전이한다(발신자 없음이라 장부 from 은 데몬 라벨, 관측 신원은 nil — 위 상수·헬퍼 주석).
+    /// ★id 힌트 = **요청 발신자의 AgentId**(리뷰 fix 2 · load-bearing)★: 파킹 키는 발송 시점의 발신자
+    ///   **이름**인데, 그 사이 그 에이전트가 개명했으면 이름-키 큐를 아무도 열지 않는다 — 통지는
+    ///   `notified` 라 재발화도 없으니 그 notice 는 **영영 stranded**(계약이 조용히 반쪽) 된다. 그래서
+    ///   장부가 함께 들고 있던 발신자 id 를 힌트로 실어, flush 가 이름 유일성과 무관하게 그 incarnation 으로
+    ///   배달하게 한다(id 가 죽었으면 이름 규칙으로 자동 복귀 — respawn 이어받기 유지).
+    /// ★도어벨은 **파킹 뒤 반드시** 누른다(같은 fix)★: 예전엔 이름이 유일 도달로 풀릴 때만 눌러서, 개명·
+    ///   동명 다수 상황에서 큐에 넣고 아무도 깨우지 않는 lost wakeup 이 났다. 이제 발신자 id 로 한 번
+    ///   (`flush_for_agent` 가 힌트 큐까지 연다), 이름이 다른 산 에이전트로 풀리면 그쪽으로도 한 번 누른다.
+    /// ★락 규율★: 로스터는 호출자가 뜬 스냅샷을 받고(틱당 1회 — sweep 주석), park 만 짧은 락, 도어벨은 park
+    ///   뒤(락 밖).
+    // ADR-0103
+    fn deliver_notice(&self, due: &DueTimeout, body: &str, roster: &[LiveAgent]) {
+        // ★타임아웃↔회신 레이스 좁히기(리뷰 fix 5)★: due 산출(락 해제)과 여기 사이에 회신이 도착해 계약이
+        //   닫혔을 수 있다 — 그러면 발신자는 회신을 받고도 "회신 없음" 통지를 뒤이어 받는다(모순된 통지).
+        //   파킹 **직전**에 장부를 다시 보고 닫혔으면 통지를 접는다. 남는 잔여: 이 확인과 park 가 별개 락
+        //   구간이라 그 사이(마이크로초)에 닫히는 경우는 여전히 통지가 나간다 — 한 락으로 묶으려면 park 를
+        //   장부 안으로 끌어와야 해(관심사 혼합) 여기선 창을 좁히는 선에서 멈춘다.
+        let closed_since_collection = {
+            let st = self.state.lock().expect("messaging state poisoned");
+            st.ledger.is_request_closed(&due.request_id)
+        };
+        if closed_since_collection {
+            tracing::debug!(
+                request_id = %due.request_id,
+                "기한 초과 통지 취소 — 산출 후 파킹 전에 회신이 도착해 계약이 닫힘(spec §3)"
+            );
+            return;
+        }
+
+        let recipient = &due.sender;
+        // ★notice id 도 같은 충돌 검사를 탄다(round-final fix 2)★ — 아래 `draw_daemon_msg_id` 주석.
+        let drawn = self.draw_daemon_msg_id();
+        if let Some(collided) = &drawn.collided {
+            // 락 밖 로깅(모듈 헤더 규율).
+            tracing::error!(
+                collided = %collided,
+                replacement = %drawn.id,
+                still_colliding = drawn.still_colliding,
+                "notice id 충돌 — 새 id 로 1회 재시도(ADR-0103 · 사실상 불가한 경로라 난수/장부 배선을 의심할 것)"
+            );
+        }
+        let notice_id = drawn.id;
+        // 이름이 지금 유일 도달로 풀리면 그쪽 도어벨도 누른다(발신자가 죽고 같은 이름이 재스폰된 경우).
+        let by_name = unique_reachable_in(roster, recipient);
+        let hint = format!("notice for '{recipient}' parked until that agent can receive it.");
+        let _ = self.park_pending(
+            &notice_id,
+            NOTICE_SENDER_LABEL,
+            daemon_identity(),
+            Entrance::Daemon,
+            recipient,
+            body,
+            hint,
+            Some(due.sender_id),
+            ParkKind::Notice,
+            &SendMeta::default(),
+        );
+        // 도어벨(락 밖) — idle 이면 그 자리에서(다른 스레드) 배달되고, 턴 중이면 소비 측 게이트가 스킵해
+        //   파킹이 유지된다(판정은 소비 측 한 곳 — fix 4 와 같은 분업). 죽은 id 로 눌러도 무해한 no-op 다.
+        self.request_flush(due.sender_id);
+        if let Some(t) = by_name.filter(|t| t.id != due.sender_id) {
+            self.request_flush(t.id);
+        }
+    }
+
+    /// ★데몬 자가 발신(`<notice>`)의 msg_id 를 발송과 **같은 충돌 검사**로 뽑는다(round-final fix 2)★.
+    ///
+    /// ★왜 notice 도 검사하나(load-bearing)★: 예전엔 `new_msg_id()` 결과를 그대로 썼다 — 에이전트 발송만
+    ///   `Ledger::msg_id_in_use` 를 통과하고 **데몬이 만든 id 는 무검사**였다. msg_id 는 이력 레코드 키
+    ///   ((msg_id, to))이자 관측 상관 키라, notice id 가 기존 id 와 겹치면 `transition` 이 남의 레코드를 집고
+    ///   장부가 두 메시지를 한 id 로 뭉갠다 — 발신 주체가 데몬이라고 덜 해롭지 않다. 그래서 같은 검사를
+    ///   같은 규율(한 락 구간 검사 + **1회** 재-draw)로 태운다.
+    /// ★두 번째도 겹치면 그 id 를 그대로 쓴다(notice 만의 규칙)★: 에이전트 발송은 `IdCollision` 으로 반려해도
+    ///   호출자가 재시도하면 그만이지만, notice 는 **버릴 수 없다** — 회신 계약 통지가 사라지면 계약이 조용히
+    ///   반쪽 난다(보관함 cap 예외를 둔 이유와 같다). 관측상 오염(이력 앨리어싱)이 통지 유실보다 낫다. 그
+    ///   상태는 `still_colliding` 으로 노출해 호출자가 락 밖에서 error 로 남긴다.
+    /// ★남는 창★: 검사와 실제 record(`park_pending`) 사이의 TOCTOU 창은 **발송 경로와 동일**하고, 전면
+    ///   예약을 두지 않기로 한 근거는 `handle_single_send` 의 예약 지점 주석이 정본이다(중복 서술 금지).
+    fn draw_daemon_msg_id(&self) -> DrawnMsgId {
+        self.draw_daemon_msg_id_with(new_msg_id)
+    }
+
+    /// 위 함수의 **테스트 seam** — id 생성기를 주입해 충돌 분기를 결정적으로 단언한다(난수로는 36^8 분의 1
+    ///   확률이라 재현 불가). 주입 클로저는 락 보유 중 불리므로 순수해야 한다(테스트는 미리 만든 목록에서
+    ///   꺼내기만 한다).
+    fn draw_daemon_msg_id_with(&self, mut draw: impl FnMut() -> String) -> DrawnMsgId {
+        let st = self.state.lock().expect("messaging state poisoned");
+        let first = draw();
+        if !st.ledger.msg_id_in_use(&first) {
+            return DrawnMsgId {
+                id: first,
+                collided: None,
+                still_colliding: false,
+            };
+        }
+        let second = draw();
+        let still_colliding = st.ledger.msg_id_in_use(&second);
+        DrawnMsgId {
+            id: second,
+            collided: Some(first),
+            still_colliding,
+        }
+    }
+
+    /// 봉투를 **현재** 전역 포맷으로 감싼다(단일 wrap point ADR-0096). 속성(`fields`)은 호출자가 만든다 —
+    ///   즉시 배달은 `SendMeta`, flush 배달은 파킹 payload 에서 복원한 같은 메타로(두 경로 동일 봉투, C3).
+    fn wrap_now(&self, sender: &str, msg_id: &str, body: &str, fields: &EnvelopeFields) -> String {
         let format: EnvelopeFormat = self.registry.envelope_format();
-        wrap_message(sender, msg_id, body, format, &EnvelopeFields::default())
+        wrap_message(sender, msg_id, body, format, fields)
     }
 
     /// 성공 주입 관측 레코드 발행(ADR-0088) — 락 밖. registry.record_delivery 가 observer 규율을 갖는다.
@@ -941,6 +1398,25 @@ impl MessagingService {
             .collect()
     }
 
+    /// 관측/테스트용(C3) — 아직 회신 안 온 request 계약 수. 계약 오픈/닫기/회수를 단언한다.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn open_request_count(&self) -> usize {
+        let st = self.state.lock().expect("messaging state poisoned");
+        st.ledger.open_request_count()
+    }
+
+    /// 관측/테스트용(C3) — 장부 이력 스냅샷 `(msg_id, from, to, status)`(오래된 순). msg_id 를 모르는
+    ///   단언(데몬이 만든 notice 가 장부에 남았나 등)에 쓴다.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn ledger_snapshot(&self) -> Vec<(String, String, String, DeliveryStatus)> {
+        let st = self.state.lock().expect("messaging state poisoned");
+        st.ledger
+            .all_records()
+            .iter()
+            .map(|r| (r.msg_id.clone(), r.from.clone(), r.to.clone(), r.status))
+            .collect()
+    }
+
     /// 관측/테스트용 — 수신자 큐 현재 길이.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn parked_len(&self, recipient: &str) -> usize {
@@ -955,6 +1431,15 @@ impl MessagingService {
         let st = self.state.lock().expect("messaging state poisoned");
         st.mailbox.msg_ids(recipient)
     }
+
+    /// 테스트 전용(C3 리뷰 fix 4) — 파킹 항목 하나의 payload 를 **의도적으로 손상**시킨다. 깨진 항목이
+    ///   flush 배치를 중단시키지 않고 그 항목만 폴백 봉투로 열화되는지 실제 경로로 단언하는 seam.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn corrupt_parked_payload_for_test(&self, recipient: &str, idx: usize) {
+        let mut st = self.state.lock().expect("messaging state poisoned");
+        st.mailbox
+            .corrupt_envelope_for_test(recipient, idx, "CORRUPT-PAYLOAD".to_string());
+    }
 }
 
 /// 파킹 payload — flush 주입 시점에 봉투 조립·관측 레코드 발행에 필요한 최소 메타(sender 이름·발신자
@@ -965,13 +1450,32 @@ impl MessagingService {
 /// ★왜 from/entrance 도 나르나★: 파킹→flush 자동 배달도 배달 경계 관측(ADR-0088)의 대상이다 — 하네스가
 ///   "누가 누구에게 배달됐나" 를 flush 경로에서도 회수해야 한다(파킹→스폰→자동배달 acceptance, spec §7).
 ///   그러려면 원래 발신자 신원(BoundIdentity)과 입구를 flush 시점까지 보존해야 한다.
-/// ★인코딩★: `<sender_len>\n<from_agent_id>\n<from_epoch>\n<entrance>\n<sender><body>` — 앞 4줄은 개행
-///   없는 필드(uuid/숫자/`mcp`|`cli`)라 개행으로 안전 분리, sender/body 경계만 길이 접두(개행 안전).
+/// ★왜 meta(회신 계약)도 나르나(C3 · load-bearing)★: 파킹된 request/회신이 늦게 배달될 때도 **즉시 배달과
+///   동일한 봉투 속성**(id/type/reply-by/in-reply-to)이 붙어야 한다. 안 나르면 파킹을 거친 request 는
+///   속성 없는 plain 메시지로 도착해 수신 LLM 이 회신할 id 를 모르고, 발신자만 기한 초과 notice 를 받는다
+///   (계약이 조용히 깨지는 최악 모드). 봉투를 park 시점에 굳히지 않는 설계의 대가로 재료를 나른다.
+/// ★인코딩(v1 태그 — C3 리뷰 fix 4 에서 버전 헤더 도입)★:
+///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<from_agent_id>\n<from_epoch>\n<entrance>\n<flags>\n`
+///   `<sender><reply_by><reply_to><body>`
+///   앞 8줄은 개행 없는 필드(숫자/uuid/짧은 리터럴)라 개행으로 안전 분리하고, 가변 문자열 4개는 **길이
+///   접두**로 경계를 잡는다(body·reply_to 에 개행이 들어와도 안전 — reply_to 는 에이전트 입력이라 임의
+///   문자열일 수 있다). 길이 0 = `None`(빈 문자열 `Some("")` 은 입구 검증이 이미 반려하므로 모호하지 않다).
+///
+/// ★왜 버전 태그인가(fix 4)★: 이 형식은 **프로세스 내부**에서만 쓰이지만(파킹은 인메모리라 데몬 재시작이면
+///   소멸), 형식이 바뀌는 순간 옛 payload 가 새 decode 를 만나면 조용히 오해석될 수 있다(길이 필드가 다른
+///   자리로 밀려 body 가 잘리는 식). 1글자 태그가 있으면 **모르는 버전 = 즉시 폴백**으로 갈라져, 오해석
+///   대신 "봉투 속성 잃고 body 만 남음"(보이는 열화)으로 실패한다. v2 영속화가 파킹을 디스크에 남기면
+///   이 태그가 마이그레이션 분기점이 된다.
+const PARK_PAYLOAD_VERSION: &str = "1";
+
 struct ParkPayload {
     sender_name: String,
     from: BoundIdentity,
     entrance: Entrance,
     body: String,
+    /// C3 회신 계약 메타(파싱된 Duration 은 **복원하지 않는다** — 계약은 발송 시점에 이미 장부에 열렸고,
+    ///   flush 가 필요한 건 봉투 속성뿐이다). 그래서 `reply_by` 는 raw 표기만 살아남는다.
+    meta: SendMeta,
 }
 
 impl ParkPayload {
@@ -979,22 +1483,39 @@ impl ParkPayload {
         let ent = match self.entrance {
             Entrance::Mcp => "mcp",
             Entrance::Cli => "cli",
+            Entrance::Daemon => "daemon",
         };
+        let reply_by = self.meta.reply_by_raw.as_deref().unwrap_or("");
+        let reply_to = self.meta.reply_to.as_deref().unwrap_or("");
+        let flags = if self.meta.request { "r" } else { "-" };
         format!(
-            "{}\n{}\n{}\n{}\n{}{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}{}{}",
+            PARK_PAYLOAD_VERSION,
             self.sender_name.len(),
+            reply_by.len(),
+            reply_to.len(),
             self.from.agent_id,
             self.from.epoch,
             ent,
+            flags,
             self.sender_name,
+            reply_by,
+            reply_to,
             self.body
         )
     }
 
     /// encode 역연산. 형식이 깨지면(있을 수 없음 — 우리 인코딩) 전체를 body 로 폴백(조용한 유실보다 낫다).
+    ///
+    /// ★절대 패닉하지 않는다(fix 4 · load-bearing)★: 이 함수는 flush 배치 루프 **안에서 항목마다** 불린다 —
+    ///   여기서 패닉하면 그 배치의 나머지 항목이 통째로 날아가고(release 는 panic=abort 라 데몬 자체가 죽는다)
+    ///   깨진 항목 하나가 멀쩡한 메시지들을 끌고 간다. 그래서 모든 실패 경로가 **항목 단위 폴백**으로 끝난다:
+    ///   길이 필드가 거짓이거나(합이 남은 길이 초과) **char 경계를 안 가르거나**(멀티바이트 중간 절단 —
+    ///   `split_at` 이 패닉하는 그 경우) 버전이 모르는 값이면, 봉투 속성을 잃되 원문을 body 로 살려 보낸다.
+    ///   덕분에 배치의 다른 항목은 정상 배달된다(테스트: corrupt 항목 1개가 배치를 중단시키지 않음).
     fn decode(s: &str) -> Self {
-        // 앞 4개 개행 필드 + 나머지(sender+body). splitn(5) 로 body 안 개행을 보존.
-        let mut it = s.splitn(5, '\n');
+        // 버전 + 앞 7개 개행 필드 + 나머지(sender+reply_by+reply_to+body). splitn(9) 로 body 안 개행을 보존.
+        let mut it = s.splitn(9, '\n');
         let fallback = || Self {
             sender_name: String::new(),
             from: BoundIdentity {
@@ -1003,35 +1524,141 @@ impl ParkPayload {
             },
             entrance: Entrance::Cli,
             body: s.to_string(),
+            meta: SendMeta::default(),
         };
-        let (Some(len_str), Some(id_str), Some(ep_str), Some(ent_str), Some(rest)) =
-            (it.next(), it.next(), it.next(), it.next(), it.next())
+        let (
+            Some(ver),
+            Some(sender_len),
+            Some(rb_len),
+            Some(rt_len),
+            Some(id_str),
+            Some(ep_str),
+            Some(ent_str),
+            Some(flags),
+            Some(rest),
+        ) = (
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+        )
         else {
             return fallback();
         };
-        let (Ok(len), Ok(agent_id), Ok(epoch)) = (
-            len_str.parse::<usize>(),
+        // 모르는 버전 = 오해석 금지(위 상수 주석) — 폴백으로 갈라 보이는 열화로 실패한다.
+        if ver != PARK_PAYLOAD_VERSION {
+            return fallback();
+        }
+        // ★enum 은 **엄격 파싱**한다(round-final fix 3 · load-bearing)★: 예전엔 모르는 입구 문자열이 조용히
+        //   `Cli` 로, 모르는 플래그가 조용히 "request 아님" 으로 떨어졌다. 그건 길이 필드가 깨졌을 때와 같은
+        //   종류의 손상인데 **혼자만 다른 실패 모드**(폴백이 아니라 임의 재해석)를 갖는다는 뜻이라,
+        //   `<message>` 로 나가야 할 게 관측상 다른 입구로 기록되거나 request 봉투(id/reply-by)를 잃은 채
+        //   plain 으로 도착한다 — 후자는 수신 LLM 이 회신할 id 를 모르는 계약 파손이다. 어휘 밖 값은 손상의
+        //   증거이므로 길이 손상과 **같은 항목 단위 폴백**으로 보낸다(조용한 재해석 금지).
+        let (Some(entrance), Some(request)) = (parse_entrance(ent_str), parse_request_flag(flags))
+        else {
+            return fallback();
+        };
+        let (Ok(sender_len), Ok(rb_len), Ok(rt_len), Ok(agent_id), Ok(epoch)) = (
+            sender_len.parse::<usize>(),
+            rb_len.parse::<usize>(),
+            rt_len.parse::<usize>(),
             id_str.parse::<AgentId>(),
             ep_str.parse::<u32>(),
         ) else {
             return fallback();
         };
-        if rest.len() < len {
+        // 길이 합이 남은 문자열을 넘으면 인코딩이 깨진 것 — 폴백(패닉 대신).
+        let Some(total) = sender_len
+            .checked_add(rb_len)
+            .and_then(|v| v.checked_add(rt_len))
+        else {
+            return fallback();
+        };
+        if rest.len() < total {
             return fallback();
         }
-        let (sender, body) = rest.split_at(len);
+        // ★char 경계 검증(fix 4)★: 길이는 우리가 쓴 **바이트** 길이라 정상 payload 에선 항상 경계와 맞지만,
+        //   payload 가 깨졌다면(외부 주입·형식 드리프트) 멀티바이트 문자 중간을 가리킬 수 있고 그때
+        //   `split_at` 은 **패닉**한다. 세 절단점을 모두 미리 확인하고, 하나라도 어긋나면 폴백한다.
+        let cut1 = sender_len;
+        let cut2 = cut1 + rb_len;
+        let cut3 = cut2 + rt_len;
+        if !rest.is_char_boundary(cut1)
+            || !rest.is_char_boundary(cut2)
+            || !rest.is_char_boundary(cut3)
+        {
+            return fallback();
+        }
+        let (sender, tail) = rest.split_at(cut1);
+        let (reply_by, tail) = tail.split_at(rb_len);
+        let (reply_to, body) = tail.split_at(rt_len);
         Self {
             sender_name: sender.to_string(),
             from: BoundIdentity { agent_id, epoch },
-            entrance: if ent_str == "mcp" {
-                Entrance::Mcp
-            } else {
-                Entrance::Cli
-            },
+            entrance,
             body: body.to_string(),
+            meta: SendMeta {
+                request,
+                reply_by_raw: (!reply_by.is_empty()).then(|| reply_by.to_string()),
+                // 파싱값은 복원하지 않는다(위 struct 주석 — flush 는 표기만 필요).
+                reply_by: None,
+                reply_to: (!reply_to.is_empty()).then(|| reply_to.to_string()),
+            },
         }
     }
 }
+
+/// `ParkPayload` 의 입구 어휘 ↔ enum(**엄격** — 어휘 밖은 `None` = 손상 신호, fix 3). `encode` 의 리터럴과
+///   한 쌍이라 입구 종류가 늘면 둘을 함께 고친다(어긋나면 정상 payload 가 폴백돼 round-trip 테스트가 잡는다).
+fn parse_entrance(s: &str) -> Option<Entrance> {
+    match s {
+        "mcp" => Some(Entrance::Mcp),
+        "cli" => Some(Entrance::Cli),
+        "daemon" => Some(Entrance::Daemon),
+        _ => None,
+    }
+}
+
+/// `ParkPayload` 의 request 플래그 어휘 ↔ bool(**엄격**). `r` = request, `-` = 통보/회신, 그 밖 = 손상.
+fn parse_request_flag(s: &str) -> Option<bool> {
+    match s {
+        "r" => Some(true),
+        "-" => Some(false),
+        _ => None,
+    }
+}
+
+/// ★데몬 자가 발신의 신원(C3)★ — `<notice>` 에는 발신 에이전트가 없다. 관측 레코드(`DeliveryObservation.from`)
+///   가 신원을 요구하므로 **nil AgentId** 를 데몬 출처 표식으로 쓴다(어떤 실제 에이전트와도 겹치지 않는다).
+///   `Entrance::Daemon` 과 짝을 이뤄 "이건 인프라 통지" 를 레코드만으로 판별하게 한다.
+fn daemon_identity() -> BoundIdentity {
+    BoundIdentity {
+        agent_id: AgentId::nil(),
+        epoch: 0,
+    }
+}
+
+/// `draw_daemon_msg_id` 결과 — 선택된 id + 관측용 충돌 흔적(로깅은 **락 밖** 호출자가 한다 — 모듈 헤더 규율).
+struct DrawnMsgId {
+    /// 실제로 쓸 id(검사를 통과했거나, 재-draw 까지 하고도 걸린 최후의 값).
+    id: String,
+    /// 첫 draw 가 장부와 충돌해 버려진 경우 그 값 — 조사 단서는 **충돌한 쪽**에 있다(ingress 재시도 로그와
+    ///   같은 규율: 대체 id 만 남기면 무엇과 부딪혔는지 추적 불가).
+    collided: Option<String>,
+    /// 재-draw 한 id **마저** 충돌했나. true = 난수/장부 배선 의심 신호지만, notice 는 그래도 내보낸다.
+    still_colliding: bool,
+}
+
+// ★기간 표기 역산(duration_notation)은 제거됐다(C3 리뷰 fix 6)★: `Duration` → 표기 복원은 정규화라
+//   `"60m"` 으로 보낸 기한을 `"1h"` 로 통지해 봉투 속성(`reply-by="60m"`)과 문구가 어긋났다. 이제 장부가
+//   발신자 표기를 원본째 보관하고(ledger.rs `RequestEntry.reply_by`) 통지는 그걸 그대로 쓴다 — 역산 함수가
+//   다시 생기면 같은 불일치가 재발한다.
 
 /// `to`(이름 또는 AgentId 문자열) → 산·도달 가능 수신자(LiveAgent). 매치 규칙(ingress::resolve_recipient
 ///   미러 — F2): AgentId 문자열 정확 일치 우선 → 이름 정확 일치. 동명 다수·부재는 여기선 None 으로 접고
@@ -1109,11 +1736,15 @@ mod tests {
         /// roster 밖 id 의 canonical_name override(비-도달 수신자 = TUI 시나리오 — finding 4). roster 에
         ///   없어도 이 맵에 있으면 canonical_name 이 그 이름을 돌려준다(로스터엔 안 뜨는 산 에이전트 모사).
         canonical_overrides: StdMutex<std::collections::HashMap<AgentId, String>>,
-        /// live_reachable_agents 조회 횟수(late-appearance 스크립트용).
+        /// live_reachable_agents 조회 횟수(late-appearance 스크립트용 + sweep 스냅샷 1회 단언 — fix 8).
         roster_calls: StdMutex<usize>,
         /// 세팅되면 **첫 조회 이후**부터 이 roster 를 돌려준다(첫 조회 = resolve 는 원래 roster, 이후 =
         ///   self_heal 이 보는 late-appearance roster). finding 3 TOCTOU self-heal 재현용.
         roster_after_first: StdMutex<Option<Vec<LiveAgent>>>,
+        /// ★일회성 roster 조회 hook(fix 5 레이스 재현)★ — 로스터를 뜨는 **그 순간** 다른 일이 벌어진 상황을
+        ///   결정적으로 만든다(예: sweep 의 due 산출 뒤·notice 파킹 전에 회신이 도착). 한 번 쓰고 비우므로
+        ///   hook 안에서 다시 발송해도 재귀하지 않는다.
+        on_roster: StdMutex<Option<Box<dyn Fn() + Send>>>,
     }
 
     impl FakeDeliveryPort {
@@ -1127,7 +1758,16 @@ mod tests {
                 canonical_overrides: StdMutex::new(std::collections::HashMap::new()),
                 roster_calls: StdMutex::new(0),
                 roster_after_first: StdMutex::new(None),
+                on_roster: StdMutex::new(None),
             }
+        }
+        /// 다음 roster 조회 때 **한 번만** 실행할 hook(fix 5 레이스 재현).
+        fn arm_on_next_roster(&self, f: Box<dyn Fn() + Send>) {
+            *self.on_roster.lock().unwrap() = Some(f);
+        }
+        /// live_reachable_agents 총 호출 수(fix 8 — sweep 이 틱당 1회만 뜨는지 단언).
+        fn roster_call_count(&self) -> usize {
+            *self.roster_calls.lock().unwrap()
         }
         /// roster 밖 id 에 canonical 이름을 부여(비-도달 산 에이전트 모사 — finding 4).
         fn set_canonical(&self, id: AgentId, name: &str) {
@@ -1191,6 +1831,11 @@ mod tests {
                 *c += 1;
                 i
             };
+            // 일회성 hook — 락을 놓고 부른다(hook 이 다시 발송해도 자기 락에 걸리지 않게).
+            let hook = self.on_roster.lock().unwrap().take();
+            if let Some(f) = hook {
+                f();
+            }
             // 첫 조회(call 0) = 원래 roster(resolve 가 봄). 이후 = armed roster(있으면 — late appearance).
             if call >= 1 {
                 if let Some(r) = self.roster_after_first.lock().unwrap().as_ref() {
@@ -1356,7 +2001,15 @@ mod tests {
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
         let out = svc
-            .handle_single_send("m1", ident(), "bob", "alice", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "bob",
+                "alice",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("no reject");
         assert_eq!(out, SendOutcome::Delivered);
         assert_eq!(
@@ -1378,7 +2031,15 @@ mod tests {
         let (svc, port) = svc();
         port.set_roster(vec![]); // 아무도 없음.
         let out = svc
-            .handle_single_send("m1", ident(), "bob", "ghost", "hi", Entrance::Cli)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "bob",
+                "ghost",
+                "hi",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
             .expect("파킹은 반려 아님");
         assert!(matches!(out, SendOutcome::Parked { .. }), "부재 → 파킹");
         assert_eq!(
@@ -1398,7 +2059,15 @@ mod tests {
         port.set_roster(vec![alice]);
         port.fail_at(&[0]); // 첫(유일) inject 실패.
         let out = svc
-            .handle_single_send("m1", ident(), "bob", "alice", "hi", Entrance::Cli)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "bob",
+                "alice",
+                "hi",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
             .expect("파킹은 반려 아님");
         assert!(
             matches!(out, SendOutcome::Parked { .. }),
@@ -1425,6 +2094,7 @@ mod tests {
                 "late",
                 &format!("body{i}"),
                 Entrance::Mcp,
+                &SendMeta::default(),
             )
             .expect("park");
         }
@@ -1456,8 +2126,16 @@ mod tests {
         let (svc, port) = svc();
         port.set_roster(vec![]);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
-            svc.handle_single_send(m, ident(), "s", "late", &format!("b{i}"), Entrance::Mcp)
-                .expect("park");
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "late",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
         }
         let (late_id, late) = live("late");
         // finding 2: flush_for 는 로스터 유일 도달 재검증 후 진행.
@@ -1513,8 +2191,16 @@ mod tests {
         // 오래된 파킹 3건(m0,m1,m2) — 로스터 부재라 파킹된다.
         port.set_roster(vec![]);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
-            svc.handle_single_send(m, ident(), "s", "late", &format!("b{i}"), Entrance::Mcp)
-                .expect("park");
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "late",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
         }
         // ★finding 2 정합★: flush_for 는 execution 시점 로스터로 "late" 를 유일 도달로 재검증하므로, flush
         //   호출 직전 "late" 를 올린다. 단 hook 의 동시 sends 는 **부재**여야 파킹되므로, hook 이 idx 0
@@ -1535,6 +2221,7 @@ mod tests {
                         "late",
                         &format!("c{i}"),
                         Entrance::Mcp,
+                        &SendMeta::default(),
                     );
                 }
                 // 2차 flush 재검증이 통과하도록 다시 유일 도달로 되돌린다.
@@ -1600,12 +2287,28 @@ mod tests {
         let (svc, port) = svc();
         port.set_roster(vec![]);
         for i in 0..100 {
-            svc.handle_single_send(&format!("m{i}"), ident(), "s", "full", "x", Entrance::Mcp)
-                .expect("cap 이내 파킹");
+            svc.handle_single_send(
+                &format!("m{i}"),
+                ident(),
+                "s",
+                "full",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("cap 이내 파킹");
         }
         assert_eq!(svc.parked_len("full"), 100);
         let rej = svc
-            .handle_single_send("over", ident(), "s", "full", "x", Entrance::Mcp)
+            .handle_single_send(
+                "over",
+                ident(),
+                "s",
+                "full",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect_err("cap 초과는 반려");
         assert_eq!(rej, SendReject::MailboxFull);
         assert_eq!(svc.parked_len("full"), 100, "반려된 건 큐에 안 들어감");
@@ -1621,8 +2324,16 @@ mod tests {
         // 파킹 후 TTL 초과 sweep → ledger pending→expired(장부 잔존, spec §5). 즉시 주입 없음이 전제.
         let (svc, port) = svc();
         port.set_roster(vec![]);
-        svc.handle_single_send("m1", ident(), "s", "ghost", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "ghost",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Pending]);
         // TTL(24h) + 1s 뒤 sweep — 파킹 시각은 handle_single_send 내부의 Instant::now() 라, 여기선 그보다
         //   충분히 미래인 now 를 준다. mailbox PARK_TTL 미러(PARK_TTL_FOR_TEST, ADR-0105) 사용 — 값
@@ -1655,6 +2366,7 @@ mod tests {
                 &tui_id.to_string(), // exact AgentId 지목
                 "hi",
                 Entrance::Mcp,
+                &SendMeta::default(),
             )
             .expect("park");
         assert!(matches!(out, SendOutcome::Parked { .. }));
@@ -1694,7 +2406,15 @@ mod tests {
         let (late_id, late) = live("late");
         port.arm_roster_after_first_call(vec![late]);
         let out = svc
-            .handle_single_send("m1", ident(), "s", "late", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "s",
+                "late",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("park");
         assert!(
             matches!(out, SendOutcome::Parked { .. }),
@@ -1725,7 +2445,15 @@ mod tests {
         let (_b, dup_b) = live("dup");
         port.arm_roster_after_first_call(vec![dup_a, dup_b]);
         let out = svc
-            .handle_single_send("m1", ident(), "s", "dup", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "s",
+                "dup",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("park");
         assert!(matches!(out, SendOutcome::Parked { .. }));
         // 동명 다수라 self-heal 안 함 → 여전히 파킹(pending).
@@ -1755,8 +2483,16 @@ mod tests {
         //   재검증한다(임의 incarnation 배달 금지, send-side AMBIGUOUS 정합).
         let (svc, port) = svc();
         port.set_roster(vec![]); // 부재 → park.
-        svc.handle_single_send("m1", ident(), "s", "dup", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "dup",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("dup"), 1);
         // execution 시점 로스터엔 동명 2개(ambiguous).
         let (dup_id, dup_a) = live("dup");
@@ -1785,8 +2521,16 @@ mod tests {
         //   는 skip 하고 메일을 파킹 상태로 남긴다 — 죽은 대상에 주입 시도(stale id)를 하지 않는다.
         let (svc, port) = svc();
         port.set_roster(vec![]); // 부재 → park.
-        svc.handle_single_send("m1", ident(), "s", "gone", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "gone",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("gone"), 1);
         // execution 시점에도 로스터엔 그 이름이 없음(enqueue 사이 죽음 — stale id 로 호출).
         let (stale_id, _gone) = live("gone");
@@ -1811,8 +2555,16 @@ mod tests {
         //   갱신되는** 핵심 축은 미검증이었다 — 이 테스트가 그 갭을 메운다.)
         let (svc, port) = svc();
         port.set_roster(vec![]); // 부재 → park(이름 앞으로 파킹).
-        svc.handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("recv"), 1);
 
         // ── respawn 모사: 같은 이름 "recv" 지만 enqueue 때와 다른 새 AgentId 로 로스터에 등장 ──────────
@@ -1870,6 +2622,7 @@ mod tests {
             from,
             entrance: Entrance::Mcp,
             body: "line1\nline2".to_string(),
+            meta: SendMeta::default(),
         };
         let d = ParkPayload::decode(&p.encode());
         assert_eq!(d.sender_name, "qa-alpha");
@@ -1877,6 +2630,60 @@ mod tests {
         assert_eq!(d.from.agent_id, from.agent_id);
         assert_eq!(d.from.epoch, 3);
         assert!(matches!(d.entrance, Entrance::Mcp));
+        assert_eq!(d.meta, SendMeta::default(), "통보는 계약 메타가 비어야");
+    }
+
+    #[test]
+    fn park_payload_roundtrip_preserves_contract_meta_with_newlines() {
+        // ★C3★: request/회신 메타가 park→flush 를 무손실로 건넌다(늦은 배달도 같은 봉투 — 모듈 헤더).
+        //   reply_to 는 **에이전트 입력**이라 개행·멀티바이트가 섞일 수 있다 — 길이 접두 인코딩이 이를 견딘다.
+        let from = BoundIdentity {
+            agent_id: AgentId::new_v4(),
+            epoch: 7,
+        };
+        let meta = SendMeta {
+            request: true,
+            reply_by_raw: Some("10m".to_string()),
+            // 파싱값은 park 를 건너지 않는다(계약은 이미 장부에 열렸다 — ParkPayload 주석).
+            reply_by: Some(Duration::from_secs(600)),
+            reply_to: None,
+        };
+        let p = ParkPayload {
+            sender_name: "발신자-한글".to_string(),
+            from,
+            entrance: Entrance::Daemon,
+            body: "본문\n둘째 줄".to_string(),
+            meta: meta.clone(),
+        };
+        let d = ParkPayload::decode(&p.encode());
+        assert_eq!(
+            d.sender_name, "발신자-한글",
+            "멀티바이트 sender 경계(바이트 길이 접두)"
+        );
+        assert_eq!(d.body, "본문\n둘째 줄");
+        assert!(matches!(d.entrance, Entrance::Daemon));
+        assert!(d.meta.request, "request 플래그 복원");
+        assert_eq!(d.meta.reply_by_raw.as_deref(), Some("10m"), "표기 복원");
+        assert_eq!(d.meta.reply_by, None, "파싱값은 의도적으로 미복원");
+        assert_eq!(d.meta.reply_to, None);
+
+        // 회신 축(개행 포함 reply_to) — 길이 접두 경계 검증.
+        let reply = ParkPayload {
+            sender_name: "s".to_string(),
+            from,
+            entrance: Entrance::Cli,
+            body: "b".to_string(),
+            meta: SendMeta {
+                request: false,
+                reply_by_raw: None,
+                reply_by: None,
+                reply_to: Some("m-abc\nxyz".to_string()),
+            },
+        };
+        let d = ParkPayload::decode(&reply.encode());
+        assert_eq!(d.meta.reply_to.as_deref(), Some("m-abc\nxyz"));
+        assert_eq!(d.body, "b");
+        assert!(!d.meta.request);
     }
 
     // ── C2: idle 게이트(spec §5 주입 타이밍 · ADR-0104 결정 3) ────────────────────────────────
@@ -1890,7 +2697,15 @@ mod tests {
         port.set_roster(vec![alice]);
         gate.set_busy(alice_id, 0);
         let out = svc
-            .handle_single_send("m1", ident(), "bob", "alice", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "bob",
+                "alice",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("busy 파킹은 반려 아님");
         match out {
             SendOutcome::Parked { hint } => {
@@ -1920,7 +2735,15 @@ mod tests {
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
         let out = svc
-            .handle_single_send("m1", ident(), "bob", "alice", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "bob",
+                "alice",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("no reject");
         assert_eq!(out, SendOutcome::Delivered);
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
@@ -1939,7 +2762,15 @@ mod tests {
         port.set_roster(vec![alice]);
         gate.set_busy(alice_id, 1); // 옛/다른 incarnation 만 busy 로 알려짐
         let out = svc
-            .handle_single_send("m1", ident(), "bob", "alice", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "bob",
+                "alice",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("no reject");
         assert_eq!(
             out,
@@ -1958,7 +2789,15 @@ mod tests {
         gate.set_busy(recv_id, 0);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
             let out = svc
-                .handle_single_send(m, ident(), "s", "recv", &format!("b{i}"), Entrance::Mcp)
+                .handle_single_send(
+                    m,
+                    ident(),
+                    "s",
+                    "recv",
+                    &format!("b{i}"),
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
                 .expect("park");
             assert!(matches!(out, SendOutcome::Parked { .. }));
         }
@@ -1993,7 +2832,15 @@ mod tests {
         // 첫 조회(게이트 확인)만 busy, 그 뒤(재확인)는 idle → self-heal 발동.
         gate.arm_idle_after_call(1);
         let out = svc
-            .handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "s",
+                "recv",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("park");
         assert!(
             matches!(out, SendOutcome::Parked { .. }),
@@ -2019,8 +2866,16 @@ mod tests {
         let (recv_id, recv) = live("recv");
         port.set_roster(vec![recv]);
         gate.set_busy(recv_id, 0);
-        svc.handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("recv"), 1, "여전히 busy → 파킹 유지");
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Pending]);
         assert!(port.injected_bodies().is_empty());
@@ -2037,8 +2892,16 @@ mod tests {
         // 먼저 부재 상태로 3건 파킹(게이트 무관 경로).
         port.set_roster(vec![]);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
-            svc.handle_single_send(m, ident(), "s", "recv", &format!("b{i}"), Entrance::Mcp)
-                .expect("park");
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "recv",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
         }
         // 등장했지만 턴 중 → flush 스킵(주입 0, 파킹 유지).
         port.set_roster(vec![recv]);
@@ -2082,8 +2945,16 @@ mod tests {
         // busy 상태에서 2건 파킹.
         gate.set_busy(recv_id, 0);
         for (i, m) in ["m0", "m1"].iter().enumerate() {
-            svc.handle_single_send(m, ident(), "s", "recv", &format!("b{i}"), Entrance::Mcp)
-                .expect("park");
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "recv",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
         }
         assert_eq!(svc.parked_len("recv"), 2);
         // 여전히 busy → flush 스킵. 큐·장부 그대로.
@@ -2114,7 +2985,15 @@ mod tests {
         gate.set_busy(id_a, 0);
         // exact-id 지목(동명 모호성을 의도적으로 통과) → busy 라 파킹.
         let out = svc
-            .handle_single_send("m1", ident(), "s", &id_a.to_string(), "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "s",
+                &id_a.to_string(),
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("park");
         assert!(matches!(out, SendOutcome::Parked { .. }));
         assert_eq!(svc.parked_len("dup"), 1, "park 키는 여전히 이름(dup)");
@@ -2144,8 +3023,16 @@ mod tests {
         let (old_id, old_agent) = live("recv");
         port.set_roster(vec![old_agent]);
         gate.set_busy(old_id, 0);
-        svc.handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("recv"), 1);
         // 재스폰: 옛 id 는 사라지고 같은 이름의 **새 AgentId** 가 등장.
         gate.clear();
@@ -2169,13 +3056,29 @@ mod tests {
         port.set_roster(vec![recv]);
         gate.set_busy(recv_id, 0);
         for (i, m) in ["m0", "m1"].iter().enumerate() {
-            svc.handle_single_send(m, ident(), "s", "recv", &format!("b{i}"), Entrance::Mcp)
-                .expect("park");
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "recv",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
         }
         // 턴 종료(게이트 idle) — 하지만 flush 를 아직 돌리지 않은 상태에서 새 발송이 들어온다.
         gate.clear();
         let out = svc
-            .handle_single_send("m2", ident(), "s", "recv", "b2", Entrance::Mcp)
+            .handle_single_send(
+                "m2",
+                ident(),
+                "s",
+                "recv",
+                "b2",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("no reject");
         assert!(
             matches!(out, SendOutcome::Parked { .. }),
@@ -2201,7 +3104,15 @@ mod tests {
         let (_id, recv) = live("recv");
         port.set_roster(vec![recv]);
         let out = svc
-            .handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
+            .handle_single_send(
+                "m1",
+                ident(),
+                "s",
+                "recv",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
             .expect("no reject");
         assert_eq!(out, SendOutcome::Delivered, "큐가 비면 즉시 주입");
         assert_eq!(port.injected_bodies().len(), 1);
@@ -2215,8 +3126,16 @@ mod tests {
         let (recv_id, recv) = live("recv");
         port.set_roster(vec![recv]);
         gate.set_busy(recv_id, 0);
-        svc.handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(
             bell.seen(),
             vec![recv_id],
@@ -2238,8 +3157,16 @@ mod tests {
         // 등장하지 않았으면 도어벨도 울리지 않는다(잉여 요청 억제 — 그 이름은 등장 flush 가 잡는다).
         let (svc, port, _gate, bell) = svc_gated_with_doorbell();
         port.set_roster(vec![]);
-        svc.handle_single_send("m1", ident(), "s", "ghost", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "ghost",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert!(bell.seen().is_empty(), "부재 그대로면 도어벨 없음");
         assert_eq!(svc.parked_len("ghost"), 1);
     }
@@ -2253,8 +3180,16 @@ mod tests {
         let (late_id, late) = live("late");
         port.set_roster(vec![]);
         port.arm_roster_after_first_call(vec![late]);
-        svc.handle_single_send("m1", ident(), "s", "late", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "late",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(
             bell.seen(),
             vec![late_id],
@@ -2277,8 +3212,16 @@ mod tests {
         let (id, agent) = live("old-name");
         port.set_roster(vec![agent]);
         gate.set_busy(id, 0);
-        svc.handle_single_send("m1", ident(), "s", "old-name", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "old-name",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("old-name"), 1, "발송 시점 이름 큐에 파킹");
 
         // 턴 중 rename — 같은 id, 새 canonical 이름.
@@ -2306,8 +3249,16 @@ mod tests {
         let (svc, port, _gate) = svc_gated();
         let (id, agent) = live("recv");
         port.set_roster(vec![]); // 부재 → 힌트 없는 파킹.
-        svc.handle_single_send("m1", ident(), "s", "somebody-else", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "somebody-else",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         port.set_roster(vec![agent]);
         svc.flush_for_agent(id);
         assert!(
@@ -2340,6 +3291,7 @@ mod tests {
                 &to.to_string(),
                 &format!("body-{msg_id}"),
                 Entrance::Mcp,
+                &SendMeta::default(),
             )
             .expect("park");
         }
@@ -2557,8 +3509,16 @@ mod tests {
         let t0 = Instant::now();
         tracker.mark_attached_for_test(id, 0);
         tracker.mark_busy_at_for_test(id, 0, t0);
-        svc.handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         assert_eq!(svc.parked_len("recv"), 1, "busy 라 파킹");
         assert!(
             port.injected_bodies().is_empty(),
@@ -2597,8 +3557,16 @@ mod tests {
         assert!(port.injected_bodies().is_empty(), "파킹 없으면 no-op");
         // 파킹이 있으면 id → 이름으로 풀려 배달된다.
         port.set_roster(vec![]);
-        svc.handle_single_send("m1", ident(), "s", "recv", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         let (_again, recv2) = live("recv");
         let recv2 = LiveAgent {
             id: recv_id,
@@ -2614,14 +3582,1091 @@ mod tests {
         // 이미 reap 된 id → canonical_name None → no-op(다음 등장 diff 가 잡는다).
         let (svc, port, _gate) = svc_gated();
         port.set_roster(vec![]);
-        svc.handle_single_send("m1", ident(), "s", "ghost", "hi", Entrance::Mcp)
-            .expect("park");
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "ghost",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
         svc.flush_for_agent(AgentId::new_v4());
         assert_eq!(
             svc.parked_len("ghost"),
             1,
             "미존재 id flush 는 무해한 no-op"
         );
+        assert!(port.injected_bodies().is_empty());
+    }
+    // ── C3: 회신 계약(request/reply/notice — spec §2·§3 · ADR-0103 결정 2/3) ─────────────────
+
+    /// request 발송 메타(기한 표기 + 파싱값 쌍 — SendMeta 주석의 "둘 다 나르는 이유").
+    fn req_meta(raw: &str, secs: u64) -> SendMeta {
+        SendMeta {
+            request: true,
+            reply_by_raw: Some(raw.to_string()),
+            reply_by: Some(Duration::from_secs(secs)),
+            reply_to: None,
+        }
+    }
+
+    /// 회신 발송 메타.
+    fn reply_meta(in_reply_to: &str) -> SendMeta {
+        SendMeta {
+            request: false,
+            reply_by_raw: None,
+            reply_by: None,
+            reply_to: Some(in_reply_to.to_string()),
+        }
+    }
+
+    #[test]
+    fn notice_uses_the_senders_own_notation_not_a_normalized_one() {
+        // ★리뷰 fix 6 회귀★: 예전엔 Duration 에서 표기를 역산해 `60m` 이 `1h` 로 통지됐다 — 봉투는
+        //   `reply-by="60m"` 인데 통지는 `기한(1h)` 이라 같은 계약이 두 표기로 보였다. 이제 발신자 표기를
+        //   장부가 원본째 들고 있다가 그대로 쓴다.
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "m-60m",
+            ident(),
+            "alice",
+            "ghost",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("60m", 3600),
+        )
+        .expect("parked");
+        svc.sweep(Instant::now() + Duration::from_secs(3601));
+        assert_eq!(
+            port.injected_bodies(),
+            vec!["<notice>요청 m-60m 기한(60m) 초과 — ghost 회신 없음</notice>".to_string()],
+            "봉투에 쓴 표기 그대로(1h 로 정규화 금지)"
+        );
+    }
+
+    #[test]
+    fn delivered_request_opens_contract_and_renders_request_envelope() {
+        // ★골든(즉시 배달)★: request 봉투 = from → id → type → reply-by 순서(spec §1 고정).
+        let (svc, port) = svc();
+        let (_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        let out = svc
+            .handle_single_send(
+                "m-req1",
+                ident(),
+                "qa-alpha",
+                "alice",
+                "코드 짜고 회신해",
+                Entrance::Mcp,
+                &req_meta("10m", 600),
+            )
+            .expect("delivered");
+        assert_eq!(out, SendOutcome::Delivered);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![concat!(
+                r#"<message from="qa-alpha" id="m-req1" type="request" reply-by="10m">"#,
+                "코드 짜고 회신해</message>"
+            )
+            .to_string()],
+            "request 봉투 골든(속성 순서·kebab-case)"
+        );
+        assert_eq!(
+            svc.open_request_count(),
+            1,
+            "배달된 request 는 계약이 열린다"
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-req1"),
+            vec![DeliveryStatus::Delivered]
+        );
+    }
+
+    #[test]
+    fn parked_request_opens_contract_too_and_keeps_envelope_on_flush() {
+        // ★spec §3 단계 2★: 계약은 **배달이든 파킹이든** 접수되면 열린다. 그리고 늦게 배달돼도 봉투 속성이
+        //   같아야 한다(안 그러면 수신자가 회신할 id 를 모른 채 발신자만 타임아웃 통지를 받는다).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        let out = svc
+            .handle_single_send(
+                "m-req2",
+                ident(),
+                "qa-alpha",
+                "bob",
+                "하고 알려줘",
+                Entrance::Mcp,
+                &req_meta("1h", 3600),
+            )
+            .expect("parked");
+        assert!(matches!(out, SendOutcome::Parked { .. }));
+        assert_eq!(
+            svc.open_request_count(),
+            1,
+            "파킹된 request 도 계약이 열린다"
+        );
+        assert_eq!(svc.ledger_statuses("m-req2"), vec![DeliveryStatus::Pending]);
+
+        // 등장 → flush. 봉투는 즉시 배달과 **동일**해야 한다.
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        svc.flush_for("bob", bob_id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![concat!(
+                r#"<message from="qa-alpha" id="m-req2" type="request" reply-by="1h">"#,
+                "하고 알려줘</message>"
+            )
+            .to_string()],
+            "파킹→flush 배달도 같은 request 봉투(C3 ParkPayload meta 보존)"
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-req2"),
+            vec![DeliveryStatus::Delivered]
+        );
+    }
+
+    #[test]
+    fn reply_envelope_carries_in_reply_to_immediate_and_flushed() {
+        // ★골든(회신)★: 발신 인자 reply_to → 수신 속성 in-reply-to(spec §1 표기 매핑). id/type 은 없다
+        //   (노출 원칙 — 회신은 회신할 대상이 아니다).
+        let (svc, port) = svc();
+        let (_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "m-rep1",
+            ident(),
+            "qa-bravo",
+            "alice",
+            "다 짰음",
+            Entrance::Mcp,
+            &reply_meta("m-7f3k"),
+        )
+        .expect("delivered");
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="qa-bravo" in-reply-to="m-7f3k">다 짰음</message>"#.to_string()],
+        );
+
+        // 파킹 경로도 동일 속성.
+        let (svc2, port2) = super::tests::svc();
+        port2.set_roster(vec![]);
+        svc2.handle_single_send(
+            "m-rep2",
+            ident(),
+            "qa-bravo",
+            "carol",
+            "늦은 회신",
+            Entrance::Cli,
+            &reply_meta("m-7f3k"),
+        )
+        .expect("parked");
+        let (carol_id, carol) = live("carol");
+        port2.set_roster(vec![carol]);
+        svc2.flush_for("carol", carol_id);
+        assert_eq!(
+            port2.injected_bodies(),
+            vec![
+                r#"<message from="qa-bravo" in-reply-to="m-7f3k">늦은 회신</message>"#.to_string()
+            ],
+            "파킹→flush 회신도 in-reply-to 를 유지"
+        );
+    }
+
+    #[test]
+    fn plain_send_envelope_is_unchanged_by_c3() {
+        // 회귀 방어: 통보는 여전히 속성 없는 plain 봉투(SendMeta::default()).
+        let (svc, port) = svc();
+        let (_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "s",
+            "alice",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("delivered");
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="s">hi</message>"#.to_string()]
+        );
+        assert_eq!(svc.open_request_count(), 0, "통보는 계약을 열지 않는다");
+    }
+
+    #[test]
+    fn correct_reply_id_closes_contract_and_marks_replied() {
+        // 엄격 매칭 성공 — 계약 닫힘 + 이력 Delivered→Replied 전이(전이 시각 = 회신 시각).
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![alice, bob]);
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("delivered");
+        assert_eq!(svc.open_request_count(), 1);
+
+        svc.handle_single_send(
+            "m-rep",
+            ident(),
+            "bob",
+            "alice",
+            "했음",
+            Entrance::Mcp,
+            &reply_meta("m-req"),
+        )
+        .expect("delivered");
+        assert_eq!(
+            svc.open_request_count(),
+            0,
+            "정확한 id 회신은 계약을 닫는다"
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-req"),
+            vec![DeliveryStatus::Replied],
+            "원본 레코드가 Replied 로 전이"
+        );
+    }
+
+    #[test]
+    fn wrong_reply_id_still_delivers_but_closes_nothing() {
+        // ★엄격 매칭(spec §2)★: 틀린 id 는 아무 것도 닫지 않는다 — 그래도 **회신 메시지 자체는 정상 배달**
+        //   되고 응답 shape 도 그대로다(반려로 승격하면 이미 배달된 메시지에 재시도가 붙어 중복이 난다).
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![alice, bob]);
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("delivered");
+
+        let out = svc
+            .handle_single_send(
+                "m-rep",
+                ident(),
+                "bob",
+                "alice",
+                "엉뚱한 id 로 회신",
+                Entrance::Mcp,
+                &reply_meta("m-nope"),
+            )
+            .expect("회신은 정상 배달돼야");
+        assert_eq!(out, SendOutcome::Delivered);
+        assert_eq!(svc.open_request_count(), 1, "틀린 id 는 계약을 못 닫는다");
+        assert_eq!(
+            svc.ledger_statuses("m-req"),
+            vec![DeliveryStatus::Delivered],
+            "원본은 여전히 미회신"
+        );
+        assert_eq!(
+            port.injected_bodies().len(),
+            2,
+            "request + 회신 둘 다 실제로 주입됐다"
+        );
+    }
+
+    #[test]
+    fn second_reply_to_closed_request_is_noop_and_still_delivers() {
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![alice, bob]);
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("delivered");
+        svc.handle_single_send(
+            "m-r1",
+            ident(),
+            "bob",
+            "alice",
+            "1차",
+            Entrance::Mcp,
+            &reply_meta("m-req"),
+        )
+        .expect("delivered");
+        svc.handle_single_send(
+            "m-r2",
+            ident(),
+            "bob",
+            "alice",
+            "2차",
+            Entrance::Mcp,
+            &reply_meta("m-req"),
+        )
+        .expect("2차 회신도 배달돼야");
+        assert_eq!(svc.open_request_count(), 0);
+        assert_eq!(port.injected_bodies().len(), 3, "3건 모두 주입");
+    }
+
+    #[test]
+    fn parked_request_reply_closes_contract_even_before_delivery() {
+        // 원본이 아직 pending(미주입)인데 회신이 도착 — 계약은 닫히고(정본은 추적) 이력은 anomaly 로 남는다
+        //   (ledger.rs ClosedHistoryAnomaly: 계약 닫힘과 이력 부기는 별개 관심사).
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "ghost",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("parked");
+        assert_eq!(svc.open_request_count(), 1);
+        svc.handle_single_send(
+            "m-rep",
+            ident(),
+            "ghost",
+            "alice",
+            "했음",
+            Entrance::Mcp,
+            &reply_meta("m-req"),
+        )
+        .expect("delivered");
+        assert_eq!(svc.open_request_count(), 0, "계약은 닫힌다");
+        assert_eq!(
+            svc.ledger_statuses("m-req"),
+            vec![DeliveryStatus::Pending],
+            "이력은 미주입 상태 유지(불법 간선 — anomaly 로 관측만)"
+        );
+    }
+
+    #[test]
+    fn rejected_request_does_not_leave_a_ghost_contract() {
+        // ★유령 타임아웃 방지★: cap 초과로 **접수조차 안 된** request 의 계약이 남으면, 보낸 적 없는 요청에
+        //   대해 기한 초과 notice 가 간다. 반려 갈래가 예약을 회수해야 한다.
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        for i in 0..100 {
+            svc.handle_single_send(
+                &format!("m{i}"),
+                ident(),
+                "s",
+                "ghost",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("cap 이내");
+        }
+        let rejected = svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "ghost",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        );
+        assert_eq!(rejected, Err(SendReject::MailboxFull));
+        assert_eq!(
+            svc.open_request_count(),
+            0,
+            "반려된 request 의 계약은 회수돼야(유령 타임아웃 금지)"
+        );
+        // sweep 을 기한 한참 뒤로 돌려도 notice 가 나오면 안 된다.
+        svc.sweep(Instant::now() + Duration::from_secs(3600));
+        assert!(
+            port.injected_bodies().is_empty(),
+            "반려분에 대한 notice 는 없어야"
+        );
+        // ★흔적째 제거(무계 증식 방지)★: 반려는 이력 레코드를 안 남기므로 추적을 "닫기" 만 하면 evict 될
+        //   계기가 영영 없다 — 같은 id 로 다시 시도할 수 있어야(= 추적에서 사라졌어야) 한다.
+        let retry = svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "alice",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        );
+        assert!(
+            !matches!(retry, Err(SendReject::IdCollision)),
+            "반려된 id 는 추적에 잔존하지 않아야(닫기가 아니라 제거): {retry:?}"
+        );
+    }
+
+    #[test]
+    fn reply_by_timeout_delivers_notice_to_sender_exactly_once() {
+        // ★spec §3 단계 4 · §1 notice 템플릿★: 기한 초과 → **발신자에게** notice. 두 번 sweep 해도 1회.
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "m-7f3k",
+            ident(),
+            "alice",
+            "qa-bravo",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("수신자 부재 → 파킹(계약은 열림)");
+        assert!(port.injected_bodies().is_empty(), "부재라 아직 주입 없음");
+
+        svc.sweep(Instant::now() + Duration::from_secs(601));
+        assert_eq!(
+            port.injected_bodies(),
+            vec!["<notice>요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음</notice>".to_string()],
+            "notice 골든(from 속성 없음 = 회신 대상 아님)"
+        );
+
+        // 이중 통지 방지(장부 notified 플래그).
+        svc.sweep(Instant::now() + Duration::from_secs(1200));
+        assert_eq!(port.injected_bodies().len(), 1, "notice 는 정확히 1회");
+    }
+
+    #[test]
+    fn replied_request_never_produces_a_timeout_notice() {
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![alice, bob]);
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("1m", 60),
+        )
+        .expect("delivered");
+        svc.handle_single_send(
+            "m-rep",
+            ident(),
+            "bob",
+            "alice",
+            "했음",
+            Entrance::Mcp,
+            &reply_meta("m-req"),
+        )
+        .expect("delivered");
+        svc.sweep(Instant::now() + Duration::from_secs(600));
+        assert_eq!(
+            port.injected_bodies().len(),
+            2,
+            "회신된 계약엔 notice 가 없다(request + reply 2건뿐)"
+        );
+    }
+
+    #[test]
+    fn request_without_reply_by_never_times_out() {
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        let meta = SendMeta {
+            request: true,
+            reply_by_raw: None,
+            reply_by: None,
+            reply_to: None,
+        };
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "ghost",
+            "해줘",
+            Entrance::Mcp,
+            &meta,
+        )
+        .expect("parked");
+        svc.sweep(Instant::now() + Duration::from_secs(100_000));
+        assert!(
+            port.injected_bodies().is_empty(),
+            "기한 없는 request 는 타임아웃 없음"
+        );
+        assert_eq!(svc.open_request_count(), 1, "계약은 열린 채 유지");
+    }
+
+    #[test]
+    fn timeout_notice_parks_cap_exempt_when_sender_is_absent_and_is_ledgered() {
+        // ★cap 예외(spec §5 · ADR-0103 불변식)★: 발신자 보관함이 가득 차 있어도 notice 는 반드시 수용된다.
+        //   그리고 조용히 사라지지 않는다 — 장부에 pending 으로 남는다.
+        let (svc, port) = svc();
+        port.set_roster(vec![]); // alice 도 부재.
+        for i in 0..100 {
+            svc.handle_single_send(
+                &format!("m{i}"),
+                ident(),
+                "s",
+                "alice",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("cap 이내");
+        }
+        assert_eq!(
+            svc.handle_single_send(
+                "over",
+                ident(),
+                "s",
+                "alice",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default()
+            ),
+            Err(SendReject::MailboxFull),
+            "message 는 cap 에서 반려(대조군)"
+        );
+
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("1m", 60),
+        )
+        .expect("parked");
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+
+        assert_eq!(
+            svc.parked_len("alice"),
+            101,
+            "notice 는 cap 을 무시하고 얹혀야(100 message + 1 notice)"
+        );
+        let noticed: Vec<_> = svc
+            .ledger_snapshot()
+            .into_iter()
+            .filter(|(_, from, _, _)| from == NOTICE_SENDER_LABEL)
+            .collect();
+        assert_eq!(
+            noticed.len(),
+            1,
+            "notice 도 장부에 남는다(조용한 유실 금지)"
+        );
+        assert_eq!(noticed[0].2, "alice", "notice 수신자 = 요청 발신자");
+        assert_eq!(noticed[0].3, DeliveryStatus::Pending, "파킹이므로 pending");
+    }
+
+    #[test]
+    fn parked_notice_flushes_as_notice_tag_and_marks_delivered() {
+        // 파킹된 notice 가 등장 flush 로 배달될 때도 notice 태그여야 한다(kind 기반 wrap 분기).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        svc.handle_single_send(
+            "m-9x",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("1m", 60),
+        )
+        .expect("parked");
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        assert!(
+            port.injected_bodies().is_empty(),
+            "발신자도 부재 → notice 파킹"
+        );
+
+        let (alice_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.flush_for("alice", alice_id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec!["<notice>요청 m-9x 기한(1m) 초과 — bob 회신 없음</notice>".to_string()],
+            "flush 배달도 notice 태그(from 없음)"
+        );
+        let noticed: Vec<_> = svc
+            .ledger_snapshot()
+            .into_iter()
+            .filter(|(_, from, _, _)| from == NOTICE_SENDER_LABEL)
+            .collect();
+        assert_eq!(
+            noticed[0].3,
+            DeliveryStatus::Delivered,
+            "실제 주입 시점 delivered"
+        );
+    }
+
+    #[test]
+    fn timeout_notice_parks_when_sender_is_mid_turn() {
+        // idle 게이트는 notice 에도 적용된다(턴 중 주입 금지 — 배치 제어권 유지). 단 cap 만 예외.
+        let (svc, port, gate) = svc_gated();
+        let (alice_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        gate.set_busy(alice_id, 0);
+        svc.handle_single_send(
+            "m-b1",
+            ident(),
+            "alice",
+            "ghost",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("1m", 60),
+        )
+        .expect("parked");
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        assert!(
+            port.injected_bodies().is_empty(),
+            "발신자가 턴 중이면 notice 도 주입하지 않는다"
+        );
+        assert_eq!(svc.parked_len("alice"), 1, "notice 가 alice 앞에 파킹");
+
+        gate.clear();
+        svc.flush_for("alice", alice_id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec!["<notice>요청 m-b1 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
+            "턴 종료 flush 로 배달"
+        );
+    }
+
+    // ── C3 리뷰 라운드 fix ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn timeout_notice_reaches_a_renamed_sender_via_id_hint() {
+        // ★fix 2 회귀★: 계약을 연 뒤 발신자가 개명하면 notice 는 **옛 이름** 큐에 파킹된다. 이름-키만
+        //   보는 flush 는 그 큐를 영영 열지 않고, 통지는 notified 라 재발화도 없다 = 영구 stranded.
+        //   장부가 함께 든 발신자 id 를 힌트로 실으면, 개명 후에도 그 incarnation 으로 배달된다.
+        let (svc, port) = svc();
+        let alice_id = AgentId::new_v4();
+        let old = LiveAgent {
+            id: alice_id,
+            name: "alice".to_string(),
+            epoch: 0,
+        };
+        port.set_roster(vec![old]);
+        svc.handle_single_send(
+            "m-req",
+            BoundIdentity {
+                agent_id: alice_id,
+                epoch: 0,
+            },
+            "alice",
+            "ghost",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("1m", 60),
+        )
+        .expect("parked(수신자 부재)");
+
+        // 발신자 개명 — 같은 id, 다른 이름. 이제 "alice" 라는 이름은 로스터에 없다.
+        let renamed = LiveAgent {
+            id: alice_id,
+            name: "alice-v2".to_string(),
+            epoch: 0,
+        };
+        port.set_roster(vec![renamed]);
+
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        // 도어벨 미배선 = 인라인 flush 폴백이므로 sweep 안에서 배달까지 끝난다.
+        assert_eq!(
+            port.injected_bodies(),
+            vec!["<notice>요청 m-req 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
+            "개명한 발신자에게도 id 힌트로 배달돼야(옛 이름 큐에 갇히지 않는다)"
+        );
+        assert_eq!(svc.parked_len("alice"), 0, "큐가 비었다 = 실제로 나갔다");
+    }
+
+    #[test]
+    fn sweep_snapshots_the_roster_once_per_tick() {
+        // ★fix 8★: due 항목마다 로스터를 다시 뜨면 한 틱 안에서 항목별로 다른 스냅샷을 본다(판정 흔들림).
+        //   틱당 1회만 뜨는지 호출 수로 단언한다.
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        for i in 0..3 {
+            svc.handle_single_send(
+                &format!("m-r{i}"),
+                ident(),
+                &format!("sender{i}"),
+                "ghost",
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("1m", 60),
+            )
+            .expect("parked");
+        }
+        let before = port.roster_call_count();
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        let used = port.roster_call_count() - before;
+        // 전제: 발신자들이 로스터에 없어 인라인 flush 폴백이 canonical_name 단계에서 조기 반환한다 —
+        //   그래서 이 틱의 로스터 조회는 sweep 자신의 스냅샷 **하나뿐**이어야 한다. 항목별 재조회로
+        //   되돌리면 due 수(3)만큼 늘어 여기서 잡힌다.
+        assert_eq!(
+            used, 1,
+            "sweep 은 due 수와 무관하게 틱당 로스터 1회만 떠야(항목별 재조회 금지)"
+        );
+        assert_eq!(svc.parked_len("sender0"), 1, "notice 는 정상 파킹");
+    }
+
+    #[test]
+    fn timeout_notice_is_skipped_when_reply_lands_before_parking() {
+        // ★fix 5★: due 산출(락 해제)과 notice 파킹 사이에 회신이 도착하면, 발신자는 회신을 받고도
+        //   "회신 없음" 통지를 뒤이어 받는다(모순). 파킹 직전 재확인으로 그 통지를 접는다.
+        //   레이스는 roster hook 으로 결정적으로 만든다(sweep 은 due 산출 뒤 로스터를 뜬다).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        svc.handle_single_send(
+            "m-req",
+            ident(),
+            "alice",
+            "bob",
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("1m", 60),
+        )
+        .expect("parked");
+
+        let svc2 = svc.clone();
+        port.arm_on_next_roster(Box::new(move || {
+            // 이 시점 = due 는 이미 걷혔고(notified 세워짐) notice 는 아직 파킹 전.
+            svc2.handle_single_send(
+                "m-rep",
+                ident(),
+                "bob",
+                "alice",
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("parked(alice 부재)");
+        }));
+
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        let notices: Vec<_> = svc
+            .ledger_snapshot()
+            .into_iter()
+            .filter(|(_, from, _, _)| from == NOTICE_SENDER_LABEL)
+            .collect();
+        assert!(
+            notices.is_empty(),
+            "회신이 먼저 닿았으면 통지는 취소돼야: {notices:?}"
+        );
+        assert_eq!(svc.open_request_count(), 0, "계약은 회신으로 닫혔다");
+    }
+
+    #[test]
+    fn plain_send_with_colliding_id_is_rejected_without_side_effects() {
+        // ★fix 12★: id 충돌은 request 만의 문제가 아니다 — 통보/회신도 같은 id 면 남의 이력 레코드를
+        //   앨리어싱한다. 종류 무관 반려 + 부작용 0(호출자가 새 id 로 재시도).
+        let (svc, port) = svc();
+        let (_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "dup",
+            ident(),
+            "s",
+            "alice",
+            "1",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("delivered");
+        let before = svc.ledger_snapshot().len();
+        let injected_before = port.injected_bodies().len();
+
+        // 통보 재사용.
+        assert_eq!(
+            svc.handle_single_send(
+                "dup",
+                ident(),
+                "s",
+                "alice",
+                "2",
+                Entrance::Mcp,
+                &SendMeta::default()
+            ),
+            Err(SendReject::IdCollision),
+            "통보도 id 충돌이면 반려"
+        );
+        // 회신 재사용.
+        assert_eq!(
+            svc.handle_single_send(
+                "dup",
+                ident(),
+                "s",
+                "alice",
+                "3",
+                Entrance::Mcp,
+                &reply_meta("m-other"),
+            ),
+            Err(SendReject::IdCollision),
+            "회신도 id 충돌이면 반려"
+        );
+        assert_eq!(svc.ledger_snapshot().len(), before, "장부 레코드 증가 없음");
+        assert_eq!(
+            port.injected_bodies().len(),
+            injected_before,
+            "주입 없음(부작용 0)"
+        );
+    }
+
+    #[test]
+    fn request_beyond_open_contract_cap_is_rejected_without_side_effects() {
+        // ★fix 3 의 짝★: 오픈 계약이 상한이면 새 request 는 RequestCapacity 로 반려된다(부작용 0).
+        //   통보는 계약을 열지 않으므로 계속 통과해야 한다(반려가 메시징 전체를 막지 않는다).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        // 수신자를 흩어 mailbox cap(수신자당 100)에 안 걸리게 한다 — 여기서 재는 건 계약 상한이다.
+        let cap = 512;
+        for i in 0..cap {
+            svc.handle_single_send(
+                &format!("m-r{i}"),
+                ident(),
+                "alice",
+                &format!("ghost{}", i % 64),
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("10m", 600),
+            )
+            .expect("cap 이내");
+        }
+        let before = svc.ledger_snapshot().len();
+        assert_eq!(
+            svc.handle_single_send(
+                "m-over",
+                ident(),
+                "alice",
+                "ghost0",
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("10m", 600),
+            ),
+            Err(SendReject::RequestCapacity),
+            "상한 초과 request 는 RequestCapacity"
+        );
+        assert_eq!(
+            svc.ledger_snapshot().len(),
+            before,
+            "반려는 부작용 0(장부 레코드 없음)"
+        );
+        assert!(
+            svc.handle_single_send(
+                "m-plain",
+                ident(),
+                "alice",
+                "ghost0",
+                "알림",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .is_ok(),
+            "통보는 계약을 열지 않으므로 상한과 무관하게 통과"
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ingress가 유일 검증자")]
+    fn mutually_exclusive_contract_fields_trip_the_debug_assert() {
+        // ★fix 11★: 이 함수는 pub 이라 다른 조립이 직접 부를 수 있다 — 상호배타 위반 배선을 debug 에서
+        //   즉시 터뜨린다(운영 반려 문구는 ingress 가 정본이므로 검증을 복제하지 않는다).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        let bad = SendMeta {
+            request: true,
+            reply_by_raw: None,
+            reply_by: None,
+            reply_to: Some("m-1".to_string()),
+        };
+        let _ = svc.handle_single_send("m-x", ident(), "s", "bob", "x", Entrance::Mcp, &bad);
+    }
+
+    // ── ParkPayload 견고성(fix 4) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn park_payload_decode_falls_back_on_corrupt_input_without_panicking() {
+        // ★fix 4★: 어떤 입력이 와도 패닉하지 않는다 — 특히 길이 필드가 **멀티바이트 문자 중간**을 가리키는
+        //   경우(`split_at` 이 패닉하는 그 지점). 실패는 전부 "속성 잃고 body 만 남는" 폴백이다.
+        let good = ParkPayload {
+            sender_name: "qa".to_string(),
+            from: BoundIdentity {
+                agent_id: AgentId::new_v4(),
+                epoch: 3,
+            },
+            entrance: Entrance::Mcp,
+            body: "안녕\n둘째 줄".to_string(),
+            meta: req_meta("10m", 600),
+        };
+        let encoded = good.encode();
+        // 대조군: 정상 payload 는 그대로 복원된다.
+        let ok = ParkPayload::decode(&encoded);
+        assert_eq!(ok.body, "안녕\n둘째 줄");
+        assert_eq!(ok.sender_name, "qa");
+        assert!(ok.meta.request);
+
+        for corrupt in [
+            // 헤더 자체가 없음.
+            "그냥 본문".to_string(),
+            // 버전 태그가 모르는 값(형식 드리프트) — 오해석 대신 폴백.
+            encoded.replacen('1', "9", 1),
+            // 길이 필드가 숫자가 아님.
+            "1\nx\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nbody".to_string(),
+            // 길이 합이 남은 문자열보다 큼(절단).
+            "1\n99\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nshort".to_string(),
+            // ★char 경계 중간 절단★: '한'은 3바이트인데 sender_len=1 이라 문자 중간을 가른다.
+            "1\n1\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            // reply_to 길이가 경계를 어긋나게 만드는 경우(두 번째 절단점).
+            "1\n0\n1\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            // 헤더 줄 수 부족.
+            "1\n0\n0\n0\n".to_string(),
+            // ★어휘 밖 입구(fix 3)★: 예전엔 조용히 Cli 로 떨어졌다 — 이제 손상으로 보고 폴백한다.
+            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nsmtp\n-\nbody".to_string(),
+            // 입구 칸이 비어 있음(형식 드리프트).
+            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\n\n-\nbody".to_string(),
+            // 대소문자도 어휘 밖(정규화하지 않는다 — 우리가 쓴 값만 인정).
+            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nMCP\n-\nbody".to_string(),
+            // ★어휘 밖 플래그(fix 3)★: 예전엔 조용히 "request 아님" 으로 떨어져 계약 속성을 잃었다.
+            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nR\nbody".to_string(),
+            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n\nbody".to_string(),
+            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nr-\nbody".to_string(),
+        ] {
+            let p = ParkPayload::decode(&corrupt);
+            assert_eq!(
+                p.body, corrupt,
+                "깨진 payload 는 전체를 body 로 폴백(조용한 유실 금지): {corrupt:?}"
+            );
+            assert!(!p.meta.request, "폴백은 계약 속성을 주장하지 않는다");
+        }
+    }
+
+    #[test]
+    fn one_corrupt_parked_item_does_not_abort_the_flush_batch() {
+        // ★fix 4 의 목적★: decode 는 flush 배치 안에서 항목마다 불린다 — 한 항목이 깨졌다고 배치가
+        //   중단되면 멀쩡한 메시지까지 발이 묶인다(release 는 panic=abort 라 데몬 자체가 죽는다).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        for (id, body) in [("m-a", "첫째"), ("m-b", "둘째"), ("m-c", "셋째")] {
+            svc.handle_single_send(
+                id,
+                ident(),
+                "qa",
+                "bob",
+                body,
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("parked");
+        }
+        // 가운데 항목의 payload 를 손상시킨다(테스트 전용 주입 — 실제로는 일어나지 않지만 방어의 대상).
+        svc.corrupt_parked_payload_for_test("bob", 1);
+
+        let (bob_id, bob) = live("bob");
+        port.set_roster(vec![bob]);
+        svc.flush_for("bob", bob_id);
+
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 3, "깨진 항목 하나가 배치를 끊지 않는다");
+        assert!(bodies[0].contains("첫째") && bodies[2].contains("셋째"));
+        assert!(
+            bodies[1].contains("CORRUPT"),
+            "깨진 항목은 폴백 봉투로라도 나간다(조용한 유실 금지): {}",
+            bodies[1]
+        );
+    }
+
+    // ── 데몬 자가 발신 id 충돌 검사(round-final fix 2) ────────────────────────────────
+
+    #[test]
+    fn daemon_notice_id_goes_through_the_same_collision_check_as_sends() {
+        // ★fix 2★: 데몬이 만드는 notice id 도 장부 충돌 검사(`msg_id_in_use`)를 탄다 — 예전엔 무검사라
+        //   기존 id 를 앨리어싱할 수 있었다(이력 레코드 키 공유 = 남의 레코드를 전이·뭉갬).
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        svc.handle_single_send(
+            "m-taken",
+            ident(),
+            "alice",
+            "bob",
+            "x",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("parked");
+
+        // ① 첫 draw 가 이미 쓰인 id → 새 id 로 딱 1회 갈아탄다(ingress 재시도와 같은 규율).
+        //    (`pop()` 이 뒤에서 꺼내므로 목록은 draw 순서의 역순이다.)
+        let mut two = vec!["m-fresh".to_string(), "m-taken".to_string()];
+        let drawn = svc.draw_daemon_msg_id_with(|| two.pop().expect("draw"));
+        assert_eq!(drawn.id, "m-fresh", "충돌한 id 는 버리고 새 id 를 쓴다");
+        assert_eq!(
+            drawn.collided.as_deref(),
+            Some("m-taken"),
+            "충돌한 쪽이 조사 단서 — 로그가 그 값을 찍는다"
+        );
+        assert!(!drawn.still_colliding);
+
+        // ② 두 번째도 충돌 → notice 는 **그래도 나간다**(버리면 계약이 조용히 반쪽) + 신호를 세워 관측.
+        let mut both = vec!["m-taken".to_string(), "m-taken".to_string()];
+        let drawn = svc.draw_daemon_msg_id_with(|| both.pop().expect("draw"));
+        assert_eq!(drawn.id, "m-taken", "통지 유실보다 관측상 오염이 낫다");
+        assert!(
+            drawn.still_colliding,
+            "재-draw 마저 충돌하면 신호(로그 대상)"
+        );
+
+        // ③ 대조군: 충돌이 없으면 첫 draw 를 그대로 쓴다(불필요한 재-draw 없음).
+        let mut once = vec!["m-new".to_string()];
+        let drawn = svc.draw_daemon_msg_id_with(|| once.pop().expect("draw 는 1회뿐이어야"));
+        assert_eq!(drawn.id, "m-new");
+        assert!(drawn.collided.is_none());
+    }
+
+    #[test]
+    fn id_collision_rejects_without_side_effects() {
+        // ★부작용 0 보장(SendReject::IdCollision 주석)★: 같은 id 로 두 번째 request 를 보내면 배달·파킹·
+        //   장부 레코드가 **하나도** 늘지 않아야 호출자가 새 id 로 안전하게 재시도할 수 있다.
+        let (svc, port) = svc();
+        port.set_roster(vec![]);
+        svc.handle_single_send(
+            "dup",
+            ident(),
+            "alice",
+            "bob",
+            "1",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("parked");
+        let before = svc.ledger_snapshot().len();
+        let again = svc.handle_single_send(
+            "dup",
+            ident(),
+            "alice",
+            "bob",
+            "2",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        );
+        assert_eq!(again, Err(SendReject::IdCollision));
+        assert_eq!(svc.ledger_snapshot().len(), before, "장부 레코드 증가 없음");
+        assert_eq!(svc.parked_len("bob"), 1, "파킹 증가 없음");
         assert!(port.injected_bodies().is_empty());
     }
 }

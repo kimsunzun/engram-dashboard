@@ -457,4 +457,44 @@ mod tests {
             "B(CliOnly)는 send_message 단어가 부재여야(MCP 입구 완전 삭제 — freeze 방지)"
         );
     }
+
+    /// ★C3 회신 계약 프라이밍 정합(ADR-0103 결정 2/3 · spec §3)★: 데몬은 `type="request"` 봉투를 내보내고
+    ///   기한 초과 시 발신자에게 `<notice>` 를 쏜다 — 그런데 **회신 자체는 LLM 준수(soft)** 라, 프라이밍이
+    ///   회신 규칙을 안 가르치면 엄격 매칭(`reply_to` 필수)이 구조적으로 회신을 못 받는다(계약 반쪽).
+    ///   그래서 두 변형 모두 "request 를 받으면 그 id 로 회신" 을 가르치는지 파일 수준에서 못박는다.
+    ///
+    /// ★변형별 표기★: A(McpPrimary)는 툴 인자(snake_case `reply_to`)와 CLI 플래그(`--reply-to`)를 **둘 다**,
+    ///   B(CliOnly)는 CLI 플래그만(툴 인자 표기를 가르치면 없는 입구를 가리킨다 — 지시-도구 불일치).
+    #[test]
+    fn production_priming_files_teach_the_reply_contract() {
+        let root = repo_root();
+        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
+        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
+        for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
+            assert!(
+                text.contains("type=\"request\""),
+                "{label}: request 봉투를 알아보게 가르쳐야"
+            );
+            assert!(
+                text.contains("<notice>"),
+                "{label}: notice 는 회신 대상이 아님을 가르쳐야(데몬 전용 태그)"
+            );
+            assert!(
+                text.contains("--reply-to"),
+                "{label}: CLI 회신 플래그를 가르쳐야"
+            );
+            assert!(
+                text.contains("--request") && text.contains("--reply-by"),
+                "{label}: CLI request/기한 플래그를 가르쳐야"
+            );
+        }
+        assert!(
+            a.contains("reply_to") && a.contains("reply_by"),
+            "A(McpPrimary)는 툴 인자 표기(snake_case)도 가르쳐야(both-teaching)"
+        );
+        assert!(
+            !b.contains("reply_to") && !b.contains("reply_by"),
+            "B(CliOnly)는 툴 인자 표기가 부재여야(없는 입구를 가리키지 않게)"
+        );
+    }
 }

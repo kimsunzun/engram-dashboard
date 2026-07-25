@@ -487,6 +487,7 @@ async fn control_send_revoked_sender_still_delivers_observation() {
         from,
         to: "target-b".to_string(),
         body: "revoked-but-DELIVERED".to_string(),
+        contract: Default::default(),
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
@@ -729,6 +730,7 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
         from,
         to: to_name.clone(),
         body: body.to_string(),
+        contract: Default::default(),
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
@@ -828,6 +830,7 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
         from,
         to: to_name,
         body: "trigger-panic-observer".to_string(),
+        contract: Default::default(),
     };
     // panic 이 record_delivery 에서 격리되지 않으면 여기서 unwind 로 테스트가 죽는다.
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
@@ -871,6 +874,7 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
         from,
         to: to_name.clone(),
         body: body.to_string(),
+        contract: Default::default(),
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
@@ -944,6 +948,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
         from,
         to: "obs-target".to_string(),
         body: body.to_string(),
+        contract: Default::default(),
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
@@ -1097,7 +1102,12 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         // handle_send 는 sync(&Arc<..>) — OS 스레드로 near-simultaneous 발화(tokio task 아님, 병렬성 확보).
         handles.push(std::thread::spawn(move || {
             barrier.wait(); // ★입구 정렬 — 모든 스레드가 여기 모인 뒤 near-simultaneous 하게 handle_send 로 돌진(실행 겹침 강제는 아님)★.
-            let cmd = ControlCommand { from, to, body };
+            let cmd = ControlCommand {
+                from,
+                to,
+                body,
+                contract: Default::default(),
+            };
             let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
             let v = result.to_json();
             // 각 발화는 접수 성공 + 고유 msg_id 를 받아야(중복/유실 없음의 발신측 증거). 산 수신자라 delivered.
@@ -1311,6 +1321,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
             from,
             to: to_name.clone(),
             body: body.clone(),
+            contract: Default::default(),
         };
         let result = handle_send(manager, registry, messaging, Entrance::Cli, cmd);
         let v = result.to_json();
@@ -1391,6 +1402,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
             from,
             to: to_name,
             body: body_gt,
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -1431,6 +1443,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
             from,
             to: to_name,
             body: body_mb_over,
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -1508,6 +1521,7 @@ async fn stage1_lifecycle_recipient_absent_parks_pending_no_observation() {
             from,
             to: "no-such-agent".to_string(),
             body: "hi".to_string(),
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -1569,6 +1583,7 @@ async fn c1_park_then_spawn_auto_delivers() {
             from,
             to: target_name.to_string(),
             body: "parked-until-spawn".to_string(),
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -1681,6 +1696,7 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
                 from,
                 to: to_name.clone(),
                 body: body.to_string(),
+                contract: Default::default(),
             },
         )
         .to_json();
@@ -1811,6 +1827,7 @@ async fn c2_tap_is_live_only_and_never_bootstraps_busy_from_replay() {
             from,
             to: to_name.clone(),
             body: "hello".to_string(),
+            contract: Default::default(),
         },
     )
     .to_json();
@@ -1895,6 +1912,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
             from,
             to: target.to_string(),
             body: "say OK".to_string(),
+            contract: Default::default(),
         },
     )
     .to_json();
@@ -1917,6 +1935,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
             from,
             to: target.to_string(),
             body: "and then say DONE".to_string(),
+            contract: Default::default(),
         },
     )
     .to_json();
@@ -2000,6 +2019,7 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
             from,
             to: to_name.clone(),
             body: "will-fail-once".to_string(),
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -2197,6 +2217,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
             from,
             to: to_name,
             body: "to-current-incarnation".to_string(),
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -2426,6 +2447,7 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
             from,
             to: to_name,
             body: "mid-flight-race-body".to_string(),
+            contract: Default::default(),
         },
     );
     let v = result.to_json();
@@ -2575,6 +2597,404 @@ async fn mcp_send_message_tool_happy_and_error() {
     let _ = client.cancel().await;
     manager.kill_agent(b_info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── C3(ADR-0103): 회신 계약 — request→reply→replied 전이 + 기한 초과 notice(seam, claude 불요) ────────
+//
+// ★왜 seam 인가★: 계약 전이·notice 주입은 **배관** 검증이라 실 claude 왕복이 필요 없다(모델 응답에
+//   의존하면 플레이키해진다). structured 캐리어 seam 수신자를 꽂아 주입 바이트를 직접 회계한다.
+// ★결정적 시계★: sweep 은 `now` 를 인자로 받으므로(순수성 불변식) 실제 대기 없이 기한을 넘긴 시각을 손으로
+//   밀어 넣는다 — sleep 기반 타임아웃 테스트의 플레이키를 원천 제거한다.
+
+/// C3 인자를 실은 /control/send POST(임의 JSON 바디). `post_send` 는 통보 전용이라 별도로 둔다.
+async fn post_send_json(
+    base: &str,
+    bearer: Option<&str>,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, String) {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(format!("{base}/control/send"))
+        .header("Content-Type", "application/json")
+        .json(&body);
+    if let Some(b) = bearer {
+        req = req.header("Authorization", format!("Bearer {b}"));
+    }
+    let resp = req.send().await.expect("http request");
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    (status, text)
+}
+
+#[tokio::test]
+async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
+    use engram_dashboard_daemon::control::ingress::{
+        handle_send, ControlCommand, Entrance, SendContract,
+    };
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_daemon::messaging::ledger::DeliveryStatus;
+
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("c3-roundtrip").await;
+
+    // A = 요청자(발신자이자 회신 수신자), B = 회신자. 둘 다 structured seam(도달 가능).
+    let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let (b_id, b_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let a_name = obs_seam::fallback_name(a_id);
+    let b_name = obs_seam::fallback_name(b_id);
+    registry.issue(a_id, 0, "c3-a".to_string());
+    registry.issue(b_id, 0, "c3-b".to_string());
+    let from_a = BoundIdentity {
+        agent_id: a_id,
+        epoch: 0,
+    };
+    let from_b = BoundIdentity {
+        agent_id: b_id,
+        epoch: 0,
+    };
+
+    // 1) A → B: request(+ 기한). 봉투에 id/type/reply-by 가 실려야 B 가 회신할 id 를 안다.
+    let ack = handle_send(
+        &manager,
+        &registry,
+        &messaging,
+        Entrance::Mcp,
+        ControlCommand {
+            from: from_a,
+            to: b_name.clone(),
+            body: "코드 짜고 회신해".to_string(),
+            contract: SendContract {
+                request: true,
+                reply_by: Some("10m".to_string()),
+                reply_to: None,
+            },
+        },
+    )
+    .to_json();
+    assert_eq!(
+        ack["results"][0]["status"], "delivered",
+        "request ACK: {ack}"
+    );
+    let req_id = ack["id"].as_str().expect("msg id").to_string();
+    assert!(
+        req_id.starts_with("m-") && req_id.len() == 10,
+        "wire id 는 짧은 base36 계약(spec §1): {req_id}"
+    );
+    assert_eq!(
+        messaging.open_request_count(),
+        1,
+        "계약이 장부에 열려야(spec §3 단계 2)"
+    );
+
+    // B 가 실제로 받은 바이트에 request 속성이 들어 있어야 한다(stream-json 인코딩 안이라 substring 검사).
+    let b_line = String::from_utf8_lossy(&obs_seam::last_written(&b_captured)).to_string();
+    for needle in ["type=", "request", &req_id, "reply-by", "10m"] {
+        assert!(
+            b_line.contains(needle),
+            "B 가 받은 봉투에 '{needle}' 가 있어야: {b_line}"
+        );
+    }
+
+    // 2) B → A: 그 id 로 회신. 엄격 매칭이 계약을 닫고 이력을 Replied 로 전이한다.
+    let ack = handle_send(
+        &manager,
+        &registry,
+        &messaging,
+        Entrance::Cli,
+        ControlCommand {
+            from: from_b,
+            to: a_name.clone(),
+            body: "다 짰음, 테스트 통과".to_string(),
+            contract: SendContract {
+                request: false,
+                reply_by: None,
+                reply_to: Some(req_id.clone()),
+            },
+        },
+    )
+    .to_json();
+    assert_eq!(ack["results"][0]["status"], "delivered", "회신 ACK: {ack}");
+    assert!(
+        ack.get("status").is_none(),
+        "회신 응답 shape 은 통보와 동일해야(새 필드 없음): {ack}"
+    );
+
+    assert_eq!(
+        messaging.ledger_statuses(&req_id),
+        vec![DeliveryStatus::Replied],
+        "request 레코드가 replied 로 전이(spec §3 단계 3)"
+    );
+    assert_eq!(messaging.open_request_count(), 0, "계약이 닫혀야");
+
+    // A 가 받은 봉투엔 in-reply-to 가 실린다(발신 인자 reply_to → 수신 속성 in-reply-to, spec §1).
+    let a_line = String::from_utf8_lossy(&obs_seam::last_written(&a_captured)).to_string();
+    assert!(
+        a_line.contains("in-reply-to") && a_line.contains(&req_id),
+        "A 가 받은 회신 봉투에 in-reply-to: {a_line}"
+    );
+
+    // 3) 기한이 지나도 notice 는 없다(회신된 계약은 due 대상이 아님).
+    messaging.sweep(Instant::now() + Duration::from_secs(3600));
+    let a_line = String::from_utf8_lossy(&obs_seam::last_written(&a_captured)).to_string();
+    assert!(
+        !a_line.contains("<notice>"),
+        "회신된 계약엔 타임아웃 통지가 없어야: {a_line}"
+    );
+
+    manager.kill_agent(a_id).ok();
+    manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ★multi_thread 필수★: 이 테스트는 **flush 레인(tokio task)** 이 실제로 진행해야 한다 — 아래 wait_until 은
+//   블로킹 폴링이라 current_thread 런타임에선 그 레인을 굶겨 영영 배달이 안 된다(false-red). 기존 C1/C2
+//   flush 관측 테스트들과 같은 flavor 를 쓴다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
+    use engram_dashboard_daemon::control::ingress::{
+        handle_send, ControlCommand, Entrance, SendContract,
+    };
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("c3-timeout").await;
+
+    // A = 요청자(산·도달 — notice 를 받을 대상). 수신자는 **부재 이름**이라 회신이 올 수 없다.
+    let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    registry.issue(a_id, 0, "c3-timeout-a".to_string());
+    let from_a = BoundIdentity {
+        agent_id: a_id,
+        epoch: 0,
+    };
+
+    let ack = handle_send(
+        &manager,
+        &registry,
+        &messaging,
+        Entrance::Mcp,
+        ControlCommand {
+            from: from_a,
+            to: "ghost-worker".to_string(),
+            body: "해줘".to_string(),
+            contract: SendContract {
+                request: true,
+                reply_by: Some("1m".to_string()),
+                reply_to: None,
+            },
+        },
+    )
+    .to_json();
+    assert_eq!(
+        ack["results"][0]["status"], "pending",
+        "부재 수신자 → 파킹(계약은 열림): {ack}"
+    );
+    let req_id = ack["id"].as_str().expect("msg id").to_string();
+    assert_eq!(messaging.open_request_count(), 1);
+    assert!(
+        obs_seam::all_written(&a_captured).is_empty(),
+        "아직 A 에게 아무 것도 주입되지 않았다"
+    );
+
+    // 기한을 넘긴 시각으로 sweep(주입 시계 조작 — 대기 없음).
+    messaging.sweep(Instant::now() + Duration::from_secs(61));
+
+    // ★비동기 배달(운영 배선 미러)★: sweep 은 notice 를 **파킹 + 도어벨**만 하고 즉시 반환한다(자식 stdin
+    //   blocking write 를 sweep task 에서 떼어내는 규율 — service.rs deliver_notice). 이 하네스는 운영과
+    //   동일하게 flush 워커를 띄우므로 실제 주입은 그 레인에서 일어난다 → 폴링으로 기다린다.
+    assert!(
+        wait_until(Duration::from_secs(5), || !obs_seam::all_written(
+            &a_captured
+        )
+        .is_empty()),
+        "flush 레인이 notice 를 A 에게 주입해야"
+    );
+    let a_line = String::from_utf8_lossy(&obs_seam::last_written(&a_captured)).to_string();
+    assert!(
+        a_line.contains("<notice>"),
+        "기한 초과 통지는 <notice> 태그(from 없음 = 회신 대상 아님): {a_line}"
+    );
+    for needle in [&req_id, "1m", "ghost-worker"] {
+        assert!(
+            a_line.contains(needle),
+            "notice 문구에 '{needle}' 가 있어야(spec §1 템플릿): {a_line}"
+        );
+    }
+    assert!(
+        !a_line.contains("<message"),
+        "notice 는 <message> 로 새면 안 된다(회신 가능성 오인): {a_line}"
+    );
+
+    // 이중 통지 금지 — 다시 sweep 해도 A 에게 주입이 늘지 않는다(장부 notified 플래그).
+    //   비동기 레인이라 "안 늘어남" 은 잠깐 기다린 뒤 확인해야 의미가 있다(즉시 확인하면 아직 안 온 걸
+    //   안 온 것으로 오판할 수 있다 — false-green 방지).
+    let before = obs_seam::all_written(&a_captured).len();
+    messaging.sweep(Instant::now() + Duration::from_secs(120));
+    assert!(
+        !wait_until(Duration::from_millis(500), || obs_seam::all_written(
+            &a_captured
+        )
+        .len()
+            > before),
+        "notice 는 정확히 1회(두 번째 sweep 은 아무 것도 안 보낸다)"
+    );
+
+    manager.kill_agent(a_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance() {
+    // 두 입구의 반려 코드/shape 가 같아야 한다(entrance-agnostic — ADR-0086). 여기선 HTTP 입구로 확인.
+    let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("c3-args").await;
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c3-args-sender".to_string());
+    let tok = Some("c3-args-sender");
+
+    // 상호배타.
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "nobody", "body": "x", "request": true, "reply_to": "m-1" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["code"], "INVALID_SEND_ARGS", "request+reply_to: {body}");
+    assert!(v["hint"].is_string(), "교정 hint 동봉");
+
+    // reply_by 단독.
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "nobody", "body": "x", "reply_by": "10m" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["code"], "INVALID_SEND_ARGS", "reply_by 단독: {body}");
+
+    // 표기 오류.
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "nobody", "body": "x", "request": true, "reply_by": "ten min" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["code"], "INVALID_SEND_ARGS", "기간 표기 오류: {body}");
+
+    // ★1분 미만 기한(리뷰 fix 7)★ — 판정 해상도가 sweep 주기(60s)라 지킬 수 없는 약속은 받지 않는다.
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "nobody", "body": "x", "request": true, "reply_by": "30s" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["code"], "INVALID_SEND_ARGS", "1분 미만 기한: {body}");
+    assert!(
+        v["hint"].as_str().unwrap_or_default().contains("1-minute"),
+        "hint 가 하한을 알려야: {body}"
+    );
+    // 대조군: 정확히 1분(초 표기)은 수용 — 하한은 값에 걸리지 표기에 걸리지 않는다.
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "nobody", "body": "x", "request": true, "reply_by": "60s" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["results"][0]["status"], "pending", "60s 는 유효: {body}");
+
+    // 그룹 request → 전용 코드(GROUPS_NOT_SUPPORTED 와 구분 — C4 가 방송을 켜도 남는 금지, spec §4).
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "@coders", "body": "x", "request": true }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["code"], "GROUP_REQUEST_UNSUPPORTED",
+        "그룹 request: {body}"
+    );
+
+    // 같은 그룹 주소라도 통보면 기존 코드 그대로.
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "@coders", "body": "x" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["code"], "GROUPS_NOT_SUPPORTED", "그룹 통보: {body}");
+
+    // 옛 `{to, body}` 바디는 그대로 동작해야(통보 wire 호환).
+    let (status, body) = post_send(&base, tok, "nobody", "hi").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["results"][0]["status"], "pending", "통보 회귀: {body}");
+    let id = v["id"].as_str().expect("id");
+    assert!(id.starts_with("m-") && id.len() == 10, "id 포맷: {id}");
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ★C3 리뷰 fix 1★: 계약 필드(request/reply_to)는 XML 봉투 전용 — 콜론 포맷에선 반려된다.
+//   ★왜 통합 테스트인가★: 판정 로직 자체는 ingress 단위 테스트가 두 갈래(포맷·템플릿 env) 모두 덮는다.
+//   여기서 확인할 건 **실제 입구가 그 판정을 실제로 태우는지**(런타임 포맷 전환이 발송 반려로 이어지는지)다.
+#[tokio::test]
+async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
+    use engram_dashboard_daemon::control::ingress::EnvelopeFormat;
+
+    let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("c3-colon").await;
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c3-colon-sender".to_string());
+    let tok = Some("c3-colon-sender");
+
+    // 런타임 스위치를 콜론으로 — 이 포맷의 렌더는 id/type/reply-by/in-reply-to 를 통째로 버린다.
+    registry.set_envelope_format(EnvelopeFormat::Colon);
+
+    for payload in [
+        serde_json::json!({ "to": "nobody", "body": "x", "request": true, "reply_by": "10m" }),
+        serde_json::json!({ "to": "nobody", "body": "x", "reply_to": "m-7f3k" }),
+    ] {
+        let (_s, body) = post_send_json(&base, tok, payload.clone()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            v["code"], "INVALID_SEND_ARGS",
+            "콜론 봉투에선 계약 필드 반려({payload}): {body}"
+        );
+        assert!(
+            v["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("XML envelope"),
+            "교정 hint 가 사유를 말해야: {body}"
+        );
+    }
+
+    // 대조군 ①: 같은 콜론 포맷에서도 **통보**는 정상 접수된다(기존 동작 불변).
+    let (status, body) = post_send(&base, tok, "nobody", "hi").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["results"][0]["status"], "pending", "통보는 통과: {body}");
+
+    // 대조군 ②: xml 로 되돌리면 계약 발송이 다시 접수된다(반려는 포맷에만 걸린 것).
+    registry.set_envelope_format(EnvelopeFormat::Xml);
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "nobody", "body": "x", "request": true, "reply_by": "10m" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["results"][0]["status"], "pending",
+        "xml 로 되돌리면 계약 발송 정상: {body}"
+    );
+
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }

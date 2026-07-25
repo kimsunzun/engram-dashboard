@@ -15,7 +15,15 @@
 //! ★봉투(ADR-0096/0103)★: 봉투 조립은 **단일 wrap point**(`wrap_message`/`wrap_notice` — ADR-0096)에만
 //!   있다. S18 메시징 v1(ADR-0103)이 기본 포맷을 XML 로 flip 하고 `<message>` 속성(id/type/reply-by/
 //!   in-reply-to/to)과 `<notice>`(데몬 전용, from 없음) 렌더를 이 seam 에 얹었다(`EnvelopeFields`). colon 은
-//!   잔존 스위치(속성 미지원). idle 게이트·장부·그룹 해석·request 추적은 **후속 increment**(여기 범위 밖).
+//!   잔존 스위치(속성 미지원). 그룹 해석(`@`)은 **후속 increment C4**(여기 범위 밖).
+//!
+//! ★회신 계약 인자(C3 · spec §3 · ADR-0103 결정 2/3)★: 두 입구가 `SendContract`(request/reply_by/reply_to)를
+//!   실어 오고, **구문 검증은 전부 여기서**(서비스 위임 전에) 한다 — 상호배타·기간 표기·빈 값. 통과한 인자는
+//!   `messaging::service::SendMeta`(파싱된 Duration 포함)로 정규화돼 서비스로 내려간다.
+//!
+//! ★`type="notice"` 밀반입 불가(구조적 — ADR-0103 불변식)★: 발신 인자에는 **타입 문자열이 없다**(`request:
+//!   bool` 뿐). `<notice>` 는 데몬이 `wrap_notice` 로만 만들고 그 호출부는 MessagingService 의 타임아웃 통지
+//!   경로뿐이다 — 에이전트가 어떤 입구로도 notice 를 발신할 수 없다.
 //!
 //! tauri import 0(daemon crate).
 
@@ -103,12 +111,16 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// 어느 입구로 들어온 요청인가(ADR-0086 F6 — relay 계측 로그 필드). MCP 툴 · CLI(HTTP) 라우트 구분.
 /// 파이프라인 로직은 이걸 분기하지 않는다(entrance-agnostic) — **로그 라벨 전용**이다.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entrance {
     /// MCP `send_message` 툴 경로.
     Mcp,
     /// `/control/send` 평문 HTTP 라우트(CLI `engram-send`).
     Cli,
+    /// ★데몬 자가 발신(C3 — `<notice>`)★: 어떤 에이전트 입구도 거치지 않고 데몬이 스스로 만든 배달이다
+    ///   (request 기한 초과 통지 — spec §3 단계 4). 관측 레코드에서 "이건 인프라 통지지 동료 발신이 아니다"
+    ///   를 라벨만으로 가르려고 별도 값을 둔다(에이전트가 이 입구를 쓸 방법은 없다 — 생성처가 데몬 내부뿐).
+    Daemon,
 }
 
 impl Entrance {
@@ -117,6 +129,7 @@ impl Entrance {
         match self {
             Entrance::Mcp => "mcp",
             Entrance::Cli => "cli",
+            Entrance::Daemon => "daemon",
         }
     }
 }
@@ -134,6 +147,225 @@ pub struct ControlCommand {
     pub to: String,
     /// 메시지 본문(텍스트). 최소 버전은 순수 텍스트(첨부·구조화는 범위 밖).
     pub body: String,
+    /// ★회신 계약 인자(C3, spec §3)★ — 전부 선택이라 별도 struct 로 묶는다(`Default` = 통보 = 기존 동작).
+    pub contract: SendContract,
+}
+
+/// ★회신 계약 발송 인자(C3 · spec §6 `send_message { …, request?, reply_by?, reply_to? }`)★.
+///
+/// ★왜 별도 struct 인가★: 세 인자는 전부 **선택**이고 기본값(`Default`)이 곧 "통보"(기존 v1 이전 동작)다.
+///   `ControlCommand` 에 평평하게 늘어놓으면 plain 발송을 만드는 모든 자리(테스트·스모크 bin 포함)가 세
+///   필드를 매번 써야 한다 — 묶어 두면 `contract: SendContract::default()` 한 줄이면 된다.
+/// ★검증은 여기가 아니라 `handle_send`(입구 공통)★: 이 struct 는 **날것 그대로**를 나른다(파싱 안 함).
+///   상호배타·기간 표기 유효성은 `validate_contract` 가 서비스 위임 전에 한 번만 본다(양 입구 동일 반려).
+/// ★표기 매핑(spec §1)★: 여기 필드는 snake_case(`reply_by`/`reply_to`) — 봉투 XML 속성은 kebab-case
+///   (`reply-by`/`in-reply-to`)로 렌더된다(`EnvelopeFields` 주석).
+// ADR-0103 (결정 2/3 — request 타입 + 회신 계약)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SendContract {
+    /// `true` = 회신 요구(장부에 미회신 오픈 + 봉투 `type="request"`). 그룹 주소엔 v1 금지(spec §4).
+    pub request: bool,
+    /// 회신 기한 **기간 표기**(`"5m"`/`"10m"`/`"1h"`, 최소 1분). `request` 전용 — 단독 지정은 반려.
+    pub reply_by: Option<String>,
+    /// 어느 request 의 회신인가(원본 메시지 id). `request` 와 **상호배타**(spec §6).
+    pub reply_to: Option<String>,
+}
+
+/// ★논리 메시지 id 알파벳 — 소문자 base36★(수신 LLM 이 눈으로 옮겨 적는 값이라 대소문자 혼용 금지).
+const MSG_ID_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// id 본체 길이(접두 `m-` 제외). 8자 base36 = 36^8 ≈ 2.8×10^12 공간.
+const MSG_ID_BODY_LEN: u32 = 8;
+
+/// ★논리 메시지 id 생성(C3 · spec §1 `m-7f3k` 계약)★ — `m-` + 소문자 base36 8자.
+///
+/// ★왜 UUID 가 아닌가(load-bearing — LLM 인간공학)★: 이 id 는 **수신 LLM 이 봉투에서 읽어 회신 인자
+///   (`reply_to`)로 되받아쳐야** 하는 값이다(spec §2 엄격 매칭). 36자 UUID 는 토큰을 먹고 전사 오류를 부른다 —
+///   그래서 짧은 불투명 id 로 바꿨다. 이 id 는 **봉투·장부 키·응답 `id`·관측 레코드**에서 전부 같은 값이다
+///   (`DeliveryObservation.msg_uuid` 는 **다른 축** — 세션 replay-dedup 키라 여전히 UUID다).
+/// ★충돌 방어(문서화된 잔여)★: 공간 2.8×10^12 에 인메모리 규모(장부 링버퍼 1024 · 미회신 request 소수)라
+///   충돌 확률은 무시 가능하다. 그래도 조용히 넘기지 않는다 — request 발송은 `Ledger::open_request` 의
+///   `DuplicateId` 로 충돌을 잡고, 호출자(`handle_send`)가 **새 id 로 1회 재시도**한 뒤에도 걸리면 반려한다.
+/// ★난수원★: `uuid::v4`(OS CSPRNG) 의 앞 8바이트를 base36 공간으로 접는다 — 새 의존을 들이지 않으려고
+///   이미 있는 uuid 를 난수원으로만 쓴다(모듈러 접기의 편향은 2^64 mod 36^8 수준이라 무의미).
+// ADR-0103
+pub(crate) fn new_msg_id() -> String {
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    let mut n = u64::from_le_bytes(bytes[..8].try_into().expect("uuid = 16 bytes"));
+    n %= 36u64.pow(MSG_ID_BODY_LEN);
+    let mut buf = [b'0'; MSG_ID_BODY_LEN as usize];
+    // 뒤에서 앞으로 채워 자리수를 고정한다(상위 자리가 0 이면 '0' 패딩 — 길이 불변 = 파싱·로그 정렬 안정).
+    for slot in buf.iter_mut().rev() {
+        *slot = MSG_ID_ALPHABET[(n % 36) as usize];
+        n /= 36;
+    }
+    format!("m-{}", std::str::from_utf8(&buf).expect("base36 = ascii"))
+}
+
+/// `reply_by` 기간 표기 상한 — 30일. 초과는 반려한다.
+///
+/// ★왜 상한이 필요한가(load-bearing — 데몬 안정성)★: 장부는 기한을 `created_at + reply_by`(`Instant +
+///   Duration`)로 계산하는데, 이 덧셈은 **오버플로 시 패닉**한다. 상한이 없으면 에이전트가
+///   `--reply-by 99999999999999s` 하나로 sweep task 를 죽일 수 있다(가용성 결함). 30일은 인메모리 단계의
+///   현실적 상한이다 — 파킹 TTL 이 24h 이고 데몬 재시작이면 장부 자체가 소멸하므로 그보다 긴 기한은 의미가 없다.
+const MAX_REPLY_BY_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// `reply_by` 하한 — 1분. 미만은 반려한다.
+///
+/// ★왜 하한이 필요한가(리뷰 fix 7 · load-bearing — 계약 정직성)★: 기한 **초과 판정은 sweep 주기(60초)에서만**
+///   일어난다(lib.rs). 그래서 `30s` 를 받아 주면 실제 통지는 60~120초 뒤에 나간다 — 파서가 표현할 수 있는
+///   정밀도와 데몬이 지킬 수 있는 정밀도가 어긋나, 발신자는 "30초 뒤 알려준다" 는 약속을 받고 두 배 넘게
+///   기다린다. 지킬 수 없는 기한은 받지 않는 게 맞다(모호하면 반려 — parse_reply_by 의 기조와 동일).
+///   `s` 단위 자체는 계속 받는다(`120s` 처럼 60 이상이면 유효) — 막는 건 **값의 크기**지 표기가 아니다.
+/// ★sweep 주기와의 결합★: 이 값은 lib.rs 의 `SWEEP_INTERVAL`(60s)과 짝이다. 주기를 바꾸면 이 하한도 함께
+///   봐야 한다(더 촘촘해지면 낮출 수 있다).
+const MIN_REPLY_BY_SECS: u64 = 60;
+
+/// ★`reply_by` 기간 표기 파서(C3 · spec §3 "기간 표기 10m/1h — 데몬이 절대시각 환산")★ — 엄격.
+///
+/// 허용 형태는 **정수 + 단위 1글자**뿐이다: `<digits>(s|m|h)` — 공백·부호·소수점·복합 표기(`1h30m`)·
+/// 대문자 단위 전부 거부한다. 왜 관대하게 받지 않나: 이 값은 발신 LLM 이 자유롭게 쓰는 자리라 "받아는
+/// 줬는데 뜻이 어긋나는" 해석(예: `"10"` 을 분으로 추측)이 조용한 계약 오차가 된다 — 모호하면 반려하고
+/// 힌트로 형태를 알려 자기교정시킨다.
+///
+/// 반려: 빈 값 · 단위 없음/모름 · 숫자 아님 · `0` · u64 곱셈 오버플로 · 하한(1분) 미만 · 상한(30일) 초과.
+/// (`0` 을 막는 이유: 기한 0 = 발송 즉시 초과라 notice 를 즉발한다 — 계약이 아니라 오타로 보는 게 안전하다.)
+/// (하한 1분의 근거: `MIN_REPLY_BY_SECS` 주석 — 판정 해상도가 sweep 주기라 더 짧은 약속은 지킬 수 없다.)
+// ADR-0103
+pub(crate) fn parse_reply_by(s: &str) -> Result<std::time::Duration, String> {
+    let bytes = s.as_bytes();
+    // 최소 2바이트(숫자 1 + 단위 1). 바이트 단위로 자르므로 멀티바이트 문자는 단위 매치에서 자연히 걸린다.
+    if bytes.len() < 2 {
+        return Err(format!(
+            "reply_by '{s}' is not a duration; use an integer with a unit like 5m, 10m, or 1h (minimum 1 minute)."
+        ));
+    }
+    let (digits, unit) = bytes.split_at(bytes.len() - 1);
+    let unit_secs: u64 = match unit[0] {
+        b's' => 1,
+        b'm' => 60,
+        b'h' => 3600,
+        _ => {
+            return Err(format!(
+                "reply_by '{s}' has an unknown unit; use s (seconds), m (minutes), or h (hours) — e.g. 10m."
+            ))
+        }
+    };
+    if !digits.iter().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "reply_by '{s}' must be a plain integer plus one unit (no spaces or signs) — e.g. 5m, 10m, 1h."
+        ));
+    }
+    let n: u64 = std::str::from_utf8(digits)
+        .expect("ascii digits")
+        .parse()
+        .map_err(|_| {
+            format!("reply_by '{s}' is out of range; use at most 30d worth (e.g. 24h).")
+        })?;
+    if n == 0 {
+        return Err(format!(
+            "reply_by '{s}' must be greater than zero; drop the flag if you don't want a deadline."
+        ));
+    }
+    let secs = n.checked_mul(unit_secs).ok_or_else(|| {
+        format!("reply_by '{s}' is out of range; use at most 30d worth (e.g. 24h).")
+    })?;
+    if secs < MIN_REPLY_BY_SECS {
+        return Err(format!(
+            "reply_by '{s}' is shorter than the 1-minute minimum; deadlines are checked once a minute, so anything shorter cannot be honoured — use 1m or longer (60s is fine)."
+        ));
+    }
+    if secs > MAX_REPLY_BY_SECS {
+        return Err(format!(
+            "reply_by '{s}' exceeds the 30-day maximum; use a shorter deadline (e.g. 24h)."
+        ));
+    }
+    Ok(std::time::Duration::from_secs(secs))
+}
+
+/// ★C3 인자 정합 검증(spec §6 상호배타 · 양 입구 동일 반려)★ — 통과하면 서비스용 `SendMeta` 로 정규화한다.
+///
+/// 규칙(첫 위반에서 반려, 코드는 전부 `INVALID_SEND_ARGS`):
+///   1. `request` + `reply_to` 동시 지정 → 반려. 한 메시지가 "새 요청" 이면서 "남의 요청에 대한 회신" 일 수
+///      없다(spec §6 상호배타). 실제로 회신하며 새 요청을 걸고 싶으면 메시지 2건으로 나눈다.
+///   2. `reply_by` 는 `request` 전용 — 단독 지정은 반려(기한만 있고 추적할 계약이 없다 = 조용한 무시가 되므로).
+///   3. `reply_by` 표기 파싱 실패 → 반려(허용 형태를 hint 로).
+///   4. `reply_to` 빈 문자열/공백만 → 반려(장부 매칭 키가 못 된다). 앞뒤 공백은 **잘라서** 받는다.
+fn validate_contract(c: &SendContract) -> Result<crate::messaging::service::SendMeta, String> {
+    if c.request && c.reply_to.is_some() {
+        return Err(
+            "request and reply_to are mutually exclusive: a message is either a new request or a reply to one. Send two messages if you need both."
+                .to_string(),
+        );
+    }
+    if c.reply_by.is_some() && !c.request {
+        return Err(
+            "reply_by is only meaningful with request=true (it is the deadline of the reply contract you are opening). Add request, or drop reply_by."
+                .to_string(),
+        );
+    }
+    let reply_by = match &c.reply_by {
+        Some(raw) => Some(parse_reply_by(raw)?),
+        None => None,
+    };
+    let reply_to = match &c.reply_to {
+        Some(raw) => {
+            // ★입구 정규화로서의 trim(의도적 — 리뷰에서 제기됐으나 유지)★: 이 값은 발신 LLM 이 봉투에서
+            //   눈으로 옮겨 적는 id 라 앞뒤 공백이 섞이기 쉽다. 여기서 한 번 다듬은 값이 **봉투 렌더와 장부
+            //   엄격 매칭 양쪽에 그대로** 쓰이므로(SendMeta.reply_to 하나), 두 곳이 서로 다른 문자열을 볼
+            //   여지가 없다 — 즉 trim 은 매칭 규칙을 느슨하게 만드는 게 아니라 **입구에서 표준형을 정하는**
+            //   것이다. 다듬지 않으면 `" m-7f3k"` 가 같은 id 를 가리키는데도 NoMatch 로 조용히 빗나간다
+            //   (엄격 매칭의 취지는 "틀린 id 는 안 닫는다" 이지 "공백 하나로 빗나간다" 가 아니다).
+            let t = raw.trim();
+            if t.is_empty() {
+                return Err(
+                    "reply_to must be the id of the request you are answering (e.g. m-7f3k9q2d); it cannot be empty."
+                        .to_string(),
+                );
+            }
+            Some(t.to_string())
+        }
+        None => None,
+    };
+    Ok(crate::messaging::service::SendMeta {
+        request: c.request,
+        reply_by_raw: c.reply_by.clone(),
+        reply_by,
+        reply_to,
+    })
+}
+
+/// ★계약 필드(request/reply_to)가 **현재 봉투 렌더 경로에서 표현 불가**인가(C3 리뷰 fix 1 · load-bearing)★.
+/// 불가면 교정 hint(`INVALID_SEND_ARGS` 용)를 돌려주고, 가능하면 `None`.
+///
+/// ★왜 반려까지 하나(조용한 열화 거부)★: 봉투 포맷 스위치는 두 갈래로 살아 있다 — 런타임
+///   `SetEnvelopeFormat`(Colon, connection_core 경유로 실시간 전환) 과 스파이크용 `ENGRAM_WRAP_FORMAT`
+///   템플릿(`wrap_message` 가 **format 인자보다 먼저** 본다). 두 갈래 모두 렌더가 `sender/id/body` 수준이라
+///   **id·type·reply-by·in-reply-to 속성을 통째로 버린다**(`EnvelopeFields` 주석 "Colon 변형 미지원",
+///   `apply_wrap_template` 의 플레이스홀더 집합).
+///   그 상태에서 request 를 받아 주면 결말이 **정해져 있다**: 수신자는 회신에 쓸 id 를 본 적이 없는데 장부는
+///   엄격 매칭을 요구하므로(spec §2) 회신이 구조적으로 불가능하고, 기한이 지나면 발신자에게 "회신 없음"
+///   통지가 **반드시** 간다 — 거짓 타임아웃이 보장된 계약이다. 회신(`reply_to`)도 `in-reply-to` 가 사라져
+///   수신자가 무엇에 대한 답인지 모른다. 그래서 열화 배달 대신 입구에서 반려한다.
+/// ★통보는 영향 없음★: 속성이 없는 발송이라 어느 포맷에서도 그대로 나간다(기존 동작 불변).
+/// ★env 를 여기서 읽는 이유★: 템플릿은 `wrap_message` 가 **최우선**으로 보는 전역 스위치라, 이 판정이
+///   registry 포맷만 보면 템플릿이 켜진 프로세스에서 그대로 새 나간다. 판정과 렌더가 같은 입력을 봐야 한다.
+// ADR-0103
+fn contract_unsupported_by_envelope(
+    meta: &crate::messaging::service::SendMeta,
+    format: EnvelopeFormat,
+) -> Option<String> {
+    if !(meta.request || meta.reply_to.is_some()) {
+        return None;
+    }
+    let template_active = std::env::var("ENGRAM_WRAP_FORMAT").is_ok_and(|v| !v.is_empty());
+    if format == EnvelopeFormat::Xml && !template_active {
+        return None;
+    }
+    Some(
+        "Reply contracts (request / reply_to) need the XML envelope: the envelope format in effect drops the id / type / reply-by / in-reply-to attributes, so the recipient could never reply and you would get a false timeout notice. Send this as a plain notification instead, or switch the envelope format back to xml."
+            .to_string(),
+    )
 }
 
 /// 한 수신자에 대한 발송 결과(spec §6 `results[]` 원소). status = delivered|pending, hint 선택.
@@ -217,7 +449,10 @@ enum Resolution {
 /// — 이 아래는 입구를 모른다(entrance-agnostic).
 ///
 /// 검사 순서(첫 실패에서 교정 에러 반환 — 같은 shape 양 입구):
-///   1. 그룹 주소(`@`) → GROUPS_NOT_SUPPORTED(그룹 발송은 C4).
+///   0. ★C3 회신 계약 인자 정합★ → INVALID_SEND_ARGS(상호배타·reply_by 단독·표기 오류·빈 reply_to).
+///      주소보다 **먼저** 본다: 순수 구문 오류라 로스터 상태와 무관하게 항상 같은 답이 나와야 한다.
+///   1. 그룹 주소(`@`) → request 면 GROUP_REQUEST_UNSUPPORTED(spec §4 — v1 그룹 request 금지),
+///      아니면 GROUPS_NOT_SUPPORTED(그룹 발송 자체가 C4).
 ///   2. body 상한(64 KiB) → BODY_TOO_LARGE.
 ///   3. ★동명 다수 → RECIPIENT_AMBIGUOUS(유지, spec §5 주의)★ — 산 로스터에 같은 이름이 여럿이면
 ///      파킹/배달 이전에 반려한다(발신자가 exact id 로 재지목). 파킹 대상이 모호하면 안 되므로 여기서 먼저.
@@ -242,8 +477,41 @@ pub fn handle_send(
     entrance: Entrance,
     cmd: ControlCommand,
 ) -> ControlResult {
-    // 1. 그룹 주소(@) — 그룹 발송은 C4. 지금은 명시 교정(자리 예약).
+    // 0. C3 회신 계약 인자 정합(순수 구문 — 로스터 무관). 통과분은 파싱된 SendMeta 로 정규화된다.
+    let meta = match validate_contract(&cmd.contract) {
+        Ok(m) => m,
+        Err(hint) => {
+            return ControlResult::Error {
+                code: "INVALID_SEND_ARGS",
+                hint,
+            }
+        }
+    };
+
+    // 0-b. ★계약 필드는 XML 봉투 전용(리뷰 fix 1)★ — 판정 정본은 `contract_unsupported_by_envelope`.
+    if let Some(hint) = contract_unsupported_by_envelope(&meta, registry.envelope_format()) {
+        return ControlResult::Error {
+            code: "INVALID_SEND_ARGS",
+            hint,
+        };
+    }
+
+    // 1. 그룹 주소(@).
+    // ★C4 를 위한 분기 구조(load-bearing — 지금 두 갈래를 갈라 두는 이유)★: C4 가 그룹 발송을 켤 때
+    //   **아래쪽 GROUPS_NOT_SUPPORTED 갈래만** fan-out 으로 바뀐다. 위쪽 request 갈래는 그대로 남아야 한다 —
+    //   그룹 request 는 완료 판정(any/all/quorum) 시맨틱이 미정이라 v1 에서 **영구 금지**로 못박혔다(spec §4 ·
+    //   ADR-0103 거부 대안 "그룹 request(v1)"). 지금 한 갈래로 합쳐 두면 C4 가 broadcast 를 켜면서 request 를
+    //   같이 열어 버리는 회귀가 쉽게 난다.
     if cmd.to.starts_with('@') {
+        if meta.request {
+            return ControlResult::Error {
+                code: "GROUP_REQUEST_UNSUPPORTED",
+                hint: format!(
+                    "Requests must have exactly one recipient; '{}' is a group address. Send the request to a single agent name (a plain broadcast to the group is a separate message).",
+                    cmd.to
+                ),
+            };
+        }
         return ControlResult::Error {
             code: "GROUPS_NOT_SUPPORTED",
             hint: "Group addresses are not available yet; send to a single agent name.".to_string(),
@@ -276,7 +544,9 @@ pub fn handle_send(
 
     // ★발신자 생존 관측(기록용만 — 게이트 아님, 사용자 결정 2026-07-19)★: 죽은 발신자여도 배달·파킹은
     //   진행한다("결과 보내고 종료" 유언 패턴 + 파킹 커밋 시맨틱). body/토큰 미로깅(보안).
-    let msg_id = AgentId::new_v4().to_string();
+    // ★id = `m-` + base36 8자(C3, spec §1)★ — 수신 LLM 이 회신에 되받아 적는 값이라 짧은 불투명 id 다
+    //   (옛 UUID 폐기 — new_msg_id 주석). 봉투 `id` 속성·장부 키·응답 `id`·관측 레코드가 전부 이 값이다.
+    let mut msg_id = new_msg_id();
     if !registry.is_identity_live(cmd.from) {
         tracing::warn!(
             from = %cmd.from.agent_id,
@@ -297,8 +567,46 @@ pub fn handle_send(
     #[cfg(feature = "test-harness")]
     registry.fire_mid_send_hook();
 
-    match messaging.handle_single_send(&msg_id, cmd.from, &sender_name, &cmd.to, &cmd.body, entrance)
-    {
+    // ★id 충돌 재시도(C3 — new_msg_id 주석의 "새 id 로 1회 재시도")★: request 발송은 장부에 계약을 여는데,
+    //   그 예약이 `DuplicateId` 로 튕기면(2.8×10^12 공간에서 사실상 불가) 서비스는 **부작용 없이**
+    //   `IdCollision` 만 돌려준다(예약이 첫 부작용이라 배달·파킹은 아직 없다). 그러니 여기서 새 id 를 뽑아
+    //   딱 한 번 더 시도하고, 두 번째도 걸리면 내부 결함으로 보고 반려한다(무한 재시도 금지 — 그 지점이면
+    //   충돌이 아니라 장부/난수 배선 버그다).
+    let mut outcome = messaging.handle_single_send(
+        &msg_id,
+        cmd.from,
+        &sender_name,
+        &cmd.to,
+        &cmd.body,
+        entrance,
+        &meta,
+    );
+    if matches!(
+        outcome,
+        Err(crate::messaging::service::SendReject::IdCollision)
+    ) {
+        // ★로그는 **충돌한 id** 를 찍는다(리뷰 fix 10)★: 예전엔 재생성 **뒤** 찍어서 대체 id(=아직 아무
+        //   일도 없던 값)만 남았다 — 장부에서 무엇과 부딪혔는지 추적할 단서가 사라진다. 조사 가치는 옛
+        //   id 에 있으므로 그걸 먼저 붙들고, 대체 id 는 상관용으로 함께 남긴다.
+        let collided = std::mem::replace(&mut msg_id, new_msg_id());
+        tracing::error!(
+            collided = %collided,
+            replacement = %msg_id,
+            entrance = entrance.as_str(),
+            "메시지 id 충돌 — 새 id 로 1회 재시도(ADR-0103 · 사실상 불가한 경로라 난수/장부 배선을 의심할 것)"
+        );
+        outcome = messaging.handle_single_send(
+            &msg_id,
+            cmd.from,
+            &sender_name,
+            &cmd.to,
+            &cmd.body,
+            entrance,
+            &meta,
+        );
+    }
+
+    match outcome {
         Ok(crate::messaging::service::SendOutcome::Delivered) => ControlResult::Ok {
             id: msg_id,
             results: vec![SendResult {
@@ -321,6 +629,17 @@ pub fn handle_send(
                 "Recipient '{}' mailbox is full; oldest parked messages expire by TTL — retry later.",
                 cmd.to
             ),
+        },
+        Err(crate::messaging::service::SendReject::IdCollision) => ControlResult::Error {
+            code: "INTERNAL_ID_COLLISION",
+            hint: "The daemon could not allocate a unique message id; retry the send.".to_string(),
+        },
+        // ★오픈 계약 상한(리뷰 fix 3)★ — request 만 받는 반려. 코드는 안정 계약이므로 새 이름을 만들지
+        //   말고 이 값을 쓴다(발신 LLM 이 코드로 분기한다).
+        Err(crate::messaging::service::SendReject::RequestCapacity) => ControlResult::Error {
+            code: "REQUEST_CAPACITY",
+            hint: "Too many replies are still outstanding; the daemon is not tracking new requests right now. Send this as a plain notification, or wait for earlier requests to be answered or to time out."
+                .to_string(),
         },
     }
 }
@@ -587,15 +906,16 @@ fn render_message_xml(sender: &str, body: &str, fields: &EnvelopeFields) -> Stri
 ///   **없다**. 태그 분리가 load-bearing — 수신 LLM 은 `<notice>` 에 회신하지 않아야 한다(인프라 통지지
 ///   동료 발신이 아님, spec §1·§2 · ADR-0103 불변식). from 이 없어 "누구에게 회신" 대상 자체가 없다.
 ///
-/// ★스코프(increment A)★: 렌더만 제공하고 send-path 통합(타임아웃 시 발신자에게 주입 등)은 후속 increment.
+/// ★유일 호출부 = `MessagingService`(C3 타임아웃 통지)★: increment C3 가 이 seam 을 연결했다 — `reply_by`
+///   초과 시 **발신자에게** notice 를 주입/파킹하는 경로(service.rs `deliver_notice`)가 유일한 생성처다.
+///   그래서 에이전트는 어떤 입구로도 `<notice>` 를 만들 수 없다(발신 인자에 타입 문자열 자체가 없다).
+/// ★포맷 스위치 무관(의도적)★: `wrap_message` 와 달리 `EnvelopeFormat`·`ENGRAM_WRAP_FORMAT` 을 보지 않는다 —
+///   colon 변형에는 notice 대응물이 정의돼 있지 않고(ADR-0103: colon = 레거시 채팅 관례), 인프라 통지는
+///   "회신 대상이 아님" 을 태그로 알려야 하므로 포맷과 무관하게 항상 `<notice>` 다.
 /// ★이스케이프★: body 는 element text 문맥(`escape_xml_text`) — `<notice>` 안에도 `</notice>` 조각 주입을
 ///   막는다. notice 는 데몬이 만드는 텍스트지만 요청 id·에이전트 이름을 보간하므로 동일 규율 적용.
-// ★allow(dead_code)★: 렌더 seam 을 지금 깔되(저위험·장기 = CLAUDE.md §0) send-path 호출부는 후속
-//   increment(request 타임아웃 notice 주입)가 붙인다. 단위 테스트(#[cfg(test)])가 렌더 계약을 이미 고정하나
-//   non-test 빌드엔 호출부가 없어 dead_code 경고가 뜬다 — 의도된 미연결 seam 이라 명시적으로 허용한다.
 // ADR-0103
-#[allow(dead_code)]
-fn wrap_notice(body: &str) -> String {
+pub(crate) fn wrap_notice(body: &str) -> String {
     format!("<notice>{}</notice>", escape_xml_text(body))
 }
 
@@ -1331,7 +1651,350 @@ mod tests {
             from: ident(id),
             to: "bob".to_string(),
             body: "hi".to_string(),
+            contract: Default::default(),
         };
         assert_eq!(cmd.from.agent_id, id);
+    }
+    // ── C3: 메시지 id 포맷(spec §1 `m-7f3k`) ────────────────────────────────────────────────
+
+    #[test]
+    fn new_msg_id_is_m_prefix_plus_eight_lowercase_base36() {
+        // ★wire 계약★: 수신 LLM 이 봉투에서 읽어 회신 인자로 되받아치는 값이라 길이·문자 집합을 고정한다.
+        for _ in 0..200 {
+            let id = new_msg_id();
+            assert_eq!(id.len(), 10, "`m-` + 8자 = 10바이트: {id}");
+            let body = id
+                .strip_prefix("m-")
+                .unwrap_or_else(|| panic!("m- 접두: {id}"));
+            assert_eq!(body.len(), 8);
+            assert!(
+                body.bytes()
+                    .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+                "소문자 base36 만: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_msg_id_is_not_a_uuid_and_varies() {
+        // 옛 UUID 포맷 회귀 방어(길이·하이픈 수) + 난수성 최소 확인.
+        let a = new_msg_id();
+        assert!(a.parse::<AgentId>().is_err(), "UUID 로 파싱되면 안 됨: {a}");
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            seen.insert(new_msg_id());
+        }
+        assert!(
+            seen.len() > 90,
+            "100회 생성에 중복이 거의 없어야: {}",
+            seen.len()
+        );
+    }
+
+    // ── C3: reply_by 기간 표기 파서 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_reply_by_accepts_integer_plus_unit() {
+        use std::time::Duration;
+        assert_eq!(
+            parse_reply_by("10m").expect("10m"),
+            Duration::from_secs(600)
+        );
+        assert_eq!(parse_reply_by("1h").expect("1h"), Duration::from_secs(3600));
+        // ★`s` 단위는 계속 유효하다(리뷰 fix 7)★ — 하한은 **값**에 걸리는 것이지 표기에 거는 게 아니다.
+        assert_eq!(parse_reply_by("60s").expect("60s"), Duration::from_secs(60));
+        assert_eq!(
+            parse_reply_by("120s").expect("120s"),
+            Duration::from_secs(120)
+        );
+        // 상한 경계(30일)는 수용.
+        assert_eq!(
+            parse_reply_by("720h").expect("720h = 30d"),
+            Duration::from_secs(30 * 24 * 3600)
+        );
+    }
+
+    #[test]
+    fn parse_reply_by_rejects_below_one_minute_floor() {
+        // ★리뷰 fix 7★: 기한 판정 해상도 = sweep 주기(60s)라 1분 미만은 지킬 수 없는 약속이다 —
+        //   `30s` 를 받아 주면 실제 통지는 60~120초 뒤에 나간다(계약 문구가 거짓말이 된다).
+        for bad in ["1s", "30s", "59s"] {
+            let err = parse_reply_by(bad).expect_err("1분 미만은 반려");
+            assert!(
+                err.contains("1-minute minimum"),
+                "hint 가 하한을 알려야: {err}"
+            );
+        }
+        // 경계: 정확히 60초는 수용(`>=` 아님 — `< MIN` 만 반려).
+        assert!(parse_reply_by("60s").is_ok(), "정확히 1분은 수용");
+        assert!(parse_reply_by("1m").is_ok(), "1m 도 같은 값이라 수용");
+    }
+
+    #[test]
+    fn parse_reply_by_rejects_malformed_forms() {
+        // 엄격 — 모호하면 반려하고 hint 로 형태를 알린다(조용한 오해석 금지).
+        for bad in [
+            "", "s", "m", "10", "10 m", " 10m", "10m ", "10M", "1H", "10x", "-5m", "1.5h", "1h30m",
+            "0s", "0m", "0h", "십분", "10초",
+        ] {
+            assert!(
+                parse_reply_by(bad).is_err(),
+                "'{bad}' 는 반려돼야(엄격 파서)"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_reply_by_rejects_overflow_and_beyond_cap() {
+        // ★가용성 방어★: 상한이 없으면 `Instant + Duration` 오버플로 패닉으로 sweep task 가 죽는다.
+        assert!(parse_reply_by("721h").is_err(), "30일 초과는 반려");
+        assert!(
+            parse_reply_by("18446744073709551615s").is_err(),
+            "u64 최대치도 상한에서 반려"
+        );
+        assert!(
+            parse_reply_by("99999999999999999999s").is_err(),
+            "u64 파싱 초과도 반려"
+        );
+        assert!(
+            parse_reply_by("18446744073709551615h").is_err(),
+            "곱셈 오버플로도 반려"
+        );
+    }
+
+    // ── C3 리뷰 fix 1: 계약 필드는 XML 봉투 전용 ─────────────────────────────────────────────
+
+    /// request 발송 메타(검증 통과분 모양).
+    fn req_meta() -> crate::messaging::service::SendMeta {
+        crate::messaging::service::SendMeta {
+            request: true,
+            reply_by_raw: Some("10m".to_string()),
+            reply_by: Some(std::time::Duration::from_secs(600)),
+            reply_to: None,
+        }
+    }
+    fn reply_meta() -> crate::messaging::service::SendMeta {
+        crate::messaging::service::SendMeta {
+            request: false,
+            reply_by_raw: None,
+            reply_by: None,
+            reply_to: Some("m-7f3k".to_string()),
+        }
+    }
+
+    #[test]
+    fn contract_fields_are_rejected_under_colon_envelope() {
+        // ★fix 1★: colon 렌더는 id/type/reply-by/in-reply-to 를 통째로 버린다 — 그 상태의 request 는
+        //   회신이 구조적으로 불가능하고 거짓 타임아웃이 **보장**된다. 조용히 열화시키지 않고 반려한다.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(
+            std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
+            "전제: 템플릿 env 미설정"
+        );
+        for meta in [req_meta(), reply_meta()] {
+            let hint = contract_unsupported_by_envelope(&meta, EnvelopeFormat::Colon)
+                .expect("colon 에선 계약 필드 반려");
+            assert!(hint.contains("XML envelope"), "교정 hint: {hint}");
+        }
+        // 대조군: 같은 colon 이라도 **통보**는 통과한다(속성이 없으니 열화될 게 없다).
+        assert_eq!(
+            contract_unsupported_by_envelope(
+                &crate::messaging::service::SendMeta::default(),
+                EnvelopeFormat::Colon
+            ),
+            None,
+            "통보는 포맷과 무관하게 허용(기존 동작 불변)"
+        );
+        // 대조군: xml 이면 계약 필드도 통과.
+        assert_eq!(
+            contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml),
+            None
+        );
+    }
+
+    #[test]
+    fn contract_fields_are_rejected_when_wrap_template_env_is_active() {
+        // ★fix 1 의 두 번째 갈래★: `ENGRAM_WRAP_FORMAT` 템플릿은 wrap_message 가 **format 인자보다 먼저**
+        //   보는 전역 스위치라, 포맷이 Xml 이어도 실제 렌더는 템플릿(sender/id/body)이다 — 판정도 같은
+        //   입력을 봐야 새지 않는다.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(
+            std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
+            "전제: 다른 테스트가 남긴 값이 없어야"
+        );
+        std::env::set_var("ENGRAM_WRAP_FORMAT", "<{sender}#{id}> {body}");
+        let under_template = contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml);
+        let plain_under_template = contract_unsupported_by_envelope(
+            &crate::messaging::service::SendMeta::default(),
+            EnvelopeFormat::Xml,
+        );
+        // 빈 값은 "미설정" 과 같게 취급한다(wrap_message 의 판정과 동일 규칙).
+        std::env::set_var("ENGRAM_WRAP_FORMAT", "");
+        let under_empty = contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml);
+        std::env::remove_var("ENGRAM_WRAP_FORMAT"); // 반드시 제거(다른 테스트로 새지 않게).
+
+        assert!(
+            under_template.is_some(),
+            "템플릿이 켜져 있으면 xml 포맷이어도 계약 필드는 반려"
+        );
+        assert_eq!(
+            plain_under_template, None,
+            "템플릿 아래서도 통보는 통과(기존 스파이크 경로 불변)"
+        );
+        assert_eq!(under_empty, None, "빈 값 = 미설정 취급");
+    }
+
+    // ── C3: 발송 인자 정합(spec §6 상호배타) ──────────────────────────────────────────────────
+
+    #[test]
+    fn contract_default_is_plain_notice_message() {
+        let m = validate_contract(&SendContract::default()).expect("통보는 항상 유효");
+        assert!(!m.request);
+        assert_eq!(m.reply_by, None);
+        assert_eq!(m.reply_to, None);
+    }
+
+    #[test]
+    fn contract_request_and_reply_to_together_is_rejected() {
+        let c = SendContract {
+            request: true,
+            reply_by: None,
+            reply_to: Some("m-7f3k".to_string()),
+        };
+        let e = validate_contract(&c).expect_err("상호배타(spec §6)");
+        assert!(
+            e.contains("mutually exclusive"),
+            "hint 가 사유를 말해야: {e}"
+        );
+    }
+
+    #[test]
+    fn contract_reply_by_without_request_is_rejected() {
+        let c = SendContract {
+            request: false,
+            reply_by: Some("10m".to_string()),
+            reply_to: None,
+        };
+        let e = validate_contract(&c).expect_err("reply_by 는 request 전용");
+        assert!(e.contains("request"), "hint 가 교정법을 말해야: {e}");
+    }
+
+    #[test]
+    fn contract_bad_reply_by_notation_is_rejected_with_form_hint() {
+        let c = SendContract {
+            request: true,
+            reply_by: Some("ten minutes".to_string()),
+            reply_to: None,
+        };
+        let e = validate_contract(&c).expect_err("표기 오류");
+        assert!(e.contains("10m"), "허용 형태 예시: {e}");
+        // ★hint 는 **지금 유효한** 예시만 든다(리뷰 fix 7 의 짝)★: 하한 도입 후에도 `30s` 를 예시로 남기면
+        //   그 예시를 따라 고친 발신자가 다시 반려당한다(자기교정 루프). 예시는 반드시 통과하는 값이어야.
+        for example in ["30s", "1s", "59s"] {
+            assert!(
+                !e.contains(example),
+                "hint 가 반려되는 값을 예시로 들면 안 된다('{example}'): {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn contract_empty_reply_to_is_rejected_and_whitespace_is_trimmed() {
+        let empty = SendContract {
+            request: false,
+            reply_by: None,
+            reply_to: Some("   ".to_string()),
+        };
+        assert!(
+            validate_contract(&empty).is_err(),
+            "공백만 reply_to 는 반려"
+        );
+
+        let padded = SendContract {
+            request: false,
+            reply_by: None,
+            reply_to: Some("  m-7f3k  ".to_string()),
+        };
+        let m = validate_contract(&padded).expect("trim 후 유효");
+        assert_eq!(
+            m.reply_to.as_deref(),
+            Some("m-7f3k"),
+            "앞뒤 공백은 잘라 받는다"
+        );
+    }
+
+    #[test]
+    fn valid_request_contract_carries_both_raw_and_parsed_deadline() {
+        // 봉투는 raw 표기("10m")를, 장부는 파싱값(600s)을 쓴다(SendMeta 주석).
+        let c = SendContract {
+            request: true,
+            reply_by: Some("10m".to_string()),
+            reply_to: None,
+        };
+        let m = validate_contract(&c).expect("valid");
+        assert!(m.request);
+        assert_eq!(m.reply_by_raw.as_deref(), Some("10m"));
+        assert_eq!(m.reply_by, Some(std::time::Duration::from_secs(600)));
+    }
+
+    // ── C3: 봉투 속성 조립(노출 원칙 — spec §1) ────────────────────────────────────────────────
+
+    #[test]
+    fn request_envelope_exposes_id_type_reply_by_only() {
+        // ★노출 원칙★: id 는 request 에만. 통보/회신 봉투에 id 가 새면 수신 LLM 의 회신 판단이 흐려진다.
+        let _g = ENV_LOCK.lock().unwrap();
+        let m = validate_contract(&SendContract {
+            request: true,
+            reply_by: Some("10m".to_string()),
+            reply_to: None,
+        })
+        .expect("valid");
+        let w = wrap_message(
+            "qa-alpha",
+            "m-7f3k",
+            "코드 짜고 회신해",
+            EnvelopeFormat::Xml,
+            &m.envelope_fields("m-7f3k"),
+        );
+        assert_eq!(
+            w,
+            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m">코드 짜고 회신해</message>"#
+        );
+    }
+
+    #[test]
+    fn reply_envelope_exposes_only_in_reply_to() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let m = validate_contract(&SendContract {
+            request: false,
+            reply_by: None,
+            reply_to: Some("m-7f3k".to_string()),
+        })
+        .expect("valid");
+        let w = wrap_message(
+            "qa-bravo",
+            "m-other",
+            "다 짰음",
+            EnvelopeFormat::Xml,
+            &m.envelope_fields("m-other"),
+        );
+        assert_eq!(
+            w, r#"<message from="qa-bravo" in-reply-to="m-7f3k">다 짰음</message>"#,
+            "회신엔 id/type 이 없다(노출 원칙)"
+        );
+    }
+
+    #[test]
+    fn plain_envelope_has_no_attributes() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let m = validate_contract(&SendContract::default()).expect("valid");
+        let w = wrap_message(
+            "alice",
+            "m-zz",
+            "빌드 끝났음",
+            EnvelopeFormat::Xml,
+            &m.envelope_fields("m-zz"),
+        );
+        assert_eq!(w, r#"<message from="alice">빌드 끝났음</message>"#);
     }
 }

@@ -16,19 +16,32 @@
 // ADR-0103
 // ADR-0104
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
+
+use engram_dashboard_core::agent::types::AgentId;
 
 /// 이력 링버퍼 용량 — 초과 시 가장 오래된 레코드부터 evict(spec §5 "이력 링버퍼").
 ///
 /// ★조율 대상(사용자 비준 필요)★: 1024 는 "데몬 1회 수명의 메시지 이력을 담기에 충분" 이라는 어림값이다 —
 ///   spec 은 "이력 링버퍼" 만 명시하고 정확한 수는 정하지 않았다(TTL 24h·cap 100 만 못박음, ADR-0105). 인메모리 단계라
 ///   메모리 상한 겸 evict 경계이므로 실사용 관측 후 사용자가 조정한다(v1 스코프: 값 하나, 무파괴 변경 가능).
-/// ★evict 와 request 추적의 관계(finding 6 보정)★: request 추적은 별도 맵(`requests`)이지만 **이력 evict 에
-///   결박된다** — evict 되는 레코드의 msg_id 와 같은 request_id 의 오픈 추적 항목을 함께 드롭한다(`record`
-///   참조). 안 그러면 조회 불가해진 레코드를 가리키는 추적이 살아남아 spurious 타임아웃·무계 증식을 낳는다.
-///   즉 이력 용량이 회신 계약 추적의 상한도 겸한다(인메모리 v1 유계 보장 — 이력이 사라지면 계약도 추적 밖).
+/// ★evict 와 request 추적의 관계(C3 리뷰 fix 3 로 좁혀짐)★: 이력 evict 는 **끝난 계약**(closed 또는 이미
+///   통지된)의 추적 항목만 함께 드롭한다. 살아 있는(미회신·미통지) 계약은 evict 를 견디고 남는다 — 예전엔
+///   무조건 드롭해서, 이력이 밀려난 오픈 request 가 **회신으로 닫힐 길과 기한 초과 통지를 동시에 잃었다**
+///   (조용한 계약 소멸 = 최악 실패 모드). 유계는 이제 이력 용량이 아니라 `MAX_OPEN_REQUESTS` 가 준다.
 const HISTORY_CAPACITY: usize = 1024;
+
+/// 동시에 열려 있을 수 있는(미회신·미통지) request 계약 수의 상한.
+///
+/// ★왜 필요한가(fix 3 의 짝 — load-bearing)★: 오픈 계약이 이력 evict 를 견디게 바꾼 순간(위 상수 주석),
+///   추적 목록의 상한을 **이력 용량이 더 이상 대신 주지 않는다**. 상한이 없으면 회신이 영영 안 오는
+///   request(기한 없는 것 포함)가 쌓여 인메모리 v1 의 유계 보장이 깨진다. 그래서 오픈 계약 자체에 cap 을
+///   두고, cap 에서는 **새 request 를 반려**한다(오래된 계약을 조용히 버리지 않는다 — 조용한 유실 금지).
+/// ★512 의 근거★: 보관함 cap 100 × 동시 수신자 수십 규모를 넉넉히 덮는 어림값이다. 사람 대화 수준
+///   메시지율에서 오픈 계약이 이 수에 닿는다면 그건 정상 부하가 아니라 회신하지 않는 상대가 쌓인 것이므로,
+///   반려로 발신자에게 가시화하는 게 맞다(HISTORY_CAPACITY 와 같은 성격의 조율 대상 값 — 무파괴 변경 가능).
+const MAX_OPEN_REQUESTS: usize = 512;
 
 /// 메시지 배달 1건의 상태(spec §5 상태 어휘 — 새 어휘 발명 금지).
 ///
@@ -108,18 +121,38 @@ pub struct MessageRecord {
 struct RequestEntry {
     /// request 메시지 id(회신의 `in_reply_to` 가 이걸 정확히 가리켜야 닫힘 — 엄격 매칭).
     request_id: String,
-    /// 요청 발신자(타임아웃 notice 를 받을 대상 — spec §3 "발신자에게").
+    /// 요청 발신자 이름(타임아웃 notice 를 받을 대상 — spec §3 "발신자에게"). **발송 시점의** 표시 이름이다.
     sender: String,
+    /// ★요청 발신자의 AgentId(C3 리뷰 fix 2 — load-bearing)★: 이름은 발송 후 바뀔 수 있고(display_name
+    ///   변경), 그러면 이름-키 파킹만으로는 notice 가 옛 이름 큐에 갇혀 **영영 배달되지 않는다**(통지는
+    ///   `notified` 라 재발화도 없다 = 계약이 조용히 반쪽). id 를 함께 들고 있으면 상위가 그걸 파킹 힌트로
+    ///   실어 이름과 무관하게 그 incarnation 으로 배달할 수 있다.
+    sender_id: AgentId,
     /// 요청 수신자(누가 회신해야 하나 — 관측/보고용).
     recipient: String,
-    /// 회신 기한(발송 기준 오프셋 — spec §3 "reply_by 시계는 발송 기준"). `None` = 기한 없음(타임아웃 없음).
-    reply_by: Option<Duration>,
+    /// 회신 기한 = (발송 기준 오프셋, **발신자가 쓴 표기 원본**). `None` = 기한 없음(타임아웃 없음).
+    ///
+    /// ★왜 표기를 함께 보관하나(C3 리뷰 fix 6)★: 예전엔 Duration 만 두고 통지 문구를 만들 때 상위가 표기를
+    ///   **역산**했다 — 그 역산이 정규화라 `60m` 로 보낸 기한이 `1h` 로 통지돼 봉투(`reply-by="60m"`)와
+    ///   문구가 어긋났다. 계약 문구는 발신자가 쓴 그대로여야 하므로 표기를 원본째 보관한다(둘을 한 튜플로
+    ///   묶어 "기한이 있으면 표기도 반드시 있다" 를 타입으로 강제한다).
+    reply_by: Option<(Duration, String)>,
     /// 요청 오픈(발송) 시각 — reply_by 절대 기한 = created_at + reply_by.
     created_at: Instant,
     /// 회신으로 닫혔나(replied). true 면 due_timeouts 대상에서 제외.
     closed: bool,
     /// 타임아웃이 이미 보고됐나 — 이중 통지 방지(위 struct 주석).
     notified: bool,
+}
+
+impl RequestEntry {
+    /// 아직 **살아 있는** 계약인가 — 회신도 안 왔고 통지도 안 나간 상태. 이 부류만 이력 evict 를 견디고
+    /// (`record`), `MAX_OPEN_REQUESTS` cap 의 계수 대상이다. 끝난 계약이 무계가 아닌 근거는 두 갈래다:
+    /// 이력이 남아 있으면 그 이력이 evict 될 때, 이력이 이미 없으면 **끝나는 그 순간**
+    /// (`purge_finished_without_history` — fix 1) 정리된다.
+    fn is_live(&self) -> bool {
+        !self.closed && !self.notified
+    }
 }
 
 /// request 회신 결과(엄격 매칭, spec §2).
@@ -165,17 +198,41 @@ pub enum OpenOutcome {
     /// 같은 request_id 가 추적에 이미 존재(open/closed 무관)해 거부됨 — no-op. id 는 데몬 생성 유일값이라
     /// 재사용은 non-scenario(finding 2 — 관대 재오픈이 shadowing 버그를 낳아 제거).
     DuplicateId,
+    /// ★오픈 계약 cap(`MAX_OPEN_REQUESTS`) 도달(C3 리뷰 fix 3)★ — 새 계약을 열지 않는다(no-op). 상위가
+    /// 발신자에게 반려로 가시화한다(오래된 계약을 조용히 버리는 대신 새 것을 거절 — 조용한 유실 금지).
+    Full,
 }
 
-/// 타임아웃 초과 request 1건의 보고 정보(발신자에게 notice 를 만들 상위 increment 용).
+/// `drop_request` 결과 — 제거 여부 + **그 계약이 이미 통지된 상태였는지**(C3 리뷰 fix 5).
+///
+/// ★왜 notified 를 함께 돌려주나(load-bearing — 관측)★: 반려 회수(`drop_request`)는 "계약이 성립한 적 없음"
+///   을 뜻하는데, 그 항목이 이미 `notified` 였다면 **기한 초과 통지가 이미 발신자에게 나간 뒤**라는 말이다
+///   (통지는 회수할 수 없다 — 이미 나간 메시지다). 이 이중 결말("통지도 갔고 반려도 됐다")은 드물지만
+///   조용히 넘기면 안 되는 상태라 호출자가 로그로 남길 수 있게 사실을 함께 반환한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropOutcome {
+    /// 항목을 제거했다. `notified` = 제거 시점에 이미 타임아웃 통지가 나간 상태였나.
+    Removed { notified: bool },
+    /// 그런 id 가 추적에 없다(멱등 — no-op).
+    NotFound,
+}
+
+/// 타임아웃 초과 request 1건의 보고 정보(발신자에게 notice 를 만드는 `MessagingService` 용).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueTimeout {
     /// 초과한 request id.
     pub request_id: String,
-    /// notice 를 받을 발신자.
+    /// notice 를 받을 발신자 이름(**발송 시점** 표시 이름 — 그 뒤 개명됐을 수 있다).
     pub sender: String,
+    /// ★notice 배달용 발신자 id(C3 리뷰 fix 2)★ — 이름이 바뀌었어도 이 id 로 배달 경로를 찾는다
+    ///   (`RequestEntry.sender_id` 주석). 상위가 파킹 힌트 + flush 도어벨 대상으로 쓴다.
+    pub sender_id: AgentId,
     /// 회신하지 않은 수신자(notice 문구용).
     pub recipient: String,
+    /// ★초과된 기한의 **표기 원본**(C3 리뷰 fix 6 — notice 문구용)★: spec §1 notice 템플릿이
+    ///   `기한({reply_by})` 을 그대로 노출하므로, 발신자가 쓴 표기(`"60m"`)를 **그대로** 싣는다. 예전엔
+    ///   Duration 만 넘기고 상위가 표기를 역산해(`60m` → `1h`) 봉투 속성과 통지 문구가 어긋났다.
+    pub reply_by_raw: String,
 }
 
 /// 메시지 장부 — 이력 링버퍼 + request 추적. 순수(주입 시계).
@@ -183,7 +240,8 @@ pub struct DueTimeout {
 pub struct Ledger {
     /// 이력 링버퍼(오래된 순, front = 가장 오래됨). 용량 초과 시 front evict.
     history: VecDeque<MessageRecord>,
-    /// 오픈/닫힘 request 추적. 별도 컬렉션이나 이력 evict 에 결박된다(evict 시 동반 드롭 — finding 6·record 참조).
+    /// 오픈/닫힘 request 추적. 이력과 별도 컬렉션이고, **끝난 항목만** 이력 evict 에 결박된다(record 참조).
+    ///   이력이 먼저 사라진 채 끝난 항목은 그 순간 정리된다(`purge_finished_without_history` — fix 1).
     requests: Vec<RequestEntry>,
     /// 링버퍼 용량(테스트가 작은 값으로 evict 를 빨리 검증하도록 주입 가능).
     capacity: usize,
@@ -215,11 +273,15 @@ impl Ledger {
     ///
     /// ★초기 상태 인자화★: 단일/그룹 발송은 `Pending`(주입 대기) 또는 `Delivered`(즉시 주입 폴백)로,
     ///   그룹 죽은 멤버는 `Skipped` 로 시작하므로 호출자가 초기 상태를 정한다(spec §4·§5).
-    /// ★evict = front(오래된 것) + request 추적 동반 정리(load-bearing)★: 링버퍼라 용량을 넘기면 가장
-    ///   오래된 이력부터 버린다. 이때 **그 레코드에 매달린 오픈 request 추적 항목도 함께 드롭한다** —
-    ///   안 그러면 evict 로 조회 불가해진 레코드를 가리키는 request 가 살아남아 (a) `due_timeouts` 가
-    ///   조회 불가 레코드에 대해 spurious 타임아웃을 쏘고 (b) 추적 맵이 무계 증식한다. 이력 evict 를
-    ///   회신 계약의 경계로 삼는다(이력이 사라지면 그 회신 계약도 추적 밖 — 인메모리 v1 의 유계 보장).
+    /// ★evict = front(오래된 것) + **끝난 계약만** 동반 정리(C3 리뷰 fix 3 · load-bearing)★: 링버퍼라 용량을
+    ///   넘기면 가장 오래된 이력부터 버린다. 이때 같은 msg_id 의 request 추적 항목은 **닫혔거나 이미
+    ///   통지된 것만** 함께 드롭한다(dangling 정리 + 유계). ★살아 있는 계약(미회신·미통지)은 evict 를
+    ///   견딘다★ — 예전엔 무조건 드롭해서, 이력이 밀려난 오픈 request 가 (a) 회신이 와도 닫히지 않고
+    ///   (`NoMatch`) (b) 기한이 지나도 통지가 안 나가는 **조용한 계약 소멸**을 겪었다. 계약의 정본은 추적이지
+    ///   이력이 아니므로(ReplyOutcome 주석), 이력 용량이 계약을 죽이면 안 된다. 살아 있는 계약의 유계는
+    ///   `MAX_OPEN_REQUESTS`(open_request 의 `Full`)가 따로 준다.
+    /// ★그 evict 를 견딘 계약이 나중에 끝나면(fix 1)★ 정리해 줄 evict 이벤트가 이미 지나갔으므로 닫힘·
+    ///   통지 시점에 즉시 지운다 — 여기 evict 경로의 정리는 그 짝(belt)이다(`purge_finished_without_history`).
     pub fn record(
         &mut self,
         msg_id: &str,
@@ -238,13 +300,39 @@ impl Ledger {
             created_at: now,
             transitioned_at: now,
         });
-        // 용량 초과 — 가장 오래된(front) 것부터 evict(오래된 순 유지). evict 되는 msg_id 와 request_id 가
-        // 같은 오픈 추적 항목이 있으면 함께 드롭(위 주석 — dangling 방지·유계 유지).
+        // 용량 초과 — 가장 오래된(front) 것부터 evict(오래된 순 유지). evict 뒤 **끝난 계약 중 이력이 사라진
+        // 것**을 정리한다(`purge_finished_without_history`) — 살아 있는 계약은 남겨야 회신·통지 경로가
+        // 유지된다(위 주석 fix 3). 아직 안 끝난 것들의 상한은 MAX_OPEN_REQUESTS 가 준다.
+        let mut evicted_any = false;
         while self.history.len() > self.capacity {
-            if let Some(evicted) = self.history.pop_front() {
-                self.requests.retain(|r| r.request_id != evicted.msg_id);
+            if self.history.pop_front().is_some() {
+                evicted_any = true;
             }
         }
+        if evicted_any {
+            self.purge_finished_without_history();
+        }
+    }
+
+    /// ★끝난 계약 중 **가리킬 이력이 없는** 추적 항목을 제거한다(round-final fix 1 · load-bearing)★.
+    ///
+    /// ★막는 것 = 좀비 추적 항목★: 끝난(closed/notified) 항목의 정상 정리 계기는 "같은 msg_id 이력이
+    ///   evict 될 때"(`record`)다. 그런데 fix 3 로 **살아 있는 계약이 evict 를 견디게** 된 순간, 이력이 먼저
+    ///   밀려난 계약은 나중에 닫히거나 통지될 때 **정리해 줄 evict 이벤트가 이미 지나간 상태**가 된다. 그
+    ///   항목은 `is_live()` 가 false 라 `MAX_OPEN_REQUESTS` 계수에도 안 잡히므로 **어떤 상한도 안 걸린
+    ///   채** 영원히 쌓인다(인메모리 v1 의 유계 보장 붕괴). 그래서 끝나는 그 순간(닫힘·통지)과 evict 때,
+    ///   이력 유무를 보고 고아를 즉시 지운다.
+    /// ★살아 있는 계약은 절대 안 건드린다★: 미회신·미통지 계약은 이력이 없어도 남아야 회신으로 닫히고
+    ///   기한 초과 통지가 나간다(fix 3 의 조용한 계약 소멸 방지).
+    /// ★비용★: 끝난 항목이 하나도 없으면(대부분) 선형 스캔 한 번으로 즉시 반환하고, 있을 때만 이력
+    ///   msg_id 집합(≤ capacity)을 만들어 O(이력 + 추적)으로 판정한다.
+    fn purge_finished_without_history(&mut self) {
+        if self.requests.iter().all(|r| r.is_live()) {
+            return;
+        }
+        let live_ids: HashSet<&str> = self.history.iter().map(|r| r.msg_id.as_str()).collect();
+        self.requests
+            .retain(|r| r.is_live() || live_ids.contains(r.request_id.as_str()));
     }
 
     /// (msg_id, to) 쌍의 이력 레코드를 새 상태로 전이하고 전이 시각을 기록한다. 불법 전이는 거부한다.
@@ -292,21 +380,32 @@ impl Ledger {
     ///   동시에 남겨 (a) 회신이 앞쪽 닫힌 항목을 먼저 만나 `AlreadyClosed` 오발, (b) 같은-id 이력 evict 가
     ///   재오픈 추적을 드롭하는 shadowing 버그를 낳았다. 유일성 전제이므로 재오픈 자체를 없애 이 클래스의
     ///   버그를 제거한다.
+    /// ★cap 도달 = `Full`(C3 리뷰 fix 3)★: 살아 있는(미회신·미통지) 계약이 `MAX_OPEN_REQUESTS` 개면 새
+    ///   계약을 열지 않는다. 오래된 계약을 밀어내지 않는 이유: 이미 발신자가 기다리는 계약을 조용히 없애는
+    ///   건 유실이고, 새 발송을 반려하면 발신자가 즉시 알고 조정할 수 있다(가시적 실패 > 조용한 유실).
+    /// ★인자 `reply_by` = (기한, 표기 원본)★: 표기는 통지 문구에 그대로 쓰인다(`DueTimeout.reply_by_raw`).
+    ///   튜플로 묶어 "기한이 있으면 표기도 있다" 를 타입으로 강제한다(둘이 어긋날 여지 자체를 없앤다).
     pub fn open_request(
         &mut self,
         request_id: &str,
         sender: &str,
+        sender_id: AgentId,
         recipient: &str,
-        reply_by: Option<Duration>,
+        reply_by: Option<(Duration, String)>,
         now: Instant,
     ) -> OpenOutcome {
         // 같은 id 가 추적에 하나라도 있으면(open/closed 무관) 거부 — id 는 데몬 생성 유일값(재사용 non-scenario).
         if self.requests.iter().any(|r| r.request_id == request_id) {
             return OpenOutcome::DuplicateId;
         }
+        // 살아 있는 계약만 센다 — 끝난 항목은 자기 이력이 밀려날 때 정리되므로 상한의 대상이 아니다.
+        if self.requests.iter().filter(|r| r.is_live()).count() >= MAX_OPEN_REQUESTS {
+            return OpenOutcome::Full;
+        }
         self.requests.push(RequestEntry {
             request_id: request_id.to_string(),
             sender: sender.to_string(),
+            sender_id,
             recipient: recipient.to_string(),
             reply_by,
             created_at: now,
@@ -314,6 +413,38 @@ impl Ledger {
             notified: false,
         });
         OpenOutcome::Opened
+    }
+
+    /// 이 `msg_id` 가 장부에서 **이미 쓰이고 있나** — 이력 레코드(그룹 방송 포함) 또는 request 추적
+    /// (open/closed 무관) 어느 쪽에든 있으면 true.
+    ///
+    /// ★왜 모든 발송이 이걸 보나(C3 리뷰 fix 12 · load-bearing)★: 예전엔 id 충돌을 **request 발송만**
+    ///   잡았다(`open_request` 의 DuplicateId). 그런데 id 는 이력 레코드의 상관 키이자 회신 매칭 키라,
+    ///   통보/회신이 기존 id 와 겹치면 (a) `records_for`·`transition` 이 남의 레코드를 집고 (b) 관측 레코드가
+    ///   두 메시지를 한 id 로 뭉갠다 — request 가 아니어도 똑같이 해롭다. 그래서 예약 지점에서 종류 무관
+    ///   같은 검사를 한다.
+    /// ★비용(선택 근거)★: 링버퍼 선형 스캔(≤ HISTORY_CAPACITY) + 추적 선형 스캔이다. 별도 id 집합을 두면
+    ///   evict/닫기/제거마다 두 자료구조를 동기화해야 하는데(불일치 = 조용한 오탐), 메시지율이 사람 대화
+    ///   수준이라 스캔 비용이 무의미하다 — 단순함을 택했다(v2 영속화 때 인덱스와 함께 재검토).
+    pub fn msg_id_in_use(&self, msg_id: &str) -> bool {
+        self.history.iter().any(|r| r.msg_id == msg_id)
+            || self.requests.iter().any(|r| r.request_id == msg_id)
+    }
+
+    /// 이 request 가 **회신으로 닫혔나**(추적에 있고 `closed`). 없는 id 는 false.
+    ///
+    /// ★용도(C3 리뷰 fix 5 — 타임아웃↔회신 레이스 좁히기)★: `due_timeouts` 로 걷은 뒤 notice 를 파킹하기
+    ///   직전에 상위가 다시 확인한다 — 그 사이 회신이 도착해 계약이 닫혔으면 "회신 없음" 통지를 보내지
+    ///   않는다. 없는 id 가 false 인 건 의도적이다: evict 등으로 추적이 사라진 경우 타임아웃은 실제로
+    ///   발생했으므로 통지를 막을 이유가 없다.
+    /// ★잔여(fix 1 과의 상호작용 — 정직한 명시)★: 이력이 이미 evict 된 계약은 **닫히는 순간 추적에서
+    ///   제거**되므로(좀비 방지) 그 뒤 이 조회는 false 다 — 즉 "산출 후 회신 도착" 취소가 그 좁은 경우엔
+    ///   안 걸리고 통지가 한 번 더 나갈 수 있다. 이력 1024건이 밀려난 뒤 마이크로초 창에서만 성립하는
+    ///   경로라, 여기서 유계(좀비 제거)를 택했다.
+    pub fn is_request_closed(&self, request_id: &str) -> bool {
+        self.requests
+            .iter()
+            .any(|r| r.request_id == request_id && r.closed)
     }
 
     /// 회신 도착 처리 — **엄격 매칭**(spec §2 · ADR-0103 불변식). `in_reply_to` 가 오픈된 request id 를
@@ -354,12 +485,44 @@ impl Ledger {
         // 2) 매칭 이력 레코드를 Replied 로 전이. 계약은 이미 닫혔다(위) — 여기 결과는 이력 부기 정직성만
         //    가른다. 불법 간선이면 이력이 회신을 못 담은 채 남으므로 anomaly 로 승격(위 주석), evict(NotFound)
         //    는 가리킬 레코드가 없어 정상 best-effort skip → Closed.
-        match self.transition(in_reply_to, &recipient, DeliveryStatus::Replied, now) {
+        let outcome = match self.transition(in_reply_to, &recipient, DeliveryStatus::Replied, now) {
             Ok(()) => ReplyOutcome::Closed,
             Err(TransitionError::NotFound) => ReplyOutcome::Closed,
             Err(TransitionError::Illegal { from, .. }) => {
                 ReplyOutcome::ClosedHistoryAnomaly { from }
             }
+        };
+        // 3) 방금 끝난 계약의 이력이 이미 evict 됐다면 그 항목은 **정리해 줄 evict 이벤트가 영영 없다** —
+        //    여기서 지운다(좀비 방지, `purge_finished_without_history` 주석). 이력이 남아 있으면 그대로 두고
+        //    그 이력이 밀려날 때 함께 정리된다(닫힌 id 재오픈 차단이 그동안 유지된다).
+        self.purge_finished_without_history();
+        outcome
+    }
+
+    /// ★오픈된 request 추적을 **통째로 제거**한다(C3 — 발송이 반려돼 계약이 애초에 성립하지 않은 경우)★.
+    /// 제거했으면 `Removed { notified }`(그 항목이 이미 통지된 상태였는지 동봉), 그런 id 가 없으면 `NotFound`.
+    ///
+    /// ★왜 `close_on_reply` 가 아니라 별도 출구인가(load-bearing — 유계 보장)★: 닫기(`closed=true`)는
+    ///   "회신이 와서 계약이 이행됐다" 는 **이력**이라 추적 목록에 남는다. 그 잔존 항목은 같은 msg_id 의
+    ///   **이력 레코드가 evict 될 때** 함께 드롭돼 유계가 유지된다(`record` 주석). 그런데 **반려된 발송**은
+    ///   이력 레코드가 애초에 없다(park 조차 안 됐다) — 그래서 닫기만 하면 그 항목을 evict 할 계기가 영영
+    ///   없어 반려가 반복될수록 추적 목록이 무계 증식한다. 반려는 "계약이 이행됨" 이 아니라 "계약이 성립한
+    ///   적 없음" 이므로, 이력을 남기지 않고 흔적째 지우는 게 의미상으로도 맞다.
+    /// ★멱등★: 없는 id 면 아무 것도 하지 않는다(`NotFound`).
+    /// ★notified 동봉(C3 리뷰 fix 5)★: 제거 시점에 이미 타임아웃 통지가 나갔던 항목이면 그 사실을 함께
+    ///   돌려준다 — 호출자가 "통지도 갔는데 반려도 됐다" 는 이중 결말을 로그로 남긴다(`DropOutcome` 주석).
+    // ADR-0103
+    pub fn drop_request(&mut self, request_id: &str) -> DropOutcome {
+        let Some(idx) = self
+            .requests
+            .iter()
+            .position(|r| r.request_id == request_id)
+        else {
+            return DropOutcome::NotFound;
+        };
+        let removed = self.requests.remove(idx);
+        DropOutcome::Removed {
+            notified: removed.notified,
         }
     }
 
@@ -376,7 +539,7 @@ impl Ledger {
             if r.closed || r.notified {
                 continue;
             }
-            let Some(reply_by) = r.reply_by else {
+            let Some((reply_by, reply_by_raw)) = r.reply_by.clone() else {
                 continue; // 기한 없는 request 는 타임아웃 없음.
             };
             let deadline = r.created_at + reply_by;
@@ -385,9 +548,17 @@ impl Ledger {
                 due.push(DueTimeout {
                     request_id: r.request_id.clone(),
                     sender: r.sender.clone(),
+                    sender_id: r.sender_id,
                     recipient: r.recipient.clone(),
+                    // 표기는 발신자가 쓴 원본 그대로 — 통지 문구가 봉투 `reply-by` 와 어긋나지 않게(fix 6).
+                    reply_by_raw,
                 });
             }
+        }
+        // 통지로 끝난 계약 중 이력이 이미 evict 된 것은 정리 계기가 영영 없다 — 그 자리에서 지운다(좀비
+        //   방지, `purge_finished_without_history` 주석). due 가 빈 대부분의 sweep 은 스캔조차 안 한다.
+        if !due.is_empty() {
+            self.purge_finished_without_history();
         }
         due
     }
@@ -403,9 +574,21 @@ impl Ledger {
         self.history.iter().filter(|r| r.msg_id == msg_id).collect()
     }
 
+    /// 전 이력 레코드(오래된 순) — 관측/테스트 스냅샷. 상위(MessagingService)가 "notice 가 장부에 남았나"
+    /// 처럼 msg_id 를 모르는 단언을 할 때 쓴다(msg_id 를 아는 조회는 `records_for`).
+    pub fn all_records(&self) -> Vec<&MessageRecord> {
+        self.history.iter().collect()
+    }
+
     /// 오픈(미회신) request 수(관측/테스트). closed 제외.
     pub fn open_request_count(&self) -> usize {
         self.requests.iter().filter(|r| !r.closed).count()
+    }
+
+    /// 추적 항목 **총수**(끝난 것 포함 — 관측/테스트). 좀비 누적(fix 1)이 없는지 유계를 단언하는 데 쓴다:
+    ///   `open_request_count` 는 끝난 항목을 안 세므로 누수를 못 본다.
+    pub fn tracking_len(&self) -> usize {
+        self.requests.len()
     }
 }
 
@@ -415,6 +598,35 @@ mod tests {
 
     fn t0() -> Instant {
         Instant::now()
+    }
+
+    /// 발신자 AgentId(fix 2) — 대부분의 단언은 값 자체를 안 보므로 매번 새로 뽑는다.
+    fn sid() -> AgentId {
+        AgentId::new_v4()
+    }
+
+    /// 기한 튜플(fix 6) — 표기는 Duration 에서 만든 게 아니라 **발신자가 쓴 것**이라는 전제를 테스트에서도
+    /// 유지하려고, 단언이 표기를 안 보는 자리에선 관례적 표기 하나를 쓴다.
+    fn rb(d: Duration) -> Option<(Duration, String)> {
+        Some((d, format!("{}s", d.as_secs())))
+    }
+
+    /// 운영 경로 재현 — 접수된 발송은 **반드시** 이력 레코드를 남기고(park/inject 둘 다 record 한다) 계약을
+    /// 연다. 이력 없는 계약은 evict 이후에만 존재하므로(fix 1), 그 케이스를 노리지 않는 테스트는 이 헬퍼로
+    /// 이력을 함께 만든다 — 그래야 "닫힌 계약이 추적에 남는다" 같은 단언이 운영 상태를 반영한다.
+    fn open_delivered_request(
+        l: &mut Ledger,
+        id: &str,
+        reply_by: Option<(Duration, String)>,
+        now: Instant,
+    ) {
+        l.record(id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l.open_request(id, "alice", sid(), "bob", reply_by, now);
+        assert_eq!(
+            l.transition(id, "bob", DeliveryStatus::Delivered, now),
+            Ok(()),
+            "전제: 주입까지 끝난 계약"
+        );
     }
 
     // ── 이력 링버퍼 ──────────────────────────────────────────────────────────────
@@ -614,7 +826,7 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         assert_eq!(
-            l.open_request("req-1", "alice", "bob", None, now),
+            l.open_request("req-1", "alice", sid(), "bob", None, now),
             OpenOutcome::Opened
         );
         assert_eq!(l.open_request_count(), 1);
@@ -626,7 +838,7 @@ mod tests {
     fn strict_reply_wrong_id_does_not_close() {
         let mut l = Ledger::new();
         let now = t0();
-        l.open_request("req-1", "alice", "bob", None, now);
+        l.open_request("req-1", "alice", sid(), "bob", None, now);
         // 틀린 id 회신 = NoMatch, 아무 것도 안 닫음(엄격 매칭 — 우연 닫힘 오발 거부).
         assert_eq!(l.close_on_reply("req-999", now), ReplyOutcome::NoMatch);
         assert_eq!(l.open_request_count(), 1, "틀린 id 는 request 를 안 닫아야");
@@ -636,7 +848,8 @@ mod tests {
     fn second_reply_to_same_request_is_already_closed_noop() {
         let mut l = Ledger::new();
         let now = t0();
-        l.open_request("req-1", "alice", "bob", None, now);
+        // 이력이 남아 있는 정상 계약 — 닫힌 항목이 추적에 잔존해야 두 번째 회신을 AlreadyClosed 로 구분한다.
+        open_delivered_request(&mut l, "req-1", None, now);
         assert_eq!(l.close_on_reply("req-1", now), ReplyOutcome::Closed);
         // 두 번째 회신 = AlreadyClosed(no-op — 첫 회신만 유효, 문서화된 동작).
         assert_eq!(l.close_on_reply("req-1", now), ReplyOutcome::AlreadyClosed);
@@ -649,11 +862,11 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         assert_eq!(
-            l.open_request("req-1", "alice", "bob", None, now),
+            l.open_request("req-1", "alice", sid(), "bob", None, now),
             OpenOutcome::Opened
         );
         assert_eq!(
-            l.open_request("req-1", "alice", "carol", None, now),
+            l.open_request("req-1", "alice", sid(), "carol", None, now),
             OpenOutcome::DuplicateId,
             "중복 오픈 id 는 거부"
         );
@@ -666,14 +879,12 @@ mod tests {
         //   관대 재오픈은 닫힌 항목 + 재오픈 항목을 동시에 남겨 shadowing 버그를 낳았다 — 이제 아예 막는다.
         let mut l = Ledger::new();
         let now = t0();
-        assert_eq!(
-            l.open_request("req-1", "alice", "bob", None, now),
-            OpenOutcome::Opened
-        );
+        // 이력이 남아 있는 정상 계약(운영 경로) — 닫힌 항목이 추적에 남아 재오픈을 막는다.
+        open_delivered_request(&mut l, "req-1", None, now);
         assert_eq!(l.close_on_reply("req-1", now), ReplyOutcome::Closed);
         // 닫힌 뒤 같은 id 재오픈 시도 → 거부(추적에 여전히 존재).
         assert_eq!(
-            l.open_request("req-1", "alice", "bob", None, now),
+            l.open_request("req-1", "alice", sid(), "bob", None, now),
             OpenOutcome::DuplicateId,
             "닫힌 id 재오픈은 거부(유일성 전제)"
         );
@@ -700,7 +911,7 @@ mod tests {
             DeliveryStatus::Pending,
             now,
         );
-        l.open_request("req-1", "alice", "bob", None, now);
+        l.open_request("req-1", "alice", sid(), "bob", None, now);
         // 주입(Delivered) — Delivered → Replied 만 합법이므로 선행 필요.
         let delivered_at = now + Duration::from_secs(1);
         assert_eq!(
@@ -725,7 +936,7 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         l.record("req-1", "alice", "bob", "q", DeliveryStatus::Pending, now);
-        l.open_request("req-1", "alice", "bob", None, now);
+        l.open_request("req-1", "alice", sid(), "bob", None, now);
         assert_eq!(
             l.close_on_reply("req-1", now),
             ReplyOutcome::ClosedHistoryAnomaly {
@@ -753,7 +964,7 @@ mod tests {
         let mut l = Ledger::with_capacity(1);
         let now = t0();
         // req-1 이력은 곧 밀려나지만, 추적은 record 와 무관하게 열 수 있다(별도 맵).
-        l.open_request("req-1", "alice", "bob", None, now);
+        l.open_request("req-1", "alice", sid(), "bob", None, now);
         // 다른 msg_id 이력을 밀어넣어 req-1 이력 레코드가 존재하지 않게 만든다(애초에 record 안 함 = NotFound).
         l.record("other", "x", "y", "z", DeliveryStatus::Delivered, now);
         // req-1 이력 레코드는 없음 → transition NotFound → 정상 best-effort skip → 그냥 Closed.
@@ -771,7 +982,7 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         let reply_by = Duration::from_secs(600); // 10m
-        l.open_request("req-1", "alice", "bob", Some(reply_by), now);
+        l.open_request("req-1", "alice", sid(), "bob", rb(reply_by), now);
         // 정확히 기한인 순간 = 아직 due 아님(`>` 경계).
         assert!(
             l.due_timeouts(now + reply_by).is_empty(),
@@ -786,11 +997,37 @@ mod tests {
     }
 
     #[test]
+    fn due_timeout_carries_sender_id_and_raw_notation() {
+        // ★fix 2/6★: 보고는 발신자 **id**(개명 대비 배달 힌트)와 **표기 원본**(통지 문구용)을 함께 싣는다.
+        //   특히 표기는 정규화하지 않는다 — `60m` 는 `60m` 그대로여야 봉투 reply-by 와 문구가 일치한다.
+        let mut l = Ledger::new();
+        let now = t0();
+        let sender = sid();
+        let reply_by = Duration::from_secs(3600);
+        l.open_request(
+            "req-1",
+            "alice",
+            sender,
+            "bob",
+            Some((reply_by, "60m".to_string())),
+            now,
+        );
+        let due = l.due_timeouts(now + reply_by + Duration::from_secs(1));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].sender_id, sender, "발신자 id 동봉(개명 대비 힌트)");
+        assert_eq!(
+            due[0].reply_by_raw, "60m",
+            "표기 원본 그대로(1h 로 정규화 금지)"
+        );
+    }
+
+    #[test]
     fn due_timeout_no_double_notification() {
         let mut l = Ledger::new();
         let now = t0();
         let reply_by = Duration::from_secs(600);
-        l.open_request("req-1", "alice", "bob", Some(reply_by), now);
+        // 이력이 남아 있는 정상 계약 — 재산출을 막는 게 `notified` 플래그임을 단언한다(항목 제거가 아니라).
+        open_delivered_request(&mut l, "req-1", rb(reply_by), now);
         let over = now + reply_by + Duration::from_secs(1);
         assert_eq!(l.due_timeouts(over).len(), 1, "첫 산출은 보고");
         assert!(
@@ -804,7 +1041,7 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         let reply_by = Duration::from_secs(600);
-        l.open_request("req-1", "alice", "bob", Some(reply_by), now);
+        l.open_request("req-1", "alice", sid(), "bob", rb(reply_by), now);
         // 기한 전에 회신 도착 → 닫힘.
         assert_eq!(l.close_on_reply("req-1", now), ReplyOutcome::Closed);
         // 기한을 넘겨도 replied(closed) request 는 절대 due 로 안 나옴.
@@ -816,10 +1053,49 @@ mod tests {
     }
 
     #[test]
+    fn drop_request_removes_the_entry_entirely_unlike_close() {
+        // ★C3 반려 회수★: 닫기(close)는 이력으로 **남고**(같은 id 재오픈 불가), 제거(drop)는 흔적째 지워
+        //   같은 id 를 다시 열 수 있다. 반려된 발송은 이력 레코드가 없어 evict 계기가 없으므로 제거해야
+        //   무계 증식을 막는다(drop_request 주석).
+        let mut l = Ledger::new();
+        let now = t0();
+        let reply_by = Duration::from_secs(600);
+
+        // 닫기: 재오픈 불가(DuplicateId) + due 대상 아님(이력이 남아 있는 정상 계약).
+        open_delivered_request(&mut l, "closed-1", rb(reply_by), now);
+        assert_eq!(l.close_on_reply("closed-1", now), ReplyOutcome::Closed);
+        assert_eq!(
+            l.open_request("closed-1", "alice", sid(), "bob", rb(reply_by), now),
+            OpenOutcome::DuplicateId,
+            "닫힌 항목은 추적에 남아 재오픈을 막는다"
+        );
+
+        // 제거: 흔적이 없으니 같은 id 재오픈 가능.
+        l.open_request("dropped-1", "alice", sid(), "bob", rb(reply_by), now);
+        assert_eq!(
+            l.drop_request("dropped-1"),
+            DropOutcome::Removed { notified: false },
+            "제거 성공 — 통지 전이었으므로 notified=false"
+        );
+        assert_eq!(
+            l.drop_request("dropped-1"),
+            DropOutcome::NotFound,
+            "멱등 — 두 번째는 NotFound"
+        );
+        assert_eq!(
+            l.open_request("dropped-1", "alice", sid(), "bob", rb(reply_by), now),
+            OpenOutcome::Opened,
+            "제거된 id 는 다시 열 수 있다(계약 미성립 = 흔적 없음)"
+        );
+        // 제거됐던 계약은 그 사이 due 로도 안 나왔어야 한다(지금 다시 연 것만 유효).
+        assert_eq!(l.open_request_count(), 1, "열린 계약은 방금 것 하나뿐");
+    }
+
+    #[test]
     fn request_without_reply_by_never_times_out() {
         let mut l = Ledger::new();
         let now = t0();
-        l.open_request("req-1", "alice", "bob", None, now);
+        l.open_request("req-1", "alice", sid(), "bob", None, now);
         // 기한 없으면 아무리 시간이 지나도 due 아님.
         let far = now + Duration::from_secs(100_000);
         assert!(
@@ -837,43 +1113,277 @@ mod tests {
         assert_eq!(l.records_for("g1")[0].status, DeliveryStatus::Skipped);
     }
 
-    // ── evict ↔ request 추적 결합(finding 6) ────────────────────────────────────
+    // ── evict ↔ request 추적 결합(finding 6 · C3 리뷰 fix 3 로 재정의) ────────────
     #[test]
-    fn eviction_drops_dangling_request_tracking() {
-        // 용량 초과로 request 이력 레코드가 evict 되면 그 오픈 추적도 함께 드롭돼야:
-        //   ① due_timeouts 가 evict/조회불가 레코드에 spurious 타임아웃을 쏘지 않음
-        //   ② 추적 맵이 무계 증식하지 않음(유계)
-        let cap = 3;
+    fn eviction_drops_only_finished_request_tracking() {
+        // 이력 evict 는 **끝난 계약**(closed/notified)의 추적만 정리한다 — dangling 방지·유계는 유지하되
+        //   살아 있는 계약은 건드리지 않는다(아래 별도 테스트).
+        let cap = 2;
+        let mut l = Ledger::with_capacity(cap);
+        let now = t0();
+        // 끝난 계약 하나(회신으로 닫힘) + 이후 다른 메시지로 그 이력을 밀어낸다.
+        l.record("done", "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l.open_request("done", "alice", sid(), "bob", None, now);
+        assert!(matches!(
+            l.close_on_reply("done", now),
+            ReplyOutcome::ClosedHistoryAnomaly { .. } | ReplyOutcome::Closed
+        ));
+        for i in 0..cap {
+            l.record(
+                &format!("x{i}"),
+                "alice",
+                "bob",
+                "q",
+                DeliveryStatus::Delivered,
+                now,
+            );
+        }
+        assert_eq!(l.history_len(), cap, "이력은 용량 유계");
+        assert!(
+            l.records_for("done").is_empty(),
+            "전제: done 이력은 evict 됐다"
+        );
+        assert!(
+            !l.msg_id_in_use("done"),
+            "끝난 계약의 추적은 이력 evict 와 함께 드롭(유계 유지)"
+        );
+    }
+
+    #[test]
+    fn eviction_keeps_live_contract_so_reply_and_timeout_still_work() {
+        // ★fix 3 회귀★: 이력이 밀려나도 **미회신·미통지** 계약은 살아남아야 한다 — 안 그러면 회신이 와도
+        //   NoMatch 로 튕기고 기한이 지나도 통지가 안 나가는 조용한 계약 소멸이 된다.
+        let cap = 2;
         let mut l = Ledger::with_capacity(cap);
         let now = t0();
         let reply_by = Duration::from_secs(600);
-        // 용량을 넘겨 request 를 여러 건 연다 — 각각 이력 1건 + 추적 1건.
-        let total = cap + 3; // 6건 → 앞 3건(m0..m2)은 evict.
-        for i in 0..total {
-            let id = format!("m{i}");
-            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
-            l.open_request(&id, "alice", "bob", Some(reply_by), now);
+        l.record("req-1", "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l.open_request("req-1", "alice", sid(), "bob", rb(reply_by), now);
+        // 뒤이은 메시지들이 req-1 이력을 밀어낸다.
+        for i in 0..cap {
+            l.record(
+                &format!("x{i}"),
+                "alice",
+                "bob",
+                "q",
+                DeliveryStatus::Delivered,
+                now,
+            );
         }
-        // 이력은 용량 상한.
-        assert_eq!(l.history_len(), cap, "이력은 용량 유계");
-        // 추적도 evict 된 만큼 정리돼 유계(살아남은 이력 수와 일치).
+        assert!(l.records_for("req-1").is_empty(), "전제: 이력은 evict 됐다");
         assert_eq!(
             l.open_request_count(),
-            cap,
-            "evict 된 request 추적은 드롭돼 유계"
+            1,
+            "살아 있는 계약은 evict 를 견딘다"
         );
-        // 기한 초과 시 evict 된 id 는 due 로 안 나오고, 살아남은 것만 나온다.
+        // ① 기한 초과 통지가 여전히 나간다.
+        let due = l.due_timeouts(now + reply_by + Duration::from_secs(1));
+        assert_eq!(due.len(), 1, "evict 됐어도 타임아웃 통지는 살아 있다");
+        assert_eq!(due[0].request_id, "req-1");
+
+        // ② 회신도 여전히 계약을 닫는다(다른 장부로 같은 조건 재현 — 위에서 이미 통지된 항목과 섞지 않게).
+        let mut l2 = Ledger::with_capacity(cap);
+        l2.record("req-2", "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l2.open_request("req-2", "alice", sid(), "bob", rb(reply_by), now);
+        for i in 0..cap {
+            l2.record(
+                &format!("y{i}"),
+                "alice",
+                "bob",
+                "q",
+                DeliveryStatus::Delivered,
+                now,
+            );
+        }
+        assert_eq!(
+            l2.close_on_reply("req-2", now),
+            ReplyOutcome::Closed,
+            "이력이 evict 됐어도 회신은 계약을 닫는다(가리킬 이력만 없음)"
+        );
+        assert_eq!(l2.open_request_count(), 0);
+    }
+
+    /// fix 1 전용 셋업 — 이력이 **먼저 evict 된 살아 있는 계약** 하나만 남은 장부(좀비의 출발 조건).
+    fn ledger_with_evicted_live_contract(
+        cap: usize,
+        id: &str,
+        reply_by: Option<(Duration, String)>,
+        now: Instant,
+    ) -> Ledger {
+        let mut l = Ledger::with_capacity(cap);
+        l.record(id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+        l.open_request(id, "alice", sid(), "bob", reply_by, now);
+        for i in 0..cap {
+            l.record(
+                &format!("filler{i}"),
+                "alice",
+                "bob",
+                "x",
+                DeliveryStatus::Delivered,
+                now,
+            );
+        }
+        assert!(l.records_for(id).is_empty(), "전제: 그 계약의 이력은 evict");
+        assert_eq!(
+            l.tracking_len(),
+            1,
+            "전제: 살아 있는 계약은 evict 를 견딘다"
+        );
+        l
+    }
+
+    #[test]
+    fn close_after_history_eviction_removes_the_finished_tracking_entry() {
+        // ★fix 1(좀비 방지)★: 이력이 먼저 밀려난 계약은 살아 있는 동안 evict 를 견딘다(fix 3). 그런데 그
+        //   계약이 **나중에 회신으로 닫히면** 정리해 줄 evict 이벤트는 이미 지나갔다 — 예전엔 그 항목이
+        //   영원히 남았고(live 계수에서도 빠져 cap 이 못 잡는다) 반복되면 추적이 무계 증식했다.
+        let now = t0();
+        let mut l = ledger_with_evicted_live_contract(2, "req-1", None, now);
+        assert_eq!(l.close_on_reply("req-1", now), ReplyOutcome::Closed);
+        assert_eq!(
+            l.tracking_len(),
+            0,
+            "닫히는 순간 고아 추적 항목을 제거(좀비 없음)"
+        );
+        assert!(!l.msg_id_in_use("req-1"), "추적에도 이력에도 없다");
+    }
+
+    #[test]
+    fn timeout_notice_after_history_eviction_removes_the_finished_tracking_entry() {
+        // ★fix 1 의 다른 종점★: 통지(notified)로 끝나는 경우도 같다 — 보고는 정상적으로 나가되(계약 이행
+        //   경로 유지) 그 항목은 그 자리에서 정리된다.
+        let now = t0();
+        let reply_by = Duration::from_secs(600);
+        let mut l = ledger_with_evicted_live_contract(2, "req-1", rb(reply_by), now);
+        let due = l.due_timeouts(now + reply_by + Duration::from_secs(1));
+        assert_eq!(due.len(), 1, "evict 됐어도 통지는 나간다(fix 3 유지)");
+        assert_eq!(due[0].request_id, "req-1");
+        assert_eq!(
+            l.tracking_len(),
+            0,
+            "통지로 끝난 고아 항목도 그 자리에서 제거"
+        );
+    }
+
+    #[test]
+    fn tracking_stays_bounded_when_evicted_contracts_finish() {
+        // ★fix 1 의 유계 단언★: 이력 용량(2)의 수십 배 계약을 열고 매번 이력을 밀어낸 뒤 끝내도 추적은
+        //   0 으로 수렴한다. `open_request_count` 는 끝난 항목을 안 세므로 `tracking_len`(총수)으로 본다.
+        let cap = 2;
+        let mut l = Ledger::with_capacity(cap);
+        let now = t0();
+        let reply_by = Duration::from_secs(60);
         let over = now + reply_by + Duration::from_secs(1);
-        let due = l.due_timeouts(over);
-        let due_ids: Vec<&str> = due.iter().map(|d| d.request_id.as_str()).collect();
-        assert_eq!(due.len(), cap, "살아남은 request 만 due");
-        assert!(
-            !due_ids.contains(&"m0") && !due_ids.contains(&"m1") && !due_ids.contains(&"m2"),
-            "evict 된 id 는 spurious 타임아웃 안 남(dangling 없음)"
+        for i in 0..50 {
+            let id = format!("r{i}");
+            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+            l.open_request(&id, "alice", sid(), "bob", rb(reply_by), now);
+            // 이 계약의 이력을 곧바로 밀어낸다(cap 개 filler) → 고아 상태의 살아 있는 계약.
+            for j in 0..cap {
+                l.record(
+                    &format!("f{i}-{j}"),
+                    "alice",
+                    "bob",
+                    "x",
+                    DeliveryStatus::Delivered,
+                    now,
+                );
+            }
+            assert!(l.records_for(&id).is_empty(), "전제: 이력 evict");
+            // 절반은 회신으로, 절반은 기한 초과 통지로 끝난다 — 어느 종점이든 남으면 안 된다.
+            if i % 2 == 0 {
+                assert_eq!(l.close_on_reply(&id, now), ReplyOutcome::Closed);
+            } else {
+                assert_eq!(l.due_timeouts(over).len(), 1, "이 라운드의 계약만 due");
+            }
+            assert_eq!(
+                l.tracking_len(),
+                0,
+                "라운드마다 추적이 0 으로 수렴(좀비 누적 없음)"
+            );
+        }
+    }
+
+    #[test]
+    fn open_request_rejects_at_capacity_with_full() {
+        // ★fix 3 의 짝★: 살아 있는 계약이 cap 이면 새 계약은 Full 로 반려(조용한 밀어내기 금지).
+        let mut l = Ledger::new();
+        let now = t0();
+        for i in 0..MAX_OPEN_REQUESTS {
+            assert_eq!(
+                l.open_request(&format!("r{i}"), "alice", sid(), "bob", None, now),
+                OpenOutcome::Opened
+            );
+        }
+        assert_eq!(
+            l.open_request("over", "alice", sid(), "bob", None, now),
+            OpenOutcome::Full,
+            "cap 도달 시 새 계약은 Full"
         );
+        assert_eq!(l.open_request_count(), MAX_OPEN_REQUESTS, "기존 계약 불변");
+        // 하나가 끝나면(회신) 자리가 난다 — 계수는 **살아 있는 것**만 세기 때문.
+        assert_eq!(l.close_on_reply("r0", now), ReplyOutcome::Closed);
+        assert_eq!(
+            l.open_request("over", "alice", sid(), "bob", None, now),
+            OpenOutcome::Opened,
+            "끝난 계약은 cap 계수에서 빠진다"
+        );
+    }
+
+    #[test]
+    fn msg_id_in_use_sees_history_and_tracking() {
+        // ★fix 12★: 충돌 검사는 이력·추적 **양쪽**을 본다(통보/회신 id 도 남의 레코드를 앨리어싱하면 안 됨).
+        let mut l = Ledger::new();
+        let now = t0();
+        assert!(!l.msg_id_in_use("m1"), "미사용 id");
+        l.record("m1", "a", "b", "x", DeliveryStatus::Delivered, now);
+        assert!(l.msg_id_in_use("m1"), "이력에 있으면 사용 중");
+        // 이력 없이 추적만 있는 경우(반려 전 예약 등)도 사용 중이다.
+        l.open_request("r1", "a", sid(), "b", None, now);
+        assert!(l.msg_id_in_use("r1"), "추적에만 있어도 사용 중");
+        // 닫힌 계약도 여전히 사용 중(재사용 금지 — 회신 매칭 키 유일성). 이력이 남아 있는 정상 계약 기준:
+        //   이력이 이미 evict 된 계약은 닫히는 순간 정리되므로(fix 1) 그 케이스는 별도 테스트가 본다.
+        open_delivered_request(&mut l, "r2", None, now);
+        assert_eq!(l.close_on_reply("r2", now), ReplyOutcome::Closed);
         assert!(
-            due_ids.contains(&"m3") && due_ids.contains(&"m4") && due_ids.contains(&"m5"),
-            "살아남은 id 는 정상 due"
+            l.msg_id_in_use("r2"),
+            "닫혀도 이력·추적에 남아 있으면 사용 중"
+        );
+    }
+
+    #[test]
+    fn is_request_closed_only_true_for_closed_entries() {
+        // ★fix 5★: 통지 직전 재확인용 — 열려 있으면 false, 회신으로 닫히면 true, 없는 id 는 false.
+        let mut l = Ledger::new();
+        let now = t0();
+        // 이력이 남아 있는 정상 계약 — 닫힌 항목이 추적에 잔존해야 이 조회가 통지를 취소할 수 있다.
+        open_delivered_request(&mut l, "r1", None, now);
+        assert!(!l.is_request_closed("r1"), "열린 계약은 false");
+        assert!(
+            !l.is_request_closed("nope"),
+            "없는 id 는 false(통지 막지 않음)"
+        );
+        assert_eq!(l.close_on_reply("r1", now), ReplyOutcome::Closed);
+        assert!(l.is_request_closed("r1"), "회신으로 닫히면 true");
+    }
+
+    #[test]
+    fn drop_request_reports_already_notified_entry() {
+        // ★fix 5★: 통지가 이미 나간 계약을 회수하면 그 사실을 알린다(통지는 되돌릴 수 없다 — 이중 결말 관측).
+        let mut l = Ledger::new();
+        let now = t0();
+        let reply_by = Duration::from_secs(600);
+        // 이력이 남아 있는 정상 계약 — 통지 뒤에도 항목이 남아 있어야 회수가 그 사실을 보고할 수 있다.
+        open_delivered_request(&mut l, "r1", rb(reply_by), now);
+        assert_eq!(
+            l.due_timeouts(now + reply_by + Duration::from_secs(1))
+                .len(),
+            1
+        );
+        assert_eq!(
+            l.drop_request("r1"),
+            DropOutcome::Removed { notified: true },
+            "이미 통지된 계약의 회수는 그 사실을 동봉"
         );
     }
 }

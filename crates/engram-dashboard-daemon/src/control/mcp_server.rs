@@ -36,7 +36,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, Ser
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use super::ingress::{handle_send, ControlCommand, Entrance};
+use super::ingress::{handle_send, ControlCommand, Entrance, SendContract};
 use super::registry::{BoundIdentity, ControlRegistry};
 
 /// MCP 서버가 붙는 axum 경로. mcp-config url 도 이 경로를 가리킨다(`http://127.0.0.1:<port>/mcp`).
@@ -243,7 +243,11 @@ impl EngramMcpHandler {
         tool to reply to or reach another live agent. Pass `to` = the teammate's name (or agent id) \
         and `body` = your message text. The sender envelope (who you are, message id) is added \
         automatically by the broker — your identity comes from your bound session, not from \
-        arguments, so just write the body naturally."
+        arguments, so just write the body naturally. Set `request` = true when you need an answer \
+        back (optionally with `reply_by` = \"5m\"/\"10m\"/\"1h\" — at least 1 minute, after which \
+        YOU get notified that no reply arrived). When you answer a message that arrived with \
+        type=\"request\" and an id, pass `reply_to` = that id. `request` and `reply_to` are \
+        mutually exclusive."
     )]
     async fn send_message(
         &self,
@@ -288,8 +292,24 @@ impl EngramMcpHandler {
                 None,
             ));
         };
-        let Parameters(SendArgs { to, body }) = params;
-        let cmd = ControlCommand { from, to, body };
+        let Parameters(SendArgs {
+            to,
+            body,
+            request,
+            reply_by,
+            reply_to,
+        }) = params;
+        // C3: 선택 인자를 그대로 나른다(검증·파싱은 ingress 단일 지점 — 양 입구 동일 반려, ADR-0103).
+        let cmd = ControlCommand {
+            from,
+            to,
+            body,
+            contract: SendContract {
+                request: request.unwrap_or(false),
+                reply_by,
+                reply_to,
+            },
+        };
         let result = handle_send(manager, &self.registry, messaging, Entrance::Mcp, cmd);
         // ACK/에러 JSON 을 text content 로. CLI(/control/send)와 같은 to_json shape 를 그대로 실어 보낸다.
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
@@ -301,14 +321,32 @@ impl EngramMcpHandler {
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct PingArgs {}
 
-/// `send_message` 인자 — 수신자 지목(`to`) + 본문(`body`). ★from 필드 없음★: 발신자는 세션 신원에서만
-/// 파생한다(payload from 금지 — ADR-0086 불변식). schemars 로 input schema 자동 생성.
+/// `send_message` 인자 — 수신자 지목(`to`) + 본문(`body`) + 회신 계약(C3, 전부 선택). ★from 필드 없음★:
+/// 발신자는 세션 신원에서만 파생한다(payload from 금지 — ADR-0086 불변식). schemars 로 input schema 자동 생성.
+///
+/// ★타입 문자열 인자 없음(구조적 — ADR-0103 불변식)★: `type` 을 문자열로 받지 않고 `request: bool` 만 둔다 —
+///   그래야 에이전트가 `type="notice"`(데몬 전용 태그)를 밀반입할 표면 자체가 없다.
+/// ★doc 주석 = 툴 스키마 설명★: schemars 가 이 주석을 property description 으로 싣는다(수신 LLM 이 읽는 계약).
+// ADR-0103 (C3 — spec §6 send_message { to, body, request?, reply_by?, reply_to? })
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SendArgs {
     /// 수신자 — 산 에이전트 이름(profile name) 또는 정확한 agent id 문자열.
     pub to: String,
     /// 메시지 본문(텍스트).
     pub body: String,
+    /// Set true when you need an answer: the broker tracks this message as awaiting a reply.
+    /// Single recipient only. Mutually exclusive with reply_to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<bool>,
+    /// Reply deadline for a request, as an integer + unit: "5m", "10m", "1h" (minimum 1 minute —
+    /// deadlines are checked once a minute, so anything shorter is rejected; "60s" is accepted).
+    /// Only valid together with request. On timeout the broker notifies YOU (the sender), not the recipient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_by: Option<String>,
+    /// The id of the request you are answering (the `id` attribute on the message you received).
+    /// Mutually exclusive with request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
 }
 
 // router = self.tool_router — 저장한 필드를 실제로 읽게 해 dead_code 를 피하고, 핸들러마다 라우터를
@@ -524,11 +562,18 @@ fn bad_request() -> Response {
 //   조립한다 — payload 의 어떤 from 필드도 신원으로 쓰지 않는다(사칭 차단). MCP 툴 경로와 **같은 공통
 //   핸들러**(ingress::handle_send)를 부르므로 ACK/에러 JSON shape 가 동일하다(entrance-agnostic).
 
-/// `/control/send` 요청 바디. `{to, body}` — from 필드 없음(신원은 토큰에서만).
+/// `/control/send` 요청 바디. `{to, body, request?, reply_by?, reply_to?}` — from 필드 없음(신원은 토큰에서만).
+/// C3 인자는 전부 선택이라 옛 `{to, body}` 바디와 **wire 호환**이다(누락 = 통보).
 #[derive(Debug, serde::Deserialize)]
 struct SendRequest {
     to: String,
     body: String,
+    #[serde(default)]
+    request: Option<bool>,
+    #[serde(default)]
+    reply_by: Option<String>,
+    #[serde(default)]
+    reply_to: Option<String>,
 }
 
 /// `/control/send` 라우트 State — relay 대상(manager 슬롯) + 발신자 재검증용 registry(F3). MCP factory 와
@@ -586,6 +631,11 @@ async fn control_send_handler(
         from,
         to: req.to,
         body: req.body,
+        contract: SendContract {
+            request: req.request.unwrap_or(false),
+            reply_by: req.reply_by,
+            reply_to: req.reply_to,
+        },
     };
     let result = handle_send(manager, &state.registry, messaging, Entrance::Cli, cmd);
     // 성공/교정 에러 모두 200 + JSON(CLI 가 status 필드로 성패 판정). MCP 툴 경로와 같은 to_json shape.

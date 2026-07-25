@@ -592,6 +592,7 @@ async fn run() -> i32 {
         from: from_a,
         to: NAME_B.to_string(), // 이름으로 지목(alice→bob).
         body: SEED_A_TO_B.to_string(),
+        contract: Default::default(),
     };
     let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, seed);
     eprintln!("[roundtrip] seed A→B ACK = {}", ack.to_json());
@@ -803,6 +804,8 @@ fn entrance_str(e: Entrance) -> &'static str {
     match e {
         Entrance::Mcp => "mcp",
         Entrance::Cli => "cli",
+        // C3: 데몬 자가 발신(`<notice>` 타임아웃 통지) — 이 하네스는 A→B 발송만 돌리므로 표시용으로만 존재.
+        Entrance::Daemon => "daemon",
     }
 }
 

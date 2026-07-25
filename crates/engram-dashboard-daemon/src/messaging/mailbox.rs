@@ -324,6 +324,18 @@ impl Mailbox {
     pub fn is_empty(&self) -> bool {
         self.queues.is_empty()
     }
+
+    /// ★테스트 전용 손상 주입(C3 리뷰 fix 4)★ — 큐의 `idx` 번째 항목의 `envelope` 문자열을 임의 값으로
+    ///   바꾼다. 파킹 payload 가 깨진 상황(형식 드리프트·메모리 손상)에서 **그 항목 하나만 열화되고 배치는
+    ///   계속 나가는지**를 실제 flush 경로로 단언하기 위한 seam 이다. 운영 코드에서 부르지 않는다.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn corrupt_envelope_for_test(&mut self, recipient: &str, idx: usize, envelope: String) {
+        if let Some(q) = self.queues.get_mut(recipient) {
+            if let Some(m) = q.get_mut(idx) {
+                m.envelope = envelope;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -233,6 +233,7 @@ async fn run() -> i32 {
         from,
         to: agent.id.to_string(), // 정확한 AgentId 로 지목(이름 충돌 회피).
         body: NATURAL_MESSAGE.to_string(),
+        contract: Default::default(),
     };
     let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     eprintln!("[smoke] inject ACK = {}", ack.to_json());
