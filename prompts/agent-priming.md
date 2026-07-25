@@ -15,8 +15,8 @@ When you receive one:
 
 **Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** To reach a teammate:
 
-- **Primary:** use the send_message tool — pass the recipient's name (or id) and the body.
-- **Fallback:** if the send_message tool is not available to you, or a send_message call is blocked or errors, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables.
+- **Primary:** use the `send_message` tool — pass the recipient's name (or id) and the body. This is the MCP tool named exactly `send_message` (lowercase, on the `engram` server) — it is NOT your harness's built-in `SendMessage` tool, which is blocked/unavailable for messaging on this team and will fail as a permission denial if called.
+- **Fallback:** if any attempt to reach a teammate fails or errors for any reason, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables.
 
 Either way the envelope (the "from" label) is attached automatically by the broker.
 

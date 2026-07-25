@@ -324,6 +324,32 @@ impl AgentBackend for ClaudeBackend {
                 //   구조적으로 불가능하다. (extra_args 안에 자체 `--flag <val...>` variadic 이 있어도 그건
                 //   호출자 의도한 값이고, 우리 grant 패턴을 삼키진 않는다 — grant 가 뒤에 있으므로.)
                 args.extend(extra_args.iter().cloned());
+                // ADR-0094 / ADR-0106: 내장 SendMessage 차단 — `--disallowedTools SendMessage`,
+                //   **control endpoint 있을 때만** 주입.
+                //   ★왜★: harness 내장 툴 `SendMessage`(PascalCase)와 우리 MCP 툴 `send_message`
+                //   (server: engram, snake_case)가 이름이 충돌한다 — 스폰된 claude 가 프라이밍을
+                //   오독해 내장 SendMessage 를 호출하면, 내장은 engram 에이전트 이름을 몰라
+                //   "No agent named 'X' is reachable" 로 실패한다(실측 2026-07-26 roundtrip 진단 —
+                //   스폰마다 재현). 그래서 스폰 시점에 내장 SendMessage 자체를 `--disallowedTools`
+                //   로 막아 이 오인식 경로를 구조적으로 없앤다(프라이밍 문구 교정만으론 재발 가능 —
+                //   결정적 차단이 필요).
+                //   ★스코프 = control 있을 때만(ADR-0106, 리뷰 지적 2026-07-26)★: 충돌이 문제 되는 건
+                //   메시징 프라이밍을 받은 에이전트뿐이다 — control endpoint 가 있는 스폰만 그 프라이밍
+                //   (--mcp-config/--append-system-prompt-file, 위 참조)을 싣는다. 일반(비메시징) 스폰은
+                //   control=None 이라 이 이름 충돌 자체가 없으므로, 그 경우까지 내장 SendMessage 를
+                //   막으면 (a) 이유 없이 내장 기능을 잃고 (b) claude 가 미등록 툴을 deny 목록에서 만나
+                //   매 호출마다 경고 비용을 문다 — 둘 다 회피한다. 그래서 조건을 control 유무로 좁힌다
+                //   (= --mcp-config/--allowedTools 와 동일 조건).
+                //   ★순서(variadic 흡수 방지, 위 extra_args 주석과 동일 원리)★: extra_args 소진
+                //   **직후**, `--allowedTools` 그룹보다 **앞**에 둔다 — 뒤이은 `--allowedTools`(새
+                //   `--flag`)가 이 disallowedTools variadic 을 종료시켜, allowedTools 그룹이 여전히
+                //   args 벡터의 **맨 끝**(claude_allowed_tools_group_is_last_and_exact_* 불변식)을
+                //   유지한다.
+                // ADR-0094 / ADR-0106
+                if control.is_some() {
+                    args.push("--disallowedTools".to_string());
+                    args.push("SendMessage".to_string());
+                }
                 // ADR-0094: 발신 입구 pre-authorization — `--allowedTools <pattern>...`.
                 //   ★claude 문법 지식 단독(ADR-0004)★: grants(추상 ToolGrant)를 claude allowlist 패턴으로
                 //   번역하는 규칙(`mcp__{server}__{tool}` / `Bash({exe}:*)`+`PowerShell({exe}:*)`)은 이
@@ -1125,6 +1151,7 @@ mod tests {
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--verbose".to_string(),
+                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.program, p);
@@ -1143,6 +1170,7 @@ mod tests {
                 "bypassPermissions".to_string(),
                 "--resume".to_string(),
                 sid.to_string(),
+                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.args, a);
@@ -1212,6 +1240,10 @@ mod tests {
                 sid.to_string(),
                 "--mcp-config".to_string(),
                 "C:/data/mcp/agent-x.json".to_string(),
+                // ADR-0094/0106: control 있으면 내장 SendMessage 차단 주입(grants 빈 ep() 라
+                //   --allowedTools 는 없음).
+                "--disallowedTools".to_string(),
+                "SendMessage".to_string(),
             ],
         );
         assert_eq!(s.args, a, "터미널 모드 claude 에 --mcp-config 주입");
@@ -1776,6 +1808,69 @@ mod tests {
         );
     }
 
+    // ── ADR-0094/0106: 내장 SendMessage 차단(`--disallowedTools SendMessage`, control-scoped) ──
+    #[test]
+    fn claude_no_control_endpoint_no_disallowed_tools_flag() {
+        // ADR-0106(리뷰 지적 2026-07-26): 충돌이 문제 되는 건 메시징 프라이밍을 받은(=control endpoint
+        //   있는) 에이전트뿐이다 — control=None(비메시징 스폰)이면 --disallowedTools 를 주입하지
+        //   않는다. 일반 스폰은 내장 SendMessage 기능을 그대로 유지하고, 미등록 툴 deny 경고 비용도
+        //   피한다(사용자 체감 최소화 스코프).
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        assert!(
+            !s.args.iter().any(|a| a == "--disallowedTools"),
+            "control 없으면 --disallowedTools 미주입(일반 스폰은 내장 SendMessage 유지): {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_disallowed_tools_precedes_allowed_tools_group() {
+        // ★순서 불변(variadic 흡수 방지)★: grants 가 있어 --allowedTools 그룹이 붙어도, disallowedTools
+        //   그룹은 그 **앞**에 있어야 한다 — 그래야 --allowedTools(새 --flag)가 disallowedTools 의
+        //   variadic 값 목록을 종료시키고, allowedTools 그룹이 여전히 args 벡터의 맨 끝(다른 회귀
+        //   테스트가 못박는 불변식)을 유지한다. (grants 가 있는 케이스는 항상 control 도 있으므로
+        //   --disallowedTools 도 함께 주입된다 — ADR-0106 스코프.)
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_grants()),
+        );
+        let disallowed = s
+            .args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("control(grants 포함) 있으면 --disallowedTools 주입");
+        let allowed = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("grants 있으면 --allowedTools 존재");
+        assert_eq!(
+            s.args.get(disallowed + 1).map(|s| s.as_str()),
+            Some("SendMessage"),
+            "disallowedTools 값 = SendMessage 하나뿐: {:?}",
+            s.args
+        );
+        assert!(
+            disallowed + 2 == allowed,
+            "disallowedTools 그룹(플래그+값 2요소) 바로 뒤에 --allowedTools 가 와야 함(사이 흡수 없음): disallowed={disallowed} allowedTools={allowed} args={:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_disallowed_tools_present_in_json_mode_too_with_control() {
+        // json(stream-json) 모드도 control 있으면 동일하게 내장 SendMessage 를 차단해야 한다(mode
+        //   무관, scope 는 control 유무 — ADR-0106).
+        let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        assert!(
+            s.args.iter().any(|a| a == "--disallowedTools"),
+            "control 있으면 json 모드에도 --disallowedTools 주입: {:?}",
+            s.args
+        );
+    }
+
     /// args 벡터에서 `--permission-mode` 바로 뒤에 `bypassPermissions` 가 오는(연속 pair) 위치를
     /// 찾는다. 없으면 None. 새 auto-권한 회귀 테스트들이 공유한다.
     fn permission_mode_pair_index(args: &[String]) -> Option<usize> {
@@ -1990,6 +2085,7 @@ mod tests {
                 "--permission-mode".to_string(),
                 "bypassPermissions".to_string(),
                 "--debug".to_string(),
+                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.program, p);
@@ -2084,6 +2180,7 @@ mod tests {
                 sid.to_string(),
                 "--model".to_string(),
                 "sonnet".to_string(),
+                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.program, p);

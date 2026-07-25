@@ -3,7 +3,11 @@
 //!
 //! ★동작★: 환경변수 `ENGRAM_TOKEN`(Bearer 토큰) + `ENGRAM_CONTROL_URL`(데몬 제어 base URL)을 읽어,
 //!   `<base>/control/send` 로 `{to, body}` JSON 을 POST 한다(Authorization: Bearer <token>). 응답 JSON 을
-//!   stdout 에 **그대로** 찍고, `"status":"enqueued"` 면 exit 0, 아니면 1(연결/env 오류도 1 + 에러 JSON).
+//!   stdout 에 **그대로** 찍고, HTTP 2xx 이고 body 에 `results` 배열이 있으면(spec §6 성공 shape:
+//!   `{id, results:[{to,status,hint?}]}` — delivered·pending(파킹) 모두 접수 성공) exit 0, 아니면 1
+//!   (반려 `{status:"error",code,hint}`·연결/env 오류·비-2xx 모두 1 + 에러 JSON). (구 단일
+//!   `{"status":"enqueued"}` shape 는 S18 메시징 v1/ADR-0103 으로 폐기 — 판정 정본은
+//!   `exit_code_for_response`.)
 //!
 //! ★from 은 payload 아님★: 발신자 신원은 토큰에서만 파생된다(데몬이 토큰→신원 조회). CLI 는 to/body 만
 //!   보낸다 — 이 프로세스가 자기 신원을 주장하지 않는다(사칭 차단, ADR-0086).
@@ -503,7 +507,7 @@ mod tests {
     #[test]
     fn parse_response_content_length_body() {
         // Content-Length 만큼만 body 로 취한다(초과 잔재 무시).
-        let body = "{\"status\":\"enqueued\"}";
+        let body = "{\"id\":\"m1\",\"results\":[]}";
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}EXTRA-GARBAGE",
             body.len(),
@@ -518,7 +522,7 @@ mod tests {
     fn parse_response_short_body_is_incomplete() {
         // ★M1★: Content-Length 가 100 인데 실제 body 는 그보다 짧게 도착(mid-body 절단) → INCOMPLETE_RESPONSE.
         //   절단 조각이 우연히 유효 JSON 이어도 성공으로 오인하지 않는다(가짜 exit 0 차단).
-        let partial = r#"{"status":"enqueued"}"#; // 21바이트 — 100 미달.
+        let partial = r#"{"id":"m1","results":[]}"#; // 24바이트 — 100 미달.
         assert!(partial.len() < 100, "테스트 전제: partial < 100");
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{partial}"
@@ -537,7 +541,7 @@ mod tests {
     #[test]
     fn parse_response_case_insensitive_headers() {
         // 헤더 key 는 대소문자 무시로 인식한다(content-length 소문자).
-        let body = "{\"status\":\"enqueued\"}";
+        let body = "{\"id\":\"m1\",\"results\":[]}";
         let resp = format!(
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
             body.len(),
@@ -549,24 +553,24 @@ mod tests {
 
     #[test]
     fn parse_response_chunked_body() {
-        // Transfer-Encoding: chunked → 청크 이어붙임(0-청크 종료). "{\"status\":" + "\"enqueued\"}".
+        // Transfer-Encoding: chunked → 청크 이어붙임(0-청크 종료). "{\"id\":\"m1\",\"" + "results\":[]}".
         let resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
-                    a\r\n{\"status\":\r\n\
-                    b\r\n\"enqueued\"}\r\n\
+                    c\r\n{\"id\":\"m1\",\"\r\n\
+                    c\r\nresults\":[]}\r\n\
                     0\r\n\r\n";
         let r = parse_response(resp.as_bytes()).expect("parse chunked");
         assert_eq!(r.status, 200);
-        assert_eq!(r.body, "{\"status\":\"enqueued\"}", "chunked de-frame");
+        assert_eq!(r.body, "{\"id\":\"m1\",\"results\":[]}", "chunked de-frame");
     }
 
     #[test]
     fn parse_response_read_to_eof_fallback() {
         // Content-Length·Transfer-Encoding 둘 다 없으면 나머지 전부가 body(Connection: close).
         let resp =
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"enqueued\"}";
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"m1\",\"results\":[]}";
         let r = parse_response(resp.as_bytes()).expect("parse");
         assert_eq!(r.status, 200);
-        assert_eq!(r.body, "{\"status\":\"enqueued\"}");
+        assert_eq!(r.body, "{\"id\":\"m1\",\"results\":[]}");
     }
 
     #[test]
