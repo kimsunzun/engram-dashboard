@@ -40,7 +40,7 @@
 
 ## 3. 회신 계약 (request)
 
-1. 발송: `request` + 선택 `reply_by`(기간 표기 "10m"/"1h" — 데몬이 절대시각 환산).
+1. 발송: `request` + 선택 `reply_by`(기간 표기 "10m"/"1h" — 데몬이 절대시각 환산. **하한 1분** = 타임아웃 감지 해상도(60s 스윕)와 정합 · **상한 30일** = 내부 시각 연산 안전 — 구현 결정 2026-07-26). 계약 필드(request/reply_to)는 **XML 봉투 전용** — 콜론/템플릿 포맷 활성 시 반려(속성이 떨어져 회신 불가·오탐 notice가 되므로).
 2. 장부: 미회신(`awaiting_reply`) 오픈.
 3. 회신(`in_reply_to`) 도착 → `replied` 닫힘.
 4. `reply_by` 초과 → **발신자에게** `<notice>` 주입(수신자 재촉 아님 — 재촉 여부는 발신 LLM 판단). notice는 메일박스 가득참 예외 통로.
@@ -97,7 +97,7 @@ engram-send status <id> | pending
 engram-send group list | group update @g --add a,b [--remove c] [--delete]
 ```
 
-**발신 응답(두 입구 동일 JSON):** `{ id, results: [{to, status, hint?}] }` — 수신자별 `delivered|pending|skipped`. 발송 반려 = `{ status:"error", code, hint }`.
+**발신 응답(두 입구 동일 JSON):** `{ id, results: [{to, status, hint?}] }` — 수신자별 `delivered|pending|skipped`. 발송 반려 = `{ status:"error", code, hint }`. 에러 어휘(C3 추가분): `INVALID_SEND_ARGS`(계약 필드 문법·상호배타·비XML 포맷 위반) · `REQUEST_CAPACITY`(미회신 동시 상한 512 초과) · `INTERNAL_ID_COLLISION`(id 재생성 1회 후에도 충돌 — 사실상 미발생 가드). 메시지 id 표기 = `m-` + base36 8자(수신 LLM이 `reply_to`로 옮겨 적는 값이라 단문형 — UUID 폐기).
 
 **allowedMcpServers 대책 (실측 2026-07-24 — 유저 전역 `[]`=전면 차단이 에이전트에도 적용됨):**
 데몬이 스폰 시 `--settings`로 `{ "allowedMcpServers": [{"serverName":"engram"}] }` 조각을 **세션 한정 주입**(backend/claude.rs — 백엔드 지식 격리 ADR-0004 자리). 전역 파일 무변경·허용 범위 = 엔그램 스폰 에이전트뿐. merge 동작은 구현 QA에서 실증(미검증 항목).

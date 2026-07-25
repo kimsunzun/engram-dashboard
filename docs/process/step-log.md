@@ -1203,11 +1203,17 @@
 - **게이트:** review deep 3인(doc-aware·blind codex·동시성 렌즈) 4라운드 수렴(12→7→3→0) 최종 PASS — HIGH 2건(replay false-busy·flush 레인 belt 이탈)을 리뷰가 적출. qa full 전 게이트 PASS(rust 838·vitest 634·실 claude c1/c2 통합 테스트 RAN ok·roundtrip smoke).
 - **후속 확인 항목:** roundtrip smoke에서 bob→alice 회신이 "이름 라우팅 오류" 관찰(실험 bin 경로 — 게이트 미적용·qualitative judge라 비블로커, 시나리오 자체 문제인지 C1 해석 변경 영향인지 미판정). **다음 = C3(request 장부·reply_by 타이머→notice) → C4(그룹 fan-out) → D(MCP 툴·CLI·--settings).**
 
+## S18 v1 증분 C3 — request 회신 계약 완료 (2026-07-26, master, 자율 세션 연속) · 커밋 `78f3050`
+- **무엇:** 발송 계약(request·reply_by·reply_to) 전 입구 확장 + 봉투 속성 첫 실노출(`type="request" id reply-by`/`in-reply-to`) + 메시지 id `m-`base36 8자 전환 + 장부 배선(엄격 매칭·MAX_OPEN_REQUESTS 512·축출-계약 분리) + 60s 스윕 기한 초과→발신자 `<notice>` 주입(id-hint·도어벨·닫힘 재확인·cap 예외). 계약 필드 = XML 봉투 전용(콜론/템플릿 반려). reply_by 하한 1m(스윕 해상도)·상한 30d(Instant 오버플로 가드).
+- **게이트:** review deep 3인 2라운드(13→4→0) PASS — 굵은 적발: 콜론 포맷 계약 구멍·notice 이름-only 고립·축출의 계약 삭제·유령 계약 레이스. qa full 전 게이트 PASS(rust ~914·c3 통합 4/4·live smoke에서 단문 id 실흐름 확인). 부수: 내장 SendMessage 툴 충돌 차단(`e7465ad`, ADR-0106 — deny 레이어, 제어 채널 스폰 한정).
+- **잔여(최종 인수 패스로):** 실 claude request→회신 왕복(soft 절반 — 8자 id 전사 준수)은 seam으로 불가, C4·D 완료 후 인수 런에서 실측(spec §7). **다음 = C4(그룹 fan-out) → D(MCP 툴 messages/group·CLI·--settings).**
+
 ## 파킹 TTL 1h→24h 상향 (ADR-0105) (2026-07-25, master) · 사용자 결정 · /research light 근거
 - C2 리뷰가 "busy 대기도 TTL 공유 → 1h 초과 장기 턴과 충돌"을 지적 → 선례 조사(RabbitMQ 무만료·SQS 4d·Kafka 7d·Postfix 5d·liveness 면제 선례 전무) → 사용자 결정: **24h, 면제 규칙 없음**(시계 단일 규칙 · 영속화 단계 때 재설계 전제). spec §5 갱신 + ADR-0103 부분 개정 양방향. 코드 상수 적용 = C2 커밋과 함께.
 
 ## 다음 (미진행)
 - **[사용자 제안 2026-07-25] 메일박스 UI 인지** — 에이전트 트리 노드 우하단 편지봉투 배지 + pending 카운트(+ MAILBOX_FULL 경고 표시). 데이터 = 장부/메일박스 기존 보유 — 이벤트버스로 프론트 노출 + §5 원칙대로 LLM 제어 표면 동반(“UI 먼저, 제어는 나중” 금지). 에이전트 쪽 인지는 D의 `messages` 툴이 담당. 시점 = S18 v1(D) 이후.
+- **[사용자 구체화 2026-07-26 — 아래 2022-07-22 결정의 상세]** 공용 정본 = **중간언어(config IR)**. 에이전트 시작 시 해당 LLM 형식 파일을 **생성+캐싱**(claude→claude 설정, gemini→gemini 설정), MCP 등록(engram 허용 등)도 IR에 선언하면 이 레이어가 LLM별로 자동 번역. 그전까지 = 증분 D의 `--settings` 수동 주입(같은 훅 자리 `backend/claude.rs` — IR materializer의 claude 구현 1호로 승계될 구조). **시점 = S18 메시징 완료 후 별도 챕터.**
 - **[사용자 결정 2026-07-22] 전 LLM 공용 제약 레이어 (제약 공용화)** — 지금은 스폰 에이전트에 auto mode(권한 승인 생략)를 깔고, **나중에** 모든 LLM(claude·codex·gemini…)이 공통 적용받는 공용 제약 시스템을 만든다: 공용 셋팅 정본을 두고, 특정 LLM 실행 시 그 정본을 **파싱해 해당 LLM의 설정 파일 형식으로 폴더에 생성**(예: codex 실행 → codex용 설정 파일 materialize). 구성은 **셋(set) + 상속**으로 조합해 주입 가능하게. 배경: 기본 거부+grant 배관은 워커형에 구조적 한계(헤드리스 승인자 부재·도구별 grant 반복— 2026-07-22 CLI 0/38 실측), 업계 방향은 승인 완화+경계(containment) 담당. Windows 경계(WSL2/컨테이너+PTY) 스파이크는 이 레이어의 전제 후보. auto mode 적용 자체는 별도 슬라이스(ADR 동반 — ADR-0094 "NEVER bypassPermissions" 스탠스 부분 개정).
 - **[S17 확정 지시 2026-07-21·구현 슬라이스에 포함] 에이전트 대면 텍스트 영어화** — 사용자 재확인 지시("양식은 영어로 하고 마크다운도 영어로"): 프라이밍 md·하네스 시드를 영어화(봉투 양식 자체는 이미 영어/언어중립 — colon 무단어·옵션 라벨·xml 속성 영어). v3 라우팅 수치는 한국어 기준이므로 영어판 재검증 동반. 온오프 토글은 후속. **CLI 입구 검증도 사용자 재확인 요청** — MCP는 실측 완료, CLI는 grant confound로 단독 격리 미실측(클린 테스트 = MCP disallow 노브 추가 후 CLI-only 재실측).
 - **[진행중 S17] LLM 제어 표면** — PRD 초안 완료(위 S17). CLAUDE.md §5 신설(모든 메뉴가 LLM 제어 가능, LLM이 메인/사용자 UI는 서브, 손발/두뇌 분리). 현재 백엔드만 invoke로 제어되고 UI/레이아웃(분할·저장·트리 추가 등)은 프론트 전용. UI 액션을 LLM·사람이 같이 부르는 단일 control surface(command 버스)로 모으는 작업 필요. 채널 아키텍처 확정 = ADR-0086(듀얼 typed 입구 + 메일박스). 다음 = /implement 스텝 1 → 스텝 사다리 2~6. PRD/TRD §6은 engram-ctl 전제라 갱신 필요(이월).
