@@ -1198,6 +1198,14 @@
 - **게이트:** review deep 3인(doc-aware FIX·동시성 렌즈 PASS·blind BLOCK) → 4라운드 수렴 최종 PASS — blind가 실결함 다수 적출(재파킹 cap 유실→`restore_front` 무손실, 동명 flush 임의 개체→유일-도달가능 게이트, 블로킹 write의 executor 독점→spawn_blocking, stale id 재바인딩, 동명 교체 id-diff). qa full 전 게이트 PASS + 실측(실 claude `c1_park_then_spawn_auto_delivers` 실행 PASS · roundtrip_smoke XML 왕복 정상 — GUI cdp는 프론트 무변경이라 미해당).
 - **잔여(다음): 증분 C2(idle 게이트 — 턴 관측 = OutputCore emit 부착점, capability 폴백) → C3(request 장부·reply_by 타이머→notice) → C4(그룹 fan-out) → D(MCP 툴·CLI·--settings).**
 
+## S18 v1 증분 C2 — idle 게이트 완료 (2026-07-25~26, master, 자율 세션) · 커밋 `d071ae0`
+- **무엇:** 수신자 턴 진행 중 파킹(`pending` 공유)→MessageDone 일괄 배달. BusyTracker(양성 attach 게이트·`BUSY_MAX_TURN` 30min fail-open 스윕 — result 미발생 이상 턴 안전판, 최악=턴 중 주입인데 CLI 큐잉이 흡수) · TurnTapSink(`subscribe_from` **live-only** — resume transcript가 만드는 깨울 수 없는 false-busy 차단) · FlushMsg 4종(Appear/Attach/Detach/Idle) 2-레인 워커(생애주기/배달 분리·둘 다 셧다운 belt) · IdleCoalescer · 도어벨 self-heal · `hinted_id` 파킹(동명/개명 blackhole 차단) · `admission_seq` 복원 순서축 + 만료 전량 스캔 · PARK_TTL 24h 상수 반영.
+- **게이트:** review deep 3인(doc-aware·blind codex·동시성 렌즈) 4라운드 수렴(12→7→3→0) 최종 PASS — HIGH 2건(replay false-busy·flush 레인 belt 이탈)을 리뷰가 적출. qa full 전 게이트 PASS(rust 838·vitest 634·실 claude c1/c2 통합 테스트 RAN ok·roundtrip smoke).
+- **후속 확인 항목:** roundtrip smoke에서 bob→alice 회신이 "이름 라우팅 오류" 관찰(실험 bin 경로 — 게이트 미적용·qualitative judge라 비블로커, 시나리오 자체 문제인지 C1 해석 변경 영향인지 미판정). **다음 = C3(request 장부·reply_by 타이머→notice) → C4(그룹 fan-out) → D(MCP 툴·CLI·--settings).**
+
+## 파킹 TTL 1h→24h 상향 (ADR-0105) (2026-07-25, master) · 사용자 결정 · /research light 근거
+- C2 리뷰가 "busy 대기도 TTL 공유 → 1h 초과 장기 턴과 충돌"을 지적 → 선례 조사(RabbitMQ 무만료·SQS 4d·Kafka 7d·Postfix 5d·liveness 면제 선례 전무) → 사용자 결정: **24h, 면제 규칙 없음**(시계 단일 규칙 · 영속화 단계 때 재설계 전제). spec §5 갱신 + ADR-0103 부분 개정 양방향. 코드 상수 적용 = C2 커밋과 함께.
+
 ## 다음 (미진행)
 - **[사용자 제안 2026-07-25] 메일박스 UI 인지** — 에이전트 트리 노드 우하단 편지봉투 배지 + pending 카운트(+ MAILBOX_FULL 경고 표시). 데이터 = 장부/메일박스 기존 보유 — 이벤트버스로 프론트 노출 + §5 원칙대로 LLM 제어 표면 동반(“UI 먼저, 제어는 나중” 금지). 에이전트 쪽 인지는 D의 `messages` 툴이 담당. 시점 = S18 v1(D) 이후.
 - **[사용자 결정 2026-07-22] 전 LLM 공용 제약 레이어 (제약 공용화)** — 지금은 스폰 에이전트에 auto mode(권한 승인 생략)를 깔고, **나중에** 모든 LLM(claude·codex·gemini…)이 공통 적용받는 공용 제약 시스템을 만든다: 공용 셋팅 정본을 두고, 특정 LLM 실행 시 그 정본을 **파싱해 해당 LLM의 설정 파일 형식으로 폴더에 생성**(예: codex 실행 → codex용 설정 파일 materialize). 구성은 **셋(set) + 상속**으로 조합해 주입 가능하게. 배경: 기본 거부+grant 배관은 워커형에 구조적 한계(헤드리스 승인자 부재·도구별 grant 반복— 2026-07-22 CLI 0/38 실측), 업계 방향은 승인 완화+경계(containment) 담당. Windows 경계(WSL2/컨테이너+PTY) 스파이크는 이 레이어의 전제 후보. auto mode 적용 자체는 별도 슬라이스(ADR 동반 — ADR-0094 "NEVER bypassPermissions" 스탠스 부분 개정).
