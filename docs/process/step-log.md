@@ -1193,6 +1193,11 @@
 - **게이트:** 각 증분 review code full(doc-aware PASS/FIX + codex blind, FIX 반영 2~3라운드 → 최종 PASS) + qa standard 전 게이트 PASS(rust 705+·vitest 634·fmt·격리·tsc). blind 1차 리뷰의 BLOCK 2건은 증분 스코프 오해(부정확한 payload)로 판명 — 정정 재판정 PASS.
 - **다음 = 증분 C(critical): MessagingService 조율(3분기+idle 게이트+flush 훅+reply_by 타이머·notice 발행) → 증분 D: MCP 툴 2개(messages·group)+CLI 서브커맨드+`--settings` 주입.** fresh 세션 권장(동시성 영역 + 컨텍스트 예산).
 
+## S18 v1 증분 C1 — MessagingService 배선(3분기·파킹·등장 flush·TTL 스윕) 완료 (2026-07-25, master, 자율 세션 연속) · 커밋 `dece316`
+- **무엇:** `handle_send` 3분기 개조(즉시배달/파킹/반려 — RECIPIENT_NOT_FOUND·NOT_REACHABLE 폐지→`pending` 파킹, MAILBOX_FULL 신설) + spec §6 응답(`{id,results:[…]}`) + 등장/epoch flush(상태싱크 diff → mpsc → 전용 워커, `spawn_blocking` 격리) + 파킹 TOCTOU 자체치유 + 60s TTL 스윕 + 셧다운 순서(shutdown_all 선행 + 5s 벨트). `DeliveryPort` seam으로 headless 단위테스트.
+- **게이트:** review deep 3인(doc-aware FIX·동시성 렌즈 PASS·blind BLOCK) → 4라운드 수렴 최종 PASS — blind가 실결함 다수 적출(재파킹 cap 유실→`restore_front` 무손실, 동명 flush 임의 개체→유일-도달가능 게이트, 블로킹 write의 executor 독점→spawn_blocking, stale id 재바인딩, 동명 교체 id-diff). qa full 전 게이트 PASS + 실측(실 claude `c1_park_then_spawn_auto_delivers` 실행 PASS · roundtrip_smoke XML 왕복 정상 — GUI cdp는 프론트 무변경이라 미해당).
+- **잔여(다음): 증분 C2(idle 게이트 — 턴 관측 = OutputCore emit 부착점, capability 폴백) → C3(request 장부·reply_by 타이머→notice) → C4(그룹 fan-out) → D(MCP 툴·CLI·--settings).**
+
 ## 다음 (미진행)
 - **[사용자 결정 2026-07-22] 전 LLM 공용 제약 레이어 (제약 공용화)** — 지금은 스폰 에이전트에 auto mode(권한 승인 생략)를 깔고, **나중에** 모든 LLM(claude·codex·gemini…)이 공통 적용받는 공용 제약 시스템을 만든다: 공용 셋팅 정본을 두고, 특정 LLM 실행 시 그 정본을 **파싱해 해당 LLM의 설정 파일 형식으로 폴더에 생성**(예: codex 실행 → codex용 설정 파일 materialize). 구성은 **셋(set) + 상속**으로 조합해 주입 가능하게. 배경: 기본 거부+grant 배관은 워커형에 구조적 한계(헤드리스 승인자 부재·도구별 grant 반복— 2026-07-22 CLI 0/38 실측), 업계 방향은 승인 완화+경계(containment) 담당. Windows 경계(WSL2/컨테이너+PTY) 스파이크는 이 레이어의 전제 후보. auto mode 적용 자체는 별도 슬라이스(ADR 동반 — ADR-0094 "NEVER bypassPermissions" 스탠스 부분 개정).
 - **[S17 확정 지시 2026-07-21·구현 슬라이스에 포함] 에이전트 대면 텍스트 영어화** — 사용자 재확인 지시("양식은 영어로 하고 마크다운도 영어로"): 프라이밍 md·하네스 시드를 영어화(봉투 양식 자체는 이미 영어/언어중립 — colon 무단어·옵션 라벨·xml 속성 영어). v3 라우팅 수치는 한국어 기준이므로 영어판 재검증 동반. 온오프 토글은 후속. **CLI 입구 검증도 사용자 재확인 요청** — MCP는 실측 완료, CLI는 grant confound로 단독 격리 미실측(클린 테스트 = MCP disallow 노브 추가 후 CLI-only 재실측).
