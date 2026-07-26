@@ -2667,6 +2667,7 @@ impl ParkSideEffects {
 ///   회수될 수 있다. 그건 spec §5 계약상 `expired` 다(시계가 먼저 그 항목의 운명을 정했고, 회수는 그저 그
 ///   사실을 늦게 발견한 것이다). 판정은 mailbox 의 `ParkedMessage::is_expired(now)` 를 그대로 재사용한다 —
 ///   TTL 상수도 `>=` 경계 규약도 저장소 한 곳에만 두려고 리터럴을 복제하지 않는다.
+// ADR-0107 (회수분 장부 종점 — skipped/expired 분류)
 fn park_into(
     st: &mut MessagingState,
     req: ParkRequest<'_>,

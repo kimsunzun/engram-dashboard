@@ -458,6 +458,7 @@ impl Mailbox {
     /// ★`want` 가 1보다 클 수 있다★: `restore_ordered`(재파킹)는 cap 을 우회하므로 큐가 일시적으로 상한을
     ///   넘을 수 있다. 그래서 "1자리 확보" 가 아니라 **초과분 전체**를 계산해 한 번에 정리한다(초과는 다음
     ///   park 들이 점진적으로 되돌린다 — `restore_ordered` 주석의 "일시 초과" 절).
+    // ADR-0107 (압력 회수 — stale 잔해만 은퇴·반려는 부작용 0)
     pub fn park(
         &mut self,
         recipient: &str,

@@ -1208,6 +1208,13 @@
 - **게이트:** review deep 3인 2라운드(13→4→0) PASS — 굵은 적발: 콜론 포맷 계약 구멍·notice 이름-only 고립·축출의 계약 삭제·유령 계약 레이스. qa full 전 게이트 PASS(rust ~914·c3 통합 4/4·live smoke에서 단문 id 실흐름 확인). 부수: 내장 SendMessage 툴 충돌 차단(`e7465ad`, ADR-0106 — deny 레이어, 제어 채널 스폰 한정).
 - **잔여(최종 인수 패스로):** 실 claude request→회신 왕복(soft 절반 — 8자 id 전사 준수)은 seam으로 불가, C4·D 완료 후 인수 런에서 실측(spec §7). **다음 = C4(그룹 fan-out) → D(MCP 툴 messages/group·CLI·--settings).**
 
+## S18 v1 증분 C4 — 그룹 fan-out + 메일박스 용량·순서 모델 v2 완료 (2026-07-26, master, 자율 세션) · 커밋 `0486d83`
+- **무엇:** `@name` 그룹 fan-out(발송 순간 로스터 스냅샷 1회 → 멤버별 idle 즉시/busy 파킹(개체 `(id,epoch)` 결박 — 방송 소급 금지)/죽음·동명·비structured skipped, 장부 1:N) + 코어 epoch 조건부 stdin 쓰기 API + notice 자기식별(`[engram]` 머리표 + 프라이밍 1절) + 장부 링 1024→4096(사용자 결정). 봉투 `to="@그룹"`.
+- **메일박스 용량·순서 모델 v2(ADR-0107 — 게이트 재작업 round 6~9가 적출·확정):** 2단 정원+면제 폐기 → 단일 정원 100 전량 계수 + stale 잔해(동명 생존 목록 비소속만) 오래된 순 은퇴(`skipped`/TTL 경과분 `expired`) + notice 전용 레인 20 무반려 + in-flight 회계(보관+주입중 ≤ cap 등식) + FIFO 합류 = 큐+in-flight + 동일 수신자 flush 중첩 유예(마커 = id 집합, 정산 시 전원 재타). FIFO 사각지대는 C2부터 있던 기존 결함 — 스코프 편입 = 사용자 결정 2026-07-26("지금 고치고 간다").
+- **게이트:** 리뷰 5라운드(핸드오프 이전) + blind(codex) 재판정 4라운드(FIX 3→1→1→**PASS**) 수렴, 각 수정 mutation 검증. qa full 전 게이트 PASS(rust 980(core 285·discovery 45·protocol 53·daemon 597)·vitest 634·tsc 0에러·격리 0줄·라이브 smoke = 신빌드 데몬 spawn-kill 실 IPC 완주).
+- **체감 변화(수용):** flush 주입 창 동안 신규 발송이 `MAILBOX_FULL`/`Parked` 가능(조용한 유실 대신 가시적 반려·직후 순서대로 배달) · 동명 산 쌍둥이 시 가득 찬 보관함은 상대 메일 은퇴 대신 반려.
+- **잔여:** 후속 항목 명시만 — 장부 런타임 설정/커맨드 노출 · 장부 본문 절단 저장(최악 256MiB 프로필). GUI 레벨 에이전트 간 실송수신은 인수 런 몫. **다음 = D(MCP 툴 messages/group·CLI 미러·--settings 주입·프라이밍 교육) → 인수 실측 3건.**
+
 ## 파킹 TTL 1h→24h 상향 (ADR-0105) (2026-07-25, master) · 사용자 결정 · /research light 근거
 - C2 리뷰가 "busy 대기도 TTL 공유 → 1h 초과 장기 턴과 충돌"을 지적 → 선례 조사(RabbitMQ 무만료·SQS 4d·Kafka 7d·Postfix 5d·liveness 면제 선례 전무) → 사용자 결정: **24h, 면제 규칙 없음**(시계 단일 규칙 · 영속화 단계 때 재설계 전제). spec §5 갱신 + ADR-0103 부분 개정 양방향. 코드 상수 적용 = C2 커밋과 함께.
 

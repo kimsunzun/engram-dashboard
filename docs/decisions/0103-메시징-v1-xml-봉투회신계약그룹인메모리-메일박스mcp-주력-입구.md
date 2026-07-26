@@ -1,7 +1,7 @@
 # ADR-0103: 메시징 v1 — XML 봉투·회신계약·그룹·인메모리 메일박스·MCP 주력 입구
 
-- 상태: 확정 (2026-07-24, 근거: 5갈래 설계 서베이 + cross-family 적대 리뷰 + 세션 내 실측 — 아래 근거 절)
-- 관련: `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`(구현 계약 정본) · ADR-0086(듀얼 입구) · ADR-0087(send 시맨틱·이름 규칙) · ADR-0094(발신 권한 — MCP 서버명 const `engram` 정의처) · ADR-0096(봉투 wrap seam) · ADR-0099(mcp-config 발급) · ADR-0101(canonical 이름) · Amended by ADR-0105 (파킹 TTL 1h → 24h — 인메모리 단계 한정)
+- 상태: 확정 (2026-07-24, 근거: 5갈래 설계 서베이 + cross-family 적대 리뷰 + 세션 내 실측 — 아래 근거 절) · 부분 폐기 by ADR-0107 (notice cap 예외 통로 및 파킹 단일 수신자 전용 조항)
+- 관련: `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`(구현 계약 정본) · ADR-0086(듀얼 입구) · ADR-0087(send 시맨틱·이름 규칙) · ADR-0094(발신 권한 — MCP 서버명 const `engram` 정의처) · ADR-0096(봉투 wrap seam) · ADR-0099(mcp-config 발급) · ADR-0101(canonical 이름) · Amended by ADR-0105 (파킹 TTL 1h → 24h — 인메모리 단계 한정) · Amended by ADR-0107 (notice cap 예외 통로 및 파킹 단일 수신자 전용 조항)
 
 ## 맥락
 
