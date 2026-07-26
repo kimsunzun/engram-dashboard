@@ -130,7 +130,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 claude 전용 인자(`--session-id`/`--resume`)는 `backend/claude.rs` 한 곳에만. manager는 dispatch(`needs_session`/`build_command_spec`/`backend_for`)만 부르고 `CommandSpec`만 transport에 주입(transport는 백엔드 모름). codex/gemini는 CLI spike 후 variant 추가(현재 stub·미연결). (ADR-0004)
 
 ### 4. 코어 격리 규칙
-- 코어 crate(`crates/engram-dashboard-core/src/`) 하위 **tauri import 0** (`rg "use tauri"` → 0줄 유지).
+- 코어 crate(`crates/engram-dashboard-core/src/`) 하위 **tauri import 0** (`rg "^\s*use tauri"` → 0줄 유지 — import 라인 앵커, 주석 자기인용 오탐 방지 2026-07-13).
 - **`AgentManager` 소유 = 데몬**(`Arc<AgentManager>`, 외부 Mutex 없음). src-tauri는 in-proc 호스팅 X·AppState 제거(ADR-0029).
 
 ### 5. LLM-우선 제어 — 모든 메뉴가 프로그래밍 가능해야 한다 (불변)
@@ -186,7 +186,7 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 - `cargo test -p engram-dashboard-core` — 코어 unit + 통합 테스트(실 PTY로 단언)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
 - `cargo build` (루트) — 전체 workspace 빌드
-- `cargo fmt --check` / `rg "use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트(검사형 `--check`)
+- `cargo fmt --check` / `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트(검사형 `--check`)
 - 프론트 게이트: `npm test`(vitest run) + `npx tsc --noEmit`(타입체크 — 별도 typecheck 스크립트 없음)
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E
 - 로그 ON: `RUST_LOG=debug` (기본 OFF=warn)
