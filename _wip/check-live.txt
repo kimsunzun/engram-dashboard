@@ -1,0 +1,1 @@
+(function() { return JSON.stringify({alphaLive: window.__LIVE_ALPHA.length, bravoLive: window.__LIVE_BRAVO.length, alpha3: window.__LIVE_ALPHA.slice(-3), bravo3: window.__LIVE_BRAVO.slice(-3), alphaState: window.__ENGRAM_AGENT__.getViewOutputState("sj-live-alpha"), bravoState: window.__ENGRAM_AGENT__.getViewOutputState("sj-live-bravo")}); })()

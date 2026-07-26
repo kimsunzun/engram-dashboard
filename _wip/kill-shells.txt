@@ -1,0 +1,10 @@
+(async function() {
+  try {
+    await window.__ENGRAM_AGENT__.killAgent('725b4a36-99ea-4d56-a4ec-d917cd6f037c');
+    await window.__ENGRAM_AGENT__.killAgent('9feb5c88-6a89-44e8-be71-2cb5ad43d443');
+    // Also delete the profiles so they don't persist
+    await window.__ENGRAM_AGENT__.deleteProfile('725b4a36-99ea-4d56-a4ec-d917cd6f037c');
+    await window.__ENGRAM_AGENT__.deleteProfile('9feb5c88-6a89-44e8-be71-2cb5ad43d443');
+    return 'killed-and-deleted';
+  } catch(e) { return JSON.stringify({err: String(e)}); }
+})()

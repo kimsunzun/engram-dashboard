@@ -1,0 +1,1 @@
+(async function() { const agents = await window.__ENGRAM_AGENT__.getAgents(); const alpha = agents.find(a => a.id === "0d5fdcac-a030-4525-aa4e-d3d9a905e77b"); const bravo = agents.find(a => a.id === "1f64c40d-c9a4-433e-bdf8-ac693098582b"); return JSON.stringify({alpha: alpha, bravo: bravo}); })()

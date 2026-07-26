@@ -1,0 +1,7 @@
+(function() {
+  const alphaLen = window.__QA_ALPHA_OUT ? window.__QA_ALPHA_OUT.length : 0;
+  const bravoLen = window.__QA_BRAVO_OUT ? window.__QA_BRAVO_OUT.length : 0;
+  const alphaTail = window.__QA_ALPHA_OUT ? window.__QA_ALPHA_OUT.slice(-300) : '';
+  const bravoTail = window.__QA_BRAVO_OUT ? window.__QA_BRAVO_OUT.slice(-300) : '';
+  return JSON.stringify({alphaLen, bravoLen, alphaTail, bravoTail});
+})()

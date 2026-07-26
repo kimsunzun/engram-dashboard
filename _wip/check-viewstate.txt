@@ -1,0 +1,7 @@
+(function() {
+  try {
+    const alphaState = window.__ENGRAM_AGENT__.getViewOutputState('qa-view-alpha');
+    const bravoState = window.__ENGRAM_AGENT__.getViewOutputState('qa-view-bravo');
+    return JSON.stringify({alphaState, bravoState});
+  } catch(e) { return JSON.stringify({err: String(e)}); }
+})()

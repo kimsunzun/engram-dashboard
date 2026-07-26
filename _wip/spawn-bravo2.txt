@@ -1,0 +1,1 @@
+(async function() { try { const r = await window.__ENGRAM_AGENT__.spawnAgent("I:/Engram/apps/engram-dashboard/_wip/qa-bravo"); return JSON.stringify(r); } catch(e) { return JSON.stringify({err: String(e)}); } })()

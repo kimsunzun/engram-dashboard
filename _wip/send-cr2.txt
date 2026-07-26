@@ -1,0 +1,1 @@
+(async function() { try { await window.__ENGRAM_AGENT__.writeStdin("3f47bfc7-98b2-4bb6-9c39-04345bef957c", new Uint8Array([13])); return "sent-cr"; } catch(e) { return JSON.stringify({err: String(e)}); } })()

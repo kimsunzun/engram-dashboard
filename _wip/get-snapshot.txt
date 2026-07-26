@@ -1,0 +1,12 @@
+(async function() {
+  try {
+    const alphaSnap = await window.__ENGRAM_AGENT__.getSnapshot('725b4a36-99ea-4d56-a4ec-d917cd6f037c');
+    const bravoSnap = await window.__ENGRAM_AGENT__.getSnapshot('9feb5c88-6a89-44e8-be71-2cb5ad43d443');
+    return JSON.stringify({
+      alphaFrames: alphaSnap ? alphaSnap.length : 'null',
+      bravoFrames: bravoSnap ? bravoSnap.length : 'null',
+      alphaFirst: alphaSnap && alphaSnap.length > 0 ? JSON.stringify(alphaSnap[0]).slice(0,100) : 'empty',
+      bravoFirst: bravoSnap && bravoSnap.length > 0 ? JSON.stringify(bravoSnap[0]).slice(0,100) : 'empty',
+    });
+  } catch(e) { return JSON.stringify({err: String(e)}); }
+})()

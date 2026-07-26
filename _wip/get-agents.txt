@@ -1,0 +1,4 @@
+(async function() {
+  const agents = await window.__ENGRAM_AGENT__.getAgents();
+  return JSON.stringify(agents.map(a => ({id:a.id, name:a.name, status:a.status})));
+})()

@@ -1,0 +1,23 @@
+(async function() {
+  try {
+    // Create alpha profile
+    const alpha = await window.__ENGRAM_AGENT__.createClaudeProfile(
+      'qa-alpha',
+      'I:/Engram/apps/engram-dashboard/_wip/qa-alpha',
+      [],
+      [],
+      false,
+      'Terminal'
+    );
+    // Create bravo profile
+    const bravo = await window.__ENGRAM_AGENT__.createClaudeProfile(
+      'qa-bravo',
+      'I:/Engram/apps/engram-dashboard/_wip/qa-bravo',
+      [],
+      [],
+      false,
+      'Terminal'
+    );
+    return JSON.stringify({alpha: {id:alpha.id,name:alpha.name,displayName:alpha.displayName}, bravo: {id:bravo.id,name:bravo.name,displayName:bravo.displayName}});
+  } catch(e) { return JSON.stringify({err: String(e)}); }
+})()

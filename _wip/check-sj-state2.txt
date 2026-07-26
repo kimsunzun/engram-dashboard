@@ -1,0 +1,1 @@
+(function() { const alphaState = window.__ENGRAM_AGENT__.getViewOutputState("sj-view-alpha"); const bravoState = window.__ENGRAM_AGENT__.getViewOutputState("sj-view-bravo"); return JSON.stringify({alphaState, bravoState, alphaChunks: (window.__SJ_ALPHA||[]).length, bravoChunks: (window.__SJ_BRAVO||[]).length}); })()

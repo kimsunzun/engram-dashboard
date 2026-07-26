@@ -1,0 +1,1 @@
+(async function() { try { const enc = new TextEncoder(); await window.__ENGRAM_AGENT__.writeStdin("3f47bfc7-98b2-4bb6-9c39-04345bef957c", enc.encode("")); return "sent-cr"; } catch(e) { return JSON.stringify({err: String(e)}); } })()

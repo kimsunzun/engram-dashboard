@@ -1,0 +1,18 @@
+(async function() {
+  window.__QA_BRAVO_OUT = '';
+  window.__QA_ALPHA_OUT = '';
+  const alphaId = '725b4a36-99ea-4d56-a4ec-d917cd6f037c';
+  const bravoId = '9feb5c88-6a89-44e8-be71-2cb5ad43d443';
+  const dec = new TextDecoder();
+  // Subscribe bravo output
+  window.__QA_BRAVO_SUB = await window.__ENGRAM_AGENT__.subscribeOutput(
+    'qa-view-bravo', bravoId,
+    (chunk) => { if (chunk.tag === 0) { window.__QA_BRAVO_OUT += dec.decode(chunk.bytes); } }
+  );
+  // Subscribe alpha output too for bidirectional check
+  window.__QA_ALPHA_SUB = await window.__ENGRAM_AGENT__.subscribeOutput(
+    'qa-view-alpha', alphaId,
+    (chunk) => { if (chunk.tag === 0) { window.__QA_ALPHA_OUT += dec.decode(chunk.bytes); } }
+  );
+  return 'subscribed-both';
+})()
