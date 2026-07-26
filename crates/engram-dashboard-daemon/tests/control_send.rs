@@ -2,7 +2,7 @@
 //!
 //! 실 DaemonControlChannel + AgentManager + MCP 서버를 배선하고 검증한다:
 //!   - `/control/send`(CLI 입구): 무/오 토큰 → 401 · 유효 토큰 + 없는 수신자 → RECIPIENT_NOT_FOUND ·
-//!     그룹(@) → GROUPS_NOT_SUPPORTED · 대용량 body → BODY_TOO_LARGE.
+//!     미등록 그룹(@) → GROUP_NOT_FOUND · 대용량 body → BODY_TOO_LARGE.
 //!   - MCP `send_message` 툴: happy path(산 json 에이전트에 배달 + relay 가 래핑된 라인을 stdin 에 씀) +
 //!     교정 에러(없는 수신자).
 //!   - relay 관측: 산 json(stream-json) 에이전트에 보내면 write_input 이 동기 발행하는 입력-시점 유저
@@ -309,10 +309,11 @@ async fn control_send_corrective_errors() {
     );
     assert!(v["results"][0]["hint"].is_string(), "파킹 hint 동봉");
 
-    // 그룹 주소(@) → GROUPS_NOT_SUPPORTED.
+    // ★C4: 그룹 주소(@)는 이제 fan-out 갈래★ — 다만 등록된 적 없는 이름이라 GROUP_NOT_FOUND 로 반려된다
+    //   (옛 GROUPS_NOT_SUPPORTED 는 spec §4 어휘로 교체 — 방송 자체는 지원된다).
     let (_s, body) = post_send(&base, Some("valid-sender"), "@team", "hi").await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "GROUPS_NOT_SUPPORTED", "@ 주소: {body}");
+    assert_eq!(v["code"], "GROUP_NOT_FOUND", "미등록 @ 주소: {body}");
 
     // 대용량 body(>64KiB) → BODY_TOO_LARGE.
     let big = "x".repeat(64 * 1024 + 1);
@@ -2814,7 +2815,9 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
         a_line.contains("<notice>"),
         "기한 초과 통지는 <notice> 태그(from 없음 = 회신 대상 아님): {a_line}"
     );
-    for needle in [&req_id, "1m", "ghost-worker"] {
+    // `[engram]` = 시스템 발신 표시(사용자 요청 2026-07-26 — 프라이밍 없이도 출처가 읽히도록). 가독용
+    //   라벨이지 파싱 계약이 아니다(기계 판정은 태그 모양 · from 부재).
+    for needle in [&req_id, "1m", "ghost-worker", "[engram]"] {
         assert!(
             a_line.contains(needle),
             "notice 문구에 '{needle}' 가 있어야(spec §1 템플릿): {a_line}"
@@ -2906,7 +2909,7 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["results"][0]["status"], "pending", "60s 는 유효: {body}");
 
-    // 그룹 request → 전용 코드(GROUPS_NOT_SUPPORTED 와 구분 — C4 가 방송을 켜도 남는 금지, spec §4).
+    // 그룹 request → 전용 코드(해석 반려와 구분 — C4 가 방송을 켜도 남는 영구 금지, spec §4).
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -2919,7 +2922,9 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
         "그룹 request: {body}"
     );
 
-    // 같은 그룹 주소라도 통보면 기존 코드 그대로.
+    // 같은 그룹 주소라도 통보면 **request 금지에 걸리지 않는다** — fan-out 갈래로 내려가 해석 결과에 따라
+    //   답한다(여기선 미등록이라 GROUP_NOT_FOUND). 두 코드가 갈리는 게 요점: request 금지는 이름과 무관한
+    //   영구 계약이고, NOT_FOUND 는 명단 상태에 따른 답이다.
     let (_s, body) = post_send_json(
         &base,
         tok,
@@ -2927,7 +2932,7 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     )
     .await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["code"], "GROUPS_NOT_SUPPORTED", "그룹 통보: {body}");
+    assert_eq!(v["code"], "GROUP_NOT_FOUND", "그룹 통보(미등록): {body}");
 
     // 옛 `{to, body}` 바디는 그대로 동작해야(통보 wire 호환).
     let (status, body) = post_send(&base, tok, "nobody", "hi").await;
@@ -2993,6 +2998,278 @@ async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
     assert_eq!(
         v["results"][0]["status"], "pending",
         "xml 로 되돌리면 계약 발송 정상: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// stream-json 캐리어가 stdin 에 쓴 한 줄에서 **논리 봉투 텍스트**만 꺼낸다(`message.content[0].text`).
+///
+/// ★왜 문자열 contains 가 아니라 파싱인가★: 캐리어가 봉투를 JSON 문자열로 감싸며 `"` 를 이스케이프하므로
+///   (`to=\"@all\"`) 원바이트에 대고 `to="@all"` 을 찾으면 **실제로는 맞는데 틀렸다고 나온다**. 봉투 golden
+///   단언은 캐리어 인코딩이 아니라 봉투 자체를 봐야 하므로 한 겹 벗기고 비교한다.
+fn stream_json_text(written: &[u8]) -> String {
+    let line = String::from_utf8_lossy(written);
+    let v: serde_json::Value = serde_json::from_str(&line)
+        .unwrap_or_else(|e| panic!("stream-json 라인 파싱 실패({e}): {line}"));
+    v["message"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("stream-json 라인에 봉투 텍스트가 없다: {line}"))
+        .to_string()
+}
+
+// ── S18 메시징 v1 C4 수용 시나리오(spec §4·§6): 그룹 fan-out 이 **실 입구(HTTP /control/send)** 를 탄다 ──
+// ★무엇을 증명하나(단위 테스트와 갈리는 지점)★: service.rs 단위 테스트는 fan-out 로직 자체를 덮는다.
+//   여기서 볼 건 **입구 배선**이다 — `@` 주소가 HTTP 입구에서 fan-out 갈래로 내려가고, 멤버별 결과가
+//   spec §6 의 `results[]`(멤버당 한 줄) JSON 으로 나오며, 실제 수신자 stdin 에 `to="@…"` 봉투가 쓰이는지.
+// ★claude 불요·결정적★: 수신자는 obs_seam 의 structured 세션(실 PTY·claude 없이 write 캡처 가능)이라
+//   로스터·도달성·주입을 전부 손으로 통제한다.
+
+/// `@all` = 발송 순간 산 수신자 전원 − **발신자 자신**(spec §4 + 자기 메아리 금지 정책).
+#[tokio::test]
+async fn c4_all_group_fans_out_to_live_agents_and_excludes_the_sender() {
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("c4-all").await;
+
+    // 발신자도 **산 structured 에이전트**여야 "자기 제외" 를 실증할 수 있다(로스터에 있어야 뺄 게 생긴다).
+    let (sender_id, sender_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let (b_id, b_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let sender_name = obs_seam::fallback_name(sender_id);
+    let a_name = obs_seam::fallback_name(a_id);
+    let b_name = obs_seam::fallback_name(b_id);
+    registry.issue(sender_id, 0, "c4-all-token".to_string());
+
+    let (status, body) = post_send(&base, Some("c4-all-token"), "@all", "전원 리베이스 대기").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "방송 접수도 200: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        v.get("status").is_none(),
+        "성공 응답엔 최상위 status 없음(spec §6): {body}"
+    );
+
+    // 멤버당 한 줄 — 발신자 줄은 **없어야** 한다.
+    let results = v["results"].as_array().expect("results 배열").clone();
+    // ★순서까지 단언한다(C4 리뷰 fix H)★: `got` 을 정렬하지 않는다 — 운영 `ManagerDeliveryPort` 가 로스터를
+    //   (이름, id) 오름차순으로 내므로 `@all` 의 결과 순서 = **이름 정렬 순서**여야 한다. 정렬하면 이 결정성이
+    //   테스트에서 사라지고(HashMap 순회 순서 그대로여도 초록) 실행마다 다른 주입 순서를 못 잡는다.
+    let got: Vec<(String, String)> = results
+        .iter()
+        .map(|r| {
+            (
+                r["to"].as_str().unwrap_or_default().to_string(),
+                r["status"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let mut want = vec![
+        (a_name.clone(), "delivered".to_string()),
+        (b_name.clone(), "delivered".to_string()),
+    ];
+    want.sort(); // 기대값만 정렬 — "결과가 이름 순으로 나온다" 가 단언 대상이다.
+    assert_eq!(
+        got, want,
+        "@all = 산 전원 − 발신자, 각자 delivered, **이름 오름차순**(결정적 로스터 — fix H): {body}"
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|r| r["to"].as_str() == Some(sender_name.as_str())),
+        "발신자 자신은 @all 명단에 없다(자기 방송 메아리 금지): {body}"
+    );
+
+    // 실제 주입 — 두 수신자 stdin 에만 쓰였고, 봉투에 방송 표시(`to="@all"`)가 붙는다(spec §1 노출 원칙).
+    for (captured, who) in [(&a_captured, &a_name), (&b_captured, &b_name)] {
+        let written = obs_seam::all_written(captured);
+        assert_eq!(written.len(), 1, "{who} 에게 정확히 1건 주입");
+        assert_eq!(
+            stream_json_text(&written[0]),
+            format!(r#"<message from="{sender_name}" to="@all">전원 리베이스 대기</message>"#),
+            "방송 봉투 golden — to 속성이 실려야({who})"
+        );
+    }
+    assert!(
+        obs_seam::all_written(&sender_captured).is_empty(),
+        "발신자 자신의 stdin 엔 아무것도 쓰이지 않는다"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// 등록 그룹은 **명단이 정본** — 명단에 있으나 안 뜬 이름은 `skipped`(파킹 없음 = 방송 소급 금지, spec §4).
+#[tokio::test]
+async fn c4_registered_group_skips_a_member_that_is_not_live() {
+    let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("c4-registered").await;
+
+    let (live_id, live_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let live_name = obs_seam::fallback_name(live_id);
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c4-reg-token".to_string());
+    // 발신자는 산 세션이 없어(순수 신원) 표시 이름이 id 앞 8자 fallback 이다 — 봉투 golden 에 그대로 쓴다.
+    let sender_display = obs_seam::fallback_name(sender);
+
+    // 그룹 관리 표면(MCP `group` 툴)은 D 스코프라, 여기선 하네스 seam 으로 명단을 채운다.
+    messaging.add_group_member_for_test("@coders", &live_name);
+    messaging.add_group_member_for_test("@coders", "never-spawned");
+
+    let (status, body) = post_send(&base, Some("c4-reg-token"), "@coders", "공지").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "방송 접수: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["results"][0]["to"],
+        live_name.as_str(),
+        "결과는 등록 순서대로: {body}"
+    );
+    assert_eq!(v["results"][0]["status"], "delivered", "산 멤버: {body}");
+    assert_eq!(v["results"][1]["to"], "never-spawned");
+    assert_eq!(
+        v["results"][1]["status"], "skipped",
+        "죽은/미등장 멤버는 skipped(파킹 아님 — 방송 소급 금지): {body}"
+    );
+    assert!(
+        v["results"][1]["hint"].is_string(),
+        "skip 사유 hint 동봉: {body}"
+    );
+
+    // ★파킹 금지 불변식★ — 나중에 그 이름이 떠도 이 방송은 배달되지 않는다(큐가 비어 있어야 한다).
+    assert_eq!(
+        messaging.parked_len("never-spawned"),
+        0,
+        "부재 멤버는 파킹되지 않는다(방송 소급 금지 — ADR-0103)"
+    );
+    // 산 멤버에겐 그룹 라벨 봉투가 실제로 쓰였다(golden — 그룹 이름은 해석에 쓴 정규화 이름 그대로).
+    assert_eq!(
+        stream_json_text(&obs_seam::last_written(&live_captured)),
+        format!(r#"<message from="{sender_display}" to="@coders">공지</message>"#),
+        "등록 그룹 봉투에도 to 속성"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// ★수신자 지목의 앞뒤 공백은 **그룹 축에만** 걷어낸다(C4 리뷰 fix G → round-3 fix 4 에서 범위 축소)★.
+///
+/// ★왜 실입구 테스트인가★: 이건 **판정들 사이의 불일치** 버그였다 — 그룹 갈래는 raw `to` 를
+///   `starts_with('@')` 로 보고, 그룹 이름 정규화는 trim 한 값을 본다. 그래서 `" @all"` 은 단일 발송으로
+///   흘러 "그런 이름의 에이전트 없음 → **부재 파킹**" 이 됐다: 발신자에겐 `pending` 성공으로 보이는데 실제로는
+///   아무도 못 받고 TTL 에 소멸한다(공백 한 칸 뒤에 숨은 조용한 유실). 두 판정이 같은 문자열을 보는지는
+///   입구를 실제로 태워야 증명된다.
+/// ★단일 수신자는 **바이트 그대로**다(round-3 fix 4)★: C4 는 `cmd.to` 자체를 덮어써 단일 발송 주소까지
+///   정규화했는데, 그건 과교정이다 — 이름 네임스페이스는 바이트 정확(WYSIWYA — ADR-0101)이라 무조건 trim 은
+///   발신자가 쓰지 않은 이름으로 **재지목**하고 파킹 키·장부 키·응답 `to` 까지 바꾼다. 그래서 단일 갈래는
+///   C4 이전 동작(= 이름 매치 실패 → 원문 이름으로 부재 파킹)으로 되돌린다. 아래 ②가 그걸 고정한다.
+#[tokio::test]
+async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
+    let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("c4-trim").await;
+
+    let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let a_name = obs_seam::fallback_name(a_id);
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c4-trim-token".to_string());
+    let tok = Some("c4-trim-token");
+
+    // ① `" @all"` — 공백이 있어도 **그룹 갈래**로 간다(단일 발송 부재 파킹이 아니라 멤버별 회계).
+    let (status, body) = post_send(&base, tok, " @all", "공백 방송").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["results"][0]["to"], a_name.as_str(),
+        "results 는 **멤버 이름** — 그룹으로 라우팅됐다는 증거(단일 발송이면 ' @all' 이 그대로 실린다): {body}"
+    );
+    assert_eq!(v["results"][0]["status"], "delivered", "{body}");
+    assert_eq!(
+        messaging.parked_len(" @all"),
+        0,
+        "공백 이름 앞으로 부재 파킹되지 않는다(조용한 유실 방지)"
+    );
+    // 봉투 라벨도 정규화된 그룹 이름이다(라벨 단일 출처 — 공백이 새어 나가지 않는다).
+    assert!(
+        stream_json_text(&obs_seam::last_written(&a_captured)).contains(r#"to="@all""#),
+        "봉투 to 속성은 정규화된 @all: {:?}",
+        stream_json_text(&obs_seam::last_written(&a_captured))
+    );
+
+    // ② `" <이름>"` — 단일 발송은 **바이트 그대로** 해석한다(round-3 fix 4). 그런 이름의 에이전트는
+    //    없으므로 spec §5 분기 2(부재 → 파킹)를 타고, 파킹 키·응답 `to` 는 발신자가 쓴 원문 그대로다.
+    //    ★이게 왜 옳은 결말인가★: 주소 정규화를 입구가 임의로 하면 앞뒤 공백이 붙은 canonical 이름을 가진
+    //    에이전트를 **다른 이름으로 재지목**하게 된다(극단적으로 trim 값이 산 AgentId 면 엉뚱한 배달).
+    //    오타·공백은 TTL 이 방어하는 기존 계약 그대로 두고, 발신자는 응답의 `to` 에서 자기 표기를 본다.
+    let padded = format!(" {a_name}");
+    let (status, body) = post_send(&base, tok, &padded, "공백 1:1").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["results"][0]["status"], "pending",
+        "공백이 붙은 지목은 그 이름의 산 에이전트가 없으므로 부재 파킹(바이트 정확 해석): {body}"
+    );
+    assert_eq!(
+        v["results"][0]["to"],
+        padded.as_str(),
+        "결과 `to` 는 발신자가 쓴 원문 그대로(입구가 주소를 바꿔치지 않는다): {body}"
+    );
+    assert_eq!(messaging.parked_len(&padded), 1, "파킹 키도 원문 이름");
+    assert_eq!(
+        messaging.parked_len(&a_name),
+        0,
+        "trim 된 이름 큐로 새어 나가지 않는다"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// ★방송을 켰어도 계약 필드 두 금지는 그대로다(spec §4)★ — **등록·유효한** 그룹으로 시험해야 의미가 있다.
+/// 미등록 이름으로만 시험하면 GROUP_NOT_FOUND 가 먼저 나가 금지가 살아 있는지 알 수 없다(순서 착시).
+#[tokio::test]
+async fn c4_contract_fields_stay_banned_on_a_resolvable_group() {
+    let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("c4-ban").await;
+
+    let (live_id, live_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    messaging.add_group_member_for_test("@coders", &obs_seam::fallback_name(live_id));
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "c4-ban-token".to_string());
+    let tok = Some("c4-ban-token");
+
+    // ① request → GROUP_REQUEST_UNSUPPORTED(완료 판정 시맨틱 미정 = v1 영구 금지).
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "@coders", "body": "x", "request": true }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["code"], "GROUP_REQUEST_UNSUPPORTED",
+        "해석 가능한 그룹이어도 request 는 금지: {body}"
+    );
+
+    // ② reply_to → INVALID_SEND_ARGS(회신은 항상 발신자 1인에게 — 전체회신 없음).
+    let (_s, body) = post_send_json(
+        &base,
+        tok,
+        serde_json::json!({ "to": "@coders", "body": "x", "reply_to": "m-7f3k" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["code"], "INVALID_SEND_ARGS",
+        "그룹 주소로의 회신 = reply-all 이라 반려: {body}"
+    );
+
+    // ★두 반려는 배달 부작용 0★ — 금지가 "일단 보내고 나서" 걸리면 의미가 없다.
+    assert!(
+        obs_seam::all_written(&live_captured).is_empty(),
+        "반려된 그룹 발송은 멤버 stdin 에 아무것도 쓰지 않는다"
+    );
+
+    // 대조군: 같은 그룹에 **통보**는 정상 방송된다(금지가 그룹 전체를 막은 게 아니다).
+    let (_s, body) = post_send(&base, tok, "@coders", "공지").await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "통보는 통과: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);

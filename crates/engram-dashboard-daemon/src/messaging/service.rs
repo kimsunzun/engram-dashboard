@@ -1,13 +1,14 @@
 //! service — MessagingService: 순수 구조(mailbox·ledger·groups)를 tokio 위에서 발송 파이프라인에
 //! 엮는 오케스트레이터(S18 메시징 v1 increment C1 · ADR-0103/0104).
 //!
-//! ★역할(C1+C2+C3 스코프)★: 단일 수신자 발송의 3분기(spec §5)와 등장/idle flush(ADR-0104), TTL sweep,
-//!   **idle 게이트**(C2), **회신 계약**(C3 — request 장부 오픈·회신 닫기·기한 초과 notice)을 담당한다.
-//!   그룹(C4)은 **범위 밖** — 여기 넣지 않는다.
+//! ★역할(C1+C2+C3+C4 스코프)★: 단일 수신자 발송의 3분기(spec §5)와 등장/idle flush(ADR-0104), TTL sweep,
+//!   **idle 게이트**(C2), **회신 계약**(C3 — request 장부 오픈·회신 닫기·기한 초과 notice), **그룹 fan-out**
+//!   (C4 — 발송 순간 스냅샷 방송·멤버별 회계)을 담당한다. 그룹 **관리**(생성·증감·삭제 툴/CLI)는 D 스코프다.
 //!     ① resolve+inject 성공 → `delivered`(실제 주입 시점에만, ADR-0104)
 //!        — 단 수신자가 **턴 진행 중(busy)** 이면 주입하지 않고 **파킹** = `pending`(C2 idle 게이트)
-//!        — 또한 그 이름 앞에 **이미 파킹이 쌓여 있으면** 직발송이 큐를 앞지르지 않게 **함께 파킹**하고
-//!          flush 에 합류시킨다(FIFO 일관성 — 수신자가 보는 순서 = 도착 순서)
+//!        — 또한 그 이름 앞에 **먼저 나갈 게 남아 있으면**(큐의 파킹 **또는 flush 가 지금 주입 중인 배치**)
+//!          직발송이 그것을 앞지르지 않게 **함께 파킹**하고 flush 에 합류시킨다(FIFO 일관성 — 수신자가
+//!          보는 순서 = 도착 순서). 판정 동사 = `mailbox::has_pending_ahead`(round-7).
 //!     ② 부재(미스폰·죽음, "없는 이름" 포함) → **파킹** = `pending`(RECIPIENT_NOT_FOUND 소멸, spec §5)
 //!     ③ 도달 불가/write 실패 → **파킹** = `pending`
 //!     보관함 초과 → `MAILBOX_FULL` 반려(spec §5 분기 3).
@@ -18,11 +19,17 @@
 //!   묻는다 — 운영은 `BusyTracker`(출력 스트림 tap 이 턴 이벤트를 관측), 단위 테스트는 가짜 게이트를 끼운다.
 //!   게이트를 안 꽂으면 `AlwaysIdleGate`(= 즉시 주입 = C1 동작)로 폴백한다(관측 불가 백엔드 폴백과 같은 값).
 //!
-//! ★순서 보장의 범위(finding 8 · load-bearing)★: "오래된 순" 은 **한 flush 배치 내부**(+ 재파킹 front-
-//!   restore 로 배치 간 이월 시 오래된 것 우선)에서만 보장한다 — spec §5 가 약속하는 건 **배치 순서**지
-//!   전 출처를 아우르는 global total order 가 아니다. 진행 중인 flush 배치와 **동시 직발송**(handle_single_send)
-//!   이 수신자 stdin 에서 인터리브될 수 있다(둘 다 락 밖에서 inject) — 사람 대화 수준 메시지율에선 무해하다고
-//!   보고 **의도적으로 수용**한다(전역 순서 직렬화는 inject 를 락 안으로 넣어야 해 락 규율과 상충).
+//! ★순서 보장의 범위(finding 8 · round-7 보정 · load-bearing)★: "오래된 순" 은 **한 flush 배치 내부**
+//!   (+ 재파킹 merge 로 배치 간 이월 시 오래된 것 우선)에서 보장한다 — spec §5 가 약속하는 건 **배치 순서**지
+//!   전 출처를 아우르는 global total order 가 아니다.
+//!   ★옛 주장 "진행 중인 flush 배치와 동시 직발송이 인터리브될 수 있고 그걸 의도적으로 수용한다" 는 **너무
+//!   넓었다**(round-7 high)★: 그 문장 아래에서 실제로 벌어지던 건 "이미 나가 있는 배치를 새 발송이 통째로
+//!   **앞지르는**" 순서 역전이었고, 이건 3-b 가 막으려던 바로 그 사고다(큐만 봐서 in-flight 를 못 봤다).
+//!   지금은 발송·방송의 합류 판정이 in-flight 까지 보고(`mailbox::has_pending_ahead`), flush 는 같은 수신자에
+//!   대해 겹쳐 돌지 않는다(`flush_for` 0단계) — 즉 **한 수신자가 보는 순서**는 지켜진다.
+//!   남는 수용분(진짜 잔여)은 둘이다: ① 합류 판정(락 안)과 그 뒤 inject(락 밖) 사이 마이크로초 창 —
+//!   그 사이에 새로 파킹된 메일이 먼저 나갈 수 있다 ② **서로 다른 수신자** 사이의 전역 순서. 둘 다 inject 를
+//!   락 안으로 넣어야만 닫히므로(락 규율 정면 위반) 사람 대화 수준 메시지율에서 의도적으로 수용한다.
 //!
 //! ★단일 락(load-bearing — ADR-0006 정신)★: Mailbox+Ledger+Groups 를 **하나의 `Mutex<MessagingState>`**
 //!   뒤에 둔다. 락 순서 위험이 없고(락 하나) 메시지율이 극히 낮아(사람 대화 수준) 경합이 무의미하다.
@@ -47,13 +54,33 @@
 //!   - **회신 발송**(`reply_to`) → 정상 배달/파킹 뒤 `Ledger::close_on_reply`(엄격 매칭). 매칭 실패는
 //!     **배달에 영향 없다** — 메시지는 그대로 가고 계약만 안 닫힌다(응답 shape 도 그대로).
 //!   - **기한 초과** → sweep 이 `due_timeouts` 로 걷어 **발신자에게** `<notice>` 를 보낸다(수신자 재촉
-//!     아님). 배달은 `ParkKind::Notice` 파킹 + flush 도어벨로 일원화한다 — **cap 예외**(통지가 막히면
-//!     계약이 반쪽)이고, sweep task 에서 blocking write 를 하지 않기 위함이다(`deliver_notice` 주석).
+//!     아님). 배달은 `ParkKind::Notice` 파킹 + flush 도어벨로 일원화한다 — 통지는 **전용 레인**
+//!     (`mailbox::NOTICE_CAP`)에서 회계돼 message 백로그에 막히지 않고(통지가 막히면 계약이 반쪽) 그
+//!     자체로도 무계가 아니며, sweep task 에서 blocking write 를 하지 않기 위함이다(`deliver_notice` 주석).
+//!     ★옛 주장 "notice 는 cap 예외이고 그 유계는 `ledger::MAX_OPEN_REQUESTS` 가 준다" 는 **거짓이었다**
+//!     (round-6)★: `due_timeouts` 는 `notified` 를 즉시 세워 계약 자리를 비우므로, 앞선 통지가 아직 큐에
+//!     파킹된 채로 다음 물결이 계약을 새로 열 수 있다 — 오픈 계약 수는 큐에 쌓인 통지 수를 묶지 못한다.
+//!
+//! ★그룹 fan-out(C4 · spec §4 · ADR-0103 결정 4 · ADR-0104 결정 1)★:
+//!   - **로스터 스냅샷은 발송 순간 딱 한 장**(`handle_group_send` 첫 줄). 그 한 장으로 `@all` 명단 산출·
+//!     멤버 해석·busy 판정을 전부 한다 — 방송 소급 금지(ADR-0103 불변식)의 물리적 근거다. 발송 뒤 등장한
+//!     에이전트는 어떤 경로로도 이 메시지를 받지 못한다(그래서 **죽은/부재 멤버는 파킹하지 않는다**).
+//!     ★이 주장은 2026-07-26 까지 **거짓이었다**(C4 리뷰 fix A)★: 파킹된 방송분이 flush 의 **이름 폴백**을
+//!     타고 ① 같은 이름의 새 AgentId ② 같은 AgentId 의 다음 epoch 로 소급 배달됐다. 이제 그룹 파킹은
+//!     `bound_incarnation`(발송 순간 `(AgentId, epoch)`)을 달고, flush 는 **정확히 그 incarnation** 일 때만
+//!     배달한다(이름 폴백 없음·cross-epoch 없음) — 그래서 위 주장이 참이 됐다.
+//!   - **멤버별 3결말**: idle+큐 빔 → 주입 `delivered` / busy·선행 큐 있음 → 파킹 `pending`(아래 해석) /
+//!     부재·동명 다수·보관함 가득·**주입(write) 실패** → `skipped`(장부에 남기고 배달 안 함).
+//!   - **장부 = 1 msg_id : N 배달기록**(spec §4). 그래서 만료/전이는 반드시 `(msg_id, recipient)` 로 지목한다
+//!     (mailbox `ExpiredParked` 가 큐 키를 함께 실어 주는 이유 — 옛 msg_id 단독 역조회는 제거됐다).
+//!   - **회신은 그룹으로 못 간다**: request 는 입구가 반려하고(spec §4), 그룹 주소로의 `reply_to` 도 입구가
+//!     반려한다(전체회신 없음 — 회신은 항상 발신자 1인에게). 그래서 fan-out 은 항상 **통보**다.
 //!
 //! tauri import 0(daemon crate).
 // ADR-0103
 // ADR-0104
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,8 +88,11 @@ use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::types::{AgentId, AgentStatus, WriteOutcome};
 
 use super::busy::{AlwaysIdleGate, BusyGate};
-use super::ledger::{DeliveryStatus, DropOutcome, DueTimeout, Ledger, OpenOutcome, ReplyOutcome};
-use super::mailbox::{Mailbox, ParkError, ParkKind, ParkedMessage};
+use super::groups::{normalize_group_name, GroupError, GroupSource, Groups};
+use super::ledger::{
+    DeliveryStatus, DropOutcome, DueTimeout, Ledger, OpenOutcome, ReplyOutcome, TransitionError,
+};
+use super::mailbox::{FlightTicket, Mailbox, ParkError, ParkKind, ParkedMessage};
 use crate::control::ingress::{
     new_msg_id, wrap_message, wrap_notice, DeliveryObservation, Entrance, EnvelopeFields,
     EnvelopeFormat,
@@ -92,6 +122,16 @@ pub struct SendMeta {
     pub reply_by: Option<Duration>,
     /// 어느 request 의 회신인가(원본 id) — 봉투 `in-reply-to` + 장부 엄격 매칭 닫기.
     pub reply_to: Option<String>,
+    /// ★그룹 방송 라벨(C4)★ — 이 발송이 그룹 fan-out 의 한 갈래면 그 **정규화된** 그룹 이름(`@coders`).
+    ///   봉투 `to` 속성으로 렌더돼 수신 LLM 에게 "이건 나 혼자에게 온 게 아니라 방송" 임을 알린다(spec §1
+    ///   노출 원칙 — `to` 는 그룹일 때만).
+    ///
+    /// ★왜 `SendMeta` 에 얹나(load-bearing)★: 그룹 파킹분이 **늦게 배달될 때도 같은 봉투**여야 하기 때문이다.
+    ///   봉투는 park 시점이 아니라 주입 시점에 조립되므로(모듈 헤더 "봉투 = 주입 시점 조립"), 속성 재료는
+    ///   `ParkPayload` 에 실려 flush 까지 살아남아야 한다 — 계약 필드(request/reply_to)와 **정확히 같은 이유**라
+    ///   같은 통로(SendMeta → ParkPayload)에 태운다. 별도 축을 만들면 flush 경로가 두 벌이 된다.
+    /// ★단일 발송은 항상 `None`★: `handle_single_send` 는 이 값을 채우지 않는다(debug_assert 로 고정).
+    pub group: Option<String>,
 }
 
 impl SendMeta {
@@ -115,8 +155,9 @@ impl SendMeta {
                 None
             },
             in_reply_to: self.reply_to.clone(),
-            // C4(그룹 방송) 자리 — 단일 수신자 발송은 `to` 속성을 싣지 않는다(방송이 아님, spec §1).
-            to: None,
+            // ★C4★: 그룹 fan-out 만 `to` 를 싣는다(방송임을 알림 — spec §1). 단일 수신자 발송은 `group`
+            //   이 `None` 이라 속성이 통째로 생략된다(= C1~C3 봉투와 byte-identical).
+            to: self.group.clone(),
         }
     }
 }
@@ -154,6 +195,48 @@ pub enum SendReject {
     RequestCapacity,
 }
 
+/// ★그룹 방송의 **멤버별** 결말(C4 · spec §4·§6)★ — 응답 `results[]` 원소 하나에 대응한다.
+///
+/// ★멤버당 정확히 하나(spec §6)★: 응답은 그룹 하나가 아니라 **멤버 N개**의 결과를 낸다 — 발신 LLM 이
+///   "누가 받았고 누가 못 받았나" 를 보고 스스로 조정하게 하는 게 방송 회계의 목적이다(그룹 단위 요약은
+///   그 정보를 뭉갠다).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMemberResult {
+    /// 멤버 **이름**(그룹 이름이 아니다 — spec §6 `results[].to`).
+    pub to: String,
+    /// 이 멤버의 결말.
+    pub status: GroupMemberStatus,
+    /// 자기교정 힌트(pending/skipped 사유). `delivered` 는 `None`.
+    pub hint: Option<String>,
+}
+
+/// 그룹 멤버 1인의 배달 상태(spec §5·§6 어휘 — 새 어휘 발명 금지).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupMemberStatus {
+    /// 실제 주입 완료(ADR-0104 — delivered = 실제 주입 시점).
+    Delivered,
+    /// 파킹됨 — 그 멤버가 턴 진행 중이거나 앞선 큐가 있어 배달 순서를 지켜야 하는 경우(아래 해석 참조).
+    Pending,
+    /// 배달하지 않음 — 부재/죽음(방송 소급 금지)·동명 다수·보관함 가득. 장부에 `skipped` 로 남는다.
+    Skipped,
+}
+
+/// 그룹 발송 **전체** 반려(spec §4·§6 `{status:"error", code, hint}`). 멤버별 결말(`GroupMemberResult`)과
+/// 는 다른 축이다 — 여긴 "이 그룹으로는 아무 것도 보낼 수 없다" 는 판정이라 배달·장부 부작용이 0 이다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupReject {
+    /// 등록 명단에 없는 그룹 이름 → `GROUP_NOT_FOUND`.
+    NotFound { name: String },
+    /// 그룹은 있으나 멤버 0명(또는 `@all` 인데 발신자 말고 산 수신자가 없음) → `GROUP_EMPTY`.
+    Empty { name: String },
+    /// `@` 네임스페이스 규약 위반(`@` 단독·`@@x`·`@a@b`). 상위가 `GROUP_NOT_FOUND` + 규약 hint 로 매핑한다
+    ///   (spec §4 에 없는 새 에러 코드를 만들지 않는다 — "그런 그룹은 없다" 가 발신자에게 맞는 사실이다).
+    InvalidName { name: String },
+    /// 논리 메시지 id 가 장부에 이미 존재(`SendReject::IdCollision` 과 같은 사실·같은 부작용 0 보장).
+    ///   호출자가 새 id 로 1회 재시도한다.
+    IdCollision,
+}
+
 /// 배달 경계 seam(ADR-0012) — MessagingService 가 AgentManager 를 직접 부르지 않고 이 너머로 부른다.
 ///
 /// ★왜 트레잇인가★: 헤드리스 단위 테스트가 claude 바이너리·실 PTY·spawn 파이프 없이 3분기·flush·sweep 을
@@ -164,7 +247,29 @@ pub enum SendReject {
 pub trait DeliveryPort: Send + Sync {
     /// 완성된 봉투 바이트를 수신자에게 주입한다(= write_stdin). 성공 시 `WriteOutcome`(관측 상관용),
     /// 실패 시 에러 문자열(도달 불가·write 실패 — 상위가 파킹으로 처리). 봉투 조립은 상위가 이미 끝냄.
+    ///
+    /// ★이건 **incarnation 무조건** 주입이다★: 그 AgentId 가 지금 가리키는 세션에 그대로 쓴다 — 재시작으로
+    ///   epoch 이 올랐어도 새 incarnation 에 착지한다. 그게 **옳은** 경로는 이름 주소 항목(단일 발송·notice)
+    ///   뿐이다(재스폰 이어받기가 기능 — ADR-0101). 결박 항목(그룹 방송)은 `inject_if_epoch` 를 써야 한다.
     fn inject(&self, to_id: AgentId, bytes: &[u8]) -> Result<WriteOutcome, String>;
+
+    /// ★incarnation 조건부 주입(round-3 fix 1 · 방송 소급 금지의 마지막 관문)★ — `expected_epoch` 가 **지금**
+    /// 그 id 가 가리키는 incarnation 의 epoch 과 같을 때만 쓰고, 다르면 **한 바이트도 쓰지 않고** Err.
+    ///
+    /// ★왜 별도 동사인가(load-bearing)★: "누구에게 보낼지" 를 정하는 로스터 해석과 실제 write 는 **다른
+    ///   시점**이다(그 사이 락도 놓고, 앞 멤버의 blocking write 로 길게 벌어질 수도 있다). 그 창에서
+    ///   수신자가 재시작하면 무조건 주입은 **발송 순간에 존재하지도 않던 incarnation** 에 착지한다 —
+    ///   ADR-0103 불변식("발송 뒤 등장한 에이전트는 이 방송을 받지 못한다") 위반이고, 결박(`bound_incarnation`)
+    ///   으로 대상을 좁혀 놔도 write 자체가 무조건이면 결박은 종잇장이다. 검사를 write 와 같은 단위로
+    ///   내려야 닫히는 창이라, 그 판정을 **주입 경계**에 둔다(운영 구현은 core 의
+    ///   `AgentManager::write_stdin_observed_if_epoch` 로 그대로 내려간다).
+    /// ★계약: 실패 = 부작용 0★ — Err 를 받은 호출자는 "안 보냈다" 로 확정하고 재파킹/skip 을 판정한다.
+    fn inject_if_epoch(
+        &self,
+        to_id: AgentId,
+        expected_epoch: u32,
+        bytes: &[u8],
+    ) -> Result<WriteOutcome, String>;
 
     /// 지금 살아있고(Running|Exiting) **제어 채널로 도달 가능한**(structured 출력) 에이전트 로스터.
     /// (name, id, epoch) 스냅샷 — resolve(이름→id)·flush(등장/epoch 교체 감지)·`@all`(C4) 공용.
@@ -214,15 +319,42 @@ impl ManagerDeliveryPort {
 
 impl DeliveryPort for ManagerDeliveryPort {
     fn inject(&self, to_id: AgentId, bytes: &[u8]) -> Result<WriteOutcome, String> {
-        // manager.rs:818 — 배달-경계 계측판. 완결성 = Ok/Err(WriteOutcome 주석).
+        // manager.rs — 배달-경계 계측판. 완결성 = Ok/Err(WriteOutcome 주석).
         self.manager
             .write_stdin_observed(to_id, bytes)
             .map_err(|e| e.to_string())
     }
 
+    /// 조건부 판정을 **core 에 그대로 위임**한다(여기서 로스터를 다시 뜨지 않는다 — 그러면 검사와 write 가
+    ///   또 갈라져 같은 TOCTOU 가 한 겹 아래에서 재생산된다). core 는 세션 Arc 를 clone 한 뒤 그 Arc 의
+    ///   epoch 과 비교하고 같은 Arc 에 쓰므로 검사↔write 사이에 대상이 바뀔 수 없다(ADR-0006).
+    fn inject_if_epoch(
+        &self,
+        to_id: AgentId,
+        expected_epoch: u32,
+        bytes: &[u8],
+    ) -> Result<WriteOutcome, String> {
+        self.manager
+            .write_stdin_observed_if_epoch(to_id, expected_epoch, bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    /// ★정렬 = (이름, id) 오름차순(C4 리뷰 fix H · load-bearing — `@all` 결정성)★.
+    ///
+    /// ★왜 여기서 정렬하나★: `@all` 명단은 이 로스터를 **verbatim** 쓴다(groups.rs 계약 축 1 — 해석기가
+    ///   정렬하면 안 된다). 그런데 manager 의 세션 저장소는 HashMap 이라 순회 순서가 실행마다 다르다 —
+    ///   그대로 두면 같은 방송이 실행마다 **다른 주입 순서·다른 `results[]` 순서**를 낸다(발신 LLM 이 보는
+    ///   회계가 흔들리고, 재현 불가한 순서 의존 버그를 숨긴다). 단위 테스트는 Vec fake 라 이 비결정성을
+    ///   **못 잡는다** — 그래서 결정성을 운영 구현체 쪽에 박는다.
+    /// ★seam 계약은 그대로★: `DeliveryPort` 는 "산·도달 가능 로스터" 만 약속하고 순서는 구현 자유다. 여기서
+    ///   정렬해도 해석기(`GroupSource`)의 verbatim 계약과 충돌하지 않는다 — 정렬 위치가 **소스 앞단**(로스터
+    ///   생산 지점)이라 해석기는 여전히 받은 그대로 돌려준다.
+    /// ★2차 키가 id 인 이유★: 동명 다수(dup-name)여도 순서가 안정되게 — 이름만으로는 두 항목의 상대 순서가
+    ///   여전히 HashMap 순서에 좌우된다.
     fn live_reachable_agents(&self) -> Vec<LiveAgent> {
         // list_agents 스냅샷 1회 → 산(Running|Exiting) + structured(제어 채널 도달 가능)만.
-        self.manager
+        let mut live: Vec<LiveAgent> = self
+            .manager
             .list_agents()
             .into_iter()
             .filter(|a| {
@@ -234,7 +366,9 @@ impl DeliveryPort for ManagerDeliveryPort {
                 name: a.name,
                 epoch: a.epoch,
             })
-            .collect()
+            .collect();
+        live.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        live
     }
 
     fn canonical_name(&self, id: AgentId) -> Option<String> {
@@ -243,14 +377,40 @@ impl DeliveryPort for ManagerDeliveryPort {
 }
 
 /// ★단일 락 아래 상태(load-bearing — ADR-0006)★: mailbox+ledger+groups 를 한 Mutex 뒤에 함께 둔다.
-///   락 순서 위험 제거 + 극저 메시지율이라 경합 무의미. groups 는 C4 에서 쓰나 컨테이너는 지금 배치한다
-///   (increment-B 순수 구조를 서비스가 소유 — 스코프 밖 로직은 추가 안 함).
+///   락 순서 위험 제거 + 극저 메시지율이라 경합 무의미.
 struct MessagingState {
     mailbox: Mailbox,
     ledger: Ledger,
-    // C4(그룹 발송)가 쓸 자리. C1 은 소유만 하고 만지지 않는다(over-build 금지 — allow dead 로 명시).
-    #[allow(dead_code)]
-    groups: super::groups::Groups,
+    /// 그룹 명단 레지스트리(C4 — 해석 seam `GroupSource`). 방송 fan-out 이 여기서 멤버를 편다.
+    ///   ★관리(생성·증감·삭제) 표면은 D 스코프★ — 지금은 해석만 배선돼 있다(테스트는 직접 채운다).
+    groups: Groups,
+    /// ★유예된 flush 재-도어벨 장부(round-7 · round-8 보정 · load-bearing)★ — 키 = park 큐 이름,
+    /// 값 = 그 큐에 대해 **물러난 모든 도어벨 id**(중복 제거된 집합).
+    ///
+    /// `flush_for` 는 같은 수신자에 대해 **겹쳐 돌지 않는다**(앞 배치가 락 밖에서 주입 중이면 뒤 배치가
+    /// 그 잔여를 앞지른다 — 순서 역전이 한 층 아래에서 재발). 그래서 뒤 flush 는 드레인 없이 물러나는데,
+    /// 물러나기만 하면 그 깨우기가 **증발한다**(lost wakeup — C1 finding 3 과 같은 실패 모드). 여기에 사실을
+    /// 남겨 두면 **영수증을 쥔 쪽**(진행 중인 flush)이 정산을 마치고 나가면서 도어벨을 다시 눌러 준다.
+    ///
+    /// ★왜 id 하나가 아니라 **집합**인가(round-8 high — 옛 단일 슬롯이 틀렸던 지점)★: 한 이름 큐는 여러
+    /// id 로 열린다 — 같은 이름의 산 incarnation, 개명 전 이름 큐를 힌트로 여는 옛 id, 죽어 가는
+    /// incarnation 의 늦은 idle 통지 등(`flush_for_agent` 가 이름 큐 + 힌트 큐를 함께 여는 이유와 같은
+    /// 사정). 단일 슬롯은 **last-writer-wins** 라, 산 id 가 먼저 물러나고 그 뒤 이미 reap 된 stale id 가
+    /// 물러나면 산 id 의 깨우기가 덮여 사라진다. 그러면 정산 후 되울린 건 stale id 뿐이고,
+    /// `flush_for_agent` 는 `canonical_name == None` 에서 조기 반환하므로 **아무도 드레인하지 않는다** —
+    /// 산 수신자가 멀쩡히 있는데도 admitted 메일이 다음 사건이나 TTL 까지 묶인다. 종료성만 지켜지고
+    /// 깨우기의 **유용성**이 깨진 셈이라, 요청된 깨우기를 하나도 잃지 않도록 전부 보관한다.
+    /// ★왜 "이름만 저장하고 정산 시점에 로스터로 다시 푼다" 가 아닌가★: 그 해석은 **이름으로 풀리는 id**
+    /// 만 되살린다 — 힌트 큐를 열려던 id(개명·동명 다수)는 이름 해석으로 돌아오지 않아 같은 유실이 남는다.
+    /// 게다가 정산 경로에 port 호출(로스터)이 새로 끼어든다. 요청된 id 를 그대로 보관하는 쪽이 더 작고 더
+    /// 정확하다.
+    /// ★유계★: 한 배치가 도는 동안 실제로 경합한 **서로 다른** id 수만큼이라(중복은 넣지 않는다) 사람
+    /// 대화 수준에서 0~2개다. 선형 `contains` 로 충분하다(HashSet 이 필요할 규모가 아니다).
+    /// ★왜 "큐가 비지 않았으면 무조건 재-도어벨" 이 아닌가★: 그러면 배달 불가(busy·타깃 없음)로 파킹이
+    /// 유지되는 정상 상태에서 flush 가 자기 자신을 무한히 재기동한다. 실제 유예가 있었을 때만, 유예한
+    /// id 마다 정확히 1회 되울린다(집합은 유한하고 정산 때 통째로 꺼내므로 종료성은 그대로다).
+    // ADR-0107 (flush 중첩 유예 마커 — id 집합, 전원 재타)
+    deferred_flush: HashMap<String, Vec<AgentId>>,
 }
 
 /// MessagingService — 순수 구조를 발송 파이프라인에 엮는 데몬측 오케스트레이터(C1).
@@ -290,7 +450,8 @@ impl MessagingService {
             state: Mutex::new(MessagingState {
                 mailbox: Mailbox::new(),
                 ledger: Ledger::new(),
-                groups: super::groups::Groups::new(),
+                groups: Groups::new(),
+                deferred_flush: HashMap::new(),
             }),
             port,
             registry,
@@ -383,6 +544,13 @@ impl MessagingService {
             meta.reply_by_raw.is_some(),
             "reply_by 는 파싱값과 표기 원본을 쌍으로 나른다(SendMeta)"
         );
+        // ★단일 발송은 그룹 라벨을 달지 않는다(C4)★: `to` 속성은 "이건 방송" 이라는 신호라(spec §1 노출
+        //   원칙) 1:1 발송에 달리면 수신 LLM 이 자기 앞으로 온 메시지를 방송으로 오독한다. 그룹 갈래는
+        //   `handle_group_send` 가 전담하므로 여기 오는 meta 엔 group 이 없어야 한다(배선 실수 방지).
+        debug_assert!(
+            meta.group.is_none(),
+            "그룹 라벨은 handle_group_send 전용 — 단일 발송 봉투에 to 속성이 붙으면 안 된다(spec §1)"
+        );
 
         // 1) 로스터 조회(락 밖 — port 호출) → 이름/AgentId 해석.
         let roster = self.port.live_reachable_agents();
@@ -400,6 +568,11 @@ impl MessagingService {
             Some(t) => t.name.clone(),
             None => self.canonical_park_key(to),
         };
+        // ★압력 회수 기준 = 이 park 키를 지금 달고 있는 산 incarnation 전부(F2)★ — 같은 로스터 스냅샷에서
+        //   뽑는다. 동명 다수여서 `resolved` 가 None 인 경우에도 목록은 채워지는데, 그게 정확히 F2 가 지키는
+        //   상태다(그 동명들 앞 결박 메일은 살아 있으므로 회수 대상이 아니다). 하나도 없으면 빈 목록 =
+        //   "모른다" 로 저장소가 회수를 접는다(mailbox `is_stale_bound`).
+        let live_here = live_incarnations_named(&roster, &recipient_key);
 
         // 2) ★id 예약 + C3 계약 예약(발송 기준 시계)★ — 배달 시도 전, 부작용 0 지점에서 **한 락 구간**.
         //
@@ -419,6 +592,12 @@ impl MessagingService {
         //     · 비용 = 예약 생명주기(커밋/해제/누수 회수)가 mailbox·flush·반려 경로 전부와 락으로 얽힌다 —
         //       drop_request 급 회수 경로를 하나 더 만드는 셈이고, 그 배선 버그가 위 확률보다 훨씬 크다.
         //   그래서 **검사만** 하고 예약은 두지 않는다. 걸리면 호출자(ingress)가 새 id 로 1회 재시도한다.
+        // ★그룹 fan-out(C4)도 **같은 결정을 그대로 따른다**(리뷰 항목 K — 명시적 declined)★:
+        //   `handle_group_send` 의 id 예약도 검사만 하고 선점하지 않는다. 방송은 한 msg_id 아래 레코드가
+        //   N개라 앨리어싱 피해가 N배로 보일 수 있지만, ① 확률은 여전히 같은 2.8×10^12 공간의 마이크로초
+        //   창이고 ② 레코드 키가 `(msg_id, to)` 라 **수신자가 다르면 서로를 덮지 않는다**(뭉개지는 건 우연히
+        //   같은 수신자를 가진 레코드 하나뿐) ③ 예약 생명주기 배선이 단일 발송보다 더 복잡해진다(멤버별
+        //   부분 성공의 회수 규칙이 추가로 필요). 단일 발송의 선례를 갈라 두 규칙을 만들 이유가 없어 거부한다.
         let now = Instant::now();
         let reservation = {
             let mut st = self.state.lock().expect("messaging state poisoned");
@@ -472,6 +651,7 @@ impl MessagingService {
             meta,
             resolved,
             &recipient_key,
+            &live_here,
         );
 
         match &result {
@@ -545,10 +725,504 @@ impl MessagingService {
         }
     }
 
+    /// ★그룹 방송 fan-out(C4 · spec §4 · ADR-0103 결정 4)★ — 그룹 주소 하나를 **발송 순간 스냅샷**으로 펼쳐
+    ///   멤버별로 개별 배달한다. 입구(handle_send)의 `@` 갈래가 부르는 유일한 진입점이다.
+    ///
+    ///   - `group`: 발신자가 지목한 그룹 주소(`@all`·`@coders`). 정규화는 여기서 한 번 한다(seam 함수).
+    ///   - `meta`: 입구가 검증한 발송 메타 — **계약 필드가 비어 있음을 확인하는 용도**(아래 guard). 봉투용
+    ///     메타는 이 함수가 그룹 라벨만 담아 새로 만든다(방송은 항상 통보 — 모듈 헤더 그룹 절).
+    ///   - 반환: 멤버별 결과 N개(spec §6 `results[]`) 또는 그룹 전체 반려(`GroupReject`, 부작용 0).
+    ///
+    /// ★로스터 스냅샷은 딱 한 장(load-bearing — 방송 소급 금지, ADR-0103 불변식)★: 첫 줄에서 뜬 스냅샷
+    ///   하나로 ① `@all` 명단 산출 ② 멤버 이름 해석 ③ busy 판정을 **전부** 한다. 도중에 다시 뜨면 한 방송
+    ///   안에서 멤버마다 다른 세계를 보게 되고("발송 순간" 이 흐려진다), 발송 뒤 등장한 에이전트가 슬쩍
+    ///   섞일 여지가 생긴다. 그 반대급부로 **부재 멤버는 파킹하지 않는다** — 파킹은 "이름이 나중에 등장하면
+    ///   배달" 이라 정확히 소급 배달이기 때문이다(단일 발송 전용 기능, spec §5).
+    /// ★**파킹된 멤버 몫도 소급하지 않는다**(리뷰 fix A · load-bearing)★: 부재 멤버를 파킹하지 않는 것만으론
+    ///   부족하다 — busy/FIFO 로 **파킹된** 몫은 큐에 남는데, 그 큐는 이름-키이고 flush 는 힌트가 죽으면
+    ///   이름으로 폴백하므로(모듈 헤더) 그 사이 같은 이름의 새 에이전트가 뜨거나 같은 에이전트가 재시작
+    ///   (epoch bump)하면 **그 메시지가 소급 배달**된다(2026-07-26 실측 확인). 그래서 그룹 파킹은
+    ///   `bound_incarnation = (target.id, target.epoch)` 을 달고 나가고, flush 는 그 쌍이 지금 로스터에
+    ///   그대로 있을 때만 배달한다. 결박 대상이 사라지면 그 항목은 파킹된 채 TTL 로 `expired` 가 된다
+    ///   (spec §5 "파킹의 운명" 어휘 그대로 — 새 상태 발명 금지).
+    /// ★`@all` 명단 순서 = **정렬된 로스터**(리뷰 fix H)★: 운영 `ManagerDeliveryPort` 가 로스터를 (이름, id)
+    ///   오름차순으로 낸다 — 그래서 `@all` 의 주입 순서와 `results[]` 순서가 실행마다 같다(결정적). 등록
+    ///   그룹은 등록 순서가 정본이다(레지스트리가 순서를 보존).
+    ///
+    /// ★`@all` 은 발신자를 제외한다(정책 해석 — 보고 대상)★: 스냅샷 이름을 verbatim 넘기되 **발신자 자신의
+    ///   incarnation(id 기준)만 뺀다**. 근거: 자기 방송을 자기가 받는 건 정보가 0 인 잡음이고(발신 LLM 은
+    ///   방금 자기가 쓴 글을 다시 읽는다), 턴 중이면 자기 큐에 파킹돼 다음 턴을 자기 메아리로 시작한다.
+    ///   ★등록 그룹은 제외하지 않는다★ — 명단에 자기를 넣은 건 명시적 의사표시라 그대로 배달한다(`@all` 은
+    ///   "관리 불요 내장" 이라 그 의사표시 자리가 없다는 게 차이다). id 로 빼는 이유: 이름은 겹칠 수 있어
+    ///   동명 타인까지 함께 빠지면 안 된다(그 타인은 dup-name 규칙으로 따로 판정된다).
+    ///
+    /// ★멤버별 결말(spec §4·§5)★:
+    ///   - **idle + 큐 빔** → 즉시 주입 `delivered`(실제 주입 시점 — ADR-0104).
+    ///   - **busy(턴 중)** → 파킹 `pending`(정책 해석 — 보고 대상). "방송 소급 금지" 는 **발송 순간 살아있지
+    ///     않던** 수신자에게 배달하지 말라는 규칙이고, busy 멤버는 그 순간 **살아 있다** — idle 게이트는
+    ///     멤버십이 아니라 **배달 타이밍**의 문제다(ADR-0104 결정 3: "delivered = 실제 주입 시점"). 여기서
+    ///     즉시 주입하면 idle 게이트를 방송만 우회하는 구멍이 되고, 반대로 skip 하면 산 멤버가 턴 중이라는
+    ///     이유로 방송을 못 받는다(정보 유실). 그래서 파킹 = spec §5 분기 1 과 **같은 취급**이다.
+    ///   - **앞선 파킹이 있음** → 파킹 `pending`(FIFO — 방송이 그 멤버의 옛 메일을 앞지르지 않는다).
+    ///   - **부재/죽음** → `skipped`(파킹 없음 — 위 소급 금지).
+    ///   - **동명 다수** → `skipped`(정책 해석 — 보고 대상). 이름이 유일하게 안 풀리면 방송이 누구를 고를
+    ///     근거가 없다. 단일 발송의 `RECIPIENT_AMBIGUOUS` 반려와 같은 판정을 **멤버 단위**로 적용한 것이고
+    ///     (`unique_reachable_in` 공유), 방송 전체를 반려하지 않는 이유는 나머지 멤버의 배달을 볼모로 잡지
+    ///     않기 위해서다.
+    ///   - **그 멤버의 보관함이 cap** → `skipped`(정책 해석 — 보고 대상). 단일 발송은 `MAILBOX_FULL` 반려지만
+    ///     방송에서 그러면 **한 멤버의 가득 찬 메일함이 방송 전체를 막는다**. 방송은 멤버별 best-effort 회계라
+    ///     그 멤버만 접고 나머지는 보낸다(발신자는 results 에서 그 사실을 본다 — 조용한 유실 아님).
+    ///   - **주입(write) 실패** → `skipped`(리뷰 fix B — 단일 발송과 갈리는 지점). 단일 발송은 실패분을
+    ///     파킹하지만(spec §5 분기 3 "unreachable → 파킹"), 방송에서 write 실패는 **바로 그 순간 그 멤버가
+    ///     도달 불가**라는 뜻이라 spec §4 의 "발송 순간 살아있지 않으면 배달하지 않는다" 갈래와 같은 사실이다
+    ///     — 여기서 파킹하면 그 멤버가 다음에 등장할 때 배달돼 **방송 소급 금지를 정면으로 위반**한다.
+    ///     그래서 장부에 `skipped` 로 남기고 hint 에 write 오류를 실어 발신자가 재발송을 판단하게 한다.
+    ///
+    /// ★장부 = 1 msg_id : N 배달기록(spec §4)★: 멤버마다 레코드 하나(`(msg_id, member)` 키). 전이(delivered/
+    ///   expired)는 반드시 그 쌍으로 지목한다 — 그래서 sweep 이 mailbox 로부터 큐 키를 함께 받는다.
+    ///
+    /// ★락 규율(모듈 헤더)★: 로스터 조회(port)는 락 밖 → **한 락 구간**에서 해석·판정·파킹·skip 장부화를
+    ///   끝내고 → 락을 놓은 뒤 도어벨·주입(port)을 한다. 게이트(`BusyGate`)를 락 안에서 부르는 건 계약상
+    ///   안전하다(flush_for 와 같은 근거). 판정과 파킹을 한 락에 묶는 이유도 flush_for 와 같다 — 그 사이에
+    ///   큐가 "비어 보이는 창" 이 생기면 동시 직발송이 FIFO 를 앞지른다.
+    ///
+    /// ★주입 = 멤버 수만큼 순차 직접 write(수용된 비용 — 단, 호출 스레드는 반드시 blocking-safe 해야 한다)★:
+    ///   각 inject 는 자식 stdin 의 blocking write 이고 상한은 멤버 수(사람이 만든 그룹 = 사람 규모)다.
+    ///   ★"1:1 발송 N번과 같은 일" 이 **아니다**(리뷰 fix D — 옛 주석 수정)★: 1:1 발송 N번은 요청 N개가
+    ///   각자 스레드를 쓰지만, 방송은 **요청 하나**가 N번의 blocking write 를 직렬로 진다 — 한 멤버의 막힌
+    ///   파이프가 나머지 멤버의 배달과 그 워커 스레드를 통째로 head-of-line 블로킹한다. 그래서 입구(MCP 툴·
+    ///   HTTP 라우트)가 `handle_send` 전체를 `spawn_blocking` 으로 감싼다(mcp_server.rs). 여기서 별도 워커로
+    ///   넘기지 않는 이유는 그대로다: 그러면 `delivered` 를 응답에 실을 수 없어(주입이 아직 안 일어남)
+    ///   spec §6 의 멤버별 회계가 전부 `pending` 으로 뭉개진다. 파킹분만 도어벨로 넘긴다.
+    // ADR-0103 (결정 4 — 그룹 스냅샷 fan-out)
+    // ADR-0104 (결정 1 — GroupSource seam)
+    pub fn handle_group_send(
+        &self,
+        msg_id: &str,
+        from: BoundIdentity,
+        sender_name: &str,
+        group: &str,
+        body: &str,
+        entrance: Entrance,
+        meta: &SendMeta,
+    ) -> Result<Vec<GroupMemberResult>, GroupReject> {
+        // ★계약 필드 금지의 유일한 검증자는 ingress 다(리뷰 fix I — 단일 발송 guard 와 대칭)★: 그룹
+        //   request 는 완료 판정 시맨틱 미정으로 v1 영구 금지고, 그룹 주소로의 회신은 reply-all 이라 금지다
+        //   (spec §4). 이 함수는 pub 이라 다른 조립(스모크 bin·미래 입구)이 직접 부를 수 있는데, 계약 필드가
+        //   실려 들어오면 방송이 N개의 계약을 열거나 남의 계약을 닫는 뒤엉킨 상태가 된다. 여기서 반려 문구를
+        //   **복제하지 않는 이유**는 코드/문구가 입구마다 갈리면 안 되기 때문이고(entrance-agnostic), 대신
+        //   디버그 빌드에서 배선 실수를 즉시 터뜨린다.
+        debug_assert!(
+            !meta.request && meta.reply_to.is_none(),
+            "ingress가 유일 검증자 — 그룹 방송에 계약 필드(request/reply_to) 금지(spec §4)"
+        );
+        // 0) 이름 정규화 — **seam 함수**(groups::normalize_group_name)를 쓴다. 해석기가 쓰는 것과 같은
+        //    함수라 봉투 `to` 라벨이 실제 해석 대상과 어긋나지 않고(라벨 단일 출처), v1 레지스트리 타입에
+        //    파이프라인을 묶지 않는다(리뷰 fix F — 미래 소스가 다른 이름 문법을 가져도 이 지점은 그대로).
+        let group_label = match normalize_group_name(group) {
+            Ok(n) => n,
+            Err(_) => {
+                return Err(GroupReject::InvalidName {
+                    name: group.to_string(),
+                })
+            }
+        };
+
+        // 1) ★로스터 스냅샷 1회(락 밖 — port 호출)★. 이 한 장이 이 방송의 "발송 순간" 이다.
+        let roster = self.port.live_reachable_agents();
+        // `@all` 이 볼 live 명단 = 스냅샷 이름 verbatim − 발신자 자신(위 doc "발신자 제외").
+        let live_names: Vec<String> = roster
+            .iter()
+            .filter(|a| a.id != from.agent_id)
+            .map(|a| a.name.clone())
+            .collect();
+
+        // 2) 해석 + id 예약 — 부작용 0 지점에서 한 락 구간(순수 조작). 예약 검사의 근거·남는 창은
+        //    `handle_single_send` 의 예약 지점 주석이 정본이다(중복 서술 금지).
+        let resolved = {
+            let st = self.state.lock().expect("messaging state poisoned");
+            if st.ledger.msg_id_in_use(msg_id) {
+                Err(GroupReject::IdCollision)
+            } else {
+                st.groups
+                    .resolve(&group_label, &live_names)
+                    .map_err(|e| match e {
+                        GroupError::NotFound { name } => GroupReject::NotFound { name },
+                        GroupError::Empty { name } => GroupReject::Empty { name },
+                        GroupError::InvalidName { name } => GroupReject::InvalidName { name },
+                        // resolve 는 Builtin 을 내지 않는다(CRUD 전용 에러) — 도달 불가 경로지만 조용히
+                        //   삼키지 않고 발신자에게 맞는 사실("그런 그룹 없음")로 접는다.
+                        GroupError::Builtin => GroupReject::NotFound {
+                            name: group_label.clone(),
+                        },
+                    })
+            }
+        };
+        // ★락 밖 로깅(모듈 헤더 규율)★.
+        let members = match resolved {
+            Ok(m) => dedup_members(m),
+            Err(reject) => {
+                tracing::debug!(
+                    msg_id = %msg_id,
+                    group = %group_label,
+                    reject = ?reject,
+                    "그룹 발송 반려 — 배달·장부 부작용 없음(spec §4)"
+                );
+                return Err(reject);
+            }
+        };
+
+        // 그룹 발송은 항상 **통보**다 — request 도 reply_to 도 입구가 이미 반려한다(모듈 헤더 그룹 절 +
+        //   위 debug_assert). 봉투에는 `to="@그룹"` 만 붙는다(노출 원칙 — spec §1). 인자 `meta` 를 그대로
+        //   쓰지 않고 **새로 만드는** 이유: 방송 봉투에 실릴 속성은 그룹 라벨 하나뿐이라는 걸 타입 수준이
+        //   아니라 이 한 줄로 못 박는다(입구가 실수로 계약 필드를 실어도 봉투로 새지 않는다).
+        let fanout_meta = SendMeta {
+            group: Some(group_label.clone()),
+            ..SendMeta::default()
+        };
+
+        // 3) ★멤버별 판정 + 파킹/skip 장부화 — 한 락 구간(주입은 락 밖)★.
+        let now = Instant::now();
+        let mut plans: Vec<(String, MemberPlan)> = Vec::with_capacity(members.len());
+        // 멤버 파킹이 남긴 락 밖 로깅 거리(압력 회수 — round-6). 락 구간 뒤에 찍는다.
+        let mut park_effects = ParkSideEffects::default();
+        {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            for member in &members {
+                let plan = match unique_reachable_in(&roster, member) {
+                    // 부재/죽음 · 동명 다수 → skipped(파킹 없음 — 방송 소급 금지). 둘을 hint 로 가른다:
+                    //   발신자가 할 수 있는 교정이 서로 다르다(스폰/대기 vs 재명명·1:1 재지목).
+                    None => {
+                        let live_count = roster.iter().filter(|a| &a.name == member).count();
+                        let hint = if live_count == 0 {
+                            format!(
+                                "'{member}' was not live and reachable at send time — broadcasts are never parked for absent members (send it 1:1 if it should wait for them)."
+                            )
+                        } else {
+                            format!(
+                                "'{member}' matches {live_count} live agents — a broadcast cannot choose between them; give them distinct names, or send it 1:1 using the exact agent id."
+                            )
+                        };
+                        st.ledger.record(
+                            msg_id,
+                            sender_name,
+                            member,
+                            body,
+                            DeliveryStatus::Skipped,
+                            now,
+                        );
+                        MemberPlan::Skipped { hint }
+                    }
+                    // 산 멤버 — "지금 주입해도 되나" 판정(안 되면 그 자리에서 파킹까지). 판정 규칙은
+                    //   `plan_live_member` 한 곳에만 있다(주입 직전 재확인과 **같은 함수** — fix C 참조).
+                    Some(target) => {
+                        // ★회수 기준은 **이 이름의 산 incarnation 전부**(F2)★ — 지금 이 멤버는 유일 해석이라
+                        //   보통 1개지만, 목록으로 넘겨야 이 큐에 섞인 **다른 동명 앞 산 메일**이 잔해로
+                        //   몰리지 않는다(그 이름이 다시 유일해지기 전에 쌓인 몫이 있을 수 있다).
+                        let live_here = live_incarnations_named(&roster, member);
+                        self.plan_live_member(
+                            &mut st,
+                            ParkRequest {
+                                msg_id,
+                                sender_name,
+                                from,
+                                entrance,
+                                recipient: member,
+                                body,
+                                // 해석된 산 멤버라 id 힌트를 남긴다(동명 충돌 중에도 그 incarnation 으로
+                                //   배달될 길 — mailbox `hinted_id` 주석).
+                                hinted_id: Some(target.id),
+                                // ★방송 소급 금지의 물리적 강제(fix A)★ — 이 파킹은 **발송 순간의 그
+                                //   incarnation** 에게만 배달된다(mailbox `bound_incarnation` 주석).
+                                bound_incarnation: Some((target.id, target.epoch)),
+                                live_incarnations: &live_here,
+                                kind: ParkKind::Message,
+                                meta: &fanout_meta,
+                            },
+                            &target,
+                            now,
+                            &mut park_effects,
+                        )
+                    }
+                };
+                plans.push((member.clone(), plan));
+            }
+        }
+        // ★락 밖 로깅(모듈 헤더 규율)★ — fan-out 전체의 회수 사실을 한 번에 찍는다. 멤버마다 큐가 달라
+        //   대표 키로 그룹 라벨을 싣는다(항목별 recipient 는 evict 로그가 따로 들고 있다).
+        park_effects.log(&group_label);
+
+        // 4) 도어벨(★락 밖★) — 파킹된 멤버의 큐를 flush 레인이 열게 한다. busy 면 소비 측 게이트가 스킵해
+        //    파킹이 유지되고(판정은 소비 측 한 곳 — flush_for 주석), idle 이면 그 배치가 순서대로 나간다.
+        //
+        // ★두 갈래의 시점이 다르다(round-3 fix 3/5 · load-bearing)★:
+        //   - **배선된 도어벨(운영)** = 여기서 **즉시** enqueue 한다. 논블록 채널 send 뿐이라 재진입도
+        //     회계 오염도 없고, 미루면 멤버 k 의 깨우기가 **남은 전 멤버의 blocking write 뒤로** 밀린다
+        //     (지연 손해). debug 빌드에서 주입 루프가 패닉하면 미뤄 둔 도어벨은 통째로 사라지기도 한다.
+        //   - **미배선(인라인 폴백 — 실험 bin·단위 테스트)** = `flush_for_agent` 를 **이 스레드에서 그대로**
+        //     실행한다. 그걸 여기서 부르면 방송 한가운데서 flush 에 재진입해, 아직 `results[]` 를 조립하지도
+        //     않았는데 큐에 있던 그 방송분이 `delivered` 로 전이된다(응답은 `pending` 이라 회계가 어긋난다).
+        //     그래서 인라인 갈래만 모아 두고 **주입 루프 종료 + 응답 확정 뒤**에 돌린다(아래 6단계).
+        let mut deferred_inline: Vec<AgentId> = Vec::new();
+        for (_, plan) in &plans {
+            if let MemberPlan::Parked { doorbell, .. } = plan {
+                self.ring_or_defer(*doorbell, &mut deferred_inline);
+            }
+        }
+
+        // 5) 주입(★락 밖★) — 봉투는 **한 번만** 조립해 전 멤버가 같은 텍스트를 받는다(한 방송 = 한 봉투).
+        let wrapped = self.wrap_now(
+            sender_name,
+            msg_id,
+            body,
+            &fanout_meta.envelope_fields(msg_id),
+        );
+        let mut results: Vec<GroupMemberResult> = Vec::with_capacity(plans.len());
+        for (member, plan) in plans {
+            let result = match plan {
+                MemberPlan::Skipped { hint } => GroupMemberResult {
+                    to: member,
+                    status: GroupMemberStatus::Skipped,
+                    hint: Some(hint),
+                },
+                MemberPlan::Parked { hint, .. } => GroupMemberResult {
+                    to: member,
+                    status: GroupMemberStatus::Pending,
+                    hint: Some(hint),
+                },
+                MemberPlan::Deliver(target) => {
+                    // ★멤버별 주입 직전 재확인(리뷰 fix C · load-bearing)★: 3단계의 `Deliver` 판정은 **한
+                    //   락 구간**에서 전 멤버를 한꺼번에 정했는데, 실제 주입은 멤버 수만큼의 **순차 blocking
+                    //   write** 다 — 앞 멤버에 쓰는 동안(파이프가 막히면 길게) 뒤 멤버의 세계가 바뀔 수 있다:
+                    //     ① 그 사이 그 멤버가 **새 턴을 시작**했다 → 그대로 밀면 idle 게이트를 방송만 우회
+                    //     ② 그 사이 그 멤버 앞으로 **다른 발송이 파킹**됐다 → 그대로 밀면 방송이 큐를 앞지른다
+                    //   둘 다 단일 발송이 이미 3-b 에서 막는 사고라, 같은 판정 함수를 주입 **직전**에 한 번 더
+                    //   태워 parity 를 맞춘다. 재확인이 뒤집히면 여기서 파킹(+결박)하고 `pending` 으로 보고한다.
+                    // ★남는 창은 좁힐 뿐 없앨 수 없다★: 이 확인과 inject 사이(마이크로초)는 여전히 열려 있다 —
+                    //   inject 를 락 안에서 하지 않는 한(모듈 헤더 절대 규율 위반) 구조적으로 닫히지 않는다.
+                    let mut late_effects = ParkSideEffects::default();
+                    // 회수 기준(F2) — 3단계와 **같은 스냅샷**에서 뽑는다("스냅샷 한 장" 계약).
+                    let live_here = live_incarnations_named(&roster, &member);
+                    let late = {
+                        let mut st = self.state.lock().expect("messaging state poisoned");
+                        self.plan_live_member(
+                            &mut st,
+                            ParkRequest {
+                                msg_id,
+                                sender_name,
+                                from,
+                                entrance,
+                                recipient: &member,
+                                body,
+                                hinted_id: Some(target.id),
+                                bound_incarnation: Some((target.id, target.epoch)),
+                                live_incarnations: &live_here,
+                                kind: ParkKind::Message,
+                                meta: &fanout_meta,
+                            },
+                            &target,
+                            Instant::now(),
+                            &mut late_effects,
+                        )
+                    };
+                    late_effects.log(&member); // 락 밖 로깅(모듈 헤더 규율).
+                    match late {
+                        MemberPlan::Parked { hint, doorbell } => {
+                            // 4단계와 **같은 분업**: 배선돼 있으면 즉시 enqueue, 인라인 폴백만 미룬다.
+                            self.ring_or_defer(doorbell, &mut deferred_inline);
+                            GroupMemberResult {
+                                to: member,
+                                status: GroupMemberStatus::Pending,
+                                hint: Some(hint),
+                            }
+                        }
+                        MemberPlan::Skipped { hint } => GroupMemberResult {
+                            to: member,
+                            status: GroupMemberStatus::Skipped,
+                            hint: Some(hint),
+                        },
+                        MemberPlan::Deliver(target) => {
+                            // ★결박 주입(round-3 fix 1 · load-bearing)★: 재확인조차 **발송 순간 스냅샷의**
+                            //   target 을 쓰므로(로스터를 다시 뜨지 않는다 — "스냅샷 한 장" 계약), 재확인과
+                            //   이 write 사이에 그 멤버가 재시작하면 무조건 주입은 새 incarnation 에 착지한다.
+                            //   그 창은 검사로 못 닫는다(검사와 write 가 별개 연산) — 그래서 판정을 write 와
+                            //   같은 단위로 내린다(`inject_if_epoch`). 실패하면 아래 Err 갈래 = 죽은 멤버와
+                            //   같은 결말(`skipped`)이고, 그게 정확히 맞다: 발송 순간의 그 수신자는 이제 없다.
+                            match self.port.inject_if_epoch(
+                                target.id,
+                                target.epoch,
+                                wrapped.as_bytes(),
+                            ) {
+                                Ok(outcome) => {
+                                    {
+                                        let mut st =
+                                            self.state.lock().expect("messaging state poisoned");
+                                        // pending 없이 곧장 delivered(즉시 주입 — 단일 발송과 동일 규칙).
+                                        st.ledger.record(
+                                            msg_id,
+                                            sender_name,
+                                            &member,
+                                            body,
+                                            DeliveryStatus::Delivered,
+                                            Instant::now(),
+                                        );
+                                    }
+                                    self.observe_success(
+                                        msg_id, &target, from, entrance, &wrapped, &outcome,
+                                    );
+                                    GroupMemberResult {
+                                        to: member,
+                                        status: GroupMemberStatus::Delivered,
+                                        hint: None,
+                                    }
+                                }
+                                Err(e) => {
+                                    // ★write 실패 = 그 순간 도달 불가 = 죽은 멤버와 **같은 결말**(리뷰 fix B)★:
+                                    //   spec §4 가 "발송 순간 살아있지 않은 멤버에겐 배달하지 않는다" 이므로
+                                    //   여기서 파킹하면 그 멤버의 **다음 등장에 배달**돼 방송 소급 금지를 정면
+                                    //   위반한다(옛 구현이 그랬다 — 파킹 + "retried on next appearance" hint).
+                                    //   그래서 장부에 `skipped` 로 남기고 write 오류를 hint 에 실어 발신자가
+                                    //   재발송 여부를 정하게 한다(조용한 유실 아님 — results 에 그대로 보인다).
+                                    // ★epoch 불일치(round-3 fix 1)도 **여기로 온다**★: "그 사이 재시작해 발송
+                                    //   순간의 그 incarnation 이 사라졌다" 는 위와 정확히 같은 사실이라 결말도
+                                    //   같아야 한다. 원인은 `e`(= "epoch mismatch: …")가 hint 로 실어 나른다 —
+                                    //   결말이 같으니 분기를 늘리지 않고 사유만 구분해 보여 준다.
+                                    self.observe_failure(
+                                        msg_id, &target, from, entrance, &wrapped, &e,
+                                    );
+                                    {
+                                        let mut st =
+                                            self.state.lock().expect("messaging state poisoned");
+                                        st.ledger.record(
+                                            msg_id,
+                                            sender_name,
+                                            &member,
+                                            body,
+                                            DeliveryStatus::Skipped,
+                                            Instant::now(),
+                                        );
+                                    }
+                                    GroupMemberResult {
+                                        hint: Some(format!(
+                                            "Delivery to '{member}' failed ({e}) — skipped for this broadcast (broadcasts are never re-delivered later; send it 1:1 if it must reach that agent)."
+                                        )),
+                                        to: member,
+                                        status: GroupMemberStatus::Skipped,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            results.push(result);
+        }
+        // 6) ★인라인 폴백 flush — 주입 루프가 끝나고 `results` 가 확정된 **뒤**(round-3 fix 3/5)★.
+        //    배선된 도어벨은 이미 4단계·재확인 시점에 즉시 눌렀다(위 주석의 분업). 여기 남은 건 도어벨이
+        //    없는 조립뿐이고, 그 갈래는 flush 를 이 스레드에서 동기 실행하므로 방송 한가운데서 부르면
+        //    ① flush 재진입 ② 응답(`pending`)과 장부(`delivered`)의 시점 불일치가 난다. 응답을 다 만든
+        //    뒤로 미루면 그 두 사고가 구조적으로 불가능해진다(응답은 이미 값으로 굳었다).
+        //    중복 id 는 없다 — 한 멤버는 계획 파킹이거나 재확인 파킹이지 둘 다일 수 없다.
+        for id in deferred_inline {
+            self.flush_for_agent(id);
+        }
+        Ok(results)
+    }
+
+    /// ★도어벨 발화 시점 분업(round-3 fix 5)★ — 배선돼 있으면 **즉시** enqueue(논블록), 미배선이면
+    ///   `deferred` 에 담아 호출자가 **응답 확정 후** 인라인 실행하게 한다.
+    ///
+    /// ★왜 갈라야 하나★: 두 갈래는 비용 구조가 정반대다. 배선 갈래는 채널 send 라 즉시 부르는 게 항상
+    ///   옳고(미루면 그 멤버의 깨우기가 남은 blocking write 뒤로 밀리고, 패닉하면 통째로 유실된다),
+    ///   미배선 갈래는 **이 스레드에서 배치 write 를 그대로 실행**하므로 주입 루프 한가운데서 부르면
+    ///   flush 재진입 + 회계 skew(응답 `pending` vs 장부 `delivered`)를 만든다. 그래서 "즉시 vs 나중" 을
+    ///   도어벨 배선 유무로 가른다. 근거 전문은 `handle_group_send` 4단계 주석.
+    /// ★락 밖 호출★: `FlushTrigger`/인라인 flush 모두 messaging 락 밖에서만 부른다(모듈 헤더 규율).
+    fn ring_or_defer(&self, id: AgentId, deferred: &mut Vec<AgentId>) {
+        match &self.trigger {
+            Some(t) => t.request_flush(id),
+            None => deferred.push(id),
+        }
+    }
+
+    /// ★산 멤버 1인의 "지금 주입해도 되나" 판정 + 안 되면 그 자리에서 파킹까지(C4 · 리뷰 fix C)★.
+    ///
+    /// 반환: `Deliver` = 지금 주입해라(락 밖에서) / `Parked` = 파킹했다(장부 `pending` 기록 완료, 도어벨만
+    /// 남았다) / `Skipped` = 보관함 cap 이라 접었다(장부 `skipped` 기록 완료).
+    ///
+    /// ★왜 함수로 뽑았나(load-bearing — 두 지점의 parity)★: 이 판정은 **두 번** 불린다 — ① fan-out 계획
+    ///   단계(전 멤버 한 락 구간) ② 각 멤버 **주입 직전**(계획이 stale 해졌을 수 있으므로 재확인). 두 곳에
+    ///   규칙을 복제하면 한쪽만 고쳐져 "계획은 파킹인데 재확인은 주입" 같은 어긋남이 난다. 특히 hint 문구까지
+    ///   같아야 발신자가 같은 사유를 같은 말로 본다.
+    /// ★락 계약★: 호출자가 messaging 락을 **든 채** 부른다(`st` 를 그대로 받는다). 내부에서 `BusyGate` 를
+    ///   부르는 건 계약상 안전하고(busy.rs), `DeliveryPort` 는 절대 부르지 않는다(모듈 헤더 절대 규율).
+    ///   같은 이유로 **여기서 tracing 을 찍지 않는다** — park 이 남긴 로깅 거리는 `effects` 에 쌓아 호출자가
+    ///   락을 놓은 뒤 찍는다(`ParkSideEffects::log`).
+    fn plan_live_member(
+        &self,
+        st: &mut MessagingState,
+        req: ParkRequest<'_>,
+        target: &LiveAgent,
+        now: Instant,
+        effects: &mut ParkSideEffects,
+    ) -> MemberPlan {
+        // 지금 주입하면 안 되는 두 사유(둘 다 파킹 = `pending`): ① 턴 진행 중(idle 게이트, ADR-0104)
+        //   ② 그 멤버 앞에 이미 먼저 나갈 게 있음(FIFO — 방송이 옛 메일을 앞지르지 않게).
+        // ★판정 동사는 단일 발송 3-b 와 **같은 것**을 쓴다(round-7)★: 방송의 즉시 배달도 큐를 우회하는
+        //   직주입이라 같은 사각을 공유했다 — 진행 중인 flush 배치(in-flight)를 큐만 보고 못 보면 방송이
+        //   그 배치를 앞지른다. `has_pending_ahead` = 큐 배달 가능분 + 그 이름 앞 in-flight.
+        // ★"큐 항" 은 **이 incarnation 에게 배달 가능한 것만** 센다(round-3 fix 2)★: 다른 incarnation 앞으로
+        //   결박된 잔해는 이 멤버에게 절대 배달되지 않으므로 앞지를 대상이 아니다(mailbox `visible_to`).
+        //   in-flight 항엔 그 필터가 안 걸린다(과다 차단 = 지연 — mailbox `has_pending_ahead` 주석).
+        let busy = self.busy.is_busy(target.id, target.epoch);
+        let queued = st
+            .mailbox
+            .has_pending_ahead(req.recipient, Some((target.id, target.epoch)));
+        if !busy && !queued {
+            return MemberPlan::Deliver(target.clone());
+        }
+        let member = req.recipient;
+        let hint = if busy {
+            format!(
+                "'{member}' is mid-turn — this broadcast is parked and delivered as one batch when that turn ends."
+            )
+        } else {
+            format!(
+                "'{member}' has earlier queued messages — this broadcast joins that queue and is delivered in order."
+            )
+        };
+        let full_hint = format!(
+            "'{member}' mailbox is full — skipped for this broadcast (its oldest parked messages expire by TTL; the other members still received it)."
+        );
+        let (msg_id, sender_name, recipient, body) =
+            (req.msg_id, req.sender_name, req.recipient, req.body);
+        match park_into(st, req, now, effects) {
+            Ok(()) => MemberPlan::Parked {
+                hint,
+                doorbell: target.id,
+            },
+            // ★멤버 하나의 보관함 cap 이 방송 전체를 막지 않는다(handle_group_send doc 정책)★.
+            Err(ParkError::MailboxFull) => {
+                st.ledger.record(
+                    msg_id,
+                    sender_name,
+                    recipient,
+                    body,
+                    DeliveryStatus::Skipped,
+                    now,
+                );
+                MemberPlan::Skipped { hint: full_hint }
+            }
+        }
+    }
+
     /// 발송 3분기 본체(C1/C2) — `handle_single_send` 가 계약 예약/닫기로 감싸는 안쪽.
     ///
-    /// 인자 `resolved`/`park_key` 는 호출자가 이미 계산해 넘긴다(계약 오픈이 recipient 를 먼저 알아야 하므로
-    /// 로스터 해석을 밖으로 끌어올렸다 — 여기서 재조회하면 두 판정이 서로 다른 스냅샷을 보게 된다).
+    /// 인자 `resolved`/`park_key`/`live_here` 는 호출자가 이미 계산해 넘긴다(계약 오픈이 recipient 를 먼저
+    /// 알아야 하므로 로스터 해석을 밖으로 끌어올렸다 — 여기서 재조회하면 두 판정이 서로 다른 스냅샷을 보게
+    /// 된다). `live_here` = 그 park 키를 지금 달고 있는 산 incarnation 전부(F2 압력 회수 기준 —
+    /// `live_incarnations_named`). 아래 네 파킹 갈래가 **전부 같은 값**을 쓴다: park 키가 갈래마다 다르지
+    /// 않기 때문이다(해석 성공이면 `park_key == target.name`).
     #[allow(clippy::too_many_arguments)]
     fn dispatch_single(
         &self,
@@ -561,6 +1235,7 @@ impl MessagingService {
         meta: &SendMeta,
         resolved: Option<LiveAgent>,
         park_key: &str,
+        live_here: &[(AgentId, u32)],
     ) -> Result<SendOutcome, SendReject> {
         // 2) 부재 → 파킹(spec §5 분기 2). "없는 이름"도 파킹(스폰 전 선지시 지원, TTL 방어).
         let Some(target) = resolved else {
@@ -577,6 +1252,8 @@ impl MessagingService {
                 body,
                 hint,
                 None,
+                // 유일 해석은 실패했지만 **생사는 알 수도 있다**(동명 다수 갈래) — 그 목록 그대로 넘긴다(F2).
+                live_here,
                 ParkKind::Message,
                 meta,
             )?;
@@ -610,6 +1287,8 @@ impl MessagingService {
                 // ★id 힌트(fix 2)★: 이 발송은 구체적 산 수신자를 해석했다 — 동명 다수여도(exact-id 지목은
                 //   AMBIGUOUS 를 의도적으로 통과한다) 그 id 로 배달될 길을 flush 에 남긴다.
                 Some(target.id),
+                // 회수 기준 = 이 이름의 산 incarnation 전부(결박 아님 — park_pending doc 의 두 축 구분).
+                live_here,
                 ParkKind::Message,
                 meta,
             )?;
@@ -624,14 +1303,25 @@ impl MessagingService {
             return Ok(outcome);
         }
 
-        // 3-b) ★FIFO 일관성(C2 리뷰 fix 5 · load-bearing)★: 수신자는 idle 인데 그 이름 앞에 **이미 파킹이
-        //    쌓여 있으면** 직발송이 큐를 앞지른다 — 수신자가 보는 순서가 (새것, 옛것들) 로 뒤집힌다.
-        //    "오래된 순 일괄" 계약(ADR-0104)은 큐 안에서만 성립하는 게 아니라 **그 수신자가 보는 순서**에
-        //    대한 약속이라, 큐가 비어 있지 않으면 이 메시지도 큐 뒤에 붙이고 flush 를 눌러 한 배치로
-        //    순서대로 나가게 한다. (큐가 비어 있으면 앞지를 대상이 없으므로 그대로 직발송 = C1 동작.)
+        // 3-b) ★FIFO 일관성(C2 리뷰 fix 5 · round-7 보정 · load-bearing)★: 수신자는 idle 인데 그 이름 앞에
+        //    **먼저 나갈 게 남아 있으면** 직발송이 그것을 앞지른다 — 수신자가 보는 순서가 (새것, 옛것들) 로
+        //    뒤집힌다. "오래된 순 일괄" 계약(ADR-0104)은 큐 안에서만 성립하는 게 아니라 **그 수신자가 보는
+        //    순서**에 대한 약속이라, 앞에 뭔가 있으면 이 메시지도 큐 뒤에 붙이고 flush 를 눌러 한 배치로
+        //    순서대로 나가게 한다. (앞에 아무것도 없으면 앞지를 대상이 없으므로 그대로 직발송 = C1 동작.)
+        //    ★"앞에 있다" 는 큐만이 아니다(round-7 high — C2/C3 flush 설계 이래의 사각)★: flush 는 큐를
+        //    통째로 비운 뒤 **락을 놓고** 주입한다. 그 구간에 큐는 비어 보이지만 그 배치는 아직 수신자에게
+        //    닿지 않았다 — 큐만 세면 여기서 즉시 주입해 **진행 중인 배치를 앞지른다**. 그래서 판정은
+        //    `has_pending_ahead`(= 큐 배달 가능분 + 그 이름 앞 in-flight) 한 동사로 한다.
+        //    ★"큐 항" 은 **이 incarnation 에게 배달 가능한 것**만 센다(round-3 fix 2)★: 다른 incarnation
+        //    앞으로 결박된 방송 잔해는 이 수신자에게 배달될 일이 없으므로 앞지를 대상이 아니다. 총량으로
+        //    세면 죽은 방송분이 산 수신자의 즉시 배달을 TTL(24h)까지 막는다(mailbox `visible_to`).
+        //    ★in-flight 항은 그 필터를 못 건다(과다 차단을 감수한다 — mailbox `has_pending_ahead` 주석)★:
+        //    영수증은 건수만 알아 결박을 모른다. 그 대가는 **지연**뿐이다(파킹 + 도어벨 → 그 flush 가 끝나면
+        //    바로 다음 배치로 나간다). 반대 방향의 오차(과소 차단)는 곧바로 순서 역전이라 대칭이 아니다.
         let has_queued = {
             let st = self.state.lock().expect("messaging state poisoned");
-            st.mailbox.len(&target.name) > 0
+            st.mailbox
+                .has_pending_ahead(&target.name, Some((target.id, target.epoch)))
         };
         if has_queued {
             let hint = format!(
@@ -647,6 +1337,7 @@ impl MessagingService {
                 body,
                 hint,
                 Some(target.id),
+                live_here,
                 ParkKind::Message,
                 meta,
             )?;
@@ -700,6 +1391,7 @@ impl MessagingService {
                     // 해석된 산 수신자가 있었으므로 힌트를 남긴다 — 그 id 가 여전히 로스터에 있으면(일시적
                     //   write 오류) 이름 유일성과 무관하게 그쪽으로 재시도되고, 죽었으면 이름 규칙으로 돌아간다.
                     Some(target.id),
+                    live_here,
                     ParkKind::Message,
                     meta,
                 )
@@ -725,11 +1417,22 @@ impl MessagingService {
     ///   안 남긴다(발신자에게 반려로 즉시 가시화 — spec §5 "오래된 것 조용히 버리기 금지" 와 정합).
     /// ★락 규율★: 이 함수는 park+record 를 한 락 구간에서 하되(둘 다 순수 구조 조작, 외부 호출 없음) 그
     ///   구간에서 port 를 부르지 않는다.
-    /// ★kind(C3)★: `Notice` 는 **cap 예외**라 이 함수가 절대 `MailboxFull` 을 내지 않는다(mailbox.rs `park`).
-    ///   그래서 notice 호출부는 반환값을 무시해도 안전하다.
+    /// ★kind(C3 · round-6)★: `Notice` 는 **자기 레인**(`mailbox::NOTICE_CAP`)에서 회계되고 넘치면 가장
+    ///   오래된 통지를 회수할 뿐 반려되지 않으므로, 이 함수는 notice 에 대해 절대 `MailboxFull` 을 내지
+    ///   않는다(mailbox.rs `park`). 그래서 notice 호출부는 반환값을 무시해도 안전하다.
     /// ★meta(C3)★: 회신 계약 속성은 **payload 에 실려 flush 까지 살아남는다** — 늦게 배달되는 request/회신도
     ///   즉시 배달과 **같은 봉투**(같은 속성)로 나가야 하기 때문이다(park 시점에 봉투를 굳히지 않는 설계라
     ///   속성 재료를 함께 날라야 한다 — 모듈 헤더 "봉투 = 주입 시점 조립").
+    /// ★incarnation 결박 없음(C4 리뷰 fix A — 이 래퍼의 계약)★: 여기로 오는 파킹은 **단일 발송·notice** 뿐이라
+    ///   `bound_incarnation` 을 항상 `None` 으로 고정한다. 그 둘은 이름 주소가 정본이고 재스폰 이어받기가
+    ///   **기능**이기 때문이다(canonical_park_key 주석) — 결박은 "발송 순간 스냅샷" 계약을 가진 그룹 방송만의
+    ///   축이고, 그 경로는 `park_into` 를 직접 부른다(`handle_group_send`). 여기에 결박 인자를 열면 단일 발송이
+    ///   실수로 결박돼 재스폰 배달이 조용히 멈출 수 있다.
+    /// ★인자 `live`(F2 — 압력 회수의 기준축)★ = 이 park 시점에 **`recipient` 이름을 달고 있는 산
+    ///   incarnation 전부**(호출자가 자기 로스터 스냅샷에서 `live_incarnations_named` 로 뽑는다). 하나도 못
+    ///   해석했으면 빈 슬라이스 = "모른다" → 저장소는 아무것도 회수하지 않는다. **결박이 아니다**(위 문단과
+    ///   충돌하지 않는다 — `ParkRequest.live_incarnations` 주석의 두 축 구분 참조). 단수 `current` 였던 옛
+    ///   축이 왜 산 메일을 잡아먹었는지는 mailbox `is_stale_bound` 주석이 정본.
     #[allow(clippy::too_many_arguments)]
     fn park_pending(
         &self,
@@ -741,43 +1444,38 @@ impl MessagingService {
         body: &str,
         hint: String,
         hinted_id: Option<AgentId>,
+        live: &[(AgentId, u32)],
         kind: ParkKind,
         meta: &SendMeta,
     ) -> Result<SendOutcome, SendReject> {
         let now = Instant::now();
-        let mut st = self.state.lock().expect("messaging state poisoned");
-        // park 는 raw body + 봉투/관측에 필요한 최소 메타(sender 이름·발신자 신원·입구·회신 계약)를
-        //   나른다(봉투는 flush 주입 시점 조립 — 단일 wrap point). ParkedMessage.envelope 계약이 "완성 봉투"라
-        //   여기선 ParkPayload 로 인코딩해 그 문자열 슬롯에 실어 보관하고, flush 때 decode 한다.
-        let payload = ParkPayload {
-            sender_name: sender_name.to_string(),
-            from,
-            entrance,
-            body: body.to_string(),
-            meta: meta.clone(),
-        };
-        let parked = ParkedMessage {
-            msg_id: msg_id.to_string(),
-            envelope: payload.encode(),
-            kind,
-            parked_at: now,
-            // admission 순번은 `park` 이 수용 시점에 부여한다(저장소가 유일 부여자 — mailbox 주석). 여기 값은
-            //   무시되므로 placeholder.
-            admission_seq: 0,
-            hinted_id,
-        };
-        match st.mailbox.park(recipient, parked) {
-            Ok(()) => {
-                st.ledger.record(
+        // ★락 보유 중 tracing 금지(모듈 헤더 규율)★ — 압력 회수 사실은 여기 모았다가 락을 놓고 찍는다.
+        let mut effects = ParkSideEffects::default();
+        let parked = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            park_into(
+                &mut st,
+                ParkRequest {
                     msg_id,
                     sender_name,
+                    from,
+                    entrance,
                     recipient,
                     body,
-                    DeliveryStatus::Pending,
-                    now,
-                );
-                Ok(SendOutcome::Parked { hint })
-            }
+                    hinted_id,
+                    // 위 doc "incarnation 결박 없음" — 단일 발송·notice 는 이름 주소 규칙 그대로.
+                    bound_incarnation: None,
+                    live_incarnations: live,
+                    kind,
+                    meta,
+                },
+                now,
+                &mut effects,
+            )
+        };
+        effects.log(recipient);
+        match parked {
+            Ok(()) => Ok(SendOutcome::Parked { hint }),
             Err(ParkError::MailboxFull) => Err(SendReject::MailboxFull),
         }
     }
@@ -785,19 +1483,56 @@ impl MessagingService {
     /// ★등장/epoch flush(ADR-0104 — C1)★: 수신자 이름의 파킹분을 **오래된 순 일괄** 주입한다. 데몬측
     ///   로스터 diff(flush observer)가 newly-live/epoch-bump 를 감지해 그 이름들로 부른다.
     ///
-    /// ★순서 보장 범위(finding 8)★: "오래된 순" 은 **이 배치 내부** 보장이다(재파킹 front-restore 로 배치 간
-    ///   이월 시에도 오래된 것 우선). 동시 직발송(handle_single_send)이나 다른 flush 호출과의 전역 순서는
-    ///   보장하지 않는다 — 모듈 헤더 "순서 보장의 범위" 참조(accepted trade-off).
+    /// ★순서 보장 범위(finding 8 · round-7 보정)★: "오래된 순" 은 **이 배치 내부** 보장이다(재파킹은 순번
+    ///   merge 라 배치 간 이월 시에도 오래된 것 우선). 옛 주석은 여기에 "동시 직발송·다른 flush 와의 순서는
+    ///   보장하지 않는다" 고 적었는데 **그건 너무 넓었다**: 지금은 ① 동시 직발송/방송이 이 배치를 앞지르지
+    ///   못하고(합류 판정이 in-flight 를 본다 — `mailbox::has_pending_ahead`) ② 같은 수신자 flush 도 겹치지
+    ///   않는다(아래 0단계). 남는 잔여는 **서로 다른 수신자** 간 전역 순서와 합류 판정↔inject 사이의
+    ///   마이크로초 창뿐이다 — 모듈 헤더 "순서 보장의 범위"(accepted trade-off).
     ///
-    /// 동작(1~4가 **한 락 구간**, 5만 락 밖 — 아래 "미배달분은 큐를 떠나지 않는다" 참조):
+    /// 동작(0~4가 **한 락 구간**, 5만 락 밖 — 아래 "미배달분은 큐를 떠나지 않는다" 참조):
+    ///   0. ★같은 수신자에 대한 flush 중복 진입 차단(round-7)★ — 그 이름 앞으로 **아직 정산되지 않은
+    ///      in-flight** 가 있으면 = 다른 flush 가 락 밖에서 그 배치를 주입하는 중이라는 뜻이므로, 드레인 없이
+    ///      물러난다(아래 "겹쳐 돌면 안 되는 이유").
     ///   1. 락 잡고 `mailbox.drain(recipient)` → deliverable(미만료, 오래된 순) + expired(만료).
     ///   2. expired → ledger `pending→expired`(장부 잔존 — 순수 조작).
-    ///   3. deliverable 을 **해석된 타깃별로 분할**(항목별 id 힌트 우선 → 이름 유일 도달 규칙).
-    ///   4. 타깃별 **게이트 1회** → busy 타깃 몫·배달 경로 없는 몫은 **그 자리에서 원래 순서로 복원**. **락 해제.**
-    ///   5. 배달할 몫만 각각 **개별 봉투**로 감싸 순서대로 inject(락 밖). 성공 → ledger `pending→delivered`.
+    ///   3. deliverable 을 **해석된 타깃별로 분할**(항목별 **결박(그룹 방송) 우선** → id 힌트 → 이름 유일
+    ///      도달 규칙). 결박 항목은 그 `(id, epoch)` 가 없으면 **폴백 없이** 파킹 유지다(fix A).
+    ///   4. 타깃별 **게이트 1회** → busy 타깃 몫·배달 경로 없는 몫은 **그 자리에서 원래 순서로 복원**.
+    ///      락을 떠나는 몫만 `take_in_flight` 로 등록(cap 분모 유지 — 아래 F1 절). **락 해제.**
+    ///   5. 배달할 몫만 각각 **개별 봉투**로 감싸 순서대로 inject(락 밖). 성공 → ledger `pending→delivered`
+    ///      + 그 1건 in-flight 정산.
     ///      ★부분 실패 무손실(load-bearing)★: 배치 도중 inject 실패(drain 후 수신자 사망)면 **그 타깃의 남은
     ///      몫(실패분 포함)을 `restore_ordered` 로 되돌린다**(cap 우회 + admission 순번 merge = 무손실·순서
-    ///      보존). 다른 타깃 몫은 계속 배달한다(조용한 유실 금지).
+    ///      보존, 같은 락 구간에서 그만큼 정산). 다른 타깃 몫은 계속 배달한다(조용한 유실 금지).
+    ///
+    /// ★in-flight 회계 — cap 이 사이클마다 밀리던 구멍을 막는다(F1 · load-bearing)★: 4단계에서 락을 떠나는
+    ///   배치는 큐에 없지만 **여전히 그 수신자 앞 미결 메시지**다. 이걸 분모에서 빼면 다음 인터리빙으로 큐가
+    ///   무계로 자란다 — ① drain 이 큐를 비운다 ② 락 밖 inject 동안 동시 발송 k 건이 "빈 큐" 를 보고 cap 검사를
+    ///   통과한다 ③ inject 실패로 배치 N 건이 복원된다 → 큐 = N + k, 다음 사이클 배치도 N + k 라 **매 사이클
+    ///   +k**. 그래서 나가는 배치를 `take_in_flight` 로 분모에 남기고, 종점(배달/복원)마다 그만큼 정산한다.
+    ///   정산 누락은 `FlightSettle`(Drop)이 덮는다. 관측 가능한 대가: **flush 가 도는 동안 그 수신자에게 온
+    ///   신규 발송이 `MAILBOX_FULL` 로 반려될 수 있다**(큐는 비어 보여도 분모가 차 있다) — 조용한 성장 대신
+    ///   가시적 반려를 택한 spec §5 기조와 같은 선택이다.
+    ///   ★in-flight 는 이제 회계 값이 아니라 **순서 계약의 관측 수단**이기도 하다(round-7)★: "그 이름 앞으로
+    ///   나가 있는 배치가 있나" 를 이 값 하나로 답할 수 있어졌고, 그 위에 두 판정이 얹혔다 — ① 직발송/방송의
+    ///   FIFO 합류(`mailbox::has_pending_ahead`) ② 아래 0단계의 flush 중복 진입 차단.
+    ///
+    /// ★같은 수신자 flush 는 겹쳐 돌면 안 된다(round-7 · load-bearing)★: 배치 A 가 락 밖에서 주입 중일 때
+    ///   배치 B 가 큐를 다시 드레인해 주입하면, A 의 **남은 항목보다 B 가 먼저** 수신자에게 닿는다 — 3-b 가
+    ///   막는 순서 역전과 정확히 같은 사고가 한 층 아래에서 재발한다. 그래서 0단계에서 in-flight 를 보고
+    ///   물러난다. 물러난 사실은 `deferred_flush` 에 남기고, **영수증을 쥔 쪽**이 정산을 마치며 도어벨을 다시
+    ///   눌러 준다(그냥 물러나면 lost wakeup — 그 배치가 다음 idle 통지/등장까지 발이 묶인다).
+    ///   ★되울림은 **물러난 id 전부**에 대해 한다(round-8 high)★: 한 이름 큐는 여러 id 로 열리므로(산
+    ///   incarnation · 힌트 큐 · 죽어 가는 쪽의 늦은 통지) 유예 표식이 id 하나짜리 슬롯이면 나중 id 가 앞의
+    ///   것을 덮는다. 덮인 쪽이 유일하게 배달 가능한 id 였으면 되울림이 **쓸모 없는 깨우기**가 되고(reap 된
+    ///   id → `flush_for_agent` 조기 반환) 산 수신자 앞 메일이 TTL 까지 묶인다 — 종료성은 지켜지는데 유용성이
+    ///   깨지는 실패 모드다. 그래서 표식은 중복 제거된 **집합**이고 6단계가 전부 누른다(`deferred_flush` 주석).
+    ///   ★운영 배선에선 이 갈래가 **도달하지 않는다**(방어선 · 증명)★: 도어벨이 배선된 조립은 flush 를 전부
+    ///   **단일 직렬 레인**(ws.rs `run_flush_lane` — FlushMsg 를 하나씩 꺼내 `spawn_blocking` 완료를 await)에서
+    ///   실행하므로 두 flush 가 동시에 존재할 수 없다. 겹침이 실재하는 건 **도어벨 미배선 폴백**(실험 bin·
+    ///   단위 테스트 — `request_flush` 가 호출 스레드에서 인라인 실행)과 앞으로 생길 다른 호출자다. 레인
+    ///   직렬성은 ws.rs 쪽 성질이라 여기서 가정하지 않고, 이 파일 안에서 닫는다.
     ///
     /// ★왜 to_id 를 인자로 받나(그리고 왜 execution 시점에 재검증하나 — finding 2)★: flush observer/self-heal
     ///   이 로스터 스냅샷에서 (이름→현재 id) 를 알고 부르지만, 그 스냅샷은 **enqueue 시점** 것이라
@@ -852,7 +1587,14 @@ impl MessagingService {
         let now = Instant::now();
         // ★락 밖에서 로깅할 사실(finding 3)★: 아래 락 구간에서 **수집만** 하고, 락을 놓은 뒤 찍는다.
         let mut no_target_kept = 0usize;
+        let mut bound_kept = 0usize;
         let mut busy_skipped: Vec<(AgentId, u32, usize)> = Vec::new();
+        // 만료/회수 전이가 링버퍼 evict 때문에 실패한 항목(C4 리뷰 fix J) — 락 밖에서 debug 로 남긴다.
+        //   ★의도한 종점 상태를 함께 나른다(round-5 finding 2)★: 이 함에는 `expired`(TTL)와 `skipped`
+        //   (확정 사망 회수) 두 어휘가 섞여 들어오므로, 상태를 안 실으면 로그가 전부 만료로 뭉개진다.
+        let mut evicted_transitions: Vec<EvictedTransition> = Vec::new();
+        // 확정 사망 결박이라 즉시 종점(`skipped`)을 찍고 버린 항목(round-3 fix 6) — 락 밖 debug.
+        let mut retired_dead: Vec<String> = Vec::new();
         // 1~4) 드레인 + 만료 장부화 + 타깃 분할 + 게이트 + **미배달분 즉시 복원** — 전부 **한 락 구간**.
         //
         // ★락 보유 중 tracing 금지 — 수집 후 락 밖 로깅(finding 3)★: 동기 포맷팅 subscriber 는 stdout 락에
@@ -868,44 +1610,139 @@ impl MessagingService {
         //   "messaging 락을 든 채 불려도 안전" 을 계약으로 못 박은 seam 이다(busy.rs `BusyGate` 주석). 역방향
         //   (busy 락 → messaging 락) 경로는 존재하지 않는다(tap 은 논블록 채널 send 만 한다) → 락 순서 역전 없음.
         //   금지 대상은 **DeliveryPort(inject/roster)** 다 — 그건 여전히 전부 락 밖이다(아래 5단계).
-        let groups: Vec<(LiveAgent, Vec<ParkedMessage>)> = {
+        // ★labeled block(`'drained`)인 이유★: 만료 전이의 evict 사실은 **락 밖**에서 찍어야 하는데(위 규율),
+        //   배달할 게 없다고 여기서 `return` 해 버리면 그 로그가 통째로 사라진다. 그래서 블록을 값으로
+        //   빠져나가고(빈 Vec) 로깅은 락 해제 뒤 공통 경로에서 한다(아래 루프들은 빈 입력에 no-op).
+        /// 영수증 + 타깃별 배치. `None` = **유예**(0단계에서 물러남 — 큐도 영수증도 건드리지 않았다는 뜻이라
+        ///   빈 배치(`Some`)와 구분해야 한다: 빈 배치는 "볼 것이 없었다", 유예는 "지금은 볼 차례가 아니다").
+        type Drained = Option<(FlightTicket, Vec<(LiveAgent, Vec<ParkedMessage>)>)>;
+        let drained_or_deferred: Drained = 'drained: {
             let mut st = self.state.lock().expect("messaging state poisoned");
+            // 0) ★같은 수신자 flush 중복 진입 차단(위 doc "겹쳐 돌면 안 되는 이유")★ — in-flight 가 남아
+            //    있다 = 다른 flush 가 이 이름 앞 배치를 락 밖에서 주입하는 중. 지금 드레인하면 그 배치의
+            //    **남은 항목보다 우리가 먼저** 수신자에게 닿는다(순서 역전). 유예 사실만 남기고 물러난다 —
+            //    판정도 기록도 **같은 락 구간**이라, 영수증 보유자의 정산 마무리(같은 락)와 경합하지 않는다:
+            //    그쪽이 먼저면 여기서 in-flight 가 0이라 정상 진행하고, 여기가 먼저면 그쪽이 이 표식을 본다.
+            //    ★덮어쓰지 않고 **추가**한다(round-8 high)★: 한 이름 큐를 여러 id 가 열 수 있어(산
+            //    incarnation · 힌트 큐 · 죽어 가는 쪽의 늦은 통지) 단일 슬롯이면 나중 id 가 앞의 것을 덮는다.
+            //    그 앞 id 가 유일하게 배달 가능한 쪽이었으면 깨우기가 **쓸모를 잃는다**(`deferred_flush` 주석의
+            //    stale-id 시나리오). 같은 id 는 두 번 담지 않는다 — 되울림은 idempotent 지만 잉여 도어벨은 공짜가
+            //    아니고, 유계 근거도 "서로 다른 id 수" 이기 때문이다.
+            if st.mailbox.in_flight_len(recipient) > 0 {
+                let waiters = st.deferred_flush.entry(recipient.to_string()).or_default();
+                if !waiters.contains(&to_id) {
+                    waiters.push(to_id);
+                }
+                break 'drained None;
+            }
             let drained = st.mailbox.drain(recipient, now);
             for ex in &drained.expired {
-                // pending → expired(장부 잔존). NotFound/Illegal 은 best-effort(레코드 evict 등) — 무시.
-                let _ = st
-                    .ledger
-                    .transition(&ex.msg_id, recipient, DeliveryStatus::Expired, now);
+                // pending → expired(장부 잔존). Illegal 은 best-effort — 무시. NotFound 는 **레코드가 링에서
+                //   밀려난 것**이라 만료 사실이 어디에도 안 남는다 → 사실만 모아 락 밖에서 debug(fix J).
+                transition_or_collect_evicted(
+                    &mut st.ledger,
+                    &ex.msg_id,
+                    recipient,
+                    DeliveryStatus::Expired,
+                    now,
+                    &mut evicted_transitions,
+                );
             }
             let deliverable = drained.deliverable;
             if deliverable.is_empty() {
-                return;
+                break 'drained Some((FlightTicket::default(), Vec::new()));
             }
 
             // ★항목별 타깃 해석 → 타깃별 분할(round-3 finding 3)★: ① park 시 해석돼 있던 id 힌트가 **아직
             //   로스터에 살아 있으면** 이름 유일성과 무관하게 그쪽으로 배달한다(exact-id 지목이 동명 다수
             //   때문에 TTL 까지 blackhole 되는 걸 막는다 — fix 2) → ② 힌트가 없거나 죽었으면 이름 유일 도달
             //   규칙(respawn 이 파킹을 이어받는 이름-키 설계 — canonical_park_key 주석).
+            //   ★단 결박 항목(그룹 방송)은 이 두 규칙보다 **앞서고 대체한다**★ — 아래 match 첫 팔(fix A).
             //   그룹은 **등장 순서**대로, 그룹 안 인덱스도 **오래된 순**이라 배달 순서가 보존된다.
             let mut groups: Vec<(LiveAgent, Vec<usize>)> = Vec::new();
             let mut restore: Vec<usize> = Vec::new();
+            // ★확정 사망 결박(round-3 fix 6)★ — 큐로 **되돌리지 않는다**. 아래에서 장부에 종점을 찍는다.
+            let mut retired: Vec<usize> = Vec::new();
             for (idx, parked) in deliverable.iter().enumerate() {
-                let target = parked
-                    .hinted_id
-                    .and_then(|h| roster.iter().find(|a| a.id == h).cloned())
-                    .or_else(|| name_target.clone());
+                let target = match parked.bound_incarnation {
+                    // ★결박 항목 = 그 (id, epoch) **에게만**(C4 리뷰 fix A · load-bearing)★: 그룹 방송의
+                    //   파킹분이다. 이름 폴백도, 같은 id 의 다른 epoch 도 **쓰지 않는다** — 그 둘이 정확히
+                    //   "발송 뒤 등장한 수신자에게 소급 배달" 이 나던 두 경로였다(mailbox 주석의 실측 ①②).
+                    Some((bid, bepoch)) => match roster.iter().find(|a| a.id == bid) {
+                        // 그 incarnation 이 그대로 산 채 — 배달 후보.
+                        Some(a) if a.epoch == bepoch => Some(a.clone()),
+                        // ★같은 id 가 **더 높은 epoch** 으로 있다 = 확정 사망(round-3 fix 6)★: epoch 은 한
+                        //   AgentId 안에서 단조 증가한다(ADR-0007 — 재spawn/복원마다 +1, 되돌아가지 않는다).
+                        //   그러니 이건 "지금 안 보인다" 가 아니라 **되돌아올 수 없다는 증거**다. 증거가 있는데
+                        //   24시간을 더 붙들면 큐·메모리·스캔 비용만 물고 장부는 그동안 `pending` 이라 거짓말을
+                        //   한다(발신자가 조회하면 "아직 배달 대기 중" 으로 보인다). 그래서 즉시 종점을 찍는다.
+                        // ★어휘 = `skipped`(신설 금지 — spec §5 어휘 재사용)★: `expired` 는 **시계 사실**(TTL
+                        //   도달)을 주장하는 상태라 여기 쓰면 장부가 거짓 원인을 남긴다(사유는 시계가 아니라
+                        //   수신자 소멸이다). spec §4 의 `skipped` = "그 멤버에게는 배달하지 않음(부재/죽음)"
+                        //   이 정확히 같은 사실이고, fan-out 의 죽은 멤버·write 실패와도 **같은 결말**이라
+                        //   발신 LLM 이 보는 회계가 한 어휘로 통일된다.
+                        Some(a) if a.epoch > bepoch => {
+                            retired.push(idx);
+                            continue;
+                        }
+                        // epoch 이 **더 낮게** 보이는 건 단조성 위반이라 있을 수 없다 — 우리 모델이 틀린
+                        //   상황이므로 파괴적 판정(버리기)을 하지 않고 보수적으로 보류한다.
+                        Some(_) => None,
+                        // ★로스터에 아예 없음 → 보류(의도적)★: "안 보인다" 는 **영구 사망의 증거가 아니다** —
+                        //   재시작 중이거나 잠깐 비-도달(비-structured)일 수 있고, 그 판정을 여기서 내리면
+                        //   살아 돌아온 **그 incarnation**(같은 id·같은 epoch)이 받을 수 있었던 메시지를 우리가
+                        //   먼저 버리는 셈이다. 결박이 이미 소급을 막고 있으므로 위험은 "늦게 배달" 이 아니라
+                        //   "안 배달" 뿐이고, 그 종점은 TTL(`expired`)이 정한다.
+                        // ★두 규칙을 함께 읽어야 전체 그림이다(round-6)★: 이 보류는 **무한 보관이 아니다**.
+                        //   여기서 회수되는 건 "같은 AgentId 가 더 높은 epoch 으로 돌아온" 증거 있는 사망뿐이라,
+                        //   같은 이름이 **완전히 새 AgentId** 로 대체된 경우의 옛 결박은 이 경로로는 영영
+                        //   회수되지 않는다(고아). 그 갈래의 backstop 은 저장소의 **압력 회수**다 — 큐가
+                        //   `mailbox::MAILBOX_CAP` 에 닿으면 park 이 **배달 불가 잔해**(= 결박이 그 park 의
+                        //   생사 스냅샷에 없는 항목 — F2)를 오래된 순으로 걷어내고 장부에 종점을 남긴다
+                        //   (보통 `skipped`, 이미 TTL 을 넘겼으면 `expired` — F3). 즉 회수 주체는 ① 로스터
+                        //   증거가 있으면 여기(flush) ② 증거가 없으면 압력이 찰 때 park, 그 위에 TTL.
+                        // ★여기서 걷어내는 게 **복원보다 먼저**인 것이 중요하다(round-6)★: 이 함수는 로스터를
+                        //   손에 쥔 유일한 지점이라 증거 있는 사망분을 여기서 떨궈야, 아래 `restore_ordered` 로
+                        //   되돌아가는 배치가 그만큼 작아진다(= 되돌아오는 몫과 in-flight 분모를 함께 줄인다).
+                        None => None,
+                    },
+                    None => parked
+                        .hinted_id
+                        .and_then(|h| roster.iter().find(|a| a.id == h).cloned())
+                        .or_else(|| name_target.clone()),
+                };
                 match target {
                     Some(t) => match groups.iter_mut().find(|(g, _)| g.id == t.id) {
                         Some((_, idxs)) => idxs.push(idx),
                         None => groups.push((t, vec![idx])),
                     },
-                    // 배달 경로 없음(이름이 부재/동명 다수 + 힌트도 사망) → 파킹 유지.
-                    None => restore.push(idx),
+                    // 배달 경로 없음(이름이 부재/동명 다수 + 힌트도 사망, 또는 결박 incarnation 부재) → 파킹 유지.
+                    None => {
+                        // 두 사유를 갈라 센다 — 로그가 "이름이 안 풀렸다" 로 뭉개지면 결박 보류를 오진한다.
+                        if parked.bound_incarnation.is_some() {
+                            bound_kept += 1;
+                        } else {
+                            no_target_kept += 1;
+                        }
+                        restore.push(idx);
+                    }
                 }
             }
-            // 로깅은 락 밖에서(finding 3) — 여기선 사실만 센다.
-            if !restore.is_empty() {
-                no_target_kept = restore.len();
+
+            // ★확정 사망분 종점 찍기(round-3 fix 6)★ — 큐에서는 이미 나왔으므로(drain) 되돌리지 않는 것만으로
+            //   제거된다. 조용한 유실 금지: 반드시 장부에 `skipped` 를 남긴다. `NotFound`(이력 링에서 evict)는
+            //   만료 전이와 **같은 규율**로 사실만 모아 락 밖에서 debug(fix J).
+            for &idx in &retired {
+                let item = &deliverable[idx];
+                transition_or_collect_evicted(
+                    &mut st.ledger,
+                    &item.msg_id,
+                    recipient,
+                    DeliveryStatus::Skipped,
+                    now,
+                    &mut evicted_transitions,
+                );
+                retired_dead.push(item.msg_id.clone());
             }
 
             // ★flush 게이트(fix 4 + finding 3) — 타깃당 정확히 1회★. 그 타깃 배치가 시작된 뒤엔 절대 다시
@@ -932,16 +1769,60 @@ impl MessagingService {
                 st.mailbox.restore_ordered(recipient, items);
             }
             // 배달 대상만 소유권을 들고 락 밖으로 나간다(인덱스 → 항목).
-            deliver
+            let groups: Vec<(LiveAgent, Vec<ParkedMessage>)> = deliver
                 .into_iter()
                 .map(|(t, idxs)| {
-                    let items = idxs.iter().map(|&i| deliverable[i].clone()).collect();
+                    let items: Vec<ParkedMessage> =
+                        idxs.iter().map(|&i| deliverable[i].clone()).collect();
                     (t, items)
                 })
-                .collect()
+                .collect();
+            // ★in-flight 등록 — **락을 떠나는 몫만**(F1 · load-bearing)★: cap 분모의 구멍은 이 락이 풀린
+            //   구간에만 있다. 위에서 이미 되돌린 몫(busy·타깃 없음)과 종점을 찍은 몫(확정 사망·만료)은 그
+            //   구멍 밖이라 세지 않는다 — 세면 분모가 근거 없이 부풀어 정상 유입이 `MailboxFull` 로 반려된다.
+            //   영수증은 아래 `FlightSettle` 이 **반드시** 반납한다(누락 = 그 수신자 레인 영구 봉쇄).
+            let flight = st
+                .mailbox
+                .take_in_flight(recipient, groups.iter().flat_map(|(_, items)| items.iter()));
+            Some((flight, groups))
+        };
+        // 유예(0단계) — 큐도 영수증도 건드리지 않았으므로 로깅할 사실도, 정산할 것도, 되울릴 것도 없다
+        //   (되울리기는 영수증 보유자의 몫 — 아래 꼬리). 로그는 debug 한 줄만.
+        let Some((flight, groups)) = drained_or_deferred else {
+            tracing::debug!(
+                recipient,
+                stale_id = %to_id,
+                "flush 유예: 같은 수신자 앞 배치가 아직 주입 중(in-flight) — 드레인 없이 물러남, 정산 시 재-도어벨(round-7)"
+            );
+            return;
+        };
+        // ★단일 출구 정산 가드(F1)★ — 아래 배달 루프는 타깃별 early break 가 있고, 락 밖 외부 호출(inject)이
+        //   섞여 있다. 정산을 각 갈래에 흩뿌리면 한 곳만 놓쳐도 그 수신자 레인의 분모가 영구히 부풀어
+        //   메일이 영영 안 들어간다. 그래서 남은 영수증은 Drop 이 반납한다(정상 종료·언와인딩 공통).
+        let mut flight = FlightSettle {
+            svc: self,
+            recipient,
+            owed: flight,
         };
 
         // ★락 해제 후 로깅(finding 3)★ — 위에서 모은 사실만 찍는다(포맷팅·stdout 대기가 락 밖이다).
+        log_evicted_transitions(&evicted_transitions);
+        if bound_kept > 0 {
+            tracing::debug!(
+                recipient,
+                stale_id = %to_id,
+                keeping = bound_kept,
+                "flush skip: 그룹 방송 파킹분의 결박 incarnation(발송 순간 id·epoch)이 지금 로스터에 없음 — 파킹 유지(소급 배달 금지, TTL 이 종점 · fix A)"
+            );
+        }
+        if !retired_dead.is_empty() {
+            tracing::debug!(
+                recipient,
+                retired = retired_dead.len(),
+                msg_ids = ?retired_dead,
+                "flush retire: 결박 incarnation 이 **확정 사망**(같은 AgentId 가 더 높은 epoch 으로 존재 — epoch 단조, ADR-0007) — 큐에서 제거하고 장부 skipped(TTL 대기 없음 · round-3 fix 6)"
+            );
+        }
         if no_target_kept > 0 {
             tracing::debug!(
                 recipient,
@@ -978,8 +1859,24 @@ impl MessagingService {
                         &payload.meta.envelope_fields(&parked.msg_id),
                     ),
                 };
-                match self.port.inject(to_id, wrapped.as_bytes()) {
+                // ★결박 항목만 조건부 주입(round-3 fix 1 · load-bearing)★: 위 타깃 해석은 **락 안의 로스터
+                //   스냅샷**으로 했는데, 실제 write 는 락 밖이고 앞 항목의 blocking write 뒤에 온다 — 그
+                //   사이 수신자가 재시작하면 무조건 주입이 새 incarnation 에 착지해 결박이 무력화된다.
+                //   그래서 결박 항목은 판정을 write 와 같은 단위로 내린다.
+                // ★이름 항목(단일 발송·notice)은 **일부러** 무조건 주입한다★: 그쪽 주소 단위는 이름이고
+                //   재스폰 이어받기가 **기능**이다(ADR-0101 · canonical_park_key 주석). 여기에 epoch 검사를
+                //   걸면 "재시작한 에이전트가 자기 앞 파킹을 못 받는" 회귀가 된다.
+                let inject_result = match parked.bound_incarnation {
+                    Some((_, bepoch)) => {
+                        self.port.inject_if_epoch(to_id, bepoch, wrapped.as_bytes())
+                    }
+                    None => self.port.inject(to_id, wrapped.as_bytes()),
+                };
+                match inject_result {
                     Ok(outcome) => {
+                        // 이 1건은 종점을 맞았다 — in-flight 영수증에서 즉시 떼어 낸다(F1). 배치 끝까지
+                        //   붙들면 긴 배치가 도는 동안 그 수신자 앞 정상 유입이 통째로 반려된다.
+                        let settled = flight.owed.split([parked.kind]);
                         {
                             let mut st = self.state.lock().expect("messaging state poisoned");
                             // pending → delivered(실제 주입 시점, ADR-0104).
@@ -989,6 +1886,7 @@ impl MessagingService {
                                 DeliveryStatus::Delivered,
                                 Instant::now(),
                             );
+                            st.mailbox.settle_in_flight(recipient, settled);
                         }
                         // 등장 배달도 배달 경계 관측(ADR-0088) — handle_single_send 와 동일하게 발행(락 밖).
                         //   원 발신자 신원·입구는 파킹 payload 에서 복원(파킹→flush 자동배달 acceptance, spec §7).
@@ -1009,7 +1907,7 @@ impl MessagingService {
                             &outcome,
                         );
                     }
-                    Err(_e) => {
+                    Err(e) => {
                         // ★부분 실패 무손실(load-bearing — finding 1, ADR-0103/0104)★: 수신자가 drain↔inject
                         //   사이 죽었다 — 그 타깃의 남은 몫(실패분 포함)을 되돌린다. 왜 `park` 가 아니라
                         //   `restore_ordered` 인가:
@@ -1030,23 +1928,64 @@ impl MessagingService {
                         //   merge 라 이 루프가 타깃마다 따로 되돌려도 큐는 전역 오래된 순을 유지한다 — 그룹 간
                         //   상대 순서도 무의미하지 않다: 큐 앞머리는 `handle_single_send` 의 FIFO 합류 판정과
                         //   다음 배치의 배달 순서를 결정하고, 나이 역전은 sweep 이 만료 항목을 지나치게 만든다.
+                        // ★결박 epoch 불일치(round-3 fix 1)도 이 갈래로 온다 — 같은 처리가 맞다★: 그 수신자가
+                        //   재시작했다는 뜻이므로 (a) 결박 항목은 되돌려야 하고(이 배치에서 배달 불가, 다음
+                        //   flush 가 "확정 사망" 으로 보고 종점을 찍는다 — fix 6) (b) 남은 이름 항목도 되돌려
+                        //   **새 incarnation 기준으로 게이트를 다시 받게** 해야 한다(그냥 밀면 새 턴 한가운데에
+                        //   주입될 수 있다). 그래서 여기서 배치를 끊는 게 옳고, 사유는 `e` 가 남긴다.
                         let remaining: Vec<ParkedMessage> = items[n..].to_vec();
                         let remaining_count = remaining.len();
+                        // ★복원과 정산은 **한 락 구간에서 짝**이어야 한다(F1 불변식의 근거)★: 복원은 이
+                        //   항목들을 in-flight 에서 큐로 **옮기는** 것이라, 둘 사이에 락을 놓으면 그 찰나에
+                        //   같은 항목이 큐와 in-flight 양쪽에 잡혀(이중 계수) 분모가 부풀고, 반대로 정산만
+                        //   먼저 하면 창이 다시 열린다. 합(`queue + in_flight`)은 이 짝 덕분에 불변이다.
+                        let settled = flight.owed.split(remaining.iter().map(|m| m.kind));
                         {
                             // ★락 보유 중 tracing 금지(finding 3)★ — 복원만 하고 즉시 락을 놓은 뒤 로깅한다.
                             let mut st = self.state.lock().expect("messaging state poisoned");
                             st.mailbox.restore_ordered(recipient, remaining);
+                            st.mailbox.settle_in_flight(recipient, settled);
                         }
                         tracing::warn!(
                             recipient,
                             agent = %to_id,
                             remaining = remaining_count,
-                            "메시지 flush 중 inject 실패 — 그 타깃의 남은 배치 재파킹(무손실 restore_ordered, ADR-0103/0104)"
+                            "메시지 flush 중 inject 실패/거부 — 그 타깃의 남은 배치 재파킹(무손실 restore_ordered, ADR-0103/0104): {e}"
                         );
                         break;
                     }
                 }
             }
+        }
+
+        // 6) ★유예된 flush 되울리기(round-7 · load-bearing — lost wakeup 금지)★: 우리가 락 밖에서 주입하는
+        //    동안 이 이름 앞 flush 를 물린 호출자가 있으면(0단계), 그 깨우기를 여기서 되살린다. 안 하면 그
+        //    배치는 다음 idle 통지/등장/TTL 까지 발이 묶인다 — 코드베이스가 lost wakeup 을 1급 결함으로 다루는
+        //    이유는 C1 finding 3 주석들(`self_heal_if_live`·busy-park 도어벨) 참조.
+        // ★먼저 영수증을 비운다★: 되울린 flush 가 (인라인 폴백에선 **이 스레드에서 곧바로**) 0단계를 다시
+        //    보므로, 우리 영수증이 남아 있으면 그 자리에서 또 유예돼 깨우기가 표식으로만 왕복한다.
+        //    Drop 에 맡기지 않고 명시적으로 떨구는 이유가 이 순서다(정상 경로에선 이미 0건이라 no-op).
+        drop(flight);
+        // ★집합을 **락 안에서 통째로 꺼낸다**(round-8 · load-bearing)★: 아래 되울림은 인라인 폴백에서 이
+        //   스레드의 flush 재진입을 부르고, 그 flush 가 또 유예되면 같은 키에 id 를 **새로 넣는다**. 맵을 들고
+        //   순회하면 그 추가분과 섞여 무엇을 눌렀는지 흐려지고 재진입 중 재대여 위험도 생긴다. 통째로 꺼내
+        //   소유하면 우리는 "이 스냅샷" 만 책임지고, 순회 중 새로 쌓인 유예는 **그때 영수증을 쥔 쪽**(재진입한
+        //   flush)의 6단계가 가져간다 — 책임이 겹치지도 새지도 않는다.
+        let deferred = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            st.deferred_flush.remove(recipient).unwrap_or_default()
+        };
+        // ★"큐가 비지 않았으면 무조건" 이 아니라 **실제 유예가 있었을 때만**(무한 재기동 방지)★ — 배달 불가
+        //   (busy·타깃 없음)로 파킹이 유지되는 정상 상태에서 큐 길이로 되울리면 flush 가 자기를 무한히 다시
+        //   부른다. 집합은 유한하고 여기서 제거되므로, 유예한 id 마다 정확히 1회 되울리고 끝난다.
+        // ★도어벨 id 는 **유예한 쪽이 쓰려던 값**을 그대로 쓴다★: 그쪽이 열려던 큐를 다시 열게 하는 게
+        //   목적이라 우리 to_id 로 바꾸지 않는다(`flush_for_agent` 가 그 id 의 현재 이름 큐 + 힌트 큐를 연다).
+        // ★전부 누른다 — 고르지 않는다(round-8 high)★: 어느 id 가 "쓸모 있는" 깨우기인지는 여기서 알 수
+        //   없다(로스터를 다시 떠도 힌트 큐 쪽은 못 가린다 — `deferred_flush` 주석). 죽은 id 로 눌러도
+        //   `flush_for_agent` 가 조용한 no-op 이라 잉여의 대가는 0에 수렴하는 반면, 하나라도 빠뜨리면
+        //   산 수신자 앞 메일이 TTL 까지 묶인다 — 비대칭이라 전부 누르는 쪽이 맞다.
+        for id in deferred {
+            self.request_flush(id);
         }
     }
 
@@ -1168,18 +2107,36 @@ impl MessagingService {
     ///   순회)를 다시 불러, 한 틱 안에서 항목별로 **다른 스냅샷**을 보고 판정했다(같은 틱인데 앞 항목은
     ///   배달, 뒤 항목은 부재로 갈릴 수 있었다). 한 번 떠서 전 항목에 같은 스냅샷을 쓴다 — 비용도 O(due)
     ///   에서 O(1) 로 준다. due 가 비면 아예 뜨지 않는다(대부분의 틱).
+    /// ★만료 전이의 `NotFound` 는 조용히 삼키지 않는다(C4 리뷰 fix J)★: 방송은 한 발송이 레코드를 **N개**
+    ///   쓰므로 이력 링(`ledger::HISTORY_CAPACITY`)이 훨씬 빨리 회전한다 — 파킹이 만료될 즈음 그 레코드가
+    ///   이미 밀려났을 수 있고, 그러면 "만료됐다" 는 사실이 **어디에도** 남지 않는다. 전이는 여전히
+    ///   best-effort(장부를 되살리진 않는다)지만, 그 사실을 debug 로 남겨 관측 가능하게 한다(락 밖 로깅).
     pub fn sweep(&self, now: Instant) {
+        // 만료 전이가 evict 때문에 실패한 항목 — 락 안에서 모으고 락 밖에서 찍는다(모듈 헤더 규율).
+        //   이 경로의 의도 상태는 항상 `Expired`(TTL) 다 — 그래도 상태를 값으로 실어 보낸다(finding 2).
+        let mut evicted_transitions: Vec<EvictedTransition> = Vec::new();
         let due: Vec<DueTimeout> = {
             let mut st = self.state.lock().expect("messaging state poisoned");
             let expired = st.mailbox.sweep_expired(now);
             for ex in expired {
-                // 파킹은 어느 수신자 큐에 있었는지 sweep 반환에 없다 — ledger 레코드는 (msg_id, recipient) 키라
-                //   recipient 를 알아야 전이한다. sweep_expired 는 recipient 를 안 돌려주므로, msg_id 로 레코드를
-                //   찾아 그 to 로 전이한다(records_for → 첫 pending 레코드). 조용한 유실 금지.
-                transition_expired_by_msg_id(&mut st.ledger, &ex.msg_id, now);
+                // ★(msg_id, recipient) 로 정확히 지목(C4 — ADR-0104 앵커 해소)★: 장부는 1 msg_id : N 배달
+                //   기록이라(그룹 방송) msg_id 만으로는 어느 멤버의 배달인지 특정할 수 없다. mailbox 가
+                //   만료 항목마다 **자기 큐 키**를 함께 돌려주므로(`ExpiredParked`) 그 쌍으로 전이한다 —
+                //   옛 "첫 pending 레코드 역조회" 헬퍼는 엉뚱한 멤버를 만료시킬 수 있어 제거됐다.
+                //   Illegal 은 best-effort — 무시. NotFound(= 링에서 evict 됨)는 사실만 모아 락 밖 debug(fix J).
+                transition_or_collect_evicted(
+                    &mut st.ledger,
+                    &ex.msg.msg_id,
+                    &ex.recipient,
+                    DeliveryStatus::Expired,
+                    now,
+                    &mut evicted_transitions,
+                );
             }
             st.ledger.due_timeouts(now)
         };
+        // 락 밖 로깅(모듈 헤더 규율) — due 유무와 무관하게 먼저 찍는다.
+        log_evicted_transitions(&evicted_transitions);
         if due.is_empty() {
             return;
         }
@@ -1188,8 +2145,13 @@ impl MessagingService {
         for d in due {
             // spec §1 notice 템플릿(한국어 계약 — 문구를 바꾸면 프라이밍·수용 기준과 어긋난다).
             //   기한 표기는 **발신자가 쓴 원본**을 그대로 쓴다(fix 6 — 봉투 `reply-by` 와 어긋나지 않게).
+            // ★`[engram]` 접두 = 발신 주체 표시(사용자 요청 2026-07-26)★: `<notice>` 에 `from` 이 없다는
+            //   구조적 신호만으로는 수신 LLM 이 "누가 보냈나" 를 놓칠 수 있다(프라이밍을 못 읽었거나 봉투가
+            //   요약돼 전달되는 경우). 그래서 본문 첫 토큰으로 시스템 출처를 명시한다 — 프라이밍이 없어도
+            //   읽히도록. ★파싱 계약이 아니다★: 사람/LLM 가독용 라벨이고, 기계 판정은 여전히 태그 모양
+            //   (`<notice>` · `from` 부재)이 정본이다(코드가 이 접두를 되읽지 않는다).
             let body = format!(
-                "요청 {} 기한({}) 초과 — {} 회신 없음",
+                "[engram] 요청 {} 기한({}) 초과 — {} 회신 없음",
                 d.request_id, d.reply_by_raw, d.recipient
             );
             self.deliver_notice(&d, &body, &roster);
@@ -1207,8 +2169,10 @@ impl MessagingService {
     /// ★경로 1벌(ADR-0104 "flush = 일괄·오래된 순" 공유)★: 파킹으로 일원화하면 즉시/늦은 배달의 봉투
     ///   조립·관측·장부 전이가 전부 기존 flush 경로 하나를 탄다(두 벌 유지 금지). 봉투는 `ParkKind::Notice`
     ///   를 보고 `wrap_notice` 로 감싸진다.
-    /// ★cap 예외★: `ParkKind::Notice` 라 보관함이 가득 차도 반드시 수용된다(회신 계약 통지가 막히면 계약이
-    ///   반쪽 — ADR-0103 불변식). 그래서 반려 갈래가 없고 반환값도 없다.
+    /// ★반려 없음(round-6 — notice 전용 레인)★: `ParkKind::Notice` 는 message 백로그와 무관한 자기 레인
+    ///   (`mailbox::NOTICE_CAP`)에서 회계되고, 그 레인이 가득 차면 **가장 오래된 통지가 회수될 뿐** 신규는
+    ///   반드시 수용된다(회신 계약 통지가 막히면 계약이 반쪽 — ADR-0103 불변식). 그래서 반려 갈래가 없고
+    ///   반환값도 없다. 회수분은 조용히 사라지지 않는다 — 장부에 `skipped` 로 남는다(`park_into`).
     /// ★FIFO 정합★: 앞선 파킹이 있으면 notice 도 그 뒤에 붙는다 — 통지가 앞선 메일을 앞지르지 않는다.
     /// ★조용한 유실 금지★: park 와 함께 장부에 `pending` 을 남기고, 실제 주입 때 flush 가 `delivered` 로
     ///   전이한다(발신자 없음이라 장부 from 은 데몬 라벨, 관측 신원은 nil — 위 상수·헬퍼 주석).
@@ -1256,6 +2220,25 @@ impl MessagingService {
         let notice_id = drawn.id;
         // 이름이 지금 유일 도달로 풀리면 그쪽 도어벨도 누른다(발신자가 죽고 같은 이름이 재스폰된 경우).
         let by_name = unique_reachable_in(roster, recipient);
+        // ★생사 스냅샷은 **반드시 실제로 해석한 값**을 넘긴다(round-6 finding — 대량 회수 결함의 진원)★:
+        //   이 값은 park 의 압력 회수에서 "무엇이 배달 불가 잔해인가" 의 기준축이다. 옛 구현은 여기서
+        //   `None`(= "지금이 누구인지 모른다")을 넘겼고, 그때의 회수 판정(`!visible_to`)은 그걸 **"큐의 모든
+        //   결박 항목이 stale"** 로 읽어 — 바로 이 수신자에게 배달될 산 메일까지 회수 후보에 올렸다. 지금은
+        //   저장소가 "모름" 과 "없음" 을 구분해 모르면 회수하지 않지만(mailbox `is_stale_bound`), 그건
+        //   방어선이지 면허가 아니다: 우리는 여기서 그 incarnation 을 **이미 알고 있다**(로스터 스냅샷).
+        // ★목록 구성(F2)★ = ① 그 이름을 지금 달고 있는 산 incarnation 전부(동명 다수 포함) ② 거기에 장부가
+        //   든 **발신자 id** 가 살아 있으면 그것도 더한다 — 그 사이 개명했으면 이름으로는 안 잡히지만 이 큐의
+        //   주인은 여전히 그 incarnation 이라, 빼면 자기 앞 결박 메일이 잔해로 몰린다. 둘 다 없으면 빈 목록
+        //   (정직한 "모른다" — 회수 없음).
+        // ★오늘 notice 레인은 이 값을 소비하지 않는다(회수 기준이 "가장 오래된 통지" 라 결박과 무관)★ —
+        //   그래도 넘기는 이유는 park 호출부의 계약을 한 벌로 유지하기 위해서다. "이 호출부만 거짓말해도
+        //   된다" 는 예외가 정확히 지난 결함이었다.
+        let mut live_here = live_incarnations_named(roster, recipient);
+        if let Some(a) = roster.iter().find(|a| a.id == due.sender_id) {
+            if !live_here.contains(&(a.id, a.epoch)) {
+                live_here.push((a.id, a.epoch));
+            }
+        }
         let hint = format!("notice for '{recipient}' parked until that agent can receive it.");
         let _ = self.park_pending(
             &notice_id,
@@ -1266,6 +2249,7 @@ impl MessagingService {
             body,
             hint,
             Some(due.sender_id),
+            &live_here,
             ParkKind::Notice,
             &SendMeta::default(),
         );
@@ -1432,6 +2416,37 @@ impl MessagingService {
         st.mailbox.msg_ids(recipient)
     }
 
+    /// 관측/테스트용 — 그 이름 앞으로 **아직 정산되지 않은 in-flight** 건수(정산 누수 단언 · round-7 의
+    ///   FIFO 합류/flush 유예 판정이 보는 값과 동일한 출처).
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn in_flight_len(&self, recipient: &str) -> usize {
+        let st = self.state.lock().expect("messaging state poisoned");
+        st.mailbox.in_flight_len(recipient)
+    }
+
+    /// ★테스트/하네스 전용(C4)★ — 등록 그룹에 멤버를 넣는다(없으면 그룹 생성). `@all` 은 내장이라 거절된다.
+    ///
+    /// ★왜 `_for_test` 인가★: 그룹 **관리 표면**(MCP `group` 툴 · CLI `group update`)은 D 스코프다. C4 는
+    ///   *해석·방송*만 배선하므로, 그때까지 등록 그룹 경로를 실증하려면 레지스트리를 직접 채울 통로가
+    ///   필요하다. D 가 정식 커맨드를 붙이면 테스트도 그쪽으로 옮기고 이 seam 은 지운다(운영 코드가 부르지
+    ///   않는다 — `corrupt_parked_payload_for_test` 와 같은 계열).
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn add_group_member_for_test(&self, group: &str, member: &str) {
+        let mut st = self.state.lock().expect("messaging state poisoned");
+        st.groups
+            .add_member(group, member)
+            .expect("테스트 그룹 등록 실패(이름 규약 또는 내장 그룹)");
+    }
+
+    /// ★테스트/하네스 전용(C4)★ — 멤버 없는 빈 그룹을 만든다(`GROUP_EMPTY` 갈래 실증용).
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn create_group_for_test(&self, group: &str) {
+        let mut st = self.state.lock().expect("messaging state poisoned");
+        st.groups
+            .create(group)
+            .expect("테스트 그룹 생성 실패(이름 규약 또는 내장 그룹)");
+    }
+
     /// 테스트 전용(C3 리뷰 fix 4) — 파킹 항목 하나의 payload 를 **의도적으로 손상**시킨다. 깨진 항목이
     ///   flush 배치를 중단시키지 않고 그 항목만 폴백 봉투로 열화되는지 실제 경로로 단언하는 seam.
     #[cfg(any(test, feature = "test-harness"))]
@@ -1440,6 +2455,281 @@ impl MessagingService {
         st.mailbox
             .corrupt_envelope_for_test(recipient, idx, "CORRUPT-PAYLOAD".to_string());
     }
+}
+
+/// 그룹 fan-out 의 멤버별 **판정 결과**(락 안에서 정하고 락 밖에서 집행한다 — C4).
+///
+/// ★왜 판정과 집행을 나누나(락 규율)★: 파킹·장부는 락 안에서 원자적으로 끝내야 하고(큐가 "비어 보이는 창"
+///   금지 — flush_for 주석), 주입·도어벨은 절대 락 안에서 하면 안 된다(port 호출). 그래서 락 안에선 "이
+///   멤버를 어떻게 할지" 만 정해 이 값으로 들고 나온다.
+enum MemberPlan {
+    /// 지금 주입한다(락 밖). 해석된 산 멤버.
+    Deliver(LiveAgent),
+    /// 이미 파킹했다(장부 `pending` 기록 완료) — 락 밖에서 도어벨만 누른다.
+    Parked { hint: String, doorbell: AgentId },
+    /// 배달하지 않는다(장부 `skipped` 기록 완료) — 락 밖에서 할 일 없음.
+    Skipped { hint: String },
+}
+
+/// 그룹 멤버 명단에서 **같은 이름 중복을 접는다**(첫 등장 순서 유지 — C4).
+///
+/// ★왜 필요한가★: 주소 단위는 이름이라(WYSIWYA — ADR-0101) 같은 이름이 두 번 나오면 그건 두 수신자가
+///   아니라 **한 수신자**다. `@all` 은 로스터 이름 verbatim 이라 동명 에이전트가 둘이면 같은 이름이 두 번
+///   들어온다 — 접지 않으면 응답 `results[]` 에 같은 이름이 두 줄(둘 다 동명 다수 skip) 나와 발신자가
+///   "수신자가 둘인가?" 로 오독한다(spec §6 = 멤버당 한 줄).
+/// ★등록 명단의 중복도 **의도적으로** 한 줄로 접는다(리뷰 항목 L — 명시적 결정)★: v1 레지스트리는 add
+///   단계에서 이미 dedup 하지만 그건 이 함수가 **기대는 보장이 아니다** — 미래 `GroupSource`(폴더·계층)는
+///   같은 이름을 여러 번 낼 수 있고, seam 계약은 "명단 verbatim" 만 요구한다. 그때도 답은 같다: **결과의
+///   단위는 "멤버"** 이지 "명단 줄" 이 아니다. 같은 수신자에게 같은 방송을 두 번 밀면 수신 LLM 이 같은 지시를
+///   두 번 읽는 실해이고, 결말이 하나인데 두 줄로 보고하면 회계만 부풀 뿐 새 사실이 없다. 명단에 이름을 두 번
+///   적은 건 정보가 0 인 표기 중복이라 접어도 잃는 사실이 없다.
+fn dedup_members(members: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    members
+        .into_iter()
+        .filter(|m| seen.insert(m.clone()))
+        .collect()
+}
+
+/// `park_into` 인자 묶음 — 파킹 1건에 필요한 재료(인자 수가 많아 struct 로 묶는다).
+struct ParkRequest<'a> {
+    msg_id: &'a str,
+    sender_name: &'a str,
+    from: BoundIdentity,
+    entrance: Entrance,
+    recipient: &'a str,
+    body: &'a str,
+    hinted_id: Option<AgentId>,
+    /// ★incarnation 결박(C4 리뷰 fix A)★ — `Some((id, epoch))` 면 그 incarnation **에게만** 배달 가능한
+    ///   파킹이다(그룹 방송 전용). 단일 발송·notice 는 항상 `None`(이름 주소 규칙 유지). 의미·근거는
+    ///   mailbox.rs `ParkedMessage.bound_incarnation` 주석이 정본.
+    bound_incarnation: Option<(AgentId, u32)>,
+    /// ★압력 회수의 기준 = **생사 스냅샷**(F2 — 결박과 다른 축, 단수에서 집합으로)★: 이 park 시점에
+    ///   **park 키(이름)를 달고 있는 산 incarnation 전부**(`live_incarnations_named` 가 로스터 스냅샷에서
+    ///   뽑는다). 하나도 해석 못 했으면 빈 슬라이스 = "모른다" → 저장소는 아무것도 회수하지 않는다.
+    ///
+    /// ★왜 `bound_incarnation` 과 따로 두나★: 결박은 "누구에게만 배달할까"(배달 대상), 이건 "무엇이 이미
+    ///   배달 불가한 잔해인가"(회수 대상 판정)다. 그룹 파킹에선 값이 겹쳐 보이지만, **단일 발송은 결박이
+    ///   `None` 이면서도 해석된 수신자가 있다**. 하나로 합치면 단일 발송이 결박돼 재스폰 배달이 멈춘다.
+    /// ★왜 단수 `current` 가 아니라 집합인가(F2 — 실측 결함)★: 옛 축은 "이 park 이 해석한 그 하나" 였고,
+    ///   저장소는 "그것과 다르면 잔해" 로 읽었다. 동명 다수(exact-id 발송·재스폰 공존)에서 그 판정은 **살아
+    ///   있는 동명 A 앞 결박 메일**을 B 앞 park 의 압력으로 걷어냈다. 근거는 mailbox `is_stale_bound` 주석.
+    /// ★cap 분모에는 관여하지 않는다★(round-6 — 분모는 결박을 모른다. F1 이후 분모는 큐 + in-flight).
+    live_incarnations: &'a [(AgentId, u32)],
+    kind: ParkKind,
+    meta: &'a SendMeta,
+}
+
+/// ★장부에 **못 남긴** 종점 전이 1건(C4 리뷰 fix J · round-5 finding 2)★ — 레코드가 이력 링에서 이미
+///   밀려나(`TransitionError::NotFound`) 전이가 불가능했던 사실을, **찍으려던 상태와 함께** 나른다.
+///
+/// ★왜 `intended` 를 나르나(finding 2 — load-bearing)★: 이 수집함은 처음엔 만료(`expired`) 전용이었는데
+///   이후 `skipped` 전이(확정 사망 회수·압력 회수)까지 같은 함에 담기게 됐다. 상태를 안 나르면 로그가
+///   전부 "expired" 로 뭉개져 — 레코드가 사라진 마당에 **유일하게 남는 감사 증거**가 거짓 원인을 말한다.
+///   그래서 전이에 쓴 상태를 그대로 실어 보낸다(전이와 로그가 **같은 값** 하나를 쓴다 — 갈릴 여지 없음).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvictedTransition {
+    msg_id: String,
+    recipient: String,
+    /// 전이하려던 종점 상태(`Expired` = TTL 만료 / `Skipped` = 수신자 소멸로 회수).
+    intended: DeliveryStatus,
+}
+
+/// 종점 전이 1회 + evict 사실 수집(**단일 지점** — 의도 상태가 전이와 로그에서 갈릴 수 없다).
+///
+/// `Illegal` 은 best-effort 로 무시한다(장부 그래프 위반은 상위 버그지만 배달을 막을 이유가 없다).
+/// `NotFound` 만 수집해 호출자가 **락 밖에서** 로깅한다(락 보유 중 tracing 금지 — 모듈 헤더 규율).
+fn transition_or_collect_evicted(
+    ledger: &mut Ledger,
+    msg_id: &str,
+    recipient: &str,
+    intended: DeliveryStatus,
+    now: Instant,
+    evicted: &mut Vec<EvictedTransition>,
+) {
+    if let Err(TransitionError::NotFound) = ledger.transition(msg_id, recipient, intended, now) {
+        evicted.push(EvictedTransition {
+            msg_id: msg_id.to_string(),
+            recipient: recipient.to_string(),
+            intended,
+        });
+    }
+}
+
+/// 수집된 evict 사실을 찍는다 — **락 밖에서만** 부른다(모듈 헤더 규율).
+fn log_evicted_transitions(evicted: &[EvictedTransition]) {
+    for e in evicted {
+        tracing::debug!(
+            msg_id = %e.msg_id,
+            recipient = %e.recipient,
+            intended_status = ?e.intended,
+            "record evicted before terminal transition — 종점(만료/회수)은 실제로 일어났으나 이력 링버퍼에서 이미 밀려나 장부에 남길 레코드가 없음(ledger HISTORY_CAPACITY)"
+        );
+    }
+}
+
+/// ★in-flight 영수증의 단일 출구 정산 가드(F1 · load-bearing)★ — `Mailbox::take_in_flight` 로 올려 둔 cap
+///   분모를 **어떤 경로로 flush 를 빠져나가든** 반드시 내린다.
+///
+/// ★왜 스택 가드인가★: 배달 루프는 타깃마다 early break 가 있고 중간에 외부 호출(inject)이 섞여 있다.
+///   정산을 갈래마다 흩뿌리면 한 곳만 놓쳐도 그 수신자 레인의 분모가 **영구히** 부풀어(누수) 그 이름 앞
+///   메일이 영영 안 들어간다 — 조용한 유실보다 고치기 어려운 실패 모드다. 그래서 "남은 건 Drop 이 갚는다"
+///   로 뒤집어, 갈래별 정산은 **최적화**(분모를 실제 미결 건수에 맞추기)일 뿐 정확성 조건이 아니게 만든다.
+/// ★Drop 에서 락 실패를 삼키는 이유★: 언와인딩 중일 수 있고, 그때 messaging 락은 이미 poisoned 다. 거기서
+///   다시 패닉하면 이중 패닉으로 프로세스가 죽는다 — 그리고 락이 poisoned 라는 건 이 서비스가 이미 죽었다는
+///   뜻이라(모든 경로가 `expect` 로 패닉한다) 분모를 되돌릴 실익도 없다.
+/// ★정산 누락은 없지만 **일시 과다 계수**는 있다(명시 계약)★: 배달 완료·복원 갈래는 그 자리에서 떼어 내지만,
+///   그 사이 구간에서는 나가 있는 건수만큼 분모가 높다 — 그게 F1 이 막으려는 창 그 자체라 의도된 값이다.
+struct FlightSettle<'a> {
+    svc: &'a MessagingService,
+    recipient: &'a str,
+    /// 아직 반납하지 않은 몫. 갈래별 정산이 `split` 으로 떼어 가고, 남은 건 Drop 이 갚는다.
+    owed: FlightTicket,
+}
+
+impl Drop for FlightSettle<'_> {
+    fn drop(&mut self) {
+        if self.owed.is_zero() {
+            return;
+        }
+        if let Ok(mut st) = self.svc.state.lock() {
+            st.mailbox.settle_in_flight(self.recipient, self.owed);
+        }
+    }
+}
+
+/// ★park 1건이 남긴 **락 밖에서 처리할 사실**(round-6)★ — 압력 회수는 락 안에서 일어나지만 로깅은 락
+///   밖이어야 한다(모듈 헤더 규율). 그래서 `ring_or_defer(&mut deferred)` 와 같은 축적자 형태로 호출자가
+///   들고 다니다가, 락을 놓은 뒤 `log` 를 부른다.
+///
+/// ★세 갈래를 **따로 센다**★: 회수 사유가 다르기 때문이다(message = 배달 불가 잔해 정리 / notice = 더 최신
+///   통지에 밀림 / TTL 초과 = 시계가 먼저 운명을 정함). 한 필드로 합치면 로그가 사유를 뭉개 운영 중 오진을
+///   부르고, 특히 TTL 갈래는 **장부 어휘 자체가 다르다**(`expired` — F3).
+#[derive(Debug, Default)]
+struct ParkSideEffects {
+    /// message 레인 압력으로 걷어낸 배달 불가 잔해의 msg_id(장부 `skipped` 전이는 락 안에서 이미 끝났다).
+    retired_stale: Vec<String>,
+    /// notice 레인 상한으로 밀려난 옛 통지의 msg_id(같은 전이·같은 규율).
+    retired_notices: Vec<String>,
+    /// ★회수 시점에 이미 TTL 을 넘겨 있던 항목(F3)★ — 장부 어휘가 `expired` 라 위 둘과 분리한다(레인 무관).
+    retired_expired: Vec<String>,
+    /// 그 전이가 링 evict 로 실패한 항목(의도 상태 동반 — finding 2).
+    evicted: Vec<EvictedTransition>,
+}
+
+impl ParkSideEffects {
+    /// 락 밖 로깅. 아무 일도 없었으면(대부분) no-op.
+    fn log(&self, recipient: &str) {
+        if !self.retired_expired.is_empty() {
+            tracing::debug!(
+                recipient,
+                retired = self.retired_expired.len(),
+                msg_ids = ?self.retired_expired,
+                "park retire: 회수 시점에 이미 TTL(mailbox PARK_TTL) 초과 — sweep(60s 주기)이 아직 안 걷었을 뿐이라 장부 어휘는 skipped 가 아니라 expired(spec §5 · F3)"
+            );
+        }
+        if !self.retired_stale.is_empty() {
+            tracing::debug!(
+                recipient,
+                retired = self.retired_stale.len(),
+                msg_ids = ?self.retired_stale,
+                "park retire: 보관함 cap(mailbox MAILBOX_CAP) 압력 — 결박 incarnation 이 사라져 배달 불가한 방송 잔해를 오래된 순으로 회수하고 장부 skipped(round-6)"
+            );
+        }
+        if !self.retired_notices.is_empty() {
+            tracing::debug!(
+                recipient,
+                retired = self.retired_notices.len(),
+                msg_ids = ?self.retired_notices,
+                "park retire: notice 레인 상한(mailbox NOTICE_CAP) 초과 — 가장 오래된 통지를 회수하고 장부 skipped(신규 통지는 항상 수용 — round-6)"
+            );
+        }
+        log_evicted_transitions(&self.evicted);
+    }
+}
+
+/// ★파킹 + 장부 `pending` 기록의 **락 안 알맹이**(단일 발송·그룹 fan-out 공용)★.
+///
+/// ★왜 자유 함수로 뽑았나★: 그룹 fan-out 은 멤버 N명의 판정·파킹을 **한 락 구간**에서 끝내야 하는데
+///   (`handle_group_send` 락 규율), `park_pending` 은 자기가 락을 잡는다 — 그대로 부르면 멤버마다 락을
+///   잡았다 놓아 "큐가 비어 보이는 창" 이 열린다. 그래서 락을 **호출자가 쥔 채** 부를 수 있는 알맹이를
+///   분리하고, 단일 발송용 `park_pending` 은 이걸 감싸는 얇은 래퍼로 남긴다(파킹 규칙 한 벌 유지 —
+///   조용한 유실 금지·payload 인코딩·장부 기록이 두 경로에서 갈리면 안 된다).
+/// ★조용한 유실 금지(ADR-0103)★: park 성공 시 반드시 장부에 `pending` 을 남긴다. cap 초과 반려는 저장
+///   자체를 안 하므로 장부도 안 남긴다(호출자가 반려/skip 으로 가시화한다).
+/// ★압력 회수의 장부화(round-6 · F3 어휘 보정)★: 이 park 이 자리를 만드느라 걷어낸 항목
+///   (`ParkAdmitted.retired` — message 레인의 배달 불가 잔해 또는 notice 레인의 옛 통지)은 **여기서** 장부
+///   종점으로 전이한다 — 저장소는 순수라 장부를 모르고, 그 사실을 아는 유일한 지점이 이 경계다. 걷어내고
+///   장부를 안 고치면 유령 pending 이 남는다(큐엔 없는데 조회하면 "배달 대기 중"). 사유별 로깅 거리는
+///   `effects` 에 나눠 모아 **락 밖**에서 찍는다(모듈 헤더 규율).
+/// ★어휘는 항목마다 갈린다 — TTL 이 `skipped` 보다 우선(F3)★: 기본은 `skipped`("그 수신자에게는 배달하지
+///   않음")지만, sweep 주기(60s)와 TTL(24h) 사이의 틈 때문에 **이미 TTL 을 넘겼는데 아직 안 걷힌** 항목이
+///   회수될 수 있다. 그건 spec §5 계약상 `expired` 다(시계가 먼저 그 항목의 운명을 정했고, 회수는 그저 그
+///   사실을 늦게 발견한 것이다). 판정은 mailbox 의 `ParkedMessage::is_expired(now)` 를 그대로 재사용한다 —
+///   TTL 상수도 `>=` 경계 규약도 저장소 한 곳에만 두려고 리터럴을 복제하지 않는다.
+fn park_into(
+    st: &mut MessagingState,
+    req: ParkRequest<'_>,
+    now: Instant,
+    effects: &mut ParkSideEffects,
+) -> Result<(), ParkError> {
+    // park 는 raw body + 봉투/관측에 필요한 최소 메타(sender 이름·발신자 신원·입구·회신 계약·그룹 라벨)를
+    //   나른다(봉투는 flush 주입 시점 조립 — 단일 wrap point). ParkedMessage.envelope 계약이 "완성 봉투"라
+    //   여기선 ParkPayload 로 인코딩해 그 문자열 슬롯에 실어 보관하고, flush 때 decode 한다.
+    let payload = ParkPayload {
+        sender_name: req.sender_name.to_string(),
+        from: req.from,
+        entrance: req.entrance,
+        body: req.body.to_string(),
+        meta: req.meta.clone(),
+    };
+    let parked = ParkedMessage {
+        msg_id: req.msg_id.to_string(),
+        envelope: payload.encode(),
+        kind: req.kind,
+        parked_at: now,
+        // admission 순번은 `park` 이 수용 시점에 부여한다(저장소가 유일 부여자 — mailbox 주석). 여기 값은
+        //   무시되므로 placeholder.
+        admission_seq: 0,
+        hinted_id: req.hinted_id,
+        bound_incarnation: req.bound_incarnation,
+    };
+    let admitted = st
+        .mailbox
+        .park(req.recipient, parked, req.live_incarnations)?;
+    // 회수분 종점 — 기본 어휘는 `skipped`(배달할 수신자가 사라졌거나 더 최신 통지에 밀림)이고, **이미 TTL 을
+    //   넘긴 항목만 `expired`**(위 doc "TTL 이 skipped 보다 우선" — F3). 레코드가 이미 링에서 밀려났으면
+    //   사실만 모아 락 밖 debug. 로그 갈래는 어휘 우선, 그 다음 레인(`kind`)으로 가른다.
+    for m in admitted.retired {
+        let expired = m.is_expired(now);
+        let intended = if expired {
+            DeliveryStatus::Expired
+        } else {
+            DeliveryStatus::Skipped
+        };
+        transition_or_collect_evicted(
+            &mut st.ledger,
+            &m.msg_id,
+            req.recipient,
+            intended,
+            now,
+            &mut effects.evicted,
+        );
+        match (expired, m.kind) {
+            (true, _) => effects.retired_expired.push(m.msg_id),
+            (false, ParkKind::Message) => effects.retired_stale.push(m.msg_id),
+            (false, ParkKind::Notice) => effects.retired_notices.push(m.msg_id),
+        }
+    }
+    st.ledger.record(
+        req.msg_id,
+        req.sender_name,
+        req.recipient,
+        req.body,
+        DeliveryStatus::Pending,
+        now,
+    );
+    Ok(())
 }
 
 /// 파킹 payload — flush 주입 시점에 봉투 조립·관측 레코드 발행에 필요한 최소 메타(sender 이름·발신자
@@ -1454,10 +2744,10 @@ impl MessagingService {
 ///   동일한 봉투 속성**(id/type/reply-by/in-reply-to)이 붙어야 한다. 안 나르면 파킹을 거친 request 는
 ///   속성 없는 plain 메시지로 도착해 수신 LLM 이 회신할 id 를 모르고, 발신자만 기한 초과 notice 를 받는다
 ///   (계약이 조용히 깨지는 최악 모드). 봉투를 park 시점에 굳히지 않는 설계의 대가로 재료를 나른다.
-/// ★인코딩(v1 태그 — C3 리뷰 fix 4 에서 버전 헤더 도입)★:
-///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<from_agent_id>\n<from_epoch>\n<entrance>\n<flags>\n`
-///   `<sender><reply_by><reply_to><body>`
-///   앞 8줄은 개행 없는 필드(숫자/uuid/짧은 리터럴)라 개행으로 안전 분리하고, 가변 문자열 4개는 **길이
+/// ★인코딩(v2 태그 — C3 리뷰 fix 4 에서 버전 헤더 도입, C4 에서 그룹 라벨 추가)★:
+///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<group_len>\n<from_agent_id>\n<from_epoch>\n`
+///   `<entrance>\n<flags>\n<sender><reply_by><reply_to><group><body>`
+///   앞 9줄은 개행 없는 필드(숫자/uuid/짧은 리터럴)라 개행으로 안전 분리하고, 가변 문자열 5개는 **길이
 ///   접두**로 경계를 잡는다(body·reply_to 에 개행이 들어와도 안전 — reply_to 는 에이전트 입력이라 임의
 ///   문자열일 수 있다). 길이 0 = `None`(빈 문자열 `Some("")` 은 입구 검증이 이미 반려하므로 모호하지 않다).
 ///
@@ -1466,15 +2756,18 @@ impl MessagingService {
 ///   자리로 밀려 body 가 잘리는 식). 1글자 태그가 있으면 **모르는 버전 = 즉시 폴백**으로 갈라져, 오해석
 ///   대신 "봉투 속성 잃고 body 만 남음"(보이는 열화)으로 실패한다. v2 영속화가 파킹을 디스크에 남기면
 ///   이 태그가 마이그레이션 분기점이 된다.
-const PARK_PAYLOAD_VERSION: &str = "1";
+/// ★C4 에서 `1` → `2`★: 필드가 하나 늘었다(그룹 라벨). 같은 프로세스 안에서만 쓰는 형식이라 옛 payload 가
+///   실재할 수는 없지만, 태그를 그대로 두면 **레이아웃이 바뀌었는데 버전은 같은** 상태가 되어 태그의
+///   의미(= 이 문자열의 레이아웃 계약)가 무너진다 — "형식이 바뀌면 태그도 바뀐다" 는 규율을 지킨다.
+const PARK_PAYLOAD_VERSION: &str = "2";
 
 struct ParkPayload {
     sender_name: String,
     from: BoundIdentity,
     entrance: Entrance,
     body: String,
-    /// C3 회신 계약 메타(파싱된 Duration 은 **복원하지 않는다** — 계약은 발송 시점에 이미 장부에 열렸고,
-    ///   flush 가 필요한 건 봉투 속성뿐이다). 그래서 `reply_by` 는 raw 표기만 살아남는다.
+    /// C3 회신 계약 메타 + C4 그룹 라벨(파싱된 Duration 은 **복원하지 않는다** — 계약은 발송 시점에 이미
+    ///   장부에 열렸고, flush 가 필요한 건 봉투 속성뿐이다). 그래서 `reply_by` 는 raw 표기만 살아남는다.
     meta: SendMeta,
 }
 
@@ -1487,13 +2780,16 @@ impl ParkPayload {
         };
         let reply_by = self.meta.reply_by_raw.as_deref().unwrap_or("");
         let reply_to = self.meta.reply_to.as_deref().unwrap_or("");
+        // C4: 그룹 라벨(봉투 `to`) — 파킹된 방송이 늦게 배달돼도 "방송" 표시를 잃지 않게 함께 나른다.
+        let group = self.meta.group.as_deref().unwrap_or("");
         let flags = if self.meta.request { "r" } else { "-" };
         format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}{}{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}{}{}{}",
             PARK_PAYLOAD_VERSION,
             self.sender_name.len(),
             reply_by.len(),
             reply_to.len(),
+            group.len(),
             self.from.agent_id,
             self.from.epoch,
             ent,
@@ -1501,6 +2797,7 @@ impl ParkPayload {
             self.sender_name,
             reply_by,
             reply_to,
+            group,
             self.body
         )
     }
@@ -1514,8 +2811,9 @@ impl ParkPayload {
     ///   `split_at` 이 패닉하는 그 경우) 버전이 모르는 값이면, 봉투 속성을 잃되 원문을 body 로 살려 보낸다.
     ///   덕분에 배치의 다른 항목은 정상 배달된다(테스트: corrupt 항목 1개가 배치를 중단시키지 않음).
     fn decode(s: &str) -> Self {
-        // 버전 + 앞 7개 개행 필드 + 나머지(sender+reply_by+reply_to+body). splitn(9) 로 body 안 개행을 보존.
-        let mut it = s.splitn(9, '\n');
+        // 버전 + 앞 8개 개행 필드 + 나머지(sender+reply_by+reply_to+group+body). splitn(10) 으로 body 안
+        //   개행을 보존한다(마지막 조각은 자르지 않는다).
+        let mut it = s.splitn(10, '\n');
         let fallback = || Self {
             sender_name: String::new(),
             from: BoundIdentity {
@@ -1531,12 +2829,14 @@ impl ParkPayload {
             Some(sender_len),
             Some(rb_len),
             Some(rt_len),
+            Some(grp_len),
             Some(id_str),
             Some(ep_str),
             Some(ent_str),
             Some(flags),
             Some(rest),
         ) = (
+            it.next(),
             it.next(),
             it.next(),
             it.next(),
@@ -1564,10 +2864,11 @@ impl ParkPayload {
         else {
             return fallback();
         };
-        let (Ok(sender_len), Ok(rb_len), Ok(rt_len), Ok(agent_id), Ok(epoch)) = (
+        let (Ok(sender_len), Ok(rb_len), Ok(rt_len), Ok(grp_len), Ok(agent_id), Ok(epoch)) = (
             sender_len.parse::<usize>(),
             rb_len.parse::<usize>(),
             rt_len.parse::<usize>(),
+            grp_len.parse::<usize>(),
             id_str.parse::<AgentId>(),
             ep_str.parse::<u32>(),
         ) else {
@@ -1577,6 +2878,7 @@ impl ParkPayload {
         let Some(total) = sender_len
             .checked_add(rb_len)
             .and_then(|v| v.checked_add(rt_len))
+            .and_then(|v| v.checked_add(grp_len))
         else {
             return fallback();
         };
@@ -1589,15 +2891,18 @@ impl ParkPayload {
         let cut1 = sender_len;
         let cut2 = cut1 + rb_len;
         let cut3 = cut2 + rt_len;
+        let cut4 = cut3 + grp_len;
         if !rest.is_char_boundary(cut1)
             || !rest.is_char_boundary(cut2)
             || !rest.is_char_boundary(cut3)
+            || !rest.is_char_boundary(cut4)
         {
             return fallback();
         }
         let (sender, tail) = rest.split_at(cut1);
         let (reply_by, tail) = tail.split_at(rb_len);
-        let (reply_to, body) = tail.split_at(rt_len);
+        let (reply_to, tail) = tail.split_at(rt_len);
+        let (group, body) = tail.split_at(grp_len);
         Self {
             sender_name: sender.to_string(),
             from: BoundIdentity { agent_id, epoch },
@@ -1609,6 +2914,7 @@ impl ParkPayload {
                 // 파싱값은 복원하지 않는다(위 struct 주석 — flush 는 표기만 필요).
                 reply_by: None,
                 reply_to: (!reply_to.is_empty()).then(|| reply_to.to_string()),
+                group: (!group.is_empty()).then(|| group.to_string()),
             },
         }
     }
@@ -1679,6 +2985,24 @@ fn unique_reachable_in(roster: &[LiveAgent], name: &str) -> Option<LiveAgent> {
     }
 }
 
+/// ★park 시점 생사 스냅샷(F2)★ — 주어진 로스터 스냅샷에서 **그 이름을 지금 달고 있는 산 incarnation
+///   전부**를 `(AgentId, epoch)` 로 뽑는다. mailbox 의 압력 회수는 이 목록에 **없는** 결박만 잔해로 본다.
+///
+/// ★왜 유일 해석(`unique_reachable_in`)이 아니라 전량인가★: 이 시스템은 동명 다수를 1급 상태로 허용한다
+///   (exact-id 발송이 모호성을 통과하고, 재스폰 직후 옛·새가 공존한다). 유일 해석은 그 상황에서 `None` 을
+///   내거나 한 쪽만 지목하는데, 그 값을 회수 기준으로 쓰면 **다른 쪽 앞 산 메일**이 잔해로 몰려 걷힌다
+///   (F2 결함). 회수 판정에 필요한 사실은 "누구에게 보낼까" 가 아니라 "누가 아직 살아 있나" 라서 집합이다.
+/// ★증거의 한계(수용된 잔여)★: 근거는 `live_reachable_agents` 스냅샷이라 **살아 있지만 비-도달**
+///   (non-structured)인 incarnation 은 여기 안 잡힌다 — 그 앞 결박은 압력이 찰 때 잔해로 판정될 수 있다.
+///   더 강한 증거원이 없어 그대로 두되, 목록이 **비면** 저장소가 아예 회수하지 않으므로 최악은 막힌다.
+fn live_incarnations_named(roster: &[LiveAgent], name: &str) -> Vec<(AgentId, u32)> {
+    roster
+        .iter()
+        .filter(|a| a.name == name)
+        .map(|a| (a.id, a.epoch))
+        .collect()
+}
+
 fn resolve_live(to: &str, roster: &[LiveAgent]) -> Option<LiveAgent> {
     // F2: AgentId 문자열 정확 일치 우선(이름=UUID 충돌이 ID 지목을 가로채지 못하게 — ingress 미러).
     if let Some(a) = roster.iter().find(|a| a.id.to_string() == to) {
@@ -1691,27 +3015,13 @@ fn resolve_live(to: &str, roster: &[LiveAgent]) -> Option<LiveAgent> {
     None
 }
 
-/// sweep 만료분을 ledger 에 `expired` 로 남긴다(recipient 를 sweep 반환이 안 주므로 msg_id 로 레코드 역조회).
-///   같은 msg_id 의 첫 `pending` 레코드를 찾아 그 to 로 전이한다. 조용한 유실 금지(spec §5 expired 장부 잔존).
-///
-/// ★C4 위험(finding 7 · load-bearing 경고)★: "첫 pending 레코드" 선택은 **단일 수신자 C1 에서만 옳다**.
-///   C4 그룹 방송은 한 msg_id 에 수신자별 레코드가 N개(1 msg_id : N records)라, 만료된 특정 수신자 큐 항목이
-///   어느 레코드인지 msg_id 만으로는 특정 못 한다 — 첫 pending 을 집으면 **엉뚱한 수신자 레코드**를 expired 로
-///   전이할 수 있다. C4 가 들어오면 sweep_expired 가 (msg_id, recipient) 를 함께 반환하도록 mailbox seam 을
-///   넓혀 여기서 recipient 로 정확히 지목해야 한다(msg_id 단독 역조회 금지). 그 전까지 이 헬퍼는 C1 전용이다.
+// ★제거됨(C4 — ADR-0104 앵커 해소)★: 옛 `transition_expired_by_msg_id` 는 sweep 만료분을 msg_id 만으로
+//   장부에서 역조회해 "첫 pending 레코드" 를 expired 로 전이했다. 그 선택은 **단일 수신자에서만** 옳다 —
+//   그룹 방송은 한 msg_id 에 수신자별 레코드가 N개라 엉뚱한 멤버를 만료시킬 수 있고, 무엇보다 이력 삽입
+//   순서와 만료 순서의 **우연한 상관**에 정확성을 기대는 구조였다. 이제 mailbox 가 만료 항목마다 큐 키를
+//   함께 돌려주므로(`ExpiredParked`) `sweep` 이 `(msg_id, recipient)` 로 직접 지목한다. 이 헬퍼를 되살리지
+//   말 것 — msg_id 단독 역조회는 1:N 장부와 구조적으로 양립하지 않는다.
 // ADR-0104
-fn transition_expired_by_msg_id(ledger: &mut Ledger, msg_id: &str, now: Instant) {
-    // 이 msg_id 의 pending 레코드의 recipient(to)를 찾는다. records_for 는 &, transition 은 &mut 이라
-    //   recipient 를 String 으로 복사해 borrow 를 끊는다(락 구간 내 순수 조작).
-    let recipient = ledger
-        .records_for(msg_id)
-        .iter()
-        .find(|r| r.status == DeliveryStatus::Pending)
-        .map(|r| r.to.clone());
-    if let Some(to) = recipient {
-        let _ = ledger.transition(msg_id, &to, DeliveryStatus::Expired, now);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1721,8 +3031,11 @@ mod tests {
 
     /// 헤드리스 테스트용 DeliveryPort — 로스터·주입 성공/실패를 스크립트한다(claude/PTY 없음).
     struct FakeDeliveryPort {
-        /// 살아있는 도달 가능 로스터(테스트가 세팅).
-        roster: StdMutex<Vec<LiveAgent>>,
+        /// 살아있는 도달 가능 로스터(테스트가 세팅). ★Arc 인 이유★: 테스트가 핸들을 복제해 **inject 도중**
+        ///   (on_inject hook 안에서) 로스터를 갈아끼울 수 있어야 한다 — "로스터 스냅샷 이후·write 이전에
+        ///   수신자가 재시작했다" 는 TOCTOU 를 결정적으로 재현하는 유일한 방법이다(port 자체를 hook 에
+        ///   캡처하면 자기참조 순환이 된다).
+        roster: Arc<StdMutex<Vec<LiveAgent>>>,
         /// 주입 시도 로그(순서대로 (to_id, 바이트)). 오래된 순 주입·개별 봉투 단언용.
         injected: StdMutex<Vec<(AgentId, Vec<u8>)>>,
         /// inject 호출 횟수(0-based) — fail_at_call 인덱스 매칭용.
@@ -1732,7 +3045,10 @@ mod tests {
         /// inject 호출 시점에 실행할 부수 hook(drain↔inject 사이 동시 park 레이스 재현용). 호출 인덱스를
         ///   받아 임의 조작(예: 재파킹으로 큐 재충전)을 한다 — 이 hook 안에서 서비스 락을 다시 잡지 않는다
         ///   (inject 는 락 밖 호출이므로 안전).
-        on_inject: StdMutex<Option<Box<dyn Fn(usize) + Send>>>,
+        /// ★Box 가 아니라 Arc 인 이유(round-7)★: hook 안에서 **다시 주입이 일어날 수 있다**(예: 유예된
+        ///   flush 가 되울려 그 자리에서 배달). Box 를 락 가드 아래에서 호출하면 그 재진입이 이 뮤텍스에
+        ///   걸려 **데드락**(std Mutex 는 비재진입)이라, 복제 가능한 Arc 로 바꿔 락을 놓고 부른다.
+        on_inject: StdMutex<Option<Arc<dyn Fn(usize) + Send + Sync>>>,
         /// roster 밖 id 의 canonical_name override(비-도달 수신자 = TUI 시나리오 — finding 4). roster 에
         ///   없어도 이 맵에 있으면 canonical_name 이 그 이름을 돌려준다(로스터엔 안 뜨는 산 에이전트 모사).
         canonical_overrides: StdMutex<std::collections::HashMap<AgentId, String>>,
@@ -1750,7 +3066,7 @@ mod tests {
     impl FakeDeliveryPort {
         fn new() -> Self {
             Self {
-                roster: StdMutex::new(Vec::new()),
+                roster: Arc::new(StdMutex::new(Vec::new())),
                 injected: StdMutex::new(Vec::new()),
                 call_count: StdMutex::new(0),
                 fail_at_call: StdMutex::new(Vec::new()),
@@ -1783,12 +3099,25 @@ mod tests {
         fn set_roster(&self, roster: Vec<LiveAgent>) {
             *self.roster.lock().unwrap() = roster;
         }
+        /// 로스터 핸들 — 테스트가 **inject 도중**(on_inject hook) 갈아끼우려고 복제해 간다(위 필드 주석).
+        fn roster_handle(&self) -> Arc<StdMutex<Vec<LiveAgent>>> {
+            self.roster.clone()
+        }
+        /// ★`inject_if_epoch` 이 보는 "지금" 로스터★ — armed(late-appearance) 가 있으면 그것, 없으면 기본.
+        ///   `live_reachable_agents` 와 달리 호출 카운터·hook 을 건드리지 않는다(주입 경계의 판정이지
+        ///   로스터 **조회**가 아니다 — 운영 구현도 세션 맵을 직접 보지 로스터를 다시 뜨지 않는다).
+        fn effective_roster(&self) -> Vec<LiveAgent> {
+            match self.roster_after_first.lock().unwrap().as_ref() {
+                Some(r) => r.clone(),
+                None => self.roster.lock().unwrap().clone(),
+            }
+        }
         /// 주어진 inject 호출 인덱스(0-based)들에서 Err 를 낸다(그 외는 성공).
         fn fail_at(&self, indices: &[usize]) {
             *self.fail_at_call.lock().unwrap() = indices.to_vec();
         }
         /// inject 호출마다(성공/실패 결정 전) 부를 hook 설치 — 동시 park 레이스 재현용.
-        fn set_on_inject(&self, f: Box<dyn Fn(usize) + Send>) {
+        fn set_on_inject(&self, f: Arc<dyn Fn(usize) + Send + Sync>) {
             *self.on_inject.lock().unwrap() = Some(f);
         }
         fn injected_bodies(&self) -> Vec<String> {
@@ -1801,17 +3130,40 @@ mod tests {
         }
     }
 
-    impl DeliveryPort for FakeDeliveryPort {
-        fn inject(&self, to_id: AgentId, bytes: &[u8]) -> Result<WriteOutcome, String> {
+    impl FakeDeliveryPort {
+        /// 두 주입 동사의 공통 본체 — 호출 인덱스 부여·hook·실패 스크립트·기록을 한 벌로 유지한다.
+        ///   `expected_epoch = Some(e)` 면 **운영 구현과 같은 판정**(그 id 의 현재 epoch 과 다르면 쓰지 않고
+        ///   Err)을 한다. hook 은 판정 **전에** 부른다 — "스냅샷 이후·write 이전 재시작" 이 그 순서다.
+        fn inject_inner(
+            &self,
+            to_id: AgentId,
+            expected_epoch: Option<u32>,
+            bytes: &[u8],
+        ) -> Result<WriteOutcome, String> {
             let idx = {
                 let mut c = self.call_count.lock().unwrap();
                 let i = *c;
                 *c += 1;
                 i
             };
-            // 동시 park 레이스 재현 hook(설치돼 있으면). fail/success 결정 전에 호출한다.
-            if let Some(f) = self.on_inject.lock().unwrap().as_ref() {
+            // 동시 park·재시작 레이스 재현 hook(설치돼 있으면). epoch 판정·fail/success 결정 전에 호출한다.
+            //   ★락을 놓고 부른다★ — hook 이 다시 주입을 유발해도 이 뮤텍스에 재진입하지 않게(필드 주석).
+            let hook = self.on_inject.lock().unwrap().clone();
+            if let Some(f) = hook {
                 f(idx);
+            }
+            if let Some(expected) = expected_epoch {
+                let now_epoch = self
+                    .effective_roster()
+                    .iter()
+                    .find(|a| a.id == to_id)
+                    .map(|a| a.epoch);
+                if now_epoch != Some(expected) {
+                    // 부작용 0(기록도 안 남긴다) — 운영 core 계약과 동일.
+                    return Err(format!(
+                        "epoch mismatch: agent {to_id} is now at epoch {now_epoch:?}, caller required {expected} — nothing was written"
+                    ));
+                }
             }
             if self.fail_at_call.lock().unwrap().contains(&idx) {
                 return Err("fake inject fail".to_string());
@@ -1821,8 +3173,23 @@ mod tests {
                 bytes_requested: bytes.len(),
                 bytes_written: bytes.len(),
                 msg_uuid: uuid::Uuid::new_v4(),
-                epoch: 0,
+                epoch: expected_epoch.unwrap_or(0),
             })
+        }
+    }
+
+    impl DeliveryPort for FakeDeliveryPort {
+        fn inject(&self, to_id: AgentId, bytes: &[u8]) -> Result<WriteOutcome, String> {
+            self.inject_inner(to_id, None, bytes)
+        }
+
+        fn inject_if_epoch(
+            &self,
+            to_id: AgentId,
+            expected_epoch: u32,
+            bytes: &[u8],
+        ) -> Result<WriteOutcome, String> {
+            self.inject_inner(to_id, Some(expected_epoch), bytes)
         }
         fn live_reachable_agents(&self) -> Vec<LiveAgent> {
             let call = {
@@ -2208,7 +3575,7 @@ mod tests {
         let svc_hook = svc.clone();
         let port_hook = port.clone();
         let late_for_hook = late.clone();
-        port.set_on_inject(Box::new(move |idx| {
+        port.set_on_inject(Arc::new(move |idx| {
             if idx == 0 {
                 // 동시 park 가 파킹되도록 로스터를 잠시 비운다(부재). flush_for 재검증은 이 hook 전에 끝남.
                 port_hook.set_roster(vec![]);
@@ -2240,11 +3607,20 @@ mod tests {
             vec![r#"<message from="s">b0</message>"#.to_string()],
             "실패 전(b0)만 주입"
         );
-        // ★유실 0★: b1·b2(admitted 재파킹) + 동시 park c0..c99(cap) = cap+2 건이 큐에 남아야.
+        // ★유실 0 — 단 cap 을 넘기지도 않는다(F1 에서 기대값 보정: 102 → 99)★. 옛 기대값은 "동시 park 가
+        //   cap(100)까지 다 들어오고 재파킹분 2건이 그 위에 얹힌다" 였는데, 그게 바로 사이클마다 큐를 키우던
+        //   구멍이다(빈 큐 창). 이제 drain 한 배치 3건이 in-flight 로 분모에 남아 동시 park 는 97건만
+        //   수용되고, 재파킹분 2건이 되돌아와 97 + 2 = 99 ≤ cap 이 된다. **무손실 성질은 그대로**다 —
+        //   b1·b2 는 한 건도 안 사라졌고(아래 pending 단언), 못 들어온 3건은 발신자에게 `MAILBOX_FULL` 로
+        //   가시화됐다(조용한 드롭 아님 — spec §5).
         assert_eq!(
             svc.parked_len("late"),
-            MAILBOX_CAP_FOR_TEST + 2,
-            "재파킹분(b1,b2)이 cap 재충전에도 유실되지 않아야(restore_ordered cap 우회)"
+            MAILBOX_CAP_FOR_TEST - 1,
+            "재파킹분(b1,b2)은 유실되지 않고, 합계는 cap 을 넘지 않는다(97 동시 park + 2 재파킹)"
+        );
+        assert!(
+            svc.ledger_statuses("c99").is_empty(),
+            "in-flight 때문에 반려된 동시 발송은 장부에도 안 남는다(반려 = 저장 자체를 안 함)"
         );
         assert_eq!(
             svc.ledger_statuses("m1"),
@@ -2257,7 +3633,7 @@ mod tests {
             "b2 재파킹 pending(유령 아님)"
         );
         // ★순서★: hook 을 제거하고 재-flush → 재파킹분(b1,b2)이 동시 park 분(c0..)보다 먼저 나와야.
-        port.set_on_inject(Box::new(|_| {}));
+        port.set_on_inject(Arc::new(|_| {}));
         port.fail_at(&[]);
         svc.flush_for("late", late_id);
         let bodies = port.injected_bodies();
@@ -2647,6 +4023,7 @@ mod tests {
             // 파싱값은 park 를 건너지 않는다(계약은 이미 장부에 열렸다 — ParkPayload 주석).
             reply_by: Some(Duration::from_secs(600)),
             reply_to: None,
+            group: None,
         };
         let p = ParkPayload {
             sender_name: "발신자-한글".to_string(),
@@ -2678,6 +4055,7 @@ mod tests {
                 reply_by_raw: None,
                 reply_by: None,
                 reply_to: Some("m-abc\nxyz".to_string()),
+                group: None,
             },
         };
         let d = ParkPayload::decode(&reply.encode());
@@ -3116,6 +4494,266 @@ mod tests {
             .expect("no reject");
         assert_eq!(out, SendOutcome::Delivered, "큐가 비면 즉시 주입");
         assert_eq!(port.injected_bodies().len(), 1);
+    }
+
+    // ── round-7 high: FIFO 합류가 **in-flight 배치**를 못 보던 사각 ────────────────────────────────
+    //    flush 는 큐를 통째로 비운 뒤 락을 놓고 주입한다. 그 구간의 큐는 비어 있어서, 옛 판정
+    //    (`deliverable_len` = 큐만)은 "앞에 아무도 없다" 로 읽고 직발송을 즉시 주입했다 — 진행 중인 배치를
+    //    통째로 앞지르는 순서 역전. 이 사각은 C2/C3 flush 설계 이래 있었고, round-7 의 in-flight 회계가
+    //    비로소 관측 수단을 줬다. 아래 세 테스트가 세 주입 경로(직발송·중복 flush·방송)를 각각 덮는다.
+
+    /// ★(a)★ 배치가 **주입 중**(큐는 비어 있음)일 때 들어온 직발송은 즉시 주입하지 않고 합류한다 —
+    ///   그리고 그 배치 **뒤에** 배달된다(길이가 아니라 순서로 단언한다).
+    #[test]
+    fn a_direct_send_joins_a_batch_that_is_already_in_flight() {
+        let (svc, port, gate) = svc_gated(); // 도어벨 미배선 = 인라인 폴백(단언이 결정적).
+        let (recv_id, recv) = live("recv");
+        port.set_roster(vec![recv]);
+        // 큐에 m0·m1 을 쌓아 둔다(busy 파킹 → 턴 종료).
+        gate.set_busy(recv_id, 0);
+        for (i, m) in ["m0", "m1"].iter().enumerate() {
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "recv",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
+        }
+        gate.clear();
+
+        // 첫 항목(b0)을 수신자 stdin 에 쓰는 **그 순간** 새 직발송이 들어온다. 이 시점의 큐는 drain 으로
+        //   비어 있고, 배치 2건은 in-flight 다 — 옛 구현이 "앞에 없음" 으로 오판하던 정확히 그 창.
+        let svc_hook = svc.clone();
+        let outcome: Arc<StdMutex<Option<SendOutcome>>> = Arc::new(StdMutex::new(None));
+        let outcome_hook = outcome.clone();
+        port.set_on_inject(Arc::new(move |idx| {
+            if idx != 0 {
+                return;
+            }
+            let out = svc_hook
+                .handle_single_send(
+                    "m2",
+                    ident(),
+                    "s",
+                    "recv",
+                    "b2",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("no reject");
+            *outcome_hook.lock().unwrap() = Some(out);
+        }));
+
+        svc.flush_for("recv", recv_id);
+
+        assert!(
+            matches!(
+                outcome.lock().unwrap().as_ref(),
+                Some(SendOutcome::Parked { .. })
+            ),
+            "주입 중인 배치가 있으면 직발송은 파킹(합류): {:?}",
+            outcome.lock().unwrap()
+        );
+        assert_eq!(
+            port.injected_bodies(),
+            vec![
+                r#"<message from="s">b0</message>"#.to_string(),
+                r#"<message from="s">b1</message>"#.to_string(),
+                r#"<message from="s">b2</message>"#.to_string(),
+            ],
+            "수신자가 보는 순서 = 도착 순서(새 발송이 진행 중인 배치를 앞지르지 않는다)"
+        );
+        assert_eq!(
+            svc.parked_len("recv"),
+            0,
+            "합류분도 결국 배달된다(유예 아님)"
+        );
+        assert_eq!(svc.in_flight_len("recv"), 0, "영수증 정산 누수 없음");
+        assert_eq!(svc.ledger_statuses("m2"), vec![DeliveryStatus::Delivered]);
+    }
+
+    /// ★(b)★ 같은 수신자 flush 는 겹쳐 돌지 않는다(뒤 배치가 앞 배치의 잔여를 앞지르는 것 = 한 층 아래의
+    ///   같은 사고). 유예된 깨우기는 **영수증 정산 시 되울려** 발이 묶이지 않는다.
+    #[test]
+    fn a_second_flush_defers_while_a_batch_is_in_flight_and_the_settlement_re_rings() {
+        // 도어벨 **배선**(기록만 하고 아무도 소비하지 않음) — "되울림이 실제로 눌렸나" 를 인라인 실행과
+        //   섞이지 않게 단언하려고 이 조립을 쓴다.
+        let (svc, port, gate, bell) = svc_gated_with_doorbell();
+        let (recv_id, recv) = live("recv");
+        port.set_roster(vec![recv]);
+        gate.set_busy(recv_id, 0);
+        for (i, m) in ["m0", "m1"].iter().enumerate() {
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "recv",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
+        }
+        gate.clear();
+
+        // 배치가 주입 중인 동안 ① 새 메일이 파킹되고 ② **두 번째 flush** 가 같은 이름으로 들어온다.
+        let svc_hook = svc.clone();
+        let port_hook = port.clone();
+        let bell_hook = bell.clone();
+        // (겹친 flush 가 주입한 건수, 그 시점까지의 도어벨 횟수).
+        let probe: Arc<StdMutex<(usize, usize)>> = Arc::new(StdMutex::new((0, 0)));
+        let probe_hook = probe.clone();
+        port.set_on_inject(Arc::new(move |idx| {
+            if idx != 0 {
+                return;
+            }
+            let before = port_hook.injected_bodies().len();
+            svc_hook
+                .handle_single_send(
+                    "m2",
+                    ident(),
+                    "s",
+                    "recv",
+                    "b2",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("no reject");
+            svc_hook.flush_for("recv", recv_id); // 겹친 두 번째 flush.
+            let after = port_hook.injected_bodies().len();
+            *probe_hook.lock().unwrap() = (after - before, bell_hook.seen().len());
+        }));
+
+        svc.flush_for("recv", recv_id);
+
+        let (overlapped_injects, bells_at_hook) = *probe.lock().unwrap();
+        assert_eq!(
+            overlapped_injects, 0,
+            "겹친 flush 는 드레인도 주입도 하지 않는다(유예)"
+        );
+        assert_eq!(
+            port.injected_bodies(),
+            vec![
+                r#"<message from="s">b0</message>"#.to_string(),
+                r#"<message from="s">b1</message>"#.to_string(),
+            ],
+            "이 조립엔 도어벨 소비자가 없으므로 합류분은 아직 큐에 있다"
+        );
+        assert_eq!(
+            svc.parked_msg_ids("recv"),
+            vec!["m2".to_string()],
+            "유예분이 사라지지 않는다(무손실)"
+        );
+        assert_eq!(svc.in_flight_len("recv"), 0, "영수증 정산 누수 없음");
+        assert_eq!(
+            bell.seen().len(),
+            bells_at_hook + 1,
+            "정산을 마치며 유예된 flush 를 정확히 1회 되울린다(lost wakeup 금지)"
+        );
+        // ★여기선 유예한 id 가 **하나뿐**이라 되울림도 1건이다(단일 슬롯 시절과 값이 같다)★ — 표식이
+        //   집합이라는 사실은 이 테스트가 아니라 아래 stale-id 테스트가 강제한다(round-8).
+        assert_eq!(
+            bell.seen().last().copied(),
+            Some(recv_id),
+            "되울림 대상 = 유예한 쪽이 열려던 큐의 도어벨 id"
+        );
+        // 되울림을 소비하면(운영에선 flush 레인) 합류분이 그제서야 순서대로 나간다.
+        svc.flush_for("recv", recv_id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![
+                r#"<message from="s">b0</message>"#.to_string(),
+                r#"<message from="s">b1</message>"#.to_string(),
+                r#"<message from="s">b2</message>"#.to_string(),
+            ],
+        );
+        assert_eq!(svc.parked_len("recv"), 0);
+    }
+
+    /// ★(d) round-8 high★ — 유예 표식이 id 하나짜리 슬롯이면 **나중 유예가 앞의 것을 덮는다**. 산
+    ///   incarnation 이 먼저 물러나고 그 뒤 이미 reap 된 stale id 가 물러나면, 정산 후 되울리는 건 stale id
+    ///   뿐이다 → `flush_for_agent` 가 `canonical_name == None` 에서 조기 반환 → **아무도 드레인하지 않는다**.
+    ///   산 수신자가 멀쩡한데도 admitted 메일이 TTL 까지 묶인다(종료성은 지켜지고 깨우기의 *유용성*이 깨진다).
+    #[test]
+    fn a_stale_id_deferral_does_not_erase_the_live_one_and_the_mail_still_drains() {
+        let (svc, port, gate, bell) = svc_gated_with_doorbell();
+        let (live_id, recv) = live("recv");
+        port.set_roster(vec![recv]);
+        // 이미 reap 된 옛 incarnation — 로스터에도 canonical override 에도 없으므로 이 id 로는 어떤 큐도
+        //   열리지 않는다(늦게 도착한 idle 통지가 딱 이 모양이다).
+        let stale_id = AgentId::new_v4();
+
+        gate.set_busy(live_id, 0);
+        for (i, m) in ["m0", "m1"].iter().enumerate() {
+            svc.handle_single_send(
+                m,
+                ident(),
+                "s",
+                "recv",
+                &format!("b{i}"),
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("park");
+        }
+        gate.clear();
+
+        // 배치가 주입 중인 동안: 새 메일이 합류하고, 두 개의 flush 가 **서로 다른 id 로** 물러난다
+        //   (산 id 가 먼저 — 옛 단일 슬롯은 여기서 stale 이 산 id 를 덮었다).
+        let svc_hook = svc.clone();
+        let bell_hook = bell.clone();
+        let bells_at_hook = Arc::new(StdMutex::new(0usize));
+        let bells_probe = bells_at_hook.clone();
+        port.set_on_inject(Arc::new(move |idx| {
+            if idx != 0 {
+                return;
+            }
+            svc_hook
+                .handle_single_send(
+                    "m2",
+                    ident(),
+                    "s",
+                    "recv",
+                    "b2",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("no reject");
+            svc_hook.flush_for("recv", live_id); // 유예 ①(산 id)
+            svc_hook.flush_for("recv", stale_id); // 유예 ②(reap 된 id)
+            *bells_probe.lock().unwrap() = bell_hook.seen().len();
+        }));
+
+        svc.flush_for("recv", live_id);
+
+        let at_hook = *bells_at_hook.lock().unwrap();
+        let re_rung: Vec<AgentId> = bell.seen()[at_hook..].to_vec();
+        assert_eq!(
+            re_rung,
+            vec![live_id, stale_id],
+            "물러난 id 를 **전부** 되울린다(유예 순서 보존) — 단일 슬롯이면 [stale_id] 뿐이다"
+        );
+
+        // 운영의 flush 레인이 하는 일을 그대로 흉내 낸다: 눌린 도어벨을 순서대로 소비한다.
+        for id in re_rung {
+            svc.flush_for_agent(id);
+        }
+        assert_eq!(
+            port.injected_bodies(),
+            vec![
+                r#"<message from="s">b0</message>"#.to_string(),
+                r#"<message from="s">b1</message>"#.to_string(),
+                r#"<message from="s">b2</message>"#.to_string(),
+            ],
+            "산 id 의 깨우기가 살아남아 합류분이 배달된다(stale 만 남으면 여기서 2건에서 멈춘다)"
+        );
+        assert_eq!(svc.parked_len("recv"), 0, "stranded 없음");
+        assert_eq!(svc.in_flight_len("recv"), 0, "영수증 정산 누수 없음");
+        assert_eq!(svc.ledger_statuses("m2"), vec![DeliveryStatus::Delivered]);
     }
 
     #[test]
@@ -3609,6 +5247,7 @@ mod tests {
             reply_by_raw: Some(raw.to_string()),
             reply_by: Some(Duration::from_secs(secs)),
             reply_to: None,
+            group: None,
         }
     }
 
@@ -3619,6 +5258,7 @@ mod tests {
             reply_by_raw: None,
             reply_by: None,
             reply_to: Some(in_reply_to.to_string()),
+            group: None,
         }
     }
 
@@ -3643,7 +5283,9 @@ mod tests {
         svc.sweep(Instant::now() + Duration::from_secs(3601));
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>요청 m-60m 기한(60m) 초과 — ghost 회신 없음</notice>".to_string()],
+            vec![
+                "<notice>[engram] 요청 m-60m 기한(60m) 초과 — ghost 회신 없음</notice>".to_string()
+            ],
             "봉투에 쓴 표기 그대로(1h 로 정규화 금지)"
         );
     }
@@ -4038,7 +5680,10 @@ mod tests {
         svc.sweep(Instant::now() + Duration::from_secs(601));
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음</notice>".to_string()],
+            vec![
+                "<notice>[engram] 요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음</notice>"
+                    .to_string()
+            ],
             "notice 골든(from 속성 없음 = 회신 대상 아님)"
         );
 
@@ -4091,6 +5736,7 @@ mod tests {
             reply_by_raw: None,
             reply_by: None,
             reply_to: None,
+            group: None,
         };
         svc.handle_single_send(
             "m-req",
@@ -4111,9 +5757,10 @@ mod tests {
     }
 
     #[test]
-    fn timeout_notice_parks_cap_exempt_when_sender_is_absent_and_is_ledgered() {
-        // ★cap 예외(spec §5 · ADR-0103 불변식)★: 발신자 보관함이 가득 차 있어도 notice 는 반드시 수용된다.
-        //   그리고 조용히 사라지지 않는다 — 장부에 pending 으로 남는다.
+    fn timeout_notice_parks_in_its_own_lane_when_sender_is_absent_and_is_ledgered() {
+        // ★레인 분리(round-6 — 옛 "cap 예외" 를 대체)★: 발신자 보관함이 message 로 가득 차 있어도 notice 는
+        //   자기 레인에서 수용된다(회신 계약 통지가 막히면 계약이 반쪽 — ADR-0103 불변식). 그리고 조용히
+        //   사라지지 않는다 — 장부에 pending 으로 남는다.
         let (svc, port) = svc();
         port.set_roster(vec![]); // alice 도 부재.
         for i in 0..100 {
@@ -4157,7 +5804,7 @@ mod tests {
         assert_eq!(
             svc.parked_len("alice"),
             101,
-            "notice 는 cap 을 무시하고 얹혀야(100 message + 1 notice)"
+            "message 백로그가 통지를 막지 않는다(100 message + 1 notice — 레인이 다르다)"
         );
         let noticed: Vec<_> = svc
             .ledger_snapshot()
@@ -4171,6 +5818,60 @@ mod tests {
         );
         assert_eq!(noticed[0].2, "alice", "notice 수신자 = 요청 발신자");
         assert_eq!(noticed[0].3, DeliveryStatus::Pending, "파킹이므로 pending");
+    }
+
+    /// ★notice 레인도 무계가 아니다(round-6)★ — 옛 구현은 notice 를 두 상한 모두에서 면제하고 그 유계를
+    ///   `ledger::MAX_OPEN_REQUESTS` 가 준다고 적었는데 **거짓이었다**: `due_timeouts` 는 `notified` 를 즉시
+    ///   세워 계약 자리를 비우므로, 앞선 통지가 큐에 파킹된 채로 다음 물결이 계약을 새로 열 수 있다. 이제
+    ///   통지는 자기 레인 상한(20)에서 멈추고, 밀려난 **가장 오래된** 통지는 장부에 `skipped` 로 남는다.
+    #[test]
+    fn the_notice_lane_is_bounded_and_retires_its_oldest_to_the_ledger() {
+        /// mailbox 비공개 `NOTICE_CAP` 미러(값 동기).
+        const NOTICE_CAP_FOR_TEST: usize = 20;
+        let (svc, port) = svc();
+        port.set_roster(vec![]); // alice(발신자)·bob(수신자) 모두 부재 → 파킹 + 계약 오픈.
+        for i in 0..(NOTICE_CAP_FOR_TEST + 1) {
+            svc.handle_single_send(
+                &format!("req{i}"),
+                ident(),
+                "alice",
+                "bob",
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("1m", 60),
+            )
+            .expect("parked");
+        }
+        // 한 번의 sweep 이 21건을 전부 기한 초과로 걷어 통지 21건을 alice 큐에 park 한다.
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+
+        assert_eq!(
+            svc.parked_len("alice"),
+            NOTICE_CAP_FOR_TEST,
+            "통지는 자기 레인 상한에서 멈춘다(옛 구현 = 21 — 무계)"
+        );
+        let noticed: Vec<_> = svc
+            .ledger_snapshot()
+            .into_iter()
+            .filter(|(_, from, _, _)| from == NOTICE_SENDER_LABEL)
+            .collect();
+        assert_eq!(
+            noticed.len(),
+            NOTICE_CAP_FOR_TEST + 1,
+            "밀려난 통지도 장부에 남는다(조용한 유실 0 — 반려가 아니라 회수)"
+        );
+        // 장부 스냅샷은 삽입 순서(링 순서)라 첫 통지가 가장 오래된 것이다.
+        assert_eq!(
+            noticed[0].3,
+            DeliveryStatus::Skipped,
+            "가장 오래된 통지가 회수돼 skipped(신규 통지는 절대 반려되지 않는다)"
+        );
+        assert!(
+            noticed[1..]
+                .iter()
+                .all(|(_, _, _, s)| *s == DeliveryStatus::Pending),
+            "나머지는 큐에 남아 pending"
+        );
     }
 
     #[test]
@@ -4199,7 +5900,7 @@ mod tests {
         svc.flush_for("alice", alice_id);
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>요청 m-9x 기한(1m) 초과 — bob 회신 없음</notice>".to_string()],
+            vec!["<notice>[engram] 요청 m-9x 기한(1m) 초과 — bob 회신 없음</notice>".to_string()],
             "flush 배달도 notice 태그(from 없음)"
         );
         let noticed: Vec<_> = svc
@@ -4242,7 +5943,7 @@ mod tests {
         svc.flush_for("alice", alice_id);
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>요청 m-b1 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
+            vec!["<notice>[engram] 요청 m-b1 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
             "턴 종료 flush 로 배달"
         );
     }
@@ -4288,7 +5989,9 @@ mod tests {
         // 도어벨 미배선 = 인라인 flush 폴백이므로 sweep 안에서 배달까지 끝난다.
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>요청 m-req 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
+            vec![
+                "<notice>[engram] 요청 m-req 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()
+            ],
             "개명한 발신자에게도 id 힌트로 배달돼야(옛 이름 큐에 갇히지 않는다)"
         );
         assert_eq!(svc.parked_len("alice"), 0, "큐가 비었다 = 실제로 나갔다");
@@ -4494,6 +6197,7 @@ mod tests {
             reply_by_raw: None,
             reply_by: None,
             reply_to: Some("m-1".to_string()),
+            group: None,
         };
         let _ = svc.handle_single_send("m-x", ident(), "s", "bob", "x", Entrance::Mcp, &bad);
     }
@@ -4521,31 +6225,41 @@ mod tests {
         assert_eq!(ok.sender_name, "qa");
         assert!(ok.meta.request);
 
+        // 버전 태그를 모르는 값으로 바꾼 것(형식 드리프트 모사) — 태그는 항상 맨 앞이라 위치로 자른다
+        //   (옛 `replacen('1', …)` 는 버전 문자가 바뀌면 엉뚱한 자리를 건드려 조용히 유효 payload 가 됐다).
+        let unknown_version = {
+            let mut s = encoded.clone();
+            s.replace_range(0..PARK_PAYLOAD_VERSION.len(), "9");
+            s
+        };
+        // v2 레이아웃: ver·sender_len·rb_len·rt_len·grp_len·uuid·epoch·entrance·flags 9줄 + 나머지.
         for corrupt in [
             // 헤더 자체가 없음.
             "그냥 본문".to_string(),
             // 버전 태그가 모르는 값(형식 드리프트) — 오해석 대신 폴백.
-            encoded.replacen('1', "9", 1),
+            unknown_version,
             // 길이 필드가 숫자가 아님.
-            "1\nx\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nbody".to_string(),
+            "2\nx\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nbody".to_string(),
             // 길이 합이 남은 문자열보다 큼(절단).
-            "1\n99\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nshort".to_string(),
+            "2\n99\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nshort".to_string(),
             // ★char 경계 중간 절단★: '한'은 3바이트인데 sender_len=1 이라 문자 중간을 가른다.
-            "1\n1\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            "2\n1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
             // reply_to 길이가 경계를 어긋나게 만드는 경우(두 번째 절단점).
-            "1\n0\n1\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            "2\n0\n1\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            // ★그룹 라벨 절단점(C4 — 네 번째 절단점)★: 새로 늘어난 칸도 같은 방어를 받아야 한다.
+            "2\n0\n0\n0\n1\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
             // 헤더 줄 수 부족.
-            "1\n0\n0\n0\n".to_string(),
+            "2\n0\n0\n0\n".to_string(),
             // ★어휘 밖 입구(fix 3)★: 예전엔 조용히 Cli 로 떨어졌다 — 이제 손상으로 보고 폴백한다.
-            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nsmtp\n-\nbody".to_string(),
+            "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nsmtp\n-\nbody".to_string(),
             // 입구 칸이 비어 있음(형식 드리프트).
-            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\n\n-\nbody".to_string(),
+            "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\n\n-\nbody".to_string(),
             // 대소문자도 어휘 밖(정규화하지 않는다 — 우리가 쓴 값만 인정).
-            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nMCP\n-\nbody".to_string(),
+            "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nMCP\n-\nbody".to_string(),
             // ★어휘 밖 플래그(fix 3)★: 예전엔 조용히 "request 아님" 으로 떨어져 계약 속성을 잃었다.
-            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nR\nbody".to_string(),
-            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n\nbody".to_string(),
-            "1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nr-\nbody".to_string(),
+            "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nR\nbody".to_string(),
+            "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n\nbody".to_string(),
+            "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nr-\nbody".to_string(),
         ] {
             let p = ParkPayload::decode(&corrupt);
             assert_eq!(
@@ -4668,5 +6382,1847 @@ mod tests {
         assert_eq!(svc.ledger_snapshot().len(), before, "장부 레코드 증가 없음");
         assert_eq!(svc.parked_len("bob"), 1, "파킹 증가 없음");
         assert!(port.injected_bodies().is_empty());
+    }
+
+    // ── C4: 그룹 방송 fan-out(spec §4 · ADR-0103 결정 4 · ADR-0104 결정 1) ─────────────────────
+
+    /// 발신자 신원 + 그 신원이 로스터에 있는 LiveAgent 를 함께 만든다(@all 자기 제외 검증용).
+    fn live_sender(name: &str) -> (BoundIdentity, LiveAgent) {
+        let id = AgentId::new_v4();
+        (
+            BoundIdentity {
+                agent_id: id,
+                epoch: 0,
+            },
+            LiveAgent {
+                id,
+                name: name.to_string(),
+                epoch: 0,
+            },
+        )
+    }
+
+    /// 멤버별 (이름, 상태) 로 접어 단언하기 쉽게 만든다(hint 문구는 따로 본다).
+    fn member_pairs(v: &[GroupMemberResult]) -> Vec<(String, GroupMemberStatus)> {
+        v.iter().map(|m| (m.to.clone(), m.status)).collect()
+    }
+
+    #[test]
+    fn all_group_excludes_the_sender_and_uses_the_send_time_snapshot_verbatim() {
+        // spec §4 `@all` = 발송 순간 살아있는 수신 가능 전원 — 단 **발신자 자신은 뺀다**(자기 방송 메아리
+        //   금지, handle_group_send 정책 주석). 명단은 스냅샷 이름 verbatim(정렬·재해석 없음).
+        let (svc, port) = svc();
+        let (from, sender_agent) = live_sender("boss");
+        let (_a, alice) = live("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![sender_agent, alice, bob]);
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@all",
+                "리베이스 대기",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("@all 방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("alice".to_string(), GroupMemberStatus::Delivered),
+                ("bob".to_string(), GroupMemberStatus::Delivered),
+            ],
+            "발신자(boss)는 @all 명단에서 빠지고, 나머지는 로스터 순서 그대로"
+        );
+        assert_eq!(port.injected_bodies().len(), 2, "멤버 수만큼 개별 주입");
+    }
+
+    #[test]
+    fn all_group_with_only_the_sender_live_is_group_empty() {
+        // 발신자를 빼면 아무도 안 남는다 → GROUP_EMPTY(반려, 부작용 0). "혼자인데 방송" 은 조용히 성공한
+        //   척하기보다 반려로 알려 주는 게 발신자에게 유용하다.
+        let (svc, port) = svc();
+        let (from, sender_agent) = live_sender("solo");
+        port.set_roster(vec![sender_agent]);
+        let out = svc.handle_group_send(
+            "g1",
+            from,
+            "solo",
+            "@all",
+            "x",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        );
+        assert_eq!(
+            out,
+            Err(GroupReject::Empty {
+                name: "@all".to_string()
+            })
+        );
+        assert!(port.injected_bodies().is_empty(), "부작용 0");
+        assert!(svc.ledger_snapshot().is_empty(), "장부 부작용 0");
+    }
+
+    #[test]
+    fn registered_group_delivers_to_its_own_list_including_the_sender() {
+        // 등록 그룹은 **명단이 정본**이다 — 발신자를 넣은 건 명시적 의사표시라 그대로 배달한다(@all 의
+        //   자기 제외와 갈리는 지점 — handle_group_send 정책 주석).
+        let (svc, port) = svc();
+        let (from, sender_agent) = live_sender("boss");
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![sender_agent, alice]);
+        svc.add_group_member_for_test("@coders", "boss");
+        svc.add_group_member_for_test("@coders", "alice");
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@coders",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("등록 그룹 방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("boss".to_string(), GroupMemberStatus::Delivered),
+                ("alice".to_string(), GroupMemberStatus::Delivered),
+            ],
+            "등록 순서대로 배달(발신자 포함)"
+        );
+    }
+
+    #[test]
+    fn unknown_and_empty_and_invalid_group_names_are_distinct_rejects() {
+        let (svc, port) = svc();
+        let (from, _s) = live_sender("boss");
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+
+        // 미등록 → NotFound.
+        assert_eq!(
+            svc.handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@ghost",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default()
+            ),
+            Err(GroupReject::NotFound {
+                name: "@ghost".to_string()
+            })
+        );
+        // 등록됐으나 멤버 0명 → Empty(둘은 상위에서 다른 코드로 매핑되므로 반드시 구분).
+        svc.create_group_for_test("@hollow");
+        assert_eq!(
+            svc.handle_group_send(
+                "g2",
+                from,
+                "boss",
+                "@hollow",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default()
+            ),
+            Err(GroupReject::Empty {
+                name: "@hollow".to_string()
+            })
+        );
+        // 이름 규약 위반 → InvalidName(상위가 GROUP_NOT_FOUND + 규약 hint 로 매핑).
+        assert_eq!(
+            svc.handle_group_send(
+                "g3",
+                from,
+                "boss",
+                "@@x",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default()
+            ),
+            Err(GroupReject::InvalidName {
+                name: "@@x".to_string()
+            })
+        );
+        assert!(port.injected_bodies().is_empty(), "반려는 전부 부작용 0");
+    }
+
+    #[test]
+    fn mixed_fanout_injects_idle_parks_busy_and_skips_the_dead_member() {
+        // ★C4 핵심 시나리오★: 한 방송 안에서 세 결말이 동시에 난다 — idle 은 즉시 주입(delivered),
+        //   busy 는 파킹(pending, 산 멤버라 소급 금지에 걸리지 않는다), 부재 멤버는 skipped(파킹 없음).
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (_idle_id, idle_agent) = live("idle-one");
+        let (busy_id, busy_agent) = live("busy-one");
+        port.set_roster(vec![idle_agent, busy_agent]);
+        gate.set_busy(busy_id, 0);
+        svc.add_group_member_for_test("@team", "idle-one");
+        svc.add_group_member_for_test("@team", "busy-one");
+        svc.add_group_member_for_test("@team", "ghost"); // 스폰된 적 없는 이름.
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@team",
+                "전원 리베이스",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("혼합 방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("idle-one".to_string(), GroupMemberStatus::Delivered),
+                ("busy-one".to_string(), GroupMemberStatus::Pending),
+                ("ghost".to_string(), GroupMemberStatus::Skipped),
+            ]
+        );
+        // 주입은 idle 멤버 1건뿐(턴 중 멤버에겐 밀지 않는다 — ADR-0104 idle 게이트).
+        let injected = port.injected_bodies();
+        assert_eq!(injected.len(), 1);
+        assert!(injected[0].contains("전원 리베이스"));
+        // busy 멤버는 큐에 남고, 죽은 멤버는 **파킹되지 않는다**(방송 소급 금지 — ADR-0103 불변식).
+        assert_eq!(svc.parked_len("busy-one"), 1);
+        assert_eq!(svc.parked_len("ghost"), 0, "부재 멤버는 파킹 금지");
+        // 장부 = 1 msg_id : N 배달기록(멤버별 상태 독립). 판정(파킹·skip)은 락 안에서 먼저 기록되고,
+        //   주입 성공 기록은 락 밖 주입 뒤라 순서가 이렇게 갈린다.
+        assert_eq!(
+            svc.ledger_snapshot()
+                .into_iter()
+                .map(|(_, _, to, st)| (to, st))
+                .collect::<Vec<_>>(),
+            vec![
+                ("busy-one".to_string(), DeliveryStatus::Pending),
+                ("ghost".to_string(), DeliveryStatus::Skipped),
+                ("idle-one".to_string(), DeliveryStatus::Delivered),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_name_member_is_skipped_not_delivered_twice() {
+        // 동명 다수는 방송이 누구를 고를 근거가 없다 → skipped(단일 발송 RECIPIENT_AMBIGUOUS 와 같은 판정을
+        //   멤버 단위로). 그리고 결과 줄은 **하나**여야 한다(멤버당 한 줄 — dedup_members).
+        let (svc, port) = svc();
+        let (from, _s) = live_sender("boss");
+        let (_t1, twin1) = live("twin");
+        let (_t2, twin2) = live("twin");
+        let (_o, other) = live("solo");
+        port.set_roster(vec![twin1, twin2, other]);
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@all",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("@all 방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("twin".to_string(), GroupMemberStatus::Skipped),
+                ("solo".to_string(), GroupMemberStatus::Delivered),
+            ],
+            "동명 멤버는 한 줄 skipped, 나머지는 정상 배달"
+        );
+        assert!(
+            results[0]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("2 live agents"),
+            "hint 가 사유(동명 다수)를 알려야: {:?}",
+            results[0].hint
+        );
+        assert_eq!(port.injected_bodies().len(), 1, "동명 멤버에겐 주입 안 함");
+    }
+
+    #[test]
+    fn member_with_a_full_mailbox_is_skipped_and_the_rest_still_receive() {
+        // ★best-effort 정책★: 한 멤버의 보관함이 cap 이어도 방송 전체를 반려하지 않는다(단일 발송의
+        //   MAILBOX_FULL 반려와 갈리는 지점 — handle_group_send 정책 주석).
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (full_id, full_agent) = live("full-one");
+        let (_i, idle_agent) = live("idle-one");
+        port.set_roster(vec![full_agent, idle_agent]);
+        // full-one 을 턴 중으로 두고 cap 까지 채운다(직발송이 전부 그 큐로 들어가게).
+        gate.set_busy(full_id, 0);
+        for i in 0..100 {
+            svc.handle_single_send(
+                &format!("m{i}"),
+                ident(),
+                "s",
+                "full-one",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("cap 이내");
+        }
+        assert_eq!(svc.parked_len("full-one"), 100);
+        svc.add_group_member_for_test("@team", "full-one");
+        svc.add_group_member_for_test("@team", "idle-one");
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@team",
+                "공지",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("cap 멤버가 있어도 방송 자체는 접수");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("full-one".to_string(), GroupMemberStatus::Skipped),
+                ("idle-one".to_string(), GroupMemberStatus::Delivered),
+            ]
+        );
+        assert!(
+            results[0]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mailbox is full"),
+            "hint 가 사유를 알려야: {:?}",
+            results[0].hint
+        );
+        assert_eq!(svc.parked_len("full-one"), 100, "cap 넘겨 밀어넣지 않는다");
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Skipped, DeliveryStatus::Delivered],
+            "skip 도 장부에 남는다(조용한 유실 금지)"
+        );
+    }
+
+    #[test]
+    fn group_send_writes_one_ledger_record_per_member_under_one_msg_id() {
+        // spec §4 "장부 = 메시지 1 : 배달기록 N" — 같은 msg_id 아래 멤버별 레코드가 독립 상태를 갖는다.
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (busy_id, busy_agent) = live("b");
+        let (_i, idle_agent) = live("a");
+        port.set_roster(vec![idle_agent, busy_agent]);
+        gate.set_busy(busy_id, 0);
+        svc.add_group_member_for_test("@t", "a");
+        svc.add_group_member_for_test("@t", "b");
+        svc.add_group_member_for_test("@t", "gone");
+
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "x",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        let recs: Vec<(String, DeliveryStatus)> = svc
+            .ledger_snapshot()
+            .into_iter()
+            .map(|(id, _, to, st)| {
+                assert_eq!(id, "g1", "전 레코드가 한 논리 메시지 id 를 공유");
+                (to, st)
+            })
+            .collect();
+        assert_eq!(recs.len(), 3, "멤버 3명 → 배달기록 3건");
+        assert!(recs.contains(&("a".to_string(), DeliveryStatus::Delivered)));
+        assert!(recs.contains(&("b".to_string(), DeliveryStatus::Pending)));
+        assert!(recs.contains(&("gone".to_string(), DeliveryStatus::Skipped)));
+    }
+
+    #[test]
+    fn expiry_transitions_only_the_expired_members_record() {
+        // ★(msg_id, recipient) 키(C4 — ADR-0104 앵커 해소)★: 만료는 **그 멤버의 배달기록 하나만** 건드려야
+        //   한다. 옛 구현은 msg_id 로 "첫 pending 레코드" 를 역조회해 이력 삽입 순서와 만료 순서의 우연한
+        //   상관에 정확성을 기댔다 — 이제 mailbox 가 큐 키를 함께 준다(`ExpiredParked`).
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (busy_id, busy_agent) = live("waiter");
+        let (_i, idle_agent) = live("reader");
+        port.set_roster(vec![idle_agent, busy_agent]);
+        gate.set_busy(busy_id, 0);
+        svc.add_group_member_for_test("@t", "reader");
+        svc.add_group_member_for_test("@t", "waiter");
+
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "x",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        // 파킹분이 TTL(24h)을 넘도록 sweep. reader 는 이미 delivered 라 만료 대상이 아니다.
+        svc.sweep(Instant::now() + Duration::from_secs(25 * 3600));
+
+        let recs: Vec<(String, DeliveryStatus)> = svc
+            .ledger_snapshot()
+            .into_iter()
+            .map(|(_, _, to, st)| (to, st))
+            .collect();
+        assert!(
+            recs.contains(&("waiter".to_string(), DeliveryStatus::Expired)),
+            "만료된 멤버의 레코드만 expired: {recs:?}"
+        );
+        assert!(
+            recs.contains(&("reader".to_string(), DeliveryStatus::Delivered)),
+            "다른 멤버 레코드는 그대로: {recs:?}"
+        );
+        assert_eq!(svc.parked_len("waiter"), 0, "만료분은 큐에서 사라진다");
+    }
+
+    #[test]
+    fn group_envelope_carries_the_to_attribute_immediately_and_after_flush() {
+        // spec §1 노출 원칙: `to` 는 **그룹 방송에만** 실린다. 즉시 배달과 파킹→flush 배달의 봉투가 같아야
+        //   한다(파킹은 raw 재료만 나르고 봉투는 주입 시점 조립 — ParkPayload 가 그룹 라벨을 실어 나른다).
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (busy_id, busy_agent) = live("late");
+        let (_i, idle_agent) = live("now");
+        port.set_roster(vec![idle_agent, busy_agent]);
+        gate.set_busy(busy_id, 0);
+        svc.add_group_member_for_test("@coders", "now");
+        svc.add_group_member_for_test("@coders", "late");
+
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@coders",
+            "리베이스",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="boss" to="@coders">리베이스</message>"#.to_string()],
+            "즉시 배달 봉투에 to 속성(golden)"
+        );
+
+        // 턴이 끝나 파킹분이 flush 되면 **같은 봉투**여야 한다.
+        gate.clear();
+        svc.flush_for("late", busy_id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![
+                r#"<message from="boss" to="@coders">리베이스</message>"#.to_string(),
+                r#"<message from="boss" to="@coders">리베이스</message>"#.to_string(),
+            ],
+            "flush 배달도 to 속성을 유지(ParkPayload 그룹 라벨 왕복)"
+        );
+    }
+
+    #[test]
+    fn single_send_envelope_has_no_to_attribute() {
+        // 대조군 — 1:1 발송은 `to` 를 싣지 않는다(방송 오독 방지, spec §1). C1~C3 봉투와 byte-identical.
+        let (svc, port) = svc();
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        svc.handle_single_send(
+            "m1",
+            ident(),
+            "boss",
+            "alice",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("배달");
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="boss">hi</message>"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_reply_to_a_broadcast_goes_only_to_the_sender() {
+        // spec §4 "회신은 항상 발신자 1인에게(전체회신 없음)" — 그룹 메시지 id 로 회신해도 그건 **1:1
+        //   발송**이라 방송으로 번지지 않는다(그룹 주소로의 reply_to 자체는 입구가 반려한다).
+        let (svc, port) = svc();
+        let (from, boss_agent) = live_sender("boss");
+        let (_a, alice) = live("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![boss_agent, alice, bob]);
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@all",
+            "질문",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        assert_eq!(port.injected_bodies().len(), 2, "전제: alice·bob 이 받음");
+
+        // alice 가 그 방송 id 로 발신자에게만 회신.
+        let out = svc
+            .handle_single_send(
+                "m-r",
+                ident(),
+                "alice",
+                "boss",
+                "받았음",
+                Entrance::Mcp,
+                &reply_meta("g1"),
+            )
+            .expect("회신 배달");
+        assert_eq!(out, SendOutcome::Delivered);
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 3, "회신은 딱 1건 추가(전체회신 없음)");
+        assert_eq!(
+            bodies[2], r#"<message from="alice" in-reply-to="g1">받았음</message>"#,
+            "회신 봉투엔 to 속성 없음(방송 아님)"
+        );
+        // 방송은 계약을 열지 않으므로 닫을 것도 없다(엄격 매칭 NoMatch — 배달엔 영향 없음).
+        assert_eq!(svc.open_request_count(), 0);
+    }
+
+    #[test]
+    fn broadcast_joins_an_existing_queue_instead_of_jumping_it() {
+        // FIFO 일관성(C2 fix 5 와 같은 규율): 멤버가 idle 이어도 그 앞에 파킹이 쌓여 있으면 방송이 먼저
+        //   나가면 안 된다 — 큐 뒤에 붙어 순서대로 배달된다.
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (dest_id, dest) = live("dest");
+        port.set_roster(vec![dest]);
+        gate.set_busy(dest_id, 0);
+        svc.handle_single_send(
+            "m-old",
+            ident(),
+            "s",
+            "dest",
+            "먼저 온 것",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        gate.clear(); // 턴은 끝났지만 아직 flush 전.
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@all",
+                "방송",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![("dest".to_string(), GroupMemberStatus::Pending)],
+            "선행 큐가 있으면 방송도 큐에 합류(pending)"
+        );
+        // 도어벨(미배선 = 인라인 flush 폴백)이 큐를 오래된 순으로 비운다.
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies[0].contains("먼저 온 것"),
+            "옛 메일이 먼저: {bodies:?}"
+        );
+        assert!(bodies[1].contains("방송"), "방송은 그 뒤: {bodies:?}");
+    }
+
+    /// ★(c) round-7 high — 방송의 즉시 배달도 같은 사각을 공유했다★: 멤버 앞 배치가 **주입 중**이면
+    ///   (큐는 비어 보인다) 방송이 그 배치를 앞지른다. 단일 발송 3-b 와 **같은 판정 동사**로 닫혔는지 본다.
+    #[test]
+    fn a_broadcast_to_an_idle_member_joins_a_batch_that_is_already_in_flight() {
+        let (svc, port, gate) = svc_gated(); // 도어벨 미배선 = 인라인 폴백.
+        let (from, _s) = live_sender("boss");
+        let (dest_id, dest) = live("dest");
+        port.set_roster(vec![dest]);
+        gate.set_busy(dest_id, 0);
+        svc.handle_single_send(
+            "m-old",
+            ident(),
+            "s",
+            "dest",
+            "먼저 온 것",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        gate.clear();
+
+        // 옛 메일을 stdin 에 쓰는 **그 순간** 방송이 들어온다 — 큐는 drain 으로 비어 있고 그 1건은 in-flight.
+        let svc_hook = svc.clone();
+        let results: Arc<StdMutex<Vec<GroupMemberResult>>> = Arc::new(StdMutex::new(Vec::new()));
+        let results_hook = results.clone();
+        port.set_on_inject(Arc::new(move |idx| {
+            if idx != 0 {
+                return;
+            }
+            let r = svc_hook
+                .handle_group_send(
+                    "g1",
+                    from,
+                    "boss",
+                    "@all",
+                    "방송",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("방송");
+            *results_hook.lock().unwrap() = r;
+        }));
+
+        svc.flush_for("dest", dest_id);
+
+        let results = results.lock().unwrap().clone();
+        assert_eq!(
+            member_pairs(&results),
+            vec![("dest".to_string(), GroupMemberStatus::Pending)],
+            "주입 중인 배치가 있으면 방송도 합류(pending)"
+        );
+        assert!(
+            results[0]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("earlier queued messages"),
+            "hint 는 FIFO 합류 사유(큐 축) 그대로 — 사각이 닫혔어도 어휘는 안 늘린다: {:?}",
+            results[0].hint
+        );
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 2, "둘 다 배달됐다: {bodies:?}");
+        assert!(
+            bodies[0].contains("먼저 온 것"),
+            "진행 중이던 배치가 먼저: {bodies:?}"
+        );
+        assert!(bodies[1].contains("방송"), "방송은 그 뒤: {bodies:?}");
+        assert_eq!(svc.parked_len("dest"), 0);
+        assert_eq!(svc.in_flight_len("dest"), 0, "영수증 정산 누수 없음");
+    }
+
+    #[test]
+    fn inject_failure_during_fanout_skips_that_member_and_keeps_going() {
+        // ★리뷰 fix B★: 방송 중 write 실패 = **그 순간 그 멤버가 도달 불가** = 죽은 멤버와 같은 사실이다
+        //   (spec §4). 옛 구현은 이걸 파킹해서 그 멤버의 **다음 등장에 배달**했다 — 방송 소급 금지 위반.
+        //   이제 `skipped` + write 오류 hint 이고, 그 멤버 큐는 비어 있어야 한다(나중에도 안 간다).
+        //   그리고 한 멤버의 실패가 나머지 멤버의 배달을 볼모로 잡지 않는다.
+        let (svc, port) = svc();
+        let (from, _s) = live_sender("boss");
+        let (_a, first) = live("first");
+        let (_b, second) = live("second");
+        port.set_roster(vec![first, second]);
+        port.fail_at(&[0]); // 첫 멤버 주입만 실패.
+        svc.add_group_member_for_test("@t", "first");
+        svc.add_group_member_for_test("@t", "second");
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("first".to_string(), GroupMemberStatus::Skipped),
+                ("second".to_string(), GroupMemberStatus::Delivered),
+            ]
+        );
+        assert!(
+            results[0]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("fake inject fail"),
+            "hint 가 write 오류를 실어야 발신자가 재발송을 판단한다: {:?}",
+            results[0].hint
+        );
+        assert_eq!(
+            svc.parked_len("first"),
+            0,
+            "실패분은 파킹하지 않는다(파킹하면 다음 등장에 소급 배달된다 — ADR-0103 불변식)"
+        );
+        // 주입 루프가 멤버 순서대로 도므로 장부 기록도 그 순서(실패→skipped, 그 뒤 성공 delivered).
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Skipped, DeliveryStatus::Delivered],
+            "실패분도 장부에 남는다(조용한 유실 금지) — 단 배달 대상이 아니라 skipped"
+        );
+    }
+
+    // ── C4 리뷰 fix A: 방송 소급 금지의 **파킹분** 강제(incarnation 결박) ────────────────────────
+    // ★두 테스트는 실측된 두 구멍의 회귀 그물이다★: 옛 구현은 파킹된 방송분이 flush 의 이름 폴백을 타고
+    //   ① 같은 이름의 **새 AgentId** ② 같은 AgentId 의 **다음 epoch** 로 배달됐다. 둘 다 "발송 뒤 등장한
+    //   에이전트" 라 ADR-0103 불변식 위반. 대조군(단일 발송은 여전히 재스폰이 이어받는다)은
+    //   `dead_id_hint_falls_back_to_unique_name_rule_for_respawn` 가 지킨다 — 결박은 그룹 전용 축이다.
+
+    /// 방송을 위해 파킹된 몫은 **같은 이름으로 새로 뜬 다른 AgentId** 에게 가지 않는다(구멍 ①).
+    #[test]
+    fn parked_broadcast_is_never_delivered_to_a_same_named_respawn() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (old_id, old_agent) = live("worker");
+        port.set_roster(vec![old_agent]);
+        gate.set_busy(old_id, 0); // 턴 중이라 방송이 파킹된다(산 멤버 = 소급 금지에 안 걸림).
+        svc.add_group_member_for_test("@t", "worker");
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "공지",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![("worker".to_string(), GroupMemberStatus::Pending)],
+            "전제: busy 멤버는 파킹(pending)"
+        );
+        assert_eq!(svc.parked_len("worker"), 1);
+
+        // 그 멤버가 죽고 **같은 이름의 새 에이전트**(새 AgentId)가 등장 — 옛 구현은 여기서 배달했다.
+        let (new_id, new_agent) = live("worker");
+        port.set_roster(vec![new_agent]);
+        gate.clear();
+        svc.flush_for("worker", new_id); // 등장 flush(이름 키)
+        svc.flush_for_agent(new_id); // idle flush 입구(id 키)도 같이
+        assert!(
+            port.injected_bodies().is_empty(),
+            "발송 순간 스냅샷 밖의 incarnation 에는 배달 금지(ADR-0103 불변식): {:?}",
+            port.injected_bodies()
+        );
+        assert_eq!(
+            svc.parked_len("worker"),
+            1,
+            "배달 못 해도 파킹은 유지(즉시 skip 금지 — TTL 이 종점)"
+        );
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Pending],
+            "아직 pending"
+        );
+
+        // TTL 이 지나면 (msg_id, recipient) 로 정확히 expired 전이 — spec §5 "파킹의 운명" 어휘 그대로.
+        svc.sweep(Instant::now() + Duration::from_secs(25 * 3600));
+        assert_eq!(svc.parked_len("worker"), 0, "만료분은 큐에서 사라진다");
+        assert_eq!(
+            svc.ledger_snapshot()
+                .into_iter()
+                .map(|(id, _, to, st)| (id, to, st))
+                .collect::<Vec<_>>(),
+            vec![(
+                "g1".to_string(),
+                "worker".to_string(),
+                DeliveryStatus::Expired
+            )],
+            "그 멤버의 배달기록 하나만 expired"
+        );
+    }
+
+    /// 방송을 위해 파킹된 몫은 **같은 AgentId 의 다음 epoch**(재시작한 그 에이전트)에도 가지 않는다(구멍 ②).
+    ///
+    /// ★round-3 fix 6 에서 결말이 바뀌었다★: 예전엔 배달만 막고 TTL(24h)까지 붙들었는데, "같은 AgentId 가
+    ///   **더 높은 epoch** 으로 있다" 는 **확정 사망의 증거**다(epoch 단조 — ADR-0007). 증거가 있는데 붙들면
+    ///   장부가 24시간 동안 `pending`(= "배달 대기 중")이라고 거짓말을 한다. 이제 그 자리에서 `skipped`.
+    #[test]
+    fn parked_broadcast_is_never_delivered_across_an_epoch_bump() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (id, agent) = live("worker"); // epoch 0
+        port.set_roster(vec![agent]);
+        gate.set_busy(id, 0);
+        svc.add_group_member_for_test("@t", "worker");
+
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "공지",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        assert_eq!(svc.parked_len("worker"), 1, "전제: 파킹");
+
+        // 같은 AgentId 가 재시작 = **epoch 교체**(같은 이름·같은 id, 다른 incarnation). id 힌트만 보던
+        //   옛 구현은 여기서 배달했다 — 그 incarnation 은 발송 순간에 존재하지 않았다.
+        port.set_roster(vec![LiveAgent {
+            id,
+            name: "worker".to_string(),
+            epoch: 1,
+        }]);
+        gate.clear();
+        svc.flush_for("worker", id);
+        assert!(
+            port.injected_bodies().is_empty(),
+            "epoch 이 오른 incarnation 은 발송 순간의 그 수신자가 아니다: {:?}",
+            port.injected_bodies()
+        );
+        // ★fix 6★: 확정 사망이므로 TTL 을 기다리지 않고 그 자리에서 큐에서 빠지고 장부 종점이 찍힌다.
+        assert_eq!(
+            svc.parked_len("worker"),
+            0,
+            "확정 사망 결박은 24시간 붙들지 않는다(같은 id·더 높은 epoch = 되돌아올 수 없음)"
+        );
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Skipped],
+            "어휘는 spec §5 재사용 — `expired`(시계 사실)가 아니라 `skipped`(수신자 소멸, 죽은 멤버와 같은 결말)"
+        );
+        // 종점이므로 이후 sweep 이 다시 만져 상태를 흔들지 않는다(terminal 재전이 불법 — ledger).
+        svc.sweep(Instant::now() + Duration::from_secs(25 * 3600));
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Skipped]);
+    }
+
+    /// 대조군(fix 6 의 경계) — 결박 대상이 **로스터에서 그냥 안 보이는** 경우는 여전히 보류한다.
+    /// "안 보임" 은 재시작 중·일시 비-도달일 수 있어 사망의 증거가 아니다(증거는 오직 '더 높은 epoch').
+    #[test]
+    fn a_bound_item_is_held_when_its_incarnation_is_merely_absent_not_provably_dead() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (id, agent) = live("worker");
+        port.set_roster(vec![agent]);
+        gate.set_busy(id, 0);
+        svc.add_group_member_for_test("@t", "worker");
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "공지",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        assert_eq!(svc.parked_len("worker"), 1, "전제: 파킹");
+
+        // 그 에이전트가 로스터에서 사라진다(죽었는지 재시작 중인지 알 수 없다).
+        port.set_roster(vec![]);
+        gate.clear();
+        svc.flush_for("worker", id);
+        assert!(port.injected_bodies().is_empty());
+        assert_eq!(
+            svc.parked_len("worker"),
+            1,
+            "부재는 사망의 증거가 아니다 — 파킹 유지(그 incarnation 이 돌아오면 받을 수 있다)"
+        );
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Pending]);
+        // 종점은 여전히 TTL.
+        svc.sweep(Instant::now() + Duration::from_secs(25 * 3600));
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Expired]);
+    }
+
+    /// 그 incarnation 이 **돌아오면** 결박 배달이 그대로 성립한다(보류가 '영구 봉쇄'가 아님을 고정).
+    #[test]
+    fn a_held_bound_item_is_delivered_when_its_exact_incarnation_reappears() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (id, agent) = live("worker");
+        port.set_roster(vec![agent.clone()]);
+        gate.set_busy(id, 0);
+        svc.add_group_member_for_test("@t", "worker");
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "공지",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        port.set_roster(vec![]); // 잠깐 사라졌다가…
+        gate.clear();
+        svc.flush_for("worker", id);
+        assert_eq!(svc.parked_len("worker"), 1, "보류");
+
+        port.set_roster(vec![agent]); // …같은 (id, epoch) 로 다시 보인다.
+        svc.flush_for("worker", id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="boss" to="@t">공지</message>"#.to_string()],
+            "결박 대상 본인이 돌아오면 배달"
+        );
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Delivered]);
+    }
+
+    /// 대조군 — 결박된 그 incarnation 이 **그대로** 살아 있으면(턴만 끝나면) 정상 배달된다.
+    /// 결박이 "아무에게도 안 보낸다" 가 아니라 "그 수신자에게만 보낸다" 임을 고정한다.
+    #[test]
+    fn parked_broadcast_still_reaches_the_same_incarnation_when_its_turn_ends() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (id, agent) = live("worker");
+        port.set_roster(vec![agent]);
+        gate.set_busy(id, 0);
+        svc.add_group_member_for_test("@t", "worker");
+
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "공지",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        gate.clear(); // 턴 종료 — 같은 (id, epoch) 가 그대로 산 채다.
+        svc.flush_for("worker", id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="boss" to="@t">공지</message>"#.to_string()],
+            "결박 대상 본인에겐 늦게라도 배달된다(봉투도 그대로)"
+        );
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Delivered]);
+    }
+
+    // ── round-3 fix 1: 해석↔주입 사이 재시작(epoch bump TOCTOU) ────────────────────────────────────
+    // ★무엇을 막나★: 결박(`bound_incarnation`)은 **누구에게 보낼지**를 좁힐 뿐, write 자체가 무조건이면
+    //   해석 이후 재시작한 새 incarnation 에 그대로 착지한다 — 결박이 종잇장이 되는 구멍이다. 두 테스트가
+    //   즉시 fan-out 경로와 flush 경로 각각에서 그 창을 재현한다.
+    // ★변이 검증★: 해당 경로의 `inject_if_epoch` 을 `inject` 로 되돌리면 두 테스트 모두 실패한다.
+
+    /// 즉시 fan-out — 앞 멤버에 쓰는 동안 뒤 멤버가 **재시작**(epoch bump)하면 그 멤버에겐 쓰지 않는다.
+    #[test]
+    fn a_member_that_restarts_mid_fanout_is_not_injected_into_the_new_incarnation() {
+        let (svc, port) = svc();
+        let (from, _s) = live_sender("boss");
+        let (first_id, first) = live("first");
+        let (second_id, second) = live("second");
+        port.set_roster(vec![first.clone(), second]);
+        // 발송 스냅샷(첫 로스터 조회)은 둘 다 epoch 0 을 본다. 그 뒤(= 주입 시점)부터는 second 가
+        //   재시작해 epoch 1 이다 — 계획과 write 사이에 세계가 바뀐 상황.
+        port.arm_roster_after_first_call(vec![
+            first,
+            LiveAgent {
+                id: second_id,
+                name: "second".to_string(),
+                epoch: 1,
+            },
+        ]);
+        svc.add_group_member_for_test("@t", "first");
+        svc.add_group_member_for_test("@t", "second");
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "공지",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("first".to_string(), GroupMemberStatus::Delivered),
+                ("second".to_string(), GroupMemberStatus::Skipped),
+            ],
+            "재시작한 멤버는 발송 순간의 그 수신자가 아니다 → 죽은 멤버와 같은 결말(skipped)"
+        );
+        assert!(
+            results[1]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("epoch mismatch"),
+            "hint 가 사유를 실어야 발신자가 재발송을 판단한다: {:?}",
+            results[1].hint
+        );
+        assert_eq!(
+            port.injected
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![first_id],
+            "새 incarnation 에는 단 한 바이트도 가지 않는다"
+        );
+        assert_eq!(
+            svc.parked_len("second"),
+            0,
+            "방송은 파킹하지 않는다(파킹하면 다음 등장에 소급 배달)"
+        );
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Delivered, DeliveryStatus::Skipped],
+        );
+    }
+
+    /// flush — 락 안 로스터 스냅샷으로 타깃을 정한 뒤, 실제 write 직전에 재시작하면 결박분은 쓰지 않는다.
+    #[test]
+    fn a_bound_item_is_not_injected_when_the_incarnation_flips_between_snapshot_and_write() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (id, agent) = live("worker");
+        port.set_roster(vec![agent]);
+        gate.set_busy(id, 0);
+        svc.add_group_member_for_test("@t", "worker");
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "공지",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        assert_eq!(svc.parked_len("worker"), 1, "전제: busy 라 파킹");
+
+        // flush 의 로스터 스냅샷은 (id, epoch 0) 을 본다 → 배달 후보로 뽑힌다. 그런데 **inject 직전**에
+        //   그 에이전트가 재시작한다(epoch 1) — 이 창이 정확히 fix 1 이 닫는 창이다.
+        gate.clear();
+        let handle = port.roster_handle();
+        port.set_on_inject(Arc::new(move |_| {
+            *handle.lock().unwrap() = vec![LiveAgent {
+                id,
+                name: "worker".to_string(),
+                epoch: 1,
+            }];
+        }));
+        svc.flush_for("worker", id);
+
+        assert!(
+            port.injected_bodies().is_empty(),
+            "재시작 후의 incarnation 에는 쓰지 않는다: {:?}",
+            port.injected_bodies()
+        );
+        assert_eq!(
+            svc.parked_len("worker"),
+            1,
+            "거부분은 무손실 복원(장부는 여전히 pending)"
+        );
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Pending]);
+        // 다음 flush 는 같은 로스터에서 "확정 사망"(같은 id·더 높은 epoch)을 보고 종점을 찍는다(fix 6 연결).
+        port.set_on_inject(Arc::new(|_| {}));
+        svc.flush_for("worker", id);
+        assert_eq!(svc.parked_len("worker"), 0);
+        assert_eq!(svc.ledger_statuses("g1"), vec![DeliveryStatus::Skipped]);
+    }
+
+    // ── 다른 incarnation 앞 결박 잔해는 산 수신자의 우편함을 인질로 잡지 못한다(round-3 fix 2 의 요구,
+    //    round-6 에서 **메커니즘 교체**: 회계 가시성 예외 → 압력 회수) ────────────────────────────
+    /// 죽은 방송분이 cap 을 채워도 같은 이름의 **새 incarnation** 앞 1:1 발송은 반려되지 않는다.
+    #[test]
+    fn a_dead_broadcast_backlog_does_not_reject_mail_to_the_new_incarnation() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (old_id, old_agent) = live("worker");
+        port.set_roster(vec![old_agent]);
+        gate.set_busy(old_id, 0); // 턴 중 → 방송이 파킹된다.
+        svc.add_group_member_for_test("@t", "worker");
+        // cap(100)까지 방송분을 쌓는다 — 전부 (old_id, 0) 결박.
+        for i in 0..100 {
+            svc.handle_group_send(
+                &format!("g{i}"),
+                from,
+                "boss",
+                "@t",
+                "공지",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        }
+        assert_eq!(svc.parked_len("worker"), 100, "전제: 큐가 cap 까지 참");
+
+        // 그 멤버가 죽고 같은 이름의 **새 에이전트**가 뜬다. 결박분은 그쪽으로 절대 안 가지만(fix A),
+        //   회계에서도 안 보여야 새 수신자가 정상적으로 메일을 받는다.
+        let (new_id, new_agent) = live("worker");
+        port.set_roster(vec![new_agent]);
+        gate.clear();
+        let out = svc
+            .handle_single_send(
+                "m-direct",
+                ident(),
+                "s",
+                "worker",
+                "1:1",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("MAILBOX_FULL 로 반려되면 안 된다(즉시 배달이라 파킹 자체를 안 한다)");
+        assert_eq!(
+            out,
+            SendOutcome::Delivered,
+            "FIFO 합류 판정은 잔해를 세지 않는다(visible_to = 순서 축) → 앞지를 대상이 없으니 즉시 배달"
+        );
+        assert_eq!(
+            port.injected
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![new_id],
+            "새 incarnation 에게만, 그리고 결박분은 하나도 안 나갔다"
+        );
+
+        // busy 라 파킹으로 가는 갈래도 같다 — cap 이 잔해로 막히면 안 된다. 단 **메커니즘이 다르다**
+        //   (round-6): 잔해도 용량을 차지하므로, 자리는 가장 오래된 잔해를 회수해 만든다(장부 skipped).
+        gate.set_busy(new_id, 0);
+        let out = svc
+            .handle_single_send(
+                "m-parked",
+                ident(),
+                "s",
+                "worker",
+                "나중에",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("stale 잔해를 회수해 자리를 만들므로 파킹 수용");
+        assert!(matches!(out, SendOutcome::Parked { .. }));
+        assert_eq!(
+            svc.parked_len("worker"),
+            100,
+            "잔해 99 + 새 파킹 1 — 큐는 cap 을 넘지 않는다(옛 구현 = 101)"
+        );
+        assert_eq!(
+            svc.ledger_statuses("g0"),
+            vec![DeliveryStatus::Skipped],
+            "밀려난 가장 오래된 잔해는 조용히 사라지지 않고 장부에 남는다"
+        );
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Pending],
+            "필요한 만큼만 회수한다(둘째로 오래된 잔해는 그대로)"
+        );
+    }
+
+    // ── round-6: **단일 cap** 이 잔해의 무한 성장을 막는다(분모에서 가시성 예외를 걷어냈다) ──────────
+    /// ★실측 결함 회귀★: 같은 이름을 **완전히 새 AgentId** 로 계속 갈아치우면 옛 유입 cap 의 분모(가시
+    ///   항목)가 세대마다 리셋돼 100건씩 더 수용됐고, 그 잔해는 flush 의 "확정 사망" 판정(같은 id·더 높은
+    ///   epoch)에도 안 걸려 최대 24h(TTL) 동안 남았다 — 큐가 무계였다(옛 구현 = 400건). 이제 cap 은 결박을
+    ///   모르므로 큐가 100 에서 멈추고, 밀려난 잔해는 **조용히 사라지지 않고** 장부에 `skipped` 로 남는다.
+    #[test]
+    fn repeated_respawn_broadcasts_stay_under_the_mailbox_cap_and_ledger_every_retirement() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        svc.add_group_member_for_test("@t", "worker");
+
+        // 4세대 × cap = 400건 방송. 세대마다 같은 이름의 새 AgentId 로 갈아치우고(고아 갈래), 턴 중이라
+        //   방송은 전부 그 세대의 incarnation 에 결박된 채 파킹된다.
+        let generations = 4usize;
+        for g in 0..generations {
+            let (id, agent) = live("worker");
+            port.set_roster(vec![agent]);
+            gate.set_busy(id, 0);
+            for i in 0..MAILBOX_CAP_FOR_TEST {
+                svc.handle_group_send(
+                    &format!("g{g}-{i}"),
+                    from,
+                    "boss",
+                    "@t",
+                    "공지",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                )
+                .expect("방송 접수(멤버 회계는 결과 줄에 실린다)");
+            }
+        }
+
+        assert_eq!(
+            svc.parked_len("worker"),
+            MAILBOX_CAP_FOR_TEST,
+            "큐는 단일 cap 에서 멈춘다(옛 구현 = 400)"
+        );
+
+        let snapshot = svc.ledger_snapshot();
+        assert_eq!(
+            snapshot.len(),
+            generations * MAILBOX_CAP_FOR_TEST,
+            "발송마다 레코드 1건(이력 링 4096 안이라 evict 없음)"
+        );
+        let skipped: Vec<&String> = snapshot
+            .iter()
+            .filter(|(_, _, _, s)| *s == DeliveryStatus::Skipped)
+            .map(|(id, ..)| id)
+            .collect();
+        let pending = snapshot
+            .iter()
+            .filter(|(_, _, _, s)| *s == DeliveryStatus::Pending)
+            .count();
+        assert_eq!(
+            skipped.len(),
+            (generations - 1) * MAILBOX_CAP_FOR_TEST,
+            "밀려난 300건이 전부 장부에 남는다(조용한 유실 0 — 수용 총량 = 잔존 + 회수)"
+        );
+        assert_eq!(pending, MAILBOX_CAP_FOR_TEST, "큐에 남은 것만 pending");
+        // 회수는 **오래된 순** — 마지막 세대만 남고 앞선 세대는 통째로 밀려났다.
+        let last_gen = format!("g{}-", generations - 1);
+        assert!(
+            skipped.iter().all(|id| !id.starts_with(&last_gen)),
+            "가장 오래된 세대부터 회수된다(admission 순번 오름차순)"
+        );
+        let parked = svc.parked_msg_ids("worker");
+        assert!(
+            parked.iter().all(|id| id.starts_with(&last_gen)),
+            "큐에는 마지막 세대만 남는다"
+        );
+        assert_eq!(
+            parked.first().unwrap(),
+            &format!("{last_gen}0"),
+            "큐 앞머리 = 남은 것 중 가장 오래된 것(순서 보존)"
+        );
+    }
+
+    // ── F2: 압력 회수는 **산 동명** 앞 메일을 잡아먹지 않는다 ──────────────────────────────────────
+    #[test]
+    fn capacity_retirement_never_eats_mail_bound_to_a_live_duplicate_name() {
+        // ★F2 회귀(round-6 결함 — 실측 가능한 1급 상태)★: 같은 이름의 산 에이전트가 둘인 상황은 이 시스템의
+        //   정상 상태다(exact-id 발송이 동명 모호성을 의도적으로 통과하고, 재스폰 직후 옛·새가 공존한다).
+        //   옛 회수 판정은 "이 park 이 해석한 current 와 다르면 잔해" 라, B 앞 파킹의 압력이 **살아서 턴 중인
+        //   A 앞 방송 메일**을 `skipped` 로 걷어냈다 — "회수가 산 메일을 잡아먹지 않는다" 는 보장 위반.
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (a_id, a_agent) = live("worker");
+        port.set_roster(vec![a_agent.clone()]);
+        gate.set_busy(a_id, 0); // 턴 중 → 방송이 A 결박으로 파킹된다.
+        svc.add_group_member_for_test("@t", "worker");
+        for i in 0..MAILBOX_CAP_FOR_TEST {
+            svc.handle_group_send(
+                &format!("g{i}"),
+                from,
+                "boss",
+                "@t",
+                "공지",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        }
+        assert_eq!(
+            svc.parked_len("worker"),
+            MAILBOX_CAP_FOR_TEST,
+            "전제: A 결박분으로 cap 까지 참"
+        );
+
+        // 같은 이름의 두 번째 에이전트 B 등장 — ★A 는 여전히 살아 있다★(죽지 않았다는 게 이 테스트의 핵심).
+        let (b_id, b_agent) = live("worker");
+        port.set_roster(vec![a_agent, b_agent.clone()]);
+        gate.set_busy(b_id, 0);
+        // exact-id 지목은 동명 모호성을 통과한다 → B 앞 파킹 시도 = cap 압력.
+        let rejected = svc.handle_single_send(
+            "m-to-b",
+            ident(),
+            "s",
+            &b_id.to_string(),
+            "1:1",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        );
+        assert_eq!(
+            rejected,
+            Err(SendReject::MailboxFull),
+            "생사 스냅샷에 A 가 있으므로 회수할 잔해가 없다 → 산 메일을 먹는 대신 반려"
+        );
+        assert_eq!(svc.parked_len("worker"), MAILBOX_CAP_FOR_TEST, "부작용 0");
+        assert_eq!(
+            svc.ledger_statuses("g0"),
+            vec![DeliveryStatus::Pending],
+            "A 앞 메일은 한 건도 skipped 되지 않았다(옛 구현 = skipped)"
+        );
+
+        // 대조군 — A 가 사라지면 그 결박분은 **진짜** 잔해다 → 회수하고 수용(회수 기능이 죽은 게 아니다).
+        port.set_roster(vec![b_agent]);
+        let parked = svc
+            .handle_single_send(
+                "m-to-b2",
+                ident(),
+                "s",
+                &b_id.to_string(),
+                "1:1",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("A 가 없으면 잔해 회수로 수용");
+        assert!(matches!(parked, SendOutcome::Parked { .. }));
+        assert_eq!(
+            svc.ledger_statuses("g0"),
+            vec![DeliveryStatus::Skipped],
+            "증거가 생기면 가장 오래된 잔해가 회수되고 장부에 남는다"
+        );
+    }
+
+    // ── F1: flush 중 "빈 큐 창" 이 cap 을 뚫지 못한다(in-flight 회계) ────────────────────────────
+    #[test]
+    fn repeated_flush_failure_cycles_never_grow_the_queue_past_the_cap() {
+        // ★F1 회귀(무계 성장 — 실측 인터리빙)★: flush 가 락 밖에서 주입하는 동안 큐는 **비어 보인다**. 옛
+        //   구현은 그 창에서 동시 발송을 cap 만큼 통째로 받았고(cap 검사가 빈 큐를 봤다), inject 가 실패해
+        //   배치가 `restore_ordered` 로 되돌아오면 큐가 그만큼 커졌다 — 사이클마다 +k 로 자라 상한이
+        //   무의미해졌다. 장부는 전부 pending 이라 "유실" 로도 안 잡히는, 조용한 메모리 성장이다.
+        let (svc, port) = svc();
+        let (late_id, late) = live("late");
+        port.set_roster(vec![]);
+        for i in 0..MAILBOX_CAP_FOR_TEST {
+            svc.handle_single_send(
+                &format!("m{i}"),
+                ident(),
+                "s",
+                "late",
+                "x",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("cap 이내 파킹");
+        }
+
+        // inject 도중(= 락 밖·큐가 비어 보이는 창) 동시 발송 20건을 밀어넣는 hook. 로스터를 잠시 비워
+        //   그 발송들이 파킹 경로를 타게 한다(부재 파킹) — self-heal 도 그동안 아무 것도 못 찾는다.
+        let svc_hook = svc.clone();
+        let port_hook = port.clone();
+        let late_hook = late.clone();
+        let seq = Arc::new(StdMutex::new(0usize));
+        let seq_hook = seq.clone();
+        port.set_on_inject(Arc::new(move |_| {
+            let n = {
+                let mut g = seq_hook.lock().unwrap();
+                let v = *g;
+                *g += 1;
+                v
+            };
+            port_hook.set_roster(vec![]);
+            for i in 0..20 {
+                let _ = svc_hook.handle_single_send(
+                    &format!("c{n}-{i}"),
+                    ident(),
+                    "s",
+                    "late",
+                    "x",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                );
+            }
+            port_hook.set_roster(vec![late_hook.clone()]);
+        }));
+        // 사이클마다 inject 를 **첫 항목에서** 실패시킨다(호출 인덱스는 누적이라 0,1,2 = 각 사이클의 첫 시도).
+        port.fail_at(&[0, 1, 2]);
+        for cycle in 0..3 {
+            port.set_roster(vec![late.clone()]);
+            svc.flush_for("late", late_id);
+            assert_eq!(
+                svc.parked_len("late"),
+                MAILBOX_CAP_FOR_TEST,
+                "사이클 {cycle}: 큐는 cap 에서 멈춘다(옛 구현 = 120·140·160 으로 성장)"
+            );
+        }
+        assert_eq!(
+            svc.ledger_statuses("m0"),
+            vec![DeliveryStatus::Pending],
+            "되돌아온 배치는 유실 없이 pending 유지(무손실은 그대로)"
+        );
+    }
+
+    // ── F3: 회수 시점에 이미 TTL 을 넘긴 항목의 장부 어휘는 `expired` ────────────────────────────
+    #[test]
+    fn a_capacity_retired_item_past_its_ttl_is_ledgered_expired_not_skipped() {
+        // ★F3 회귀★: TTL(24h)과 sweep 주기(60s) 사이에는 틈이 있어, **이미 만료됐지만 아직 안 걷힌** 항목이
+        //   압력 회수로 먼저 걷힐 수 있다. spec §5 계약상 그 종점은 `skipped`(= 그 수신자에게 배달하지 않음)가
+        //   아니라 `expired`(= 시계가 먼저 운명을 정함)다 — 옛 구현은 회수면 무조건 skipped 라 장부가 거짓
+        //   원인을 남겼다(발신 LLM 이 "수신자가 사라졌나?" 로 오독한다).
+        // ★park_into 를 직접 부르는 이유★: 운영 경로(`park_pending`)는 `Instant::now()` 를 쓰므로 테스트가
+        //   24시간 경과를 만들 수 없다. 순수 알맹이에 시각을 주입하는 게 이 계약을 결정적으로 고정하는 길이다.
+        let (svc, _port) = svc();
+        let t0 = Instant::now();
+        let dead = (AgentId::new_v4(), 0u32);
+        let alive = (AgentId::new_v4(), 0u32);
+        let meta = SendMeta::default();
+        let mut effects = ParkSideEffects::default();
+        let mut park_bound = |st: &mut MessagingState, id: &str, to: &str, now: Instant| {
+            park_into(
+                st,
+                ParkRequest {
+                    msg_id: id,
+                    sender_name: "s",
+                    from: ident(),
+                    entrance: Entrance::Mcp,
+                    recipient: to,
+                    body: "x",
+                    hinted_id: Some(dead.0),
+                    bound_incarnation: Some(dead),
+                    live_incarnations: &[dead],
+                    kind: ParkKind::Message,
+                    meta: &meta,
+                },
+                now,
+                &mut effects,
+            )
+        };
+        {
+            let mut st = svc.state.lock().expect("state");
+            // 두 수신자 큐를 t0 에 cap 까지 채운다(전부 dead 결박 = 회수 대상). w = 만료 갈래, w2 = 대조군.
+            for i in 0..MAILBOX_CAP_FOR_TEST {
+                park_bound(&mut st, &format!("g{i}"), "w", t0).expect("cap 이내");
+                park_bound(&mut st, &format!("h{i}"), "w2", t0).expect("cap 이내");
+            }
+        }
+        // TTL 을 넘긴 시점의 신규 park → 가장 오래된 잔해 1건이 회수되는데, 그건 이미 만료 상태다.
+        let later = t0 + PARK_TTL_FOR_TEST + Duration::from_secs(1);
+        let mut late_effects = ParkSideEffects::default();
+        {
+            let mut st = svc.state.lock().expect("state");
+            park_into(
+                &mut st,
+                ParkRequest {
+                    msg_id: "m-new",
+                    sender_name: "s",
+                    from: ident(),
+                    entrance: Entrance::Mcp,
+                    recipient: "w",
+                    body: "x",
+                    hinted_id: None,
+                    bound_incarnation: None,
+                    live_incarnations: &[alive],
+                    kind: ParkKind::Message,
+                    meta: &meta,
+                },
+                later,
+                &mut late_effects,
+            )
+            .expect("잔해 회수로 수용");
+            // 대조군 — 같은 회수를 **TTL 이전**에 하면 어휘는 그대로 `skipped` 다.
+            park_into(
+                &mut st,
+                ParkRequest {
+                    msg_id: "m-new2",
+                    sender_name: "s",
+                    from: ident(),
+                    entrance: Entrance::Mcp,
+                    recipient: "w2",
+                    body: "x",
+                    hinted_id: None,
+                    bound_incarnation: None,
+                    live_incarnations: &[alive],
+                    kind: ParkKind::Message,
+                    meta: &meta,
+                },
+                t0 + Duration::from_secs(1),
+                &mut late_effects,
+            )
+            .expect("잔해 회수로 수용");
+        }
+
+        assert_eq!(
+            svc.ledger_statuses("g0"),
+            vec![DeliveryStatus::Expired],
+            "TTL 지난 회수분은 expired(옛 구현 = skipped — 거짓 원인)"
+        );
+        assert_eq!(
+            svc.ledger_statuses("h0"),
+            vec![DeliveryStatus::Skipped],
+            "TTL 전 회수분은 그대로 skipped(어휘를 뭉개지 않는다)"
+        );
+        assert_eq!(
+            late_effects.retired_expired,
+            vec!["g0".to_string()],
+            "로그 갈래도 어휘를 따라 갈린다(만료는 잔해 회수 로그로 새지 않는다)"
+        );
+        assert_eq!(late_effects.retired_stale, vec!["h0".to_string()]);
+    }
+
+    // ── round-5 finding 2: evict 된 레코드의 로그는 **시도한 종점 상태**를 말해야 한다 ────────────────
+    /// 이력 링에서 밀려난 레코드에 대한 종점 전이는 로그가 **유일하게 남는 감사 증거**다. 옛 구현은 그 수집함이
+    /// 만료 전용이던 시절의 이름·문구를 그대로 써서, 회수(`skipped`)까지 `expired` 로 보고했다.
+    #[test]
+    fn an_evicted_terminal_transition_reports_the_status_that_was_attempted() {
+        let t0 = Instant::now();
+        let mut ledger = Ledger::with_capacity(1);
+        ledger.record("m0", "s", "w", "본문", DeliveryStatus::Pending, t0);
+        // 용량 1 이라 이 기록이 m0 를 링에서 밀어낸다(= 운영의 HISTORY_CAPACITY evict 와 같은 상황).
+        ledger.record("m1", "s", "w", "본문", DeliveryStatus::Pending, t0);
+
+        let mut evicted = Vec::new();
+        // 회수(결박 수신자 소멸) 의도 → `skipped` 로 보고돼야 한다.
+        transition_or_collect_evicted(
+            &mut ledger,
+            "m0",
+            "w",
+            DeliveryStatus::Skipped,
+            t0,
+            &mut evicted,
+        );
+        assert_eq!(
+            evicted,
+            vec![EvictedTransition {
+                msg_id: "m0".to_string(),
+                recipient: "w".to_string(),
+                intended: DeliveryStatus::Skipped,
+            }],
+            "회수를 만료로 뭉개지 않는다(finding 2)"
+        );
+        // 만료 의도는 그대로 `expired` — 같은 지점이 두 어휘를 정확히 나른다.
+        transition_or_collect_evicted(
+            &mut ledger,
+            "m0",
+            "w",
+            DeliveryStatus::Expired,
+            t0,
+            &mut evicted,
+        );
+        assert_eq!(evicted[1].intended, DeliveryStatus::Expired);
+        // 살아 있는 레코드는 정상 전이 → 수집되지 않는다(수집함은 evict 사실 전용).
+        transition_or_collect_evicted(
+            &mut ledger,
+            "m1",
+            "w",
+            DeliveryStatus::Skipped,
+            t0,
+            &mut evicted,
+        );
+        assert_eq!(evicted.len(), 2, "전이가 성공하면 수집 없음");
+    }
+
+    /// 대조군 — **같은 incarnation** 앞 결박분은 여전히 FIFO 합류 대상이다(잔해 필터가 과교정이 아님).
+    #[test]
+    fn a_broadcast_parked_for_the_same_incarnation_still_holds_the_fifo_line() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (id, agent) = live("worker");
+        port.set_roster(vec![agent]);
+        gate.set_busy(id, 0);
+        svc.add_group_member_for_test("@t", "worker");
+        svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@t",
+            "방송",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("방송");
+        gate.clear(); // 턴은 끝났지만 아직 flush 전.
+
+        let out = svc
+            .handle_single_send(
+                "m-direct",
+                ident(),
+                "s",
+                "worker",
+                "직발송",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("접수");
+        assert!(
+            matches!(out, SendOutcome::Parked { .. }),
+            "같은 incarnation 앞 결박분은 보이므로 직발송이 큐에 합류한다"
+        );
+        // 도어벨(미배선 = 인라인 폴백)이 오래된 순으로 비운다.
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("방송"), "방송이 먼저: {bodies:?}");
+        assert!(bodies[1].contains("직발송"), "직발송은 뒤: {bodies:?}");
+    }
+
+    // ── round-3 fix 3/5: 도어벨 시점 — 배선=즉시 enqueue / 미배선(인라인)=응답 확정 후 ────────────────
+    /// 인라인 폴백은 **주입 루프가 끝나고 results 가 확정된 뒤** 돈다(방송 한가운데 flush 재진입 금지).
+    #[test]
+    fn the_inline_flush_fallback_runs_after_the_broadcast_response_is_final() {
+        let (svc, port, gate) = svc_gated(); // ★도어벨 미배선★ = 인라인 폴백.
+        let (from, _s) = live_sender("boss");
+        let (aq_id, aq) = live("aq");
+        let (bee_id, bee) = live("bee");
+        port.set_roster(vec![aq, bee]);
+        svc.add_group_member_for_test("@t", "aq");
+        svc.add_group_member_for_test("@t", "bee");
+        // aq 앞에 옛 메일 하나를 파킹시켜 둔다(busy 로 park → 턴 종료). 방송은 여기 합류한다.
+        gate.set_busy(aq_id, 0);
+        svc.handle_single_send(
+            "m-old",
+            ident(),
+            "s",
+            "aq",
+            "옛 메일",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("파킹");
+        gate.clear();
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "방송",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("aq".to_string(), GroupMemberStatus::Pending),
+                ("bee".to_string(), GroupMemberStatus::Delivered),
+            ],
+        );
+        // ★핵심 단언★: 방송 자신의 주입(bee)이 **먼저** 끝나고, 그 다음에야 aq 큐의 인라인 flush 가 돈다.
+        //   옛 배치(도어벨을 주입 루프 **전에** 눌렀던 코드)에서는 [옛 메일, 방송(aq), 방송(bee)] 이 나왔다 —
+        //   응답을 조립하기도 전에 aq 의 방송분이 delivered 로 전이되는 회계 skew 가 그 순서의 증상이다.
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 3, "중복 주입 없음: {bodies:?}");
+        assert!(
+            bodies[0].contains("방송"),
+            "방송 fan-out 이 먼저: {bodies:?}"
+        );
+        assert_eq!(
+            port.injected.lock().unwrap()[0].0,
+            bee_id,
+            "그 첫 주입은 즉시 배달 대상(bee)"
+        );
+        assert!(
+            bodies[1].contains("옛 메일"),
+            "그 뒤 aq 큐 flush: {bodies:?}"
+        );
+        assert!(
+            bodies[2].contains("방송"),
+            "aq 의 방송분은 큐 순서대로 마지막"
+        );
+        assert_eq!(
+            svc.ledger_statuses("g1"),
+            vec![DeliveryStatus::Delivered, DeliveryStatus::Delivered],
+            "인라인 flush 후엔 둘 다 delivered(응답은 그 이전 시점의 사실이었다)"
+        );
+    }
+
+    /// 배선된 도어벨은 **미루지 않는다** — 파킹이 정해진 그 자리에서 즉시 enqueue(논블록)한다.
+    #[test]
+    fn a_wired_doorbell_is_rung_immediately_not_deferred_past_the_injection_loop() {
+        let (svc, port, gate, bell) = svc_gated_with_doorbell();
+        let (from, _s) = live_sender("boss");
+        let (aq_id, aq) = live("aq");
+        let (bee_id, bee) = live("bee");
+        port.set_roster(vec![aq, bee]);
+        svc.add_group_member_for_test("@t", "aq");
+        svc.add_group_member_for_test("@t", "bee");
+        gate.set_busy(aq_id, 0); // aq 는 파킹 → 도어벨 대상.
+
+        // bee 주입이 일어나는 그 시점에 도어벨이 **이미** 눌려 있어야 한다(미루면 여기서 비어 있다).
+        let bell_probe = bell.clone();
+        let seen_at_inject = Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen_at_inject.clone();
+        port.set_on_inject(Arc::new(move |_| {
+            *sink.lock().unwrap() = bell_probe.seen();
+        }));
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "방송",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("aq".to_string(), GroupMemberStatus::Pending),
+                ("bee".to_string(), GroupMemberStatus::Delivered),
+            ],
+        );
+        assert_eq!(
+            *seen_at_inject.lock().unwrap(),
+            vec![aq_id],
+            "배선 갈래는 주입 루프 **전에** 이미 눌렸다 — 미루면 그 멤버의 깨우기가 남은 blocking write 뒤로 밀린다"
+        );
+        assert_eq!(bell.seen(), vec![aq_id], "중복 발화 없음");
+        // 소비자가 없는 조립이므로 파킹은 그대로 남는다(= 발신 스레드가 배치 write 를 지지 않았다는 증거).
+        assert_eq!(svc.parked_len("aq"), 1);
+        assert_eq!(
+            port.injected
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![bee_id],
+        );
+    }
+
+    // ── C4 리뷰 fix C: 멤버별 주입 직전 재확인(계획이 순차 write 사이에 stale 해진다) ──────────────
+
+    /// 앞 멤버에 쓰는 동안 뒤 멤버가 **새 턴을 시작**하면, 계획이 `Deliver` 였어도 주입하지 않고 파킹한다
+    /// (idle 게이트를 방송만 우회하는 구멍 — 단일 발송 3분기와 parity).
+    #[test]
+    fn a_member_that_starts_a_turn_mid_fanout_is_parked_instead_of_injected() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (_f, first) = live("first");
+        let (second_id, second) = live("second");
+        port.set_roster(vec![first, second]);
+        svc.add_group_member_for_test("@t", "first");
+        svc.add_group_member_for_test("@t", "second");
+        // 첫 멤버 stdin 에 쓰는 **그 순간** 둘째 멤버가 턴을 시작한다(계획은 이미 굳은 뒤).
+        let gate_hook = gate.clone();
+        port.set_on_inject(Arc::new(move |idx| {
+            if idx == 0 {
+                gate_hook.set_busy(second_id, 0);
+            }
+        }));
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "공지",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("first".to_string(), GroupMemberStatus::Delivered),
+                ("second".to_string(), GroupMemberStatus::Pending),
+            ]
+        );
+        assert_eq!(
+            port.injected_bodies().len(),
+            1,
+            "턴을 시작한 멤버에겐 밀지 않는다(주입은 첫 멤버 1건뿐)"
+        );
+        assert_eq!(
+            svc.parked_len("second"),
+            1,
+            "그 몫은 파킹돼 턴 종료를 기다린다"
+        );
+        assert!(
+            results[1]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mid-turn"),
+            "hint 는 계획 단계 파킹과 **같은 문구**여야 한다: {:?}",
+            results[1].hint
+        );
+    }
+
+    /// 앞 멤버에 쓰는 동안 뒤 멤버 앞으로 **다른 메일이 파킹**되면, 방송은 그 큐를 앞지르지 않고 합류한다
+    /// (FIFO 일관성 — 단일 발송 3-b 와 parity).
+    #[test]
+    fn a_member_whose_queue_grows_mid_fanout_joins_that_queue_instead_of_jumping_it() {
+        let (svc, port, gate) = svc_gated();
+        let (from, _s) = live_sender("boss");
+        let (_f, first) = live("first");
+        let (second_id, second) = live("second");
+        port.set_roster(vec![first, second]);
+        svc.add_group_member_for_test("@t", "first");
+        svc.add_group_member_for_test("@t", "second");
+        // 첫 멤버에 쓰는 동안 둘째 멤버 앞으로 1:1 메일이 파킹된다(그 멤버가 잠깐 턴을 돌았다 끝낸 상황).
+        //   busy 축과 분리해 **큐 축만** 뒤집기 위해, 파킹시킨 뒤 곧바로 idle 로 되돌린다.
+        let svc_hook = svc.clone();
+        let gate_hook = gate.clone();
+        port.set_on_inject(Arc::new(move |idx| {
+            if idx == 0 {
+                gate_hook.set_busy(second_id, 0);
+                let _ = svc_hook.handle_single_send(
+                    "m-old",
+                    ident(),
+                    "s",
+                    "second",
+                    "먼저 온 것",
+                    Entrance::Mcp,
+                    &SendMeta::default(),
+                );
+                gate_hook.clear();
+            }
+        }));
+
+        let results = svc
+            .handle_group_send(
+                "g1",
+                from,
+                "boss",
+                "@t",
+                "방송",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("방송");
+        assert_eq!(
+            member_pairs(&results),
+            vec![
+                ("first".to_string(), GroupMemberStatus::Delivered),
+                ("second".to_string(), GroupMemberStatus::Pending),
+            ]
+        );
+        assert!(
+            results[1]
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("earlier queued messages"),
+            "hint 가 FIFO 합류 사유여야 한다: {:?}",
+            results[1].hint
+        );
+        // 도어벨(미배선 = 인라인 flush 폴백)이 큐를 오래된 순으로 비운다 — 방송이 옛 메일 뒤에 나간다.
+        let bodies = port.injected_bodies();
+        assert_eq!(bodies.len(), 3, "first 1건 + second 큐 2건: {bodies:?}");
+        assert!(
+            bodies[1].contains("먼저 온 것"),
+            "옛 메일이 먼저: {bodies:?}"
+        );
+        assert!(bodies[2].contains("방송"), "방송은 그 뒤: {bodies:?}");
+    }
+
+    /// ★fix I★ — 그룹 갈래에도 배선 guard 를 둔다(단일 발송 guard 와 대칭). 계약 필드는 입구가 유일 검증자다.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ingress가 유일 검증자")]
+    fn contract_fields_on_the_group_path_trip_the_debug_assert() {
+        let (svc, port) = svc();
+        let (from, _s) = live_sender("boss");
+        let (_a, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        let _ = svc.handle_group_send(
+            "g1",
+            from,
+            "boss",
+            "@all",
+            "x",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        );
     }
 }

@@ -16,7 +16,7 @@ Messages arrive as XML envelopes:
 - `<message from="qa-alpha">…</message>` — an ordinary heads-up. No reply is owed.
 - `<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m">…</message>` — **the sender is waiting on an answer.** Do the work first, then reply with `--reply-to m-7f3k` (that exact id). `reply-by` is the sender's own deadline: if you don't reply in time, *the sender* gets notified — nothing is sent to you. Still reply when you're done, even if you're late; and if you can't or won't do it, reply saying so — a refusal is a reply, silence is not.
 - `<message from="qa-bravo" in-reply-to="m-7f3k">…</message>` — an answer to a request you sent earlier.
-- `<notice>…</notice>` — infrastructure notice from the broker itself. It has no `from`, so **do not reply to it**; just take the information (e.g. "nobody answered your request in time") and decide what to do.
+- `<notice>…</notice>` — a system notice from the **Engram broker daemon itself, never a teammate**; its body opens with an `[engram]` marker and the envelope carries no `from` — that absence is the tell. There is nobody on the other end, so **do not reply to it**; just take the information (e.g. "nobody answered your request in time") and decide what to do.
 
 Only use `--reply-to` when the message you're answering actually carried `type="request"` and an `id`.
 

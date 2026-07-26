@@ -247,7 +247,9 @@ impl EngramMcpHandler {
         back (optionally with `reply_by` = \"5m\"/\"10m\"/\"1h\" — at least 1 minute, after which \
         YOU get notified that no reply arrived). When you answer a message that arrived with \
         type=\"request\" and an id, pass `reply_to` = that id. `request` and `reply_to` are \
-        mutually exclusive."
+        mutually exclusive. Delivery is at-least-once: if this call fails or times out without a \
+        result, the message may already have been delivered — check before resending, because a \
+        retry is a NEW message, not a replacement."
     )]
     async fn send_message(
         &self,
@@ -310,7 +312,36 @@ impl EngramMcpHandler {
                 reply_to,
             },
         };
-        let result = handle_send(manager, &self.registry, messaging, Entrance::Mcp, cmd);
+        // ★blocking 경계(C4 리뷰 fix D · load-bearing)★: `handle_send` 안의 `inject` 는 자식 stdin 의
+        //   **blocking write** 다. 그룹 방송이면 한 요청이 멤버 수만큼 그 write 를 **직렬로** 지므로
+        //   (service.rs handle_group_send "주입 = 멤버 수만큼 순차 직접 write"), 이 async 핸들러에서 그대로
+        //   부르면 막힌 파이프 하나가 tokio 워커 스레드를 통째로 잡고 그 스레드에 얹힌 **다른 요청까지**
+        //   head-of-line 블로킹한다(런타임 워커는 코어 수만큼뿐). 그래서 blocking 풀로 옮긴다 — 단일 발송도
+        //   같은 write 를 하므로 같은 대우를 받는다(경로를 갈라 두 규율을 만들지 않는다).
+        //   ★flush 레인과 같은 규율★: 배치 write 를 요청 처리 스레드에서 떼어내는 것(service.rs FlushTrigger).
+        //
+        // ★그 대가 = **at-least-once 배달**(round-3 fix 7 · 의도된 설계, 문서화 필요)★: `spawn_blocking`
+        //   클로저는 **abort 불가**다. 호출자가 요청을 중도 취소하면(HTTP 연결 끊김·MCP 클라이언트 종료·
+        //   타임아웃) 이 `.await` 는 사라지지만 **블로킹 태스크는 끝까지 돈다** — 즉 배달과 장부 커밋은
+        //   그대로 일어나고 **응답만** 유실된다. 발신자가 재시도하면 데몬은 그걸 새 `msg_id` 의 새 발송으로
+        //   보므로(멱등 키가 없다) 같은 내용이 한 번 더 배달/방송된다.
+        //   ★왜 이대로 두나★: 반대 선택(취소 시 배달도 취소)은 불가능하다 — 자식 stdin 에 이미 쓴 바이트는
+        //   회수할 수 없고, "쓰기 전에 취소를 확인" 은 또 하나의 TOCTOU 다. 그래서 **중복 > 유실**을 택한다:
+        //   중복은 수신 LLM 이 읽고 판단할 수 있는 가시적 사실이지만, 유실은 아무도 모르는 조용한 실패다
+        //   (ADR-0103 "조용한 유실 금지" 와 같은 방향).
+        //   ★미래 확장점★: 발신자가 고르는 **멱등 키**(재시도 시 같은 값)를 받아 장부에서 중복 발송을 접는
+        //   것. 지금은 `msg_id` 가 데몬 생성이라 그 역할을 못 한다(재시도마다 새 값).
+        let (manager, registry, messaging) =
+            (manager.clone(), self.registry.clone(), messaging.clone());
+        let result = tokio::task::spawn_blocking(move || {
+            handle_send(&manager, &registry, &messaging, Entrance::Mcp, cmd)
+        })
+        .await
+        .map_err(|e| {
+            // JoinError = blocking 태스크가 패닉했다(정상 흐름엔 없음). 삼키지 않고 툴 에러로 올린다.
+            tracing::error!(entrance = "mcp", "제어 채널 send 태스크 실패(패닉): {e}");
+            ErrorData::internal_error("send task failed", None)
+        })?;
         // ACK/에러 JSON 을 text content 로. CLI(/control/send)와 같은 to_json shape 를 그대로 실어 보낸다.
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -637,7 +668,25 @@ async fn control_send_handler(
             reply_to: req.reply_to,
         },
     };
-    let result = handle_send(manager, &state.registry, messaging, Entrance::Cli, cmd);
+    // ★blocking 경계(C4 리뷰 fix D)★ — 근거는 MCP 핸들러 쪽 주석이 정본(같은 이유·같은 규율).
+    // ★at-least-once(round-3 fix 7)★ — 요청이 끊겨도 이 블로킹 태스크는 완주해 배달·장부는 커밋되고 응답만
+    //   유실된다. 근거·대안·확장점(멱등 키)은 MCP 핸들러 쪽 주석이 정본.
+    let (manager, registry, messaging) =
+        (manager.clone(), state.registry.clone(), messaging.clone());
+    let Ok(result) = tokio::task::spawn_blocking(move || {
+        handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd)
+    })
+    .await
+    else {
+        // JoinError = blocking 태스크 패닉(정상 흐름엔 없음). "항상 200 + JSON" 계약은 **핸들러가 답을
+        //   만들어낸 경우**의 계약이라, 답 자체가 없는 이 경로는 500 으로 갈라 CLI 가 성공으로 오독하지
+        //   않게 한다(새 wire 에러 코드를 발명하지 않는다 — spec §6 어휘 고정).
+        tracing::error!(entrance = "cli", "제어 채널 send 태스크 실패(패닉)");
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::empty())
+            .expect("valid 500 response");
+    };
     // 성공/교정 에러 모두 200 + JSON(CLI 가 status 필드로 성패 판정). MCP 툴 경로와 같은 to_json shape.
     Json(result.to_json()).into_response()
 }

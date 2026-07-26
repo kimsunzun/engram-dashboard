@@ -823,6 +823,47 @@ impl AgentManager {
         self.get_session(agent_id)?.write_input_observed(data)
     }
 
+    /// ★incarnation 조건부 write★ — `expected_epoch` 가 **지금** 그 AgentId 가 가리키는 세션의 epoch 과
+    ///   같을 때만 쓴다. 다르면 transport 를 아예 건드리지 않고(부작용 0) `Err` 를 낸다.
+    ///
+    /// ★왜 필요한가(check-then-write TOCTOU — load-bearing)★: 호출자가 `(id, epoch)` 로 수신자를 정한 뒤
+    ///   `write_stdin_observed(id, ..)` 를 부르면, 그 사이 에이전트가 재시작(= 세션 맵 교체 + epoch+1)했을 때
+    ///   write 는 **새 incarnation** 에 착지한다. 해석과 write 가 별개 연산인 한 호출자가 아무리 앞서 검사해도
+    ///   그 창은 닫히지 않는다 — 판정을 **write 와 같은 단위**로 끌어와야 닫힌다. 그래서 이 함수가 존재한다.
+    ///   (데몬 메시징의 그룹 방송이 "발송 순간 살아 있던 그 incarnation 에게만" 을 불변식으로 갖는다 —
+    ///   ADR-0103. 그 소급 배달을 물리적으로 막는 마지막 관문이 여기다.)
+    ///
+    /// ★왜 이게 실제로 창을 닫나(ADR-0006 락 규율과 함께 읽을 것)★: `get_session` 은 sessions read lock 을
+    ///   잡아 `Arc<AgentSession>` 을 clone 하고 **즉시 해제**한다. 그 뒤의 epoch 비교와 write 는 **같은 Arc**
+    ///   위에서 일어나고, `AgentSession.epoch` 는 생성 시 고정되는 불변 필드다(재시작은 세션을 *교체*할 뿐
+    ///   기존 세션의 epoch 을 바꾸지 않는다). 따라서 비교 이후 맵이 교체돼도 우리가 쓰는 대상은 바뀔 수
+    ///   없다 — 이 함수가 `Ok` 를 내면 "epoch == expected 인 바로 그 세션에 썼다" 가 참이다.
+    ///
+    /// ★불일치 신호 = `PtyError::Unsupported`(전용 변형을 만들지 않는다)★: 호출자에게 필요한 사실은
+    ///   "이 동사를 **지금 이 대상에** 수행할 수 없었고 아무 것도 쓰지 않았다" 하나이고, 그건 이미 있는
+    ///   미지원 신호와 같은 모양이다. 원인 특정은 메시지가 담당한다(요구 epoch / 현재 epoch 을 실는다) —
+    ///   에러 어휘를 늘리면 이 한 갈래 때문에 모든 호출부의 match 가 넓어진다.
+    // ADR-0006
+    // ADR-0088
+    // ADR-0103
+    pub fn write_stdin_observed_if_epoch(
+        &self,
+        agent_id: AgentId,
+        expected_epoch: u32,
+        data: &[u8],
+    ) -> Result<crate::agent::types::WriteOutcome, PtyError> {
+        let session = self.get_session(agent_id)?;
+        // ★부작용 0 보장★: 불일치면 transport 를 건드리기 **전에** 빠진다 — 호출자가 이 Err 를 "안 보냈다"
+        //   로 확정할 수 있어야 재파킹·skip 판정이 성립한다.
+        if session.epoch != expected_epoch {
+            return Err(PtyError::Unsupported(format!(
+                "epoch mismatch: agent {agent_id} is now at epoch {}, caller required {expected_epoch} — nothing was written",
+                session.epoch
+            )));
+        }
+        session.write_input_observed(data)
+    }
+
     /// ★하네스 전용 세션 주입 seam(ADR-0088 / ADR-0012)★ — 미리 조립한 `AgentSession`(테스트 transport
     ///   포함)을 sessions 맵에 직접 등록한다. spawn 파이프(실 PTY·claude 바이너리)를 거치지 않고
     ///   배달-경계 관측 테스트(reachable=structured 캐리어인데 write 성공/실패)를 **바이너리 의존 없이**
@@ -1090,5 +1131,186 @@ mod tests {
         );
         assert!(caps.control.resize, "PTY resize 가능");
         transport.shutdown();
+    }
+
+    // ── write_stdin_observed_if_epoch — incarnation 조건부 write(ADR-0103 방송 소급 금지의 마지막 관문) ──
+    //
+    // ★왜 실 spawn 없이 세션을 맵에 직접 꽂나★: 검증 대상은 "맵이 가리키는 세션의 epoch 과 요구 epoch 을
+    //   비교해 write 를 집행/거부하는가" 뿐이라, 실 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리).
+    //   in-crate 테스트라 private `sessions` 에 직접 접근한다 — `insert_test_session`(feature gate) 불요.
+
+    use crate::agent::types::{
+        ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps, SessionCaps, TransportCaps,
+    };
+    use crate::persistence::{FilePresetStore, FileProfileStore};
+
+    /// write 바이트만 캡처하는 최소 transport(자식·파이프 없음, pump 미기동).
+    struct RecordingTransport {
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+    impl AgentTransport for RecordingTransport {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            self.written.lock().expect("written poisoned").push(bytes);
+            Ok(())
+        }
+        fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: false,
+                    structured: true,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+
+    struct NoopStatus;
+    impl StatusSink for NoopStatus {
+        fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+        fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+    }
+
+    /// 빈 레지스트리(임시 디렉토리 store)로 조립한 manager — 이 테스트는 spawn 을 안 쓴다.
+    fn bare_manager() -> AgentManager {
+        let tag = uuid::Uuid::new_v4();
+        let profiles = Arc::new(crate::agent::profile::ProfileRegistry::new(Arc::new(
+            FileProfileStore::new(std::env::temp_dir().join(format!("engram-epoch-w-{tag}"))),
+        )));
+        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
+            std::env::temp_dir().join(format!("engram-epoch-w-preset-{tag}")),
+        ))));
+        let tracker = Arc::new(SessionTracker::new(
+            crate::agent::session_tracker::TrackerConfig {
+                sessions_dir: None,
+                enabled: false,
+                poll_interval: Duration::from_secs(1),
+            },
+            Arc::new(|_, _| {}),
+        ));
+        AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker)
+    }
+
+    /// 주어진 epoch 의 세션을 맵에 꽂는다(같은 id 재삽입 = 재시작 = incarnation 교체 모사).
+    fn put_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<Mutex<Vec<Vec<u8>>>> {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let core = Arc::new(OutputCore::new(id, epoch, Arc::new(NoopStatus)));
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from("."),
+            epoch,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            BackendCaps {
+                session: SessionCaps {
+                    resume: false,
+                    snapshot: false,
+                    cwd_env: false,
+                },
+                model: ModelCaps {
+                    select: false,
+                    temperature: false,
+                    max_tokens: false,
+                },
+            },
+            InputEncoder::Raw,
+            core,
+            Box::new(RecordingTransport {
+                written: written.clone(),
+            }),
+        ));
+        manager
+            .sessions
+            .write()
+            .expect("sessions poisoned")
+            .insert(id, session);
+        written
+    }
+
+    #[test]
+    fn write_stdin_observed_if_epoch_writes_when_the_incarnation_matches() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let written = put_session(&manager, id, 3);
+
+        let out = manager
+            .write_stdin_observed_if_epoch(id, 3, b"hello")
+            .expect("일치하면 정상 write");
+        assert_eq!(out.bytes_requested, 5);
+        assert_eq!(
+            out.epoch, 3,
+            "WriteOutcome.epoch = write 를 집행한 세션의 epoch"
+        );
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            &[b"hello".to_vec()],
+            "요구 epoch 과 현재 incarnation 이 같으면 그대로 쓴다"
+        );
+    }
+
+    #[test]
+    fn write_stdin_observed_if_epoch_refuses_a_replaced_incarnation_without_writing() {
+        // ★핵심 회귀★: 호출자가 epoch 0 을 보고 결정한 뒤 그 사이 재시작(epoch 1 교체)이 일어난 상황.
+        //   무조건 write 하는 옛 경로는 **새 incarnation** 에 착지했다(방송 소급 배달 — ADR-0103 위반).
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let old_written = put_session(&manager, id, 0);
+        // 재시작 = 같은 AgentId 를 **새 세션**(epoch 1)으로 교체.
+        let new_written = put_session(&manager, id, 1);
+
+        let err = manager
+            .write_stdin_observed_if_epoch(id, 0, b"broadcast")
+            .expect_err("교체된 incarnation 에는 쓰지 않는다");
+        assert!(
+            matches!(err, PtyError::Unsupported(ref m) if m.contains("epoch mismatch")),
+            "불일치는 미지원 신호 + 원인 메시지: {err}"
+        );
+        assert!(
+            new_written.lock().unwrap().is_empty(),
+            "새 incarnation 에 단 한 바이트도 가면 안 된다(부작용 0)"
+        );
+        assert!(
+            old_written.lock().unwrap().is_empty(),
+            "옛 세션은 맵에서 밀려났으므로 그쪽에도 쓰지 않는다"
+        );
+        // 대조: 요구 epoch 을 현재 값으로 맞추면 그대로 쓴다(거부가 '영구 봉쇄'가 아님).
+        manager
+            .write_stdin_observed_if_epoch(id, 1, b"broadcast")
+            .expect("현재 incarnation 지목은 통과");
+        assert_eq!(new_written.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn write_stdin_observed_if_epoch_reports_not_found_for_an_unknown_agent() {
+        let manager = bare_manager();
+        let err = manager
+            .write_stdin_observed_if_epoch(AgentId::new_v4(), 0, b"x")
+            .expect_err("없는 에이전트");
+        assert!(
+            matches!(err, PtyError::NotFound(_)),
+            "부재는 epoch 불일치와 다른 사실이다: {err}"
+        );
     }
 }

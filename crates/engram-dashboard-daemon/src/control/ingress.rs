@@ -332,6 +332,9 @@ fn validate_contract(c: &SendContract) -> Result<crate::messaging::service::Send
         reply_by_raw: c.reply_by.clone(),
         reply_by,
         reply_to,
+        // 그룹 라벨은 발신 인자가 아니다(수신자 지목 `to` 에서 파생) — 그룹 갈래는 `handle_group_send` 가
+        //   자기 meta 를 만든다. 단일 발송 경로의 meta 는 항상 라벨 없음(= 봉투에 `to` 속성 없음).
+        group: None,
     })
 }
 
@@ -368,15 +371,16 @@ fn contract_unsupported_by_envelope(
     )
 }
 
-/// 한 수신자에 대한 발송 결과(spec §6 `results[]` 원소). status = delivered|pending, hint 선택.
+/// 한 수신자에 대한 발송 결과(spec §6 `results[]` 원소). status = delivered|pending|skipped, hint 선택.
 ///
-/// ★spec §6 shape★: 발송 성공 응답은 `{ id, results: [{to, status, hint?}] }` 다. C1 은 단일 수신자라
-///   results 길이 1 이지만, 그룹(C4)이 오면 이 배열이 길이 N 이 된다(다중수신 seam — ADR-0092 정신).
+/// ★spec §6 shape★: 발송 성공 응답은 `{ id, results: [{to, status, hint?}] }` 다. 단일 발송은 길이 1,
+///   그룹 방송(C4)은 **멤버당 한 줄**이라 길이 N 이다(그룹 단위 요약이 아니라 멤버별 회계 — spec §6).
 #[derive(Debug, Clone)]
 pub struct SendResult {
-    /// 해석된 수신자 이름(부재 파킹이면 발신자가 지목한 원 이름).
+    /// 수신자 이름 — 단일 발송이면 발신자가 지목한 이름, 그룹 방송이면 **멤버 이름**(그룹 이름 아님).
     pub to: String,
-    /// `"delivered"`(실제 주입) 또는 `"pending"`(파킹) — spec §5 상태 어휘.
+    /// `"delivered"`(실제 주입) · `"pending"`(파킹) · `"skipped"`(그룹 방송에서 배달 안 함 — 부재/동명
+    ///   다수/보관함 가득) — spec §4·§5 상태 어휘. `skipped` 는 그룹 방송에서만 나온다.
     pub status: &'static str,
     /// 자기교정용 힌트(파킹 사유 등). None 이면 응답에서 생략.
     pub hint: Option<String>,
@@ -451,8 +455,9 @@ enum Resolution {
 /// 검사 순서(첫 실패에서 교정 에러 반환 — 같은 shape 양 입구):
 ///   0. ★C3 회신 계약 인자 정합★ → INVALID_SEND_ARGS(상호배타·reply_by 단독·표기 오류·빈 reply_to).
 ///      주소보다 **먼저** 본다: 순수 구문 오류라 로스터 상태와 무관하게 항상 같은 답이 나와야 한다.
-///   1. 그룹 주소(`@`) → request 면 GROUP_REQUEST_UNSUPPORTED(spec §4 — v1 그룹 request 금지),
-///      아니면 GROUPS_NOT_SUPPORTED(그룹 발송 자체가 C4).
+///   1. ★그룹 주소(`@`) → fan-out 위임(C4)★. 단 계약 필드는 금지다: request → GROUP_REQUEST_UNSUPPORTED
+///      (spec §4 v1 영구 금지) · reply_to → INVALID_SEND_ARGS(전체회신 없음 — 회신은 발신자 1인에게).
+///      해석 실패는 GROUP_NOT_FOUND / GROUP_EMPTY(`handle_group_send`).
 ///   2. body 상한(64 KiB) → BODY_TOO_LARGE.
 ///   3. ★동명 다수 → RECIPIENT_AMBIGUOUS(유지, spec §5 주의)★ — 산 로스터에 같은 이름이 여럿이면
 ///      파킹/배달 이전에 반려한다(발신자가 exact id 로 재지목). 파킹 대상이 모호하면 안 되므로 여기서 먼저.
@@ -477,6 +482,24 @@ pub fn handle_send(
     entrance: Entrance,
     cmd: ControlCommand,
 ) -> ControlResult {
+    // ★trim 은 **그룹 축에만** 적용한다(round-3 fix 4 — C4 의 무조건 trim 을 좁힘 · load-bearing)★.
+    //
+    // 원래 고치려던 결함은 **판정들 사이의 불일치** 하나였다: 그룹 갈래는 `starts_with('@')` 로 raw 를 보고
+    //   그룹 이름 정규화(groups::normalize_group_name)는 trim 한 값을 본다 → `" @all"` 이 "@ 로 시작하지
+    //   않으니 단일 발송" 으로 흘러 **그런 이름 없음 → 부재 파킹**이 됐다(발신자에겐 `pending` 성공인데
+    //   아무도 못 받고 TTL 에 소멸 = 공백 한 칸 뒤에 숨은 조용한 유실). 그 불일치는 **그룹 감지와 그룹
+    //   해석이 같은 문자열을 보게** 하면 사라진다.
+    // ★그런데 `cmd.to` 자체를 덮어쓰면 과교정이다★: 단일 수신자 주소는 **바이트 그대로의 이름 네임스페이스**
+    //   다(WYSIWYA — ADR-0101). 앞뒤 공백이 붙은 canonical 이름이 실재하면 무조건 trim 은 그 수신자를 **다른
+    //   이름으로 재지목**해 버리고(극단적으로는 trim 한 값이 산 AgentId 문자열이면 엉뚱한 에이전트로 배달),
+    //   파킹 키·장부 키·관측 레코드의 `to` 까지 발신자가 쓰지 않은 값으로 바뀐다. 주소 정규화는 이 입구가
+    //   임의로 내릴 결정이 아니다.
+    // 그래서: **trim 한 값은 ① `@` 감지 ② 그룹 해석 ③ 봉투 그룹 라벨에만** 쓰고, 단일 수신자 해석·관측·
+    //   장부 키·응답 `to` 는 **원본 `cmd.to`** 를 그대로 쓴다(= C4 이전 동작 그대로).
+    // ★body 는 trim 하지 않는다★: 본문의 앞뒤 공백은 발신자가 의도한 내용일 수 있다(코드 블록 들여쓰기 등).
+    // ADR-0101
+    let to_trimmed = cmd.to.trim();
+
     // 0. C3 회신 계약 인자 정합(순수 구문 — 로스터 무관). 통과분은 파싱된 SendMeta 로 정규화된다.
     let meta = match validate_contract(&cmd.contract) {
         Ok(m) => m,
@@ -496,26 +519,44 @@ pub fn handle_send(
         };
     }
 
-    // 1. 그룹 주소(@).
-    // ★C4 를 위한 분기 구조(load-bearing — 지금 두 갈래를 갈라 두는 이유)★: C4 가 그룹 발송을 켤 때
-    //   **아래쪽 GROUPS_NOT_SUPPORTED 갈래만** fan-out 으로 바뀐다. 위쪽 request 갈래는 그대로 남아야 한다 —
-    //   그룹 request 는 완료 판정(any/all/quorum) 시맨틱이 미정이라 v1 에서 **영구 금지**로 못박혔다(spec §4 ·
-    //   ADR-0103 거부 대안 "그룹 request(v1)"). 지금 한 갈래로 합쳐 두면 C4 가 broadcast 를 켜면서 request 를
-    //   같이 열어 버리는 회귀가 쉽게 난다.
-    if cmd.to.starts_with('@') {
+    // 1. 그룹 주소(@) — 계약 필드는 금지, 그 외는 fan-out(C4).
+    // ★두 금지는 C4 이후에도 남는다(load-bearing)★:
+    //   - **request** — 완료 판정(any/all/quorum) 시맨틱이 미정이라 v1 에서 **영구 금지**(spec §4 · ADR-0103
+    //     거부 대안 "그룹 request(v1)"). 방송을 켠다고 함께 열리면 안 되는 갈래다.
+    //   - **reply_to** — "회신은 항상 발신자 1인에게(전체회신 없음)"(spec §4). 그룹 주소로 회신을 보내면
+    //     그게 곧 reply-all 이라 계약이 뒤집힌다. 조용히 무시(라벨만 떼고 방송)하면 발신자는 회신했다고
+    //     믿는데 원 요청자는 아무 것도 못 닫으므로, 입구에서 반려해 발신자가 1:1 로 다시 보내게 한다.
+    //   두 반려는 **배달·장부 부작용 0** 지점(body 상한·로스터 조회 전)에서 끝난다.
+    // 그룹 감지·해석·라벨은 **trim 한 값**을 본다(위 정규화 규약 — 감지와 해석이 같은 문자열을 봐야 한다).
+    if to_trimmed.starts_with('@') {
         if meta.request {
             return ControlResult::Error {
                 code: "GROUP_REQUEST_UNSUPPORTED",
                 hint: format!(
-                    "Requests must have exactly one recipient; '{}' is a group address. Send the request to a single agent name (a plain broadcast to the group is a separate message).",
-                    cmd.to
+                    "Requests must have exactly one recipient; '{to_trimmed}' is a group address. Send the request to a single agent name (a plain broadcast to the group is a separate message)."
                 ),
             };
         }
-        return ControlResult::Error {
-            code: "GROUPS_NOT_SUPPORTED",
-            hint: "Group addresses are not available yet; send to a single agent name.".to_string(),
-        };
+        if meta.reply_to.is_some() {
+            return ControlResult::Error {
+                code: "INVALID_SEND_ARGS",
+                hint: format!(
+                    "Replies always go to one agent — the sender of the request; '{to_trimmed}' is a group address (there is no reply-all). Send the reply to that agent's name, and broadcast any follow-up separately."
+                ),
+            };
+        }
+        // body 상한은 그룹도 같이 받는다(수신자 수와 무관한 순수 구문 상한) — 아래 단일 경로와 같은 코드.
+        if cmd.body.len() > MAX_BODY_BYTES {
+            return ControlResult::Error {
+                code: "BODY_TOO_LARGE",
+                hint: format!(
+                    "Message body exceeds the {MAX_BODY_BYTES}-byte limit; shorten it and retry."
+                ),
+            };
+        }
+        return handle_group_send(
+            manager, registry, messaging, entrance, &cmd, to_trimmed, &meta,
+        );
     }
 
     // 2. body 상한.
@@ -640,6 +681,117 @@ pub fn handle_send(
             code: "REQUEST_CAPACITY",
             hint: "Too many replies are still outstanding; the daemon is not tracking new requests right now. Send this as a plain notification, or wait for earlier requests to be answered or to time out."
                 .to_string(),
+        },
+    }
+}
+
+/// ★그룹 방송 입구(C4 · spec §4·§6)★ — `handle_send` 의 `@` 갈래가 계약 필드 금지·body 상한을 통과시킨 뒤
+/// 부른다. 여기 책임은 **얇다**: id 부여 + 서비스 위임 + 멤버별 결과를 wire JSON shape 으로 옮기는 것뿐이고,
+/// 스냅샷·해석·회계는 전부 `MessagingService::handle_group_send` 가 소유한다(입구는 정책을 모른다).
+///
+/// ★응답 = 멤버당 한 줄(spec §6)★: `{ id, results: [{to: 멤버이름, status, hint?}] }` — `to` 는 그룹 이름이
+///   아니라 **멤버 이름**이다. 그룹 단위 반려(NOT_FOUND/EMPTY)는 성공 축이 아니라 `{status:"error"}` 다.
+/// ★에러 코드 어휘는 spec §4 고정★: 이름 규약 위반(`@`·`@@x`)도 새 코드를 만들지 않고 `GROUP_NOT_FOUND` 로
+///   답한다 — 발신자에게 맞는 사실은 "그런 그룹은 없다" 이고, 교정 방법은 hint 가 알려 준다.
+/// ★id 충돌 재시도★: 단일 발송과 **같은 규율**(새 id 로 1회 재시도 후 반려) — 서비스가 부작용 0 상태에서
+///   `IdCollision` 을 돌려주기 때문에 그대로 다시 부를 수 있다.
+// ADR-0103 (결정 4 — 그룹 방송)
+fn handle_group_send(
+    manager: &Arc<AgentManager>,
+    registry: &Arc<ControlRegistry>,
+    messaging: &Arc<crate::messaging::service::MessagingService>,
+    entrance: Entrance,
+    cmd: &ControlCommand,
+    // 그룹 주소 — 호출자(`handle_send`)가 `cmd.to` 를 trim 한 값이다. ★`cmd.to` 를 여기서 다시 읽지 않는
+    //   이유★: 그러면 감지(trim 한 값)와 해석(raw)이 다시 갈려 원래 결함이 되살아난다. 그룹 축의 단일
+    //   문자열은 이 인자다(정규화 자체는 서비스의 `normalize_group_name` 이 한 번 더 한다 — 라벨 단일 출처).
+    group: &str,
+    // 검증된 메타 — 그룹 갈래에선 **계약 필드가 비어 있음이 이미 확인된 값**이다. 서비스에 그대로 넘겨
+    //   그쪽 debug_assert 가 배선 실수를 잡게 한다(단일 발송 guard 와 대칭 — service.rs handle_group_send).
+    meta: &crate::messaging::service::SendMeta,
+) -> ControlResult {
+    use crate::messaging::service::{GroupMemberStatus, GroupReject};
+
+    // 발신자 생존 관측(기록용만 — 단일 발송과 같은 규율, 게이트 아님).
+    let mut msg_id = new_msg_id();
+    if !registry.is_identity_live(cmd.from) {
+        tracing::warn!(
+            from = %cmd.from.agent_id,
+            from_epoch = cmd.from.epoch,
+            msg_id = %msg_id,
+            entrance = entrance.as_str(),
+            "그룹 방송 발송 — 발신자가 relay 시점에 더 이상 산 신원 아님(작성 시점 인증으로 유효, 기록용 관측)"
+        );
+    }
+    let sender_name = sender_display_name(manager, cmd.from);
+
+    let mut outcome = messaging.handle_group_send(
+        &msg_id,
+        cmd.from,
+        &sender_name,
+        group,
+        &cmd.body,
+        entrance,
+        meta,
+    );
+    if matches!(outcome, Err(GroupReject::IdCollision)) {
+        // 로그는 **충돌한 id** 를 찍는다(단일 발송 재시도와 같은 규율 — 조사 단서는 옛 id 쪽에 있다).
+        let collided = std::mem::replace(&mut msg_id, new_msg_id());
+        tracing::error!(
+            collided = %collided,
+            replacement = %msg_id,
+            entrance = entrance.as_str(),
+            "그룹 메시지 id 충돌 — 새 id 로 1회 재시도(ADR-0103 · 사실상 불가한 경로)"
+        );
+        outcome = messaging.handle_group_send(
+            &msg_id,
+            cmd.from,
+            &sender_name,
+            group,
+            &cmd.body,
+            entrance,
+            meta,
+        );
+    }
+
+    match outcome {
+        Ok(members) => ControlResult::Ok {
+            id: msg_id,
+            results: members
+                .into_iter()
+                .map(|m| SendResult {
+                    to: m.to,
+                    status: match m.status {
+                        GroupMemberStatus::Delivered => "delivered",
+                        GroupMemberStatus::Pending => "pending",
+                        GroupMemberStatus::Skipped => "skipped",
+                    },
+                    hint: m.hint,
+                })
+                .collect(),
+        },
+        Err(GroupReject::NotFound { name }) => ControlResult::Error {
+            code: "GROUP_NOT_FOUND",
+            hint: format!(
+                "No group named '{name}' is registered. Create it first (group add), or use the built-in @all."
+            ),
+        },
+        Err(GroupReject::Empty { name }) => ControlResult::Error {
+            code: "GROUP_EMPTY",
+            hint: format!(
+                "Group '{name}' resolved to no members right now — nothing was sent. Add members to it, or wait until the agents you want are running (for @all, that means someone other than you is live and reachable)."
+            ),
+        },
+        // 이름 규약 위반도 "그런 그룹 없음" 으로 답한다(spec §4 어휘 고정 — 새 코드 금지). hint 가 규약을 알려준다.
+        Err(GroupReject::InvalidName { name }) => ControlResult::Error {
+            code: "GROUP_NOT_FOUND",
+            hint: format!(
+                "'{name}' is not a valid group address: a group is exactly one leading '@' plus a name (e.g. @coders). Use @all to reach everyone live."
+            ),
+        },
+        Err(GroupReject::IdCollision) => ControlResult::Error {
+            code: "INTERNAL_ID_COLLISION",
+            hint: "The daemon could not allocate a unique message id; retry the send.".to_string(),
         },
     }
 }
@@ -1632,12 +1784,12 @@ mod tests {
     #[test]
     fn error_json_shape() {
         let r = ControlResult::Error {
-            code: "GROUPS_NOT_SUPPORTED",
+            code: "GROUP_NOT_FOUND",
             hint: "h".to_string(),
         };
         let v = r.to_json();
         assert_eq!(v["status"], "error");
-        assert_eq!(v["code"], "GROUPS_NOT_SUPPORTED");
+        assert_eq!(v["code"], "GROUP_NOT_FOUND");
         assert_eq!(v["hint"], "h");
         assert!(!r.is_accepted(), "반려는 접수 성공 아님");
     }
@@ -1771,6 +1923,7 @@ mod tests {
             reply_by_raw: Some("10m".to_string()),
             reply_by: Some(std::time::Duration::from_secs(600)),
             reply_to: None,
+            group: None,
         }
     }
     fn reply_meta() -> crate::messaging::service::SendMeta {
@@ -1779,6 +1932,7 @@ mod tests {
             reply_by_raw: None,
             reply_by: None,
             reply_to: Some("m-7f3k".to_string()),
+            group: None,
         }
     }
 
