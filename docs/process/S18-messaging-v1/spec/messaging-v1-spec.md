@@ -44,11 +44,13 @@
 2. 장부: 미회신(`awaiting_reply`) 오픈.
 3. 회신(`in_reply_to`) 도착 → `replied` 닫힘.
 4. `reply_by` 초과 → **발신자에게** `<notice>` 주입(수신자 재촉 아님 — 재촉 여부는 발신 LLM 판단). notice는 **전용 유계 레인**(반려 없음 — §5 정책 상수, ADR-0107. 구 "가득참 예외 통로" 문구 대체).
-5. LLM측 강제는 soft(프라이밍) — 보장은 데몬 장부 추적이 담당(액터 call/ask + FIPA reply-by의 증류).
+5. **기한 초과 ≠ 종결(ADR-0108):** 통지 후에도 계약은 회신까지 오픈 — 수신자의 미결 조회(`messages`)에 `timed_out`으로 계속 보인다. **동시 오픈 상한 512(전역)** 도달 시 **은퇴 가능 계약**(통지 완료분 또는 기한 없는 것 — 통지 의무 미발화분은 절대 불가) 중 최고령을 은퇴시키고 신규 수용(**이력 행은 유지·계약 추적만 제거** + 데몬 로그 잔존, 발신자 통지 없음), 은퇴 불가 계약만 512개면 `REQUEST_CAPACITY` 반려.
+6. LLM측 강제는 soft(프라이밍) — 보장은 데몬 장부 추적이 담당(액터 call/ask + FIPA reply-by의 증류).
 
 ## 4. 그룹
 
 - **명단 소스 = 런타임 등록**(데몬 인메모리): `group` 툴/CLI로 생성·증감·삭제. 데몬 재시작 시 소멸(인메모리 단계 정합).
+- **관리 semantics(D 확정, ADR-0109 — 사용자 결정 2026-07-26~27):** **전원 수정 가능**(ACL·조작 주체 기록 없음 — 고도화 백로그) · **조용히**(변경·삭제 통지 없음) · **암묵 생성**(create 동사 없음 — 없는 그룹에 add하면 생성, remove·조회는 생성 안 함) · **그룹명 `@` 필수**(`INVALID_GROUP_NAME`) · **멤버명에 `@` 금지**(`INVALID_MEMBER_NAME` — 중첩 그룹 미지원) · `@all` 보호(`GROUP_BUILTIN`) · **명단 변경·삭제는 이미 파킹된 방송분에 무영향**(스냅샷 원칙) · 멤버명 정규화(콤마 분해·트림)는 **데몬 단일점**(두 입구 동일 결과) · 배치 변경은 전검증 후 일괄 적용(부분 반영 금지).
 - **그룹 해석 = seam**(ADR-0104): "그룹 이름 → 멤버 목록" 해석기(GroupRegistry)를 소스 플러그인 구조로 짠다 — v1 소스 = 런타임 명단 + `@all`. **폴더가 데몬 소유로 생기면 폴더 = 추가 소스**(`@폴더명` — 조직 방송의 정본 단위 예정). 하위 에이전트 계층은 주소 단위 **비채택**(오케스트레이터가 스폰하며 런타임 그룹을 등록하면 동일 효과 + 동적 명단은 스냅샷 원칙과 마찰 — ADR-0104 거부 대안).
 - **멤버십 = 이름 기반**(id 아님) — 주소 체계(WYSIWYA, ADR-0101)와 동일 원칙, 재스폰 생존.
 - **`@all` = 내장 그룹**(멤버 = 발송 순간 살아있는 수신 가능 전원, 관리 불요). `@` 네임스페이스는 기예약(GROUPS_NOT_SUPPORTED 자리 대체).
@@ -97,10 +99,10 @@ engram-send status <id> | pending
 engram-send group list | group update @g --add a,b [--remove c] [--delete]
 ```
 
-**발신 응답(두 입구 동일 JSON):** `{ id, results: [{to, status, hint?}] }` — 수신자별 `delivered|pending|skipped`. 발송 반려 = `{ status:"error", code, hint }`. 에러 어휘(C3 추가분): `INVALID_SEND_ARGS`(계약 필드 문법·상호배타·비XML 포맷 위반) · `REQUEST_CAPACITY`(미회신 동시 상한 512 초과) · `INTERNAL_ID_COLLISION`(id 재생성 1회 후에도 충돌 — 사실상 미발생 가드). 메시지 id 표기 = `m-` + base36 8자(수신 LLM이 `reply_to`로 옮겨 적는 값이라 단문형 — UUID 폐기).
+**발신 응답(두 입구 동일 JSON — 바이트 동일, 파리티 테스트 고정):** `{ id, results: [{to, status, hint?}] }` — 수신자별 `delivered|pending|skipped`. 발송 반려 = `{ status:"error", code, hint }`. 에러 어휘(C3 추가분): `INVALID_SEND_ARGS`(계약 필드 문법·상호배타·비XML 포맷 위반) · `REQUEST_CAPACITY`(**은퇴 불가 계약만으로** 동시 상한 512 도달 — 은퇴 가능분이 있으면 은퇴 후 수용, §3 항목 5·ADR-0108) · `INTERNAL_ID_COLLISION`(id 재생성 1회 후에도 충돌 — 사실상 미발생 가드). **D 추가분(관리·조회, ADR-0109):** `INVALID_GROUP_NAME` · `INVALID_MEMBER_NAME` · `GROUP_BUILTIN` · `INVALID_GROUP_ARGS` · `MESSAGE_NOT_FOUND`. 메시지 id 표기 = `m-` + base36 8자(수신 LLM이 `reply_to`로 옮겨 적는 값이라 단문형 — UUID 폐기). **CLI 신원 = `ENGRAM_TOKEN` 유일**(위장 플래그 없음 — 서버측 파생). `messages{id}` 응답은 수신자별 행 + `may_be_truncated`(발송 시점 기대 행수 대비 — 이력 링 유실 정직 공개), 시각은 상대 초.
 
 **allowedMcpServers 대책 (실측 2026-07-24 — 유저 전역 `[]`=전면 차단이 에이전트에도 적용됨):**
-데몬이 스폰 시 `--settings`로 `{ "allowedMcpServers": [{"serverName":"engram"}] }` 조각을 **세션 한정 주입**(backend/claude.rs — 백엔드 지식 격리 ADR-0004 자리). 전역 파일 무변경·허용 범위 = 엔그램 스폰 에이전트뿐. merge 동작은 구현 QA에서 실증(미검증 항목).
+데몬이 스폰 시 `--settings`로 `{ "allowedMcpServers": [{"serverName":"engram"}] }` 조각을 **세션 한정 주입**(backend/claude.rs — 백엔드 지식 격리 ADR-0004 자리). **구현 확정(D, ADR-0109): 인라인 JSON이 아니라 파일 경로 주입**(Windows `cmd /c` 인용 붕괴 = 조용한 실패 모드 회피) — 조각 파일은 mcp-config 디렉토리·스윕·revoke 수명주기 동승(ADR-0099), 단일 키 유지(회귀 테스트 고정), 쓰기 실패는 warn+계속. 전역 파일 무변경·허용 범위 = 엔그램 스폰 에이전트뿐. merge 동작 라이브 실증 = 인수 런 항목(미검증).
 
 ## 7. 수용 기준
 
