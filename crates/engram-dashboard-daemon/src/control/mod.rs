@@ -181,7 +181,7 @@ impl ControlChannel for DaemonControlChannel {
         //   - 비-MCP(codex/gemini stub=false): mcp-config **미기록**(파일 물리 부재) + CLI-only 프라이밍
         //     (engram-send 만) + [Cli] grant. MCP 입구가 프롬프트에서 완전히 삭제돼 지시-도구 불일치 없음.
         // ADR-0099
-        let (config_path, priming_variant) = if accepts_mcp_config {
+        let (config_path, settings_file, priming_variant) = if accepts_mcp_config {
             // 순서: 파일 먼저 쓰고(경로 확정) → registry 등록. NEW config write 실패는 치명(FIX 5 §case 2)
             //   → Err 로 fail-closed. (오래된 파일 삭제 실패는 provision 을 막지 않는다 — 아래 boot sweep /
             //   revoke 가 warn 만; 그 잔여 파일은 토큰이 registry 에 없어 inert 다.)
@@ -190,14 +190,34 @@ impl ControlChannel for DaemonControlChannel {
                     tracing::warn!(agent = %id, epoch, "mcp-config 기록 실패 — fail-closed(스폰 중단): {e}");
                     ProvisionError(format!("mcp-config write failed: {e}"))
                 })?;
+            // S18 D(spec §6): 세션 한정 설정 조각도 **MCP-capable 일 때만** 쓴다 — 조각의 내용이
+            //   `allowedMcpServers`(engram 서버 허용)뿐이라, MCP 채널을 안 까는 스폰엔 의미가 없다(허용할
+            //   서버 자체가 없다). 그래서 config_path 와 **같은 갈래**에 묶어 정합 불변식(깐 채널 == 허용한
+            //   채널)이 by-construction 으로 유지되게 한다.
+            // ★write 실패는 치명이 아니다(mcp-config 와 다른 판단 — load-bearing)★: mcp-config 가 없으면
+            //   MCP 채널이 **물리적으로 없어** 발신 입구가 사라지므로 fail-closed 가 맞다. 반면 이 조각은
+            //   "유저 전역 차단을 뒤집는 보정" 이라, 없으면 **전역 설정이 허용일 때는 정상 동작**하고
+            //   차단일 때만 툴이 안 보인다. 그 열화 때문에 스폰 자체를 막으면 회귀(오늘까지 이 파일 없이도
+            //   스폰은 됐다)라, warn 만 남기고 조각 없이 진행한다(priming_file 의 graceful 과 같은 등급).
+            let settings = match mcp_config::write_settings(&self.data_dir, id, epoch) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %id, epoch,
+                        "세션 설정 조각 기록 실패 — 조각 없이 스폰 진행(전역 allowedMcpServers 가 차단이면 engram 툴이 안 보일 수 있음): {e}"
+                    );
+                    None
+                }
+            };
             // ADR-0099: MCP-capable → config_path = Some(경로) — backend(claude.rs)가 `--mcp-config` 로 주입.
-            (Some(path), PrimingVariant::McpPrimary)
+            (Some(path), settings, PrimingVariant::McpPrimary)
         } else {
             // 비-MCP: mcp-config 를 **아예 쓰지 않는다**(물리 부재 = MCP 입구 삭제). config_path = None 으로
             //   부재를 **타입으로 인코딩**한다(옛 빈 PathBuf::new() sentinel 폐기) — backend(claude.rs)는
             //   `Some` 일 때만 `--mcp-config` 를 붙이므로, None 이면 그 플래그가 애초에 생성되지 않는다
             //   (빈-경로 방어 분기 불필요 — 타입이 강제). 이게 정합 불변식의 물리 절반(MCP 채널 없음)이다.
-            (None, PrimingVariant::CliOnly)
+            //   설정 조각도 함께 생략한다(허용할 MCP 서버가 없다 — 위 갈래 주석).
+            (None, None, PrimingVariant::CliOnly)
         };
         // ADR-0099: provision fork 관측성(정합 불변식은 필드로 볼 값어치가 있다 — logging-conventions §계측
         //   의무 "외부 경계·동시성 전이"). token 은 절대 로깅하지 않는다(§보안). effective flag(seam 반영
@@ -261,14 +281,19 @@ impl ControlChannel for DaemonControlChannel {
             priming_file,
             // ADR-0094/0099: 발신 입구 pre-authorization(위 build_grants — 채널별 방출).
             grants,
+            // S18 D(spec §6): 세션 한정 설정 조각 경로(backend 가 --settings 로 주입). 비-MCP·write 실패면 None.
+            settings_file,
         }))
     }
 
-    /// (AgentId, epoch) 토큰 폐기 + mcp-config 파일 삭제. reaper(terminal 단일 소비자)·kill_agent 선제
-    /// 에서 불린다. registry.revoke 가 epoch-guard·idempotent 를 담당하고, config 삭제도 idempotent.
+    /// (AgentId, epoch) 토큰 폐기 + mcp-config·설정 조각 파일 삭제. reaper(terminal 단일 소비자)·
+    /// kill_agent 선제에서 불린다. registry.revoke 가 epoch-guard·idempotent 를 담당하고, 파일 삭제도
+    /// 둘 다 idempotent(없으면 no-op) — 조각을 안 쓴 스폰(비-MCP)에서도 안전하다.
     fn revoke(&self, id: AgentId, epoch: u32) {
         self.registry.revoke(id, epoch);
         mcp_config::remove_config(&self.data_dir, id, epoch);
+        // S18 D: 조각도 같은 수명(같은 폴더) — 함께 지운다(mcp_config::settings_path 주석).
+        mcp_config::remove_settings(&self.data_dir, id, epoch);
     }
 }
 
@@ -521,6 +546,22 @@ mod tests {
             "MCP-capable → McpPrimary 프라이밍 변형"
         );
         assert_eq!(ep.priming_file, Some(PathBuf::from("A-mcp-primary")));
+        // S18 D(spec §6): MCP-capable → 세션 설정 조각도 함께 기록되고 endpoint 가 그 경로를 싣는다.
+        let settings = ep
+            .settings_file
+            .as_ref()
+            .expect("MCP-capable → settings_file Some");
+        assert!(settings.is_file(), "설정 조각 파일 물리 존재");
+        let content = std::fs::read_to_string(settings).expect("read settings");
+        assert!(
+            content.contains("allowedMcpServers") && content.contains(MCP_SERVER_NAME),
+            "조각이 engram 서버를 허용해야: {content}"
+        );
+        // revoke 가 조각까지 idempotent 하게 지운다(수명 = mcp-config 와 동일).
+        channel.revoke(id, 0);
+        assert!(!settings.exists(), "revoke 시 설정 조각 삭제");
+        assert!(!cfg.exists(), "revoke 시 mcp-config 삭제");
+        channel.revoke(id, 0); // 이중 revoke 안전.
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
@@ -548,6 +589,11 @@ mod tests {
         assert!(
             !data_dir.join("mcp-config").exists(),
             "비-MCP → mcp-config 파일이 물리적으로 없어야"
+        );
+        // S18 D: 설정 조각도 같은 갈래라 함께 생략된다(허용할 MCP 서버가 없다).
+        assert_eq!(
+            ep.settings_file, None,
+            "비-MCP → settings_file 도 None(정합 불변식: 깐 채널 == 허용한 채널)"
         );
         assert_eq!(
             *seen.lock().unwrap(),

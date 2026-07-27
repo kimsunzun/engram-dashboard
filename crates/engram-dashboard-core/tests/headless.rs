@@ -133,6 +133,8 @@ impl ControlChannel for CountingControl {
             priming_file: None,
             // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록(SpawnReservation 인과만 격리).
             grants: vec![],
+            // S18 D: 설정 조각도 이 테스트의 관심사가 아니다(spec 조립이 아니라 spawn 인과 격리).
+            settings_file: None,
         }))
     }
     fn revoke(&self, id: AgentId, epoch: u32) {

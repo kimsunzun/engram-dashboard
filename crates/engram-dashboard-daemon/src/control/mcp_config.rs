@@ -1,7 +1,10 @@
-//! 에이전트별 mcp-config 생성·정리(ADR-0086) — claude `--mcp-config <path>` 가 읽는 JSON 파일.
+//! 에이전트별 **스폰 부착 파일** 생성·정리(ADR-0086 · S18 D) — claude 가 경로로 읽는 두 JSON.
 //!
-//! ★역할★: provision 시 (AgentId, epoch)용 mcp-config JSON 을 데이터 디렉토리 아래에 쓰고, revoke 시
-//!   지운다. 파일에는 데몬 MCP 엔드포인트 URL + Bearer 토큰(Authorization 헤더)이 담긴다 — claude 가
+//! ★역할★: provision 시 (AgentId, epoch)용 파일을 데이터 디렉토리 아래에 쓰고 revoke 시 지운다. 두 종류다:
+//!   ① **mcp-config**(`--mcp-config`) — 제어 채널 엔드포인트 + Bearer 토큰.
+//!   ② **세션 설정 조각**(`--settings`, S18 D) — 그 세션에만 engram MCP 서버를 허용하는 최소 조각
+//!      (`settings_path` 주석 — 같은 폴더·같은 수명·같은 부팅 스윕을 재사용한다).
+//!   아래 설명은 ①을 기준으로 읽되, 생성/삭제/스윕 규율은 ②에도 그대로 적용된다. 파일에는 데몬 MCP 엔드포인트 URL + Bearer 토큰(Authorization 헤더)이 담긴다 — claude 가
 //!   이 파일을 읽어 initialize/tools/list/tools/call 전 요청에 헤더를 실어 보낸다(claude 2.1.170 실측).
 //!
 //! ★스키마(claude Streamable HTTP MCP 서버)★:
@@ -26,8 +29,10 @@ use std::path::{Path, PathBuf};
 
 use engram_dashboard_core::agent::types::AgentId;
 
-/// mcp-config 파일이 사는 하위 디렉토리명(데이터 디렉토리 기준). 다른 산출물(agents.json 등)과 섞이지
-/// 않게 전용 폴더로 격리한다. revoke 시 파일만 지우고 폴더는 남긴다(재사용).
+/// 스폰 부착 파일(mcp-config + 세션 설정 조각)이 사는 하위 디렉토리명(데이터 디렉토리 기준). 다른
+/// 산출물(agents.json 등)과 섞이지 않게 전용 폴더로 격리한다. revoke 시 파일만 지우고 폴더는 남긴다(재사용).
+/// ★이름은 `mcp-config` 로 유지★: 폴더명을 바꾸면 옛 데이터 디렉토리에 남은 파일이 스윕 대상에서 빠져
+///   영원히 방치된다(마이그레이션 없는 인메모리 단계에선 이름 유지가 더 안전하다).
 const MCP_CONFIG_SUBDIR: &str = "mcp-config";
 
 /// ★서버 논리명(mcpServers 키) = `engram`★ — **단일 출처(ADR-0094)**. claude 의 `system:init` 에 이
@@ -107,6 +112,74 @@ pub fn write_config(
     Ok(path)
 }
 
+/// ★세션 한정 설정 조각 파일 경로(S18 D · spec §6)★ — `<data_dir>/mcp-config/<id>-<epoch>.settings.json`.
+///
+/// ★왜 mcp-config 와 **같은 폴더**인가(load-bearing — 수명 관리 단일화)★: 이 조각은 mcp-config 와 정확히
+///   같은 수명이다(같은 (id,epoch)에 provision 때 생기고 revoke 때 사라진다). 전용 폴더를 새로 파면
+///   ① revoke ② 부팅 스윕 ③ 데이터 디렉토리 규약이 각각 두 벌이 되고, 한쪽만 갱신되면 조각 파일이 영원히
+///   쌓인다. 같은 폴더를 쓰면 **기존 부팅 스윕(`sweep_stale_configs`)이 폴더 안 파일을 전부 지우므로**
+///   추가 스윕 코드 없이 청소가 따라온다. 파일명 접미(`.settings.json`)로 mcp-config(`.json`)와 구분한다.
+/// ★비밀 없음★: 조각엔 토큰이 없다(허용 목록뿐) — 그래도 같은 폴더 규약(데이터 디렉토리 아래)에 둔다.
+pub fn settings_path(data_dir: &Path, id: AgentId, epoch: u32) -> PathBuf {
+    data_dir
+        .join(MCP_CONFIG_SUBDIR)
+        .join(format!("{id}-{epoch}.settings.json"))
+}
+
+/// 세션 한정 설정 조각 JSON 문자열(순수 함수 — 파일 IO 없음, 단위 테스트 대상).
+///
+/// ★내용 = `{"allowedMcpServers":[{"serverName":"engram"}]}`(spec §6)★. 유저 전역 설정의
+///   `allowedMcpServers: []`(전면 차단)가 스폰 에이전트에도 적용돼 engram MCP 서버가 툴 목록에서 사라지는
+///   문제(실측 2026-07-24)를 **이 세션에만** 뒤집는다. 전역 파일은 건드리지 않는다.
+/// ★최소 조각 원칙(load-bearing)★: 이 파일에 **다른 설정을 더 넣지 않는다**. `--settings` 는 설정 계층의
+///   높은 우선순위 층이라(user → project → local → `--settings` → managed), 여기 들어간 키는 사용자의
+///   프로젝트/로컬 설정을 조용히 덮어쓴다. 그래서 우리가 반드시 필요한 한 키만 싣는다 — 이 파일이
+///   "잡다한 스폰 설정" 서랍이 되면 사용자 설정을 침범한다(설정 IR 레이어가 오면 그쪽이 정본이 된다).
+/// ★서버 이름 단일 출처★: `MCP_SERVER_NAME` — mcp-config 의 `mcpServers` 키와 **같은 값**이어야 허용이
+///   실제 서버에 걸린다(두 곳이 갈리면 허용 목록이 존재하지 않는 서버를 가리켜 조용히 무력).
+// ADR-0103 (spec §6 allowedMcpServers 대책)
+// ADR-0109 (--settings 조각 — 단일 키 유지·파일 주입)
+pub fn render_settings() -> String {
+    #[derive(serde::Serialize)]
+    struct Root<'a> {
+        #[serde(rename = "allowedMcpServers")]
+        allowed_mcp_servers: Vec<AllowedServer<'a>>,
+    }
+    #[derive(serde::Serialize)]
+    struct AllowedServer<'a> {
+        #[serde(rename = "serverName")]
+        server_name: &'a str,
+    }
+    let root = Root {
+        allowed_mcp_servers: vec![AllowedServer {
+            server_name: MCP_SERVER_NAME,
+        }],
+    };
+    serde_json::to_string_pretty(&root).unwrap_or_default()
+}
+
+/// 설정 조각 파일을 디스크에 쓴다(디렉토리 없으면 생성). 성공 시 경로 — backend 가 `--settings` 로 가리킨다.
+pub fn write_settings(data_dir: &Path, id: AgentId, epoch: u32) -> std::io::Result<PathBuf> {
+    let path = settings_path(data_dir, id, epoch);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, render_settings())?;
+    tracing::info!(agent = %id, epoch, path = %path.display(), "세션 설정 조각 기록(spec §6)");
+    Ok(path)
+}
+
+/// 설정 조각 파일 삭제(revoke). 없으면 조용히 성공(idempotent — mcp-config 삭제와 같은 규율).
+/// 실패해도 provision/revoke 를 막지 않는다 — 이 파일엔 비밀이 없고, 다음 부팅 스윕이 어차피 쓸어낸다.
+pub fn remove_settings(data_dir: &Path, id: AgentId, epoch: u32) {
+    let path = settings_path(data_dir, id, epoch);
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::info!(agent = %id, epoch, "세션 설정 조각 삭제"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // idempotent no-op
+        Err(e) => tracing::warn!(agent = %id, epoch, "세션 설정 조각 삭제 실패(무시): {e}"),
+    }
+}
+
 /// mcp-config 파일 삭제(revoke). 없으면 조용히 성공(idempotent — 이중 revoke 안전).
 ///
 /// ★삭제 실패는 provision 을 막지 않는다(무해 이유 — FIX 5)★: 파일 삭제가 실패해도 warn 만 남기고
@@ -125,8 +198,8 @@ pub fn remove_config(data_dir: &Path, id: AgentId, epoch: u32) {
     }
 }
 
-/// ★부팅 스윕(FIX 5)★: 데몬 시작 시 `<data_dir>/mcp-config/` 안의 파일을 전부 삭제한다. 데몬 크래시나
-/// 세션 등록 전 실패로 살아남은 stale mcp-config 는 dead credential 이다 — 그 안의 토큰은 registry 가
+/// ★부팅 스윕(FIX 5)★: 데몬 시작 시 `<data_dir>/mcp-config/` 안의 파일을 **전부**(mcp-config + 세션 설정
+/// 조각) 삭제한다. 데몬 크래시나 세션 등록 전 실패로 살아남은 stale mcp-config 는 dead credential 이다 — 그 안의 토큰은 registry 가
 /// **부팅마다 빈 상태로 시작**하므로 어떤 것도 유효하지 않다(validate None → 401). 그래도 평문 토큰
 /// 파일을 디스크에 방치하지 않으려 부팅 시 일괄 청소한다. 디렉토리가 없으면 no-op(첫 부팅). 개별 파일
 /// 삭제 실패는 warn 만 남기고 계속한다(다음 부팅이 재시도 — 청소 실패로 데몬 기동을 막지 않는다).
@@ -146,14 +219,14 @@ pub fn sweep_stale_configs(data_dir: &Path) {
         match std::fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(e) => {
-                tracing::warn!(path = %path.display(), "부팅 스윕: stale mcp-config 삭제 실패(계속): {e}")
+                tracing::warn!(path = %path.display(), "부팅 스윕: stale 스폰 부착 파일 삭제 실패(계속): {e}")
             }
         }
     }
     if removed > 0 {
         tracing::info!(
             count = removed,
-            "부팅 스윕: stale mcp-config 청소(ADR-0086)"
+            "부팅 스윕: stale 스폰 부착 파일 청소(mcp-config + 세션 설정 조각, ADR-0086)"
         );
     }
 }
@@ -201,6 +274,57 @@ mod tests {
         assert!(!path.exists(), "revoke 시 파일이 지워져야 함");
         // 이중 remove 안전(idempotent).
         remove_config(&dir, id, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── S18 D(spec §6): 세션 한정 설정 조각 ──────────────────────────────────────────────
+    #[test]
+    fn render_settings_allows_exactly_the_engram_server() {
+        let s = render_settings();
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
+        let arr = v["allowedMcpServers"].as_array().expect("배열");
+        assert_eq!(arr.len(), 1, "허용 목록은 engram 하나뿐: {s}");
+        assert_eq!(
+            arr[0]["serverName"], MCP_SERVER_NAME,
+            "서버 이름은 mcp-config 키와 같은 단일 출처여야(갈리면 허용이 무력): {s}"
+        );
+        // ★최소 조각 회귀 가드★: 다른 키가 섞이면 사용자 project/local 설정을 조용히 덮어쓴다.
+        assert_eq!(
+            v.as_object().map(|o| o.len()),
+            Some(1),
+            "조각엔 allowedMcpServers 하나만: {s}"
+        );
+    }
+
+    #[test]
+    fn settings_path_is_distinct_from_mcp_config_but_shares_the_swept_dir() {
+        let id = AgentId::new_v4();
+        let cfg = config_path(Path::new("C:/data"), id, 3);
+        let set = settings_path(Path::new("C:/data"), id, 3);
+        assert_ne!(cfg, set, "두 파일은 서로 다른 이름이어야(덮어쓰기 금지)");
+        assert_eq!(
+            cfg.parent(),
+            set.parent(),
+            "같은 폴더 = 기존 부팅 스윕/삭제 경로 재사용(수명 관리 단일화)"
+        );
+        assert!(set.to_string_lossy().ends_with("-3.settings.json"));
+    }
+
+    #[test]
+    fn write_then_remove_settings_roundtrip_and_boot_sweep_cleans_it() {
+        let dir = std::env::temp_dir().join(format!("engram-settings-test-{}", AgentId::new_v4()));
+        let id = AgentId::new_v4();
+        let path = write_settings(&dir, id, 0).expect("write settings");
+        assert!(path.exists());
+        remove_settings(&dir, id, 0);
+        assert!(!path.exists(), "revoke 시 삭제");
+        remove_settings(&dir, id, 0); // idempotent
+
+        // 부팅 스윕이 설정 조각도 함께 쓸어내는지(같은 폴더를 쓰기로 한 결정의 실증).
+        let path = write_settings(&dir, id, 1).expect("write settings again");
+        assert!(path.exists());
+        sweep_stale_configs(&dir);
+        assert!(!path.exists(), "부팅 스윕이 설정 조각도 청소");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

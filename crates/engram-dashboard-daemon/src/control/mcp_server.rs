@@ -36,7 +36,10 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, Ser
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use super::ingress::{handle_send, ControlCommand, Entrance, SendContract};
+use super::ingress::{
+    handle_group, handle_messages, handle_send, ControlCommand, Entrance, GroupCommand,
+    SendContract,
+};
 use super::registry::{BoundIdentity, ControlRegistry};
 
 /// MCP 서버가 붙는 axum 경로. mcp-config url 도 이 경로를 가리킨다(`http://127.0.0.1:<port>/mcp`).
@@ -51,6 +54,15 @@ const MCP_PATH: &str = "/mcp";
 /// CLI 입구(ADR-0086 스텝 2) — `engram-send` 가 POST 하는 평문 HTTP 라우트. 같은 서버·포트·auth
 /// 미들웨어를 공유하되 MCP 가 아닌 단순 JSON POST 다(base URL = ENGRAM_CONTROL_URL, CLI 가 이 경로 조립).
 const CONTROL_SEND_PATH: &str = "/control/send";
+
+/// CLI 조회 입구(D · spec §6) — `engram-send status <id>` / `pending` 이 POST 하는 라우트.
+/// ★POST 인 이유(GET 아님)★: 같은 bearer 미들웨어를 타야 하는데, 미들웨어는 세션 id 없는 **GET 을 400** 으로
+///   끊는다(세션 operation 규약 — bearer_auth 1.5단계). 조회는 세션을 쓰지 않으므로 send 와 같은 무-세션
+///   POST 형태로 맞춘다(경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다).
+const CONTROL_MESSAGES_PATH: &str = "/control/messages";
+
+/// CLI 그룹 관리 입구(D · spec §6) — `engram-send group …` 이 POST 하는 라우트(위와 같은 이유로 POST).
+const CONTROL_GROUP_PATH: &str = "/control/group";
 
 /// ★manager 늦은 주입 슬롯(순환 해소)★: 데몬 기동은 MCP 서버를 **먼저** 띄우고(그 URL 로 mcp-config 를
 /// 발급하는 DaemonControlChannel 을 만들어야 하므로) 그 다음 AgentManager 를 배선한다 — 즉 서버 start
@@ -111,6 +123,17 @@ const SESSION_ID_HEADER: &str = "mcp-session-id";
 ///   대신 런타임 tools/list 에 이 const 이름의 툴이 실제로 있는지 단언해 두 곳을 묶는다(rot 방지).
 ///   claude 문법(`mcp__..`) 지식은 backend/claude.rs 단독 — 이 const 는 이름만 제공한다(ADR-0004/0094).
 pub const SEND_MESSAGE_TOOL: &str = "send_message";
+
+/// ★`messages` MCP 툴 이름(D · spec §6)★ — `SEND_MESSAGE_TOOL` 과 같은 규율(아래 `#[tool]` 메서드명과
+///   일치해야 하고, 하위 테스트 `tools_list_exposes_the_query_tools` 가 그걸 강제한다).
+///   ★grant 대상 아님(의도적)★: ADR-0094 의 pre-authorization 은 **발신 입구**만 담는다는 결정이라
+///   (build_grants "최소권한 — 발신 입구만"), 조회 툴은 grant 목록에 넣지 않는다. 오늘 스폰은
+///   `--permission-mode bypassPermissions`(ADR-0097)라 실질 인가에 영향이 없다 — 그 bypass 를 걷는
+///   제약 레이어가 오면 그때 "조회·관리 툴도 grant 대상인가" 를 사용자 결정으로 다시 물어야 한다.
+pub const MESSAGES_TOOL: &str = "messages";
+
+/// ★`group` MCP 툴 이름(D · spec §6)★ — 위와 동일 규율·동일 grant 주석.
+pub const GROUP_TOOL: &str = "group";
 
 /// 실행 중 MCP 서버 핸들 — 에이전트가 붙을 엔드포인트 URL + graceful 종료 토큰.
 pub struct McpServerHandle {
@@ -346,6 +369,96 @@ impl EngramMcpHandler {
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
+
+    /// `messages`(D · spec §6) — **읽기 전용** 장부 조회. 인자 `{id?}`.
+    ///
+    /// 신원은 send_message 와 같은 경로(세션 바인딩 → extensions)에서만 온다 — 무인자 조회("내 미결")의
+    /// "나" 가 그 신원이다(payload 로 남을 사칭할 수 없다).
+    /// ★응답 shape 정본 = `ingress::handle_messages` doc-comment★(두 입구 동일 JSON — 여기 복제하지 않는다).
+    /// ★spawn_blocking 없음★: 이 경로엔 자식 stdin blocking write 가 없다(근거는 ingress 조회 섹션 주석).
+    // ADR-0086 / ADR-0103
+    #[tool(
+        description = "Look up message state on the Engram broker. With no arguments it returns \
+        YOUR open items — messages you sent that have not landed yet, requests you are waiting on \
+        an answer for, and requests other agents sent you that you have NOT answered yet (each row \
+        is tagged with `direction`, and `reply_owed_by_me` means you still owe that agent a reply). \
+        Pass `id` = a message id (e.g. m-7f3k9q2d) to see that one message's delivery state \
+        instead; for a group broadcast you get one row per recipient. This tool only reads — it \
+        never sends, replies, or changes anything."
+    )]
+    async fn messages(
+        &self,
+        params: Parameters<MessagesArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(from) = ctx
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<BoundIdentity>().copied())
+        else {
+            return Err(ErrorData::invalid_request(
+                "no bound identity in request context (auth middleware should have set it)",
+                None,
+            ));
+        };
+        let (Some(manager), Some(messaging)) = (self.manager.get(), self.messaging.get()) else {
+            tracing::error!(
+                entrance = "mcp",
+                "messages 조회 불가 — manager/messaging 슬롯 미설정(배선 순서 이상)"
+            );
+            return Err(ErrorData::internal_error("control channel not ready", None));
+        };
+        let Parameters(MessagesArgs { id }) = params;
+        let result = handle_messages(manager, messaging, from, id.as_deref());
+        let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+
+    /// `group`(D · spec §4·§6) — 그룹 명단 조회·증감·삭제. 인자 `{group?, add?, remove?, delete?}`.
+    ///
+    /// ★ACL 없음(사용자 결정 2026-07-26)★: 누구나 어떤 그룹이든 고치고 지운다 — 그래서 신원을 읽지 않는다
+    ///   (행위자 기록도 없다). 신원 검증이 필요해지면 v2 의 ACL 설계와 함께 온다.
+    /// ★응답 shape·인자 조합 규칙 정본 = `ingress::handle_group` doc-comment★.
+    // ADR-0086 / ADR-0103
+    #[tool(
+        description = "Manage broadcast groups on the Engram broker. Group names always start with \
+        '@' (e.g. @coders). No arguments = list the groups that exist (including the built-in @all, \
+        which always means everyone live right now). `group` alone = show that group's members. \
+        `group` + `add` / `remove` = change membership by agent NAME; adding to a group that does \
+        not exist creates it, so there is no separate create step. `group` + `delete` = remove the \
+        group (cannot be combined with add/remove). Membership changes only affect FUTURE sends — \
+        messages already accepted for delivery are unaffected. @all cannot be edited or deleted."
+    )]
+    async fn group(
+        &self,
+        params: Parameters<GroupArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(messaging) = self.messaging.get() else {
+            tracing::error!(
+                entrance = "mcp",
+                "group 관리 불가 — messaging 슬롯 미설정(배선 순서 이상)"
+            );
+            return Err(ErrorData::internal_error("control channel not ready", None));
+        };
+        let Parameters(GroupArgs {
+            group,
+            add,
+            remove,
+            delete,
+        }) = params;
+        let result = handle_group(
+            messaging,
+            GroupCommand {
+                group,
+                add,
+                remove,
+                delete,
+            },
+        );
+        let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
 }
 
 /// 툴 인자 — ping 은 인자가 없다(빈 struct). schemars(rmcp 재수출)로 input schema 자동 생성.
@@ -380,6 +493,38 @@ pub struct SendArgs {
     pub reply_to: Option<String>,
 }
 
+/// `messages` 인자(D · spec §6 `messages { id? }`). 전부 선택 — 무인자가 "내 미결" 조회다.
+/// ★신원 필드 없음★: "나" 는 세션 신원에서만 온다(payload 로 남의 미결을 볼 수 없다 — ADR-0086 불변식).
+// ADR-0103
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct MessagesArgs {
+    /// A message id to inspect (e.g. "m-7f3k9q2d"). Omit to list your own open items instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// `group` 인자(D · spec §6 `group { group?, add?, remove?, delete? }`). 전부 선택 — 무인자가 목록 조회다.
+///
+/// ★doc 주석 = 툴 스키마 설명★: schemars 가 이 주석을 property description 으로 싣는다(호출 LLM 이 읽는 계약).
+/// ★조합 규칙의 정본은 `ingress::handle_group`★ — 여기 스키마는 형태만 알리고 판정은 하지 않는다(양 입구
+///   동일 반려를 위해 검증 지점은 하나여야 한다 — send 인자와 같은 규율).
+// ADR-0103
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct GroupArgs {
+    /// Group name, always starting with '@' (e.g. "@coders"). Omit to list all groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Agent names to add. Adding to a group that does not exist creates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<Vec<String>>,
+    /// Agent names to remove from the group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove: Option<Vec<String>>,
+    /// Delete the whole group. Cannot be combined with add or remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete: Option<bool>,
+}
+
 // router = self.tool_router — 저장한 필드를 실제로 읽게 해 dead_code 를 피하고, 핸들러마다 라우터를
 // 재빌드하지 않는다(factory 가 세션마다 new() 하므로 라우터를 필드에 한 번 만들어 두는 게 효율적).
 #[tool_handler(router = self.tool_router)]
@@ -389,7 +534,7 @@ impl ServerHandler for EngramMcpHandler {
         // tools capability 만 켠다. OAuth/resources/prompts 미광고(#59467 회피). 워커 노출 = 최소권한
         // (engram_ping + send_message 만 — ADR-0086 least-privilege).
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Engram daemon control channel (ADR-0086). Available tools: engram_ping, send_message.",
+            "Engram daemon control channel (ADR-0086). Available tools: engram_ping, send_message, messages, group.",
         )
     }
 }
@@ -642,10 +787,7 @@ async fn control_send_handler(
             entrance = "cli",
             "제어 채널 send 불가 — manager 슬롯 미설정(배선 순서 이상, ADR-0086 F6)"
         );
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(axum::body::Body::empty())
-            .expect("valid 503 response");
+        return service_unavailable();
     };
     // 발송 3분기 담당 MessagingService 슬롯 조회(C1) — manager 와 같은 시점에 채워진다.
     let Some(messaging) = state.messaging.get() else {
@@ -653,10 +795,7 @@ async fn control_send_handler(
             entrance = "cli",
             "제어 채널 send 불가 — messaging 슬롯 미설정(배선 순서 이상, C1)"
         );
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(axum::body::Body::empty())
-            .expect("valid 503 response");
+        return service_unavailable();
     };
     let cmd = ControlCommand {
         from,
@@ -689,6 +828,94 @@ async fn control_send_handler(
     };
     // 성공/교정 에러 모두 200 + JSON(CLI 가 status 필드로 성패 판정). MCP 툴 경로와 같은 to_json shape.
     Json(result.to_json()).into_response()
+}
+
+/// `/control/messages` 요청 바디(D) — `{id?}`. 신원 필드 없음(토큰 파생 — send 와 같은 불변식).
+#[derive(Debug, Default, serde::Deserialize)]
+struct MessagesRequest {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// `/control/messages` 핸들러 — CLI 조회 입구. MCP `messages` 툴과 **같은 공통 핸들러**를 부른다
+/// (entrance-agnostic — 두 입구 동일 JSON, spec §6).
+///
+/// ★빈 바디 허용★: `pending`(무인자 조회)은 보낼 필드가 없다. CLI 가 `{}` 를 싣지만, 바디 자체가 없거나
+///   파싱이 안 돼도 **무인자 조회로 접는다** — 조회는 부작용이 없어 관대해도 안전하고, 여기서 400 을 내면
+///   "인자를 안 준 것" 과 "요청이 깨진 것" 을 CLI 가 구분하지 못해 자기교정이 헛돈다(send 는 반대로 400 —
+///   거긴 필수 필드가 있고 부작용이 있다).
+async fn control_messages_handler(
+    axum::extract::State(state): axum::extract::State<ControlSendState>,
+    identity: Option<axum::Extension<BoundIdentity>>,
+    body: Option<Json<MessagesRequest>>,
+) -> Response {
+    let Some(axum::Extension(from)) = identity else {
+        return unauthorized();
+    };
+    let (Some(manager), Some(messaging)) = (state.manager.get(), state.messaging.get()) else {
+        tracing::error!(
+            entrance = "cli",
+            "messages 조회 불가 — manager/messaging 슬롯 미설정(배선 순서 이상)"
+        );
+        return service_unavailable();
+    };
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let result = handle_messages(manager, messaging, from, req.id.as_deref());
+    Json(result.to_json()).into_response()
+}
+
+/// `/control/group` 요청 바디(D) — `{group?, add?, remove?, delete?}`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct GroupRequest {
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    add: Option<Vec<String>>,
+    #[serde(default)]
+    remove: Option<Vec<String>>,
+    #[serde(default)]
+    delete: Option<bool>,
+}
+
+/// `/control/group` 핸들러 — CLI 그룹 관리 입구. MCP `group` 툴과 같은 공통 핸들러(동일 JSON).
+/// ★빈 바디 = 목록 조회★(위 messages 와 같은 관대 규율 — 무인자가 정당한 호출이다).
+async fn control_group_handler(
+    axum::extract::State(state): axum::extract::State<ControlSendState>,
+    identity: Option<axum::Extension<BoundIdentity>>,
+    body: Option<Json<GroupRequest>>,
+) -> Response {
+    // ★신원을 쓰진 않지만 **인증은 요구한다**★: 그룹 관리에 ACL 은 없어도(사용자 결정 2026-07-26) 제어
+    //   채널 자체는 인증된 에이전트 전용이다 — 미들웨어가 이미 막지만 방어적으로 한 번 더 확인한다.
+    let Some(axum::Extension(_from)) = identity else {
+        return unauthorized();
+    };
+    let Some(messaging) = state.messaging.get() else {
+        tracing::error!(
+            entrance = "cli",
+            "group 관리 불가 — messaging 슬롯 미설정(배선 순서 이상)"
+        );
+        return service_unavailable();
+    };
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let result = handle_group(
+        messaging,
+        GroupCommand {
+            group: req.group,
+            add: req.add,
+            remove: req.remove,
+            delete: req.delete,
+        },
+    );
+    Json(result.to_json()).into_response()
+}
+
+/// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). send·messages·group **네 갈래 전부**가 이 하나를
+/// 쓴다(D 리뷰 A3 — 예전엔 send 쪽 두 곳이 같은 응답을 따로 손조립하고 있었다).
+fn service_unavailable() -> Response {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(axum::body::Body::empty())
+        .expect("valid 503 response")
 }
 
 /// 데몬 MCP 서버를 127.0.0.1 ephemeral 포트에 띄운다(WS 서버와 나란히). 반환: 엔드포인트 URL·종료 토큰
@@ -752,6 +979,23 @@ pub async fn start_mcp_server(
         .route(
             CONTROL_SEND_PATH,
             axum::routing::post(control_send_handler).with_state(ControlSendState {
+                manager: manager.clone(),
+                registry: registry.clone(),
+                messaging: messaging.clone(),
+            }),
+        )
+        // D(spec §6): CLI 조회·관리 미러. send 와 같은 State·같은 auth 미들웨어·같은 공통 핸들러를 쓴다.
+        .route(
+            CONTROL_MESSAGES_PATH,
+            axum::routing::post(control_messages_handler).with_state(ControlSendState {
+                manager: manager.clone(),
+                registry: registry.clone(),
+                messaging: messaging.clone(),
+            }),
+        )
+        .route(
+            CONTROL_GROUP_PATH,
+            axum::routing::post(control_group_handler).with_state(ControlSendState {
                 manager: manager.clone(),
                 registry: registry.clone(),
                 messaging: messaging.clone(),
@@ -837,6 +1081,36 @@ mod tests {
         assert!(
             router.has_route(SEND_MESSAGE_TOOL),
             "라우터에 '{SEND_MESSAGE_TOOL}' 툴이 등록돼 있어야(const ↔ #[tool] 메서드명 일치 강제)"
+        );
+    }
+
+    #[test]
+    fn tools_list_exposes_the_query_tools() {
+        // ★단일 출처 tie(SEND_MESSAGE_TOOL 과 같은 규율)★: const ↔ #[tool] 메서드명이 어긋나면 프라이밍이
+        //   가르치는 툴 이름과 실제 노출 이름이 갈려 조회 입구가 조용히 없는 것이 된다.
+        let router = EngramMcpHandler::tool_router();
+        assert!(router.has_route(MESSAGES_TOOL), "'{MESSAGES_TOOL}' 툴 등록");
+        assert!(router.has_route(GROUP_TOOL), "'{GROUP_TOOL}' 툴 등록");
+    }
+
+    #[test]
+    fn query_tool_schemas_build_and_carry_no_identity_field() {
+        // 두 조회 툴 모두 인자가 전부 선택이어야(무인자 호출이 정당한 경로) + 신원 필드가 없어야 한다
+        //   (payload 로 남의 미결을 보거나 남을 사칭할 표면 자체를 없앤다 — ADR-0086 불변식).
+        let m =
+            serde_json::to_string(&schemars::schema_for!(MessagesArgs)).expect("messages schema");
+        assert!(m.contains("\"id\""), "messages 스키마에 id: {m}");
+        assert!(
+            !m.contains("\"from\"") && !m.contains("required"),
+            "messages 인자는 전부 선택 + from 없음: {m}"
+        );
+        let g = serde_json::to_string(&schemars::schema_for!(GroupArgs)).expect("group schema");
+        for key in ["\"group\"", "\"add\"", "\"remove\"", "\"delete\""] {
+            assert!(g.contains(key), "group 스키마에 {key}: {g}");
+        }
+        assert!(
+            !g.contains("\"from\"") && !g.contains("required"),
+            "group 인자는 전부 선택 + from 없음: {g}"
         );
     }
 

@@ -311,6 +311,32 @@ impl AgentBackend for ClaudeBackend {
                         args.push(priming.to_string_lossy().into_owned());
                     }
                 }
+                // S18 D(spec §6): 세션 한정 설정 조각 주입 — `--settings <abs-path>`. (ADR-0109)
+                //   ★claude 플래그 지식은 이 파일 단독(ADR-0004)★: 데몬이 조각 파일을 쓰고 경로만
+                //   ControlEndpoint.settings_file 로 실어 보낸다(내용은 데몬 소유 — mcp_config.rs). 여기선
+                //   claude 방식으로 번역만 한다. 부재(None)면 미주입 — 오늘 동작과 바이트 동일.
+                //   ★왜 이 조각이 필요한가★: 유저 전역 설정의 `allowedMcpServers: []`(전면 차단)가 스폰
+                //   에이전트에도 적용돼 engram MCP 서버가 툴 목록에서 사라졌다(실측 2026-07-24). 이 조각이
+                //   그 **세션에만** engram 서버를 허용한다(전역 파일 무변경).
+                //
+                // ★인라인 JSON 이 아니라 **파일 경로**를 쓰는 이유(load-bearing — Windows 인용 지옥)★:
+                //   claude 의 `--settings` 는 JSON 문자열도 받지만, 우리 스폰 경로는 Windows 에서
+                //   `console_command` 가 `cmd.exe /c claude …` 로 감싼다(npm shim 회피 — backend/mod.rs).
+                //   cmd.exe 를 한 겹 더 거치는 argv 에 `{"allowedMcpServers":[…]}` 같은 따옴표·중괄호
+                //   덩어리를 실으면 cmd 의 인용/이스케이프 규칙(따옴표 소실·`&`/`^` 특수문자)에 조용히
+                //   깨지기 쉽고, 깨진 결과는 "설정이 무시된 채 정상 기동"(= MCP 툴 부재 재발)이라 발현이
+                //   늦다. 파일 경로는 공백만 다루면 되고, 같은 경로 전달 방식(`--mcp-config`/
+                //   `--append-system-prompt-file`)이 이미 실측으로 검증돼 있다(M3 심의 기록) — 그래서
+                //   경로를 택한다. 대가는 파일 하나의 수명 관리인데, 그건 mcp-config 파일과 **같은 폴더·
+                //   같은 생성/삭제/부팅스윕 경로**를 그대로 재사용해 흡수한다(mcp_config.rs).
+                //   ★core 는 여기서도 파일을 열지 않는다★: args 에 경로 문자열만 싣는다(격리 유지).
+                // ADR-0004
+                if let Some(endpoint) = &control {
+                    if let Some(settings) = &endpoint.settings_file {
+                        args.push("--settings".to_string());
+                        args.push(settings.to_string_lossy().into_owned());
+                    }
+                }
                 // ★순서 불변(load-bearing, ADR-0094 최소권한)★: `extra_args`(호출자 패스스루)를
                 //   **`--allowedTools` 주입보다 먼저** 잇는다. 이유는 `--allowedTools <tools...>` 가
                 //   claude(2.1.170 실측)에서 **variadic** 이라서다 — 이 플래그 뒤에 오는 positional
@@ -1190,6 +1216,17 @@ mod tests {
             // ADR-0094: 기본 헬퍼는 grants 를 비워둔다 — grant 주입 테스트가 명시로 채운다(회귀 격리:
             //   기존 mcp-config/priming 테스트가 --allowedTools 영향을 안 받게).
             grants: vec![],
+            // S18 D: 기본 헬퍼는 설정 조각을 담지 않는다 — `--settings` 주입 테스트가 명시로 채운다
+            //   (기존 arg-golden 테스트가 새 플래그의 영향을 안 받게 — priming_file 과 같은 규율).
+            settings_file: None,
+        }
+    }
+
+    /// 세션 한정 설정 조각 경로를 담은 변주(S18 D · spec §6) — `--settings` 주입 검증용.
+    fn ep_with_settings() -> ControlEndpoint {
+        ControlEndpoint {
+            settings_file: Some(PathBuf::from("C:/data/mcp/agent-x.settings.json")),
+            ..ep()
         }
     }
 
@@ -1675,6 +1712,96 @@ mod tests {
         assert!(
             !s.args.iter().any(|a| a == "--append-system-prompt-file"),
             "control 없으면 프라이밍 플래그 없음: {:?}",
+            s.args
+        );
+    }
+
+    // ── S18 D(spec §6): 세션 한정 설정 조각 주입(`--settings`) ────────────────────────────
+    #[test]
+    fn claude_settings_file_injects_settings_flag_terminal() {
+        // settings_file 이 있으면 터미널 모드 args 에 `--settings <abs>` 가 붙는다(경로 payload — 인라인
+        //   JSON 아님: cmd.exe 인용 지옥 회피, build_spec 주석).
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_settings()),
+        );
+        let pos = s
+            .args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("settings_file 있으면 --settings 주입");
+        assert_eq!(
+            s.args.get(pos + 1).map(|s| s.as_str()),
+            Some("C:/data/mcp/agent-x.settings.json"),
+            "플래그 다음 인자 = 설정 조각 절대경로: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_settings_file_injects_flag_json_mode() {
+        // json(stream-json) 헤드리스가 실제 스폰 경로다 — 여기 안 붙으면 대책 자체가 무의미.
+        let s = spec_with_control(
+            &json(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_with_settings()),
+        );
+        assert!(
+            s.args.iter().any(|a| a == "--settings"),
+            "json 모드에도 설정 조각 주입: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_no_settings_file_no_settings_flag() {
+        // settings_file=None 이면 플래그 미주입 — 오늘 동작과 바이트 동일(회귀 0).
+        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+        assert!(
+            !s.args.iter().any(|a| a == "--settings"),
+            "설정 조각 없으면 --settings 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_no_control_endpoint_no_settings_flag() {
+        let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
+        assert!(
+            !s.args.iter().any(|a| a == "--settings"),
+            "control 없으면 --settings 없음: {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_settings_flag_does_not_disturb_the_allowed_tools_tail() {
+        // ★variadic 흡수 방어의 회귀 가드★: `--settings <path>` 는 grant 그룹보다 **앞**에 들어가야 한다.
+        //   뒤로 가면 `--allowedTools` 의 variadic 이 경로를 "허용 툴" 로 삼키거나(권한 오염) grant 그룹의
+        //   맨-끝 불변식이 깨진다. 두 플래그를 함께 켠 조합에서 마지막 요소가 여전히 grant 패턴인지 본다.
+        let ep = ControlEndpoint {
+            settings_file: Some(PathBuf::from("C:/data/mcp/a.settings.json")),
+            ..ep_with_grants()
+        };
+        let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep));
+        let settings_pos = s.args.iter().position(|a| a == "--settings").expect("주입");
+        let allowed_pos = s
+            .args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("grant 그룹 주입");
+        assert!(
+            settings_pos < allowed_pos,
+            "--settings 는 --allowedTools 그룹보다 앞: {:?}",
+            s.args
+        );
+        assert_eq!(
+            s.args.last().map(|s| s.as_str()),
+            Some("PowerShell(engram-send:*)"),
+            "grant 그룹이 여전히 맨 끝: {:?}",
             s.args
         );
     }

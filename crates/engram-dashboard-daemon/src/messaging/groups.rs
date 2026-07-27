@@ -37,6 +37,13 @@ pub enum GroupError {
     NotFound { name: String },
     /// 그룹은 있으나 해석 결과 멤버가 0명 → `GROUP_EMPTY`(빈 그룹 발송 반려, spec §4).
     Empty { name: String },
+    /// ★멤버 이름이 `@` 로 시작 = 중첩 그룹 시도(round-2 리뷰 F5)★ — v1 미지원이라 거절한다.
+    ///
+    /// ★왜 거절인가(조용한 수용이 더 나쁘다)★: 멤버십은 **에이전트 이름** 기반인데(spec §4), `@` 로
+    ///   시작하는 이름을 가진 에이전트는 존재할 수 없다(`@` 는 그룹 네임스페이스 예약). 그대로 등록하면
+    ///   그 멤버는 어떤 방송에서도 매치되지 않아 **영원히 `skipped`** 되고, 발신자는 중첩 그룹이 동작한다고
+    ///   믿는다(응답에 멤버로 보이니까). 등록 시점에 막아 오해를 원천 차단한다.
+    InvalidMemberName { name: String },
 }
 
 /// ★그룹 주소 정규화 — **seam 레벨** 자유 함수(C4 리뷰 fix F · ADR-0104 결정 1)★. `@` 네임스페이스 규약을
@@ -140,12 +147,16 @@ impl Groups {
     }
 
     /// 그룹에 멤버(이름) 추가. 그룹이 없으면 **생성 후 추가**(등록 편의 — spec §4 "생성·증감"). 중복 이름은
-    /// 무시(집합 의미). `@all` 은 거절.
+    /// 무시(집합 의미). `@all` 은 거절. `@` 로 시작하는 **멤버** 이름도 거절(중첩 그룹 미지원 — F5).
+    ///
+    /// ★구조적 guard(입구 검증과 이중)★: 입구(ingress)가 먼저 걸러 좋은 hint 를 주지만, 여기서도 막아
+    ///   **어떤 경로로도** 매치 불가능한 멤버가 명단에 들어가지 못하게 한다(레지스트리 불변식).
     pub fn add_member(&mut self, group: &str, member: &str) -> Result<(), GroupError> {
         let norm = Self::normalize(group)?;
         if Self::is_builtin(&norm) {
             return Err(GroupError::Builtin);
         }
+        Self::validate_member_name(member)?;
         let members = self.registered.entry(norm).or_default();
         if !members.iter().any(|m| m == member) {
             members.push(member.to_string());
@@ -188,6 +199,86 @@ impl Groups {
         let mut names = vec![ALL_GROUP.to_string()];
         names.extend(self.registered.keys().cloned());
         names
+    }
+
+    /// ★멤버 이름 규약(round-2 리뷰 F5)★ — `@` 로 시작하면 그룹 네임스페이스라 에이전트 이름일 수 없다.
+    /// 규칙 정본을 한 함수에 두고 단건(`add_member`)·배치(`update_members`)가 공유한다(두 경로가 갈리면
+    /// 한쪽으로만 유령 멤버가 새어 들어온다).
+    fn validate_member_name(member: &str) -> Result<(), GroupError> {
+        if member.trim_start().starts_with('@') {
+            return Err(GroupError::InvalidMemberName {
+                name: member.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// ★배치 증감 — **전부 검증한 뒤 전부 적용**(round-3 리뷰 G2 · load-bearing)★. 반환 = 적용 후 명단.
+    ///
+    /// ★왜 원자적이어야 하나★: 예전엔 상위(`MessagingService::group_update`)가 `add_member` 를 루프로
+    ///   돌렸다. 그러면 `["alice", "@all"]` 같은 배치가 **alice 를 넣은 뒤** 두 번째에서 에러를 내
+    ///   호출자에게는 실패를 돌려주면서 레지스트리는 이미 바뀐 상태로 남는다(부분 반영). 입구(ingress)가
+    ///   먼저 걸러 주는 덕에 운영 경로에선 안 보이지만, 그건 **입구를 반드시 거친다**는 가정에 기댄 안전이라
+    ///   내부 호출자 하나가 우회하면 곧바로 깨진다. 원자성을 자료구조 쪽에 두면 그 가정이 필요 없다.
+    /// ★단계★: ① 그룹 이름 규약·내장 보호 ② 모든 멤버 이름 규약 ③ "생성되지 않을 그룹에 대한 조작인가"
+    ///   (`add` 가 비었는데 그룹이 없으면 `NotFound`) — 여기까지 통과하면 ④ 적용은 **실패할 수 없다**.
+    /// ★순서 = add 먼저, remove 나중★: 한 호출에 같은 이름이 양쪽에 있으면 최종 상태는 "빠진 것" 이다
+    ///   (제거 의도를 무시하는 쪽이 더 위험 — 다음 방송이 그 멤버에게 나간다).
+    /// ★암묵 생성★: `add` 가 있으면 없는 그룹이 그 자리에서 생긴다. `remove` 만으로는 절대 생기지 않는다.
+    // round-3 리뷰 G2
+    // ADR-0109 (배치 원자성 — 전검증 후 일괄 적용)
+    pub fn update_members(
+        &mut self,
+        group: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<Vec<String>, GroupError> {
+        // ── 1~3단계: 검증만(레지스트리 무변경) ──────────────────────────────────────────
+        let norm = Self::normalize(group)?;
+        if Self::is_builtin(&norm) {
+            return Err(GroupError::Builtin);
+        }
+        for m in add.iter().chain(remove.iter()) {
+            Self::validate_member_name(m)?;
+        }
+        let exists = self.registered.contains_key(&norm);
+        if !exists && add.is_empty() {
+            // 생성 트리거(add)가 없으면 없는 그룹은 그대로 없는 그룹이다 — 조회든 remove 든 `NotFound`.
+            //   (빈 add 가 유령 그룹을 만들지 않게 하는 규칙과 같은 자리.)
+            return Err(GroupError::NotFound { name: norm });
+        }
+
+        // ── 4단계: 적용(여기서부터 실패 없음) ────────────────────────────────────────────
+        let members = self.registered.entry(norm).or_default();
+        for m in add {
+            if !members.iter().any(|x| x == m) {
+                members.push(m.clone());
+            }
+        }
+        for m in remove {
+            members.retain(|x| x != m);
+        }
+        Ok(members.clone())
+    }
+
+    /// ★관리 조회용 멤버 목록(S18 D — `group { group }`)★. 등록 그룹이면 그 명단(**빈 그룹은 `Ok(vec![])`**),
+    /// 없으면 `NotFound`. `@all` 은 여기서 처리하지 않는다(`Builtin` — liveness 를 모르므로 상위가 `resolve`
+    /// 에 live 스냅샷을 넘겨 푼다).
+    ///
+    /// ★왜 `resolve` 로 대신하지 않나(load-bearing — 두 질문이 다르다)★: `resolve` 는 **발송용**이라 멤버 0명을
+    ///   `Empty` 로 **거부**한다(빈 그룹에 방송하면 아무에게도 안 가므로 반려가 맞다). 그런데 **관리**에서는
+    ///   "방금 만든 빈 그룹" 이 정상 상태다 — 그걸 에러로 답하면 `group @g --add x` 직후의 조회가 실패하고,
+    ///   사용자는 그룹이 안 만들어진 줄 안다. 두 질문(보낼 수 있나 / 명단이 뭐냐)을 한 함수로 뭉개면 한쪽이
+    ///   반드시 거짓말을 하므로 조회 전용 출구를 따로 둔다.
+    pub fn members_of(&self, group: &str) -> Result<Vec<String>, GroupError> {
+        let norm = Self::normalize(group)?;
+        if Self::is_builtin(&norm) {
+            return Err(GroupError::Builtin);
+        }
+        self.registered
+            .get(&norm)
+            .cloned()
+            .ok_or(GroupError::NotFound { name: norm })
     }
 }
 
@@ -580,6 +671,124 @@ mod tests {
         let listed = g.list();
         assert!(listed.contains(&ALL_GROUP.to_string()), "@all 항상 포함");
         assert!(listed.contains(&"@team".to_string()));
+    }
+
+    #[test]
+    fn add_member_rejects_group_like_names_so_nesting_cannot_be_registered() {
+        // ★round-2 리뷰 F5 — 구조적 guard★: 입구가 먼저 거르지만, 레지스트리도 스스로 막아 **어떤 경로로도**
+        //   매치 불가능한 멤버(= `@` 로 시작하는 이름)가 명단에 들어가지 못하게 한다.
+        let mut g = Groups::new();
+        assert_eq!(
+            g.add_member("@t", "@coders"),
+            Err(GroupError::InvalidMemberName {
+                name: "@coders".to_string()
+            })
+        );
+        assert_eq!(
+            g.add_member("@t", " @all"),
+            Err(GroupError::InvalidMemberName {
+                name: " @all".to_string()
+            }),
+            "앞 공백으로 위장해도 막는다"
+        );
+        // 반려는 그룹을 만들지도 않는다(암묵 생성보다 이름 검증이 먼저).
+        assert!(matches!(
+            g.members_of("@t"),
+            Err(GroupError::NotFound { .. })
+        ));
+        // 대조군: 평범한 이름·이름 안의 `@` 는 정상 수용(과잉 차단 아님).
+        assert!(g.add_member("@t", "alice").is_ok());
+        assert!(g.add_member("@t", "e@mail").is_ok());
+    }
+
+    #[test]
+    fn update_members_is_all_or_nothing_when_a_name_in_the_batch_is_invalid() {
+        // ★round-3 리뷰 G2★: 입구 검증을 우회하는 내부 호출자가 잘못된 배치를 넣어도 **부분 반영이 없어야**
+        //   한다. 옛 구현(상위의 add_member 루프)은 alice 를 넣은 뒤 두 번째에서 에러를 내, 호출자에겐
+        //   실패인데 레지스트리는 바뀐 상태로 남겼다.
+        let mut g = Groups::new();
+        let err = g
+            .update_members("@t", &names(&["alice", " @all"]), &[])
+            .expect_err("배치 안의 잘못된 이름은 반려");
+        assert_eq!(
+            err,
+            GroupError::InvalidMemberName {
+                name: " @all".to_string()
+            }
+        );
+        assert!(
+            matches!(g.members_of("@t"), Err(GroupError::NotFound { .. })),
+            "실패한 배치는 그룹조차 만들지 않는다(부분 변경 0)"
+        );
+        assert_eq!(g.list(), vec![ALL_GROUP], "레지스트리 무변경");
+
+        // 기존 그룹에 대한 실패도 명단을 건드리지 않는다.
+        g.update_members("@t", &names(&["alice"]), &[]).unwrap();
+        let err = g
+            .update_members("@t", &names(&["bob", "@nested"]), &names(&["alice"]))
+            .expect_err("반려");
+        assert!(matches!(err, GroupError::InvalidMemberName { .. }));
+        assert_eq!(
+            g.members_of("@t"),
+            Ok(names(&["alice"])),
+            "bob 이 들어가지도, alice 가 빠지지도 않아야: 부분 반영 0"
+        );
+    }
+
+    #[test]
+    fn update_members_applies_adds_then_removes_and_creates_implicitly() {
+        let mut g = Groups::new();
+        // 암묵 생성 + 순서(add 먼저, remove 나중 — 한 배치에 같은 이름이면 remove 가 이긴다).
+        assert_eq!(
+            g.update_members("@t", &names(&["a", "b", "c"]), &names(&["b"])),
+            Ok(names(&["a", "c"]))
+        );
+        // remove 만으로는 없는 그룹이 생기지 않는다.
+        assert!(matches!(
+            g.update_members("@ghost", &[], &names(&["a"])),
+            Err(GroupError::NotFound { .. })
+        ));
+        // 빈 배치 = 순수 조회(부작용 0), 없는 그룹이면 NotFound.
+        assert_eq!(g.update_members("@t", &[], &[]), Ok(names(&["a", "c"])));
+        assert!(matches!(
+            g.update_members("@ghost", &[], &[]),
+            Err(GroupError::NotFound { .. })
+        ));
+        // 내장 그룹은 배치 경로에서도 보호된다.
+        assert_eq!(
+            g.update_members("@all", &names(&["a"]), &[]),
+            Err(GroupError::Builtin)
+        );
+    }
+
+    #[test]
+    fn members_of_returns_empty_list_for_a_known_but_empty_group() {
+        // ★관리 조회 ≠ 발송 해석★: resolve 는 빈 그룹을 Empty 로 거부하지만(방송 반려), members_of 는
+        //   "방금 만든 빈 그룹" 을 정상 상태로 답해야 한다(안 그러면 add 직후 조회가 실패한다).
+        let mut g = Groups::new();
+        g.create("@hollow").unwrap();
+        assert_eq!(g.members_of("@hollow"), Ok(vec![]));
+        assert!(matches!(
+            g.resolve("@hollow", &[]),
+            Err(GroupError::Empty { .. })
+        ));
+    }
+
+    #[test]
+    fn members_of_rejects_unknown_builtin_and_bad_names() {
+        let mut g = Groups::new();
+        g.add_member("@x", "a").unwrap();
+        assert_eq!(g.members_of("@x"), Ok(names(&["a"])));
+        assert!(matches!(
+            g.members_of("@ghost"),
+            Err(GroupError::NotFound { .. })
+        ));
+        // @all 은 liveness 가 필요해 이 순수 조회로는 못 푼다 — 상위가 resolve(live) 로 간다.
+        assert_eq!(g.members_of("@all"), Err(GroupError::Builtin));
+        assert!(matches!(
+            g.members_of("nope"),
+            Err(GroupError::InvalidName { .. })
+        ));
     }
 
     #[test]

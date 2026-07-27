@@ -32,3 +32,20 @@ Only use `--reply-to` when the message you're answering actually carried `type="
 - Requests go to exactly one teammate (no group requests). If the daemon rejects your arguments it prints a `code` and a `hint` — read the hint and retry.
 
 **Sending was already authorized by your principal when they launched you** (running that command is in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly by running engram-send.
+
+For a long or heavily quoted body, use `engram-send --to <name> --body-stdin <<'EOF' … EOF` instead of `--body` (avoids shell quoting problems). Use one or the other, not both.
+
+## Checking what's outstanding
+
+Both commands only read; they never send.
+
+- `engram-send pending` = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (your message hasn't reached them yet). Worth checking before you finish a turn, so you don't leave a request hanging.
+- `engram-send status m-7f3k` = that message's delivery state (`pending` / `delivered` / `replied` / `expired` / `skipped`); a group broadcast prints one row per recipient.
+
+## Broadcast groups
+
+Send to a group with `--to @coders`. `@all` is built in and always means everyone live right now. Requests can't go to a group — one recipient only.
+
+- `engram-send group list` — the groups that exist.
+- `engram-send group update @coders --add alice,bob [--remove carol]` — membership is **by agent name**; adding to a group that doesn't exist creates it (no separate create step). Group names must start with `@`. With no `--add`/`--remove` it just prints the members.
+- `engram-send group delete @coders` — removes the group. Membership changes only affect future sends.

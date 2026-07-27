@@ -639,14 +639,27 @@ mod obs_seam {
         manager: &Arc<AgentManager>,
         fail: bool,
     ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>) {
+        // 기본은 "이름 = id 앞 8자"(fallback_name) — 대부분의 테스트가 유일 이름을 전제한다.
         let id = AgentId::new_v4();
+        let name = id.to_string()[..8].to_string();
+        insert_seam_recipient_named(manager, fail, id, &name)
+    }
+
+    /// ★동명 다수 시나리오용(D 리뷰 B1)★ — AgentId 와 **보이는 이름을 따로** 지정한다. 두 세션에 같은
+    /// 이름을 주면 로스터에 동명 두 명이 뜨고, 그때 발신자는 exact AgentId 로만 한쪽을 지목할 수 있다.
+    pub fn insert_seam_recipient_named(
+        manager: &Arc<AgentManager>,
+        fail: bool,
+        id: AgentId,
+        name: &str,
+    ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>) {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatus)));
         // ADR-0101 (WYSIWYA): canonical name = display_name ?? basename(session.cwd) 이고 seam 세션엔
         //   프로필(=display_name)이 없다. 그래서 cwd 의 basename 이 곧 이 세션의 addressable name 이 된다.
         //   테스트는 fallback_name(id)=id[:8] 로 지목하므로, cwd basename 을 id[:8] 로 맞춰 "보이는 이름
         //   = 주소" 를 성립시킨다(옛 cwd="." 는 basename="." 이라 지목 불가·동명 충돌).
-        let cwd = std::path::PathBuf::from(format!("seam-root/{}", &id.to_string()[..8]));
+        let cwd = std::path::PathBuf::from(format!("seam-root/{name}"));
         // ClaudeStreamJson encoder — json 모드 캐리어를 흉내(래핑된 봉투가 stream-json 라인으로 감싸짐).
         //   요청 바이트(WriteOutcome.bytes_requested)는 감싸기 **전** 논리 메시지 = wrap_message 봉투 그대로다.
         let session = Arc::new(AgentSession::new(
@@ -2615,9 +2628,19 @@ async fn post_send_json(
     bearer: Option<&str>,
     body: serde_json::Value,
 ) -> (reqwest::StatusCode, String) {
+    post_control(base, "/control/send", bearer, body).await
+}
+
+/// 임의의 제어 라우트로 JSON POST(D — 조회/그룹 미러가 send 와 같은 서버·auth·프레이밍을 쓴다).
+async fn post_control(
+    base: &str,
+    route: &str,
+    bearer: Option<&str>,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, String) {
     let client = reqwest::Client::new();
     let mut req = client
-        .post(format!("{base}/control/send"))
+        .post(format!("{base}{route}"))
         .header("Content-Type", "application/json")
         .json(&body);
     if let Some(b) = bearer {
@@ -2627,6 +2650,32 @@ async fn post_send_json(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     (status, text)
+}
+
+/// ★D 이후 그룹 명단은 **실 입구**로만 채운다★ — C4 의 하네스 seam(`add_group_member_for_test`)은 D 에서
+/// 삭제됐다. 이 헬퍼는 CLI 미러 라우트(`/control/group`)로 실제 `group update` 를 태워, 통합 테스트가
+/// 운영 경로와 같은 코드를 지나게 한다(테스트 전용 통로를 남기면 실제로 도는 코드와 갈린다).
+async fn group_add(base: &str, bearer: &str, group: &str, members: &[&str]) {
+    let (status, body) = post_control(
+        base,
+        "/control/group",
+        Some(bearer),
+        serde_json::json!({ "group": group, "add": members }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "group update 응답: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["group"], group, "응답 라벨 = 정규화된 그룹 이름: {body}");
+    for m in members {
+        assert!(
+            v["members"]
+                .as_array()
+                .expect("members 배열")
+                .iter()
+                .any(|x| x == m),
+            "'{m}' 이 명단에 있어야: {body}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3109,9 +3158,14 @@ async fn c4_registered_group_skips_a_member_that_is_not_live() {
     // 발신자는 산 세션이 없어(순수 신원) 표시 이름이 id 앞 8자 fallback 이다 — 봉투 golden 에 그대로 쓴다.
     let sender_display = obs_seam::fallback_name(sender);
 
-    // 그룹 관리 표면(MCP `group` 툴)은 D 스코프라, 여기선 하네스 seam 으로 명단을 채운다.
-    messaging.add_group_member_for_test("@coders", &live_name);
-    messaging.add_group_member_for_test("@coders", "never-spawned");
+    // D: 명단은 **실 관리 입구**(group update)로 채운다(C4 의 하네스 seam 은 삭제됨 — group_add 주석).
+    group_add(
+        &base,
+        "c4-reg-token",
+        "@coders",
+        &[&live_name, "never-spawned"],
+    )
+    .await;
 
     let (status, body) = post_send(&base, Some("c4-reg-token"), "@coders", "공지").await;
     assert_eq!(status, reqwest::StatusCode::OK, "방송 접수: {body}");
@@ -3224,13 +3278,20 @@ async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
 /// 미등록 이름으로만 시험하면 GROUP_NOT_FOUND 가 먼저 나가 금지가 살아 있는지 알 수 없다(순서 착시).
 #[tokio::test]
 async fn c4_contract_fields_stay_banned_on_a_resolvable_group() {
-    let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("c4-ban").await;
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("c4-ban").await;
 
     let (live_id, live_captured) = obs_seam::insert_seam_recipient(&manager, false);
-    messaging.add_group_member_for_test("@coders", &obs_seam::fallback_name(live_id));
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "c4-ban-token".to_string());
     let tok = Some("c4-ban-token");
+    // D: 명단은 실 관리 입구로(C4 하네스 seam 삭제분 이관).
+    group_add(
+        &base,
+        "c4-ban-token",
+        "@coders",
+        &[&obs_seam::fallback_name(live_id)],
+    )
+    .await;
 
     // ① request → GROUP_REQUEST_UNSUPPORTED(완료 판정 시맨틱 미정 = v1 영구 금지).
     let (_s, body) = post_send_json(
@@ -3270,6 +3331,664 @@ async fn c4_contract_fields_stay_banned_on_a_resolvable_group() {
     assert_eq!(
         v["results"][0]["status"], "delivered",
         "통보는 통과: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── D(spec §6): 조회·관리 입구 — `messages` / `group` 두 입구 동일 JSON ──────────────────────
+//
+// ★왜 통합 테스트인가★: 두 입구(MCP 툴 · CLI HTTP 라우트)가 **같은 공통 핸들러**를 부른다는 게 이 증분의
+//   핵심 계약(ADR-0086 entrance-agnostic)인데, 그건 배선을 실제로 태워야만 증명된다 — 단위 테스트는
+//   핸들러 하나만 본다. 그래서 실 데몬(MCP 서버 + auth 미들웨어 + MessagingService)을 띄우고 두 경로의
+//   응답 JSON 이 **동일한지** 직접 비교한다.
+// ★claude 불요★: 조회·그룹 관리는 자식 프로세스 stdin 을 건드리지 않는다(읽기/명단 조작뿐).
+
+#[tokio::test]
+async fn d_group_surface_lists_shows_updates_and_deletes_over_the_cli_route() {
+    let (_manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-group").await;
+    let caller = AgentId::new_v4();
+    registry.issue(caller, 0, "d-group-tok".to_string());
+    let tok = Some("d-group-tok");
+
+    // ① 무인자 = 목록. 처음엔 내장 @all 뿐.
+    let (status, body) = post_control(&base, "/control/group", tok, serde_json::json!({})).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["groups"],
+        serde_json::json!(["@all"]),
+        "초기 목록: {body}"
+    );
+
+    // ② 암묵 생성 — add 만으로 그룹이 생긴다(별도 create 동사 없음).
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@coders", "add": ["alice", "bob"] }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v,
+        serde_json::json!({ "group": "@coders", "members": ["alice", "bob"] }),
+        "증감 응답 = 적용 후 명단: {body}"
+    );
+
+    // ③ 이름만 = 멤버 조회.
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@coders" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["members"], serde_json::json!(["alice", "bob"]));
+
+    // ④ 목록에 새 그룹이 보인다(@all 이 머리, 나머지 사전순).
+    let (_s, body) = post_control(&base, "/control/group", tok, serde_json::json!({})).await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["groups"], serde_json::json!(["@all", "@coders"]));
+
+    // ⑤ 삭제 → 목록에서 사라진다.
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@coders", "delete": true }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v,
+        serde_json::json!({ "group": "@coders", "deleted": true }),
+        "삭제 응답: {body}"
+    );
+    let (_s, body) = post_control(&base, "/control/group", tok, serde_json::json!({})).await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["groups"], serde_json::json!(["@all"]));
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn d_group_surface_rejects_bad_names_builtin_edits_and_nonsensical_arg_combos() {
+    let (_manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-group-err").await;
+    let caller = AgentId::new_v4();
+    registry.issue(caller, 0, "d-ge-tok".to_string());
+    let tok = Some("d-ge-tok");
+
+    // 코드별 반려 — 발신 LLM 은 code 로 분기하므로 어휘가 계약이다.
+    let cases: Vec<(serde_json::Value, &str)> = vec![
+        // 선행 @ 없음 → INVALID_GROUP_NAME(발송의 GROUP_NOT_FOUND 와 갈린다: 관리에선 처방이 다르다).
+        (
+            serde_json::json!({ "group": "coders" }),
+            "INVALID_GROUP_NAME",
+        ),
+        (serde_json::json!({ "group": "@@x" }), "INVALID_GROUP_NAME"),
+        // 내장 @all 증감·삭제 → GROUP_BUILTIN.
+        (
+            serde_json::json!({ "group": "@all", "add": ["x"] }),
+            "GROUP_BUILTIN",
+        ),
+        (
+            serde_json::json!({ "group": "@all", "delete": true }),
+            "GROUP_BUILTIN",
+        ),
+        // 없는 그룹 조회/삭제/제거 → GROUP_NOT_FOUND(add 는 암묵 생성이라 여기 없다).
+        (serde_json::json!({ "group": "@ghost" }), "GROUP_NOT_FOUND"),
+        (
+            serde_json::json!({ "group": "@ghost", "delete": true }),
+            "GROUP_NOT_FOUND",
+        ),
+        (
+            serde_json::json!({ "group": "@ghost", "remove": ["a"] }),
+            "GROUP_NOT_FOUND",
+        ),
+        // 조합 오류 → INVALID_GROUP_ARGS.
+        (
+            serde_json::json!({ "group": "@x", "add": ["a"], "delete": true }),
+            "INVALID_GROUP_ARGS",
+        ),
+        (serde_json::json!({ "add": ["a"] }), "INVALID_GROUP_ARGS"),
+        (serde_json::json!({ "delete": true }), "INVALID_GROUP_ARGS"),
+    ];
+    for (req, code) in cases {
+        let (status, body) = post_control(&base, "/control/group", tok, req.clone()).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "반려도 200+JSON: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(v["status"], "error", "에러 shape: {body}");
+        assert_eq!(v["code"], code, "요청 {req}: {body}");
+        assert!(v["hint"].is_string(), "교정 hint 동봉: {body}");
+    }
+
+    // ★부작용 0★: 위 반려들 중 어느 것도 그룹을 만들지 않았다.
+    let (_s, body) = post_control(&base, "/control/group", tok, serde_json::json!({})).await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["groups"],
+        serde_json::json!(["@all"]),
+        "유령 그룹 없음: {body}"
+    );
+
+    // 인증 없는 호출은 미들웨어가 막는다(관리에 ACL 은 없어도 채널 인증은 필수).
+    let (status, _b) = post_control(&base, "/control/group", None, serde_json::json!({})).await;
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-messages").await;
+
+    // 수신자(구조화 seam) + 발신자(순수 신원).
+    let (recv_id, _recv_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let recv_name = obs_seam::fallback_name(recv_id);
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "d-msg-tok".to_string());
+    let tok = Some("d-msg-tok");
+    let sender_name = obs_seam::fallback_name(sender);
+
+    // ① 통보 발송 → 그 id 로 status 조회.
+    let (_s, body) = post_send(&base, tok, &recv_name, "hello").await;
+    let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let msg_id = sent["id"].as_str().expect("id").to_string();
+
+    let (status, body) = post_control(
+        &base,
+        "/control/messages",
+        tok,
+        serde_json::json!({ "id": msg_id }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["id"], msg_id.as_str());
+    assert_eq!(v["from"], sender_name.as_str(), "발신자 라벨: {body}");
+    assert_eq!(v["awaiting_reply"], false, "통보는 회신 대기 아님");
+    assert_eq!(v["rows"].as_array().map(|a| a.len()), Some(1));
+    assert_eq!(v["rows"][0]["to"], recv_name.as_str());
+    assert_eq!(v["rows"][0]["status"], "delivered");
+    assert!(v["rows"][0]["age_secs"].is_number(), "경과 초 동봉: {body}");
+
+    // ② 없는 id → MESSAGE_NOT_FOUND(반려 shape 은 발송과 동일).
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        tok,
+        serde_json::json!({ "id": "m-nope1234" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["code"], "MESSAGE_NOT_FOUND", "{body}");
+
+    // ③ 무인자 = 내 미결. 부재 수신자에게 보낸 파킹 1건이 outbound_pending 으로 잡힌다.
+    let (_s, _b) = post_send(&base, tok, "never-spawned", "parked").await;
+    let (_s, body) = post_control(&base, "/control/messages", tok, serde_json::json!({})).await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["me"], sender_name.as_str(), "'나' 는 토큰 신원: {body}");
+    let open = v["open"].as_array().expect("open 배열");
+    assert_eq!(open.len(), 1, "미결 1건(배달된 통보는 미결 아님): {body}");
+    assert_eq!(open[0]["direction"], "outbound_pending");
+    assert_eq!(open[0]["to"], "never-spawned");
+    assert!(open[0].get("reply_by").is_none(), "통보 줄엔 계약 축 없음");
+
+    // ④ 다른 신원으로 물으면 자기 것만 본다(남의 미결이 새지 않는다 — 신원은 토큰 파생).
+    let other = AgentId::new_v4();
+    registry.issue(other, 0, "d-msg-other".to_string());
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        Some("d-msg-other"),
+        serde_json::json!({}),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["open"],
+        serde_json::json!([]),
+        "남의 미결은 안 보인다: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn d_messages_shows_the_reply_debt_on_both_sides_of_a_request() {
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-req-debt").await;
+
+    let (recv_id, _c) = obs_seam::insert_seam_recipient(&manager, false);
+    let recv_name = obs_seam::fallback_name(recv_id);
+    // 수신자 신원 토큰 — 그쪽 관점의 미결(내가 답할 것)을 물어본다.
+    registry.issue(recv_id, 0, "d-recv-tok".to_string());
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "d-send-tok".to_string());
+
+    let (_s, body) = post_send_json(
+        &base,
+        Some("d-send-tok"),
+        serde_json::json!({ "to": recv_name, "body": "해줘", "request": true, "reply_by": "10m" }),
+    )
+    .await;
+    let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let req_id = sent["id"].as_str().expect("id").to_string();
+
+    // 발신자 관점: 회신 대기(awaiting_their_reply) + 기한 표기 원본.
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        Some("d-send-tok"),
+        serde_json::json!({}),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let open = v["open"].as_array().expect("배열");
+    assert_eq!(open.len(), 1, "{body}");
+    assert_eq!(open[0]["direction"], "awaiting_their_reply");
+    assert_eq!(open[0]["id"], req_id.as_str());
+    assert_eq!(open[0]["reply_by"], "10m", "기한 표기 원본 그대로: {body}");
+    assert_eq!(open[0]["timed_out"], false);
+
+    // 수신자 관점: **내가 답할 차례**(reply_owed_by_me) — 같은 계약이 정반대 태그로 보인다.
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        Some("d-recv-tok"),
+        serde_json::json!({}),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let open = v["open"].as_array().expect("배열");
+    assert_eq!(open.len(), 1, "{body}");
+    assert_eq!(open[0]["direction"], "reply_owed_by_me", "{body}");
+    assert_eq!(open[0]["id"], req_id.as_str());
+
+    // id 조회는 awaiting_reply 로 같은 사실을 알린다.
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        Some("d-send-tok"),
+        serde_json::json!({ "id": req_id }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["awaiting_reply"], true, "{body}");
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// MCP 툴 호출 → text content JSON(D parity 테스트 전용 헬퍼).
+async fn call_mcp_tool(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    use rmcp::model::CallToolRequestParams;
+    let mut params = CallToolRequestParams::default();
+    params.name = name.to_string().into();
+    params.arguments = Some(args.as_object().expect("객체").clone());
+    let result = client.call_tool(params).await.expect("call tool");
+    let text = result
+        .content
+        .iter()
+        .find_map(|c| c.as_text().map(|t| t.text.clone()))
+        .expect("text content");
+    serde_json::from_str(&text).expect("tool json")
+}
+
+/// ★두 입구 동일 JSON(spec §6)★ — MCP 툴과 CLI 라우트의 응답이 **바이트 동형**인지 직접 비교한다.
+/// 어긋나면 한쪽 입구의 LLM 만 다른 계약을 배우게 되므로(발신 freeze 와 같은 계열의 사고) 회귀 그물이다.
+#[tokio::test]
+async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() {
+    use rmcp::transport::streamable_http_client::{
+        StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    };
+    use rmcp::ServiceExt;
+
+    let (_manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-parity").await;
+    let caller = AgentId::new_v4();
+    registry.issue(caller, 0, "d-parity-tok".to_string());
+    let tok = Some("d-parity-tok");
+
+    let config = StreamableHttpClientTransportConfig::with_uri(handle.url.clone())
+        .auth_header("d-parity-tok");
+    let transport = StreamableHttpClientTransport::from_config(config);
+    let client = ().serve(transport).await.expect("MCP handshake");
+
+    // tools/list 에 조회·관리 툴이 노출된다(프라이밍이 가르치는 이름과 같은 값).
+    let tools = client.list_all_tools().await.expect("list tools");
+    let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+    for want in ["send_message", "messages", "group"] {
+        assert!(
+            names.contains(&want.to_string()),
+            "tools 에 {want}: {names:?}"
+        );
+    }
+
+    // ① group 목록 — 두 입구 동일.
+    let via_mcp = call_mcp_tool(&client, "group", serde_json::json!({})).await;
+    let (_s, body) = post_control(&base, "/control/group", tok, serde_json::json!({})).await;
+    let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(via_mcp, via_cli, "group 목록이 두 입구에서 동일해야");
+
+    // ② group 증감 — MCP 로 만들고 CLI 로 조회해도 같은 상태를 본다(같은 레지스트리 = 단일 상태).
+    let created = call_mcp_tool(
+        &client,
+        "group",
+        serde_json::json!({ "group": "@coders", "add": ["alice"] }),
+    )
+    .await;
+    assert_eq!(
+        created,
+        serde_json::json!({ "group": "@coders", "members": ["alice"] })
+    );
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@coders" }),
+    )
+    .await;
+    let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(created, via_cli, "MCP 로 만든 그룹을 CLI 가 그대로 본다");
+
+    // ③ 반려도 동일 shape·동일 code.
+    let via_mcp = call_mcp_tool(&client, "group", serde_json::json!({ "group": "nope" })).await;
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "nope" }),
+    )
+    .await;
+    let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(via_mcp, via_cli, "반려 JSON 도 두 입구 동일");
+    assert_eq!(via_mcp["code"], "INVALID_GROUP_NAME");
+
+    // ④ messages 무인자 — 같은 토큰이므로 "나" 도 같고 결과도 같다.
+    let via_mcp = call_mcp_tool(&client, "messages", serde_json::json!({})).await;
+    let (_s, body) = post_control(&base, "/control/messages", tok, serde_json::json!({})).await;
+    let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(via_mcp, via_cli, "미결 조회가 두 입구에서 동일해야");
+    assert_eq!(via_mcp["open"], serde_json::json!([]));
+
+    // ⑤ ★멤버 이름 정규화 parity(D 리뷰 A1)★ — 프라이밍이 가르치는 **콤마 표기**가 MCP 로 들어와도
+    //    CLI 와 같은 명단이 돼야 한다. 예전엔 여기서 `"alice,bob"` 이라는 유령 멤버 하나가 생겼다
+    //    (그 이름과 일치하는 에이전트는 영원히 없어 모든 방송에서 조용히 skipped).
+    let via_mcp = call_mcp_tool(
+        &client,
+        "group",
+        serde_json::json!({ "group": "@norm", "add": ["carol,dave", " eve ", ""] }),
+    )
+    .await;
+    assert_eq!(
+        via_mcp,
+        serde_json::json!({ "group": "@norm", "members": ["carol", "dave", "eve"] }),
+        "MCP 로 온 콤마·공백·빈 조각도 데몬이 정규화한다"
+    );
+    // CLI 로 같은 표기를 보내면 **같은 최종 상태**(멱등이라 명단이 그대로)여야 한다.
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@norm", "add": ["carol,dave", " eve "] }),
+    )
+    .await;
+    let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(via_mcp, via_cli, "두 입구의 정규화 결과가 byte-identical");
+    // 유령 멤버가 실제로 없다(방송 대상이 정확히 셋).
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@norm" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["members"], serde_json::json!(["carol", "dave", "eve"]));
+
+    // ⑦ ★중첩 그룹 거절(round-2 리뷰 F5) — 두 입구 동일★: `@` 로 시작하는 멤버 이름은 어떤 에이전트와도
+    //    매치되지 않아 영원히 skipped 되는데 응답엔 멤버로 보인다(중첩이 되는 줄 안다). 등록을 막는다.
+    let via_mcp = call_mcp_tool(
+        &client,
+        "group",
+        serde_json::json!({ "group": "@norm", "add": ["@coders"] }),
+    )
+    .await;
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@norm", "add": ["@coders"] }),
+    )
+    .await;
+    let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(via_mcp, via_cli, "중첩 그룹 반려도 두 입구 동일");
+    assert_eq!(via_mcp["code"], "INVALID_MEMBER_NAME", "{via_mcp}");
+    assert!(
+        via_mcp["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cannot contain another group"),
+        "hint 가 중첩 미지원임을 알려야: {via_mcp}"
+    );
+    // 부작용 0 — 명단은 그대로다.
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@norm" }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["members"],
+        serde_json::json!(["carol", "dave", "eve"]),
+        "반려는 명단을 바꾸지 않는다: {body}"
+    );
+
+    // ⑥ 빈 이름 멤버는 **만들 수 없다** → 지울 수 없는 상태 자체가 생기지 않는다(A1).
+    let via_mcp = call_mcp_tool(
+        &client,
+        "group",
+        serde_json::json!({ "group": "@norm", "add": ["", "  "] }),
+    )
+    .await;
+    assert_eq!(
+        via_mcp["code"], "INVALID_GROUP_ARGS",
+        "쓸 이름이 하나도 없으면 조용히 조회로 강등하지 않고 반려: {via_mcp}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// ★스냅샷 원칙 — 실 입구 판(service 단위 그물의 통합 짝)★: 방송이 busy 멤버에게 파킹된 뒤 그 멤버를
+/// 명단에서 빼고 그룹까지 지워도, 멤버가 idle 이 되면 파킹분은 **그대로 배달된다**.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn d_group_membership_change_does_not_cancel_an_already_parked_broadcast() {
+    let (manager, registry, base, data_dir, handle, messaging, busy) = wire("d-snapshot").await;
+
+    let (member_id, member_captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let member_name = obs_seam::fallback_name(member_id);
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "d-snap-tok".to_string());
+    let tok = Some("d-snap-tok");
+    group_add(&base, "d-snap-tok", "@team", &[&member_name]).await;
+
+    // 턴 tap 을 직접 붙여 busy/idle 을 구동한다(c2 테스트와 같은 하네스 seam — 실 claude 불요).
+    busy.mark_attached_for_test(member_id, 0);
+    let tap = busy.tap_for_test();
+    let feed = |ev: &OutputEvent| {
+        tap.send(OutputFrame {
+            agent_id: member_id,
+            epoch: 0,
+            seq: 1,
+            payload: OutputPayload::Event(ev),
+        })
+        .expect("tap 은 항상 Ok");
+    };
+
+    // 멤버를 턴 진행 중(busy)으로 만든다 → 방송이 파킹된다(산 멤버라 소급 금지에 안 걸림).
+    feed(&OutputEvent::TextDelta {
+        text: "working...".to_string(),
+        turn_id: None,
+        message_id: None,
+    });
+    assert!(busy.is_busy(member_id, 0), "전제: 턴 진행 중");
+    let (_s, body) = post_send(&base, tok, "@team", "공지").await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["results"][0]["status"], "pending", "전제: 파킹 — {body}");
+    assert_eq!(messaging.parked_len(&member_name), 1);
+    assert!(
+        obs_seam::all_written(&member_captured).is_empty(),
+        "턴 중엔 아직 주입 없음"
+    );
+
+    // 파킹 뒤 명단에서 빼고 그룹까지 삭제 — 둘 다 **앞으로의 발송**에만 영향을 준다.
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@team", "remove": [member_name.clone()] }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["members"], serde_json::json!([]), "명단은 비었다: {body}");
+    let (_s, body) = post_control(
+        &base,
+        "/control/group",
+        tok,
+        serde_json::json!({ "group": "@team", "delete": true }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["deleted"], true, "{body}");
+
+    // 턴이 끝나면 파킹분이 배달된다(유실 아님).
+    feed(&OutputEvent::MessageDone {
+        turn_id: None,
+        message_id: None,
+    });
+    assert!(!busy.is_busy(member_id, 0), "MessageDone → idle");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !obs_seam::all_written(&member_captured).is_empty()
+        }),
+        "명단에서 빠졌어도 이미 파킹된 방송은 배달돼야(스냅샷 원칙)"
+    );
+    let text = stream_json_text(&obs_seam::last_written(&member_captured));
+    assert!(text.contains("공지"), "본문 보존: {text}");
+    assert!(
+        text.contains(r#"to="@team""#),
+        "봉투의 그룹 라벨도 발송 순간 값 그대로(삭제된 그룹 이름): {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// ★D 리뷰 B1 — 실 입구 판 회귀 그물★: 같은 이름의 산 에이전트가 둘일 때, exact AgentId 로 건 request 의
+/// 회신 의무가 **쌍둥이에게 잘못 붙지 않는다**. 신원은 두 토큰(각 AgentId)에서 파생되므로 이 축은 실제
+/// 인증 경로를 태워야만 증명된다(단위 테스트는 서비스 함수 인자만 본다).
+#[tokio::test]
+async fn d_messages_does_not_misassign_a_reply_obligation_to_a_same_named_twin() {
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-twin").await;
+
+    // ★같은 **보이는 이름**의 산 에이전트 둘★ — 이 상태에서만 이름-only 귀속의 오귀속이 드러난다.
+    //   이름이 겹치므로 발신자는 exact AgentId 로만 한쪽을 지목할 수 있다(이름 지목은 AMBIGUOUS 반려).
+    let twin_a = AgentId::new_v4();
+    let twin_b = AgentId::new_v4();
+    let (_a, _cap_a) = obs_seam::insert_seam_recipient_named(&manager, false, twin_a, "worker");
+    let (_b, _cap_b) = obs_seam::insert_seam_recipient_named(&manager, false, twin_b, "worker");
+    registry.issue(twin_a, 0, "d-twin-a".to_string());
+    registry.issue(twin_b, 0, "d-twin-b".to_string());
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "d-twin-send".to_string());
+
+    // exact AgentId 로 A 에게만 request.
+    let (_s, body) = post_send_json(
+        &base,
+        Some("d-twin-send"),
+        serde_json::json!({ "to": twin_a.to_string(), "body": "해줘", "request": true, "reply_by": "10m" }),
+    )
+    .await;
+    let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let req_id = sent["id"].as_str().expect("id").to_string();
+
+    // A 관점: 내가 답할 차례.
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        Some("d-twin-a"),
+        serde_json::json!({}),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let a_open = v["open"].as_array().expect("배열");
+    assert_eq!(a_open.len(), 1, "지목된 A 는 의무를 진다: {body}");
+    assert_eq!(a_open[0]["direction"], "reply_owed_by_me");
+    assert_eq!(a_open[0]["id"], req_id.as_str());
+
+    // B 관점: 받은 적이 없으므로 **아무 것도 없다**(옛 구현은 여기서 A 의 의무를 돌려줬다).
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        Some("d-twin-b"),
+        serde_json::json!({}),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["open"],
+        serde_json::json!([]),
+        "받은 적 없는 쌍둥이에게 의무가 붙으면 안 된다(B1): {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+/// ★D 리뷰 B2 — 조회가 완전성을 단언하는지 여부를 응답에 싣는다★.
+#[tokio::test]
+async fn d_messages_declares_whether_the_row_list_is_complete() {
+    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-trunc").await;
+    let (recv_id, _c) = obs_seam::insert_seam_recipient(&manager, false);
+    let recv_name = obs_seam::fallback_name(recv_id);
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "d-trunc-tok".to_string());
+    let tok = Some("d-trunc-tok");
+
+    let (_s, body) = post_send(&base, tok, &recv_name, "hello").await;
+    let sent: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let msg_id = sent["id"].as_str().expect("id").to_string();
+
+    let (_s, body) = post_control(
+        &base,
+        "/control/messages",
+        tok,
+        serde_json::json!({ "id": msg_id }),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    // 링이 아직 안 밀린 상태 = **확실히 전부**. 필드는 항상 실린다(부재를 완전성으로 오독하지 않게).
+    assert_eq!(
+        v["may_be_truncated"], false,
+        "완전성은 적극적으로 단언한다: {body}"
+    );
+    assert!(
+        v.get("hint").is_none(),
+        "완전할 때는 경고 문장을 붙이지 않는다: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);

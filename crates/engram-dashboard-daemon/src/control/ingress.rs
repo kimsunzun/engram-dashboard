@@ -796,6 +796,432 @@ fn handle_group_send(
     }
 }
 
+// ── 조회·관리 입구(D · spec §6 `messages` / `group`) ──────────────────────────────────────
+//
+// ★같은 규율, 다른 동사(ADR-0086 entrance-agnostic)★: `handle_send` 와 마찬가지로 MCP 툴과 CLI HTTP 라우트가
+//   **이 함수들만** 부른다 — 두 입구의 응답 JSON 이 같은 코드에서 나오므로 갈릴 수 없다(spec §6 "두 입구 동일
+//   JSON"). 신원 역시 두 입구 모두 토큰/세션 파생 `BoundIdentity` 다(payload 신원 금지).
+// ★읽기 전용/부작용 최소★: `messages` 는 장부를 **바꾸지 않는다**(조회 전용 — 전이·닫기 없음). `group` 은
+//   명단만 바꾸고 메시지·장부·큐를 건드리지 않는다(스냅샷 원칙 — service.rs 그룹 관리 섹션).
+// ★spawn_blocking 을 쓰지 않는 이유★: 이 경로엔 자식 stdin blocking write 가 없다(inject 없음). 잡는 락은
+//   messaging state 하나이고 그 임계구역은 순수 자료구조 조작뿐이라(port 호출은 락 밖) 짧다 — async 워커를
+//   붙들지 않는다. `handle_send` 가 blocking 풀로 가는 이유(막힌 파이프)가 여기엔 성립하지 않는다.
+
+/// 조회·관리 커맨드의 결과 — 성공(임의 JSON 객체) 또는 교정 에러. 발송(`ControlResult`)과 **에러 shape 이
+/// 동일**하다(`{status:"error", code, hint}` — spec §6): 발신 LLM·CLI 가 성공/실패를 한 규칙으로 읽는다.
+///
+/// ★왜 발송과 다른 타입인가★: 발송 성공은 `{id, results[]}` 로 **shape 이 고정**돼 있지만(계약), 조회 성공은
+///   동사마다 모양이 다르다(메시지 상태 / 미결 목록 / 그룹 목록 / 멤버 목록). 억지로 한 enum 에 넣으면
+///   variant 가 동사마다 늘어 계약이 흐려지므로, 성공 payload 는 만든 쪽이 통째로 싣고 **에러 축만** 공유한다.
+// PartialEq(Eq 아님 — serde_json::Value 가 f64 를 담아 Eq 를 못 준다)는 단위 테스트가 결과를 통째로
+//   비교하려고 붙였다. wire 계약엔 영향 없다.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlQueryResult {
+    /// 조회/관리 성공 — 동사별 payload(아래 각 핸들러 doc-comment 가 shape 정본).
+    Ok(serde_json::Value),
+    /// 교정 에러(반려) — 발송과 같은 code/hint 규약.
+    Error { code: &'static str, hint: String },
+}
+
+impl ControlQueryResult {
+    /// wire JSON. 성공은 payload 그대로, 에러는 `{status:"error", code, hint}`(발송과 동일 shape).
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            ControlQueryResult::Ok(v) => v.clone(),
+            ControlQueryResult::Error { code, hint } => serde_json::json!({
+                "status": "error",
+                "code": code,
+                "hint": hint,
+            }),
+        }
+    }
+
+    /// 성공인가 — CLI 가 exit code(0/1) 매핑에 쓴다.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ControlQueryResult::Ok(_))
+    }
+}
+
+/// ★`messages { id? }` 공통 핸들러(D · spec §6)★ — **읽기 전용**. 장부를 조회만 하고 어떤 상태도 바꾸지 않는다.
+///
+/// ★응답 shape(계약 — 두 입구 동일)★
+///
+/// `id` 지정 = 그 메시지의 배달 장부. 그룹 방송은 **수신자별 1행**(spec §4 1 msg_id : N 배달기록):
+/// ```json
+/// { "id": "m-7f3k", "from": "alice", "awaiting_reply": false, "may_be_truncated": false,
+///   "rows": [ { "to": "bob", "status": "delivered", "age_secs": 42, "updated_secs_ago": 40 } ] }
+/// ```
+/// - `status` 어휘 = 발송 응답과 **같은 집합**(`pending|delivered|replied|expired|skipped`).
+/// - `awaiting_reply` = 이 메시지가 request 인데 아직 회신이 안 왔다(통보면 항상 false).
+/// - ★`may_be_truncated`(리뷰 B2)★ = `rows` 가 **그 메시지의 전부라는 보장이 없다**(인메모리 이력 링이
+///   밀려 앞쪽 행이 사라졌을 수 있다). `false` 면 확실히 전부다. `true` 일 때는 `hint` 도 함께 실어
+///   사람/LLM 이 읽을 문장으로도 알린다 — 이 필드가 없으면 조회자가 남은 행을 전체로 오독한다(10인
+///   방송의 앞 6행이 밀려나면 "4명에게만 나갔다" 로 읽힌다).
+/// - 없는 id → `{status:"error", code:"MESSAGE_NOT_FOUND", hint}`. 단 이력이 통째로 밀려났어도 **회신
+///   계약이 살아 있으면** 행 0줄 + `awaiting_reply:true` + `may_be_truncated:true` 로 답한다(무인자
+///   조회가 미결로 보여 주는 id 를 여기선 "없다" 고 하는 자기모순 제거).
+///
+/// `id` 없음 = **호출자의 미결**(세 갈래를 한 목록으로, 오래된 순):
+/// ```json
+/// { "me": "alice", "open": [
+///     { "direction": "outbound_pending",     "id": "m-1", "from": "alice", "to": "ghost", "age_secs": 90 },
+///     { "direction": "awaiting_their_reply", "id": "m-2", "from": "alice", "to": "bob",   "age_secs": 30,
+///       "reply_by": "10m", "timed_out": false },
+///     { "direction": "reply_owed_by_me",     "id": "m-3", "from": "carol", "to": "alice", "age_secs": 5 } ] }
+/// ```
+/// - `direction` = 이 줄이 무엇인지(안정 토큰). 세 값의 **할 일이 정반대**라 이 태그가 필수다:
+///   `outbound_pending`(내 발송이 아직 안 꽂힘 — 기다림) · `awaiting_their_reply`(내 요청의 회신 대기 —
+///   기다림) · `reply_owed_by_me`(**내가 지금 답해야 함**).
+/// - `reply_by`·`timed_out` 은 request 줄에만 실린다(통보 줄에선 생략 — 노출 원칙과 같은 정신).
+/// - 미결이 없으면 `open: []`.
+///
+/// ★시각을 절대시각이 아니라 경과 초로 주는 이유★: 장부 시각은 단조 시계(`Instant`)라 벽시계 값이 없다
+///   (spec §5 — 상태 전이 시각은 상대 비교용). 절대시각을 내려면 장부에 새 시간 축을 들여야 하는데 v1 범위
+///   밖이다. "3분 전" 은 수신 LLM 에게도 타임스탬프보다 바로 쓸모 있다(`MessagingService::message_state` 주석).
+/// ★호출자 이름 = canonical(WYSIWYA — ADR-0101)★: 장부는 이름으로 기록되므로 신원(BoundIdentity)을 발송
+///   봉투와 **같은 계산**으로 표시 이름으로 바꿔 매칭한다(`sender_display_name` 재사용 — 두 곳이 갈리면
+///   "내 미결" 이 남의 것으로 보이거나 통째로 비어 버린다).
+// ADR-0086 (듀얼 입구 공통 핸들러)
+// ADR-0103 (spec §6 messages)
+pub fn handle_messages(
+    manager: &Arc<AgentManager>,
+    messaging: &Arc<crate::messaging::service::MessagingService>,
+    from: BoundIdentity,
+    id: Option<&str>,
+) -> ControlQueryResult {
+    let now = std::time::Instant::now();
+    match id {
+        Some(raw) => {
+            // ★trim 은 여기서 한다(입구 정규화 — reply_to 와 같은 규율)★: 이 값도 발신 LLM 이 봉투에서 눈으로
+            //   옮겨 적는 id 라 앞뒤 공백이 섞이기 쉽다. 조회는 부작용이 없으므로 관대해도 안전하다.
+            let msg_id = raw.trim();
+            if msg_id.is_empty() {
+                return ControlQueryResult::Error {
+                    code: "MESSAGE_NOT_FOUND",
+                    hint: "Pass the message id you want to inspect (e.g. m-7f3k9q2d), or call this tool with no arguments to list your own open items.".to_string(),
+                };
+            }
+            let Some(view) = messaging.message_state(msg_id, now) else {
+                return ControlQueryResult::Error {
+                    code: "MESSAGE_NOT_FOUND",
+                    hint: format!(
+                        "No message '{msg_id}' in the ledger. Ids look like m-7f3k9q2d; very old messages fall out of the in-memory history, and the ledger is cleared when the daemon restarts."
+                    ),
+                };
+            };
+            let rows: Vec<serde_json::Value> = view
+                .rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "to": r.to,
+                        "status": r.status,
+                        "age_secs": r.age_secs,
+                        "updated_secs_ago": r.updated_secs_ago,
+                    })
+                })
+                .collect();
+            let mut out = serde_json::json!({
+                "id": view.id,
+                "from": view.from,
+                "awaiting_reply": view.awaiting_reply,
+                // ★항상 싣는다(리뷰 B2)★: `false` 는 "확실히 전부" 라는 **적극적 완전성 단언**이라 그 자체로
+                //   정보다. 참일 때만 실으면 필드의 부재가 완전성으로 읽혀 같은 오독이 남는다.
+                "may_be_truncated": view.may_be_truncated,
+                "rows": rows,
+            });
+            if view.may_be_truncated {
+                // 기계 판독용 불리언 옆에 사람/LLM 이 읽을 문장을 붙인다(발송 반려의 hint 와 같은 역할).
+                out["hint"] = serde_json::Value::String(
+                    "The in-memory ledger has rotated, so some delivery rows for this message may already be gone — treat the list below as partial, not as the full set of recipients.".to_string(),
+                );
+            }
+            ControlQueryResult::Ok(out)
+        }
+        None => {
+            let me = sender_display_name(manager, from);
+            let open: Vec<serde_json::Value> = messaging
+                // 의무 귀속은 이름이 아니라 신원(AgentId)으로 가른다(리뷰 B1 — 동명 다수 오귀속 차단).
+                .open_items_for(&me, from.agent_id, now)
+                .iter()
+                .map(|i| {
+                    let mut obj = serde_json::json!({
+                        "direction": i.direction.as_str(),
+                        "id": i.id,
+                        "from": i.from,
+                        "to": i.to,
+                        "age_secs": i.age_secs,
+                    });
+                    // 계약 축은 request 줄에만 — 통보 줄에 `reply_by: null` 을 실으면 노출 원칙이 흐려진다.
+                    if let Some(rb) = &i.reply_by {
+                        obj["reply_by"] = serde_json::Value::String(rb.clone());
+                    }
+                    if i.reply_by.is_some() || i.timed_out {
+                        obj["timed_out"] = serde_json::Value::Bool(i.timed_out);
+                    }
+                    obj
+                })
+                .collect();
+            ControlQueryResult::Ok(serde_json::json!({ "me": me, "open": open }))
+        }
+    }
+}
+
+/// `group` 커맨드 인자(D · spec §6 `group { group?, add?, remove?, delete? }`). 두 입구가 이 형태로 정규화한다.
+///
+/// ★신원 없음(사용자 결정 2026-07-26)★: ACL 도 행위자 기록도 없다 — 누구나 어떤 그룹이든 고치고 지운다.
+///   그래서 이 struct 는 발신자를 담지 않는다(안 쓰는 값을 받으면 "검사하겠지" 라는 잘못된 기대를 남긴다).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupCommand {
+    /// 대상 그룹 이름(`@`로 시작). 없으면 = 목록 조회.
+    pub group: Option<String>,
+    /// 추가할 멤버 이름들(없는 그룹이면 **암묵 생성**).
+    pub add: Option<Vec<String>>,
+    /// 제거할 멤버 이름들.
+    pub remove: Option<Vec<String>>,
+    /// 그룹 자체 삭제. `add`/`remove` 와 **함께 쓸 수 없다**(아래 handle_group 규칙 3).
+    pub delete: Option<bool>,
+}
+
+/// ★`group` 공통 핸들러(D · spec §4·§6)★ — 그룹 명단 조회·증감·삭제.
+///
+/// ★인자 조합 규칙(결정 — 사용자 결정 2026-07-26 기반)★
+///   1. 인자 없음 → **목록**: `{ "groups": ["@all", "@coders", …] }`(`@all` 먼저, 나머지 사전순).
+///   2. `group` 만 → **멤버 조회**: `{ "group": "@coders", "members": ["alice","bob"] }`.
+///      `@all` 은 지금 살아 있는 수신 가능 전원(발송 때와 같은 스냅샷 규칙 — 로스터 이름 verbatim).
+///   3. `group` + `add`/`remove` → **증감**(없는 그룹에 add 하면 **암묵 생성** — 별도 create 동사 없음).
+///      응답은 2번과 같은 shape(적용 후 명단) — 호출자가 결과를 한 번에 확인한다.
+///   4. `group` + `delete:true` → **삭제**: `{ "group": "@coders", "deleted": true }`.
+///   5. `delete` 와 `add`/`remove` **동시 지정은 반려**(`INVALID_GROUP_ARGS`) — "지우면서 멤버를 넣는다" 는
+///      의미가 없고, 어느 쪽을 먼저 적용하느냐로 결과가 갈린다(둘 중 무엇을 원했는지 데몬이 추측하면 안 된다).
+///      ★"delete 단독이면 delete 가 이긴다"★ = 4번, 즉 조합이 아닌 단독일 때만 삭제가 수행된다.
+///   6. `group` 없이 `add`/`remove`/`delete` → 반려(`INVALID_GROUP_ARGS`) — 대상이 없다.
+///   7. `delete:false` 는 "삭제 안 함" 이라 **무시**한다(false 를 명시했다고 반려하지 않는다 — 관대해도
+///      모호하지 않은 유일한 자리다. 5번 판정도 `delete:true` 일 때만 발동한다).
+///
+/// ★에러 어휘★: `INVALID_GROUP_NAME`(선행 `@` 없음·`@` 단독·중복 `@` — 기존 `INVALID_SEND_ARGS` 의
+///   `INVALID_*` 계열) · `INVALID_GROUP_ARGS`(위 5·6번 조합 오류) · `GROUP_NOT_FOUND`(없는 그룹 조회/증감/
+///   삭제 — 발송 갈래와 **같은 코드**) · `GROUP_BUILTIN`(`@all` 증감·삭제 시도 — `GROUP_*` 계열).
+/// ★왜 발송의 `GROUP_NOT_FOUND` 처럼 이름 규약 위반을 NOT_FOUND 로 접지 않나★: 발송에서는 발신자에게 맞는
+///   사실이 "그런 그룹은 없다" 였다(보낼 곳이 없다는 게 핵심). 관리에서는 반대다 — 사용자가 **만들려고**
+///   하는 중이라 "그 이름은 규약 위반" 과 "그 그룹이 아직 없다" 의 처방이 완전히 다르다(전자는 이름을 고쳐라,
+///   후자는 add 로 만들어라). 두 사실을 한 코드로 접으면 `group coders --add a` 가 "없으니 만들어라" 로
+///   읽혀 무한 재시도가 된다.
+/// ★알림 없음★: 멤버 증감·삭제는 조용하다(사용자 결정 2026-07-26) — notice 를 만들지 않는다.
+// ADR-0086 (듀얼 입구 공통 핸들러)
+// ADR-0103 (spec §4·§6 group)
+pub fn handle_group(
+    messaging: &Arc<crate::messaging::service::MessagingService>,
+    cmd: GroupCommand,
+) -> ControlQueryResult {
+    let plan = match validate_group_args(cmd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match plan {
+        GroupPlan::List => {
+            ControlQueryResult::Ok(serde_json::json!({ "groups": messaging.group_list() }))
+        }
+        GroupPlan::Delete { group } => match messaging.group_delete(&group) {
+            Ok(()) => ControlQueryResult::Ok(serde_json::json!({
+                "group": group,
+                "deleted": true,
+            })),
+            Err(e) => group_error_to_result(&group, e),
+        },
+        // 규칙 2·3 — 조회와 증감은 **한 출구**로 흐른다(응답 shape 이 같아야 하므로 분기를 늘리지 않는다).
+        //   `@all` 은 증감이 금지돼 있어 변경 인자가 있으면 service 가 `Builtin` 으로 거절하고, 없으면 live
+        //   스냅샷 조회로 답한다.
+        GroupPlan::Members {
+            group,
+            add,
+            remove,
+            mutating,
+        } => {
+            let outcome = if mutating {
+                messaging.group_update(&group, &add, &remove)
+            } else {
+                messaging.group_members(&group)
+            };
+            match outcome {
+                Ok(members) => ControlQueryResult::Ok(serde_json::json!({
+                    "group": group,
+                    "members": members,
+                })),
+                Err(e) => group_error_to_result(&group, e),
+            }
+        }
+    }
+}
+
+/// 검증을 통과한 `group` 커맨드의 **실행 계획**(순수 — 부작용 없음).
+///
+/// ★왜 계획으로 한 번 접나★: 인자 조합 규칙(handle_group doc-comment 1~7)은 순수 판정인데, 그걸
+///   `handle_group` 안에 인라인으로 두면 `MessagingService`(= 실 로스터·실 큐) 없이는 단위 테스트가 불가능하다.
+///   판정을 값으로 뽑아 두면 조합 규칙 전수를 순수 테스트로 못 박고, 실행부는 통합 테스트가 본다(seam 분리).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupPlan {
+    /// 인자 없음 → 그룹 이름 목록.
+    List,
+    /// 조회 또는 증감(둘의 응답 shape 이 같아 한 variant). `mutating=false` 면 순수 조회.
+    Members {
+        group: String,
+        add: Vec<String>,
+        remove: Vec<String>,
+        mutating: bool,
+    },
+    /// 그룹 삭제(단독 지정일 때만 — 규칙 5).
+    Delete { group: String },
+}
+
+/// `group` 인자 조합 검증 + 이름 정규화(순수 — handle_group doc-comment 의 규칙 1~7 정본 구현).
+///
+/// ★이름 정규화를 여기서 하는 이유(라벨 단일 출처)★: 응답의 `group` 필드는 **레지스트리가 실제로 쓴 이름**과
+///   같아야 한다(발송 봉투의 그룹 라벨과 같은 원칙 — groups.rs `normalize_group_name` 주석). 입구가 raw 를
+///   그대로 되돌리면 `" @coders"` 같은 입력에서 응답 라벨과 저장 키가 갈려, 호출자가 자기가 만든 그룹을
+///   목록에서 못 찾는다. 그래서 seam 함수로 한 번 정규화하고 그 값을 아래로도 위로도 쓴다.
+fn validate_group_args(cmd: GroupCommand) -> Result<GroupPlan, ControlQueryResult> {
+    // ★멤버 이름 정규화는 **여기**(공용 핸들러)가 정본이다(D 리뷰 A1)★ — 아래 함수 주석 참조.
+    let add_raw = cmd.add.unwrap_or_default();
+    let remove_raw = cmd.remove.unwrap_or_default();
+    let add = normalize_member_names(&add_raw);
+    let remove = normalize_member_names(&remove_raw);
+    // ★"뭔가 주긴 했는데 쓸 이름이 하나도 안 남았다" 는 반려한다★: 조용히 빈 목록으로 접으면 변경 의도가
+    //   **순수 조회로 강등**돼 호출자가 "적용됐다" 고 오독한다(응답이 성공 shape 이라 구분이 안 된다).
+    if !add_raw.is_empty() && add.is_empty() {
+        return Err(ControlQueryResult::Error {
+            code: "INVALID_GROUP_ARGS",
+            hint: "add contained no usable agent names (only blanks or separators). Pass the teammate names you want in the group, e.g. add = [\"alice\", \"bob\"].".to_string(),
+        });
+    }
+    if !remove_raw.is_empty() && remove.is_empty() {
+        return Err(ControlQueryResult::Error {
+            code: "INVALID_GROUP_ARGS",
+            hint: "remove contained no usable agent names (only blanks or separators). Pass the names you want out of the group.".to_string(),
+        });
+    }
+    // ★중첩 그룹 거절(round-2 리뷰 F5)★: `@` 로 시작하는 이름은 그룹 네임스페이스라 **에이전트 이름일 수
+    //   없다**. 그대로 등록하면 어떤 방송에서도 매치되지 않아 영원히 skipped 되는데, 응답엔 멤버로 보이므로
+    //   발신자는 중첩 그룹이 동작한다고 믿는다. `remove` 도 함께 막는다 — 애초에 등록될 수 없는 이름을
+    //   지우라는 요청은 호출자가 중첩을 기대하고 있다는 신호라, 조용한 no-op 보다 교정 hint 가 낫다.
+    if let Some(bad) = add.iter().chain(remove.iter()).find(|n| n.starts_with('@')) {
+        return Err(invalid_member_name(bad));
+    }
+    // 규칙 7 — `delete:false` 는 "삭제 안 함" 이라 없는 것과 같게 취급한다.
+    let delete = cmd.delete.unwrap_or(false);
+    let mutating = !add.is_empty() || !remove.is_empty();
+
+    // 규칙 5 — delete + 증감은 모호. 대상 유무보다 **먼저** 본다: 순수 인자 오류라 그룹 상태와 무관하게
+    //   항상 같은 답이어야 한다(handle_send 의 "구문 먼저" 규율과 동일).
+    if delete && mutating {
+        return Err(ControlQueryResult::Error {
+            code: "INVALID_GROUP_ARGS",
+            hint: "delete cannot be combined with add/remove — deleting the group discards the membership you are editing. Send one call to change members, or one call with delete alone.".to_string(),
+        });
+    }
+
+    let Some(group) = cmd.group else {
+        // 규칙 6 — 대상 없는 변경은 반려. 인자가 아예 없으면 목록(규칙 1).
+        if delete || mutating {
+            return Err(ControlQueryResult::Error {
+                code: "INVALID_GROUP_ARGS",
+                hint: "add / remove / delete need a group to act on — pass group = \"@name\". Call with no arguments to list the groups that exist.".to_string(),
+            });
+        }
+        return Ok(GroupPlan::List);
+    };
+
+    let group = crate::messaging::groups::normalize_group_name(&group).map_err(|e| {
+        // 이름 규약 위반은 여기서 끝난다 — service 까지 내려가지 않는다(부작용 0 지점에서 반려).
+        group_error_to_result(&group, e)
+    })?;
+
+    if delete {
+        return Ok(GroupPlan::Delete { group });
+    }
+    Ok(GroupPlan::Members {
+        group,
+        add,
+        remove,
+        mutating,
+    })
+}
+
+/// ★멤버 이름 목록 정규화 — **양 입구 공용 정본**(D 리뷰 A1 · load-bearing)★. 콤마 분해 + 각 조각 trim +
+/// 빈 조각 제거.
+///
+/// ★왜 CLI 가 아니라 여기인가★: 예전엔 이 정리가 CLI 파서에만 있었다. 그래서 **MCP 로 들어온 같은 표기가
+///   그대로 저장**됐다 — 프라이밍이 콤마 형태(`--add alice,bob`)를 가르치므로 MCP 호출자도 자연히
+///   `add:["alice,bob"]` 을 보내는데, 그러면 `"alice,bob"` 이라는 **이름 하나짜리 유령 멤버**가 등록된다.
+///   그 이름과 일치하는 에이전트는 영원히 없으므로 모든 방송에서 `skipped` 로 새고, 발신자는 두 명에게
+///   보냈다고 믿는다. 같은 이유로 `" bob"`(앞 공백)은 별개 멤버가 되고, `""`(빈 이름)은 CLI 로 지울 수조차
+///   없었다(`--remove ""` 가 CLI 단계에서 걸러져 순수 조회로 바뀐다). 검증·정규화는 데몬 ingress 단독이라는
+///   이 모듈의 원칙(헤더)을 그대로 적용해 정본을 여기 하나로 옮긴다 — CLI 는 argv 를 그대로 실어 보낸다.
+/// ★왜 거부가 아니라 분해인가★: 콤마 형태는 우리가 프라이밍에서 **가르친** 표기다. 그걸 에러로 돌려주면
+///   문서와 구현이 싸우는 꼴이고, 호출자는 자기가 배운 대로 썼는데 반려당한다. 분해가 의도에 맞는 해석이다.
+///   (콤마를 품은 실제 에이전트 이름은 그 대가로 그룹에 넣을 수 없다 — 이름은 display_name/cwd basename 에서
+///   오므로 병적인 경우이고, 유령 멤버가 조용히 생기는 쪽이 훨씬 해롭다.)
+/// ★결과가 빈 목록이 될 수 있다★: 호출자가 뭔가를 주긴 했는데 전부 걸러졌다는 뜻이라, 호출부
+///   (`validate_group_args`)가 그 경우를 `INVALID_GROUP_ARGS` 로 반려한다(조용한 강등 금지).
+// 리뷰 A1
+// ADR-0109 (의미 검증·정규화 = 데몬 단일점)
+fn normalize_member_names(raw: &[String]) -> Vec<String> {
+    raw.iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// 그룹 연산 에러 → wire 코드/hint(관리 표면 전용 매핑 — 발송 갈래는 `handle_group_send` 가 따로 매핑한다).
+///
+/// ★두 매핑이 갈리는 건 의도적이다(handle_group doc-comment 의 근거)★: 발송은 "보낼 곳이 없다" 가 요점이라
+///   이름 규약 위반까지 `GROUP_NOT_FOUND` 로 접었지만, 관리는 "무엇을 고쳐야 하나" 가 요점이라 사유를 가른다.
+fn group_error_to_result(
+    requested: &str,
+    e: crate::messaging::groups::GroupError,
+) -> ControlQueryResult {
+    use crate::messaging::groups::GroupError;
+    match e {
+        GroupError::InvalidName { name } => ControlQueryResult::Error {
+            code: "INVALID_GROUP_NAME",
+            hint: format!(
+                "'{name}' is not a valid group name: exactly one leading '@' plus a name, e.g. @coders."
+            ),
+        },
+        GroupError::Builtin => ControlQueryResult::Error {
+            code: "GROUP_BUILTIN",
+            hint: "@all is built in — it always means everyone live and reachable right now, so it cannot be edited or deleted. Create your own group instead (e.g. group @coders --add alice).".to_string(),
+        },
+        GroupError::NotFound { name } => ControlQueryResult::Error {
+            code: "GROUP_NOT_FOUND",
+            hint: format!(
+                "No group named '{name}'. Adding a member creates the group, so `group {name} --add <name>` is how you make it."
+            ),
+        },
+        // 관리 경로는 "아는데 멤버 0명" 을 정상 조회 결과(빈 목록)로 답하므로 여기 오면 배선 결함이다 —
+        //   조용히 성공으로 접지 않고 사실대로 알린다(발송 갈래의 GROUP_EMPTY 와 같은 어휘).
+        GroupError::Empty { name } => ControlQueryResult::Error {
+            code: "GROUP_EMPTY",
+            hint: format!("Group '{name}' has no members right now (requested: '{requested}')."),
+        },
+        // 입구가 먼저 거르므로(validate_group_args) 여기 오면 구조적 guard 가 잡은 것 — 같은 코드·같은 문구.
+        GroupError::InvalidMemberName { name } => invalid_member_name(&name),
+    }
+}
+
+/// `@` 로 시작하는 멤버 이름 반려(round-2 리뷰 F5) — 입구 검증과 레지스트리 guard 가 **같은 답**을 내게
+/// 하나로 모은다(두 곳이 다른 문구를 내면 호출자가 원인을 두 가지로 오해한다).
+fn invalid_member_name(name: &str) -> ControlQueryResult {
+    ControlQueryResult::Error {
+        code: "INVALID_MEMBER_NAME",
+        hint: format!(
+            "'{name}' cannot be a group member: members are agent names, and a group cannot contain another group (nesting is not supported). Pass the individual agent names instead."
+        ),
+    }
+}
+
 /// `to`(이름 또는 AgentId 문자열) → 산 에이전트 해석. 매치 규칙(ADR-0086 §6):
 ///   - ★정확한 AgentId 문자열 우선(F2)★. 이름과 별개 축이며 **이름 매치보다 먼저** 시도한다.
 ///   - 그 다음 이름(AgentInfo.name = profile name) 정확 일치. 여러 개면 RECIPIENT_AMBIGUOUS(후보 name+id 나열).
@@ -2150,5 +2576,295 @@ mod tests {
             &m.envelope_fields("m-zz"),
         );
         assert_eq!(w, r#"<message from="alice">빌드 끝났음</message>"#);
+    }
+
+    // ── D: `group` 인자 조합 규칙(순수 — handle_group doc-comment 1~7) ────────────────────────
+
+    /// 인자 조합 오류의 code 만 뽑는다(hint 문구는 계약이 아니라 교정 텍스트라 단언하지 않는다).
+    fn group_err_code(r: &ControlQueryResult) -> &'static str {
+        match r {
+            ControlQueryResult::Error { code, .. } => code,
+            ControlQueryResult::Ok(v) => panic!("에러여야 하는데 성공: {v}"),
+        }
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn group_args_no_arguments_is_a_list() {
+        assert_eq!(
+            validate_group_args(GroupCommand::default()),
+            Ok(GroupPlan::List)
+        );
+        // 규칙 7 — delete:false 는 "삭제 안 함" 이라 없는 것과 같다(명시했다고 반려하지 않는다).
+        assert_eq!(
+            validate_group_args(GroupCommand {
+                delete: Some(false),
+                ..Default::default()
+            }),
+            Ok(GroupPlan::List)
+        );
+    }
+
+    #[test]
+    fn group_args_name_only_is_a_pure_query() {
+        assert_eq!(
+            validate_group_args(GroupCommand {
+                group: Some("@coders".to_string()),
+                ..Default::default()
+            }),
+            Ok(GroupPlan::Members {
+                group: "@coders".to_string(),
+                add: vec![],
+                remove: vec![],
+                mutating: false,
+            })
+        );
+    }
+
+    #[test]
+    fn group_args_add_or_remove_is_a_mutation() {
+        assert_eq!(
+            validate_group_args(GroupCommand {
+                group: Some("@coders".to_string()),
+                add: Some(names(&["alice"])),
+                remove: Some(names(&["bob"])),
+                ..Default::default()
+            }),
+            Ok(GroupPlan::Members {
+                group: "@coders".to_string(),
+                add: names(&["alice"]),
+                remove: names(&["bob"]),
+                mutating: true,
+            })
+        );
+        // 빈 배열은 변경이 아니다(부작용 0) — `--add` 없이 호출한 것과 같게 접는다.
+        assert_eq!(
+            validate_group_args(GroupCommand {
+                group: Some("@coders".to_string()),
+                add: Some(vec![]),
+                remove: Some(vec![]),
+                ..Default::default()
+            })
+            .map(|p| matches!(
+                p,
+                GroupPlan::Members {
+                    mutating: false,
+                    ..
+                }
+            )),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn group_args_delete_alone_wins_but_combined_with_edits_is_rejected() {
+        // 규칙 4 — delete 단독은 삭제.
+        assert_eq!(
+            validate_group_args(GroupCommand {
+                group: Some("@coders".to_string()),
+                delete: Some(true),
+                ..Default::default()
+            }),
+            Ok(GroupPlan::Delete {
+                group: "@coders".to_string()
+            })
+        );
+        // 규칙 5 — delete + add/remove 는 모호하므로 반려(둘 중 무엇을 원했는지 추측 금지).
+        for cmd in [
+            GroupCommand {
+                group: Some("@coders".to_string()),
+                add: Some(names(&["a"])),
+                delete: Some(true),
+                ..Default::default()
+            },
+            GroupCommand {
+                group: Some("@coders".to_string()),
+                remove: Some(names(&["a"])),
+                delete: Some(true),
+                ..Default::default()
+            },
+        ] {
+            let err = validate_group_args(cmd).expect_err("조합 반려");
+            assert_eq!(group_err_code(&err), "INVALID_GROUP_ARGS");
+        }
+    }
+
+    #[test]
+    fn group_args_edits_without_a_target_are_rejected() {
+        // 규칙 6 — 대상 없는 변경. 조합 오류는 그룹 상태와 무관하게 항상 같은 코드다.
+        for cmd in [
+            GroupCommand {
+                add: Some(names(&["a"])),
+                ..Default::default()
+            },
+            GroupCommand {
+                remove: Some(names(&["a"])),
+                ..Default::default()
+            },
+            GroupCommand {
+                delete: Some(true),
+                ..Default::default()
+            },
+        ] {
+            let err = validate_group_args(cmd).expect_err("대상 없음 반려");
+            assert_eq!(group_err_code(&err), "INVALID_GROUP_ARGS");
+        }
+    }
+
+    #[test]
+    fn group_args_reject_names_that_break_the_at_namespace() {
+        // ★관리 표면은 발송 갈래와 **다른 코드**를 쓴다★: 발송은 "그런 그룹 없다"(GROUP_NOT_FOUND)가 맞는
+        //   사실이지만, 관리는 사용자가 만들려는 중이라 "이름이 규약 위반" 과 "아직 없다" 의 처방이 다르다.
+        for bad in ["coders", "@", "  @  ", "@@x", "@a@b", ""] {
+            let err = validate_group_args(GroupCommand {
+                group: Some(bad.to_string()),
+                ..Default::default()
+            })
+            .expect_err("이름 규약 반려");
+            assert_eq!(group_err_code(&err), "INVALID_GROUP_NAME", "입력: {bad:?}");
+        }
+    }
+
+    // ── D 리뷰 A1: 멤버 이름 정규화가 **공용 핸들러**에 있다 ────────────────────────────────
+
+    #[test]
+    fn group_args_split_and_trim_member_names_regardless_of_entrance() {
+        // ★핵심★: 프라이밍이 가르치는 콤마 표기가 MCP 로 들어와도 CLI 와 **같은 최종 상태**가 돼야 한다.
+        //   옛 구현은 CLI 파서에만 분해가 있어 MCP 호출이 `"alice,bob"` 이라는 유령 멤버 하나를 만들었다.
+        let plan = validate_group_args(GroupCommand {
+            group: Some("@coders".to_string()),
+            add: Some(names(&["alice,bob", " carol ", "dave"])),
+            remove: Some(names(&["eve, frank"])),
+            ..Default::default()
+        })
+        .expect("정규화 통과");
+        assert_eq!(
+            plan,
+            GroupPlan::Members {
+                group: "@coders".to_string(),
+                add: names(&["alice", "bob", "carol", "dave"]),
+                remove: names(&["eve", "frank"]),
+                mutating: true,
+            },
+            "콤마 분해 + trim + 빈 조각 제거가 입구와 무관하게 적용"
+        );
+    }
+
+    #[test]
+    fn group_args_never_register_a_blank_member_name() {
+        // 빈 이름 멤버는 어떤 에이전트와도 매치되지 않아 영원히 skipped 되고, CLI 로 지울 수도 없었다.
+        //   애초에 등록되지 않게 막는다(생성 경로를 닫으면 제거 불가 상태도 사라진다).
+        let plan = validate_group_args(GroupCommand {
+            group: Some("@t".to_string()),
+            add: Some(names(&["a", "", "  ", "b"])),
+            ..Default::default()
+        })
+        .expect("정규화 통과");
+        assert_eq!(
+            plan,
+            GroupPlan::Members {
+                group: "@t".to_string(),
+                add: names(&["a", "b"]),
+                remove: vec![],
+                mutating: true,
+            }
+        );
+    }
+
+    #[test]
+    fn group_args_reject_at_prefixed_member_names_as_nested_groups() {
+        // ★round-2 리뷰 F5★: `@` 로 시작하는 이름을 멤버로 받으면 어떤 에이전트와도 매치되지 않아 영원히
+        //   skipped 되는데, 응답엔 멤버로 보여 호출자가 "중첩 그룹이 된다" 고 믿는다. 등록 시점에 막는다.
+        for cmd in [
+            GroupCommand {
+                group: Some("@t".to_string()),
+                add: Some(names(&["alice", "@coders"])),
+                ..Default::default()
+            },
+            GroupCommand {
+                group: Some("@t".to_string()),
+                add: Some(names(&["@all"])),
+                ..Default::default()
+            },
+            // remove 도 막는다 — 등록될 수 없는 이름을 지우라는 요청은 중첩 기대의 신호라, 조용한
+            //   no-op 보다 교정 hint 가 낫다.
+            GroupCommand {
+                group: Some("@t".to_string()),
+                remove: Some(names(&["@coders"])),
+                ..Default::default()
+            },
+            // 콤마 표기 안에 섞여 들어와도 정규화 **뒤** 검사라 잡힌다.
+            GroupCommand {
+                group: Some("@t".to_string()),
+                add: Some(names(&["alice,@coders"])),
+                ..Default::default()
+            },
+        ] {
+            let err = validate_group_args(cmd).expect_err("중첩 그룹 반려");
+            assert_eq!(group_err_code(&err), "INVALID_MEMBER_NAME");
+        }
+        // 대조군: 평범한 이름은 통과한다(과잉 차단 아님).
+        assert!(validate_group_args(GroupCommand {
+            group: Some("@t".to_string()),
+            add: Some(names(&["alice", "bob-2", "e@mail"])),
+            ..Default::default()
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn group_args_reject_edits_whose_names_all_normalize_away() {
+        // ★조용한 강등 금지★: 전부 걸러지면 변경이 순수 조회가 돼 "적용됐다" 로 오독된다 — 반려한다.
+        for cmd in [
+            GroupCommand {
+                group: Some("@t".to_string()),
+                add: Some(names(&[",,", "   "])),
+                ..Default::default()
+            },
+            GroupCommand {
+                group: Some("@t".to_string()),
+                remove: Some(names(&[""])),
+                ..Default::default()
+            },
+        ] {
+            let err = validate_group_args(cmd).expect_err("쓸 이름 없음 반려");
+            assert_eq!(group_err_code(&err), "INVALID_GROUP_ARGS");
+        }
+    }
+
+    #[test]
+    fn group_args_normalize_the_label_so_response_and_registry_agree() {
+        // 라벨 단일 출처 — 응답의 group 필드는 레지스트리가 실제로 쓴 이름이어야 한다(공백 낀 입력에서
+        //   응답 라벨과 저장 키가 갈리면 호출자가 자기 그룹을 목록에서 못 찾는다).
+        assert_eq!(
+            validate_group_args(GroupCommand {
+                group: Some("  @coders  ".to_string()),
+                delete: Some(true),
+                ..Default::default()
+            }),
+            Ok(GroupPlan::Delete {
+                group: "@coders".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn query_result_error_shape_matches_the_send_entrance() {
+        // 두 입구·두 동사가 같은 규칙으로 읽히려면 에러 shape 이 발송과 동일해야 한다(spec §6).
+        let e = ControlQueryResult::Error {
+            code: "GROUP_NOT_FOUND",
+            hint: "h".to_string(),
+        };
+        assert_eq!(
+            e.to_json(),
+            serde_json::json!({"status":"error","code":"GROUP_NOT_FOUND","hint":"h"})
+        );
+        assert!(!e.is_ok());
+        let ok = ControlQueryResult::Ok(serde_json::json!({"groups":["@all"]}));
+        assert_eq!(ok.to_json(), serde_json::json!({"groups":["@all"]}));
+        assert!(ok.is_ok());
     }
 }

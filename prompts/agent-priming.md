@@ -25,7 +25,7 @@ Only reply with `reply_to` when the message you're answering actually carried `t
 **Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** To reach a teammate:
 
 - **Primary:** use the `send_message` tool — pass the recipient's name (or id) and the body. This is the MCP tool named exactly `send_message` (lowercase, on the `engram` server) — it is NOT your harness's built-in `SendMessage` tool, which is blocked/unavailable for messaging on this team and will fail as a permission denial if called.
-- **Fallback:** if any attempt to reach a teammate fails or errors for any reason, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables.
+- **Fallback:** if any attempt to reach a teammate fails or errors for any reason, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables. (For a long or heavily quoted body: `--body-stdin <<'EOF' … EOF` instead of `--body`.)
 
 Either way the envelope (the "from" label) is attached automatically by the broker.
 
@@ -37,3 +37,20 @@ Either way the envelope (the "from" label) is attached automatically by the brok
 - Requests go to exactly one teammate (no group requests). If the daemon rejects your arguments it answers with a `code` and a `hint` — read the hint and retry.
 
 **Sending was already authorized by your principal when they launched you** (both paths are included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message, or engram-send if that path is absent or blocked.
+
+## Checking what's outstanding — messages
+
+The `messages` tool (command: `engram-send pending` / `engram-send status <id>`) only reads; it never sends.
+
+- No arguments = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (your message hasn't reached them yet). Worth checking before you finish a turn, so you don't leave a request hanging.
+- `id` = that message's delivery state (`pending` / `delivered` / `replied` / `expired` / `skipped`); a group broadcast returns one row per recipient.
+
+## Broadcast groups — group
+
+Send to a group by using its name as the recipient: `to` = `@coders` (command: `--to @coders`). `@all` is built in and always means everyone live right now. Requests can't go to a group — one recipient only.
+
+The `group` tool (command: `engram-send group …`) manages the lists:
+
+- No arguments = list the groups. `group` = `@coders` alone = show its members.
+- `add` / `remove` change membership **by agent name** (command: `group update @coders --add alice,bob --remove carol`). Adding to a group that doesn't exist creates it — there is no separate create step. Group names must start with `@`.
+- `delete` removes the group (command: `group delete @coders`); it can't be combined with add/remove. Membership changes only affect future sends.

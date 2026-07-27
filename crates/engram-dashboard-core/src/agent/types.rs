@@ -216,6 +216,16 @@ pub struct ControlEndpoint {
     /// 이면 backend 가 아무 것도 주입하지 않는다(권한 플래그 없음 = 기존 게이트 유지). core 는 이
     /// 목록을 데이터로만 나른다 — "권한"·claude 문법을 모른다(ADR-0004 격리).
     pub grants: Vec<ToolGrant>,
+    /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
+    /// 데몬이 provision 때 `<data_dir>/mcp-config/<id>-<epoch>.settings.json` 에 쓰고 revoke 때 지운다.
+    /// backend/claude.rs 가 `--settings <abs-path>` 로 번역한다(그 플래그 지식은 거기 단독 — ADR-0004).
+    ///
+    /// ★왜 필요한가(실측 2026-07-24)★: 유저 전역 설정의 `allowedMcpServers: []`(= 전면 차단)가 **스폰
+    ///   에이전트에도 그대로 적용**돼 engram MCP 서버가 툴 목록에 뜨지 않았다. 이 조각이 그 세션에만
+    ///   engram 서버를 허용한다 — **전역 설정 파일은 절대 건드리지 않는다**(허용 범위 = 엔그램이 스폰한
+    ///   에이전트뿐). config_path 와 같은 수명(epoch 단위 생성·폐기)이라 같은 descriptor 에 태운다.
+    /// ★core 격리★: priming_file 과 동형으로 **경로만 나른다** — 파일을 열지 않고 내용·의미도 모른다.
+    pub settings_file: Option<std::path::PathBuf>,
 }
 
 /// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일
