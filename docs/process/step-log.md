@@ -1243,6 +1243,13 @@
 - **QA(/qa full):** build·5멤버 1105/0·fmt·격리 grep 2종(core tauri 0 / messaging 무의존 0)·tsc·vitest 634/634 전부 PASS + **실측 2종 PASS**: roundtrip-smoke 라이브(실 claude 2기, B_SENT=true·ENTRANCE=mcp·배달 msg_id 확인 — 새 구조 위 첫 라이브 왕복) + cdp 앱 스모크(새 데몬 바이너리 부팅·spawn→Running→kill→제거, `__ENGRAM_AGENT__` 제어 표면 경유). teardown 완료(QA가 띄운 앱·데몬만 종료 — 사전 tasklist로 기존 데몬 부재 확인).
 - qa 바인딩 드리프트 수정(멤버 5개→6개 — 코더 부분 갱신 잔여).
 
+## S18 인수 실측 ①·③ 종결 + 하네스 delivery census (2026-07-28, master)
+- **인수 ① (request id 전사) = PASS 종결:** roundtrip-smoke `--seed-request --seed-reply-by 5m` 라이브 런 — B 회신이 시드 request id를 정확히 전사(`REPLY_IN_REPLY_TO` 일치·`REPLY_MATCHES_SEED=true`·`REPLY_POLL=matched`). 앞서 일반 왕복 절반과 합쳐 양 축 완결.
+- **인수 ③ (messages/group 툴) = PASS 종결:** `--b-task` 유도 4런. messages 툴 = B가 스폰 직후 실제 미결 조회("open: 0" 실결과). group(@all) = 초기 2런은 자기보고뿐이라 판정 보류(관측 공백 실발생) → **하네스 delivery census 증분**(아래) 후 재런에서 `delivered=true` 구조화 관측으로 확정.
+- **하네스 delivery census 증분:** CapturingObserver 전 레코드를 END 배너 앞 + fail_setup! 실패 경로에서 덤프(`[delivery-census] from/to(이름)/entrance/msg_id/in_reply_to/bytes/delivered/err`). 코더(worker-scout) → light 리뷰(worker-senior) FIX 2건(F1 배달 상태 축 누락 = 실패 기록이 배달처럼 읽힘 · F2 실패 경로 미출력) 반영 → 게이트 green(빌드·bin 49/49·fmt·데몬 멤버 227/0).
+- **야생 관측(계획 밖):** B가 자발적으로 기한 10분 request 사용 + alice가 `in_reply_to` 물고 자율 회신(하네스 유도 없는 유기적 request→reply 스레딩) — 쟁점2(reply_by 유지) "실사용률 관측" 부대조건의 첫 실데이터. B가 "회신은 메시지 통지로 오니 wakeup 불요"로 배달 모델을 정확 이해한 것도 함께 기록.
+- 인수 ② = 사용자 승인 후 진행 중(CLAUDE_CONFIG_DIR 샌드박스 — 격리 리다이렉션 실증 완료, 자격증명 사본은 권한 분류기 차단으로 사용자 직접 실행 대기). ④⑤ 잔여.
+
 ## 다음 (미진행)
 - **[flaky 실측 2026-07-28] ws_e2e `case09_slow_consumer_closed_others_unaffected` 부하 민감 간헐 실패** — CPU 부하(병행 콜드 빌드) 하 재현 확정(ws_e2e.rs:975 "느린 소비자 연결은 서버가 닫아야 함" assert), 무부하 12연속 통과. 당시 diff(하네스·관측 필드)와 무관 실증(ws.rs 무접촉). 수리 착수 시 ADR-0038 절차(`docs/reference/debugging-conventions.md` — 임계값 튜닝 금지·OSS 선례 조사) 적용. 재현법: 별도 CARGO_TARGET_DIR 콜드 빌드 병행 + `cargo test -p engram-dashboard-daemon --features test-harness --test ws_e2e`.
 - **[사용자 지시 2026-07-28] MCP Agent Mail 참조 조사** — 직접 피어(코딩 에이전트 메일함 MCP 서버, 2k★, pull 전용) 발견(위 감사). 스레딩·ack 설계 비교 + "메시징 계층의 독립 MCP 서비스 분리(외부 에이전트 접속)" 아이디어와 묶어 검토. 분리 시 제약: 푸시 배달(주입·busy 게이트)은 프로세스 소유권 필요 — 외부 에이전트에겐 pull 강등.

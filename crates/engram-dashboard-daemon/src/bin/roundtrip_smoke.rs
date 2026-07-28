@@ -151,6 +151,10 @@
 //!   않는다(옛 substring 파서는 본문 이스케이프 허점으로 위조 가능해 리뷰 F1 에서 삭제됐다 — ingress.rs
 //!   `DeliveryObservation.in_reply_to` 주석이 정본). registry 에 새 read accessor 는 없다(ADR-0088 HARD
 //!   CONSTRAINT 준수) — 관측 함수 시그니처에 파라미터 하나가 늘었을 뿐, registry 조회는 없다.
+//!   ★delivery census(2026-07-28)★: 위 회신 축 관측(`[B->A delivery]`)은 baseline 이후 from=B/to=A 로
+//!   필터된 한 레코드만 찍어, 그룹(@all)·과제턴 발송처럼 그 축 밖의 배달은 아무 출력에도 안 잡히는 공백이
+//!   있었다 — END 배너 직전에 캡처된 **전체** `DeliveryObservation` 을 도착 순서대로 `[delivery-census]
+//!   #<idx> from=.. to=.. entrance=.. msg_id=.. in_reply_to=.. bytes=..` 로 덤프해 메운다.
 //! - **결과 3분류(FIX round-2 #2/#4/#5)** — ① **valid negative**(setup 성공했으나 B 가 안 보냄) = 구조화
 //!   결과 출력 후 exit 0(유효한 실험 결과). ② **SETUP-SKIP**(exit 1) = 케이스가 요구하는 인프라 부재
 //!   (CLI-지시 프라이밍인데 engram-send 미빌드 — 판정은 셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**)
@@ -440,6 +444,16 @@ impl CapturingObserver {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// ★delivery census(2026-07-28 인수 ③ 실측 실발생)★: baseline 절단·from/to 필터 없이 **지금까지 관측된
+    ///   전체** 레코드를 도착 순서(Vec push 순서) 그대로 복제해 돌려준다. 위 세 메서드(`record_count`/
+    ///   `find_delivery_after`/`records_after`)는 전부 "B→A 답신 축" 판정용으로 baseline 이후 + from/to
+    ///   필터가 걸려 있어, 그룹(@all) 방송이나 B 원과제 턴 중의 발송처럼 그 축 밖의 레코드는 잡히지 않는다
+    ///   — 이 메서드는 그 필터를 걷어낸 순수 diagnostic 조회다(DeliveryObservation 은 `derive(Clone)` 이라
+    ///   락을 오래 쥐지 않고 즉시 복제해 반환).
+    fn all_records(&self) -> Vec<DeliveryObservation> {
+        self.records.lock().unwrap().clone()
     }
 }
 
@@ -745,6 +759,9 @@ async fn run() -> i32 {
     //   해제·kill·디렉토리 정리·MCP 종료를 하고 SETUP-FAIL 을 낸다(valid negative 와 구분).
     macro_rules! fail_setup {
         ($reason:expr) => {{
+            // ★실패 경로에도 census(light 리뷰 F2)★ — 관측 공백이 제일 아픈 게 바로 실패/행 턴 조사인데
+            //   happy tail 에서만 찍으면 그 경로에서 다시 자기보고 의존으로 돌아간다. teardown 전에 덤프.
+            print_delivery_census(&observer);
             if let Some(id) = sink_a {
                 let _ = manager.unsubscribe(agent_a.id, id);
             }
@@ -1063,6 +1080,7 @@ async fn run() -> i32 {
     let b_seed_response = obs_b.response_text();
     println!("[B post-seed turn ended] {b_turn_ended}");
     println!("[B post-seed turn text]\n{}", b_seed_response.trim());
+    print_delivery_census(&observer);
     println!("===== END ROUNDTRIP (orchestrator judges qualitatively) =====\n");
 
     // ── 정리 ──────────────────────────────────────────────────────────────────────
@@ -1259,6 +1277,38 @@ fn entrance_str(e: Entrance) -> &'static str {
         Entrance::Cli => "cli",
         // C3: 데몬 자가 발신(`<notice>` 타임아웃 통지) — 이 하네스는 A→B 발송만 돌리므로 표시용으로만 존재.
         Entrance::Daemon => "daemon",
+    }
+}
+
+/// UUID 앞 8자(hex) — delivery census 출력용 짧은 표시(전체 UUID 는 census 한 줄을 과하게 늘려 눈으로
+///   훑기 어렵게 만든다). `.simple()` 은 하이픈 없는 32자 hex 문자열이라 앞 8자 슬라이스가 전부 ASCII hex임이
+///   보장된다(byte-slice 안전).
+fn short_peer_id(id: uuid::Uuid) -> String {
+    id.simple().to_string()[..8].to_string()
+}
+
+/// ★delivery census(2026-07-28 · light 리뷰 F1/F2 반영)★ — 왜: [B->A delivery] 는 회신 축(B→A) 한
+///   레코드만 찍는다. 그룹(@all) 방송·B 원과제 턴 중 발송처럼 그 축 밖의 배달은 stdout 어디에도 안 잡혀,
+///   인수 실측이 참가자 자기보고에 의존하게 되는 관측 공백이 있었다(2026-07-28 인수 ③ 실측에서 실발생).
+///   캡처된 전체 레코드를 도착 순서 그대로 덤프한다 — happy tail 과 fail_setup! 양쪽에서 호출된다(F2:
+///   실패/행 턴 조사가 이 공백이 제일 아픈 경로다).
+/// ★delivered/err 축은 생략 불가(F1)★: 하네스 규율은 "배달된(is_delivered) 레코드만 증거"다 — 상태 축
+///   없이 찍으면 write 실패 레코드가 배달 증거처럼 읽혀, census 가 없애려던 자기보고 의존을 자기가
+///   재생산한다(false positive 제조기).
+fn print_delivery_census(observer: &CapturingObserver) {
+    for (idx, obs) in observer.all_records().iter().enumerate() {
+        println!(
+            "[delivery-census] #{idx} from={} to={}({}) entrance={} msg_id={} in_reply_to={} bytes={} delivered={} err={}",
+            short_peer_id(obs.from.peer_id),
+            short_peer_id(obs.to_id),
+            obs.to_name,
+            entrance_str(obs.entrance),
+            obs.msg_id,
+            obs.in_reply_to.as_deref().unwrap_or("-"),
+            obs.bytes_requested,
+            obs.is_delivered(),
+            obs.error.as_deref().unwrap_or("-")
+        );
     }
 }
 
