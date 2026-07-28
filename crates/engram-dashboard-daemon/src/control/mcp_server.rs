@@ -36,9 +36,10 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, Ser
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use engram_dashboard_messaging::envelope::Entrance; // ADR-0110: 입구 라벨은 커널 crate 소유.
+
 use super::ingress::{
-    handle_group, handle_messages, handle_send, ControlCommand, Entrance, GroupCommand,
-    SendContract,
+    handle_group, handle_messages, handle_send, ControlCommand, GroupCommand, SendContract,
 };
 use super::registry::{BoundIdentity, ControlRegistry};
 
@@ -94,7 +95,7 @@ impl ManagerSlot {
 /// `set` 으로 채운다. send 요청은 accept loop 이후라 항상 채워져 있다. 미설정이면 핸들러가 방어적 거부.
 #[derive(Default)]
 pub struct MessagingSlot {
-    inner: std::sync::OnceLock<Arc<crate::messaging::service::MessagingService>>,
+    inner: std::sync::OnceLock<Arc<engram_dashboard_messaging::service::MessagingService>>,
 }
 
 impl MessagingSlot {
@@ -102,12 +103,14 @@ impl MessagingSlot {
         Self::default()
     }
     /// MessagingService 를 1회 주입(데몬 조립 직후). 이미 설정됐으면 무시(멱등).
-    pub fn set(&self, svc: Arc<crate::messaging::service::MessagingService>) {
+    pub fn set(&self, svc: Arc<engram_dashboard_messaging::service::MessagingService>) {
         let _ = self.inner.set(svc);
     }
     /// 주입된 서비스 참조(미설정이면 None — 정상 흐름엔 없음). ws.rs 의 MessagingFlushSink 도 부르므로
     /// crate 내부에 노출한다(mcp_server 밖에서 접근).
-    pub(crate) fn get(&self) -> Option<&Arc<crate::messaging::service::MessagingService>> {
+    pub(crate) fn get(
+        &self,
+    ) -> Option<&Arc<engram_dashboard_messaging::service::MessagingService>> {
         self.inner.get()
     }
 }

@@ -3,16 +3,16 @@
 //! ★역할(C2 스코프)★: "수신자가 지금 턴 진행 중인가" 를 **관측된 사실로만** 들고 있어, MessagingService 가
 //!   주입 전에 물어볼 수 있게 한다(spec §5 주입 타이밍 = idle 게이트 + 일괄 flush). 세 조각이다:
 //!     ① `BusyGate` — 서비스가 소비하는 조회 seam(`is_busy(id, epoch)`). 운영 = `BusyTracker`.
-//!     ② `BusyTracker` — (AgentId, epoch) 별 턴 상태 표 + tap 부착 관리.
-//!     ③ `TurnTapSink` — 에이전트 출력 스트림에 붙는 `OutputSink`. 턴 이벤트를 보고 표를 갱신하고,
-//!        턴 종료(MessageDone)마다 flush 트리거를 통지한다(`IdleNotifier`).
+//!     ② `BusyTracker` — (PeerId, epoch) 별 턴 상태 표 + tap 부착 관리.
+//!     ③ `TurnProbe` — 호스트 어댑터가 턴 신호(진행/종료)를 넣는 수신구. 진행 신호는 표를 갱신하고,
+//!        턴 종료 신호는 표를 지운 뒤 flush 트리거를 통지한다(`IdleNotifier`).
 //!   request/reply(C3)·그룹(C4)은 범위 밖.
 //!
 //! ★positive-knowledge-only(load-bearing — spec §5 capability 폴백)★: 표에 **없는** (id, epoch) 는 전부
 //!   **idle 취급**이다(= 즉시 주입). "모른다" 를 busy 로 해석하면 관측 불가 백엔드·tap 미부착 창(부팅 초기,
 //!   attach 실패)에서 배달이 **영구 대기**한다(ADR-0104 영향/불변식: "관측 불가 백엔드에서 idle 게이트를
 //!   강제하면 배달이 영구 대기"). 그래서 busy 는 **관측된 사실이 있을 때만** 참이다 — 자료구조도 그 의미를
-//!   구조적으로 못 박는다: 표는 `HashSet<(AgentId, epoch)>` 로 **busy 인 것만** 담고, 부재 = idle ∨ 미관측
+//!   구조적으로 못 박는다: 표는 `HashSet<(PeerId, epoch)>` 로 **busy 인 것만** 담고, 부재 = idle ∨ 미관측
 //!   (둘을 구분하지 않는다 — 둘 다 즉시 주입이 정답이라 구분할 이유가 없다).
 //!
 //! ★busy 관측 capability = `output.structured` 프록시(내부 선택 — 보고 대상)★: 턴 이벤트(MessageDone)는
@@ -25,8 +25,8 @@
 //!   지나가지 않는다). 프록시가 깨지는 날(= structured 이지만 턴 이벤트가 없는 백엔드 등장) 그때 진짜
 //!   capability 필드를 추가한다 — ADR-0104 capability 원칙과 정합(관측 불가 = 즉시 주입 폴백).
 //!
-//! ★콜백 규율(load-bearing — 절대 위반 금지)★: `TurnTapSink::send` 는 **pump 스레드**가 부르는 동기
-//!   콜백이다(core `OutputSink` 계약). 여기서 하는 일은 ① 작은 락 구간의 HashSet 갱신 ② 논블록 채널 send
+//! ★콜백 규율(load-bearing — 절대 위반 금지)★: `TurnProbe::on_progress`/`on_turn_done` 은 **호스트의
+//!   출력 pump 스레드**가 부르는 동기 콜백이다. 여기서 하는 일은 ① 작은 락 구간의 HashSet 갱신 ② 논블록 채널 send
 //!   **둘뿐**이다 — 주입(inject)·manager 호출·messaging 락 취득·blocking write 를 **하지 않는다**. 이걸
 //!   어기면 출력 pump 가 배달 작업 뒤에서 막혀 전 에이전트의 출력 스트림이 지연된다(ws.rs finding 5 와
 //!   같은 계열의 사고). 실제 flush 는 통지를 받은 flush worker 가 수행한다.
@@ -38,8 +38,9 @@
 //!   incarnation) TextDelta/Structured 로 끝나고 **MessageDone 이 없다** → tap 이 그 과거를 먹으면
 //!   (id, new_epoch) 를 busy 로 찍는데 그 턴의 종료 통지는 **영원히 오지 않는다**(이미 지나간 기록이므로).
 //!   결과 = 깨울 수 없는 false-busy → 그 수신자 앞 모든 발송이 TTL 만료까지 파킹된다(배달이 안 가는 것 =
-//!   메시징 최악 실패 모드). 그래서 tap 은 `subscribe_from(after_seq = u64::MAX)` 로 **구독 이후 프레임만**
-//!   받는다(`ManagerTapHost::subscribe_output` 주석). 부트스트랩 없이 시작하는 대가는 positive-knowledge-
+//!   메시징 최악 실패 모드). 그래서 tap 은 **구독 이후 발생분만** 받는다(호스트 어댑터
+//!   `messaging_host::ManagerTapHost::subscribe_output` 의 `after_seq = u64::MAX` 주석 — 그 규율은
+//!   `TapHost` 계약의 일부다). 부트스트랩 없이 시작하는 대가는 positive-knowledge-
 //!   only 폴백이 이미 흡수한다 — 관측 전엔 idle = 즉시 주입(늦게 가는 것보다 안 가는 것이 나쁘다).
 //!
 //! ★busy 상한(fail-open 안전 밸브 — round-3 finding 4)★: MessageDone 은 **유일한 in-band 해제**다. 턴이
@@ -49,21 +50,19 @@
 //!   청소하고 그 id 를 **도어벨로 깨운다**(대기 메일이 그때 배달된다). 발생 빈도는 미측정(spec §7 항목).
 //!
 //! ★알려진 미확인(측정 항목 — spec §7)★: 중첩 Task 서브에이전트의 `result` 라인이 **부모 턴 종료**
-//!   MessageDone 으로 새는지 미검증이다. 새면 부모가 아직 턴 중인데 idle 로 오판해 조기 주입할 수 있다
+//!   신호로 새는지 미검증이다. 새면 부모가 아직 턴 중인데 idle 로 오판해 조기 주입할 수 있다
 //!   (유실은 없고 타이밍만 어긋남). C2 는 이를 **해결하지 않고 실 하네스 측정 항목으로 남긴다**.
 //!
-//! tauri import 0(daemon crate).
+//! 워크스페이스 crate import 0(ADR-0110 — 컴파일러 강제).
 // ADR-0103
 // ADR-0104
+// ADR-0110
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::types::{
-    AgentId, OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
-};
+use crate::PeerId;
 
 /// ★busy 상한(fail-open 안전 밸브 — round-3 finding 4, 내부 선택: **30분**)★: 마지막 턴 진행 관측으로부터
 ///   이 시간을 넘긴 busy 표시는 주기 sweep 이 **비정상 종료된 턴의 잔해**로 보고 청소한다(모듈 헤더).
@@ -90,7 +89,7 @@ pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 pub trait BusyGate: Send + Sync {
     /// 이 (id, epoch) 가 **관측상** 턴 진행 중인가. ★모르는 대상은 반드시 false(idle)★ —
     ///   positive-knowledge-only(모듈 헤더). true 는 "턴 중이라는 관측 근거가 있다" 는 뜻이다.
-    fn is_busy(&self, id: AgentId, epoch: u32) -> bool;
+    fn is_busy(&self, id: PeerId, epoch: u32) -> bool;
 }
 
 /// 게이트 미배선/관측 불가 폴백 — **항상 idle**(= 즉시 주입, spec §5 capability 폴백).
@@ -101,32 +100,38 @@ pub trait BusyGate: Send + Sync {
 pub struct AlwaysIdleGate;
 
 impl BusyGate for AlwaysIdleGate {
-    fn is_busy(&self, _id: AgentId, _epoch: u32) -> bool {
+    fn is_busy(&self, _id: PeerId, _epoch: u32) -> bool {
         false
     }
 }
 
 /// ★tap 부착 seam(ADR-0012)★ — 출력 스트림 구독을 트레잇 뒤로 밀어, 단위 테스트가 실 PTY·claude 없이
-///   부착 정책(중복 방지·epoch 검증·실패 재시도)을 단언하게 한다. 운영 = `ManagerTapHost`.
+///   부착 정책(중복 방지·epoch 검증·실패 재시도)을 단언하게 한다. 운영 구현은 호스트 소유
+///   (데몬 `messaging_host::ManagerTapHost` — ADR-0110 결정 3).
 ///
-/// ★비용 경고(호출 지점 제약 — load-bearing)★: 구현(운영)은 core 의 subscribers 락을 잡고 들어간다.
+/// ★비용 경고(호출 지점 제약 — load-bearing)★: 구현(운영)은 호스트 출력 코어의 subscribers 락을 잡고 들어간다.
 ///   그래서 이 메서드는 **status 콜백 같은 짧아야 하는 경로에서 부르면 안 된다** — flush worker 의
 ///   blocking pool 에서만 부른다(ws.rs). live-only 구독이라 링 replay 비용은 없지만(아래) core 락 구간에
 ///   들어가는 호출이라는 성질은 그대로다.
 pub trait TapHost: Send + Sync {
-    /// 이 에이전트의 출력 스트림에 sink 를 붙인다 — ★live-only★(구독 이후 프레임만).
+    /// 이 참여자의 턴 관측을 시작한다 — 호스트의 출력 스트림에 이 수신구를 배선한다. ★live-only★
+    ///   (배선 이후 발생분만 — 과거 replay 금지, 모듈 헤더 "replay 부트스트랩 거부").
     ///
-    /// ★`expect_epoch` 는 장식이 아니다(round-3 finding 5 — 유령 tap 누수 차단)★: 구현은 **구독 지점에서**
+    /// ★`probe` 는 무엇인가(ADR-0110 결정 4)★: 출력 이벤트→턴 신호 **분류**는 백엔드 지식(claude
+    ///   stream-json 등)이라 이 커널이 알지 않는다. 호스트 어댑터가 자기 출력 계층에 붙어 분류한 뒤 이
+    ///   수신구의 `on_progress`/`on_turn_done` 를 부른다. 커널은 신호 어휘만 소유한다.
+    ///
+    /// ★`expect_epoch` 는 장식이 아니다(round-3 finding 5 — 유령 tap 누수 차단)★: 구현은 **배선 지점에서**
     ///   그 id 의 현재 epoch 이 `expect_epoch` 인지 확인해야 하고, 아니면 `StaleEpoch` 를 돌려주며 **구독을
-    ///   남기지 않아야** 한다(이미 붙였다면 되돌린다). 왜: `attach` 의 사전 검증과 여기 구독 사이에 재시작이
-    ///   끼면 sink 가 **새 epoch 의 core** 에 붙는데 부착 표시는 `(id, 옛 epoch)` 로 남는다 → 그 tap 이 보는
-    ///   프레임은 전부 양성 게이트에서 버려지고(관측 0), 뒤이어 새 epoch 용 정상 attach 가 sink 를 **하나 더**
-    ///   붙인다(tap 은 명시 unsubscribe 를 하지 않으므로 그 유령은 그 core 수명 동안 남아 통지를 중복시킨다).
+    ///   남기지 않아야** 한다(이미 붙였다면 되돌린다). 왜: `attach` 의 사전 검증과 여기 배선 사이에 재시작이
+    ///   끼면 수신구가 **새 epoch 의 출력 코어** 에 붙는데 부착 표시는 `(id, 옛 epoch)` 로 남는다 → 그 tap 이
+    ///   보는 신호는 전부 양성 게이트에서 버려지고(관측 0), 뒤이어 새 epoch 용 정상 attach 가 수신구를
+    ///   **하나 더** 붙인다(tap 은 명시 해제를 하지 않으므로 그 유령은 그 코어 수명 동안 남아 통지를 중복시킨다).
     fn subscribe_output(
         &self,
-        id: AgentId,
+        id: PeerId,
         expect_epoch: u32,
-        sink: Arc<dyn OutputSink>,
+        probe: Arc<TurnProbe>,
     ) -> Result<(), SubscribeError>;
 
     /// 이 id 의 **현재** epoch(로스터 기준). 부재(reap 완료)면 None.
@@ -135,7 +140,7 @@ pub trait TapHost: Send + Sync {
     ///   오므로, worker 가 집행할 때 이미 stale 일 수 있다(그 사이 재시작 = epoch bump). 검증 없이 붙이면
     ///   **이미 사라진 epoch** 키로 부착/busy 표를 만들어(그 core 는 곧 drop) 아무도 지우지 않는 유령 항목이
     ///   남고, 같은 id 에 tap 이 둘 붙어 통지가 중복된다. 그래서 attach 는 집행 직전 현재 epoch 을 확인한다.
-    fn current_epoch(&self, id: AgentId) -> Option<u32>;
+    fn current_epoch(&self, id: PeerId) -> Option<u32>;
 }
 
 /// tap 구독 실패 사유 — 호출자(`BusyTracker::attach`)가 **재시도할 값어치가 있는 실패**와 **아예 대상이
@@ -149,81 +154,7 @@ pub enum SubscribeError {
     Failed(String),
 }
 
-/// 운영 TapHost — `Arc<AgentManager>` 얇은 래퍼(공개 API 만 부른다, ADR-0006 락 규율 그대로 탄다).
-pub struct ManagerTapHost {
-    manager: Arc<AgentManager>,
-}
-
-impl ManagerTapHost {
-    pub fn new(manager: Arc<AgentManager>) -> Self {
-        Self { manager }
-    }
-}
-
-impl TapHost for ManagerTapHost {
-    fn subscribe_output(
-        &self,
-        id: AgentId,
-        expect_epoch: u32,
-        sink: Arc<dyn OutputSink>,
-    ) -> Result<(), SubscribeError> {
-        // ★구독 지점 epoch 검증(round-3 finding 5 — 유령 tap 누수 차단)★: core 에는 "이 epoch 이면 구독" 이라는
-        //   원자적 API 가 없다(core 는 읽기 전용 — 새 seam 을 내지 않는다). 그래서 **구독 직전 + 직후** 두 번
-        //   현재 epoch 을 확인하고, 사후 확인이 어긋나면 방금 받은 SinkId 로 **되돌린다**(unsubscribe). 이러면
-        //   창이 남더라도 그 창에서 만들어진 유령 구독은 우리 손으로 회수되므로 "붙었는데 아무도 안 지우는 tap"
-        //   이 남지 않는다. 사전 확인만으로는(옛 구현) 그 사이 재시작이 끼면 새 core 에 유령이 영구 잔류했다.
-        if let Some(err) = self.stale_check(id, expect_epoch) {
-            return Err(err);
-        }
-        // ★live-only 구독(load-bearing — 모듈 헤더 "replay 부트스트랩 거부")★: `after_seq = u64::MAX` 는
-        //   "이 seq 까지는 이미 봤다" 는 뜻이라, core `subscribe_from` 의 Resumed 분기가 보낼 tail 을
-        //   `partition_point(seq <= u64::MAX)` = **전체 skip** 으로 계산한다 → replay 프레임이 tap 에 한
-        //   건도 들어오지 않고 그 뒤 live emit 만 받는다. `epoch_matches = true` 를 넘기는 이유: false 면
-        //   core 가 "안전 기본값" 으로 **전체 replay** 를 보낸다(FromOldest) — tap 에는 그게 바로 위험이다.
-        //   `epoch_matches = true` 가 정당한 이유는 위 사전/사후 검증이 "구독한 core = expect_epoch 의 core"
-        //   를 확인해 주기 때문이다.
-        // SinkId 는 정상 경로에선 버린다 — tap 은 명시 unsubscribe 를 하지 않는다(수명 = 그 epoch 의
-        //   OutputCore). 근거: 세션이 reap 되면 OutputCore 가 drop 되며 구독자도 함께 사라지고, 살아 있는
-        //   동안엔 계속 관측해야 한다. epoch 교체는 새 core = 새 attach(로스터 diff 가 건다). 단 **사후
-        //   검증이 어긋난 경우에만** 이 id 를 써서 유령 구독을 즉시 회수한다(위 헤더).
-        // on_ready 는 no-op — 데몬 WS 경로의 SubscribeAck 큐잉용 hook 이라 tap 엔 할 일이 없다(그리고
-        //   core 의 subscribers 락 보유 중 불리므로 블로킹 금지 계약이 걸려 있다).
-        let outcome = self
-            .manager
-            .subscribe_from(id, sink, Some(u64::MAX), true, |_| {})
-            .map_err(|e| SubscribeError::Failed(e.to_string()))?;
-        if let Some(err) = self.stale_check(id, expect_epoch) {
-            // 구독↔검증 사이 epoch 이 바뀌었다 = 방금 붙은 sink 는 유령이다. 되돌린다(best-effort —
-            //   그 사이 또 교체됐으면 대상 core 가 이미 drop 되는 중이라 구독도 함께 사라진다).
-            let _ = self.manager.unsubscribe(id, outcome.sink_id);
-            return Err(err);
-        }
-        Ok(())
-    }
-
-    fn current_epoch(&self, id: AgentId) -> Option<u32> {
-        // list_agents 스냅샷 1회 — attach 빈도는 로스터 변화 빈도라 비용 무관.
-        self.manager
-            .list_agents()
-            .into_iter()
-            .find(|a| a.id == id)
-            .map(|a| a.epoch)
-    }
-}
-
-impl ManagerTapHost {
-    /// 현재 epoch 이 기대와 다르면 `StaleEpoch` 를 만든다(같으면 None). 구독 전·후 두 지점에서 쓴다.
-    fn stale_check(&self, id: AgentId, expect_epoch: u32) -> Option<SubscribeError> {
-        let current = self.current_epoch(id);
-        if current == Some(expect_epoch) {
-            None
-        } else {
-            Some(SubscribeError::StaleEpoch { current })
-        }
-    }
-}
-
-/// ★턴 종료(idle 전이) 통지 seam★ — tap 이 "이 에이전트 턴이 끝났다" 를 알리는 출구. 운영 구현은
+/// ★턴 종료(idle 전이) 통지 seam★ — 턴 관측(`TurnProbe`)이 "이 에이전트 턴이 끝났다" 를 알리는 출구. 운영 구현은
 ///   flush worker 채널로 논블록 send 한다(ws.rs `ChannelIdleNotifier`), 단위 테스트는 기록만 한다.
 ///
 /// ★계약(load-bearing)★: **논블록·비-재진입**이어야 한다 — pump 스레드 콜백에서 불린다(모듈 헤더 콜백
@@ -236,7 +167,7 @@ impl ManagerTapHost {
 ///   유계로 묶는다(ws.rs `IdleCoalescer` — 같은 id 의 미처리 Idle 이 이미 큐에 있으면 enqueue 를 접는다).
 pub trait IdleNotifier: Send + Sync {
     /// 이 에이전트가 방금 턴을 끝냈다(= 쌓인 파킹을 일괄 주입할 시점). **논블록**.
-    fn notify_idle(&self, id: AgentId);
+    fn notify_idle(&self, id: PeerId);
 }
 
 /// tap(쓰기 측)과 tracker/서비스(읽기 측)가 공유하는 턴 상태 — **부착 표시**와 **busy 표시** 두 표다.
@@ -250,13 +181,13 @@ pub trait IdleNotifier: Send + Sync {
 /// ★락 순서(load-bearing — ADR-0006)★: **attached → busy** 한 방향뿐이다(역순 금지). 외부 호출
 ///   (`host.subscribe_output`)은 **두 락을 모두 놓은 상태**에서만 한다.
 struct TurnStates {
-    /// ★tap 부착이 확정된 (AgentId, epoch)★ — 두 역할을 한 표가 겸한다:
+    /// ★tap 부착이 확정된 (PeerId, epoch)★ — 두 역할을 한 표가 겸한다:
     ///   ① 중복 subscribe 방지(같은 스트림에 tap 이 여러 개면 상태 갱신·통지가 N배).
     ///   ② `mark_busy` 의 **양성 게이트**(fix 9 — 아래).
-    attached: Mutex<HashSet<(AgentId, u32)>>,
-    /// ★턴 진행 중으로 관측된 (AgentId, epoch) → **마지막 관측 시각**★. 부재 = idle ∨ 미관측(= 즉시 주입,
+    attached: Mutex<HashSet<(PeerId, u32)>>,
+    /// ★턴 진행 중으로 관측된 (PeerId, epoch) → **마지막 관측 시각**★. 부재 = idle ∨ 미관측(= 즉시 주입,
     ///   모듈 헤더). 값(시각)은 상한 sweep(`BUSY_MAX_TURN`)이 "비정상 종료된 턴의 잔해" 를 가려내는 축이다.
-    busy: Mutex<HashMap<(AgentId, u32), Instant>>,
+    busy: Mutex<HashMap<(PeerId, u32), Instant>>,
     /// 턴 종료 통지 출구(논블록 계약).
     notifier: Arc<dyn IdleNotifier>,
 }
@@ -273,14 +204,14 @@ impl TurnStates {
     /// ★시각은 매 관측마다 갱신한다(load-bearing — `BUSY_MAX_TURN` 주석)★: 정상적으로 오래 도는 턴은
     ///   delta/도구 호출이 계속 오므로 늙지 않고, 관측이 끊긴 잔해만 상한에 걸린다.
     /// ★`Instant::now()` 를 여기서 부르는 건 의도적 예외★: 이 모듈은 pump 콜백 층이라 messaging 의 순수성
-    ///   불변식(clock injection) 대상이 아니다(messaging/mod.rs 헤더 예외 구역). 판정(sweep)은 주입된 now 를
+    ///   불변식(clock injection) 대상이 아니다(crate 헤더 lib.rs 의 예외 구역). 판정(sweep)은 주입된 now 를
     ///   받으므로 결정적 테스트는 유지된다 — 시계를 읽는 곳은 이 한 지점뿐이다.
-    fn mark_busy(&self, key: (AgentId, u32)) {
+    fn mark_busy(&self, key: (PeerId, u32)) {
         self.mark_busy_at(key, Instant::now());
     }
 
     /// 시각 주입형(테스트가 상한 경계를 결정적으로 구동한다 — 운영 경로는 위 `mark_busy`).
-    fn mark_busy_at(&self, key: (AgentId, u32), at: Instant) {
+    fn mark_busy_at(&self, key: (PeerId, u32), at: Instant) {
         // 락 순서 attached → busy(모듈 주석). attached 를 든 채 busy 를 잡는다 — 그 사이 attach 가 바뀌어
         //   유령 항목이 생기는 창을 없애려면 두 표를 한 임계구역에서 봐야 한다.
         let atk = self.attached.lock().expect("busy attached poisoned");
@@ -298,7 +229,7 @@ impl TurnStates {
     /// ★해제·통지는 attach 게이트를 걸지 않는다(의도적)★: 제거는 언제나 안전하고(없는 키 remove = no-op),
     ///   통지는 잉여여도 빈 큐 no-op 이다. 반대로 게이트를 걸면 "부착 표가 방금 갱신됐다" 는 이유로 종료
     ///   통지가 삼켜져 파킹이 stranded 될 수 있다 — 누락 < 잉여(IdleNotifier 주석).
-    fn mark_idle(&self, key: (AgentId, u32)) {
+    fn mark_idle(&self, key: (PeerId, u32)) {
         {
             let mut g = self.busy.lock().expect("busy states poisoned");
             g.remove(&key);
@@ -307,7 +238,7 @@ impl TurnStates {
         self.notifier.notify_idle(key.0);
     }
 
-    fn is_busy(&self, key: (AgentId, u32)) -> bool {
+    fn is_busy(&self, key: (PeerId, u32)) -> bool {
         self.busy
             .lock()
             .expect("busy states poisoned")
@@ -315,13 +246,13 @@ impl TurnStates {
     }
 
     /// ★상한 초과 busy 잔해 청소(round-3 finding 4)★ — 마지막 관측이 `BUSY_MAX_TURN` 이전인 항목을 제거하고
-    ///   그 **AgentId 목록**(중복 제거)을 돌려준다. 호출자가 락을 놓은 뒤 그 id 들을 도어벨로 깨운다.
+    ///   그 **PeerId 목록**(중복 제거)을 돌려준다. 호출자가 락을 놓은 뒤 그 id 들을 도어벨로 깨운다.
     ///
     /// ★왜 통지를 여기서 하지 않나(ADR-0006)★: `notifier` 는 외부 호출이다 — busy 락을 든 채 부르면 락
     ///   보유 중 외부 호출 금지 규율을 깬다. 그래서 이 함수는 **순수 제거 + 목록 반환**만 하고 통지는
     ///   `BusyTracker::sweep_stale_busy` 가 락 밖에서 한다.
-    fn sweep_stale(&self, now: Instant, max: Duration) -> Vec<AgentId> {
-        let mut woken: Vec<AgentId> = Vec::new();
+    fn sweep_stale(&self, now: Instant, max: Duration) -> Vec<PeerId> {
+        let mut woken: Vec<PeerId> = Vec::new();
         let mut g = self.busy.lock().expect("busy states poisoned");
         g.retain(|(id, _epoch), marked| {
             let stale = now.saturating_duration_since(*marked) >= max;
@@ -335,7 +266,7 @@ impl TurnStates {
 
     /// 부착 표시 선점 — 새로 표시했으면 true, 이미 있었으면 false(중복 subscribe 금지).
     /// 새로 표시할 때 같은 id 의 **다른 epoch** 표시는 청소한다(한 id 에 살아있는 epoch 은 하나 — ADR-0007).
-    fn claim_attached(&self, key: (AgentId, u32)) -> bool {
+    fn claim_attached(&self, key: (PeerId, u32)) -> bool {
         let mut at = self.attached.lock().expect("busy attached poisoned");
         if !at.insert(key) {
             return false;
@@ -345,7 +276,7 @@ impl TurnStates {
     }
 
     /// 부착 표시 1건 해제(attach 실패·패닉 롤백 — `AttachGuard`).
-    fn release_attached(&self, key: (AgentId, u32)) {
+    fn release_attached(&self, key: (PeerId, u32)) {
         self.attached
             .lock()
             .expect("busy attached poisoned")
@@ -359,7 +290,7 @@ impl TurnStates {
 
     /// 이 id 의 모든 상태 제거(로스터 이탈 = 죽음). 죽은 에이전트의 busy 플래그가 남아 그 이름 앞
     ///   파킹이 영영 대기하는 걸 막는다(stale-flag 청소) + 다음 등장에 재부착되게 부착 표시도 지운다.
-    fn forget(&self, id: AgentId) {
+    fn forget(&self, id: PeerId) {
         // 락 순서 attached → busy.
         self.attached
             .lock()
@@ -372,9 +303,9 @@ impl TurnStates {
     }
 
     /// 이 id 의 **다른 epoch** busy 표시만 제거(현 epoch 은 보존). epoch 교체(재시작/재활성화)는 같은
-    ///   AgentId 의 맵 항목을 바꾸므로(ADR-0007) 한 id 에 살아있는 epoch 은 **항상 하나**다 — 옛 epoch 의
+    ///   PeerId 의 맵 항목을 바꾸므로(ADR-0007) 한 id 에 살아있는 epoch 은 **항상 하나**다 — 옛 epoch 의
     ///   busy 표시는 그 순간 무의미해진다. 안 지우면 재시작마다 죽은 항목이 한 개씩 누적된다.
-    fn forget_other_epochs(&self, id: AgentId, keep: u32) {
+    fn forget_other_epochs(&self, id: PeerId, keep: u32) {
         self.busy
             .lock()
             .expect("busy states poisoned")
@@ -389,12 +320,12 @@ impl TurnStates {
 ///   busy 도 못 찍혀 "게이트가 조용히 사라진" 상태가 된다 — 조용한 기능 상실은 실패보다 나쁘다.
 struct AttachGuard {
     shared: Arc<TurnStates>,
-    key: (AgentId, u32),
+    key: (PeerId, u32),
     armed: bool,
 }
 
 impl AttachGuard {
-    fn new(shared: Arc<TurnStates>, key: (AgentId, u32)) -> Self {
+    fn new(shared: Arc<TurnStates>, key: (PeerId, u32)) -> Self {
         Self {
             shared,
             key,
@@ -436,11 +367,11 @@ pub enum AttachOutcome {
 /// ★BusyTracker — 턴 상태 표 + tap 부착 관리(C2)★. 데몬 부팅에서 하나 만들어 셋이 공유한다:
 ///   - MessagingService(게이트 조회 — `BusyGate`),
 ///   - flush worker(Attach/Detach 집행),
-///   - (간접) 각 에이전트에 붙은 `TurnTapSink`(상태 갱신).
+///   - (간접) 각 에이전트에 배선된 `TurnProbe`(상태 갱신).
 ///
 /// ★락 규율(load-bearing)★: 두 표의 순서는 **attached → busy** 한 방향뿐이다(`TurnStates` 주석).
 ///   외부 호출(`host.subscribe_output`)은 **두 락을 모두 놓은 상태**에서만 한다 — subscribe 는 내부에서
-///   core 의 subscribers 락을 잡고, 그 구간에서 우리 tap 이 호출될 수 있으므로(live emit 과 직렬화) 락을
+///   호스트 출력 코어의 subscribers 락을 잡고, 그 구간에서 우리 수신구가 호출될 수 있으므로(live emit 과 직렬화) 락을
 ///   든 채 부르면 자기 재진입 데드락이다. 이게 attach 가 "표시 → 락 해제 → subscribe → (실패/패닉 시)
 ///   가드 롤백" 순서인 이유다.
 pub struct BusyTracker {
@@ -460,11 +391,6 @@ impl BusyTracker {
         }
     }
 
-    /// 운영 편의 생성자 — manager 를 `ManagerTapHost` 로 감싼다(데몬 부팅용).
-    pub fn for_manager(manager: Arc<AgentManager>, notifier: Arc<dyn IdleNotifier>) -> Self {
-        Self::new(Arc::new(ManagerTapHost::new(manager)), notifier)
-    }
-
     /// ★tap 부착(C2)★ — 이 (id, epoch) 의 출력 스트림에 턴 관측 tap 을 붙인다. 로스터 diff 가 새로 등장/
     ///   epoch bump 한 **모든 id** 에 대해 flush worker 를 통해 부른다(이름 유일성과 무관 — tap 은 id 단위).
     ///
@@ -481,7 +407,7 @@ impl BusyTracker {
     ///   status 콜백에서 부르면 로스터 이벤트 forwarding 이 그만큼 막힌다(ws.rs finding 5 계열).
     /// ★실패가 배달을 막지는 않는다★: 부착 실패 대상은 게이트가 모르므로 idle = 즉시 주입 폴백
     ///   (positive-knowledge-only). 대신 `Failed` 를 돌려 호출자가 **재시도 경로를 열게** 한다(fix 8a).
-    pub fn attach(&self, id: AgentId, epoch: u32) -> AttachOutcome {
+    pub fn attach(&self, id: PeerId, epoch: u32) -> AttachOutcome {
         // 1) epoch 현재성 검증(fix 6) — stale Attach 로 유령 표를 만들지 않는다.
         match self.host.current_epoch(id) {
             Some(cur) if cur == epoch => {}
@@ -503,8 +429,8 @@ impl BusyTracker {
         let mut guard = AttachGuard::new(self.shared.clone(), (id, epoch));
         // 옛 incarnation 의 busy 표시 청소(그 epoch 은 더 이상 존재하지 않는다).
         self.shared.forget_other_epochs(id, epoch);
-        let sink: Arc<dyn OutputSink> = self.make_tap();
-        match self.host.subscribe_output(id, epoch, sink) {
+        let probe = self.make_probe();
+        match self.host.subscribe_output(id, epoch, probe) {
             Ok(()) => {
                 guard.disarm();
                 AttachOutcome::Attached
@@ -562,38 +488,37 @@ impl BusyTracker {
     /// ★부착 표시를 함께 지우는 게 양성 게이트의 다른 반쪽★: 표시가 사라지면 그 id 의 남은 tap 들은
     ///   더 이상 busy 를 찍지 못한다(mark_busy 게이트) — 죽어가는 core 의 잔여 이벤트가 유령 busy 를
     ///   되살리는 경로가 구조적으로 닫힌다(fix 9).
-    pub fn forget(&self, id: AgentId) {
+    pub fn forget(&self, id: PeerId) {
         self.shared.forget(id);
     }
 
     /// 이 (id, epoch) 가 관측상 턴 중인가(부재 = idle — positive-knowledge-only).
-    pub fn is_busy(&self, id: AgentId, epoch: u32) -> bool {
+    pub fn is_busy(&self, id: PeerId, epoch: u32) -> bool {
         self.shared.is_busy((id, epoch))
     }
 
-    /// tap sink 조립(내부) — 상태만 공유한다(tracker 자체를 잡지 않는다).
-    fn make_tap(&self) -> Arc<TurnTapSink> {
-        Arc::new(TurnTapSink {
-            sink_id: uuid::Uuid::new_v4(),
+    /// 턴 신호 수신구 조립(내부) — 상태만 공유한다(tracker 자체를 잡지 않는다).
+    fn make_probe(&self) -> Arc<TurnProbe> {
+        Arc::new(TurnProbe {
             shared: self.shared.clone(),
         })
     }
 
-    /// ★하네스 전용★ — subscribe 를 거치지 않고 tap sink 만 만든다. 통합 테스트가 실 claude 턴 없이
-    ///   턴 이벤트를 **직접 주입**해 idle 게이트·배치 flush 를 결정적으로 구동하려고 쓴다(spec §7 배치
+    /// ★하네스 전용★ — subscribe 를 거치지 않고 턴 신호 수신구만 만든다. 통합 테스트가 실 claude 턴 없이
+    ///   턴 신호를 **직접 주입**해 idle 게이트·배치 flush 를 결정적으로 구동하려고 쓴다(spec §7 배치
     ///   검증 강화). 운영 경로는 `attach` 만 쓴다(부착 표시·중복 방지를 거치는 유일한 문).
     ///
     /// ★함께 `mark_attached_for_test` 를 불러야 한다★: 양성 attach 게이트(fix 9) 때문에 부착 표시가 없는
-    ///   키의 busy 관측은 무시된다 — 하네스 tap 도 그 게이트를 통과해야 상태가 움직인다.
+    ///   키의 busy 관측은 무시된다 — 하네스 수신구도 그 게이트를 통과해야 상태가 움직인다.
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn tap_for_test(&self) -> Arc<dyn OutputSink> {
-        self.make_tap()
+    pub fn probe_for_test(&self) -> Arc<TurnProbe> {
+        self.make_probe()
     }
 
     /// ★하네스/테스트 전용★ — subscribe 없이 **부착 표시만** 등록한다(양성 게이트 통과용).
     ///   운영 경로는 절대 부르지 않는다(tap 없는 부착 표시 = 관측되지 않는 busy 게이트).
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn mark_attached_for_test(&self, id: AgentId, epoch: u32) {
+    pub fn mark_attached_for_test(&self, id: PeerId, epoch: u32) {
         self.shared.claim_attached((id, epoch));
     }
 
@@ -606,64 +531,46 @@ impl BusyTracker {
     /// ★하네스/테스트 전용★ — busy 관측 시각을 **지정해** 표에 넣는다(양성 attach 게이트는 그대로 통과해야
     ///   한다). 실시간 30분을 기다리지 않고 `BUSY_MAX_TURN` 경계·시각 갱신을 결정적으로 단언하려는 seam.
     #[cfg(any(test, feature = "test-harness"))]
-    pub fn mark_busy_at_for_test(&self, id: AgentId, epoch: u32, at: Instant) {
+    pub fn mark_busy_at_for_test(&self, id: PeerId, epoch: u32, at: Instant) {
         self.shared.mark_busy_at((id, epoch), at);
     }
 }
 
 impl BusyGate for BusyTracker {
-    fn is_busy(&self, id: AgentId, epoch: u32) -> bool {
+    fn is_busy(&self, id: PeerId, epoch: u32) -> bool {
         BusyTracker::is_busy(self, id, epoch)
     }
 }
 
-/// ★TurnTapSink — 출력 스트림에 붙어 턴 경계만 읽는 `OutputSink`(C2)★.
+/// ★TurnProbe — 턴 신호 수신구(C2 · ADR-0110 결정 4)★: 호스트 어댑터가 "이 참여자의 턴이 **진행**
+///   중이다 / **끝났다**" 를 알려 넣는 두 구멍. `BusyTracker::attach` 가 만들어 `TapHost` 에 건네고,
+///   호스트는 자기 출력 계층에 붙어 이벤트를 분류한 뒤 이 메서드들을 부른다.
 ///
-/// ★상태머신(spec §5 · ADR-0104 결정 3)★:
-///   - `TextDelta` / `ToolCall` / `Structured` → **busy**. 왜 이 셋인가: 어시스턴트 응답(delta)·도구 호출은
-///     턴 진행의 직접 증거고, `Structured` 는 백엔드별 이벤트 탈출구인데 claude 는 **입력 시점 유저 에코**를
-///     여기로 낸다 — 즉 대시보드 사용자가 터미널에 직접 입력해 시작한 턴(MessagingService 를 우회하는 경로)도
-///     이 variant 로 잡힌다(그래서 반드시 포함해야 한다). 우리 자신의 주입도 같은 에코로 busy 가 되므로,
-///     주입 직후 도착한 다음 메시지는 자동으로 다음 턴 경계까지 파킹된다(의도된 동작).
-///   - `MessageDone` → **idle** + flush 트리거 통지(턴 종료).
-///   - `Usage` / `Error` / `TerminalBytes` → **무시**(상태 불변). Usage 는 턴 중간에도 오고, Error 는
-///     스트림 내부 오류지 턴 종료가 아니며(종료는 MessageDone/terminal 상태), TerminalBytes 는 tap 을
-///     붙이지 않는 비-structured 경로의 payload 다.
+/// ★여기 없는 것 = 분류(load-bearing 경계, ADR-0110 결정 4 · ADR-0004 와 같은 결)★: "어떤 출력 이벤트가
+///   턴 진행이고 어떤 게 턴 종료인가" 는 백엔드(claude stream-json)의 지식이다. 그걸 커널에 두면 이
+///   crate 가 core 의 출력 타입을 알아야 해 완전 상호무지가 깨진다. 그래서 분류는 데몬 어댑터
+///   (`messaging_host::TurnTapSink`)가 하고, 커널은 **신호 어휘 두 개**만 소유한다. busy 정책(양성 attach
+///   게이트·positive-knowledge-only·상한 sweep·통지 규율)은 전부 이쪽(`TurnStates`)에 남는다 — 포트는
+///   얇게, 정책은 커널에.
 ///
-/// ★상관 키가 없다(honest scope)★: claude 의 MessageDone 은 `turn_id`/`message_id` 가 모두 None 이라
-///   "어느 턴의 종료인가" 를 상관시킬 키가 없다. 그래서 이 tap 은 **턴 카운팅/펜싱을 하지 않고** 단순
-///   최신-관측 상태만 유지한다(마지막 이벤트가 결정한다). 중첩 서브에이전트 result 누수 가능성은 모듈
-///   헤더의 미확인 항목.
-/// ★항상 Ok 반환★: Err 는 코어가 dead-sink 로 판단해 구독을 제거하는 신호다 — tap 은 스스로 빠지지 않고
-///   그 세션(epoch)의 수명 동안 관측을 유지한다(정리는 세션 drop).
-pub struct TurnTapSink {
-    sink_id: SinkId,
+/// ★콜백 규율(load-bearing — 절대 위반 금지)★: 두 메서드는 **호스트의 출력 pump 스레드**가 부르는 동기
+///   콜백이다. 하는 일은 ① 작은 락 구간의 표 갱신 ② 논블록 통지 send **둘뿐** — 주입·호스트 호출·
+///   messaging 락 취득·blocking IO 를 하지 않는다(모듈 헤더 콜백 규율).
+pub struct TurnProbe {
     shared: Arc<TurnStates>,
 }
 
-impl OutputSink for TurnTapSink {
-    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // 구조화 이벤트만 본다. Bytes(터미널 payload)는 턴 경계 정보가 없다.
-        let OutputPayload::Event(ev) = frame.payload else {
-            return Ok(());
-        };
-        // ★상태 키 = 프레임이 신고한 (agent_id, epoch)★: 이 tap 이 붙은 OutputCore 의 (id, epoch) 와
-        //   by-construction 동일하다(코어가 자기 값으로 프레임을 채운다). 프레임 값을 쓰면 게이트가 보는
-        //   로스터 epoch 과 같은 축으로 정렬되고, tap 이 중복 필드를 들고 있을 필요가 없다.
-        let key = (frame.agent_id, frame.epoch);
-        match ev {
-            OutputEvent::TextDelta { .. }
-            | OutputEvent::ToolCall { .. }
-            | OutputEvent::Structured { .. } => self.shared.mark_busy(key),
-            OutputEvent::MessageDone { .. } => self.shared.mark_idle(key),
-            // 상태 불변(위 상태머신 주석).
-            OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => {}
-        }
-        Ok(())
+impl TurnProbe {
+    /// 턴 **진행** 신호 — 이 (참여자, epoch) 가 지금 턴 중이라는 관측을 넣는다(양성 attach 게이트를
+    ///   통과한 키만 실제로 기록된다 — `TurnStates::mark_busy`).
+    pub fn on_progress(&self, peer: PeerId, epoch: u32) {
+        self.shared.mark_busy((peer, epoch));
     }
 
-    fn sink_id(&self) -> SinkId {
-        self.sink_id
+    /// 턴 **종료** 신호 — busy 해제 + flush 도어벨 통지(`IdleNotifier`). 전이 여부와 무관하게 매번
+    ///   통지한다(누락 < 잉여 — `IdleNotifier` idempotency 주석).
+    pub fn on_turn_done(&self, peer: PeerId, epoch: u32) {
+        self.shared.mark_idle((peer, epoch));
     }
 }
 
@@ -672,9 +579,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    /// 통지 기록용 IdleNotifier — 통지된 AgentId 순서를 모은다.
+    /// 통지 기록용 IdleNotifier — 통지된 PeerId 순서를 모은다.
     struct RecordingNotifier {
-        seen: StdMutex<Vec<AgentId>>,
+        seen: StdMutex<Vec<PeerId>>,
     }
     impl RecordingNotifier {
         fn new() -> Arc<Self> {
@@ -682,27 +589,27 @@ mod tests {
                 seen: StdMutex::new(Vec::new()),
             })
         }
-        fn seen(&self) -> Vec<AgentId> {
+        fn seen(&self) -> Vec<PeerId> {
             self.seen.lock().unwrap().clone()
         }
     }
     impl IdleNotifier for RecordingNotifier {
-        fn notify_idle(&self, id: AgentId) {
+        fn notify_idle(&self, id: PeerId) {
             self.seen.lock().unwrap().push(id);
         }
     }
 
     /// subscribe 를 기록/스크립트하는 TapHost — 실 manager·PTY 없이 부착 정책만 단언한다.
     struct FakeTapHost {
-        calls: StdMutex<Vec<AgentId>>,
+        calls: StdMutex<Vec<PeerId>>,
         /// true 면 subscribe 를 Err 로(이미 죽은 에이전트 모사).
         fail: StdMutex<bool>,
         /// true 면 subscribe 안에서 **패닉**(fix 8b 롤백 가드 검증 — core 락 구간 패닉 모사).
         panic_in_subscribe: StdMutex<bool>,
-        /// 붙은 sink 보관 — 테스트가 프레임을 직접 먹인다.
-        sinks: StdMutex<Vec<Arc<dyn OutputSink>>>,
+        /// 배선된 수신구 보관 — 테스트가 턴 신호를 직접 넣는다.
+        probes: StdMutex<Vec<Arc<TurnProbe>>>,
         /// 로스터 현재 epoch(fix 6 검증용). 없는 id 는 부재(None) 취급.
-        current: StdMutex<std::collections::HashMap<AgentId, u32>>,
+        current: StdMutex<std::collections::HashMap<PeerId, u32>>,
         /// Some(e) 면 **subscribe 진입 직후** 현재 epoch 을 e 로 바꾼다(1회) — attach 사전 검증과 구독 사이에
         ///   재시작이 끼는 창(round-3 finding 5)을 결정적으로 재현한다. 운영 host 는 같은 지점에서 현재
         ///   epoch 을 재확인하므로, 이 hook 이 그 검증을 실제로 구동한다.
@@ -714,7 +621,7 @@ mod tests {
                 calls: StdMutex::new(Vec::new()),
                 fail: StdMutex::new(false),
                 panic_in_subscribe: StdMutex::new(false),
-                sinks: StdMutex::new(Vec::new()),
+                probes: StdMutex::new(Vec::new()),
                 current: StdMutex::new(std::collections::HashMap::new()),
                 flip_at_subscribe: StdMutex::new(None),
             })
@@ -728,23 +635,28 @@ mod tests {
         fn set_panic(&self, v: bool) {
             *self.panic_in_subscribe.lock().unwrap() = v;
         }
-        fn set_current(&self, id: AgentId, epoch: u32) {
+        fn set_current(&self, id: PeerId, epoch: u32) {
             self.current.lock().unwrap().insert(id, epoch);
         }
         /// subscribe 진입 직후 현재 epoch 을 바꾸도록 무장(attach 사전검증↔구독 사이 재시작 모사).
         fn arm_epoch_flip_at_subscribe(&self, epoch: u32) {
             *self.flip_at_subscribe.lock().unwrap() = Some(epoch);
         }
-        fn last_sink(&self) -> Arc<dyn OutputSink> {
-            self.sinks.lock().unwrap().last().cloned().expect("no sink")
+        fn last_probe(&self) -> Arc<TurnProbe> {
+            self.probes
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("no probe")
         }
     }
     impl TapHost for FakeTapHost {
         fn subscribe_output(
             &self,
-            id: AgentId,
+            id: PeerId,
             expect_epoch: u32,
-            sink: Arc<dyn OutputSink>,
+            probe: Arc<TurnProbe>,
         ) -> Result<(), SubscribeError> {
             self.calls.lock().unwrap().push(id);
             // 재시작 창 모사(1회) — 운영 host 와 같은 지점에서 현재 epoch 을 재확인한다.
@@ -753,7 +665,7 @@ mod tests {
             }
             let current = self.current.lock().unwrap().get(&id).copied();
             if current != Some(expect_epoch) {
-                // 운영 host 는 여기서 방금 만든 구독을 회수한다 — fake 는 애초에 sink 를 보관하지 않는다.
+                // 운영 host 는 여기서 방금 만든 구독을 회수한다 — fake 는 애초에 수신구를 보관하지 않는다.
                 return Err(SubscribeError::StaleEpoch { current });
             }
             if *self.panic_in_subscribe.lock().unwrap() {
@@ -762,10 +674,10 @@ mod tests {
             if *self.fail.lock().unwrap() {
                 return Err(SubscribeError::Failed("fake: agent gone".to_string()));
             }
-            self.sinks.lock().unwrap().push(sink);
+            self.probes.lock().unwrap().push(probe);
             Ok(())
         }
-        fn current_epoch(&self, id: AgentId) -> Option<u32> {
+        fn current_epoch(&self, id: PeerId) -> Option<u32> {
             self.current.lock().unwrap().get(&id).copied()
         }
     }
@@ -781,36 +693,11 @@ mod tests {
     fn attach_live(
         t: &Arc<BusyTracker>,
         h: &Arc<FakeTapHost>,
-        id: AgentId,
+        id: PeerId,
         epoch: u32,
     ) -> AttachOutcome {
         h.set_current(id, epoch);
         t.attach(id, epoch)
-    }
-
-    /// 이벤트 하나를 tap 에 먹인다(pump 가 하는 일 모사).
-    fn feed(sink: &Arc<dyn OutputSink>, id: AgentId, epoch: u32, ev: &OutputEvent) {
-        sink.send(OutputFrame {
-            agent_id: id,
-            epoch,
-            seq: 1,
-            payload: OutputPayload::Event(ev),
-        })
-        .expect("tap 은 항상 Ok");
-    }
-
-    fn delta() -> OutputEvent {
-        OutputEvent::TextDelta {
-            text: "x".into(),
-            turn_id: None,
-            message_id: None,
-        }
-    }
-    fn done() -> OutputEvent {
-        OutputEvent::MessageDone {
-            turn_id: None,
-            message_id: None,
-        }
     }
 
     #[test]
@@ -818,7 +705,7 @@ mod tests {
         // ★폴백 불변식(ADR-0104)★: 관측 근거가 없으면 busy 가 아니다(= 즉시 주입).
         let (t, _h, _n) = tracker();
         assert!(
-            !t.is_busy(AgentId::new_v4(), 0),
+            !t.is_busy(PeerId::new_v4(), 0),
             "미관측 대상은 idle 취급(관측 불가 백엔드 즉시 주입 폴백)"
         );
     }
@@ -826,83 +713,13 @@ mod tests {
     #[test]
     fn delta_marks_busy_and_done_marks_idle() {
         let (t, _h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         t.mark_attached_for_test(id, 0); // 양성 attach 게이트(fix 9) 통과.
-        let tap = t.tap_for_test();
-        feed(&tap, id, 0, &delta());
+        let tap = t.probe_for_test();
+        tap.on_progress(id, 0);
         assert!(t.is_busy(id, 0), "TextDelta = 턴 진행 관측 → busy");
-        feed(&tap, id, 0, &done());
+        tap.on_turn_done(id, 0);
         assert!(!t.is_busy(id, 0), "MessageDone = 턴 종료 → idle");
-    }
-
-    #[test]
-    fn tool_call_and_structured_user_echo_mark_busy() {
-        // Structured 포함이 load-bearing: claude 는 **입력 시점 유저 에코**를 Structured 로 낸다 —
-        //   대시보드 사용자 직접 입력으로 시작된 턴(MessagingService 우회)도 이걸로 잡힌다.
-        let (t, _h, _n) = tracker();
-        let a = AgentId::new_v4();
-        let b = AgentId::new_v4();
-        t.mark_attached_for_test(a, 0);
-        t.mark_attached_for_test(b, 0);
-        let tap = t.tap_for_test();
-        feed(
-            &tap,
-            a,
-            0,
-            &OutputEvent::ToolCall {
-                name: "Bash".into(),
-                args_json: "{}".into(),
-                id: None,
-                turn_id: None,
-                message_id: None,
-            },
-        );
-        feed(
-            &tap,
-            b,
-            0,
-            &OutputEvent::Structured {
-                kind: "user".into(),
-                json: "{}".into(),
-            },
-        );
-        assert!(t.is_busy(a, 0), "ToolCall → busy");
-        assert!(t.is_busy(b, 0), "Structured(유저 에코) → busy");
-    }
-
-    #[test]
-    fn usage_and_error_do_not_change_state() {
-        let (t, _h, _n) = tracker();
-        let id = AgentId::new_v4();
-        t.mark_attached_for_test(id, 0);
-        let tap = t.tap_for_test();
-        // idle 상태에서 Usage/Error → 여전히 idle.
-        feed(
-            &tap,
-            id,
-            0,
-            &OutputEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-                turn_id: None,
-            },
-        );
-        feed(&tap, id, 0, &OutputEvent::Error("stream hiccup".into()));
-        assert!(!t.is_busy(id, 0), "Usage/Error 는 턴 시작 신호가 아니다");
-        // busy 상태에서 Usage/Error → 여전히 busy(종료 신호는 MessageDone 뿐).
-        feed(&tap, id, 0, &delta());
-        feed(
-            &tap,
-            id,
-            0,
-            &OutputEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-                turn_id: None,
-            },
-        );
-        feed(&tap, id, 0, &OutputEvent::Error("stream hiccup".into()));
-        assert!(t.is_busy(id, 0), "Usage/Error 는 턴 종료가 아니다");
     }
 
     #[test]
@@ -911,12 +728,14 @@ mod tests {
         //   어시스턴트 이벤트 없이 곧장 끝나는 턴에서 통지가 빠지면 파킹이 다음 턴까지 stranded 되므로,
         //   잉여 통지(빈 큐 drain = no-op)를 택했다. 채널 압력은 ws.rs 의 id 별 coalescing 이 묶는다.
         let (t, _h, n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         t.mark_attached_for_test(id, 0);
-        let tap = t.tap_for_test();
-        for ev in [delta(), done(), delta(), done(), done()] {
-            feed(&tap, id, 0, &ev);
-        }
+        let tap = t.probe_for_test();
+        tap.on_progress(id, 0);
+        tap.on_turn_done(id, 0);
+        tap.on_progress(id, 0);
+        tap.on_turn_done(id, 0);
+        tap.on_turn_done(id, 0);
         assert!(!t.is_busy(id, 0), "마지막 관측이 MessageDone → idle");
         assert_eq!(
             n.seen(),
@@ -930,19 +749,19 @@ mod tests {
         // ★fix 9 회귀★: 부착 표시가 없는 키의 busy 관측은 무시된다. 이게 없으면 rotation 후 살아남은
         //   옛 core 의 잔여 이벤트가 아무도 지우지 않는 유령 busy 를 되살릴 수 있다(TTL 까지 배달 정지).
         let (t, _h, n) = tracker();
-        let id = AgentId::new_v4();
-        let tap = t.tap_for_test(); // 부착 표시 없음.
-        feed(&tap, id, 0, &delta());
+        let id = PeerId::new_v4();
+        let tap = t.probe_for_test(); // 부착 표시 없음.
+        tap.on_progress(id, 0);
         assert!(
             !t.is_busy(id, 0),
             "미부착 키의 turn 관측은 표에 들어가지 않는다(양성 게이트)"
         );
         // 종료 관측은 게이트를 걸지 않는다(제거·통지는 잉여여도 안전 — 누락이 치명).
-        feed(&tap, id, 0, &done());
+        tap.on_turn_done(id, 0);
         assert_eq!(n.seen(), vec![id], "미부착이어도 종료 통지는 나간다");
         // 부착되면 그때부터 관측이 반영된다.
         t.mark_attached_for_test(id, 0);
-        feed(&tap, id, 0, &delta());
+        tap.on_progress(id, 0);
         assert!(t.is_busy(id, 0), "부착 후에는 busy 관측 반영");
     }
 
@@ -952,16 +771,16 @@ mod tests {
         //   지연 이벤트는 (id, 0) 을 되살리지 못해야 한다 — 되살아나면 그 항목은 MessageDone 도 Detach 도
         //   지우지 않는다(Detach 는 id 전체를 지우고 끝난 뒤라서).
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         assert_eq!(attach_live(&t, &h, id, 0), AttachOutcome::Attached);
-        let old_tap = h.last_sink();
-        feed(&old_tap, id, 0, &delta());
+        let old_probe = h.last_probe();
+        old_probe.on_progress(id, 0);
         assert!(t.is_busy(id, 0), "부착 중엔 정상 관측");
         // 재시작(epoch 1) → 부착 표시가 epoch 1 로 교체되고 옛 busy 표시는 청소된다.
         assert_eq!(attach_live(&t, &h, id, 1), AttachOutcome::Attached);
         assert!(!t.is_busy(id, 0));
         // 옛 core 의 잔여 이벤트 — 게이트가 막는다.
-        feed(&old_tap, id, 0, &delta());
+        old_probe.on_progress(id, 0);
         assert!(
             !t.is_busy(id, 0),
             "rotation 후 옛 epoch 이벤트는 busy 를 되살리지 못한다"
@@ -973,13 +792,13 @@ mod tests {
         // ★fix 6 회귀★: Attach 는 채널을 타고 오므로 집행 시점에 stale 할 수 있다 — 현재 epoch 과
         //   다르면 붙지 않는다(유령 부착/중복 tap 금지). 현재 epoch 용 Attach 가 뒤따라 온다.
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         h.set_current(id, 2); // 실제로는 이미 epoch 2.
         assert_eq!(t.attach(id, 1), AttachOutcome::Stale, "stale epoch = skip");
         assert_eq!(h.call_count(), 0, "subscribe 자체를 시도하지 않는다");
         assert_eq!(t.attached_len(), 0, "부착 표시도 남기지 않는다");
         // 부재(reap 완료)도 같은 판정.
-        assert_eq!(t.attach(AgentId::new_v4(), 0), AttachOutcome::Stale);
+        assert_eq!(t.attach(PeerId::new_v4(), 0), AttachOutcome::Stale);
         // 현재 epoch 이면 정상 부착.
         assert_eq!(t.attach(id, 2), AttachOutcome::Attached);
         assert_eq!(h.call_count(), 1);
@@ -992,7 +811,7 @@ mod tests {
         //   빠지지 않는다) ② 부착 표시는 옛 epoch 이라 그 tap 의 관측이 전부 버려지고 ③ 뒤이은 정상
         //   attach 가 sink 를 하나 더 붙여 통지가 중복됐다. 이제 Stale 로 접고 표시도 남기지 않는다.
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         h.set_current(id, 0); // 사전 검증은 통과(현재 epoch 0).
         h.arm_epoch_flip_at_subscribe(1); // 구독 진입 직후 epoch 1 로 교체.
         assert_eq!(
@@ -1013,10 +832,10 @@ mod tests {
         //   영구화해 그 수신자 앞 배달을 TTL 까지 막는다. 상한 sweep 이 표를 지우고 **도어벨을 눌러야**
         //   대기 메일이 나간다(지우기만 하면 다음 트리거가 없어 그대로 앉아 있다).
         let (t, _h, n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         t.mark_attached_for_test(id, 0);
-        let tap = t.tap_for_test();
-        feed(&tap, id, 0, &delta()); // busy 관측(해제 통지는 오지 않는다).
+        let tap = t.probe_for_test();
+        tap.on_progress(id, 0); // busy 관측(해제 통지는 오지 않는다).
         assert!(t.is_busy(id, 0));
         // 상한 이전 = 청소하지 않는다(정상 진행 중인 턴을 자르면 턴 중 주입이 된다).
         assert_eq!(
@@ -1041,7 +860,7 @@ mod tests {
         //   갱신되므로 "출력이 계속 오는 턴" 은 늙지 않는다. 갱신이 없으면(턴 시작 시각 고정) 30분 넘게
         //   도는 정상 턴이 잘려 턴 중 주입이 된다.
         let (t, _h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         t.mark_attached_for_test(id, 0);
         let t0 = Instant::now();
         t.mark_busy_at_for_test(id, 0, t0);
@@ -1065,8 +884,8 @@ mod tests {
         // 잉여 도어벨은 무해하지만(빈 큐 no-op) 신선한 busy 를 함께 지우면 그건 **턴 중 주입**이다 — 늙은
         //   항목만 청소하고 그 id 만 깨운다.
         let (t, _h, n) = tracker();
-        let stale = AgentId::new_v4();
-        let fresh = AgentId::new_v4();
+        let stale = PeerId::new_v4();
+        let fresh = PeerId::new_v4();
         t.mark_attached_for_test(stale, 0);
         t.mark_attached_for_test(fresh, 0);
         let t0 = Instant::now();
@@ -1088,7 +907,7 @@ mod tests {
         //   tap 없이 돌고(중복 접힘) 양성 게이트 때문에 busy 도 못 찍힌다 = 게이트가 조용히 사라짐.
         //   Drop 가드가 되돌리는지 본다. (이 테스트는 의도된 패닉 메시지를 출력한다.)
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         h.set_current(id, 0);
         h.set_panic(true);
         let t2 = t.clone();
@@ -1111,10 +930,10 @@ mod tests {
         // epoch 교체(재스폰) = 새 OutputCore. 옛 epoch 의 busy 가 새 epoch 판정에 새면 새 incarnation 앞
         //   메일이 근거 없이 대기한다 — 키에 epoch 을 넣어 구조적으로 막는다.
         let (t, _h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         t.mark_attached_for_test(id, 0);
-        let tap = t.tap_for_test();
-        feed(&tap, id, 0, &delta());
+        let tap = t.probe_for_test();
+        tap.on_progress(id, 0);
         assert!(t.is_busy(id, 0));
         assert!(
             !t.is_busy(id, 1),
@@ -1125,7 +944,7 @@ mod tests {
     #[test]
     fn attach_dedups_same_id_epoch_and_resubscribes_on_epoch_bump() {
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         assert_eq!(attach_live(&t, &h, id, 0), AttachOutcome::Attached);
         assert_eq!(t.attach(id, 0), AttachOutcome::AlreadyAttached);
         assert_eq!(t.attach(id, 0), AttachOutcome::AlreadyAttached);
@@ -1146,10 +965,10 @@ mod tests {
         // 재시작(epoch bump)하면 옛 incarnation 의 busy 표시는 무의미하다 — 남겨 두면 항목이 누적되고,
         //   같은 epoch 이 재사용되는 상황(맵 교체 순서)에서 근거 없는 busy 로 오판할 수 있다.
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         attach_live(&t, &h, id, 0);
-        let tap = t.tap_for_test();
-        feed(&tap, id, 0, &delta());
+        let tap = t.probe_for_test();
+        tap.on_progress(id, 0);
         assert!(t.is_busy(id, 0));
         // 재스폰(epoch 1)로 재부착 → 옛 epoch 의 busy 표시 소멸.
         attach_live(&t, &h, id, 1);
@@ -1163,7 +982,7 @@ mod tests {
         //   스냅샷을 무효화해 재시도를 열어야 한다 — fix 8a). 표시가 남으면 그 (id, epoch) 는 영영 tap 없이
         //   idle 폴백으로만 돈다.
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         h.set_fail(true);
         assert_eq!(attach_live(&t, &h, id, 0), AttachOutcome::Failed);
         assert_eq!(h.call_count(), 1);
@@ -1176,14 +995,14 @@ mod tests {
 
     #[test]
     fn attached_tap_drives_state_through_host() {
-        // attach 로 붙은 sink 가 실제로 이 tracker 의 상태를 갱신하는지(make_tap↔shared 배선 확인).
+        // attach 로 배선된 수신구가 실제로 이 tracker 의 상태를 갱신하는지(make_probe↔shared 배선 확인).
         let (t, h, n) = tracker();
-        let id = AgentId::new_v4();
+        let id = PeerId::new_v4();
         attach_live(&t, &h, id, 2);
-        let sink = h.last_sink();
-        feed(&sink, id, 2, &delta());
+        let probe = h.last_probe();
+        probe.on_progress(id, 2);
         assert!(t.is_busy(id, 2));
-        feed(&sink, id, 2, &done());
+        probe.on_turn_done(id, 2);
         assert!(!t.is_busy(id, 2));
         assert_eq!(n.seen(), vec![id]);
     }
@@ -1192,14 +1011,14 @@ mod tests {
     fn forget_clears_state_and_attachment_for_departed_agent() {
         // 로스터 이탈(죽음) → busy 플래그와 부착 표시 청소. 안 지우면 죽은 수신자 앞 파킹이 영영 대기한다.
         let (t, h, _n) = tracker();
-        let id = AgentId::new_v4();
-        let other = AgentId::new_v4();
+        let id = PeerId::new_v4();
+        let other = PeerId::new_v4();
         attach_live(&t, &h, id, 0);
         attach_live(&t, &h, other, 0);
         // 부착 표시는 (id,0)·(other,0) 2개. epoch 0 관측으로 둘 다 busy.
-        let tap = t.tap_for_test();
-        feed(&tap, id, 0, &delta());
-        feed(&tap, other, 0, &delta());
+        let tap = t.probe_for_test();
+        tap.on_progress(id, 0);
+        tap.on_progress(other, 0);
         assert!(t.is_busy(id, 0) && t.is_busy(other, 0));
 
         t.forget(id);
@@ -1215,23 +1034,6 @@ mod tests {
     fn always_idle_gate_never_reports_busy() {
         // 폴백 게이트 — 게이트 미배선 조립이 C1 과 동일하게(즉시 주입) 돌게 하는 안전 기본값.
         let g = AlwaysIdleGate;
-        assert!(!g.is_busy(AgentId::new_v4(), 7));
-    }
-
-    #[test]
-    fn terminal_bytes_payload_is_ignored() {
-        // 비-structured 경로 방어 — Bytes payload 는 턴 경계 정보가 없다(상태 불변).
-        let (t, _h, _n) = tracker();
-        let id = AgentId::new_v4();
-        t.mark_attached_for_test(id, 0);
-        let tap = t.tap_for_test();
-        tap.send(OutputFrame {
-            agent_id: id,
-            epoch: 0,
-            seq: 1,
-            payload: OutputPayload::Bytes(b"raw vt bytes"),
-        })
-        .expect("항상 Ok");
-        assert!(!t.is_busy(id, 0));
+        assert!(!g.is_busy(PeerId::new_v4(), 7));
     }
 }

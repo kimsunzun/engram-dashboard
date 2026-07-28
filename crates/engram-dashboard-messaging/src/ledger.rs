@@ -19,7 +19,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use engram_dashboard_core::agent::types::AgentId;
+use crate::PeerId;
 
 /// 이력 링버퍼 용량 — 초과 시 가장 오래된 레코드부터 evict(spec §5 "이력 링버퍼").
 ///
@@ -144,26 +144,26 @@ struct RequestEntry {
     request_id: String,
     /// 요청 발신자 이름(타임아웃 notice 를 받을 대상 — spec §3 "발신자에게"). **발송 시점의** 표시 이름이다.
     sender: String,
-    /// ★요청 발신자의 AgentId(C3 리뷰 fix 2 — load-bearing)★: 이름은 발송 후 바뀔 수 있고(display_name
+    /// ★요청 발신자의 PeerId(C3 리뷰 fix 2 — load-bearing)★: 이름은 발송 후 바뀔 수 있고(display_name
     ///   변경), 그러면 이름-키 파킹만으로는 notice 가 옛 이름 큐에 갇혀 **영영 배달되지 않는다**(통지는
     ///   `notified` 라 재발화도 없다 = 계약이 조용히 반쪽). id 를 함께 들고 있으면 상위가 그걸 파킹 힌트로
     ///   실어 이름과 무관하게 그 incarnation 으로 배달할 수 있다.
-    sender_id: AgentId,
+    sender_id: PeerId,
     /// 요청 수신자(누가 회신해야 하나 — 관측/보고용).
     recipient: String,
-    /// ★해석된 수신자 AgentId(D 리뷰 B1 — load-bearing)★: 발송 시점에 수신자가 **산 에이전트로 해석됐으면**
-    /// 그 AgentId. 부재 파킹(아직 안 뜬 이름·죽은 이름)이면 `None`.
+    /// ★해석된 수신자 PeerId(D 리뷰 B1 — load-bearing)★: 발송 시점에 수신자가 **산 에이전트로 해석됐으면**
+    /// 그 PeerId. 부재 파킹(아직 안 뜬 이름·죽은 이름)이면 `None`.
     ///
-    /// ★왜 이름만으로는 안 되나★: 같은 이름의 산 에이전트가 둘일 때(동명 다수) 발신자는 exact AgentId 로
+    /// ★왜 이름만으로는 안 되나★: 같은 이름의 산 에이전트가 둘일 때(동명 다수) 발신자는 exact PeerId 로
     ///   지목해 한쪽에만 request 를 보낼 수 있는데, 계약은 이름(`recipient`)으로만 기록됐다 — 그러면
     ///   **메시지를 받은 적도 없는 쌍둥이**가 미결 조회에서 그 의무를 자기 것으로 본다(잘못된 의무 귀속).
     ///   id 를 함께 붙들면 "누가 답해야 하나" 를 정확히 가를 수 있다.
-    /// ★epoch 는 담지 않는다★: 같은 에이전트의 재시작은 AgentId 를 유지하고 epoch 만 올린다(ADR-0007) —
+    /// ★epoch 는 담지 않는다★: 같은 에이전트의 재시작은 PeerId 를 유지하고 epoch 만 올린다(ADR-0007) —
     ///   재시작한 그 에이전트는 여전히 답할 주체이므로 epoch 로 좁히면 의무가 부당하게 사라진다.
     /// ★None 의 의미 = 이름 폴백★: 아직 뜨지 않은 이름 앞으로 건 request 는 나중에 그 이름으로 등장한
     ///   에이전트가 답할 주체다(WYSIWYA — ADR-0101). 그래서 id 가 없으면 이름으로만 매칭한다.
     // 리뷰 B1
-    recipient_id: Option<AgentId>,
+    recipient_id: Option<PeerId>,
     /// 회신 기한 = (발송 기준 오프셋, **발신자가 쓴 표기 원본**). `None` = 기한 없음(타임아웃 없음).
     ///
     /// ★왜 표기를 함께 보관하나(C3 리뷰 fix 6)★: 예전엔 Duration 만 두고 통지 문구를 만들 때 상위가 표기를
@@ -341,7 +341,7 @@ pub struct DueTimeout {
     pub sender: String,
     /// ★notice 배달용 발신자 id(C3 리뷰 fix 2)★ — 이름이 바뀌었어도 이 id 로 배달 경로를 찾는다
     ///   (`RequestEntry.sender_id` 주석). 상위가 파킹 힌트 + flush 도어벨 대상으로 쓴다.
-    pub sender_id: AgentId,
+    pub sender_id: PeerId,
     /// 회신하지 않은 수신자(notice 문구용).
     pub recipient: String,
     /// ★초과된 기한의 **표기 원본**(C3 리뷰 fix 6 — notice 문구용)★: spec §1 notice 템플릿이
@@ -364,12 +364,12 @@ pub struct OpenRequestView {
     pub request_id: String,
     /// 요청 발신자 이름(발송 시점 표시 이름).
     pub sender: String,
-    /// 요청 발신자의 AgentId — 미결 조회가 "내가 건 요청" 을 **이름이 아니라 id 로** 가르는 축(리뷰 B1).
-    pub sender_id: AgentId,
+    /// 요청 발신자의 PeerId — 미결 조회가 "내가 건 요청" 을 **이름이 아니라 id 로** 가르는 축(리뷰 B1).
+    pub sender_id: PeerId,
     /// 요청 수신자 이름 — 회신 의무를 진 쪽.
     pub recipient: String,
-    /// 해석된 수신자 AgentId(부재 파킹이면 None) — 동명 다수에서 의무를 정확히 귀속시키는 축(리뷰 B1).
-    pub recipient_id: Option<AgentId>,
+    /// 해석된 수신자 PeerId(부재 파킹이면 None) — 동명 다수에서 의무를 정확히 귀속시키는 축(리뷰 B1).
+    pub recipient_id: Option<PeerId>,
     /// 발신자가 쓴 기한 표기 원본(`"10m"`). 기한 없는 request 는 None.
     pub reply_by_raw: Option<String>,
     /// 계약 오픈(발송) 시각 — 상위가 `now` 와 빼서 경과를 만든다(장부는 벽시계를 모른다).
@@ -585,16 +585,16 @@ impl Ledger {
     // round-2 리뷰 F1 / 사용자 결정 2026-07-27
     /// ★인자 `reply_by` = (기한, 표기 원본)★: 표기는 통지 문구에 그대로 쓰인다(`DueTimeout.reply_by_raw`).
     ///   튜플로 묶어 "기한이 있으면 표기도 있다" 를 타입으로 강제한다(둘이 어긋날 여지 자체를 없앤다).
-    /// ★인자 `recipient_id`(D 리뷰 B1)★: 발송 시점에 수신자가 산 에이전트로 **해석됐으면** 그 AgentId,
+    /// ★인자 `recipient_id`(D 리뷰 B1)★: 발송 시점에 수신자가 산 에이전트로 **해석됐으면** 그 PeerId,
     ///   부재 파킹이면 `None`. 동명 다수에서 회신 의무를 정확히 귀속시키는 축이다(`RequestEntry.recipient_id`).
     #[allow(clippy::too_many_arguments)]
     pub fn open_request(
         &mut self,
         request_id: &str,
         sender: &str,
-        sender_id: AgentId,
+        sender_id: PeerId,
         recipient: &str,
-        recipient_id: Option<AgentId>,
+        recipient_id: Option<PeerId>,
         reply_by: Option<(Duration, String)>,
         now: Instant,
     ) -> OpenOutcome {
@@ -721,17 +721,17 @@ impl Ledger {
     /// ★실제 배달된 수신자로 계약의 `recipient_id` 를 고쳐 박는다(round-2 리뷰 F2 · load-bearing)★.
     /// 그런 계약이 없으면(통보였거나 이미 닫힘) no-op.
     ///
-    /// ★막는 것 = 배달자/의무자 불일치★: exact AgentId 로 건 request 가 그 순간 busy 라 **이름 키**로
+    /// ★막는 것 = 배달자/의무자 불일치★: exact PeerId 로 건 request 가 그 순간 busy 라 **이름 키**로
     ///   파킹되면, 봉투는 이름 큐에 놓이고 id 는 힌트일 뿐이다. 그 뒤 A 가 죽고 같은 이름의 B 가 뜨면
     ///   flush 의 이름 폴백이 **B 에게 배달**한다(단일 발송은 재스폰 이어받기가 기능이다 — ADR-0101).
     ///   그런데 계약의 `recipient_id` 는 여전히 A 라, id 기준 매처(`matches_contract_party`)에서 B 의 미결
     ///   조회는 그 의무를 **못 본다** — 봉투를 실제로 받은 쪽이 "답할 게 없다" 고 읽는 최악의 조합이다.
     ///   그래서 **봉투가 실제로 꽂힌 시점**(pending→delivered 전이 자리, 착지 incarnation 을 아는 유일한
     ///   지점)에 의무를 그 수신자에게 옮긴다 — "의무는 봉투를 받은 자를 따른다".
-    /// ★epoch 은 담지 않는다★: 같은 에이전트의 재시작은 AgentId 를 유지한다(ADR-0007) — 의무는 유지돼야 한다.
+    /// ★epoch 은 담지 않는다★: 같은 에이전트의 재시작은 PeerId 를 유지한다(ADR-0007) — 의무는 유지돼야 한다.
     /// ★닫힌 계약은 건드리지 않는다★: 이미 회신이 온 계약의 상대를 뒤늦게 바꾸면 이력이 오염된다.
     // round-2 리뷰 F2
-    pub fn rebind_request_recipient(&mut self, request_id: &str, delivered_to: AgentId) {
+    pub fn rebind_request_recipient(&mut self, request_id: &str, delivered_to: PeerId) {
         if let Some(r) = self
             .requests
             .iter_mut()
@@ -1032,9 +1032,9 @@ mod tests {
         Instant::now()
     }
 
-    /// 발신자 AgentId(fix 2) — 대부분의 단언은 값 자체를 안 보므로 매번 새로 뽑는다.
-    fn sid() -> AgentId {
-        AgentId::new_v4()
+    /// 발신자 PeerId(fix 2) — 대부분의 단언은 값 자체를 안 보므로 매번 새로 뽑는다.
+    fn sid() -> PeerId {
+        PeerId::new_v4()
     }
 
     /// 기한 튜플(fix 6) — 표기는 Duration 에서 만든 게 아니라 **발신자가 쓴 것**이라는 전제를 테스트에서도

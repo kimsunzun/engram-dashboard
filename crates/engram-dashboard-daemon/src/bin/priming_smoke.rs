@@ -32,14 +32,15 @@ use engram_dashboard_core::agent::types::{
 };
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
-use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::priming::{
     FilePrimingProvider, PrimingProvider, PrimingVariant,
 };
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
-use engram_dashboard_daemon::messaging::service::MessagingService;
+use engram_dashboard_daemon::messaging_host::messaging_for_manager;
+use engram_dashboard_messaging::envelope::Entrance;
 
 /// 스폰 후 목록 등장 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -137,10 +138,7 @@ async fn run() -> i32 {
     ));
     slot.set(manager.clone());
     // C1: MessagingService 조립 후 슬롯 주입(handle_send 위임 경로). 이 스모크는 산 수신자 = delivered.
-    let messaging = Arc::new(MessagingService::for_manager(
-        manager.clone(),
-        registry.clone(),
-    ));
+    let messaging = Arc::new(messaging_for_manager(manager.clone(), registry.clone()));
     messaging_slot.set(messaging.clone());
 
     // 모델 핀 — 인자 없으면 sonnet(빠르고 저렴, 파일럿과 동일 계열). 첫 인자로 override 가능.

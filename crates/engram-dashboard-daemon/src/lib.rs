@@ -15,9 +15,10 @@ pub mod control;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 pub mod instance;
-// ADR-0103/0104: S18 메시징 v1 순수 데이터 구조(mailbox·ledger·groups). 오케스트레이션(MessagingService)
-//   은 후속 increment — 여기선 모듈만 등록해 컴파일에 태운다(단위 테스트도 함께 돈다).
-pub mod messaging;
+// ADR-0110: 메시징 커널은 별도 lib crate(`engram-dashboard-messaging`)로 분리됐다. 여기 남는 건
+//   호스트 어댑터 + 조립실 — 커널 포트(DeliveryPort·ControlPlanePort·TapHost)에 AgentManager·
+//   ControlRegistry 실물을 꽂는 유일한 자리다.
+pub mod messaging_host;
 pub mod portfile;
 pub mod ws;
 
@@ -522,7 +523,7 @@ pub async fn run() -> Result<(), i32> {
         flush_tx,
         idle_coalescer.clone(),
     ));
-    let busy = Arc::new(messaging::busy::BusyTracker::for_manager(
+    let busy = Arc::new(messaging_host::busy_tracker_for_manager(
         manager.clone(),
         idle_notifier.clone(),
     ));
@@ -533,7 +534,7 @@ pub async fn run() -> Result<(), i32> {
     //    C2 리뷰 fix 11: flush 도어벨(같은 채널)도 주입 — 자가치유·FIFO 합류의 배치 blocking write 가
     //    발신 스레드(MCP/HTTP 워커)에서 실행되지 않게 flush 레인으로 넘긴다.
     let messaging = Arc::new(
-        messaging::service::MessagingService::for_manager_gated(
+        messaging_host::messaging_for_manager_gated(
             manager.clone(),
             control_registry.clone(),
             busy.clone(),
@@ -836,13 +837,13 @@ async fn start_test_server_inner(
         flush_tx,
         idle_coalescer.clone(),
     ));
-    let busy = Arc::new(messaging::busy::BusyTracker::for_manager(
+    let busy = Arc::new(messaging_host::busy_tracker_for_manager(
         manager.clone(),
         idle_notifier.clone(),
     ));
     // 서비스 주입(manager 를 감싸므로 조립 후). WS 테스트에선 파킹이 없어 flush 는 사실상 no-op.
     messaging_slot.set(Arc::new(
-        messaging::service::MessagingService::for_manager_gated(
+        messaging_host::messaging_for_manager_gated(
             manager.clone(),
             control_registry.clone(),
             busy.clone(),

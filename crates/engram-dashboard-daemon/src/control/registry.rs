@@ -25,13 +25,27 @@ use std::sync::{Arc, RwLock};
 
 use engram_dashboard_core::agent::types::AgentId;
 
-use super::ingress::{DeliveryObservation, DeliveryObserver, EnvelopeFormat};
+// ADR-0110: 봉투 포맷·배달 관측 어휘는 메시징 커널 crate 소유(옛 자리는 control::ingress).
+use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, EnvelopeFormat};
 
 /// 검증 성공 시 되돌리는 신원 — 토큰이 묶인 (AgentId, epoch). `from` 파생의 단일 출처(ADR-0086).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundIdentity {
     pub agent_id: AgentId,
     pub epoch: u32,
+}
+
+/// ★제어 채널 신원 → 메시징 커널 신원(ADR-0110 경계 번역)★ — 2필드 복사. 커널은 "토큰이 묶였다" 는
+///   호스트 인증 개념을 알 이유가 없어 자기 값 타입(`SenderIdentity`)을 쓴다. 이 impl 이 경계에서
+///   그 둘을 잇는 **유일한 지점**이다(입구가 `cmd.from.into()` 로 넘긴다).
+// ADR-0110
+impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
+    fn from(b: BoundIdentity) -> Self {
+        Self {
+            peer_id: b.agent_id,
+            epoch: b.epoch,
+        }
+    }
 }
 
 /// (AgentId, epoch)별 제어 채널 토큰 레지스트리. 데몬이 1개 소유(Arc 공유). 내부 RwLock —

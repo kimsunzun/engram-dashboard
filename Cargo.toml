@@ -1,12 +1,15 @@
 # Cargo workspace 루트 (S12 phase 1). 정적 링크.
-# 멤버: protocol(경계 계약) · core(에이전트 코어, Tauri import 0) · src-tauri(Embedded 앱).
-# daemon(별도 bin)은 phase 2 에서 추가.
+# 멤버 6: protocol(경계 계약) · core(에이전트 코어, Tauri import 0) · discovery(데몬 발견) ·
+#   messaging(메시징 커널 — 워크스페이스 crate 무의존, ADR-0110) · daemon(에이전트 호스트 + 조립실) ·
+#   src-tauri(데몬 클라이언트 셸).
 [workspace]
 resolver = "2"
 members = [
     "crates/engram-dashboard-protocol",
     "crates/engram-dashboard-core",
     "crates/engram-dashboard-discovery",
+    # ADR-0110: 메시징 커널 lib(워크스페이스 crate 무의존 — 완전 상호무지).
+    "crates/engram-dashboard-messaging",
     "crates/engram-dashboard-daemon",
     "src-tauri",
 ]

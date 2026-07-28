@@ -154,15 +154,18 @@ flowchart BT
   protocol["protocol [lib]<br/>앱↔데몬 공용 언어(명령·이벤트 타입 + 프레임 codec + ts-rs)"]
   core["core [lib]<br/>에이전트 엔진(tauri import 0, seam: transport/backend/control)"]
   discovery["discovery [lib]<br/>데몬 찾기/띄우기 + default_data_dir 단일결정"]
-  daemon["daemon [lib+exe]<br/>AgentManager 소유 + WS 서버 + MCP 제어 서버(S17)<br/>+ 단일인스턴스 + 포트파일 · bin: daemon / engram-send"]
+  messaging["messaging [lib]<br/>메시징 커널(메일박스·장부·그룹·봉투·발송·busy 게이트)<br/>워크스페이스 crate 무의존 — 접합은 포트 trait 뿐(ADR-0110)"]
+  daemon["daemon [lib+exe]<br/>AgentManager 소유 + WS 서버 + MCP 제어 서버(S17)<br/>+ 메시징 호스트 어댑터/조립실(messaging_host)<br/>+ 단일인스턴스 + 포트파일 · bin: daemon / engram-send"]
 
   core -->|"의존"| protocol
   daemon -->|"의존"| core
   discovery -->|"의존"| protocol
   daemon -->|"의존"| discovery
+  daemon -->|"의존"| messaging
 ```
 
-- 여전히 **5 멤버**(protocol·core·discovery·daemon·src-tauri). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram-send` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
+- **6 멤버**(protocol·core·discovery·messaging·daemon·src-tauri). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram-send` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
+- **messaging(6번째 멤버, 2026-07-28 · ADR-0110)** 은 위 그래프에서 **화살표가 나가지 않는 유일한 lib** 이다 — core 조차 의존하지 않는다(컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다.
 
 ### core 클래스 구조 (소유 관계)
 

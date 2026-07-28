@@ -303,13 +303,13 @@ impl ChannelIdleNotifier {
     }
 }
 
-impl crate::messaging::busy::IdleNotifier for ChannelIdleNotifier {
+impl engram_dashboard_messaging::busy::IdleNotifier for ChannelIdleNotifier {
     fn notify_idle(&self, id: AgentId) {
         self.enqueue(id);
     }
 }
 
-impl crate::messaging::service::FlushTrigger for ChannelIdleNotifier {
+impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
     fn request_flush(&self, id: AgentId) {
         self.enqueue(id);
     }
@@ -712,7 +712,7 @@ const FLUSH_JOIN_BELT: Duration = Duration::from_secs(5);
 ///   관점 idle 폴백(positive-knowledge-only)이라 배달이 막히지는 않는다.
 ///   JoinError 가 Cancelled 인 경우(런타임 종료)도 같은 처리 — 종료 중에 재시도할 이유가 없다.
 async fn handle_attach(wiring: &FlushWiring, id: AgentId, epoch: u32) {
-    use crate::messaging::busy::AttachOutcome;
+    use engram_dashboard_messaging::busy::AttachOutcome;
     let busy = wiring.busy.clone();
     // subscribe = 코어 subscribers 락 구간 → runtime worker 를 굶기지 않게 blocking pool 로.
     //   live-only 구독이라 링 replay 는 0건이고, 이 호출은 자식 프로세스에 의존하지 않는다(유계).
@@ -812,7 +812,7 @@ pub struct FlushWiring {
     /// MessagingService 늦은 주입 슬롯(manager 조립 후에 채워진다).
     pub messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     /// 턴 관측 tracker — Attach/Detach 집행 대상.
-    pub busy: Arc<crate::messaging::busy::BusyTracker>,
+    pub busy: Arc<engram_dashboard_messaging::busy::BusyTracker>,
     /// 로스터 diff 시퀀싱 상태 — attach 실패 시 스냅샷 무효화(재시도 개방)용으로 공유한다.
     pub diff: Arc<RosterDiff>,
     /// Idle coalescing 집합 — 통지 측(ChannelIdleNotifier)과 공유(집어들 때 해제).
@@ -2071,7 +2071,7 @@ mod tests {
     fn idle_coalescer_folds_pending_notifications_until_taken() {
         // ★fix 10★: 같은 id 의 미처리 Idle 은 하나로 접힌다(MessageDone 폭풍의 채널 압력 상한). 소비자가
         //   집어들면(taken) 다시 열려 이후 통지가 큐에 들어간다 — 그래서 lost wakeup 이 없다.
-        use crate::messaging::busy::IdleNotifier;
+        use engram_dashboard_messaging::busy::IdleNotifier;
         let (tx, mut rx) = mpsc::unbounded_channel::<FlushMsg>();
         let coalescer = Arc::new(IdleCoalescer::new());
         let notifier = ChannelIdleNotifier::new(tx, coalescer.clone());
@@ -2096,7 +2096,7 @@ mod tests {
     fn service_doorbell_shares_the_idle_channel_and_coalescing() {
         // 서비스 도어벨(FlushTrigger)과 tap 의 턴 종료 통지는 **같은 메시지**로 나간다 — 결과가 같기
         //   때문이다("그 id 의 파킹 큐를 flush"). 그래서 coalescing 도 함께 받는다.
-        use crate::messaging::service::FlushTrigger;
+        use engram_dashboard_messaging::service::FlushTrigger;
         let (tx, mut rx) = mpsc::unbounded_channel::<FlushMsg>();
         let coalescer = Arc::new(IdleCoalescer::new());
         let notifier = ChannelIdleNotifier::new(tx, coalescer.clone());
@@ -2107,8 +2107,7 @@ mod tests {
     }
 
     // ── 9b. flush worker: attach 패닉 격리(round-3 finding 6) + 2-레인 소유/종료(finding 1) ──────────
-    use crate::messaging::busy::{BusyTracker, SubscribeError, TapHost};
-    use engram_dashboard_core::agent::types::OutputSink as CoreOutputSink;
+    use engram_dashboard_messaging::busy::{BusyTracker, SubscribeError, TapHost, TurnProbe};
 
     /// subscribe 마다 **패닉**하는 TapHost — core `subscribe_from` 이 sink 를 push 한 **뒤** replay 락
     ///   `expect` 에서 패닉하는 실제 형태를 모사한다(그 상태에선 sink 가 이미 등록돼 있고 subscribers 락이
@@ -2121,7 +2120,7 @@ mod tests {
             &self,
             _id: AgentId,
             _expect_epoch: u32,
-            _sink: Arc<dyn CoreOutputSink>,
+            _probe: Arc<TurnProbe>,
         ) -> Result<(), SubscribeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             panic!("fake: subscribe panicked (의도된 패닉 — 재시도 금지 검증)");
@@ -2140,7 +2139,7 @@ mod tests {
             &self,
             _id: AgentId,
             _expect_epoch: u32,
-            _sink: Arc<dyn CoreOutputSink>,
+            _probe: Arc<TurnProbe>,
         ) -> Result<(), SubscribeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(SubscribeError::Failed("fake: gone".to_string()))
@@ -2152,7 +2151,7 @@ mod tests {
 
     /// 통지를 버리는 IdleNotifier(이 테스트들은 부착 정책만 본다).
     struct SinkNotifier;
-    impl crate::messaging::busy::IdleNotifier for SinkNotifier {
+    impl engram_dashboard_messaging::busy::IdleNotifier for SinkNotifier {
         fn notify_idle(&self, _id: AgentId) {}
     }
 

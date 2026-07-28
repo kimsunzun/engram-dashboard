@@ -36,7 +36,7 @@ use engram_dashboard_daemon::control::mcp_server::{
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
-use engram_dashboard_daemon::messaging::service::MessagingService;
+use engram_dashboard_messaging::service::MessagingService;
 
 struct NoopSink;
 impl StatusSink for NoopSink {
@@ -109,7 +109,7 @@ async fn wire(
     McpServerHandle,
     Arc<MessagingService>,
     // C2: idle 게이트 관측기 — c2 테스트가 턴 이벤트를 직접 먹여(tap_for_test) busy/idle 을 구동한다.
-    Arc<engram_dashboard_daemon::messaging::busy::BusyTracker>,
+    Arc<engram_dashboard_messaging::busy::BusyTracker>,
 ) {
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
@@ -173,7 +173,7 @@ async fn wire(
         idle_coalescer.clone(),
     ));
     let busy = Arc::new(
-        engram_dashboard_daemon::messaging::busy::BusyTracker::for_manager(
+        engram_dashboard_daemon::messaging_host::busy_tracker_for_manager(
             manager.clone(),
             idle_notifier.clone(),
         ),
@@ -182,8 +182,12 @@ async fn wire(
     //   C2: idle 게이트를 함께 주입(busy 수신자 → 파킹) + flush 도어벨(fix 11 — 자가치유 배치 write 를
     //   발신 스레드에서 떼어 flush 레인으로 넘긴다). 운영 배선과 동일하게 유지한다.
     let messaging = Arc::new(
-        MessagingService::for_manager_gated(manager.clone(), registry.clone(), busy.clone())
-            .with_flush_trigger(idle_notifier),
+        engram_dashboard_daemon::messaging_host::messaging_for_manager_gated(
+            manager.clone(),
+            registry.clone(),
+            busy.clone(),
+        )
+        .with_flush_trigger(idle_notifier),
     );
     messaging_slot.set(messaging.clone());
     // finding 5 + fix 3: 2-레인 flush worker(운영과 동일 배선) — 생애주기는 main lane, 배달은 flush 레인.
@@ -453,8 +457,9 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
 //   json claude 스폰에 의존(loud skip).
 #[tokio::test]
 async fn control_send_revoked_sender_still_delivers_observation() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("revoked-delivers").await;
@@ -535,10 +540,10 @@ async fn control_send_revoked_sender_still_delivers_observation() {
 //   json 수신자로 end-to-end(실 encoder/transport) 경로까지 관측이 성립함을 확인한다(있으면 실행, 없으면
 //   loud skip). 두 축이 상보적이다 — seam=바이너리 독립 core, gated=실경로 e2e.
 struct DeliveryCapture {
-    seen: Arc<Mutex<Vec<engram_dashboard_daemon::control::ingress::DeliveryObservation>>>,
+    seen: Arc<Mutex<Vec<engram_dashboard_messaging::envelope::DeliveryObservation>>>,
 }
-impl engram_dashboard_daemon::control::ingress::DeliveryObserver for DeliveryCapture {
-    fn observe(&self, obs: engram_dashboard_daemon::control::ingress::DeliveryObservation) {
+impl engram_dashboard_messaging::envelope::DeliveryObserver for DeliveryCapture {
+    fn observe(&self, obs: engram_dashboard_messaging::envelope::DeliveryObservation) {
         self.seen.lock().unwrap().push(obs);
     }
 }
@@ -720,8 +725,9 @@ mod obs_seam {
 #[tokio::test]
 async fn control_send_delivery_observation_via_seam_no_claude() {
     use engram_dashboard_core::agent::backend::InputEncoder;
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-seam-ok").await;
 
@@ -788,7 +794,7 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     assert!(obs.is_delivered(), "is_delivered() = true");
     assert_eq!(obs.to_id, b_id, "레코드 수신자 AgentId");
     assert_eq!(obs.to_name, to_name, "레코드 수신자 이름(fallback)");
-    assert_eq!(obs.from, from, "레코드 발신자 신원(토큰 파생)");
+    assert_eq!(obs.from, from.into(), "레코드 발신자 신원(토큰 파생)");
 
     // ★계층 관통(exact bytes)★: 세션이 실제 받은 write 바이트 = encoder(봉투, msg_uuid). XML 봉투의 `"` 는
     //   stream-json JSON 인코딩에서 `\"` 로 이스케이프되므로 raw 봉투 문자열 substring 비교는 성립하지
@@ -823,10 +829,9 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
 //   장부에 request 를 미리 열지 않고 임의 id 로 reply_to 를 실어도 관측 축만 독립적으로 확인할 수 있다.
 #[tokio::test]
 async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
-    use engram_dashboard_daemon::control::ingress::{
-        handle_send, ControlCommand, Entrance, SendContract,
-    };
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-reply-to").await;
 
@@ -878,8 +883,9 @@ async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
 
 #[tokio::test]
 async fn control_send_plain_send_has_no_in_reply_to_no_claude() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("obs-plain-no-reply").await;
@@ -936,10 +942,9 @@ async fn control_send_plain_send_has_no_in_reply_to_no_claude() {
 //   돌려줘야 한다(관측을 켰다는 이유로 ACK 유실 → 발신자 재시도 → 중복 배달, 이 회귀를 막는다).
 #[tokio::test]
 async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
-    use engram_dashboard_daemon::control::ingress::{
-        handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance,
-    };
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 
     struct PanicObserver;
     impl DeliveryObserver for PanicObserver {
@@ -985,8 +990,9 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
 //   bytes_written=None, msg_uuid=None, is_delivered()==false — "don't swallow failure as success" 증거.
 #[tokio::test]
 async fn control_send_delivery_failure_observation_records_error_not_success() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-fail").await;
 
@@ -1043,7 +1049,7 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
     );
     // 상관 축(수신자·발신자)은 실패 레코드에도 실린다.
     assert_eq!(obs.to_id, b_id, "실패 레코드 수신자 AgentId");
-    assert_eq!(obs.from, from, "실패 레코드 발신자 신원");
+    assert_eq!(obs.from, from.into(), "실패 레코드 발신자 신원");
 
     manager.kill_agent(b_id).ok();
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -1052,8 +1058,9 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
 
 #[tokio::test]
 async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("delivery-obs").await;
 
@@ -1131,7 +1138,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
     // 수신자 신원/이름도 실렸는지.
     assert_eq!(obs.to_id, b_info.id, "레코드 수신자 AgentId");
     assert_eq!(obs.to_name, "obs-target", "레코드 수신자 이름");
-    assert_eq!(obs.from, from, "레코드 발신자 신원(토큰 파생)");
+    assert_eq!(obs.from, from.into(), "레코드 발신자 신원(토큰 파생)");
 
     manager.kill_agent(b_info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -1189,8 +1196,9 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 #[tokio::test]
 async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     use engram_dashboard_core::agent::backend::InputEncoder;
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
     use std::sync::Barrier;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
@@ -1297,7 +1305,7 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     // msg_uuid → 관측 레코드(정확 봉투 재구성용). 성공 레코드는 msg_uuid Some.
     let by_uuid: std::collections::HashMap<
         uuid::Uuid,
-        &engram_dashboard_daemon::control::ingress::DeliveryObservation,
+        &engram_dashboard_messaging::envelope::DeliveryObservation,
     > = obs_records
         .iter()
         .filter_map(|o| o.msg_uuid.map(|u| (u, o)))
@@ -1413,8 +1421,9 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
 #[tokio::test]
 async fn stage1_body_size_boundary_bytes_not_chars() {
     use engram_dashboard_core::agent::backend::InputEncoder;
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     const MAX: usize = 64 * 1024; // = MAX_BODY_BYTES(ingress 상수 — 여기 미러; 값 드리프트 시 아래가 잡는다).
 
@@ -1441,7 +1450,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         body: String,
     ) -> (
         serde_json::Value,
-        Option<engram_dashboard_daemon::control::ingress::DeliveryObservation>,
+        Option<engram_dashboard_messaging::envelope::DeliveryObservation>,
         Vec<u8>,
         usize,   // 봉투(wrap_message) 의 기대 바이트 길이
         Vec<u8>, // 기대 encoded stream-json 라인(성공 시 재구성, 실패 시 빈 Vec)
@@ -1631,8 +1640,9 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
 ///   배달 없음)이다 — 관측은 실제 inject 에서만 생긴다. 이 두 성질(파킹 접수 + 관측 0)을 함께 못 박는다.
 #[tokio::test]
 async fn stage1_lifecycle_recipient_absent_parks_pending_no_observation() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-absent").await;
@@ -1689,8 +1699,9 @@ async fn stage1_lifecycle_recipient_absent_parks_pending_no_observation() {
 //   가능하나, 이 헬퍼는 다수 동기 테스트가 공유하므로 여기선 런타임 flavor 로만 격리 — 최소 변경.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_park_then_spawn_auto_delivers() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("c1-park-spawn").await;
@@ -1742,8 +1753,8 @@ async fn c1_park_then_spawn_auto_delivers() {
     // 등장 flush 는 spawn 이 emit 하는 agent_list_updated 에서 발동한다. 배달 관측이 뜰 때까지 폴링.
     let delivered = wait_until(Duration::from_secs(5), || {
         seen.lock().unwrap().iter().any(
-            |o: &engram_dashboard_daemon::control::ingress::DeliveryObservation| {
-                o.to_name == target_name && o.from.agent_id == sender && o.is_delivered()
+            |o: &engram_dashboard_messaging::envelope::DeliveryObservation| {
+                o.to_name == target_name && o.from.peer_id == sender && o.is_delivered()
             },
         )
     });
@@ -1771,9 +1782,10 @@ async fn c1_park_then_spawn_auto_delivers() {
 //   블로킹 폴링이다 — c1 테스트와 같은 사유(현재 스레드를 붙잡으면 worker 가 폴링될 틈이 없다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
-    use engram_dashboard_daemon::messaging::ledger::DeliveryStatus;
+    use engram_dashboard_messaging::envelope::Entrance;
+    use engram_dashboard_messaging::ledger::DeliveryStatus;
 
     let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-idle-gate").await;
 
@@ -1797,7 +1809,8 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     // ★양성 attach 게이트(C2 리뷰 fix 9)★: 부착 표시가 없는 키의 busy 관측은 무시된다(rotation 후
     //   유령 busy 방지). 하네스 tap 도 그 게이트를 통과해야 하므로 부착 표시만 등록한다(subscribe 없이).
     busy.mark_attached_for_test(b_id, 0);
-    let tap = busy.tap_for_test();
+    let tap =
+        engram_dashboard_daemon::messaging_host::turn_tap_sink_for_test(busy.probe_for_test());
     let feed = |ev: &OutputEvent| {
         tap.send(OutputFrame {
             agent_id: b_id,
@@ -1916,9 +1929,10 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
 //   배달되는지를 본다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_tap_is_live_only_and_never_bootstraps_busy_from_replay() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
-    use engram_dashboard_daemon::messaging::busy::AttachOutcome;
+    use engram_dashboard_messaging::busy::AttachOutcome;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-live-only").await;
 
@@ -2000,8 +2014,9 @@ async fn c2_tap_is_live_only_and_never_bootstraps_busy_from_replay() {
 //   레인에선 panic 으로 승격 — silent skip 금지 정책 정합). 그 축의 결정적 커버리지는 위 테스트가 갖는다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-live").await;
 
@@ -2084,7 +2099,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     // 4) 턴 종료(claude 의 result 라인)를 기다린다 → idle 트리거 → 파킹분 배달.
     let delivered = wait_until(Duration::from_secs(90), || {
         seen.lock().unwrap().iter().any(
-            |o: &engram_dashboard_daemon::control::ingress::DeliveryObservation| {
+            |o: &engram_dashboard_messaging::envelope::DeliveryObservation| {
                 o.msg_id == msg2 && o.is_delivered()
             },
         )
@@ -2125,8 +2140,9 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
 ///     `physical_pipe_partial_write_then_err_surfaces_as_err`(prefix 쓴 뒤에도 WriteFailed 로 표면화).
 #[tokio::test]
 async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-write-err").await;
@@ -2228,8 +2244,9 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
         AgentId as CoreAgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent,
         ModelCaps, OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
     };
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
     use std::sync::atomic::AtomicU8;
 
     // 로컬 seam transport — obs_seam 의 것과 동형이나 여기선 epoch 별로 **다른 캡처 버퍼**를 심어야
@@ -2428,8 +2445,9 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
         AgentId as CoreAgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent,
         ModelCaps, OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
     };
-    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
     // epoch 별 다른 캡처 버퍼를 심어 incarnation 을 구분한다(오라클 5 의 EpochSeam 과 동형, 인라인).
@@ -2801,11 +2819,10 @@ async fn group_add(base: &str, bearer: &str, group: &str, members: &[&str]) {
 
 #[tokio::test]
 async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
-    use engram_dashboard_daemon::control::ingress::{
-        handle_send, ControlCommand, Entrance, SendContract,
-    };
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
-    use engram_dashboard_daemon::messaging::ledger::DeliveryStatus;
+    use engram_dashboard_messaging::envelope::Entrance;
+    use engram_dashboard_messaging::ledger::DeliveryStatus;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("c3-roundtrip").await;
 
@@ -2924,10 +2941,9 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
 //   flush 관측 테스트들과 같은 flavor 를 쓴다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
-    use engram_dashboard_daemon::control::ingress::{
-        handle_send, ControlCommand, Entrance, SendContract,
-    };
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("c3-timeout").await;
 
@@ -3121,7 +3137,7 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
 //   여기서 확인할 건 **실제 입구가 그 판정을 실제로 태우는지**(런타임 포맷 전환이 발송 반려로 이어지는지)다.
 #[tokio::test]
 async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
-    use engram_dashboard_daemon::control::ingress::EnvelopeFormat;
+    use engram_dashboard_messaging::envelope::EnvelopeFormat;
 
     let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("c3-colon").await;
     let sender = AgentId::new_v4();
@@ -3949,7 +3965,8 @@ async fn d_group_membership_change_does_not_cancel_an_already_parked_broadcast()
 
     // 턴 tap 을 직접 붙여 busy/idle 을 구동한다(c2 테스트와 같은 하네스 seam — 실 claude 불요).
     busy.mark_attached_for_test(member_id, 0);
-    let tap = busy.tap_for_test();
+    let tap =
+        engram_dashboard_daemon::messaging_host::turn_tap_sink_for_test(busy.probe_for_test());
     let feed = |ev: &OutputEvent| {
         tap.send(OutputFrame {
             agent_id: member_id,

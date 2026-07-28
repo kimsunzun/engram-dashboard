@@ -51,9 +51,9 @@ use engram_dashboard_protocol::{
 
 use tokio::sync::watch;
 
-use crate::control::ingress::EnvelopeFormat as CoreEnvelopeFormat;
 use crate::control::registry::ControlRegistry;
 use crate::ws::{ConnId, ConnRegistry};
+use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
 //

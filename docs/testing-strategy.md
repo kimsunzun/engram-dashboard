@@ -45,6 +45,13 @@
 - 실행: `cargo test -p engram-dashboard-core` (단위 55 + 통합 3).
 - 격리 게이트: `rg "use tauri" crates/engram-dashboard-core/src/`(0) · `rg "engram_dashboard_protocol" .../src/`(0).
 
+### messaging (`crates/engram-dashboard-messaging`) — 2026-07-28 신설(ADR-0110)
+- **① 단위**: `src/` 내 279건(mailbox 파킹·TTL, ledger 이력/회신 계약, groups 해석, envelope 렌더·이스케이프, service 3분기/flush/sweep, busy 게이트 상태머신). 전부 clock injection(주입 `now`)이라 실시간 sleep 0.
+- **격리 하네스 = crate 경계 그 자체**: 이 crate 는 워크스페이스 crate 무의존(ADR-0110 결정 2)이라 `AgentManager`·PTY·Tauri 없이 단독으로 돈다 — 외부 의존은 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TapHost`·`IdleNotifier`·`FlushTrigger`)의 fake 로만 들어온다.
+- 실행: `cargo test -p engram-dashboard-messaging`.
+- 격리 게이트: `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` → 0.
+- **호스트 어댑터는 daemon 쪽 테스트**: 출력 이벤트→턴 신호 분류(`messaging_host::TurnTapSink`)·배달 어댑터는 백엔드 지식이라 daemon crate 단위 테스트가 덮는다.
+
 ### daemon (`crates/engram-dashboard-daemon`)
 - **① 단위**: `src/` 내 25건(instance/portfile/ws 변환·OriginCheck 등).
 - **② in-process WS E2E**: `tests/ws_e2e.rs` 47건 — 데몬 WS 서버를 127.0.0.1:0 + MemProfileStore 로 in-process 기동하고 tokio-tungstenite 클라로 전 경로(auth/구독/replay/resume/truncated/epoch/backpressure/dispatch 전 command/keepalive/lease/resize 협상) 검증.
@@ -85,6 +92,7 @@
 cargo test                                  # workspace 전체 단위+통합
 cargo test -p engram-dashboard-protocol     # ~32 (단위+golden+ts_export)
 cargo test -p engram-dashboard-core         # 단위55 + 통합3(headless/transport_smoke/session_smoke, 실 PTY)
+cargo test -p engram-dashboard-messaging    # 279 (메시징 커널 단위 — 워크스페이스 crate 무의존, ADR-0110)
 cargo test -p engram-dashboard-daemon       # 단위25 + ws_e2e47 (+ignored 3)
 cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture  # 실프로세스 3
 cargo clippy --workspace --all-targets -- -D warnings

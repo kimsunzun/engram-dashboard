@@ -1,0 +1,23 @@
+[package]
+name = "engram-dashboard-messaging"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 메시징 커널 — 메일박스·장부·그룹·발송 오케스트레이션·busy 게이트·봉투. 워크스페이스 crate 무의존(ADR-0110 완전 상호무지)."
+
+[lib]
+name = "engram_dashboard_messaging"
+path = "src/lib.rs"
+
+# ★test-harness (ADR-0110 — 데몬 전달형에서 독립 선언으로 승격)★: 하네스 전용 관찰 seam
+#   (서비스/메일박스/그룹/busy 의 `#[cfg(any(test, feature = "test-harness"))]` 항목)을 여는 기능 플래그.
+#   기본 OFF — 운영 빌드는 이 seam 들을 아예 컴파일하지 않는다. 데몬의 같은-이름 기능이 이리로 전이한다.
+[features]
+test-harness = []
+
+# ★의존성 상한(load-bearing — ADR-0110 결정 2 "완전 상호무지")★: 워크스페이스 crate 를 **하나도**
+#   넣지 않는다(core 포함). 외부 의존도 uuid·tracing 둘로 고정 — 그 밖은 std 로 푼다. 여기에 crate 를
+#   추가하려는 충동이 들면 그건 포트를 파야 한다는 신호다(호스트가 어댑터로 꽂는다).
+[dependencies]
+# 참여자 id(PeerId)·메시지 id 생성. core/protocol 과 동일 1.x(AgentId=Uuid 와 같은 바닥 타입).
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"

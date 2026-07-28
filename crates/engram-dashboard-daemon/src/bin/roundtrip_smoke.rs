@@ -177,14 +177,13 @@ use engram_dashboard_core::agent::types::{
 };
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
-use engram_dashboard_daemon::control::ingress::{
-    handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance, SendContract,
-};
+use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
 use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::priming::{FilePrimingProvider, PrimingProvider};
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
-use engram_dashboard_daemon::messaging::service::MessagingService;
+use engram_dashboard_daemon::messaging_host::messaging_for_manager;
+use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 
 /// 스폰 후 목록 등장 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -407,7 +406,7 @@ impl CapturingObserver {
         let recs = self.records.lock().unwrap();
         recs.get(baseline..)?
             .iter()
-            .find(|r| r.from.agent_id == from_id && r.to_id == to_id)
+            .find(|r| r.from.peer_id == from_id && r.to_id == to_id)
             .cloned()
     }
 
@@ -436,7 +435,7 @@ impl CapturingObserver {
             .map(|slice| {
                 slice
                     .iter()
-                    .filter(|r| r.from.agent_id == from_id && r.to_id == to_id)
+                    .filter(|r| r.from.peer_id == from_id && r.to_id == to_id)
                     .cloned()
                     .collect()
             })
@@ -708,10 +707,7 @@ async fn run() -> i32 {
     // C1: MessagingService 조립(발송 3분기·flush) — manager 를 DeliveryPort 로 감싼다. 이 하네스는
     //   flush sink 를 배선하지 않으므로(NoopStatus) 파킹 시나리오는 handle_single_send 직접 경로만 탄다.
     //   씨앗 A→B 는 산 수신자라 delivered 경로.
-    let messaging = Arc::new(MessagingService::for_manager(
-        manager.clone(),
-        registry.clone(),
-    ));
+    let messaging = Arc::new(messaging_for_manager(manager.clone(), registry.clone()));
     messaging_slot.set(messaging.clone());
 
     // ── A·B 스폰(둘 다 실 primed claude, stream-json, Fresh) ─────────────────────────

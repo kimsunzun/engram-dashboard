@@ -48,9 +48,7 @@ use engram_dashboard_core::agent::types::{
 };
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
-use engram_dashboard_daemon::control::ingress::{
-    handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance,
-};
+use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, ManagerSlot, McpServerHandle,
 };
@@ -66,6 +64,7 @@ use engram_dashboard_daemon::experiment::record::{
     ProbeRecord, Record, StallRecord, SummaryRecord, SuspectedCompactionRecord, TurnRecord,
     UsageSnapshot,
 };
+use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 // ★트랜스크립트 탭(ADR-0090 Fix 1)★: 우리가 통제하는 세션 id(ADR-0008)로 claude 가 디스크에 남기는 raw
 //   세션 JSONL 을 best-effort 로 읽어 실 usage(cache 항 합)·모델 id·compact 마커를 보강한다. 탭 부재는
 //   하네스를 실패시키지 않는다 — 문자 추정으로 폴백. record.rs 의 raw 파서(parse_init_model/event_type_key/
@@ -451,7 +450,7 @@ struct RunDriveCtx<'a> {
     manager: &'a Arc<AgentManager>,
     registry: &'a Arc<ControlRegistry>,
     /// C1: 발송 3분기 담당(do_injection → handle_send). Wiring.messaging 참조.
-    messaging: &'a Arc<engram_dashboard_daemon::messaging::service::MessagingService>,
+    messaging: &'a Arc<engram_dashboard_messaging::service::MessagingService>,
     agent: &'a AgentInfo,
     obs: &'a Arc<TurnObserver>,
     delivery_seen: &'a Arc<Mutex<Vec<DeliveryObservation>>>,
@@ -802,7 +801,7 @@ struct Wiring {
     manager: Arc<AgentManager>,
     registry: Arc<ControlRegistry>,
     /// C1: 발송 3분기 담당(handle_send 에 넘긴다). manager 를 감싼 서비스.
-    messaging: Arc<engram_dashboard_daemon::messaging::service::MessagingService>,
+    messaging: Arc<engram_dashboard_messaging::service::MessagingService>,
     mcp_handle: McpServerHandle,
     data_dir: PathBuf,
     /// ★finding 9★: per-run profile/preset 임시 dir(cleanup 이 이것도 제거해야 함 — 이전엔 누수).
@@ -855,7 +854,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     slot.set(manager.clone());
     // C1: MessagingService 조립 후 슬롯 주입. 파일럿은 handle_send 직접 호출 경로만 쓴다(산 수신자).
     let messaging = Arc::new(
-        engram_dashboard_daemon::messaging::service::MessagingService::for_manager(
+        engram_dashboard_daemon::messaging_host::messaging_for_manager(
             manager.clone(),
             registry.clone(),
         ),
@@ -1355,7 +1354,7 @@ enum InjectOutcome {
 fn do_injection(
     manager: &Arc<AgentManager>,
     registry: &Arc<ControlRegistry>,
-    messaging: &Arc<engram_dashboard_daemon::messaging::service::MessagingService>,
+    messaging: &Arc<engram_dashboard_messaging::service::MessagingService>,
     obs: &Arc<TurnObserver>,
     agent_id: AgentId,
     agent_epoch: u32,

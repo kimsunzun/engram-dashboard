@@ -150,14 +150,15 @@ claude 전용 인자(`--session-id`/`--resume`)는 `backend/claude.rs` 한 곳�
 - **참조 = 패턴 차용이지 코드 복붙 아님** — 그대로 옮길 때만 라이선스 법무 확인. 클론 소스: `I:\Engram_Workspace\references\`(git 추적 밖).
 - **특정 도구를 조사 앵커로 선정하지 않는다(사용자 결정 2026-07-26)** — 참조 도구 목록을 여기 박으면 후속 조사가 그 목록에 앵커링돼 직접 피어를 놓친다(M3 실발생 2026-07-15). 과거 선정 이력은 ADR이 보존하되, 새 조사는 매번 넓게 서베이한다.
 
-## 백엔드 모듈 맵 (Cargo workspace — 5 멤버: protocol · core · discovery · daemon · src-tauri)
+## 백엔드 모듈 맵 (Cargo workspace — 6 멤버: protocol · core · discovery · messaging · daemon · src-tauri)
 > **개요만.** 파일별 책임은 코드/grep(`// ADR-` 앵커 포함)이 단일 출처 — 여기 베끼지 않는다(rot 방지). 불변식은 ↓ 핵심 불변식.
 
 **데이터 흐름(S10 추상화):** `AgentManager → AgentSession(= OutputCore + dyn AgentTransport)`. 출력·상태는 `OutputSink`/`StatusSink` trait으로만 흐른다(코어는 Tauri·전송 방식 모름). 종료 분류는 reaper 단일 소비자(ADR-0019).
 
 **crate 경계** (ADR-0029: 에이전트 호스트 = 데몬 프로세스):
 - **core** — 에이전트 코어(agent·persistence·logging), **tauri import 0**. seam: `transport`(`AgentTransport` — pty 실물/api 껍데기) · `backend`(CommandSpec·claude 인자 격리, ADR-0004).
-- **daemon** — `AgentManager` 소유, WS 서버, 단일 인스턴스 guard, portfile(`daemon.json`). 이벤트버스 single-push(ADR-0028).
+- **messaging** — 메시징 커널(mailbox·ledger·groups·envelope·service·busy). **워크스페이스 crate 무의존**(core 포함 — 컴파일러 강제 벽, ADR-0110). 접합은 lib이 소유한 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TapHost`·`IdleNotifier`·`FlushTrigger`)뿐이고, 실물 어댑터는 데몬(`messaging_host.rs`)이 소유한다.
+- **daemon** — `AgentManager` 소유, WS 서버, 단일 인스턴스 guard, portfile(`daemon.json`). 이벤트버스 single-push(ADR-0028). 메시징 호스트 어댑터·조립실(`messaging_host.rs`, ADR-0110).
 - **discovery** — 데몬 발견 순수 로직(no WMI/no sleep, seam) + `ensure_daemon` + `default_data_dir`(ADR-0024).
 - **protocol** — wire 계약(AgentCommand/Event/OutputChunk/DaemonInfo + codec + ts-rs).
 - **src-tauri** — 데몬 클라이언트 셸(창·트레이·discovery·로컬 command). 에이전트 in-proc 호스팅 X. tray = §5 LLM 제어 핸들.
@@ -185,8 +186,10 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 **Cargo workspace**: 멤버 구성은 위 모듈맵 참조. 코어(agent/persistence/logging)·tests/는 `crates/engram-dashboard-core`, `target/`는 워크스페이스 루트.
 - `cargo test -p engram-dashboard-core` — 코어 unit + 통합 테스트(실 PTY로 단언)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
+- `cargo test -p engram-dashboard-messaging` — 메시징 커널 단위(워크스페이스 crate 무의존 격리 하네스, ADR-0110)
 - `cargo build` (루트) — 전체 workspace 빌드
 - `cargo fmt --check` / `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트(검사형 `--check`)
+- `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
 - 프론트 게이트: `npm test`(vitest run) + `npx tsc --noEmit`(타입체크 — 별도 typecheck 스크립트 없음)
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E
 - 로그 ON: `RUST_LOG=debug` (기본 OFF=warn)

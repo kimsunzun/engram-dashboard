@@ -43,7 +43,7 @@ Windows에서는 저장소 루트의 `run-dashboard-clean.bat`(데몬 빌드 포
 
 ```bash
 # 멤버 열거형 사용(--workspace는 Windows에서 src-tauri 크래시) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)
-cargo test -p engram-dashboard-core -p engram-dashboard-protocol -p engram-dashboard-discovery -p engram-dashboard-daemon
+cargo test -p engram-dashboard-core -p engram-dashboard-protocol -p engram-dashboard-discovery -p engram-dashboard-messaging -p engram-dashboard-daemon
 npm test
 ```
 

@@ -18,7 +18,11 @@ path = "src/lib.rs"
 #   그러면 `cargo test -p engram-dashboard-daemon` 이 별도 --features 플래그 없이 hook 을 컴파일하고,
 #   운영 dep 그래프(무-feature)엔 유니피케이션되지 않는다.
 [features]
-test-harness = ["engram-dashboard-core/test-harness"]
+test-harness = [
+    "engram-dashboard-core/test-harness",
+    # ADR-0110: 메시징 커널이 자체 선언한 같은-이름 기능(하네스 seam)으로 전이한다.
+    "engram-dashboard-messaging/test-harness",
+]
 
 # 데몬 실행 진입점. AgentManager 를 daemon 프로세스가 소유하고, src-tauri(Embedded)와
 # 같은 core/protocol 을 공유한다. lib 의 run() 만 호출하는 thin entry.
@@ -65,6 +69,9 @@ engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # data_dir 단일 출처(ADR-0024) — embedded·daemon 이 같은 default_data_dir() 을 보게(순환 없음).
 engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
+# ADR-0110: 메시징 커널(lib). 이 crate 는 워크스페이스 crate 무의존 — 접합은 전부 포트 trait 이고
+#   실물 어댑터는 데몬 `src/messaging_host.rs` 가 소유한다.
+engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # WS 서버(step 4b): accept_hdr_async(Origin 콜백)/split/Message. rustls 등 TLS 불필요(로컬 평문 WS).
@@ -129,6 +136,9 @@ engram-dashboard-daemon = { path = ".", features = ["test-harness"] }
 #   운영 daemon 바이너리 의존 그래프(위 [dependencies] 의 무-feature core)엔 유니피케이션되지 않는다 —
 #   운영 빌드는 seam 을 컴파일하지 않는다(no-leak). (feature-only dev-dep 재선언 — path 는 위와 동일 crate.)
 engram-dashboard-core = { path = "../engram-dashboard-core", features = ["test-harness"] }
+# ★ADR-0110★: 같은 계열 — 통합 테스트가 메시징 커널의 하네스 seam(`probe_for_test`·`mark_attached_for_test`
+#   등)을 cross-crate 로 쓰므로 dev 그래프에서만 그 기능을 켠다(운영 daemon 바이너리엔 미유니피케이션).
+engram-dashboard-messaging = { path = "../engram-dashboard-messaging", features = ["test-harness"] }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # happy-path handshake(initialize + tools/list + tools/call)는 rmcp 클라이언트 role 로 정직하게 검증.
