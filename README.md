@@ -83,7 +83,6 @@ graph TB
 |---|---|
 | Claude Code | 지원 |
 | Codex | 예정 |
-| Gemini | 예정 |
 | API 기반 모델 (로컬 모델 포함) | 예정 |
 
 macOS·Linux는 당장 계획에 없지만, Windows 전용 코드가 격리되어 있어 구조상 가능성은 열어두었습니다.
