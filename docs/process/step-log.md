@@ -1251,6 +1251,7 @@
 - 인수 ② = 사용자 승인 후 진행 중(CLAUDE_CONFIG_DIR 샌드박스 — 격리 리다이렉션 실증 완료, 자격증명 사본은 권한 분류기 차단으로 사용자 직접 실행 대기). ④⑤ 잔여.
 
 ## 다음 (미진행)
+- **[리뷰 적출 2026-07-28] ADR-0086의 "SQLite 메일박스-first" 조항이 폐기 표시 없이 생존** — v1은 인메모리로 갔는데(0103) 0086엔 부분 폐기 스탬프가 없어, 0086만 여는 다음 세션이 무효 결정을 살아있는 것으로 읽을 수 있다(architecture-overview 리뷰 doc-aware 수호 적출). 처리 = `/adr supersede partial`(0103 또는 신규가 0086의 해당 조항 amend) — **폐기 판단은 사용자 결정** 후 실행.
 - **[flaky 실측 2026-07-28] ws_e2e `case09_slow_consumer_closed_others_unaffected` 부하 민감 간헐 실패** — CPU 부하(병행 콜드 빌드) 하 재현 확정(ws_e2e.rs:975 "느린 소비자 연결은 서버가 닫아야 함" assert), 무부하 12연속 통과. 당시 diff(하네스·관측 필드)와 무관 실증(ws.rs 무접촉). 수리 착수 시 ADR-0038 절차(`docs/reference/debugging-conventions.md` — 임계값 튜닝 금지·OSS 선례 조사) 적용. 재현법: 별도 CARGO_TARGET_DIR 콜드 빌드 병행 + `cargo test -p engram-dashboard-daemon --features test-harness --test ws_e2e`.
 - **[사용자 지시 2026-07-28] MCP Agent Mail 참조 조사** — 직접 피어(코딩 에이전트 메일함 MCP 서버, 2k★, pull 전용) 발견(위 감사). 스레딩·ack 설계 비교 + "메시징 계층의 독립 MCP 서비스 분리(외부 에이전트 접속)" 아이디어와 묶어 검토. 분리 시 제약: 푸시 배달(주입·busy 게이트)은 프로세스 소유권 필요 — 외부 에이전트에겐 pull 강등.
 - **[D 이월 2026-07-27] 메시징 잔여 결정·고도화 적립** — ① **grants(ADR-0094) 확장 여부 = 사용자 결정 필요**: `messages`/`group` 툴이 `--allowedTools` 목록에 의도적 미포함(발신 입구 아님) — 현재 스폰 권한 모드에선 무영향, **제약 레이어 도입 때 반드시 재결정**(코드 주석 플래그 있음) ② request 계약 은퇴의 발신자 통지 옵션(현재 데몬 로그만 — ADR-0108) ③ `outbound_pending` 축 id 인지(MessageRecord에 id 열 추가 — expected_rows가 선례) ④ 발신자별 request 상한(현재 전역 512 단일).
