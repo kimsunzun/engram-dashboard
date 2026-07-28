@@ -81,6 +81,21 @@ pub struct DeliveryObservation {
     /// write 실패 시 None(꽂힌 데 없으니 착지 epoch 도 없음 — msg_uuid/bytes_written 실패 시맨틱과 정합).
     /// ★완결성 판정 레버 아님★: `is_delivered()` 는 이 값을 보지 않는다(배달 유효성 게이트가 아니라 관측 축).
     pub to_epoch: Option<u32>,
+    /// ★회신 계약 관측(ADR-0088 확장 — roundtrip-smoke `--seed-request`)★: 이 배달이 어느 request 의
+    ///   회신인가 — 통보·request 발송이면 None.
+    ///   ★값의 진짜 출처 = 구조화 발신 메타, 텍스트에서 절대 파생하지 않는다(F1 리뷰 fix, load-bearing —
+    ///   보안)★: 이 필드는 `SendMeta.reply_to`(ingress `validate_contract` 가 이미 검증한 발신 인자)를
+    ///   관측 호출부(service.rs `observe_success`/`observe_failure`)가 **파라미터로 그대로 전달받아**
+    ///   채운다 — 렌더된 봉투 문자열을 다시 훑지 않는다. 옛 구현은 봉투 전체를 `in-reply-to="` 로
+    ///   substring 탐색했는데, 본문 이스케이프(`escape_xml_text`)가 `"` 를 이스케이프하지 않아 발신자가
+    ///   본문에 `in-reply-to="m-x..."` 같은 텍스트를 넣으면 관측이 위조됐다(재현됨) — 그래서 본문을 절대
+    ///   보지 않는 구조화 경로로 바꿨다. 그룹 방송은 reply_to 가 입구에서 이미 금지돼 있어(spec §4) 자연히
+    ///   None 이고, 콜론 포맷은 계약 필드 자체가 이 층에 오기 전에 반려된다(`contract_unsupported_by_envelope`)
+    ///   — 어느 쪽도 텍스트 파싱으로 판정하지 않는다.
+    ///   ★registry read accessor 를 추가하지 않는다(ADR-0088 HARD CONSTRAINT)★ — 새 조회 경로가 아니라
+    ///   호출부가 **이미 손에 쥔** 구조화 값(`SendMeta`/파킹 payload 의 `meta`)을 파라미터로 얹을 뿐이다
+    ///   (`observe_success`/`observe_failure` 시그니처에 파라미터 하나가 늘었을 뿐, registry 조회는 없다).
+    pub in_reply_to: Option<String>,
     /// write 결과 — 성공이면 None, 실패면 에러 문자열(PtyError Display). 실패를 성공으로 삼키지 않음의 증거.
     /// ★배달 완결성의 1차 증거는 이 필드다(바이트 비교 아님)★ — `None` = 세션 write_all 이 Ok.
     pub error: Option<String>,

@@ -1085,7 +1085,15 @@ impl MessagingService {
                                         );
                                     }
                                     self.observe_success(
-                                        msg_id, &target, from, entrance, &wrapped, &outcome,
+                                        msg_id,
+                                        &target,
+                                        from,
+                                        entrance,
+                                        &wrapped,
+                                        &outcome,
+                                        // 그룹 방송은 reply_to 가 입구에서 이미 금지돼 있다(spec §4) — 자연히
+                                        //   None. fanout_meta 에서 그대로 스레딩(구조화 출처, F1).
+                                        fanout_meta.reply_to.clone(),
                                     );
                                     GroupMemberResult {
                                         to: member,
@@ -1105,7 +1113,13 @@ impl MessagingService {
                                     //   같아야 한다. 원인은 `e`(= "epoch mismatch: …")가 hint 로 실어 나른다 —
                                     //   결말이 같으니 분기를 늘리지 않고 사유만 구분해 보여 준다.
                                     self.observe_failure(
-                                        msg_id, &target, from, entrance, &wrapped, &e,
+                                        msg_id,
+                                        &target,
+                                        from,
+                                        entrance,
+                                        &wrapped,
+                                        &e,
+                                        fanout_meta.reply_to.clone(),
                                     );
                                     {
                                         let mut st =
@@ -1390,7 +1404,16 @@ impl MessagingService {
                     );
                 }
                 // 관측 레코드(ADR-0088) — 락 밖에서 발행(registry.record_delivery 가 자체 규율).
-                self.observe_success(msg_id, &target, from, entrance, &wrapped, &outcome);
+                // in_reply_to = 이 발송의 SendMeta.reply_to 그대로(구조화 출처, F1 — 봉투 재파싱 없음).
+                self.observe_success(
+                    msg_id,
+                    &target,
+                    from,
+                    entrance,
+                    &wrapped,
+                    &outcome,
+                    meta.reply_to.clone(),
+                );
                 Ok(SendOutcome::Delivered)
             }
             Err(e) => {
@@ -1400,7 +1423,15 @@ impl MessagingService {
                 //   부재라 park 했으나 그 사이 등장)만 자가치유한다. inject 실패는 방금 그 incarnation 이
                 //   도달 불가해진 것이라, 같은 roster 로 즉시 재-flush 하면 깨진 수신자에 재주입을 반복할 수
                 //   있다(무한 재시도 위험). 실패분은 다음 **진짜** 등장(epoch bump)의 flush observer 에 맡긴다.
-                self.observe_failure(msg_id, &target, from, entrance, &wrapped, &e);
+                self.observe_failure(
+                    msg_id,
+                    &target,
+                    from,
+                    entrance,
+                    &wrapped,
+                    &e,
+                    meta.reply_to.clone(),
+                );
                 self.park_pending(
                     msg_id,
                     sender_name,
@@ -1932,6 +1963,8 @@ impl MessagingService {
                             name: recipient.to_string(),
                             epoch: outcome.epoch,
                         };
+                        // in_reply_to = 파킹 payload 가 실어 온 SendMeta.reply_to(구조화 출처, F1) — 늦은
+                        //   배달도 즉시 배달과 같은 파라미터 스레딩 규율(봉투 재파싱 없음).
                         self.observe_success(
                             &parked.msg_id,
                             &observed_target,
@@ -1939,6 +1972,7 @@ impl MessagingService {
                             payload.entrance,
                             &wrapped,
                             &outcome,
+                            payload.meta.reply_to.clone(),
                         );
                     }
                     Err(e) => {
@@ -2342,6 +2376,13 @@ impl MessagingService {
     }
 
     /// 성공 주입 관측 레코드 발행(ADR-0088) — 락 밖. registry.record_delivery 가 observer 규율을 갖는다.
+    ///
+    /// ★`in_reply_to` = 호출자가 넘긴 구조화 값(F1 리뷰 fix, load-bearing — 보안)★: 옛 구현은 렌더된 봉투
+    ///   문자열(`wrapped`)을 `in-reply-to="…"` 로 substring 탐색해 파생했는데, 본문 이스케이프
+    ///   (`escape_xml_text`)가 따옴표를 이스케이프하지 않아 발신자가 본문에 그 속성 문자열을 흉내 내
+    ///   넣으면 관측이 위조됐다(재현됨 — ingress.rs `DeliveryObservation.in_reply_to` 주석). 그래서 이제
+    ///   `wrapped` 는 파싱하지 않고, 호출부가 봉투를 조립할 때 이미 쓴 `SendMeta.reply_to`(ingress
+    ///   `validate_contract` 가 검증한 값)를 파라미터로 그대로 받는다 — 텍스트 재해석 없음.
     fn observe_success(
         &self,
         msg_id: &str,
@@ -2350,6 +2391,7 @@ impl MessagingService {
         entrance: Entrance,
         wrapped: &str,
         outcome: &WriteOutcome,
+        in_reply_to: Option<String>,
     ) {
         self.registry.record_delivery(DeliveryObservation {
             msg_id: msg_id.to_string(),
@@ -2361,6 +2403,7 @@ impl MessagingService {
             bytes_written: Some(outcome.bytes_written),
             msg_uuid: Some(outcome.msg_uuid),
             to_epoch: Some(outcome.epoch),
+            in_reply_to,
             error: None,
         });
         // 보안: body/토큰 미로깅 — 바이트 수·id 만.
@@ -2376,6 +2419,11 @@ impl MessagingService {
     }
 
     /// 실패 주입 관측 레코드 발행(ADR-0088) — 실패를 성공으로 삼키지 않음의 증거. 이후 상위가 파킹한다.
+    ///
+    /// ★`in_reply_to` = 구조화 값(F1 — `observe_success` 주석과 같은 이유)★: 파라미터로 받은 값을 그대로
+    ///   싣는다(봉투 재파싱 없음). write 가 실패해 실제로 도달하지 않았어도 "무엇에 대한 회신이었나"는
+    ///   발신 인자에서 이미 정해진 사실이라 그대로 기록한다 — 단 이 레코드는 `is_delivered()==false`
+    ///   이므로 완결성 판정 소비자는 이 값을 "회신이 갔다"의 증거로 쓰면 안 된다(호출자 규율).
     fn observe_failure(
         &self,
         msg_id: &str,
@@ -2384,6 +2432,7 @@ impl MessagingService {
         entrance: Entrance,
         wrapped: &str,
         err: &str,
+        in_reply_to: Option<String>,
     ) {
         self.registry.record_delivery(DeliveryObservation {
             msg_id: msg_id.to_string(),
@@ -2395,6 +2444,7 @@ impl MessagingService {
             bytes_written: None,
             msg_uuid: None,
             to_epoch: None,
+            in_reply_to,
             error: Some(err.to_string()),
         });
         tracing::warn!(

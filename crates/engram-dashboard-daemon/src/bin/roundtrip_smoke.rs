@@ -44,6 +44,77 @@
 //!   둘 다 test-only 노브(운영 스위치 아님)이고 CLI 입구(send_exe = engram-send 형제 빌드)가 필수다 — 없으면
 //!   SETUP-SKIP. 미지정이면 오늘 동작(MCP 경로)과 바이트 동일.
 //!
+//! ## 씨앗 계약·B 과제 노브 2종(위 CLI-only 노브와 독립적으로 조합 가능)
+//!   - **`--seed-request`**(+ 선택 `--seed-reply-by <dur>`, 예: `5m`) — 씨앗 A→B 를 **회신 계약**
+//!     (`SendContract{request:true,..}`)으로 보낸다. 같은 실 control 경로(`handle_send`, `Entrance::Cli`)
+//!     그대로 계약 축만 얹는다 — entrance/backend 불변. `--seed-reply-by` 를 `--seed-request` 없이 단독
+//!     지정하면 **인자 오류**(exit 1, 다른 setup 전에 fail-fast — reply_by 는 request 전용, ingress.rs
+//!     `validate_contract` 규칙 1 과 같은 정신). ★`--seed-reply-by` 값 자체의 오용(F5 와 같은 규율)★ 값
+//!     누락 / 다음 토큰이 `--` 로 시작(플래그로 오인 가능) / 빈 값·공백만인 값도 전부 **인자 오류**(exit 1,
+//!     스폰 전 fail-fast — `--b-task` 오용 가드와 같은 분업: parse_args 는 사실만 기록, 반려는 run() 이).
+//!     조용히 넘기면 기한 없이(또는 엉뚱한 값으로) 돌아 오퍼레이터가 눈치채기 어렵다.
+//!     결과 블록에 `SEED_KIND=request|plain` 을 항상 찍고, request 일 때만
+//!     `SEED_REPLY_BY=<value|none>`·`REPLY_IN_REPLY_TO=<id|none>`·`REPLY_MATCHES_SEED=true|false`·
+//!     `REPLY_POLL=matched|timeout|skipped-no-budget`(항목1, option b — 아래 F3 폴링 예산 절 참조)·
+//!     `REPLY_POLL_BUDGET_MS=<ms>`(신규 — 폴링 스킵/타임아웃을 가른 결정 지점의 잔여 예산을 ms 로 그대로
+//!     드러낸다. 0 = 예산 없음(스킵) **또는 1ms 미만 잔여**(ms 절사) — 스킵 판정 정본은 REPLY_POLL 라벨.
+//!     이게 없으면 REPLY_POLL=timeout 뒤에 "100ms 짜리 굶주린 예산" 인지 "정상 예산을
+//!     다 쓰고도 못 찾음" 인지가 안 갈린다)를
+//!     추가로 찍는다(B 의 답신 봉투가 in-reply-to 를 실었는지 + 씨앗 msg_id 와 일치하는지 — 아래 관측 절의
+//!     `DeliveryObservation.in_reply_to` 확장 필드로 판정).
+//!     ★두 마커는 서로 다른 축이다(FIX)★: `REPLY_MATCHES_SEED` 는 baseline 이후 배달된(is_delivered)
+//!     B→A 레코드 중 `in_reply_to == seed_msg_id` 인 것이 있는지의 **엄격 일치** 판정이고,
+//!     `REPLY_IN_REPLY_TO` 는 **그 일치 레코드가 있으면 그 레코드의 값(= seed id)을 우선해서 찍고,
+//!     없을 때만** baseline 이후 첫 배달 레코드 중 `in_reply_to.is_some()` 인 값으로 폴백한다 — 그래야
+//!     "B 가 틀린/환각 id 로 회신함"(REPLY_MATCHES_SEED=false 인데 REPLY_IN_REPLY_TO 엔 값이 있음 — 계약
+//!     위반 중 가장 유력한 형태)과 "B 가 in-reply-to 를 아예 안 실음"(REPLY_IN_REPLY_TO=none)이
+//!     구분된다(이전엔 REPLY_IN_REPLY_TO 가 일치 판정의 `matched` 에서 파생돼 seed id 또는 none 두 값만
+//!     낼 수 있었다 — 가장 유력한 계약 위반 형태를 안 보이게 만드는 결함이었다).
+//!     ★마커쌍 자기모순 재발 방지(리뷰어 NOTE FIX)★: "일치 여부와 **무관하게 항상** 첫 배달 레코드 값을
+//!     찍는다" 로 짜면, B 가 틀린 id 로 먼저 답하고(then) 맞는 id 로 나중에 답할 때
+//!     `REPLY_IN_REPLY_TO=<wrong-id>` 인데 `REPLY_MATCHES_SEED=true` 인 자기모순 쌍이 난다(두 마커가 서로
+//!     다른 레코드를 가리킴 — 첫 레코드 vs 일치 레코드). 그래서 이제 매치가 존재하면 그 매치 레코드를
+//!     **항상** 우선해 두 마커가 같은 레코드에서 파생되게 한다(첫-레코드 폴백은 매치가 아예 없을 때만).
+//!     ★F3 레이스는 폴링으로 닫는다(FIX)★: 판정은 **첫 도착 레코드가 아니라** A 턴 대기까지 끝난 뒤
+//!     baseline 이후 B→A 레코드 **전부**를 스캔해 내리되, 그 스캔에 앞서 "배달 + in_reply_to ==
+//!     seed_msg_id" 레코드가 나타나길 같은 폴링 간격(200ms)으로 마저 기다린다(seed-request 일 때만 —
+//!     plain 씨앗은 in_reply_to 자체가 없어 폴링할 대상이 없으므로 기본 경로를 늦추지 않는다). 첫
+//!     레코드가 실제 회신과 무관한 "ack" 한 통이고 진짜 회신이 그 뒤에 늦게 와도, A 턴 대기 뒤 이 폴링이
+//!     (잔여 예산이 있을 때만) 마저 잡아 두므로 스캔이 놓치지 않는다(이전엔 스캔만 하고 기다리진 않아 A 턴이 먼저 끝나면 여전히
+//!     거짓 negative 가 났다). 배달된(is_delivered) 레코드만 증거로 인정한다 — write 실패 레코드가
+//!     우연히 seed id 를 실었어도 실제로 도달 안 했으므로 "회신 성공" 의 증거가 아니다.
+//!     ★예산은 wait_for_reply 전용이 아니라 A 턴 대기와 공유하는 하나의 벽시계다(option b, FIX)★: 이
+//!     폴링이 쓰는 잔여 예산은 씨앗 주입 직후 잡은 시각부터 `REPLY_WAIT_CAP`(180s)을 잰 나머지다 —
+//!     그 사이엔 `wait_for_reply`(B 의 첫 답신 대기)뿐 아니라 그 뒤 이어지는 `wait_turn_end`(A 턴 종료
+//!     대기, 최대 `TURN_WAIT_CAP`=180s)까지 **같은 벽시계를 함께 태운다**(이전 주석은 "wait_for_reply 가
+//!     소비한 시간만 뺀다" 고 잘못 말했었다 — 실제로는 A 턴 대기가 더 큰 소비자일 수 있다). 즉 A 턴
+//!     대기가 길어지면 이 폴링의 잔여 예산이 0 이하로 떨어질 수 있고, 그러면 폴링은 **아예 돌지 않는다**
+//!     (조용히 스킵) — 새 타임아웃 상수를 만들지 않는 대신 예산을 공유시킨 트레이드오프다(사용자 결정,
+//!     option b: 구조는 그대로 두고 이 사실을 정확히 알리는 쪽). 그래서 결과 블록에
+//!     `REPLY_POLL=matched|timeout|skipped-no-budget` 을 항상 찍어(seed-request 일 때만) 예산 고갈로
+//!     폴링이 안 돈 경우를 침묵시키지 않는다 — skipped-no-budget = 잔여 예산이 0/음수라 폴링 자체가 안
+//!     돎, timeout = 폴링이 돌았으나 예산 소진까지 못 찾음, matched = 폴링이 잡았든(또는 폴링 전에 이미
+//!     배달돼 있었든) 최종 스캔이 일치를 확인함.
+//!     ★N1★ `--seed-reply-by` 는 B 의 봉투에 `reply-by` 속성을 **렌더만** 한다 — 이 하네스는 데몬의 60초
+//!     sweep 을 돌리지 않는 단발 실행이라, 여기서 기한 초과 타임아웃/notice 가 발화하는 일은 없다.
+//!     ★N2★ 잘못된 기간 표기(파싱 실패)는 두 에이전트가 모두 스폰된 **뒤**, 씨앗 발송 시점에야 잡힌다
+//!     (`validate_contract` 가 그 자리서 반려) — 비용은 있으나 분류는 여전히 SETUP-FAIL 이다(스폰 자체는
+//!     헛되지 않았다고 보지 않는다 — 그냥 더 늦게 걸릴 뿐).
+//!   - **`--b-task <text|@path>`** — B 의 원과제 프롬프트(기본 auth 모듈 과제)를 대체한다. `@` 접두면
+//!     파일 참조(절대/상대 — 상대는 repo 루트 기준, `--priming` 명시 경로 override 와 동일 규약)로 그
+//!     내용을 읽는다. 파일 부재/읽기 실패는 SETUP-FAIL(exit 1, 아직 아무것도 스폰하지 않은 시점에
+//!     fail-fast — 정리할 리소스 없음). ★F5 오용 가드★ 값 누락·다음 토큰이 `--` 로 시작(플래그로 오인
+//!     가능해 `take_flag_value` 가 소비하지 않는 바로 그 경우)·빈 값/공백만인 값은 전부 **인자 오류**
+//!     (exit 1, 스폰 전 fail-fast — 조용히 기본값으로 넘기지 않는다). 텍스트를 파일로 좁히는 게 아니다 —
+//!     인라인 텍스트는 여전히 허용, 잘못 쓴 값만 막는다(사용자 결정). 결과 블록에
+//!     `B_TASK=default|file:<path>|inline(<n> bytes)` 를 항상 찍는다(F5).
+//!   둘 다 test-only 노브. 미지정이면 **스폰·프라이밍·발신 동작은 오늘과 바이트 동일**하다 — 다만 결과
+//!   블록 stdout 은 두 노브 모두에 대해 항상 한 줄씩 늘어난다(`SEED_KIND=plain`·`B_TASK=default`, F4).
+//!   ★F4 — 이 두 줄은 의도적으로 항상 찍는다★: `SEED_KIND=` 는 조용히 무시되는 미지정 토큰들 사이에서
+//!   오퍼레이터의 오타(예: `SEED_KIND=plain` 인데 `--seed-request` 를 쳤다고 착각)를 눈에 띄게 하는
+//!   신호이기도 하다. 즉 "오늘과 바이트 동일" 은 에이전트 스폰·프라이밍·전송 로직에 대한 주장이지 stdout
+//!   전문에 대한 주장이 아니다 — 결과 블록에 두 줄이 늘어나는 것과 모순이 아니다.
+//!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
 //! ★CLI 입구를 쓰는 실험(운영 B `prompts/agent-priming-cli.md` 또는 `--cli-only`)은 먼저 `engram-send` 를
 //!   빌드해야 한다★ — 이 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아 CLI 입구를 켠다.
@@ -56,6 +127,8 @@
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke                 # 기본(both, MCP)
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming prompts/agent-priming-cli.md --model sonnet
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --cli-only    # provision 강제 비-MCP(false path 전체)
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --seed-request --seed-reply-by 5m   # 씨앗을 회신 계약으로
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --b-task "You are on the billing module. Reply in one line when ready."
 //! ```
 //! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — 명시 경로 무관)인데 `engram-send`
 //!   가 형제에 없으면, 하네스는 normal negative 가 아니라 **SETUP-SKIP**(engram-send not built) 라벨로 요란히
@@ -72,12 +145,19 @@
 //! - **B 의 답신은 실 입구로만**(하네스가 handle_send 를 대신 부르지 않는다) — 이게 이 하네스의 핵심 새 검증.
 //! - **배달 관측 = ADR-0088 in-proc 싱크** — registry 에 `DeliveryObserver` 를 설치해 relay 레코드를 회수한다
 //!   (detached 데몬 로그 스크레이핑 금지). registry 에 read accessor 를 추가하지 않고 이 싱크로만 회수한다.
+//!   ★확장(roundtrip-smoke `--seed-request`)★: `DeliveryObservation.in_reply_to`(Option<String>)는 발신
+//!   시점에 검증된 구조화 메타(`SendMeta.reply_to`)를 각 wrap 호출부가 `observe_success`/
+//!   `observe_failure`(service.rs) 에 **파라미터로 직접 넘겨** 채운다 — 렌더된 봉투 문자열을 다시 파싱하지
+//!   않는다(옛 substring 파서는 본문 이스케이프 허점으로 위조 가능해 리뷰 F1 에서 삭제됐다 — ingress.rs
+//!   `DeliveryObservation.in_reply_to` 주석이 정본). registry 에 새 read accessor 는 없다(ADR-0088 HARD
+//!   CONSTRAINT 준수) — 관측 함수 시그니처에 파라미터 하나가 늘었을 뿐, registry 조회는 없다.
 //! - **결과 3분류(FIX round-2 #2/#4/#5)** — ① **valid negative**(setup 성공했으나 B 가 안 보냄) = 구조화
 //!   결과 출력 후 exit 0(유효한 실험 결과). ② **SETUP-SKIP**(exit 1) = 케이스가 요구하는 인프라 부재
 //!   (CLI-지시 프라이밍인데 engram-send 미빌드 — 판정은 셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**)
-//!   — normal negative 로 오귀속 금지. ③ **SETUP-FAIL**(exit 1) = 준비 단계 실패(A/B 출력 구독 실패 /
-//!   B 원과제 턴 실패 / A·B process death / 씨앗 ACK 에러 / priming 파일 부재). valid negative 는 setup 이
-//!   온전히 성공했고 **A·B 가 모두 살아 있을 때만** 보고한다(A 死 → B 답신이 도달할 대상 없음).
+//!   — normal negative 로 오귀속 금지. ③ **SETUP-FAIL**(exit 1) = 준비 단계 실패(**인자 오류** —
+//!   `--b-task`/`--seed-reply-by` 오용 가드·`--cli-only` co-pass 거부 등, 스폰 전 fail-fast / A/B 출력
+//!   구독 실패 / B 원과제 턴 실패 / A·B process death / 씨앗 ACK 에러 / priming 파일 부재). valid negative
+//!   는 setup 이 온전히 성공했고 **A·B 가 모두 살아 있을 때만** 보고한다(A 死 → B 답신이 도달할 대상 없음).
 //! - **skip_no_claude loud-skip** — claude 부재/인증 실패면 요란하게 스킵(silent skip 금지).
 // ADR-0092
 
@@ -98,7 +178,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{
-    handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance,
+    handle_send, ControlCommand, DeliveryObservation, DeliveryObserver, Entrance, SendContract,
 };
 use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
 use engram_dashboard_daemon::control::priming::{FilePrimingProvider, PrimingProvider};
@@ -204,6 +284,49 @@ fn cli_only_run_passed(b_sent: bool, entrance_label: &str) -> bool {
     b_sent && entrance_label == "cli"
 }
 
+/// ★REPLY_POLL 라벨 판정(순수·단위테스트 대상)★: `--seed-request` 결과 블록의 `REPLY_POLL=` 값을
+///   결정하는 우선순위 판정자 — matched > timeout > skipped-no-budget. `matched` 는 `wait_for_matching_reply`
+///   가 실제로 돌아 잡았든(poll_ran=true) 폴링이 예산 부족으로 스킵됐지만 이미 그 전에 배달돼 있었든
+///   (poll_ran=false) 최종 스캔(`records_after`)이 seed 와 일치하는 회신을 확인하기만 하면 최우선이다 —
+///   poll_ran 값과 무관하게 이긴다. matched 가 아닐 때만 poll_ran 을 본다: poll_ran=true(폴링이 예산을
+///   받아 실제로 돌았지만 예산 소진까지 못 찾음) = timeout, poll_ran=false(잔여 REPLY_WAIT_CAP 예산이
+///   씨앗 주입 이후 A 턴 대기까지 소비돼 0/음수라 폴링 자체가 안 돎) = skipped-no-budget. 이전엔 이 로직이
+///   호출부(print 시점)에 인라인 if/else 로만 있어 단위테스트가 없었다 — 여기로 뽑아 세 갈래를 각각 검증한다.
+fn reply_poll_label(matched: bool, poll_ran: bool) -> &'static str {
+    if matched {
+        "matched"
+    } else if poll_ran {
+        "timeout"
+    } else {
+        "skipped-no-budget"
+    }
+}
+
+/// --seed-reply-by 가 --seed-request 없이 단독 지정됐는가(순수·단위테스트 대상): true 면 인자 오류다.
+///   reply_by 는 request 계약의 회신 기한이라 request 자체가 없으면 추적할 계약이 없다 - 조용히 무시하지
+///   않고 반려한다(ingress.rs validate_contract 의 "reply_by 는 request 전용" 규칙과 같은 정신을 CLI 인자
+///   레벨에서 fail-fast 로 앞당긴다 - 실 에이전트를 스폰하기 전에 걸러야 헛된 스폰을 막는다).
+fn seed_reply_by_without_request_is_invalid(
+    seed_request: bool,
+    seed_reply_by: &Option<String>,
+) -> bool {
+    !seed_request && seed_reply_by.is_some()
+}
+
+/// --b-task 값이 파일 참조(`@path`)인가(순수·단위테스트 대상) - 그렇다면 repo 루트 기준으로 절대화한
+///   경로를 돌려준다(절대 경로면 그대로, 상대면 join - `--priming` 명시 경로 override 와 동일 규약).
+///   `@` 접두가 아니면 None(호출자는 값을 인라인 텍스트 그대로 쓴다). 존재 검사는 하지 않는다(호출자가
+///   읽기 시도로 판정 - `resolve_priming_path` 와 같은 분업).
+fn resolve_b_task_file_path(value: &str, repo_root: &std::path::Path) -> Option<PathBuf> {
+    let rel = value.strip_prefix('@')?;
+    let p = PathBuf::from(rel);
+    Some(if p.is_absolute() {
+        p
+    } else {
+        repo_root.join(p)
+    })
+}
+
 /// CLI 인자 파싱 결과(순수) — priming 셀렉터 + 모델. `run` 이 이걸로 env·스폰을 배선한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
@@ -225,6 +348,30 @@ struct Args {
     ///   override 를 주지 않아야 한다★ — provision 이 자동으로 `prompts/agent-priming-cli.md` 를 고르는 걸
     ///   보는 게 목적이다(entrance=cli 기대). test-only 노브(운영 스위치 아님).
     cli_only: bool,
+    /// `--seed-request` 플래그: 켜지면 씨앗 A->B 를 회신 계약(SendContract{request:true,..})으로 보낸다
+    ///   — 같은 실 control 경로(handle_send, Entrance::Cli) 그대로, 계약 축만 얹는다. 미지정이면 오늘
+    ///   동작(plain 통보, SendContract::default(), 바이트 동일).
+    seed_request: bool,
+    /// `--seed-reply-by <dur>` 값(기간 표기 - "5m"/"10m"/"1h", validate_contract 가 최종 검증). 반드시
+    ///   --seed-request 와 함께 써야 한다(단독 지정은 인자 오류) - reply_by 는 request 계약의 기한이라
+    ///   추적할 계약이 없으면 조용한 무시가 된다(ingress.rs validate_contract 규칙 1 과 같은 정신).
+    seed_reply_by: Option<String>,
+    /// ★값 자체의 오용(F5 와 같은 규율)★ `--seed-reply-by` 가 값 누락 / 다음 토큰이 `--` 로 시작(플래그로
+    ///   오인 가능해 `take_flag_value` 라면 조용히 소비 안 했을 경우) / 빈 값·공백만인 값으로 잘못 쓰였는가.
+    ///   Some(reason) 이면 `run()` 이 실 claude 를 스폰하기 **전에** SETUP-FAIL 로 fail-fast 한다(`--b-task`
+    ///   오용 가드와 같은 분업 — parse_args 는 사실만 순수하게 기록하고, 반려 여부·시점은 호출자가 정한다).
+    seed_reply_by_error: Option<String>,
+    /// `--b-task <text|@path>` 값 - 지정 시 B 원과제 프롬프트(TASK_PROMPT_B)를 대체한다. `@` 접두면
+    ///   파일 참조(절대/상대 - 상대는 repo 루트 기준, --priming 상대경로와 동일 규약)로 해석해 그 내용을
+    ///   읽는다. 미지정이면 기본 auth 모듈 과제(오늘 동작, 바이트 동일).
+    b_task: Option<String>,
+    /// ★F5 오용 가드★ `--b-task` 가 잘못 쓰였는가 — 값 누락 / 다음 토큰이 `--` 로 시작(플래그로 오인돼
+    ///   `take_flag_value` 라면 조용히 값 없음으로 넘겼을 경우) / 빈 값·공백만인 값. Some(reason) 이면
+    ///   `run()` 이 실 claude 를 스폰하기 **전에** SETUP-FAIL 로 fail-fast 한다(`--seed-reply-by` 단독
+    ///   지정 검사와 같은 분업 — parse_args 는 사실만 순수하게 기록하고, 반려 여부·시점은 호출자가 정한다).
+    ///   텍스트 값을 막는 가드가 아니다 — 유효한 인라인 텍스트는 그대로 통과(사용자 결정, 파일로 좁히지
+    ///   않는다).
+    b_task_error: Option<String>,
 }
 
 /// 배달 관측 싱크(ADR-0088) — relay 레코드를 스레드 안전 Vec 에 모은다. 하네스가 registry 에 설치하고
@@ -263,6 +410,38 @@ impl CapturingObserver {
             .find(|r| r.from.agent_id == from_id && r.to_id == to_id)
             .cloned()
     }
+
+    /// ★F3★ baseline **이후** 도착한 from=`from_id`·to=`to_id` 레코드 **전부**(순서 보존) — `find_delivery_after`
+    ///   와 달리 첫 매치에서 멈추지 않는다. b_sent/entrance 판정("B 가 뭐라도 보냈나")은 여전히 첫 도착
+    ///   (`find_delivery_after`)으로 충분하지만, 회신 **내용** 검증(REPLY_IN_REPLY_TO/REPLY_MATCHES_SEED)은
+    ///   그래선 안 된다 — 첫 레코드가 회신과 무관한 "ack" 한 통이고 진짜 회신이 그 뒤에 오면 first-wins 는
+    ///   거짓 negative(REPLY_MATCHES_SEED=false)를 낸다. ★이 메서드 자체는 호출 시점까지 쌓인 레코드의
+    ///   스냅샷 스캔일 뿐이다★ — 레이스를 실제로 닫는 건 `run()` 이 A 턴 대기 직후 호출하는
+    ///   `wait_for_matching_reply` 다. ★그런데 그 호출 자체가 조건부다(정정 — 이전 판본은 여기서 "잔여
+    ///   REPLY_WAIT_CAP 예산 = wait_for_reply 가 쓰고 남긴 것" 이라 잘못 말했다)★: REPLY_WAIT_CAP 벽시계는
+    ///   **씨앗 주입 시점부터** 재고, 그 사이엔 `wait_for_reply`(B 첫 답신 대기)뿐 아니라 그 뒤 이어지는
+    ///   A 턴 대기(`wait_turn_end`, 최대 TURN_WAIT_CAP=180s)까지 **함께** 그 벽시계를 소비한다 — A 턴
+    ///   대기가 길면 잔여가 0/음수로 떨어져 `wait_for_matching_reply` 가 **아예 호출되지 않을 수 있다**
+    ///   (폴링 자체가 안 돎). 그래서 이 메서드가 print 시점에 뽑아내는 최종 값은 세 갈래로 갈린다: 폴링이
+    ///   돌아 매치를 찾음(matched) / 폴링이 돌았으나 예산 소진까지 못 찾음(timeout) / 잔여 예산이 없어
+    ///   폴링 자체가 안 돎(skipped-no-budget) — 우선순위 판정은 `reply_poll_label` 참조.
+    fn records_after(
+        &self,
+        baseline: usize,
+        from_id: AgentId,
+        to_id: AgentId,
+    ) -> Vec<DeliveryObservation> {
+        let recs = self.records.lock().unwrap();
+        recs.get(baseline..)
+            .map(|slice| {
+                slice
+                    .iter()
+                    .filter(|r| r.from.agent_id == from_id && r.to_id == to_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl DeliveryObserver for CapturingObserver {
@@ -273,6 +452,25 @@ impl DeliveryObserver for CapturingObserver {
 
 async fn run() -> i32 {
     let args = parse_args(std::env::args().skip(1));
+    // ★F5-style 오용 가드(신규)★: --seed-reply-by 값 자체(문법)가 잘못 쓰였으면 — "--seed-request 없이
+    //   단독 지정" 같은 의미 검사보다 먼저 걸러야 한다(값이 애초에 안 먹혔다면 그 의미를 논해도 무의미) —
+    //   --b-task 오용 가드와 같은 분업으로 스폰 전에 fail-fast(인자 오류, exit 1).
+    if let Some(reason) = &args.seed_reply_by_error {
+        return setup_fail(reason);
+    }
+    // --seed-reply-by 는 --seed-request 없이 의미가 없다 - 다른 setup(priming 해석·MCP 서버 기동 등)보다
+    //   먼저, 실 claude 를 스폰하기 전에 걸러 헛된 스폰을 막는다(인자 오류, exit 1).
+    if seed_reply_by_without_request_is_invalid(args.seed_request, &args.seed_reply_by) {
+        return setup_fail(
+            "--seed-reply-by requires --seed-request (reply_by is only meaningful as the deadline of a request contract) — add --seed-request or drop --seed-reply-by",
+        );
+    }
+    // ★F5 오용 가드★ --b-task 가 값 누락/플래그처럼 보이는 값/빈·공백 값으로 잘못 쓰였으면 다른 setup 보다
+    //   먼저, 실 claude 를 스폰하기 전에 걸러 헛된 스폰을 막는다(인자 오류, exit 1 — reply_by 단독 지정
+    //   검사와 같은 분업: parse_args 는 사실만 기록, 반려는 여기서).
+    if let Some(reason) = &args.b_task_error {
+        return setup_fail(reason);
+    }
 
     let repo_root = repo_root_from_manifest();
     let priming_selector = args.priming.clone();
@@ -340,6 +538,32 @@ async fn run() -> i32 {
                 priming_selector
             ));
         }
+    };
+    // --b-task 해석(지정 시에만): `@path` 는 파일 참조, 그 외는 인라인 텍스트 그대로. 파일 부재/읽기
+    //   실패는 SETUP-FAIL(인프라 부재를 실험적 negative 로 오인하지 않는다 - priming 파일 읽기와 같은
+    //   분업). 실 claude 를 아직 하나도 스폰하지 않은 시점이라 정리(cleanup)할 리소스가 없다.
+    // ★F5★ `b_task_kind` 는 결과 블록의 `B_TASK=` 자기서술 줄(항상 찍힘) 재료 — default/file:<path>/
+    //   inline(<n> bytes) 셋 중 하나. `<n>` 은 CLI 값의 바이트 길이(String::len — char 수 아님).
+    let (task_prompt_b, b_task_kind): (String, String) = match &args.b_task {
+        None => (TASK_PROMPT_B.to_string(), "default".to_string()),
+        Some(v) => match resolve_b_task_file_path(v, &repo_root) {
+            Some(path) => match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let kind = format!("file:{}", path.display());
+                    (content, kind)
+                }
+                Err(e) => {
+                    return setup_fail(&format!(
+                        "--b-task 파일 읽기 실패: {} : {e} — B 원과제 프롬프트를 못 구했으니 진행 불가",
+                        path.display()
+                    ));
+                }
+            },
+            None => {
+                let kind = format!("inline({} bytes)", v.len());
+                (v.clone(), kind)
+            }
+        },
     };
     // ★env 로 넘겨 FilePrimingProvider 생성 전에 set★: provision 마다 priming_file() 이 이 env 를
     //   최우선 override 로 읽어 두 에이전트(A·B) 모두 같은 변형을 받는다.
@@ -552,7 +776,7 @@ async fn run() -> i32 {
     // ★turn 실패 = setup 실패(FIX round-2 #4)★: 이전엔 warn 후 계속했다 — 그러면 "일하는 팀원 맥락" 이
     //   서지 않은 채 B_SENT=false 를 정상 negative 로 보고해 setup 실패를 실험 결과로 오인한다. B 가 원과제를
     //   수용(턴 종료)하지 못하거나 그 사이 죽으면 valid negative 가 아니라 SETUP-FAIL 이다.
-    if !send_and_wait(&manager, agent_b.id, &obs_b, TASK_PROMPT_B) {
+    if !send_and_wait(&manager, agent_b.id, &obs_b, &task_prompt_b) {
         if !is_agent_alive(&manager, agent_b.id) {
             fail_setup!("B 가 원과제 턴 도중 종료됨(process death) — 팀원 맥락 setup 실패");
         }
@@ -588,11 +812,23 @@ async fn run() -> i32 {
     obs_b.begin_turn();
     let baseline_b = obs_b.done_snapshot();
 
+    // --seed-request(지정 시): 씨앗을 회신 계약(SendContract{request:true,..})으로 보낸다 - 같은 실
+    //   control 경로(handle_send, Entrance::Cli) 그대로, 계약 축만 얹는다. 미지정이면 오늘 동작
+    //   (SendContract::default() = plain 통보, 바이트 동일).
+    let seed_contract = if args.seed_request {
+        SendContract {
+            request: true,
+            reply_by: args.seed_reply_by.clone(),
+            reply_to: None,
+        }
+    } else {
+        SendContract::default()
+    };
     let seed = ControlCommand {
         from: from_a,
         to: NAME_B.to_string(), // 이름으로 지목(alice→bob).
         body: SEED_A_TO_B.to_string(),
-        contract: Default::default(),
+        contract: seed_contract,
     };
     let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, seed);
     eprintln!("[roundtrip] seed A→B ACK = {}", ack.to_json());
@@ -605,10 +841,39 @@ async fn run() -> i32 {
             ack.to_json()
         ));
     }
+    // 씨앗 논리 메시지 id(ADR-0088 확장 - --seed-request 판정용): ACK JSON 의 `id` 가 곧 이 씨앗의
+    //   msg_id 다(handle_send 성공 응답 shape, spec §6). B 의 답신이 이 id 로 회신했는지
+    //   (REPLY_MATCHES_SEED) 비교할 기준값을 여기서 한 번 뽑아 둔다.
+    let seed_msg_id: Option<String> = ack
+        .to_json()
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // ★ACK shape-drift 가드(신규)★: 현재 `ControlResult::Ok { id: String, .. }` shape(ingress.rs) 상
+    //   접수된(accepted) ACK 는 `id` 를 항상 싣는다 — 위 파싱이 None 을 내는 건 오늘은 불가능하다. 그런데
+    //   이 가드가 없으면, 그 shape 이 미래에 바뀌어(예: id 가 optional 로) 조용히 None 이 나올 때 --seed-request
+    //   경로가 그걸 알아채지 못하고 REPLY_POLL=skipped-no-budget(예산 고갈)로 **오분류**한다 — 실제 원인은
+    //   예산 부족이 아니라 판정 기준값(seed_msg_id) 자체가 없어 애초에 회신 일치를 판정할 수 없는 것인데,
+    //   같은 라벨 뒤에 숨어 버린다. --seed-request 일 때만 유의미하므로(plain 씨앗은 이 id 를 안 쓴다) 그
+    //   경우로 한정해 스폰 이후 첫 발견 즉시 SETUP-FAIL 로 fail-fast 한다(조용히 진행해 오분류를 내지 않는다).
+    if args.seed_request && seed_msg_id.is_none() {
+        fail_setup!(&format!(
+            "seed ACK missing id — request judgment impossible (ACK={})",
+            ack.to_json()
+        ));
+    }
 
     // ── 3) B 의 답신을 **B 자신의 발신 경로**로 대기(하네스는 handle_send 를 부르지 않는다) ──────
     //    B(실 claude)가 MCP send_message 또는 engram-send CLI 를 스스로 호출 → 실 입구 → handle_send →
     //    wrap → A stdin. 그 relay 가 관측 싱크에 baseline 이후 from=B·to=A 레코드로 남는지 폴링한다.
+    // ★F3 잔여 예산 계산용 시작점(option b — 예산은 A 턴 대기와 공유)★: 이 시각부터 REPLY_WAIT_CAP(180s)
+    //   을 재는데, 그 사이엔 바로 아래 wait_for_reply 뿐 아니라 그 뒤 이어지는 A 턴 대기(wait_turn_end,
+    //   최대 TURN_WAIT_CAP=180s)까지 **같은 벽시계를 함께 소비한다** — 새 타임아웃 상수를 만들지 않고
+    //   하나의 창을 공유시킨 트레이드오프다(사용자 결정, option b — "wait_for_reply 소비분만 뺀다" 던
+    //   이전 주석은 틀렸다). A 턴 대기가 길면 아래 폴링(wait_for_matching_reply)의 잔여 예산이 0/음수가
+    //   될 수 있고, 그러면 폴링은 아예 돌지 않는다 — 그 경우를 결과 블록의 REPLY_POLL=skipped-no-budget
+    //   으로 반드시 알린다(침묵 금지).
+    let reply_wait_started = Instant::now();
     let reply_obs = wait_for_reply(
         &observer,
         reply_baseline,
@@ -658,6 +923,47 @@ async fn run() -> i32 {
     };
     let a_response = obs_a.response_text();
 
+    // ★F3 레이스를 여기서 실제로 닫는다★: wait_for_reply 는 baseline 이후 첫 B→A 레코드(무관한 "ack" 일
+    //   수 있음)에서 멈춘다 — A 턴 대기까지 끝나도 진짜 계약 회신(in_reply_to == seed_msg_id)이 아직
+    //   안 왔을 수 있어, 그 상태로 바로 print 시점 스캔을 하면 거짓 negative 가 난다. 그래서 A 턴 대기가
+    //   끝난 지금, 그 레코드가 나타나길 잔여 REPLY_WAIT_CAP 예산으로 마저 폴링한다(같은 루프/간격 재사용
+    //   — 새 타임아웃 상수 없음). ★그 잔여 예산은 wait_for_reply 만의 소비가 아니라 방금 끝난 A 턴 대기
+    //   (wait_turn_end, 최대 TURN_WAIT_CAP=180s)까지 같은 REPLY_WAIT_CAP 벽시계를 함께 태운 뒤 남은
+    //   값이다(option b) — A 턴이 길게 돌면 이 잔여가 0/음수일 수 있고, 그럴 땐 바로 아래
+    //   `remaining.is_zero()` 가드가 폴링을 아예 건너뛴다. 그 스킵은 조용히 넘어가지 않고 결과 블록의
+    //   REPLY_POLL=skipped-no-budget 로 반드시 드러낸다(항목1, option b — 아래 reply_poll_ran 이 그
+    //   판정용 신호). seed-request 일 때만 한다 — plain 씨앗은 in_reply_to 자체가 없어 폴링할 대상이
+    //   없고, 기본 경로(SEED_KIND=plain)를 늦추지 않아야 하기 때문이다. 예산이 소진되도록 못 찾으면
+    //   아래 스캔이 정직하게 none/false 로 남긴다.
+    // ★REPLY_POLL 마커용 신호(항목1, option b)★: 이 폴링이 실제로 "돌았는가"(예산이 있어 루프에
+    //   진입했는가)만 기록한다 — 최종 라벨(matched/timeout/skipped-no-budget)은 5) 절에서 이 값과
+    //   reply_matches_seed(최종 스캔 결과)를 함께 봐서 정한다. "matched" 는 폴링이 잡았든 폴링이
+    //   스킵됐지만 이미 배달돼 있었든 상관없이 최우선이므로, 여기서는 예산 유무만 정직하게 담아 둔다.
+    let mut reply_poll_ran = false;
+    // ★REPLY_POLL_BUDGET_MS 계측(신규)★: 폴링 돌지/스킵 여부를 가른 바로 그 결정 지점에서 잔여 예산(ms)을
+    //   그대로 남긴다 — 0 = 예산 없음(스킵) 또는 1ms 미만 잔여(as_millis 절사로 poll_ran=true 인데 0 이
+    //   찍힐 수 있다). 스킵 여부의 정본은 REPLY_POLL 라벨이지 이 수치가 아니다. 이게 있어야 "폴링이 100ms 짜리 굶주린 예산만 받고 timeout 이 났다" 는
+    //   기아(starvation) 상황과 "폴링이 정상적인(수십 초) 예산을 다 쓰고도 못 찾은" negative 를 같은
+    //   REPLY_POLL=timeout 라벨 뒤에서 구분할 수 있다(라벨만으로는 두 상황이 안 갈린다).
+    let mut reply_poll_budget_ms: u64 = 0;
+    if args.seed_request {
+        if let Some(sid) = seed_msg_id.as_deref() {
+            let remaining = REPLY_WAIT_CAP.saturating_sub(reply_wait_started.elapsed());
+            reply_poll_budget_ms = remaining.as_millis() as u64;
+            if !remaining.is_zero() {
+                reply_poll_ran = true;
+                wait_for_matching_reply(
+                    &observer,
+                    reply_baseline,
+                    agent_b.id,
+                    agent_a.id,
+                    sid,
+                    remaining,
+                );
+            }
+        }
+    }
+
     // ── 5) 구조화 stdout 마커(오케스트레이터 판정용) ────────────────────────────────
     // cli-only 모드는 셀렉터가 없으므로(override 금지) 전용 라벨을 단다 — 오케스트레이터가 이 실측이
     //   false-path(provision 강제 비-MCP) 임을 구분하게.
@@ -671,6 +977,79 @@ async fn run() -> i32 {
     // 존재 검사를 통과한 실제 in-effect 경로만 출력한다(FIX round-2 #5 — 거짓 라벨 금지).
     println!("[priming] {}", resolved_priming.display());
     println!("[seed A->B body] {SEED_A_TO_B}");
+    // --seed-request(지정 시) 결과 마커 - 미지정이면 SEED_KIND=plain 뿐(오늘 동작, 새 줄 하나만 추가).
+    let seed_kind = if args.seed_request {
+        "request"
+    } else {
+        "plain"
+    };
+    println!("SEED_KIND={seed_kind}");
+    // ★F5★ B_TASK 자기서술 줄 — SEED_KIND 와 같은 규율로 항상 찍는다(default 여도).
+    println!("B_TASK={b_task_kind}");
+    if args.seed_request {
+        // ★F5 규율★ SEED_REPLY_BY 자기서술 줄 — B_TASK/SEED_KIND 와 같은 규율로, request 일 땐 항상 찍는다
+        //   (미지정이면 "none" — 조용히 빠지지 않는다).
+        println!(
+            "SEED_REPLY_BY={}",
+            args.seed_reply_by.as_deref().unwrap_or("none")
+        );
+        // ★F3★ "첫 레코드 승" 이 아니라, wait_for_matching_reply(위, A 턴 대기 직후)가 — **잔여
+        //   REPLY_WAIT_CAP 예산이 남아 있을 때만** — 실제 계약 회신을 폴링해 마저 기다린다. 그 예산은
+        //   씨앗 주입 시점부터 A 턴 대기(wait_turn_end)까지 함께 소비한 벽시계라, A 턴이 길면 잔여가
+        //   0/음수가 돼 이 폴링이 **아예 호출되지 않을 수 있다**(무조건 기다리는 게 아니다 — reply_poll_ran
+        //   이 그 실행 여부를 담는다). 폴링이 돌았든 안 돌았든(=스킵), 그 **뒤** baseline 이후 B→A 레코드
+        //   **전부**를 스캔한다 — 첫 레코드가 실제 회신과 무관한 "ack" 한 통이어도, 폴링이 돌아 진짜 회신을
+        //   이미 잡아 뒀다면(또는 폴링 전에 이미 배달돼 있었다면) 여기 스캔이 그걸 찾는다(레이스가 폴링으로
+        //   닫혔으므로 이 스캔은 이미 채워진 결과를 읽는 역할). 폴링이 예산 부족으로 아예 안 돈 경우엔
+        //   스캔이 찾을 게 새로 생기지 않으므로 정직하게 none/false 로 남고, 그 스킵은 아래 REPLY_POLL=
+        //   skipped-no-budget 라벨로 timeout(폴링은 돌았으나 못 찾음)과 구분된다. **배달된(is_delivered)
+        //   레코드만** 증거로 인정한다 — write 가 실패한 레코드는 실제로 도달하지 않았으므로, 그
+        //   in_reply_to 가 우연히 seed id 와 같아도 "B 가 성공적으로 회신했다" 의 증거가 아니다(그래서
+        //   폴링 예산이 소진되도록 못 찾은 "only failed records carry it" 케이스는 정직하게 none/false 로
+        //   남긴다).
+        let after_seed = observer.records_after(reply_baseline, agent_b.id, agent_a.id);
+        // REPLY_MATCHES_SEED: 엄격 일치 판정(변경 없음) — 배달된 레코드 중 seed_msg_id 와 정확히 같은
+        //   in_reply_to 를 가진 것이 있는가.
+        let matched = after_seed.iter().find(|r| {
+            r.is_delivered()
+                && seed_msg_id
+                    .as_deref()
+                    .is_some_and(|s| r.in_reply_to.as_deref() == Some(s))
+        });
+        let reply_matches_seed = matched.is_some();
+        // ★finding 1 FIX★ REPLY_IN_REPLY_TO 는 first-wins 만으로 정하지 않는다 — 아래 항목2 FIX 참조.
+        //   baseline 이후 첫 **배달된** B→A 레코드 중 in_reply_to.is_some() 인 것을 폴백용으로 찾아 둔다
+        //   (매치가 없을 때만 이 값을 쓴다 — "B 가 in-reply-to 를 아예 안 실음" 과 구분하는 용도는 유지).
+        let first_reply_with_id = after_seed
+            .iter()
+            .find(|r| r.is_delivered() && r.in_reply_to.is_some());
+        // ★항목2 마커쌍 자기모순 FIX(reviewer NOTE)★: 이전엔 REPLY_IN_REPLY_TO 를 **항상 무조건**
+        //   first-wins(`first_reply_with_id`)로 찍었다 — B 가 틀린 id 로 먼저 답하고 맞는 id 로 나중에
+        //   답하면 REPLY_IN_REPLY_TO=<wrong-id> 인데 REPLY_MATCHES_SEED=true 인 자기모순 쌍이 났다(두
+        //   마커가 서로 다른 레코드를 가리킴 — 하나는 첫 레코드, 하나는 일치 레코드). 그래서 이제: 일치
+        //   레코드(`matched`)가 있으면 **그 레코드의 값**(= seed id 와 동일)을 우선해서 찍고, 일치가
+        //   아예 없을 때만 first-wins 로 폴백한다 — 두 마커가 항상 같은 레코드에서 파생되어 모순이 없다.
+        let reply_in_reply_to: Option<String> = match matched {
+            Some(m) => m.in_reply_to.clone(),
+            None => first_reply_with_id.and_then(|r| r.in_reply_to.clone()),
+        };
+        println!(
+            "REPLY_IN_REPLY_TO={}",
+            reply_in_reply_to.as_deref().unwrap_or("none")
+        );
+        println!("REPLY_MATCHES_SEED={reply_matches_seed}");
+        // ★항목1 REPLY_POLL 마커(option b)★: 예산이 A 턴 대기에 다 먹혀 폴링이 조용히 스킵되는 경우를
+        //   절대 침묵시키지 않는다. 우선순위 판정은 순수 함수 `reply_poll_label`(단위테스트 대상)로 뽑아
+        //   뒀다 — matched(폴링이 잡았든 폴링 전에 이미 배달돼 있었든 최종 스캔이 일치를 확인하면 최우선)
+        //   > timeout(폴링이 실제로 돌았는데 예산 소진까지 못 찾음) > skipped-no-budget(잔여 예산이
+        //   0/음수라 폴링 자체가 안 돎 — reply_poll_ran=false).
+        let reply_poll = reply_poll_label(reply_matches_seed, reply_poll_ran);
+        println!("REPLY_POLL={reply_poll}");
+        // ★REPLY_POLL_BUDGET_MS(신규)★: 위에서 폴링 여부를 가른 그 결정 지점의 잔여 예산(ms)을 그대로
+        //   찍는다(스킵이면 0) — REPLY_POLL 라벨만으로는 "100ms 짜리 굶주린 예산 끝에 난 timeout" 과
+        //   "정상 예산을 다 쓰고도 못 찾은 negative" 가 구분되지 않는다. 이 값이 있어야 그 둘을 가른다.
+        println!("REPLY_POLL_BUDGET_MS={reply_poll_budget_ms}");
+    }
     println!("[B sent reply to A] {b_sent}");
     println!("[B chosen entrance] {entrance_label}");
     if let Some(o) = &reply_obs {
@@ -720,13 +1099,22 @@ async fn run() -> i32 {
     0
 }
 
-/// ★인자 파싱(순수·단위테스트 대상)★: `--priming <값>`·`--model <값>`·불리언 `--disallow-mcp`/`--cli-only`
-///   를 인식한다. 미지정 model=sonnet, 미지정 priming=None(= 기본 both 프라이밍). 알 수 없는 토큰은 무시
-///   (하네스라 관대). `iter` 로 받아 std::env 의존을 뺀다.
-/// ★플래그를 값으로 삼키지 않는다(FIX round-2 #7)★: `--priming --model opus` 처럼 다음 토큰이 또 플래그
+/// 인자 파싱(순수·단위테스트 대상): `--priming <값>`·`--model <값>`·불리언 `--disallow-mcp`/`--cli-only`
+///   /`--seed-request`·`--seed-reply-by <값>`·`--b-task <값>` 를 인식한다. 미지정 model=sonnet, 미지정
+///   priming=None(= 기본 both 프라이밍), 미지정 seed_request=false/seed_reply_by=None/b_task=None(= 오늘
+///   동작). 알 수 없는 토큰은 무시(하네스라 관대). `iter` 로 받아 std::env 의존을 뺀다.
+/// 플래그를 값으로 삼키지 않는다(FIX round-2 #7): `--priming --model opus` 처럼 다음 토큰이 또 플래그
 ///   (`--` 로 시작)면 그건 값이 아니라 새 플래그다 — peek 해서 값으로 소비하지 않고 넘긴다(그 플래그는
 ///   다음 루프에서 제대로 처리, priming 은 미지정 유지). 이렇게 안 하면 `--model` 이 priming 값으로 먹혀
 ///   model 이 조용히 기본값에 남는다.
+/// ★F5 — `--b-task`·`--seed-reply-by` 는 예외(더 엄격)★: 다른 값-플래그(`--priming`/`--model`)는 값이
+///   없거나 플래그처럼 보이면 `take_flag_value` 가 조용히 None 을 돌려 호출자가 기본값을 유지하지만,
+///   `--b-task` 와 `--seed-reply-by` 는 그 세 오용(값 누락·다음이 `--` 로 시작·빈/공백뿐인 값)을 전부
+///   각각 `b_task_error`/`seed_reply_by_error` 에 사유로 기록한다 — B 원과제 프롬프트나 회신 기한이
+///   통째로 조용히 기본값(auth 모듈 과제 / 기한 없음)으로 미끄러지면 오퍼레이터가 눈치채기 어렵기
+///   때문이다(다른 노브는 미지정=오늘 동작이 곧 안전한 기본이라 관대해도 되지만, 이 둘은 "쓰려던 값이
+///   안 먹혔다" 는 신호를 죽인다 — 특히 `--seed-reply-by` 가 조용히 안 먹히면 request 계약이 기한 없이
+///   돈다).
 fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     let mut priming = None;
     let mut model = "sonnet".to_string();
@@ -735,6 +1123,19 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     let mut disallow_mcp = false;
     // ADR-0099 FIX 3: `--cli-only` 도 값 없는 불리언 플래그(존재 = 켜짐).
     let mut cli_only = false;
+    // `--seed-request` 도 값 없는 불리언 플래그(존재 = 켜짐).
+    let mut seed_request = false;
+    let mut seed_reply_by = None;
+    // ★F5 오용 가드(신규)★ `--seed-reply-by` 도 `--b-task` 와 같은 강화를 받는다 — `take_flag_value` 의
+    //   "조용히 None" 을 받지 않고 잘못 쓴 값(누락/플래그로 오인/빈 값)을 사유째 기록해 `run()` 이 스폰 전에
+    //   fail-fast 하게 한다(조용히 넘기면 request 계약이 기한 없이 돌아 오퍼레이터가 눈치채기 어렵다).
+    let mut seed_reply_by_error: Option<String> = None;
+    let mut b_task = None;
+    // ★F5 오용 가드★ `--b-task`·`--seed-reply-by` 는 다른 값-플래그(`--priming`/`--model`)와 다르게
+    //   `take_flag_value` 의 "조용히 None" 을 그대로 받지 않는다 — 잘못 쓴 값(누락/플래그로 오인/빈 값)을
+    //   여기서 사유째 기록해 두면 `run()` 이 스폰 전에 fail-fast 한다(다른 플래그는 관대하게 무시하는
+    //   기존 규율을 그대로 유지 — 이건 이 둘의 전용 강화다).
+    let mut b_task_error: Option<String> = None;
     let mut it = iter.peekable();
     while let Some(tok) = it.next() {
         match tok.as_str() {
@@ -750,6 +1151,57 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
             }
             "--disallow-mcp" => disallow_mcp = true,
             "--cli-only" => cli_only = true,
+            "--seed-request" => seed_request = true,
+            // ★F5 오용 가드(신규)★ 값 누락 / 다음 토큰이 `--` 로 시작(플래그로 오인 가능) / 빈·공백뿐인
+            //   값은 전부 seed_reply_by_error 에 사유째 기록한다(--b-task 와 같은 peek 패턴 — 조용히
+            //   None 을 돌리는 take_flag_value 를 여기선 안 쓴다).
+            "--seed-reply-by" => match it.peek() {
+                None => {
+                    seed_reply_by_error = Some(
+                        "--seed-reply-by requires a value (duration text like '5m') but none was given."
+                            .to_string(),
+                    );
+                }
+                Some(next) if next.starts_with("--") => {
+                    seed_reply_by_error = Some(format!(
+                        "--seed-reply-by requires a value (duration text like '5m'); '{next}' looks like another flag, not a duration value."
+                    ));
+                }
+                Some(_) => {
+                    let v = it.next().expect("peeked Some");
+                    if v.trim().is_empty() {
+                        seed_reply_by_error = Some(
+                            "--seed-reply-by value is empty or whitespace-only; provide a duration like '5m'."
+                                .to_string(),
+                        );
+                    } else {
+                        seed_reply_by = Some(v);
+                    }
+                }
+            },
+            "--b-task" => match it.peek() {
+                None => {
+                    b_task_error = Some(
+                        "--b-task requires a value (text or @path) but none was given.".to_string(),
+                    );
+                }
+                Some(next) if next.starts_with("--") => {
+                    b_task_error = Some(format!(
+                        "--b-task requires a value (text or @path); '{next}' looks like another flag, not a task value."
+                    ));
+                }
+                Some(_) => {
+                    let v = it.next().expect("peeked Some");
+                    if v.trim().is_empty() {
+                        b_task_error = Some(
+                            "--b-task value is empty or whitespace-only; provide task text or an @path reference."
+                                .to_string(),
+                        );
+                    } else {
+                        b_task = Some(v);
+                    }
+                }
+            },
             _ => {}
         }
     }
@@ -758,6 +1210,11 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
         model,
         disallow_mcp,
         cli_only,
+        seed_request,
+        seed_reply_by,
+        seed_reply_by_error,
+        b_task,
+        b_task_error,
     }
 }
 
@@ -895,6 +1352,43 @@ fn wait_for_reply(
     let deadline = Instant::now() + cap;
     loop {
         if let Some(rec) = observer.find_delivery_after(baseline, from_b, to_a) {
+            return Some(rec);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// ★F3 레이스를 실제로 닫는 폴링(--seed-request 전용)★: `wait_for_reply` 는 baseline 이후 첫 B→A
+///   레코드(회신과 무관한 "ack" 일 수 있음)에서 멈춘다 — 진짜 계약 회신(배달 + in_reply_to == seed_msg_id)
+///   이 그 뒤에 도착하면 그 시점의 관측만으론 놓친다. 그래서 A 턴 대기까지 끝난 뒤, **잔여** 예산
+///   (`cap` — 호출부가 `REPLY_WAIT_CAP.saturating_sub(elapsed)` 로 계산해 넘긴다, 새 타임아웃 상수 없음)
+///   만큼, 같은 루프 구조·폴링 간격(200ms)으로 그 레코드가 나타나길 마저 기다린다.
+///   ★그 `elapsed` 는 wait_for_reply 만의 소비가 아니다(option b, FIX)★: 호출부가 재는 시각은 씨앗 주입
+///   직후부터라, wait_for_reply 뒤에 이어지는 A 턴 대기(wait_turn_end, 최대 TURN_WAIT_CAP=180s)까지
+///   **같은 REPLY_WAIT_CAP 벽시계를 함께 태운다**(이전 주석은 "wait_for_reply 소비분만 뺀다" 고 잘못
+///   말했었다). 그래서 `cap` 이 0(또는 음수, `saturating_sub` 이 0 으로 바닥침)이면 호출부는 이 함수를
+///   아예 부르지 않는다(폴링 스킵) — 그 스킵은 결과 블록의 REPLY_POLL=skipped-no-budget 으로 반드시
+///   라벨링되며 침묵하지 않는다(항목1, option b). 매치를 찾으면 그 값을 돌려주지만(호출자는 부수효과로만
+///   쓴다 — 실제 사용은 그 뒤 `records_after` 스캔), 예산이 소진되도록 못 찾으면 None(정직한 negative —
+///   호출자가 그대로 스캔해도 같은 결과).
+fn wait_for_matching_reply(
+    observer: &Arc<CapturingObserver>,
+    baseline: usize,
+    from_b: AgentId,
+    to_a: AgentId,
+    seed_msg_id: &str,
+    cap: Duration,
+) -> Option<DeliveryObservation> {
+    let deadline = Instant::now() + cap;
+    loop {
+        if let Some(rec) = observer
+            .records_after(baseline, from_b, to_a)
+            .into_iter()
+            .find(|r| r.is_delivered() && r.in_reply_to.as_deref() == Some(seed_msg_id))
+        {
             return Some(rec);
         }
         if Instant::now() >= deadline {
@@ -1045,6 +1539,17 @@ mod tests {
         assert_eq!(a.model, "sonnet");
         assert!(!a.disallow_mcp, "기본은 MCP 허용(오늘 동작)");
         assert!(!a.cli_only, "기본은 cli-only 강제 없음(오늘 동작)");
+        assert!(
+            !a.seed_request,
+            "기본은 씨앗 계약 없음(plain 통보, 오늘 동작)"
+        );
+        assert_eq!(a.seed_reply_by, None);
+        assert_eq!(
+            a.seed_reply_by_error, None,
+            "기본은 --seed-reply-by 오용 없음"
+        );
+        assert_eq!(a.b_task, None, "기본은 B 원과제 override 없음(오늘 동작)");
+        assert_eq!(a.b_task_error, None, "기본은 --b-task 오용 없음");
     }
 
     #[test]
@@ -1306,6 +1811,250 @@ mod tests {
         assert!(
             !cli_only_run_passed(true, "none"),
             "b_sent=true 라도 entrance=none 이면 pass 아님"
+        );
+    }
+
+    // ── REPLY_POLL 라벨 판정(순수) — 우선순위 matched > timeout > skipped-no-budget ──────────────────
+    #[test]
+    fn reply_poll_label_matched_wins_regardless_of_poll_ran() {
+        // matched 는 폴링이 실제로 돌아 잡았든(poll_ran=true), 폴링 전에 이미 배달돼 있어 스킵됐든
+        // (poll_ran=false) 최우선이다 — 두 조합 모두 "matched".
+        assert_eq!(reply_poll_label(true, true), "matched");
+        assert_eq!(
+            reply_poll_label(true, false),
+            "matched",
+            "matched 는 poll_ran 과 무관하게 최우선(skipped-no-budget 보다 이긴다)"
+        );
+    }
+
+    #[test]
+    fn reply_poll_label_timeout_when_ran_but_not_matched() {
+        // 폴링이 예산을 받아 실제로 돌았지만 예산 소진까지 매치를 못 찾은 경우 = timeout.
+        assert_eq!(reply_poll_label(false, true), "timeout");
+    }
+
+    #[test]
+    fn reply_poll_label_skipped_no_budget_when_not_ran_and_not_matched() {
+        // 잔여 예산이 0/음수라 폴링 자체가 안 돌았고, 매치도 없는 경우 = skipped-no-budget.
+        assert_eq!(reply_poll_label(false, false), "skipped-no-budget");
+    }
+
+    // ── --seed-request/--seed-reply-by(순수 파싱) ─────────────────────────────────────────────────
+    #[test]
+    fn parse_args_seed_request_flag_is_boolean() {
+        // --seed-request 는 값 없는 불리언 플래그(존재 = 켜짐) — 뒤 토큰(--model)을 값으로 삼키지 않는다.
+        let a = parse_args(s(&["--seed-request", "--model", "opus"]));
+        assert!(a.seed_request, "--seed-request 존재 → 켜짐");
+        assert_eq!(a.model, "opus", "--seed-request 뒤 --model 은 정상 파싱");
+        assert_eq!(a.seed_reply_by, None);
+    }
+
+    #[test]
+    fn parse_args_seed_request_absent_is_false() {
+        // 플래그 미지정이면 오늘 동작(plain 통보) 유지 — 운영 회귀 0.
+        let a = parse_args(s(&["--priming", "C0", "--model", "haiku"]));
+        assert!(!a.seed_request);
+    }
+
+    #[test]
+    fn parse_args_seed_reply_by_value() {
+        let a = parse_args(s(&["--seed-request", "--seed-reply-by", "5m"]));
+        assert!(a.seed_request);
+        assert_eq!(a.seed_reply_by.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn parse_args_seed_reply_by_does_not_consume_next_flag_as_value() {
+        // FIX round-2 #7 과 동일 규율: --seed-reply-by 다음이 또 플래그면 값으로 삼키지 않는다.
+        // ★F5 오용 가드(신규)★: 이젠 조용히 넘기지 않고 seed_reply_by_error 에 사유를 남긴다(--b-task
+        //   의 parse_args_b_task_next_looks_like_flag_is_an_error 와 대칭).
+        let a = parse_args(s(&["--seed-reply-by", "--model", "opus"]));
+        assert_eq!(
+            a.seed_reply_by, None,
+            "다음 토큰이 플래그면 seed_reply_by 값으로 삼키지 않는다"
+        );
+        assert!(
+            a.seed_reply_by_error.is_some(),
+            "다음 토큰이 플래그처럼 보이면 오용 에러를 기록해야(F5)"
+        );
+        assert_eq!(
+            a.model, "opus",
+            "--model 은 정상 파싱돼야(에러 기록이 뒤 파싱을 막지 않는다)"
+        );
+    }
+
+    // ★F5 오용 가드(신규)★ --seed-reply-by 값 누락/빈 값/공백뿐인 값 — --b-task 오용 가드와 같은 규율.
+    #[test]
+    fn parse_args_seed_reply_by_missing_value_at_end_is_an_error() {
+        let a = parse_args(s(&["--seed-request", "--seed-reply-by"]));
+        assert_eq!(a.seed_reply_by, None);
+        assert!(
+            a.seed_reply_by_error.is_some(),
+            "값 없이 끝나는 --seed-reply-by 는 오용 에러를 기록해야(F5)"
+        );
+    }
+
+    #[test]
+    fn parse_args_seed_reply_by_empty_value_is_an_error() {
+        let a = parse_args(s(&["--seed-request", "--seed-reply-by", ""]));
+        assert_eq!(a.seed_reply_by, None);
+        assert!(
+            a.seed_reply_by_error.is_some(),
+            "빈 값은 오용 에러를 기록해야(F5)"
+        );
+    }
+
+    #[test]
+    fn parse_args_seed_reply_by_whitespace_only_value_is_an_error() {
+        let a = parse_args(s(&["--seed-request", "--seed-reply-by", "   "]));
+        assert_eq!(a.seed_reply_by, None);
+        assert!(
+            a.seed_reply_by_error.is_some(),
+            "공백뿐인 값은 오용 에러를 기록해야(F5)"
+        );
+    }
+
+    #[test]
+    fn parse_args_seed_reply_by_valid_value_has_no_error() {
+        let a = parse_args(s(&["--seed-request", "--seed-reply-by", "5m"]));
+        assert_eq!(a.seed_reply_by.as_deref(), Some("5m"));
+        assert_eq!(
+            a.seed_reply_by_error, None,
+            "유효한 값은 에러를 기록하지 않는다"
+        );
+    }
+
+    #[test]
+    fn seed_reply_by_without_request_is_rejected() {
+        // --seed-reply-by 단독 지정(= --seed-request 없이)은 인자 오류다.
+        assert!(
+            seed_reply_by_without_request_is_invalid(false, &Some("5m".to_string())),
+            "seed_request=false 인데 seed_reply_by=Some → 반려"
+        );
+    }
+
+    #[test]
+    fn seed_reply_by_with_request_is_valid() {
+        // --seed-request 와 함께면 유효(반려 아님).
+        assert!(!seed_reply_by_without_request_is_invalid(
+            true,
+            &Some("5m".to_string())
+        ));
+    }
+
+    #[test]
+    fn seed_reply_by_absent_is_always_valid() {
+        // seed_reply_by=None 이면 seed_request 값과 무관하게 반려 아님(단독 지정이 아니므로).
+        assert!(!seed_reply_by_without_request_is_invalid(false, &None));
+        assert!(!seed_reply_by_without_request_is_invalid(true, &None));
+    }
+
+    // ── --b-task(순수 파싱 + 파일참조 해석) ───────────────────────────────────────────────────────
+    #[test]
+    fn parse_args_b_task_inline_text() {
+        let a = parse_args(s(&["--b-task", "You are on billing. Reply in one line."]));
+        assert_eq!(
+            a.b_task.as_deref(),
+            Some("You are on billing. Reply in one line.")
+        );
+    }
+
+    #[test]
+    fn parse_args_b_task_file_reference_kept_raw() {
+        // parse_args 는 순수 토큰화만 한다 — `@` 접두 해석(파일 읽기)은 run() 이 나중에 한다.
+        let a = parse_args(s(&["--b-task", "@prompts/experiments/b-task.md"]));
+        assert_eq!(a.b_task.as_deref(), Some("@prompts/experiments/b-task.md"));
+    }
+
+    // ★F5 오용 가드★ --b-task 는 다른 값-플래그와 달리 "다음이 플래그처럼 보임" 을 조용히 넘기지 않고
+    //   인자 오류로 기록한다(parse_args_defaults 의 b_task_error=None 과 대칭 — 여기선 Some 이어야 한다).
+    #[test]
+    fn parse_args_b_task_next_looks_like_flag_is_an_error() {
+        let a = parse_args(s(&["--b-task", "--model", "opus"]));
+        assert_eq!(
+            a.b_task, None,
+            "다음 토큰이 플래그면 b_task 값으로 삼키지 않는다(값은 여전히 미설정)"
+        );
+        assert!(
+            a.b_task_error.is_some(),
+            "다음 토큰이 플래그처럼 보이면 오용 에러를 기록해야(F5)"
+        );
+        assert_eq!(
+            a.model, "opus",
+            "--model 은 정상 파싱돼야(에러 기록이 뒤 파싱을 막지 않는다)"
+        );
+    }
+
+    #[test]
+    fn parse_args_b_task_missing_value_at_end_is_an_error() {
+        let a = parse_args(s(&["--b-task"]));
+        assert_eq!(a.b_task, None);
+        assert!(
+            a.b_task_error.is_some(),
+            "값 없이 끝나는 --b-task 는 오용 에러를 기록해야(F5)"
+        );
+    }
+
+    #[test]
+    fn parse_args_b_task_empty_value_is_an_error() {
+        let a = parse_args(s(&["--b-task", ""]));
+        assert_eq!(a.b_task, None);
+        assert!(a.b_task_error.is_some(), "빈 값은 오용 에러를 기록해야(F5)");
+    }
+
+    #[test]
+    fn parse_args_b_task_whitespace_only_value_is_an_error() {
+        let a = parse_args(s(&["--b-task", "   "]));
+        assert_eq!(a.b_task, None);
+        assert!(
+            a.b_task_error.is_some(),
+            "공백뿐인 값은 오용 에러를 기록해야(F5)"
+        );
+    }
+
+    #[test]
+    fn parse_args_b_task_valid_value_has_no_error() {
+        let a = parse_args(s(&["--b-task", "You are on billing."]));
+        assert_eq!(a.b_task.as_deref(), Some("You are on billing."));
+        assert_eq!(a.b_task_error, None, "유효한 값은 에러를 기록하지 않는다");
+    }
+
+    #[test]
+    fn resolve_b_task_file_path_absolute_passthrough() {
+        let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
+        let abs = if cfg!(windows) {
+            "@C:\\custom\\task.md"
+        } else {
+            "@/custom/task.md"
+        };
+        let got = resolve_b_task_file_path(abs, &root).expect("@ 접두 → 파일 참조");
+        let expected = if cfg!(windows) {
+            "C:\\custom\\task.md"
+        } else {
+            "/custom/task.md"
+        };
+        assert_eq!(got, PathBuf::from(expected), "절대 경로는 그대로 통과");
+    }
+
+    #[test]
+    fn resolve_b_task_file_path_relative_joined_under_root() {
+        let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
+        let got = resolve_b_task_file_path("@sub/task.md", &root).expect("@ 접두 → 상대 파일 참조");
+        assert!(got.is_absolute());
+        assert!(
+            got.ends_with("sub/task.md") || got.ends_with("sub\\task.md"),
+            "상대 경로는 repo 루트 기준 join: {got:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_b_task_file_path_none_for_inline_text() {
+        // `@` 접두가 아니면 파일 참조가 아니다 — 호출자는 값을 인라인 텍스트 그대로 쓴다.
+        let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
+        assert_eq!(
+            resolve_b_task_file_path("plain inline text", &root),
+            None,
+            "@ 접두 없으면 None(인라인 텍스트로 처리)"
         );
     }
 }

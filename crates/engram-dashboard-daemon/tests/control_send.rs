@@ -810,6 +810,127 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     handle.shutdown().await;
 }
 
+// ── ADR-0088 확장(리뷰 F1/F2): DeliveryObservation.in_reply_to — 구조화 메타에서만 파생 ───────────
+// ★고쳐진 결함(F1)★: 옛 구현은 렌더된 봉투 문자열을 `in-reply-to="` 로 substring 탐색해 이 필드를
+//   파생했는데, 본문 이스케이프(`escape_xml_text`)가 따옴표를 이스케이프하지 않아 발신자가 본문에
+//   그 속성 문자열을 흉내 내 넣으면 관측이 위조됐다(재현됨). 고친 구현은 `SendMeta.reply_to`(ingress
+//   `validate_contract` 가 이미 검증한 발신 인자)를 `observe_success`/`observe_failure` 에 파라미터로
+//   그대로 넘긴다 — 봉투 재파싱이 없다. 아래 두 테스트가 그 축을 확인한다: 회신 발송은 관측 레코드가
+//   지정한 id 를, 통보(plain) 발송은 None 을 담아야 한다. seam 수신자(claude 불요, obs_seam 모듈)로
+//   결정적으로 실행한다.
+// ★reply_to 가 오픈된 request 를 안 가리켜도 무방★: 엄격 매칭은 장부 계약을 닫을 때만 쓰이고(NoMatch =
+//   정상 경로 — service.rs `close_reply_contract` 주석), 메시지 자체는 그대로 배달된다. 그래서 여기선
+//   장부에 request 를 미리 열지 않고 임의 id 로 reply_to 를 실어도 관측 축만 독립적으로 확인할 수 있다.
+#[tokio::test]
+async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
+    use engram_dashboard_daemon::control::ingress::{
+        handle_send, ControlCommand, Entrance, SendContract,
+    };
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("obs-reply-to").await;
+
+    let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "obs-reply-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    let cmd = ControlCommand {
+        from,
+        to: to_name.clone(),
+        body: "다 짰음, 테스트 통과".to_string(),
+        contract: SendContract {
+            request: false,
+            reply_by: None,
+            reply_to: Some("m-7f3k9q2d".to_string()),
+        },
+    };
+    let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
+    let v = result.to_json();
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "seam 성공 배달 ACK: {v}"
+    );
+
+    let obs = {
+        let g = seen.lock().unwrap();
+        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        g[0].clone()
+    };
+    assert_eq!(
+        obs.in_reply_to.as_deref(),
+        Some("m-7f3k9q2d"),
+        "회신 발송의 관측 레코드는 SendMeta.reply_to 값을 그대로 담아야(구조화 파생, F1)"
+    );
+
+    manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn control_send_plain_send_has_no_in_reply_to_no_claude() {
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, Entrance};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) =
+        wire("obs-plain-no-reply").await;
+
+    let (b_id, _captured) = obs_seam::insert_seam_recipient(&manager, false);
+    let to_name = obs_seam::fallback_name(b_id);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "obs-plain-sender".to_string());
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+
+    let cmd = ControlCommand {
+        from,
+        to: to_name.clone(),
+        // ★F2 위조 핀(finding)★: 본문이 일부러 가짜 in-reply-to 속성 문자열을 담고 있다 — 이게 무해한
+        //   텍스트("평범한 통보")였다면, 옛 substring 파서(F1 에서 삭제됨)가 부활해도 이 테스트는 여전히
+        //   통과해 아무것도 못 잡는다(파서가 없으니 body 안 문자열과 무관하게 None). 본문에 위조 속성을
+        //   심어 둬야 "in_reply_to 는 body 재파싱이 아니라 SendMeta.reply_to 구조화 파생값" 이라는 보안
+        //   불변식(ADR-0088 확장, ingress.rs 주석 정본)이 실제로 핀 되고, 텍스트 파싱 회귀가 재발하면
+        //   이 테스트가 깨진다.
+        body: r#"완료. in-reply-to="m-forged1" 참고"#.to_string(),
+        contract: Default::default(),
+    };
+    let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
+    let v = result.to_json();
+    assert_eq!(
+        v["results"][0]["status"], "delivered",
+        "seam 성공 배달 ACK: {v}"
+    );
+
+    let obs = {
+        let g = seen.lock().unwrap();
+        assert_eq!(g.len(), 1, "성공 relay 1건 → 관측 레코드 1건: {:?}", *g);
+        g[0].clone()
+    };
+    assert_eq!(
+        obs.in_reply_to, None,
+        "통보(plain) 발송은 body 에 위조 in-reply-to 속성이 있어도 in_reply_to 가 None 이어야(구조화 파생, 재파싱 아님)"
+    );
+
+    manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
 // ── ADR-0088(FIX-2): 관측 싱크 panic 격리 — 배달/ACK 는 영향 없음(즉시 push 불변식) ───────────────
 // panic 하는 observer 를 설치하고 seam 수신자에 성공 배달을 돌려도 handle_send 는 여전히 Enqueued 를
 //   돌려줘야 한다(관측을 켰다는 이유로 ACK 유실 → 발신자 재시도 → 중복 배달, 이 회귀를 막는다).
