@@ -68,16 +68,25 @@ graph TB
     Client["클라이언트 중계기<br/>명령 전달 · 출력 분배"]
     Daemon["데몬<br/>에이전트 실행 · 상태 · 메시징"]
     PTY["가상 터미널 / stdio"]
-    Claude["Claude Code"]
+    Agent["에이전트 (아래 표)"]
 
-    UI --> Client
+    UI <--> Client
     Client <-->|WebSocket| Daemon
-    Daemon --> PTY
-    PTY --> Claude
-    Claude -.->|MCP · engram-send| Daemon
+    Daemon <--> PTY
+    PTY <--> Agent
+    Agent -.->|MCP 또는 engram-send| Daemon
 ```
 
-모델별 실행 방식은 공통 추상화 아래에서 분리했습니다. 현재는 Claude Code만 연결되어 있으며 Codex, Gemini, API 기반 모델과 macOS·Linux 지원은 추후 추가할 예정입니다.
+모델별 실행 방식은 공통 추상화 아래에서 분리했습니다.
+
+| 백엔드 | 상태 |
+|---|---|
+| Claude Code | 지원 |
+| Codex | 예정 |
+| Gemini | 예정 |
+| API 기반 모델 (로컬 모델 포함) | 예정 |
+
+macOS·Linux 지원도 추후 추가할 예정입니다.
 
 ## 문서
 
