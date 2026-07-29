@@ -235,7 +235,7 @@ fn engram_send_pending_posts_to_the_messages_route_and_exits_zero() {
 }
 
 #[test]
-fn engram_send_status_and_group_subcommands_hit_their_routes() {
+fn engram_send_query_subcommands_hit_their_routes_and_group_is_gone() {
     // status <id> → /control/messages + {"id": …}
     let response =
         ok_response(r#"{"id":"m-7f3k9q2d","from":"a","awaiting_reply":false,"rows":[]}"#);
@@ -250,40 +250,27 @@ fn engram_send_status_and_group_subcommands_hit_their_routes() {
     );
     assert!(request.contains(r#"{"id":"m-7f3k9q2d"}"#), "{request}");
 
-    // group update @g --add a,b → /control/group + 콤마 분해된 배열
-    let response = ok_response(r#"{"group":"@coders","members":["alice","bob"]}"#);
+    // pending → /control/messages + 빈 객체(무인자 = "내 미결").
+    let response = ok_response(r#"{"me":"a","open":[]}"#);
     let (host, port, stub) = spawn_capturing_stub(response);
     let url = format!("http://{host}:{port}");
-    let (_stdout, code) = run_cli(
-        &url,
-        &["group", "update", "@coders", "--add", "alice,bob"],
-        None,
-    );
+    let (_stdout, code) = run_cli(&url, &["pending"], None);
     let request = stub.join().expect("stub join");
     assert_eq!(code, 0);
     assert!(
-        request.starts_with("POST /control/group HTTP/1.1"),
+        request.starts_with("POST /control/messages HTTP/1.1"),
         "{request}"
-    );
-    // ★값은 가공 없이 그대로 실린다(D 리뷰 A1)★ — 콤마 분해·trim 은 데몬(ingress)의 일이다. CLI 가
-    //   미리 다듬으면 같은 표기가 MCP 로 왔을 때와 최종 상태가 갈린다(유령 멤버 결함의 원인).
-    assert!(
-        request.contains(r#"{"add":["alice,bob"],"group":"@coders"}"#),
-        "add 값은 argv 그대로 전달: {request}"
     );
 
-    // group delete @g → delete:true
-    let response = ok_response(r#"{"group":"@coders","deleted":true}"#);
-    let (host, port, stub) = spawn_capturing_stub(response);
-    let url = format!("http://{host}:{port}");
-    let (_stdout, code) = run_cli(&url, &["group", "delete", "@coders"], None);
-    let request = stub.join().expect("stub join");
-    assert_eq!(code, 0);
+    // ★`group` 서브커맨드는 제거됐다(ADR-0111 결정 4 · ADR-0112 결정 1)★ — 사용자 정의 그룹 관리 표면
+    //   자체가 사라졌으므로 CLI 도 그 동사를 모른다. 남아 있으면 프라이밍이 없는 명령을 가르친다.
+    //   ★네트워크를 타지 않는다★: 인자 파싱 단계에서 끝나므로 스텁 서버가 필요 없다.
+    let (stdout, code) = run_cli("http://127.0.0.1:1", &["group", "list"], None);
+    assert_eq!(code, 1, "모르는 서브커맨드는 BAD_ARGS: {stdout}");
     assert!(
-        request.starts_with("POST /control/group HTTP/1.1"),
-        "{request}"
+        stdout.contains("BAD_ARGS"),
+        "인자 오류로 끝나야(라우트 조회 없음): {stdout}"
     );
-    assert!(request.contains(r#""delete":true"#), "{request}");
 }
 
 #[test]

@@ -229,7 +229,7 @@ async fn run() -> i32 {
     let baseline = obs.done_snapshot();
     let cmd = ControlCommand {
         from,
-        to: agent.id.to_string(), // 정확한 AgentId 로 지목(이름 충돌 회피).
+        to: vec![agent.id.to_string()], // 정확한 AgentId 로 지목(이름 충돌 회피). 목록 = 1명.
         body: NATURAL_MESSAGE.to_string(),
         contract: Default::default(),
     };

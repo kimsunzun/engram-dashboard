@@ -839,7 +839,7 @@ async fn run() -> i32 {
     };
     let seed = ControlCommand {
         from: from_a,
-        to: NAME_B.to_string(), // 이름으로 지목(alice→bob).
+        to: vec![NAME_B.to_string()], // 이름으로 지목(alice→bob). 수신자 목록 = 1명(ADR-0111).
         body: SEED_A_TO_B.to_string(),
         contract: seed_contract,
     };

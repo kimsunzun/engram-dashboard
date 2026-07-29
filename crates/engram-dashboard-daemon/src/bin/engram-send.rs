@@ -1,18 +1,17 @@
 //! `engram-send` — CLI 입구(ADR-0086 스텝 2 · S18 D). 스폰된 claude 에이전트가 Bash 로 팀에 말을 걸고
-//! 자기 미결·그룹 명단을 확인하는 최소 클라이언트다. **MCP 툴 3종의 미러**(spec §6 듀얼 입구).
+//! 자기 미결을 확인하는 최소 클라이언트다. **MCP 툴 2종의 미러**(spec §6 듀얼 입구 — `group` 툴/서브커맨드는
+//! ADR-0111 결정 4 로 제거됐다).
 //!
 //! ★동작★: 환경변수 `ENGRAM_TOKEN`(Bearer 토큰) + `ENGRAM_CONTROL_URL`(데몬 제어 base URL)을 읽어
 //!   `<base>/control/<verb>` 로 JSON 을 POST 한다(Authorization: Bearer <token>). 응답 JSON 을 stdout 에
 //!   **그대로** 찍는다.
 //!
 //! ```text
-//! engram-send --to <이름|@그룹> --body "…" [--request [--reply-by 10m]] [--reply-to m-xxxx]
-//! engram-send --to <이름> --body-stdin <<'EOF' … EOF     # 인용 지옥 회피(D)
+//! engram-send --to <수신자[,수신자…]> --body "…" [--request [--reply-by 10m]] [--reply-to m-xxxx]
+//!     # 수신자 = 이름 | agent id | @all(나 빼고 전원). **콤마로 여러 명**(ADR-0111 다중 수신자).
+//! engram-send --to <수신자> --body-stdin <<'EOF' … EOF   # 인용 지옥 회피(D)
 //! engram-send status <m-id>                              # 그 메시지의 배달 장부
 //! engram-send pending                                    # 내 미결(보낸 것·기다리는 것·내가 답할 것)
-//! engram-send group list                                 # 그룹 목록(@all 포함)
-//! engram-send group update @g --add a,b [--remove c]     # 증감(없는 그룹은 add 로 생성)
-//! engram-send group delete @g                            # 그룹 삭제
 //! ```
 //!
 //! ★exit code 3분법★: **0** = 접수/조회 성공 · **1** = 실패(반려 `{status:"error",code,hint}`·연결/env
@@ -25,7 +24,7 @@
 //!   (사칭 차단, ADR-0086 불변식). 그래서 조회 명령에도 신원 인자가 없고, ENGRAM_TOKEN 이 없으면 애초에
 //!   `NO_TOKEN` 으로 끝난다 — "누구로 조회할지" 를 CLI 가 고를 여지 자체를 만들지 않는다.
 //!
-//! ★의미 검증은 데몬(ingress) 단독★: 상호배타(`--request` + `--reply-to`)·기간 표기·그룹 인자 조합은 전부
+//! ★의미 검증은 데몬(ingress) 단독★: 상호배타(`--request` + `--reply-to`)·기간 표기·수신자 해석은 전부
 //!   데몬이 판정한다 — MCP 입구와 반려 코드/문구가 같아야 하기 때문이다(entrance-agnostic). CLI 는 **형태**
 //!   (값 누락·모르는 플래그)와 **CLI 고유 배관**(`--body` ↔ `--body-stdin` 상호배타 — 데몬은 body 필드 하나만
 //!   알아서 이 충돌을 볼 수 없다)만 본다.
@@ -188,38 +187,14 @@ enum ParsedCommand {
         id: String,
     },
     Pending,
-    GroupList,
-    GroupUpdate {
-        group: String,
-        add: Vec<String>,
-        remove: Vec<String>,
-        /// spec §6 의 `group update @g … [--delete]` — 조합 판정은 **데몬**이 한다(리뷰 B4).
-        delete: bool,
-    },
-    GroupDelete {
-        group: String,
-    },
 }
 
 /// 실행 가능한 커맨드(본문까지 확정됨) — 라우트·바디를 자기가 안다.
 #[derive(Debug)]
 enum Command {
     Send(CliArgs),
-    Status {
-        id: String,
-    },
+    Status { id: String },
     Pending,
-    GroupList,
-    GroupUpdate {
-        group: String,
-        add: Vec<String>,
-        remove: Vec<String>,
-        /// spec §6 의 `group update @g … [--delete]` — 조합 판정은 **데몬**이 한다(리뷰 B4).
-        delete: bool,
-    },
-    GroupDelete {
-        group: String,
-    },
 }
 
 impl Command {
@@ -231,9 +206,6 @@ impl Command {
         match self {
             Command::Send(_) => "/control/send",
             Command::Status { .. } | Command::Pending => "/control/messages",
-            Command::GroupList | Command::GroupUpdate { .. } | Command::GroupDelete { .. } => {
-                "/control/group"
-            }
         }
     }
 
@@ -244,33 +216,6 @@ impl Command {
             Command::Status { id } => serde_json::json!({ "id": id }).to_string(),
             // 무인자 조회 = "내 미결". 빈 객체를 실어 라우트만 지목한다(신원은 토큰).
             Command::Pending => serde_json::json!({}).to_string(),
-            Command::GroupList => serde_json::json!({}).to_string(),
-            Command::GroupUpdate {
-                group,
-                add,
-                remove,
-                delete,
-            } => {
-                // ★미지정 축은 키를 안 싣는다★: 데몬은 없는 키를 "변경 없음" 으로 읽는다(빈 배열과 동치지만,
-                //   보내지 않는 쪽이 의도를 더 정확히 표현한다 — 발송 바디의 규율과 같다).
-                let mut v = serde_json::json!({ "group": group });
-                if !add.is_empty() {
-                    v["add"] = serde_json::Value::from(add.clone());
-                }
-                if !remove.is_empty() {
-                    v["remove"] = serde_json::Value::from(remove.clone());
-                }
-                // ★`--delete` 는 판정하지 않고 **그대로 전달**한다(리뷰 B4)★: 단독이면 삭제, 증감과 섞이면
-                //   `INVALID_GROUP_ARGS` — 그 규칙과 에러 어휘의 정본은 데몬(ingress `handle_group`)이다.
-                //   CLI 가 여기서 미리 반려하면 같은 조합에 MCP 입구와 다른 답이 나간다.
-                if *delete {
-                    v["delete"] = serde_json::Value::Bool(true);
-                }
-                v.to_string()
-            }
-            Command::GroupDelete { group } => {
-                serde_json::json!({ "group": group, "delete": true }).to_string()
-            }
         }
     }
 }
@@ -306,86 +251,8 @@ fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
             }
             Ok(ParsedCommand::Pending)
         }
-        Some("group") => parse_group_command(&args[1..]),
         // 첫 인자가 플래그이거나 인자가 없다 = 발송(기본 동사, 하위호환).
         _ => parse_send_args(args),
-    }
-}
-
-/// `group …` 하위 파서 — `list` / `update @g [--add a,b] [--remove c]` / `delete @g`.
-fn parse_group_command(rest: &[String]) -> Result<ParsedCommand, String> {
-    match rest.first().map(|s| s.as_str()) {
-        Some("list") => {
-            if rest.len() > 1 {
-                return Err(format!("group list takes no arguments: {}", rest[1]));
-            }
-            Ok(ParsedCommand::GroupList)
-        }
-        Some("update") => {
-            let group = rest
-                .get(1)
-                .ok_or("group update requires a group name, e.g. group update @coders --add alice")?
-                .clone();
-            if group.starts_with("--") {
-                return Err(
-                    "group update needs the group name before its flags, e.g. group update @coders --add alice"
-                        .to_string(),
-                );
-            }
-            let mut add = Vec::new();
-            let mut remove = Vec::new();
-            let mut delete = false;
-            let mut i = 2;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    // ★값을 **가공하지 않고** 그대로 누적한다(D 리뷰 A1)★: 콤마 분해·trim·빈 조각 제거는
-                    //   이제 데몬(ingress `normalize_member_names`)이 하는 일이다. 여기서 미리 다듬으면
-                    //   같은 표기가 CLI 로 왔을 때와 MCP 로 왔을 때 **다른 최종 상태**가 되는데(옛 결함),
-                    //   그 정규화 정본을 한 곳에 두려면 CLI 는 argv 를 나르기만 해야 한다.
-                    //   `--add a,b` 와 `--add a --add b` 는 둘 다 데몬에서 같은 결과로 수렴한다.
-                    "--add" => {
-                        i += 1;
-                        add.push(rest.get(i).ok_or("--add requires a value")?.clone());
-                    }
-                    "--remove" => {
-                        i += 1;
-                        remove.push(rest.get(i).ok_or("--remove requires a value")?.clone());
-                    }
-                    // ★spec §6 표기 그대로 수용 + 판정은 데몬(리뷰 B4)★: `group update @g --delete` 는
-                    //   spec 의 CLI shape 에 있는 형태다. 여기서 반려하면 MCP 입구와 답이 갈리므로
-                    //   플래그만 실어 보내고 조합 규칙·에러 어휘는 데몬이 정한다.
-                    "--delete" => delete = true,
-                    other => return Err(format!("unknown argument: {other}")),
-                }
-                i += 1;
-            }
-            Ok(ParsedCommand::GroupUpdate {
-                group,
-                add,
-                remove,
-                delete,
-            })
-        }
-        Some("delete") => {
-            let group = rest
-                .get(1)
-                .ok_or("group delete requires a group name, e.g. group delete @coders")?
-                .clone();
-            if rest.len() > 2 {
-                return Err(format!(
-                    "unexpected argument after group delete <@group>: {}",
-                    rest[2]
-                ));
-            }
-            Ok(ParsedCommand::GroupDelete { group })
-        }
-        Some(other) => Err(format!(
-            "unknown group subcommand '{other}' — use: group list | group update @g --add a,b [--remove c] | group delete @g"
-        )),
-        None => Err(
-            "group needs a subcommand: group list | group update @g --add a,b [--remove c] | group delete @g"
-                .to_string(),
-        ),
     }
 }
 
@@ -513,19 +380,6 @@ fn materialize_body(
         }
         ParsedCommand::Status { id } => Command::Status { id },
         ParsedCommand::Pending => Command::Pending,
-        ParsedCommand::GroupList => Command::GroupList,
-        ParsedCommand::GroupUpdate {
-            group,
-            add,
-            remove,
-            delete,
-        } => Command::GroupUpdate {
-            group,
-            add,
-            remove,
-            delete,
-        },
-        ParsedCommand::GroupDelete { group } => Command::GroupDelete { group },
     })
 }
 
@@ -558,8 +412,9 @@ const EXIT_FAILED: i32 = 1;
 const EXIT_MALFORMED_SUCCESS: i32 = 2;
 
 /// 성공 `results[]` 항목이 가질 수 있는 상태 어휘(spec §5·§6). 이 밖의 값은 shape 위반으로 본다.
-///   (`skipped` = 그룹 방송 죽은 멤버 — C4 가 켜면 나온다. 미리 받아 둔다.)
-const VALID_RESULT_STATUSES: [&str; 3] = ["delivered", "pending", "skipped"];
+///   ★`skipped` 는 폐지되고 `failed` 가 들어왔다(ADR-0111 결정 3)★ — 실패 행은 그 수신자만의 실패이고
+///   발송 자체는 접수됐으므로 **exit 0** 이다(부분 진행이 정상 경로 — 발신자가 `results[]` 를 읽고 판단한다).
+const VALID_RESULT_STATUSES: [&str; 3] = ["delivered", "pending", "failed"];
 
 /// (HTTP status, body) → exit code. 성공(0) 조건 = **HTTP 2xx** 이고 body 가 spec §6 성공 shape 을 **완전히**
 /// 만족할 때. **검증된** 반려 shape(`is_validated_error_shape`)·프레이밍 오류(비-JSON)·비-2xx 는
@@ -573,7 +428,7 @@ const VALID_RESULT_STATUSES: [&str; 3] = ["delivered", "pending", "skipped"];
 ///   그래서 성공은 **전 조건**을 만족할 때만 0 이다:
 ///     ① 최상위 `id` 가 비어 있지 않은 문자열(장부·회신 상관 키 — spec §6)
 ///     ② `results` 가 **비어 있지 않은** 배열(수신자 0명 = 접수된 게 없다)
-///     ③ 각 항목의 `to` 가 비어 있지 않은 문자열이고, `status` 가 어휘(delivered|pending|skipped) 안
+///     ③ 각 항목의 `to` 가 비어 있지 않은 문자열이고, `status` 가 어휘(delivered|pending|failed) 안
 ///   하나라도 어긋나면 우리가 아는 성공이 아니므로 `EXIT_MALFORMED_SUCCESS` + stderr 한 줄로 갈라 낸다.
 /// ★비-2xx 는 항상 1★: status 를 무시하면 프레이밍 오류를 성공으로 오인할 위험이 있어 게이트를 둔다.
 ///   body 파싱 실패(비-JSON)도 1 — 2xx + 비-JSON 은 "성공 shape 위반" 이 아니라 프레이밍 실패로 본다
@@ -656,7 +511,7 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
             .is_some_and(|s| VALID_RESULT_STATUSES.contains(&s));
         if !to_ok || !status_ok {
             eprintln!(
-                "engram-send: malformed success response — result entry needs a non-empty 'to' and a status of delivered|pending|skipped"
+                "engram-send: malformed success response — result entry needs a non-empty 'to' and a status of delivered|pending|failed"
             );
             return EXIT_MALFORMED_SUCCESS;
         }
@@ -664,11 +519,11 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
     0
 }
 
-/// ★조회·관리 응답의 exit code 매핑(D)★ — `status`/`pending`/`group …` 전용.
+/// ★조회 응답의 exit code 매핑(D)★ — `status`/`pending` 전용.
 ///
 /// ★왜 발송과 다른 판정기인가(load-bearing)★: 발송 성공은 shape 이 **하나로 고정**(`{id, results[]}`)이라
 ///   전 조건을 검사할 수 있다. 조회 성공은 동사마다 다르다(`{id,from,awaiting_reply,rows}` /
-///   `{me,open}` / `{groups}` / `{group,members}` / `{group,deleted}`). 그 다섯 shape 을 CLI 가 다시
+///   `{me,open}`). 그 shape 들을 CLI 가 다시
 ///   기술하면 데몬 응답이 늘 때마다 **두 곳**을 고쳐야 하고, 한쪽만 고치면 정상 응답이 exit 2 로 튄다
 ///   (거짓 경보). 그래서 조회는 반대 방향으로 판정한다: **검증된 에러 shape 이면 실패(1), 그 외 2xx JSON
 ///   객체면 성공(0)**. 에러 어휘(`status:"error"` + 비지 않은 `code`)는 발송과 공유하는 안정 계약이라
@@ -1209,14 +1064,31 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_skipped_status_is_accepted() {
-        // C4 그룹 방송의 죽은 멤버 어휘 — 미리 받아 둔다(접수 성공).
+    fn exit_code_failed_row_is_still_an_accepted_send() {
+        // ★부분 진행(ADR-0111 결정 3)★: 한 수신자가 실패해도 **발송 자체는 접수**됐다 — exit 0 이고,
+        //   누구에게 안 갔는지는 발신자가 `results[]` 의 `code` 를 읽고 판단한다(자기교정 대상이 아니다).
         assert_eq!(
             exit_code_for_response(
                 200,
-                r#"{"id":"m-1","results":[{"to":"bob","status":"delivered"},{"to":"dead","status":"skipped"}]}"#
+                r#"{"id":"m-1","results":[{"to":"bob","status":"delivered"},{"to":"dead","status":"failed","code":"RECIPIENT_NOT_FOUND"}]}"#
             ),
             0
+        );
+        // 전원 실패도 같은 shape·같은 판정(전체 반려로 승격하지 않는다 — spec §5).
+        assert_eq!(
+            exit_code_for_response(
+                200,
+                r#"{"id":"m-1","results":[{"to":"dead","status":"failed","code":"RECIPIENT_NOT_FOUND"}]}"#
+            ),
+            0
+        );
+        // 폐지된 어휘(`skipped`)는 이제 shape 위반이다 — 조용히 통과시키면 옛 데몬과의 불일치를 못 본다.
+        assert_eq!(
+            exit_code_for_response(
+                200,
+                r#"{"id":"m-1","results":[{"to":"dead","status":"skipped"}]}"#
+            ),
+            2
         );
     }
 
@@ -1527,87 +1399,6 @@ mod tests {
         assert_eq!(
             wire(&["pending"]),
             ("/control/messages", serde_json::json!({}))
-        );
-    }
-
-    #[test]
-    fn group_subcommands_map_to_the_group_route() {
-        assert_eq!(
-            wire(&["group", "list"]),
-            ("/control/group", serde_json::json!({}))
-        );
-        // ★값은 **가공하지 않고** 실린다(D 리뷰 A1)★: 콤마 분해·trim 은 데몬(ingress)이 하는 일이라
-        //   CLI 는 argv 를 그대로 나른다 — 그래야 같은 표기가 MCP 로 왜을 때와 최종 상태가 같아진다.
-        assert_eq!(
-            wire(&["group", "update", "@coders", "--add", "alice,bob"]),
-            (
-                "/control/group",
-                serde_json::json!({ "group": "@coders", "add": ["alice,bob"] })
-            )
-        );
-        assert_eq!(
-            wire(&["group", "update", "@coders", "--add", "carol", "--remove", "alice"]),
-            (
-                "/control/group",
-                serde_json::json!({ "group": "@coders", "add": ["carol"], "remove": ["alice"] })
-            )
-        );
-        assert_eq!(
-            wire(&["group", "delete", "@coders"]),
-            (
-                "/control/group",
-                serde_json::json!({ "group": "@coders", "delete": true })
-            )
-        );
-    }
-
-    #[test]
-    fn group_update_without_edits_is_a_plain_lookup_body() {
-        // 데몬은 "이름만 준 호출" 을 멤버 조회로 답한다(handle_group 규칙 2) — CLI 가 미리 반려하지 않는다
-        //   (의미 판정은 데몬 단독 — 두 입구 계약이 갈리지 않게).
-        assert_eq!(
-            wire(&["group", "update", "@coders"]),
-            ("/control/group", serde_json::json!({ "group": "@coders" }))
-        );
-    }
-
-    #[test]
-    fn add_and_remove_are_forwarded_verbatim_for_the_daemon_to_normalize() {
-        // ★D 리뷰 A1 로 역할이 옮겨간 테스트(옛 이름: `..._accept_commas_and_repetition_and_drop_empty_pieces`)★.
-        //   예전엔 CLI 가 콤마를 분해하고 빈 조각을 버렸다 — 그래서 **같은 표기가 MCP 로 들어오면** 그대로
-        //   저장돼 유령 멤버가 생겼다(입구별 최종 상태 불일치). 이제 정규화 정본은 데몬 하나고, CLI 는
-        //   반복 지정을 배열로 모으기만 한다. 최종 명단이 같아지는지는 ingress 단위 테스트가 본다.
-        let (_r, body) = wire(&[
-            "group", "update", "@t", "--add", " a , b ,", "--add", "c", "--remove", ",,",
-        ]);
-        assert_eq!(
-            body,
-            serde_json::json!({ "group": "@t", "add": [" a , b ,", "c"], "remove": [",,"] }),
-            "반복 지정은 배열로 누적하되 값은 손대지 않는다(정규화는 데몬)"
-        );
-    }
-
-    #[test]
-    fn group_update_forwards_the_delete_flag_instead_of_judging_it_locally() {
-        // ★D 리뷰 B4★: spec §6 의 CLI shape 은 `group update @g --add a,b [--remove c] [--delete]` 다.
-        //   조합 규칙(단독이면 삭제 / 증감과 섞이면 INVALID_GROUP_ARGS)과 에러 어휘의 정본은 데몬이라,
-        //   CLI 가 로컬로 반려하면 같은 입력에 MCP 입구와 다른 답이 나간다. 그래서 플래그만 실어 보낸다.
-        assert_eq!(
-            wire(&["group", "update", "@coders", "--delete"]),
-            (
-                "/control/group",
-                serde_json::json!({ "group": "@coders", "delete": true })
-            ),
-            "delete 단독 = `group delete @g` 와 같은 바디"
-        );
-        // 모순 조합도 **그대로** 실어 보낸다 — 반려는 데몬이 INVALID_GROUP_ARGS 로 한다.
-        assert_eq!(
-            wire(&["group", "update", "@coders", "--add", "a", "--delete"]),
-            (
-                "/control/group",
-                serde_json::json!({ "group": "@coders", "add": ["a"], "delete": true })
-            ),
-            "CLI 는 조합을 판정하지 않는다(판정 지점 단일화)"
         );
     }
 

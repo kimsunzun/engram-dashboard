@@ -68,20 +68,12 @@ impl DeliveryPort for ManagerDeliveryPort {
             .map_err(|e| e.to_string())
     }
 
-    /// 조건부 판정을 **core 에 그대로 위임**한다(여기서 로스터를 다시 뜨지 않는다 — 그러면 검사와 write 가
-    ///   또 갈라져 같은 TOCTOU 가 한 겹 아래에서 재생산된다). core 는 세션 Arc 를 clone 한 뒤 그 Arc 의
-    ///   epoch 과 비교하고 같은 Arc 에 쓰므로 검사↔write 사이에 대상이 바뀔 수 없다(ADR-0006).
-    fn inject_if_epoch(
-        &self,
-        to_id: PeerId,
-        expected_epoch: u32,
-        bytes: &[u8],
-    ) -> Result<InjectReceipt, String> {
-        self.manager
-            .write_stdin_observed_if_epoch(to_id, expected_epoch, bytes)
-            .map(receipt)
-            .map_err(|e| e.to_string())
-    }
+    // ★옛 `inject_if_epoch`(epoch-조건부 주입) 어댑터는 제거됐다(ADR-0111 결정 6)★: 그 동사는 그룹 방송의
+    //   incarnation 결박 전용이었고 결박 자체가 폐지됐다. core 의 `write_stdin_observed_if_epoch` 도 이제
+    //   **소비자가 하나도 없다**(그 헤더가 그 사실을 명시한다 — 옛 "다른 소비자 소유" 서술은 거짓이었다).
+    //   되살릴 일이 생기면 어댑터만 다시 얹으면 되지만, 그 전에 "발송 순간 화신에게만" 을 v2 개인 메일
+    //   옵션으로 정식 재론해야 한다(spec §8).
+    // ADR-0111
 
     /// ★정렬 = (이름, id) 오름차순(C4 리뷰 fix H · load-bearing — `@all` 결정성)★.
     ///

@@ -38,9 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use engram_dashboard_messaging::envelope::Entrance; // ADR-0110: 입구 라벨은 커널 crate 소유.
 
-use super::ingress::{
-    handle_group, handle_messages, handle_send, ControlCommand, GroupCommand, SendContract,
-};
+use super::ingress::{handle_messages, handle_send, ControlCommand, SendContract};
 use super::registry::{BoundIdentity, ControlRegistry};
 
 /// MCP 서버가 붙는 axum 경로. mcp-config url 도 이 경로를 가리킨다(`http://127.0.0.1:<port>/mcp`).
@@ -61,9 +59,6 @@ const CONTROL_SEND_PATH: &str = "/control/send";
 ///   끊는다(세션 operation 규약 — bearer_auth 1.5단계). 조회는 세션을 쓰지 않으므로 send 와 같은 무-세션
 ///   POST 형태로 맞춘다(경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다).
 const CONTROL_MESSAGES_PATH: &str = "/control/messages";
-
-/// CLI 그룹 관리 입구(D · spec §6) — `engram-send group …` 이 POST 하는 라우트(위와 같은 이유로 POST).
-const CONTROL_GROUP_PATH: &str = "/control/group";
 
 /// ★manager 늦은 주입 슬롯(순환 해소)★: 데몬 기동은 MCP 서버를 **먼저** 띄우고(그 URL 로 mcp-config 를
 /// 발급하는 DaemonControlChannel 을 만들어야 하므로) 그 다음 AgentManager 를 배선한다 — 즉 서버 start
@@ -134,9 +129,6 @@ pub const SEND_MESSAGE_TOOL: &str = "send_message";
 ///   `--permission-mode bypassPermissions`(ADR-0097)라 실질 인가에 영향이 없다 — 그 bypass 를 걷는
 ///   제약 레이어가 오면 그때 "조회·관리 툴도 grant 대상인가" 를 사용자 결정으로 다시 물어야 한다.
 pub const MESSAGES_TOOL: &str = "messages";
-
-/// ★`group` MCP 툴 이름(D · spec §6)★ — 위와 동일 규율·동일 grant 주석.
-pub const GROUP_TOOL: &str = "group";
 
 /// 실행 중 MCP 서버 핸들 — 에이전트가 붙을 엔드포인트 URL + graceful 종료 토큰.
 pub struct McpServerHandle {
@@ -265,17 +257,23 @@ impl EngramMcpHandler {
     ///   않는 툴을 가리켜 발신 입구가 조용히 막히고, 테스트만 이를 잡는다.
     // ADR-0086 / ADR-0094(단일 출처 결합)
     #[tool(
-        description = "Send a message to a teammate agent. You are one agent on a team; use this \
-        tool to reply to or reach another live agent. Pass `to` = the teammate's name (or agent id) \
-        and `body` = your message text. The sender envelope (who you are, message id) is added \
-        automatically by the broker — your identity comes from your bound session, not from \
-        arguments, so just write the body naturally. Set `request` = true when you need an answer \
-        back (optionally with `reply_by` = \"5m\"/\"10m\"/\"1h\" — at least 1 minute, after which \
-        YOU get notified that no reply arrived). When you answer a message that arrived with \
-        type=\"request\" and an id, pass `reply_to` = that id. `request` and `reply_to` are \
-        mutually exclusive. Delivery is at-least-once: if this call fails or times out without a \
-        result, the message may already have been delivered — check before resending, because a \
-        retry is a NEW message, not a replacement."
+        description = "Send a message to teammate agents. You are one agent on a team; use this \
+        tool to reply to or reach other live agents. `to` = one teammate or a LIST of them — each \
+        entry is an agent name (or agent id), or \"@all\" which means everyone live right now \
+        EXCEPT you; you can mix them, e.g. [\"@all\", \"qa-bravo\"]. `body` = your message text. \
+        The sender envelope (who you are, message id) is added automatically by the broker — your \
+        identity comes from your bound session, not from arguments, so just write the body \
+        naturally. Set `request` = true when you need answers back (optionally with `reply_by` = \
+        \"5m\"/\"10m\"/\"1h\" — at least 1 minute, after which YOU get notified for each recipient \
+        that did not reply); with several recipients that opens one independent reply contract per \
+        recipient. When you answer a message that arrived with type=\"request\" and an id, pass \
+        `reply_to` = that id — a reply must have exactly one recipient. `request` and `reply_to` \
+        are mutually exclusive. The result has one row per recipient: status delivered (injected \
+        now), pending (queued until that agent finishes its turn) or failed (that recipient only — \
+        `code` says why, e.g. RECIPIENT_NOT_FOUND if it is not running; the others still got it). \
+        Delivery is at-least-once: if this call fails or times out without a result, the message \
+        may already have been delivered — check before resending, because a retry is a NEW \
+        message, not a replacement."
     )]
     async fn send_message(
         &self,
@@ -330,7 +328,8 @@ impl EngramMcpHandler {
         // C3: 선택 인자를 그대로 나른다(검증·파싱은 ingress 단일 지점 — 양 입구 동일 반려, ADR-0103).
         let cmd = ControlCommand {
             from,
-            to,
+            // ★MCP 입구 = 분해 없음★(spec §6) — 배열 원소를 그대로 토큰으로 쓴다.
+            to: to.into_tokens(),
             body,
             contract: SendContract {
                 request: request.unwrap_or(false),
@@ -416,57 +415,40 @@ impl EngramMcpHandler {
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
-
-    /// `group`(D · spec §4·§6) — 그룹 명단 조회·증감·삭제. 인자 `{group?, add?, remove?, delete?}`.
-    ///
-    /// ★ACL 없음(사용자 결정 2026-07-26)★: 누구나 어떤 그룹이든 고치고 지운다 — 그래서 신원을 읽지 않는다
-    ///   (행위자 기록도 없다). 신원 검증이 필요해지면 v2 의 ACL 설계와 함께 온다.
-    /// ★응답 shape·인자 조합 규칙 정본 = `ingress::handle_group` doc-comment★.
-    // ADR-0086 / ADR-0103
-    #[tool(
-        description = "Manage broadcast groups on the Engram broker. Group names always start with \
-        '@' (e.g. @coders). No arguments = list the groups that exist (including the built-in @all, \
-        which always means everyone live right now). `group` alone = show that group's members. \
-        `group` + `add` / `remove` = change membership by agent NAME; adding to a group that does \
-        not exist creates it, so there is no separate create step. `group` + `delete` = remove the \
-        group (cannot be combined with add/remove). Membership changes only affect FUTURE sends — \
-        messages already accepted for delivery are unaffected. @all cannot be edited or deleted."
-    )]
-    async fn group(
-        &self,
-        params: Parameters<GroupArgs>,
-        _ctx: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let Some(messaging) = self.messaging.get() else {
-            tracing::error!(
-                entrance = "mcp",
-                "group 관리 불가 — messaging 슬롯 미설정(배선 순서 이상)"
-            );
-            return Err(ErrorData::internal_error("control channel not ready", None));
-        };
-        let Parameters(GroupArgs {
-            group,
-            add,
-            remove,
-            delete,
-        }) = params;
-        let result = handle_group(
-            messaging,
-            GroupCommand {
-                group,
-                add,
-                remove,
-                delete,
-            },
-        );
-        let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
-    }
 }
 
 /// 툴 인자 — ping 은 인자가 없다(빈 struct). schemars(rmcp 재수출)로 input schema 자동 생성.
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct PingArgs {}
+
+/// ★`to` 의 복수 표기(spec §6 — ADR-0111 다중 수신자)★: **문자열 1개 또는 문자열 배열**.
+///
+/// ★단일 문자열 형태는 그대로 유효하다(하위 호환)★ — 기존 호출·기존 프라이밍이 무변경으로 돈다. 각 원소는
+///   에이전트 이름·agent id·`@`주소이며 **혼용 가능**하다.
+/// ★MCP 배열 원소는 **절대 콤마로 쪼개지 않는다**(spec §6)★: 배열이라는 구조가 이미 경계를 주므로 이중
+///   분해를 하지 않는다 — 원소 `"a,b"` 는 그런 **이름 하나**로 취급되고(없으면 `RECIPIENT_NOT_FOUND` 행),
+///   콤마 분해는 CLI 입구(`/control/send`)만의 규칙이다.
+/// ★schemars★: `#[serde(untagged)]` 라 입력 스키마가 `anyOf[string, array<string>]` 로 나간다 — 호출 LLM 이
+///   두 형태 모두 유효함을 스키마만 보고 안다.
+// ADR-0111
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ToField {
+    /// 수신자 하나(이름·agent id·`@`주소).
+    One(String),
+    /// 수신자 여러 명(각 원소가 이름·agent id·`@`주소).
+    Many(Vec<String>),
+}
+
+impl ToField {
+    /// 수신자 토큰 목록으로 편다(**분해 없음** — 위 주석). 트림·펼침·중복 제거는 데몬 단일점이 한다.
+    pub fn into_tokens(self) -> Vec<String> {
+        match self {
+            ToField::One(s) => vec![s],
+            ToField::Many(v) => v,
+        }
+    }
+}
 
 /// `send_message` 인자 — 수신자 지목(`to`) + 본문(`body`) + 회신 계약(C3, 전부 선택). ★from 필드 없음★:
 /// 발신자는 세션 신원에서만 파생한다(payload from 금지 — ADR-0086 불변식). schemars 로 input schema 자동 생성.
@@ -477,12 +459,15 @@ pub struct PingArgs {}
 // ADR-0103 (C3 — spec §6 send_message { to, body, request?, reply_by?, reply_to? })
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SendArgs {
-    /// 수신자 — 산 에이전트 이름(profile name) 또는 정확한 agent id 문자열.
-    pub to: String,
+    /// Who to send to: one teammate, or a list. Each entry is an agent name, an exact agent id, or
+    /// "@all" (everyone live except you) — you can mix them, e.g. ["@all", "qa-bravo"].
+    pub to: ToField,
     /// 메시지 본문(텍스트).
     pub body: String,
-    /// Set true when you need an answer: the broker tracks this message as awaiting a reply.
-    /// Single recipient only. Mutually exclusive with reply_to.
+    /// Set true when you need answers back: the broker tracks this message as awaiting a reply.
+    /// With several recipients this opens ONE INDEPENDENT reply contract per recipient — each of
+    /// them owes you their own answer, one of them replying does not close the others, and each
+    /// silent one gets its own deadline notice. Mutually exclusive with reply_to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<bool>,
     /// Reply deadline for a request, as an integer + unit: "5m", "10m", "1h" (minimum 1 minute —
@@ -491,7 +476,8 @@ pub struct SendArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_by: Option<String>,
     /// The id of the request you are answering (the `id` attribute on the message you received).
-    /// Mutually exclusive with request.
+    /// A reply goes to EXACTLY ONE recipient — the agent that sent the request; passing several
+    /// recipients (or any "@" address) with reply_to is rejected. Mutually exclusive with request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
 }
@@ -506,28 +492,6 @@ pub struct MessagesArgs {
     pub id: Option<String>,
 }
 
-/// `group` 인자(D · spec §6 `group { group?, add?, remove?, delete? }`). 전부 선택 — 무인자가 목록 조회다.
-///
-/// ★doc 주석 = 툴 스키마 설명★: schemars 가 이 주석을 property description 으로 싣는다(호출 LLM 이 읽는 계약).
-/// ★조합 규칙의 정본은 `ingress::handle_group`★ — 여기 스키마는 형태만 알리고 판정은 하지 않는다(양 입구
-///   동일 반려를 위해 검증 지점은 하나여야 한다 — send 인자와 같은 규율).
-// ADR-0103
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct GroupArgs {
-    /// Group name, always starting with '@' (e.g. "@coders"). Omit to list all groups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    /// Agent names to add. Adding to a group that does not exist creates it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub add: Option<Vec<String>>,
-    /// Agent names to remove from the group.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remove: Option<Vec<String>>,
-    /// Delete the whole group. Cannot be combined with add or remove.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delete: Option<bool>,
-}
-
 // router = self.tool_router — 저장한 필드를 실제로 읽게 해 dead_code 를 피하고, 핸들러마다 라우터를
 // 재빌드하지 않는다(factory 가 세션마다 new() 하므로 라우터를 필드에 한 번 만들어 두는 게 효율적).
 #[tool_handler(router = self.tool_router)]
@@ -537,7 +501,7 @@ impl ServerHandler for EngramMcpHandler {
         // tools capability 만 켠다. OAuth/resources/prompts 미광고(#59467 회피). 워커 노출 = 최소권한
         // (engram_ping + send_message 만 — ADR-0086 least-privilege).
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Engram daemon control channel (ADR-0086). Available tools: engram_ping, send_message, messages, group.",
+            "Engram daemon control channel (ADR-0086). Available tools: engram_ping, send_message, messages.",
         )
     }
 }
@@ -745,7 +709,8 @@ fn bad_request() -> Response {
 /// C3 인자는 전부 선택이라 옛 `{to, body}` 바디와 **wire 호환**이다(누락 = 통보).
 #[derive(Debug, serde::Deserialize)]
 struct SendRequest {
-    to: String,
+    /// 수신자 — 문자열 1개(콤마 목록 허용) 또는 배열. ★콤마 분해는 이 CLI 입구 전용★(아래 핸들러 주석).
+    to: ToField,
     body: String,
     #[serde(default)]
     request: Option<bool>,
@@ -753,6 +718,19 @@ struct SendRequest {
     reply_by: Option<String>,
     #[serde(default)]
     reply_to: Option<String>,
+}
+
+/// ★CLI 입구의 수신자 토큰화(순수 함수 — 리뷰 C3)★: `engram-send --to a,b` 는 셸에서 목록을 표현할 방법이
+/// 콤마뿐이라 **이 입구에서만** 한 번 쪼갠다.
+///
+/// ★MCP 배열 원소는 절대 쪼개지 않는다(spec §6)★ — 그쪽은 구조가 이미 경계를 주므로 이중 분해를 하면
+///   `"a,b"` 라는 실제 이름을 표현할 방법이 사라진다. 그래서 분해 규칙이 **입구별로 다른 게 의도**이고,
+///   분해 이후의 정규화(트림·펼침·중복 제거·로스터 대조)는 데몬 단일점이라 두 입구 결과가 같다.
+fn cli_recipient_tokens(to: ToField) -> Vec<String> {
+    to.into_tokens()
+        .into_iter()
+        .flat_map(|t| t.split(',').map(|p| p.to_string()).collect::<Vec<_>>())
+        .collect()
 }
 
 /// `/control/send` 라우트 State — relay 대상(manager 슬롯) + 발신자 재검증용 registry(F3). MCP factory 와
@@ -802,7 +780,11 @@ async fn control_send_handler(
     };
     let cmd = ControlCommand {
         from,
-        to: req.to,
+        // ★콤마 분해는 **CLI 입구 전용**이다(spec §6 · load-bearing)★: `engram-send --to a,b` 는 셸에서
+        //   목록을 표현할 방법이 콤마뿐이라 여기서 한 번 쪼갠다. MCP 배열 원소는 **절대** 쪼개지 않는다
+        //   (그쪽은 구조가 이미 경계를 준다 — 이중 분해는 `"a,b"` 라는 실제 이름을 표현 불가하게 만든다).
+        //   분해 **이후**의 정규화(트림·펼침·중복 제거·로스터 대조)는 데몬 단일점이라 두 입구 결과가 같다.
+        to: cli_recipient_tokens(req.to),
         body: req.body,
         contract: SendContract {
             request: req.request.unwrap_or(false),
@@ -867,52 +849,7 @@ async fn control_messages_handler(
     Json(result.to_json()).into_response()
 }
 
-/// `/control/group` 요청 바디(D) — `{group?, add?, remove?, delete?}`.
-#[derive(Debug, Default, serde::Deserialize)]
-struct GroupRequest {
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
-    add: Option<Vec<String>>,
-    #[serde(default)]
-    remove: Option<Vec<String>>,
-    #[serde(default)]
-    delete: Option<bool>,
-}
-
-/// `/control/group` 핸들러 — CLI 그룹 관리 입구. MCP `group` 툴과 같은 공통 핸들러(동일 JSON).
-/// ★빈 바디 = 목록 조회★(위 messages 와 같은 관대 규율 — 무인자가 정당한 호출이다).
-async fn control_group_handler(
-    axum::extract::State(state): axum::extract::State<ControlSendState>,
-    identity: Option<axum::Extension<BoundIdentity>>,
-    body: Option<Json<GroupRequest>>,
-) -> Response {
-    // ★신원을 쓰진 않지만 **인증은 요구한다**★: 그룹 관리에 ACL 은 없어도(사용자 결정 2026-07-26) 제어
-    //   채널 자체는 인증된 에이전트 전용이다 — 미들웨어가 이미 막지만 방어적으로 한 번 더 확인한다.
-    let Some(axum::Extension(_from)) = identity else {
-        return unauthorized();
-    };
-    let Some(messaging) = state.messaging.get() else {
-        tracing::error!(
-            entrance = "cli",
-            "group 관리 불가 — messaging 슬롯 미설정(배선 순서 이상)"
-        );
-        return service_unavailable();
-    };
-    let req = body.map(|Json(b)| b).unwrap_or_default();
-    let result = handle_group(
-        messaging,
-        GroupCommand {
-            group: req.group,
-            add: req.add,
-            remove: req.remove,
-            delete: req.delete,
-        },
-    );
-    Json(result.to_json()).into_response()
-}
-
-/// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). send·messages·group **네 갈래 전부**가 이 하나를
+/// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). send·messages **양쪽 전부**가 이 하나를
 /// 쓴다(D 리뷰 A3 — 예전엔 send 쪽 두 곳이 같은 응답을 따로 손조립하고 있었다).
 fn service_unavailable() -> Response {
     Response::builder()
@@ -996,14 +933,6 @@ pub async fn start_mcp_server(
                 messaging: messaging.clone(),
             }),
         )
-        .route(
-            CONTROL_GROUP_PATH,
-            axum::routing::post(control_group_handler).with_state(ControlSendState {
-                manager: manager.clone(),
-                registry: registry.clone(),
-                messaging: messaging.clone(),
-            }),
-        )
         .layer(axum::middleware::from_fn_with_state(
             registry.clone(),
             bearer_auth,
@@ -1074,6 +1003,47 @@ mod tests {
     }
 
     #[test]
+    fn to_field_tokenizes_per_entrance_without_double_splitting() {
+        // ★리뷰 C3 — 입구별 토큰화 규칙의 단위 커버(통합 하네스에만 있던 축)★.
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        // MCP: 배열 원소도 문자열 하나도 **그대로**(콤마 분해 없음).
+        assert_eq!(
+            ToField::One("a,b".to_string()).into_tokens(),
+            owned(&["a,b"])
+        );
+        assert_eq!(
+            ToField::Many(owned(&["a,b", "@all"])).into_tokens(),
+            owned(&["a,b", "@all"])
+        );
+        // CLI: 콤마를 쪼갠다(문자열이든 배열이든 같은 규칙).
+        assert_eq!(
+            cli_recipient_tokens(ToField::One("a,b".to_string())),
+            owned(&["a", "b"])
+        );
+        assert_eq!(
+            cli_recipient_tokens(ToField::Many(owned(&["a,b", "@all"]))),
+            owned(&["a", "b", "@all"])
+        );
+        // 두 입구가 **일부러 다르다**: 같은 문자열이 MCP 에선 이름 하나, CLI 에선 두 수신자다.
+        assert_ne!(
+            ToField::One("a,b".to_string()).into_tokens(),
+            cli_recipient_tokens(ToField::One("a,b".to_string()))
+        );
+    }
+
+    #[test]
+    fn to_field_deserializes_both_string_and_array_shapes() {
+        // 하위 호환(단일 문자열)과 신규(배열)가 **둘 다** 유효해야 한다(spec §6).
+        let one: ToField = serde_json::from_str(r#""bob""#).expect("string 형태");
+        assert_eq!(one.into_tokens(), vec!["bob".to_string()]);
+        let many: ToField = serde_json::from_str(r#"["bob","@all"]"#).expect("array 형태");
+        assert_eq!(
+            many.into_tokens(),
+            vec!["bob".to_string(), "@all".to_string()]
+        );
+    }
+
+    #[test]
     fn tools_list_exposes_send_message_tool() {
         // ★단일 출처 tie(ADR-0094)★: SEND_MESSAGE_TOOL const 가 실제 등록된 툴 이름과 일치하는지
         //   런타임 라우터로 강제한다. rmcp #[tool] 매크로가 메서드명(send_message)을 툴 이름으로 쓰므로
@@ -1093,7 +1063,6 @@ mod tests {
         //   가르치는 툴 이름과 실제 노출 이름이 갈려 조회 입구가 조용히 없는 것이 된다.
         let router = EngramMcpHandler::tool_router();
         assert!(router.has_route(MESSAGES_TOOL), "'{MESSAGES_TOOL}' 툴 등록");
-        assert!(router.has_route(GROUP_TOOL), "'{GROUP_TOOL}' 툴 등록");
     }
 
     #[test]
@@ -1106,14 +1075,6 @@ mod tests {
         assert!(
             !m.contains("\"from\"") && !m.contains("required"),
             "messages 인자는 전부 선택 + from 없음: {m}"
-        );
-        let g = serde_json::to_string(&schemars::schema_for!(GroupArgs)).expect("group schema");
-        for key in ["\"group\"", "\"add\"", "\"remove\"", "\"delete\""] {
-            assert!(g.contains(key), "group 스키마에 {key}: {g}");
-        }
-        assert!(
-            !g.contains("\"from\"") && !g.contains("required"),
-            "group 인자는 전부 선택 + from 없음: {g}"
         );
     }
 

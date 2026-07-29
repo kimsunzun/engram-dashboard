@@ -1404,7 +1404,7 @@ fn do_injection(
         Entrance::Cli,
         ControlCommand {
             from,
-            to,
+            to: vec![to],
             body,
             contract: Default::default(),
         },
@@ -1425,8 +1425,22 @@ fn do_injection(
             o.to_epoch,
             o.error.clone(),
         ),
-        // C1: 성공 응답은 results 배열(spec §6) — 관측 레코드 부재 시 접수 성공을 그것으로 판정.
-        None => (v.get("results").is_some(), 0, None, None, None),
+        // C1: 관측 레코드 부재 시 응답 `results[]` 로 판정한다.
+        //   ★행 상태를 본다(리뷰 C5)★: 개편 이후 `results` 는 **실패 행**도 담으므로(ADR-0111 부분 진행)
+        //   존재 여부로 판정하면 아무에게도 안 간 발송이 delivered 로 기록돼 용량 파일럿 데이터가 오염된다.
+        None => (
+            v.get("results")
+                .and_then(|r| r.as_array())
+                .is_some_and(|rows| {
+                    rows.iter().any(|r| {
+                        matches!(r.get("status").and_then(|s| s.as_str()), Some("delivered"))
+                    })
+                }),
+            0,
+            None,
+            None,
+            None,
+        ),
     };
 
     writer.write(&Record::Injection(InjectionRecord {

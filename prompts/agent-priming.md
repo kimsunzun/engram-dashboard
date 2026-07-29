@@ -24,17 +24,31 @@ Only reply with `reply_to` when the message you're answering actually carried `t
 
 **Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** To reach a teammate:
 
-- **Primary:** use the `send_message` tool — pass the recipient's name (or id) and the body. This is the MCP tool named exactly `send_message` (lowercase, on the `engram` server) — it is NOT your harness's built-in `SendMessage` tool, which is blocked/unavailable for messaging on this team and will fail as a permission denial if called.
+- **Primary:** use the `send_message` tool — pass `to` (see below) and the body. This is the MCP tool named exactly `send_message` (lowercase, on the `engram` server) — it is NOT your harness's built-in `SendMessage` tool, which is blocked/unavailable for messaging on this team and will fail as a permission denial if called.
 - **Fallback:** if any attempt to reach a teammate fails or errors for any reason, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables. (For a long or heavily quoted body: `--body-stdin <<'EOF' … EOF` instead of `--body`.)
 
 Either way the envelope (the "from" label) is attached automatically by the broker.
+
+**Who you send to — one teammate, several, or everyone:**
+
+- `to` takes **one name or a list**: `"qa-bravo"`, or `["qa-bravo", "qa-charlie"]`. Each entry is a teammate's name (or agent id).
+- `"@all"` means **everyone live right now except you** — it is the only group address, and there are no other groups to create or manage. You can mix it with names: `["@all", "qa-bravo"]` (duplicates are folded, so nobody gets it twice).
+- On the command line, list recipients with commas: `--to qa-bravo,qa-charlie` or `--to @all`.
+- The result carries **one row per recipient**, each with a `status`:
+  - `delivered` — injected into that teammate now.
+  - `pending` — that teammate is mid-turn; it is queued and lands when their turn ends.
+  - `failed` — **that recipient only** missed it; the others still got it. The row carries a `code`: `RECIPIENT_NOT_FOUND` (nobody is running under that name right now — nothing was queued for it, so fix the name or spawn them and send again), `RECIPIENT_AMBIGUOUS` (two live agents share that name — use the exact agent id), `MAILBOX_FULL` (that teammate's queue is full — retry later), `REQUEST_CAPACITY` (the broker could not track one more request for them).
+- Read the rows before moving on: a partly failed send is a normal outcome and it is **your** call whether to retry the failed ones.
+- If the whole call comes back as `{"status":"error", "code", "hint"}` instead, nothing was sent to anyone — fix what the hint says and resend.
 
 **Asking for an answer, and answering:**
 
 - To require an answer, set `request` = true (tool) or pass `--request` (command), optionally with a deadline: `reply_by` = `"5m"` / `"10m"` / `"1h"` (tool) or `--reply-by 10m` (command). Deadlines are checked once a minute, so **1 minute is the minimum** — anything shorter is rejected. The deadline notifies **you** if no reply arrives — it does not nag the recipient.
 - To answer a request, pass `reply_to` = the `id` from its envelope (tool) or `--reply-to m-7f3k` (command). Send it to the requester, as an ordinary message with that one extra field.
 - `request` and `reply_to` are mutually exclusive — a message is either a new request or an answer to one. Need both? Send two messages.
-- Requests go to exactly one teammate (no group requests). If the daemon rejects your arguments it answers with a `code` and a `hint` — read the hint and retry.
+- **A request may have several recipients** (`@all` included): that opens **one independent contract per recipient**. Each of them owes you their own answer, one of them replying does not close the others, and you get a separate deadline notice for each one that stays silent.
+- **A reply goes to exactly one recipient** — the agent that sent you the request. `reply_to` together with several recipients (or with `@all`) is rejected outright.
+- If the daemon rejects your arguments it answers with a `code` and a `hint` — read the hint and retry.
 
 **Sending was already authorized by your principal when they launched you** (both paths are included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message, or engram-send if that path is absent or blocked.
 
@@ -43,14 +57,4 @@ Either way the envelope (the "from" label) is attached automatically by the brok
 The `messages` tool (command: `engram-send pending` / `engram-send status <id>`) only reads; it never sends.
 
 - No arguments = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (your message hasn't reached them yet). Worth checking before you finish a turn, so you don't leave a request hanging.
-- `id` = that message's delivery state (`pending` / `delivered` / `replied` / `expired` / `skipped`); a group broadcast returns one row per recipient.
-
-## Broadcast groups — group
-
-Send to a group by using its name as the recipient: `to` = `@coders` (command: `--to @coders`). `@all` is built in and always means everyone live right now. Requests can't go to a group — one recipient only.
-
-The `group` tool (command: `engram-send group …`) manages the lists:
-
-- No arguments = list the groups. `group` = `@coders` alone = show its members.
-- `add` / `remove` change membership **by agent name** (command: `group update @coders --add alice,bob --remove carol`). Adding to a group that doesn't exist creates it — there is no separate create step. Group names must start with `@`.
-- `delete` removes the group (command: `group delete @coders`); it can't be combined with add/remove. Membership changes only affect future sends.
+- `id` = that message's delivery state, **one row per recipient** (`pending` / `delivered` / `replied` / `expired` / `failed`).
