@@ -19,11 +19,14 @@
 //!   백엔드 decoder 가 있는 에이전트에서만 나온다(claude stream-json). 그리고 decoder 는 `structured`
 //!   출력 capability 와 **정확히 같은 조건**으로 존재한다(json 모드 = decoder 있음 = structured=true /
 //!   터미널 모드 = TerminalBytes 만). 그래서 C2 는 core/protocol 에 새 capability 필드(`output.busy` 같은)를
-//!   추가하지 않고 **`structured` 를 busy-관측 가능성의 프록시로** 쓴다 — 파킹 수신 후보 로스터
-//!   (`live_reachable_agents`)와 tap 부착 대상이 이미 같은 `structured` 필터를 쓰므로, 게이트가 보는 집합과
-//!   tap 이 관측하는 집합이 **구조적으로 일치**한다(비-structured 는 애초에 수신 후보가 아니라 게이트를
-//!   지나가지 않는다). 프록시가 깨지는 날(= structured 이지만 턴 이벤트가 없는 백엔드 등장) 그때 진짜
-//!   capability 필드를 추가한다 — ADR-0104 capability 원칙과 정합(관측 불가 = 즉시 주입 폴백).
+//!   추가하지 않고 **`structured` 를 busy-관측 가능성의 프록시로** 쓴다 — 그 프록시 값은
+//!   `LiveAgent::turn_signal` 로 로스터 항목에 실려 오고(ADR-0116 결정 7), tap 부착 대상도 같은 조건이라
+//!   게이트가 보는 집합과 tap 이 관측하는 집합이 **구조적으로 일치**한다.
+//!   ★4차 개정(ADR-0116)★: 비-structured 세션은 **이제 로스터에 있다**(멤버십 조건이 아니다) — 다만 발송
+//!   경로가 그 부류에 대해 이 게이트를 **아예 묻지 않고** 즉시 주입한다(`turn_signal == false`). 즉 이
+//!   모듈이 보는 집합은 여전히 "턴 이벤트가 나오는 에이전트" 로 유지된다. 프록시가 깨지는 날(= structured
+//!   이지만 턴 이벤트가 없는 백엔드 등장) 그때 진짜 capability 필드를 추가한다 — ADR-0104 capability
+//!   원칙과 정합(관측 불가 = 즉시 주입 폴백).
 //!
 //! ★콜백 규율(load-bearing — 절대 위반 금지)★: `TurnProbe::on_progress`/`on_turn_done` 은 **호스트의
 //!   출력 pump 스레드**가 부르는 동기 콜백이다. 여기서 하는 일은 ① 작은 락 구간의 HashSet 갱신 ② 논블록 채널 send

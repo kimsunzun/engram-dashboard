@@ -18,6 +18,7 @@
 //! tauri import 0(daemon crate).
 // ADR-0110
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::manager::AgentManager;
@@ -29,7 +30,7 @@ use engram_dashboard_messaging::busy::{
 };
 use engram_dashboard_messaging::envelope::{DeliveryObservation, EnvelopeFormat};
 use engram_dashboard_messaging::service::{
-    ControlPlanePort, DeliveryPort, InjectReceipt, LiveAgent, MessagingService,
+    AddressingSources, ControlPlanePort, DeliveryPort, InjectReceipt, LiveAgent, MessagingService,
 };
 use engram_dashboard_messaging::PeerId;
 
@@ -47,6 +48,45 @@ impl ManagerDeliveryPort {
     pub fn new(manager: Arc<AgentManager>) -> Self {
         Self { manager }
     }
+}
+
+/// ★로스터 술어(load-bearing — 이 파일의 **유일한** 멤버십 조건)★: `Running|Exiting` 만 산 것으로 본다.
+///
+/// ★"list_agents 에 있음" 이 아니다★: 세션은 reap 까지 맵에 남으므로 단순 존재로 판정하면 시체가 섞인다
+///   (그 결과 = 방금 종료된 에이전트에게 배달을 시도하고, 잠듦 파킹으로 넘어갈 이름이 배달 대상으로 오분류).
+/// ★capability 조건은 **여기 없다**(ADR-0116 결정 7 — 4차 개정)★: 옛 술어는 `output.structured` 를 함께
+///   걸어 터미널/콘솔 모드 세션을 로스터에서 뺐고, 그 결과가 `RECIPIENT_UNREACHABLE` 반려였다. 그 전제는
+///   폐기됐다 — 그 CLI 는 자기 입력 큐로 턴 중 입력을 물고 있다가 소비하므로 관측 없이도 배달이 성립한다.
+///   구조화 여부는 `LiveAgent::turn_signal` 로 실려 커널의 **타이밍** 판정(idle 게이트 vs 즉시 주입)에만 쓴다.
+/// ★뮤테이션 실측 경고★: 이 조건을 지워도 데몬 412 테스트가 전부 초록이었다(비대칭 커버리지) → 이제 유일한
+///   멤버십 게이트이므로 **실물 어댑터 레벨 봉인 테스트**가 이 모듈의 필수 산출물이다(아래 tests).
+/// ★`pub(crate)` 인 이유 = split-brain 방지(리뷰 fix N4)★: flush 등장 diff(`ws.rs` 이름 축)도 **같은 술어**를
+///   써야 한다. 예전엔 그쪽이 인라인 `matches!` 복제본 + "같은 조건" 이라는 주석이었는데, 술어가 바뀔 때 한쪽만
+///   고치면 **발송 측과 flush 측이 다른 세계를 본다**(이번 라운드가 잡은 결함 부류 그 자체). 그래서 정의는
+///   여기 하나만 두고 호출만 나눈다 — 복제본을 다시 만들지 말 것.
+// ADR-0116 (로스터 술어 = 상태만)
+pub(crate) fn is_live(a: &engram_dashboard_core::agent::types::AgentInfo) -> bool {
+    matches!(a.status, AgentStatus::Running | AgentStatus::Exiting)
+}
+
+/// core `AgentInfo` → 커널 `LiveAgent`(경계 번역 — 필요한 4필드만).
+///
+/// ★`turn_signal` = `capabilities.output.structured`(프록시 — busy.rs 헤더가 근거 정본)★: 턴 이벤트
+///   (MessageDone)는 백엔드 decoder 가 있는 에이전트에서만 나오고, decoder 는 구조화 출력 capability 와
+///   **정확히 같은 조건**으로 존재한다. 이 값은 **멤버십이 아니라 타이밍**을 가른다(위 `is_live` 주석).
+fn to_live_agent(a: engram_dashboard_core::agent::types::AgentInfo) -> LiveAgent {
+    LiveAgent {
+        id: a.id,
+        name: a.name,
+        epoch: a.epoch,
+        turn_signal: a.capabilities.output.structured,
+    }
+}
+
+/// (이름, id) 오름차순 — `@all` 결정성(아래 `live_agents` doc)의 정렬 키. 두 조회(`live_agents` ·
+/// `addressing_sources`)가 같은 키를 쓰게 함수로 묶었다(한쪽만 정렬하면 판정이 다른 순서를 본다).
+fn sort_key(a: &LiveAgent, b: &LiveAgent) -> std::cmp::Ordering {
+    a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id))
 }
 
 /// core `WriteOutcome` → 커널 `InjectReceipt` 4필드 복사(ADR-0110 경계 번역 — 필드 의미 동일).
@@ -87,24 +127,71 @@ impl DeliveryPort for ManagerDeliveryPort {
     ///   생산 지점)이라 해석기는 여전히 받은 그대로 돌려준다.
     /// ★2차 키가 id 인 이유★: 동명 다수(dup-name)여도 순서가 안정되게 — 이름만으로는 두 항목의 상대 순서가
     ///   여전히 HashMap 순서에 좌우된다.
-    fn live_reachable_agents(&self) -> Vec<LiveAgent> {
-        // list_agents 스냅샷 1회 → 산(Running|Exiting) + structured(제어 채널 도달 가능)만.
+    fn live_agents(&self) -> Vec<LiveAgent> {
+        // list_agents 스냅샷 1회 → 산(Running|Exiting) 전원. capability 는 멤버십 조건이 아니다(`is_live`).
         let mut live: Vec<LiveAgent> = self
             .manager
             .list_agents()
             .into_iter()
-            .filter(|a| {
-                matches!(a.status, AgentStatus::Running | AgentStatus::Exiting)
-                    && a.capabilities.output.structured
-            })
-            .map(|a| LiveAgent {
-                id: a.id,
-                name: a.name,
-                epoch: a.epoch,
-            })
+            .filter(is_live)
+            .map(to_live_agent)
             .collect();
-        live.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        live.sort_by(sort_key);
         live
+    }
+
+    /// ★입구 판정 소스 한 장(spec §5 3분기 · ADR-0116)★ — **물리 조회 2회**: `list_agents()` 한 번(로스터) +
+    /// `profiles().list()` 한 번(잠든 이름).
+    ///
+    /// ★이 함수의 존재 이유 = 두 소스를 **한 호출로 묶는 것**★: 로스터와 프로필을 호출자가 따로 뜨면 그 사이
+    ///   spawn·종료·삭제가 끼어 **같은 발송의 두 수신자가 다른 세계를 본다**(ADR-0111 결정 2 금지 부류).
+    ///   ★로스터 술어는 `is_live` 하나다★ — `live_agents()` 와 **글자 그대로 같은 조건**(4차 개정으로
+    ///   capability 조건이 빠졌다: 턴 신호 없는 산 세션도 배달 대상이다, ADR-0116 결정 7).
+    /// ★잠듦 = **id 기준**(이름 기준이 아니다)★: 프로필의 세션은 그 프로필 id 로 뜨므로(`activate_profile`),
+    ///   "산 세션이 없는 프로필" 을 id 집합으로 정확히 가른다. 이름으로 빼면 동명 프로필 하나가 떠 있을 때
+    ///   잠든 다른 프로필까지 함께 사라져 잠듦 층 동명 차단이 무력화된다.
+    /// ★이름 파생 = `AgentProfile::canonical_name_when_live()`(단일 출처)★: 산 세션의
+    ///   `resolve_canonical_name` 과 **같은 함수 + 같은 cwd 정규화**를 쓴다. 여기서 규칙을 복제하면(예:
+    ///   `resolve_display_name(display_name, profile.cwd)`) 빈 override·placeholder cwd·상대/심링크 cwd 에서
+    ///   파킹 키가 복원 후 이름과 어긋나 편지가 24h TTL 로 조용히 만료된다 — 잠듦 파킹이 막으려던 그 실패다.
+    ///   ★fs 접근은 override 없는 프로필에서만 일어난다★(그 함수의 단축 — 리뷰 fix D3): 발송 임계 경로에
+    ///   syscall 을 얹지 않기 위한 것이고, 이 호출은 **락 밖**이다(모듈 헤더 규율).
+    /// ★정렬★: 로스터는 `@all` 결정성 때문에 (이름, id) 정렬이 필수고(위 `sort_key` 주석), 잠든 이름도
+    ///   같은 이유로 정렬해 둔다(중복은 접지 않는다 — 동명 판정 축이다).
+    // ADR-0116 (판정 소스 2종 — 물리 조회 2회)
+    fn addressing_sources(&self) -> AddressingSources {
+        // ★스냅샷 1회★ — 로스터와 "산 세션 id 집합"(잠듦 차집합의 기준)이 같은 장에서 나온다.
+        let snapshot = self.manager.list_agents();
+        let mut roster: Vec<LiveAgent> = Vec::with_capacity(snapshot.len());
+        let mut live_ids: HashSet<uuid::Uuid> = HashSet::with_capacity(snapshot.len());
+        for a in snapshot.into_iter().filter(is_live) {
+            live_ids.insert(a.id);
+            roster.push(to_live_agent(a));
+        }
+        roster.sort_by(sort_key);
+
+        let mut dormant_names: Vec<String> = self
+            .manager
+            .profiles()
+            .list()
+            .into_iter()
+            .filter(|p| !live_ids.contains(&p.id))
+            .map(|p| p.canonical_name_when_live())
+            .collect();
+        dormant_names.sort();
+        AddressingSources {
+            roster,
+            dormant_names,
+        }
+    }
+
+    /// ★삭제 정리 게이트(spec §5 · ADR-0116 결정 3 — 리뷰 fix D1)★ — **id 축**이고 로스터와 **같은 술어**를
+    /// 쓴다(`is_live`). 이름으로 물으면 프로필 삭제로 canonical 이름이 바뀐 산 세션을 놓쳐 정리가 늘 발동한다.
+    fn is_agent_live(&self, id: PeerId) -> bool {
+        self.manager
+            .list_agents()
+            .into_iter()
+            .any(|a| a.id == id && is_live(&a))
     }
 
     fn canonical_name(&self, id: PeerId) -> Option<String> {
@@ -473,5 +560,127 @@ mod tests {
         );
         feed(&sink, id, 0, &OutputEvent::Error("stream hiccup".into()));
         assert!(t.is_busy(id, 0), "Usage/Error 는 턴 종료가 아니다");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 리뷰 fix D9-a — 로스터 술어 **실물 어댑터** 봉인(ADR-0116 결정 1·7 · spec §7)
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// ★왜 실물 어댑터 레벨인가(뮤테이션 실측)★: `is_live`(= `Running|Exiting`) 조건을 **지워도** 데몬 412
+    /// 테스트가 전부 초록이었다(구조화 조건을 지운 쪽은 잡혔는데 상태 조건은 무방비 — 비대칭 커버리지).
+    /// 4차 개정으로 그 상태 술어가 **유일한 멤버십 게이트**가 됐으므로(capability 는 타이밍 축으로 내려갔다)
+    /// 여기서 실 세션으로 못 박는다. 커널 단위 테스트는 하네스가 집합을 스크립트하므로 이 술어를 타지 않는다.
+    #[cfg(windows)]
+    mod roster_predicate {
+        use super::*;
+        use engram_dashboard_core::agent::preset::PresetRegistry;
+        use engram_dashboard_core::agent::profile::{
+            AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
+        };
+        use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+        use engram_dashboard_core::agent::types::{AgentInfo, AgentStatus, StatusSink};
+        use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
+        use engram_dashboard_messaging::service::DeliveryPort;
+        use std::time::Duration;
+
+        struct NoopSink;
+        impl StatusSink for NoopSink {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        fn manager(tag: &str) -> Arc<AgentManager> {
+            let sink: Arc<dyn StatusSink> = Arc::new(NoopSink);
+            let dir = |k: &str| {
+                std::env::temp_dir()
+                    .join(format!("engram-roster-{k}-{tag}-{}", uuid::Uuid::new_v4()))
+            };
+            Arc::new(AgentManager::new(
+                sink,
+                Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(dir(
+                    "prof",
+                ))))),
+                Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(dir(
+                    "preset",
+                ))))),
+                Arc::new(SessionTracker::new(
+                    TrackerConfig {
+                        sessions_dir: None,
+                        enabled: false,
+                        poll_interval: Duration::from_secs(1),
+                    },
+                    Arc::new(|_, _| {}),
+                )),
+            ))
+        }
+
+        /// 턴 신호 없는 산 세션(shell = structured false) — 4차 로스터의 **핵심 모집단**.
+        fn shell(name: &str) -> AgentProfile {
+            let mut p = AgentProfile::new(
+                name.to_string(),
+                AgentCommand::Shell {
+                    program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+                    args: vec![],
+                },
+                std::env::temp_dir(),
+                vec![],
+                false,
+            );
+            p.display_name = Some(name.to_string());
+            p
+        }
+
+        fn wait_until<F: Fn() -> bool>(cond: F) -> bool {
+            for _ in 0..150 {
+                if cond() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            cond()
+        }
+
+        #[test]
+        fn a_live_session_without_a_turn_signal_is_in_the_roster_with_turn_signal_false() {
+            // ★멤버십 = 상태뿐 · capability = 타이밍★(ADR-0116 결정 1·7): 구조화 출력이 없어도 로스터에
+            //   **있어야** 하고, 그 사실은 `turn_signal = false` 로만 나타나야 한다. 옛 술어(structured 필터)를
+            //   되살리면 이 단언이 빈 로스터로 깨진다.
+            let manager = manager("live");
+            let port = ManagerDeliveryPort::new(manager.clone());
+            let info = manager
+                .spawn_agent(&shell("sheller"), SpawnMode::Fresh)
+                .expect("shell spawn");
+            assert!(wait_until(|| manager
+                .list_agents()
+                .iter()
+                .any(|a| a.id == info.id)));
+
+            let roster = port.live_agents();
+            let entry = roster
+                .iter()
+                .find(|a| a.id == info.id)
+                .expect("턴 신호 없는 산 세션도 로스터에 있어야(멤버십 조건은 상태뿐)");
+            assert!(
+                !entry.turn_signal,
+                "그 사실은 turn_signal=false 로만 나타난다(= 즉시 주입 대상)"
+            );
+            // 입구 판정 소스도 **같은 술어**를 쓴다(두 조회가 갈리면 발송과 flush 가 다른 세계를 본다).
+            let sources = port.addressing_sources();
+            assert!(
+                sources.roster.iter().any(|a| a.id == info.id),
+                "addressing_sources 의 로스터도 같은 술어여야: {sources:?}"
+            );
+            assert!(
+                port.is_agent_live(info.id),
+                "삭제 정리 게이트도 같은 술어여야(리뷰 fix D1 — 이 부류를 놓치면 배달될 메일이 죽는다)"
+            );
+
+            manager.kill_agent(info.id).ok();
+        }
+
+        // ★종료된 세션의 로스터 부재는 여기서 단언하지 않는다(정직 명시)★: 이 조립에서 실제 종료는
+        // reaper 가 세션을 **맵에서 곧바로 제거**하므로(reaper.rs — 시체 보존은 프로필 축이다) "terminal
+        // 상태인데 목록에 남아 있는" 상태를 실 세션으로 만들 수 없다. 그 술어의 봉인은 세션 주입 seam 이 있는
+        // 통합 테스트가 맡는다(`tests/control_send.rs` — `roster_excludes_a_terminal_session_still_in_the_map`).
     }
 }

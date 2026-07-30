@@ -36,8 +36,8 @@ Either way the envelope (the "from" label) is attached automatically by the brok
 - On the command line, list recipients with commas: `--to qa-bravo,qa-charlie` or `--to @all`.
 - The result carries **one row per recipient**, each with a `status`:
   - `delivered` — injected into that teammate now.
-  - `pending` — that teammate is mid-turn; it is queued and lands when their turn ends.
-  - `failed` — **that recipient only** missed it; the others still got it. The row carries a `code`: `RECIPIENT_NOT_FOUND` (nobody is running under that name right now — nothing was queued for it, so fix the name or spawn them and send again), `RECIPIENT_AMBIGUOUS` (two live agents share that name — use the exact agent id), `MAILBOX_FULL` (that teammate's queue is full — retry later), `REQUEST_CAPACITY` (the broker could not track one more request for them).
+  - `pending` — queued, not injected yet. Two reasons: that teammate is **mid-turn** (it lands when their turn ends), or they are **not running but saved** (it lands when they are restored). Nobody is notified if a queued message expires first (24h), so check with `messages` if it matters.
+  - `failed` — **that recipient only** missed it; the others still got it. The row carries a `code`: `RECIPIENT_NOT_FOUND` (**no agent by that name at all** — not running and not saved, so fix the name or create them and send again), `RECIPIENT_AMBIGUOUS` (two agents share that name — **duplicate names are not supported: do NOT resend, tell the user** so they can rename or retire one), `MAILBOX_FULL` (that teammate's queue is full — retry later), `REQUEST_CAPACITY` (the broker could not track one more request for them).
 - Read the rows before moving on: a partly failed send is a normal outcome and it is **your** call whether to retry the failed ones.
 - If the whole call comes back as `{"status":"error", "code", "hint"}` instead, nothing was sent to anyone — fix what the hint says and resend.
 
@@ -57,4 +57,4 @@ Either way the envelope (the "from" label) is attached automatically by the brok
 The `messages` tool (command: `engram-send pending` / `engram-send status <id>`) only reads; it never sends.
 
 - No arguments = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (your message hasn't reached them yet). Worth checking before you finish a turn, so you don't leave a request hanging.
-- `id` = that message's delivery state, **one row per recipient** (`pending` / `delivered` / `replied` / `expired` / `failed`).
+- `id` = that message's delivery state, **one row per recipient** (`pending` / `delivered` / `replied` / `expired` / `failed`). A `failed` row here can carry `code: RECIPIENT_DELETED` — the recipient was **deleted while your message was still queued**, so it was closed as undelivered. That name no longer exists: resending is pointless, tell the user if it still matters.

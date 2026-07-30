@@ -277,6 +277,9 @@ async fn run_accept_loop(
     // ADR-0096: 봉투 포맷 전역 상태 거처(제어 채널 레지스트리) — 연결마다 handle_connection 에 넘겨
     //   SetEnvelopeFormat dispatch 가 쓰게 한다. handle_send(MCP/CLI)와 같은 Arc(전역 상태 하나).
     control_registry: Arc<control::registry::ControlRegistry>,
+    // ADR-0116 결정 3: `DeleteProfile` dispatch 의 삭제 정리 훅이 쓸 메시징 커널 슬롯(늦은 주입 — 서비스는
+    //   manager 조립 후에 채워진다. 연결마다 handle_connection → ConnectionCore 로 그대로 흘린다).
+    messaging_slot: Arc<control::mcp_server::MessagingSlot>,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -293,6 +296,7 @@ async fn run_accept_loop(
                         let registry = registry.clone();
                         let multiview = multiview.clone();
                         let control_registry = control_registry.clone();
+                        let messaging_slot = messaging_slot.clone();
                         let expected_token = expected_token.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
@@ -303,6 +307,7 @@ async fn run_accept_loop(
                                 registry,
                                 multiview,
                                 control_registry,
+                                messaging_slot,
                                 expected_token,
                                 shutdown_tx,
                                 keepalive,
@@ -660,6 +665,7 @@ pub async fn run() -> Result<(), i32> {
         registry,
         multiview,
         control_registry, // ADR-0096: 봉투 포맷 전역 상태 거처(handle_send 와 같은 Arc)
+        messaging_slot.clone(), // ADR-0116: DeleteProfile 삭제 정리 훅(늦은 주입 슬롯 — 이미 채워져 있다)
         expected_token,
         shutdown_tx,
         shutdown_rx,
@@ -872,6 +878,7 @@ async fn start_test_server_inner(
                 registry,
                 multiview,
                 control_registry, // ADR-0096: standalone 봉투 포맷 상태 거처(테스트 accept loop 전용)
+                messaging_slot, // ADR-0116: DeleteProfile 삭제 정리 훅(테스트 조립도 같은 슬롯을 공유)
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,

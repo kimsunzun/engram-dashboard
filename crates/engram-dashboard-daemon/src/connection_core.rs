@@ -600,6 +600,13 @@ pub struct ConnectionCore {
     ///   다른 타입임에 주의: 저건 연결 fanout, 이건 제어 채널 토큰·봉투 포맷 상태.
     // ADR-0096
     control_registry: Arc<ControlRegistry>,
+    /// ★메시징 커널 늦은 주입 슬롯(ADR-0116 결정 3 — 프로필 삭제 정리 배선)★: `DeleteProfile` dispatch 가
+    ///   프로필을 지운 **직후** `handle_profile_deleted` 를 불러 그 이름 앞 파킹분·오픈 계약을 정리한다.
+    ///   ★슬롯(OnceLock)인 이유★: MessagingService 는 manager 를 감싸므로 manager·연결보다 **뒤에** 조립된다
+    ///   (mcp_server::MessagingSlot 과 같은 순환 해소). 미설정이면 정리를 건너뛴다 — 그 조립(실험 bin·일부
+    ///   테스트)엔 메시징이 아예 없어 정리할 것도 없다.
+    // ADR-0116
+    messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     /// StopDaemon 수신 시 main 종료를 트리거하는 watch(어댑터가 주입).
     shutdown_tx: watch::Sender<bool>,
 }
@@ -610,6 +617,7 @@ impl ConnectionCore {
         multiview: MultiViewState,
         registry: ConnRegistry,
         control_registry: Arc<ControlRegistry>,
+        messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -617,6 +625,7 @@ impl ConnectionCore {
             multiview,
             registry,
             control_registry,
+            messaging,
             shutdown_tx,
         }
     }
@@ -960,9 +969,40 @@ impl ConnectionCore {
             } => {
                 // Tauri `delete_profile` 미러: 등록 해제·persist(실행 중 세션은 별도 Kill).
                 // remove 는 무조건 성공(없는 id 면 no-op) — Tauri 경로와 동일하게 Ack.
+                //
+                // ★삭제 정리(spec §5 · ADR-0116 결정 3)★: 지운 프로필 이름 앞 파킹분과 그 이름이 요청자인
+                //   오픈 계약을 메시징 커널이 종결한다. 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
+                // ★이름은 **삭제 전에** 뽑는다★: 지운 뒤엔 파생할 재료(display_name·cwd)가 없다. 파생 규칙은
+                //   `canonical_name_when_live`(산 세션과 같은 함수 + 같은 cwd 정규화) — 파킹 키가 그 값이므로
+                //   여기서 규칙을 복제하면 정리가 엉뚱한 큐를 보거나 아무것도 못 찾는다.
+                // ★락 순서(ADR-0006)★: `get`/`remove` 는 각각 프로필 레지스트리 락을 잡고 즉시 놓는다 —
+                //   정리 호출은 그 **뒤**(락 미보유 상태)라 "레지스트리 락 보유 중 메시징 락" 이 성립하지 않는다.
+                // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
+                //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
+                let deleted_name = manager
+                    .profiles()
+                    .get(profile_id)
+                    .map(|p| p.canonical_name_when_live());
                 manager.profiles().remove(profile_id);
                 reply(sink, request_id, Ok(()));
                 broadcast_profile_list(registry, manager);
+                // ★게이트는 커널이 **프로필 id** 로 판정한다(리뷰 fix D1 — load-bearing)★: 이름으로 물으면
+                //   지금 이 순간 이후로 그 산 세션의 canonical 이름이 **바뀌기 때문에**(프로필이 사라져
+                //   `display_name` override 가 없어지고 `basename(session.cwd)` 로 강등된다) 게이트가 늘 헛돌아
+                //   산 에이전트의 파킹 메일·계약을 죽인다. `RenameProfile` 한 번이면 재현되는 평범한 경로다.
+                if let (Some(name), Some(messaging)) = (deleted_name, self.messaging.get()) {
+                    // 이 경로엔 자식 stdin blocking write 가 없다(큐 정리 + 장부 전이 + 짧은 로스터 스냅샷) —
+                    //   그래서 spawn_blocking 없이 이 async 컨텍스트에서 그대로 돈다(ingress 조회 경로와 동형).
+                    let out = messaging.handle_profile_deleted(profile_id, &name);
+                    tracing::debug!(
+                        profile = %profile_id,
+                        name = %name,
+                        skipped_live = out.skipped_live,
+                        parked_failed = out.failed_parked,
+                        contracts_failed = out.failed_contracts,
+                        "프로필 삭제 — 메시징 삭제 정리 훅 실행(ADR-0116 결정 3)"
+                    );
+                }
             }
 
             AgentCommand::SpawnProfile {
@@ -1400,6 +1440,27 @@ mod tests {
         }
     }
 
+    /// ★메시징 커널까지 배선한 core(리뷰 fix D1 — 삭제 정리 훅 통합 테스트용)★.
+    ///
+    /// ★왜 별도 조립인가★: 기본 `test_core` 는 슬롯이 비어 있어 `DeleteProfile` 의 정리 훅이 조용히 넘어간다
+    ///   (그 조립엔 메시징이 없다). 삭제 정리의 **배선**(이름을 언제 뽑나 · 게이트를 무엇으로 거나)은 실물
+    ///   `ManagerDeliveryPort` + 실제 spawn 이 있어야 검증된다 — 가짜 포트 단위 테스트는 그 배선을 타지 않는다.
+    /// ★flush 트리거는 꽂지 않는다(의도)★: 운영은 로스터 diff(MessagingFlushSink)가 등장 시 파킹을 비우지만,
+    ///   여기서는 "스폰 후에도 파킹분이 남아 있는" 상태가 필요하다(삭제 정리가 그걸 죽이는지가 검증 대상).
+    ///   그 diff 배선 자체는 ws.rs·control_send 테스트가 지킨다.
+    fn test_core_with_messaging() -> (
+        ConnectionCore,
+        Arc<engram_dashboard_messaging::service::MessagingService>,
+    ) {
+        let (core, _rx) = test_core();
+        let messaging = Arc::new(crate::messaging_host::messaging_for_manager(
+            core.manager.clone(),
+            core.control_registry.clone(),
+        ));
+        core.messaging.set(messaging.clone());
+        (core, messaging)
+    }
+
     fn test_core() -> (ConnectionCore, watch::Receiver<bool>) {
         // in-memory manager 배선(lib.rs build_manager_with_store 와 같은 결, 여기선 직접).
         use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
@@ -1453,6 +1514,9 @@ mod tests {
             MultiViewState::new(),
             registry,
             control_registry,
+            // 이 테스트 조립엔 메시징 커널이 없다(빈 슬롯) — `DeleteProfile` 의 삭제 정리 훅은 조용히
+            //   건너뛴다. 정리 semantics 자체는 커널 단위 테스트가 지킨다(ADR-0116 — `handle_profile_deleted`).
+            Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             shutdown_tx,
         );
         (core, shutdown_rx)
@@ -2224,5 +2288,205 @@ mod tests {
             None,
             "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 리뷰 fix D1 — `DeleteProfile` 삭제 정리 훅의 **배선** 통합 테스트(ADR-0116 결정 3)
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// ★왜 데몬 통합인가(가짜 포트 단위 테스트가 원리적으로 못 잡는다)★: 이 결함은 **두 배선**의 순서·축에
+    /// 있었다 — ① 정리 대상 이름을 프로필 **제거 전에** 뽑나 ② 발동 게이트를 **id** 로 거나. 커널 단위
+    /// 테스트는 그 둘을 하네스가 대신 정해 주므로(이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸
+    /// 볼 수 없다. 여기서는 실제 프로필·실제 spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다.
+    ///
+    /// ★잡는 결함(fail-before)★: 게이트를 **이름**으로 걸면(= 삭제 후 로스터에서 그 이름을 찾으면) **프로필이
+    /// 사라진 순간 그 산 세션의 canonical 이름이 바뀌므로**(`display_name` override 소멸 →
+    /// `basename(session.cwd)`) 절대 매치되지 않고 정리가 **항상** 발동한다 → 산 에이전트의 파킹 메일이
+    /// `RECIPIENT_DELETED` 로 죽고 그가 요청자인 계약이 `reply_failed` 가 된다(spec §5 · ADR-0118 결정 2 금지).
+    /// `RenameProfile` 한 번이면 재현되는 평범한 경로다.
+    #[tokio::test]
+    async fn deleting_a_renamed_profile_whose_session_is_live_keeps_its_mail_and_contracts() {
+        use engram_dashboard_messaging::envelope::Entrance;
+        use engram_dashboard_messaging::service::SendMeta;
+        use engram_dashboard_messaging::SenderIdentity;
+
+        let (core, messaging) = test_core_with_messaging();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(64);
+        let sink = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+
+        // (1) 프로필 2개 — boss(곧 산 세션이 된다) · sleepy(계속 잠들어 있다 = 파킹 수신자).
+        let mk = |name: &str| {
+            engram_dashboard_core::agent::profile::AgentProfile::new(
+                name.into(),
+                engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                    program: default_shell().to_string(),
+                    args: vec![],
+                },
+                std::env::temp_dir(),
+                vec![],
+                false,
+            )
+        };
+        let boss = mk("boss-raw");
+        let sleepy = {
+            let mut p = mk("sleepy-raw");
+            p.display_name = Some("sleepy".into());
+            p
+        };
+        core.manager.profiles().upsert(boss.clone());
+        core.manager.profiles().upsert(sleepy.clone());
+
+        // (2) ★개명(RenameProfile — 이 결함의 평범한 트리거)★: 이제 canonical 이름은 override 다.
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: boss.id,
+                name: Some("boss".into()),
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+        assert_eq!(
+            core.manager
+                .profiles()
+                .get(boss.id)
+                .expect("프로필")
+                .canonical_name_when_live(),
+            "boss",
+            "개명이 canonical 이름을 바꿨다(이 등식이 이 테스트의 전제)"
+        );
+
+        // (3) boss 가 잠든 동안: ⓐ boss 앞으로 파킹 1건 ⓑ boss 가 **요청자**인 계약 1건.
+        //     (파킹은 이름 키 — 그 이름이 곧 정리 대상 축이다.)
+        let sender = SenderIdentity {
+            peer_id: uuid::Uuid::new_v4(),
+            epoch: 0,
+        };
+        let req = SendMeta {
+            request: true,
+            reply_by: None,
+            reply_by_raw: None,
+            reply_to: None,
+            to_attr: None,
+        };
+        let rows = messaging
+            .handle_send(
+                "m-in",
+                sender,
+                "outsider",
+                &["boss".to_string()],
+                "쌓아둔다",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows[0].status,
+            engram_dashboard_messaging::service::SendStatus::Pending,
+            "잠든 프로필 이름 앞으로 파킹된다: {rows:?}"
+        );
+        assert_eq!(messaging.parked_len("boss"), 1);
+        messaging
+            .handle_send(
+                "m-out",
+                SenderIdentity {
+                    peer_id: boss.id,
+                    epoch: 0,
+                },
+                "boss",
+                &["sleepy".to_string()],
+                "해줘",
+                Entrance::Cli,
+                &req,
+            )
+            .expect("행 응답");
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            Some("awaiting_reply"),
+            "boss 가 요청자인 계약이 열렸다"
+        );
+
+        // (4) boss 스폰 — 이제 **산 세션**이다(트리 항목만 지우는 삭제의 전제 상황).
+        core.dispatch(
+            AgentCommand::Spawn {
+                profile_id: boss.id,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+        assert!(
+            core.manager.list_agents().iter().any(|a| a.id == boss.id),
+            "스폰된 세션이 목록에 있어야(이 테스트의 전제)"
+        );
+
+        // (5) ★DeleteProfile — 실제 dispatch★. 세션은 죽지 않는다(킬은 별도 커맨드).
+        core.dispatch(
+            AgentCommand::DeleteProfile {
+                profile_id: boss.id,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+
+        // (6) 보호 단언 — 산 세션의 메일·계약은 **그대로**여야 한다.
+        assert_eq!(
+            messaging.parked_len("boss"),
+            1,
+            "★D1★ 산 세션의 파킹 메일이 삭제 정리에 죽었다(게이트가 이름 축이면 여기서 0이 된다)"
+        );
+        assert_eq!(
+            messaging.contract_outcome_for_test("m-out", "sleepy"),
+            Some("awaiting_reply"),
+            "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
+        );
+
+        // (7) ★반대 방향도 못 박는다 — 이름은 **제거 전에** 뽑아야 한다★: 잠든 sleepy 를 지우면 정리가
+        //     **발동해야** 한다. 이름을 제거 후에 뽑으면 프로필이 없어 파생 자체가 불가(None)라 정리가 조용히
+        //     건너뛰어지고, 그 파킹분은 24h TTL 로만 사라진다(그 경로는 D1 의 짝 결함이다).
+        let rows2 = messaging
+            .handle_send(
+                "m-sleep",
+                sender,
+                "outsider",
+                &["sleepy".to_string()],
+                "잠든 상대에게",
+                Entrance::Cli,
+                &SendMeta::default(),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows2[0].status,
+            engram_dashboard_messaging::service::SendStatus::Pending
+        );
+        core.dispatch(
+            AgentCommand::DeleteProfile {
+                profile_id: sleepy.id,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &sink,
+        )
+        .await;
+        assert_eq!(
+            messaging.parked_len("sleepy"),
+            0,
+            "잠든 프로필 삭제는 정리가 발동해야(이름을 제거 전에 뽑았다는 증거)"
+        );
+        let view = messaging
+            .message_state("m-sleep", std::time::Instant::now())
+            .expect("조회");
+        assert_eq!(
+            view.rows[0].code,
+            Some("RECIPIENT_DELETED"),
+            "장부 종점 + 사유 코드가 남는다(조용히 버리지 않는다): {view:?}"
+        );
+
+        core.manager.kill_agent(boss.id).ok();
     }
 }

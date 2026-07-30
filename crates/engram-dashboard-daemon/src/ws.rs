@@ -443,8 +443,12 @@ impl RosterDiff {
         st.prev_ids = next_ids;
 
         // ── ② 이름 축 diff(등장 flush) ─────────────────────────────────────────────────
-        // 1) 산(Running|Exiting) + structured(도달 가능) 후보를 **이름별로 그룹핑**한다 — 파킹은 이 조건의
-        //   수신자 앞으로만 배달 가능(비-도달 이름은 애초에 파킹 수신 대상 아님).
+        // 1) ★산(Running|Exiting) 후보 전원★을 **이름별로 그룹핑**한다. ★4차 개정(ADR-0116 결정 7)★:
+        //   여기엔 **structured 조건을 걸지 않는다** — 로스터 자격에서 capability 가 빠졌으므로 턴 신호 없는
+        //   세션도 파킹을 들고 있을 수 있다(그 부류의 유일한 파킹 경로 = **주입 실패**, spec §5 분기 3). 옛
+        //   필터를 유지하면 그 파킹분에 재등장 flush 계기가 **영원히 없어** 24h TTL 로 조용히 만료된다.
+        //   위 ①(tap 부착)은 반대로 structured 조건을 유지한다 — 턴 이벤트가 없는 상대에 tap 을 붙일 이유가
+        //   없고, 그쪽은 "게이트가 보는 집합 = tap 집합" 규율의 자리다(busy.rs 헤더).
         // ★finding 2(BLOCK): 동명 다수 skip(last-write-wins 금지)★: 예전엔 같은 이름을 마지막 것으로
         //   덮어(last-write-wins) 임의 incarnation 으로 flush 했다 — 이름-키 파킹이 엉뚱한 동명 에이전트로
         //   갈 수 있어 send-side RECIPIENT_AMBIGUOUS 정책과 어긋난다. 이제 그 이름을 지닌 도달 가능
@@ -452,9 +456,10 @@ impl RosterDiff {
         //   메일은 그 이름이 다시 유일해지거나 TTL 로 만료될 때까지 대기한다.
         let mut by_name: HashMap<String, Vec<(u32, AgentId)>> = HashMap::new();
         for a in agents {
-            let reachable = matches!(a.status, CoreStatus::Running | CoreStatus::Exiting)
-                && a.capabilities.output.structured;
-            if !reachable {
+            // ★술어는 **커널 로스터 술어 그 자체**를 부른다(리뷰 fix N4)★: 인라인 `matches!` 복제본 +
+            //   "같은 조건" 주석이었는데, 술어가 바뀔 때 한쪽만 고치면 발송 측(입구 판정)과 flush 측(이 diff)이
+            //   다른 세계를 본다 — 정의 1곳(`messaging_host::is_live`)만 두고 여기선 호출만 한다.
+            if !crate::messaging_host::is_live(a) {
                 continue;
             }
             by_name
@@ -1069,6 +1074,9 @@ pub async fn handle_connection(
     // ADR-0096: 제어 채널 레지스트리(봉투 포맷 전역 상태 거처) — SetEnvelopeFormat dispatch 가 쓴다.
     //   handle_send(MCP/CLI)가 relay 마다 읽는 그 같은 Arc(전역 상태 하나).
     control_registry: Arc<crate::control::registry::ControlRegistry>,
+    // ADR-0116 결정 3: `DeleteProfile` dispatch 가 삭제 정리를 부를 메시징 커널 슬롯(늦은 주입 — 서비스는
+    //   manager 조립 후에 생긴다). ConnectionCore 가 그대로 들고 있다.
+    messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     keepalive: KeepaliveConfig,
@@ -1164,6 +1172,7 @@ pub async fn handle_connection(
         multiview.clone(),
         registry.clone(),
         control_registry.clone(),
+        messaging,
         shutdown_tx,
     ));
 
@@ -1889,18 +1898,26 @@ mod tests {
     }
 
     #[test]
-    fn flush_sink_skips_non_reachable() {
-        // 비-structured(TUI) 또는 terminal 상태는 flush 후보 아님(파킹 수신 대상 아님).
+    fn flush_sink_appears_for_a_turn_signal_less_agent_but_never_taps_it() {
+        // ★4차 개정(ADR-0116 결정 7)★: 두 축이 **다른 술어**를 쓴다 —
+        //   ② 이름 축(등장 flush) = 상태만 → 턴 신호 없는 산 세션도 **Appear 대상**이다(그 부류도 주입 실패로
+        //      파킹을 들고 있을 수 있고, 재등장이 그 유일한 flush 계기다).
+        //   ① id 축(tap 부착) = 상태 + structured → 턴 이벤트가 없는 상대엔 **Attach 하지 않는다**.
+        //   terminal 상태는 어느 축에도 안 든다.
         let (sink, mut rx) = flush_sink();
         let tui = AgentId::new_v4();
         let dead = AgentId::new_v4();
         sink.agent_list_updated(vec![
-            flush_info(tui, "tui", 0, false, CoreStatus::Running), // 비-structured
+            flush_info(tui, "tui", 0, false, CoreStatus::Running), // 비-structured = 턴 신호 없음
             flush_info(dead, "dead", 0, true, CoreStatus::Killed), // terminal
         ]);
-        assert!(
-            drain_msgs(&mut rx).is_empty(),
-            "비-도달·terminal 은 flush/tap 대상 아님"
+        assert_eq!(
+            drain_msgs(&mut rx),
+            vec![FlushMsg::Appear {
+                name: "tui".to_string(),
+                id: tui,
+            }],
+            "턴 신호 없는 산 세션 = Appear 만(Attach 없음) · terminal 은 아무것도 아님"
         );
     }
 

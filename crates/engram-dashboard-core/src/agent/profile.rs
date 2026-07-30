@@ -154,8 +154,18 @@ pub struct AgentProfile {
 
     pub command: AgentCommand,
 
-    /// 저장 전 `dunce::canonicalize`로 정규화된 cwd(UNC `\\?\` 회피 + 표기 고정).
-    /// claude 세션 디렉토리가 cwd 문자 치환이라, 표기가 흔들리면 세션을 잃는다(spike 확인).
+    /// ★저장된 값은 **raw** 다 — 정규화되지 않는다(리뷰 fix N3 · load-bearing)★: `CreateProfile` 은 받은
+    /// 문자열을 `PathBuf::from(cwd)` 로 **그대로** 넣고(daemon `connection_core.rs` 의 CreateProfile 분기),
+    /// core·persistence 어디에도 프로필 cwd 를 canonicalize 하는 코드가 없다(프리셋만 별도로 정규화한다).
+    /// 그래서 `"."`·`".."`·심링크·대소문자 다른 Windows 경로가 그대로 앉아 있을 수 있다.
+    ///
+    /// ★정규화는 **따로** 일어난다(두 곳)★: ① spawn 이 `dunce::canonicalize(profile.cwd)` 한 값을
+    /// `session.cwd` 로 쓴다(`manager::spawn_agent` — UNC `\\?\` 회피 + 표기 고정. claude 세션 디렉토리가
+    /// cwd 문자 치환이라 표기가 흔들리면 세션을 잃는다, spike 확인) ② 잠든 이름 파생이
+    /// `canonical_name_when_live()` 안에서 **같은 정규화를 다시** 한다.
+    /// ★②의 canonicalize 를 "중복" 으로 보고 지우지 말 것★: 이 필드가 raw 이므로 그게 유일한 정규화 지점이다.
+    /// 지우면 override 없는 프로필(상대경로·심링크·대소문자 차이 cwd)의 **잠듦 파킹 키**가 산 세션 이름과
+    /// 갈라져, 그 앞으로 온 편지가 주인을 못 만나고 24h TTL 로 조용히 만료된다(이 슬라이스가 막으려는 그 결말).
     pub cwd: PathBuf,
 
     /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
@@ -228,6 +238,57 @@ impl AgentProfile {
             last_active: now,
             last_start_at: None,
         }
+    }
+
+    /// ★이 프로필이 **다시 뜨면 갖게 될 canonical 이름**(ADR-0101 · ADR-0116 결정 1 — load-bearing)★.
+    ///
+    /// ★왜 필요한가(잠듦 파킹의 전제)★: 메시징이 잠든(프로세스 닫힘·복원 가능) 수신자에게 메일을 파킹할 때
+    ///   키로 쓰는 이름이 이 값이고, 그 항목은 복원된 세션의 **산 canonical 이름**으로만 열린다(파킹은 이름
+    ///   키다). 두 값이 어긋나면 편지가 주인을 못 만나 24h TTL 로 조용히 만료된다 — 잠듦 파킹이 막으려던
+    ///   실패 그 자체다. 그래서 파생 규칙을 **산 세션과 한 함수로** 묶는다.
+    /// ★산 세션과 같은 규칙 = `canonical_name_or_id_fallback`(+ canonicalize 된 cwd)★:
+    ///   - `manager::resolve_canonical_name` 이 산 세션에 쓰는 그 함수다. `name::resolve_display_name` 은
+    ///     **아니다** — 그건 빈/공백-only override 를 그대로 이름으로 쓰고 basename 이 placeholder(경로 없음)
+    ///     일 때 id 로 degrade 하지도 않아, 두 엣지에서 산 이름과 갈린다.
+    ///   - cwd 도 산 세션과 같은 표기여야 한다: spawn 은 `dunce::canonicalize(profile.cwd)` 한 값을
+    ///     session.cwd 로 쓰고(manager spawn), 프로필 쪽 `cwd` 에는 raw 값(`.`·`..`·심링크·대소문자 다른
+    ///     Windows 경로)이 들어올 수 있다. 그래서 여기서도 **같은 정규화**를 하고, 실패하면(경로가 이미
+    ///     사라졌으면) spawn 과 동일하게 원본으로 degrade 한다.
+    /// ★`name` 필드는 표시 이름이 아니다(함정)★: `AgentProfile.name` 은 CreateProfile 때 받은 원본 문자열
+    ///   (종종 경로)이라 트리·주소 체계가 쓰지 않는다. 그 필드로 잠든 이름을 뽑으면 조용히 어긋난다.
+    /// ★fs 접근은 **override 가 없을 때만** 있다(순수 아님)★: canonicalize 는 실제 파일시스템을 본다 —
+    ///   그래서 이 동사는 이름 파생 순수 코어(`name.rs`)가 아니라 프로필 쪽에 있다.
+    /// ★override 단축(load-bearing — 정확성 + 지연 둘 다)★: `display_name` 이 비공백이면 canonical 이름은
+    ///   **파일시스템에 전혀 의존하지 않는다**(산 세션 규칙도 override 를 그대로 쓴다). 그래서 그 경우
+    ///   syscall 을 아예 하지 않는다. 두 이득이 있다:
+    ///   - **정확성**: 삭제 정리는 프로필을 지우기 직전에 이 이름을 뽑는데, 그 사이 cwd 디렉터리가 사라졌으면
+    ///     canonicalize 가 실패해 raw 경로로 degrade 한다 — 그 basename 이 파킹 키(잠듦 시점에 파생된 이름)와
+    ///     다르면 정리가 **엉뚱한 큐**를 쓸어 편지가 `RECIPIENT_DELETED` 대신 24h TTL 로 조용히 만료된다.
+    ///     override 가 있으면 fs 를 안 보므로 그 어긋남이 구조적으로 불가능하다.
+    ///   - **지연**: 이 동사는 발송 1회당 잠든 프로필 수만큼 불린다. cwd 가 죽은 네트워크 공유(SMB)에 있으면
+    ///     canonicalize 한 번이 수십 초 블록이라 **모든 발송의 임계 경로**에 그 지연이 붙는다.
+    /// ★남는 갭(알고 수용 — 정직 명시)★: **override 가 없는데 cwd 가 사라진** 프로필은 여전히 raw degrade 라
+    ///   파킹 키와 어긋날 수 있고(그 잔여의 결말 = TTL `expired`, `RECIPIENT_DELETED` 아님) SMB 지연도 남는다.
+    ///   막으려면 파킹 시점에 프로필 id 를 키로 함께 저장해야 하는데(이름 키 파킹 자체의 재설계) 그건 새 결정
+    ///   소관이다 — 여기서 몰래 바꾸지 않는다.
+    // ADR-0101 (WYSIWYA) / ADR-0116 (결정 1 — 잠듦 파킹 키)
+    pub fn canonical_name_when_live(&self) -> String {
+        // ★override 우선 — fs 무접근★(위 doc "override 단축"). 산 세션 규칙(`canonical_name_or_id_fallback`)
+        //   의 첫 분기와 **글자 그대로 같다**(비공백이면 trim 하지 않고 원본 그대로가 이름).
+        if let Some(n) = self.display_name.as_deref() {
+            if !n.trim().is_empty() {
+                return n.to_string();
+            }
+        }
+        // ★답을 바꿀 수 없는 syscall 은 하지 않는다★: cwd 가 빈/공백-only 면 basename 이 placeholder 라
+        //   결과는 canonicalize 성공/실패와 무관하게 id 앞 8자다(`canonical_name_or_id_fallback` degrade).
+        let raw = self.cwd.to_string_lossy();
+        if raw.trim().is_empty() {
+            return crate::agent::name::canonical_name_or_id_fallback(None, &raw, self.id);
+        }
+        // spawn 과 동일: 정규화 실패 시 원본 사용(best-effort — manager::spawn_agent 의 cwd 처리 미러).
+        let cwd = dunce::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+        crate::agent::name::canonical_name_or_id_fallback(None, &cwd.to_string_lossy(), self.id)
     }
 }
 
@@ -620,6 +681,84 @@ mod tests {
             vec![],
             true,
         )
+    }
+
+    #[test]
+    fn canonical_name_when_live_mirrors_the_live_session_rule() {
+        // ★ADR-0116 결정 1 — 잠듦 파킹 키의 전제★: 잠든 프로필의 이름은 **산 세션과 같은 규칙**으로
+        //   파생돼야 한다(`canonical_name_or_id_fallback` + canonicalize 된 cwd). 갈리면 파킹 키와 복원 후
+        //   이름이 어긋나 편지가 주인을 못 만난다.
+        // ★상대 경로가 이 테스트의 핵심★: `PathBuf::from(".")` 은 raw 라 basename 이 `"."` 이 되지만, 산
+        //   세션은 canonicalize 된 절대경로의 basename 을 쓴다. 두 값이 같아야 한다는 것을 여기서 못 박는다
+        //   (`resolve_display_name(None, ".")` 로 뽑으면 `"."` 이 나와 조용히 어긋난다).
+        let p = sample(); // cwd = "."
+        let expected = {
+            let abs = dunce::canonicalize(".").expect("cwd 는 실재한다");
+            crate::agent::name::canonical_name_or_id_fallback(None, &abs.to_string_lossy(), p.id)
+        };
+        assert_eq!(p.canonical_name_when_live(), expected);
+        assert_ne!(
+            p.canonical_name_when_live(),
+            ".",
+            "raw cwd basename 을 쓰면 산 이름과 갈린다"
+        );
+
+        // override 가 있으면 그대로(트리 rename 과 동형) — 단 공백-only override 는 무시하고 cwd 로 떨어진다.
+        let mut named = sample();
+        named.display_name = Some("Alice".into());
+        assert_eq!(named.canonical_name_when_live(), "Alice");
+        let mut blank = sample();
+        blank.display_name = Some("   ".into());
+        assert_eq!(
+            blank.canonical_name_when_live(),
+            expected,
+            "공백-only override 는 무시된다(산 세션 규칙과 동일 — resolve_display_name 은 이 가드가 없다)"
+        );
+    }
+
+    #[test]
+    fn canonical_name_when_live_survives_a_vanished_cwd_when_an_override_exists() {
+        // ★리뷰 fix(D3) — 삭제 시점 이름 재파생이 큐를 놓치는 경로를 막는다★: 삭제 정리는 프로필을 지우기
+        //   **직전**에 이 이름을 뽑아 그 값으로 파킹 큐를 지목한다. 그런데 cwd 디렉터리가 그 사이 사라졌으면
+        //   canonicalize 가 실패해 raw 경로로 degrade 하고, 그 basename 이 파킹 키(잠듦 시점 이름)와 다르면
+        //   정리가 **엉뚱한 큐**를 쓸어 편지가 `RECIPIENT_DELETED` 가 아니라 24h TTL 로 조용히 만료된다.
+        //   override 가 있으면 이름이 fs 에 전혀 의존하지 않아야 한다는 게 이 테스트의 계약이다.
+        let vanished = PathBuf::from("C:/engram-does-not-exist-9f1c/never/created");
+        assert!(
+            dunce::canonicalize(&vanished).is_err(),
+            "이 테스트의 전제 — 이 경로는 실재하지 않아야 canonicalize 실패 경로를 탄다"
+        );
+
+        let mut named = sample();
+        named.cwd = vanished.clone();
+        named.display_name = Some("Renamed".into());
+        assert_eq!(
+            named.canonical_name_when_live(),
+            "Renamed",
+            "override 가 있으면 fs 를 보지 않는다(canonicalize 실패가 이름을 흔들면 안 된다)"
+        );
+
+        // ★수용된 갭(정직 명시 — 함수 doc)★: override 가 없으면 raw basename 으로 degrade 한다.
+        //   그 부류의 잔여 결말은 TTL 이고 `RECIPIENT_DELETED` 가 아니다.
+        let mut anon = sample();
+        anon.cwd = vanished;
+        anon.display_name = None;
+        assert_eq!(
+            anon.canonical_name_when_live(),
+            "created",
+            "override 없음 + cwd 소멸 → raw basename(알고 수용한 갭)"
+        );
+
+        // cwd 가 공백-only + override 없음 → syscall 을 하지 않고 곧장 id 앞 8자(답을 바꿀 수 없는 호출 회피).
+        let mut blank = sample();
+        blank.cwd = PathBuf::from("   ");
+        blank.display_name = None;
+        let id8 = blank.id.to_string()[..8].to_string();
+        assert_eq!(
+            blank.canonical_name_when_live(),
+            id8,
+            "빈 cwd 는 canonicalize 결과와 무관하게 id degrade 다"
+        );
     }
 
     #[test]

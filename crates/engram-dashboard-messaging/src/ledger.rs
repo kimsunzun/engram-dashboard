@@ -5,6 +5,9 @@
 //!      "상태 전이 시각이 곧 회신·발신 시각 데이터"(봉투 미노출 — spec §5). 용량 초과 = 오래된 것부터 evict.
 //!   ② **request 추적** — `awaiting_reply` 오픈 + `in_reply_to` **엄격 매칭**으로 닫기 + `reply_by` 초과
 //!      타임아웃 산출(발신자에게 notice 는 후속 increment 가 생성 — 여기선 "누가 초과했나"만 산출).
+//!      ★종결 사유는 둘(4차 — ADR-0116 결정 2/3 · ADR-0118 결정 1)★: 회신 수용(`replied`) 또는 **실패
+//!      종결**(`reply_failed` — 회신 발송이 `RECIPIENT_NOT_FOUND` / 요청자 프로필 삭제 정리). 기한 초과는
+//!      여전히 **종결 사유가 아니다**(ADR-0108 결정 1 — 통지 ≠ 종결).
 //!   ③ **그룹 배달 장부** — 메시지 1 : 배달기록 N(spec §4). 죽은 멤버 `skipped` 지원.
 //!
 //! ★순수·주입 시계(load-bearing — 모듈 헤더 불변식)★: 상태 전이·타임아웃 판정의 모든 시각은 `now: Instant`
@@ -55,9 +58,10 @@ const MAX_OPEN_REQUESTS: usize = 512;
 /// 메시지 배달 1건의 상태(spec §5·§6 상태 어휘 — 새 어휘 발명 금지).
 ///
 /// ★상태 전이(load-bearing)★: `Pending → Delivered → Replied`(request 만) / `Expired`(TTL) / `Skipped`
-///   (notice 레인 은퇴) / `Failed`(입구 반려·`MAILBOX_FULL`·`REQUEST_CAPACITY` — **기록 시점부터 종점**).
-///   각 전이는 시각을 남긴다(spec §5 "상태 전이 시각이 곧 회신·발신 시각"). busy 대기·주입 실패 파킹은
-///   둘 다 `Pending`(상태 어휘 공유 — spec §5 분기 1 보정).
+///   (notice 레인 은퇴) / `Failed`(입구 반려·`MAILBOX_FULL`·`REQUEST_CAPACITY` — **기록 시점부터 종점**,
+///   단 **삭제 정리만** `Pending → Failed` 로 사후 종결한다 — ADR-0116 결정 4 · `fail_pending`).
+///   각 전이는 시각을 남긴다(spec §5 "상태 전이 시각이 곧 회신·발신 시각"). busy 대기·주입 실패 파킹·
+///   **잠듦 파킹**(ADR-0116 결정 1)은 전부 `Pending`(상태 어휘 공유 — spec §5 분기 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
     /// 주입 대기(busy 대기 또는 주입 실패 파킹 — 어휘 공유, spec §5).
@@ -72,13 +76,18 @@ pub enum DeliveryStatus {
     ///   ★발송 응답 어휘에는 없다★(ADR-0111 결정 3 으로 그룹 멤버 skip 이 사라지며 응답 축에서 폐지).
     Skipped,
     /// ★수신자별 실패 종점(신설 — ADR-0111 결정 3 · spec §5 "실패 수신자도 장부에 남는다")★:
-    ///   입구 반려(`RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS`) · `MAILBOX_FULL` · `REQUEST_CAPACITY`.
+    ///   입구 반려(`RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS`) ·
+    ///   `MAILBOX_FULL` · `REQUEST_CAPACITY` · **삭제 정리**(`RECIPIENT_DELETED` — 4차).
     ///
     /// ★왜 장부에 남기나(load-bearing)★: 발신자가 나중에 `messages{id}` 로 "누가 못 받았나" 를 다시 볼 수
     ///   있어야 하고, 그래야 **장부 기대 행수 = 발신 응답 행수**가 맞아 `may_be_truncated` 오탐이 사라진다
     ///   (spec §5·§6). 파킹은 없지만 기록은 있다.
-    /// ★기록 시점이 곧 종점★: 이 상태로 `record` 되고 **어떤 전이도 나가지 않는다**(아래 그래프).
+    /// ★기록 시점이 곧 종점 — **단 하나의 예외**(4차 · ADR-0116 결정 4)★: 입구 반려 계열은 이 상태로
+    ///   `record` 되고 어떤 전이도 나가지 않는다. 삭제 정리만 *이미 파킹된* 레코드를 사후 종결하므로
+    ///   `Pending → Failed` 한 간선을 쓰는데, 그 간선은 **전용 동사 `fail_pending` 에만** 열려 있다
+    ///   (범용 `transition(.., Failed, ..)` 은 여전히 전부 불법 — 아래 `can_transition_to`).
     // ADR-0111
+    // ADR-0116 (pending→failed = 삭제 정리 한정)
     Failed,
 }
 
@@ -94,9 +103,12 @@ impl DeliveryStatus {
     ///   재전이, 그리고 되돌림(`*→Pending`)·건너뜀(`Pending→Replied`, `Expired→Delivered` 등)은 거부한다.
     ///   되돌림·건너뜀을 허용하면 "상태 전이 시각 = 회신·발신 시각" 이라는 장부 의미가 오염된다(오발 닫힘·
     ///   시각 소급). 같은 상태로의 자기 전이도 불법(무의미한 시각 갱신 방지)이다.
-    /// ★`Failed` 는 들어오는 간선도 없다(ADR-0111)★: 실패 행은 **처음부터** 그 상태로 기록된다(파킹된 적이
-    ///   없으므로 `Pending` 을 거칠 수 없다). 전이로 만들 수 있게 열어 두면 "배달됐다가 실패로 돌아간"
-    ///   불가능한 이력이 표현 가능해진다.
+    /// ★`Failed` 로 들어오는 간선은 이 **범용** 그래프에 없다(ADR-0111 · 4차에도 유지)★: 실패 행은
+    ///   **처음부터** 그 상태로 기록된다. 범용 전이로 열어 두면 "배달됐다가 실패로 돌아간" 불가능한 이력이
+    ///   표현 가능해지므로, 4차에서 추가된 `Pending → Failed`(삭제 정리)도 여기에 넣지 않고 **전용 동사**
+    ///   (`fail_pending` → `can_fail_by_cleanup`)로만 연다. 그래서 `transition(.., Failed, ..)` 은 어느
+    ///   상태에서든 `Illegal` 이고(임의 호출 차단), 삭제 정리만 그 간선을 쓴다(spec §6 전이 그래프 개정).
+    // ADR-0116 (pending→failed 는 경로 한정 — 범용 그래프 불변)
     fn can_transition_to(self, next: DeliveryStatus) -> bool {
         use DeliveryStatus::*;
         matches!(
@@ -107,6 +119,18 @@ impl DeliveryStatus {
                 | (Delivered, Skipped)
                 | (Delivered, Replied)
         )
+    }
+
+    /// ★삭제 정리 전용 간선(`Pending → Failed`, spec §6 · ADR-0116 결정 4)★ — 이 상태에서 **삭제 정리로**
+    /// `Failed` 로 갈 수 있나. 파킹 중(`Pending`)인 레코드만 해당한다.
+    ///
+    /// ★왜 별도 술어인가(load-bearing)★: 이 간선은 "이미 파킹된 레코드를 사후 종결하는 유일한 경로" 에만
+    ///   합법이다. 범용 그래프(`can_transition_to`)에 넣으면 **어떤 호출자든** pending 행을 실패로 만들 수
+    ///   있어(예: 만료 스윕 버그·flush 오분기) "배달 대기 중이던 메일이 사유 없이 실패로 적힌" 이력이
+    ///   생긴다. 술어를 갈라 두면 그 능력이 `fail_pending` 한 동사에만 있고, `Delivered → Failed` 는
+    ///   두 술어 어디에도 없어 영구히 불법이다.
+    fn can_fail_by_cleanup(self) -> bool {
+        matches!(self, DeliveryStatus::Pending)
     }
 }
 
@@ -146,6 +170,17 @@ pub struct MessageRecord {
     ///   8KiB 만 더한다(본문 보관 비용에 비하면 무시 가능).
     // round-2 리뷰 F3
     pub expected_rows: u16,
+    /// ★조회에 실을 실패 코드(4차 신설 — spec §6 `RECIPIENT_DELETED`)★. `None` = 코드 없음.
+    ///
+    /// ★왜 wire 문자열을 그대로 담나(load-bearing)★: 이 코드가 처음 보이는 곳은 **발송 응답이 아니라
+    ///   `messages{id}` 조회**다(발송 시점엔 `pending` 이었다 — spec §6). 즉 값을 발송 응답과 다른 시점까지
+    ///   **보관**해야 하므로 레코드에 실린다. 어휘 정본은 `service::FailCode::as_str` 이고 여기엔 그 반환값이
+    ///   그대로 들어온다 — 장부가 service 의 enum 을 타입으로 알면 순수 저장 계층이 정책 어휘에 유착되므로
+    ///   `&'static str` 한 겹으로만 받는다(값 복제 없음).
+    /// ★지금 채워지는 경로는 삭제 정리 하나뿐★: 입구 반려 계열의 `failed` 행은 발송 응답이 그 자리에서
+    ///   code/hint 를 이미 전달했으므로(spec §6) 조회 축에 중복 보관하지 않는다(`None`).
+    // ADR-0116 (RECIPIENT_DELETED — 조회 시점 코드)
+    pub fail_code: Option<&'static str>,
 }
 
 /// 오픈된 request 추적 1건(spec §3). 이력 레코드와 **별도 맵**이라 링 evict 에 영향받지 않는다.
@@ -169,9 +204,11 @@ struct RequestEntry {
     recipient: String,
     /// ★해석된 수신자 PeerId(D 리뷰 B1 — load-bearing)★: 발송 시점에 수신자가 **산 에이전트로 해석됐으면**
     /// 그 PeerId.
-    /// ★v1 에서 `None` 은 운영 경로에 없다(ADR-0111 결정 1 이후 — L3)★: 부재 수신자는 실패 행이 되고 계약을
-    /// 아예 열지 않으므로, 계약이 열렸다면 그 수신자는 반드시 해석됐다. `None` 이 남아 있는 자리는 **테스트
-    /// seam·레거시**(`park_absent_for_test`)뿐이다 — 아래 폴백 서술을 그 전제로 읽을 것.
+    /// ★`None` 은 4차부터 **운영 경로에 다시 존재한다**(ADR-0116 결정 1 — 잠듦 파킹 부활)★: 잠든(프로필만
+    /// 있는) 수신자에게 건 request 는 계약을 열지만 그 순간 산 incarnation 이 없어 id 를 못 붙인다. 그
+    /// 계약은 **이름으로** 의무를 귀속하다가(아래 폴백), 복원 후 실제 배달 시점에
+    /// `rebind_request_recipient` 가 착지 incarnation 의 id 를 박는다. (3차 서술 "None 은 테스트 seam
+    /// 뿐" 은 폐기 — 잠듦 파킹이 그 전제를 뒤집었다.)
     ///
     /// ★왜 이름만으로는 안 되나★: 같은 이름의 산 에이전트가 둘일 때(동명 다수) 발신자는 exact PeerId 로
     ///   지목해 한쪽에만 request 를 보낼 수 있는데, 계약은 이름(`recipient`)으로만 기록됐다 — 그러면
@@ -192,8 +229,21 @@ struct RequestEntry {
     reply_by: Option<(Duration, String)>,
     /// 요청 오픈(발송) 시각 — reply_by 절대 기한 = created_at + reply_by.
     created_at: Instant,
-    /// 회신으로 닫혔나(replied). true 면 due_timeouts 대상에서 제외.
+    /// ★계약이 종결됐나(종점 도달)★ — true 면 오픈 목록·due_timeouts·상한 계수에서 빠진다.
+    ///   종결 사유는 둘이다: 회신 수용(`replied`) 또는 **실패 종결**(`reply_failed` — 아래 필드).
     closed: bool,
+    /// ★실패 종결 표식(4차 신설 — ADR-0116 결정 2/3 · ADR-0118 결정 1)★. `closed` 와 **항상 함께** 세워지고,
+    /// 이 값이 `true` 면 종점 어휘가 `replied` 가 아니라 `reply_failed` 다(계약 축 — spec §6).
+    ///
+    /// ★왜 `closed` 옆의 한 비트인가(load-bearing)★: 종결의 **결과**(오픈 목록 제거·기한 스윕 미발화·512
+    ///   계수 제외)는 `replied` 와 완전히 같다 — 그래서 그 판정들을 두 벌로 만들지 않고 `closed` 단일 술어를
+    ///   그대로 쓴다(ADR-0118 결정 4 "`occupied_slots` 단일 술어 유지"). 이 비트는 **사유**만 나른다:
+    ///   "회신이 성립했다" 를 주장하지 않는 종점이라는 사실(§6 축 구분)과, 삭제 정리가 **이미 `replied` 인
+    ///   계약은 건드리지 않는다**(§3 항목 7-④ 되돌림 금지)는 규칙의 관측면이다.
+    /// ★발화 경로는 딱 둘★: ① 회신 발송 행이 `RECIPIENT_NOT_FOUND`(`fail_on_undeliverable_reply`)
+    ///   ② 요청자 프로필 삭제 정리(`fail_open_requests_from`). 그 밖의 회신 실패는 **무동작**이다.
+    // ADR-0116 (결정 2) / ADR-0118 (결정 1·4)
+    reply_failed: bool,
     /// 타임아웃이 이미 보고됐나 — 이중 통지 방지(위 struct 주석).
     notified: bool,
     /// ★상한 압력으로 **은퇴 예정 표시**됨(round-5 mark-and-sweep)★ — 아직 목록에 살아 있고 회신도 받을 수
@@ -234,8 +284,10 @@ struct RequestEntry {
 }
 
 impl RequestEntry {
-    /// 아직 **살아 있는**(= 미회신) 계약인가. 이 부류만 이력 evict 를 견디고(`record`),
+    /// 아직 **살아 있는**(= 종결되지 않은) 계약인가. 이 부류만 이력 evict 를 견디고(`record`),
     /// `MAX_OPEN_REQUESTS` cap 의 계수 대상이다.
+    /// ★4차 보정★: 종결(`closed`)에는 회신 수용(`replied`)과 **실패 종결**(`reply_failed`)이 함께 들어온다 —
+    ///   둘 다 결말이 확정된 계약이라 여기서 갈리지 않는다(ADR-0118 결정 4 "단일 술어 유지").
     ///
     /// ★기준 = `!closed` 단독(D 리뷰 B3 — 옛 `!closed && !notified` 에서 교정)★: 예전엔 기한 초과 통지가
     ///   나간 계약(`notified`)을 "끝난 것" 으로 취급해 이력 evict 때 함께 지웠다. 그런데 통지는 **발신자에게
@@ -268,8 +320,12 @@ impl RequestEntry {
     ///   - **커밋**: 잠정 표시가 풀린다 → 그 계약이 닫혀 있었다면 그때 자리가 **정당하게** 해제된다
     ///     (회신을 실제로 받은 계약이므로 자리를 놓는 게 맞다).
     ///   - **롤백**: 닫힌 잠정 계약을 제거(-1)하고 희생자 표시를 해제(+1) → 합이 0, 정확히 cap 유지.
+    /// ★`reply_failed` 도 여기서 **자동으로 빠진다**(ADR-0118 결정 4 — 두 번째 용량 개념 금지)★: 실패 종결은
+    ///   `closed` 를 세우므로 이 술어가 그대로 false 를 낸다. 별도 분기를 추가하지 말 것 — 상한 계수는
+    ///   단일 술어라는 게 이 함수의 존재 이유다(정산 산술이 여기 한 곳에서만 성립한다).
     // round-5 mark-and-sweep / round-6 I1
     // ADR-0108 (용량 술어 단일점 — 잠정은 닫혀도 무게 유지)
+    // ADR-0118 (결정 4 — reply_failed 는 계수에서 빠진다)
     fn occupies_slot(&self) -> bool {
         (!self.closed || self.provisional) && !self.pending_retirement
     }
@@ -292,6 +348,31 @@ pub enum ReplyOutcome {
     NoMatch,
     /// 이미 닫힌 request 에 대한 두 번째 회신 — no-op(중복 회신, 아래 close_on_reply 주석 참조).
     AlreadyClosed,
+}
+
+/// ★회신 실패 종결 시도의 결말(4차 신설 — spec §3 항목 7-④ · ADR-0118)★.
+///
+/// ★`Failed` 외 셋은 전부 **무동작**이다★ — 계약은 그대로 오픈이거나 이미 종결이다. 호출자는 결말별로
+///   로그만 갈린다(배달·응답에는 영향 없음 — 회신 메시지 자체의 결말은 이미 실패 행으로 보고됐다).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyFailOutcome {
+    /// 계약을 `reply_failed` 종점으로 닫았다(오픈 목록·기한 스윕·512 계수에서 제거, 이력 잔존).
+    Failed,
+    /// 그 회신자의 오픈 계약이 없다 — 모르는 id·남의 계약(정상 경로, `close_on_reply` 의 `NoMatch` 와 동형).
+    NoMatch,
+    /// 이미 종결된 계약(`replied` 이거나 이미 `reply_failed`) — 되돌리지 않는다.
+    AlreadyClosed,
+    /// ★가드 보유 중(ADR-0118 결정 3)★ — 잠정·은퇴 예정 표시가 붙어 있어 수명이 그 가드 소유다. 무동작.
+    GuardHeld,
+}
+
+/// ★요청자 삭제 정리가 계약 축에서 한 일(spec §5 삭제 정리 ②)★ — 호출자가 **락 밖에서** 로그로 남긴다.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RequesterCleanup {
+    /// `reply_failed` 로 종결한 계약 키 `(request_id, recipient)`.
+    pub failed: Vec<(String, String)>,
+    /// 가드(잠정·은퇴 예정) 때문에 건너뛴 계약 수 — 재발화하지 않는다(삭제 시점 단발, spec §5).
+    pub guard_held: usize,
 }
 
 /// `transition` 실패 사유 — 불법 상태 전이(spec §5 그래프 위반) 또는 대상 레코드 부재.
@@ -453,8 +534,11 @@ pub struct OpenRequestView {
     pub sender_id: PeerId,
     /// 요청 수신자 이름 — 회신 의무를 진 쪽.
     pub recipient: String,
-    /// 해석된 수신자 PeerId — 동명 다수에서 의무를 정확히 귀속시키는 축(리뷰 B1). v1 운영 경로에선 항상
-    /// `Some`(부재는 계약을 열지 않는다 — ADR-0111 결정 1); `None` 은 테스트 seam 잔여다.
+    /// 해석된 수신자 PeerId — 동명 다수에서 의무를 정확히 귀속시키는 축(리뷰 B1).
+    /// ★`None` 은 테스트 seam 이 아니다(4차 — ADR-0116 결정 1)★: **잠든 수신자**의 계약은 산 incarnation 이
+    /// 없어 `None` 으로 열리고(`service` 발송 경로), 복원 후 실제 주입 시점에 `rebind_request_recipient` 가
+    /// 착지 id 를 박는다. 즉 운영 경로에 `None` 인 구간이 실재한다 — 그 구간의 회신은 `close_on_reply` 의
+    /// **이름 폴백**만이 닫을 수 있다(그래서 그 팔은 dead code 가 아니다).
     pub recipient_id: Option<PeerId>,
     /// 발신자가 쓴 기한 표기 원본(`"10m"`). 기한 없는 request 는 None.
     pub reply_by_raw: Option<String>,
@@ -561,6 +645,8 @@ impl Ledger {
             // 0 은 의미가 없다(모든 발송은 최소 1행) — 방어적으로 1 로 올려 `rows < expected` 판정이
             //   "행이 있는데 기대가 0" 같은 모순 상태에 빠지지 않게 한다.
             expected_rows: expected_rows.max(1),
+            // 기록 시점엔 코드가 없다 — 삭제 정리(`fail_pending`)만 사후에 채운다(그 필드 주석).
+            fail_code: None,
         });
         // 용량 초과 — 가장 오래된(front) 것부터 evict(오래된 순 유지). evict 뒤 **닫힌 계약 중 이력이 사라진
         // 것**을 정리한다(`purge_finished_without_history`) — 미회신 계약은 남겨야 회신·통지·미결 조회 경로가
@@ -640,6 +726,43 @@ impl Ledger {
         Ok(())
     }
 
+    /// ★삭제 정리 전용 종결(`Pending → Failed` + 사유 코드 — spec §5 삭제 정리 · §6 전이 그래프 개정)★.
+    ///
+    /// ★왜 `transition` 이 아니라 전용 동사인가(load-bearing)★: 이 간선은 **삭제 정리 한 경로에만** 합법이다
+    ///   (`can_fail_by_cleanup` 주석). 범용 전이에 열면 임의 호출자가 배달 대기 중인 행을 사유 없이 실패로
+    ///   바꿀 수 있다. 그래서 능력을 이 동사 하나에 가두고, 그 동사는 **사유 코드를 필수 인자로** 받는다 —
+    ///   조회가 코드 없는 `failed` 를 보고 "왜 실패했나" 를 답할 수 없는 상태를 타입으로 막는다.
+    /// ★`Delivered → Failed` 는 여전히 불법★: 이미 꽂힌 메시지가 사후에 실패로 뒤집히면 "배달됐다가 실패로
+    ///   돌아간" 불가능한 이력이 된다(spec §6). 그 경우 `Illegal` 을 돌려준다.
+    /// ★반환★: `Ok(())` = 종결 성공 · `Illegal` = pending 이 아님 · `NotFound` = 레코드가 링에서 밀려남
+    ///   (호출자가 락 밖에서 debug 로 남긴다 — 조용한 유실 금지).
+    // ADR-0116 (결정 3/4 — 삭제 정리)
+    pub fn fail_pending(
+        &mut self,
+        msg_id: &str,
+        to: &str,
+        code: &'static str,
+        now: Instant,
+    ) -> Result<(), TransitionError> {
+        let Some(rec) = self
+            .history
+            .iter_mut()
+            .find(|r| r.msg_id == msg_id && r.to == to)
+        else {
+            return Err(TransitionError::NotFound);
+        };
+        if !rec.status.can_fail_by_cleanup() {
+            return Err(TransitionError::Illegal {
+                from: rec.status,
+                to: DeliveryStatus::Failed,
+            });
+        }
+        rec.status = DeliveryStatus::Failed;
+        rec.fail_code = Some(code);
+        rec.transitioned_at = now;
+        Ok(())
+    }
+
     /// request 오픈 — `awaiting_reply` 추적 시작(spec §3 단계 2). **계약 키 = `(request_id, recipient)`**.
     ///
     /// ★다중 수신자 request = 독립 계약 N개(ADR-0111 결정 5 · load-bearing)★: 메시지 id 는 N계약 공통이고
@@ -652,7 +775,10 @@ impl Ledger {
     /// ★중복 **키** 거부 — 오픈이든 닫힘이든 존재하면 거부(load-bearing · finding 2)★: 같은
     ///   `(request_id, recipient)` 가 추적에 **하나라도 있으면**(open OR closed) `DuplicateId` 로 거부한다
     ///   (no-op). 메시지 id 는 **데몬이 생성하는 유일 값**이고 수신자는 발송 해석 단계에서 이미 중복 제거되므로
-    ///   (spec §5 해석 순서 ④) 이 조합의 재사용은 non-scenario 다. 예전의 "닫힌 id 는 재오픈 허용" 관대함은
+    ///   (spec §5 해석 순서 ④) 이 조합의 재사용은 non-scenario 다. ★파킹된 수신자도 계약을 연다(spec §3
+    ///   항목 2)★ — busy 든 **잠듦**(ADR-0116 결정 1)이든 수용은 수용이라 회신 의무가 성립하고 기한 스윕도
+    ///   정상 발화한다. 잠듦 계약은 `recipient_id = None` 으로 열린다(산 incarnation 이 없다).
+    ///   예전의 "닫힌 id 는 재오픈 허용" 관대함은
     ///   두 항목을 동시에 남겨 (a) 회신이 앞쪽 닫힌 항목을 먼저 만나 `AlreadyClosed` 오발, (b) 같은-id 이력
     ///   evict 가 재오픈 추적을 드롭하는 shadowing 버그를 낳았다.
     /// ★cap 도달 = **가장 오래된 은퇴 가능 계약을 내보내고 수용**(사용자 결정 2026-07-27 · round-2 F1)★.
@@ -675,8 +801,12 @@ impl Ledger {
     /// ★인자 `reply_by` = (기한, 표기 원본)★: 표기는 통지 문구에 그대로 쓰인다(`DueTimeout.reply_by_raw`).
     ///   튜플로 묶어 "기한이 있으면 표기도 있다" 를 타입으로 강제한다(둘이 어긋날 여지 자체를 없앤다).
     /// ★인자 `recipient_id`(D 리뷰 B1)★: 발송 시점에 해석된 수신자의 PeerId. 동명 다수에서 회신 의무를
-    ///   정확히 귀속시키는 축이다(`RequestEntry.recipient_id`). v1 발송 경로는 항상 `Some` 을 넘긴다
-    ///   (부재는 계약을 열지 않으므로) — `None` 은 테스트 seam 전용이다.
+    ///   정확히 귀속시키는 축이다(`RequestEntry.recipient_id`).
+    ///   ★`None` 은 운영 경로에 실재한다(4차 — ADR-0116 결정 1. 옛 "테스트 seam 전용" 서술은 **거짓이라
+    ///   폐기**)★: **잠든 수신자**에게 파킹되는 request 는 산 incarnation 이 없어 `None` 으로 열린다
+    ///   (`service::handle_send` 의 잠듦 갈래). 그 구간의 계약을 닫는 유일한 경로가 `close_on_reply` 의
+    ///   **이름 폴백**이므로 그 팔을 "죽은 코드" 로 읽고 지우면 잠든 요청자 계약이 영영 안 닫힌다.
+    ///   복원 후 실제 주입 시점에 `rebind_request_recipient` 가 착지 id 를 박아 그 뒤로는 id 축이 산다.
     #[allow(clippy::too_many_arguments)]
     pub fn open_request(
         &mut self,
@@ -742,6 +872,7 @@ impl Ledger {
             reply_by,
             created_at: now,
             closed: false,
+            reply_failed: false,
             notified: false,
             pending_retirement: false,
             // 접수 확정 전 — 커밋이 이 표시를 지운다(그전엔 남의 희생자가 될 수 없다).
@@ -961,11 +1092,15 @@ impl Ledger {
     ///   즉 예전에 `Closed` 로 은폐하던 불법 전이만 anomaly 로 승격한다(evict 는 정상 best-effort skip).
     /// ★두 번째 회신 = no-op 로 문서화★: 같은 request 에 두 번째 회신이 와도 상태를 되돌리거나 재-닫지
     ///   않는다(첫 회신이 이미 계약 이행). 에러가 아니라 `AlreadyClosed` 로 구분해 반환한다(상위 판단용).
+    /// ★인자 `allow_name_fallback`(리뷰 fix D4)★: `false` 면 **id 매치만** 인정한다. 상위가 "그 회신자
+    ///   이름이 산 세션 2개 이상에 걸린다" 를 관측했을 때 내려보낸다 — 그 상황에서 이름 폴백을 태우면 어느
+    ///   쌍둥이가 실제로 요청을 받았는지 알 수 없는 채 계약을 닫는다(귀속 날조).
     pub fn close_on_reply(
         &mut self,
         in_reply_to: &str,
         replier_name: &str,
         replier_id: PeerId,
+        allow_name_fallback: bool,
         now: Instant,
     ) -> ReplyOutcome {
         // 1) 추적 항목을 닫는다(정본). recipient 를 꺼내 뒤이어 이력 전이에 쓴다(borrow 분리).
@@ -978,22 +1113,19 @@ impl Ledger {
         //   조회의 귀속 판정(`matches_contract_party`)은 **id 단독**이라, 그 에이전트는 자기 화면에 보이지도
         //   않는 의무를 닫아 버리는 비대칭이 생긴다.
         // ★두 패스면 그 비대칭이 사라진다★: id 로 지목된 계약이 있으면 그게 유일한 정답이고(조회 축과 동일),
-        //   id 매치가 하나도 없을 때만 이름으로 떨어진다 — 재스폰(새 PeerId)·부재 파킹처럼 계약이 id 를 들고
+        //   id 매치가 하나도 없을 때만 이름으로 떨어진다 — 재스폰(새 PeerId)·잠듦 파킹처럼 계약이 id 를 들고
         //   있지 않은 경우의 정상 회신 경로를 그대로 살린다.
-        // ★남는 위험(수용된 잔여)★: 계약이 id 를 **안 들고 있을 때** 동명 쌍둥이가 이름으로 닫을 수 있다.
-        //   개편 이후 admitted 수신자의 계약은 항상 id 를 들고 있어 실제 노출면이 좁고, 이 부류의 근본 제거는
-        //   ADR-0115(스폰 이름 유일성)다 — 그때까지의 과도기 계약이다.
-        let matched = self
-            .requests
-            .iter()
-            .position(|r| r.request_id == in_reply_to && r.recipient_id == Some(replier_id))
-            .or_else(|| {
-                self.requests.iter().position(|r| {
-                    r.request_id == in_reply_to
-                        && r.recipient_id.is_none()
-                        && r.recipient == replier_name
-                })
-            });
+        // ★남는 위험을 **한 겹 더 좁혔다**(리뷰 fix D4)★: 계약이 id 를 안 들고 있는 구간(**잠듦 파킹** —
+        //   운영 경로에 실재한다)에서 동명 쌍둥이가 이름으로 남의 계약을 닫는 경로가 있었다. 이제 상위가
+        //   "그 이름이 산 세션 2개 이상에 걸리나" 를 판정해 `allow_name_fallback = false` 로 내려보내고,
+        //   그때는 이름 폴백을 아예 타지 않는다(무동작 = 계약 오픈 유지 — 잘못 닫는 것보다 안 닫는 게 낫다).
+        //   근본 제거는 여전히 ADR-0115(스폰 이름 유일성)다.
+        let matched = self.match_contract_for_replier(
+            in_reply_to,
+            replier_name,
+            replier_id,
+            allow_name_fallback,
+        );
         let recipient = match matched.map(|i| &mut self.requests[i]) {
             Some(r) if r.closed => return ReplyOutcome::AlreadyClosed,
             Some(r) => {
@@ -1017,6 +1149,127 @@ impl Ledger {
         //    그 이력이 밀려날 때 함께 정리된다(닫힌 id 재오픈 차단이 그동안 유지된다).
         self.purge_finished_without_history();
         outcome
+    }
+
+    /// ★회신자의 계약을 고르는 **단일 규칙**(id 우선 → 이름 폴백) — `close_on_reply` 와
+    /// `fail_on_undeliverable_reply` 가 **같은 함수**를 쓴다(load-bearing)★.
+    ///
+    /// ★왜 함수로 묶나★: 두 동사는 같은 회신 1건의 두 결말(수용 → `replied` / 도달 불가 확정 →
+    ///   `reply_failed`)이다. 선택 규칙이 갈리면 **같은 회신이 서로 다른 계약을 지목**해, 성공 경로가 닫은
+    ///   계약과 실패 경로가 종결한 계약이 어긋난다(A6 가 잡은 부류의 재발 — 그때도 원인은 "한 규칙을 두 곳에
+    ///   따로 쓴 것" 이었다). 규칙 본문의 근거·수용된 잔여는 `close_on_reply` 헤더가 정본이다.
+    /// ★`allow_name_fallback = false` = **이름 폴백 금지**(리뷰 fix D4 — 귀속 모호)★: 그 회신자 이름이 산
+    /// 세션 여러 개에 걸릴 때 상위가 내려보낸다. 이름으로 닫으면 "받은 적 없는 요청" 을 닫아 버릴 수 있고
+    /// (두 쌍둥이가 서로의 계약을 닫는다) 미결 조회는 **id 단독**이라 양쪽 다 `reply_owed_by_me` 로 보는
+    /// 비대칭까지 난다. 그래서 그때는 아무 것도 고르지 않는다(`NoMatch` → 무동작, 계약 오픈 유지).
+    fn match_contract_for_replier(
+        &self,
+        in_reply_to: &str,
+        replier_name: &str,
+        replier_id: PeerId,
+        allow_name_fallback: bool,
+    ) -> Option<usize> {
+        self.requests
+            .iter()
+            .position(|r| r.request_id == in_reply_to && r.recipient_id == Some(replier_id))
+            .or_else(|| {
+                if !allow_name_fallback {
+                    return None;
+                }
+                self.requests.iter().position(|r| {
+                    r.request_id == in_reply_to
+                        && r.recipient_id.is_none()
+                        && r.recipient == replier_name
+                })
+            })
+    }
+
+    /// ★회신이 **도달 불가 확정**이라 계약을 실패 종결한다(spec §3 항목 7-④ · ADR-0116 결정 2 · ADR-0118)★ —
+    /// 회신 발송 행이 `RECIPIENT_NOT_FOUND`(= 요청자 이름이 로스터·프로필 **둘 다에 없다**) 일 때만
+    /// 호출된다. 계약을 `reply_failed` 종점으로 닫아 오픈 목록·기한 스윕·512 계수에서 빼고 이력은 남긴다.
+    ///
+    /// ★그 밖의 회신 실패는 이 동사를 부르지 않는다(load-bearing)★: `MAILBOX_FULL`·`RECIPIENT_AMBIGUOUS`
+    ///   는 **그 순간의 환경**이라 재시도가 실제로 배달에 성공할 수 있다 — 그때
+    ///   장부가 영영 "회신 실패" 로 남으면 거짓말이 된다(ADR-0118 결정 2). 그 부류는 **무동작**(계약 오픈
+    ///   유지)이고, 좀비가 아닌 근거는 "기한 통지가 나가면 ADR-0108 은퇴 자격을 얻는다" 다.
+    /// ★가드 우선(ADR-0118 결정 3 — ADR-0108 결정 4 불변식 존중)★: **잠정(`provisional`)·은퇴 예정
+    ///   (`pending_retirement`) 표시 계약은 건드리지 않는다**(`GuardHeld`). 미정산 항목의 수명은 그 가드
+    ///   소유이므로, 여기서 닫으면 ① 가드의 커밋/롤백이 이미 종결된 계약을 되살리거나(유령 재개방)
+    ///   ② 표시된 희생자를 남이 종결해 상한 교환이 반쪽 난다. 그 사이 도착한 실패 회신은 무동작이다.
+    /// ★배달 상태는 건드리지 않는다(spec §6 축 구분)★: `reply_failed` 는 **계약 축** 종점이다 — 원 request 의
+    ///   배달기록은 그대로 `delivered`(또는 `pending`)에 머문다. 여기서 이력을 전이하면 "배달됐다가 실패로
+    ///   돌아간" 이력이 표현 가능해진다.
+    // ADR-0116 (결정 2) / ADR-0118 (결정 1·2·3)
+    /// ★인자 `allow_name_fallback`(리뷰 fix D4)★ — `close_on_reply` 와 **같은 의미·같은 값**을 받는다
+    ///   (선택 규칙이 갈리면 성공 경로와 실패 경로가 다른 계약을 지목한다 — `match_contract_for_replier` doc).
+    pub fn fail_on_undeliverable_reply(
+        &mut self,
+        in_reply_to: &str,
+        replier_name: &str,
+        replier_id: PeerId,
+        allow_name_fallback: bool,
+    ) -> ReplyFailOutcome {
+        let Some(idx) = self.match_contract_for_replier(
+            in_reply_to,
+            replier_name,
+            replier_id,
+            allow_name_fallback,
+        ) else {
+            return ReplyFailOutcome::NoMatch;
+        };
+        let entry = &mut self.requests[idx];
+        if entry.closed {
+            return ReplyFailOutcome::AlreadyClosed;
+        }
+        // 가드 우선 — 미정산 항목은 그 소유자(ReservationGuard)가 정산할 때까지 남의 것이다.
+        if entry.provisional || entry.pending_retirement {
+            return ReplyFailOutcome::GuardHeld;
+        }
+        entry.closed = true;
+        entry.reply_failed = true;
+        // 이력이 이미 밀려난 채 끝난 항목은 정리 계기가 영영 없다 — 닫는 그 자리에서 지운다(좀비 방지,
+        //   `close_on_reply` 3단계와 같은 규율).
+        self.purge_finished_without_history();
+        ReplyFailOutcome::Failed
+    }
+
+    /// ★요청자 프로필 삭제 정리 — 그 이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결한다★
+    /// (spec §5 삭제 정리 ② · ADR-0116 결정 3).
+    ///
+    /// ★대상 = 요청자(`sender`) 쪽만★: 회신이 갈 곳이 사라졌으므로 그 계약은 결말이 확정됐다. **회신자
+    ///   (`recipient`) 쪽이 삭제된 계약은 유지한다** — 발신자는 기한 통지(spec §3 항목 4~5)로 무응답을 알게
+    ///   되는 기존 경로가 살아 있고, 그 계약을 여기서 닫으면 "답을 못 받았다" 는 사실이 사라진다.
+    /// ★이미 종결된 계약은 건드리지 않는다★: `replied` 는 **되돌리지 않는다**(spec §3 항목 7-④ "수용 =
+    ///   완료" — 파킹된 회신이 나중에 `RECIPIENT_DELETED` 로 치워져도 계약은 `replied` 로 남는다).
+    ///   `!closed` 필터가 그 규칙을 구조적으로 보장한다.
+    /// ★가드 우선(ADR-0118 결정 3)★: 잠정·은퇴 예정 표시 계약은 건너뛰고 그 수를 함께 돌려준다(정산 후
+    ///   재발화는 **하지 않는다** — 삭제 정리는 삭제 시점 단발이고, 그 잔여의 결말은 TTL 이다. spec §5).
+    /// ★이름 기준 매칭★: 계약의 발신자 축은 이름(+id)이지만 삭제된 프로필의 **id 로 매칭하지 않는다** —
+    ///   계약의 `sender` 는 **발송 시점 표시 이름**이고 파킹 큐 키도 이름이므로, 같은 축으로 판정해야 정리
+    ///   대상이 갈리지 않는다(id 로 바꾸면 개명 전 이름으로 열린 계약을 놓친다).
+    ///   ★발동 게이트는 그 위에서 id 로 판정한다(리뷰 fix D1 — `service::handle_profile_deleted`)★: 여기까지
+    ///   왔다는 것은 이미 "그 프로필의 세션이 살아 있지 않다" 가 확정됐다는 뜻이다. 게이트(정확성)와 대상
+    ///   선택(이름 축)이 서로 다른 축을 쓰는 것은 의도된 분업이다.
+    // ADR-0116 (결정 3) / ADR-0118 (결정 3)
+    pub fn fail_open_requests_from(&mut self, sender: &str) -> RequesterCleanup {
+        let mut out = RequesterCleanup::default();
+        for r in self.requests.iter_mut() {
+            if r.closed || r.sender != sender {
+                continue;
+            }
+            if r.provisional || r.pending_retirement {
+                out.guard_held += 1;
+                continue;
+            }
+            r.closed = true;
+            r.reply_failed = true;
+            out.failed.push((r.request_id.clone(), r.recipient.clone()));
+        }
+        if !out.failed.is_empty() {
+            // 닫힌 계약 중 이력이 없는 것을 정리(좀비 방지 — `close_on_reply` 와 같은 규율).
+            self.purge_finished_without_history();
+        }
+        out
     }
 
     /// ★오픈된 request 추적을 **통째로 제거**한다(C3 — 발송이 반려돼 계약이 애초에 성립하지 않은 경우)★.
@@ -1233,6 +1486,44 @@ impl Ledger {
             .count()
     }
 
+    /// ★계약 축 종점 어휘 관측(4차 — spec §6 `awaiting_reply`/`replied`/`reply_failed`)★. 추적에 없으면
+    ///   `None`(이력만 남았거나 모르는 키).
+    ///
+    /// ★왜 필요한가★: `replied` 와 `reply_failed` 는 오픈 목록·기한 스윕·상한 계수에서 **똑같이 빠지므로**
+    ///   그 축으로는 구분되지 않는다. "수용은 완료로, 도달 불가 확정만 실패로" 라는 규칙(§3 항목 7-④)과
+    ///   "삭제 정리는 `replied` 를 되돌리지 않는다" 를 단언하려면 사유 자체를 봐야 한다.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn contract_outcome_for_test(
+        &self,
+        request_id: &str,
+        recipient: &str,
+    ) -> Option<&'static str> {
+        self.requests
+            .iter()
+            .find(|r| r.request_id == request_id && r.recipient == recipient)
+            .map(|r| match (r.closed, r.reply_failed) {
+                (true, true) => "reply_failed",
+                (true, false) => "replied",
+                (false, _) => "awaiting_reply",
+            })
+    }
+
+    /// ★계약에 박힌 수신자 id 관측(리뷰 fix D4)★ — `None` = 아직 이름으로만 귀속된 계약(잠듦 파킹 구간).
+    ///
+    /// ★왜 필요한가★: "복원 후 실제 주입 시점에 착지 id 를 박는다"(`rebind_request_recipient`)는 **상태로만**
+    ///   확인할 수 있고, 그 배선이 빠지면 동명 세션이 남의 계약을 이름으로 닫는 경로가 열린다.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn contract_recipient_id_for_test(
+        &self,
+        request_id: &str,
+        recipient: &str,
+    ) -> Option<PeerId> {
+        self.requests
+            .iter()
+            .find(|r| r.request_id == request_id && r.recipient == recipient)
+            .and_then(|r| r.recipient_id)
+    }
+
     /// 테스트 전용(C2) — 그 계약 키가 추적 목록에 존재하나(닫힘·은퇴 표시 무관). 잠정/은퇴 창의 관측축.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn is_tracked_for_test(&self, request_id: &str, recipient: &str) -> bool {
@@ -1319,8 +1610,10 @@ mod tests {
     ///   없는 id 면 아무 이름으로 물어 `NoMatch` 를 그대로 받는다(엄격 매칭 검증 유지).
     fn reply(l: &mut Ledger, id: &str, now: Instant) -> ReplyOutcome {
         match l.party_of(id) {
-            Some((name, pid)) => l.close_on_reply(id, &name, pid.unwrap_or_else(PeerId::nil), now),
-            None => l.close_on_reply(id, "nobody", PeerId::nil(), now),
+            Some((name, pid)) => {
+                l.close_on_reply(id, &name, pid.unwrap_or_else(PeerId::nil), true, now)
+            }
+            None => l.close_on_reply(id, "nobody", PeerId::nil(), true, now),
         }
     }
 
@@ -2239,7 +2532,7 @@ mod tests {
         let recipient = sid();
         l.record("r1", "alice", "worker", "q", DeliveryStatus::Pending, now);
         l.open_request("r1", "alice", sender, "worker", Some(recipient), None, now);
-        // 부재 파킹(해석 실패) — id 없이 이름만 남는다(이름 폴백 축).
+        // 잠듦 파킹(산 incarnation 부재) — id 없이 이름만 남는다(이름 폴백 축 — ADR-0116 결정 1).
         l.record("r2", "alice", "ghost", "q", DeliveryStatus::Pending, now);
         l.open_request("r2", "alice", sender, "ghost", None, None, now);
 
@@ -2252,7 +2545,7 @@ mod tests {
         );
         assert_eq!(
             open[1].recipient_id, None,
-            "부재 파킹은 id 가 없다 — 나중에 그 이름으로 등장한 쪽이 답할 주체(WYSIWYA)"
+            "잠듦 파킹은 id 가 없다 — 나중에 그 이름으로 등장한 쪽이 답할 주체(WYSIWYA)"
         );
     }
 
@@ -3076,5 +3369,261 @@ mod tests {
         // 통보만 있는 장부 — request 추적이 없으므로 미결도 없다.
         l.record("m1", "alice", "bob", "hi", DeliveryStatus::Delivered, now);
         assert!(l.open_requests().is_empty());
+    }
+
+    // ── S18.6: `pending → failed` 간선 + 계약 실패 종결(spec §6 · ADR-0116/0118) ────────────────
+
+    #[test]
+    fn pending_to_failed_is_legal_only_through_the_cleanup_verb() {
+        // ★spec §7 "`pending → failed` 간선"★: 이 전이는 **삭제 정리 경로에서만** 합법이다.
+        //   ① 범용 `transition(.., Failed, ..)` 은 pending 이어도 **거부**(임의 호출 차단)
+        //   ② 전용 동사 `fail_pending` 은 pending 에서 성공하고 사유 코드를 남긴다
+        //   ③ `delivered → failed` 는 **어느 경로로도** 불법("배달됐다가 실패로 돌아간" 이력 금지)
+        let mut l = Ledger::new();
+        let now = t0();
+        l.record("m1", "a", "b", "x", DeliveryStatus::Pending, now);
+        assert_eq!(
+            l.transition("m1", "b", DeliveryStatus::Failed, now),
+            Err(TransitionError::Illegal {
+                from: DeliveryStatus::Pending,
+                to: DeliveryStatus::Failed
+            }),
+            "임의 pending→failed 호출은 거부된다(간선은 전용 동사에만 열려 있다)"
+        );
+        assert_eq!(l.fail_pending("m1", "b", "RECIPIENT_DELETED", now), Ok(()));
+        let rows = l.records_for("m1");
+        assert_eq!(rows[0].status, DeliveryStatus::Failed);
+        assert_eq!(
+            rows[0].fail_code,
+            Some("RECIPIENT_DELETED"),
+            "사유 코드가 레코드에 남아 조회가 이유를 답할 수 있다"
+        );
+
+        // delivered 에서는 전용 동사도 거부한다.
+        l.record("m2", "a", "b", "x", DeliveryStatus::Delivered, now);
+        assert_eq!(
+            l.fail_pending("m2", "b", "RECIPIENT_DELETED", now),
+            Err(TransitionError::Illegal {
+                from: DeliveryStatus::Delivered,
+                to: DeliveryStatus::Failed
+            }),
+            "delivered→failed 는 여전히 불법"
+        );
+        // 없는 레코드는 NotFound(이력 링 evict — best-effort, 호출자가 로그로 남긴다).
+        assert_eq!(
+            l.fail_pending("nope", "b", "RECIPIENT_DELETED", now),
+            Err(TransitionError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_failed_reply_never_touches_a_guard_marked_contract() {
+        // ★spec §7 회신 계약 규칙 ⑤(ADR-0118 결정 3)★: 잠정(`provisional`)·은퇴 예정(`pending_retirement`)
+        //   표시 계약의 수명은 그 가드 소유다 — 실패 종결은 **정산 이후에만** 적용되고, 그 사이 도착한 실패
+        //   회신은 무동작이다. 안 지키면 가드의 커밋/롤백이 이미 종결된 계약을 되살리거나(유령 재개방) 상한
+        //   교환이 반쪽 난다.
+        let mut l = Ledger::new();
+        let now = t0();
+        let w = PeerId::new_v4();
+        // 잠정 계약(open_request 직후 — 커밋 전). ★이력 행을 함께 남긴다★: 종결된 계약 중 **이력이 없는**
+        //   것은 좀비 방지 정리(`purge_finished_without_history`)가 지우므로, 종점 어휘를 관측하려면 운영
+        //   경로처럼 배달기록이 있어야 한다(그 정리 자체는 다른 테스트가 지킨다).
+        l.record("m1", "boss", "worker", "q", DeliveryStatus::Delivered, now);
+        l.open_request("m1", "boss", PeerId::new_v4(), "worker", Some(w), None, now);
+        assert_eq!(
+            l.fail_on_undeliverable_reply("m1", "worker", w, true),
+            ReplyFailOutcome::GuardHeld,
+            "잠정 계약은 건드리지 않는다"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m1", "worker"),
+            Some("awaiting_reply")
+        );
+        // 정산(커밋) 후에는 정상 적용된다 — 유실이 아니라 **지연**이다.
+        l.commit_open(Some(("m1", "worker")), None);
+        assert_eq!(
+            l.fail_on_undeliverable_reply("m1", "worker", w, true),
+            ReplyFailOutcome::Failed
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m1", "worker"),
+            Some("reply_failed")
+        );
+        // 두 번째 호출은 no-op(되돌리지도, 재종결하지도 않는다).
+        assert_eq!(
+            l.fail_on_undeliverable_reply("m1", "worker", w, true),
+            ReplyFailOutcome::AlreadyClosed
+        );
+        // 모르는 id 는 NoMatch(정상 경로 — 배달은 이미 끝났고 계약만 무동작).
+        assert_eq!(
+            l.fail_on_undeliverable_reply("nope", "worker", w, true),
+            ReplyFailOutcome::NoMatch
+        );
+    }
+
+    #[test]
+    fn both_guard_marks_hold_off_the_two_failure_closers() {
+        // ★리뷰 fix D7 — 가드 커버리지의 빈칸★: 기존 가드 테스트는 **잠정(`provisional`)만** 만들어서,
+        //   `pending_retirement` 쪽 조건을 한 줄 지워도 전부 초록이었다(무방비 실측). 은퇴 예정 표시는 상한
+        //   교환의 절반이라, 남이 그 계약을 종결하면 표시를 붙인 예약의 커밋/롤백이 허공을 가리킨다.
+        // ★표시는 **운영 경로**로 만든다★: 테스트 setter 로 플래그를 세우면 "그 표시가 실제로 생기는 경로"
+        //   와 갈릴 수 있다. cap 을 채운 뒤 새 request 를 열면 최고령 은퇴 가능 계약(r0)에 표시가 붙는다.
+        let mut l = Ledger::new();
+        let now = t0();
+        let reply_by = Duration::from_secs(60);
+        let over = now + reply_by + Duration::from_secs(1);
+        for i in 0..MAX_OPEN_REQUESTS {
+            let id = format!("r{i}");
+            l.record(&id, "alice", "bob", "q", DeliveryStatus::Pending, now);
+            assert_eq!(
+                open_committed(&mut l, &id, rb(reply_by), now),
+                OpenOutcome::Opened
+            );
+        }
+        assert_eq!(
+            l.due_timeouts(over).len(),
+            MAX_OPEN_REQUESTS,
+            "전원 통지 완료 = 은퇴 가능"
+        );
+        let marked = match l.open_request("over", "alice", sid(), "bob2", None, None, over) {
+            OpenOutcome::OpenedAfterMarking(r) => r,
+            other => panic!("표시 후 수용이어야: {other:?}"),
+        };
+        assert_eq!(marked.request_id, "r0");
+        assert_eq!(l.marked_retirement_count_for_test(), 1);
+
+        // ① 회신 실패 종결 — 은퇴 예정 표시 계약을 건드리지 않는다.
+        assert_eq!(
+            l.fail_on_undeliverable_reply("r0", "bob", PeerId::new_v4(), true),
+            ReplyFailOutcome::GuardHeld,
+            "은퇴 예정 표시 계약은 실패 종결 대상이 아니다(ADR-0118 결정 3)"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("r0", "bob"),
+            Some("awaiting_reply")
+        );
+
+        // ② 요청자 삭제 정리 — 같은 표시를 같은 규율로 건너뛴다(잠정분 "over" 도 함께 걸린다).
+        let out = l.fail_open_requests_from("alice");
+        assert!(
+            !out.failed.iter().any(|(id, _)| id == "r0" || id == "over"),
+            "표시된 계약(r0=은퇴 예정 · over=잠정)은 종결 목록에 없어야: {out:?}"
+        );
+        assert!(
+            out.guard_held >= 2,
+            "두 표시가 모두 건너뛴 수로 보고돼야: {out:?}"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("r0", "bob"),
+            Some("awaiting_reply"),
+            "은퇴 예정 표시 계약의 수명은 그 가드 소유다"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("over", "bob2"),
+            Some("awaiting_reply"),
+            "잠정 계약도 그대로(기존 커버리지 유지)"
+        );
+    }
+
+    #[test]
+    fn the_general_transition_graph_rejects_both_failed_edges() {
+        // ★뮤테이션 프로브 D9-c★: 범용 전이 그래프에 `(Delivered, Failed)`·`(Pending, Failed)` 를 **추가해도**
+        //   메시징 전 테스트가 초록이었다(기존 불법-간선 테스트는 무관한 세 간선만 봤다). 이 두 간선이 열리면
+        //   "배달됐다가 실패로 돌아간" 이력이 표현 가능해지고(§6 금지 부류), 삭제 정리 전용 동사(`fail_pending`)
+        //   가 유일 경로라는 계약이 조용히 무너진다.
+        let mut l = Ledger::new();
+        let now = t0();
+        // ① delivered → failed 는 **어떤 경로로도** 불법이다.
+        l.record("m-del", "a", "b", "x", DeliveryStatus::Delivered, now);
+        assert_eq!(
+            l.transition("m-del", "b", DeliveryStatus::Failed, now),
+            Err(TransitionError::Illegal {
+                from: DeliveryStatus::Delivered,
+                to: DeliveryStatus::Failed
+            }),
+            "delivered→failed 는 범용 전이에서 불법(§6)"
+        );
+        assert_eq!(
+            l.records_for("m-del")[0].status,
+            DeliveryStatus::Delivered,
+            "거부된 전이는 상태를 바꾸지 않는다"
+        );
+        // ② pending → failed 는 **전용 동사 밖에서는** 불법이다(삭제 정리 한정 간선 — ADR-0116 결정 4).
+        l.record("m-park", "a", "b", "x", DeliveryStatus::Pending, now);
+        assert_eq!(
+            l.transition("m-park", "b", DeliveryStatus::Failed, now),
+            Err(TransitionError::Illegal {
+                from: DeliveryStatus::Pending,
+                to: DeliveryStatus::Failed
+            }),
+            "임의 pending→failed 호출은 거부된다(간선은 fail_pending 에만 열려 있다)"
+        );
+        assert_eq!(l.records_for("m-park")[0].status, DeliveryStatus::Pending);
+        assert!(
+            l.records_for("m-park")[0].fail_code.is_none(),
+            "거부된 전이는 사유 코드도 남기지 않는다"
+        );
+    }
+
+    #[test]
+    fn the_requester_cleanup_closes_open_contracts_but_respects_guards_and_replied() {
+        // ★spec §7 "프로필 삭제 일괄 정리" ①④ + 가드(ADR-0116 결정 3 · ADR-0118 결정 3)★:
+        //   그 이름이 **요청자**인 오픈 계약만 `reply_failed` 로 닫고, ① 이미 `replied` 인 계약은 되돌리지
+        //   않으며 ② 잠정·은퇴 예정 표시 계약은 건너뛴다(재발화 없음 — 잔여는 TTL 소관).
+        let mut l = Ledger::new();
+        let now = t0();
+        let (a, b, c) = (PeerId::new_v4(), PeerId::new_v4(), PeerId::new_v4());
+        let gone = PeerId::new_v4();
+        // ① 오픈 계약(gone 이 요청자) — 종결 대상. 이력 행을 함께 남긴다(좀비 정리에 지워지지 않게 — 위
+        //    테스트와 같은 이유. 운영 경로도 배달기록을 남긴 뒤 계약을 연다).
+        l.record("m-open", "gone", "w1", "q", DeliveryStatus::Delivered, now);
+        l.open_request("m-open", "gone", gone, "w1", Some(a), None, now);
+        l.commit_open(Some(("m-open", "w1")), None);
+        // ② 이미 회신으로 닫힌 계약 — 되돌리지 않는다.
+        l.open_request("m-done", "gone", gone, "w2", Some(b), None, now);
+        l.commit_open(Some(("m-done", "w2")), None);
+        l.record("m-done", "gone", "w2", "x", DeliveryStatus::Delivered, now);
+        assert_eq!(
+            l.close_on_reply("m-done", "w2", b, true, now),
+            ReplyOutcome::Closed
+        );
+        // ③ 잠정 계약(가드 보유) — 건너뛴다.
+        l.open_request("m-prov", "gone", gone, "w3", Some(c), None, now);
+        // ④ 남의 계약(요청자가 다른 이름) — 무관.
+        l.open_request("m-other", "someone", a, "w4", Some(a), None, now);
+        l.commit_open(Some(("m-other", "w4")), None);
+
+        let out = l.fail_open_requests_from("gone");
+        assert_eq!(
+            out.failed,
+            vec![("m-open".to_string(), "w1".to_string())],
+            "오픈 계약 하나만 종결: {out:?}"
+        );
+        assert_eq!(out.guard_held, 1, "잠정 계약은 건너뛴 수로 보고된다");
+        assert_eq!(
+            l.contract_outcome_for_test("m-open", "w1"),
+            Some("reply_failed")
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m-done", "w2"),
+            Some("replied"),
+            "★되돌리지 않는다★ — 수용 = 완료(spec §3 항목 7-④)"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m-prov", "w3"),
+            Some("awaiting_reply"),
+            "가드 보유 계약은 그대로"
+        );
+        assert_eq!(
+            l.contract_outcome_for_test("m-other", "w4"),
+            Some("awaiting_reply"),
+            "남의 계약은 무관"
+        );
+        // 종결분은 상한 계수에서 빠진다(ADR-0118 결정 4 — 단일 술어).
+        assert_eq!(
+            l.occupied_slots(),
+            2,
+            "m-prov(잠정) + m-other 만 자리를 차지한다"
+        );
     }
 }

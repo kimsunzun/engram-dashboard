@@ -335,20 +335,24 @@ async fn control_send_corrective_errors() {
     handle.shutdown().await;
 }
 
-// ── /control/send: shell(비-도달) 수신자는 **실패 행** — ADR-0111 결정 1 ─────────────────────────────
-// ★무엇을 지키나★: shell(structured=false)은 제어 채널 도달 불가라 산 로스터(live_reachable_agents)에서
-//   제외된다 → 발송 순간 스냅샷에 그 이름이 없으므로 **부재와 완전히 같은 결말**이다(`failed` +
-//   `RECIPIENT_NOT_FOUND`). 파킹하지 않는다 — 옛 판은 "unreachable 도 파킹" 이었고 그 진입로는 폐지됐다.
-// ★왜 별도 테스트인가★: 로스터 필터(도달성)가 **입구 판정과 같은 후보 집합**을 쓰는지는 실제 세션을
-//   띄워야 증명된다(비-structured 세션을 산 것으로 세면 이 행이 delivered 로 뒤집힌다).
+// ── /control/send: shell(턴 신호 없음) 수신자도 **게이트 없이 배달**된다 — ADR-0116 결정 7 ─────────────
+// ★무엇을 지키나(4차 개정으로 결말이 뒤집혔다)★: shell(structured=false)은 턴 경계를 관측할 수 없지만
+//   **프로세스는 살아 있다**. 3차 판은 그 부류를 로스터에서 빼고 실패 행(`RECIPIENT_UNREACHABLE`)으로
+//   반려했는데, 그 전제("관측할 수 없으니 배달할 수 없다")가 **틀렸다** — 그 CLI 는 자기 입력 큐를 갖고 있어
+//   턴 중 입력을 물고 있다가 턴이 끝난 뒤 소비한다. 그래서 이제 **게이트 없이 즉시 주입**하고 행은
+//   `delivered` 다(파킹도, 대기도, 재시도도 없다 — spec §5 배달 분기).
+// ★왜 통합으로서 유용한가★: "턴 신호 없는 산 세션이 로스터에 든다" 는 **실물 어댑터 술어**(messaging_host
+//   `is_live`)에 걸린 사실이라, 하네스가 집합을 스크립트하는 단위 테스트로는 증명되지 않는다. 여기선 실제
+//   spawn 이 그 상태를 만든다(그 술어의 봉인 테스트는 messaging_host 유닛에도 있다 — 리뷰 fix D9-a).
 #[tokio::test]
-async fn control_send_shell_recipient_is_a_failed_row_not_parked() {
-    let (manager, registry, base, data_dir, handle, _messaging, _busy) =
-        wire("not-reachable").await;
+async fn control_send_shell_recipient_is_delivered_without_a_gate() {
+    let (manager, registry, base, data_dir, handle, messaging, _busy) =
+        wire("no-turn-signal").await;
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "valid-sender".to_string());
 
-    // shell 에이전트(structured=false = 도달 불가) 스폰.
+    // shell 에이전트(structured=false = **턴 신호 없음**) 스폰. ★"도달 불가" 가 아니다★ — 그 어휘는 3차 판의
+    //   것이고 4차에 폐기됐다(이 테스트가 바로 그 부류의 **배달**을 단언한다, ADR-0116 결정 7).
     let mut profile = AgentProfile::new(
         "sheller".to_string(),
         AgentCommand::Shell {
@@ -372,12 +376,89 @@ async fn control_send_shell_recipient_is_a_failed_row_not_parked() {
     let (_s, body) = post_send(&base, Some("valid-sender"), "sheller", "hi").await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
-        v["results"][0]["status"], "failed",
-        "★ADR-0111 결정 1★ shell(비-structured = 로스터 밖) 수신자도 실패 행이다(파킹 아님): {body}"
+        v["results"][0]["status"], "delivered",
+        "★ADR-0116 결정 7★ 턴 신호가 없어도 산 세션은 배달 대상이다(게이트 없이 즉시 주입): {body}"
+    );
+    assert!(
+        v["results"][0]["code"].is_null(),
+        "배달 행에는 실패 코드가 없어야(옛 RECIPIENT_UNREACHABLE 는 폐기됐다): {body}"
+    );
+    assert_eq!(
+        messaging.parked_len("sheller"),
+        0,
+        "이 부류엔 busy 파킹이 없다(게이트를 묻지 않는다): {body}"
     );
 
     manager.kill_agent(info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── 로스터 술어 봉인: terminal 상태 세션은 **맵에 남아 있어도** 로스터에서 빠진다 — ADR-0116 결정 1 ──────
+// ★왜 필요한가(뮤테이션 실측 — 리뷰 fix D9-a)★: `messaging_host::is_live` 의 상태 조건을 지워도 데몬 412
+//   테스트가 전부 초록이었다. 4차 개정으로 그 조건이 **유일한 멤버십 게이트**가 됐으므로(capability 는 타이밍
+//   축으로 내려갔다) 실물 어댑터 레벨에서 봉인한다. "list_agents 에 있음 ≠ 로스터" 가 이 테스트의 주제다.
+#[tokio::test]
+async fn roster_excludes_a_terminal_session_still_in_the_map() {
+    use engram_dashboard_messaging::service::DeliveryPort;
+
+    let (manager, _registry, _base, data_dir, handle, messaging, _busy) = wire("dead-roster").await;
+    let dead = obs_seam::insert_terminal_seam_recipient(&manager, "corpse");
+    let port = engram_dashboard_daemon::messaging_host::ManagerDeliveryPort::new(manager.clone());
+
+    // 전제: 맵엔 **남아 있다**(reaper 가 수거하지 않는 주입 세션) — 그런데 상태는 terminal 이다.
+    assert!(
+        manager.list_agents().iter().any(|a| a.id == dead),
+        "주입 세션은 맵에 남아 있어야(이 테스트의 전제)"
+    );
+    assert!(
+        !matches!(
+            manager
+                .list_agents()
+                .into_iter()
+                .find(|a| a.id == dead)
+                .expect("맵에 있다")
+                .status,
+            AgentStatus::Running | AgentStatus::Exiting
+        ),
+        "상태는 terminal 이어야(이 테스트의 전제)"
+    );
+
+    assert!(
+        !port.live_agents().iter().any(|a| a.id == dead),
+        "★D9-a★ terminal 세션이 로스터에 섞였다(상태 술어가 지워졌다)"
+    );
+    let sources = port.addressing_sources();
+    assert!(
+        !sources.roster.iter().any(|a| a.id == dead),
+        "입구 판정 소스도 같은 술어여야: {sources:?}"
+    );
+    assert!(
+        !port.is_agent_live(dead),
+        "삭제 정리 게이트도 같은 술어여야(시체를 산 것으로 보면 정리가 영원히 안 돈다)"
+    );
+    // 그 이름으로 보내면 배달 시도가 아니라 입구 반려다(프로필도 없으므로 `RECIPIENT_NOT_FOUND`).
+    let rows = messaging
+        .handle_send(
+            "m-dead",
+            engram_dashboard_messaging::SenderIdentity {
+                peer_id: AgentId::new_v4(),
+                epoch: 0,
+            },
+            "outsider",
+            &["corpse".to_string()],
+            "hi",
+            engram_dashboard_messaging::envelope::Entrance::Cli,
+            &engram_dashboard_messaging::service::SendMeta::default(),
+        )
+        .expect("행 응답");
+    assert_eq!(
+        rows[0].code,
+        Some(engram_dashboard_messaging::service::FailCode::RecipientNotFound),
+        "시체는 수신자가 아니다: {rows:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
@@ -656,6 +737,40 @@ mod obs_seam {
         let id = AgentId::new_v4();
         let name = id.to_string()[..8].to_string();
         insert_seam_recipient_named(manager, fail, id, &name)
+    }
+
+    /// ★terminal 상태인데 **맵에 남아 있는** 세션을 주입한다(리뷰 fix D9-a)★ — 로스터 술어의 상태 조건을
+    /// 결정적으로 봉인하기 위한 seam.
+    ///
+    /// ★왜 실 종료로는 못 만드나★: 실제 종료는 reaper 가 세션을 맵에서 **곧바로 제거**한다(시체 보존은
+    ///   프로필 축이다 — reaper.rs). 그래서 "list_agents 엔 있는데 상태는 terminal" 이라는 상태를 실 세션으로
+    ///   재현할 수 없다. 주입 세션은 pump 가 없어 ReapMsg 가 나가지 않으므로 그 상태로 남는다
+    ///   (`insert_test_session` doc 의 안전 불변식 (a)).
+    /// ★왜 이 술어가 중요한가★: 상태 조건을 지우면 시체가 로스터에 섞여 ① 그 이름 앞 발송이 배달 시도로 가고
+    ///   ② 프로필이 남은 이름이 잠듦 파킹으로 내려가지 못한다(입구 3분기가 통째로 흔들린다).
+    pub fn insert_terminal_seam_recipient(manager: &Arc<AgentManager>, name: &str) -> AgentId {
+        let id = AgentId::new_v4();
+        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatus)));
+        // ★종점 전이(pump 단독 소유 — ADR-0005)를 직접 부른다★: 이 세션엔 pump 가 없어 finalize 경쟁자가
+        //   없다. 결과 = 맵에 남은 채 상태만 terminal(Killed).
+        core.finish(engram_dashboard_core::agent::types::TerminalReason::Killed);
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from(format!("seam-root/{name}")),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            backend_caps(),
+            InputEncoder::ClaudeStreamJson,
+            core,
+            Box::new(SeamTransport {
+                fail: false,
+                captured: Arc::new(Mutex::new(Vec::new())),
+            }),
+        ));
+        manager.insert_test_session(session);
+        id
     }
 
     /// ★동명 다수 시나리오용(D 리뷰 B1)★ — AgentId 와 **보이는 이름을 따로** 지정한다. 두 세션에 같은
@@ -1027,7 +1142,9 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
     };
     let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     let v = result.to_json();
-    // ★C1 변경(spec §5 unreachable → 파킹)★: inject 실패는 이제 반려가 아니라 **파킹(pending)** 이다.
+    // ★spec §5 **분기 3**(파킹 `pending`) — 주입 실패는 그 분기 **안에** 있다(분기는 3개다)★: inject 실패는
+    //   반려가 아니라 **파킹(pending)** 이다(옛 "unreachable → 파킹" 서술은 4차에 폐기됐다 — 도달 불가는 이제
+    //   로스터 밖 산 세션의 실패 코드 이름이다, ADR-0116).
     //   그러나 실패 관측 레코드는 여전히 남는다(무엇을 배달하려다 실패했나 + 성공으로 안 삼킴) — 아래 단언.
     assert_eq!(
         v["results"][0]["status"], "pending",

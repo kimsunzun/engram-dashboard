@@ -594,6 +594,9 @@ impl ControlQueryResult {
 ///   (`delivered|pending|failed`)와 **같은 집합이 아니다** — 둘은 spec §6 대응표가 잇는 **다른 축**이다:
 ///   응답은 "그 발송 호출이 어떻게 끝났나" 의 순간 스냅샷, 조회는 "그 배달기록이 지금 어디까지 갔나" 다.
 ///   `failed` 는 수신자별 실패의 종점(ADR-0111), `skipped` 는 **장부 전용**(notice 레인 은퇴)이다.
+/// - ★`code`/`hint`(행에 있을 때만 — 4차 신설)★: 사후에 종결된 행의 사유다. 지금 나타나는 값은
+///   **`RECIPIENT_DELETED`** 하나로, "파킹 대기 중 수신자가 삭제돼 미배달 종결" 을 뜻한다(ADR-0116 결정 3).
+///   발송 시점엔 `pending` 이었으므로 **발송 응답엔 절대 없는 코드**이고, 여기가 그 사실이 처음 보이는 곳이다.
 /// - `awaiting_reply` = 이 메시지가 request 인데 아직 회신이 안 왔다(통보면 항상 false).
 /// - ★`may_be_truncated`(리뷰 B2)★ = `rows` 가 **그 메시지의 전부라는 보장이 없다**(인메모리 이력 링이
 ///   밀려 앞쪽 행이 사라졌을 수 있다). `false` 면 확실히 전부다. `true` 일 때는 `hint` 도 함께 실어
@@ -655,12 +658,26 @@ pub fn handle_messages(
                 .rows
                 .iter()
                 .map(|r| {
-                    serde_json::json!({
+                    let mut row = serde_json::json!({
                         "to": r.to,
                         "status": r.status,
                         "age_secs": r.age_secs,
                         "updated_secs_ago": r.updated_secs_ago,
-                    })
+                    });
+                    // ★조회 시점 실패 코드 + 힌트(4차 — spec §6 `RECIPIENT_DELETED`)★: 이 코드는 **발송
+                    //   응답에 나타나지 않는다**(발송 시점엔 `pending` 이었다) — 파킹 대기 중 수신자가 삭제돼
+                    //   미배달 종결된 사실을 발신 LLM 이 여기서 처음 본다. 그래서 발송 실패 행과 **같은 어휘**
+                    //   (`code`/`hint`)로 싣는다: 코드만 봐도 읽히고, 힌트까지 보면 다음 행동(재발송 무의미 →
+                    //   사용자 보고)이 나오는 것이 요구사항이다.
+                    // ★있을 때만 싣는다★: 정상 행에 `code: null` 을 붙이면 노출 원칙(행동을 바꾸는 필드만)이
+                    //   흐려지고, 조회자가 모든 행에 사유가 있다고 오독한다.
+                    if let Some(code) = r.code {
+                        row["code"] = serde_json::Value::String(code.to_string());
+                    }
+                    if let Some(hint) = &r.hint {
+                        row["hint"] = serde_json::Value::String(hint.clone());
+                    }
+                    row
                 })
                 .collect();
             let mut out = serde_json::json!({

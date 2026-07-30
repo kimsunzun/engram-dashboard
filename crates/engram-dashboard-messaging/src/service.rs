@@ -5,16 +5,29 @@
 //!   **회신 계약**(request 장부 오픈·회신 닫기·기한 초과 notice)을 담당한다. 발송 진입점은
 //!   `handle_send` **하나**다 — 개인·다중·`@all` 이 전부 같은 레일을 탄다(경로 1벌, ADR-0111 결정 2/4).
 //!
-//! ★수신자 1명당 3분기(spec §5 — 다중 수신자는 이 판정을 수신자마다 1회씩 = fan-out)★:
-//!   1. **입구 반려 → 수신자별 실패 행**(ADR-0111 결정 1): 발송 순간 로스터 스냅샷에 그 이름이 없으면
-//!      `failed` + `RECIPIENT_NOT_FOUND`(미스폰·죽음·잠든 세션 전부 동일 — wake 없음), 동명 다수면
-//!      `RECIPIENT_AMBIGUOUS`. **파킹하지 않는다** — "없는 이름 파킹"(스폰 전 선지시)은 v1 비지원이다.
-//!   2. **배달** — 로스터에 있고 idle + 선행 파킹분 없음 → 즉시 주입 `delivered`(실제 주입 시점, ADR-0104).
-//!   3. **파킹 `pending`** — 로스터엔 있는데 지금 못 넣는 경우: **busy 계열**(턴 중이거나 선행 파킹분 뒤
-//!      FIFO 합류) **+ 주입(write) 실패**. 보관함 초과면 **그 수신자만** `failed` + `MAILBOX_FULL`이다
-//!      (전체 반려로 승격하지 않는다 — spec §5 부분 진행).
-//!   등장(스폰/epoch 교체)·**턴 종료(idle 전이)**·flush 시 파킹분을 **오래된 순 일괄** 주입한다(각 메시지
-//!   개별 봉투, ADR-0104).
+//! ★수신자 1명당 3분기(spec §5 · **ADR-0116 결정 1 로 4차 개정** — 다중 수신자는 이 판정을 수신자마다
+//!   1회씩 = fan-out)★. 판정 소스는 **둘**(로스터 / 프로필 목록)이고 원칙 한 줄은
+//!   **"살아 있으면 보내고, 나중에 살아날 수 있으면 기다리고, 없으면 시끄럽게 실패한다"** 다:
+//!   1. **입구 반려 → 수신자별 실패 행**:
+//!      - **없음** — 로스터·프로필 **둘 다에 없다**(오타·미스폰·삭제됨) → `RECIPIENT_NOT_FOUND`.
+//!      - 동명 다수는 **어느 층에서든** `RECIPIENT_AMBIGUOUS`(잠듦 층 포함 — 이름 키 파킹은 "먼저 복원된
+//!        쪽이 조용히 받는" 경로를 만든다). 산·잠듦에 걸친 동명은 **산 쪽이 이긴다**(로스터 판정이 먼저).
+//!   2. **배달 `delivered`** — 로스터에 있으면 배달 대상이다. **capability 는 "언제 넣을지" 만 가른다**
+//!      (ADR-0116 결정 7 — 자격 조건이 아니다):
+//!      - **턴 신호 있는 백엔드**(`LiveAgent::turn_signal`) — idle + 선행 파킹분 없음이면 즉시 주입, 아니면 3번.
+//!      - **턴 신호 없는 백엔드**(터미널/콘솔 모드) — **게이트 없이 바로 주입**한다: busy 판정도, 선행분
+//!        대기도, 재시도도 없다("그냥 보내고 뒤돌아보지 않는다"). 근거 = 그 CLI 가 **자기 입력 큐**를 갖고
+//!        있어 턴 중에 들어온 입력을 물고 있다가 턴이 끝난 뒤 소비한다 → 우리가 idle 을 관측할 이유가 없다.
+//!        그래서 이 부류엔 **busy 파킹이 없다**. `delivered` 는 어느 경로든 **실제 주입 시점**에 찍는다.
+//!   3. **파킹 `pending`** — 지금 못 넣지만 **수용**하는 경우: **busy 계열**(턴 신호 있는 백엔드가 턴 중이거나
+//!      선행 파킹분 뒤 FIFO 합류) **+ 주입(write) 실패**(어느 부류든 — 조용한 유실 금지) **+ 잠듦**(로스터엔
+//!      없지만 **프로필이 실재**해 복원 가능 — ADR-0116 결정 1). 보관함 초과면 **그 수신자만** `failed` +
+//!      `MAILBOX_FULL`이다(전체 반려로 승격하지 않는다 — spec §5 부분 진행). 옛 "이름 없어도 파킹" 과 다르다:
+//!      프로필에 실재하는 이름만 수용하므로 오타가 조용히 쌓이는 경로는 없다.
+//!   등장(스폰/epoch 교체·**복원**)·**턴 종료(idle 전이)**·flush 시 파킹분을 **오래된 순 일괄** 주입한다(각
+//!   메시지 개별 봉투, ADR-0104). **깨우기(wake)는 없다** — 잠든 수신자는 파킹될 뿐이다(spec §8 v2 후보).
+//!   ★`RECIPIENT_UNREACHABLE`(4차 초안의 "살아 있지만 구조화 출력 없음 = 반려")은 **폐기됐다**★ — 그 부류는
+//!   위 2번으로 정상 배달된다. 되살리지 말 것(ADR-0116 결정 7 · 거부한 대안).
 //!
 //! ★부분 진행(ADR-0111 결정 3)★: 수신자별 판정은 서로 독립이다 — 일부가 실패해도 나머지에겐 그대로
 //!   배달된다. **전체 반려는 발송 자체의 문제뿐**이다: 이 함수가 내는 것은 주소 공간 오류
@@ -26,9 +39,13 @@
 //!   전용 fan-out 경로·죽은 멤버 skip·발송 순간 `(id,epoch)` 결박은 **전부 폐지**됐다 — 되살리면 ADR-0111
 //!   위반이다. 사용자 정의 그룹(등록 명단·관리 툴)도 없다.
 //!
-//! ★로스터 스냅샷은 발송 1회당 **딱 한 장**(불변식 — ADR-0111 결정 2)★: `handle_send` 첫 줄에서 뜬 한
-//!   장으로 `@` 펼침·존재/동명 판정·busy 판정을 **전원 일괄** 처리한다. 수신자별로 다시 뜨면 해석 도중
-//!   명단 변동에 의한 반쪽 판정이 재발한다(옛 그룹 스냅샷 원칙에서 존치된 조각).
+//! ★판정 소스 스냅샷은 발송 1회당 **딱 한 장**(불변식 — ADR-0111 결정 2 · ADR-0116 으로 소스 확장)★:
+//!   `handle_send` 첫 줄에서 `port.addressing_sources()` 를 **한 번** 불러 그 한 장으로 `@` 펼침·존재/동명·
+//!   잠듦·busy 판정을 **전원 일괄** 처리한다. 수신자별로 다시 뜨면 해석 도중 명단 변동에 의한
+//!   반쪽 판정이 재발한다(옛 그룹 스냅샷 원칙에서 존치된 조각).
+//!   ★물리 조회는 **2회**다★: 세션 스냅샷(`list_agents()`) 1회 + 프로필 목록 1회. 턴 신호 유무는 그
+//!   스냅샷의 **각 항목에 붙어 오는 속성**이라 별도 조회가 아니다(판정을 나누지 않고 "언제 넣을지" 만
+//!   가른다). 프로필 목록과의 경합은 유계라 수용하고(spec §5), 그 잔여는 TTL·삭제 정리가 거둔다.
 //!
 //! ★봉투 `to` 속성의 동결(spec §1 · load-bearing)★: `to` 는 **수용 판정된(= 실패 행이 아닌) 수신자가 2인
 //!   이상일 때만** 실리고, 값은 **전 수신자의 수용 판정이 끝난 뒤 1회 확정**해 그 발송의 모든 봉투(즉시
@@ -44,9 +61,16 @@
 //!   (+ 재파킹 merge 로 배치 간 이월 시 오래된 것 우선)에서 보장한다 — spec §5 가 약속하는 건 **배치 순서**지
 //!   전 출처를 아우르는 global total order 가 아니다. 직발송·flush 가 서로를 앞지르지 않도록 합류 판정이
 //!   in-flight 까지 보고(`mailbox::has_pending_ahead`), flush 는 같은 수신자에 대해 겹쳐 돌지 않는다
-//!   (`flush_for` 0단계) — 즉 **한 수신자가 보는 순서**는 지켜진다. 남는 수용분은 둘이다: ① 합류 판정(락 안)과
-//!   그 뒤 inject(락 밖) 사이 마이크로초 창 ② **서로 다른 수신자** 사이의 전역 순서. 둘 다 inject 를 락 안으로
-//!   넣어야만 닫히므로(락 규율 정면 위반) 사람 대화 수준 메시지율에서 의도적으로 수용한다.
+//!   (`flush_for` 0단계) — 즉 **한 수신자가 보는 순서**는 (아래 ③을 제외하면) 지켜진다. 남는 수용분은 셋이다:
+//!   ① 합류 판정(락 안)과 그 뒤 inject(락 밖) 사이 마이크로초 창 ② **서로 다른 수신자** 사이의 전역 순서 —
+//!   둘 다 inject 를 락 안으로 넣어야만 닫히므로(락 규율 정면 위반) 사람 대화 수준 메시지율에서 의도적으로
+//!   수용한다. ③ **턴 신호 없는 수신자: 즉시 주입이 그 수신자의 앞선 파킹분(주입 실패 파킹·통지)을 앞지를 수
+//!   있다 — ADR-0116 결정 7 로 의도 수용**. 그 부류는 합류 판정 자체를 하지 않는다(`has_pending_ahead` 를
+//!   묻지 않는다 — 입구 `park_hint` 분기와 `deliver_one` 재확인 둘 다 `turn_signal` 로 건너뛴다). 그래서
+//!   주입 실패가 없어도 평범하게 발생한다: sweep 은 그 부류에도 기한 통지를 **파킹 + 도어벨**로만 넣으므로
+//!   (`deliver_notice`), flush 레인이 집어가기 전 몇 ms 사이에 온 직발송이 먼저 꽂힌다. **되돌리지 말 것** —
+//!   이 부류에 `has_pending_ahead` 를 복원하면 "그냥 보내고 뒤돌아보지 않는다" 는 결정 7 이 무력해진다
+//!   (같은 회귀가 `deliver_one` 재확인 주석에도 실측으로 기록돼 있다).
 //!
 //! ★단일 락(load-bearing — ADR-0006 정신)★: Mailbox+Ledger 를 **하나의 `Mutex<MessagingState>`** 뒤에 둔다.
 //!   락 순서 위험이 없고(락 하나) 메시지율이 극히 낮아(사람 대화 수준) 경합이 무의미하다.
@@ -71,11 +95,23 @@
 //!     수신자가 실패 행으로 끝나면 그 계약만 되돌린다 — 안 되돌리면 배달된 적 없는 요청이 기한 초과 notice 를
 //!     쏜다(유령 타임아웃). **계약을 못 연 수신자에겐 메시지도 배달하지 않는다**(`REQUEST_CAPACITY` —
 //!     추적 없는 request 배달 금지, ADR-0114 영향 절).
-//!   - **회신 발송**(`reply_to`) → 정상 배달/파킹 뒤 `Ledger::close_on_reply`(엄격 매칭 + **회신자로 계약
-//!     선택**). 매칭 실패는 **배달에 영향 없다** — 메시지는 그대로 가고 계약만 안 닫힌다.
+//!   - **회신 발송**(`reply_to`) → 결말 한 줄(spec §3 항목 7-④ · ADR-0116 결정 2 · ADR-0118): **수용**
+//!     (`delivered`|`pending`)이면 `Ledger::close_on_reply` 로 `replied` 닫힘(**파킹도 수용**이다 — 잠든
+//!     요청자에게 쌓아 두면 그 시점에 의무가 이행됐다) · 행이 **`RECIPIENT_NOT_FOUND`** 면
+//!     `Ledger::fail_on_undeliverable_reply` 로 `reply_failed` **실패 종결**(요청자 이름이 세상에 없다) ·
+//!     **그 밖의 실패는 무동작**(계약 오픈 유지 — 재시도가 정상 경로로 닫는다). 매칭 실패는 **배달에 영향
+//!     없다** — 메시지는 그대로 가고 계약만 안 닫힌다.
 //!   - **기한 초과** → sweep 이 `due_timeouts` 로 걷어 **발신자에게** `<notice>` 를 보낸다(계약별 1건 —
 //!     병합 없음, ADR-0114 결정 2). 배달은 `ParkKind::Notice` 파킹 + flush 도어벨로 일원화한다 — 통지는
 //!     **전용 유계 레인**(`mailbox::NOTICE_CAP` = 64)에서 회계된다.
+//!
+//! ★프로필 삭제 정리(spec §5 · ADR-0116 결정 3)★: 호스트가 프로필을 지운 **직후** `handle_profile_deleted`
+//!   를 부른다. 발동 조건은 **삭제 ∧ 그 프로필 id 의 세션이 살아 있지 않음 ∧ 그 이름을 지닌 산 세션도 없음**
+//!   이고(도달성 무관 — 트리 항목만 지운 산 세션의 배달 가능 메일을 죽이지 않는다. id 축만으로는 개명 면역을
+//!   얻고, 이름 축이 없으면 정리가 **이름 전체**를 지우므로 동명 산 세션이 함께 죽는다 —
+//!   `handle_profile_deleted` doc), 성립하면 ① 그 이름 앞 파킹분을 `failed` + `RECIPIENT_DELETED` 로 종결 ② 그
+//!   이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결한다. **삭제 시점 단발**이고 재평가 트리거를
+//!   두지 않는다 — 그 뒤 삽입분·뒤늦게 죽은 세션의 잔여는 **TTL 24h `expired`** 소관이다(알고 수용).
 //!
 //! 워크스페이스 crate import 0(ADR-0110 — 컴파일러 강제).
 // ADR-0103
@@ -83,6 +119,8 @@
 // ADR-0111
 // ADR-0112
 // ADR-0114
+// ADR-0116 (입구 3분기 · 턴 신호 없으면 즉시 주입 · 잠듦 파킹 · 회신 계약 실패 종결 · 삭제 정리)
+// ADR-0118 (계약 수명 접합 — 가드 우선 · 512 계수)
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -95,7 +133,7 @@ use super::envelope::{
 };
 use super::groups::{normalize_group_name, BuiltinGroups, GroupError, GroupSource};
 use super::ledger::{
-    DeliveryStatus, DropOutcome, DueTimeout, Ledger, OpenOutcome, ReplyOutcome,
+    DeliveryStatus, DropOutcome, DueTimeout, Ledger, OpenOutcome, ReplyFailOutcome, ReplyOutcome,
     ReservationLiveness, RetiredContract, TransitionError,
 };
 use super::mailbox::{FlightTicket, Mailbox, ParkError, ParkKind, ParkedMessage};
@@ -210,15 +248,32 @@ pub enum SendStatus {
 /// 수신자별 실패 코드(spec §6 행 코드 — 발송 단위 반려 코드와 **다른 축**이다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailCode {
-    /// 발송 순간 로스터에 그 이름이 없음(미스폰·죽음·**잠든 세션** 전부 동일 — ADR-0111 결정 1 · ADR-0112 결정 2).
+    /// ★로스터·프로필 **둘 다에 없는 이름**(오타·미스폰·이미 삭제됨)★ — 4차로 의미가 **좁아졌다**
+    ///   (ADR-0116 결정 1): 잠든 세션은 이제 이 코드가 아니라 파킹(`pending`)이고, **살아 있으나 구조화
+    ///   출력이 없는 상대도 이 코드가 아니다** — 게이트 없이 즉시 주입돼 정상 배달된다(결정 7).
+    ///   ★옛 `RecipientUnreachable` 는 폐기됐다★(4차 초안에서 잠깐 신설 → 같은 날 폐기). 그 코드가 가리킬
+    ///   상태가 없다 — 되살리려면 새 결정이 먼저다(ADR-0116 거부한 대안).
+    // ADR-0116 (의미 축소 · 결정 7)
     RecipientNotFound,
-    /// 같은 이름의 산 에이전트가 둘 이상 — 누구에게 보낼지 데몬이 고를 근거가 없다(ADR-0114 결정 4 과도기 규칙).
+    /// 같은 이름의 에이전트가 둘 이상 — 누구에게 보낼지 데몬이 고를 근거가 없다(ADR-0114 결정 4 과도기 규칙).
+    ///   ★어느 층에서든 같은 코드다(4차)★: 산 층(로스터 동명)뿐 아니라 **잠듦 층**(같은 이름으로 파생되는
+    ///   프로필이 둘 이상)도 이 코드로 실패한다 — 이름 키 파킹은 "먼저 복원된 쪽이 조용히 받는" 구멍이 된다
+    ///   (ADR-0116 결정 1). ADR-0115(스폰 이름 유일성)가 이 부류를 사문화할 예정이다.
     RecipientAmbiguous,
     /// 그 수신자의 보관함(message 레인 100건)이 가득 참 — **회수 시도 없이 즉시**(ADR-0114 결정 1).
     MailboxFull,
     /// 그 수신자의 회신 계약을 열 수 없음(오픈 계약 상한 512, ADR-0108). **그 수신자에겐 배달도 하지 않는다** —
     ///   request 의 본질이 회신 추적이라 추적 없는 배달은 계약 위반이다(ADR-0114 영향 절).
     RequestCapacity,
+    /// ★파킹돼 기다리는 동안 수신자 프로필이 삭제돼 미배달 종결됨 — 4차 신설(ADR-0116 결정 3)★.
+    ///
+    /// ★발송 응답에는 **절대 나타나지 않는다**(spec §6)★: 발송 시점엔 `pending` 이었고 이 코드는 삭제 정리가
+    ///   사후에 찍는다 — 그래서 발신 LLM 은 이걸 `messages{id}` **조회**에서 처음 본다(조회 행이 code 와
+    ///   힌트를 함께 싣는 이유 — `message_state`). `RecipientNotFound`("보낼 때부터 없었다")와 **시점이
+    ///   다르다**: 발신자가 "이름을 잘못 썼구나" 와 "기다리다 상대가 지워졌구나" 를 구분해야 재발송 판단이
+    ///   갈린다.
+    // ADR-0116 (결정 3/4)
+    RecipientDeleted,
 }
 
 impl FailCode {
@@ -229,6 +284,7 @@ impl FailCode {
             FailCode::RecipientAmbiguous => "RECIPIENT_AMBIGUOUS",
             FailCode::MailboxFull => "MAILBOX_FULL",
             FailCode::RequestCapacity => "REQUEST_CAPACITY",
+            FailCode::RecipientDeleted => "RECIPIENT_DELETED",
         }
     }
 }
@@ -255,6 +311,24 @@ pub enum SendReject {
     ///   이 값을 돌려줄 때 배달·파킹·장부 레코드는 하나도 일어나지 않았다. 그래서 호출자(ingress)가 새 id 로
     ///   그대로 다시 부르면 중복 배달 없이 안전하게 재시도된다.
     IdCollision,
+}
+
+/// ★프로필 삭제 정리 결과(spec §5 · ADR-0116 결정 3)★ — 호스트가 로그·관측에 쓰고, 단위 테스트가 "정리가
+/// 실제로 돌았나 / 산 세션이 있어 건너뛰었나" 를 이 값으로 단언한다.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileDeletedOutcome {
+    /// ★조건 미성립★ — 두 게이트 축 중 하나라도 "아직 살아 있다" 여서 아무것도 하지 않았다(도달성 무관 —
+    ///   터미널 모드 포함): **그 프로필 id 의 세션이 산 경우**(트리 항목만 지운 상태) 또는 **그 이름을 지닌
+    ///   다른 산 세션이 있는 경우**(과도기 동명 — 리뷰 fix N1). 어느 쪽이든 그 상대는 곧 받을 수 있는 산
+    ///   수신자이고, 정리는 이름 축이라 그를 함께 죽인다(spec §5). 어느 축이 막았는지는 로그가 구분한다.
+    ///   이 값이 `true` 면 나머지 필드는 전부 0이다.
+    pub skipped_live: bool,
+    /// `failed` + `RECIPIENT_DELETED` 로 종결한 파킹분 수(레인 무관 — notice 포함).
+    pub failed_parked: usize,
+    /// `reply_failed` 로 종결한 오픈 계약 수(그 이름이 **요청자**인 것만).
+    pub failed_contracts: usize,
+    /// 가드(잠정·은퇴 예정) 때문에 건너뛴 계약 수 — 재발화하지 않는다(삭제 시점 단발, spec §5).
+    pub guard_held_contracts: usize,
 }
 
 /// ★주입 영수증(ADR-0110 결정 2 — 이 crate 자체 타입)★ — `DeliveryPort` 가 "봉투 바이트를 실제로
@@ -317,14 +391,72 @@ pub trait DeliveryPort: Send + Sync {
     // ADR-0111 (결박 폐지 — 조건부 주입 동사 제거)
     fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String>;
 
-    /// 지금 살아있고(Running|Exiting) **제어 채널로 도달 가능한**(structured 출력) 에이전트 로스터.
-    /// (name, id, epoch) 스냅샷 — resolve(이름→id)·flush(등장/epoch 교체 감지)·`@all`(C4) 공용.
-    /// ★도달성 포함★: TUI(비-structured)는 stdin 주입이 유효 라인이 안 되므로 여기서 제외한다(spec §5
-    ///   "unreachable → 파킹" 의 판정을 로스터 단계로 당긴다 — 비-도달 이름은 애초에 "산 수신자"가 아님).
-    fn live_reachable_agents(&self) -> Vec<LiveAgent>;
+    /// ★로스터 = 지금 **프로세스가 붙어 있는** 에이전트 전원(`Running`|`Exiting`)★ — (name, id, epoch,
+    /// turn_signal) 스냅샷. resolve(이름→id)·flush(등장/epoch 교체 감지)·`@all`(C4)·입구 판정 공용.
+    ///
+    /// ★술어는 **상태뿐**이다(4차 · load-bearing — ADR-0116 결정 1·7)★: 구조화 출력(턴 신호) 유무는 **자격
+    ///   조건이 아니다**. 옛 술어는 `structured` 를 함께 걸어 터미널/콘솔 모드 세션을 로스터에서 빼고 그
+    ///   부류를 반려(`RECIPIENT_UNREACHABLE`)했는데, **그 전제가 틀렸다**: 그 CLI 는 자기 입력 큐로 턴 중
+    ///   입력을 물고 있다가 소비하므로 관측 없이도 배달이 성립한다. 그래서 capability 는 멤버십이 아니라
+    ///   **"언제 넣을지"**(idle 게이트 vs 즉시 주입)를 가르는 축으로 내려갔다 — `LiveAgent::turn_signal`.
+    /// ★"세션 목록에 있음" 이 아니다(load-bearing)★: 세션은 reaper 가 수거하기 전까지 맵에 남으므로, 단순
+    ///   존재로 판정하면 **방금 종료된 에이전트**가 잠듦(파킹) 대신 배달 대상으로 오분류된다. 이 술어는
+    ///   뮤테이션 실측에서 무방비로 확인됐다(지워도 전 테스트 초록) → 실물 어댑터 레벨 봉인 테스트가 정본.
+    // ADR-0116 (로스터 술어 = 상태만 · 결정 7)
+    fn live_agents(&self) -> Vec<LiveAgent>;
+
+    /// ★입구 판정 소스 **한 장 스냅샷**(spec §5 3분기 — ADR-0116)★: 발송 1회당 **정확히 한 번** 불린다.
+    ///
+    /// ★왜 두 조회로 나누지 않고 한 동사로 묶나(load-bearing)★: 3분기는 두 술어(로스터 / 프로필)를 보는데,
+    ///   조회를 나누면 그 사이 명단이 바뀌어 **한 발송 안에서 수신자마다 다른 세계를 보는** 반쪽 판정이
+    ///   재발한다(ADR-0111 결정 2 가 금지한 부류). 한 동사로 묶으면 "세션 스냅샷 1회 + 프로필 1회" 를
+    ///   어댑터가 **구조적으로** 보장한다.
+    /// ★구현 계약(어댑터가 지켜야 하는 것 — 어기면 조용히 오분류된다)★:
+    ///   - `roster` = `live_agents()` 와 **동일 술어**(`Running|Exiting`, capability 조건 없음)이고 같은
+    ///     `list_agents()` **한 장**에서 유도한다. 두 번 뜨면 그 자체가 결함이다.
+    ///   - `dormant_names` = **그 프로필의 세션이 살아 있지 않은** 프로필의 canonical 이름이고, **산 세션과
+    ///     같은 규칙으로 파생**해야 한다(spec §5 — 다르면 파킹 키와 복원 후 이름이 어긋나 편지가 주인을 못
+    ///     만난다). 동명 판정을 위해 **중복을 접지 않는다**(같은 이름 2개면 2개 그대로).
+    /// ★락 밖 호출 계약★: 다른 메서드와 같다(messaging 락을 놓은 상태에서만 불린다).
+    // ADR-0116 (판정 소스 2종 — 물리 조회 2회)
+    fn addressing_sources(&self) -> AddressingSources;
+
+    /// ★이 id 의 세션이 **지금 살아 있나**(`Running`|`Exiting` = 로스터와 같은 술어)★.
+    ///
+    /// ★존재 이유 = 삭제 정리 게이트(spec §5 · ADR-0116 결정 3 — 리뷰 fix D1)★. 게이트는 **id 축**이어야
+    ///   하고, 이름으로는 표현할 수 없다:
+    ///   - **개명 면역(id 축)**: 게이트는 프로필을 **지운 뒤** 평가되는데, 프로필이 사라지면 그 산 세션의
+    ///     canonical 이름이 `display_name` 에서 `basename(session.cwd)` 로 **바뀐다**
+    ///     (`manager::resolve_canonical_name` — 프로필에서 override 를 읽으므로). 그래서 삭제 전에 뽑은
+    ///     이름으로 삭제 후 명단을 찾으면 **개명된 프로필은 영원히 매치되지 않고** 정리가 늘 발동한다 —
+    ///     산 에이전트의 파킹 메일이 `RECIPIENT_DELETED` 로 죽고 그가 요청자인 계약이 `reply_failed` 가
+    ///     된다(spec §5·ADR-0118 결정 2 가 금지한 그 결말). `RenameProfile` 한 번이면 재현되는 평범한
+    ///     경로다. 프로필 id 는 세션 id 와 같고(`activate_profile`) 개명에 흔들리지 않으므로 그걸 축으로 쓴다.
+    /// ★`addressing_sources().roster` 를 쓰지 않는 이유★: 그쪽은 프로필 목록 조회 + 잠든 이름 파생(경우에
+    ///   따라 fs 접근)까지 딸린 **발송용** 한 장이다. 게이트는 단일 술어 하나만 필요하므로 좁은 동사를 따로
+    ///   둔다(어댑터는 같은 `is_live` 술어를 공유해 두 판정이 갈리지 않게 한다).
+    /// ★락 밖 호출 계약★: 다른 메서드와 같다.
+    // ADR-0116 (결정 3 — 삭제 정리 게이트) / 리뷰 fix D1
+    fn is_agent_live(&self, id: PeerId) -> bool;
 
     /// id → canonical 표시 이름(봉투 sender·수신자 이름 단일 출처, ADR-0101). 없으면 None.
     fn canonical_name(&self, id: PeerId) -> Option<String>;
+}
+
+/// ★입구 판정 소스 한 장(spec §5 3분기 · ADR-0116)★ — `DeliveryPort::addressing_sources` 의 산출물.
+///
+/// 두 필드는 **한 시점의 사실**이라 서로 정합해야 한다: `dormant_names` 는 `roster` 에 세션이 없는
+/// 프로필들의 이름이다(교집합이 없다). 그 정합성은 어댑터가 보장하고(위 메서드의 구현 계약), 서비스는
+/// 그걸 전제로 3분기를 판정한다.
+#[derive(Debug, Default, Clone)]
+pub struct AddressingSources {
+    /// 로스터 = 산 세션 전원(`Running|Exiting` — **턴 신호 유무 무관**). `@all` 펼침·존재/동명·busy 판정의
+    ///   정본이고 `@all` 은 **이것만** 본다(방송 = "지금 있는 전원" — 잠든 이름은 펼침에 들어오지 않는다,
+    ///   spec §4). 턴 신호 없는 산 세션도 **여기 들어온다**(ADR-0116 결정 7 — 즉시 주입 대상).
+    pub roster: Vec<LiveAgent>,
+    /// 잠든 이름(프로필 실재 · 그 프로필의 세션은 살아 있지 않음) — 파킹 판정 축(spec §5 분기 3).
+    ///   **중복을 접지 않는다**(같은 이름 2개 = 잠듦 층 동명 → `RECIPIENT_AMBIGUOUS`).
+    pub dormant_names: Vec<String>,
 }
 
 /// ★flush 도어벨 seam(C2 리뷰 fix 11)★ — "이 에이전트의 파킹 큐를 지금 flush 해라" 를 **다른 스레드에
@@ -343,12 +475,21 @@ pub trait FlushTrigger: Send + Sync {
     fn request_flush(&self, id: PeerId);
 }
 
-/// 로스터 항목 — 살아있고 도달 가능한 한 에이전트의 (id, 이름, epoch) 스냅샷.
+/// 로스터 항목 — 살아 있는 한 에이전트의 (id, 이름, epoch, 턴 신호) 스냅샷.
 #[derive(Debug, Clone)]
 pub struct LiveAgent {
     pub id: PeerId,
     pub name: String,
     pub epoch: u32,
+    /// ★턴 경계를 관측할 수 있나(= 이 수신자에게 idle 게이트가 성립하나) — ADR-0116 결정 7 · load-bearing★.
+    ///
+    /// `true`(구조화 출력 백엔드) → 주입 전에 `BusyGate` 에 묻고 busy 면 파킹한다.
+    /// `false`(터미널/콘솔 모드) → **게이트 없이 즉시 주입**한다: busy 판정도 선행분 대기도 하지 않는다.
+    /// 근거는 그 CLI 가 **자기 입력 큐**를 갖고 있다는 관측이다(턴 중 입력을 물고 있다가 턴 후 소비) — 우리가
+    /// idle 을 관측할 이유가 없다. 그래서 이 값은 **멤버십이 아니라 타이밍**만 가른다(로스터 자격 조건이
+    /// 아니다 — 그 옛 술어가 `RECIPIENT_UNREACHABLE` 반려를 낳았고 폐기됐다).
+    // ADR-0116 (결정 7)
+    pub turn_signal: bool,
 }
 
 /// ★단일 락 아래 상태(load-bearing — ADR-0006)★: mailbox+ledger+groups 를 한 Mutex 뒤에 함께 둔다.
@@ -406,6 +547,17 @@ pub struct MessagingService {
     /// ★flush 도어벨(C2 리뷰 fix 11)★ — 자가치유·FIFO 합류가 배치 flush 를 **다른 스레드**에 넘기는 출구.
     ///   `None` = 미배선 → 인라인 flush 폴백(FlushTrigger 주석의 문서화된 두 갈래).
     trigger: Option<Arc<dyn FlushTrigger>>,
+    /// ★수용 임계구역 관측 훅(테스트 전용 — 리뷰 fix D2 원자성 단언)★: **수용을 기록한 그 락을 아직 쥔 채**
+    ///   장부를 그대로 보여 준다. 발화 지점 둘: ① `handle_send` 주 임계구역 이탈 직전(파킹 수용 갈래의 결말이
+    ///   정해진 상태) ② `deliver_one` 의 배달 기록 락 끝(즉시 배달 갈래의 수용 확정 지점).
+    ///
+    /// ★왜 이 모양이어야 하나(결정론)★: "수용과 계약 닫기가 한 임계구역" 은 **최종 상태만 봐선 단언할 수
+    ///   없다** — 두 락으로 갈라도 경합이 없으면 결과가 같다. 그래서 테스트는 **락 안에서** 계약이 이미 닫혔는지
+    ///   본다: 닫기가 다른 락으로 빠지면 이 시점 관측이 `awaiting_reply` 라 즉시 빨개진다(sleep·스레드 없음).
+    /// ★훅 계약★: 넘겨받은 장부만 읽는다 — **서비스 락을 다시 잡지 않는다**(std Mutex 는 비재진입 = 데드락).
+    /// ★`OnceLock` 인 이유★: 읽기에 락이 필요 없어(state 락 보유 중 호출) 락 순서 규약을 건드리지 않는다.
+    #[cfg(any(test, feature = "test-harness"))]
+    accept_hook: std::sync::OnceLock<Arc<dyn Fn(&Ledger) + Send + Sync>>,
 }
 
 impl MessagingService {
@@ -432,6 +584,22 @@ impl MessagingService {
             registry,
             busy,
             trigger: None,
+            #[cfg(any(test, feature = "test-harness"))]
+            accept_hook: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// ★수용 임계구역 훅 설치(테스트 전용 — 필드 주석이 근거 정본)★. 1회만 설치된다(멱등, 이후 무시).
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn set_accept_hook_for_test(&self, hook: Arc<dyn Fn(&Ledger) + Send + Sync>) {
+        let _ = self.accept_hook.set(hook);
+    }
+
+    /// 설치돼 있으면 훅을 발화한다(락 보유 중 — 훅은 넘겨받은 장부만 읽는다).
+    #[cfg(any(test, feature = "test-harness"))]
+    fn fire_accept_hook(&self, ledger: &Ledger) {
+        if let Some(h) = self.accept_hook.get() {
+            h(ledger);
         }
     }
 
@@ -511,17 +679,36 @@ impl MessagingService {
             "빈 수신자 목록은 입구가 INVALID_SEND_ARGS 로 반려한다(spec §6)"
         );
 
-        // 1) ★로스터 스냅샷 1장(락 밖 — port 호출)★. 이 한 장으로 `@` 펼침·존재/동명·busy 판정을 전원
-        //    일괄 처리한다(ADR-0111 결정 2 불변식 — 수신자별로 다시 뜨면 반쪽 판정이 재발한다).
-        let roster = self.port.live_reachable_agents();
+        // 1) ★판정 소스 스냅샷 1장(락 밖 — port 호출 **1회**)★. 이 한 장으로 `@` 펼침·존재/동명·잠듦·
+        //    busy 판정을 전원 일괄 처리한다(ADR-0111 결정 2 불변식 — 수신자별로 다시 뜨면 반쪽 판정이
+        //    재발한다). ★두 번 부르지 말 것★: 로스터와 프로필 목록이 이 한 장에 함께 실려 온다(ADR-0116),
+        //    다시 부르면 같은 발송의 두 수신자가 다른 세계를 볼 수 있다.
+        let sources = self.port.addressing_sources();
+        // ★회신 계약 닫기 장치(리뷰 fix D2 — load-bearing)★: 수용이 확정되는 **그 락 구간에서** 계약을
+        //   닫는다(두 락으로 갈리면 그 사이 삭제 정리가 `reply_failed` 로 닫아 "수용됐는데 회신 실패" 가
+        //   된다 — `ReplyClosing` 헤더가 근거 정본).
+        // ★이름 폴백 허용 판정은 **락 밖 스냅샷**으로 여기서 한 번 한다(리뷰 fix D4)★: 회신자 이름이 산
+        //   세션 둘 이상에 걸리면 이름으로 남의 계약을 닫을 수 있어(귀속 날조) 폴백을 금지한다.
+        let mut closing = ReplyClosing {
+            in_reply_to: meta.reply_to.as_deref(),
+            replier_name: sender_name,
+            replier_id: from.peer_id,
+            allow_name_fallback: sources
+                .roster
+                .iter()
+                .filter(|a| a.name == sender_name)
+                .count()
+                <= 1,
+            done: None,
+        };
 
         // 2) 주소 해석(순수) — 트림 → `@` 펼침(발신자 제외) → 명시 지목과 합류 → 중복 제거 → 행 순서 확정.
         //    `@`주소 오류는 여기서 **발송 단위 반려**로 끝난다(부작용 0 — ADR-0114 결정 3 층위).
-        let addressing = resolve_addressing(&self.groups, to, from, &roster)?;
+        let addressing = resolve_addressing(&self.groups, to, from, &sources)?;
         // 이 발송이 남길 배달기록 총수 = **실패 행 포함** 수신자 수(spec §5 "실패 수신자도 장부에 남는다").
         //   조회의 잘림 판정(`may_be_truncated`)이 이 값과 남은 행 수를 비교하므로 모든 행이 같은 값을 든다.
         let expected_rows = u16::try_from(addressing.recipients.len()).unwrap_or(u16::MAX);
-        let roster_names = live_names_hint(&roster);
+        let roster_names = live_names_hint(&sources.roster);
 
         let now = Instant::now();
         let mut plans: Vec<RecipientPlan> = Vec::with_capacity(addressing.recipients.len());
@@ -545,51 +732,40 @@ impl MessagingService {
 
             // ── pass A: 수신자별 수용 판정(파킹은 아직 안 한다 — 위 doc "두 패스") ────────────────
             for r in &addressing.recipients {
-                // 2-a) 입구 반려 — 판정 근거는 **오직 이 스냅샷**이다(ADR-0111 결정 1 · ADR-0112 결정 2).
-                //      미스폰·죽음·잠든 세션이 전부 같은 결말이고, wake 는 발동하지 않는다.
-                let Some(target) = r.target.clone() else {
-                    let (code, hint) = if let Some(folded) = &r.dup_of {
-                        // M3: 같은 이름으로 접히는 다른 실체 — 자기 행을 만들 수 없다는 사실을 드러낸다.
-                        (
-                            FailCode::RecipientAmbiguous,
-                            format!(
-                                "'{}' resolves to a different agent that shares the name '{folded}' with another recipient of this send — the broker addresses mailboxes by name, so only one of them can be a recipient here. Send to it in a separate message.",
-                                r.display
-                            ),
-                        )
-                    } else if r.live_count == 0 {
-                        (
-                            FailCode::RecipientNotFound,
-                            format!(
-                                "No live agent named '{}' right now — nothing was queued for it (spawn it, or fix the name and send again). Live agents: {roster_names}.",
-                                r.display
-                            ),
-                        )
-                    } else {
-                        (
-                            FailCode::RecipientAmbiguous,
-                            format!(
-                                "'{}' matches {} live agents — send again using the exact agent id, or give them distinct names.",
-                                r.display, r.live_count
-                            ),
-                        )
-                    };
-                    // ★실패 수신자도 장부에 남는다(spec §5)★ — 종점 행이라 더 움직이지 않는다.
-                    st.ledger.record_with_expected(
-                        msg_id,
-                        sender_name,
-                        &r.key,
-                        body,
-                        DeliveryStatus::Failed,
-                        now,
-                        expected_rows,
-                    );
-                    plans.push(RecipientPlan::Failed { code, hint });
-                    continue;
+                // 2-a) ★입구 3분기(spec §5 · ADR-0116 결정 1)★ — 판정 근거는 **오직 이 스냅샷**이다.
+                //      `target` 이 있으면 로스터에 있는 것(분기 2 배달 / 3 busy 파킹) · 없으면 아래가 가른다:
+                //      실패 행(없음/동명) 또는 **잠듦 파킹**(프로필 실재 → 대상 없이 파킹).
+                //      ★wake 는 여전히 발동하지 않는다★ — 잠든 수신자는 파킹될 뿐이다(spec §5 분기 3).
+                let target = match r.target.clone() {
+                    Some(t) => Some(t),
+                    None => match absent_disposition(r, &roster_names) {
+                        // 실패 행 — 파킹하지 않고, 계약도 열지 않는다(그 아래 2-b 를 타지 않는다).
+                        AbsentDisposition::Failed { code, hint } => {
+                            // ★실패 수신자도 장부에 남는다(spec §5)★ — 종점 행이라 더 움직이지 않는다.
+                            st.ledger.record_with_expected(
+                                msg_id,
+                                sender_name,
+                                &r.key,
+                                body,
+                                DeliveryStatus::Failed,
+                                now,
+                                expected_rows,
+                            );
+                            plans.push(RecipientPlan::Failed { code, hint });
+                            continue;
+                        }
+                        // ★잠듦 = 수용(ADR-0116 결정 1)★ — 산 대상이 없으므로 `None` 을 들고 아래로 내려가
+                        //   계약을 열고(수용이므로) 파킹된다. 도어벨도 없다(누를 id 가 없다 — 재등장 flush 가 집는다).
+                        AbsentDisposition::Dormant => None,
+                    },
                 };
 
                 // 2-b) request 면 **이 수신자의 계약**을 먼저 연다(발송 기준 시계 — spec §3).
                 //      계약을 못 열면 그 수신자에겐 **배달도 하지 않는다**(추적 없는 request 금지).
+                //      ★파킹도 계약을 연다 — 잠듦 포함(spec §3 항목 2 · ADR-0116 결정 1)★: 언젠가 주입될
+                //      메시지라 회신 의무가 성립하고, 그래서 기한 스윕도 정상 발화한다. 잠듦은 산
+                //      incarnation 이 없어 `recipient_id = None` 으로 열리고(이름으로 의무 귀속), 복원 후
+                //      실제 배달 시점에 `rebind_request_recipient` 가 착지 id 를 박는다.
                 let mut contract: PendingContract = None;
                 if meta.request {
                     let reply_by = meta.reply_by.zip(meta.reply_by_raw.clone());
@@ -598,7 +774,7 @@ impl MessagingService {
                         sender_name,
                         from.peer_id,
                         &r.key,
-                        Some(target.id),
+                        target.as_ref().map(|t| t.id),
                         reply_by,
                         now,
                     ) {
@@ -639,23 +815,47 @@ impl MessagingService {
                 // 2-c) 지금 주입해도 되나 — 안 되면 파킹 예정(pass B), 보관함이 가득이면 그 수신자만 실패.
                 //      판정 동사는 `has_pending_ahead`(= 큐 + 그 이름 앞 in-flight) 하나다: 진행 중인 flush
                 //      배치를 직발송이 앞지르지 않게 한다(round-7 — 큐만 보면 그 배치가 안 보인다).
-                let busy = self.busy.is_busy(target.id, target.epoch);
-                let queued = st.mailbox.has_pending_ahead(&r.key);
-                if !busy && !queued {
-                    // ★계약은 아직 잠정이다★ — 확정은 주입/파킹 결말이 정해지는 자리에서(PendingContract).
-                    plans.push(RecipientPlan::Deliver { target, contract });
-                    continue;
-                }
+                //      ★잠듦(`target == None`)은 이 판정을 건너뛴다★: 게이트에 물어볼 incarnation 도, 지금
+                //      주입할 대상도 없다 — 무조건 파킹 예정이다(보관함 상한만 본다).
+                let park_hint = match &target {
+                    // ★턴 신호 없는 백엔드 = 게이트 없이 즉시 주입(ADR-0116 결정 7 · load-bearing)★:
+                    //   busy 판정도, 선행 파킹분 대기도 하지 않는다. 근거 = 그 CLI 가 자기 입력 큐로 턴 중
+                    //   입력을 물고 있다가 소비하므로 우리가 idle 을 관측할 이유가 없다(그 CLI 가 게이트다).
+                    //   ★귀결(알고 수용)★: 이 부류엔 **busy 파킹이 없다**. 그리고 write 실패로 이미 파킹분이
+                    //   쌓여 있어도 이 발송은 그 앞을 지나간다 — "그냥 보내고 뒤돌아보지 않는다" 가 채택된
+                    //   방침이라 FIFO 보장을 이 부류에 적용하지 않는다(spec §5 배달 분기).
+                    Some(t) if !t.turn_signal => {
+                        plans.push(RecipientPlan::Deliver {
+                            target: t.clone(),
+                            contract,
+                        });
+                        continue;
+                    }
+                    Some(t) => {
+                        let busy = self.busy.is_busy(t.id, t.epoch);
+                        let queued = st.mailbox.has_pending_ahead(&r.key);
+                        if !busy && !queued {
+                            // ★계약은 아직 잠정이다★ — 확정은 주입/파킹 결말이 정해지는 자리에서(PendingContract).
+                            plans.push(RecipientPlan::Deliver {
+                                target: t.clone(),
+                                contract,
+                            });
+                            continue;
+                        }
+                        if busy {
+                            park_hint_busy(&r.display)
+                        } else {
+                            park_hint_queued(&r.display)
+                        }
+                    }
+                    None => park_hint_dormant(&r.display),
+                };
                 if st.mailbox.can_admit(&r.key, ParkKind::Message) {
-                    let hint = if busy {
-                        park_hint_busy(&r.display)
-                    } else {
-                        park_hint_queued(&r.display)
-                    };
                     plans.push(RecipientPlan::Park {
-                        hint,
+                        hint: park_hint,
                         contract,
-                        doorbell: target.id,
+                        // 잠듦은 누를 도어벨이 없다(산 id 부재) — 재등장 flush(로스터 diff)가 집는다.
+                        doorbell: target.as_ref().map(|t| t.id),
                     });
                     continue;
                 }
@@ -722,9 +922,10 @@ impl MessagingService {
                         entrance,
                         recipient: &r.key,
                         body,
-                        // 해석된 산 수신자라 id 힌트를 남긴다(동명 충돌 중에도 그 incarnation 으로 배달될
-                        //   길 — mailbox `hinted_id` 주석).
-                        hinted_id: Some(doorbell),
+                        // 해석된 산 수신자면 id 힌트를 남긴다(동명 충돌 중에도 그 incarnation 으로 배달될
+                        //   길 — mailbox `hinted_id` 주석). ★잠듦은 `None`★ — 그 순간 산 실체가 없으므로
+                        //   이름 큐로만 열린다(복원 후 canonical 이름 = 파킹 키라는 전제가 load-bearing).
+                        hinted_id: doorbell,
                         kind: ParkKind::Message,
                         meta: &fanout_meta,
                         expected_rows,
@@ -737,7 +938,14 @@ impl MessagingService {
                         if let Some(res) = contract {
                             res.commit(&mut st, &mut retirements);
                         }
-                        doorbells.push(doorbell);
+                        // ★수용 확정 = 회신 계약 닫기(같은 임계구역 — 리뷰 fix D2)★: 파킹은 inject 를
+                        //   부르지 않으므로 락을 놓을 이유가 없다. 여기서 닫으면 삭제 정리가 그 사이
+                        //   `reply_failed` 로 끼어들 창이 **구조적으로** 사라진다.
+                        closing.close_in_lock(&mut st);
+                        // 잠듦 파킹은 누를 도어벨이 없다(위 `Park.doorbell` 주석).
+                        if let Some(id) = doorbell {
+                            doorbells.push(id);
+                        }
                     }
                     // ★도달 불가 경로★: 바로 위에서 `can_admit` 이 통과했고 그 사이 같은 락을 놓지 않았다.
                     //   그래도 조용히 삼키지 않는다 — 저장소 회계가 어긋났다는 뜻이므로 실패 행으로 강등한다.
@@ -762,6 +970,12 @@ impl MessagingService {
                     }
                 }
             }
+            // ★임계구역 이탈 직전 테스트 훅(리뷰 fix D2 — 원자성 결정론 단언용)★: 이 지점까지 오면 수용
+            //   기록과 계약 닫기가 **둘 다** 이 락 안에서 끝났다. 훅은 다른 스레드가 그 사이 락을 얻지
+            //   못했음을 관측하게 하는 seam 이고(채널 신호만 — 상태를 만지지 않는다), 운영 빌드엔 컴파일되지
+            //   않는다. 훅을 이 **밖**으로 내리면 그 자체가 창을 만들어 테스트가 무의미해진다.
+            #[cfg(any(test, feature = "test-harness"))]
+            self.fire_accept_hook(&st.ledger);
             drop(st);
 
             // 락을 놓았으니 이제 로깅·도어벨·주입(락 밖 규율).
@@ -825,6 +1039,7 @@ impl MessagingService {
                         contract,
                         &mut deferred_inline,
                         &mut retirements,
+                        &mut closing,
                     ),
                 };
                 results.push(result);
@@ -849,26 +1064,50 @@ impl MessagingService {
                 self.flush_for_agent(id);
             }
 
-            // 6) ★회신 닫기(엄격 매칭 + 회신자 기준)★ — **수용된**(delivered|pending) 회신만 계약을 닫는다.
+            // 6) ★회신 계약 처리 — 규칙 한 줄(spec §3 항목 7-④ · ADR-0116 결정 2 · ADR-0118)★:
+            //    **수용**(`delivered`|`pending`) → `replied` 닫힘 · **`RECIPIENT_NOT_FOUND`** →
+            //    `reply_failed` 실패 종결 · **그 밖의 실패** → **무동작**(계약 오픈 유지).
+            //    ★수용 갈래는 여기서 닫지 않는다(리뷰 fix D2)★: 이미 **수용을 기록한 그 락 구간에서**
+            //    `ReplyClosing::close_in_lock` 이 닫았다. 여기 남은 일은 그 결과를 **락 밖에서** 찍는 것과,
+            //    수용이 하나도 없었을 때의 두 갈래(실패 종결 / 무동작)뿐이다.
             //
-            // ★A1 회귀(load-bearing · TODO(ratify) — 사용자 재가 대기)★: 옛 구현은 `results` 를 보지 않고
-            //   무조건 닫았다. 개편으로 부재 수신자가 **실패 행**이 되면서 그 무조건이 거짓말이 됐다 —
-            //   "요청자가 죽은 뒤 일꾼이 회신" 하면 메시지는 **아무에게도 가지 않았는데**(row = failed,
-            //   RECIPIENT_NOT_FOUND) 장부는 `replied` 로 뒤집히고, 일꾼의 `reply_owed_by_me` 가 사라지며
-            //   `due_timeouts` 는 그 계약을 영영 건너뛴다(기한 통지도 안 나간다). 개편 전에는 부재가 파킹돼
-            //   "언젠가 도착한다" 가 성립했으므로 일관됐지만 이제는 아니다.
-            // ★규칙★: 회신 발송은 수신자가 정확히 1명이므로(spec §3 항목 7-①) 그 한 행이 `failed` 면
-            //   **계약은 열린 채로 남는다** — 장부가 도달하지 않은 메시지를 `replied` 라고 주장하지 않고,
-            //   발신자의 기한 통지도 그대로 발화한다. 매칭 실패(모르는 id·내 계약 아님)는 그대로 정상 경로다.
+            // ★왜 이 세 갈래인가(load-bearing — 두 방향의 장부 거짓말을 동시에 피한다)★:
+            //   - 옛 구현(무조건 닫기)은 **도달하지 않은 메시지를 `replied` 로 주장**했다. 요청자가 죽은 뒤
+            //     일꾼이 회신하면 메시지는 아무에게도 가지 않았는데 계약이 닫혀 일꾼의 `reply_owed_by_me` 가
+            //     사라지고 기한 통지도 영영 안 나갔다.
+            //   - 개편기 잠정안(A1 — 사유 무관 오픈 유지)은 그 반대로 **갈 곳 없는 계약을 영구 방치**했다.
+            //   - 재가된 규칙은 둘을 가른다: **파킹도 수용이다**("꽂으면 계약 완료" — 잠든 요청자에게 회신이
+            //     쌓이면 회신자의 의무는 그 시점에 이행됐다. 그 뒤 요청자가 삭제돼 그 파킹분이
+            //     `RECIPIENT_DELETED` 로 치워져도 **계약은 `replied` 로 남는다** — 되돌리지 않는다: 계약 축은
+            //     "답을 했나" 에, 배달 축은 "도착했나" 에 각자 사실을 적는다, spec §6 축 구분). 요청자 이름이
+            //     **세상에 없을 때만**(`RECIPIENT_NOT_FOUND`) 갈 곳이 없으므로 실패 종결한다. 보관함 가득·
+            //     동명·도달 불가는 **그 순간의 환경**이라 재시도가 성공할 수 있어 무동작이다(닫으면 재시도가
+            //     실제로 배달돼도 장부는 영영 "회신 실패" — 거짓말의 반대 방향).
+            // ★회신 경로에서 발생하지 않는 코드★: `REQUEST_CAPACITY`(회신은 `reply_to`↔`request` 상호배타라
+            //   계약을 열지 않는다) · `RECIPIENT_DELETED`(발송 응답이 아니라 조회 시점 코드) — 분기를 두지 않는다.
+            // ADR-0116 (결정 2) / ADR-0118 (결정 1·2·3)
             if let Some(in_reply_to) = &meta.reply_to {
-                let admitted = results.iter().any(|r| r.status != SendStatus::Failed);
-                if admitted {
-                    self.close_reply_contract(in_reply_to, sender_name, from.peer_id);
-                } else {
-                    tracing::debug!(
+                match (closing.done, reply_disposition(&results)) {
+                    // 수용 → in-lock 으로 이미 닫혔다. 결과만 락 밖에서 찍는다.
+                    (Some(outcome), _) => log_reply_close(outcome, in_reply_to, sender_name),
+                    (None, ReplyDisposition::RequesterGone) => self.fail_reply_contract(
                         in_reply_to,
-                        "회신이 어느 수신자에게도 배달되지 않아(전 행 failed) 계약을 닫지 않음 — 장부는 도달하지 않은 메시지를 replied 로 주장하지 않는다(A1)"
-                    );
+                        sender_name,
+                        from.peer_id,
+                        closing.allow_name_fallback,
+                    ),
+                    (None, ReplyDisposition::NoOp) => tracing::debug!(
+                        in_reply_to,
+                        "회신이 일시 사유(보관함 가득·동명)로 실패 — 계약은 **오픈 유지**(무동작). 재시도가 정상 경로로 닫는다(spec §3 항목 7-④)"
+                    ),
+                    // ★수용 행이 있는데 in-lock 닫기가 안 됐다 = 배선 결함★: 수용 갈래는 전부
+                    //   `close_in_lock` 을 거치므로 도달 불가다. 조용히 넘기지 않고 남긴다(계약이 안 닫힌 채
+                    //   기한 통지가 나가는 결말이라 관측이 필요하다).
+                    (None, ReplyDisposition::Accepted) => tracing::error!(
+                        in_reply_to,
+                        replier = %sender_name,
+                        "회신이 수용됐는데 계약 닫기가 임계구역에서 일어나지 않았다 — 수용 갈래 배선 누락(리뷰 fix D2)"
+                    ),
                 }
             }
             Ok(results)
@@ -886,6 +1125,7 @@ impl MessagingService {
     /// ★write 실패 = 파킹(spec §5 분기 3)★: 조용한 유실 금지 — 관측 레코드는 실패로 남기고 메시지는 큐에
     ///   되돌린다. ★self-heal 하지 않는다(의도적)★: 방금 그 incarnation 이 도달 불가해진 것이라 같은 로스터로
     ///   즉시 재-flush 하면 깨진 수신자에 재주입을 반복할 수 있다. 다음 **진짜** 등장(epoch bump)에 맡긴다.
+    #[allow(clippy::too_many_arguments)]
     fn deliver_one(
         &self,
         ctx: DeliverOne<'_>,
@@ -893,6 +1133,9 @@ impl MessagingService {
         contract: PendingContract<'_>,
         deferred_inline: &mut Vec<PeerId>,
         retirements: &mut RetirementLog,
+        // ★회신 계약 닫기(리뷰 fix D2)★ — 이 함수의 **모든 수용 갈래**(즉시 배달·늦은 재확인 파킹·inject
+        //   실패 재파킹)가 자기 락 구간에서 닫는다. 호출자가 락 밖에서 닫으면 그 사이 삭제 정리가 끼어든다.
+        closing: &mut ReplyClosing<'_>,
     ) -> RecipientResult {
         let mut effects = ParkSideEffects::default();
         // 4-a) 재확인(짧은 락) — 뒤집혔으면 그 자리에서 파킹까지 끝낸다.
@@ -900,8 +1143,13 @@ impl MessagingService {
         let mut contract = contract;
         let late = {
             let mut st = self.state.lock().expect("messaging state poisoned");
-            let busy = self.busy.is_busy(target.id, target.epoch);
-            let queued = st.mailbox.has_pending_ahead(ctx.key);
+            // ★턴 신호 없는 수신자는 재확인 자체를 건너뛴다(ADR-0116 결정 7)★: 입구에서 게이트를 묻지 않기로
+            //   한 부류를 여기서 다시 게이트에 걸면 같은 발송이 "게이트 없음" 으로 판정됐다가 "busy 라 파킹"
+            //   으로 뒤집힌다(실측 — 이 한 줄이 없으면 즉시 주입 계약이 무력화된다). 재확인이 막으려던 두
+            //   사고(idle 게이트 우회·큐 앞지르기)는 애초에 이 부류에 적용되지 않는 규칙이다.
+            let gated = target.turn_signal;
+            let busy = gated && self.busy.is_busy(target.id, target.epoch);
+            let queued = gated && st.mailbox.has_pending_ahead(ctx.key);
             if !busy && !queued {
                 None
             } else {
@@ -915,6 +1163,10 @@ impl MessagingService {
                     (Ok(_), Some(res)) => res.commit(&mut st, retirements),
                     (Err(_), Some(res)) => res.rollback(&mut st),
                     _ => {}
+                }
+                // 수용(파킹 접수)이면 같은 락에서 회신 계약을 닫는다(리뷰 fix D2).
+                if outcome.is_ok() {
+                    closing.close_in_lock(&mut st);
                 }
                 Some(outcome)
             }
@@ -943,6 +1195,13 @@ impl MessagingService {
                     if let Some(res) = contract.take() {
                         res.commit(&mut st, retirements);
                     }
+                    // ★수용 확정 = 회신 계약 닫기(같은 임계구역 — 리뷰 fix D2)★: inject 자체는 설계상 락
+                    //   밖이지만 **배달 사실을 장부에 적는 이 짧은 락**이 수용 확정 지점이다. 그래서 여기서
+                    //   닫으면 "수용 기록과 계약 닫기가 원자적" 이 배달·파킹 **모든 수용 갈래**에서 성립한다.
+                    closing.close_in_lock(&mut st);
+                    // 이 락을 쥔 채 장부를 관측하는 테스트 훅(리뷰 fix D2 — 위 필드 주석이 근거 정본).
+                    #[cfg(any(test, feature = "test-harness"))]
+                    self.fire_accept_hook(&st.ledger);
                 }
                 // 관측 레코드(ADR-0088) — 락 밖에서 발행. in_reply_to 는 봉투 재파싱 없이 구조화 값 그대로.
                 self.observe_success(
@@ -989,6 +1248,10 @@ impl MessagingService {
                         (Ok(_), Some(res)) => res.commit(&mut st, retirements),
                         (Err(_), Some(res)) => res.rollback(&mut st),
                         _ => {}
+                    }
+                    // 재파킹도 수용이다 — 같은 락에서 회신 계약을 닫는다(리뷰 fix D2).
+                    if outcome.is_ok() {
+                        closing.close_in_lock(&mut st);
                     }
                     outcome
                 };
@@ -1104,29 +1367,226 @@ impl MessagingService {
     ///   이미 배달/파킹됐다. 발신자에게 새 에러를 만들지 않는다: 고칠 수 없는 상태이고, 반려하면 이미 배달된
     ///   메시지에 대해 재시도를 유발해 중복이 난다.
     /// ★락 규율★: 짧은 단독 락 구간에서 장부만 만지고, 로깅은 **락을 놓은 뒤** 한다.
-    fn close_reply_contract(&self, in_reply_to: &str, replier_name: &str, replier_id: PeerId) {
+    /// ★운영 발송 경로는 이 동사를 쓰지 않는다 — **테스트 seam 전용이다**(리뷰 fix D2)★. 운영은 **수용을
+    ///   기록한 그 락 구간에서** `ReplyClosing::close_in_lock` 으로 닫는다(그 struct 헤더가 근거 정본): 두 락
+    ///   으로 갈리면 그 사이 삭제 정리가 계약을 `reply_failed` 로 닫아 "수용됐는데 회신 실패" 가 된다.
+    ///   그래서 이 동사는 cfg 로 **운영 빌드에서 컴파일되지 않게** 막아 둔다 — 남겨 두면 다음 세션이 "간단한
+    ///   쪽" 을 골라 그 레이스를 되살린다(레거시 파킹 seam 만 쓴다 — 그래서 `cfg(test)` 단독이다:
+    ///   `test-harness` 피처만 켠 빌드엔 호출자가 없다).
+    #[cfg(test)]
+    fn close_reply_contract(
+        &self,
+        in_reply_to: &str,
+        replier_name: &str,
+        replier_id: PeerId,
+        allow_name_fallback: bool,
+    ) {
         let outcome = {
             let mut st = self.state.lock().expect("messaging state poisoned");
-            st.ledger
-                .close_on_reply(in_reply_to, replier_name, replier_id, Instant::now())
+            st.ledger.close_on_reply(
+                in_reply_to,
+                replier_name,
+                replier_id,
+                allow_name_fallback,
+                Instant::now(),
+            )
+        };
+        log_reply_close(outcome, in_reply_to, replier_name);
+    }
+
+    /// ★회신 계약 **실패 종결**(spec §3 항목 7-④ · ADR-0116 결정 2 · ADR-0118 결정 1)★ — 회신 발송 행이
+    /// `RECIPIENT_NOT_FOUND` 였을 때만 불린다(요청자 이름이 로스터·프로필 전부에 없다 = 갈 곳이 없다).
+    ///
+    /// ★이 동사가 하는 일 = 계약 축 종결뿐★: 배달 축은 이미 실패 행으로 기록됐고(회신 메시지 자체의 결말),
+    ///   원 request 의 배달기록은 그대로 `delivered` 에 머문다(spec §6 축 구분 — `delivered → reply_failed`
+    ///   같은 배달 상태 전이는 존재하지 않는다).
+    /// ★가드 보유 중이면 무동작(ADR-0118 결정 3)★: 잠정·은퇴 예정 표시 계약의 수명은 그 가드 소유다.
+    /// ★수용 갈래와 달리 **락을 갈라도 안전하다**(리뷰 fix D2)★: 이 경로엔 수용이 없다(전 행 실패) — 그
+    ///   사이 삭제 정리가 같은 계약을 `reply_failed` 로 닫아도 결말이 같으므로 되돌림이 성립하지 않는다.
+    /// ★인자 `allow_name_fallback`★: `close_on_reply` 와 **같은 값**을 받는다 — 성공 경로와 실패 경로가 다른
+    ///   계약을 지목하면 안 된다(`Ledger::match_contract_for_replier` doc).
+    /// ★락 규율★: 짧은 단독 락 구간에서 장부만 만지고, 로깅은 락을 놓은 뒤 한다.
+    // ADR-0116 (결정 2) / ADR-0118 (결정 1·3) / 리뷰 fix D4
+    fn fail_reply_contract(
+        &self,
+        in_reply_to: &str,
+        replier_name: &str,
+        replier_id: PeerId,
+        allow_name_fallback: bool,
+    ) {
+        let outcome = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            st.ledger.fail_on_undeliverable_reply(
+                in_reply_to,
+                replier_name,
+                replier_id,
+                allow_name_fallback,
+            )
         };
         match outcome {
-            ReplyOutcome::Closed => {}
-            ReplyOutcome::ClosedHistoryAnomaly { from } => tracing::warn!(
-                in_reply_to,
-                history_status = ?from,
-                "회신으로 계약은 닫혔으나 이력이 Replied 로 전이 못 함(불법 간선) — 계약 정본은 추적, 이력만 미반영(ADR-0103)"
-            ),
-            ReplyOutcome::NoMatch => tracing::debug!(
+            ReplyFailOutcome::Failed => tracing::info!(
                 in_reply_to,
                 replier = %replier_name,
-                "reply_to 가 이 회신자의 오픈된 request 를 가리키지 않음 — 메시지는 정상 배달, 닫힌 계약 없음(spec §3 항목 7-②)"
+                "회신이 도달 불가 확정(요청자 이름이 어디에도 없음) — 계약을 reply_failed 로 실패 종결(오픈 목록·기한 스윕·512 계수에서 제거, 이력 잔존 — ADR-0116 결정 2)"
             ),
-            ReplyOutcome::AlreadyClosed => tracing::debug!(
+            ReplyFailOutcome::NoMatch => tracing::debug!(
                 in_reply_to,
                 replier = %replier_name,
-                "이미 닫힌 계약에 대한 추가 회신 — 메시지는 정상 배달, no-op(spec §3 항목 7-③)"
+                "reply_to 가 이 회신자의 오픈 계약을 가리키지 않음 — 종결할 계약 없음(정상 경로, spec §3 항목 7-②)"
             ),
+            ReplyFailOutcome::AlreadyClosed => tracing::debug!(
+                in_reply_to,
+                replier = %replier_name,
+                "이미 종결된 계약 — 되돌리지 않는다(no-op, spec §3 항목 7-③/7-④)"
+            ),
+            ReplyFailOutcome::GuardHeld => tracing::debug!(
+                in_reply_to,
+                replier = %replier_name,
+                "잠정·은퇴 예정 표시 계약이라 실패 종결을 적용하지 않음 — 수명은 그 가드 소유(ADR-0118 결정 3, 무동작)"
+            ),
+        }
+    }
+
+    /// ★프로필 삭제 일괄 정리(spec §5 · ADR-0116 결정 3)★ — 호스트(데몬)가 프로필을 지운 **직후** 부른다.
+    ///
+    /// ★발동 조건 = 삭제 ∧ **그 프로필 id 의 세션이 살아 있지 않음** ∧ **그 이름을 지닌 산 세션도 없음**
+    ///   (사용자 결정 2026-07-30 · 리뷰 fix D1 = id 축 · 리뷰 fix N1 = 이름 축 — load-bearing)★: 프로필 삭제
+    ///   커맨드는 실행 중 세션을 죽이지 않으므로 "트리 항목만 지웠고 프로세스는 살아 있는" 상태가 존재한다.
+    ///   그 상대는 **곧 idle 이 되면 받을 수 있는 산 수신자**라 정리 대상이 아니다 — 정리하면 배달될 메일을
+    ///   죽이고 성립할 계약을 실패로 적는다(이 개정 취지의 정반대). 그 세션이 실제로 사라지는 시점엔 프로필도
+    ///   없으므로 자연히 "없음" 부류로 수렴한다.
+    /// ★게이트는 **두 축**이고 둘 다 "죽었다" 여야 정리가 발동한다(load-bearing)★ — 술어는 양쪽 모두
+    ///   **산 명단**(`Running|Exiting`)이다:
+    ///   - **① id 축(`is_agent_live(profile_id)`) — 개명 면역**: 이 함수는 프로필이 **지워진 뒤** 불리는데,
+    ///     프로필이 없으면 그 산 세션의 canonical 이름이 `display_name` → `basename(session.cwd)` 로
+    ///     **바뀐다**. 그래서 삭제 전에 뽑은 이름(= `display_name`)으로만 삭제 후 명단을 찾으면 절대 매치되지
+    ///     않고 정리가 **항상** 발동한다 — `RenameProfile` 한 번이면 재현되는 평범한 경로다.
+    ///   - **② 이름 축(`live_agents()` 에 그 이름이 있나) — 파괴의 축이 이름이기 때문이다(리뷰 fix N1)**:
+    ///     아래가 지우는 것은 id 가 아니라 **이름 전체**(`purge_recipient(name)` ·
+    ///     `fail_open_requests_from(name)`)다. 그래서 id 축만 보면 **그 이름을 공유하는 다른 산 세션**의
+    ///     파킹 메일이 `RECIPIENT_DELETED`(그 수신자는 삭제되지 않았으니 **거짓 사유**)로 죽고, 그가 요청자인
+    ///     오픈 계약이 `reply_failed` 로 닫혀 대기 목록·기한 통지에서 사라진다 — ADR-0118 결정 2·spec §5 가
+    ///     금지한 그 결말이고, 유계 잔여로 문서화된 적도 없다. **재현은 지원되는 조작뿐이다**(이름 유일성
+    ///     강제는 ADR-0115 소관이라 아직 없다): 프로필 둘을 같은 `display_name` 으로 개명 → 한쪽만 스폰 →
+    ///     잠든 쪽을 삭제하면 id 축은 거짓이라 통과한다.
+    ///   - **왜 fail-safe(건너뛰기) 방향인가**: 건너뛴 정리의 잔여는 **이미 문서화된 결말**(삭제 시점 단발 +
+    ///     TTL 24h `expired` — 아래 항목)이다. 반대 방향(오정리)은 산 에이전트의 배달될 메일·계약을 죽이는
+    ///     비가역 손실이다. 두 축의 port 호출이 원자적이지 않은 것도 같은 이유로 무해하다 — 그 사이 명단이
+    ///     바뀌면 결과는 "건너뜀"(안전) 쪽으로만 기울고, 정리는 **양쪽 다 죽었을 때만** 나온다.
+    ///   - 두 축 어디에도 **capability 조건이 없다**: 게이트가 묻는 것은 "아직 받을 가능성이 있나" 이고, 턴
+    ///     신호가 없는 세션도 (게이트 없이) 받는다(ADR-0116 결정 7). 로스터 술어와 같은 `Running|Exiting` 이다.
+    /// ★그래도 이름은 필요하다(파킹은 이름 키다)★: 큐·장부·계약의 축은 canonical 이름이므로 정리 대상은
+    ///   이름으로 지목한다. 그 이름은 **삭제 전에** 파생돼야 한다(삭제 후엔 파생 재료가 없다) — 호출자 의무.
+    /// ★하는 일 두 가지★: ① 그 이름 앞 **파킹분 전량**을 `failed` + `RECIPIENT_DELETED` 로 종결(장부 종점 +
+    ///   조회 힌트 — 대기열에서만 사라지고 이력은 남아 발신자가 `messages{id}` 로 사유를 본다. "산 메일
+    ///   조용히 버리기 금지" 불변식 유지) ② 그 이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결(회신
+    ///   도달 불가 확정). 이미 `replied` 인 계약은 되돌리지 않고, **회신자 쪽이 삭제된 계약은 유지**한다
+    ///   (발신자는 기한 통지로 무응답을 알게 되는 기존 경로가 살아 있다).
+    /// ★삭제 시점 **단발**이다 — 재평가 트리거를 두지 않는다(정직 명시 · spec §5)★: 발동 조건은 삭제 그
+    ///   순간에만 평가된다. 그래서 ⓐ 판정과 파킹 삽입 사이에 삭제가 끼면 그 항목은 이 스캔을 놓치고 ⓑ 프로필만
+    ///   지운 산 세션이 나중에 죽어도 거둬갈 사건이 없다 — **그 잔여의 결말은 TTL 24h `expired`** 이고
+    ///   `RECIPIENT_DELETED` 가 아니다(알고 수용한 성질). 대칭 트리거·삽입 시점 tombstone 은 **비채택**
+    ///   (ADR-0116 거부한 대안) — 되살리려면 새 결정이 먼저다.
+    /// ★락 규율(ADR-0006)★: 산 명단 판정은 **락 밖**(port 호출)이고, 그 뒤 한 락 구간에서 큐 정리 + 장부
+    ///   전이 + 계약 종결을 끝내고 로깅은 락을 놓은 뒤 한다. ★호출자 의무 둘★: ① **프로필 레지스트리 락을
+    ///   해제한 뒤에** 부른다(레지스트리 락 보유 중 메시징 락을 잡으면 락 순서가 뒤집힌다 — spec §5)
+    ///   ② `name` 은 **프로필 제거 전에** `AgentProfile::canonical_name_when_live()` 로 파생한 값이어야 한다
+    ///   (제거 후엔 파생 재료 자체가 없고, 그 값이 파킹 키다).
+    /// ★반환★: 관측·테스트용 요약(무엇을 얼마나 치웠나). 조건 미성립이면 `skipped_live = true` 이고 나머지는 0.
+    // ADR-0116 (결정 3) / ADR-0118 (결정 3 — 가드 우선) / 리뷰 fix D1 (id 축) / 리뷰 fix N1 (이름 축)
+    pub fn handle_profile_deleted(&self, profile_id: PeerId, name: &str) -> ProfileDeletedOutcome {
+        // 1-a) id 축 — **그 프로필 id 의 세션이 살아 있나**(락 밖 port 호출). id 이므로 개명
+        //      (`RenameProfile`)에도, 프로필 제거로 이름이 바뀌는 것에도 흔들리지 않는다(위 doc ①).
+        if self.port.is_agent_live(profile_id) {
+            tracing::debug!(
+                deleted = %name,
+                profile = %profile_id,
+                "프로필 삭제 정리 건너뜀 — 그 프로필의 세션이 아직 살아 있다(트리 항목만 지운 상태). 파킹분·계약은 그대로 두고 idle 전이 시 정상 배달된다(spec §5)"
+            );
+            return ProfileDeletedOutcome {
+                skipped_live: true,
+                ..Default::default()
+            };
+        }
+        // 1-b) ★이름 축(리뷰 fix N1 — load-bearing)★: 아래 정리는 id 가 아니라 **이름 전체**를 지운다
+        //      (`purge_recipient`/`fail_open_requests_from`). 그 이름을 지닌 산 세션이 하나라도 있으면
+        //      **통째로 건너뛴다** — 안 그러면 삭제되지 않은 동명 산 세션의 파킹 메일이 `RECIPIENT_DELETED`
+        //      (거짓 사유)로 죽고 그가 요청자인 오픈 계약이 `reply_failed` 로 닫힌다(위 doc ②).
+        //      ★`live_agents()` 를 쓰는 이유★: 이름 축엔 산 명단만 필요하다 — `addressing_sources()` 는
+        //      잠든 이름 파생(경우에 따라 fs 접근)이 딸린 **발송용** 한 장이라 게이트가 살 이유가 없다.
+        //      비교는 로스터 해석과 같은 **정확 일치**다(`resolve_live`/`push_recipient` 와 같은 축).
+        if let Some(alive) = self.port.live_agents().into_iter().find(|a| a.name == name) {
+            tracing::debug!(
+                deleted = %name,
+                profile = %profile_id,
+                live_id = %alive.id,
+                "프로필 삭제 정리 건너뜀 — 같은 canonical 이름의 **다른 산 세션**이 있다(과도기 동명 — ADR-0115 전). 이름 축으로 지우면 그 산 세션의 메일·계약이 죽는다(리뷰 fix N1). 잔여는 삭제 시점 단발 + TTL 24h 소관(spec §5)"
+            );
+            return ProfileDeletedOutcome {
+                skipped_live: true,
+                ..Default::default()
+            };
+        }
+
+        let now = Instant::now();
+        // 락 안에서 모으고 락 밖에서 찍는 사실들(모듈 헤더 락 규율).
+        let mut evicted: Vec<EvictedTransition> = Vec::new();
+        let mut illegal = 0usize;
+        let (purged, contracts) = {
+            let mut st = self.state.lock().expect("messaging state poisoned");
+            let purged = st.mailbox.purge_recipient(name);
+            for m in &purged {
+                // ★`pending → failed`(삭제 정리 한정 간선 — spec §6)★: 전용 동사라 범용 전이로는 못 만든다.
+                match st.ledger.fail_pending(
+                    &m.msg_id,
+                    name,
+                    FailCode::RecipientDeleted.as_str(),
+                    now,
+                ) {
+                    Ok(()) => {}
+                    // 레코드가 이력 링에서 이미 밀려남 — 제거 사실은 로그로만 남는다(best-effort, spec §5).
+                    Err(TransitionError::NotFound) => evicted.push(EvictedTransition {
+                        msg_id: m.msg_id.clone(),
+                        recipient: name.to_string(),
+                        intended: DeliveryStatus::Failed,
+                    }),
+                    // 큐에 있는 항목의 장부 상태는 `pending` 이어야 한다 — 아니면 회계가 어긋났다는 신호다.
+                    Err(TransitionError::Illegal { .. }) => illegal += 1,
+                }
+            }
+            let contracts = st.ledger.fail_open_requests_from(name);
+            (purged, contracts)
+        };
+
+        log_evicted_transitions(&evicted);
+        if illegal > 0 {
+            tracing::error!(
+                deleted = %name,
+                count = illegal,
+                "삭제 정리: 큐에 있던 항목의 장부 상태가 pending 이 아니었다 — 큐↔장부 회계 어긋남(배선 결함 신호)"
+            );
+        }
+        if !purged.is_empty() || !contracts.failed.is_empty() {
+            tracing::info!(
+                deleted = %name,
+                parked_failed = purged.len(),
+                contracts_failed = contracts.failed.len(),
+                guard_held = contracts.guard_held,
+                "프로필 삭제 정리 — 파킹분을 RECIPIENT_DELETED 로 종결하고 그 이름이 요청자인 오픈 계약을 reply_failed 로 종결(ADR-0116 결정 3)"
+            );
+        }
+        if contracts.guard_held > 0 {
+            tracing::debug!(
+                deleted = %name,
+                held = contracts.guard_held,
+                "삭제 정리: 잠정·은퇴 예정 표시 계약은 건드리지 않았다(수명 = 가드 소유, ADR-0118 결정 3). 재발화 없음 — 잔여는 TTL 소관(spec §5)"
+            );
+        }
+        ProfileDeletedOutcome {
+            skipped_live: false,
+            failed_parked: purged.len(),
+            failed_contracts: contracts.failed.len(),
+            guard_held_contracts: contracts.guard_held,
         }
     }
 
@@ -1295,7 +1755,7 @@ impl MessagingService {
         // ★execution-time 재해석(finding 2)★: enqueue 시점 (name,id) 는 stale 가능 — 지금 로스터로 재확인.
         //   port 호출이라 messaging 락 밖(모듈 헤더 규율). ★로스터 스냅샷은 1회만 뜬다★ — 이름 유일성
         //   판정과 아래 id-힌트 생존 판정이 **같은 스냅샷**을 봐야 배치 안에서 판정이 흔들리지 않는다.
-        let roster = self.port.live_reachable_agents();
+        let roster = self.port.live_agents();
         let name_target = unique_reachable_in(&roster, recipient);
 
         let now = Instant::now();
@@ -1545,6 +2005,8 @@ impl MessagingService {
                             id: to_id,
                             name: recipient.to_string(),
                             epoch: outcome.epoch,
+                            // 관측 레코드는 턴 신호 축을 쓰지 않는다(배달 사실만 싣는다) — 값은 무의미하다.
+                            turn_signal: false,
                         };
                         // in_reply_to = 파킹 payload 가 실어 온 SendMeta.reply_to(구조화 출처, F1) — 늦은
                         //   배달도 즉시 배달과 같은 파라미터 스레딩 규율(봉투 재파싱 없음).
@@ -1695,7 +2157,7 @@ impl MessagingService {
     /// ★락 규율(load-bearing)★: 만료 전이·due 산출은 **한 락 구간**(순수 조작)에서 끝내고, notice 파킹은
     ///   **락을 놓은 뒤** 한다 — 파킹 전 로스터 조회가 DeliveryPort 호출이라 락 안에서 부르면 모듈 헤더의
     ///   절대 규율(messaging 락 보유 중 port 금지)을 어겨 락 순서 역전 위험이 생긴다.
-    /// ★로스터는 **틱당 한 번**만 뜬다(리뷰 fix 8)★: 예전엔 due 항목마다 `live_reachable_agents`(= 전 세션
+    /// ★로스터는 **틱당 한 번**만 뜬다(리뷰 fix 8)★: 예전엔 due 항목마다 `live_agents`(= 전 세션
     ///   순회)를 다시 불러, 한 틱 안에서 항목별로 **다른 스냅샷**을 보고 판정했다(같은 틱인데 앞 항목은
     ///   배달, 뒤 항목은 부재로 갈릴 수 있었다). 한 번 떠서 전 항목에 같은 스냅샷을 쓴다 — 비용도 O(due)
     ///   에서 O(1) 로 준다. due 가 비면 아예 뜨지 않는다(대부분의 틱).
@@ -1751,7 +2213,7 @@ impl MessagingService {
             return;
         }
         // 락 밖 · 틱당 1회 스냅샷(위 주석). 아래 전 항목이 이 한 장으로 판정한다.
-        let roster = self.port.live_reachable_agents();
+        let roster = self.port.live_agents();
         for d in due {
             // spec §1 notice 템플릿(한국어 계약 — 문구를 바꾸면 프라이밍·수용 기준과 어긋난다).
             //   기한 표기는 **발신자가 쓴 원본**을 그대로 쓴다(fix 6 — 봉투 `reply-by` 와 어긋나지 않게).
@@ -1999,6 +2461,23 @@ impl MessagingService {
         st.ledger.tracking_len()
     }
 
+    /// ★관측/테스트용(4차) — 계약 축 종점 어휘★: `awaiting_reply` | `replied` | `reply_failed`(추적에 없으면
+    ///   `None`). `replied` 와 `reply_failed` 는 오픈 목록·기한 스윕·상한 계수에서 **똑같이 빠지므로** 그
+    ///   축으로는 구분되지 않는다 — "수용은 완료로, 도달 불가 확정만 실패로"(spec §3 항목 7-④)와 "삭제 정리는
+    ///   `replied` 를 되돌리지 않는다" 를 단언하려면 사유 자체를 봐야 한다.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn contract_outcome_for_test(&self, msg_id: &str, recipient: &str) -> Option<&'static str> {
+        let st = self.state.lock().expect("messaging state poisoned");
+        st.ledger.contract_outcome_for_test(msg_id, recipient)
+    }
+
+    /// 관측/테스트용(리뷰 fix D4) — 그 계약에 박힌 수신자 id(`None` = 이름 귀속 구간 = 잠듦 파킹).
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn contract_recipient_id_for_test(&self, msg_id: &str, recipient: &str) -> Option<PeerId> {
+        let st = self.state.lock().expect("messaging state poisoned");
+        st.ledger.contract_recipient_id_for_test(msg_id, recipient)
+    }
+
     /// 관측/테스트용(C2) — 그 계약 키가 **추적 목록에 아직 있나**(닫힘·은퇴 표시 무관). 은퇴는 **표시**일
     ///   뿐이고 물리 제거는 커밋에서 일어나므로, 이 값이 잠정 창을 직접 관측하는 축이다(이력 링과 무관하다 —
     ///   `msg_id_in_use` 는 4096 링 때문에 창이 닫힌 뒤에도 true 라 그 창을 관측하지 못한다).
@@ -2146,6 +2625,11 @@ impl MessagingService {
                 status: status_label(r.status),
                 age_secs: secs_since(r.created_at, now),
                 updated_secs_ago: secs_since(r.transitioned_at, now),
+                // ★조회 시점 코드 + 힌트(spec §6 — `RECIPIENT_DELETED`)★: 발송 응답이 아니라 여기서 처음
+                //   보이는 종점이라, 코드만으로 끝내지 않고 다음 행동까지 실어 준다(힌트 문구 = `row_hint`
+                //   단일점 — 장부는 코드만 보관한다).
+                code: r.fail_code,
+                hint: r.fail_code.and_then(row_hint),
             })
             .collect();
         Some(MessageStateView {
@@ -2236,10 +2720,11 @@ impl MessagingService {
 ///   그대로 남으므로, id 가 있으면 id 가 유일 기준이다.
 /// ★왜 epoch 는 안 보나★: 같은 에이전트의 재시작은 PeerId 를 유지하고 epoch 만 올린다(ADR-0007). 재시작한
 ///   그 에이전트는 여전히 답할 주체이므로 epoch 로 좁히면 의무가 부당하게 사라진다.
-/// ★id 가 없으면 이름 폴백(ADR-0101 WYSIWYA)★: 아직 뜨지 않은 이름 앞으로 건 request 는
-///   나중에 그 이름으로 등장한 에이전트가 답할 주체다. ★단 개편(ADR-0111 결정 1) 이후 admitted 수신자의
-///   계약은 **항상 id 를 든다** — 이 폴백이 실제로 쓰이는 자리는 "스폰 전 선지시" 가 아니라(그 기능은 폐지)
-///   레거시/테스트 경로뿐이다.
+/// ★id 가 없으면 이름 폴백(ADR-0101 WYSIWYA)★: 아직 뜨지 않은 이름 앞으로 건 request 는 나중에 그 이름으로
+///   등장한 에이전트가 답할 주체다. ★4차부터 이 폴백은 **운영 경로다**(ADR-0116 결정 1)★ — 잠든 수신자에게
+///   건 request 는 산 incarnation 이 없어 `recipient_id = None` 으로 열리므로, 복원 전까지 의무 귀속이
+///   이름으로만 성립한다(복원 후 실제 배달 시점에 `rebind_request_recipient` 가 착지 id 를 박아 그 뒤로는
+///   id 축이 정본이 된다). 3차 서술("admitted 계약은 항상 id 를 든다 — 폴백은 레거시/테스트뿐")은 폐기.
 /// ★의도된 귀결★: 계약이 가리키던 incarnation 이 죽고 **다른** 에이전트가 같은 이름으로 뜨면 그 새 에이전트는
 ///   의무를 물려받지 않는다 — 그는 그 메시지를 받은 적이 없어 답할 수가 없다(모르는 요청을 떠안기는 쪽이 더
 ///   나쁘다). 발신자 쪽 `awaiting_their_reply` 는 그대로 남아 기한 초과 통지로 귀결된다.
@@ -2298,12 +2783,32 @@ pub struct MessageStateView {
 pub struct DeliveryRowView {
     /// 이 줄의 수신자 이름.
     pub to: String,
-    /// 상태 어휘(pending|delivered|replied|expired|skipped).
+    /// 상태 어휘(pending|delivered|replied|expired|failed|skipped).
     pub status: &'static str,
     /// 발송(레코드 생성)으로부터 경과 초.
     pub age_secs: u64,
     /// 마지막 상태 전이로부터 경과 초.
     pub updated_secs_ago: u64,
+    /// ★실패 사유 코드(4차 — spec §6)★. 지금 채워지는 경로는 **삭제 정리**(`RECIPIENT_DELETED`) 하나다:
+    ///   발송 시점엔 `pending` 이었고 이 코드는 사후에 찍히므로 **조회에서 처음 보인다**. 입구 반려 계열의
+    ///   `failed` 행은 발송 응답이 이미 code/hint 를 전달했으므로 여기선 `None` 이다.
+    pub code: Option<&'static str>,
+    /// 그 코드의 자기교정 힌트(코드가 있을 때만) — 발신 LLM 이 다음 행동(재발송 무의미 → 사용자 보고)을
+    ///   코드만 보고도, 힌트까지 보면 확실히 알게 하는 것이 요구사항이다(spec §6).
+    pub hint: Option<String>,
+}
+
+/// 조회 행의 코드 → 힌트 문구(**단일점** — 장부는 코드만 보관하고 문구는 여기서만 만든다).
+///
+/// ★왜 문구를 저장하지 않나★: 레코드마다 문자열을 들면 이력 링(4096)의 메모리가 근거 없이 늘고, 문구를
+///   고칠 때 이미 저장된 옛 문구가 남아 두 표현이 공존한다. 코드가 안정 계약이고 문구는 표현이므로, 표현은
+///   조회 시점에 만든다.
+fn row_hint(code: &'static str) -> Option<String> {
+    match code {
+        c if c == FailCode::RecipientDeleted.as_str() => Some(deleted_hint()),
+        // 다른 코드는 조회 축에 힌트를 두지 않는다(발송 응답이 이미 전달했다 — 위 필드 주석).
+        _ => None,
+    }
 }
 
 /// 미결 항목의 **방향**(spec §6 무인자 조회). 세 갈래는 처방이 달라 반드시 구분해 노출한다.
@@ -2361,7 +2866,10 @@ enum RecipientPlan<'a> {
     /// 파킹 예정 — pass B 가 실제 파킹을 끝내고, 락 밖에서 도어벨만 누른다.
     Park {
         hint: String,
-        doorbell: PeerId,
+        /// ★누를 도어벨(`None` = 잠듦 파킹 — ADR-0116 결정 1)★: busy·주입 실패 파킹은 산 incarnation 을
+        ///   알아 그 id 로 flush 를 깨우지만, 잠듦은 **누를 대상이 없다**(그래서 park 항목의 `hinted_id` 도
+        ///   `None` 이고, 배달 계기는 재등장 시 로스터 diff 가 여는 **이름 큐** flush 뿐이다).
+        doorbell: Option<PeerId>,
         contract: PendingContract<'a>,
     },
     /// 이 수신자만 실패(장부 종점 기록 완료) — 락 밖에서 할 일 없음. 나머지 수신자는 그대로 간다.
@@ -2567,11 +3075,17 @@ struct ResolvedRecipient {
     ///   단계에서 `key` 로 다시 풀면 **exact-PeerId 지목이 이름 해석으로 강등**돼, 동명 다수를 의도적으로
     ///   통과하던 id 지목이 `RECIPIENT_AMBIGUOUS` 로 뒤집힌다(같은 스냅샷인데 답이 갈리는 자기모순).
     target: Option<LiveAgent>,
-    /// 그 이름을 지금 달고 있는 산 에이전트 수 — 실패 사유를 부재(0)와 동명 다수(2+)로 가르는 축.
+    /// 그 이름을 지금 달고 있는 **로스터** 에이전트 수 — 실패 사유를 로스터 밖(0)과 동명 다수(2+)로 가르는 축.
     live_count: usize,
-    /// ★자기 행을 가질 수 없는 중복 지목(M3 · TODO(ratify))★ — `Some(접힌 키)` 면 이 토큰은 **다른 실체**를
-    ///   가리키는데 park/장부 키(= 이름)가 앞선 행과 같아 자기 자리를 만들 수 없다. 그 사실을
+    /// ★같은 이름으로 파생되는 **잠든 프로필** 수(spec §5 분기 3 · 잠듦 층 동명 차단)★ — **로스터에 없을
+    ///   때만** 계산한다(그 전에 판정이 끝나면 0). `1` = 잠듦 파킹 · `2+` =
+    ///   `RECIPIENT_AMBIGUOUS`(이름 키 파킹은 "먼저 복원된 쪽이 조용히 받는" 구멍을 만든다) · `0` = 없음.
+    // ADR-0116 (결정 1 — 잠듦 파킹 · 잠듦 층 동명)
+    dormant_count: usize,
+    /// ★자기 행을 가질 수 없는 중복 지목(M3 — 과도기 방어, ADR-0116 결정 5)★ — `Some(접힌 키)` 면 이 토큰은
+    ///   **다른 실체**를 가리키는데 park/장부 키(= 이름)가 앞선 행과 같아 자기 자리를 만들 수 없다. 그 사실을
     ///   `RECIPIENT_AMBIGUOUS` **실패 행**으로 드러낸다(조용히 사라지지 않게 — `push_recipient` 주석).
+    ///   정책으로 승격하지 않는다(동명이인 미지원 · 뿌리 제거 = ADR-0115). 재가 대기 상태가 아니다.
     dup_of: Option<String>,
 }
 
@@ -2619,12 +3133,16 @@ fn resolve_addressing(
     groups: &dyn GroupSource,
     to: &[String],
     from: SenderIdentity,
-    roster: &[LiveAgent],
+    sources: &AddressingSources,
 ) -> Result<Addressing, SendReject> {
-    // `@` 펼침이 볼 live 명단 = 스냅샷 이름 verbatim − **발신자 자신의 incarnation**(id 기준).
+    // `@` 펼침이 볼 명단 = **로스터** 이름 verbatim − **발신자 자신의 incarnation**(id 기준).
+    //   ★잠든 이름은 들어오지 않는다(ADR-0116)★: 방송 = "지금 있는 전원" 이고, 잠든 상대에게 쌓아두는 것은
+    //   *직접 지목*의 의미다(spec §4 명단 소스). ★턴 신호 없는 산 세션은 **들어온다**★ — 로스터 자격에
+    //   capability 조건이 없으므로(ADR-0116 결정 7) 방송이 그 부류를 빼지 않는다(게이트 없이 즉시 주입된다).
     //   ★id 로 빼는 이유★: 이름은 겹칠 수 있어 동명 타인까지 함께 빠지면 안 된다(그 타인은 동명 규칙으로
     //   따로 판정된다 — ADR-0114 결정 4).
-    let live_names: Vec<String> = roster
+    let live_names: Vec<String> = sources
+        .roster
         .iter()
         .filter(|a| a.id != from.peer_id)
         .map(|a| a.name.clone())
@@ -2650,14 +3168,14 @@ fn resolve_addressing(
                 keys: Vec::new(),
             });
         } else {
-            let key = push_recipient(&mut recipients, token.to_string(), roster);
+            let key = push_recipient(&mut recipients, token.to_string(), sources);
             tokens.push(AddressToken::Name { key });
         }
     }
     // 사전순(동률이면 토큰 순서) — 결정성 고정.
     expanded.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     for (i, name) in expanded {
-        let key = push_recipient(&mut recipients, name, roster);
+        let key = push_recipient(&mut recipients, name, sources);
         // 그 `@`토큰이 기여한 키로 기록한다 — **중복 제거로 흡수됐어도** 기록한다(A5: 흡수 ≠ 실패).
         if let AddressToken::Group { keys, .. } = &mut tokens[i] {
             if !keys.contains(&key) {
@@ -2677,21 +3195,23 @@ fn resolve_addressing(
 /// 해석된 수신자 1명을 행 목록에 추가하고 **그 수신자의 park 키**를 돌려준다 — 키 기준 중복 제거.
 ///
 /// ★중복 제거 = 먼저 나온 자리를 남긴다(spec §5)★ — 겹친 수신자의 **행 위치**는 명시 지목 자리를 따른다.
-/// ★자기 행을 못 갖는 중복은 **보이게 실패시킨다**(M3 · TODO(ratify))★: 두 토큰이 **서로 다른 산 실체**를
+/// ★자기 행을 못 갖는 중복은 **보이게 실패시킨다**(M3)★: 두 토큰이 **서로 다른 산 실체**를
 ///   exact-id 로 지목했는데 그 둘의 canonical 이름이 같으면(동명), 뒤 토큰은 park·장부 키를 앞 행과 공유할 수
 ///   없어 자기 자리를 만들 수 없다 — 옛 구현은 그 토큰을 **행 없이 조용히 삼켰다**(spec §6 "수신자 1명 = 1행"
-///   위반이고, `RECIPIENT_AMBIGUOUS` hint 가 "exact id 로 다시 보내라" 고 가르치는 바로 그 시도가 무음으로
-///   실패한다). 실체 키 병행 트랙은 비용 과다로 거부됐으므로(ADR-0114 거부 대안), **가시적 실패**로 강등한다.
-/// ★단 하나의 예외: 해석된 쪽이 이긴다(A8 · TODO(ratify))★ — 두 토큰이 같은 키로 접힐 때 한쪽만
-///   `target` 을 갖고 있으면(= exact-PeerId 지목은 동명 다수를 의도적으로 통과한다) **행 위치는 앞선 것을
-///   유지하면서 해석 결과만 그쪽으로 갈아끼운다**. 왜: 그러지 않으면 `["dup", "<dup1의 id>"]` 가
-///   `RECIPIENT_AMBIGUOUS` 로 끝나고, 그 행의 hint("exact agent id 로 다시 보내라")가 **같은 `to` 에 id 를
-///   덧붙인 발신자에게는 거짓말**이 된다(순서를 뒤집으면 배달되는 비대칭도 함께 생긴다). 표기(`display`)는
-///   먼저 쓴 것을 남긴다 — 응답의 `to` 는 발신자가 처음 쓴 표기라는 WYSIWYA 계약을 지킨다.
+///   위반). 실체 키 병행 트랙은 비용 과다로 거부됐으므로(ADR-0114 거부 대안), **가시적 실패**로 강등한다.
+/// ★단 하나의 예외: 해석된 쪽이 이긴다(A8)★ — 두 토큰이 같은 키로 접힐 때 한쪽만 `target` 을 갖고 있으면
+///   (= exact-PeerId 지목은 동명 다수를 의도적으로 통과한다) **행 위치는 앞선 것을 유지하면서 해석 결과만
+///   그쪽으로 갈아끼운다**. 왜: 그러지 않으면 `["dup", "<dup1의 id>"]` 가 `RECIPIENT_AMBIGUOUS` 로 끝나고,
+///   순서를 뒤집으면 배달되는 비대칭이 생긴다. 표기(`display`)는 먼저 쓴 것을 남긴다 — 응답의 `to` 는
+///   발신자가 처음 쓴 표기라는 WYSIWYA 계약을 지킨다.
+/// ★위 두 규칙의 지위(ADR-0116 결정 5 — 재가 완료)★: **정책으로 승격하지 않는다**(spec 문구화 없음).
+///   동명이인 자체가 **미지원**이고 뿌리 제거는 ADR-0115(스폰 이름 유일성)가 한다 — 그때까지 이 코드는
+///   "조용한 행 소멸 방지" 라는 **과도기 방어**로만 존치한다(그래서 힌트도 exact-id 재발송을 가르치지 않고
+///   사용자 에스컬레이션을 가리킨다 — `ambiguous_hint`). 사용자 재가 대기 상태가 아니다.
 fn push_recipient(
     recipients: &mut Vec<ResolvedRecipient>,
     display: String,
-    roster: &[LiveAgent],
+    sources: &AddressingSources,
 ) -> String {
     // ★① 같은 **raw 토큰**을 두 번 적었으면 행은 하나다(F2-a)★: 표기가 글자 그대로 같으면 정보가 0 인
     //   중복이다. 이 검사를 앞에 두지 않으면 반복된 exact-id 토큰이 아래 M3 갈래를 매번 새로 타서 **같은
@@ -2699,7 +3219,7 @@ fn push_recipient(
     if let Some(existing) = recipients.iter().find(|r| r.display == display) {
         return existing.key.clone();
     }
-    let target = resolve_live(&display, roster);
+    let target = resolve_live(&display, &sources.roster);
     let key = target
         .as_ref()
         .map(|a| a.name.clone())
@@ -2711,15 +3231,19 @@ fn push_recipient(
         .iter()
         .position(|r| r.dup_of.is_none() && r.key == key)
     {
-        // TODO(ratify): 아래 두 규칙(해석 우선 · 중복 실체의 가시적 실패)은 리뷰 라운드의 **잠정 정책
-        //   선택**이다(사용자 재가 대기 — A8/M3).
+        // ★아래 두 규칙(해석 우선 · 중복 실체의 가시적 실패) = 과도기 **방어**다(ADR-0116 결정 5 — 정책
+        //   비승격, ADR-0115 로 사문화 예정). 위 함수 doc 이 그 지위의 정본이다.
         let existing_target = recipients[pos].target.as_ref().map(|a| a.id);
         let new_target = target.as_ref().map(|a| a.id);
         match (existing_target, new_target) {
             // A8: 앞 행이 해석되지 않았고 이 토큰이 해석됐다 → 행 자리는 유지하고 해석만 갈아끼운다.
             (None, Some(_)) => {
-                recipients[pos].live_count = roster.iter().filter(|a| a.name == key).count();
+                recipients[pos].live_count =
+                    sources.roster.iter().filter(|a| a.name == key).count();
                 recipients[pos].target = target;
+                // 로스터로 해석됐으므로 로스터 밖 축(잠듦)은 더 이상 의미가 없다 — 지운다.
+                //   (안 지우면 앞 행이 잠듦으로 판정됐던 흔적이 남아 3분기가 두 갈래를 동시에 본다.)
+                recipients[pos].dormant_count = 0;
             }
             // M3: 둘 다 해석됐는데 **다른 실체**다 → 뒤 토큰은 자기 행을 만들 수 없으니 보이게 실패시킨다.
             (Some(e), Some(n)) if e != n => {
@@ -2729,6 +3253,7 @@ fn push_recipient(
                     display,
                     target: None,
                     live_count: 0,
+                    dormant_count: 0,
                     dup_of: Some(key),
                 });
                 // 봉투 `to` 판정이 이 토큰을 "수용" 으로 세지 않게 **loser 키**를 돌려준다(이름 공간 밖이라
@@ -2740,12 +3265,21 @@ fn push_recipient(
         }
         return key;
     }
-    let live_count = roster.iter().filter(|a| a.name == key).count();
+    let live_count = sources.roster.iter().filter(|a| a.name == key).count();
+    // ★잠듦 축은 **로스터 판정이 끝난 뒤에만** 계산한다(spec §5 분기 순서 — 산 쪽이 이긴다)★:
+    //   로스터로 해석됐거나(target) 로스터 동명(live_count ≥ 2)이면 결말이 이미 정해졌으므로 프로필 층을
+    //   보지 않는다. 그래야 "산 1 + 잠든 1 동명 → 산 쪽으로 배달" 이 성립한다(잠듦 판정이 끼어들 여지 없음).
+    let dormant_count = if target.is_some() || live_count > 0 {
+        0
+    } else {
+        sources.dormant_names.iter().filter(|n| **n == key).count()
+    };
     recipients.push(ResolvedRecipient {
         display,
         key: key.clone(),
         target,
         live_count,
+        dormant_count,
         dup_of: None,
     });
     key
@@ -2826,6 +3360,123 @@ fn live_names_hint(roster: &[LiveAgent]) -> String {
         .map(|a| a.name.clone())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// ★로스터 밖 수신자의 결말(spec §5 분기 1/3 — ADR-0116 결정 1)★. `Failed` = 실패 행(파킹 없음) ·
+/// `Dormant` = 잠듦 파킹(수용).
+enum AbsentDisposition {
+    Failed { code: FailCode, hint: String },
+    Dormant,
+}
+
+/// ★로스터 밖 수신자를 3분기의 나머지 두 갈래로 가르는 **단일 판정점**(spec §5 · ADR-0116 결정 1)★.
+///
+/// 판정 순서가 곧 정책이다(순서를 바꾸면 결말이 바뀐다):
+///   ① **접힌 중복 지목**(`dup_of`) → `RECIPIENT_AMBIGUOUS`(과도기 방어 — `push_recipient` 헤더)
+///   ② **로스터 동명 다수** → `RECIPIENT_AMBIGUOUS`(산 층)
+///   ③ **잠듦 동명 다수** → `RECIPIENT_AMBIGUOUS`(잠듦 층 — 이름 키 파킹은 "먼저 복원된 쪽이 조용히 받는"
+///      구멍을 만든다)
+///   ④ **잠듦 1개** → 파킹(수용) · ⑤ **아무 데도 없음** → `RECIPIENT_NOT_FOUND`
+/// ★로스터 판정이 이 함수보다 먼저다(호출자)★: 로스터에 있으면 여기 오지 않는다 — 턴 신호가 없어도 그건
+///   배달 대상이다(ADR-0116 결정 7. 옛 `RECIPIENT_UNREACHABLE` 갈래는 폐기 — 되살리지 말 것).
+// ADR-0116 (결정 1 — 3분기 판정)
+fn absent_disposition(r: &ResolvedRecipient, roster_names: &str) -> AbsentDisposition {
+    if let Some(folded) = &r.dup_of {
+        return AbsentDisposition::Failed {
+            code: FailCode::RecipientAmbiguous,
+            hint: format!(
+                "'{}' resolves to a different agent that shares the name '{folded}' with another recipient of this send — the broker addresses mailboxes by name, so only one of them can be a recipient here. {}",
+                r.display, AMBIGUOUS_ESCALATION
+            ),
+        };
+    }
+    if r.live_count >= 2 {
+        return AbsentDisposition::Failed {
+            code: FailCode::RecipientAmbiguous,
+            hint: ambiguous_hint(&r.display, r.live_count, "live"),
+        };
+    }
+    if r.dormant_count >= 2 {
+        return AbsentDisposition::Failed {
+            code: FailCode::RecipientAmbiguous,
+            hint: ambiguous_hint(&r.display, r.dormant_count, "saved"),
+        };
+    }
+    if r.dormant_count == 1 {
+        return AbsentDisposition::Dormant;
+    }
+    AbsentDisposition::Failed {
+        code: FailCode::RecipientNotFound,
+        hint: format!(
+            "No agent named '{}' exists right now — not running and no saved agent by that name, so nothing was queued for it (fix the name, or create/spawn it and send again). Live agents: {roster_names}.",
+            r.display
+        ),
+    }
+}
+
+/// ★회신 발송의 계약 처리 갈래(spec §3 항목 7-④)★ — `handle_send` 6단계가 이 값으로 분기한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyDisposition {
+    /// 수용됨(`delivered`|`pending`) → `replied` 닫힘. **파킹도 수용이다**.
+    Accepted,
+    /// 요청자 이름이 어디에도 없다(`RECIPIENT_NOT_FOUND`) → `reply_failed` 실패 종결.
+    RequesterGone,
+    /// 그 밖의 실패(`MAILBOX_FULL`·`RECIPIENT_AMBIGUOUS`) → **무동작**(오픈 유지).
+    NoOp,
+}
+
+/// ★회신 결말 판정(spec §3 항목 7-④ · ADR-0116 결정 2)★ — 응답 행만 보고 정한다(장부를 다시 보지 않는다).
+///
+/// ★회신은 수신자가 정확히 1명이다(spec §3 항목 7-①, ingress 가 표기 단계에서 강제)★. 그래도 이 함수는
+///   행 목록으로 판정한다 — `handle_send` 는 pub 이라 다른 조립(스모크 bin·미래 입구)이 여러 행으로 부를 수
+///   있고, 그때 "하나라도 수용됐으면 수용" 이 유일하게 안전한 해석이다(회신 하나가 실제로 도착했다면 의무는
+///   이행됐다). ★`RECIPIENT_NOT_FOUND` 는 **전 행이 실패**일 때만 본다★: 한 명에게라도 갔으면 수용이 이긴다.
+// ADR-0116 (결정 2)
+fn reply_disposition(results: &[RecipientResult]) -> ReplyDisposition {
+    if results.iter().any(|r| r.status != SendStatus::Failed) {
+        return ReplyDisposition::Accepted;
+    }
+    if results
+        .iter()
+        .any(|r| r.code == Some(FailCode::RecipientNotFound))
+    {
+        return ReplyDisposition::RequesterGone;
+    }
+    ReplyDisposition::NoOp
+}
+
+/// ★동명 실패 힌트의 공통 꼬리(ADR-0116 결정 5 — 사용자 결정 2026-07-30)★.
+///
+/// ★exact-id 재발송 안내를 **하지 않는다**★: 동명이인 자체가 미지원이므로(뿌리 제거 = ADR-0115) id-구제
+///   흐름을 지원 정책처럼 가르치면 안 된다. 발신 LLM 이 해야 할 일은 재시도가 아니라 **사용자에게 알리는
+///   것**이다 — 재발송은 같은 결과를 반복하고 컨텍스트만 태운다.
+const AMBIGUOUS_ESCALATION: &str = "Duplicate agent names are not supported: do NOT resend this message — tell the user, who can rename or retire one of them.";
+
+/// 동명 다수 실패 행 hint(산 층·잠듦 층 공용 — `layer` 는 사람이 읽을 층 이름).
+///
+/// ★카운트와 라벨이 반드시 같은 층을 가리켜야 한다(리뷰 fix D6-a)★: 산 층은 **로스터 카운트**를 세고
+///   라벨이 `live` 다 — 4차 로스터는 "산 세션 전원"(턴 신호 무관)이므로 그 라벨이 사실과 정확히 맞는다
+///   (3차엔 구조화 조건이 걸려 있어 "live" 가 실제보다 적은 수를 가리켰다). 잠듦 층은 프로필 카운트 +
+///   `saved` 다. 한쪽만 바꾸면 발신자가 "둘이라는데 하나만 보인다" 로 읽는다(spec §5 힌트 라벨 규칙).
+fn ambiguous_hint(display: &str, count: usize, layer: &str) -> String {
+    format!("'{display}' matches {count} {layer} agents, so the broker cannot tell which one you mean — nothing was queued. {AMBIGUOUS_ESCALATION}")
+}
+
+/// ★삭제 정리로 종결된 파킹분의 조회 힌트(spec §6 `RECIPIENT_DELETED`)★ — 이 코드는 발송 응답이 아니라
+/// `messages{id}` 조회에서 처음 보이므로, 코드 옆에 다음 행동까지 실어 준다.
+fn deleted_hint() -> String {
+    "The recipient was deleted while this message was still parked, so it was closed as undelivered — that name no longer exists, resending is pointless. Tell the user if this still matters.".to_string()
+}
+
+/// 잠듦 파킹 hint(spec §5 분기 3 — ADR-0116 결정 1). 발신자가 "왜 pending 인가" 와 결말을 읽게 한다.
+///
+/// ★만료는 조용하다(사용자 결정 2026-07-30 — 알고 수용)★: 아무도 복원하지 않으면 24h TTL 로 `expired` 되고
+///   **발신자에게 능동 통지는 없다**(발송 응답의 `pending` + 이후 `messages` 조회가 전부). 그래서 그 사실을
+///   힌트에 적어 둔다 — 발신 LLM 이 "언젠가 반드시 간다" 로 오독하지 않게.
+fn park_hint_dormant(display: &str) -> String {
+    format!(
+        "'{display}' is not running right now but it is a saved agent — parked; it will be delivered as one batch when that agent is restored. Nobody is notified if it expires first (24h TTL), so check with `messages` if it matters."
+    )
 }
 
 /// busy 파킹 hint(spec §5 분기 3) — 발신자가 "왜 아직 안 갔나" 를 스스로 읽게 한다.
@@ -2952,6 +3603,90 @@ struct DeliverOne<'a> {
     meta: &'a SendMeta,
     /// 이미 조립된 봉투 텍스트(전 수신자 공용 — 한 발송 = 한 봉투).
     wrapped: &'a str,
+}
+
+/// ★회신 계약 닫기를 **수용 기록과 같은 임계구역에서** 끝내는 장치(리뷰 fix D2 — load-bearing)★.
+///
+/// ★막는 것 = "수용됐는데 계약은 `reply_failed`" 라는 되돌림★(재가된 규칙 "수용 = 완료, 되돌림 없음" 위반):
+///   예전 배선은 ① 락 A 에서 회신을 파킹(수용 확정) → 락 해제 → ② 락 B 에서 계약을 `replied` 로 닫았다.
+///   두 락 사이에 **삭제 정리**(`handle_profile_deleted`)가 끼면 그 계약을 요청자 삭제로 `reply_failed` 로
+///   닫아 버리고, 뒤늦은 ②는 `AlreadyClosed` 로 조용히 물러난다 — 결과는 "회신은 `pending` 으로 접수됐는데
+///   계약은 회신 실패" 다. 파킹 수용 경로에는 두 락을 갈라야 할 이유가 **하나도 없다**(파킹은 inject 를
+///   부르지 않는다 = 락 안에서 못 할 일이 없다). 그래서 그 자리에서 닫는다.
+/// ★즉시 배달 경로도 같은 방식으로 닫는다★: inject 자체는 설계상 락 밖이지만, **배달 사실을 장부에 적는
+///   짧은 락**(`deliver_one` 의 `record_with_expected(Delivered)`)이 수용 확정 지점이다. 그 락 안에서 함께
+///   닫으므로 "수용 기록과 계약 닫기가 원자적" 이 배달·파킹·재파킹 **모든 수용 갈래**에서 성립한다.
+///   (대안이었던 "mid-flight 마커로 정리를 막기" 는 새 상태를 도입하고 누출 시 계약이 영영 안 닫히는 위험이
+///   있어 채택하지 않았다 — 여기 방식은 새 상태가 0이다.)
+/// ★멱등★: `done` 이 채워지면 다시 닫지 않는다(다중 수신자 회신에서 첫 수용이 계약을 닫고 나머지는 무동작 —
+///   "하나라도 수용되면 수용" 규칙과 같은 방향, `reply_disposition`).
+/// ★단서 — 멱등이 **결말 종류를 가리지 않는다**(현행 무해 · 미래 함정, 리뷰 fix N-nit)★: `NoMatch`(내 계약이
+///   아님)도 "닫았다" 로 기록돼 뒤 행이 다시 시도하지 않는다. 지금은 무해하다 — 입구가 회신 발송을 **수신자
+///   정확히 1명**으로 강제하므로(`control/ingress.rs` 규칙 2 · spec §3 항목 7-①) 행이 애초에 하나다. 다만
+///   `handle_send` 는 pub 이라 그 강제를 안 타는 호출자가 다중 행 회신을 넣으면 **앞 행의 `NoMatch` 가 뒤 행의
+///   진짜 매치를 가린다**. 다중 행 회신을 허용하려면 이 조건을 성공 결말(`Closed`/`ClosedHistoryAnomaly`)로
+///   좁혀야 한다 — 그때 `NoMatch` 는 "아직 안 닫음" 으로 남겨야 한다.
+/// ★로깅은 락 밖★: 결과만 들고 나와 호출자가 `log_reply_close` 로 찍는다(락 보유 중 tracing 금지).
+// ADR-0116 (결정 2) / ADR-0118 (결정 1·2) / 리뷰 fix D2
+struct ReplyClosing<'a> {
+    /// `Some` = 이 발송이 회신이다(그 계약 id). `None` 이면 이 장치는 통째로 no-op.
+    in_reply_to: Option<&'a str>,
+    replier_name: &'a str,
+    replier_id: PeerId,
+    /// 이름 폴백 허용 여부(리뷰 fix D4 — 동명 산 세션 2개 이상이면 `false`).
+    allow_name_fallback: bool,
+    /// 이미 닫았으면 그 결과(락 밖 로깅용 + 재닫기 차단).
+    done: Option<ReplyOutcome>,
+}
+
+impl ReplyClosing<'_> {
+    /// ★수용이 확정된 그 락 구간에서 계약을 닫는다★ — 호출부는 반드시 `st` 를 **보유한 상태**여야 한다
+    /// (그게 이 장치의 존재 이유다). 회신이 아니거나 이미 닫았으면 아무 것도 하지 않는다.
+    fn close_in_lock(&mut self, st: &mut MessagingState) {
+        let Some(in_reply_to) = self.in_reply_to else {
+            return;
+        };
+        if self.done.is_some() {
+            return;
+        }
+        self.done = Some(st.ledger.close_on_reply(
+            in_reply_to,
+            self.replier_name,
+            self.replier_id,
+            self.allow_name_fallback,
+            Instant::now(),
+        ));
+    }
+}
+
+/// ★회신 계약 닫기 결과 로깅(**락 밖에서만** — 모듈 헤더 규율)★ — 결과에 따라 로깅만 갈린다(배달·응답에는
+/// 영향 없음, spec §3 항목 7-②).
+///
+/// - `Closed` = 정상(그 회신자의 첫 유효 회신). 다른 수신자의 계약은 그대로 열려 있다(전체회신 없음).
+/// - `ClosedHistoryAnomaly` = 계약은 닫혔으나 이력이 `Delivered → Replied` 간선을 못 탐(예: 회신이 원본보다
+///   먼저 처리돼 원본이 아직 `pending`). 계약 정본은 추적이라 그대로 두고 **관측**만 한다.
+/// - `NoMatch`/`AlreadyClosed` = 틀린 id·내 계약이 아님·이미 닫힘. **정상 경로**다(회신 메시지 자체는 이미
+///   배달/파킹됐다) — 발신자에게 새 에러를 만들지 않는다: 고칠 수 없는 상태이고, 반려하면 이미 배달된
+///   메시지에 재시도를 유발해 중복이 난다.
+fn log_reply_close(outcome: ReplyOutcome, in_reply_to: &str, replier_name: &str) {
+    match outcome {
+        ReplyOutcome::Closed => {}
+        ReplyOutcome::ClosedHistoryAnomaly { from } => tracing::warn!(
+            in_reply_to,
+            history_status = ?from,
+            "회신으로 계약은 닫혔으나 이력이 Replied 로 전이 못 함(불법 간선) — 계약 정본은 추적, 이력만 미반영(ADR-0103)"
+        ),
+        ReplyOutcome::NoMatch => tracing::debug!(
+            in_reply_to,
+            replier = %replier_name,
+            "reply_to 가 이 회신자의 오픈된 request 를 가리키지 않음 — 메시지는 정상 배달, 닫힌 계약 없음(spec §3 항목 7-②. 동명 산 세션 다수면 이름 폴백이 금지돼 여기로 온다 — 리뷰 fix D4)"
+        ),
+        ReplyOutcome::AlreadyClosed => tracing::debug!(
+            in_reply_to,
+            replier = %replier_name,
+            "이미 닫힌 계약에 대한 추가 회신 — 메시지는 정상 배달, no-op(spec §3 항목 7-③)"
+        ),
+    }
 }
 
 /// ★장부에 **못 남긴** 종점 전이 1건(C4 리뷰 fix J · round-5 finding 2)★ — 레코드가 이력 링에서 이미
@@ -3404,13 +4139,15 @@ struct DrawnMsgId {
 //   발신자 표기를 원본째 보관하고(ledger.rs `RequestEntry.reply_by`) 통지는 그걸 그대로 쓴다 — 역산 함수가
 //   다시 생기면 같은 불일치가 재발한다.
 
-/// `to`(이름 또는 PeerId 문자열) → 산·도달 가능 수신자(LiveAgent). 매치 규칙(ingress::resolve_recipient
+/// `to`(이름 또는 PeerId 문자열) → **산 수신자**(LiveAgent). 4차 이후 "도달 가능" 은 로스터 자격이 아니다
+///   (턴 신호 없는 산 세션도 로스터에 있다 — ADR-0116 결정 7. 이름만 남은 함수명은 유지: 호출부가 많다).
+///   매치 규칙(ingress::resolve_recipient
 ///   미러 — F2): PeerId 문자열 정확 일치 우선 → 이름 정확 일치. 동명 다수·부재는 여기선 None 으로 접고
 ///   상위(handle_send)가 AMBIGUOUS/파킹을 판정한다.
 ///
 /// ★C1 스코프 = 단일 수신자★: 동명 다수(RECIPIENT_AMBIGUOUS)는 상위가 로스터로 판정(파킹 전에). 여기선
 ///   유일 매치만 Some — 0개 또는 2개+ 면 None. 상위가 로스터를 다시 보지 않도록 여기 로직을 최소로 둔다.
-/// ★이름 유일 도달 판정(단일 출처)★: 주어진 로스터 **스냅샷**에서 그 이름의 도달 후보가 정확히 1개면
+/// ★이름 유일 판정(단일 출처)★: 주어진 로스터 **스냅샷**에서 그 이름의 산 후보가 정확히 1개면
 ///   그 항목, 0개(부재)·2개+(동명 다수)면 None. 스냅샷을 인자로 받는 이유: flush 배치는 이름 판정과
 ///   id-힌트 생존 판정을 **같은 스냅샷**으로 해야 배치 도중 판정이 흔들리지 않는다(로스터 재조회 금지).
 fn unique_reachable_in(roster: &[LiveAgent], name: &str) -> Option<LiveAgent> {
@@ -3483,7 +4220,7 @@ mod tests {
         /// roster 밖 id 의 canonical_name override(비-도달 수신자 = TUI 시나리오 — finding 4). roster 에
         ///   없어도 이 맵에 있으면 canonical_name 이 그 이름을 돌려준다(로스터엔 안 뜨는 산 에이전트 모사).
         canonical_overrides: StdMutex<std::collections::HashMap<PeerId, String>>,
-        /// live_reachable_agents 조회 횟수(late-appearance 스크립트용 + sweep 스냅샷 1회 단언 — fix 8).
+        /// live_agents 조회 횟수(late-appearance 스크립트용 + sweep 스냅샷 1회 단언 — fix 8).
         roster_calls: StdMutex<usize>,
         /// 세팅되면 **첫 조회 이후**부터 이 roster 를 돌려준다(첫 조회 = resolve 는 원래 roster, 이후 =
         ///   self_heal 이 보는 late-appearance roster). finding 3 TOCTOU self-heal 재현용.
@@ -3492,6 +4229,15 @@ mod tests {
         ///   결정적으로 만든다(예: sweep 의 due 산출 뒤·notice 파킹 전에 회신이 도착). 한 번 쓰고 비우므로
         ///   hook 안에서 다시 발송해도 재귀하지 않는다.
         on_roster: StdMutex<Option<Box<dyn Fn() + Send>>>,
+        /// ★잠든 이름 목록(프로필 실재 · 세션 없음 — spec §5 분기 3)★. **중복을 접지 않는다**(같은 이름 2개 =
+        ///   잠듦 층 동명). 운영 어댑터는 `ProfileRegistry::list()` 에서 산 세션 몫을 뺀 뒤 canonical 규칙으로
+        ///   파생하고, 여기선 그 결과만 스크립트한다.
+        dormant: StdMutex<Vec<String>>,
+        /// ★`is_agent_live` 가 참을 돌려줄 id 들(삭제 정리 게이트 시나리오 — 리뷰 fix D1)★.
+        ///
+        /// ★로스터와 **따로** 스크립트한다(의도)★: 게이트는 그 좁은 동사로 물으므로, 로스터에서 유도해 버리면
+        ///   "게이트가 로스터를 본다" 는 배선을 fake 가 대신 만들어 버려 테스트가 실물 배선을 못 본다.
+        live_ids: StdMutex<Vec<PeerId>>,
     }
 
     impl FakeDeliveryPort {
@@ -3506,13 +4252,24 @@ mod tests {
                 roster_calls: StdMutex::new(0),
                 roster_after_first: StdMutex::new(None),
                 on_roster: StdMutex::new(None),
+                dormant: StdMutex::new(Vec::new()),
+                live_ids: StdMutex::new(Vec::new()),
             }
+        }
+        /// 잠든 이름 세팅(중복 허용 — 잠듦 층 동명 시나리오) — spec §5 분기 3.
+        fn set_dormant(&self, names: &[&str]) {
+            *self.dormant.lock().unwrap() = names.iter().map(|n| n.to_string()).collect();
+        }
+        /// ★삭제 정리 게이트가 "아직 살아 있다" 로 볼 id 세팅(리뷰 fix D1)★ — 로스터와 독립이다(터미널
+        ///   모드로 살아 있는 세션·개명된 프로필처럼 이름으로는 안 잡히는 경우를 그대로 모사한다).
+        fn set_live_ids(&self, ids: &[PeerId]) {
+            *self.live_ids.lock().unwrap() = ids.to_vec();
         }
         /// 다음 roster 조회 때 **한 번만** 실행할 hook(fix 5 레이스 재현).
         fn arm_on_next_roster(&self, f: Box<dyn Fn() + Send>) {
             *self.on_roster.lock().unwrap() = Some(f);
         }
-        /// live_reachable_agents 총 호출 수(fix 8 — sweep 이 틱당 1회만 뜨는지 단언).
+        /// live_agents 총 호출 수(fix 8 — sweep 이 틱당 1회만 뜨는지 단언).
         fn roster_call_count(&self) -> usize {
             *self.roster_calls.lock().unwrap()
         }
@@ -3520,7 +4277,7 @@ mod tests {
             *self.roster.lock().unwrap() = roster;
         }
         /// ★`inject_if_epoch` 이 보는 "지금" 로스터★ — armed(late-appearance) 가 있으면 그것, 없으면 기본.
-        ///   `live_reachable_agents` 와 달리 호출 카운터·hook 을 건드리지 않는다(주입 경계의 판정이지
+        ///   `live_agents` 와 달리 호출 카운터·hook 을 건드리지 않는다(주입 경계의 판정이지
         ///   로스터 **조회**가 아니다 — 운영 구현도 세션 맵을 직접 보지 로스터를 다시 뜨지 않는다).
         fn effective_roster(&self) -> Vec<LiveAgent> {
             match self.roster_after_first.lock().unwrap().as_ref() {
@@ -3603,7 +4360,7 @@ mod tests {
             self.inject_inner(to_id, None, bytes)
         }
 
-        fn live_reachable_agents(&self) -> Vec<LiveAgent> {
+        fn live_agents(&self) -> Vec<LiveAgent> {
             let call = {
                 let mut c = self.roster_calls.lock().unwrap();
                 let i = *c;
@@ -3622,6 +4379,22 @@ mod tests {
                 }
             }
             self.roster.lock().unwrap().clone()
+        }
+        /// ★입구 판정 소스 한 장(ADR-0116)★ — 운영 어댑터와 **같은 관계**를 모사한다: `roster` 는
+        ///   `live_agents()` 와 **같은 값**이고(술어 = 상태만) `dormant_names` 는 별도 소스다.
+        ///   ★로스터 조회 카운터를 **함께 올린다**★: "발송 1회당 스냅샷 1장" 회귀 테스트가 세는 축이 곧 이
+        ///   호출이다(입구가 `live_agents` 대신 이걸 부르게 됐으므로 카운터가 그쪽으로 옮겨간다).
+        fn addressing_sources(&self) -> AddressingSources {
+            AddressingSources {
+                roster: self.live_agents(),
+                dormant_names: self.dormant.lock().unwrap().clone(),
+            }
+        }
+
+        /// ★삭제 정리 게이트(리뷰 fix D1)★ — 테스트가 세팅한 id 집합만 본다(로스터에서 유도하지 않는다 —
+        ///   필드 주석).
+        fn is_agent_live(&self, id: PeerId) -> bool {
+            self.live_ids.lock().unwrap().contains(&id)
         }
         fn canonical_name(&self, id: PeerId) -> Option<String> {
             // roster 우선 → armed(late-appearance) roster → override(비-도달 산 에이전트) 조회.
@@ -3758,7 +4531,7 @@ mod tests {
             // ★로스터를 **먼저** 본다(load-bearing)★: 운영 경로를 태운 뒤 실패 행을 보고 되돌리면 그
             //   반려가 남긴 장부 종점 행(`failed`)이 큐 항목과 겹쳐 조회가 2행이 된다. 부재가 확실할 때만
             //   진입을 우회한다.
-            let absent = resolve_live(to, &self.port.live_reachable_agents()).is_none();
+            let absent = resolve_live(to, &self.port.live_agents()).is_none();
             match absent {
                 true => {
                     // id 충돌 검사는 운영과 같은 자리(첫 부작용 지점)에서 — 우회 경로도 부작용 0 반려다.
@@ -3823,7 +4596,8 @@ mod tests {
                     effects.log(to);
                     // 접수된 회신은 계약을 닫는다(운영과 같은 규율 — 매칭 실패는 무동작).
                     if let Some(in_reply_to) = &meta.reply_to {
-                        self.close_reply_contract(in_reply_to, sender_name, from.peer_id);
+                        // 레거시 seam 은 동명 판정을 하지 않는다 — 이름 폴백 허용(옛 동작 유지).
+                        self.close_reply_contract(in_reply_to, sender_name, from.peer_id, true);
                     }
                     Ok(SendOutcome::Parked {
                         hint: format!("(legacy park seam) queued for '{to}'"),
@@ -3858,8 +4632,19 @@ mod tests {
                 id,
                 name: name.to_string(),
                 epoch: 0,
+                // 기본 = 턴 신호 있음(구조화 출력 백엔드) — 이 파일의 게이트·파킹 회귀 자산이 보는 부류다.
+                //   턴 신호 **없는** 부류(즉시 주입 — ADR-0116 결정 7)는 `live_no_turn_signal` 로 만든다.
+                turn_signal: true,
             },
         )
+    }
+
+    /// ★턴 신호 없는 산 에이전트(터미널/콘솔 모드 — ADR-0116 결정 7)★ — 로스터에 **있고**(멤버십 조건이
+    ///   아니다) 게이트 없이 즉시 주입되는 부류.
+    fn live_no_turn_signal(name: &str) -> (PeerId, LiveAgent) {
+        let (id, mut a) = live(name);
+        a.turn_signal = false;
+        (id, a)
     }
 
     // ── C2 idle 게이트 테스트 하네스 ─────────────────────────────────────────────────
@@ -3999,7 +4784,7 @@ mod tests {
 
     #[test]
     fn inject_failure_parks_pending() {
-        // spec §5 분기 3(unreachable/write-fail) → 파킹. 해석은 성공하나 inject Err.
+        // spec §5 분기 3(주입 실패) → 파킹. 해석은 성공하나 inject Err.
         let (svc, port) = svc();
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -5278,6 +6063,7 @@ mod tests {
             id,
             name: "new-name".to_string(),
             epoch: 0,
+            turn_signal: true,
         }]);
         gate.clear(); // 턴 종료.
         svc.flush_for_agent(id); // 턴 종료 통지 = id 입구(이름을 모른다).
@@ -6317,6 +7103,7 @@ mod tests {
             id: alice_id,
             name: "alice".to_string(),
             epoch: 0,
+            turn_signal: true,
         };
         port.set_roster(vec![old]);
         svc.park_absent_for_test(
@@ -6338,6 +7125,7 @@ mod tests {
             id: alice_id,
             name: "alice-v2".to_string(),
             epoch: 0,
+            turn_signal: true,
         };
         port.set_roster(vec![renamed]);
 
@@ -7361,9 +8149,13 @@ mod tests {
 
     #[test]
     fn an_absent_recipient_is_a_failed_row_that_never_parks_but_always_ledgers() {
-        // ★spec §7 "부재·잠든 수신자 입구 반려"★: 응답 행 `failed`+`RECIPIENT_NOT_FOUND` · **파킹 큐에
-        //   안 실림**(장부에 `pending` 레코드 없음) · 그래도 **종점 행은 남는다**(§5 "실패 수신자도 장부에").
-        //   그래서 `messages{id}` 행수 = 발신 응답 행수라 `may_be_truncated` 오탐이 사라진다(§7 두 번째 항목).
+        // ★spec §7 "없는 이름 입구 반려"(4차 개정)★: **로스터·프로필 둘 다에** 없는 이름 → 응답 행
+        //   `failed`+`RECIPIENT_NOT_FOUND` · **파킹 큐에 안 실림**(장부에 `pending` 레코드 없음) · 그래도
+        //   **종점 행은 남는다**(§5 "실패 수신자도 장부에"). 그래서 `messages{id}` 행수 = 발신 응답 행수라
+        //   `may_be_truncated` 오탐이 사라진다.
+        // ★4차 보정★: 여기 "없음" 은 **잠든 세션도, 턴 신호 없는 산 세션도 아니다** — 잠듦(프로필 실재)은
+        //   파킹 `pending` 이고(`a_dormant_recipient_is_parked_*`), 턴 신호 없는 산 세션은 게이트 없이
+        //   **배달**된다(`a_live_agent_without_a_turn_signal_*`). 이 테스트는 그 둘과 **배타적**이어야 한다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         port.set_roster(vec![me]);
@@ -7878,14 +8670,20 @@ mod tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    // /review code deep — fix round 1 회귀 그물(A1·A2·A3·A5·A6·A7·A8 · C2·C4)
+    // /review code deep — fix round 1 회귀 그물(A2·A3·A5·A6·A7·A8 · C2·C4)
+    //   ★A1(회신 계약 처리)은 4차에서 **재가된 규칙으로 교체**됐다★ — 그 자리는 아래 두 테스트가 지킨다
+    //   (도달 불가 확정 → `reply_failed` / 일시 사유 → 오픈 유지 + 재시도 닫힘). ADR-0116 결정 2 · ADR-0118.
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn a_reply_that_reached_nobody_leaves_the_contract_open_and_the_timeout_still_fires() {
-        // ★A1 회귀(TODO(ratify) — 잠정 정책)★: 요청자가 죽은 뒤 일꾼이 회신하면 그 회신은 **아무에게도**
-        //   가지 않는다(row = failed/RECIPIENT_NOT_FOUND). 그때 계약을 닫으면 장부가 도달하지 않은 메시지를
-        //   `replied` 로 주장하고, 일꾼의 `reply_owed_by_me` 가 사라지며 기한 통지도 영영 안 나간다.
+    fn a_reply_to_a_requester_that_exists_nowhere_fails_the_contract_and_stops_the_timeout() {
+        // ★spec §7 회신 계약 규칙 ③(ADR-0116 결정 2 · 사용자 결정 2026-07-30)★: 요청자 이름이 로스터·산
+        //   명단·프로필 **전부에 없으면** 회신은 갈 곳이 없다(row = failed/`RECIPIENT_NOT_FOUND`). 그 계약은
+        //   `reply_failed` **실패 종결**이다 — 미결 조회에서 사라지고 기한 스윕이 발화하지 않으며 512 계수도
+        //   줄고, 이력은 남는다.
+        // ★이 테스트는 옛 A1 잠정안(사유 무관 오픈 유지)을 **뒤집은 것**이다★: 옛 단언("계약이 열린 채로
+        //   남고 기한 통지가 나간다")은 재가된 규칙과 정반대라, 그 초록을 근거로 옛 semantics 를 유지하면
+        //   갈 곳 없는 좀비 계약이 상한까지 남는다(ADR-0116 거부한 대안 "계약 열어두기").
         let (svc, port) = svc();
         let (boss_from, boss) = live_sender("boss");
         let (w_id, worker) = live("worker");
@@ -7902,12 +8700,14 @@ mod tests {
         )
         .expect("배달");
         assert_eq!(svc.open_request_count(), 1);
+        let slots_before = svc.occupied_slots_for_test();
 
-        // 요청자(boss)가 죽는다 — 로스터에서 사라진다.
+        // 요청자(boss)가 죽고 **프로필도 없다** — 어느 소스에도 없는 이름이 된다.
         port.set_roster(vec![LiveAgent {
             id: w_id,
             name: "worker".to_string(),
             epoch: 0,
+            turn_signal: true,
         }]);
         let worker_from = SenderIdentity {
             peer_id: w_id,
@@ -7927,27 +8727,178 @@ mod tests {
         assert_eq!(
             rows_out[0].code,
             Some(FailCode::RecipientNotFound),
-            "죽은 요청자에게는 회신이 가지 않는다"
+            "없는 요청자에게는 회신이 가지 않는다"
+        );
+        assert_eq!(
+            svc.open_request_count(),
+            0,
+            "도달 불가 확정 회신은 계약을 reply_failed 로 **종결**한다(ADR-0116 결정 2)"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("reply_failed"),
+            "종점 어휘는 replied 가 아니다 — 회신이 성립했다고 주장하지 않는다(spec §6 축 구분)"
+        );
+        assert_eq!(
+            svc.occupied_slots_for_test(),
+            slots_before - 1,
+            "512 계수에서 빠진다(ADR-0118 결정 4 — 좀비가 상한을 먹지 않게)"
+        );
+        // 일꾼의 미결에서 의무가 사라진다(기다려도 갈 곳이 없다).
+        let owed = svc.open_items_for("worker", w_id, Instant::now());
+        assert!(
+            !owed.iter().any(|i| i.id == "m-req"),
+            "종결된 계약은 미결 목록에 없어야: {owed:?}"
+        );
+        // 이력은 잔존한다(원 request 의 배달기록은 그대로 delivered — 계약 축과 배달 축은 별개다).
+        assert_eq!(
+            svc.ledger_statuses("m-req"),
+            vec![DeliveryStatus::Delivered]
+        );
+        // 기한 스윕이 발화하지 않는다(종결된 계약은 due 대상이 아니다).
+        svc.sweep(Instant::now() + Duration::from_secs(601));
+        assert!(
+            !svc.ledger_snapshot()
+                .iter()
+                .any(|(_, from, _, _)| from == NOTICE_SENDER_LABEL),
+            "종결된 계약엔 기한 초과 통지가 나가지 않아야"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_failed_for_a_transient_reason_keeps_the_contract_open_and_a_retry_closes_it() {
+        // ★spec §7 회신 계약 규칙 ④(ADR-0118 결정 2)★: `MAILBOX_FULL`·동명·도달 불가는 **그 순간의 환경**이라
+        //   계약을 닫지 않는다(무동작 = 오픈 유지). 여기서 닫으면 잠시 뒤 재시도가 **실제로 배달에 성공해도**
+        //   장부는 영영 "회신 실패" 로 남고 요청자의 미결 목록에서도 사라진다(장부 거짓말의 반대 방향).
+        let (svc, port, gate) = svc_gated();
+        let (boss_from, boss) = live_sender("boss");
+        let (w_id, worker) = live("worker");
+        let boss_id = boss_from.peer_id;
+        port.set_roster(vec![boss.clone(), worker.clone()]);
+
+        // boss → worker request(즉시 배달).
+        svc.handle_send(
+            "m-req",
+            boss_from,
+            "boss",
+            &["worker".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        // boss 의 보관함을 가득 채운다(busy 로 파킹 100건) → 다음 발송은 `MAILBOX_FULL` 행.
+        gate.set_busy(boss_id, 0);
+        for i in 0..100 {
+            send(&svc, &format!("fill{i}"), boss_from, "boss", &["boss"]).expect("파킹");
+        }
+        let worker_from = SenderIdentity {
+            peer_id: w_id,
+            epoch: 0,
+        };
+        let rows_out = svc
+            .handle_send(
+                "m-rep",
+                worker_from,
+                "worker",
+                &["boss".to_string()],
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows_out[0].code,
+            Some(FailCode::MailboxFull),
+            "보관함이 가득이라 이 회신은 실패 행이다"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("awaiting_reply"),
+            "일시 사유 실패는 **무동작** — 계약은 오픈 유지(ADR-0118 결정 2)"
+        );
+
+        // ★회귀 핵심★: 자리가 생긴 뒤 재시도가 정상 경로로 계약을 닫는다.
+        svc.flush_for("boss", boss_id); // busy 라 드레인되지 않지만, 게이트를 풀고 다시 flush 한다.
+        gate.clear();
+        svc.flush_for("boss", boss_id);
+        let retry = svc
+            .handle_send(
+                "m-rep2",
+                worker_from,
+                "worker",
+                &["boss".to_string()],
+                "했음(재시도)",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            retry[0].status,
+            SendStatus::Delivered,
+            "재시도는 배달된다: {retry:?}"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("replied"),
+            "재시도 성공이 정상 경로로 계약을 닫는다(오픈 유지의 존재 이유)"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_reply_target_also_leaves_the_contract_open() {
+        // ★리뷰 fix D7 — 위 테스트의 빈칸★: 옛 판은 `MAILBOX_FULL` **하나만** 봐서, 무동작 목록에서 다른
+        //   코드를 빼도 초록이었다. 무동작 부류는 spec §3 항목 7-④가 **둘**로 못 박았다(`MAILBOX_FULL` ·
+        //   `RECIPIENT_AMBIGUOUS`) — 동명은 "그 순간의 환경" 이지 도달 불가 확정이 아니다.
+        let (svc, port) = svc();
+        let (boss_from, boss) = live_sender("boss");
+        let (w_id, worker) = live("worker");
+        port.set_roster(vec![boss.clone(), worker]);
+        svc.handle_send(
+            "m-req",
+            boss_from,
+            "boss",
+            &["worker".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        // 요청자 이름이 산 세션 **둘**에 걸린다(동명) → 회신은 `RECIPIENT_AMBIGUOUS` 실패 행.
+        let (_b2, boss_twin) = live("boss");
+        let (_w2, worker_again) = live("worker");
+        port.set_roster(vec![boss, boss_twin, worker_again]);
+        let worker_from = SenderIdentity {
+            peer_id: w_id,
+            epoch: 0,
+        };
+        let rows_out = svc
+            .handle_send(
+                "m-rep",
+                worker_from,
+                "worker",
+                &["boss".to_string()],
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rows_out[0].code,
+            Some(FailCode::RecipientAmbiguous),
+            "동명 요청자에게는 배달할 수 없다: {rows_out:?}"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("awaiting_reply"),
+            "동명 실패는 **무동작** — 계약 오픈 유지(사용자가 이름을 정리하면 재시도가 닫는다)"
         );
         assert_eq!(
             svc.open_request_count(),
             1,
-            "배달되지 않은 회신은 계약을 닫지 않는다(A1) — 장부가 replied 로 거짓 주장하지 않는다"
-        );
-        // 일꾼의 미결에 의무가 그대로 남는다.
-        let owed = svc.open_items_for("worker", w_id, Instant::now());
-        assert!(
-            owed.iter()
-                .any(|i| i.direction == Direction::ReplyOwedByMe && i.id == "m-req"),
-            "회신 의무가 유지돼야: {owed:?}"
-        );
-        // 기한 통지도 그대로 발화한다(due_timeouts 가 이 계약을 건너뛰지 않는다).
-        svc.sweep(Instant::now() + Duration::from_secs(601));
-        assert!(
-            svc.ledger_snapshot()
-                .iter()
-                .any(|(_, from, _, _)| from == NOTICE_SENDER_LABEL),
-            "기한 초과 통지가 나가야(계약이 살아 있으므로)"
+            "512 계수에서 빠지지 않는다(종결이 아니다)"
         );
     }
 
@@ -8808,6 +9759,7 @@ mod tests {
             key: k.to_string(),
             target: None,
             live_count: 0,
+            dormant_count: 0,
             dup_of: None,
         };
 
@@ -8882,9 +9834,10 @@ mod tests {
 
     #[test]
     fn two_exact_ids_of_same_named_twins_both_get_a_row() {
-        // ★M3(TODO(ratify))★: park·장부 키가 이름이라 두 쌍둥이는 **한 자리**밖에 못 쓴다. 옛 구현은 뒤
-        //   토큰을 **행 없이 삼켰다**(spec §6 "수신자 1명 = 1행" 위반 + AMBIGUOUS hint 가 가르친 시도가 무음
-        //   실패). 이제 그 토큰은 `RECIPIENT_AMBIGUOUS` **실패 행**으로 보인다.
+        // ★M3(과도기 방어 — 정책 아님, ADR-0116 결정 5)★: park·장부 키가 이름이라 두 쌍둥이는 **한 자리**
+        //   밖에 못 쓴다. 옛 구현은 뒤 토큰을 **행 없이 삼켰다**(spec §6 "수신자 1명 = 1행" 위반). 이제 그
+        //   토큰은 `RECIPIENT_AMBIGUOUS` **실패 행**으로 보인다 — 동명이인 자체는 미지원이고(힌트가 사용자
+        //   에스컬레이션을 가리킨다) 뿌리 제거는 ADR-0115 가 한다. 재가 대기 상태가 아니다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (d1, dup1) = live("dup");
@@ -9159,9 +10112,10 @@ mod tests {
 
     #[test]
     fn an_exact_id_token_rescues_an_ambiguous_name_in_the_same_to_list() {
-        // ★A8(TODO(ratify) — 잠정 정책)★: 두 토큰이 같은 키로 접힐 때 **해석된 쪽이 이긴다**. 그러지 않으면
-        //   AMBIGUOUS 행의 hint("exact agent id 로 다시 보내라")가 같은 `to` 에 id 를 덧붙인 발신자에게
-        //   거짓말이 되고, 토큰 순서만 뒤집으면 배달되는 비대칭이 생긴다.
+        // ★A8(과도기 방어 — 정책 아님, ADR-0116 결정 5)★: 두 토큰이 같은 키로 접힐 때 **해석된 쪽이 이긴다**.
+        //   그러지 않으면 토큰 순서만 뒤집으면 배달되는 비대칭이 생긴다(같은 `to` 에 id 를 덧붙였는데 앞뒤에
+        //   따라 결말이 갈린다). 힌트는 이제 exact-id 재발송을 가르치지 않지만, 이 방어는 그 비대칭 자체를
+        //   막는 것이라 존치한다 — ADR-0115 가 동명 부류를 없애면 함께 사문화된다. 재가 대기 상태가 아니다.
         for order in 0..2 {
             let (svc, port) = svc();
             let (from, me) = live_sender("alice");
@@ -9202,7 +10156,7 @@ mod tests {
         // b 가 회신 — 자기 계약(alice2)만 닫혀야 한다. 옛 OR 한 패스는 이름 매치가 아니어도 id 순서에
         //   따라 앞의 항목을 집을 수 있었다(여기선 id 우선 패스가 정확히 b 를 고른다).
         assert_eq!(
-            l.close_on_reply("m1", "alice2", b, now),
+            l.close_on_reply("m1", "alice2", b, true, now),
             ReplyOutcome::Closed
         );
         let open = l.open_requests();
@@ -9213,7 +10167,7 @@ mod tests {
         let mut l2 = Ledger::new();
         l2.open_request("m2", "boss", PeerId::new_v4(), "alice", Some(a), None, now);
         assert_eq!(
-            l2.close_on_reply("m2", "alice", PeerId::new_v4(), now),
+            l2.close_on_reply("m2", "alice", PeerId::new_v4(), true, now),
             ReplyOutcome::NoMatch,
             "id 를 든 계약은 이름만 같은 쌍둥이가 닫을 수 없다(조회 축과 동일)"
         );
@@ -9276,5 +10230,869 @@ mod tests {
             obs[0].0, obs[0].1,
             "in-flight 창에서도 예측 == 실제(분모가 갈리면 여기서 터진다)"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // S18.6 입구 3분기 — 잠듦 파킹 · 턴 신호 없으면 즉시 주입 · 삭제 정리(spec §7 · ADR-0116/0117/0118)
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn a_dormant_recipient_is_parked_without_a_wake_and_flushed_on_restore() {
+        // ★spec §7 "잠든 수신자 파킹"(ADR-0116 결정 1)★: 로스터엔 없지만 **프로필이 실재하는** 이름 →
+        //   응답 행 `pending` · 파킹 레코드 생성 · **wake 미발동**(아무것도 깨우지 않는다 — 주입 시도 0) ·
+        //   세션 복원(재등장) 시 flush 로 `delivered` 전이.
+        // ★"wake 미발동" 의 관측 방법★: 커널엔 깨우기 seam 자체가 없다(있다면 새 포트 동사여야 한다) —
+        //   그래서 "그 발송이 주입을 한 건도 시도하지 않았다" + "큐에 남았다" 로 단언한다.
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        port.set_roster(vec![me]);
+        port.set_dormant(&["sleepy"]);
+
+        let out = send(&svc, "m-dorm", from, "alice", &["sleepy"]).expect("반려 아님");
+        assert_eq!(
+            (out[0].status, out[0].code),
+            (SendStatus::Pending, None),
+            "잠듦은 수용(파킹)이다 — 실패 행이 아니다: {out:?}"
+        );
+        assert!(
+            out[0].hint.as_deref().unwrap_or("").contains("saved agent"),
+            "힌트가 '저장된 에이전트라 복원 시 배달' 을 말해야: {:?}",
+            out[0].hint
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-dorm"),
+            vec![DeliveryStatus::Pending],
+            "파킹 레코드가 장부에 남는다(조용한 유실 금지)"
+        );
+        assert_eq!(svc.parked_len("sleepy"), 1, "이름 큐에 파킹된다");
+        assert!(
+            port.injected_bodies().is_empty(),
+            "잠든 상대에게 주입을 시도하지 않는다(wake 미발동)"
+        );
+
+        // 복원(재등장) — 로스터에 그 이름이 뜨고 flush 가 집는다(도어벨은 없었지만 로스터 diff 경로가 부른다).
+        let (late_id, late) = live("sleepy");
+        port.set_roster(vec![late]);
+        port.set_dormant(&[]);
+        svc.flush_for("sleepy", late_id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="alice">body</message>"#.to_string()],
+            "복원 시 flush 로 배달된다"
+        );
+        assert_eq!(
+            svc.ledger_statuses("m-dorm"),
+            vec![DeliveryStatus::Delivered]
+        );
+        assert_eq!(svc.parked_len("sleepy"), 0);
+    }
+
+    #[test]
+    fn at_all_never_expands_to_a_dormant_name_but_direct_naming_parks_it() {
+        // ★spec §7 "잠든 수신자 파킹" 중 `@all` 불포함★: 방송 = "지금 받을 수 있는 전원" 이므로 잠든 이름은
+        //   펼침에 들어오지 않는다(ADR-0116 — 잠든 상대에게 쌓아두는 건 *직접 지목*의 의미다).
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        let (_b, bob) = live("bob");
+        port.set_roster(vec![me, bob]);
+        port.set_dormant(&["sleepy"]);
+
+        let all = send(&svc, "m-all", from, "alice", &["@all"]).expect("반려 아님");
+        assert_eq!(
+            all.iter().map(|r| r.to.clone()).collect::<Vec<_>>(),
+            vec!["bob".to_string()],
+            "펼침에 잠든 이름이 끼면 안 된다: {all:?}"
+        );
+        assert_eq!(
+            svc.parked_len("sleepy"),
+            0,
+            "방송은 잠든 큐를 만들지 않는다"
+        );
+
+        // 같은 발송에 직접 지목을 섞으면 그 행만 파킹된다(층위 분리 — spec §7 혼용 `to`).
+        let mixed = send(&svc, "m-mix", from, "alice", &["sleepy", "@all"]).expect("반려 아님");
+        assert_eq!(
+            rows(&mixed),
+            vec![
+                ("sleepy".to_string(), SendStatus::Pending, None),
+                ("bob".to_string(), SendStatus::Delivered, None),
+            ],
+            "잠든 행은 pending, 산 행은 배달: {mixed:?}"
+        );
+    }
+
+    #[test]
+    fn a_dormant_request_opens_a_contract_whose_deadline_notice_still_fires() {
+        // ★spec §7 "잠든 수신자 파킹 — request 면 계약이 열리고 기한 스윕이 정상 발화"★: 파킹은 수용이므로
+        //   회신 의무가 성립한다(spec §3 항목 2). 시계는 **발송 기준**이라 복원과 무관하게 기한이 흐른다.
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        port.set_roster(vec![me]);
+        port.set_dormant(&["sleepy"]);
+
+        let out = svc
+            .handle_send(
+                "m-req",
+                from,
+                "alice",
+                &["sleepy".to_string()],
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("1m", 60),
+            )
+            .expect("반려 아님");
+        assert_eq!(out[0].status, SendStatus::Pending);
+        assert_eq!(svc.open_request_count(), 1, "잠듦 파킹도 계약을 연다");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "sleepy"),
+            Some("awaiting_reply")
+        );
+
+        // 기한 초과 → 발신자에게 notice(계약이 살아 있으므로 스윕이 걷는다).
+        svc.sweep(Instant::now() + Duration::from_secs(61));
+        assert!(
+            svc.ledger_snapshot()
+                .iter()
+                .any(|(_, f, to, _)| f == NOTICE_SENDER_LABEL && to == "alice"),
+            "잠듦 계약도 기한 통지가 나가야: {:?}",
+            svc.ledger_snapshot()
+        );
+    }
+
+    #[test]
+    fn two_dormant_profiles_sharing_a_name_block_the_park_as_ambiguous() {
+        // ★spec §7 "잠듦 층 동명 차단"(ADR-0116 결정 1/4)★: 같은 이름의 잠든 프로필이 둘이면 파킹하지 않고
+        //   `RECIPIENT_AMBIGUOUS` 실패 행이다 — 이름 키로 파킹하면 **먼저 복원된 쪽이 조용히 받는다**.
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        port.set_roster(vec![me]);
+        port.set_dormant(&["twin", "twin"]);
+
+        let out = send(&svc, "m1", from, "alice", &["twin"]).expect("행 응답");
+        assert_eq!(
+            (out[0].status, out[0].code),
+            (SendStatus::Failed, Some(FailCode::RecipientAmbiguous)),
+            "잠듦 층 동명은 파킹이 아니라 실패 행: {out:?}"
+        );
+        assert_eq!(svc.parked_len("twin"), 0, "조용히 받는 경로가 없어야");
+        assert_eq!(
+            svc.ledger_statuses("m1"),
+            vec![DeliveryStatus::Failed],
+            "실패 행도 장부 종점으로 남는다"
+        );
+    }
+
+    #[test]
+    fn a_live_agent_wins_over_a_dormant_namesake() {
+        // ★spec §7 "산 1 + 잠든 1 동명 → 산 쪽으로 배달"★: 로스터 판정이 먼저다(지금 받을 수 있는 실체가
+        //   있으면 그쪽이 수신자다). 잠듦 판정이 끼어들면 배달될 메일이 파킹되거나 모호로 반려된다.
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        let (_d, dup) = live("dup");
+        port.set_roster(vec![me, dup]);
+        port.set_dormant(&["dup"]);
+
+        let out = send(&svc, "m1", from, "alice", &["dup"]).expect("행 응답");
+        assert_eq!(
+            out[0].status,
+            SendStatus::Delivered,
+            "산 쪽이 이긴다: {out:?}"
+        );
+        assert_eq!(port.injected_bodies().len(), 1);
+        assert_eq!(svc.parked_len("dup"), 0);
+    }
+
+    #[test]
+    fn a_live_agent_without_a_turn_signal_is_injected_with_no_gate() {
+        // ★spec §7 "턴 신호 없는 백엔드 = 즉시 주입"(ADR-0116 결정 7 — `RECIPIENT_UNREACHABLE` 폐기)★:
+        //   살아 있고 구조화 출력이 없는 상대 → **busy 판정 없이 바로 주입**되고 행은 `delivered` ·
+        //   **파킹 레코드 미생성** · request 면 계약도 정상 오픈 · 연속 2건도 둘 다 주입된다(게이트가 없으므로
+        //   선행분 대기가 없다) · `@all` 펼침에도 **포함**된다(로스터 자격에 capability 조건이 없다).
+        // ★게이트가 busy 라고 답해도 무관함★: 이 부류는 게이트를 **묻지 않는다** — 그래서 busy 를 세팅한
+        //   채로 배달을 단언한다(옛 술어/게이트 경유를 되살리면 여기서 파킹으로 뒤집혀 잡힌다).
+        let (svc, port, gate) = svc_gated();
+        let (from, me) = live_sender("alice");
+        let (tui_id, tui) = live_no_turn_signal("tui");
+        port.set_roster(vec![me.clone(), tui]);
+        gate.set_busy(tui_id, 0); // 턴 신호 없는 부류엔 이 값이 보이지 않아야 한다.
+
+        let out = svc
+            .handle_send(
+                "m1",
+                from,
+                "alice",
+                &["tui".to_string()],
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("10m", 600),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            (out[0].status, out[0].code),
+            (SendStatus::Delivered, None),
+            "턴 신호가 없어도 배달 대상이다(게이트 없이 즉시 주입): {out:?}"
+        );
+        assert_eq!(port.injected_bodies().len(), 1, "실제로 주입됐다");
+        assert_eq!(svc.parked_len("tui"), 0, "busy 파킹이 없는 부류다");
+        assert_eq!(
+            svc.ledger_statuses("m1"),
+            vec![DeliveryStatus::Delivered],
+            "delivered = 실제 주입 시점"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m1", "tui"),
+            Some("awaiting_reply"),
+            "배달됐으므로 계약도 정상 오픈"
+        );
+
+        // 연속 2건 — 게이트가 없으니 선행분 대기도 없다(둘 다 주입).
+        let second = send(&svc, "m2", from, "alice", &["tui"]).expect("행 응답");
+        assert_eq!(second[0].status, SendStatus::Delivered);
+        assert_eq!(port.injected_bodies().len(), 2, "둘 다 주입된다");
+
+        // `@all` 펼침 포함 — 방송이 이 부류를 빼지 않는다.
+        let all = send(&svc, "m3", from, "alice", &["@all"]).expect("행 응답");
+        assert_eq!(
+            all.iter().map(|r| r.to.clone()).collect::<Vec<_>>(),
+            vec!["tui".to_string()],
+            "@all 은 턴 신호 없는 산 세션도 펼친다: {all:?}"
+        );
+
+        // ★NOT_FOUND 는 로스터·프로필 **둘 다** 비었을 때만이다★.
+        port.set_roster(vec![me]);
+        let gone = send(&svc, "m4", from, "alice", &["tui"]).expect("행 응답");
+        assert_eq!(
+            gone[0].code,
+            Some(FailCode::RecipientNotFound),
+            "로스터·프로필에 없으면 그때는 없음 코드다: {gone:?}"
+        );
+    }
+
+    #[test]
+    fn the_ambiguous_hint_escalates_to_the_user_instead_of_teaching_exact_ids() {
+        // ★spec §7 "동명 힌트 문구"(ADR-0116 결정 4/5)★: 두 층 모두 "동명이인 미지원 — 재발송 말고 사용자에게
+        //   알려라" 를 말하고, **exact-id 재발송 안내는 어디에도 없다**(동명이인 자체가 미지원이므로 id-구제
+        //   흐름을 지원 정책처럼 가르치지 않는다).
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        let (_a, dup1) = live("dup");
+        let (_b, dup2) = live("dup");
+        port.set_roster(vec![me, dup1, dup2]);
+        port.set_dormant(&["twin", "twin"]);
+
+        let live_row = send(&svc, "m1", from, "alice", &["dup"]).expect("행")[0]
+            .hint
+            .clone()
+            .unwrap_or_default();
+        let dormant_row = send(&svc, "m2", from, "alice", &["twin"]).expect("행")[0]
+            .hint
+            .clone()
+            .unwrap_or_default();
+        for (layer, hint) in [("live", &live_row), ("dormant", &dormant_row)] {
+            assert!(
+                hint.contains("not supported")
+                    && hint.contains("do NOT resend")
+                    && hint.contains("tell the user"),
+                "{layer} 힌트가 사용자 에스컬레이션을 말해야: {hint}"
+            );
+            assert!(
+                !hint.contains("exact agent id") && !hint.contains("exact id"),
+                "{layer} 힌트에 exact-id 재발송 안내가 남아 있다: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_to_a_dormant_requester_is_accepted_and_stays_replied_after_the_deletion() {
+        // ★spec §7 회신 계약 규칙 ①②(ADR-0116 결정 2)★: 잠든 요청자에게 회신 → `pending` **수용** + 계약
+        //   `replied` 정상 닫힘. 그 뒤 **요청자가 삭제돼 파킹된 회신이 `RECIPIENT_DELETED` 로 치워져도 계약은
+        //   `replied` 로 남는다**(되돌림 없음 — 계약 축은 "답을 했나", 배달 축이 "도착했나" 를 적는다).
+        let (svc, port) = svc();
+        let (boss_from, boss) = live_sender("boss");
+        let (w_id, worker) = live("worker");
+        port.set_roster(vec![boss, worker.clone()]);
+
+        svc.handle_send(
+            "m-req",
+            boss_from,
+            "boss",
+            &["worker".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        // 요청자(boss)가 잠든다 — 로스터에서 빠지고 프로필만 남는다.
+        port.set_roster(vec![worker.clone()]);
+        port.set_dormant(&["boss"]);
+        let worker_from = SenderIdentity {
+            peer_id: w_id,
+            epoch: 0,
+        };
+        let rep = svc
+            .handle_send(
+                "m-rep",
+                worker_from,
+                "worker",
+                &["boss".to_string()],
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rep[0].status,
+            SendStatus::Pending,
+            "잠든 요청자에게 회신은 파킹된다: {rep:?}"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("replied"),
+            "파킹도 수용이다 — 꽂으면 계약 완료(ADR-0116 결정 2)"
+        );
+
+        // 요청자 프로필 삭제 → 파킹된 회신이 RECIPIENT_DELETED 로 치워진다.
+        //   ★게이트는 **프로필 id** 로 묻는다(리뷰 fix D1)★ — boss 의 세션은 없으므로(잠듦) 통과한다.
+        port.set_dormant(&[]);
+        let cleanup = svc.handle_profile_deleted(boss_from.peer_id, "boss");
+        assert_eq!(cleanup.failed_parked, 1, "파킹된 회신이 종결된다");
+        assert_eq!(
+            svc.ledger_statuses("m-rep"),
+            vec![DeliveryStatus::Failed],
+            "배달 축은 사실대로 실패를 적는다"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("replied"),
+            "★되돌리지 않는다★ — 계약은 replied 로 남는다(ADR-0116 결정 2 · 종점 되돌림 금지)"
+        );
+    }
+
+    #[test]
+    fn deleting_a_profile_fails_its_parked_mail_and_the_contracts_it_was_waiting_on() {
+        // ★spec §7 "프로필 삭제 일괄 정리" ①③④(ADR-0116 결정 3)★:
+        //   ① 삭제 ∧ 로스터 부재 → 그 이름 앞 파킹분 `failed`+`RECIPIENT_DELETED`(장부 종점 + **조회 힌트**) ·
+        //      그 이름이 **요청자**인 오픈 계약 `reply_failed`
+        //   ③ **회신자 쪽**이 삭제된 계약은 유지(발신자는 기한 통지로 무응답을 알게 된다)
+        let (svc, port) = svc();
+        let (gone_from, _gone_live) = live_sender("gone");
+        let (w_id, worker) = live("worker");
+        port.set_roster(vec![worker.clone()]);
+        port.set_dormant(&["gone"]);
+        let worker_from = SenderIdentity {
+            peer_id: w_id,
+            epoch: 0,
+        };
+
+        // (a) gone 이 **요청자**인 계약 — worker 에게 request(즉시 배달).
+        svc.handle_send(
+            "m-out",
+            gone_from,
+            "gone",
+            &["worker".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+        // (b) gone 이 **회신자**인 계약 — worker → gone request(잠듦이라 파킹 + 계약 오픈).
+        svc.handle_send(
+            "m-in",
+            worker_from,
+            "worker",
+            &["gone".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("반려 아님");
+        assert_eq!(svc.parked_len("gone"), 1);
+
+        // 프로필 삭제(그 프로필의 세션이 살아 있지 않다) → 정리 발동. 게이트 축 = **프로필 id**(리뷰 fix D1).
+        port.set_dormant(&[]);
+        let out = svc.handle_profile_deleted(gone_from.peer_id, "gone");
+        assert!(!out.skipped_live);
+        assert_eq!(out.failed_parked, 1, "파킹분 종결");
+        assert_eq!(out.failed_contracts, 1, "요청자 쪽 계약만 종결");
+        assert_eq!(svc.parked_len("gone"), 0, "대기열에서 사라진다");
+
+        // 장부 종점 + 조회 코드/힌트(발신자가 사유를 다시 볼 수 있어야 — spec §6).
+        assert_eq!(svc.ledger_statuses("m-in"), vec![DeliveryStatus::Failed]);
+        let view = svc
+            .message_state("m-in", Instant::now())
+            .expect("조회 가능");
+        assert_eq!(view.rows[0].code, Some("RECIPIENT_DELETED"));
+        assert!(
+            view.rows[0]
+                .hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("resending is pointless"),
+            "조회 힌트가 다음 행동을 말해야: {:?}",
+            view.rows[0].hint
+        );
+
+        // 계약 축: 요청자(gone) 계약은 reply_failed, 회신자(gone) 계약은 **유지**.
+        assert_eq!(
+            svc.contract_outcome_for_test("m-out", "worker"),
+            Some("reply_failed"),
+            "그 이름이 요청자인 계약은 실패 종결"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-in", "gone"),
+            Some("awaiting_reply"),
+            "회신자 쪽이 삭제된 계약은 유지(기한 통지 경로 존속)"
+        );
+    }
+
+    #[test]
+    fn deleting_a_profile_whose_session_is_still_live_cleans_nothing() {
+        // ★spec §7 "프로필 삭제 일괄 정리" ②(오동작 방지 회귀)★: 삭제됐지만 세션이 살아 있으면(트리 항목만
+        //   지운 상태) 정리하지 않는다 — 그 상대는 곧 idle 이 되면 받을 수 있는 산 수신자다. 정리하면 배달될
+        //   메일을 죽이고 성립할 계약을 실패로 적는다(이 개정 취지의 정반대).
+        // ★게이트 축 = **프로필 id × 산 명단**(리뷰 fix D1)★ — 이름이 아니다. 그래서 이 테스트는 로스터를
+        //   비운 채(= 이름으로는 절대 못 찾는 상태) `is_agent_live(id)` 만 참으로 두고 보호를 단언한다:
+        //   프로필이 지워지면 그 산 세션의 canonical 이름이 실제로 바뀌므로(개명·override 소멸) 이름 축
+        //   게이트는 이 상황을 **구조적으로** 놓친다.
+        let (svc, port, gate) = svc_gated();
+        let (from, me) = live_sender("alice");
+        let (r_id, recv) = live("recv");
+        port.set_roster(vec![me, recv]);
+        gate.set_busy(r_id, 0); // 턴 중 → 파킹.
+        svc.handle_send(
+            "m-req",
+            from,
+            "alice",
+            &["recv".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("파킹");
+        assert_eq!(svc.parked_len("recv"), 1);
+
+        // 삭제 시점: **같은 id 가 다른 이름으로** 로스터에 있다(프로필이 지워지면 canonical 이름이
+        //   `display_name` → `basename(session.cwd)` 로 바뀌는 그 상태 미러). 그래서 이름 축 게이트는 "recv"
+        //   를 찾지 못하고 정리를 발동시키지만, id 축 게이트는 그가 아직 산 것을 안다.
+        port.set_roster(vec![
+            live_sender("alice").1,
+            LiveAgent {
+                id: r_id,
+                name: "recv-after-delete".to_string(),
+                epoch: 0,
+                turn_signal: true,
+            },
+        ]);
+        port.set_live_ids(&[r_id]);
+        let out = svc.handle_profile_deleted(r_id, "recv");
+        assert!(out.skipped_live, "그 프로필의 세션이 살아 있으면 건너뛴다");
+        assert_eq!(out.failed_parked, 0);
+        assert_eq!(svc.parked_len("recv"), 1, "파킹분 보존");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "recv"),
+            Some("awaiting_reply"),
+            "계약 오픈 유지"
+        );
+
+        // 턴이 끝나면 정상 배달된다(정리가 죽이지 않았다는 증거).
+        gate.clear();
+        svc.flush_for("recv", r_id);
+        assert_eq!(
+            svc.ledger_statuses("m-req"),
+            vec![DeliveryStatus::Delivered]
+        );
+    }
+
+    #[test]
+    fn deleting_a_profile_whose_live_session_has_no_turn_signal_cleans_nothing() {
+        // ★리뷰 fix D7 — 위 테스트의 빈칸★: 옛 판은 **구조화 로스터만** 만들어, "게이트가 턴 신호 없는 산
+        //   세션을 놓친다" 는 부류를 전혀 보지 못했다(그 부류는 옛 로스터 술어에서 아예 빠져 있었다).
+        //   4차 로스터는 그 부류를 포함하므로, 그가 write 실패로 남긴 파킹분도 정리에서 보호돼야 한다.
+        // ★파킹 진입로★: 이 부류엔 busy 파킹이 없다(게이트를 묻지 않는다) — 유일한 파킹 경로는 **주입 실패**
+        //   다. 그래서 fake 의 inject 를 1회 실패시켜 그 상태를 실제 코드 경로로 만든다.
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        let (tui_id, tui) = live_no_turn_signal("tui");
+        port.set_roster(vec![me, tui]);
+        port.fail_at(&[0]); // 첫 주입 실패 → 재파킹(spec §5 분기 3).
+
+        let out = svc
+            .handle_send(
+                "m-req",
+                from,
+                "alice",
+                &["tui".to_string()],
+                "해줘",
+                Entrance::Mcp,
+                &req_meta("10m", 600),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            out[0].status,
+            SendStatus::Pending,
+            "주입 실패는 파킹으로 흡수된다(조용한 유실 금지): {out:?}"
+        );
+        assert_eq!(svc.parked_len("tui"), 1);
+
+        // 프로필만 지운 상태 — 세션은 (턴 신호 없이) 살아 있다.
+        port.set_live_ids(&[tui_id]);
+        let cleaned = svc.handle_profile_deleted(tui_id, "tui");
+        assert!(
+            cleaned.skipped_live,
+            "턴 신호가 없어도 산 세션이다 — 게이트가 놓치면 배달될 메일이 죽는다"
+        );
+        assert_eq!(svc.parked_len("tui"), 1, "파킹분 보존");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "tui"),
+            Some("awaiting_reply"),
+            "계약 오픈 유지"
+        );
+    }
+
+    #[test]
+    fn deleting_a_dormant_profile_spares_a_live_namesakes_mail_and_contracts() {
+        // ★리뷰 fix N1 — 게이트는 id 로 묻는데 파괴는 **이름 전체**로 한다★: 정리는
+        //   `purge_recipient(name)` + `fail_open_requests_from(name)` 이라, 같은 canonical 이름을 지닌 **산
+        //   세션**이 따로 있으면 id 축 게이트만으로는 그를 못 지킨다(그 id 는 실제로 죽었으니 통과한다).
+        // ★재현 = 지원되는 조작뿐이다(이름 유일성 강제는 ADR-0115 소관 — 아직 없다)★: 프로필 P1·P2 를 같은
+        //   `display_name`("boss")으로 개명 → **P2 만** 스폰 → 잠든 P1 삭제. id 축은 P1 이 죽은 걸 맞게 보고
+        //   통과하고, 그 뒤 이름 "boss" 로 쓸어 P2 의 파킹 메일이 `RECIPIENT_DELETED`(그 수신자는 삭제되지
+        //   않았으므로 **거짓 사유**)로 죽고 P2 가 요청자인 오픈 계약이 `reply_failed` 로 닫힌다 —
+        //   ADR-0118 결정 2·spec §5 가 금지한 결말이고 유계 잔여로 문서화된 적도 없다.
+        // ★이름 축 가드를 지우면 이 테스트가 즉시 빨개진다★(fail-before 증거: `failed_parked=1` ·
+        //   `failed_contracts=1` · `m-in` 이 `Failed` · `m-out` 계약이 `reply_failed`).
+        let (svc, port, gate) = svc_gated();
+        let (alice_from, alice) = live_sender("alice");
+        // P2 — 산 세션. 잠든 P1 과 canonical 이름이 겹친다(개명으로 성립).
+        let (boss_id, boss) = live("boss");
+        port.set_roster(vec![alice.clone(), boss.clone()]);
+        let boss_from = SenderIdentity {
+            peer_id: boss_id,
+            epoch: 0,
+        };
+
+        // (a) 산 P2 가 **요청자**인 오픈 계약 — boss → alice request(즉시 배달).
+        svc.handle_send(
+            "m-out",
+            boss_from,
+            "boss",
+            &["alice".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        // (b) 산 P2 앞 파킹분 — 턴 중이라 "boss" 키로 쌓인다.
+        gate.set_busy(boss_id, 0);
+        svc.handle_send(
+            "m-in",
+            alice_from,
+            "alice",
+            &["boss".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("파킹");
+        assert_eq!(svc.parked_len("boss"), 1);
+
+        // 잠든 P1 삭제 — 그 id 의 세션은 **없고**(id 축 통과) 산 명단엔 동명 P2 가 남아 있다.
+        let dormant_p1 = PeerId::new_v4();
+        port.set_dormant(&[]);
+        port.set_live_ids(&[boss_id]); // 산 세션 = P2 뿐(P1 은 없다).
+        let out = svc.handle_profile_deleted(dormant_p1, "boss");
+
+        assert!(
+            out.skipped_live,
+            "동명 산 세션이 있으면 정리를 **통째로** 건너뛴다(fail-safe — 잔여는 단발+TTL 소관): {out:?}"
+        );
+        assert_eq!(out.failed_parked, 0, "산 동명의 파킹분을 건드리지 않는다");
+        assert_eq!(
+            out.failed_contracts, 0,
+            "산 동명이 요청자인 계약을 닫지 않는다"
+        );
+        assert_eq!(svc.parked_len("boss"), 1, "대기열 보존");
+        assert_eq!(
+            svc.ledger_statuses("m-in"),
+            vec![DeliveryStatus::Pending],
+            "★거짓 사유 금지★ — 삭제되지 않은 수신자의 메일이 RECIPIENT_DELETED 로 죽으면 안 된다"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-out", "alice"),
+            Some("awaiting_reply"),
+            "산 동명이 요청자인 오픈 계약은 유지된다(대기 목록·기한 통지에서 사라지면 안 된다 — ADR-0118 결정 2)"
+        );
+
+        // 턴이 끝나면 정상 배달된다(정리가 죽이지 않았다는 종결 증거).
+        gate.clear();
+        svc.flush_for("boss", boss_id);
+        assert_eq!(svc.ledger_statuses("m-in"), vec![DeliveryStatus::Delivered]);
+    }
+
+    #[test]
+    fn a_reply_accepted_as_a_park_closes_the_contract_in_the_same_critical_section() {
+        // ★리뷰 fix D2 — 수용과 계약 닫기의 원자성(결정론 단언 · sleep 없음)★.
+        //
+        // ★막는 결말★: ① 스레드 A 가 잠든 요청자에게 회신을 파킹(수용 확정) → 락 해제 ② 그 사이 삭제 정리가
+        //   그 계약을 `reply_failed` 로 닫음 ③ 뒤늦은 A 의 닫기가 `AlreadyClosed` 로 물러남 → "회신은 수용
+        //   (`pending`)됐는데 계약은 회신 실패" (재가된 규칙 "수용 = 완료, 되돌림 없음" 위반).
+        // ★결정론 장치(sleep·스레드 없음)★: 서비스가 **수용을 기록한 그 락을 쥔 채** 장부를 보여 주는 훅
+        //   안에서 계약 상태를 관측한다. 닫기가 별도 락으로 빠지면 이 시점 관측이 `awaiting_reply` 라 즉시
+        //   빨개진다 — 최종 상태만 보는 테스트는 경합이 없으면 두 배선을 구분하지 못한다(그게 이 장치의 이유).
+        let (svc, port) = svc();
+        let (boss_from, boss) = live_sender("boss");
+        let (w_id, worker) = live("worker");
+        port.set_roster(vec![boss, worker.clone()]);
+        svc.handle_send(
+            "m-req",
+            boss_from,
+            "boss",
+            &["worker".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        // 요청자가 잠든다 → 회신은 파킹(수용)된다.
+        port.set_roster(vec![worker]);
+        port.set_dormant(&["boss"]);
+
+        // 임계구역 안에서 본 계약 상태를 모은다(훅은 넘겨받은 장부만 읽는다 — 락 재취득 금지).
+        let in_lock = Arc::new(StdMutex::new(Vec::<Option<&'static str>>::new()));
+        let seen = in_lock.clone();
+        svc.set_accept_hook_for_test(Arc::new(move |ledger| {
+            seen.lock()
+                .unwrap()
+                .push(ledger.contract_outcome_for_test("m-req", "worker"));
+        }));
+
+        let rep = svc
+            .handle_send(
+                "m-rep",
+                SenderIdentity {
+                    peer_id: w_id,
+                    epoch: 0,
+                },
+                "worker",
+                &["boss".to_string()],
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(rep[0].status, SendStatus::Pending, "회신이 파킹 수용됐다");
+        assert_eq!(
+            *in_lock.lock().unwrap(),
+            vec![Some("replied")],
+            "★수용을 기록한 그 락 안에서 이미 닫혀 있어야 한다★ — 여기가 `awaiting_reply` 면 닫기가 다른 락으로 빠졌다는 뜻이고, 그 창에 삭제 정리가 끼면 '수용됐는데 회신 실패' 가 된다(리뷰 fix D2)"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("replied"),
+            "수용 = 완료 — 계약은 그 임계구역에서 닫혔다"
+        );
+
+        // 이제(락 밖) 삭제 정리가 돌아도 종점을 되돌리지 않는다.
+        port.set_dormant(&[]);
+        let cleaned = svc.handle_profile_deleted(boss_from.peer_id, "boss");
+        assert_eq!(cleaned.failed_parked, 1, "파킹된 회신은 사실대로 실패 종결");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "worker"),
+            Some("replied"),
+            "계약 축은 되돌리지 않는다(ADR-0116 결정 2)"
+        );
+    }
+
+    #[test]
+    fn an_immediately_delivered_reply_closes_the_contract_in_the_delivery_record_lock() {
+        // ★리뷰 fix D2 — 즉시 배달 갈래(같은 장치의 나머지 절반)★: inject 자체는 설계상 락 밖이지만 **배달
+        //   사실을 장부에 적는 짧은 락**이 수용 확정 지점이다. 그 락 안에서 계약이 닫혀야 삭제 정리가 끼어들
+        //   창이 없다("수용 기록과 계약 닫기가 원자적" 이 배달·파킹 모든 갈래에서 성립).
+        // ★관측 순서가 곧 단언★: 훅은 두 번 발화한다 — ① 주 임계구역 끝(아직 아무것도 수용되지 않았다:
+        //   즉시 배달은 락 밖 주입 뒤에 확정된다) ② 배달 기록 락 끝(닫혀 있어야 한다).
+        let (svc, port) = svc();
+        let (boss_from, boss) = live_sender("boss");
+        let (w_id, worker) = live("worker");
+        port.set_roster(vec![boss, worker]);
+        svc.handle_send(
+            "m-req",
+            boss_from,
+            "boss",
+            &["worker".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        let in_lock = Arc::new(StdMutex::new(Vec::<Option<&'static str>>::new()));
+        let seen = in_lock.clone();
+        svc.set_accept_hook_for_test(Arc::new(move |ledger| {
+            seen.lock()
+                .unwrap()
+                .push(ledger.contract_outcome_for_test("m-req", "worker"));
+        }));
+
+        let rep = svc
+            .handle_send(
+                "m-rep",
+                SenderIdentity {
+                    peer_id: w_id,
+                    epoch: 0,
+                },
+                "worker",
+                &["boss".to_string()],
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(rep[0].status, SendStatus::Delivered);
+        assert_eq!(
+            *in_lock.lock().unwrap(),
+            vec![Some("awaiting_reply"), Some("replied")],
+            "★배달 기록 락 안에서 닫혀야 한다★ — 마지막 관측이 `awaiting_reply` 면 닫기가 그 락 밖으로 빠졌다는 뜻이다(리뷰 fix D2)"
+        );
+    }
+
+    #[test]
+    fn a_dormant_contract_binds_the_real_id_when_the_parked_request_is_injected() {
+        // ★리뷰 fix D4 전반부★: 잠든 수신자의 계약은 `recipient_id = None` 으로 열린다 — 그 구간엔 **이름
+        //   폴백만** 계약을 닫을 수 있다. 그래서 복원 후 그 파킹분이 **실제로 주입되는 시점**에 착지 id 를
+        //   계약에 박아 넣어야 한다(그 뒤로는 id 축이 살아 동명 오폐쇄가 불가능해진다).
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        port.set_roster(vec![me]);
+        port.set_dormant(&["sleepy"]);
+        svc.handle_send(
+            "m-req",
+            from,
+            "alice",
+            &["sleepy".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("파킹");
+        assert_eq!(
+            svc.contract_recipient_id_for_test("m-req", "sleepy"),
+            None,
+            "잠듦 계약은 산 incarnation 이 없어 id 없이 열린다"
+        );
+
+        // 복원 → flush 로 주입되는 순간 id 가 박힌다.
+        let (late_id, late) = live("sleepy");
+        port.set_roster(vec![late]);
+        port.set_dormant(&[]);
+        svc.flush_for("sleepy", late_id);
+        assert_eq!(
+            svc.contract_recipient_id_for_test("m-req", "sleepy"),
+            Some(late_id),
+            "주입 시점에 착지 incarnation 의 id 를 계약에 박는다(의무는 봉투를 받은 자를 따른다)"
+        );
+    }
+
+    #[test]
+    fn a_namesake_cannot_close_a_dormant_contract_it_never_received() {
+        // ★리뷰 fix D4 후반부★: 잠든 수신자의 계약(`recipient_id = None`)은 이름 폴백으로 닫히는데, 그 이름을
+        //   가진 **산 세션이 둘 이상**이면 누가 실제로 요청을 받았는지 알 수 없다 → 이름 폴백을 **금지**하고
+        //   무동작(계약 오픈 유지)한다. 잘못 닫는 것보다 안 닫는 게 낫다(귀속 날조 금지).
+        let (svc, port) = svc();
+        let (boss_from, boss) = live_sender("boss");
+        port.set_roster(vec![boss.clone()]);
+        port.set_dormant(&["twin"]);
+        svc.handle_send(
+            "m-req",
+            boss_from,
+            "boss",
+            &["twin".to_string()],
+            "해줘",
+            Entrance::Mcp,
+            &req_meta("10m", 600),
+        )
+        .expect("파킹");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "twin"),
+            Some("awaiting_reply")
+        );
+
+        // 같은 이름의 산 세션이 **둘** 등장 — 어느 쪽도 그 계약을 닫을 수 없다.
+        let (twin_a, a) = live("twin");
+        let (_twin_b, b) = live("twin");
+        port.set_roster(vec![boss.clone(), a, b]);
+        port.set_dormant(&[]);
+        let rep = svc
+            .handle_send(
+                "m-rep",
+                SenderIdentity {
+                    peer_id: twin_a,
+                    epoch: 0,
+                },
+                "twin",
+                &["boss".to_string()],
+                "했음",
+                Entrance::Mcp,
+                &reply_meta("m-req"),
+            )
+            .expect("행 응답");
+        assert_eq!(
+            rep[0].status,
+            SendStatus::Delivered,
+            "회신 **배달**은 막지 않는다(계약 쪽만 무동작 — spec §3 항목 7-②): {rep:?}"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "twin"),
+            Some("awaiting_reply"),
+            "동명 다수에서는 이름 폴백을 금지한다(오폐쇄 금지 — 리뷰 fix D4)"
+        );
+
+        // 동명이 하나로 줄면 정상 경로로 닫힌다(폴백 자체를 죽인 게 아님을 못 박는다).
+        let (solo, solo_agent) = live("twin");
+        port.set_roster(vec![boss, solo_agent]);
+        svc.handle_send(
+            "m-rep2",
+            SenderIdentity {
+                peer_id: solo,
+                epoch: 0,
+            },
+            "twin",
+            &["boss".to_string()],
+            "했음",
+            Entrance::Mcp,
+            &reply_meta("m-req"),
+        )
+        .expect("행 응답");
+        assert_eq!(
+            svc.contract_outcome_for_test("m-req", "twin"),
+            Some("replied"),
+            "동명이 사라지면 이름 폴백이 정상 작동한다"
+        );
+    }
+
+    #[test]
+    fn every_fail_code_has_a_frozen_wire_string() {
+        // ★뮤테이션 프로브 D9-d★: `FailCode::as_str` 의 문자열을 **서로 맞바꿔도** 메시징 전 테스트가 초록
+        //   이었다(데몬 테스트 2개만 잡았다). 이 값들은 발신 LLM 이 분기하는 **안정 계약**(spec §6)이라
+        //   커널에서 직접 봉인한다. 새 variant 를 추가하면 이 매치가 컴파일 에러로 갱신을 강제한다.
+        for (code, wire) in [
+            (FailCode::RecipientNotFound, "RECIPIENT_NOT_FOUND"),
+            (FailCode::RecipientAmbiguous, "RECIPIENT_AMBIGUOUS"),
+            (FailCode::MailboxFull, "MAILBOX_FULL"),
+            (FailCode::RequestCapacity, "REQUEST_CAPACITY"),
+            (FailCode::RecipientDeleted, "RECIPIENT_DELETED"),
+        ] {
+            assert_eq!(code.as_str(), wire, "{code:?} 의 wire 문자열이 바뀌었다");
+            // 컴파일러가 variant 누락을 잡게 한다(새 코드가 오면 이 match 가 깨진다).
+            match code {
+                FailCode::RecipientNotFound
+                | FailCode::RecipientAmbiguous
+                | FailCode::MailboxFull
+                | FailCode::RequestCapacity
+                | FailCode::RecipientDeleted => {}
+            }
+        }
     }
 }
