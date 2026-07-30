@@ -4813,6 +4813,53 @@ mod tests {
     }
 
     #[test]
+    fn inject_failure_parks_pending_without_a_turn_signal() {
+        // ★막는 회귀 2종★(ADR-0116 결정 7): ① 이 부류의 주입 실패를 실패 행/유실로 바꾸는 변경 ② 그렇게 쌓인
+        //   백로그가 **다음 편지를 막게** 만드는 변경(= `deliver_one` 재확인의 큐 검사에서 `turn_signal` 조건을
+        //   빼는 것 — 실측으로 무방비였다). 이 부류에 FIFO 는 적용하지 않는다("그냥 보내고 뒤돌아보지 않는다").
+        // ★`handle_send` 경로 한정 서술★: 이 부류는 게이트를 묻지 않아 여기선 주입 실패만이 파킹 진입로다
+        //   (notice 경로 `deliver_notice` 는 수신자 부류와 무관하게 항상 파킹 후 도어벨을 누른다).
+        let (svc, port) = svc();
+        let (from, me) = live_sender("alice");
+        let (tui_id, tui) = live_no_turn_signal("tui");
+        port.set_roster(vec![me, tui]);
+        port.fail_at(&[0]); // 첫(유일) inject 실패.
+
+        let out = send(&svc, "m1", from, "alice", &["tui"]).expect("파킹은 반려 아님");
+        assert_eq!(
+            (out[0].status, out[0].code),
+            (SendStatus::Pending, None),
+            "주입 실패 → 파킹(실패 행도, 조용한 유실도 아니다): {out:?}"
+        );
+        assert_eq!(svc.parked_len("tui"), 1);
+        assert_eq!(
+            svc.ledger_statuses("m1"),
+            vec![DeliveryStatus::Pending],
+            "장부도 pending 으로 남아야(유실 금지)"
+        );
+
+        // ★백로그가 있어도 다음 편지는 그 앞을 지나간다(FIFO 미적용)★ — 큐 검사에서 `turn_signal` 조건이
+        //   빠지면 여기서 파킹으로 뒤집힌다.
+        let second = send(&svc, "m2", from, "alice", &["tui"]).expect("행 응답");
+        assert_eq!(
+            second[0].status,
+            SendStatus::Delivered,
+            "선행 파킹분을 앞질러 즉시 주입돼야: {second:?}"
+        );
+        assert_eq!(port.injected_bodies().len(), 1, "주입된 건 m2 뿐");
+        assert_eq!(
+            svc.ledger_statuses("m1"),
+            vec![DeliveryStatus::Pending],
+            "m1 은 여전히 파킹(앞지르기가 큐를 지우지 않는다)"
+        );
+
+        // 파킹분이 살아 있다는 증거 — 다음 flush 계기에 실제로 주입된다.
+        svc.flush_for("tui", tui_id);
+        assert_eq!(port.injected_bodies().len(), 2);
+        assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
+    }
+
+    #[test]
     fn flush_on_appearance_delivers_oldest_first_individually_wrapped() {
         // 부재 시 3건 파킹 → 등장 flush → 오래된 순 + 각자 개별 봉투 주입.
         let (svc, port) = svc();
@@ -10402,6 +10449,10 @@ mod tests {
         assert_eq!(svc.parked_len("dup"), 0);
     }
 
+    // ★게이트 생략의 **busy 반쪽** 방어선(반쪽 둘 — 착각 금지)★: 이 테스트는 busy 를 세팅한 채 배달을
+    //   단언하지만 발송이 백로그를 만나지 않아 **큐 반쪽은 못 덮는다** — 그쪽은
+    //   `inject_failure_parks_pending_without_a_turn_signal`(m2 가 파킹분을 앞지른다)이 지킨다. 데몬 통합
+    //   (`daemon/tests/control_send.rs` — shell 수신자)은 tap 도 백로그도 없어 **둘 다** 못 잡는다(실측).
     #[test]
     fn a_live_agent_without_a_turn_signal_is_injected_with_no_gate() {
         // ★spec §7 "턴 신호 없는 백엔드 = 즉시 주입"(ADR-0116 결정 7 — `RECIPIENT_UNREACHABLE` 폐기)★:

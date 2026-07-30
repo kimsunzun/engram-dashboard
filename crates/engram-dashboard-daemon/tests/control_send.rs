@@ -335,24 +335,22 @@ async fn control_send_corrective_errors() {
     handle.shutdown().await;
 }
 
-// ── /control/send: shell(턴 신호 없음) 수신자도 **게이트 없이 배달**된다 — ADR-0116 결정 7 ─────────────
-// ★무엇을 지키나(4차 개정으로 결말이 뒤집혔다)★: shell(structured=false)은 턴 경계를 관측할 수 없지만
-//   **프로세스는 살아 있다**. 3차 판은 그 부류를 로스터에서 빼고 실패 행(`RECIPIENT_UNREACHABLE`)으로
-//   반려했는데, 그 전제("관측할 수 없으니 배달할 수 없다")가 **틀렸다** — 그 CLI 는 자기 입력 큐를 갖고 있어
-//   턴 중 입력을 물고 있다가 턴이 끝난 뒤 소비한다. 그래서 이제 **게이트 없이 즉시 주입**하고 행은
-//   `delivered` 다(파킹도, 대기도, 재시도도 없다 — spec §5 배달 분기).
-// ★왜 통합으로서 유용한가★: "턴 신호 없는 산 세션이 로스터에 든다" 는 **실물 어댑터 술어**(messaging_host
-//   `is_live`)에 걸린 사실이라, 하네스가 집합을 스크립트하는 단위 테스트로는 증명되지 않는다. 여기선 실제
-//   spawn 이 그 상태를 만든다(그 술어의 봉인 테스트는 messaging_host 유닛에도 있다 — 리뷰 fix D9-a).
+// ── /control/send: shell(턴 신호 없음) 산 세션이 **로스터에 들어 배달된다** — ADR-0116 결정 1 ────────────
+// ★이 테스트의 실제 범위 = 멤버십 한 축뿐★: 실제 spawn 한 shell(structured=false) 세션이 실물 어댑터 술어
+//   (messaging_host `is_live`)를 통과해 배달까지 간다는 것.
+// ★게이트 생략은 여기서 검증되지 않는다(뮤테이션 실측 — 착각 금지)★: 두 판정 지점에 게이트를 되살려도 이
+//   테스트는 초록이다. shell 은 tap 이 없어 busy 가 항상 false 고 보관함도 비어, 게이트가 있어도 파킹으로
+//   분기할 일이 없기 때문이다. 게이트 생략은 **반쪽 둘**이고 방어선은 전부 커널에 있다(`messaging/src/service.rs`):
+//   busy 반쪽 = `a_live_agent_without_a_turn_signal_is_injected_with_no_gate` · 큐 백로그 반쪽 =
+//   `inject_failure_parks_pending_without_a_turn_signal`. 어느 쪽을 지우든 이 통합 테스트가 대신 잡아주지 **않는다**.
 #[tokio::test]
-async fn control_send_shell_recipient_is_delivered_without_a_gate() {
+async fn control_send_shell_recipient_is_in_the_roster_and_delivered() {
     let (manager, registry, base, data_dir, handle, messaging, _busy) =
         wire("no-turn-signal").await;
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "valid-sender".to_string());
 
-    // shell 에이전트(structured=false = **턴 신호 없음**) 스폰. ★"도달 불가" 가 아니다★ — 그 어휘는 3차 판의
-    //   것이고 4차에 폐기됐다(이 테스트가 바로 그 부류의 **배달**을 단언한다, ADR-0116 결정 7).
+    // shell 에이전트(structured=false = **턴 신호 없음**) 스폰.
     let mut profile = AgentProfile::new(
         "sheller".to_string(),
         AgentCommand::Shell {
@@ -377,16 +375,16 @@ async fn control_send_shell_recipient_is_delivered_without_a_gate() {
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
         v["results"][0]["status"], "delivered",
-        "★ADR-0116 결정 7★ 턴 신호가 없어도 산 세션은 배달 대상이다(게이트 없이 즉시 주입): {body}"
+        "★ADR-0116 결정 1★ 턴 신호가 없어도 산 세션은 로스터에 들어 배달된다: {body}"
     );
     assert!(
         v["results"][0]["code"].is_null(),
-        "배달 행에는 실패 코드가 없어야(옛 RECIPIENT_UNREACHABLE 는 폐기됐다): {body}"
+        "배달 행에는 실패 코드가 없어야: {body}"
     );
     assert_eq!(
         messaging.parked_len("sheller"),
         0,
-        "이 부류엔 busy 파킹이 없다(게이트를 묻지 않는다): {body}"
+        "배달됐으니 파킹 잔여도 없어야(게이트 생략 자체의 증거는 아니다 — 위 헤더): {body}"
     );
 
     manager.kill_agent(info.id).ok();

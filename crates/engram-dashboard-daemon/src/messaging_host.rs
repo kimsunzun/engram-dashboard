@@ -570,13 +570,15 @@ mod tests {
     /// 테스트가 전부 초록이었다(구조화 조건을 지운 쪽은 잡혔는데 상태 조건은 무방비 — 비대칭 커버리지).
     /// 4차 개정으로 그 상태 술어가 **유일한 멤버십 게이트**가 됐으므로(capability 는 타이밍 축으로 내려갔다)
     /// 여기서 실 세션으로 못 박는다. 커널 단위 테스트는 하네스가 집합을 스크립트하므로 이 술어를 타지 않는다.
-    #[cfg(windows)]
+    ///
+    /// ★플랫폼 게이트는 **spawn 하는 테스트에만** 건다★: 잠듦 축 봉인은 `upsert` 뿐이라 OS 의존이 없는데,
+    /// 모듈째 `#[cfg(windows)]` 로 덮으면 non-Windows 에서 그 회귀가 초록으로 샌다.
     mod roster_predicate {
         use super::*;
         use engram_dashboard_core::agent::preset::PresetRegistry;
-        use engram_dashboard_core::agent::profile::{
-            AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
-        };
+        #[cfg(windows)]
+        use engram_dashboard_core::agent::profile::SpawnMode;
+        use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, ProfileRegistry};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
         use engram_dashboard_core::agent::types::{AgentInfo, AgentStatus, StatusSink};
         use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
@@ -614,10 +616,12 @@ mod tests {
             ))
         }
 
-        /// 턴 신호 없는 산 세션(shell = structured false) — 4차 로스터의 **핵심 모집단**.
-        fn shell(name: &str) -> AgentProfile {
+        /// ★base 이름(`AgentProfile::name`)과 canonical 이름(`display_name`)을 **일부러 다르게** 만드는
+        ///   fixture★: 두 값이 같으면 트랩 필드(`p.name`)로 잠든 이름을 뽑는 회귀가 그대로 통과한다
+        ///   (ADR-0116 영향 절 — "그 필드로 잠든 이름을 뽑으면 조용히 어긋난다").
+        fn profile(base: &str, canonical: &str) -> AgentProfile {
             let mut p = AgentProfile::new(
-                name.to_string(),
+                base.to_string(),
                 AgentCommand::Shell {
                     program: engram_dashboard_core::agent::manager::default_shell().to_string(),
                     args: vec![],
@@ -626,10 +630,17 @@ mod tests {
                 vec![],
                 false,
             );
-            p.display_name = Some(name.to_string());
+            p.display_name = Some(canonical.to_string());
             p
         }
 
+        /// 턴 신호 없는 산 세션(shell = structured false) — 4차 로스터의 **핵심 모집단**.
+        #[cfg(windows)]
+        fn shell(name: &str) -> AgentProfile {
+            profile(name, name)
+        }
+
+        #[cfg(windows)]
         fn wait_until<F: Fn() -> bool>(cond: F) -> bool {
             for _ in 0..150 {
                 if cond() {
@@ -640,6 +651,7 @@ mod tests {
             cond()
         }
 
+        #[cfg(windows)]
         #[test]
         fn a_live_session_without_a_turn_signal_is_in_the_roster_with_turn_signal_false() {
             // ★멤버십 = 상태뿐 · capability = 타이밍★(ADR-0116 결정 1·7): 구조화 출력이 없어도 로스터에
@@ -673,6 +685,69 @@ mod tests {
             assert!(
                 port.is_agent_live(info.id),
                 "삭제 정리 게이트도 같은 술어여야(리뷰 fix D1 — 이 부류를 놓치면 배달될 메일이 죽는다)"
+            );
+
+            manager.kill_agent(info.id).ok();
+        }
+
+        #[test]
+        fn two_dormant_profiles_sharing_a_name_are_both_reported() {
+            // ★막는 회귀 2종★(둘 다 뮤테이션 실측으로 무방비 확인 — 데몬 전 테스트 초록이었다):
+            //   ① `dormant_names` 에 `.dedup()` — 접히면 동명 잠듦이 `RECIPIENT_AMBIGUOUS` 대신 이름 키로
+            //      파킹돼 **먼저 복원된 쪽이 남의 편지를 조용히 받는다**(ADR-0116 결정 1 이 금지한 결말).
+            //   ② 이름 파생을 트랩 필드 `p.name` 으로 바꾸기 — fixture 가 base ≠ canonical 이라 그 순간
+            //      파킹 키가 복원 후 산 이름과 어긋난다(편지가 24h TTL 로 조용히 만료).
+            //   커널 쪽 동명 테스트는 중복 목록을 fake 에 **스크립트**하므로 이 생산자를 타지 않는다.
+            let manager = manager("dormant-dup");
+            let port = ManagerDeliveryPort::new(manager.clone());
+            // 스폰하지 않는다 — 산 세션이 없는 프로필이 곧 잠듦이다(`live_ids` 차집합).
+            manager.profiles().upsert(profile("raw-twin-a", "twin"));
+            manager.profiles().upsert(profile("raw-twin-b", "twin"));
+
+            let sources = port.addressing_sources();
+            assert!(
+                sources.roster.is_empty(),
+                "스폰이 없으므로 로스터는 비어야: {sources:?}"
+            );
+            assert_eq!(
+                sources.dormant_names,
+                vec!["twin".to_string(), "twin".to_string()],
+                "동명 잠듦 2건은 canonical 이름 그대로 2건 올라와야: {sources:?}"
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn a_live_namesake_does_not_hide_a_dormant_profile_with_the_same_name() {
+            // ★봉인 대상 = 잠듦 차집합의 축이 **id** 라는 규칙 자체(ADR-0116 결정 1)★. 이 fixture 가 재현하는
+            //   실패 모드는 **이름 우연 일치**다: 잠든 프로필의 canonical 이름이 산 세션의 이름과 같으면
+            //   이름 축 차집합에서 그 프로필이 통째로 사라지고(`dormant_names == []`), id 축이면 산 것만 빠지고
+            //   잠든 쪽은 남는다(아래 단언).
+            // ★정직 명시 — 이 fixture 의 발송 결말은 뮤테이션과 무관하게 같다★: 산 동명이 있으면 잠듦 축은
+            //   조회조차 되지 않는다(산 쪽이 이긴다 — `service.rs::a_live_agent_wins_over_a_dormant_namesake`).
+            //   즉 이건 어댑터 산출물의 white-box 봉인이지 발송 결말 회귀가 아니다.
+            let manager = manager("live-namesake");
+            let port = ManagerDeliveryPort::new(manager.clone());
+            let info = manager
+                .spawn_agent(&profile("raw-live-twin", "twin"), SpawnMode::Fresh)
+                .expect("shell spawn");
+            assert!(wait_until(|| manager
+                .list_agents()
+                .iter()
+                .any(|a| a.id == info.id)));
+            manager
+                .profiles()
+                .upsert(profile("raw-dormant-twin", "twin"));
+
+            let sources = port.addressing_sources();
+            assert!(
+                sources.roster.iter().any(|a| a.id == info.id),
+                "산 동명이 로스터에 있어야(전제): {sources:?}"
+            );
+            assert_eq!(
+                sources.dormant_names,
+                vec!["twin".to_string()],
+                "산 쪽은 id 로 빠지고 잠든 동명은 남아야(이름 축으로 빼면 비어 버린다): {sources:?}"
             );
 
             manager.kill_agent(info.id).ok();
