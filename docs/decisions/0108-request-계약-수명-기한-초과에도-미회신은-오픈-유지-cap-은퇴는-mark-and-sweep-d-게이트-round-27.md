@@ -1,7 +1,7 @@
 # ADR-0108: request 계약 수명 — 기한 초과에도 미회신은 오픈 유지 + cap 은퇴는 mark-and-sweep (D 게이트 round 2~7)
 
-- 상태: 확정 (2026-07-27, 근거: D 적대 리뷰 6라운드 실적출 + 사용자 결정 2026-07-27) · 부분 폐기 by ADR-0114 (결정 2 REQUEST_CAPACITY 반려 층위)
-- 관련: ADR-0103(회신 계약 본체) · ADR-0107(메일박스 용량 모델 — 압력 회수의 선례 패턴) · spec §3(회신 계약)·§6(REQUEST_CAPACITY) · Amended by ADR-0114 (결정 2 REQUEST_CAPACITY 반려 층위)
+- 상태: 확정 (2026-07-27, 근거: D 적대 리뷰 6라운드 실적출 + 사용자 결정 2026-07-27) · 부분 폐기 by ADR-0114 (결정 2 REQUEST_CAPACITY 반려 층위) · 부분 폐기 by ADR-0118 (결정 1 계약 종결 조건)
+- 관련: ADR-0103(회신 계약 본체) · ADR-0107(메일박스 용량 모델 — 압력 회수의 선례 패턴) · spec §3(회신 계약)·§6(REQUEST_CAPACITY) · Amended by ADR-0114 (결정 2 REQUEST_CAPACITY 반려 층위) · Amended by ADR-0118 (결정 1 계약 종결 조건)
 
 ## 맥락
 
