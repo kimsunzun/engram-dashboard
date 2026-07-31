@@ -36,7 +36,7 @@ type CmdResult = Result<AgentEvent, String>;
 
 /// 새 에이전트 spawn(프로필 참조). reply = `Ack`(데몬 spawn dispatch 확인). 성공 시 `()`.
 ///
-/// ★주의(reply 종류)★: 데몬 ws.rs 의 `Spawn{profile_id}` dispatch 는 Ack 로 응답한다(SpawnByCwd/
+/// ★주의(reply 종류)★: 데몬 connection_core.rs 의 `Spawn{profile_id}` dispatch 는 Ack 로 응답한다(SpawnByCwd/
 /// SpawnProfile 만 Spawned 로 AgentInfo 동봉). 여기선 Ack/Spawned 어느 쪽이든 성공으로 본다.
 #[tauri::command]
 pub async fn agent_spawn(
@@ -268,11 +268,12 @@ pub async fn forward_daemon_command(
     //   않음 — connection_core.rs dispatch). 정상 경로의 왕복은 loopback 에서 수 ms 라 30s 에 절대 안
     //   닿는다. 넉넉히 잡아 "느린 데몬"을 타임아웃으로 오판하지 않으면서, 무한 hang 만 확정적으로 끊는다.
     //
-    // ★데몬측 enqueue 실패 승격 대신 클라측 타임아웃을 택한 이유★: connection_core.rs:535 의 enqueue
-    //   실패 무시를 "연결 종료로 승격"하면 ADR-0020 R6(behavior-preserving)을 깨고 데몬 crate 회귀 위험이
-    //   크다(정상 단일 연결도 일시적 큐 포화로 끊길 수 있음). 타임아웃은 src-tauri(클라) 레이어에 격리돼
-    //   데몬 동작을 안 건드리고, 락 순서(ADR-0006)와도 무관하다 — send_command 는 락을 잡았다 즉시 풀고
-    //   Sender clone 만 반환하므로 이 timeout 래핑은 추가 락을 보유하지 않는다.
+    // ★데몬측 enqueue 실패 승격 대신 클라측 타임아웃을 택한 이유★: connection_core.rs 의 enqueue
+    //   실패 무시(`let _ = sink.enqueue(..)`)를 "연결 종료로 승격"하면 ADR-0020 R6(behavior-preserving)을
+    //   깨고 데몬 crate 회귀 위험이 크다(정상 단일 연결도 일시적 큐 포화로 끊길 수 있음). 타임아웃은
+    //   src-tauri(클라) 레이어에 격리돼 데몬 동작을 안 건드리고, 락 순서(ADR-0006)와도 무관하다 —
+    //   send_command 는 락을 잡았다 즉시 풀고 Sender clone 만 반환하므로 이 timeout 래핑은 추가 락을
+    //   보유하지 않는다.
     const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     match tokio::time::timeout(REPLY_TIMEOUT, client.send_command(agent_cmd)).await {
         Ok(Ok(event)) => {

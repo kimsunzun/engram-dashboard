@@ -2,7 +2,7 @@
 //!
 //! ★배치 규약★: 이 타입들은 **src-tauri 안에서만** 정의·export 된다. protocol/daemon crate 에
 //! 절대 넣지 않는다 — 데몬은 View 를 일절 모르는 UI 불가지론(ADR-0035). ts-rs 로 프론트
-//! (`src/store/layoutTypes.ts`)에 미러하되, 데몬 wire 계약(protocol crate)과는 별개 채널이다.
+//! (`src/api/layoutTypes.ts`)에 미러하되, 데몬 wire 계약(protocol crate)과는 별개 채널이다.
 //!
 //! LayoutNode 는 split 트리(에디터 모델) — Slot(말단) / Split(내부 노드)의 재귀 enum. agent_id 는
 //! 데몬 에이전트의 "참조 문자열"일 뿐(소유 아님) — close_view 해도 에이전트는 생존(ADR-0035 디커플링).
@@ -104,7 +104,7 @@ pub struct View {
     pub focused_slot_id: Option<Uuid>,
 }
 
-/// 탭 바용 View 메타(레이아웃 본체 제외 — `view:list-updated` 페이로드).
+/// 탭 바용 View 메타(레이아웃 본체 제외 — `window:tabs-updated` 페이로드).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct ViewMeta {

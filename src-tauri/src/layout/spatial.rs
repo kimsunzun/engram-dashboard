@@ -46,7 +46,7 @@ impl NormRect {
     fn bottom(&self) -> f32 {
         self.y + self.h
     }
-    /// 이 rect 의 중심(ordinal 정렬·edge 토큰 선택에 씀 — 경계가 아니라 대표점).
+    /// 이 rect 의 중심(ordinal 정렬에 씀 — 경계가 아니라 대표점).
     fn center_x(&self) -> f32 {
         self.x + self.w / 2.0
     }

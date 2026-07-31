@@ -67,8 +67,7 @@ pub fn is_popup_label(label: &str) -> bool {
 }
 
 /// 런타임 창 URL 을 만든다. ★URL 키 = `?window=<label>`(ADR-0057/§3-3)★: 팝업 페이지는 "고정 뷰"가
-/// 아니라 "이 창의 활성 탭"을 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위). 프론트는 이 슬라이스
-/// 밖(스테이지 4)이라 stale 하지만, Rust 측 일관성 위해 새 키로 발급한다.
+/// 아니라 "이 창의 활성 탭"을 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위).
 fn window_url(label: &str) -> String {
     format!("index.html#/popup?window={label}")
 }

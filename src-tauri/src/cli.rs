@@ -90,7 +90,6 @@ async fn cmd_list() -> Result<(), String> {
         println!("(no agents)");
     }
     for a in &agents {
-        // status 는 enum(Running/Exited{code}/…)이라 문자열이 아니면 JSON 으로 압축 출력.
         println!("{}\t{}\t{}\t{}", a.id, a.label, a.status, a.cwd);
     }
     Ok(())
