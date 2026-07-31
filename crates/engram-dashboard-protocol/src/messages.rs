@@ -229,7 +229,9 @@ pub enum AgentEvent {
         capabilities: Option<Capabilities>,
     },
     /// side-effect command 수신/처리 확인(request_id 에코).
-    Ack { request_id: RequestId },
+    Ack {
+        request_id: RequestId,
+    },
     /// Subscribe 응답 — replay 방식과 범위(설계 §1-3).
     SubscribeAck {
         #[ts(type = "string")]
@@ -270,7 +272,9 @@ pub enum AgentEvent {
     },
     /// 전체 목록 갱신(broadcast). terminal 판정은 이걸로(status_changed 아님 — 설계 불변식).
     /// ※ 트리 실시간 갱신 전용 — request_id 없음. ListAgents 조회 응답은 [`AgentEvent::AgentList`].
-    AgentListUpdated { agents: Vec<AgentInfo> },
+    AgentListUpdated {
+        agents: Vec<AgentInfo>,
+    },
     /// ListAgents 조회 응답(전용 reply) — request_id 에코로 "내 요청 결과"를 정확히 매칭.
     /// broadcast 인 AgentListUpdated 와 페이로드는 동일하나 편승 매칭(다음 도착 메시지 짝짓기)을
     /// 제거하기 위해 request_id 를 동봉한다(Spawned/Created 와 동형).
@@ -278,7 +282,9 @@ pub enum AgentEvent {
         request_id: RequestId,
         agents: Vec<AgentInfo>,
     },
-    RestoreResult { report: RestoreReport },
+    RestoreResult {
+        report: RestoreReport,
+    },
     /// 입력 lease 상태 변경 통보(다중 뷰어가 "지금 잠겨있음"을 알게 함). held=true 면 누군가 보유 중,
     /// false 면 비어 있음(아무나 acquire 가능). 보유자 conn 식별값은 보안상 노출하지 않는다(잠김 여부만).
     InputLeaseChanged {
@@ -289,7 +295,9 @@ pub enum AgentEvent {
     /// 프로필 목록 갱신(broadcast, phase4 1단계). CRUD(생성/삭제/토글) 후 자동 push — 프론트
     /// ProfileRegistry 미러 갱신용. AgentListUpdated 의 프로필판. request_id 없음.
     /// ListProfiles 조회 응답은 [`AgentEvent::ProfileList`].
-    ProfileListUpdated { profiles: Vec<AgentProfile> },
+    ProfileListUpdated {
+        profiles: Vec<AgentProfile>,
+    },
     /// ListProfiles 조회 응답(전용 reply) — request_id 에코. broadcast 인 ProfileListUpdated 와
     /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(Spawned/Created 와 동형).
     ProfileList {
@@ -299,7 +307,9 @@ pub enum AgentEvent {
 
     /// 프리셋 목록 갱신(broadcast, ADR-0061). CRUD(생성/삭제) 후 자동 push — 모든 창의 프리셋 미러
     /// 동기화용. ProfileListUpdated 의 프리셋판. request_id 없음. ListPresets 조회 응답은 [`AgentEvent::PresetList`].
-    PresetListUpdated { presets: Vec<Preset> },
+    PresetListUpdated {
+        presets: Vec<Preset>,
+    },
     /// ListPresets 조회 응답(전용 reply, ADR-0061) — request_id 에코. broadcast 인 PresetListUpdated 와
     /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(ProfileList 와 동형).
     PresetList {
@@ -428,9 +438,15 @@ pub enum OutputChunk {
         input_tokens: u64,
         output_tokens: u64,
     },
-    ToolCall { name: String, args_json: String },
+    ToolCall {
+        name: String,
+        args_json: String,
+    },
     /// 임의 구조화 페이로드(forward-compat 탈출구).
-    Structured { kind: String, json: String },
+    Structured {
+        kind: String,
+        json: String,
+    },
 }
 
 #[cfg(test)]

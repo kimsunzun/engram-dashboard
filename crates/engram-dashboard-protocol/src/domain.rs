@@ -179,7 +179,10 @@ pub enum AgentSpawnCommand {
         #[serde(default)]
         output_format: ClaudeOutputFormat,
     },
-    Shell { program: String, args: Vec<String> },
+    Shell {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 /// 자동 재시작 정책 wire 미러 — core `profile::RestartPolicy` 와 동일.
