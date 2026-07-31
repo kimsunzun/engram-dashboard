@@ -18,7 +18,7 @@
 //!   동시 write 불가라, 여러 호출자가 직접 ws 를 만지면 write 가 교차한다. 그래서 데몬 ws.rs 의
 //!   "연결당 단일 writer" 와 대칭으로, 클라도 **하나의 task** 가 read/write 를 전담하고 다른
 //!   주체(invoke 핸들러)는 `cmd_tx`(mpsc) 로 의도만 보낸다. 이게 openGen(wsTransport)의 zombie
-//!   가드를 task lifetime 으로 대체하는 토대다(완전한 가드는 T4).
+//!   가드를 task lifetime 으로 대체하는 토대다(T4 에서 in-flight 취소·백오프 재연결이 합류).
 //! - **generation 가드(openGen 씨앗, Fix B)**: `generation`·`cmd_tx`·watch 전이를 **하나의
 //!   `Mutex<Lifecycle>` 아래로** 통합한다(`lifecycle.rs`). connect/ensure/close 마다 락 안에서 세대를
 //!   올리고, 각 연결 task 는 spawn 시점 세대(my_gen)를 캡처한다. task·caller 는 공유 상태(state
@@ -26,9 +26,10 @@
 //!   `publish_if_current`/`store_cmd_if_current`. 비교와 변경 사이에 다른 스레드가 세대를 못 바꾸므로,
 //!   밀려난(stale) task 는 공유 상태를 절대 못 건드린다 → 동시 connect·close-in-flight 에서 고아 Down
 //!   clobber·좀비 cmd_tx·close 후 Connected 부활을 막는다. ⚠️ atomic 하나(load→send 분리)는 SeqCst
-//!   여도 체크+변경을 못 묶어 TOCTOU 가 reachable 했다(Codex 적출) — 그래서 락으로 원자화했다. T2 는
-//!   *씨앗*까지만 — 짧은 순간 소켓 2개가 동시에 열릴 수 있음(둘 다 connect_async)은 허용하되 관찰
-//!   가능한 상태 오염만 없앤다. 완전한 동시-시도 abort·백오프 재연결은 T4.
+//!   여도 체크+변경을 못 묶어 TOCTOU 가 reachable 했다(Codex 적출) — 그래서 락으로 원자화했다.
+//!   ★남은 허용 범위(T2 씨앗 이후 — T4 는 재연결 경로만 덮었다)★: cancel 구독이 connected 직후라
+//!   (connection.rs) 첫 핸드셰이크는 취소 경쟁 밖이다 — 동시 connect 로 소켓 2개가 열릴 수 있음
+//!   (둘 다 connect_async)은 허용하고, 관찰 가능한 상태 오염만 없앤다.
 //! - 상태(`ConnectionState`)는 `watch` 채널로 노출 — 읽기 측(여러 구독자)이 락 없이 현재값을 본다.
 
 pub mod connection;
@@ -296,7 +297,8 @@ impl DaemonClient {
             .lifecycle
             .bump_and_capture(Some(ConnectionState::Connecting));
         // ★spawn 허용 경로★: ensure_spawn(데몬 없으면 띄움). blocking 이라 spawn_blocking 으로 감싼다.
-        //   이 await 동안 옛 세대는 이미 취소·stale 이라 소켓을 못 연다(위 bump 가 닫은 창).
+        //   이 await 동안 옛 **재연결** 세대는 취소·stale 이라 소켓을 못 연다(위 bump 가 닫은 창) — 첫
+        //   핸드셰이크 중인 세대는 cancel 미구독이라 이 가드 밖이다(↑ 모듈 헤더 "남은 허용 범위").
         let discovery = self.discovery.clone();
         let info = match self
             .rt
@@ -383,35 +385,15 @@ impl DaemonClient {
         //   cmd_rx 로 들어오는 명령을 처리한다. 비의도 끊김 시 이 task 안에서 백오프 재연결을
         //   돈다(discovery.read_live no-spawn + rt.spawn_blocking). my_gen + lifecycle 핸들로
         //   stale task 가 공유 상태를 못 건드리게 한다(Fix B + reconnect_guard).
-        // ★emit 경로★: app 이 None(테스트)면 no-emit 더미 AppHandle 을 만들 수 없으므로,
-        //   run_connection 에 Option<AppHandle> 을 주입하는 대신 app 필드가 Some 인 경우만 spawn 한다.
-        //   테스트는 app=None 이라 emit 없이 연결 task 가 돌아야 하므로, run_connection 은
-        //   AppHandle 을 받되 테스트는 Option 언래핑 대신 별도 경로를 써야 한다.
-        //   ★단순화 결정★: 테스트용으로 AppHandle 을 mock 하기 어려우므로, run_connection 의 app
-        //   파라미터는 그대로 AppHandle(Option 아님)로 두되, 테스트 생성자는 app=None → spawn 시
-        //   connect/ensure 가 아닌 경로를 타지 않아 이 코드에 닿지 않는다. 운영 경로에선 항상 Some.
-        //   ★안전 unwrap★: new_real_with_owned_runtime 만이 운영 생성자이고 그것만이 app=Some 으로
-        //   start_connection 에 도달하는 경로를 제공한다(connect/ensure → start_connection).
-        //   테스트 생성자(new_with_handshake_timeout)는 app=None 이지만 실제 소켓에 연결되는 테스트도
-        //   connect/ensure 를 호출한다 — 그때 unwrap_or_else 로 panic 대신 warn.
+        // ★emit 경로★: run_connection 은 `AppHandle`(Option 아님)을 받는다 — mock 이 어려워 테스트용
+        //   Option 화를 하지 않았다. 그래서 app=None(테스트 생성자)이면 연결 task 를 띄울 수 없다(↓ None 분기).
         let app_handle = match self.app.clone() {
             Some(a) => a,
             None => {
-                // 테스트 맥락(emit 대상 없음) — run_connection 이 emit 호출 시 Err 를 무시하므로 안전하게
-                // 진행한다. 그러나 AppHandle 없이는 run_connection 을 spawn 할 수 없다 — 이 분기에 도달
-                // 하는 테스트는 실제 Tauri 런타임이 없어 연결 task 가 app 없이 돌아야 한다.
-                // ★현재 구현 한계★: 테스트가 connect/ensure 를 호출하면 이 분기에서 막힌다. 테스트는
-                // mock_app 주입이나 conditional compile 으로 해결해야 하나, 지금은 connect/ensure 를
-                // 부르는 테스트가 실제 Tauri AppHandle 컨텍스트에서만 돌아야 한다는 제약으로 문서화.
-                // 일단 기존 테스트는 실제 WS 서버와 연결하는 통합 테스트라 AppHandle 없이 돌지 않는다
-                // — 그 테스트들이 mock_app 를 쓰거나 Tauri test_app 을 쓰는 건 후속 작업.
                 tracing::warn!(
                     "start_connection: app=None(테스트 맥락) — emit 없이 연결 task 를 spawn 할 수 없음. \
                      테스트는 Tauri AppHandle 주입이 필요합니다(T7c 한계, 후속 작업)."
                 );
-                // 테스트에서 이 경로에 닿으면 컴파일 실패가 아닌 런타임 경고로 넘기고 현재 함수에서
-                // 단락한다. start_connection 반환 타입이 Result<(), HandshakeError> 라 Ok 로 단락.
-                //
                 // ★app:None 단락 = 통합테스트 위양성, 후속 ADR 필요(미해결)★: 이 `Ok(())` 단락은 task 를
                 //   spawn 하지 않은 채 성공을 반환한다 → 상태가 Connecting 에 고착되는데, tests.rs 의
                 //   connect/ensure 테스트(app=None 생성자)는 `assert_eq!(state, Connected)` 를 단언한다(예:
@@ -420,10 +402,9 @@ impl DaemonClient {
                 //   안 돼 드러나지 않는다. ★운영 경로는 항상 app:Some(new_real_with_owned_runtime)이라 무영향★
                 //   — 이 분기는 테스트 맥락에서만 닿는다.
                 //   근본 수정 = run_connection 이 `Option<AppHandle>` 을 받아 emit no-op(connection.rs 동시성
-                //   영역 전반 + emit 6곳 변경)이거나 test_app 주입. 범위가 connection.rs 동시성 영역 전반이고
-                //   회귀 검증(테스트 실행)이 막혀 있어 Fix-C 범위 밖.
-                //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목 참조(박제). 정식
-                //   ADR 채번은 메인이 별도로 한다(이 노트는 그 step-log/후속 ADR 을 가리키는 앵커).
+                //   영역 전반 + 다수 emit 지점 변경)이거나 test_app 주입 — 회귀 검증(테스트 실행)이 막혀 보류.
+                //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목(박제). 정식 ADR
+                //   채번은 별도.
                 return Ok(());
             }
         };

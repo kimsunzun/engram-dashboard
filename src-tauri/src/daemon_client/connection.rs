@@ -186,9 +186,10 @@ pub enum ConnectionCommand {
 /// 비교 + watch send" 를 같은 락 critical section 으로 묶어 원자화하므로, 비교 통과 후 send 전에 다른
 /// 스레드가 세대를 바꿔 끼어들 수 없다(이전 `AtomicU64::load` → `send` 분리가 만든 TOCTOU 를 닫음).
 /// 이게 wsTransport openGen 가드의 씨앗 — 현재(current) 연결 task 는 최대 1개라는 불변식을 코드로
-/// 강제한다. ⚠️ 완전한 "동시 시도 abort/백오프"는 T4 — 여기선 짧은 순간 소켓 2개가 동시에 열릴 수
-/// 있음(둘 다 connect_async 진행)을 허용하되, stale task 가 *공유 상태를 안 건드리고* 즉시 self-close
-/// 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·Connected 부활)은 없앤다.
+/// 강제한다. ⚠️ 첫 핸드셰이크는 취소 경쟁 밖이라(cancel 구독은 connected 직후 — T4 는 재연결 경로만
+/// 덮었다) 소켓 2개가 동시에 열릴 수 있음(둘 다 connect_async 진행)은 허용한다 — stale task 는 *공유
+/// 상태를 안 건드리고* stale 판정 시 self-close 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·
+/// Connected 부활)은 없앤다.
 ///
 /// ## ★ADR-0006 — 락 .await across 보유 금지★
 /// `publish_if_current`/`store_cmd_if_current` 는 전부 동기(내부에서 await 안 함)다. 따라서 아래
