@@ -4,7 +4,8 @@
 
 ## 양식 오버라이드 (항목 단위 — 명시 안 한 항목은 style-base 유지)
 
-(없음 — style-base 그대로.)
+- **파일 헤더** (style-base "안 쓴다"의 오버라이드): load-bearing 파일(동시성·kill·보안·세션복원 등)은 모듈 overview 헤더(`//!` — 역할·불변식·진입점·시그니처로 안 보이는 의미)를 **권장**한다. soft·boy-scout(만질 때 곁다리로) — 게이트 아님.
+- **프로젝트 상세 캐논** = `docs/reference/commenting-conventions.md`(ADR-0032) — rules.md와 같은 계열(why/invariant/load-bearing). 스킬 🔒SEALED가 우선하고, 그 아래 상세(층위 모델·헤더 형식·점진 정리 권고)는 캐논이 채운다.
 
 ## 보호 패턴 추가 (add-only)
 
