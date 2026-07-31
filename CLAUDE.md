@@ -210,9 +210,8 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 
 ## 컨벤션
 - 중요 로직(동시성·kill·unsafe·비자명한 결정)에 **왜** 그런지 한국어 주석. 자명한 코드엔 주석 금지.
-- **숨은 의도·불변식은 그 코드에 박는다** — 시그니처·타입만 봐선 안 보이는 load-bearing 의미("이 분기가 어떤 race를 막나" 등). 빠뜨리면 다음 세션이 모르고 지우거나 잘못 바꾼다. 상세 규약·사례 = `docs/reference/commenting-conventions.md`(ADR-0032).
-- **load-bearing 파일은 `//!` overview 헤더**(역할·불변식·진입점 요약 — 만지는 파일부터 boy-scout). 상세는 위 reference.
-- **주석 규율 스킬 연동** — 코드 주석의 작성·정리는 clean-comment 스킬의 소비 계약을 따른다(기준 = `~/.claude/skills/clean-comment/references/rules.md`, 프로젝트 특화 = `.claude/skill-bindings/clean-comment.md`). 위 두 줄과 같은 계열이며, retrofit-완료 범위·보호 패턴(`// ADR-NNNN` 등)이 바인딩에 있다 — /implement를 안 거치는 직접 편집 세션도 이 계약을 읽고 코딩한다.
+- **숨은 의도·불변식은 그 코드에 박는다** — 시그니처·타입만 봐선 안 보이는 load-bearing 의미("이 분기가 어떤 race를 막나" 등). 빠뜨리면 다음 세션이 모르고 지우거나 잘못 바꾼다.
+- **주석 규율 정본 = clean-comment 스킬 소비 계약** — 작성·정리 모두 이것을 따른다(기준 = `~/.claude/skills/clean-comment/references/rules.md` + `style-base.md`, 프로젝트 특화·보호 패턴·retrofit-완료 범위 = `.claude/skill-bindings/clean-comment.md`). `//!` overview 헤더·동갱신·boy-scout 규약은 구 캐논(ADR-0032)에서 스킬 Base로 승급됨(2026-07-31 — 캐논 문서 폐기, 결정 근거는 ADR-0032 유지). **/implement를 안 거치는 직접 편집 세션도 이 계약을 읽고 코딩한다.**
 - 자격증명을 `profile.env`에 넣지 말 것(agents.json 평문 저장 — persistence가 경고).
 - 모듈마다 build/test/커밋. 커밋 메시지 끝에 Co-Authored-By 트레일러.
 
