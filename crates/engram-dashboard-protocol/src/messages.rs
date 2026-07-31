@@ -11,7 +11,6 @@ use crate::domain::{
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
 /// UI→core 요청 envelope(설계 §3). side-effect 명령은 `request_id` 로 idempotent.
-/// (Profile CRUD 는 phase 1 에서 core profile 타입 합류 후 추가 — 지금은 보류.)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum AgentCommand {
@@ -95,19 +94,16 @@ pub enum AgentCommand {
     },
 
     // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────────
-    // EmbeddedClient(invoke)의 프로필 메서드와 1:1 대응. 두 모드가 같은 동작을 해야
-    // DaemonClient 가 EmbeddedClient 와 호환된다(아래 각 variant 주석에 대응 invoke 명시).
-    /// cwd 만으로 ad-hoc 셸 에이전트 spawn(영속 프로필 없이 transient). EmbeddedClient `spawnAgent(cwd)`
-    /// = Tauri `spawn_agent` 대응 — 기본 셸 명령 + auto_restore=false 로 Fresh spawn.
+    /// cwd 만으로 ad-hoc 셸 에이전트 spawn — 호출자가 미리 만들어 둔 프로필이 필요 없다. 기본 셸 명령
+    /// 프로필을 즉석 생성(생성 시 auto_restore=false)해 Fresh spawn 하고, spawn 경로가 그 프로필을
+    /// registry 에 등록·persist 한다.
     SpawnByCwd { cwd: String, request_id: RequestId },
 
-    /// 저장된 프로필 전체 조회. EmbeddedClient `listProfiles` = Tauri `list_profiles` 대응.
-    /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply). broadcast 인
+    /// 저장된 프로필 전체 조회. 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply). broadcast 인
     /// [`AgentEvent::ProfileListUpdated`](프론트 미러 갱신)와 별개 — 편승 매칭 제거.
     ListProfiles { request_id: RequestId },
 
-    /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). EmbeddedClient `createClaudeProfile`
-    /// = Tauri `create_claude_profile` 대응. ※env 에 자격증명 금지(평문 persist).
+    /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). ※env 에 자격증명 금지(평문 persist).
     CreateProfile {
         name: String,
         cwd: String,
@@ -124,7 +120,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 프로필 삭제. EmbeddedClient `deleteProfile` = Tauri `delete_profile` 대응.
+    /// 프로필 삭제.
     DeleteProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -132,7 +128,6 @@ pub enum AgentCommand {
     },
 
     /// 저장된 프로필 spawn. resume=true 면 기존 세션 이어받기(claude `--resume`).
-    /// EmbeddedClient `spawnProfile(agentId, resume)` = Tauri `spawn_profile` 대응.
     SpawnProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -140,7 +135,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// auto_restore 토글. EmbeddedClient `setProfileAutoRestore` = Tauri `set_profile_auto_restore` 대응.
+    /// auto_restore 토글.
     SetProfileAutoRestore {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -174,8 +169,8 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// replay buffer 스냅샷 조회. EmbeddedClient `getSnapshot` = Tauri `get_agent_snapshot` 대응.
-    /// 응답은 [`AgentEvent::Snapshot`]. (Subscribe replay 와 별개의 1회성 조회.)
+    /// replay buffer 스냅샷 조회. 응답은 [`AgentEvent::Snapshot`].
+    /// (Subscribe replay 와 별개의 1회성 조회.)
     GetSnapshot {
         #[ts(type = "string")]
         agent_id: AgentId,

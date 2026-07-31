@@ -1,8 +1,10 @@
 //! # engram-dashboard-protocol — 경계 계약 (linchpin)
 //!
-//! UI(프론트) ↔ core/daemon 사이 wire 프로토콜. 두 모드 공통:
-//!   - Embedded: Tauri invoke/Channel 이 이 타입을 실어 나름.
-//!   - Daemon: 127.0.0.1 WS 가 이 타입을 실어 나름.
+//! UI(프론트) ↔ daemon 사이 wire 프로토콜(daemon-only 단일 경로 — ADR-0029 embedded 모드 제거,
+//! ADR-0036 창↔데몬 직결 없이 src-tauri 가 단일 데몬 클라이언트로 중계).
+//! 두 구간이 이 타입을 실어 나른다:
+//!   - 프론트 ↔ src-tauri(로컬 IPC): Tauri invoke(명령) · 이벤트(브로드캐스트) · Channel(출력 frame, raw byte).
+//!   - src-tauri(DaemonClient) ↔ daemon: 127.0.0.1 WS.
 //!
 //! ## 설계 근거 (daemon-design.md)
 //! - §1-1 단일 WS 연결·단일 수신루프(lane 분리 금지) — control 과 output 이 같은 연결.

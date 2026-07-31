@@ -135,7 +135,7 @@ fn tag_two_is_still_unknown() {
     assert_eq!(decode_frame(&buf), Err(CodecError::UnknownTag(2)));
 }
 
-// ── 경계값·최소길이 회귀 (adversary FIX) ──────────────────────────────────────
+// ── 경계값·최소길이 회귀 ──────────────────────────────────────────────────────
 
 /// epoch/seq 극값 round-trip: BE 변환이 상한(u32::MAX / u64::MAX)에서도 무손실인지.
 /// to_be_bytes/from_be_bytes 오프셋·자릿수 실수를 경계에서 잡는다(tag0·tag1 둘 다).
