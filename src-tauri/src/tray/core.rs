@@ -1,21 +1,12 @@
 //! tray core — 트레이 동작의 **순수 로직**(OS/GUI/네트워크 무의존).
 //!
-//! ## 출처 (ADR-0026 1단계: 별도 tray-host crate 제거 + 순수 로직 살리기)
-//! 구 `crates/engram-tray-host/src/core.rs` 에서 **순수 매핑/enum/픽셀 변환** 만 이관했다.
-//! 버린 것: `LaunchError`/`DaemonProbe`/`Launcher`/`dispatch`/`causes_tray_exit`/`icon_state_from_probe`
-//! (통합 앱은 트레이 핸들러가 discovery command 를 직접 부르므로 이 seam 불필요 — TRD §2).
-//!
-//! core.rs 순수성 유지 — tauri/discovery import 0(슬라이스/enum 만 다룬다, CLAUDE.md §4).
-//!
-//! ## ADR-0026 2단계: MenuAction 5개로 재정리(트레이=앱 통합)
-//! 통합으로 "트레이 종료"(QuitTray)는 무의미해져 삭제(트레이=앱 → 트레이만 끄기 불가). 6→5:
-//! StartDaemon/StopDaemon/ShowUi/HideUi/QuitApp. 라벨도 "UI 열기/닫기" → "UI 보이기/숨기기"
-//! (창 show/hide 가 실제 동작 — destroy 가 아님), "완전 종료" → QuitApp.
-//!
-//! ## 커밋C: 메뉴에서 ShowUi/HideUi 제거(더블클릭으로 대체)
-//! 트레이 더블클릭 = UI 열기로 대체되어 메뉴 항목 ShowUi/HideUi 를 뺀다(메뉴 항목 5→3 +
-//! ToggleAutostart + QuitApp). ★주의: show_main_ui/hide_main_ui actions·command 는 유지★ —
-//! 메뉴 *항목*만 제거한 것이고, 더블클릭·LLM/cdp 제어(CLAUDE.md §5)는 같은 actions 함수를 계속 쓴다.
+//! 순수성 불변식: tauri/discovery import 0 — 슬라이스/enum 만 다룬다(CLAUDE.md §4).
+//! Launcher/DaemonProbe/dispatch 류 seam 은 **의도적 부재** — 통합 앱은 트레이 핸들러가
+//! discovery command 를 직접 부르므로 불필요하다(ADR-0026, TRD §2).
+//! 메뉴 항목은 StartDaemon/StopDaemon + ToggleAutostart + QuitApp 뿐(ADR-0026 — 트레이=앱
+//! 통합이라 QuitTray 무의미, ShowUi/HideUi 는 트레이 더블클릭이 대체해 메뉴에서 뺐다).
+//! ★주의: show_main_ui/hide_main_ui actions·command 는 유지★ — 메뉴 *항목*만 없는 것이고,
+//! 더블클릭·LLM/cdp 제어(CLAUDE.md §5)가 같은 actions 함수를 계속 쓴다.
 
 // ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
 
@@ -59,7 +50,7 @@ impl MenuAction {
     /// v2 메뉴에 노출되는 액션들(순서 = 표시 순서).
     /// 표시: 데몬 켜기, 데몬 끄기, 부팅 시 자동 시작, (구분선), 완전 종료.
     /// (구분선은 GUI shell 이 QuitApp 앞에 삽입 — core 는 액션만 안다.)
-    /// 커밋C: ShowUi/HideUi 는 메뉴에서 빠지고 트레이 더블클릭으로 대체(actions 함수는 유지).
+    /// ShowUi/HideUi 는 메뉴에서 빠지고 트레이 더블클릭으로 대체(actions 함수는 유지).
     pub const ALL: [MenuAction; 4] = [
         MenuAction::StartDaemon,
         MenuAction::StopDaemon,

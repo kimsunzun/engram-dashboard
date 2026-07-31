@@ -206,14 +206,12 @@ pub fn toggle_autostart(app: &AppHandle) {
             return;
         }
     };
-    // 반전: 켜져 있으면 끄고, 꺼져 있으면 켠다.
     let result = if enabled { mgr.disable() } else { mgr.enable() };
     if let Err(e) = result {
         tracing::warn!("[tray] autostart 토글(enable/disable) 실패: {e}");
         return;
     }
     let new_state = !enabled;
-    // 체크 표시 동기화 — 보관한 CheckMenuItem 핸들로 직접 set_checked.
     if let Some(check) = app.try_state::<AutostartCheck>() {
         if let Err(e) = check.0.set_checked(new_state) {
             tracing::warn!("[tray] autostart CheckMenuItem set_checked 실패: {e}");

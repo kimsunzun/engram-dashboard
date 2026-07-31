@@ -48,10 +48,10 @@ const ENSURE_TIMEOUT: Duration = Duration::from_secs(5);
 /// .ico → RGBA 디코드는 Tauri Image::from_bytes(image-ico feature)로 한다(별도 image crate 불필요).
 /// 회색은 디코드한 RGBA 버퍼를 core::to_grayscale_rgba 로 변환해 Image::new_owned 로 재구성.
 fn build_icons() -> tauri::Result<TrayIcons> {
-    // 컬러: .ico 바이트 → Image(rgba 디코드). image-ico feature 필요.
+    // image-ico feature 필요(없으면 .ico 디코드 실패).
     let active = Image::from_bytes(ICON_ICO)?;
     let (w, h) = (active.width(), active.height());
-    // 회색: 디코드된 RGBA 슬라이스를 desaturate. to_grayscale_rgba 는 len==w*h*4 전제(디코드가 보장).
+    // to_grayscale_rgba 는 len==w*h*4 전제(디코드가 보장).
     let gray_rgba = core::to_grayscale_rgba(active.rgba(), w, h);
     let inactive = Image::new_owned(gray_rgba, w, h);
     // 컬러도 owned 로 승격(Image::from_bytes 는 'static — ICON_ICO 가 'static 이라 OK, 명시 clone).
@@ -63,10 +63,10 @@ fn build_icons() -> tauri::Result<TrayIcons> {
 ///
 /// 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
 /// 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
-/// 커밋C: UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 더블클릭**으로 대체(on_tray_icon_event).
+/// UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 더블클릭**으로 대체(on_tray_icon_event).
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
-    // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정). 두 벌은 state 로 보관.
+    // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정).
     let initial = icons.inactive.clone();
     app.manage(icons);
 
@@ -119,7 +119,6 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    // setup 직후 데몬 상태로 아이콘 확정(컬러/회색).
     actions::refresh_tray_icon(&app.handle().clone());
     Ok(())
 }
