@@ -106,11 +106,9 @@ pub enum HandshakeError {
     NoLiveDaemon,
     /// ws://host:port 접속 실패(데몬 죽음/거부).
     Connect(String),
-    /// Auth frame 송신 실패.
     AuthSend(String),
     /// 데몬이 Hello 전에 Error 를 보냄(토큰/버전 불일치 등).
     AuthRejected(String),
-    /// Hello 전에 소켓이 닫힘.
     ClosedBeforeHello,
     /// 핸드셰이크(소켓 open ~ Hello 수신)가 HANDSHAKE_TIMEOUT 을 넘김. 서버가 소켓만 받고 Hello/
     /// Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
@@ -817,8 +815,9 @@ async fn main_loop(
                     Some(Ok(msg)) => {
                         match msg {
                             Message::Text(text) => {
-                                // 데몬 control 이벤트. T6a: reply(request_id echo) 면 pending 매칭→resolve.
-                                //   broadcast(request_id 없음)는 매칭 우회 — T6b 가 app.emit 배선(지금은 무시).
+                                // 데몬 control 이벤트. reply(request_id echo) 면 pending 매칭→resolve.
+                                //   broadcast(request_id 없음)는 매칭 우회 — app.emit 으로 전 webview 에
+                                //   push 한다(아래 emit_broadcast, else 분기).
                                 // 파싱 실패는 무시(데몬은 valid JSON 만 보낸다 — 부분/미래 프레임 방어).
                                 if let Ok(ev) = serde_json::from_str::<AgentEvent>(&text) {
                                     if let Some(rid) = protocol_state::event_reply_request_id(&ev) {
