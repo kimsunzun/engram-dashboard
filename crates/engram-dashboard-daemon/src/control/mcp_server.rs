@@ -259,8 +259,10 @@ impl EngramMcpHandler {
     #[tool(
         description = "Send a message to teammate agents. You are one agent on a team; use this \
         tool to reply to or reach other live agents. `to` = one teammate or a LIST of them — each \
-        entry is an agent name (or agent id), or \"@all\" which means everyone live right now \
-        EXCEPT you; you can mix them, e.g. [\"@all\", \"qa-bravo\"]. `body` = your message text. \
+        entry is an agent name (or agent id), or a group address: \"@here\" = everyone live right \
+        now EXCEPT you, \"@all\" = every agent in the team tree EXCEPT you, including ones that \
+        are not running (their copy waits and is delivered when they come back). You can mix them, \
+        e.g. [\"@here\", \"qa-bravo\"]. `body` = your message text. \
         The sender envelope (who you are, message id) is added automatically by the broker — your \
         identity comes from your bound session, not from arguments, so just write the body \
         naturally. Set `request` = true when you need answers back (optionally with `reply_by` = \
@@ -459,8 +461,10 @@ impl ToField {
 // ADR-0103 (C3 — spec §6 send_message { to, body, request?, reply_by?, reply_to? })
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SendArgs {
-    /// Who to send to: one teammate, or a list. Each entry is an agent name, an exact agent id, or
-    /// "@all" (everyone live except you) — you can mix them, e.g. ["@all", "qa-bravo"].
+    /// Who to send to: one teammate, or a list. Each entry is an agent name, an exact agent id, or a
+    /// group address: "@here" (everyone live except you) or "@all" (every agent in the team tree
+    /// except you, including ones that are not running — their copy is delivered when they come
+    /// back). You can mix them, e.g. ["@here", "qa-bravo"].
     pub to: ToField,
     /// 메시지 본문(텍스트).
     pub body: String,

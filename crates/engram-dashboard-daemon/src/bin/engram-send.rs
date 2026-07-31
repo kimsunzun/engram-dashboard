@@ -8,7 +8,8 @@
 //!
 //! ```text
 //! engram-send --to <수신자[,수신자…]> --body "…" [--request [--reply-by 10m]] [--reply-to m-xxxx]
-//!     # 수신자 = 이름 | agent id | @all(나 빼고 전원). **콤마로 여러 명**(ADR-0111 다중 수신자).
+//!     # 수신자 = 이름 | agent id | @here(나 빼고 지금 산 전원) | @all(나 빼고 명부 전원 — 잠든 것 포함,
+//!     #          ADR-0121). **콤마로 여러 명**(ADR-0111 다중 수신자).
 //! engram-send --to <수신자> --body-stdin <<'EOF' … EOF   # 인용 지옥 회피(D)
 //! engram-send status <m-id>                              # 그 메시지의 배달 장부
 //! engram-send pending                                    # 내 미결(보낸 것·기다리는 것·내가 답할 것)

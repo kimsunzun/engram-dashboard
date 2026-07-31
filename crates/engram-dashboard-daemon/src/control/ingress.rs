@@ -275,7 +275,8 @@ fn contract_unsupported_by_envelope(
 /// ★`code` 는 `failed` 행에만 실린다(spec §6)★ — 발신 LLM 이 그 값으로 재시도/교정을 분기한다.
 #[derive(Debug, Clone)]
 pub struct SendResult {
-    /// 수신자 표기 — 발신자가 쓴 토큰(트림만). `@all` 펼침 결과는 로스터 이름이다.
+    /// 수신자 표기 — 발신자가 쓴 토큰(트림만). `@`주소 펼침 결과는 명부의 canonical 이름이다
+    ///   (`@here` = 로스터 · `@all` = 로스터 + 잠든 프로필 — ADR-0121).
     pub to: String,
     /// `"delivered"`(실제 주입) · `"pending"`(파킹) · `"failed"`(그 수신자만 실패) — spec §5·§6 상태 어휘.
     ///   ★`skipped` 는 응답 어휘에서 폐지됐다(ADR-0111 결정 3)★ — 장부 종점 어휘의 `skipped` 는 다른 축이다.
@@ -418,7 +419,7 @@ pub fn handle_send(
     if recipients.is_empty() {
         return ControlResult::Error {
             code: "INVALID_SEND_ARGS",
-            hint: "to must name at least one recipient — pass an agent name, an agent id, or @all (a list is allowed)."
+            hint: "to must name at least one recipient — pass an agent name, an agent id, @here (everyone live except you), or @all (every agent in the tree, including ones that are not running, except you). A list is allowed."
                 .to_string(),
         };
     }
@@ -519,12 +520,12 @@ pub fn handle_send(
         Err(SendReject::GroupNotFound { name }) => ControlResult::Error {
             code: "GROUP_NOT_FOUND",
             hint: format!(
-                "'{name}' is not an address the broker knows. The only group address is @all (everyone live except you); everything else must be an agent name or agent id. Fix the address and send again."
+                "'{name}' is not an address the broker knows. The only group addresses are @here (everyone live except you) and @all (every agent in the tree, including ones that are not running, except you); everything else must be an agent name or agent id. Fix the address and send again."
             ),
         },
         Err(SendReject::GroupEmpty) => ControlResult::Error {
             code: "GROUP_EMPTY",
-            hint: "That send resolved to no recipients at all — nothing was sent. For @all it means nobody other than you is live and reachable right now; name an agent directly (including yourself) if you meant to reach someone specific."
+            hint: "That send resolved to no recipients at all — nothing was sent. For @here it means nobody other than you is live right now; for @all it means the team tree holds nobody but you. Name an agent directly (including yourself) if you meant to reach someone specific."
                 .to_string(),
         },
         Err(SendReject::IdCollision) => ControlResult::Error {

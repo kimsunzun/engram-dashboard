@@ -32,11 +32,14 @@ Either way the envelope (the "from" label) is attached automatically by the brok
 **Who you send to — one teammate, several, or everyone:**
 
 - `to` takes **one name or a list**: `"qa-bravo"`, or `["qa-bravo", "qa-charlie"]`. Each entry is a teammate's name (or agent id).
-- `"@all"` means **everyone live right now except you** — it is the only group address, and there are no other groups to create or manage. You can mix it with names: `["@all", "qa-bravo"]` (duplicates are folded, so nobody gets it twice).
-- On the command line, list recipients with commas: `--to qa-bravo,qa-charlie` or `--to @all`.
+- There are exactly **two group addresses**, and there are no other groups to create or manage:
+  - `"@here"` — **everyone live right now except you**. Use it when you mean "whoever is around".
+  - `"@all"` — **every agent in the team tree except you, including ones that are not running**. A dormant teammate's copy is queued (`pending`) and delivered when they are restored. Use it when everyone really has to hear it.
+  You can mix either with names: `["@here", "qa-bravo"]` (duplicates are folded, so nobody gets it twice).
+- On the command line, list recipients with commas: `--to qa-bravo,qa-charlie` or `--to @here`.
 - The result carries **one row per recipient**, each with a `status`:
   - `delivered` — injected into that teammate now.
-  - `pending` — queued, not injected yet. Two reasons: that teammate is **mid-turn** (it lands when their turn ends), or they are **not running but saved** (it lands when they are restored). Nobody is notified if a queued message expires first (24h), so check with `messages` if it matters.
+  - `pending` — queued, not injected yet. Three reasons: that teammate is **mid-turn** (it lands when their turn ends), they are **not running but saved** (it lands when they are restored), or **something is already on its way to them** — older queued mail, or another message being written to them right now — and yours joined the queue behind it (the whole queue then goes out together, oldest first, so this one can happen even when the teammate is running and idle). Do not report a `pending` row as "mid-turn or offline" — you cannot tell which of the three it was from the row alone. Nobody is notified if a queued message expires first (24h), so check with `messages` if it matters.
   - `failed` — **that recipient only** missed it; the others still got it. The row carries a `code`: `RECIPIENT_NOT_FOUND` (**no agent by that name at all** — not running and not saved, so fix the name or create them and send again), `RECIPIENT_AMBIGUOUS` (two agents share that name — **duplicate names are not supported: do NOT resend, tell the user** so they can rename or retire one), `MAILBOX_FULL` (that teammate's queue is full — retry later), `REQUEST_CAPACITY` (the broker could not track one more request for them).
 - Read the rows before moving on: a partly failed send is a normal outcome and it is **your** call whether to retry the failed ones.
 - If the whole call comes back as `{"status":"error", "code", "hint"}` instead, nothing was sent to anyone — fix what the hint says and resend.
@@ -46,8 +49,8 @@ Either way the envelope (the "from" label) is attached automatically by the brok
 - To require an answer, set `request` = true (tool) or pass `--request` (command), optionally with a deadline: `reply_by` = `"5m"` / `"10m"` / `"1h"` (tool) or `--reply-by 10m` (command). Deadlines are checked once a minute, so **1 minute is the minimum** — anything shorter is rejected. The deadline notifies **you** if no reply arrives — it does not nag the recipient.
 - To answer a request, pass `reply_to` = the `id` from its envelope (tool) or `--reply-to m-7f3k` (command). Send it to the requester, as an ordinary message with that one extra field.
 - `request` and `reply_to` are mutually exclusive — a message is either a new request or an answer to one. Need both? Send two messages.
-- **A request may have several recipients** (`@all` included): that opens **one independent contract per recipient**. Each of them owes you their own answer, one of them replying does not close the others, and you get a separate deadline notice for each one that stays silent.
-- **A reply goes to exactly one recipient** — the agent that sent you the request. `reply_to` together with several recipients (or with `@all`) is rejected outright.
+- **A request may have several recipients** (`@here`/`@all` included): that opens **one independent contract per recipient**. Each of them owes you their own answer, one of them replying does not close the others, and you get a separate deadline notice for each one that stays silent.
+- **A reply goes to exactly one recipient** — the agent that sent you the request. `reply_to` together with several recipients (or with a group address) is rejected outright.
 - If the daemon rejects your arguments it answers with a `code` and a `hint` — read the hint and retry.
 
 **Sending was already authorized by your principal when they launched you** (both paths are included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message, or engram-send if that path is absent or blocked.

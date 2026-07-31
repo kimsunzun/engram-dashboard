@@ -319,6 +319,16 @@ impl FlightTicket {
     }
 }
 
+/// ★직발송 좌석(ADR-0121 결정 2)★ — `reserve_direct_seat` 의 산출물. 영수증(분모 반납용)과 예약 순번
+/// (실패 시 나이 보존용)을 짝으로 나른다. 둘이 갈리면 반납은 됐는데 나이를 잃거나 그 반대가 된다.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectSeat {
+    /// in-flight 분모에 올린 몫 — `settle_in_flight` 로 반납해야 하는 영수증.
+    pub ticket: FlightTicket,
+    /// 이 좌석의 수용 순번. 주입 실패 시 이 값을 실어 `restore_ordered` 로 되돌린다(나이 보존).
+    pub admission_seq: u64,
+}
+
 /// 수신자 이름(String, WYSIWYA — ADR-0101) → FIFO 큐 저장소. **파킹 사유 셋 공용**(busy 계열·주입 실패·
 /// 잠듦 — spec §5 분기 3, 모듈 헤더가 정본. 4차로 잠듦이 부활했다: ADR-0116 결정 1).
 ///
@@ -552,6 +562,38 @@ impl Mailbox {
             }
         }
         outcome
+    }
+
+    /// ★직발송(즉시 주입) 1건의 좌석 예약 — in-flight 등록 + admission 순번 확보(ADR-0121 결정 2)★.
+    ///
+    /// ★왜 필요한가(load-bearing — 직발송이 순서 계약의 사각이었다)★: 직발송은 큐를 거치지 않고 락을 놓은 뒤
+    ///   주입한다. 그 구간을 아무 곳에도 신고하지 않으면 동시 발송이 `has_pending_ahead` 로 물었을 때 "앞에
+    ///   아무도 없다" 는 답을 받아 **진행 중인 주입을 앞지른다** — flush 배치에 대해 이미 막아 둔 사고
+    ///   (`take_in_flight`)와 같은 모양인데 직발송 경로에만 회계가 없었다. 그래서 같은 회계에 편입한다.
+    /// ★순번도 함께 잡는 이유★: 주입이 실패해 이 항목이 큐로 되돌아갈 때, 그 사이 파킹된 **더 새 편지 뒤로
+    ///   밀리면** 안 된다(수신자가 보는 순서가 뒤집힌다). 예약 시점의 순번을 들고 있다가
+    ///   `restore_ordered` 로 되돌리면 나이 순서가 그대로 지켜진다.
+    /// ★번호를 태우는 대가(명시)★: 주입이 성공하면 그 순번은 쓰이지 않고 버려진다 — `park` 의 "반려분은
+    ///   번호를 태우지 않는다" 규율과 다른 지점이다. 순번은 단조 비교용 u64 라 구멍이 나도 무해하고, 예약
+    ///   시점에 잡지 않으면 나이를 표현할 수 없다.
+    /// ★cap 분모에 든다★: 예약된 좌석은 `park`/`can_admit` 의 분모에 잡힌다(그 수신자 앞으로 나가 있는 1건).
+    ///   그래서 예약 중에 들어온 신규 park 가 cap 경계에서 반려될 수 있고, 그게 옳다 — 좌석을 먼저 잡은 쪽이
+    ///   먼저 온 편지다.
+    /// ★호출자 계약★: 반환 영수증은 배달 성공·복원 중 무엇이 되든 **반드시** `settle_in_flight` 로 반납한다
+    ///   (누락 = 그 수신자 레인의 분모가 영구히 부풀어 유입 봉쇄). 상위는 단일 출구 가드로 들고 다닌다
+    ///   (service.rs `FlightSettle`).
+    // ADR-0121 (직발송도 in-flight 회계에 편입 — 순서 계약)
+    pub fn reserve_direct_seat(&mut self, recipient: &str) -> DirectSeat {
+        let mut ticket = FlightTicket::default();
+        ticket.add(ParkKind::Message);
+        let slot = self.in_flight.entry(recipient.to_string()).or_default();
+        slot.message += 1;
+        let admission_seq = self.next_seq;
+        self.next_seq += 1;
+        DirectSeat {
+            ticket,
+            admission_seq,
+        }
     }
 
     /// ★락 밖으로 나가는 배치를 in-flight 로 등록한다(F1 · load-bearing)★ — flush 가 `drain` 결과 중 **실제로
