@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 데몬 발견 정보. daemon.json 의 전체 내용.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfo {
     /// 데몬 프로세스 PID — stale 판정(살아있는지)에 사용.

@@ -20,7 +20,6 @@ pub enum AgentCommand {
         token: String,
         protocol_version: u32,
     },
-    /// 새 에이전트 spawn. 프로필 참조.
     Spawn {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -64,7 +63,6 @@ pub enum AgentCommand {
         #[ts(type = "number | null")]
         after_seq: Option<u64>,
     },
-    /// 구독 해제.
     Unsubscribe {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -120,7 +118,6 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 프로필 삭제.
     DeleteProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -135,7 +132,6 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// auto_restore 토글.
     SetProfileAutoRestore {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -282,7 +278,6 @@ pub enum AgentEvent {
         request_id: RequestId,
         agents: Vec<AgentInfo>,
     },
-    /// 복원 시도 결과.
     RestoreResult { report: RestoreReport },
     /// 입력 lease 상태 변경 통보(다중 뷰어가 "지금 잠겨있음"을 알게 함). held=true 면 누군가 보유 중,
     /// false 면 비어 있음(아무나 acquire 가능). 보유자 conn 식별값은 보안상 노출하지 않는다(잠김 여부만).
@@ -428,14 +423,11 @@ pub enum OutputChunk {
         #[ts(type = "number[]")]
         Vec<u8>,
     ),
-    /// API/구조화 텍스트 증분.
     TextDelta(String),
-    /// 토큰 사용량.
     Usage {
         input_tokens: u64,
         output_tokens: u64,
     },
-    /// 도구 호출(이름+직렬화 인자).
     ToolCall { name: String, args_json: String },
     /// 임의 구조화 페이로드(forward-compat 탈출구).
     Structured { kind: String, json: String },
