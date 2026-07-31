@@ -511,8 +511,10 @@ impl ProfileRegistry {
 
     /// 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `Some(name)` → override 저장, `None` →
     /// 해제(cwd basename 파생 복귀). 존재하면 변경 후 persist·true, 없는 id 면 no-op·false.
-    /// ★정규화는 호출자(프론트) 책임★: trim·빈 문자열 거부·미변경 스킵은 프론트가 확정 직전에 처리한다
-    /// (TabBar rename 과 동형) — 여기엔 이미 유효 값 또는 명시적 None 만 온다. update_with 위임(persist 일원화).
+    /// ★정규화는 저장 게이트(`AgentManager::rename_agent`) 책임★: 양끝 공백 제거와 "공백만 남으면 override
+    /// 없음" 판정은 이름 유일성 판정 **전에** 거기서 끝난다(`normalize_display_name`) — 여기서 또 깎으면
+    /// 판정이 본 값과 저장되는 값이 갈린다. 여기엔 이미 정규화된 값 또는 명시적 None 만 온다.
+    /// update_with 위임(persist 일원화).
     pub fn rename(&self, id: AgentId, display_name: Option<String>) -> bool {
         self.update_with(id, |p| p.display_name = display_name)
     }

@@ -149,9 +149,12 @@ pub enum AgentCommand {
     },
 
     /// 프로필 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `name=Some` → override 저장,
-    /// `None` → 해제(cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 프론트가 확정 직전 처리
-    /// (TabBar rename 과 동형) — 여기엔 유효 값 또는 명시 None 만 온다. 없는 id 면 Error(SetProfileAutoRestore
-    /// 와 동형). 성공 후 [`AgentEvent::ProfileListUpdated`] broadcast(낙관 갱신 X — 모든 창 동기화).
+    /// `None` → 해제(cwd basename 파생 복귀). ★정규화는 데몬 저장 게이트(`AgentManager::rename_agent`)
+    /// 책임★ — 양끝 공백 제거와 "공백만 남으면 override 없음" 판정을 이름 유일성 판정 **전에** 거기서
+    /// 끝낸다. 그래서 `" bob "` 이 그대로 와도 `bob` 요청으로 확정되고, 같은 요청 재제출도 게이트가 멱등
+    /// 처리한다(접미사 번호 미소모). 프론트가 미리 다듬어 보내도 되지만 그건 UX 편의지 계약이 아니다.
+    /// 없는 id 면 Error(SetProfileAutoRestore 와 동형). 성공 후 [`AgentEvent::ProfileListUpdated`]
+    /// broadcast(낙관 갱신 X — 모든 창 동기화).
     RenameProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,

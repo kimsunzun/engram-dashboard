@@ -118,6 +118,41 @@ pub struct RosterEntry {
     pub live: Option<AgentInfo>,
 }
 
+/// 저장 직전의 표시명 override 정규화 — 양끝 공백만 깎고, 남는 게 없으면 override 없음(`None`)으로 본다.
+/// 이름 배정 게이트를 여는 셋(`create_agent`·`rename_agent`·`register_for_spawn`)이 전부 통과한다. 다만
+/// **지금 실제로 override 를 싣는 경로는 개명 하나뿐**이다 — 표시명 override 를 나르는 wire 명령은
+/// `RenameProfile` 뿐이고, 생성·spawn 쪽에는 그 필드가 아예 없다(`CreateProfile.name` 은 `AgentProfile.name`
+/// 이고 `AgentProfile::new` 가 `display_name: None` 을 박는다). 그래서 나머지 둘은 공개 API 방어선이다.
+///
+/// ★저장된 이름 · 화면에 그려지는 이름 · 편지 주소가 **같은 문자열**이어야 한다★: 유일성(ADR-0120) 판정은
+///   문자열 비교라 `bob` 과 `" bob "` 은 서로 다른 이름으로 **둘 다** 통과하는데 트리에는 똑같이 그려진다 —
+///   사용자는 편지가 둘 중 누구에게 가는지 구분할 수 없다. 게다가 메시징 입구가 수신자 토큰을 trim 해서
+///   맞추므로 `" bob "` 으로 저장된 에이전트는 보이면서도 이름으로 주소 지정이 안 된다.
+/// ★그 입구 trim(`messaging` service 수신자 대조)은 지우지 말 것★: **CLI 입구**(`engram-send --to a,b`)가
+///   셸 제약 때문에 수신자 목록을 콤마로 쪼개는데 그때 공백을 떼지 않아(`"alice, bob"` → `["alice", " bob"]`)
+///   두 번째 이후 수신자를 그 trim 이 구제한다. MCP 입구는 배열 원소를 **절대 쪼개지 않으므로**(spec §6 —
+///   쪼개면 `"a,b"` 라는 실제 이름을 표현할 수 없다) 그쪽만 보고 "쪼개는 데가 없으니 trim 도 불필요" 라고
+///   결론내면 콤마 목록이 깨진다. 저장을 정규화하면 그 trim 은 잘 저장된 이름에 대해 no-op 이 될 뿐이고,
+///   콤마 목록 구제 역할은 그대로 남는다.
+/// ★유일성 판정 **전에** 건다★: 판정과 저장이 같은 정규화 값을 봐야 `" bob "` 이 모든 면에서 `bob` 요청이
+///   된다(뒤에 걸면 `" bob "` 이 빈 이름으로 판정돼 동명이 다시 새어 들어온다).
+/// ★안쪽 공백은 이름의 일부다★ — `"bob smith"` 는 그대로 살아야 하므로 양끝만 깎는다.
+/// ★남는 문제는 "같은 구멍의 잔여" 가 아니라 다른 종류다★: `str::trim` 은 Unicode White_Space(스페이스·탭·
+///   NBSP)만 걷어내고 zero-width(U+200B 등)는 **양쪽 어디서도** 떨어지지 않는다 — 그래서 그런 이름은
+///   저장 == 표시 == 주소가 그대로 성립해 위 불변식을 깨지 않는다(패딩 이름이 깬 것은 *주소 도달성*이었다).
+///   남는 것은 눈으로 구분이 안 되는 **시각적 혼동**뿐이고, 그 해법(NFKC·confusable folding)은 정당한
+///   이름까지 뭉개므로 여기서 즉흥 필터로 처리하지 않는다 — 정책 결정 사항이다.
+/// ★이미 저장된 이름은 고치지 않는다★ — 지금부터의 쓰기에만 걸린다(마이그레이션 장치 없음).
+// ADR-0120
+fn normalize_display_name(display_name: Option<String>) -> Option<String> {
+    let trimmed = display_name?.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 /// `name` 이 `base` 계열일 때의 형태. ★`Exact` 와 `Suffixed(0)` 를 **절대 한 값으로 섞지 않는다**★:
 /// 섞으면 리터럴 `bob(0)` 하나가 접미사 없는 `bob` 을 점유한 것처럼 보여, `bob` 이 비어 있는데도
 /// 다음 요청이 `bob(1)` 을 받는다.
@@ -499,6 +534,7 @@ impl AgentManager {
     // ADR-0120
     // ADR-0123
     pub fn create_agent(&self, mut profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+        profile.display_name = normalize_display_name(profile.display_name.take());
         // ★파생도 게이트 안에서★: 요청 이름을 정하는 읽기가 게이트 밖에 있으면 관측과 커밋 사이가 아니라
         //   **파생과 관측 사이**에 창이 생긴다(그 사이 남이 같은 이름을 커밋하면 둘 다 자유로 판정한다).
         let _gate = self.lock_name_allocation();
@@ -538,6 +574,9 @@ impl AgentManager {
     // ADR-0123
     // ADR-0116
     pub fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome {
+        // 결정표가 보는 `desired` 와 커밋되는 값이 같은 정규화 문자열이어야 `" bob "` 재요청이 자기 현재
+        //   이름과 같은 값으로 판정된다(번호를 태우거나 주소를 흔들지 않는다).
+        let display_name = normalize_display_name(display_name);
         let _gate = self.lock_name_allocation();
         let Some(profile) = self.profiles.get(id) else {
             return RenameOutcome::NotFound;
@@ -730,9 +769,10 @@ impl AgentManager {
             self.profiles.upsert_preserving_hierarchy(profile.clone());
             return Ok(());
         }
+        let mut fresh = profile.clone();
+        fresh.display_name = normalize_display_name(fresh.display_name.take());
         // 파생·관측·커밋을 한 임계구역으로 묶는다(게이트 필드 주석의 불변식).
         let _gate = self.lock_name_allocation();
-        let mut fresh = profile.clone();
         let desired = fresh.canonical_name_when_live();
         match self.decide_name(fresh.id, &desired, None) {
             NameDecision::Free => {}
@@ -2416,6 +2456,140 @@ mod tests {
             manager.agent_snapshot(x.id).unwrap().display_name,
             None,
             "무변경이면 override 를 새로 심지 않는다(심으면 조용한 개명이다)"
+        );
+    }
+
+    #[test]
+    fn every_name_gate_entrance_stores_the_override_without_edge_whitespace() {
+        // ★한 입구라도 빠지면 그리로 동명이 새어 들어온다★: 유일성은 문자열 비교라 `" bob "` 은 `bob` 과
+        //   다른 이름으로 통과하는데 화면엔 똑같이 그려지고, 메시징 입구는 수신자를 trim 해 맞추므로 그렇게
+        //   저장된 에이전트는 이름으로 주소 지정도 안 된다.
+        // 지금 override 를 싣는 산 경로는 개명 하나뿐이지만(나머지 둘은 `display_name: None` 로 들어온다)
+        //   셋 다 공개 API 라 함께 봉인한다 — 나중에 생성·spawn 이 이름을 나르게 되는 날 조용히 뚫린다.
+        let manager = bare_manager();
+
+        let created = create(&manager, "C:/x", Some("  bob  "));
+        assert_eq!(
+            created.display_name,
+            Some("bob".to_string()),
+            "생성 응답이 들고 가는 값부터 정규화돼야 한다"
+        );
+        assert_eq!(
+            manager.agent_snapshot(created.id).unwrap().display_name,
+            Some("bob".to_string()),
+            "명부에 저장된 값도 같아야 한다"
+        );
+
+        let renamed = create(&manager, "C:/y", Some("carol"));
+        assert!(renamed_ok(
+            manager.rename_agent(renamed.id, Some("\tdave\n".into()))
+        ));
+        assert_eq!(
+            manager.agent_snapshot(renamed.id).unwrap().display_name,
+            Some("dave".to_string()),
+            "개명 경로(탭·개행 포함)"
+        );
+
+        // spawn 신규 등록 — 프로필을 그대로 심는 세 번째 입구.
+        let spawned = agent_profile("C:/z", Some(" erin "));
+        manager
+            .register_for_spawn(&spawned)
+            .expect("신규 등록 성공");
+        assert_eq!(
+            manager.agent_snapshot(spawned.id).unwrap().display_name,
+            Some("erin".to_string()),
+            "신규 등록 경로"
+        );
+    }
+
+    #[test]
+    fn a_whitespace_only_override_is_stored_as_no_override() {
+        // 공백-only override 는 파생 함수들이 이미 무시하지만(빈 라벨 방지), 그건 **표시**만 구제할 뿐
+        //   명부엔 쓸모없는 문자열이 남는다. 저장 단계에서 없앤 override 로 확정해 cwd 파생으로 떨어뜨린다.
+        let manager = bare_manager();
+
+        let blank = create(&manager, "C:/blankdir", Some("   "));
+        assert_eq!(
+            blank.display_name, None,
+            "공백만 남는 요청은 override 없음으로 저장된다"
+        );
+        assert_eq!(
+            name_of(&manager, blank.id),
+            "blankdir",
+            "override 가 없으니 cwd 파생 이름"
+        );
+
+        let named = create(&manager, "C:/otherdir", Some("zoe"));
+        assert!(renamed_ok(manager.rename_agent(named.id, Some(" ".into()))));
+        assert_eq!(
+            manager.agent_snapshot(named.id).unwrap().display_name,
+            None,
+            "개명 경로의 공백-only 요청 = override 해제"
+        );
+        assert_eq!(name_of(&manager, named.id), "otherdir");
+    }
+
+    #[test]
+    fn interior_whitespace_is_part_of_the_name() {
+        // 양끝만 깎는다 — 안쪽 공백까지 건드리면 사용자가 지은 이름이 조용히 다른 이름이 된다.
+        let manager = bare_manager();
+        let a = create(&manager, "C:/x", Some("  bob smith  "));
+        assert_eq!(a.display_name, Some("bob smith".to_string()));
+        assert_eq!(name_of(&manager, a.id), "bob smith");
+    }
+
+    #[test]
+    fn renaming_to_a_padded_form_of_the_current_name_burns_no_number() {
+        // ★개명 멱등 계약과의 접점★: 정규화가 결정표보다 앞에 있어야 `" bob "` 이 자기 현재 이름과 같은
+        //   값으로 판정된다. 뒤에 있으면 `" bob "` 이 빈 이름으로 보여 **다른 이름**으로 확정되고, 그 순간
+        //   `bob` 이 비어 다음 요청자가 화면상 동명을 그대로 가져간다.
+        let manager = bare_manager();
+        let bob = create(&manager, "C:/a", Some("bob"));
+
+        assert_eq!(
+            manager.rename_agent(bob.id, Some("  bob  ".into())),
+            RenameOutcome::Renamed("bob".to_string()),
+            "요청은 `bob` 요청이므로 이름이 바뀌지 않는다"
+        );
+        assert_eq!(name_of(&manager, bob.id), "bob");
+        assert_eq!(
+            manager.agent_snapshot(bob.id).unwrap().display_name,
+            Some("bob".to_string())
+        );
+        // 번호도 태우지 않았다 — 다음 신규가 bob(1) 이다(bob 이 여전히 점유돼 있다는 뜻이기도 하다).
+        let next = create(&manager, "C:/b", Some("bob"));
+        assert_eq!(
+            next.canonical_name_when_live(),
+            "bob(1)",
+            "패딩 개명이 bob 을 비웠으면 여기서 동명 두 건이 앉는다"
+        );
+    }
+
+    #[test]
+    fn a_padded_request_for_a_taken_name_gets_the_suffixed_form() {
+        // 남이 `bob` 을 쥔 상태의 `" bob "` 요청은 `bob` 요청과 **같은 취급**이어야 한다 — 별개 이름으로
+        //   저장되면 유일성 검사를 우회한 동명 2건이 된다.
+        let manager = bare_manager();
+        create(&manager, "C:/h", Some("bob"));
+
+        let other = create(&manager, "C:/o", Some("  bob  "));
+        assert_eq!(
+            other.display_name,
+            Some("bob(1)".to_string()),
+            "패딩 요청도 접미사 계열로 들어간다"
+        );
+        assert_eq!(name_of(&manager, other.id), "bob(1)");
+
+        // 이미 그 계열 이름을 쥔 뒤의 패딩 재요청 = 멱등 무변경(번호 미소모).
+        assert_eq!(
+            manager.rename_agent(other.id, Some(" bob ".into())),
+            RenameOutcome::Unchanged("bob(1)".to_string())
+        );
+        let third = create(&manager, "C:/t", Some("bob"));
+        assert_eq!(
+            third.canonical_name_when_live(),
+            "bob(2)",
+            "재요청이 번호를 태웠으면 여기가 bob(3) 이 된다"
         );
     }
 
