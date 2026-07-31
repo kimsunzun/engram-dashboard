@@ -94,12 +94,14 @@ pub fn icon_state_for(alive: bool) -> IconState {
 /// (Rec.601)로 각 RGB 채널을 동일 값으로 대체하고 alpha 는 보존한다 → R==G==B 인 무채색.
 /// image 의존은 GUI shell 에만 두고 core 는 `&[u8]` 슬라이스만 받아 격리를 유지한다(CLAUDE.md §4).
 ///
-/// `rgba.len()` 은 `w*h*4` 여야 한다(RGBA 4채널). 이 전제는 호출자(`image::into_rgba8()`)가
-/// 보장한다. 어긋나면 디버그 빌드에서 panic(개발 계약 위반 조기 검출).
-/// 릴리스에서 4의 배수가 아닌 잔여를 보존하지 **않는다** — 어차피 산출물의 유일 소비처
-/// `Icon::from_rgba(_, w, h)` 가 `len==w*h*4` 를 요구해 잔여가 있으면 그쪽에서 Err→expect panic
-/// 이라, 잔여를 살려도 "안전망"이 못 된다(전제 위반은 호출자 버그). 그래서 chunks_exact 의
-/// 잔여는 버린다 — 전제가 지켜지면 잔여 자체가 없다.
+/// `rgba.len()` 은 `w*h*4` 여야 한다(RGBA 4채널). 이 전제는 호출자(Tauri `Image::from_bytes` 로
+/// 디코드한 `.rgba()`)가 보장한다 — 디코드 결과가 `(width, height)` 와 정합하는 길이의 버퍼다.
+/// len ≠ w*h*4 는 전부 계약 위반(4의 배수 여부 무관). debug 빌드는 아래 debug_assert 가 즉시
+/// panic 으로 잡고, 릴리스는 하류가 잡되 **soft** 하다 — 직접 소비처 `Image::new_owned(_, w, h)`
+/// 는 무검증 생성자지만, 그 `Image` 가 트레이에 닿기 전 `TryFrom → tray_icon::Icon::from_rgba`
+/// 의 길이 검증을 거친다(builder 경로 = `.ok()` 로 삼켜 아이콘 미설정 / `set_icon` 경로 = warn
+/// 로그 degrade — 어느 쪽도 panic 아님). 즉 debug_assert 는 유일한 방어선이 아니라 유일하게
+/// 즉시·시끄럽게 잡는 방어선이다. 전제가 지켜지면 chunks_exact 잔여는 없다.
 pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     debug_assert_eq!(
         rgba.len(),

@@ -17,3 +17,4 @@
 ## retrofit-완료 (밀도 정합 활성 범위 — 루트-상대 디렉터리 · 구획 경계 전방 일치)
 
 - `src-tauri/src/tray` (2026-07-31 파일럿 — review doc light PASS + qa standard PASS)
+- `src-tauri/src/daemon_client` (2026-07-31 확대 — 워커 3 병렬, review doc full PASS(재작성 오류 1건 게이트 적출·정정) + qa standard PASS)

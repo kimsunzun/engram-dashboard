@@ -729,7 +729,6 @@ async fn connected_lifetime(
                 HandshakeOutcome::Err(e) => {
                     // 시도 실패(데몬 죽음/거부) — 다음 백오프로. 소진 시 위 attempt 가드가 None.
                     tracing::debug!(generation = my_gen, attempt, "재연결 시도 실패: {e}");
-                    // continue inner loop → 다음 백오프.
                 }
             }
         };
