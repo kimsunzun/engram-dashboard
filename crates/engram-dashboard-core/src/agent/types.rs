@@ -15,6 +15,19 @@ pub enum AgentStatus {
     Killed,
 }
 
+impl AgentStatus {
+    /// ★"살아 있음" 술어 — `Running|Exiting` 만★(ADR-0116 로스터 술어의 정본).
+    ///
+    /// ★"세션 맵에 있음" 과 다르다(load-bearing)★: 세션은 reaper 가 수거할 때까지 맵에 남으므로
+    ///   단순 존재로 판정하면 시체가 섞인다. 명부(`AgentManager::roster`)와 데몬 어댑터
+    ///   (`messaging_host::is_live` — 이 술어를 호출만 한다)가 **같은 조건**을 봐야 발송 측과
+    ///   flush 측이 다른 세계를 보지 않는다. 복제본을 만들지 말 것.
+    // ADR-0116
+    pub fn is_live(&self) -> bool {
+        matches!(self, AgentStatus::Running | AgentStatus::Exiting)
+    }
+}
+
 /// pump→core 내부 출력 이벤트. 확장 가능 enum. core는 variant-agnostic(_ => ignore).
 ///
 /// ★ADR-0045 (출력 정제를 백엔드로)★: 콘솔은 `TerminalBytes`(VT 바이트 스트림) 그대로,

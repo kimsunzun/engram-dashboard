@@ -563,8 +563,9 @@ fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
 
 /// 결정적 출력 shell 프로필을 **ProfileRegistry 에 등록만** 하고(spawn 하지 않음) profile_id 를 반환.
 /// WS `Spawn{profile_id}` dispatch 경로를 타려면 manager 의 레지스트리에 알려진 프로필이 있어야 한다.
-/// ★운영 회귀 0★: 등록은 manager 의 공개 API(`profiles().upsert`)만 사용 — start_test_server/run()
-///   배선을 건드리지 않는다(프로필 주입 인자 추가 불필요). 운영 경로도 같은 upsert 를 쓴다.
+/// ★운영 회귀 0★: 등록은 manager 의 공개 API(`create_agent` — 명부 단일 입구, ADR-0119)만 사용 —
+///   start_test_server/run() 배선을 건드리지 않는다(프로필 주입 인자 추가 불필요). 운영 `CreateProfile`
+///   경로도 **같은 동사**를 쓰므로 이름 유일성 강제(ADR-0120)를 함께 탄다.
 fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
     #[cfg(windows)]
     let command = AgentCommand::Shell {
@@ -584,7 +585,7 @@ fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
         false, // auto_restore=false(복원 대상 아님)
     );
     let id = profile.id;
-    handle.manager.profiles().upsert(profile);
+    handle.manager.create_agent(profile).expect("등록 성공");
     id
 }
 
@@ -1990,7 +1991,7 @@ async fn case35_ws_create_profile() {
     assert!(created.auto_restore, "auto_restore 반영");
     // manager(공유 레지스트리)에도 실제 등록됐는지 — dispatch 가 upsert 했다는 사실 확인.
     assert!(
-        server.manager.profiles().get(created.id).is_some(),
+        server.manager.agent_snapshot(created.id).is_some(),
         "create 후 manager 레지스트리에 존재해야"
     );
 
@@ -2016,8 +2017,7 @@ async fn case35_ws_create_profile() {
     assert!(
         server
             .manager
-            .profiles()
-            .get(created_json.id)
+            .agent_snapshot(created_json.id)
             .expect("json 프로필 등록됨")
             .command
             .is_json_mode(),
@@ -2100,7 +2100,7 @@ async fn case38_ws_delete_profile() {
         "DeleteProfile 후 목록에서 제거돼야"
     );
     assert!(
-        server.manager.profiles().get(profile_id).is_none(),
+        server.manager.agent_snapshot(profile_id).is_none(),
         "manager 레지스트리에서도 제거"
     );
 
@@ -2133,8 +2133,7 @@ async fn case39_ws_set_auto_restore() {
     assert!(
         server
             .manager
-            .profiles()
-            .get(profile_id)
+            .agent_snapshot(profile_id)
             .map(|p| p.auto_restore)
             .unwrap_or(false),
         "manager 레지스트리에도 토글 반영"

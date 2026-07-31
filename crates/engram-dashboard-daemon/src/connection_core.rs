@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_core::agent::manager::RenameOutcome as CoreRenameOutcome;
 use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
 use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::agent::profile::SpawnMode;
@@ -690,7 +691,7 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // 프로필 기반 spawn(profile.rs spawn_profile 미러, resume=false=Fresh).
-                let result = match manager.profiles().get(profile_id) {
+                let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => manager
                         .spawn_agent(&profile, SpawnMode::Fresh)
                         .map(|_| ())
@@ -920,7 +921,7 @@ impl ConnectionCore {
                 // 요청 연결에만 응답(ListAgents 와 동형). broadcast ProfileListUpdated 는 CRUD 후 별도 push.
                 let _ = sink.enqueue(Outbound::event(AgentEvent::ProfileList {
                     request_id,
-                    profiles: core_profiles_to_wire(manager.profiles().list()),
+                    profiles: core_profiles_to_wire(manager.agent_snapshots()),
                 }));
             }
 
@@ -951,16 +952,24 @@ impl ConnectionCore {
                     env,
                     auto_restore,
                 );
-                // upsert 가 profile 을 move 하므로 wire 변환을 먼저 떠둔다.
-                let wire = profile_to_wire(&profile);
-                manager.profiles().upsert(profile);
-                // requester 에겐 Created(생성된 프로필 동봉)로 응답 — Ack 는 보내지 않는다(중복 resolve 방지).
-                let _ = sink.enqueue(Outbound::event(AgentEvent::Created {
-                    request_id,
-                    profile: wire,
-                }));
-                // 생성은 공유 상태 변경 → 나머지 연결엔 갱신된 목록 broadcast.
-                broadcast_profile_list(registry, manager);
+                // ★wire 변환은 등록 **뒤**에 뜬다(ADR-0120)★: 명부 전역 이름 유일성 강제가 접미사를
+                //   붙일 수 있으므로, requester 에게 돌려주는 프로필은 이 호출이 등록한 값이어야 한다
+                //   (등록 전 스냅샷을 보내면 화면과 명부가 다른 이름을 갖는다).
+                // ★Err(접미사 공간 소진)은 등록 없이 Error 로 반려한다★ — 중복 이름을 명부에 넣지 않는다.
+                //   그 경우 broadcast 도 하지 않는다(바뀐 게 없다).
+                match manager.create_agent(profile) {
+                    Ok(stored) => {
+                        let wire = profile_to_wire(&stored);
+                        // requester 에겐 Created(생성된 프로필 동봉)로 응답 — Ack 는 보내지 않는다(중복 resolve 방지).
+                        let _ = sink.enqueue(Outbound::event(AgentEvent::Created {
+                            request_id,
+                            profile: wire,
+                        }));
+                        // 생성은 공유 상태 변경 → 나머지 연결엔 갱신된 목록 broadcast.
+                        broadcast_profile_list(registry, manager);
+                    }
+                    Err(e) => reply(sink, request_id, Err(e.to_string())),
+                }
             }
 
             AgentCommand::DeleteProfile {
@@ -980,10 +989,9 @@ impl ConnectionCore {
                 // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
                 //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
                 let deleted_name = manager
-                    .profiles()
-                    .get(profile_id)
+                    .agent_snapshot(profile_id)
                     .map(|p| p.canonical_name_when_live());
-                manager.profiles().remove(profile_id);
+                manager.delete_agent(profile_id);
                 reply(sink, request_id, Ok(()));
                 broadcast_profile_list(registry, manager);
                 // ★게이트는 커널이 **프로필 id** 로 판정한다(리뷰 fix D1 — load-bearing)★: 이름으로 물으면
@@ -1031,7 +1039,7 @@ impl ConnectionCore {
                 //   Resume 은 blocking(EARLY_EXIT_WINDOW)이라 이 연결 응답만 지연(다른 세션 무영향).
                 // 성공(resume·재활성화·fresh) 시 Spawned(AgentInfo 동봉)로 응답, 실패/없음은 Error.
                 // agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
-                match manager.profiles().get(profile_id) {
+                match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         let mode = if resume || profile.claude_session_id.is_some() {
                             SpawnMode::Resume
@@ -1062,9 +1070,7 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // Tauri `set_profile_auto_restore` 미러: update_with 로 토글. 없으면 Error(Tauri 와 동일).
-                let ok = manager
-                    .profiles()
-                    .update_with(profile_id, |p| p.auto_restore = auto_restore);
+                let ok = manager.set_agent_auto_restore(profile_id, auto_restore);
                 if ok {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(registry, manager);
@@ -1085,16 +1091,26 @@ impl ConnectionCore {
                 // ADR-0061 리치화(트리 rename): 표시명 override set/clear. SetProfileAutoRestore 와 동형 —
                 // update_with(persist 일원화) 로 mutate 후 없으면 Error. 성공 시 전 연결에 broadcast(모든 창
                 // 동기화·낙관 갱신 X — 프론트는 broadcast 로만 표시명 반영).
-                let ok = manager.profiles().rename(profile_id, name);
-                if ok {
-                    reply(sink, request_id, Ok(()));
-                    broadcast_profile_list(registry, manager);
-                } else {
-                    reply(
+                // ★실패 사유를 구분해 응답한다★: "그런 에이전트가 없다" 와 "이름을 발급할 수 없다" 는
+                //   서로 다른 사실이고, 둘을 같은 문구로 뭉개면 호출자(사용자·LLM)가 거짓 원인을 본다.
+                //   성공 두 갈래(확정·멱등 무변경)는 기존과 동일하게 Ack + 전 연결 broadcast 다.
+                match manager.rename_agent(profile_id, name) {
+                    CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_) => {
+                        reply(sink, request_id, Ok(()));
+                        broadcast_profile_list(registry, manager);
+                    }
+                    CoreRenameOutcome::NotFound => reply(
                         sink,
                         request_id,
                         Err(format!("profile not found: {profile_id}")),
-                    );
+                    ),
+                    CoreRenameOutcome::Exhausted => reply(
+                        sink,
+                        request_id,
+                        Err(format!(
+                            "name suffix space exhausted — cannot assign a unique name: {profile_id}"
+                        )),
+                    ),
                 }
             }
 
@@ -1106,7 +1122,7 @@ impl ConnectionCore {
                 // ADR-0072 트리 계층 reparent: 부모 지정/해제. 검증(self-parent·nonexistent parent·1단 상한·
                 // 2단 금지)은 ProfileRegistry::reparent 가 한 임계구역에서 수행 — 위반이면 false 로 Error,
                 // 성공이면 Ack + 전 연결 broadcast(RenameProfile 와 동형, 모든 창 동기화·낙관 갱신 X).
-                let ok = manager.profiles().reparent(child_id, parent_id);
+                let ok = manager.reparent_agent(child_id, parent_id);
                 if ok {
                     reply(sink, request_id, Ok(()));
                     broadcast_profile_list(registry, manager);
@@ -1325,7 +1341,7 @@ pub(crate) fn broadcast_lease_changed(registry: &ConnRegistry, agent_id: AgentId
 /// 공유 ProfileRegistry 상태를 바꾸므로 모든 뷰어가 최신 목록을 보게 한다(agent_list_updated 와 동형).
 fn broadcast_profile_list(registry: &ConnRegistry, manager: &Arc<AgentManager>) {
     let ev = AgentEvent::ProfileListUpdated {
-        profiles: core_profiles_to_wire(manager.profiles().list()),
+        profiles: core_profiles_to_wire(manager.agent_snapshots()),
     };
     if let Some(text) = event_json(&ev) {
         registry.broadcast_text(text);
@@ -1691,7 +1707,7 @@ mod tests {
             false,
         );
         let cid = child.id;
-        core.manager.profiles().upsert(child);
+        core.manager.create_agent(child).expect("등록 성공");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
         let mock = MockOutboundSink::new(tx);
@@ -1718,7 +1734,7 @@ mod tests {
         }
         // 부작용 없음: child 의 parent_id 는 여전히 None(거부 = no-op).
         assert_eq!(
-            core.manager.profiles().get(cid).unwrap().parent_id,
+            core.manager.agent_snapshot(cid).unwrap().parent_id,
             None,
             "거부된 reparent 는 상태를 바꾸지 않아야 함"
         );
@@ -1921,7 +1937,7 @@ mod tests {
             [AgentEvent::Created { request_id, .. }] => assert_eq!(*request_id, req),
             other => panic!("Created 기대: {other:?}"),
         }
-        assert_eq!(core.manager.profiles().list().len(), 1, "프로필 1개 등록");
+        assert_eq!(core.manager.agent_snapshots().len(), 1, "프로필 1개 등록");
     }
 
     // ── ADR-0044 M2: CreateProfile(output_format=StreamJson) → 저장 프로필이 json 모드 ──
@@ -1947,7 +1963,7 @@ mod tests {
             &mock,
         )
         .await;
-        let profiles = core.manager.profiles().list();
+        let profiles = core.manager.agent_snapshots();
         assert_eq!(profiles.len(), 1, "프로필 1개 등록");
         assert!(
             profiles[0].command.is_json_mode(),
@@ -2334,8 +2350,10 @@ mod tests {
             p.display_name = Some("sleepy".into());
             p
         };
-        core.manager.profiles().upsert(boss.clone());
-        core.manager.profiles().upsert(sleepy.clone());
+        core.manager.create_agent(boss.clone()).expect("등록 성공");
+        core.manager
+            .create_agent(sleepy.clone())
+            .expect("등록 성공");
 
         // (2) ★개명(RenameProfile — 이 결함의 평범한 트리거)★: 이제 canonical 이름은 override 다.
         core.dispatch(
@@ -2350,8 +2368,7 @@ mod tests {
         .await;
         assert_eq!(
             core.manager
-                .profiles()
-                .get(boss.id)
+                .agent_snapshot(boss.id)
                 .expect("프로필")
                 .canonical_name_when_live(),
             "boss",

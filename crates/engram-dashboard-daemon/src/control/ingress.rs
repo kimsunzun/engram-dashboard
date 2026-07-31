@@ -743,7 +743,11 @@ fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> Stri
     }
     // 세션 수거됨(발신자 terminal) → 프로필 있으면 공유 fallback 으로 best-effort. profile.cwd 는 raw 라
     //   canonical 과 다를 수 있으나, 이 경로는 산 세션이 없어 라우팅 대상도 아니다(표시 전용).
-    if let Some(p) = manager.profiles().get(from.agent_id) {
+    // ★공유 fallback 을 **무조건** 부른다(단축 금지 — 동작 보존)★: `canonical_name_when_live()` 는
+    //   display_name 이 있으면 fs 를 안 보는 단축이 있지만, 여기선 그 함수가 아니라 순수 파생
+    //   (`canonical_name_or_id_fallback`)을 raw `profile.cwd` 로 부른다. 두 경로는 cwd 정규화 유무가
+    //   달라 결과가 갈릴 수 있다 — 이 자리는 표시 전용 best-effort 라 기존 계산을 그대로 유지한다.
+    if let Some(p) = manager.agent_snapshot(from.agent_id) {
         return engram_dashboard_core::agent::name::canonical_name_or_id_fallback(
             p.display_name.as_deref(),
             &p.cwd.to_string_lossy(),

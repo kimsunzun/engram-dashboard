@@ -18,12 +18,11 @@
 //! tauri import 0(daemon crate).
 // ADR-0110
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::types::{
-    AgentStatus, OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
+    OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
 };
 use engram_dashboard_messaging::busy::{
     BusyGate, BusyTracker, IdleNotifier, SubscribeError, TapHost, TurnProbe,
@@ -64,9 +63,13 @@ impl ManagerDeliveryPort {
 ///   써야 한다. 예전엔 그쪽이 인라인 `matches!` 복제본 + "같은 조건" 이라는 주석이었는데, 술어가 바뀔 때 한쪽만
 ///   고치면 **발송 측과 flush 측이 다른 세계를 본다**(이번 라운드가 잡은 결함 부류 그 자체). 그래서 정의는
 ///   여기 하나만 두고 호출만 나눈다 — 복제본을 다시 만들지 말 것.
+/// ★정의는 core `AgentStatus::is_live` 로 내려갔다(ADR-0119 결정 4 — 에이전트 "사실" 계층은 코어)★:
+///   명부(`AgentManager::roster`)도 같은 술어를 써야 하는데 코어는 데몬을 의존할 수 없다. 여기 남은 건
+///   `AgentInfo` 를 받는 데몬측 호출 어댑터고, `ws.rs` 도 계속 이 이름을 부른다(복제본 금지 규율 유지).
 // ADR-0116 (로스터 술어 = 상태만)
+// ADR-0119
 pub(crate) fn is_live(a: &engram_dashboard_core::agent::types::AgentInfo) -> bool {
-    matches!(a.status, AgentStatus::Running | AgentStatus::Exiting)
+    a.status.is_live()
 }
 
 /// core `AgentInfo` → 커널 `LiveAgent`(경계 번역 — 필요한 4필드만).
@@ -140,44 +143,30 @@ impl DeliveryPort for ManagerDeliveryPort {
         live
     }
 
-    /// ★입구 판정 소스 한 장(spec §5 3분기 · ADR-0116)★ — **물리 조회 2회**: `list_agents()` 한 번(로스터) +
-    /// `profiles().list()` 한 번(잠든 이름).
+    /// ★입구 판정 소스 한 장(spec §5 3분기 · ADR-0116)★ — 이제 **명부 단일 입구**
+    /// (`AgentManager::roster()`, ADR-0119)를 한 번 부르고 커널 타입으로 번역만 한다.
     ///
-    /// ★이 함수의 존재 이유 = 두 소스를 **한 호출로 묶는 것**★: 로스터와 프로필을 호출자가 따로 뜨면 그 사이
-    ///   spawn·종료·삭제가 끼어 **같은 발송의 두 수신자가 다른 세계를 본다**(ADR-0111 결정 2 금지 부류).
-    ///   ★로스터 술어는 `is_live` 하나다★ — `live_agents()` 와 **글자 그대로 같은 조건**(4차 개정으로
-    ///   capability 조건이 빠졌다: 턴 신호 없는 산 세션도 배달 대상이다, ADR-0116 결정 7).
-    /// ★잠듦 = **id 기준**(이름 기준이 아니다)★: 프로필의 세션은 그 프로필 id 로 뜨므로(`activate_profile`),
-    ///   "산 세션이 없는 프로필" 을 id 집합으로 정확히 가른다. 이름으로 빼면 동명 프로필 하나가 떠 있을 때
-    ///   잠든 다른 프로필까지 함께 사라져 잠듦 층 동명 차단이 무력화된다.
-    /// ★이름 파생 = `AgentProfile::canonical_name_when_live()`(단일 출처)★: 산 세션의
-    ///   `resolve_canonical_name` 과 **같은 함수 + 같은 cwd 정규화**를 쓴다. 여기서 규칙을 복제하면(예:
-    ///   `resolve_display_name(display_name, profile.cwd)`) 빈 override·placeholder cwd·상대/심링크 cwd 에서
-    ///   파킹 키가 복원 후 이름과 어긋나 편지가 24h TTL 로 조용히 만료된다 — 잠듦 파킹이 막으려던 그 실패다.
-    ///   ★fs 접근은 override 없는 프로필에서만 일어난다★(그 함수의 단축 — 리뷰 fix D3): 발송 임계 경로에
-    ///   syscall 을 얹지 않기 위한 것이고, 이 호출은 **락 밖**이다(모듈 헤더 규율).
+    /// ★차집합 계산은 여기 없다(ADR-0119 결정 2)★: 옛날엔 이 함수가 산 목록과 프로필 목록을 각자 떠서
+    ///   id 차집합으로 잠든 이름을 만들었다 — 그 합성이 프론트에도 사본으로 있어 한쪽만 고쳐지는 drift 가
+    ///   확정적이었다. 이제 합성은 매니저 한 곳이고 여기는 포워딩이다. **여기서 다시 합치지 말 것.**
+    ///   스냅샷 1회·id 축 차집합·동명 잠듦 미접기·override 있으면 fs 무접근 — 그 규율은 전부 `roster()`
+    ///   doc 에 있고 그쪽이 정본이다.
+    /// ★로스터 술어는 여전히 `is_live` 하나다★ — `roster()` 가 `AgentStatus::is_live` 를 쓰고 이 파일의
+    ///   `is_live` 도 같은 함수를 부른다(정의 1곳).
     /// ★정렬★: 로스터는 `@all` 결정성 때문에 (이름, id) 정렬이 필수고(위 `sort_key` 주석), 잠든 이름도
     ///   같은 이유로 정렬해 둔다(중복은 접지 않는다 — 동명 판정 축이다).
-    // ADR-0116 (판정 소스 2종 — 물리 조회 2회)
+    // ADR-0119 (명부 단일 입구 — 이 함수는 포워더)
+    // ADR-0116 (판정 소스 2종)
     fn addressing_sources(&self) -> AddressingSources {
-        // ★스냅샷 1회★ — 로스터와 "산 세션 id 집합"(잠듦 차집합의 기준)이 같은 장에서 나온다.
-        let snapshot = self.manager.list_agents();
-        let mut roster: Vec<LiveAgent> = Vec::with_capacity(snapshot.len());
-        let mut live_ids: HashSet<uuid::Uuid> = HashSet::with_capacity(snapshot.len());
-        for a in snapshot.into_iter().filter(is_live) {
-            live_ids.insert(a.id);
-            roster.push(to_live_agent(a));
+        let mut roster: Vec<LiveAgent> = Vec::new();
+        let mut dormant_names: Vec<String> = Vec::new();
+        for entry in self.manager.roster() {
+            match entry.live {
+                Some(info) => roster.push(to_live_agent(info)),
+                None => dormant_names.push(entry.canonical_name),
+            }
         }
         roster.sort_by(sort_key);
-
-        let mut dormant_names: Vec<String> = self
-            .manager
-            .profiles()
-            .list()
-            .into_iter()
-            .filter(|p| !live_ids.contains(&p.id))
-            .map(|p| p.canonical_name_when_live())
-            .collect();
         dormant_names.sort();
         AddressingSources {
             roster,
@@ -701,8 +690,12 @@ mod tests {
             let manager = manager("dormant-dup");
             let port = ManagerDeliveryPort::new(manager.clone());
             // 스폰하지 않는다 — 산 세션이 없는 프로필이 곧 잠듦이다(`live_ids` 차집합).
-            manager.profiles().upsert(profile("raw-twin-a", "twin"));
-            manager.profiles().upsert(profile("raw-twin-b", "twin"));
+            // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`create_agent`)는 이제 명부 전역 이름
+            //   유일성을 강제해 동명 2건을 **만들 수 없다**. 이 테스트가 봉인하는 건 그 위층 규칙이
+            //   아니라 **어댑터 산출물**(동명 잠듦을 접지 않는다)이라, 유일성을 우회해 상태를 직접 만든다.
+            //   유일성이 데이터 전체에 적용되기 전(기존 agents.json)엔 이 상태가 실재할 수 있다.
+            manager.seed_agent_bypassing_uniqueness(profile("raw-twin-a", "twin"));
+            manager.seed_agent_bypassing_uniqueness(profile("raw-twin-b", "twin"));
 
             let sources = port.addressing_sources();
             assert!(
@@ -735,9 +728,9 @@ mod tests {
                 .list_agents()
                 .iter()
                 .any(|a| a.id == info.id)));
-            manager
-                .profiles()
-                .upsert(profile("raw-dormant-twin", "twin"));
+            // ★하네스 seam★: 산 `twin` 이 이미 명부에 있으므로 정상 경로면 `twin(1)` 로 개명된다
+            //   (ADR-0120). 이 테스트가 보는 건 **차집합 축이 id 라는 사실**이라 이름이 같아야 성립한다.
+            manager.seed_agent_bypassing_uniqueness(profile("raw-dormant-twin", "twin"));
 
             let sources = port.addressing_sources();
             assert!(

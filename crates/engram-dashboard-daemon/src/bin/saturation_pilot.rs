@@ -295,9 +295,7 @@ async fn run_one(
     //   ~/.claude/projects 아래에서 재귀 검색한다. 스폰 직후엔 파일이 아직 안 생겼을 수 있어 짧게 폴링.
     //   못 찾아도(부재) best-effort — transcript_available=false 로 기록하고 문자 추정으로 폴백한다.
     let session_id = manager
-        .profiles()
-        .get(agent.id)
-        .and_then(|p| p.claude_session_id)
+        .agent_claude_session_id(agent.id)
         .map(|s| s.to_string());
     let transcript_path = match &session_id {
         Some(sid) => locate_transcript_with_wait(sid, TRANSCRIPT_APPEAR_TIMEOUT),
