@@ -1376,7 +1376,8 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
             };
             let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
             let v = result.to_json();
-            // 각 발화는 접수 성공 + 고유 msg_id 를 받아야(중복/유실 없음의 발신측 증거). 산 수신자라 delivered.
+            // 각 발화는 접수 성공 + 고유 msg_id 를 받아야(중복/유실 없음의 발신측 증거). 행 상태는 보지
+            //   않는다 — 겹친 드레인에서 물러난 쪽은 `pending` 이 정상이다(아래 주석).
             assert!(
                 v.get("results").is_some(),
                 "동시 발화도 각기 접수(results): {v}"
@@ -1386,12 +1387,17 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     }
     let ack_ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-    // ★ADR-0121 좌석 예약의 귀결 — 동시 버스트는 **직렬화된다**(5차)★: 먼저 도착한 발송이 좌석을 잡으면
-    //   나머지는 `has_pending_ahead` 로 그걸 보고 **큐에 합류**한다(응답 행 `pending`) — 진행 중인 주입을
-    //   앞지르지 않기 위해서다. 그래서 실제 배달은 도어벨 → flush 레인이 비동기로 끝낸다. 옛 판은 전원이
-    //   발신 스레드에서 즉시 주입돼 이 대기가 필요 없었지만, **단언 대상은 그대로다**(유실·중복 없음, 봉투
-    //   바이트 무결). 여기서 기다리는 것은 그 파이프라인의 정지(quiescence)뿐이고, 운영 경로(도어벨 →
-    //   레인 → `flush_for_agent`)를 그대로 태우므로 합류분이 실제로 배달되는지도 함께 실증된다.
+    // ★동시 버스트의 결말 = `delivered`/`pending` **혼합**이다(7차 · ADR-0125)★: 모든 발송이 큐 꼬리에
+    //   적재된 뒤 **자기 호출 안에서** 그 수신자 큐를 드레인한다. 여러 발신이 겹치면 먼저 배치를 든 쪽이
+    //   영수증(in-flight)을 쥐고, 뒤따른 드레인은 **중복 진입 가드**에 걸려 물러나며 유예 표식만 남긴다
+    //   (진행 중 배치를 앞지르면 배달 순서가 적재 순서에서 풀리므로). 물러난 쪽은 자기 편지의 주입 여부를
+    //   모르니 응답을 `pending` 으로 답하지만(spec §6 ㉯ — "안 갔다" 가 아니다) 그 편지는 **이긴 쪽 배치에
+    //   실려 나가거나**, 영수증 보유자가 정산하며 되울린 도어벨 → flush 레인이 집어 간다.
+    //   ★그래서 여기 단언 대상은 차수와 무관하게 그대로다★: 유실·중복 없음(고유 msg_id N개) · 봉투 바이트
+    //   무결(multiset 일치). 아래에서 기다리는 것은 그 파이프라인의 정지(quiescence)뿐이고, 운영 경로
+    //   (동기 드레인 → 물러남 → 되울린 도어벨 → 레인 → `flush_for_agent`)를 그대로 태우므로 물러난 몫이
+    //   실제로 배달되는지도 함께 실증된다. ★위 "산 수신자라 delivered" 주석을 근거로 전원 `delivered` 를
+    //   단언으로 승격시키지 말 것★ — 겹친 드레인에서 물러난 쪽은 정상적으로 `pending` 이다.
     for _ in 0..600 {
         if seen.lock().unwrap().len() >= N && messaging.parked_len(&to_name) == 0 {
             break;
