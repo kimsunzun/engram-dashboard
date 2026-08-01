@@ -21,14 +21,18 @@
 
 use std::path::PathBuf;
 
-/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식**: 이 변형이
-/// 가르치는 채널 집합은 provision 이 물리적으로 깐 채널 집합과 일치해야 한다(어기면 발신 freeze 재발 —
-/// MCP 노출 + CLI-only 지시 = ~6/7 미발신 실측). 그래서 백엔드 capability 하나가 이 변형과 채널 배선을
-/// 함께 움직인다.
+/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식(ADR-0126 결정 4
+/// 로 단방향 개정)**: 이 변형이 **가르치는** 채널 집합 ⊆ provision 이 물리적으로 **깐** 채널 집합. 등호가
+/// 아니다 — 실측이 뒷받침하는 금지는 **안 깐 채널을 가르치는** 한 방향뿐이고(MCP 노출 + CLI-only 지시 =
+/// ~6/7 미발신, ADR-0099), 깔았지만 안 가르치는 상태는 허용된다(ADR-0126 결정 3 이 그 상태를 의도적으로
+/// 만든다). 그래서 백엔드 capability 하나가 이 변형과 채널 배선을 함께 움직인다.
+// ADR-0126
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimingVariant {
-    /// MCP-capable 백엔드(claude). send_message 툴 주력 + engram-send CLI 폴백을 가르친다(both-teaching).
-    ///   → `prompts/agent-priming.md`.
+    /// MCP-capable 백엔드(claude). **send_message 툴만** 가르친다(ADR-0126 결정 1 — engram-send CLI 우회
+    ///   교육 폐지). engram-send 는 이 스폰에도 물리적으로 계속 깔리지만(PATH·env, 결정 3: 나중에 커맨드
+    ///   계열과 연결할 여지) 가르치지 않는다 — 고장난 MCP 를 조용히 우회하면 고장이 관측되지 않으므로,
+    ///   대신 principal 에게 보고하도록 가르친다(결정 2). → `prompts/agent-priming.md`.
     McpPrimary,
     /// 비-MCP 백엔드(codex/gemini 등 미래). engram-send CLI 만 가르친다(send_message 단어 자체 부재).
     ///   → `prompts/agent-priming-cli.md`.
@@ -70,10 +74,11 @@ pub struct FilePrimingProvider {
 }
 
 /// 프라이밍 정적 파일 2개(repo·버전관리, ADR-0099). base_dir 에 붙여 해석한다. 변형(PrimingVariant)이
-///   MCP-capable→both-teaching, 비-MCP→CLI-only 를 가른다.
-/// ★정합 불변식(ADR-0099)★: 두 파일이 가르치는 채널 집합은 provision 이 그 변형에 물리적으로 까는 채널
-///   집합과 일치해야 한다 — MCP_PRIMARY 는 send_message + engram-send 를, CLI_ONLY 는 engram-send 만
-///   (send_message 단어 부재) 가르친다.
+///   MCP-capable→MCP-only 교육, 비-MCP→CLI-only 를 가른다.
+/// ★정합 불변식(ADR-0099 → ADR-0126 결정 4 로 단방향)★: 두 파일이 가르치는 채널 ⊆ provision 이 그 변형에
+///   물리적으로 까는 채널 — MCP_PRIMARY 는 send_message 만, CLI_ONLY 는 engram-send 만(send_message 단어
+///   부재) 가르친다. 파일 **내용** 쪽 강제는 아래 tests 의 `production_priming_files_*` 3종이 건다.
+// ADR-0126
 const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
 const REL_CLI_ONLY: &str = "prompts/agent-priming-cli.md";
 /// env override 키(설정 시 base_dir·변형 무시하고 이 경로를 절대화해 쓴다 — 아래 override 우선 참조).
@@ -418,7 +423,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0099: 정합 불변식 pin(content-based) — 운영 프라이밍 파일이 실제로 가르치는 채널 ──────────
+    // ── ADR-0099/0126: 정합 불변식 pin(content-based) — 운영 프라이밍 파일이 실제로 가르치는 채널 ──────
     /// repo 루트(이 크레이트 매니페스트 두 단계 위). roundtrip_smoke 의 repo_root_from_manifest 와 동형 —
     ///   테스트는 항상 컴파일타임 소스 트리 안에서 도므로 MANIFEST_DIR 이 신뢰 가능하다.
     fn repo_root() -> PathBuf {
@@ -431,31 +436,75 @@ mod tests {
 
     #[test]
     fn production_priming_files_pin_taught_channels() {
-        // ★정합 불변식(ADR-0099)★: 물리적으로 깐 채널 집합 == 프라이밍이 가르치는 채널 집합. 여기선 파일
-        //   수준에서 그 불변식을 못박는다 —
-        //   - A(McpPrimary, agent-priming.md): send_message **와** engram-send 를 모두 가르쳐야(both-teaching).
+        // ★정합 불변식(ADR-0099 → ADR-0126 결정 4 로 단방향 개정)★: **가르치는 채널 ⊆ 깐 채널**. 등호가
+        //   아니다 — 깔았지만 안 가르치는 상태는 허용되고, ADR-0126 결정 3 이 그 상태를 의도적으로 만든다
+        //   (engram-send 는 MCP 가능 스폰에도 계속 깔리되 A 는 그걸 가르치지 않는다). 실측이 뒷받침하는
+        //   금지는 **안 깐 채널을 가르치는** 한 방향뿐이다(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099).
+        //   여기선 파일 수준에서 각 변형의 **교육 표면**을 못박는다 —
+        //   - A(McpPrimary, agent-priming.md): send_message **만**(ADR-0126 결정 1 — CLI 우회 교육 폐지).
         //   - B(CliOnly, agent-priming-cli.md): engram-send 는 가르치되 send_message 단어는 **부재**여야
-        //     (MCP 입구를 프롬프트에서 완전히 삭제 — 지시-도구 불일치 freeze 방지).
+        //     (안 깐 MCP 입구를 프롬프트에서 완전 삭제 — 지시-도구 불일치 freeze 방지, ADR-0099 실측).
         //   문구가 드리프트하면 이 테스트가 깨져 프라이밍-배선 정합을 강제한다.
+        // ADR-0126
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
         let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
         assert!(
             a.contains("send_message"),
-            "A(McpPrimary)는 send_message 를 가르쳐야(both-teaching)"
+            "A(McpPrimary)는 send_message 를 가르쳐야(A 의 유일한 교육 표면)"
         );
-        assert!(
-            a.contains("engram-send"),
-            "A(McpPrimary)는 engram-send 폴백도 가르쳐야(both-teaching)"
-        );
+        // A 의 CLI 표면 **전면** 부재 — ADR-0126 영향/불변식의 검사 목록 그대로(바이너리 이름 + 딸린 플래그).
+        //   이름만 지우고 플래그 표기가 남으면 우회 교육이 반쪽으로 살아남는다.
+        for token in [
+            "engram-send",
+            "--to",
+            "--body",
+            "--request",
+            "--reply-by",
+            "--reply-to",
+        ] {
+            assert!(
+                !a.contains(token),
+                "A(McpPrimary)에 CLI 표면 {token:?} 이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — \
+                 engram-send 는 물리적으로 계속 깔리되(결정 3) 가르치지 않는다"
+            );
+        }
         assert!(
             b.contains("engram-send"),
             "B(CliOnly)는 engram-send 를 가르쳐야"
         );
         assert!(
             !b.contains("send_message"),
-            "B(CliOnly)는 send_message 단어가 부재여야(MCP 입구 완전 삭제 — freeze 방지)"
+            "B(CliOnly)는 send_message 단어가 부재여야(안 깐 MCP 입구 완전 삭제 — freeze 방지, ADR-0099)"
         );
+    }
+
+    /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: 우회 교육을 걷어낸 자리를 비워 두면 두 오작동이
+    ///   남는다 — ㉮ 셸을 뒤진 에이전트가 **가르치지 않은** engram-send(결정 3 으로 PATH 에 그대로 있다)를
+    ///   스스로 찾아 쓰거나, ㉯ 편지를 조용히 버려 principal 이 고장을 영영 모른다. 그래서 "우회하지 마라"
+    ///   와 "대신 principal 에게 보고하라" 는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면
+    ///   결정이 반쪽이 된다. auto mode 에선 grant 가 NO-OP 이라(ADR-0099) 이 지시를 붙드는 장치는 프라이밍
+    ///   문장 하나뿐 — 그래서 파일 수준에서 못박는다.
+    ///
+    /// ★왜 "broken channel" 한 토큰만 pin 하나★: 문장 전체를 pin 하면 평범한 문구 손질에도 깨진다. "우회
+    ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 pin_taught_channels 가 A 의 CLI 표면 부재와 B 의
+    ///   send_message 부재를 이미 강제하므로 "대신 다른 입구를 써라" 식 회귀는 그쪽에서 잡힌다. 여기선
+    ///   **고장을 고장이라 부르는 문장이 존재하는지**만 본다.
+    ///
+    /// ★두 파일 모두(결정 5)★: 유일한 입구가 고장났을 때 편지를 조용히 버리는 실패 모드는 변형과 무관하게
+    ///   같다 — 표면 차이는 툴 이름뿐이라 에스컬레이션 교육은 양쪽에 같이 산다.
+    // ADR-0126
+    #[test]
+    fn production_priming_files_teach_channel_failure_escalation() {
+        let root = repo_root();
+        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
+        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
+        for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
+            assert!(
+                text.contains("broken channel"),
+                "{label}: 발신 입구가 고장나면 우회하지 말고 principal 에게 보고하도록 가르쳐야(ADR-0126 결정 2·5)"
+            );
+        }
     }
 
     /// ★C3 회신 계약 프라이밍 정합(ADR-0103 결정 2/3 · spec §3)★: 데몬은 `type="request"` 봉투를 내보내고
@@ -463,13 +512,18 @@ mod tests {
     ///   회신 규칙을 안 가르치면 엄격 매칭(`reply_to` 필수)이 구조적으로 회신을 못 받는다(계약 반쪽).
     ///   그래서 두 변형 모두 "request 를 받으면 그 id 로 회신" 을 가르치는지 파일 수준에서 못박는다.
     ///
-    /// ★변형별 표기★: A(McpPrimary)는 툴 인자(snake_case `reply_to`)와 CLI 플래그(`--reply-to`)를 **둘 다**,
-    ///   B(CliOnly)는 CLI 플래그만(툴 인자 표기를 가르치면 없는 입구를 가리킨다 — 지시-도구 불일치).
+    /// ★변형별 표기(ADR-0126 결정 1 로 개정)★: **각 변형은 자기 입구의 표기만** 가르친다 — A(McpPrimary)는
+    ///   툴 인자(snake_case `reply_to`)만, B(CliOnly)는 CLI 플래그(`--reply-to`)만. 봉투 인식(`type="request"`)
+    ///   과 `<notice>` 는 입구와 무관한 수신측 계약이라 양쪽 공통이다. A 에 CLI 플래그가 남으면 폐지한 우회
+    ///   교육이 되살아나고(ADR-0126), B 에 툴 인자 표기가 있으면 없는 입구를 가리킨다(지시-도구 불일치,
+    ///   ADR-0099).
+    // ADR-0126
     #[test]
     fn production_priming_files_teach_the_reply_contract() {
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
         let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
+        // 입구 무관 공통분 — 봉투를 알아보고 notice 에 회신하지 않는 규칙.
         for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
             assert!(
                 text.contains("type=\"request\""),
@@ -479,18 +533,19 @@ mod tests {
                 text.contains("<notice>"),
                 "{label}: notice 는 회신 대상이 아님을 가르쳐야(데몬 전용 태그)"
             );
-            assert!(
-                text.contains("--reply-to"),
-                "{label}: CLI 회신 플래그를 가르쳐야"
-            );
-            assert!(
-                text.contains("--request") && text.contains("--reply-by"),
-                "{label}: CLI request/기한 플래그를 가르쳐야"
-            );
         }
+        // 회신·기한을 **거는** 표기는 입구별로 갈린다(위 ★변형별 표기★).
         assert!(
             a.contains("reply_to") && a.contains("reply_by"),
-            "A(McpPrimary)는 툴 인자 표기(snake_case)도 가르쳐야(both-teaching)"
+            "A(McpPrimary)는 회신·기한을 툴 인자 표기(snake_case)로 가르쳐야(A 의 유일한 입구)"
+        );
+        assert!(
+            b.contains("--reply-to"),
+            "B(CliOnly)는 CLI 회신 플래그를 가르쳐야"
+        );
+        assert!(
+            b.contains("--request") && b.contains("--reply-by"),
+            "B(CliOnly)는 CLI request/기한 플래그를 가르쳐야"
         );
         assert!(
             !b.contains("reply_to") && !b.contains("reply_by"),

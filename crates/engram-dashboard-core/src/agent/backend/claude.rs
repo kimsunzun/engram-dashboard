@@ -40,9 +40,10 @@ impl AgentBackend for ClaudeBackend {
 
     fn accepts_mcp_config(&self) -> bool {
         // claude 는 mcp-config 를 `--mcp-config` 로 부착한다(ADR-0099) → MCP-capable.
-        //   이 true 하나가 provision 에서 mcp-config 기록 + MCP endpoint bits + both-teaching 프라이밍 +
-        //   [Mcp, Cli] grant 를 구동한다(정합 불변식: 깐 채널 == 프라이밍이 가르치는 채널).
-        // ADR-0099
+        //   이 true 하나가 provision 에서 mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍
+        //   (send_message 만 — ADR-0126 결정 1) + [Mcp, Cli] grant 를 구동한다(정합 불변식: 가르치는 채널
+        //   ⊆ 깐 채널 — engram-send 는 이 스폰에도 계속 깔리되 결정 3 에 따라 가르치지 않는다).
+        // ADR-0099 / ADR-0126
         true
     }
 

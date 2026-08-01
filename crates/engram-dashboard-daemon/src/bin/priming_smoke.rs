@@ -78,7 +78,8 @@ async fn run() -> i32 {
     //   기준 repo 루트(cargo run 은 크레이트 dir 이 cwd 일 수 있어 명시). ENGRAM_PRIMING_FILE override 존중.
     let repo_root = repo_root_from_manifest();
     let priming = FilePrimingProvider::new(repo_root.clone());
-    // ADR-0099: 이 진단 bin 은 claude(MCP-capable) 를 스폰하므로 McpPrimary(both-teaching) 변형을 본다.
+    // ADR-0099/0126: 이 진단 bin 은 claude(MCP-capable) 를 스폰하므로 McpPrimary 변형을 본다
+    //   (= A `prompts/agent-priming.md` — send_message 만 가르친다, ADR-0126 결정 1).
     let priming_path = priming.priming_file(PrimingVariant::McpPrimary);
     match &priming_path {
         Some(p) => eprintln!("[smoke] priming file = {}", p.display()),

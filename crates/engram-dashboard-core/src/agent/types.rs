@@ -269,10 +269,14 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///
     /// `accepts_mcp_config`(ADR-0099): 이 backend 가 mcp-config 를 받아들이는가(= MCP-capable 인가). manager 가
     ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **채널 물리 배선·
-    ///   프라이밍 변형·grant 를 한꺼번에 가른다**(정합 불변식 = 물리적으로 깐 채널 집합 == 프라이밍이 가르치는
-    ///   채널 집합 — 어기면 발신 freeze 재발). true → mcp-config 기록 + MCP endpoint bits + both-teaching
-    ///   프라이밍 + `[Mcp, Cli]` grant. false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant.
+    ///   프라이밍 변형·grant 를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 채널 집합 ⊆ 물리적으로
+    ///   **깐** 채널 집합 — ADR-0099 의 등호를 ADR-0126 결정 4 가 단방향으로 개정했다. 금지된 방향은 안 깐
+    ///   채널을 가르치는 쪽뿐이고(어기면 발신 freeze 재발), 깔고도 안 가르치는 상태는 허용이다).
+    ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
+    ///   결정 1; `engram-send` 는 이 스폰에도 계속 깔리되 결정 3 에 따라 가르치지 않는다) + `[Mcp, Cli]` grant.
+    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant.
     ///   core 는 이 값을 **불투명 bool 로만** 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003 격리).
+    // ADR-0126
     fn provision(
         &self,
         id: AgentId,

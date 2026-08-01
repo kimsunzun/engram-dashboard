@@ -20,44 +20,38 @@ Messages arrive as XML envelopes:
 
 Only reply with `reply_to` when the message you're answering actually carried `type="request"` and an `id`. Ordinary messages don't need it.
 
-## Replying to teammates — send_message tool, or the engram-send command
+## Replying to teammates — the send_message tool
 
-**Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** To reach a teammate:
-
-- **Primary:** use the `send_message` tool — pass `to` (see below) and the body. This is the MCP tool named exactly `send_message` (lowercase, on the `engram` server) — it is NOT your harness's built-in `SendMessage` tool, which is blocked/unavailable for messaging on this team and will fail as a permission denial if called.
-- **Fallback:** if any attempt to reach a teammate fails or errors for any reason, don't stop there — run in your shell: `engram-send --to <name> --body "<your message>"` — the command is already available in your shell, and the auth token and address are injected via environment variables. (For a long or heavily quoted body: `--body-stdin <<'EOF' … EOF` instead of `--body`.)
-
-Either way the envelope (the "from" label) is attached automatically by the broker.
+**Your ordinary text output (what you just write in your turn) is visible only to your principal and is NOT delivered to teammates.** To reach a teammate, use the `send_message` tool — pass `to` (see below) and the body. This is the MCP tool named exactly `send_message` (lowercase, on the `engram` server) — it is NOT your harness's built-in `SendMessage` tool, which is blocked/unavailable for messaging on this team and will fail as a permission denial if called. The envelope (the "from" label) is attached automatically by the broker. If `send_message` is missing, or a couple of tries get no response from it at all — as opposed to a reply carrying a `code` and `hint` — that is a broken channel and not something to work around: stop trying, and say so plainly to your principal in your turn, so it can be repaired.
 
 **Who you send to — one teammate, several, or everyone:**
 
-- `to` takes **one name or a list**: `"qa-bravo"`, or `["qa-bravo", "qa-charlie"]`. Each entry is a teammate's name (or agent id).
+- `to` takes **one name or a list**: `"qa-bravo"`, or `["qa-bravo", "qa-charlie"]`. Each entry is a teammate's name (or agent id). A comma inside a single string is part of that name, not a separator.
 - There are exactly **two group addresses**, and there are no other groups to create or manage:
   - `"@here"` — **everyone live right now except you**. Use it when you mean "whoever is around".
   - `"@all"` — **every agent in the team tree except you, including ones that are not running**. A dormant teammate's copy is queued (`pending`) and delivered when they are restored. Use it when everyone really has to hear it.
   You can mix either with names: `["@here", "qa-bravo"]` (duplicates are folded, so nobody gets it twice).
-- On the command line, list recipients with commas: `--to qa-bravo,qa-charlie` or `--to @here`.
 - The result carries **one row per recipient**, each with a `status`:
-  - `delivered` — injected into that teammate now.
-  - `pending` — queued, not injected yet. Three reasons: that teammate is **mid-turn** (it lands when their turn ends), they are **not running but saved** (it lands when they are restored), or **something is already on its way to them** — older queued mail, or another message being written to them right now — and yours joined the queue behind it (the whole queue then goes out together, oldest first, so this one can happen even when the teammate is running and idle). Do not report a `pending` row as "mid-turn or offline" — you cannot tell which of the three it was from the row alone. Nobody is notified if a queued message expires first (24h), so check with `messages` if it matters.
+  - `delivered` — this send injected it into that teammate; this is the only outcome you can take as confirmed.
+  - `pending` — **this send did not confirm delivery; it does not mean "it didn't go."** It is not a failure signal and not a cue to re-send. Either it is still queued (they are mid-turn, they are not running but saved, or the write into them did not land), or a send to the same teammate overlapped yours and yours may already have gone out with it. Each teammate's queue goes out oldest-first, so a later `delivered` to the same teammate does not mean an earlier `pending` was overtaken. **Never infer the case, or that teammate's state, from the row — if it matters whether it arrived, look it up: `messages` with that message's `id`.**
   - `failed` — **that recipient only** missed it; the others still got it. The row carries a `code`: `RECIPIENT_NOT_FOUND` (**no agent by that name at all** — not running and not saved, so fix the name or create them and send again), `RECIPIENT_AMBIGUOUS` (two agents share that name — **duplicate names are not supported: do NOT resend, tell the user** so they can rename or retire one), `MAILBOX_FULL` (that teammate's queue is full — retry later), `REQUEST_CAPACITY` (the broker could not track one more request for them).
 - Read the rows before moving on: a partly failed send is a normal outcome and it is **your** call whether to retry the failed ones.
 - If the whole call comes back as `{"status":"error", "code", "hint"}` instead, nothing was sent to anyone — fix what the hint says and resend.
 
 **Asking for an answer, and answering:**
 
-- To require an answer, set `request` = true (tool) or pass `--request` (command), optionally with a deadline: `reply_by` = `"5m"` / `"10m"` / `"1h"` (tool) or `--reply-by 10m` (command). Deadlines are checked once a minute, so **1 minute is the minimum** — anything shorter is rejected. The deadline notifies **you** if no reply arrives — it does not nag the recipient.
-- To answer a request, pass `reply_to` = the `id` from its envelope (tool) or `--reply-to m-7f3k` (command). Send it to the requester, as an ordinary message with that one extra field.
+- To require an answer, set `request` = true, optionally with a deadline: `reply_by` = `"5m"` / `"10m"` / `"1h"`. Deadlines are checked once a minute, so **1 minute is the minimum** — anything shorter is rejected. The deadline notifies **you** if no reply arrives — it does not nag the recipient.
+- To answer a request, pass `reply_to` = the `id` from its envelope. Send it to the requester, as an ordinary message with that one extra field.
 - `request` and `reply_to` are mutually exclusive — a message is either a new request or an answer to one. Need both? Send two messages.
 - **A request may have several recipients** (`@here`/`@all` included): that opens **one independent contract per recipient**. Each of them owes you their own answer, one of them replying does not close the others, and you get a separate deadline notice for each one that stays silent.
 - **A reply goes to exactly one recipient** — the agent that sent you the request. `reply_to` together with several recipients (or with a group address) is rejected outright.
 - If the daemon rejects your arguments it answers with a `code` and a `hint` — read the hint and retry.
 
-**Sending was already authorized by your principal when they launched you** (both paths are included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message, or engram-send if that path is absent or blocked.
+**Sending was already authorized by your principal when they launched you** (the tool is included in your allowed tools). Replying to a teammate's message is part of the collaboration you were assigned, so within the scope of your task, don't wait for separate permission — reply directly via send_message.
 
 ## Checking what's outstanding — messages
 
-The `messages` tool (command: `engram-send pending` / `engram-send status <id>`) only reads; it never sends.
+The `messages` tool only reads; it never sends.
 
-- No arguments = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (your message hasn't reached them yet). Worth checking before you finish a turn, so you don't leave a request hanging.
-- `id` = that message's delivery state, **one row per recipient** (`pending` / `delivered` / `replied` / `expired` / `failed`). A `failed` row here can carry `code: RECIPIENT_DELETED` — the recipient was **deleted while your message was still queued**, so it was closed as undelivered. That name no longer exists: resending is pointless, tell the user if it still matters.
+- No arguments = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (that message is not recorded as injected yet). Worth checking before you finish a turn, so you don't leave a request hanging.
+- `id` = that message's delivery state, **one row per recipient** (`pending` / `delivered` / `replied` / `expired` / `failed`). A `pending` row is where that record stands at the moment you read it, not a verdict: the message leaves that recipient's queue when their turn ends, when they are restored, or when anyone's next message to them goes out — nothing re-attempts it on a timer of its own, and anything still queued at 24h expires silently. Only `expired` and `failed` mean it will not arrive. A `failed` row here can carry `code: RECIPIENT_DELETED` — the recipient was **deleted while your message was still queued**, so it was closed as undelivered. That name no longer exists: resending is pointless, tell the user if it still matters.

@@ -886,9 +886,9 @@ impl AgentManager {
         // ADR-0086
         let control_endpoint = if backend::supports_control_channel(&profile.command) {
             // ADR-0099: backend 의 MCP-capability 를 provision 에 넘겨 채널 물리 배선·프라이밍 변형·grant 를
-            //   한꺼번에 가르게 한다(정합 불변식 = 깐 채널 == 프라이밍이 가르치는 채널). 판정은 backend
-            //   dispatch(ADR-0004) — manager 는 command 를 직접 matches! 하지 않는다.
-            // ADR-0099
+            //   한꺼번에 가르게 한다(정합 불변식 = 가르치는 채널 ⊆ 깐 채널 — ADR-0126 결정 4 로 단방향 개정).
+            //   판정은 backend dispatch(ADR-0004) — manager 는 command 를 직접 matches! 하지 않는다.
+            // ADR-0099 / ADR-0126
             let accepts_mcp = backend::accepts_mcp_config(&profile.command);
             self.control
                 .provision(profile.id, epoch, accepts_mcp)

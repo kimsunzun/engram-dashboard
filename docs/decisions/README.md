@@ -146,7 +146,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0096](0096-봉투-포맷-운영-스위치-데몬-전역-상태-invoke-커맨드-조종-표면-전용워커-mcp-미노출.md) | 봉투 포맷 운영 스위치 — 데몬 전역 상태 + invoke 커맨드 (조종 표면 전용·워커 MCP 미노출) | 확정 |
 | [0097](0097-스폰-에이전트-기본-auto-modebypasspermissions-채택-헤드리스-워커-권한-현실화.md) | 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화 | 확정 |
 | [0098](0098-cli-발신-grant를-bare-name-path-주입으로-정렬-절대경로-미매칭-해소.md) | CLI 발신 grant를 bare-name + PATH 주입으로 정렬 — 절대경로 미매칭 해소 | 확정 |
-| [0099](0099-채널-선택-백엔드-capability-스위치-프라이밍-정적-2파일mcp-capableboth-teaching-비-mcpcli-only.md) | 채널 선택 = 백엔드 capability 스위치 + 프라이밍 정적 2파일(MCP-capable=both-teaching / 비-MCP=CLI-only) | 확정 |
+| [0099](0099-채널-선택-백엔드-capability-스위치-프라이밍-정적-2파일mcp-capableboth-teaching-비-mcpcli-only.md) | 채널 선택 = 백엔드 capability 스위치 + 프라이밍 정적 2파일(MCP-capable=both-teaching / 비-MCP=CLI-only) | 확정 (부분 폐기 by ADR-0126: engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화) |
 | [0100](0100-릴리즈-패키징-포터블-폴더-조립-스크립트-co-location-불변식.md) | 릴리즈 패키징 — 포터블 폴더 조립 스크립트 (co-location 불변식) | 확정 |
 | [0101](0101-에이전트-canonical-이름-표시-이름display-name-cwd-basename-라우팅표시발신자명-단일화-adr-0087-이름주소-step-1.md) | 에이전트 canonical 이름 = 표시 이름(display_name ?? cwd basename) — 라우팅·표시·발신자명 단일화 (ADR-0087 이름주소 step 1) | 확정 |
 | [0102](0102-부팅-레이스-방지-managed-state는-build-전-등록-프론트-부팅-pull-재시도-main-창-무한-로딩-근절.md) | 부팅 레이스 방지 — managed state는 build 전 등록 + 프론트 부팅 pull 재시도 (main 창 무한 로딩 근절) | 확정 |
@@ -173,3 +173,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0123](0123-접미사-번호는-현재-명부-관측-최대치-기준-다-빠지면-재사용-허용.md) | 접미사 번호는 현재 명부 관측 최대치 기준 — 다 빠지면 재사용 허용 | 확정 |
 | [0124](0124-발송은-전부-큐에-적재하고-flush-레인이-뺀다-직발송-지름길-폐지.md) | 발송은 전부 큐에 적재하고 flush 레인이 뺀다 (직발송 지름길 폐지) | 폐기 (Superseded by ADR-0125) |
 | [0125](0125-발송이-자기-턴에-큐를-끝까지-비운다-동기-드레인-delivered-복원.md) | 발송이 자기 턴에 큐를 끝까지 비운다 (동기 드레인 · delivered 복원) | 확정 |
+| [0126](0126-mcp-실패-시-cli-우회-교육-폐지-입구는-스폰-시-capability로만-갈리고-런타임-폴백은-없다.md) | MCP 실패 시 CLI 우회 교육 폐지 — 입구는 스폰 시 capability로만 갈리고 런타임 폴백은 없다 | 확정 |

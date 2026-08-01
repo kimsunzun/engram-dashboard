@@ -79,8 +79,11 @@ impl DaemonControlChannel {
     ///
     /// ★ADR-0094 CLI-only 측정 test-seam(`ENGRAM_DISALLOW_MCP_SEND`)★: ingress.rs 의 `ENGRAM_WRAP_FORMAT`
     ///   스파이크-seam 선례와 동일한 **env 게이트·하네스/운영자 통제·test-only** 노브다(운영 스위치 아님).
-    ///   env 가 설정되고 **비어있지 않으면** MCP send_message grant 를 **뺀다** → 에이전트는 CLI(engram-send)
-    ///   로만 발신할 수 있어 순수 CLI-only 라우팅을 실측할 수 있다. env 미설정/빈 값이면 오늘과 **바이트 동일**
+    ///   env 가 설정되고 **비어있지 않으면** MCP send_message grant 를 **뺀다** → 권한상 남는 발신 입구는
+    ///   CLI(engram-send)뿐이라 순수 CLI-only 라우팅을 실측할 수 있다. ★ADR-0126 이후 프라이밍을 함께
+    ///   맞춰야 한다★: 운영 A 는 이제 send_message 만 가르치므로(결정 1), 이 노브만 켜면 에이전트는 배운
+    ///   유일한 입구가 막히고 CLI 는 배운 적이 없는 상태가 된다 — CLI-only 프라이밍을 함께 줘야 의도한
+    ///   측정이 된다. env 미설정/빈 값이면 오늘과 **바이트 동일**
     ///   (MCP grant 존재) — 운영 회귀 0. ★최소권한 불변식★: 이 seam 은 grant 를 **오직 제거만** 한다(절대
     ///   확장 X) — env 를 켠 하네스라도 오늘보다 더 넓은 권한을 얻지 못한다. env 게이트라 운영 호출자는 무영향.
     fn build_grants(
@@ -111,6 +114,9 @@ impl DaemonControlChannel {
         //     와일드카드)로 번역하고, 스폰된 에이전트는 bare `engram-send` 를 shell 에서 부른다(backend 가
         //     주입한 PATH 로 해석 — claude.rs 참조). 이 세 문자열(grant · 프라이밍이 가르치는 명령 · 실제
         //     invocation)이 모두 bare `engram-send` 로 정렬돼야 claude 권한 게이트를 통과한다.
+        //   ★ADR-0126 이후 그 명령을 가르치는 건 CLI-only 프라이밍(B) 뿐★: MCP 가능 스폰에도 grant·PATH 는
+        //     그대로 남지만(결정 3 — 나중에 커맨드 계열과 연결할 여지) A 는 그걸 가르치지 않는다(결정 1).
+        //     즉 정렬 요구는 살아 있되 그 요구를 만드는 쪽은 이제 B 다.
         //   ★WHY bare 이름(절대경로 폐기)★: 옛 절대경로 grant(`Bash(<abs> *)`, space-star)는 라이브
         //     측정에서 0/38 로 전부 permission-blocked 됐고(패턴 미매칭), 절대 좌표를 grant 에 박아 배포
         //     비친화적(머신마다 경로가 다름)이었다. bare 이름 + 주입 PATH 로 배포 가능하게 정렬한다.
@@ -157,11 +163,14 @@ impl ControlChannel for DaemonControlChannel {
         // ADR-0099 test-seam: `ENGRAM_FORCE_CLI_ONLY_SEND` — 스폰을 **비-MCP 로 강제**해 false 분기 전체를
         //   돌린다(no config write + CliOnly 프라이밍 + [Cli]-only grant). ★이 분기 맨 위에서 flag 를
         //   덮어써 채널 물리 배선·프라이밍·grant 가 **한 소스**(effective flag)에서 파생되게 한다 — 정합
-        //   불변식(깐 채널 == 프라이밍이 가르치는 채널)이 by-construction 으로 보존된다.★ 이게 옛
+        //   불변식(가르치는 채널 ⊆ 깐 채널, ADR-0126 결정 4)이 by-construction 으로 보존된다.★ 이게 옛
         //   `ENGRAM_DISALLOW_MCP_SEND`(grant-only 노브)와 다른 점이다: 후자는 grant 에서 MCP 만 빼고
-        //   **MCP 서버는 여전히 mcp-config 로 부착**돼(프라이밍도 both-teaching) 물리/교육 채널이 갈렸다
-        //   (측정 전용 — 프롬프트-도구 불일치를 일부러 만든다). 이 seam 은 반대로 **모든 채널을 CLI 로 정렬**
-        //   해 실 claude 를 비-MCP 백엔드처럼 굴려 false path 전체를 실측한다.
+        //   **MCP 서버는 여전히 mcp-config 로 부착**돼 물리와 권한이 갈렸다(측정 전용 — 프롬프트-도구
+        //   불일치를 일부러 만든다). ★ADR-0126 이후 그 노브는 기본 프라이밍과도 어긋난다★: A 는 이제
+        //   send_message **만** 가르치므로, grant 만 빼면 에이전트는 유일하게 배운 입구가 막히고 CLI 는
+        //   배운 적이 없는 상태가 된다 — CLI 라우팅을 보려면 CLI-only 프라이밍을 함께 줘야 한다.
+        //   이 seam 은 반대로 **모든 채널을 CLI 로 정렬**해 실 claude 를 비-MCP 백엔드처럼 굴려 false path
+        //   전체를 실측한다.
         //   ★env 게이트(ENGRAM_DISALLOW_MCP_SEND·ENGRAM_WRAP_FORMAT 선례와 동형)★: 설정 + non-empty 일
         //     때만 발동. 미설정/빈 값이면 오늘과 바이트 동일(운영 회귀 0) — env 게이트라 운영 호출자는 무영향.
         //     하네스/운영자 통제·test-only 노브다(운영 스위치 아님).
@@ -173,14 +182,17 @@ impl ControlChannel for DaemonControlChannel {
             .unwrap_or(false);
         let accepts_mcp_config = accepts_mcp_config && !force_cli_only;
         // ADR-0099: 백엔드 MCP-capability 하나가 채널 물리 배선·프라이밍 변형·grant 를 전부 가른다.
-        //   ★정합 불변식★: 물리적으로 provision 하는 채널 집합 == 프라이밍이 가르치는 채널 집합. 어기면
-        //     발신 freeze 재발(MCP 노출 + CLI-only 지시 = ~6/7 미발신 실측). 그래서 아래 세 갈래
+        //   ★정합 불변식(ADR-0126 결정 4 로 단방향 개정)★: 프라이밍이 **가르치는** 채널 집합 ⊆ 물리적으로
+        //     provision 하는 채널 집합. 안 깐 채널을 가르치면 발신 freeze 재발(MCP 노출 + CLI-only 지시 =
+        //     ~6/7 미발신 실측) — 실측이 뒷받침하는 금지는 그 한 방향뿐이고, 반대(깔고도 안 가르침)는
+        //     허용이다(ADR-0126 결정 3 이 그 상태를 의도적으로 만든다). 그래서 아래 세 갈래
         //     (config_path / priming variant / grants)가 이 flag 하나로 함께 움직인다 — 따로 놀지 않게.
         //   - MCP-capable(claude=true): mcp-config 기록(파일 물리 존재) + MCP endpoint bits(url/token/config)
-        //     + both-teaching 프라이밍(send_message + engram-send) + [Mcp, Cli] grant.
+        //     + MCP-only 교육 프라이밍(send_message 만 — engram-send 는 계속 깔리되 가르치지 않는다,
+        //     ADR-0126 결정 1·3) + [Mcp, Cli] grant.
         //   - 비-MCP(codex/gemini stub=false): mcp-config **미기록**(파일 물리 부재) + CLI-only 프라이밍
         //     (engram-send 만) + [Cli] grant. MCP 입구가 프롬프트에서 완전히 삭제돼 지시-도구 불일치 없음.
-        // ADR-0099
+        // ADR-0099 / ADR-0126
         let (config_path, settings_file, priming_variant) = if accepts_mcp_config {
             // 순서: 파일 먼저 쓰고(경로 확정) → registry 등록. NEW config write 실패는 치명(FIX 5 §case 2)
             //   → Err 로 fail-closed. (오래된 파일 삭제 실패는 provision 을 막지 않는다 — 아래 boot sweep /
@@ -233,11 +245,12 @@ impl ControlChannel for DaemonControlChannel {
         );
         // ADR-0099 fail-closed edge(FIX 2): 비-MCP(effective) 스폰인데 CLI 입구(send_exe)마저 없으면
         //   물리 채널이 **하나도 없다**(MCP 미부착 + CLI 미배포) — 그런데 CLI-only 프라이밍(B)은
-        //   engram-send 를 가르친다. 이는 정합 불변식(가르친 채널 == 깐 채널)의 정면 위반이고, 발신 freeze
-        //   (가르친 도구가 물리적으로 부재)를 낳는다. 그래서 조용히 반쪽 스폰하지 않고 **loud fail-closed**
-        //   로 스폰을 중단한다(mod.rs ~L145 fail-closed 정신 — 제어 채널 없이 몰래 도는 에이전트 금지).
-        //   ★MCP-capable && send_exe=None 은 여기 안 걸린다★: 그건 MCP 입구가 물리적으로 살아 있어(both
-        //     프라이밍의 주력 경로) 채널 0 이 아니다 — 아래 accepted-edge 로 별도 처리(warn 만).
+        //   engram-send 를 가르친다. 이는 정합 불변식(가르치는 채널 ⊆ 깐 채널 — ADR-0126 결정 4)이 금지하는
+        //   바로 그 방향의 위반이고, 발신 freeze(가르친 도구가 물리적으로 부재)를 낳는다. 그래서 조용히
+        //   반쪽 스폰하지 않고 **loud fail-closed** 로 스폰을 중단한다(mod.rs ~L145 fail-closed 정신 —
+        //   제어 채널 없이 몰래 도는 에이전트 금지).
+        //   ★MCP-capable && send_exe=None 은 여기 안 걸린다★: 그건 MCP 입구가 물리적으로 살아 있어(A
+        //     프라이밍이 가르치는 유일한 입구) 채널 0 이 아니다 — 아래 accepted-edge 로 별도 처리(warn 만).
         //   ★config 아직 미기록★: 이 분기는 !accepts_mcp_config 일 때만 참이라 위 write_config 를 타지
         //     않았다 → 여기서 Err 를 내도 회수할 config 파일이 없다(token 도 아직 issue 전 — leak 0).
         // ADR-0099
@@ -246,23 +259,25 @@ impl ControlChannel for DaemonControlChannel {
             tracing::warn!(agent = %id, epoch, "제어 채널 provision fail-closed(ADR-0099): {msg}");
             return Err(ProvisionError(msg.to_string()));
         }
-        // ADR-0099 accepted-edge(FIX 2): MCP-capable + send_exe=None. MCP 입구는 살아 있으므로(both
-        //   프라이밍의 주력) 채널 0 이 아니라 스폰을 허용한다. 다만 both-teaching 의 **폴백 문단**은
-        //   engram-send 를 가리키는데 그 바이너리가 없어, 에이전트가 폴백을 시도하면 그 명령이 **가시적으로
-        //   실패**한다(조용한 오작동 아님 — 에러가 눈에 보인다). 주력(MCP)이 정상이라 이 폴백 부재는
-        //   기능적으로 치명이 아니다 → 허용하되 관측 가능하게 warn 만 남긴다(가시적-실패 엣지로 문서화).
+        // ADR-0099 accepted-edge(FIX 2): MCP-capable + send_exe=None. MCP 입구는 살아 있고 프라이밍 A 가
+        //   가르치는 입구도 그것뿐이라(ADR-0126 결정 1) 채널 0 이 아니다 → 스폰을 허용한다. 여기서 빠진
+        //   것은 **교육 표면이 아니라 물리 배선**이다: ADR-0126 결정 3 은 MCP 가능 스폰에도 engram-send 를
+        //   계속 깔아 두기로 했는데(나중에 커맨드 계열과 연결할 여지) 그 바이너리가 없다. 아무도 가르치지
+        //   않는 채널이라 발신 기능엔 영향이 없어 치명이 아니고, 대신 그 배선 결손 자체는 보여야 하므로
+        //   허용하되 warn 만 남긴다.
+        // ADR-0126
         if accepts_mcp_config && self.send_exe.is_none() {
             tracing::warn!(
                 agent = %id,
                 epoch,
-                "MCP-capable 스폰이나 engram-send 부재 — both-teaching 폴백(CLI)은 가시적으로 실패할 수 있음(주력 MCP 는 정상, accepted edge)"
+                "MCP-capable 스폰이나 engram-send 부재 — 발신 기능엔 영향 없음(프라이밍 A 는 send_message 만 가르친다). ADR-0126 결정 3 의 물리 배선만 결손(accepted edge)"
             );
         }
         self.registry.issue(id, epoch, token.clone());
         // ADR-0092/0099: 프라이밍 파일 경로를 seam 으로 해석해 endpoint 에 싣는다(있으면). 변형은 위
-        //   MCP-capability 가 고른다(McpPrimary=both-teaching / CliOnly=engram-send 만). 부재/미구성이면
-        //   None — 프라이밍 provider 가 이미 warn 로그를 남겼고, 스폰은 막지 않는다(graceful). 내용은 안
-        //   읽고 경로만 나른다(하드코딩 금지).
+        //   MCP-capability 가 고른다(McpPrimary=send_message 만 / CliOnly=engram-send 만 — ADR-0126 결정 1
+        //   로 A 의 CLI 우회 교육이 폐지됐다). 부재/미구성이면 None — 프라이밍 provider 가 이미 warn 로그를
+        //   남겼고, 스폰은 막지 않는다(graceful). 내용은 안 읽고 경로만 나른다(하드코딩 금지).
         let priming_file = self.priming.priming_file(priming_variant);
         // ADR-0094/0099: 발신 입구 pre-authorization grant 를 **여기서**(입구 정의 옆) 채널별로 채운다 —
         //   이름의 정본은 컨트롤 채널이다. backend(claude.rs)는 이 목록을 자기 문법(--allowedTools
@@ -520,7 +535,7 @@ mod tests {
     #[test]
     fn provision_mcp_capable_writes_config_and_picks_mcp_primary_priming() {
         // MCP-capable(true): mcp-config 파일이 실제로 쓰이고 endpoint.config_path 가 그 파일을 가리키며,
-        //   프라이밍 변형은 McpPrimary(A = both-teaching).
+        //   프라이밍 변형은 McpPrimary(A = send_message 만 가르친다, ADR-0126 결정 1).
         // ★단일 ENV_LOCK(ADR-0099)★: provision 은 FORCE·DISALLOW env 를 모두 읽으므로, 이 값을 세우지 않는
         //   테스트도 setter 테스트와 경합하지 않게 락을 잡는다(양쪽 env 모두 leak 없음을 단언).
         let _g = ENV_LOCK.lock().unwrap();
@@ -643,8 +658,9 @@ mod tests {
 
     #[test]
     fn provision_mcp_capable_with_no_send_exe_is_allowed_accepted_edge() {
-        // MCP-capable + send_exe=None: MCP 입구가 살아 있어(both 프라이밍 주력) 채널 0 이 아니다 → 허용
-        //   (accepted edge — 폴백 engram-send 는 가시적 실패, warn 만). config_path 는 Some 이어야.
+        // MCP-capable + send_exe=None: MCP 입구가 살아 있어(A 프라이밍이 가르치는 유일한 입구) 채널 0 이
+        //   아니다 → 허용(accepted edge — engram-send 는 아무도 안 가르치므로 발신 영향 없고, ADR-0126
+        //   결정 3 의 배선 결손만 warn). config_path 는 Some 이어야.
         // ★단일 ENV_LOCK(ADR-0099)★: provision 이 두 env 를 읽으므로 setter 테스트와 직렬화(둘 다 leak 없음 단언).
         let _g = ENV_LOCK.lock().unwrap();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());

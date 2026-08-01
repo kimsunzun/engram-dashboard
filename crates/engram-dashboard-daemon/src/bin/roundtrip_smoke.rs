@@ -10,7 +10,7 @@
 //!   1. B 에게 짧은 원과제 턴을 줘 "일하는 팀원" 맥락을 만든다.
 //!   2. A→B 로 자연스러운 질문 하나를 실 control 경로(`handle_send`, Entrance::Cli)로 **씨앗 주입**한다
 //!      — B 는 봉투 `[message from alice id:..]` 에서 A 의 이름을 배운다(본문엔 "툴 X 를 써라" 같은 기계적
-//!      지시를 넣지 않는다 — 발신 학습은 프라이밍 변형이 하고, 기본(no-priming/both) 은 순수 툴 발견을 본다).
+//!      지시를 넣지 않는다 — 발신 학습은 프라이밍 변형이 하고, 기본(no-priming/운영 A)은 순수 툴 발견을 본다).
 //!   3. 하네스는 **B 의 답신에 대해 handle_send 를 부르지 않는다** — B(실 claude)가 스스로 MCP/CLI 입구를
 //!      호출하고, 그 요청이 **실제 입구 → handle_send → wrap → A stdin** 으로 흐른다.
 //!   4. 관측: (a) 기계적 = registry `DeliveryObservation`(from=B, to=A)이 실제로 생겼는지 + B 가 고른
@@ -18,8 +18,9 @@
 //!   5. 구조화 stdout 마커로 오케스트레이터 판정용 결과를 출력한다.
 //!
 //! ## 프라이밍 선택(발신 학습 변형 — priming 파일로 조절, ADR-0099 이후)
-//!   - 미지정(또는 `--priming C0`) = `prompts/agent-priming.md`(운영 A = both-teaching: send_message +
-//!     engram-send). "C0" 는 no-priming 기본과 동의어인 편의 별칭일 뿐이다(그 하나만 남았다).
+//!   - 미지정(또는 `--priming C0`) = `prompts/agent-priming.md`(운영 A — ADR-0126 결정 1 이후 `send_message`
+//!     **만** 가르친다. engram-send 는 계속 깔리되(결정 3) 교육 표면에서 빠졌다). "C0" 는 no-priming 기본과
+//!     동의어인 편의 별칭일 뿐이다(그 하나만 남았다).
 //!   - `--priming <abs-or-rel-path>` 로 임의 프라이밍 파일 직접 지정(예: 운영 B `prompts/agent-priming-cli.md`).
 //!     절대면 그대로, 상대면 repo 루트 기준.
 //!   ※ 옛 C1~C3 케이스 별칭(`prompts/experiments/agent-priming-send-*.md` 로 매핑되던)은 ADR-0099 로 제거됐다
@@ -29,8 +30,11 @@
 //!
 //! ## CLI-only 측정 노브 2종(측정 축이 다르다)
 //!   - **`--disallow-mcp`(ADR-0094)** — `ENGRAM_DISALLOW_MCP_SEND` env 를 세워 MCP `send_message` **grant 만**
-//!     뺀다. MCP 서버는 여전히 mcp-config 로 부착되고 프라이밍도 both-teaching 이라, 물리(MCP 살아있음)와
-//!     교육/권한(CLI 만)이 **갈린다** — 프롬프트-도구 불일치를 일부러 만들어 순수 CLI 라우팅을 측정한다.
+//!     뺀다. MCP 서버는 여전히 mcp-config 로 부착돼 물리(MCP 살아있음)와 권한(CLI 만)이 **갈린다** —
+//!     프롬프트-도구 불일치를 일부러 만드는 측정 노브다. ★ADR-0126 이후 프라이밍을 함께 맞춰야 한다★:
+//!     운영 A 는 이제 `send_message` 만 가르치므로, 이 노브만 켜면 배운 유일한 입구가 막히고 CLI 는 배운
+//!     적이 없는 상태가 된다. 순수 CLI 라우팅을 재려면 `--priming prompts/agent-priming-cli.md` 를 함께
+//!     주거나(교육까지 CLI 로 정렬), 정합을 통째로 보존하는 `--cli-only` 를 쓴다.
 //!   - **`--cli-only`(ADR-0099 FIX 3)** — `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 을 **비-MCP 로
 //!     강제**한다. mcp-config 미부착 + CliOnly 프라이밍(`prompts/agent-priming-cli.md`) + [Cli] grant 가 함께
 //!     움직여 정합 불변식을 **보존한 채** false path 전체를 실측한다(실 claude 를 비-MCP 백엔드처럼 굴림).
@@ -124,7 +128,7 @@
 //! # 1) CLI 입구 바이너리 먼저 빌드(CLI 경로 실험 필수 — 형제 위치에 놓이게)
 //! cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send
 //! # 2) 하네스 실행
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke                 # 기본(both, MCP)
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke                 # 기본(운영 A, MCP)
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming prompts/agent-priming-cli.md --model sonnet
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --cli-only    # provision 강제 비-MCP(false path 전체)
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --seed-request --seed-reply-by 5m   # 씨앗을 회신 계약으로
@@ -207,7 +211,8 @@ const TASK_PROMPT_B: &str =
 
 /// ★씨앗 A→B(ADR-0092 — 자연 팀원 질문, 기계적 "툴 X 써라" 아님)★: A 가 B 에게 진행 상황을 묻는
 ///   평범한 협업 질문 → 답을 A 에게 돌려주는 게 자연스러운 반응이 되도록 만든다. 발신 방법(툴/CLI)은
-///   본문이 아니라 **프라이밍 변형**이 가르친다(C0/기본 = 프로덕션 both-teaching `prompts/agent-priming.md`).
+///   본문이 아니라 **프라이밍 변형**이 가르친다(C0/기본 = 프로덕션 A `prompts/agent-priming.md` —
+///   ADR-0126 결정 1 이후 send_message 만 가르친다).
 const SEED_A_TO_B: &str =
     "Can you share the status of the auth module? If you're stuck anywhere on the login path, tell me what you need too.";
 
@@ -333,7 +338,7 @@ fn resolve_b_task_file_path(value: &str, repo_root: &std::path::Path) -> Option<
 /// CLI 인자 파싱 결과(순수) — priming 셀렉터 + 모델. `run` 이 이걸로 env·스폰을 배선한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
-    /// `--priming` 값(프라이밍 파일 경로 — 절대/상대, 또는 편의 별칭 `C0`). 미지정이면 None(= 기본 both
+    /// `--priming` 값(프라이밍 파일 경로 — 절대/상대, 또는 편의 별칭 `C0`). 미지정이면 None(= 기본 운영 A
     ///   프라이밍 `prompts/agent-priming.md`, `C0` 별칭과 동일). C1~C3 는 ADR-0099 로 별칭이 제거돼 이제 그냥
     ///   파일 경로로 해석된다(특수 매핑 없음 — 부재로 걸림).
     priming: Option<String>,
@@ -346,7 +351,8 @@ struct Args {
     /// `--cli-only` 플래그(ADR-0099 FIX 3): 켜지면 `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 이
     ///   실 claude 스폰을 **비-MCP 백엔드로 강제**한다 → false path 전체(no mcp-config + CliOnly 프라이밍 +
     ///   [Cli] grant)가 돈다. ★`--disallow-mcp` 와 다른 점★: 후자는 MCP grant 만 빼고 MCP 서버는 여전히
-    ///   부착·both-teaching 프라이밍이라 물리/교육 채널이 갈린다(측정용 불일치). `--cli-only` 는 provision
+    ///   부착되며 프라이밍도 그대로라(ADR-0126 이후 A 의 교육 표면은 send_message 뿐) 물리·교육·권한이
+    ///   갈린다(측정용 불일치). `--cli-only` 는 provision
     ///   자체를 CLI-only 로 정렬해 정합 불변식을 보존한 채 false path 를 실측한다. ★이 모드는 `--priming`
     ///   override 를 주지 않아야 한다★ — provision 이 자동으로 `prompts/agent-priming-cli.md` 를 고르는 걸
     ///   보는 게 목적이다(entrance=cli 기대). test-only 노브(운영 스위치 아님).
@@ -1115,7 +1121,7 @@ async fn run() -> i32 {
 
 /// 인자 파싱(순수·단위테스트 대상): `--priming <값>`·`--model <값>`·불리언 `--disallow-mcp`/`--cli-only`
 ///   /`--seed-request`·`--seed-reply-by <값>`·`--b-task <값>` 를 인식한다. 미지정 model=sonnet, 미지정
-///   priming=None(= 기본 both 프라이밍), 미지정 seed_request=false/seed_reply_by=None/b_task=None(= 오늘
+///   priming=None(= 기본 운영 A 프라이밍), 미지정 seed_request=false/seed_reply_by=None/b_task=None(= 오늘
 ///   동작). 알 수 없는 토큰은 무시(하네스라 관대). `iter` 로 받아 std::env 의존을 뺀다.
 /// 플래그를 값으로 삼키지 않는다(FIX round-2 #7): `--priming --model opus` 처럼 다음 토큰이 또 플래그
 ///   (`--` 로 시작)면 그건 값이 아니라 새 플래그다 — peek 해서 값으로 소비하지 않고 넘긴다(그 플래그는
@@ -1243,7 +1249,7 @@ fn take_flag_value<I: Iterator<Item = String>>(it: &mut std::iter::Peekable<I>) 
 }
 
 /// ★셀렉터→priming 파일 경로(순수·단위테스트 대상, ADR-0099)★: repo 루트 기준 경로로 매핑한다.
-///   - C0(또는 None) → `prompts/agent-priming.md`(운영 A = both-teaching).
+///   - C0(또는 None) → `prompts/agent-priming.md`(운영 A — send_message 만 가르친다, ADR-0126 결정 1).
 ///   - 그 외 = **파일 경로로 간주**(절대면 그대로, 상대면 repo 루트 기준 join) — 명시 override. 운영 B
 ///     (`prompts/agent-priming-cli.md`)나 임시 실험 파일을 이 경로로 직접 지정한다.
 /// 반환은 항상 절대경로(존재 검사는 하지 않는다 — FilePrimingProvider 가 최종 존재/CLI-안전 검사).
