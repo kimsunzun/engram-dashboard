@@ -343,9 +343,9 @@ flowchart TD
 
 - **파킹(parking)** = "지금 못 넣는 메시지를 데몬이 들고 있는 것". 부재·busy·write 실패가 **같은 `pending` 어휘**를 쓴다(상태 발명 금지). 존재하지 않는 이름도 파킹한다 — 스폰 전 선지시를 지원하고, 오타는 **TTL 24h**가 걷어낸다(ADR-0105).
 - **주입 타이밍 = idle 게이트 + 일괄 flush**(ADR-0104). 턴 진행 중에 stdin으로 밀면 CLI 내부 큐로 넘어가 데몬이 순서·시점을 잃는다. 대신 턴이 끝나는 순간 쌓인 것을 **한꺼번에** 넣어, 수신 LLM이 메일함 열듯 전체를 보고 우선순위·모순을 스스로 정리한다(한 건씩 드리블 = 메시지당 턴 하나 = N배 비용).
-- **busy는 관측된 사실일 때만 참이다**(positive-knowledge-only) — 모르면 idle = 즉시 주입. 반대로 하면 관측 불가 백엔드·tap 미부착 창에서 배달이 영구 대기한다("늦게 가는 것"보다 "안 가는 것"이 나쁘다).
+- **busy는 관측된 사실일 때만 참이다**(positive-knowledge-only) — 모르면 idle = 즉시 주입. 반대로 하면 관측 불가 백엔드·관측이 아직 시작되지 않은 창에서 배달이 영구 대기한다("늦게 가는 것"보다 "안 가는 것"이 나쁘다).
 - **잠든 수신자를 깨우지 않는다**(v1) — 부재와 똑같이 파킹한다(wake 연기, ADR-0104).
-- **주기 sweep은 배달 재시도가 아니다.** sweep이 하는 일은 TTL 지난 파킹분을 `expired`로 걷어내고 기한 넘긴 request의 notice를 발행하는 것뿐이다 — 부재 수신자 앞 메일은 **그가 등장할 때** 나가거나 TTL로 만료되지, 주기적으로 재시도되지 않는다. 타이머가 도어벨을 울리는 경로는 busy 표시가 비정상적으로 오래 남았을 때 그걸 청소하며 깨우는 fail-open 안전 밸브 하나뿐이다.
+- **주기 sweep은 배달 재시도가 아니다.** sweep이 하는 일은 TTL 지난 파킹분을 `expired`로 걷어내고 기한 넘긴 request의 notice를 발행하는 것뿐이다 — 부재 수신자 앞 메일은 **그가 등장할 때** 나가거나 TTL로 만료되지, 주기적으로 재시도되지 않는다. 타이머가 도어벨을 울리는 경로는 busy 관측이 비정상적으로 오래 남았을 때 그 주인을 깨우는 fail-open 안전 밸브 하나뿐이다 — 그때도 **공용 관측 표는 건드리지 않는다**(`TurnFacts`는 읽기 전용). 커널이 자기 상한 판정 장부에 "잔해"로 적고 도어벨만 울린다(ADR-0127 결정 4 — 상한이 공용 표를 지우면 그 결정 위반).
 - **반려는 한 레인의 이야기다.** 위 ③은 **단일 발송의 message 레인**에만 해당한다. 통지(notice) 레인은 꽉 차면 가장 오래된 통지를 은퇴시키고 새 것을 받아 **반려하지 않고**(ADR-0107), 그룹 발송에서 자리가 없는 멤버는 반려가 아니라 그 멤버만 `skipped`로 기록된다.
 
 ### 회신 계약(request) + 장부
@@ -368,7 +368,7 @@ flowchart TD
 
 ### 구조 — 커널 lib + 데몬 어댑터 (ADR-0110)
 
-**정책은 커널에, 실물은 데몬에.** 메시징 커널은 워크스페이스의 어떤 crate에도 의존하지 않는 독립 lib이라 `AgentManager`·`OutputSink`·`ControlRegistry`를 **타입으로도 모른다**. 접합은 커널이 소유한 포트 trait으로만 뚫리고, 그 구멍에 실물을 꽂는 어댑터는 데몬 `messaging_host.rs`가 소유한다.
+**정책은 커널에, 실물은 데몬에.** 메시징 커널은 워크스페이스의 어떤 crate에도 의존하지 않는 독립 lib이라 `AgentManager`·`TurnObservations`·`ControlRegistry`를 **타입으로도 모른다**. 접합은 커널이 소유한 포트 trait으로만 뚫리고, 그 구멍에 실물을 꽂는 어댑터는 데몬 `messaging_host.rs`가 소유한다.
 
 ```mermaid
 flowchart TD
@@ -377,9 +377,9 @@ flowchart TD
     MB["Mailbox · 수신자별 FIFO 파킹 큐 (message·notice 독립 레인)"]
     LG["Ledger · 이력 링 + request 추적 + 그룹 배달기록"]
     GR["Groups · 그룹→멤버 해석 (GroupSource seam)"]
-    BZ["BusyTracker · 턴 상태 표 + idle 게이트"]
+    BZ["busy · 턴 사실 해석 정책(상한·폴백) + idle 게이트<br/>관측 표는 안 든다 — 사실은 TurnFacts 포트 너머 (자기 상한 판정 장부만 든다)"]
     EN["envelope · 단일 wrap point + 배달 관측 어휘"]
-    PORT["★포트 = 커널이 소유한 계약★<br/>DeliveryPort(주입·로스터) · ControlPlanePort(봉투 포맷·관측)<br/>FlushTrigger(도어벨) · TapHost(턴 관측) · IdleNotifier"]
+    PORT["★포트 = 커널이 소유한 계약★<br/>DeliveryPort(주입·로스터) · ControlPlanePort(봉투 포맷·관측)<br/>FlushTrigger(도어벨) · TurnFacts(턴 사실 조회) · IdleNotifier"]
     SVC --> MB
     SVC --> LG
     SVC --> GR
@@ -388,17 +388,19 @@ flowchart TD
     SVC --> PORT
   end
 
-  HOST["데몬 messaging_host.rs — 어댑터 + 조립실<br/>ManagerDeliveryPort · ManagerTapHost · ControlRegistry 어댑터 · 조립 헬퍼"]
-  REAL["데몬 실물: AgentManager · OutputSink · ControlRegistry"]
+  HOST["데몬 messaging_host.rs — 어댑터 + 조립실<br/>ManagerDeliveryPort · ManagerTurnFacts · ControlRegistry 어댑터 · 조립 헬퍼"]
+  REAL["데몬 실물: AgentManager · ControlRegistry"]
+  CORE["코어 agent/turn.rs — TurnObservations · 턴 관측 표(AgentManager 소유)<br/>분류는 backend seam 뒤(AgentBackend::turn_classifier)"]
 
   HOST -->|"포트 구현을 꽂는다"| PORT
-  HOST -->|"이 셋을 아는 유일한 자리"| REAL
+  HOST -->|"이 실물을 아는 유일한 자리"| REAL
+  HOST -->|"턴 사실만 읽어 중계 (상태·정책 없음)"| CORE
 ```
 
 - **규약이 아니라 벽인 이유:** 이 코드베이스는 작업마다 다른 코더 세션이 짜므로, 경계를 문서·리뷰로만 지키면 세션이 갈릴 때마다 부식될 수 있다. crate 경계는 컴파일러가 강제하므로 커널에서 `AgentManager`를 부르려는 시도는 컴파일 에러가 된다 — 그 멈춤이 "포트를 새로 정의하거나 설계 판단을 받아야 한다"는 신호로 설계됐다(ADR-0110).
-- **백엔드 지식의 자리:** "어떤 출력 이벤트가 턴 진행이고 어떤 게 턴 종료인가"는 claude stream-json 지식이라 커널이 아니라 데몬 어댑터가 안다(ADR-0004와 같은 결). 어댑터는 얇게, 정책은 커널에 — busy 불변식을 어댑터에서 재구현하지 않는다.
+- **백엔드 지식의 자리:** "어떤 출력 이벤트가 턴 진행이고 어떤 게 턴 종료인가"는 claude stream-json 지식이라 커널이 아니라 **코어의 `backend/` seam 뒤**가 안다(`AgentBackend::turn_classifier` — ADR-0004와 같은 결, ADR-0127 결정 2). 데몬 어댑터는 얇게, 정책은 커널에 — busy 불변식을 어댑터에서 재구현하지 않는다.
 - **격리 게이트:** `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` → 0줄.
-- **부수 이득:** `cargo test -p engram-dashboard-messaging` 하나로 claude 바이너리·실 PTY 없이 3분기·flush·sweep·계약을 결정적으로 단언한다 — 가짜 포트를 끼우고, `mailbox`·`ledger`·`groups`는 로직 안에서 현재 시각을 직접 읽지 않고 시계를 **인자로 주입**받는다(그 세 모듈의 순수성 불변식). `busy`는 턴 상한 판정에 실시간이 필요해 문서화된 예외다.
+- **부수 이득:** `cargo test -p engram-dashboard-messaging` 하나로 claude 바이너리·실 PTY 없이 3분기·flush·sweep·계약을 결정적으로 단언한다 — 가짜 포트를 끼우고, `mailbox`·`ledger`·`groups`는 로직 안에서 현재 시각을 직접 읽지 않고 시계를 **인자로 주입**받는다(그 세 모듈의 순수성 불변식). `busy`도 **시계를 읽지 않는다** — 상한 비교는 `now`를 인자로 받는 sweep 안에서만 하고 조회(`is_busy`)는 그 판정 장부를 볼 뿐이다. 그래서 판정 시점이 sweep 주기에 고정돼 **관측 가능한 동작이 결정적이다**.
 
 ### v1 경계 — 정직하게
 
@@ -637,7 +639,7 @@ flowchart TD
 | (프론트) transport | carrier | 프론트 밖·별개 | TauriTransport 고정 | WsTransport(테스트/직결) |
 
 - **`ControlChannel`의 성격이 다른 이유:** 나머지 코어 seam이 *출력·상태를 코어 밖으로 흘리는* 출구라면, `ControlChannel`은 *에이전트가 되전화할 인바운드 엔드포인트를 스폰 때 세우고 종료 때 거두는* 생명주기 seam이다. 코어는 `ControlEndpoint`(url·token·config 경로 문자열)만 나르고 rmcp/axum/HTTP를 모른다(ADR-0003 idiom 동형).
-- **메시징 포트는 이 표에 없다 — 다른 가문이다.** 위 5종은 *코어*가 소유한 seam이고, `DeliveryPort`·`ControlPlanePort`·`FlushTrigger`·`TapHost`·`IdleNotifier`는 *메시징 커널 lib*이 소유한 포트다(구현은 데몬 `messaging_host.rs`). 방향은 같은 idiom(정책이 실물을 모른다)이지만 소유자와 crate가 다르므로 섞지 않는다. 상세는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
+- **메시징 포트는 이 표에 없다 — 다른 가문이다.** 위 5종은 *코어*가 소유한 seam이고, `DeliveryPort`·`ControlPlanePort`·`FlushTrigger`·`TurnFacts`·`IdleNotifier`는 *메시징 커널 lib*이 소유한 포트다(구현은 데몬 `messaging_host.rs`). 방향은 같은 idiom(정책이 실물을 모른다)이지만 소유자와 crate가 다르므로 섞지 않는다. 상세는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
 
 **설계 지향(LLM-우선 제어 = CLAUDE.md §5):** UI 컴포넌트는 store 액션 호출만, 그 액션을 LLM도 동일하게 부르는 단일 control surface로 모은다.
 - **백엔드 제어 — "누가" 제어하나로 갈린다.** ① 스폰·kill·write 등은 **클라이언트 제어 표면(invoke)** 으로 LLM 제어 가능(앱을 부리는 주체 경로). ② 워커(child 에이전트)끼리는 **least-privilege** — 제어 채널로 **메시징 3툴(`send_message`·`messages`·`group`) + 진단 `engram_ping`만** 노출된다(형제 스폰·kill 권한 없음, ADR-0086).

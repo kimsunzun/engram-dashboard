@@ -47,10 +47,10 @@
 
 ### messaging (`crates/engram-dashboard-messaging`) — 2026-07-28 신설(ADR-0110)
 - **① 단위**: `src/` 내 279건(mailbox 파킹·TTL, ledger 이력/회신 계약, groups 해석, envelope 렌더·이스케이프, service 3분기/flush/sweep, busy 게이트 상태머신). 전부 clock injection(주입 `now`)이라 실시간 sleep 0.
-- **격리 하네스 = crate 경계 그 자체**: 이 crate 는 워크스페이스 crate 무의존(ADR-0110 결정 2)이라 `AgentManager`·PTY·Tauri 없이 단독으로 돈다 — 외부 의존은 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TapHost`·`IdleNotifier`·`FlushTrigger`)의 fake 로만 들어온다.
+- **격리 하네스 = crate 경계 그 자체**: 이 crate 는 워크스페이스 crate 무의존(ADR-0110 결정 2)이라 `AgentManager`·PTY·Tauri 없이 단독으로 돈다 — 외부 의존은 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TurnFacts`·`IdleNotifier`·`FlushTrigger`)의 fake 로만 들어온다.
 - 실행: `cargo test -p engram-dashboard-messaging`.
 - 격리 게이트: `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` → 0.
-- **호스트 어댑터는 daemon 쪽 테스트**: 출력 이벤트→턴 신호 분류(`messaging_host::TurnTapSink`)·배달 어댑터는 백엔드 지식이라 daemon crate 단위 테스트가 덮는다.
+- **호스트 어댑터는 daemon 쪽 테스트**: 배달·턴 사실 조회 어댑터(`messaging_host::ManagerDeliveryPort`·`ManagerTurnFacts`)는 daemon crate 단위 테스트가 덮는다. 출력 이벤트→턴 신호 분류는 백엔드 지식이라 코어 `backend/` seam 뒤로 내려갔고(`AgentBackend::turn_classifier`, ADR-0127) core crate 테스트가 덮는다.
 
 ### daemon (`crates/engram-dashboard-daemon`)
 - **① 단위**: `src/` 내 25건(instance/portfile/ws 변환·OriginCheck 등).

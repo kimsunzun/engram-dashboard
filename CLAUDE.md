@@ -158,7 +158,7 @@ claude 전용 인자(`--session-id`/`--resume`)는 `backend/claude.rs` 한 곳�
 
 **crate 경계** (ADR-0029: 에이전트 호스트 = 데몬 프로세스):
 - **core** — 에이전트 코어(agent·persistence·logging), **tauri import 0**. seam: `transport`(`AgentTransport` — pty 실물/api 껍데기) · `backend`(CommandSpec·claude 인자 격리, ADR-0004).
-- **messaging** — 메시징 커널(mailbox·ledger·groups·envelope·service·busy). **워크스페이스 crate 무의존**(core 포함 — 컴파일러 강제 벽, ADR-0110). 접합은 lib이 소유한 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TapHost`·`IdleNotifier`·`FlushTrigger`)뿐이고, 실물 어댑터는 데몬(`messaging_host.rs`)이 소유한다.
+- **messaging** — 메시징 커널(mailbox·ledger·groups·envelope·service·busy). **워크스페이스 crate 무의존**(core 포함 — 컴파일러 강제 벽, ADR-0110). 접합은 lib이 소유한 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TurnFacts`·`IdleNotifier`·`FlushTrigger`)뿐이고, 실물 어댑터는 데몬(`messaging_host.rs`)이 소유한다.
 - **daemon** — `AgentManager` 소유, WS 서버, 단일 인스턴스 guard, portfile(`daemon.json`). 이벤트버스 single-push(ADR-0028). 메시징 호스트 어댑터·조립실(`messaging_host.rs`, ADR-0110).
 - **discovery** — 데몬 발견 순수 로직(no WMI/no sleep, seam) + `ensure_daemon` + `default_data_dir`(ADR-0024).
 - **protocol** — wire 계약(AgentCommand/Event/OutputChunk/DaemonInfo + codec + ts-rs).
