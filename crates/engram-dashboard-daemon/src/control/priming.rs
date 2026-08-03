@@ -21,18 +21,19 @@
 
 use std::path::PathBuf;
 
-/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식(ADR-0126 결정 4
-/// 로 단방향 개정)**: 이 변형이 **가르치는** 채널 집합 ⊆ provision 이 물리적으로 **깐** 채널 집합. 등호가
-/// 아니다 — 실측이 뒷받침하는 금지는 **안 깐 채널을 가르치는** 한 방향뿐이고(MCP 노출 + CLI-only 지시 =
-/// ~6/7 미발신, ADR-0099), 깔았지만 안 가르치는 상태는 허용된다(ADR-0126 결정 3 이 그 상태를 의도적으로
-/// 만든다). 그래서 백엔드 capability 하나가 이 변형과 채널 배선을 함께 움직인다.
+/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식(ADR-0128 로 등호
+/// 복원)**: 이 변형이 **가르치는** 채널 집합 **=** provision 이 물리적으로 **깐** 채널 집합. 안 깐 채널을
+/// 가르치면 발신 freeze 가 재발하고(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099), 반대로 깔고도 안
+/// 가르치면 아무도 통제하지 못하는 우회 표면이 남는다. 그래서 백엔드 capability 하나가 이 변형과 채널 배선을
+/// 함께 움직인다.
 // ADR-0126
+// ADR-0128
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimingVariant {
     /// MCP-capable 백엔드(claude). **send_message 툴만** 가르친다(ADR-0126 결정 1 — engram-send CLI 우회
-    ///   교육 폐지). engram-send 는 이 스폰에도 물리적으로 계속 깔리지만(PATH·env, 결정 3: 나중에 커맨드
-    ///   계열과 연결할 여지) 가르치지 않는다 — 고장난 MCP 를 조용히 우회하면 고장이 관측되지 않으므로,
-    ///   대신 principal 에게 보고하도록 가르친다(결정 2). → `prompts/agent-priming.md`.
+    ///   교육 폐지). 그 스폰엔 engram-send 배선 자체가 없다(ADR-0128 결정 2) — 고장난 MCP 를 조용히
+    ///   우회하면 고장이 관측되지 않으므로, 대신 principal 에게 보고하도록 가르친다(ADR-0126 결정 2).
+    ///   → `prompts/agent-priming.md`.
     McpPrimary,
     /// 비-MCP 백엔드(codex/gemini 등 미래). engram-send CLI 만 가르친다(send_message 단어 자체 부재).
     ///   → `prompts/agent-priming-cli.md`.
@@ -75,10 +76,11 @@ pub struct FilePrimingProvider {
 
 /// 프라이밍 정적 파일 2개(repo·버전관리, ADR-0099). base_dir 에 붙여 해석한다. 변형(PrimingVariant)이
 ///   MCP-capable→MCP-only 교육, 비-MCP→CLI-only 를 가른다.
-/// ★정합 불변식(ADR-0099 → ADR-0126 결정 4 로 단방향)★: 두 파일이 가르치는 채널 ⊆ provision 이 그 변형에
+/// ★정합 불변식(ADR-0099 → ADR-0128 로 등호)★: 두 파일이 가르치는 채널 == provision 이 그 변형에
 ///   물리적으로 까는 채널 — MCP_PRIMARY 는 send_message 만, CLI_ONLY 는 engram-send 만(send_message 단어
 ///   부재) 가르친다. 파일 **내용** 쪽 강제는 아래 tests 의 `production_priming_files_*` 3종이 건다.
 // ADR-0126
+// ADR-0128
 const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
 const REL_CLI_ONLY: &str = "prompts/agent-priming-cli.md";
 /// env override 키(설정 시 base_dir·변형 무시하고 이 경로를 절대화해 쓴다 — 아래 override 우선 참조).
@@ -436,16 +438,15 @@ mod tests {
 
     #[test]
     fn production_priming_files_pin_taught_channels() {
-        // ★정합 불변식(ADR-0099 → ADR-0126 결정 4 로 단방향 개정)★: **가르치는 채널 ⊆ 깐 채널**. 등호가
-        //   아니다 — 깔았지만 안 가르치는 상태는 허용되고, ADR-0126 결정 3 이 그 상태를 의도적으로 만든다
-        //   (engram-send 는 MCP 가능 스폰에도 계속 깔리되 A 는 그걸 가르치지 않는다). 실측이 뒷받침하는
-        //   금지는 **안 깐 채널을 가르치는** 한 방향뿐이다(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099).
-        //   여기선 파일 수준에서 각 변형의 **교육 표면**을 못박는다 —
+        // ★정합 불변식(ADR-0099 → ADR-0128 로 등호)★: **가르치는 채널 == 깐 채널**. 안 깐 채널을 가르치면
+        //   발신 freeze 가 재발하고(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099 실측), 깔고도 안
+        //   가르치면 통제 없는 우회 표면이 남는다. 여기선 파일 수준에서 각 변형의 **교육 표면**을 못박는다 —
         //   - A(McpPrimary, agent-priming.md): send_message **만**(ADR-0126 결정 1 — CLI 우회 교육 폐지).
         //   - B(CliOnly, agent-priming-cli.md): engram-send 는 가르치되 send_message 단어는 **부재**여야
         //     (안 깐 MCP 입구를 프롬프트에서 완전 삭제 — 지시-도구 불일치 freeze 방지, ADR-0099 실측).
         //   문구가 드리프트하면 이 테스트가 깨져 프라이밍-배선 정합을 강제한다.
         // ADR-0126
+        // ADR-0128
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
         let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
@@ -466,7 +467,7 @@ mod tests {
             assert!(
                 !a.contains(token),
                 "A(McpPrimary)에 CLI 표면 {token:?} 이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — \
-                 engram-send 는 물리적으로 계속 깔리되(결정 3) 가르치지 않는다"
+                 MCP 가능 스폰엔 engram-send 배선 자체가 없다(ADR-0128)"
             );
         }
         assert!(
@@ -479,12 +480,12 @@ mod tests {
         );
     }
 
-    /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: 우회 교육을 걷어낸 자리를 비워 두면 두 오작동이
-    ///   남는다 — ㉮ 셸을 뒤진 에이전트가 **가르치지 않은** engram-send(결정 3 으로 PATH 에 그대로 있다)를
-    ///   스스로 찾아 쓰거나, ㉯ 편지를 조용히 버려 principal 이 고장을 영영 모른다. 그래서 "우회하지 마라"
-    ///   와 "대신 principal 에게 보고하라" 는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면
-    ///   결정이 반쪽이 된다. auto mode 에선 grant 가 NO-OP 이라(ADR-0099) 이 지시를 붙드는 장치는 프라이밍
-    ///   문장 하나뿐 — 그래서 파일 수준에서 못박는다.
+    /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: 우회 교육을 걷어낸 자리를 비워 두면 편지를 조용히
+    ///   버려 principal 이 고장을 영영 모르는 실패 모드가 남는다. 그래서 "우회하지 마라" 와 "대신 principal
+    ///   에게 보고하라" 는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면 결정이 반쪽이 된다.
+    ///   ★ADR-0128 이후에도 이 교육은 필요하다★: 셸 우회 갈래는 배선 제거로 소멸했지만(engram-send 가
+    ///   MCP 스폰에 없다) **조용한 포기** 갈래는 그대로 남고, auto mode 에선 grant 가 NO-OP 이라(ADR-0097)
+    ///   이 지시를 붙드는 장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
     ///
     /// ★왜 "broken channel" 한 토큰만 pin 하나★: 문장 전체를 pin 하면 평범한 문구 손질에도 깨진다. "우회
     ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 pin_taught_channels 가 A 의 CLI 표면 부재와 B 의

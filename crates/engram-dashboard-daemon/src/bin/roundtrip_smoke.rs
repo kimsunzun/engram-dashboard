@@ -30,11 +30,13 @@
 //!
 //! ## CLI-only 측정 노브 2종(측정 축이 다르다)
 //!   - **`--disallow-mcp`(ADR-0094)** — `ENGRAM_DISALLOW_MCP_SEND` env 를 세워 MCP `send_message` **grant 만**
-//!     뺀다. MCP 서버는 여전히 mcp-config 로 부착돼 물리(MCP 살아있음)와 권한(CLI 만)이 **갈린다** —
-//!     프롬프트-도구 불일치를 일부러 만드는 측정 노브다. ★ADR-0126 이후 프라이밍을 함께 맞춰야 한다★:
-//!     운영 A 는 이제 `send_message` 만 가르치므로, 이 노브만 켜면 배운 유일한 입구가 막히고 CLI 는 배운
-//!     적이 없는 상태가 된다. 순수 CLI 라우팅을 재려면 `--priming prompts/agent-priming-cli.md` 를 함께
-//!     주거나(교육까지 CLI 로 정렬), 정합을 통째로 보존하는 `--cli-only` 를 쓴다.
+//!     뺀다. MCP 서버는 여전히 mcp-config 로 부착돼 물리(MCP 살아있음)와 권한이 **갈린다** —
+//!     프롬프트-도구 불일치를 일부러 만드는 측정 노브다.
+//!     ★이 노브로는 CLI 라우팅을 만들 수 없다(ADR-0128 · 실측 2026-08-03 6/6 무효)★: MCP 가능 스폰엔
+//!     engram-send 배선도 CLI grant 도 없으므로 남는 발신 grant 가 0 이 되고, 게다가 스폰은 auto 권한
+//!     모드라 grant 자체가 NO-OP 이다(ADR-0097) — 실측에서 이 노브를 켠 에이전트 6/6 이 전부 MCP 로 정상
+//!     발신했다(조작이 성립하지 못했다). CLI 라우팅 실측은 물리를 가르는 `--cli-only` 로만 성립한다.
+//!     이 노브의 존치·폐기는 사용자 결정 대기(코드·플래그는 그대로 둔다).
 //!   - **`--cli-only`(ADR-0099 FIX 3)** — `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 을 **비-MCP 로
 //!     강제**한다. mcp-config 미부착 + CliOnly 프라이밍(`prompts/agent-priming-cli.md`) + [Cli] grant 가 함께
 //!     움직여 정합 불변식을 **보존한 채** false path 전체를 실측한다(실 claude 를 비-MCP 백엔드처럼 굴림).
@@ -120,24 +122,27 @@
 //!   전문에 대한 주장이 아니다 — 결과 블록에 두 줄이 늘어나는 것과 모순이 아니다.
 //!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
-//! ★CLI 입구를 쓰는 실험(운영 B `prompts/agent-priming-cli.md` 또는 `--cli-only`)은 먼저 `engram-send` 를
-//!   빌드해야 한다★ — 이 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아 CLI 입구를 켠다.
-//!   형제에 없으면 B 가 그 경로로 못 보내 **인프라 부재를 실험적 negative 로 오인**할 수 있다. `cargo run` 은
-//!   dep bin 을 안 만들므로 별도로 빌드한다(같은 profile/target 이어야 형제로 co-locate 된다):
+//! ★CLI 입구를 쓰는 실험 = `--cli-only` **한 모드뿐**(ADR-0128)★ — MCP 가능 스폰엔 engram-send 배선이 없어
+//!   CLI-지시 프라이밍을 `--priming` 으로 직접 얹는 조합은 실행 불가라 SETUP-FAIL 로 거부된다. 그리고 그 모드는
+//!   먼저 `engram-send` 를 빌드해야 한다 — 이 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아
+//!   CLI 입구를 켠다. 형제에 없으면 B 가 그 경로로 못 보내 **인프라 부재를 실험적 negative 로 오인**할 수
+//!   있다. `cargo run` 은 dep bin 을 안 만들므로 별도로 빌드한다(같은 profile/target 이어야 형제로 co-locate):
 //! ```text
 //! # 1) CLI 입구 바이너리 먼저 빌드(CLI 경로 실험 필수 — 형제 위치에 놓이게)
 //! cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send
 //! # 2) 하네스 실행
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke                 # 기본(운영 A, MCP)
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming prompts/agent-priming-cli.md --model sonnet
+//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming <경로> --model sonnet   # 프라이밍 override(CLI-지시 파일은 아래 --cli-only 로만)
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --cli-only    # provision 강제 비-MCP(false path 전체)
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --seed-request --seed-reply-by 5m   # 씨앗을 회신 계약으로
 //! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --b-task "You are on the billing module. Reply in one line when ready."
 //! ```
-//! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — 명시 경로 무관)인데 `engram-send`
-//!   가 형제에 없으면, 하네스는 normal negative 가 아니라 **SETUP-SKIP**(engram-send not built) 라벨로 요란히
-//!   알리고 종료한다 — 인프라 부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. 판정은 셀렉터·basename 이 아니라
-//!   **해석된 프라이밍 파일 본문(content)** 이라 명시 경로 override 와 CLI-지시 프라이밍까지 모두 잡힌다(ADR-0094).
+//! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — 명시 경로 무관)은 스폰 전에 두
+//!   게이트를 통과해야 한다: ① `--cli-only` 없이 왔으면 **SETUP-FAIL**(그 스폰엔 배선이 없다 — ADR-0128)
+//!   ② `engram-send` 가 형제에 없으면 **SETUP-SKIP**(engram-send not built). 둘 다 normal negative 가 아니라
+//!   요란한 라벨로 종료한다 — 배선·인프라 부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. 판정은 셀렉터·
+//!   basename 이 아니라 **해석된 프라이밍 파일 본문(content)** 이라 명시 경로 override 와 CLI-지시 프라이밍까지
+//!   모두 잡힌다(ADR-0094).
 //!
 //! ## 핵심 불변식(ADR-0092/0086/0088)
 //! - **required-features = ["test-harness"]** — 운영/릴리즈 빌드는 이 bin 을 컴파일하지 않는다.
@@ -264,13 +269,51 @@ fn setup_fail(reason: &str) -> i32 {
 ///   (v3-en-cli 등)이 리스트에서 누락돼 가드가 조용히 우회됐고, engram-send 부재(인프라 부재)가 SETUP-SKIP
 ///   대신 정상 negative(B_SENT=false)로 오귀속됐다. 그래서 파일명이 아니라 실제 본문을 진실의 출처로 본다 —
 ///   어느 프라이밍이든 CLI 발신을 지시하면 basename 과 무관하게 잡힌다.
-///   ★의도적으로 보수적(부정문 false positive 는 수용)★: "engram-send 를 쓰지 마라" 같은 부정문도 substring
-///   존재만으로 true → 헛된 SETUP-SKIP 이 될 수 있다. 그러나 SETUP-SKIP 은 요란한 exit-1 로, 틀릴 수 있는
-///   데이터 발화를 거부하는 안전한 방향이다(실 프라이밍에 그런 부정문은 없다). 부정 파싱은 넣지 않는다 —
-///   substring 존재 ⇒ CLI-지시로 취급, 헛된 skip 이 안전한 쪽.
+///   ★의도적으로 보수적(부정문 false positive 는 수용 — 사용자 결정 2026-08-04)★: "engram-send 를 쓰지 마라"
+///   같은 부정문도 substring 존재만으로 true → 그 파일을 `--cli-only` 없이 넘기면 헛된 거부(SETUP-FAIL,
+///   `cli_priming_requires_cli_only`)가 된다. 그래도 부정 파싱을 넣지 않는다: 요란한 exit-1 은 틀릴 수 있는
+///   데이터를 발화하는 것보다 안전하고, 내용 기반 검출이 바로 이 오귀속 부류를 닫아 두는 장치라 negation-aware
+///   로 만들면 그 차단이 약해진다. 운영 프라이밍 2종엔 그런 부정문이 없어 실경로 영향은 0 이다. operator 가
+///   이 한계에 부딪히는 자리(그 SETUP-FAIL 문구)가 이유와 우회로를 함께 알린다.
 fn priming_text_directs_cli(content: &str) -> bool {
     let lower = content.to_lowercase();
     lower.contains("engram-send") || lower.contains("engram_send_exe")
+}
+
+/// ★CLI-지시 프라이밍이 배선 없는 스폰에 실렸는가(순수·단위테스트 대상, ADR-0128)★: MCP 가능 스폰엔
+///   `engram-send` 배선(PATH·크레덴셜)이 **없다** — 그래서 CLI 발신을 가르치는 프라이밍은 `--cli-only`
+///   (provision 을 비-MCP 로 정렬)와 함께여야만 실행 가능한 조합이 된다. 어긋나면 "가르쳤지만 안 깐 채널"
+///   이 되어 ADR-0099 가 실측한 발신 freeze(~6/7 미발신)를 그대로 재현하고, 하네스는 그것을 정상 negative
+///   로 오귀속한다. send_exe 존재 여부는 이 판정에 **들어오지 않는다** — 바이너리가 있어도 MCP 가능 스폰의
+///   자식은 그 이름을 해석할 수 없다(그 축은 뒤따르는 CLI 입구 부재 SETUP-SKIP 가 본다).
+/// ★분류기의 알려진 한계(수용 — `priming_text_directs_cli` 참조)★: 언급이 **부정문**이어도("never run
+///   engram-send") CLI-지시로 잡혀 `--cli-only` 없이는 거부된다. fail-closed 방향이라 유지하되, 그 파일을
+///   넘긴 operator 가 이유를 알 수 있게 SETUP-FAIL 문구가 이 한계를 함께 알린다.
+// ADR-0128
+fn cli_priming_requires_cli_only(directs_cli: bool, cli_only: bool) -> bool {
+    directs_cli && !cli_only
+}
+
+/// ★역방향 — 배선을 깔았는데 아무도 안 가르치는가(순수·단위테스트 대상, ADR-0128 등호)★: `--cli-only` 는
+///   provision 을 비-MCP 로 정렬해 CLI 배선을 **실제로 깐다**. 그 스폰의 프라이밍이 CLI 발신을 가르치지
+///   않으면 깐 채널을 아무도 안 쓰고, B 는 발신 방법을 배우지 못한 채 조용히 아무것도 안 보낸다 —
+///   `B_SENT=false` 가 정상 negative 로 채점되는 **같은 오귀속의 반대 방향**이다. 위 정방향 판정과 짝을
+///   이뤄 등호(가르치는 채널 == 깐 채널)를 하네스 입력 단계에서 강제한다.
+///   ★유일한 발화 경로 = 운영 B 파일 개정, 즉 defense-in-depth★: `--cli-only` 는 `--priming` co-pass 도,
+///   비어 있지 않은 상속 `ENGRAM_PRIMING_FILE` 도 앞서 거부하고(빈 값은 미설정 취급이라 provision 이 B 를
+///   auto-select 한다) — 그래서 이 갈래의 프라이밍은 **항상** 운영 B 파일(`prompts/agent-priming-cli.md`)
+///   이다. 따라서 이 게이트가 실제로 걸리는 경우는 그 파일이 셸 명령 언급을 잃는 개정 하나뿐이고, 그
+///   회귀는 파일 내용 테스트 `production_priming_files_pin_taught_channels`(priming.rs)가 이미 잡는다.
+///   즉 여기는 그 pin 뒤의 2차 방어선이다 — pin 이 지워지거나 override 정책이 느슨해지면 이쪽이 남는다.
+///   ★entrance 판정과 다른 축★: 뒤쪽 `cli_only && b_sent && entrance != "cli"` 검사는 **보냈는데 입구가
+///   틀린** 경우를 잡는다 — **아예 안 보낸** 경우는 못 잡는다. 그 빈칸을 이 스폰-전 게이트가 메운다.
+/// ★두 판정자의 호출부 배선은 단위 테스트가 없다(알려진 공백)★: 게이트는 실 에이전트 2개를 스폰하는
+///   `run()` 안에 있어 단위 테스트가 닿지 못한다 — `if false && …` 로 꺼도 스위트는 초록이다. 여기 순수
+///   판정자만 커버되며, 이는 이 파일의 **모든** 게이트에 해당하는 구조적 공백이다(이 변경이 만든 게 아니다).
+///   호출부를 고칠 때 테스트가 지켜준다고 가정하지 말 것.
+// ADR-0128
+fn cli_only_requires_cli_priming(directs_cli: bool, cli_only: bool) -> bool {
+    cli_only && !directs_cli
 }
 
 /// ★--cli-only 가 상속된 ENGRAM_PRIMING_FILE override 와 충돌하는가(순수·단위테스트 대상, ADR-0099)★:
@@ -345,14 +388,18 @@ struct Args {
     /// `--model` 값(기본 sonnet).
     model: String,
     /// `--disallow-mcp` 플래그(ADR-0094 CLI-only 측정): 켜지면 `ENGRAM_DISALLOW_MCP_SEND` env 를 세워
-    ///   두 에이전트가 MCP send_message grant **없이** 스폰 → engram-send CLI 로만 발신하게 강제한다.
-    ///   test-only 측정 노브(운영 스위치 아님). 미지정이면 오늘 동작(MCP grant 포함).
+    ///   두 에이전트가 MCP send_message grant **없이** 스폰된다. test-only 측정 노브(운영 스위치 아님).
+    ///   미지정이면 오늘 동작(MCP grant 포함).
+    ///   ★사정거리 정정(ADR-0128 · 실측 2026-08-03 6/6)★: 이 노브는 **CLI 라우팅을 만들지 못한다** —
+    ///   MCP 가능 스폰엔 engram-send 배선도 CLI grant 도 없으므로 발신 grant 가 0 이 되고, auto 권한 모드
+    ///   에선 grant 가 NO-OP 이라(ADR-0097) 에이전트는 그대로 MCP 로 보낸다(6/6 정상 발신 — 조작 실패).
+    ///   물리를 가르는 `--cli-only` 가 유일한 CLI 라우팅 측정 수단이다. 존치·폐기는 사용자 결정 대기.
     disallow_mcp: bool,
     /// `--cli-only` 플래그(ADR-0099 FIX 3): 켜지면 `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 이
     ///   실 claude 스폰을 **비-MCP 백엔드로 강제**한다 → false path 전체(no mcp-config + CliOnly 프라이밍 +
     ///   [Cli] grant)가 돈다. ★`--disallow-mcp` 와 다른 점★: 후자는 MCP grant 만 빼고 MCP 서버는 여전히
     ///   부착되며 프라이밍도 그대로라(ADR-0126 이후 A 의 교육 표면은 send_message 뿐) 물리·교육·권한이
-    ///   갈린다(측정용 불일치). `--cli-only` 는 provision
+    ///   갈린다(측정용 불일치 — 그래서 실측으로는 무효였다, ADR-0128). `--cli-only` 는 provision
     ///   자체를 CLI-only 로 정렬해 정합 불변식을 보존한 채 false path 를 실측한다. ★이 모드는 `--priming`
     ///   override 를 주지 않아야 한다★ — provision 이 자동으로 `prompts/agent-priming-cli.md` 를 고르는 걸
     ///   보는 게 목적이다(entrance=cli 기대). test-only 노브(운영 스위치 아님).
@@ -648,14 +695,48 @@ async fn run() -> i32 {
         Some(p) => eprintln!("[roundtrip] engram-send = {}", p.display()),
         None => eprintln!("[roundtrip] engram-send 형제 바이너리 없음 — CLI 입구 비활성(MCP 만)."),
     }
-    // ★CLI 요구 프라이밍인데 engram-send 부재 = SETUP-SKIP(ADR-0094)★: CLI 발신을 지시하는 프라이밍은
-    //   B 가 CLI 입구로 보내도록 지시한다. send_exe 가 None 이면 B 는 그 경로로 물리적으로 못 보내므로,
-    //   결과 B_SENT=false 는 "B 가 안 보내기로 함"(정상 negative)이 아니라 인프라 부재다. 판정은 셀렉터·
-    //   basename 이 아니라 **해석된 프라이밍 파일 본문**으로 한다 — 명시 경로 override 도, basename 리스트에서
-    //   누락되던 새 CLI-지시 프라이밍도 잡힌다. 위에서 단 한 번 읽어 둔 `priming_content` 를 순수 판정자
-    //   `priming_text_directs_cli` 에 넘긴다(재읽기·TOCTOU 없음). 실 claude 2개를 스폰하기 **전에** 요란히
-    //   SETUP-SKIP 하고 종료한다 — 헛된 스폰·오귀속 둘 다 막는다.
-    if priming_text_directs_cli(&priming_content) && send_exe.is_none() {
+    // 배선 축 게이트 3종은 이 한 판정을 공유한다(재읽기·TOCTOU 없음 — 위에서 한 번 읽어 둔 본문으로 판정).
+    let directs_cli = priming_text_directs_cli(&priming_content);
+    // ★CLI-지시 프라이밍인데 `--cli-only` 가 없다 = SETUP-FAIL(ADR-0128)★: MCP 가능 스폰엔 engram-send
+    //   배선이 없으므로(결정 2) B 는 배운 명령을 **실행할 수 없다** — send_exe 가 형제에 있든 없든 마찬가지다
+    //   (PATH·크레덴셜이 그 스폰에 안 실린다). 그 상태의 B_SENT=false 는 정상 negative 가 아니라 인자 조합
+    //   오류이므로, 스폰 **전에** 요란히 거부하고 정합 조합(`--cli-only`)을 안내한다. 아래 역방향 게이트·
+    //   인프라 부재 SETUP-SKIP 과 합쳐 "가르치는 채널 == 깐 채널" 을 입력 단계에서 강제한다.
+    if cli_priming_requires_cli_only(directs_cli, args.cli_only) {
+        handle.shutdown().await;
+        let dirs = [&data_dir, &ws_a, &ws_b];
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        return setup_fail(&format!(
+            "CLI-teaching priming on an MCP-capable spawn (case={:?}): ADR-0128 이후 MCP 가능 스폰엔 engram-send 배선(PATH·ENGRAM_* 크레덴셜)이 없어 B 가 배운 명령을 실행할 수 없다 — 가르쳤지만 안 깐 채널 = 발신 freeze(ADR-0099 실측 ~6/7 미발신)를 정상 negative 로 오귀속하게 된다. CLI 입구를 실측하려면 `--cli-only` 로 provision 을 비-MCP 로 정렬하라(그 모드가 CliOnly 프라이밍을 자동 선택하므로 `--priming` 은 함께 주지 않는다). ※판정은 본문에 `engram-send`/`ENGRAM_SEND_EXE` 가 **등장하는지**로만 한다 — \"never run engram-send\" 같은 부정문도 CLI-지시로 잡힌다(의도된 fail-closed: 오귀속보다 거부가 안전하다). MCP 전용 파일로 돌리려면 그 언급 자체를 빼라",
+            priming_selector
+        ));
+    }
+    // ★역방향 — `--cli-only` 인데 프라이밍이 CLI 를 안 가르친다 = SETUP-FAIL(ADR-0128 등호)★: 이 모드는 CLI
+    //   배선을 실제로 깔지만, 그 스폰의 프라이밍이 발신 방법을 안 가르치면 B 는 아무것도 보내지 않는다 —
+    //   그 `B_SENT=false` 는 "안 보내기로 함"(정상 negative)이 아니라 **가르치지 않은 결과**다. 뒤쪽
+    //   entrance 검사는 *보냈는데 입구가 틀린* 경우만 잡으므로(안 보낸 경우는 못 잡는다) 이 빈칸을 스폰 전에
+    //   메운다. ★유일한 발화 경로 = 운영 B 파일이 셸 명령 언급을 잃는 개정(defense-in-depth)★: 이 모드는
+    //   `--priming` co-pass 와 비어 있지 않은 상속 override 를 앞서 거부하므로 프라이밍은 항상 그 B 파일이고,
+    //   그 회귀는 priming.rs 의 파일 내용 pin 이 1차로 잡는다 — 여기는 그 pin 뒤의 2차선이다.
+    if cli_only_requires_cli_priming(directs_cli, args.cli_only) {
+        handle.shutdown().await;
+        let dirs = [&data_dir, &ws_a, &ws_b];
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        return setup_fail(
+            "--cli-only 인데 해석된 프라이밍이 CLI 발신(engram-send)을 가르치지 않는다 — 이 모드는 provision 을 비-MCP 로 정렬해 CLI 배선을 깔지만, 가르치지 않으면 B 는 발신 방법을 모른 채 아무것도 보내지 않고 그 B_SENT=false 가 정상 negative 로 오귀속된다(ADR-0128 등호: 가르치는 채널 == 깐 채널). prompts/agent-priming-cli.md 가 engram-send 를 가르치는지 확인하고, 상속된 ENGRAM_PRIMING_FILE override 가 MCP 전용 파일을 가리키고 있지 않은지 보라",
+        );
+    }
+    // ★CLI 요구 프라이밍인데 engram-send 부재 = SETUP-SKIP(ADR-0094)★: 위 게이트를 통과했다는 건
+    //   `--cli-only`(= CLI 배선이 깔리는 유일한 모드)라는 뜻이다. 그런데 send_exe 가 None 이면 B 는 그
+    //   경로로 물리적으로 못 보내므로, 결과 B_SENT=false 는 "B 가 안 보내기로 함"(정상 negative)이 아니라
+    //   인프라 부재다. 판정은 셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**으로 한다 — 명시 경로
+    //   override 도, basename 리스트에서 누락되던 새 CLI-지시 프라이밍도 잡힌다. 실 claude 2개를 스폰하기
+    //   **전에** 요란히 SETUP-SKIP 하고 종료한다 — 헛된 스폰·오귀속 둘 다 막는다.
+    if directs_cli && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
         for d in dirs {
@@ -666,9 +747,13 @@ async fn run() -> i32 {
             priming_selector
         ));
     }
-    // ★--disallow-mcp 는 CLI 입구가 반드시 살아 있어야 한다(ADR-0094)★: MCP send grant 를 빼는데 CLI grant
-    //   마저 없으면(send_exe=None) 두 에이전트는 발신 경로가 **하나도** 없어, B_SENT=false 는 정상 negative
-    //   가 아니라 인프라 부재다. 위 CLI-요구 프라이밍 스킵과 같은 이유로 스폰 **전에** 요란히 SETUP-SKIP.
+    // ★--disallow-mcp 는 형제 바이너리 부재를 계속 SETUP-SKIP 으로 거른다(ADR-0094 → ADR-0128 정정)★:
+    //   ★send_exe 가 있어도 이 모드엔 CLI grant 가 생기지 않는다★ — CLI grant 는 `!accepts_mcp_config &&
+    //   send_exe.is_some()` 에서만 나오고(control/mod.rs build_grants) `--disallow-mcp` 는 스폰을 MCP 가능
+    //   그대로 두므로, 이 모드의 발신 grant 는 바이너리 유무와 무관하게 **0** 이다. 즉 이 스킵이 지키는 것은
+    //   "CLI grant 가 있다" 가 아니라 하네스의 SETUP 라벨 일관성뿐이다(권한은 auto mode 에서 NO-OP 이라
+    //   에이전트는 그대로 MCP 로 보낸다 — ADR-0097·실측 6/6). 노브 존치·폐기는 사용자 결정 대기라 동작은
+    //   그대로 둔다.
     if args.disallow_mcp && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -676,12 +761,18 @@ async fn run() -> i32 {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_skip(
-            "--disallow-mcp requires the CLI inlet (engram-send) but it is not built — MCP grant removed AND no CLI grant means agents have no send path. 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
+            "--disallow-mcp: engram-send 형제 바이너리가 없어 SETUP-SKIP. ※주의(ADR-0128) — 이 모드는 스폰을 MCP 가능 그대로 두므로 바이너리를 빌드해도 **CLI 발신 경로는 생기지 않는다**(CLI grant 는 비-MCP 스폰에서만 방출된다) — 이 모드의 발신 grant 는 바이너리 유무와 무관하게 0 이고, auto 권한 모드에선 grant 가 NO-OP 이라 에이전트는 그대로 MCP 로 보낸다(실측 6/6). 즉 빌드는 이 스킵을 넘기기 위한 절차일 뿐 CLI 라우팅을 만들지 못한다 — CLI 입구를 실측하려면 `--cli-only` 를 쓰라. 스킵을 넘기려면: `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send`",
         );
     }
-    // ★--cli-only 는 CLI 입구가 반드시 살아 있어야 한다(ADR-0099 FIX 3)★: 이 모드는 provision 을 비-MCP 로
-    //   강제하므로 MCP 입구가 물리적으로 없다 — send_exe 마저 없으면 provision 이 fail-closed edge(Err)로
-    //   스폰을 막는다(control/mod.rs). 그걸 SETUP-FAIL 로 늦게 만나기 전에 스폰 **전에** 요란히 SETUP-SKIP.
+    // ★도달 불가 — 그러나 남긴다(belt-and-braces, ADR-0128)★: 위 두 pairing 게이트가 downstream 에
+    //   `directs_cli ⟺ cli_only` 를 세우므로, `--cli-only` 면 directs_cli 도 참이고 그러면 바로 위
+    //   `directs_cli && send_exe.is_none()` 스킵이 **항상 먼저** 걸린다(같은 처방 문구까지 동일). 그래서 이
+    //   분기는 오늘 도달하지 않는다. 지우지 않는 이유는 그 도달 불가가 **다른 게이트의 성질에 의존**하기
+    //   때문이다 — 분류기(`priming_text_directs_cli`)가 좁아지거나 역방향 게이트가 완화되면 이 조합이 되살아나고,
+    //   그때 이게 없으면 provision 의 fail-closed(Err)를 스폰 뒤에 SETUP-FAIL 로 늦게 만난다(진단이 나빠진다).
+    //   ★"죽은 단언" 과 다른 종류★: 성립하지 않는 성질을 보증하는 게 아니라, 되살아났을 때 정확한 처방을 내는
+    //   폴백이다. 다만 도달 불가라 테스트로 고정할 수 없다 — 순서를 바꿔 "되살리는" 리팩터를 하지 말 것.
+    // ADR-0128
     if args.cli_only && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -1795,6 +1886,68 @@ mod tests {
             priming_text_directs_cli("Do NOT use engram-send; use MCP instead."),
             "부정문도 substring 존재로 true — 의도된 보수적 skip 방향"
         );
+    }
+
+    // ── ADR-0128: 배선 축 등호 — CLI 교육 ⟺ CLI 배선(두 방향 모두 게이트가 있다) ────────────────────
+    #[test]
+    fn cli_priming_without_cli_only_is_rejected() {
+        // ★정방향(ADR-0128)★: MCP 가능 스폰엔 engram-send 배선이 없으므로, CLI 발신을 가르치는 프라이밍을
+        //   `--cli-only` 없이 얹는 조합은 거부 대상이다(가르쳤지만 안 깐 채널 = 발신 freeze 를 정상
+        //   negative 로 오귀속). 이 판정은 send_exe 존재 여부를 보지 않는다 — 바이너리가 있어도 그 스폰의
+        //   자식은 PATH·크레덴셜이 없어 이름을 해석할 수 없다.
+        assert!(
+            cli_priming_requires_cli_only(true, false),
+            "CLI-지시 프라이밍 + --cli-only 없음 → 거부"
+        );
+    }
+
+    #[test]
+    fn cli_only_without_cli_priming_is_rejected() {
+        // ★역방향(ADR-0128 등호)★: `--cli-only` 는 CLI 배선을 실제로 깔지만, 프라이밍이 그 입구를 안
+        //   가르치면 B 는 발신 방법을 모른 채 아무것도 보내지 않는다 — 그 B_SENT=false 를 정상 negative 로
+        //   채점하는 것이 이 게이트가 막는 오귀속이다. 뒤쪽 entrance 검사는 *보냈는데 입구가 틀린* 경우만
+        //   잡아 이 갈래를 못 본다.
+        assert!(
+            cli_only_requires_cli_priming(false, true),
+            "--cli-only + CLI 안 가르치는 프라이밍 → 거부"
+        );
+    }
+
+    #[test]
+    fn wiring_axis_accepts_only_the_two_aligned_combinations() {
+        // ★등호 진리표★: 두 판정자를 합치면 (가르치는 채널, 깐 채널)이 **같은** 두 조합만 통과한다.
+        //   ★라우팅까지 단언한다(판정자별 셀 고정)★: 어긋난 두 조합은 **각 방향이 하나씩** 거부해야 한다 —
+        //   OR 만 보면 두 판정자가 같은 행을 함께 거부하도록 넓어져도 초록이다(실측: 정방향을
+        //   `directs_cli != cli_only` 로 넓히면 OR 단언만으론 안 잡힌다). 두 게이트는 operator 에게 **서로
+        //   다른 처방**을 안내하므로(`--cli-only` 를 붙여라 / 프라이밍이 CLI 를 가르치는지 보라) 어느 쪽이
+        //   거부하는지가 실제 계약이다.
+        for (directs_cli, cli_only, expect_forward, expect_converse) in [
+            // (정합) CLI 교육 + CLI 배선(--cli-only) — 어느 방향도 거부하지 않는다.
+            (true, true, false, false),
+            // (정합) MCP 교육 + MCP 배선(기본 모드).
+            (false, false, false, false),
+            // (어긋남) 가르쳤으나 안 깔림 → **정방향만** 거부.
+            (true, false, true, false),
+            // (어긋남) 깔았으나 안 가르침 → **역방향만** 거부.
+            (false, true, false, true),
+        ] {
+            let forward = cli_priming_requires_cli_only(directs_cli, cli_only);
+            let converse = cli_only_requires_cli_priming(directs_cli, cli_only);
+            assert_eq!(
+                forward, expect_forward,
+                "정방향(cli_priming_requires_cli_only) directs_cli={directs_cli} cli_only={cli_only}"
+            );
+            assert_eq!(
+                converse, expect_converse,
+                "역방향(cli_only_requires_cli_priming) directs_cli={directs_cli} cli_only={cli_only}"
+            );
+            // 호출부 결정(두 게이트가 OR 로 붙는다)도 함께 고정 — 라우팅과 별개 축이라 지우지 않는다.
+            assert_eq!(
+                forward || converse,
+                expect_forward || expect_converse,
+                "호출부 거부 여부 directs_cli={directs_cli} cli_only={cli_only}"
+            );
+        }
     }
 
     // ── ADR-0099: --cli-only 가 상속된 ENGRAM_PRIMING_FILE override 를 거부하는가(순수 판정) ──────────

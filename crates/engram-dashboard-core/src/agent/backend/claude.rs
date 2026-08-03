@@ -42,9 +42,11 @@ impl AgentBackend for ClaudeBackend {
     fn accepts_mcp_config(&self) -> bool {
         // claude 는 mcp-config 를 `--mcp-config` 로 부착한다(ADR-0099) → MCP-capable.
         //   이 true 하나가 provision 에서 mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍
-        //   (send_message 만 — ADR-0126 결정 1) + [Mcp, Cli] grant 를 구동한다(정합 불변식: 가르치는 채널
-        //   ⊆ 깐 채널 — engram-send 는 이 스폰에도 계속 깔리되 결정 3 에 따라 가르치지 않는다).
-        // ADR-0099 / ADR-0126
+        //   (send_message 만 — ADR-0126 결정 1) + `[Mcp]` grant 를 구동한다.
+        //   ★등호 불변식(ADR-0128)★: 가르치는 채널 집합 **=** 물리로 깐 채널 집합. 그래서 MCP 가능
+        //   스폰엔 engram-send 배선(ENGRAM_SEND_EXE·PATH·CLI 크레덴셜)을 아예 깔지 않는다 — 우편 발신
+        //   채널은 capability 로만 갈리고 런타임 폴백이 없다(build_spec 의 config_path 갈림 참조).
+        // ADR-0099 / ADR-0126 / ADR-0128
         true
     }
 
@@ -144,158 +146,33 @@ impl AgentBackend for ClaudeBackend {
                         }
                     }
                 }
-                // ADR-0086: 제어 채널(MCP) 주입 — `--mcp-config <path>`. ★claude 플래그 지식은
-                //   이 파일에만★(ADR-0004 격리): generic 층(manager/backend dispatch)은 추상
-                //   ControlEndpoint(url/token/config_path)만 나르고 "MCP"·플래그 문자열을 모른다. 여기서
-                //   claude 방식으로 번역한다. 데몬(DaemonControlChannel.provision)이 config_path 파일에
+                // ADR-0086: 제어 채널 주입 — claude 방식(`--mcp-config <path>` / CLI 크레덴셜 env)으로 번역.
+                //   ★claude 플래그·env 지식은 이 파일에만★(ADR-0004 격리): generic 층(manager/backend
+                //   dispatch)은 추상 ControlEndpoint(url/token/config_path/send_exe)만 나르고 "MCP"·플래그
+                //   문자열을 모른다. 데몬(DaemonControlChannel.provision)이 config_path 파일에
                 //   {mcpServers:{engram:{type:http,url,headers:{Authorization:Bearer <token>}}}} 를 이미
                 //   기록해 뒀다 — 우리는 그 경로를 `--mcp-config` 로 가리키기만 한다. 터미널·json 모드
                 //   둘 다 연결 대상이라 mode 무관 동일 주입(claude 2.1.170 실측: headers Authorization 을
-                //   initialize/tools/list/tools/call 전 요청에 실전송). None(제어 채널 미구성·shell)이면 미주입.
+                //   initialize/tools/list/tools/call 전 요청에 실전송). control=None(제어 채널 미구성·shell)
+                //   이면 args·env 어느 쪽도 건드리지 않는다.
                 //   ★보안★: config_path 만 args 에 실린다(토큰은 파일 안 — args/로그에 토큰 평문 없음).
-                //   ★config_path = Option(ADR-0099)★: MCP-capable(claude)이면 데몬이 `Some(path)`로 실어
-                //     보내 여기서 `--mcp-config <path>` 를 붙인다. 비-MCP 백엔드(codex/gemini)는 데몬이
-                //     `None` 을 실어 이 플래그가 아예 붙지 않는다(부재를 타입으로 인코딩 — 빈-경로 sentinel
-                //     방어 코드 불필요). CLI 크레덴셜 env(ENGRAM_TOKEN/URL/SEND_EXE·PATH)는 control endpoint
-                //     자체가 있으면(=제어 채널 소비 backend) 주입하므로 config_path 유무와 직교한다.
-                // ADR-0086 / ADR-0099
+                //   ★config_path = 채널 갈림의 유일한 신호(ADR-0128 등호 불변식)★: 우편 발신 채널은 백엔드
+                //     capability 로만 갈리고 런타임 폴백이 없다 — MCP 가능 스폰은 `--mcp-config` **만**,
+                //     비-MCP 스폰은 CLI 크레덴셜·PATH **만** 받는다. 데몬은 MCP-capable 일 때만 config 를
+                //     쓰고 그 write 가 실패하면 provision 자체를 Err 로 끊으므로(fail-closed), `Some` ==
+                //     MCP 가능이 **등호**로 성립한다 — 반쪽 MCP 스폰이 존재하지 않아 이 신호로 갈라도
+                //     안전하다. 그래서 `match` 로 두 갈래를 배타로 못박아 "가르치는 채널 = 깐 채널" 등호가
+                //     구조로 보장되게 한다(한 스폰에 두 입구를 함께 깔면 ADR-0128 위반).
+                //     비-MCP 백엔드(codex/gemini)에서 `None` 인 것은 부재의 타입 인코딩이라 빈-경로 sentinel
+                //     방어 코드가 필요 없다(ADR-0099).
+                // ADR-0086 / ADR-0099 / ADR-0128
                 if let Some(endpoint) = &control {
-                    // ADR-0099: mcp-config 경로는 MCP-capable 스폰에만 존재(Some) — 있을 때만 플래그 주입.
-                    if let Some(config_path) = &endpoint.config_path {
-                        args.push("--mcp-config".to_string());
-                        args.push(config_path.to_string_lossy().into_owned());
-                    }
-                    // ADR-0086 스텝 2(CLI 입구): MCP(mcp-config) 입구와 **별개로**, PTY env 에 CLI 크레덴셜을
-                    //   주입한다. 스폰된 claude 가 Bash 로 CLI(`engram-send`)를 부를 때 이 env 를 읽어 데몬 제어
-                    //   라우트에 Bearer 토큰으로 POST 한다. env 는 CommandSpec.env → transport 가 cmd.env(k,v)
-                    //   로 심고, portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
-                    //   (Bash·그 손자)까지 상속**한다(lib.rs ENGRAM_EXE 주석과 동일 메커니즘).
-                    //   ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: `engram-send` 는 원래 PATH 에 없다(데몬
-                    //   exe 의 형제로 배포되는 내부 바이너리). 데몬이 부팅 시 자기 exe 형제에서 위치를 찾아
-                    //   endpoint.send_exe 로 실어 보내면, 여기서 그 **절대경로**를 env 로 주입한다. 프라이밍은
-                    //   이제 bare `engram-send`(주입 PATH 로 해석 — 아래 PATH 주입 참조)를 가르친다 — 에이전트가
-                    //   그 이름을 shell 에서 그대로 부른다. ENGRAM_SEND_EXE(절대경로) env 는 하위호환으로 유지
-                    //   (기존 진단·대체 소비자용 — ADR-0094 정렬은 PATH 로 이루되 이 env 는 병행 보존).
-                    //   send_exe 가 None(부분 빌드 등 형제 부재)이면 이 env 만 생략한다 — token/url 은 그래도
-                    //   주입해 MCP 입구는 살리고, CLI 입구만 못 쓰게 한다(데몬은 그때 warn 로그 — lib.rs).
-                    //   ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
-                    //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를
-                    //   벗겨 base 만 남긴다 — CLI 가 `<base>/control/send` 를 조립한다(라우트 경로 지식은 CLI 소유).
-                    //   suffix 가 없으면(형태 변주) url 을 그대로 base 로 쓴다(방어적).
-                    //   ★keep-in-sync(M5)★: 아래 strip_suffix 의 리터럴 "/mcp" 는 데몬측 MCP_PATH 상수와
-                    //   **손으로 맞춰진** 값이다 — 정본 = `crates/engram-dashboard-daemon/src/control/
-                    //   mcp_server.rs`(const MCP_PATH). 그쪽 경로를 바꾸면 여기 리터럴도 함께 고쳐야 한다
-                    //   (빌드가 강제 못 함 → 어긋나면 base 파생이 틀어져 CLI 가 조용히 404). 두 곳 상호 앵커.
-                    //   ★claude 지식 격리(ADR-0004)와의 관계★: env 키(ENGRAM_TOKEN/ENGRAM_CONTROL_URL/
-                    //   ENGRAM_SEND_EXE)는 claude 플래그가 아니라 제어 채널 규약이지만, "control endpoint 를
-                    //   프로세스에 어떻게 먹이나"는 backend 별 방식(claude=mcp-config+env)이라 이 파일이 소유한다.
-                    //   generic 층은 여전히 추상 ControlEndpoint 만 나른다(send_exe 도 그 descriptor 필드).
-                    //   ★보안★: 토큰이 env 로 노출되나, 같은 OS 유저의 자식 프로세스에만 상속되고(하드 격리는
-                    //   원래 불가 — ADR-0086 §불변식), 로그엔 찍지 않는다.
-                    let base = endpoint
-                        .url
-                        .strip_suffix("/mcp")
-                        .unwrap_or(&endpoint.url)
-                        .to_string();
-                    env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
-                    env.push(("ENGRAM_CONTROL_URL".to_string(), base));
-                    // send_exe 가 있을 때만 CLI 경로를 env 로 노출(없으면 CLI 입구 비활성 — MCP 입구는 유지).
-                    if let Some(send_exe) = &endpoint.send_exe {
-                        // ★ENGRAM_SEND_EXE(절대경로) 유지(하위호환)★: grant·프라이밍이 bare `engram-send`
-                        //   로 정렬됐어도 이 절대경로 env 는 계속 주입한다 — 기존 소비자(진단·대체 경로)가
-                        //   있을 수 있어 제거하지 않는다(ADR-0094 정렬은 PATH 로 이룬다, 이건 병행 보존).
-                        env.push((
-                            "ENGRAM_SEND_EXE".to_string(),
-                            send_exe.to_string_lossy().into_owned(),
-                        ));
-                        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(engram-send:*)`)와 프라이밍이
-                        //   모두 bare `engram-send` 를 가르치므로, 스폰된 에이전트의 shell(및 그 자식 Bash
-                        //   도구)이 그 이름을 실제로 **찾을** 수 있어야 한다. `engram-send` 는 PATH 에 없는
-                        //   내부 형제 바이너리라, send_exe 의 **부모 디렉토리**를 PATH **맨 앞**에 붙여
-                        //   자식이 상속할 PATH 로 심는다. transport(portable-pty)가 부모 env 를 먼저 시드한
-                        //   뒤 CommandSpec.env 를 순서대로 덮으므로, 이 PATH 항목이 자식이 상속한 PATH 를
-                        //   대체한다. 에이전트의 자식들(Bash 도구 등)도 이 PATH 를 상속한다.
-                        //   부모 디렉토리를 못 구하면(경로 형태 이상) PATH 주입을 건너뛴다(오늘 동작 유지).
-                        //
-                        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이
-                        //   지점보다 **먼저** env 벡터에 들어와 있다(spawn 경로가 profile.env 를 먼저 push).
-                        //   base 로 데몬 프로세스 PATH(std::env::var_os) 대신 **env 벡터에 이미 있는 마지막
-                        //   PATH** 를 쓴다 — 프로필이 커스텀 PATH 를 실었으면 그 값이 base 가 돼 tail 로
-                        //   보존된다(데몬 PATH 로 리빌드하면 프로필 PATH 가 통째로 증발한다). env 벡터에
-                        //   PATH 가 없을 때만 데몬 프로세스 PATH 로 폴백한다.
-                        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수라
-                        //   Windows(=대소문자 무시)에선 eq_ignore_ascii_case 로, 그 외 OS 에선 정확 일치로
-                        //   찾는다.
-                        //   ★last-match-wins + dedupe(load-bearing)★: transport(portable-pty)는 env 를
-                        //   **순서대로** cmd.env(k,v) 하므로, 같은 변수의 중복 항목이 있으면 자식엔
-                        //   **마지막** 값이 산다(예: Windows 에서 `[("PATH", 데몬), ("Path", 프로필)]`).
-                        //   그래서 base 로 **마지막 case-equivalent PATH 의 값**(= 실제로 자식이 받았을 값)을
-                        //   쓰고, 그 항목의 **키 표기**를 유지해 제자리 교체한다. 그리고 **나머지 case-equivalent
-                        //   PATH 항목은 전부 제거**해 최종 spec env 에 PATH 가 **정확히 하나**(그 승리 항목)만
-                        //   남게 한다 — 중복을 남겨두면, 우리가 앞쪽 항목만 고치고 뒤쪽 미수정 항목이 last-wins
-                        //   로 이겨 send_exe 부모가 빠진 PATH 가 자식에 실리며 주입이 **조용히 무력화**된다
-                        //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제
-                        //   디렉토리가 **맨 앞**(shadowing 방어: 우리 형제 바이너리가 먼저 해석), 프로필/데몬
-                        //   PATH 는 **tail 로 생존**.
-                        if let Some(parent) = send_exe.parent() {
-                            let is_path_key = |k: &str| {
-                                if cfg!(windows) {
-                                    k.eq_ignore_ascii_case("PATH")
-                                } else {
-                                    k == "PATH"
-                                }
-                            };
-                            // env 벡터의 **마지막** case-equivalent PATH 를 찾는다 — 순차 적용 시 자식이 받는
-                            //   값이 이 마지막 항목이므로 그 값을 base 로, 그 키 표기를 승리 항목으로 삼는다.
-                            let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
-                            // base = 마지막 env PATH 값(자식이 실제 받았을 값) → 없으면 데몬 프로세스 PATH →
-                            //   둘 다 없으면 빈 값.
-                            let base_os = winner_idx
-                                .map(|i| std::ffi::OsString::from(env[i].1.clone()))
-                                .or_else(|| std::env::var_os("PATH"));
-                            let mut dirs = vec![parent.to_path_buf()];
-                            if let Some(base) = &base_os {
-                                dirs.extend(std::env::split_paths(base));
-                            }
-                            match std::env::join_paths(dirs)
-                                .ok()
-                                .and_then(|j| j.into_string().ok())
-                            {
-                                Some(joined) => match winner_idx {
-                                    Some(i) => {
-                                        // 승리(마지막) 항목의 값을 교체(그 키 표기 유지).
-                                        env[i].1 = joined;
-                                        // 나머지 case-equivalent PATH 항목을 모두 제거 → PATH 정확히 하나.
-                                        //   승리 인덱스(i)만 남기고 다른 PATH 키 항목을 걸러낸다.
-                                        let mut seen = 0usize;
-                                        env.retain(|(k, _)| {
-                                            if is_path_key(k) {
-                                                let keep = seen == i;
-                                                seen += 1;
-                                                keep
-                                            } else {
-                                                seen += 1;
-                                                true
-                                            }
-                                        });
-                                    }
-                                    // 기존 PATH 부재 → 새 항목 push.
-                                    None => env.push(("PATH".to_string(), joined)),
-                                },
-                                // ★loud skip(FIX-2/3)★: join 실패 또는 결과가 valid UTF-8 이 아니면 주입을
-                                //   **통째 건너뛴다** — lossy 변환한 PATH 를 절대 push 하지 않는다(비-Unicode
-                                //   PATH 항목을 조용히 손상시키면 skip 보다 더 나쁘다). skip 시에는 기존 PATH
-                                //   항목을 제거·수정하지 않고 env 벡터를 **원래 그대로** 둔다 — 오늘 동작
-                                //   (상속 PATH 그대로)이 유지돼 안전 폴백이 되고, warn 으로 promise-mismatch
-                                //   (grant·프라이밍은 bare `engram-send` 를 약속했는데 이 병적 설치에선 자식이
-                                //   그 이름을 해석 못 함)를 **관측 가능**하게 만든다(조용한 실패 방지).
-                                None => {
-                                    tracing::warn!(
-                                        "engram-send PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `engram-send` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지"
-                                    );
-                                }
-                            }
+                    match &endpoint.config_path {
+                        Some(config_path) => {
+                            args.push("--mcp-config".to_string());
+                            args.push(config_path.to_string_lossy().into_owned());
                         }
+                        None => inject_cli_entrance(&mut env, endpoint),
                     }
                 }
                 // ADR-0092: 프라이밍(수신 계약) 주입 — `--append-system-prompt-file <abs-path>`.
@@ -455,6 +332,138 @@ impl AgentBackend for ClaudeBackend {
 
     fn turn_classifier(&self) -> TurnClassifier {
         classify_turn
+    }
+}
+
+/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜(`ENGRAM_TOKEN`/`ENGRAM_CONTROL_URL`/
+/// `ENGRAM_SEND_EXE`) + `engram-send` 형제 디렉토리 PATH 프리펜드를 심는다.
+///
+/// ★호출 조건 = 비-MCP(CLI 전용) 스폰 **하나뿐**(ADR-0128 등호 불변식)★: MCP 가능 스폰에서 이 함수를
+///   부르면 그 스폰 env 에 `engram-send` 로 가는 경로가 생겨 결정 위반이다 — 채널 통제의 유일한 실효
+///   수단이 물리 배선이라(실측: 권한 제거는 조작이 되지 못했다) 두 채널을 함께 깔면 통제가 사라진다.
+///   되살리지 말 것. 유일한 호출부 = `build_spec` 의 `config_path` 갈림(None 갈래).
+/// ★왜 env 인가★: 에이전트가 shell 로 `engram-send` 를 부를 때 이 env 를 읽어 데몬 제어 라우트에
+///   Bearer 토큰으로 POST 한다. env 는 CommandSpec.env → transport 가 cmd.env(k,v) 로 심고, portable-pty
+///   CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스(Bash·그 손자)까지 상속**한다
+///   (lib.rs ENGRAM_EXE 주석과 동일 메커니즘).
+/// ★claude 지식 격리(ADR-0004)와의 관계★: env 키(ENGRAM_TOKEN/ENGRAM_CONTROL_URL/ENGRAM_SEND_EXE)는
+///   claude 플래그가 아니라 제어 채널 규약이지만, "control endpoint 를 프로세스에 어떻게 먹이나"는
+///   backend 별 방식(claude=mcp-config+env)이라 이 파일이 소유한다. generic 층은 여전히 추상
+///   ControlEndpoint 만 나른다(send_exe 도 그 descriptor 필드).
+/// ★보안★: 토큰이 env 로 노출되나, 같은 OS 유저의 자식 프로세스에만 상속되고(하드 격리는 원래 불가 —
+///   ADR-0086 §불변식), 로그엔 찍지 않는다.
+// ADR-0086 / ADR-0128
+fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
+    // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
+    //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를 벗겨 base 만
+    //   남긴다 — CLI 가 `<base>/control/send` 를 조립한다(라우트 경로 지식은 CLI 소유). suffix 가 없으면
+    //   (형태 변주) url 을 그대로 base 로 쓴다(방어적).
+    //   ★keep-in-sync(M5)★: 아래 strip_suffix 의 리터럴 "/mcp" 는 데몬측 MCP_PATH 상수와 **손으로 맞춰진**
+    //   값이다 — 정본 = `crates/engram-dashboard-daemon/src/control/mcp_server.rs`(const MCP_PATH). 그쪽
+    //   경로를 바꾸면 여기 리터럴도 함께 고쳐야 한다(빌드가 강제 못 함 → 어긋나면 base 파생이 틀어져 CLI 가
+    //   조용히 404). 두 곳 상호 앵커.
+    let base = endpoint
+        .url
+        .strip_suffix("/mcp")
+        .unwrap_or(&endpoint.url)
+        .to_string();
+    env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
+    env.push(("ENGRAM_CONTROL_URL".to_string(), base));
+    // ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: `engram-send` 는 원래 PATH 에 없다(데몬 exe 의
+    //   형제로 배포되는 내부 바이너리). 데몬이 부팅 시 자기 exe 형제에서 위치를 찾아 endpoint.send_exe 로
+    //   실어 보내면, 여기서 그 **절대경로**를 env 로 주입한다. CLI-only 프라이밍(B)과 grant 는 bare
+    //   `engram-send`(아래 PATH 주입으로 해석)를 가르치지만, 이 절대경로 env 는 병행 보존한다 — 기존
+    //   소비자(진단·대체 경로)가 있을 수 있어 제거하지 않는다(ADR-0094 정렬은 PATH 로 이룬다).
+    //   send_exe 가 None 이면 이 env 와 PATH 프리펜드만 생략한다 — 이 갈래에선 발신 입구가 하나도 남지
+    //   않으므로 데몬이 provision 단계에서 이미 fail-closed 로 끊는다(그 조합은 여기 도달하지 않는 방어
+    //   경로다 — 도달했다면 크레덴셜만 있고 부를 CLI 가 없는 무해한 상태).
+    if let Some(send_exe) = &endpoint.send_exe {
+        env.push((
+            "ENGRAM_SEND_EXE".to_string(),
+            send_exe.to_string_lossy().into_owned(),
+        ));
+        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(engram-send:*)`)와 프라이밍이 모두 bare
+        //   `engram-send` 를 가르치므로, 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
+        //   **찾을** 수 있어야 한다. `engram-send` 는 PATH 에 없는 내부 형제 바이너리라, send_exe 의
+        //   **부모 디렉토리**를 PATH **맨 앞**에 붙여 자식이 상속할 PATH 로 심는다. transport(portable-pty)
+        //   가 부모 env 를 먼저 시드한 뒤 CommandSpec.env 를 순서대로 덮으므로, 이 PATH 항목이 자식이
+        //   상속한 PATH 를 대체한다. 에이전트의 자식들(Bash 도구 등)도 이 PATH 를 상속한다.
+        //   부모 디렉토리를 못 구하면(경로 형태 이상) PATH 주입을 건너뛴다(상속 PATH 그대로).
+        //
+        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이 지점보다 **먼저** env
+        //   벡터에 들어와 있다(spawn 경로가 profile.env 를 먼저 push). base 로 데몬 프로세스 PATH
+        //   (std::env::var_os) 대신 **env 벡터에 이미 있는 마지막 PATH** 를 쓴다 — 프로필이 커스텀 PATH 를
+        //   실었으면 그 값이 base 가 돼 tail 로 보존된다(데몬 PATH 로 리빌드하면 프로필 PATH 가 통째로
+        //   증발한다). env 벡터에 PATH 가 없을 때만 데몬 프로세스 PATH 로 폴백한다.
+        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수라 Windows
+        //   (=대소문자 무시)에선 eq_ignore_ascii_case 로, 그 외 OS 에선 정확 일치로 찾는다.
+        //   ★last-match-wins + dedupe(load-bearing)★: transport(portable-pty)는 env 를 **순서대로**
+        //   cmd.env(k,v) 하므로, 같은 변수의 중복 항목이 있으면 자식엔 **마지막** 값이 산다(예: Windows
+        //   에서 `[("PATH", 데몬), ("Path", 프로필)]`). 그래서 base 로 **마지막 case-equivalent PATH 의
+        //   값**(= 실제로 자식이 받았을 값)을 쓰고, 그 항목의 **키 표기**를 유지해 제자리 교체한다. 그리고
+        //   **나머지 case-equivalent PATH 항목은 전부 제거**해 최종 spec env 에 PATH 가 **정확히 하나**(그
+        //   승리 항목)만 남게 한다 — 중복을 남겨두면, 우리가 앞쪽 항목만 고치고 뒤쪽 미수정 항목이
+        //   last-wins 로 이겨 send_exe 부모가 빠진 PATH 가 자식에 실리며 주입이 **조용히 무력화**된다
+        //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제 디렉토리가
+        //   **맨 앞**(shadowing 방어: 우리 형제 바이너리가 먼저 해석), 프로필/데몬 PATH 는 **tail 로 생존**.
+        if let Some(parent) = send_exe.parent() {
+            let is_path_key = |k: &str| {
+                if cfg!(windows) {
+                    k.eq_ignore_ascii_case("PATH")
+                } else {
+                    k == "PATH"
+                }
+            };
+            // env 벡터의 **마지막** case-equivalent PATH 를 찾는다 — 순차 적용 시 자식이 받는 값이 이
+            //   마지막 항목이므로 그 값을 base 로, 그 키 표기를 승리 항목으로 삼는다.
+            let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
+            // base = 마지막 env PATH 값(자식이 실제 받았을 값) → 없으면 데몬 프로세스 PATH → 둘 다 없으면
+            //   빈 값.
+            let base_os = winner_idx
+                .map(|i| std::ffi::OsString::from(env[i].1.clone()))
+                .or_else(|| std::env::var_os("PATH"));
+            let mut dirs = vec![parent.to_path_buf()];
+            if let Some(base) = &base_os {
+                dirs.extend(std::env::split_paths(base));
+            }
+            match std::env::join_paths(dirs)
+                .ok()
+                .and_then(|j| j.into_string().ok())
+            {
+                Some(joined) => match winner_idx {
+                    Some(i) => {
+                        // 승리(마지막) 항목의 값을 교체(그 키 표기 유지).
+                        env[i].1 = joined;
+                        // 나머지 case-equivalent PATH 항목을 모두 제거 → PATH 정확히 하나.
+                        //   승리 인덱스(i)만 남기고 다른 PATH 키 항목을 걸러낸다.
+                        let mut seen = 0usize;
+                        env.retain(|(k, _)| {
+                            if is_path_key(k) {
+                                let keep = seen == i;
+                                seen += 1;
+                                keep
+                            } else {
+                                seen += 1;
+                                true
+                            }
+                        });
+                    }
+                    // 기존 PATH 부재 → 새 항목 push.
+                    None => env.push(("PATH".to_string(), joined)),
+                },
+                // ★loud skip(FIX-2/3)★: join 실패 또는 결과가 valid UTF-8 이 아니면 주입을 **통째
+                //   건너뛴다** — lossy 변환한 PATH 를 절대 push 하지 않는다(비-Unicode PATH 항목을 조용히
+                //   손상시키면 skip 보다 더 나쁘다). skip 시에는 기존 PATH 항목을 제거·수정하지 않고 env
+                //   벡터를 **원래 그대로** 둔다 — 상속 PATH 가 유지돼 안전 폴백이 되고, warn 으로
+                //   promise-mismatch(grant·프라이밍은 bare `engram-send` 를 약속했는데 이 병적 설치에선
+                //   자식이 그 이름을 해석 못 함)를 **관측 가능**하게 만든다(조용한 실패 방지).
+                None => {
+                    tracing::warn!(
+                        "engram-send PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `engram-send` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1292,9 +1301,23 @@ mod tests {
         }
     }
 
-    /// send_exe=None 변주(형제 바이너리 부재 모사) — token/url 은 주입하되 ENGRAM_SEND_EXE 는 생략됨을 검증.
-    fn ep_no_send() -> ControlEndpoint {
+    /// CLI 전용(비-MCP 백엔드) 스폰이 받는 endpoint — `config_path=None` 이 그 갈림 신호다(ADR-0128).
+    ///   CLI 입구(크레덴셜 env·PATH 프리펜드)를 검증하는 테스트는 전부 이 변주를 쓴다: MCP 가능 변주
+    ///   (`ep()`)로는 그 배선이 **없는 것이 정답**이라 배선 회귀를 못 잡는다.
+    // ADR-0128
+    fn ep_cli_only() -> ControlEndpoint {
         ControlEndpoint {
+            config_path: None,
+            ..ep()
+        }
+    }
+
+    /// CLI 전용 + send_exe=None(형제 바이너리 부재 모사) — 크레덴셜은 주입하되 ENGRAM_SEND_EXE·PATH 는
+    ///   생략됨을 검증한다. 데몬은 이 조합을 provision 에서 fail-closed 로 끊으므로(발신 입구 0) 실
+    ///   스폰엔 오지 않는 방어 경로다.
+    fn ep_cli_only_no_send() -> ControlEndpoint {
+        ControlEndpoint {
+            config_path: None,
             send_exe: None,
             ..ep()
         }
@@ -1355,30 +1378,37 @@ mod tests {
     fn claude_control_endpoint_none_config_path_no_mcp_config_flag() {
         // ★ADR-0099★: control endpoint 는 있으되 config_path=None(비-MCP 백엔드가 준 endpoint 모사)이면
         //   --mcp-config 플래그가 붙지 않는다 — 부재를 타입(Option)으로 인코딩해 backend 가 Some 일 때만
-        //   주입한다(빈-경로 sentinel 방어 코드 없이 타입이 강제). CLI env(ENGRAM_TOKEN 등)는 endpoint 가
-        //   있으면 여전히 주입되므로 config_path 유무와 직교함도 함께 확인.
-        let no_cfg = ControlEndpoint {
-            config_path: None,
-            ..ep()
-        };
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(no_cfg));
+        //   주입한다(빈-경로 sentinel 방어 코드 없이 타입이 강제). ★ADR-0128★: 같은 신호가 CLI 입구
+        //   주입의 게이트이기도 하다 — None 갈래는 CLI 크레덴셜을 받는다(아래 단언; 배타성은 전용
+        //   ADR-0128 테스트가 양방향으로 못박는다).
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_cli_only()),
+        );
         assert!(
             !s.args.iter().any(|a| a == "--mcp-config"),
             "config_path=None → --mcp-config 미주입: {:?}",
             s.args
         );
-        // endpoint 자체는 있으므로 CLI 크레덴셜 env 는 주입된다(config 유무와 직교).
         assert!(
             s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN"),
-            "endpoint 존재 → ENGRAM_TOKEN 은 그래도 주입(직교)"
+            "config_path=None(CLI 전용) → ENGRAM_TOKEN 주입"
         );
     }
 
     // ── ADR-0086 스텝 2: CLI 크레덴셜 env 주입(ENGRAM_TOKEN / ENGRAM_CONTROL_URL) ──────────────
     #[test]
-    fn claude_control_endpoint_injects_cli_env() {
-        // control 이 있으면 env 에 ENGRAM_TOKEN(토큰) + ENGRAM_CONTROL_URL(base=/mcp 벗긴 값)이 실린다.
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+    fn claude_cli_only_endpoint_injects_cli_env() {
+        // CLI 전용 스폰(config_path=None)이면 env 에 ENGRAM_TOKEN(토큰) + ENGRAM_CONTROL_URL(base=/mcp
+        //   벗긴 값)이 실린다.
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_cli_only()),
+        );
         let token = s
             .env
             .iter()
@@ -1409,18 +1439,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_control_endpoint_without_send_exe_omits_send_env() {
-        // F1: send_exe=None(형제 바이너리 부재)이면 ENGRAM_SEND_EXE 는 생략하되 token/url 은 주입한다.
+    fn claude_cli_only_without_send_exe_omits_send_env() {
+        // F1: CLI 전용 스폰인데 send_exe=None(형제 바이너리 부재)이면 ENGRAM_SEND_EXE 만 생략하고 token/
+        //   url 은 그대로 주입한다 — 데몬이 이 조합을 provision 에서 이미 끊으므로(발신 입구 0 → Err)
+        //   여기 남는 크레덴셜은 부를 CLI 가 없는 무해한 잔여다.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
             None,
-            Some(ep_no_send()),
+            Some(ep_cli_only_no_send()),
         );
         assert!(
             s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN")
                 && s.env.iter().any(|(k, _)| k == "ENGRAM_CONTROL_URL"),
-            "send_exe 없어도 token/url 은 주입(MCP 입구 유지): {:?}",
+            "send_exe 없어도 token/url 은 주입: {:?}",
             s.env
         );
         assert!(
@@ -1445,11 +1477,16 @@ mod tests {
 
     // ── ADR-0094: PATH 주입(bare `engram-send` 해석 — send_exe 부모 디렉토리 prepend) ──────────
     #[test]
-    fn claude_control_endpoint_injects_path_with_send_exe_dir_prepended() {
-        // send_exe 가 있으면 PATH env 항목이 실리고, 그 값은 send_exe 부모 디렉토리로 **시작**하며
-        //   기존 프로세스 PATH 를 그 뒤에 보존한다(상위집합 — 아무것도 제거 안 함). ep() 의 send_exe =
-        //   C:/app/engram-send.exe → 부모 = C:/app.
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
+    fn claude_cli_only_endpoint_injects_path_with_send_exe_dir_prepended() {
+        // CLI 전용 스폰 + send_exe 가 있으면 PATH env 항목이 실리고, 그 값은 send_exe 부모 디렉토리로
+        //   **시작**하며 기존 프로세스 PATH 를 그 뒤에 보존한다(상위집합 — 아무것도 제거 안 함).
+        //   ep_cli_only() 의 send_exe = C:/app/engram-send.exe → 부모 = C:/app.
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(ep_cli_only()),
+        );
         let path = s
             .env
             .iter()
@@ -1481,13 +1518,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_control_endpoint_without_send_exe_omits_path_env() {
-        // send_exe=None(형제 부재)이면 PATH 도 주입하지 않는다(오늘 동작 유지 — CLI 입구 자체가 없음).
+    fn claude_cli_only_without_send_exe_omits_path_env() {
+        // CLI 전용 스폰이라도 send_exe=None(형제 부재)이면 PATH 를 주입하지 않는다 — 해석시킬 바이너리가
+        //   없으므로 상속 PATH 를 그대로 둔다.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
             None,
-            Some(ep_no_send()),
+            Some(ep_cli_only_no_send()),
         );
         assert!(
             !s.env.iter().any(|(k, _)| k == "PATH"),
@@ -1541,7 +1579,7 @@ mod tests {
         //   데몬 프로세스 PATH 로 리빌드하면 프로필 PATH 가 증발하므로 그러면 안 된다. 또 승리 PATH 는
         //   spec env 에 정확히 하나(기존 프로필 항목을 제자리 교체 — 새 PATH 를 뒤에 또 쌓지 않음).
         let profile_env = vec![("PATH".to_string(), "C:\\custom;C:\\other".to_string())];
-        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         let entries = path_entries(&s);
         assert_eq!(
             entries.len(),
@@ -1573,7 +1611,7 @@ mod tests {
         //   인식해(eq_ignore_ascii_case) 그 값을 base 로 쓰고 제자리 교체한다 — 데몬 PATH 로 리빌드
         //   하거나 별도 "PATH" 항목을 추가하지 않는다. Windows 전용(대소문자 무시 의미론).
         let profile_env = vec![("Path".to_string(), "C:\\custom;C:\\other".to_string())];
-        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         let entries = path_entries(&s);
         assert_eq!(
             entries.len(),
@@ -1615,7 +1653,7 @@ mod tests {
             ("PATH".to_string(), "C:\\daemon".to_string()),
             ("Path".to_string(), "C:\\profile".to_string()),
         ];
-        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         let entries = path_entries(&s);
         assert_eq!(
             entries.len(),
@@ -1659,7 +1697,7 @@ mod tests {
             ("PATH".to_string(), "C:\\first".to_string()),
             ("PATH".to_string(), "C:\\second".to_string()),
         ];
-        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         let entries = path_entries(&s);
         assert_eq!(
             entries.len(),
@@ -1691,6 +1729,73 @@ mod tests {
     //   UTF-8 String 이어야 해 모순이고, OsString 비-UTF8 주입 경로가 없다. 그래서 이 스킵 분기는
     //   단위 테스트로 강제하지 않는다(FIX-2/3 주석·loud warn 으로 관측성 확보). 실패 시 오늘 동작
     //   (상속 PATH 유지)이라 안전 폴백 — 회귀 위험 낮음.
+
+    // ── ADR-0128: 우편 채널 하드 단일화 — 교육 집합 = 물리 배선 집합(등호, 양방향 단언) ────────────
+    #[test]
+    fn claude_mcp_capable_spawn_has_no_cli_entrance_wiring() {
+        // ★핵심(ADR-0128 결정 2)★: MCP 가능 스폰(config_path=Some)은 mcp-config 만 받고 `engram-send` 로
+        //   가는 경로를 **하나도** 받지 않는다. endpoint 가 send_exe 를 실어 보내도(데몬은 두 갈래 공용
+        //   한 줄로 싣는다) 이 갈림이 막는 것이 계약이라, 그 값이 든 ep() 로 단언해야 의미가 있다.
+        // ★프로필 PATH 를 반드시 실어 둔다(빈 env 면 아래 단언이 공허해진다)★: 빈 env 로 지으면 PATH 항목이
+        //   0 개라 "우리가 얹지도 깎지도 않았다" 를 견줄 대상이 없다 — 기존 PATH 항목의 앞에 형제 디렉토리를
+        //   끼워 넣는 회귀가 초록으로 통과한다.
+        let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
+        let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", "ENGRAM_SEND_EXE"] {
+            assert!(
+                !s.env.iter().any(|(k, _)| k == key),
+                "MCP 가능 스폰에 {key} 가 실리면 ADR-0128 위반: {:?}",
+                s.env
+            );
+        }
+        // ★단언 범위 = "우리가 안 얹었다"(사용자 결정)★: PATH 값이 프로필이 준 값과 **글자 그대로 같아야**
+        //   한다 — 형제 디렉토리를 prepend 하지 않았고(결정 위반 방지), 프로필이 실은 값을 깎지도 않았다.
+        //   프로필이 스스로 CLI 경로를 실은 경우까지 막는 것은 이 결정의 범위가 아니다(사용자 책임).
+        assert_eq!(
+            path_entries(&s),
+            vec!["C:\\custom"],
+            "MCP 가능 스폰의 PATH 는 프로필 값 그대로여야(우리가 얹지도 깎지도 않는다): {:?}",
+            s.env
+        );
+        assert!(
+            s.args.iter().any(|a| a == "--mcp-config"),
+            "MCP 갈래는 mcp-config 를 받아야(등호의 반대 절반): {:?}",
+            s.args
+        );
+    }
+
+    #[test]
+    fn claude_cli_only_spawn_gets_full_cli_entrance_wiring() {
+        // ★등호의 반대 절반(ADR-0128)★: CLI 전용 스폰은 크레덴셜 3종 + PATH 프리펜드를 전부 받고
+        //   mcp-config 는 받지 않는다. 프로필 PATH 를 함께 실어 tail 보존·단일 항목까지 한 테스트에서
+        //   못박는다 — 이 갈래가 조용히 열화하면 비-MCP 백엔드의 우편이 죽는다.
+        let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
+        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", "ENGRAM_SEND_EXE"] {
+            assert!(
+                s.env.iter().any(|(k, _)| k == key),
+                "CLI 전용 스폰은 {key} 를 받아야: {:?}",
+                s.env
+            );
+        }
+        let entries = path_entries(&s);
+        assert_eq!(entries.len(), 1, "PATH 는 정확히 하나: {:?}", s.env);
+        let components: Vec<PathBuf> = std::env::split_paths(entries[0]).collect();
+        assert_eq!(
+            components.first(),
+            Some(&PathBuf::from("C:/app")),
+            "PATH 맨 앞 = send_exe 형제 디렉토리: {components:?}"
+        );
+        assert!(
+            components.contains(&PathBuf::from("C:\\custom")),
+            "프로필 PATH 가 tail 로 생존: {components:?}"
+        );
+        assert!(
+            !s.args.iter().any(|a| a == "--mcp-config"),
+            "CLI 전용 갈래엔 mcp-config 없음: {:?}",
+            s.args
+        );
+    }
 
     // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────
     #[test]

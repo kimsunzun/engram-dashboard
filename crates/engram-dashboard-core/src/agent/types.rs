@@ -209,10 +209,16 @@ pub struct ControlEndpoint {
     ///   입구 물리 삭제). 옛 빈 `PathBuf::new()` sentinel 대신 `None` 으로 "없음"을 타입으로 못박아,
     ///   backend 가 `--mcp-config` 를 `Some` 일 때만 주입한다(빈 경로 방어 코드 불필요 — 타입이 강제).
     ///   core 는 이 값을 데이터로만 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003/0004 격리).
+    /// ★ADR-0128: 이 Option 이 우편 발신 채널 갈림의 **단일 신호**★ — `Some`=MCP 배선만, `None`=CLI 배선만
+    ///   (backend 가 이 축으로 CLI 크레덴셜·PATH 주입을 가른다). 데몬이 MCP-capable 일 때만 config 를 쓰고
+    ///   그 write 실패 시 provision 을 Err 로 끊으므로 반쪽 MCP endpoint 는 존재하지 않는다 — 그 fail-closed
+    ///   가 이 신호의 등호를 지탱한다(깨지면 MCP 스폰에 CLI 배선이 새어 ADR-0128 위반).
     pub config_path: Option<std::path::PathBuf>,
     /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram-send` CLI 바이너리 절대경로(있으면).
     /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
-    /// 그 env(claude=`ENGRAM_SEND_EXE`)를 주입하지 않는다(token/url 은 그래도 주입 — CLI 만 못 씀).
+    /// 그 env(claude=`ENGRAM_SEND_EXE`)와 PATH 프리펜드를 주입하지 않는다.
+    /// ★소비 조건 = CLI 전용 스폰(`config_path=None`)뿐(ADR-0128)★: 두 갈래가 공유하는 필드라 MCP 가능
+    /// endpoint 에도 값이 실리지만 그 갈래는 이 값을 **쓰지 않는다** — 쓰면 채널이 둘로 늘어 결정 위반이다.
     /// core 는 이 값을 해석하지 않고 문자열 경로만 나른다(형제 exe 탐색 지식은 데몬 소유 — lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
     /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
@@ -269,14 +275,15 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///
     /// `accepts_mcp_config`(ADR-0099): 이 backend 가 mcp-config 를 받아들이는가(= MCP-capable 인가). manager 가
     ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **채널 물리 배선·
-    ///   프라이밍 변형·grant 를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 채널 집합 ⊆ 물리적으로
-    ///   **깐** 채널 집합 — ADR-0099 의 등호를 ADR-0126 결정 4 가 단방향으로 개정했다. 금지된 방향은 안 깐
-    ///   채널을 가르치는 쪽뿐이고(어기면 발신 freeze 재발), 깔고도 안 가르치는 상태는 허용이다).
+    ///   프라이밍 변형·grant 를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 채널 집합 **=**
+    ///   물리적으로 **깐** 채널 집합 — ADR-0128 이 ADR-0126 결정 4 의 포함관계를 등호로 되돌렸다. 안 깐
+    ///   채널을 가르치면 발신 freeze 가 재발하고, 깔고도 안 가르치면 통제 없는 우회 표면이 남는다).
     ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
-    ///   결정 1; `engram-send` 는 이 스폰에도 계속 깔리되 결정 3 에 따라 가르치지 않는다) + `[Mcp, Cli]` grant.
-    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant.
+    ///   결정 1) + `[Mcp]` grant, `engram-send` 배선 없음.
+    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant + `engram-send` 배선(env·PATH).
     ///   core 는 이 값을 **불투명 bool 로만** 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003 격리).
     // ADR-0126
+    // ADR-0128
     fn provision(
         &self,
         id: AgentId,
