@@ -291,6 +291,12 @@ impl ControlChannel for DaemonControlChannel {
             token,
             config_path,
             // F1: 형제 CLI 경로를 endpoint 로 실어 backend 가 ENGRAM_SEND_EXE 로 주입하게 한다(부팅 때 1회 탐색).
+            // ★MCP 가능 스폰에서도 지우지 말 것(ADR-0126 결정 3)★: 프라이밍 A 는 이 채널을 **일부러 안
+            //   가르치므로**(결정 1) 여기 배선은 겉보기에 아무도 안 쓴다 — 그래도 나중에 커맨드 계열과
+            //   연결할 여지로 **남기기로 한 사용자 결정**이다. 지우는 건 dead-code 정리가 아니라 그 결정에
+            //   대한 회귀고, 이 줄을 지키는 가드는 아래 테스트 하나뿐이다
+            //   (`provision_mcp_capable_carries_send_exe_into_spawn_env`).
+            // ADR-0126
             send_exe: self.send_exe.clone(),
             // ADR-0092/0099: 변형별 프라이밍 MD 절대경로(backend 가 --append-system-prompt-file 로 주입).
             priming_file,
@@ -683,6 +689,103 @@ mod tests {
                 tool: SEND_MESSAGE_TOOL.to_string(),
             }],
             "MCP-capable + send_exe=None → grants == [Mcp]"
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // ── ADR-0126 결정 3: MCP 가능 스폰도 engram-send 물리 배선을 계속 싣는다(가르치지 않는 채널) ──────
+
+    /// ★배선을 지키는 유일한 가드 — 단 **세 구간 중 뒤 둘만**(ADR-0126 결정 3)★: 프라이밍 A 는 이제
+    /// `engram-send` 를 **일부러 가르치지 않는다**(결정 1). 그래서 이 배선은 겉보기에 아무도 안 쓰고,
+    /// 지워도 프라이밍·발신 동작이 전부 그대로다 — 다음 세션이 "죽은 코드" 로 읽고 정리하기 쉽다.
+    /// **그 삭제는 dead-code 정리가 아니라 사용자 결정에 대한 회귀다** — 나중에 커맨드 계열과 연결할
+    /// 여지로 배선을 남기기로 한 결정(결정 3)이고, 지우려면 그 결정을 먼저 뒤집어야 한다.
+    ///
+    /// ★이 테스트의 사정거리(과신 금지)★: 배선은 세 구간이고 여기서 커버하는 건 ②③ 뿐이다.
+    ///   - ① **부팅 시 형제 exe 탐색**(`lib.rs::locate_send_exe` → `lib.rs` 조립부 호출) — **미커버**.
+    ///     그 private 헬퍼를 지우고 호출부에 `None` 을 넘기면 이 테스트를 포함해 전 스위트가 초록인 채로
+    ///     MCP 가능 스폰이 `ENGRAM_SEND_EXE`·PATH 를 잃는다. 그쪽은 테스트가 아니라 그 함수에 박은
+    ///     ADR-0126 앵커가 sweeper 를 막는다(`rg "ADR-"`).
+    ///   - ② provision → `ControlEndpoint.send_exe`(아래 `provision` 호출) · ③ backend → 스폰 env
+    ///     (아래 `build_spec` 호출) — 이 테스트가 커버. ③ 은 core 쪽 claude backend 테스트도 함께 본다.
+    /// ★왜 MCP 가능 스폰인가★: **다른 갈래가 보호돼서가 아니라** 결정 3 이 지키는 케이스가 이것이기
+    ///   때문이다. 비-MCP 스폰의 endpoint 배선도 보호가 없다 — 아래 fail-closed(`self.send_exe` 를 읽는
+    ///   **채널** 필드 검사)와 `build_grants` 는 둘 다 endpoint 필드를 안 보므로,
+    ///   `provision_non_mcp_skips_config_and_picks_cli_only_priming` 은 `ep.grants` 만 단언한 채 통과한다.
+    ///   다만 endpoint 대입은 **두 갈래가 공유**하는 한 줄이라, 여기서 MCP 가능 케이스만 단언해도 그
+    ///   삭제는 양쪽 모두에서 잡힌다.
+    /// ★grants 테스트로는 못 지킨다(권한 축 ≠ 배선 축)★: `build_grants` 는 send_exe 를 **존재 여부**로만
+    ///   읽어(Some/None) bare 이름 문자열을 낸다 — endpoint 가 나르는 **경로 값**을 안 본다. grant 단언이
+    ///   전부 초록인 채로 경로 전달만 끊길 수 있다.
+    /// ★end-to-end 로 단언하는 이유★: 계약은 "endpoint 에 실렸나" 가 아니라 "스폰될 프로세스 env 에 닿나"
+    ///   다. 데몬이 준 endpoint 를 그대로 실 backend(ClaudeBackend)에 먹여 최종 CommandSpec.env 까지 본다 —
+    ///   두 절반(provision 이 싣기 / backend 가 ENGRAM_SEND_EXE·PATH 로 주입하기) 중 어느 쪽이 끊겨도 red.
+    // ADR-0126
+    #[test]
+    fn provision_mcp_capable_carries_send_exe_into_spawn_env() {
+        use engram_dashboard_core::agent::backend::{AgentBackend, ClaudeBackend};
+        use engram_dashboard_core::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+
+        // ★단일 ENV_LOCK(ADR-0099)★: provision 이 두 env 를 모두 읽으므로 setter 테스트와 직렬화.
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
+        let seen = Arc::new(Mutex::new(None));
+        // lib.rs `locate_send_exe` 가 돌려주는 것과 같은 **절대경로**로 모사한다 — 부모 디렉토리가 PATH
+        //   prepend 대상이라 경로 형태가 load-bearing 이다(bare 이름이면 부모가 없어 PATH 주입이 안 돈다).
+        let send_exe = PathBuf::from("C:/app/engram-send.exe");
+        let (channel, data_dir) =
+            provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
+        let id = AgentId::new_v4();
+        let ep = channel
+            .provision(id, 0, true)
+            .expect("provision ok")
+            .expect("endpoint");
+        // 이 스폰이 정말 MCP 가능 갈래였는지 먼저 고정 — 비-MCP 로 새면 결정 3 이 지키는 케이스가 아니다.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(PrimingVariant::McpPrimary),
+            "MCP 가능 갈래(프라이밍 A)여야 이 가드가 의미를 가진다"
+        );
+        assert_eq!(
+            ep.send_exe.as_deref(),
+            Some(send_exe.as_path()),
+            "ADR-0126 결정 3: 가르치지 않아도 MCP 가능 스폰의 endpoint 는 CLI 절대경로를 계속 나른다"
+        );
+
+        // 데몬이 준 endpoint 를 그대로 실 backend 에 먹인다(테스트용 더미 endpoint 금지 — 손으로 만든
+        //   endpoint 로는 provision 이 끊긴 걸 못 잡는다). CommandSpec.env 가 스폰될 프로세스가 받을 env 다.
+        let spec = ClaudeBackend.build_spec(
+            &AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: ClaudeOutputFormat::StreamJson,
+            },
+            SpawnMode::Fresh,
+            Some(id),
+            PathBuf::from("."),
+            vec![],
+            Some(ep),
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|(k, _)| k == "ENGRAM_SEND_EXE")
+                .map(|(_, v)| v.as_str()),
+            Some("C:/app/engram-send.exe"),
+            "CLI 절대경로가 ENGRAM_SEND_EXE 로 스폰 env 에 실려야: {:?}",
+            spec.env
+        );
+        // PATH 맨 앞 = 형제 디렉토리 — 에이전트(와 그 자식 shell 도구)가 bare `engram-send` 를 해석하는
+        //   경로다. 구분자·표기 차를 흡수하려 문자열 prefix 가 아니라 split_paths 분해로 단언한다.
+        let path = spec
+            .env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.as_str())
+            .expect("send_exe 가 실렸으면 PATH 도 주입돼야");
+        assert_eq!(
+            std::env::split_paths(path).next(),
+            Some(PathBuf::from("C:/app")),
+            "PATH 맨 앞 = engram-send 형제 디렉토리: {path}"
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }

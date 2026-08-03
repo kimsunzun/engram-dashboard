@@ -131,6 +131,14 @@ fn set_engram_exe_env() {
 /// current_exe(데몬)의 형제 `engram-send[.exe]` 절대경로를 찾는다. 못 찾으면 None(warn 로그).
 /// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다 — 그 값은
 /// DaemonControlChannel 로 흘러 provision 마다 ControlEndpoint.send_exe 에 담긴다(env 주입은 backend 소유).
+///
+/// ★"안 쓰는 것처럼 보여도 지우지 말 것"(ADR-0126 결정 3)★: 이 헬퍼가 먹이는 채널을 프라이밍은 이제
+/// **일부러 안 가르친다**(결정 1) — 그래서 호출자가 하나뿐이고 테스트도 없는 게 정상이다. 나중에 커맨드
+/// 계열과 연결할 여지로 배선을 남기기로 한 **사용자 결정**이라, 삭제는 dead-code 정리가 아니라 그 결정에
+/// 대한 회귀다. 이 구간은 테스트가 없어(지우고 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한
+/// 방어선이다 — 뒤 구간(provision→endpoint→스폰 env)은 daemon control 테스트
+/// `provision_mcp_capable_carries_send_exe_into_spawn_env` 가 잡는다.
+// ADR-0126
 fn locate_send_exe() -> Option<PathBuf> {
     const SEND_EXE: &str = if cfg!(windows) {
         "engram-send.exe"
