@@ -464,6 +464,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             0,
             status_sink.clone() as Arc<dyn StatusSink>,
+            crate::agent::output_core::TurnWiring::detached(),
         ));
 
         // pump 가 panic 했다고 가정 → resolve_pump_reason 으로 Error 산출 → finish.
@@ -500,11 +501,13 @@ mod tests {
             uuid::Uuid::new_v4(),
             0,
             sink_a.clone() as Arc<dyn StatusSink>,
+            crate::agent::output_core::TurnWiring::detached(),
         ));
         let core_b = Arc::new(OutputCore::new(
             uuid::Uuid::new_v4(),
             0,
             sink_b.clone() as Arc<dyn StatusSink>,
+            crate::agent::output_core::TurnWiring::detached(),
         ));
 
         // A 의 pump 가 panic → A 만 Failed.

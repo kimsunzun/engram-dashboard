@@ -136,8 +136,9 @@ engram-dashboard-daemon = { path = ".", features = ["test-harness"] }
 #   운영 daemon 바이너리 의존 그래프(위 [dependencies] 의 무-feature core)엔 유니피케이션되지 않는다 —
 #   운영 빌드는 seam 을 컴파일하지 않는다(no-leak). (feature-only dev-dep 재선언 — path 는 위와 동일 crate.)
 engram-dashboard-core = { path = "../engram-dashboard-core", features = ["test-harness"] }
-# ★ADR-0110★: 같은 계열 — 통합 테스트가 메시징 커널의 하네스 seam(`probe_for_test`·`mark_attached_for_test`
-#   등)을 cross-crate 로 쓰므로 dev 그래프에서만 그 기능을 켠다(운영 daemon 바이너리엔 미유니피케이션).
+# ★ADR-0110★: 같은 계열 — 데몬 테스트가 메시징 커널의 하네스 seam(`MessagingService::contract_outcome_for_test`
+#   — connection_core 의 삭제 정리 테스트가 계약 **종결 사유**를 본다)을 cross-crate 로 쓰므로 dev 그래프
+#   에서만 그 기능을 켠다(운영 daemon 바이너리엔 미유니피케이션).
 engram-dashboard-messaging = { path = "../engram-dashboard-messaging", features = ["test-harness"] }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }

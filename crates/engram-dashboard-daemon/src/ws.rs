@@ -216,26 +216,16 @@ impl StatusSink for DaemonStatusSink {
 
 // ── MessagingFlushSink(등장/epoch flush 트리거, ADR-0104 — C1/C2) ──────────────────────────
 
-/// flush worker 로 흐르는 작업 단위(C1 등장 flush + C2 idle 게이트 배선).
+/// flush worker 로 흐르는 작업 단위(C1 등장 flush + C2 idle 게이트 도어벨).
 ///
-/// ★왜 enum 인가(옛 `(String, AgentId)` 튜플 확장)★: C2 가 같은 worker 에 **세 종류**의 일을 더 얹는다 —
-///   턴 관측 tap 부착/해제와 턴 종료 flush. 채널을 늘리면 순서가 갈려(같은 에이전트의 Attach 와 Appear 가
-///   서로 앞지름) 배선 추론이 어려워지므로, **하나의 채널·하나의 소비자**로 유지하고 메시지 종류만 늘린다.
+/// ★하나의 채널·하나의 소비자★: 두 종류를 따로 나르면 같은 에이전트의 등장과 턴 종료가 서로 앞질러
+///   배선 추론이 어려워진다.
 /// ★공통 계약★: 이 메시지들은 전부 **status 콜백/pump 콜백(블록 금지)** 에서 논블록으로 enqueue 되고,
-///   실제 작업(코어 락·링 replay·blocking stdin write)은 worker 가 수행한다(finding 5 계열 규율).
+///   실제 작업(messaging 락·blocking stdin write)은 worker 가 수행한다(finding 5 계열 규율).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlushMsg {
     /// 로스터 등장/epoch bump(그 이름의 도달 후보가 **유일**할 때만) — 그 **이름** 앞 파킹을 일괄 flush.
     Appear { name: String, id: AgentId },
-    /// 턴 관측 tap 부착 요청(C2). subscribe 는 core 락 구간에 들어가므로 status 콜백에서 못 한다.
-    /// ★이름 유일성과 무관하게 id 단위★: tap 은 출력 스트림(= 세션) 단위라 동명 다수여도 각각 붙는다.
-    /// ★재시도 상태를 메시지에 싣지 않는다★: 실패 재시도는 worker 안에서 **즉시 1회**로 끝내고(상한이
-    /// 코드에 박혀 있다) 그 이후는 로스터 diff 재발행에 맡긴다(`handle_attach`) — 메시지에 시도 횟수를
-    /// 실으면 아무도 증가시키지 않는 상태 필드가 남는다.
-    Attach { id: AgentId, epoch: u32 },
-    /// 로스터 이탈(죽음) — 그 id 의 턴 상태·부착 표시 청소(C2). 죽은 에이전트의 busy 플래그가 남으면
-    /// 그 이름 앞 파킹이 영영 대기한다.
-    Detach { id: AgentId },
     /// 턴 종료(idle 전이) 관측 — 그 id 의 파킹을 오래된 순 일괄 주입(C2 idle 게이트, ADR-0104 결정 3).
     Idle { id: AgentId },
 }
@@ -246,11 +236,11 @@ pub enum FlushMsg {
 ///   에이전트가 도구 호출을 연달아 돌리면 짧은 시간에 MessageDone 이 여러 번 나올 수 있고, unbounded 채널
 ///   이라 그만큼 항목이 쌓인다(메모리·처리 낭비 — 대부분 빈 큐 no-op). flush 는 **큐 전체를 drain** 하므로
 ///   같은 id 의 Idle N개는 1개와 결과가 같다 → 접어도 의미가 보존된다.
-/// ★lost wakeup 이 없는 이유(load-bearing)★: 통지 순서가 "① tap 이 busy 해제 → ② notify" 이므로, 접힌
-///   통지가 가리키는 상태 변화는 **아직 처리 안 된 그 Idle** 이 대표한다. 소비자는 **집어들 때 먼저 집합에서
-///   지우고**(그 뒤에 게이트를 보고 flush) 처리하므로, 처리 도중 도착한 새 MessageDone 은 다시 enqueue 된다.
-/// ★로스터 생애주기 메시지는 절대 접지 않는다★: Attach/Detach/Appear 는 각각 고유한 사건이라 무손실이어야
-///   한다(접으면 tap 부착·상태 청소가 사라진다). 이 coalescer 는 **Idle 전용**이다.
+/// ★lost wakeup 이 없는 이유(load-bearing)★: 코어가 "① 턴 관측 표 갱신 → ② 통지" 순서를 지키므로
+///   (output_core.rs emit), 접힌 통지가 가리키는 상태 변화는 **아직 처리 안 된 그 Idle** 이 대표한다.
+///   소비자는 **집어들 때 먼저 집합에서 지우고**(그 뒤에 게이트를 보고 flush) 처리하므로, 처리 도중 도착한
+///   새 턴 종료 신호는 다시 enqueue 된다.
+/// ★Appear 는 절대 접지 않는다★: 등장은 고유한 사건이라 무손실이어야 한다. 이 coalescer 는 **Idle 전용**이다.
 #[derive(Debug, Default)]
 pub struct IdleCoalescer {
     pending: Mutex<std::collections::HashSet<AgentId>>,
@@ -278,7 +268,7 @@ impl IdleCoalescer {
     }
 }
 
-/// tap → flush worker 통지 구현 — `IdleNotifier`(턴 종료 관측)와 `FlushTrigger`(서비스 도어벨)를 **같은
+/// 커널 → flush worker 통지 구현 — `IdleNotifier`(상한 sweep 의 깨우기)와 `FlushTrigger`(서비스 도어벨)를 **같은
 ///   채널**로 잇는다(C2). 둘 다 결과가 "그 id 의 파킹 큐를 flush" 라 메시지를 나눌 이유가 없다.
 ///
 /// ★논블록 계약(load-bearing)★: `notify_idle` 은 **pump 스레드**에서, `request_flush` 는 발신(MCP/HTTP)
@@ -352,24 +342,21 @@ pub struct MessagingFlushSink {
     /// flush 작업(FlushMsg)을 flush worker 로 보내는 채널(unbounded — status 콜백을 절대 막지 않게).
     ///   worker 미가동/드롭이어도 send 실패는 무시(파킹은 다음 등장에 재시도 — 무손실 유지).
     flush_tx: mpsc::UnboundedSender<FlushMsg>,
-    /// 로스터 diff 시퀀싱 상태(스냅샷 2축 + enqueue 직렬화) — flush worker 와 **공유**한다(attach 실패
-    ///   피드백이 여기 스냅샷을 무효화해야 재시도가 열린다 — `RosterDiff::forget_attached`).
-    diff: Arc<RosterDiff>,
+    /// 로스터 diff 시퀀싱 상태(스냅샷 + enqueue 직렬화).
+    diff: RosterDiff,
+    /// 턴 종료 push(코어 `StatusSink::turn_ended`)를 도어벨로 옮기는 출구 — coalescer 를 통지 측과 공유한다.
+    idle: ChannelIdleNotifier,
 }
 
-/// ★로스터 diff 시퀀싱 상태(C2 리뷰 fix 7)★ — 이름 축·id 축 직전 스냅샷을 **한 락** 아래 두고, 그 락을
-///   **든 채로 채널 enqueue 까지** 끝낸다.
+/// ★로스터 diff 시퀀싱 상태(C2 리뷰 fix 7)★ — 직전 스냅샷을 락 아래 두고, 그 락을 **든 채로 채널
+///   enqueue 까지** 끝낸다.
 ///
-/// ★왜 한 락 + 락 보유 중 send 인가(load-bearing)★: 옛 구현은 스냅샷을 락 안에서 갱신하고 **락을 놓은
-///   뒤** send 했다. 그러면 `agent_list_updated` 콜백 둘이 동시에 들어올 때(코어는 이 콜백의 직렬화를
-///   보장하지 않는다) 스냅샷 갱신 순서와 enqueue 순서가 **갈릴 수 있다** — 예: 나중 스냅샷(에이전트 부활)
-///   의 Attach 가 먼저 enqueue 되고, 앞선 스냅샷(그 에이전트 사망)의 Detach 가 뒤에 도착해 방금 붙인
-///   tap 의 상태·부착 표시를 지운다(그 에이전트는 그 뒤로 영구 idle 폴백 = 턴 중 주입). enqueue 를 락
-///   안으로 넣으면 "스냅샷 순서 = 채널 순서" 가 구조적으로 보장된다. unbounded send 는 논블록이라 락
-///   보유 구간이 여전히 짧다(콜백 blocking 금지 규율 유지).
-/// ★두 축을 따로 두는 게 load-bearing★: 이름 축(`prev`)은 동명 다수를 skip 하지만(배달 대상 모호), tap 은
-///   출력 스트림 단위라 동명이어도 **전부** 붙어야 한다(붙지 않으면 그 에이전트는 영구 idle 폴백). 판정
-///   기준이 다르므로 스냅샷도 분리한다 — 단, **같은 락** 아래 둔다(위 순서 보장).
+/// ★왜 락 보유 중 send 인가(load-bearing)★: 스냅샷을 락 안에서 갱신하고 락을 놓은 뒤 send 하면,
+///   `agent_list_updated` 콜백 둘이 동시에 들어올 때(코어는 이 콜백의 직렬화를 보장하지 않는다) 스냅샷
+///   갱신 순서와 enqueue 순서가 **갈릴 수 있다** — 옛 스냅샷이 만든 Appear 가 새 스냅샷의 것보다 뒤에
+///   도착해 사라진 incarnation 으로 flush 를 건다. enqueue 를 락 안으로 넣으면 "스냅샷 순서 = 채널 순서"
+///   가 구조적으로 보장된다. unbounded send 는 논블록이라 락 보유 구간이 여전히 짧다(콜백 blocking 금지
+///   규율 유지).
 #[derive(Debug, Default)]
 pub struct RosterDiff {
     inner: Mutex<RosterSnapshots>,
@@ -379,8 +366,6 @@ pub struct RosterDiff {
 struct RosterSnapshots {
     /// 직전 로스터 스냅샷(name→(epoch, id)). diff 로 newly-live/epoch-bump 를 판정(배달 축).
     prev: HashMap<String, (u32, AgentId)>,
-    /// 직전 **id 축** 스냅샷(id→epoch) — 턴 관측 tap 의 부착/해제 판정용.
-    prev_ids: HashMap<AgentId, u32>,
 }
 
 impl RosterDiff {
@@ -388,67 +373,14 @@ impl RosterDiff {
         Self::default()
     }
 
-    /// ★attach 실패 피드백(C2 리뷰 fix 8a)★: 이 id 의 부착 스냅샷 항목을 지운다 → 다음 로스터 업데이트가
-    ///   그 id 를 "새로 등장" 으로 보고 Attach 를 다시 낸다.
-    ///
-    /// ★없으면 무슨 일이 나나★: 스냅샷은 Attach 를 **낸 시점에** 갱신되므로, worker 의 부착이 실패해도
-    ///   스냅샷은 "붙었다" 고 남는다 → 로스터가 그대로인 동안 Attach 가 다시 나오지 않아 그 에이전트는
-    ///   **영구히 tap 없이** 돈다(게이트 관점 항상 idle = 턴 중 주입). 조용한 기능 상실이라 반드시 되돌린다.
-    pub fn forget_attached(&self, id: AgentId) {
-        self.inner
-            .lock()
-            .expect("flush roster diff poisoned")
-            .prev_ids
-            .remove(&id);
-    }
-
     /// 로스터 업데이트 1회 처리 — diff 를 계산해 **락 보유 중** 순서대로 enqueue 한다.
-    ///
-    /// enqueue 순서(같은 업데이트 안에서 load-bearing): **Attach → Detach → Appear**.
-    ///   Attach 를 Appear 보다 앞세우는 이유: 등장 flush 주입 **이전**에 tap 이 붙어야 그 주입이 만드는
-    ///   유저 에코부터 관측된다(턴 상태 표가 첫 턴부터 정확해짐). 뒤집으면 첫 턴을 놓쳐 그 사이 도착한
-    ///   메시지가 턴 중에 주입될 수 있다. worker 도 Attach 를 **완료한 뒤** Appear 를 flush lane 으로
-    ///   넘기므로(ws.rs run_flush_worker) 이 순서가 실행까지 보존된다.
     fn dispatch(&self, agents: &[CoreAgentInfo], flush_tx: &mpsc::UnboundedSender<FlushMsg>) {
         let mut st = self.inner.lock().expect("flush roster diff poisoned");
 
-        // ── ① id 축 diff(tap 부착/해제) ────────────────────────────────────────────────
-        //   도달 가능(산 + structured) 후보만 — 비-structured 는 턴 이벤트 자체가 없고(busy 관측 불가)
-        //   파킹 수신 대상도 아니다(게이트가 보는 집합과 tap 집합을 일치시킨다 — busy.rs 헤더 프록시).
-        let mut next_ids: HashMap<AgentId, u32> = HashMap::new();
-        for a in agents {
-            let reachable = matches!(a.status, CoreStatus::Running | CoreStatus::Exiting)
-                && a.capabilities.output.structured;
-            if reachable {
-                next_ids.insert(a.id, a.epoch);
-            }
-        }
-        for (id, epoch) in &next_ids {
-            // 새 id 또는 epoch 변경(= 새 OutputCore — 구독은 epoch 을 넘지 못한다) → 부착 요청.
-            //   중복 요청은 tracker 가 접는다(attach dedup) — 여기선 노이즈만 줄인다.
-            if st.prev_ids.get(id) != Some(epoch) {
-                let _ = flush_tx.send(FlushMsg::Attach {
-                    id: *id,
-                    epoch: *epoch,
-                });
-            }
-        }
-        // 이탈(로스터에서 사라짐 = terminal/reap) → 상태 청소. 죽은 대상의 busy 플래그를 남기면
-        //   그 이름 앞 파킹이 다음 등장까지 stranded 된다.
-        for id in st.prev_ids.keys() {
-            if !next_ids.contains_key(id) {
-                let _ = flush_tx.send(FlushMsg::Detach { id: *id });
-            }
-        }
-        st.prev_ids = next_ids;
-
-        // ── ② 이름 축 diff(등장 flush) ─────────────────────────────────────────────────
         // 1) ★산(Running|Exiting) 후보 전원★을 **이름별로 그룹핑**한다. ★4차 개정(ADR-0116 결정 7)★:
         //   여기엔 **structured 조건을 걸지 않는다** — 로스터 자격에서 capability 가 빠졌으므로 턴 신호 없는
-        //   세션도 파킹을 들고 있을 수 있다(그 부류의 유일한 파킹 경로 = **주입 실패**, spec §5 분기 3). 옛
-        //   필터를 유지하면 그 파킹분에 재등장 flush 계기가 **영원히 없어** 24h TTL 로 조용히 만료된다.
-        //   위 ①(tap 부착)은 반대로 structured 조건을 유지한다 — 턴 이벤트가 없는 상대에 tap 을 붙일 이유가
-        //   없고, 그쪽은 "게이트가 보는 집합 = tap 집합" 규율의 자리다(busy.rs 헤더).
+        //   세션도 파킹을 들고 있을 수 있다(그 부류의 유일한 파킹 경로 = **주입 실패**, spec §5 분기 3).
+        //   그 조건을 되살리면 그 파킹분에 재등장 flush 계기가 **영원히 없어** 24h TTL 로 조용히 만료된다.
         // ★finding 2(BLOCK): 동명 다수 skip(last-write-wins 금지)★: 예전엔 같은 이름을 마지막 것으로
         //   덮어(last-write-wins) 임의 incarnation 으로 flush 했다 — 이름-키 파킹이 엉뚱한 동명 에이전트로
         //   갈 수 있어 send-side RECIPIENT_AMBIGUOUS 정책과 어긋난다. 이제 그 이름을 지닌 도달 가능
@@ -508,33 +440,34 @@ impl RosterDiff {
 
 impl MessagingFlushSink {
     /// 운영 생성자 — DaemonStatusSink 를 감싼다(프론트 broadcast delegate + flush 트리거). `flush_tx` 는
-    ///   flush worker 로 이어지는 채널의 송신단이고, `diff` 는 그 worker 와 공유하는 시퀀싱 상태다(부팅에서 만든다).
+    ///   flush worker 로 이어지는 채널의 송신단이고, `idle` 은 flush 레인과 공유하는 Idle coalescer 다.
     pub fn new(
         inner: DaemonStatusSink,
         flush_tx: mpsc::UnboundedSender<FlushMsg>,
-        diff: Arc<RosterDiff>,
+        idle: Arc<IdleCoalescer>,
     ) -> Self {
-        Self::new_boxed(Box::new(inner), flush_tx, diff)
+        Self::new_boxed(Box::new(inner), flush_tx, idle)
     }
 
     /// 테스트 생성자 — 임의 inner StatusSink(NoopSink 등)를 감싼다. flush 로직만 검증할 때.
     pub fn new_test(
         inner: Box<dyn StatusSink>,
         flush_tx: mpsc::UnboundedSender<FlushMsg>,
-        diff: Arc<RosterDiff>,
+        idle: Arc<IdleCoalescer>,
     ) -> Self {
-        Self::new_boxed(inner, flush_tx, diff)
+        Self::new_boxed(inner, flush_tx, idle)
     }
 
     fn new_boxed(
         inner: Box<dyn StatusSink>,
         flush_tx: mpsc::UnboundedSender<FlushMsg>,
-        diff: Arc<RosterDiff>,
+        idle: Arc<IdleCoalescer>,
     ) -> Self {
         Self {
+            idle: ChannelIdleNotifier::new(flush_tx.clone(), idle),
             inner,
             flush_tx,
-            diff,
+            diff: RosterDiff::new(),
         }
     }
 }
@@ -560,59 +493,29 @@ impl MessagingFlushSink {
 ///
 /// ★slot 늦은 주입★: MessagingService 는 manager 조립 후 생기므로 worker 도 slot(OnceLock)로 받아, 대상이
 ///   와도 slot 미설정이면 건너뛴다(부팅 초기 짧은 창엔 파킹 없음 — 무해). 채널 닫힘(sink 드롭)이면 종료.
-/// ★C2 추가 책임★: 같은 채널이 턴 관측 tap 의 **부착(Attach)/해제(Detach)** 와 **턴 종료 flush(Idle)** 도
-///   나른다. Attach 는 코어 subscribe(락 구간)이라 status 콜백에서 할 수 없어 여기서 blocking pool 로 던지고,
-///   Detach 는 순수 맵 조작이라 인라인, Idle 은 Appear 와 같은 flush 경로를 쓰되 이름 대신 **id** 로
-///   진입한다(tap 은 이름을 모른다).
 ///
-/// ★2-레인 파이프라인(C2 리뷰 fix 3 — head-of-line blocking 제거, load-bearing)★: 단일 소비자였을 때는
-///   한 수신자의 **막힌 stdin write** 가 그 뒤의 **모든** 메시지를 세우는 문제가 있었다 — Attach/Detach 는
-///   배달과 무관한 생애주기 작업(tap 부착·상태 청소)인데도 배달 뒤에서 굶어, 그 사이 등장한 에이전트들이
-///   전부 tap 없이(=게이트 없이) 돌게 된다. 그래서 레인을 둘로 나눈다:
-///   - **main lane(이 함수)** — Attach/Detach 를 **인라인 처리**하고, 배달 작업(Appear/Idle)은 flush 레인으로
-///     **forward** 한다. Attach 의 `spawn_blocking(...).await` 는 허용한다: replay 는 링(≤4096, 메모리)
-///     한계이고 **자식 프로세스에 의존하지 않으므로** 유계 시간에 끝난다(막히는 write 와 성질이 다르다).
-///     live-only 구독(busy.rs fix 1)이라 그 replay 조차 0건이다.
-///   - **flush lane(`run_flush_lane`)** — 자체 task + 자체 채널. 여기의 `spawn_blocking` 이 막혀도 main
-///     lane 은 계속 돌아 Attach/Detach 가 제때 처리된다. 레인 내부는 **여전히 직렬**이라 같은 수신자 배치
-///     순서(오래된 순)는 보존된다(병렬화하면 순서가 깨진다).
-///   ★Attach → Appear 순서 보존은 **한 로스터 업데이트 안에서만** 성립한다(round-3 finding 7 — 범위 정정)★:
-///     같은 업데이트가 낸 Attach 를 main lane 이 처리 완료한 뒤 그 업데이트의 Appear 를 forward 하므로, 그
-///     업데이트가 트리거한 등장 flush 주입 전엔 tap 이 붙어 있다(RosterDiff 주석). **업데이트를 넘으면
-///     보장되지 않는다** — 업데이트 N 의 Appear 가 레인에서 처리되는 동안 업데이트 N+1 의 Attach 가 main
-///     lane 에서 돌 수 있고(두 레인은 서로 기다리지 않는다), 그러면 N+1 이 등장시킨 에이전트의 첫 턴 일부를
-///     tap 이 놓칠 수 있다. 결과는 **타이밍 어긋남뿐이고 유실은 없다**: 놓친 구간의 busy 관측이 없으면
-///     게이트는 idle 폴백(positive-knowledge-only)이라 그 배치가 턴 중에 주입될 수 있을 뿐이고, CLI 는 턴 중
-///     stdin 을 다음 턴으로 큐잉한다(busy.rs `BUSY_MAX_TURN` 주석의 같은 근거).
-///     ★"attached 표시 없으면 Appear forward 를 미룬다" 는 사전 점검은 **채택하지 않았다**(내부 결정 — 보고):
-///     그 조건은 정상 상태(부착 실패·비-structured 수신자)에서도 참이라 배달을 **영구 보류**할 수 있고,
-///     막으려는 것은 유실 없는 타이밍 어긋남뿐이다. 배달 정지 위험을 타이밍 개선과 바꾸지 않는다.
+/// ★2-레인 파이프라인(C2 리뷰 fix 3 — head-of-line blocking 격리, load-bearing)★:
+///   - **main lane(이 함수)** — 채널에서 꺼내 flush 레인으로 **forward** 만 한다(논블록). 여기가 막히지
+///     않아야 status 콜백이 넣은 작업이 계속 흡수된다.
+///   - **flush lane(`run_flush_lane`)** — 자체 task + 자체 채널. `spawn_blocking` 이 자식 stdin write 로
+///     막히는 곳이 여기다. 레인 내부는 **여전히 직렬**이라 같은 수신자 배치 순서(오래된 순)는 보존된다
+///     (병렬화하면 순서가 깨진다).
 ///
 /// ★레인 task 는 **호출자(부팅)가 소유**한다 — 이 함수가 spawn 하지 않는다(round-3 finding 1, BLOCK)★:
-///   옛 구현은 레인을 이 future **안에서** spawn 하고 JoinHandle 을 지역 변수로 들었다. 그러면 종료 경로가
-///   main lane 을 abort 할 때 그 핸들이 **그냥 drop**(= detach, abort 아님)되므로 레인은 계속 살아 있고,
-///   lib.rs 의 5s join belt 는 **정작 blocking 작업이 없는** main lane 만 감시하게 된다(모든 blocking inject 는
-///   레인으로 옮겨졌다) → 진짜 blocking 을 지닌 task 가 belt 밖에 남아 런타임 drop 이 종료 시점에 hang 할 수
-///   있다(round-3 finding 1 이 고쳤던 실패 모드의 재발). 그래서 두 task 를 **둘 다 호출자가 들고** 각각
-///   abort + belt 로 내린다(`spawn_flush_worker` / `FlushWorkerHandles::shutdown`).
+///   레인을 이 future **안에서** spawn 하고 JoinHandle 을 지역 변수로 들면, 종료 경로가 main lane 을 abort
+///   할 때 그 핸들이 **그냥 drop**(= detach, abort 아님)되므로 레인은 계속 살아 있고 lib.rs 의 5s join belt 는
+///   **정작 blocking 작업이 없는** main lane 만 감시하게 된다(모든 blocking inject 는 레인에 있다) → 진짜
+///   blocking 을 지닌 task 가 belt 밖에 남아 런타임 drop 이 종료 시점에 hang 할 수 있다. 그래서 두 task 를
+///   **둘 다 호출자가 들고** 각각 abort + belt 로 내린다(`spawn_flush_worker` / `FlushWorkerHandles::shutdown`).
 /// ★수명★: main lane 이 끝나면(또는 abort 되면) `lane_tx` 가 drop 되어 레인도 자연 종료한다 — 단 레인은
 ///   **큐에 남은 배달을 다 처리한 뒤** 끝나므로 즉시 멈추지 않는다. 그래서 종료 경로는 `shutdown_all`(자식
 ///   kill·파이프 닫기)로 막힌 write 를 먼저 풀고, main → lane 순으로 abort 한다(lib.rs 종료 주석).
 pub async fn run_flush_worker(
     mut flush_rx: mpsc::UnboundedReceiver<FlushMsg>,
-    wiring: FlushWiring,
     lane_tx: mpsc::UnboundedSender<FlushMsg>,
 ) {
     while let Some(msg) = flush_rx.recv().await {
         match msg {
-            FlushMsg::Detach { id } => {
-                // 순수 맵 조작(짧은 락 2개, 외부 호출 없음) — spawn_blocking 불요.
-                wiring.busy.forget(id);
-            }
-            FlushMsg::Attach { id, epoch } => {
-                handle_attach(&wiring, id, epoch).await;
-            }
-            // 배달 작업 → flush 레인으로 넘기고 즉시 다음 생애주기 메시지를 본다.
             other @ (FlushMsg::Appear { .. } | FlushMsg::Idle { .. }) => {
                 // ★send 실패를 삼키지 않는다(round-3 finding 1)★: 레인이 죽었다면(패닉 등) 이 경로의 조용한
                 //   `let _ =` 는 **모든 배달이 영구 정지**한 사실을 감춘다(파킹만 쌓이다 TTL 로 만료 —
@@ -634,7 +537,7 @@ pub async fn run_flush_worker(
 /// ★왜 묶음인가(round-3 finding 1)★: 레인이 detach 되면 종료 belt 가 무의미해진다(위 `run_flush_worker`
 ///   주석). 조립·종료를 한 타입에 모아 호출자가 **한쪽만 내리는 실수**를 구조적으로 못 하게 한다.
 pub struct FlushWorkerHandles {
-    /// 생애주기 레인(Attach/Detach) — blocking 작업은 유계(subscribe).
+    /// 수신 레인 — 채널에서 꺼내 배달 레인으로 넘기기만 한다(blocking 작업 없음).
     main: tokio::task::JoinHandle<()>,
     /// 배달 레인(Appear/Idle) — 여기 `spawn_blocking` 이 자식 stdin write 로 막힐 수 있다.
     lane: tokio::task::JoinHandle<()>,
@@ -650,8 +553,7 @@ impl FlushWorkerHandles {
     ///   그래도 이 종료 경로가 hang 하지 않는 이유는 belt 가 아니라 **호출 순서**다:
     ///     ① 여기 오기 전에 `shutdown_all` 이 끝나 있다 → 자식이 kill 되고 stdin 파이프가 닫힌다 → 그 파이프에
     ///        막혀 있던 `inject`(동기 write_all+flush)가 **에러로 풀려** 클로저가 스스로 반환한다.
-    ///     ② 배달 레인 밖의 유일한 blocking 작업인 `BusyTracker::attach` 의 subscribe(replay)는 **메모리
-    ///        바운드**다(링 ≤4096 복사, 외부 I/O 없음) → 유계 시간에 끝난다.
+    ///     ② 배달 레인 밖에는 blocking 작업이 없다(main lane 은 forward 만 한다).
     ///   즉 **kill-first 순서가 실제 보증이고, abort + 5s belt 는 관측 장치**다 — belt 가 실제로 발화한다면
     ///   그건 위 두 전제 중 하나가 깨졌다는 신호(warn 로그)이고, 그러려면 kill 된 자식의 파이프 write 가 에러도
     ///   안 내고 영원히 blocking 하는 **병리적 OS 동작**이 필요하다. 그래서 여기서 더 강한 취소 수단(별도
@@ -685,81 +587,20 @@ pub fn spawn_flush_worker(
     wiring: FlushWiring,
 ) -> FlushWorkerHandles {
     let (lane_tx, lane_rx) = mpsc::unbounded_channel::<FlushMsg>();
-    let lane = tokio::spawn(run_flush_lane(
-        lane_rx,
-        wiring.messaging.clone(),
-        wiring.idle.clone(),
-    ));
-    let main = tokio::spawn(run_flush_worker(flush_rx, wiring, lane_tx));
+    let lane = tokio::spawn(run_flush_lane(lane_rx, wiring.messaging, wiring.idle));
+    let main = tokio::spawn(run_flush_worker(flush_rx, lane_tx));
     FlushWorkerHandles { main, lane }
 }
 
 /// 종료 join belt — abort 후 이 시간 안에 안 끝나면 warn 후 detach(데몬 종료 hang 방지, round-3 finding 1).
 const FLUSH_JOIN_BELT: Duration = Duration::from_secs(5);
 
-/// Attach 1건 집행 — blocking pool 격리 + 실패 피드백(C2 리뷰 fix 8a).
-///
-/// `AttachOutcome::Failed`(subscribe 가 Err 를 돌려준 정상 실패)면:
-///   ① `RosterDiff::forget_attached` 로 diff 스냅샷을 무효화한다 → 다음 로스터 업데이트가 Attach 를 다시
-///      낸다(스냅샷을 그대로 두면 그 에이전트는 영구히 tap 없이 = 게이트 없이 돈다).
-///   ② **유계 즉시 재시도 1회**. 채널 자기-send 로 재큐잉하지 않는 이유: worker 가 자기 채널 송신단을
-///      들면 채널이 영원히 닫히지 않아 종료 인과가 흐려진다. 인라인 재시도는 상한이 이 함수 구조에 박혀
-///      있어(재시도의 재시도가 없다) 폭주가 불가능하다.
-/// ★성공 재시도 후의 잔여★: `forget_attached` 로 스냅샷을 이미 지웠으므로 다음 로스터 업데이트가 같은
-///   Attach 를 한 번 더 낸다 → tracker 가 `AlreadyAttached` 로 접는다(무해한 no-op).
-///
-/// ★패닉은 **재시도하지 않는다**(round-3 finding 6 · load-bearing)★: core `subscribe_from` 은 sink 를
-///   구독자 목록에 **push 한 뒤** replay 락을 `expect` 로 잡는다(output_core.rs) — 거기서 패닉하면 ① 그 sink
-///   는 **이미 등록된 채** 남고 ② subscribers 락이 poison 돼 그 에이전트의 pump 가 죽는다. 즉 패닉 후의
-///   재시도는 "고장 난 core 에 sink 를 하나 더 붙이는" 시도이고, 성공하면 tap 이 둘(통지 중복), 실패하면
-///   그냥 낭비다. 그래서 패닉(JoinError)은 warn + 스냅샷 무효화까지만 하고 **즉시 반환**한다 — 재시도 판단은
-///   다음 로스터 업데이트에 맡긴다(그때는 epoch/상태가 바뀌어 있을 수 있다). 그 전까지 그 대상은 게이트
-///   관점 idle 폴백(positive-knowledge-only)이라 배달이 막히지는 않는다.
-///   JoinError 가 Cancelled 인 경우(런타임 종료)도 같은 처리 — 종료 중에 재시도할 이유가 없다.
-async fn handle_attach(wiring: &FlushWiring, id: AgentId, epoch: u32) {
-    use engram_dashboard_messaging::busy::AttachOutcome;
-    let busy = wiring.busy.clone();
-    // subscribe = 코어 subscribers 락 구간 → runtime worker 를 굶기지 않게 blocking pool 로.
-    //   live-only 구독이라 링 replay 는 0건이고, 이 호출은 자식 프로세스에 의존하지 않는다(유계).
-    let outcome = match tokio::task::spawn_blocking(move || busy.attach(id, epoch)).await {
-        Ok(o) => o,
-        Err(e) => {
-            // blocking task panic/cancel — 부착 표시는 tracker 의 Drop 가드가 이미 되돌렸다(busy.rs fix 8b).
-            //   ★재시도 금지★(위 헤더): 등록된 sink + poison 된 락 위에 두 번째 sink 를 얹지 않는다.
-            tracing::warn!(
-                agent = %id,
-                epoch,
-                panicked = e.is_panic(),
-                "턴 tap attach blocking task 비정상 종료 — 재시도 없이 다음 로스터 업데이트에 맡김(그 전까지 idle 폴백): {e}"
-            );
-            wiring.diff.forget_attached(id);
-            return;
-        }
-    };
-    if outcome != AttachOutcome::Failed {
-        return;
-    }
-    // 정상 실패 → 다음 로스터 diff 가 재시도할 수 있게 스냅샷 무효화 + 즉시 1회 재시도.
-    wiring.diff.forget_attached(id);
-    tracing::debug!(agent = %id, epoch, "턴 tap attach 실패 — 즉시 1회 재시도(유계)");
-    let busy = wiring.busy.clone();
-    match tokio::task::spawn_blocking(move || busy.attach(id, epoch)).await {
-        Ok(AttachOutcome::Failed) | Err(_) => {
-            // 재시도도 실패 — 여기서 멈춘다(다음 로스터 업데이트가 다시 시도). 그 전까지 그 대상은
-            //   게이트 관점 idle 폴백(positive-knowledge-only) — 배달은 막히지 않는다.
-            wiring.diff.forget_attached(id);
-            tracing::warn!(agent = %id, epoch, "턴 tap attach 재시도 실패 — 다음 로스터 업데이트에 재시도(그 전까지 idle 폴백)");
-        }
-        Ok(_) => {}
-    }
-}
-
 /// ★flush 레인(C2 리뷰 fix 3)★ — 배달 작업(Appear/Idle) 전용 **직렬** 소비자. 여기의 blocking write 가
-///   막혀도 main lane(Attach/Detach)은 계속 돈다.
+///   막혀도 수신 레인은 계속 돌아 채널을 비운다.
 ///
 /// ★직렬 유지가 load-bearing★: 같은 수신자의 배치는 "오래된 순" 을 지켜야 하므로(ADR-0104) 이 레인 안에서
 ///   병렬 실행하지 않는다. 서로 다른 수신자끼리도 직렬이라 한 막힌 수신자가 다른 수신자의 배달을 늦출 수는
-///   있으나(수용된 잔여 — 사람 대화 수준 메시지율), **생애주기 작업**은 더 이상 그 뒤에 서지 않는다.
+///   있으나(수용된 잔여 — 사람 대화 수준 메시지율), 채널 수신 자체는 그 뒤에 서지 않는다.
 async fn run_flush_lane(
     mut lane_rx: mpsc::UnboundedReceiver<FlushMsg>,
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
@@ -804,8 +645,6 @@ async fn run_flush_lane(
                     tracing::warn!("idle flush blocking task 실패(레인 계속 — 패닉 격리는 debug 한정, release=abort): {e}");
                 }
             }
-            // 생애주기 메시지는 main lane 이 처리한다(여기 오지 않는다 — forward 분기 참조).
-            FlushMsg::Attach { .. } | FlushMsg::Detach { .. } => {}
         }
     }
     tracing::debug!("flush 레인 종료(채널 닫힘)");
@@ -816,11 +655,7 @@ async fn run_flush_lane(
 pub struct FlushWiring {
     /// MessagingService 늦은 주입 슬롯(manager 조립 후에 채워진다).
     pub messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    /// 턴 관측 tracker — Attach/Detach 집행 대상.
-    pub busy: Arc<engram_dashboard_messaging::busy::BusyTracker>,
-    /// 로스터 diff 시퀀싱 상태 — attach 실패 시 스냅샷 무효화(재시도 개방)용으로 공유한다.
-    pub diff: Arc<RosterDiff>,
-    /// Idle coalescing 집합 — 통지 측(ChannelIdleNotifier)과 공유(집어들 때 해제).
+    /// Idle coalescing 집합 — 통지 측(`MessagingFlushSink`)과 공유(집어들 때 해제).
     pub idle: Arc<IdleCoalescer>,
 }
 
@@ -830,10 +665,8 @@ impl StatusSink for MessagingFlushSink {
     }
 
     fn agent_list_updated(&self, agents: Vec<CoreAgentInfo>) {
-        // ★로스터 diff → flush 작업 enqueue(C2 리뷰 fix 7)★: 두 축(id·이름) 스냅샷 갱신과 채널 enqueue 를
-        //   `RosterDiff` 가 **한 락 아래에서** 한다 — 동시 콜백 사이에서 "스냅샷 순서 = 채널 순서" 를
-        //   보장해야 옛 Detach 가 새 Attach 뒤에 도착해 방금 붙인 tap 상태를 지우는 사고가 없다(그 rationale
-        //   과 Attach→Detach→Appear 순서 근거는 `RosterDiff::dispatch`). unbounded send 는 논블록이라 이
+        // ★로스터 diff → flush 작업 enqueue(C2 리뷰 fix 7)★: 스냅샷 갱신과 채널 enqueue 를 `RosterDiff` 가
+        //   **한 락 아래에서** 한다(그 rationale 은 `RosterDiff` 주석). unbounded send 는 논블록이라 이
         //   콜백은 여전히 배치 크기와 무관하게 짧다(finding 5 — 실제 flush 는 worker 가 수행).
         self.diff.dispatch(&agents, &self.flush_tx);
 
@@ -844,6 +677,20 @@ impl StatusSink for MessagingFlushSink {
 
     fn restore_result(&self, report: CoreRestoreReport) {
         self.inner.restore_result(report);
+    }
+
+    /// ★턴 종료 push → flush 도어벨(ADR-0113 결정 3 — 데몬은 중계만)★. 여기서 하는 일은 coalescing
+    ///   판정 + 논블록 채널 send 뿐이다(그 계약은 `StatusSink::turn_ended`).
+    // ADR-0113
+    fn turn_ended(&self, id: AgentId, epoch: u32) {
+        // epoch 을 도어벨에 싣지 않는 이유: flush 는 **에이전트 단위** 큐를 여는 동작이고, 어느 화신이
+        //   끝났든 그 시점의 현재 화신에게 배달하는 게 맞다(메일은 논리 에이전트를 향한다 — ADR-0086 §F5).
+        self.idle.enqueue(id);
+        // ★감싼 sink 로도 반드시 흘린다(decorator 계약)★: 이 wrapper 가 데몬이 설치하는 **유일한**
+        //   StatusSink 이고 이 훅은 기본 구현이 no-op 이라, 빠뜨리면 안쪽이 이 훅을 구현하는 날
+        //   **컴파일 에러 없이** 조용히 죽는다. 턴 상태를 프론트/LLM 제어 표면으로 내보내는 경로가
+        //   그 안쪽에 생길 예정이다(ADR-0113 §영향 — §5 정합).
+        self.inner.turn_ended(id, epoch);
     }
 }
 
@@ -1761,23 +1608,16 @@ mod tests {
 
     /// flush 작업만 뽑는 sink + 그 채널 수신단을 만든다(worker 미배선 — diff 만 관측).
     fn flush_sink() -> (MessagingFlushSink, mpsc::UnboundedReceiver<FlushMsg>) {
-        let (sink, rx, _diff) = flush_sink_with_diff();
+        let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
+        let sink = MessagingFlushSink::new_test(
+            Box::new(TestNoopSink),
+            tx,
+            Arc::new(IdleCoalescer::new()),
+        );
         (sink, rx)
     }
 
-    /// diff 상태까지 함께 돌려주는 조립 — attach 실패 피드백(forget_attached) 검증용.
-    fn flush_sink_with_diff() -> (
-        MessagingFlushSink,
-        mpsc::UnboundedReceiver<FlushMsg>,
-        Arc<RosterDiff>,
-    ) {
-        let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
-        let diff = Arc::new(RosterDiff::new());
-        let sink = MessagingFlushSink::new_test(Box::new(TestNoopSink), tx, diff.clone());
-        (sink, rx, diff)
-    }
-
-    /// 채널에 쌓인 모든 작업을 순서대로 뽑는다(C2 — Attach/Detach/Appear/Idle 전부).
+    /// 채널에 쌓인 모든 작업을 순서대로 뽑는다(Appear/Idle 전부).
     fn drain_msgs(rx: &mut mpsc::UnboundedReceiver<FlushMsg>) -> Vec<FlushMsg> {
         let mut out = Vec::new();
         while let Ok(t) = rx.try_recv() {
@@ -1898,12 +1738,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_sink_appears_for_a_turn_signal_less_agent_but_never_taps_it() {
-        // ★4차 개정(ADR-0116 결정 7)★: 두 축이 **다른 술어**를 쓴다 —
-        //   ② 이름 축(등장 flush) = 상태만 → 턴 신호 없는 산 세션도 **Appear 대상**이다(그 부류도 주입 실패로
-        //      파킹을 들고 있을 수 있고, 재등장이 그 유일한 flush 계기다).
-        //   ① id 축(tap 부착) = 상태 + structured → 턴 이벤트가 없는 상대엔 **Attach 하지 않는다**.
-        //   terminal 상태는 어느 축에도 안 든다.
+    fn flush_sink_appears_for_a_turn_signal_less_agent_and_ignores_the_dead() {
+        // ★4차 개정(ADR-0116 결정 7)★: 등장 flush 의 유일한 조건은 **상태**다 — 턴 신호 없는 산 세션도
+        //   Appear 대상이다(그 부류도 주입 실패로 파킹을 들고 있을 수 있고, 재등장이 그 유일한 flush 계기다).
+        //   terminal 은 어느 쪽도 아니다.
         let (sink, mut rx) = flush_sink();
         let tui = AgentId::new_v4();
         let dead = AgentId::new_v4();
@@ -1917,170 +1755,34 @@ mod tests {
                 name: "tui".to_string(),
                 id: tui,
             }],
-            "턴 신호 없는 산 세션 = Appear 만(Attach 없음) · terminal 은 아무것도 아님"
+            "턴 신호 없는 산 세션 = Appear · terminal 은 아무것도 아님"
         );
     }
 
-    // ── 7b. C2: id 축 diff — 턴 관측 tap 부착/해제 enqueue(ADR-0104 결정 3) ─────────────────
+    // ── 7b. 턴 종료 push → 도어벨(ADR-0113 — 데몬은 중계만) ─────────────────────────────
 
     #[test]
-    fn flush_sink_enqueues_attach_before_appear_for_new_agent() {
-        // ★순서가 load-bearing★: Attach 가 Appear 보다 앞서야 등장 flush 주입이 만드는 유저 에코부터
-        //   tap 이 관측한다(첫 턴을 놓치지 않음 — 그 사이 도착 메시지의 턴 중 주입 방지).
+    fn a_turn_end_push_from_the_core_becomes_an_idle_doorbell() {
+        // 코어가 출력 pump 스레드에서 부르는 `StatusSink::turn_ended` 가 flush 채널로 이어지는지 —
+        //   이 배선이 끊기면 파킹이 턴 종료에 풀리지 않고 TTL 까지 앉아 있는다.
         let (sink, mut rx) = flush_sink();
         let id = AgentId::new_v4();
-        sink.agent_list_updated(vec![flush_info(id, "alice", 0, true, CoreStatus::Running)]);
+        sink.turn_ended(id, 3);
+        assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Idle { id }]);
+    }
+
+    #[test]
+    fn turn_end_pushes_are_coalesced_per_agent_until_taken() {
+        // ★잉여 통지 흡수★: 종료 신호마다 push 가 나오므로(누락 < 잉여) 미처리 Idle 은 id 별 1건으로 접힌다.
+        let (sink, mut rx) = flush_sink();
+        let id = AgentId::new_v4();
+        sink.turn_ended(id, 0);
+        sink.turn_ended(id, 0);
+        sink.turn_ended(id, 1);
         assert_eq!(
             drain_msgs(&mut rx),
-            vec![
-                FlushMsg::Attach { id, epoch: 0 },
-                FlushMsg::Appear {
-                    name: "alice".to_string(),
-                    id
-                },
-            ],
-            "Attach → Appear 순서(단일 채널 FIFO)"
-        );
-    }
-
-    #[test]
-    fn flush_sink_attaches_all_ids_even_when_name_ambiguous() {
-        // ★이름 축과 id 축의 판정이 다르다★: 동명 다수는 **배달**(Appear)에선 skip 이지만, tap 은 출력
-        //   스트림 단위라 **둘 다** 붙어야 한다(안 붙으면 그 에이전트는 영구 idle 폴백 = 턴 중 주입).
-        let (sink, mut rx) = flush_sink();
-        let a = AgentId::new_v4();
-        let b = AgentId::new_v4();
-        sink.agent_list_updated(vec![
-            flush_info(a, "dup", 0, true, CoreStatus::Running),
-            flush_info(b, "dup", 0, true, CoreStatus::Running),
-        ]);
-        let msgs = drain_msgs(&mut rx);
-        let mut attached: Vec<AgentId> = msgs
-            .iter()
-            .filter_map(|m| match m {
-                FlushMsg::Attach { id, .. } => Some(*id),
-                _ => None,
-            })
-            .collect();
-        attached.sort();
-        let mut expect = vec![a, b];
-        expect.sort();
-        assert_eq!(attached, expect, "동명이어도 id 별로 전부 tap 부착");
-        assert!(
-            !msgs.iter().any(|m| matches!(m, FlushMsg::Appear { .. })),
-            "동명 다수는 배달 flush(Appear) 대상 아님(C1 정책 불변)"
-        );
-    }
-
-    #[test]
-    fn flush_sink_reattaches_on_epoch_bump_only() {
-        // epoch bump = 새 OutputCore → 재부착 필요. 같은 (id, epoch) 재-push 는 노이즈라 skip.
-        let (sink, mut rx) = flush_sink();
-        let id = AgentId::new_v4();
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        assert!(drain_msgs(&mut rx).contains(&FlushMsg::Attach { id, epoch: 0 }));
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        assert!(
-            drain_msgs(&mut rx).is_empty(),
-            "같은 (id, epoch) 재-push 는 attach 도 안 낸다"
-        );
-        sink.agent_list_updated(vec![flush_info(id, "a", 1, true, CoreStatus::Running)]);
-        assert!(
-            drain_msgs(&mut rx).contains(&FlushMsg::Attach { id, epoch: 1 }),
-            "epoch bump 은 재부착(구독은 epoch 을 넘지 못한다)"
-        );
-    }
-
-    #[test]
-    fn flush_sink_enqueues_detach_when_agent_leaves_roster() {
-        // 이탈(죽음/reap) → Detach 로 턴 상태 청소 요청. 안 하면 죽은 대상 busy 플래그가 남아 그 이름 앞
-        //   파킹이 stranded 된다.
-        let (sink, mut rx) = flush_sink();
-        let id = AgentId::new_v4();
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        let _ = drain_msgs(&mut rx);
-        sink.agent_list_updated(vec![]);
-        assert_eq!(
-            drain_msgs(&mut rx),
-            vec![FlushMsg::Detach { id }],
-            "로스터 이탈 → Detach"
-        );
-        // 다시 등장하면 재부착(이탈로 스냅샷에서 지워졌으므로).
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        assert!(drain_msgs(&mut rx).contains(&FlushMsg::Attach { id, epoch: 0 }));
-    }
-
-    #[test]
-    fn flush_sink_detaches_when_agent_becomes_terminal() {
-        // terminal 상태(Killed)로 바뀌면 도달 후보에서 빠지므로 이탈과 동일 처리(Detach).
-        let (sink, mut rx) = flush_sink();
-        let id = AgentId::new_v4();
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        let _ = drain_msgs(&mut rx);
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Killed)]);
-        assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Detach { id }]);
-    }
-
-    #[test]
-    fn flush_sink_mixed_diff_enqueues_attach_detach_then_appear_in_order() {
-        // ★fix 7 순서 계약★: 한 업데이트 안에서 죽은 에이전트와 새 에이전트가 섞여도 enqueue 순서는
-        //   **Attach → Detach → Appear** 다(스냅샷 갱신과 같은 락 구간에서 send 하므로 순서가 갈리지 않는다).
-        //   Appear 가 Attach 뒤라는 게 load-bearing(등장 flush 주입 전에 tap 이 붙어야 첫 턴을 관측).
-        let (sink, mut rx) = flush_sink();
-        let dying = AgentId::new_v4();
-        let fresh = AgentId::new_v4();
-        // 1) dying 만 있는 상태로 스냅샷 세팅.
-        sink.agent_list_updated(vec![flush_info(
-            dying,
-            "dying",
-            0,
-            true,
-            CoreStatus::Running,
-        )]);
-        let _ = drain_msgs(&mut rx);
-        // 2) 한 업데이트에서 dying 이탈 + fresh 등장.
-        sink.agent_list_updated(vec![flush_info(
-            fresh,
-            "fresh",
-            0,
-            true,
-            CoreStatus::Running,
-        )]);
-        assert_eq!(
-            drain_msgs(&mut rx),
-            vec![
-                FlushMsg::Attach {
-                    id: fresh,
-                    epoch: 0
-                },
-                FlushMsg::Detach { id: dying },
-                FlushMsg::Appear {
-                    name: "fresh".to_string(),
-                    id: fresh
-                },
-            ],
-            "Attach → Detach → Appear 순서(단일 락 구간에서 enqueue)"
-        );
-    }
-
-    #[test]
-    fn roster_diff_forget_attached_reopens_attach_on_next_update() {
-        // ★fix 8a★: attach 실패 피드백은 id 축 스냅샷을 지워 **다음 로스터 업데이트가 재시도**하게 만든다.
-        //   피드백이 없으면 로스터가 그대로인 동안 Attach 가 다시 나오지 않아 그 에이전트는 영구 tap 없음.
-        let (sink, mut rx, diff) = flush_sink_with_diff();
-        let id = AgentId::new_v4();
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        let _ = drain_msgs(&mut rx);
-        // 같은 로스터 재-push 는 아무것도 내지 않는다(스냅샷 동일).
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        assert!(drain_msgs(&mut rx).is_empty());
-        // worker 가 부착 실패를 피드백 → 스냅샷 무효화.
-        diff.forget_attached(id);
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
-        assert_eq!(
-            drain_msgs(&mut rx),
-            vec![FlushMsg::Attach { id, epoch: 0 }],
-            "피드백 후 같은 로스터에서도 Attach 재발행(Appear 는 이름 스냅샷이 그대로라 안 나온다)"
+            vec![FlushMsg::Idle { id }],
+            "미처리분이 있으면 접는다(소비자가 집어들면 다시 열린다 — IdleCoalescer)"
         );
     }
 
@@ -2111,7 +1813,7 @@ mod tests {
 
     #[test]
     fn service_doorbell_shares_the_idle_channel_and_coalescing() {
-        // 서비스 도어벨(FlushTrigger)과 tap 의 턴 종료 통지는 **같은 메시지**로 나간다 — 결과가 같기
+        // 서비스 도어벨(FlushTrigger)과 턴 종료 통지는 **같은 메시지**로 나간다 — 결과가 같기
         //   때문이다("그 id 의 파킹 큐를 flush"). 그래서 coalescing 도 함께 받는다.
         use engram_dashboard_messaging::service::FlushTrigger;
         let (tx, mut rx) = mpsc::unbounded_channel::<FlushMsg>();
@@ -2123,127 +1825,37 @@ mod tests {
         assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Idle { id }]);
     }
 
-    // ── 9b. flush worker: attach 패닉 격리(round-3 finding 6) + 2-레인 소유/종료(finding 1) ──────────
-    use engram_dashboard_messaging::busy::{BusyTracker, SubscribeError, TapHost, TurnProbe};
+    // ── 9b. flush worker: 2-레인 소유/종료(round-3 finding 1) ────────────────────────────────
 
-    /// subscribe 마다 **패닉**하는 TapHost — core `subscribe_from` 이 sink 를 push 한 **뒤** replay 락
-    ///   `expect` 에서 패닉하는 실제 형태를 모사한다(그 상태에선 sink 가 이미 등록돼 있고 subscribers 락이
-    ///   poison 이라 재시도가 두 번째 sink 를 얹는 꼴이 된다 — 그래서 재시도 금지).
-    struct PanickingTapHost {
-        calls: Arc<AtomicU64>,
-    }
-    impl TapHost for PanickingTapHost {
-        fn subscribe_output(
-            &self,
-            _id: AgentId,
-            _expect_epoch: u32,
-            _probe: Arc<TurnProbe>,
-        ) -> Result<(), SubscribeError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            panic!("fake: subscribe panicked (의도된 패닉 — 재시도 금지 검증)");
-        }
-        fn current_epoch(&self, _id: AgentId) -> Option<u32> {
-            Some(0) // 사전 검증 통과(패닉 지점까지 도달시킨다).
-        }
-    }
-
-    /// 매번 `Err(Failed)` 를 내는 TapHost — **정상 실패**는 유계 1회 재시도가 유지돼야 한다(대조군).
-    struct FailingTapHost {
-        calls: Arc<AtomicU64>,
-    }
-    impl TapHost for FailingTapHost {
-        fn subscribe_output(
-            &self,
-            _id: AgentId,
-            _expect_epoch: u32,
-            _probe: Arc<TurnProbe>,
-        ) -> Result<(), SubscribeError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(SubscribeError::Failed("fake: gone".to_string()))
-        }
-        fn current_epoch(&self, _id: AgentId) -> Option<u32> {
-            Some(0)
-        }
-    }
-
-    /// 통지를 버리는 IdleNotifier(이 테스트들은 부착 정책만 본다).
-    struct SinkNotifier;
-    impl engram_dashboard_messaging::busy::IdleNotifier for SinkNotifier {
-        fn notify_idle(&self, _id: AgentId) {}
-    }
-
-    fn attach_wiring(host: Arc<dyn TapHost>) -> (FlushWiring, Arc<RosterDiff>) {
-        let diff = Arc::new(RosterDiff::new());
-        let wiring = FlushWiring {
+    fn lane_wiring() -> FlushWiring {
+        FlushWiring {
             messaging: Arc::new(crate::control::mcp_server::MessagingSlot::new()),
-            busy: Arc::new(BusyTracker::new(host, Arc::new(SinkNotifier))),
-            diff: diff.clone(),
             idle: Arc::new(IdleCoalescer::new()),
-        };
-        (wiring, diff)
-    }
-
-    #[tokio::test]
-    async fn attach_panic_is_not_retried() {
-        // ★round-3 finding 6 회귀★: 패닉은 "sink 가 이미 등록됐고 락이 poison" 일 수 있는 상태다 — 재시도
-        //   하면 두 번째 sink 를 얹어(통지 중복) 상황을 악화시킨다. 정확히 1회만 시도하고 물러난다.
-        let calls = Arc::new(AtomicU64::new(0));
-        let (wiring, diff) = attach_wiring(Arc::new(PanickingTapHost {
-            calls: calls.clone(),
-        }));
-        let id = AgentId::new_v4();
-        handle_attach(&wiring, id, 0).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "패닉 후 재시도 금지 — subscribe 시도는 정확히 1회"
-        );
-        // 스냅샷은 무효화돼 다음 로스터 업데이트가 판단할 수 있어야 한다(조용한 기능 상실 방지).
-        diff.forget_attached(id); // idempotent 확인(패닉 경로가 이미 지웠다 — 두 번 지워도 무해).
-    }
-
-    #[tokio::test]
-    async fn attach_normal_failure_still_retries_once() {
-        // 대조군: **정상 실패**(subscribe Err)는 유계 1회 재시도를 유지한다(fix 8a) — 패닉만 예외다.
-        let calls = Arc::new(AtomicU64::new(0));
-        let (wiring, _diff) = attach_wiring(Arc::new(FailingTapHost {
-            calls: calls.clone(),
-        }));
-        handle_attach(&wiring, AgentId::new_v4(), 0).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "정상 실패는 즉시 1회 재시도(총 2회) — 그 뒤는 로스터 diff 에 맡긴다"
-        );
+        }
     }
 
     #[tokio::test]
     async fn flush_worker_handles_shutdown_stops_both_lanes() {
-        // ★round-3 finding 1 회귀★: 배달 레인은 **호출자 소유**여야 한다 — 옛 구현은 worker future 안에서
-        //   spawn 해 종료 시 detach 됐고(abort 아님), 5s belt 는 blocking 없는 main lane 만 감시했다.
+        // ★round-3 finding 1 회귀★: 배달 레인은 **호출자 소유**여야 한다 — worker future 안에서 spawn 하면
+        //   종료 시 detach 되고(abort 아님), 5s belt 는 blocking 없는 수신 레인만 감시하게 된다.
         //   `shutdown()` 이 두 레인을 모두 끝내는지(= 핸들을 들고 있는지) 관측한다.
         let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
-        let (wiring, _diff) = attach_wiring(Arc::new(FailingTapHost {
-            calls: Arc::new(AtomicU64::new(0)),
-        }));
-        let handles = spawn_flush_worker(rx, wiring);
+        let handles = spawn_flush_worker(rx, lane_wiring());
         // 배달 작업 1건을 넣어 레인이 실제로 돌게 한다(messaging slot 미주입이라 즉시 skip = 결정적).
         tx.send(FlushMsg::Idle {
             id: AgentId::new_v4(),
         })
-        .expect("main lane 수신");
-        // shutdown 은 belt(5s) 안에 끝나야 한다 — 레인을 detach 하면 이 단언은 여전히 통과하지만,
-        //   그 경우 레인 task 가 살아남는다. 그래서 아래에서 "채널이 닫혔음" 으로 종료를 교차 확인한다.
+        .expect("수신 레인 수신");
         tokio::time::timeout(Duration::from_secs(6), handles.shutdown())
             .await
             .expect("shutdown 이 belt 안에 반환해야");
-        // main lane 이 죽었으므로 그 수신단은 닫혔다(송신 실패 = 소비자 종료의 관측 가능한 증거).
+        // 수신 레인이 죽었으므로 그 수신단은 닫혔다(송신 실패 = 소비자 종료의 관측 가능한 증거).
         assert!(
             tx.send(FlushMsg::Idle {
                 id: AgentId::new_v4()
             })
             .is_err(),
-            "shutdown 후 main lane 은 더 이상 수신하지 않는다"
+            "shutdown 후 수신 레인은 더 이상 수신하지 않는다"
         );
     }
 

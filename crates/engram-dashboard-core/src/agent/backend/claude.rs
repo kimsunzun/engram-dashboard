@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::agent::backend::{console_command, AgentBackend};
+use crate::agent::backend::{console_command, AgentBackend, TurnClassifier};
 use crate::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+use crate::agent::turn::TurnSignal;
 use crate::agent::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
 };
@@ -450,6 +451,42 @@ impl AgentBackend for ClaudeBackend {
                 max_tokens: false,
             },
         }
+    }
+
+    fn turn_classifier(&self) -> TurnClassifier {
+        classify_turn
+    }
+}
+
+/// claude stream-json 이벤트 → 턴 신호(ADR-0113 · ADR-0004 백엔드 지식 격리).
+///
+/// ★`Structured` 를 진행으로 세는 게 load-bearing — 그리고 그 판정은 **claude 한정**이다★: claude 는
+///   **입력 시점 유저 에코**를 이 variant 로 낸다(`user_text_echo_json` · decoder 의 user 라인). 그래서
+///   대시보드 사용자가 터미널에 직접 입력해 시작한 턴도, 우편 주입이 시작한 턴도 이 갈래로 잡힌다 —
+///   빼면 그 두 경로의 턴 시작이 통째로 관측 밖으로 나간다. 반대로 `Structured` 는 **백엔드별 이벤트
+///   탈출구**라, 다른 백엔드가 턴과 무관한 메타 라인을 여기 실으면 그건 진행 신호가 아니다. 그래서 이
+///   매핑은 공용 층이 아니라 이 파일에 산다(백엔드마다 자기 매핑을 선언한다).
+/// ★`kind` 를 보지 않는 이유(현 범위의 정직한 표기)★: claude decoder 가 내는 `Structured` 는 전부 턴
+///   안에서 발생하는 라인이라 지금은 kind 구분이 불필요하다. claude 가 턴 밖 구조화 라인을 내기
+///   시작하면 여기서 kind 를 걸러야 한다 — 그 판정 지점이 여기라는 게 이 seam 의 요점이다.
+/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고(decoder 는 result 의 usage 를
+///   `MessageDone` **앞에** 낸다), `Error` 는 스트림 내부 오류지 턴 경계가 아니다(실패 턴도 `MessageDone`
+///   으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계 정보가 없는 콘솔 바이트다.
+/// ★상관 키가 없다(알려진 범위)★: claude 의 `MessageDone` 은 `turn_id`/`message_id` 가 모두 None 이라
+///   "어느 턴의 종료인가" 를 맞출 키가 없다. 그래서 턴 카운팅·펜싱을 하지 않고 **마지막 관측이
+///   결정한다**. 중첩 Task 서브에이전트의 종료 라인이 부모 턴 종료로 새는지는 미검증이고, 새면 증상은
+///   "부모가 아직 턴 중인데 idle 로 오판 → 조기 주입"(유실 없이 타이밍만 어긋남)이다.
+/// ★터미널 모드와 공유해도 되는 이유★: 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐르므로 이
+///   매핑을 그대로 써도 신호가 하나도 나오지 않는다(모드별 분기가 불필요).
+// ADR-0113
+// ADR-0004
+pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
+    match event {
+        OutputEvent::TextDelta { .. }
+        | OutputEvent::ToolCall { .. }
+        | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
+        OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended),
+        OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => None,
     }
 }
 

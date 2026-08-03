@@ -11,4 +11,6 @@ pub mod reaper;
 pub mod session;
 pub mod session_tracker;
 pub mod transport;
+// ADR-0113: 턴 관측 표(사실 계층) — 소유는 AgentManager, 쓰기는 OutputCore::emit.
+pub mod turn;
 pub mod types;

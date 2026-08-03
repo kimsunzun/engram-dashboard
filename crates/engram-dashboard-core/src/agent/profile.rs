@@ -181,6 +181,27 @@ pub struct AgentProfile {
     /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 결정적 트리거.
     pub epoch: u32,
 
+    /// ★이 프로세스에서 이 에이전트의 화신(세션)이 있었나★ — 다음 spawn 이 **최초**인가 **교체**인가를
+    /// 가르는 축이다(ADR-0007 은 *교체*에만 epoch bump 를 건다 — `epoch_for_spawn`).
+    ///
+    /// ★`#[serde(skip)]` 가 의미의 일부다★: "이 프로세스에서" 가 정확히 필요한 범위다. 디스크에 남기면
+    ///   재부팅 후 첫 spawn 이 교체로 오판돼 근거 없이 epoch 를 올린다(무해하지만 부정확). 새 프로세스엔
+    ///   아직 배출 중인 앞선 화신이 **있을 수 없으므로** false 로 시작하는 게 옳다.
+    /// ★프로필과 한 몸인 게 요점★: 별도 집합으로 두면 삭제(`remove`)와 spawn 판정 사이에 창이 생기고
+    ///   (삭제가 표식만 지운 뒤 spawn 이 다시 심으면 회수 불가) 크기 상한도 규약으로만 남는다. 필드면
+    ///   삭제가 표식을 **구조적으로** 함께 거두고, 개수는 정의상 프로필 수를 넘지 못한다.
+    /// ★스냅샷이 되돌리지 못한다 — 그리고 그게 이 표식의 유일한 방어다★: spawn 호출부는 프로필 **스냅샷**
+    ///   을 넘기므로(연결이 들고 있던 옛 사본일 수 있다) `upsert_preserving_hierarchy` 가 live 값을
+    ///   보존해야 한다(epoch 과 같은 이유 — ADR-0084). 이 값을 **평범한 `upsert` 로** 쓰는 경로가 새로
+    ///   생기면 그 사본이 표식을 지우고, 다음 Fresh 가 교체를 최초로 오판해 죽은 화신의 epoch 를
+    ///   재사용한다. 새 spawn 명령이 caller 가 만든 프로필을 그대로 받는 모양이면 여기를 먼저 볼 것.
+    /// ★유계★: 프로필의 한 필드라 개수는 정의상 프로필 수와 같다 — 따로 회수할 표가 없다(별도 집합이었을
+    ///   땐 삭제가 표식만 지운 뒤 spawn 이 다시 심으면 회수 불가였다).
+    // ADR-0007
+    // ADR-0113
+    #[serde(skip)]
+    pub had_session: bool,
+
     /// 앱 재시작 시 자동 복원 대상인지.
     pub auto_restore: bool,
 
@@ -229,6 +250,7 @@ impl AgentProfile {
             claude_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
+            had_session: false,
             auto_restore,
             // 사용자 결정(ADR-0016): 항상 살아있게. 동작은 TODO.
             restart_policy: RestartPolicy::Always,
@@ -473,19 +495,23 @@ impl ProfileRegistry {
     /// 보존·판정·save 가 한 임계구역(mutate)이라 TOCTOU 없이 원자적이다(ADR-0071 락 규율).
     ///
     /// ★epoch 도 live 보존(ADR-0084)★: epoch 역시 프로세스 기동과 무관한 순수 런타임 메타로, spawn 이
-    ///   넘긴 **스냅샷**이 author 하면 안 된다. 재활성화 respawn 은 이 upsert **직전** `bump_epoch`
-    ///   (activate_profile Resume 갈래)로 registry epoch 를 올려두는데, 옛 스냅샷(epoch 그대로)을 여기서
-    ///   그대로 삽입하면 그 bump 가 되돌려져(lost update) 새 세션이 죽은 세션과 같은 epoch 를 재사용한다
-    ///   → 프론트 재구독 누락(빈 슬롯). 그래서 parent_id/display_name 과 동일하게 live 값을 보존한다.
-    ///   신규 id(live 없음)면 스냅샷 epoch(0)를 그대로 써 첫 spawn 은 여전히 epoch=0(bump 는 재활성화만).
+    ///   넘긴 **스냅샷**이 author 하면 안 된다. spawn 은 이 upsert **직후** `epoch_for_spawn` 으로 registry
+    ///   epoch 를 확정하는데(화신 교체면 +1), 옛 스냅샷의 epoch 를 여기서 그대로 삽입하면 앞선 bump 가
+    ///   되돌려져(lost update) 새 세션이 죽은 세션과 같은 epoch 를 재사용한다 → 프론트 재구독 누락(빈 슬롯)
+    ///   + 턴 관측·제어 토큰이 두 세대를 구분 못 함. 그래서 parent_id/display_name 과 동일하게 live 값을
+    ///   보존한다. 신규 id(live 없음)면 스냅샷 epoch(0)를 그대로 쓴다 — 첫 화신은 올릴 앞선 epoch 가 없다.
     // ADR-0070 ADR-0072 ADR-0084
     pub fn upsert_preserving_hierarchy(&self, mut profile: AgentProfile) {
         self.mutate(|m| {
             if let Some(live) = m.get(&profile.id) {
                 profile.parent_id = live.parent_id;
                 profile.display_name = live.display_name.clone();
-                // ADR-0084: 재활성화 bump_epoch 로 올린 registry epoch 를 stale 스냅샷이 되돌리지 못하게.
+                // ADR-0084: spawn 이 올린 registry epoch 를 stale 스냅샷이 되돌리지 못하게.
                 profile.epoch = live.epoch;
+                // 같은 이유로 화신 이력도 live 값이 이긴다 — 스냅샷은 그 사실의 author 가 아니다
+                //   (되돌리면 다음 Fresh 가 교체를 최초로 오판해 죽은 화신의 epoch 를 재사용한다).
+                // ADR-0007
+                profile.had_session = live.had_session;
             }
             m.insert(profile.id, profile);
         });
@@ -638,17 +664,28 @@ impl ProfileRegistry {
         })
     }
 
-    /// epoch 증가 후 새 값 반환. "같은 AgentId 맵 교체"가 일어나는 **모든 지점**에서
-    /// 호출해야 한다(ADR-0007). ★현 프로덕션 호출점★: `activate_profile` 의 Resume 갈래
-    /// (시체 재활성화 = reap 으로 빠진 세션을 같은 id 로 재spawn = 맵 교체 — manager.rs `// ADR-0084`).
-    /// 옛 유일 호출자 fresh-fallback `fallback_fresh` 는 ADR-0082 로 제거됐다 — 이 재활성화 호출점이
-    /// 그 자리를 잇는다. dead code 아님(오인해 지우지 말 것 — 지우면 재활성화가 epoch 재사용→프론트
-    /// 재구독 누락으로 빈 슬롯이 되고 apply_disposition epoch-guard 도 구분자를 잃는다).
+    /// ★spawn 이 쓸 epoch 을 **한 임계구역에서** 확정한다(ADR-0007 "같은 AgentId 맵 교체마다 +1")★.
+    ///
+    /// 앞선 화신이 있었으면(`had_session`) 올리고, 최초 화신이면 현재 값을 그대로 준다.
+    /// `None` = 그 사이 프로필이 사라졌다(동시 삭제) → **호출자는 spawn 을 중단해야 한다**.
+    ///
+    /// ★판정과 커밋이 한 락 안이어야 하는 이유(load-bearing)★: 둘로 나누면 그 사이 `remove` 가 끼어들어
+    ///   ① 판정은 "교체" 인데 bump 대상이 사라지거나 ② 판정이 "최초" 로 뒤집혀 죽은 화신의 epoch 를
+    ///   재사용한다. 어느 쪽이든 두 화신이 같은 (AgentId, epoch) 를 갖게 되고, 그걸 키로 쓰는 구조
+    ///   (턴 관측 표 ADR-0113 · 제어 채널 토큰 ADR-0086 · reap epoch-guard ADR-0084)가 두 세대를 구분하지
+    ///   못한다. 그래서 "읽고-정하고-쓰기" 를 여기 한 곳에 가둔다.
+    /// ★현 프로덕션 호출점은 `AgentManager::spawn_agent` **하나**다★ — 모드(Fresh/Resume)를 가리지 않고
+    ///   그 지점만 지나간다. 호출부마다 bump 를 흩뿌리면 새 호출부가 또 빠뜨리므로(실측: WS `Spawn`·
+    ///   부팅 복원이 그렇게 빠졌다) 여기 단일 진입점을 유지할 것. dead code 아님(오인해 지우지 말 것 —
+    ///   지우면 화신 교체가 epoch 를 재사용해 프론트 재구독 누락·관측 오염·토큰 충돌이 한꺼번에 난다).
     // ADR-0084
-    pub fn bump_epoch(&self, id: AgentId) -> Option<u32> {
+    // ADR-0007
+    pub fn epoch_for_spawn(&self, id: AgentId) -> Option<u32> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            p.epoch = p.epoch.wrapping_add(1);
+            if p.had_session {
+                p.epoch = p.epoch.wrapping_add(1);
+            }
             Some(p.epoch)
         })
     }
@@ -877,13 +914,44 @@ mod tests {
     }
 
     #[test]
-    fn bump_epoch_increments() {
+    fn epoch_for_spawn_increments_only_after_a_prior_incarnation() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        assert_eq!(reg.bump_epoch(id), Some(1));
-        assert_eq!(reg.bump_epoch(id), Some(2));
+        // 최초 화신 — 올릴 앞선 epoch 이 없다(ADR-0007 은 *교체*에만 건다).
+        assert_eq!(reg.epoch_for_spawn(id), Some(0));
+        assert_eq!(reg.epoch_for_spawn(id), Some(0), "판정은 멱등이어야");
+
+        // 화신이 하나 있었다고 표시하면 그 뒤부터는 교체다.
+        reg.update_with(id, |p| p.had_session = true);
+        assert_eq!(reg.epoch_for_spawn(id), Some(1));
+        assert_eq!(reg.epoch_for_spawn(id), Some(2));
+
+        // ★삭제와의 원자성★: 사라진 프로필은 epoch 를 만들어 내지 않는다(호출자가 spawn 을 중단한다).
+        reg.remove(id);
+        assert_eq!(
+            reg.epoch_for_spawn(id),
+            None,
+            "프로필이 없으면 None — 0 으로 떨어지면 죽은 화신보다 작은 epoch 이 산 세션에 붙는다"
+        );
+    }
+
+    #[test]
+    fn had_session_survives_a_stale_snapshot_upsert() {
+        // ★스냅샷은 화신 이력의 author 가 아니다★: 되돌아가면 다음 Fresh 가 교체를 최초로 오판해
+        //   죽은 화신의 epoch 를 재사용한다(epoch 보존과 같은 이유 — ADR-0084).
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p.clone());
+        reg.update_with(id, |p| p.had_session = true);
+        // spawn 호출부가 들고 있던 옛 스냅샷(had_session=false)으로 upsert.
+        reg.upsert_preserving_hierarchy(p);
+        assert!(
+            reg.get(id).expect("존재").had_session,
+            "live 값이 이겨야(스냅샷이 화신 이력을 지우면 epoch 재사용이 되살아난다)"
+        );
     }
 
     // ── 표시명 override(ADR-0061 리치화 — 트리 rename) ──────────────────────────────

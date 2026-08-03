@@ -72,7 +72,7 @@
 //!   그 값을 flush 까지 날라야 하기 때문이다(재계산 금지).
 //!
 //! ★idle 게이트 seam(C2 · ADR-0104 결정 3)★: "수신자가 턴 중인가" 는 `BusyGate`(busy.rs) 너머로
-//!   묻는다 — 운영은 `BusyTracker`(출력 스트림 tap 이 턴 이벤트를 관측), 단위 테스트는 가짜 게이트를 끼운다.
+//!   묻는다 — 운영은 `BusyPolicy`(호스트의 턴 관측 사실을 우편 정책으로 해석), 단위 테스트는 가짜 게이트를 끼운다.
 //!   게이트를 안 꽂으면 `AlwaysIdleGate`(= 즉시 주입)로 폴백한다(관측 불가 백엔드 폴백과 같은 값).
 //!
 //! ★순서 보장의 범위(finding 8 · round-7 보정 · **ADR-0125 갱신** · load-bearing)★: 한 수신자가 보는
@@ -586,7 +586,7 @@ pub struct MessagingService {
     ///   발행한다 — handle_send 와 **같은 Arc**(전역 상태 하나).
     registry: Arc<dyn ControlPlanePort>,
     /// ★idle 게이트(C2 · ADR-0104 결정 3)★ — 주입 전에 "수신자가 턴 중인가" 를 묻는 seam. 운영은
-    ///   `BusyTracker`, 미배선/관측 불가는 `AlwaysIdleGate`(즉시 주입 폴백 — busy.rs 헤더).
+    ///   `BusyPolicy`, 미배선/관측 불가는 `AlwaysIdleGate`(즉시 주입 폴백 — busy.rs 헤더).
     busy: Arc<dyn BusyGate>,
     /// ★flush 도어벨(C2 리뷰 fix 11)★ — 드레인이 못 낸 몫을 **다른 스레드**에서 열게 하는 출구.
     ///   `None` = 미배선 → 인라인 드레인 폴백(FlushTrigger 주석의 문서화된 두 갈래).
@@ -1559,14 +1559,15 @@ impl MessagingService {
     ///     통째로 우회하는 구멍이었다. 그래서 drain 결과를 **해석된 타깃별로 분할**하고 각 타깃에 1회씩
     ///     게이트를 적용한다(busy 타깃은 파킹 유지, idle 타깃은 오래된 순 배달).
     ///   - **mid-batch 재검사 금지(의도적 — 타깃 안에서는 불변)**: 배치의 첫 주입이 수신자 측 "입력 시점
-    ///     유저 에코"(claude 는 이걸 `Structured` 로 낸다 = tap 이 busy 로 관측)를 즉시 발생시키므로, 항목마다
+    ///     유저 에코"(claude 는 이걸 `Structured` 로 낸다 = 턴 진행으로 관측된다)를 즉시 발생시키므로, 항목마다
     ///     게이트를 보면 **배치가 1건 만에 중단**된다(= 드리블 주입 = ADR-0104 거부 대안). 한 타깃의 배치를
     ///     시작했으면 그 타깃 몫은 끝까지 민다.
     ///   - **왜 drain 전이 아니라 drain 후인가**: 항목별 타깃은 id 힌트에 따라 달라져 **drain 하기 전엔 알
     ///     수 없다**. 이름으로만 게이트하면 힌트로 배달되는 경로가 게이트를 우회한다. drain 후 복원은
     ///     같은 락 구간 안이고 무손실·순서 보존이므로(restore_ordered) 외부에 관측 가능한 차이가 없다.
-    ///   게이트가 안전한 전제는 tap 이 **live-only** 라는 것이다(busy.rs fix 1) — busy = 지금 진행 중인
-    ///   실제 턴이므로 그 종료 통지가 반드시 온다(과거 transcript 로 인한 깨울 수 없는 busy 없음). 그 통지가
+    ///   게이트가 안전한 전제는 관측이 **라이브 출력에서만** 시작한다는 것이다(재개 transcript 는 관측하지
+    ///   않는다 — core `OutputCore::seed`). busy = 지금 진행 중인 실제 턴이므로 그 종료 통지가 반드시 온다
+    ///   (과거 기록으로 인한 깨울 수 없는 busy 없음). 그 통지가
     ///   유실되는 비정상 턴은 `BUSY_MAX_TURN` 상한 sweep 이 fail-open 으로 깨운다(busy.rs).
     /// ★미배달분은 **큐를 떠나지 않는다**(락 원자성 — load-bearing)★: drain·타깃 분할·게이트·스킵분 복원을
     ///   **한 락 구간**에서 끝내고, 락 밖으로는 **배달할 항목만** 들고 나간다. 예전엔 drain 후 락을 놓고
@@ -1623,7 +1624,7 @@ impl MessagingService {
         //   그래서 "배달할 것만 큐에서 나가고, 안 나갈 것은 애초에 큐를 떠나지 않는다" 를 락으로 원자화한다.
         // ★락 안에서 게이트를 부르는 게 규율 위반이 아닌 이유★: `BusyGate` 는 **순수 조회 + 짧은 락**이며
         //   "messaging 락을 든 채 불려도 안전" 을 계약으로 못 박은 seam 이다(busy.rs `BusyGate` 주석). 역방향
-        //   (busy 락 → messaging 락) 경로는 존재하지 않는다(tap 은 논블록 채널 send 만 한다) → 락 순서 역전 없음.
+        //   (busy 락 → messaging 락) 경로는 존재하지 않는다(통지는 논블록 채널 send 만 한다) → 락 순서 역전 없음.
         //   금지 대상은 **DeliveryPort(inject/roster)** 다 — 그건 여전히 전부 락 밖이다(아래 5단계).
         // ★labeled block(`'drained`)인 이유★: 만료 전이의 evict 사실은 **락 밖**에서 찍어야 하는데(위 규율),
         //   배달할 게 없다고 여기서 `return` 해 버리면 그 로그가 통째로 사라진다. 그래서 블록을 값으로
@@ -1979,8 +1980,8 @@ impl MessagingService {
     }
 
     /// ★턴 종료(idle 전이) flush(C2 · ADR-0104 결정 3)★: **id 로** 지목된 flush — 그 에이전트의 canonical
-    ///   이름을 풀어 `flush_for` 에 위임한다. 왜 id 입구가 따로 있나: 턴 관측 tap 은 출력 스트림에 붙어
-    ///   있어 **id/epoch 만 안다**(이름을 모른다 — 이름은 프로필·cwd 파생이라 core 출력 경계에 없다).
+    ///   이름을 풀어 `flush_for` 에 위임한다. 왜 id 입구가 따로 있나: 턴 종료 통지는 출력 경계에서 나와
+    ///   **id/epoch 만 안다**(이름을 모른다 — 이름은 프로필·cwd 파생이라 core 출력 경계에 없다).
     ///   반면 파킹은 이름-키다(respawn 생존 — canonical_park_key 주석). 그 간극을 여기서 한 번 메운다:
     ///   id → canonical name → 기존 flush 경로(경로 2벌 금지 — ADR-0104 "flush = 일괄·오래된 순" 공유).
     ///
@@ -4603,7 +4604,7 @@ mod tests {
 
     // ── C2 idle 게이트 테스트 하네스 ─────────────────────────────────────────────────
     /// 가짜 idle 게이트 — (id, epoch) 별 busy 를 테스트가 세팅하고, 호출 횟수를 세어 TOCTOU 시나리오
-    ///   (첫 확인은 busy, 재확인은 idle)를 스크립트한다. 실 tap/PTY 없이 게이트 분기만 결정적으로 단언.
+    ///   (첫 확인은 busy, 재확인은 idle)를 스크립트한다. 실 관측/PTY 없이 게이트 분기만 결정적으로 단언.
     struct FakeGate {
         busy: StdMutex<std::collections::HashSet<(PeerId, u32)>>,
         calls: StdMutex<usize>,
@@ -6514,7 +6515,7 @@ mod tests {
     #[test]
     fn rename_mid_turn_still_flushes_old_name_queue_via_id_hint() {
         // ★round-3 finding 2 회귀★: busy 파킹은 **발송 시점** 이름 큐에 들어가고, 턴 종료 flush 는 **현재**
-        //   이름으로 진입한다(tap 은 id 만 안다). 턴 중에 이름이 바뀌면 옛 이름 큐를 아무도 열지 않아 TTL 까지
+        //   이름으로 진입한다(턴 종료 통지는 id 만 안다). 턴 중에 이름이 바뀌면 옛 이름 큐를 아무도 열지 않아 TTL 까지
         //   stranded 된다 — id 힌트 역방향 조회로 그 큐도 함께 연다.
         let (svc, port, gate) = svc_gated();
         let (id, agent) = live("old-name");
@@ -6766,23 +6767,6 @@ mod tests {
     }
 
     // ── round-3 finding 4: busy 상한 sweep 이 깨울 수 없는 busy 를 풀고 대기 메일을 배달 ────────────
-    /// tap 부착을 하지 않는 no-op TapHost — 이 테스트는 `BusyTracker` 를 **게이트로만** 쓰고 표는 하네스
-    ///   seam 으로 조작한다(실 PTY·claude 없이 "상한 sweep → 배달" 전 구간을 잇는다).
-    struct NoSubscribeTapHost;
-    impl super::super::busy::TapHost for NoSubscribeTapHost {
-        fn subscribe_output(
-            &self,
-            _id: PeerId,
-            _expect_epoch: u32,
-            _probe: Arc<super::super::busy::TurnProbe>,
-        ) -> Result<(), super::super::busy::SubscribeError> {
-            Ok(())
-        }
-        fn current_epoch(&self, _id: PeerId) -> Option<u32> {
-            None
-        }
-    }
-
     /// 도어벨 통지를 기록하는 IdleNotifier(운영은 flush 채널) — sweep 이 **깨우는지**를 단언한다.
     struct RecordingIdle {
         seen: StdMutex<Vec<PeerId>>,
@@ -6795,29 +6779,27 @@ mod tests {
 
     #[test]
     fn stale_busy_sweep_unblocks_parked_mail() {
-        // ★round-3 finding 4 회귀(전 구간)★: MessageDone 이 영영 오지 않는 턴은 busy 를 영구화해 그 수신자
-        //   앞 배달을 TTL 까지 막는다. 상한 sweep 이 ① 표를 지우고 ② 도어벨을 눌러야 대기 메일이 나간다.
-        use super::super::busy::{BusyTracker, BUSY_MAX_TURN};
+        // ★round-3 finding 4 회귀(전 구간)★: 턴 종료 신호가 영영 오지 않는 턴은 busy 판정을 영구화해 그
+        //   수신자 앞 배달을 TTL 까지 막는다. 상한이 ① 판정을 idle 로 돌리고 ② sweep 이 도어벨을 눌러야
+        //   대기 메일이 나간다.
+        use super::super::busy::{BusyPolicy, ScriptedTurnFacts, BUSY_MAX_TURN};
         let port = Arc::new(FakeDeliveryPort::new());
         let notifier = Arc::new(RecordingIdle {
             seen: StdMutex::new(Vec::new()),
         });
-        let tracker = Arc::new(BusyTracker::new(
-            Arc::new(NoSubscribeTapHost),
-            notifier.clone(),
-        ));
+        let facts = ScriptedTurnFacts::new();
+        let gate = Arc::new(BusyPolicy::new(facts.clone(), notifier.clone()));
         let svc = Arc::new(MessagingService::new_gated(
             port.clone(),
             Arc::new(FakeControlPlane),
-            tracker.clone(),
+            gate.clone(),
         ));
         let (id, agent) = live("recv");
         port.set_roster(vec![agent]);
 
-        // 비정상 턴: busy 로 관측됐고 종료 통지가 오지 않는다(시각은 주입 — 실시간 30분 대기 회피).
+        // 비정상 턴: 턴 중으로 관측됐고 종료 신호가 오지 않는다(시각은 주입 — 실시간 30분 대기 회피).
         let t0 = Instant::now();
-        tracker.mark_attached_for_test(id, 0);
-        tracker.mark_busy_at_for_test(id, 0, t0);
+        facts.set_in_turn(id, 0, t0);
         svc.park_absent_for_test(
             "m1",
             ident(),
@@ -6834,16 +6816,16 @@ mod tests {
             "턴 중이므로 주입 없음(정상)"
         );
 
-        // 상한 경과 sweep → 표 청소 + 도어벨.
+        // 상한 경과 → 판정이 idle 로 돌아가고 sweep 이 도어벨을 누른다.
         assert_eq!(
-            tracker.sweep_stale_busy(t0 + BUSY_MAX_TURN + Duration::from_secs(1)),
+            gate.sweep_stale_busy(t0 + BUSY_MAX_TURN + Duration::from_secs(1)),
             1,
-            "상한 초과 busy 잔해 청소"
+            "상한 초과 잔해를 깨운다"
         );
         assert_eq!(
             notifier.seen.lock().unwrap().clone(),
             vec![id],
-            "청소한 id 를 깨워야 대기 메일이 나간다(지우기만 하면 다음 트리거가 없다)"
+            "깨워야 대기 메일이 나간다(판정만 뒤집으면 다음 트리거가 없다)"
         );
         // 운영에선 flush lane 이 그 도어벨을 소비한다 — 여기선 직접 그 소비를 수행.
         svc.flush_for_agent(id);
@@ -6857,7 +6839,7 @@ mod tests {
 
     #[test]
     fn flush_for_agent_resolves_name_and_is_noop_without_parked() {
-        // id 입구(턴 관측 tap 은 이름을 모른다) → canonical name 해석 후 기존 flush 경로 재사용.
+        // id 입구(턴 종료 통지는 이름을 모른다) → canonical name 해석 후 기존 flush 경로 재사용.
         //   파킹이 없으면 no-op(잉여 idle 통지의 비용을 여기서 깎는다 — 조기 반환).
         let (svc, port, _gate) = svc_gated();
         let (recv_id, recv) = live("recv");
@@ -10972,7 +10954,7 @@ mod tests {
     //   **순서 축**(백로그가 있을 때 앞지르지 않기)은 여기서 안 본다 — 그쪽은
     //   `inject_failure_parks_pending_without_a_turn_signal`(합류·오래된 순)과
     //   `the_flush_gate_asks_the_same_predicate_the_send_path_asks`(flush측 술어 일치)가 지킨다. 데몬 통합
-    //   (`daemon/tests/control_send.rs` — shell 수신자)은 tap 도 백로그도 없어 **둘 다** 못 잡는다(실측).
+    //   (`daemon/tests/control_send.rs` — shell 수신자)은 턴 관측도 백로그도 없어 **둘 다** 못 잡는다(실측).
     #[test]
     fn a_live_agent_without_a_turn_signal_is_injected_with_no_gate() {
         // ★spec §7 "턴 신호 없는 백엔드 = idle 게이트 없음"(ADR-0116 결정 7 — `RECIPIENT_UNREACHABLE` 폐기)★:

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::backend;
 use crate::agent::backend::InputEncoder;
-use crate::agent::output_core::OutputCore;
+use crate::agent::output_core::{OutputCore, TurnWiring};
 use crate::agent::preset::PresetRegistry;
 use crate::agent::profile::{
     AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
@@ -36,6 +36,7 @@ use crate::agent::session_tracker::SessionTracker;
 use crate::agent::transport::pty::PtyTransport;
 use crate::agent::transport::stdio::StdioTransport;
 use crate::agent::transport::{AgentTransport, OutputDecoder};
+use crate::agent::turn::TurnObservations;
 use crate::agent::types::{
     AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, ControlChannel, NoopControlChannel,
     OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome,
@@ -309,6 +310,17 @@ pub struct AgentManager {
     // ADR-0123
     // ADR-0006
     name_allocation: Arc<Mutex<()>>,
+
+    /// 턴 관측 표(ADR-0113 사실 계층) — 이 매니저가 띄운 모든 `OutputCore` 가 공유한다.
+    /// 쓰기 = `OutputCore::emit`(★호출 스레드는 둘이다★ — 출력 pump 와 입력 에코를 낸 주입 스레드,
+    /// turn.rs 헤더), 청소 = `OutputCore::finish`(★reaper 가 아니다★ — 종료 후 지각 emit 과의 경쟁을
+    /// finalize 플래그와 같은 지점에서 닫아야 해서다. ADR-0127 결정 5 · 거부한 대안 (d)),
+    /// 읽기 = 소비자(우편 idle 게이트 등).
+    /// ★sessions 락과 무관한 leaf★: 이 표를 잡은 채 sessions/profiles 를 잡는 경로가 없다
+    /// (ADR-0006 순서에 순환을 만들지 않는다).
+    // ADR-0113
+    // ADR-0127
+    turns: Arc<TurnObservations>,
 }
 
 /// spawn 진행 중 AgentId 예약을 잡고, drop 시 자동 해제하는 RAII 가드(ADR-0086 FIX 6). spawn_agent
@@ -407,10 +419,12 @@ impl AgentManager {
         control: Arc<dyn ControlChannel>,
     ) -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let turns = Arc::new(TurnObservations::new());
 
         // reaper supervisor 1개 기동 — manager 와 동일한 sessions/profiles/status_sink 를 공유한다
         // (두 주체가 같은 모델을 본다). reap_one 이 lock 밖에서 disposition·통지를 수행한다.
         // ★control 도 공유(ADR-0086)★: reaper 가 terminal(단일 소비자) 시 revoke 를 부른다.
+        //   (턴 관측 청소는 여기 없다 — `OutputCore::finish` 가 소유한다, ADR-0113.)
         let deps = ReaperDeps {
             sessions: sessions.clone(),
             profiles: profiles.clone(),
@@ -431,7 +445,15 @@ impl AgentManager {
             control,
             spawning: Arc::new(Mutex::new(HashSet::new())),
             name_allocation: Arc::new(Mutex::new(())),
+            turns,
         }
+    }
+
+    /// 턴 관측 표(ADR-0113 사실 계층) 공유 핸들 — 소비자(우편 idle 게이트·UI 입력 잠금 등)가 이걸 들고
+    /// 자기 정책으로 해석한다. 표 자체는 정책을 갖지 않는다(turn.rs 헤더).
+    // ADR-0113
+    pub fn turns(&self) -> Arc<TurnObservations> {
+        self.turns.clone()
     }
 
     /// 프리셋 레지스트리 접근(connection_core 의 프리셋 CRUD 에 사용, ADR-0061).
@@ -555,6 +577,8 @@ impl AgentManager {
 
     /// 에이전트 삭제(트리 "지우기"). 부모 삭제 시 자식은 루트로 승격한다(ProfileRegistry::remove).
     pub fn delete_agent(&self, id: AgentId) {
+        // ★화신 이력 표시(`AgentProfile::had_session`)도 이 한 줄이 함께 거둔다★ — 프로필과 한 몸이라
+        //   삭제와 spawn 판정 사이에 표식만 남는 창이 없다(그 필드 주석 · `epoch_for_spawn`).
         self.profiles.remove(id);
     }
 
@@ -865,8 +889,32 @@ impl AgentManager {
             None
         };
 
-        // epoch는 레지스트리의 현재값(fallback respawn 등에서 미리 bump됨).
-        let epoch = self.profiles.get(profile.id).map(|p| p.epoch).unwrap_or(0);
+        // ★epoch 확정 — 화신 **교체**면 올린다(ADR-0007 "같은 AgentId 맵 교체마다 +1")★
+        //
+        // ★왜 이 자리인가(호출부가 아니라)★: 맵 교체가 실제로 일어나는 곳이 여기고, **모든 spawn 이
+        //   모드와 무관하게 이 한 줄을 지난다**. 옛날엔 bump 가 `activate_profile` 의 Resume 갈래에만
+        //   있어서 Fresh 재spawn 경로들(WS `Spawn` 명령 · `activate_profile` 의 Fresh 갈래 · sid 없는
+        //   프로필의 부팅 복원)이 죽은 화신의 epoch 를 **그대로 재사용**했다. 그 재사용은 (AgentId, epoch)
+        //   를 키로 쓰는 모든 구조를 무너뜨린다 — 턴 관측 표(ADR-0113: 죽은 화신의 지각 emit 이 산 화신의
+        //   항목을 덮고 그 emit 의 finalize 재확인이 그걸 지운다) · 제어 채널 토큰(ADR-0086) ·
+        //   reap epoch-guard(ADR-0084). 호출부마다 흩뿌리면 새 호출부가 또 빠뜨린다.
+        // ★모드를 보지 않는다(Resume 도 같은 규칙)★: "교체인가" 는 모드가 아니라 **앞선 화신이 있었는가**
+        //   의 함수다. 모드로 가르면 Resume 쪽 재spawn(`restore_all` 을 부팅 밖에서 부르는 등)이 같은
+        //   재사용 구멍으로 남는다 — 그건 규약일 뿐 강제되지 않는다.
+        // ★판정·bump 원자성(load-bearing)★: 판정과 bump 를 여기서 나눠 하면 그 사이 `delete_agent` 가
+        //   끼어들어 epoch 가 0 으로 떨어지거나(죽은 화신보다 **작은** 값이 산 세션에 붙는다 = 관측이
+        //   거꾸로 뒤집힌다) 재사용으로 되돌아간다. 그래서 레지스트리가 한 임계구역에서 처리한다
+        //   (`epoch_for_spawn` — 그 doc 이 정본).
+        // ★프로필이 사라졌으면 **spawn 을 중단한다**★: 삭제된 프로필로 세션을 띄울 이유가 없고, 무엇보다
+        //   여기서 없는 프로필을 0 으로 떨어뜨리면 위 뒤집힘이 그대로 발생한다 — 그래서 `?` 로 끊는다.
+        // ADR-0007
+        // ADR-0113
+        let epoch = self.profiles.epoch_for_spawn(profile.id).ok_or_else(|| {
+            PtyError::SpawnFailed(format!(
+                "profile {} vanished mid-spawn (concurrent delete) — spawn aborted",
+                profile.id
+            ))
+        })?;
 
         // ADR-0086: 제어 채널 provisioning. 데몬이 (AgentId,epoch)용 토큰+mcp-config 를 발급해
         //   ControlEndpoint 를 돌려준다. ★spec 조립 직전에 부른다★ — build_command_spec 이 endpoint 를
@@ -934,6 +982,9 @@ impl AgentManager {
         // 출력 정제기(입력 encoder 의 대칭 짝) — json 모드면 backend 가 claude decoder 를 만들고,
         // 그 외엔 None(바이트 직통). claude 스키마 지식은 backend 단독이라 여기선 command 만 넘긴다.
         let decoder = backend::output_decoder(&profile.command);
+        // ADR-0113/0004: 이 백엔드의 턴 신호 분류자(encoder/decoder 와 같은 자리에서 뽑는다 —
+        //   spawn_session 은 backend 를 모른다).
+        let turn_classifier = backend::turn_classifier(&profile.command);
 
         // ADR-0079: resume(=과거 대화 이어받기) 스폰이면 `.jsonl` transcript 에서 과거 이벤트를 읽어
         //   버퍼에 seed 한다(pump 전). Fresh 는 이어받을 대화가 없으므로 빈 Vec(기존 동작 불변). json
@@ -956,6 +1007,7 @@ impl AgentManager {
             json_mode,
             epoch,
             seed_events,
+            turn_classifier,
         )?;
 
         // ★provision 가드 무장 해제(FIX 3)★: 여기 도달 = spawn_session 이 sessions 맵에 세션을 등록 완료.
@@ -1023,6 +1075,13 @@ impl AgentManager {
         }
 
         // 2. Fresh(진짜 신규 — 세션 없음)는 이어받을 대화가 없으므로 spawn_agent 위임(정상 신규 생성).
+        //
+        // ★이 갈래도 같은 AgentId 의 맵 교체지만 여기서 epoch 을 올리지 않는다 — `spawn_agent` 이 올린다★:
+        //   Fresh 로 같은 프로필을 다시 띄우는 경로는 이것 말고도 있어서(WS `Spawn` 명령 · sid 없는 프로필의
+        //   부팅 복원), bump 를 갈래마다 흩뿌리면 새 경로가 또 빠뜨린다. 그래서 맵 교체가 실제로 일어나는
+        //   지점 하나에 모았다(spawn_agent 의 epoch 확정 주석이 정본). **아래 Resume 갈래도 예외가 아니다**
+        //   — 모드와 무관하게 판정 축은 "앞선 화신이 있었나" 하나이고 `spawn_agent` 이 처리한다.
+        // ADR-0007
         if mode == SpawnMode::Fresh {
             return self.spawn_agent(profile, SpawnMode::Fresh);
         }
@@ -1030,18 +1089,14 @@ impl AgentManager {
         // 3. Resume: 이어받기만 시도(fresh-fallback 폐지). resume_no_fallback 이 RestoreOutcome 을
         //    돌려주므로 결말을 AgentInfo/Err 로 번역한다.
         //
-        // ★재활성화 = epoch++★: 여기 도달했다는 건 위 가드에서 산 세션이 **없음**을 이미 확인했다는
-        //   뜻이다 — 즉 reap 으로 세션이 맵에서 빠진 **시체**를 같은 AgentId 로 다시 띄우는 맵 교체다.
-        //   ADR-0007 불변식("같은 AgentId 맵 교체마다 epoch +1")을 그대로 적용해, 새 세션이 죽은
-        //   세션과 다른 `[agentId, epoch]` 를 갖게 한다 → 프론트 구독(deps [viewId,agentId,epoch])이
-        //   재발화해 resume 출력이 화면에 붙고, 옛 seq/cursor 가 새 스트림에 오적용되지 않는다.
-        //   spawn_agent(L223)이 이 bump **뒤** 프로필 epoch 를 읽으므로 순서가 load-bearing 이다.
-        //   (산 세션 재활성화는 위 가드에서 이미 걸러졌으므로 절대 여기 오지 않는다 — bump 안전.)
-        //   또 이 bump 는 stale reap 의 apply_disposition epoch-guard(reaper.rs)가 재활성화된 산
-        //   세션을 강등 못 하게 하는 구분자이기도 하다.
-        // ADR-0084
-        // ADR-0007
-        self.profiles.bump_epoch(profile.id);
+        // ★재활성화도 화신 교체다 — 하지만 bump 는 여기서 하지 않는다(`spawn_agent` 단일 지점)★:
+        //   여기 도달했다는 건 위 가드에서 산 세션이 **없음**을 확인했다는 뜻이다 — 즉 reap 으로 맵에서
+        //   빠진 시체를 같은 AgentId 로 다시 띄우는 맵 교체다. **여기서 따로 올리지 말 것** — 이 자리에
+        //   bump 를 두면 Fresh 재spawn 경로들이 같은 처리를 빠뜨린다(그 구멍이 실재했다). 판정 축은
+        //   "앞선 화신이 있었나" 하나이고, 모드와 무관하게 `spawn_agent` 이 처리한다.
+        //   ★순서는 여전히 지켜진다★: bump 는 `register_for_spawn` 의 upsert **뒤**, 제어 채널 provision
+        //   **앞**에서 일어난다 — 그래서 stale 스냅샷이 되돌리지 못하고(ADR-0084 upsert 보존), 새 토큰이
+        //   새 epoch 로 발급되며(ADR-0086), 프론트가 `[agentId, epoch]` 로 재구독한다(ADR-0007).
 
         match self.resume_no_fallback(profile) {
             // resume 성공 — 살아있는 세션의 info 반환.
@@ -1070,6 +1125,8 @@ impl AgentManager {
         // ADR-0079: resume 시 `.jsonl` 에서 복원한 과거 이벤트. pump 전에 core 버퍼에 seed 한다.
         //   Fresh(및 비-json)는 빈 Vec → seed 안 함(기존 fresh 버퍼 동작 불변).
         seed_events: Vec<OutputEvent>,
+        // ADR-0113: 이 백엔드의 턴 신호 분류자(호출자가 backend dispatch 로 뽑아 넘긴다).
+        turn_classifier: backend::TurnClassifier,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
         // 1. 모드에 맞는 transport 조립(json=StdioTransport 파이프 / 그 외=PtyTransport ConPTY).
         //    child spawn + job 편입 + 파이프/reader·writer 확보. pump는 아직 안 띄움(start에서).
@@ -1078,7 +1135,14 @@ impl AgentManager {
             select_transport(json_mode, &spec, DEFAULT_COLS, DEFAULT_ROWS, decoder)?;
 
         // 2. 출력 측 core 생성(status Running, seq 0). transport와 분리된 출력 fanout 담당.
-        let core = Arc::new(OutputCore::new(id, epoch, self.status_sink.clone()));
+        //    ADR-0113: 공용 턴 관측 표 + **이 백엔드의 신호 분류자**를 함께 꽂는다(분류는 백엔드 지식 —
+        //    ADR-0004). 안 꽂으면 이 세션만 조용히 관측 밖으로 빠진다.
+        let core = Arc::new(OutputCore::new(
+            id,
+            epoch,
+            self.status_sink.clone(),
+            TurnWiring::new(self.turns.clone(), turn_classifier),
+        ));
 
         // 2.1. ★ADR-0079 seed-before-publish(load-bearing 순서 — cross-family review 2026-07-13)★:
         //      resume 복원 과거 이벤트를 **세션이 관측 가능해지기 전에**(= sessions 맵 insert 전) core
@@ -1160,7 +1224,14 @@ impl AgentManager {
         //      순서를 "플립 true → start_pump → (크래시 시) reaper false" 로 고정해 reaper 의
         //      downgrade(false)가 항상 **마지막**이 되게 한다. spawn 은 활성화 행동이므로 여기서만 올린다
         //      (reaper 는 downgrade-only — true 로 올리지 않음).
-        self.profiles.update_with(id, |p| p.auto_restore = true);
+        //      ★ADR-0007/0113: 같은 갱신에서 화신 이력도 찍는다★ — 이 id 는 이제 "화신을 가진 적 있는"
+        //      쪽이라, 다음 spawn 은 모드와 무관하게 **교체**이므로 epoch 를 올려야 한다
+        //      (`epoch_for_spawn`). reap 은 이 표시를 지우지 않는다 — 시체가 되살아나는 게 그 축이
+        //      잡아야 하는 경우다. 지우는 곳은 프로필 삭제 하나뿐이다.
+        self.profiles.update_with(id, |p| {
+            p.auto_restore = true;
+            p.had_session = true;
+        });
 
         // 6. pump 기동 — reader take + pump 스레드 spawn + core.attach_pump(핸들/done_rx 적재).
         //    이제부터 출력·종료가 흐른다. 종료 시 finish hook→ReapMsg(맵에 이미 존재).
@@ -1180,7 +1251,9 @@ impl AgentManager {
         let mut reports = Vec::with_capacity(targets.len());
         for profile in targets {
             let outcome = self.restore_one(&profile);
-            // fallback에서 epoch가 bump됐을 수 있으니 최신값을 읽는다.
+            // spawn 이 성공했으면 `epoch_for_spawn` 이 올린 최신값이 명부에 있으므로 그걸 읽는다
+            //   (fresh-fallback 은 폐지됐다 — 옛 주석이 말하던 bump 경로가 아니다). 프로필이 없으면
+            //   spawn 이 실패한 경우뿐이라 결말이 Failed 이고, 이때 스냅샷 epoch 은 보고용 표기일 뿐이다.
             let epoch = self
                 .profiles
                 .get(profile.id)
@@ -1416,6 +1489,29 @@ impl AgentManager {
             .write()
             .expect("sessions poisoned")
             .insert(session.id, session);
+    }
+
+    /// ★하네스 전용★ — `insert_test_session` 의 짝. 이 매니저의 **통지 경로와 턴 관측 표에 이어진**
+    ///   `OutputCore` 를 만든다(spawn_session 이 하는 배선과 동형).
+    ///
+    /// ★왜 필요한가★: 주입 세션이 `OutputCore::new` 만으로 조립되면 그 세션의 emit 은 매니저의 표에
+    ///   닿지 않아, 게이트·도어벨 배선을 보려는 통합 테스트가 "관측이 없어서 통과" 하는 위약이 된다.
+    ///   반대로 관측이 필요 없는 테스트는 이걸 쓰지 않으면 된다(운영 세션과 달리 선택이다).
+    // ADR-0113
+    #[cfg(feature = "test-harness")]
+    #[doc(hidden)]
+    pub fn wired_test_core(
+        &self,
+        id: AgentId,
+        epoch: u32,
+        classify: crate::agent::backend::TurnClassifier,
+    ) -> Arc<OutputCore> {
+        Arc::new(OutputCore::new(
+            id,
+            epoch,
+            self.status_sink.clone(),
+            TurnWiring::new(self.turns.clone(), classify),
+        ))
     }
 
     /// PTY cols/rows 변경. resize 성공 시에만 cols/rows atomic 갱신(AgentSession 책임).
@@ -1745,7 +1841,12 @@ mod tests {
     /// 주어진 epoch 의 세션을 맵에 꽂는다(같은 id 재삽입 = 재시작 = incarnation 교체 모사).
     fn put_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<Mutex<Vec<Vec<u8>>>> {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let core = Arc::new(OutputCore::new(id, epoch, Arc::new(NoopStatus)));
+        let core = Arc::new(OutputCore::new(
+            id,
+            epoch,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
         let session = Arc::new(AgentSession::new(
             id,
             std::path::PathBuf::from("."),
@@ -1849,7 +1950,12 @@ mod tests {
     /// 지정 cwd 로 **산 세션**을 맵에 꽂는다(프로필 없음 = ad-hoc 산 에이전트). `put_session` 은 cwd 가
     /// `"."` 로 고정이라 이름 축 단언을 못 해서 따로 둔다 — 이름은 `basename(session.cwd)` 로 파생된다.
     fn put_live_session_at(manager: &AgentManager, id: AgentId, cwd: &str) {
-        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatus)));
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
         let session = Arc::new(AgentSession::new(
             id,
             std::path::PathBuf::from(cwd),
@@ -2647,7 +2753,12 @@ mod tests {
         cwd: &str,
         transport: Box<dyn AgentTransport>,
     ) {
-        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatus)));
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
         let session = Arc::new(AgentSession::new(
             id,
             std::path::PathBuf::from(cwd),
@@ -2879,6 +2990,49 @@ mod tests {
             THREADS,
             "명부에 동명이 앉으면 안 된다: {roster:?}"
         );
+    }
+
+    /// ★epoch 재사용 회귀(ADR-0007 · ADR-0113)★: 죽어서 수거된 프로필을 **Fresh 로 다시 띄우면** 앞선
+    /// 화신과 다른 epoch 을 받아야 한다. 재사용하면 (AgentId, epoch) 를 키로 쓰는 구조가 두 화신을 구분하지
+    /// 못한다 — 특히 죽은 화신의 지각 emit 이 산 화신의 턴 관측을 덮고 그 뒤 `forget` 으로 지워 버린다.
+    /// ★실 프로세스로 보는 이유★: bump 는 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이 말한다.
+    #[cfg(windows)]
+    #[test]
+    fn a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch() {
+        let manager = bare_manager();
+        let profile = create(
+            &manager,
+            &std::env::temp_dir().to_string_lossy(),
+            Some("epoch-reuse"),
+        );
+        let first = manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("첫 spawn");
+        manager.kill_agent(first.id).ok();
+        // reaper 가 맵에서 수거할 때까지 — 그 뒤라야 두 번째 spawn 이 이중 spawn 가드를 통과한다.
+        let reaped = (0..200).any(|_| {
+            if manager.list_agents().is_empty() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            false
+        });
+        assert!(reaped, "kill 후 세션이 수거돼야(전제)");
+
+        let second = manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("Fresh 재spawn");
+        assert_ne!(
+            second.epoch, first.epoch,
+            "Fresh 재spawn 이 죽은 화신의 epoch 을 재사용하면 안 된다"
+        );
+        assert!(
+            second.epoch > first.epoch,
+            "epoch 은 단조 증가여야(표의 '더 작은 건 버린다' 규칙이 그 위에 선다): {} → {}",
+            first.epoch,
+            second.epoch
+        );
+        manager.kill_agent(second.id).ok();
     }
 
     /// 실 spawn 경로가 정말 `register_for_spawn` 을 탄다는 것(= 위 단위 테스트가 죽은 코드를 보고 있지

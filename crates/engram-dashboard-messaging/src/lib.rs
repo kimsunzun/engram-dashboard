@@ -12,7 +12,7 @@
 //! 아예 등장하지 않고(격리 grep 게이트), 접합점은 전부 이
 //! crate 가 소유한 계약(포트 trait)으로만 뚫린다: `service::DeliveryPort`(배달 실물) ·
 //! `service::ControlPlanePort`(봉투 포맷 조회·배달 관측 기록) · `service::FlushTrigger`(도어벨) ·
-//! `busy::TapHost`(턴 관측 구독) · `busy::IdleNotifier`(유휴 통지). 실물 어댑터는 호스트(데몬)가
+//! `busy::TurnFacts`(턴 관측 사실 조회) · `busy::IdleNotifier`(유휴 통지). 실물 어댑터는 호스트(데몬)가
 //! 소유한다. 여기에 워크스페이스 의존을 추가하고 싶어지면 그건 "포트를 파야 한다" 는 신호이지 벽을
 //! 뚫을 이유가 아니다 — 컴파일러가 강제하는 벽이 이 구조의 요점이다(규약이 아니라 구조).
 //!
@@ -39,12 +39,11 @@ pub mod mailbox;
 // C1: 순수 구조를 발송 파이프라인에 엮는 오케스트레이터(MessagingService + delivery seam). 락은
 //   여기서 소유(위 순수 구조는 무동시성). ADR-0103/0104.
 pub mod service;
-// C2: idle 게이트 — 수신자 턴 상태 관측(BusyTracker + 턴 신호 수신구 `TurnProbe`) + 서비스가 묻는
-//   BusyGate seam. ★위 "순수성 불변식" 의 예외 구역★: 이 모듈은 호스트의 출력 pump 스레드에서 불리는
-//   콜백(`TurnProbe`)을 받고 락·통지 채널을 다루므로 무동시성이 아니다(service.rs 와 같은 오케스트레이션
-//   층). 대신 시간·tokio 를 쓰지 않으므로 결정적 단위 테스트는 유지된다(신호를 손으로 먹여 상태머신을
-//   단언). ADR-0104 결정 3 · ADR-0110 결정 4(출력 이벤트→턴 신호 **분류**는 백엔드 지식이라 호스트
-//   어댑터 소유 — 여기엔 신호 어휘만 남는다).
+// C2: idle 게이트 — 호스트의 턴 관측 사실(`TurnFacts`)을 우편 정책으로 해석하는 `BusyPolicy` + 서비스가
+//   묻는 `BusyGate` seam. ★위 "순수성 불변식" 의 부분 예외★: 락·호스트 콜백을 다루므로 무동시성은
+//   아니지만(service.rs 와 같은 오케스트레이션 층), 시계는 여전히 읽지 않는다 — 상한 비교는 now 를
+//   주입받는 `sweep_stale_busy` 안에서만 일어난다. ADR-0104 결정 3 · ADR-0113(사실은 공용 계층에,
+//   여기엔 정책만).
 pub mod busy;
 
 /// 메시징 참여자 id — 이 crate 자체의 id 별칭(ADR-0110 결정 2 "완전 상호무지").

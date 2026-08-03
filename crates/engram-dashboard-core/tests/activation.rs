@@ -179,7 +179,9 @@ fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
 /// **fresh-fallback 없이** Failed(Err)로 끝난다 — 자동으로 새 대화를 만들지 않는다. 검증:
 ///   (a) activate_profile 이 Err 반환(Failed 시체 → Err 번역).
 ///   (b) 배치가 **정확히 1회**만 실행됨(fresh 재spawn 이 있었다면 2회 — fresh-fallback 부재 증명).
-///   (c) epoch 불변(0) — fallback 이 없앤 epoch++ 가 일어나지 않음.
+///   (c) epoch 0 유지 — 이 프로필은 **이 프로세스에서 앞선 화신이 없어서** 올릴 대상이 아니다
+///       (`epoch_for_spawn` 의 판정 축). 대신 `had_session` 이 켜졌음을 함께 단언한다 — 그게 다음
+///       spawn 이 올라간다는 실제 계약이고, 여기 0 은 fallback 유무와 무관하다.
 ///   (d) claude_session_id/old_session_ids 불변 — 새 sid 발급(fresh) 없음.
 ///   (e) 프로필(시체) 생존 — reaper 가 삭제하지 않음(KeepDisableAutoRestore).
 ///   (f) auto_restore=true→false 다운그레이드 — 삭제가 아니라 "시체로 보존"임을 결정적으로 단언.
@@ -221,15 +223,23 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         run_count(&count)
     );
 
-    // (c) ★ADR-0084 갱신★: 재활성화(Resume)는 성패와 무관하게 진입 시 epoch 를 bump 한다(맵 교체
-    //     불변식 — activate_profile Resume 갈래). resume 이 조기종료로 Failed 가 돼도 그 사이 새 세션이
-    //     맵에 insert→reap 됐으므로 epoch++ 가 옳다. 옛 ADR-0082 가정(epoch 불변=0)은 폐기됐다.
-    //     (fresh-fallback 이 하던 "kill 후 fresh 재spawn 시 bump" 와는 다른 경로 — 여기선 재활성화 진입
-    //      자체가 bump 주체이고, 자동 fresh 재생성은 여전히 없다(위 run-count==1 로 별도 단언).)
+    // (c) ★epoch 판정 축 = "앞선 화신이 있었나"(모드가 아니다)★: 이 프로필은 이 프로세스에서 **처음**
+    //     떠 봤으므로 구분해야 할 앞선 화신이 없다 → 이번 화신은 epoch 0 을 그대로 쓴다. 옛 판은
+    //     `activate_profile` 진입에서 무조건 bump 해 여기서 1 이 나왔는데, 그 배치가 Fresh 재spawn
+    //     경로들(WS `Spawn`·부팅 복원)을 빠뜨리는 구멍이었다 — 이제 `spawn_agent` 한 지점이 모드 무관하게
+    //     판정한다(manager.rs epoch 확정 주석).
+    //     ★불변식 자체(두 화신이 같은 epoch 를 쓰지 않는다)는 그대로다★: 이 화신이 죽었으므로 프로필엔
+    //     화신 이력이 찍혔고, **다음** spawn 은 반드시 더 큰 epoch 를 받는다(아래 단언 + 전용 회귀
+    //     `manager::tests::a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch`).
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
-        Some(1),
-        "재활성화(Resume) 진입은 epoch 를 0→1 로 bump 해야 함(ADR-0084 맵 교체 불변식)"
+        Some(0),
+        "최초 화신은 올릴 앞선 epoch 가 없다(ADR-0007 은 *교체*에만 건다)"
+    );
+    assert_eq!(
+        profiles.get(id).map(|p| p.had_session),
+        Some(true),
+        "화신이 한 번 떠 봤다는 사실이 찍혀야 다음 spawn 이 교체로 판정된다"
     );
 
     // (d) sid 이력 불변 — 새 sid 발급(fresh)이 없어 claude_session_id/old_session_ids 가 그대로.
@@ -398,8 +408,8 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
 /// ADR-0007("같은 AgentId 맵 교체마다 epoch +1")를 적용한다. epoch 가 안 오르면 프론트 구독
 /// (deps [viewId,agentId,epoch])이 재발화하지 않아 resume 출력이 화면에 안 붙는다(빈 슬롯).
 ///
-/// ★step 1 이 없으면(bump_epoch 미호출) 이 테스트는 실패한다★: spawn_agent 은 프로필 epoch 를 읽기만
-///   하므로, bump 가 없으면 재활성화된 새 세션이 죽은 세션과 동일 epoch(E)를 갖는다 → 아래 `> E` 단언 실패.
+/// ★bump 지점(`spawn_agent` 의 `epoch_for_spawn`)이 사라지면 이 테스트가 실패한다★: 그러면 재활성화된
+///   새 세션이 죽은 세션과 동일 epoch(E)를 갖는다 → 아래 `> E` 단언 실패.
 ///
 /// 실 claude 없이 셸로 모사: 셸은 needs_session=false 라 --resume 플래그를 붙이진 않지만(그건 별도
 ///   backend 단위 테스트가 실증), 이 테스트가 겨냥하는 "재활성화 = 맵 교체 = epoch++" 는 backend

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use engram_dashboard_core::agent::manager::default_shell;
-use engram_dashboard_core::agent::output_core::OutputCore;
+use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_core::agent::transport::pty::PtyTransport;
 use engram_dashboard_core::agent::transport::AgentTransport;
 use engram_dashboard_core::agent::types::{
@@ -98,7 +98,7 @@ fn transport_open_input_resize_shutdown() {
 
     // 2) OutputCore + status sink. 생성 직후 Running.
     let status_sink: Arc<dyn StatusSink> = Arc::new(NoopStatusSink);
-    let core = Arc::new(OutputCore::new(id, 0, status_sink));
+    let core = Arc::new(OutputCore::new(id, 0, status_sink, TurnWiring::detached()));
     assert!(
         matches!(core.status(), AgentStatus::Running),
         "open 직후 status 가 Running 이어야 함"

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_core::agent::output_core::OutputCore;
+use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_core::agent::transport::stdio::StdioTransport;
 use engram_dashboard_core::agent::transport::AgentTransport;
 use engram_dashboard_core::agent::types::OutputSink;
@@ -151,7 +151,12 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
     let transport = Arc::new(transport);
 
     let sink = CollectingSink::new();
-    let core = Arc::new(OutputCore::new(Uuid::new_v4(), 0, Arc::new(NoopStatusSink)));
+    let core = Arc::new(OutputCore::new(
+        Uuid::new_v4(),
+        0,
+        Arc::new(NoopStatusSink),
+        TurnWiring::detached(),
+    ));
     transport.start(core.clone());
     core.subscribe(Arc::new(sink.clone()));
 
@@ -351,7 +356,12 @@ exit 0"
 
     // pump + 수집 sink(test 1 과 동형) — 자식이 echo 한 prefix 를 seq 순서로 모은다.
     let sink = CollectingSink::new();
-    let core = Arc::new(OutputCore::new(Uuid::new_v4(), 0, Arc::new(NoopStatusSink)));
+    let core = Arc::new(OutputCore::new(
+        Uuid::new_v4(),
+        0,
+        Arc::new(NoopStatusSink),
+        TurnWiring::detached(),
+    ));
     transport.start(core.clone());
     core.subscribe(Arc::new(sink.clone()));
 

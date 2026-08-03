@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use engram_dashboard_core::agent::backend::{AgentBackend, ShellBackend};
 use engram_dashboard_core::agent::manager::default_shell;
-use engram_dashboard_core::agent::output_core::OutputCore;
+use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_core::agent::session::AgentSession;
 use engram_dashboard_core::agent::transport::pty::PtyTransport;
 use engram_dashboard_core::agent::transport::AgentTransport;
@@ -121,7 +121,7 @@ fn session_compose_resize_exiting_kill() {
     // 2) OutputCore + 기록형 status sink.
     let status_sink = RecordingStatusSink::new();
     let status_dyn: Arc<dyn StatusSink> = Arc::new(status_sink.clone());
-    let core = Arc::new(OutputCore::new(id, 0, status_dyn));
+    let core = Arc::new(OutputCore::new(id, 0, status_dyn, TurnWiring::detached()));
 
     // 3) start(pump 기동) — AgentSession 밖에서 manager 처럼. new 는 start 를 안 부른다(impl-spec).
     let transport: Box<dyn AgentTransport> = Box::new(transport);

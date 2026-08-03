@@ -576,6 +576,21 @@ pub trait StatusSink: Send + Sync + 'static {
     fn agent_list_updated(&self, agents: Vec<AgentInfo>);
     /// 복원 시도 결과 통지(S9 §18-d). 기본 no-op — 복원을 안 쓰는 sink는 구현 불필요.
     fn restore_result(&self, _report: crate::agent::profile::RestoreReport) {}
+    /// 이 화신이 방금 한 턴을 끝냈다(ADR-0113 — 턴 관측의 push 출구). 기본 no-op.
+    ///
+    /// ★계약 = 논블록·비재진입(ADR-0006 콜백 규율 — 절대 위반 금지)★: 구현이 할 수 있는 일은 논블록
+    ///   통지(채널 send) 정도다. IO·주입·재진입 호출을 하면 그 작업이 끝날 때까지 이 콜백을 부른
+    ///   스레드가 멈춘다.
+    /// ★그 스레드는 **오늘은** 출력 pump 다 — 그러나 구조가 보장하지 않는다(load-bearing)★: `emit` 의
+    ///   호출자는 둘이고(출력 pump · 입력 에코를 낸 주입 스레드 — turn.rs 헤더), 이 훅은 그중 종료 신호를
+    ///   낸 쪽에서 불린다. 지금 pump 로 고정되는 이유는 **입력 에코가 진행 신호로 분류되기 때문**일 뿐이다
+    ///   (backend 분류자). 종료 신호를 내는 비-pump emit 경로가 새로 생기면 이 계약의 무게가 그 스레드로
+    ///   옮겨간다 — 그때 배달 작업을 발신 스레드에 얹지 않으려면 여기가 여전히 논블록이어야 한다.
+    /// ★전이 여부를 가리지 않고 종료 신호마다 나간다★: 소비자가 "직전이 턴 중이었을 때만" 으로 좁히려면
+    ///   그 판정을 자기 쪽에서 해야 한다. 여기서 좁히면 어시스턴트 이벤트 없이 곧장 끝나는 턴에서 통지가
+    ///   빠지는데, 잉여 통지는 대개 무해한 반면 누락은 소비자를 영구 대기시킨다.
+    // ADR-0113
+    fn turn_ended(&self, _id: AgentId, _epoch: u32) {}
 }
 
 // ReplayBuffer 는 session.rs 로 이동 (LLD §1/§4: session.rs 소속).

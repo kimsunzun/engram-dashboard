@@ -1,32 +1,27 @@
 //! messaging_host — 메시징 커널(`engram-dashboard-messaging`)의 **호스트 어댑터 + 조립실**(ADR-0110).
 //!
-//! ★역할★: 커널이 소유한 계약(포트 trait)에 데몬의 실물을 꽂는다. 커널은 `AgentManager`·`OutputSink`·
-//!   `ControlRegistry` 를 **타입으로도 모르므로**(완전 상호무지 — ADR-0110 결정 2), 그 셋을 아는 코드는
-//!   전부 이 파일에 모인다:
+//! ★역할★: 커널이 소유한 계약(포트 trait)에 데몬의 실물을 꽂는다. 커널은 `AgentManager`·
+//!   `TurnObservations`·`ControlRegistry` 를 **타입으로도 모르므로**(완전 상호무지 — ADR-0110 결정 2),
+//!   그 셋을 아는 코드는 전부 이 파일에 모인다:
 //!     - `ManagerDeliveryPort` — `DeliveryPort`(주입·로스터·이름) → `AgentManager`.
-//!     - `ManagerTapHost` + `TurnTapSink` — `TapHost`(턴 관측 배선) → `AgentManager` 출력 구독.
-//!       ★여기가 백엔드 지식의 자리★: "어떤 출력 이벤트가 턴 진행이고 어떤 게 턴 종료인가" 는 claude
-//!       stream-json 의 지식이라 커널이 아니라 이 어댑터가 안다(ADR-0110 결정 4 · ADR-0004 와 같은 결).
+//!     - `ManagerTurnFacts` — `TurnFacts`(턴 관측 사실 조회) → 코어의 턴 관측 표(ADR-0113 결정 1).
 //!     - `ControlRegistry` 의 `ControlPlanePort` 구현 — 봉투 포맷 조회 + 배달 관측 적재.
-//!     - 조립 헬퍼(`messaging_for_manager`/`messaging_for_manager_gated`/`busy_tracker_for_manager`) —
-//!       옛 커널 편의 생성자(`MessagingService::for_manager*`·`BusyTracker::for_manager`)의 후계.
+//!     - 조립 헬퍼(`messaging_for_manager`/`messaging_for_manager_gated`/`busy_gate_for_manager`).
 //!
-//! ★불변식(load-bearing)★: 정책은 커널에, 어댑터는 얇게. busy 불변식(positive-knowledge-only·유령 busy
-//!   차단·콜백 규율·상한 sweep)을 여기서 재구현하지 않는다 — 이 파일이 하는 일은 **타입 번역과 배선**
-//!   뿐이다(ADR-0110 영향/불변식 "포트는 얇게, 정책은 lib에").
+//! ★불변식(load-bearing)★: 정책은 커널에, 어댑터는 얇게. busy 불변식(positive-knowledge-only·상한·
+//!   도어벨 규율)을 여기서 재구현하지 않는다 — 이 파일이 하는 일은 **타입 번역과 배선** 뿐이다
+//!   (ADR-0110 영향/불변식 "포트는 얇게, 정책은 lib에").
 //!
 //! tauri import 0(daemon crate).
 // ADR-0110
+// ADR-0113
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::types::{
-    OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
-};
-use engram_dashboard_messaging::busy::{
-    BusyGate, BusyTracker, IdleNotifier, SubscribeError, TapHost, TurnProbe,
-};
+use engram_dashboard_core::agent::turn::TurnObservations;
+use engram_dashboard_messaging::busy::{BusyGate, BusyPolicy, IdleNotifier, TurnFact, TurnFacts};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, EnvelopeFormat};
 use engram_dashboard_messaging::service::{
     AddressingSources, ControlPlanePort, DeliveryPort, InjectReceipt, LiveAgent, MessagingService,
@@ -207,136 +202,35 @@ impl ControlPlanePort for ControlRegistry {
 
 // ── 턴 관측 어댑터 ──────────────────────────────────────────────────────────────────────────────
 
-/// 운영 TapHost — `Arc<AgentManager>` 얇은 래퍼(공개 API 만 부른다, ADR-0006 락 규율 그대로 탄다).
-pub struct ManagerTapHost {
-    manager: Arc<AgentManager>,
-}
-
-impl ManagerTapHost {
-    pub fn new(manager: Arc<AgentManager>) -> Self {
-        Self { manager }
-    }
-}
-
-impl TapHost for ManagerTapHost {
-    fn subscribe_output(
-        &self,
-        id: PeerId,
-        expect_epoch: u32,
-        probe: Arc<TurnProbe>,
-    ) -> Result<(), SubscribeError> {
-        // ★구독 지점 epoch 검증(round-3 finding 5 — 유령 tap 누수 차단)★: core 에는 "이 epoch 이면 구독" 이라는
-        //   원자적 API 가 없다(core 는 읽기 전용 — 새 seam 을 내지 않는다). 그래서 **구독 직전 + 직후** 두 번
-        //   현재 epoch 을 확인하고, 사후 확인이 어긋나면 방금 받은 SinkId 로 **되돌린다**(unsubscribe). 이러면
-        //   창이 남더라도 그 창에서 만들어진 유령 구독은 우리 손으로 회수되므로 "붙었는데 아무도 안 지우는 tap"
-        //   이 남지 않는다. 사전 확인만으로는(옛 구현) 그 사이 재시작이 끼면 새 core 에 유령이 영구 잔류했다.
-        if let Some(err) = self.stale_check(id, expect_epoch) {
-            return Err(err);
-        }
-        let sink: Arc<dyn OutputSink> = Arc::new(TurnTapSink {
-            sink_id: uuid::Uuid::new_v4(),
-            probe,
-        });
-        // ★live-only 구독(load-bearing — busy 모듈 헤더 "replay 부트스트랩 거부")★: `after_seq = u64::MAX` 는
-        //   "이 seq 까지는 이미 봤다" 는 뜻이라, core `subscribe_from` 의 Resumed 분기가 보낼 tail 을
-        //   `partition_point(seq <= u64::MAX)` = **전체 skip** 으로 계산한다 → replay 프레임이 tap 에 한
-        //   건도 들어오지 않고 그 뒤 live emit 만 받는다. `epoch_matches = true` 를 넘기는 이유: false 면
-        //   core 가 "안전 기본값" 으로 **전체 replay** 를 보낸다(FromOldest) — tap 에는 그게 바로 위험이다.
-        //   `epoch_matches = true` 가 정당한 이유는 위 사전/사후 검증이 "구독한 core = expect_epoch 의 core"
-        //   를 확인해 주기 때문이다.
-        // SinkId 는 정상 경로에선 버린다 — tap 은 명시 unsubscribe 를 하지 않는다(수명 = 그 epoch 의
-        //   OutputCore). 근거: 세션이 reap 되면 OutputCore 가 drop 되며 구독자도 함께 사라지고, 살아 있는
-        //   동안엔 계속 관측해야 한다. epoch 교체는 새 core = 새 attach(로스터 diff 가 건다). 단 **사후
-        //   검증이 어긋난 경우에만** 이 id 를 써서 유령 구독을 즉시 회수한다(위 헤더).
-        // on_ready 는 no-op — 데몬 WS 경로의 SubscribeAck 큐잉용 hook 이라 tap 엔 할 일이 없다(그리고
-        //   core 의 subscribers 락 보유 중 불리므로 블로킹 금지 계약이 걸려 있다).
-        let outcome = self
-            .manager
-            .subscribe_from(id, sink, Some(u64::MAX), true, |_| {})
-            .map_err(|e| SubscribeError::Failed(e.to_string()))?;
-        if let Some(err) = self.stale_check(id, expect_epoch) {
-            // 구독↔검증 사이 epoch 이 바뀌었다 = 방금 붙은 sink 는 유령이다. 되돌린다(best-effort —
-            //   그 사이 또 교체됐으면 대상 core 가 이미 drop 되는 중이라 구독도 함께 사라진다).
-            let _ = self.manager.unsubscribe(id, outcome.sink_id);
-            return Err(err);
-        }
-        Ok(())
-    }
-
-    fn current_epoch(&self, id: PeerId) -> Option<u32> {
-        // list_agents 스냅샷 1회 — attach 빈도는 로스터 변화 빈도라 비용 무관.
-        self.manager
-            .list_agents()
-            .into_iter()
-            .find(|a| a.id == id)
-            .map(|a| a.epoch)
-    }
-}
-
-impl ManagerTapHost {
-    /// 현재 epoch 이 기대와 다르면 `StaleEpoch` 를 만든다(같으면 None). 구독 전·후 두 지점에서 쓴다.
-    fn stale_check(&self, id: PeerId, expect_epoch: u32) -> Option<SubscribeError> {
-        let current = self.current_epoch(id);
-        if current == Some(expect_epoch) {
-            None
-        } else {
-            Some(SubscribeError::StaleEpoch { current })
-        }
-    }
-}
-
-/// ★TurnTapSink — 출력 스트림에 붙어 턴 경계만 읽는 `OutputSink`(C2 · ADR-0110 결정 4)★.
+/// 운영 `TurnFacts` — 코어의 턴 관측 표(ADR-0113 사실 계층)를 커널 어휘로 번역하는 **읽기 전용** 창.
 ///
-/// ★왜 커널이 아니라 여기 사나(load-bearing 경계)★: 아래 분류표는 **백엔드 지식**(claude stream-json 이
-///   어떤 이벤트로 턴을 진행/종료하는가)이다. 커널은 신호 어휘(`TurnProbe::on_progress`/`on_turn_done`)만
-///   갖고, 그 어휘로 번역하는 이 7줄이 호스트 몫이다(ADR-0004 백엔드 지식 격리와 같은 결).
-///
-/// ★상태머신(spec §5 · ADR-0104 결정 3)★:
-///   - `TextDelta` / `ToolCall` / `Structured` → **busy**. 왜 이 셋인가: 어시스턴트 응답(delta)·도구 호출은
-///     턴 진행의 직접 증거고, `Structured` 는 백엔드별 이벤트 탈출구인데 claude 는 **입력 시점 유저 에코**를
-///     여기로 낸다 — 즉 대시보드 사용자가 터미널에 직접 입력해 시작한 턴(MessagingService 를 우회하는 경로)도
-///     이 variant 로 잡힌다(그래서 반드시 포함해야 한다). 우리 자신의 주입도 같은 에코로 busy 가 되므로,
-///     주입 직후 도착한 다음 메시지는 자동으로 다음 턴 경계까지 파킹된다(의도된 동작).
-///   - `MessageDone` → **idle** + flush 트리거 통지(턴 종료).
-///   - `Usage` / `Error` / `TerminalBytes` → **무시**(상태 불변). Usage 는 턴 중간에도 오고, Error 는
-///     스트림 내부 오류지 턴 종료가 아니며(종료는 MessageDone/terminal 상태), TerminalBytes 는 tap 을
-///     붙이지 않는 비-structured 경로의 payload 다.
-///
-/// ★상관 키가 없다(honest scope)★: claude 의 MessageDone 은 `turn_id`/`message_id` 가 모두 None 이라
-///   "어느 턴의 종료인가" 를 상관시킬 키가 없다. 그래서 이 tap 은 **턴 카운팅/펜싱을 하지 않고** 단순
-///   최신-관측 상태만 유지한다(마지막 이벤트가 결정한다). 중첩 서브에이전트 result 누수 가능성은 busy
-///   모듈 헤더의 미확인 항목.
-/// ★항상 Ok 반환★: Err 는 코어가 dead-sink 로 판단해 구독을 제거하는 신호다 — tap 은 스스로 빠지지 않고
-///   그 세션(epoch)의 수명 동안 관측을 유지한다(정리는 세션 drop).
-/// ★콜백 규율★: `send` 는 pump 스레드가 부르는 동기 콜백이다 — 여기서 하는 일은 분류 + 커널 수신구 호출
-///   (짧은 락 + 논블록 채널 send)뿐이다. 주입·manager 호출·blocking IO 금지(busy 모듈 헤더).
-struct TurnTapSink {
-    sink_id: SinkId,
-    probe: Arc<TurnProbe>,
+/// ★얇음이 계약이다★: 여기엔 판정이 없다 — 상한·폴백은 커널 `BusyPolicy` 소유다(ADR-0110 "포트는 얇게,
+///   정책은 lib에"). 이 어댑터에 "늙었으면 안 보여 준다" 같은 조건을 넣으면 우편 정책이 데몬으로 새고,
+///   같은 표를 보는 다른 소비자와 판정이 갈린다.
+/// ★표를 직접 든다(manager 를 안 든다)★: 조회 경로에 sessions 락을 끼우지 않는다 — 이 조회는 배달 판정
+///   경로에 있고, 표는 매니저와 무관한 leaf 락이다(ADR-0006).
+pub struct ManagerTurnFacts {
+    turns: Arc<TurnObservations>,
 }
 
-impl OutputSink for TurnTapSink {
-    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // 구조화 이벤트만 본다. Bytes(터미널 payload)는 턴 경계 정보가 없다.
-        let OutputPayload::Event(ev) = frame.payload else {
-            return Ok(());
-        };
-        // ★상태 키 = 프레임이 신고한 (agent_id, epoch)★: 이 tap 이 붙은 OutputCore 의 (id, epoch) 와
-        //   by-construction 동일하다(코어가 자기 값으로 프레임을 채운다). 프레임 값을 쓰면 게이트가 보는
-        //   로스터 epoch 과 같은 축으로 정렬되고, tap 이 중복 필드를 들고 있을 필요가 없다.
-        match ev {
-            OutputEvent::TextDelta { .. }
-            | OutputEvent::ToolCall { .. }
-            | OutputEvent::Structured { .. } => self.probe.on_progress(frame.agent_id, frame.epoch),
-            OutputEvent::MessageDone { .. } => self.probe.on_turn_done(frame.agent_id, frame.epoch),
-            // 상태 불변(위 상태머신 주석).
-            OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => {}
+impl ManagerTurnFacts {
+    pub fn new(manager: &Arc<AgentManager>) -> Self {
+        Self {
+            turns: manager.turns(),
         }
-        Ok(())
+    }
+}
+
+impl TurnFacts for ManagerTurnFacts {
+    fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact> {
+        self.turns.get(id, epoch).map(|o| TurnFact {
+            in_turn: o.in_turn,
+            last_signal: o.last_signal,
+        })
     }
 
-    fn sink_id(&self) -> SinkId {
-        self.sink_id
+    fn in_turn_snapshot(&self) -> Vec<(PeerId, u32, Instant)> {
+        self.turns.in_turn_snapshot()
     }
 }
 
@@ -360,195 +254,58 @@ pub fn messaging_for_manager_gated(
     MessagingService::new_gated(Arc::new(ManagerDeliveryPort::new(manager)), registry, busy)
 }
 
-/// 운영 편의 조립 — manager 를 `ManagerTapHost` 로 감싼 `BusyTracker`(데몬 부팅용).
-pub fn busy_tracker_for_manager(
+/// 운영 편의 조립 — 코어 턴 관측 표를 커널 정책으로 감싼 idle 게이트(데몬 부팅용).
+pub fn busy_gate_for_manager(
     manager: Arc<AgentManager>,
     notifier: Arc<dyn IdleNotifier>,
-) -> BusyTracker {
-    BusyTracker::new(Arc::new(ManagerTapHost::new(manager)), notifier)
-}
-
-/// ★하네스 전용★ — 커널 수신구를 **운영과 같은 분류 어댑터**로 감싼 sink 를 만든다(구독은 하지 않는다).
-///   통합 하네스가 실 claude 턴 없이 `OutputFrame` 을 손으로 먹여 idle 게이트·배치 flush 를 결정적으로
-///   구동하려고 쓴다 — 분류(이벤트→턴 신호)까지 운영 경로 그대로 태우는 게 요점이다.
-///   짝: `BusyTracker::probe_for_test` + `mark_attached_for_test`(양성 attach 게이트 통과).
-#[cfg(any(test, feature = "test-harness"))]
-pub fn turn_tap_sink_for_test(probe: Arc<TurnProbe>) -> Arc<dyn OutputSink> {
-    Arc::new(TurnTapSink {
-        sink_id: uuid::Uuid::new_v4(),
-        probe,
-    })
+) -> BusyPolicy {
+    BusyPolicy::new(Arc::new(ManagerTurnFacts::new(&manager)), notifier)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use engram_dashboard_core::agent::types::AgentId;
-    use engram_dashboard_messaging::busy::AttachOutcome;
-    use std::sync::Mutex as StdMutex;
 
-    /// 통지 기록용 IdleNotifier — 커널 tracker 를 붙여 분류 결과가 상태로 이어지는지 본다.
-    struct RecordingNotifier {
-        seen: StdMutex<Vec<AgentId>>,
-    }
-    impl IdleNotifier for RecordingNotifier {
-        fn notify_idle(&self, id: AgentId) {
-            self.seen.lock().unwrap().push(id);
-        }
+    // ── 턴 사실 어댑터: 코어 표 → 커널 어휘(번역만, 판정 없음) ──────────────────────────────
+
+    /// 사실 어댑터 조립 — manager 없이 표만 들고 같은 번역을 태운다.
+    fn facts(turns: Arc<TurnObservations>) -> ManagerTurnFacts {
+        ManagerTurnFacts { turns }
     }
 
-    /// 배선 없이 `TurnProbe` 만 내주는 TapHost — 분류 어댑터만 단독 검증한다(실 manager/PTY 없음).
-    struct ProbeOnlyHost;
-    impl TapHost for ProbeOnlyHost {
-        fn subscribe_output(
-            &self,
-            _id: PeerId,
-            _expect_epoch: u32,
-            _probe: Arc<TurnProbe>,
-        ) -> Result<(), SubscribeError> {
-            Ok(())
-        }
-        fn current_epoch(&self, _id: PeerId) -> Option<u32> {
-            Some(0)
-        }
-    }
-
-    /// 분류 검증용 조립 — tracker + 그 수신구를 감싼 실제 어댑터 sink.
-    fn tap() -> (Arc<BusyTracker>, Arc<dyn OutputSink>, AgentId) {
-        let t = Arc::new(BusyTracker::new(
-            Arc::new(ProbeOnlyHost),
-            Arc::new(RecordingNotifier {
-                seen: StdMutex::new(Vec::new()),
-            }),
-        ));
+    #[test]
+    fn turn_facts_forwards_the_core_observation_verbatim() {
+        use engram_dashboard_core::agent::turn::TurnSignal;
+        let turns = Arc::new(TurnObservations::new());
+        let f = facts(turns.clone());
         let id = AgentId::new_v4();
-        // 양성 attach 게이트(busy fix 9) 통과 — 부착 표시 없는 키의 관측은 커널이 무시한다.
-        assert_eq!(t.attach(id, 0), AttachOutcome::Attached);
-        let sink: Arc<dyn OutputSink> = Arc::new(TurnTapSink {
-            sink_id: uuid::Uuid::new_v4(),
-            probe: t.probe_for_test(),
-        });
-        (t, sink, id)
-    }
+        assert_eq!(f.turn_fact(id, 0), None, "미관측은 미관측으로 넘긴다");
 
-    fn feed(sink: &Arc<dyn OutputSink>, id: AgentId, epoch: u32, ev: &OutputEvent) {
-        sink.send(OutputFrame {
-            agent_id: id,
-            epoch,
-            seq: 1,
-            payload: OutputPayload::Event(ev),
-        })
-        .expect("tap 은 항상 Ok");
-    }
+        let t0 = Instant::now();
+        turns.observe_at(id, 0, 1, TurnSignal::Progress, t0);
+        assert_eq!(
+            f.turn_fact(id, 0),
+            Some(TurnFact {
+                in_turn: true,
+                last_signal: t0
+            })
+        );
+        assert_eq!(f.in_turn_snapshot(), vec![(id, 0, t0)]);
 
-    #[test]
-    fn delta_and_done_map_to_progress_and_turn_done() {
-        let (t, sink, id) = tap();
-        feed(
-            &sink,
-            id,
-            0,
-            &OutputEvent::TextDelta {
-                text: "x".into(),
-                turn_id: None,
-                message_id: None,
-            },
+        // ★상한 판정은 여기 없다★: 아무리 늙어도 어댑터는 사실을 그대로 넘긴다(정책은 커널 소유).
+        turns.observe_at(id, 0, 2, TurnSignal::Ended, t0);
+        assert_eq!(
+            f.turn_fact(id, 0),
+            Some(TurnFact {
+                in_turn: false,
+                last_signal: t0
+            })
         );
-        assert!(t.is_busy(id, 0), "TextDelta = 턴 진행 → busy");
-        feed(
-            &sink,
-            id,
-            0,
-            &OutputEvent::MessageDone {
-                turn_id: None,
-                message_id: None,
-            },
-        );
-        assert!(!t.is_busy(id, 0), "MessageDone = 턴 종료 → idle");
-    }
-
-    #[test]
-    fn tool_call_and_structured_user_echo_map_to_progress() {
-        // Structured 포함이 load-bearing: claude 는 **입력 시점 유저 에코**를 Structured 로 낸다 —
-        //   대시보드 사용자 직접 입력으로 시작된 턴(MessagingService 우회)도 이걸로 잡힌다.
-        let (t, sink, id) = tap();
-        feed(
-            &sink,
-            id,
-            0,
-            &OutputEvent::ToolCall {
-                name: "Bash".into(),
-                args_json: "{}".into(),
-                id: None,
-                turn_id: None,
-                message_id: None,
-            },
-        );
-        assert!(t.is_busy(id, 0), "ToolCall → busy");
-
-        let (t2, sink2, id2) = tap();
-        feed(
-            &sink2,
-            id2,
-            0,
-            &OutputEvent::Structured {
-                kind: "user".into(),
-                json: "{}".into(),
-            },
-        );
-        assert!(t2.is_busy(id2, 0), "Structured(유저 에코) → busy");
-    }
-
-    #[test]
-    fn usage_error_and_terminal_bytes_are_ignored() {
-        let (t, sink, id) = tap();
-        // idle 상태에서 Usage/Error/Bytes → 여전히 idle.
-        feed(
-            &sink,
-            id,
-            0,
-            &OutputEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-                turn_id: None,
-            },
-        );
-        feed(&sink, id, 0, &OutputEvent::Error("stream hiccup".into()));
-        sink.send(OutputFrame {
-            agent_id: id,
-            epoch: 0,
-            seq: 2,
-            payload: OutputPayload::Bytes(b"raw vt bytes"),
-        })
-        .expect("항상 Ok");
         assert!(
-            !t.is_busy(id, 0),
-            "Usage/Error/Bytes 는 턴 시작 신호가 아니다"
+            f.in_turn_snapshot().is_empty(),
+            "sweep 입구에는 턴 중인 것만 오른다"
         );
-
-        // busy 상태에서도 상태를 바꾸지 않는다(종료 신호는 MessageDone 뿐).
-        feed(
-            &sink,
-            id,
-            0,
-            &OutputEvent::TextDelta {
-                text: "x".into(),
-                turn_id: None,
-                message_id: None,
-            },
-        );
-        feed(
-            &sink,
-            id,
-            0,
-            &OutputEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-                turn_id: None,
-            },
-        );
-        feed(&sink, id, 0, &OutputEvent::Error("stream hiccup".into()));
-        assert!(t.is_busy(id, 0), "Usage/Error 는 턴 종료가 아니다");
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════

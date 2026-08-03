@@ -16,7 +16,7 @@ pub mod control;
 pub mod experiment;
 pub mod instance;
 // ADR-0110: 메시징 커널은 별도 lib crate(`engram-dashboard-messaging`)로 분리됐다. 여기 남는 건
-//   호스트 어댑터 + 조립실 — 커널 포트(DeliveryPort·ControlPlanePort·TapHost)에 AgentManager·
+//   호스트 어댑터 + 조립실 — 커널 포트(DeliveryPort·ControlPlanePort·TurnFacts)에 AgentManager·
 //   ControlRegistry 실물을 꽂는 유일한 자리다.
 pub mod messaging_host;
 pub mod portfile;
@@ -205,7 +205,7 @@ fn build_manager(
     registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<ws::FlushMsg>,
-    roster_diff: Arc<ws::RosterDiff>,
+    idle_coalescer: Arc<ws::IdleCoalescer>,
 ) -> Arc<AgentManager> {
     // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
     // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
@@ -217,7 +217,7 @@ fn build_manager(
         registry,
         control,
         flush_tx,
-        roster_diff,
+        idle_coalescer,
     )
 }
 
@@ -231,18 +231,18 @@ fn build_manager_with_store(
     registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<ws::FlushMsg>,
-    roster_diff: Arc<ws::RosterDiff>,
+    idle_coalescer: Arc<ws::IdleCoalescer>,
 ) -> Arc<AgentManager> {
     // ADR-0104(C1): status sink 를 MessagingFlushSink 로 감싼다 — 로스터 등장/epoch bump 를 데몬측에서
     //   diff 해 파킹 flush 를 건다(코어 seam 무변경). 감싼 DaemonStatusSink 가 프론트 broadcast 를 그대로
     //   수행하고, wrapper 는 그 전에 flush 대상을 채널로 flush worker 에 넘긴다(finding 5 — 콜백 blocking
     //   분리). flush worker·MessagingService 는 이 manager 조립 후 부팅에서 배선된다(slot 늦은 주입).
-    //   C2 리뷰 fix 7/8a: 로스터 diff 상태(`RosterDiff`)는 flush worker 와 **공유**한다 — 스냅샷 갱신과
-    //   enqueue 를 한 락에서 하고(순서 보장), worker 의 attach 실패 피드백이 그 스냅샷을 무효화해 재시도를 연다.
+    //   ADR-0113: 같은 wrapper 가 코어의 턴 종료 push(`StatusSink::turn_ended`)를 flush 도어벨로 중계한다 —
+    //   그래서 flush 레인과 **같은 Idle coalescer** 를 공유한다(잉여 통지 유계화).
     let status_sink = Arc::new(ws::MessagingFlushSink::new(
         DaemonStatusSink::new(registry),
         flush_tx,
-        roster_diff,
+        idle_coalescer,
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
     // ADR-0061: 프리셋 레지스트리도 데몬이 소유. 프로필과 동일하게 store 에서 로드해 초기화.
@@ -463,10 +463,8 @@ pub async fn run() -> Result<(), i32> {
     // finding 5: flush 작업을 status-sink 콜백에서 분리하는 채널. sink(status 콜백)는 diff 대상만 push 하고
     //   즉시 반환하며, 아래 flush worker(sweep task 옆)가 소비해 실제 flush_for(blocking write)를 돈다.
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<ws::FlushMsg>();
-    // C2 리뷰 fix 7/8a/10: status sink 와 flush worker 가 공유하는 두 조각.
-    //   - `RosterDiff`: 로스터 diff 스냅샷 + enqueue 직렬화(순서 보장) + attach 실패 재시도 개방.
-    //   - `IdleCoalescer`: 같은 id 의 미처리 Idle 통지를 하나로 접어 채널 압력을 유계로 만든다.
-    let roster_diff = Arc::new(ws::RosterDiff::new());
+    // C2 리뷰 fix 10: status sink(턴 종료 push 중계)와 flush 레인이 공유하는 `IdleCoalescer` —
+    //   같은 id 의 미처리 Idle 통지를 하나로 접어 채널 압력을 유계로 만든다.
     let idle_coalescer = Arc::new(ws::IdleCoalescer::new());
 
     // MCP 서버 핸들 — Some 이면 프로세스 수명 동안 살아 있어야 서버가 유지된다(drop=종료). fail-closed
@@ -521,22 +519,22 @@ pub async fn run() -> Result<(), i32> {
         registry.clone(),
         control,
         flush_tx.clone(),
-        roster_diff.clone(),
+        idle_coalescer.clone(),
     );
     // ADR-0086 스텝 2: manager 를 슬롯에 주입 → 이제 send_message/`/control/send` 가 relay 를 수행할 수
     //   있다(에이전트 spawn·send 이전에 완료). accept loop 이후의 어떤 send 도 채워진 슬롯을 본다.
     manager_slot.set(manager.clone());
 
-    // 6.4) C2: idle 게이트 관측기(BusyTracker) 조립 — 에이전트 출력 스트림에 턴 tap 을 붙여 busy/idle 을
-    //    관측하고, 턴 종료마다 flush 트리거를 **같은 flush 채널**로 보낸다(ADR-0104 결정 3). tap 부착은
-    //    로스터 diff(MessagingFlushSink)가 Attach 로 요청하고 flush worker 가 집행한다(subscribe = 링
-    //    replay 동반이라 status 콜백 금지). 게이트는 아래 MessagingService 가 주입 전에 조회한다.
-    //    통지 출구(ChannelIdleNotifier)는 Idle coalescer 를 공유한다(fix 10 — MessageDone 폭풍 유계화).
+    // 6.4) C2: idle 게이트 조립(ADR-0104 결정 3 · ADR-0113) — 코어의 턴 관측 표를 읽어 우편 정책
+    //    (positive-knowledge-only · 30분 상한)으로 답하는 게이트. 관측 자체는 코어가 출력 pump 에서
+    //    직접 적재하므로 여기서 배선할 것이 없고, 턴 종료 push 는 status sink wrapper 가 도어벨로
+    //    중계한다(ws::MessagingFlushSink::turn_ended). 게이트는 아래 MessagingService 가 주입 전에 조회한다.
+    //    도어벨 출구(ChannelIdleNotifier)는 그 wrapper 와 같은 Idle coalescer 를 공유한다(fix 10).
     let idle_notifier = Arc::new(ws::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
     ));
-    let busy = Arc::new(messaging_host::busy_tracker_for_manager(
+    let busy = Arc::new(messaging_host::busy_gate_for_manager(
         manager.clone(),
         idle_notifier.clone(),
     ));
@@ -566,9 +564,9 @@ pub async fn run() -> Result<(), i32> {
     //    막지 않는 이유★: 자식 stdin **blocking write 를 하지 않는다** — 실제 주입은 도어벨을 받은 flush
     //    레인이 blocking pool 에서 한다(service.rs `deliver_notice` 주석). 그래서 `spawn_blocking` 없이
     //    이 async task 에 남겨도 안전하고, abort 도 즉시 먹는다.
-    //    ★C2 round-3 finding 4: 같은 주기가 **busy 상한 sweep** 도 돈다★ — MessageDone 이 영영 오지 않는
-    //    비정상 턴(파싱 실패·decoder 이상)은 busy 표시를 영구화해 그 수신자 앞 배달을 TTL 까지 막는다.
-    //    `BUSY_MAX_TURN`(30분) 을 넘긴 잔해를 청소하고 그 id 를 flush 도어벨로 깨운다(busy.rs 헤더 —
+    //    ★C2 round-3 finding 4: 같은 주기가 **busy 상한 sweep** 도 돈다★ — 턴 종료 신호가 영영 오지 않는
+    //    비정상 턴(파싱 실패·decoder 이상)은 busy 판정을 영구화해 그 수신자 앞 배달을 TTL 까지 막는다.
+    //    `BUSY_MAX_TURN`(30분) 을 넘긴 잔해를 idle 로 판정하고 그 id 를 flush 도어벨로 깨운다(busy.rs 헤더 —
     //    fail-open 안전 밸브).
     //    ★reply_by 하한과의 결합★: 기한 초과 판정 해상도가 곧 이 주기다 — ingress 의 `MIN_REPLY_BY_SECS`
     //    (1분)가 이 값과 짝이므로, 주기를 바꾸면 그 하한도 함께 봐야 한다.
@@ -604,10 +602,9 @@ pub async fn run() -> Result<(), i32> {
     // 6.7) finding 5: flush worker task — MessagingFlushSink 가 채널로 보낸 등장/epoch flush 대상을 소비해
     //    실제 flush_for(messaging 락 + inject blocking write)를 수행한다. status-sink 콜백을 blocking write
     //    에서 떼어내 spawn/reap/프론트 업데이트가 배치 flush 에 물리지 않게 한다(sweep task 옆, 종료 시 abort).
-    //    C2: 같은 worker 가 턴 tap 부착/해제(Attach/Detach)와 턴 종료 flush(Idle)도 집행한다 — subscribe 의
-    //    링 replay 와 blocking write 를 콜백 밖으로 모으는 단일 지점(ws.rs::run_flush_worker).
-    //    C2 리뷰 fix 3: worker 는 2-레인이다 — 생애주기(Attach/Detach)는 main lane 인라인, 배달
-    //    (Appear/Idle)은 flush 레인으로 forward(막힌 stdin write 가 tap 부착을 세우지 않게).
+    //    C2: 같은 worker 가 턴 종료 도어벨(Idle)도 집행한다 — blocking write 를 콜백 밖으로 모으는 단일 지점.
+    //    C2 리뷰 fix 3: worker 는 2-레인이다 — 수신 레인이 채널을 비우고 배달(Appear/Idle)은 flush 레인이
+    //    직렬 처리한다(막힌 stdin write 가 수신을 세우지 않게).
     //    ★round-3 finding 1: 두 레인 task 를 **여기서 함께 소유**한다★(`spawn_flush_worker`) — 옛 구현은
     //    레인을 worker future 안에서 spawn 해, 종료 시 main abort 가 레인 핸들을 detach 시키고 5s belt 가
     //    blocking 없는 쪽만 감시했다(진짜 blocking inject 는 레인에 있다 → 런타임 drop 이 hang 가능).
@@ -615,8 +612,6 @@ pub async fn run() -> Result<(), i32> {
         flush_rx,
         ws::FlushWiring {
             messaging: messaging_slot.clone(),
-            busy: busy.clone(),
-            diff: roster_diff.clone(),
             idle: idle_coalescer.clone(),
         },
     );
@@ -833,8 +828,7 @@ async fn start_test_server_inner(
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     // finding 5: flush 채널 + worker(운영 run() 과 동일 패턴). status 콜백은 대상만 push, worker 가 flush.
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<ws::FlushMsg>();
-    // C2 리뷰 fix 7/10: 운영과 동일하게 diff 시퀀싱 상태·Idle coalescer 를 sink/worker 가 공유한다.
-    let roster_diff = Arc::new(ws::RosterDiff::new());
+    // C2 리뷰 fix 10: 운영과 동일하게 Idle coalescer 를 sink/flush 레인이 공유한다.
     let idle_coalescer = Arc::new(ws::IdleCoalescer::new());
     let manager = build_manager_with_store(
         store,
@@ -842,16 +836,15 @@ async fn start_test_server_inner(
         registry.clone(),
         control,
         flush_tx.clone(),
-        roster_diff.clone(),
+        idle_coalescer.clone(),
     );
-    // C2: idle 게이트 관측기(운영 run() 과 동일 배선). WS 테스트는 메시징을 검증하지 않지만, 배선을
-    //   운영과 동일하게 유지해 "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
-    //    통지 출구(ChannelIdleNotifier)는 Idle coalescer 를 공유한다(fix 10 — MessageDone 폭풍 유계화).
+    // C2: idle 게이트(운영 run() 과 동일 배선). WS 테스트는 메시징을 검증하지 않지만, 배선을 운영과
+    //   동일하게 유지해 "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
     let idle_notifier = Arc::new(ws::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
     ));
-    let busy = Arc::new(messaging_host::busy_tracker_for_manager(
+    let busy = Arc::new(messaging_host::busy_gate_for_manager(
         manager.clone(),
         idle_notifier.clone(),
     ));
@@ -869,8 +862,6 @@ async fn start_test_server_inner(
         flush_rx,
         ws::FlushWiring {
             messaging: messaging_slot.clone(),
-            busy,
-            diff: roster_diff,
             idle: idle_coalescer,
         },
     );

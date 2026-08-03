@@ -327,7 +327,12 @@ mod tests {
 
     fn session_with(encoder: InputEncoder) -> (AgentSession, Arc<Mutex<Vec<Vec<u8>>>>) {
         let id = uuid::Uuid::new_v4();
-        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatusSink),
+            crate::agent::output_core::TurnWiring::detached(),
+        ));
         let captured = Arc::new(Mutex::new(Vec::new()));
         let transport = Box::new(CapturingTransport {
             captured: captured.clone(),
@@ -458,7 +463,12 @@ mod tests {
             }
         }
         let id = uuid::Uuid::new_v4();
-        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatusSink),
+            crate::agent::output_core::TurnWiring::detached(),
+        ));
         let shell_cmd = crate::agent::profile::AgentCommand::Shell {
             program: "cmd.exe".into(),
             args: vec![],
@@ -540,7 +550,12 @@ mod tests {
     #[test]
     fn json_mode_session_caps_are_structured() {
         let id = uuid::Uuid::new_v4();
-        let core = Arc::new(OutputCore::new(id, 0, Arc::new(NoopStatusSink)));
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatusSink),
+            crate::agent::output_core::TurnWiring::detached(),
+        ));
         let spec = crate::agent::types::CommandSpec {
             program: "cmd.exe".into(),
             args: vec!["/c".into(), "echo probe".into()],

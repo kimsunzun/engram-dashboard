@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 use crate::agent::profile::{AgentCommand, SpawnMode};
 use crate::agent::transport::OutputDecoder;
-use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint};
+use crate::agent::turn::TurnSignal;
+use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint, OutputEvent};
 
 /// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
 ///
@@ -106,6 +107,39 @@ pub trait AgentBackend: Send + Sync {
     /// backend 가 session caps 의 출처(ADR-0030)이고 mode 는 command 에 있으므로, 여기서 command 를
     /// 보고 정직하게 산출한다(type split 유지 — output/control 은 여전히 transport 소관).
     fn capabilities(&self, command: &AgentCommand) -> BackendCaps;
+
+    /// 이 backend 의 **턴 신호 분류자**(ADR-0113 사실 계층의 백엔드 지식 몫).
+    ///
+    /// ★왜 backend 인가(ADR-0004 · ADR-0110 결정 4 의 취지 승계)★: "어떤 출력 이벤트가 턴 진행이고
+    ///   어떤 게 턴 종료인가" 는 프로그램별 지식이다. 특히 `OutputEvent::Structured` 는 **백엔드별
+    ///   이벤트 탈출구**라 그 `kind` 의 의미가 백엔드마다 다르다 — 공용 층에서 해석하면 한 백엔드의
+    ///   관례가 전원에게 강제된다(구조화 메타 라인을 내는 백엔드가 종료 신호 없이 영구 "턴 중" 이 된다).
+    /// ★신호 어휘(`TurnSignal`)는 공용 하나뿐★: 백엔드마다 다른 건 **매핑**이지 어휘가 아니다.
+    ///   백엔드별 신호 enum 을 만들면 소비자가 백엔드를 알아야 한다.
+    /// ★기본값 = 신호 없음(fail-open)★: 매핑을 선언하지 않은 backend 는 관측 대상이 아니다. 미관측은
+    ///   소비자 쪽에서 "즉시 배달" 로 흡수되지만(positive-knowledge-only), 근거 없는 진행 신호는
+    ///   깨울 수 없는 "턴 중" 을 만든다 — 그래서 기본은 침묵이다.
+    // ADR-0004
+    // ADR-0110
+    // ADR-0113
+    fn turn_classifier(&self) -> TurnClassifier {
+        no_turn_signals
+    }
+}
+
+/// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
+/// 세션 수명 동안 들고 이벤트마다 부른다.
+///
+/// ★왜 함수 포인터인가★: emit 은 에이전트 출력마다 도는 hot path 다 — 매 이벤트에 `AgentCommand` 를
+///   들고 dispatch 하면 세션이 자기 명령 사본을 들거나 매니저를 되짚어야 하고, `Box<dyn Fn>` 은 할당을
+///   낳는다. backend 는 상태 없는 unit struct 라 매핑이 순수 함수로 떨어지므로, spawn 때 한 번 뽑아
+///   포인터로 들고 있으면 할당·락·조회가 전부 0 이다.
+pub type TurnClassifier = fn(&OutputEvent) -> Option<TurnSignal>;
+
+/// 턴 신호를 내지 않는 backend 의 분류자(trait 기본값). 터미널 모드·shell 처럼 구조화 출력이 없는 경로.
+/// 관측이 필요 없는 조립(테스트 하네스)도 이걸 꽂아 "신호 없음" 을 명시한다.
+pub fn no_turn_signals(_event: &OutputEvent) -> Option<TurnSignal> {
+    None
 }
 
 // ── 정적 싱글턴 ────────────────────────────────────────────────────────────────
@@ -161,6 +195,13 @@ pub fn build_command_spec(
 /// command 를 backend 에 넘겨 mode 별 caps(예: json 모드 resume=false, FIX 5)를 정직하게 산출한다.
 pub fn backend_caps(c: &AgentCommand) -> BackendCaps {
     backend_for(c).capabilities(c)
+}
+
+/// 이 명령의 턴 신호 분류자(ADR-0113). manager 가 spawn 때 한 번 뽑아 `OutputCore` 에 꽂고, emit 이
+/// 이벤트마다 부른다. 매핑을 선언하지 않은 backend 는 침묵한다(`no_turn_signals`).
+// ADR-0113
+pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
+    backend_for(c).turn_classifier()
 }
 
 // ── 입력 인코딩(ADR-0044/0004) ────────────────────────────────────────────────
@@ -337,6 +378,50 @@ mod tests {
                 expected_mcp,
                 "variant {:?}: accepts_mcp_config 불일치 — backend mod.rs 상단 expected_channel_matrix 체크리스트를 따라 capability를 의식적으로 선언할 것(ADR-0099)",
                 c
+            );
+        }
+    }
+
+    // ── ADR-0113/0004: 턴 신호 분류자 dispatch(매핑은 백엔드 소유, 어휘는 공용) ──────────────
+
+    #[test]
+    fn turn_classifier_dispatch_maps_claude_events_and_silences_shell() {
+        use crate::agent::types::OutputEvent;
+        let json = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::StreamJson,
+        };
+        let shell = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let delta = OutputEvent::TextDelta {
+            text: "x".into(),
+            turn_id: None,
+            message_id: None,
+        };
+        let done = OutputEvent::MessageDone {
+            turn_id: None,
+            message_id: None,
+        };
+        // claude 는 자기 매핑을 선언한다.
+        let claude_classify = turn_classifier(&json);
+        assert_eq!(claude_classify(&delta), Some(TurnSignal::Progress));
+        assert_eq!(claude_classify(&done), Some(TurnSignal::Ended));
+        // ★`Structured` 해석이 백엔드별인 이유의 회귀★: claude 는 입력 시점 유저 에코를 여기 싣기에
+        //   진행으로 세지만, 매핑을 선언하지 않은 backend 는 같은 이벤트에 침묵해야 한다 — 안 그러면
+        //   턴과 무관한 구조화 메타 라인이 종료 신호 없는 영구 "턴 중" 을 만든다.
+        let meta = OutputEvent::Structured {
+            kind: "session_meta".into(),
+            json: "{}".into(),
+        };
+        assert_eq!(claude_classify(&meta), Some(TurnSignal::Progress));
+        let shell_classify = turn_classifier(&shell);
+        for ev in [&delta, &done, &meta] {
+            assert_eq!(
+                shell_classify(ev),
+                None,
+                "매핑 미선언 backend 는 어떤 이벤트에도 신호를 내지 않는다(기본 = 침묵)"
             );
         }
     }

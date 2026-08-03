@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_core::agent::output_core::OutputCore;
+use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_core::agent::transport::stdio::StdioTransport;
 use engram_dashboard_core::agent::transport::{AgentTransport, OutputDecoder};
 use engram_dashboard_core::agent::types::{
@@ -157,7 +157,12 @@ fn stdio_stdout_pump_and_finalize_once() {
             .expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink.clone())));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink.clone()),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
 
@@ -215,7 +220,12 @@ fn stdio_stderr_not_in_output_stream() {
     .expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink)));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
     let out = RecordingSink::new();
@@ -253,7 +263,12 @@ fn stdio_stdin_reaches_child_then_shutdown_kills() {
     let (transport, _pid) = StdioTransport::open(&spec("cmd.exe", &[]), true, None).expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink)));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
     let out = RecordingSink::new();
@@ -343,7 +358,12 @@ fn stdio_decoder_routes_bytes_and_flushes_on_eof() {
     .expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink)));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
     let out = RecordingSink::new();
@@ -400,7 +420,12 @@ fn stdio_decoder_flush_skipped_on_shutdown_kill() {
         StdioTransport::open(&spec("cmd.exe", &[]), true, Some(decoder)).expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink)));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
     let out = RecordingSink::new();
@@ -471,7 +496,12 @@ fn stdio_real_claude_decoder_emits_structured_event() {
     .expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink)));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
     let out = RecordingSink::new();
@@ -510,7 +540,12 @@ fn stdio_no_decoder_passes_terminal_bytes_through() {
             .expect("open");
 
     let status_sink = RecordingStatusSink::new();
-    let core = Arc::new(OutputCore::new(id, 0, Arc::new(status_sink)));
+    let core = Arc::new(OutputCore::new(
+        id,
+        0,
+        Arc::new(status_sink),
+        TurnWiring::detached(),
+    ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
     let out = RecordingSink::new();

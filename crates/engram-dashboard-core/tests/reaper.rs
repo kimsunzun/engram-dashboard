@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use engram_dashboard_core::agent::backend::{AgentBackend, ShellBackend};
 use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::output_core::OutputCore;
+use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_core::agent::preset::PresetRegistry;
 use engram_dashboard_core::agent::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
@@ -354,7 +354,12 @@ fn make_test_session(
     epoch: u32,
     status_sink: Arc<dyn StatusSink>,
 ) -> Arc<AgentSession> {
-    let core = Arc::new(OutputCore::new(id, epoch, status_sink));
+    let core = Arc::new(OutputCore::new(
+        id,
+        epoch,
+        status_sink,
+        TurnWiring::detached(),
+    ));
     let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
     // ApiTransport(no-op)라 caps 내용은 무관 — 합성 경로를 만족시키는 더미로 셸 caps 주입.
     Arc::new(AgentSession::new(
@@ -491,7 +496,7 @@ fn duplicate_reap_processes_exactly_once() {
 //   1) 프로필 epoch=E(=0), auto_restore=true 로 산 세션이 돌던 상태.
 //   2) 그 세션이 죽어 reaper 가 sessions.remove(epoch=E) 까지 마쳤다(맵에서 빠짐).
 //   3) remove 와 lock-free apply_disposition 사이 창에서 **재활성화**가 일어나 프로필 epoch 를
-//      E+1 로 bump(manager.rs activate_profile Resume 갈래 = bump_epoch) + 새 산 세션이 붙었다.
+//      E+1 로 bump(manager.rs spawn_agent 의 epoch 확정 = `epoch_for_spawn`) + 새 산 세션이 붙었다.
 //   4) 뒤늦게 도착한 옛 reap 의 apply_disposition(reaped_epoch=E)이 실행된다.
 //   기대: p.epoch(E+1) != reaped_epoch(E) → 다운그레이드 스킵 → auto_restore=true 유지(산 세션
 //         이 부팅 복원 대상에서 탈락하지 않는다). epoch-guard 가 없으면 여기서 false 로 강등된다.

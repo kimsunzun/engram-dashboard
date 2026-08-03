@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::agent::backend::TurnClassifier;
+use crate::agent::turn::{TurnObservations, TurnSignal};
 use crate::agent::types::{
     AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputPayload, OutputSink,
     ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
@@ -61,12 +63,66 @@ pub struct OutputCore {
     /// transport 는 이 의미를 모른다(transport 는 그냥 core.finish 만 부른다).
     /// 단위테스트는 OutputCore::new 만 쓰고 hook 을 주입하지 않으므로 Option(None=no-op).
     on_terminal: Mutex<Option<OnTerminalHook>>,
+
+    // ── ADR-0113 턴 관측 ──────────────────────────────────────
+    /// 공용 표 + 이 세션 백엔드의 신호 분류자. **생성자 인자**라 배선 없는 core 를 만들 수 없다(아래
+    /// `TurnWiring` 주석). 생성 후 불변이라 hot path 에 원자 load 도 락도 없다.
+    turn: TurnWiring,
+}
+
+/// 턴 관측 배선 한 벌(ADR-0113) — 표(어디에 쌓나)와 분류자(무엇이 신호인가)는 항상 같이 꽂힌다.
+/// 둘을 따로 두면 "표는 있는데 분류자가 없는" 반쪽 상태가 생긴다.
+///
+/// ★`OutputCore::new` 의 **필수 인자**인 게 이 타입의 요점이다(ADR-0002 §0 — 싸고 오래 가는 경계는
+///   지금 깐다)★: 사후 주입(setter)이면 새 spawn 경로가 그걸 빠뜨려도 컴파일이 통과하고, 그 에이전트는
+///   **영구히 idle 로 보고돼** 턴 중에 메일이 꽂힌다 — 에러도 로그도 없이. 인자로 만들면 그 실수가
+///   컴파일 에러가 된다. 관측이 필요 없는 조립은 `detached()` 로 **명시**한다(빠뜨림과 구분된다).
+pub struct TurnWiring {
+    table: Arc<TurnObservations>,
+    classify: TurnClassifier,
+}
+
+impl TurnWiring {
+    /// 운영 배선 — 매니저의 공용 표 + 그 세션 백엔드의 분류자(`backend::turn_classifier`).
+    pub fn new(table: Arc<TurnObservations>, classify: TurnClassifier) -> Self {
+        Self { table, classify }
+    }
+
+    /// ★관측을 쓰지 않는 조립 전용(하네스·독립 smoke)★ — 아무도 읽지 않는 자기 표 + 침묵 분류자.
+    ///   신호를 하나도 만들지 않으므로 관측 소비자 관점에서 "그 에이전트는 관측된 적 없음" 과 같다.
+    ///
+    /// ★운영 spawn 경로는 절대 쓰지 않는다★: 이걸 쓰면 그 에이전트의 턴 게이트가 조용히 꺼진다
+    ///   (= 턴 중 주입). 운영은 반드시 `new(manager 표, backend 분류자)` 를 쓴다 — 이름이 다른 이유가
+    ///   그것이다. ★그 구분을 강제하는 장치는 **없다**★: `use tauri` 격리나 메시징 격리와 달리 이 호출을
+    ///   막는 grep 게이트가 없으므로, 이건 컴파일러가 아니라 규약이 지키는 경계다(운영 호출이 0 인지는
+    ///   리뷰가 본다).
+    ///
+    /// ★왜 `test-harness` feature 로 잠그지 않았나(기록된 트레이드오프)★: 그렇게 하면 core 자체 통합
+    ///   테스트(`tests/*.rs`)가 lib 을 **외부 crate 로** 링크하는데 그 기능이 꺼져 있어, core 에도
+    ///   self-dev-dependency 를 얹어야 한다. 그 패턴은 이 워크스페이스에 이미 있다(daemon Cargo.toml 의
+    ///   ADR-0088 트릭) — 그러니 불가능해서가 아니다. 걸리는 건 그 파일이 함께 문서화한 비용이다:
+    ///   cargo 는 한 호출 안에서 같은 crate 의 feature 를 **합집합**하므로, `--all-targets` 로 lib 과
+    ///   테스트 타깃을 같이 빌드하면 그 기능이 공유 lib 빌드로 유니피케이션돼 **배포 산출물에 하네스
+    ///   표면이 박힌다**. 그 위험을 지금 core 까지 넓히는 값이, "이름이 다른 생성자" 가 이미 주는 방어보다
+    ///   크다고 봤다. 잠그기로 결정이 바뀌면 그 릴리스 빌드 규칙(`--all-targets` 금지)이 core 에도 걸린다.
+    #[doc(hidden)]
+    pub fn detached() -> Self {
+        Self {
+            table: Arc::new(TurnObservations::new()),
+            classify: crate::agent::backend::no_turn_signals,
+        }
+    }
 }
 
 impl OutputCore {
     /// 새 core 생성. status는 Running, seq 0, finalized false. pump 핸들은 None
     /// — transport.start가 attach_pump로 채운다(stage 3).
-    pub fn new(id: AgentId, epoch: u32, status_sink: Arc<dyn StatusSink>) -> Self {
+    pub fn new(
+        id: AgentId,
+        epoch: u32,
+        status_sink: Arc<dyn StatusSink>,
+        turn: TurnWiring,
+    ) -> Self {
         Self {
             id,
             epoch,
@@ -79,6 +135,7 @@ impl OutputCore {
             drain_handle: Mutex::new(None),
             drain_done_rx: Mutex::new(None),
             on_terminal: Mutex::new(None),
+            turn,
         }
     }
 
@@ -112,6 +169,11 @@ impl OutputCore {
     /// ★seq 연속성★: seed 한 이벤트마다 emit 과 동일하게 `seq.fetch_add(1)` 로 seq 를 발급한다. 그래서
     ///   seed 뒤 첫 라이브 emit 의 seq 가 seed 마지막 seq+1 로 자연히 이어진다(gap·중복 없음).
     ///   finalize·status 는 건드리지 않는다(ADR-0005 — seed 는 종료 전이가 아니다).
+    ///
+    /// ★턴 관측도 건드리지 않는다 — 되살리지 말 것(ADR-0113)★: transcript 는 **지나간 기록**이라
+    ///   턴 중간에 끊긴 것일 수 있고(killed incarnation), 그러면 진행 신호로 끝나고 종료 신호가 없다. 그걸
+    ///   관측으로 먹이면 새 화신이 "턴 중" 으로 찍히는데 그 턴의 종료는 **영원히 오지 않는다** — 그 상태를
+    ///   기다리는 소비자(우편 파킹 등)가 깨울 수 없이 멈춘다. 관측은 라이브 emit 에서만 시작한다.
     pub fn seed(&self, events: Vec<OutputEvent>) {
         // replay lock 을 한 번 잡고 순서대로 push(각 이벤트에 연속 seq 발급). subscribers 는 만지지 않는다.
         let mut replay = self.replay.lock().expect("replay poisoned");
@@ -171,6 +233,37 @@ impl OutputCore {
         }
         // ↑ replay lock 은 push 직후 즉시 drop(블록 스코프 종료). 아래 send 는 lock 미보유.
         //   seq 는 로컬에 캡처해 락 밖 fanout 이 그대로 사용(ADR-0006 규칙3: send 는 무락).
+
+        // ★ADR-0113 턴 관측★: 표 갱신을 **fanout·통지보다 먼저** 한다. 통지를 받은 소비자가 곧바로
+        //   표를 조회하므로(도어벨→flush 등) 순서가 뒤집히면 그 조회가 갱신 전 값을 본다.
+        //   락 규율: 표 갱신은 자기 락 하나만 짧게 잡고(core 락 미보유), 통지는 그 락을 놓은 뒤 한다.
+        if let Some(signal) = (self.turn.classify)(&event) {
+            // ★신호에 **출력 순서(seq)** 를 실어 보낸다★: emit 호출자는 둘이라(pump · 입력 에코를 낸
+            //   주입 스레드) 두 emit 이 병행하면 표 적용 순서가 발행 순서와 뒤집힐 수 있다. seq 는 replay
+            //   락 안에서 발급돼 **출력의 정본 순서**이므로, 표가 그걸로 늦은 신호를 걸러낸다(turn.rs).
+            self.turn.table.observe(self.id, self.epoch, seq, signal);
+            // ★종료 후 지각 emit 이 유령 항목을 되살리지 못하게(load-bearing)★: 주입 스레드가 transport
+            //   write 에 막혀 있는 동안 pump 가 EOF→`finish` 를 지나 표를 비울 수 있고, 그 뒤 깨어난 에코가
+            //   **같은 epoch** 으로 항목을 다시 만든다(더 작은 epoch 만 버리는 표 쪽 규칙으론 못 막는다).
+            //   그 항목은 종료 신호가 영영 오지 않아 아무도 못 지운다.
+            //   ★무엇이 순서를 만드나 = **표의 뮤텍스**(이 인자를 지우지 말 것)★: 그 락이 우리 insert 와
+            //   `finish` 의 forget 을 **전순서**로 놓는다. forget 이 먼저인 순서에서는 forget 의 unlock
+            //   (release)이 우리 lock(acquire)과 synchronizes-with 하므로, forget 앞의 `finalized` swap 이
+            //   우리 load 보다 happens-before → load 는 false 를 읽을 수 없다. 반대 순서면 우리 insert 가
+            //   먼저이므로 뒤따르는 forget 이 그걸 지운다. 어느 쪽이든 유령이 남지 않는다.
+            //   ★그래서 이 load 의 `Acquire` 가 근거가 아니다★ — `Relaxed` 여도 결론은 같고, 순서를 나르는
+            //   것은 뮤텍스다. 표 갱신을 락 밖(lock-free)으로 "최적화" 하면 이 증명이 조용히 무너진다.
+            if self.finalized.load(Ordering::Acquire) {
+                self.turn.table.forget(self.id, self.epoch);
+            }
+            // ★통지는 epoch·finalize·seq 게이트를 걸지 않는다(위 표 갱신과 의도적으로 비대칭)★: 표는
+            //   **상태**라 죽은/옛 화신이 쓰면 산 화신의 사실이 오염되지만, 도어벨은 **일회성 자극**이라
+            //   잉여는 빈 큐 no-op 으로 흡수되고(소비자가 실행 시점에 재검증) 누락은 대기를 만든다
+            //   ("누락 < 잉여" — StatusSink::turn_ended 계약).
+            if signal == TurnSignal::Ended {
+                self.status_sink.turn_ended(self.id, self.epoch);
+            }
+        }
 
         // event 종류로 payload 뷰 분기(ADR-0002 출력 종류 비가정): TerminalBytes→Bytes, 그 외 구조화
         // →Event. 로컬 `event`(Ring 에 넣은 것과 별개 원본)를 borrow 하므로 lock 수명과 무관.
@@ -237,6 +330,15 @@ impl OutputCore {
             let mut status = self.status.lock().expect("status poisoned");
             *status = new_status.clone();
         }
+
+        // ★ADR-0113: 이 화신의 턴 관측을 여기서 거둔다★ — finalize 승자 경로라 **정확히 1회**고(ADR-0005),
+        //   terminal 로 넘어간 화신은 더 이상 사실을 만들지 않는다. 안 지우면 턴 중에 죽은 에이전트가
+        //   "턴 중" 으로 남아 그 앞에서 기다리던 소비자(우편 파킹 등)가 영영 풀리지 않는다.
+        //   ★왜 여기고 reaper 가 아닌가★: reaper 는 이 finish 가 보낸 ReapMsg 로만 깨어나므로 **늘 뒤**고,
+        //   무엇보다 `finalized` 플래그와 같은 지점이어야 emit 쪽 지각 삽입과의 경쟁이 순서로 닫힌다
+        //   (emit 의 finalize 재확인 주석이 그 인과의 다른 반쪽). epoch 일치 검사는 forget 이 한다.
+        // ADR-0113
+        self.turn.table.forget(self.id, self.epoch);
 
         // status lock 해제 후 외부 호출(§10: status lock 보유 중 외부호출 금지).
         self.status_sink
@@ -687,20 +789,26 @@ mod tests {
         }
     }
 
-    /// 받은 status 변경을 순서대로 수집하는 mock StatusSink.
+    /// 받은 status 변경과 턴 종료 통지를 순서대로 수집하는 mock StatusSink.
     struct MockStatusSink {
         statuses: Mutex<Vec<AgentStatus>>,
+        turn_ends: Mutex<Vec<(AgentId, u32)>>,
     }
 
     impl MockStatusSink {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 statuses: Mutex::new(Vec::new()),
+                turn_ends: Mutex::new(Vec::new()),
             })
         }
 
         fn statuses(&self) -> Vec<AgentStatus> {
             self.statuses.lock().unwrap().clone()
+        }
+
+        fn turn_ends(&self) -> Vec<(AgentId, u32)> {
+            self.turn_ends.lock().unwrap().clone()
         }
     }
 
@@ -709,12 +817,227 @@ mod tests {
             self.statuses.lock().unwrap().push(status);
         }
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+        fn turn_ended(&self, id: AgentId, epoch: u32) {
+            self.turn_ends.lock().unwrap().push((id, epoch));
+        }
     }
 
     use crate::agent::types::AgentInfo;
 
     fn new_core(status_sink: Arc<dyn StatusSink>) -> OutputCore {
-        OutputCore::new(uuid::Uuid::new_v4(), 0, status_sink)
+        OutputCore::new(uuid::Uuid::new_v4(), 0, status_sink, TurnWiring::detached())
+    }
+
+    // ── ADR-0113: emit → 턴 관측 표 + 턴 종료 push ───────────────────────────────────
+
+    /// 표 + claude 분류자를 꽂은 core(운영 spawn_session 배선과 동형 — 같은 dispatch 로 뽑는다).
+    fn core_with_turns(
+        status_sink: Arc<dyn StatusSink>,
+        epoch: u32,
+    ) -> (OutputCore, Arc<TurnObservations>, AgentId) {
+        use crate::agent::profile::{AgentCommand, ClaudeOutputFormat};
+        let id = uuid::Uuid::new_v4();
+        let turns = Arc::new(TurnObservations::new());
+        let core = OutputCore::new(
+            id,
+            epoch,
+            status_sink,
+            TurnWiring::new(
+                turns.clone(),
+                crate::agent::backend::turn_classifier(&AgentCommand::Claude {
+                    extra_args: vec![],
+                    output_format: ClaudeOutputFormat::StreamJson,
+                }),
+            ),
+        );
+        (core, turns, id)
+    }
+
+    fn delta() -> OutputEvent {
+        OutputEvent::TextDelta {
+            text: "x".into(),
+            turn_id: None,
+            message_id: None,
+        }
+    }
+
+    fn message_done() -> OutputEvent {
+        OutputEvent::MessageDone {
+            turn_id: None,
+            message_id: None,
+        }
+    }
+
+    #[test]
+    fn emit_records_turn_signals_into_the_shared_table() {
+        let (core, turns, id) = core_with_turns(MockStatusSink::new(), 7);
+        core.emit(delta());
+        assert!(turns.is_in_turn(id, 7), "진행 신호 → 턴 중");
+        core.emit(message_done());
+        assert!(!turns.is_in_turn(id, 7), "종료 신호 → 턴 아님");
+    }
+
+    #[test]
+    fn emit_of_non_turn_events_leaves_the_table_untouched() {
+        // 비-구조화 세션은 TerminalBytes 만 낸다 — 그래서 관측 대상 집합이 구조적으로 좁혀진다.
+        let (core, turns, id) = core_with_turns(MockStatusSink::new(), 0);
+        core.emit(OutputEvent::TerminalBytes(b"raw".to_vec()));
+        core.emit(OutputEvent::Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            turn_id: None,
+        });
+        core.emit(OutputEvent::Error("stream hiccup".into()));
+        assert_eq!(
+            turns.get(id, 0),
+            None,
+            "턴 신호가 아니면 항목을 만들지 않는다"
+        );
+    }
+
+    #[test]
+    fn every_message_done_pushes_a_turn_end_notification() {
+        // 전이 없는 종료(연속 MessageDone)도 통지한다 — 누락은 소비자를 영구 대기시키고, 잉여는 무해하다.
+        let sink = MockStatusSink::new();
+        let (core, _turns, id) = core_with_turns(sink.clone(), 2);
+        core.emit(delta());
+        core.emit(message_done());
+        core.emit(message_done());
+        assert_eq!(sink.turn_ends(), vec![(id, 2), (id, 2)]);
+    }
+
+    #[test]
+    fn progress_events_do_not_push_turn_end() {
+        let sink = MockStatusSink::new();
+        let (core, _turns, _id) = core_with_turns(sink.clone(), 0);
+        core.emit(delta());
+        core.emit(OutputEvent::Structured {
+            kind: "user".into(),
+            json: "{}".into(),
+        });
+        assert!(sink.turn_ends().is_empty());
+    }
+
+    #[test]
+    fn a_late_echo_after_finish_cannot_resurrect_the_entry() {
+        // ★유령 항목 회귀(같은 epoch 지각 신호)★ 실제 순서를 그대로 재현한다: 주입 스레드가
+        //   transport write 에 막힌 사이 pump 가 EOF→finish 로 표를 비우고, 깨어난 그 스레드가 **같은
+        //   epoch** 으로 입력 에코를 emit 한다. epoch 단조 규칙은 더 작은 epoch 만 버리므로 이걸 못 막는다
+        //   — emit 의 finalize 재확인이 막는다. 안 막으면 종료 신호가 영영 오지 않는 항목이 프로세스
+        //   수명 내내 남아(in_turn_snapshot 에 계속 잡혀) 죽은 에이전트로 도어벨이 반복된다.
+        let (core, turns, id) = core_with_turns(MockStatusSink::new(), 0);
+        core.emit(delta());
+        assert!(turns.is_in_turn(id, 0), "전제: 턴 중으로 관측됨");
+
+        core.finish(TerminalReason::Exited { code: Some(0) });
+        assert_eq!(turns.get(id, 0), None, "finish 가 자기 항목을 거둔다");
+
+        // 막혀 있던 주입 스레드가 이제야 에코를 낸다(같은 epoch).
+        core.emit(OutputEvent::Structured {
+            kind: "user".into(),
+            json: "{}".into(),
+        });
+        assert_eq!(
+            turns.get(id, 0),
+            None,
+            "종료된 화신은 항목을 되살리지 못한다"
+        );
+        assert!(turns.in_turn_snapshot().is_empty());
+    }
+
+    #[test]
+    fn a_dead_incarnations_late_echo_cannot_delete_the_live_ones_observation() {
+        // ★epoch 재사용이 왜 치명적인지의 반대 증명★: 두 화신이 **다른 epoch** 을 가지면, 죽은 쪽의 지각
+        //   emit 은 ① 표를 덮지 못하고(더 작은 epoch) ② 그 emit 의 finalize 재확인이 부르는
+        //   `forget(id, 죽은 epoch)` 도 epoch 이 안 맞아 산 항목을 지우지 못한다. epoch 이 같으면 둘 다
+        //   통과해 산 에이전트가 미관측이 되고, 그 결과가 턴 중 주입이다(spawn_agent 의 epoch 확정 주석).
+        use crate::agent::profile::{AgentCommand, ClaudeOutputFormat};
+        let id = uuid::Uuid::new_v4();
+        let turns = Arc::new(TurnObservations::new());
+        let classify = crate::agent::backend::turn_classifier(&AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::StreamJson,
+        });
+        let wiring = |t: &Arc<TurnObservations>| TurnWiring::new(t.clone(), classify);
+
+        // 앞선 화신(epoch 0) — 한동안 돌다 종료한다.
+        let dead = OutputCore::new(id, 0, MockStatusSink::new(), wiring(&turns));
+        for _ in 0..5 {
+            dead.emit(delta());
+        }
+        dead.finish(TerminalReason::Killed);
+        assert_eq!(turns.get(id, 0), None, "종료가 자기 항목을 거둔다(전제)");
+
+        // 새 화신(epoch 1) — 같은 AgentId, 새 core 라 seq 는 0 부터 다시 센다.
+        let live = OutputCore::new(id, 1, MockStatusSink::new(), wiring(&turns));
+        live.emit(delta());
+        assert!(turns.is_in_turn(id, 1), "산 화신이 턴 중으로 관측됨(전제)");
+
+        // 죽은 화신의 주입 스레드가 이제야 깨어 에코를 낸다 — seq 는 산 화신의 것보다 **크다**.
+        dead.emit(OutputEvent::Structured {
+            kind: "user".into(),
+            json: "{}".into(),
+        });
+        assert!(
+            turns.is_in_turn(id, 1),
+            "죽은 화신의 지각 emit 이 산 화신의 관측을 덮거나 지우면 안 된다"
+        );
+        assert_eq!(
+            turns.get(id, 0),
+            None,
+            "죽은 화신의 항목이 되살아나지도 않는다"
+        );
+    }
+
+    #[test]
+    fn a_backend_without_a_turn_mapping_never_records_a_signal() {
+        // 기본값 = 침묵(fail-open). 근거 없는 진행 신호는 깨울 수 없는 "턴 중" 을 만든다.
+        use crate::agent::profile::AgentCommand;
+        let id = uuid::Uuid::new_v4();
+        let turns = Arc::new(TurnObservations::new());
+        let core = OutputCore::new(
+            id,
+            0,
+            MockStatusSink::new(),
+            TurnWiring::new(
+                turns.clone(),
+                crate::agent::backend::turn_classifier(&AgentCommand::Shell {
+                    program: "cmd.exe".into(),
+                    args: vec![],
+                }),
+            ),
+        );
+        core.emit(delta());
+        core.emit(OutputEvent::Structured {
+            kind: "session_meta".into(),
+            json: "{}".into(),
+        });
+        core.emit(message_done());
+        assert_eq!(turns.get(id, 0), None, "분류자가 침묵하면 관측도 없다");
+    }
+
+    #[test]
+    fn an_unwired_core_records_nothing_at_all() {
+        // 분류자가 없으면 어떤 이벤트가 신호인지 알 수 없다 — 공용 층이 추측하지 않는다(ADR-0004).
+        let sink = MockStatusSink::new();
+        let core = new_core(sink.clone());
+        core.emit(delta());
+        core.emit(message_done());
+        assert!(sink.turn_ends().is_empty(), "배선 없으면 통지도 없다");
+    }
+
+    #[test]
+    fn seed_never_bootstraps_turn_observation_from_a_transcript() {
+        // ★되살리지 말 것★: 턴 중간에 끊긴 transcript 를 관측으로 먹이면 종료 신호가 영영 오지 않는
+        //   "턴 중" 이 만들어져 그 화신을 기다리는 소비자가 깨울 수 없이 멈춘다.
+        let sink = MockStatusSink::new();
+        let (core, turns, id) = core_with_turns(sink.clone(), 0);
+        core.seed(vec![delta(), message_done(), delta()]);
+        assert_eq!(turns.get(id, 0), None, "seed 는 관측이 아니다");
+        assert!(sink.turn_ends().is_empty(), "seed 는 통지도 내지 않는다");
+        // 라이브 emit 부터 관측이 시작된다(seed 가 관측을 막아 버리는 것도 아니다).
+        core.emit(delta());
+        assert!(turns.is_in_turn(id, 0));
     }
 
     #[test]

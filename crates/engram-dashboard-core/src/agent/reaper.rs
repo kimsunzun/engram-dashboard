@@ -136,7 +136,7 @@ pub fn decide(msg: &ReapMsg) -> Disposition {
 ///
 /// ★ADR-0084 epoch-guard★: `reaped_epoch`(= ReapMsg.epoch = 죽은 세션이 spawn 될 때 읽은 프로필
 ///   epoch. session.epoch 과 동일 값)와 **현재 프로필 epoch 이 일치할 때만** auto_restore 를 내린다.
-///   sessions.remove 후 이 lock-free disposition 사이에 재활성화가 `bump_epoch`(manager.rs Resume
+///   sessions.remove 후 이 lock-free disposition 사이에 재활성화가 `epoch_for_spawn`(manager.rs spawn
 ///   갈래)로 프로필 epoch 를 올렸다면, `p.epoch != reaped_epoch` → 다운그레이드를 **건너뛴다**(그
 ///   사이 새로 붙은 산 세션을 stale reap 이 강등하지 못하게). sessions.remove 의 epoch-guard(ADR-0007)
 ///   와 같은 원리를 disposition 계층까지 확장한 것이다.
