@@ -1,7 +1,7 @@
 # ADR-0099: 채널 선택 = 백엔드 capability 스위치 + 프라이밍 정적 2파일(MCP-capable=both-teaching / 비-MCP=CLI-only)
 
-- 상태: 확정 (2026-07-22, 근거: 사용자 결정 + 채널 지연·프라이밍 결정력 실측 — 아래 근거) · 부분 폐기 by ADR-0126 (engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화)
-- 관련: ADR-0030/0002(capability 매트릭스) · ADR-0004(백엔드 지식 격리) · ADR-0086(듀얼입구·단일 wrap) · ADR-0097(auto mode — 채널 선택=프라이밍) · ADR-0098(bare-name grant) · ADR-0093(실험 케이스 매트릭스 — "문구 확정 시 정리" 예고) · `crates/engram-dashboard-daemon/src/control/mod.rs::build_grants` · `crates/engram-dashboard-daemon/src/control/priming.rs` · `crates/engram-dashboard-core/src/agent/backend/claude.rs` · step-log S17 · Amended by ADR-0126 (engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화)
+- 상태: 확정 (2026-07-22, 근거: 사용자 결정 + 채널 지연·프라이밍 결정력 실측 — 아래 근거) · 부분 폐기 by ADR-0126 (engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화) · 부분 폐기 by ADR-0128 (결정 2 engram-send 물리 주입)
+- 관련: ADR-0030/0002(capability 매트릭스) · ADR-0004(백엔드 지식 격리) · ADR-0086(듀얼입구·단일 wrap) · ADR-0097(auto mode — 채널 선택=프라이밍) · ADR-0098(bare-name grant) · ADR-0093(실험 케이스 매트릭스 — "문구 확정 시 정리" 예고) · `crates/engram-dashboard-daemon/src/control/mod.rs::build_grants` · `crates/engram-dashboard-daemon/src/control/priming.rs` · `crates/engram-dashboard-core/src/agent/backend/claude.rs` · step-log S17 · Amended by ADR-0126 (engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화) · Amended by ADR-0128 (결정 2 engram-send 물리 주입)
 
 ## 맥락
 채널 정책은 확정됐으나("MCP 있으면 MCP, 없으면 CLI 폴백" — 사용자, 2026-07-22) 그걸 **어떻게 강제하느냐**가 미정이었다. 현 배관 실측:
