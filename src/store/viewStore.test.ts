@@ -81,7 +81,6 @@ beforeEach(() => {
   listeners.clear()
   unlistenMock.mockClear()
   listenMock.mockClear()
-  // 스토어 초기화(테스트 격리).
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   window.location.hash = '#/' // 기본 = main 창
 })
@@ -167,7 +166,7 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
   it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + {window,tab} 반환', async () => {
     invokeMock.mockResolvedValueOnce({ window: 'slot-popup-2', tab: 'v-new' })
     const res = await useViewStore.getState().moveSlotToWindow('v1', 's1')
-    // toWindow 미지정 → null(새 팝업 창).
+    // null = 새 팝업 창.
     expect(invokeMock).toHaveBeenCalledWith('move_slot_to_window', {
       viewId: 'v1',
       slotId: 's1',
@@ -241,7 +240,6 @@ describe('version 가드(전역 단조 version, G10)', () => {
       await ready
     }
     emit('layout:updated', snap({ view_id: 'v1', version: 5, focused_slot_id: 's5' }))
-    // 늦게 도착한 과거 emit(version 3) — 같은 view 캐시 version(5) 이하라 폐기돼야 한다.
     emit('layout:updated', snap({ view_id: 'v1', version: 3, focused_slot_id: 's3' }))
     const cached = useViewStore.getState().layouts['v1']
     expect(cached.version).toBe(5)
@@ -254,9 +252,7 @@ describe('version 가드(전역 단조 version, G10)', () => {
       await ready
     }
     emit('window:tabs-updated', tabsPayload({ label: 'main', active: 'v5', version: 5 }))
-    // 늦게 도착한 과거(version 3) — 폐기.
     emit('window:tabs-updated', tabsPayload({ label: 'main', active: 'v3', version: 3 }))
-    // 같은 version(5) 도 폐기(<=).
     emit('window:tabs-updated', tabsPayload({ label: 'main', active: 'vX', version: 5 }))
     expect(useViewStore.getState().windows['main'].active).toBe('v5')
   })
@@ -301,7 +297,6 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_view', { viewId: 'v1' })
     const st = useViewStore.getState()
     expect(st.windows['main'].active).toBe('v1')
-    // active 뷰 레이아웃이 캐시에 들어가 렌더 대상이 된다(부팅 즉시 렌더 조건).
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   })
 
@@ -321,7 +316,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
     await initMainWindowFromBackend()
     expect(listTabsCalls).toBeGreaterThanOrEqual(3) // 첫 시도 + 재시도 2회 이상.
     const st = useViewStore.getState()
-    expect(st.windows['main'].active).toBe('v1') // 재시도가 성공을 회수 → 상태가 채워짐(undefined 아님).
+    expect(st.windows['main'].active).toBe('v1')
     expect(selectView(st, 'v1')?.focusedSlotId).toBe('s1')
   }, 10000)
 
@@ -333,7 +328,6 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       return undefined
     })
     await expect(initMainWindowFromBackend()).rejects.toThrow('backend down')
-    // 상태는 채워지지 않는다(신호 없이 조용히 undefined 로 남는 게 아니라 throw 로 알린다).
     expect(useViewStore.getState().windows['main']).toBeUndefined()
   }, 10000)
 
@@ -349,7 +343,7 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       focused_slot_id: 's-new',
       layout: { type: 'slot', id: 's-new', content: { type: 'empty' } },
     }))
-    // 그 뒤 늦게 완료된 init 의 get_view pull(낡은 version 0)이 도착 — 캐시 version(5) 이하라 폐기돼야 한다.
+    // 그 뒤 늦게 완료된 init 의 get_view pull(낡은 version 0)이 도착.
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') {
         return tabsPayload({ label: 'main', tabs: [{ id: 'v1', name: 'View 1' }], active: 'v1', version: 0 })
@@ -358,7 +352,6 @@ describe('initMainWindowFromBackend 부팅 init(read-only pull)', () => {
       return undefined
     })
     await initMainWindowFromBackend()
-    // 옛 pull 이 새 emit 을 덮지 않음 — 최신(version 5) 유지.
     expect(useViewStore.getState().layouts['v1'].version).toBe(5)
     expect(selectView(useViewStore.getState(), 'v1')?.focusedSlotId).toBe('s-new')
   })
@@ -565,7 +558,6 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
         'slot-popup-1': { tabs: [{ id: 'p1', name: 'p1' }], active: 'p1', version: 1 },
       },
     })
-    // 팝업 hash 면 main 이 아니라 자기 창 active.
     expect(currentViewId()).toBe('p1')
   })
 

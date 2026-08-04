@@ -2,7 +2,6 @@ import { create } from 'zustand'
 
 import type { AgentInfo, AgentProfile, AgentStatus, Preset } from '../api/types'
 
-// AgentTree가 직접 참조하는 더미 데이터 — 3c에서 실제 트리 연결 전까지 유지.
 export const dummyAgents = [
   { id: '1', name: '비서', status: 'running', cost: '$0.12' },
   { id: '2', name: '코더', status: 'idle', cost: '$0.21' },

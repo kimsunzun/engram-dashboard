@@ -25,9 +25,9 @@ function rootVar(name: string): string {
 
 beforeEach(() => {
   localStorage.clear()
-  // store 를 기본값으로 리셋(zustand 싱글톤이라 테스트 간 격리). setState 로 직접 초기화.
+  // zustand 싱글톤이라 테스트 간 격리.
   useChatStyleStore.setState({ values: { ...CHAT_STYLE_DEFAULTS } })
-  // :root 인라인 스타일 정리(이전 테스트 잔류 방지).
+  // 이전 테스트 잔류 방지.
   document.documentElement.removeAttribute('style')
 })
 
@@ -49,14 +49,14 @@ describe('chatStyleStore (ADR-0051)', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: '15px' }))
     const loaded = loadChatStyle()
     expect(loaded.fontSize).toBe('15px')
-    expect(loaded.railRowPt).toBe(CHAT_STYLE_DEFAULTS.railRowPt) // 누락 키 = 기본값
+    expect(loaded.railRowPt).toBe(CHAT_STYLE_DEFAULTS.railRowPt)
   })
 
   it('loadChatStyle: 문자열이 아닌 값은 무시하고 기본값 유지(신뢰 못할 저장값 방어)', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: 42, lineHeight: '1.7' }))
     const loaded = loadChatStyle()
-    expect(loaded.fontSize).toBe(CHAT_STYLE_DEFAULTS.fontSize) // number → 무시
-    expect(loaded.lineHeight).toBe('1.7') // string → 채택
+    expect(loaded.fontSize).toBe(CHAT_STYLE_DEFAULTS.fontSize)
+    expect(loaded.lineHeight).toBe('1.7')
   })
 
   it('init: localStorage 로드 → CSS 변수 적용', () => {
@@ -64,7 +64,6 @@ describe('chatStyleStore (ADR-0051)', () => {
     useChatStyleStore.getState().init()
     expect(useChatStyleStore.getState().values.railRowPt).toBe('2rem')
     expect(rootVar('--chat-rail-row-pt')).toBe('2rem')
-    // 누락 키도 기본값으로 :root 에 적용된다.
     expect(rootVar('--chat-font-size')).toBe(CHAT_STYLE_DEFAULTS.fontSize)
   })
 
@@ -78,7 +77,6 @@ describe('chatStyleStore (ADR-0051)', () => {
 
   it('영속 round-trip: setValue 후 새 로드(loadChatStyle)가 그 값을 복원한다', () => {
     useChatStyleStore.getState().setValue('lineHeight', '1.8')
-    // 새로고침 시뮬레이션 — localStorage 에서 다시 로드.
     const reloaded = loadChatStyle()
     expect(reloaded.lineHeight).toBe('1.8')
   })
@@ -89,7 +87,7 @@ describe('chatStyleStore (ADR-0051)', () => {
     const v = useChatStyleStore.getState().values
     expect(v.fontSize).toBe('14px')
     expect(v.lineHeight).toBe('1.6')
-    expect(v.railGutter).toBe(before) // 안 건드린 키 유지
+    expect(v.railGutter).toBe(before)
     expect(rootVar('--chat-font-size')).toBe('14px')
     expect(rootVar('--chat-line-height')).toBe('1.6')
   })
@@ -108,22 +106,19 @@ describe('chatStyleStore (ADR-0051)', () => {
 describe('chatStyleStore runtime key whitelist (ADR-0051 FIX-2)', () => {
   it('patch({ bogus }): 낯선 키는 store·localStorage 를 오염시키지 않고 bogus 로 setProperty 하지 않는다', () => {
     const spy = vi.spyOn(document.documentElement.style, 'setProperty')
-    // 캐스트로 TS 를 우회(런타임 외부 호출 = LLM/CDP 재현). 알려진 키 하나 + 낯선 키 하나를 섞는다.
+    // 캐스트로 TS 를 우회(런타임 외부 호출 = LLM/CDP 재현).
     useChatStyleStore
       .getState()
       .patch({ fontSize: '17px', bogus: 'x' } as unknown as Partial<ChatStyleValues>)
 
-    // 알려진 키는 반영, 낯선 키는 store 에 없다.
     const v = useChatStyleStore.getState().values as Record<string, unknown>
     expect(v.fontSize).toBe('17px')
     expect('bogus' in v).toBe(false)
 
-    // localStorage 에도 낯선 키가 없다.
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
     expect('bogus' in saved).toBe(false)
     expect(saved.fontSize).toBe('17px')
 
-    // setProperty 는 'bogus' 이름(또는 --bogus)으로 절대 호출되지 않는다.
     const propertyNames = spy.mock.calls.map(c => String(c[0]))
     expect(propertyNames.some(n => n.includes('bogus'))).toBe(false)
     spy.mockRestore()
@@ -135,7 +130,6 @@ describe('chatStyleStore runtime key whitelist (ADR-0051 FIX-2)', () => {
     const setValue = useChatStyleStore.getState().setValue as (k: string, v: string) => void
     setValue('nope', 'y')
     expect(useChatStyleStore.getState().values).toEqual(before)
-    // 저장 자체가 일어나지 않아야 한다(키 오염 없음).
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) expect('nope' in JSON.parse(raw)).toBe(false)
   })
@@ -158,17 +152,14 @@ describe('chatStyleStore prototype-key bypass (ADR-0051)', () => {
     setValue('constructor', 'x')
     setValue('toString', 'y')
 
-    // store values 에 오염 키가 own-key 로 들어가지 않는다.
     const v = useChatStyleStore.getState().values as Record<string, unknown>
     for (const k of POLLUTING_KEYS) {
       expect(Object.prototype.hasOwnProperty.call(v, k)).toBe(false)
     }
     expect(useChatStyleStore.getState().values).toEqual(before)
 
-    // 저장 자체가 일어나지 않는다(모두 no-op → localStorage 미기록).
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
 
-    // Object.prototype 이 오염되지 않았다.
     expect(Object.getPrototypeOf({})).toBe(objProtoBefore)
     expect(({} as Record<string, unknown>).toString).toBe(Object.prototype.toString)
   })
@@ -192,7 +183,6 @@ describe('chatStyleStore prototype-key bypass (ADR-0051)', () => {
       expect(Object.prototype.hasOwnProperty.call(saved, k)).toBe(false)
     }
 
-    // Object.prototype·글로벌 프로토타입 오염 없음.
     expect(Object.getPrototypeOf({})).toBe(objProtoBefore)
   })
 
@@ -202,11 +192,10 @@ describe('chatStyleStore prototype-key bypass (ADR-0051)', () => {
       .patch({ fontSize: '15px', __proto__: 'x' } as unknown as Partial<ChatStyleValues>)
 
     const v = useChatStyleStore.getState().values as Record<string, unknown>
-    expect(v.fontSize).toBe('15px') // 유효 키 적용
+    expect(v.fontSize).toBe('15px')
     expect(Object.prototype.hasOwnProperty.call(v, '__proto__')).toBe(false)
     expect(rootVar('--chat-font-size')).toBe('15px')
 
-    // localStorage 에 유효 키만 반영, 오염 키 없음.
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
     expect(saved.fontSize).toBe('15px')
     expect(Object.prototype.hasOwnProperty.call(saved, '__proto__')).toBe(false)

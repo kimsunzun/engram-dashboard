@@ -38,7 +38,7 @@ export const CHAT_STYLE_DEFAULTS: ChatStyleValues = {
   lineHeight: '1.45',
 }
 
-// ADR-0051: store 키 → :root CSS 변수명. StructuredTextView/theme.css/chat.css 가 이 변수들을 var() 로 읽는다.
+// ADR-0051: StructuredTextView/theme.css/chat.css 가 이 변수들을 var() 로 읽는다.
 const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
   railRowPt: '--chat-rail-row-pt',
   plainRowPt: '--chat-plain-row-pt',
@@ -52,9 +52,8 @@ const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
   lineHeight: '--chat-line-height',
 }
 
-const STORAGE_KEY = 'engram.chatStyle' // ADR-0051: localStorage 영속 키
+const STORAGE_KEY = 'engram.chatStyle'
 
-/** localStorage 에서 저장된 값을 읽어 기본값 위에 병합한다. 부재/파싱 실패/타입 오류 → 기본값 fallback. */
 export function loadChatStyle(): ChatStyleValues {
   try {
     const raw = globalThis.localStorage?.getItem(STORAGE_KEY)
@@ -121,7 +120,6 @@ export function loadAndApplyChatStyle(): void {
 
 interface ChatStyleState {
   values: ChatStyleValues
-  /** 부팅 1회 — localStorage 로드 → CSS 변수 적용(값 부재 시 기본값). */
   init: () => void
   /** 단일 키 갱신 — CSS 변수 적용 + localStorage 저장. 사람 UI·LLM 공통 진입점. */
   setValue: (key: ChatStyleKey, value: string) => void
@@ -132,7 +130,7 @@ interface ChatStyleState {
 }
 
 // ADR-0051: chat-style slice — 값의 유일 권위. 액션은 항상 (set → applyToRoot → persist) 3단을 함께 한다
-//   (store·CSS·저장 3자 일관성). 초기 상태는 defaults(부팅 시 init() 이 localStorage 로 덮는다).
+//   (store·CSS·저장 3자 일관성). 초기 상태는 defaults(부팅 시 loadAndApplyChatStyle 이 localStorage 로 덮는다).
 export const useChatStyleStore = create<ChatStyleState>((set, get) => ({
   values: { ...CHAT_STYLE_DEFAULTS },
   init: () => {

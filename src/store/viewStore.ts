@@ -55,7 +55,6 @@ export interface WindowTabs {
   version: number
 }
 
-/** view_id 별 캐시 항목 — 그 view 가 마지막으로 채택한 레이아웃 + focus + (전역 단조) version. */
 export interface CachedView {
   layout: LayoutNode
   focusedSlotId: string | null
@@ -78,10 +77,9 @@ interface ViewState {
    */
   renderModeOverride: Record<string, RenderMode>
 
-  // ── 탭/창 command(창 label 을 받는 창별 조작, ADR-0057) ──────────────────────────
+  // ── 탭/창 command ──────────────────────────
   /** 창 `window` 에 새 빈-슬롯 탭 추가·활성화 → 새 view_id 반환. */
   createTab: (window: string, name?: string) => Promise<string>
-  /** 창 `window` 의 탭 `view` 닫기(§5-2 상태기계). */
   closeTab: (window: string, viewId: string) => Promise<void>
   /** 창 `window` 의 활성 탭 변경(그 창만). */
   switchTab: (window: string, viewId: string) => Promise<void>
@@ -108,7 +106,6 @@ interface ViewState {
   focusSlot: (viewId: string, slotId: string) => Promise<void>
   /** slot 닫기(형제 승격). */
   closeSlot: (viewId: string, slotId: string) => Promise<void>
-  /** slot 에 agent 참조 배정. */
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
   /**
    * slot 의 콘텐츠를 SlotContent 유니온 어느 것으로도 교체(ADR-0063 배치 제어 표면). 트리(agent_list)·
@@ -214,7 +211,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   clearRenderMode: nodeId =>
     set(state => {
       const next = { ...state.renderModeOverride }
-      delete next[nodeId] // 키 제거 → 렌더러가 ?? defaultRenderMode 로 caps 유도 기본으로 복귀.
+      delete next[nodeId] // 렌더러가 ?? defaultRenderMode 로 caps 유도 기본으로 복귀.
       return { renderModeOverride: next }
     }),
 
@@ -265,7 +262,6 @@ export const useViewStore = create<ViewState>((set, get) => ({
   },
 }))
 
-/** 현재 active view 의 캐시 항목(없으면 null) — 창 캔버스 렌더 selector(그 view_id 캐시 조회). */
 export function selectView(state: ViewState, viewId: string | null): CachedView | null {
   return viewId ? (state.layouts[viewId] ?? null) : null
 }
@@ -281,12 +277,11 @@ export function selectView(state: ViewState, viewId: string | null): CachedView 
  * "이 창이 어느 창인지"를 한 곳으로 모은다.
  */
 export function readWindowLabelFromHash(): string {
-  // hash 예: "#/popup?window=slot-popup-3". '?' 뒤를 URLSearchParams 로 파싱.
   const hash = window.location.hash
   const qIndex = hash.indexOf('?')
   if (qIndex < 0) return MAIN_WINDOW_LABEL
-  // ★라우트 스코핑★: `?window=` 는 팝업 라우트에서만 신뢰한다. 라우트 경로(= '#' 과 '?' 사이)가 정확히
-  // `/popup` 일 때만 파싱. 그 외 hash(메인 `#/?window=x` 같은 도달불가 상태 포함)는 main 폴백.
+  // ★라우트 스코핑★: `?window=` 는 팝업 라우트에서만 신뢰한다. 그 외 hash(메인 `#/?window=x` 같은
+  // 도달불가 상태 포함)는 main 폴백.
   const path = hash.slice(0, qIndex)
   if (path !== '#/popup') return MAIN_WINDOW_LABEL
   const params = new URLSearchParams(hash.slice(qIndex + 1))
@@ -382,13 +377,13 @@ export async function initMainWindowFromBackend(): Promise<void> {
   // ADR-0102: 두 부팅 pull 을 유계 재시도로 감싼다 — main 창은 이벤트 복구 경로가 없어(window:tabs-updated 는
   //   탭 변형 시에만 발화) 이 read-only pull 이 조기 transient 로 한 번 실패하면 화면이 채워지지 않는다.
   //   재시도 소진 시엔 throw 로 최종 실패를 호출자(eventBus)에게 전파해 console.error 로 표면화한다(조용히
-  //   삼키지 않음). 성공 시 캐시/창 version 가드가 그 사이 도착한 더 최신 emit 을 덮지 않게 막는다(역전 방지).
+  //   삼키지 않음).
   const payload = await retryAsync(() =>
     invoke<WindowTabsPayload>('list_tabs', { window: MAIN_WINDOW_LABEL }),
   )
   useViewStore.getState().applyWindowTabsUpdated(payload)
   // active 탭 레이아웃도 pull — 부팅 즉시 캔버스가 그려지게. (keep-alive 라 나머지 탭은 WindowLayout
-  // 이 마운트 시 각자 get_view 로 채운다. main 부팅 렌더엔 active 만 있으면 충분.) 이것도 재시도한다.
+  // 이 마운트 시 각자 get_view 로 채운다. main 부팅 렌더엔 active 만 있으면 충분.)
   const snap = await retryAsync(() =>
     invoke<ViewSnapshot>('get_view', { viewId: payload.active }),
   )
