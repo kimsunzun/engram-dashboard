@@ -2,7 +2,7 @@
 name = "engram-dashboard-daemon"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 데몬 — 단일 인스턴스, 랜덤 포트 + 토큰 발급, AgentManager 소유. WS 서버는 다음 단위(phase 2 step 4b)."
+description = "Engram Dashboard 데몬 — AgentManager 소유(에이전트 호스트) + 제어 평면(MCP·ingress·프라이밍) + 메시징 접합 + 조립실(ADR-0129 슬라이스 1)."
 
 # 라이브러리 표면. main(bin)과 격리 하네스(tests/ws_e2e.rs)가 같은 기동 흐름(run / start_test_server)을
 # 공유하도록 서버 조립·accept loop 를 lib 로 모았다. crate 이름 underscore 는 Rust path 규약.
@@ -81,11 +81,31 @@ engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
 # ADR-0110: 메시징 커널(lib). 이 crate 는 워크스페이스 crate 무의존 — 접합은 전부 포트 trait 이고
 #   실물 어댑터는 데몬 `src/messaging_host.rs` 가 소유한다.
 engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
+# ADR-0129 슬라이스 1: 네트워크 행 lib(WS 서버·불투명 프레임 포트·단일 인스턴스 가드·portfile). 이 방향
+#   (daemon → net)만 존재한다 — net 은 데몬을 타입으로도 모르고, 두 행은 그 crate 가 소유한 포트 trait
+#   (`frame_port`)으로만 만난다. 데몬은 그 포트에 실물을 꽂는 쪽(`agent_conn`)이자 조립실이다.
+engram-dashboard-net = { path = "../engram-dashboard-net" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
-# WS 서버(step 4b): accept_hdr_async(Origin 콜백)/split/Message. rustls 등 TLS 불필요(로컬 평문 WS).
-tokio-tungstenite = "0.26"
-# split(SplitSink/SplitStream) + StreamExt::next + SinkExt::send. WS read/write 분리에 필수.
+# ★ADR-0129 슬라이스 1 — `tokio-tungstenite` 를 [dev-dependencies] 로 내렸다★: 이 crate 운영 코드의
+#   사용은 **0**이고(WS 서버는 네트워크 crate 몫) 남은 사용처는 하네스 하나(`tests/ws_e2e.rs` 가 WS
+#   **클라이언트**로 붙어 조립을 구동)다. **다시 [dependencies] 로 올리지 말 것.**
+#   ★작동 기준은 "의존 그래프에 있나" 가 **아니라 "이 매니페스트가 직접 선언했나" 다★: `cargo tree -p
+#   engram-dashboard-daemon -e normal` 은 net 을 거쳐 여전히 `tokio-tungstenite` 를 보여준다 — 그 출력으로
+#   판단하면 정반대 결론이 난다. 실제 벽은 Rust 2018 의 extern prelude 가 **직접 선언한 의존만** 받아
+#   들인다는 것이라, 직접 선언이 없으면 운영 소스의 `use tokio_tungstenite::…` 는 **그 crate 가 스코프에
+#   없어 컴파일되지 않는다**. 그래서 새 데몬 소스가 에이전트 행 안에 WS 서버를 되키우는 부식(ADR-0129 가
+#   기각한 대안 2 "문서·리뷰로 경계 유지" 가 실제로 밟은 경로)이 컴파일 단계에서 막힌다.
+#   ★벽이 서는 축은 코드의 test-ness 도, 명령 이름도 아니라 **컴파일 대상(target)** 이다★: dev-dependency 가
+#   extern prelude 에 들어오는 것은 lib 이 `--cfg test` **유닛테스트 타깃**으로 빌드될 때뿐이다. 그냥 lib
+#   타깃(통합테스트·bin·doctest 가 링크하는 그것)에는 들어오지 않으므로, `cargo test` 로 돌려도 그 타깃을
+#   빌드하는 순간 `src/` 비-테스트 코드의 `use` 는 여전히 깨진다 — **실측**(최소 2-crate 워크스페이스에서
+#   `cargo test -p b` → `error[E0433]`). 이 데몬은 `tests/ws_e2e.rs` 와 bin 을 둘 다 가지므로 그대로 해당된다.
+# 운영 코드에서는 포트 trait 시그니처의 `future::BoxFuture` 때문에 쓴다(async fn in trait 이 dyn
+#   비호환이라 수동 박싱). ★WS read/write split(SplitSink/StreamExt/SinkExt) 계열은 이제 이 crate 운영
+#   소스에 **사용 0** 이다★ — 네트워크 crate 몫으로 갔다(그 0 이 깨지면 위 tokio-tungstenite 주석의 부식
+#   경고를 함께 읽을 것). 하네스(`tests/`)는 WS 클라이언트라 더 넓게 쓴다 — 정확한 사용처는
+#   `rg "futures_util|SinkExt|StreamExt" src/ tests/` 로 볼 것(여기 열거하지 않는다).
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -117,15 +137,20 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # http = axum 미들웨어에서 StatusCode/HeaderMap 직접 조작(rmcp 와 동일 1.x wire 타입).
 http = "1"
 
-# named mutex(단일 인스턴스) + pid liveness(OpenProcess). core 와 동일 0.58 버전 고정.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_System_Threading",
-    "Win32_Foundation",
-] }
+# ★ADR-0129 슬라이스 1 — `windows` 직접 의존을 제거했다★: 이 crate 의 유일한 소비자가 named mutex
+#   단일 인스턴스 가드(`instance.rs`)였고 그게 네트워크 crate 로 갔다. 지금 이 crate 의 `windows::` 사용은
+#   **0**이다(pid liveness 는 원래 core 의 `agent::platform` 몫이었다 — 옛 주석의 "pid liveness(OpenProcess)"
+#   는 이 crate 에서 참인 적이 없다). ★`#[cfg(windows)]`·`windows_subsystem` 은 crate 사용이 **아니다**★ —
+#   토큰만 보고 "아직 쓰네" 로 되돌리지 말 것. Job Object 등으로 Win32 를 다시 직접 쓸 일이 생기면 그때
+#   근거와 함께 새로 넣는다(core 와 같은 0.58 핀).
 
 # ── ADR-0086 통합 테스트 전용(dev) ─────────────────────────────────────────────
 [dev-dependencies]
+# ★ADR-0129 슬라이스 1★: WS 스택은 하네스 전용이다 — `tests/ws_e2e.rs` 가 WS **클라이언트**가 되어
+#   in-process 로 띄운 조립(`start_test_server*`)에 붙는다. 운영 코드 사용 0(위 [dependencies] 의 주석이
+#   왜 여기 있어야 하는지의 정본). 네트워크 crate 와 같은 0.26 핀 — 하네스와 서버가 같은 wire 구현을 봐야
+#   한다.
+tokio-tungstenite = "0.26"
 # ★ADR-0088 self-dev-dependency 트릭★: 자기 crate(daemon lib)를 features=["test-harness"] 로 dev 그래프에
 #   재선언한다 → `cargo test -p engram-dashboard-daemon` 이 lib 을 그 feature 로 컴파일해 handle_send 의
 #   yield-seam hook 을 별도 --features 플래그 없이 켠다. dev 그래프에만 있으므로 운영 daemon 바이너리

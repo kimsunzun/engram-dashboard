@@ -2,7 +2,7 @@
 //!
 //! `AgentManager` 에 주입되는 **전역 `StatusSink`** 하나만 산다. 코어가 동기 스레드에서 밀어 올린
 //! 상태 사실(status_changed / agent_list_updated / restore_result)을 `AgentEvent` JSON 으로 인코딩해
-//! 팬아웃 포트(`frame_port::FrameFanout`)로 한 번 밀어 넣는다.
+//! 팬아웃 포트(`engram_dashboard_net::frame_port::FrameFanout`)로 한 번 밀어 넣는다.
 //!
 //! ★왜 에이전트 시스템 쪽인가(분리 축)★: 이 파일은 코어 어휘(`AgentId`·`AgentStatus`·`AgentInfo`·
 //!   `RestoreReport`)와 wire 어휘(`AgentEvent`)를 **둘 다** 안다 — 네트워크 행이 타입으로도 알아선
@@ -30,7 +30,7 @@ use engram_dashboard_protocol::AgentEvent;
 use crate::connection_core::{
     core_agents_to_wire, core_report_to_wire, core_status_to_wire, event_json,
 };
-use crate::frame_port::FrameFanout;
+use engram_dashboard_net::frame_port::FrameFanout;
 use std::sync::Arc;
 
 // ── DaemonStatusSink(global) ─────────────────────────────────────────────────────
@@ -95,8 +95,9 @@ mod tests {
     /// 소켓 없는 격리 하네스 — 팬아웃 포트 자리에 기록용 더블을 꽂는다.
     ///
     /// ★이 층에서 관측 가능한 것은 "포트로 무엇이 몇 번 나갔나" 가 전부다★: 연결·등록·복제는 포트
-    ///   건너편(`ws::ConnRegistry`)의 개념이라 여기서 보이지 않는다. 그쪽 몫(한 text 를 연결마다 같은
-    ///   바이트로 복제 · 포화한 연결을 건너뛰고 계속)은 `ws` 자기 테스트가 지킨다.
+    ///   건너편(`engram_dashboard_net::ws::ConnRegistry`)의 개념이라 여기서 보이지 않는다. 그쪽 몫
+    ///   (한 text 를 연결마다 같은 바이트로 복제 · 포화한 연결을 건너뛰고 계속)은 네트워크 crate 의
+    ///   자기 테스트가 지킨다.
     fn sink_with_fanout() -> (DaemonStatusSink, Arc<RecordingFanout>) {
         let fanout = Arc::new(RecordingFanout::new());
         (DaemonStatusSink::new(fanout.clone()), fanout)

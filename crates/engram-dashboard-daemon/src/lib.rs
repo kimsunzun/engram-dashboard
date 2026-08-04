@@ -8,30 +8,27 @@
 //! → bind → 토큰 → manager 배선 → restore_all → accept loop → graceful 종료)을 `run()` 이
 //! 그대로 수행한다. accept loop 본체는 `run_accept_loop()` 로 분리해 테스트와 공유한다.
 
-// ADR-0129: 네트워크 행이 소유한 불투명 프레임 포트(`frame_port`)와, 에이전트 시스템이 거기 꽂는
-//   어댑터(`agent_conn`). 데몬 lib 3층 분리의 컴파일러 벽을 세우기 전 단계 — 두 행 사이의 호출을
-//   이 포트로만 흐르게 해 뒤 슬라이스가 파일을 그대로 옮길 수 있게 한다.
+// ADR-0129 슬라이스 1: 네트워크 행은 별도 lib crate(`engram-dashboard-net`)로 떨어졌다 — 포트 계약
+//   (`frame_port`)·WS 서버(`ws`)·단일 인스턴스 가드(`instance`)·portfile 이 그리로 갔고, 컴파일러 벽이
+//   섰다. 여기 남는 `agent_conn` 은 그 포트에 에이전트 시스템 실물을 꽂는 어댑터다(`ConnectionHandler`
+//   /`ConnectionHandlerFactory` 구현 = 명령 해석·이벤트 인코딩·연결 정리).
 pub mod agent_conn;
 pub mod connection_core;
 pub mod control;
-pub mod frame_port;
 // ADR-0090: Stage 2 컨텍스트 포화 파일럿의 순수 실험 로직. test-harness feature 뒤 — 운영 빌드
 //   미포함(saturation-pilot bin 도 required-features=["test-harness"]). experiment/mod.rs 헤더 참조.
 #[cfg(feature = "test-harness")]
 pub mod experiment;
-pub mod instance;
 // ADR-0110: 메시징 커널은 별도 lib crate(`engram-dashboard-messaging`)로 분리됐다. 여기 남는 건
 //   호스트 어댑터 + 조립실 — 커널 포트(DeliveryPort·ControlPlanePort·TurnFacts)에 AgentManager·
 //   ControlRegistry 실물을 꽂는 유일한 자리다.
 pub mod messaging_host;
-pub mod portfile;
 // ADR-0129: 상태 → wire 팬아웃(`DaemonStatusSink`). 코어 어휘와 wire 어휘를 둘 다 아는 자리라
-//   네트워크 행(`ws`)이 아니라 에이전트 시스템 쪽이다 — 그 파일 헤더가 근거 정본.
+//   네트워크 행(`engram_dashboard_net::ws`)이 아니라 에이전트 시스템 쪽이다 — 그 파일 헤더가 근거 정본.
 pub mod status_fanout;
 // ADR-0129: 프레임 포트의 테스트 더블(에이전트 행 전용 격리 하네스). 운영 빌드에 없다.
 #[cfg(test)]
 mod test_doubles;
-pub mod ws;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,9 +45,14 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use connection_core::MultiViewState;
-use frame_port::FrameFanout;
+use engram_dashboard_net::frame_port::FrameFanout;
+use engram_dashboard_net::ws::ConnRegistry;
 use status_fanout::DaemonStatusSink;
-use ws::{ConnRegistry, KeepaliveConfig};
+
+// ADR-0129 슬라이스 1: 네트워크 행이 소유한 타입인데 **이 crate 의 공개 시그니처에 나타나므로**
+//   재수출한다(`start_test_server_with_keepalive` — `tests/ws_e2e.rs` 가 부른다). 표준 Rust API
+//   재수출 패턴이고, **모듈 통째 재수출이 아니다** — 옛 `crate::ws::` 경로를 되살리는 것은 금지다.
+pub use engram_dashboard_net::ws::KeepaliveConfig;
 
 const DAEMON_FILE: &str = "daemon.json";
 
@@ -226,8 +228,9 @@ fn install_panic_hook() {
 ///   받는 자리마다** 어긋난 짝이 표현 가능하다. `manager`(→ status sink)도 `handlers`(→ 공장 →
 ///   `AgentConnections.fanout`)도 전이적 운반자다. 그래서 **"팬아웃 타입을 파라미터로 안 받으니
 ///   안전" 은 판정 기준이 될 수 없다** — 무엇을 나르는지를 봐야 한다.
-///   지금 이 규칙에 걸리는 자리는 **조립 밖의 공개 진입점**(`ws::handle_connection` ·
-///   `AgentConnections::new` · `ConnectionCore::new`)과 ws 테스트 하네스이고, **조립 안에는 없다** —
+///   지금 이 규칙에 걸리는 자리는 **조립 밖의 공개 진입점**(`engram_dashboard_net::ws::handle_connection` ·
+///   `AgentConnections::new` · `ConnectionCore::new`)과 **네트워크 crate 의** ws 테스트 하네스이고,
+///   **조립 안에는 없다** —
 ///   그게 이 struct 의 존재 이유다. 이 struct 를 손으로 조립해 남의 레지스트리를 끼우는 것도 한 모듈
 ///   안이라 타입으로 못 막는다.
 ///   ★이 괄호는 목록이 아니라 예시다★: 새 운반자가 생기면 여기 덧붙는지로 판정하지 말고 **위 규칙으로**
@@ -357,9 +360,12 @@ async fn run_accept_loop(
     //
     // ★팬아웃 포트를 인자로 받지 않고 여기서 뽑는 이유★: 아래 accept 갈래가 등록하는 **그 값**에서
     //   뽑으므로 "브로드캐스트 대상 ≠ 등록 대상" 을 이 함수 안에서는 쓸 수가 없다.
-    // ★기계적으로 확인 가능한 두 사실★: ① **파라미터 타입으로** 레지스트리와 팬아웃을 둘 다 받는 함수가
-    //   crate 에 없다(두 집합이 서로소 — 레지스트리 쪽은 `handle_connection` 과 테스트 하네스, 팬아웃 쪽은
-    //   `AgentConnections::new`·`ConnectionCore::new`·`DaemonStatusSink::new`) ② 조립(이 파일)에서
+    // ★기계적으로 확인 가능한 두 사실★: ① **파라미터 타입으로** 레지스트리와 팬아웃을 **둘 다** 받는 함수가
+    //   **두 crate 어디에도** 없다. 판정 기준은 시그니처 스캔이다 — 레지스트리 쪽 = `ConnRegistry` 를
+    //   파라미터로 받는 함수, 팬아웃 쪽 = `FrameFanout`(`Arc<dyn>`·`&dyn` 무관)을 파라미터로 받는 함수.
+    //   ★두 집합의 구성원을 여기 열거하지 않는다★: 열거는 매번 한 칸 모자랐고(이 주석의 다른 자리가 그걸
+    //   경고한다) ①이 필요로 하는 것은 명단이 아니라 **교집합이 비었다**는 사실뿐이다. 다시 확인하려면
+    //   위 두 기준으로 직접 스캔할 것 ② 조립(이 파일)에서
     //   만들어지는 `Arc<dyn FrameFanout>` 은 전부 그 함수가 이미 들고 있는 레지스트리에서 제자리 생성된다
     //   (생성 지점 둘 = `build_daemon_wiring_with_store` 와 이 자리. 테스트는 레지스트리 없이 기록용
     //   더블을 꽂으므로 ② 밖이고, 운영 경로엔 없다).
@@ -369,7 +375,8 @@ async fn run_accept_loop(
     // ★다음 두 문장은 둘 다 거짓이니 여기서 인용하지 말 것★(둘 다 디렉토리 범위 grep 을 crate 전체로
     //   일반화해 나온 것이고, 두 번 다 전이적 운반자를 가렸다):
     //   · "팬아웃이 어느 시그니처에도 없다" — 에이전트 행 시그니처에는 있다(위 ① 괄호).
-    //   · "레지스트리를 파라미터로 받는 함수가 없다" — `ws::handle_connection` 이 받는다. ① 은 **둘 다**
+    //   · "레지스트리를 파라미터로 받는 함수가 없다" — `engram_dashboard_net::ws::handle_connection` 이
+    //     받는다. ① 은 **둘 다**
     //     받는 함수가 없다는 뜻이지 한쪽도 없다는 뜻이 아니다.
     // ★이 파생은 과도기 모양이지 종착지가 아니다★: 분리(ADR-0129 결정 3) 후 이 루프는 네트워크 crate 의
     //   것이 되어 `Arc<dyn ConnectionHandlerFactory>` 하나만 받고, 공장 조립은 얇은 조립 바이너리로
@@ -380,7 +387,7 @@ async fn run_accept_loop(
     //   에서만** 얻을 수 있고 독립 생성이 불가능해진다(슬라이스 3에서 이걸 할 것).
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    let handlers: Arc<dyn frame_port::ConnectionHandlerFactory> =
+    let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
             multiview,
@@ -400,7 +407,7 @@ async fn run_accept_loop(
                         let handlers = handlers.clone();
                         let expected_token = expected_token.clone();
                         tokio::spawn(async move {
-                            ws::handle_connection(
+                            engram_dashboard_net::ws::handle_connection(
                                 stream,
                                 peer,
                                 registry,
@@ -459,7 +466,7 @@ pub async fn run() -> Result<(), i32> {
 
     // 1) 단일 인스턴스 가드. 이미 실행 중이면 로그 남기고 정상 종료(exit 0).
     //    ★_guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 mutex 해제 = 단일성 깨짐).
-    let _guard = match instance::acquire() {
+    let _guard = match engram_dashboard_net::instance::acquire() {
         Ok(Some(g)) => g,
         Ok(None) => {
             tracing::info!("데몬이 이미 실행 중 — 종료");
@@ -481,8 +488,8 @@ pub async fn run() -> Result<(), i32> {
 
     // 2.5) 기존 daemon.json 검사. stale(죽은 PID)이면 무시(로그만)하고 덮어쓴다.
     //      살아있으면 방어적으로 덮어쓰지 않고 정상 종료(살아있는 데몬 보호).
-    if let Some(prev) = portfile::read(&daemon_path) {
-        if portfile::is_stale(&prev) {
+    if let Some(prev) = engram_dashboard_net::portfile::read(&daemon_path) {
+        if engram_dashboard_net::portfile::is_stale(&prev) {
             tracing::info!(pid = prev.pid, "기존 daemon.json 이 stale — 덮어씀");
         } else {
             tracing::warn!(
@@ -708,7 +715,7 @@ pub async fn run() -> Result<(), i32> {
     // 8) daemon.json atomic 기록. 토큰을 포함하나 파일에만 — 로그엔 port/pid 만.
     let start_time =
         engram_dashboard_core::agent::platform::current_process_start_time().unwrap_or(0);
-    let info = portfile::DaemonInfo {
+    let info = engram_dashboard_net::portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
         port,
@@ -716,7 +723,7 @@ pub async fn run() -> Result<(), i32> {
         protocol_version: PROTOCOL_VERSION,
         start_time,
     };
-    if let Err(e) = portfile::write_atomic(&daemon_path, &info) {
+    if let Err(e) = engram_dashboard_net::portfile::write_atomic(&daemon_path, &info) {
         tracing::error!("daemon.json 기록 실패: {e}");
         // ADR-0086 F5: 여기서 Err 로 반환하면 mcp_server_handle(Some)이 스코프 종료로 drop 되며
         //   McpServerHandle::drop 이 cancel 토큰을 발화해 detached serve 태스크를 확실히 내린다

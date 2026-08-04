@@ -1,7 +1,8 @@
-//! 네트워크 행이 위층으로 뚫는 **유일한 구멍** — 불투명 프레임 포트(ADR-0129).
+//! 불투명 프레임 포트 — 네트워크 행과 위층 사이의 계약(ADR-0129).
 //!
-//! 여기 정의된 계약은 text/binary/close 세 가지 프레임만 안다. `AgentCommand`·`AgentEvent`·
-//! 프로토콜 인코딩은 한 낱말도 등장하지 않으며, 그 어휘를 아는 쪽은 전부 위층(`agent_conn`)이다.
+//! 여기 정의된 계약이 아는 프레임 어휘는 아래 `Frame` 이 전부다. 프로토콜 디코드·인코딩과 그 타입들은
+//! 이 계약에 들어오지 않는다 — 그 어휘의 소비자는 위층(데몬 crate 의 `agent_conn`)이고, 이 crate 안에
+//! 남은 예외는 lib.rs 헤더가 기록한다.
 //! 계약(trait)은 아래층인 네트워크 행이 소유하고 실물은 양쪽이 나눠 꽂는다 — `FrameSink`(연결당
 //! 출구)와 `FrameFanout`(전-연결 출구)은 네트워크 행(`ws::ConnFrameSink`·`ws::ConnRegistry`)이,
 //! `ConnectionHandler`/`ConnectionHandlerFactory` 는 위층이 구현한다(ADR-0110 의 포트 소유 idiom과
@@ -154,7 +155,8 @@ pub trait ConnectionHandler: Send + Sync {
     ///   통해 만든 sink(특히 오래 사는 곳에 등록한 것)를 여기서 회수하지 않으면, 네트워크 행의 송신
     ///   큐 사본이 살아남아 writer task 가 스스로 끝나지 못한다(연결이 끝나도 회수되지 않는 task).
     ///   현 구현이 이 의무를 어떻게 지키는지, 그리고 그 회수를 놓치는 알려진 경쟁은
-    ///   `agent_conn::AgentConnection::on_disconnect` 주석에 있다 — 위 abort-겹침 경쟁과 같은 뿌리다.
+    ///   데몬 crate 의 `agent_conn::AgentConnection::on_disconnect` 주석에 있다 — 위 abort-겹침 경쟁과
+    ///   같은 뿌리다.
     ///
     /// ★이 시점 이 연결은 아직 fanout 레지스트리에 남아 있다★(등록 해제는 네트워크 행이 이 호출
     /// **뒤에** 한다). 다만 여기서 나가는 브로드캐스트가 **자기 자신에게 배달된다고 전제할 수 없다**

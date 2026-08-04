@@ -1,0 +1,69 @@
+[package]
+name = "engram-dashboard-net"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 네트워크 행 — WS 서버(Origin·auth·연결 수명·단일 writer·keepalive), 불투명 프레임 포트, 전-연결 팬아웃 레지스트리, 단일 인스턴스 가드, portfile. 에이전트 어휘를 타입으로도 모른다 — 단 auth 핸드셰이크의 AgentCommand::Auth·PROTOCOL_VERSION 두 이름은 0-4 이월분으로 예외(ADR-0129 결정 1 + step-log S18.20, 상세는 lib.rs 헤더)."
+
+[lib]
+name = "engram_dashboard_net"
+path = "src/lib.rs"
+
+# ★의존성 상한 — 열거가 아니라 **규칙**(load-bearing, ADR-0129 결정 1)★: 워크스페이스 crate 는
+#   **"이 crate 를 쓰는 쪽이 이미 어차피 지고 있는 것" 만** 둔다. 지금 그 조건을 만족하는 것은
+#   protocol·core 이고, 그 밖(daemon·messaging·discovery 및 앞으로 생길 것)은 넣지 않는다 —
+#   넣는 순간 "네트워크만 필요한 소비자" 가 에이전트 시스템까지 의존으로 지게 되고 이 crate 를 만든
+#   이유가 사라진다. **규칙으로 적은 이유** = 이름을 열거하면 새 crate 가 생길 때마다 한 칸 모자란다
+#   (그 결함이 이 이사 슬라이스의 지배적 결함 유형이었다).
+#   ★기계 강제 = lib.rs 헤더의 게이트 3★ — **이 파일의 텍스트가 아니라 해석된 의존 그래프**를 읽는다
+#   (명령 정본은 그 헤더. 매니페스트 텍스트 grep 은 rename·테이블 형 등에 뚫려 쓰지 않는다). 게이트 1·2 는
+#   `src/` 만 보므로 소스가 이름을 안 부르는 의존은 못 잡고, 그 자리를 게이트 3 이 맡는다.
+#   추가하고 싶어지면 그건 포트를 파야 한다는 신호다(위층이 어댑터로 꽂는다 — messaging 커널과 같은 idiom).
+[dependencies]
+# 소비자: ① `portfile` — daemon.json 의 공유 구조체(`DaemonInfo`, 데몬이 write·클라가 read)
+#   ② `ws` 의 auth 핸드셰이크 — `AgentCommand::Auth`·`PROTOCOL_VERSION`. **②가 어휘 예외**(의도된
+#   0-4 이월)이고 근거는 lib.rs 헤더의 0-4 이월 note. 0-4 가 끝나면 ②는 사라지고 ①은 남는다 —
+#   즉 `net → protocol` 은 0-4 뒤에도 **영구**다(`portfile.rs` 가 `DaemonInfo` 를 re-export 한다).
+engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
+# `portfile` 의 stale 판정 전용 — `agent::platform` 의 프로세스 liveness 헬퍼(에이전트 어휘 아님)다.
+#   **허용 심볼의 정본은 lib.rs 헤더의 게이트 2**이고, 그 게이트가 심볼 목록 자체를 기대값으로 못 박는다
+#   (파일 단위가 아니라 심볼 단위 — 여기서 목록을 다시 세지 말고 그 게이트를 볼 것). daemon·tauri 양쪽이
+#   같은 liveness 로직을 보게 하는 DRY — discovery crate 가 core 에 의존하는 것과 같은 이유
+#   (ADR-0129 결정: 격리 게이트는 crate 단위가 아니라 **타입 단위**다).
+engram-dashboard-core = { path = "../engram-dashboard-core" }
+
+# macros = `tokio::select!`(write_task 의 큐/close_signal/keepalive 3-arm) + `#[tokio::test]`.
+# net/sync/time = TcpStream·mpsc·Notify·timeout/interval. daemon 과 같은 1.x 핀.
+# ★`rt-multi-thread` 는 필요보다 넓다(의도적 유보)★: `handle_connection` 의 task spawn 이 요구하는 것은
+#   **`rt`** 이고, 이 crate 엔 런타임 빌더도 `flavor = "multi_thread"` 도 없다(둘 다 사용 0). 그래도
+#   좁히지 않은 이유 = 이 슬라이스는 **순수 이사**라 동작 인접 변경을 넣지 않는다는 것 하나다.
+#   ★"어차피 데몬이 켜니 좁혀도 같다" 는 근거로 쓰지 말 것★: feature 합집합은 **호출 1회 단위**라, 데몬을
+#   함께 빌드할 때만 그렇다. 이 crate 의 단독 빌드/테스트(`cargo build|test -p engram-dashboard-net` —
+#   lib.rs 헤더가 광고하는 바로 그 격리 경로)에서는 여기 적힌 feature 가 그대로 유효 집합이다.
+#   `rt` 로의 축소는 별 단위로 미룬다.
+# `signal` 은 넣지 않는다 — Ctrl-C 는 데몬 살림이고 이 crate 에 `ctrl_c` 사용이 0이다(accept loop 가
+#   아직 조립부에 있어 그쪽이 쥔다).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# WS 서버: accept_hdr_async(Origin 콜백)/split/Message. rustls 등 TLS 불필요(로컬 평문 WS).
+tokio-tungstenite = "0.26"
+# 포트 trait 시그니처의 `future::BoxFuture`(async fn in trait 이 dyn 비호환이라 수동 박싱)와, `ws` 의 WS
+#   살림·스트림 추상(`stream::SplitSink` writer half 별칭 · `SinkExt` · `StreamExt` · `read_task<S>` 의
+#   `Stream` 바운드)에 쓴다. 격리 테스트는 `stream::iter`(합성 프레임열)·`poll!`(포화 park 양성 관측)도
+#   쓴다. 정확한 사용처는 `rg "futures_util|SinkExt|StreamExt|Stream\b" src/` 로 볼 것 — 여기 목록을
+#   기대값으로 삼지 말 것(세 번 세어 세 번 한 칸 모자랐다).
+futures-util = "0.3"
+# auth 핸드셰이크에 쓴다 — 운영 경로의 사용처는 `ws.rs` 의 `from_str::<AgentCommand>` 이고, 테스트가 그
+#   핸드셰이크를 합성하는 데 더 쓴다. 그 밖의 프레임은 불투명 text/바이트로만 다루므로, 핸드셰이크 밖에서
+#   JSON 해석이 늘어나면 어휘 격리가 새고 있다는 신호다.
+serde_json = "1"
+tracing = "0.1"
+
+# `instance` 의 named mutex 살림에 쓴다. 심볼 목록을 여기 열거하지 않는다(열거는 한 칸 모자라기 쉽고,
+#   `windows::core::PCWSTR` 처럼 아래 어느 feature 에도 안 걸리는 것도 있다) — 실제 사용은
+#   `rg "windows::" src/` 가 답이다.
+#   ★pid liveness 는 여기 없다★: 그건 core 의 `agent::platform` 헬퍼가 한다(위 core 의존 주석) — 옛
+#   데몬 주석의 "pid liveness(OpenProcess)" 를 이 자리로 옮겨 적지 말 것. core 와 동일 0.58 버전 고정.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }

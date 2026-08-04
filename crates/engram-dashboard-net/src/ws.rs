@@ -27,7 +27,8 @@ use std::time::Duration;
 
 // ★ADR-0129 잔여 — auth 핸드셰이크★: 핸드셰이크를 데몬 소유 타입으로 옮기는 것은 후속 슬라이스라,
 //   지금은 `AgentCommand::Auth`/`PROTOCOL_VERSION` 만 네트워크 행에 남는다. 이 두 이름이 이 파일에
-//   남은 **유일한** 에이전트 어휘다(상태·메시징 sink 는 status_fanout/messaging_host 로 이사했다).
+//   남은 **유일한** 에이전트 어휘다(상태·메시징 sink 는 데몬 crate 의 status_fanout/messaging_host 로
+//   이사했다).
 use engram_dashboard_protocol::{AgentCommand, PROTOCOL_VERSION};
 
 use crate::frame_port::{
@@ -645,7 +646,7 @@ mod tests {
         }
     }
 
-    // (kind_to_action 매핑 테스트는 connection_core.rs 로 이동 — 함수가 거기 있음.)
+    // (kind_to_action 매핑 테스트는 데몬 crate 의 connection_core.rs 로 이동 — 함수가 거기 있음.)
 
     // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────
     #[test]
@@ -846,8 +847,8 @@ mod tests {
         }
     }
 
-    // (6. Subscribe control 순서 테스트는 connection_core.rs 로, 7·7b·9b 의 flush/도어벨 테스트는
-    //  messaging_host.rs 로 이동 — 검증 대상이 거기 있음. ADR-0129)
+    // (6. Subscribe control 순서 테스트는 데몬 crate 의 connection_core.rs 로, 7·7b·9b 의 flush/도어벨
+    //  테스트는 같은 crate 의 messaging_host.rs 로 이동 — 검증 대상이 거기 있음. ADR-0129)
 
     // ── 10. (적용4-1) OriginCheck::on_request 분기 — 무방비 였던 거부/허용 분기 검증 ──────
     //    순수 헤더 검사라 in-process 서버 불필요. Request 를 직접 만들어 콜백을 호출한다.

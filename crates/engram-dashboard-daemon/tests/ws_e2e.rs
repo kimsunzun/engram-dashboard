@@ -17,9 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
-use engram_dashboard_daemon::ws::KeepaliveConfig;
+// ADR-0129 슬라이스 1: `KeepaliveConfig` 의 본가는 네트워크 crate 지만, 이 하네스가 부르는
+//   `start_test_server_with_keepalive` 의 시그니처에 나타나므로 데몬 crate 가 재수출한다 —
+//   조립(데몬)을 구동하는 테스트라 네트워크 crate 를 직접 dev-dependency 로 물지 않는다.
 use engram_dashboard_daemon::{
-    start_test_server, start_test_server_with_keepalive, TestServerHandle,
+    start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
 use engram_dashboard_protocol::{
     decode_frame, AgentCommand as WireCommand, AgentEvent, ClaudeOutputFormat as WireOutputFormat,

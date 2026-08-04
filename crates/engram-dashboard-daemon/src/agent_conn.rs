@@ -29,7 +29,7 @@ use crate::connection_core::{
     ConnectionCore, ConnectionSession, DispatchFlow, MultiViewState, Outbound,
     OutboundSink as CoreOutboundSink, SinkError as CoreSinkError,
 };
-use crate::frame_port::{
+use engram_dashboard_net::frame_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
 };
 
@@ -367,8 +367,10 @@ mod tests {
     use crate::test_doubles::FakeFrameSink;
     use tokio::sync::mpsc;
 
-    /// 프레임 출구 더블. 네트워크 행 실물(`ws::ConnFrameSink`)을 쓰지 않는 이유는 이 행이 그 타입을
-    /// 알면 crate 가 갈릴 때 dev-dependency 로 되살아나기 때문이다(ADR-0129).
+    /// 프레임 출구 더블. 네트워크 행 실물(`engram_dashboard_net::ws::ConnFrameSink`)은 이제
+    /// **부를 수도 없다** — 슬라이스 1 로 crate 가 갈리며 그 타입이 네트워크 crate 내부
+    /// (`pub(crate)`)에 남았다(ADR-0129). 그래서 이 행의 테스트는 포트 계약(`frame_port`)에만
+    /// 의존하는 더블을 쓴다.
     fn frame_sink(tx: mpsc::Sender<Frame>) -> Arc<dyn FrameSink> {
         Arc::new(FakeFrameSink::new(tx))
     }
