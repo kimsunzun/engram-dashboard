@@ -77,7 +77,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **코더 = 『코더(복잡)』/『코더(단순)』 스폰(모델 바인딩 = 전역 사전).** 메인은 설계·지시·취합만 — 직접 구현 편집 = 규약 위반.
 - **리뷰어 = `/review` 스킬(『doc-aware 리뷰어』 + 『cross-family(blind) 리뷰어』 2인 적대, 다른 family).** 단계 인자(prd/trd/code/doc)가 전용 Advocate/Adversary 렌즈를 박는다(즉석 발명 금지). 리뷰어 모델·MCP 툴 바인딩 정본 = 전역 사전(글로벌 룰 §전역 사전). 리뷰 스킵 절대 금지. 판정 PASS/FIX/BLOCK — **불일치는 메인 임의 판정 금지, 사용자에게.** 리뷰 절차·공통 규약의 실행 정본 = **review 스킬**(스킬 개편 시 그쪽이 이김), 결정 근거 = ADR-0031.
 - **QA = `/qa` 스킬(build/test + GUI 실측 `scripts/cdp.mjs`).** 테스트·tsc 통과 ≠ 완료 — 실제 화면 동작 확인 전엔 미완.
-- **TDD + 모듈 격리 — 강제.** 기능 단위로 테스트를 먼저(또는 함께) 쓰고, 모든 모듈은 외부 의존(Tauri/네트워크/실제 프로세스)을 seam으로 끊어 **단독 실행 격리 하네스**를 갖춘다 — 코어=Noop/테스트 sink headless, transport/session=smoke bin, 데몬=integration harness bin. 테스트는 누적해 `cargo test`(루트) 한 번에 전 모듈 회귀. (ADR-0012)
+- **TDD + 모듈 격리 — 강제.** 기능 단위로 테스트를 먼저(또는 함께) 쓰고, 모든 모듈은 외부 의존(Tauri/네트워크/실제 프로세스)을 seam으로 끊어 **단독 실행 격리 하네스**를 갖춘다 — 코어=Noop/테스트 sink headless, transport/session=smoke bin, 데몬=integration harness bin. 테스트는 누적해 `cargo test --workspace --exclude engram-dashboard` 한 번에 전 모듈 회귀. (ADR-0012)
 - **테스트 가능성 분리 검토 — 사용자 결정.** 중요한 로직이 외부 의존(Tauri/환경)에 묶여 단위테스트가 막히면 순수 로직의 seam 분리를 **항상 검토**하되, 분리 여부는 사용자 판단(구현 갈림길 = 사용자 결정). (ADR-0012)
 - **예외(인라인 허용):** 1~2줄 사소 수정·**사소한 문서(오타·서식·노트)**·조사/탐색·스파이크(throwaway). 이때도 QA build/test는 돌린다. **load-bearing 문서(standing 규약·표준·바인딩 등 다른 작업이 의존)는 예외 아님 → `/review doc` 거쳐 커밋.**
 - **조사·웹서칭·대량 읽기 = 서브에이전트 일임.** 범용 원칙 = global-rules 「위임 우선」(여기 안 베낌). engram 바인딩: OSS·설계 조사는 `/research`. 자율 모드("진행 쭉해")에서도 생략 금지.
@@ -151,7 +151,7 @@ claude 전용 인자(`--session-id`/`--resume`)는 `backend/claude.rs` 한 곳�
 - **참조 = 패턴 차용이지 코드 복붙 아님** — 그대로 옮길 때만 라이선스 법무 확인. 클론 소스: `I:\Engram_Workspace\references\`(git 추적 밖).
 - **특정 도구를 조사 앵커로 선정하지 않는다(사용자 결정 2026-07-26)** — 참조 도구 목록을 여기 박으면 후속 조사가 그 목록에 앵커링돼 직접 피어를 놓친다(M3 실발생 2026-07-15). 과거 선정 이력은 ADR이 보존하되, 새 조사는 매번 넓게 서베이한다.
 
-## 백엔드 모듈 맵 (Cargo workspace — 6 멤버: protocol · core · discovery · messaging · daemon · src-tauri)
+## 백엔드 모듈 맵 (Cargo workspace — 멤버 목록 정본 = 루트 `Cargo.toml`의 `[workspace] members`)
 > **개요만.** 파일별 책임은 코드/grep(`// ADR-` 앵커 포함)이 단일 출처 — 여기 베끼지 않는다(rot 방지). 불변식은 ↓ 핵심 불변식.
 
 **데이터 흐름(S10 추상화):** `AgentManager → AgentSession(= OutputCore + dyn AgentTransport)`. 출력·상태는 `OutputSink`/`StatusSink` trait으로만 흐른다(코어는 Tauri·전송 방식 모름). 종료 분류는 reaper 단일 소비자(ADR-0019).
@@ -159,7 +159,8 @@ claude 전용 인자(`--session-id`/`--resume`)는 `backend/claude.rs` 한 곳�
 **crate 경계** (ADR-0029: 에이전트 호스트 = 데몬 프로세스):
 - **core** — 에이전트 코어(agent·persistence·logging), **tauri import 0**. seam: `transport`(`AgentTransport` — pty 실물/api 껍데기) · `backend`(CommandSpec·claude 인자 격리, ADR-0004).
 - **messaging** — 메시징 커널(mailbox·ledger·groups·envelope·service·busy). **워크스페이스 crate 무의존**(core 포함 — 컴파일러 강제 벽, ADR-0110). 접합은 lib이 소유한 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TurnFacts`·`IdleNotifier`·`FlushTrigger`)뿐이고, 실물 어댑터는 데몬(`messaging_host.rs`)이 소유한다.
-- **daemon** — `AgentManager` 소유, WS 서버, 단일 인스턴스 guard, portfile(`daemon.json`). 이벤트버스 single-push(ADR-0028). 메시징 호스트 어댑터·조립실(`messaging_host.rs`, ADR-0110).
+- **net** — 데몬의 네트워크 행(WS 업그레이드·Origin·토큰 핸드셰이크·연결 수명·연결당 단일 writer·keepalive·팬아웃 레지스트리 `ws` · 프레임 포트 계약 `frame_port` · 단일 인스턴스 가드 `instance` · portfile `portfile`). 경계·격리 게이트 3종·의존 상한의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더(ADR-0129).
+- **daemon** — `AgentManager` 소유, 소켓 수락 루프(`run_accept_loop`)와 네트워크 행 조립. 이벤트버스 single-push(ADR-0028). 메시징 호스트 어댑터·조립실(`messaging_host.rs`, ADR-0110).
 - **discovery** — 데몬 발견 순수 로직(no WMI/no sleep, seam) + `ensure_daemon` + `default_data_dir`(ADR-0024).
 - **protocol** — wire 계약(AgentCommand/Event/OutputChunk/DaemonInfo + codec + ts-rs).
 - **src-tauri** — 데몬 클라이언트 셸(창·트레이·discovery·로컬 command). 에이전트 in-proc 호스팅 X. tray = §5 LLM 제어 핸들.
@@ -185,12 +186,18 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 
 ## 빌드·검증 명령 (Cargo workspace — 루트에서 실행)
 **Cargo workspace**: 멤버 구성은 위 모듈맵 참조. 코어(agent/persistence/logging)·tests/는 `crates/engram-dashboard-core`, `target/`는 워크스페이스 루트.
+- `cargo test --workspace --exclude engram-dashboard` — 전 workspace 회귀(src-tauri 패키지 `engram-dashboard` 제외 — 그 lib 테스트 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽는다, 실측 2026-08-05)
 - `cargo test -p engram-dashboard-core` — 코어 unit + 통합 테스트(실 PTY로 단언)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
 - `cargo test -p engram-dashboard-messaging` — 메시징 커널 단위(워크스페이스 crate 무의존 격리 하네스, ADR-0110)
+- `cargo test -p engram-dashboard-net` — 네트워크 행 단위(실소켓 127.0.0.1:0 또는 합성 프레임열, 에이전트 시스템 실물 없음 — ADR-0129)
 - `cargo build` (루트) — 전체 workspace 빌드
 - `cargo fmt --check` / `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트(검사형 `--check`)
 - `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
+- 네트워크 행 격리 게이트 3종(ADR-0129 — 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더):
+  - `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` (→ 0줄) — 소스 참조
+  - `rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/ | sort -u` (→ 정확히 2줄) — core 심볼 allowlist(파일 단위 아닌 **심볼 단위**)
+  - `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 3줄) — 직접 워크스페이스 의존 상한. **해석된 의존 그래프**를 읽는다 — Cargo.toml 텍스트 grep으로 바꾸지 말 것(rename·테이블 형·비활성 target·optional 등에 뚫린다), 플래그도 줄이지 말 것
 - 프론트 게이트: `npm test`(vitest run) + `npx tsc --noEmit`(타입체크 — 별도 typecheck 스크립트 없음)
 - 프로젝트 루트: `npm run tauri dev` — 전체 E2E
 - 로그 ON: `RUST_LOG=debug` (기본 OFF=warn)

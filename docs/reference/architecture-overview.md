@@ -6,7 +6,7 @@
 >
 > **용어가 막히면 맨 아래 [§용어 사전](#용어-사전-혼동쌍-고정)**을 본다 — 이 문서의 모든 혼동쌍(에이전트/클라이언트/데몬 등)이 거기 고정돼 있다. PART 1 앞머리엔 최소 5개만 먼저 깐다.
 >
-> 기준: **S18**(에이전트 간 메시징 v1 — 보관함·회신 장부·그룹까지 구현 + 메시징 커널 lib 분리. ADR-0103/0104/0110) · S17 제어 채널 입구(ADR-0086/0087) · 생명주기 개정(resume 전용·시체 보존 — ADR-0082/0083/0084) 반영. 2026-07 스냅샷.
+> 기준: **S18**(에이전트 간 메시징 v1 — 보관함·회신 장부·그룹까지 구현 + 메시징 커널 lib 분리. ADR-0103/0104/0110) · S17 제어 채널 입구(ADR-0086/0087) · 생명주기 개정(resume 전용·시체 보존 — ADR-0082/0083/0084) 반영.
 >
 > 다이어그램은 전부 Mermaid다 — 렌더 뷰 전제(GitLab·IDE 미리보기). **화살표 = 데이터 흐름 방향**(라벨의 "A→B"가 그 방향을 다시 못박는다).
 
@@ -160,17 +160,24 @@ flowchart BT
   core["core [lib]<br/>에이전트 엔진(tauri import 0, seam: transport/backend/control)"]
   discovery["discovery [lib]<br/>데몬 찾기/띄우기 + default_data_dir 단일결정"]
   messaging["messaging [lib]<br/>메시징 커널(보관함·장부·그룹·봉투·발송·busy 게이트)<br/>워크스페이스 crate 무의존 — 접합은 포트 trait 뿐(ADR-0110)"]
-  daemon["daemon [lib+exe]<br/>AgentManager 소유 + WS 서버 + MCP 제어 서버(S17)<br/>+ 메시징 호스트 어댑터/조립실(messaging_host)<br/>+ 단일인스턴스 + 포트파일 · bin: daemon / engram-send"]
+  net["net [lib]<br/>네트워크 행(WS 서버·Origin·토큰 핸드셰이크·연결 수명·단일 writer·keepalive<br/>팬아웃 레지스트리 · 프레임 포트 계약 · 단일인스턴스 · 포트파일)<br/>경계·격리 게이트의 정본 = 그 crate lib.rs 헤더(ADR-0129)"]
+  daemon["daemon [lib+exe]<br/>AgentManager 소유 + 소켓 수락 루프·네트워크 행 조립 + MCP 제어 서버(S17)<br/>+ 메시징 호스트 어댑터/조립실(messaging_host)<br/>· bin: daemon / engram-send"]
 
   core -->|"의존"| protocol
+  net -->|"의존"| protocol
+  net -->|"의존"| core
   daemon -->|"의존"| core
+  daemon -->|"의존"| protocol
+  daemon -->|"의존"| net
   discovery -->|"의존"| protocol
+  discovery -->|"의존"| core
   daemon -->|"의존"| discovery
   daemon -->|"의존"| messaging
 ```
 
-- **6 멤버**(protocol·core·discovery·messaging·daemon·src-tauri). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram-send` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
-- **messaging(6번째 멤버, 2026-07-28 · ADR-0110)** 은 위 그래프에서 **화살표가 나가지 않는 유일한 lib** 이다 — core 조차 의존하지 않는다(컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
+- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram-send` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
+- **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(core 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
+- **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 예외(auth 핸드셰이크가 protocol 에서 가져오는 이름)와 그것이 0-4 이월인 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3에서 이동 예정). 격리 게이트 3종과 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다.
 
 ### core 클래스 구조 (소유 관계)
 
