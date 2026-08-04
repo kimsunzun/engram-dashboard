@@ -137,15 +137,16 @@ async fn wire(
     //   분리). 테스트도 운영과 동일 배선 — worker 를 detached 로 띄운다(manager 가 sink 로 flush_tx 를 살려
     //   두므로 worker 는 manager 수명 동안 산다; 테스트 종료 시 프로세스와 함께 정리).
     let (flush_tx, flush_rx) =
-        tokio::sync::mpsc::unbounded_channel::<engram_dashboard_daemon::ws::FlushMsg>();
+        tokio::sync::mpsc::unbounded_channel::<engram_dashboard_daemon::messaging_host::FlushMsg>();
     // C2 리뷰 fix 10: 운영 run() 과 동일하게 Idle coalescer 를 sink(턴 종료 push 중계)와 flush 레인이 공유한다.
-    let idle_coalescer = Arc::new(engram_dashboard_daemon::ws::IdleCoalescer::new());
-    let sink: Arc<dyn StatusSink> =
-        Arc::new(engram_dashboard_daemon::ws::MessagingFlushSink::new_test(
+    let idle_coalescer = Arc::new(engram_dashboard_daemon::messaging_host::IdleCoalescer::new());
+    let sink: Arc<dyn StatusSink> = Arc::new(
+        engram_dashboard_daemon::messaging_host::MessagingFlushSink::new_test(
             Box::new(NoopSink),
             flush_tx.clone(),
             idle_coalescer.clone(),
-        ));
+        ),
+    );
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-send-prof-{tag}-{}", AgentId::new_v4())),
     ))));
@@ -165,10 +166,12 @@ async fn wire(
     ));
     slot.set(manager.clone());
     // C2: idle 게이트(운영 run() 미러) — manager 조립 후에 만든다(코어 턴 관측 표를 든다).
-    let idle_notifier = Arc::new(engram_dashboard_daemon::ws::ChannelIdleNotifier::new(
-        flush_tx,
-        idle_coalescer.clone(),
-    ));
+    let idle_notifier = Arc::new(
+        engram_dashboard_daemon::messaging_host::ChannelIdleNotifier::new(
+            flush_tx,
+            idle_coalescer.clone(),
+        ),
+    );
     let busy = Arc::new(
         engram_dashboard_daemon::messaging_host::busy_gate_for_manager(
             manager.clone(),
@@ -190,9 +193,9 @@ async fn wire(
     // finding 5 + fix 3: 2-레인 flush worker(운영과 동일 배선) — 수신은 main lane, 배달은 flush 레인.
     //   round-3 finding 1: 조립은 `spawn_flush_worker` 단일 지점(두 레인 핸들 묶음). 이 하네스는 핸들을
     //   detach 한다(테스트 종료 = 프로세스 종료로 회수 — 운영 종료 경로는 lib.rs 가 belt 로 내린다).
-    drop(engram_dashboard_daemon::ws::spawn_flush_worker(
+    drop(engram_dashboard_daemon::messaging_host::spawn_flush_worker(
         flush_rx,
-        engram_dashboard_daemon::ws::FlushWiring {
+        engram_dashboard_daemon::messaging_host::FlushWiring {
             messaging: messaging_slot.clone(),
             idle: idle_coalescer,
         },

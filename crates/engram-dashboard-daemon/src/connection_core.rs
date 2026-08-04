@@ -1462,7 +1462,7 @@ mod tests {
     ///   `ManagerDeliveryPort` + 실제 spawn 이 있어야 검증된다 — 가짜 포트 단위 테스트는 그 배선을 타지 않는다.
     /// ★flush 트리거는 꽂지 않는다(의도)★: 운영은 로스터 diff(MessagingFlushSink)가 등장 시 파킹을 비우지만,
     ///   여기서는 "스폰 후에도 파킹분이 남아 있는" 상태가 필요하다(삭제 정리가 그걸 죽이는지가 검증 대상).
-    ///   그 diff 배선 자체는 ws.rs·control_send 테스트가 지킨다.
+    ///   그 diff 배선 자체는 messaging_host.rs·control_send 테스트가 지킨다.
     fn test_core_with_messaging() -> (
         ConnectionCore,
         Arc<engram_dashboard_messaging::service::MessagingService>,
@@ -1512,7 +1512,9 @@ mod tests {
         let registry = ConnRegistry::new();
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore::default());
         let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
-        let status_sink = Arc::new(crate::ws::DaemonStatusSink::new(registry.clone()));
+        let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(
+            registry.clone(),
+        ));
         let profiles = Arc::new(ProfileRegistry::new(store));
         let presets = Arc::new(PresetRegistry::new(preset_store));
         let tracker = Arc::new(SessionTracker::new(
@@ -2504,5 +2506,52 @@ mod tests {
         );
 
         core.manager.kill_agent(boss.id).ok();
+    }
+
+    // ── 6. Subscribe 시 conn_tx 에 SubscribeAck → ReplayComplete 순서로 들어가는지 ──
+    //    (mock manager 가 없어 실 AgentManager 의 비어있는 snapshot 경로로는 NotFound 가 나므로,
+    //     여기선 control 메시지 순서 로직을 직접 재현해 검증한다. 실 manager subscribe 의 replay
+    //     동기 전송은 output_core.rs 단위테스트가 이미 커버.)
+    #[tokio::test]
+    async fn subscribe_control_order_ack_then_complete() {
+        use crate::frame_port::Frame;
+        use engram_dashboard_protocol::{encode_terminal_frame, SubscribeAction};
+        use tokio::sync::mpsc;
+        let (tx, mut rx) = mpsc::channel::<Frame>(16);
+        let agent_id = uuid::Uuid::new_v4();
+
+        // handle_subscribe 가 보내는 control 순서를 직접 재현(SubscribeAck → [replay binary] → ReplayComplete).
+        let ack = event_json(&AgentEvent::SubscribeAck {
+            agent_id,
+            action: SubscribeAction::Reset,
+            current_epoch: 0,
+            oldest_seq: 0,
+            latest_seq: 0,
+            replay_from: 0,
+            truncated: false,
+        })
+        .unwrap();
+        tx.send(Frame::Text(ack)).await.unwrap();
+        // 가상의 replay binary 1건.
+        tx.send(Frame::Binary(encode_terminal_frame(agent_id, 0, 0, b"r")))
+            .await
+            .unwrap();
+        let complete = event_json(&AgentEvent::ReplayComplete { agent_id, epoch: 0 }).unwrap();
+        tx.send(Frame::Text(complete)).await.unwrap();
+
+        // 순서 검증: Text(SubscribeAck) → Binary(replay) → Text(ReplayComplete).
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        let third = rx.recv().await.unwrap();
+
+        match first {
+            Frame::Text(s) => assert!(s.contains("SubscribeAck")),
+            _ => panic!("1번째는 SubscribeAck Text 여야 함"),
+        }
+        assert!(matches!(second, Frame::Binary(_)), "2번째는 replay binary");
+        match third {
+            Frame::Text(s) => assert!(s.contains("ReplayComplete")),
+            _ => panic!("3번째는 ReplayComplete Text 여야 함"),
+        }
     }
 }

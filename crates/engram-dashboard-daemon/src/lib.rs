@@ -25,6 +25,9 @@ pub mod instance;
 //   ControlRegistry 실물을 꽂는 유일한 자리다.
 pub mod messaging_host;
 pub mod portfile;
+// ADR-0129: 상태 → wire 팬아웃(`DaemonStatusSink`). 코어 어휘와 wire 어휘를 둘 다 아는 자리라
+//   네트워크 행(`ws`)이 아니라 에이전트 시스템 쪽이다 — 그 파일 헤더가 근거 정본.
+pub mod status_fanout;
 pub mod ws;
 
 use std::path::PathBuf;
@@ -42,7 +45,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use connection_core::MultiViewState;
-use ws::{ConnRegistry, DaemonStatusSink, KeepaliveConfig};
+use status_fanout::DaemonStatusSink;
+use ws::{ConnRegistry, KeepaliveConfig};
 
 const DAEMON_FILE: &str = "daemon.json";
 
@@ -210,8 +214,8 @@ fn build_manager(
     data_dir: &std::path::Path,
     registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
-    flush_tx: tokio::sync::mpsc::UnboundedSender<ws::FlushMsg>,
-    idle_coalescer: Arc<ws::IdleCoalescer>,
+    flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
+    idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> Arc<AgentManager> {
     // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
     // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
@@ -236,8 +240,8 @@ fn build_manager_with_store(
     preset_store: Arc<dyn PresetStore>,
     registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
-    flush_tx: tokio::sync::mpsc::UnboundedSender<ws::FlushMsg>,
-    idle_coalescer: Arc<ws::IdleCoalescer>,
+    flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
+    idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> Arc<AgentManager> {
     // ADR-0104(C1): status sink 를 MessagingFlushSink 로 감싼다 — 로스터 등장/epoch bump 를 데몬측에서
     //   diff 해 파킹 flush 를 건다(코어 seam 무변경). 감싼 DaemonStatusSink 가 프론트 broadcast 를 그대로
@@ -245,7 +249,7 @@ fn build_manager_with_store(
     //   분리). flush worker·MessagingService 는 이 manager 조립 후 부팅에서 배선된다(slot 늦은 주입).
     //   ADR-0113: 같은 wrapper 가 코어의 턴 종료 push(`StatusSink::turn_ended`)를 flush 도어벨로 중계한다 —
     //   그래서 flush 레인과 **같은 Idle coalescer** 를 공유한다(잉여 통지 유계화).
-    let status_sink = Arc::new(ws::MessagingFlushSink::new(
+    let status_sink = Arc::new(messaging_host::MessagingFlushSink::new(
         DaemonStatusSink::new(registry),
         flush_tx,
         idle_coalescer,
@@ -473,10 +477,10 @@ pub async fn run() -> Result<(), i32> {
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     // finding 5: flush 작업을 status-sink 콜백에서 분리하는 채널. sink(status 콜백)는 diff 대상만 push 하고
     //   즉시 반환하며, 아래 flush worker(sweep task 옆)가 소비해 실제 flush_for(blocking write)를 돈다.
-    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<ws::FlushMsg>();
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     // C2 리뷰 fix 10: status sink(턴 종료 push 중계)와 flush 레인이 공유하는 `IdleCoalescer` —
     //   같은 id 의 미처리 Idle 통지를 하나로 접어 채널 압력을 유계로 만든다.
-    let idle_coalescer = Arc::new(ws::IdleCoalescer::new());
+    let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
     // MCP 서버 핸들 — Some 이면 프로세스 수명 동안 살아 있어야 서버가 유지된다(drop=종료). fail-closed
     //   라 실패 시 아래 match 가 early-return 하므로, 여기 도달하면 항상 살아 있는 핸들을 든다.
@@ -539,9 +543,10 @@ pub async fn run() -> Result<(), i32> {
     // 6.4) C2: idle 게이트 조립(ADR-0104 결정 3 · ADR-0113) — 코어의 턴 관측 표를 읽어 우편 정책
     //    (positive-knowledge-only · 30분 상한)으로 답하는 게이트. 관측 자체는 코어가 출력 pump 에서
     //    직접 적재하므로 여기서 배선할 것이 없고, 턴 종료 push 는 status sink wrapper 가 도어벨로
-    //    중계한다(ws::MessagingFlushSink::turn_ended). 게이트는 아래 MessagingService 가 주입 전에 조회한다.
+    //    중계한다(messaging_host::MessagingFlushSink::turn_ended). 게이트는 아래 MessagingService 가
+    //    주입 전에 조회한다.
     //    도어벨 출구(ChannelIdleNotifier)는 그 wrapper 와 같은 Idle coalescer 를 공유한다(fix 10).
-    let idle_notifier = Arc::new(ws::ChannelIdleNotifier::new(
+    let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
     ));
@@ -619,9 +624,9 @@ pub async fn run() -> Result<(), i32> {
     //    ★round-3 finding 1: 두 레인 task 를 **여기서 함께 소유**한다★(`spawn_flush_worker`) — 옛 구현은
     //    레인을 worker future 안에서 spawn 해, 종료 시 main abort 가 레인 핸들을 detach 시키고 5s belt 가
     //    blocking 없는 쪽만 감시했다(진짜 blocking inject 는 레인에 있다 → 런타임 drop 이 hang 가능).
-    let flush_worker = ws::spawn_flush_worker(
+    let flush_worker = messaging_host::spawn_flush_worker(
         flush_rx,
-        ws::FlushWiring {
+        messaging_host::FlushWiring {
             messaging: messaging_slot.clone(),
             idle: idle_coalescer.clone(),
         },
@@ -703,7 +708,7 @@ pub async fn run() -> Result<(), i32> {
     //   먼저** 한다. 왜: flush worker 는 flush_for 안에서 inject = transport.send_input 을 부르는데,
     //   그건 자식 stdin 으로의 **동기 blocking write_all+flush**다(pty.rs:302-308 / stdio.rs:322-332 —
     //   논블록 채널 send 가 아니라 실제 파이프 write). worker 는 이 blocking 을 spawn_blocking 으로 던지지만
-    //   (round-4 finding 1 — executor 굶주림 격리, ws.rs::run_flush_worker), spawn_blocking 클로저 자체는
+    //   (round-4 finding 1 — executor 굶주림 격리, messaging_host::run_flush_worker), spawn_blocking 클로저 자체는
     //   abort 불가다 — worker 의 .await 를 abort 해도 blocking pool 스레드의 write_all 은 자식이 stdin 을
     //   안 비우고 파이프 버퍼가 가득 차면 계속 걸려 있다(tokio abort 는 .await 지점에서만 취소되지, blocking
     //   syscall 중인 pool 스레드는 못 끊는다). 그래서 abort 를 flush 보다 먼저 걸고 await 하면 데몬 종료가
@@ -758,7 +763,7 @@ pub struct TestServerHandle {
     shutdown_tx: watch::Sender<bool>,
     /// finding 5: flush worker 2-레인 핸들 — shutdown 시 둘 다 abort + belt(운영 run() 과 동일 패턴,
     ///   round-3 finding 1: 배달 레인을 detach 하지 않는다).
-    flush_worker: ws::FlushWorkerHandles,
+    flush_worker: messaging_host::FlushWorkerHandles,
 }
 
 impl TestServerHandle {
@@ -838,9 +843,9 @@ async fn start_test_server_inner(
     //   wrapper 가 채널을 요구하므로 배선하고 manager 조립 후 서비스를 채운다(부재여도 worker 가 flush 스킵).
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     // finding 5: flush 채널 + worker(운영 run() 과 동일 패턴). status 콜백은 대상만 push, worker 가 flush.
-    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<ws::FlushMsg>();
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     // C2 리뷰 fix 10: 운영과 동일하게 Idle coalescer 를 sink/flush 레인이 공유한다.
-    let idle_coalescer = Arc::new(ws::IdleCoalescer::new());
+    let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
     let manager = build_manager_with_store(
         store,
         preset_store,
@@ -851,7 +856,7 @@ async fn start_test_server_inner(
     );
     // C2: idle 게이트(운영 run() 과 동일 배선). WS 테스트는 메시징을 검증하지 않지만, 배선을 운영과
     //   동일하게 유지해 "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
-    let idle_notifier = Arc::new(ws::ChannelIdleNotifier::new(
+    let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
     ));
@@ -869,9 +874,9 @@ async fn start_test_server_inner(
         .with_flush_trigger(idle_notifier),
     ));
     // round-3 finding 1: 운영 run() 과 동일하게 두 레인을 핸들로 소유한다(TestServerHandle::shutdown 이 내림).
-    let flush_worker = ws::spawn_flush_worker(
+    let flush_worker = messaging_host::spawn_flush_worker(
         flush_rx,
-        ws::FlushWiring {
+        messaging_host::FlushWiring {
             messaging: messaging_slot.clone(),
             idle: idle_coalescer,
         },

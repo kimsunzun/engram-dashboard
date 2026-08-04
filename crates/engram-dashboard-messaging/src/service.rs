@@ -494,7 +494,8 @@ pub struct AddressingSources {
 }
 
 /// ★flush 도어벨 seam(C2 리뷰 fix 11)★ — "이 에이전트의 파킹 큐를 지금 flush 해라" 를 **다른 스레드에
-///   맡기는** 출구. 운영은 flush 채널로 논블록 enqueue 한다(ws.rs `ChannelIdleNotifier`).
+///   맡기는** 출구. 운영은 flush 채널로 논블록 enqueue 한다(호스트측 `messaging_host.rs`
+///   `ChannelIdleNotifier` — 커널은 그 구현을 모른다).
 ///
 /// ★왜 필요한가 — 7차에 역할이 좁아졌다(ADR-0125)★: inject 는 자식 stdin **blocking write** 라, 발신 경로
 ///   (MCP/HTTP 요청을 처리하는 tokio 워커 스레드)에서 남의 큐까지 배치로 밀면 막힌 파이프 하나가 데몬 요청
@@ -1533,10 +1534,11 @@ impl MessagingService {
     ///   id → `flush_for_agent` 조기 반환) 산 수신자 앞 메일이 TTL 까지 묶인다 — 종료성은 지켜지는데 유용성이
     ///   깨지는 실패 모드다. 그래서 표식은 중복 제거된 **집합**이고 6단계가 전부 누른다(`deferred_flush` 주석).
     ///   ★운영 배선에선 이 갈래가 **도달하지 않는다**(방어선 · 증명)★: 도어벨이 배선된 조립은 flush 를 전부
-    ///   **단일 직렬 레인**(ws.rs `run_flush_lane` — FlushMsg 를 하나씩 꺼내 `spawn_blocking` 완료를 await)에서
-    ///   실행하므로 두 flush 가 동시에 존재할 수 없다. 겹침이 실재하는 건 **도어벨 미배선 폴백**(실험 bin·
-    ///   단위 테스트 — `request_flush` 가 호출 스레드에서 인라인 실행)과 앞으로 생길 다른 호출자다. 레인
-    ///   직렬성은 ws.rs 쪽 성질이라 여기서 가정하지 않고, 이 파일 안에서 닫는다.
+    ///   **단일 직렬 레인**(호스트측 `messaging_host.rs` `run_flush_lane` — FlushMsg 를 하나씩 꺼내
+    ///   `spawn_blocking` 완료를 await)에서 실행하므로 두 flush 가 동시에 존재할 수 없다. 겹침이 실재하는 건
+    ///   **도어벨 미배선 폴백**(실험 bin· 단위 테스트 — `request_flush` 가 호출 스레드에서 인라인 실행)과
+    ///   앞으로 생길 다른 호출자다. 레인 직렬성은 **호스트 쪽 성질**이라(커널은 그 배선을 모른다) 여기서
+    ///   가정하지 않고, 이 파일 안에서 닫는다.
     ///
     /// ★왜 to_id 를 인자로 받나(그리고 왜 execution 시점에 재검증하나 — finding 2)★: flush observer/도어벨
     ///   이 로스터 스냅샷에서 (이름→현재 id) 를 알고 부르지만, 그 스냅샷은 **enqueue 시점** 것이라

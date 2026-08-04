@@ -101,8 +101,9 @@ impl MessagingSlot {
     pub fn set(&self, svc: Arc<engram_dashboard_messaging::service::MessagingService>) {
         let _ = self.inner.set(svc);
     }
-    /// 주입된 서비스 참조(미설정이면 None — 정상 흐름엔 없음). ws.rs 의 MessagingFlushSink 도 부르므로
-    /// crate 내부에 노출한다(mcp_server 밖에서 접근).
+    /// 주입된 서비스 참조(미설정이면 None — 정상 흐름엔 없음). messaging_host.rs 의 flush 레인
+    /// (`run_flush_lane`)도 부르므로 crate 내부에 노출한다(mcp_server 밖에서 접근 — ADR-0129 이사 전엔
+    /// 그 호출자가 ws.rs 에 있었다).
     pub(crate) fn get(
         &self,
     ) -> Option<&Arc<engram_dashboard_messaging::service::MessagingService>> {
