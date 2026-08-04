@@ -1,6 +1,5 @@
-// ADR-0055: fireAndForget 단위테스트(FIX-3/FIX-4) — 사람 클릭·키바인딩용 안전 실행 경로.
-//   핵심: sync throw·async reject(thenable 포함)를 모두 삼켜 warn 만 남긴다(리스너 안 죽음).
-//   ★run() 자체는 손대지 않는다(await 호출부 무손실)★ — 그 계약은 registry.test.ts 가 지킨다.
+// ADR-0055 (FIX-3/FIX-4)
+// ★run() 자체는 손대지 않는다(await 호출부 무손실)★ — 그 계약은 registry.test.ts 가 지킨다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -48,7 +47,6 @@ describe('fireAndForget (ADR-0055 fire-and-forget 안전망)', () => {
 
   it('thenable(비 네이티브 Promise) reject 도 삼킨다(FIX-3: instanceof 로 안 좁힘)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // Promise.resolve().catch 로 정규화되므로 thenable 도 커버된다.
     const thenable = { then: (_res: unknown, rej: (e: unknown) => void) => rej(new Error('thenable-nope')) }
     register({ id: 'thenable.reject', title: 't', run: () => thenable })
     fireAndForget('thenable.reject')

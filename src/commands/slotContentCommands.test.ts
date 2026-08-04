@@ -1,12 +1,4 @@
-// ADR-0067 / ADR-0064/0065: slotContentCommands 단위테스트 — slot.assignRunningAgent 등록·라우팅 +
-//   슬롯 메뉴 기여(가시성 hideOn) + "생성" 제거 회귀. headless(DOM/Tauri 의존은 mock).
-//
-// ★검증 불변식(ADR-0067)★:
-//   1. slot.assignRunningAgent 가 registry 에 등록된다.
-//   2. run(ctx) 이 우클릭한 slot 좌표(viewId/slotId)로 monitoringPickerStore.open 을 부른다(배치 상태 없음).
-//   3. viewId/slotId 없으면 throw(requireCoords fail-loud).
-//   4. "에이전트 모니터링" 이 empty·agent 슬롯 메뉴엔 뜨고, 소스 슬롯(agent_list/preset_palette)엔 hideOn 으로 빠진다.
-//   5. empty "새 콘텐츠" 서브메뉴에서 "생성"(slot.createAgentHere)이 제거됐다(트리·팔레트만 남음).
+// ADR-0067 / ADR-0064/0065
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -47,7 +39,6 @@ describe('slot.assignRunningAgent 등록·라우팅 (ADR-0067)', () => {
 })
 
 describe('슬롯 메뉴 기여 — 가시성 hideOn (ADR-0067)', () => {
-  // buildSlotMenu 는 flat + 컨테이너 자식 id 를 모두 훑는 헬퍼(가시성 판정용).
   const allIds = (contentType: Parameters<typeof buildSlotMenu>[0]): string[] => {
     const flat: string[] = []
     for (const item of buildSlotMenu(contentType)) {

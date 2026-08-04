@@ -1,10 +1,7 @@
-// ADR-0061 / ADR-0055: 프리셋 command 어댑터 — register 로 agentClient 프리셋 메서드(ProtocolClient
-//   seam, ADR-0011)에 라우팅만 한다(새 상태 경로 0 — store 반영은 PresetListUpdated broadcast 가 담당).
-//   import 부수효과로 등록되므로 단일 매니페스트(contributions.ts)에서 side-effect import 한다.
-//   검증: window.__engramCmd.run('preset.create',{cwd:'C:/work'}) → PresetListUpdated → store.presets.
+// ADR-0061 / ADR-0055: agentClient 프리셋 메서드(ProtocolClient seam, ADR-0011)에 라우팅만 한다(새 상태
+//   경로 0 — store 반영은 PresetListUpdated broadcast 가 담당).
 //
-// ★ADR-0064 슬롯 메뉴 기여 co-location★: 이 모듈이 preset.add command(폴더 다이얼로그 → createPreset) 를
-//   등록하고 preset_palette 슬롯 메뉴에 기여한다 — 콘텐츠(프리셋) 지식이 한 모듈에 응집(공통은 '*'이 소유).
+// ★ADR-0064 슬롯 메뉴 기여 co-location★: 콘텐츠(프리셋) 지식이 한 모듈에 응집(공통은 '*'이 소유).
 
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -17,7 +14,7 @@ register({
   id: 'preset.list',
   title: t('preset.list'),
   category: 'preset',
-  // 읽기 전용 조회 — Preset[] 를 그대로 반환(cdp/호출부가 await). store 미러 교체는 안 한다(조회 표면).
+  // store 미러 교체는 안 한다(조회 표면).
   run: () => agentClient.listPresets(),
 })
 
@@ -25,8 +22,7 @@ register({
   id: 'preset.create',
   title: t('preset.create'),
   category: 'preset',
-  // args.cwd 만 destructure(단일 객체 가방, ADR-0055). 이름은 안 넘긴다 — 백엔드가 {id,cwd}만 저장하고
-  //   표시명은 프론트가 cwd basename 으로 파생한다(ADR-0061). 반환(Promise<void>)을 그대로 흘려보낸다.
+  // 이름은 안 넘긴다 — 백엔드가 {id,cwd}만 저장하고 표시명은 프론트가 cwd basename 으로 파생한다(ADR-0061).
   run: (args) => {
     const cwd = args?.cwd as string | undefined
     if (!cwd || !cwd.trim()) {
@@ -40,7 +36,7 @@ register({
   id: 'preset.delete',
   title: t('preset.delete'),
   category: 'preset',
-  // args.id 만 destructure. 없는 id 는 백엔드 no-op(Ack) — 프론트에서 존재 검증 안 함(ADR-0061).
+  // 없는 id 는 백엔드 no-op(Ack) — 프론트에서 존재 검증 안 함(ADR-0061).
   run: (args) => {
     const id = args?.id as string | undefined
     if (!id || !id.trim()) {
@@ -54,7 +50,7 @@ register({
   id: 'preset.rename',
   title: t('preset.rename'),
   category: 'preset',
-  // ADR-0061 리치화(§5 LLM 제어): 프리셋 표시명 override set/clear. args={ id, name }.
+  // ADR-0061 리치화(§5 LLM 제어): 프리셋 표시명 override set/clear.
   //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
   //   반영은 PresetListUpdated broadcast(낙관 갱신 X). 없는 id 는 백엔드 no-op(Ack). 이것이 rename 을
   //   프론트 전용이 아니라 백엔드 저장으로 두는 이유 — LLM 이 같은 표면(command)으로 표시명을 바꿀 수 있다.
@@ -64,7 +60,6 @@ register({
       throw new Error(`[preset.rename] id 가 비어 있음: ${String(id)}`)
     }
     const raw = args?.name
-    // trim 후 빈 문자열이거나 null/undefined → override 해제(null). 아니면 그 값으로 set.
     const name = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
     return agentClient.renamePreset(id.trim(), name)
   },
@@ -75,9 +70,8 @@ register({
   title: t('preset.add'),
   category: 'preset',
   // ★네이티브 폴더 다이얼로그 → createPreset★(ADR-0061 / ADR-0064): 옛 PresetPalette 의 pane "추가" 메뉴
-  //   로직을 command 로 승격한다. OS 폴더 선택 창(open({directory:true}))에서 고른 cwd(non-null)를 그대로
-  //   agentClient.createPreset 로 넘긴다(store 반영은 PresetListUpdated broadcast — 낙관 갱신 X). 취소(null)면
-  //   no-op. 다이얼로그는 네이티브 창(webview 밖)이라 cdp 검증 불가 — open→createPreset 배선만 단위테스트.
+  //   로직을 command 로 승격한다. store 반영은 PresetListUpdated broadcast(낙관 갱신 X). 다이얼로그는
+  //   네이티브 창(webview 밖)이라 cdp 검증 불가 — open→createPreset 배선만 단위테스트.
   run: async () => {
     const picked = await open({ directory: true, multiple: false, title: t('dialog.pickPresetPath') })
     const cwd = typeof picked === 'string' ? picked : null
@@ -86,5 +80,5 @@ register({
   },
 })
 
-// ADR-0064: preset_palette 슬롯 메뉴에 preset.add 기여(group='content' — 공통 slot-ops 위에 렌더).
+// ADR-0064: group='content' — 공통 slot-ops 위에 렌더.
 registerSlotMenu('preset_palette', [{ commandId: 'preset.add', group: 'content', order: 10 }])

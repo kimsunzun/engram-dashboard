@@ -1,11 +1,3 @@
-// ADR-0064/0055: 공통 슬롯 ops(slotCommands) + 코어 콘텐츠(slotContentCommands) command 라우팅 테스트.
-//
-// ★검증 불변식★:
-//   1. slot.split.h/v · slot.popout · slot.empty · slot.close 가 등록되고 viewStore 액션으로 (viewId,slotId)
-//      좌표를 흘린다(§5 단일 제어 표면, 백엔드 권위).
-//   2. viewId/slotId 누락 → throw(좌표 없이 side-effecting 호출 금지).
-//   3. '*' 기여에 공통 5항목이 slot-ops 그룹으로 붙는다.
-//   4. slot.fill.* / slot.createAgentHere(empty) · agent.kill(agent) 콘텐츠 기여 + 라우팅.
 //
 // 전략: viewStore.getState() 의 액션들을 hoisted spy 로 주입(command 는 getState().split(...) 로 부른다).
 //   agentClient·plugin-dialog 도 stub. registry/slotMenu 는 실제 모듈(등록 부수효과를 관측).
@@ -40,8 +32,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...a: unknown[]) => dialogMock.open(...(a as [])),
 }))
 
-import './slotCommands' // side-effect register + '*' 기여
-import './slotContentCommands' // side-effect register + empty/agent 기여
+import './slotCommands' // side-effect register
+import './slotContentCommands' // side-effect register
 import { run } from './registry'
 import { buildSlotMenu } from './slotMenu'
 
@@ -129,8 +121,6 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
 
   it('empty 콘텐츠 메뉴 최상위 = 에이전트 모니터링 → 새 콘텐츠(컨테이너) → 가로/세로 분할 → 닫기 (ADR-0067/0065 트림)', () => {
     const items = buildSlotMenu('empty')
-    // ADR-0067: content 그룹 맨 위 = 에이전트 모니터링(order 5). ADR-0065: 채움 2항목은 "새 콘텐츠"
-    //   컨테이너(order 10)로 접히고, popout/empty 는 hideOn 으로 트림된다.
     expect(items.map(i => i.id)).toEqual([
       'slot.assignRunningAgent',
       'container:새 콘텐츠',
@@ -138,13 +128,12 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
       'slot.split.v',
       'slot.close',
     ])
-    // ADR-0067: 컨테이너 자식 = 트리/팔레트만("생성" 제거 — 스폰은 트리 소관).
+    // ADR-0067: "생성" 은 뺀다 — 스폰은 트리 소관.
     expect(items[1].children?.map(c => c.id)).toEqual([
       'slot.fill.agentList',
       'slot.fill.presetPalette',
     ])
     expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
-    // hideOn 트림 확인: 빈 슬롯엔 비우기/팝업 없음.
     expect(items.map(i => i.id)).not.toContain('slot.empty')
     expect(items.map(i => i.id)).not.toContain('slot.popout')
   })
@@ -157,7 +146,6 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
   })
   it('agent 콘텐츠 메뉴 = 에이전트 모니터링(order 5) → 종료(order 10) 순 (ADR-0067)', () => {
     const items = buildSlotMenu('agent')
-    // content 그룹 안에서 order 로 정렬: assignRunningAgent(5) 먼저, agent.kill(10) 나중.
     expect(items[0].id).toBe('slot.assignRunningAgent')
     expect(items[1].id).toBe('agent.kill')
   })

@@ -1,14 +1,3 @@
-// ADR-0064: slotMenu 기여 API + 결정적 빌더 단위테스트(headless — DOM/Tauri 의존 0).
-//
-// ★검증 불변식★:
-//   1. buildSlotMenu = ('*' 공통 ∪ contentType 전용) 병합, group(content→slot-ops)·order 로 결정적 정렬
-//      (등록 순서 무관).
-//   2. group 경계에 separatorBefore=true(콘텐츠→공통 구분선).
-//   3. 미등록 commandId 기여 → fail-loud but crash-free(console.error + skip, throw 안 함 — FIX-1).
-//   4. registerSlotMenu 중복 (target, commandId) → warn 후 교체(마지막이 이김, HMR-safe).
-//   5. resolve 는 registry title/run 을 그대로 싣는다.
-//   6. commandId dedupe('*' ∩ contentType) — 최종 순서 첫 등장만(FIX-2).
-//   7. validateSlotMenuContributions — 미등록 기여마다 console.error(부팅 전수 검증, FIX-1).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -28,7 +17,6 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-/** 테스트용 no-op command 등록 헬퍼. */
 function reg(id: string, title = id): void {
   register({ id, title, run: vi.fn() })
 }
@@ -40,12 +28,11 @@ describe('buildSlotMenu — 병합 + 결정적 정렬', () => {
     registerSlotMenu('*', [{ commandId: 'common.a', group: 'slot-ops', order: 10 }])
     registerSlotMenu('empty', [{ commandId: 'content.x', group: 'content', order: 10 }])
     const items = buildSlotMenu('empty')
-    expect(items.map(i => i.id)).toEqual(['content.x', 'common.a']) // content 먼저, slot-ops 나중
+    expect(items.map(i => i.id)).toEqual(['content.x', 'common.a'])
   })
 
   it('등록 순서와 무관하게 (group, order) 로만 정렬된다', () => {
     reg('c1'); reg('c2'); reg('s1'); reg('s2')
-    // 일부러 뒤섞어 등록.
     registerSlotMenu('*', [
       { commandId: 's2', group: 'slot-ops', order: 20 },
       { commandId: 's1', group: 'slot-ops', order: 10 },
@@ -74,7 +61,6 @@ describe('buildSlotMenu — 병합 + 결정적 정렬', () => {
       { commandId: 's1', group: 'slot-ops', order: 10 },
       { commandId: 's2', group: 'slot-ops', order: 20 },
     ])
-    // preset_palette 전용 기여가 없어도 '*' 만으로 조립된다(첫 항목 separator 없음).
     const items = buildSlotMenu('preset_palette')
     expect(items.map(i => i.id)).toEqual(['s1', 's2'])
     expect(items[0].separatorBefore).toBe(false)
@@ -100,8 +86,8 @@ describe('fail-loud but crash-free + HMR-safe (FIX-1)', () => {
       { commandId: 'ok', group: 'slot-ops', order: 20 },
     ])
     let items!: ReturnType<typeof buildSlotMenu>
-    expect(() => { items = buildSlotMenu('empty') }).not.toThrow() // 크래시 금지
-    expect(items.map(i => i.id)).toEqual(['ok']) // 미등록은 빠지고 유효 항목만
+    expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
+    expect(items.map(i => i.id)).toEqual(['ok'])
     expect(error).toHaveBeenCalledWith(
       expect.stringMatching(/unregistered commandId "not\.registered" \(target=empty\) — skipped/),
     )
@@ -111,31 +97,29 @@ describe('fail-loud but crash-free + HMR-safe (FIX-1)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     reg('x')
     registerSlotMenu('*', [{ commandId: 'x', group: 'slot-ops', order: 10 }])
-    registerSlotMenu('*', [{ commandId: 'x', group: 'slot-ops', order: 99 }]) // 교체
+    registerSlotMenu('*', [{ commandId: 'x', group: 'slot-ops', order: 99 }])
     expect(warn).toHaveBeenCalled()
     const items = buildSlotMenu('empty')
-    expect(items).toHaveLength(1) // 중복이 아니라 교체 — 1개만
+    expect(items).toHaveLength(1)
   })
 })
 
 describe('commandId dedupe — \'*\' ∩ contentType (FIX-2)', () => {
   it('공통(\'*\')과 콘텐츠 전용이 같은 commandId 를 기여해도 렌더 목록은 1회만(중복 key 방지)', () => {
     reg('shared'); reg('s1')
-    // '*'(slot-ops)와 콘텐츠(content)가 같은 commandId 'shared' 를 기여.
     registerSlotMenu('*', [
       { commandId: 'shared', group: 'slot-ops', order: 10 },
       { commandId: 's1', group: 'slot-ops', order: 20 },
     ])
     registerSlotMenu('empty', [{ commandId: 'shared', group: 'content', order: 10 }])
     const ids = buildSlotMenu('empty').map(i => i.id)
-    expect(ids).toEqual(['shared', 's1']) // content 쪽(먼저 정렬)이 이겨 1회만, s1 은 유지
-    expect(new Set(ids).size).toBe(ids.length) // 고유 commandId 보장
+    expect(ids).toEqual(['shared', 's1'])
+    expect(new Set(ids).size).toBe(ids.length)
   })
 
   it('같은 target 안에서 같은 group·order 로 중복 등장해도 첫 등장만(방어적 dedupe)', () => {
     reg('dup')
     // registerSlotMenu 는 같은 (target, commandId) 를 교체하므로, 서로 다른 배열 호출로 중복을 만든다.
-    // (여기선 '*' 와 콘텐츠에 각각 등록해 dedupe 자체를 확인 — 위 케이스의 최소형.)
     registerSlotMenu('*', [{ commandId: 'dup', group: 'slot-ops', order: 10 }])
     registerSlotMenu('empty', [{ commandId: 'dup', group: 'slot-ops', order: 10 }])
     expect(buildSlotMenu('empty').map(i => i.id)).toEqual(['dup'])
@@ -150,9 +134,7 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
       { commandId: 's.popout', group: 'slot-ops', order: 30, hideOn: ['empty'] },
       { commandId: 's.empty', group: 'slot-ops', order: 40, hideOn: ['empty'] },
     ])
-    // empty: hideOn 항목 제외.
     expect(buildSlotMenu('empty').map(i => i.id)).toEqual(['s.split'])
-    // 비-empty(agent): 전부 남는다(subtraction 전용 — '*' 보편성 유지).
     expect(buildSlotMenu('agent').map(i => i.id)).toEqual(['s.split', 's.popout', 's.empty'])
   })
 
@@ -187,9 +169,7 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
         ],
       },
     ])
-    // empty: hideOn:['empty'] 자식은 서브메뉴에서 빠진다(가시성 계약 = 자식 포함).
     expect(buildSlotMenu('empty')[0].children!.map(c => c.id)).toEqual(['fill.keep'])
-    // agent(비-empty): 자식 그대로 유지.
     expect(buildSlotMenu('agent')[0].children!.map(c => c.id)).toEqual(['fill.keep', 'fill.hidden'])
   })
 
@@ -201,7 +181,6 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
         title: '새 콘텐츠',
         group: 'content',
         order: 10,
-        // 유일한 자식이 hideOn:['empty'] → empty 에서 자식 0 → FIX-1 로 컨테이너 omit.
         children: [{ commandId: 'fill.only', group: 'content', order: 10, hideOn: ['empty'] }],
       },
     ])
@@ -250,14 +229,12 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
         ],
       },
     ])
-    // 자식은 group/order 로 재정렬하지 않고 선언 순서(c, a, b) 그대로 — 기여가 이미 의도 순서로 나열한다.
     expect(buildSlotMenu('empty')[0].children!.map(c => c.id)).toEqual(['fill.c', 'fill.a', 'fill.b'])
   })
 
   it('FIX-1: 자식이 전부 skip 되면 컨테이너를 leaf 로 emit 하지 않고 통째로 omit 한다', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     reg('s1')
-    // 컨테이너 자식이 전부 미등록 commandId → 자식이 모두 skip → 빈 컨테이너.
     registerSlotMenu('empty', [
       {
         title: '새 콘텐츠',
@@ -272,7 +249,6 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
     registerSlotMenu('*', [{ commandId: 's1', group: 'slot-ops', order: 10 }])
     let items!: ReturnType<typeof buildSlotMenu>
     expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
-    // 컨테이너는 통째로 빠지고(container:새 콘텐츠 없음, children:[] leaf 로도 안 남음) 나머지만.
     expect(items.map(i => i.id)).toEqual(['s1'])
     expect(items.some(i => i.id === 'container:새 콘텐츠')).toBe(false)
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/자식이 모두 skip 되어 빈 컨테이너/))
@@ -287,8 +263,8 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
     const items = buildSlotMenu('empty')
     expect(items.map(i => i.id)).toEqual(['container:새 콘텐츠', 's1'])
     expect(items[0].children).toBeDefined()
-    expect(items[1].children).toBeUndefined() // leaf 는 children 없음
-    expect(items[1].separatorBefore).toBe(true) // content → slot-ops 경계
+    expect(items[1].children).toBeUndefined()
+    expect(items[1].separatorBefore).toBe(true)
   })
 })
 
@@ -303,14 +279,13 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
         order: 10,
         children: [
           { commandId: 'ok.child', group: 'content', order: 10 },
-          // 2단 중첩 — 금지. 자식이 또 children 을 가진다.
           { title: '더깊이', group: 'content', order: 20, children: [{ commandId: 'deep', group: 'content', order: 10 }] },
         ],
       },
     ])
     let items!: ReturnType<typeof buildSlotMenu>
-    expect(() => { items = buildSlotMenu('empty') }).not.toThrow() // crash-free
-    expect(items[0].children!.map(c => c.id)).toEqual(['ok.child']) // 중첩 자식만 skip, 정상 자식 유지
+    expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
+    expect(items[0].children!.map(c => c.id)).toEqual(['ok.child'])
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/2단\+ 중첩 금지/))
   })
 
@@ -322,7 +297,7 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
     ])
     let items!: ReturnType<typeof buildSlotMenu>
     expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
-    expect(items).toHaveLength(0) // 형태 위반 → skip
+    expect(items).toHaveLength(0)
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/commandId 와 children 을 동시에/))
   })
 
@@ -381,7 +356,6 @@ describe('validateSlotMenuContributions — 부팅 전수 검증 (FIX-1)', () =>
   it('FIX-3: 형태 위반(both-cmd-and-children)을 부팅 전수 검증이 우클릭 없이 발각한다', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     reg('both'); reg('kid')
-    // commandId 는 등록돼 있지만 children 도 동시에 가진 형태 위반 — 옛 sweep 은 못 잡았다.
     registerSlotMenu('empty', [
       { commandId: 'both', title: '둘다', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
     ])
@@ -399,9 +373,7 @@ describe('validateSlotMenuContributions — 부팅 전수 검증 (FIX-1)', () =>
         order: 10,
         children: [
           { commandId: 'ok.child', group: 'content', order: 10 },
-          // 2단 중첩(자식이 또 children) — 형태 위반, 부팅에 발각돼야 한다.
           { title: '더깊이', group: 'content', order: 20, children: [{ commandId: 'x', group: 'content', order: 10 }] },
-          // 미등록 commandId 자식 — commandId 존재 검증에 발각.
           { commandId: 'typo.child', group: 'content', order: 30 },
         ],
       },

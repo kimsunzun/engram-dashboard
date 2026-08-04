@@ -1,9 +1,6 @@
-// ADR-0064: 슬롯 컨텍스트 메뉴 = 단일 기여 API + 결정적 빌더.
-//
-// ★역할★: 슬롯 우클릭 메뉴 항목을 "command id 참조"로만 조립한다(메뉴에서 직접 store 호출 금지 —
+// ADR-0064: 슬롯 우클릭 메뉴 항목을 "command id 참조"로만 조립한다(메뉴에서 직접 store 호출 금지 —
 //   ADR-0064 불변식). 공통 슬롯 ops 는 target='*' 로, 콘텐츠 전용 항목은 target=<SlotContentType> 로
-//   같은 API(registerSlotMenu)를 통해 기여된다(VS Code contributes.menus 결). buildSlotMenu 가
-//   (contentType 기여 ∪ '*' 기여)를 group·order 로 결정적 정렬하고 registry 에서 title/run 을 resolve 한다.
+//   같은 API(registerSlotMenu)를 통해 기여된다(VS Code contributes.menus 결).
 //
 // ★DOM-free 유지★: registry.ts 와 동일하게 순수 Map/함수라 headless(vitest)로 단위테스트된다. DOM/Tauri
 //   의존은 command handler(*Commands.ts / slotCommands.ts)로 밀어낸다.
@@ -11,7 +8,7 @@
 import type { SlotContent } from '../api/layoutTypes'
 import { getCommand } from './registry'
 
-/** 기여 대상 = 특정 SlotContent 타입, 또는 '*'(모든 슬롯 = 공통). */
+/** '*' = 모든 슬롯(공통). */
 export type SlotMenuTarget = SlotContent['type'] | '*'
 
 /**
@@ -66,10 +63,8 @@ function groupRank(group: string): number {
   return GROUP_ORDER[group] ?? Number.POSITIVE_INFINITY
 }
 
-// target → 기여 항목 배열. registerSlotMenu 가 import 부수효과로 채운다.
 const contributions = new Map<SlotMenuTarget, SlotMenuItem[]>()
 
-/** 기여의 dedupe/교체 키 — 실행 항목은 commandId, 컨테이너(children 有)는 title 로 식별한다(commandId 없음). */
 function itemKey(item: SlotMenuItem): string {
   return item.commandId ?? `container:${item.title ?? ''}`
 }
@@ -85,7 +80,6 @@ export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]):
     const key = itemKey(item)
     const idx = list.findIndex(existing => itemKey(existing) === key)
     if (idx >= 0) {
-      // HMR 재평가나 실수 중복 — 마지막이 이기되 조용히 넘어가지 않는다.
       console.warn(`[slotMenu] 중복 기여 재등록 — 교체: target='${target}' key='${key}'`)
       list[idx] = item
     } else {
@@ -95,21 +89,20 @@ export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]):
   contributions.set(target, list)
 }
 
-/** (group, order) 결정적 비교자 — 등록 순서 무관. 동률 타이브레이크는 실행 항목 commandId / 컨테이너 title. */
+/** 등록 순서 무관 — (group, order) 로만 결정적. */
 function compareItems(a: SlotMenuItem, b: SlotMenuItem): number {
   const gr = groupRank(a.group) - groupRank(b.group)
   if (gr !== 0) return gr
   // 같은 랭크의 서로 다른 group 명(둘 다 미등록 등) — 이름순으로 안정화.
   if (a.group !== b.group) return a.group < b.group ? -1 : 1
   if (a.order !== b.order) return a.order - b.order
-  // 최종 타이브레이크 — key(commandId 또는 container:title) 로 결정적.
   const ka = itemKey(a)
   const kb = itemKey(b)
   return ka < kb ? -1 : ka > kb ? 1 : 0
 }
 
 /**
- * 실행 항목(commandId) 하나를 resolve 한다. 성공 시 ResolvedSlotMenuItem, 실패(미등록 등) 시 null(skip).
+ * 실패(미등록 등) 시 null(skip).
  * ★fail-loud but crash-free(FIX-1)★: 렌더 시점(우클릭) 호출이라 throw 하면 error boundary 부재 시 앱 blank.
  *   시끄럽게 console.error 하고 그 항목만 null 로 skip 한다(부팅 전수 검증은 validateSlotMenuContributions).
  */
@@ -174,41 +167,32 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
  * separatorBefore: 그룹이 바뀌는 첫 항목(맨 앞 제외)에 true → 렌더러가 그 위에 구분선을 그린다.
  */
 export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMenuItem[] {
-  // '*'(공통) + contentType(전용) 기여를 합친다. contentType==='*' 는 타입상 불가(SlotContent['type']).
+  // contentType==='*' 는 타입상 불가(SlotContent['type']).
   const merged: SlotMenuItem[] = [...(contributions.get('*') ?? []), ...(contributions.get(contentType) ?? [])]
 
-  // ADR-0065: hideOn 제외(subtraction) — 이 콘텐츠 타입에서 숨길 항목을 먼저 뺀다.
   const visible = merged.filter(item => !(item.hideOn?.includes(contentType) ?? false))
 
   const sorted = visible.slice().sort(compareItems)
 
   const resolved: ResolvedSlotMenuItem[] = []
-  const seen = new Set<string>() // FIX-2: key dedupe — 첫 등장만.
+  const seen = new Set<string>()
   let prevGroup: string | null = null
   for (const item of sorted) {
-    // FIX-2: '*' 와 콘텐츠가 같은 key 를 기여하면 정렬 후 첫 등장만 남긴다(중복 key 방지).
-    //   prevGroup 은 skip 항목으로 갱신하지 않아 구분선 계산이 실제 렌더 순서를 따른다.
+    // ★skip 은 seen·prevGroup 을 갱신하지 않는다★ — 구분선 계산이 실제 렌더 순서를 따르게.
     const key = itemKey(item)
     if (seen.has(key)) continue
-    // ADR-0065: 실행 항목 XOR 컨테이너 형태 검증(위반 시 skip — prevGroup·seen 미갱신).
     if (!validateItemShape(item, contentType, false)) continue
 
     let entry: ResolvedSlotMenuItem
     if (item.children) {
-      // 컨테이너(1단 서브메뉴): title passthrough + 각 자식 resolve. 자식은 실행 항목만(nested 검증).
       const children: ResolvedSlotMenuItem[] = []
       for (const child of item.children) {
-        // FIX-2(ADR-0065): hideOn 필터를 자식에도 적용 — 최상위와 동일 subtraction. 이 콘텐츠 타입을 hideOn
-        //   에 담은 자식은 서브메뉴에서도 빠진다(가시성 계약 = 자식 포함). 필터 후 자식이 0개면 아래 FIX-1 로 컨테이너째 skip.
         if (child.hideOn?.includes(contentType) ?? false) continue
         if (!validateItemShape(child, contentType, true)) continue
         // 컨테이너 자식은 항상 실행 항목(validateItemShape nested=true 가 children 재보유를 막음).
         const rc = resolveRunnable(child.commandId as string, contentType)
         if (rc) children.push(rc)
       }
-      // FIX-1(ADR-0065): 자식이 전부 skip(미등록·2단 중첩·hideOn 등)돼 비면 컨테이너를 leaf 로 오인해
-      //   dead 항목(arrow 없음 + 미등록 container:<title> dispatch)이 된다 → 컨테이너째 skip + 시끄럽게 로그.
-      //   (fail-loud but crash-free — buildSlotMenu 의 다른 skip 과 동형, seen·prevGroup 미갱신.)
       if (children.length === 0) {
         console.error(
           `[slotMenu] container "${item.title}" (target=${contentType}) — 자식이 모두 skip 되어 빈 컨테이너 — omitted`,
@@ -226,11 +210,10 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
       }
     } else {
       const rr = resolveRunnable(item.commandId as string, contentType)
-      if (!rr) continue // 미등록 — seen·prevGroup 미갱신(FIX-1 skip)
+      if (!rr) continue
       entry = {
         ...rr,
         group: item.group,
-        // 첫 항목이 아니고 그룹이 직전과 다르면 구분선(그룹 경계).
         separatorBefore: prevGroup !== null && prevGroup !== item.group,
       }
     }
@@ -253,9 +236,8 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
 export function validateSlotMenuContributions(): void {
   for (const [target, items] of contributions) {
     for (const item of items) {
-      // FIX-3: 형태 검증(실행 항목 XOR 컨테이너). 위반이면 아래 commandId 검증은 무의미하므로 skip.
+      // FIX-3: 위반이면 아래 commandId 검증은 무의미하므로 skip.
       if (!validateItemShape(item, target, false)) continue
-      // 컨테이너(children 有)는 자체 commandId 가 없다 — 자식들을 재귀 검증한다(형태 + commandId, 1단).
       if (item.children) {
         for (const child of item.children) {
           if (!validateItemShape(child, target, true)) continue

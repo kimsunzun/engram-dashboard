@@ -1,5 +1,3 @@
-// ADR-0055: 키바인딩 포커스 가드 단위테스트 — ★load-bearing 불변식★: 입력/터미널 타이핑 중엔
-//   단축키를 가로채면 안 된다. isEditableTarget 술어(순수)와 comboOf 정규화를 jsdom 으로 검증한다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,7 +16,6 @@ function withSpecContentEditable(el: HTMLElement): HTMLElement {
   Object.defineProperty(el, 'isContentEditable', {
     configurable: true,
     get(this: HTMLElement): boolean {
-      // 가장 가까운 contenteditable 지정 조상을 찾아 그 값으로 실효 편집성을 판정(스펙: false 섬에서 끊김).
       let node: HTMLElement | null = this
       while (node) {
         const v = node.getAttribute?.('contenteditable')
@@ -34,7 +31,6 @@ function withSpecContentEditable(el: HTMLElement): HTMLElement {
   return el
 }
 
-/** contenteditable 속성 지정 + 스펙 준수 isContentEditable 심기 헬퍼(jsdom 미구현 우회). */
 function mkCE(ce: string): HTMLElement {
   const el = document.createElement('div')
   el.setAttribute('contenteditable', ce)
@@ -83,7 +79,6 @@ describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
     const inner = document.createElement('span')
     editable.appendChild(inner)
     withSpecContentEditable(inner)
-    // isContentEditable 은 상속 편집 가능성을 반영하므로 inner 도 true.
     expect(isEditableTarget(inner)).toBe(true)
   })
 
@@ -93,8 +88,6 @@ describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
   })
 
   it('편집 조상 안의 contenteditable="false" 섬 자손 → false (FIX-A: closest 가 경계를 넘던 버그)', () => {
-    // <div contenteditable="true"><button contenteditable="false"><span target></span></button></div>
-    // isContentEditable 은 "false" 섬을 정확히 비편집으로 보므로, 편집 조상 밑이어도 단축키가 발화해야 한다.
     const editable = mkCE('true')
     const island = document.createElement('button')
     island.setAttribute('contenteditable', 'false')
@@ -144,9 +137,7 @@ describe('comboOf (키 조합 정규화)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX-6: installKeybindings 배선/생명주기 E2E — 순수 술어가 아니라 *실제 설치된 리스너* 를 통해
-//   document 로 keydown 을 디스패치해 (a) 가드가 리스너에 실제로 걸렸는지 (b) disposer 가 리스너를
-//   떼는지 (c) install→dispose→install 이 중복 발화하지 않는지 (d) when 게이트(FIX-5)를 검증한다.
+// FIX-6: 순수 술어가 아니라 *실제 설치된 리스너* 를 통해 검증한다.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   let dispose: (() => void) | null = null
@@ -163,7 +154,6 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     vi.restoreAllMocks()
   })
 
-  // ctrl+shift+t keydown 을 지정 타겟에서 document 로 버블링해 디스패치한다.
   function fireCtrlShiftT(target: EventTarget): KeyboardEvent {
     const e = new KeyboardEvent('keydown', {
       key: 'T',
@@ -204,7 +194,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     })
     dispose = installKeybindings()
     fireCtrlShiftT(document.body)
-    expect(useThemeStore.getState().theme).toBe('light') // dark → light 순환
+    expect(useThemeStore.getState().theme).toBe('light')
   })
 
   it('타겟이 <input> 이면 command 실행 안 함(가드가 리스너에 배선됨)', () => {
@@ -216,7 +206,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     document.body.appendChild(input)
     const e = fireCtrlShiftT(input)
     expect(spy).not.toHaveBeenCalled()
-    expect(e.defaultPrevented).toBe(false) // 가드 통과 → preventDefault 안 함
+    expect(e.defaultPrevented).toBe(false)
   })
 
   it('타겟이 .xterm 자손이면 command 실행 안 함', () => {
@@ -241,7 +231,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     const editable = document.createElement('div')
     editable.setAttribute('contenteditable', 'plaintext-only')
     document.body.appendChild(editable)
-    withSpecContentEditable(editable) // jsdom 미구현 isContentEditable 을 스펙대로 심는다.
+    withSpecContentEditable(editable)
     fireCtrlShiftT(editable)
     expect(spy).not.toHaveBeenCalled()
   })
@@ -250,7 +240,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     const spy = vi.fn()
     register({ id: 'theme.toggle', title: 'toggle', run: spy })
     const d = installKeybindings()
-    d() // 리스너 제거
+    d()
     fireCtrlShiftT(document.body)
     expect(spy).not.toHaveBeenCalled()
   })
@@ -260,7 +250,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     register({ id: 'theme.toggle', title: 'toggle', run: spy })
     const d1 = installKeybindings()
     d1()
-    dispose = installKeybindings() // 재설치(마지막만 살아있어야 함)
+    dispose = installKeybindings()
     fireCtrlShiftT(document.body)
     expect(spy).toHaveBeenCalledTimes(1)
   })
@@ -272,7 +262,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
     const e = fireCtrlShiftT(document.body)
     expect(spy).not.toHaveBeenCalled()
-    expect(e.defaultPrevented).toBe(false) // when=false → 키를 삼키지 않고 통과
+    expect(e.defaultPrevented).toBe(false)
   })
 
   it('when:()=>true 로 바인딩된 command 는 정상 발화(FIX-5)', () => {
@@ -299,7 +289,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
     // dispatchEvent 는 리스너에서 throw 가 새어나오지 않으면 정상 반환한다(핸들러 밖 uncaught 없음).
     const e = fireCtrlShiftT(document.body)
-    expect(spy).not.toHaveBeenCalled() // when=throw → false 취급 → 미실행
-    expect(e.defaultPrevented).toBe(false) // 키를 삼키지 않고 통과
+    expect(spy).not.toHaveBeenCalled()
+    expect(e.defaultPrevented).toBe(false)
   })
 })

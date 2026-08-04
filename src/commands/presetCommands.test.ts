@@ -1,12 +1,3 @@
-// presetCommands 단위테스트 — preset.rename 어댑터가 id/name 을 해소해 agentClient.renamePreset 으로
-//   올바로 라우팅하는지(§5 LLM 제어 — ADR-0061 리치화). preset.create/delete/add 는 기존 배선 유지.
-//
-// ★검증 불변식★:
-//   1. preset.rename(id, name) → renamePreset(id, trimmed).
-//   2. name 생략/빈문자열 → null(override 해제).
-//   3. 빈 id → throw(조용한 no-op 금지).
-//   4. preset.delete(id) → deletePreset(trim 된 id)(기존 배선 회귀 가드).
-
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 const clientMock = vi.hoisted(() => ({

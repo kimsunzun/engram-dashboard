@@ -1,13 +1,6 @@
-// tabCommands 단위테스트 — 탭/창 command 어댑터가 store 액션으로 올바로 라우팅하는지(ADR-0055/0057).
-//
-// ★검증 불변식★:
-//   1. tab.create/switch/close·window.create/close 가 대응 viewStore 액션을 (해소된 window, ...)로 부른다.
-//   2. window 생략 → 이 웹뷰 창(readWindowLabelFromHash)으로 해소.
-//   3. tab.next(Ctrl+Tab) → 이 창 탭을 오른쪽 순환(마지막이면 첫 탭 wrap). 1개 이하면 no-op.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// store 액션을 spy 로 갈아끼워 라우팅만 검증(실제 invoke 안 탐).
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => vi.fn()) }))
 vi.mock('@tauri-apps/api/window', () => ({
@@ -74,9 +67,8 @@ describe('tabCommands 라우팅 (window 해소)', () => {
     expect(closeTabSpy).toHaveBeenCalledWith('main', 'v3')
   })
 
-  // ── ★S4-F1★: view 생략 시 *지정된 창*의 active 를 쓴다(현재 웹뷰 active 아님) ──
+  // ── ★S4-F1★ ──
   it('tab.close(window 지정·view 생략) → 그 창의 active 를 닫는다(현재 웹뷰 active 아님)', () => {
-    // 이 웹뷰(main)의 active 는 mv, 타깃 창(slot-popup-1)의 active 는 pv. 타깃 pv 를 닫아야 한다.
     useViewStore.setState({
       windows: {
         main: { tabs: [{ id: 'mv', name: 'M' }], active: 'mv', version: 1 },
@@ -101,7 +93,7 @@ describe('tabCommands 라우팅 (window 해소)', () => {
     expect(() => run('tab.close', { window: 'slot-popup-9' })).toThrow()
   })
 
-  // ── ★tab.rename(ADR-0057)★: view(필수)·name(trim, 공백거부) 검증 후 renameTab 라우팅 ──
+  // ── ★tab.rename(ADR-0057)★ ──
   it('tab.rename(view/name 지정) → renameTab(view, trim된 name)', () => {
     run('tab.rename', { view: 'v7', name: '  My Tab  ' })
     expect(renameTabSpy).toHaveBeenCalledWith('v7', 'My Tab')
@@ -134,9 +126,8 @@ describe('tabCommands 라우팅 (window 해소)', () => {
 })
 
 // ── ★layout.setSlotContent variant 형태 검증(FIX LOW)★ ─────────────────────────────────────────
-// 이 스위트가 막는 것: tag(type)만 화이트리스트로 걸던 경계에 variant 별 필수 필드 검증을 더해,
-// {type:'agent'}(agent_id 누락) 같은 malformed 값이 레지스트리를 통과해 Rust 역직렬화에서야 늦게
-// 터지는 걸 막는다 — invoke 전에 loud fail(오배치 진단 지연 회귀 안전망).
+// 이 스위트가 막는 것: {type:'agent'}(agent_id 누락) 같은 malformed 값이 레지스트리를 통과해 Rust
+// 역직렬화에서야 늦게 터지는 것 — invoke 전에 loud fail.
 describe('layout.setSlotContent variant 형태 검증', () => {
   const setSlotContentSpy = vi.fn(async () => undefined)
   beforeEach(() => {
@@ -148,7 +139,6 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent' } }),
     ).toThrow(/agent_id/)
-    // ★invoke 전 throw★ — 잘못된 값이 store/백엔드로 흘러가면 안 된다.
     expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 

@@ -1,9 +1,6 @@
-// ADR-0055 / ADR-0011: 에이전트 command 어댑터 — register 로 agentClient(단일 제어 표면) 스폰 경로에
-//   라우팅만 한다(새 상태 경로 0). import 부수효과로 등록되므로 단일 매니페스트(contributions.ts)에서
-//   side-effect import 한다. 검증: window.__engramCmd.run('agent.spawn',{cwd:'C:/work'}).
+// ADR-0055 / ADR-0011: agentClient(단일 제어 표면) 스폰 경로에 라우팅만 한다(새 상태 경로 0).
 //
-// ★ADR-0064 슬롯 메뉴 기여 co-location★: agentlist.createAgent(폴더 다이얼로그 → reserved claude 프로필 등록)를
-//   등록하고 agent_list 슬롯 메뉴에 기여한다 — 트리(agent_list) 콘텐츠 지식이 이 모듈에 응집(공통은 '*'이 소유).
+// ★ADR-0064 슬롯 메뉴 기여 co-location★: 트리(agent_list) 콘텐츠 지식이 이 모듈에 응집(공통은 '*'이 소유).
 
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -17,8 +14,7 @@ import { registerSlotMenu } from './slotMenu'
 
 // ★ADR-0078★: 렌더 모드(Terminal=xterm PTY / StreamJson=headless NDJSON→RichSlot)는 생성 시점에 고정하고
 //   이후 불변이다 — pane "에이전트 생성" 서브메뉴에서 모드를 골라 예약 프로필을 만든다(활성화-시점 override 는
-//   거부됨: 활성화 행 메뉴는 단일 "활성화" 유지). 세 생성 command 가 공유하는 헬퍼 — 폴더 다이얼로그로 cwd 를
-//   고른 뒤 claude reserved(비활성) 프로필을 outputFormat 고정으로 등록한다(스폰하지 않음). 취소(null)면 no-op.
+//   거부됨: 활성화 행 메뉴는 단일 "활성화" 유지). claude reserved(비활성) 프로필을 등록만 한다(스폰하지 않음).
 async function createReservedProfile(outputFormat: ClaudeOutputFormat) {
   const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
   const cwd = typeof picked === 'string' ? picked : null
@@ -26,7 +22,7 @@ async function createReservedProfile(outputFormat: ClaudeOutputFormat) {
   const profile = await agentClient.createClaudeProfile(cwd, cwd, [], [], false, outputFormat)
   // broadcast 는 유실 가능(ws 큐 포화, ws.rs:145)·구독이 레이아웃 초기화 이후(eventBus.ts)라, 생성 직후
   // 명시 refetch 로 예약 노드 표시를 보장한다(activateReserved 의 .then(refreshProfiles) 와 동형
-  // belt-and-suspenders). 생성 프로필은 그대로 반환(회수부 cdp/메뉴가 계속 사용 가능).
+  // belt-and-suspenders).
   await refreshProfiles()
   return profile
 }
@@ -45,9 +41,8 @@ register({
   id: 'agent.spawn',
   title: t('agent.spawn'),
   category: 'agent',
-  // 단일 객체 가방(ADR-0055): { preset?, cwd?, parent? }.
-  //   - preset(id) 주어지면 store.presets 에서 cwd 를 해소(프리셋 = cwd 북마크, ADR-0061).
-  //   - 아니면 raw cwd 사용. 둘 다 최종적으로 agentClient.spawnAgent(cwd)(데몬 SpawnByCwd)로 흐른다.
+  //   - preset(id) 주어지면 store.presets 에서 cwd 를 해소(프리셋 = cwd 북마크, ADR-0061). 최종적으로
+  //     agentClient.spawnAgent(cwd)(데몬 SpawnByCwd)로 흐른다.
   //   - parent 는 SIGNATURE-ONLY: 중첩(부모 아래 스폰)은 아직 미지원 — 세팅되면 명시 throw(조용한
   //     무시 금지, LLM/cdp 디버깅 위해). 향후 트리 중첩 도입 시 여기서 배선한다.
   run: (args) => {
@@ -59,7 +54,6 @@ register({
       throw new Error('agent.spawn: parent nesting 미지원')
     }
 
-    // 프리셋 우선 — id 로 store.presets 조회해 cwd 해소. 없는 id 면 명시 throw(조용한 no-op 금지).
     let cwd: string | undefined
     if (preset) {
       const found = useAgentStore.getState().presets.find(p => p.id === preset)
@@ -82,7 +76,7 @@ register({
   id: 'agent.rename',
   title: t('agent.rename'),
   category: 'agent',
-  // ADR-0061 리치화(§5 LLM 제어): 에이전트(프로필) 표시명 override set/clear. args={ id, name }.
+  // ADR-0061 리치화(§5 LLM 제어): 에이전트(프로필) 표시명 override set/clear.
   //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
   //   반영은 ProfileListUpdated broadcast(낙관 갱신 X). 없는 id 는 백엔드 Error. 이것이 rename 을 프론트
   //   전용이 아니라 백엔드 저장으로 두는 이유 — LLM 이 같은 표면(command)으로 트리 표시명을 바꿀 수 있다.

@@ -1,11 +1,3 @@
-// agentCommands 단위테스트 — agent.spawn 어댑터가 preset/cwd 를 해소해 agentClient.spawnAgent 로
-//   올바로 라우팅하는지(ADR-0055/0011). parent 는 signature-only(미지원 throw).
-//
-// ★검증 불변식★:
-//   1. preset(id) → store.presets 에서 cwd 해소 → spawnAgent(cwd).
-//   2. raw cwd → spawnAgent(trim 된 cwd).
-//   3. parent 세팅 → throw(중첩 미지원).
-//   4. 빈/공백 cwd → throw. 없는 preset id → throw.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -86,7 +78,7 @@ describe('agent.spawn 라우팅', () => {
   })
 })
 
-// ── agent.rename 어댑터(§5 LLM 제어 — ADR-0061 리치화) ────────────────────────────
+// ── agent.rename(§5 — ADR-0061) ──────────────────────────────────────────────
 describe('agent.rename 라우팅', () => {
   it('id + name → renameProfile(id, trimmed)', () => {
     run('agent.rename', { id: '  a1  ', name: '  내 에이전트  ' })
@@ -107,10 +99,6 @@ describe('agent.rename 라우팅', () => {
 
 // ── agent_list 생성 계열 어댑터(ADR-0064 / ADR-0078) ──────────────────────────────
 // ★동작 변경★: 옛 즉시 셸(cmd.exe) 스폰(agent.spawn) → claude reserved(비활성) 프로필 등록.
-//   폴더 다이얼로그로 cwd 를 고른 뒤 createClaudeProfile(name=cwd, [], [], autoRestore=false, outputFormat).
-//   활성화(더블클릭/우클릭)에서 비로소 claude 를 spawn 한다.
-// ★ADR-0078★: 렌더 모드(Terminal/StreamJson)는 생성 시점에 고정한다 — leaf command 두 개가 모드를 명시하고,
-//   파라미터형 프리미티브 agentlist.createAgent 는 args.outputFormat(미지정 'StreamJson' 기본)으로 받는다.
 describe('agent_list 생성 계열 라우팅', () => {
   // 생성 프로필의 최소 형태(AgentProfile) — refreshProfiles → setProfiles 로 store/tree 에 실릴 값.
   const createdProfile = { id: 'p-created', cwd: 'C:/work/engram', display_name: null }
@@ -124,7 +112,6 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.createClaudeProfile).toHaveBeenCalledWith(
       'C:/work/engram', 'C:/work/engram', [], [], false, 'Terminal',
     )
-    // 생성 직후 명시 refetch 로 예약 노드가 store(=트리 소스)에 실린다(broadcast 유실 대비).
     expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
     expect(useAgentStore.getState().profiles).toEqual([createdProfile])
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
@@ -139,24 +126,20 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.createClaudeProfile).toHaveBeenCalledWith(
       'C:/work/engram', 'C:/work/engram', [], [], false, 'StreamJson',
     )
-    // 공유 헬퍼가 생성 직후 refreshProfiles(→listProfiles) 로 store 에 반영한다(broadcast 유실 대비).
     expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
     expect(useAgentStore.getState().profiles).toEqual([createdProfile])
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
   it('createAgent(파라미터형): 인자 없으면 StreamJson 기본, args.outputFormat 주면 그 값 사용', async () => {
-    // 기본값(back-compat): 인자 없이 → StreamJson.
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
     await run('agentlist.createAgent', {})
     expect(clientMock.createClaudeProfile).toHaveBeenLastCalledWith(
       'C:/work/engram', 'C:/work/engram', [], [], false, 'StreamJson',
     )
-    // 공유 헬퍼가 생성 직후 refreshProfiles(→listProfiles) 로 store 에 반영한다(broadcast 유실 대비).
     expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
     expect(useAgentStore.getState().profiles).toEqual([createdProfile])
-    // args.outputFormat 존중 → Terminal.
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     await run('agentlist.createAgent', { outputFormat: 'Terminal' })
     expect(clientMock.createClaudeProfile).toHaveBeenLastCalledWith(
@@ -165,8 +148,7 @@ describe('agent_list 생성 계열 라우팅', () => {
   })
 
   it('createAgent(파라미터형): 잘못된 outputFormat → 명시 throw + createClaudeProfile 미호출', async () => {
-    // ★경계 검증(§5)★: 외부 입력이 두 유효값이 아니면 조용히 백엔드로 흘리지 않고 fail-loud throw.
-    //   다이얼로그(open)보다 검증이 먼저라 폴더 픽·createClaudeProfile 모두 타지 않는다.
+    // 다이얼로그(open)보다 검증이 먼저라 폴더 픽·createClaudeProfile 모두 타지 않는다.
     await expect(run('agentlist.createAgent', { outputFormat: 'invalid' })).rejects.toThrow(/invalid/)
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
@@ -177,14 +159,13 @@ describe('agent_list 생성 계열 라우팅', () => {
     await run('agentlist.createTerminal', {})
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
-    // 취소면 refreshProfiles(→listProfiles)도 타지 않고 store 는 그대로.
     expect(clientMock.listProfiles).not.toHaveBeenCalled()
     expect(useAgentStore.getState().profiles).toEqual([])
   })
 })
 
 // ── agent_list pane 메뉴 = 1단 서브메뉴 컨테이너(ADR-0078 / ADR-0065) ──────────────
-// side-effect import 로 registerSlotMenu 가 이미 컨테이너를 기여했다 — buildSlotMenu 로 형태를 검증한다.
+// side-effect import 로 registerSlotMenu 가 이미 컨테이너를 기여했다.
 describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
   it('"에이전트 생성" 컨테이너 + 자식 2개(선언 순서 Json→Terminal)', () => {
     const items = buildSlotMenu('agent_list')

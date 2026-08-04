@@ -1,19 +1,14 @@
-// ADR-0055: 전역 키바인딩 — key-combo → command id 매핑 후 run(id). 사람 클릭·__engramCmd 와 함께
-//   소비자 계층(레지스트리는 발견/라우팅/메타만). 골격 최소 — 커스텀 키맵 저장(localStorage)은 후속.
+// ADR-0055: 골격 최소 — 커스텀 키맵 저장(localStorage)은 후속.
 
 import { fireAndForget } from './dispatch'
 import { getCommand } from './registry'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ★LOAD-BEARING 포커스 가드 (ADR-0055 · CLAUDE.md §5)★
-//   전역 keydown 은 사용자가 입력 중일 때 단축키를 가로채면 안 된다. <input>/<textarea>/
-//   contenteditable/터미널(.xterm — xterm.js) 안에서 타이핑 중이면 즉시 bail-out 해 키를
-//   그대로 흘려보낸다. 안 그러면 터미널·입력창 타이핑을 단축키가 삼키는 회귀(예: 't' 를 치면
-//   테마가 바뀌는 식). ★이 가드에 구멍이 나면 단축키가 터미널/입력 타이핑을 가로챈다★(load-bearing).
-//   이 술어를 순수 함수로 뽑아 headless 로 단위테스트한다.
+//   전역 keydown 은 사용자가 입력 중일 때 단축키를 가로채면 안 된다. ★이 가드에 구멍이 나면 단축키가
+//   터미널/입력 타이핑을 가로챈다★ — 예: 터미널에서 't' 를 치면 테마가 바뀌는 회귀.
 // ─────────────────────────────────────────────────────────────────────────────
 export function isEditableTarget(target: EventTarget | null): boolean {
-  // Element 가 아니면(document/window 등) 편집 대상 아님.
   if (!target || typeof (target as Element).closest !== 'function') return false
   const el = target as Element
 
@@ -36,14 +31,14 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return false
 }
 
-/** KeyboardEvent → 정규화된 combo 문자열(예: 'ctrl+shift+t'). 매핑 테이블 키와 대조. */
+/** KeyboardEvent → 정규화된 combo 문자열(예: 'ctrl+shift+t'). */
 export function comboOf(e: KeyboardEvent): string {
   const parts: string[] = []
   if (e.ctrlKey) parts.push('ctrl')
   if (e.altKey) parts.push('alt')
   if (e.shiftKey) parts.push('shift')
   if (e.metaKey) parts.push('meta')
-  // 수식키 자체는 제외. key 는 소문자로 정규화(shift 조합 시 대문자 방지).
+  // key 는 소문자로 정규화(shift 조합 시 대문자 방지).
   const key = e.key.toLowerCase()
   if (key !== 'control' && key !== 'alt' && key !== 'shift' && key !== 'meta') {
     parts.push(key)
@@ -51,20 +46,20 @@ export function comboOf(e: KeyboardEvent): string {
   return parts.join('+')
 }
 
-// combo → command id 매핑(골격 최소 — 커스텀 키맵은 후속).
+// 골격 최소 — 커스텀 키맵은 후속.
 const BINDINGS: Record<string, string> = {
   'ctrl+shift+t': 'theme.toggle',
-  // ★Ctrl+Tab(D-8, ADR-0057)★: 포커스된 창의 탭 순환 → tab.next(= switch_tab, 사람 클릭과 동일 경로).
+  // ★Ctrl+Tab(D-8, ADR-0057)★: tab.next 는 사람 클릭과 동일 경로(switch_tab)로 간다.
   'ctrl+tab': 'tab.next',
 }
 
 /**
- * 전역 키바인딩 설치. import 시점이 아니라 명시 호출로 리스너를 건다(배선·정리 제어 가능).
+ * import 시점이 아니라 명시 호출로 리스너를 건다(배선·정리 제어 가능).
  * 반환 = disposer(리스너 제거). HMR/언마운트에서 호출해 중복 누적을 막는다.
  */
 export function installKeybindings(): () => void {
   const onKeyDown = (e: KeyboardEvent): void => {
-    // ★포커스 가드 먼저★ — 입력/터미널 타이핑 중이면 단축키 무시(위 불변식).
+    // ★포커스 가드 먼저★(위 불변식).
     if (isEditableTarget(e.target)) return
 
     const id = BINDINGS[comboOf(e)]
@@ -85,7 +80,7 @@ export function installKeybindings(): () => void {
       } catch {
         ok = false
       }
-      if (!ok) return // when=false(또는 throw) → 이 키를 삼키지 않고 통과(preventDefault 안 함)
+      if (!ok) return
     }
 
     e.preventDefault()

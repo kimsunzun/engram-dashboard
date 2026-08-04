@@ -1,5 +1,3 @@
-// ADR-0055: command 레지스트리 단위테스트 — register/run/list 동작, 모르는 id throw, 중복 id warn,
-//   단일 객체-가방 인자 전달, handler 반환(Promise 포함) 통과. 순수 Map 이라 DOM/Tauri 없이 headless.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -52,7 +50,7 @@ describe('command registry (ADR-0055)', () => {
     register({ id: 'dup', title: 'second', run: () => 2 })
     expect(warn).toHaveBeenCalledOnce()
     expect(warn.mock.calls[0][0]).toContain("'dup'")
-    expect(run('dup')).toBe(2) // 마지막 등록이 이긴다
+    expect(run('dup')).toBe(2)
   })
 
   it('list: 등록된 command 의 메타 스냅샷 반환(run 함수 제외)', () => {
@@ -62,7 +60,6 @@ describe('command registry (ADR-0055)', () => {
     expect(items).toHaveLength(2)
     const c1 = items.find(i => i.id === 'c1')!
     expect(c1).toEqual({ id: 'c1', title: 'C1', category: 'cat', keybinding: 'Ctrl+K' })
-    // run 함수는 노출되지 않는다(발견/메타만).
     expect('run' in c1).toBe(false)
     const c2 = items.find(i => i.id === 'c2')!
     expect(c2.category).toBeUndefined()
@@ -74,10 +71,8 @@ describe('command registry (ADR-0055)', () => {
 
   it('getCommand: 사본을 반환 → cmd.run 변조가 레지스트리로 새지 않는다(FIX-C)', () => {
     register({ id: 'guarded', title: 'g', run: () => 'original' })
-    // 반환 객체의 run 을 갈아끼워도(악의적 변조) 레지스트리 원본은 그대로여야 한다.
     getCommand('guarded')!.run = () => 'hijacked'
     expect(run('guarded')).toBe('original')
-    // when 등 메타는 정상 조회된다(사본이라도 값은 동일).
     expect(getCommand('guarded')!.id).toBe('guarded')
     expect(getCommand('없음')).toBeUndefined()
   })
