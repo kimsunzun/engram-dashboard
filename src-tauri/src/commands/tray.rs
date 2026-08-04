@@ -8,19 +8,19 @@
 
 use crate::tray::actions;
 
-/// main 창 보이기(show+unminimize+focus). 트레이 "UI 보이기"와 동일 동작.
+// main 창 보이기(show+unminimize+focus). 트레이 "UI 보이기"와 동일 동작.
 #[tauri::command]
 pub fn show_main_ui(app: tauri::AppHandle) {
     actions::show_main_ui(&app);
 }
 
-/// main 창 숨기기(hide). 트레이 "UI 숨기기"·X=hide 와 동일 종착.
+// main 창 숨기기(hide). 트레이 "UI 숨기기"·X=hide 와 동일 종착.
 #[tauri::command]
 pub fn hide_main_ui(app: tauri::AppHandle) {
     actions::hide_main_ui(&app);
 }
 
-/// 앱 완전 종료(best-effort 데몬 graceful stop 후 exit). 트레이 "완전 종료"와 동일.
+// 앱 완전 종료(best-effort 데몬 graceful stop 후 exit). 트레이 "완전 종료"와 동일.
 #[tauri::command]
 pub fn quit_app(app: tauri::AppHandle) {
     actions::quit_app(&app);

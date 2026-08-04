@@ -25,19 +25,19 @@ use uuid::Uuid;
 use crate::daemon_client::DaemonClient;
 use crate::output_channel::WindowChannelRegistry;
 
-/// 프론트가 보낸 UUID 문자열을 파싱한다. invalid 면 명확한 Err(패닉 금지 — 잘못된 입력 방어).
+// 프론트가 보낸 UUID 문자열을 파싱한다. invalid 면 명확한 Err(패닉 금지 — 잘못된 입력 방어).
 fn parse_uuid(s: &str, what: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("{what} UUID 파싱 실패: {e}"))
 }
 
-/// send_command 결과를 프론트로 넘기기 전 공통 처리. reply 이벤트는 데몬측 의미(Ack/Spawned/…)라,
-/// 성공 케이스는 호출자별로 필요한 만큼만 꺼내고 여기선 그대로 통과시킨다(각 핸들러가 변환).
+// send_command 결과를 프론트로 넘기기 전 공통 처리. reply 이벤트는 데몬측 의미(Ack/Spawned/…)라,
+// 성공 케이스는 호출자별로 필요한 만큼만 꺼내고 여기선 그대로 통과시킨다(각 핸들러가 변환).
 type CmdResult = Result<AgentEvent, String>;
 
-/// 새 에이전트 spawn(프로필 참조). reply = `Ack`(데몬 spawn dispatch 확인). 성공 시 `()`.
-///
-/// ★주의(reply 종류)★: 데몬 ws.rs 의 `Spawn{profile_id}` dispatch 는 Ack 로 응답한다(SpawnByCwd/
-/// SpawnProfile 만 Spawned 로 AgentInfo 동봉). 여기선 Ack/Spawned 어느 쪽이든 성공으로 본다.
+// 새 에이전트 spawn(프로필 참조). reply = `Ack`(데몬 spawn dispatch 확인). 성공 시 `()`.
+//
+// ★주의(reply 종류)★: 데몬 ws.rs 의 `Spawn{profile_id}` dispatch 는 Ack 로 응답한다(SpawnByCwd/
+// SpawnProfile 만 Spawned 로 AgentInfo 동봉). 여기선 Ack/Spawned 어느 쪽이든 성공으로 본다.
 #[tauri::command]
 pub async fn agent_spawn(
     client: State<'_, Arc<DaemonClient>>,
@@ -51,7 +51,7 @@ pub async fn agent_spawn(
     expect_ack_or_spawned(client.send_command(cmd).await)
 }
 
-/// 에이전트 종료(자원 강제 폐쇄). reply = `Ack`.
+// 에이전트 종료(자원 강제 폐쇄). reply = `Ack`.
 #[tauri::command]
 pub async fn agent_kill(
     client: State<'_, Arc<DaemonClient>>,
@@ -65,7 +65,7 @@ pub async fn agent_kill(
     expect_ack(client.send_command(cmd).await)
 }
 
-/// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존. reply = `Ack`.
+// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존. reply = `Ack`.
 #[tauri::command]
 pub async fn agent_interrupt(
     client: State<'_, Arc<DaemonClient>>,
@@ -79,7 +79,7 @@ pub async fn agent_interrupt(
     expect_ack(client.send_command(cmd).await)
 }
 
-/// stdin 입력 전달(raw 바이트). reply = `Ack`. `data` 는 프론트에서 byte 배열(키 입력).
+// stdin 입력 전달(raw 바이트). reply = `Ack`. `data` 는 프론트에서 byte 배열(키 입력).
 #[tauri::command]
 pub async fn agent_write_stdin(
     client: State<'_, Arc<DaemonClient>>,
@@ -95,14 +95,14 @@ pub async fn agent_write_stdin(
     expect_ack(client.send_command(cmd).await)
 }
 
-/// PTY 크기 변경. ★주의★: `Resize` 는 wire 상 request_id 가 없어(데몬이 reply 안 보냄) send_command 의
-/// reply 매칭 대상이 아니다 — 그래서 **fire-and-forget**(`send_fire_and_forget`)가 정답이다(reply 기대
-/// 경로로 보내면 영구 hang). T6b 가 그 송신 경로를 깔아 여기서 실제로 wire 송신한다.
-///
-/// ★fire-and-forget 의미★: enqueue 만 하고 ack 를 안 기다린다(resize 미반영=화면 크기 어긋남일 뿐
-/// 동작 안전엔 무해). 비연결이면 DaemonClient 가 조용히 no-op — Resize 는 구독 델타가 아니라 단발 명령이라
-/// connect 시 자동 재동기되지 않는다(다음 resize 입력이 새 치수로 갱신). 그래서 `Ok(())` 는 "송신 시도함"
-/// 이지 "데몬 반영 확인"이 아니다.
+// PTY 크기 변경. ★주의★: `Resize` 는 wire 상 request_id 가 없어(데몬이 reply 안 보냄) send_command 의
+// reply 매칭 대상이 아니다 — 그래서 **fire-and-forget**(`send_fire_and_forget`)가 정답이다(reply 기대
+// 경로로 보내면 영구 hang). T6b 가 그 송신 경로를 깔아 여기서 실제로 wire 송신한다.
+//
+// ★fire-and-forget 의미★: enqueue 만 하고 ack 를 안 기다린다(resize 미반영=화면 크기 어긋남일 뿐
+// 동작 안전엔 무해). 비연결이면 DaemonClient 가 조용히 no-op — Resize 는 구독 델타가 아니라 단발 명령이라
+// connect 시 자동 재동기되지 않는다(다음 resize 입력이 새 치수로 갱신). 그래서 `Ok(())` 는 "송신 시도함"
+// 이지 "데몬 반영 확인"이 아니다.
 #[tauri::command]
 pub async fn agent_resize(
     client: State<'_, Arc<DaemonClient>>,
@@ -120,19 +120,19 @@ pub async fn agent_resize(
     Ok(())
 }
 
-/// ★봉투 포맷 전역 스위치(ADR-0096) — 조종/invoke 제어 표면★. 오퍼레이터(또는 §5 LLM/상주
-/// 오케스트레이터)가 `invoke('set_envelope_format', { format: 'colon' | 'xml' })` 로 부르면 데몬 전역
-/// 봉투 포맷 상태를 바꾼다 — 이후 모든 A→B 메시지 봉투가 그 포맷으로 렌더된다(colon=`{sender}: {body}`
-/// 기본, xml=`<message from="{sender}">{body}</message>`). reply = `Ack`(데몬 상태 변경 확인). 성공 시 `()`.
-///
-/// ★src-tauri = 클라이언트 셸(ADR-0029)★: 이 command 는 상태를 소유하지 않고 `AgentCommand::SetEnvelopeFormat`
-/// 를 데몬으로 전달만 한다(다른 agent_* command 와 동형 — 얇은 빌더 + send_command). 상태 소유·조립은
-/// 데몬(AgentManager 소유 프로세스)이다. ★워커 MCP 채널엔 미노출★(관리당하는 에이전트가 팀-전역 포맷을
-/// 바꾸면 안 됨 — ADR-0096 결정 3·ADR-0094 최소권한). 이 invoke 표면이 정식 활성 경로이고, 사람용
-/// 트리거(단축키/UI 버튼)는 나중 옵션이다(ADR-0096 결정 5 — cdp.mjs eval 로 이 invoke 를 임시 호출·검증).
-///
-/// ★format 역직렬화★: `EnvelopeFormat` 는 serde lowercase 라 invoke JSON `{format:"xml"}` 이 그대로
-/// 들어온다(wire enum 계약, ADR-0096). Tauri 가 command 인자를 이 타입으로 역직렬화한다.
+// ★봉투 포맷 전역 스위치(ADR-0096) — 조종/invoke 제어 표면★. 오퍼레이터(또는 §5 LLM/상주
+// 오케스트레이터)가 `invoke('set_envelope_format', { format: 'colon' | 'xml' })` 로 부르면 데몬 전역
+// 봉투 포맷 상태를 바꾼다 — 이후 모든 A→B 메시지 봉투가 그 포맷으로 렌더된다(colon=`{sender}: {body}`
+// 기본, xml=`<message from="{sender}">{body}</message>`). reply = `Ack`(데몬 상태 변경 확인). 성공 시 `()`.
+//
+// ★src-tauri = 클라이언트 셸(ADR-0029)★: 이 command 는 상태를 소유하지 않고 `AgentCommand::SetEnvelopeFormat`
+// 를 데몬으로 전달만 한다(다른 agent_* command 와 동형 — 얇은 빌더 + send_command). 상태 소유·조립은
+// 데몬(AgentManager 소유 프로세스)이다. ★워커 MCP 채널엔 미노출★(관리당하는 에이전트가 팀-전역 포맷을
+// 바꾸면 안 됨 — ADR-0096 결정 3·ADR-0094 최소권한). 이 invoke 표면이 정식 활성 경로이고, 사람용
+// 트리거(단축키/UI 버튼)는 나중 옵션이다(ADR-0096 결정 5 — cdp.mjs eval 로 이 invoke 를 임시 호출·검증).
+//
+// ★format 역직렬화★: `EnvelopeFormat` 는 serde lowercase 라 invoke JSON `{format:"xml"}` 이 그대로
+// 들어온다(wire enum 계약, ADR-0096). Tauri 가 command 인자를 이 타입으로 역직렬화한다.
 // ADR-0096
 #[tauri::command]
 pub async fn set_envelope_format(
@@ -146,22 +146,22 @@ pub async fn set_envelope_format(
     expect_ack(client.send_command(cmd).await)
 }
 
-/// ★출력 Channel 등록(ADR-0046 — 등록만, replay 트리거 없음)★. 창 mount 시 프론트가
-/// `invoke('subscribe_output', { channel })` 로 호출한다 — 그 창의 출력 Channel 을 window_label → Channel
-/// registry 에 넣는다. 연결 task 가 라우팅 표를 보고 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다
-/// (프레임에 agent_id 태그 내장).
-///
-/// ★window label 자동 주입★: `tauri::Window` 를 인자로 받으면 Tauri 가 **호출한 webview** 를 주입한다 →
-/// `window.label()` 로 라벨을 얻는다(프론트가 라벨을 안 넘겨도 됨, 위조 불가). Channel 도 호출 webview 에
-/// 태생 바인딩된다(spike §7) — 그래서 라벨↔Channel 짝이 항상 정합한다.
-///
-/// ★raw byte(spike §7)★: registry 타입이 `Channel<tauri::ipc::Response>` 라 연결 task 가
-/// `Response::new(bytes)` 로 raw 바이트를 보낸다(`Channel<Vec<u8>>` 의 JSON 직렬화 함정 회피).
-///
-/// ## ★ADR-0046: replay 트리거 분리★
-/// 미러 버퍼 제거로 subscribe_output 은 **Channel 등록만** 한다(옛 등록-즉시-replay 삭제). replay 는 뷰가
-/// mount 시 별도로 `request_replay` 로 유발한다 — 등록(창 단위)과 replay(뷰/agent 단위)를 분리해, 한 창의
-/// 여러 뷰가 각자 gen 펜스로 자기 replay 경계를 안다.
+// ★출력 Channel 등록(ADR-0046 — 등록만, replay 트리거 없음)★. 창 mount 시 프론트가
+// `invoke('subscribe_output', { channel })` 로 호출한다 — 그 창의 출력 Channel 을 window_label → Channel
+// registry 에 넣는다. 연결 task 가 라우팅 표를 보고 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다
+// (프레임에 agent_id 태그 내장).
+//
+// ★window label 자동 주입★: `tauri::Window` 를 인자로 받으면 Tauri 가 **호출한 webview** 를 주입한다 →
+// `window.label()` 로 라벨을 얻는다(프론트가 라벨을 안 넘겨도 됨, 위조 불가). Channel 도 호출 webview 에
+// 태생 바인딩된다(spike §7) — 그래서 라벨↔Channel 짝이 항상 정합한다.
+//
+// ★raw byte(spike §7)★: registry 타입이 `Channel<tauri::ipc::Response>` 라 연결 task 가
+// `Response::new(bytes)` 로 raw 바이트를 보낸다(`Channel<Vec<u8>>` 의 JSON 직렬화 함정 회피).
+//
+// ## ★ADR-0046: replay 트리거 분리★
+// 미러 버퍼 제거로 subscribe_output 은 **Channel 등록만** 한다(옛 등록-즉시-replay 삭제). replay 는 뷰가
+// mount 시 별도로 `request_replay` 로 유발한다 — 등록(창 단위)과 replay(뷰/agent 단위)를 분리해, 한 창의
+// 여러 뷰가 각자 gen 펜스로 자기 replay 경계를 안다.
 #[tauri::command]
 pub fn subscribe_output(
     registry: State<'_, WindowChannelRegistry>,
@@ -176,12 +176,12 @@ pub fn subscribe_output(
     Ok(())
 }
 
-/// ★뷰 주도 replay 채번(ADR-0046 M1 — request_replay)★. 뷰(slot)가 mount/remount 시 호출한다 — 그 agent 의
-/// 데몬 ring 전량 재replay 를 single-flight 로 유발하고, 배정된 `gen`(세대)을 돌려준다. 뷰는 자기가 받은
-/// gen **이상**의 성공 마커에만 sort+dedup flush(gen 펜스 — 남의/구세대 replay 조기 flush 차단).
-///
-/// ★BLOCK-1 전면화(ADR-0046)★: wire `Subscribe{after_seq:None}`(전량)를 보내는 유일 경로다. layout 은
-/// Unsubscribe(정리)만 보낸다. 비연결이면 Err(프론트가 connected 전이에서 재요청 — M2).
+// ★뷰 주도 replay 채번(ADR-0046 M1 — request_replay)★. 뷰(slot)가 mount/remount 시 호출한다 — 그 agent 의
+// 데몬 ring 전량 재replay 를 single-flight 로 유발하고, 배정된 `gen`(세대)을 돌려준다. 뷰는 자기가 받은
+// gen **이상**의 성공 마커에만 sort+dedup flush(gen 펜스 — 남의/구세대 replay 조기 flush 차단).
+//
+// ★BLOCK-1 전면화(ADR-0046)★: wire `Subscribe{after_seq:None}`(전량)를 보내는 유일 경로다. layout 은
+// Unsubscribe(정리)만 보낸다. 비연결이면 Err(프론트가 connected 전이에서 재요청 — M2).
 #[tauri::command]
 pub async fn request_replay(
     client: State<'_, Arc<DaemonClient>>,
@@ -191,28 +191,28 @@ pub async fn request_replay(
     client.request_replay(agent_id).await
 }
 
-/// ★T7c: TauriTransport.send() 진입점★. 프론트 ProtocolClient 가 AgentCommand wire 객체를
-/// JSON 으로 보내면 Rust DaemonClient 를 통해 데몬으로 전달한다.
-///
-/// ★계약★: `cmd` 는 AgentCommand 의 externally-tagged JSON(e.g. `{"Kill":{…}}`). 파싱 실패는
-/// 에러 반환(JSON 구조 불일치).
-///
-/// ## ★reply 평면 (Fix-B / 안 ②)★
-/// 프론트 ProtocolClient 는 reply 를 oneshot(pending 맵)으로 기다리고, 그 reply 를 `onMessage`(control
-/// InboundMessage)로 받아 request_id 매칭으로 resolve 한다. 그래서 이 invoke 는 **reply 를 버리지 않고**
-/// 데몬 reply(AgentEvent)를 그대로 직렬화해 invoke 반환값으로 돌려준다 — TauriTransport.send 가 그 반환을
-/// `onMessage({kind:'control', event})` 로 올려, ProtocolClient.handleEvent 가 기존대로 pending 을 깬다.
-/// (WsTransport 가 데몬 Text frame 을 control 로 올리는 것과 동형 — broadcast 낭비·다창 누수 없는 oneshot 경로.)
-///
-/// ★request_id 유무로 경로 분기 (hang 방지)★:
-/// - request_id 있는 명령(spawn/kill/write/list/snapshot/profile CRUD/…) → `send_command`(reply await).
-///   ProtocolClient 가 pending 을 거는 명령은 *전부* request_id 를 가지며(resizePty 만 예외=fire-and-forget),
-///   데몬은 그 명령들에 reply variant(Ack/Spawned/Created/AgentList/ProfileList/Snapshot) 또는 Error 를
-///   echo 한다(connection_core.rs dispatch). 즉 send_command await 가 영구 점유되는 명령은 없다.
-/// - request_id 없는 명령(Resize/Subscribe/Unsubscribe) → fire-and-forget. 반환 `Ok(None)`(올릴 reply 없음).
-///   (Subscribe/Unsubscribe 는 ProtocolClient 가 fire-and-forget 으로 보낸다 — pending 안 검.)
-///
-/// 반환 `Ok(Some(value))` = 프론트로 올릴 control event(reply), `Ok(None)` = 올릴 것 없음.
+// ★T7c: TauriTransport.send() 진입점★. 프론트 ProtocolClient 가 AgentCommand wire 객체를
+// JSON 으로 보내면 Rust DaemonClient 를 통해 데몬으로 전달한다.
+//
+// ★계약★: `cmd` 는 AgentCommand 의 externally-tagged JSON(e.g. `{"Kill":{…}}`). 파싱 실패는
+// 에러 반환(JSON 구조 불일치).
+//
+// ## ★reply 평면 (Fix-B / 안 ②)★
+// 프론트 ProtocolClient 는 reply 를 oneshot(pending 맵)으로 기다리고, 그 reply 를 `onMessage`(control
+// InboundMessage)로 받아 request_id 매칭으로 resolve 한다. 그래서 이 invoke 는 **reply 를 버리지 않고**
+// 데몬 reply(AgentEvent)를 그대로 직렬화해 invoke 반환값으로 돌려준다 — TauriTransport.send 가 그 반환을
+// `onMessage({kind:'control', event})` 로 올려, ProtocolClient.handleEvent 가 기존대로 pending 을 깬다.
+// (WsTransport 가 데몬 Text frame 을 control 로 올리는 것과 동형 — broadcast 낭비·다창 누수 없는 oneshot 경로.)
+//
+// ★request_id 유무로 경로 분기 (hang 방지)★:
+// - request_id 있는 명령(spawn/kill/write/list/snapshot/profile CRUD/…) → `send_command`(reply await).
+//   ProtocolClient 가 pending 을 거는 명령은 *전부* request_id 를 가지며(resizePty 만 예외=fire-and-forget),
+//   데몬은 그 명령들에 reply variant(Ack/Spawned/Created/AgentList/ProfileList/Snapshot) 또는 Error 를
+//   echo 한다(connection_core.rs dispatch). 즉 send_command await 가 영구 점유되는 명령은 없다.
+// - request_id 없는 명령(Resize/Subscribe/Unsubscribe) → fire-and-forget. 반환 `Ok(None)`(올릴 reply 없음).
+//   (Subscribe/Unsubscribe 는 ProtocolClient 가 fire-and-forget 으로 보낸다 — pending 안 검.)
+//
+// 반환 `Ok(Some(value))` = 프론트로 올릴 control event(reply), `Ok(None)` = 올릴 것 없음.
 #[tauri::command]
 pub async fn forward_daemon_command(
     client: tauri::State<'_, std::sync::Arc<DaemonClient>>,
@@ -288,7 +288,7 @@ pub async fn forward_daemon_command(
     }
 }
 
-/// reply 가 Ack(void 성공)인지 확인. 그 외 event 면 예상 밖이나, 성공 reply 류는 모두 통과시킨다.
+// reply 가 Ack(void 성공)인지 확인. 그 외 event 면 예상 밖이나, 성공 reply 류는 모두 통과시킨다.
 fn expect_ack(result: CmdResult) -> Result<(), String> {
     match result {
         Ok(AgentEvent::Ack { .. }) => Ok(()),
@@ -306,7 +306,7 @@ fn expect_ack(result: CmdResult) -> Result<(), String> {
     }
 }
 
-/// reply 가 Ack 또는 Spawned(둘 다 spawn 성공)인지 확인.
+// reply 가 Ack 또는 Spawned(둘 다 spawn 성공)인지 확인.
 fn expect_ack_or_spawned(result: CmdResult) -> Result<(), String> {
     match result {
         Ok(AgentEvent::Ack { .. }) | Ok(AgentEvent::Spawned { .. }) => Ok(()),

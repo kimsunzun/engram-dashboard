@@ -10,24 +10,24 @@
 
 // ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
 
-/// 트레이 메뉴 클릭이 표현하는 **의도**(렌더링/원천과 분리된 단일 enum).
-/// 사람 클릭·LLM 호출·단축키가 모두 이 의도로 수렴한다(CLAUDE.md §5 손발/두뇌).
+// 트레이 메뉴 클릭이 표현하는 **의도**(렌더링/원천과 분리된 단일 enum).
+// 사람 클릭·LLM 호출·단축키가 모두 이 의도로 수렴한다(CLAUDE.md §5 손발/두뇌).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
-    /// "데몬 켜기" — 데몬 ensure(discovery WMI spawn). blocking → 워커.
+    // "데몬 켜기" — 데몬 ensure(discovery WMI spawn). blocking → 워커.
     StartDaemon,
-    /// "데몬 끄기" — 데몬만 graceful stop(UI 무관). blocking → 워커.
+    // "데몬 끄기" — 데몬만 graceful stop(UI 무관). blocking → 워커.
     StopDaemon,
-    /// "완전 종료" — best-effort 데몬 graceful stop 후 app.exit(0). 진짜 종료는 이것뿐(ADR-0026).
+    // "완전 종료" — best-effort 데몬 graceful stop 후 app.exit(0). 진짜 종료는 이것뿐(ADR-0026).
     QuitApp,
-    /// "부팅 시 자동 시작" 토글(ADR-0027 §55) — autolaunch enable/disable 반전 + 체크 동기화.
-    /// 다른 액션과 달리 CheckMenuItem(체크 상태 보유)으로 렌더된다(GUI shell 책임).
+    // "부팅 시 자동 시작" 토글(ADR-0027 §55) — autolaunch enable/disable 반전 + 체크 동기화.
+    // 다른 액션과 달리 CheckMenuItem(체크 상태 보유)으로 렌더된다(GUI shell 책임).
     ToggleAutostart,
 }
 
 impl MenuAction {
-    /// 메뉴 항목의 안정 id(Tauri MenuItem 의 id 문자열로 사용).
-    /// 디스플레이 라벨과 분리 — 라벨이 바뀌어도 id 는 불변(클릭 매핑 안정).
+    // 메뉴 항목의 안정 id(Tauri MenuItem 의 id 문자열로 사용).
+    // 디스플레이 라벨과 분리 — 라벨이 바뀌어도 id 는 불변(클릭 매핑 안정).
     pub const fn menu_id(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "start_daemon",
@@ -37,7 +37,7 @@ impl MenuAction {
         }
     }
 
-    /// 메뉴 항목의 고정 라벨(상태 비반영).
+    // 메뉴 항목의 고정 라벨(상태 비반영).
     pub const fn label(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "데몬 켜기",
@@ -47,10 +47,10 @@ impl MenuAction {
         }
     }
 
-    /// v2 메뉴에 노출되는 액션들(순서 = 표시 순서).
-    /// 표시: 데몬 켜기, 데몬 끄기, 부팅 시 자동 시작, (구분선), 완전 종료.
-    /// (구분선은 GUI shell 이 QuitApp 앞에 삽입 — core 는 액션만 안다.)
-    /// ShowUi/HideUi 는 메뉴에서 빠지고 트레이 더블클릭으로 대체(actions 함수는 유지).
+    // v2 메뉴에 노출되는 액션들(순서 = 표시 순서).
+    // 표시: 데몬 켜기, 데몬 끄기, 부팅 시 자동 시작, (구분선), 완전 종료.
+    // (구분선은 GUI shell 이 QuitApp 앞에 삽입 — core 는 액션만 안다.)
+    // ShowUi/HideUi 는 메뉴에서 빠지고 트레이 더블클릭으로 대체(actions 함수는 유지).
     pub const ALL: [MenuAction; 4] = [
         MenuAction::StartDaemon,
         MenuAction::StopDaemon,
@@ -59,25 +59,25 @@ impl MenuAction {
     ];
 }
 
-/// 메뉴 클릭 id → [`MenuAction`] 매핑(순수). 알 수 없는 id 면 None.
-/// Tauri 의 MenuEvent.id 문자열을 받아 의도로 환원한다.
+// 메뉴 클릭 id → [`MenuAction`] 매핑(순수). 알 수 없는 id 면 None.
+// Tauri 의 MenuEvent.id 문자열을 받아 의도로 환원한다.
 pub fn action_for_menu_id(id: &str) -> Option<MenuAction> {
     MenuAction::ALL.into_iter().find(|a| a.menu_id() == id)
 }
 
 // ── 상태 → 표시 매핑(순수) ─────────────────────────────────────────────────────────
 
-/// 트레이 아이콘 상태. 데몬 생존을 시각화한다(활성=컬러/비활성=회색).
-/// 실제 아이콘 두 벌은 GUI shell 이 들고, core 는 어떤 상태인지만 결정한다(렌더링 분리).
+// 트레이 아이콘 상태. 데몬 생존을 시각화한다(활성=컬러/비활성=회색).
+// 실제 아이콘 두 벌은 GUI shell 이 들고, core 는 어떤 상태인지만 결정한다(렌더링 분리).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconState {
-    /// 데몬 alive — 활성(컬러) 아이콘.
+    // 데몬 alive — 활성(컬러) 아이콘.
     Active,
-    /// 데몬 없음/죽음 — 비활성(회색) 아이콘.
+    // 데몬 없음/죽음 — 비활성(회색) 아이콘.
     Inactive,
 }
 
-/// 데몬 alive(bool) → [`IconState`] 매핑(순수).
+// 데몬 alive(bool) → [`IconState`] 매핑(순수).
 pub fn icon_state_for(alive: bool) -> IconState {
     if alive {
         IconState::Active
@@ -88,20 +88,20 @@ pub fn icon_state_for(alive: bool) -> IconState {
 
 // ── 아이콘 픽셀 변환(순수) ──────────────────────────────────────────────────────────
 
-/// RGBA8 픽셀 버퍼를 desaturate(회색조)한 새 버퍼를 만든다(순수 — image 타입 무의존).
-///
-/// 비활성(데몬 죽음) 상태의 회색 아이콘을 컬러 원본에서 파생한다. luma = 0.299R+0.587G+0.114B
-/// (Rec.601)로 각 RGB 채널을 동일 값으로 대체하고 alpha 는 보존한다 → R==G==B 인 무채색.
-/// image 의존은 GUI shell 에만 두고 core 는 `&[u8]` 슬라이스만 받아 격리를 유지한다(CLAUDE.md §4).
-///
-/// `rgba.len()` 은 `w*h*4` 여야 한다(RGBA 4채널). 이 전제는 호출자(Tauri `Image::from_bytes` 로
-/// 디코드한 `.rgba()`)가 보장한다 — 디코드 결과가 `(width, height)` 와 정합하는 길이의 버퍼다.
-/// len ≠ w*h*4 는 전부 계약 위반(4의 배수 여부 무관). debug 빌드는 아래 debug_assert 가 즉시
-/// panic 으로 잡고, 릴리스는 하류가 잡되 **soft** 하다 — 직접 소비처 `Image::new_owned(_, w, h)`
-/// 는 무검증 생성자지만, 그 `Image` 가 트레이에 닿기 전 `TryFrom → tray_icon::Icon::from_rgba`
-/// 의 길이 검증을 거친다(builder 경로 = `.ok()` 로 삼켜 아이콘 미설정 / `set_icon` 경로 = warn
-/// 로그 degrade — 어느 쪽도 panic 아님). 즉 debug_assert 는 유일한 방어선이 아니라 유일하게
-/// 즉시·시끄럽게 잡는 방어선이다. 전제가 지켜지면 chunks_exact 잔여는 없다.
+// RGBA8 픽셀 버퍼를 desaturate(회색조)한 새 버퍼를 만든다(순수 — image 타입 무의존).
+//
+// 비활성(데몬 죽음) 상태의 회색 아이콘을 컬러 원본에서 파생한다. luma = 0.299R+0.587G+0.114B
+// (Rec.601)로 각 RGB 채널을 동일 값으로 대체하고 alpha 는 보존한다 → R==G==B 인 무채색.
+// image 의존은 GUI shell 에만 두고 core 는 `&[u8]` 슬라이스만 받아 격리를 유지한다(CLAUDE.md §4).
+//
+// `rgba.len()` 은 `w*h*4` 여야 한다(RGBA 4채널). 이 전제는 호출자(Tauri `Image::from_bytes` 로
+// 디코드한 `.rgba()`)가 보장한다 — 디코드 결과가 `(width, height)` 와 정합하는 길이의 버퍼다.
+// len ≠ w*h*4 는 전부 계약 위반(4의 배수 여부 무관). debug 빌드는 아래 debug_assert 가 즉시
+// panic 으로 잡고, 릴리스는 하류가 잡되 **soft** 하다 — 직접 소비처 `Image::new_owned(_, w, h)`
+// 는 무검증 생성자지만, 그 `Image` 가 트레이에 닿기 전 `TryFrom → tray_icon::Icon::from_rgba`
+// 의 길이 검증을 거친다(builder 경로 = `.ok()` 로 삼켜 아이콘 미설정 / `set_icon` 경로 = warn
+// 로그 degrade — 어느 쪽도 panic 아님). 즉 debug_assert 는 유일한 방어선이 아니라 유일하게
+// 즉시·시끄럽게 잡는 방어선이다. 전제가 지켜지면 chunks_exact 잔여는 없다.
 pub fn to_grayscale_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     debug_assert_eq!(
         rgba.len(),

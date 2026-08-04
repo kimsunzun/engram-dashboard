@@ -23,9 +23,9 @@ pub use types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot}
 
 use std::sync::{Arc, Mutex};
 
-/// AppState — src-tauri 가 manage 하는 레이아웃 권위 핸들. invoke 스레드풀 동시접근 → Mutex.
-/// ★Tauri async_runtime::Mutex 가 아닌 std Mutex★: mutation 은 짧은 동기 구간이고 락 보유 중
-/// await(외부 호출)가 없다(ADR-0006: 락 보유 중 외부 호출 0) → std Mutex 로 충분.
+// AppState — src-tauri 가 manage 하는 레이아웃 권위 핸들. invoke 스레드풀 동시접근 → Mutex.
+// ★Tauri async_runtime::Mutex 가 아닌 std Mutex★: mutation 은 짧은 동기 구간이고 락 보유 중
+// await(외부 호출)가 없다(ADR-0006: 락 보유 중 외부 호출 0) → std Mutex 로 충분.
 #[derive(Clone, Default)]
 pub struct LayoutState(pub Arc<Mutex<ViewManager>>);
 

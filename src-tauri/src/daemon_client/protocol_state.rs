@@ -24,11 +24,11 @@ use std::collections::HashMap;
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
 
 // ── request_id 추출(T6a — request/reply 상관) ─────────────────────────────────────────
-/// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
-/// 일부(Auth/Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
-///
-/// ★T6a 계약★: `send_command` 은 reply 를 기대하므로 request_id 가 있는 명령에만 쓴다. None 인 명령을
-/// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로, 호출자(send_command)가 None 을 거른다.
+// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
+// 일부(Auth/Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
+//
+// ★T6a 계약★: `send_command` 은 reply 를 기대하므로 request_id 가 있는 명령에만 쓴다. None 인 명령을
+// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로, 호출자(send_command)가 None 을 거른다.
 pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
     match cmd {
         AgentCommand::Spawn { request_id, .. }
@@ -66,13 +66,13 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
     }
 }
 
-/// reply 이벤트에 실린 request_id 를 꺼낸다(매칭용). 전용 reply variant(Ack/Spawned/Created/
-/// SubscribeAck-는 request_id 없음/AgentList/ProfileList/Snapshot/Error)만 request_id 를 echo 한다 —
-/// broadcast(AgentListUpdated/StatusChanged/…)는 `None` 이라 pending 매칭을 우회한다(편승 매칭 제거).
-///
-/// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
-/// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
-/// None — T6a 의 send_command 대상이 아니다(Subscribe 는 request_id 없는 명령). T6b 가 agent_id 로 처리.
+// reply 이벤트에 실린 request_id 를 꺼낸다(매칭용). 전용 reply variant(Ack/Spawned/Created/
+// SubscribeAck-는 request_id 없음/AgentList/ProfileList/Snapshot/Error)만 request_id 를 echo 한다 —
+// broadcast(AgentListUpdated/StatusChanged/…)는 `None` 이라 pending 매칭을 우회한다(편승 매칭 제거).
+//
+// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
+// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
+// None — T6a 의 send_command 대상이 아니다(Subscribe 는 request_id 없는 명령). T6b 가 agent_id 로 처리.
 pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
     match ev {
         AgentEvent::Ack { request_id }
@@ -99,9 +99,9 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
     }
 }
 
-/// reply 이벤트가 성공(Ok)인지 실패(Err)인지 가른다(T6a — oneshot resolve). `Error{message}` 만
-/// Err(message), 나머지 전용 reply 는 Ok(event). 호출자가 take_pending 으로 꺼낸 oneshot 에 이 결과를
-/// 넣는다.
+// reply 이벤트가 성공(Ok)인지 실패(Err)인지 가른다(T6a — oneshot resolve). `Error{message}` 만
+// Err(message), 나머지 전용 reply 는 Ok(event). 호출자가 take_pending 으로 꺼낸 oneshot 에 이 결과를
+// 넣는다.
 pub fn reply_outcome(ev: AgentEvent) -> Result<AgentEvent, String> {
     match ev {
         AgentEvent::Error { message, .. } => Err(message),
@@ -109,56 +109,56 @@ pub fn reply_outcome(ev: AgentEvent) -> Result<AgentEvent, String> {
     }
 }
 
-/// 에이전트별 출력 구독 상태(JS `protocolClient.ts` `SubState` 승격).
-///
-/// epoch 가드의 per-agent 진실원. 연결 task 가 agent_id → SubState 맵으로 들고,
-/// SubscribeAck/output frame 마다 아래 결정 함수에 `&mut` 로 넘긴다.
-///
-/// ★T7a 변경★: high-water(last_delivered_seq) 와 dedup 가드는 per-window 로 이동(output_channel.rs) —
-/// 창마다 독립 render_seq 를 들어 각 창이 받은 최고 seq 로 dedup 한다. 이 struct 는 epoch 가드만 담는다.
+// 에이전트별 출력 구독 상태(JS `protocolClient.ts` `SubState` 승격).
+//
+// epoch 가드의 per-agent 진실원. 연결 task 가 agent_id → SubState 맵으로 들고,
+// SubscribeAck/output frame 마다 아래 결정 함수에 `&mut` 로 넘긴다.
+//
+// ★T7a 변경★: high-water(last_delivered_seq) 와 dedup 가드는 per-window 로 이동(output_channel.rs) —
+// 창마다 독립 render_seq 를 들어 각 창이 받은 최고 seq 로 dedup 한다. 이 struct 는 epoch 가드만 담는다.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubState {
-    /// 마지막 `SubscribeAck.current_epoch`. output frame epoch 매칭용(불일치 frame 폐기) +
-    /// 재연결 resubscribe wire epoch. `None` = 아직 Ack 못 받음(첫 구독 직후).
+    // 마지막 `SubscribeAck.current_epoch`. output frame epoch 매칭용(불일치 frame 폐기) +
+    // 재연결 resubscribe wire epoch. `None` = 아직 Ack 못 받음(첫 구독 직후).
     pub epoch: Option<u32>,
 }
 
 impl SubState {
-    /// 신규 구독 직후 초기값(JS `subscribeOutput`: epoch=undefined).
-    /// 같은 agent_id 재구독 시 이걸로 덮는다(컴포넌트가 epoch 바뀌면 재구독).
+    // 신규 구독 직후 초기값(JS `subscribeOutput`: epoch=undefined).
+    // 같은 agent_id 재구독 시 이걸로 덮는다(컴포넌트가 epoch 바뀌면 재구독).
     pub fn new() -> Self {
         Self { epoch: None }
     }
 }
 
-/// output frame 의 epoch 가드 판정 결과(T7a — per-window dedup 이동 후 epoch 판정만 남음).
-///
-/// ★T7a 변경★: T6b 까지의 `OutputDecision{Deliver{seq}/DropEpochMismatch/DropDuplicate}` 에서
-/// dedup(DropDuplicate) 판정을 per-window 레벨(output_channel::should_deliver)로 이동했다 — 창마다
-/// 다른 render_seq 를 들어 독립 dedup 해야 하기 때문(SubState 전역 high-water 는 다중 창 불가).
-/// epoch 가드만 이 레이어에 남겨 라우팅 전 1회 적용하고, dedup 은 fan_out_per_window 안에서 창별로 한다.
+// output frame 의 epoch 가드 판정 결과(T7a — per-window dedup 이동 후 epoch 판정만 남음).
+//
+// ★T7a 변경★: T6b 까지의 `OutputDecision{Deliver{seq}/DropEpochMismatch/DropDuplicate}` 에서
+// dedup(DropDuplicate) 판정을 per-window 레벨(output_channel::should_deliver)로 이동했다 — 창마다
+// 다른 render_seq 를 들어 독립 dedup 해야 하기 때문(SubState 전역 high-water 는 다중 창 불가).
+// epoch 가드만 이 레이어에 남겨 라우팅 전 1회 적용하고, dedup 은 fan_out_per_window 안에서 창별로 한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochDecision {
-    /// epoch 가드 통과 — fan-out 후보(dedup 은 창별로 추가 판정).
+    // epoch 가드 통과 — fan-out 후보(dedup 은 창별로 추가 판정).
     Deliver,
-    /// epoch 불일치 — 옛 세션 잔여 frame. 화면 오염 방지로 버린다.
+    // epoch 불일치 — 옛 세션 잔여 frame. 화면 오염 방지로 버린다.
     DropEpochMismatch,
 }
 
-/// pending request_id → reply 콜백 슬롯의 키→값 타입. 값(T)은 호출자가 정한다 —
-/// 운영에선 `oneshot::Sender<reply>`, 테스트에선 결과를 적재하는 mock. 이 모듈은 매칭 로직만 소유한다.
+// pending request_id → reply 콜백 슬롯의 키→값 타입. 값(T)은 호출자가 정한다 —
+// 운영에선 `oneshot::Sender<reply>`, 테스트에선 결과를 적재하는 mock. 이 모듈은 매칭 로직만 소유한다.
 pub type PendingMap<T> = HashMap<RequestId, T>;
 
 // ── output frame epoch 가드(T7a — dedup 은 per-window output_channel::should_deliver 로 이동) ──
-/// epoch 가드만 판정한다. dedup(seq high-water)은 창별 `output_channel::should_deliver` 가 담당한다.
-///
-/// ★T7a 이동 배경★: 단일 global high-water(SubState.last_delivered_seq)는 창이 여럿일 때 문제가 된다 —
-/// 창 A 가 seq 100 을 렌더하면 창 B 에게도 seq<=100 을 drop 해버린다(창 B 는 아직 0부터 필요할 수 있음).
-/// 그래서 dedup 을 per-window(output_channel::WindowEntry.render_seqs)로 낮추고 이 레이어엔 epoch 가드만
-/// 남겼다. epoch 는 세션 단위라 "창 무관, 이 epoch 의 frame 인가?" 를 1회 판정하면 충분하다.
-///
-/// ★epoch=None(첫 Ack 전) 통과(load-bearing)★: epoch 기준이 없으면 비교를 건너뛰고 통과시킨다 —
-/// Ack 전 도착 frame 도 배달해야 초반 출력이 사라지지 않는다(JS `st.epoch !== undefined` 가드와 동형).
+// epoch 가드만 판정한다. dedup(seq high-water)은 창별 `output_channel::should_deliver` 가 담당한다.
+//
+// ★T7a 이동 배경★: 단일 global high-water(SubState.last_delivered_seq)는 창이 여럿일 때 문제가 된다 —
+// 창 A 가 seq 100 을 렌더하면 창 B 에게도 seq<=100 을 drop 해버린다(창 B 는 아직 0부터 필요할 수 있음).
+// 그래서 dedup 을 per-window(output_channel::WindowEntry.render_seqs)로 낮추고 이 레이어엔 epoch 가드만
+// 남겼다. epoch 는 세션 단위라 "창 무관, 이 epoch 의 frame 인가?" 를 1회 판정하면 충분하다.
+//
+// ★epoch=None(첫 Ack 전) 통과(load-bearing)★: epoch 기준이 없으면 비교를 건너뛰고 통과시킨다 —
+// Ack 전 도착 frame 도 배달해야 초반 출력이 사라지지 않는다(JS `st.epoch !== undefined` 가드와 동형).
 pub fn decide_epoch(st: &SubState, frame_epoch: u32) -> EpochDecision {
     if let Some(cur) = st.epoch {
         if frame_epoch != cur {
@@ -169,17 +169,17 @@ pub fn decide_epoch(st: &SubState, frame_epoch: u32) -> EpochDecision {
 }
 
 // ── SubscribeAck 처리(JS handleEvent 의 SubscribeAck 분기 승격) ───────────────────────
-/// SubscribeAck 수신 시 epoch 갱신. epoch 가 변경됐으면 `true`, 동일하면 `false` 반환.
-///
-/// ★T7a 변경★: 반환값 `bool` 추가(epoch 변경 시 true). 호출자(connection.rs)가 `true` 이면
-/// `output_channel::reset_all_windows_for_agent` 로 모든 창의 render_seq 를 None(전체 replay)으로
-/// 리셋한다 — T6b 의 SubState.last_delivered_seq 리셋을 per-window 리셋으로 대체한 것.
-///
-/// ★버그 B 가드(유지)★: `replay_from` 은 "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니다 —
-/// dedup 기준으로 쓰면 첫 정상 프레임을 버린다. 그래서 이 함수는 replay_from 을 인자로 받지 않는다.
-///
-/// ★epoch 변경 리셋(ADR-0007 epoch 재구독 대응)★: epoch 이 바뀌면(데몬 재기동·재시작) 새 스트림 →
-/// 모든 창의 render_seq 를 리셋해야 새 낮은 seq 가 창별 dedup 에 막히지 않는다(호출자 책임).
+// SubscribeAck 수신 시 epoch 갱신. epoch 가 변경됐으면 `true`, 동일하면 `false` 반환.
+//
+// ★T7a 변경★: 반환값 `bool` 추가(epoch 변경 시 true). 호출자(connection.rs)가 `true` 이면
+// `output_channel::reset_all_windows_for_agent` 로 모든 창의 render_seq 를 None(전체 replay)으로
+// 리셋한다 — T6b 의 SubState.last_delivered_seq 리셋을 per-window 리셋으로 대체한 것.
+//
+// ★버그 B 가드(유지)★: `replay_from` 은 "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니다 —
+// dedup 기준으로 쓰면 첫 정상 프레임을 버린다. 그래서 이 함수는 replay_from 을 인자로 받지 않는다.
+//
+// ★epoch 변경 리셋(ADR-0007 epoch 재구독 대응)★: epoch 이 바뀌면(데몬 재기동·재시작) 새 스트림 →
+// 모든 창의 render_seq 를 리셋해야 새 낮은 seq 가 창별 dedup 에 막히지 않는다(호출자 책임).
 pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) -> bool {
     let epoch_changed = match st.epoch {
         Some(prev) => current_epoch != prev,
@@ -190,21 +190,21 @@ pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) -> bool {
 }
 
 // ── pending request_id 매칭(JS resolvePending/rejectPending + connected→down reject 승격) ──
-/// request_id 에 대응하는 pending 슬롯을 꺼낸다(매칭 성공 시 맵에서 제거 — 1회성). `None` 이면 무시
-/// (JS `resolvePending` 의 "없으면 no-op"). 호출자가 반환된 슬롯을 resolve/reject 한다.
-///
-/// ★편승 매칭 제거(protocol v2)★: 조회도 전용 reply variant(AgentList/ProfileList/Snapshot)가
-/// request_id 를 echo 하므로 broadcast(AgentListUpdated 등)가 조회 응답에 편승하지 않는다 — 호출자가
-/// broadcast variant 는 이 함수를 안 거치고 콜백만 호출하면 된다.
+// request_id 에 대응하는 pending 슬롯을 꺼낸다(매칭 성공 시 맵에서 제거 — 1회성). `None` 이면 무시
+// (JS `resolvePending` 의 "없으면 no-op"). 호출자가 반환된 슬롯을 resolve/reject 한다.
+//
+// ★편승 매칭 제거(protocol v2)★: 조회도 전용 reply variant(AgentList/ProfileList/Snapshot)가
+// request_id 를 echo 하므로 broadcast(AgentListUpdated 등)가 조회 응답에 편승하지 않는다 — 호출자가
+// broadcast variant 는 이 함수를 안 거치고 콜백만 호출하면 된다.
 pub fn take_pending<T>(pending: &mut PendingMap<T>, request_id: &RequestId) -> Option<T> {
     pending.remove(request_id)
 }
 
-/// connected→비connected 전이 시 **모든** pending 을 꺼내 비운다(JS handleClose 의 일괄 reject).
-/// 호출자가 각 슬롯을 "connection lost" 로 reject 한다. spawn/kill 등 1회성이라 자동 재전송은 중복
-/// 부작용 위험 — 호출자가 catch 후 재시도가 단순·안전(JS 주석 보존). 반환 후 맵은 빈다.
-///
-/// ★1회성★: 한 번 끊기면 모든 in-flight 가 동시에 죽는다 — 부분 reject 없음(전부 또는 없음).
+// connected→비connected 전이 시 **모든** pending 을 꺼내 비운다(JS handleClose 의 일괄 reject).
+// 호출자가 각 슬롯을 "connection lost" 로 reject 한다. spawn/kill 등 1회성이라 자동 재전송은 중복
+// 부작용 위험 — 호출자가 catch 후 재시도가 단순·안전(JS 주석 보존). 반환 후 맵은 빈다.
+//
+// ★1회성★: 한 번 끊기면 모든 in-flight 가 동시에 죽는다 — 부분 reject 없음(전부 또는 없음).
 pub fn drain_pending<T>(pending: &mut PendingMap<T>) -> Vec<T> {
     pending.drain().map(|(_k, v)| v).collect()
 }
@@ -242,8 +242,8 @@ mod tests {
 
     // ── request_id pending 매칭 ─────────────────────────────────────────────────────
 
-    /// TS: "spawnAgent → SpawnByCwd{request_id} 전송 + Spawned{request_id,agent} resolve"
-    /// 순수 핵심: 등록된 request_id 의 reply 가 도착하면 그 슬롯이 정확히 매칭돼 꺼내진다.
+    // TS: "spawnAgent → SpawnByCwd{request_id} 전송 + Spawned{request_id,agent} resolve"
+    // 순수 핵심: 등록된 request_id 의 reply 가 도착하면 그 슬롯이 정확히 매칭돼 꺼내진다.
     #[test]
     fn pending_resolve_on_matching_reply() {
         let mut pending: PendingMap<&str> = PendingMap::new();
@@ -254,8 +254,8 @@ mod tests {
         assert!(pending.is_empty(), "매칭 후 슬롯 제거(1회성)");
     }
 
-    /// TS: "killAgent → Ack{request_id} 로 void resolve"
-    /// 순수 핵심: void 응답(payload 없음)도 request_id 로만 매칭된다(여기선 unit 값).
+    // TS: "killAgent → Ack{request_id} 로 void resolve"
+    // 순수 핵심: void 응답(payload 없음)도 request_id 로만 매칭된다(여기선 unit 값).
     #[test]
     fn pending_resolve_void_ack() {
         let mut pending: PendingMap<()> = PendingMap::new();
@@ -265,8 +265,8 @@ mod tests {
         assert!(pending.is_empty());
     }
 
-    /// TS: "Error{request_id} 로 reject"
-    /// 순수 핵심: Error 도 request_id echo 로 같은 슬롯을 꺼낸다(호출자가 reject — 여기선 take 까지).
+    // TS: "Error{request_id} 로 reject"
+    // 순수 핵심: Error 도 request_id echo 로 같은 슬롯을 꺼낸다(호출자가 reject — 여기선 take 까지).
     #[test]
     fn pending_take_for_error() {
         let mut pending: PendingMap<&str> = PendingMap::new();
@@ -276,8 +276,8 @@ mod tests {
         assert!(pending.is_empty());
     }
 
-    /// TS: "잘못된 request_id 의 응답은 무시(pending 유지)"
-    /// 순수 핵심: 매칭 안 되는 request_id 면 None 반환 + 기존 슬롯 보존.
+    // TS: "잘못된 request_id 의 응답은 무시(pending 유지)"
+    // 순수 핵심: 매칭 안 되는 request_id 면 None 반환 + 기존 슬롯 보존.
     #[test]
     fn pending_unknown_request_id_ignored() {
         let mut pending: PendingMap<&str> = PendingMap::new();
@@ -304,14 +304,14 @@ mod tests {
 
     // ── epoch 가드(T7a — decide_epoch) ─────────────────────────────────────────────
 
-    /// 구독 직후 + SubscribeAck(current_epoch) 적용 헬퍼.
+    // 구독 직후 + SubscribeAck(current_epoch) 적용 헬퍼.
     fn subscribed_with_ack(epoch: u32) -> SubState {
         let mut st = SubState::new();
         apply_subscribe_ack(&mut st, epoch);
         st
     }
 
-    /// TS: "epoch 안 맞는 frame → drop(stale 세션)".
+    // TS: "epoch 안 맞는 frame → drop(stale 세션)".
     #[test]
     fn epoch_mismatch_dropped() {
         let st = subscribed_with_ack(5);
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(decide_epoch(&st, 5), EpochDecision::Deliver);
     }
 
-    /// TS: "SubscribeAck 전 frame(epoch undefined) → epoch 가드 통과(배달)".
+    // TS: "SubscribeAck 전 frame(epoch undefined) → epoch 가드 통과(배달)".
     #[test]
     fn frame_before_ack_passes_epoch_guard() {
         let st = SubState::new(); // Ack 전 — epoch=None
@@ -329,21 +329,21 @@ mod tests {
         assert_eq!(decide_epoch(&st, 0), EpochDecision::Deliver);
     }
 
-    /// TS: "SubscribeAck epoch=1 + output epoch=1 → 배달(전멸 안 됨)" (BLOCKER 1 회귀).
+    // TS: "SubscribeAck epoch=1 + output epoch=1 → 배달(전멸 안 됨)" (BLOCKER 1 회귀).
     #[test]
     fn ack_epoch1_output_epoch1_delivered() {
         let st = subscribed_with_ack(1);
         assert_eq!(decide_epoch(&st, 1), EpochDecision::Deliver);
     }
 
-    /// TS: "SubscribeAck epoch=1 + output epoch=0(옛 버그 재현) → epoch 가드 drop".
+    // TS: "SubscribeAck epoch=1 + output epoch=0(옛 버그 재현) → epoch 가드 drop".
     #[test]
     fn ack_epoch1_output_epoch0_dropped() {
         let st = subscribed_with_ack(1);
         assert_eq!(decide_epoch(&st, 0), EpochDecision::DropEpochMismatch);
     }
 
-    /// TS: "epoch 0 output + epoch 0 SubscribeAck 정합(fresh 세션 epoch=0)".
+    // TS: "epoch 0 output + epoch 0 SubscribeAck 정합(fresh 세션 epoch=0)".
     #[test]
     fn fresh_session_epoch0_delivered() {
         let st = subscribed_with_ack(0);
@@ -352,7 +352,7 @@ mod tests {
 
     // ── apply_subscribe_ack — bool 반환(T7a) ──────────────────────────────────────
 
-    /// 첫 Ack 는 epoch=None → Some(E) 전이. epoch 가 없었으므로 changed=false.
+    // 첫 Ack 는 epoch=None → Some(E) 전이. epoch 가 없었으므로 changed=false.
     #[test]
     fn first_ack_returns_false() {
         let mut st = SubState::new();
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(st.epoch, Some(10));
     }
 
-    /// 동일 epoch 재 Ack — changed=false.
+    // 동일 epoch 재 Ack — changed=false.
     #[test]
     fn same_epoch_ack_returns_false() {
         let mut st = subscribed_with_ack(5);
@@ -372,7 +372,7 @@ mod tests {
         assert!(!changed, "같은 epoch 재확인 — 창 리셋 불필요");
     }
 
-    /// epoch 변경 Ack — changed=true(호출자가 reset_all_windows_for_agent 해야 함).
+    // epoch 변경 Ack — changed=true(호출자가 reset_all_windows_for_agent 해야 함).
     #[test]
     fn epoch_change_ack_returns_true() {
         let mut st = subscribed_with_ack(10);
@@ -387,8 +387,8 @@ mod tests {
 
     // ── pending drain ───────────────────────────────────────────────────────────────
 
-    /// TS: "connected→reconnecting 전이 시 pending 명령 reject(connection lost)"
-    /// 순수 핵심: 끊김 시 drain_pending 이 **모든** in-flight 를 꺼내 비운다(호출자가 일괄 reject).
+    // TS: "connected→reconnecting 전이 시 pending 명령 reject(connection lost)"
+    // 순수 핵심: 끊김 시 drain_pending 이 **모든** in-flight 를 꺼내 비운다(호출자가 일괄 reject).
     #[test]
     fn drain_pending_on_disconnect() {
         let mut pending: PendingMap<&str> = PendingMap::new();
@@ -401,8 +401,8 @@ mod tests {
 
     // ── close ──────────────────────────────────────────────────────────────────────
 
-    /// TS: "close() → pending reject + transport.close 호출"
-    /// 순수 핵심: close 시 모든 pending 을 꺼내 비운다(transport.close 호출은 carrier 배선 = T6).
+    // TS: "close() → pending reject + transport.close 호출"
+    // 순수 핵심: close 시 모든 pending 을 꺼내 비운다(transport.close 호출은 carrier 배선 = T6).
     #[test]
     fn close_drains_all_pending() {
         let mut pending: PendingMap<&str> = PendingMap::new();
@@ -414,8 +414,8 @@ mod tests {
 
     // ── T6a: request_id 추출 + reply outcome 분류 ─────────────────────────────────────
 
-    /// side-effect 명령은 request_id 를 반환하고, request_id 없는 명령(Auth/Resize/Subscribe/
-    /// Unsubscribe)은 None — send_command 가 None 을 걸러 영구 pending(hang)을 막는 계약의 단위 박제.
+    // side-effect 명령은 request_id 를 반환하고, request_id 없는 명령(Auth/Resize/Subscribe/
+    // Unsubscribe)은 None — send_command 가 None 을 걸러 영구 pending(hang)을 막는 계약의 단위 박제.
     #[test]
     fn command_request_id_extracts_or_none() {
         let r = RequestId::new();
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(command_request_id(&auth), None);
     }
 
-    /// 전용 reply variant 는 request_id 를 echo(매칭 대상), broadcast 는 None(매칭 우회 = 편승 제거).
+    // 전용 reply variant 는 request_id 를 echo(매칭 대상), broadcast 는 None(매칭 우회 = 편승 제거).
     #[test]
     fn event_reply_request_id_only_for_replies() {
         let r = RequestId::new();
@@ -510,7 +510,7 @@ mod tests {
         );
     }
 
-    /// reply_outcome: Error 만 Err(message), 나머지 전용 reply 는 Ok(event).
+    // reply_outcome: Error 만 Err(message), 나머지 전용 reply 는 Ok(event).
     #[test]
     fn reply_outcome_splits_ok_and_err() {
         let r = RequestId::new();

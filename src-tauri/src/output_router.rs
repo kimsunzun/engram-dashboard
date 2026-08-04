@@ -42,37 +42,37 @@ use arc_swap::ArcSwap;
 use crate::layout::manager::ViewManager;
 use crate::layout::types::{LayoutNode, SlotContent};
 
-/// 캐시된 빈 라우팅 결과(미스 시 반환). `Arc::from(Vec::new())` 는 매번 Arc 헤더(refcount 블록)를
-/// 힙에 할당한다 — 미스가 핫패스에서 빈번하면 그게 누적 비용이다. 한 번만 만들어 `Arc::clone`(refcount
-/// +1, 할당 0)으로 돌려 미스 경로를 진짜 zero-alloc 으로 만든다(FIX-2).
+// 캐시된 빈 라우팅 결과(미스 시 반환). `Arc::from(Vec::new())` 는 매번 Arc 헤더(refcount 블록)를
+// 힙에 할당한다 — 미스가 핫패스에서 빈번하면 그게 누적 비용이다. 한 번만 만들어 `Arc::clone`(refcount
+// +1, 할당 0)으로 돌려 미스 경로를 진짜 zero-alloc 으로 만든다(FIX-2).
 static EMPTY_TARGETS: LazyLock<Arc<[WindowLabel]>> = LazyLock::new(|| Arc::from(Vec::new()));
 
-/// 라우팅 키. 프레임 `agent_id`(= `engram_dashboard_protocol::AgentId` = `uuid::Uuid`)와 동일 타입.
-/// Slot 의 `String` 은 rebuild 경계에서 이 타입으로 파싱·정규화한다(위 모듈 주석 AgentKey 결정).
+// 라우팅 키. 프레임 `agent_id`(= `engram_dashboard_protocol::AgentId` = `uuid::Uuid`)와 동일 타입.
+// Slot 의 `String` 은 rebuild 경계에서 이 타입으로 파싱·정규화한다(위 모듈 주석 AgentKey 결정).
 pub type AgentKey = uuid::Uuid;
 
-/// Tauri window label(예: "main", "slot-popup-3"). `ViewManager.windows` 키와 동일 타입 → 별도
-/// numeric 레지스트리 불필요(spike §8 D1).
+// Tauri window label(예: "main", "slot-popup-3"). `ViewManager.windows` 키와 동일 타입 → 별도
+// numeric 레지스트리 불필요(spike §8 D1).
 pub type WindowLabel = String;
 
-/// 라우팅 스냅샷. `Arc<[WindowLabel]>` 로 값을 공유 — 핫패스에서 clone 해도 포인터 복사뿐(요소 복사 X).
-///
-/// `by_agent` 에 없는 agent = 현재 어느 창에도 안 보임 → `targets` 가 빈 슬라이스 반환(전송 대상 0).
+// 라우팅 스냅샷. `Arc<[WindowLabel]>` 로 값을 공유 — 핫패스에서 clone 해도 포인터 복사뿐(요소 복사 X).
+//
+// `by_agent` 에 없는 agent = 현재 어느 창에도 안 보임 → `targets` 가 빈 슬라이스 반환(전송 대상 0).
 #[derive(Debug, Default)]
 pub struct RoutingSnapshot {
     pub by_agent: HashMap<AgentKey, Arc<[WindowLabel]>>,
 }
 
-/// rebuild 1회의 구독 델타(F-B). 직전 snapshot 대비 agent-union diff 를 한 번의 트리 순회에서 산출한다.
-///
-/// ## agent 단위 diff
-/// - `to_subscribe`: 이번에 새로 보이기 시작(0→1 agent). ★ADR-0046: layout 은 이걸로 wire Subscribe 를
-///   **보내지 않는다**★ — wire 구독 형성은 뷰 주도 `request_replay` 단독이다(BLOCK-1 전면화). 델타 산출은
-///   유지해 diff 보존 불변식 테스트/미래 진단에 쓴다.
-/// - `to_unsubscribe`: 더 이상 어느 창에도 안 보임(1→0 agent) → 라우터가 wire `Unsubscribe` 를 발행(정리).
-///
-/// ★ADR-0046 — 축 B 제거★: 옛 slot=(window,agent) 단위 cursor 델타(`slots_to_replay`/`slots_to_drop`)는
-///   미러 버퍼(cursor)와 함께 삭제됐다. remount/새 창은 데몬 ring 전량 재replay(뷰 주도)로 대체한다.
+// rebuild 1회의 구독 델타(F-B). 직전 snapshot 대비 agent-union diff 를 한 번의 트리 순회에서 산출한다.
+//
+// ## agent 단위 diff
+// - `to_subscribe`: 이번에 새로 보이기 시작(0→1 agent). ★ADR-0046: layout 은 이걸로 wire Subscribe 를
+//   **보내지 않는다**★ — wire 구독 형성은 뷰 주도 `request_replay` 단독이다(BLOCK-1 전면화). 델타 산출은
+//   유지해 diff 보존 불변식 테스트/미래 진단에 쓴다.
+// - `to_unsubscribe`: 더 이상 어느 창에도 안 보임(1→0 agent) → 라우터가 wire `Unsubscribe` 를 발행(정리).
+//
+// ★ADR-0046 — 축 B 제거★: 옛 slot=(window,agent) 단위 cursor 델타(`slots_to_replay`/`slots_to_drop`)는
+//   미러 버퍼(cursor)와 함께 삭제됐다. remount/새 창은 데몬 ring 전량 재replay(뷰 주도)로 대체한다.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionDelta {
     pub to_subscribe: Vec<AgentKey>,
@@ -80,17 +80,17 @@ pub struct SubscriptionDelta {
 }
 
 impl SubscriptionDelta {
-    /// 두 축 모두 비었으면 변화 없음(트리거 측이 송신 스킵 판단에 쓸 수 있게).
+    // 두 축 모두 비었으면 변화 없음(트리거 측이 송신 스킵 판단에 쓸 수 있게).
     pub fn is_empty(&self) -> bool {
         self.to_subscribe.is_empty() && self.to_unsubscribe.is_empty()
     }
 }
 
-/// agent_id → window 라우팅 테이블. 핫패스 읽기는 lock-free(`ArcSwap`), 재계산은 저빈도.
-///
-/// app-level 공유(재연결 task 수명을 넘어 산다) → `Arc<OutputRouter>` 로 manage/주입한다(T6).
+// agent_id → window 라우팅 테이블. 핫패스 읽기는 lock-free(`ArcSwap`), 재계산은 저빈도.
+//
+// app-level 공유(재연결 task 수명을 넘어 산다) → `Arc<OutputRouter>` 로 manage/주입한다(T6).
 pub struct OutputRouter {
-    /// 핫패스가 `load()` 로 읽는 현재 스냅샷. rebuild 가 `store()` 로 통째 교체(부분 변경 없음).
+    // 핫패스가 `load()` 로 읽는 현재 스냅샷. rebuild 가 `store()` 로 통째 교체(부분 변경 없음).
     table: ArcSwap<RoutingSnapshot>,
 }
 
@@ -101,19 +101,19 @@ impl Default for OutputRouter {
 }
 
 impl OutputRouter {
-    /// 빈 라우팅 테이블로 생성(어느 agent 도 매핑 없음 → 모든 `targets` 가 빈 슬라이스).
+    // 빈 라우팅 테이블로 생성(어느 agent 도 매핑 없음 → 모든 `targets` 가 빈 슬라이스).
     pub fn new() -> Self {
         Self {
             table: ArcSwap::from_pointee(RoutingSnapshot::default()),
         }
     }
 
-    /// ★핫패스★ agent 가 현재 보이는 모든 window label. 락 0 — `ArcSwap::load()` + `Arc` 포인터 clone 뿐.
-    ///
-    /// 반환은 `Arc<[WindowLabel]>` clone(요소 복사 X). 매핑 없으면 캐시된 빈 슬라이스 Arc 를 clone(할당 0,
-    /// refcount +1 뿐 — `EMPTY_TARGETS` 단일 인스턴스). ★주의(spike §7 Pitfall)★: 반환 Arc 는 즉시 순회해
-    /// 소비하라. (`load()` Guard 를 `.await` 너머로 들고 가면 슬롯 고갈 — 여기선 Guard 를 함수 안에서만 쓰고
-    /// Arc 만 반환하므로 안전.)
+    // ★핫패스★ agent 가 현재 보이는 모든 window label. 락 0 — `ArcSwap::load()` + `Arc` 포인터 clone 뿐.
+    //
+    // 반환은 `Arc<[WindowLabel]>` clone(요소 복사 X). 매핑 없으면 캐시된 빈 슬라이스 Arc 를 clone(할당 0,
+    // refcount +1 뿐 — `EMPTY_TARGETS` 단일 인스턴스). ★주의(spike §7 Pitfall)★: 반환 Arc 는 즉시 순회해
+    // 소비하라. (`load()` Guard 를 `.await` 너머로 들고 가면 슬롯 고갈 — 여기선 Guard 를 함수 안에서만 쓰고
+    // Arc 만 반환하므로 안전.)
     pub fn targets(&self, agent_id: AgentKey) -> Arc<[WindowLabel]> {
         let snap = self.table.load();
         match snap.by_agent.get(&agent_id) {
@@ -124,10 +124,10 @@ impl OutputRouter {
         }
     }
 
-    /// ★테스트 전용★: ViewManager 트리 구성 없이 라우팅 스냅샷을 직접 박는다. 각 agent 를 단일 "main" 창에
-    /// 매핑한다. `pub(crate)` 라 crate 내 다른 테스트 모듈(daemon_client::tests)에서도 호출 가능.
-    /// ★ADR-0046★: 옛 eager resubscribe(current_agents 순회)는 삭제됐다 — 헬퍼는 라우팅(targets) 테스트가
-    ///   다시 쓸 수 있어 남긴다(현재는 미사용 → allow).
+    // ★테스트 전용★: ViewManager 트리 구성 없이 라우팅 스냅샷을 직접 박는다. 각 agent 를 단일 "main" 창에
+    // 매핑한다. `pub(crate)` 라 crate 내 다른 테스트 모듈(daemon_client::tests)에서도 호출 가능.
+    // ★ADR-0046★: 옛 eager resubscribe(current_agents 순회)는 삭제됐다 — 헬퍼는 라우팅(targets) 테스트가
+    //   다시 쓸 수 있어 남긴다(현재는 미사용 → allow).
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn set_visible_agents_for_test(&self, agents: &[AgentKey]) {
@@ -138,20 +138,20 @@ impl OutputRouter {
         self.table.store(Arc::new(RoutingSnapshot { by_agent }));
     }
 
-    /// ★저빈도★ ViewManager 스냅샷으로 라우팅 테이블을 전부 재계산하고 원자 교체한다.
-    ///
-    /// 같은 트리 순회 한 번에 (1) `agent → [window]` 역인덱스와 (2) 현재 보이는 agent 집합을 동시에
-    /// 산출(piggyback) → 직전 snapshot 의 agent 집합과 diff 해 구독 델타(F-B)를 반환한다.
-    ///
-    /// ★호출 계약(직렬화 — FIX-1)★: 이 함수는 **ViewManager 락을 보유한 채(layout mutation 과 같은
-    ///  critical section 안에서)** 호출돼야 한다. 내부가 `load(prev) → delta 계산 → store(new)` 의
-    ///  RMW 라, 락 밖에서 동시 호출되면(Tauri thread pool) 델타가 어긋난다 — 중복 Subscribe·누락
-    ///  Unsubscribe·ABA(낡은 store 가 새 store 를 덮음). 락이 RMW 를 직렬화하고 `&mgr` 가 현재 상태임을
-    ///  보장한다.
-    ///
-    /// ★ADR-0006★: 락 안에서 호출해도 위반 아님 — 본문은 **순수 계산 + lock-free `ArcSwap::store`** 뿐이고
-    ///  락 보유 중 외부 호출(emit / DaemonClient / network I/O)이 0 이다. 반환된 델타의 **송신만** 락 해제
-    ///  후 T6 가 cmd_tx 로 enqueue 한다(락 안에서 송신 금지).
+    // ★저빈도★ ViewManager 스냅샷으로 라우팅 테이블을 전부 재계산하고 원자 교체한다.
+    //
+    // 같은 트리 순회 한 번에 (1) `agent → [window]` 역인덱스와 (2) 현재 보이는 agent 집합을 동시에
+    // 산출(piggyback) → 직전 snapshot 의 agent 집합과 diff 해 구독 델타(F-B)를 반환한다.
+    //
+    // ★호출 계약(직렬화 — FIX-1)★: 이 함수는 **ViewManager 락을 보유한 채(layout mutation 과 같은
+    //  critical section 안에서)** 호출돼야 한다. 내부가 `load(prev) → delta 계산 → store(new)` 의
+    //  RMW 라, 락 밖에서 동시 호출되면(Tauri thread pool) 델타가 어긋난다 — 중복 Subscribe·누락
+    //  Unsubscribe·ABA(낡은 store 가 새 store 를 덮음). 락이 RMW 를 직렬화하고 `&mgr` 가 현재 상태임을
+    //  보장한다.
+    //
+    // ★ADR-0006★: 락 안에서 호출해도 위반 아님 — 본문은 **순수 계산 + lock-free `ArcSwap::store`** 뿐이고
+    //  락 보유 중 외부 호출(emit / DaemonClient / network I/O)이 0 이다. 반환된 델타의 **송신만** 락 해제
+    //  후 T6 가 cmd_tx 로 enqueue 한다(락 안에서 송신 금지).
     pub fn rebuild(&self, mgr: &ViewManager) -> SubscriptionDelta {
         // 새 역인덱스 + agent 집합을 한 번의 창/탭/트리 순회로 만든다.
         let mut by_agent: HashMap<AgentKey, Vec<WindowLabel>> = HashMap::new();
@@ -206,21 +206,21 @@ impl OutputRouter {
     }
 }
 
-/// ★창 정리 코어(Tauri-free — G1 headless 필수, TRD §8 스테이지1)★. `label` 창의 **모든 탭 View 를
-/// 통째로 드롭**(views + view_owner + windows 엔트리) 후 `rebuild` 1회 → 그 델타를 반환한다. 반환된
-/// `to_unsubscribe`(어느 창에도 안 남은 agent)는 **호출자가 락 안에서** 데몬에 발화한다(F1 — 델타 계산과
-/// 발화 사이 재추가로 stale 1→0 unsubscribe 가 라이브 구독을 죽이는 것 방지).
-///
-/// ★이 함수는 Tauri·DaemonClient·registry 를 모른다★ — `ViewManager`(모델) + `OutputRouter`(라우팅)만
-///   받아 순수하게 모델·라우팅 표만 갱신한다(headless 단독 테스트 가능). command 핸들러
-///   `cleanup_popup_window` 가 이 코어를 ViewManager 락 안에서 호출하고, 델타 발화·registry.remove(Tauri
-///   부분)는 핸들러가 맡는다.
-///
-/// - `label == MAIN_WINDOW_LABEL`: 정리 대상 아님(불변식 4) — no-op, 빈 델타(방어적, 호출자도 선차단).
-/// - `windows` 에 `label` 없음(close_tab/close_window command 가 먼저 모델을 지운 정상 경로): close 스킵,
-///   `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
-/// - `windows` 에 `label` 있음(titlebar/강제 Destroyed — 멀티탭 잔류 위험, G1): `close_window` 로 tabs
-///   전부 순회 드롭 후 `rebuild`.
+// ★창 정리 코어(Tauri-free — G1 headless 필수, TRD §8 스테이지1)★. `label` 창의 **모든 탭 View 를
+// 통째로 드롭**(views + view_owner + windows 엔트리) 후 `rebuild` 1회 → 그 델타를 반환한다. 반환된
+// `to_unsubscribe`(어느 창에도 안 남은 agent)는 **호출자가 락 안에서** 데몬에 발화한다(F1 — 델타 계산과
+// 발화 사이 재추가로 stale 1→0 unsubscribe 가 라이브 구독을 죽이는 것 방지).
+//
+// ★이 함수는 Tauri·DaemonClient·registry 를 모른다★ — `ViewManager`(모델) + `OutputRouter`(라우팅)만
+//   받아 순수하게 모델·라우팅 표만 갱신한다(headless 단독 테스트 가능). command 핸들러
+//   `cleanup_popup_window` 가 이 코어를 ViewManager 락 안에서 호출하고, 델타 발화·registry.remove(Tauri
+//   부분)는 핸들러가 맡는다.
+//
+// - `label == MAIN_WINDOW_LABEL`: 정리 대상 아님(불변식 4) — no-op, 빈 델타(방어적, 호출자도 선차단).
+// - `windows` 에 `label` 없음(close_tab/close_window command 가 먼저 모델을 지운 정상 경로): close 스킵,
+//   `rebuild` 만 1회(계약상 표 재계산). Destroyed 는 그 뒤 OS 이벤트라 모델엔 이미 없다.
+// - `windows` 에 `label` 있음(titlebar/강제 Destroyed — 멀티탭 잔류 위험, G1): `close_window` 로 tabs
+//   전부 순회 드롭 후 `rebuild`.
 pub fn cleanup_window_core(
     mgr: &mut ViewManager,
     router: &OutputRouter,
@@ -239,14 +239,14 @@ pub fn cleanup_window_core(
     router.rebuild(mgr)
 }
 
-/// 한 View 트리를 순회하며 배정된(SlotContent::Agent) 슬롯의 agent 를 `windows` 전부에 매핑한다.
-///
-/// Slot 의 agent 참조 문자열을 `AgentKey`(Uuid)로 파싱 — 실패하면 무시(실 프레임과 매칭 불가).
-/// rebuild(저빈도)에서만 호출되므로 파싱 비용은 핫패스와 무관(AgentKey 결정 근거).
-///
-/// ★load-bearing 라우팅 불변식(ADR-0041/0042/0046 · ADR-0060)★: **배정 슬롯(SlotContent::Agent)만**
-/// 라우팅 대상이다 — `SlotContent::Empty` 는 명시적으로 무시한다(빈 슬롯엔 출력을 흘리지 않는다). 콘텐츠
-/// 종류(SlotContent)와 바이트 라우팅은 이 지점에서만 교차하며, 여기선 Agent 의 바인딩(agent_id)만 추출한다.
+// 한 View 트리를 순회하며 배정된(SlotContent::Agent) 슬롯의 agent 를 `windows` 전부에 매핑한다.
+//
+// Slot 의 agent 참조 문자열을 `AgentKey`(Uuid)로 파싱 — 실패하면 무시(실 프레임과 매칭 불가).
+// rebuild(저빈도)에서만 호출되므로 파싱 비용은 핫패스와 무관(AgentKey 결정 근거).
+//
+// ★load-bearing 라우팅 불변식(ADR-0041/0042/0046 · ADR-0060)★: **배정 슬롯(SlotContent::Agent)만**
+// 라우팅 대상이다 — `SlotContent::Empty` 는 명시적으로 무시한다(빈 슬롯엔 출력을 흘리지 않는다). 콘텐츠
+// 종류(SlotContent)와 바이트 라우팅은 이 지점에서만 교차하며, 여기선 Agent 의 바인딩(agent_id)만 추출한다.
 // ADR-0060
 fn collect_agents(
     node: &LayoutNode,
@@ -288,24 +288,24 @@ mod tests {
 
     // ── 헬퍼 ────────────────────────────────────────────────────────────────
 
-    /// 새 agent uuid + 그 문자열.
+    // 새 agent uuid + 그 문자열.
     fn agent() -> (Uuid, String) {
         let id = Uuid::new_v4();
         (id, id.to_string())
     }
 
-    /// main 창의 활성 탭 id.
+    // main 창의 활성 탭 id.
     fn main_active(mgr: &ViewManager) -> Uuid {
         mgr.windows.get(MAIN_WINDOW_LABEL).unwrap().active
     }
 
-    /// view 의 첫(유일) 슬롯 id.
+    // view 의 첫(유일) 슬롯 id.
     fn first_slot(mgr: &ViewManager, view_id: Uuid) -> Uuid {
         let v = mgr.views.get(&view_id).unwrap();
         crate::layout::tree::first_slot_id(&v.layout)
     }
 
-    /// main 창 활성 탭의 첫(유일) 슬롯에 agent 를 배정한다. 슬롯 id 반환.
+    // main 창 활성 탭의 첫(유일) 슬롯에 agent 를 배정한다. 슬롯 id 반환.
     fn assign_to_main(mgr: &mut ViewManager, agent_str: &str) -> Uuid {
         let view_id = main_active(mgr);
         let slot = first_slot(mgr, view_id);
@@ -653,8 +653,8 @@ mod tests {
         assert_eq!(d2.to_unsubscribe, vec![aid]);
     }
 
-    /// ★non-vacuity 가드★: diff 로직이 no-op(항상 빈 델타 반환)이면 이 테스트가 실패한다.
-    /// 두 개의 서로 다른 agent 가 들고나는 시퀀스에서 정확한 차집합을 단언 — 빈 델타로는 통과 불가.
+    // ★non-vacuity 가드★: diff 로직이 no-op(항상 빈 델타 반환)이면 이 테스트가 실패한다.
+    // 두 개의 서로 다른 agent 가 들고나는 시퀀스에서 정확한 차집합을 단언 — 빈 델타로는 통과 불가.
     #[test]
     fn diff_non_vacuous_distinct_deltas() {
         let mut mgr = ViewManager::new();
@@ -682,10 +682,10 @@ mod tests {
     //   생명주기가 사라졌다. remount/새 창은 데몬 ring 전량 재replay(뷰 주도)로 대체(rust 검증은 single-flight
     //   상태기계 = daemon_client::replay_flight 단위테스트). 아래 axis A(agent 단위) diff·보존 불변식은 존속.
 
-    /// ★델타 보존 불변식 가드★: **직렬화된** rebuild 시퀀스(= ViewManager 락 보유 호출, FIX-1)
-    /// 전체에서, `(모든 to_subscribe 합집합) \ (모든 to_unsubscribe 합집합)` 가 최종 테이블의 agent 집합과
-    /// 정확히 일치해야 한다 — 즉 최종에 보이는 agent 는 모두 net-구독됐고(빠짐없이), net-해제된 것은 하나도
-    /// 없다. 누수(구독했는데 테이블엔 없음)·유실(테이블엔 있는데 구독 안 됨)을 한 번에 잡는 회귀 그물.
+    // ★델타 보존 불변식 가드★: **직렬화된** rebuild 시퀀스(= ViewManager 락 보유 호출, FIX-1)
+    // 전체에서, `(모든 to_subscribe 합집합) \ (모든 to_unsubscribe 합집합)` 가 최종 테이블의 agent 집합과
+    // 정확히 일치해야 한다 — 즉 최종에 보이는 agent 는 모두 net-구독됐고(빠짐없이), net-해제된 것은 하나도
+    // 없다. 누수(구독했는데 테이블엔 없음)·유실(테이블엔 있는데 구독 안 됨)을 한 번에 잡는 회귀 그물.
     #[test]
     fn delta_conservation_over_sequence() {
         let mut mgr = ViewManager::new();
@@ -749,7 +749,7 @@ mod tests {
 
     // ── cleanup_window_core(G1 멀티탭 정리 headless 필수, TRD §8 스테이지1) ────────────────────
 
-    /// 창 `label` 의 활성 탭 첫 슬롯에 agent 배정(팝업/main 공통).
+    // 창 `label` 의 활성 탭 첫 슬롯에 agent 배정(팝업/main 공통).
     fn assign_to_window(mgr: &mut ViewManager, label: &str, agent_str: &str) -> Uuid {
         let view_id = mgr.windows.get(label).unwrap().active;
         let slot = first_slot(mgr, view_id);

@@ -58,27 +58,27 @@ use super::{ConnectionState, DaemonClient, DaemonDiscovery};
 // 둘 다 같은 host/port/token 을 돌려주되, "어느 메서드가 불렸는가" 로 spawn 가능/no-spawn 을 가린다.
 
 struct MockDiscovery {
-    /// read_live 가 돌려줄 값(None=살아있는 데몬 없음). ensure(no-spawn)·재연결(attach-only)이 본다.
-    /// ★Mutex★: 재연결 테스트(T4)가 도중에 값을 바꿔 hot-swap(새 port)·데몬 죽음(None)을 흉내낸다 —
-    /// wsTransport.test.ts 의 `liveDaemonInfo = ...` 재대입 대응. 기존 케이스는 고정값으로 그대로 동작.
+    // read_live 가 돌려줄 값(None=살아있는 데몬 없음). ensure(no-spawn)·재연결(attach-only)이 본다.
+    // ★Mutex★: 재연결 테스트(T4)가 도중에 값을 바꿔 hot-swap(새 port)·데몬 죽음(None)을 흉내낸다 —
+    // wsTransport.test.ts 의 `liveDaemonInfo = ...` 재대입 대응. 기존 케이스는 고정값으로 그대로 동작.
     live: std::sync::Mutex<Option<DaemonInfo>>,
-    /// ensure_spawn 이 돌려줄 값(connect 경로 = spawn 가능).
+    // ensure_spawn 이 돌려줄 값(connect 경로 = spawn 가능).
     spawn_result: Result<DaemonInfo, String>,
     ensure_spawn_calls: Arc<AtomicUsize>,
     read_live_calls: Arc<AtomicUsize>,
-    /// ★read_live 게이트(in-flight 취소 테스트용)★. Some(rx)면 read_live 가 그 채널 신호를 받을 때까지
-    /// 블록한다 — 재연결 task 가 "read_live join await" 창에 머무는 순간을 결정론적으로 만들어, 그 사이
-    /// close/connect 를 끼워 connect_async *이전* 취소(소켓 미오픈)를 검증한다. None=즉시 반환(기존 동작).
-    /// read_live 는 spawn_blocking 안에서 실행되므로 동기 블로킹(std recv)을 쓴다.
+    // ★read_live 게이트(in-flight 취소 테스트용)★. Some(rx)면 read_live 가 그 채널 신호를 받을 때까지
+    // 블록한다 — 재연결 task 가 "read_live join await" 창에 머무는 순간을 결정론적으로 만들어, 그 사이
+    // close/connect 를 끼워 connect_async *이전* 취소(소켓 미오픈)를 검증한다. None=즉시 반환(기존 동작).
+    // read_live 는 spawn_blocking 안에서 실행되므로 동기 블로킹(std recv)을 쓴다.
     read_live_gate: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-    /// read_live 가 게이트에 도달(블록 시작)했음을 테스트에 알리는 신호(테스트가 이때 close 를 끼운다).
+    // read_live 가 게이트에 도달(블록 시작)했음을 테스트에 알리는 신호(테스트가 이때 close 를 끼운다).
     read_live_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    /// ★ensure_spawn 게이트(FIX-1 discovery 창 테스트용)★. Some(rx)면 ensure_spawn 이 그 채널 신호를 받을
-    /// 때까지 블록한다 — 승계 connect() 가 "느린 discovery await" 창에 머무는 순간을 결정론적으로 만들어,
-    /// 그 사이 옛 재연결이 데몬에 접촉하지 않음(FIX-1)을 검증한다. None=즉시 반환(기존 동작).
-    /// ensure_spawn 은 spawn_blocking 안에서 실행되므로 동기 블로킹(std recv)을 쓴다.
+    // ★ensure_spawn 게이트(FIX-1 discovery 창 테스트용)★. Some(rx)면 ensure_spawn 이 그 채널 신호를 받을
+    // 때까지 블록한다 — 승계 connect() 가 "느린 discovery await" 창에 머무는 순간을 결정론적으로 만들어,
+    // 그 사이 옛 재연결이 데몬에 접촉하지 않음(FIX-1)을 검증한다. None=즉시 반환(기존 동작).
+    // ensure_spawn 은 spawn_blocking 안에서 실행되므로 동기 블로킹(std recv)을 쓴다.
     ensure_spawn_gate: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-    /// ensure_spawn 이 게이트에 도달(블록 시작)했음을 테스트에 알리는 신호(테스트가 이때 옛 접촉 부재를 본다).
+    // ensure_spawn 이 게이트에 도달(블록 시작)했음을 테스트에 알리는 신호(테스트가 이때 옛 접촉 부재를 본다).
     ensure_spawn_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
@@ -96,16 +96,16 @@ impl MockDiscovery {
         }
     }
 
-    /// 재연결 중 daemon.json 변화(hot-swap=Some(new), 죽음=None)를 흉내내려 read_live 결과를 바꾼다.
+    // 재연결 중 daemon.json 변화(hot-swap=Some(new), 죽음=None)를 흉내내려 read_live 결과를 바꾼다.
     #[allow(dead_code)] // T4 재연결 테스트에서만 사용 — 다른 cfg(test) 빌드 조합 경고 억제.
     fn set_live(&self, info: Option<DaemonInfo>) {
         *self.live.lock().unwrap() = info;
     }
 
-    /// read_live 를 게이트로 막는다. 반환: (entered_rx, release_tx).
-    ///   - entered_rx: read_live 가 블록에 진입(=재연결이 read_live join await 창에 들어옴)하면 신호가 온다.
-    ///   - release_tx: 보내면 read_live 가 풀려 값을 반환한다.
-    /// ★in-flight 취소 테스트 전용★: connect_async 이전 창(read_live join)에서 close 를 끼우려고 쓴다.
+    // read_live 를 게이트로 막는다. 반환: (entered_rx, release_tx).
+    //   - entered_rx: read_live 가 블록에 진입(=재연결이 read_live join await 창에 들어옴)하면 신호가 온다.
+    //   - release_tx: 보내면 read_live 가 풀려 값을 반환한다.
+    // ★in-flight 취소 테스트 전용★: connect_async 이전 창(read_live join)에서 close 를 끼우려고 쓴다.
     #[allow(dead_code)]
     fn gate_read_live(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -115,10 +115,10 @@ impl MockDiscovery {
         (entered_rx, release_tx)
     }
 
-    /// ensure_spawn 을 게이트로 막는다(FIX-1 discovery 창 테스트 전용). 반환: (entered_rx, release_tx).
-    ///   - entered_rx: ensure_spawn 이 블록에 진입(=승계 connect 가 discovery await 창에 들어옴)하면 신호.
-    ///   - release_tx: 보내면 ensure_spawn 이 풀려 spawn_result 를 반환한다.
-    /// gate_read_live 와 동형 — 다만 connect 경로(ensure_spawn)를 막는다.
+    // ensure_spawn 을 게이트로 막는다(FIX-1 discovery 창 테스트 전용). 반환: (entered_rx, release_tx).
+    //   - entered_rx: ensure_spawn 이 블록에 진입(=승계 connect 가 discovery await 창에 들어옴)하면 신호.
+    //   - release_tx: 보내면 ensure_spawn 이 풀려 spawn_result 를 반환한다.
+    // gate_read_live 와 동형 — 다만 connect 경로(ensure_spawn)를 막는다.
     #[allow(dead_code)]
     fn gate_ensure_spawn(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -161,7 +161,7 @@ fn info_for(port: u16, token: &str) -> DaemonInfo {
     info_for_version(port, token, PROTOCOL_VERSION)
 }
 
-/// protocol_version 을 임의로 지정한 DaemonInfo(Fix C 회귀 테스트가 틀린 값을 주입하는 용도).
+// protocol_version 을 임의로 지정한 DaemonInfo(Fix C 회귀 테스트가 틀린 값을 주입하는 용도).
 fn info_for_version(port: u16, token: &str, protocol_version: u32) -> DaemonInfo {
     DaemonInfo {
         pid: 4321,
@@ -178,7 +178,7 @@ fn info_for_version(port: u16, token: &str, protocol_version: u32) -> DaemonInfo
 // 127.0.0.1:0 에 bind 해 한 연결을 받아: 첫 frame 을 캡처해 oneshot 으로 돌려주고, Hello 를 응답한다.
 // (데몬 ws.rs 의 Auth→Hello 흐름을 핸드셰이크 검증에 필요한 만큼만 흉내낸다.)
 
-/// 첫 수신 frame 을 oneshot 으로 보고하는 mock 서버를 띄운다. 반환: (port, 첫프레임 수신 future).
+// 첫 수신 frame 을 oneshot 으로 보고하는 mock 서버를 띄운다. 반환: (port, 첫프레임 수신 future).
 async fn spawn_mock_server_capturing_first_frame() -> (u16, tokio::sync::oneshot::Receiver<String>)
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -401,8 +401,8 @@ async fn connect_idempotent_when_already_connected() {
 
 // ── 추가 mock 서버(적대 리뷰 회귀 가드용) ───────────────────────────────────────────────────
 
-/// 여러 연결을 받아 각각 Hello 로 응답하는 mock 서버(동시 connect 테스트용 — 짧은 순간 소켓 2개가
-/// 동시에 열릴 수 있으므로 1개만 받으면 둘째 task 의 connect_async 가 막힌다). 연결을 잠시 유지한다.
+// 여러 연결을 받아 각각 Hello 로 응답하는 mock 서버(동시 connect 테스트용 — 짧은 순간 소켓 2개가
+// 동시에 열릴 수 있으므로 1개만 받으면 둘째 task 의 connect_async 가 막힌다). 연결을 잠시 유지한다.
 async fn spawn_mock_server_multi_accept() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -432,9 +432,9 @@ async fn spawn_mock_server_multi_accept() -> u16 {
     port
 }
 
-/// Auth 수신을 신호한 뒤 Hello 를 **지연** 전송하는 mock 서버(close-in-flight 테스트용).
-/// 반환: (port, auth 수신 신호 수신 future). 테스트는 auth 신호를 받고 close() 를 부른 뒤,
-/// 서버가 지연 후 Hello 를 보내도 클라가 stale 이라 Connected 로 부활하지 않음을 단언한다.
+// Auth 수신을 신호한 뒤 Hello 를 **지연** 전송하는 mock 서버(close-in-flight 테스트용).
+// 반환: (port, auth 수신 신호 수신 future). 테스트는 auth 신호를 받고 close() 를 부른 뒤,
+// 서버가 지연 후 Hello 를 보내도 클라가 stale 이라 Connected 로 부활하지 않음을 단언한다.
 async fn spawn_mock_server_delayed_hello() -> (u16, tokio::sync::oneshot::Receiver<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -459,8 +459,8 @@ async fn spawn_mock_server_delayed_hello() -> (u16, tokio::sync::oneshot::Receiv
     (port, auth_rx)
 }
 
-/// accept 만 하고 Hello/Error/Close 중 무엇도 안 보내는 **침묵** mock 서버(timeout 테스트용).
-/// Auth 를 읽기만 하고 영원히 잠잔다 — 클라의 wait_for_hello 가 무한 대기에 빠지는 상황 재현.
+// accept 만 하고 Hello/Error/Close 중 무엇도 안 보내는 **침묵** mock 서버(timeout 테스트용).
+// Auth 를 읽기만 하고 영원히 잠잔다 — 클라의 wait_for_hello 가 무한 대기에 빠지는 상황 재현.
 async fn spawn_mock_server_silent() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -951,17 +951,17 @@ fn backoff_delay_is_exponential_capped() {
 // 결정론적으로 만든다. accept 카운터로 "새 소켓이 실제로 열렸나(재연결됐나)" 를 관찰한다(TS 의
 // FakeWebSocket.instances.length 대응).
 
-/// 재연결 mock 서버 핸들 — accept 카운터 + "현재 연결 끊기" 신호.
+// 재연결 mock 서버 핸들 — accept 카운터 + "현재 연결 끊기" 신호.
 struct ReconnectServer {
     port: u16,
-    /// 지금까지 accept 한 WS 연결 수(= 클라가 연 소켓 수). TS instances.length 대응.
+    // 지금까지 accept 한 WS 연결 수(= 클라가 연 소켓 수). TS instances.length 대응.
     accepts: Arc<AtomicUsize>,
-    /// 가장 최근 수립된 연결을 끊으라는 신호(서버가 그 소켓을 drop). 매 연결마다 새 채널로 교체된다.
+    // 가장 최근 수립된 연결을 끊으라는 신호(서버가 그 소켓을 drop). 매 연결마다 새 채널로 교체된다.
     drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl ReconnectServer {
-    /// 현재 연결을 서버측에서 끊는다(데몬 끊김 흉내 → 클라 재연결 트리거).
+    // 현재 연결을 서버측에서 끊는다(데몬 끊김 흉내 → 클라 재연결 트리거).
     fn drop_current_connection(&self) {
         if let Some(tx) = self.drop_current.lock().unwrap().take() {
             let _ = tx.send(());
@@ -972,7 +972,7 @@ impl ReconnectServer {
     }
 }
 
-/// 순차 연결을 받아 Hello 응답 후 drop 신호까지 유지하는 mock 서버.
+// 순차 연결을 받아 Hello 응답 후 drop 신호까지 유지하는 mock 서버.
 async fn spawn_reconnect_server() -> ReconnectServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1024,22 +1024,22 @@ async fn spawn_reconnect_server() -> ReconnectServer {
 // 에 멈추고, 그 사이 테스트가 close 를 끼울 수 있다. ★accept_count + auth_count 단언으로 vacuity 제거★:
 // "stale task 가 여분 소켓을 열었나/Auth 를 보냈나"를 최종 상태가 아니라 *서버 접촉 횟수*로 직접 본다.
 
-/// handshake 창 제어 + Auth 수신 카운트가 있는 재연결 mock 서버.
+// handshake 창 제어 + Auth 수신 카운트가 있는 재연결 mock 서버.
 struct HandshakeGateServer {
     port: u16,
-    /// accept 한 WS 연결 수(= 클라가 연 소켓 수).
+    // accept 한 WS 연결 수(= 클라가 연 소켓 수).
     accepts: Arc<AtomicUsize>,
-    /// 첫 frame(Auth)을 실제로 수신한 횟수(= 클라가 Auth 를 보낸 소켓 수). close 후 stale task 가 Auth 를
-    /// 보냈는지를 이 카운트로 본다.
+    // 첫 frame(Auth)을 실제로 수신한 횟수(= 클라가 Auth 를 보낸 소켓 수). close 후 stale task 가 Auth 를
+    // 보냈는지를 이 카운트로 본다.
     auths: Arc<AtomicUsize>,
-    /// 가장 최근 연결을 끊는 신호.
+    // 가장 최근 연결을 끊는 신호.
     drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// Hello 송신을 게이트(보내면 그 연결이 Hello 를 전송). 매 연결마다 새로 등록된다.
+    // Hello 송신을 게이트(보내면 그 연결이 Hello 를 전송). 매 연결마다 새로 등록된다.
     release_hello: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// 어떤 연결이 Auth 를 수신해 "핸드셰이크 창"에 들어왔다는 신호(테스트가 이때 close 를 끼운다).
+    // 어떤 연결이 Auth 를 수신해 "핸드셰이크 창"에 들어왔다는 신호(테스트가 이때 close 를 끼운다).
     auth_received: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// 재연결 연결에서 **클라가 소켓을 닫았음**(Close/EOF)을 감지한 신호. cancel select 가 wait_for_hello
-    /// await 를 깨워 self-close 하면 이 신호가 온다 — "취소가 정말 소켓을 닫았나"를 서버측에서 직접 관찰.
+    // 재연결 연결에서 **클라가 소켓을 닫았음**(Close/EOF)을 감지한 신호. cancel select 가 wait_for_hello
+    // await 를 깨워 self-close 하면 이 신호가 온다 — "취소가 정말 소켓을 닫았나"를 서버측에서 직접 관찰.
     client_closed: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
@@ -1055,22 +1055,22 @@ impl HandshakeGateServer {
             let _ = tx.send(());
         }
     }
-    /// 보류 중인 Hello 를 보내게 한다(핸드셰이크 완료시킴).
+    // 보류 중인 Hello 를 보내게 한다(핸드셰이크 완료시킴).
     #[allow(dead_code)]
     fn release_hello(&self) {
         if let Some(tx) = self.release_hello.lock().unwrap().take() {
             let _ = tx.send(());
         }
     }
-    /// 재연결 연결이 Auth 를 수신(=핸드셰이크 창 진입)하면 신호를 받을 rx 를 등록한다. 테스트는 이 rx 로
-    /// "클라가 wait_for_hello 창에 들어왔다"를 기다린 뒤 close 를 끼운다.
+    // 재연결 연결이 Auth 를 수신(=핸드셰이크 창 진입)하면 신호를 받을 rx 를 등록한다. 테스트는 이 rx 로
+    // "클라가 wait_for_hello 창에 들어왔다"를 기다린 뒤 close 를 끼운다.
     #[allow(dead_code)]
     fn arm_auth_received(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         *self.auth_received.lock().unwrap() = Some(tx);
         rx
     }
-    /// 재연결 연결에서 클라가 소켓을 닫으면(취소 self-close) 신호를 받을 rx 를 등록한다.
+    // 재연결 연결에서 클라가 소켓을 닫으면(취소 self-close) 신호를 받을 rx 를 등록한다.
     #[allow(dead_code)]
     fn arm_client_closed(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -1174,16 +1174,16 @@ async fn spawn_handshake_gate_server() -> HandshakeGateServer {
     }
 }
 
-/// connect 헬퍼(paused-clock current-thread 용) — start()로 핸드셰이크 완료를 await 한다.
+// connect 헬퍼(paused-clock current-thread 용) — start()로 핸드셰이크 완료를 await 한다.
 async fn connect_via(client: &DaemonClient) {
     client.connect().await.expect("connect → connected");
     assert_eq!(client.state(), ConnectionState::Connected);
 }
 
-/// 가짜 시계를 잘게 advance 하며 `cond` 가 참이 될 때까지 기다린다(결정론적 폴링). 반환=조건 충족 여부.
-/// ★실벽시계 0★: advance 로만 시간이 흐르므로, 백오프·재핸드셰이크가 진행되되 flaky 여지가 없다.
-/// IO(loopback 핸드셰이크)는 advance 사이의 yield 로 협력 진행시킨다. 매 스텝 시작에 yield 를 먼저 줘서
-/// "직전 트리거(끊김 신호 등)의 task 진행"이 백오프 advance 전에 반영되게 한다.
+// 가짜 시계를 잘게 advance 하며 `cond` 가 참이 될 때까지 기다린다(결정론적 폴링). 반환=조건 충족 여부.
+// ★실벽시계 0★: advance 로만 시간이 흐르므로, 백오프·재핸드셰이크가 진행되되 flaky 여지가 없다.
+// IO(loopback 핸드셰이크)는 advance 사이의 yield 로 협력 진행시킨다. 매 스텝 시작에 yield 를 먼저 줘서
+// "직전 트리거(끊김 신호 등)의 task 진행"이 백오프 advance 전에 반영되게 한다.
 async fn advance_until(max_steps: u32, mut cond: impl FnMut() -> bool) -> bool {
     for _ in 0..max_steps {
         // 먼저 협력 진행 — 직전에 발사한 신호(서버 drop 등)가 task 로 흘러 state 에 반영될 틈을 준다.
@@ -1238,10 +1238,10 @@ async fn reconnect_disconnect_recovers_to_connected() {
     assert_eq!(client.state(), ConnectionState::Down);
 }
 
-/// 한 연결을 받아 Hello 응답 후, kill 신호 시 **그 연결과 listener 를 모두 종료**하는 mock 서버
-/// (데몬 완전 죽음 흉내). kill 후 같은 port 재연결 connect_async 는 listener 부재로 전부 거부된다 →
-/// 클라 재연결 소진 → Down. (TS 'attach 재시도 소진' 의 liveDaemonInfo=null + 매 시도 즉시 onclose 대응.)
-/// 반환: (port, kill 신호 sender). disco 핸들을 함께 넘겨 read_live 를 None 으로 바꿔 hot-swap 추적도 죽인다.
+// 한 연결을 받아 Hello 응답 후, kill 신호 시 **그 연결과 listener 를 모두 종료**하는 mock 서버
+// (데몬 완전 죽음 흉내). kill 후 같은 port 재연결 connect_async 는 listener 부재로 전부 거부된다 →
+// 클라 재연결 소진 → Down. (TS 'attach 재시도 소진' 의 liveDaemonInfo=null + 매 시도 즉시 onclose 대응.)
+// 반환: (port, kill 신호 sender). disco 핸들을 함께 넘겨 read_live 를 None 으로 바꿔 hot-swap 추적도 죽인다.
 async fn spawn_dying_server() -> (u16, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1526,11 +1526,11 @@ async fn reconnect_down_then_connect_revives() {
     assert_eq!(client.state(), ConnectionState::Down);
 }
 
-/// Reconnecting 진입을 **시간 진행 없이(yield 만)** 기다린다. ★시계 advance 금지★: 재연결 루프는 진입
-/// 즉시 Reconnecting 발행 후 backoff_delay(0)=500ms sleep 으로 멈춘다 — paused clock 이라 advance 를 안
-/// 하면 그 sleep 에 영구 대기 = Reconnecting 에 머문다. 그래서 advance 없이 yield 만으로 끊김 감지 →
-/// Reconnecting 발행이 task 에 흐르길 기다리면, 그 상태로 멈춰 있는 동안 zombie/hijack race(close/connect
-/// 끼워넣기)를 테스트가 결정론적으로 실행할 수 있다.
+// Reconnecting 진입을 **시간 진행 없이(yield 만)** 기다린다. ★시계 advance 금지★: 재연결 루프는 진입
+// 즉시 Reconnecting 발행 후 backoff_delay(0)=500ms sleep 으로 멈춘다 — paused clock 이라 advance 를 안
+// 하면 그 sleep 에 영구 대기 = Reconnecting 에 머문다. 그래서 advance 없이 yield 만으로 끊김 감지 →
+// Reconnecting 발행이 task 에 흐르길 기다리면, 그 상태로 멈춰 있는 동안 zombie/hijack race(close/connect
+// 끼워넣기)를 테스트가 결정론적으로 실행할 수 있다.
 async fn advance_until_reconnecting(client: &DaemonClient) -> bool {
     for _ in 0..200 {
         if client.state() == ConnectionState::Reconnecting {
@@ -1936,16 +1936,16 @@ async fn reconnect_connect_during_backoff_no_extra_socket() {
 
 struct ConnectGateServer {
     port: u16,
-    /// TCP accept 완료 수(WS 업그레이드 전). connect_async 창에선 이게 올라도 auth 는 안 온다.
+    // TCP accept 완료 수(WS 업그레이드 전). connect_async 창에선 이게 올라도 auth 는 안 온다.
     accepts: Arc<AtomicUsize>,
-    /// 첫 frame(Auth) 수신 수(= 클라가 Auth 를 보낸 소켓 수). connect_async 창 취소면 이게 안 는다.
+    // 첫 frame(Auth) 수신 수(= 클라가 Auth 를 보낸 소켓 수). connect_async 창 취소면 이게 안 는다.
     auths: Arc<AtomicUsize>,
-    /// 가장 최근 연결을 끊는 신호.
+    // 가장 최근 연결을 끊는 신호.
     drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// 재연결 연결의 **WS 업그레이드(accept_async) 게이트**: 보내면 그 연결이 업그레이드를 진행한다.
-    /// 이 게이트로 connect_async 창(업그레이드 응답 대기)을 결정론적으로 연다.
+    // 재연결 연결의 **WS 업그레이드(accept_async) 게이트**: 보내면 그 연결이 업그레이드를 진행한다.
+    // 이 게이트로 connect_async 창(업그레이드 응답 대기)을 결정론적으로 연다.
     release_upgrade: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// 재연결 연결이 **TCP accept** 됐다(=connect_async 가 업그레이드 응답 대기 창에 진입할 채비)는 신호.
+    // 재연결 연결이 **TCP accept** 됐다(=connect_async 가 업그레이드 응답 대기 창에 진입할 채비)는 신호.
     tcp_accepted: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
@@ -1961,7 +1961,7 @@ impl ConnectGateServer {
             let _ = tx.send(());
         }
     }
-    /// 재연결 연결이 TCP accept 되면(connect_async 가 업그레이드 대기 창에 들어옴) 신호 받을 rx 무장.
+    // 재연결 연결이 TCP accept 되면(connect_async 가 업그레이드 대기 창에 들어옴) 신호 받을 rx 무장.
     fn arm_tcp_accepted(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         *self.tcp_accepted.lock().unwrap() = Some(tx);
@@ -1969,8 +1969,8 @@ impl ConnectGateServer {
     }
 }
 
-/// TCP accept 와 WS 업그레이드(accept_async) 사이를 게이트로 막는 mock 서버. 재연결 연결(2번째+)에서만
-/// 게이트를 켜 connect_async 창을 연다(첫 connect 는 즉시 업그레이드해 connected 시킨다).
+// TCP accept 와 WS 업그레이드(accept_async) 사이를 게이트로 막는 mock 서버. 재연결 연결(2번째+)에서만
+// 게이트를 켜 connect_async 창을 연다(첫 connect 는 즉시 업그레이드해 connected 시킨다).
 async fn spawn_connect_gate_server() -> ConnectGateServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -2225,8 +2225,8 @@ async fn reconnect_close_after_auth_send_self_closes_socket() {
 //   조건을 실벽시계로 짧게 폴링하는 별도 헬퍼를 둔다. `advance_until` 은 손대지 않는다(다른 paused-time
 //   테스트들이 쓴다).
 
-/// `cond` 가 참이 될 때까지 실시간으로 짧게 폴링한다. 전역 상한(`limit`) 안에 충족되면 true,
-/// 안 되면 false(상한 도달 = hang 대신 호출부의 단언 실패로 귀결). multi_thread 전용.
+// `cond` 가 참이 될 때까지 실시간으로 짧게 폴링한다. 전역 상한(`limit`) 안에 충족되면 true,
+// 안 되면 false(상한 도달 = hang 대신 호출부의 단언 실패로 귀결). multi_thread 전용.
 async fn poll_until_realtime(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
     tokio::time::timeout(limit, async {
         loop {
@@ -2377,23 +2377,23 @@ async fn supersede_connect_cancels_reconnect_before_discovery() {
 
 use engram_dashboard_protocol::RequestId;
 
-/// reply mock 서버가 명령 수신 시 어떻게 응답할지(테스트별 분기).
+// reply mock 서버가 명령 수신 시 어떻게 응답할지(테스트별 분기).
 #[derive(Clone, Copy)]
 enum ReplyBehavior {
-    /// 명령의 request_id 를 echo 한 Ack 로 응답(정상 매칭 경로).
+    // 명령의 request_id 를 echo 한 Ack 로 응답(정상 매칭 경로).
     AckEcho,
-    /// request_id 를 echo 한 Error 로 응답(reject 경로).
+    // request_id 를 echo 한 Error 로 응답(reject 경로).
     ErrorEcho,
-    /// 명령과 무관한(틀린) request_id 의 Ack 로 응답(모르는 id 무시 검증).
+    // 명령과 무관한(틀린) request_id 의 Ack 로 응답(모르는 id 무시 검증).
     AckWrongId,
-    /// 명령을 받고도 응답하지 않은 채 소켓을 닫는다(끊김 drain 검증).
+    // 명령을 받고도 응답하지 않은 채 소켓을 닫는다(끊김 drain 검증).
     DropAfterReceive,
 }
 
-/// Auth/Hello 핸드셰이크를 마친 뒤 첫 명령 1건을 받아 `behavior` 대로 응답하는 mock 서버.
-/// 반환: port. (start_test_server 의 전체 데몬을 띄우는 대신, T6a 의 cmd/reply 배선만 정밀히 통제하려고
-/// 직접 mock 한다 — spike T2 행의 "mock WS 서버" 선택지. AckEcho/ErrorEcho/AckWrongId/DropAfterReceive
-/// 로 매칭·reject·무시·drain 경로를 결정론적으로 만든다.)
+// Auth/Hello 핸드셰이크를 마친 뒤 첫 명령 1건을 받아 `behavior` 대로 응답하는 mock 서버.
+// 반환: port. (start_test_server 의 전체 데몬을 띄우는 대신, T6a 의 cmd/reply 배선만 정밀히 통제하려고
+// 직접 mock 한다 — spike T2 행의 "mock WS 서버" 선택지. AckEcho/ErrorEcho/AckWrongId/DropAfterReceive
+// 로 매칭·reject·무시·drain 경로를 결정론적으로 만든다.)
 async fn spawn_reply_mock_server(behavior: ReplyBehavior) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -2451,7 +2451,7 @@ async fn spawn_reply_mock_server(behavior: ReplyBehavior) -> u16 {
     port
 }
 
-/// 테스트 공용: mock 서버로 connect 해 connected 상태의 client 를 만든다.
+// 테스트 공용: mock 서버로 connect 해 connected 상태의 client 를 만든다.
 async fn connected_client_to(port: u16, token: &str) -> Arc<DaemonClient> {
     let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, token))));
     let client = Arc::new(DaemonClient::new(Handle::current(), disco));
@@ -2460,7 +2460,7 @@ async fn connected_client_to(port: u16, token: &str) -> Arc<DaemonClient> {
     client
 }
 
-/// 테스트용 Spawn 명령(request_id 동봉) 빌더.
+// 테스트용 Spawn 명령(request_id 동봉) 빌더.
 fn spawn_cmd() -> AgentCommand {
     AgentCommand::Spawn {
         profile_id: uuid::Uuid::new_v4(),
@@ -2595,8 +2595,8 @@ async fn send_command_rejects_command_without_request_id() {
 // (Binary frame fan-out 은 실 Tauri Channel 이 필요해 단위 불가 → GUI 실측 영역, 보고서 명시.)
 // ══════════════════════════════════════════════════════════════════════════════════
 
-/// Auth/Hello 핸드셰이크 후 **첫 명령 frame(Text JSON)을 캡처해 oneshot 으로 돌려주는** mock 서버.
-/// 반환: (port, 첫 명령 수신 oneshot rx). 클라가 보낸 fire-and-forget 명령의 wire 인코딩을 직접 본다.
+// Auth/Hello 핸드셰이크 후 **첫 명령 frame(Text JSON)을 캡처해 oneshot 으로 돌려주는** mock 서버.
+// 반환: (port, 첫 명령 수신 oneshot rx). 클라가 보낸 fire-and-forget 명령의 wire 인코딩을 직접 본다.
 async fn spawn_capture_first_command_server() -> (u16, tokio::sync::oneshot::Receiver<AgentCommand>)
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2724,17 +2724,17 @@ async fn fire_and_forget_when_not_connected_is_noop() {
 //   request/reply 배선까지 망가뜨릴(예: pending 맵 오염·actor 종료) 회귀를 이 테스트가 박는다.
 // ══════════════════════════════════════════════════════════════════════════════════
 
-/// 재연결 crux 전용 mock 서버 핸들. 한 listener 가 순차 연결을 받아:
-///   - 매 연결: Auth 소비 → Hello 송신(= connected). 그 뒤 명령 frame 을 계속 읽는다.
-///   - 명령 frame 을 받으면: `ack_replies` 가 true 면 그 request_id 로 Ack echo(정상 reply),
-///     false(첫 연결)면 **응답 없이** 그 명령을 받았다는 신호만 보내고 drop 신호까지 매달린다.
-/// 이걸로 "첫 소켓: 명령 받고 무응답 → 끊김(서버 drop) → 재연결된 둘째 소켓: 명령 Ack" 흐름을 만든다.
+// 재연결 crux 전용 mock 서버 핸들. 한 listener 가 순차 연결을 받아:
+//   - 매 연결: Auth 소비 → Hello 송신(= connected). 그 뒤 명령 frame 을 계속 읽는다.
+//   - 명령 frame 을 받으면: `ack_replies` 가 true 면 그 request_id 로 Ack echo(정상 reply),
+//     false(첫 연결)면 **응답 없이** 그 명령을 받았다는 신호만 보내고 drop 신호까지 매달린다.
+// 이걸로 "첫 소켓: 명령 받고 무응답 → 끊김(서버 drop) → 재연결된 둘째 소켓: 명령 Ack" 흐름을 만든다.
 struct CruxReconnectServer {
     port: u16,
     accepts: Arc<AtomicUsize>,
-    /// 첫 연결이 명령 frame 을 실제로 수신(= wire 로 나감 = in-flight pending)했음을 테스트에 알린다.
+    // 첫 연결이 명령 frame 을 실제로 수신(= wire 로 나감 = in-flight pending)했음을 테스트에 알린다.
     first_cmd_received: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-    /// 가장 최근 연결을 서버측에서 끊는 신호(첫 소켓 drop = 클라 재연결 트리거).
+    // 가장 최근 연결을 서버측에서 끊는 신호(첫 소켓 drop = 클라 재연결 트리거).
     drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
@@ -2749,7 +2749,7 @@ impl CruxReconnectServer {
     }
 }
 
-/// 첫 연결은 명령에 무응답(drain 유발), 둘째 이후 연결은 명령에 Ack echo 하는 mock 서버.
+// 첫 연결은 명령에 무응답(drain 유발), 둘째 이후 연결은 명령에 Ack echo 하는 mock 서버.
 async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -3064,7 +3064,7 @@ async fn buffered_send_command_drain_yields_unsent_message() {
         .expect("drain 후에도 cmd_rx 는 열려 있어야(닫지 않음 — 재연결 carry)");
 }
 
-/// 받은 명령 frame 수를 카운트하며 Ack echo 하는 mock 서버(끊긴 명령의 재연결 후 미실행 검증용). 반환: port.
+// 받은 명령 frame 수를 카운트하며 Ack echo 하는 mock 서버(끊긴 명령의 재연결 후 미실행 검증용). 반환: port.
 async fn spawn_counting_reply_server(count: Arc<AtomicUsize>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

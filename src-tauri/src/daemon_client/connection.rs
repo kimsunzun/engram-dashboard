@@ -39,41 +39,41 @@ use super::{ConnectionState, DaemonDiscovery};
 use crate::output_channel::{self, WindowChannelRegistry};
 use crate::output_router::OutputRouter;
 
-/// ★replay 진행 기반 deadline(ADR-0046)★. single-flight in-flight 가 이 시간 동안 진행(frame/Ack) 0 이면
-/// 실패 마커로 종결한다(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 오는 경로). healthy-slow replay
-/// (디버그 빌드·경합)는 frame/Ack 마다 리셋돼 절대 트립 안 된다(진행 기반). 운영 10s급.
+// ★replay 진행 기반 deadline(ADR-0046)★. single-flight in-flight 가 이 시간 동안 진행(frame/Ack) 0 이면
+// 실패 마커로 종결한다(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 오는 경로). healthy-slow replay
+// (디버그 빌드·경합)는 frame/Ack 마다 리셋돼 절대 트립 안 된다(진행 기반). 운영 10s급.
 const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
 
-/// deadline sweep 주기 — main_loop select! 의 tick 간격. 이 granularity 로 만료된 in-flight 를 훑는다.
+// deadline sweep 주기 — main_loop select! 의 tick 간격. 이 granularity 로 만료된 in-flight 를 훑는다.
 const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
 
-/// SendCommand 의 reply 채널 타입(T6a). `Ok(event)` = 데몬이 매칭 reply(Ack/Spawned/Created/
-/// SubscribeAck/AgentList/…)를 보냄, `Err(msg)` = 데몬 Error 또는 연결 끊김(drain). 호출자
-/// (`DaemonClient::send_command`)가 이 oneshot 의 수신단을 await 한다.
+// SendCommand 의 reply 채널 타입(T6a). `Ok(event)` = 데몬이 매칭 reply(Ack/Spawned/Created/
+// SubscribeAck/AgentList/…)를 보냄, `Err(msg)` = 데몬 Error 또는 연결 끊김(drain). 호출자
+// (`DaemonClient::send_command`)가 이 oneshot 의 수신단을 await 한다.
 pub type CommandReply = oneshot::Sender<Result<AgentEvent, String>>;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// 핸드셰이크(소켓 open ~ Hello 수신) 상한. 서버측 AUTH_TIMEOUT(1s, ws.rs)보다 넉넉히 잡되
-/// 정상 핸드셰이크는 loopback 에서 <1s 라 절대 안 닿는다. 이 상한이 없으면 서버가 소켓만 받고
-/// 침묵할 때 wait_for_hello 가 영구 대기한다(Fix A). 운영 기본값이며, 테스트는 run_connection 의
-/// `handshake_timeout` 파라미터로 짧은 값을 주입한다(const 가 테스트를 10초 기다리게 만들지 않도록).
+// 핸드셰이크(소켓 open ~ Hello 수신) 상한. 서버측 AUTH_TIMEOUT(1s, ws.rs)보다 넉넉히 잡되
+// 정상 핸드셰이크는 loopback 에서 <1s 라 절대 안 닿는다. 이 상한이 없으면 서버가 소켓만 받고
+// 침묵할 때 wait_for_hello 가 영구 대기한다(Fix A). 운영 기본값이며, 테스트는 run_connection 의
+// `handshake_timeout` 파라미터로 짧은 값을 주입한다(const 가 테스트를 10초 기다리게 만들지 않도록).
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// ★재연결 백오프(T4 — wsTransport `scheduleReconnect` 500ms→10s MAX5 이식)★.
-/// attach-only 재연결 최대 시도 횟수. 데몬이 죽으면(graceful stop·kill·크래시) 캐시/read_live 주소로의
-/// 재연결이 전부 실패한다 — 무한 reconnecting 으로 매달리지 않고 이 횟수만큼 시도한 뒤 Down 으로
-/// 정착시킨다(꺼진 채 유지). 일시적 끊김은 이 안에서 회복된다. 복구는 명시 connect 로만.
+// ★재연결 백오프(T4 — wsTransport `scheduleReconnect` 500ms→10s MAX5 이식)★.
+// attach-only 재연결 최대 시도 횟수. 데몬이 죽으면(graceful stop·kill·크래시) 캐시/read_live 주소로의
+// 재연결이 전부 실패한다 — 무한 reconnecting 으로 매달리지 않고 이 횟수만큼 시도한 뒤 Down 으로
+// 정착시킨다(꺼진 채 유지). 일시적 끊김은 이 안에서 회복된다. 복구는 명시 connect 로만.
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
-/// 백오프 기준 지연(500ms). attempt 마다 2^attempt 배(500ms→1s→2s→4s→8s), 상한 BACKOFF_CAP.
+// 백오프 기준 지연(500ms). attempt 마다 2^attempt 배(500ms→1s→2s→4s→8s), 상한 BACKOFF_CAP.
 const BACKOFF_BASE: Duration = Duration::from_millis(500);
 
-/// 백오프 상한(10s). 지수 증가가 이 값을 넘지 않게 클램프(wsTransport `Math.min(..., 10000)`).
+// 백오프 상한(10s). 지수 증가가 이 값을 넘지 않게 클램프(wsTransport `Math.min(..., 10000)`).
 const BACKOFF_CAP: Duration = Duration::from_secs(10);
 
-/// attempt 번째 재연결 시도의 백오프 지연. attempt=0 → 500ms, 1 → 1s, …, 상한 10s.
-/// ★shift 안전★: 2^attempt 가 u64 를 넘기지 않게 checked_shl 로 클램프한 뒤 곱한다(MAX5 라 실제론 최대 8s).
+// attempt 번째 재연결 시도의 백오프 지연. attempt=0 → 500ms, 1 → 1s, …, 상한 10s.
+// ★shift 안전★: 2^attempt 가 u64 를 넘기지 않게 checked_shl 로 클램프한 뒤 곱한다(MAX5 라 실제론 최대 8s).
 pub(crate) fn backoff_delay(attempt: u32) -> Duration {
     // attempt 가 커도 곱셈 오버플로 없이 BACKOFF_CAP 으로 수렴하게: 먼저 shift 후 cap 으로 min.
     let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
@@ -81,42 +81,42 @@ pub(crate) fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(millis).min(BACKOFF_CAP)
 }
 
-/// 메인 루프 종료 사유 — 재연결 대상(데몬 끊김)인지 명시 종료(close)인지 가른다(T4).
-///
-/// ★load-bearing★: 이 구분이 재연결 진입 여부를 결정한다. `Disconnected` 만 재연결 루프로 가고,
-/// `Closed`(cmd_rx EOF = close()/stale 미저장)는 재연결하지 않는다 — 사용자가 닫았거나(respawn 금지)
-/// 더 새 연결이 이미 떴기(stale 미저장 = 좀비 방지) 때문이다. 단, `Disconnected` 라도 진입 직후
-/// reconnect_guard(generation + closed_by_user)를 한 번 더 보고 Stop 이면 재연결 안 한다(끊김과 close 가
-/// 동시에 들어온 경우).
+// 메인 루프 종료 사유 — 재연결 대상(데몬 끊김)인지 명시 종료(close)인지 가른다(T4).
+//
+// ★load-bearing★: 이 구분이 재연결 진입 여부를 결정한다. `Disconnected` 만 재연결 루프로 가고,
+// `Closed`(cmd_rx EOF = close()/stale 미저장)는 재연결하지 않는다 — 사용자가 닫았거나(respawn 금지)
+// 더 새 연결이 이미 떴기(stale 미저장 = 좀비 방지) 때문이다. 단, `Disconnected` 라도 진입 직후
+// reconnect_guard(generation + closed_by_user)를 한 번 더 보고 Stop 이면 재연결 안 한다(끊김과 close 가
+// 동시에 들어온 경우).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopExit {
-    /// 데몬 stream 이 끊김/오류/Close frame → 재연결 대상. (비의도 끊김)
+    // 데몬 stream 이 끊김/오류/Close frame → 재연결 대상. (비의도 끊김)
     Disconnected,
-    /// cmd_rx 가 EOF(모든 sender drop) = 명시 close() 또는 stale 미저장 → 재연결 안 함(종료).
+    // cmd_rx 가 EOF(모든 sender drop) = 명시 close() 또는 stale 미저장 → 재연결 안 함(종료).
     Closed,
 }
 
-/// 핸드셰이크 실패 사유. wsTransport 의 reject 문자열에 대응.
+// 핸드셰이크 실패 사유. wsTransport 의 reject 문자열에 대응.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeError {
-    /// 발견/spawn 단계 실패(connect 경로). discovery 에러 메시지를 그대로 싣는다(token 미포함).
+    // 발견/spawn 단계 실패(connect 경로). discovery 에러 메시지를 그대로 싣는다(token 미포함).
     Discovery(String),
-    /// ensure(attach-only)인데 살아있는 데몬이 없음(no-spawn 이라 못 띄움 — ADR-0021).
-    /// wsTransport 의 "daemon down — daemon_start 로 명시 시작 필요" 대응.
+    // ensure(attach-only)인데 살아있는 데몬이 없음(no-spawn 이라 못 띄움 — ADR-0021).
+    // wsTransport 의 "daemon down — daemon_start 로 명시 시작 필요" 대응.
     NoLiveDaemon,
-    /// ws://host:port 접속 실패(데몬 죽음/거부).
+    // ws://host:port 접속 실패(데몬 죽음/거부).
     Connect(String),
-    /// Auth frame 송신 실패.
+    // Auth frame 송신 실패.
     AuthSend(String),
-    /// 데몬이 Hello 전에 Error 를 보냄(토큰/버전 불일치 등).
+    // 데몬이 Hello 전에 Error 를 보냄(토큰/버전 불일치 등).
     AuthRejected(String),
-    /// Hello 전에 소켓이 닫힘.
+    // Hello 전에 소켓이 닫힘.
     ClosedBeforeHello,
-    /// 핸드셰이크(소켓 open ~ Hello 수신)가 HANDSHAKE_TIMEOUT 을 넘김. 서버가 소켓만 받고 Hello/
-    /// Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
-    /// 상한을 둬 확정적으로 실패로 빠진다. ★Fix A★ — 영구 hang 방지.
+    // 핸드셰이크(소켓 open ~ Hello 수신)가 HANDSHAKE_TIMEOUT 을 넘김. 서버가 소켓만 받고 Hello/
+    // Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
+    // 상한을 둬 확정적으로 실패로 빠진다. ★Fix A★ — 영구 hang 방지.
     Timeout,
-    /// 연결 task 가 ready 신호 전에 사라짐(panic 등).
+    // 연결 task 가 ready 신호 전에 사라짐(panic 등).
     TaskGone,
 }
 
@@ -144,58 +144,60 @@ impl std::fmt::Display for HandshakeError {
 
 impl std::error::Error for HandshakeError {}
 
-/// 연결 task 로 보내는 명령(단일 task 소유 — invoke 는 이걸 보내고 task 가 처리).
-///
-/// ★평면 구분★: `SendCommand` = 요청/응답(reply 기대) — request_id ↔ oneshot 상관을 main_loop 가
-/// `PendingMap` 으로 한다. `Subscribe`/`Unsubscribe`/`Fire` = **fire-and-forget**(reply 없음).
-/// Subscribe/Unsubscribe 는 wire 인코딩 시 `SubState`(epoch/after_seq) 조회가 필요해 전용 variant 로
-/// 두고, Resize 처럼 SubState 무관한 reply 없는 명령은 그냥 `Fire` 로 wire 송신한다.
+// 연결 task 로 보내는 명령(단일 task 소유 — invoke 는 이걸 보내고 task 가 처리).
+//
+// ★평면 구분★: `SendCommand` = 요청/응답(reply 기대) — request_id ↔ oneshot 상관을 main_loop 가
+// `PendingMap` 으로 한다. `Subscribe`/`Unsubscribe`/`Fire` = **fire-and-forget**(reply 없음).
+// Subscribe/Unsubscribe 는 wire 인코딩 시 `SubState`(epoch/after_seq) 조회가 필요해 전용 variant 로
+// 두고, Resize 처럼 SubState 무관한 reply 없는 명령은 그냥 `Fire` 로 wire 송신한다.
 #[derive(Debug)]
 pub enum ConnectionCommand {
-    /// 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
-    ///   1) reply 를 PendingMap[request_id] 에 넣고 → 2) cmd 를 JSON 으로 sink.send.
-    /// 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 으로 resolve. send/끊김 실패 시 Err.
+    // 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
+    //   1) reply 를 PendingMap[request_id] 에 넣고 → 2) cmd 를 JSON 으로 sink.send.
+    // 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 으로 resolve. send/끊김 실패 시 Err.
     SendCommand {
         cmd: AgentCommand,
         reply: CommandReply,
     },
-    /// 출력 구독 해제(정리, ADR-0046 BLOCK-1). main_loop 가 `AgentCommand::Unsubscribe` 를 wire 로 송신한다.
-    /// wire 구독 형성(Subscribe)은 `RequestReplay` 단독이고, layout 델타는 1→0 정리만 이걸로 보낸다.
+    // 출력 구독 해제(정리, ADR-0046 BLOCK-1). main_loop 가 `AgentCommand::Unsubscribe` 를 wire 로 송신한다.
+    // wire 구독 형성(Subscribe)은 `RequestReplay` 단독이고, layout 델타는 1→0 정리만 이걸로 보낸다.
     Unsubscribe {
         agent_id: engram_dashboard_protocol::AgentId,
     },
-    /// reply 없는 fire-and-forget 명령(Resize 등). main_loop 가 그냥 JSON 으로 wire 송신한다.
-    Fire { cmd: AgentCommand },
-    /// ★뷰 주도 replay 채번(ADR-0046 — single-flight)★. 뷰 mount/remount 시 도착한다. main_loop 가
-    /// `ReplayFlightSet::request_replay` 로 gen 을 채번하고, idle 이면 즉시 wire `Subscribe{after_seq:None}`
-    /// (epoch=SubState 현재값)를 보내거나 in-flight 중이면 다음 1회 Subscribe 에 병합한다. 배정된 gen 은
-    /// `reply`(Some)로 회수한다(`request_replay` 커맨드). `Option` 인 것은 seam 자리 유지용 — 현재 모든
-    /// 발행이 `Some`(구 프론트 fire-and-forget alias `resync_output` 은 M3 에서 삭제).
+    // reply 없는 fire-and-forget 명령(Resize 등). main_loop 가 그냥 JSON 으로 wire 송신한다.
+    Fire {
+        cmd: AgentCommand,
+    },
+    // ★뷰 주도 replay 채번(ADR-0046 — single-flight)★. 뷰 mount/remount 시 도착한다. main_loop 가
+    // `ReplayFlightSet::request_replay` 로 gen 을 채번하고, idle 이면 즉시 wire `Subscribe{after_seq:None}`
+    // (epoch=SubState 현재값)를 보내거나 in-flight 중이면 다음 1회 Subscribe 에 병합한다. 배정된 gen 은
+    // `reply`(Some)로 회수한다(`request_replay` 커맨드). `Option` 인 것은 seam 자리 유지용 — 현재 모든
+    // 발행이 `Some`(구 프론트 fire-and-forget alias `resync_output` 은 M3 에서 삭제).
     RequestReplay {
         agent_id: engram_dashboard_protocol::AgentId,
         reply: Option<oneshot::Sender<u64>>,
     },
 }
 
-/// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
-/// 뒤 메인 루프(read/write/cmd)로 들어간다. 이 함수가 stream 을 split 해 단독 소유한다.
-///
-/// ## ★generation 가드(load-bearing, Fix B — 락으로 원자화)★
-/// `my_gen` = 이 task 가 spawn 될 때 캡처한 세대값, `lifecycle` = 공유 lifecycle 락(DaemonClient 소유).
-/// 동시 connect/ensure·close-in-flight 로 더 새 task 가 떠 세대가 올라가면, **밀려난(stale) task 는
-/// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다. 모든
-/// 가드된 전이는 `lifecycle.publish_if_current(my_gen, state)` 한 곳을 통과한다 — 이 메서드가 "세대
-/// 비교 + watch send" 를 같은 락 critical section 으로 묶어 원자화하므로, 비교 통과 후 send 전에 다른
-/// 스레드가 세대를 바꿔 끼어들 수 없다(이전 `AtomicU64::load` → `send` 분리가 만든 TOCTOU 를 닫음).
-/// 이게 wsTransport openGen 가드의 씨앗 — 현재(current) 연결 task 는 최대 1개라는 불변식을 코드로
-/// 강제한다. ⚠️ 완전한 "동시 시도 abort/백오프"는 T4 — 여기선 짧은 순간 소켓 2개가 동시에 열릴 수
-/// 있음(둘 다 connect_async 진행)을 허용하되, stale task 가 *공유 상태를 안 건드리고* 즉시 self-close
-/// 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·Connected 부활)은 없앤다.
-///
-/// ## ★ADR-0006 — 락 .await across 보유 금지★
-/// `publish_if_current`/`store_cmd_if_current` 는 전부 동기(내부에서 await 안 함)다. 따라서 아래
-/// `connect_async`·`sink.send`·`wait_for_hello`·`sink.close` 등 모든 await 는 lifecycle 락을 보유하지
-/// 않은 채 일어난다(락은 publish_if_current 호출 안에서만 잡혔다 즉시 풀린다).
+// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
+// 뒤 메인 루프(read/write/cmd)로 들어간다. 이 함수가 stream 을 split 해 단독 소유한다.
+//
+// ## ★generation 가드(load-bearing, Fix B — 락으로 원자화)★
+// `my_gen` = 이 task 가 spawn 될 때 캡처한 세대값, `lifecycle` = 공유 lifecycle 락(DaemonClient 소유).
+// 동시 connect/ensure·close-in-flight 로 더 새 task 가 떠 세대가 올라가면, **밀려난(stale) task 는
+// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다. 모든
+// 가드된 전이는 `lifecycle.publish_if_current(my_gen, state)` 한 곳을 통과한다 — 이 메서드가 "세대
+// 비교 + watch send" 를 같은 락 critical section 으로 묶어 원자화하므로, 비교 통과 후 send 전에 다른
+// 스레드가 세대를 바꿔 끼어들 수 없다(이전 `AtomicU64::load` → `send` 분리가 만든 TOCTOU 를 닫음).
+// 이게 wsTransport openGen 가드의 씨앗 — 현재(current) 연결 task 는 최대 1개라는 불변식을 코드로
+// 강제한다. ⚠️ 완전한 "동시 시도 abort/백오프"는 T4 — 여기선 짧은 순간 소켓 2개가 동시에 열릴 수
+// 있음(둘 다 connect_async 진행)을 허용하되, stale task 가 *공유 상태를 안 건드리고* 즉시 self-close
+// 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·Connected 부활)은 없앤다.
+//
+// ## ★ADR-0006 — 락 .await across 보유 금지★
+// `publish_if_current`/`store_cmd_if_current` 는 전부 동기(내부에서 await 안 함)다. 따라서 아래
+// `connect_async`·`sink.send`·`wait_for_hello`·`sink.close` 등 모든 await 는 lifecycle 락을 보유하지
+// 않은 채 일어난다(락은 publish_if_current 호출 안에서만 잡혔다 즉시 풀린다).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_connection(
     info: DaemonInfo,
@@ -279,8 +281,8 @@ pub(crate) async fn run_connection(
     .await;
 }
 
-/// 한 소켓의 핸드셰이크 산출물 — split 된 sink/stream 을 들고, 정리(sink_close)·소유 이전(into_split)을
-/// 제공한다. 첫 연결과 재연결이 같은 핸드셰이크 경로를 공유하게 묶는다.
+// 한 소켓의 핸드셰이크 산출물 — split 된 sink/stream 을 들고, 정리(sink_close)·소유 이전(into_split)을
+// 제공한다. 첫 연결과 재연결이 같은 핸드셰이크 경로를 공유하게 묶는다.
 struct Handshaked {
     sink: futures_util::stream::SplitSink<Ws, Message>,
     stream: futures_util::stream::SplitStream<Ws>,
@@ -300,10 +302,10 @@ impl Handshaked {
     }
 }
 
-/// 1회 소켓 열기 + Auth 송신 + Hello 대기(=인증 성공). 성공 시 split 된 소켓을 돌려준다. 공유 상태
-/// 전이(Connected/Down)는 **호출자가** 가드(publish_if_current)와 함께 결정한다 — 첫 연결은 ready 보고가
-/// 딸리고 재연결은 안 딸려, 그 분기를 호출자에 두는 게 깔끔하다(이 함수는 순수 소켓 핸드셰이크만 —
-/// lifecycle 미접촉).
+// 1회 소켓 열기 + Auth 송신 + Hello 대기(=인증 성공). 성공 시 split 된 소켓을 돌려준다. 공유 상태
+// 전이(Connected/Down)는 **호출자가** 가드(publish_if_current)와 함께 결정한다 — 첫 연결은 ready 보고가
+// 딸리고 재연결은 안 딸려, 그 분기를 호출자에 두는 게 깔끔하다(이 함수는 순수 소켓 핸드셰이크만 —
+// lifecycle 미접촉).
 async fn handshake(
     info: &DaemonInfo,
     my_gen: u64,
@@ -377,28 +379,28 @@ async fn handshake(
     }
 }
 
-/// ★취소 가능 핸드셰이크 산출(T4 — in-flight 취소)★. 재연결 루프가 쓰는 핸드셰이크 결과 3분기.
-/// `Ok`=성공, `Err`=실패(데몬 죽음/거부/타임아웃), `Cancelled`=close()/승계가 cancel 을 켜서 중단됨
-/// (소켓을 안 열었거나, connect_async 가 이미 연 소켓을 즉시 닫음 — 어느 쪽이든 데몬에 Auth 안 보냄).
+// ★취소 가능 핸드셰이크 산출(T4 — in-flight 취소)★. 재연결 루프가 쓰는 핸드셰이크 결과 3분기.
+// `Ok`=성공, `Err`=실패(데몬 죽음/거부/타임아웃), `Cancelled`=close()/승계가 cancel 을 켜서 중단됨
+// (소켓을 안 열었거나, connect_async 가 이미 연 소켓을 즉시 닫음 — 어느 쪽이든 데몬에 Auth 안 보냄).
 enum HandshakeOutcome {
     Ok(Handshaked),
     Err(HandshakeError),
-    /// 취소로 중단 — 호출자가 reconnect_guard 로 재확인 후 탈출/재시도. **소켓은 이미 정리됨**(연 적이
-    /// 없거나 self-close 완료)이라 호출자가 추가로 닫을 필요 없다.
+    // 취소로 중단 — 호출자가 reconnect_guard 로 재확인 후 탈출/재시도. **소켓은 이미 정리됨**(연 적이
+    // 없거나 self-close 완료)이라 호출자가 추가로 닫을 필요 없다.
     Cancelled,
 }
 
-/// 재연결 전용 취소 가능 핸드셰이크. `handshake` 와 같은 단계(connect→Auth→Hello)를 밟되, **모든 await
-/// 를 `cancel_rx.changed()` 와 `select!` 로 경쟁**시킨다(작업 지시: connect_async·핸드셰이크 각 await 를
-/// 취소와 select). close()/승계 connect 가 cancel 을 켜면:
-///   - connect_async 단계 취소 → **소켓을 아예 안 연다**(데몬 무접촉).
-///   - Auth send / wait_for_hello 단계 취소 → 이미 연 소켓을 **즉시 self-close** 하고 Cancelled 반환
-///     (Auth 가 나갔을 수는 있으나 stale 소켓이 *살아남아* 계속 점유/통신하는 창은 닫는다).
-/// 이게 "close 후 stale task 가 소켓 open + Auth 를 보낸다"는 Codex 적출 결함의 1차 방어선이다.
-/// generation 가드(publish_if_current)는 상태 발행을 막는 2차 방어선으로 남는다.
-///
-/// ★cancel-safe★: 모든 arm 의 `cancel_rx.changed()` 와 IO future 는 cancel-safe 라, 한 arm 이 이기면
-/// 진 arm 은 부작용 없이 폐기된다(select! 표준). 따라서 부분 진행 상태가 새지 않는다.
+// 재연결 전용 취소 가능 핸드셰이크. `handshake` 와 같은 단계(connect→Auth→Hello)를 밟되, **모든 await
+// 를 `cancel_rx.changed()` 와 `select!` 로 경쟁**시킨다(작업 지시: connect_async·핸드셰이크 각 await 를
+// 취소와 select). close()/승계 connect 가 cancel 을 켜면:
+//   - connect_async 단계 취소 → **소켓을 아예 안 연다**(데몬 무접촉).
+//   - Auth send / wait_for_hello 단계 취소 → 이미 연 소켓을 **즉시 self-close** 하고 Cancelled 반환
+//     (Auth 가 나갔을 수는 있으나 stale 소켓이 *살아남아* 계속 점유/통신하는 창은 닫는다).
+// 이게 "close 후 stale task 가 소켓 open + Auth 를 보낸다"는 Codex 적출 결함의 1차 방어선이다.
+// generation 가드(publish_if_current)는 상태 발행을 막는 2차 방어선으로 남는다.
+//
+// ★cancel-safe★: 모든 arm 의 `cancel_rx.changed()` 와 IO future 는 cancel-safe 라, 한 arm 이 이기면
+// 진 arm 은 부작용 없이 폐기된다(select! 표준). 따라서 부분 진행 상태가 새지 않는다.
 async fn handshake_cancellable(
     info: &DaemonInfo,
     my_gen: u64,
@@ -489,17 +491,17 @@ async fn handshake_cancellable(
     }
 }
 
-/// connected 이후 수명주기 — main_loop 를 돌고, **비의도 끊김**이면 재연결 루프로, **명시 close/stale**
-/// 이면 종료한다(T4). 단일 task 가 전체를 들고 돌아 generation 가드가 task lifetime 과 한 몸이 된다.
-///
-/// ## ★재연결 generation/closedByUser 가드(load-bearing — T4 안전 게이트)★
-/// 재연결 루프의 매 백오프·재시도 전에 `lifecycle.reconnect_guard(my_gen)` 로 "내가 current + 사용자
-/// 안 닫음"을 **원자로** 확인한다. close()(세대 bump + closed_by_user)나 새 connect(세대 bump)가 끼면
-/// Stop 을 받아 즉시 종료한다 — 이게 wsTransport `closedByUser` + `openGen` 좀비 가드의 task-lifetime
-/// 판이다. ★왜 충분한가★: TS 의 좀비 race 는 "await yield 중 새 소켓 생성 → this.ws hijack" 이었다.
-/// Rust 단일 task 모델엔 *공유 가변 소켓 핸들이 없다*(소켓은 이 task 스택에만 산다) → hijack 자체가
-/// 불가능하고, 남는 위험은 stale task 가 *공유 상태*(watch/cmd_tx)를 건드리는 것뿐인데 그건 전부
-/// publish_if_current/store_cmd_if_current/reconnect_guard 한 락으로 닫혀 있다.
+// connected 이후 수명주기 — main_loop 를 돌고, **비의도 끊김**이면 재연결 루프로, **명시 close/stale**
+// 이면 종료한다(T4). 단일 task 가 전체를 들고 돌아 generation 가드가 task lifetime 과 한 몸이 된다.
+//
+// ## ★재연결 generation/closedByUser 가드(load-bearing — T4 안전 게이트)★
+// 재연결 루프의 매 백오프·재시도 전에 `lifecycle.reconnect_guard(my_gen)` 로 "내가 current + 사용자
+// 안 닫음"을 **원자로** 확인한다. close()(세대 bump + closed_by_user)나 새 connect(세대 bump)가 끼면
+// Stop 을 받아 즉시 종료한다 — 이게 wsTransport `closedByUser` + `openGen` 좀비 가드의 task-lifetime
+// 판이다. ★왜 충분한가★: TS 의 좀비 race 는 "await yield 중 새 소켓 생성 → this.ws hijack" 이었다.
+// Rust 단일 task 모델엔 *공유 가변 소켓 핸들이 없다*(소켓은 이 task 스택에만 산다) → hijack 자체가
+// 불가능하고, 남는 위험은 stale task 가 *공유 상태*(watch/cmd_tx)를 건드리는 것뿐인데 그건 전부
+// publish_if_current/store_cmd_if_current/reconnect_guard 한 락으로 닫혀 있다.
 #[allow(clippy::too_many_arguments)]
 async fn connected_lifetime(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
@@ -755,36 +757,36 @@ async fn connected_lifetime(
     }
 }
 
-/// 메인 read/write 루프(connected 이후). 단일 task 가 stream/sink 를 단독 소유한 채
-/// `tokio::select!` 로 (a) 데몬 수신 (b) cmd 채널 (c) deadline tick 을 동시에 대기한다. 종료 사유
-/// (`LoopExit`)를 돌려줘 호출자(`connected_lifetime`)가 재연결(Disconnected) vs 종료(Closed)를 가른다.
-///
-/// ★상태 전이는 호출자가★: 이 함수는 종료 시 Down 을 발행하지 않는다 — 사유(`LoopExit`)만 보고하고
-/// 상태 결정(Down/Reconnecting)은 호출자에 모은다(lifecycle 미접촉). sink 는 소유로 받아 루프 종료 시
-/// 여기서 닫는다(재연결 시 새 소켓이 오므로 옛 소켓은 확실히 정리).
-///
-/// ## ★request/reply 상관(T6a — load-bearing)★
-/// `pending`(request_id → reply oneshot) 은 이 actor 가 단독 소유(호출자가 `&mut` 로 빌려줌, Mutex 없음).
-/// 한 select! 루프 안에서 직렬 처리하므로 두 arm 이 동시에 pending 을 만지지 않는다. 끊김(루프 종료)시
-/// 남은 pending 은 호출자(`connected_lifetime`)가 drain→Err 한다(no-leak).
-///
-/// ## ★출력 라우팅 — 무상태 통과(ADR-0046, load-bearing)★
-/// - **Binary arm**: `decode_frame` 헤더(agentId·epoch)만 읽고 → `decide_epoch(subs[agent], epoch)`(★재배선:
-///   옛 미러 on_frame 에 접혀 있던 epoch 가드를 핫패스가 직접 호출★)로 stale epoch 를 통과 전 drop → 통과분은
-///   **원본 frame bytes 그대로** `router.targets(agent)` ∩ registered 창 Channel 로 fan-out(버퍼·cursor 없음).
-///   dedup/진도는 웹뷰 뷰 단위가 한다. frame 수신은 그 agent 의 single-flight deadline 을 리셋(진행).
-/// - **Text arm `SubscribeAck`**: `apply_subscribe_ack`(epoch 갱신) + `flight.on_ack`(acked 전이 + truncated
-///   기억 + 진행). **`ReplayComplete`**: `flight.on_complete` 가 acked in-flight 를 성공 마커로 각인 → 마커
-///   frame(tag=255)을 **binary 와 동일 Channel::send 경로**로 송신(★app.emit 경유 금지 — 순서 붕괴★) + 대기열
-///   있으면 다음 Subscribe.
-/// - **cmd_rx arm `RequestReplay`**: `flight.request_replay` 로 gen 채번 → idle 이면 즉시 wire Subscribe,
-///   in-flight 면 병합. `Unsubscribe`/`Fire`: wire 송신(reply 없음).
-/// - **deadline tick arm**: `flight.check_deadlines` 로 무진행 만료 in-flight 를 실패 마커로 종결(agent 소멸·
-///   subscribe 실패 경로) + 대기열 있으면 다음 Subscribe.
-///
-/// ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
-/// ★ADR-0046: 진입 eager resubscribe 삭제★ — src-tauri 는 connect 진입 시 재구독하지 않는다(진도/구독 상태
-/// 무보유). wire 구독 형성은 뷰 주도 `request_replay` 단독(BLOCK-1 전면화), 정리는 라우터 Unsubscribe 단독.
+// 메인 read/write 루프(connected 이후). 단일 task 가 stream/sink 를 단독 소유한 채
+// `tokio::select!` 로 (a) 데몬 수신 (b) cmd 채널 (c) deadline tick 을 동시에 대기한다. 종료 사유
+// (`LoopExit`)를 돌려줘 호출자(`connected_lifetime`)가 재연결(Disconnected) vs 종료(Closed)를 가른다.
+//
+// ★상태 전이는 호출자가★: 이 함수는 종료 시 Down 을 발행하지 않는다 — 사유(`LoopExit`)만 보고하고
+// 상태 결정(Down/Reconnecting)은 호출자에 모은다(lifecycle 미접촉). sink 는 소유로 받아 루프 종료 시
+// 여기서 닫는다(재연결 시 새 소켓이 오므로 옛 소켓은 확실히 정리).
+//
+// ## ★request/reply 상관(T6a — load-bearing)★
+// `pending`(request_id → reply oneshot) 은 이 actor 가 단독 소유(호출자가 `&mut` 로 빌려줌, Mutex 없음).
+// 한 select! 루프 안에서 직렬 처리하므로 두 arm 이 동시에 pending 을 만지지 않는다. 끊김(루프 종료)시
+// 남은 pending 은 호출자(`connected_lifetime`)가 drain→Err 한다(no-leak).
+//
+// ## ★출력 라우팅 — 무상태 통과(ADR-0046, load-bearing)★
+// - **Binary arm**: `decode_frame` 헤더(agentId·epoch)만 읽고 → `decide_epoch(subs[agent], epoch)`(★재배선:
+//   옛 미러 on_frame 에 접혀 있던 epoch 가드를 핫패스가 직접 호출★)로 stale epoch 를 통과 전 drop → 통과분은
+//   **원본 frame bytes 그대로** `router.targets(agent)` ∩ registered 창 Channel 로 fan-out(버퍼·cursor 없음).
+//   dedup/진도는 웹뷰 뷰 단위가 한다. frame 수신은 그 agent 의 single-flight deadline 을 리셋(진행).
+// - **Text arm `SubscribeAck`**: `apply_subscribe_ack`(epoch 갱신) + `flight.on_ack`(acked 전이 + truncated
+//   기억 + 진행). **`ReplayComplete`**: `flight.on_complete` 가 acked in-flight 를 성공 마커로 각인 → 마커
+//   frame(tag=255)을 **binary 와 동일 Channel::send 경로**로 송신(★app.emit 경유 금지 — 순서 붕괴★) + 대기열
+//   있으면 다음 Subscribe.
+// - **cmd_rx arm `RequestReplay`**: `flight.request_replay` 로 gen 채번 → idle 이면 즉시 wire Subscribe,
+//   in-flight 면 병합. `Unsubscribe`/`Fire`: wire 송신(reply 없음).
+// - **deadline tick arm**: `flight.check_deadlines` 로 무진행 만료 in-flight 를 실패 마커로 종결(agent 소멸·
+//   subscribe 실패 경로) + 대기열 있으면 다음 Subscribe.
+//
+// ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
+// ★ADR-0046: 진입 eager resubscribe 삭제★ — src-tauri 는 connect 진입 시 재구독하지 않는다(진도/구독 상태
+// 무보유). wire 구독 형성은 뷰 주도 `request_replay` 단독(BLOCK-1 전면화), 정리는 라우터 Unsubscribe 단독.
 #[allow(clippy::too_many_arguments)]
 async fn main_loop(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
@@ -1049,12 +1051,12 @@ async fn main_loop(
     exit
 }
 
-/// ★T7c: broadcast 이벤트(request_id 없음) → app.emit 으로 전 webview push.★
-///
-/// AgentListUpdated / StatusChanged / RestoreResult / ProfileListUpdated 에 대응하는 Tauri 이벤트를
-/// 발행한다. 그 외 variant(Ack·SubscribeAck·Output·ReplayComplete·AgentList/ProfileList/Snapshot 등)는
-/// request_id 있거나 Binary 평면이거나 내부 소비라 emit 대상이 아니다 → 조용히 no-op.
-/// Err 무시(webview 없음·채널 오류는 치명적이지 않음).
+// ★T7c: broadcast 이벤트(request_id 없음) → app.emit 으로 전 webview push.★
+//
+// AgentListUpdated / StatusChanged / RestoreResult / ProfileListUpdated 에 대응하는 Tauri 이벤트를
+// 발행한다. 그 외 variant(Ack·SubscribeAck·Output·ReplayComplete·AgentList/ProfileList/Snapshot 등)는
+// request_id 있거나 Binary 평면이거나 내부 소비라 emit 대상이 아니다 → 조용히 no-op.
+// Err 무시(webview 없음·채널 오류는 치명적이지 않음).
 fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
     match ev {
         AgentEvent::AgentListUpdated { agents } => {
@@ -1097,13 +1099,13 @@ fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
     }
 }
 
-/// ★fire-and-forget 송신(T6b)★: reply 없는 명령(Subscribe/Unsubscribe/Resize)을 JSON 으로 wire 송신.
-/// 송신 실패(소켓 죽음)는 로깅만 — reply 가 없어 깨울 oneshot 이 없고, 소켓은 곧 끊겨 다음 select 가
-/// Disconnected 로 빠진다(재연결 시 layout 이 다시 rebuild/resubscribe).
-///
-/// ★반환(FIX-2)★: `true` = wire 로 나감, `false` = 직렬화/송신 실패. 대부분의 호출처(Unsubscribe/Fire/
-/// replay-next)는 반환을 무시(fire-and-forget)하지만, `request_replay` 의 send_now Subscribe 는 이 결과로
-/// 실패를 감지해 방금 만든 in-flight 를 롤백한다(gen 을 프론트에 잘못 반환하지 않도록).
+// ★fire-and-forget 송신(T6b)★: reply 없는 명령(Subscribe/Unsubscribe/Resize)을 JSON 으로 wire 송신.
+// 송신 실패(소켓 죽음)는 로깅만 — reply 가 없어 깨울 oneshot 이 없고, 소켓은 곧 끊겨 다음 select 가
+// Disconnected 로 빠진다(재연결 시 layout 이 다시 rebuild/resubscribe).
+//
+// ★반환(FIX-2)★: `true` = wire 로 나감, `false` = 직렬화/송신 실패. 대부분의 호출처(Unsubscribe/Fire/
+// replay-next)는 반환을 무시(fire-and-forget)하지만, `request_replay` 의 send_now Subscribe 는 이 결과로
+// 실패를 감지해 방금 만든 in-flight 를 롤백한다(gen 을 프론트에 잘못 반환하지 않도록).
 async fn send_fire(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     cmd: &AgentCommand,
@@ -1125,11 +1127,11 @@ async fn send_fire(
     }
 }
 
-/// Hello 가 올 때까지 stream 을 읽는다(internal 소비). Hello=Ok, Error=AuthRejected, 닫힘=ClosedBeforeHello.
-///
-/// ★Hello 내부 소비(wsTransport 와 동형)★: Hello 는 핸드셰이크 신호라 control 로 위로 올리지
-/// 않는다 — 여기서 먹고 connected 로만 전이한다. Hello 전에 오는 다른 control/binary 는 정상
-/// 흐름엔 없지만(데몬은 Hello 를 가장 먼저 push), 방어적으로 무시하고 Hello 만 기다린다.
+// Hello 가 올 때까지 stream 을 읽는다(internal 소비). Hello=Ok, Error=AuthRejected, 닫힘=ClosedBeforeHello.
+//
+// ★Hello 내부 소비(wsTransport 와 동형)★: Hello 는 핸드셰이크 신호라 control 로 위로 올리지
+// 않는다 — 여기서 먹고 connected 로만 전이한다. Hello 전에 오는 다른 control/binary 는 정상
+// 흐름엔 없지만(데몬은 Hello 를 가장 먼저 push), 방어적으로 무시하고 Hello 만 기다린다.
 async fn wait_for_hello(
     stream: &mut futures_util::stream::SplitStream<Ws>,
 ) -> Result<(), HandshakeError> {

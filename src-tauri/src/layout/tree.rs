@@ -13,13 +13,13 @@ use uuid::Uuid;
 
 use super::types::{LayoutNode, SlotContent};
 
-/// ratio 를 [0.0, 1.0] 으로 클램프. split 기본값은 0.5.
+// ratio 를 [0.0, 1.0] 으로 클램프. split 기본값은 0.5.
 pub fn clamp_ratio(r: f32) -> f32 {
     r.clamp(0.0, 1.0)
 }
 
-/// 트리에서 slot_id 를 가진 Slot 을 찾아 그 콘텐츠(점유자) 를 반환.
-/// 반환: Some(SlotContent::Agent{..}) = 배정됨 · Some(SlotContent::Empty) = 빈 슬롯 · None = 그 slot_id 없음.
+// 트리에서 slot_id 를 가진 Slot 을 찾아 그 콘텐츠(점유자) 를 반환.
+// 반환: Some(SlotContent::Agent{..}) = 배정됨 · Some(SlotContent::Empty) = 빈 슬롯 · None = 그 slot_id 없음.
 pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&SlotContent> {
     match node {
         LayoutNode::Slot { id, content } => {
@@ -33,12 +33,12 @@ pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&SlotContent> {
     }
 }
 
-/// slot_id 가 트리에 존재하는지.
+// slot_id 가 트리에 존재하는지.
 pub fn contains_slot(node: &LayoutNode, slot_id: Uuid) -> bool {
     find_slot(node, slot_id).is_some()
 }
 
-/// 트리를 전위 순회하며 첫 번째(가장 왼쪽 = a 우선) Slot 의 id 를 반환. 트리는 항상 ≥1 슬롯이라 무한.
+// 트리를 전위 순회하며 첫 번째(가장 왼쪽 = a 우선) Slot 의 id 를 반환. 트리는 항상 ≥1 슬롯이라 무한.
 pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     match node {
         LayoutNode::Slot { id, .. } => *id,
@@ -46,9 +46,9 @@ pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     }
 }
 
-/// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(SlotContent::Empty)의 id** 를
-/// 반환한다. 빈 슬롯이 하나도 없으면 None. spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의
-/// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
+// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(SlotContent::Empty)의 id** 를
+// 반환한다. 빈 슬롯이 하나도 없으면 None. spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의
+// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
 pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     match node {
         LayoutNode::Slot { id, content } => {
@@ -64,12 +64,12 @@ pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     }
 }
 
-/// slot_id 슬롯을 Split 으로 분할한다.
-///
-/// 대상 Slot 을 `Split{dir, ratio:0.5, a=원래 슬롯, b=새 빈 슬롯}` 으로 치환하고 **새 빈 슬롯의
-/// id 를 반환**(호출자가 focus 이동·검증에 사용). slot_id 가 없으면 트리 불변 + None 반환(no-op).
-///
-/// 중첩 분할도 지원: 한 번 split 된 트리의 어느 말단 Slot 이든 다시 split 가능(재귀가 깊이 무관).
+// slot_id 슬롯을 Split 으로 분할한다.
+//
+// 대상 Slot 을 `Split{dir, ratio:0.5, a=원래 슬롯, b=새 빈 슬롯}` 으로 치환하고 **새 빈 슬롯의
+// id 를 반환**(호출자가 focus 이동·검증에 사용). slot_id 가 없으면 트리 불변 + None 반환(no-op).
+//
+// 중첩 분할도 지원: 한 번 split 된 트리의 어느 말단 Slot 이든 다시 split 가능(재귀가 깊이 무관).
 pub fn split_in_tree(
     node: &mut LayoutNode,
     slot_id: Uuid,
@@ -108,13 +108,13 @@ pub fn split_in_tree(
     }
 }
 
-/// slot_id 슬롯을 닫는다.
-///
-/// - 닫는 슬롯이 어떤 Split 의 **직접 자식**이면 → 그 Split 을 **형제(다른 자식)로 치환**(형제 승격).
-/// - 닫는 슬롯이 **root 자체**(트리에 슬롯 하나뿐)면 → 새 빈 슬롯으로 리셋(View 는 빈 상태 유지).
-/// - slot_id 가 없으면 트리 불변(no-op, false 반환).
-///
-/// 반환: 실제로 닫혔으면 true(no-op 이면 false). 호출자는 false 면 invalid id 로 Err.
+// slot_id 슬롯을 닫는다.
+//
+// - 닫는 슬롯이 어떤 Split 의 **직접 자식**이면 → 그 Split 을 **형제(다른 자식)로 치환**(형제 승격).
+// - 닫는 슬롯이 **root 자체**(트리에 슬롯 하나뿐)면 → 새 빈 슬롯으로 리셋(View 는 빈 상태 유지).
+// - slot_id 가 없으면 트리 불변(no-op, false 반환).
+//
+// 반환: 실제로 닫혔으면 true(no-op 이면 false). 호출자는 false 면 invalid id 로 Err.
 pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
     // root 가 바로 그 슬롯이면 빈 슬롯으로 리셋(트리에 슬롯 하나뿐인 경우 포함).
     if let LayoutNode::Slot { id, .. } = node {
@@ -152,10 +152,10 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
     false
 }
 
-/// slot_id 슬롯에 agent_id(참조 문자열) 를 배정. agent=None 이면 해제(빈 슬롯 = SlotContent::Empty).
-/// 데몬에 실재 검증 안 함(ADR-0035/0006 — 락 보유 중 외부 호출 0). slot_id 없으면 no-op(false).
-/// ★덮어쓰기 시맨틱 유지(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 resolve_spawn_slot 층).
-/// ADR-0060: 입력 Option<String> 을 SlotContent(Some→Agent / None→Empty)로 매핑해 콘텐츠를 통째 치환한다.
+// slot_id 슬롯에 agent_id(참조 문자열) 를 배정. agent=None 이면 해제(빈 슬롯 = SlotContent::Empty).
+// 데몬에 실재 검증 안 함(ADR-0035/0006 — 락 보유 중 외부 호출 0). slot_id 없으면 no-op(false).
+// ★덮어쓰기 시맨틱 유지(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 resolve_spawn_slot 층).
+// ADR-0060: 입력 Option<String> 을 SlotContent(Some→Agent / None→Empty)로 매핑해 콘텐츠를 통째 치환한다.
 pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String>) -> bool {
     match node {
         LayoutNode::Slot { id, content } => {
@@ -180,10 +180,10 @@ pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String
     }
 }
 
-/// slot_id 슬롯의 콘텐츠(SlotContent)를 통째로 교체한다(제네릭 — Empty/Agent/AgentList/PresetPalette 어느
-/// variant 든). assign_in_tree 의 미러이나 Option<String> agent 래핑 없이 SlotContent 를 직접 받는다 —
-/// 비-에이전트 콘텐츠(AgentList/PresetPalette)를 슬롯에 배치하는 배치 경로(ADR-0063 set_slot_content).
-/// slot_id 없으면 no-op(false). ★덮어쓰기 시맨틱★: 점유 슬롯이어도 무조건 교체(assign_in_tree 와 동형).
+// slot_id 슬롯의 콘텐츠(SlotContent)를 통째로 교체한다(제네릭 — Empty/Agent/AgentList/PresetPalette 어느
+// variant 든). assign_in_tree 의 미러이나 Option<String> agent 래핑 없이 SlotContent 를 직접 받는다 —
+// 비-에이전트 콘텐츠(AgentList/PresetPalette)를 슬롯에 배치하는 배치 경로(ADR-0063 set_slot_content).
+// slot_id 없으면 no-op(false). ★덮어쓰기 시맨틱★: 점유 슬롯이어도 무조건 교체(assign_in_tree 와 동형).
 pub fn set_in_tree(node: &mut LayoutNode, slot_id: Uuid, content: SlotContent) -> bool {
     match node {
         LayoutNode::Slot { id, content: c } => {
@@ -210,7 +210,7 @@ mod tests {
     use super::super::types::{SlotContent, SplitDir};
     use super::*;
 
-    /// 배정된 슬롯 노드(테스트 헬퍼) — id + Agent{agent_id}.
+    // 배정된 슬롯 노드(테스트 헬퍼) — id + Agent{agent_id}.
     fn agent_slot(id: Uuid, agent: &str) -> LayoutNode {
         LayoutNode::Slot {
             id,
@@ -220,7 +220,7 @@ mod tests {
         }
     }
 
-    /// 단일 빈 슬롯 트리 + 그 슬롯 id 반환.
+    // 단일 빈 슬롯 트리 + 그 슬롯 id 반환.
     fn single_slot() -> (LayoutNode, Uuid) {
         let node = LayoutNode::new_empty_slot();
         let id = first_slot_id(&node);

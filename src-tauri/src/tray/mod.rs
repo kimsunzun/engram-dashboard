@@ -27,26 +27,26 @@ use core::{IconState, MenuAction};
 
 use crate::discovery::StopOutcome;
 
-/// 컬러(데몬 alive)·회색(dead) 트레이 아이콘 두 벌. setup 에서 1회 생성해 manage(state).
-///
-/// ★1회 생성 후 보관(load-bearing)★: 매 갱신마다 .ico 디코드/grayscale 변환을 다시 하면 낭비라
-/// setup 에서 두 벌을 만들어 들고, refresh 때는 set_icon 으로 둘 중 하나를 교체만 한다. Image<'static>
-/// 은 내부 Cow 라 clone 이 저렴(set_icon 이 소유를 요구해 갱신 시 복제).
+// 컬러(데몬 alive)·회색(dead) 트레이 아이콘 두 벌. setup 에서 1회 생성해 manage(state).
+//
+// ★1회 생성 후 보관(load-bearing)★: 매 갱신마다 .ico 디코드/grayscale 변환을 다시 하면 낭비라
+// setup 에서 두 벌을 만들어 들고, refresh 때는 set_icon 으로 둘 중 하나를 교체만 한다. Image<'static>
+// 은 내부 Cow 라 clone 이 저렴(set_icon 이 소유를 요구해 갱신 시 복제).
 pub struct TrayIcons {
     pub active: Image<'static>,
     pub inactive: Image<'static>,
 }
 
-/// 내장 컬러 아이콘(.ico). 배포 시 경로 의존 제거 위해 컴파일에 박는다(tray-host 와 동일 방식).
+// 내장 컬러 아이콘(.ico). 배포 시 경로 의존 제거 위해 컴파일에 박는다(tray-host 와 동일 방식).
 const ICON_ICO: &[u8] = include_bytes!("../../icons/icon.ico");
 
-/// ensure_daemon(WMI spawn + 폴링) blocking 한계. discovery 내부 폴링 timeout 과 같은 5초.
+// ensure_daemon(WMI spawn + 폴링) blocking 한계. discovery 내부 폴링 timeout 과 같은 5초.
 const ENSURE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 트레이 아이콘 두 벌을 생성한다. 컬러 = .ico 디코드, 회색 = 컬러 RGBA 를 grayscale 변환.
-///
-/// .ico → RGBA 디코드는 Tauri Image::from_bytes(image-ico feature)로 한다(별도 image crate 불필요).
-/// 회색은 디코드한 RGBA 버퍼를 core::to_grayscale_rgba 로 변환해 Image::new_owned 로 재구성.
+// 트레이 아이콘 두 벌을 생성한다. 컬러 = .ico 디코드, 회색 = 컬러 RGBA 를 grayscale 변환.
+//
+// .ico → RGBA 디코드는 Tauri Image::from_bytes(image-ico feature)로 한다(별도 image crate 불필요).
+// 회색은 디코드한 RGBA 버퍼를 core::to_grayscale_rgba 로 변환해 Image::new_owned 로 재구성.
 fn build_icons() -> tauri::Result<TrayIcons> {
     // image-ico feature 필요(없으면 .ico 디코드 실패).
     let active = Image::from_bytes(ICON_ICO)?;
@@ -59,11 +59,11 @@ fn build_icons() -> tauri::Result<TrayIcons> {
     Ok(TrayIcons { active, inactive })
 }
 
-/// 트레이를 생성·배선한다(setup 에서 1회). 아이콘 두 벌을 manage 하고, 메뉴·핸들러를 단다.
-///
-/// 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
-/// 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
-/// UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 더블클릭**으로 대체(on_tray_icon_event).
+// 트레이를 생성·배선한다(setup 에서 1회). 아이콘 두 벌을 manage 하고, 메뉴·핸들러를 단다.
+//
+// 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
+// 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
+// UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 더블클릭**으로 대체(on_tray_icon_event).
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
     // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정).
@@ -123,25 +123,25 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 데몬 생사 주기 옵저버(setup 에서 1회 spawn). 회색 고착 버그 해소 — 데몬이 부팅 후 외부에서
-/// 뜨거나 죽어도 ≤PROBE_INTERVAL 내에 트레이 아이콘·emit 가 따라간다.
-///
-/// ★주기 probe = ADR-0028 "버스 뒤 옵저버 impl(pre-flip)"(load-bearing)★: 이 폴링은 임시 우회가
-/// 아니라 **Rust 가 소유한 단일 push 소스**다. 데몬 연결(WS) 이벤트로 생사를 직접 받게 되는 flip
-/// 단계에서 *probe 메커니즘*은 그 이벤트로 교체되지만, "Rust 옵저버가 변화를 감지해 트레이(네이티브)
-/// 와 WebView(emit) 두 구독자에게 push" 라는 **버스/구독자 형태는 불변**이다. 프론트는 나중에
-/// `daemon-status-changed` 를 구독한다(ADR-0028 단일 push 채널).
-///
-/// ★StopOutcome 즉시확정 분기와의 분담★: 끄기 직후 회색 고착 race 는 dispatch 의
-/// icon_state_for_stop_outcome(probe 우회 즉시 회색)가 막고, 이 옵저버는 그걸 **대체하지 않고 보완**한다
-/// — 즉시성은 StopOutcome, 외부 변화(부팅 후 데몬 등장·크래시)는 옵저버가 ≤PROBE_INTERVAL 내 반영.
-///
-/// panic/종료 격리: probe·publish 어느 것도 옵저버 스레드를 죽이지 않게 결과를 무시(에러는 내부 warn)
-/// 하고 무한 루프를 돈다. 변화 판정·중복차단·억제창은 publish_daemon_liveness(LivenessState)가 소유 —
-/// 옵저버는 probe→publish 만 한다. 초기 아이콘은 build_tray refresh 가 publish 로 last 를 먼저 세팅하므로
-/// 옵저버 첫 루프가 같은 값이면 publish 가 자동 무시(변화 없음).
+// 데몬 생사 주기 옵저버(setup 에서 1회 spawn). 회색 고착 버그 해소 — 데몬이 부팅 후 외부에서
+// 뜨거나 죽어도 ≤PROBE_INTERVAL 내에 트레이 아이콘·emit 가 따라간다.
+//
+// ★주기 probe = ADR-0028 "버스 뒤 옵저버 impl(pre-flip)"(load-bearing)★: 이 폴링은 임시 우회가
+// 아니라 **Rust 가 소유한 단일 push 소스**다. 데몬 연결(WS) 이벤트로 생사를 직접 받게 되는 flip
+// 단계에서 *probe 메커니즘*은 그 이벤트로 교체되지만, "Rust 옵저버가 변화를 감지해 트레이(네이티브)
+// 와 WebView(emit) 두 구독자에게 push" 라는 **버스/구독자 형태는 불변**이다. 프론트는 나중에
+// `daemon-status-changed` 를 구독한다(ADR-0028 단일 push 채널).
+//
+// ★StopOutcome 즉시확정 분기와의 분담★: 끄기 직후 회색 고착 race 는 dispatch 의
+// icon_state_for_stop_outcome(probe 우회 즉시 회색)가 막고, 이 옵저버는 그걸 **대체하지 않고 보완**한다
+// — 즉시성은 StopOutcome, 외부 변화(부팅 후 데몬 등장·크래시)는 옵저버가 ≤PROBE_INTERVAL 내 반영.
+//
+// panic/종료 격리: probe·publish 어느 것도 옵저버 스레드를 죽이지 않게 결과를 무시(에러는 내부 warn)
+// 하고 무한 루프를 돈다. 변화 판정·중복차단·억제창은 publish_daemon_liveness(LivenessState)가 소유 —
+// 옵저버는 probe→publish 만 한다. 초기 아이콘은 build_tray refresh 가 publish 로 last 를 먼저 세팅하므로
+// 옵저버 첫 루프가 같은 값이면 publish 가 자동 무시(변화 없음).
 pub fn spawn_daemon_observer(app: &AppHandle) {
-    /// probe 주기. 응답성(외부 변화 반영 지연)과 부하(daemon.json 읽기+PID probe) 절충 — 3초.
+    // probe 주기. 응답성(외부 변화 반영 지연)과 부하(daemon.json 읽기+PID probe) 절충 — 3초.
     const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
     let app = app.clone();
@@ -162,11 +162,11 @@ pub fn spawn_daemon_observer(app: &AppHandle) {
         .ok();
 }
 
-/// 메뉴 클릭 id → MenuAction → 동작. 모든 동작은 actions(공유 부수효과)만 호출.
-///
-/// ★데몬 켜기/끄기 = blocking → 워커(load-bearing)★: ensure/send_stop 은 WMI 폴링/WS 접속으로 수초
-/// blocking. on_menu_event 는 메인 스레드라 직접 부르면 트레이·창이 그동안 얼어붙는다 → spawn_blocking
-/// 워커로 보내고, 완료 후 refresh_tray_icon(메인 스레드 set_icon)으로 아이콘 갱신.
+// 메뉴 클릭 id → MenuAction → 동작. 모든 동작은 actions(공유 부수효과)만 호출.
+//
+// ★데몬 켜기/끄기 = blocking → 워커(load-bearing)★: ensure/send_stop 은 WMI 폴링/WS 접속으로 수초
+// blocking. on_menu_event 는 메인 스레드라 직접 부르면 트레이·창이 그동안 얼어붙는다 → spawn_blocking
+// 워커로 보내고, 완료 후 refresh_tray_icon(메인 스레드 set_icon)으로 아이콘 갱신.
 fn dispatch_menu(app: &AppHandle, menu_id: &str) {
     let Some(action) = core::action_for_menu_id(menu_id) else {
         tracing::warn!("[tray] 알 수 없는 메뉴 id: {menu_id}");
@@ -185,11 +185,11 @@ enum DaemonOp {
     Stop,
 }
 
-/// 데몬 켜기/끄기를 워커에서 실행하고 완료 후 아이콘 갱신.
-///
-/// ★std::process::Command 로 데몬 직접 spawn 금지(ADR-0024 C1)★: ensure_daemon 은 내부에서 WMI
-/// (Win32_Process.Create)로만 spawn 한다 — WmiPrvSE 자식이라 앱 Job(KILL_ON_JOB_CLOSE) 미상속 =
-/// detached/breakaway 자동충족. 여기서 Command 직접 spawn 하면 앱 종료 시 데몬 동반 사살.
+// 데몬 켜기/끄기를 워커에서 실행하고 완료 후 아이콘 갱신.
+//
+// ★std::process::Command 로 데몬 직접 spawn 금지(ADR-0024 C1)★: ensure_daemon 은 내부에서 WMI
+// (Win32_Process.Create)로만 spawn 한다 — WmiPrvSE 자식이라 앱 Job(KILL_ON_JOB_CLOSE) 미상속 =
+// detached/breakaway 자동충족. 여기서 Command 직접 spawn 하면 앱 종료 시 데몬 동반 사살.
 fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     let app = app.clone();
     // ★워커 panic 시 아이콘 갱신 누락 한계(reviewer Minor, 의도적 미가드)★: 아래 클로저가
@@ -243,14 +243,14 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     });
 }
 
-/// [`StopOutcome`] → 끄기 후 아이콘 상태(impure 층 — discovery 타입 의존).
-///
-/// ★core 가 아니라 여기 있는 이유(load-bearing)★: StopOutcome 은 discovery 의 타입이라 core.rs
-/// (tauri/discovery import 0, IconState 만 안다)에 넣으면 순수성이 깨진다. 그래서 이 매핑만 impure
-/// 층에 둔다.
-/// - `DaemonClosed`(연결 닫힘=꺼짐 확정) → `Some(Inactive)`: 회색 확정(끄기 경로는 force_daemon_down
-///   이 이 확정 위에 death-window 억제창까지 세팅 — M-1 race 방지).
-/// - `Timeout | NoTarget`(불확실/끌 데몬 없음) → `None`: 호출자가 기존 probe 폴백(refresh)을 탄다.
+// [`StopOutcome`] → 끄기 후 아이콘 상태(impure 층 — discovery 타입 의존).
+//
+// ★core 가 아니라 여기 있는 이유(load-bearing)★: StopOutcome 은 discovery 의 타입이라 core.rs
+// (tauri/discovery import 0, IconState 만 안다)에 넣으면 순수성이 깨진다. 그래서 이 매핑만 impure
+// 층에 둔다.
+// - `DaemonClosed`(연결 닫힘=꺼짐 확정) → `Some(Inactive)`: 회색 확정(끄기 경로는 force_daemon_down
+//   이 이 확정 위에 death-window 억제창까지 세팅 — M-1 race 방지).
+// - `Timeout | NoTarget`(불확실/끌 데몬 없음) → `None`: 호출자가 기존 probe 폴백(refresh)을 탄다.
 fn icon_state_for_stop_outcome(outcome: StopOutcome) -> Option<IconState> {
     match outcome {
         StopOutcome::DaemonClosed => Some(IconState::Inactive),
@@ -258,8 +258,8 @@ fn icon_state_for_stop_outcome(outcome: StopOutcome) -> Option<IconState> {
     }
 }
 
-/// 끄기 결과가 "꺼짐 확정(DaemonClosed)"인지. 매핑(icon_state_for_stop_outcome)을 재사용해
-/// 끄기 경로 분기에 쓴다 — 확정이면 force_daemon_down(회색+억제창), 아니면 probe 폴백.
+// 끄기 결과가 "꺼짐 확정(DaemonClosed)"인지. 매핑(icon_state_for_stop_outcome)을 재사용해
+// 끄기 경로 분기에 쓴다 — 확정이면 force_daemon_down(회색+억제창), 아니면 probe 폴백.
 fn is_daemon_closed(outcome: StopOutcome) -> bool {
     icon_state_for_stop_outcome(outcome).is_some()
 }

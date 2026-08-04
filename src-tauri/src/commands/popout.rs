@@ -35,45 +35,45 @@ use crate::daemon_client::DaemonClient;
 use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
 use crate::output_router::OutputRouter;
 
-/// 팝업/런타임 창 label prefix. capabilities/popup.json 의 `"slot-popup-*"` glob 과 짝(변경 시 양쪽 동기).
-/// ★의미 확장(ADR-0057/G8)★: "팝업" → "런타임 창"(create_window 포함). prefix 값은 불변(Destroyed 정리
-/// 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
+// 팝업/런타임 창 label prefix. capabilities/popup.json 의 `"slot-popup-*"` glob 과 짝(변경 시 양쪽 동기).
+// ★의미 확장(ADR-0057/G8)★: "팝업" → "런타임 창"(create_window 포함). prefix 값은 불변(Destroyed 정리
+// 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
 const POPUP_LABEL_PREFIX: &str = "slot-popup-";
 
-/// ★WebView2 환경 옵션 SSOT — tauri.conf.json 의 `additionalBrowserArgs` 와 문자-단위로 동일해야 한다★.
-/// 근거(실측 확인 — ghost windows 버그): 같은 user-data 폴더를 공유하는 모든 WebView 창은 **동일한**
-/// WebView2 환경 옵션(additionalBrowserArgs)을 써야 한다. config 창(main·agent-tree)은 이 인자를 주는데
-/// 런타임 WebviewWindowBuilder 가 안 주면 환경 옵션 불일치 → 같은 user-data 폴더의 런타임 WebView2 환경
-/// 생성이 조용히 실패(build() 는 Ok·창 등록됨·HWND 없음 = 유령 창)한다. 결정·불변식 정본 = ADR-0054.
+// ★WebView2 환경 옵션 SSOT — tauri.conf.json 의 `additionalBrowserArgs` 와 문자-단위로 동일해야 한다★.
+// 근거(실측 확인 — ghost windows 버그): 같은 user-data 폴더를 공유하는 모든 WebView 창은 **동일한**
+// WebView2 환경 옵션(additionalBrowserArgs)을 써야 한다. config 창(main·agent-tree)은 이 인자를 주는데
+// 런타임 WebviewWindowBuilder 가 안 주면 환경 옵션 불일치 → 같은 user-data 폴더의 런타임 WebView2 환경
+// 생성이 조용히 실패(build() 는 Ok·창 등록됨·HWND 없음 = 유령 창)한다. 결정·불변식 정본 = ADR-0054.
 const WEBVIEW2_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required";
 
-/// 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
-/// 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피). AtomicU64 라 락 없이 안전.
+// 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
+// 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피). AtomicU64 라 락 없이 안전.
 #[derive(Default)]
 pub struct PopupCounter(pub AtomicU64);
 
 impl PopupCounter {
-    /// 다음 유일 label 발급(`slot-popup-N`). N 은 1 부터 단조 증가.
+    // 다음 유일 label 발급(`slot-popup-N`). N 은 1 부터 단조 증가.
     fn next_label(&self) -> String {
         let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
         format!("{POPUP_LABEL_PREFIX}{n}")
     }
 }
 
-/// 이 label 이 팝업/런타임 창인지(prefix 매칭). lib.rs Destroyed arm 이 main/agent-tree 와 구분하는 데 쓴다.
+// 이 label 이 팝업/런타임 창인지(prefix 매칭). lib.rs Destroyed arm 이 main/agent-tree 와 구분하는 데 쓴다.
 pub fn is_popup_label(label: &str) -> bool {
     label.starts_with(POPUP_LABEL_PREFIX)
 }
 
-/// 런타임 창 URL 을 만든다. ★URL 키 = `?window=<label>`(ADR-0057/§3-3)★: 팝업 페이지는 "고정 뷰"가
-/// 아니라 "이 창의 활성 탭"을 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위). 프론트는 이 슬라이스
-/// 밖(스테이지 4)이라 stale 하지만, Rust 측 일관성 위해 새 키로 발급한다.
+// 런타임 창 URL 을 만든다. ★URL 키 = `?window=<label>`(ADR-0057/§3-3)★: 팝업 페이지는 "고정 뷰"가
+// 아니라 "이 창의 활성 탭"을 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위). 프론트는 이 슬라이스
+// 밖(스테이지 4)이라 stale 하지만, Rust 측 일관성 위해 새 키로 발급한다.
 fn window_url(label: &str) -> String {
     format!("index.html#/popup?window={label}")
 }
 
-/// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지). label 순번 N 으로 오프셋. 8개마다 wrap.
+// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지). label 순번 N 으로 오프셋. 8개마다 wrap.
 fn cascade_position(label: &str) -> (f64, f64) {
     let n: u32 = label
         .strip_prefix(POPUP_LABEL_PREFIX)
@@ -83,8 +83,8 @@ fn cascade_position(label: &str) -> (f64, f64) {
     (140.0 + step * 72.0, 110.0 + step * 60.0)
 }
 
-/// WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). config 창과 동일한
-/// WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054). 실패 시 Err(빌드 문자열).
+// WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). config 창과 동일한
+// WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054). 실패 시 Err(빌드 문자열).
 fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
     let (x, y) = cascade_position(label);
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
@@ -97,9 +97,9 @@ fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
         .map_err(|e| format!("런타임 창 생성 실패: {e}"))
 }
 
-/// OS 창을 destroy(닫기). Destroyed 이벤트 → lib.rs Destroyed arm → cleanup_popup_window 가 잔여 정리.
-/// ★창 닫힘 = 백엔드 단일 소스(§5-2/G2)★: 프론트로 별도 view:closed 를 안 쏜다(이중 발화·재진입 방지).
-/// registry 는 여기선 안 건드린다(Destroyed→cleanup 이 정리) — 그래서 인자로도 안 받는다(F5).
+// OS 창을 destroy(닫기). Destroyed 이벤트 → lib.rs Destroyed arm → cleanup_popup_window 가 잔여 정리.
+// ★창 닫힘 = 백엔드 단일 소스(§5-2/G2)★: 프론트로 별도 view:closed 를 안 쏜다(이중 발화·재진입 방지).
+// registry 는 여기선 안 건드린다(Destroyed→cleanup 이 정리) — 그래서 인자로도 안 받는다(F5).
 pub fn destroy_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
         if let Err(e) = w.destroy() {
@@ -111,11 +111,11 @@ pub fn destroy_window(app: &AppHandle, label: &str) {
     }
 }
 
-/// ★빈 새 창 생성(create_window — D-6)★. 모델에 빈 창(빈 탭 1개) 추가 → 락 밖에서 웹뷰 빌드. 성공 시
-/// 새 창 label 반환. 빌드 실패 시 모델 롤백(close_window). command wrapper 는 commands/layout.rs.
-///
-/// ★create_window count 노트(ADR-0056/§4-2)★: 창 수를 늘리므로 보이는 슬롯 상한(≤16) 근접을 로그로 남긴다
-/// (하드 블록 아님 — 초과 레이아웃은 프론트 onContextLoss→DOM graceful degrade + ADR-0056 재검토 트리거).
+// ★빈 새 창 생성(create_window — D-6)★. 모델에 빈 창(빈 탭 1개) 추가 → 락 밖에서 웹뷰 빌드. 성공 시
+// 새 창 label 반환. 빌드 실패 시 모델 롤백(close_window). command wrapper 는 commands/layout.rs.
+//
+// ★create_window count 노트(ADR-0056/§4-2)★: 창 수를 늘리므로 보이는 슬롯 상한(≤16) 근접을 로그로 남긴다
+// (하드 블록 아님 — 초과 레이아웃은 프론트 onContextLoss→DOM graceful degrade + ADR-0056 재검토 트리거).
 pub async fn create_empty_window(
     app: &AppHandle,
     state: &LayoutState,
@@ -160,16 +160,16 @@ pub async fn create_empty_window(
     Ok(label)
 }
 
-/// ★슬롯을 다른 창의 새 탭으로 MOVE(move_slot_to_window)★. §5-3 2-phase 롤백(G4).
-///   `to_window` 지정 → 그 기존 창 새 탭으로(phase C 삽입·재검증). 미지정 → 새 팝업 창 생성.
-/// 반환 = `{ window, tab }`(호출자가 옮겨간 창·탭을 안다, G4). 빈 슬롯(Empty)이면 Err.
-///
-/// ★ADR-0064 — 모든 슬롯 콘텐츠 팝업★: agent 슬롯뿐 아니라 agent_list/preset_palette 슬롯도 새 창으로
-///   옮긴다(SlotContent 전체를 옮김). 비-에이전트 콘텐츠는 백엔드 출력 구독이 없어 구독 마이그레이션이
-///   자연히 no-op(rebuild 가 Agent 슬롯만 라우팅 — collect_agents). Empty 만 거부(메뉴가 empty 를 hideOn 으로
-///   숨기지만 코어도 방어).
-///
-/// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(새 창 타깃은 phase B 에서 빌드).
+// ★슬롯을 다른 창의 새 탭으로 MOVE(move_slot_to_window)★. §5-3 2-phase 롤백(G4).
+//   `to_window` 지정 → 그 기존 창 새 탭으로(phase C 삽입·재검증). 미지정 → 새 팝업 창 생성.
+// 반환 = `{ window, tab }`(호출자가 옮겨간 창·탭을 안다, G4). 빈 슬롯(Empty)이면 Err.
+//
+// ★ADR-0064 — 모든 슬롯 콘텐츠 팝업★: agent 슬롯뿐 아니라 agent_list/preset_palette 슬롯도 새 창으로
+//   옮긴다(SlotContent 전체를 옮김). 비-에이전트 콘텐츠는 백엔드 출력 구독이 없어 구독 마이그레이션이
+//   자연히 no-op(rebuild 가 Agent 슬롯만 라우팅 — collect_agents). Empty 만 거부(메뉴가 empty 를 hideOn 으로
+//   숨기지만 코어도 방어).
+//
+// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(새 창 타깃은 phase B 에서 빌드).
 #[tauri::command]
 pub async fn move_slot_to_window(
     app: AppHandle,
@@ -330,21 +330,21 @@ pub async fn move_slot_to_window(
     })
 }
 
-/// move_slot_to_window 반환(G4) — 옮겨간 창 label + 새 탭 View id.
+// move_slot_to_window 반환(G4) — 옮겨간 창 label + 새 탭 View id.
 #[derive(serde::Serialize, Clone)]
 pub struct MoveResult {
     pub window: String,
     pub tab: Uuid,
 }
 
-/// phase A 임시 View 롤백(창 삽입 전이라 tabs 갱신 불필요). 소스 슬롯은 유지(사용자가 슬롯 안 잃음).
-///
-/// ★F2 REAL 동시성 버그 수정★: 옛 코드는 rebuild 델타를 락 안에서 계산하고 `send_subscription_delta`
-///   발화를 `drop(mgr)` 뒤(락 밖)에 했다 → F1 과 같은 클래스(계산~발화 사이 재추가로 stale 1→0
-///   unsubscribe). 이제 발화도 락 안(drop 전) — send_subscription_delta 는 동기 try_send(await/network 0)라
-///   ADR-0006 위반 아님. tmp_view 는 orphan(view_owner 없음)이라 이 rebuild 델타에 to_subscribe 는 안 나오고
-///   (라우팅 순회는 windows→tabs walk 인데 tmp_view 는 어느 tabs 에도 없음), drop 으로 to_unsubscribe 가
-///   나올 수 있어(0→1 이 애초에 안 나갔으니 대개 no-op) 발화를 락 안으로 옮기는 게 안전.
+// phase A 임시 View 롤백(창 삽입 전이라 tabs 갱신 불필요). 소스 슬롯은 유지(사용자가 슬롯 안 잃음).
+//
+// ★F2 REAL 동시성 버그 수정★: 옛 코드는 rebuild 델타를 락 안에서 계산하고 `send_subscription_delta`
+//   발화를 `drop(mgr)` 뒤(락 밖)에 했다 → F1 과 같은 클래스(계산~발화 사이 재추가로 stale 1→0
+//   unsubscribe). 이제 발화도 락 안(drop 전) — send_subscription_delta 는 동기 try_send(await/network 0)라
+//   ADR-0006 위반 아님. tmp_view 는 orphan(view_owner 없음)이라 이 rebuild 델타에 to_subscribe 는 안 나오고
+//   (라우팅 순회는 windows→tabs walk 인데 tmp_view 는 어느 tabs 에도 없음), drop 으로 to_unsubscribe 가
+//   나올 수 있어(0→1 이 애초에 안 나갔으니 대개 no-op) 발화를 락 안으로 옮기는 게 안전.
 fn rollback_detached(
     state: &LayoutState,
     router: &Arc<OutputRouter>,
@@ -372,21 +372,21 @@ impl EmitLayout for AppHandle {
     }
 }
 
-/// ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
-/// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. 그 창의 **모든 탭 View 를
-/// 통째로 드롭**(views + view_owner) + windows 엔트리 제거 → rebuild **1회** → 그 델타의 to_unsubscribe
-/// (어느 창에도 안 남은 agent)를 데몬에 발화 → 출력 Channel 제거.
-///
-/// ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
-/// + Unsubscribe 누락. 이제 Tauri-free 코어 `cleanup_window_core`(output_router.rs)가 close_window 로 tabs
-/// 전부 순회 드롭 + rebuild(마지막 1회 — 락 1구간)해 델타를 반환하고, 이 핸들러가 그 델타의 to_unsubscribe
-/// 를 **락 안에서** 발화한다(F1 — 발화를 락 밖으로 미루면 재추가로 stale 1→0 이 라이브 구독을 죽인다).
-/// 코어(모델·라우팅)는 headless 단독 테스트 가능(G1 필수, TRD §8 스테이지1) — Tauri 부분(registry.remove)만
-/// 이 핸들러에 남는다.
-///
-/// ★이 함수는 command 가 아니다★ — Rust 이벤트 핸들러(on_window_event)에서 직접 호출. State 대신 이미
-/// 손에 쥔 Arc 참조들을 인자로 받는다(lib.rs 가 app.state 로 꺼내 넘김). `_app` 은 현재 미사용(향후 즉시
-/// emit 여지로 시그니처 통일).
+// ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
+// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. 그 창의 **모든 탭 View 를
+// 통째로 드롭**(views + view_owner) + windows 엔트리 제거 → rebuild **1회** → 그 델타의 to_unsubscribe
+// (어느 창에도 안 남은 agent)를 데몬에 발화 → 출력 Channel 제거.
+//
+// ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
+// + Unsubscribe 누락. 이제 Tauri-free 코어 `cleanup_window_core`(output_router.rs)가 close_window 로 tabs
+// 전부 순회 드롭 + rebuild(마지막 1회 — 락 1구간)해 델타를 반환하고, 이 핸들러가 그 델타의 to_unsubscribe
+// 를 **락 안에서** 발화한다(F1 — 발화를 락 밖으로 미루면 재추가로 stale 1→0 이 라이브 구독을 죽인다).
+// 코어(모델·라우팅)는 headless 단독 테스트 가능(G1 필수, TRD §8 스테이지1) — Tauri 부분(registry.remove)만
+// 이 핸들러에 남는다.
+//
+// ★이 함수는 command 가 아니다★ — Rust 이벤트 핸들러(on_window_event)에서 직접 호출. State 대신 이미
+// 손에 쥔 Arc 참조들을 인자로 받는다(lib.rs 가 app.state 로 꺼내 넘김). `_app` 은 현재 미사용(향후 즉시
+// emit 여지로 시그니처 통일).
 pub fn cleanup_popup_window(
     _app: &tauri::AppHandle,
     label: &str,
