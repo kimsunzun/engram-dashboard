@@ -94,7 +94,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 # 토큰 난수: 256-bit(32B) → hex 64자. rand 대신 getrandom — 의존 가벼움(OS CSPRNG 직접).
 getrandom = "0.2"
-# WsOutputSink sink_id 생성 + AgentId 파싱. core/protocol 과 동일 1.x(AgentId=Uuid).
+# 출력 sink 의 sink_id 생성 + AgentId 파싱. core/protocol 과 동일 1.x(AgentId=Uuid).
 uuid = { version = "1", features = ["v4"] }
 
 # ── ADR-0086: 제어 채널 MCP 입구 ────────────────────────────────────────────────

@@ -8,8 +8,13 @@
 //! → bind → 토큰 → manager 배선 → restore_all → accept loop → graceful 종료)을 `run()` 이
 //! 그대로 수행한다. accept loop 본체는 `run_accept_loop()` 로 분리해 테스트와 공유한다.
 
+// ADR-0129: 네트워크 행이 소유한 불투명 프레임 포트(`frame_port`)와, 에이전트 시스템이 거기 꽂는
+//   어댑터(`agent_conn`). 데몬 lib 3층 분리의 컴파일러 벽을 세우기 전 단계 — 두 행 사이의 호출을
+//   이 포트로만 흐르게 해 뒤 슬라이스가 파일을 그대로 옮길 수 있게 한다.
+pub mod agent_conn;
 pub mod connection_core;
 pub mod control;
+pub mod frame_port;
 // ADR-0090: Stage 2 컨텍스트 포화 파일럿의 순수 실험 로직. test-harness feature 뒤 — 운영 빌드
 //   미포함(saturation-pilot bin 도 required-features=["test-harness"]). experiment/mod.rs 헤더 참조.
 #[cfg(feature = "test-harness")]
@@ -295,30 +300,35 @@ async fn run_accept_loop(
     enable_ctrl_c: bool,
     keepalive: KeepaliveConfig,
 ) {
+    // ADR-0129: 에이전트 시스템 배선을 여기서 **한 번** 묶어 프레임 포트 뒤로 넘긴다 — 그래서
+    //   `handle_connection` 은 manager/multiview/control_registry/messaging 슬롯/shutdown 신호를
+    //   타입으로도 모른다. 연결마다 이 공장이 `ConnectionCore` + per-conn 상태를 조립한다.
+    let handlers: Arc<dyn frame_port::ConnectionHandlerFactory> =
+        Arc::new(agent_conn::AgentConnections::new(
+            manager,
+            multiview,
+            registry.clone(),
+            control_registry,
+            messaging_slot,
+            shutdown_tx,
+        ));
+
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, "연결 수락 — WS 핸들러로 넘김");
-                        let manager = manager.clone();
                         let registry = registry.clone();
-                        let multiview = multiview.clone();
-                        let control_registry = control_registry.clone();
-                        let messaging_slot = messaging_slot.clone();
+                        let handlers = handlers.clone();
                         let expected_token = expected_token.clone();
-                        let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
                             ws::handle_connection(
                                 stream,
                                 peer,
-                                manager,
                                 registry,
-                                multiview,
-                                control_registry,
-                                messaging_slot,
+                                handlers,
                                 expected_token,
-                                shutdown_tx,
                                 keepalive,
                             )
                             .await;

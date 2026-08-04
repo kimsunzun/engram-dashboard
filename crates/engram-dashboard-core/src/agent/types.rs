@@ -569,7 +569,7 @@ pub struct SinkError;
 
 /// PTY 출력 전달 추상화 — Tauri 의존 없이 headless 테스트 가능하게 격리.
 /// ※S12: send는 **raw OutputFrame**을 받는다(base64 아님). wire 인코딩은 구현체가 소유:
-/// ChannelOutputSink=base64 PtyEvent / WsOutputSink=binary frame. → 코어 transport-agnostic.
+/// ChannelOutputSink=base64 PtyEvent / 데몬 프레임 sink=binary frame. → 코어 transport-agnostic.
 pub trait OutputSink: Send + Sync + 'static {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError>;
     fn sink_id(&self) -> SinkId;

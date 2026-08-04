@@ -906,7 +906,7 @@ async fn case08_epoch_mismatch_reset() {
 //
 // ★재현 메커니즘★: slow 소비자는 ReplayComplete 후 **소켓을 전혀 읽지 않는다**. 같은 agent 에
 //   대량 출력이 흐르면 slow 의 서버측 송신 mpsc(CONN_TX_CAP=4608) + OS 소켓 버퍼가 둘 다 차고,
-//   WsOutputSink.try_send 가 full 을 만나 close_signal 을 발동 → write_task 가 그 연결만 닫는다.
+//   프레임 출구의 try_send 가 full 을 만나 close_signal 을 발동 → write_task 가 그 연결만 닫는다.
 //   good 소비자는 **백그라운드 task 로 계속 drain** 해 살아남아야 한다(타 연결 무영향).
 #[tokio::test]
 async fn case09_slow_consumer_closed_others_unaffected() {

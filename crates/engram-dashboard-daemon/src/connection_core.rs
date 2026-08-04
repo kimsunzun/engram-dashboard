@@ -53,16 +53,18 @@ use engram_dashboard_protocol::{
 use tokio::sync::watch;
 
 use crate::control::registry::ControlRegistry;
-use crate::ws::{ConnId, ConnRegistry};
+use crate::frame_port::ConnId;
+use crate::ws::ConnRegistry;
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
 //
-// dispatch 가 쓰던 reply/send_error/event_json 은 모두 conn_tx.send(WsOutbound::Text/Binary)
+// dispatch 가 쓰던 reply/send_error/event_json 은 모두 conn_tx.send(Frame::Text/Binary)
 // 였다. 이를 carrier-중립 Outbound enqueue 로 치환한다. 인코딩(JSON text / binary frame)은
 // sink 구현이 소유한다(코어는 모름) — OutputSink 가 frame→codec 을 sink 에 맡기는 것과 동형.
 
-/// carrier-중립 송신 단위. WsOutbound(Text/Binary/Close)의 상위 개념.
+/// carrier-중립 송신 단위. 네트워크 행의 `Frame`(Text/Binary/Close)에 대응하되, control 은 아직
+/// 인코딩 전 `AgentEvent` 라는 점이 다르다(인코딩은 어댑터가 소유).
 /// Event=control(AgentEvent), Binary=출력 frame(이미 인코딩된 바이트), Close=연결 종료 요청.
 ///
 /// ★Box<AgentEvent>★: AgentEvent 가 ~272B 라 다른 variant(24B)와 크기 차가 크다(clippy
@@ -98,7 +100,7 @@ impl std::fmt::Display for SinkError {
 impl std::error::Error for SinkError {}
 
 /// 한 연결의 출력 송신 추상. dispatch 의 모든 응답/이벤트가 이걸 통해 나간다.
-/// WS 어댑터의 `WsOutboundSink` 가 conn_tx 에 push 하며 인코딩을 소유한다.
+/// 어댑터(`agent_conn::FrameOutboundSink`)가 프레임 출구에 push 하며 인코딩을 소유한다.
 pub trait OutboundSink: Send + Sync {
     /// Outbound(control/binary/close)를 큐잉. 실패(포화/닫힘)면 SinkError(어댑터가 carrier 별로 해석).
     fn enqueue(&self, out: Outbound) -> Result<(), SinkError>;
@@ -110,7 +112,6 @@ pub trait OutboundSink: Send + Sync {
     /// embedded=base64 PtyEvent) sink 구현이 다르므로, 반환을 trait object 로 두어 carrier-중립으로
     /// 만든다. 함께 반환하는 `Arc<AtomicBool>` 은 replay 구간 중 frame drop(try_send full) 여부 —
     /// handle_subscribe 가 ReplayComplete 직전 검사해 SubscribeAck.truncated 를 사후 보정한다.
-    /// (Stage 1 은 구체 `Arc<WsOutputSink>` 반환이라 carrier 추가가 막혔다 — reviewer-deep 지적.)
     fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>);
 }
 
@@ -563,7 +564,7 @@ pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protoc
 }
 
 /// AgentEvent 를 JSON 문자열로 직렬화(control 전송용). 실패는 거의 불가능하나 로그 후 None.
-/// (WS 어댑터의 DaemonStatusSink/WsOutboundSink 가 인코딩에 재사용한다.)
+/// (DaemonStatusSink·FrameOutboundSink 가 인코딩에 재사용한다.)
 pub(crate) fn event_json(ev: &AgentEvent) -> Option<String> {
     match serde_json::to_string(ev) {
         Ok(s) => Some(s),
@@ -650,9 +651,9 @@ impl ConnectionCore {
     /// request_id 있으면 Ack/Error 를 sink 로 enqueue.
     ///
     /// ★sink.enqueue 실패(SinkError)는 무시★: side-effect 명령의 Ack/Error 송신 실패는 삼킨다.
-    /// 단 의미 변경 주의 — baseline 의 control 응답은 `conn_tx.send(..).await`(큐 full 시 backpressure
-    /// 블록)였고, 신규 WsOutboundSink::enqueue 는 `try_send`(full 시 즉시 drop + close_signal).
-    /// 정상 단일 연결은 큐 여유로 control drop 이 안 나며, full 시 종착점(연결 종료)은 동일.
+    /// 어댑터의 enqueue 는 논블록(try_send)이라 큐 포화면 backpressure 로 기다리는 게 아니라 즉시
+    /// drop + close 신호다 — 정상 단일 연결은 큐 여유로 control drop 이 안 나고, 포화 시 종착점
+    /// (연결 종료)은 어느 쪽이든 같다.
     pub async fn dispatch(
         &self,
         cmd: AgentCommand,
@@ -1231,11 +1232,10 @@ impl ConnectionCore {
     /// 보다 반드시 먼저 일어난다(단일 writer FIFO → Ack→replay→ReplayComplete 순서).
     ///
     /// ★output sink 의 정체★: 코어 subscribe_from 에 넘기는 sink 는 어댑터가 만든
-    /// `WsOutputSink`(코어 OutputSink) 다 — 이건 응답용 `OutboundSink`(dispatch 의 sink)와는
-    /// 다른 평면(코어 출력 frame 평면). Stage 1 은 동작 보존이라 WS 어댑터의 WsOutputSink 를
-    /// 코어에 직접 넘긴다(handle_connection 이 만든 conn_tx/close_signal 공유). control(Ack/
-    /// ReplayComplete/Error)만 dispatch sink(OutboundSink)로 enqueue 한다 — 둘 다 같은 conn_tx
-    /// 단일 writer 큐로 합류하므로 FIFO 가 보존된다.
+    /// `agent_conn::FrameOutputSink`(코어 OutputSink) 다 — 이건 응답용 `OutboundSink`(dispatch 의
+    /// sink)와는 다른 평면(코어 출력 frame 평면). control(Ack/ReplayComplete/Error)만 dispatch
+    /// sink(OutboundSink)로 enqueue 한다 — 둘 다 **같은 프레임 출구**(연결당 단일 writer 큐)로
+    /// 합류하므로 FIFO 가 보존된다.
     fn handle_subscribe(
         &self,
         agent_id: AgentId,
@@ -1402,18 +1402,18 @@ mod tests {
     }
 
     /// dispatch 응답을 순서대로 기록하는 mock OutboundSink. control(Outbound::Event)만 검증한다.
-    /// ★output sink(WsOutputSink)는 conn_tx 기반이라 mock 으로 못 만든다★ — make_output_sink 가
-    /// WsOutputSink 를 요구하므로, output frame 평면(replay binary)은 실 conn_tx 로 흘려 별도 채널로
-    /// 받는다. 여기 mock 은 control 평면(Ack/Error/ReplayComplete/Spawned 등)만 본다.
+    /// ★output 평면은 mock 으로 안 만든다★ — 실 프레임 출구(conn_tx)로 흘려 별도 채널로 받는다
+    /// (그래야 control 과 같은 단일 writer 큐에 실려 FIFO 순서를 관측할 수 있다).
+    /// 여기 mock 은 control 평면(Ack/Error/ReplayComplete/Spawned 등)만 본다.
     struct MockOutboundSink {
         events: Arc<StdMutex<Vec<AgentEvent>>>,
         /// handle_subscribe 가 요구하는 output sink 의 conn_tx(replay binary 가 여기로).
-        conn_tx: tokio::sync::mpsc::Sender<crate::ws::WsOutbound>,
+        conn_tx: tokio::sync::mpsc::Sender<crate::frame_port::Frame>,
         close_signal: Arc<tokio::sync::Notify>,
     }
 
     impl MockOutboundSink {
-        fn new(conn_tx: tokio::sync::mpsc::Sender<crate::ws::WsOutbound>) -> Self {
+        fn new(conn_tx: tokio::sync::mpsc::Sender<crate::frame_port::Frame>) -> Self {
             Self {
                 events: Arc::new(StdMutex::new(Vec::new())),
                 conn_tx,
@@ -1431,26 +1431,25 @@ mod tests {
                 Outbound::Event(ev) => {
                     // control 은 conn_tx 에도 흘려(FIFO 검증용) 기록도 남긴다.
                     if let Some(text) = event_json(&ev) {
-                        let _ = self.conn_tx.try_send(crate::ws::WsOutbound::Text(text));
+                        let _ = self.conn_tx.try_send(crate::frame_port::Frame::Text(text));
                     }
                     self.events.lock().unwrap().push(*ev);
                     Ok(())
                 }
                 Outbound::Binary(b) => {
-                    let _ = self.conn_tx.try_send(crate::ws::WsOutbound::Binary(b));
+                    let _ = self.conn_tx.try_send(crate::frame_port::Frame::Binary(b));
                     Ok(())
                 }
                 Outbound::Close(r) => {
-                    let _ = self.conn_tx.try_send(crate::ws::WsOutbound::Close(r));
+                    let _ = self.conn_tx.try_send(crate::frame_port::Frame::Close(r));
                     Ok(())
                 }
             }
         }
         fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
-            let sink = Arc::new(crate::ws::WsOutputSink::new(
-                self.conn_tx.clone(),
-                self.close_signal.clone(),
-            ));
+            let sink = Arc::new(crate::agent_conn::FrameOutputSink::new(Arc::new(
+                crate::ws::ConnFrameSink::new(self.conn_tx.clone(), self.close_signal.clone()),
+            )));
             let flag = sink.replay_dropped_flag();
             (sink, flag)
         }
@@ -1582,7 +1581,7 @@ mod tests {
             waited += 1;
         }
 
-        let (tx, mut conn_rx) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(4608);
+        let (tx, mut conn_rx) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(4608);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
 
@@ -1605,14 +1604,14 @@ mod tests {
         assert!(items.len() >= 2, "최소 Ack+ReplayComplete: {}", items.len());
         // 첫 항목은 SubscribeAck Text.
         match &items[0] {
-            crate::ws::WsOutbound::Text(s) => {
+            crate::frame_port::Frame::Text(s) => {
                 assert!(s.contains("SubscribeAck"), "1번째는 SubscribeAck: {s}")
             }
             other => panic!("1번째는 Text(SubscribeAck) 여야 함: {other:?}"),
         }
         // 마지막 항목은 ReplayComplete Text.
         match items.last().unwrap() {
-            crate::ws::WsOutbound::Text(s) => {
+            crate::frame_port::Frame::Text(s) => {
                 assert!(s.contains("ReplayComplete"), "마지막은 ReplayComplete: {s}")
             }
             other => panic!("마지막은 Text(ReplayComplete) 여야 함: {other:?}"),
@@ -1620,7 +1619,7 @@ mod tests {
         // 중간 항목(있다면)은 전부 Binary(replay frame) 여야 한다 — control 이 끼면 FIFO 깨짐.
         for mid in &items[1..items.len() - 1] {
             assert!(
-                matches!(mid, crate::ws::WsOutbound::Binary(_)),
+                matches!(mid, crate::frame_port::Frame::Binary(_)),
                 "Ack 와 ReplayComplete 사이엔 replay Binary 만: {mid:?}"
             );
         }
@@ -1643,7 +1642,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_unknown_agent_emits_error_no_ack() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1665,7 +1664,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_missing_profile_errors() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1709,7 +1708,7 @@ mod tests {
         let cid = child.id;
         core.manager.create_agent(child).expect("등록 성공");
 
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1744,7 +1743,7 @@ mod tests {
     #[tokio::test]
     async fn kill_unknown_agent_errors() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1770,7 +1769,7 @@ mod tests {
         // conn 2 가 lease 획득.
         let _ = core.multiview.acquire(agent_id, 2);
         // conn 1 이 write 시도 → Denied → Error(manager 호출 없이).
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1799,7 +1798,7 @@ mod tests {
     async fn acquire_input_acks_and_broadcasts() {
         let (core, _rx) = test_core();
         let agent_id = uuid::Uuid::new_v4();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1818,7 +1817,7 @@ mod tests {
             other => panic!("Ack 기대: {other:?}"),
         }
         // 재획득(같은 conn)은 멱등 Ack.
-        let (tx2, _r) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx2, _r) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock2 = MockOutboundSink::new(tx2);
         core.dispatch(
             AgentCommand::AcquireInput {
@@ -1839,7 +1838,7 @@ mod tests {
     #[tokio::test]
     async fn list_agents_returns_agent_list() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1868,7 +1867,7 @@ mod tests {
             CoreEnvelopeFormat::Xml,
             "초기 봉투 포맷은 xml(기본, ADR-0103)"
         );
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1915,7 +1914,7 @@ mod tests {
     #[tokio::test]
     async fn create_profile_returns_created() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1946,7 +1945,7 @@ mod tests {
     #[tokio::test]
     async fn create_profile_stream_json_stores_json_mode() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1975,7 +1974,7 @@ mod tests {
     #[tokio::test]
     async fn stop_daemon_no_active_closes_and_signals() {
         let (core, mut rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let flow = core
@@ -2327,7 +2326,7 @@ mod tests {
         use engram_dashboard_messaging::SenderIdentity;
 
         let (core, messaging) = test_core_with_messaging();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::ws::WsOutbound>(64);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(64);
         let sink = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
 

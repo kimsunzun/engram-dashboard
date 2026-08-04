@@ -1,48 +1,49 @@
-//! WebSocket 서버 본체 (phase 2 step 4b).
+//! WebSocket 서버 본체 — 소켓 살림만 하는 네트워크 행(ADR-0129).
 //!
 //! 책임: accept 된 TCP stream 을 WS 업그레이드(Origin allowlist) → 1초 내 첫 frame 토큰 auth →
-//! AgentCommand/AgentEvent 프레임 핸들링(manager 위임). 출력 hot path 는 binary frame(codec),
-//! control 은 JSON.
+//! 연결 수명·단일 writer·keepalive·레지스트리. **프레임 내용의 어휘는 모른다** — 들어온 text/binary
+//! 는 `ConnectionHandler`(frame_port)로 올리고, 나가는 것은 `FrameSink` 로 받는다.
 //!
 //! ★동시성 모델(위험 지점)★
-//! - **연결당 단일 writer**: SplitSink 는 동시 write 불가. 그래서 모든 출력 frame·control JSON 을
-//!   연결당 단일 `mpsc::Sender<WsOutbound>`(conn_tx)에 넣고, write_task 한 곳만 SinkHalf 에 write
-//!   한다. SubscribeAck→replay→live 의 FIFO 순서가 이 단일 큐로 보장된다.
-//! - **try_send vs await 경계**: pump 스레드에서 호출되는 `WsOutputSink::send` 는 절대 block 금지
-//!   (try_send 만). async read_task 의 control 전송은 await 허용(.send().await).
-//! - **out-of-band 종료 신호(close_signal)**: conn_tx 가 full 이면 큐 안 마커(WsOutbound::Close)도
+//! - **연결당 단일 writer**: SplitSink 는 동시 write 불가. 그래서 모든 출력 프레임을 연결당 단일
+//!   `mpsc::Sender<Frame>`(conn_tx)에 넣고, write_task 한 곳만 SinkHalf 에 write 한다.
+//!   SubscribeAck→replay→live 의 FIFO 순서가 이 단일 큐로 보장된다.
+//! - **try_send vs await 경계**: 위층 sink 가 pump 스레드에서 부르는 `FrameSink::try_send` 는 절대
+//!   block 금지. async 문맥의 `FrameSink::send` 는 await 허용(.send().await).
+//! - **out-of-band 종료 신호(close_signal)**: conn_tx 가 full 이면 큐 안 마커(`Frame::Close`)도
 //!   try_send 실패해 좀비 연결이 된다. 그래서 큐 **밖**의 `Arc<Notify>` close_signal 을 둔다.
-//!   WsOutputSink 가 full 을 만나면 `close_signal.notify_one()`(sync 안전)으로 신호하고,
-//!   write_task 는 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를 동시에 대기해
-//!   큐가 막혀 있어도 깨어 sink_half.close() 후 break → cleanup 한다.
+//!   `ConnFrameSink` 가 try_send 에서 full 을 만나면 `close_signal.notify_one()`(sync 안전)으로
+//!   신호하고, write_task 는 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를 동시에
+//!   대기해 큐가 막혀 있어도 깨어 sink_half.close() 후 break → cleanup 한다.
 //! - **레지스트리**: status 브로드캐스트용. 모든 연결의 conn_tx 를 ConnId→Sender 맵으로 보관해
 //!   DaemonStatusSink 가 try_send(Text) 로 전 연결에 fanout.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::agent::types::{
-    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputFrame, OutputPayload,
-    OutputSink, SinkError, SinkId, StatusSink,
+    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, StatusSink,
 };
 
-use engram_dashboard_protocol::{
-    encode_structured_frame, encode_terminal_frame, AgentCommand, AgentEvent, PROTOCOL_VERSION,
-};
+// ★ADR-0129 잔여 — auth 핸드셰이크★: 핸드셰이크를 데몬 소유 타입으로 옮기는 것은 후속 슬라이스라,
+//   지금은 `AgentCommand::Auth`/`PROTOCOL_VERSION` 만 네트워크 행에 남는다. `AgentEvent` 는 아직 이
+//   파일에 사는 상태 sink(DaemonStatusSink·MessagingFlushSink — 에이전트 어휘, 이사 예정)의 것이다.
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, PROTOCOL_VERSION};
 
 use crate::connection_core::{
-    agent_list_event, core_agents_to_wire, core_report_to_wire, core_status_to_wire, event_json,
-    hello_event, output_event_to_wire, ConnectionCore, ConnectionSession, MultiViewState, Outbound,
-    OutboundSink as CoreOutboundSink, SinkError as CoreSinkError,
+    core_agents_to_wire, core_report_to_wire, core_status_to_wire, event_json,
+};
+use crate::frame_port::{
+    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameError, FrameSink,
 };
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::future::BoxFuture;
+use futures_util::{SinkExt, Stream, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
 };
@@ -94,25 +95,11 @@ const ALLOWED_ORIGINS: &[&str] = &[
     "https://tauri.localhost",
 ];
 
-/// 연결 식별자(단조 증가). 레지스트리 키.
-pub type ConnId = u64;
-
-/// 단일 writer 큐로 흐르는 출력 단위. 모든 frame·control·close 가 이걸 통해 write_task 로 간다.
-#[derive(Debug)]
-pub enum WsOutbound {
-    /// control JSON(AgentEvent 직렬화).
-    Text(String),
-    /// 출력 binary frame(codec).
-    Binary(Vec<u8>),
-    /// 연결 종료 — write_task 가 이걸 받으면 close 후 break. reason 은 로그/디버깅용.
-    Close(String),
-}
-
 /// status 브로드캐스트용 연결 레지스트리. connect 시 등록, disconnect 시 제거.
 /// DaemonStatusSink 가 전 연결 conn_tx 에 try_send 하기 위해 공유된다.
 #[derive(Clone)]
 pub struct ConnRegistry {
-    inner: Arc<Mutex<HashMap<ConnId, mpsc::Sender<WsOutbound>>>>,
+    inner: Arc<Mutex<HashMap<ConnId, mpsc::Sender<Frame>>>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -128,7 +115,7 @@ impl ConnRegistry {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn register(&self, id: ConnId, tx: mpsc::Sender<WsOutbound>) {
+    fn register(&self, id: ConnId, tx: mpsc::Sender<Frame>) {
         self.inner
             .lock()
             .expect("conn registry poisoned")
@@ -142,15 +129,24 @@ impl ConnRegistry {
             .remove(&id);
     }
 
+    /// 이 conn 이 아직 fanout 대상인지 — 테스트가 cleanup 순서(정리 후 등록 해제)를 관측한다.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, id: ConnId) -> bool {
+        self.inner
+            .lock()
+            .expect("conn registry poisoned")
+            .contains_key(&id)
+    }
+
     /// 전 연결에 Text 브로드캐스트(try_send). full 인 연결은 느린 것으로 보고 로그만.
     pub(crate) fn broadcast_text(&self, text: String) {
-        let conns: Vec<(ConnId, mpsc::Sender<WsOutbound>)> = {
+        let conns: Vec<(ConnId, mpsc::Sender<Frame>)> = {
             let guard = self.inner.lock().expect("conn registry poisoned");
             guard.iter().map(|(id, tx)| (*id, tx.clone())).collect()
         };
         for (id, tx) in conns {
             // try_send 만 — StatusSink 는 pump/manager 스레드(sync)에서 불릴 수 있어 block 금지.
-            if let Err(e) = tx.try_send(WsOutbound::Text(text.clone())) {
+            if let Err(e) = tx.try_send(Frame::Text(text.clone())) {
                 tracing::warn!(
                     conn = id,
                     "status 브로드캐스트 try_send 실패(느린 소비자): {e}"
@@ -694,59 +690,24 @@ impl StatusSink for MessagingFlushSink {
     }
 }
 
-// ── WsOutputSink(연결당 출력 sink, pump 스레드에서 호출) ───────────────────────────
+// ── ConnFrameSink(연결당 프레임 출구 — 프레임 포트의 WS 구현) ──────────────────────
 
-/// 한 연결의 한 에이전트 구독에 대응하는 OutputSink. pump 스레드가 `send` 를 호출한다.
-/// frame 을 codec binary 로 인코딩해 conn_tx 에 **try_send 만**(block 금지) 한다.
-/// 큐가 full/closed 면 SinkError 반환(코어가 dead-sink 로 제거) + out-of-band close 신호.
-pub struct WsOutputSink {
-    conn_tx: mpsc::Sender<WsOutbound>,
+/// 한 연결의 단일 writer 큐를 `FrameSink` 로 노출한다. 위층(에이전트 시스템)은 이걸 통해서만
+/// 내보내므로 프레임에 실린 어휘가 무엇이든 이 파일은 모른다.
+///
+/// ★R6 close_signal(out-of-band)★: `try_send` 가 큐 포화를 만나면 `FrameError` 를 돌려주면서
+/// close_signal 을 notify 해 write_task 가 큐가 막혀도 깨어 닫게 한다(WS-특정 처리라 여기 잔류).
+/// `send`(backpressure 허용)는 기다릴 수 있는 호출자이므로 신호하지 않는다 — 이 비대칭이 계약이다.
+// ADR-0129
+pub(crate) struct ConnFrameSink {
+    conn_tx: mpsc::Sender<Frame>,
     /// 큐 밖 종료 신호. full 감지 시 notify_one — write_task 가 큐가 막혀도 깨어 닫는다.
     /// ★pump 스레드(sync)에서 notify_one 호출 OK — Notify 는 sync-safe.
     close_signal: Arc<Notify>,
-    /// replay 구간 중 try_send 실패(frame drop)가 한 번이라도 있었는지.
-    /// handle_subscribe 가 ReplayComplete 직전 검사해 SubscribeAck.truncated 를 사후 보정한다.
-    /// 평소(라이브)엔 코어가 dead-sink 로 제거하므로 의미가 없고, replay 구간 정확성에만 쓴다.
-    replay_dropped: Arc<AtomicBool>,
-    sink_id: SinkId,
 }
 
-impl WsOutputSink {
-    pub(crate) fn new(conn_tx: mpsc::Sender<WsOutbound>, close_signal: Arc<Notify>) -> Self {
-        Self {
-            conn_tx,
-            close_signal,
-            replay_dropped: Arc::new(AtomicBool::new(false)),
-            sink_id: uuid::Uuid::new_v4(),
-        }
-    }
-
-    /// replay 구간 동안 frame 이 drop 됐는지 사후 검사용 핸들(handle_subscribe 가 공유 보관).
-    pub(crate) fn replay_dropped_flag(&self) -> Arc<AtomicBool> {
-        self.replay_dropped.clone()
-    }
-}
-
-// ── WsOutboundSink(연결당 control sink, ConnectionCore.dispatch 의 응답 경로) ──────────
-//
-// ConnectionCore 의 `OutboundSink` 를 WS 로 구현한다. dispatch 가 enqueue 하는 Outbound 를
-// WsOutbound 로 변환해 conn_tx(단일 writer 큐)에 넣는다. 인코딩(AgentEvent→JSON text)은 이
-// 어댑터가 소유한다(코어는 모름 — ADR-0003 정합).
-//
-// ★FIFO(R1)★: dispatch 의 control(Ack/SubscribeAck/ReplayComplete/Error 등)과 코어 output
-// 평면(WsOutputSink 의 binary frame)이 같은 conn_tx 단일 writer 로 합류하므로, dispatch 가
-// SubscribeAck 를 replay binary 보다 먼저 enqueue 하면 순서가 보존된다.
-//
-// ★R6 close_signal(out-of-band)★: 큐 포화 시 SinkError 를 반환하고, 동시에 close_signal 을
-// notify 해 write_task 가 큐가 막혀도 깨어 닫게 한다(WS-특정 처리 — 어댑터에 잔류). enqueue 의
-// `.await` 가 불가능한 sync trait 이므로 try_send 만 쓴다(control 도 큐 여유분으로 보통 성공).
-pub struct WsOutboundSink {
-    conn_tx: mpsc::Sender<WsOutbound>,
-    close_signal: Arc<Notify>,
-}
-
-impl WsOutboundSink {
-    pub(crate) fn new(conn_tx: mpsc::Sender<WsOutbound>, close_signal: Arc<Notify>) -> Self {
+impl ConnFrameSink {
+    pub(crate) fn new(conn_tx: mpsc::Sender<Frame>, close_signal: Arc<Notify>) -> Self {
         Self {
             conn_tx,
             close_signal,
@@ -754,106 +715,19 @@ impl WsOutboundSink {
     }
 }
 
-impl CoreOutboundSink for WsOutboundSink {
-    fn enqueue(&self, out: Outbound) -> Result<(), CoreSinkError> {
-        let msg = match out {
-            // control 이벤트 — JSON text 로 인코딩(어댑터 소유). 직렬화 실패는 drop(기존 event_json 동작).
-            Outbound::Event(ev) => match event_json(&ev) {
-                Some(text) => WsOutbound::Text(text),
-                None => return Ok(()), // 직렬화 실패는 무시(기존 `let _ = ...` 동작과 동일)
-            },
-            Outbound::Binary(b) => WsOutbound::Binary(b),
-            Outbound::Close(reason) => WsOutbound::Close(reason),
-        };
-        match self.conn_tx.try_send(msg) {
+impl FrameSink for ConnFrameSink {
+    fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
+        match self.conn_tx.try_send(frame) {
             Ok(()) => Ok(()),
             Err(_) => {
-                // 큐 포화/닫힘 — out-of-band close 신호로 write_task 를 깨운다(R6, WS-특정 잔류).
                 self.close_signal.notify_one();
-                Err(CoreSinkError)
+                Err(FrameError)
             }
         }
     }
 
-    fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
-        // handle_subscribe 가 코어 subscribe_from 에 넘길 output 평면 sink. 같은 conn_tx/close_signal
-        // 을 공유해 control(이 sink)과 output(WsOutputSink)이 한 단일 writer 큐로 합류한다(FIFO).
-        // ★Stage 2 generic★: 반환을 Arc<dyn OutputSink> trait object 로(carrier-중립). replay_dropped
-        //   플래그를 함께 돌려 handle_subscribe 가 truncated 사후 보정에 쓰게 한다.
-        let sink = Arc::new(WsOutputSink::new(
-            self.conn_tx.clone(),
-            self.close_signal.clone(),
-        ));
-        let flag = sink.replay_dropped_flag();
-        (sink, flag)
-    }
-}
-
-impl OutputSink for WsOutputSink {
-    fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // ★S15 B5/B7 payload 분기(ADR-0045)★: 콘솔 바이트는 tag0 terminal frame, 구조화 이벤트는 tag1
-        //   structured frame 으로 인코딩한다. sink 가 wire 인코딩을 소유(코어는 wire 모름, ADR-0003) —
-        //   Bytes 는 raw payload 를, Event 는 core `OutputEvent` → wire `StructuredEvent`(daemon adapter)
-        //   → JSON payload 를 헤더에 실어 보낸다.
-        //   ★현 배선 상태★: 구조화 이벤트 생산자(B3 decoder→pump 배선)는 아직 미배선이라 런타임엔 Bytes 만
-        //   흐른다 — Event arm 은 B7 단위테스트(합성 OutputEvent)로만 도달·검증된다(정상).
-        let buf = match frame.payload {
-            OutputPayload::Bytes(b) => {
-                encode_terminal_frame(frame.agent_id, frame.epoch, frame.seq, b)
-            }
-            // ★tag1 인코딩(B7)★: core OutputEvent → wire StructuredEvent(adapter) → JSON payload →
-            //   tag1 structured frame. codec 은 payload 스키마 무지(opaque) — 직렬화 형식(JSON)·이벤트
-            //   타입은 여기(daemon)가 소유한다(ADR-0045 self-describing).
-            OutputPayload::Event(ev) => {
-                // (1) core→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류
-                //     배선 버그) 매핑 불가(None) → debug 는 조기 발견, release 는 warn 후 drop(연결 유지).
-                let wire = match output_event_to_wire(ev) {
-                    Some(w) => w,
-                    None => {
-                        debug_assert!(
-                            false,
-                            "TerminalBytes(tag0 전용)가 Event(tag1) arm 에 도달 — 상류 payload 분기 버그"
-                        );
-                        tracing::warn!(
-                            agent = %frame.agent_id,
-                            "tag1 인코딩 불가(TerminalBytes 가 Event arm 도달) — drop"
-                        );
-                        return Ok(());
-                    }
-                };
-                // (2) JSON 직렬화. 실패는 거의 불가능(문자열/숫자 필드뿐)하나, 나면 이 frame 만 warn 후
-                //     drop 한다(SinkError 로 연결을 죽이지 않음 — 직렬화 실패는 슬로우 소비자와 무관한
-                //     데이터 문제고, control event_json 실패 처리와 동일 관례).
-                let payload = match serde_json::to_vec(&wire) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = %frame.agent_id,
-                            "StructuredEvent 직렬화 실패 — drop: {e}"
-                        );
-                        return Ok(());
-                    }
-                };
-                // (3) tag1 frame(헤더+payload). 헤더 레이아웃은 tag0 과 동일, tag=1(codec, ADR-0045).
-                encode_structured_frame(frame.agent_id, frame.epoch, frame.seq, &payload)
-            }
-        };
-        // ★pump 스레드 — try_send 만(절대 block 금지). full/closed = 느린 소비자 → 코어가 이 sink 제거.
-        match self.conn_tx.try_send(WsOutbound::Binary(buf)) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                // frame 이 drop 됐음을 기록(replay 구간 truncated 사후 보정용).
-                self.replay_dropped.store(true, Ordering::Release);
-                // ★out-of-band 종료 신호★: 큐가 full 이라 WsOutbound::Close try_send 는 실패할 수
-                //   있으나, Notify 는 큐와 무관하게 write_task 를 깨운다(좀비 연결 방지).
-                self.close_signal.notify_one();
-                Err(SinkError)
-            }
-        }
-    }
-
-    fn sink_id(&self) -> SinkId {
-        self.sink_id
+    fn send(&self, frame: Frame) -> BoxFuture<'_, Result<(), FrameError>> {
+        Box::pin(async move { self.conn_tx.send(frame).await.map_err(|_| FrameError) })
     }
 }
 
@@ -908,24 +782,18 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 // ── 연결 핸들러 ────────────────────────────────────────────────────────────────
 
 /// 연결 1개의 전 수명을 처리한다. accept 된 raw TCP stream 을 받아:
-/// WS 업그레이드 → auth → Hello/list push → read/write task → cleanup.
+/// WS 업그레이드 → auth → 핸들러 부착 → read/write task → cleanup.
 ///
-/// `expected_token` 은 daemon.json 의 토큰. `shutdown_tx` 는 StopDaemon 수신 시 main 종료를 트리거.
-#[allow(clippy::too_many_arguments)]
+/// `expected_token` 은 daemon.json 의 토큰. `handlers` 는 이 연결에 붙일 위층 핸들러 공장 —
+/// 프레임의 의미(명령 해석·이벤트 인코딩·연결 정리)는 전부 그쪽이 소유하므로, 이 함수는 에이전트
+/// 어휘를 auth 핸드셰이크 말고는 알지 못한다(ADR-0129).
+// ADR-0129
 pub async fn handle_connection(
     stream: TcpStream,
     peer: std::net::SocketAddr,
-    manager: Arc<AgentManager>,
     registry: ConnRegistry,
-    multiview: MultiViewState,
-    // ADR-0096: 제어 채널 레지스트리(봉투 포맷 전역 상태 거처) — SetEnvelopeFormat dispatch 가 쓴다.
-    //   handle_send(MCP/CLI)가 relay 마다 읽는 그 같은 Arc(전역 상태 하나).
-    control_registry: Arc<crate::control::registry::ControlRegistry>,
-    // ADR-0116 결정 3: `DeleteProfile` dispatch 가 삭제 정리를 부를 메시징 커널 슬롯(늦은 주입 — 서비스는
-    //   manager 조립 후에 생긴다). ConnectionCore 가 그대로 들고 있다.
-    messaging: Arc<crate::control::mcp_server::MessagingSlot>,
+    handlers: Arc<dyn ConnectionHandlerFactory>,
     expected_token: Arc<String>,
-    shutdown_tx: watch::Sender<bool>,
     keepalive: KeepaliveConfig,
 ) {
     // 1) WS 업그레이드 + Origin 검사.
@@ -948,7 +816,11 @@ pub async fn handle_connection(
                     // 토큰 비교(상수시간). 보안: 토큰 값은 로그 금지.
                     if !constant_time_eq(&token, expected_token.as_str()) {
                         tracing::warn!(%peer, "auth 실패: 토큰 불일치 — close");
-                        let _ = send_error_and_close(&mut ws, "auth failed").await;
+                        let _ = send_error_and_close(
+                            &mut ws,
+                            handlers.handshake_error_frame("auth failed"),
+                        )
+                        .await;
                         return;
                     }
                     if protocol_version != PROTOCOL_VERSION {
@@ -960,9 +832,9 @@ pub async fn handle_connection(
                         );
                         let _ = send_error_and_close(
                             &mut ws,
-                            &format!(
+                            handlers.handshake_error_frame(&format!(
                                 "protocol_version mismatch: client {protocol_version} != server {PROTOCOL_VERSION}"
-                            ),
+                            )),
                         )
                         .await;
                         return;
@@ -971,19 +843,31 @@ pub async fn handle_connection(
                 }
                 Ok(_) => {
                     tracing::warn!(%peer, "첫 frame 이 Auth 가 아님 — close");
-                    let _ = send_error_and_close(&mut ws, "expected Auth as first frame").await;
+                    let _ = send_error_and_close(
+                        &mut ws,
+                        handlers.handshake_error_frame("expected Auth as first frame"),
+                    )
+                    .await;
                     return;
                 }
                 Err(e) => {
                     tracing::warn!(%peer, "첫 frame 파싱 실패: {e} — close");
-                    let _ = send_error_and_close(&mut ws, "invalid first frame").await;
+                    let _ = send_error_and_close(
+                        &mut ws,
+                        handlers.handshake_error_frame("invalid first frame"),
+                    )
+                    .await;
                     return;
                 }
             }
         }
         Ok(Some(Ok(_))) => {
             tracing::warn!(%peer, "첫 frame 이 Text 가 아님 — close");
-            let _ = send_error_and_close(&mut ws, "expected Auth text frame").await;
+            let _ = send_error_and_close(
+                &mut ws,
+                handlers.handshake_error_frame("expected Auth text frame"),
+            )
+            .await;
             return;
         }
         Ok(Some(Err(e))) => {
@@ -996,14 +880,15 @@ pub async fn handle_connection(
         }
         Err(_) => {
             tracing::warn!(%peer, "auth 타임아웃(1s) — close");
-            let _ = send_error_and_close(&mut ws, "auth timeout").await;
+            let _ =
+                send_error_and_close(&mut ws, handlers.handshake_error_frame("auth timeout")).await;
             return;
         }
     }
 
     // 3) conn_tx/rx 생성 + close_signal + 레지스트리 등록 + split.
-    let (conn_tx, conn_rx) = mpsc::channel::<WsOutbound>(CONN_TX_CAP);
-    // ★out-of-band 종료 신호★: 큐 포화로 WsOutbound::Close 마저 못 들어갈 때 write_task 를 깨운다.
+    let (conn_tx, conn_rx) = mpsc::channel::<Frame>(CONN_TX_CAP);
+    // ★out-of-band 종료 신호★: 큐 포화로 `Frame::Close` 마저 못 들어갈 때 write_task 를 깨운다.
     let close_signal = Arc::new(Notify::new());
     let conn_id = registry.alloc_id();
     registry.register(conn_id, conn_tx.clone());
@@ -1011,28 +896,30 @@ pub async fn handle_connection(
 
     let (sink_half, stream_half) = ws.split();
 
-    // 3b) ConnectionCore(transport-중립 dispatch) 배선. 연결당 1개 — manager/multiview/registry/
-    //     shutdown_tx 는 전 연결이 공유하나, dispatch 호출 경로를 캡슐화하려고 연결마다 묶는다.
-    //     read_task 가 이걸 통해 명령을 처리하고, cleanup 도 core 의 manager/multiview/registry 를 쓴다.
-    let core = Arc::new(ConnectionCore::new(
-        manager.clone(),
-        multiview.clone(),
-        registry.clone(),
-        control_registry.clone(),
-        messaging,
-        shutdown_tx,
-    ));
+    // 3b) 프레임 출구 + 위층 핸들러 부착. 이 연결의 모든 출력은 frames(단일 writer 큐)로만 나가고,
+    //     들어온 프레임의 의미 해석은 handler 가 소유한다(ADR-0129 — 이 함수는 어휘를 모른다).
+    let frames: Arc<dyn FrameSink> =
+        Arc::new(ConnFrameSink::new(conn_tx.clone(), close_signal.clone()));
+    let handler = handlers.handler_for(conn_id);
 
-    // 4) 연결 직후 Hello + 현재 목록 push(단일 writer 큐 경유 — 이후 모든 출력과 FIFO 정렬).
-    if let Some(text) = event_json(&hello_event(env!("CARGO_PKG_VERSION").into())) {
-        let _ = conn_tx.send(WsOutbound::Text(text)).await;
+    // 4) 연결 직후 인사·초기 상태 push(단일 writer 큐 경유 — 이후 모든 출력과 FIFO 정렬).
+    //    ★소비자보다 먼저다★: write_task 는 아직 없으므로 여기서 넣은 프레임은 큐에 쌓이기만 한다
+    //    (그 제약이 ConnectionHandler::on_connect 의 계약). 순서상 여기가 두 task 스폰보다 앞이어야
+    //    명령 dispatch 가 인사보다 앞설 수 없다. ★단 "연결의 첫 프레임" 보장은 아니다★ — 등록이 이미
+    //    끝났으므로 status fanout 이 그 사이 큐에 먼저 들어갔을 수 있다.
+    handler.on_connect(conn_id, &frames).await;
+    // ★관측만 하고 흐름은 바꾸지 않는다★: 패닉을 쓰지 않는 이유는 여기서 죽으면 아래 정리 훅과
+    //   레지스트리 해제를 통째로 건너뛴 채 죽은 큐가 fanout 대상으로 남기 때문이다(HEAD 에 없던 종료 경로).
+    // ★잡히는 범위 = "정확히 가득 찬 채로 on_connect 이 **반환한**" 경계 하나뿐★: 정작 위험한 쪽
+    //   (용량을 넘겨 넣어 `send` 가 영구 대기)은 이 줄에 **도달조차 못 한다** — 그 hang 은 어디에도
+    //   로그가 남지 않는다(알려진 미로그 구멍 — `ConnectionHandler::on_connect` 계약에 서술).
+    // ★"지금 막혔다"는 뜻이 아니다★: 바로 아래에서 write_task 가 떠 큐를 비우므로 진행은 계속된다.
+    if conn_tx.capacity() == 0 {
+        tracing::warn!(
+            conn = conn_id,
+            "on_connect 반환 시점에 연결 큐가 가득 찼다 — 한 프레임만 더 넣었으면 writer 기동 전에 영구 대기했을 것(핸들러 푸시 + 등록 후 status fanout 합계)"
+        );
     }
-    if let Some(text) = event_json(&agent_list_event(&manager)) {
-        let _ = conn_tx.send(WsOutbound::Text(text)).await;
-    }
-
-    // 5) 이 연결의 per-conn 수명 상태(subs/owned_viewports + conn_id). read_task 와 cleanup 이 공유.
-    let session = Arc::new(ConnectionSession::new(conn_id));
 
     // ── keepalive 공유 시계(A) ──────────────────────────────────────────────────────
     // base = 연결 시작 시각(tokio Instant). last_recv = base 기준 경과 ms(AtomicU64).
@@ -1041,21 +928,18 @@ pub async fn handle_connection(
     let keepalive_base = tokio::time::Instant::now();
     let last_recv = Arc::new(AtomicU64::new(0));
 
-    // read_task: stream_half 에서 명령을 읽어 ConnectionCore.dispatch 로 처리. 응답은 WsOutboundSink
-    //   (control)와 WsOutputSink(output, handle_subscribe 가 생성)가 conn_tx 로 큐잉한다.
-    //   close_signal 은 두 sink 에 공유(full 시 write_task 깨우기 — R6).
+    // read_task: stream_half 에서 프레임을 읽어 handler 로 올린다. 응답은 handler 가 frames 로
+    //   큐잉하므로 read_task 자신은 소켓에 직접 쓰지 않는다.
     let mut read_handle = tokio::spawn(read_task(
         stream_half,
-        conn_tx.clone(),
-        core.clone(),
-        session.clone(),
+        frames,
+        handler.clone(),
         conn_id,
-        close_signal.clone(),
         keepalive_base,
         last_recv.clone(),
     ));
 
-    // write_task: conn_rx 에서 받은 WsOutbound 를 sink_half 로 순서대로 write(단일 writer).
+    // write_task: conn_rx 에서 받은 프레임을 sink_half 로 순서대로 write(단일 writer).
     //   close_signal 발동 시 큐가 막혀 있어도 깨어 닫는다(좀비 방지). keepalive Ping 도 여기서 송신.
     let mut write_handle = tokio::spawn(write_task(
         sink_half,
@@ -1067,9 +951,14 @@ pub async fn handle_connection(
         last_recv,
     ));
 
-    // 6) 하나라도 끝나면 cleanup. ★살아남은 쪽을 명시적으로 abort★ — JoinHandle 을 그냥 drop 하면
+    // 5) 하나라도 끝나면 cleanup. ★살아남은 쪽을 명시적으로 abort★ — JoinHandle 을 그냥 drop 하면
     //    task 가 detach 되어 계속 돈다(WS half 를 붙든 채 좀비). 그래서 &mut 로 select 해 핸들을
     //    소비하지 않고, 진 쪽을 abort 한다(연결의 read/write 가 함께 끝나게).
+    //    회귀 방어 = `the_losing_task_is_aborted_not_detached`(read 를 abort 하는 갈래만).
+    //    ★write 를 abort 하는 갈래도 abort 를 제거하지 말 것★: 대개는 송신단이 모두 드롭돼 write_task 가
+    //    스스로 끝나지만, 그건 "모든 Sender<Frame> 사본이 함께 죽는다" 는 조건부다 — 구독 기록 누락
+    //    (아래 on_disconnect 경쟁)으로 사본이 살아남으면 자기종료가 성립하지 않는다. 전수 열거와 실측
+    //    범위는 그 테스트 주석에 있다.
     tokio::select! {
         _ = &mut read_handle => {
             tracing::debug!(conn = conn_id, "read_task 종료 → write_task abort + cleanup");
@@ -1082,56 +971,26 @@ pub async fn handle_connection(
     }
 
     // ── cleanup(누수 방지 — 리뷰 필수) ──────────────────────────────────────────
-    // 이 연결이 등록한 모든 (agent_id, sink_id) 를 manager 에서 unsubscribe + 레지스트리 제거.
-    // 안 하면 죽은 conn_tx 로 영원히 try_send 하는 좀비 sink 가 코어 subscribers 에 남는다
-    // (코어가 try_send 실패로 결국 제거하긴 하나, 다음 emit 까지 잔존 — 명시적으로 끊는다).
-    let leftovers: Vec<(AgentId, SinkId)> = {
-        let guard = session.subs.lock().expect("subs poisoned");
-        guard.iter().map(|(a, s)| (*a, *s)).collect()
-    };
-    for (agent_id, sink_id) in leftovers {
-        let _ = manager.unsubscribe(agent_id, sink_id);
-    }
-
-    // ── 멀티뷰어 cleanup ───────────────────────────────────────────────────────
-    // (a) viewport 재협상: 끊긴 연결의 viewport 들을 맵에서 빼고, 영향받은 agent 를 남은 뷰어 기준
-    //     smallest 로 다시 resize 한다(tmux detach 후 잔여 클라 기준으로 다시 키우는 것과 동일).
-    //     ★lock 순서★: remove_conn_viewports 가 multiview lock 안에서 협상값만 계산해 반환한 뒤
-    //     lock 을 푼 상태에서 manager.resize 를 부른다(lock 보유 중 코어 호출 금지).
-    let owned: Vec<(AgentId, String)> = {
-        let g = session
-            .owned_viewports
-            .lock()
-            .expect("owned_viewports poisoned");
-        g.clone()
-    };
-    if !owned.is_empty() {
-        for (agent_id, negotiated) in core.multiview().remove_conn_viewports(&owned) {
-            if let Some((cols, rows)) = negotiated {
-                // 남은 뷰어가 있으면 그 smallest 로 복귀. 없으면(None) 그대로 둔다(마지막 크기 유지).
-                let _ = manager.resize(agent_id, cols, rows);
-            }
-        }
-    }
-    // (b) 입력 lease 자동 해제: 보유자가 끊기면 다른 뷰어가 영영 막히면 안 된다(좀비 lock 방지).
-    //     해제된 agent 는 이제 lease 가 비었으니 InputLeaseChanged{held:false} 를 전 연결에 통보.
-    for agent_id in core.multiview().release_all_for_conn(conn_id) {
-        crate::connection_core::broadcast_lease_changed(&registry, agent_id, false);
-    }
+    // 위층 정리(구독 해제·viewport 재협상·lease 반납)가 **먼저**, 레지스트리 제거가 **나중**이다.
+    // ★이 순서에 배달 정합성이 걸려 있지는 않다★: 브로드캐스트는 맵 스냅샷으로 돌아 다른 연결이
+    // 받는 것은 순서와 무관하고, 이 연결 자신의 몫은 배달을 전제할 수 없다(writer 가 먼저 끝난
+    // 갈래면 확실히 버려지고, reader 가 먼저 끝난 갈래면 abort 가 먹기 전에 나갈 수도 있다 —
+    // ConnectionHandler::on_disconnect 문서). 순서를 지키는 이유는 순수 리팩터로 두려는 것뿐이다.
+    // ★위 abort 는 완료를 기다리지 않는다★: 취소된 read_task 가 아직 핸들러 호출 안에 있을 수 있어
+    // on_disconnect 와 겹칠 수 있다(HEAD 도 동일한 잔여 경쟁 — ConnectionHandler 문서).
+    handler.on_disconnect(conn_id);
 
     registry.unregister(conn_id);
     tracing::info!(%peer, conn = conn_id, "연결 종료 — cleanup 완료");
 }
 
-/// auth 실패 시 Error + close 를 직접(레지스트리 등록 전이라 conn_tx 없음) 보낸다.
+/// 핸드셰이크 실패 통보 + close 를 소켓에 직접 쓴다(레지스트리 등록 전이라 단일 writer 큐가 없다).
+/// `frame` 은 위층이 인코딩한 불투명 text — None 이면 본문 없이 close 만 한다.
 async fn send_error_and_close(
     ws: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
-    message: &str,
+    frame: Option<String>,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-    if let Some(text) = event_json(&AgentEvent::Error {
-        request_id: None,
-        message: message.to_string(),
-    }) {
+    if let Some(text) = frame {
         ws.send(Message::Text(text.into())).await?;
     }
     ws.close(None).await
@@ -1143,16 +1002,24 @@ type SinkHalf =
     futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>;
 
 /// conn_rx 에서 받은 출력을 sink_half 로 순서대로 write. 이게 이 연결의 유일한 writer.
-/// 종료 트리거 3가지: (1) conn_rx 큐의 WsOutbound::Close, (2) sink send 실패, (3) close_signal.
+/// 종료 트리거 3가지: (1) 큐 안의 `Frame::Close`, (2) sink send 실패, (3) close_signal.
 ///
-/// ★out-of-band 종료(M1 핵심)★: conn_tx 가 full 이면 WsOutbound::Close 마저 큐에 못 들어가
+/// ★out-of-band 종료(M1 핵심)★: conn_tx 가 full 이면 `Frame::Close` 마저 큐에 못 들어가
 /// 좀비 연결이 된다. 그래서 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를
-/// 동시에 대기한다. WsOutputSink 가 full 을 만나 `close_signal.notify_one()` 하면, 큐가
+/// 동시에 대기한다. `ConnFrameSink` 가 try_send 에서 full 을 만나 `close_signal.notify_one()` 하면, 큐가
 /// 가득 차 있어도 이 select 가 깨어 sink_half.close() 후 break → cleanup 으로 이어진다.
+///
+/// ★알려진 구멍 — 진행 중인 소켓 write 는 이 신호로 끊기지 않는다(HEAD 도 동일, 이 슬라이스 범위 밖)★:
+/// recv arm 은 프레임을 꺼낸 **뒤** `sink_half.send(msg).await` 를 **select! 밖**(arm 본문)에서 기다린다.
+/// 인증된 피어가 읽기를 멈추면 그 send 가 무기한 pending 일 수 있고, 그 동안 이 task 는 select! 를
+/// 폴링하지 않으므로 `close_signal` 도 keepalive tick 도 그 연결을 구할 수 없다 — 같은 select! 안에
+/// 있어서 둘 다 함께 멈춘다. 즉 코드가 광고하는 "슬로우 소비자 정리" 는 **이 경우를 덮지 못한다**.
+/// `Notify` 는 대기자가 없을 때 permit 을 보관하므로 깨우기는 **유실이 아니라 지연**이다(그 send 가
+/// 언젠가 풀리면 즉시 발화). 고치려면 write 자체에 타임아웃/취소를 걸어야 하는데 그건 동작 변경이다.
 #[allow(clippy::too_many_arguments)]
 async fn write_task(
     mut sink_half: SinkHalf,
-    mut conn_rx: mpsc::Receiver<WsOutbound>,
+    mut conn_rx: mpsc::Receiver<Frame>,
     conn_id: ConnId,
     close_signal: Arc<Notify>,
     keepalive: KeepaliveConfig,
@@ -1201,9 +1068,9 @@ async fn write_task(
                     break;
                 };
                 let msg = match out {
-                    WsOutbound::Text(s) => Message::Text(s.into()),
-                    WsOutbound::Binary(b) => Message::Binary(b.into()),
-                    WsOutbound::Close(reason) => {
+                    Frame::Text(s) => Message::Text(s.into()),
+                    Frame::Binary(b) => Message::Binary(b.into()),
+                    Frame::Close(reason) => {
                         tracing::info!(conn = conn_id, %reason, "write_task: close 신호 — 종료");
                         let _ = sink_half.close().await;
                         break;
@@ -1221,34 +1088,24 @@ async fn write_task(
 
 // ── read_task ────────────────────────────────────────────────────────────────
 
-type StreamHalf = futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<TcpStream>>;
-
-/// stream_half 에서 명령 frame 을 읽어 ConnectionCore.dispatch 로 처리. 응답은 WsOutboundSink
-/// (control)를 통해 conn_tx 로 큐잉된다(직접 write 안 함).
+/// 수신 프레임을 위층 `ConnectionHandler` 로 올린다. 응답은 handler 가 `FrameSink` 로 큐잉하므로
+/// 이 루프는 소켓에 직접 쓰지 않는다. handler 가 `ConnFlow::Close` 를 돌려주면 루프를 탈출한다
+/// (StopDaemon·프로토콜 위반).
 ///
-/// ★Stage 1 배선★: 옛 read_task 는 dispatch 자유함수를 직접 불렀다. 이제 transport-중립
-/// ConnectionCore 가 dispatch 를 소유하고, read_task 는 WS 프레임→AgentCommand 파싱과
-/// WsOutboundSink(control 인코딩)만 담당한다(carrier 경계). DispatchFlow::Close 면 루프 탈출
-/// (옛 dispatch 의 bool true 와 동일 동작 — StopDaemon).
-#[allow(clippy::too_many_arguments)]
-async fn read_task(
-    mut stream_half: StreamHalf,
-    conn_tx: mpsc::Sender<WsOutbound>,
-    core: Arc<ConnectionCore>,
-    session: Arc<ConnectionSession>,
+/// ★stream 이 generic 인 이유★: 소켓 없이 합성 프레임열로 이 루프를 돌리는 격리 하네스를 두려고
+/// (ADR-0129 — 이 seam 이 뒤 슬라이스의 crate 분리 검증 근거다). 운영 경로는 WS stream half 로만
+/// 단형화된다.
+async fn read_task<S>(
+    mut incoming: S,
+    frames: Arc<dyn FrameSink>,
+    handler: Arc<dyn ConnectionHandler>,
     conn_id: ConnId,
-    close_signal: Arc<Notify>,
     keepalive_base: tokio::time::Instant,
     last_recv: Arc<AtomicU64>,
-) {
-    use crate::connection_core::DispatchFlow;
-
-    // 이 연결의 control 응답 sink — dispatch 의 Ack/Error/SubscribeAck/ReplayComplete 등이 여기로.
-    // output 평면(replay/live binary)은 handle_subscribe 가 make_output_sink 로 별도 생성하나,
-    // 같은 conn_tx/close_signal 을 공유해 한 단일 writer 큐로 합류한다(FIFO 보존).
-    let ws_sink = WsOutboundSink::new(conn_tx.clone(), close_signal.clone());
-
-    while let Some(item) = stream_half.next().await {
+) where
+    S: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin + Send,
+{
+    while let Some(item) = incoming.next().await {
         let msg = match item {
             Ok(m) => m,
             Err(e) => {
@@ -1265,34 +1122,16 @@ async fn read_task(
         );
         match msg {
             Message::Text(text) => {
-                match serde_json::from_str::<AgentCommand>(&text) {
-                    Ok(cmd) => {
-                        if core.dispatch(cmd, &session, &ws_sink).await == DispatchFlow::Close {
-                            // dispatch 가 연결 종료를 요청(StopDaemon 등) — 루프 탈출.
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(conn = conn_id, "명령 파싱 실패: {e}");
-                        // 옛 send_error(conn_tx, ..) 와 동일: Error 이벤트를 conn_tx 로 큐잉.
-                        let _ = ws_sink.enqueue(Outbound::event(AgentEvent::Error {
-                            request_id: None,
-                            message: format!("invalid command: {e}"),
-                        }));
-                    }
+                if handler.on_text(conn_id, &text, &frames).await == ConnFlow::Close {
+                    break;
                 }
             }
-            Message::Binary(_) => {
-                // 클라→데몬 binary 는 프로토콜에 없음 — 오류로 보고 종료.
-                tracing::warn!(conn = conn_id, "예상치 못한 binary frame — close");
-                let _ = ws_sink.enqueue(Outbound::event(AgentEvent::Error {
-                    request_id: None,
-                    message: "unexpected binary frame".into(),
-                }));
-                let _ = conn_tx
-                    .send(WsOutbound::Close("protocol error".into()))
-                    .await;
-                break;
+            Message::Binary(payload) => {
+                // 페이로드는 **빌려준다** — 거부 경로가 유일한 소비자라 복사하지 않는다(클라가 고른
+                //   크기만큼 할당하게 두면 인증 후 최대 프레임 크기까지 낭비 할당이 된다).
+                if handler.on_binary(conn_id, &payload, &frames).await == ConnFlow::Close {
+                    break;
+                }
             }
             // Ping/Pong 은 tungstenite 가 자동 응답(write_task 가 아닌 내부). 여기선 무시.
             Message::Ping(_) | Message::Pong(_) => {}
@@ -1350,19 +1189,19 @@ mod tests {
         assert!(constant_time_eq("", ""));
     }
 
-    // ── 3. WsOutbound 매핑(Text/Binary/Close → Message) ──────────────────────
+    // ── 3. Frame 매핑(Text/Binary/Close → Message) ───────────────────────────
     // write_task 의 변환 로직과 동일한 매핑을 직접 검증(실제 WS 없이).
     #[test]
-    fn ws_outbound_maps_to_message() {
-        let t = WsOutbound::Text("hi".into());
-        let b = WsOutbound::Binary(vec![1, 2, 3]);
-        let c = WsOutbound::Close("bye".into());
+    fn frame_maps_to_message() {
+        let t = Frame::Text("hi".into());
+        let b = Frame::Binary(vec![1, 2, 3]);
+        let c = Frame::Close("bye".into());
 
-        let to_msg = |o: WsOutbound| -> Message {
+        let to_msg = |o: Frame| -> Message {
             match o {
-                WsOutbound::Text(s) => Message::Text(s.into()),
-                WsOutbound::Binary(b) => Message::Binary(b.into()),
-                WsOutbound::Close(_) => Message::Close(None),
+                Frame::Text(s) => Message::Text(s.into()),
+                Frame::Binary(b) => Message::Binary(b.into()),
+                Frame::Close(_) => Message::Close(None),
             }
         };
         assert!(matches!(to_msg(t), Message::Text(_)));
@@ -1370,125 +1209,81 @@ mod tests {
         assert!(matches!(to_msg(c), Message::Close(_)));
     }
 
-    // ── 4. WsOutputSink 가 conn_tx 에 binary frame 을 try_send 하는지 ─────────
+    // ── 4. ConnFrameSink: try_send 는 포화 시 out-of-band close_signal 을 울린다 ──
     #[tokio::test]
-    async fn ws_output_sink_encodes_and_sends_binary() {
-        let (tx, mut rx) = mpsc::channel::<WsOutbound>(8);
-        let sink = WsOutputSink::new(tx, Arc::new(Notify::new()));
-        let agent_id = uuid::Uuid::new_v4();
-        let data = b"abc";
-        let frame = OutputFrame {
-            agent_id,
-            epoch: 7,
-            seq: 42,
-            payload: OutputPayload::Bytes(data),
-        };
-        sink.send(frame).expect("send ok");
-
-        match rx.recv().await.expect("one item") {
-            WsOutbound::Binary(buf) => {
-                // codec 으로 디코드해 헤더가 맞는지 확인.
-                let decoded = engram_dashboard_protocol::decode_frame(&buf).expect("decode");
-                assert_eq!(decoded.agent_id, agent_id);
-                assert_eq!(decoded.epoch, 7);
-                assert_eq!(decoded.seq, 42);
-                assert_eq!(decoded.payload, b"abc");
-            }
-            _ => panic!("Binary 가 아님"),
-        }
-    }
-
-    // ── 4b. (S15 B7) WsOutputSink 가 Event(구조화) payload 를 tag1 frame 으로 인코딩하는지 ──────
-    //    합성 OutputEvent → send → conn_tx 의 Binary 를 decode_frame 으로 풀어 tag1·헤더 확인 후,
-    //    payload 를 다시 wire StructuredEvent 로 serde 파싱해 필드가 보존됐는지 단언(ADR-0045 self-describing).
-    #[tokio::test]
-    async fn ws_output_sink_encodes_event_as_tag1_structured_frame() {
-        use engram_dashboard_core::agent::types::OutputEvent as CoreOutputEvent;
-        use engram_dashboard_protocol::{
-            decode_frame, StructuredEvent as WireStructuredEvent, FRAME_TAG_STRUCTURED_EVENT,
-        };
-
-        let (tx, mut rx) = mpsc::channel::<WsOutbound>(8);
-        let sink = WsOutputSink::new(tx, Arc::new(Notify::new()));
-        let agent_id = uuid::Uuid::new_v4();
-        // 합성 구조화 이벤트(B3 미배선이라 런타임 생산자 없음 — 여기선 직접 만들어 tag1 경로를 태운다).
-        let ev = CoreOutputEvent::ToolCall {
-            name: "read".into(),
-            args_json: r#"{"path":"/x"}"#.into(),
-            id: Some("call_1".into()),
-            turn_id: Some("t9".into()),
-            message_id: None,
-        };
-        let frame = OutputFrame {
-            agent_id,
-            epoch: 3,
-            seq: 100,
-            payload: OutputPayload::Event(&ev),
-        };
-        sink.send(frame).expect("Event send ok");
-
-        match rx.recv().await.expect("one item") {
-            WsOutbound::Binary(buf) => {
-                let decoded = decode_frame(&buf).expect("decode");
-                // tag=1(structured) + 헤더 필드 그대로.
-                assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT, "tag1 이어야 함");
-                assert_eq!(decoded.agent_id, agent_id);
-                assert_eq!(decoded.epoch, 3);
-                assert_eq!(decoded.seq, 100);
-                // payload = JSON self-describing StructuredEvent. 파싱해 필드 보존 단언.
-                let parsed: WireStructuredEvent =
-                    serde_json::from_slice(decoded.payload).expect("payload JSON 파싱");
-                assert_eq!(
-                    parsed,
-                    WireStructuredEvent::ToolCall {
-                        name: "read".into(),
-                        args_json: r#"{"path":"/x"}"#.into(),
-                        id: Some("call_1".into()),
-                        turn_id: Some("t9".into()),
-                        message_id: None,
-                    },
-                    "tag1 payload 가 wire StructuredEvent 로 무손실 복원"
-                );
-            }
-            other => panic!("Binary(tag1) 여야 함: {other:?}"),
-        }
-    }
-
-    // ── 5. WsOutputSink full → SinkError + close_signal notify + replay_dropped ──
-    #[tokio::test]
-    async fn ws_output_sink_full_returns_error_and_notifies_close_signal() {
-        // cap 1 채널을 가득 채운 뒤: send 가 Err 를 반환하고, 큐가 막혀 있어도 out-of-band
-        // close_signal 이 발동(write_task 를 깨움)하며, replay_dropped 가 set 되는지.
-        let (tx, mut rx) = mpsc::channel::<WsOutbound>(1);
+    async fn conn_frame_sink_notifies_close_signal_when_full() {
+        // cap 1 채널을 가득 채운 뒤: try_send 가 Err 를 반환하고, 큐가 막혀 있어도 close_signal 이
+        // 발동(write_task 를 깨움)하는지 — 이게 좀비 연결을 막는 유일한 경로(M1).
+        let (tx, mut rx) = mpsc::channel::<Frame>(1);
         let close_signal = Arc::new(Notify::new());
-        let sink = WsOutputSink::new(tx, close_signal.clone());
-        let replay_dropped = sink.replay_dropped_flag();
-        let agent_id = uuid::Uuid::new_v4();
-        let frame = |seq: u64| OutputFrame {
-            agent_id,
-            epoch: 0,
-            seq,
-            payload: OutputPayload::Bytes(b"x"),
-        };
-        // 첫 send 성공(큐 1칸 채움).
-        sink.send(frame(0)).expect("first ok");
-        // 두 번째는 full → Err.
-        assert!(sink.send(frame(1)).is_err(), "full 이면 SinkError");
+        let sink = ConnFrameSink::new(tx, close_signal.clone());
 
-        // ★out-of-band 종료 신호★: 큐가 full 이어도 close_signal 은 발동해야 한다.
-        //   notified() 가 즉시 깨면 write_task 가 깨어 닫을 수 있다는 의미(M1 핵심 근거).
+        sink.try_send(Frame::Text("first".into()))
+            .expect("빈 큐엔 들어간다");
+        assert!(
+            sink.try_send(Frame::Text("second".into())).is_err(),
+            "full 이면 FrameError"
+        );
+
         tokio::time::timeout(Duration::from_millis(200), close_signal.notified())
             .await
             .expect("close_signal 이 full 에서도 발동해야 함");
 
-        // replay 구간 사후 보정용 플래그도 set.
+        assert!(matches!(rx.recv().await.unwrap(), Frame::Text(_)));
+    }
+
+    // ── 4b. ConnFrameSink: send(backpressure)는 close_signal 을 울리지 않는다 ──
+    #[tokio::test]
+    async fn conn_frame_sink_send_does_not_signal_close() {
+        // ★try_send / send 비대칭★: 기다릴 수 있는 호출자는 슬로우 소비자 판정 대상이 아니다.
+        //   cap 1 을 채운 뒤 send 가 **실제로 포화에 park 했음을 먼저 확정**하고, 그 상태에서 종료
+        //   신호가 없었음을 본 다음 한 칸 비워 통과를 확인한다.
+        let (tx, mut rx) = mpsc::channel::<Frame>(1);
+        let close_signal = Arc::new(Notify::new());
+        let sink = ConnFrameSink::new(tx, close_signal.clone());
+
+        sink.try_send(Frame::Text("first".into())).expect("한 칸");
+
+        // ★포화 경로를 탔다는 **양성 관측**★: future 를 직접 1회 폴링해 Pending 을 확인한다. 이게
+        //   없으면 `spawn` + 곧바로 `recv()` 조합에서 send 가 **자리가 빈 뒤에야** 처음 폴링될 수 있어
+        //   (spawn 은 폴링을 보장하지 않고, 비어있지 않은 채널의 recv 는 yield 없이 Ready) 정작 검증
+        //   대상인 포화 분기를 한 번도 안 타고 통과할 수 있다(실측: 그 형태는 회귀를 놓쳤다).
+        let mut pending = Box::pin(sink.send(Frame::Text("second".into())));
         assert!(
-            replay_dropped.load(Ordering::Acquire),
-            "drop 시 replay_dropped set"
+            futures_util::poll!(pending.as_mut()).is_pending(),
+            "가득 찬 큐에서 send 는 반드시 park 해야(포화 경로 미실행이면 이 테스트가 무의미하다)"
+        );
+        // park 한 그 상태에서 종료 신호가 없어야 한다(try_send 와 갈리는 지점).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), close_signal.notified())
+                .await
+                .is_err(),
+            "send 는 포화를 기다릴 뿐 종료 신호를 울리지 않는다"
         );
 
-        // 큐 첫 항목은 Binary(첫 frame).
-        assert!(matches!(rx.recv().await.unwrap(), WsOutbound::Binary(_)));
+        // 한 칸 비우면 park 이 풀려 통과한다.
+        assert!(matches!(rx.recv().await.unwrap(), Frame::Text(_)));
+        pending.await.expect("자리가 나면 backpressure 가 풀린다");
+    }
+
+    // ── 4c. ConnFrameSink: 세 프레임 종류가 그대로 단일 writer 큐에 FIFO 로 실린다 ──
+    #[tokio::test]
+    async fn conn_frame_sink_maps_frames_to_queue_in_order() {
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let sink = ConnFrameSink::new(tx, Arc::new(Notify::new()));
+        sink.send(Frame::Text("hi".into())).await.expect("text ok");
+        sink.try_send(Frame::Binary(vec![1, 2, 3]))
+            .expect("binary ok");
+        sink.send(Frame::Close("bye".into()))
+            .await
+            .expect("close ok");
+
+        assert!(matches!(rx.recv().await.unwrap(), Frame::Text(_)));
+        assert!(matches!(rx.recv().await.unwrap(), Frame::Binary(_)));
+        match rx.recv().await.unwrap() {
+            Frame::Close(r) => assert_eq!(r, "bye"),
+            other => panic!("Close 여야 함: {other:?}"),
+        }
     }
 
     // ── 6. Subscribe 시 conn_tx 에 SubscribeAck → ReplayComplete 순서로 들어가는지 ──
@@ -1497,8 +1292,8 @@ mod tests {
     //     동기 전송은 output_core.rs 단위테스트가 이미 커버.)
     #[tokio::test]
     async fn subscribe_control_order_ack_then_complete() {
-        use engram_dashboard_protocol::SubscribeAction;
-        let (tx, mut rx) = mpsc::channel::<WsOutbound>(16);
+        use engram_dashboard_protocol::{encode_terminal_frame, SubscribeAction};
+        let (tx, mut rx) = mpsc::channel::<Frame>(16);
         let agent_id = uuid::Uuid::new_v4();
 
         // handle_subscribe 가 보내는 control 순서를 직접 재현(SubscribeAck → [replay binary] → ReplayComplete).
@@ -1512,15 +1307,13 @@ mod tests {
             truncated: false,
         })
         .unwrap();
-        tx.send(WsOutbound::Text(ack)).await.unwrap();
+        tx.send(Frame::Text(ack)).await.unwrap();
         // 가상의 replay binary 1건.
-        tx.send(WsOutbound::Binary(encode_terminal_frame(
-            agent_id, 0, 0, b"r",
-        )))
-        .await
-        .unwrap();
+        tx.send(Frame::Binary(encode_terminal_frame(agent_id, 0, 0, b"r")))
+            .await
+            .unwrap();
         let complete = event_json(&AgentEvent::ReplayComplete { agent_id, epoch: 0 }).unwrap();
-        tx.send(WsOutbound::Text(complete)).await.unwrap();
+        tx.send(Frame::Text(complete)).await.unwrap();
 
         // 순서 검증: Text(SubscribeAck) → Binary(replay) → Text(ReplayComplete).
         let first = rx.recv().await.unwrap();
@@ -1528,15 +1321,12 @@ mod tests {
         let third = rx.recv().await.unwrap();
 
         match first {
-            WsOutbound::Text(s) => assert!(s.contains("SubscribeAck")),
+            Frame::Text(s) => assert!(s.contains("SubscribeAck")),
             _ => panic!("1번째는 SubscribeAck Text 여야 함"),
         }
-        assert!(
-            matches!(second, WsOutbound::Binary(_)),
-            "2번째는 replay binary"
-        );
+        assert!(matches!(second, Frame::Binary(_)), "2번째는 replay binary");
         match third {
-            WsOutbound::Text(s) => assert!(s.contains("ReplayComplete")),
+            Frame::Text(s) => assert!(s.contains("ReplayComplete")),
             _ => panic!("3번째는 ReplayComplete Text 여야 함"),
         }
     }
@@ -1895,5 +1685,534 @@ mod tests {
     fn origin_check_allows_missing_origin() {
         // Origin 헤더 없음 → 현 정책상 허용(네이티브/하네스, 토큰이 주 방어).
         assert!(run_origin_check(None).is_ok());
+    }
+
+    // ── 11. 프레임 포트 seam — 소켓 없이 도는 격리 하네스(ADR-0129) ──────────────────
+    //    가짜 ConnectionHandler + 가짜 FrameSink 로 연결 수명을 재현한다. TcpStream 이 없어야
+    //    뒤 슬라이스에서 네트워크 행이 별도 crate 로 떨어져도 이 검증이 그대로 산다.
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SeenFrame {
+        Text(String),
+        Binary(Vec<u8>),
+        Close(String),
+    }
+
+    #[derive(Default)]
+    struct FakeFrameSink {
+        frames: Mutex<Vec<SeenFrame>>,
+    }
+
+    impl FakeFrameSink {
+        fn frames(&self) -> Vec<String> {
+            self.frames
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|f| match f {
+                    SeenFrame::Text(s) => format!("text:{s}"),
+                    SeenFrame::Binary(b) => format!("bin:{}", b.len()),
+                    SeenFrame::Close(r) => format!("close:{r}"),
+                })
+                .collect()
+        }
+    }
+
+    impl FrameSink for FakeFrameSink {
+        fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
+            let seen = match frame {
+                Frame::Text(s) => SeenFrame::Text(s),
+                Frame::Binary(b) => SeenFrame::Binary(b),
+                Frame::Close(r) => SeenFrame::Close(r),
+            };
+            self.frames.lock().unwrap().push(seen);
+            Ok(())
+        }
+        fn send(&self, frame: Frame) -> BoxFuture<'_, Result<(), FrameError>> {
+            Box::pin(async move { self.try_send(frame) })
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum HandlerCall {
+        Connect(ConnId),
+        Text(ConnId, String),
+        /// payload 길이만 — 내용은 이 seam 의 관심사가 아니다.
+        Binary(ConnId, usize),
+        Disconnect(ConnId),
+    }
+
+    struct FakeHandler {
+        calls: Mutex<Vec<HandlerCall>>,
+        /// 이 텍스트를 받으면 `ConnFlow::Close` 를 돌려준다(수신 루프 탈출 검증용).
+        close_on: Option<String>,
+        /// 이 텍스트를 받으면 `Frame::Close` 를 큐에 넣고 **Continue** 를 돌려준다 — 연결을
+        /// read 쪽이 아니라 **write_task 쪽**에서 끝내, select! 의 "read 를 abort" 갈래를 태운다.
+        close_queue_on: Option<String>,
+        /// `on_connect` 가 인사 프레임을 넣은 뒤 여기서 대기한다. 테스트가 그 창 동안 "아직 아무것도
+        /// 소켓으로 안 나갔다"(=writer 미기동) 와 "아직 아무 프레임도 처리 안 됐다"(=reader 미기동)를
+        /// 관측한다.
+        connect_gate: Option<Arc<Notify>>,
+        /// `on_text` 1건 처리 완료 신호 — 테스트가 클라 close 타이밍과 무관하게 진행하기 위한 것.
+        text_seen: Arc<Notify>,
+        /// `on_connect` 이 받은 프레임 출구의 약참조. 강참조는 read_task 만 들고 있으므로, 연결이
+        /// 끝난 뒤에도 upgrade 되면 그 task 가 abort 되지 않고 **detach** 됐다는 뜻이다.
+        /// ★이 fake 는 프레임 출구의 **강참조를 절대 보관하면 안 된다**★ — 필드에 `Arc` 를 하나라도
+        /// 남기면 upgrade 가 항상 성공하고, `the_losing_task_is_aborted_not_detached` 의 폴링 루프가
+        /// 끝까지 `released == false` 로 돌아 **정상 코드에서 그 테스트가 항상 실패한다**(조용한 탐지
+        /// 불능이 아니라 시끄러운 위양성 — 그래서 원인을 이 필드로 되짚기 어렵다).
+        frames_weak: Mutex<Option<std::sync::Weak<dyn FrameSink>>>,
+        /// `on_disconnect` 시점에 이 연결이 아직 fanout 레지스트리에 있었는지(cleanup 순서 관측).
+        registry: Option<ConnRegistry>,
+        registered_at_disconnect: Mutex<Option<bool>>,
+    }
+
+    impl FakeHandler {
+        fn new(close_on: Option<&str>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                close_on: close_on.map(|s| s.to_string()),
+                close_queue_on: None,
+                connect_gate: None,
+                text_seen: Arc::new(Notify::new()),
+                frames_weak: Mutex::new(None),
+                registry: None,
+                registered_at_disconnect: Mutex::new(None),
+            }
+        }
+
+        /// `handle_connection` 의 순서 검증용 — 레지스트리를 들여다보고 on_connect 을 게이트로 잡는다.
+        fn probing(registry: ConnRegistry, connect_gate: Arc<Notify>) -> Self {
+            Self {
+                registry: Some(registry),
+                connect_gate: Some(connect_gate),
+                ..Self::new(None)
+            }
+        }
+
+        /// write_task 쪽에서 연결을 끝내는 변종(패자 abort 검증용).
+        fn closing_via_writer(close_queue_on: &str) -> Self {
+            Self {
+                close_queue_on: Some(close_queue_on.to_string()),
+                ..Self::new(None)
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| match c {
+                    HandlerCall::Connect(id) => format!("connect:{id}"),
+                    HandlerCall::Text(id, t) => format!("text:{id}:{t}"),
+                    HandlerCall::Binary(id, n) => format!("binary:{id}:{n}"),
+                    HandlerCall::Disconnect(id) => format!("disconnect:{id}"),
+                })
+                .collect()
+        }
+
+        fn registered_at_disconnect(&self) -> Option<bool> {
+            *self.registered_at_disconnect.lock().unwrap()
+        }
+
+        /// `on_connect` 이 두 지점에서 쓰는 단언 — 정상 코드에선 `on_connect` 이 끝나기 전에 어떤
+        /// 프레임도 처리될 수 없다(read_task 가 아직 없다).
+        fn assert_nothing_processed_yet(&self, at: &str) {
+            let calls = self.calls.lock().unwrap();
+            assert!(
+                calls.is_empty(),
+                "on_connect({at}) 보다 먼저 처리된 프레임이 있다 — read_task 가 앞서 스폰됐다: {calls:?}"
+            );
+        }
+
+        fn frames_still_held(&self) -> bool {
+            self.frames_weak
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .is_some()
+        }
+    }
+
+    impl ConnectionHandler for FakeHandler {
+        fn on_connect<'a>(
+            &'a self,
+            conn_id: ConnId,
+            frames: &'a Arc<dyn FrameSink>,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                *self.frames_weak.lock().unwrap() = Some(Arc::downgrade(frames));
+                // ★게이트 **앞** 단언(프로그램 순서로 결정)★: 정상 코드에선 read_task 가 아직 스폰조차
+                //   안 됐으므로 처리된 프레임이 있을 수 없다. 스케줄러와 무관하게 참이다.
+                self.assert_nothing_processed_yet("게이트 진입 전");
+                // 인사를 **게이트 앞에서** 넣는다 — writer 가 이미 떠 있다면 이 프레임이 게이트 대기
+                //   중에 소켓으로 나가고, 테스트가 그걸 잡는다.
+                let _ = frames.send(Frame::Text("greeting".into())).await;
+                if let Some(gate) = &self.connect_gate {
+                    gate.notified().await;
+                }
+                // ★게이트 **뒤** 단언★: 게이트가 열릴 때까지의 창(테스트가 그 안에서 명령을 미리
+                //   흘려둔다) 동안 잘못 스폰된 read_task 가 그 명령을 처리했는지 잡는다.
+                self.assert_nothing_processed_yet("게이트 통과 후");
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(HandlerCall::Connect(conn_id));
+            })
+        }
+
+        fn on_text<'a>(
+            &'a self,
+            conn_id: ConnId,
+            text: &'a str,
+            frames: &'a Arc<dyn FrameSink>,
+        ) -> BoxFuture<'a, ConnFlow> {
+            Box::pin(async move {
+                let close = self.close_on.as_deref() == Some(text);
+                let close_via_writer = self.close_queue_on.as_deref() == Some(text);
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(HandlerCall::Text(conn_id, text.to_string()));
+                self.text_seen.notify_one();
+                if close_via_writer {
+                    let _ = frames.try_send(Frame::Close("테스트: writer 가 먼저 끝난다".into()));
+                    return ConnFlow::Continue;
+                }
+                if close {
+                    ConnFlow::Close
+                } else {
+                    ConnFlow::Continue
+                }
+            })
+        }
+
+        fn on_binary<'a>(
+            &'a self,
+            conn_id: ConnId,
+            payload: &'a [u8],
+            _frames: &'a Arc<dyn FrameSink>,
+        ) -> BoxFuture<'a, ConnFlow> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(HandlerCall::Binary(conn_id, payload.len()));
+                ConnFlow::Continue
+            })
+        }
+
+        fn on_disconnect(&self, conn_id: ConnId) {
+            if let Some(registry) = &self.registry {
+                *self.registered_at_disconnect.lock().unwrap() = Some(registry.contains(conn_id));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(HandlerCall::Disconnect(conn_id));
+        }
+    }
+
+    struct FakeFactory {
+        handler: Arc<FakeHandler>,
+    }
+
+    impl ConnectionHandlerFactory for FakeFactory {
+        fn handler_for(&self, _conn_id: ConnId) -> Arc<dyn ConnectionHandler> {
+            self.handler.clone()
+        }
+        fn handshake_error_frame(&self, message: &str) -> Option<String> {
+            Some(message.to_string())
+        }
+    }
+
+    fn text_frame(s: &str) -> Result<Message, tokio_tungstenite::tungstenite::Error> {
+        Ok(Message::Text(s.to_string().into()))
+    }
+
+    #[tokio::test]
+    async fn handler_sees_connect_then_frames_then_disconnect() {
+        let fake_sink = Arc::new(FakeFrameSink::default());
+        let frames: Arc<dyn FrameSink> = fake_sink.clone();
+        let fake = Arc::new(FakeHandler::new(None));
+        let handler: Arc<dyn ConnectionHandler> = fake.clone();
+
+        handler.on_connect(7, &frames).await;
+        read_task(
+            futures_util::stream::iter(vec![
+                text_frame("cmd"),
+                Ok(Message::Binary(vec![1, 2, 3].into())),
+                Ok(Message::Close(None)),
+                text_frame("after-close"),
+            ]),
+            frames.clone(),
+            handler.clone(),
+            7,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+        handler.on_disconnect(7);
+
+        assert_eq!(
+            fake.calls(),
+            vec![
+                "connect:7",
+                "text:7:cmd",
+                "binary:7:3",
+                "disconnect:7", // Close frame 뒤의 프레임은 소비되지 않는다
+            ]
+        );
+        assert_eq!(
+            fake_sink.frames(),
+            vec!["text:greeting"],
+            "on_connect 가 넣은 프레임이 단일 출구로 나간다"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_flow_from_on_text_breaks_the_read_loop() {
+        let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
+        let fake = Arc::new(FakeHandler::new(Some("stop")));
+        let handler: Arc<dyn ConnectionHandler> = fake.clone();
+
+        read_task(
+            futures_util::stream::iter(vec![
+                text_frame("go"),
+                text_frame("stop"),
+                text_frame("unreachable"),
+            ]),
+            frames,
+            handler,
+            3,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+
+        assert_eq!(
+            fake.calls(),
+            vec!["text:3:go", "text:3:stop"],
+            "ConnFlow::Close 면 그 자리에서 수신 루프를 나간다"
+        );
+    }
+
+    /// 메시지 1건을 수신 루프에 태우고 keepalive 시계가 갱신됐는지 돌려준다.
+    /// 초기값을 도달 불가능한 sentinel 로 두어 "갱신됐다" 를 타이밍 없이 판정한다.
+    async fn clock_updated_by(msg: Message) -> bool {
+        let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
+        let handler: Arc<dyn ConnectionHandler> = Arc::new(FakeHandler::new(None));
+        let last_recv = Arc::new(AtomicU64::new(u64::MAX));
+
+        read_task(
+            futures_util::stream::iter(vec![Ok(msg)]),
+            frames,
+            handler,
+            1,
+            tokio::time::Instant::now(),
+            last_recv.clone(),
+        )
+        .await;
+
+        last_recv.load(Ordering::Acquire) < u64::MAX
+    }
+
+    #[tokio::test]
+    async fn every_received_message_updates_the_keepalive_clock() {
+        // ★"무엇이든 받았다 = 살아있다"★: 갱신은 메시지 **종류를 가리지 않는다**(생산 코드가 match
+        //   **앞에서** 갱신하는 이유). 특히 Pong 이 빠지면 능동 Ping 에만 답하는 정상 연결이 idle 로
+        //   오판돼 끊긴다(half-open 위양성). 갱신을 일부 arm 안으로 옮기는 회귀를 잡으려면 6종을 다
+        //   태워야 하므로 `Message` 의 variant 전부를 넣는다.
+        assert!(clock_updated_by(Message::Text("cmd".to_string().into())).await);
+        assert!(clock_updated_by(Message::Binary(vec![1].into())).await);
+        assert!(clock_updated_by(Message::Ping(Vec::new().into())).await);
+        assert!(clock_updated_by(Message::Pong(Vec::new().into())).await);
+        assert!(clock_updated_by(Message::Close(None)).await);
+        // Message::Frame 은 실소켓 수신으로는 안 올라오지만(tungstenite 문서) read_task 가 arm 을
+        //   갖고 있으므로 합성해 태운다.
+        assert!(
+            clock_updated_by(Message::Frame(
+                tokio_tungstenite::tungstenite::protocol::frame::Frame::pong(Vec::new())
+            ))
+            .await
+        );
+    }
+
+    // ── 12. handle_connection 순서 계약(ADR-0129) ─────────────────────────────────
+
+    /// 테스트 서버 1개를 띄우고 인증까지 마친 클라이언트를 돌려준다(공통 뼈대).
+    async fn serve_one(
+        registry: ConnRegistry,
+        fake: Arc<FakeHandler>,
+        keepalive: KeepaliveConfig,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let factory: Arc<dyn ConnectionHandlerFactory> = Arc::new(FakeFactory { handler: fake });
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(
+                stream,
+                peer,
+                registry,
+                factory,
+                Arc::new("tok".to_string()),
+                keepalive,
+            )
+            .await;
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        let auth = serde_json::to_string(&AgentCommand::Auth {
+            token: "tok".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+        client.send(Message::Text(auth.into())).await.unwrap();
+        (client, server)
+    }
+
+    /// 실제 `handle_connection` 이 지키는 세 순서를 고정한다 — read_task 하네스로는 못 잡는 것들:
+    ///   ① `on_connect` 가 **write_task 스폰**보다 앞선다(그래야 `on_connect` 계약의 "소비자가 아직
+    ///      없다" 전제가 성립한다)
+    ///   ② `on_connect` 가 **read_task 스폰**보다 앞선다(그래야 명령이 인사를 앞지르지 못한다)
+    ///   ③ `on_disconnect` 가 레지스트리 제거보다 앞선다
+    ///
+    /// ★탐지력의 정직한 범위★ — 세 단언 다 **정상 코드를 실패시킬 수는 없다**(전부 부정형: "아직
+    ///   아무것도 처리/도달하지 않았다"). 그러나 회귀를 잡는 것은 ③만 결정적이다:
+    ///   - ①·② 모두 **확률적**이다. 스폰은 그 자체로 아무것도 실행하지 않으므로, 잘못 앞당겨 스폰된
+    ///     task 가 **이 창 안에 폴링되어야** 흔적이 남는다. ②의 경우 회귀 구현이 read_task 를 먼저
+    ///     스폰해도 실행기가 그 전에 `on_connect` 을 게이트 앞 단언까지 폴링해 버릴 수 있고, 게이트가
+    ///     열릴 때까지도 명령이 처리되지 않았으면 게이트 뒤 단언과 마지막 호출 순서 검사까지 전부
+    ///     통과한다. 그래서 단언을 게이트 앞·뒤 **두 곳**에 둬 창을 넓히지만(공짜다) 보증은 아니다.
+    ///     ★결정적 판별자는 없다★ — 스케줄링이나 task 생성에 직접 걸 훅이 없으면 만들 수 없다.
+    ///   - ③은 `on_disconnect` 안에서 레지스트리를 직접 들여다보므로 사실상 결정적이다.
+    ///   요약: 위양성 0 · ③ 결정적 · ①② 확률적(창을 넓힌 표집).
+    #[tokio::test]
+    async fn handle_connection_orders_connect_before_both_tasks_and_cleanup_before_unregister() {
+        let registry = ConnRegistry::new();
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(FakeHandler::probing(registry.clone(), gate.clone()));
+        let (mut client, server) =
+            serve_one(registry.clone(), fake.clone(), KeepaliveConfig::default()).await;
+
+        // 게이트가 닫힌 동안 서버 소켓에 대기하도록 명령을 미리 흘려둔다.
+        client
+            .send(Message::Text("cmd".to_string().into()))
+            .await
+            .unwrap();
+
+        // ★①★ 이 창에서 클라에 도달하는 게 있으면 writer 가 이미 떠 있다는 뜻이다. 정상 코드에선
+        //   writer 가 없으므로 **영원히** 아무것도 안 온다 — 즉 위양성(flake)은 불가능하고, 부하가
+        //   높으면 위음성(놓침) 쪽으로만 틀린다. **결정적 보증이 아니라 확률적 탐지**다(임계값 튜닝
+        //   대상이 아닌 이유이기도 하다 — 값을 키워도 보증이 되지는 않는다).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), client.next())
+                .await
+                .is_err(),
+            "on_connect 진행 중엔 writer 가 없어 소켓으로 나가는 게 없어야 한다"
+        );
+
+        gate.notify_one();
+
+        // ★클라 close 타이밍에 의존하지 않는다★: 명령이 실제로 처리된 걸 확인한 **뒤에** 닫는다.
+        //   (닫기를 먼저 하면 writer 의 인사 write 실패 → reader abort 경합이 결과를 좌우할 수 있다.)
+        tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
+            .await
+            .expect("명령이 처리돼야");
+        client.close(None).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("handle_connection 이 반환해야")
+            .unwrap();
+
+        let calls = fake.calls();
+        assert_eq!(
+            calls,
+            vec!["connect:1", "text:1:cmd", "disconnect:1"],
+            "connect → 프레임 → disconnect 순서"
+        );
+        // ★③★
+        assert_eq!(
+            fake.registered_at_disconnect(),
+            Some(true),
+            "on_disconnect 시점엔 아직 fanout 레지스트리에 있다"
+        );
+        assert!(
+            !registry.contains(1),
+            "handle_connection 이 반환할 땐 등록 해제돼 있다"
+        );
+    }
+
+    /// ★패자 task 의 명시적 abort★(`handle_connection` 의 select!) — JoinHandle 을 그냥 drop 하면
+    /// detach 되어 WS half 를 쥔 task 가 살아남는다. 그 누수는 e2e 로는 안 보인다(전부 정상 종료라
+    /// 남은 half 가 표에 안 드러난다).
+    ///
+    /// ★관측 방법★: 프레임 출구 `Arc` 의 **강참조는 read_task 만** 들고 있다(`handle_connection` 은
+    /// 그것을 read_task 로 move 하고, `on_connect` 은 빌리기만 한다). 그래서 연결 종료 뒤에도 약참조가
+    /// upgrade 되면 = read_task 가 살아 있다 = abort 대신 detach 됐다는 뜻이다.
+    /// 이 방향(write 가 먼저 끝나 read 를 abort 하는 갈래)을 태우려고 핸들러가 `Frame::Close` 를 큐에
+    /// 넣고 Continue 를 돌려준다 — read 는 계속 `next()` 에 파킹된 채로 남는다.
+    /// ★대칭 갈래(read 가 먼저 끝나 write 를 abort)는 **미검증으로 남긴다**★ — 아래 조건부 관측 때문에
+    /// 부정형 테스트를 못 만들었을 뿐이고, **그쪽 `abort()` 가 불필요하다는 뜻은 아니다.**
+    ///
+    /// ★관측된 것(2026-08-04, 현 `AgentConnection` + 아래 경쟁 미발생 조건에서만)★: write_task 를
+    /// detach 해도 `handle_connection` 반환 시 마지막 `Sender<Frame>` 이 드롭되어 `conn_rx.recv()` 가
+    /// None 을 돌려주고, write_task 가 **스스로 종료**하며 sink_half 를 놓았다(짧은 `ping_interval` 로
+    /// "종료 후 Ping 이 더 오는가" 를 봤더니 즉시 EOF — 소켓이 닫혔다 = writer 가 이미 끝났다).
+    ///
+    /// ★그 자기종료는 "모든 `Sender<Frame>` 사본이 `handle_connection` 과 함께 죽는다" 는 **조건부**다★.
+    /// 사본 전수: ① 이 함수의 지역 `conn_tx` ② 레지스트리 항목(등록 해제로 소멸) ③ read_task 가 소유한
+    /// `ConnFrameSink` ④ 코어 subscribers 에 등록된 `FrameOutputSink` 사본들 — ④는 `session.subs` 기록을
+    /// 통해서만 회수된다(`on_disconnect`).
+    /// ★그래서 ④가 새면 조건이 깨지고, 살아남은 sender 때문에 detach 된 writer 는 **자기종료하지
+    /// 않는다**★. 새는 경로가 실제로 있다: `handle_subscribe` 가 코어에 sink 를 등록한 **뒤**
+    /// `subs.insert` 전에 read_task 가 **패닉**하면(그 사이엔 `.await` 가 없어 취소는 못 끼어들지만
+    /// 패닉은 낀다) 그 sink 는 어디에도 기록되지 않은 채 코어에 남아 conn_tx 사본을 붙든다.
+    /// 릴리스는 `panic=abort` 라 프로세스가 죽지만 debug/테스트 빌드에선 도달 가능하다.
+    /// **결론: 그 갈래의 `abort()` 는 제거 금지** — 위 실측은 "그 경쟁이 안 났을 때 그렇더라" 이지
+    /// 불변식이 아니다.
+    /// 반대 갈래(이 테스트)는 read_task 가 `next()` 에 파킹돼 스스로 끝나지 않으므로 abort 가 유일한
+    /// 회수 수단이다 — 그래서 여기만 검증한다.
+    #[tokio::test]
+    async fn the_losing_task_is_aborted_not_detached() {
+        let registry = ConnRegistry::new();
+        let fake = Arc::new(FakeHandler::closing_via_writer("die"));
+        let (mut client, server) =
+            serve_one(registry.clone(), fake.clone(), KeepaliveConfig::default()).await;
+
+        client
+            .send(Message::Text("die".to_string().into()))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("write_task 가 Frame::Close 로 끝나면 handle_connection 도 반환해야")
+            .unwrap();
+
+        // abort 는 요청이라 future drop 이 반환과 동기는 아니다 — 넉넉히 폴링한다(정상 코드는 곧
+        //   놓고, detach 회귀는 `next()` 에 영원히 파킹돼 절대 놓지 않는다).
+        let mut released = false;
+        for _ in 0..200 {
+            if !fake.frames_still_held() {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            released,
+            "패자 task 가 abort 되지 않았다(detach) — WS half 를 쥔 채 살아남는다"
+        );
+        drop(client);
     }
 }

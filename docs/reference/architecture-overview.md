@@ -216,7 +216,7 @@ flowchart TD
   PUMP["Transport 펌프 스레드 (read 루프)<br/>PTY : raw 바이트 그대로<br/>stdio: OutputDecoder가 NDJSON → OutputEvent 파싱 (★claude 지식 여기까지만)"]
   EMIT["OutputCore.emit(event)<br/>① seq 붙여 replay 링에 먼저 저장 ← 구독 타이밍 경쟁에서 유실 방지<br/>② 구독자 스냅샷 뜨고 → 락 놓고 send ← 블로킹 중 락 X"]
   SUB["subscribers: OutputSink.send(frame) ★seam<br/>← 코어의 유일한 출구 (raw만, wire 모름)"]
-  WSSINK["데몬 WsOutputSink → 바이너리 WS 프레임 → 클라이언트 → 웹뷰 슬롯"]
+  WSSINK["데몬 FrameOutputSink → 바이너리 WS 프레임 → 클라이언트 → 웹뷰 슬롯"]
 
   SO --> PUMP --> EMIT --> SUB --> WSSINK
 ```
@@ -572,7 +572,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  O1["[데몬] claude stdout → 펌프 → OutputCore.emit → replay 저장 + WsOutputSink"]
+  O1["[데몬] claude stdout → 펌프 → OutputCore.emit → replay 저장 + FrameOutputSink"]
   O2["WS Binary [tag·agentId·epoch·seq·payload] ──▶ [Rust] connection.rs"]
   O3["decode_frame → decide_epoch(낡으면 드롭) → OutputRouter.targets(agentId)=['main','popup']"]
   O4["send_to_windows → 각 창 Channel.send(raw) ← Rust는 여기까지 무상태 중계"]
@@ -633,7 +633,7 @@ flowchart TD
 |-------------|-------------|------|-----------|-----------|
 | `AgentTransport` | 전송 방식(물리) | 출력·입력 손발 | PtyTransport / StdioTransport | API transport(껍데기만) |
 | `AgentBackend` | 백엔드 프로그램(claude 인자·스키마) | spawn 순간 | ClaudeBackend / ShellBackend | codex/gemini variant |
-| `OutputSink` | 출력이 나가는 wire | data plane 출구 | 데몬 WsOutputSink / 테스트 sink | 새 전송 경로 |
+| `OutputSink` | 출력이 나가는 wire | data plane 출구 | 데몬 FrameOutputSink(`agent_conn`) / 테스트 sink | 새 전송 경로 |
 | `StatusSink` | 상태·목록 알림 | control plane 출구 | 데몬 broadcast | — |
 | `ControlChannel` (S17) | 인바운드 제어 엔드포인트 | spawn=provision · terminal=revoke | DaemonControlChannel(MCP) / NoopControlChannel | 새 입구·명령 |
 | (프론트) transport | carrier | 프론트 밖·별개 | TauriTransport 고정 | WsTransport(테스트/직결) |
