@@ -28,6 +28,9 @@ pub mod portfile;
 // ADR-0129: 상태 → wire 팬아웃(`DaemonStatusSink`). 코어 어휘와 wire 어휘를 둘 다 아는 자리라
 //   네트워크 행(`ws`)이 아니라 에이전트 시스템 쪽이다 — 그 파일 헤더가 근거 정본.
 pub mod status_fanout;
+// ADR-0129: 프레임 포트의 테스트 더블(에이전트 행 전용 격리 하네스). 운영 빌드에 없다.
+#[cfg(test)]
+mod test_doubles;
 pub mod ws;
 
 use std::path::PathBuf;
@@ -45,6 +48,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use connection_core::MultiViewState;
+use frame_port::FrameFanout;
 use status_fanout::DaemonStatusSink;
 use ws::{ConnRegistry, KeepaliveConfig};
 
@@ -206,43 +210,84 @@ fn install_panic_hook() {
 
 // ── AgentManager 배선 (src-tauri lib.rs setup 미러) ───────────────────────────────
 
+/// 조립이 한 덩이로 들고 다니는 데몬 배선 — `AgentManager` 와 **그 status sink 이 팬아웃하는 바로 그**
+/// 연결 레지스트리를 묶는다.
+///
+/// ★왜 묶는가(load-bearing — 풀면 조용한 장애가 표현 가능해진다)★: manager 는 자기 안에
+///   `DaemonStatusSink` → `Arc<dyn FrameFanout>` 을 **투명하게** 지고 있어서, 둘을 따로 넘기면
+///   `build_daemon_wiring(A)` 로 만든 manager 를 `run_accept_loop(.., 레지스트리 B)` 에 짝지어 넣는 것이
+///   **컴파일된다**. 그러면 연결은 B 에 등록되고 상태·목록·복원 통지는 A 로 나가 아무 클라에도 닿지
+///   않는다 — 빈 맵은 루프 0회라 **실패 로그조차 없고**, 프론트는 목록 이벤트로 terminal 을 판정하므로
+///   (ADR-0005) 모든 에이전트가 영원히 살아 있는 것으로 보인다. lease/프로필/프리셋 브로드캐스트도
+///   같은 방식으로 사라진다.
+/// ★어긋난 짝이 표현 가능한 자리 — **규칙으로 적는다**★. 경로를 열거하면 매번 한 자리씩 모자란다
+///   (실제로 두 번 그랬다: 처음엔 `manager` 가, 그다음엔 `handlers` 가 열거를 빠져나갔다). 규칙은:
+///   **"레지스트리를 받는 파라미터" 와 "팬아웃을 — 직접이든 전이적이든 — 나르는 파라미터" 를 함께
+///   받는 자리마다** 어긋난 짝이 표현 가능하다. `manager`(→ status sink)도 `handlers`(→ 공장 →
+///   `AgentConnections.fanout`)도 전이적 운반자다. 그래서 **"팬아웃 타입을 파라미터로 안 받으니
+///   안전" 은 판정 기준이 될 수 없다** — 무엇을 나르는지를 봐야 한다.
+///   지금 이 규칙에 걸리는 자리는 **조립 밖의 공개 진입점**(`ws::handle_connection` ·
+///   `AgentConnections::new` · `ConnectionCore::new`)과 ws 테스트 하네스이고, **조립 안에는 없다** —
+///   그게 이 struct 의 존재 이유다. 이 struct 를 손으로 조립해 남의 레지스트리를 끼우는 것도 한 모듈
+///   안이라 타입으로 못 막는다.
+///   ★이 괄호는 목록이 아니라 예시다★: 새 운반자가 생기면 여기 덧붙는지로 판정하지 말고 **위 규칙으로**
+///   판정할 것. 목록으로 읽는 습관이 위 두 번의 누락을 만들었다.
+/// ★그 공개 진입점을 여기서 고치지 않는 이유★: `handle_connection` 은 레지스트리가 정당히 필요하고
+///   **공장이 어떻게 조립됐는지는 알아선 안 된다** — 레지스트리에서 공장을 파생시키면 층이 뒤집힌다.
+///   정공법은 슬라이스 3의 투영(`run_accept_loop` 파생 지점 주석)이다: 팬아웃을 레지스트리에서만 얻게
+///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `handle_connection` 도 포함.
+// ADR-0129
+struct DaemonWiring {
+    manager: Arc<AgentManager>,
+    /// 연결이 등록되는 맵. `manager` 안의 status sink 가 팬아웃하는 그 맵과 **같은 것**이다
+    /// (`ConnRegistry` 는 내부가 Arc — clone 이 같은 맵을 본다).
+    registry: ConnRegistry,
+}
+
 /// src-tauri 의 setup 블록과 동일한 방식으로 AgentManager 를 조립한다(파일 기반 store).
 /// 차이: StatusSink 가 TauriStatusSink 대신 DaemonStatusSink(연결된 WS 클라이언트에 push).
-/// `registry` 는 호출자가 만들어 주입한다 — DaemonStatusSink 와 accept loop 가 같은 인스턴스를
-/// 공유해야 status 브로드캐스트 대상(전 연결 conn_tx)이 일치한다.
-fn build_manager(
+///
+/// ★manager 만이 아니라 연결 레지스트리까지 **조립이 직접 만들어** 함께 돌려준다★(실제 생성은 아래
+/// `build_daemon_wiring_with_store` 안 — 이 함수는 store 만 골라 위임한다). 호출자가 레지스트리를 따로
+/// 만들어 넘기면 위 `DaemonWiring` 주석의 짝 어긋남이 되살아나므로, 운영 조립에서 `ConnRegistry` 를
+/// 생성하는 코드는 그 한 곳으로 몰아 뒀다.
+fn build_daemon_wiring(
     data_dir: &std::path::Path,
-    registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
-) -> Arc<AgentManager> {
+) -> DaemonWiring {
     // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
     // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
     let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
     let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
-    build_manager_with_store(
+    build_daemon_wiring_with_store(
         profile_store,
         preset_store,
-        registry,
         control,
         flush_tx,
         idle_coalescer,
     )
 }
 
-/// build_manager 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리할 수
-/// 있게 store 를 인자로 받는다(운영 경로는 위 build_manager 가 File{Profile,Preset}Store 를 넘김).
+/// build_daemon_wiring 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리할 수
+/// 있게 store 를 인자로 받는다(운영 경로는 위 build_daemon_wiring 이 File{Profile,Preset}Store 를 넘김).
 /// 배선 로직(status_sink/profiles/presets/tracker)은 운영과 동일 — 회귀 없음.
 /// `control`(ADR-0086): 제어 채널 seam — 운영은 DaemonControlChannel, 제어 채널 미사용 테스트는 Noop.
-fn build_manager_with_store(
+fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
     preset_store: Arc<dyn PresetStore>,
-    registry: ConnRegistry,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
-) -> Arc<AgentManager> {
+) -> DaemonWiring {
+    // ADR-0129: 연결 레지스트리와 그 팬아웃 면(面)을 **여기서** 만든다 — status sink 가 무는 맵과
+    //   accept loop 가 등록하는 맵이 애초에 같은 값이고, 둘은 아래 `DaemonWiring` 으로 묶여 나간다.
+    //   HEAD 는 concrete `ConnRegistry` 를 받아 그 불일치가 타입상 불가능했는데, 포트화(dyn)가 그 보장을
+    //   산문으로 격하시키지 않게 조립을 이 한 자리로 모은 것이다(ADR-0129 결정 3 — 조립 행만 두 행을
+    //   다 안다).
+    let registry = ConnRegistry::new();
+    let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     // ADR-0104(C1): status sink 를 MessagingFlushSink 로 감싼다 — 로스터 등장/epoch bump 를 데몬측에서
     //   diff 해 파킹 flush 를 건다(코어 seam 무변경). 감싼 DaemonStatusSink 가 프론트 broadcast 를 그대로
     //   수행하고, wrapper 는 그 전에 flush 대상을 채널로 flush worker 에 넘긴다(finding 5 — 콜백 blocking
@@ -250,7 +295,7 @@ fn build_manager_with_store(
     //   ADR-0113: 같은 wrapper 가 코어의 턴 종료 push(`StatusSink::turn_ended`)를 flush 도어벨로 중계한다 —
     //   그래서 flush 레인과 **같은 Idle coalescer** 를 공유한다(잉여 통지 유계화).
     let status_sink = Arc::new(messaging_host::MessagingFlushSink::new(
-        DaemonStatusSink::new(registry),
+        DaemonStatusSink::new(fanout),
         flush_tx,
         idle_coalescer,
     ));
@@ -269,13 +314,14 @@ fn build_manager_with_store(
     tracker.start();
 
     // ADR-0086: 제어 채널 seam 을 주입해 spawn=provision / terminal=revoke 인과를 코어에 잇는다.
-    Arc::new(AgentManager::new_with_control(
+    let manager = Arc::new(AgentManager::new_with_control(
         status_sink,
         profiles,
         presets,
         tracker,
         control,
-    ))
+    ));
+    DaemonWiring { manager, registry }
 }
 
 // ── accept loop (main + 테스트 공유) ──────────────────────────────────────────────
@@ -289,8 +335,9 @@ fn build_manager_with_store(
 #[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
     listener: TcpListener,
-    manager: Arc<AgentManager>,
-    registry: ConnRegistry,
+    // ADR-0129: manager 와 연결 레지스트리를 **한 덩이로** 받는다 — 따로 받으면 남의 레지스트리를 짝지어
+    //   넣는 것이 컴파일된다(왜 그게 조용한 장애인지는 `DaemonWiring` 주석).
+    wiring: DaemonWiring,
     multiview: MultiViewState,
     // ADR-0096: 봉투 포맷 전역 상태 거처(제어 채널 레지스트리) — 연결마다 handle_connection 에 넘겨
     //   SetEnvelopeFormat dispatch 가 쓰게 한다. handle_send(MCP/CLI)와 같은 Arc(전역 상태 하나).
@@ -307,11 +354,37 @@ async fn run_accept_loop(
     // ADR-0129: 에이전트 시스템 배선을 여기서 **한 번** 묶어 프레임 포트 뒤로 넘긴다 — 그래서
     //   `handle_connection` 은 manager/multiview/control_registry/messaging 슬롯/shutdown 신호를
     //   타입으로도 모른다. 연결마다 이 공장이 `ConnectionCore` + per-conn 상태를 조립한다.
+    //
+    // ★팬아웃 포트를 인자로 받지 않고 여기서 뽑는 이유★: 아래 accept 갈래가 등록하는 **그 값**에서
+    //   뽑으므로 "브로드캐스트 대상 ≠ 등록 대상" 을 이 함수 안에서는 쓸 수가 없다.
+    // ★기계적으로 확인 가능한 두 사실★: ① **파라미터 타입으로** 레지스트리와 팬아웃을 둘 다 받는 함수가
+    //   crate 에 없다(두 집합이 서로소 — 레지스트리 쪽은 `handle_connection` 과 테스트 하네스, 팬아웃 쪽은
+    //   `AgentConnections::new`·`ConnectionCore::new`·`DaemonStatusSink::new`) ② 조립(이 파일)에서
+    //   만들어지는 `Arc<dyn FrameFanout>` 은 전부 그 함수가 이미 들고 있는 레지스트리에서 제자리 생성된다
+    //   (생성 지점 둘 = `build_daemon_wiring_with_store` 와 이 자리. 테스트는 레지스트리 없이 기록용
+    //   더블을 꽂으므로 ② 밖이고, 운영 경로엔 없다).
+    // ★①② 를 도달 가능성으로 읽으면 거짓이다★: 둘은 **파라미터 타입**을 훑는 문장이고 전이적 운반자
+    //   (manager·공장)를 덮지 않는다. 어긋난 짝의 실제 판정 규칙과, 조립 밖에서 여전히 표현 가능한
+    //   자리는 `DaemonWiring` 주석에 있다.
+    // ★다음 두 문장은 둘 다 거짓이니 여기서 인용하지 말 것★(둘 다 디렉토리 범위 grep 을 crate 전체로
+    //   일반화해 나온 것이고, 두 번 다 전이적 운반자를 가렸다):
+    //   · "팬아웃이 어느 시그니처에도 없다" — 에이전트 행 시그니처에는 있다(위 ① 괄호).
+    //   · "레지스트리를 파라미터로 받는 함수가 없다" — `ws::handle_connection` 이 받는다. ① 은 **둘 다**
+    //     받는 함수가 없다는 뜻이지 한쪽도 없다는 뜻이 아니다.
+    // ★이 파생은 과도기 모양이지 종착지가 아니다★: 분리(ADR-0129 결정 3) 후 이 루프는 네트워크 crate 의
+    //   것이 되어 `Arc<dyn ConnectionHandlerFactory>` 하나만 받고, 공장 조립은 얇은 조립 바이너리로
+    //   옮겨간다 — 그때 이 함수는 팬아웃을 아예 보지 않는다. 다만 **그 바이너리는 두 실물을 다 들게 되어
+    //   짝 어긋남이 crate 경계에서 되살아난다**. 그때의 정공법은 파생을 또 베끼거나 인자 2개로 돌아가는
+    //   것이 아니라, 네트워크 crate 가 투영을 직접 내주는 것이다 —
+    //   `impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`. 그러면 팬아웃은 **레지스트리
+    //   에서만** 얻을 수 있고 독립 생성이 불가능해진다(슬라이스 3에서 이걸 할 것).
+    let DaemonWiring { manager, registry } = wiring;
+    let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
             multiview,
-            registry.clone(),
+            fanout,
             control_registry,
             messaging_slot,
             shutdown_tx,
@@ -449,8 +522,6 @@ pub async fn run() -> Result<(), i32> {
     //   공유하는 단일 출처. daemon.json 의 WS 토큰과는 완전히 다른 관심사(혼용 금지 — ADR-0086 §맥락).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
 
-    // 5) 연결 레지스트리(status 브로드캐스트용) — DaemonStatusSink 와 accept loop 가 공유한다.
-    let registry = ConnRegistry::new();
     // 5b) 멀티뷰어 협상 상태(resize smallest + 입력 lease) — 전 연결이 공유한다.
     let multiview = MultiViewState::new();
 
@@ -517,7 +588,8 @@ pub async fn run() -> Result<(), i32> {
             (channel, Some(handle))
         }
         Err(e) => {
-            // fail-closed: 이미 만든 자원 정리(listener·registry 는 이 스코프 drop 로 회수) 후 중단.
+            // fail-closed: 이미 만든 자원 정리(listener 는 이 스코프 drop 로 회수) 후 중단.
+            //   ★연결 레지스트리는 아직 없다★: 그건 아래 6단계 `build_daemon_wiring` 이 만든다(ADR-0129).
             //   daemon.json 은 아직 안 썼으므로(아래 8단계) 남는 stale portfile 도 없다.
             tracing::error!(
                 "MCP 서버 기동 실패 — 제어 채널 없이는 데몬을 띄우지 않는다(fail-closed): {e}"
@@ -529,13 +601,10 @@ pub async fn run() -> Result<(), i32> {
 
     // 6) AgentManager 배선(src-tauri 미러). status_sink = MessagingFlushSink(DaemonStatusSink) — C1
     //    파킹 flush 트리거를 로스터 이벤트에 얹는다(messaging_slot 늦은 주입).
-    let manager = build_manager(
-        &data_dir,
-        registry.clone(),
-        control,
-        flush_tx.clone(),
-        idle_coalescer.clone(),
-    );
+    let wiring = build_daemon_wiring(&data_dir, control, flush_tx.clone(), idle_coalescer.clone());
+    // 아래 배선들이 쓰는 manager 핸들(같은 Arc). 레지스트리는 `wiring` 이 계속 들고 있다가 accept loop 로
+    //   함께 넘어간다 — 여기서 풀어 두면 짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
+    let manager = wiring.manager.clone();
     // ADR-0086 스텝 2: manager 를 슬롯에 주입 → 이제 send_message/`/control/send` 가 relay 를 수행할 수
     //   있다(에이전트 spawn·send 이전에 완료). accept loop 이후의 어떤 send 도 채워진 슬롯을 본다.
     manager_slot.set(manager.clone());
@@ -680,8 +749,7 @@ pub async fn run() -> Result<(), i32> {
     tracing::info!("accept loop 시작(WS 핸들링 활성)");
     run_accept_loop(
         listener,
-        manager.clone(),
-        registry,
+        wiring,
         multiview,
         control_registry, // ADR-0096: 봉투 포맷 전역 상태 거처(handle_send 와 같은 Arc)
         messaging_slot.clone(), // ADR-0116: DeleteProfile 삭제 정리 훅(늦은 주입 슬롯 — 이미 채워져 있다)
@@ -789,7 +857,7 @@ impl TestServerHandle {
 /// in-process 테스트 서버 기동. 127.0.0.1:0 bind → 실제 포트 + 알려진 토큰 + 실제
 /// AgentManager(in-memory store) + DaemonStatusSink 를 배선하고 accept loop 를 tokio task 로 띄운다.
 ///
-/// ★main 과의 공유★: accept loop 본체(`run_accept_loop`)와 manager 배선(`build_manager_with_store`)을
+/// ★main 과의 공유★: accept loop 본체(`run_accept_loop`)와 데몬 배선(`build_daemon_wiring_with_store`)을
 /// 운영 경로와 같은 함수로 호출한다 — 테스트가 검증하는 코드 = 실제 도는 코드.
 pub async fn start_test_server() -> std::io::Result<TestServerHandle> {
     // in-memory store — 디스크/Embedded agents.json 과 격리. ProfileStore trait 구현체.
@@ -827,7 +895,6 @@ async fn start_test_server_inner(
         generate_token().map_err(|e| std::io::Error::other(format!("token gen failed: {e}")))?;
     let expected_token = Arc::new(token.clone());
 
-    let registry = ConnRegistry::new();
     let multiview = MultiViewState::new();
     // ADR-0096: WS dispatch(SetEnvelopeFormat)가 쓰는 봉투 포맷 전역 상태 거처. 테스트 서버는 MCP 서버·
     //   제어 채널을 배선하지 않으므로(아래 Noop) accept loop 전용 standalone registry 를 새로 만든다 —
@@ -846,14 +913,15 @@ async fn start_test_server_inner(
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     // C2 리뷰 fix 10: 운영과 동일하게 Idle coalescer 를 sink/flush 레인이 공유한다.
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
-    let manager = build_manager_with_store(
+    // 운영 run() 과 같은 모양 — manager + 연결 레지스트리를 한 덩이로 받는다(ADR-0129 `DaemonWiring`).
+    let wiring = build_daemon_wiring_with_store(
         store,
         preset_store,
-        registry.clone(),
         control,
         flush_tx.clone(),
         idle_coalescer.clone(),
     );
+    let manager = wiring.manager.clone();
     // C2: idle 게이트(운영 run() 과 동일 배선). WS 테스트는 메시징을 검증하지 않지만, 배선을 운영과
     //   동일하게 유지해 "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
@@ -884,13 +952,11 @@ async fn start_test_server_inner(
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let accept_handle = {
-        let manager = manager.clone();
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
             run_accept_loop(
                 listener,
-                manager,
-                registry,
+                wiring,
                 multiview,
                 control_registry, // ADR-0096: standalone 봉투 포맷 상태 거처(테스트 accept loop 전용)
                 messaging_slot, // ADR-0116: DeleteProfile 삭제 정리 훅(테스트 조립도 같은 슬롯을 공유)

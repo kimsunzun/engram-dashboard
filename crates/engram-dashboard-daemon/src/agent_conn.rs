@@ -30,9 +30,8 @@ use crate::connection_core::{
     OutboundSink as CoreOutboundSink, SinkError as CoreSinkError,
 };
 use crate::frame_port::{
-    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameSink,
+    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
 };
-use crate::ws::ConnRegistry;
 
 // ── 출력 평면 sink(연결당 구독 1개, pump 스레드에서 호출) ─────────────────────────
 
@@ -289,18 +288,21 @@ impl ConnectionHandler for AgentConnection {
         // (b) 입력 lease 자동 해제: 보유자가 끊기면 다른 뷰어가 영영 막히면 안 된다(좀비 lock 방지).
         //     해제된 agent 는 이제 lease 가 비었으니 InputLeaseChanged{held:false} 를 전 연결에 통보.
         for agent_id in self.core.multiview().release_all_for_conn(conn_id) {
-            broadcast_lease_changed(self.core.registry(), agent_id, false);
+            broadcast_lease_changed(self.core.fanout(), agent_id, false);
         }
     }
 }
 
 /// 연결마다 `AgentConnection` 을 조립하는 공장. 전 연결이 공유하는 실물(manager·multiview·
-/// registry·control_registry·messaging 슬롯·shutdown 신호)을 한 번만 들고, 소켓이 설 때마다
+/// 팬아웃 포트·control_registry·messaging 슬롯·shutdown 신호)을 한 번만 들고, 소켓이 설 때마다
 /// 그것들로 연결 1개짜리 `ConnectionCore` 를 묶는다.
 pub struct AgentConnections {
     manager: Arc<AgentManager>,
     multiview: MultiViewState,
-    registry: ConnRegistry,
+    /// 전-연결 브로드캐스트 출구(ADR-0129). 네트워크 행의 연결 레지스트리가 조립 시점에 꽂히지만,
+    ///   이 행이 표현할 수 있는 것은 "전부에게 이 text" 뿐이다.
+    // ADR-0129
+    fanout: Arc<dyn FrameFanout>,
     /// ADR-0096: 봉투 포맷 전역 상태 거처 — SetEnvelopeFormat dispatch 가 쓴다. handle_send(MCP/CLI)가
     ///   relay 마다 읽는 그 **같은 Arc**(전역 상태 하나).
     // ADR-0096
@@ -317,7 +319,7 @@ impl AgentConnections {
     pub fn new(
         manager: Arc<AgentManager>,
         multiview: MultiViewState,
-        registry: ConnRegistry,
+        fanout: Arc<dyn FrameFanout>,
         control_registry: Arc<crate::control::registry::ControlRegistry>,
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         shutdown_tx: watch::Sender<bool>,
@@ -325,7 +327,7 @@ impl AgentConnections {
         Self {
             manager,
             multiview,
-            registry,
+            fanout,
             control_registry,
             messaging,
             shutdown_tx,
@@ -335,12 +337,12 @@ impl AgentConnections {
 
 impl ConnectionHandlerFactory for AgentConnections {
     fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler> {
-        // ConnectionCore 는 연결마다 새로 묶는다 — 안에 든 manager/multiview/registry/shutdown_tx 는
+        // ConnectionCore 는 연결마다 새로 묶는다 — 안에 든 manager/multiview/fanout/shutdown_tx 는
         //   전 연결이 공유하나, dispatch 호출 경로를 연결 단위로 캡슐화한다.
         let core = Arc::new(ConnectionCore::new(
             self.manager.clone(),
             self.multiview.clone(),
-            self.registry.clone(),
+            self.fanout.clone(),
             self.control_registry.clone(),
             self.messaging.clone(),
             self.shutdown_tx.clone(),
@@ -362,19 +364,20 @@ impl ConnectionHandlerFactory for AgentConnections {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ws::ConnFrameSink;
-    use std::time::Duration;
-    use tokio::sync::{mpsc, Notify};
+    use crate::test_doubles::FakeFrameSink;
+    use tokio::sync::mpsc;
 
-    fn frame_sink(tx: mpsc::Sender<Frame>, close: Arc<Notify>) -> Arc<dyn FrameSink> {
-        Arc::new(ConnFrameSink::new(tx, close))
+    /// 프레임 출구 더블. 네트워크 행 실물(`ws::ConnFrameSink`)을 쓰지 않는 이유는 이 행이 그 타입을
+    /// 알면 crate 가 갈릴 때 dev-dependency 로 되살아나기 때문이다(ADR-0129).
+    fn frame_sink(tx: mpsc::Sender<Frame>) -> Arc<dyn FrameSink> {
+        Arc::new(FakeFrameSink::new(tx))
     }
 
     // ── 1. FrameOutputSink 가 conn_tx 에 binary frame 을 넣는지 ─────────────────
     #[tokio::test]
     async fn frame_output_sink_encodes_and_sends_binary() {
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
-        let sink = FrameOutputSink::new(frame_sink(tx, Arc::new(Notify::new())));
+        let sink = FrameOutputSink::new(frame_sink(tx));
         let agent_id = uuid::Uuid::new_v4();
         let data = b"abc";
         let frame = OutputFrame {
@@ -409,7 +412,7 @@ mod tests {
         };
 
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
-        let sink = FrameOutputSink::new(frame_sink(tx, Arc::new(Notify::new())));
+        let sink = FrameOutputSink::new(frame_sink(tx));
         let agent_id = uuid::Uuid::new_v4();
         // 합성 구조화 이벤트(B3 미배선이라 런타임 생산자 없음 — 여기선 직접 만들어 tag1 경로를 태운다).
         let ev = CoreOutputEvent::ToolCall {
@@ -454,14 +457,17 @@ mod tests {
         }
     }
 
-    // ── 2. full → SinkError + close_signal notify + replay_dropped ─────────────
+    // ── 2. full → SinkError + replay_dropped ──────────────────────────────────
     #[tokio::test]
-    async fn frame_output_sink_full_returns_error_and_notifies_close_signal() {
-        // cap 1 채널을 가득 채운 뒤: send 가 Err 를 반환하고, 큐가 막혀 있어도 out-of-band
-        // close_signal 이 발동(write_task 를 깨움)하며, replay_dropped 가 set 되는지.
+    async fn frame_output_sink_full_returns_error_and_marks_replay_dropped() {
+        // cap 1 채널을 가득 채운 뒤: send 가 Err 를 반환하고 replay_dropped 가 set 되는지.
+        // ★큐 포화의 out-of-band 종료 신호는 여기 관심사가 아니다★: 그건 프레임 출구 **구현**의 계약이고,
+        //   그걸 지키는 테스트는 `impl FrameSink for ConnFrameSink` 옆에 있다(★테스트 더블 쪽이 아니다★ —
+        //   더블은 종료 신호를 울리지 않는다). 테스트 함수명 대신 impl 블록을 가리키는 이유는 함수명이
+        //   개명·crate 분리 때 끊긴 참조가 되기 때문. 이 행이 책임지는 것은 `FrameSink` 가 준 Err 를
+        //   SinkError 로 올리고 replay 구간 사후 보정 플래그를 세우는 것까지다.
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
-        let close_signal = Arc::new(Notify::new());
-        let sink = FrameOutputSink::new(frame_sink(tx, close_signal.clone()));
+        let sink = FrameOutputSink::new(frame_sink(tx));
         let replay_dropped = sink.replay_dropped_flag();
         let agent_id = uuid::Uuid::new_v4();
         let frame = |seq: u64| OutputFrame {
@@ -474,12 +480,6 @@ mod tests {
         sink.send(frame(0)).expect("first ok");
         // 두 번째는 full → Err.
         assert!(sink.send(frame(1)).is_err(), "full 이면 SinkError");
-
-        // ★out-of-band 종료 신호★: 큐가 full 이어도 close_signal 은 발동해야 한다.
-        //   notified() 가 즉시 깨면 write_task 가 깨어 닫을 수 있다는 의미(M1 핵심 근거).
-        tokio::time::timeout(Duration::from_millis(200), close_signal.notified())
-            .await
-            .expect("close_signal 이 full 에서도 발동해야 함");
 
         // replay 구간 사후 보정용 플래그도 set.
         assert!(
@@ -495,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn frame_outbound_sink_maps_outbound_to_frames() {
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
-        let sink = FrameOutboundSink::new(frame_sink(tx, Arc::new(Notify::new())));
+        let sink = FrameOutboundSink::new(frame_sink(tx));
         sink.enqueue(Outbound::event(AgentEvent::Error {
             request_id: None,
             message: "boom".into(),

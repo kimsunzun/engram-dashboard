@@ -2,20 +2,21 @@
 //!
 //! `AgentManager` 에 주입되는 **전역 `StatusSink`** 하나만 산다. 코어가 동기 스레드에서 밀어 올린
 //! 상태 사실(status_changed / agent_list_updated / restore_result)을 `AgentEvent` JSON 으로 인코딩해
-//! 연결 레지스트리의 **모든** 연결로 논블록 fanout 한다.
+//! 팬아웃 포트(`frame_port::FrameFanout`)로 한 번 밀어 넣는다.
 //!
 //! ★왜 에이전트 시스템 쪽인가(분리 축)★: 이 파일은 코어 어휘(`AgentId`·`AgentStatus`·`AgentInfo`·
 //!   `RestoreReport`)와 wire 어휘(`AgentEvent`)를 **둘 다** 안다 — 네트워크 행이 타입으로도 알아선
-//!   안 되는 것들이다(ADR-0129 결정 1). 네트워크 쪽에 남는 것은 불투명 text 를 받는 팬아웃 표면
-//!   (`ws::ConnRegistry::broadcast_text`)뿐이고, 그 표면의 포트화는 결정 3(얇은 조립)에서 배선된다
+//!   안 되는 것들이다(ADR-0129 결정 1). 반대로 이 파일은 연결이 몇 개인지·누가 등록돼 있는지를
+//!   모른다: 포트 너머로 넘길 수 있는 것은 불투명 text 하나뿐이다
 //!   (ADR-0129 2026-08-04 note — 구멍은 연결당·전-연결 두 모양이다).
 //! ★여기서 정책이 바뀌지 않는다★: terminal 판정·이벤트 합성은 코어 몫이고(ADR-0005 상태 알림 분담)
 //!   이 sink 는 코어가 부른 것을 인코딩해 흘리기만 한다 — 판정하지도, 이벤트를 만들어 내지도 않는다.
 //!   코어가 상태를 **한 갈래로만** 밀어 올리기로 한 구조(ADR-0028 — 기능마다 별도 관측자를 달지 않는다)의
 //!   그 한 갈래 끝이 여기다.
-//! ★"이벤트당 1회 송신" 이 아니다(오독 주의)★: 인코딩은 이벤트당 1회지만 **송신은 등록된 연결 수만큼**
-//!   이다 — `ConnRegistry::broadcast_text` 가 연결마다 try_send 한다. ADR-0028 은 *푸시 갈래가 하나*라는
-//!   결정이지 *전송이 한 번*이라는 보장이 아니다. 느린 연결 하나가 실패해도 나머지는 그대로 나간다.
+//! ★"이벤트당 1회 송신" 이 아니다(오독 주의)★: 이 파일에서의 인코딩·팬아웃 호출은 이벤트당 1회지만
+//!   **실제 송신은 등록된 연결 수만큼**이다 — 포트 구현이 연결마다 try_send 한다. ADR-0028 은 *푸시
+//!   갈래가 하나*라는 결정이지 *전송이 한 번*이라는 보장이 아니다. 느린 연결 하나가 실패해도 나머지는
+//!   그대로 나간다(`FrameFanout` 계약).
 // ADR-0129
 // ADR-0005
 // ADR-0028
@@ -29,22 +30,24 @@ use engram_dashboard_protocol::AgentEvent;
 use crate::connection_core::{
     core_agents_to_wire, core_report_to_wire, core_status_to_wire, event_json,
 };
-use crate::ws::ConnRegistry;
+use crate::frame_port::FrameFanout;
+use std::sync::Arc;
 
 // ── DaemonStatusSink(global) ─────────────────────────────────────────────────────
 
 /// AgentManager 에 주입되는 전역 StatusSink. status_changed/agent_list_updated/restore_result
-/// 를 AgentEvent JSON 으로 직렬화해 레지스트리의 모든 conn_tx 에 try_send(Text) 한다.
+/// 를 AgentEvent JSON 으로 직렬화해 팬아웃 포트로 넘긴다.
 /// (LogStatusSink 대체 — build_manager 가 이걸 주입.)
 ///
-/// ★호출 컨텍스트: pump/manager 의 동기 스레드★ → 절대 block 금지. broadcast_text 가 try_send 만 쓴다.
+/// ★호출 컨텍스트: pump/manager 의 동기 스레드★ → 절대 block 금지. `FrameFanout` 계약이 논블록
+/// 구현을 요구하는 이유가 이 호출 컨텍스트다.
 pub struct DaemonStatusSink {
-    registry: ConnRegistry,
+    fanout: Arc<dyn FrameFanout>,
 }
 
 impl DaemonStatusSink {
-    pub fn new(registry: ConnRegistry) -> Self {
-        Self { registry }
+    pub fn new(fanout: Arc<dyn FrameFanout>) -> Self {
+        Self { fanout }
     }
 }
 
@@ -56,7 +59,7 @@ impl StatusSink for DaemonStatusSink {
             epoch,
         };
         if let Some(text) = event_json(&ev) {
-            self.registry.broadcast_text(text);
+            self.fanout.broadcast_text(text);
         }
     }
 
@@ -65,7 +68,7 @@ impl StatusSink for DaemonStatusSink {
             agents: core_agents_to_wire(agents),
         };
         if let Some(text) = event_json(&ev) {
-            self.registry.broadcast_text(text);
+            self.fanout.broadcast_text(text);
         }
     }
 
@@ -74,7 +77,7 @@ impl StatusSink for DaemonStatusSink {
             report: core_report_to_wire(report),
         };
         if let Some(text) = event_json(&ev) {
-            self.registry.broadcast_text(text);
+            self.fanout.broadcast_text(text);
         }
     }
 }
@@ -82,46 +85,25 @@ impl StatusSink for DaemonStatusSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame_port::Frame;
+    use crate::test_doubles::RecordingFanout;
     use engram_dashboard_core::agent::profile::RestoreOutcome as CoreRestoreOutcome;
     use engram_dashboard_core::agent::types::{
         Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps, SessionCaps,
     };
     use serde_json::json;
-    use tokio::sync::mpsc;
 
-    /// 소켓 없는 격리 하네스 — 연결 n개가 등록된 레지스트리와 각 연결의 수신단.
-    /// (등록 경로는 ws 모듈 private 이라 `register_for_test` 로 심는다 — 그 함수 주석이 근거.)
-    fn registry_with(n: usize) -> (ConnRegistry, Vec<mpsc::Receiver<Frame>>) {
-        let registry = ConnRegistry::new();
-        let mut rxs = Vec::new();
-        for _ in 0..n {
-            let (tx, rx) = mpsc::channel::<Frame>(8);
-            registry.register_for_test(tx);
-            rxs.push(rx);
-        }
-        (registry, rxs)
+    /// 소켓 없는 격리 하네스 — 팬아웃 포트 자리에 기록용 더블을 꽂는다.
+    ///
+    /// ★이 층에서 관측 가능한 것은 "포트로 무엇이 몇 번 나갔나" 가 전부다★: 연결·등록·복제는 포트
+    ///   건너편(`ws::ConnRegistry`)의 개념이라 여기서 보이지 않는다. 그쪽 몫(한 text 를 연결마다 같은
+    ///   바이트로 복제 · 포화한 연결을 건너뛰고 계속)은 `ws` 자기 테스트가 지킨다.
+    fn sink_with_fanout() -> (DaemonStatusSink, Arc<RecordingFanout>) {
+        let fanout = Arc::new(RecordingFanout::new());
+        (DaemonStatusSink::new(fanout.clone()), fanout)
     }
 
-    /// 이 연결이 받은 **유일한** Text 프레임의 원문. 프레임이 0개거나 2개 이상이면 실패 —
-    /// "연결당 정확히 1프레임" 이 이 테스트들의 관심사라 개수를 여기서 못 박는다.
-    /// ★원문(String)을 돌려주는 이유★: 호출자가 연결 간 **바이트 동일성**까지 볼 수 있게(파싱하면
-    ///   그 정보가 사라진다 — 연결마다 다르게 만들어 보내는 회귀를 못 잡는다).
-    fn sole_text(rx: &mut mpsc::Receiver<Frame>) -> String {
-        let first = rx.try_recv().expect("등록된 연결은 이벤트를 받아야");
-        let text = match first {
-            Frame::Text(s) => s,
-            other => panic!("status fanout 은 Text 프레임이어야: {other:?}"),
-        };
-        assert!(
-            rx.try_recv().is_err(),
-            "이벤트 1건은 연결당 정확히 1프레임이어야(중복 송신 회귀)"
-        );
-        text
-    }
-
-    fn sole_event(rx: &mut mpsc::Receiver<Frame>) -> serde_json::Value {
-        serde_json::from_str(&sole_text(rx)).expect("wire 는 JSON")
+    fn sole_event(fanout: &RecordingFanout) -> serde_json::Value {
+        serde_json::from_str(&fanout.sole_text()).expect("wire 는 JSON")
     }
 
     /// 테스트용 core AgentInfo — 로스터 인코딩 경로에 태울 최소 스냅샷(상태는 인자로).
@@ -199,27 +181,24 @@ mod tests {
     }
 
     #[test]
-    fn a_status_change_reaches_every_connection_as_one_identical_envelope() {
-        // ★이 sink 의 계약★: 코어 사실 1건 → wire 봉투 1개 → **등록된 연결 전부**에 같은 바이트로.
+    fn a_status_change_goes_out_as_exactly_one_whole_envelope() {
+        // ★이 sink 의 계약★: 코어 사실 1건 → wire 봉투 1개 → 팬아웃 포트로 **정확히 1회**.
         //   ★봉투 **전체**와 비교한다★: 고른 필드만 보면 필드 추가·미검사 필드 오염이 통과한다.
         //   ★payload 를 지닌 상태(`Exited{code}`)를 쓰는 이유★: 유닛 variant 만 태우면 상태 payload 를
         //     떨어뜨리는 회귀가 안 잡힌다.
-        //   ★"인코딩 1회" 는 단언하지 않는다(관측 불가 — 연결마다 다시 인코딩해도 결과 문자열이 같다)★.
-        //     대신 관측 가능한 것을 못 박는다: 연결들이 받은 원문이 **서로 바이트 동일**하다.
-        let (registry, mut rxs) = registry_with(3);
-        let sink = DaemonStatusSink::new(registry);
+        //   ★"연결마다 같은 바이트" 는 여기서 단언할 수 없다(관측 불가)★: 이 sink 는 포트에 text 를 하나
+        //     넘길 뿐이고 연결이 몇 개인지 모른다. 그 복제의 바이트 동일성은 **포트 구현측 계약**이고,
+        //     그걸 지키는 테스트는 `impl FrameFanout for ConnRegistry` 옆에 있다.
+        //     ★테스트 더블 쪽을 보면 안 된다★: 더블도 같은 trait 을 구현하지만 **복제를 하지 않는다**
+        //     (기록만) — 확인하려는 성질이 거기엔 없다. 테스트 함수명 대신 impl 블록을 가리키는 이유는
+        //     함수명은 개명·crate 분리 때 끊긴 참조가 되고 아무것도 그 끊김을 잡아주지 않기 때문.
+        let (sink, fanout) = sink_with_fanout();
         let id = AgentId::new_v4();
 
         sink.status_changed(id, CoreStatus::Exited { code: Some(3) }, 7);
 
-        let texts: Vec<String> = rxs.iter_mut().map(sole_text).collect();
-        assert!(
-            texts.windows(2).all(|w| w[0] == w[1]),
-            "연결마다 다른 바이트가 나갔다(단일 인코딩 결과를 그대로 fanout 해야): {texts:?}"
-        );
-        let got: serde_json::Value = serde_json::from_str(&texts[0]).expect("wire 는 JSON");
         assert_eq!(
-            got,
+            sole_event(&fanout),
             json!({
                 "StatusChanged": {
                     "agent_id": id.to_string(),
@@ -238,8 +217,7 @@ mod tests {
         //   프론트는 status_changed 가 아니라 이 목록으로 terminal 을 판정한다). 그래서 fixture 에
         //   **비-Running 을 섞는다** — 여기에 필터가 생기면 프론트가 종료를 영영 못 본다.
         // ★배열 전체를 비교한다★: 길이+몇 필드만 보면 잘림·필드 오염이 통과한다.
-        let (registry, mut rxs) = registry_with(1);
-        let sink = DaemonStatusSink::new(registry);
+        let (sink, fanout) = sink_with_fanout();
         let (a, b, c) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
 
         sink.agent_list_updated(vec![
@@ -256,7 +234,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            sole_event(&mut rxs[0]),
+            sole_event(&fanout),
             json!({
                 "AgentListUpdated": {
                     "agents": [
@@ -308,8 +286,7 @@ mod tests {
         ];
 
         for (idx, (outcome, expected_outcome)) in cases.into_iter().enumerate() {
-            let (registry, mut rxs) = registry_with(1);
-            let sink = DaemonStatusSink::new(registry);
+            let (sink, fanout) = sink_with_fanout();
             let id = AgentId::new_v4();
             let epoch = idx as u32;
 
@@ -320,7 +297,7 @@ mod tests {
             });
 
             assert_eq!(
-                sole_event(&mut rxs[0]),
+                sole_event(&fanout),
                 json!({
                     "RestoreResult": {
                         "report": {
@@ -331,87 +308,6 @@ mod tests {
                     }
                 })
             );
-        }
-    }
-
-    #[test]
-    fn a_full_connection_does_not_stop_the_others() {
-        // ★fanout 은 연결 하나의 포화에 걸리지 않는다★: 느린 소비자 처리는 네트워크 행(try_send 실패 시
-        //   경고 + 그 연결 종료 신호)의 몫이고, 이 sink 는 나머지 연결 배달을 계속해야 한다. 막히면
-        //   슬로우 클라 하나가 전 클라의 상태 갱신을 세운다.
-        //
-        // ★반복하는 이유 = 매 회차 HashMap 순회 순서를 다시 뽑으려는 것(패딩 아님)★: `broadcast_text` 는
-        //   레지스트리 맵을 순회해 Vec 으로 뜨므로 방문 순서가 곧 배달 순서다.
-        //   - **정상 코드는 순서와 무관하게 통과한다** → 이 루프가 위양성(flake)을 만들 수는 없다. 반복이
-        //     바꾸는 것은 오직 **탐지력**이다.
-        //   - 잡으려는 회귀 = "첫 try_send 실패에서 fanout 중단". 그 회귀는 포화 연결이 **마지막에** 방문된
-        //     회차에서는 멀쩡한 연결들이 이미 다 받은 뒤라 살아남는다(S18.17 이 기록한 "포화 경로를 한 번도
-        //     안 밟고 통과" 와 같은 부류). 그래서 회차마다 **새 레지스트리**로 순서를 다시 뽑는다.
-        //     ※ 같은 레지스트리를 재사용하면 순서가 고정돼 반복이 무의미하다(그래서 루프 **안**에서 만든다).
-        // ★탐지력은 경험적이지 증명이 아니다(정직 명시)★: std 는 `RandomState` 가 인스턴스마다 다른 씨앗을
-        //   쓴다고만 하고, **인스턴스 간 순서 독립성도 특정 분포도 보장하지 않는다**. 그러니 "K회면 놓칠 확률
-        //   2^-K" 같은 계산을 여기 적을 근거가 없다 — 그건 관측을 보장으로 격상하는 것이다.
-        //   ★실측(2026-08-04 · 이 형태 = 포화 1 + 멀쩡 2)★: 위 회귀를 심고 **10회 시도 전부** 잡혔다.
-        //   잡히는 회차(round 0~1)도, 굶은 연결(ok0/ok1)도 실행마다 달랐다 — 순서가 실제로 매 회차 다시
-        //   뽑힌다는 증거. **보장이 아니라 측정치다.**
-        // ★결정적 탐지를 원하면 순회 순서를 통제해야 한다★ = `ConnRegistry` 의 맵 타입 교체(정렬 맵 등).
-        //   이사 슬라이스(ADR-0129)의 범위 밖이라 하지 않는다 — 이게 **하드 보장**이어야 할 날이 오면 그때
-        //   그 교체가 정공법이고, 그 전까지 K 는 탐지력 손잡이일 뿐이다(임계값 튜닝 대상 아님 — ADR-0038).
-        // ★멀쩡한 연결을 2개 두는 이유★: 포화가 **가운데**에 오는 배치까지 덮는다. 회귀가 한 회차를
-        //   살아남으려면 포화 연결이 **맨 뒤**에 와야 하는데, 멀쩡한 연결이 1개면 "뒤" 가 두 자리 중
-        //   하나이고 2개면 세 자리 중 하나다 — 즉 회차당 생존 여지가 좁아진다(분포 보장이 없으므로
-        //   이것도 확률 계산이 아니라 **자리 수 논증**이다).
-        const K: usize = 20;
-        for round in 0..K {
-            let registry = ConnRegistry::new();
-            let (full_tx, mut full_rx) = mpsc::channel::<Frame>(1);
-            full_tx
-                .try_send(Frame::Text("선점".into()))
-                .expect("cap 1 을 미리 채운다");
-            registry.register_for_test(full_tx);
-            let mut oks: Vec<mpsc::Receiver<Frame>> = (0..2)
-                .map(|_| {
-                    let (ok_tx, ok_rx) = mpsc::channel::<Frame>(8);
-                    registry.register_for_test(ok_tx);
-                    ok_rx
-                })
-                .collect();
-
-            let sink = DaemonStatusSink::new(registry);
-            sink.status_changed(AgentId::new_v4(), CoreStatus::Killed, 0);
-
-            // 포화 연결엔 새 이벤트가 못 들어갔다(선점 프레임만 남아 있다).
-            assert!(
-                matches!(full_rx.try_recv(), Ok(Frame::Text(s)) if s == "선점"),
-                "round {round}: 포화 연결엔 선점 프레임만 있어야"
-            );
-            assert!(
-                full_rx.try_recv().is_err(),
-                "round {round}: 포화 연결은 이번 건을 못 받는다"
-            );
-            // 그래도 멀쩡한 연결은 **전부** 받는다 — 포화 연결의 방문 위치와 무관하게.
-            // ★여기서 `sole_text` 를 안 쓰는 이유★: 이 테스트가 잡는 회귀(첫 포화에서 fanout 중단)는
-            //   "아무것도 못 받음" 으로 나타나므로, 그 갈래에 **회차·연결 번호와 원인**을 담은 메시지를
-            //   붙인다(공용 헬퍼의 일반 메시지로는 어느 회차가 걸렸는지 안 보인다).
-            for (n, ok_rx) in oks.iter_mut().enumerate() {
-                let v = match ok_rx.try_recv() {
-                    Ok(Frame::Text(s)) => {
-                        serde_json::from_str::<serde_json::Value>(&s).expect("wire 는 JSON")
-                    }
-                    other => panic!(
-                        "round {round}/ok{n}: 멀쩡한 연결이 이벤트를 못 받았다(fanout 이 첫 실패에서 멈춘 회귀): {other:?}"
-                    ),
-                };
-                assert!(
-                    ok_rx.try_recv().is_err(),
-                    "round {round}/ok{n}: 연결당 정확히 1프레임"
-                );
-                assert_eq!(
-                    v["StatusChanged"]["status"],
-                    json!({ "type": "Killed" }),
-                    "round {round}/ok{n}: 한 연결의 포화가 다른 연결의 fanout 을 막지 않는다"
-                );
-            }
         }
     }
 }
