@@ -24,7 +24,7 @@ if (import.meta.env.DEV) {
   (window as unknown as { __engram?: unknown }).__engram = {
     theme: useThemeStore,
     agent: useAgentStore,
-    chatStyle: useChatStyleStore, // ADR-0051 — 채팅 스타일 store 핸들(값 스냅샷·액션 직접 조회)
+    chatStyle: useChatStyleStore, // ADR-0051
   };
 }
 

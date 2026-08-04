@@ -5,25 +5,20 @@
 //   부팅 레이스로 managed state 가 아직 준비 전인 순간) 그걸로 끝이고 화면이 로딩 플레이스홀더에 영구
 //   고착된다. LayoutState 는 이제 pre-build manage 로 레이스가 구조적으로 사라졌지만(근본 수정), pull 은
 //   여전히 one-shot 이면 안 된다 — 다른 조기 transient(DaemonClient 등 런타임 의존 상태의 순간적 미준비,
-//   IPC 초기화 지연)에도 스스로 회복해야 한다. 이 헬퍼가 "몇 번 재시도 후 성공하면 채우고, 다 실패하면
-//   조용히 삼키지 말고 신호를 남긴다"를 두 부팅 pull 호출부(WindowLayout·initMainWindowFromBackend)에서
-//   공유하게 한다(로직 중복 0).
+//   IPC 초기화 지연)에도 스스로 회복해야 한다.
 
-/** 재시도 정책. 기본값은 부팅 pull 에 맞춘 보수적 값(짧고 몇 번만 — 부팅 UX 를 오래 막지 않음). */
+/** 기본값은 부팅 pull 에 맞춘 보수적 값(짧고 몇 번만 — 부팅 UX 를 오래 막지 않음). */
 export interface RetryOptions {
-  /** 총 시도 횟수(첫 시도 포함). 기본 4 = 첫 시도 + 재시도 3회. */
   attempts?: number
-  /** 첫 재시도 전 대기(ms). 이후 시도마다 factor 배로 증가(backoff). 기본 150ms. */
   baseDelayMs?: number
-  /** backoff 배수. 기본 2 → 150·300·600ms 로 벌어진다(총 대기 ~1s, 부팅 체감 상한). */
+  /** 기본 2 → 총 대기 ~1s(부팅 체감 상한). */
   factor?: number
-  /** 각 실패 후(마지막 실패 제외) 호출 — 진단 로깅용(선택). attempt=이번 실패 시도(1-base). */
   onRetry?: (err: unknown, attempt: number) => void
-  /** 취소 신호(선택). true 를 반환하면 다음 시도 전 즉시 중단(unmount 가드용). */
+  /** unmount 가드용. */
   isCancelled?: () => boolean
 }
 
-/** isCancelled 로 중단됐을 때 던지는 sentinel(정상 실패와 구분 — 호출부가 조용히 무시). */
+/** 정상 실패와 구분하는 sentinel — 호출부가 조용히 무시한다. */
 export class RetryCancelledError extends Error {
   constructor() {
     super('retry cancelled')
@@ -34,9 +29,7 @@ export class RetryCancelledError extends Error {
 const sleep = (ms: number): Promise<void> => new Promise(res => setTimeout(res, ms))
 
 /**
- * `fn` 을 유계 재시도한다. 성공하면 그 값을 반환하고, 모든 시도가 실패하면 *마지막* 에러를 throw 한다
- * (조용히 삼키지 않음 — 호출부가 최종 실패를 표면화하도록). isCancelled 가 중간에 true 면
- * RetryCancelledError 를 throw 한다(정상 실패와 구분).
+ * 모든 시도가 실패하면 마지막 에러를 throw 한다 — 조용히 삼키지 않아야 호출부가 최종 실패를 표면화한다.
  */
 export async function retryAsync<T>(fn: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
   const attempts = opts.attempts ?? 4
@@ -51,7 +44,7 @@ export async function retryAsync<T>(fn: () => Promise<T>, opts: RetryOptions = {
     } catch (err) {
       lastErr = err
       const isLast = i === attempts - 1
-      if (isLast) break // 마지막 시도 실패 → 대기 없이 lastErr throw(아래).
+      if (isLast) break
       opts.onRetry?.(err, i + 1)
       await sleep(baseDelayMs * factor ** i)
     }

@@ -14,7 +14,7 @@ const C = {
   dim: `${ESC}[2m`,
 }
 
-// 박스 내부 폭 86칸(>80) — 좁은 슬롯에서 우측 테두리가 다음 줄로 밀려 깨진다.
+// >80 이어야 좁은 슬롯에서 우측 테두리가 다음 줄로 밀려 깨진다.
 const W = 86
 const bar = '─'.repeat(W)
 const pad = (s: string, visibleLen: number) => s + ' '.repeat(Math.max(0, W - visibleLen))

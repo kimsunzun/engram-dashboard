@@ -1,12 +1,3 @@
-// retryInvoke 단위테스트(ADR-0102) — 유계 재시도 + backoff + 최종 실패 throw + 취소 sentinel.
-//
-// ★검증 불변식★:
-//   1. N번 reject 후 resolve → 성공값 반환(재시도가 성공을 회수).
-//   2. 모든 시도 실패 → 마지막 에러를 throw(조용히 삼키지 않음).
-//   3. isCancelled → RetryCancelledError(정상 실패와 구분).
-//   4. onRetry 콜백은 실패 시도마다(마지막 제외) 호출.
-//   5. backoff 대기가 실제로 걸린다(fake timers 로 시간 진행).
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { retryAsync, RetryCancelledError } from './retryInvoke'
@@ -46,7 +37,7 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
     })
     const result = await settleResolves(retryAsync(fn, { baseDelayMs: 10 }))
     expect(result).toBe('ok')
-    expect(fn).toHaveBeenCalledTimes(3) // 첫 시도 + 재시도 2회.
+    expect(fn).toHaveBeenCalledTimes(3)
   })
 
   it('모든 시도 실패 → 마지막 에러를 throw(조용히 삼키지 않음)', async () => {
@@ -55,7 +46,6 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
       calls += 1
       throw new Error(`fail ${calls}`)
     })
-    // 기본 attempts=4 → 4회 시도 후 마지막(4번째) 에러 throw.
     await settleRejects(retryAsync(fn, { baseDelayMs: 5 }), 'fail 4')
     expect(fn).toHaveBeenCalledTimes(4)
   })
@@ -78,33 +68,31 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
   it('isCancelled → RetryCancelledError(정상 실패와 구분)', async () => {
     let cancelled = false
     const fn = vi.fn(async () => {
-      cancelled = true // 첫 시도 후 취소 상태로 전환.
+      cancelled = true
       throw new Error('boom')
     })
     await settleRejects(
       retryAsync(fn, { baseDelayMs: 5, isCancelled: () => cancelled }),
       RetryCancelledError,
     )
-    // 첫 시도(1회)는 돌고, 그 실패 후 다음 시도 전 isCancelled 로 중단 → fn 은 1회만.
     expect(fn).toHaveBeenCalledTimes(1)
   })
 
   it('마지막 실패 시도 도중 취소 → 소진 throw 대신 RetryCancelledError(FIX-4)', async () => {
-    // 시나리오: attempts=2. 두 시도 모두 reject 하되, ★마지막(2번째) 시도가 실패한 뒤★ 취소로 전환된다.
-    //   옛 코드는 루프 상단에서만 isCancelled 를 봐서 backend 에러('fail 2')를 그대로 throw → 호출부가
+    // 옛 코드는 루프 상단에서만 isCancelled 를 봐서 backend 에러('fail 2')를 그대로 throw → 호출부가
     //   헛된 최종-실패를 로깅. FIX-4 는 소진 throw 직전 재확인해 RetryCancelledError 로 바꾼다.
     let calls = 0
     let cancelled = false
     const fn = vi.fn(async () => {
       calls += 1
-      if (calls === 2) cancelled = true // 마지막 시도가 실패하는 순간 unmount 흉내(취소로 전환).
+      if (calls === 2) cancelled = true // unmount 흉내
       throw new Error(`fail ${calls}`)
     })
     await settleRejects(
       retryAsync(fn, { attempts: 2, baseDelayMs: 5, isCancelled: () => cancelled }),
       RetryCancelledError,
     )
-    expect(fn).toHaveBeenCalledTimes(2) // 두 시도 모두 돌고, 소진 후 취소 재확인이 sentinel 로 치환.
+    expect(fn).toHaveBeenCalledTimes(2)
   })
 
   it('onRetry 는 실패 시도마다(마지막 제외) 호출된다', async () => {
@@ -113,7 +101,6 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
       throw new Error('x')
     })
     await settleRejects(retryAsync(fn, { attempts: 3, baseDelayMs: 5, onRetry }), 'x')
-    // 3회 시도 중 마지막(3번째) 실패엔 onRetry 안 부름 → 2회.
     expect(onRetry).toHaveBeenCalledTimes(2)
     expect(onRetry).toHaveBeenNthCalledWith(1, expect.any(Error), 1)
     expect(onRetry).toHaveBeenNthCalledWith(2, expect.any(Error), 2)

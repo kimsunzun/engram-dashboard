@@ -28,22 +28,18 @@ import './scroll-area.css'
 
 export interface ScrollAreaProps {
   children: ReactNode
-  /** Root(스크롤 영역 바깥 컨테이너)에 얹을 클래스 — flex/크기 배치용(예: min-h-0 flex-1). */
   className?: string
-  /** Viewport(실제 스크롤 엘리먼트)에 얹을 클래스 — 콘텐츠 컨테이너 스타일. */
   viewportClassName?: string
-  /** Root(바깥 컨테이너)에 얹을 인라인 스타일 — 변수-only 스타일 소비자(트리·팝업 등)가 크기/배경을 준다. */
   style?: React.CSSProperties
-  /** Viewport(실제 스크롤 엘리먼트)에 얹을 인라인 스타일 — <pre> 등 콘텐츠 스타일(whiteSpace 등). */
   viewportStyle?: React.CSSProperties
-  /** 스크롤 방향(기본 vertical). horizontal 목록/코드뷰가 나오면 여기로 확장(단일 seam 유지). */
+  /** horizontal 목록/코드뷰가 나오면 여기로 확장(단일 seam 유지). */
   orientation?: 'vertical' | 'horizontal'
-  /** cdp eval·테스트에서 마운트 여부·대상 확인용 마커(소비자가 넘긴 data-* 을 Root 에 얹는다). */
+  /** cdp eval·테스트에서 마운트 여부·대상 확인용 마커. */
   'data-testid'?: string
 }
 
-// ADR-0053: Radix ScrollArea 위의 얇은 seam. ref 는 Viewport(실제 스크롤 노드)로 forward 한다 —
-//   RichSlot/DomSlot 이 이 ref 로 하단 고정 스크롤을 건다(위 헤더 불변식).
+// ADR-0053: ref 는 Viewport(실제 스크롤 노드)로 forward 한다 — RichSlot/DomSlot 이 이 ref 로 하단 고정
+//   스크롤을 건다(위 헤더 불변식).
 export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function ScrollArea(
   { children, className, viewportClassName, style, viewportStyle, orientation = 'vertical', ...rest },
   viewportRef,
@@ -51,8 +47,8 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
   return (
     <RadixScrollArea.Root
       type="scroll"
-      // ★scrollHideDelay★: 스크롤 멈춤 뒤 스크롤바를 얼마 있다 감출지(ms). 500ms 린거(lingering) — 스크롤을
-      //   끝낸 직후 바로 사라지면 어색하므로 잠깐 남긴다(hover 표시 지연과 무관 — 구 CSS animation-delay 제거됨).
+      // ★scrollHideDelay★: 500ms 린거(lingering) — 스크롤을 끝낸 직후 바로 사라지면 어색하므로 잠깐
+      //   남긴다(hover 표시 지연과 무관 — 구 CSS animation-delay 제거됨).
       scrollHideDelay={500}
       className={cn('relative overflow-hidden', className)}
       style={style}
@@ -69,8 +65,8 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
       </RadixScrollArea.Viewport>
       <RadixScrollArea.Scrollbar
         orientation={orientation}
-        // 스타일은 CSS 클래스로(scroll-area.css). type="scroll" 이므로 Radix 가 스크롤 중에만 마운트하고
-        //   scrollHideDelay 뒤 언마운트한다 — hover 기반 show-delay animation 는 제거됨.
+        // type="scroll" 이므로 Radix 가 스크롤 중에만 마운트하고 scrollHideDelay 뒤 언마운트한다
+        //   — hover 기반 show-delay animation 는 제거됨.
         className="engram-scrollbar"
       >
         <RadixScrollArea.Thumb className="engram-scrollbar-thumb" />

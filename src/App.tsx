@@ -18,7 +18,7 @@ function App() {
     themeManager.apply('dark')
   }, [])
 
-  // ADR-0055: 전역 키바인딩 설치 — 언마운트/HMR 시 disposer 로 리스너 제거(중복 누적 방지).
+  // ADR-0055: 반환 disposer 는 언마운트/HMR 시 리스너 중복 누적을 막는다.
   useEffect(() => installKeybindings(), [])
 
   useEffect(() => {
@@ -37,9 +37,9 @@ function App() {
       })
         .then(agents => useAgentStore.getState().setAgents(agents))
         .catch(err => console.warn('[App] getAgents 최종 실패:', err))
-      // 깡통(예약) 프로필 초기 로드(ADR-0018) — 트리가 예약 노드를 그리려면 필요.
+      // ADR-0018: 트리가 예약(깡통) 노드를 그리려면 필요.
       void refreshProfiles()
-      // 프리셋 초기 로드(ADR-0061) — PresetPalette 가 목록을 그리려면 필요(refreshProfiles 미러).
+      // ADR-0061: PresetPalette 가 목록을 그리려면 필요(refreshProfiles 미러).
       void refreshPresets()
     })()
   }, [])
@@ -50,7 +50,7 @@ function App() {
         <Routes>
           <Route path="/" element={<AppLayout />} />
           <Route path="/tree" element={<TreePage />} />
-          {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(WindowLayout, ADR-0057). */}
+          {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(ADR-0057). */}
           <Route path="/popup" element={<PopoutPage />} />
         </Routes>
       </div>

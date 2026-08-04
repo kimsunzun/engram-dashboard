@@ -2,9 +2,8 @@
 //
 // ★탭 소유 모델(ADR-0057)★: 옛 "고정 단일 View" 팝업이 아니라 **탭 가진 일반 창**이다(D-2 "팝업도 탭").
 //   URL 키 `#/popup?window=<label>` 로 자기 창 label 을 확정하고, WindowLayout(label) 을 얇게 감싼다 —
-//   그 컴포넌트가 탭바 + 활성 탭 슬롯 캔버스(keep-alive) + 자기 창 탭 상태 학습(list_tabs pull +
-//   window:tabs-updated listen) + 0탭 자가닫힘을 전부 소유한다(§7-1). PopoutPage 는 label 만 뽑아 넘기는
-//   껍데기다.
+//   탭바·슬롯 캔버스·탭 상태 학습·0탭 자가닫힘은 전부 그 컴포넌트가 소유한다(§7-1). PopoutPage 는
+//   label 만 뽑아 넘기는 껍데기다.
 //
 // ★view:closed 은퇴(G2)★: 옛 "자기 view 가 닫히면 창 자가종료"(view:closed 리스너)는 제거됐다. 창 닫힘은
 //   백엔드 close_window 단일 소스(§5-2)이고, 프론트 자가닫힘은 WindowLayout 의 window:tabs-updated{tabs:[]}
@@ -26,8 +25,8 @@ import WindowLayout from '../components/layout/WindowLayout'
 import { readWindowLabelFromHash } from '../store/viewStore'
 
 export default function PopoutPage() {
-  // 이 팝업 창의 label(URL `?window=` 에서 1회 확정 — 창 수명 동안 불변). 팝업 라우트가 아니면 'main'
-  // 폴백이나(readWindowLabelFromHash), /popup 라우트에서만 이 페이지가 뜨므로 정상 경로는 팝업 label 이다.
+  // URL `?window=` 에서 1회 확정 — 창 수명 동안 불변. 팝업 라우트가 아니면 'main' 폴백이나,
+  // /popup 라우트에서만 이 페이지가 뜨므로 정상 경로는 팝업 label 이다.
   const [label] = useState<string>(readWindowLabelFromHash)
 
   return (

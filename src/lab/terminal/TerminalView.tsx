@@ -15,9 +15,9 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
 interface TerminalViewProps {
-  /** mock PTY 출력(ANSI 포함). 실제 메인에선 subscribeOutput 청크가 이 자리. */
+  /** 실제 메인에선 subscribeOutput 청크가 이 자리. */
   output: string
-  /** fit 결과를 "PTY 로 전파"하는 콜백 mock. 메인에선 agentClient.resizePty. */
+  /** 메인에선 agentClient.resizePty. */
   onResize?: (cols: number, rows: number) => void
 }
 

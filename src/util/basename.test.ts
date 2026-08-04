@@ -1,6 +1,4 @@
-// basename 단위테스트 — cwd basename 파생 규칙(ADR-0061). PresetPalette·AgentList 표시명 단일 출처.
-//
-// 검증: win/posix 구분자·후행 슬래시·root/drive-root/UNC 엣지·빈/공백 placeholder.
+// ADR-0061: cwd basename 파생 규칙. PresetPalette·AgentList 표시명 단일 출처.
 
 import { describe, expect, it } from 'vitest'
 
