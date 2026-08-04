@@ -209,9 +209,8 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행(결과 JSON
 `eval`로 DOM 텍스트·백엔드 직접 호출(`window.__TAURI__.core.invoke(...)`) → spawn/write/interrupt/kill을 실제 IPC로 검증. **검증엔 스샷보다 `eval` 텍스트가 토큰·정확도 유리**(픽셀 해석 회피). 포트 9223 고정(9222=Gemini Chrome 충돌 회피, `CDP_PORT`로 변경).
 
 ## 컨벤션
-- 중요 로직(동시성·kill·unsafe·비자명한 결정)에 **왜** 그런지 한국어 주석. 자명한 코드엔 주석 금지.
-- **숨은 의도·불변식은 그 코드에 박는다** — 시그니처·타입만 봐선 안 보이는 load-bearing 의미("이 분기가 어떤 race를 막나" 등). 빠뜨리면 다음 세션이 모르고 지우거나 잘못 바꾼다.
-- **주석 규율 정본 = clean-comment 스킬 소비 계약** — 작성·정리 모두 이것을 따른다(기준 = `~/.claude/skills/clean-comment/references/rules.md` + `style-base.md`, 프로젝트 특화·보호 패턴·retrofit-완료 범위 = `.claude/skill-bindings/clean-comment.md`). `//!` overview 헤더·동갱신·boy-scout 규약은 구 캐논(ADR-0032)에서 스킬 Base로 승급됨(2026-07-31 — 캐논 문서 폐기, 결정 근거는 ADR-0032 유지). **/implement를 안 거치는 직접 편집 세션도 이 계약을 읽고 코딩한다.**
+> **주석 규약 = 현재 미설정(2026-08-05).** 옛 규약 3줄(왜-주석·불변식 박기·clean-comment 소비 계약)을 **사용자 지시로 삭제**했다 — clean-comment 스킬이 skill-factory에서 리팩터 중이고, **배포되면 그때 이 자리에 다시 건다.** 그때까지는 프로젝트 규약 없이 **모델 기본 판단**으로 쓴다. 이 자리를 임의 규칙으로 채우지 말 것(미배포 정본을 가리키던 옛 문장이 세션마다 즉흥 fallback을 만들었다 — 실발동 2026-08-05).
+
 - 자격증명을 `profile.env`에 넣지 말 것(agents.json 평문 저장 — persistence가 경고).
 - 모듈마다 build/test/커밋. 커밋 메시지 끝에 Co-Authored-By 트레일러.
 
