@@ -64,6 +64,15 @@ name = "roundtrip-smoke"
 path = "src/bin/roundtrip_smoke.rs"
 required-features = ["test-harness"]
 
+# ★ADR-0125 동기 드레인 지연 실측 드라이버(spec §7 수용 기준 ⑤·⑧)★: 발송 호출이 자기 턴에 떠안는
+#   드레인 비용을 결정적 seam 수신자(실 claude 불요)로 재서 PRINT 한다 — **타이밍 단언 없음**(spec 이
+#   ⑤·⑧ 양쪽에서 임계값 고정을 금지한다). 회귀 스위트에 넣지 않는 이유도 같다(시간 측정은 flaky).
+#   required-features 로 릴리즈 빌드가 컴파일하지 않게 막는다(saturation-pilot 계열과 동일).
+[[bin]]
+name = "drain-latency"
+path = "src/bin/drain_latency.rs"
+required-features = ["test-harness"]
+
 [dependencies]
 engram-dashboard-core = { path = "../engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
