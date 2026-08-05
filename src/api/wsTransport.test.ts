@@ -114,7 +114,7 @@ beforeEach(() => {
   FakeWebSocket.last = null
   FakeWebSocket.instances = []
   invokeMock.mockClear()
-  liveDaemonInfo = discoverInfo // 매 테스트 기본: read_daemon_info 는 같은 데몬을 돌려준다.
+  liveDaemonInfo = discoverInfo
   uuidCounter = 0
   ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
@@ -160,7 +160,6 @@ describe('WsTransport 핸드셰이크', () => {
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     await connect(t)
-    // Hello 는 소비됨 — control 로 올라오면 안 됨.
     expect(got.find((m) => m.kind === 'control' && 'Hello' in m.event)).toBeUndefined()
     t.close()
   })
@@ -232,12 +231,11 @@ describe('WsTransport 재연결', () => {
     ws1.fireClose()
     const instancesAfterClose = FakeWebSocket.instances.length
 
-    // 4) 새 소켓 핸드셰이크 완료 → connected, ws1.close 로 인한 reconnect 없음(새 소켓 무사).
     ws2.fireOpen()
     ws2.fireText({ Hello: { protocol_version: 1 } })
     await p2
     expect(t.connectionState).toBe('connected')
-    expect(FakeWebSocket.instances.length).toBe(instancesAfterClose) // reconnect 새 소켓 안 생김
+    expect(FakeWebSocket.instances.length).toBe(instancesAfterClose)
     t.close()
   })
 
@@ -258,7 +256,6 @@ describe('WsTransport 재연결', () => {
     // ★no-hang 가드★: pendingReject-settle 이 없으면 p1 은 영영 settle 안 돼 이 await 가 timeout.
     await expect(p1).rejects.toThrow(/superseded/)
 
-    // 3) start #2 핸드셰이크 완료 → connected.
     const ws2 = FakeWebSocket.last!
     expect(ws2).not.toBe(ws1)
     ws2.fireOpen()
@@ -288,7 +285,7 @@ describe('WsTransport 재연결', () => {
     const p1 = t.start()
     await Promise.resolve() // 실행자 동기 본문 + run() 진입 → await invoke 에서 멈춤
     await Promise.resolve()
-    expect(FakeWebSocket.last).toBeNull() // ws 생성 전(discover in-flight) 확인
+    expect(FakeWebSocket.last).toBeNull()
 
     // 3) p2: 두 번째 start() → this.ws 가 null 인 채 cleanupSocket 진입.
     const p2 = t.start().catch(() => {})
@@ -319,13 +316,11 @@ describe('WsTransport 재연결', () => {
     const ws = FakeWebSocket.last!
     ws.fireOpen()
     ws.fireText({ Hello: { protocol_version: 1 } })
-    // 정상 resolve — pendingReject 가 null 로 비워졌다.
     await expect(p).resolves.toBeUndefined()
     expect(t.connectionState).toBe('connected')
     // healthy close — cleanupSocket 이 아무것도 reject 하지 않아야 한다(unhandled rejection 없음).
     expect(() => t.close()).not.toThrow()
     expect(t.connectionState).toBe('down')
-    // 이미 resolve 된 promise 는 close 에 영향받지 않는다.
     await expect(p).resolves.toBeUndefined()
   })
 
@@ -379,7 +374,6 @@ describe('WsTransport 재연결', () => {
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
 
-    // ★좀비 차단 단언★: 새 WS 인스턴스가 안 생겼고 상태는 down 유지(부활 없음).
     expect(FakeWebSocket.instances.length).toBe(instancesBefore)
     expect(t.connectionState).toBe('down')
   })
@@ -389,7 +383,6 @@ describe('WsTransport 재연결', () => {
     const ws1 = await connect(t)
     invokeMock.mockClear()
 
-    // 1) 끊김 → reconnecting.
     ws1.fireClose()
     expect(t.connectionState).toBe('reconnecting')
 
@@ -425,8 +418,6 @@ describe('WsTransport 재연결', () => {
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
 
-    // ★hijack 차단 단언★: 좀비 소켓이 안 생겼다(WS 수 불변). this.ws 가 정식 소켓을 가리키므로
-    //  정식 소켓으로 명령 전송이 정상이고, 연결은 connected 유지.
     expect(FakeWebSocket.instances.length).toBe(instancesAfterReal)
     expect(t.connectionState).toBe('connected')
 
@@ -446,19 +437,16 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     const ws = await connect(t)
     ws.sent.length = 0 // handshake Auth 제거.
 
-    // 1) 첫 요청 → 즉시 wire Subscribe 1개 송신 + gen1 반환.
     const gen1 = await t.requestReplay(AGENT)
     expect(gen1).toBe(1n)
     let subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
     expect(subs.length).toBe(1)
 
-    // 2) in-flight(Ack/Complete 전) 중 동시 요청 2개 → wire 안 나감(sole-outstanding). 같은 gen 공유.
     const p2 = t.requestReplay(AGENT)
     const p3 = t.requestReplay(AGENT)
     subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
-    expect(subs.length).toBe(1) // 아직 1개(겹쳐 안 보냄)
+    expect(subs.length).toBe(1)
 
-    // 3) 첫 replay 종결(Ack→Complete) → boundary gen = gen1(마지막값 오각인 없음) + 병합요청 승격 송신.
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 0, truncated: false } })
@@ -466,14 +454,12 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     const b1 = got.find((m) => m.kind === 'replayBoundary')
     expect(b1).toMatchObject({ kind: 'replayBoundary', agentId: AGENT, gen: 1n, epoch: 4 })
 
-    // 병합요청이 경계 뒤에 정확히 1회 Subscribe 송신 + 대기자 전원 같은 gen(=2) 회수.
     const [g2, g3] = await Promise.all([p2, p3])
     expect(g2).toBe(2n)
-    expect(g3).toBe(2n) // 같은 gen 공유(병합)
+    expect(g3).toBe(2n)
     subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
-    expect(subs.length).toBe(2) // 경계 뒤 병합요청 1개 추가 = 총 2개
+    expect(subs.length).toBe(2)
 
-    // 4) 병합 replay 종결 → boundary gen = gen2(그 replay 를 종결하는 요청과 일치).
     got.length = 0
     ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 0, truncated: false } })
     ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
@@ -489,18 +475,17 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
 
-    await t.requestReplay(AGENT) // gen1 즉시 송신.
+    await t.requestReplay(AGENT)
     ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 0 } })
-    expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1) // boundary 1개.
+    expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1)
 
-    // in-flight 종결 후 새 요청 → 다시 즉시 송신(병합 아님).
     got.length = 0
     const gen2 = await t.requestReplay(AGENT)
     expect(gen2).toBe(2n)
     const subs = ws.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
-    expect(subs.length).toBe(2) // 첫 + 두 번째 = 2개.
+    expect(subs.length).toBe(2)
     ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 0 } })
-    expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1) // 새 요청도 boundary 1개.
+    expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1)
     t.close()
   })
 })
@@ -524,14 +509,13 @@ describe('WsTransport replay single-flight — 소켓 종료 시 상태 리셋 +
     let p2Rejected: unknown = null
     void p2.catch((e) => (p2Rejected = e))
     subs = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
-    expect(subs.length).toBe(1) // 아직 1개(sole-outstanding).
+    expect(subs.length).toBe(1)
 
     // 3) ★ReplayComplete 전에 소켓 close★ → handleClose 가 wsReplay 를 비우고 pending 대기자 reject.
     ws1.fireClose()
     await expect(p2).rejects.toThrow(/closed before replay complete/)
-    expect(p2Rejected).not.toBeNull() // reject 관측(unhandled 아님).
+    expect(p2Rejected).not.toBeNull()
 
-    // 4) 재연결 → 새 소켓 핸드셰이크 완료.
     await new Promise((r) => setTimeout(r, 600))
     const ws2 = FakeWebSocket.last!
     expect(ws2).not.toBe(ws1)
@@ -546,7 +530,7 @@ describe('WsTransport replay single-flight — 소켓 종료 시 상태 리셋 +
     const gen3 = await t.requestReplay(AGENT)
     expect(gen3).toBe(3n) // gen 카운터는 계속 증가(gen1=1, gen2=2 소각, gen3=3).
     subs = ws2.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m)
-    expect(subs.length).toBe(1) // 재연결 소켓으로 새 Subscribe 1개 나감.
+    expect(subs.length).toBe(1)
     t.close()
   })
 })
@@ -560,7 +544,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     const t = new WsTransport()
     await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
     expect(invokeMock).not.toHaveBeenCalled() // discover(=spawn 유발) 절대 안 함
-    expect(FakeWebSocket.instances.length).toBe(0) // 소켓조차 안 엶
+    expect(FakeWebSocket.instances.length).toBe(0)
     expect(t.connectionState).toBe('down')
   })
 
@@ -607,12 +591,10 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     expect(invokeMock).toHaveBeenCalledTimes(1) // 최초 discover 1회만
     invokeMock.mockClear()
 
-    // 비의도 끊김 → attach-only 재연결.
     ws1.fireClose()
     expect(t.connectionState).toBe('reconnecting')
     await new Promise((r) => setTimeout(r, 600))
 
-    // ★불변식★: 재연결 경로는 discover_daemon(=spawn 유발)을 절대 호출하지 않는다.
     expect(invokeMock).not.toHaveBeenCalledWith('discover_daemon')
     // ★ADR-0021 hot-swap 추적★: 대신 read_daemon_info(no-spawn)로 현재 daemon.json 을 재조회한다.
     expect(invokeMock).toHaveBeenCalledWith('read_daemon_info')
@@ -669,7 +651,6 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     for (let i = 0; i < WS_MAX_ATTEMPTS; i++) {
       await vi.advanceTimersByTimeAsync(11000)
       const w = FakeWebSocket.last!
-      // attach-only 소켓이 핸드셰이크 전에 닫힘(데몬 죽음).
       w.fireClose()
       await Promise.resolve()
     }
@@ -716,7 +697,6 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     await c.subscribeOutput(V1, AGENT, (chunk) => received.push(chunk.seq))
     await Promise.resolve()
 
-    // requestReplay 가 legacy 직결 근사로 wire Subscribe{after_seq:null}(FromOldest) 를 보냈다.
     const sub = ws1.parsedSent().find((m) => typeof m === 'object' && m && 'Subscribe' in m) as {
       Subscribe: { agent_id: string; epoch: number | null; after_seq: number | null }
     }
@@ -755,7 +735,6 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
     expect(received).toEqual([0, 1, 2])
 
-    // 재연결.
     ws1.fireClose()
     await new Promise((r) => setTimeout(r, 600))
     const ws2 = FakeWebSocket.last!

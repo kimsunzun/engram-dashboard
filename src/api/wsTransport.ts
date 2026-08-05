@@ -86,7 +86,6 @@ export class WsTransport implements Transport {
   >()
   private wsGenCounter = 0n
 
-  /** 이 agent 의 wsReplay 상태를 얻거나 생성. */
   private wsReplayEntry(agentId: string): {
     inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
     pending?: {
@@ -102,7 +101,7 @@ export class WsTransport implements Transport {
     return e
   }
 
-  /** wire Subscribe{after_seq:null}(전량 재replay) 송신. 미연결이면 throw(호출자가 계약대로 reject). */
+  /** 미연결이면 send 가 throw — 호출자가 계약대로 reject. */
   private sendSubscribeFromOldest(agentId: string): void {
     this.send({ Subscribe: { agent_id: agentId, epoch: null, after_seq: null } })
   }
@@ -144,8 +143,8 @@ export class WsTransport implements Transport {
       return Promise.resolve()
     }
     if (this.connectPromise) return this.connectPromise
-    // 사용자가 명시 종료(close)했거나 재연결이 소진돼 down 인데도 명령이 들어오면 attach 시도조차
-    // 하지 않고 즉시 reject — 명령이 데몬을 깨우면 안 된다(꺼진 채 유지). 복구는 명시 start 로만.
+    // 사용자가 명시 종료(close)했으면 명령이 들어와도 attach 시도조차 하지 않고 즉시 reject — 명령이
+    // 데몬을 깨우면 안 된다(꺼진 채 유지). 복구는 명시 start 로만.
     if (this.closedByUser) {
       return Promise.reject(
         new Error('daemon down — daemon_start 로 명시 시작 필요 (ADR-0021: 명령은 respawn 안 함)'),
@@ -156,7 +155,6 @@ export class WsTransport implements Transport {
         new Error('daemon down — daemon_start 로 명시 시작 필요 (no cached daemon, ADR-0021)'),
       )
     }
-    // attach-only: 캐시 host:port 로 소켓만 재오픈. 데몬이 죽었으면 onclose → reject(respawn 안 함).
     this.connectPromise = this.openSocket(false)
     return this.connectPromise
   }
@@ -179,8 +177,6 @@ export class WsTransport implements Transport {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    // 명시 start 는 discover 를 강제한다 — 위 cleanupSocket 으로 진행 중 attach 소켓을 명시적으로
-    // 정리한 뒤 새 openSocket(true) 로 연결을 다시 연다(옛 소켓 onclose 에 정리를 의존하지 않음).
     this.connectPromise = this.openSocket(true)
     return this.connectPromise
   }
@@ -217,7 +213,6 @@ export class WsTransport implements Transport {
       const run = async () => {
         let info: DaemonInfoDto
         if (allowDiscover) {
-          // 명시 연결만 discover(없으면 데몬 spawn). 성공 시 캐시 갱신(데몬 재기동 시 port/token 반영).
           info = await invoke<DaemonInfoDto>('discover_daemon')
           // ★await 재개 직후 stale 검사★: discover 가 yield 한 사이 cleanupSocket(openGen++)이 끼면
           // 이 시도는 무효 — settleReject 만 하고 빠진다(소켓 생성 금지, this.ws 미오염).
@@ -239,7 +234,6 @@ export class WsTransport implements Transport {
             return
           }
           if (fresh) {
-            // 살아있는 데몬 발견(옮겨갔을 수 있음) → 캐시 갱신 후 그 주소로 attach.
             this.cachedInfo = fresh
             info = fresh
           } else if (this.cachedInfo) {
@@ -247,7 +241,6 @@ export class WsTransport implements Transport {
             // 옛 주소로 마지막 시도(여전히 attach-only, spawn 아님). 실패하면 onclose→backoff→소진.
             info = this.cachedInfo
           } else {
-            // 캐시도 없고 살아있는 데몬도 없다 → 붙을 곳을 모른다. reject(재연결은 새 데몬 안 만듦).
             throw new Error('no live/cached daemon — reconnect cannot discover/spawn (ADR-0021)')
           }
         }
@@ -298,10 +291,8 @@ export class WsTransport implements Transport {
             //   requestReplay 계약(요청당 최소 1개 boundary, sole-outstanding)을 근사한다. control 은 아래에서
             //   그대로 위로도 올린다.
             this.observeReplayWire(msg)
-            // control event — ProtocolClient 로 정규화 전달.
             this.messageCb?.({ kind: 'control', event: msg })
           } else if (event.data instanceof ArrayBuffer) {
-            // binary output frame — 디코드해 정규화 output 으로 전달.
             const f = decodeOutputFrame(event.data)
             if (!f) return
             this.messageCb?.({
@@ -334,8 +325,8 @@ export class WsTransport implements Transport {
     })
   }
 
-  /** 소켓 종료 처리 — 의도적 종료가 아니면 재연결 스케줄. pending reject 는 ProtocolClient 가
-   * connectionState 전이(connected→reconnecting)로 처리한다(carrier 무관 위치로 승격). */
+  /** pending reject 는 ProtocolClient 가 connectionState 전이(connected→reconnecting)로
+   * 처리한다(carrier 무관 위치로 승격). */
   private handleClose(wasHandshakeSettled: boolean): void {
     this.connectPromise = null
     this.ws = null
@@ -366,12 +357,10 @@ export class WsTransport implements Transport {
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return
     if (this.closedByUser) return
-    // attach-only 재시도 소진 → 'down' 정착(데몬이 안 살아남는다). 사용자가 명시로 다시 시작.
     if (this.reconnectAttempt >= WsTransport.MAX_RECONNECT_ATTEMPTS) {
       this.setState('down')
       return
     }
-    // 500ms → 1s → 2s → … 최대 10s.
     const delay = Math.min(500 * 2 ** this.reconnectAttempt, 10000)
     this.reconnectAttempt += 1
     this.reconnectTimer = setTimeout(() => {
@@ -408,8 +397,6 @@ export class WsTransport implements Transport {
   requestReplay(agentId: string): Promise<bigint> {
     const entry = this.wsReplayEntry(agentId)
     if (entry.inflight) {
-      // 이미 미종결 Subscribe 가 있다 — wire 를 겹쳐 보내지 않는다(sole-outstanding). 다음 1회 요청에
-      //   병합: pending 이 없으면 새 gen 채번, 있으면 기존 pending gen 공유. 모든 대기자가 같은 gen 을 회수.
       if (!entry.pending) entry.pending = { gen: ++this.wsGenCounter, waiters: [] }
       const pending = entry.pending
       // resolve/reject 쌍을 보관 — ReplayComplete 승격 시 resolve, 소켓이 그 전에 닫히면 reject(FIX-B).
@@ -420,7 +407,7 @@ export class WsTransport implements Transport {
     try {
       this.sendSubscribeFromOldest(agentId)
     } catch (e) {
-      if (!entry.pending) this.wsReplay.delete(agentId) // 병합 대기자 없으면 entry 정리.
+      if (!entry.pending) this.wsReplay.delete(agentId)
       return Promise.reject(e instanceof Error ? e : new Error(String(e)))
     }
     entry.inflight = { gen, truncated: false, epoch: undefined }
@@ -456,8 +443,6 @@ export class WsTransport implements Transport {
         truncated: done.truncated,
         failed: false,
       })
-      // ★병합 요청 승격(sole-outstanding)★: 진행 중 들어와 병합된 다음 요청이 있으면, 지금(경계 뒤) 정확히
-      //   1회 Subscribe 를 송신해 새 in-flight 로 만든다. 대기자 전원에게 같은 gen 을 회수시킨다.
       const pending = entry.pending
       if (pending) {
         entry.pending = undefined
