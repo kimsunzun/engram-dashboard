@@ -217,7 +217,8 @@ fn diag_send_with_close_mode(mode: &str) -> bool {
     let url = format!("ws://{}:{}", info.host, info.port);
     let stream = TcpStream::connect(format!("{}:{}", info.host, info.port)).unwrap();
     let (mut ws, _r) = tungstenite::client(&url, stream).unwrap();
-    let auth = serde_json::to_string(&engram_dashboard_protocol::AgentCommand::Auth {
+    // ADR-0129 0-4: 첫 프레임의 모양은 네트워크 lib 소유 타입이다(명령 enum 아님).
+    let auth = serde_json::to_string(&engram_dashboard_net::auth::AuthFrame::Auth {
         token: info.token.clone(),
         protocol_version: engram_dashboard_protocol::PROTOCOL_VERSION,
     })

@@ -42,6 +42,17 @@ engram-dashboard-core = { path = "../crates/engram-dashboard-core" }
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 # S13 sub-step 2: 순수 데몬 발견/spawn/stop 로직(crate::discovery 로 re-export).
 engram-dashboard-discovery = { path = "../crates/engram-dashboard-discovery" }
+# ADR-0129 0-4: 데몬 WS 핸드셰이크 프레임(`auth::AuthFrame`) — 이 셸이 첫 프레임으로 보낸다(daemon_client
+#   재연결 경로 + cli.rs). ★에이전트 호스팅이 아니다★(ADR-0029 불변) — 네트워크 lib 은 WS 살림만 담고
+#   `AgentManager` 를 모른다. 그 crate 의 워크스페이스-로컬 forward 폐포는 {net, core, protocol} 이라
+#   여기서 지는 짐이 늘지 않는다(셋 다 이미 이 셸의 의존이다).
+#   ★feature 를 켜지 않는다 — 쓰는 건 `auth::AuthFrame` 뿐이다★(`rg engram_dashboard_net src/` →
+#   cli.rs · daemon_client/connection.rs · daemon_client/tests.rs, 셋 다 그 타입 하나). net 의 기본 feature
+#   는 비어 있어 그 타입만 나오고, WS **서버** 행은 여기서 안 쓰므로 `server` 를 적지 않는다.
+#   ★이쪽은 의존 트리가 줄지 않는다★ — 이 셸은 자기 몫으로 tokio·tokio-tungstenite·futures-util 을 이미
+#   직접 지고 있다(위 T1 블록). 그래도 안 켜는 이유는 **의도 표시**다: 나중에 이 셸이 async 를 걷어내도
+#   net 간선이 그것을 되돌려 놓지 않는다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석.
+engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
 tauri-plugin-autostart = "2"
 
 # T1(S14 모듈①): DaemonClient(비동기 WS 클라이언트) + OutputRouter(arc-swap) 신설을 위해

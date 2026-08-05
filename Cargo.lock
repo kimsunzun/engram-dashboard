@@ -995,6 +995,7 @@ dependencies = [
  "engram-dashboard-core",
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",
+ "engram-dashboard-net",
  "engram-dashboard-protocol",
  "futures-util",
  "serde",
@@ -1039,6 +1040,7 @@ dependencies = [
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",
  "engram-dashboard-messaging",
+ "engram-dashboard-net",
  "engram-dashboard-protocol",
  "futures-util",
  "getrandom 0.2.17",
@@ -1056,7 +1058,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "windows 0.58.0",
 ]
 
 [[package]]
@@ -1065,6 +1066,7 @@ version = "0.1.0"
 dependencies = [
  "dunce",
  "engram-dashboard-core",
+ "engram-dashboard-net",
  "engram-dashboard-protocol",
  "serde_json",
  "tempfile",
@@ -1080,6 +1082,21 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "engram-dashboard-net"
+version = "0.1.0"
+dependencies = [
+ "engram-dashboard-core",
+ "engram-dashboard-protocol",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "windows 0.58.0",
 ]
 
 [[package]]

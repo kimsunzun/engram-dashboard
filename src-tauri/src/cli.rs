@@ -21,6 +21,8 @@
 
 use std::time::Duration;
 
+// ADR-0129 0-4: 핸드셰이크 프레임의 모양은 네트워크 lib 소유다(명령 enum 이 아니다).
+use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{
     AgentCommand, AgentEvent, AgentInfo, DaemonInfo, RequestId, PROTOCOL_VERSION,
 };
@@ -290,7 +292,7 @@ impl Connection {
         // ★첫 프레임 = Auth(Text JSON)★ — 데몬은 1초 내 첫 프레임으로 이걸 기대한다(ws.rs AUTH_TIMEOUT).
         //   protocol_version 은 daemon.json echo 가 아니라 우리 컴파일 버전(connection.rs Fix C 와 동형).
         //   token 은 wire 로만 흐른다(로그/에러에 절대 노출 금지 — 보안).
-        let auth = AgentCommand::Auth {
+        let auth = AuthFrame::Auth {
             token: info.token.clone(),
             protocol_version: PROTOCOL_VERSION,
         };

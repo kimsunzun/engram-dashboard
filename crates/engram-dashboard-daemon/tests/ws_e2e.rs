@@ -17,10 +17,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
-use engram_dashboard_daemon::ws::KeepaliveConfig;
+// ADR-0129 슬라이스 1: `KeepaliveConfig` 의 본가는 네트워크 crate 지만, 이 하네스가 부르는
+//   `start_test_server_with_keepalive` 의 시그니처에 나타나므로 데몬 crate 가 재수출한다 —
+//   조립(데몬)을 구동하는 테스트라 네트워크 crate 를 직접 dev-dependency 로 물지 않는다.
+// ADR-0129 0-4: 핸드셰이크 프레임은 반대로 **네트워크 crate 를 직접** 부른다 — 데몬 crate 의 공개
+//   시그니처에 나타나지 않아 재수출할 사유가 없고, 경계가 이 import 줄에서 그대로 보인다.
 use engram_dashboard_daemon::{
-    start_test_server, start_test_server_with_keepalive, TestServerHandle,
+    start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
+use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{
     decode_frame, AgentCommand as WireCommand, AgentEvent, ClaudeOutputFormat as WireOutputFormat,
     RequestId, SubscribeAction, PROTOCOL_VERSION,
@@ -62,20 +67,28 @@ impl Client {
     /// 연결만 — Hello/Error 수신은 호출자가 next_event 로 확인한다.
     async fn connect_and_auth(port: u16, token: &str) -> Self {
         let url = format!("ws://127.0.0.1:{port}");
-        let (mut ws, _resp) = tokio::time::timeout(NET_TIMEOUT, connect_async(url))
+        let (ws, _resp) = tokio::time::timeout(NET_TIMEOUT, connect_async(url))
             .await
             .expect("connect timeout")
             .expect("connect failed");
-        let auth = WireCommand::Auth {
+        let mut client = Self { ws };
+        client.send_auth(token).await;
+        client
+    }
+
+    /// 핸드셰이크 프레임 1개 송신. ★핸드셰이크는 명령이 아니다(ADR-0129 0-4)★ — 모양이 네트워크 lib
+    /// 소유라 `send`(명령 전용)를 못 탄다. 첫 프레임(정상 인증)과 2차 프레임(case21 의 프로토콜 위반)이
+    /// **같은 바이트**여야 하므로 두 자리가 이 헬퍼 하나를 공유한다.
+    async fn send_auth(&mut self, token: &str) {
+        let auth = AuthFrame::Auth {
             token: token.to_string(),
             protocol_version: PROTOCOL_VERSION,
         };
         let text = serde_json::to_string(&auth).unwrap();
-        tokio::time::timeout(NET_TIMEOUT, ws.send(Message::Text(text.into())))
+        tokio::time::timeout(NET_TIMEOUT, self.ws.send(Message::Text(text.into())))
             .await
             .expect("auth send timeout")
             .expect("auth send failed");
-        Self { ws }
     }
 
     /// auth frame 만 보내지 않고 raw 연결만(타임아웃/잘못된 첫 frame 테스트용).
@@ -1509,12 +1522,13 @@ async fn case21_ws_second_auth_rejected() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // 이미 auth 된 연결에서 또 Auth — dispatch 가 request_id 없는 Error("already authenticated").
-    c.send(&WireCommand::Auth {
-        token: server.token.clone(),
-        protocol_version: PROTOCOL_VERSION,
-    })
-    .await;
+    // 이미 auth 된 연결에서 또 Auth — request_id 없는 Error("already authenticated").
+    // ★ADR-0129 0-4 이후 응답 주인이 바뀌었다★: 예전엔 이 프레임이 명령으로 디코드돼 dispatch 가 답했다.
+    //   지금은 명령으로 디코드되지 않으므로 `agent_conn::on_text` 의 파싱 실패 갈래가 **태그로** 되잡아
+    //   같은 문구를 낸다. 아래 단언이 지키는 것은 **온전한 핸드셰이크가 받는 그 문구**다 — 어긋난
+    //   프레임의 진단 텍스트까지 그대로라는 뜻은 아니다(무엇이 어떻게 바뀌었는지는 `connection_core`
+    //   의 그 arm 자리 주석).
+    c.send_auth(&server.token).await;
     let msg = c.await_error_no_id().await;
     assert!(
         msg.contains("already authenticated"),

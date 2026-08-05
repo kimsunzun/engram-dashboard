@@ -2,7 +2,8 @@
 //!
 //! 책임: accept 된 TCP stream 을 WS 업그레이드(Origin allowlist) → 1초 내 첫 frame 토큰 auth →
 //! 연결 수명·단일 writer·keepalive·레지스트리. **프레임 내용의 어휘는 모른다** — 들어온 text/binary
-//! 는 `ConnectionHandler`(frame_port)로 올리고, 나가는 것은 `FrameSink` 로 받는다.
+//! 는 `ConnectionHandler`(frame_port)로 올리고, 나가는 것은 `FrameSink`(연결당)·`FrameFanout`
+//! (전-연결)으로 받는다.
 //!
 //! ★동시성 모델(위험 지점)★
 //! - **연결당 단일 writer**: SplitSink 는 동시 write 불가. 그래서 모든 출력 프레임을 연결당 단일
@@ -15,22 +16,23 @@
 //!   `ConnFrameSink` 가 try_send 에서 full 을 만나면 `close_signal.notify_one()`(sync 안전)으로
 //!   신호하고, write_task 는 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를 동시에
 //!   대기해 큐가 막혀 있어도 깨어 sink_half.close() 후 break → cleanup 한다.
-//! - **레지스트리**: status 브로드캐스트용. 모든 연결의 conn_tx 를 ConnId→Sender 맵으로 보관해
-//!   위층(`status_fanout::DaemonStatusSink`)이 try_send(Text) 로 전 연결에 fanout 한다 — 이 파일이
-//!   내주는 것은 **불투명 text 를 받는 표면**뿐이고 실린 어휘는 모른다.
+//! - **레지스트리**: 전-연결 팬아웃용. 모든 연결의 conn_tx 를 ConnId→Sender 맵으로 보관하고, 위층에는
+//!   `FrameFanout`(불투명 text 하나를 전 연결에 try_send)만 내준다. 등록·해제·id 발급은 이 파일이 쥔
+//!   연결 수명이라 그 포트에 없다 — 그 포트로 표현할 수 있는 것은 "전부에게 이 text" 하나뿐이다.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-// ★ADR-0129 잔여 — auth 핸드셰이크★: 핸드셰이크를 데몬 소유 타입으로 옮기는 것은 후속 슬라이스라,
-//   지금은 `AgentCommand::Auth`/`PROTOCOL_VERSION` 만 네트워크 행에 남는다. 이 두 이름이 이 파일에
-//   남은 **유일한** 에이전트 어휘다(상태·메시징 sink 는 status_fanout/messaging_host 로 이사했다).
-use engram_dashboard_protocol::{AgentCommand, PROTOCOL_VERSION};
+// ★auth 핸드셰이크 = 이 crate 가 의미를 아는 유일한 프레임(ADR-0129 결정 1, 0-4 완료)★: 프레임 모양은
+//   `crate::auth` 가 소유하고, 기대 프로토콜 버전은 **값으로 주입**받는다(아래 `handle_connection`).
+//   그래서 이 파일엔 위층 명령 enum 도 버전 상수도 없다 — 그 상태를 lib.rs 헤더의 게이트 4 가 못 박는다.
+use crate::auth::AuthFrame;
 
 use crate::frame_port::{
-    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameError, FrameSink,
+    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameError, FrameFanout,
+    FrameSink,
 };
 
 use futures_util::future::BoxFuture;
@@ -88,8 +90,9 @@ const ALLOWED_ORIGINS: &[&str] = &[
     "https://tauri.localhost",
 ];
 
-/// status 브로드캐스트용 연결 레지스트리. connect 시 등록, disconnect 시 제거.
-/// `status_fanout::DaemonStatusSink` 가 전 연결 conn_tx 에 try_send 하기 위해 공유된다.
+/// 전-연결 팬아웃용 연결 레지스트리. connect 시 등록, disconnect 시 제거.
+/// 위층은 `FrameFanout`(아래 impl)으로만 이 맵에 닿아 전 연결 conn_tx 에 try_send 한다 — 실린 text 가
+/// 무엇인지(상태 통지든 목록 갱신이든)는 이 파일의 관심사가 아니다.
 #[derive(Clone)]
 pub struct ConnRegistry {
     inner: Arc<Mutex<HashMap<ConnId, mpsc::Sender<Frame>>>>,
@@ -122,20 +125,6 @@ impl ConnRegistry {
             .remove(&id);
     }
 
-    /// 테스트가 fanout 대상을 심는 경로 — 운영 등록은 `handle_connection` 만 한다(alloc_id + register).
-    ///
-    /// ★왜 필요한가★: 등록 경로가 이 모듈 private 이라 **다른 모듈의 단위 테스트**(`status_fanout`)가
-    ///   소켓 없이 전-연결 fanout 을 관측할 수 없다. 위 `contains` 와 같은 이유·같은 형태(`#[cfg(test)]`)라
-    ///   운영 가시성은 그대로다 — 운영 빌드엔 이 함수가 존재하지 않는다.
-    /// ★crate 분리 후엔 이 자리가 사라진다★: 팬아웃이 포트가 되면(ADR-0129 결정 3) 위층 테스트는 가짜
-    ///   포트를 쓰므로 레지스트리 내부에 닿을 이유가 없다. 그때까지의 과도기 seam 이다.
-    #[cfg(test)]
-    pub(crate) fn register_for_test(&self, tx: mpsc::Sender<Frame>) -> ConnId {
-        let id = self.alloc_id();
-        self.register(id, tx);
-        id
-    }
-
     /// 이 conn 이 아직 fanout 대상인지 — 테스트가 cleanup 순서(정리 후 등록 해제)를 관측한다.
     #[cfg(test)]
     pub(crate) fn contains(&self, id: ConnId) -> bool {
@@ -144,20 +133,27 @@ impl ConnRegistry {
             .expect("conn registry poisoned")
             .contains_key(&id)
     }
+}
 
+/// 전-연결 팬아웃 포트의 WS 구현. 위층은 이 trait 으로만 레지스트리에 닿으므로 등록·해제·id 발급
+/// (연결 수명 = 네트워크 살림)에는 손이 닿지 않는다.
+// ADR-0129
+impl FrameFanout for ConnRegistry {
     /// 전 연결에 Text 브로드캐스트(try_send). full 인 연결은 느린 것으로 보고 로그만.
-    pub(crate) fn broadcast_text(&self, text: String) {
+    ///
+    /// ★맵을 잠근 채 보내지 않는다(ADR-0006 락 순서)★: 스냅샷을 뜬 뒤 락을 놓고 그 사본으로 send 한다
+    ///   — 락 보유 중 외부(채널)로 나가는 호출을 만들지 않기 위해서다.
+    /// ★포화를 연결 종료로 잇지 않는다★: 연결당 `ConnFrameSink::try_send` 는 여기서 close_signal 을
+    ///   울리지만 팬아웃은 로그만 남기고 다음 연결로 간다(`FrameFanout` 계약의 비대칭).
+    fn broadcast_text(&self, text: String) {
         let conns: Vec<(ConnId, mpsc::Sender<Frame>)> = {
             let guard = self.inner.lock().expect("conn registry poisoned");
             guard.iter().map(|(id, tx)| (*id, tx.clone())).collect()
         };
         for (id, tx) in conns {
-            // try_send 만 — StatusSink 는 pump/manager 스레드(sync)에서 불릴 수 있어 block 금지.
+            // try_send 만 — 위층 호출자가 pump/manager 스레드(sync)일 수 있어 block 금지(`FrameFanout` 의무 1).
             if let Err(e) = tx.try_send(Frame::Text(text.clone())) {
-                tracing::warn!(
-                    conn = id,
-                    "status 브로드캐스트 try_send 실패(느린 소비자): {e}"
-                );
+                tracing::warn!(conn = id, "전-연결 팬아웃 try_send 실패(느린 소비자): {e}");
             }
         }
     }
@@ -265,7 +261,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// `expected_token` 은 daemon.json 의 토큰. `handlers` 는 이 연결에 붙일 위층 핸들러 공장 —
 /// 프레임의 의미(명령 해석·이벤트 인코딩·연결 정리)는 전부 그쪽이 소유하므로, 이 함수는 에이전트
-/// 어휘를 auth 핸드셰이크 말고는 알지 못한다(ADR-0129).
+/// 어휘를 알지 못한다(ADR-0129).
+///
+/// ★`expected_protocol_version` 도 **주입**이다(0-4)★: 토큰과 같은 결로 조립부가 값을 넣어 준다.
+/// 그래서 이 crate 는 "지금 버전이 몇" 을 모르고 **"클라가 말한 숫자가 내가 받은 숫자와 같은가"** 만
+/// 판정한다 — 버전 상수를 여기서 읽으면 그 순간 프로토콜 어휘가 네트워크 행으로 돌아온다.
 // ADR-0129
 pub async fn handle_connection(
     stream: TcpStream,
@@ -273,6 +273,7 @@ pub async fn handle_connection(
     registry: ConnRegistry,
     handlers: Arc<dyn ConnectionHandlerFactory>,
     expected_token: Arc<String>,
+    expected_protocol_version: u32,
     keepalive: KeepaliveConfig,
 ) {
     // 1) WS 업그레이드 + Origin 검사.
@@ -287,8 +288,8 @@ pub async fn handle_connection(
     // 2) 첫 frame(1초 내) → Auth 파싱 + 토큰 상수시간 비교 + 버전 검사.
     match tokio::time::timeout(AUTH_TIMEOUT, ws.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => {
-            match serde_json::from_str::<AgentCommand>(&text) {
-                Ok(AgentCommand::Auth {
+            match serde_json::from_str::<AuthFrame>(&text) {
+                Ok(AuthFrame::Auth {
                     token,
                     protocol_version,
                 }) => {
@@ -302,17 +303,17 @@ pub async fn handle_connection(
                         .await;
                         return;
                     }
-                    if protocol_version != PROTOCOL_VERSION {
+                    if protocol_version != expected_protocol_version {
                         tracing::warn!(
                             %peer,
                             client = protocol_version,
-                            server = PROTOCOL_VERSION,
+                            server = expected_protocol_version,
                             "auth 실패: protocol_version 불일치 — close"
                         );
                         let _ = send_error_and_close(
                             &mut ws,
                             handlers.handshake_error_frame(&format!(
-                                "protocol_version mismatch: client {protocol_version} != server {PROTOCOL_VERSION}"
+                                "protocol_version mismatch: client {protocol_version} != server {expected_protocol_version}"
                             )),
                         )
                         .await;
@@ -320,8 +321,27 @@ pub async fn handle_connection(
                     }
                     tracing::info!(%peer, "auth 성공");
                 }
-                Ok(_) => {
-                    tracing::warn!(%peer, "첫 frame 이 Auth 가 아님 — close");
+                // ★두 실패 문구의 경계가 0-4 로 옮겨졌다(의도)★: 예전엔 "위층 명령으로는 파싱되지만
+                //   auth 가 아님" 이 앞 문구였다. 이제 이 crate 는 위층 명령을 모르므로 그 판정을 못 한다 —
+                //   대신 serde 가 이미 계산해 둔 에러 분류를 쓴다(재파싱 0):
+                //     · data 에러  = JSON 은 맞는데 이 모양이 아님 → "auth 를 기대했다"
+                //     · 그 밖(syntax/eof/io) = 애초에 JSON 이 아님 → "프레임 자체가 잘못됐다"
+                //   그래서 **JSON 으로 파싱되면서 온전한 `AuthFrame` 이 아닌 것 전부**가 뒤 문구에서 앞
+                //   문구로 옮겨간다 — 필드가 빠진 auth 프레임(`{"Auth":{"token":"x"}}`)과 본문이 깨진
+                //   위층 명령(`{"Kill":{"agent_id":1}}`)까지 포함이다(옛 코드는 그 둘을 뒤 문구로 냈다).
+                //   이 문구를 단언하는 테스트는 없고(핸드셰이크 실패는 close 로 관측된다) 발신자 중
+                //   어느 것도 문구로 분기하지 않는다 — 사람이 읽는 진단 텍스트다.
+                // ★에러를 `{e}` 로 싣지 않는다★: `{"Auth":"<토큰>"}` 의 Display 는 그 문자열을 그대로
+                //   내놓아 토큰이 로그로 샌다(`docs/reference/logging-conventions.md`). 분류와 위치만
+                //   남긴다 — 회귀 방어는 아래 `auth_parse_failure_log_fields_do_not_carry_the_payload`.
+                Err(e) if e.is_data() => {
+                    tracing::warn!(
+                        %peer,
+                        kind = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "첫 frame 이 Auth 가 아님 — close"
+                    );
                     let _ = send_error_and_close(
                         &mut ws,
                         handlers.handshake_error_frame("expected Auth as first frame"),
@@ -329,8 +349,15 @@ pub async fn handle_connection(
                     .await;
                     return;
                 }
+                // 위 갈래와 같은 이유로 Display 를 싣지 않는다(토큰이 이 갈래로도 올 수 있다).
                 Err(e) => {
-                    tracing::warn!(%peer, "첫 frame 파싱 실패: {e} — close");
+                    tracing::warn!(
+                        %peer,
+                        kind = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "첫 frame 파싱 실패 — close"
+                    );
                     let _ = send_error_and_close(
                         &mut ws,
                         handlers.handshake_error_frame("invalid first frame"),
@@ -385,7 +412,7 @@ pub async fn handle_connection(
     //    ★소비자보다 먼저다★: write_task 는 아직 없으므로 여기서 넣은 프레임은 큐에 쌓이기만 한다
     //    (그 제약이 ConnectionHandler::on_connect 의 계약). 순서상 여기가 두 task 스폰보다 앞이어야
     //    명령 dispatch 가 인사보다 앞설 수 없다. ★단 "연결의 첫 프레임" 보장은 아니다★ — 등록이 이미
-    //    끝났으므로 status fanout 이 그 사이 큐에 먼저 들어갔을 수 있다.
+    //    끝났으므로 전-연결 팬아웃이 그 사이 큐에 먼저 들어갔을 수 있다.
     handler.on_connect(conn_id, &frames).await;
     // ★관측만 하고 흐름은 바꾸지 않는다★: 패닉을 쓰지 않는 이유는 여기서 죽으면 아래 정리 훅과
     //   레지스트리 해제를 통째로 건너뛴 채 죽은 큐가 fanout 대상으로 남기 때문이다(HEAD 에 없던 종료 경로).
@@ -396,7 +423,7 @@ pub async fn handle_connection(
     if conn_tx.capacity() == 0 {
         tracing::warn!(
             conn = conn_id,
-            "on_connect 반환 시점에 연결 큐가 가득 찼다 — 한 프레임만 더 넣었으면 writer 기동 전에 영구 대기했을 것(핸들러 푸시 + 등록 후 status fanout 합계)"
+            "on_connect 반환 시점에 연결 큐가 가득 찼다 — 한 프레임만 더 넣었으면 writer 기동 전에 영구 대기했을 것(핸들러 푸시 + 등록 후 전-연결 팬아웃 합계)"
         );
     }
 
@@ -628,28 +655,9 @@ async fn read_task<S>(
 mod tests {
     use super::*;
 
-    // ── 1. Auth 직렬화 roundtrip ────────────────────────────────────────────
-    #[test]
-    fn auth_command_roundtrip() {
-        let cmd = AgentCommand::Auth {
-            token: "deadbeef".repeat(8), // 64자
-            protocol_version: PROTOCOL_VERSION,
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let back: AgentCommand = serde_json::from_str(&json).unwrap();
-        match back {
-            AgentCommand::Auth {
-                token,
-                protocol_version,
-            } => {
-                assert_eq!(token, "deadbeef".repeat(8));
-                assert_eq!(protocol_version, PROTOCOL_VERSION);
-            }
-            _ => panic!("Auth 가 아님"),
-        }
-    }
-
-    // (kind_to_action 매핑 테스트는 connection_core.rs 로 이동 — 함수가 거기 있음.)
+    // (1. Auth 직렬화 테스트는 `auth.rs` 로 이동 — 타입이 거기 있고, 형태 대조를 **golden JSON 문자열**로
+    //  바꿨다. 옛 형태는 위층 명령 enum 과의 round-trip 이라 0-4 가 지운 import 를 테스트가 되살렸다.)
+    // (kind_to_action 매핑 테스트는 데몬 crate 의 connection_core.rs 로 이동 — 함수가 거기 있음.)
 
     // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────
     #[test]
@@ -666,6 +674,24 @@ mod tests {
         assert!(!constant_time_eq(&a, &almost));
         // 빈 문자열 동일.
         assert!(constant_time_eq("", ""));
+    }
+
+    // ── 2b. auth 파싱 실패 로그에 페이로드가 실리지 않는다 ─────────────────────
+    #[test]
+    fn auth_parse_failure_log_fields_do_not_carry_the_payload() {
+        // 전제부터 못 박는다: serde 의 Display 는 **실제로** 토큰을 싣는다. 그래서 `handle_connection`
+        //   의 두 실패 갈래가 `{e}` 대신 분류·위치만 로깅한다(`docs/reference/logging-conventions.md`).
+        let token = "deadbeef".repeat(8); // 운영과 같은 64자
+        let e = serde_json::from_str::<AuthFrame>(&format!(r#"{{"Auth":"{token}"}}"#)).unwrap_err();
+        assert!(
+            e.to_string().contains(&token),
+            "Display 가 토큰을 싣지 않으면 이 테스트가 지키는 게 없다: {e}"
+        );
+        let logged = format!("{:?} {} {}", e.classify(), e.line(), e.column());
+        assert!(
+            !logged.contains(&token),
+            "로깅 필드에 토큰이 실렸다: {logged}"
+        );
     }
 
     // ── 3. Frame 매핑(Text/Binary/Close → Message) ───────────────────────────
@@ -765,8 +791,93 @@ mod tests {
         }
     }
 
-    // (6. Subscribe control 순서 테스트는 connection_core.rs 로, 7·7b·9b 의 flush/도어벨 테스트는
-    //  messaging_host.rs 로 이동 — 검증 대상이 거기 있음. ADR-0129)
+    // ── 4d. ConnRegistry: 전-연결 팬아웃 — 포화한 연결 하나가 나머지를 막지 않는다(ADR-0129) ──
+    #[test]
+    fn broadcast_text_copies_the_text_to_every_connection_that_can_take_it() {
+        // ★`FrameFanout` 계약의 두 항을 여기서 못 박는다★: ① 넘겨받은 text 를 연결마다 **같은 바이트**로
+        //   복제한다 ② 큐가 포화한 연결은 건너뛰고 **나머지 배달을 계속**한다. 위층(상태 통지·목록
+        //   브로드캐스트)은 연결을 볼 수 없으므로 이 둘을 관측할 수 있는 자리는 여기뿐이다. ②가 깨지면
+        //   슬로우 클라 하나가 전 클라의 갱신을 세운다.
+        // ★포화를 종료 신호로 잇지 않는다★: 연결당 `ConnFrameSink::try_send`(위 4.)와 다른 점 — 여기선
+        //   경고 로그만 남기고 다음 연결로 간다. 그 비대칭 자체는 4./4b. 가 지킨다.
+        //
+        // ★반복하는 이유 = 매 회차 HashMap 순회 순서를 다시 뽑으려는 것(패딩 아님)★: `broadcast_text` 는
+        //   레지스트리 맵을 순회해 Vec 으로 뜨므로 방문 순서가 곧 배달 순서다.
+        //   - **정상 코드는 순서와 무관하게 통과한다** → 이 루프가 위양성(flake)을 만들 수는 없다. 반복이
+        //     바꾸는 것은 오직 **탐지력**이다.
+        //   - 잡으려는 회귀 = "첫 try_send 실패에서 fanout 중단". 그 회귀는 포화 연결이 **마지막에** 방문된
+        //     회차에서는 멀쩡한 연결들이 이미 다 받은 뒤라 살아남는다(S18.17 이 기록한 "포화 경로를 한 번도
+        //     안 밟고 통과" 와 같은 부류). 그래서 회차마다 **새 레지스트리**로 순서를 다시 뽑는다.
+        //     ※ 같은 레지스트리를 재사용하면 순서가 고정돼 반복이 무의미하다(그래서 루프 **안**에서 만든다).
+        // ★탐지력은 경험적이지 증명이 아니다(정직 명시)★: std 는 `RandomState` 가 인스턴스마다 다른 씨앗을
+        //   쓴다고만 하고, **인스턴스 간 순서 독립성도 특정 분포도 보장하지 않는다**. 그러니 "K회면 놓칠 확률
+        //   2^-K" 같은 계산을 여기 적을 근거가 없다 — 그건 관측을 보장으로 격상하는 것이다.
+        //   ★실측(2026-08-04 · 이 형태 = 포화 1 + 멀쩡 2)★: 위 회귀를 심고 **10회 시도 전부** 잡혔다.
+        //   잡히는 회차도, 굶은 연결(ok0/ok1)도 실행마다 달랐다 — 순서가 실제로 매 회차 다시 뽑힌다는
+        //   증거. **보장이 아니라 측정치다.**
+        // ★결정적 탐지를 원하면 순회 순서를 통제해야 한다★ = `ConnRegistry` 의 맵 타입 교체(정렬 맵 등).
+        //   이사 슬라이스(ADR-0129)의 범위 밖이라 하지 않는다 — 이게 **하드 보장**이어야 할 날이 오면 그때
+        //   그 교체가 정공법이고, 그 전까지 K 는 탐지력 손잡이일 뿐이다(임계값 튜닝 대상 아님 — ADR-0038).
+        // ★멀쩡한 연결을 2개 두는 이유★: 포화가 **가운데**에 오는 배치까지 덮는다. 회귀가 한 회차를
+        //   살아남으려면 포화 연결이 **맨 뒤**에 와야 하는데, 멀쩡한 연결이 1개면 "뒤" 가 두 자리 중
+        //   하나이고 2개면 세 자리 중 하나다 — 즉 회차당 생존 여지가 좁아진다(분포 보장이 없으므로
+        //   이것도 확률 계산이 아니라 **자리 수 논증**이다).
+        const K: usize = 20;
+        const PAYLOAD: &str = "opaque-fanout-payload";
+        for round in 0..K {
+            let registry = ConnRegistry::new();
+            // 운영 등록 경로(alloc_id + register)를 그대로 쓴다 — 같은 모듈이라 테스트 전용 seam 이 필요 없다.
+            let register = |tx: mpsc::Sender<Frame>| {
+                let id = registry.alloc_id();
+                registry.register(id, tx);
+            };
+            let (full_tx, mut full_rx) = mpsc::channel::<Frame>(1);
+            full_tx
+                .try_send(Frame::Text("선점".into()))
+                .expect("cap 1 을 미리 채운다");
+            register(full_tx);
+            let mut oks: Vec<mpsc::Receiver<Frame>> = (0..2)
+                .map(|_| {
+                    let (ok_tx, ok_rx) = mpsc::channel::<Frame>(8);
+                    register(ok_tx);
+                    ok_rx
+                })
+                .collect();
+
+            registry.broadcast_text(PAYLOAD.to_string());
+
+            // 포화 연결엔 새 프레임이 못 들어갔다(선점 프레임만 남아 있다).
+            assert!(
+                matches!(full_rx.try_recv(), Ok(Frame::Text(s)) if s == "선점"),
+                "round {round}: 포화 연결엔 선점 프레임만 있어야"
+            );
+            assert!(
+                full_rx.try_recv().is_err(),
+                "round {round}: 포화 연결은 이번 건을 못 받는다"
+            );
+            // 그래도 멀쩡한 연결은 **전부** 받는다 — 포화 연결의 방문 위치와 무관하게.
+            // ★분기마다 회차·연결 번호를 메시지에 담는다★: 잡는 회귀("첫 포화에서 중단")는 "아무것도 못
+            //   받음" 으로 나타나므로, 일반 메시지로는 어느 회차가 걸렸는지 안 보인다.
+            for (n, ok_rx) in oks.iter_mut().enumerate() {
+                match ok_rx.try_recv() {
+                    Ok(Frame::Text(s)) => assert_eq!(
+                        s, PAYLOAD,
+                        "round {round}/ok{n}: 넘겨받은 text 를 그대로 복제해야"
+                    ),
+                    other => panic!(
+                        "round {round}/ok{n}: 멀쩡한 연결이 프레임을 못 받았다(fanout 이 첫 실패에서 멈춘 회귀): {other:?}"
+                    ),
+                }
+                assert!(
+                    ok_rx.try_recv().is_err(),
+                    "round {round}/ok{n}: 팬아웃 1회는 연결당 정확히 1프레임"
+                );
+            }
+        }
+    }
+
+    // (6. Subscribe control 순서 테스트는 데몬 crate 의 connection_core.rs 로, 7·7b·9b 의 flush/도어벨
+    //  테스트는 같은 crate 의 messaging_host.rs 로 이동 — 검증 대상이 거기 있음. ADR-0129)
 
     // ── 10. (적용4-1) OriginCheck::on_request 분기 — 무방비 였던 거부/허용 분기 검증 ──────
     //    순수 헤더 검사라 in-process 서버 불필요. Request 를 직접 만들어 콜백을 호출한다.
@@ -1161,11 +1272,43 @@ mod tests {
 
     // ── 12. handle_connection 순서 계약(ADR-0129) ─────────────────────────────────
 
+    /// 이 crate 의 테스트가 쓰는 임의 프로토콜 버전. ★실제 운영 버전과 일부러 다른 값★ — 서버가
+    /// 상수를 도로 읽는 회귀가 생기면 이 값과 어긋나 테스트가 깨진다(주입 경로의 존재 증명).
+    ///
+    /// ★이름에 그 버전 상수명을 이어 붙이지 말 것★: lib.rs 헤더의 게이트 4 는 **부분 문자열**을 훑어서
+    /// `TEST_(P)ROTOCOL_VERSION` 같은 지역 이름도 물어 버린다(실측 — 처음 이 이름으로 썼다가 걸렸다.
+    /// 이 주석이 괄호 형태인 것도 같은 이유다).
+    /// 그 넓음은 의도된 것이다: 이 crate 안에 프로토콜 버전 **비슷한 것조차** 두지 않겠다는 뜻이라,
+    /// 회피가 아니라 이름을 다르게 짓는 게 맞는 대응이다.
+    const TEST_WIRE_VERSION: u32 = 4242;
+
     /// 테스트 서버 1개를 띄우고 인증까지 마친 클라이언트를 돌려준다(공통 뼈대).
     async fn serve_one(
         registry: ConnRegistry,
         fake: Arc<FakeHandler>,
         keepalive: KeepaliveConfig,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        serve_one_with_versions(
+            registry,
+            fake,
+            keepalive,
+            TEST_WIRE_VERSION,
+            TEST_WIRE_VERSION,
+        )
+        .await
+    }
+
+    /// `serve_one` 의 버전 파라미터화 판 — 서버가 **주입받은** 기대 버전과 클라가 **보내는** 버전을
+    /// 따로 준다(버전 게이트 검증용).
+    async fn serve_one_with_versions(
+        registry: ConnRegistry,
+        fake: Arc<FakeHandler>,
+        keepalive: KeepaliveConfig,
+        server_expects: u32,
+        client_sends: u32,
     ) -> (
         tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
         tokio::task::JoinHandle<()>,
@@ -1181,6 +1324,7 @@ mod tests {
                 registry,
                 factory,
                 Arc::new("tok".to_string()),
+                server_expects,
                 keepalive,
             )
             .await;
@@ -1189,13 +1333,61 @@ mod tests {
         let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let auth = serde_json::to_string(&AgentCommand::Auth {
+        let auth = serde_json::to_string(&AuthFrame::Auth {
             token: "tok".to_string(),
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: client_sends,
         })
         .unwrap();
         client.send(Message::Text(auth.into())).await.unwrap();
         (client, server)
+    }
+
+    /// ★버전 게이트가 **주입값**을 본다(0-4)★: 서버는 상수를 읽지 않으므로, 클라가 다른 숫자를 보내면
+    /// 거부하고 그 두 숫자를 문구에 실어야 한다. 상수 하드코딩 회귀(예: 어디선가 3 을 도로 읽기)는
+    /// 이 두 숫자 중 하나를 틀리게 만든다.
+    #[tokio::test]
+    async fn auth_rejects_version_mismatch_using_the_injected_expectation() {
+        let registry = ConnRegistry::new();
+        let fake = Arc::new(FakeHandler::new(None));
+        let (mut client, server) = serve_one_with_versions(
+            registry.clone(),
+            fake.clone(),
+            KeepaliveConfig::default(),
+            TEST_WIRE_VERSION,
+            TEST_WIRE_VERSION + 1,
+        )
+        .await;
+
+        // 실패 통보(FakeFactory 는 메시지를 그대로 text 로 내준다) → 그 뒤 close.
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("거부 통보가 와야")
+            .expect("스트림이 살아 있어야")
+            .expect("프레임 수신");
+        match msg {
+            Message::Text(t) => assert_eq!(
+                t.as_str(),
+                format!(
+                    "protocol_version mismatch: client {} != server {}",
+                    TEST_WIRE_VERSION + 1,
+                    TEST_WIRE_VERSION
+                ),
+                "두 숫자 모두 주입값 기준이어야(상수 하드코딩이면 어긋난다)"
+            ),
+            other => panic!("Text 거부 통보여야: {other:?}"),
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("버전 불일치면 handle_connection 이 반환해야")
+            .unwrap();
+        // 등록까지 가지 않았다 — 인증 실패는 레지스트리 등록 **전**이다.
+        assert!(!registry.contains(1), "인증 실패 연결은 등록되지 않는다");
+        assert_eq!(
+            fake.calls(),
+            Vec::<String>::new(),
+            "인증 실패면 위층 핸들러가 아예 붙지 않는다"
+        );
     }
 
     /// 실제 `handle_connection` 이 지키는 세 순서를 고정한다 — read_task 하네스로는 못 잡는 것들:

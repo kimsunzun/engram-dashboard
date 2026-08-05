@@ -1,8 +1,9 @@
 //! 단일 연결 task(actor) 본체 + Auth/Hello 핸드셰이크 (S14 모듈① T2, ADR-0036).
 //!
-//! 데몬 WS 서버(`crates/engram-dashboard-daemon/src/ws.rs`)의 **대칭 클라이언트**다. 서버측 기대:
-//!   1) WS 업그레이드 후 **1초 내 첫 frame 이 `AgentCommand::Auth`(Text JSON)** 여야 한다 — 아니면
-//!      서버가 Error 후 close(ws.rs `handle_connection` step 2 / AUTH_TIMEOUT).
+//! 데몬 WS 서버(`crates/engram-dashboard-net/src/ws.rs` — ADR-0129 로 데몬 crate 에서 이사)의
+//! **대칭 클라이언트**다. 서버측 기대:
+//!   1) WS 업그레이드 후 **1초 내 첫 frame 이 핸드셰이크 프레임(`AuthFrame`, Text JSON)** 이어야 한다
+//!      — 아니면 서버가 Error 후 close(`handle_connection` step 2 / AUTH_TIMEOUT).
 //!   2) 토큰·protocol_version 일치 시 서버가 `AgentEvent::Hello`(Text JSON) → `AgentListUpdated`
 //!      를 push 한다(ws.rs step 4 `hello_event`). 불일치면 Error 후 close.
 //! 그래서 이 task 는 소켓 open 직후 **가장 먼저 Auth 를 보내고**, 첫 Hello 를 internal 소비해
@@ -19,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// ADR-0129 0-4: 핸드셰이크 프레임의 모양은 네트워크 lib 소유다(명령 enum 이 아니다).
+use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{
     decode_frame, AgentCommand, AgentEvent, AgentId, DaemonInfo, PROTOCOL_VERSION,
 };
@@ -302,6 +305,25 @@ impl Handshaked {
     }
 }
 
+// 첫 frame(핸드셰이크) text 를 만든다 — 데몬은 연결 1초 안에 이걸 기대한다(네트워크 lib 의 AUTH_TIMEOUT).
+//
+// ★단일 산출점(2026-08-05 통합)★: `handshake` 와 `handshake_cancellable` 이 **각자** 같은 프레임을
+// 조립하고 있었다. 그 중복이 위험한 이유는 아래 Fix C 불변식이 **두 벌**이었다는 것 — 한쪽만 고치면
+// 재연결 경로에서만 조용히 게이트가 죽는다. 그래서 조립을 여기로 모았다(에러 처리는 두 함수의 반환
+// 타입이 달라 각자 남는다 — 이 함수는 serde 에러를 그대로 올린다).
+//
+// ★Fix C — protocol_version 은 **우리가 컴파일된 PROTOCOL_VERSION**(protocol crate)이다★:
+// `DaemonInfo` 가 준 값을 되쏘면(echo) 서버의 버전 비교가 항상 통과해 버전 게이트가 무력화된다.
+// 불일치 시 서버가 거부하는 게 의도된 게이트다(discovery 의 `build_auth_command` 와 동형).
+// ★타입 출처(ADR-0129 0-4)★: 프레임 모양은 네트워크 lib 소유(`AuthFrame`) — 명령 enum 이 아니다.
+// ★token 은 wire 로만★(로그·에러에 미노출).
+fn auth_frame_text(info: &DaemonInfo) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&AuthFrame::Auth {
+        token: info.token.clone(),
+        protocol_version: PROTOCOL_VERSION,
+    })
+}
+
 // 1회 소켓 열기 + Auth 송신 + Hello 대기(=인증 성공). 성공 시 split 된 소켓을 돌려준다. 공유 상태
 // 전이(Connected/Down)는 **호출자가** 가드(publish_if_current)와 함께 결정한다 — 첫 연결은 ready 보고가
 // 딸리고 재연결은 안 딸려, 그 분기를 호출자에 두는 게 깔끔하다(이 함수는 순수 소켓 핸드셰이크만 —
@@ -335,16 +357,8 @@ async fn handshake(
     // 2) split — 이 task 가 read(stream)/write(sink) 양쪽을 단독 소유한다(Mutex 없음).
     let (mut sink, mut stream) = ws.split();
 
-    // 3) ★첫 frame = Auth(Text JSON)★: 데몬 ws.rs 가 1초 내 첫 frame 으로 이걸 기대한다(AUTH_TIMEOUT).
-    //    ★Fix C★ protocol_version 은 **우리가 컴파일된 PROTOCOL_VERSION**(protocol crate)을 보낸다
-    //    — DaemonInfo 가 준 값을 되쏘면(echo) 서버 버전 비교(ws.rs)가 항상 통과해 버전 게이트가
-    //    무력화된다. 버전 불일치 시 서버가 거부하는 게 의도된 게이트(discovery/lib.rs build_auth_command
-    //    과 동형). token 은 wire 로만(로그/에러 미노출).
-    let auth = AgentCommand::Auth {
-        token: info.token.clone(),
-        protocol_version: PROTOCOL_VERSION,
-    };
-    let auth_text = match serde_json::to_string(&auth) {
+    // 3) ★첫 frame = Auth(Text JSON)★ — 조립은 `auth_frame_text`(이 파일의 단일 산출점).
+    let auth_text = match auth_frame_text(info) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(generation = my_gen, "Auth 직렬화 실패: {e}");
@@ -440,11 +454,8 @@ async fn handshake_cancellable(
     let (mut sink, mut stream) = ws.split();
 
     // 3) Auth 송신 — 소켓이 이미 열렸으므로 여기부터 취소되면 self-close 로 정리한다(stale 소켓 점유 차단).
-    let auth = AgentCommand::Auth {
-        token: info.token.clone(),
-        protocol_version: PROTOCOL_VERSION,
-    };
-    let auth_text = match serde_json::to_string(&auth) {
+    //    조립은 `handshake` 와 **같은 산출점**(auth_frame_text) — 두 벌로 갈라져 있던 것을 합쳤다.
+    let auth_text = match auth_frame_text(info) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(generation = my_gen, "Auth 직렬화 실패: {e}");

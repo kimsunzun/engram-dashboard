@@ -11,10 +11,11 @@
 //! - **R6 close_signal**: 큐 포화 out-of-band 종료는 WS-특정 → sink 구현(어댑터)이 SinkError
 //!   해석으로 처리한다. 코어는 SinkError 만 본다(이 모듈은 close_signal 을 모른다).
 //!
-//! ★status fanout(broadcast)은 어댑터 디테일★: lease/profile 변경의 전-연결 브로드캐스트는
-//! per-conn 응답(OutboundSink)이 아니라 `ConnRegistry`(carrier 별 fanout)로 간다. Stage 1 은
-//! 동작 0 변경이므로 registry 를 ConnectionCore 가 참조로 들고 기존 broadcast 를 그대로 한다
-//! (carrier-중립 fanout sink 로의 추상화는 Stage 2+ 작업).
+//! ★status fanout(broadcast)도 carrier-중립이다★: lease/profile 변경의 전-연결 브로드캐스트는
+//! per-conn 응답(OutboundSink)이 아니라 `engram_dashboard_net::frame_port::FrameFanout`(전-연결
+//! 출구)으로 간다 —
+//! 인코딩된 text 하나를 넘길 뿐이라 연결이 몇 개인지도, 누가 등록돼 있는지도 이 모듈은 모른다
+//! (ADR-0129 — Stage 1 이 registry 실물을 들던 자리가 포트로 바뀌었다).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,9 +54,8 @@ use engram_dashboard_protocol::{
 use tokio::sync::watch;
 
 use crate::control::registry::ControlRegistry;
-use crate::frame_port::ConnId;
-use crate::ws::ConnRegistry;
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
+use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
 //
@@ -587,19 +587,25 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 
 // ── ConnectionCore ────────────────────────────────────────────────────────────────
 
-/// transport-중립 연결 코어. dispatch + 멀티뷰어 협상 + (Stage 1 한정) status fanout registry.
-/// 연결마다가 아니라 **서버 전체에 1개** — manager/multiview/registry 는 전 연결이 공유한다.
-/// per-conn 상태는 `ConnectionSession` 으로 dispatch 에 주입한다.
+/// transport-중립 연결 코어. dispatch + 멀티뷰어 협상 + 전-연결 팬아웃 출구.
+///
+/// ★이 struct 는 **연결마다 새로 만들어진다**(`agent_conn::AgentConnections::handler_for`)★. 서버 전체에
+/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 아래 6개
+/// (manager · multiview · fanout · control_registry · messaging · shutdown_tx)가 전부 그렇다.
+/// ★그래서 새 필드를 넣을 때 반드시 확인할 것★: 공유 핸들이 아닌 값을 여기 넣으면 "서버 전체 1개" 로
+/// 읽히는 자리에 조용히 **연결마다 별개**인 상태가 생긴다. 연결 고유 상태의 자리는 `ConnectionSession`
+/// (dispatch 에 주입)이다.
 pub struct ConnectionCore {
     manager: Arc<AgentManager>,
     multiview: MultiViewState,
-    /// status/lease/profile 브로드캐스트용. ★Stage 1 한정★: ADR-0020 R6/§5 대로 fanout 은
-    /// carrier 디테일이라 추상 sink 로 안 올리고, behavior-preserving 위해 registry 를 그대로 든다.
-    registry: ConnRegistry,
+    /// status/lease/profile 브로드캐스트용 전-연결 출구. carrier 디테일(연결 등록·해제)은 포트
+    /// 너머라 여기서 표현할 수 있는 것은 "전부에게 이 text" 하나뿐이다(ADR-0129).
+    // ADR-0129
+    fanout: Arc<dyn FrameFanout>,
     /// ★제어 채널 레지스트리(ADR-0086)★ — 봉투 포맷 전역 상태(ADR-0096)의 거처. SetEnvelopeFormat
     ///   dispatch 가 여기 `set_envelope_format` 을 부른다. handle_send(MCP/CLI 입구)가 relay 마다 읽는
-    ///   그 **같은 Arc** 다(전역 상태 하나 — 두 봉투 조립 경로가 동일 값을 본다). ConnRegistry(위)와
-    ///   다른 타입임에 주의: 저건 연결 fanout, 이건 제어 채널 토큰·봉투 포맷 상태.
+    ///   그 **같은 Arc** 다(전역 상태 하나 — 두 봉투 조립 경로가 동일 값을 본다). 위 `fanout` 과 다른
+    ///   것임에 주의: 저건 전-연결 출구, 이건 제어 채널 토큰·봉투 포맷 상태.
     // ADR-0096
     control_registry: Arc<ControlRegistry>,
     /// ★메시징 커널 늦은 주입 슬롯(ADR-0116 결정 3 — 프로필 삭제 정리 배선)★: `DeleteProfile` dispatch 가
@@ -617,7 +623,7 @@ impl ConnectionCore {
     pub fn new(
         manager: Arc<AgentManager>,
         multiview: MultiViewState,
-        registry: ConnRegistry,
+        fanout: Arc<dyn FrameFanout>,
         control_registry: Arc<ControlRegistry>,
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         shutdown_tx: watch::Sender<bool>,
@@ -625,7 +631,7 @@ impl ConnectionCore {
         Self {
             manager,
             multiview,
-            registry,
+            fanout,
             control_registry,
             messaging,
             shutdown_tx,
@@ -637,9 +643,9 @@ impl ConnectionCore {
         &self.multiview
     }
 
-    /// registry 접근(어댑터 cleanup 의 lease-freed 브로드캐스트에 사용).
-    pub fn registry(&self) -> &ConnRegistry {
-        &self.registry
+    /// 팬아웃 포트 접근(어댑터 cleanup 의 lease-freed 브로드캐스트에 사용).
+    pub fn fanout(&self) -> &dyn FrameFanout {
+        self.fanout.as_ref()
     }
 
     /// manager 접근(어댑터 cleanup 의 unsubscribe/resize 에 사용).
@@ -664,7 +670,7 @@ impl ConnectionCore {
 
         let manager = &self.manager;
         let multiview = &self.multiview;
-        let registry = &self.registry;
+        let fanout = self.fanout.as_ref();
         let conn_id = session.conn_id;
         let subs = &session.subs;
         let owned_viewports = &session.owned_viewports;
@@ -682,11 +688,15 @@ impl ConnectionCore {
         }
 
         match cmd {
-            // 2번째 Auth 는 무시(Error 만 — 이미 인증된 연결).
-            AgentCommand::Auth { .. } => {
-                send_error(sink, None, "already authenticated".into());
-            }
-
+            // ★2번째 Auth arm 은 여기 없다(ADR-0129 0-4)★: 핸드셰이크 프레임이 이 enum 을 떠나
+            //   네트워크 lib 소유가 됐으므로, 인증 뒤 도착한 Auth 프레임은 **명령으로 디코드되지 않는다**.
+            //   그 응답("already authenticated")은 디코드 지점인 `agent_conn::AgentConnection::on_text`
+            //   이 태그로 되잡아 그대로 낸다 — 회귀 방어는 `ws_e2e` case21 이다.
+            //   ★불변인 것과 바뀐 것을 구분할 것★: 온전한 2차 핸드셰이크가 받는 **응답 문구**는 그대로다.
+            //   어긋난 프레임이 받는 **진단 텍스트**는 바뀌었다 — Auth 태그를 단 어긋난 프레임은 이제 그
+            //   태그 판정에 걸려 같은 "already authenticated" 를 받고(옛 경로는 이 arm 까지 와서 serde 의
+            //   필드 누락 오류를 냈다), 그 밖의 프레임이 받는 "unknown variant" 문구의 기대 목록에서는
+            //   `Auth` 가 빠졌다. case23 이 보는 것은 그 목록이 아니라 `invalid command` 접두다.
             AgentCommand::Spawn {
                 profile_id,
                 request_id,
@@ -802,7 +812,7 @@ impl ConnectionCore {
                 // 멱등(Ack, 상태 변경 없음 → 브로드캐스트 생략). 타 conn 보유면 Error.
                 match multiview.acquire(agent_id, conn_id) {
                     Ok(true) => {
-                        broadcast_lease_changed(registry, agent_id, true);
+                        broadcast_lease_changed(fanout, agent_id, true);
                         reply(sink, request_id, Ok(()));
                     }
                     Ok(false) => reply(sink, request_id, Ok(())), // idempotent
@@ -822,7 +832,7 @@ impl ConnectionCore {
                 // 멱등(Ack). 타 conn 이 보유 중이면 Error(남의 lease 를 뺏지 못함).
                 match multiview.release(agent_id, conn_id) {
                     Ok(true) => {
-                        broadcast_lease_changed(registry, agent_id, false);
+                        broadcast_lease_changed(fanout, agent_id, false);
                         reply(sink, request_id, Ok(()));
                     }
                     Ok(false) => reply(sink, request_id, Ok(())), // 원래 비어 있음
@@ -967,7 +977,7 @@ impl ConnectionCore {
                             profile: wire,
                         }));
                         // 생성은 공유 상태 변경 → 나머지 연결엔 갱신된 목록 broadcast.
-                        broadcast_profile_list(registry, manager);
+                        broadcast_profile_list(fanout, manager);
                     }
                     Err(e) => reply(sink, request_id, Err(e.to_string())),
                 }
@@ -994,7 +1004,7 @@ impl ConnectionCore {
                     .map(|p| p.canonical_name_when_live());
                 manager.delete_agent(profile_id);
                 reply(sink, request_id, Ok(()));
-                broadcast_profile_list(registry, manager);
+                broadcast_profile_list(fanout, manager);
                 // ★게이트는 커널이 **프로필 id** 로 판정한다(리뷰 fix D1 — load-bearing)★: 이름으로 물으면
                 //   지금 이 순간 이후로 그 산 세션의 canonical 이름이 **바뀌기 때문에**(프로필이 사라져
                 //   `display_name` override 가 없어지고 `basename(session.cwd)` 로 강등된다) 게이트가 늘 헛돌아
@@ -1074,7 +1084,7 @@ impl ConnectionCore {
                 let ok = manager.set_agent_auto_restore(profile_id, auto_restore);
                 if ok {
                     reply(sink, request_id, Ok(()));
-                    broadcast_profile_list(registry, manager);
+                    broadcast_profile_list(fanout, manager);
                 } else {
                     reply(
                         sink,
@@ -1098,7 +1108,7 @@ impl ConnectionCore {
                 match manager.rename_agent(profile_id, name) {
                     CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_) => {
                         reply(sink, request_id, Ok(()));
-                        broadcast_profile_list(registry, manager);
+                        broadcast_profile_list(fanout, manager);
                     }
                     CoreRenameOutcome::NotFound => reply(
                         sink,
@@ -1126,7 +1136,7 @@ impl ConnectionCore {
                 let ok = manager.reparent_agent(child_id, parent_id);
                 if ok {
                     reply(sink, request_id, Ok(()));
-                    broadcast_profile_list(registry, manager);
+                    broadcast_profile_list(fanout, manager);
                 } else {
                     reply(
                         sink,
@@ -1173,7 +1183,7 @@ impl ConnectionCore {
                 // 전 연결에 갱신 목록 broadcast(모든 창 동기화, ADR-0061 불변식).
                 manager.presets().create(std::path::PathBuf::from(cwd));
                 reply(sink, request_id, Ok(()));
-                broadcast_preset_list(registry, manager);
+                broadcast_preset_list(fanout, manager);
             }
 
             AgentCommand::DeletePreset {
@@ -1184,7 +1194,7 @@ impl ConnectionCore {
                 // 없는 id 면 no-op(프로필 DeleteProfile 과 동일하게 Ack). 이후 broadcast.
                 manager.presets().remove(preset_id);
                 reply(sink, request_id, Ok(()));
-                broadcast_preset_list(registry, manager);
+                broadcast_preset_list(fanout, manager);
             }
 
             AgentCommand::RenamePreset {
@@ -1196,7 +1206,7 @@ impl ConnectionCore {
                 // 변경은 공유 PresetRegistry 상태를 바꾸므로 전 연결에 broadcast(모든 창 동기화·낙관 갱신 X).
                 manager.presets().rename(preset_id, name);
                 reply(sink, request_id, Ok(()));
-                broadcast_preset_list(registry, manager);
+                broadcast_preset_list(fanout, manager);
             }
 
             AgentCommand::SetEnvelopeFormat { format, request_id } => {
@@ -1328,35 +1338,35 @@ impl ConnectionCore {
 }
 
 /// 입력 lease 상태 변경을 전 연결에 브로드캐스트(다른 뷰어가 "잠김/해제" 를 알게). 보유자 식별값은
-/// 노출하지 않고 held(bool) 만 — §5(LLM 도 leaseholder 변화를 관측 가능). registry 의 try_send 라
-/// pump/cleanup 등 어느 컨텍스트에서 불려도 안전(block 없음).
-pub(crate) fn broadcast_lease_changed(registry: &ConnRegistry, agent_id: AgentId, held: bool) {
+/// 노출하지 않고 held(bool) 만 — §5(LLM 도 leaseholder 변화를 관측 가능). 팬아웃 포트가 논블록 구현을
+/// 요구하므로 pump/cleanup 등 어느 컨텍스트에서 불려도 안전하다.
+pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentId, held: bool) {
     let ev = AgentEvent::InputLeaseChanged { agent_id, held };
     if let Some(text) = event_json(&ev) {
-        registry.broadcast_text(text);
+        fanout.broadcast_text(text);
     }
 }
 
 /// 현재 프로필 목록을 전 연결에 브로드캐스트(ProfileListUpdated). 프로필 CRUD(생성/삭제/토글)는
 /// 공유 ProfileRegistry 상태를 바꾸므로 모든 뷰어가 최신 목록을 보게 한다(agent_list_updated 와 동형).
-fn broadcast_profile_list(registry: &ConnRegistry, manager: &Arc<AgentManager>) {
+fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     let ev = AgentEvent::ProfileListUpdated {
         profiles: core_profiles_to_wire(manager.agent_snapshots()),
     };
     if let Some(text) = event_json(&ev) {
-        registry.broadcast_text(text);
+        fanout.broadcast_text(text);
     }
 }
 
 /// 현재 프리셋 목록을 전 연결에 브로드캐스트(PresetListUpdated, ADR-0061). 프리셋 CRUD(생성/삭제)는
 /// 공유 PresetRegistry 상태를 바꾸므로 모든 창이 최신 목록을 보게 한다(broadcast_profile_list 와 동형).
 /// ★create/delete 는 반드시 이 broadcast 로 이어진다★(안 그러면 다른 창이 stale — ADR-0061 불변식).
-fn broadcast_preset_list(registry: &ConnRegistry, manager: &Arc<AgentManager>) {
+fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     let ev = AgentEvent::PresetListUpdated {
         presets: core_presets_to_wire(manager.presets().list()),
     };
     if let Some(text) = event_json(&ev) {
-        registry.broadcast_text(text);
+        fanout.broadcast_text(text);
     }
 }
 
@@ -1392,6 +1402,9 @@ pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ADR-0129 슬라이스 1: 포트 계약은 네트워크 crate 소유다. 모듈째 들여와 아래 `frame_port::Frame`
+    //   철자를 그대로 두되(경계는 이 한 줄에서 보인다), 옛 `crate::frame_port::` 경로는 되살리지 않는다.
+    use engram_dashboard_net::frame_port;
     use engram_dashboard_protocol::RequestId;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -1408,16 +1421,14 @@ mod tests {
     struct MockOutboundSink {
         events: Arc<StdMutex<Vec<AgentEvent>>>,
         /// handle_subscribe 가 요구하는 output sink 의 conn_tx(replay binary 가 여기로).
-        conn_tx: tokio::sync::mpsc::Sender<crate::frame_port::Frame>,
-        close_signal: Arc<tokio::sync::Notify>,
+        conn_tx: tokio::sync::mpsc::Sender<frame_port::Frame>,
     }
 
     impl MockOutboundSink {
-        fn new(conn_tx: tokio::sync::mpsc::Sender<crate::frame_port::Frame>) -> Self {
+        fn new(conn_tx: tokio::sync::mpsc::Sender<frame_port::Frame>) -> Self {
             Self {
                 events: Arc::new(StdMutex::new(Vec::new())),
                 conn_tx,
-                close_signal: Arc::new(tokio::sync::Notify::new()),
             }
         }
         fn events(&self) -> Vec<AgentEvent> {
@@ -1431,24 +1442,27 @@ mod tests {
                 Outbound::Event(ev) => {
                     // control 은 conn_tx 에도 흘려(FIFO 검증용) 기록도 남긴다.
                     if let Some(text) = event_json(&ev) {
-                        let _ = self.conn_tx.try_send(crate::frame_port::Frame::Text(text));
+                        let _ = self.conn_tx.try_send(frame_port::Frame::Text(text));
                     }
                     self.events.lock().unwrap().push(*ev);
                     Ok(())
                 }
                 Outbound::Binary(b) => {
-                    let _ = self.conn_tx.try_send(crate::frame_port::Frame::Binary(b));
+                    let _ = self.conn_tx.try_send(frame_port::Frame::Binary(b));
                     Ok(())
                 }
                 Outbound::Close(r) => {
-                    let _ = self.conn_tx.try_send(crate::frame_port::Frame::Close(r));
+                    let _ = self.conn_tx.try_send(frame_port::Frame::Close(r));
                     Ok(())
                 }
             }
         }
         fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
+            // 프레임 출구는 포트 더블 — 네트워크 행 실물(`engram_dashboard_net::ws::ConnFrameSink`)의
+            // 큐 포화 종료 신호는
+            //   그쪽 관심사이고 여기서 보는 것은 "frame 이 큐에 실렸나 / 포화면 Err 인가" 뿐이다.
             let sink = Arc::new(crate::agent_conn::FrameOutputSink::new(Arc::new(
-                crate::ws::ConnFrameSink::new(self.conn_tx.clone(), self.close_signal.clone()),
+                crate::test_doubles::FakeFrameSink::new(self.conn_tx.clone()),
             )));
             let flag = sink.replay_dropped_flag();
             (sink, flag)
@@ -1509,12 +1523,12 @@ mod tests {
             }
         }
 
-        let registry = ConnRegistry::new();
+        // 전-연결 팬아웃 자리는 기록용 더블 — 이 조립엔 연결이 없다. 나간 것을 관측하는 테스트는
+        //   status_fanout 쪽이고, 여기 테스트들은 per-conn sink(mock)로 오는 control 만 본다.
+        let fanout: Arc<dyn FrameFanout> = Arc::new(crate::test_doubles::RecordingFanout::new());
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore::default());
         let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
-        let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(
-            registry.clone(),
-        ));
+        let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone()));
         let profiles = Arc::new(ProfileRegistry::new(store));
         let presets = Arc::new(PresetRegistry::new(preset_store));
         let tracker = Arc::new(SessionTracker::new(
@@ -1529,7 +1543,7 @@ mod tests {
         let core = ConnectionCore::new(
             manager,
             MultiViewState::new(),
-            registry,
+            fanout,
             control_registry,
             // 이 테스트 조립엔 메시징 커널이 없다(빈 슬롯) — `DeleteProfile` 의 삭제 정리 훅은 조용히
             //   건너뛴다. 정리 semantics 자체는 커널 단위 테스트가 지킨다(ADR-0116 — `handle_profile_deleted`).
@@ -1583,7 +1597,7 @@ mod tests {
             waited += 1;
         }
 
-        let (tx, mut conn_rx) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(4608);
+        let (tx, mut conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
 
@@ -1606,14 +1620,14 @@ mod tests {
         assert!(items.len() >= 2, "최소 Ack+ReplayComplete: {}", items.len());
         // 첫 항목은 SubscribeAck Text.
         match &items[0] {
-            crate::frame_port::Frame::Text(s) => {
+            frame_port::Frame::Text(s) => {
                 assert!(s.contains("SubscribeAck"), "1번째는 SubscribeAck: {s}")
             }
             other => panic!("1번째는 Text(SubscribeAck) 여야 함: {other:?}"),
         }
         // 마지막 항목은 ReplayComplete Text.
         match items.last().unwrap() {
-            crate::frame_port::Frame::Text(s) => {
+            frame_port::Frame::Text(s) => {
                 assert!(s.contains("ReplayComplete"), "마지막은 ReplayComplete: {s}")
             }
             other => panic!("마지막은 Text(ReplayComplete) 여야 함: {other:?}"),
@@ -1621,7 +1635,7 @@ mod tests {
         // 중간 항목(있다면)은 전부 Binary(replay frame) 여야 한다 — control 이 끼면 FIFO 깨짐.
         for mid in &items[1..items.len() - 1] {
             assert!(
-                matches!(mid, crate::frame_port::Frame::Binary(_)),
+                matches!(mid, frame_port::Frame::Binary(_)),
                 "Ack 와 ReplayComplete 사이엔 replay Binary 만: {mid:?}"
             );
         }
@@ -1644,7 +1658,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_unknown_agent_emits_error_no_ack() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1666,7 +1680,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_missing_profile_errors() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1690,8 +1704,8 @@ mod tests {
     }
 
     // ── ReparentProfile: 거부(false) → Error(request_id 동봉), Ack/broadcast 없음 (ADR-0072) ──
-    //    broadcast_profile_list 는 registry.broadcast_text 로 나가고 mock sink 은 registry 에
-    //    등록돼 있지 않다 → 거부 경로에서 mock 이 받는 control 은 Error 딱 1건이어야 한다.
+    //    broadcast_profile_list 는 팬아웃 포트로 나가고 mock sink 은 그 포트 뒤에 없다 → 거부 경로에서
+    //    mock 이 받는 control 은 Error 딱 1건이어야 한다.
     //    (성공 경로였다면 mock 에 Ack 가 enqueue 된다 — Ack 부재로 broadcast 분기 스킵을 방증.)
     #[tokio::test]
     async fn reparent_rejected_emits_error_no_ack_no_broadcast() {
@@ -1710,7 +1724,7 @@ mod tests {
         let cid = child.id;
         core.manager.create_agent(child).expect("등록 성공");
 
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1745,7 +1759,7 @@ mod tests {
     #[tokio::test]
     async fn kill_unknown_agent_errors() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1771,7 +1785,7 @@ mod tests {
         // conn 2 가 lease 획득.
         let _ = core.multiview.acquire(agent_id, 2);
         // conn 1 이 write 시도 → Denied → Error(manager 호출 없이).
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1800,7 +1814,7 @@ mod tests {
     async fn acquire_input_acks_and_broadcasts() {
         let (core, _rx) = test_core();
         let agent_id = uuid::Uuid::new_v4();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1819,7 +1833,7 @@ mod tests {
             other => panic!("Ack 기대: {other:?}"),
         }
         // 재획득(같은 conn)은 멱등 Ack.
-        let (tx2, _r) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx2, _r) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock2 = MockOutboundSink::new(tx2);
         core.dispatch(
             AgentCommand::AcquireInput {
@@ -1840,7 +1854,7 @@ mod tests {
     #[tokio::test]
     async fn list_agents_returns_agent_list() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1869,7 +1883,7 @@ mod tests {
             CoreEnvelopeFormat::Xml,
             "초기 봉투 포맷은 xml(기본, ADR-0103)"
         );
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1916,7 +1930,7 @@ mod tests {
     #[tokio::test]
     async fn create_profile_returns_created() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
@@ -1947,7 +1961,7 @@ mod tests {
     #[tokio::test]
     async fn create_profile_stream_json_stores_json_mode() {
         let (core, _rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         core.dispatch(
@@ -1976,7 +1990,7 @@ mod tests {
     #[tokio::test]
     async fn stop_daemon_no_active_closes_and_signals() {
         let (core, mut rx) = test_core();
-        let (tx, _rx2) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(16);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let flow = core
@@ -2328,7 +2342,7 @@ mod tests {
         use engram_dashboard_messaging::SenderIdentity;
 
         let (core, messaging) = test_core_with_messaging();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::frame_port::Frame>(64);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(64);
         let sink = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
 
@@ -2514,7 +2528,7 @@ mod tests {
     //     동기 전송은 output_core.rs 단위테스트가 이미 커버.)
     #[tokio::test]
     async fn subscribe_control_order_ack_then_complete() {
-        use crate::frame_port::Frame;
+        use engram_dashboard_net::frame_port::Frame;
         use engram_dashboard_protocol::{encode_terminal_frame, SubscribeAction};
         use tokio::sync::mpsc;
         let (tx, mut rx) = mpsc::channel::<Frame>(16);
