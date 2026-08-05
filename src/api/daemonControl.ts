@@ -1,6 +1,5 @@
 // DaemonControl — 데몬 lifecycle 제어 표면 (ADR-0021 §5: LLM·UI·트레이 동일 핸들).
 //
-// daemon_start(명시 ensure=spawn 허용) / daemon_stop(graceful 우선, fallback kill) / daemon_status.
 // 사람 UI 클릭·트레이·(미래) 백엔드측 LLM·cdp.mjs 가 모두 이 표면을 통한다(§5 LLM-우선 제어).
 //
 // ★ensure/reconnect 분리(ADR-0021 불변식)★: start 만 spawn 을 유발한다. wsTransport 의 재연결
@@ -29,17 +28,14 @@ export interface DaemonInfo {
   protocol_version: number
 }
 
-/** 데몬 lifecycle 제어(start/stop/status). */
 export interface DaemonControl {
   /** 명시 시작(ensure). 이미 살아있으면 attach, 없으면 spawn. console=true 면 콘솔 창과 함께(디버그). */
   start(opts?: { console?: boolean; timeoutMs?: number }): Promise<DaemonInfo>
   /** 종료. 연결이 살아있으면 StopDaemon(graceful, 자식 정리 후 자진 종료) 먼저, 그 뒤 fallback kill. */
   stop(opts?: { force?: boolean }): Promise<void>
-  /** 상태 조회(alive/pid/port). */
   status(): Promise<DaemonStatus>
 }
 
-/** 실제 구현 — Tauri command + StopDaemon graceful. */
 export class DaemonDaemonControl implements DaemonControl {
   private readonly client: AgentClient
 
@@ -63,7 +59,7 @@ export class DaemonDaemonControl implements DaemonControl {
 
   async stop(opts?: { force?: boolean }): Promise<void> {
     // 1) graceful 우선 — 연결이 살아있으면 StopDaemon AgentCommand 로 데몬이 자식 PTY 를 정리하고
-    //    스스로 내려가게 한다. 연결이 없으면(이미 끊김) 이 단계는 건너뛴다.
+    //    스스로 내려가게 한다.
     let gracefulOk = false
     if (this.client.connectionState === 'connected') {
       try {

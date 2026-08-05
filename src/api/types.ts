@@ -1,7 +1,6 @@
 // Rust 백엔드 타입 미러 — LLD §3 / frontend-integration-lld.md §1
 // 백엔드 #[serde(tag="type")]와 정확히 일치하는 discriminated union.
 
-/** 에이전트 생명주기 상태 — `status.type`으로 분기 */
 export type AgentStatus =
   | { type: 'Running' }
   | { type: 'Exiting' }
@@ -9,25 +8,22 @@ export type AgentStatus =
   | { type: 'Failed'; message: string }
   | { type: 'Killed' }
 
-/** PTY 출력 Channel 페이로드 — data_b64는 base64 인코딩된 raw bytes */
 export interface PtyEvent {
   agent_id: string
   seq: number
-  /** 세션 epoch — WS binary frame 헤더와 동형(BLOCKER 1). InProc 이 이 값으로 epoch 가드를 통과시킨다. */
+  /** 세션 epoch — WS binary frame 헤더와 동형(BLOCKER 1). */
   epoch: number
   data_b64: string
 }
 
 // ── Capabilities (Rust Capabilities 미러, snake_case) ──────────────────────────
 
-/** PTY 입력 채널 지원 여부 */
 export interface InputCaps {
   raw: boolean
   message: boolean
   attachment: boolean
 }
 
-/** 출력 포맷 지원 여부 */
 export interface OutputCaps {
   terminal_bytes: boolean
   /** 구조화 스트림(NDJSON) 여부 — 렌더러 분기(xterm vs RichSlot) 근거 (ADR-0044) */
@@ -37,7 +33,6 @@ export interface OutputCaps {
   usage: boolean
 }
 
-/** 제어 동작 지원 여부 */
 export interface ControlCaps {
   resize: boolean
   interrupt: boolean
@@ -45,21 +40,18 @@ export interface ControlCaps {
   graceful_shutdown: boolean
 }
 
-/** 세션 연속성 지원 여부 */
 export interface SessionCaps {
   resume: boolean
   snapshot: boolean
   cwd_env: boolean
 }
 
-/** 모델 파라미터 제어 지원 여부 */
 export interface ModelCaps {
   select: boolean
   temperature: boolean
   max_tokens: boolean
 }
 
-/** transport 종류별 영역별 capability — AgentInfo에 포함되어 프론트 UI 분기에 사용 */
 export interface Capabilities {
   input: InputCaps
   output: OutputCaps
@@ -68,7 +60,6 @@ export interface Capabilities {
   model: ModelCaps
 }
 
-/** 에이전트 메타데이터 스냅샷 */
 export interface AgentInfo {
   id: string
   /** 표시용 이름. 백엔드 ProfileRegistry에서 채움(없으면 id 앞 8자). */
@@ -79,7 +70,6 @@ export interface AgentInfo {
   rows: number
   /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (S9 §18) */
   epoch: number
-  /** transport 종류별 지원 영역 — UI 분기용 */
   capabilities: Capabilities
 }
 
@@ -141,8 +131,7 @@ export interface AgentProfile {
 
 /**
  * 영속 프리셋 — presets.json 단위(데몬 소유, ADR-0061). wire `Preset` 미러(protocol/bindings/Preset.ts).
- * ★이름은 저장하지 않는다★ — cwd basename 을 프론트가 파생한다(ADR-0061). 프로필과 별개 축:
- * 프리셋 = 자주 쓰는 cwd 북마크(스폰 안 함), 프로필 = 실제 에이전트 저장 단위.
+ * 프로필과 별개 축: 프리셋 = 자주 쓰는 cwd 북마크(스폰 안 함), 프로필 = 실제 에이전트 저장 단위.
  */
 export interface Preset {
   id: string

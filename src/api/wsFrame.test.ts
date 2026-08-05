@@ -1,5 +1,3 @@
-// wsFrame 단위테스트 — decodeOutputFrame 순수 함수(codec.rs binary frame 디코드).
-//
 // 옛 daemonClient.test 의 decodeOutputFrame describe 를 이관(Stage 4a — daemonClient 삭제).
 // wsTransport.test 의 "binary frame → output" 한 케이스로는 못 잡는 엣지(tag!=0/헤더미만/대문자
 // 정규화/빈 payload)를 순수 함수 단위로 보존한다.
@@ -22,7 +20,6 @@ function buildFrame(opts: {
   epoch: number
   seq: number
   payload?: Uint8Array
-  /** 헤더 미만 길이 테스트용 — 헤더 일부만 생성. */
   truncateTo?: number
 }): ArrayBuffer {
   const payload = opts.payload ?? new Uint8Array(0)
@@ -49,7 +46,6 @@ describe('decodeOutputFrame', () => {
     expect(f!.tag).toBe(0)
     expect(f!.epoch).toBe(7)
     expect(f!.seq).toBe(42)
-    // 16바이트 → 8-4-4-4-12 소문자 UUID 정확 복원(알려진 uuid ↔ 바이트 왕복).
     expect(f!.agentId).toBe(AGENT)
     expect(Array.from(f!.payload)).toEqual([0x68, 0x69])
   })
@@ -77,7 +73,6 @@ describe('decodeOutputFrame', () => {
     expect(f!.epoch).toBe(2)
     expect(f!.seq).toBe(5)
     expect(f!.agentId).toBe(AGENT)
-    // payload 왕복 — 소비자가 JSON.parse 로 StructuredEvent 를 복원한다.
     expect(new TextDecoder().decode(f!.payload)).toBe(json)
   })
 
@@ -87,7 +82,7 @@ describe('decodeOutputFrame', () => {
   })
 
   it('tag=255(ADR-0046 replay 경계 마커)는 조용히 skip(null) — 던지지 않음, 전방 호환(M0)', () => {
-    // src-tauri 가 흘리는 마커 프레임 규격: [tag=255][agentId:16][epoch:4][gen:8 LE][flags:1] = 30바이트.
+    // src-tauri 가 흘리는 마커 프레임 규격: [tag=255][agentId:16][epoch:4][gen:8 BE][flags:1] = 30바이트.
     //   현 프론트는 마커를 소비하지 않으므로(M2) 미지 tag 를 예외 없이 null 로 버려야 한다. 길이가
     //   헤더(29) 이상이어도 tag 게이트에서 걸러진다(payload 로 오해 금지).
     const marker = new ArrayBuffer(1 + 16 + 4 + 8 + 1)
@@ -96,7 +91,7 @@ describe('decodeOutputFrame', () => {
     const idBytes = uuidToBytes(AGENT)
     for (let i = 0; i < 16; i++) view.setUint8(1 + i, idBytes[i])
     view.setUint32(17, 3, false) // epoch
-    // gen(8 LE) + flags(1) 은 decodeOutputFrame 이 안 읽는다 — tag 게이트에서 이미 null.
+    // gen(8 BE) + flags(1) 은 decodeOutputFrame 이 안 읽는다 — tag 게이트에서 이미 null.
     expect(() => decodeOutputFrame(marker)).not.toThrow()
     expect(decodeOutputFrame(marker)).toBeNull()
   })

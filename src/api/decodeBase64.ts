@@ -1,5 +1,4 @@
 export function decodeBase64Bytes(b64: string): Uint8Array {
-  // Uint8Array.fromBase64 신규 API 우선, 없으면 atob fallback
   const f = (Uint8Array as any).fromBase64
   if (f) return f(b64) as Uint8Array
   const bin = atob(b64)

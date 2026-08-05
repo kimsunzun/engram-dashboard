@@ -1,5 +1,5 @@
 // WS binary output frame 디코드 — codec.rs `encode_terminal_frame`/`decode_frame` 의 역.
-// WsTransport 가 사용. 순수 함수 — 테스트 용이(wsFrame.test). (Stage 4a: DaemonClient re-export 제거됨.)
+// 순수 함수 — 테스트 용이(wsFrame.test). (Stage 4a: DaemonClient re-export 제거됨.)
 //
 // 포맷(big-endian): [tag:1][agentId:16][epoch:4 BE][seq:8 BE][raw payload...].
 
@@ -8,14 +8,14 @@
 // 헤더 포맷은 tag 무관 동일 — payload 해석만 tag 로 갈린다(소비자=ProtocolClient.handleOutput).
 export const FRAME_TAG_TERMINAL_BYTES = 0
 export const FRAME_TAG_STRUCTURED_EVENT = 1
-const FRAME_HEADER_LEN = 1 + 16 + 4 + 8 // 29
+const FRAME_HEADER_LEN = 1 + 16 + 4 + 8
 
 // ★replay 경계 마커 tag(ADR-0046 — Channel 내부 계약)★: 데몬 codec 엔 없다. src-tauri 가 각 replay
 //   종결마다 같은 출력 Channel 로 합성해 흘리고, transport(decodeReplayMarker)만 해석한다. 데몬 binary
 //   frame(tag0/1)과 seq 공간이 다르므로 decodeOutputFrame 은 이 tag 를 여전히 skip(전방 호환).
 export const FRAME_TAG_REPLAY_MARKER = 255
 // 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1(bit0=truncated,bit1=failed)].
-const MARKER_LEN = 1 + 16 + 4 + 8 + 1 // 30
+const MARKER_LEN = 1 + 16 + 4 + 8 + 1
 const MARKER_FLAG_TRUNCATED = 0x01
 const MARKER_FLAG_FAILED = 0x02
 

@@ -1,7 +1,3 @@
-// clientFactory 단위테스트 — daemon-only(ADR-0029) + window 노출(§5).
-//
-// factory 는 항상 ProtocolClient over WsTransport(데몬 attach) + DaemonDaemonControl 을 만든다.
-// 모드 개념 없음 — carrier 는 WsTransport 고정(lazy connect 라 명령 전 'down').
 // factory 는 모듈 로드 시점에 싱글톤(agentClient)을 만든다 → 각 케이스마다 vi.resetModules 후
 // dynamic import 로 격리한다. @tauri-apps/api/core 는 mock(인스턴스화 시점엔 invoke 호출 안 함).
 
@@ -39,7 +35,6 @@ describe('clientFactory (daemon-only)', () => {
     const { ProtocolClient } = await import('./protocolClient')
     const client = factory.getAgentClient()
     expect(client).toBeInstanceOf(ProtocolClient)
-    // Ws carrier 는 lazy connect — 명령 전 'down'.
     expect(client.connectionState).toBe('down')
   })
 
@@ -48,7 +43,6 @@ describe('clientFactory (daemon-only)', () => {
     const a = factory.getAgentClient()
     const b = factory.getAgentClient()
     expect(a).toBe(b)
-    // §5 LLM-우선 제어: 제어 표면이 window 에 노출돼야 함.
     expect((window as Win).__ENGRAM_AGENT__).toBe(a)
   })
 
@@ -57,7 +51,6 @@ describe('clientFactory (daemon-only)', () => {
     const factory = await import('./clientFactory')
     const client = factory.getAgentClient()
     expect(client.connectionState).toBe('down')
-    // 명령 호출 전이므로 discover_daemon 미호출.
     expect(core.invoke).not.toHaveBeenCalled()
   })
 

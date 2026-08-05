@@ -21,10 +21,8 @@ let initPromise: Promise<void> | null = null
 /** 단일 AgentClient 인스턴스. 컴포넌트·스토어·(미래)LLM 이 모두 이걸 통한다. */
 export function getAgentClient(): AgentClient {
   if (!instance) {
-    // daemon-only: T7c — TauriTransport(Rust DaemonClient 연결 단일화) 위의 ProtocolClient.
     const transport = new TauriTransport()
     instance = new ProtocolClient(transport)
-    // ADR-0021 §5: 데몬 lifecycle 제어 표면(start/stop/status).
     daemonControlInstance = new DaemonDaemonControl(instance)
     // §5 LLM-우선 제어: 제어 표면을 window 에 노출 — cdp.mjs eval / (미래) 백엔드측 LLM 이
     // 사람 클릭과 동일 진입점을 호출할 수 있게 한다.
@@ -57,7 +55,6 @@ export async function waitForTransportInit(): Promise<void> {
   if (initPromise) await initPromise
 }
 
-/** 단일 DaemonControl 인스턴스. getAgentClient 와 동일 시점에 구성된다. */
 export function getDaemonControl(): DaemonControl {
   if (!daemonControlInstance) getAgentClient() // 동시 초기화 보장.
   return daemonControlInstance!

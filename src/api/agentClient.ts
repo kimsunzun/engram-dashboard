@@ -1,7 +1,8 @@
-// AgentClient — 프론트가 의존하는 단일 제어 표면(S12 phase 1b, daemon-design §3-a).
+// AgentClient — 프론트가 의존하는 단일 제어 표면(S12, daemon-design §3-a).
 //
 // 컴포넌트·스토어는 invoke/Channel/WS 를 직접 부르지 않고 이 인터페이스만 의존한다.
-// 단일 구현 ProtocolClient(프로토콜 의미론 1벌) + transport 2개(InProc/Ws, ADR-0020 Stage 3~4a).
+// 단일 구현 ProtocolClient(프로토콜 의미론 1벌) + carrier(TauriTransport, ADR-0020) —
+// embedded/InProc 표면은 제거됐다(ADR-0029: daemon-only).
 // transport(Tauri Channel / WS binary frame)와 base64/디코딩은 transport 내부에 숨긴다 —
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
@@ -14,17 +15,15 @@ import type {
   RestoreReport,
 } from './types'
 
-/** 클라↔백엔드 연결 상태. Embedded 는 항상 connected. Daemon 만 reconnecting/down 발생. */
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
 
 /** 디코드된 출력 청크 — transport 무관(base64/binary frame 은 클라 내부에서 이미 풀림). */
 export interface OutputChunk {
-  /** core OutputCore 발급 seq(단조 증가). 클라가 재연결 경계 dedup, 컴포넌트도 방어적 dedup. */
+  /** core OutputCore 발급 seq(단조 증가). */
   seq: number
   /**
    * frame 종류(wsFrame.ts): 0=터미널 raw 바이트(xterm write) / 1=StructuredEvent JSON(ADR-0045 tag1).
-   * 단일 콜백에 tag 를 실어 소비자가 렌더 경로를 가른다(TerminalSlot=tag0 무시하고 bytes / RichSlot=
-   * tag1 이면 JSON.parse). 별도 콜백 대신 tag 필드로 통합한 이유: seq dedup·epoch 가드·pre-subscribe
+   * 별도 콜백 대신 tag 필드로 통합한 이유: seq dedup·epoch 가드·pre-subscribe
    * 버퍼가 tag 를 몰라도 되게(한 seq 공간·한 배달 경로) — 콜백 이중화는 그 규율을 두 벌로 쪼갠다.
    */
   tag: number
@@ -38,7 +37,7 @@ export interface OutputSubscription {
 }
 
 /**
- * 뷰별 replay 상태 스냅샷(§5 LLM 제어 표면 — ADR-0046). getViewOutputState 가 반환한다.
+ * 뷰별 replay 상태 스냅샷(§5 LLM 제어 표면 — ADR-0046).
  * error(재요청 사다리 소진) 등을 LLM/자동화가 타입으로 발견·재구동 판단에 쓴다. 최소 노출.
  */
 export interface ViewOutputState {
@@ -62,14 +61,14 @@ export interface AgentClient {
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
 
   /**
-   * **명시 연결(spawn 허용)** — ADR-0021 §1. transport.start 위임. 부팅 1회 / 사용자 daemon_start 가
+   * **명시 연결(spawn 허용)** — ADR-0021 §1. 부팅 1회 / 사용자 daemon_start 가
    * 부른다(DaemonControl.start). 데몬이 없으면 여기서만 spawn 한다. 명령 경로(ensureReady)는
-   * attach-only 라 spawn 못 하므로, 데몬을 띄우는 유일한 의도적 진입점이다. daemon 모드만 의미 있고
-   * embedded(InProc)는 Channel 등록(no-op spawn). 재연결로 멈췄던 상태(closedByUser/attempt)를 리셋.
+   * attach-only 라 spawn 못 하므로, 데몬을 띄우는 유일한 의도적 진입점이다.
+   * 재연결로 멈췄던 상태(closedByUser/attempt)를 리셋.
    */
   connect(): Promise<void>
   /**
-   * **명시 연결 해제(재연결 중단, ADR-0021 note3)** — transport.close 위임. graceful daemon_stop
+   * **명시 연결 해제(재연결 중단, ADR-0021 note3)** — graceful daemon_stop
    * 후 부른다: closedByUser=true 로 즉시 'down' 정착해 5회 재연결 헛시도를 없앤다. ProtocolClient
    * 자체(구독 라우터/콜백 레지스트리)는 유지하므로, 이후 connect 로 다시 살릴 수 있다(close 와 다름).
    */
@@ -90,30 +89,26 @@ export interface AgentClient {
 
   /**
    * 뷰(slot)별 replay 상태 조회(§5 LLM 제어 표면 — ADR-0046). error 소진(재요청 3회 실패)·buffering
-   * 고착 등을 LLM/자동화가 관측·재구동 판단에 쓴다. 없는 viewId 면 null. (구현 = ProtocolClient.)
+   * 고착 등을 LLM/자동화가 관측·재구동 판단에 쓴다. 없는 viewId 면 null.
    */
   getViewOutputState(viewId: string): ViewOutputState | null
 
   // ── 상태/목록/복원 이벤트 ─────────────────────────────────────────────────────
-  // 두 모드 공통 표면 — eventBus 가 소비해 store 에 연결한다(모드 무관).
-  // Embedded 는 Tauri listen 래핑, Daemon 은 WS 이벤트 라우팅으로 동일 의미를 제공한다.
-  // 각 메서드는 sync disposer 를 반환(호출 시 구독 해제). connectionState 패턴과 동일.
   /** 권위 있는 에이전트 목록 교체(존재/제거 판정 기준). */
   onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void
-  /** 개별 status 갱신(뱃지 표시용, 목록 제거 안 함). */
+  /** 개별 status 갱신(목록 제거 안 함). */
   onStatusChanged(cb: (id: string, status: AgentStatus, epoch: number) => void): () => void
   /** 부팅 복원 결과(S9). */
   onRestoreResult(cb: (report: RestoreReport) => void): () => void
   /**
    * 프로필 목록 라이브 갱신(깡통/예약 에이전트 — ADR-0018 후속, §5).
-   * 백엔드가 프로필 변경(create/delete/activate)을 broadcast 하면 store 미러를 갱신한다.
-   * daemon 모드는 AgentEvent::ProfileListUpdated 라우팅으로 동작, embedded 는 후속 backend
-   * broadcast 흡수 자리(현재 백엔드 미도달 — 인터페이스·프론트 배선은 지금 깐다).
+   * 백엔드가 프로필 변경(create/delete/activate)을 broadcast 하면 store 미러를 갱신한다
+   * (AgentEvent::ProfileListUpdated 라우팅).
    */
   onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void
   /**
    * 프리셋 목록 라이브 갱신(ADR-0061 — 프로필판과 동형, §5). 백엔드가 프리셋 CRUD(create/delete)를
-   * broadcast 하면 store 미러를 갱신한다. daemon 모드는 AgentEvent::PresetListUpdated 라우팅으로 동작.
+   * broadcast 하면 store 미러를 갱신한다(AgentEvent::PresetListUpdated 라우팅).
    */
   onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
 
@@ -127,9 +122,8 @@ export interface AgentClient {
   getSnapshot(agentId: string): Promise<unknown[]>
   /**
    * 데몬 graceful 종료(ADR-0021 §5). StopDaemon AgentCommand 전송 — 데몬이 자식 PTY 를 정리하고
-   * 스스로 내려간다. force=false 면 실활성 에이전트가 있을 때 데몬이 거부(Error). embedded 모드는
-   * in-proc 라 무의미(데몬 없음) → carrier 가 무시(앱 안 내림). DaemonControl.stop 이 이걸 graceful
-   * 단계로 부르고, 실패/연결없음 시 daemon_stop(fallback kill)로 보강한다.
+   * 스스로 내려간다. force=false 면 실활성 에이전트가 있을 때 데몬이 거부(Error). DaemonControl.stop 이
+   * 이걸 graceful 단계로 부르고, 실패/연결없음 시 daemon_stop(fallback kill)로 보강한다.
    */
   stopDaemon(force: boolean): Promise<void>
 
