@@ -74,6 +74,7 @@ npx tsc --noEmit && npm test                        # 클린 / 41파일 634
 - **★병렬 리뷰어는 빌드 권한을 한쪽에만★** — `target/debug/.cargo-lock` 충돌로 근거 없는 BLOCK이 났던 실발동. 이번엔 실측 검증자 1인에게만 주고 나머지엔 `cargo tree`/`metadata`만 허용 → 충돌 0.
 - **★cross-family 리뷰어(codex) 프리앰블 필수★** — "너는 오케스트레이터가 아니다 + 환경의 스킬·에이전트 정의 전부 무시 + 되묻기 불가"를 프롬프트 맨 앞에 안 박으면 repo의 `review` 스킬을 자기가 실행할 것으로 읽고 죽는다. 검증된 프리앰블 = 이 세션 scratchpad `blind-*.txt`. 호출형 = `MSYS_NO_PATHCONV=1 codex exec --sandbox read-only -c model_reasoning_effort="high" "$(cat <prompt>)" < /dev/null > <log> 2>&1`, 백그라운드로(전경 10분 상한). 회수는 로그에서 `VERDICT` 라인부터 잘라 읽기.
 - **★워커가 세션 한도로 끊기면 `SendMessage`로 이어붙일 수 있다★**(이번에 2회 발동, 둘 다 성공). 새로 스폰하지 말 것 — 컨텍스트가 살아 있다. 재개 메시지엔 **작업트리 실측 상태**를 같이 줄 것(워커 기억과 대조하게).
+- **★프론트·src-tauri 파일에 `file:line` 포인터를 쓰지 말 것 — 실발동★.** `wt2` 세션이 주석 정리 스윕을 돌리는 중이라 그 파일들의 줄 번호가 계속 밀린다. 이 핸드오프가 처음에 적은 포인터 6개 중 **3개가 통합 직후 이미 어긋났다**(`wsTransport.ts` · `transport.ts` · `types.ts` — 전부 프론트). **심볼·함수·블록 이름으로 가리켜라.** Rust crate 쪽(`net`·`daemon`·`core`)은 그 스윕 대상이 아니라 아직 안전하지만, 같은 이유로 언젠가 밀린다.
 - **쉘 변수는 Bash 호출 간 유지되지 않는다**(cwd는 유지). 절대경로를 쓰거나 같은 호출 안에서 정의.
 - **커밋 전 `git checkout -- crates/engram-dashboard-protocol/bindings/`** — `cargo build`가 ts-rs export로 22~23파일을 줄바꿈만 더럽힌다(내용 diff 0). **실제 내용이 바뀐 파일이 있으면 그것만 먼저 `git add` 한 뒤 checkout** 하면 살아남는다(0-4의 `AgentCommand.ts`가 그 사례).
 - **`git add -A`/`commit -a` 금지**(신규 파일은 명시 add) · **Engram repo(`I:\Engram`)에서도 금지**(중첩 repo gitlink) · bare `cargo test` 금지 · Fable 워커 금지 · **Agent 스폰 시 model/프리셋 명시 필수** · git-bash 경로 인자엔 `MSYS_NO_PATHCONV=1`.
@@ -103,12 +104,12 @@ npx tsc --noEmit && npm test                        # 클린 / 41파일 634
 **★슬라이스 2와 섞지 말 것★** — 축이 다르다(축 1 = 프론트↔데몬 계약 / 축 2 = 데몬 내부 3층 분리). 별 단위로 잡고, 굵은 설계면 PRD/TRD·ADR 단계부터.
 
 **측정된 현재 상태(이 세션 대화 중 실측 — 전부 재확인 가능):**
-- **wire 명령 union에 TS 타입이 아예 없다** — `src/api/transport.ts:78` = `send(payload: unknown)`. **두 벌 문제가 아니라 영 벌 문제다**(세션 중 내가 "손 미러가 있다"고 말한 것은 오류였고 아래 혼동 쌍이 원인).
+- **wire 명령 union에 TS 타입이 아예 없다** — `src/api/transport.ts` 의 `send(payload: unknown)`. **두 벌 문제가 아니라 영 벌 문제다**(세션 중 내가 "손 미러가 있다"고 말한 것은 오류였고 아래 혼동 쌍이 원인).
 - **유일한 검문소 = 셸의 serde** — `src-tauri/src/daemon_client/mod.rs:532` `send_command(cmd: AgentCommand)`. 운영 경로(`TauriTransport` 고정, ADR-0036)는 여기를 통과하므로 모양이 틀리면 런타임에 거절된다.
-- **직결 경로는 그 검문소마저 우회** — `src/api/wsTransport.ts:270-274`(auth 프레임 `JSON.stringify` 손조립) · `scripts/engram.mjs:72`. 둘 다 `daemon.json`의 `protocol_version`을 **에코**한다(러스트 발신자는 컴파일 상수를 보낸다 = "Fix C" 불변식이 JS에선 무효, 테스트 0건).
+- **직결 경로는 그 검문소마저 우회** — `src/api/wsTransport.ts` 의 `ws.onopen` 안(auth 프레임 `JSON.stringify` 손조립) · `scripts/engram.mjs` 의 같은 형태. 둘 다 `daemon.json`의 `protocol_version`을 **에코**한다(러스트 발신자는 컴파일 상수를 보낸다 = "Fix C" 불변식이 JS에선 무효, 테스트 0건).
 - **생성물 23개 중 소비 1개** — `protocol/bindings/StructuredEvent`만 `src/components/slot/structuredAccumulator.ts`가 import. 나머지 22개는 매 `cargo test`마다 재생성돼 dirty로 뜨고 아무도 안 읽는다(커밋 전 `git checkout --` 대상이 계속 생기는 원인).
 - **★선례가 같은 repo에 있다 — 발명할 게 없다★** — 레이아웃 타입은 `src-tauri/bindings/`(8개)를 `src/api/layoutTypes.ts`가 **파사드로 재수출**하고 컴포넌트가 거기서 가져온다(ADR-0035, 레이아웃 권위 = src-tauri). bindings가 `tsconfig include("src")` 밖이라 상대경로를 한 곳에 모은 것까지 주석에 적혀 있다. **wire 타입도 같은 모양으로 옮기면 된다.**
-- **★혼동 쌍 미등록 — `AgentCommand`★:** 러스트 = **WS wire 명령**(`Spawn`/`Kill`/`ListAgents`…) / 프론트 `src/api/types.ts:100` = **에이전트 실행 명령**(`{kind:'Claude'|'Shell'}`, 러스트 대응 이름은 `protocol::AgentSpawnCommand` — `domain.rs:174`). **같은 이름이 경계 양쪽에서 다른 뜻**이라 세션이 갈리면 엉뚱한 쪽을 고친다. CLAUDE.md 「혼동 쌍 — 고정 용어」 등록 후보.
+- **★혼동 쌍 미등록 — `AgentCommand`★:** 러스트 = **WS wire 명령**(`Spawn`/`Kill`/`ListAgents`…) / 프론트 `src/api/types.ts` 의 `export type AgentCommand` = **에이전트 실행 명령**(`{kind:'Claude'|'Shell'}`, 러스트 대응 이름은 `protocol::AgentSpawnCommand`). **같은 이름이 경계 양쪽에서 다른 뜻**이라 세션이 갈리면 엉뚱한 쪽을 고친다. CLAUDE.md 「혼동 쌍 — 고정 용어」 등록 후보.
 - 프론트가 손 미러하는 건 wire 명령이 아니라 **도메인 타입**들이다(`AgentProfile`·`AgentSpawnCommand`·`Preset` — `src/api/types.ts` 주석이 "wire ~ 미러"로 표기).
 
 **거부한 대안:** 생성기를 걷어낸다(잡음·가짜 안전망 제거, 검사는 런타임 한 곳으로 정직하게 남김) — 사용자가 빌드 타임 쪽을 택했으므로 기각. **단 지금 상태(생성하고 안 씀)는 비용만 내고 이득 0 + "안전망 있다"는 착각까지 주므로 유지 금지** — 어느 쪽이든 지금보다 낫다.
