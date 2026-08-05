@@ -1,5 +1,3 @@
-// mergeTreeNodes 단위테스트 (ADR-0018) — 빈 프로필 / 실행중만 / 둘 다 / 중복 id.
-
 import { describe, expect, it } from 'vitest'
 
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
@@ -68,7 +66,6 @@ describe('mergeTreeNodes', () => {
     const out = mergeTreeNodes([], [agent('a', '코더'), agent('b')])
     expect(out).toHaveLength(2)
     expect(out[0]).toMatchObject({ id: 'a', name: '코더', kind: 'running', status: 'Running' })
-    // name 비면 id 앞 8자
     expect(out[1]).toMatchObject({ id: 'b', kind: 'running' })
   })
 
@@ -91,27 +88,21 @@ describe('mergeTreeNodes', () => {
       [profile('same', '프로필이름'), profile('p2', '여전히예약')],
       [agent('same', '실행중이름')],
     )
-    // same 은 1개만, running 으로
     expect(out.filter(n => n.id === 'same')).toHaveLength(1)
     const same = out.find(n => n.id === 'same')!
     expect(same.kind).toBe('running')
     expect(same.name).toBe('실행중이름')
-    // 안 겹친 p2 는 예약으로 남음
     expect(out.find(n => n.id === 'p2')).toMatchObject({ kind: 'reserved' })
   })
 
   // ── ADR-0061 리치화: display_name override 전파 ──────────────────────────────
   it('display_name override → reserved 노드는 프로필 직접, running 노드는 매칭 프로필에서 이어받음', () => {
     const out = mergeTreeNodes(
-      // p-run 은 실행중이기도 함(매칭) → running 노드가 override 를 이어받아야 함.
       [profile('p-run', '', 0, '실행override'), profile('p-res', '', 0, '예약override')],
-      [agent('p-run'), agent('adhoc')], // adhoc = 프로필 없는 ad-hoc → override 없음(null).
+      [agent('p-run'), agent('adhoc')],
     )
-    // running 노드: 매칭 프로필의 display_name 이어받음.
     expect(out.find(n => n.id === 'p-run')?.displayName).toBe('실행override')
-    // ad-hoc running(프로필 없음): override 없음 → null(basename 파생).
     expect(out.find(n => n.id === 'adhoc')?.displayName).toBeNull()
-    // reserved 노드: 프로필 직접 매핑.
     expect(out.find(n => n.id === 'p-res')?.displayName).toBe('예약override')
   })
 
@@ -158,10 +149,9 @@ describe('mergeTreeNodes', () => {
     it('reserved 는 created_at 오름차순, 입력 순서와 무관', () => {
       const p1 = profile('zzz', '나중', 200)
       const p2 = profile('aaa', '먼저', 100)
-      // 입력 순서를 뒤집어도 created_at 기준 동일 결과여야 한다.
       const a = mergeTreeNodes([p1, p2], []).map(n => n.id)
       const b = mergeTreeNodes([p2, p1], []).map(n => n.id)
-      expect(a).toEqual(['aaa', 'zzz']) // created_at 100 < 200
+      expect(a).toEqual(['aaa', 'zzz'])
       expect(b).toEqual(a)
     })
 
@@ -200,11 +190,9 @@ describe('mergeTreeNodes', () => {
           [profile('x', '깡통이름')],
           [agent('x', '세션이름', true, status)],
         )
-        // 같은 id 는 정확히 1개, 여전히 running-kind (예약으로 강등되지 않음).
         expect(out.filter(n => n.id === 'x')).toHaveLength(1)
         const node = out.find(n => n.id === 'x')!
         expect(node.kind).toBe('running')
-        // status 문자열은 terminal type 을 그대로 노출(Reserved 아님).
         expect(node.status).toBe(status.type)
         expect(node.name).toBe('세션이름')
       })
@@ -222,7 +210,6 @@ describe('mergeTreeNodes', () => {
     })
 
     it('자식이 부모 children 으로 중첩(A > B·C) — 루트는 부모만', () => {
-      // A(부모), B·C(자식). created_at 으로 결정적 순서 보장.
       const out = mergeTreeNodes(
         [
           profile('A', '부모', 1),
@@ -231,14 +218,12 @@ describe('mergeTreeNodes', () => {
         ],
         [],
       )
-      // 루트 = A 1개.
       expect(out.map(n => n.id)).toEqual(['A'])
-      // A 의 children = [B, C] (created_at 오름차순).
       expect(out[0].children.map(n => n.id)).toEqual(['B', 'C'])
     })
 
     it('running 부모 + reserved 자식 혼합(머지 계층 유지, ADR-0018 ⊕ ADR-0072)', () => {
-      // A 는 실행중, 자식 B 는 예약. parent_id 는 프로필에서만 오므로 자식 프로필이 A 를 가리킨다.
+      // parent_id 는 프로필에서만 오므로 자식 프로필이 A 를 가리킨다.
       const out = mergeTreeNodes(
         [profile('A', '', 1, null, null), profile('B', '', 2, null, 'A')],
         [agent('A', '실행부모')],
@@ -250,7 +235,6 @@ describe('mergeTreeNodes', () => {
     })
 
     it('running 자식도 매칭 프로필의 parent_id 를 이어받아 중첩(AgentInfo 엔 parent_id 없음)', () => {
-      // 자식 B 가 실행중이면서 매칭 프로필이 parent_id=A 를 가짐 → running 노드가 parent 를 이어받아 A 밑으로.
       const out = mergeTreeNodes(
         [profile('A', '', 1), profile('B', '', 2, null, 'A')],
         [agent('A'), agent('B')],
@@ -273,7 +257,6 @@ describe('mergeTreeNodes', () => {
     })
 
     it('2단 방지(A>B>C) — B 가 이미 자식이면 C 는 B 밑에 안 붙고 루트로 승격', () => {
-      // A 루트, B 는 A 의 자식, C 는 B 를 부모로 지정. 백엔드는 금지하지만 프론트는 방어적으로 C 를 루트로.
       const out = mergeTreeNodes(
         [
           profile('A', '', 1),
@@ -282,24 +265,21 @@ describe('mergeTreeNodes', () => {
         ],
         [],
       )
-      // 루트 = A, C (B 는 A 자식). C 는 절대 B 밑에 중첩 안 함(2단 금지).
       expect(out.map(n => n.id).sort()).toEqual(['A', 'C'])
       const a = out.find(n => n.id === 'A')!
       expect(a.children.map(n => n.id)).toEqual(['B'])
-      // B 는 자식을 갖지 않는다(C 가 B 밑에 안 붙음).
       expect(a.children[0].children).toHaveLength(0)
     })
 
     it('자식 정렬도 결정적(created_at 오름차순 → id tiebreaker), 입력 순서 무관', () => {
-      // 고정 created_at: x=30, y=20, z=10 → 정렬은 항상 [z, y, x]. 입력 순서만 뒤집어도 동일.
       const cx = profile('x', '', 30, null, 'A')
       const cy = profile('y', '', 20, null, 'A')
       const cz = profile('z', '', 10, null, 'A')
       const parent = profile('A', '', 1)
       const forward = mergeTreeNodes([parent, cx, cy, cz], [])[0].children.map(n => n.id)
       const reversed = mergeTreeNodes([parent, cz, cy, cx], [])[0].children.map(n => n.id)
-      expect(forward).toEqual(['z', 'y', 'x']) // created_at 오름차순
-      expect(reversed).toEqual(forward) // 입력 순서 무관
+      expect(forward).toEqual(['z', 'y', 'x'])
+      expect(reversed).toEqual(forward)
     })
   })
 })
