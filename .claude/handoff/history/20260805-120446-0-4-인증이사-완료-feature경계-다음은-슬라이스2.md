@@ -96,8 +96,27 @@ npx tsc --noEmit && npm test                        # 클린 / 41파일 634
 1. **격리 게이트 명령 텍스트를 세 문서(`CLAUDE.md`·`qa.md`·`testing-strategy.md`)에서 지우고 `net/src/lib.rs` 헤더만 정본으로 남길지** — blind: "중복이라 rot한다" / doc-aware: "qa 바인딩은 문자 그대로 실행돼야 게이트가 돈다(포인터로 바꾸면 조용히 안 돎)".
 2. **`docs/reference/architecture-overview.md`의 net 설명 문단을 통째 지울지.**
 
+## ★사용자 방향 확정 2026-08-05 — wire 타입을 빌드 타임으로 당긴다★
+
+**결정:** 생성된 wire 타입 바인딩을 프론트가 **실제로 물게 한다**(현재는 생성만 하고 안 쓴다). 근거 = 오류가 런타임에서 **빌드 타임으로 당겨진다.** 이 프로젝트에서 그 차이가 큰 이유는 하나다 — **그 JS를 짜는 주체가 매번 갈리는 LLM 세션**이고, 세션은 런타임 실패를 못 보지만(앱을 띄워 클릭하지 않는다) 컴파일 실패는 반드시 본다. ADR-0129가 crate 벽을 세운 논리("문서·리뷰로만 지킨 경계는 세션 교체를 못 견딘다")와 **동일한 논리**다.
+
+**★슬라이스 2와 섞지 말 것★** — 축이 다르다(축 1 = 프론트↔데몬 계약 / 축 2 = 데몬 내부 3층 분리). 별 단위로 잡고, 굵은 설계면 PRD/TRD·ADR 단계부터.
+
+**측정된 현재 상태(이 세션 대화 중 실측 — 전부 재확인 가능):**
+- **wire 명령 union에 TS 타입이 아예 없다** — `src/api/transport.ts:78` = `send(payload: unknown)`. **두 벌 문제가 아니라 영 벌 문제다**(세션 중 내가 "손 미러가 있다"고 말한 것은 오류였고 아래 혼동 쌍이 원인).
+- **유일한 검문소 = 셸의 serde** — `src-tauri/src/daemon_client/mod.rs:532` `send_command(cmd: AgentCommand)`. 운영 경로(`TauriTransport` 고정, ADR-0036)는 여기를 통과하므로 모양이 틀리면 런타임에 거절된다.
+- **직결 경로는 그 검문소마저 우회** — `src/api/wsTransport.ts:270-274`(auth 프레임 `JSON.stringify` 손조립) · `scripts/engram.mjs:72`. 둘 다 `daemon.json`의 `protocol_version`을 **에코**한다(러스트 발신자는 컴파일 상수를 보낸다 = "Fix C" 불변식이 JS에선 무효, 테스트 0건).
+- **생성물 23개 중 소비 1개** — `protocol/bindings/StructuredEvent`만 `src/components/slot/structuredAccumulator.ts`가 import. 나머지 22개는 매 `cargo test`마다 재생성돼 dirty로 뜨고 아무도 안 읽는다(커밋 전 `git checkout --` 대상이 계속 생기는 원인).
+- **★선례가 같은 repo에 있다 — 발명할 게 없다★** — 레이아웃 타입은 `src-tauri/bindings/`(8개)를 `src/api/layoutTypes.ts`가 **파사드로 재수출**하고 컴포넌트가 거기서 가져온다(ADR-0035, 레이아웃 권위 = src-tauri). bindings가 `tsconfig include("src")` 밖이라 상대경로를 한 곳에 모은 것까지 주석에 적혀 있다. **wire 타입도 같은 모양으로 옮기면 된다.**
+- **★혼동 쌍 미등록 — `AgentCommand`★:** 러스트 = **WS wire 명령**(`Spawn`/`Kill`/`ListAgents`…) / 프론트 `src/api/types.ts:100` = **에이전트 실행 명령**(`{kind:'Claude'|'Shell'}`, 러스트 대응 이름은 `protocol::AgentSpawnCommand` — `domain.rs:174`). **같은 이름이 경계 양쪽에서 다른 뜻**이라 세션이 갈리면 엉뚱한 쪽을 고친다. CLAUDE.md 「혼동 쌍 — 고정 용어」 등록 후보.
+- 프론트가 손 미러하는 건 wire 명령이 아니라 **도메인 타입**들이다(`AgentProfile`·`AgentSpawnCommand`·`Preset` — `src/api/types.ts` 주석이 "wire ~ 미러"로 표기).
+
+**거부한 대안:** 생성기를 걷어낸다(잡음·가짜 안전망 제거, 검사는 런타임 한 곳으로 정직하게 남김) — 사용자가 빌드 타임 쪽을 택했으므로 기각. **단 지금 상태(생성하고 안 씀)는 비용만 내고 이득 0 + "안전망 있다"는 착각까지 주므로 유지 금지** — 어느 쪽이든 지금보다 낫다.
+
 ## 미결 (착수를 막지 않음)
 
+- **`core`의 `protocol` dev-dependency가 죽은 것으로 보인다** — `crates/engram-dashboard-core/Cargo.toml:33`이 `[dev-dependencies]`로 선언하고 주석이 사유를 적어놨는데(S15 B8 opaque replay 단위테스트가 실 codec으로 프레임 조립), **지금 쓰는 코드가 0줄**이다(`rg -n "engram_dashboard_protocol" crates/engram-dashboard-core/` → 매치 없음). 슬라이스 1이 걷어낸 죽은 `windows` 의존과 같은 부류. **확정은 한 줄** — 지우고 `cargo test -p engram-dashboard-core` 통과하면 죽은 것.
+- **`docs/reference/architecture-overview.md:166`이 그 dev-only 간선을 평범한 "의존"으로 그린다** — 그래프만 보면 코어가 런타임에 wire 타입을 안다고 읽혀 ADR-0003 격리와 정반대다. dev 표시를 붙이거나 간선을 빼야 한다. (2026-08-05 커밋 `db503c9`에서 간선 감사를 했는데 `[dependencies]`/`[dev-dependencies]` 구분을 안 봤다 — 감사 기준의 공백.)
 - **`net/src/lib.rs:83`이 `ADR-0129 Note A`를 가리키는데 ADR에 그런 라벨이 없다** — 새 note 안에서 지시 대상을 고정해 뒀다. 코드 포인터를 고칠지 ADR에 라벨을 달지는 미정(후자는 기존 note 수정 = 사용자 승인 사안).
 - **`bin/engram-send.rs`(1,528줄)는 직교** — `engram_dashboard_*` 의존 0. 어느 crate의 `[[bin]]`에 둘지만 정하면 된다(조립 crate가 자연스러움).
 - **MCP 제어 평면(`control/mcp_server.rs`, axum, 자체 포트)** — ADR-0129가 "제어 평면"을 에이전트 시스템에 배정했다. 슬라이스 2 대상.
