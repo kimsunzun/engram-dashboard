@@ -14,8 +14,8 @@
 //   올리는 것과 동일한 InboundMessage 형태로 reply·output 을 올린다. 그래서 ProtocolClient 는 carrier
 //   가 WS 인지 Tauri 인지 모른 채 기존 로직(pending 매칭 / handleOutput)으로 처리한다(ProtocolClient 무수정).
 //
-// ★분기점★: clientFactory.ts 에서 WsTransport → TauriTransport 로 교체하면 프론트가 Rust 연결 단일화
-//   경로를 탄다(창이 몇 개든 데몬엔 Rust 연결 1개 — ADR-0036 목표).
+// ★교체 완료★: clientFactory.ts 가 이 transport 를 생성한다 — 프론트는 Rust 연결 단일화 경로를 탄다
+//   (창이 몇 개든 데몬엔 Rust 연결 1개 — ADR-0036 목표).
 //
 // ## ★연결 상태 단일 진실원 = Rust emit (Fix-C ①)★
 // 연결 상태(connected/reconnecting/down)는 **Rust DaemonClient 가 보내는 `daemon-connection-state`
@@ -52,13 +52,10 @@ export class TauriTransport implements Transport {
   //   또 등록 요청이 들어오면 pending 플래그만 세워 완료 후 정확히 1회 재등록한다(동시 invoke 0 → Rust 가
   //   붙드는 Channel 이 항상 마지막 완료분과 일치).
   private outputChannelInflight: Promise<void> | null = null
-  // 진행 중 등록이 완료된 뒤 재등록이 필요한지(진행 중에 추가 요청이 들어왔음). 여러 요청을 1회로 합친다.
   private outputChannelRerun = false
 
-  // 연결 중복 방지(connect/ensureReady 동시 호출). 진행 중이면 모든 호출자가 이 promise 를 공유한다.
   private connectPromise: Promise<void> | null = null
 
-  // 명시 종료 플래그 — ensureReady 가 down 인데 재연결을 시도하지 않게.
   private closedByUser = false
 
   // ★연결 세대(close 세대 가드, Fix-C ①)★: close() 가 호출될 때마다 +1. in-flight doConnect 는 진입
@@ -104,14 +101,13 @@ export class TauriTransport implements Transport {
 
   // ── 연결 상태 반영(단일 진실원 핸들러) ───────────────────────────────────────
   // `daemon-connection-state` 이벤트 핸들러와 self-heal pull 조회가 *공유* 하는 단일 경로다.
-  // raw 문자열(Rust emit / pull command 반환 — 같은 어휘: connected/reconnecting/down)을 받아
-  // ConnectionState 로 정규화하고, 비-connected → connected (재)전이 시에만 출력 Channel 을 (재)등록한다.
+  // Rust emit 과 pull command 반환은 같은 어휘를 쓴다(connected/reconnecting/down).
   // 첫 연결·Rust 내부 재연결·리로드 self-heal 을 한 경로로 통일한다(중복 등록 없음).
   //
   // ★멱등(더블 등록/이벤트 레이스 가드)★: 이미 connected 였으면(wasConnected) 출력 Channel 등록을
   //   생략한다 — self-heal pull 과 실제 전이 이벤트가 겹쳐도 등록은 정확히 전이당 1회다. self-heal 은
-  //   조회 결과를 캐시하지 않고 이 핸들러에 즉시 흘려보내므로(아래 selfHeal 참조), 조회와 응답 사이에
-  //   'down' 이벤트가 끼면 그 이벤트가 마지막에 이겨 setState('down')이 유지된다(last-write).
+  //   조회 결과를 캐시하지 않고 이 핸들러에 즉시 흘려보내되, 조회와 응답 사이에 이벤트가 끼면 그 pull
+  //   결과가 stateVersion 비교로 폐기된다(FIX 5 — 이벤트가 항상 이긴다. 아래 selfHeal 참조).
   private applyConnectionState(raw: string): void {
     let state: ConnectionState
     if (raw === 'connected') {
@@ -133,7 +129,6 @@ export class TauriTransport implements Transport {
     this.stateVersion += 1
     const wasConnected = this._state === 'connected'
     this.setState(state)
-    // 비-connected → connected (재)전이 시 출력 Channel (재)등록. 첫 연결·재연결·self-heal 단일 경로.
     if (state === 'connected' && !wasConnected) {
       this.registerOutputChannel().catch((err: unknown) => {
         console.warn('[TauriTransport] 출력 Channel 등록 실패:', err)
@@ -161,11 +156,6 @@ export class TauriTransport implements Transport {
   //   applyConnectionState 의 wasConnected 가드가 이미 connected 면 출력 Channel 재등록을 생략하므로
   //   이중 등록도 없다. 조회가 non-connected 를 반환하면 아무 것도 하지 않는다(이후 전이 이벤트가 처리).
   private async selfHeal(): Promise<void> {
-    // ★레이스: pull 스냅샷은 이벤트보다 오래됐을 수 있다(FIX 5)★. invoke await 동안 실제
-    //   daemon-connection-state 이벤트가 끼면(예: 'down' 전이) pull 결과는 그보다 낡은 스냅샷이다.
-    //   invoke 전 stateVersion 을 캡처해, 응답을 적용하기 직전 값이 그대로면(이벤트가 하나도 안 낌)
-    //   적용하고, 바뀌었으면(이벤트가 끼어 최신 상태를 이미 반영) pull 결과를 폐기한다. 이벤트가 항상
-    //   이긴다 — 순서가 event→pull 이어도 낡은 스냅샷이 새 상태를 덮어쓰지 않는다.
     const versionBefore = this.stateVersion
     let raw: string
     try {
@@ -176,11 +166,8 @@ export class TauriTransport implements Transport {
       return
     }
     if (this.stateVersion !== versionBefore) {
-      // invoke 대기 중 실제 이벤트가 끼었다 — pull 스냅샷은 stale 이므로 폐기(이벤트가 최신 권위).
       return
     }
-    // 이벤트가 안 낀 경우에만 조회 결과를 핸들러에 흘린다(캐시 없이). 이미 connected 면 applyConnectionState
-    //   가 wasConnected 가드로 등록 no-op — 이중 등록 차단.
     this.applyConnectionState(raw)
   }
 
@@ -192,7 +179,7 @@ export class TauriTransport implements Transport {
   //   close()→cleanupListeners 로 비워진 뒤의 재연결에서만 실제 재등록한다(이중 리스너 방지).
   //
   // ★부분 등록 정리(Fix-C ①, low)★: listen() 중간에 하나라도 실패하면 *앞서 등록한* 리스너를 즉시
-  //   해제하고 throw 한다. 이전엔 5개 전부 성공해야 unlisten 에 저장했어서, 중간 실패 시 앞 리스너가
+  //   해제하고 throw 한다. 이전엔 전부 성공해야 unlisten 에 저장했어서, 중간 실패 시 앞 리스너가
   //   해제 경로 없이 누수됐다. 부분 등록분을 모아 두고 실패 시 전부 off 한다.
   //
   // ★in-flight close 가드(Fix-C ①)★: listen() 은 async 라, registerListeners 가 await 중인 사이 close()
@@ -246,8 +233,6 @@ export class TauriTransport implements Transport {
           })
         }),
       )
-      // 프리셋 목록 broadcast(ADR-0061) — profile-list-updated 와 동형. src-tauri 가 PresetListUpdated →
-      //   Tauri event "preset-list-updated" 로 emit 한 payload(presets 배열)를 control 로 정규화.
       registered.push(
         await listen<unknown>('preset-list-updated', (e) => {
           this.messageCb?.({
@@ -273,15 +258,12 @@ export class TauriTransport implements Transport {
           this.applyConnectionState(e.payload)
         }),
       )
-      // ★in-flight close 가드★: await 중 close() 가 끼었으면(세대 증가) 이 등록은 stale 이다 — 저장하지
-      //   않고 즉시 해제한다(close 가 못 정리한 좀비 리스너 방지). 다음 연결이 새로 등록한다.
       if (myGen !== this.generation) {
         for (const off of registered) off()
         return
       }
       this.unlisten = registered
     } catch (e) {
-      // 부분 등록분 정리 후 실패 전파(누수 방지).
       for (const off of registered) off()
       throw e
     }
@@ -297,9 +279,9 @@ export class TauriTransport implements Transport {
   // Rust 연결 task 가 이 Channel 로 그 창의 모든 agent 출력을 raw bytes(Response::new)로 fan-out 하면,
   // decodeOutputFrame 으로 풀어 output InboundMessage 로 올린다(WsTransport binary arm 과 동형).
   //
-  // ★멱등(Fix-C ①·④)★: connected 마다(doConnect / u5 재전이) 불릴 수 있으나, 새 Channel 을 만들어
-  //   재등록하면 Rust 가 같은 window_label 로 덮어쓴다(agent.rs subscribe_output: 같은 라벨 재등록은
-  //   옛 WindowEntry drop). ★이전 outputChannel onmessage 는 먼저 delete 로 정리(#13133 — null 대입
+  // ★멱등(Fix-C ①·④)★: connected 전이마다(첫 연결·Rust 내부 재연결·리로드 self-heal) 불릴 수 있으나,
+  //   새 Channel 을 만들어 재등록하면 Rust 가 같은 window_label 로 덮어쓴다(agent.rs subscribe_output:
+  //   같은 라벨 재등록은 옛 WindowEntry drop). ★이전 outputChannel onmessage 는 먼저 delete 로 정리(#13133 — null 대입
   //   아님)★ 해 동시 doConnect 두 개가 각각 Channel 을 만들어 좀비 콜백을 남기는 일을 막는다. 재연결
   //   후에도 출력이 끊기지 않게 한다.
   //
@@ -308,9 +290,8 @@ export class TauriTransport implements Transport {
   //   마지막으로 닿을지 통제 불가)을 원천 차단한다. 실제 등록 작업은 doRegisterOutputChannel.
   private registerOutputChannel(): Promise<void> {
     if (this.outputChannelInflight) {
-      // 진행 중 — 새 invoke 를 겹쳐 띄우지 않는다. 대신 "완료 후 1회 재등록" 플래그만 세운다(여러 요청
-      //   합침). 진행 중인 등록이 이미 최신 상태를 반영할 수도 있으나, 안전측으로 1회 재등록해 재연결
-      //   경계에서 확실히 살아있는 Channel 로 수렴시킨다.
+      // 진행 중인 등록이 이미 최신 상태를 반영할 수도 있으나, 안전측으로 1회 재등록해 재연결 경계에서
+      //   확실히 살아있는 Channel 로 수렴시킨다.
       this.outputChannelRerun = true
       return this.outputChannelInflight
     }
@@ -319,7 +300,6 @@ export class TauriTransport implements Transport {
         do {
           this.outputChannelRerun = false
           await this.doRegisterOutputChannel()
-          // 진행 중 들어온 추가 요청이 있으면(rerun) 한 번 더 — 그 사이에도 겹친 invoke 는 없다(직렬).
         } while (this.outputChannelRerun)
       } finally {
         this.outputChannelInflight = null
@@ -372,9 +352,8 @@ export class TauriTransport implements Transport {
   }
 
   // ── 전송 준비 보장 = attach-only(ADR-0021) ─────────────────────────────────
-  // WsTransport.ensureReady 와 대응: 이미 connected 면 resolve, 아니면 Rust connect 호출.
-  // Tauri transport 는 Rust DaemonClient 가 이미 연결 단일화를 담당하므로, 여기선 연결 상태만
-  // 확인하거나 invoke('daemon_ensure') 를 부르는 방식으로 동작한다.
+  // WsTransport.ensureReady 와 대응. Rust DaemonClient 가 연결 단일화를 이미 담당하므로 여기선
+  // 자체 재연결 루프를 두지 않는다.
   ensureReady(): Promise<void> {
     if (this._state === 'connected') return Promise.resolve()
     if (this.connectPromise) return this.connectPromise
@@ -383,7 +362,6 @@ export class TauriTransport implements Transport {
         new Error('daemon down — daemon_start 로 명시 시작 필요 (ADR-0021: 명령은 respawn 안 함)'),
       )
     }
-    // attach-only: Rust ensure(no-spawn) 호출.
     this.connectPromise = this.doConnect(false)
     return this.connectPromise
   }
@@ -397,18 +375,14 @@ export class TauriTransport implements Transport {
   //   유지한다 — 사용자가 닫은 뒤 다시 start 하면 재연결이 다시 가능해야 하므로.
   start(): Promise<void> {
     if (this._state === 'connected') return Promise.resolve()
-    // closedByUser 리셋은 항상(재진입 여부 무관) — start = "다시 연결을 허용한다"는 명시 의도.
     this.closedByUser = false
-    // 진행 중인 연결이 있으면 그것을 재사용(중복 daemon_connect 방지). 단 진행 중인 게 ensure(no-spawn)
-    //   였더라도, start 의 spawn 의도는 closedByUser 리셋으로 이미 반영됐다 — 그 ensure 가 실패해
-    //   재시도하면 다음 호출이 spawn 경로를 탄다.
+    // 진행 중인 게 ensure(no-spawn)였더라도 start 의 spawn 의도는 closedByUser 리셋으로 이미 반영됐다 —
+    //   그 ensure 가 실패해 재시도하면 다음 호출이 spawn 경로를 탄다.
     if (this.connectPromise) return this.connectPromise
     this.connectPromise = this.doConnect(true)
     return this.connectPromise
   }
 
-  // allowSpawn=true → invoke('daemon_connect'), false → invoke('daemon_ensure').
-  //
   // ★연결 시도만(MED-1 + Fix-C ①·④)★: doConnect 는 (1)control 리스너 멱등 등록 (2)Rust connect/ensure
   //   invoke 만 한다. 상태 전이와 출력 Channel 등록은 *둘 다* Rust `daemon-connection-state` emit(u5
   //   리스너)이 단일 권위로 담당한다 — doConnect 는 이 둘을 직접 하지 않는다.
@@ -425,7 +399,7 @@ export class TauriTransport implements Transport {
   // ★close 세대 가드(Fix-C ①)★: invoke await 동안 close() 가 끼면 myGen != generation. 상태·출력 Channel
   //   부활은 이미 구조적으로 막혀 있다(아래 본문 주석) — 가드는 stale doConnect 가 connectPromise 를
   //   잘못 비우지 않게 하는 데 쓴다(finally).
-  // 실패는 그대로 전파(ensureReady/start 호출자가 catch). connectPromise 정리는 finally(current 세대만).
+  // 실패는 그대로 전파(ensureReady/start 호출자가 catch).
   private async doConnect(allowSpawn: boolean): Promise<void> {
     const myGen = this.generation
     try {
@@ -465,7 +439,6 @@ export class TauriTransport implements Transport {
   //   자체는 onMessage 경로로 resolve 되므로 이 Promise 의 resolve 값은 ProtocolClient 가 쓰지 않는다.
   send(payload: unknown): void | Promise<void> {
     return invoke<unknown>('forward_daemon_command', { cmd: payload }).then((reply) => {
-      // reply 가 있으면(request_id 명령의 데몬 응답) control 로 올린다. null/undefined = 올릴 것 없음.
       if (reply != null && typeof reply === 'object') {
         this.messageCb?.({ kind: 'control', event: reply as Record<string, unknown> })
       }
@@ -501,7 +474,8 @@ export class TauriTransport implements Transport {
     this.generation += 1
     this.connectPromise = null
     this.cleanupListeners()
-    // 출력 Channel 정리(#13133: null 대입 아님 — delete onmessage). 재연결 시 doConnect 가 새로 등록.
+    // 출력 Channel 정리(#13133: null 대입 아님 — delete onmessage). 재연결 시 u5 의 connected 전이
+    //   핸들러가 새로 등록(doConnect 아님).
     if (this.outputChannel) {
       delete (this.outputChannel as { onmessage?: unknown }).onmessage
       this.outputChannel = null
