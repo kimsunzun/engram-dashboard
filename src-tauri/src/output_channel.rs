@@ -47,7 +47,6 @@ pub fn send_to_windows(registry: &WindowChannelRegistry, labels: &[WindowLabel],
     }
     let mut dead: Vec<WindowLabel> = Vec::new();
     {
-        // ★락 across await 없음★: 이 블록 안 `.await` 0 — Channel::send 는 동기.
         let Ok(mut reg) = registry.lock() else {
             tracing::warn!("registry lock poisoned — 출력 frame 통과 스킵");
             return;
@@ -58,16 +57,14 @@ pub fn send_to_windows(registry: &WindowChannelRegistry, labels: &[WindowLabel],
                     .send(tauri::ipc::Response::new(bytes.to_vec()))
                     .is_err()
                 {
-                    // 소멸 webview — registry 에서 제거 대상(절대 unwrap 금지, spike §7 D6).
                     dead.push(label.clone());
                 }
             }
-            // 미등록 label(미mount 창)은 skip — 그 창 mount 시 뷰가 replay 를 재요청한다(뷰 주도).
         }
         for label in &dead {
             reg.remove(label);
         }
-    } // ← registry lock drop
+    }
     if !dead.is_empty() {
         tracing::debug!(dead = ?dead, "dead window Channel 제거");
     }

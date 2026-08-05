@@ -63,7 +63,6 @@ pub fn run_cli(args: &[String]) -> i32 {
     }
 }
 
-/// verb 라우팅. 첫 인자 = verb, 나머지 = 인자. 알 수 없는 verb 는 usage 로 실패.
 async fn dispatch(args: &[String]) -> Result<(), String> {
     let (verb, rest) = args.split_first().ok_or_else(usage)?;
     match verb.as_str() {
@@ -82,7 +81,7 @@ fn usage() -> String {
 
 // ── verbs ────────────────────────────────────────────────────────────────────────
 
-/// `list` — 에이전트 1줄/개: `<id>\t<label>\t<status>\t<cwd>`. label=트리 표시명(profile join).
+/// `list` — 에이전트 1줄/개: `<id>\t<label>\t<status>\t<cwd>`. label=트리 표시명.
 async fn cmd_list() -> Result<(), String> {
     let mut conn = Connection::open().await?;
     let agents = fetch_agents(&mut conn).await?;
@@ -90,14 +89,13 @@ async fn cmd_list() -> Result<(), String> {
         println!("(no agents)");
     }
     for a in &agents {
-        // status 는 enum(Running/Exited{code}/…)이라 문자열이 아니면 JSON 으로 압축 출력.
         println!("{}\t{}\t{}\t{}", a.id, a.label, a.status, a.cwd);
     }
     Ok(())
 }
 
 /// `send <name|id> <text...>` — 대상 에이전트 stdin 에 텍스트 주입(A→B 메시지). 이름은 트리 표시명으로도
-/// 지목 가능(profile join). 텍스트 끝에 `\r`(PTY Enter)을 붙여 상대가 실제로 입력을 제출하게 한다.
+/// 지목 가능. 텍스트 끝에 `\r`(PTY Enter)을 붙여 상대가 실제로 입력을 제출하게 한다.
 async fn cmd_send(rest: &[String]) -> Result<(), String> {
     let target = rest
         .first()
@@ -110,7 +108,6 @@ async fn cmd_send(rest: &[String]) -> Result<(), String> {
     let agents = fetch_agents(&mut conn).await?;
     let agent = resolve_agent(&agents, target)?;
 
-    // ★\r = PTY Enter(제출)★ — 이게 있어야 상대 에이전트가 입력을 실제로 받는다(engram.mjs 와 동일).
     // data 는 wire 에서 serde_bytes(Vec<u8>) → JSON 숫자배열로 직렬화된다(WriteStdin.data).
     let data = format!("{text}\r").into_bytes();
     let request_id = RequestId::new();
@@ -178,7 +175,7 @@ struct ResolvedAgent {
     id: uuid::Uuid,
     label: String,
     cwd: String,
-    /// status 를 문자열로 평탄화(Running/Exited{code}/… — 출력·비교용).
+    /// status 를 문자열로 평탄화(Running/Exited{code}/… — 출력용).
     status: String,
 }
 
@@ -210,7 +207,6 @@ async fn fetch_agents(conn: &mut Connection) -> Result<Vec<ResolvedAgent>, Strin
     Ok(out)
 }
 
-/// status enum → 짧은 문자열. terminal 변형의 부가정보(code/message)는 괄호로 덧붙인다.
 fn status_str(a: &AgentInfo) -> String {
     use engram_dashboard_protocol::AgentStatus as S;
     match &a.status {
@@ -276,7 +272,6 @@ struct Connection {
 }
 
 impl Connection {
-    /// daemon.json 발견(read-only, no-spawn) → ws 접속 → Auth 송신 → Hello 대기.
     async fn open() -> Result<Self, String> {
         // ★spawn 안 함(ADR-0021 대칭)★: read_live_daemon 은 살아있는 호환 데몬의 daemon.json 만 읽는다.
         //   없으면(파일 없음/죽음/버전 불일치) None → 명확한 에러("데몬 없음").
@@ -314,7 +309,6 @@ impl Connection {
         }
     }
 
-    /// AgentCommand 를 Text JSON 으로 송신.
     async fn send(&mut self, cmd: &AgentCommand) -> Result<(), String> {
         let text = serde_json::to_string(cmd).map_err(|e| format!("command 직렬화 실패: {e}"))?;
         self.ws
@@ -339,7 +333,6 @@ impl Connection {
             if reply_matches(&ev, request_id) {
                 return Ok(ev);
             }
-            // 매칭 안 되는 제어 프레임(broadcast·다른 요청 reply)은 버리고 계속.
         }
     }
 
@@ -358,16 +351,14 @@ impl Connection {
                 Ok(Some(Ok(m))) => m,
             };
             match msg {
-                // 제어 프레임(Text JSON) — AgentEvent 로 파싱. 파싱 실패는 건너뛴다(방어).
+                // 파싱 실패는 Err 로 안 내고 건너뛴다(방어).
                 Message::Text(t) => {
                     if let Ok(ev) = serde_json::from_str::<AgentEvent>(&t) {
                         return Ok(ev);
                     }
                 }
-                // Binary = 터미널 출력 바이트(codec frame). 제어 CLI 는 무시.
                 Message::Binary(_) => {}
                 Message::Close(_) => return Err("daemon 연결이 닫힘(reply 전)".to_string()),
-                // Ping/Pong/Frame 등 — 무시하고 계속.
                 _ => {}
             }
         }
@@ -385,7 +376,6 @@ fn reply_matches(ev: &AgentEvent, request_id: RequestId) -> bool {
         AgentEvent::Created { request_id: r, .. } => *r == request_id,
         AgentEvent::Snapshot { request_id: r, .. } => *r == request_id,
         AgentEvent::PresetList { request_id: r, .. } => *r == request_id,
-        // Error 는 request_id 가 Option — 있으면 매칭, 없으면(전역) 이 one-shot 명령 실패로 수용.
         AgentEvent::Error { request_id: r, .. } => r.map(|r| r == request_id).unwrap_or(true),
         _ => false,
     }
