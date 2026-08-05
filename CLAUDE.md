@@ -190,11 +190,11 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 - `cargo test -p engram-dashboard-core` — 코어 unit + 통합 테스트(실 PTY로 단언)
 - `cargo test -p engram-dashboard-protocol` — protocol codec golden + ts-rs 바인딩
 - `cargo test -p engram-dashboard-messaging` — 메시징 커널 단위(워크스페이스 crate 무의존 격리 하네스, ADR-0110)
-- `cargo test -p engram-dashboard-net` — 네트워크 행 단위(실소켓 127.0.0.1:0 또는 합성 프레임열, 에이전트 시스템 실물 없음 — ADR-0129)
+- `cargo test -p engram-dashboard-net --all-features` — 네트워크 행 단위(실소켓 127.0.0.1:0 또는 합성 프레임열, 에이전트 시스템 실물 없음 — ADR-0129). ★`--all-features` 를 빼지 말 것★: net 의 기본 feature 가 비어 있어 맨 명령은 `auth` 만 컴파일하고 6개만 돈다(켜면 31개 — 실측 2026-08-05). 두 조합을 다 도는 것이 게이트 5(정본 = 그 crate lib.rs 헤더)
 - `cargo build` (루트) — 전체 workspace 빌드
 - `cargo fmt --check` / `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 포맷·격리 게이트(검사형 `--check`)
 - `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
-- 네트워크 행 격리 게이트 3종(ADR-0129 — 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더):
+- 네트워크 행 격리 게이트 — 아래는 발췌고, **전체 목록·기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더**다(ADR-0129). 여기서 개수를 세지 말 것(세던 숫자가 게이트 4·5 추가 때 두 번 뒤처졌다):
   - `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` (→ 0줄) — 소스 참조
   - `rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/ | sort -u` (→ 정확히 2줄) — core 심볼 allowlist(파일 단위 아닌 **심볼 단위**)
   - `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 3줄) — 직접 워크스페이스 의존 상한. **해석된 의존 그래프**를 읽는다 — Cargo.toml 텍스트 grep으로 바꾸지 말 것(rename·테이블 형·비활성 target·optional 등에 뚫린다), 플래그도 줄이지 말 것

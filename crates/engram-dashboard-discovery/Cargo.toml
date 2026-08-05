@@ -17,11 +17,28 @@ engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 #   워크스페이스-로컬 forward 폐포는 {net, core, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
 #   crate 의 lib.rs 헤더). 슬라이스 1 전이었다면 인증 타입이 daemon 에 있어 daemon→discovery 와 고리를
 #   이뤘을 자리다 — 그래서 0-4 가 슬라이스 1 **뒤**로 밀렸다.
+#   ★feature 를 켜지 말 것(load-bearing)★: 여기서 필요한 것은 `auth::AuthFrame` 하나뿐이고, 그건 net 의
+#   기본 feature(비어 있음)로 나온다. `server` 를 켜면 net 은 WS **서버** crate 라 tokio·mio·
+#   tokio-tungstenite·futures-util 이 이 crate 의 의존 트리로 딸려 들어오고(0-4 직후 실측 — 아래
+#   tungstenite 주석의 "async 런타임을 안 들인다" 가 그때 조용히 거짓이 됐다), 그 상태가 아래 트리 게이트로
+#   드러난다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석이 정본이다.
 engram-dashboard-net = { path = "../engram-dashboard-net" }
 # 명령(StopDaemon)·핸드셰이크 프레임 직렬화 — send_stop 이 WS 로 보낼 JSON 조립.
 serde_json = "1"
 # 동기 WS 클라이언트(send_stop 일방 발사). 데몬의 tokio-tungstenite 0.26 과 같은 0.26 계열 —
 # discovery 는 전부 동기라 async 런타임을 들이지 않으려 blocking tungstenite 를 쓴다.
+# ★그 성질의 범위는 `-p` 스코프다(넓혀 읽지 말 것)★: feature 합집합은 cargo 호출 1회 단위라, 워크스페이스
+#   스코프 호출(루트 `cargo build` · `cargo test --workspace` — 이 프로젝트의 표준 회귀 명령)에서는 데몬이
+#   net 의 `server` 를 켜므로 이 crate 의 테스트 바이너리도 tokio 를 진 net 과 링크된다. 아래 게이트가
+#   참으로 지키는 것은 **이 crate 를 단독으로 빌드·소비할 때** 그 짐이 없다는 것이고, 그것이 이 crate 를
+#   src-tauri·tray-host 가 공통 의존하는 근거다.
+# ★이 성질은 실측으로 지킨다★(문장만 두면 위처럼 조용히 거짓이 된다):
+#   `cargo tree -p engram-dashboard-discovery -e normal --prefix none --target all`
+#   `| rg -i "^(tokio|mio|tokio-tungstenite|futures-util) "` → **0줄**.
+#   ★`^…␣` 앵커를 빼지 말 것★: `--prefix none` 이라 crate 이름이 줄 맨 앞에 오므로 앵커가 정확한데,
+#   맨 부분문자열로 적으면 `ter(mio)s`(core→portable-pty)와 **이 줄의 동기 `tungstenite`** 가 걸려
+#   기대값이 0 이 아니게 되고, 그러면 "몇 줄이 정상인지" 를 사람이 매번 판정해야 한다(= 게이트가 죽는다).
+#   비자기일치 확인: `--features engram-dashboard-net/server` 를 붙이면 같은 명령이 6줄을 낸다(실측).
 tungstenite = "0.26"
 
 # tests/stop_smoke.rs(graceful StopDaemon WS 왕복 #[ignore] 통합)의 임시 data_dir 격리용.

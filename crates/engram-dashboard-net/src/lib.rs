@@ -5,6 +5,11 @@
 //! 전-연결 팬아웃 레지스트리(`ws`) · 위층과의 프레임 포트 계약(`frame_port`) · 프로세스 살림
 //! (`instance` 단일 인스턴스 가드 · `portfile` daemon.json IO/stale 판정). 모듈별 책임은 각 파일
 //! 헤더가 정본이다.
+//! ★그 전부가 `server` feature 뒤에 있고 **기본은 비어 있다**★: 켜지 않으면 남는 것은 `auth` 하나 —
+//! **핸드셰이크 프레임 모양만 필요한 소비자**(`discovery` · `src-tauri`)가 async 런타임을 지지 않게
+//! 하는 경계다. 서버 행을 쓰는 쪽이 `features = ["server"]` 로 명시해 켠다(데몬 crate). 어떤 의존이 그
+//! 뒤로 들어갔는지·왜 기본을 비웠는지·이득의 범위가 어디까지인지는 **Cargo.toml 의 `[features]` 주석이
+//! 정본**이다(여기서 목록을 다시 세지 말 것).
 //! ★accept **loop 자체**는 아직 여기 없다★: `run_accept_loop` 은 데몬 조립부에 남아 수락과 에이전트
 //! 행 조립을 겸한다 — 슬라이스 3(얇은 조립 바이너리)에서 분해되며 이 crate 로 온다. 그래서 "소켓
 //! 수락 뒤" 라고 경계를 그었다(수락 그 자체는 아직 조립부 소관).
@@ -99,9 +104,27 @@
 //!     쪽이 대응이다(`ws.rs` 의 `TEST_WIRE_VERSION`). `\b` 로 좁히면 그 규율이 사라진다.
 //!     ★이 문단도 괄호 형태로 적혀 있다★ — 게이트를 **설명하는 글**조차 게이트에 걸린다(실측: 처음엔
 //!     맨 이름으로 적었다가 그대로 물렸다). 서두의 자기일치 경고가 예시 하나를 더 얻은 셈이다.
+//!   · **게이트 5 — 두 feature 조합이 각각 컴파일된다**(`-p` 범위, `default = []` 전환이 추가):
+//!     `cargo test -p engram-dashboard-net` → **성공해야 PASS**(feature 0개 = `auth` 단독 + golden 테스트)
+//!     `cargo test -p engram-dashboard-net --all-features` → **성공해야 PASS**(`server` 행)
+//!     ★판정 방식이 위 넷과 다르다★: 1·4 는 매치 유무로, 2·3 은 줄 수로 읽지만 이건 **성공 여부**로 읽는다.
+//!     ★왜 두 줄인가★: 기본이 비어 있어 맨 명령은 feature 0개만 컴파일하고, `#[cfg(feature = "server")]`
+//!     아래 모듈은 **컴파일 대상에서 빠진다**(가려진 코드는 오류를 내지 않는다) — 실측 2026-08-05 로 맨
+//!     명령은 **6개**, `--all-features` 는 **31개**를 돌린다. 반대 방향으로, 워크스페이스 스코프 명령은
+//!     데몬이 `server` 를 켜므로 항상 ON 쪽만 본다 — `-p` 범위에서 ON 쪽을 컴파일하는 명령은 둘째 줄뿐이다.
+//!     각 줄이 상대가 못 보는 쪽을 맡으므로 한 줄로 줄이지 말 것.
+//!     ★`--features server` 가 아니라 `--all-features` 인 이유★: 게이트 3 이 이미 그 플래그를 쓰므로 net
+//!     게이트의 ON 쪽 표기를 하나로 맞춘다. feature 가 `server` 하나뿐인 지금 두 형태는 같은 집합이다.
+//!     ★`build` 가 아니라 `test` 인 이유★: dev-의존 경로까지 문다 — `auth.rs` 의 golden 테스트가 쓰는
+//!     `serde_json` 은 `[dependencies]` 쪽에선 optional 이라 feature 0개 빌드에 없다.
+//!     ★이 게이트가 닫지 **않는** 것★: 새 의존을 `optional` 없이 적어 feature 0개 소비자에게 조용히
+//!     지우는 형태는 컴파일을 깨지 않으므로 여기서 안 걸린다 — 근거·대안 게이트는 Cargo.toml 의
+//!     `[features]` 주석.
 //!
-//! ★단독 검증(ADR-0012)★: `cargo test -p engram-dashboard-net` 가 이 crate 만으로 돈다 — WS 서버·프레임
-//! 포트 테스트는 실소켓(127.0.0.1:0) 또는 합성 프레임열로 돌고 에이전트 시스템 실물을 쓰지 않는다.
+//! ★단독 검증(ADR-0012)★: `cargo test -p engram-dashboard-net --all-features` 가 이 crate 만으로 돈다 —
+//! WS 서버·프레임 포트 테스트는 실소켓(127.0.0.1:0) 또는 합성 프레임열로 돌고 에이전트 시스템 실물을 쓰지
+//! 않는다. ★`--all-features` 를 빼지 말 것★: 기본이 비어 있어 맨 `cargo test -p engram-dashboard-net` 은
+//! 서버 행을 아예 컴파일하지 않고 초록을 낸다(게이트 5 의 첫 줄이 바로 그 조합이다 — 서로 다른 것을 본다).
 //! 그 crate 들이 **직접 의존으로 선언돼 있지 않다**는 것은 게이트 3(해석된 의존 그래프)이, 소스가 이름조차
 //! 부르지 않는다는 것은 게이트 1이 못 박는다.
 // ADR-0129
@@ -109,9 +132,17 @@
 // 토큰 핸드셰이크 프레임(0-4). 이 crate 가 **모양을 소유**하는 유일한 프레임이고, 발신자(트레이 stop ·
 //   CLI · 데몬 클라이언트 셸 · 프론트 손조립 JSON)가 전부 이 모양을 만든다 — wire 는 얼려 있다.
 pub mod auth;
+// ↓ 여기부터 서버 행 — `server` feature 가 켠다(기본은 비어 있고, 데몬 crate 가 명시로 켠다). `#[cfg]` 로
+//   가린 코드는 **가려진 조합에서 컴파일 오류가 보이지 않는다**는 성질이 있으므로, 이 모듈들의 컴파일은
+//   feature 를 켜고 도는 경로가 지킨다 — 워크스페이스 스코프(`cargo build` 루트 · `cargo test --workspace`)와
+//   `-p` 스코프의 게이트 5 둘째 줄(위 헤더).
 // 불투명 프레임 포트. 계약(trait)은 이 crate 가 소유하고 실물은 양쪽이 나눠 꽂는다 —
 //   `FrameSink`/`FrameFanout` 은 `ws` 가, `ConnectionHandler`/`ConnectionHandlerFactory` 는 위층이.
+#[cfg(feature = "server")]
 pub mod frame_port;
+#[cfg(feature = "server")]
 pub mod instance;
+#[cfg(feature = "server")]
 pub mod portfile;
+#[cfg(feature = "server")]
 pub mod ws;

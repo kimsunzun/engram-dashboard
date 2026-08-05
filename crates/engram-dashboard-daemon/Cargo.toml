@@ -84,7 +84,10 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 # ADR-0129 슬라이스 1: 네트워크 행 lib(WS 서버·불투명 프레임 포트·단일 인스턴스 가드·portfile). 이 방향
 #   (daemon → net)만 존재한다 — net 은 데몬을 타입으로도 모르고, 두 행은 그 crate 가 소유한 포트 trait
 #   (`frame_port`)으로만 만난다. 데몬은 그 포트에 실물을 꽂는 쪽(`agent_conn`)이자 조립실이다.
-engram-dashboard-net = { path = "../engram-dashboard-net" }
+#   ★`features = ["server"]` 를 지우지 말 것★: net 의 기본 feature 는 비어 있어 `auth` 만 나온다. 서버 행
+#   (`ws`·`frame_port`·`instance`·`portfile`)을 쓰는 것은 이 crate 뿐이고, 그것을 켜는 자리가 여기다.
+#   근거(왜 기본을 비웠나)는 그 crate `Cargo.toml` 의 `[features]` 주석이 정본이다.
+engram-dashboard-net = { path = "../engram-dashboard-net", features = ["server"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # ★ADR-0129 슬라이스 1 — `tokio-tungstenite` 를 [dev-dependencies] 로 내렸다★: 이 crate 운영 코드의
