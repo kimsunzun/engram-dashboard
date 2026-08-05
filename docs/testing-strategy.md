@@ -56,10 +56,11 @@
 - **① 단위**: `src/` 내 `#[cfg(test)]`(ws 연결 수명·Origin 허용목록·auth 핸드셰이크·연결당 단일 writer·keepalive 판정, portfile IO/stale 판정, instance 단일 인스턴스 가드). 데몬 crate 에서 이사해 온 것들이다.
 - **격리 하네스 = crate 경계 그 자체**: 실소켓(127.0.0.1:0) 또는 합성 프레임열로 돌고 에이전트 시스템 실물(`AgentManager`·실 PTY)을 쓰지 않는다. daemon·messaging·discovery 를 못 박는 것은 소스가 이름조차 부르지 않는다는 게이트 1과 직접 의존으로 선언돼 있지 않다는 게이트 3이다. `AgentManager`·`PtyTransport` 는 **core 안**에 있고 core 는 허용된 직접 의존이라 그 둘이 잡지 못한다 — 이 자리는 게이트 2의 core 심볼 allowlist(허용 심볼이 전부 `agent::platform::` 아래의 프로세스 liveness 헬퍼)가 맡는다.
 - 실행: `cargo test -p engram-dashboard-net`.
-- **격리 게이트 3종** — 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더:
+- **격리 게이트** — 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더:
   - 게이트 1(소스 참조): `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` → 0줄.
   - 게이트 2(core 심볼 allowlist — 파일 단위가 아니라 **심볼 단위**): `rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/ | sort -u` → 정확히 2줄.
   - 게이트 3(직접 워크스페이스 의존 상한 — **해석된 의존 그래프**): `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 3줄. 매니페스트 텍스트 grep 으로 바꾸지 말 것(rename·`[dependencies.<이름>]` 테이블 형·들여쓴 선언·`[build-dependencies]`·비활성 target·`optional` 이 빠져나간다 — 실측), 플래그도 줄이지 말 것.
+  - 게이트 4(auth 어휘 재유입 금지 — 0-4 가 닫은 구멍의 회귀 방어): `rg "(A)gentCommand|(P)ROTOCOL_VERSION" crates/engram-dashboard-net/src/` → 0줄. 매치 유무로 판정한다(종료코드 아님). 패턴의 `_(이름)` 괄호 형태를 풀어 쓰지 말 것 — 그 근거는 위 헤더의 게이트4 절.
 
 ### daemon (`crates/engram-dashboard-daemon`)
 - **① 단위**: `src/` 내 `#[cfg(test)]` — `connection_core`·`agent_conn`·`status_fanout`·`messaging_host`·`control/*`. 목록의 정본은 `rg -l "#\[cfg\(test\)\]" crates/engram-dashboard-daemon/src/`. ws·portfile·instance 는 net crate 로 이사했다(ADR-0129 슬라이스 1).
@@ -104,7 +105,7 @@ cargo test --workspace --exclude engram-dashboard  # 전 멤버 회귀(src-tauri
 cargo test -p engram-dashboard-protocol     # 단위+golden+ts_export
 cargo test -p engram-dashboard-core         # 단위+통합(headless/transport_smoke/session_smoke, 실 PTY)
 cargo test -p engram-dashboard-messaging    # 메시징 커널 단위 — 워크스페이스 crate 무의존, ADR-0110
-cargo test -p engram-dashboard-net          # 네트워크 행 단위 (실소켓·합성 프레임열 — 격리 게이트 3종은 위 §1 net 절)
+cargo test -p engram-dashboard-net          # 네트워크 행 단위 (실소켓·합성 프레임열 — 격리 게이트는 위 §1 net 절)
 cargo test -p engram-dashboard-daemon       # src/ 단위 + tests/(ws_e2e 등 — #[ignore] 분은 빠짐)
 cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture  # 위 ws_e2e 안의 #[ignore] 실프로세스 분
 cargo clippy --workspace --all-targets -- -D warnings

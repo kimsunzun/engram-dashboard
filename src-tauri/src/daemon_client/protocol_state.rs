@@ -25,7 +25,9 @@ use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
 
 // ── request_id 추출(T6a — request/reply 상관) ─────────────────────────────────────────
 /// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
-/// 일부(Auth/Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
+/// 일부(Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
+/// (핸드셰이크는 이 표에 없다 — 명령이 아니라 네트워크 lib 소유 프레임이라 이 함수에 오지 않는다.
+///  ADR-0129 0-4.)
 ///
 /// ★T6a 계약★: `send_command` 은 reply 를 기대하므로 request_id 가 있는 명령에만 쓴다. None 인 명령을
 /// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로, 호출자(send_command)가 None 을 거른다.
@@ -59,8 +61,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
         | AgentCommand::SetEnvelopeFormat { request_id, .. } => Some(*request_id),
         // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
-        AgentCommand::Auth { .. }
-        | AgentCommand::Resize { .. }
+        AgentCommand::Resize { .. }
         | AgentCommand::Subscribe { .. }
         | AgentCommand::Unsubscribe { .. } => None,
     }
@@ -457,11 +458,8 @@ mod tests {
             None,
             "Subscribe 는 request_id 없음"
         );
-        let auth = AgentCommand::Auth {
-            token: "x".into(),
-            protocol_version: 1,
-        };
-        assert_eq!(command_request_id(&auth), None);
+        // (옛 Auth 케이스는 지웠다 — 핸드셰이크가 명령 enum 을 떠나 이 함수에 **넣을 수조차 없다**.
+        //  ADR-0129 0-4. 단언이 약해진 게 아니라 타입이 그 입력을 없앴다.)
     }
 
     /// 전용 reply variant 는 request_id 를 echo(매칭 대상), broadcast 는 None(매칭 우회 = 편승 제거).

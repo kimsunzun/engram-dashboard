@@ -14,13 +14,14 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 /// (Profile CRUD 는 phase 1 에서 core profile 타입 합류 후 추가 — 지금은 보류.)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
+// ★`Auth` variant 는 여기 없다(ADR-0129 0-4, 2026-08-05)★: 연결 후 첫 frame 전용 인증 프레임의 모양은
+//   네트워크 lib(`engram-dashboard-net` 의 `auth::AuthFrame`)이 소유한다 — 토큰 인증은 "이 소켓을 살릴지"
+//   판정이라 네트워크 살림이고, 그 판정을 하는 crate 가 에이전트 어휘(이 enum)를 타입으로 알면 안 되기
+//   때문이다(ADR-0129 결정 1). **wire 는 그대로다** — 저쪽도 externally-tagged 라 프레임은 여전히
+//   `{"Auth":{"token":"…","protocol_version":N}}` 이고, 그 형태의 정본 테스트는 저 crate 의 golden JSON 이다.
+//   ★여기에 다시 넣지 말 것★: 두 정의가 공존하면 조용히 갈라진다. 프론트 바인딩(`bindings/AgentCommand.ts`)
+//   에도 그래서 `Auth` 가 없다(프론트 `wsTransport` 는 원래 타입 없이 객체 리터럴로 만든다).
 pub enum AgentCommand {
-    /// 연결 후 첫 frame 전용 인증(설계 §4 step 4b). 데몬이 "연결 1초 내 첫 frame"으로만 유효성을
-    /// 강제한다 — 그 외 시점의 Auth 는 무시한다. token 은 daemon.json 의 256-bit hex.
-    Auth {
-        token: String,
-        protocol_version: u32,
-    },
     /// 새 에이전트 spawn. 프로필 참조.
     Spawn {
         #[ts(type = "string")]

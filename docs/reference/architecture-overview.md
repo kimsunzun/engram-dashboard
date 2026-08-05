@@ -177,7 +177,7 @@ flowchart BT
 
 - **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram-send` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
 - **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(core 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
-- **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 예외(auth 핸드셰이크가 protocol 에서 가져오는 이름)와 그것이 0-4 이월인 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3에서 이동 예정). 격리 게이트 3종과 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다.
+- **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 범위와 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3에서 이동 예정). 격리 게이트와 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다.
 
 ### core 클래스 구조 (소유 관계)
 

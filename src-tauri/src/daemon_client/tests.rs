@@ -41,6 +41,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+// ADR-0129 0-4: 핸드셰이크 프레임의 모양은 네트워크 lib 소유다(명령 enum 이 아니다).
+use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, DaemonInfo, PROTOCOL_VERSION};
 
 use futures_util::{SinkExt, StreamExt};
@@ -230,21 +232,20 @@ async fn connect_sends_auth_first_frame() {
     // ★첫 frame 이 Auth(token 은 DaemonInfo, protocol_version 은 자기 컴파일 버전)★
     //   — wsTransport.test.ts parsedSent()[0] 대응. protocol_version 단언은 echo 가 아니라
     //   "컴파일된 PROTOCOL_VERSION 송신"(Fix C). echo 회귀는 별도 테스트가 틀린 값으로 잡는다.
+    // ★디코드 타입이 바뀌었다(ADR-0129 0-4) — 단언은 그대로★: 첫 frame 은 명령이 아니라 네트워크 lib
+    //   소유 핸드셰이크 프레임이다. **이 파싱 자체가 "서버가 받아들일 모양인가" 를 본다**(wire 는 불변).
     let first = first_rx.await.expect("첫 frame 수신");
-    let cmd: AgentCommand = serde_json::from_str(&first).expect("첫 frame 은 valid AgentCommand");
-    match cmd {
-        AgentCommand::Auth {
-            token: t,
-            protocol_version,
-        } => {
-            assert_eq!(t, token, "Auth.token 이 DaemonInfo.token 을 그대로 싣는다");
-            assert_eq!(
-                protocol_version, PROTOCOL_VERSION,
-                "protocol_version 은 자기 컴파일 버전(Fix C)"
-            );
-        }
-        other => panic!("첫 frame 은 Auth 여야 하는데 {other:?}"),
-    }
+    let frame: AuthFrame =
+        serde_json::from_str(&first).expect("첫 frame 은 valid 핸드셰이크 프레임");
+    let AuthFrame::Auth {
+        token: t,
+        protocol_version,
+    } = frame;
+    assert_eq!(t, token, "Auth.token 이 DaemonInfo.token 을 그대로 싣는다");
+    assert_eq!(
+        protocol_version, PROTOCOL_VERSION,
+        "protocol_version 은 자기 컴파일 버전(Fix C)"
+    );
 
     client.close();
     assert_eq!(client.state(), ConnectionState::Down);
@@ -498,22 +499,18 @@ async fn auth_sends_compiled_protocol_version_not_echo() {
     client.connect().await.expect("connect");
 
     let first = first_rx.await.expect("첫 frame");
-    let cmd: AgentCommand = serde_json::from_str(&first).expect("valid AgentCommand");
-    match cmd {
-        AgentCommand::Auth {
-            protocol_version, ..
-        } => {
-            assert_eq!(
-                protocol_version, PROTOCOL_VERSION,
-                "Auth 는 컴파일된 PROTOCOL_VERSION 을 보내야(echo 아님). 받은 값 {protocol_version}"
-            );
-            assert_ne!(
-                protocol_version, wrong,
-                "DaemonInfo 가 준 틀린 버전(999)을 echo 하면 안 됨"
-            );
-        }
-        other => panic!("Auth 여야 하는데 {other:?}"),
-    }
+    let frame: AuthFrame = serde_json::from_str(&first).expect("valid 핸드셰이크 프레임");
+    let AuthFrame::Auth {
+        protocol_version, ..
+    } = frame;
+    assert_eq!(
+        protocol_version, PROTOCOL_VERSION,
+        "Auth 는 컴파일된 PROTOCOL_VERSION 을 보내야(echo 아님). 받은 값 {protocol_version}"
+    );
+    assert_ne!(
+        protocol_version, wrong,
+        "DaemonInfo 가 준 틀린 버전(999)을 echo 하면 안 됨"
+    );
     client.close();
 }
 

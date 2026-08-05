@@ -688,11 +688,15 @@ impl ConnectionCore {
         }
 
         match cmd {
-            // 2번째 Auth 는 무시(Error 만 — 이미 인증된 연결).
-            AgentCommand::Auth { .. } => {
-                send_error(sink, None, "already authenticated".into());
-            }
-
+            // ★2번째 Auth arm 은 여기 없다(ADR-0129 0-4)★: 핸드셰이크 프레임이 이 enum 을 떠나
+            //   네트워크 lib 소유가 됐으므로, 인증 뒤 도착한 Auth 프레임은 **명령으로 디코드되지 않는다**.
+            //   그 응답("already authenticated")은 디코드 지점인 `agent_conn::AgentConnection::on_text`
+            //   이 태그로 되잡아 그대로 낸다 — 회귀 방어는 `ws_e2e` case21 이다.
+            //   ★불변인 것과 바뀐 것을 구분할 것★: 온전한 2차 핸드셰이크가 받는 **응답 문구**는 그대로다.
+            //   어긋난 프레임이 받는 **진단 텍스트**는 바뀌었다 — Auth 태그를 단 어긋난 프레임은 이제 그
+            //   태그 판정에 걸려 같은 "already authenticated" 를 받고(옛 경로는 이 arm 까지 와서 serde 의
+            //   필드 누락 오류를 냈다), 그 밖의 프레임이 받는 "unknown variant" 문구의 기대 목록에서는
+            //   `Auth` 가 빠졌다. case23 이 보는 것은 그 목록이 아니라 `invalid command` 접두다.
             AgentCommand::Spawn {
                 profile_id,
                 request_id,

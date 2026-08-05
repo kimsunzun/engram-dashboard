@@ -177,6 +177,34 @@ pub struct AgentConnection {
     session: Arc<ConnectionSession>,
 }
 
+/// 이 text 가 **핸드셰이크 프레임**인가(ADR-0129 0-4). `on_text` 이 명령 디코드에 실패한 뒤에만 부른다.
+///
+/// ★왜 필요한가★: 인증은 이미 네트워크 행이 첫 프레임에서 끝냈다. 그 뒤에 또 오는 핸드셰이크는
+/// **프로토콜 위반**이고, 예전엔 그게 명령 enum 의 variant 라 dispatch 가 거절 문구를 냈다. 0-4 로
+/// 모양이 네트워크 lib 로 가면서 그 경로가 끊겼으므로 여기서 되잡는다.
+/// ★연결을 닫지 않는다★: 옛 동작 그대로 Error 한 줄만 내고 연결은 살려 둔다(case21 이 후속 명령이
+/// 여전히 응답되는지까지 본다).
+///
+/// ★온전함이 아니라 **태그**로 판정한다★: 필드가 빠졌거나 본문 모양이 어긋난 Auth 프레임도 핸드셰이크로
+/// 센다. 온전한 것만 세면 낡은 클라가 ``unknown variant `Auth` `` 를 받는데, 이 서버가 첫 프레임으로
+/// 유일하게 받아 주는 것이 Auth 라서 그 답은 디버깅을 반대 방향으로 보낸다.
+/// ★위층 어휘가 늘지 않는다★: 최상위 키 하나만 보므로 명령 목록을 알 필요가 없고, 본문은
+/// `IgnoredAny` 로 건너뛰어 값 트리를 만들지 않는다 — 피어가 프레임마다 도달시킬 수 있는 경로라
+/// 할당을 얹지 않는다.
+///
+/// 순수 함수라 연결 실물(manager·소켓) 없이 단위 검증된다 — 아래 테스트.
+fn is_handshake_frame(text: &str) -> bool {
+    /// externally-tagged 단일 variant — `{"Auth": …}` 만 성공하고 본문은 건너뛴다.
+    /// ★태그 문자열의 정본은 `engram_dashboard_net::auth::AuthFrame`★ — 아래
+    /// `handshake_frame_is_recognized_after_auth` 가 그 타입을 직렬화한 바이트로 이 판정을 걸어,
+    /// 두 쪽이 갈라지면 깨지게 한다.
+    #[derive(serde::Deserialize)]
+    enum HandshakeTag {
+        Auth(serde::de::IgnoredAny),
+    }
+    serde_json::from_str::<HandshakeTag>(text).is_ok()
+}
+
 impl ConnectionHandler for AgentConnection {
     fn on_connect<'a>(
         &'a self,
@@ -209,6 +237,21 @@ impl ConnectionHandler for AgentConnection {
                     DispatchFlow::Close => ConnFlow::Close,
                     DispatchFlow::Continue => ConnFlow::Continue,
                 },
+                // ★인증 뒤 도착한 2차 핸드셰이크(ADR-0129 0-4)★: 옛 코드에선 Auth 가 명령 enum 의
+                //   variant 라 dispatch 가 "already authenticated" 를 냈다. 0-4 로 그 모양이 네트워크
+                //   lib 소유가 되면서 이 프레임은 **명령으로 디코드되지 않는다** — 되잡지 않으면 클라가
+                //   조용히 일반 파싱 오류를 받게 되는 **관측 가능한 동작 변경**이 된다(회귀 방어 =
+                //   `tests/ws_e2e.rs` case21). 그래서 파싱 실패 갈래에서 한 번 더 본다.
+                //   ★순서가 이렇다★: 명령 파싱이 **먼저**다. 태그가 겹치지 않아 결과는 순서와 무관하지만,
+                //   정상 경로(명령)에 프레임마다 추가 파싱을 얹지 않으려는 것이다.
+                Err(_) if is_handshake_frame(text) => {
+                    tracing::warn!(conn = conn_id, "인증 완료된 연결에 2차 핸드셰이크 — 거절");
+                    let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
+                        request_id: None,
+                        message: "already authenticated".into(),
+                    }));
+                    ConnFlow::Continue
+                }
                 Err(e) => {
                     tracing::warn!(conn = conn_id, "명령 파싱 실패: {e}");
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
@@ -491,6 +534,61 @@ mod tests {
 
         // 큐 첫 항목은 Binary(첫 frame).
         assert!(matches!(rx.recv().await.unwrap(), Frame::Binary(_)));
+    }
+
+    // ── 2b. 2차 핸드셰이크 판별(ADR-0129 0-4) ────────────────────────────────────
+    //    `on_text` 의 파싱 실패 갈래가 이 판정으로 갈린다: 핸드셰이크면 "already authenticated",
+    //    아니면 일반 "invalid command". e2e 회귀 방어는 ws_e2e case21 이고, 여기선 판정 자체를 고정한다.
+    #[test]
+    fn handshake_frame_is_recognized_after_auth() {
+        // ★태그의 정본과 묶는 자리★: 문자열 리터럴이 아니라 네트워크 crate 의 타입을 직렬화해 태운다.
+        //   그쪽이 태그를 바꾸면 이 판정이 못 따라간다는 것이 여기서 드러난다.
+        let frame = engram_dashboard_net::auth::AuthFrame::Auth {
+            token: "deadbeef".into(),
+            protocol_version: 3,
+        };
+        assert!(is_handshake_frame(&serde_json::to_string(&frame).unwrap()));
+        // 필드 순서·공백이 달라도 같은 프레임이다(발신자마다 직렬화기가 다르다 — 손조립 JS 도 있다).
+        assert!(is_handshake_frame(
+            r#"{ "Auth": { "protocol_version": 3, "token": "deadbeef" } }"#
+        ));
+    }
+
+    #[test]
+    fn malformed_handshake_frames_are_recognized_too() {
+        // ★온전함이 아니라 태그로 센다★: 아래가 false 가 되면 낡은 클라가 ``unknown variant `Auth` ``
+        //   를 받는다 — 이 서버가 첫 프레임으로 유일하게 받아 주는 것이 Auth 인데 그런 건 없다고 답하는
+        //   꼴이라 디버깅을 반대 방향으로 보낸다.
+        for text in [
+            r#"{"Auth":{"token":"deadbeef"}}"#, // protocol_version 누락
+            r#"{"Auth":123}"#,                  // 본문이 객체가 아님
+            r#"{"Auth":null}"#,
+        ] {
+            assert!(
+                is_handshake_frame(text),
+                "Auth 태그를 단 어긋난 프레임도 핸드셰이크다: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_handshake_text_is_not_recognized() {
+        // ★일반 파싱 오류 경로를 잠식하면 안 된다★: 아래가 하나라도 true 가 되면 case23(깨진 JSON →
+        //   "invalid command")이 조용히 "already authenticated" 로 바뀐다.
+        for text in [
+            r#"{"NotACommand":true}"#,
+            r#"{"ListAgents":{"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            r#""Auth""#,                 // 태그만 있고 본문이 없다 = 프레임이 아니다
+            r#"{"Auth":1,"Kill":2}"#,    // 최상위 키가 하나가 아니다
+            r#"{"auth":{"token":"x"}}"#, // 태그는 대소문자까지 wire 계약이다
+            "not json at all",
+            "",
+        ] {
+            assert!(
+                !is_handshake_frame(text),
+                "핸드셰이크가 아닌데 인정됐다: {text}"
+            );
+        }
     }
 
     // ── 3. control 평면: Outbound 3종이 프레임 3종으로 인코딩되는지 ───────────────

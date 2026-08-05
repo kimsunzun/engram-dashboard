@@ -53,6 +53,10 @@ use status_fanout::DaemonStatusSink;
 //   재수출한다(`start_test_server_with_keepalive` — `tests/ws_e2e.rs` 가 부른다). 표준 Rust API
 //   재수출 패턴이고, **모듈 통째 재수출이 아니다** — 옛 `crate::ws::` 경로를 되살리는 것은 금지다.
 pub use engram_dashboard_net::ws::KeepaliveConfig;
+// ADR-0129 0-4: 핸드셰이크 프레임(`auth::AuthFrame`)은 **재수출하지 않는다** — 이 crate 의 공개
+//   시그니처에 나타나지 않으므로 위 재수출의 사유가 성립하지 않고, 한 타입에 import 경로가 둘이 생긴다.
+//   `tests/ws_e2e.rs` 는 네트워크 crate 를 직접 부른다(그 crate 는 여기 normal 의존이라 테스트 타깃에서
+//   그대로 보인다) — 경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
 
 const DAEMON_FILE: &str = "daemon.json";
 
@@ -407,12 +411,16 @@ async fn run_accept_loop(
                         let handlers = handlers.clone();
                         let expected_token = expected_token.clone();
                         tokio::spawn(async move {
+                            // ADR-0129 0-4: 기대 프로토콜 버전은 **조립부가 주입**한다 — 네트워크 행은
+                            //   그 값을 알지 못하고 "클라가 말한 숫자가 이 숫자와 같은가" 만 본다.
+                            //   토큰과 같은 결(둘 다 조립부가 아는 값)이라 나란히 넘긴다.
                             engram_dashboard_net::ws::handle_connection(
                                 stream,
                                 peer,
                                 registry,
                                 handlers,
                                 expected_token,
+                                PROTOCOL_VERSION,
                                 keepalive,
                             )
                             .await;

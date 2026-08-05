@@ -995,6 +995,7 @@ dependencies = [
  "engram-dashboard-core",
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",
+ "engram-dashboard-net",
  "engram-dashboard-protocol",
  "futures-util",
  "serde",
@@ -1065,6 +1066,7 @@ version = "0.1.0"
 dependencies = [
  "dunce",
  "engram-dashboard-core",
+ "engram-dashboard-net",
  "engram-dashboard-protocol",
  "serde_json",
  "tempfile",
@@ -1089,6 +1091,7 @@ dependencies = [
  "engram-dashboard-core",
  "engram-dashboard-protocol",
  "futures-util",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

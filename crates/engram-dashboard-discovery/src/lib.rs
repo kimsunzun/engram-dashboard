@@ -19,6 +19,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+// ADR-0129 0-4: 핸드셰이크 프레임의 모양은 네트워크 lib 소유다(명령 enum 이 아니다).
+use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, PROTOCOL_VERSION};
 
 const DAEMON_FILE: &str = "daemon.json";
@@ -599,11 +601,15 @@ fn build_stop_command() -> AgentCommand {
     }
 }
 
-/// 보낼 Auth 커맨드를 조립한다(순수 — 직렬화만). token 은 daemon.json 의 값, protocol_version 은
-/// 우리 PROTOCOL_VERSION. 데몬은 연결 1초 내 첫 프레임으로 이 Auth(Text)를 기대한다(ws.rs AUTH_TIMEOUT).
+/// 보낼 핸드셰이크 프레임을 조립한다(순수 — 직렬화만). token 은 daemon.json 의 값, protocol_version 은
+/// 우리 PROTOCOL_VERSION. 데몬은 연결 1초 내 첫 프레임으로 이걸 기대한다(네트워크 lib 의 AUTH_TIMEOUT).
+///
+/// ★타입 출처(ADR-0129 0-4)★: 이건 **명령이 아니라 네트워크 lib 소유 프레임**이다(`AuthFrame`).
+/// 데몬의 인증 판정을 하는 그 crate 가 모양의 정본을 쥐므로, 발신자가 제 손으로 JSON 을 짜는 대신
+/// 같은 타입을 쓴다 — 그래야 한쪽만 바뀌는 표류가 컴파일 에러가 된다.
 /// ★token 은 로그/에러 메시지에 절대 넣지 말 것★(daemon.json ACL 채널로만 흐름).
-fn build_auth_command(token: &str) -> AgentCommand {
-    AgentCommand::Auth {
+fn build_auth_command(token: &str) -> AuthFrame {
+    AuthFrame::Auth {
         token: token.to_string(),
         protocol_version: PROTOCOL_VERSION,
     }
@@ -2004,19 +2010,25 @@ mod tests {
     #[test]
     fn build_auth_command_carries_token_and_version() {
         // Auth 가 daemon.json token + 우리 PROTOCOL_VERSION 을 싣는지(데몬 첫-프레임 검증과 정합).
+        // ★단일 variant 라 반증 불가 패턴이다(ADR-0129 0-4)★ — 옛 `other => panic!` 갈래는 이제 존재할
+        //   수 없는 상태라 지웠다(단언이 약해진 게 아니라 컴파일러가 대신 보증한다).
         let token = "f".repeat(64);
-        match build_auth_command(&token) {
-            AgentCommand::Auth {
-                token: t,
-                protocol_version,
-            } => {
-                assert_eq!(t, token);
-                assert_eq!(protocol_version, PROTOCOL_VERSION);
-            }
-            other => panic!("Auth 가 아님: {other:?}"),
-        }
+        let AuthFrame::Auth {
+            token: t,
+            protocol_version,
+        } = build_auth_command(&token);
+        assert_eq!(t, token);
+        assert_eq!(protocol_version, PROTOCOL_VERSION);
+
+        // wire 형태 — 태그 존재만이 아니라 **바이트 전체**를 못 박는다. 이 프레임을 받는 쪽(네트워크 lib)이
+        // 같은 문자열을 golden 으로 들고 있고, 데몬은 이 crate 의 타입을 쓰지 않으므로 둘을 잇는 것은
+        // 이 형태뿐이다(트레이 stop 이 조용히 인증에 실패하면 데몬이 안 꺼진다).
         let json = serde_json::to_string(&build_auth_command(&token)).unwrap();
-        assert!(json.contains("Auth"), "externally-tagged Auth 태그: {json}");
+        assert_eq!(
+            json,
+            format!(r#"{{"Auth":{{"token":"{token}","protocol_version":{PROTOCOL_VERSION}}}}}"#),
+            "핸드셰이크 wire 형태(externally-tagged)"
+        );
     }
 
     // ── find_workspace_root / is_workspace_root (임시 디렉토리 트리, 빌드모드 무관) ──────

@@ -25,11 +25,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-// ★ADR-0129 잔여 — auth 핸드셰이크★: 핸드셰이크를 데몬 소유 타입으로 옮기는 것은 후속 슬라이스라,
-//   지금은 `AgentCommand::Auth`/`PROTOCOL_VERSION` 만 네트워크 행에 남는다. 이 두 이름이 이 파일에
-//   남은 **유일한** 에이전트 어휘다(상태·메시징 sink 는 데몬 crate 의 status_fanout/messaging_host 로
-//   이사했다).
-use engram_dashboard_protocol::{AgentCommand, PROTOCOL_VERSION};
+// ★auth 핸드셰이크 = 이 crate 가 의미를 아는 유일한 프레임(ADR-0129 결정 1, 0-4 완료)★: 프레임 모양은
+//   `crate::auth` 가 소유하고, 기대 프로토콜 버전은 **값으로 주입**받는다(아래 `handle_connection`).
+//   그래서 이 파일엔 위층 명령 enum 도 버전 상수도 없다 — 그 상태를 lib.rs 헤더의 게이트 4 가 못 박는다.
+use crate::auth::AuthFrame;
 
 use crate::frame_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameError, FrameFanout,
@@ -262,7 +261,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// `expected_token` 은 daemon.json 의 토큰. `handlers` 는 이 연결에 붙일 위층 핸들러 공장 —
 /// 프레임의 의미(명령 해석·이벤트 인코딩·연결 정리)는 전부 그쪽이 소유하므로, 이 함수는 에이전트
-/// 어휘를 auth 핸드셰이크 말고는 알지 못한다(ADR-0129).
+/// 어휘를 알지 못한다(ADR-0129).
+///
+/// ★`expected_protocol_version` 도 **주입**이다(0-4)★: 토큰과 같은 결로 조립부가 값을 넣어 준다.
+/// 그래서 이 crate 는 "지금 버전이 몇" 을 모르고 **"클라가 말한 숫자가 내가 받은 숫자와 같은가"** 만
+/// 판정한다 — 버전 상수를 여기서 읽으면 그 순간 프로토콜 어휘가 네트워크 행으로 돌아온다.
 // ADR-0129
 pub async fn handle_connection(
     stream: TcpStream,
@@ -270,6 +273,7 @@ pub async fn handle_connection(
     registry: ConnRegistry,
     handlers: Arc<dyn ConnectionHandlerFactory>,
     expected_token: Arc<String>,
+    expected_protocol_version: u32,
     keepalive: KeepaliveConfig,
 ) {
     // 1) WS 업그레이드 + Origin 검사.
@@ -284,8 +288,8 @@ pub async fn handle_connection(
     // 2) 첫 frame(1초 내) → Auth 파싱 + 토큰 상수시간 비교 + 버전 검사.
     match tokio::time::timeout(AUTH_TIMEOUT, ws.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => {
-            match serde_json::from_str::<AgentCommand>(&text) {
-                Ok(AgentCommand::Auth {
+            match serde_json::from_str::<AuthFrame>(&text) {
+                Ok(AuthFrame::Auth {
                     token,
                     protocol_version,
                 }) => {
@@ -299,17 +303,17 @@ pub async fn handle_connection(
                         .await;
                         return;
                     }
-                    if protocol_version != PROTOCOL_VERSION {
+                    if protocol_version != expected_protocol_version {
                         tracing::warn!(
                             %peer,
                             client = protocol_version,
-                            server = PROTOCOL_VERSION,
+                            server = expected_protocol_version,
                             "auth 실패: protocol_version 불일치 — close"
                         );
                         let _ = send_error_and_close(
                             &mut ws,
                             handlers.handshake_error_frame(&format!(
-                                "protocol_version mismatch: client {protocol_version} != server {PROTOCOL_VERSION}"
+                                "protocol_version mismatch: client {protocol_version} != server {expected_protocol_version}"
                             )),
                         )
                         .await;
@@ -317,8 +321,27 @@ pub async fn handle_connection(
                     }
                     tracing::info!(%peer, "auth 성공");
                 }
-                Ok(_) => {
-                    tracing::warn!(%peer, "첫 frame 이 Auth 가 아님 — close");
+                // ★두 실패 문구의 경계가 0-4 로 옮겨졌다(의도)★: 예전엔 "위층 명령으로는 파싱되지만
+                //   auth 가 아님" 이 앞 문구였다. 이제 이 crate 는 위층 명령을 모르므로 그 판정을 못 한다 —
+                //   대신 serde 가 이미 계산해 둔 에러 분류를 쓴다(재파싱 0):
+                //     · data 에러  = JSON 은 맞는데 이 모양이 아님 → "auth 를 기대했다"
+                //     · 그 밖(syntax/eof/io) = 애초에 JSON 이 아님 → "프레임 자체가 잘못됐다"
+                //   그래서 **JSON 으로 파싱되면서 온전한 `AuthFrame` 이 아닌 것 전부**가 뒤 문구에서 앞
+                //   문구로 옮겨간다 — 필드가 빠진 auth 프레임(`{"Auth":{"token":"x"}}`)과 본문이 깨진
+                //   위층 명령(`{"Kill":{"agent_id":1}}`)까지 포함이다(옛 코드는 그 둘을 뒤 문구로 냈다).
+                //   이 문구를 단언하는 테스트는 없고(핸드셰이크 실패는 close 로 관측된다) 발신자 중
+                //   어느 것도 문구로 분기하지 않는다 — 사람이 읽는 진단 텍스트다.
+                // ★에러를 `{e}` 로 싣지 않는다★: `{"Auth":"<토큰>"}` 의 Display 는 그 문자열을 그대로
+                //   내놓아 토큰이 로그로 샌다(`docs/reference/logging-conventions.md`). 분류와 위치만
+                //   남긴다 — 회귀 방어는 아래 `auth_parse_failure_log_fields_do_not_carry_the_payload`.
+                Err(e) if e.is_data() => {
+                    tracing::warn!(
+                        %peer,
+                        kind = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "첫 frame 이 Auth 가 아님 — close"
+                    );
                     let _ = send_error_and_close(
                         &mut ws,
                         handlers.handshake_error_frame("expected Auth as first frame"),
@@ -326,8 +349,15 @@ pub async fn handle_connection(
                     .await;
                     return;
                 }
+                // 위 갈래와 같은 이유로 Display 를 싣지 않는다(토큰이 이 갈래로도 올 수 있다).
                 Err(e) => {
-                    tracing::warn!(%peer, "첫 frame 파싱 실패: {e} — close");
+                    tracing::warn!(
+                        %peer,
+                        kind = ?e.classify(),
+                        line = e.line(),
+                        column = e.column(),
+                        "첫 frame 파싱 실패 — close"
+                    );
                     let _ = send_error_and_close(
                         &mut ws,
                         handlers.handshake_error_frame("invalid first frame"),
@@ -625,27 +655,8 @@ async fn read_task<S>(
 mod tests {
     use super::*;
 
-    // ── 1. Auth 직렬화 roundtrip ────────────────────────────────────────────
-    #[test]
-    fn auth_command_roundtrip() {
-        let cmd = AgentCommand::Auth {
-            token: "deadbeef".repeat(8), // 64자
-            protocol_version: PROTOCOL_VERSION,
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let back: AgentCommand = serde_json::from_str(&json).unwrap();
-        match back {
-            AgentCommand::Auth {
-                token,
-                protocol_version,
-            } => {
-                assert_eq!(token, "deadbeef".repeat(8));
-                assert_eq!(protocol_version, PROTOCOL_VERSION);
-            }
-            _ => panic!("Auth 가 아님"),
-        }
-    }
-
+    // (1. Auth 직렬화 테스트는 `auth.rs` 로 이동 — 타입이 거기 있고, 형태 대조를 **golden JSON 문자열**로
+    //  바꿨다. 옛 형태는 위층 명령 enum 과의 round-trip 이라 0-4 가 지운 import 를 테스트가 되살렸다.)
     // (kind_to_action 매핑 테스트는 데몬 crate 의 connection_core.rs 로 이동 — 함수가 거기 있음.)
 
     // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────
@@ -663,6 +674,24 @@ mod tests {
         assert!(!constant_time_eq(&a, &almost));
         // 빈 문자열 동일.
         assert!(constant_time_eq("", ""));
+    }
+
+    // ── 2b. auth 파싱 실패 로그에 페이로드가 실리지 않는다 ─────────────────────
+    #[test]
+    fn auth_parse_failure_log_fields_do_not_carry_the_payload() {
+        // 전제부터 못 박는다: serde 의 Display 는 **실제로** 토큰을 싣는다. 그래서 `handle_connection`
+        //   의 두 실패 갈래가 `{e}` 대신 분류·위치만 로깅한다(`docs/reference/logging-conventions.md`).
+        let token = "deadbeef".repeat(8); // 운영과 같은 64자
+        let e = serde_json::from_str::<AuthFrame>(&format!(r#"{{"Auth":"{token}"}}"#)).unwrap_err();
+        assert!(
+            e.to_string().contains(&token),
+            "Display 가 토큰을 싣지 않으면 이 테스트가 지키는 게 없다: {e}"
+        );
+        let logged = format!("{:?} {} {}", e.classify(), e.line(), e.column());
+        assert!(
+            !logged.contains(&token),
+            "로깅 필드에 토큰이 실렸다: {logged}"
+        );
     }
 
     // ── 3. Frame 매핑(Text/Binary/Close → Message) ───────────────────────────
@@ -1243,11 +1272,43 @@ mod tests {
 
     // ── 12. handle_connection 순서 계약(ADR-0129) ─────────────────────────────────
 
+    /// 이 crate 의 테스트가 쓰는 임의 프로토콜 버전. ★실제 운영 버전과 일부러 다른 값★ — 서버가
+    /// 상수를 도로 읽는 회귀가 생기면 이 값과 어긋나 테스트가 깨진다(주입 경로의 존재 증명).
+    ///
+    /// ★이름에 그 버전 상수명을 이어 붙이지 말 것★: lib.rs 헤더의 게이트 4 는 **부분 문자열**을 훑어서
+    /// `TEST_(P)ROTOCOL_VERSION` 같은 지역 이름도 물어 버린다(실측 — 처음 이 이름으로 썼다가 걸렸다.
+    /// 이 주석이 괄호 형태인 것도 같은 이유다).
+    /// 그 넓음은 의도된 것이다: 이 crate 안에 프로토콜 버전 **비슷한 것조차** 두지 않겠다는 뜻이라,
+    /// 회피가 아니라 이름을 다르게 짓는 게 맞는 대응이다.
+    const TEST_WIRE_VERSION: u32 = 4242;
+
     /// 테스트 서버 1개를 띄우고 인증까지 마친 클라이언트를 돌려준다(공통 뼈대).
     async fn serve_one(
         registry: ConnRegistry,
         fake: Arc<FakeHandler>,
         keepalive: KeepaliveConfig,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        serve_one_with_versions(
+            registry,
+            fake,
+            keepalive,
+            TEST_WIRE_VERSION,
+            TEST_WIRE_VERSION,
+        )
+        .await
+    }
+
+    /// `serve_one` 의 버전 파라미터화 판 — 서버가 **주입받은** 기대 버전과 클라가 **보내는** 버전을
+    /// 따로 준다(버전 게이트 검증용).
+    async fn serve_one_with_versions(
+        registry: ConnRegistry,
+        fake: Arc<FakeHandler>,
+        keepalive: KeepaliveConfig,
+        server_expects: u32,
+        client_sends: u32,
     ) -> (
         tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
         tokio::task::JoinHandle<()>,
@@ -1263,6 +1324,7 @@ mod tests {
                 registry,
                 factory,
                 Arc::new("tok".to_string()),
+                server_expects,
                 keepalive,
             )
             .await;
@@ -1271,13 +1333,61 @@ mod tests {
         let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let auth = serde_json::to_string(&AgentCommand::Auth {
+        let auth = serde_json::to_string(&AuthFrame::Auth {
             token: "tok".to_string(),
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: client_sends,
         })
         .unwrap();
         client.send(Message::Text(auth.into())).await.unwrap();
         (client, server)
+    }
+
+    /// ★버전 게이트가 **주입값**을 본다(0-4)★: 서버는 상수를 읽지 않으므로, 클라가 다른 숫자를 보내면
+    /// 거부하고 그 두 숫자를 문구에 실어야 한다. 상수 하드코딩 회귀(예: 어디선가 3 을 도로 읽기)는
+    /// 이 두 숫자 중 하나를 틀리게 만든다.
+    #[tokio::test]
+    async fn auth_rejects_version_mismatch_using_the_injected_expectation() {
+        let registry = ConnRegistry::new();
+        let fake = Arc::new(FakeHandler::new(None));
+        let (mut client, server) = serve_one_with_versions(
+            registry.clone(),
+            fake.clone(),
+            KeepaliveConfig::default(),
+            TEST_WIRE_VERSION,
+            TEST_WIRE_VERSION + 1,
+        )
+        .await;
+
+        // 실패 통보(FakeFactory 는 메시지를 그대로 text 로 내준다) → 그 뒤 close.
+        let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("거부 통보가 와야")
+            .expect("스트림이 살아 있어야")
+            .expect("프레임 수신");
+        match msg {
+            Message::Text(t) => assert_eq!(
+                t.as_str(),
+                format!(
+                    "protocol_version mismatch: client {} != server {}",
+                    TEST_WIRE_VERSION + 1,
+                    TEST_WIRE_VERSION
+                ),
+                "두 숫자 모두 주입값 기준이어야(상수 하드코딩이면 어긋난다)"
+            ),
+            other => panic!("Text 거부 통보여야: {other:?}"),
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("버전 불일치면 handle_connection 이 반환해야")
+            .unwrap();
+        // 등록까지 가지 않았다 — 인증 실패는 레지스트리 등록 **전**이다.
+        assert!(!registry.contains(1), "인증 실패 연결은 등록되지 않는다");
+        assert_eq!(
+            fake.calls(),
+            Vec::<String>::new(),
+            "인증 실패면 위층 핸들러가 아예 붙지 않는다"
+        );
     }
 
     /// 실제 `handle_connection` 이 지키는 세 순서를 고정한다 — read_task 하네스로는 못 잡는 것들:

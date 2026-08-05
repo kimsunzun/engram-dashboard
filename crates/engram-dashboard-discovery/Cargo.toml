@@ -13,7 +13,12 @@ dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI �
 engram-dashboard-core = { path = "../engram-dashboard-core" }
 # daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
-# AgentCommand(Auth/StopDaemon) 직렬화 — send_stop 이 WS 로 보낼 control JSON 조립.
+# 핸드셰이크 프레임(`auth::AuthFrame`) — send_stop 의 첫 프레임(ADR-0129 0-4). ★비순환★: 네트워크 lib 의
+#   워크스페이스-로컬 forward 폐포는 {net, core, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
+#   crate 의 lib.rs 헤더). 슬라이스 1 전이었다면 인증 타입이 daemon 에 있어 daemon→discovery 와 고리를
+#   이뤘을 자리다 — 그래서 0-4 가 슬라이스 1 **뒤**로 밀렸다.
+engram-dashboard-net = { path = "../engram-dashboard-net" }
+# 명령(StopDaemon)·핸드셰이크 프레임 직렬화 — send_stop 이 WS 로 보낼 JSON 조립.
 serde_json = "1"
 # 동기 WS 클라이언트(send_stop 일방 발사). 데몬의 tokio-tungstenite 0.26 과 같은 0.26 계열 —
 # discovery 는 전부 동기라 async 런타임을 들이지 않으려 blocking tungstenite 를 쓴다.
