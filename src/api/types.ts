@@ -62,22 +62,21 @@ export interface Capabilities {
 
 export interface AgentInfo {
   id: string
-  /** 표시용 이름. 백엔드 ProfileRegistry에서 채움(없으면 id 앞 8자). */
+  /** 표시용 canonical 이름 — 백엔드가 `display_name ?? cwd basename` 으로 채움(ADR-0101). profile.name 이 아니다. */
   name: string
   cwd: string
   status: AgentStatus
   cols: number
   rows: number
-  /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (S9 §18) */
+  /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (ADR-0007) */
   epoch: number
   capabilities: Capabilities
 }
 
-/** agent-status-changed Tauri event 페이로드 */
 export interface AgentStatusChanged {
   id: string
   status: AgentStatus
-  /** 재spawn epoch — 옛 세션의 지연 알림을 버리는 데 사용 (S9 §18-d) */
+  /** 재spawn epoch — 옛 세션의 지연 알림을 버리는 데 사용 (ADR-0007) */
   epoch: number
 }
 
@@ -144,7 +143,7 @@ export interface Preset {
   name: string | null
 }
 
-/** 복원 결말 — agent-restore-result event, #[serde(tag="type")] */
+/** 복원 결말 — restore-result event, #[serde(tag="type")] */
 export type RestoreOutcome =
   | { type: 'Resumed' }
   | { type: 'Started' }
@@ -152,7 +151,7 @@ export type RestoreOutcome =
   | { type: 'Blocked'; reason: string }
   | { type: 'Failed'; reason: string }
 
-/** agent-restore-result Tauri event 페이로드 */
+/** restore-result Tauri event 페이로드의 `result` 필드 */
 export interface RestoreReport {
   agent_id: string
   epoch: number

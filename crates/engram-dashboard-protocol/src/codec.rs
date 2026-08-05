@@ -20,9 +20,7 @@ pub const FRAME_HEADER_LEN: usize = 1 + 16 + 4 + 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodecError {
-    /// 헤더보다 짧음.
     TooShort { len: usize },
-    /// 알 수 없는 tag.
     UnknownTag(u8),
 }
 

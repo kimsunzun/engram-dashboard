@@ -13,8 +13,10 @@ pub mod layout;
 //   - rebuild 트리거 = layout command 의 ViewManager 락 보유 critical section 안(layout mutation 직후,
 //     같은 락으로 router.rebuild(&mgr) → table+delta 산출). load→delta→store RMW 직렬화 + 현재 mgr
 //     일관성(ABA 방지) — emit_after_unlock 이 아니다(락 밖 동시 호출 시 델타 어긋남, FIX-1).
-//   - 델타 송신은 락 해제 후 = rebuild 반환 SubscriptionDelta 를 DaemonClient cmd_tx 로
-//     Subscribe/Unsubscribe enqueue(락 안에서 송신 금지).
+//   - 델타 enqueue 도 rebuild 와 같은 락 안이 원칙 = rebuild 반환 SubscriptionDelta 를 DaemonClient
+//     cmd_tx 로 enqueue(락 밖으로 미루면 계산~발화 사이 재추가로 stale unsubscribe 가 라이브 구독을
+//     죽인다 — 창 생성 실패 롤백 경로만 예외).
+//     wire 로 나가는 건 to_unsubscribe 뿐 — 0→1 eager Subscribe 는 없다(구독 형성 = 뷰 주도 request_replay).
 //   - targets 사용 = connection.rs binary arm(frame 헤더 → decide_epoch 필터 → targets∩registered
 //     창 Channel 로 원본 bytes 통과, ADR-0046 무상태 라우팅)
 // app-level 공유(재연결 task 수명 초월) → Arc<OutputRouter> 로 manage(T6).
@@ -30,9 +32,10 @@ pub use engram_dashboard_discovery as discovery;
 mod tray;
 
 // ADR-0029: embedded(in-process 호스팅) 제거 → daemon-only. 앱(src-tauri)은 데몬의 상주 클라이언트
-// 셸이다(창/트레이/로컬 제어 command + 데몬 discovery). 에이전트는 데몬이 호스팅하고 프론트가 WS 로
-// 직접 붙는다(앱 Rust 경유 안 함). 그래서 옛 in-proc 배선(AgentManager/ConnectionCore/embedded
-// carrier/AppState/TauriStatusSink/모드 시스템)은 전부 제거됐다. logging::init_logging 만 코어에서 쓴다.
+// 셸이다(창/트레이/로컬 제어 command + 데몬 discovery). 에이전트는 데몬이 호스팅한다.
+// 그래서 옛 in-proc 배선(AgentManager/ConnectionCore/embedded
+// carrier/AppState/TauriStatusSink/모드 시스템)은 전부 제거됐다. 이 파일이 코어에서 쓰는 건
+// logging::init_logging 뿐이다.
 use engram_dashboard_core::logging;
 
 use tauri::Manager;
@@ -112,8 +115,8 @@ pub fn run() {
             // Handle::current() 대신 전용 런타임 — DaemonClient::new_real_with_owned_runtime).
             // commands/agent.rs invoke(spawn/kill/…)가 State<Arc<DaemonClient>> 로 주입받아
             // send_command 한다. ★app-startup connect 는 T6/connect 로 이연★ — 여기선 cmd 평면만
-            // 배선하고, 실제 연결 수립(connect/ensure)은 프론트/부팅 시퀀스가 부른다(현재 프론트가
-            // wsTransport 로 직접 붙는 경로와 공존, T7 에서 TauriTransport 로 전환).
+            // 배선하고, 실제 연결 수립(connect/ensure)은 프론트/부팅 시퀀스가 부른다(T7 에서
+            // TauriTransport 로 전환 완료 — `src/api/clientFactory.ts` 가 TauriTransport 를 만든다).
             match crate::daemon_client::DaemonClient::new_real_with_owned_runtime(
                 router.clone(),
                 registry.clone(),
@@ -150,7 +153,7 @@ pub fn run() {
         // "완전 종료"(app.exit(0))뿐. ADR-0029: 앱이 항상 트레이를 갖는 daemon 클라이언트라 모드 분기
         // 없이 무조건 prevent_close + hide.
         // ★main 만 대상★: agent-tree(hidden 창)은 기존대로 단독 close 처리. main 라벨만
-        //  분기 — conf 첫 창은 label 미지정이라 Tauri 기본 라벨 "main".
+        //  분기 — tauri.conf.json 이 첫 창 label 을 "main" 으로 명시한다.
         // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
         .on_window_event(move |window, event| {
             match event {
@@ -164,7 +167,7 @@ pub fn run() {
                     }
                 }
                 // ★팝업 창 Destroyed 정리(수명/누수 임계)★: 팝업이 실제로 소멸하면(정상 close 또는 프로그램
-                //   destroy) window_bindings·데몬 구독·출력 Channel 을 정리한다. main/agent-tree 는 대상 아님
+                //   destroy) 그 창의 탭 View·데몬 구독·출력 Channel 을 정리한다. main/agent-tree 는 대상 아님
                 //   (main 은 위에서 hide 만 하니 애초에 Destroyed 안 남, agent-tree 도 팝업 prefix 아님).
                 //   강제 프로세스 kill 은 모든 state 를 통째로 죽여 이 경로가 안 타지만(수용) 정상 close·
                 //   프로그램 destroy 는 여기서 확실히 정리한다. (ADR-0046: 일반 라우팅 메커니즘 정리.)
@@ -190,10 +193,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면. 부팅 자동 호출은 phase4.
+            // Step 5: 데몬 발견(없으면 WMI spawn) — §5 LLM 제어 표면.
             commands::discover_daemon,
             // ADR-0021: 데몬 lifecycle 명시 제어 표면(§5). start=ensure(spawn 허용), stop=fallback kill,
-            //   status=alive/pid/port. 재연결 루프는 이걸 안 부른다(attach-only, wsTransport).
+            //   status=alive/pid/port. 재연결 루프는 이걸 안 부른다(attach-only).
             commands::daemon_start,
             commands::daemon_stop,
             commands::daemon_status,

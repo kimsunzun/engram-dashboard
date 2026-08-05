@@ -1,6 +1,6 @@
 //! 순수 split-트리 연산 — Tauri 의존 0(ADR-0012 격리: 단독 headless 테스트 가능).
 //!
-//! ViewManager(상위)는 락·emit·AppState 를 다루고, 실제 트리 변형은 전부 여기로 위임한다.
+//! ViewManager(상위)는 실제 트리 변형을 전부 여기로 위임한다.
 //! 이 모듈은 `LayoutNode` 만 알고 Tauri/AppState/락 을 모른다 → `#[cfg(test)]` 로 단독 회귀 단언.
 //!
 //! ★불변식★

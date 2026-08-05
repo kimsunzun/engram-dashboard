@@ -26,11 +26,7 @@ cwd: string,
 /**
  * ※자격증명 금지(평문 persist).
  */
-env: Array<[string, string]>, 
-/**
- * 현재 claude 세션 id(없으면 None).
- */
-claude_session_id: string | null, 
+env: Array<[string, string]>, claude_session_id: string | null, 
 /**
  * 폐기된 과거 세션 id 이력.
  */

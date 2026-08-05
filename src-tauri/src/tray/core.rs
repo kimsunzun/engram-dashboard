@@ -71,9 +71,7 @@ pub fn action_for_menu_id(id: &str) -> Option<MenuAction> {
 // 실제 아이콘 두 벌은 GUI shell 이 들고, core 는 어떤 상태인지만 결정한다(렌더링 분리).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconState {
-    // 데몬 alive — 활성(컬러) 아이콘.
     Active,
-    // 데몬 없음/죽음 — 비활성(회색) 아이콘.
     Inactive,
 }
 

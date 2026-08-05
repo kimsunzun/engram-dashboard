@@ -179,8 +179,10 @@ pub enum AgentSpawnCommand {
         #[serde(default)]
         output_format: ClaudeOutputFormat,
     },
-    /// 임의 셸 프로그램.
-    Shell { program: String, args: Vec<String> },
+    Shell {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 /// 자동 재시작 정책 wire 미러 — core `profile::RestartPolicy` 와 동일.
@@ -219,7 +221,6 @@ pub struct AgentProfile {
     pub cwd: String,
     /// ※자격증명 금지(평문 persist).
     pub env: Vec<(String, String)>,
-    /// 현재 claude 세션 id(없으면 None).
     #[ts(type = "string | null")]
     pub claude_session_id: Option<String>,
     /// 폐기된 과거 세션 id 이력.

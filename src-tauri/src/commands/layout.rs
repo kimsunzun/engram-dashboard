@@ -9,10 +9,10 @@
 //! invalid view_id/slot_id/window → no-op + Err(String)(패닉·부분변경 금지).
 //!
 //! ## ★출력 구독 배선(FIX-1/D3 — 동시성 핵심)★
-//! 각 mutation 은 **락 보유 critical section 안**에서 `router.rebuild(&mgr)` 를 호출해 라우팅 표를
-//! 재계산하고 구독 델타(`SubscriptionDelta`)를 산출하고, **그 자리에서 곧바로 `send_subscription_delta`
-//! 로 enqueue 까지** 한다(load→delta→store→enqueue 를 ViewManager 락이 한 critical section 으로
-//! 직렬화). read-only(get_view/list_tabs/list_windows)는 변형이 없어 rebuild 안 한다.
+//! 라우팅이 바뀔 수 있는 각 mutation 은 **락 보유 critical section 안**에서 `router.rebuild(&mgr)` 를
+//! 호출해 라우팅 표를 재계산하고 구독 델타(`SubscriptionDelta`)를 산출하고, **그 자리에서 곧바로
+//! `send_subscription_delta` 로 enqueue 까지** 한다(load→delta→store→enqueue 를 ViewManager 락이 한
+//! critical section 으로 직렬화). read-only(get_view/list_tabs/list_windows)는 변형이 없어 rebuild 안 한다.
 //!
 //! ## ★ADR-0046 — 라우터는 Unsubscribe(정리)만 발행(BLOCK-1 전면화)★
 //! `send_subscription_delta` 가 wire 로 보내는 건 `delta.to_unsubscribe`(1→0 정리)뿐이고, eager

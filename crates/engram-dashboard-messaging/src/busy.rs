@@ -9,15 +9,14 @@
 //!
 //! ★positive-knowledge-only(load-bearing — spec §5 capability 폴백)★: 관측이 **없는** (id, epoch) 는 전부
 //!   **idle 취급**이다(= 즉시 주입). "모른다" 를 busy 로 해석하면 관측 불가 백엔드·관측이 아직 시작되지
-//!   않은 창에서 배달이 **영구 대기**한다(ADR-0104 불변식: "관측 불가 백엔드에서 idle 게이트를 강제하면
-//!   배달이 영구 대기"). busy 는 **관측된 사실이 있을 때만** 참이다.
+//!   않은 창에서 배달이 **영구 대기**한다. busy 는 **관측된 사실이 있을 때만** 참이다.
 //!
 //! ★사실 계층을 **변형하지 않는다**(ADR-0113 결정 2 — 절대 위반 금지)★: 상한 판정도, sweep 도 표에서
 //!   항목을 지우지 않는다. 그 표는 다른 소비자(UI 입력 잠금 등)와 공유하는 공용 시설이고, 소비자마다
 //!   상한이 다르다 — 한 소비자가 "늙었다" 고 지우면 다른 소비자의 사실이 증발한다. 여기서 하는 일은
 //!   **읽고 자기 기준으로 판정**하는 것뿐이다.
 //!
-//! ★busy 관측 대상 = 턴 신호를 내는 백엔드(내부 선택 — 보고)★: 턴 이벤트는 백엔드 decoder 가 있는
+//! ★busy 관측 대상 = 턴 신호를 내는 백엔드★: 턴 이벤트는 백엔드 decoder 가 있는
 //!   에이전트에서만 나오고, decoder 는 구조화 출력 capability 와 **정확히 같은 조건**으로 존재한다.
 //!   그 프록시 값은 `LiveAgent::turn_signal` 로 로스터 항목에 실려 오고(ADR-0116 결정 7), 발송 경로는
 //!   `turn_signal == false` 인 부류에 이 게이트를 **아예 묻지 않고** 즉시 주입한다. 프록시가 깨지는 날
@@ -62,9 +61,6 @@ pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 
 /// ★idle 게이트 조회 seam(ADR-0012)★ — MessagingService 가 "이 수신자가 지금 턴 중인가" 를 묻는 유일한 문.
 ///
-/// ★왜 별도 trait 인가(DeliveryPort 에 합치지 않는 이유)★: `DeliveryPort` 는 **배달**(inject/roster/이름)
-///   전용 seam 이다. 턴 상태 해석은 출처와 수명이 배달과 완전히 다르므로 섞으면 두 축이 함께 커진다 —
-///   헤드리스 단위 테스트도 "가짜 배달 + 가짜 busy" 를 **독립으로** 조립해야 조합 폭발을 피한다.
 /// ★계약★: 순수 조회 — 부작용 없음, 블로킹 없음(짧은 락만). messaging 락을 **든 채** 불려도 안전해야
 ///   한다(현 호출부는 락 밖에서 부르지만, 이 계약을 지켜 두면 미래 호출 지점이 늘어도 데드락이 없다).
 pub trait BusyGate: Send + Sync {
@@ -74,11 +70,6 @@ pub trait BusyGate: Send + Sync {
 }
 
 /// 게이트 미배선/관측 불가 폴백 — **항상 idle**(= 즉시 주입, spec §5 capability 폴백).
-///
-/// ★왜 필요한가★: 게이트가 없는 조립(실험 bin·게이트를 검증하지 않는 단위 테스트)에서 서비스가 게이트
-///   도입 이전과 **byte-identical** 하게 동작하게 하는 기본값이다. "게이트를 안 꽂았다" 가 "배달이 멈춘다"
-///   로 번지지 않게 하는 안전 기본값(fail-open) — 메시징의 실패 모드는 "늦게 가는 것" 보다 "안 가는 것" 이
-///   훨씬 나쁘다.
 pub struct AlwaysIdleGate;
 
 impl BusyGate for AlwaysIdleGate {
@@ -118,8 +109,7 @@ pub trait TurnFacts: Send + Sync {
 /// ★idempotency 의존(수용된 설계)★: 통지는 **턴 종료 신호마다** 나간다(전이 여부를 따지지 않는다). 왜:
 ///   "직전이 busy 였을 때만" 으로 좁히면, 어시스턴트 이벤트 없이 곧장 끝나는 턴에서 통지가 빠져 파킹이
 ///   다음 턴까지 stranded 된다 — 배달 누락(치명)보다 **잉여 통지(무해)** 를 택한다. 잉여 통지의 대가는
-///   빈 큐 drain no-op 뿐이다(flush 경로가 execution 시점 재검증 + 빈 큐 조기 반환으로 idempotent —
-///   service.rs `flush_for` / `flush_for_agent`). 채널 압력의 상한은 호스트 통지 구현이 책임진다.
+///   빈 큐 drain no-op 뿐이다. 채널 압력의 상한은 호스트 통지 구현이 책임진다.
 pub trait IdleNotifier: Send + Sync {
     /// 이 에이전트가 방금 턴을 끝냈다(= 쌓인 파킹을 일괄 주입할 시점). **논블록**.
     fn notify_idle(&self, id: PeerId);
@@ -308,7 +298,6 @@ mod tests {
 
     #[test]
     fn unknown_agent_is_idle_positive_knowledge_only() {
-        // ★폴백 불변식(ADR-0104)★: 관측 근거가 없으면 busy 가 아니다(= 즉시 주입).
         let (p, _f, _n) = policy();
         assert!(
             !p.is_busy(PeerId::new_v4(), 0),
@@ -446,7 +435,6 @@ mod tests {
 
     #[test]
     fn always_idle_gate_never_reports_busy() {
-        // 폴백 게이트 — 게이트 미배선 조립이 게이트 도입 이전과 동일하게(즉시 주입) 돌게 하는 안전 기본값.
         let g = AlwaysIdleGate;
         assert!(!g.is_busy(PeerId::new_v4(), 7));
     }

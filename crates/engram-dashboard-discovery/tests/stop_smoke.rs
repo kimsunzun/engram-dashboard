@@ -11,17 +11,8 @@
 //!   4) 단언: (a) send_stop 이 Err 없이 반환 (b) 데몬이 몇 초 내 OS 프로세스 목록에서 사라짐(tasklist).
 //!   5) 정리: 잔존 시 taskkill /F + 임시 폴더 삭제(tempfile Drop).
 //!
-//! ★현재 알려진 결과(QA 2026-06-19): send_stop_makes_real_daemon_self_exit 는 FAIL 한다★ —
-//!   send_stop 이 flush 직후 즉시 ws.close() 하는데, 데몬은 auth 성공 후 첫 outbound(Hello 등)를
-//!   write 하려다 닫힌 소켓에 10053 으로 실패 → write_task 종료 → read_task abort(데몬 ws.rs §536
-//!   "하나라도 끝나면 상대 abort") → **StopDaemon Text 프레임이 read 되기 전에 read_task 가 죽어**
-//!   dispatch 안 됨 → 데몬 생존. 아래 diag_noclose/diag_delayclose 는 PASS(데몬에 read 할 시간을 주면
-//!   graceful self-exit, exit code 0). 즉 결함은 데몬/StopDaemon 처리가 아니라 send_stop 의 **즉시
-//!   close 타이밍**이다. 메인이 send_stop 수정(예: close 전 짧은 grace 대기 또는 ack 1프레임 read)
-//!   후 이 테스트가 PASS 하면 회귀 안전망이 된다. (이 테스트는 그 수정의 검증 자산으로 보존.)
-//!
 //! ★ENGRAM_DATA_DIR 격리(WMI 경로와 다름)★: 트레이의 운영 spawn 은 WMI Win32_Process.Create 라
-//!   자식이 env 를 상속하지 못해 ENGRAM_DATA_DIR 격리가 닿지 않는다(ws_e2e real_wmi_spawn_smoke 참조).
+//!   자식이 env 를 상속하지 못해 ENGRAM_DATA_DIR 격리가 닿지 않는다(discovery::real_wmi_spawn_smoke 참조).
 //!   그러나 이 테스트는 **std::process::Command 로 직접 spawn** 하므로 env 가 상속돼 임시 폴더로 완전
 //!   격리된다 — 운영 `.engram-data` 를 건드리지 않는다. (직접 spawn 은 send_stop 왕복 검증 목적상
 //!   충분하다 — WMI 의 detached 성질은 send_stop 동작과 무관.)
@@ -40,9 +31,8 @@ use std::path::PathBuf;
 use engram_dashboard_discovery::{daemon_status, send_stop, StopOutcome};
 
 /// 빌드된 데몬 .exe 경로. discovery::locate_daemon_exe 는 current_exe(deps/) / cwd 기준이라 통합
-/// 테스트 실행 디렉토리(crate 폴더)에선 워크스페이스 target 을 못 짚는다. 여기선 CARGO_MANIFEST_DIR
-/// (= crates/engram-dashboard-discovery)에서 워크스페이스 루트로 올라가 target/<profile>/exe 를 직접
-/// 계산한다(테스트 한정 — 운영 경로는 locate_daemon_exe 그대로).
+/// 테스트 실행 디렉토리(crate 폴더)에선 워크스페이스 target 을 못 짚는다
+/// (테스트 한정 — 운영 경로는 locate_daemon_exe 그대로).
 fn daemon_exe_path() -> PathBuf {
     // 이 테스트 바이너리가 target/<profile>/deps/ 에 있으니 그 두 단계 위가 <profile> 폴더.
     let mut p = std::env::current_exe().expect("current_exe");
@@ -173,7 +163,7 @@ fn send_stop_makes_real_daemon_self_exit() {
     //     주석 참조). 일방 발사라도 flush 로 StopDaemon 이 도달하면 데몬은 shutdown_all + self-exit.
     let gone = wait_pid_gone(daemon_pid, Duration::from_secs(10));
 
-    // wait()로 종료코드 회수(좀비 방지) — self-exit 했으면 ExitStatus(0).
+    // try_wait()로 종료코드 회수(좀비 방지) — self-exit 했으면 ExitStatus(0).
     let exit_code = guard.child.try_wait().ok().flatten();
 
     assert!(

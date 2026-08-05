@@ -11,7 +11,6 @@ use crate::domain::{
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
 /// UI→core 요청 envelope(설계 §3). side-effect 명령은 `request_id` 로 idempotent.
-/// (Profile CRUD 는 phase 1 에서 core profile 타입 합류 후 추가 — 지금은 보류.)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 // ★`Auth` variant 는 여기 없다(ADR-0129 0-4, 2026-08-05)★: 연결 후 첫 frame 전용 인증 프레임의 모양은
@@ -22,7 +21,6 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 //   ★여기에 다시 넣지 말 것★: 두 정의가 공존하면 조용히 갈라진다. 프론트 바인딩(`bindings/AgentCommand.ts`)
 //   에도 그래서 `Auth` 가 없다(프론트 `wsTransport` 는 원래 타입 없이 객체 리터럴로 만든다).
 pub enum AgentCommand {
-    /// 새 에이전트 spawn. 프로필 참조.
     Spawn {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -66,7 +64,6 @@ pub enum AgentCommand {
         #[ts(type = "number | null")]
         after_seq: Option<u64>,
     },
-    /// 구독 해제.
     Unsubscribe {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -96,19 +93,16 @@ pub enum AgentCommand {
     },
 
     // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────────
-    // EmbeddedClient(invoke)의 프로필 메서드와 1:1 대응. 두 모드가 같은 동작을 해야
-    // DaemonClient 가 EmbeddedClient 와 호환된다(아래 각 variant 주석에 대응 invoke 명시).
-    /// cwd 만으로 ad-hoc 셸 에이전트 spawn(영속 프로필 없이 transient). EmbeddedClient `spawnAgent(cwd)`
-    /// = Tauri `spawn_agent` 대응 — 기본 셸 명령 + auto_restore=false 로 Fresh spawn.
+    /// cwd 만으로 ad-hoc 셸 에이전트 spawn — 호출자가 미리 만들어 둔 프로필이 필요 없다. 기본 셸 명령
+    /// 프로필을 즉석 생성(생성 시 auto_restore=false)해 Fresh spawn 하고, spawn 경로가 그 프로필을
+    /// registry 에 등록·persist 한다.
     SpawnByCwd { cwd: String, request_id: RequestId },
 
-    /// 저장된 프로필 전체 조회. EmbeddedClient `listProfiles` = Tauri `list_profiles` 대응.
-    /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply). broadcast 인
+    /// 저장된 프로필 전체 조회. 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply). broadcast 인
     /// [`AgentEvent::ProfileListUpdated`](프론트 미러 갱신)와 별개 — 편승 매칭 제거.
     ListProfiles { request_id: RequestId },
 
-    /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). EmbeddedClient `createClaudeProfile`
-    /// = Tauri `create_claude_profile` 대응. ※env 에 자격증명 금지(평문 persist).
+    /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). ※env 에 자격증명 금지(평문 persist).
     CreateProfile {
         name: String,
         cwd: String,
@@ -125,7 +119,6 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 프로필 삭제. EmbeddedClient `deleteProfile` = Tauri `delete_profile` 대응.
     DeleteProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -133,7 +126,6 @@ pub enum AgentCommand {
     },
 
     /// 저장된 프로필 spawn. resume=true 면 기존 세션 이어받기(claude `--resume`).
-    /// EmbeddedClient `spawnProfile(agentId, resume)` = Tauri `spawn_profile` 대응.
     SpawnProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -141,7 +133,6 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// auto_restore 토글. EmbeddedClient `setProfileAutoRestore` = Tauri `set_profile_auto_restore` 대응.
     SetProfileAutoRestore {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -178,8 +169,8 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// replay buffer 스냅샷 조회. EmbeddedClient `getSnapshot` = Tauri `get_agent_snapshot` 대응.
-    /// 응답은 [`AgentEvent::Snapshot`]. (Subscribe replay 와 별개의 1회성 조회.)
+    /// replay buffer 스냅샷 조회. 응답은 [`AgentEvent::Snapshot`].
+    /// (Subscribe replay 와 별개의 1회성 조회.)
     GetSnapshot {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -242,7 +233,9 @@ pub enum AgentEvent {
         capabilities: Option<Capabilities>,
     },
     /// side-effect command 수신/처리 확인(request_id 에코).
-    Ack { request_id: RequestId },
+    Ack {
+        request_id: RequestId,
+    },
     /// Subscribe 응답 — replay 방식과 범위(설계 §1-3).
     SubscribeAck {
         #[ts(type = "string")]
@@ -283,7 +276,9 @@ pub enum AgentEvent {
     },
     /// 전체 목록 갱신(broadcast). terminal 판정은 이걸로(status_changed 아님 — 설계 불변식).
     /// ※ 트리 실시간 갱신 전용 — request_id 없음. ListAgents 조회 응답은 [`AgentEvent::AgentList`].
-    AgentListUpdated { agents: Vec<AgentInfo> },
+    AgentListUpdated {
+        agents: Vec<AgentInfo>,
+    },
     /// ListAgents 조회 응답(전용 reply) — request_id 에코로 "내 요청 결과"를 정확히 매칭.
     /// broadcast 인 AgentListUpdated 와 페이로드는 동일하나 편승 매칭(다음 도착 메시지 짝짓기)을
     /// 제거하기 위해 request_id 를 동봉한다(Spawned/Created 와 동형).
@@ -291,8 +286,9 @@ pub enum AgentEvent {
         request_id: RequestId,
         agents: Vec<AgentInfo>,
     },
-    /// 복원 시도 결과.
-    RestoreResult { report: RestoreReport },
+    RestoreResult {
+        report: RestoreReport,
+    },
     /// 입력 lease 상태 변경 통보(다중 뷰어가 "지금 잠겨있음"을 알게 함). held=true 면 누군가 보유 중,
     /// false 면 비어 있음(아무나 acquire 가능). 보유자 conn 식별값은 보안상 노출하지 않는다(잠김 여부만).
     InputLeaseChanged {
@@ -303,7 +299,9 @@ pub enum AgentEvent {
     /// 프로필 목록 갱신(broadcast, phase4 1단계). CRUD(생성/삭제/토글) 후 자동 push — 프론트
     /// ProfileRegistry 미러 갱신용. AgentListUpdated 의 프로필판. request_id 없음.
     /// ListProfiles 조회 응답은 [`AgentEvent::ProfileList`].
-    ProfileListUpdated { profiles: Vec<AgentProfile> },
+    ProfileListUpdated {
+        profiles: Vec<AgentProfile>,
+    },
     /// ListProfiles 조회 응답(전용 reply) — request_id 에코. broadcast 인 ProfileListUpdated 와
     /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(Spawned/Created 와 동형).
     ProfileList {
@@ -313,7 +311,9 @@ pub enum AgentEvent {
 
     /// 프리셋 목록 갱신(broadcast, ADR-0061). CRUD(생성/삭제) 후 자동 push — 모든 창의 프리셋 미러
     /// 동기화용. ProfileListUpdated 의 프리셋판. request_id 없음. ListPresets 조회 응답은 [`AgentEvent::PresetList`].
-    PresetListUpdated { presets: Vec<Preset> },
+    PresetListUpdated {
+        presets: Vec<Preset>,
+    },
     /// ListPresets 조회 응답(전용 reply, ADR-0061) — request_id 에코. broadcast 인 PresetListUpdated 와
     /// 페이로드는 같으나 편승 매칭 제거를 위해 request_id 동봉(ProfileList 와 동형).
     PresetList {
@@ -437,17 +437,20 @@ pub enum OutputChunk {
         #[ts(type = "number[]")]
         Vec<u8>,
     ),
-    /// API/구조화 텍스트 증분.
     TextDelta(String),
-    /// 토큰 사용량.
     Usage {
         input_tokens: u64,
         output_tokens: u64,
     },
-    /// 도구 호출(이름+직렬화 인자).
-    ToolCall { name: String, args_json: String },
+    ToolCall {
+        name: String,
+        args_json: String,
+    },
     /// 임의 구조화 페이로드(forward-compat 탈출구).
-    Structured { kind: String, json: String },
+    Structured {
+        kind: String,
+        json: String,
+    },
 }
 
 #[cfg(test)]

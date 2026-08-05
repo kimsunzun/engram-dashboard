@@ -109,11 +109,9 @@ pub enum HandshakeError {
     NoLiveDaemon,
     // ws://host:port 접속 실패(데몬 죽음/거부).
     Connect(String),
-    // Auth frame 송신 실패.
     AuthSend(String),
     // 데몬이 Hello 전에 Error 를 보냄(토큰/버전 불일치 등).
     AuthRejected(String),
-    // Hello 전에 소켓이 닫힘.
     ClosedBeforeHello,
     // 핸드셰이크(소켓 open ~ Hello 수신)가 HANDSHAKE_TIMEOUT 을 넘김. 서버가 소켓만 받고 Hello/
     // Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
@@ -182,25 +180,26 @@ pub enum ConnectionCommand {
     },
 }
 
-// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
-// 뒤 메인 루프(read/write/cmd)로 들어간다. 이 함수가 stream 을 split 해 단독 소유한다.
-//
-// ## ★generation 가드(load-bearing, Fix B — 락으로 원자화)★
-// `my_gen` = 이 task 가 spawn 될 때 캡처한 세대값, `lifecycle` = 공유 lifecycle 락(DaemonClient 소유).
-// 동시 connect/ensure·close-in-flight 로 더 새 task 가 떠 세대가 올라가면, **밀려난(stale) task 는
-// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다. 모든
-// 가드된 전이는 `lifecycle.publish_if_current(my_gen, state)` 한 곳을 통과한다 — 이 메서드가 "세대
-// 비교 + watch send" 를 같은 락 critical section 으로 묶어 원자화하므로, 비교 통과 후 send 전에 다른
-// 스레드가 세대를 바꿔 끼어들 수 없다(이전 `AtomicU64::load` → `send` 분리가 만든 TOCTOU 를 닫음).
-// 이게 wsTransport openGen 가드의 씨앗 — 현재(current) 연결 task 는 최대 1개라는 불변식을 코드로
-// 강제한다. ⚠️ 완전한 "동시 시도 abort/백오프"는 T4 — 여기선 짧은 순간 소켓 2개가 동시에 열릴 수
-// 있음(둘 다 connect_async 진행)을 허용하되, stale task 가 *공유 상태를 안 건드리고* 즉시 self-close
-// 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·Connected 부활)은 없앤다.
-//
-// ## ★ADR-0006 — 락 .await across 보유 금지★
-// `publish_if_current`/`store_cmd_if_current` 는 전부 동기(내부에서 await 안 함)다. 따라서 아래
-// `connect_async`·`sink.send`·`wait_for_hello`·`sink.close` 등 모든 await 는 lifecycle 락을 보유하지
-// 않은 채 일어난다(락은 publish_if_current 호출 안에서만 잡혔다 즉시 풀린다).
+/// 연결 task 본체. 소켓을 열어 Auth/Hello 핸드셰이크를 마치고, 그 결과를 `ready_tx` 로 1회 보고한
+/// 뒤 메인 루프(read/write/cmd)로 들어간다. 이 함수가 stream 을 split 해 단독 소유한다.
+///
+/// ## ★generation 가드(load-bearing, Fix B — 락으로 원자화)★
+/// `my_gen` = 이 task 가 spawn 될 때 캡처한 세대값, `lifecycle` = 공유 lifecycle 락(DaemonClient 소유).
+/// 동시 connect/ensure·close-in-flight 로 더 새 task 가 떠 세대가 올라가면, **밀려난(stale) task 는
+/// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다. 모든
+/// 가드된 전이는 `lifecycle.publish_if_current(my_gen, state)` 한 곳을 통과한다 — 이 메서드가 "세대
+/// 비교 + watch send" 를 같은 락 critical section 으로 묶어 원자화하므로, 비교 통과 후 send 전에 다른
+/// 스레드가 세대를 바꿔 끼어들 수 없다(이전 `AtomicU64::load` → `send` 분리가 만든 TOCTOU 를 닫음).
+/// 이게 wsTransport openGen 가드의 씨앗 — 현재(current) 연결 task 는 최대 1개라는 불변식을 코드로
+/// 강제한다. ⚠️ 첫 핸드셰이크는 취소 경쟁 밖이라(cancel 구독은 connected 직후 — T4 는 재연결 경로만
+/// 덮었다) 소켓 2개가 동시에 열릴 수 있음(둘 다 connect_async 진행)은 허용한다 — stale task 는 *공유
+/// 상태를 안 건드리고* stale 판정 시 self-close 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·
+/// Connected 부활)은 없앤다.
+///
+/// ## ★ADR-0006 — 락 .await across 보유 금지★
+/// `publish_if_current`/`store_cmd_if_current` 는 전부 동기(내부에서 await 안 함)다. 따라서 아래
+/// `connect_async`·`sink.send`·`wait_for_hello`·`sink.close` 등 모든 await 는 lifecycle 락을 보유하지
+/// 않은 채 일어난다(락은 publish_if_current 호출 안에서만 잡혔다 즉시 풀린다).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_connection(
     info: DaemonInfo,
@@ -830,8 +829,9 @@ async fn main_loop(
                     Some(Ok(msg)) => {
                         match msg {
                             Message::Text(text) => {
-                                // 데몬 control 이벤트. T6a: reply(request_id echo) 면 pending 매칭→resolve.
-                                //   broadcast(request_id 없음)는 매칭 우회 — T6b 가 app.emit 배선(지금은 무시).
+                                // 데몬 control 이벤트. reply(request_id echo) 면 pending 매칭→resolve.
+                                //   broadcast(request_id 없음)는 매칭 우회 — app.emit 으로 전 webview 에
+                                //   push 한다(아래 emit_broadcast, else 분기).
                                 // 파싱 실패는 무시(데몬은 valid JSON 만 보낸다 — 부분/미래 프레임 방어).
                                 if let Ok(ev) = serde_json::from_str::<AgentEvent>(&text) {
                                     if let Some(rid) = protocol_state::event_reply_request_id(&ev) {

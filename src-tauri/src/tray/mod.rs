@@ -76,7 +76,8 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     let start = mi(MenuAction::StartDaemon)?;
     let stop = mi(MenuAction::StopDaemon)?;
     // ADR-0027 §55: 자동 시작은 체크 가능 항목(CheckMenuItem). 초기 체크 = 현재 레지스트리 등록 여부.
-    // 등록 인자(--mode=daemon --hidden)는 init() 에서 박았고, 여기선 활성 여부만 읽어 체크에 반영.
+    // 등록 인자(--hidden, 모드 인자 없음 — ADR-0029)는 autostart 플러그인 init 에서 박았고,
+    // 여기선 활성 여부만 읽어 체크에 반영.
     let autostart_action = MenuAction::ToggleAutostart;
     let autostart_checked = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(

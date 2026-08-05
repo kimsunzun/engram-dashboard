@@ -1,8 +1,5 @@
 //! discovery 커맨드 — LLM/프론트가 데몬 발견을 호출하는 thin wrapper(§5 제어 표면).
 //!
-//! 비즈니스 로직 없음 — discovery::ensure_daemon 호출만. 실제 부팅 자동 호출 배선은
-//! phase4 DaemonClient(WS) 와 함께 한다(이번 단위는 command 노출까지).
-//!
 //! ADR-0029: 모드 제거 → AppState 없음. data_dir 은 `default_data_dir()`(무인자, debug=repo 루트
 //! walk-up / release=appdata)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
 
@@ -64,7 +61,7 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
 // 데몬을 발견(없으면 WMI spawn)하고 접속 정보를 반환한다.
 //
 // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출한다.
-// timeout_ms 미지정 시 5초. spawn 시 windowless(콘솔 창 없음) — 콘솔 가시화는 daemon_start(console=true).
+// timeout_ms 미지정 시 5초. 콘솔 가시화는 daemon_start(console=true).
 #[tauri::command]
 pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
     ensure_internal(timeout_ms, false).await
@@ -79,7 +76,7 @@ pub struct DaemonStatusDto {
 }
 
 // ADR-0021 §5: 데몬 명시 시작(ensure). 이미 살아있으면 attach(그 접속 정보 반환), 없으면 spawn.
-// `console=true` 면 콘솔 창과 함께 spawn(디버그 로그 가시화), 기본(false/미지정) windowless.
+// `console=true` 면 콘솔 창과 함께 spawn(디버그 로그 가시화).
 // ★재연결과 분리★: 이 command 만 spawn 을 유발한다 — 프론트 재연결 루프는 호출하지 않는다.
 #[tauri::command]
 pub async fn daemon_start(

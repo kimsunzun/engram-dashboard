@@ -20,9 +20,10 @@
 //! ### 불변식(★load-bearing — `// ADR-0057` 앵커로 박음★)
 //! 1. **양방향 일관성:** `view_owner[v] == L` ⟺ `windows[L].tabs.contains(v)`. 갱신은 항상 쌍으로.
 //! 2. **유니크 소유:** 모든 `v ∈ views` 는 `view_owner` 에 정확히 1개 엔트리(한 View 는 두 창 금지).
+//!    예외: `prepare_detached_view` 가 만든 tmp_view 는 phase C 삽입/롤백 전까지 owner 가 없다.
 //! 3. **활성 소속:** `windows[L].active ∈ windows[L].tabs` 항상.
 //! 4. **메인 최소 1탭 + non-closable:** `windows["main"].tabs.len() >= 1` 불변. `close_window("main")`
-//!    은 금지(command 레이어가 거부) — 마지막 탭 close 는 빈 탭 강제로만 떨어진다.
+//!    은 금지(`MainNotClosable` 로 거부) — 마지막 탭 close 는 빈 탭 강제로만 떨어진다.
 //! 5. **에이전트 참조 다중 허용:** 같은 `agent_id` 가 서로 다른 두 View 슬롯에 배정 가능(두 창이 같은
 //!    에이전트 봄, 진도 독립·ADR-0046). "한 View 두 창"(불변식 2 금지)과 다른 얘기.
 
@@ -186,7 +187,6 @@ impl ViewManager {
     }
 
     // view 안 slot_id 슬롯에 배정된 agent_id(참조 문자열)를 반환. 빈 슬롯이면 Ok(None).
-    // ★슬롯 이동(move_slot_to_window)용★: 원본 슬롯의 agent 를 읽어 새 탭으로 옮길 때 쓴다(조회만).
     // invalid view_id/slot_id → Err(no-op).
     pub fn slot_agent(&self, view_id: Uuid, slot_id: Uuid) -> Result<Option<String>, LayoutError> {
         let v = self

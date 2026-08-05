@@ -31,8 +31,8 @@
 //! - Tauri `Channel`/IPC, 창으로의 실제 전송, `commands/agent.rs`, `connection.rs` main_loop 편집.
 //! - 트리거 배선: rebuild 호출은 T6 가 layout command 의 **ViewManager 락 보유 critical section 안**에서
 //!   (layout mutation 직후, 같은 락으로 `router.rebuild(&mgr)` → table+delta 산출. RMW 직렬화 — FIX-1)
-//!   하고, **델타 송신만 락 해제 후** cmd_tx 로 enqueue 한다. `targets` 사용은 `connection.rs:668`
-//!   `Message::Binary` 자리에서, 델타→cmd_tx 송신도 T6.
+//!   하고, 반환 델타의 enqueue 도 **같은 락 안**에서 한다(`commands::layout::send_subscription_delta`).
+//!   `targets` 사용은 `connection.rs` 의 `Message::Binary` 자리에서, 델타→cmd_tx 송신도 T6.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -150,8 +150,10 @@ impl OutputRouter {
     //  보장한다.
     //
     // ★ADR-0006★: 락 안에서 호출해도 위반 아님 — 본문은 **순수 계산 + lock-free `ArcSwap::store`** 뿐이고
-    //  락 보유 중 외부 호출(emit / DaemonClient / network I/O)이 0 이다. 반환된 델타의 **송신만** 락 해제
-    //  후 T6 가 cmd_tx 로 enqueue 한다(락 안에서 송신 금지).
+    //  락 보유 중 이 함수가 하는 외부 호출(emit / DaemonClient / network I/O)이 0 이다. 반환된 델타의
+    //  enqueue 도 **같은 락 안**이 원칙이다(T6 배선 = `commands::layout::send_subscription_delta` —
+    //  창 생성 실패 롤백 경로만 락 밖). 락 밖으로 미루면 계산~발화 사이 재추가로 stale unsubscribe 가
+    //  라이브 구독을 죽인다.
     pub fn rebuild(&self, mgr: &ViewManager) -> SubscriptionDelta {
         // 새 역인덱스 + agent 집합을 한 번의 창/탭/트리 순회로 만든다.
         let mut by_agent: HashMap<AgentKey, Vec<WindowLabel>> = HashMap::new();

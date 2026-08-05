@@ -28,16 +28,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 // ── data_dir 단일 출처(ADR-0024) ─────────────────────────────────────────────────
 //
-// daemon·embedded(src-tauri)·tray-host 세 프로세스가 **같은 폴더**를 보게 하는 유일한 resolver.
-// 옛 `%APPDATA%\com.engram.dashboard`(dirs::data_dir) 대신 로컬 `.engram-data/` 를 쓴다.
+// 앱(src-tauri)·데몬 두 프로세스가 **같은 폴더**를 보게 하는 유일한 resolver.
 //
 // ★왜 디버그/릴리즈를 분리하는가★:
-//   - 디버그(개발) = 한 repo 의 여러 빌드(embedded·daemon·tray-host)가 **repo 루트 한 곳**의
+//   - 디버그(개발) = 한 repo 의 여러 빌드(앱·데몬)가 **repo 루트 한 곳**의
 //     `.engram-data/` 를 공유해야 같은 agents.json/daemon.json 을 본다. exe 위치(target/debug
 //     등)가 빌드마다 달라도 walk-up 으로 repo 루트로 수렴시킨다.
-//   - 릴리즈(배포) = repo 가 없어 walk-up 대상이 없다. **exe 자신의 폴더**에 `.engram-data/` 를
-//     둔다 — 번들 시 세 exe 가 같은 폴더에 co-located 되므로 같은 폴더로 일치한다. 릴리즈는 exe
-//     들이 같은 폴더에 있어야 일치하며, 번들이 이를 충족한다.
+//   - 릴리즈(배포) = repo 가 없어 walk-up 대상이 없다 → `%APPDATA%\com.engram.dashboard`
+//     (default_data_dir 3번 분기 · appdata_data_dir).
 //
 // ★ENGRAM_DATA_DIR override (테스트 격리 탈출구 — 배포 노브 아님)★:
 //   우선순위 1번 분기다. 설정+non-empty 면 디버그/릴리즈 분기를 모두 건너뛰고 그 경로를 그대로 쓴다.
@@ -57,7 +55,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 로컬 데이터 폴더 이름.
 // ADR-0029: debug 분기(walk-up `.engram-data`)와 그 단위테스트에서만 쓰인다 — release default_data_dir
-// 은 %APPDATA% 만 쓰므로 release 비-test 빌드에선 dead_code(find_workspace_root 와 동일 처리).
+// 은 %APPDATA% 만 쓰므로 release 비-test 빌드에선 dead_code.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 const LOCAL_DATA_DIR: &str = ".engram-data";
 
@@ -448,10 +446,10 @@ pub trait ProcessKiller {
 // ADR-0024: graceful StopDaemon 무응답/타임아웃 시 taskkill 폴백 자리. send_stop(일방 발사)에
 // ack 대기가 추가될 때 여기로 escalate.
 //
-// ★현재 워크스페이스 내 호출처 없음 = 의도된 상태(사용자 결정: 강제 폴백은 나중에 이어붙임, 일방
-//   발사 먼저). dead 처럼 보여도 지우지 말 것 — send_stop 의 미래 폴백 경로다.★
-//   (`pub fn` 이라 dead_code 경고가 안 떠서 "안 쓰는 함수"로 오해하기 쉬움 — 이 주석이 그 rot 을 막는다.
-//    배선은 send_stop 의 ★나중에 이어붙일 자리★ 주석 참조: send_stop 안에서 ack 타임아웃 시 호출.)
+// ★send_stop 에서 escalate 하는 호출처는 아직 없음 = 의도된 상태(사용자 결정: 강제 폴백은 나중에
+//   이어붙임, 일방 발사 먼저). 지우지 말 것 — send_stop 의 미래 폴백 경로다.★
+//   (현 호출처 = src-tauri 의 daemon_stop command — 프론트 stop() 의 fallback kill 경로. 배선은
+//    send_stop 의 ★나중에 이어붙일 자리★ 주석 참조: send_stop 안에서 ack 타임아웃 시 호출.)
 //
 /// 데몬 종료 fallback(real 진입점) — daemon.json 의 pid 를 taskkill /F.
 ///
@@ -549,10 +547,11 @@ pub trait StopSender {
 /// 않는다. 단지 drain 의 **종료 사유**(연결 닫힘 vs 타임아웃)를 StopOutcome 으로 끌어올려 트레이가
 /// 아이콘을 정할 때 PID probe race 를 우회하게 한다(S13 sub-step 2 race 수정 — StopOutcome 주석).
 ///
-/// ★나중에 이어붙일 자리(load-bearing)★: taskkill(daemon_stop) 강제 폴백은 미구현이다(사용자 결정:
-/// 응답 없으면 데몬 활성 유지, 다시 누르면 재발사). 나중에 graceful-with-fallback 으로 키우려면
-/// **이 함수(또는 TungsteniteStopSender::send_stop) 안에** "Timeout 시 daemon_stop(data_dir) 호출"을
-/// 추가하면 된다 — 호출부(트레이 RealLauncher)는 send_stop 시그니처만 보므로 폴백 자체는 여기서 흡수.
+/// ★나중에 이어붙일 자리(load-bearing)★: 이 send_stop 경로엔 taskkill(daemon_stop) 강제 폴백이
+/// 없다(사용자 결정: 응답 없으면 데몬 활성 유지, 다시 누르면 재발사). 나중에 graceful-with-fallback
+/// 으로 키우려면 **이 함수(또는 TungsteniteStopSender::send_stop) 안에** "Timeout 시
+/// daemon_stop(data_dir) 호출"을 추가하면 된다 — 호출부는 send_stop 시그니처만 보므로 폴백 자체는
+/// 여기서 흡수.
 /// 그래서 daemon_stop 을 지우지 말 것(이 폴백이 붙을 자리다).
 pub fn send_stop(data_dir: &Path) -> Result<StopOutcome, DiscoveryError> {
     stop_with_sender(
@@ -740,7 +739,7 @@ impl StopSender for TungsteniteStopSender {
     }
 }
 
-/// taskkill /F 로 pid 를 종료하는 real ProcessKiller(Windows). non-windows 는 SIGKILL(미지원 stub).
+/// taskkill /F 로 pid 를 종료하는 real ProcessKiller(Windows). non-windows 는 미지원 stub(Err 반환).
 struct TaskKiller;
 
 impl ProcessKiller for TaskKiller {
@@ -785,7 +784,8 @@ pub fn ensure_daemon(
     let reader = FileReader {
         path: daemon_path.clone(),
     };
-    // console=false(기본): windowless spawn(CREATE_NO_WINDOW). console=true: 콘솔 창과 함께(디버그).
+    // console=false(기본): CreateFlags 미전달 — 콘솔 창 유무는 데몬 서브시스템이 정한다(wmi_spawn
+    // 실측 주석). console=true: 별도 콘솔 창(디버그).
     let spawner = WmiSpawner { console };
     let liveness = RealLiveness;
     let clock = RealClock;
@@ -941,7 +941,8 @@ impl Drop for ComGuard {
 
 /// WMI Win32_Process.Create 스포너. `console` 으로 데몬 콘솔 창 가시성을 정한다.
 struct WmiSpawner {
-    /// true=콘솔 창과 함께(CREATE_NEW_CONSOLE, 디버그 로그 가시화), false=windowless(CREATE_NO_WINDOW, 기본).
+    /// true=별도 콘솔 창(CREATE_NEW_CONSOLE, 디버그 로그 가시화), false=CreateFlags 미전달(기본 —
+    /// 콘솔 창 유무는 데몬 서브시스템 소관, wmi_spawn 실측 주석).
     console: bool,
 }
 
@@ -1095,8 +1096,8 @@ fn wmi_create_raw(exe: &Path, create_flags: Option<i32>) -> Result<u32, Discover
 
         // 5b) ProcessStartupInformation = Win32_ProcessStartup{ CreateFlags } — **플래그가 있을 때만**.
         //     console=true(CREATE_NEW_CONSOLE)일 때만 임베디드 오브젝트를 만들어 박는다.
-        //     windowless(create_flags=None)는 이 블록 전체를 건너뛴다 — WMI 는 비대화형 spawn 이라
-        //     플래그 없이도 콘솔 창이 안 뜨고, CREATE_NO_WINDOW 를 넣으면 RV=21 로 거부되기 때문.
+        //     create_flags=None 은 이 블록 전체를 건너뛴다 — CREATE_NO_WINDOW 를 넣으면 RV=21 로
+        //     거부되기 때문.
         if let Some(create_flags) = create_flags {
             let startup_class_name = BSTR::from("Win32_ProcessStartup");
             let mut startup_class: Option<IWbemClassObject> = None;
@@ -1246,9 +1247,9 @@ mod tests {
 
     #[test]
     fn appdata_data_dir_uses_appdata_env() {
-        // release-daemon 헬퍼는 빌드모드 무관 순수 함수(release_data_dir_from_exe 와 동일 패턴) → debug
-        // 테스트로 규칙 검증. APPDATA 기준 경로가 `com.engram.dashboard` 로 끝나는지. APPDATA 는 전역
-        // env 라 ENV_LOCK 으로 직렬화하고 복원한다.
+        // release-daemon 헬퍼는 빌드모드 무관 순수 함수 → debug 테스트로 규칙 검증. APPDATA 기준
+        // 경로가 `com.engram.dashboard` 로 끝나는지. APPDATA 는 전역 env 라 ENV_LOCK 으로 직렬화하고
+        // 복원한다.
         let _g = ENV_LOCK.lock().unwrap();
         let prev = std::env::var_os("APPDATA");
         let want_root = std::env::temp_dir().join("engram-appdata-test");
@@ -1306,7 +1307,7 @@ mod tests {
     impl DaemonReader for FakeReader {
         fn read(&self) -> Result<Option<DaemonInfo>, DiscoveryError> {
             self.calls.set(self.calls.get() + 1);
-            // 시퀀스 소진 후엔 마지막 동작을 반복(None) — timeout 경로 모사.
+            // 시퀀스 소진 후엔 항상 Ok(None) — timeout 경로 모사.
             self.seq.borrow_mut().pop_front().unwrap_or(Ok(None))
         }
     }

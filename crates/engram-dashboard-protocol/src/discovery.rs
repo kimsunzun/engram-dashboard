@@ -2,7 +2,7 @@
 //!
 //! 두 프로세스의 공유 계약이라 protocol 에 둔다:
 //!   - daemon 이 이 구조체를 atomic 하게 **기록**한다(portfile::write_atomic).
-//!   - Embedded Tauri(또는 외부 클라)가 **읽어** 데몬에 붙는다(discovery::ensure_daemon).
+//!   - src-tauri 셸(또는 외부 클라)이 **읽어** 데몬에 붙는다(discovery::ensure_daemon).
 //!
 //! ★ts-rs export 안 함★: 프론트가 직접 안 읽는 Rust 전용 IPC 파일이다(daemon.json 은
 //! 백엔드 두 프로세스 사이에서만 흐른다). 그래서 serde 만 달고 TS 바인딩은 만들지 않는다.
@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 데몬 발견 정보. daemon.json 의 전체 내용.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfo {
     /// 데몬 프로세스 PID — stale 판정(살아있는지)에 사용.
