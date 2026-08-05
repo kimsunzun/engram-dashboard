@@ -33,10 +33,19 @@ ADR-0129는 데몬 lib을 3층(네트워크 lib · 에이전트 시스템 lib ·
 재확인 명령:
 ```bash
 # control/ 이 control 밖 데몬 모듈을 참조하는가 (기대: 0줄)
-rg -n "crate::(connection_core|agent_conn|status_fanout|messaging_host)" crates/engram-dashboard-daemon/src/control/
+#   ★경로 접두를 crate:: 만으로 좁히지 말 것★ — control/mod.rs 에서 super:: 는 크레이트 루트라
+#   `use super::connection_core::X` 가 같은 간선인데 빠져나간다(그 디렉토리가 실제로 super:: 형태를
+#   쓴다). 좁은 판이 2026-08-05 리뷰에서 적출됐다 — 트리거는 과탐이 낫지 미탐은 조용해서 위험하다.
+#   ★-U 를 빼지 말 것★ — rustfmt 가 폭 넘는 import 를 `use crate::{⏎ connection_core::A,⏎};` 로 쪼개면
+#   접두와 모듈명이 다른 줄에 앉아 단일행 패턴은 못 문다(이 repo 엔 rustfmt.toml 이 없어 기본 래핑이 돈다).
+#   매치가 나오면 그 줄이 그 파일의 `#[cfg(test)]` 시작 줄보다 앞인지 볼 것 — 뒤면 테스트 픽스처라 합법.
+#   양성 대조의 한계: 경로를 src/ 로 넓히면 실간선이 잡히지만 그 간선은 **전부 crate:: 형태**라
+#   super:: 갈래가 죽어도 이 대조는 통과한다. 접두를 좁히는 개정을 이 대조로 승인하지 말 것.
+rg -U -n "(crate|(super::)+)::[^;]*\b(connection_core|agent_conn|status_fanout|messaging_host)\b" crates/engram-dashboard-daemon/src/control/
 # connection_core 가 production 에서 옆 모듈을 참조하는가
 #   (매치가 전부 그 파일의 `#[cfg(test)] mod tests` 시작 줄 이후면 production 순환 없음 — 줄 번호를 여기 박지 말 것)
-rg -n "crate::(status_fanout|messaging_host)" crates/engram-dashboard-daemon/src/connection_core.rs
+#   접두·-U 주의사항은 위 명령과 동일하다 — connection_core.rs 도 크레이트 루트의 직계라 super:: 가 같은 간선이다.
+rg -U -n "(crate|(super::)+)::[^;]*\b(status_fanout|messaging_host)\b" crates/engram-dashboard-daemon/src/connection_core.rs
 ```
 
 **④ 부식 논거가 이 두 덩어리엔 약하다.** ADR-0129가 crate 벽을 택한 근거는 ADR-0020의 부식 이력이었다 — 연결 코어를 carrier-중립 모듈로 선언해뒀는데 제어 평면과 메시징이 같은 crate로 흘러들었다. **그 부식의 원인은 축이 같았다는 것이다**(연결을 처리하다 보니 연결 위에서 할 일이 옆에 쌓였다). 제어 평면은 **별개 입구**다 — 웹뷰의 WS 를 거치지 않고 자체 HTTP 리스너로 에이전트 안의 LLM 요청을 받는다(`crates/engram-dashboard-daemon/src/control/mcp_server.rs` 의 `TcpListener::bind` 지점). 같은 부식 경로를 타기 어렵다.
@@ -50,7 +59,7 @@ rg -n "crate::(status_fanout|messaging_host)" crates/engram-dashboard-daemon/src
 - **★재개 조건(하나라도 관측되면 ADR-0129 목표 모양을 다시 꺼낸다)★**
   1. 제어 평면 또는 중계 층을 **따로 쓸 소비자가 실제로 생긴다**(가정이 아니라 착수된 소비처).
   2. `control/` 에서 다른 최상위 데몬 모듈로 나가는 **production 간선이 생긴다**(= leaf 성질 붕괴 — §근거 ③의 첫 명령이 0줄을 잃는다).
-  3. production 의존 그래프에 **순환이 생긴다**(테스트 블록 밖에서). ★이 조건만 단발 명령이 없다★ — 조건 2의 grep 은 `control/` 의 나가는 간선만 보므로 그 밖에서 생기는 순환(예: `status_fanout → messaging_host`)에는 울지 않는다. 재는 법 = 각 모듈의 `crate::` 참조를 **그 파일의 `#[cfg(test)]` 시작 줄과 대조**해 production 간선만 남긴 뒤 방향을 확인하는 것(2026-08-05 실측이 이 방법으로 아래 DAG를 얻었다: `agent_conn → {connection_core, control}` · `connection_core → control` · `status_fanout → connection_core` · `messaging_host → {status_fanout, control}` · `control → 없음`).
-  - **세 조건 모두 게이트로 등록돼 있지 않다 — 자동으로 울지 않는다.** 등록 여부는 별 결정이다(step-log S18.24 잔여 ④).
+  3. production 의존 그래프에 **순환이 생긴다**(테스트 블록 밖에서). ★이 조건만 단발 명령이 없다★ — 조건 2의 grep 은 `control/` 의 나가는 간선만 보므로 그 밖에서 생기는 순환(예: `status_fanout → messaging_host`)에는 울지 않는다. 재는 법 = 각 모듈의 크레이트 내부 참조(`crate::` **와 `super::` 양쪽** — 최상위 모듈에선 둘이 같은 곳을 가리킨다. 그룹 import 때문에 `rg -U` 필수)를 **그 파일의 `#[cfg(test)]` 시작 줄과 대조**해 production 간선만 남긴 뒤 방향을 확인하는 것(2026-08-05 실측이 이 방법으로 아래 DAG를 얻었다: `agent_conn → {connection_core, control}` · `connection_core → control` · `status_fanout → connection_core` · `messaging_host → {status_fanout, control}` · `control → 없음`).
+  - **등록 상태(2026-08-05 — 이 줄이 정본):** **②만** `/qa` 바인딩(`.claude/skill-bindings/qa.md`)에 **재론 트리거**로 등록됐다 — *어기면 FAIL* 인 격리 게이트가 **아니라** "멈추고 이 ADR 을 재론하라"는 알림이라 판정 규칙이 반대다(매치를 회귀로 보고 되돌리지 말 것). **①은 기계화 대상이 아니고**(소비자 등장 = 사람 판단), **③은 여전히 미등록 — 자동으로 울지 않는다.** ②의 트리거가 0줄이라고 ③까지 깨끗하다고 읽지 말 것.
 - **테스트 코드의 옆걸음은 결함이 아니다.** `#[cfg(test)]` 픽스처가 형제 모듈을 쓰는 것은 한 crate 안에서 합법이고, 이 결정 하에서는 고칠 이유가 없다. 다만 **재개할 때는 그 코드가 crate 경계를 넘게 되므로 재배치 대상**이라는 점을 기록해 둔다 — 재개 시 이 문단을 먼저 읽을 것.
 - **`frame_port` 의 feature 소속 결정도 함께 보류된다.** ADR-0129 note 가 "슬라이스 2 전에 재검토"로 남긴 사안인데, 슬라이스 2가 보류되므로 그 시한도 함께 미뤄진다. 재개 시 **착수 전에** 결정할 것(공개 API 변경이라 나중에 하면 비싸다).

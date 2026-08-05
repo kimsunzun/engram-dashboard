@@ -62,6 +62,13 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   cargo test -p engram-dashboard-net --all-features     # 게이트5b server 행 → 성공해야 PASS
   ```
   게이트1·4는 매치 유무로 판정하고(0줄이어야 PASS — 코어 `use tauri` 게이트와 같은 규칙), 게이트2·3은 줄 수로 판정한다. **게이트5만 성공 여부로 판정한다**(앞 넷과 다르다 — 출력을 읽지 않는다). 게이트5가 두 줄인 이유: net의 기본 feature가 비어 있어 맨 명령은 `server` 아래 모듈을 **컴파일조차 하지 않고**, 반대로 워크스페이스 스코프 명령은 데몬이 `server`를 켜므로 항상 ON 쪽만 본다 — 각 줄이 상대가 못 보는 조합을 맡으므로 한 줄로 줄이지 않는다. `build`가 아니라 `test`인 이유는 dev-의존 경로(`auth.rs` golden이 쓰는 `serde_json`)까지 무는 것이다. 게이트2의 기대값은 **심볼 단위**다 — "`portfile.rs`만"처럼 파일 이름으로 바꾸면 그 파일 안에 새 import가 들어와도 통과한다. 게이트3은 **해석된 의존 그래프**를 읽는다 — `Cargo.toml` 텍스트 grep으로 바꾸지 말고(rename·`[dependencies.<이름>]` 테이블 형·들여쓴 선언·`[build-dependencies]`·비활성 target·`optional`이 빠져나간다 — 실측) 플래그도 줄이지 않는다. 게이트4의 패턴을 `_(이름)` 괄호 형태에서 풀어 쓰지 않는다 — 그 형태의 근거(자기일치 함정, 실측 기록)는 net crate 헤더의 게이트4 절이 정본이다.
+- **★ADR-0130 재론 트리거 — 게이트가 아니다(판정 규칙이 반대)★:** 아래는 *어기면 FAIL* 인 격리 게이트가 **아니라**, 매치가 나오면 **진행을 멈추고 ADR-0130 의 재개 조건을 재론하라**는 알림이다. 매치를 회귀로 보고 되돌리지 말 것 — `control/` 이 형제 모듈을 부르는 것 자체는 결함이 아니다(근거 = ADR-0130 §영향). daemon crate 가 닿으면 필수(quick이어도).
+  ```bash
+  rg -U -n "(crate|(super::)+)::[^;]*\b(connection_core|agent_conn|status_fanout|messaging_host)\b" crates/engram-dashboard-daemon/src/control/   # 재개 조건② — 0줄이면 보류 유지, 매치가 나오면 ADR-0130 재론
+  ```
+  **★매치가 나와도 바로 재론이 아니다 — 한 단계 걸러라★:** 그 줄이 **그 파일의 `#[cfg(test)]` 시작 줄보다 뒤면 테스트 픽스처라 합법**이다(ADR-0130 §영향이 옆걸음을 명시적으로 허용 — grep 은 이걸 못 가른다). 앞이면 production 간선 후보 = 재론. `rg -n "#\[cfg\(test\)\]" crates/engram-dashboard-daemon/src/control/` 로 경계 줄을 뽑아 대조한다.
+  **패턴 주의(2026-08-05 리뷰 2라운드):** ① 경로 접두를 `crate::` 만으로 좁히지 말 것 — `control/mod.rs` 에서 `super::` 는 크레이트 루트라 같은 간선이 빠져나간다. ② **`-U` 를 빼지 말 것** — rustfmt 가 쪼갠 그룹 import(`use crate::{`⏎`  connection_core::A,`)는 접두와 모듈명이 다른 줄이라 단일행 패턴이 못 문다. ③ **양성 대조(경로를 `src/` 로 넓히기)로 접두 축소를 승인하지 말 것** — 현재 실간선은 전부 `crate::` 형태라 `super::` 갈래가 죽어도 그 대조는 통과한다.
+  **커버리지는 조건 ②뿐이다.** ①(제어 평면·중계 층을 따로 쓸 소비자가 실제로 생김)은 사람 판단이라 기계화 대상이 아니고, ③(production 의존 그래프의 순환)은 단발 명령이 없다 — 재는 법의 정본은 ADR-0130 §영향 조건 3. **이 블록이 0줄이라고 "순환 없음"으로 읽지 말 것.** ★**등록 상태 자체의 정본은 여기가 아니라 ADR-0130 §영향의 "등록 상태" 줄이다**★ — ③이 나중에 등록되면 그 줄만 갱신되고 이 문단은 낡는다. 상태를 판단할 땐 거기를 볼 것.
 - **공유 데몬 바이너리 락(실발동 2026-07-08):** 실행 중인 `engram-dashboard-daemon.exe`(공유 인프라 — 타 에이전트 호스팅 가능)가 있으면 daemon bin을 빌드하는 루트 `cargo build`·`cargo test`가 os error 5로 FAIL한다 — 코드 결함 아님. **데몬 강제 종료 금지.** 우회 = daemon bin을 안 빌드하는 패키지 스코프(`cargo build/test -p <영향 crate들>`)로 좁혀 회귀 확인, 워크스페이스 전체 게이트는 **PARTIAL로 정직 보고**(못 돌린 범위 명시).
 
 ### full — standard + GUI 실측 (cdp)
