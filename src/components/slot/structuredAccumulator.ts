@@ -7,9 +7,7 @@
 //   계속 쓴다(그건 통짜 파서, 이 누산기는 라이브 tag1 전용).
 //
 // ★렌더 모델 = 순서 보존 item 스트림(ADR-0045 §52 렌더, 사용자 결정 2026-07-05)★: 이벤트가 도착한
-//   순서 그대로 item 배열에 쌓는다. text 는 인접분끼리 이어붙이고(assistant 응답 조각), ToolCall/Usage/
-//   Error 는 각각 칩 item 1개로, MessageDone(턴 종료)은 구분선(separator) item 으로 삽입한다. RichSlot 이
-//   이 순서 그대로 렌더한다(text=Markdown, 칩=클릭 펼침 한줄, separator=수평선).
+//   순서 그대로 item 배열에 쌓는다.
 //
 // ★idempotent 재구성 불변식(replay 안전 — 왜 중요한가)★: 웹뷰 리로드/슬롯 재배정 시 클라 공유버퍼가
 //   히스토리 전체를 seq 순서로 다시 흘린다(replay, ADR-0043). 구독 effect 가 reset() 후 재구독하므로,
@@ -19,31 +17,19 @@
 
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
 
-/** 순서 보존 렌더 item — RichSlot 이 배열 순서 그대로 그린다.
- *  `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
+/** `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
 export type StructuredItem =
-  // assistant 텍스트 조각(인접 TextDelta 를 이어붙인 누적 세그먼트). Markdown 으로 렌더.
   | { kind: 'text'; text: string; itemId: number }
-  // 도구 호출 칩 — 접힌 한 줄(name), 펼치면 args_json. id 는 백엔드 tool-use id.
+  // id 는 백엔드 tool-use id.
   | { kind: 'tool'; name: string; argsJson: string; id: string | null; itemId: number }
-  // 토큰 사용량 칩 — 접힌 한 줄(in/out 토큰), 펼치면 상세.
   | { kind: 'usage'; inputTokens: number; outputTokens: number; itemId: number }
-  // 에러 칩 — 접힌 한 줄(요약), 펼치면 전체 메시지.
   | { kind: 'error'; message: string; itemId: number }
-  // 탈출구 이벤트 칩(codex/gemini·API 모델 누수 흡수) — kind 라벨 + json 상세.
+  // 탈출구 이벤트(codex/gemini·API 모델 누수 흡수).
   | { kind: 'structured'; label: string; json: string; itemId: number }
-  // 턴 경계(구분선) — MessageDone 로 삽입(ADR-0045 turn 경계 semantics).
   | { kind: 'separator'; itemId: number }
 
-/**
- * 라이브 tag1 누산기. `feed` 로 tag1 payload 바이트(StructuredEvent JSON 1건)를 밀어 넣으면 파싱해
- * 순서 보존 item 스트림에 누적한다. `snapshot()` 이 반환하는 StructuredItem[] 를 RichSlot 이 그린다.
- * 재구독(replay) 전 `reset()` 으로 초기화(terminal.reset() 규율의 RichSlot 판 — 위 idempotent 불변식).
- */
 export class StructuredEventAccumulator {
-  // 도착 순서 그대로의 렌더 item 스트림.
   private items: StructuredItem[] = []
-  // 마지막 이벤트가 MessageDone/Error 였는가(턴 종료) — 라이브 입력 UX 의 streaming/idle 힌트(옵션).
   private turnDone = false
   // 단조 증가 item id — reset() 시 0 복귀. 같은 이벤트열을 refeed 하면 동일 id 를 재현(replay idempotence).
   private nextId = 0
@@ -59,8 +45,8 @@ export class StructuredEventAccumulator {
   private seenUserUuids = new Set<string>()
 
   /**
-   * tag1 payload(StructuredEvent JSON UTF-8 바이트) 1건을 먹인다. 라이브 경로는 항상 Uint8Array,
-   * 문자열은 테스트/편의용. tag1 은 프레임 1개 = 이벤트 1개라 라인 재조립·버퍼링이 필요 없다.
+   * 라이브 경로는 항상 Uint8Array, 문자열은 테스트/편의용.
+   * tag1 은 프레임 1개 = 이벤트 1개라 라인 재조립·버퍼링이 필요 없다.
    */
   feed(payload: Uint8Array | string): void {
     const json = typeof payload === 'string' ? payload : new TextDecoder('utf-8').decode(payload)
@@ -81,17 +67,14 @@ export class StructuredEventAccumulator {
       case 'TextDelta': {
         // 빈 델타("")는 phantom item(빈 Markdown 블록·의미 없는 구분선 유발)을 만들지 않도록 스킵.
         if (!ev.text) break
-        // 텍스트 조각 이어붙임 — 직전 item 이 text 면 copy-on-write concat, 아니면 새 text item 을 연다.
-        //   copy-on-write: 이전에 반환된 snapshot() 참조가 이 객체를 가리키므로 제자리 변경 금지.
-        //   (칩/구분선 뒤에 다시 텍스트가 오면 별도 세그먼트로 뜬다 — 순서 보존.)
+        // copy-on-write: 이전에 반환된 snapshot() 참조가 이 객체를 가리키므로 제자리 변경 금지.
         const last = this.items[this.items.length - 1]
         if (last && last.kind === 'text') {
-          // 새 객체로 교체(copy-on-write) — 기존 snapshot 참조가 가리키던 객체는 불변.
           this.items[this.items.length - 1] = { ...last, text: last.text + ev.text }
         } else {
           this.items.push({ kind: 'text', text: ev.text, itemId: this.nextId++ })
         }
-        this.turnDone = false // 새 델타 = 에이전트 작업 중 → idle 해제.
+        this.turnDone = false
         break
       }
       case 'ToolCall':
@@ -102,7 +85,7 @@ export class StructuredEventAccumulator {
           id: ev.id,
           itemId: this.nextId++,
         })
-        this.turnDone = false // 도구 호출 = 응답 진행 중.
+        this.turnDone = false
         break
       case 'Usage':
         this.items.push({
@@ -113,7 +96,7 @@ export class StructuredEventAccumulator {
         })
         break
       case 'Error':
-        // 에러 칩 삽입 + 턴 종료 신호. (텍스트로 누적하지 않는다 — 칩으로 별도 표시.)
+        // 텍스트로 누적하지 않고 별도 item 으로 표시한다.
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
         this.turnDone = true
         break
@@ -128,7 +111,7 @@ export class StructuredEventAccumulator {
         if (ev.kind === 'user') {
           const uuid = extractUserUuid(ev.json)
           if (uuid !== null) {
-            if (this.seenUserUuids.has(uuid)) break // 중복(합성 에코 ↔ replay) → 스킵
+            if (this.seenUserUuids.has(uuid)) break
             this.seenUserUuids.add(uuid)
           }
           // ★새 유저 턴 시작 → turnDone(=idle) 해제★: 직전 MessageDone 이 turnDone=true 로 뒀는데, 새 유저
@@ -139,8 +122,7 @@ export class StructuredEventAccumulator {
           //   세우므로 refeed 후 최종 상태 불변 — 중간 전이만 정확해진다. (dedup 스킵분은 위 break 로 여기 못 옴.)
           this.turnDone = false
         }
-        // 탈출구 이벤트 — 알 수 없는 종류(kind)를 칩으로 흘려 유실 방지. (user 는 위에서 turnDone 해제,
-        //   그 외 kind 의 turnDone 은 건드리지 않는다.)
+        // 탈출구 이벤트 — 알 수 없는 종류(kind)도 흘려 유실 방지.
         this.items.push({ kind: 'structured', label: ev.kind, json: ev.json, itemId: this.nextId++ })
         break
       }
@@ -148,8 +130,6 @@ export class StructuredEventAccumulator {
         // ADR-0045: decoder(backend claude.rs)가 claude 결과 한 줄·한 턴마다 MessageDone 을 정확히 1회
         // 발행하며, turn_id 는 현재 항상 None 이다. 따라서 MessageDone 이 유일하게 신뢰할 수 있는 턴
         // 경계 트리거다(turn_id 로 교체하면 현재 always-None 이라 경계가 사라짐 — 재론 방지).
-        // 연속 MessageDone(빈 턴)으로 구분선이 겹쳐 쌓이지 않게 가드한다.
-        // 선행 item 이 없는 경우(빈 스냅샷)도 구분선 생략 — leading-separator 방지.
         if (this.items.length > 0 && this.items[this.items.length - 1].kind !== 'separator') {
           this.items.push({ kind: 'separator', itemId: this.nextId++ })
         }
@@ -158,7 +138,7 @@ export class StructuredEventAccumulator {
     }
   }
 
-  /** 현재까지 누적된 렌더 item 스트림(내부 배열 참조). React 소비자는 [...snapshot()] 로 새 참조를 떠서 set. */
+  /** 내부 배열 참조를 그대로 돌려준다 — React 소비자는 [...snapshot()] 로 새 참조를 떠서 set. */
   snapshot(): StructuredItem[] {
     return this.items
   }
@@ -178,7 +158,7 @@ export class StructuredEventAccumulator {
 }
 
 /**
- * user Structured item 의 json 에서 dedup 키 `uuid` 를 뽑는다(합성 에코 · replay 공통 부착). 절대 throw 안 함.
+ * user Structured item 의 json 에서 dedup 키 `uuid` 를 뽑는다(합성 에코 · replay 공통 부착).
  * 백엔드가 심는 shape: `{"type":"text","text":…,"uuid":"X"}`(합성 에코) / replay 블록도 같은 위치에 uuid.
  * uuid 가 없거나 문자열이 아니면 null(→ 호출자가 dedup 하지 않고 보존).
  *
@@ -196,7 +176,6 @@ function extractUserUuid(json: string): string | null {
     const parsed: unknown = JSON.parse(json)
     if (parsed !== null && typeof parsed === 'object') {
       const obj = parsed as Record<string, unknown>
-      // 합성 에코와 dedup 짝이 되는 건 text 블록뿐 — 비-text(tool_result 등)는 dedup 제외(항상 보존).
       if (obj['type'] !== 'text') return null
       const uuid = obj['uuid']
       if (typeof uuid === 'string' && uuid.length > 0) return uuid

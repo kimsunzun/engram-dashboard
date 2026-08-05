@@ -1,18 +1,11 @@
 //! PresetPalette — 프리셋(자주 쓰는 cwd 북마크) 슬롯 콘텐츠(ADR-0060 variant / ADR-0061 저장·리치화).
 //!
-//! ★역할★: 데몬 소유 프리셋 목록(agentStore.presets)을 그리고 행별 우클릭 메뉴(이름변경·삭제)로 CRUD 한다.
 //! CRUD 는 agentClient(단일 제어 표면, ADR-0011) 프리셋 메서드만 부르고, 화면 반영은 낙관 갱신 없이
 //! PresetListUpdated broadcast → store 미러 교체로만 이뤄진다(멀티창 동기화 불변식, ADR-0061).
 //!
 //! ★pane 메뉴 없음(ADR-0064)★: 옛 pane 우클릭 "추가" 메뉴 + stopPropagation 은 제거됐다 — 추가는 이제
 //! 통합 슬롯 메뉴의 preset.add command(폴더 다이얼로그 → createPreset, presetCommands.ts)로 기여된다.
 //! pane 우클릭은 상위 ViewLayoutRenderer 의 통합 SlotContextMenu 로 버블한다(공통 슬롯 ops 도 함께 노출).
-//! ★행(ROW) 우클릭 메뉴만 소유★: 행 우클릭은 행 핸들러가 stopPropagation 으로 가로채 item-targeted 메뉴
-//! (이름변경·삭제)를 띄운다(AgentList 행 메뉴와 동형 — MENU_STYLE/outside-click/target-gone 클론).
-//!
-//! ★표시명 = name override ?? cwd basename(ADR-0061 리치화)★: 프리셋은 {id,cwd,name?}를 저장한다. name
-//! override 가 있으면 그대로, 없으면 cwd 의 마지막 경로 세그먼트를 파생한다(공용 basename 유틸 — AgentList
-//! 와 단일 출처). 이름변경 = RenamePreset command(백엔드 persist → broadcast, 낙관 갱신 X).
 //!
 //! ★스타일 = 변수-only(테마 준수)★: 색·폰트는 전부 CSS 변수 참조 — 하드코딩 색 리터럴 0(e-ink 대비).
 
@@ -27,15 +20,13 @@ import type { Preset } from '../../api/types'
 import { t } from '../../i18n'
 
 /**
- * 프리셋 표시명 = name override ?? cwd basename(ADR-0061 리치화). name override 가 있으면 그대로 쓰고,
- * 없으면(null) 공용 `basename` 유틸로 cwd 마지막 세그먼트를 파생한다(AgentList 행 표시명과 단일 출처
- * 공유 — 복제 시 win/posix·root 엣지가 갈린다). basename 파생 규칙은 위임한다.
+ * ADR-0061 리치화. 파생은 공용 `basename` 유틸에 위임 — AgentList 행 표시명과 단일 출처를 공유한다
+ * (복제하면 win/posix·root 엣지가 갈린다).
  */
 export function presetDisplayName(preset: Pick<Preset, 'cwd' | 'name'>): string {
   return preset.name ?? basename(preset.cwd)
 }
 
-/** 행 우클릭 메뉴 — primitive snapshot(좌표 + 대상 preset id). AgentList RowMenu 와 동형. */
 type RowMenu = { x: number; y: number; presetId: string }
 
 export default function PresetPalette() {
@@ -55,8 +46,7 @@ export default function PresetPalette() {
   const renamingRef = useRef<Set<string>>(new Set())
   const [renaming, setRenaming] = useState<ReadonlySet<string>>(() => new Set())
 
-  // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★:
-  //   editingId=편집 중 preset id(없으면 null), draft=입력 중 문자열. 확정(Enter/blur) 시에만 renamePreset.
+  // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // ★안정 ref★: 편집 진입(editingId 변화) 시점에만 정확히 1회 select() — 인라인 콜백 ref 로 select 하면
@@ -66,7 +56,6 @@ export default function PresetPalette() {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
 
-  // 행 메뉴 바깥 클릭으로 닫기(자기 ref 밖 mousedown 이면 닫는다 — AgentList 동형).
   useEffect(() => {
     if (!rowMenu) return
     const h = (e: MouseEvent) => {
@@ -77,7 +66,6 @@ export default function PresetPalette() {
     return () => document.removeEventListener('mousedown', h)
   }, [rowMenu])
 
-  // Escape 로 열린 행 메뉴 닫기(열려 있을 때만 리스너 — 누수 방지).
   useEffect(() => {
     if (!rowMenu) return
     const h = (e: KeyboardEvent) => {
@@ -96,8 +84,8 @@ export default function PresetPalette() {
   // 삭제: id 별 in-flight 추적 → 같은 프리셋의 삭제는 resolve 전까지 1회만 발화(더블클릭 가드).
   //   deletingRef(동기)가 권위 가드 — 다른 id 는 여전히 동시 삭제, 같은 id 는 1회만.
   const removePreset = (id: string): void => {
-    if (deletingRef.current.has(id)) return // 동기 권위 가드(같은 tick 두 번째 호출 즉시 차단)
-    deletingRef.current.add(id) // async 진입 전 동기 lock
+    if (deletingRef.current.has(id)) return
+    deletingRef.current.add(id)
     setDeleting(prev => {
       const next = new Set(prev)
       next.add(id)
@@ -120,13 +108,11 @@ export default function PresetPalette() {
       })
   }
 
-  // 편집 진입: 현재 표시명을 draft 로 시드(우클릭 "이름 변경").
   const beginEdit = (preset: Preset) => {
     setEditingId(preset.id)
     setDraft(presetDisplayName(preset))
   }
   const cancelEdit = () => setEditingId(null)
-  // 확정: trim 후 비었거나 현재 표시명과 같으면 no-op(revert), 아니면 renamePreset. 어느 경우든 편집 종료.
   // ★멱등★: editingId 가 이 preset 이 아니면 즉시 return — Enter 가 setEditingId(null) 로 input 을 언마운트하면
   //   브라우저가 blur 를 쏴 onBlur→commitEdit 이 한 번 더 돈다. Enter 후 editingId 는 이미 null 이라 blur 의
   //   commitEdit 은 no-op → renamePreset 이중 호출을 막는다(TabBar 멱등 동형).
@@ -134,7 +120,7 @@ export default function PresetPalette() {
     if (editingId !== preset.id) return
     const trimmed = draft.trim()
     setEditingId(null)
-    // 미변경(현재 표시명과 동일)·빈 문자열이면 발화 안 함 — 백엔드에 불필요한 RenamePreset 을 안 보낸다.
+    // 미변경·빈 문자열이면 백엔드에 불필요한 RenamePreset 을 안 보낸다.
     if (trimmed.length === 0 || trimmed === presetDisplayName(preset)) return
     if (renamingRef.current.has(preset.id)) return // 동기 권위 가드(rename 중복 제출 차단)
     renamingRef.current.add(preset.id)
@@ -175,8 +161,8 @@ export default function PresetPalette() {
         overflow: 'hidden',
       }}
     >
-      {/* 슬롯 콘텐츠 라벨(사용자 요청) — 이 슬롯 = 프리셋 팔레트임을 표시. 공용 슬롯 헤더가 아니라
-          PresetPalette·AgentList 이 2개 variant 컴포넌트에만 각자 넣는다(터미널 등 다른 슬롯 무영향). 변수-only. */}
+      {/* 공용 슬롯 헤더가 아니라 PresetPalette·AgentList 이 2개 variant 컴포넌트에만 각자 넣는다
+          (터미널 등 다른 슬롯 무영향). */}
       <div
         data-slot-label="preset"
         style={{
@@ -193,8 +179,7 @@ export default function PresetPalette() {
         {t('preset.label')}
       </div>
 
-      {/* 프리셋 목록 — 각 행: 표시명(name override ?? basename) + 전체 cwd(muted). 행 우클릭 = 메뉴(이름변경·삭제).
-          공용 ScrollArea seam(ADR-0053)으로 스크롤. 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
+      {/* 공용 ScrollArea seam(ADR-0053)으로 스크롤. 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
       <ScrollArea style={{ flex: 1, minHeight: 0 }}>
         {presets.length === 0 ? (
           <div style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '12px' }}>
@@ -226,7 +211,6 @@ export default function PresetPalette() {
               }}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
-                {/* 표시명 = name override ?? cwd basename(ADR-0061 리치화). 편집 중이면 인라인 input. */}
                 {isEditing ? (
                   <input
                     data-preset-rename-input={preset.id}
@@ -238,12 +222,11 @@ export default function PresetPalette() {
                       // ★버블 차단★: 편집 중 키가 전역 키바인딩으로 새면 안 된다(TabBar 동형).
                       e.stopPropagation()
                       if (e.key === 'Enter') commitEdit(preset)
-                      else if (e.key === 'Escape') cancelEdit() // 취소(revert — renamePreset 안 부름).
+                      else if (e.key === 'Escape') cancelEdit()
                     }}
                     onBlur={() => commitEdit(preset)}
                     onClick={e => e.stopPropagation()}
                     style={{
-                      // 내용 폭에 맞춤(field-sizing:content) — TabBar rename input 동형. minWidth/maxWidth 로 상·하한.
                       fieldSizing: 'content',
                       minWidth: '3ch',
                       maxWidth: '180px',
@@ -311,7 +294,6 @@ export default function PresetPalette() {
   )
 }
 
-/** 행 메뉴 항목 산출 — 대상 preset 을 찾아 이름변경/삭제 액션을 만든다. in-flight 면 disabled(시각). */
 function rowMenuItems(
   rowMenu: RowMenu,
   presets: Preset[],

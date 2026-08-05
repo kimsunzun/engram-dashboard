@@ -1,20 +1,8 @@
-// ADR-0050: 구조화 채팅 렌더 dispatch — 우리 자체 채팅 leaf 컴포넌트(chat/*)에 우리 데이터 모델
-//   (StructuredItem 스트림)을 먹인다. 벤치마크 룩 = Claude Code VSCode 확장(1차 근사치, 사용자가
+// ADR-0050: 구조화 채팅 렌더 dispatch. 벤치마크 룩 = Claude Code VSCode 확장(1차 근사치, 사용자가
 //   스크린샷으로 후속 조정). 이전 라운드에서 도입했던 외부(Apache-2.0) 이식물은 전부 제거하고 자체
-//   구현으로 대체했다. leaf: ./chat/{Markdown,ThoughtRow,CopyButton}.
+//   구현으로 대체했다.
 //
-// ★이 파일의 책임★: items 스트림을 종류별로 위 leaf 컴포넌트로 dispatch 하는 **순수 렌더**(구독/누적은
-//   RichSlot 소관). props = { items, streaming } 만 받는다.
-//
-// ★레이아웃★: 각 행은 ChatRow 래퍼(relative pt-2.5 px-4)를 쓴다. assistant-side 행(text·thinking·tool·
-//   generic·error + streaming tail)은 rail 모드 — 좌측 고정폭 gutter 에 muted 점 마커를 두고 콘텐츠를
-//   그 오른쪽으로 들여쓴다(Claude Code VSCode 확장의 thread 룩 1차 근사치 — thinking+응답+도구를 한
-//   가닥으로 묶는다). user 발화(확장 룩 버블 rounded-md border bg-elevated)와 separator 는 rail 없이 plain.
-//   헤더는 작은 lucide 아이콘 + bold 제목. 도구/에러/generic 은 이 헤더 패턴, assistant text 는 헤더 없이
-//   Markdown full-width, thinking 은 ThoughtRow.
-//
-// ★안전 파서 헬퍼(pretty/extractText/contentToText/parseToolResult/buildToolResultMap/shortArgs)★는
-//   우리 데이터-어댑터 로직이며 **절대 throw 하지 않는다**(bad json 폴백).
+// ★이 파일의 책임★: **순수 렌더** — 구독/누적은 RichSlot 소관.
 
 import { useState, type ComponentType, type ReactNode } from 'react'
 import {
@@ -37,14 +25,10 @@ import {
 import { cn } from '@/lib/utils'
 import { t } from '../../i18n'
 import type { StructuredItem } from './structuredAccumulator'
-// ADR-0050: 우리 자체 채팅 leaf 들(chat/*). 상세는 각 파일 헤더 참조.
-//   ★Markdown(전체 마크다운) 은 assistant text 에만 쓴다. 도구 IN/OUT·탈출구 json 은 신뢰할 수 없는
-//   텍스트라 마크다운 파싱을 태우지 않고 InertCode(리터럴 <pre>)로만 그린다(FIX 2 — 아래 주석).
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
 import { WaitRow } from './chat/WaitRow'
-// ADR-0053 구조 분할: 행 컨테이너 leaf(ChatRow) + rail 위치 순수 계산(railPositions)을 분리해 이 파일은
-//   dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계). 행동 불변(리팩터).
+// ADR-0053 구조 분할: 이 파일은 dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계).
 import { ChatRow } from './chat/ChatRow'
 import {
   computeRailRunPositions,
@@ -54,7 +38,6 @@ import {
 
 // ── 안전 파서 헬퍼(절대 throw 금지 — bad json 폴백) ────────────────────────────────
 
-/** args_json/json 을 읽기 좋게 pretty-print(파싱 실패 시 원문 그대로). 절대 throw 하지 않는다. */
 function pretty(json: string): string {
   try {
     return JSON.stringify(JSON.parse(json), null, 2)
@@ -63,11 +46,6 @@ function pretty(json: string): string {
   }
 }
 
-/**
- * json 문자열에서 텍스트를 추출한다. 절대 throw 하지 않는다.
- * - 'user': `.text` 우선, 없으면 `.thinking` · 'thinking': `.thinking` 우선, 없으면 `.text`.
- * - 실패/필드 부재 시 raw json 문자열.
- */
 function extractText(json: string, mode: 'thinking' | 'user'): string {
   try {
     const parsed: unknown = JSON.parse(json)
@@ -88,10 +66,7 @@ function extractText(json: string, mode: 'thinking' | 'user'): string {
   }
 }
 
-/**
- * Anthropic content 블록(문자열 | 블록 배열)에서 표시용 텍스트를 뽑는다. 절대 throw 하지 않는다.
- * content 가 문자열이면 그대로, 배열이면 `type === "text"` 블록의 `.text` 만 이어붙인다.
- */
+/** Anthropic content 블록(문자열 | 블록 배열) 스키마에 맞춘 추출. */
 function contentToText(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
@@ -113,12 +88,8 @@ function contentToText(content: unknown): string {
   return ''
 }
 
-/** tool_result 페어(도구 결과 본문 + 에러 여부). tool_use_id 로 도구 호출과 짝짓는다. */
 type ToolResult = { content: string; isError: boolean }
 
-/**
- * structured item 의 json 이 tool_result 면 { toolUseId, result } 를, 아니면 null. 절대 throw 하지 않는다.
- */
 function parseToolResult(json: string): { toolUseId: string; result: ToolResult } | null {
   try {
     const parsed: unknown = JSON.parse(json)
@@ -137,8 +108,6 @@ function parseToolResult(json: string): { toolUseId: string; result: ToolResult 
 }
 
 /**
- * items 를 한 번 훑어 tool_use_id → tool_result 맵을 만든다(pre-scan). 절대 throw 하지 않는다.
- * 도구 호출(tool item)은 이 맵에서 자기 id 로 결과(OUT)를 찾아 함께 그린다.
  * 같은 tool_use_id 가 중복되면 last-write-wins(Map.set) — tool_use id 는 Anthropic 이 고유 보장하고
  * 상류(누산기)가 seq dedup 하므로 실전 중복은 없다. 있어도 마지막 결과로 덮는 것이 안전한 폴백.
  */
@@ -152,7 +121,6 @@ function buildToolResultMap(items: StructuredItem[]): Map<string, ToolResult> {
   return map
 }
 
-/** tool args JSON 의 첫 문자열 값을 잘라 1줄 힌트(무슨 파일/명령인지). 절대 throw 하지 않는다. */
 function shortArgs(argsJson: string): string {
   try {
     const parsed: unknown = JSON.parse(argsJson)
@@ -171,20 +139,12 @@ function shortArgs(argsJson: string): string {
 }
 
 // ── 채팅 룩 프리미티브 ────────────────────────────────────────────────────────────
-// (행 컨테이너 ChatRow 와 rail 위치 순수 계산 computeRailRunPositions 는 ADR-0053 구조 분할로
-//  ./chat/ChatRow · ./chat/railPositions 로 이사했다. 이 파일은 dispatch 오케스트레이터로만 남는다.)
 
-/** 행 헤더 클래스 — 작은 아이콘 + bold 제목. */
 const HEADER_CLASSNAMES = 'flex items-center gap-2.5 mb-3'
 
 type LucideIcon = ComponentType<{ className?: string }>
 
-/**
- * 도구 헤더 아이콘 휴리스틱 — 우리 tool item 은 generic(name 만) 이라 도구 종류 판별자가 없다.
- * name 을 소문자로 보고 흔한 CC/claude 도구를 대응 아이콘(lucide)에 매핑한다. 미스는 Wrench 폴백.
- * (Pencil=edit, FilePlus2=create, FileMinus2=delete, FileCode2=read, FolderOpen=list, Search=search,
- *  SquareTerminal=bash, Globe=web/fetch.)
- */
+/** 도구 헤더 아이콘 휴리스틱 — 우리 tool item 은 generic(name 만) 이라 도구 종류 판별자가 없다. */
 function toolIconFor(name: string): LucideIcon {
   const n = name.toLowerCase()
   if (n.includes('multiedit') || n.includes('edit') || n.includes('write') || n.includes('replace'))
@@ -203,10 +163,7 @@ function toolIconFor(name: string): LucideIcon {
   return Wrench
 }
 
-/**
- * 헤더 행 — 작은 아이콘 + bold 제목(semantic color). 도구/에러/generic 에 공통.
- * 아이콘은 size-3.5(≈14px)로 우리 폰트 스케일에 맞춘다.
- */
+/** 아이콘은 size-3.5(≈14px)로 우리 폰트 스케일에 맞춘다. */
 function RowHeader({
   icon: Icon,
   title,
@@ -226,7 +183,7 @@ function RowHeader({
   )
 }
 
-// ── 이식 컴포넌트 어댑터 행 ──────────────────────────────────────────────────────────
+// ── 어댑터 행 ──────────────────────────────────────────────────────────
 
 /**
  * ★FIX 2 (fenced-code escape 방어)★: 도구 IN(args)/OUT(result)·탈출구 json 은 신뢰할 수 없는 텍스트다.
@@ -244,10 +201,7 @@ function InertCode({ code }: { code: string }) {
 }
 
 /**
- * 도구 호출 행 — 헤더(작은 아이콘 + bold 이름) + bg-surface rounded-sm border 박스.
- * 박스의 클릭 sub-header 를 눌러 IN(args)/OUT(result) 본문을 펼친다. IN/OUT 은 신뢰할 수 없는 텍스트이므로
- * InertCode(리터럴 <pre>)로만 렌더 — 마크다운 파싱 금지(FIX 2). 로컬 open state(itemId key 로 스트리밍
- * 리렌더 중에도 유지).
+ * IN/OUT 은 신뢰할 수 없는 텍스트이므로 InertCode(리터럴 <pre>)로만 렌더 — 마크다운 파싱 금지(FIX 2).
  */
 function ToolItemRow({
   name,
@@ -271,8 +225,7 @@ function ToolItemRow({
           isErr ? 'border-red-500/60' : 'border-border',
         )}
       >
-        {/* 클릭 sub-header — 펼침 토글(text-muted).
-            aria-label 에 도구명을 실어 접근성 이름을 헤더와 일치시킨다(sub-header 텍스트는 인자 힌트라
+        {/* aria-label 에 도구명을 실어 접근성 이름을 헤더와 일치시킨다(sub-header 텍스트는 인자 힌트라
             도구명이 없으므로, 스크린리더/테스트가 "어느 도구의 세부인지" 식별하게 name 을 명시). */}
         <button
           type="button"
@@ -301,7 +254,6 @@ function ToolItemRow({
           <div className="space-y-2 border-t border-border px-2.5 py-2">
             <div>
               <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">In</div>
-              {/* args JSON 을 리터럴 <pre> 로 — 마크다운 파싱 없이 원문 그대로(FIX 2). */}
               <InertCode code={pretty(argsJson)} />
             </div>
             {result && (
@@ -314,7 +266,6 @@ function ToolItemRow({
                 >
                   Out
                 </div>
-                {/* 결과 본문을 리터럴 <pre> 로 — 삼중 백틱이 있어도 inert(FIX 2). */}
                 <InertCode code={result.content || t('common.emptyResult')} />
               </div>
             )}
@@ -325,10 +276,6 @@ function ToolItemRow({
   )
 }
 
-/**
- * 탈출구(알 수 없는 label) 이벤트 — 도구 박스와 동형인 접힘 raw json 블록. label 을 muted 헤더로 얹고
- * (Braces 아이콘) bg-surface border 박스를 펼치면 json 을 InertCode(리터럴, FIX 2)로 그린다.
- */
 function GenericItemRow({ label, json }: { label: string; json: string }) {
   const [open, setOpen] = useState(false)
   return (
@@ -349,7 +296,6 @@ function GenericItemRow({ label, json }: { label: string; json: string }) {
       </button>
       {open && (
         <div className="border-t border-border px-2.5 py-2">
-          {/* raw json 을 리터럴 <pre> 로 — 마크다운 파싱 없이 원문 그대로(FIX 2). */}
           <InertCode code={pretty(json)} />
         </div>
       )}
@@ -360,17 +306,16 @@ function GenericItemRow({ label, json }: { label: string; json: string }) {
 // ── 항목 dispatch ───────────────────────────────────────────────────────────────────
 
 /**
- * ADR-0051: thinking item 의 추출 추론 텍스트가 비었나(공백만 = opus 암호화 thinking — signature 만 옴,
- * 평문 없음). rowKindOf 와 renderItem 이 **같은** 판정을 써야 rail 계산(computeRailRunPositions)과 실제
- * DOM 이 일치한다(빈 thinking = skip = 렌더 안 함). extractText 는 절대 throw 하지 않으므로 안전.
+ * ADR-0051: 공백만 = opus 암호화 thinking(signature 만 옴, 평문 없음). rowKindOf 와 renderItem 이 **같은**
+ * 판정을 써야 rail 계산과 실제 DOM 이 일치한다(빈 thinking = skip = 렌더 안 함).
  */
 function isEmptyThinking(json: string): boolean {
   return extractText(json, 'thinking').trim() === ''
 }
 
 /**
- * ADR-0051: 렌더 순서상 각 item 의 행 종류(rail run 계산 입력). renderItem 의 null 반환 규칙과 반드시
- * 일치해야 한다(흡수된 tool_result·usage·빈 thinking = skip = DOM 없음). computeRailRunPositions 가 이 배열을 먹는다.
+ * ADR-0051: renderItem 의 null 반환 규칙과 반드시 일치해야 한다(흡수된 tool_result·usage·빈 thinking =
+ * skip = DOM 없음).
  */
 function rowKindOf(item: StructuredItem): ChatRowKind {
   switch (item.kind) {
@@ -379,21 +324,18 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
     case 'error':
       return 'assistant'
     case 'usage':
-      return 'skip' // 렌더 안 함(토큰 칩 미표시)
+      return 'skip'
     case 'separator':
       return 'boundary'
     case 'structured':
-      if (parseToolResult(item.json)) return 'skip' // 도구 OUT 에 흡수(FIX 1) — DOM 없음
-      if (item.label === 'user') return 'boundary' // 유저 버블 = run 경계
-      if (item.label === 'thinking' && isEmptyThinking(item.json)) return 'skip' // 빈 thinking = DOM 없음
-      return 'assistant' // 내용 있는 thinking·generic 탈출구
+      if (parseToolResult(item.json)) return 'skip'
+      if (item.label === 'user') return 'boundary'
+      if (item.label === 'thinking' && isEmptyThinking(item.json)) return 'skip'
+      return 'assistant'
   }
 }
 
-/**
- * 한 item 렌더. key 는 여기서 부여(itemId). standalone tool_result 는 null 로 제외.
- * runPos(ADR-0051): rail 행의 run 내 위치 — 연결선 clean-ends. assistant 가 아니면 무시된다.
- */
+/** runPos(ADR-0051): rail 행의 run 내 위치 — 연결선 clean-ends. */
 function renderItem(
   item: StructuredItem,
   results: Map<string, ToolResult>,
@@ -403,8 +345,7 @@ function renderItem(
   const pos = runPos ?? undefined
   switch (item.kind) {
     case 'text':
-      // assistant 본문 — 우리 자체 Markdown(react-markdown + remark/rehype). 헤더 없이 full-width.
-      //   긴 토큰(URL·경로)이 컨테이너를 넘지 않게 행 컨테이너에 wrap-anywhere overflow-hidden.
+      // 긴 토큰(URL·경로)이 컨테이너를 넘지 않게 행 컨테이너에 wrap-anywhere overflow-hidden.
       return (
         <ChatRow key={k} rail runPos={pos}>
           <div className="wrap-anywhere overflow-hidden">
@@ -421,9 +362,6 @@ function renderItem(
       if (parseToolResult(item.json)) return null
 
       if (item.label === 'user') {
-        // 사용자 발화 — 좌측 정렬 인셋 버블(rounded-xl border bg-elevated). whitespace-pre-line 으로 줄바꿈 보존.
-        //   세로 padding/margin 은 CSS 변수(--chat-user-py/--chat-user-my), 가로 padding 은 --chat-user-px(ADR-0051).
-        //   양쪽 0.75rem 가로 마진(인셋)·border-radius 0.75rem 은 고정(§5 후속으로 키화 여지).
         return (
           <ChatRow key={k}>
             <div
@@ -445,10 +383,9 @@ function renderItem(
         )
       }
       if (item.label === 'thinking') {
-        // 추론 행 — ThoughtRow. 내용이 있으면 펼침 가능(실 추론 텍스트, 가치 있음). 내용이 비면(opus
-        //   암호화 thinking — signature 만 옴) 빈 "Thought" 클러터가 매 응답마다 뜨므로 아무것도 그리지
-        //   않는다(null). rowKindOf 도 같은 isEmptyThinking 검사로 'skip' 을 반환해야 rail 계산과 DOM 이
-        //   일치한다(ADR-0051).
+        // 내용이 비면(opus 암호화 thinking — signature 만 옴) 빈 "Thought" 클러터가 매 응답마다 뜨므로
+        //   아무것도 그리지 않는다(null). rowKindOf 도 같은 isEmptyThinking 검사로 'skip' 을 반환해야
+        //   rail 계산과 DOM 이 일치한다(ADR-0051).
         if (isEmptyThinking(item.json)) return null
         const content = extractText(item.json, 'thinking')
         return (
@@ -457,7 +394,6 @@ function renderItem(
           </ChatRow>
         )
       }
-      // 기타 label(탈출구) — 접힘 generic 블록.
       return (
         <ChatRow key={k} rail runPos={pos}>
           <GenericItemRow label={item.label} json={item.json} />
@@ -474,12 +410,10 @@ function renderItem(
     }
 
     case 'usage':
-      // 토큰 사용량 — 메시지별 토큰 칩은 표시하지 않는다. 렌더 안 함.
-      //   (누적 item 종류 자체는 유지 — 여기서 렌더만 생략.)
+      // 메시지별 토큰 칩은 표시하지 않는다(누적 item 종류 자체는 유지 — 렌더만 생략).
       return null
 
     case 'error':
-      // 에러 — 헤더 패턴(에러 아이콘 + bold "Error", text-red-500) + 메시지 본문.
       return (
         <ChatRow key={k} rail tone="error" runPos={pos}>
           <RowHeader icon={AlertTriangle} title="Error" tone="error" />
@@ -493,14 +427,6 @@ function renderItem(
   }
 }
 
-/**
- * ADR-0050: 구조화 채팅 렌더 — 세로 스택으로 항목별 dispatch. assistant-side 행(text·thinking·tool·
- * generic·error + streaming tail)은 좌측 dot-rail gutter 로 한 thread 처럼 묶고, user 버블·separator 는
- * rail 없이 plain.
- * items 를 한 번 pre-scan 해 tool_use_id → tool_result 맵을 만들고(도구 OUT 흡수), standalone tool_result
- * 는 제외. streaming(턴 활성)이면 스트림 끝에 대기 인디케이터(WaitRow — "Wait" + 경과 초)를 붙인다.
- * 순수 렌더(props in, DOM out).
- */
 export function StructuredTextView({
   items,
   streaming = false,
@@ -516,22 +442,21 @@ export function StructuredTextView({
   const showTail = streaming
   // ADR-0051: rail run 위치를 순수 계산으로 미리 뽑는다(렌더 중 파생 — state/effect 아님, ADR-0050 순수성
   //   유지). streaming tail(WaitRow)도 마지막 assistant 행으로 함께 계산해, 직전 실 행이 tail 과 연결선으로
-  //   이어지게 한다(tail 이 없으면 bottom/single 로 clean-end). items 가 비면 kinds=['assistant'] → single.
+  //   이어지게 한다(tail 이 없으면 bottom/single 로 clean-end).
   const kinds = items.map(rowKindOf)
   if (showTail) kinds.push('assistant')
   const positions = computeRailRunPositions(kinds)
   const tailPos = showTail ? (positions[positions.length - 1] ?? 'single') : 'single'
   return (
     // 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
-    //   font-size/line-height 는 CSS 변수(--chat-font-size/--chat-line-height) — LLM 제어(ADR-0051).
+    //   CSS 변수로 뺀 건 LLM 제어용(ADR-0051).
     <div
       className="flex flex-col pb-3 font-sans text-foreground"
       style={{ fontSize: 'var(--chat-font-size)', lineHeight: 'var(--chat-line-height)' }}
     >
       {items.map((item, i) => renderItem(item, results, positions[i]))}
       {showTail && (
-        // ★대기 인디케이터 tail(WaitRow)★ — 스트림 끝에서만. 구 "Thinking…" pulse 라벨을 임시 "Wait + 점 +
-        //   경과 초" 로 대체(임시·추후 재설계 — WaitRow 헤더 참조).
+        // 구 "Thinking…" pulse 라벨을 임시 "Wait + 점 + 경과 초" 로 대체(임시·추후 재설계 — WaitRow 헤더 참조).
         //   ★FIX 3(안정 key)★: key="__streaming__" — 없으면 streaming 토글/리렌더 시 직전 실 item 이 이 행과
         //   자리 매칭돼 remount 되며 WaitRow 타이머(경과 초)가 턴 도중 리셋된다. 리스트 밖 고정 노드라 상수
         //   key 로 정체성을 못박는다(변경 금지).
