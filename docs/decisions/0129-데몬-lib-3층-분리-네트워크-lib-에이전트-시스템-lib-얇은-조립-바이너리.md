@@ -1,7 +1,7 @@
 # ADR-0129: 데몬 lib 3층 분리 — 네트워크 lib · 에이전트 시스템 lib · 얇은 조립 바이너리
 
-- 상태: 확정 (2026-08-04, 근거: 사용자 문제제기 + 운영 코드 전수 실측 + ADR-0020 경계 부식 이력)
-- 관련: ADR-0020(Stage 1 — `ConnectionCore` carrier-중립 추출. 이 결정이 그 의도를 crate 경계로 승격) · ADR-0110(메시징 커널 crate 분리 — 같은 idiom: 컴파일러 강제 벽) · ADR-0029(에이전트 호스트 = 데몬 프로세스 — **부활 아님**, 아래 영향 절) · ADR-0028(이벤트버스 single-push) · ADR-0127(선행 슬라이스 — 부착 기계 철거로 분리 대상 −592줄) · `crates/engram-dashboard-daemon/src/ws.rs` · `connection_core.rs` · `control/` · `messaging_host.rs` · step-log S18.16
+- 상태: 확정 (2026-08-04, 근거: 사용자 문제제기 + 운영 코드 전수 실측 + ADR-0020 경계 부식 이력) · 부분 폐기 by ADR-0130 (결정 2와 3 보류)
+- 관련: ADR-0020(Stage 1 — `ConnectionCore` carrier-중립 추출. 이 결정이 그 의도를 crate 경계로 승격) · ADR-0110(메시징 커널 crate 분리 — 같은 idiom: 컴파일러 강제 벽) · ADR-0029(에이전트 호스트 = 데몬 프로세스 — **부활 아님**, 아래 영향 절) · ADR-0028(이벤트버스 single-push) · ADR-0127(선행 슬라이스 — 부착 기계 철거로 분리 대상 −592줄) · `crates/engram-dashboard-daemon/src/ws.rs` · `connection_core.rs` · `control/` · `messaging_host.rs` · step-log S18.16 · Amended by ADR-0130 (결정 2와 3 보류)
 
 ## 맥락
 

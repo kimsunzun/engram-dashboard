@@ -7,6 +7,11 @@
 //! ★운영 코드 회귀 0★: 옛 main 의 동작(단일 인스턴스 가드 → data_dir → daemon.json stale 검사
 //! → bind → 토큰 → manager 배선 → restore_all → accept loop → graceful 종료)을 `run()` 이
 //! 그대로 수행한다. accept loop 본체는 `run_accept_loop()` 로 분리해 테스트와 공유한다.
+//!
+//! ★이 crate 의 범위(ADR-0130)★ — 응용 층 + 조립. **데몬 살림의 *구현*은 여기 없다**: 단일 인스턴스
+//! 가드와 portfile 의 실물은 슬라이스 1 로 `engram-dashboard-net` 이 가져갔다. 여기 남은 건 그것들을
+//! 어느 순서로 부르는지(위 `run()` 서술)와 응용 층이다. 이름과 내용물의 이 어긋남은 알고 남긴 것 —
+//! rename 하지 않는 이유와 재개 조건은 ADR-0130.
 
 // ADR-0129 슬라이스 1: 네트워크 행은 별도 lib crate(`engram-dashboard-net`)로 떨어졌다 — 포트 계약
 //   (`frame_port`)·WS 서버(`ws`)·단일 인스턴스 가드(`instance`)·portfile 이 그리로 갔고, 컴파일러 벽이
@@ -241,7 +246,8 @@ fn install_panic_hook() {
 ///   판정할 것. 목록으로 읽는 습관이 위 두 번의 누락을 만들었다.
 /// ★그 공개 진입점을 여기서 고치지 않는 이유★: `handle_connection` 은 레지스트리가 정당히 필요하고
 ///   **공장이 어떻게 조립됐는지는 알아선 안 된다** — 레지스트리에서 공장을 파생시키면 층이 뒤집힌다.
-///   정공법은 슬라이스 3의 투영(`run_accept_loop` 파생 지점 주석)이다: 팬아웃을 레지스트리에서만 얻게
+///   정공법은 슬라이스 3의 투영(`run_accept_loop` 파생 지점 주석)이다 — **그 슬라이스는 ADR-0130 으로
+///   보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**: 팬아웃을 레지스트리에서만 얻게
 ///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `handle_connection` 도 포함.
 // ADR-0129
 struct DaemonWiring {
@@ -388,7 +394,8 @@ async fn run_accept_loop(
     //   짝 어긋남이 crate 경계에서 되살아난다**. 그때의 정공법은 파생을 또 베끼거나 인자 2개로 돌아가는
     //   것이 아니라, 네트워크 crate 가 투영을 직접 내주는 것이다 —
     //   `impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`. 그러면 팬아웃은 **레지스트리
-    //   에서만** 얻을 수 있고 독립 생성이 불가능해진다(슬라이스 3에서 이걸 할 것).
+    //   에서만** 얻을 수 있고 독립 생성이 불가능해진다. **슬라이스 3 은 ADR-0130 으로 보류됐다** — 이
+    //   문단은 재개 시의 정공법 기록이지 예정된 작업이 아니다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =

@@ -599,7 +599,8 @@ async fn write_task(
 /// (StopDaemon·프로토콜 위반).
 ///
 /// ★stream 이 generic 인 이유★: 소켓 없이 합성 프레임열로 이 루프를 돌리는 격리 하네스를 두려고
-/// (ADR-0129 — 이 seam 이 뒤 슬라이스의 crate 분리 검증 근거다). 운영 경로는 WS stream half 로만
+/// (ADR-0129 — 이 seam 이 슬라이스 1 의 crate 분리 검증 근거였다. **이미 일어난 일**이고, 그 뒤
+/// 슬라이스 2·3 은 ADR-0130 으로 보류됐다). 운영 경로는 WS stream half 로만
 /// 단형화된다.
 async fn read_task<S>(
     mut incoming: S,
@@ -919,7 +920,8 @@ mod tests {
 
     // ── 11. 프레임 포트 seam — 소켓 없이 도는 격리 하네스(ADR-0129) ──────────────────
     //    가짜 ConnectionHandler + 가짜 FrameSink 로 연결 수명을 재현한다. TcpStream 이 없어야
-    //    뒤 슬라이스에서 네트워크 행이 별도 crate 로 떨어져도 이 검증이 그대로 산다.
+    //    네트워크 행이 별도 crate 로 떨어져도 이 검증이 그대로 산다 — 슬라이스 1 로 **실제로
+    //    떨어졌고**(이 파일이 그 crate 에 있다) 검증은 그대로 살았다.
 
     #[derive(Debug, PartialEq, Eq)]
     enum SeenFrame {

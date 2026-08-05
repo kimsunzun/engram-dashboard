@@ -18,7 +18,8 @@ path = "src/lib.rs"
 #   컴파일 오류로 말한다. 조용한 회귀보다 시끄러운 실패가 낫다. 켜야 할 곳의 정본은
 #   `rg -n "engram-dashboard-net" crates/*/Cargo.toml src-tauri/Cargo.toml` 이 찍는 선언 줄이고,
 #   대가는 거기 붙는 `features = ["server"]` 한 조각이다(여기서 소비자를 열거하지 말 것).
-#   ★슬라이스 2 전에 먼저 볼 것★: `frame_port` 는 서버가 아니라 **계약**이고 tokio 를 쓰지 않는다
+#   ★슬라이스 2 재개 시 먼저 볼 것(그 슬라이스는 ADR-0130 으로 보류 중 — 지금 할 일이 아니다)★:
+#   `frame_port` 는 서버가 아니라 **계약**이고 tokio 를 쓰지 않는다
 #   (`rg -n "tokio" crates/engram-dashboard-net/src/frame_port.rs` → 0줄). 슬라이스 2(에이전트 시스템 lib)는
 #   그 trait 을 **구현**하는 위층이라, 지금 gating 대로면 계약을 보려고 `server` 를 켜서 async 런타임·Win32·
 #   net 의 core/protocol 간선까지 지게 된다 — discovery 에서 걷어낸 짐을 슬라이스 2 에서 되살리는 셈이다.
