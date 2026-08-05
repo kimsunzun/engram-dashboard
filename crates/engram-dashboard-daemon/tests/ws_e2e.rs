@@ -1545,7 +1545,7 @@ async fn case21_ws_second_auth_rejected() {
     server.shutdown().await;
 }
 
-// ── 케이스 22: control 자리에 binary frame → Error + 연결 close(ws.rs:610) ──────────
+// ── 케이스 22: control 자리에 binary frame → Error + 연결 close(AgentConnection::on_binary, agent_conn.rs) ──────────
 #[tokio::test]
 async fn case22_ws_binary_frame_rejected() {
     let server = start_test_server().await.unwrap();
@@ -1563,7 +1563,7 @@ async fn case22_ws_binary_frame_rejected() {
     server.shutdown().await;
 }
 
-// ── 케이스 23: 깨진 JSON text → Error(req 없음), 연결은 유지(ws.rs:604) ─────────────
+// ── 케이스 23: 깨진 JSON text → Error(req 없음), 연결은 유지(AgentConnection::on_text, agent_conn.rs) ─────────────
 #[tokio::test]
 async fn case23_ws_parse_failure_error() {
     let server = start_test_server().await.unwrap();

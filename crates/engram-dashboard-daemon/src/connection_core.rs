@@ -1,8 +1,8 @@
 //! transport-중립 연결 코어(ConnectionCore) — ADR-0020 Stage 1.
 //!
-//! ws.rs 의 dispatch 로직을 carrier(WS/embedded/gRPC) 와 무관하게 빼낸 곳이다. 입력은
+//! net crate 의 ws.rs 의 dispatch 로직을 carrier(WS/embedded/gRPC) 와 무관하게 빼낸 곳이다. 입력은
 //! `AgentCommand`, 출력은 `Outbound`(AgentEvent/binary/close)를 `OutboundSink` 로만 흘린다 —
-//! TcpStream/tungstenite/frame codec 을 이 모듈은 모른다. WS 어댑터(ws.rs)가 `OutboundSink`
+//! TcpStream/tungstenite/frame codec 을 이 모듈은 모른다. WS 어댑터(net crate 의 ws.rs)가 `OutboundSink`
 //! 를 구현해 이 코어를 구동한다(미래 carrier 는 sink 만 새로 구현).
 //!
 //! ★불변식(R1~R7, ADR-0020) 보존이 절대 원칙 — Stage 1 은 behavior-preserving★:
@@ -491,9 +491,9 @@ fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
 ///
 /// ★반환이 Option 인 이유(TerminalBytes 방어)★: 정상 경로에서 `OutputEvent::TerminalBytes` 는 이 변환에
 /// **오지 않는다** — 콘솔 raw 바이트는 sink 에서 tag0 terminal frame(`OutputPayload::Bytes`)으로 갈리고,
-/// 이 함수는 `OutputPayload::Event` arm(tag1)에서만 불린다(ws.rs). wire `StructuredEvent` 에는 TerminalBytes
+/// 이 함수는 `OutputPayload::Event` arm(tag1)에서만 불린다(net crate 의 ws.rs). wire `StructuredEvent` 에는 TerminalBytes
 /// variant 가 없으므로(tag1 payload 에 raw 바이트를 안 싣는다 — ADR-0045), 만약 TerminalBytes 가 이 arm 에
-/// 도달하면 매핑 불가다. 그때 패닉 대신 `None` 을 돌려 호출부(ws.rs)가 warn 후 drop 하게 한다(런타임 안전 —
+/// 도달하면 매핑 불가다. 그때 패닉 대신 `None` 을 돌려 호출부(net crate 의 ws.rs)가 warn 후 drop 하게 한다(런타임 안전 —
 /// tag0/tag1 오분류는 상류 배선 버그지 이 frame 하나로 연결을 죽일 사안이 아님). debug 빌드는 호출부에서
 /// debug_assert 로 조기 발견한다.
 pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructuredEvent> {
