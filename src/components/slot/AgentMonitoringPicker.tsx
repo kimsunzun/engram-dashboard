@@ -44,7 +44,7 @@ export default function AgentMonitoringPicker() {
   // query/activeIndex 리셋은 useState 초기값이 담당한다 — 여기선 포커스만.
   useEffect(() => {
     if (!target) return
-    // 마운트 직후 포커스(팝업이 방금 열림). requestAnimationFrame 없이도 ref 는 이 시점 확정.
+    // requestAnimationFrame 없이도 ref 는 이 시점 확정.
     inputRef.current?.focus()
   }, [target])
 
@@ -77,7 +77,7 @@ export default function AgentMonitoringPicker() {
     close()
   }
 
-  // 목록 키보드 내비 — ↑/↓ 이동, Enter 배정. 입력창에 포커스가 있어도 동작하도록 input onKeyDown 에 건다.
+  // 입력창에 포커스가 있어도 동작하도록 input onKeyDown 에 건다.
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -128,7 +128,7 @@ export default function AgentMonitoringPicker() {
           overflow: 'hidden',
         }}
       >
-        {/* 라벨 — 이 팝업의 목적(우클릭한 slot 에 실행중 에이전트 배정). 변수-only. */}
+        {/* 라벨 — 이 팝업의 목적(우클릭한 slot 에 실행중 에이전트 배정). */}
         <div
           style={{
             padding: '6px 10px',
@@ -165,7 +165,7 @@ export default function AgentMonitoringPicker() {
           }}
         />
 
-        {/* 후보 목록 — 실행중 필터 + 검색어 좁힘. 빈 상태 메시지 분기. 공용 ScrollArea seam(ADR-0053)으로
+        {/* 후보 목록 — 실행중 필터 + 검색어 좁힘. 공용 ScrollArea seam(ADR-0053)으로
             스크롤(raw overflow:auto → 오버레이 스크롤바). 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
         <ScrollArea style={{ flex: 1, minHeight: 0 }}>
           {candidates.length === 0 ? (
@@ -189,7 +189,7 @@ export default function AgentMonitoringPicker() {
                   padding: '6px 10px',
                   cursor: 'pointer',
                   borderBottom: '1px solid var(--border)',
-                  // 하이라이트 = 키보드 activeIndex(마우스 hover 도 activeIndex 로 동기화). 색 리터럴 없이 accent mix.
+                  // 색 리터럴 없이 accent mix.
                   background:
                     i === activeIndex ? 'color-mix(in srgb, var(--accent) 20%, transparent)' : 'transparent',
                 }}

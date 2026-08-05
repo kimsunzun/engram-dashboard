@@ -2,9 +2,8 @@
 //   assistant 본문(신뢰 콘텐츠)만 이 렌더러를 태운다. 도구 IN/OUT·탈출구 json 은 신뢰할 수 없는
 //   텍스트라 StructuredTextView 가 리터럴 <pre>(InertCode)로만 그린다 — 여기 오지 않는다.
 //
-// 파서 구성: react-markdown + remark-gfm(표·취소선·자동링크) + remark-math/rehype-katex(수식)
-//   + rehype-highlight(코드 하이라이트). 커스텀 remark 플러그인은 두지 않는다 —
-//   bare URL 자동링크는 remark-gfm 이 이미 처리하므로 unist-util-visit 기반 변환이 불필요.
+// bare URL 자동링크용 커스텀 remark 플러그인은 두지 않는다 — remark-gfm 이 이미 처리하므로
+//   unist-util-visit 기반 변환이 불필요.
 import type { ComponentProps, HTMLAttributes } from 'react'
 import { useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -26,8 +25,8 @@ import 'katex/dist/katex.min.css'
 const ZERO_WIDTH_RE = /[\u200B\u200C\u200D\u2060\uFEFF]/g
 const stripZeroWidth = (text: string): string => text.replace(ZERO_WIDTH_RE, '')
 
-// 코드 언어 별칭 정규화 — rehype-highlight 는 등록 언어명만 인식한다. 언어 미지정은 javascript 로,
-//   `foo.ts` 처럼 점이 낀 언어명은 마지막 세그먼트만 취한다(스트림이 파일명을 언어로 흘리는 경우 방어).
+// rehype-highlight 는 등록 언어명만 인식한다. 점이 낀 언어명 처리 = 스트림이 파일명을 언어로 흘리는
+//   경우 방어.
 function normalizeCodeLang() {
   return (tree: unknown) => {
     const visit = (node: any): void => {
@@ -44,7 +43,6 @@ function normalizeCodeLang() {
   }
 }
 
-/** <pre> 렌더 — hover 시 우상단에 복사 버튼을 얹는다. group 래퍼로 hover 노출을 제어. */
 function PreBlock({ children, ...preProps }: HTMLAttributes<HTMLPreElement>) {
   const preRef = useRef<HTMLPreElement>(null)
   const getText = useCallback(() => {
@@ -69,7 +67,7 @@ interface MarkdownProps {
 
 /**
  * 전체 마크다운 문서를 하나의 <ReactMarkdown> 으로 렌더한다(블록 분할 금지 — 분할하면 uniformly 들여쓴
- * 문서가 단일 code 토큰으로 붕괴). 렌더 전에 zero-width 를 제거해 펜스 붕괴를 막는다.
+ * 문서가 단일 code 토큰으로 붕괴).
  */
 export function Markdown({ markdown }: MarkdownProps) {
   const clean = markdown ? stripZeroWidth(markdown) : ''

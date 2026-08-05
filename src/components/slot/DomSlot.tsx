@@ -5,8 +5,7 @@
 //! `document.body.innerText`/CDP eval 로 읽히지 않는다 → LLM/자동화가 화면 내용을 관측·검증할 길이 없다.
 //! DomSlot 은 같은 바이트 스트림을 ANSI 만 벗겨 `<pre>` 텍스트로 붙여 eval 로 읽히게 한다.
 //!
-//! ★구독 규율은 TerminalSlot 을 그대로 미러★: effect deps [agentId,epoch], 구독 전 누적 초기화,
-//! chunk.seq dedup, cancelled 가드, cleanup 에서 unsubscribe. (근거는 각 라인 주석 참조 — TerminalSlot 동형)
+//! ★구독 규율은 TerminalSlot 을 그대로 미러★ (근거는 각 라인 주석 참조 — TerminalSlot 동형)
 //!
 //! ★범위★: read-only 관측기다. 입력 처리 없음(입력은 여전히 TerminalSlot/agentClient.writeStdin 경로).
 //! 완전한 터미널 에뮬레이터가 목표가 아니다 — 커서 이동/화면 지우기 같은 제어열은 best-effort 로 벗겨
@@ -59,16 +58,14 @@ const MAX_PENDING_LEN = 256
 // 두 청크에 쪼개지면(예: 앞 청크가 "\x1b[" 로 끝, 뒤 청크가 "31mred" 로 시작) 정규식이 반쪽을 못 지워
 // 원문 ESC[... 가 화면에 샌다. 그래서 청크 끝에 *이 청크 안에서 종료되지 않은* ESC 가 있으면 그 ESC 부터
 // 끝까지를 잘라 다음 청크 앞에 이어 붙일 pending 으로 넘긴다.
-//   반환 [head, pending]: head=지금 strip·append 할 부분, pending=다음 청크 앞에 prepend 할 미완 꼬리.
 // 판정은 단순 휴리스틱 — 마지막 ESC(\x1b) 위치를 찾아, 그 뒤에 '시퀀스를 종료시키는 바이트'가 없으면
 // 미완으로 본다(완전한 에뮬레이터 아님, 파일 헤더 참조). CSI(ESC[…final @-~)·OSC(ESC]…BEL/ST)·2바이트
 // ESC 를 모두 아우르는 근사: ESC 뒤에 CSI final(@-~) 또는 OSC 종료(BEL/ESC)가 아직 안 나왔으면 hold.
 function splitTrailingEsc(s: string): [string, string] {
   const esc = s.lastIndexOf('\x1b')
   if (esc < 0) return [s, '']
-  const tail = s.slice(esc) // 마지막 ESC 부터 끝까지
-  // 이 tail 이 이미 완결된 시퀀스면(ANSI_RE 가 tail 시작에서 매치) hold 불필요 — 전체를 head 로.
-  // (lastIndexOf 라 tail 안에 ESC 는 하나뿐 → 매치가 곧 "완결"을 뜻한다.)
+  const tail = s.slice(esc)
+  // lastIndexOf 라 tail 안에 ESC 는 하나뿐 → ANSI_RE 매치가 곧 "완결"을 뜻한다.
   ANSI_RE.lastIndex = 0
   const m = ANSI_RE.exec(tail)
   if (m && m.index === 0 && m[0].length === tail.length) return [s, '']
@@ -78,14 +75,13 @@ function splitTrailingEsc(s: string): [string, string] {
 }
 
 export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
-  // 누적 출력(평문). React state 로 들고 리렌더 — 관측용이라 xterm 같은 명령형 write 대신 선언적 렌더.
+  // React state 로 들고 리렌더 — 관측용이라 xterm 같은 명령형 write 대신 선언적 렌더.
   const [text, setText] = useState('')
   // ★scrollRef = ScrollArea Viewport(공용 seam 이 forward, ADR-0053)★: 실제 overflow/scrollTop 노드는
   //   Radix Viewport 다. 하단 고정 auto-scroll(scrollTop=scrollHeight)이 이 노드를 겨눠야 tail 이 붙는다
   //   (구 raw <pre overflow:auto> 는 pre 자신이 스크롤 노드였음 — seam 전환으로 대상이 Viewport 로 이동).
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 종료 판정(오버레이 표시용) — TerminalSlot/RichSlot 과 동일하게 store status 로 본다.
   const agents = useAgentStore(s => s.agents)
   const agent = agents.find(a => a.id === agentId) ?? null
   const isTerminated =
@@ -94,9 +90,8 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
       agent.status.type === 'Killed' ||
       agent.status.type === 'Failed')
 
-  // 출력 구독 — TerminalSlot 규율 미러(파일 헤더 참조).
   useEffect(() => {
-    setText('') // C2: 재구독 시 이전 출력 제거(StrictMode 중복·재spawn replay 재구성)
+    setText('') // C2: StrictMode 중복·재spawn replay 재구성
     const decoder = new TextDecoder() // stream=true 로 청크 경계에 걸친 멀티바이트 UTF-8 보존
     const lastSeq = { current: -1 } // T-2/G-2: seq dedup(컴포넌트 방어 — 클라도 내부 dedup)
     // FIX-3: 청크 경계에 걸린 미완 ANSI 시퀀스를 다음 청크로 넘길 버퍼(text 누적기와 같은 lifecycle —
@@ -109,7 +104,7 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
     agentClient
       .subscribeOutput(viewId, agentId, chunk => {
         if (cancelled) return
-        if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
+        if (chunk.seq <= lastSeq.current) return
         lastSeq.current = chunk.seq
         // ★tag 게이트(S15/ADR-0045)★: DOM 모드는 터미널 raw 바이트(tag0)를 평문으로 그리는 관측기다.
         //   tag1(StructuredEvent JSON)이 오면 무시한다 — TerminalSlot 과 동형(같은 tag0 소비자). 게이트가
@@ -148,7 +143,7 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립).
   }, [viewId, agentId, epoch])
 
-  // 새 출력 도착 시 하단으로 자동 스크롤(터미널 tail 관측 UX). ★대상 = ScrollArea Viewport★(위 scrollRef 주석).
+  // ★대상 = ScrollArea Viewport★(위 scrollRef 주석).
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight

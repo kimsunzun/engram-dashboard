@@ -1,8 +1,8 @@
 // RichSlot — 구조화(JSON 모드) 라이브 렌더 슬롯(ADR-0044/0045).
 //
 //  라이브 모드(<RichSlot agentId epoch />) — 백엔드가 정제한 **구조화 출력 tag1** 프레임을 TerminalSlot 과
-//  같은 구독 규율로 받아(효과 deps [agentId,epoch], seq dedup, replay, 정확한 해제) StructuredEventAccumulator
-//  로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송, Shift+Enter=줄바꿈).
+//  같은 구독 규율로 받아 StructuredEventAccumulator 로 누적해 그린다 + 하단 텍스트 입력창(Enter=전송,
+//  Shift+Enter=줄바꿈).
 //
 // ★M0 fixture 스파이크 제거(Brick 1)★: 살아있는 에이전트/데몬 없이 stream-json 샘플을 통짜 파싱해 그리던
 //   FixtureRichSlot(<RichSlot />, agentId 없음)과 그 lab/richslot 의존은 레거시 프론트 레이아웃 정리와 함께
@@ -32,13 +32,11 @@ import { t } from '../../i18n'
 interface RichSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯 독립 진도 — 버그 B 해소. */
   viewId?: string
-  /** 라이브 대상 에이전트(그 에이전트의 실스트림 구독). */
   agentId: string
   /** 재spawn 재구독 트리거([agentId,epoch]). */
   epoch?: number
 }
 
-/** 라이브 구조화 슬롯 — agentId 의 실스트림을 구독해 누적·렌더한다. */
 export default function RichSlot({ viewId, agentId, epoch }: RichSlotProps) {
   return <LiveRichSlot viewId={viewId ?? agentId} agentId={agentId} epoch={epoch ?? 0} />
 }
@@ -57,12 +55,11 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
   //   이후 표시를 turnDone 에 넘긴다.
   const [awaiting, setAwaiting] = useState(false)
   const [input, setInput] = useState('')
-  // 누산기는 렌더 간 유지(마운트 1회 생성). 재구독 effect 가 reset 으로 초기화한다(replay 규율).
+  // 재구독 effect 가 reset 으로 초기화한다(replay 규율).
   const accRef = useRef<StructuredEventAccumulator>(null as unknown as StructuredEventAccumulator)
   if (accRef.current === null) accRef.current = new StructuredEventAccumulator()
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 종료 판정(입력 비활성) — TerminalSlot 과 동일하게 store status 로 본다.
   const agents = useAgentStore((s) => s.agents)
   const agent = agents.find((a) => a.id === agentId) ?? null
   const isTerminated =
@@ -80,18 +77,18 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
   //   뜬다 → 트리(displayNameOf)와 동일하게 display_name override 없으면 basename(cwd)만 쓴다("Filter Library").
   const headerName = profile?.display_name ?? basename(cwd)
 
-  // 출력 구독 — TerminalSlot 규율 미러: [agentId,epoch] deps, 구독 전 누산기 reset(=terminal.reset()),
-  // seq dedup(컴포넌트 방어 — 클라도 내부 dedup), 정확한 unsubscribe(stale 가드 토큰은 클라 소유).
+  // 출력 구독 — TerminalSlot 규율 미러: seq dedup(컴포넌트 방어 — 클라도 내부 dedup),
+  // 정확한 unsubscribe(stale 가드 토큰은 클라 소유).
   useEffect(() => {
     const acc = accRef.current
-    acc.reset() // 재구독 시 이전 누적 제거 → 히스토리 replay 가 동일 상태로 재구성(StrictMode 중복도 방지)
+    acc.reset() // 히스토리 replay 가 동일 상태로 재구성(StrictMode 중복도 방지)
     setItems([])
     setTurnDone(false)
-    setAwaiting(false) // 재구독 경계에서 awaiting 초기화(스트리밍 힌트 stale 방지)
+    setAwaiting(false) // 스트리밍 힌트 stale 방지
 
     let sub: OutputSubscription | null = null
     let cancelled = false
-    const lastSeq = { current: -1 } // seq dedup(순서 역전·중복 drop)
+    const lastSeq = { current: -1 }
 
     agentClient
       .subscribeOutput(viewId, agentId, (chunk) => {
@@ -103,12 +100,12 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
         //   바이트를 파싱하면 깨진다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) dedup 은
         //   tag0 를 건너뛰어도 정합하다.
         if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) return
-        // tag1 payload = StructuredEvent JSON 1건 — 누산기가 파싱·순서 보존 item 스트림에 누적한다.
+        // tag1 payload = StructuredEvent JSON 1건.
         acc.feed(chunk.bytes)
         // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
         setItems([...acc.snapshot()])
         setTurnDone(acc.isTurnDone())
-        setAwaiting(false) // 응답 이벤트 도착 → awaiting 해제(이후 표시는 turnDone 이 주도)
+        setAwaiting(false) // 이후 표시는 turnDone 이 주도
       })
       .then((handle) => {
         if (cancelled) {
@@ -127,7 +124,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). epoch = 재spawn 재구독 트리거.
   }, [viewId, agentId, epoch])
 
-  // 새 item 도착 시 하단으로 스크롤(대화 UX). ★scrollRef = Radix Viewport(ScrollArea seam 이 forward)★:
+  // ★scrollRef = Radix Viewport(ScrollArea seam 이 forward)★:
   //   Radix ScrollArea 의 실제 스크롤 엘리먼트는 Root 가 아니라 Viewport 다(ADR-0053). auto-scroll 이
   //   이 Viewport 노드의 scrollTop 을 겨눠야 새 출력이 바닥에 붙는다(Root 를 겨누면 스크롤 안 됨 — 회귀 주의).
   useEffect(() => {
@@ -141,7 +138,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     // ★전송 게이트는 turnDone 을 검사하지 않는다 — 의도된 동작(ADR-0044 메커니즘 A: 스트리밍 중
     //   mid-turn 가이던스 주입 허용)★. 여기에 턴 잠금(스트리밍 중 전송 차단)을 넣지 말 것.
     if (!input.trim() || isTerminated) return
-    // FIX 5a: 앞뒤 공백을 다듬은 텍스트를 전송(가드도 trim 으로 판정하므로 실제 전송도 trim 일관).
+    // FIX 5a: 가드도 trim 으로 판정하므로 실제 전송도 trim 일관.
     const text = input.trim()
     setInput('')
     setAwaiting(true) // FIX 5b: 첫 바이트를 기다리지 않고 즉시 streaming 힌트로 전환
@@ -154,8 +151,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     })
   }
 
-  // 스트리밍 표시 = 방금 전송해 첫 바이트 대기 중(awaiting)이거나, 실제 응답 진행 중(!turnDone && 이미 item 존재).
-  //   ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
+  // ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
   //   배지가 뜨는 오작동이 있었다. items.length>0 조건으로 좁혀 idle 을 idle 로 표시하되, (a) 실제 스트리밍 중
   //   신호와 (b) '전송 직후 첫 토큰 대기(awaiting)' 는 그대로 살린다.
   //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)

@@ -5,14 +5,7 @@
 //   마운트된 모든 슬롯이 WebGL 을 쥐면 상한을 넘겨 오래된 컨텍스트가 소실된다. 그래서 WebGL addon 을
 //   가시성에 묶는다 — 보이면 부착, 숨기면 반납(loseContext→dispose). Terminal 인스턴스(버퍼)는 항상 산다.
 //
-// ★검증 핵심★: jsdom 은 실 WebGL/IntersectionObserver 가 없으므로 로직 계층만 검사한다 —
-//   (1) 보임 전이 → WebglAddon 생성 + loadAddon + fit() + refresh(). (2) 숨김 전이 → loseContext() 를
-//   먼저, addon.dispose() 를 다음 순서로 호출하고 새 addon 은 안 만든다 + fit() 미호출. (3) 가시성
-//   토글이 Terminal 을 dispose 하거나 출력 구독을 끊지 않는다(언마운트에서만). (4) 초기-숨김 마운트 →
-//   첫 "보임" 전까지 WebGL 미생성. (5) 언마운트 → 잡아둔 GL 컨텍스트로 loseContext 호출(containerRef 가
-//   commit 단계에서 null 이 돼도 방어). (6) loadAddon throw → 부분생성 addon 을 catch 에서 dispose,
-//   ref 는 null 유지, 이후 보임에서 새 addon 1개만 부착(중복부착 없음). (7) RO 가 숨김(offsetParent null
-//   / 0 크기)에서 발화 → fit()/resizePty 미호출.
+// ★검증 핵심★: jsdom 은 실 WebGL/IntersectionObserver 가 없으므로 로직 계층만 검사한다.
 //
 // 전략: IntersectionObserver 를 제어 가능한 mock 으로 깔아 테스트가 visible/hidden 콜백을 직접 발화한다.
 //   xterm Terminal / FitAddon / WebglAddon 을 stub 해 호출을 정적 holder 로 관측한다. loseContext 는
@@ -42,7 +35,6 @@ globalThis.ResizeObserver = class {
   disconnect() {}
 } as unknown as typeof ResizeObserver
 
-/** 마지막 RO 인스턴스에 크기 변화 콜백을 발화한다(entry contentRect 크기 지정). */
 function fireResize(width: number, height: number): void {
   const ro = roState.instances[roState.instances.length - 1]
   if (!ro) throw new Error('no ResizeObserver instance')
@@ -51,7 +43,7 @@ function fireResize(width: number, height: number): void {
 
 // ── 제어 가능한 IntersectionObserver mock ────────────────────────────────────────────
 // 실 IO 는 관측 즉시(현재 가시성 반영) + 전이마다 콜백을 발화한다. 여기선 발화를 테스트가 직접 몰아
-//   초기-숨김/보임/숨김 전이를 재현한다. instances 로 마지막 인스턴스에 접근해 콜백을 발사한다.
+//   초기-숨김/보임/숨김 전이를 재현한다.
 type IOEntry = { isIntersecting: boolean; intersectionRatio: number }
 const ioState = vi.hoisted(() => ({
   instances: [] as Array<{ cb: (entries: IOEntry[]) => void; disconnected: boolean }>,
@@ -74,7 +66,6 @@ class MockIntersectionObserver {
 }
 globalThis.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver
 
-/** 마지막으로 생성된 IO 인스턴스에 가시성 전이 콜백을 발화한다. */
 function fireVisibility(visible: boolean): void {
   const io = ioState.instances[ioState.instances.length - 1]
   if (!io) throw new Error('no IntersectionObserver instance')
@@ -107,8 +98,7 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }))
 
-// Terminal stub — loadAddon/refresh/dispose 를 관측한다. dispose 관측으로 "가시성 토글이 Terminal 을
-//   죽이지 않는다"를 검사한다. cols/rows 는 refresh(0, rows-1) 인자 검증용 고정값.
+// Terminal stub — loadAddon/refresh/dispose 를 관측한다. cols/rows 는 refresh(0, rows-1) 인자 검증용 고정값.
 const termState = vi.hoisted(() => ({
   loadAddon: vi.fn(),
   refresh: vi.fn(),
@@ -131,7 +121,7 @@ vi.mock('@xterm/xterm', () => ({
 }))
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 
-// ── agentClient stub — 출력 구독 unsubscribe 관측(가시성 토글이 구독을 안 끊는지). ──────────
+// ── agentClient stub — 출력 구독 unsubscribe 관측. ──────────────────────────────────────
 const captured = vi.hoisted(() => ({
   onChunk: null as ((c: OutputChunk) => void) | null,
   unsubscribe: null as ReturnType<typeof vi.fn> | null,
@@ -224,9 +214,7 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    // 아직 가시성 콜백 없음 → WebglAddon 0개.
     expect(webglState.instances).toHaveLength(0)
-    // IO 는 마운트 시 생성됐어야 한다(관측 시작).
     expect(ioState.instances.length).toBeGreaterThan(0)
   })
 
@@ -237,9 +225,7 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     fireVisibility(true)
 
     expect(webglState.instances).toHaveLength(1)
-    // 새 addon 이 Terminal 에 로드됐다.
     expect(termState.loadAddon).toHaveBeenCalledWith(webglState.instances[0])
-    // 보이는 상태이므로 fit() 로 치수 갱신 후 refresh(0, rows-1) 로 현재 버퍼를 즉시 그린다.
     expect(fitState.fit).toHaveBeenCalled()
     expect(termState.refresh).toHaveBeenCalledWith(0, 23) // rows(24) - 1
   })
@@ -253,7 +239,6 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(1)
 
-    // 숨김 전이 직전까지의 fit() 호출 수 기록 → 이후 증가하지 않아야(숨김 중 fit 금지).
     fitState.fit.mockClear()
     order.log = []
 
@@ -262,7 +247,6 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     // ★load-bearing 순서★: dispose 만으론 GPU 좌석이 GC 전까지 안 풀린다 → 반드시 loseContext 를 *먼저*.
     expect(loseContext).toHaveBeenCalled()
     expect(order.log).toEqual(['loseContext', 'dispose'])
-    // 숨김은 좌석 반납만 — 새 addon 을 만들지 않는다.
     expect(webglState.instances).toHaveLength(1)
     // 숨김 중엔 측정 불가라 fit() 을 부르지 않는다(쓰레기 치수 방지).
     expect(fitState.fit).not.toHaveBeenCalled()
@@ -278,7 +262,6 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     fireVisibility(false)
     fireVisibility(true)
 
-    // 토글을 여러 번 돌려도 Terminal 은 살아있고(구독·버퍼 보존), 구독도 안 끊긴다.
     expect(termState.dispose).not.toHaveBeenCalled()
     expect(captured.unsubscribe).not.toHaveBeenCalled()
   })
@@ -309,10 +292,9 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     order.log = []
     act(() => unmount())
 
-    // 캡처된 컨텍스트로 loseContext → dispose 순서. containerRef 미의존이 핵심(React 가 commit 에서 null 로 비움).
+    // containerRef 미의존이 핵심(React 가 commit 에서 null 로 비움).
     expect(loseContext).toHaveBeenCalled()
     expect(order.log).toEqual(['loseContext', 'dispose'])
-    // 언마운트에선 Terminal 도 dispose 된다(가시성 토글과 달리).
     expect(termState.dispose).toHaveBeenCalled()
   })
 
@@ -329,7 +311,6 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
 
     fireVisibility(true)
 
-    // addon 은 생성됐지만(1개) loadAddon 실패 → catch 에서 dispose 됐어야 한다.
     expect(webglState.instances).toHaveLength(1)
     expect(webglState.instances[0].dispose).toHaveBeenCalled()
 

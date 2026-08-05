@@ -25,11 +25,9 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
   // ADR-0056: 좌석 결정적 반납용으로 attach 시점에 잡아둔 GL 컨텍스트. 언마운트 경로 방어의 핵심 —
   //   releaseWebgl 을 containerRef.current 에 의존시키면 안 되기 때문이다(아래 releaseWebgl 주석 참조).
   const glRef = useRef<WebGLRenderingContext | null>(null)
-  // ResizeObserver 콜백에서 최신 agentId를 읽기 위한 ref
   const agentIdRef = useRef<string | null>(agentId)
-  // onData 핸들러에서 terminated 상태 확인용 ref (§4-1: NotFound 스팸 방지)
+  // §4-1: NotFound 스팸 방지
   const isTerminatedRef = useRef(false)
-  // resize debounce 타이머
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -46,10 +44,8 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       agent.status.type === 'Killed' ||
       agent.status.type === 'Failed')
 
-  // isTerminatedRef 동기화 — onData 클로저에서 최신 값 참조
   useEffect(() => { isTerminatedRef.current = isTerminated }, [isTerminated])
 
-  // Terminal 인스턴스 초기화 (1회)
   useEffect(() => {
     if (!containerRef.current) return
     // WebGL/canvas 렌더러는 글리프를 canvas 2D(ctx.font)로 rasterize하는데 canvas 는 CSS var() 를
@@ -67,7 +63,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     term.open(containerRef.current)
     // ADR-0056: WebGL 렌더러는 여기(마운트)서 안 붙인다 — 가시성 연동 effect 로 옮겼다. keep-alive 로
     //   숨은 탭도 Terminal 인스턴스는 살아있지만, WebGL 좌석(브라우저 하드 상한 16)은 보이는 슬롯에만
-    //   준다. Terminal/FitAddon/open()/ResizeObserver 는 예전대로 마운트 1회 생성 유지.
+    //   준다.
     fitAddon.fit()
     terminalRef.current = term
     fitAddonRef.current = fitAddon
@@ -77,7 +73,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       //   이때 fit() 하면 0 크기 위에서 cols/rows 가 최소값/쓰레기로 계산되고, resizePty 로 그 치수가
       //   PTY 에 전파돼 에이전트 레이아웃이 깨진다. hidden 신호로 조기 반환하고 대기 중 타이머도 지운다.
       //   신호는 offsetParent===null — display:none 이면(자신·조상 어느 쪽이든) null 이라 붕괴한 contentRect
-      //   0 폭·높이보다 견고하다(1px·overflow 잔여 크기 오탐 회피). 보일 때 동작은 이전과 동일.
+      //   0 폭·높이보다 견고하다(1px·overflow 잔여 크기 오탐 회피).
       const hidden =
         containerRef.current?.offsetParent === null ||
         (entries[0]?.contentRect.width === 0 && entries[0]?.contentRect.height === 0)
@@ -103,8 +99,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     return () => {
       ro.disconnect()
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
-      // ADR-0056: 언마운트 시에도 WebGL 좌석을 결정적으로 반납(loseContext→dispose) 후 Terminal dispose.
-      //   Terminal dispose 만으론 GC 전까지 GPU 좌석이 안 풀린다(아래 releaseWebgl 주석 참조).
+      // ADR-0056: Terminal dispose 만으론 GC 전까지 GPU 좌석이 안 풀린다(아래 releaseWebgl 주석 참조).
       releaseWebgl()
       term.dispose()
       terminalRef.current = null
@@ -130,7 +125,6 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     const addon = webglAddonRef.current
     if (!addon) return
     try {
-      // attach 때 잡아둔 컨텍스트로 반납 — containerRef 에 의존하지 않아 언마운트 ref-null 을 견딘다.
       glRef.current?.getExtension('WEBGL_lose_context')?.loseContext()
     } catch {
       // loseContext 실패는 치명적 아님 — dispose 는 계속 진행(좌석은 GC 로라도 결국 풀림).
@@ -151,7 +145,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
 
     const attachWebgl = () => {
       const term = terminalRef.current
-      if (webglAddonRef.current || !term) return // 이미 로드됐거나 Terminal 없으면 스킵
+      if (webglAddonRef.current || !term) return
       // WebGL 렌더러 — DOM 렌더러는 customGlyphs 미지원이라 블록/박스드로잉 문자를 폰트에 위임,
       // 분수 DPI(rowHeight 비정수)에서 첫 행 상단 픽셀이 깎인다. WebGL은 이 글리프를 직접 그려
       // 클리핑 제거(조사: xterm.js #2409/#3807/#967). 미지원/컨텍스트 소실 시 DOM 자동 폴백.
@@ -161,7 +155,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       let webgl: WebglAddon | undefined
       try {
         webgl = new WebglAddon()
-        // 컨텍스트 소실(좌석 축출 등) 시 반응형 DOM 폴백 — 기존 시맨틱 유지. addon 을 버리고 ref 를 비워
+        // 컨텍스트 소실(좌석 축출 등) 시 반응형 DOM 폴백. addon 을 버리고 ref 를 비워
         //   다음 "보임" 때 재부착 가능하게 둔다.
         webgl.onContextLoss(() => {
           webgl?.dispose()
@@ -207,7 +201,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       for (const entry of entries) {
         const visible = entry.isIntersecting && entry.intersectionRatio > 0
         if (visible) attachWebgl()
-        else releaseWebgl() // 숨김 → 좌석 결정적 반납. DOM 렌더러가 자동 인수(어차피 안 보여 그리지 않음).
+        else releaseWebgl() // DOM 렌더러가 자동 인수(어차피 안 보여 그리지 않음).
       }
     })
     io.observe(container)
@@ -215,7 +209,6 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     return () => io.disconnect()
   }, [])
 
-  // PTY 출력 구독 (agentId 변경 시 재구독)
   useEffect(() => {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return
@@ -223,13 +216,13 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     let sub: OutputSubscription | null = null
     let cancelled = false
 
-    terminal.reset() // C2: 재구독 시 이전 출력 제거 (StrictMode 중복 방지)
+    terminal.reset() // C2: StrictMode 중복 방지
     const lastSeq = { current: -1 } // T-2/G-2: seq dedup(컴포넌트 방어 — 클라도 내부 dedup)
 
     agentClient
       .subscribeOutput(viewId, agentId, chunk => {
         if (cancelled) return
-        if (chunk.seq <= lastSeq.current) return // T-2: 순서 역전·중복 drop
+        if (chunk.seq <= lastSeq.current) return
         lastSeq.current = chunk.seq
         // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 터미널 raw 바이트(tag0)만 xterm 에 write 한다. tag1
         //   (StructuredEvent JSON)이 오면 무시한다 — RichSlot 이 tag0 을 무시하는 것과 정확히 대칭.
@@ -268,7 +261,6 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     // viewId 포함 — 구독 키(ADR-0046)라 바뀌면 재구독(실무상 key=viewId 라 slot 교체는 remount).
   }, [viewId, agentId, epoch])
 
-  // 키 입력 → writeStdin (§4-1: terminated 후 입력 차단 + catch)
   useEffect(() => {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return

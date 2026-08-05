@@ -1,5 +1,4 @@
-// RichSlot(라이브 모드) send() 실패 경로 회귀 — writeStdin 이 reject 되면 awaiting 을 해제해
-//   'streaming' 표시가 무한 고착되지 않는지 단언(로컬 UI-state 에러 처리, WIRE 불변 ADR-0044/45/46).
+// RichSlot(라이브 모드) send() 실패 경로 회귀 — 로컬 UI-state 에러 처리(WIRE 불변 ADR-0044/45/46).
 //
 // 배경: send() 는 전송 직후 awaiting=true 로 즉시 streaming 힌트를 켠다(FIX 5b). 응답 이벤트가 도착하면
 //   awaiting 이 해제되지만, writeStdin 자체가 reject 되면 응답이 영영 안 와 awaiting 이 걸린 채 남는다 →
@@ -29,7 +28,7 @@ const clientMock = vi.hoisted(() => ({
 
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
-    // ADR-0046 시그니처 (viewId, agentId, onChunk, onState?). onChunk 를 캡처해 chunk 를 주입한다.
+    // ADR-0046 시그니처 (viewId, agentId, onChunk, onState?).
     subscribeOutput: vi.fn(
       async (_viewId: string, _agentId: string, onChunk: (c: OutputChunk) => void) => {
         captured.onChunk = onChunk
@@ -92,7 +91,6 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
   it('writeStdin 이 reject 되면 "Wait" 스트리밍 신호가 고착되지 않고 idle 로 복귀한다', async () => {
     // console.warn 은 fix 의 에러 표면 — 테스트 로그 오염 방지 겸 호출 관측용으로 잠재운다.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 전송 자체 실패(write reject)를 재현.
     clientMock.writeStdin = vi.fn(async () => {
       throw new Error('write failed')
     })
@@ -103,24 +101,19 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
 
     // 완결된 1턴을 주입 → turnDone=true & 콘텐츠 존재. 이 상태에서 streaming = awaiting.
     feedCompletedTurn()
-    // 초기: 아무 것도 안 보냈으니 idle — "Wait" tail 이 없다.
     expect(screen.queryByText('Wait')).toBeNull()
 
-    // 입력 후 전송(Enter 경로) — send() 는 즉시 awaiting=true 로 streaming 힌트를 켠다.
+    // send() 는 즉시 awaiting=true 로 streaming 힌트를 켠다.
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'hello' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
-    // write 가 시도됐는지 확인(전송 경로 진입).
     expect(clientMock.writeStdin).toHaveBeenCalledTimes(1)
 
     // reject 반영(catch → setAwaiting(false)) 마이크로태스크 flush.
     await flush()
 
-    // ★핵심 단언★: awaiting 이 해제돼 UI 가 idle 로 복귀 — "Wait" 신호가 고착되지 않는다.
     expect(screen.queryByText('Wait')).toBeNull()
-
-    // fix 의 에러 표면(console.warn)이 실제로 호출됐는지도 확인.
     expect(warn).toHaveBeenCalled()
   })
 
@@ -138,7 +131,7 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
 
-    // 성공 경로 — 아직 응답 이벤트가 없으므로 awaiting 브리지로 streaming 유지 → "Wait" tail 이 뜬다.
+    // 성공 경로 — 아직 응답 이벤트가 없으므로 awaiting 브리지로 streaming 유지.
     expect(screen.getByText('Wait')).toBeTruthy()
   })
 })
@@ -154,11 +147,11 @@ describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 
     render(<RichSlot viewId="v1" agentId={AGENT} epoch={0} />)
     await flush()
 
-    // 직전 턴 완결(turnDone=true) + 콘텐츠 존재. idle 이라 아직 "Wait" 없음.
+    // 직전 턴 완결(turnDone=true) + 콘텐츠 존재.
     feedCompletedTurn()
     expect(screen.queryByText('Wait')).toBeNull()
 
-    // 후속 전송 — awaiting=true 로 streaming 힌트 on → "Wait" 표시.
+    // 후속 전송 — awaiting=true 로 streaming 힌트 on.
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'follow-up' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
@@ -177,7 +170,6 @@ describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 
       ),
     )
 
-    // ★핵심 단언★: user 에코가 awaiting 을 껐어도 "Wait" 이 사라지지 않는다(flicker 없음).
     expect(screen.getByText('Wait')).toBeTruthy()
   })
 })

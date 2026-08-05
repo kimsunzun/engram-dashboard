@@ -1,9 +1,8 @@
-// tag 게이트 회귀 테스트(FIX-1, S15/ADR-0045) — tag0 소비 슬롯이 tag1 을 걸러내는지 단언.
+// tag 게이트 회귀 테스트(FIX-1, S15/ADR-0045).
 //
 // 배경: subscribeOutput 스트림은 tag0(터미널 raw 바이트)/tag1(StructuredEvent JSON)을 한 seq 공간으로
 //   모든 구독자에게 배달한다. RichSlot 은 tag0 을 무시하지만, tag0 을 소비하는 슬롯(TerminalSlot=xterm
 //   write / DomSlot=<pre> append)에 대칭 게이트가 없으면 tag1 JSON 바이트가 그대로 새어 화면을 오염시킨다.
-//   여기서 각 tag0 소비자가 tag1 chunk 를 write 하지 않고(오염 방지), tag0 은 그대로 write 하는지(회귀) 본다.
 //
 // 전략: subscribeOutput 을 mock 해 onChunk 콜백을 캡처한 뒤, 마운트 후 tag0/tag1 chunk 를 직접 주입해
 //   xterm.write(TerminalSlot) / <pre> 텍스트(DomSlot)에 반영됐는지 관측한다. xterm·transport 는
@@ -41,7 +40,7 @@ const captured = vi.hoisted(() => ({ onChunk: null as ((c: OutputChunk) => void)
 
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
-    // ADR-0046: 시그니처 (viewId, agentId, onChunk, onState?). onChunk 는 3번째 인자.
+    // ADR-0046: 시그니처 (viewId, agentId, onChunk, onState?).
     subscribeOutput: vi.fn(
       async (_viewId: string, _agentId: string, onChunk: (c: OutputChunk) => void) => {
         captured.onChunk = onChunk
@@ -121,7 +120,6 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
     expect(captured.onChunk).toBeTruthy()
 
     act(() => captured.onChunk!(tag0(0, 'hello')))
-    // 마지막 write 호출이 tag0 바이트여야 한다.
     const calls = xtermWrite.mock.calls.map((c) => new TextDecoder().decode(c[0] as Uint8Array))
     expect(calls).toContain('hello')
   })
@@ -139,7 +137,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
     await flushSubscribe()
 
     act(() => captured.onChunk!(tag1(0, '{"kind":"TextDelta"}'))) // seq 0 — 무시되지만 seq 전진
-    act(() => captured.onChunk!(tag0(1, 'after'))) // seq 1 — 정상 write
+    act(() => captured.onChunk!(tag0(1, 'after')))
     const calls = xtermWrite.mock.calls.map((c) => new TextDecoder().decode(c[0] as Uint8Array))
     expect(calls).toEqual(['after'])
   })
@@ -162,7 +160,6 @@ describe('DomSlot — tag 게이트(FIX-1)', () => {
 
     const json = '{"kind":"TextDelta","text":"leak"}'
     act(() => captured.onChunk!(tag1(0, json)))
-    // JSON 문자열이 <pre> 에 새어 나오면 안 된다.
     expect(screen.queryByText(new RegExp('leak'))).toBeNull()
     const pre = document.querySelector('[data-dom-mode="1"]') as HTMLElement
     expect(pre.textContent).toBe('')
