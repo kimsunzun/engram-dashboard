@@ -1,5 +1,3 @@
-// ViewLayoutRenderer — 백엔드 권위 레이아웃(ViewManager) 트리를 그리는 메인 캔버스 렌더러(ADR-0035).
-//
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
 // 사람 우클릭(SlotContextMenu)이든 LLM(window.__engramLayout)이든 같은 invoke→emit 권위 루프로 갱신된다.
@@ -30,13 +28,11 @@ export default function ViewLayoutRenderer({
   focusedSlotId: string | null
   // ★이 렌더러가 그리는 View id 오버라이드(선택).★ WindowLayout(main·팝업)이 각 탭 캔버스에 그 탭 view 를
   //   넘겨(ADR-0057) 내부 SlotContextMenu 의 액션 좌표를 그 탭 view 로 고정한다. 없으면 메뉴가
-  //   useCurrentViewId(이 웹뷰 창의 active 탭) 폴백. 재귀 split 렌더에도 전파해 하위 슬롯 메뉴까지 같은 view.
+  //   useCurrentViewId(이 웹뷰 창의 active 탭) 폴백.
   viewIdOverride?: string | null
 }) {
-  // ★렌더 모드 오버라이드(§5)★: caps 유도 기본(defaultRenderMode) 대신 강제할 slot node.id → RenderMode.
   const renderModeOverride = useViewStore(s => s.renderModeOverride)
-  // ★M2 caps 분기(ADR-0044)★: agent 배정 슬롯의 렌더러는 그 agent 의 output caps 로 고른다.
-  // structured(NDJSON 캐리어=StdioTransport)면 라이브 RichSlot, 아니면 TerminalSlot(xterm). caps 는
+  // ★M2 caps 분기(ADR-0044)★: agent 배정 슬롯의 렌더러는 그 agent 의 output caps 로 고른다. caps 는
   // AgentInfo 로 이미 wire 를 건너와 store 에 있다(M1) — 여기선 조회만(추가 배선 불필요).
   const agents = useAgentStore(s => s.agents)
   // ★우클릭 슬롯 메뉴 상태(§5)★: 슬롯 하나당 이 렌더러 인스턴스가 하나라(재귀 렌더) 여기 useState 는
@@ -44,15 +40,13 @@ export default function ViewLayoutRenderer({
   //   LayoutRenderer→SlotPane 래핑 경로가 Brick 1 에서 삭제돼 메뉴가 캔버스에서 닿지 않던 갭을 메운다.
   //   ★hooks 무조건 호출★: split/slot 분기 이전에 부른다(조건부 호출 금지).
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
-  // ★이 메뉴가 조작할 View 좌표(ADR-0064)★: WindowLayout 이 넘긴 탭 오버라이드가 있으면 그걸, 없으면 이
-  //   웹뷰 창의 active 탭(useCurrentViewId, §3-4). command.run(ctx) 의 viewId 로 흘러 분할/닫기/배정이 이
-  //   좌표를 쓴다. 옛 SlotContextMenu 내부 폴백을 여기(ctx 조립처)로 끌어올렸다.
+  // ★이 메뉴가 조작할 View 좌표(ADR-0064)★: 옛 SlotContextMenu 내부 폴백을 여기(ctx 조립처)로 끌어올렸다.
   const currentViewId = useCurrentViewId()
   const targetViewId = viewIdOverride ?? currentViewId
 
   if (node.type === 'slot') {
     const isFocused = node.id === focusedSlotId
-    // ADR-0060: 슬롯 점유자 = SlotContent 태그드 유니온. Agent variant 만 실 렌더러가 붙는다(Empty = 플레이스홀더).
+    // ADR-0060: 슬롯 점유자 = SlotContent 태그드 유니온.
     const slotAgentId = node.content.type === 'agent' ? node.content.agent_id : null
     const agent = slotAgentId != null ? (agents.find(a => a.id === slotAgentId) ?? null) : null
     // ★caps 도착 후에만 구체 렌더러를 마운트한다(ADR-0041 replay 소유권)★: 데몬 replay 는 slot-assign
@@ -64,20 +58,12 @@ export default function ViewLayoutRenderer({
     //   홀더는 일시적 엣지 상태다 — 터미널 replay 경로는 종전과 동일.)
     // 구조화 출력(NDJSON) = 라이브 RichSlot, 아니면 TerminalSlot(xterm) 분기 근거(ADR-0002/0044).
     const capsReady = slotAgentId != null && agent != null
-    // caps-ready 슬롯의 렌더러: 오버라이드가 있으면 그걸, 없으면 caps 에서 유도한 기본(defaultRenderMode).
-    // agent 는 capsReady 분기(아래 agent != null)에서만 사용되므로 여기선 null 병합만 걸어둔다.
     const mode = agent != null ? (renderModeOverride[node.id] ?? defaultRenderMode(agent)) : null
-    // hasContent = 구체 렌더러를 그리는 경우만(래퍼를 100% 채움). caps 대기 플레이스홀더는 empty 슬롯처럼
-    // 중앙정렬 스타일로 둔다(hasContent=false). ADR-0060/0061: preset_palette variant 도 슬롯을 100% 채우는
-    // 실 렌더러(PresetPalette)라 hasContent=true(중앙정렬 스타일이 팔레트 레이아웃을 깨지 않게).
     // preset_palette·agent_list variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
     //   플레이스홀더 스타일이 이들 레이아웃을 깨지 않게, ADR-0060/0061/0062).
     const isPresetPalette = node.content.type === 'preset_palette'
     const isAgentList = node.content.type === 'agent_list'
     const hasContent = capsReady || isPresetPalette || isAgentList
-    // ★ADR-0046: 버그 B 구조 해소★: ProtocolClient.subs 가 이제 viewId(slot id) 키라 같은 agentId 를 두
-    //   슬롯에 배정해도 각 슬롯이 독립 구독·독립 진도를 갖는다(옛 agentId-당-단일-콜백 덮어쓰기 소멸).
-    //   슬롯은 아래 viewId={node.id} 로 자기 slot id 를 구독 키로 넘긴다.
     return (
       <div
         style={{
@@ -111,7 +97,7 @@ export default function ViewLayoutRenderer({
         //   invoke(focus_slot) → emit(layout:updated) 단일 제어 표면(사람 클릭 = LLM = slot.focus command, §5).
         //   ★낙관 갱신 X★: 링(isFocused)은 백엔드 emit 스냅샷으로만 갱신된다(권위 = src-tauri, ADR-0035).
         //   ★버블 허용(stopPropagation/preventDefault 안 함)★: 내부 상호작용(터미널 포커스·AgentList 버튼 등)을
-        //   가로채지 않는다 — pane 어디를 눌러도 focusSlot 조건은 갱신하고 내부 핸들러도 그대로 발화한다.
+        //   가로채지 않는다 — pane 어디를 눌러도 내부 핸들러가 그대로 발화한다.
         //   ★제어 슬롯 포커스 제외 — allowlist(콘텐츠 슬롯만 포커스), ADR-0066 정제★: 콘텐츠 슬롯
         //   (empty/agent)일 때만 focusSlot 호출한다. 트리(agent_list)·팔레트(preset_palette) 등 제어 슬롯,
         //   그리고 앞으로 추가될 제어 variant(ADR-0060 FileTree/ControlPanel 등)는 자동으로 비포커스된다
@@ -119,14 +105,13 @@ export default function ViewLayoutRenderer({
         //   isContentSlot(allowlist)로 잡아 "열기" 대상 선택과 기준 이원화를 막는다.
         //   이 게이트가 없으면 트리 노드 좌클릭이 트리 슬롯 pane 까지 버블해 트리 슬롯이 포커스되고, 이어
         //   우클릭 "열기"가 그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다(선존 UX 버그).
-        //   focusSlot 호출만 스킵하고 버블 자체는 유지(내부 핸들러는 그대로 발화). targetViewId 미확정
-        //   (부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
+        //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
         onClick={() => {
           if (!isContentSlot(node.content)) return
           if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
         }}
-        // ADR-0035: 우클릭 → SlotContextMenu 마운트. 메뉴 액션(분할/닫기/배정)은 viewStore(=window.__engramLayout)
-        //   단일 제어 표면으로만 흐른다(사람 클릭 = LLM 이 한 표면, §5). 기본 컨텍스트 메뉴는 막는다.
+        // ADR-0035: 메뉴 액션(분할/닫기/배정)은 viewStore(=window.__engramLayout) 단일 제어 표면으로만
+        //   흐른다(사람 클릭 = LLM 이 한 표면, §5).
         onContextMenu={e => {
           e.preventDefault()
           setContextMenu({ x: e.clientX, y: e.clientY })
@@ -134,14 +119,8 @@ export default function ViewLayoutRenderer({
       >
         {node.content.type === 'agent' ? (
           agent == null ? (
-            // ★caps-ready 게이팅(replay 소유권)★: caps(AgentInfo) 미도착 시 중립 플레이스홀더만(위 replay
-            // 소유권 주석 참조). 구체 렌더러(DomSlot/RichSlot/TerminalSlot) 마운트를 caps 확정까지 미뤄
-            // assign 시점 replay 를 온전히 받게 한다. 래퍼의 empty 슬롯 스타일(중앙정렬·muted)을 상속.
             <span>{t('agent.connecting')}</span>
           ) : (
-            // caps 도착 후에만 도달 — mode 는 여기서 non-null(위 defaultRenderMode ?? 오버라이드).
-            // 오버라이드가 있으면 그 렌더러, 없으면 caps 유도 기본. 이 switch 는 위 caps-ready 게이팅 안에
-            // 있어 replay 소유권을 그대로 지킨다(caps 도착 전엔 마운트 안 함 → assign replay 온전).
             (() => {
               // ★viewId = node.id(slot id, ADR-0046)★: 슬롯이 자기 slot id 로 구독한다 — 같은 agentId 두
               //   슬롯도 독립 진도(버그 B 해소). key 도 slot id 로 두어(옛 agent_id 키는 같은 agent 두 슬롯이
@@ -149,10 +128,10 @@ export default function ViewLayoutRenderer({
               switch (mode) {
                 case 'dom':
                   // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
-                  // 한다(터미널 xterm 은 canvas 라 관측 불가). agentId = capsReady 확정된 slotAgentId(non-null).
+                  // 한다(터미널 xterm 은 canvas 라 관측 불가).
                   return <DomSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={agent.epoch} />
                 case 'rich':
-                  // 라이브 RichSlot — 실스트림 구독([agentId,epoch]). epoch 은 재spawn 재구독 트리거.
+                  // epoch 은 재spawn 재구독 트리거.
                   return <RichSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={agent.epoch} />
                 case 'terminal':
                 default:
@@ -161,16 +140,12 @@ export default function ViewLayoutRenderer({
             })()
           )
         ) : node.content.type === 'preset_palette' ? (
-          // ADR-0060/0061: 프리셋 팔레트 variant — 슬롯을 100% 채우는 실 렌더러(hasContent=true).
-          //   목록/추가/삭제는 PresetPalette 내부에서 agentClient(단일 제어 표면)로 흐른다.
+          // 목록/추가/삭제는 PresetPalette 내부에서 agentClient(단일 제어 표면)로 흐른다.
           <PresetPalette />
         ) : node.content.type === 'agent_list' ? (
-          // ADR-0060/0062: 에이전트 목록 variant(Slice C) — 슬롯을 100% 채우는 실 렌더러(hasContent=true).
-          //   사이드바 고정 마운트와 동일 컴포넌트(향후 슬롯 배치도 이 케이스로 렌더). 조작은 AgentList
-          //   내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
+          // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
           <AgentList />
         ) : (
-          // empty 슬롯 플레이스홀더 — 중앙정렬 스타일(hasContent=false) 상속.
           <>
             <span>Slot {node.id.slice(0, 8)}</span>
             <span>{t('common.viewEmpty')}</span>
@@ -189,10 +164,7 @@ export default function ViewLayoutRenderer({
           />
         )}
         {isFocused && (
-          // ADR-0066 포커스 링 — 컨텐츠(터미널 canvas·RichSlot) *위*에 그리는 absolute 오버레이.
-          //   inset box-shadow 를 래퍼에 직접 주면 overflow:hidden 슬롯에서 100% 채운 자식이 덮어 안 보인다
-          //   → 별도 오버레이(inset 0)로 올리고 pointerEvents:none 으로 상호작용은 그대로 통과시킨다.
-          //   ★강도 65%★: 너무 약한 포커스 표시가 반복 UX 불만이라(VS Code #24586 등, /research) "은은하되
+          // ★강도 65%★: 너무 약한 포커스 표시가 반복 UX 불만이라(VS Code #24586 등, /research) "은은하되
           //   확실히 식별"되게 65%(사용자 결정). 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
           //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 트리/프리셋 제외).
           <div
@@ -208,14 +180,13 @@ export default function ViewLayoutRenderer({
       </div>
     )
   }
-  // split: a/b 두 자식을 방향대로 분할. dir='vertical' = 상하(allotment vertical).
+  // dir='vertical' = 상하(allotment vertical).
   // ★ratio 초기 사이징(ADR-0063)★: node.ratio = a(왼/위) 자식의 비율. ★Allotment 의 `defaultSizes` 는
   //   비율이 아니라 *픽셀*이다★ — [0.2,0.8] 을 주면 0.2px/0.8px 로 먹어 split-view 가 ~1px 로 붕괴하고
   //   자식들이 흐름 밖으로 쌓인다(실측 스샷으로 확인한 회귀). 대신 첫 pane(a=왼/위)에 `preferredSize` 를
   //   *퍼센트 문자열*로 줘 컨테이너 대비 비율로 배치한다(b 는 나머지 채움). 0.2 → "20%" = 20/80,
   //   0.5 → "50%" = 50/50. 컨테이너 실측 픽셀을 몰라도 되고 높이는 Allotment 가 컨테이너로 채운다.
   //   ★초기 사이징만★: 드래그 리사이즈→백엔드 ratio 되쓰기는 이 슬라이스 범위 밖(ADR-0063).
-  // TODO(follow-up): drag→backend ratio writeback (layout:updated 권위 루프 = 별도 슬라이스)
   // ★Allotment.Pane key = 위치 고정(pane-a/pane-b), 콘텐츠 파생 금지★: 옛 key 는 nodeKey(node.a) 로
   //   *서브트리 구조*에서 파생됐다 — 어느 pane 안의 슬롯이 split 으로 재구조화되면 그 pane 의 nodeKey 가
   //   바뀌어 React 가 Pane 을 unmount+remount 했고, Allotment 는 pane 이탈+합류로 보아 전 pane 을 균등

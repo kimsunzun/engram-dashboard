@@ -1,14 +1,3 @@
-// ViewLayoutRenderer 렌더 분기 단위테스트.
-//
-// 검증 불변식:
-//   1. agent_id 있는 slot → TerminalSlot 이 마운트된다.
-//   2. agent_id null slot  → "— empty —" 플레이스홀더가 뜨고 TerminalSlot 은 마운트되지 않는다.
-//   3. focusedSlotId == node.id → 포커스 테두리(border 스타일)가 적용된다.
-//   4. split 노드 → 두 자식이 재귀 렌더된다(Allotment 모킹으로 DOM 평탄화).
-//
-// 전략: TerminalSlot 을 vi.mock 으로 stub — xterm DOM 직접 의존 없이 마운트 여부만 단언.
-// agentClient(clientFactory) / @tauri-apps/api/core / allotment / @xterm 계열도 mock 처리.
-
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -26,8 +15,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 // ── agentClient / clientFactory stub ─────────────────────────────────────────
 // TerminalSlot 이 내부에서 agentClient 를 import 하지만 이번 테스트에선 TerminalSlot 자체를
 // mock 하므로 실제 호출은 일어나지 않는다. clientFactory 도 Tauri invoke 를 사용하므로 stub.
-// spawnAgent/killAgent 도 stub — SlotContextMenu 의 '에이전트 생성'(spawn→assign)·'에이전트 종료'(kill)
-// 경로가 이들을 부른다. 컨텍스트 메뉴 테스트에서 spawn 결과 id 를 제어하려 spawnAgent 를 가변으로 둔다.
+// killAgent 도 stub — SlotContextMenu 의 '에이전트 종료'(kill) 경로가 부른다.
 const clientMock = vi.hoisted(() => ({
   spawnAgent: vi.fn(async () => ({ id: 'spawned-agent-id' })),
   killAgent: vi.fn(async () => undefined),
@@ -64,7 +52,6 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 // ── allotment stub — split 분기 렌더 시 jsdom 환경에서 ResizeObserver 에러 방지 ──
-// Allotment / Allotment.Pane 을 단순 div 로 대체해 자식을 그대로 렌더한다.
 // vi.mock factory 는 호이스팅되므로 React import 를 직접 쓸 수 없다 — importOriginal 패턴으로 우회.
 // preferredSize(=ratio 파생 초기 사이징 %, ADR-0063)를 Pane 의 data 속성으로 노출해 테스트가 단언할 수 있게
 // 한다. ★Allotment 의 defaultSizes 는 비율이 아니라 픽셀이라 [0.2,0.8]=0.2px/0.8px 로 붕괴한다 — 대신
@@ -83,9 +70,7 @@ vi.mock('allotment', async () => {
       'div',
       {
         'data-testid': 'allotment-pane',
-        // pane 초기 사이징(예: "20%") — split 렌더 테스트가 첫 pane 에서 읽어 단언.
         'data-preferred-size': preferredSize != null ? String(preferredSize) : undefined,
-        // 마운트별 유일 id — remount 시 증가. key 안정성 테스트가 리렌더 전후로 비교.
         'data-pane-instance': String(instance.current),
       },
       children,
@@ -157,13 +142,12 @@ import { useViewStore } from '../../store/viewStore'
 
 afterEach(() => {
   cleanup()
-  useViewStore.setState({ renderModeOverride: {} }) // 프론트 전용 오버라이드 격리(테스트 간 누수 방지)
-  agentStoreState.agents = [] // agent store holder 초기화(테스트 간 누수 방지)
+  useViewStore.setState({ renderModeOverride: {} })
+  agentStoreState.agents = []
 })
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────────
 function slotNode(id: string, agentId: string | null): LayoutNode {
-  // ADR-0060: 슬롯 점유자 = SlotContent 태그드 유니온(Empty / Agent{agent_id}).
   return {
     type: 'slot',
     id,
@@ -175,7 +159,6 @@ function splitNode(a: LayoutNode, b: LayoutNode, ratio = 0.5): LayoutNode {
   return { type: 'split', dir: 'horizontal', ratio, a, b }
 }
 
-/** SlotContent variant 를 직접 지정하는 슬롯 노드(preset_palette / agent_list 분기 검증용, ADR-0060). */
 function contentSlotNode(id: string, content: SlotContent): LayoutNode {
   return { type: 'slot', id, content }
 }
@@ -214,7 +197,7 @@ function seedAgents(...infos: AgentInfo[]): void {
 describe('ViewLayoutRenderer — slot 분기', () => {
   it('agent_id 있는 slot(비structured caps) → TerminalSlot 이 마운트되고 agentId prop 이 전달된다', () => {
     const agentId = 'aaaa-bbbb-cccc-dddd'
-    seedAgents(agentInfo(agentId, false)) // FIX 1: caps 도착(비structured) → TerminalSlot 분기
+    seedAgents(agentInfo(agentId, false))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     const terminal = screen.getByTestId('terminal-slot')
     expect(terminal).toBeTruthy()
@@ -232,13 +215,11 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper).toBeTruthy()
     // ADR-0066(focus-ring): 링은 래퍼가 아니라 컨텐츠 *위* absolute 오버레이로 그린다(overflow:hidden
-    //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정). accent inset box-shadow +
-    //   pointerEvents:none 오버레이가 존재해야 한다.
+    //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정).
     const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
     expect(overlay).toBeTruthy()
     expect(overlay!.style.pointerEvents).toBe('none')
     expect(overlay!.style.position).toBe('absolute')
-    // 래퍼 자신엔 accent 링을 두지 않는다(border 는 항상 1px, accent 아님).
     expect(wrapper.style.border).toContain('border')
     expect(wrapper.style.border).not.toContain('accent')
   })
@@ -248,7 +229,6 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper.style.border).toContain('border')
     expect(wrapper.style.border).not.toContain('accent')
-    // 비포커스면 accent 링 오버레이가 없어야 한다.
     const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
     expect(overlay).toBeUndefined()
   })
@@ -278,10 +258,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   })
 
   it('agent_id 있는 slot(caps 도착) 래퍼에는 중앙정렬 flex 가 없다(터미널 레이아웃 오염 방지)', () => {
-    seedAgents(agentInfo('some-agent-id', false)) // caps 도착 → 구체 렌더러(hasContent=true)
+    seedAgents(agentInfo('some-agent-id', false))
     render(<ViewLayoutRenderer node={slotNode('s1', 'some-agent-id')} focusedSlotId={null} />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
-    // agent 있을 때 justifyContent: center 가 없어야 한다 — TerminalSlot 을 center 로 밀면 출력이 깨짐.
     expect(wrapper.style.justifyContent).not.toBe('center')
     expect(wrapper.style.alignItems).not.toBe('center')
   })
@@ -297,7 +276,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
   it('agent 가 store 에 있고 structured caps → RichSlot(TerminalSlot 없음)', () => {
     const agentId = 'struct-agent'
-    seedAgents(agentInfo(agentId, true)) // structured=true → 라이브 RichSlot 분기
+    seedAgents(agentInfo(agentId, true))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('rich-slot')).toBeTruthy()
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
@@ -307,7 +286,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   // ── RenderMode 기본 유도(defaultRenderMode): 오버라이드 없을 때 caps 로 렌더러가 정해진다 ──────────
   it('오버라이드 없음 + structured=true caps → 기본 유도로 RichSlot(TerminalSlot 없음)', () => {
     const agentId = 'derive-rich'
-    seedAgents(agentInfo(agentId, true)) // defaultRenderMode → 'rich'
+    seedAgents(agentInfo(agentId, true))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('rich-slot')).toBeTruthy()
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
@@ -315,7 +294,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
   it('오버라이드 없음 + structured=false caps → 기본 유도로 TerminalSlot(RichSlot 없음)', () => {
     const agentId = 'derive-terminal'
-    seedAgents(agentInfo(agentId, false)) // defaultRenderMode → 'terminal'
+    seedAgents(agentInfo(agentId, false))
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('terminal-slot')).toBeTruthy()
     expect(screen.queryByTestId('rich-slot')).toBeNull()
@@ -324,7 +303,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   // ── 오버라이드가 기본을 이긴다(setRenderMode) ────────────────────────────────────────────────
   it('setRenderMode(id,"terminal")는 structured 기본(rich)을 덮어 TerminalSlot 을 마운트한다', () => {
     const agentId = 'override-terminal'
-    seedAgents(agentInfo(agentId, true)) // 기본은 rich 지만 오버라이드가 이긴다
+    seedAgents(agentInfo(agentId, true))
     useViewStore.getState().setRenderMode('s1', 'terminal')
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('terminal-slot')).toBeTruthy()
@@ -333,7 +312,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
   it('setRenderMode(id,"rich")는 비structured 기본(terminal)을 덮어 RichSlot 을 마운트한다', () => {
     const agentId = 'override-rich'
-    seedAgents(agentInfo(agentId, false)) // 기본은 terminal 이지만 오버라이드가 이긴다
+    seedAgents(agentInfo(agentId, false))
     useViewStore.getState().setRenderMode('s1', 'rich')
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('rich-slot')).toBeTruthy()
@@ -355,7 +334,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
   it('renderModeOverride=dom 은 structured caps 기본(rich)보다 우선(DomSlot, RichSlot 아님)', () => {
     const agentId = 'dom-struct-agent'
-    seedAgents(agentInfo(agentId, true)) // structured=true(기본은 RichSlot)여도 DOM 모드가 우선
+    seedAgents(agentInfo(agentId, true))
     useViewStore.getState().setRenderMode('s1', 'dom')
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('dom-slot')).toBeTruthy()
@@ -374,7 +353,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     const agentId = 'clear-agent'
     seedAgents(agentInfo(agentId, false)) // 기본 = terminal
     useViewStore.getState().setRenderMode('s1', 'dom')
-    useViewStore.getState().clearRenderMode('s1') // 해제 → 기본(terminal)으로 복귀
+    useViewStore.getState().clearRenderMode('s1')
     render(<ViewLayoutRenderer node={slotNode('s1', agentId)} focusedSlotId={null} />)
     expect(screen.getByTestId('terminal-slot')).toBeTruthy()
     expect(screen.queryByTestId('dom-slot')).toBeNull()
@@ -385,7 +364,6 @@ describe('ViewLayoutRenderer — split 분기', () => {
   it('split 노드 → a/b 두 자식 슬롯이 재귀 렌더된다', () => {
     const node = splitNode(slotNode('s1', null), slotNode('s2', null))
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    // 두 슬롯 모두 DOM 에 있어야 한다.
     expect(document.querySelector('[data-slot-id="s1"]')).toBeTruthy()
     expect(document.querySelector('[data-slot-id="s2"]')).toBeTruthy()
   })
@@ -396,10 +374,8 @@ describe('ViewLayoutRenderer — split 분기', () => {
     const node = splitNode(slotNode('s1', agentId), slotNode('s2', null))
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     const terminals = screen.getAllByTestId('terminal-slot')
-    // s1 은 agent 있으므로 TerminalSlot 1개, s2 는 empty.
     expect(terminals).toHaveLength(1)
     expect(terminals[0].getAttribute('data-agent-id')).toBe(agentId)
-    // s2 는 empty 플레이스홀더만.
     expect(screen.getByText('— empty —')).toBeTruthy()
   })
 
@@ -410,7 +386,6 @@ describe('ViewLayoutRenderer — split 분기', () => {
   it('split(ratio=0.2) → 첫 pane preferredSize="20%" 로 초기 사이징이 전달된다', () => {
     const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.2)
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    // 첫 pane(a=왼)에 ratio 파생 퍼센트가 붙는다. b(오)는 나머지 채움(preferredSize 없음).
     const firstPane = screen.getAllByTestId('allotment-pane')[0]
     expect(firstPane.getAttribute('data-preferred-size')).toBe('20%')
   })
@@ -427,16 +402,13 @@ describe('ViewLayoutRenderer — split 분기', () => {
   // 바뀌어 pane 이 unmount+remount → Allotment 가 전 pane 을 균등 재분배 → 형제(a=왼 20%)의 비율 소실.
   // 위치 기반 안정 key("pane-a"/"pane-b")면 pane 이 마운트 유지(같은 인스턴스 id) → 사이즈 보존.
   it('b pane 콘텐츠가 slot→중첩 split 으로 재구조화돼도 두 pane 인스턴스 id 가 유지된다(remount 없음)', () => {
-    // 초기: 왼(a=20%) slot + 오(b) slot.
     const initial = splitNode(slotNode('left', null), slotNode('right', null), 0.2)
     const { rerender } = render(<ViewLayoutRenderer node={initial} focusedSlotId={null} />)
-    // 최상위 Allotment 의 직속 두 pane(중첩 것 제외) — 첫 Allotment 자식만 집는다.
     const outerPanesBefore = topLevelPanes()
     expect(outerPanesBefore).toHaveLength(2)
     const [aBefore, bBefore] = outerPanesBefore.map(p => p.getAttribute('data-pane-instance'))
     const preferredBefore = outerPanesBefore[0].getAttribute('data-preferred-size')
 
-    // b(오) 슬롯이 다른 곳에서 split 돼 중첩 split 이 됨(=b 서브트리 재구조화). a(왼)는 그대로.
     const restructured = splitNode(
       slotNode('left', null),
       splitNode(slotNode('right', null), slotNode('right-2', null)),
@@ -446,10 +418,8 @@ describe('ViewLayoutRenderer — split 분기', () => {
 
     const outerPanesAfter = topLevelPanes()
     const [aAfter, bAfter] = outerPanesAfter.map(p => p.getAttribute('data-pane-instance'))
-    // ★핵심 단언★: 두 최상위 pane 인스턴스 id 가 리렌더 전후로 동일 = key 안정 = remount 없음.
     expect(aAfter).toBe(aBefore)
     expect(bAfter).toBe(bBefore)
-    // preferredSize(=왼 20%)도 첫 pane 에 그대로.
     expect(outerPanesAfter[0].getAttribute('data-preferred-size')).toBe(preferredBefore)
     expect(preferredBefore).toBe('20%')
   })
@@ -523,8 +493,7 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
 //
 // 전략: split/closeSlot/assignAgent/setSlotContent/moveSlotToWindow 를 real viewStore 에 spy 로 주입한다
 // (command 는 useViewStore.getState().split(...) 로 이들을 부른다 → LLM/__engramCmd 와 물리적으로 동일).
-// '에이전트 생성'(slot.createAgentHere)은 폴더 다이얼로그(open, hoisted mock) → agentClient.spawnAgent →
-// assignAgent, '에이전트 종료'(agent.kill)는 agentClient.killAgent 로 이어진다.
+// '에이전트 종료'(agent.kill)는 agentClient.killAgent 로 이어진다.
 describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어 표면)', () => {
   const ACTIVE_VIEW = 'active-view-9'
   const splitSpy = vi.fn(async () => 'new-slot')
@@ -562,7 +531,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     window.location.hash = origHash
   })
 
-  /** 슬롯 우클릭 → 메뉴 오픈. 대상 슬롯 wrapper 를 반환. viewIdOverride 를 넘기면 그 view 로 렌더한다(Fix 3). */
+  /** viewIdOverride 를 넘기면 그 view 로 렌더한다(Fix 3). */
   function openMenu(
     slotId: string,
     agentId: string | null,
@@ -589,16 +558,13 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
 
   it('빈 슬롯 우클릭 → 최상위 = 에이전트 모니터링 + 새 콘텐츠(컨테이너) + 공통 슬롯 ops, 채움은 flyout 안 (ADR-0067/0065)', () => {
     openMenu('s1', null)
-    // 최상위: 에이전트 모니터링(ADR-0067) + 콘텐츠 컨테이너 + 공통 slot-ops(단, empty 는 popout/비우기 트림).
     expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
     expect(screen.getByText('새 콘텐츠')).toBeTruthy()
     expect(screen.getByText('가로 분할')).toBeTruthy()
     expect(screen.getByText('세로 분할')).toBeTruthy()
     expect(screen.getByText('닫기')).toBeTruthy()
-    // ADR-0065 트림: 빈 슬롯엔 비우기/팝업으로 분리 없음(hideOn:['empty']).
     expect(screen.queryByText('비우기')).toBeNull()
     expect(screen.queryByText('팝업으로 분리')).toBeNull()
-    // 채움 항목은 hover 전엔 미노출(서브메뉴 안).
     expect(screen.queryByText('에이전트 트리 열기')).toBeNull()
     openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
@@ -683,7 +649,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 콘텐츠 종류와 무관하게 뜨고 (viewId, slotId)로 move.
   //    단 ADR-0065 로 빈 슬롯에선 트림(hideOn:['empty']) — 비-empty(agent) 슬롯으로 라우팅을 검증한다. ──
   it('"팝업으로 분리"(공통, 비-empty) → moveSlotToWindow(viewId, slotId) 호출', () => {
-    openMenu('slot-P', 'agent-p') // agent 슬롯 — 빈 슬롯은 popout 트림(ADR-0065)
+    openMenu('slot-P', 'agent-p')
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
   })
@@ -710,7 +676,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   })
 
   it('viewIdOverride 없으면(메인 창 경로) 종전대로 activeViewId 로 폴백한다(하위호환)', () => {
-    openMenu('slot-main', null) // 오버라이드 안 넘김
+    openMenu('slot-main', null)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-main', 'horizontal')
   })
