@@ -85,7 +85,14 @@ export interface AgentStatusChanged {
 /** claude 출력 포맷 — Terminal=PTY(xterm) / StreamJson=헤드리스 NDJSON(RichSlot). (ADR-0044) */
 export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
 
-/** 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치 */
+/**
+ * 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치.
+ *
+ * ★이름 충돌★ — 러스트 `protocol` 의 동명 타입은 뜻이 다르다(데몬에 보내는 wire 명령).
+ * 이 타입의 러스트 짝은 `AgentSpawnCommand` 다. 생성 바인딩을 물릴 때 `AgentCommand.ts`
+ * 가 아니라 `AgentSpawnCommand.ts` 를 가져올 것 — 전자는 모양이 달라 tsc 가 잡지만,
+ * 그 방어는 이 값을 짓는 테스트 픽스처가 있을 때만 작동한다(프로덕션 코드는 안 만든다).
+ */
 export type AgentCommand =
   | { kind: 'Claude'; extra_args: string[]; output_format: ClaudeOutputFormat }
   | { kind: 'Shell'; program: string; args: string[] }

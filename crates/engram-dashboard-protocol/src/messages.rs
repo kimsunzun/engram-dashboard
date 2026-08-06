@@ -20,6 +20,10 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 //   `{"Auth":{"token":"…","protocol_version":N}}` 이고, 그 형태의 정본 테스트는 저 crate 의 golden JSON 이다.
 //   ★여기에 다시 넣지 말 것★: 두 정의가 공존하면 조용히 갈라진다. 프론트 바인딩(`bindings/AgentCommand.ts`)
 //   에도 그래서 `Auth` 가 없다(프론트 `wsTransport` 는 원래 타입 없이 객체 리터럴로 만든다).
+//
+// ★이름 충돌★ — core `agent::profile::AgentCommand` 는 뜻이 다르다(프로필이 띄울 프로그램).
+//   그쪽의 wire 미러는 이 enum 이 아니라 `AgentSpawnCommand` 다. crate 를 빼고
+//   "AgentCommand" 라 부르면 뜻이 안 정해진다.
 pub enum AgentCommand {
     Spawn {
         #[ts(type = "string")]
