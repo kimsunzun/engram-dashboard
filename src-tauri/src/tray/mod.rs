@@ -1,6 +1,6 @@
 //! tray — Tauri 통합 트레이 모듈(ADR-0026: 트레이를 앱에 통합, 2프로세스).
 //!
-//! ## 구조 (3층 — CLAUDE.md §4/§5)
+//! ## 구조 (3층 — CLAUDE.md 「코어 격리」/§5)
 //! - [`core`] — **순수**(OS/Tauri/discovery 무의존): MenuAction 의도 enum, menu_id↔action 매핑,
 //!   IconState, to_grayscale_rgba. 단위테스트 대상.
 //! - [`actions`] — **불순 공유 부수효과**: 트레이 핸들러와 command 가 같은 함수를 부르게(중복 금지).

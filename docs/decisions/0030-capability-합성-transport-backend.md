@@ -1,7 +1,7 @@
 # ADR-0030: capability 산출 = transport(물리) ⊕ backend(프로그램) 합성
 
 - 상태: 확정 (2026-06-21 dashboard11, 근거: 코더→reviewer-deep(Blocker 0)→QA 실측[shell resume=false / claude resume=true, 실제 WS→데몬→프론트 IPC 경로])
-- 관련: ADR-0002(capability 매트릭스 — 본 ADR이 산출 위치를 구체화) · ADR-0004(AgentTransport seam + backend 지식 격리) · CLAUDE.md §2(capability 매트릭스)·§3(backend 격리) · `crates/engram-dashboard-core/src/agent/types.rs`(TransportCaps/BackendCaps/Capabilities::compose)·`agent/backend/mod.rs`(backend_caps dispatch)·`agent/session.rs`(compose)
+- 관련: ADR-0002(capability 매트릭스 — 본 ADR이 산출 위치를 구체화) · ADR-0004(AgentTransport seam + backend 지식 격리) · CLAUDE.md 「백엔드 확장」(capability 매트릭스·backend 격리) · `crates/engram-dashboard-core/src/agent/types.rs`(TransportCaps/BackendCaps/Capabilities::compose)·`agent/backend/mod.rs`(backend_caps dispatch)·`agent/session.rs`(compose)
 - 범위: 에이전트 capability(기능 매트릭스)를 **누가 결정하는가**. 값 자체가 아니라 산출 책임의 분할(seam).
 
 ## 맥락

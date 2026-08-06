@@ -1,7 +1,7 @@
 # ADR-0003: OutputSink / StatusSink — 코어 Tauri 격리
 
 - 상태: 확정 (S1 설계, S3/S5 구현)
-- 관련: CLAUDE.md §1·§4 · `types.rs::{OutputSink,StatusSink}` · `lib.rs::{ChannelOutputSink,TauriStatusSink}`
+- 관련: CLAUDE.md 「코어 격리」 · `types.rs::{OutputSink,StatusSink}` · `lib.rs::{ChannelOutputSink,TauriStatusSink}`
 
 ## 맥락
 코어(`pty/`)가 Tauri AppHandle에 직접 묶이면 화면 없이 테스트할 수 없고, 전송 경로(PTY/HTTP/WebSocket)를 교체할 수 없다.

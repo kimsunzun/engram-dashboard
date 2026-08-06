@@ -1,7 +1,7 @@
 # ADR-0004: AgentTransport seam + backend 지식 격리
 
 - 상태: 확정 (S10)
-- 관련: CLAUDE.md §2·§3 · `transport/mod.rs` · `backend/{mod,claude}.rs` · `types.rs::CommandSpec`
+- 관련: CLAUDE.md 「백엔드 확장」 · `transport/mod.rs` · `backend/{mod,claude}.rs` · `types.rs::CommandSpec`
 
 ## 맥락
 멀티 백엔드(claude/codex 콘솔 + API)를 한 인터페이스로 통합해야 한다. 백엔드별 인자 조립(claude `--session-id`/`--resume`)과 전송 방식(PTY/HTTP)이 코어에 새면 결합이 생긴다.

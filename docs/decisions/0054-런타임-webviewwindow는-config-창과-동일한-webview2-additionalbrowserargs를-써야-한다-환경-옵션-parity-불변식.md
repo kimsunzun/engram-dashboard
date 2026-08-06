@@ -1,7 +1,7 @@
 # ADR-0054: 런타임 WebviewWindow는 config 창과 동일한 WebView2 additionalBrowserArgs를 써야 한다 (환경 옵션 parity 불변식)
 
 - 상태: 확정 (2026-07-08, 근거: GUI 실측 — 스파이크로 단일 변수 반증/실증, EnumWindows 확인)
-- 관련: CLAUDE.md §아키텍처 원칙 §5 · `src-tauri/src/commands/popout.rs:35-43,155-163`(상수 정의 + 적용) · `src-tauri/tauri.conf.json:20,30`(config 창 args) · ADR-0038(비자명 결함 = OSS/교차조사 우선) · ADR-0046(라우팅) · ADR-0035(레이아웃 권위) · step-log 2026-07-08
+- 관련: CLAUDE.md 「아키텍처 원칙」 §5 · `src-tauri/src/commands/popout.rs:35-43,155-163`(상수 정의 + 적용) · `src-tauri/tauri.conf.json:20,30`(config 창 args) · ADR-0038(비자명 결함 = OSS/교차조사 우선) · ADR-0046(라우팅) · ADR-0035(레이아웃 권위) · step-log 2026-07-08
 
 ## 맥락
 슬롯 팝업 분리(`pop_out_slot`)는 런타임에 `WebviewWindowBuilder::build()` 로 새 OS 창을 만든다. 그런데 Windows(WebView2)에서 **런타임 생성 창이 "유령"** 이었다: `build()` 는 `Ok`, Tauri 레지스트리(`getAllWindows()`)엔 등록되는데 **실제 OS 창(HWND)이 생기지 않았다**(Win32 `EnumWindows` — 숨김 포함 열거 — 로 확정: 창 수가 안 늘어남). `tauri.conf.json` 에 선언한 config 창(`main`·`agent-tree`)은 정상 표시되고, **런타임 생성 창만** 유령이었다. 순수 `about:blank` 창(팝업/뷰/라우팅 전부 배제한 스파이크)도 동일하게 유령이라, 원인은 팝업 로직·URL·dev 서버가 아니라 **런타임 창 생성 자체**로 좁혀졌다.

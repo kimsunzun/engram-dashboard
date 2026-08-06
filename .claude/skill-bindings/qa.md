@@ -4,7 +4,7 @@
 
 골격이 "프로젝트 빌드 명령"·"프로젝트 격리 게이트"·"프로젝트 코드 불변식"이라 부르는 자리에 끼우는 **engram 전용 실명령·체크리스트**다. 골격은 스택을 모른다 — 이 파일이 engram(Cargo workspace + Tauri + React)으로 바인딩한다.
 
-> **정본 = CLAUDE.md "빌드·검증 명령" 절 + "GUI 시각/동작 검증" 절.** 이 파일은 그 **현재 바인딩 스냅샷**일 뿐이다 — 충돌하면 CLAUDE.md를 따르고 이 파일을 고친다(rot 방지). 명령을 통째 복붙해 두 출처가 갈리게 만들지 않는다. **예외 — net 격리 게이트(ADR-0129):** CLAUDE.md 의 그 대목은 스스로 "발췌"라 밝히고 게이트 1~3만 싣는다. 그 다섯 게이트의 명령 텍스트·기대값·근거 정본은 **`crates/engram-dashboard-net/src/lib.rs` 헤더**이고, 충돌하면 그 헤더를 따른다(역할 분담의 서술 = `docs/testing-strategy.md` §net).
+> **정본 = CLAUDE.md 「빌드·검증 명령」 절 + 「GUI 실측」 절.** 이 파일은 그 **현재 바인딩 스냅샷**일 뿐이다 — 충돌하면 CLAUDE.md를 따르고 이 파일을 고친다(rot 방지). 명령을 통째 복붙해 두 출처가 갈리게 만들지 않는다. **예외 — net 격리 게이트(ADR-0129):** CLAUDE.md 의 그 대목은 스스로 "발췌"라 밝히고 게이트 1~3만 싣는다. 그 다섯 게이트의 명령 텍스트·기대값·근거 정본은 **`crates/engram-dashboard-net/src/lib.rs` 헤더**이고, 충돌하면 그 헤더를 따른다(역할 분담의 서술 = `docs/testing-strategy.md` §net).
 
 ## 프로젝트 구조 (강도·범위 매핑의 전제)
 
@@ -14,9 +14,22 @@
 **경로 → 강도 매핑(골격 §1 "변경 범위 판정"에 주입):**
 - `crates/<name>/` → 해당 crate(단일이면 quick 후보)
 - `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향)
-- `src/` · `public/` · `index.html` · `package*.json` · `vite.config.*` · `tauri.conf.json` → **UI=full**(cdp 실측)
+- `src/` · `public/` · `index.html` · `package*.json` · `vite.config.*` · `src-tauri/tauri.conf.json` → **UI=full**(cdp 실측)
 - `tests/` → **standard 이상**
+- **산문 문서만 바뀐 경우** → **테스트 게이트 없음.** 테스트는 대상 자체가 없다(실측 2026-08-06: 소스 0 변경에 전체 회귀를 5회 돌려 매번 동일 결과 — 정보량 0). 판정·절차는 아래 「산문 문서 전용」 절.
 - **판정 불가** → standard
+- **★행이 여럿 걸리면 무거운 쪽이 이긴다★** — 위 목록은 평평하다. 한 변경이 `docs/`와 `crates/`를 같이 건드렸으면 문서 행이 아니라 crate 행으로 판정한다.
+
+### 산문 문서 전용 (테스트 게이트 없음)
+
+**적용 조건 — 셋 다 참일 때만:**
+1. **커밋 범위**에 `.rs`·`.ts`·`.tsx`·`.toml`·`.json`·`.html`·`.css`가 **한 파일도 없다.** ★워킹트리가 아니라 커밋 범위로 판정한다★ — `git status --short`만 보면 문서를 먼저 커밋한 뒤엔 트리가 비어 무조건 참이 된다(실발동 2026-08-06). 확인 = `git diff --name-only origin/master...HEAD` + 스테이징분.
+2. 바뀐 파일이 `docs/` · 루트 `*.md` · `.claude/skill-bindings/` 안에 있다. **`.claude/settings*.json`·`tauri.conf.json`·`package.json`·`Cargo.toml`은 "설정"이지만 여기 안 든다** — 위 표의 제 행으로 간다.
+3. 그 변경이 **다른 문서가 실행하는 명령**을 건드리지 않았거나, 건드렸으면 아래 ②를 했다.
+
+**할 것:** ① 조건 1을 기계로 확인한다. ② **변경된 명령만** 문자 그대로 실행해 도는지 본다(문서에 실린 전체 명령을 다 돌리는 게 아니다 — 이번 diff가 손댄 것만). 오탈자 하나로 게이트가 조용히 죽는다.
+
+**★문서 결함을 잡는 게이트는 테스트가 아니라 `/review doc`이다★** — 그쪽은 생략하지 않는다.
 
 **UI/프론트 영향 정의(이것만):** 위 프론트 경로가 닿았거나 **Tauri command/IPC 응답 *형식* 변경**. 이에 해당하면 full(cdp 실측 필수), 그 외 백엔드만이면 standard로 충분.
 

@@ -1,7 +1,7 @@
 # ADR-0061: 프리셋 영속 = 데몬 소유 (presets.json, 프로필 패턴 미러)
 
 - 상태: 확정 (2026-07-10, 근거: pre-PRD 설계-결정 리서치 + 사용자 결정, step-log 2026-07-10)
-- 관련: CLAUDE.md §5(LLM-우선 제어)·아키텍처 §4(AgentManager 소유=데몬) · ADR-0024(`.engram-data/` 위치) · ADR-0029(embedded 제거, 데몬 데이터 단일소유) · ADR-0028(백엔드 이벤트버스 소유) · `crates/engram-dashboard-core/src/persistence/mod.rs`(FileProfileStore 미러 대상) · step-log "에이전트 트리·프리셋"
+- 관련: CLAUDE.md §5(LLM-우선 제어)·CLAUDE.md 「백엔드 모듈 맵」(AgentManager 소유=데몬) · ADR-0024(`.engram-data/` 위치) · ADR-0029(embedded 제거, 데몬 데이터 단일소유) · ADR-0028(백엔드 이벤트버스 소유) · `crates/engram-dashboard-core/src/persistence/mod.rs`(FileProfileStore 미러 대상) · step-log "에이전트 트리·프리셋"
 
 ## 맥락
 

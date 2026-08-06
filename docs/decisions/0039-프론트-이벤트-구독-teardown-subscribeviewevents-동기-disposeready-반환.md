@@ -1,7 +1,7 @@
 # ADR-0039: 프론트 이벤트 구독 teardown — subscribeViewEvents 동기 dispose+ready 반환
 
 - 상태: 확정 (2026-06-28, 근거: cross-family OSS 리서치 + opus/Codex 적대 리뷰)
-- 관련: `src/store/viewStore.ts`(subscribeViewEvents) · `src/store/eventBus.ts`(initEventBus) · `docs/research/async-subscribe-cleanup-race-2026-06-28.md` · ADR-0035(레이아웃 권위=src-tauri) · CLAUDE.md "프론트 구조·제어 표면"
+- 관련: `src/store/viewStore.ts`(subscribeViewEvents) · `src/store/eventBus.ts`(initEventBus) · `docs/research/async-subscribe-cleanup-race-2026-06-28.md` · ADR-0035(레이아웃 권위=src-tauri) · CLAUDE.md 「프론트 구조」
 
 ## 맥락
 S14 레이아웃 슬라이스에서 `subscribeViewEvents`는 `async (): Promise<() => void>`였다 — `await Promise.all([listen(...), listen(...)])`로 두 emit(layout:updated/view:list-updated) 등록을 마친 *뒤에야* disposer를 반환한다. 호출자 `eventBus.initEventBus`는 `unlistenFns.push(await subscribeViewEvents())`로 그 disposer를 받았다.

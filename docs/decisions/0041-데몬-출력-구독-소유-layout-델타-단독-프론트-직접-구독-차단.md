@@ -1,7 +1,7 @@
 # ADR-0041: 데몬 출력 구독 소유 = layout 델타 단독 (프론트 직접 구독 차단)
 
 - 상태: 확정 (2026-07-01, 근거: S14 모듈① 1차 적대 리뷰 BLOCK-1)
-- 관련: CLAUDE.md §아키텍처 §5 · ADR-0035 · ADR-0037 · ADR-0040 · src-tauri/src/commands/agent.rs(forward_daemon_command) · src/api/protocolClient.ts · step-log S14
+- 관련: CLAUDE.md 「아키텍처 원칙」 §5 · ADR-0035 · ADR-0037 · ADR-0040 · src-tauri/src/commands/agent.rs(forward_daemon_command) · src/api/protocolClient.ts · step-log S14
 
 ## 맥락
 출력 구독(데몬에 "이 agent 출력을 보내라"는 wire `Subscribe`/`Unsubscribe`)을 **누가 소유하나**를 확정해야 했다. 창이 여럿이고 같은 agent를 동시에 보는 멀티뷰 구조(ADR-0040)에서, 프론트가 창마다 출력 렌더러를 붙일 때 데몬에 `Subscribe{after_seq:null}`(FromOldest)를 함께 forward 하면, N개 창이 같은 agent를 보면 데몬이 N번 전체 스트림을 재전송한다(중복 폭주 + 진도·순서 혼란). ADR-0035(레이아웃 권위 = src-tauri)·ADR-0037(전송 의미론 = Rust 단독)의 연장선에서 구독 소유권을 못 박을 필요가 있었다.

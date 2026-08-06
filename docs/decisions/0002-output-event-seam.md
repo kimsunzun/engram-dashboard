@@ -1,7 +1,7 @@
 # ADR-0002: 출력 seam = OutputEvent (터미널 가정 금지)
 
 - 상태: 확정 (S10 백엔드 추상화)
-- 관련: CLAUDE.md §2 · `types.rs::OutputEvent` · `Capabilities.output`
+- 관련: CLAUDE.md 「백엔드 확장」 · `types.rs::OutputEvent` · `Capabilities.output`
 
 ## 맥락
 멀티 백엔드(claude/codex 콘솔 + API)의 출력을 무엇으로 모델링할지. 콘솔은 터미널 바이트지만 API는 구조화된 텍스트/usage/tool call이다.

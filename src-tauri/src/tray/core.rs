@@ -1,6 +1,6 @@
 //! tray core — 트레이 동작의 **순수 로직**(OS/GUI/네트워크 무의존).
 //!
-//! 순수성 불변식: tauri/discovery import 0 — 슬라이스/enum 만 다룬다(CLAUDE.md §4).
+//! 순수성 불변식: tauri/discovery import 0 — 슬라이스/enum 만 다룬다(CLAUDE.md 「코어 격리」).
 //! Launcher/DaemonProbe/dispatch 류 seam 은 **의도적 부재** — 통합 앱은 트레이 핸들러가
 //! discovery command 를 직접 부르므로 불필요하다(ADR-0026, TRD §2).
 //! 메뉴 항목은 StartDaemon/StopDaemon + ToggleAutostart + QuitApp 뿐(ADR-0026 — 트레이=앱
@@ -90,7 +90,7 @@ pub fn icon_state_for(alive: bool) -> IconState {
 //
 // 비활성(데몬 죽음) 상태의 회색 아이콘을 컬러 원본에서 파생한다. luma = 0.299R+0.587G+0.114B
 // (Rec.601)로 각 RGB 채널을 동일 값으로 대체하고 alpha 는 보존한다 → R==G==B 인 무채색.
-// image 의존은 GUI shell 에만 두고 core 는 `&[u8]` 슬라이스만 받아 격리를 유지한다(CLAUDE.md §4).
+// image 의존은 GUI shell 에만 두고 core 는 `&[u8]` 슬라이스만 받아 격리를 유지한다(CLAUDE.md 「코어 격리」).
 //
 // `rgba.len()` 은 `w*h*4` 여야 한다(RGBA 4채널). 이 전제는 호출자(Tauri `Image::from_bytes` 로
 // 디코드한 `.rgba()`)가 보장한다 — 디코드 결과가 `(width, height)` 와 정합하는 길이의 버퍼다.

@@ -320,7 +320,7 @@ impl ControlChannel for NoopControlChannel {
 /// 물리 채널(transport)이, session/model은 프로그램(backend)이 결정한다. 예전엔 transport가
 /// session.resume 까지 하드코딩해(claude·shell 무관 resume=true) shell 백엔드가 부정확했다.
 /// 이제 `Capabilities::compose(TransportCaps, BackendCaps)`로만 만들어 출처를 타입으로 강제한다
-/// (CLAUDE.md §2 capability 매트릭스: resize=transport-determined, resume/model=backend-determined).
+/// (CLAUDE.md 「백엔드 확장」 capability 매트릭스: resize=transport-determined, resume/model=backend-determined).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {
     pub input: InputCaps,

@@ -1,7 +1,7 @@
 # ADR-0058: spawn_into 명시 backend = pre-spawn fail-loud (데몬 wire 부재 — 조용한 셸 대체 금지)
 
 - 상태: 확정 (2026-07-09, 근거: 스테이지 5 커밋 88134e2 + /review code full 폐쇄 PASS)
-- 관련: CLAUDE.md §3(backend 지식 격리) · ADR-0004(backend seam) · `src-tauri/src/commands/layout.rs:346-374`(backend fail-loud 가드) · `crates/engram-dashboard-daemon/src/connection_core.rs:852`(SpawnByCwd=기본 셸) · TRD `docs/process/B-wezterm-tabs/TRD.md` §6 D-7 · step-log Phase 2 스테이지 5
+- 관련: CLAUDE.md 「백엔드 확장」(backend 지식 격리) · ADR-0004(backend seam) · `src-tauri/src/commands/layout.rs:346-374`(backend fail-loud 가드) · `crates/engram-dashboard-daemon/src/connection_core.rs:852`(SpawnByCwd=기본 셸) · TRD `docs/process/B-wezterm-tabs/TRD.md` §6 D-7 · step-log Phase 2 스테이지 5
 
 ## 맥락
 Phase 2 탭 스테이지 5의 `spawn_into(window, tab?, slot?, backend?, cwd)`는 스폰+create_tab+슬롯 배정을 한 방에 조립하는 command다(TRD D-7). 시그니처에 `backend` 인자가 있으나, 실제 데몬 스폰 wire인 `SpawnByCwd{cwd}`(`connection_core.rs:852`)는 **cwd만 받고 backend 선택 인자가 없다** — 데몬은 무조건 기본 백엔드(현재 `default_shell()`)를 스폰한다. 즉 command 표면엔 backend 선택이 있는데 데몬까지 그 의도를 전달할 통로가 없다. 호출자가 `backend="claude"`를 넘겨도 실제로는 셸이 뜬다.
