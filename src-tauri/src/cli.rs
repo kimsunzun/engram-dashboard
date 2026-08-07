@@ -6,8 +6,8 @@
 //! 메시지를 보내거나(A→B) 새 에이전트를 스폰하려면 이 CLI 통로가 필요하다 — node 스크립트도,
 //! 하드코딩 경로도 없이 자기 자신(exe)을 재실행해 데몬에 붙는다.
 //!
-//! 이 모듈은 `scripts/engram.mjs`(throwaway node 스파이크)의 Rust 이식이다 — daemon.json 발견 →
-//! Auth 핸드셰이크 → AgentCommand JSON 송신 → reply 매칭. 스파이크는 롤백 대상이고 이 exe 가 자립한다.
+//! 이 모듈은 `scripts/engram.mjs`(throwaway node 스파이크)의 Rust 이식이다. 스파이크는 롤백 대상이고
+//! 이 exe 가 자립한다.
 //!
 //! ## GUI 경로 불변(load-bearing)
 //! `main.rs` 가 argv 첫 인자를 보고 **알려진 CLI verb 일 때만** 이 모듈로 분기한다. 그 외(인자 없음·
@@ -31,9 +31,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-/// 알려진 CLI verb 인가 — main.rs 가 GUI/CLI 분기 판정에 쓴다. 여기 없는 첫 인자(예: `--hidden`)는
-/// GUI 경로로 넘어간다(CLI 가 아님). ★이 목록이 GUI 인자와 겹치지 않아야 한다★ — 겹치면 GUI 인자를
-/// CLI 로 오인해 창이 안 뜬다. 현재 GUI 인자는 `--hidden` 뿐이라 충돌 없음.
+/// ★이 목록이 GUI 인자와 겹치지 않아야 한다★ — 겹치면 GUI 인자를 CLI 로 오인해 창이 안 뜬다.
+/// 현재 GUI 인자는 `--hidden` 뿐이라 충돌 없음.
 pub fn is_cli_verb(arg: &str) -> bool {
     matches!(arg, "list" | "send" | "spawn" | "kill")
 }
@@ -177,11 +176,9 @@ struct ResolvedAgent {
     id: uuid::Uuid,
     label: String,
     cwd: String,
-    /// status 를 문자열로 평탄화(Running/Exited{code}/… — 출력용).
     status: String,
 }
 
-/// ListAgents 를 조회해 canonical label 을 만든다.
 /// ★ADR-0101 (WYSIWYA): label = canonical AgentInfo.name★ — 데몬이 이미 display_name ?? basename(
 ///   session.cwd)로 파생한 값이라, 이게 트리·라우팅(resolve_recipient)이 쓰는 문자열과 동일하다.
 ///   예전엔 profile.name(종종 full-path 라벨)을 우선해 display_name 미설정 시 옛 경로 문자열을
@@ -262,7 +259,7 @@ async fn list_agents(conn: &mut Connection) -> Result<Vec<AgentInfo>, String> {
     }
 }
 
-// ── one-shot WS connection (connect → Auth → Hello) ───────────────────────────────
+// ── one-shot WS connection ───────────────────────────────────────────────────────
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -276,7 +273,6 @@ struct Connection {
 impl Connection {
     async fn open() -> Result<Self, String> {
         // ★spawn 안 함(ADR-0021 대칭)★: read_live_daemon 은 살아있는 호환 데몬의 daemon.json 만 읽는다.
-        //   없으면(파일 없음/죽음/버전 불일치) None → 명확한 에러("데몬 없음").
         let data_dir = engram_dashboard_discovery::default_data_dir();
         let info: DaemonInfo =
             engram_dashboard_discovery::read_live_daemon(&data_dir).ok_or_else(|| {
@@ -303,7 +299,7 @@ impl Connection {
             .map_err(|e| format!("Auth 전송 실패: {e}"))?;
 
         let mut conn = Connection { ws };
-        // Hello(=인증 성공) 대기. Error(토큰/버전 불일치)면 실패. 5s 상한(loopback 정상은 <1s).
+        // 5s 상한(loopback 정상은 <1s).
         match conn.next_control(Duration::from_secs(5)).await? {
             AgentEvent::Hello { .. } => Ok(conn),
             AgentEvent::Error { message, .. } => Err(format!("auth failed: {message}")),
@@ -319,7 +315,6 @@ impl Connection {
             .map_err(|e| format!("command 전송 실패: {e}"))
     }
 
-    /// request_id 가 일치하는 reply(또는 request_id 없는 Error)를 timeout 내 대기한다.
     /// request_id 없는 broadcast(AgentListUpdated/StatusChanged/…)와 다른 request_id reply 는 건너뛴다.
     async fn wait_reply(
         &mut self,
@@ -338,7 +333,6 @@ impl Connection {
         }
     }
 
-    /// 다음 **제어(Text JSON)** 프레임 1개를 timeout 내 수신해 AgentEvent 로 파싱한다.
     /// Binary(터미널 출력)·Ping/Pong 은 건너뛴다. 소켓 닫힘·타임아웃은 Err.
     async fn next_control(&mut self, timeout: Duration) -> Result<AgentEvent, String> {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -451,7 +445,6 @@ mod tests {
         let other = RequestId::new();
         assert!(reply_matches(&AgentEvent::Ack { request_id: rid }, rid));
         assert!(!reply_matches(&AgentEvent::Ack { request_id: other }, rid));
-        // request_id 없는 전역 Error 는 수용(one-shot 명령 실패).
         assert!(reply_matches(
             &AgentEvent::Error {
                 request_id: None,
