@@ -5,8 +5,6 @@ use ts_rs::TS;
 
 use crate::ids::{AgentId, PresetId, ProfileId};
 
-/// 에이전트 생명주기 상태 — internally-tagged(`type`). 프론트 discriminated union.
-/// core(types.rs) AgentStatus 와 글자 그대로 일치.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type")]
 #[ts(export)]
@@ -18,7 +16,7 @@ pub enum AgentStatus {
     Killed,
 }
 
-/// 영역별 capability(bool 폭증 방지). 슬롯이 렌더러/UI 분기에 사용.
+/// 영역별 capability(bool 폭증 방지).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct Capabilities {
@@ -41,7 +39,7 @@ pub struct InputCaps {
 #[ts(export)]
 pub struct OutputCaps {
     pub terminal_bytes: bool,
-    /// 구조화 스트림(NDJSON) 여부 — M2 렌더러 분기(xterm vs RichSlot)를 위한 신호(ADR-0044). core 미러.
+    /// 구조화 스트림(NDJSON) 여부(ADR-0044).
     /// `#[serde(default)]`(FIX 3): M1 에서 새로 추가된 필드라, 이 필드가 없는 옛 wire(구 데몬/프론트)를
     /// 받아도 관용적으로 false 로 역직렬화한다(sibling `output_format` 과 같은 additive·tolerant 접근 —
     /// PROTOCOL_VERSION 유지). ts-rs 는 serde(default) 를 optional 로 표기하지 않으므로 TS 는 여전히
@@ -78,8 +76,7 @@ pub struct ModelCaps {
     pub max_tokens: bool,
 }
 
-/// 에이전트 메타데이터 스냅샷 — AgentListUpdated 및 연결 직후 list 스냅샷에 실림.
-/// core(types.rs) AgentInfo 와 일치. epoch 는 재구독 트리거(`[agentId,epoch]`).
+/// epoch 는 재구독 트리거(`[agentId,epoch]`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct AgentInfo {
@@ -95,7 +92,6 @@ pub struct AgentInfo {
     pub capabilities: Capabilities,
 }
 
-/// 복원 결말 — core(profile.rs) RestoreOutcome 미러(`type` tag).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type")]
 #[ts(export)]
@@ -115,7 +111,6 @@ pub enum RestoreOutcome {
     },
 }
 
-/// 복원 시도 결과 통지(AgentEvent::RestoreResult 페이로드).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct RestoreReport {
@@ -127,13 +122,11 @@ pub struct RestoreReport {
 
 // ── 프로필 wire 미러(phase4 1단계) ──────────────────────────────────────────────
 //
-// core(profile.rs) 의 AgentProfile/AgentCommand/RestartPolicy 직렬화 형태를 그대로 미러한다.
 // core 는 protocol 무의존(§1 불변)이라 core 타입을 여기 쓸 수 없다 — 그래서 같은 JSON 형태의
 // 독립 타입을 두고, core↔wire 명시 변환은 데몬이 한다(reflection 왕복 금지 — agent_info_to_wire 패턴).
 // 프론트 `src/api/types.ts` 의 AgentProfile/AgentCommand/RestartPolicy 와 글자 그대로 일치.
 
-/// claude 출력 포맷 wire 미러 — core `profile::ClaudeOutputFormat` 와 동일(ADR-0044).
-/// Terminal=PTY 대화형, StreamJson=헤드리스 NDJSON. 프론트 `src/api/types.ts` 와 글자 그대로 일치.
+/// Terminal=PTY 대화형, StreamJson=헤드리스 NDJSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum ClaudeOutputFormat {
@@ -143,8 +136,7 @@ pub enum ClaudeOutputFormat {
 }
 
 /// 봉투 포맷 wire 타입(ADR-0096/0103) — 데몬이 A→B 메시지를 감쌀 때 쓰는 형식 스위치의 값.
-/// `Xml` = `<message from="{sender}" ...>{body}</message>`(운영 기본, ADR-0103), `Colon` = `{sender}: {body}`
-/// (잔존 스위치). 렌더 규칙(정확한 문자열·속성)은 데몬 `control::ingress` 단독 소유 — 이 wire 타입은 스위치
+/// 렌더 규칙(정확한 문자열·속성)은 데몬 `control::ingress` 단독 소유 — 이 wire 타입은 스위치
 /// 값만 나른다(설계·조립은 데몬, 이 crate 는 순수 wire 계약). 실제 렌더 enum(데몬측)과 이름은 같으나 별개 타입.
 ///
 /// ★serde lowercase(load-bearing)★: `#[serde(rename_all="lowercase")]` 라 wire JSON 이 `"colon"`/`"xml"`
@@ -154,8 +146,6 @@ pub enum ClaudeOutputFormat {
 /// ★기본 = Xml★: `#[default]` — 데몬 전역 상태 초기값(ADR-0103 기본 flip)과 정합. wire default 자체는
 /// SetEnvelopeFormat.format 이 `#[serde(default)]` 아님(항상 명시)이라 배선상 안 쓰이나, 운영 기본과 어긋나면
 /// `EnvelopeFormat::default()` 를 부르는 미래 코드가 오해하므로 데몬 기본과 동일하게 맞춘다.
-// ADR-0103 (wire default flip Colon→Xml — 데몬 운영 기본과 정합)
-// ADR-0096
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
@@ -167,13 +157,13 @@ pub enum EnvelopeFormat {
     Colon,
 }
 
-/// 에이전트 실행 명령 wire 미러 — core `profile::AgentCommand` 와 동일(`#[serde(tag="kind")]`).
+/// core `profile::AgentCommand` 와 동일.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export)]
 pub enum AgentSpawnCommand {
-    /// claude CLI. extra_args 는 세션 인자를 제외한 사용자 추가 인자.
-    /// output_format 은 터미널/JSON 모드(ADR-0044) — `#[serde(default)]` 라 옛 프로필은 Terminal.
+    /// extra_args 는 세션 인자를 제외한 사용자 추가 인자.
+    /// output_format 은 `#[serde(default)]` 라 옛 프로필은 Terminal.
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
@@ -185,7 +175,6 @@ pub enum AgentSpawnCommand {
     },
 }
 
-/// 자동 재시작 정책 wire 미러 — core `profile::RestartPolicy` 와 동일.
 /// **예약(reserved) — 죽은 필드 아님.** 동작 미구현이나 ADR-0016 "추후 재검토" 유효(2026-06-18 결정).
 /// 제거 시 core·ts-rs 바인딩·프론트 동반 + PROTOCOL_VERSION bump 유발 → 제거 금지.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
@@ -196,8 +185,6 @@ pub enum RestartPolicy {
     Always,
 }
 
-/// 영속 프로필 wire 미러 — core `profile::AgentProfile` 의 직렬화 형태와 일치.
-/// 프로필 CRUD command/event(ProfileListUpdated)에 실린다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct AgentProfile {
@@ -205,30 +192,28 @@ pub struct AgentProfile {
     pub id: ProfileId,
     pub name: String,
     /// 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). `Some` → 그대로 표시, `None` → cwd
-    /// basename 파생(기존 동작 불변). core `AgentProfile::display_name` 미러. 프론트 트리가 `name` 대신
+    /// basename 파생(기존 동작 불변). 프론트 트리가 `name` 대신
     /// 이 값을 우선 표시명으로 쓴다(`name` 은 CreateProfile 이름/ad-hoc cwd 문자열이라 표시명 부적합).
     #[serde(default)]
     #[ts(type = "string | null")]
     pub display_name: Option<String>,
     /// 트리 계층 부모 프로필 id(ADR-0072). `Some` → 이 프로필은 해당 부모의 자식(트리 들여쓰기), `None` →
-    /// 최상위(루트). core `AgentProfile::parent_id` 미러. 1단 중첩·부모삭제=루트승격 규칙은 데몬(reparent).
+    /// 최상위(루트). 1단 중첩·부모삭제=루트승격 규칙은 데몬(reparent).
     /// `#[serde(default)]` 라 이 필드 없는 옛 wire → None(루트, PROTOCOL_VERSION 유지 — display_name 과 동형).
     #[serde(default)]
     #[ts(type = "string | null")]
     pub parent_id: Option<ProfileId>,
     pub command: AgentSpawnCommand,
-    /// 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
+    /// 정규화된 cwd.
     pub cwd: String,
     /// ※자격증명 금지(평문 persist).
     pub env: Vec<(String, String)>,
     #[ts(type = "string | null")]
     pub claude_session_id: Option<String>,
-    /// 폐기된 과거 세션 id 이력.
     #[ts(type = "string[]")]
     pub old_session_ids: Vec<String>,
     pub epoch: u32,
     pub auto_restore: bool,
-    /// **예약(reserved)** — 동작 미구현, 제거 금지(RestartPolicy 주석 참조).
     pub restart_policy: RestartPolicy,
     /// 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 유효.
     pub restart_count: u32,
@@ -244,30 +229,22 @@ pub struct AgentProfile {
 }
 
 // ── 프리셋 wire 미러(ADR-0061) ──────────────────────────────────────────────────
-//
-// core(preset.rs) 의 Preset 직렬화 형태를 그대로 미러한다. core 는 protocol 무의존(§1 불변)이라
-// core 타입을 여기 쓸 수 없다 — 같은 JSON 형태의 독립 타입을 두고, core↔wire 명시 변환은 데몬이
-// 한다(profile_to_wire 패턴 동일). 프로필과 1:1 대응하는 최소 스키마 `{ id, cwd }`(이름 파생 — ADR-0061).
 
-/// 영속 프리셋 wire 미러 — core `preset::Preset` 의 직렬화 형태와 일치(ADR-0061). 프리셋 CRUD
-/// command/event(PresetList/PresetListUpdated)에 실린다. cwd 는 PathBuf 의 JSON 표현(문자열).
-/// 이름은 저장하지 않고 프론트가 cwd basename 으로 파생한다(ADR-0061).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct Preset {
     #[ts(type = "string")]
     pub id: PresetId,
-    /// 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
+    /// 정규화된 cwd.
     pub cwd: String,
     /// 사용자 지정 표시명 override(ADR-0061 리치화). `Some` → 그대로 표시, `None` → cwd basename 파생
-    /// (기존 동작 불변). core `preset::Preset::name` 미러. rename command 가 set/clear 한다.
+    /// (기존 동작 불변).
     #[serde(default)]
     #[ts(type = "string | null")]
     pub name: Option<String>,
 }
 
-/// 출력 스냅샷 청크 wire 미러 — core `types::OutputChunk`({seq, data}) 와 일치.
-/// GetSnapshot 응답(AgentEvent::Snapshot)에 실린다. JSON 경로라 data 는 number[].
+/// core `types::OutputChunk` 와 일치.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct SnapshotChunk {

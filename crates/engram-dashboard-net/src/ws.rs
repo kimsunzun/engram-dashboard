@@ -25,9 +25,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-// ★auth 핸드셰이크 = 이 crate 가 의미를 아는 유일한 프레임(ADR-0129 결정 1, 0-4 완료)★: 프레임 모양은
-//   `crate::auth` 가 소유하고, 기대 프로토콜 버전은 **값으로 주입**받는다(아래 `handle_connection`).
-//   그래서 이 파일엔 위층 명령 enum 도 버전 상수도 없다 — 그 상태를 lib.rs 헤더의 게이트 4 가 못 박는다.
 use crate::auth::AuthFrame;
 
 use crate::frame_port::{
@@ -49,21 +46,18 @@ use tokio_tungstenite::tungstenite::Message;
 /// replay 전체가 들어가도 control 여유가 남게 한다(output_core.rs 불변식과 정합).
 const CONN_TX_CAP: usize = 4608;
 
-/// auth 첫 frame 대기 한도. 이 안에 Auth Text 가 안 오면 close.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// 운영 기본 keepalive 주기 — 데몬이 능동 WS Ping 을 보내는 간격.
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(20);
-/// 운영 기본 idle 한도 — 마지막 클라 수신 후 이 시간 넘게 무응답이면 half-open 으로 보고 close.
 /// ping_interval 의 2.5배(여러 Ping 을 놓쳐야 끊김 — 일시 지연 위양성 방지).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
 
-/// WS application-level keepalive 설정(A). 능동 Ping 주기 + idle 한도.
+/// WS application-level keepalive 설정(A).
 ///
 /// ★half-open 감지★: tungstenite 는 들어온 Ping 에 자동 Pong 만 하고 능동 Ping 은 안 보낸다.
 /// FIN 없이 끊기는 연결(sleep/wake·NAT 타임아웃·모바일 터널)에서 TCP keepalive(기본 2시간)는
 /// 무의미하므로, write_task 가 ping_interval 마다 Ping 을 보내고 read_task 가 마지막 수신 시각을
-/// 기록한다. idle_timeout 초과면 close_signal 로 그 연결을 끊는다(좀비 구독/broadcast 누수 방지).
+/// 기록한다. idle_timeout 초과면 그 연결을 끊는다(좀비 구독/broadcast 누수 방지).
 ///
 /// ★테스트 주입★: 상수 하드코딩이면 테스트가 수십 초 걸리므로, 짧은 값(예 200ms/600ms)을
 /// 주입할 수 있게 설정 가능하게 둔다. 운영 경로는 `default()`(20s/50s) 그대로.
@@ -82,7 +76,6 @@ impl Default for KeepaliveConfig {
     }
 }
 
-/// 허용 Origin allowlist(기본). Origin 없음(네이티브/하네스)은 허용 — 토큰이 주 방어.
 const ALLOWED_ORIGINS: &[&str] = &[
     "http://localhost:1420",
     "http://127.0.0.1:1420",
@@ -90,9 +83,6 @@ const ALLOWED_ORIGINS: &[&str] = &[
     "https://tauri.localhost",
 ];
 
-/// 전-연결 팬아웃용 연결 레지스트리. connect 시 등록, disconnect 시 제거.
-/// 위층은 `FrameFanout`(아래 impl)으로만 이 맵에 닿아 전 연결 conn_tx 에 try_send 한다 — 실린 text 가
-/// 무엇인지(상태 통지든 목록 갱신이든)는 이 파일의 관심사가 아니다.
 #[derive(Clone)]
 pub struct ConnRegistry {
     inner: Arc<Mutex<HashMap<ConnId, mpsc::Sender<Frame>>>>,
@@ -135,23 +125,15 @@ impl ConnRegistry {
     }
 }
 
-/// 전-연결 팬아웃 포트의 WS 구현. 위층은 이 trait 으로만 레지스트리에 닿으므로 등록·해제·id 발급
-/// (연결 수명 = 네트워크 살림)에는 손이 닿지 않는다.
-// ADR-0129
 impl FrameFanout for ConnRegistry {
-    /// 전 연결에 Text 브로드캐스트(try_send). full 인 연결은 느린 것으로 보고 로그만.
-    ///
     /// ★맵을 잠근 채 보내지 않는다(ADR-0006 락 순서)★: 스냅샷을 뜬 뒤 락을 놓고 그 사본으로 send 한다
     ///   — 락 보유 중 외부(채널)로 나가는 호출을 만들지 않기 위해서다.
-    /// ★포화를 연결 종료로 잇지 않는다★: 연결당 `ConnFrameSink::try_send` 는 여기서 close_signal 을
-    ///   울리지만 팬아웃은 로그만 남기고 다음 연결로 간다(`FrameFanout` 계약의 비대칭).
     fn broadcast_text(&self, text: String) {
         let conns: Vec<(ConnId, mpsc::Sender<Frame>)> = {
             let guard = self.inner.lock().expect("conn registry poisoned");
             guard.iter().map(|(id, tx)| (*id, tx.clone())).collect()
         };
         for (id, tx) in conns {
-            // try_send 만 — 위층 호출자가 pump/manager 스레드(sync)일 수 있어 block 금지(`FrameFanout` 의무 1).
             if let Err(e) = tx.try_send(Frame::Text(text.clone())) {
                 tracing::warn!(conn = id, "전-연결 팬아웃 try_send 실패(느린 소비자): {e}");
             }
@@ -167,17 +149,8 @@ impl Default for ConnRegistry {
 
 // ── ConnFrameSink(연결당 프레임 출구 — 프레임 포트의 WS 구현) ──────────────────────
 
-/// 한 연결의 단일 writer 큐를 `FrameSink` 로 노출한다. 위층(에이전트 시스템)은 이걸 통해서만
-/// 내보내므로 프레임에 실린 어휘가 무엇이든 이 파일은 모른다.
-///
-/// ★R6 close_signal(out-of-band)★: `try_send` 가 큐 포화를 만나면 `FrameError` 를 돌려주면서
-/// close_signal 을 notify 해 write_task 가 큐가 막혀도 깨어 닫게 한다(WS-특정 처리라 여기 잔류).
-/// `send`(backpressure 허용)는 기다릴 수 있는 호출자이므로 신호하지 않는다 — 이 비대칭이 계약이다.
-// ADR-0129
 pub(crate) struct ConnFrameSink {
     conn_tx: mpsc::Sender<Frame>,
-    /// 큐 밖 종료 신호. full 감지 시 notify_one — write_task 가 큐가 막혀도 깨어 닫는다.
-    /// ★pump 스레드(sync)에서 notify_one 호출 OK — Notify 는 sync-safe.
     close_signal: Arc<Notify>,
 }
 
@@ -215,7 +188,6 @@ impl Callback for OriginCheck {
     fn on_request(self, request: &Request, response: Response) -> Result<Response, ErrorResponse> {
         match request.headers().get("origin") {
             None => {
-                // Origin 없음 = 네이티브/하네스 클라이언트. 토큰이 주 방어이므로 허용.
                 tracing::debug!("WS upgrade: Origin 없음 — 허용(토큰 검증으로 방어)");
                 Ok(response)
             }
@@ -225,8 +197,6 @@ impl Callback for OriginCheck {
                     tracing::debug!(origin, "WS upgrade: Origin 허용");
                     Ok(response)
                 } else {
-                    // ★TODO(실측)★: 실제 Tauri WebView2/모바일이 보내는 Origin 문자열을 실측해
-                    // allowlist 를 확정할 것(설계값 기준). 불일치 = 거부.
                     tracing::warn!(origin, "WS upgrade: Origin 불일치 — 거부");
                     let mut resp = ErrorResponse::new(Some("origin not allowed".into()));
                     *resp.status_mut() = StatusCode::FORBIDDEN;
@@ -239,8 +209,7 @@ impl Callback for OriginCheck {
 
 // ── 상수시간 토큰 비교 ──────────────────────────────────────────────────────────
 
-/// 토큰 상수시간 비교 — 길이 먼저(다르면 즉시 false), 같으면 바이트 XOR 누적으로
-/// timing 부채널을 줄인다. 길이 노출은 토큰 길이가 고정(hex 64자)이라 무해.
+/// 길이 노출은 토큰 길이가 고정(hex 64자)이라 무해.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
@@ -256,9 +225,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 // ── 연결 핸들러 ────────────────────────────────────────────────────────────────
 
-/// 연결 1개의 전 수명을 처리한다. accept 된 raw TCP stream 을 받아:
-/// WS 업그레이드 → auth → 핸들러 부착 → read/write task → cleanup.
-///
 /// `expected_token` 은 daemon.json 의 토큰. `handlers` 는 이 연결에 붙일 위층 핸들러 공장 —
 /// 프레임의 의미(명령 해석·이벤트 인코딩·연결 정리)는 전부 그쪽이 소유하므로, 이 함수는 에이전트
 /// 어휘를 알지 못한다(ADR-0129).
@@ -266,7 +232,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// ★`expected_protocol_version` 도 **주입**이다(0-4)★: 토큰과 같은 결로 조립부가 값을 넣어 준다.
 /// 그래서 이 crate 는 "지금 버전이 몇" 을 모르고 **"클라가 말한 숫자가 내가 받은 숫자와 같은가"** 만
 /// 판정한다 — 버전 상수를 여기서 읽으면 그 순간 프로토콜 어휘가 네트워크 행으로 돌아온다.
-// ADR-0129
 pub async fn handle_connection(
     stream: TcpStream,
     peer: std::net::SocketAddr,
@@ -276,7 +241,6 @@ pub async fn handle_connection(
     expected_protocol_version: u32,
     keepalive: KeepaliveConfig,
 ) {
-    // 1) WS 업그레이드 + Origin 검사.
     let mut ws = match tokio_tungstenite::accept_hdr_async(stream, OriginCheck).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -285,7 +249,6 @@ pub async fn handle_connection(
         }
     };
 
-    // 2) 첫 frame(1초 내) → Auth 파싱 + 토큰 상수시간 비교 + 버전 검사.
     match tokio::time::timeout(AUTH_TIMEOUT, ws.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<AuthFrame>(&text) {
@@ -293,7 +256,7 @@ pub async fn handle_connection(
                     token,
                     protocol_version,
                 }) => {
-                    // 토큰 비교(상수시간). 보안: 토큰 값은 로그 금지.
+                    // 보안: 토큰 값은 로그 금지.
                     if !constant_time_eq(&token, expected_token.as_str()) {
                         tracing::warn!(%peer, "auth 실패: 토큰 불일치 — close");
                         let _ = send_error_and_close(
@@ -321,14 +284,11 @@ pub async fn handle_connection(
                     }
                     tracing::info!(%peer, "auth 성공");
                 }
-                // ★두 실패 문구의 경계가 0-4 로 옮겨졌다(의도)★: 예전엔 "위층 명령으로는 파싱되지만
-                //   auth 가 아님" 이 앞 문구였다. 이제 이 crate 는 위층 명령을 모르므로 그 판정을 못 한다 —
+                // ★두 실패 문구의 경계★: 이 crate 는 위층 명령을 모르므로 "위층 명령으로는 파싱되지만
+                //   auth 가 아님" 을 판정하지 못한다 —
                 //   대신 serde 가 이미 계산해 둔 에러 분류를 쓴다(재파싱 0):
                 //     · data 에러  = JSON 은 맞는데 이 모양이 아님 → "auth 를 기대했다"
                 //     · 그 밖(syntax/eof/io) = 애초에 JSON 이 아님 → "프레임 자체가 잘못됐다"
-                //   그래서 **JSON 으로 파싱되면서 온전한 `AuthFrame` 이 아닌 것 전부**가 뒤 문구에서 앞
-                //   문구로 옮겨간다 — 필드가 빠진 auth 프레임(`{"Auth":{"token":"x"}}`)과 본문이 깨진
-                //   위층 명령(`{"Kill":{"agent_id":1}}`)까지 포함이다(옛 코드는 그 둘을 뒤 문구로 냈다).
                 //   이 문구를 단언하는 테스트는 없고(핸드셰이크 실패는 close 로 관측된다) 발신자 중
                 //   어느 것도 문구로 분기하지 않는다 — 사람이 읽는 진단 텍스트다.
                 // ★에러를 `{e}` 로 싣지 않는다★: `{"Auth":"<토큰>"}` 의 Display 는 그 문자열을 그대로
@@ -392,9 +352,7 @@ pub async fn handle_connection(
         }
     }
 
-    // 3) conn_tx/rx 생성 + close_signal + 레지스트리 등록 + split.
     let (conn_tx, conn_rx) = mpsc::channel::<Frame>(CONN_TX_CAP);
-    // ★out-of-band 종료 신호★: 큐 포화로 `Frame::Close` 마저 못 들어갈 때 write_task 를 깨운다.
     let close_signal = Arc::new(Notify::new());
     let conn_id = registry.alloc_id();
     registry.register(conn_id, conn_tx.clone());
@@ -402,17 +360,11 @@ pub async fn handle_connection(
 
     let (sink_half, stream_half) = ws.split();
 
-    // 3b) 프레임 출구 + 위층 핸들러 부착. 이 연결의 모든 출력은 frames(단일 writer 큐)로만 나가고,
-    //     들어온 프레임의 의미 해석은 handler 가 소유한다(ADR-0129 — 이 함수는 어휘를 모른다).
     let frames: Arc<dyn FrameSink> =
         Arc::new(ConnFrameSink::new(conn_tx.clone(), close_signal.clone()));
     let handler = handlers.handler_for(conn_id);
 
-    // 4) 연결 직후 인사·초기 상태 push(단일 writer 큐 경유 — 이후 모든 출력과 FIFO 정렬).
-    //    ★소비자보다 먼저다★: write_task 는 아직 없으므로 여기서 넣은 프레임은 큐에 쌓이기만 한다
-    //    (그 제약이 ConnectionHandler::on_connect 의 계약). 순서상 여기가 두 task 스폰보다 앞이어야
-    //    명령 dispatch 가 인사보다 앞설 수 없다. ★단 "연결의 첫 프레임" 보장은 아니다★ — 등록이 이미
-    //    끝났으므로 전-연결 팬아웃이 그 사이 큐에 먼저 들어갔을 수 있다.
+    // 순서상 여기가 두 task 스폰보다 앞이어야 명령 dispatch 가 인사보다 앞설 수 없다.
     handler.on_connect(conn_id, &frames).await;
     // ★관측만 하고 흐름은 바꾸지 않는다★: 패닉을 쓰지 않는 이유는 여기서 죽으면 아래 정리 훅과
     //   레지스트리 해제를 통째로 건너뛴 채 죽은 큐가 fanout 대상으로 남기 때문이다(HEAD 에 없던 종료 경로).
@@ -434,8 +386,6 @@ pub async fn handle_connection(
     let keepalive_base = tokio::time::Instant::now();
     let last_recv = Arc::new(AtomicU64::new(0));
 
-    // read_task: stream_half 에서 프레임을 읽어 handler 로 올린다. 응답은 handler 가 frames 로
-    //   큐잉하므로 read_task 자신은 소켓에 직접 쓰지 않는다.
     let mut read_handle = tokio::spawn(read_task(
         stream_half,
         frames,
@@ -445,8 +395,6 @@ pub async fn handle_connection(
         last_recv.clone(),
     ));
 
-    // write_task: conn_rx 에서 받은 프레임을 sink_half 로 순서대로 write(단일 writer).
-    //   close_signal 발동 시 큐가 막혀 있어도 깨어 닫는다(좀비 방지). keepalive Ping 도 여기서 송신.
     let mut write_handle = tokio::spawn(write_task(
         sink_half,
         conn_rx,
@@ -457,7 +405,7 @@ pub async fn handle_connection(
         last_recv,
     ));
 
-    // 5) 하나라도 끝나면 cleanup. ★살아남은 쪽을 명시적으로 abort★ — JoinHandle 을 그냥 drop 하면
+    // ★살아남은 쪽을 명시적으로 abort★ — JoinHandle 을 그냥 drop 하면
     //    task 가 detach 되어 계속 돈다(WS half 를 붙든 채 좀비). 그래서 &mut 로 select 해 핸들을
     //    소비하지 않고, 진 쪽을 abort 한다(연결의 read/write 가 함께 끝나게).
     //    회귀 방어 = `the_losing_task_is_aborted_not_detached`(read 를 abort 하는 갈래만).
@@ -477,13 +425,6 @@ pub async fn handle_connection(
     }
 
     // ── cleanup(누수 방지 — 리뷰 필수) ──────────────────────────────────────────
-    // 위층 정리(구독 해제·viewport 재협상·lease 반납)가 **먼저**, 레지스트리 제거가 **나중**이다.
-    // ★이 순서에 배달 정합성이 걸려 있지는 않다★: 브로드캐스트는 맵 스냅샷으로 돌아 다른 연결이
-    // 받는 것은 순서와 무관하고, 이 연결 자신의 몫은 배달을 전제할 수 없다(writer 가 먼저 끝난
-    // 갈래면 확실히 버려지고, reader 가 먼저 끝난 갈래면 abort 가 먹기 전에 나갈 수도 있다 —
-    // ConnectionHandler::on_disconnect 문서). 순서를 지키는 이유는 순수 리팩터로 두려는 것뿐이다.
-    // ★위 abort 는 완료를 기다리지 않는다★: 취소된 read_task 가 아직 핸들러 호출 안에 있을 수 있어
-    // on_disconnect 와 겹칠 수 있다(HEAD 도 동일한 잔여 경쟁 — ConnectionHandler 문서).
     handler.on_disconnect(conn_id);
 
     registry.unregister(conn_id);
@@ -491,7 +432,6 @@ pub async fn handle_connection(
 }
 
 /// 핸드셰이크 실패 통보 + close 를 소켓에 직접 쓴다(레지스트리 등록 전이라 단일 writer 큐가 없다).
-/// `frame` 은 위층이 인코딩한 불투명 text — None 이면 본문 없이 close 만 한다.
 async fn send_error_and_close(
     ws: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
     frame: Option<String>,
@@ -507,14 +447,6 @@ async fn send_error_and_close(
 type SinkHalf =
     futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>;
 
-/// conn_rx 에서 받은 출력을 sink_half 로 순서대로 write. 이게 이 연결의 유일한 writer.
-/// 종료 트리거 3가지: (1) 큐 안의 `Frame::Close`, (2) sink send 실패, (3) close_signal.
-///
-/// ★out-of-band 종료(M1 핵심)★: conn_tx 가 full 이면 `Frame::Close` 마저 큐에 못 들어가
-/// 좀비 연결이 된다. 그래서 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를
-/// 동시에 대기한다. `ConnFrameSink` 가 try_send 에서 full 을 만나 `close_signal.notify_one()` 하면, 큐가
-/// 가득 차 있어도 이 select 가 깨어 sink_half.close() 후 break → cleanup 으로 이어진다.
-///
 /// ★알려진 구멍 — 진행 중인 소켓 write 는 이 신호로 끊기지 않는다(HEAD 도 동일, 이 슬라이스 범위 밖)★:
 /// recv arm 은 프레임을 꺼낸 **뒤** `sink_half.send(msg).await` 를 **select! 밖**(arm 본문)에서 기다린다.
 /// 인증된 피어가 읽기를 멈추면 그 send 가 무기한 pending 일 수 있고, 그 동안 이 task 는 select! 를
@@ -532,28 +464,22 @@ async fn write_task(
     keepalive_base: tokio::time::Instant,
     last_recv: Arc<AtomicU64>,
 ) {
-    // ★keepalive Ping 주기(A)★: ping_interval 마다 능동 Ping 을 보낸다(half-open 감지).
-    //   tick 마다 마지막 수신 후 경과가 idle_timeout 초과면 close_signal 로 이 연결을 끊는다.
     let mut ping_tick = tokio::time::interval(keepalive.ping_interval);
     // 첫 tick 즉발 방지(연결 직후 바로 Ping 쏘지 않게) — 정상 첫 주기부터.
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
-            // 큐 밖 종료 신호 — full 로 큐가 막혀 있어도 여기로 깨어 닫는다.
             _ = close_signal.notified() => {
                 tracing::info!(conn = conn_id, "write_task: close_signal(슬로우 소비자) — 종료");
                 let _ = sink_half.close().await;
                 break;
             }
-            // keepalive: 주기적 능동 Ping + idle 판정.
             _ = ping_tick.tick() => {
-                // idle 판정: 마지막 클라 수신(Pong 또는 임의 메시지) 이후 경과.
                 let now_ms = keepalive_base.elapsed().as_millis() as u64;
                 let last_ms = last_recv.load(Ordering::Acquire);
                 let idle = Duration::from_millis(now_ms.saturating_sub(last_ms));
                 if idle >= keepalive.idle_timeout {
-                    // half-open 추정 — Pong 미응답이 idle_timeout 넘김. 이 연결을 닫는다.
                     tracing::info!(
                         conn = conn_id,
                         idle_ms = idle.as_millis() as u64,
@@ -562,7 +488,6 @@ async fn write_task(
                     let _ = sink_half.close().await;
                     break;
                 }
-                // 능동 Ping 송신. 실패(소켓 닫힘)면 종료.
                 if let Err(e) = sink_half.send(Message::Ping(Vec::new().into())).await {
                     tracing::debug!(conn = conn_id, "write_task keepalive Ping 송신 실패 — 종료: {e}");
                     break;
@@ -570,7 +495,6 @@ async fn write_task(
             }
             recv = conn_rx.recv() => {
                 let Some(out) = recv else {
-                    // 모든 conn_tx drop — 정상 종료.
                     break;
                 };
                 let msg = match out {
@@ -594,14 +518,8 @@ async fn write_task(
 
 // ── read_task ────────────────────────────────────────────────────────────────
 
-/// 수신 프레임을 위층 `ConnectionHandler` 로 올린다. 응답은 handler 가 `FrameSink` 로 큐잉하므로
-/// 이 루프는 소켓에 직접 쓰지 않는다. handler 가 `ConnFlow::Close` 를 돌려주면 루프를 탈출한다
-/// (StopDaemon·프로토콜 위반).
-///
 /// ★stream 이 generic 인 이유★: 소켓 없이 합성 프레임열로 이 루프를 돌리는 격리 하네스를 두려고
-/// (ADR-0129 — 이 seam 이 슬라이스 1 의 crate 분리 검증 근거였다. **이미 일어난 일**이고, 그 뒤
-/// 슬라이스 2·3 은 ADR-0130 으로 보류됐다). 운영 경로는 WS stream half 로만
-/// 단형화된다.
+/// (ADR-0129). 운영 경로는 WS stream half 로만 단형화된다.
 async fn read_task<S>(
     mut incoming: S,
     frames: Arc<dyn FrameSink>,
@@ -620,9 +538,8 @@ async fn read_task<S>(
                 break;
             }
         };
-        // ★keepalive(A)★: 클라로부터 무언가 받았다 = 연결이 살아있다는 증거. Pong 포함 모든
-        //   메시지에서 마지막 수신 시각을 갱신한다(write_task 의 idle 판정 분모). tungstenite 는
-        //   Pong 을 Message::Pong 으로 올려주므로 능동 Ping 의 응답도 여기서 잡힌다.
+        // ★keepalive(A)★: tungstenite 는 Pong 을 Message::Pong 으로 올려주므로 능동 Ping 의
+        //   응답도 여기서 잡힌다.
         last_recv.store(
             keepalive_base.elapsed().as_millis() as u64,
             Ordering::Release,
@@ -656,32 +573,23 @@ async fn read_task<S>(
 mod tests {
     use super::*;
 
-    // (1. Auth 직렬화 테스트는 `auth.rs` 로 이동 — 타입이 거기 있고, 형태 대조를 **golden JSON 문자열**로
-    //  바꿨다. 옛 형태는 위층 명령 enum 과의 round-trip 이라 0-4 가 지운 import 를 테스트가 되살렸다.)
-    // (kind_to_action 매핑 테스트는 데몬 crate 의 connection_core.rs 로 이동 — 함수가 거기 있음.)
-
     // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────
     #[test]
     fn constant_time_eq_correctness() {
         let a = "a".repeat(64);
         assert!(constant_time_eq(&a, &"a".repeat(64)), "동일 토큰은 true");
         assert!(!constant_time_eq(&a, &"b".repeat(64)), "다른 토큰은 false");
-        // 길이 다르면 즉시 false.
         assert!(!constant_time_eq(&a, &"a".repeat(63)));
         assert!(!constant_time_eq(&a, &"a".repeat(65)));
-        // 한 바이트만 달라도 false.
         let mut almost = "a".repeat(64);
         almost.replace_range(63..64, "b");
         assert!(!constant_time_eq(&a, &almost));
-        // 빈 문자열 동일.
         assert!(constant_time_eq("", ""));
     }
 
     // ── 2b. auth 파싱 실패 로그에 페이로드가 실리지 않는다 ─────────────────────
     #[test]
     fn auth_parse_failure_log_fields_do_not_carry_the_payload() {
-        // 전제부터 못 박는다: serde 의 Display 는 **실제로** 토큰을 싣는다. 그래서 `handle_connection`
-        //   의 두 실패 갈래가 `{e}` 대신 분류·위치만 로깅한다(`docs/reference/logging-conventions.md`).
         let token = "deadbeef".repeat(8); // 운영과 같은 64자
         let e = serde_json::from_str::<AuthFrame>(&format!(r#"{{"Auth":"{token}"}}"#)).unwrap_err();
         assert!(
@@ -718,8 +626,6 @@ mod tests {
     // ── 4. ConnFrameSink: try_send 는 포화 시 out-of-band close_signal 을 울린다 ──
     #[tokio::test]
     async fn conn_frame_sink_notifies_close_signal_when_full() {
-        // cap 1 채널을 가득 채운 뒤: try_send 가 Err 를 반환하고, 큐가 막혀 있어도 close_signal 이
-        // 발동(write_task 를 깨움)하는지 — 이게 좀비 연결을 막는 유일한 경로(M1).
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
         let close_signal = Arc::new(Notify::new());
         let sink = ConnFrameSink::new(tx, close_signal.clone());
@@ -741,9 +647,6 @@ mod tests {
     // ── 4b. ConnFrameSink: send(backpressure)는 close_signal 을 울리지 않는다 ──
     #[tokio::test]
     async fn conn_frame_sink_send_does_not_signal_close() {
-        // ★try_send / send 비대칭★: 기다릴 수 있는 호출자는 슬로우 소비자 판정 대상이 아니다.
-        //   cap 1 을 채운 뒤 send 가 **실제로 포화에 park 했음을 먼저 확정**하고, 그 상태에서 종료
-        //   신호가 없었음을 본 다음 한 칸 비워 통과를 확인한다.
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
         let close_signal = Arc::new(Notify::new());
         let sink = ConnFrameSink::new(tx, close_signal.clone());
@@ -759,7 +662,6 @@ mod tests {
             futures_util::poll!(pending.as_mut()).is_pending(),
             "가득 찬 큐에서 send 는 반드시 park 해야(포화 경로 미실행이면 이 테스트가 무의미하다)"
         );
-        // park 한 그 상태에서 종료 신호가 없어야 한다(try_send 와 갈리는 지점).
         assert!(
             tokio::time::timeout(Duration::from_millis(50), close_signal.notified())
                 .await
@@ -767,7 +669,6 @@ mod tests {
             "send 는 포화를 기다릴 뿐 종료 신호를 울리지 않는다"
         );
 
-        // 한 칸 비우면 park 이 풀려 통과한다.
         assert!(matches!(rx.recv().await.unwrap(), Frame::Text(_)));
         pending.await.expect("자리가 나면 backpressure 가 풀린다");
     }
@@ -795,13 +696,6 @@ mod tests {
     // ── 4d. ConnRegistry: 전-연결 팬아웃 — 포화한 연결 하나가 나머지를 막지 않는다(ADR-0129) ──
     #[test]
     fn broadcast_text_copies_the_text_to_every_connection_that_can_take_it() {
-        // ★`FrameFanout` 계약의 두 항을 여기서 못 박는다★: ① 넘겨받은 text 를 연결마다 **같은 바이트**로
-        //   복제한다 ② 큐가 포화한 연결은 건너뛰고 **나머지 배달을 계속**한다. 위층(상태 통지·목록
-        //   브로드캐스트)은 연결을 볼 수 없으므로 이 둘을 관측할 수 있는 자리는 여기뿐이다. ②가 깨지면
-        //   슬로우 클라 하나가 전 클라의 갱신을 세운다.
-        // ★포화를 종료 신호로 잇지 않는다★: 연결당 `ConnFrameSink::try_send`(위 4.)와 다른 점 — 여기선
-        //   경고 로그만 남기고 다음 연결로 간다. 그 비대칭 자체는 4./4b. 가 지킨다.
-        //
         // ★반복하는 이유 = 매 회차 HashMap 순회 순서를 다시 뽑으려는 것(패딩 아님)★: `broadcast_text` 는
         //   레지스트리 맵을 순회해 Vec 으로 뜨므로 방문 순서가 곧 배달 순서다.
         //   - **정상 코드는 순서와 무관하게 통과한다** → 이 루프가 위양성(flake)을 만들 수는 없다. 반복이
@@ -847,7 +741,6 @@ mod tests {
 
             registry.broadcast_text(PAYLOAD.to_string());
 
-            // 포화 연결엔 새 프레임이 못 들어갔다(선점 프레임만 남아 있다).
             assert!(
                 matches!(full_rx.try_recv(), Ok(Frame::Text(s)) if s == "선점"),
                 "round {round}: 포화 연결엔 선점 프레임만 있어야"
@@ -856,7 +749,6 @@ mod tests {
                 full_rx.try_recv().is_err(),
                 "round {round}: 포화 연결은 이번 건을 못 받는다"
             );
-            // 그래도 멀쩡한 연결은 **전부** 받는다 — 포화 연결의 방문 위치와 무관하게.
             // ★분기마다 회차·연결 번호를 메시지에 담는다★: 잡는 회귀("첫 포화에서 중단")는 "아무것도 못
             //   받음" 으로 나타나므로, 일반 메시지로는 어느 회차가 걸렸는지 안 보인다.
             for (n, ok_rx) in oks.iter_mut().enumerate() {
@@ -877,9 +769,6 @@ mod tests {
         }
     }
 
-    // (6. Subscribe control 순서 테스트는 데몬 crate 의 connection_core.rs 로, 7·7b·9b 의 flush/도어벨
-    //  테스트는 같은 crate 의 messaging_host.rs 로 이동 — 검증 대상이 거기 있음. ADR-0129)
-
     // ── 10. (적용4-1) OriginCheck::on_request 분기 — 무방비 였던 거부/허용 분기 검증 ──────
     //    순수 헤더 검사라 in-process 서버 불필요. Request 를 직접 만들어 콜백을 호출한다.
     fn run_origin_check(origin: Option<&str>) -> Result<(), ()> {
@@ -889,7 +778,7 @@ mod tests {
             builder = builder.header("origin", o);
         }
         let request = builder.body(()).unwrap();
-        // Response 는 콜백이 통과시키는 더미. on_request 는 self 를 소비한다.
+        // Response 는 콜백이 통과시키는 더미.
         let response = tokio_tungstenite::tungstenite::http::Response::builder()
             .body(())
             .unwrap();
@@ -901,27 +790,23 @@ mod tests {
 
     #[test]
     fn origin_check_allows_listed_origin() {
-        // allowlist 에 있는 Origin → 허용.
         assert!(run_origin_check(Some("tauri://localhost")).is_ok());
         assert!(run_origin_check(Some("http://localhost:1420")).is_ok());
     }
 
     #[test]
     fn origin_check_rejects_unlisted_origin() {
-        // allowlist 밖 Origin → 거부(mutation 으로 무방비 였던 분기).
         assert!(run_origin_check(Some("http://evil.example.com")).is_err());
     }
 
     #[test]
     fn origin_check_allows_missing_origin() {
-        // Origin 헤더 없음 → 현 정책상 허용(네이티브/하네스, 토큰이 주 방어).
         assert!(run_origin_check(None).is_ok());
     }
 
     // ── 11. 프레임 포트 seam — 소켓 없이 도는 격리 하네스(ADR-0129) ──────────────────
     //    가짜 ConnectionHandler + 가짜 FrameSink 로 연결 수명을 재현한다. TcpStream 이 없어야
-    //    네트워크 행이 별도 crate 로 떨어져도 이 검증이 그대로 산다 — 슬라이스 1 로 **실제로
-    //    떨어졌고**(이 파일이 그 crate 에 있다) 검증은 그대로 살았다.
+    //    네트워크 행이 별도 crate 로 떨어져도 이 검증이 그대로 산다.
 
     #[derive(Debug, PartialEq, Eq)]
     enum SeenFrame {
@@ -1231,7 +1116,6 @@ mod tests {
         );
     }
 
-    /// 메시지 1건을 수신 루프에 태우고 keepalive 시계가 갱신됐는지 돌려준다.
     /// 초기값을 도달 불가능한 sentinel 로 두어 "갱신됐다" 를 타이밍 없이 판정한다.
     async fn clock_updated_by(msg: Message) -> bool {
         let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
@@ -1276,12 +1160,6 @@ mod tests {
 
     /// 이 crate 의 테스트가 쓰는 임의 프로토콜 버전. ★실제 운영 버전과 일부러 다른 값★ — 서버가
     /// 상수를 도로 읽는 회귀가 생기면 이 값과 어긋나 테스트가 깨진다(주입 경로의 존재 증명).
-    ///
-    /// ★이름에 그 버전 상수명을 이어 붙이지 말 것★: lib.rs 헤더의 게이트 4 는 **부분 문자열**을 훑어서
-    /// `TEST_(P)ROTOCOL_VERSION` 같은 지역 이름도 물어 버린다(실측 — 처음 이 이름으로 썼다가 걸렸다.
-    /// 이 주석이 괄호 형태인 것도 같은 이유다).
-    /// 그 넓음은 의도된 것이다: 이 crate 안에 프로토콜 버전 **비슷한 것조차** 두지 않겠다는 뜻이라,
-    /// 회피가 아니라 이름을 다르게 짓는 게 맞는 대응이다.
     const TEST_WIRE_VERSION: u32 = 4242;
 
     /// 테스트 서버 1개를 띄우고 인증까지 마친 클라이언트를 돌려준다(공통 뼈대).
@@ -1303,8 +1181,6 @@ mod tests {
         .await
     }
 
-    /// `serve_one` 의 버전 파라미터화 판 — 서버가 **주입받은** 기대 버전과 클라가 **보내는** 버전을
-    /// 따로 준다(버전 게이트 검증용).
     async fn serve_one_with_versions(
         registry: ConnRegistry,
         fake: Arc<FakeHandler>,
@@ -1344,9 +1220,6 @@ mod tests {
         (client, server)
     }
 
-    /// ★버전 게이트가 **주입값**을 본다(0-4)★: 서버는 상수를 읽지 않으므로, 클라가 다른 숫자를 보내면
-    /// 거부하고 그 두 숫자를 문구에 실어야 한다. 상수 하드코딩 회귀(예: 어디선가 3 을 도로 읽기)는
-    /// 이 두 숫자 중 하나를 틀리게 만든다.
     #[tokio::test]
     async fn auth_rejects_version_mismatch_using_the_injected_expectation() {
         let registry = ConnRegistry::new();
@@ -1360,7 +1233,6 @@ mod tests {
         )
         .await;
 
-        // 실패 통보(FakeFactory 는 메시지를 그대로 text 로 내준다) → 그 뒤 close.
         let msg = tokio::time::timeout(Duration::from_secs(5), client.next())
             .await
             .expect("거부 통보가 와야")
@@ -1383,7 +1255,6 @@ mod tests {
             .await
             .expect("버전 불일치면 handle_connection 이 반환해야")
             .unwrap();
-        // 등록까지 가지 않았다 — 인증 실패는 레지스트리 등록 **전**이다.
         assert!(!registry.contains(1), "인증 실패 연결은 등록되지 않는다");
         assert_eq!(
             fake.calls(),

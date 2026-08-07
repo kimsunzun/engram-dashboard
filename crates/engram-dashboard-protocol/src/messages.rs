@@ -1,6 +1,5 @@
 //! wire 메시지 — UI→core [`AgentCommand`], core→UI [`AgentEvent`].
-//! 둘 다 externally-tagged JSON(serde 기본). 단 고-throughput TerminalBytes 출력은
-//! JSON 이 아닌 binary frame(`codec`)으로 흐른다(설계 §1-2).
+//! 둘 다 externally-tagged JSON(serde 기본).
 
 use ts_rs::TS;
 
@@ -10,7 +9,6 @@ use crate::domain::{
 };
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
-/// UI→core 요청 envelope(설계 §3). side-effect 명령은 `request_id` 로 idempotent.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 // ★`Auth` variant 는 여기 없다(ADR-0129 0-4, 2026-08-05)★: 연결 후 첫 frame 전용 인증 프레임의 모양은
@@ -30,7 +28,6 @@ pub enum AgentCommand {
         profile_id: ProfileId,
         request_id: RequestId,
     },
-    /// 에이전트 종료(자원 강제 폐쇄).
     Kill {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -42,7 +39,6 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// stdin 입력 전달. raw 바이트(키 입력). idempotency 키 필수(중복=입력 중복).
     WriteStdin {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -51,7 +47,7 @@ pub enum AgentCommand {
         data: Vec<u8>,
         request_id: RequestId,
     },
-    /// PTY 크기 변경. viewport_id 는 멀티뷰 중 어느 뷰가 요청했는지(ControlLease 판정용).
+    /// viewport_id 는 멀티뷰 중 어느 뷰가 요청했는지(ControlLease 판정용).
     Resize {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -59,7 +55,7 @@ pub enum AgentCommand {
         rows: u16,
         viewport_id: Option<String>,
     },
-    /// 출력 구독. epoch/after_seq 로 재연결 resume(설계 §1-3).
+    /// epoch/after_seq 로 재연결 resume(설계 §1-3).
     /// 둘 다 None = 처음부터(oldest 부터) 받겠다는 신규 구독.
     Subscribe {
         #[ts(type = "string")]
@@ -79,15 +75,14 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 입력 lease 해제. 보유자만 해제할 수 있다(보유자 아니면 Error). 해제 후엔 누구나 다시 acquire 가능.
+    /// 보유자만 해제할 수 있다(보유자 아니면 Error). 해제 후엔 누구나 다시 acquire 가능.
     ReleaseInput {
         #[ts(type = "string")]
         agent_id: AgentId,
         request_id: RequestId,
     },
     /// 전체 에이전트 목록 조회(연결 직후 데몬이 자동 push 도 하지만 명시 조회도 허용).
-    /// 응답은 request_id 동봉 [`AgentEvent::AgentList`](전용 reply). broadcast 인
-    /// [`AgentEvent::AgentListUpdated`](트리 실시간 갱신)와 별개 — 편승 매칭 제거.
+    /// 응답은 request_id 동봉 [`AgentEvent::AgentList`](전용 reply).
     ListAgents { request_id: RequestId },
     /// 데몬 종료(§5 LLM 제어). force=true 면 활성 에이전트 있어도 종료, kill_agents=true 면 함께 정리.
     StopDaemon {
@@ -102,8 +97,7 @@ pub enum AgentCommand {
     /// registry 에 등록·persist 한다.
     SpawnByCwd { cwd: String, request_id: RequestId },
 
-    /// 저장된 프로필 전체 조회. 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply). broadcast 인
-    /// [`AgentEvent::ProfileListUpdated`](프론트 미러 갱신)와 별개 — 편승 매칭 제거.
+    /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply).
     ListProfiles { request_id: RequestId },
 
     /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). ※env 에 자격증명 금지(평문 persist).
@@ -113,11 +107,8 @@ pub enum AgentCommand {
         extra_args: Vec<String>,
         env: Vec<(String, String)>,
         auto_restore: bool,
-        /// claude 출력 포맷(ADR-0044 M2) — Terminal=PTY 대화형(기본) / StreamJson=헤드리스 NDJSON.
         /// `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
         /// PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
-        /// 데몬이 이 값을 저장 프로필의 AgentCommand::Claude { output_format } 로 옮기고, 이후
-        /// SpawnProfile → manager.spawn_agent 가 is_json_mode 로 StdioTransport 를 고른다.
         #[serde(default)]
         output_format: ClaudeOutputFormat,
         request_id: RequestId,
@@ -129,7 +120,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// 저장된 프로필 spawn. resume=true 면 기존 세션 이어받기(claude `--resume`).
+    /// resume=true 면 기존 세션 이어받기(claude `--resume`).
     SpawnProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -164,7 +155,6 @@ pub enum AgentCommand {
     /// `ProfileRegistry::reparent` 로 한 임계구역에서 수행 — 위반이면 Error, 성공이면 Ack +
     /// [`AgentEvent::ProfileListUpdated`] broadcast(RenameProfile 와 동형 — 모든 창 동기화, 낙관 갱신 X).
     /// §5로 LLM/사용자가 같은 command 로 트리를 구성한다(사람 드래그는 보조 입력).
-    // ADR-0072
     ReparentProfile {
         #[ts(type = "string")]
         child_id: ProfileId,
@@ -173,7 +163,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    /// replay buffer 스냅샷 조회. 응답은 [`AgentEvent::Snapshot`].
+    /// 응답은 [`AgentEvent::Snapshot`].
     /// (Subscribe replay 와 별개의 1회성 조회.)
     GetSnapshot {
         #[ts(type = "string")]
@@ -182,10 +172,9 @@ pub enum AgentCommand {
     },
 
     // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────────────
-    // 프로필 CRUD(ListProfiles/CreateProfile/DeleteProfile)와 1:1 대응하는 프리셋판. 프리셋 =
-    // 스폰 전 "cwd 북마크"(인스턴스 아님). 데몬이 presets.json 을 단일 소유하고 wire 로만 CRUD 한다.
-    /// 저장된 프리셋 전체 조회. 응답은 request_id 동봉 전용 reply [`AgentEvent::PresetList`]
-    /// (요청 연결에만). broadcast 인 [`AgentEvent::PresetListUpdated`](CRUD 후)와 별개 — 편승 매칭 제거.
+    // 프리셋 = 스폰 전 "cwd 북마크"(인스턴스 아님). 데몬이 presets.json 을 단일 소유하고
+    // wire 로만 CRUD 한다.
+    /// 응답은 request_id 동봉 전용 reply [`AgentEvent::PresetList`](요청 연결에만).
     ListPresets { request_id: RequestId },
 
     /// 프리셋 생성(등록·persist만 — 스폰하지 않음). cwd 는 데몬이 정규화(dunce::canonicalize)해 저장.
@@ -213,34 +202,31 @@ pub enum AgentCommand {
     },
 
     /// 봉투 포맷 전역 스위치(ADR-0096) — A→B 메시지 봉투를 colon/xml 로 전환한다. 데몬이 **전역 상태
-    /// 하나**(기본 colon)를 들고, 이후 모든 `wrap_message` 조립이 그 값을 읽는다(ADR-0086 단일 wrap point
+    /// 하나**를 들고, 이후 모든 `wrap_message` 조립이 그 값을 읽는다(ADR-0086 단일 wrap point
     /// 불변 유지 — 상태는 입력일 뿐 조립은 여전히 한 곳). ★조종 표면 전용★: 이 커맨드는 src-tauri Tauri
     /// command `set_envelope_format` 가 데몬으로 전달하는 경로로만 온다 — 워커 MCP 채널엔 노출하지 않는다
-    /// (관리당하는 에이전트가 팀-전역 포맷을 바꾸면 안 됨, ADR-0096 결정 3·ADR-0094 최소권한). request_id
-    /// 동봉 → Ack 매칭(다른 side-effect 커맨드와 동형). 지속성 없음(데몬 재시작 시 colon 리셋 — 백로그).
-    // ADR-0096
+    /// (관리당하는 에이전트가 팀-전역 포맷을 바꾸면 안 됨, ADR-0096 결정 3·ADR-0094 최소권한).
+    /// 지속성 없음(데몬 재시작 시 리셋 — 백로그).
     SetEnvelopeFormat {
         format: EnvelopeFormat,
         request_id: RequestId,
     },
 }
 
-/// core→UI 이벤트 envelope(설계 §3, JSON 경로). TerminalBytes 출력은 여기 없음(binary frame).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum AgentEvent {
-    /// 연결 직후 핸드셰이크. 버전·capability 통보.
+    /// 연결 직후 핸드셰이크.
     Hello {
         protocol_version: u32,
         daemon_version: String,
         /// 데몬 전체 capability(에이전트별 capability 는 AgentInfo 에).
         capabilities: Option<Capabilities>,
     },
-    /// side-effect command 수신/처리 확인(request_id 에코).
+    /// side-effect command 수신/처리 확인.
     Ack {
         request_id: RequestId,
     },
-    /// Subscribe 응답 — replay 방식과 범위(설계 §1-3).
     SubscribeAck {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -253,10 +239,10 @@ pub enum AgentEvent {
         /// 이 seq+1 부터 replay 를 보낸다(클라가 dedup 기준).
         #[ts(type = "number")]
         replay_from: u64,
-        /// ring 밖으로 밀려 일부 손실(clear+tail). UI "output truncated" 표시.
+        /// ring 밖으로 밀려 일부 손실(clear+tail).
         truncated: bool,
     },
-    /// 저빈도 구조화 출력(TextDelta/Usage/ToolCall 등). TerminalBytes 는 binary frame 으로 감.
+    /// 저빈도 구조화 출력(TextDelta/Usage/ToolCall 등).
     Output {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -271,7 +257,7 @@ pub enum AgentEvent {
         agent_id: AgentId,
         epoch: u32,
     },
-    /// 상태 변경. epoch 동봉(옛 세션 stale 알림 방어).
+    /// epoch 동봉(옛 세션 stale 알림 방어).
     StatusChanged {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -279,7 +265,6 @@ pub enum AgentEvent {
         epoch: u32,
     },
     /// 전체 목록 갱신(broadcast). terminal 판정은 이걸로(status_changed 아님 — 설계 불변식).
-    /// ※ 트리 실시간 갱신 전용 — request_id 없음. ListAgents 조회 응답은 [`AgentEvent::AgentList`].
     AgentListUpdated {
         agents: Vec<AgentInfo>,
     },
@@ -300,9 +285,7 @@ pub enum AgentEvent {
         agent_id: AgentId,
         held: bool,
     },
-    /// 프로필 목록 갱신(broadcast, phase4 1단계). CRUD(생성/삭제/토글) 후 자동 push — 프론트
-    /// ProfileRegistry 미러 갱신용. AgentListUpdated 의 프로필판. request_id 없음.
-    /// ListProfiles 조회 응답은 [`AgentEvent::ProfileList`].
+    /// 프로필 목록 갱신(broadcast). CRUD(생성/삭제/토글) 후 자동 push.
     ProfileListUpdated {
         profiles: Vec<AgentProfile>,
     },
@@ -313,8 +296,7 @@ pub enum AgentEvent {
         profiles: Vec<AgentProfile>,
     },
 
-    /// 프리셋 목록 갱신(broadcast, ADR-0061). CRUD(생성/삭제) 후 자동 push — 모든 창의 프리셋 미러
-    /// 동기화용. ProfileListUpdated 의 프리셋판. request_id 없음. ListPresets 조회 응답은 [`AgentEvent::PresetList`].
+    /// 프리셋 목록 갱신(broadcast, ADR-0061). CRUD(생성/삭제) 후 자동 push.
     PresetListUpdated {
         presets: Vec<Preset>,
     },
@@ -325,7 +307,7 @@ pub enum AgentEvent {
         presets: Vec<Preset>,
     },
 
-    /// GetSnapshot 응답(전용 reply, phase4 1단계) — 그 시점 replay buffer 스냅샷.
+    /// GetSnapshot 응답(전용 reply) — 그 시점 replay buffer 스냅샷.
     /// request_id 에코로 같은 agent 동시 조회를 정확히 매칭(이전 agent_id 편승 매칭 제거).
     /// broadcast 아님(특정 요청에만 응답).
     Snapshot {
@@ -348,7 +330,7 @@ pub enum AgentEvent {
         agent: AgentInfo,
     },
 
-    /// 오류 통지. request_id 있으면 특정 command 실패.
+    /// request_id 있으면 특정 command 실패.
     Error {
         request_id: Option<RequestId>,
         message: String,
@@ -379,25 +361,24 @@ pub enum SubscribeAction {
 /// → 이 wire 타입은 daemon `connection_core::output_event_to_wire` 가 명시 매핑한다. protocol 은 wire
 /// 타입만 소유(core 무의존).
 ///
-/// ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고 tag1
-/// payload 에 실리지 않는다(codec.rs: tag0=TerminalBytes / tag1=StructuredEvent). 따라서 이 미러에는
-/// TerminalBytes variant 를 두지 않는다 — core `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가
-/// 방어적으로 흡수(근거 주석은 output_event_to_wire).
+/// ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고
+/// tag1 payload 에 실리지 않는다. 따라서 이 미러에는 TerminalBytes variant 를 두지 않는다 — core
+/// `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가 방어적으로 흡수(근거 주석은 output_event_to_wire).
 ///
 /// ★self-describing serde★: internally-tagged(`#[serde(tag="type")]`) — payload JSON 에 `"type"` 판별자가
-/// 박혀 프론트가 JSON.parse 후 variant 를 가른다(codec 은 이 스키마를 모른다 — opaque tag1 payload, ADR-0045).
+/// 박혀 프론트가 JSON.parse 후 variant 를 가른다.
 /// wire 직렬화 형식 = JSON(serde_json) — daemon adapter 가 `serde_json::to_vec` 로 tag1 payload 를 만든다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type")]
 #[ts(export)]
 pub enum StructuredEvent {
-    /// 어시스턴트 텍스트 증분(스트리밍 델타). core `OutputEvent::TextDelta` 미러.
+    /// 어시스턴트 텍스트 증분(스트리밍 델타).
     TextDelta {
         text: String,
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// 도구 호출 — 이름 + 직렬화된 인자(backend별 스키마 그대로). core `OutputEvent::ToolCall` 미러.
+    /// 직렬화된 인자(backend별 스키마 그대로).
     ToolCall {
         name: String,
         args_json: String,
@@ -406,7 +387,6 @@ pub enum StructuredEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// 토큰 사용량. core `OutputEvent::Usage` 미러.
     Usage {
         #[ts(type = "number")]
         input_tokens: u64,
@@ -414,20 +394,19 @@ pub enum StructuredEvent {
         output_tokens: u64,
         turn_id: Option<String>,
     },
-    /// 한 메시지(turn 응답) 종료 신호. core `OutputEvent::MessageDone` 미러.
+    /// 한 메시지(turn 응답) 종료 신호.
     MessageDone {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// backend 가 보고한 오류(스트림 내부 오류 — 종료 아님). core `OutputEvent::Error` 미러.
+    /// backend 가 보고한 오류(스트림 내부 오류 — 종료 아님).
     Error { message: String },
-    /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat). core `OutputEvent::Structured`
-    /// 미러 — kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
+    /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat).
+    /// kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
     Structured { kind: String, json: String },
 }
 
-/// 출력 청크 — 종류 불가지(설계 §2). TerminalBytes 는 binary frame(codec)으로,
-/// 나머지 구조화 variant 는 JSON(AgentEvent::Output)으로 흐른다.
+/// 출력 청크 — 종류 불가지(설계 §2).
 /// (구조화 turn 단위 출력은 TUI↔구조화 스위칭 모드 설계 때 실제 채움 — 지금은 형태만 연다.)
 ///
 /// ※S15/ADR-0045: tag1 구조화 이벤트는 이 타입이 아니라 위 [`StructuredEvent`]로 흐른다(필드 유실 0
@@ -462,17 +441,13 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    /// ★ADR-0045★: StructuredEvent 는 core `OutputEvent` 미러이자 tag1 payload 다. self-describing
-    /// (`#[serde(tag="type")]`) JSON 직렬화가 무손실 round-trip 되는지(필드 유실 0 — 교체성 핵심) +
-    /// `"type"` 판별자가 payload 에 박히는지(프론트 variant 판별 근거) 검증한다. daemon adapter 가
-    /// `serde_json::to_vec` 로 만든 tag1 payload 를 프론트가 그대로 JSON.parse 하므로 이 계약이 wire 계약이다.
     #[test]
     fn structured_event_roundtrip_all_variants() {
         let cases = vec![
             StructuredEvent::TextDelta {
                 text: "hello".into(),
                 turn_id: Some("t1".into()),
-                message_id: None, // optional 보존(None 도 왕복)
+                message_id: None,
             },
             StructuredEvent::ToolCall {
                 name: "read".into(),
@@ -500,7 +475,6 @@ mod tests {
         ];
         for ev in cases {
             let json = serde_json::to_string(&ev).expect("직렬화 성공");
-            // self-describing: "type" 판별자가 반드시 박힌다(프론트 variant 판별 근거).
             assert!(
                 json.contains("\"type\""),
                 "internally-tagged 판별자 누락: {json}"
@@ -535,9 +509,8 @@ mod tests {
 
     // ── 프리셋 wire 계약(ADR-0061) — JSON envelope golden + round-trip ─────────────
     //
-    // AgentCommand/AgentEvent 는 externally-tagged(serde 기본) JSON envelope 다. 프리셋 CRUD 가
-    // 프로필과 동형 형태(variant 이름 태그 + 필드)로 직렬화되는지 고정한다 — wire 포맷이 조용히
-    // 바뀌면(필드 개명/누락) 프론트 미러가 깨지므로 golden 문자열로 회귀를 막는다.
+    // 프리셋 CRUD 가 프로필과 동형 형태(variant 이름 태그 + 필드)로 직렬화되는지 고정한다 — wire
+    // 포맷이 조용히 바뀌면(필드 개명/누락) 프론트 미러가 깨지므로 golden 문자열로 회귀를 막는다.
 
     #[test]
     fn create_preset_command_json_golden() {
@@ -547,13 +520,11 @@ mod tests {
             request_id,
         };
         let json = serde_json::to_string(&cmd).unwrap();
-        // externally-tagged: variant 이름이 최상위 키.
         assert_eq!(
             json,
             r#"{"CreatePreset":{"cwd":"C:/proj","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
             "CreatePreset wire 형태가 golden 과 불일치"
         );
-        // round-trip 무손실.
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             back,
@@ -575,20 +546,17 @@ mod tests {
         for cmd in cases {
             let json = serde_json::to_string(&cmd).unwrap();
             let back: AgentCommand = serde_json::from_str(&json).unwrap();
-            // 재직렬화가 동일해야(round-trip 무손실).
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
     }
 
     #[test]
     fn preset_list_events_json_golden_and_roundtrip() {
-        // name=None(override 없음 — 신규 필드는 null 로 직렬화, ADR-0061 리치화).
         let preset = Preset {
             id: Uuid::nil(),
             cwd: "C:/proj".into(),
             name: None,
         };
-        // PresetList(전용 reply — request_id 동봉).
         let list = AgentEvent::PresetList {
             request_id: RequestId(Uuid::nil()),
             presets: vec![preset.clone()],
@@ -600,7 +568,6 @@ mod tests {
             "PresetList wire 형태가 golden 과 불일치"
         );
 
-        // PresetListUpdated(broadcast — request_id 없음).
         let updated = AgentEvent::PresetListUpdated {
             presets: vec![preset],
         };
@@ -611,15 +578,12 @@ mod tests {
             "PresetListUpdated wire 형태가 golden 과 불일치"
         );
 
-        // 둘 다 round-trip 무손실.
         for json in [list_json, updated_json] {
             let back: AgentEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
     }
 
-    /// ADR-0061 리치화: RenamePreset wire 형태 golden(externally-tagged) + round-trip. name=Some 케이스로
-    /// 실제 override 값이 전달되는 형태를 고정한다(필드 개명/누락 회귀 차단).
     #[test]
     fn rename_preset_command_json_golden_and_roundtrip() {
         let cmd = AgentCommand::RenamePreset {
@@ -639,7 +603,6 @@ mod tests {
             AgentCommand::RenamePreset { name: Some(ref n), .. } if n == "내 프리셋"
         ));
 
-        // name=None(override 해제) round-trip 무손실.
         let clear = AgentCommand::RenamePreset {
             preset_id: Uuid::nil(),
             name: None,
@@ -650,8 +613,6 @@ mod tests {
         assert_eq!(clear_json, serde_json::to_string(&clear_back).unwrap());
     }
 
-    /// ADR-0061 리치화: RenameProfile(트리 rename) wire golden + round-trip. SetProfileAutoRestore 와
-    /// 동형 형태(profile_id + 값 + request_id)를 고정한다.
     #[test]
     fn rename_profile_command_json_golden_and_roundtrip() {
         let cmd = AgentCommand::RenameProfile {
@@ -672,13 +633,8 @@ mod tests {
         ));
     }
 
-    /// ADR-0096: SetEnvelopeFormat wire golden(externally-tagged) + round-trip + enum lowercase serde.
-    /// ★invoke JSON 계약★: 오퍼레이터/LLM 이 `set_envelope_format({format:"xml"})` 로 부르므로 format 은
-    /// **소문자**(`"colon"`/`"xml"`)로 직렬화돼야 한다 — golden 문자열로 그 계약을 고정한다(대문자로
-    /// drift 하면 invoke JSON 이 역직렬화 실패). request_id 동봉(Ack 매칭, 다른 side-effect 커맨드 동형).
     #[test]
     fn set_envelope_format_command_json_golden_and_roundtrip() {
-        // xml 로 전환하는 커맨드.
         let cmd = AgentCommand::SetEnvelopeFormat {
             format: EnvelopeFormat::Xml,
             request_id: RequestId(Uuid::nil()),
@@ -698,7 +654,6 @@ mod tests {
             }
         ));
 
-        // colon 도 소문자로 직렬화 + 왕복 무손실.
         let colon = AgentCommand::SetEnvelopeFormat {
             format: EnvelopeFormat::Colon,
             request_id: RequestId(Uuid::nil()),
@@ -713,8 +668,6 @@ mod tests {
         assert_eq!(colon_json, serde_json::to_string(&colon_back).unwrap());
     }
 
-    /// ADR-0103: EnvelopeFormat wire 기본값 = Xml(데몬 운영 기본과 정합, 기본 flip) + `{format:"xml"}`
-    /// 형태의 소문자 문자열이 그대로 역직렬화되는지(invoke 페이로드가 이 형태) 확인.
     #[test]
     fn envelope_format_default_is_xml_and_lowercase_deserializes() {
         assert_eq!(
@@ -722,21 +675,17 @@ mod tests {
             EnvelopeFormat::Xml,
             "기본 봉투 포맷 = xml(ADR-0103 기본 flip — 데몬 운영 기본과 정합)"
         );
-        // invoke 가 넘기는 소문자 문자열이 역직렬화된다(양방향 모두 유지).
         let xml: EnvelopeFormat = serde_json::from_str(r#""xml""#).unwrap();
         assert_eq!(xml, EnvelopeFormat::Xml);
         let colon: EnvelopeFormat = serde_json::from_str(r#""colon""#).unwrap();
         assert_eq!(colon, EnvelopeFormat::Colon);
     }
 
-    /// ADR-0072: ReparentProfile wire golden(externally-tagged) + round-trip. parent_id=Some(부모 지정)와
-    /// None(루트 승격) 두 경우 모두 형태를 고정한다(필드 개명/누락 회귀 차단, RenameProfile 과 동형).
     #[test]
     fn reparent_profile_command_json_golden_and_roundtrip() {
         let child = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let parent = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
 
-        // Some(부모 지정).
         let cmd = AgentCommand::ReparentProfile {
             child_id: child,
             parent_id: Some(parent),
@@ -754,7 +703,6 @@ mod tests {
             AgentCommand::ReparentProfile { parent_id: Some(p), .. } if p == parent
         ));
 
-        // None(루트 승격) — parent_id 는 null 로 직렬화.
         let clear = AgentCommand::ReparentProfile {
             child_id: child,
             parent_id: None,
@@ -776,8 +724,6 @@ mod tests {
         ));
     }
 
-    /// ADR-0072: 프로필 wire 미러 round-trip 이 parent_id 를 보존하는지(Some/None). display_name 과 동형
-    /// additive 필드 — 직렬화→역직렬화 무손실 + parent_id 없는 옛 wire 는 #[serde(default)]=None 흡수.
     #[test]
     fn agent_profile_wire_roundtrip_includes_parent_id() {
         use crate::domain::{AgentProfile as WireProfile, AgentSpawnCommand, RestartPolicy};
@@ -814,7 +760,6 @@ mod tests {
             assert_eq!(json, serde_json::to_string(&back).unwrap());
         }
 
-        // parent_id 없는 옛 wire → default None(무마이그레이션).
         let legacy = r#"{
             "id": "00000000-0000-0000-0000-000000000000",
             "name": "legacy",

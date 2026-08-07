@@ -13,8 +13,6 @@
 //! ★수명 규칙★: 획득한 mutex 핸들은 **데몬 프로세스가 사는 동안 계속 들고 있어야** 한다.
 //! 핸들이 Drop(CloseHandle)되면 mutex 가 풀려 단일성 보장이 깨진다. 따라서 main 은
 //! 반환된 guard 를 프로세스 종료 시점까지 살려둔다(`_guard` 바인딩).
-//!
-//! non-windows 는 이번 단위에서 항상 성공하는 stub(데몬은 Windows 1차).
 
 /// 단일 인스턴스 mutex 식별자 override 환경변수 이름. 설정 시 USERNAME 대신 이 값으로 mutex 이름을
 /// 만든다 — 실프로세스 격리테스트가 테스트별 고유 key 를 주입해 병렬 충돌을 없애기 위함이다.
@@ -30,26 +28,18 @@ mod imp {
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    /// 단일 인스턴스 mutex 이름. `Global\` 네임스페이스 = 세션을 넘어 머신 전역에서 유일하므로
-    /// 사용자 식별자(USERNAME)를 이름에 넣어 "사용자당 하나" 경계를 만든다(data_dir 단위와 일치).
     /// `Global\` mutex 는 같은 사용자가 일반 권한으로 생성·개방하는 데 문제없다.
-    ///
-    /// INSTANCE_KEY_ENV override 설정 시 USERNAME 대신 그 값을 식별자로 쓴다(정본 = 상수 doc).
-    /// env 미설정 시 기존 USERNAME 동작 그대로(아래 unwrap_or_else 분기 — 운영 회귀 0).
     pub(crate) fn mutex_name() -> String {
-        // 1) 테스트 격리 override.
         if let Some(key) = std::env::var_os(INSTANCE_KEY_ENV) {
             if !key.is_empty() {
                 let key = key.to_string_lossy();
                 return format!("Global\\EngramDashboardDaemon-{key}");
             }
         }
-        // 2) 운영 기본(회귀 0).
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
         format!("Global\\EngramDashboardDaemon-{user}")
     }
 
-    /// 살아있는 동안 단일 인스턴스를 보장하는 가드. Drop 시 mutex 핸들을 닫는다.
     pub struct InstanceGuard {
         handle: HANDLE,
     }
@@ -74,7 +64,6 @@ mod imp {
     /// Err=시스템 오류(핸들 생성 실패).
     pub fn acquire() -> io::Result<Option<InstanceGuard>> {
         let name = mutex_name();
-        // 이름을 UTF-16 + NUL 종단으로 변환(PCWSTR 요구).
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
 
         // SAFETY: CreateMutexW — 보안 속성 None, 소유 요청 false, 유효한 NUL 종단
@@ -86,7 +75,6 @@ mod imp {
         // SAFETY: 직전 CreateMutexW 호출 직후의 last-error 를 읽는다(GetLastError 는 인자 없음).
         let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         if already {
-            // 이미 다른 인스턴스가 mutex 를 보유 — 우리가 받은 핸들은 닫고 None 반환.
             // SAFETY: 방금 CreateMutexW 가 반환한 유효한 핸들을 한 번만 닫는다.
             let r = unsafe { CloseHandle(handle) };
             if let Err(e) = r {
@@ -106,7 +94,6 @@ mod imp {
     /// non-windows stub 가드. 보유할 OS 자원 없음(데몬은 Windows 1차 — 추후 flock 등으로 대체).
     pub struct InstanceGuard;
 
-    /// 항상 획득 성공(stub).
     pub fn acquire() -> io::Result<Option<InstanceGuard>> {
         Ok(Some(InstanceGuard))
     }
@@ -120,12 +107,10 @@ pub use imp::acquire;
 mod tests {
     use super::{imp::mutex_name, INSTANCE_KEY_ENV};
 
-    /// mutex 이름의 env override / 기본(USERNAME) 분기를 한 테스트에서 직렬 검증한다.
     /// ★왜 한 테스트★: ENGRAM_INSTANCE_KEY 는 프로세스 전역 상태라 별도 테스트로 나누면 병렬
     ///   실행 시 서로 경합한다. set→확인→remove→확인 을 한 흐름에서 직렬로 하고 끝에서 반드시 제거한다.
     #[test]
     fn mutex_name_env_override_and_default() {
-        // 1) override 미설정 — USERNAME 단위(운영 회귀 0).
         std::env::remove_var(INSTANCE_KEY_ENV);
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
         let default_name = mutex_name();
@@ -135,7 +120,6 @@ mod tests {
             "override 미설정 시 USERNAME 단위 이름(운영 동작 그대로)"
         );
 
-        // 2) override 설정 — 그 key 로 이름 생성(USERNAME 무시 → 테스트별 독립 mutex).
         std::env::set_var(INSTANCE_KEY_ENV, "test-key-abc123");
         assert_eq!(
             mutex_name(),
@@ -151,7 +135,6 @@ mod tests {
             "빈 override 는 무시하고 USERNAME 기본으로 폴백"
         );
 
-        // 정리 — 다른 테스트로 새지 않게 반드시 제거.
         std::env::remove_var(INSTANCE_KEY_ENV);
     }
 }

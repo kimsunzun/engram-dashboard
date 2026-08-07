@@ -9,9 +9,6 @@
 //! ## 설계 근거 (daemon-design.md)
 //! - §1-1 단일 WS 연결·단일 수신루프(lane 분리 금지) — control 과 output 이 같은 연결.
 //! - §1-2 wire codec: **output hot path = 커스텀 고정헤더 binary frame**(`codec`), control = JSON.
-//!   그래서 `AgentEvent`(JSON enum)에는 고-throughput TerminalBytes 가 안 실린다 — 그건 binary frame.
-//!   저빈도 구조화 출력(TextDelta/Usage/ToolCall)만 JSON `AgentEvent::Output` 으로 흐른다.
-//! - §1-3 replay 기점: epoch 불일치=Reset / afterSeq<oldest=TruncatedReplay / 그 외=Resume(`SubscribeAction`).
 //!
 //! ## Tauri import 금지. 도메인 로직 금지(순수 타입·serde·codec 만).
 //!
@@ -45,7 +42,7 @@ pub use domain::{
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{AgentCommand, AgentEvent, OutputChunk, StructuredEvent, SubscribeAction};
 
-/// 프로토콜 버전. 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
+/// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
 /// 지금은 상수만 두고 Hello 에 실어 보냄 — 불일치 시 팝업 가이드는 나중).
 ///
 /// v2: ListAgents/ListProfiles 조회 응답을 broadcast(AgentListUpdated/ProfileListUpdated) 편승

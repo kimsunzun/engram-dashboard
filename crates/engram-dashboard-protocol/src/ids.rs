@@ -1,14 +1,12 @@
-//! ID 타입. 모두 Uuid 기반(현 core 와 동일). ts-rs 로 TS string 에 매핑.
-
 use ts_rs::TS;
 
-/// 에이전트 고유 식별자. core 의 `AgentId = uuid::Uuid` 와 동일 표현.
+/// core 의 `AgentId = uuid::Uuid` 와 동일 표현.
 pub type AgentId = uuid::Uuid;
 
-/// 영속 프로필 식별자(Spawn 요청이 참조). 현 core 의 profile id 와 동일.
+/// 현 core 의 profile id 와 동일.
 pub type ProfileId = uuid::Uuid;
 
-/// 프리셋 식별자(DeletePreset 요청이 참조). core `preset::PresetId` 와 동일 표현(ADR-0061).
+/// core `preset::PresetId` 와 동일 표현(ADR-0061).
 pub type PresetId = uuid::Uuid;
 
 /// side-effect command 의 idempotency 키(설계 §3). 데몬이 짧은 TTL dedup table 로 중복 흡수.

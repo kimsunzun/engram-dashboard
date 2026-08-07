@@ -1,11 +1,6 @@
 //! daemon.json — 데몬 발견(discovery) 파일.
 //!
-//! 데몬이 잡은 host/port + 접속 토큰 + protocol_version 을 atomic 하게 기록한다.
-//! UI(Embedded)나 외부 클라이언트는 이 파일을 읽어 데몬에 붙는다.
-//!
-//! **구조체는 `protocol::DaemonInfo`** — daemon 이 write, tauri 가 read 하는 두 프로세스의
-//! 공유 계약이라 protocol crate 에 있다. 여기엔 daemon 측 IO(write_atomic/read)와 stale
-//! 판정만 둔다.
+//! 여기엔 daemon 측 IO(write_atomic/read)와 stale 판정만 둔다.
 //!
 //! **atomic 보장(persistence/mod.rs 와 동일 패턴):** 같은 디렉토리에 tmp 를 쓰고
 //! `sync_all` 후 `rename` 한다. 같은 파일시스템 내 rename 이라 교체가 원자적 —
@@ -21,7 +16,7 @@ pub use engram_dashboard_protocol::DaemonInfo;
 
 const TMP_NAME: &str = "daemon.json.tmp";
 
-/// tmp → sync_all → rename. 부모 디렉토리는 호출자가 만들어 두었다고 가정하되,
+/// 부모 디렉토리는 호출자가 만들어 두었다고 가정하되,
 /// 안전하게 create_dir_all 도 한 번 더 한다(idempotent).
 pub fn write_atomic(path: &Path, info: &DaemonInfo) -> io::Result<()> {
     let dir = path
@@ -33,7 +28,6 @@ pub fn write_atomic(path: &Path, info: &DaemonInfo) -> io::Result<()> {
         .to_json_pretty()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    // 1) 같은 디렉토리 tmp 에 전체를 쓰고 디스크까지 flush(sync_all = 데이터+메타데이터).
     let tmp = dir.join(TMP_NAME);
     {
         let mut f = File::create(&tmp)?;
@@ -41,22 +35,20 @@ pub fn write_atomic(path: &Path, info: &DaemonInfo) -> io::Result<()> {
         f.sync_all()?;
     }
 
-    // 2) atomic rename 으로 교체. 같은 디렉토리라 크로스 파일시스템 오류는 발생하지 않는다.
-    //    실패 시 tmp 가 디스크에 남지 않게 정리하고 에러를 올린다.
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
 
-    // 3) parent 디렉토리 fsync — rename(디렉토리 엔트리 변경)을 영속화.
-    //    Windows 에선 디렉토리 핸들 fsync 지원이 제한적이라 best-effort(실패 무시).
+    // parent 디렉토리 fsync — rename(디렉토리 엔트리 변경)을 영속화.
+    // Windows 에선 디렉토리 핸들 fsync 지원이 제한적이라 best-effort(실패 무시).
     if let Ok(d) = File::open(dir) {
         let _ = d.sync_all();
     }
     Ok(())
 }
 
-/// daemon.json 읽기. 없거나 파싱 불가면 None(부팅 시 무시하고 새로 발행).
+/// 없거나 파싱 불가면 None(부팅 시 무시하고 새로 발행).
 pub fn read(path: &Path) -> Option<DaemonInfo> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -137,7 +129,6 @@ mod tests {
 
     #[test]
     fn serde_shape_is_stable() {
-        // 필드 이름/형태 회귀 방지(클라이언트와 공유되는 wire 포맷).
         let info = sample();
         let json = String::from_utf8(info.to_json_pretty().unwrap()).unwrap();
         let back = DaemonInfo::parse(json.as_bytes()).unwrap();
@@ -149,7 +140,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn pid_zero_is_stale() {
-        // PID 0 은 우리 데몬일 수 없음 → stale(windows).
         let mut info = sample();
         info.pid = 0;
         assert!(is_stale(&info), "PID 0 은 stale");
@@ -157,7 +147,6 @@ mod tests {
 
     #[test]
     fn current_process_with_unknown_start_time_is_not_stale() {
-        // start_time==0(미상, 옛 daemon.json) → PID 생존 fallback. 자기 PID 는 살아있으므로 not stale.
         let mut info = sample();
         info.pid = std::process::id();
         info.start_time = 0;
@@ -170,7 +159,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_process_with_matching_start_time_is_not_stale() {
-        // 자기 PID + 자기 creation time → not stale(정상 데몬).
         let mut info = sample();
         info.pid = std::process::id();
         info.start_time =
@@ -181,7 +169,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_pid_with_mismatched_start_time_is_stale() {
-        // ★PID 재사용 방어★: 같은 PID 라도 creation time 이 다르면 stale(우리 데몬 아님).
         let mut info = sample();
         info.pid = std::process::id();
         let real = engram_dashboard_core::agent::platform::current_process_start_time().unwrap();

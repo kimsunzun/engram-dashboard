@@ -13,15 +13,13 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 
 /// 연결 식별자(단조 증가). 두 포트 trait 의 모든 메서드가 이걸 받는다 — 그래서 carrier 구현이 아니라
-/// 포트 쪽에 산다(레지스트리 키로도 쓰인다).
+/// 포트 쪽에 산다.
 pub type ConnId = u64;
 
 /// 연결당 단일 writer 큐로 흐르는 출력 단위 — 프레임 어휘는 이 셋이 전부다.
 #[derive(Debug)]
 pub enum Frame {
-    /// 텍스트 페이로드(내용이 무엇인지는 이 층의 관심사가 아니다).
     Text(String),
-    /// binary 페이로드(codec frame 등).
     Binary(Vec<u8>),
     /// 연결 종료 — writer 가 이걸 받으면 close 후 루프를 나간다. 큐 **안**으로 들어가므로 앞서 넣은
     /// 프레임이 먼저 다 나간다(FIFO). `reason` 은 로그/디버깅용이라 클라에 전달되지 않는다.
@@ -49,7 +47,6 @@ impl std::error::Error for FrameError {}
 ///   상태에선 `Frame::Close` 조차 큐에 못 들어가 좀비 연결이 되기 때문이다(`ws` 모듈 헤더).
 /// - `send` = async 문맥 전용, backpressure 허용(자리가 날 때까지 대기). 여기서는 종료 신호를
 ///   **울리지 않는다** — 기다릴 수 있는 호출자라 슬로우 소비자 판정 대상이 아니다.
-// ADR-0129
 pub trait FrameSink: Send + Sync {
     fn try_send(&self, frame: Frame) -> Result<(), FrameError>;
 
@@ -78,7 +75,6 @@ pub trait FrameSink: Send + Sync {
 /// ★`FrameSink::try_send` 와의 비대칭(load-bearing)★: 연결당 `try_send` 는 포화를 만나면 그 연결의
 ///   종료 신호를 울리지만, **팬아웃의 포화는 연결 종료로 잇지 않는다**. 겨냥한 연결이 없는 호출이라
 ///   슬로우 소비자 판정을 여기 얹지 않는다는 뜻이고, 바꾸려면 별도 결정이 필요하다.
-// ADR-0129
 pub trait FrameFanout: Send + Sync {
     fn broadcast_text(&self, text: String);
 }
@@ -109,7 +105,6 @@ pub enum ConnFlow {
 /// ★`&Arc<dyn FrameSink>` 인 이유★: 구현이 이 연결보다 오래 사는 sink(코어 subscribers 에 등록되는
 ///   출력 sink)를 만들려면 `'static` 공유 핸들이 필요하다 — 빌린 참조로는 못 만든다.
 /// ★async 표현★: `async fn` in trait 은 dyn 호환이 아니므로 수동 `BoxFuture` 로 쓴다(새 의존 없이).
-// ADR-0129
 pub trait ConnectionHandler: Send + Sync {
     /// 연결 직후 1회. 여기서 넣은 프레임이 **이 핸들러가 내보내는** 첫 출력이다.
     ///
@@ -131,7 +126,6 @@ pub trait ConnectionHandler: Send + Sync {
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ()>;
 
-    /// text 프레임 1개. `text` 는 수신 버퍼를 빌려주는 것이라 소유권을 넘기지 않는다.
     fn on_text<'a>(
         &'a self,
         conn_id: ConnId,
@@ -140,8 +134,7 @@ pub trait ConnectionHandler: Send + Sync {
     ) -> BoxFuture<'a, ConnFlow>;
 
     /// 클라 → 데몬 binary 프레임. **어떤 프레임 종류가 유효한가는 위층 프로토콜의 판단**이라
-    /// 네트워크 행이 거부하지 않고 그대로 올린다. `payload` 도 빌림이다 — 필요하면 구현이 복사한다
-    /// (현 구현은 내용을 보지 않고 거부하므로 복사하지 않는다).
+    /// 네트워크 행이 거부하지 않고 그대로 올린다.
     fn on_binary<'a>(
         &'a self,
         conn_id: ConnId,
@@ -174,7 +167,6 @@ pub trait ConnectionHandler: Send + Sync {
 
 /// 연결마다 핸들러를 만드는 위층 공장. `handle_connection` 은 이것 하나만 들기 때문에 에이전트
 /// 어휘를 타입으로도 모른다.
-// ADR-0129
 pub trait ConnectionHandlerFactory: Send + Sync {
     fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler>;
 
