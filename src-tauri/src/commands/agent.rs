@@ -9,10 +9,6 @@
 //! 매칭한다(spike §9 G1 의 "request_id 출처"는 이 레이어). idempotency 의미상 *재시도 시 같은 키*가
 //! 정석이나, invoke 단발 호출은 매번 새 키로 충분(끊김 시 호출자가 재호출 = 새 키). writeStdin 중복
 //! 방지는 데몬측 dedup table 책임(ids.rs RequestId 주석).
-//!
-//! ## T6b 추가 (출력 평면)
-//! - `subscribe_output(channel)` — 창 mount 시 호출, 그 창의 출력 Channel 을 registry 에 등록한다.
-//! - `agent_resize` — fire-and-forget(`send_fire_and_forget(Resize)`)로 배선(reply 없는 명령).
 
 use std::sync::Arc;
 
@@ -25,19 +21,14 @@ use uuid::Uuid;
 use crate::daemon_client::DaemonClient;
 use crate::output_channel::WindowChannelRegistry;
 
-// 프론트가 보낸 UUID 문자열을 파싱한다. invalid 면 명확한 Err(패닉 금지 — 잘못된 입력 방어).
 fn parse_uuid(s: &str, what: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("{what} UUID 파싱 실패: {e}"))
 }
 
-// send_command 결과를 프론트로 넘기기 전 공통 처리. reply 이벤트는 데몬측 의미(Ack/Spawned/…)라,
-// 성공 케이스는 호출자별로 필요한 만큼만 꺼내고 여기선 그대로 통과시킨다(각 핸들러가 변환).
 type CmdResult = Result<AgentEvent, String>;
 
-// 새 에이전트 spawn(프로필 참조). reply = `Ack`(데몬 spawn dispatch 확인). 성공 시 `()`.
-//
 // ★주의(reply 종류)★: 데몬 connection_core.rs 의 `Spawn{profile_id}` dispatch 는 Ack 로 응답한다(SpawnByCwd/
-// SpawnProfile 만 Spawned 로 AgentInfo 동봉). 여기선 Ack/Spawned 어느 쪽이든 성공으로 본다.
+// SpawnProfile 만 Spawned 로 AgentInfo 동봉).
 #[tauri::command]
 pub async fn agent_spawn(
     client: State<'_, Arc<DaemonClient>>,
@@ -51,7 +42,7 @@ pub async fn agent_spawn(
     expect_ack_or_spawned(client.send_command(cmd).await)
 }
 
-// 에이전트 종료(자원 강제 폐쇄). reply = `Ack`.
+// 에이전트 종료(자원 강제 폐쇄).
 #[tauri::command]
 pub async fn agent_kill(
     client: State<'_, Arc<DaemonClient>>,
@@ -65,7 +56,7 @@ pub async fn agent_kill(
     expect_ack(client.send_command(cmd).await)
 }
 
-// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존. reply = `Ack`.
+// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존.
 #[tauri::command]
 pub async fn agent_interrupt(
     client: State<'_, Arc<DaemonClient>>,
@@ -79,7 +70,7 @@ pub async fn agent_interrupt(
     expect_ack(client.send_command(cmd).await)
 }
 
-// stdin 입력 전달(raw 바이트). reply = `Ack`. `data` 는 프론트에서 byte 배열(키 입력).
+// `data` 는 프론트에서 byte 배열(키 입력).
 #[tauri::command]
 pub async fn agent_write_stdin(
     client: State<'_, Arc<DaemonClient>>,
@@ -97,7 +88,7 @@ pub async fn agent_write_stdin(
 
 // PTY 크기 변경. ★주의★: `Resize` 는 wire 상 request_id 가 없어(데몬이 reply 안 보냄) send_command 의
 // reply 매칭 대상이 아니다 — 그래서 **fire-and-forget**(`send_fire_and_forget`)가 정답이다(reply 기대
-// 경로로 보내면 영구 hang). T6b 가 그 송신 경로를 깔아 여기서 실제로 wire 송신한다.
+// 경로로 보내면 영구 hang).
 //
 // ★fire-and-forget 의미★: enqueue 만 하고 ack 를 안 기다린다(resize 미반영=화면 크기 어긋남일 뿐
 // 동작 안전엔 무해). 비연결이면 DaemonClient 가 조용히 no-op — Resize 는 구독 델타가 아니라 단발 명령이라
@@ -123,16 +114,15 @@ pub async fn agent_resize(
 // ★봉투 포맷 전역 스위치(ADR-0096) — 조종/invoke 제어 표면★. 오퍼레이터(또는 §5 LLM/상주
 // 오케스트레이터)가 `invoke('set_envelope_format', { format: 'colon' | 'xml' })` 로 부르면 데몬 전역
 // 봉투 포맷 상태를 바꾼다 — 이후 모든 A→B 메시지 봉투가 그 포맷으로 렌더된다(colon=`{sender}: {body}`
-// 기본, xml=`<message from="{sender}">{body}</message>`). reply = `Ack`(데몬 상태 변경 확인). 성공 시 `()`.
+// 기본, xml=`<message from="{sender}">{body}</message>`).
 //
-// ★src-tauri = 클라이언트 셸(ADR-0029)★: 이 command 는 상태를 소유하지 않고 `AgentCommand::SetEnvelopeFormat`
-// 를 데몬으로 전달만 한다(다른 agent_* command 와 동형 — 얇은 빌더 + send_command). 상태 소유·조립은
-// 데몬(AgentManager 소유 프로세스)이다. ★워커 MCP 채널엔 미노출★(관리당하는 에이전트가 팀-전역 포맷을
-// 바꾸면 안 됨 — ADR-0096 결정 3·ADR-0094 최소권한). 이 invoke 표면이 정식 활성 경로이고, 사람용
-// 트리거(단축키/UI 버튼)는 나중 옵션이다(ADR-0096 결정 5 — cdp.mjs eval 로 이 invoke 를 임시 호출·검증).
+// ★src-tauri = 클라이언트 셸(ADR-0029)★: 상태 소유·조립은 데몬(AgentManager 소유 프로세스)이다.
+// ★워커 MCP 채널엔 미노출★(관리당하는 에이전트가 팀-전역 포맷을 바꾸면 안 됨 — ADR-0096 결정 3·ADR-0094
+// 최소권한). 이 invoke 표면이 정식 활성 경로이고, 사람용 트리거(단축키/UI 버튼)는 나중 옵션이다(ADR-0096
+// 결정 5 — cdp.mjs eval 로 이 invoke 를 임시 호출·검증).
 //
 // ★format 역직렬화★: `EnvelopeFormat` 는 serde lowercase 라 invoke JSON `{format:"xml"}` 이 그대로
-// 들어온다(wire enum 계약, ADR-0096). Tauri 가 command 인자를 이 타입으로 역직렬화한다.
+// 들어온다(wire enum 계약, ADR-0096).
 // ADR-0096
 #[tauri::command]
 pub async fn set_envelope_format(
@@ -170,7 +160,7 @@ pub fn subscribe_output(
 ) -> Result<(), String> {
     let label = window.label().to_string();
     // ★ADR-0006★: registry std Mutex — insert 는 동기, 락 보유 중 await 0. 같은 라벨 재등록(창 reload)은
-    //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해). registry 는 순수하게 label → Channel 만 든다.
+    //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해).
     let mut reg = registry.lock().map_err(|e| e.to_string())?;
     reg.insert(label, channel);
     Ok(())
@@ -218,7 +208,6 @@ pub async fn forward_daemon_command(
     client: tauri::State<'_, std::sync::Arc<DaemonClient>>,
     cmd: serde_json::Value,
 ) -> Result<Option<serde_json::Value>, String> {
-    // AgentCommand 로 파싱해 request_id 유무로 경로 분기.
     let agent_cmd: engram_dashboard_protocol::AgentCommand =
         serde_json::from_value(cmd).map_err(|e| format!("AgentCommand 파싱 실패: {e}"))?;
 
@@ -229,7 +218,7 @@ pub async fn forward_daemon_command(
     //   FromOldest 를 N번 replay 해 공유 버퍼 seq 단조(무손실 전제)가 붕괴하기 때문이다. 프론트
     //   ProtocolClient 는 이미 subscribeOutput 첫 구독에서 Subscribe 를 안 보내지만, resubscribeAll
     //   (재연결 resume)·미래 carrier 변경이 다시 보낼 여지가 있어 Rust 가 무시로 2차 방어한다
-    //   (프론트가 안 보내거나 Rust 가 무시 — 어느 쪽이든 데몬 직접 구독 0). reply 없는 명령이라 None 반환.
+    //   (프론트가 안 보내거나 Rust 가 무시 — 어느 쪽이든 데몬 직접 구독 0).
     if matches!(
         agent_cmd,
         engram_dashboard_protocol::AgentCommand::Subscribe { .. }
@@ -242,14 +231,11 @@ pub async fn forward_daemon_command(
         return Ok(None);
     }
 
-    // request_id 없는 명령(Resize)은 reply 가 안 와 send_command 가 hang 이므로 fire-and-forget 으로
-    // 보낸다(반환 None — 프론트로 올릴 reply 없음). (Subscribe/Unsubscribe 는 위에서 이미 차단됨.)
     if crate::daemon_client::protocol_state::command_request_id(&agent_cmd).is_none() {
         client.send_fire_and_forget(agent_cmd);
         return Ok(None);
     }
 
-    // request_id 있는 명령 — reply 를 await 해 그대로 프론트로 돌려준다(ProtocolClient 가 pending 매칭).
     // ★reply 직렬화★: 데몬 reply(Ack/Spawned/…)는 externally-tagged AgentEvent 라, 직렬화하면
     //   `{"Ack":{"request_id":…}}` 형태가 그대로 나온다 — 프론트 handleEvent 가 기대하는 wire 형태와 동형.
     // ★끊김 처리★: send_command 가 Err(연결 끊김/응답 못 받음)면 그 메시지를 프론트로 전달해
@@ -289,7 +275,6 @@ pub async fn forward_daemon_command(
     }
 }
 
-// reply 가 Ack(void 성공)인지 확인. 그 외 event 면 예상 밖이나, 성공 reply 류는 모두 통과시킨다.
 fn expect_ack(result: CmdResult) -> Result<(), String> {
     match result {
         Ok(AgentEvent::Ack { .. }) => Ok(()),
@@ -307,7 +292,6 @@ fn expect_ack(result: CmdResult) -> Result<(), String> {
     }
 }
 
-// reply 가 Ack 또는 Spawned(둘 다 spawn 성공)인지 확인.
 fn expect_ack_or_spawned(result: CmdResult) -> Result<(), String> {
     match result {
         Ok(AgentEvent::Ack { .. }) | Ok(AgentEvent::Spawned { .. }) => Ok(()),

@@ -67,7 +67,7 @@ pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, S
     ensure_internal(timeout_ms, false).await
 }
 
-// 데몬 alive/pid/port 조회(§5 LLM 제어 표면). daemon.json + PID liveness 로 판정.
+// daemon.json + PID liveness 로 판정.
 #[derive(serde::Serialize)]
 pub struct DaemonStatusDto {
     pub alive: bool,
@@ -86,8 +86,6 @@ pub async fn daemon_start(
     ensure_internal(timeout_ms, console.unwrap_or(false)).await
 }
 
-// 데몬 상태 조회(§5). 살아있는 데몬이 있는지 + pid/port.
-//
 // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출한다.
 #[tauri::command]
 pub fn daemon_status() -> Result<DaemonStatusDto, String> {
@@ -116,7 +114,7 @@ pub fn read_daemon_info() -> Result<Option<DaemonInfoDto>, String> {
     Ok(discovery::read_live_daemon(&data_dir).map(DaemonInfoDto::from))
 }
 
-// ★T7c: TauriTransport.start() 진입점(spawn 허용)★. Rust DaemonClient.connect() 를 호출한다.
+// ★T7c: TauriTransport.start() 진입점(spawn 허용)★.
 // 프론트 TauriTransport.start() 가 invoke 로 부른다(WsTransport.openSocket(true) 대응).
 #[tauri::command]
 pub async fn daemon_connect(
@@ -125,7 +123,7 @@ pub async fn daemon_connect(
     client.connect().await.map_err(|e| e.to_string())
 }
 
-// ★T7c: TauriTransport.ensureReady() 진입점(attach-only, no-spawn)★. Rust DaemonClient.ensure() 를 호출한다.
+// ★T7c: TauriTransport.ensureReady() 진입점(attach-only, no-spawn)★.
 // 프론트 TauriTransport.ensureReady() 가 invoke 로 부른다(WsTransport.ensureReady() 대응).
 #[tauri::command]
 pub async fn daemon_ensure(
@@ -134,13 +132,13 @@ pub async fn daemon_ensure(
     client.ensure().await.map_err(|e| e.to_string())
 }
 
-// ★T7c: TauriTransport.close() 진입점★. Rust DaemonClient.close() 를 호출한다.
+// ★T7c: TauriTransport.close() 진입점★.
 #[tauri::command]
 pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>) {
     client.close();
 }
 
-// ★리로드 자가복구 pull 조회(Fix-D)★. 현재 DaemonClient 연결 상태를 문자열로 반환한다.
+// ★리로드 자가복구 pull 조회(Fix-D)★.
 //
 // ★왜 필요한가★: Rust DaemonClient 는 `daemon-connection-state` 이벤트를 상태 *전이* 시에만 emit
 // 한다 — connect()/ensure() 는 이미 Connected 면 emit 없이 Ok 로 단락한다(connection.rs 는 전이에서만
@@ -160,7 +158,6 @@ pub fn daemon_connection_state(
     match client.state() {
         ConnectionState::Connected => "connected",
         ConnectionState::Reconnecting => "reconnecting",
-        // Connecting/Down 은 이벤트 어휘에 없거나 down 으로 접힌다 — 프론트가 non-connected 로 처리.
         ConnectionState::Connecting | ConnectionState::Down => "down",
     }
     .to_string()
@@ -180,7 +177,6 @@ pub async fn daemon_stop() -> Result<Option<u32>, String> {
         .map_err(|e| e.to_string())
 }
 
-// discover/start 공통 — ensure_daemon 을 blocking 으로 호출하고 DTO 로 변환.
 async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
     // ADR-0024/0029: data_dir 은 default_data_dir() 단일 출처(데몬과 동일 폴더).
     let data_dir = discovery::default_data_dir();
@@ -210,15 +206,14 @@ mod tests {
 
     #[test]
     fn dto_from_maps_all_fields() {
-        // 순수 변환 — 각 필드가 올바르게 매핑되는지 단언. start_time 은 내부 IPC 전용이라
-        // DTO 에는 싣지 않는다(프론트는 liveness 판정에 쓰지 않음).
+        // start_time 은 내부 IPC 전용이라 DTO 에는 싣지 않는다(프론트는 liveness 판정에 쓰지 않음).
         let info = engram_dashboard_protocol::DaemonInfo {
             pid: 4321,
             host: "127.0.0.1".into(),
             port: 51000,
             token: "c".repeat(64),
             protocol_version: 7,
-            start_time: 999, // DTO 로 안 넘어가는 것까지 확인(컴파일 + 무시)
+            start_time: 999,
         };
         let dto = DaemonInfoDto::from(info);
         assert_eq!(dto.pid, 4321);

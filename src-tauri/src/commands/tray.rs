@@ -14,7 +14,7 @@ pub fn show_main_ui(app: tauri::AppHandle) {
     actions::show_main_ui(&app);
 }
 
-// main 창 숨기기(hide). 트레이 "UI 숨기기"·X=hide 와 동일 종착.
+// 트레이 "UI 숨기기"·X=hide 와 동일 종착.
 #[tauri::command]
 pub fn hide_main_ui(app: tauri::AppHandle) {
     actions::hide_main_ui(&app);

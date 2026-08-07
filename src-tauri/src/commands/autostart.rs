@@ -9,8 +9,6 @@
 
 use tauri_plugin_autostart::ManagerExt;
 
-// 부팅 자동 시작 켜기/끄기(§5 LLM/트레이 공용 표면).
-//
 // autolaunch() State 는 init() 등록 시의 args(`--hidden`)로 레지스트리 Run 엔트리를 구성한다 —
 // enable=등록, disable=삭제. 플러그인 등록 ≠ 활성화: 기본 OFF, 이 command/트레이 토글로만 켠다.
 #[tauri::command]
