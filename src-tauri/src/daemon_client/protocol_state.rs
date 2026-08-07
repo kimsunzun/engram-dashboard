@@ -27,7 +27,7 @@ use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
 ///  ADR-0129 0-4.)
 ///
 /// ★계약★: `send_command` 은 reply 를 기대하므로 request_id 가 있는 명령에만 쓴다. None 인 명령을
-/// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로, 호출자(send_command)가 None 을 거른다.
+/// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로 호출자가 None 을 거른다.
 pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
     match cmd {
         AgentCommand::Spawn { request_id, .. }
@@ -113,8 +113,7 @@ pub fn reply_outcome(ev: AgentEvent) -> Result<AgentEvent, String> {
 /// epoch 가드의 per-agent 진실원. 연결 task 가 agent_id → SubState 맵으로 들고,
 /// SubscribeAck/output frame 마다 아래 결정 함수에 `&mut` 로 넘긴다.
 ///
-/// ★ADR-0046★: high-water(seq dedup)·버퍼는 src-tauri 에 없다 — 진도 상태는 프론트 뷰 단독 소유
-/// (뷰의 lastDeliveredSeq). 이 struct 는 epoch 가드만 담는다.
+/// 이 struct 는 epoch 가드만 담는다(ADR-0046).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubState {
     // 마지막 `SubscribeAck.current_epoch`. output frame epoch 매칭용(불일치 frame 폐기) +
@@ -130,11 +129,10 @@ impl SubState {
     }
 }
 
-/// output frame 의 epoch 가드 판정 결과. dedup 판정은 없다 — 진도 상태의 유일한 거처가 프론트 뷰(slot)
-/// 단독이라(ADR-0046 결정 3) src-tauri 는 라우팅 전 epoch 가드만 1회 적용한다.
+/// output frame 의 epoch 가드 판정 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochDecision {
-    /// epoch 가드 통과 — 원본 frame 그대로 fan-out(dedup 은 프론트 뷰가 뷰별로).
+    /// epoch 가드 통과 — 원본 frame 그대로 fan-out.
     Deliver,
     // epoch 불일치 — 옛 세션 잔여 frame. 화면 오염 방지로 버린다.
     DropEpochMismatch,
@@ -144,7 +142,7 @@ pub enum EpochDecision {
 // 운영에선 `oneshot::Sender<reply>`, 테스트에선 결과를 적재하는 mock. 이 모듈은 매칭 로직만 소유한다.
 pub type PendingMap<T> = HashMap<RequestId, T>;
 
-// ── output frame epoch 가드(ADR-0046 — dedup 은 프론트 뷰 단독) ─────────────────────────
+// ── output frame epoch 가드 ─────────────────────────────────────────────────────────
 /// epoch 가드만 판정한다. dedup(seq high-water)은 src-tauri 에 없다 — 프론트 뷰가 전담한다(ADR-0046).
 ///
 /// ★high-water 를 이 레이어에 되돌리면 안 되는 이유(ADR-0046 결정 3 — 재도입은 명시 위반)★: 진도를

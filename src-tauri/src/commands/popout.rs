@@ -4,25 +4,14 @@
 //!
 //! ## 무엇을 하나 (MOVE, not mirror)
 //! 원본 슬롯의 **콘텐츠(SlotContent)** 를 **새 탭**(새 창 or 지정 기존 창)으로 옮기고, 원본 슬롯을 원본
-//! View 에서 제거한다. ADR-0064: agent 슬롯뿐 아니라 agent_list/preset_palette 슬롯도 옮긴다(Empty 만 제외).
-//! agent 자체(데몬 프로세스)는 안 건드린다 — 순수 I/O 표시 표면만 이동(§5 손발/두뇌 분리). 비-에이전트
-//! 콘텐츠는 백엔드 출력 구독이 없어(프론트 렌더 콘텐츠) 구독 마이그레이션이 자연히 no-op 이다.
-//!
-//! ## 라우팅은 일반 메커니즘(ADR-0046 — 하드코딩 whitelist 금지)
-//! 새 탭이 그 창의 `tabs` 에 들어가면 OutputRouter.rebuild 가 그 창 label 로 새 View 의 agent 출력을
-//! 라우팅한다(각 창 모든 탭 walk — ADR-0057). 라우팅 표는 label-불가지 HashMap 이라 동적 label 도 흡수.
+//! View 에서 제거한다. agent 자체(데몬 프로세스)는 안 건드린다 — 순수 I/O 표시 표면만 이동(§5 손발/두뇌
+//! 분리).
 //!
 //! ## ★2-phase 롤백 + 기존창 타깃 orphan 방지(§5-3, G4)★
-//! WebviewWindowBuilder 는 Windows sync command 에서 호출하면 데드락하므로 `async fn` + 락 밖 빌드다.
 //! 락이 풀린 사이 대상 창이 소멸/동시 close 될 수 있어, **기존 창 타깃의 탭 삽입을 phase C 로 이연**하고
 //! phase C 에서 `windows.contains_key(to_window)` 재검증 후에만 삽입한다(부재면 롤백). 새 창 타깃은 phase C
 //! 에서 새 label 로 창 엔트리 생성(label = PopupCounter 단조라 재사용 충돌 없음). 소스 detach 는 still-ours
 //! 가드로 2차 락에서 close.
-//!
-//! ## label 유일성 (load-bearing)
-//! Tauri 창 label 은 재사용 금지(같은 label 재-build 는 에러). 공유 카운터(PopupCounter)로 단조 증가
-//! label(`slot-popup-1`, `-2`, …)을 발급한다 — 창을 닫아도 카운터는 안 되돌린다. `create_window`(D-6)도
-//! 같은 카운터/prefix 를 재사용한다(G8 — is_popup_label Destroyed 정리 게이트에 걸려야 누수 안 남).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -349,16 +338,10 @@ impl EmitLayout for AppHandle {
 }
 
 // ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·
-// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다. 그 창의 **모든 탭 View 를
-// 통째로 드롭**(views + view_owner) + windows 엔트리 제거 → rebuild **1회** → 그 델타의 to_unsubscribe
-// (어느 창에도 안 남은 agent)를 데몬에 발화 → 출력 Channel 제거.
+// close_tab/close_window 경유 destroy) lib.rs Destroyed arm 이 이걸 부른다.
 //
 // ★현 버그 수정(G1)★: 옛 코드는 단일 바인딩 하나만 정리해 멀티탭 팝업을 강제 종료하면 나머지 탭이 잔류
-// + Unsubscribe 누락. 이제 Tauri-free 코어 `cleanup_window_core`(output_router.rs)가 close_window 로 tabs
-// 전부 순회 드롭 + rebuild(마지막 1회 — 락 1구간)해 델타를 반환하고, 이 핸들러가 그 델타의 to_unsubscribe
-// 를 **락 안에서** 발화한다(F1 — 발화를 락 밖으로 미루면 재추가로 stale 1→0 이 라이브 구독을 죽인다).
-// 코어(모델·라우팅)는 headless 단독 테스트 가능(G1 필수, TRD §8 스테이지1) — Tauri 부분(registry.remove)만
-// 이 핸들러에 남는다.
+// + Unsubscribe 누락.
 //
 // ★이 함수는 command 가 아니다★ — Rust 이벤트 핸들러(on_window_event)에서 직접 호출. State 대신 이미
 // 손에 쥔 Arc 참조들을 인자로 받는다(lib.rs 가 app.state 로 꺼내 넘김). `_app` 은 현재 미사용(향후 즉시
@@ -390,7 +373,7 @@ pub fn cleanup_popup_window(
         };
         // 창이 이미 모델에서 지워졌으면 rebuild 만.
         let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
-        // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1). ADR-0046: to_unsubscribe 만 wire.
+        // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1).
         for a in delta.to_unsubscribe {
             client.unsubscribe(a);
         }

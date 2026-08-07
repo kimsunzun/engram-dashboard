@@ -4,10 +4,7 @@
 //! 이 모듈은 `LayoutNode` 만 알고 Tauri/AppState/락 을 모른다 → `#[cfg(test)]` 로 단독 회귀 단언.
 //!
 //! ★불변식★
-//! - split: 대상 Slot 을 Split{a=원래 슬롯, b=새 빈 슬롯, ratio=0.5}로 치환. 새 슬롯 id 반환.
-//! - close: 닫는 Slot 의 형제를 부모 자리로 승격(2-자식 Split 붕괴). root 슬롯이면 빈 슬롯으로 리셋.
 //! - assign: 대상 Slot 의 content(SlotContent) 만 교체(트리 구조 불변, ADR-0060).
-//! - ratio: 0.0~1.0 클램프(split 기본 0.5).
 
 use uuid::Uuid;
 
@@ -134,7 +131,7 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
     false
 }
 
-// 데몬에 실재 검증 안 함(ADR-0035/0006 — 락 보유 중 외부 호출 0). slot_id 없으면 no-op(false).
+// slot_id 없으면 no-op(false).
 // ★덮어쓰기 시맨틱 유지(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 resolve_spawn_slot 층).
 pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String>) -> bool {
     match node {

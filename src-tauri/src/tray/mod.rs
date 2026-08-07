@@ -199,7 +199,6 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     // match 뿐이라 panic 면이 거의 없고, (2) 일방 발사 재발사 모델이라 다음 켜기/끄기 클릭이 probe
     // 로 상태를 회수한다(아이콘 영구 고착 아님, 한 클릭 누락에 그침). 심각도 낮음 — 한계만 명시.
     tauri::async_runtime::spawn_blocking(move || {
-        // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출.
         let data_dir = crate::discovery::default_data_dir();
         match op {
             DaemonOp::Start => match crate::discovery::locate_daemon_exe() {
@@ -220,13 +219,8 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
                 Ok(outcome) => {
                     tracing::info!(?outcome, "[tray] 데몬 graceful stop 발사");
                     // ★끄기 후 아이콘 확정은 StopOutcome 으로 분기(load-bearing — S13/M-1 race 방지)★:
-                    // DaemonClosed=연결닫힘=꺼짐확정 → force_daemon_down(회색 확정 + death-window 억제창
-                    // 설정). 억제창은 데몬이 아직 죽는 중(연결닫힘~exit)에 옵저버 probe 가 alive=true 를
-                    // 거짓 보고해 회색을 컬러로 되돌리는 race 를 STOP_GRACE 동안 막는다(M-1). probe 직접
-                    // set 이 아니라 publish 게이트(LivenessState)를 거쳐 옵저버와 상태를 공유.
-                    // Timeout/NoTarget=불확실 → probe 폴백(refresh_tray_icon 도 이제 publish 경유).
-                    // 이 분기는 impure 층(StopOutcome=discovery 타입)이라 core 가 아니라 여기 둔다
-                    // (core 순수성 — core 는 IconState 만 안다).
+                    // DaemonClosed=꺼짐확정 → force_daemon_down. Timeout/NoTarget=불확실 → probe
+                    // 폴백(refresh_tray_icon).
                     if is_daemon_closed(outcome) {
                         actions::force_daemon_down(&app);
                     } else {

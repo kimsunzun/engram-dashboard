@@ -3,8 +3,7 @@
 //! 프론트가 각 창마다 데몬에 N개 WS 를 직결하던 구조(src/api/wsTransport.ts)를 src-tauri 로
 //! 끌어올린다 — **창이 몇 개든 데몬엔 연결 1개**. 이 모듈은 그 연결의 수립·핸드셰이크·생애를
 //! 소유한다. 프로토콜 의미론(epoch 가드·pending 매칭)은 `protocol_state.rs`, 재연결은 `connection.rs`,
-//! 출력 라우팅은 `output_router`/`output_channel` 이 갖는다. seq dedup·진도는 src-tauri 어디에도 없다 —
-//! 거처는 프론트 뷰(slot) 단독(ADR-0046).
+//! 출력 라우팅은 `output_router`/`output_channel` 이 갖는다.
 //!
 //! ## 구성(이 파일들이 구현하는 것)
 //! - 연결 수립 + Auth/Hello 핸드셰이크(`connection.rs`).
@@ -14,23 +13,8 @@
 //! - connected/connecting/down/reconnecting 상태 표현.
 //!
 //! ## ★동시성 모델(load-bearing)★
-//! - **단일 연결 task 가 stream 을 단독 소유한다(Mutex 없이).** WebSocketStream 의 SplitSink 는
-//!   동시 write 불가라, 여러 호출자가 직접 ws 를 만지면 write 가 교차한다. 그래서 데몬 ws.rs 의
-//!   "연결당 단일 writer" 와 대칭으로, 클라도 **하나의 task** 가 read/write 를 전담하고 다른
-//!   주체(invoke 핸들러)는 `cmd_tx`(mpsc) 로 의도만 보낸다. 이게 openGen(wsTransport)의 zombie
-//!   가드를 task lifetime 으로 대체하는 토대다(T4 에서 in-flight 취소·백오프 재연결이 합류).
-//! - **generation 가드(openGen 씨앗, Fix B)**: `generation`·`cmd_tx`·watch 전이를 **하나의
-//!   `Mutex<Lifecycle>` 아래로** 통합한다(`lifecycle.rs`). connect/ensure/close 마다 락 안에서 세대를
-//!   올리고, 각 연결 task 는 spawn 시점 세대(my_gen)를 캡처한다. task·caller 는 공유 상태(state
-//!   watch·cmd_tx)를 건드리는 "세대 비교 + 변경" 을 **같은 critical section** 으로 묶어 원자화한다 —
-//!   `publish_if_current`/`store_cmd_if_current`. 비교와 변경 사이에 다른 스레드가 세대를 못 바꾸므로,
-//!   밀려난(stale) task 는 공유 상태를 절대 못 건드린다 → 동시 connect·close-in-flight 에서 고아 Down
-//!   clobber·좀비 cmd_tx·close 후 Connected 부활을 막는다. ⚠️ atomic 하나(load→send 분리)는 SeqCst
-//!   여도 체크+변경을 못 묶어 TOCTOU 가 reachable 했다(Codex 적출) — 그래서 락으로 원자화했다.
-//!   ★남은 허용 범위(T2 씨앗 이후 — T4 는 재연결 경로만 덮었다)★: cancel 구독이 connected 직후라
-//!   (connection.rs) 첫 핸드셰이크는 취소 경쟁 밖이다 — 동시 connect 로 소켓 2개가 열릴 수 있음
-//!   (둘 다 connect_async)은 허용하고, 관찰 가능한 상태 오염만 없앤다.
-//! - 상태(`ConnectionState`)는 `watch` 채널로 노출 — 읽기 측(여러 구독자)이 락 없이 현재값을 본다.
+//! - **단일 연결 task 가 stream 을 단독 소유한다(Mutex 없이)** — `connection.rs`.
+//! - **generation 가드(openGen 씨앗, Fix B)** — `lifecycle.rs`.
 
 pub mod connection;
 mod lifecycle;
@@ -85,7 +69,7 @@ pub trait DaemonDiscovery: Send + Sync + 'static {
 }
 
 // 운영 DaemonDiscovery — discovery crate 에 위임. connect=ensure_daemon(spawn 가능),
-// ensure=read_live_daemon(no-spawn). 데이터 폴더·exe 경로는 discovery 단일 출처(ADR-0024/0029).
+// ensure=read_live_daemon(no-spawn).
 //
 // ★blocking 주의★: ensure_daemon 은 폴링·sleep·WMI 동기 호출을 포함한다. 호출자(연결 task)는
 // `spawn_blocking` 으로 감싸 async executor 를 막지 않는다(connection.rs 참조).
@@ -101,7 +85,6 @@ impl DaemonDiscovery for RealDiscovery {
     }
 
     fn read_live(&self) -> Option<DaemonInfo> {
-        // ★ADR-0021 no-spawn★: read_live_daemon 은 daemon.json 을 읽기만 한다(데몬을 깨우지 않음).
         let data_dir: PathBuf = engram_dashboard_discovery::default_data_dir();
         engram_dashboard_discovery::read_live_daemon(&data_dir)
     }
@@ -132,11 +115,6 @@ pub struct DaemonClient {
     // 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
     // 락 아래서만(가드된 전이) — 그래야 "세대 체크 + watch send" 가 원자적이다. 이 rx 는 borrow 만.
     state_rx: watch::Receiver<ConnectionState>,
-    // ★연결 lifecycle 가드(Fix B — openGen 씨앗)★. generation·cmd_tx·watch 전이를 하나의 락 아래로
-    // 통합한다(lifecycle.rs). connect/ensure/close 가 락 안에서 세대를 올리고, 각 연결 task 는 spawn
-    // 시점 세대를 캡처해 공유 상태 변경을 "세대 비교 + 변경" 한 critical section 으로 원자화한다 —
-    // 밀려난 task 는 공유 상태를 못 건드려 고아 Down clobber·좀비 cmd_tx·Connected 부활을 막는다.
-    // AtomicU64+분리 send 의 TOCTOU(SeqCst 로도 못 묶음, Codex 적출)를 락으로 닫았다.
     lifecycle: Arc<Lifecycle>,
     // 핸드셰이크(소켓 open ~ Hello) 상한. 운영=HANDSHAKE_TIMEOUT, 테스트=짧은 값 주입(Fix A).
     handshake_timeout: Duration,
@@ -363,12 +341,7 @@ impl DaemonClient {
     // 세대 bump + 캡처는 **호출자(connect/ensure)가 진입 즉시 discovery 전에** 한다(FIX-1) — 그
     // `my_gen` 을 여기로 넘겨받는다. ★이 함수는 더 이상 bump 하지 않는다(이중 bump 회피)★. 동시
     // connect/ensure 가 둘 다 들어오면 각자 진입에서 bump 해 서로 다른 세대를 갖고, 더 새 task 만
-    // current 가 된다. close() 도 같은 락 아래서 세대를 올려 진행 중 task 를 전부 stale 화한다.
-    // 공유 상태(state watch·cmd_tx) 변경은 항상 "세대 비교 + 변경" 을 같은 critical section 으로 묶는
-    // lifecycle 메서드(`publish_if_current`/`store_cmd_if_current`)로만 한다 — 비교와 변경 사이에 다른
-    // 스레드가 세대를 못 바꾸므로 stale caller/task 는 절대 공유 상태를 못 건드린다(Connecting/Down/
-    // cmd_tx clobber 불가). ★ADR-0006★: 락 메서드는 전부 동기(await 없음)라, 아래 `ready_rx.await`
-    // 등 모든 await 는 락을 보유하지 않은 채 일어난다.
+    // current 가 된다.
     //
     // ★my_gen 계약★: 호출자가 `bump_and_capture` 로 막 캡처해 넘긴 값이다. 그 bump 와 이 함수 진입
     // 사이에 다른 connect/close 가 또 끼면 내 my_gen 은 이미 stale 일 수 있다 — 그래도 모든 발행이
@@ -439,8 +412,7 @@ impl DaemonClient {
                     );
                 }
                 // ★ADR-0046★: 옛 handoff-resync(cmd_tx 저장 직후 재구독+sweep)는 제거됐다 — src-tauri 는
-                //   더는 connect 진입 시 eager 재구독을 하지 않는다(진도/구독 상태 무보유). replay 는 뷰 주도
-                //   (request_replay)로만 형성되고, layout 은 Unsubscribe 정리만 wire 로 보낸다(BLOCK-1 전면화).
+                //   더는 connect 진입 시 eager 재구독을 하지 않는다(진도/구독 상태 무보유).
                 Ok(())
             }
             Ok(Err(e)) => {
@@ -483,13 +455,6 @@ impl DaemonClient {
 
     // 명시 종료(wsTransport `close()` 대응). 연결 task 에 종료를 알리고 Down 으로 전이한다.
     //
-    // ★generation 가드(Fix B — 락으로 원자화)★: lifecycle 락 아래서 (a)세대 bump (b)cmd_tx=None
-    // (c)Down 발행 **을 한 원자 단위로** 한다. bump 가 진행 중인(핸드셰이크 중 포함) 모든 연결 task 를
-    // stale 화하고, bump 와 Down 사이에 stale task 가 끼어 Connected 를 발행할 수 없다(그 task 의
-    // publish_if_current 가 이미 올라간 세대를 보고 삼킨다). cmd_tx drop → 연결 task 의 cmd_rx EOF →
-    // task 정리. 이 Down 은 close 자신의 의도라 항상 유효.
-    //
-    // ★ADR-0006★: lifecycle.close() 는 전부 동기(bump+Option 교체+watch send) — await 없음.
     // ★재연결 금지는 T4★: T2 는 명시 close 만. closedByUser 가드(명령/재연결이 respawn 안 하게)는
     // 백오프 재연결과 함께 T4 가 채운다.
     pub fn close(&self) {
@@ -502,8 +467,7 @@ impl DaemonClient {
     //
     // ★계약(request_id)★: `cmd` 는 **호출자가 request_id 를 이미 박은** 명령이다(commands/agent.rs 의
     // 빌더가 `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency
-    // (재시도 시 같은 키)와 정합한다 — send_command 가 임의로 채우면 호출자가 키를 모른다. request_id
-    // 없는 명령(Auth/Subscribe/Unsubscribe/Resize)은 reply 가 안 와 hang 이므로 여기서 거른다.
+    // (재시도 시 같은 키)와 정합한다 — send_command 가 임의로 채우면 호출자가 키를 모른다.
     //
     // ★흐름★: (1) 현재 cmd_tx clone(없으면 not-connected Err) (2) oneshot 생성 (3) `SendCommand`
     // enqueue (4) reply await. 연결 task 가 reply 를 resolve(Ok/Err)하거나, 끊김 시 drain 으로 Err 를
@@ -512,7 +476,6 @@ impl DaemonClient {
     // ★ADR-0006(락 across await 금지)★: `current_cmd_tx()` 는 락을 잡았다 즉시 풀고 Sender clone 만
     // 돌려준다 — 이후 `tx.send().await`·`rx.await` 는 락 미보유 상태다(Sender 는 lifecycle 락과 독립).
     pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
-        // request_id 없는 명령은 reply 매칭 불가 → 즉시 거른다(연결 task 에서 영구 pending 방지).
         if protocol_state::command_request_id(&cmd).is_none() {
             return Err("send_command: request_id 없는 명령은 reply 를 기대할 수 없다".to_string());
         }
@@ -547,9 +510,6 @@ impl DaemonClient {
     // cmd_tx 는 bounded(512) mpsc 라 `try_send` 로 넣는다 — 해제는 저빈도(레이아웃 변경 시에만)라
     // full 은 사실상 안 난다. 비연결(`current_cmd_tx`=None)이면 조용히 no-op(데몬이 그 agent 를 이미 안
     // 봄 → 정리 불필요, connect 시 layout 이 다시 정리 델타를 낸다).
-    //
-    // ★ADR-0046 — Unsubscribe 만 layout 이 wire 로 보낸다(BLOCK-1 전면화)★: wire 구독 형성(Subscribe)은
-    //   뷰 주도 `request_replay` 단독이고, 정리(Unsubscribe)만 라우터(layout 델타)가 발행한다.
     pub fn unsubscribe(&self, agent_id: AgentId) {
         self.try_enqueue(ConnectionCommand::Unsubscribe { agent_id }, "unsubscribe");
     }

@@ -9,11 +9,6 @@
 //! 이 모듈은 `scripts/engram.mjs`(throwaway node 스파이크)의 Rust 이식이다. 스파이크는 롤백 대상이고
 //! 이 exe 가 자립한다.
 //!
-//! ## GUI 경로 불변(load-bearing)
-//! `main.rs` 가 argv 첫 인자를 보고 **알려진 CLI verb 일 때만** 이 모듈로 분기한다. 그 외(인자 없음·
-//! `--hidden` autostart 등)는 기존 Tauri/GUI 기동을 **그대로** 탄다 — single-instance 플러그인·창·
-//! 트레이 어느 것도 CLI 경로에선 건드리지 않는다(one-shot: 붙어서 명령 1건 처리 후 exit).
-//!
 //! ## 이 CLI 는 spawn 하지 않는다(ADR-0021 대칭)
 //! daemon.json 을 **읽기만** 한다(`read_live_daemon`) — 데몬이 없으면 명확히 에러로 빠진다("no daemon
 //! running / is the app open?"). CLI 가 데몬을 깨우지 않는 이유: CLI 는 이미 떠 있는 앱/데몬을 조종하는
@@ -264,8 +259,6 @@ async fn list_agents(conn: &mut Connection) -> Result<Vec<AgentInfo>, String> {
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// one-shot 데몬 WS 연결. connection.rs 의 핸드셰이크(Auth 첫 프레임 → Hello)를 최소로 재현한다.
-/// 재연결·상태머신 없음(one-shot). Text(제어 JSON)만 처리하고 Binary(터미널 출력 바이트)는 무시한다.
 struct Connection {
     ws: Ws,
 }

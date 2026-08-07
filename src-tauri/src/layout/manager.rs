@@ -2,7 +2,7 @@
 //! `Arc<Mutex<ViewManager>>` 로 소유.
 //!
 //! ★Tauri 의존 0★: 이 타입은 락·emit 을 모른다. 락 취득/해제·emit 은 command 레이어
-//! (`commands/layout.rs`)가 한다(ADR-0006: 락 해제 후 emit). 그래서 mutation 메서드는 변경 결과
+//! (`commands/layout.rs`)가 한다. 그래서 mutation 메서드는 변경 결과
 //! (영향받은 view_id·갱신된 스냅샷·탭 목록)를 **반환만** 하고, 여기서 직접 emit 하지 않는다 →
 //! 단독 unit 테스트 가능(headless).
 //!
@@ -50,12 +50,10 @@ pub enum LayoutError {
     SlotNotFound(Uuid),
     #[error("window 없음: {0}")]
     WindowNotFound(String),
-    // 불변식 4 — hide only.
     #[error("메인 창은 닫을 수 없음")]
     MainNotClosable,
 }
 
-// 한 창의 탭 목록 + 활성 탭(ADR-0057). `active` 는 항상 `tabs` 안(불변식 3).
 #[derive(Debug, Clone)]
 pub struct WindowTabs {
     // 탭 순서(좌→우).
@@ -75,9 +73,7 @@ pub struct WindowTabsSnapshot {
 // 레이아웃 권위 상태(탭 소유 모델 — ADR-0057). invoke 스레드풀 동시접근 → LayoutState 가 Mutex 로 감싼다.
 pub struct ViewManager {
     pub views: HashMap<ViewId, View>,
-    // View → 소유 창(★유니크 소유★ = View 당 정확히 1창). 캐시된 역인덱스(불변식 1·2). // ADR-0057
     pub view_owner: HashMap<ViewId, WindowLabel>,
-    // `agent-tree` 는 여기 없음(모델 밖). // ADR-0057
     pub windows: HashMap<WindowLabel, WindowTabs>,
     // 변경마다 +1(get_view race 용 — 팝업 pull↔listen 윈도). 0 부터 시작, 첫 변경에서 1.
     pub version: u64,
@@ -90,8 +86,6 @@ impl Default for ViewManager {
 }
 
 impl ViewManager {
-    // agent-tree 는 windows 밖. // ADR-0057
-    //
     // ★부팅 기본 = 슬롯화된 트리(ADR-0063)★: 옛 고정 좌측 사이드패널(AppLayout Sidebar)이 하던 "트리 좌측
     // 상시 노출"을 슬롯으로 재현한다. 좌측을 작게(ratio 0.2) 두어 사이드패널 UX(좁은 트리 + 넓은 작업
     // 영역)를 무손실 대체한다. ★main 첫 뷰만★ — create_tab 로 만드는 새 탭은 종전대로 단일 빈 슬롯이다
@@ -157,12 +151,10 @@ impl ViewManager {
         })
     }
 
-    // agent-tree 등 모델 밖 창은 포함 안 함.
     pub fn list_windows(&self) -> Vec<WindowLabel> {
         self.windows.keys().cloned().collect()
     }
 
-    // ADR-0068: 슬롯 공간 파생(neighbors/ordinal)을 논리 트리에서 산출해 함께 싣는다(픽셀 무관 — 백엔드 권위).
     pub fn snapshot(&self, view_id: Uuid) -> Result<ViewSnapshot, LayoutError> {
         let v = self
             .views
@@ -268,7 +260,6 @@ impl ViewManager {
     }
 
     // label 은 호출자(command 레이어)가 발급(D-6).
-    // ★이미 존재하는 label 재사용 금지★(Tauri 창 label 재사용 에러 회피 — 호출자 카운터 단조).
     pub fn create_window(&mut self, label: &str) -> Result<ViewId, LayoutError> {
         if self.windows.contains_key(label) {
             return Err(LayoutError::WindowNotFound(label.to_string()));
@@ -300,8 +291,7 @@ impl ViewManager {
         Ok(())
     }
 
-    // 창 `label` 의 탭 `view` 를 닫음(§5-2 상태기계, ADR-0057). 반환 = 이 close 로 창이 **닫혀야 하는지**
-    // (팝업 마지막 탭). command 레이어가 그때 close_window(OS) 를 실행한다.
+    // 창 `label` 의 탭 `view` 를 닫음(§5-2 상태기계, ADR-0057). 반환 = 이 close 로 창이 **닫혀야 하는지**.
     pub fn close_tab(&mut self, label: &str, view: ViewId) -> Result<CloseTabOutcome, LayoutError> {
         let wt = self
             .windows
@@ -328,7 +318,6 @@ impl ViewManager {
 
         if wt.tabs.is_empty() {
             if label == MAIN_WINDOW_LABEL {
-                // 메인 마지막 탭 → 빈 탭 1개 강제(불변식 4, main non-closable). // ADR-0057
                 let id = self.make_view("View 1".to_string());
                 self.view_owner.insert(id, MAIN_WINDOW_LABEL.to_string());
                 let wt = self.windows.get_mut(label).expect("main 존재");
@@ -337,7 +326,6 @@ impl ViewManager {
                 self.bump_version();
                 Ok(CloseTabOutcome::Stayed)
             } else {
-                // 팝업 마지막 탭 → 창 통째 닫힘. windows 엔트리 제거(에이전트는 생존, D-3). // ADR-0057
                 self.windows.remove(label);
                 self.bump_version();
                 Ok(CloseTabOutcome::WindowClosed)
@@ -349,7 +337,7 @@ impl ViewManager {
     }
 
     // 창 `label` 을 통째로 닫음(모든 탭 View 드롭 + windows 엔트리 제거). 반환 = 드롭된 View id 들
-    // (command 레이어가 rebuild 후 Unsubscribe 델타에 반영). ★main 은 금지(불변식 4)★.
+    // (command 레이어가 rebuild 후 Unsubscribe 델타에 반영).
     // 팝업 창 Destroyed 멀티탭 정리(§5-2/G1)의 코어 경로. // ADR-0057
     pub fn close_window(&mut self, label: &str) -> Result<Vec<ViewId>, LayoutError> {
         if label == MAIN_WINDOW_LABEL {
@@ -408,8 +396,6 @@ impl ViewManager {
     // view-id-키(name 은 View 속성 — split_slot 과 동형으로 소속 창은 view_owner 파생).
     // ★이름 정규화는 프론트 경계 몫★: 여기선 받은 문자열을 그대로 저장한다(trim/공백거부는 사람 UI·
     // LLM command 어댑터가 invoke 전에 처리).
-    // 이름은 ViewMeta.name 에만 반영되므로 command 레이어는 window:tabs-updated 만 emit(layout 스냅샷엔
-    // name 없음 — 라우팅·트리 불변). // ADR-0057
     pub fn rename_tab(&mut self, view_id: Uuid, name: String) -> Result<(), LayoutError> {
         let v = self.view_mut(view_id)?;
         v.name = name;
@@ -417,7 +403,6 @@ impl ViewManager {
         Ok(())
     }
 
-    // view 안 slot_id 슬롯을 닫음(형제 승격, root 슬롯이면 빈 슬롯 리셋).
     pub fn close_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
         let v = self.view_mut(view_id)?;
         if !tree::close_in_tree(&mut v.layout, slot_id) {
@@ -429,7 +414,6 @@ impl ViewManager {
     }
 
     // view 안 slot_id 슬롯에 agent_id(참조 문자열) 배정. ★데몬에 실재 검증 안 함(ADR-0035/0006).
-    // 같은 agent 가 다른 View 에도 배정될 수 있음(불변식 5 — 두 창 같은 에이전트).
     pub fn assign_agent(
         &mut self,
         view_id: Uuid,
@@ -560,8 +544,6 @@ impl ViewManager {
 }
 
 // `spawn_into`(D-7) 슬롯 해소 실패 사유(TRD §6 G9). command 레이어가 문자열로 옮긴다.
-// ★load-bearing★: `SlotOccupied` 는 스폰이 이미 성공한 뒤 배정 단계에서 나므로, command 는 이 에러를
-//   에이전트 생존(list_agents 재부착) 문구와 함께 호출자에게 전달한다(§5 실패 가시성 — 하드 롤백=kill 안 함).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpawnSlotError {
     #[error("슬롯 {0} 이미 점유됨(덮어쓰기 금지 — split_slot 으로 빈 슬롯을 만든 뒤 재시도)")]

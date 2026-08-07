@@ -620,10 +620,6 @@ async fn handshake_times_out_when_server_silent() {
 // 단언한다 — 동시 connect 테스트가 핸드셰이크 단계 self-close 만 커버하는 사각(main_loop 종료 Down
 // 가드)을 이 단위 테스트가 메운다. publish_if_current 가 stale 일 때 true 를 돌려주거나 watch 를
 // 발행하게 깨지면(가드 무력화) stale task 의 Down 이 current 의 Connected 를 clobber 한다.
-//
-// ★TOCTOU 핵심★: 이전 구현은 generation(AtomicU64) load 와 watch send 가 분리돼, 그 사이 다른
-// 스레드의 bump 가 끼어 stale task 가 current 의 상태를 덮었다. 지금은 비교+send 가 한 락 안이라
-// 끼어들 수 없다 — 아래는 그 가드 메서드의 계약(stale→미발행, current→발행)을 단언한다.
 #[test]
 fn lifecycle_guard_blocks_stale_publish() {
     let (lifecycle, mut state_rx) = Lifecycle::new();
@@ -743,12 +739,9 @@ async fn connected_then_close_reconnect_no_down_clobber() {
 // ★왜 확률적 stress 를 이 결정론적 단위로 교체했나 (다음 세션이 매직타이밍 stress 를 재도입하지 말 것)★
 // 이전엔 `toctou_stress_*` 두 테스트가 mock 서버 hold(5/30ms) vs assert sleep(3ms) 의 매직 타이밍에
 // 의존해 race 창을 *확률적으로* 때렸다. 그 타이밍 가정이 깨지면 current task 의 *정상* Down 을 stale
-// clobber 로 오판하는 false positive 가 났다(baseline 에서도 ~1/20 간헐 실패). cross-family 리서치
-// (docs/research/toctou-concurrency-test-verification-research-2026-06-28.md) 결론 = loom 도입은 지금
-// 저ROI(tokio::sync 사용자 검증엔 tokio 재컴파일 필요), 대신 **단위 수준으로 내려 가드 메서드를 직접
-// 순서대로 호출**해 가드의 *논리 계약*(stale→미발행/거부, current→발행/허용)을 네트워크 타이밍 없이
-// 결정론적으로 증명한다. ★범위 한계(정직성)★: 비교+변경의 *원자성*(동시 스레드에서 진짜 안 깨짐)은
-// std Mutex 가 보장하며 이 단위 테스트가 증명하는 게 아니다 — 그건 loom 영역이다(아래 §loom). 실 소켓
+// clobber 로 오판하는 false positive 가 났다(baseline 에서도 ~1/20 간헐 실패). 대신 **단위 수준으로
+// 내려 가드 메서드를 직접 순서대로 호출**해 가드의 *논리 계약*(stale→미발행/거부, current→발행/허용)을
+// 네트워크 타이밍 없이 결정론적으로 증명한다. 실 소켓
 // race 를 통한 통합 wiring 커버는 위쪽 single-shot 결정론 회귀 테스트
 // (`concurrent_connect_settles_connected_no_flap` · `connected_then_close_reconnect_no_down_clobber`
 // 등)가 계속 맡는다 — 이 단위 테스트는 그 가드 *판정점*(논리 계약) 자체를 race 없이 박제한다.
@@ -1337,8 +1330,7 @@ async fn reconnect_close_blocks_closed_by_user() {
 // ── 케이스: 끊김 동안 close() → 좀비 소켓 안 생김 [Blocker-1] (TS 'close() during read await') ─────
 // 재연결 백오프 중(read_live/sleep yield)에 close() 가 들어오면, 재개된 재연결 루프가 새 소켓을 열어
 // 끊은 연결을 부활시키면 안 된다(좀비). reconnect_guard(generation+closedByUser)가 stale 로 폐기해야
-// 새 accept 가 안 생기고 Down 유지. ★Rust 단일 task 모델★: hijack 할 공유 소켓 핸들 자체가 없고, 남는
-// 위험(stale task 가 공유 상태 건드림)을 reconnect_guard 한 락으로 닫는다(TS openGen 의 task-lifetime 판).
+// 새 accept 가 안 생기고 Down 유지.
 #[tokio::test(start_paused = true)]
 async fn reconnect_close_during_backoff_no_zombie() {
     let server = spawn_reconnect_server().await;

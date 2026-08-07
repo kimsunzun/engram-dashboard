@@ -3,8 +3,6 @@
 //! ★배치 규약★: 이 타입들은 **src-tauri 안에서만** 정의·export 된다. protocol/daemon crate 에
 //! 절대 넣지 않는다 — 데몬은 View 를 일절 모르는 UI 불가지론(ADR-0035). ts-rs 로 프론트
 //! (`src/api/layoutTypes.ts`)에 미러하되, 데몬 wire 계약(protocol crate)과는 별개 채널이다.
-//!
-//! agent_id 는 데몬 에이전트의 "참조 문자열"일 뿐(소유 아님) — close_tab 해도 에이전트는 생존(ADR-0035 디커플링).
 
 use ts_rs::TS;
 use uuid::Uuid;
@@ -34,7 +32,7 @@ pub enum SplitDir {
 pub enum SlotContent {
     /// resolve_spawn_slot 점유 판정에서 "빈"(ADR-0059).
     Empty,
-    /// 데몬 에이전트 참조(바인딩만 — 소유 아님, ADR-0035). resolve_spawn_slot 에서 "점유"(ADR-0059).
+    /// resolve_spawn_slot 에서 "점유"(ADR-0059).
     Agent { agent_id: String },
     /// MVP=필드 없는 unit — 렌더 대상만 지정하고 데이터는 agentStore 가 쥔다(콘텐츠 종류만 표현, ADR-0060).
     AgentList,

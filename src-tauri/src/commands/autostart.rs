@@ -10,7 +10,7 @@
 use tauri_plugin_autostart::ManagerExt;
 
 // autolaunch() State 는 init() 등록 시의 args(`--hidden`)로 레지스트리 Run 엔트리를 구성한다 —
-// enable=등록, disable=삭제. 플러그인 등록 ≠ 활성화: 기본 OFF, 이 command/트레이 토글로만 켠다.
+// enable=등록, disable=삭제.
 #[tauri::command]
 pub fn set_autostart(app: tauri::AppHandle, enable: bool) -> Result<(), String> {
     let mgr = app.autolaunch();

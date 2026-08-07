@@ -59,8 +59,6 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
 }
 
 // 데몬을 발견(없으면 WMI spawn)하고 접속 정보를 반환한다.
-//
-// data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출한다.
 // timeout_ms 미지정 시 5초. 콘솔 가시화는 daemon_start(console=true).
 #[tauri::command]
 pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
@@ -86,7 +84,6 @@ pub async fn daemon_start(
     ensure_internal(timeout_ms, console.unwrap_or(false)).await
 }
 
-// data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출한다.
 #[tauri::command]
 pub fn daemon_status() -> Result<DaemonStatusDto, String> {
     let data_dir = discovery::default_data_dir();
@@ -104,10 +101,8 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
 // ★재연결 hot-swap 추적용★: daemon_stop→daemon_start(통째 교체)나 크래시-재spawn 으로 데몬이 새
 // port/token 으로 뜨면, 프론트 재연결 루프(wsTransport)가 캐시된 옛 주소 대신 이 command 로 현재
 // daemon.json 을 재조회해 새 주소로 attach 한다. read-only 라 discover_daemon(spawn 동반)과 분리된다.
-// data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029).
 //
 // daemon.json 없음/깨짐/죽은 PID/버전 불일치 → Ok(None)(보수). 살아있는 호환 데몬이면 Ok(Some(DTO)).
-// token 은 DTO 에 실리나 **로그 금지**(DaemonInfoDto 규약).
 #[tauri::command]
 pub fn read_daemon_info() -> Result<Option<DaemonInfoDto>, String> {
     let data_dir = discovery::default_data_dir();
@@ -178,7 +173,6 @@ pub async fn daemon_stop() -> Result<Option<u32>, String> {
 }
 
 async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
-    // ADR-0024/0029: data_dir 은 default_data_dir() 단일 출처(데몬과 동일 폴더).
     let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| e.to_string())?;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));

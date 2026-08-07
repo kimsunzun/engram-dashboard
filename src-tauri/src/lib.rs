@@ -70,8 +70,6 @@ pub fn run() {
             app.manage(router.clone());
             app.manage(registry.clone());
 
-            // 슬롯 팝업 분리(pop_out_slot)용 label 카운터 — 창 label 재사용 금지 불변식을 강제하는 단조
-            // 카운터(닫아도 안 되돌림).
             app.manage(std::sync::Arc::new(
                 crate::commands::popout::PopupCounter::default(),
             ));
@@ -148,37 +146,21 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            // (없으면 WMI spawn) — §5 LLM 제어 표면.
             commands::discover_daemon,
-            // ADR-0021: 데몬 lifecycle 명시 제어 표면(§5). start=ensure(spawn 허용), stop=fallback kill,
-            //   status=alive/pid/port. 재연결 루프는 이걸 안 부른다(attach-only).
             commands::daemon_start,
             commands::daemon_stop,
             commands::daemon_status,
-            // ADR-0021: 재연결이 옮겨간(hot-swap·크래시 재spawn) 데몬을 따라가게 daemon.json 을
-            //   재조회(token 포함, no-spawn). ★재연결 attach-only 의 spawn-금지 유지★(read-only).
             commands::read_daemon_info,
-            // ★TauriTransport 진입점★ — 프론트 TauriTransport.start/ensureReady/close 가 이걸 invoke 한다.
             commands::daemon_connect,
             commands::daemon_ensure,
             commands::daemon_close,
-            // ★Fix-D: 리로드 자가복구 pull 조회★ — 이벤트는 전이 시에만 emit 되어 이미 Connected 인
-            //   데몬에 새로 뜬 웹뷰가 연결을 못 알아채는 사각지대를 메운다(TauriTransport self-heal).
             commands::daemon_connection_state,
-            // ★TauriTransport.send() 진입점★ — ProtocolClient 의 AgentCommand 를 데몬으로 전달.
             commands::forward_daemon_command,
-            // ADR-0026 2단계 §5: 트레이 동작의 LLM/cdp 제어 표면(트레이 핸들러와 같은 actions 함수).
-            //   데몬 켜기/끄기는 위 daemon_start/daemon_stop 재사용 → 여기엔 창/종료만.
             commands::show_main_ui,
             commands::hide_main_ui,
             commands::quit_app,
-            // ADR-0027 §53~55 — §5 LLM 제어 표면.
             commands::set_autostart,
             commands::get_autostart,
-            // ADR-0035/0057: 레이아웃 권위(ViewManager) 탭 소유 모델 상태변경 — §5 LLM 제어 표면
-            //   (window.__engramLayout). 락→변형→해제→emit(ADR-0006). 창별 탭 command(ADR-0057):
-            //   close_window 는 main 을 거부한다.
-            //   assign_agent 는 참조 문자열만(데몬 검증 호출 0).
             commands::create_tab,
             commands::create_window,
             commands::switch_tab,
@@ -186,48 +168,23 @@ pub fn run() {
             commands::close_window,
             commands::split_slot,
             commands::close_slot,
-            // ADR-0066: click-to-focus — 슬롯 클릭 시 그 View 의 focused_slot_id 를 백엔드가 갱신하고
-            //   layout:updated 로 emit(낙관 프론트 갱신 없음, ADR-0035). §5 slot.focus 제어 표면.
             commands::focus_slot,
-            // ADR-0057: (사람 더블클릭 인라인 편집 ↔ LLM tab.rename 단일 표면, §5). name 은
-            //   ViewMeta.name 에만 → window:tabs-updated 만 emit(layout 스냅샷·rebuild 없음).
             commands::rename_tab,
             commands::assign_agent,
-            // ADR-0063: 슬롯 콘텐츠 제네릭 배치 command(§5) — Empty/Agent/AgentList/PresetPalette 어느 것으로도
-            //   슬롯 콘텐츠 교체. assign_agent(에이전트 전용)의 배치 패턴 미러(락→변형→해제→emit). 트리/팔레트를
-            //   슬롯에 배치하는 LLM/사람 공용 표면.
             commands::set_slot_content,
-            // ADR-0057 D-7(§6 spawn_into): 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방 합성 command.
-            //   실패 관대(spawn-first — 배치 실패해도 에이전트 생존·보고). slot 정책 = G9(점유 시 덮어쓰기 X).
             commands::spawn_into,
             commands::get_view,
-            // ADR-0057: read-only 조회 — 창 mount 시 자기 활성 탭을 확정하는 경로.
-            //   (변경 핸들러는 변경 직후에만 emit → mount 직후엔 닿지 않음). 상태변경·emit 없음.
             commands::list_tabs,
             commands::list_windows,
-            // ADR-0068: 공간/방향 토큰 → slot id 해소(§5 백엔드 권위 resolver). 논리 도면(split·ratio) 파생 —
-            //   픽셀 무관. 프론트 slot.resolveSpatial command 가 이걸 invoke 한다(조회만·emit 0).
             commands::resolve_spatial,
-            // (ADR-0036) 에이전트 명령 request/reply 평면 — §5 LLM 제어 표면.
-            //   DaemonClient::send_command(request_id 매칭). 출력 구독(subscribe_output)은 T6b.
             commands::agent_spawn,
             commands::agent_kill,
             commands::agent_interrupt,
             commands::agent_write_stdin,
             commands::agent_resize,
-            // ADR-0096: 봉투 포맷 전역 스위치(colon/xml) — 조종/invoke 제어 표면(§5 백엔드 동작 = invoke
-            //   LLM 제어). src-tauri 는 AgentCommand::SetEnvelopeFormat 를 데몬으로 전달만(상태 소유=데몬).
-            //   워커 MCP 채널엔 미노출(ADR-0096 결정 3·ADR-0094).
             commands::set_envelope_format,
-            // (ADR-0036) 창 mount 시 출력 Channel 등록 — window_label → Channel registry
-            //   insert. 연결 task 가 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다(raw byte, §7).
             commands::subscribe_output,
-            // ADR-0046 M1: 뷰 주도 replay 채번(single-flight, gen 반환) — 뷰 mount/remount 시 데몬 ring
-            //   전량 재replay 를 유발하는 유일 경로(wire Subscribe 형성 = 이것 단독, BLOCK-1 전면화).
             commands::request_replay,
-            // (§5 LLM 제어 표면, ADR-0057) — 슬롯 agent 를 다른 창의 새 탭으로 MOVE(detach).
-            //   to_window 미지정 시 새 팝업 창. async fn 필수(WebviewWindowBuilder 데드락 회피). 2-phase
-            //   롤백 + 기존창 phase-C 삽입 재검증(G4). 반환 {window, tab}.
             commands::move_slot_to_window,
         ])
         .build(tauri::generate_context!())

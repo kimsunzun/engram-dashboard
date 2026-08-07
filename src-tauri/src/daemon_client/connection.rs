@@ -7,7 +7,7 @@
 //!   2) 토큰·protocol_version 일치 시 서버가 `AgentEvent::Hello`(Text JSON) → `AgentListUpdated`
 //!      를 push 한다(ws.rs step 4 `hello_event`). 불일치면 Error 후 close.
 //! 그래서 이 task 는 소켓 open 직후 **가장 먼저 Auth 를 보내고**, 첫 Hello 를 internal 소비해
-//! connected 로 전이한다(Hello 는 control 로 위로 안 올린다 — wsTransport 와 동일).
+//! connected 로 전이한다.
 //!
 //! ## ★동시성(load-bearing)★
 //! - 이 task 가 `WebSocketStream` 을 **split 해 read/write 양쪽을 단독 소유**한다(Mutex 없음).
@@ -186,12 +186,8 @@ pub enum ConnectionCommand {
 /// ## ★generation 가드(load-bearing, Fix B — 락으로 원자화)★
 /// `my_gen` = 이 task 가 spawn 될 때 캡처한 세대값, `lifecycle` = 공유 lifecycle 락(DaemonClient 소유).
 /// 동시 connect/ensure·close-in-flight 로 더 새 task 가 떠 세대가 올라가면, **밀려난(stale) task 는
-/// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다. 모든
-/// 가드된 전이는 `lifecycle.publish_if_current(my_gen, state)` 한 곳을 통과한다 — 이 메서드가 "세대
-/// 비교 + watch send" 를 같은 락 critical section 으로 묶어 원자화하므로, 비교 통과 후 send 전에 다른
-/// 스레드가 세대를 바꿔 끼어들 수 없다(이전 `AtomicU64::load` → `send` 분리가 만든 TOCTOU 를 닫음).
-/// 이게 wsTransport openGen 가드의 씨앗 — 현재(current) 연결 task 는 최대 1개라는 불변식을 코드로
-/// 강제한다. ⚠️ 첫 핸드셰이크는 취소 경쟁 밖이라(cancel 구독은 connected 직후 — T4 는 재연결 경로만
+/// 공유 상태(watch 전이 · cmd_tx 슬롯)를 건드리지 않고 자기 소켓만 닫고 조용히 종료**한다.
+/// ⚠️ 첫 핸드셰이크는 취소 경쟁 밖이라(cancel 구독은 connected 직후 — T4 는 재연결 경로만
 /// 덮었다) 소켓 2개가 동시에 열릴 수 있음(둘 다 connect_async 진행)은 허용한다 — stale task 는 *공유
 /// 상태를 안 건드리고* stale 판정 시 self-close 하므로 관찰 가능한 오염(고아 Down clobber·좀비 채널·
 /// Connected 부활)은 없앤다.
@@ -353,7 +349,7 @@ async fn handshake(
         }
     };
 
-    // 2) split — 이 task 가 read(stream)/write(sink) 양쪽을 단독 소유한다(Mutex 없음).
+    // 2) split.
     let (mut sink, mut stream) = ws.split();
 
     // 3) ★첫 frame = Auth(Text JSON)★ — 조립은 `auth_frame_text`(이 파일의 단일 산출점).
@@ -372,8 +368,7 @@ async fn handshake(
         return Err(HandshakeError::AuthSend(e.to_string()));
     }
 
-    // 4) Hello 대기(=인증 성공). Hello 는 internal 소비 — control 로 위로 올리지 않는다(wsTransport
-    //    와 동일). Hello 전 Error = Auth 실패 → reject. 소켓 닫힘 = ClosedBeforeHello.
+    // 4) Hello 대기(=인증 성공). Hello 전 Error = Auth 실패 → reject. 소켓 닫힘 = ClosedBeforeHello.
     //    ★Fix A★ wait_for_hello 를 timeout 으로 감싼다 — 서버가 침묵하면 영구 hang 이므로 상한을 둔다.
     //    ★Hello 전 도착하는 다른 control(없어야 정상이나)·binary 는 핸드셰이크 단계에선 무시한다.★
     let result = match tokio::time::timeout(handshake_timeout, wait_for_hello(&mut stream)).await {
@@ -449,7 +444,7 @@ async fn handshake_cancellable(
         },
     };
 
-    // 2) split — 이 task 가 read/write 양쪽 단독 소유.
+    // 2) split.
     let (mut sink, mut stream) = ws.split();
 
     // 3) Auth 송신 — 소켓이 이미 열렸으므로 여기부터 취소되면 self-close 로 정리한다(stale 소켓 점유 차단).
@@ -775,28 +770,7 @@ async fn connected_lifetime(
 // 상태 결정(Down/Reconnecting)은 호출자에 모은다(lifecycle 미접촉). sink 는 소유로 받아 루프 종료 시
 // 여기서 닫는다(재연결 시 새 소켓이 오므로 옛 소켓은 확실히 정리).
 //
-// ## ★request/reply 상관(T6a — load-bearing)★
-// `pending`(request_id → reply oneshot) 은 이 actor 가 단독 소유(호출자가 `&mut` 로 빌려줌, Mutex 없음).
-// 한 select! 루프 안에서 직렬 처리하므로 두 arm 이 동시에 pending 을 만지지 않는다. 끊김(루프 종료)시
-// 남은 pending 은 호출자(`connected_lifetime`)가 drain→Err 한다(no-leak).
-//
-// ## ★출력 라우팅 — 무상태 통과(ADR-0046, load-bearing)★
-// - **Binary arm**: `decode_frame` 헤더(agentId·epoch)만 읽고 → `decide_epoch(subs[agent], epoch)`(★재배선:
-//   옛 미러 on_frame 에 접혀 있던 epoch 가드를 핫패스가 직접 호출★)로 stale epoch 를 통과 전 drop → 통과분은
-//   **원본 frame bytes 그대로** `router.targets(agent)` ∩ registered 창 Channel 로 fan-out(버퍼·cursor 없음).
-//   dedup/진도는 웹뷰 뷰 단위가 한다. frame 수신은 그 agent 의 single-flight deadline 을 리셋(진행).
-// - **Text arm `SubscribeAck`**: `apply_subscribe_ack`(epoch 갱신) + `flight.on_ack`(acked 전이 + truncated
-//   기억 + 진행). **`ReplayComplete`**: `flight.on_complete` 가 acked in-flight 를 성공 마커로 각인 → 마커
-//   frame(tag=255)을 **binary 와 동일 Channel::send 경로**로 송신(★app.emit 경유 금지 — 순서 붕괴★) + 대기열
-//   있으면 다음 Subscribe.
-// - **cmd_rx arm `RequestReplay`**: `flight.request_replay` 로 gen 채번 → idle 이면 즉시 wire Subscribe,
-//   in-flight 면 병합. `Unsubscribe`/`Fire`: wire 송신(reply 없음).
-// - **deadline tick arm**: `flight.check_deadlines` 로 무진행 만료 in-flight 를 실패 마커로 종결(agent 소멸·
-//   subscribe 실패 경로) + 대기열 있으면 다음 Subscribe.
-//
 // ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
-// ★ADR-0046: 진입 eager resubscribe 삭제★ — src-tauri 는 connect 진입 시 재구독하지 않는다(진도/구독 상태
-// 무보유). wire 구독 형성은 뷰 주도 `request_replay` 단독(BLOCK-1 전면화), 정리는 라우터 Unsubscribe 단독.
 #[allow(clippy::too_many_arguments)]
 async fn main_loop(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
@@ -955,8 +929,7 @@ async fn main_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(ConnectionCommand::SendCommand { cmd, reply }) => {
-                        // ★request/reply 배선(T6a)★. request_id 추출 → pending 등록 → wire 송신.
-                        //   send_command 가 request_id 있는 명령만 넣지만, 방어적으로 None 이면 즉시 Err
+                        // send_command 가 request_id 있는 명령만 넣지만, 방어적으로 None 이면 즉시 Err
                         //   (매칭 키 없는 명령은 reply 가 안 와 영구 pending = hang 이므로).
                         let Some(rid) = protocol_state::command_request_id(&cmd) else {
                             let _ = reply.send(Err(
@@ -996,18 +969,13 @@ async fn main_loop(
                             }
                         }
                     }
-                    // 출력 구독 해제(정리, ADR-0046 BLOCK-1) — layout 델타의 1→0 만 이걸 보낸다.
                     Some(ConnectionCommand::Unsubscribe { agent_id }) => {
                         let cmd = AgentCommand::Unsubscribe { agent_id };
                         send_fire(&mut sink, &cmd, my_gen, "Unsubscribe").await;
                     }
-                    // reply 없는 일반 명령(Resize 등) — 그냥 wire 송신.
                     Some(ConnectionCommand::Fire { cmd }) => {
                         send_fire(&mut sink, &cmd, my_gen, "Fire").await;
                     }
-                    // ★뷰 주도 replay 채번(ADR-0046 M1 — single-flight)★. gen 채번 → idle 이면 즉시 wire
-                    //   Subscribe{epoch=SubState 현재값, after_seq:None}(전량 replay), in-flight 면 다음 1회에
-                    //   병합(Subscribe 는 현 in-flight 해소 시 발사). reply 있으면 gen 을 회수해 프론트로 반환.
                     Some(ConnectionCommand::RequestReplay { agent_id, reply }) => {
                         let epoch = subs.entry(agent_id).or_default().epoch;
                         let outcome = flight.request_replay(agent_id, Instant::now());
@@ -1104,8 +1072,6 @@ fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
         AgentEvent::PresetListUpdated { presets } => {
             let _ = app.emit("preset-list-updated", presets);
         }
-        // Ack / SubscribeAck / Output / ReplayComplete / Hello / AgentList / ProfileList /
-        // PresetList / Snapshot / Created / Spawned / InputLeaseChanged — request_id 있거나 내부 소비 or Binary 평면.
         _ => {}
     }
 }

@@ -8,10 +8,7 @@
 //! invalid view_id/slot_id/window → no-op + Err(String)(패닉·부분변경 금지).
 //!
 //! ## ★출력 구독 배선(FIX-1/D3 — 동시성 핵심)★
-//! 라우팅이 바뀔 수 있는 각 mutation 은 **락 보유 critical section 안**에서 `router.rebuild(&mgr)` 를
-//! 호출해 라우팅 표를 재계산하고 구독 델타(`SubscriptionDelta`)를 산출하고, **그 자리에서 곧바로
-//! `send_subscription_delta` 로 enqueue 까지** 한다(load→delta→store→enqueue 를 ViewManager 락이 한
-//! critical section 으로 직렬화). read-only(get_view/list_tabs/list_windows)는 변형이 없어 rebuild 안 한다.
+//! read-only(get_view/list_tabs/list_windows)는 변형이 없어 rebuild 안 한다.
 //!
 //! ## ★이벤트: 창별 `window:tabs-updated`(ADR-0057)★
 //! 옛 전역 `view:list-updated` 는 창별 `window:tabs-updated{label,tabs,active,version}` 로 대체됐다.
@@ -61,11 +58,6 @@ impl From<WindowTabsSnapshot> for WindowTabsPayload {
 // **같은 critical section 안**에서 불러 "enqueue 순서 = rebuild 순서"를 세운다(동시 invoke 인터리브 방지).
 // 부르는 메서드는 동기 `try_send`(await/network 0)라 락 안에서 ADR-0006 위반 아님(lifecycle 락도 독립 —
 // 데드락 0). 비연결이면 DaemonClient 가 조용히 no-op.
-//
-// ## ★ADR-0046 — 라우터는 Unsubscribe(정리)만 발행(BLOCK-1 전면화)★
-// wire 로 보내는 건 **1→0(어느 창에도 안 보이게 된 agent)의 `Unsubscribe`** 뿐. wire 구독 형성은
-// **뷰 주도 `request_replay`** 단독이고(0→1 eager Subscribe 삭제), `delta.to_subscribe` 는 산출은 되나
-// (진단/보존 불변식 테스트용) 여기서 wire 로 보내지 않는다.
 pub(crate) fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);
@@ -138,7 +130,7 @@ pub async fn create_window(
 }
 
 // 창 `window` 의 활성 탭을 `view` 로 교체(그 창만, 타 창 불변). keep-alive 라 노출 집합 불변(rebuild 는
-// 계약상 호출 — 활성 표시만 바뀜). invalid → Err(no-op).
+// 계약상 호출 — 활성 표시만 바뀜).
 #[tauri::command]
 pub fn switch_tab(
     app: AppHandle,
@@ -161,8 +153,7 @@ pub fn switch_tab(
     Ok(())
 }
 
-// 창 `window` 의 탭 `view` 닫기(§5-2 상태기계). 메인 마지막=빈탭 강제·팝업 마지막=창 닫힘(에이전트 생존).
-// invalid → Err(no-op).
+// 창 `window` 의 탭 `view` 닫기(§5-2 상태기계).
 #[tauri::command]
 pub async fn close_tab(
     app: AppHandle,
@@ -200,8 +191,7 @@ pub async fn close_tab(
     Ok(())
 }
 
-// 창 `window` 통째 닫기(모든 탭). ★`"main"` 금지(불변식 4 — main 은 hide only)★. invalid → Err.
-// 모델에서 창을 지운 뒤 OS 창을 destroy 한다(Destroyed → cleanup 이 registry/Channel 정리).
+// 창 `window` 통째 닫기(모든 탭). 모델에서 창을 지운 뒤 OS 창을 destroy 한다.
 #[tauri::command]
 pub async fn close_window(
     app: AppHandle,
@@ -220,7 +210,7 @@ pub async fn close_window(
     Ok(())
 }
 
-// 새 슬롯 id 반환. invalid → Err(no-op).
+// 새 슬롯 id 반환.
 #[tauri::command]
 pub fn split_slot(
     app: AppHandle,
@@ -250,7 +240,6 @@ pub fn split_slot(
     Ok(new_id)
 }
 
-// view 안 slot_id 슬롯을 닫음(형제 승격/root 슬롯 리셋). invalid → Err(no-op).
 #[tauri::command]
 pub fn close_slot(
     app: AppHandle,
@@ -277,13 +266,9 @@ pub fn close_slot(
     Ok(())
 }
 
-// view 안 slot_id 슬롯을 포커스로 지정(click-to-focus — ADR-0066 결정 1). ★백엔드 권위(ADR-0035)★:
-// focused_slot_id 를 백엔드가 소유하고, 프론트는 layout:updated emit 으로만 링을 갱신한다(낙관 프론트
-// 갱신 금지). 사람 클릭·팔레트·키바인딩·LLM(`__engramCmd.run('slot.focus', …)`)이 같은 이 핸들을 흔든다(§5).
-//
 // ★라우팅 불변 → rebuild/구독 델타 없음★: 포커스 이동은 어느 슬롯이 어떤 agent 를 보는지(=출력 라우팅)를
 // 바꾸지 않는다 → split/close/assign 과 달리 `router.rebuild` 도 구독 델타도 필요 없다(layout:updated 만
-// emit). invalid view_id/slot_id → Err(no-op).
+// emit).
 // ADR-0066
 #[tauri::command]
 pub fn focus_slot(
@@ -308,16 +293,11 @@ pub fn focus_slot(
     Ok(())
 }
 
-// View 이름(탭 라벨) 교체 — §5 LLM 제어 표면(사람 더블클릭 인라인 편집 ↔ LLM `tab.rename` 이 같은 이
-// 핸들을 흔든다). ★백엔드 권위(ADR-0035)★: 이름은 백엔드 ViewManager 가 소유하고, 프론트는 emit 으로만
-// 반영한다(낙관 프론트 갱신 X).
-//
 // ★탭 페이로드만 emit★: 이름은 `ViewMeta.name`(= window:tabs-updated 페이로드)에만 있고 `ViewSnapshot`
 // (layout:updated)엔 없다 → layout 스냅샷 emit 안 한다. 그리고 rename 은 어느 슬롯이 어떤 agent 를
 // 보는지(=출력 라우팅)도, 레이아웃 트리도 바꾸지 않는다 → `router.rebuild`/구독 델타도 필요 없다
 // (focus_slot 의 "라우팅 불변" 주석과 동형이나, focus 는 layout 을 emit 하는 반면 rename 은 tabs 만).
 // 그래서 router/client State 도 안 받는다(get_view/focus_slot 처럼 미사용 State 생략).
-// invalid view_id → Err(no-op).
 // ADR-0057
 #[tauri::command]
 pub fn rename_tab(
@@ -339,8 +319,6 @@ pub fn rename_tab(
     Ok(())
 }
 
-// view 안 slot_id 슬롯에 agent_id(참조 문자열) 배정. ★데몬에 실재 검증 안 함(ADR-0035/0006).
-// 같은 agent 가 다른 View 에도 배정될 수 있음(불변식 5). invalid → Err(no-op).
 #[tauri::command]
 pub fn assign_agent(
     app: AppHandle,
@@ -368,9 +346,6 @@ pub fn assign_agent(
     Ok(())
 }
 
-// view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체(ADR-0063 배치 제어 표면). assign_agent
-// 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette)를 받는다 — 트리·팔레트를
-// 슬롯에 배치하는 §5 LLM/사람 공용 command. invalid → Err(no-op).
 #[tauri::command]
 pub fn set_slot_content(
     app: AppHandle,
@@ -411,9 +386,6 @@ pub fn set_slot_content(
 // ## ★슬롯 정책(G9 — 추측 금지, USER DECISION 2b)★
 // - `tab=None`: 먼저 create_tab(window) 로 새 탭(빈 root 슬롯)을 만들고 거기 배정. (`slot=Some` 동반은
 //   ★스폰 전에 거부★ — 새로 만들 탭엔 그 slot 이 없어 orphan 탭이 생긴다. 아래 pre-spawn 가드.)
-// - `tab=Some`·`slot=None`: 그 탭의 **첫 빈 슬롯**에 배정(빈 슬롯 없으면 에러 — 자동 split 안 함, 2b).
-// - `slot=Some`·비어있음: 그 슬롯에 배정.
-// - `slot=Some`·점유: **에러**(덮어쓰기 안 함 — 호출자가 split_slot 후 재시도).
 //
 // ## ★실패 가시성(§5 손발-두뇌 분리 — spawn-first)★
 // 스폰이 먼저 일어나므로, 이후 배치(점유 슬롯·invalid view/window 등)가 실패해도 **에이전트를 kill 하지
@@ -519,7 +491,7 @@ pub async fn spawn_into(
 
 // ── read-only 조회 ───────────────────────────────────────────────────────────
 
-// view_id 의 스냅샷(version 포함) 조회. 팝업 pull↔listen race 용. invalid view_id → Err.
+// view_id 의 스냅샷(version 포함) 조회. 팝업 pull↔listen race 용.
 // ★조회만★ — 변형 없음, emit 없음(version 안 올림).
 #[tauri::command]
 pub fn get_view(state: State<'_, LayoutState>, view_id: Uuid) -> Result<ViewSnapshot, String> {
@@ -531,7 +503,7 @@ pub fn get_view(state: State<'_, LayoutState>, view_id: Uuid) -> Result<ViewSnap
 //
 // 왜 필요한가: 창이 mount 되면 자기 활성 탭을 확정해야 하는데(팝업은 `?window=` label 로만 자기 창을
 // 알 뿐 활성 탭은 백엔드가 권위), 변경 핸들러는 변경 직후에만 emit 한다 → 부팅/mount 직후엔 이 read-only
-// pull 로 `{tabs,active,version}` 을 받아 초기 렌더한다(§3-3/G3). 없는 창이면 Err.
+// pull 로 `{tabs,active,version}` 을 받아 초기 렌더한다(§3-3/G3).
 #[tauri::command]
 pub fn list_tabs(
     state: State<'_, LayoutState>,
@@ -552,11 +524,7 @@ pub fn list_windows(state: State<'_, LayoutState>) -> Result<Vec<String>, String
 
 // ★공간/방향 토큰 → slot id 해소(ADR-0068 — §5 백엔드 권위 resolver)★. ★조회만★(변형·emit 0).
 // `view_id` 지정이면 그 View, 미지정(None)이면 `window`(미지정 시 main) 의 활성 탭 View 를 대상으로 한다.
-// - 모서리 토큰 `top-left`/`top-right`/`bottom-left`/`bottom-right`: 트리 전체에서 그 코너에 가장 가까운 슬롯.
-// - 상대 방향 `left`/`right`/`up`/`down`: 그 View 의 `focused_slot_id` 기준 방향 이웃(없으면 null).
-//
-// 논리 도면(split 방향·ratio) 파생이라 픽셀·창크기 무관(ADR-0068). 사람·팔레트·LLM(`__engramCmd.run`/
-// `slot.resolveSpatial`)이 같은 이 핸들을 흔든다(§5 단일 제어 표면). 모르는 토큰/없는 View → Err(fail-loud).
+// 모르는 토큰/없는 View → Err(fail-loud).
 // ADR-0068
 #[tauri::command]
 pub fn resolve_spatial(
@@ -582,7 +550,6 @@ pub fn resolve_spatial(
     Ok(resolve_spatial_token(&v.layout, v.focused_slot_id, tok))
 }
 
-// close_window("main") 거부는 ViewManager::close_window 가 LayoutError::MainNotClosable 로 강제한다
-// (불변식 4). command 레이어는 그 Err 를 문자열로 전달만 한다(별도 가드 불필요 — 모델이 SSOT).
-// main 창은 lib.rs CloseRequested arm 이 prevent_close+hide 로만 처리해 Destroyed 를 안 남긴다.
+// close_window("main") 거부에 command 레이어는 별도 가드를 두지 않는다 — 모델(ViewManager)이 SSOT 라
+// 그 Err 를 문자열로 전달만 한다.
 const _: &str = MAIN_WINDOW_LABEL; // 상수 참조 유지(문서 앵커).

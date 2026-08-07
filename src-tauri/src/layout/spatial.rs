@@ -27,8 +27,8 @@ use super::types::{LayoutNode, SplitDir};
 /// 정확한 `==` 대신 이 epsilon 안이면 같은 경계로 본다(인접 판정 안정화).
 const EPS: f32 = 1e-4;
 
-/// 한 말단 슬롯의 정규화 논리 rect(`[0,1]×[0,1]`). ★내부 계산 detail★ — 공개 표면 아님(ADR-0068).
-/// x/y = 좌상단, w/h = 너비/높이. 겹침·경계 인접 판정에만 쓰고 밖으로 내보내지 않는다.
+/// 한 말단 슬롯의 정규화 논리 rect(`[0,1]×[0,1]`).
+/// x/y = 좌상단, w/h = 너비/높이. 겹침·경계 인접 판정에만 쓴다.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NormRect {
     pub x: f32,
@@ -60,7 +60,7 @@ fn assign_rects(node: &LayoutNode, rect: NormRect, out: &mut Vec<(Uuid, NormRect
     match node {
         LayoutNode::Slot { id, .. } => out.push((*id, rect)),
         LayoutNode::Split { dir, ratio, a, b } => {
-            // ratio = a 가 차지하는 비율. ★LOAD-BEARING 불변식(ADR-0068 §0 저위험 방어)★:
+            // ★LOAD-BEARING 불변식(ADR-0068 §0 저위험 방어)★:
             // 이 모듈의 공간 계산은 **모든 leaf 가 비퇴화 면적(ratio ∈ (0,1))** 을 가진다고 가정한다 —
             // ratio 0/1 이면 한쪽 leaf 가 zero-width/height 가 되고, 그러면 edge 인접 판정(edge_eq)·
             // overlap·corner 해소가 무너진다(경계가 겹쳐 이웃/코너가 뒤엉킴). 그래서 `[EPS, 1-EPS]` 로
@@ -110,7 +110,6 @@ fn assign_rects(node: &LayoutNode, rect: NormRect, out: &mut Vec<(Uuid, NormRect
     }
 }
 
-/// ★내부용★ — rect 는 밖으로 안 나간다(ADR-0068).
 pub(crate) fn leaf_rects(node: &LayoutNode) -> Vec<(Uuid, NormRect)> {
     let mut out = Vec::new();
     assign_rects(
@@ -141,16 +140,14 @@ pub struct Neighbors {
 }
 
 /// 한 말단 슬롯의 공간 타깃 파생 정보(ViewSnapshot 에 슬롯별로 실린다). ADR-0068.
-/// ★좌표 비노출★: neighbors + ordinal 만 — 정규화 rect 는 내부 계산 detail 이라 여기 없다(ADR-0068 결정 3).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export)]
 pub struct SlotSpatial {
     #[ts(type = "string")]
     pub slot_id: Uuid,
-    /// 방향별 인접 슬롯(공유 변 있음). 없으면 각 None.
     pub neighbors: Neighbors,
     /// 순서 인덱스 — 중심점 `(center_y, center_x)` 전역 사전순(위→아래, 동률 왼쪽→오른쪽) 0-based.
-    /// ★트리 전위가 아니라 전역 중심 정렬★. 상세·응집 미보장은 모듈 헤더 §계산 뼈대 참조.
+    /// 상세·응집 미보장은 모듈 헤더 §계산 뼈대 참조.
     #[ts(type = "number")]
     pub ordinal: u32,
 }
@@ -205,13 +202,10 @@ enum Dir {
     Right,
 }
 
-/// 반환 순서 = ordinal 순(중심점 전역 사전순 — 위→아래·동률 왼쪽→오른쪽). ViewSnapshot 이 그대로 실어
-/// 프론트/LLM 에 흘린다.
+/// 반환 순서 = ordinal 순.
 pub fn compute_spatial(node: &LayoutNode) -> Vec<SlotSpatial> {
     let rects = leaf_rects(node);
 
-    // ★트리 전위(pre-order)가 아니라 전역 중심 정렬★ — 화면상 위치로 매긴다. leaf rect 가 disjoint 라
-    // 중심점 쌍이 유일 → 결정적. 열/행 응집은 보장 안 함(비대칭 분할에서 전체 높이 열이 좌측 열 사이 끼어듦).
     let mut order: Vec<usize> = (0..rects.len()).collect();
     order.sort_by(|&i, &j| {
         let (_, a) = rects[i];

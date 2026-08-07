@@ -32,8 +32,6 @@ pub const TRAY_ID: &str = "engram-main-tray";
 pub struct LivenessState {
     // 마지막으로 push 한 alive 값(None=아직 한 번도 push 안 함). 변화 판정 기준.
     last: Mutex<Option<bool>>,
-    // 끄기로 회색을 강제한 직후 death-window(데몬이 연결만 닫고 아직 exit 안 함) 동안 옵저버의
-    // alive=true 거짓 probe 가 아이콘을 컬러로 되돌리는 race(M-1) 를 차단하는 억제 만료 시각.
     // None=억제 없음. Some(t)=now<t 동안 alive=true probe 를 무시.
     suppress_alive_until: Mutex<Option<Instant>>,
 }
@@ -77,8 +75,7 @@ pub fn hide_main_ui(app: &AppHandle) {
 // 독립 생존한다(ADR-0024). send_stop 은 수초 blocking 가능 → exit 전에 짧게만 시도하도록 별도
 // 스레드에서 발사하지 않고 동기로 부르되, 실패/무응답이어도 exit 로 진행한다.
 pub fn quit_app(app: &AppHandle) {
-    // 데몬 graceful 일방 발사(결과 무시). data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처,
-    // ADR-0024/0029)로 산출. ADR-0029: 모드 제거 → 무인자.
+    // 데몬 graceful 일방 발사(결과 무시).
     let data_dir = crate::discovery::default_data_dir();
     match crate::discovery::send_stop(&data_dir) {
         Ok(outcome) => tracing::info!(
@@ -100,7 +97,6 @@ pub fn quit_app(app: &AppHandle) {
 // daemon_status 는 daemon.json + PID liveness 판정(빠름, 비-blocking 수준). 외부/크래시 죽음
 // 주기감지는 옵저버가 담당(spawn_daemon_observer) — 여기는 액션 직후·setup 초기 갱신용.
 pub fn refresh_tray_icon(app: &AppHandle) {
-    // data_dir 은 default_data_dir()(데몬과 같은 폴더 단일 출처, ADR-0024/0029)로 산출.
     let data_dir = crate::discovery::default_data_dir();
     let alive = crate::discovery::daemon_status(&data_dir).alive;
     publish_daemon_liveness(app, alive);
@@ -108,10 +104,8 @@ pub fn refresh_tray_icon(app: &AppHandle) {
 
 // 데몬 생사 단일 publish — 변화 시에만 트레이 set_icon + emit("daemon-status-changed").
 //
-// ★억제창 중 alive=true 는 무시(M-1 race 차단 — load-bearing)★: 끄기 직후 death-window 동안
-// 옵저버 probe 가 "연결은 닫혔지만 프로세스가 아직 살아있는" 데몬을 alive=true 로 거짓 보고해 방금
-// 회색 박은 아이콘을 컬러로 되돌리는 race 가 있다. 억제창(suppress_alive_until) 안에서는 alive=true
-// 를 버린다. alive=false 는 항상 통과한다(끄기 확정 — 억제 무관).
+// ★억제창 중 alive=true 는 무시(M-1 race 차단 — load-bearing)★: 억제창(suppress_alive_until) 안에서는
+// alive=true 를 버린다. alive=false 는 항상 통과한다(끄기 확정 — 억제 무관).
 //
 // ★락 보유 중 set_icon/emit 금지(ADR-0006 락 순서)★: 변화 판정·억제 판정만 락 안에서 하고, 락을
 // 드롭한 뒤에 set_icon/emit(외부 호출·메인 스레드 post)을 부른다. set_icon 자체는
@@ -162,9 +156,7 @@ pub fn force_daemon_down(app: &AppHandle) {
 //
 // ★probe 우회 경로(load-bearing — S13 race 재발 방지)★: `refresh_tray_icon` 은
 // `daemon_status().alive`(PID probe=OpenProcess)로 상태를 *조회*해 set 하지만, 이 함수는 호출자가
-// 이미 확정한 state 를 그대로 set 한다. 데몬 graceful stop 직후 "연결은 닫혔지만 프로세스가 아직
-// 수 ms 더 살아있는" 창에서는 PID probe 가 alive=true 를 돌려줘 아이콘이 컬러로 고착되는 race 가
-// 있다(StopOutcome 주석 참조). 그래서 StopOutcome::DaemonClosed(꺼짐 확정) 경로는 probe 를
+// 이미 확정한 state 를 그대로 set 한다. 그래서 StopOutcome::DaemonClosed(꺼짐 확정) 경로는 probe 를
 // 거치지 않고 이 함수로 회색을 직접 박는다. probe 가 필요한 일반 갱신은 `refresh_tray_icon` 을 쓴다.
 //
 // set_icon 메인 스레드 보장은 `refresh_tray_icon` 과 동일(run_on_main_thread). 아이콘 두 벌은
