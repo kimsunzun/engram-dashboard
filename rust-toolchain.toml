@@ -1,0 +1,8 @@
+# 컴파일러 핀 — CI 와 로컬이 같은 rustc 로 돈다.
+# rustup 이 이 파일을 읽어 자동 설치·선택하므로 CI 에 버전을 또 적지 않는다(두 곳에 적으면 어긋난다).
+# 1.95.0 = 이 워크스페이스가 실측된 버전.
+# profile = "minimal" 이라 rustfmt 가 기본 포함이 아니다 → `cargo fmt --check` 게이트를 위해 명시한다.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+components = ["rustfmt"]
