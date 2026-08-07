@@ -1,10 +1,8 @@
 pub mod cli;
 pub mod commands;
 pub mod daemon_client;
-// protocol/daemon crate 에 넣지 않는다 — 레이아웃은 신규 클라(src-tauri) 관심사.
 pub mod layout;
 pub mod output_router;
-// Tauri Channel 을 들어야 해서 output_router.rs(Tauri 의존 0 불변식)가 아니라 여기 둔다.
 pub mod output_channel;
 // 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다.
@@ -56,17 +54,13 @@ pub fn run() {
 
     builder
         .setup(move |app| {
-            // 기본 warn(OFF) — RUST_LOG 환경변수로 재정의 가능
             logging::init_logging();
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
-            // 아이콘 두 벌 생성·메뉴·핸들러 + setup 직후 데몬 상태로 아이콘 확정. Windows 전용.
             // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).
             // ADR-0028: 데몬 생사 push 의 단일 소유 상태. build_tray 의 초기 refresh 가 publish 를
             // 타려면(중복차단·억제창 판정) state 가 먼저 manage 되어 있어야 한다 → build_tray 전에 등록.
             app.manage(tray::actions::LivenessState::default());
-
-            // setup 여기서 다시 등록하지 않는다(웹뷰 첫 invoke 가 이미 등록된 상태를 봐야 함).
 
             // ── 출력 평면(ADR-0046 — 무상태 통과): OutputRouter + window Channel registry ──
             // ★단일 공유 Arc 2벌★: router·registry — 동일 인스턴스를 본다.
@@ -77,7 +71,7 @@ pub fn run() {
             app.manage(registry.clone());
 
             // 슬롯 팝업 분리(pop_out_slot)용 label 카운터 — 창 label 재사용 금지 불변식을 강제하는 단조
-            // 카운터(닫아도 안 되돌림). app-level 공유라 Arc 로 manage(여러 pop_out_slot 호출이 같은 카운터).
+            // 카운터(닫아도 안 되돌림).
             app.manage(std::sync::Arc::new(
                 crate::commands::popout::PopupCounter::default(),
             ));
