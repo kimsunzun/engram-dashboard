@@ -1,11 +1,7 @@
 //! window Channel registry + 무상태 통과 send 헬퍼 (ADR-0046 — 미러 버퍼 제거, view-direct replay).
 //!
-//! ## 역할 (미러 제거 후)
-//! src-tauri 는 더는 데몬 ring 을 미러하지 않는다(ADR-0046). 이 파일은 두 가지만 남는다:
-//! - **`WindowChannelRegistry`** = `window_label → 출력 Channel`(Tauri 타입 보관). 창 mount 시
-//!   `subscribe_output` invoke 가 insert, dead window(send Err) 감지 시 connection task 가 remove.
-//! - **`send_to_windows`** = 원본 frame(또는 replay 경계 마커) bytes 를 targets∩registered 창 Channel 로
-//!   그대로 통과시키는 순수 fan-out(버퍼·cursor 없음). 죽은 Channel 은 send 실패 시 같은 lock 안에서 제거.
+//! ## 역할
+//! src-tauri 는 더는 데몬 ring 을 미러하지 않는다(ADR-0046).
 //!
 //! ## ★raw byte 함정(spike §7)★
 //! 출력 프레임은 `Channel<tauri::ipc::Response>` 로 운반한다 — `Channel<Vec<u8>>`/`Channel<&[u8]>` 는
@@ -14,17 +10,16 @@
 //!
 //! ## ★동시성/락 규율(ADR-0006, load-bearing)★
 //! `std::sync::Mutex` 다(tokio Mutex 아님). connection task(tokio)가 핫패스에서 registry lock→send 하는데
-//! 락 보유 중 `.await` 가 **없다**(`Channel::send` 는 동기). 락은 짧게 잡았다 즉시 푼다. 미러가 사라져 옛
-//! "buffer 락 ⊃ registry 락 중첩" 자체가 없다 — 이제 registry 락 하나뿐이라 순서 역전 데드락 표면이 0이다.
+//! 락 보유 중 `.await` 가 **없다**(`Channel::send` 는 동기). 락은 짧게 잡았다 즉시 푼다. registry 락
+//! 하나뿐이라 순서 역전 데드락 표면이 0이다.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::output_router::WindowLabel;
 
-/// window label → 그 창의 출력 Channel. 창 mount 시 `subscribe_output` invoke 가 insert,
-/// dead window(send Err) 감지 시 connection task 가 remove 한다. connection task 와 Tauri command
-/// 양쪽이 `Arc` 로 공유 → app-level manage.
+/// 창 mount 시 `subscribe_output` invoke 가 insert, dead window(send Err) 감지 시 connection task 가
+/// remove 한다. connection task 와 Tauri command 양쪽이 `Arc` 로 공유 → app-level manage.
 pub type WindowChannelRegistry =
     Arc<Mutex<HashMap<WindowLabel, tauri::ipc::Channel<tauri::ipc::Response>>>>;
 

@@ -13,13 +13,10 @@ use uuid::Uuid;
 
 use super::types::{LayoutNode, SlotContent};
 
-// ratio 를 [0.0, 1.0] 으로 클램프. split 기본값은 0.5.
 pub fn clamp_ratio(r: f32) -> f32 {
     r.clamp(0.0, 1.0)
 }
 
-// 트리에서 slot_id 를 가진 Slot 을 찾아 그 콘텐츠(점유자) 를 반환.
-// 반환: Some(SlotContent::Agent{..}) = 배정됨 · Some(SlotContent::Empty) = 빈 슬롯 · None = 그 slot_id 없음.
 pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&SlotContent> {
     match node {
         LayoutNode::Slot { id, content } => {
@@ -33,12 +30,11 @@ pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&SlotContent> {
     }
 }
 
-// slot_id 가 트리에 존재하는지.
 pub fn contains_slot(node: &LayoutNode, slot_id: Uuid) -> bool {
     find_slot(node, slot_id).is_some()
 }
 
-// 트리를 전위 순회하며 첫 번째(가장 왼쪽 = a 우선) Slot 의 id 를 반환. 트리는 항상 ≥1 슬롯이라 무한.
+// 트리는 항상 ≥1 슬롯이라 무한.
 pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     match node {
         LayoutNode::Slot { id, .. } => *id,
@@ -46,30 +42,23 @@ pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     }
 }
 
-// 트리를 전위 순회(a 우선 — first_slot_id 와 동일 순서)하며 **첫 번째 빈 슬롯(SlotContent::Empty)의 id** 를
-// 반환한다. 빈 슬롯이 하나도 없으면 None. spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의
-// 코어 — first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
+// spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의 코어 — first_slot_id 가 점유 여부를
+// 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
 pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     match node {
         LayoutNode::Slot { id, content } => {
-            // ADR-0060: 빈 슬롯 = SlotContent::Empty(옛 agent_id.is_none()).
             if content.is_empty() {
                 Some(*id)
             } else {
                 None
             }
         }
-        // a 먼저(전위·좌측 우선), 없으면 b.
         LayoutNode::Split { a, b, .. } => first_empty_slot_id(a).or_else(|| first_empty_slot_id(b)),
     }
 }
 
-// slot_id 슬롯을 Split 으로 분할한다.
-//
 // 대상 Slot 을 `Split{dir, ratio:0.5, a=원래 슬롯, b=새 빈 슬롯}` 으로 치환하고 **새 빈 슬롯의
 // id 를 반환**(호출자가 focus 이동·검증에 사용). slot_id 가 없으면 트리 불변 + None 반환(no-op).
-//
-// 중첩 분할도 지원: 한 번 split 된 트리의 어느 말단 Slot 이든 다시 split 가능(재귀가 깊이 무관).
 pub fn split_in_tree(
     node: &mut LayoutNode,
     slot_id: Uuid,
@@ -78,7 +67,6 @@ pub fn split_in_tree(
     match node {
         LayoutNode::Slot { id, .. } => {
             if *id == slot_id {
-                // 원래 슬롯(node)을 통째로 a 로 옮기고, b 에 새 빈 슬롯을 둔다.
                 // std::mem::replace 로 node 의 소유권을 빼내 a 박스에 넣는다(클론 회피).
                 let new_slot = LayoutNode::new_empty_slot();
                 let new_slot_id = match &new_slot {
@@ -108,15 +96,12 @@ pub fn split_in_tree(
     }
 }
 
-// slot_id 슬롯을 닫는다.
-//
 // - 닫는 슬롯이 어떤 Split 의 **직접 자식**이면 → 그 Split 을 **형제(다른 자식)로 치환**(형제 승격).
 // - 닫는 슬롯이 **root 자체**(트리에 슬롯 하나뿐)면 → 새 빈 슬롯으로 리셋(View 는 빈 상태 유지).
 // - slot_id 가 없으면 트리 불변(no-op, false 반환).
 //
 // 반환: 실제로 닫혔으면 true(no-op 이면 false). 호출자는 false 면 invalid id 로 Err.
 pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
-    // root 가 바로 그 슬롯이면 빈 슬롯으로 리셋(트리에 슬롯 하나뿐인 경우 포함).
     if let LayoutNode::Slot { id, .. } = node {
         if *id == slot_id {
             *node = LayoutNode::new_empty_slot();
@@ -125,13 +110,11 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
         return false;
     }
 
-    // node 는 Split. 직접 자식 중 닫을 슬롯이 있으면 형제를 승격(Split 붕괴).
     if let LayoutNode::Split { a, b, .. } = node {
         let a_is_target = matches!(a.as_ref(), LayoutNode::Slot { id, .. } if *id == slot_id);
         let b_is_target = matches!(b.as_ref(), LayoutNode::Slot { id, .. } if *id == slot_id);
 
         if a_is_target {
-            // 형제 b 를 부모(node) 자리로 승격. mem::replace 로 b 의 소유권을 빼낸다.
             let sibling = std::mem::replace(b.as_mut(), LayoutNode::new_empty_slot());
             *node = sibling;
             return true;
@@ -142,7 +125,6 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
             return true;
         }
 
-        // 직접 자식이 아니면 더 깊이 재귀(자식이 Split 인 경우).
         if close_in_tree(a, slot_id) {
             return true;
         }
@@ -152,10 +134,8 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
     false
 }
 
-// slot_id 슬롯에 agent_id(참조 문자열) 를 배정. agent=None 이면 해제(빈 슬롯 = SlotContent::Empty).
 // 데몬에 실재 검증 안 함(ADR-0035/0006 — 락 보유 중 외부 호출 0). slot_id 없으면 no-op(false).
 // ★덮어쓰기 시맨틱 유지(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 resolve_spawn_slot 층).
-// ADR-0060: 입력 Option<String> 을 SlotContent(Some→Agent / None→Empty)로 매핑해 콘텐츠를 통째 치환한다.
 pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String>) -> bool {
     match node {
         LayoutNode::Slot { id, content } => {
@@ -180,10 +160,9 @@ pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String
     }
 }
 
-// slot_id 슬롯의 콘텐츠(SlotContent)를 통째로 교체한다(제네릭 — Empty/Agent/AgentList/PresetPalette 어느
-// variant 든). assign_in_tree 의 미러이나 Option<String> agent 래핑 없이 SlotContent 를 직접 받는다 —
+// assign_in_tree 의 미러이나 Option<String> agent 래핑 없이 SlotContent 를 직접 받는다 —
 // 비-에이전트 콘텐츠(AgentList/PresetPalette)를 슬롯에 배치하는 배치 경로(ADR-0063 set_slot_content).
-// slot_id 없으면 no-op(false). ★덮어쓰기 시맨틱★: 점유 슬롯이어도 무조건 교체(assign_in_tree 와 동형).
+// ★덮어쓰기 시맨틱★: 점유 슬롯이어도 무조건 교체(assign_in_tree 와 동형).
 pub fn set_in_tree(node: &mut LayoutNode, slot_id: Uuid, content: SlotContent) -> bool {
     match node {
         LayoutNode::Slot { id, content: c } => {
@@ -210,7 +189,6 @@ mod tests {
     use super::super::types::{SlotContent, SplitDir};
     use super::*;
 
-    // 배정된 슬롯 노드(테스트 헬퍼) — id + Agent{agent_id}.
     fn agent_slot(id: Uuid, agent: &str) -> LayoutNode {
         LayoutNode::Slot {
             id,
@@ -220,7 +198,6 @@ mod tests {
         }
     }
 
-    // 단일 빈 슬롯 트리 + 그 슬롯 id 반환.
     fn single_slot() -> (LayoutNode, Uuid) {
         let node = LayoutNode::new_empty_slot();
         let id = first_slot_id(&node);
@@ -284,9 +261,7 @@ mod tests {
     fn split_replaces_slot_with_split_and_returns_new_id() {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).expect("split 성공");
-        // 새 슬롯 id 는 원래와 다름.
         assert_ne!(new_id, id);
-        // 이제 root 는 Split, 두 자식 모두 슬롯으로 존재.
         match &node {
             LayoutNode::Split { dir, ratio, a, b } => {
                 assert_eq!(*dir, SplitDir::Horizontal);
@@ -302,15 +277,12 @@ mod tests {
 
     #[test]
     fn split_nested_targets_deep_leaf() {
-        // 한 번 split → 새 슬롯을 다시 split(중첩 분할).
         let (mut node, id) = single_slot();
         let mid = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
         let deep = split_in_tree(&mut node, mid, SplitDir::Vertical).expect("중첩 split 성공");
-        // 슬롯 3개 모두 존재.
         assert!(contains_slot(&node, id));
         assert!(contains_slot(&node, mid));
         assert!(contains_slot(&node, deep));
-        // 깊은 split 의 방향이 Vertical 인지(중첩이 a/b 어느쪽이든 트리에 박혀야).
         assert_eq!(count_splits(&node), 2);
     }
 
@@ -335,7 +307,6 @@ mod tests {
     fn close_promotes_sibling() {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
-        // b(new_id) 를 닫으면 a(id) 가 root 로 승격.
         assert!(close_in_tree(&mut node, new_id));
         match &node {
             LayoutNode::Slot { id: rid, .. } => assert_eq!(*rid, id, "형제 a 가 root 로 승격"),
@@ -348,7 +319,6 @@ mod tests {
     fn close_promotes_sibling_when_closing_a() {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::Vertical).unwrap();
-        // a(id) 를 닫으면 b(new_id) 가 승격.
         assert!(close_in_tree(&mut node, id));
         match &node {
             LayoutNode::Slot { id: rid, .. } => assert_eq!(*rid, new_id),
@@ -358,13 +328,11 @@ mod tests {
 
     #[test]
     fn close_nested_promotes_subtree() {
-        // 트리: Split{ a=Slot(id), b=Split{ x, y } }. b 안의 x 를 닫으면 y 가 b 자리로 승격.
         let (mut node, id) = single_slot();
         let b_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
         let y_id = split_in_tree(&mut node, b_id, SplitDir::Vertical).unwrap();
         // 이제 트리: Split{ Slot(id), Split{ Slot(b_id), Slot(y_id) } }
         assert!(close_in_tree(&mut node, b_id), "중첩 슬롯 close");
-        // y 가 b 의 Split 자리로 승격 → 트리: Split{ Slot(id), Slot(y_id) }
         assert!(contains_slot(&node, id));
         assert!(contains_slot(&node, y_id));
         assert!(!contains_slot(&node, b_id));
@@ -378,7 +346,6 @@ mod tests {
         let id = Uuid::new_v4();
         let mut node = agent_slot(id, "agent-x");
         assert!(close_in_tree(&mut node, id), "root 슬롯 close 는 true");
-        // 빈 슬롯으로 리셋(새 id, content Empty) — View 는 빈 상태 유지.
         match &node {
             LayoutNode::Slot { id: rid, content } => {
                 assert_ne!(*rid, id, "새 빈 슬롯 id");
@@ -413,7 +380,6 @@ mod tests {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
         assert!(assign_in_tree(&mut node, new_id, Some("agent-b".into())));
-        // 대상만 바뀌고 형제는 빈 채.
         assert_eq!(
             find_slot(&node, new_id).unwrap().agent_id(),
             Some("agent-b")
@@ -451,7 +417,6 @@ mod tests {
 
     #[test]
     fn set_in_tree_replaces_with_agent_list() {
-        // 빈 슬롯을 AgentList 로 교체(비-에이전트 콘텐츠 배치 — set_in_tree 만의 경로).
         let (mut node, id) = single_slot();
         assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
         assert_eq!(find_slot(&node, id).unwrap(), &SlotContent::AgentList);
@@ -466,7 +431,6 @@ mod tests {
 
     #[test]
     fn set_in_tree_can_clear_to_empty() {
-        // 점유(Agent) 슬롯을 Empty 로 되돌린다(덮어쓰기 시맨틱).
         let id = Uuid::new_v4();
         let mut node = agent_slot(id, "occupant");
         assert!(set_in_tree(&mut node, id, SlotContent::Empty));
@@ -475,7 +439,6 @@ mod tests {
 
     #[test]
     fn set_in_tree_overwrites_occupied_slot() {
-        // 점유 슬롯도 무조건 교체(assign_in_tree 와 동형 — 점유 방어는 상위 층).
         let id = Uuid::new_v4();
         let mut node = agent_slot(id, "old");
         assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
@@ -484,7 +447,6 @@ mod tests {
 
     #[test]
     fn set_in_tree_targets_correct_slot_in_split() {
-        // split 트리에서 지정 슬롯만 바뀌고 형제는 불변.
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
         assert!(set_in_tree(&mut node, new_id, SlotContent::PresetPalette));
@@ -524,7 +486,6 @@ mod tests {
     fn first_slot_id_is_leftmost() {
         let (mut node, id) = single_slot();
         let _new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
-        // a 가 원래 슬롯(id) → 전위 순회 첫 슬롯은 id.
         assert_eq!(first_slot_id(&node), id);
     }
 
@@ -553,7 +514,6 @@ mod tests {
 
     #[test]
     fn first_empty_slot_id_skips_occupied_leftmost() {
-        // 좌측(a=id)을 점유, 우측(b=new_id)은 빈 채 → 좌측을 건너뛰고 우측을 고른다(2b).
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
         assert!(assign_in_tree(&mut node, id, Some("occupied".into())));
