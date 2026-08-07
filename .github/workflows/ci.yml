@@ -1,0 +1,344 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - 'ci/**'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+# 같은 ref 에 새 push 가 오면 앞 실행을 취소한다(뒤진 결과로 판정하지 않기 위해).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 검증 전용 워크플로라 쓰기 권한이 필요 없다. 각 job 의 checkout 은 persist-credentials: false 로
+# 토큰을 작업본에 남기지 않는다 — 검증 대상 코드가 같은 러너에서 돌기 때문.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── 백엔드 회귀 ──────────────────────────────────────────────────────────────
+  # windows-latest 단독인 이유: Job Object 코드가 `#[cfg(windows)]` 이고 PTY 픽스처가 cmd.exe/
+  # powershell.exe 라 리눅스는 이 워크스페이스에서 검증된 적이 없다.
+  backend:
+    name: backend (cargo test + build)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve and assert pinned toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          # 기대값을 YAML 에 적지 않고 rust-toolchain.toml 에서 읽는다 — 두 곳에 적으면 어긋난다.
+          # 단언이 없으면 그 파일이 지워지거나 RUSTUP_TOOLCHAIN 이 끼어들 때 러너 기본 stable 로
+          # 조용히 내려앉은 채 초록으로 남는다.
+          expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$expected" ]; then echo "FAIL — rust-toolchain.toml 에서 channel 을 읽지 못했다"; exit 1; fi
+          actual=$(rustc --version | awk '{print $2}')
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL — pinned '$expected' but active rustc is '$actual'"
+            exit 1
+          fi
+          echo "PASS — toolchain $actual matches rust-toolchain.toml"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: backend
+
+      # `--locked` 는 아래 전부에 붙인다: 커밋된 Cargo.lock 이 낡았을 때 조용히 재해석하지 않고 실패한다.
+      # src-tauri 패키지를 빼는 이유는 그 lib 테스트 타깃이 0xc0000139(ENTRYPOINT_NOT_FOUND)로 죽기 때문.
+      - name: cargo test --workspace --exclude engram-dashboard
+        shell: bash
+        run: cargo test --locked --workspace --exclude engram-dashboard
+
+      # 아래 3개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
+      # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
+      # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
+      - name: cargo test -p engram-dashboard-core
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-core
+
+      - name: cargo test -p engram-dashboard-protocol
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-protocol
+
+      # 위 스텝은 바인딩을 **재생성만** 한다 — ts_export.rs 에 단언이 하나도 없어서, 그것만으로는
+      # wire 계약과 커밋된 .ts 의 어긋남이 초록으로 지나간다. 실제 소비자는 frontend job 의 tsc 인데
+      # 그쪽은 다른 러너에서 **커밋된** .ts 를 본다. 재생성 결과가 커밋본과 다르면 여기서 잡는다.
+      # ★줄바꿈 잡음으로는 안 터진다★: index blob 이 LF 이고 git 이 비교 전에 작업본을 같은 방식으로
+      #   정규화하므로 CRLF 차이만으로는 diff 가 나지 않는다(autocrlf=true 인 Windows 에서 재생성 후
+      #   `git diff --exit-code` → 0 실측). 잡음이 보이는 것은 `git status` 쪽이지 `git diff` 가 아니다.
+      - name: 'Gate: ts-rs bindings are in sync with the wire contract'
+        shell: bash
+        run: |
+          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/; then
+            echo "FAIL — 재생성된 바인딩이 커밋본과 다르다(wire 계약 ↔ TS drift). 위 diff 를 반영해 커밋할 것."
+            exit 1
+          fi
+          echo "PASS — bindings in sync"
+
+      - name: cargo test -p engram-dashboard-messaging
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-messaging
+
+      # net 게이트 5 — 두 feature 조합이 각각 컴파일·통과해야 한다.
+      # net 의 default feature 가 비어 있어 맨 명령은 `auth` 만 컴파일하고, `#[cfg(feature = "server")]`
+      # 아래 모듈은 컴파일 대상에서 아예 빠진다(가려진 코드는 오류를 내지 않는다).
+      # 반대로 워크스페이스 스코프 명령은 데몬이 server 를 켜므로 항상 ON 쪽만 본다.
+      # 각 줄이 상대가 못 보는 쪽을 맡으므로 한 줄로 줄이지 말 것.
+      - name: 'net gate 5a: cargo test -p engram-dashboard-net (features off)'
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-net
+
+      - name: 'net gate 5b: cargo test -p engram-dashboard-net --all-features'
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-net --all-features
+
+      # 워크스페이스 전체 빌드(회귀 명령이 제외한 src-tauri 까지 여기서 컴파일된다).
+      - name: cargo build
+        shell: bash
+        run: cargo build --locked
+
+  # ── 포맷 + 격리 게이트 ───────────────────────────────────────────────────────
+  # 컴파일이 없어 백엔드 잡과 병렬로 빠르게 끝난다(cargo tree 게이트는 의존 해석만 한다).
+  gates:
+    name: fmt + isolation gates
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve and assert pinned toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$expected" ]; then echo "FAIL — rust-toolchain.toml 에서 channel 을 읽지 못했다"; exit 1; fi
+          actual=$(rustc --version | awk '{print $2}')
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL — pinned '$expected' but active rustc is '$actual'"
+            exit 1
+          fi
+          echo "PASS — toolchain $actual matches rust-toolchain.toml"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: gates
+
+      # windows-latest 러너에 ripgrep 이 있는지는 이미지 문서가 보장하지 않는다 → 버전을 박아 직접 깐다.
+      # 게이트 판정이 정규식 동작에 달려 있으므로 러너 이미지가 무엇을 들고 있든 같은 rg 로 돈다.
+      # GITHUB_PATH 는 기존 PATH 앞에 붙으므로 러너에 rg 가 이미 있어도 이쪽이 이긴다.
+      - name: Install ripgrep (pinned 14.1.1, checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '14.1.1'
+          # 릴리스가 배포하는 공식 .sha256 값. 전송 중 손상과 asset 사후 교체를 잡는다.
+          # (같은 릴리스에서 온 값이라 릴리스 자체가 오염된 경우까지 막지는 못한다 — 그건 별개 문제.)
+          $sha = 'd0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1'
+          $url = "https://github.com/BurntSushi/ripgrep/releases/download/$ver/ripgrep-$ver-x86_64-pc-windows-msvc.zip"
+          $zip = "$env:RUNNER_TEMP\rg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          if ($actual -ne $sha) { throw "ripgrep archive checksum mismatch: expected $sha, got $actual" }
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\rg" -Force
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\rg" -Recurse -Filter rg.exe | Select-Object -First 1
+          if (-not $exe) { throw "rg.exe not found in the extracted archive" }
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # 아래 검증 스텝이 쓸 기대값 — 버전 문자열을 YAML 에 두 번 적지 않으려고 여기서 넘긴다.
+          "RG_EXPECTED_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # 버전까지 확인하는 이유: 위 설치가 실패했는데 러너 이미지에 우연히 다른 rg 가 있으면, 단순
+      # `rg --version` 은 통과해 버려 게이트가 핀되지 않은 rg 로 도는 것을 못 잡는다.
+      # 정확히 일치를 보는 이유: 부분 일치로 두면 14.1.10 같은 상위 버전이 14.1.1 로 통과한다.
+      - name: Verify ripgrep is the pinned build
+        shell: bash
+        run: |
+          rg --version
+          actual=$(rg --version | head -1 | awk '{print $2}')
+          if [ "$actual" != "$RG_EXPECTED_VERSION" ]; then
+            echo "FAIL — expected ripgrep $RG_EXPECTED_VERSION, got '$actual'"
+            exit 1
+          fi
+          echo "PASS — ripgrep $actual"
+
+      # cargo fmt 는 의존을 해석하지 않으므로 --locked 를 붙이지 않는다(cargo-fmt 가 받지 않는 플래그다).
+      - name: cargo fmt --check
+        shell: bash
+        run: cargo fmt --check
+
+      # ★아래 grep 게이트 전부의 공통 함정 — 종료코드 반전★
+      # rg 는 "매치를 찾으면 0, 못 찾으면 1, 오류면 2 이상" 으로 끝난다. 그런데 이 게이트들이 통과인
+      # 조건은 **매치 0** 이다. 즉 rg 의 종료코드를 그대로 스텝 성공으로 쓰면 판정이 정확히 뒤집힌다.
+      # 또 `|| true` 나 `if rg …; then` 로 넘기면 rc=2(경로 오타·rg 부재 등)가 "매치 없음" 과 같은
+      # 갈래로 들어가 게이트가 조용히 항상 통과한다. 그래서 세 갈래(0 / 1 / 2+)를 명시적으로 가른다.
+      # `set +e` 가 필요한 이유: Actions 의 bash 는 `set -e` 로 도는데 `hits=$(rg …)` 는 rg 의 종료코드를
+      # 그대로 물려받아, 매치가 없는 **정상 통과** 경로에서 스텝이 먼저 죽는다.
+
+      - name: 'Gate: core isolation — no `use tauri` in core'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "^\s*use tauri" crates/engram-dashboard-core/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      - name: 'Gate: messaging kernel isolation — no workspace crate refs'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      - name: 'net gate 1: source refs — no daemon/messaging/discovery'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
+      # 매치 유무가 아니라 정확한 줄 수를 단언한다(2 를 넘어도 모자라도 실패).
+      - name: 'net gate 2: core symbol allowlist — exactly 2'
+        shell: bash
+        run: |
+          set +e
+          raw=$(rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
+          if [ -z "$raw" ]; then
+            out=""; n=0
+          else
+            out=$(printf '%s\n' "$raw" | sort -u)
+            n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')
+          fi
+          echo "found $n symbol(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 2 ]; then echo "FAIL — expected exactly 2"; exit 1; fi
+          echo "PASS"
+
+      # 매니페스트 텍스트가 아니라 **해석된 의존 그래프**를 읽는다 — rename·테이블 형·비활성 target·
+      # optional 같은 정상 Cargo 문법이 텍스트 grep 을 빠져나가기 때문. 플래그를 줄이면 그만큼 형태가
+      # 새므로(-e build↔build-deps · --target all↔비활성 target · --all-features↔optional) 줄이지 말 것.
+      # --locked 는 커밋된 Cargo.lock 그대로 읽게 한다 — 없으면 새로 해석한 그래프를 단언해 소비자가
+      # 실제로 보는 것과 다른 답을 낼 수 있다.
+      - name: 'net gate 3: direct workspace deps — exactly 3'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 3 ]; then echo "FAIL — expected exactly 3"; exit 1; fi
+          echo "PASS"
+
+      # 패턴의 괄호는 오타가 아니다 — 맨 이름으로 적으면 이 게이트를 설명하는 net crate 의 헤더 주석이
+      # 자기 자신에 걸려 영원히 통과하지 못한다. 단어 경계도 일부러 안 건다(부분 문자열까지 문다).
+      - name: 'net gate 4: no auth vocabulary re-entry'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "(A)gentCommand|(P)ROTOCOL_VERSION" crates/engram-dashboard-net/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # net 게이트 5 가 못 잡는 축을 맡는다: feature 0개 소비자에게 async 런타임이 **조용히** 딸려오는 것.
+      # 게이트 5 는 컴파일 여부만 보는데, 조용히 딸려온 의존은 컴파일을 깨지 않는다.
+      # 실제로 한 번 터진 회귀이고 net 의 `default = []` 결정을 부른 원인이다.
+      # ★`^…␣` 앵커(뒤 공백 포함)를 빼지 말 것★: 맨 부분문자열로 적으면 ter(mio)s 와 tungstenite 가
+      #   걸려 기대값이 0 이 아니게 되고, 그러면 사람이 매번 판정해야 한다(= 게이트가 죽는다).
+      - name: 'Gate: discovery has no async-runtime ingress'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg -i "^(tokio|mio|tokio-tungstenite|futures-util) ")
+          rgrc=$?
+          set -e
+          case "$rgrc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — async runtime leaked into discovery:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+          esac
+
+  # ── 프론트 ───────────────────────────────────────────────────────────────────
+  frontend:
+    name: frontend (vitest + tsc)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: npm ci
+        shell: bash
+        run: npm ci
+
+      - name: npm test
+        shell: bash
+        run: npm test
+
+      # 별도 typecheck 스크립트가 없어 tsc 를 직접 부른다.
+      - name: npx tsc --noEmit
+        shell: bash
+        run: npx tsc --noEmit
