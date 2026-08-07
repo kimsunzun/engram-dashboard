@@ -2,8 +2,8 @@ pub mod cli;
 pub mod commands;
 pub mod daemon_client;
 pub mod layout;
-pub mod output_router;
 pub mod output_channel;
+pub mod output_router;
 // 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다.
 pub use engram_dashboard_discovery as discovery;

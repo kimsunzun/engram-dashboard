@@ -1,9 +1,9 @@
-pub mod discovery;
-pub mod tray;
-pub mod autostart;
-pub mod layout;
 pub mod agent;
+pub mod autostart;
+pub mod discovery;
+pub mod layout;
 pub mod popout;
+pub mod tray;
 
 pub use agent::*;
 pub use autostart::*;
