@@ -34,7 +34,6 @@ use uuid::Uuid;
 use super::tree;
 use super::types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
 
-// 메인 창 label. 부팅 시 1탭으로 초기화되고 non-closable(불변식 4).
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
 // View 전역 식별자(창 간 이동·저장복원 후속 확장 위해 전역 UUID — ADR-0057).
@@ -42,7 +41,7 @@ pub type ViewId = Uuid;
 // Tauri 창 label(예: "main", "slot-popup-3").
 pub type WindowLabel = String;
 
-// 레이아웃 연산 실패 사유. invalid id 는 no-op + 이 에러(부분변경 금지).
+// invalid id 는 no-op + 이 에러(부분변경 금지).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LayoutError {
     #[error("view 없음: {0}")]
@@ -51,7 +50,7 @@ pub enum LayoutError {
     SlotNotFound(Uuid),
     #[error("window 없음: {0}")]
     WindowNotFound(String),
-    // 메인 창은 닫을 수 없음(불변식 4 — hide only).
+    // 불변식 4 — hide only.
     #[error("메인 창은 닫을 수 없음")]
     MainNotClosable,
 }
@@ -61,7 +60,6 @@ pub enum LayoutError {
 pub struct WindowTabs {
     // 탭 순서(좌→우).
     pub tabs: Vec<ViewId>,
-    // 이 창의 활성 탭(불변식 3: 항상 `tabs` 안).
     pub active: ViewId,
 }
 
@@ -76,11 +74,10 @@ pub struct WindowTabsSnapshot {
 
 // 레이아웃 권위 상태(탭 소유 모델 — ADR-0057). invoke 스레드풀 동시접근 → LayoutState 가 Mutex 로 감싼다.
 pub struct ViewManager {
-    // 전역 View 풀(id lookup).
     pub views: HashMap<ViewId, View>,
     // View → 소유 창(★유니크 소유★ = View 당 정확히 1창). 캐시된 역인덱스(불변식 1·2). // ADR-0057
     pub view_owner: HashMap<ViewId, WindowLabel>,
-    // 창 → 탭 목록 + 활성 탭. `agent-tree` 는 여기 없음(모델 밖). // ADR-0057
+    // `agent-tree` 는 여기 없음(모델 밖). // ADR-0057
     pub windows: HashMap<WindowLabel, WindowTabs>,
     // 변경마다 +1(get_view race 용 — 팝업 pull↔listen 윈도). 0 부터 시작, 첫 변경에서 1.
     pub version: u64,
@@ -93,14 +90,12 @@ impl Default for ViewManager {
 }
 
 impl ViewManager {
-    // 부팅 초기 상태: main 창 1탭(가로 분할 [AgentList(좌, 소) · Empty(우)] View 1개 + 그게 active).
     // agent-tree 는 windows 밖. // ADR-0057
     //
     // ★부팅 기본 = 슬롯화된 트리(ADR-0063)★: 옛 고정 좌측 사이드패널(AppLayout Sidebar)이 하던 "트리 좌측
-    // 상시 노출"을 슬롯으로 재현한다 — 좌측 AgentList 슬롯 + 우측 Empty 슬롯의 Split. 이제 트리 슬롯도
-    // 이동·분할·닫기 가능하고 §5 LLM 제어 표면(set_slot_content)으로 재배치된다. 좌측을 작게(ratio 0.2)
-    // 두어 사이드패널 UX(좁은 트리 + 넓은 작업 영역)를 무손실 대체한다. ★main 첫 뷰만★ — create_tab 로 만드는
-    // 새 탭은 종전대로 단일 빈 슬롯이다(트리를 모든 탭에 강제하지 않음).
+    // 상시 노출"을 슬롯으로 재현한다. 좌측을 작게(ratio 0.2) 두어 사이드패널 UX(좁은 트리 + 넓은 작업
+    // 영역)를 무손실 대체한다. ★main 첫 뷰만★ — create_tab 로 만드는 새 탭은 종전대로 단일 빈 슬롯이다
+    // (트리를 모든 탭에 강제하지 않음).
     pub fn new() -> Self {
         let mut views = HashMap::new();
         let v0 = View {
@@ -130,7 +125,6 @@ impl ViewManager {
             windows,
             version: 0,
         };
-        // 첫 슬롯을 포커스로(빈 슬롯이라도 포커스 대상은 존재).
         if let Some(v) = mgr.views.get_mut(&v0_id) {
             Self::fixup_focus(v);
         }
@@ -139,13 +133,12 @@ impl ViewManager {
 
     // ── 조회 ───────────────────────────────────────────────────────────────
 
-    // 창별 탭 목록 + 활성 + version(list_tabs / window:tabs-updated 원천). 없는 창 → Err.
     pub fn list_tabs(&self, label: &str) -> Result<WindowTabsSnapshot, LayoutError> {
         let wt = self
             .windows
             .get(label)
             .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
-        // tabs 순서대로 메타를 만든다(유니크 소유라 tabs 가 곧 그 창 탭 목록 — 필터 불필요).
+        // 유니크 소유라 tabs 가 곧 그 창 탭 목록 — 필터 불필요.
         let tabs: Vec<ViewMeta> = wt
             .tabs
             .iter()
@@ -164,12 +157,11 @@ impl ViewManager {
         })
     }
 
-    // 창 label 목록(list_windows). agent-tree 등 모델 밖 창은 포함 안 함.
+    // agent-tree 등 모델 밖 창은 포함 안 함.
     pub fn list_windows(&self) -> Vec<WindowLabel> {
         self.windows.keys().cloned().collect()
     }
 
-    // view_id 의 스냅샷(get_view·layout:updated 페이로드). 없으면 Err.
     // ADR-0068: 슬롯 공간 파생(neighbors/ordinal)을 논리 트리에서 산출해 함께 싣는다(픽셀 무관 — 백엔드 권위).
     pub fn snapshot(&self, view_id: Uuid) -> Result<ViewSnapshot, LayoutError> {
         let v = self
@@ -180,28 +172,23 @@ impl ViewManager {
             view_id: v.id,
             layout: v.layout.clone(),
             focused_slot_id: v.focused_slot_id,
-            // ADR-0068: 각 말단 슬롯의 방향 이웃·읽기 순서를 트리에서 파생(프론트 왕복·좌표 노출 0).
             slot_spatial: super::spatial::compute_spatial(&v.layout),
             version: self.version,
         })
     }
 
-    // view 안 slot_id 슬롯에 배정된 agent_id(참조 문자열)를 반환. 빈 슬롯이면 Ok(None).
-    // invalid view_id/slot_id → Err(no-op).
     pub fn slot_agent(&self, view_id: Uuid, slot_id: Uuid) -> Result<Option<String>, LayoutError> {
         let v = self
             .views
             .get(&view_id)
             .ok_or(LayoutError::ViewNotFound(view_id))?;
-        // ADR-0060: find_slot 은 SlotContent 를 돌려주므로 agent_id(참조)만 Option<String> 으로 유도.
-        //   슬롯 부재(None)와 빈 슬롯(Some(Empty)→None)을 구분: 부재만 SlotNotFound.
+        // ADR-0060: 슬롯 부재(None)와 빈 슬롯(Some(Empty)→None)을 구분 — 부재만 SlotNotFound.
         tree::find_slot(&v.layout, slot_id)
             .map(|content| content.agent_id().map(str::to_string))
             .ok_or(LayoutError::SlotNotFound(slot_id))
     }
 
-    // view_id 의 소속 창을 O(1) 파생(view_owner 역인덱스). view-id-키 command(assign/split/close_slot)
-    // 가 소속 창을 찾아 그 창에 이벤트를 쏠 때 쓴다. 없으면 None(고아 View — 정상 경로엔 없음).
+    // 없으면 None(고아 View — 정상 경로엔 없음).
     pub fn owner_of(&self, view_id: ViewId) -> Option<&WindowLabel> {
         self.view_owner.get(&view_id)
     }
@@ -227,7 +214,6 @@ impl ViewManager {
         self.version += 1;
     }
 
-    // 부팅 시 main 창 첫 뷰의 기본 레이아웃 = 가로 분할 [AgentList(좌, ratio 0.2) · Empty(우)] (ADR-0063).
     // ★직접 Split 구성★: split_in_tree 는 ratio 0.5 고정 + 새 슬롯이 항상 Empty 라 여기 요구(좌=AgentList,
     //   ratio 0.2)를 못 맞춘다 → LayoutNode::Split 을 직접 짓는다(types.rs Split 노드 형태 그대로).
     fn default_main_layout() -> LayoutNode {
@@ -242,9 +228,9 @@ impl ViewManager {
         }
     }
 
-    // ── 내부 헬퍼(불변식 유지 — 쌍 갱신) ─────────────────────────────────────
+    // ── 내부 헬퍼 ───────────────────────────────────────────────────────────
 
-    // 새 빈-슬롯 View 를 만들어 삽입만 한다(소유/창 배정은 호출자). id 반환.
+    // 소유/창 배정은 호출자.
     fn make_view(&mut self, name: String) -> ViewId {
         let id = Uuid::new_v4();
         let first_slot = LayoutNode::new_empty_slot();
@@ -261,10 +247,8 @@ impl ViewManager {
         id
     }
 
-    // ── mutation (각 메서드: 변경 후 version +1, focus 보정. emit 은 호출자) ─────────
+    // ── mutation ────────────────────────────────────────────────────────────
 
-    // 창 `label` 에 새 빈-슬롯 탭 추가·활성화. 새 View id 반환. 없는 창 → Err.
-    // ★불변식 1 쌍 갱신★: `windows[L].tabs` push ↔ `view_owner[v]=L` 를 함께. // ADR-0057
     pub fn create_tab(&mut self, label: &str, name: Option<String>) -> Result<ViewId, LayoutError> {
         if !self.windows.contains_key(label) {
             return Err(LayoutError::WindowNotFound(label.to_string()));
@@ -278,16 +262,14 @@ impl ViewManager {
         self.view_owner.insert(id, label.to_string());
         let wt = self.windows.get_mut(label).expect("존재 확인됨");
         wt.tabs.push(id);
-        wt.active = id; // 새 탭 활성화(불변식 3).
+        wt.active = id;
         self.bump_version();
         Ok(id)
     }
 
-    // 새 빈 창(빈 탭 1개) 생성(create_window — D-6). label 은 호출자(command 레이어)가 발급.
+    // label 은 호출자(command 레이어)가 발급(D-6).
     // ★이미 존재하는 label 재사용 금지★(Tauri 창 label 재사용 에러 회피 — 호출자 카운터 단조).
-    // 새 창의 (유일) 탭 View id 반환.
     pub fn create_window(&mut self, label: &str) -> Result<ViewId, LayoutError> {
-        // main 이나 기존 label 재생성 금지(부분 상태 방지).
         if self.windows.contains_key(label) {
             return Err(LayoutError::WindowNotFound(label.to_string()));
         }
@@ -304,8 +286,7 @@ impl ViewManager {
         Ok(id)
     }
 
-    // 창 `label` 의 활성 탭을 `view` 로 교체. 타 창 불변. keep-alive(ADR-0056)라 노출 집합 불변 —
-    // active 표시만 바뀐다. view 가 그 창 탭이 아니면 Err(no-op).
+    // keep-alive(ADR-0056)라 노출 집합 불변 — active 표시만 바뀐다.
     pub fn switch_tab(&mut self, label: &str, view: ViewId) -> Result<(), LayoutError> {
         let wt = self
             .windows
@@ -314,19 +295,14 @@ impl ViewManager {
         if !wt.tabs.contains(&view) {
             return Err(LayoutError::ViewNotFound(view));
         }
-        wt.active = view; // 불변식 3 유지(tabs 안 확인함).
+        wt.active = view;
         self.bump_version();
         Ok(())
     }
 
     // 창 `label` 의 탭 `view` 를 닫음(§5-2 상태기계, ADR-0057). 반환 = 이 close 로 창이 **닫혀야 하는지**
     // (팝업 마지막 탭). command 레이어가 그때 close_window(OS) 를 실행한다.
-    // - 인접 탭 승계: active 를 닫으면 오른쪽 우선(없으면 왼쪽)으로 active 이동.
-    // - main 마지막 탭: 빈 탭 1개 강제(불변식 4).
-    // - 팝업 마지막 탭: 창 닫힘 신호 반환(command 가 close_window).
-    // view 가 그 창 탭이 아니면 Err(no-op).
     pub fn close_tab(&mut self, label: &str, view: ViewId) -> Result<CloseTabOutcome, LayoutError> {
-        // 소속 검증(불변식 1·2).
         let wt = self
             .windows
             .get(label)
@@ -374,10 +350,10 @@ impl ViewManager {
 
     // 창 `label` 을 통째로 닫음(모든 탭 View 드롭 + windows 엔트리 제거). 반환 = 드롭된 View id 들
     // (command 레이어가 rebuild 후 Unsubscribe 델타에 반영). ★main 은 금지(불변식 4)★.
-    // 팝업 창 Destroyed 멀티탭 정리(§5-2/G1)의 코어 경로 — `tabs` 전부 순회 드롭. // ADR-0057
+    // 팝업 창 Destroyed 멀티탭 정리(§5-2/G1)의 코어 경로. // ADR-0057
     pub fn close_window(&mut self, label: &str) -> Result<Vec<ViewId>, LayoutError> {
         if label == MAIN_WINDOW_LABEL {
-            return Err(LayoutError::MainNotClosable); // 불변식 4. // ADR-0057
+            return Err(LayoutError::MainNotClosable);
         }
         let wt = self
             .windows
@@ -393,8 +369,7 @@ impl ViewManager {
         Ok(dropped)
     }
 
-    // view 안 slot_id 슬롯을 분할. 새 슬롯에 focus. 새 슬롯 id 반환.
-    // view-id 전역 유니크라 시그니처 유지(소속 창은 view_owner 파생). invalid → Err(no-op).
+    // view-id 전역 유니크라 시그니처 유지(소속 창은 view_owner 파생).
     pub fn split_slot(
         &mut self,
         view_id: Uuid,
@@ -414,15 +389,14 @@ impl ViewManager {
 
     // view 안 slot_id 슬롯을 포커스로 지정(click-to-focus — ADR-0066 결정 1). ★그 슬롯이 이 View 트리에
     // 실재할 때만★ `focused_slot_id` 를 갱신하고 version 을 올린다 — 부재면 no-op + SlotNotFound(부분변경
-    // 금지). split/close 의 사이드이펙트로만 옮겨지던 포커스를 명시 command 로 옮기는 경로다.
+    // 금지).
     //
     // ★백엔드 권위(ADR-0035/0066)★: focused_slot_id 는 백엔드가 소유하고, 프론트는 emit(layout:updated)로만
-    // 반영한다(낙관 갱신 금지 — command 레이어가 스냅샷 emit). 이 메서드는 순수 로직(Tauri 무관)이라 단독
-    // unit 테스트된다. auto-focus-on-split(split_slot)은 그대로 유지 — 이건 클릭 리포커스를 추가할 뿐 대체 아님.
+    // 반영한다(낙관 갱신 금지 — command 레이어가 스냅샷 emit). auto-focus-on-split(split_slot)은 그대로
+    // 유지 — 이건 클릭 리포커스를 추가할 뿐 대체 아님.
     // ADR-0066
     pub fn set_focused_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
         let v = self.view_mut(view_id)?;
-        // 트리에 실재하는 슬롯만 포커스 대상(fixup_focus 가 쓰는 것과 동일 가드). 부재 = SlotNotFound(no-op).
         if !tree::contains_slot(&v.layout, slot_id) {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
@@ -431,9 +405,9 @@ impl ViewManager {
         Ok(())
     }
 
-    // View 이름(탭 라벨) 교체. view-id-키(name 은 View 속성 — split_slot 과 동형으로 소속 창은 view_owner
-    // 파생). ★이름 정규화는 프론트 경계 몫★: 여기선 받은 문자열을 그대로 저장한다(trim/공백거부는 사람 UI·
-    // LLM command 어댑터가 invoke 전에 처리). invalid view_id → Err(ViewNotFound) no-op(version 안 올림).
+    // view-id-키(name 은 View 속성 — split_slot 과 동형으로 소속 창은 view_owner 파생).
+    // ★이름 정규화는 프론트 경계 몫★: 여기선 받은 문자열을 그대로 저장한다(trim/공백거부는 사람 UI·
+    // LLM command 어댑터가 invoke 전에 처리).
     // 이름은 ViewMeta.name 에만 반영되므로 command 레이어는 window:tabs-updated 만 emit(layout 스냅샷엔
     // name 없음 — 라우팅·트리 불변). // ADR-0057
     pub fn rename_tab(&mut self, view_id: Uuid, name: String) -> Result<(), LayoutError> {
@@ -443,8 +417,7 @@ impl ViewManager {
         Ok(())
     }
 
-    // view 안 slot_id 슬롯을 닫음(형제 승격, root 슬롯이면 빈 슬롯 리셋). focus 보정.
-    // invalid view_id/slot_id → no-op + Err.
+    // view 안 slot_id 슬롯을 닫음(형제 승격, root 슬롯이면 빈 슬롯 리셋).
     pub fn close_slot(&mut self, view_id: Uuid, slot_id: Uuid) -> Result<(), LayoutError> {
         let v = self.view_mut(view_id)?;
         if !tree::close_in_tree(&mut v.layout, slot_id) {
@@ -456,7 +429,7 @@ impl ViewManager {
     }
 
     // view 안 slot_id 슬롯에 agent_id(참조 문자열) 배정. ★데몬에 실재 검증 안 함(ADR-0035/0006).
-    // 같은 agent 가 다른 View 에도 배정될 수 있음(불변식 5 — 두 창 같은 에이전트). invalid → Err(no-op).
+    // 같은 agent 가 다른 View 에도 배정될 수 있음(불변식 5 — 두 창 같은 에이전트).
     pub fn assign_agent(
         &mut self,
         view_id: Uuid,
@@ -474,7 +447,7 @@ impl ViewManager {
     // view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체한다(ADR-0063 배치 제어 표면).
     // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette)를
     // 받는다 — 트리(에이전트)·팔레트를 슬롯에 배치하는 §5 LLM/사람 공용 경로. ★덮어쓰기 시맨틱(assign 과
-    // 동형)★: 점유 슬롯도 무조건 교체(점유 방어는 없음 — 배치 command 는 명시적 교체 의도). invalid → Err(no-op).
+    // 동형)★: 점유 슬롯도 무조건 교체(점유 방어는 없음 — 배치 command 는 명시적 교체 의도).
     pub fn set_slot_content(
         &mut self,
         view_id: Uuid,
@@ -492,9 +465,6 @@ impl ViewManager {
     // ── move_slot_to_window 2-phase 지원(§5-3, G4) ───────────────────────────
 
     // view 안 slot_id 슬롯의 콘텐츠(SlotContent)를 clone 해 반환한다(참조 아님 — 락 밖 반출용).
-    // ★슬롯 팝업 분리(move_slot_to_window)용(ADR-0064)★: agent_id 뿐 아니라 콘텐츠 종류 전체
-    // (Empty/Agent/AgentList/PresetPalette)를 새 창으로 옮기기 위해 원본 슬롯의 SlotContent 를 통째로
-    // 읽는다(조회만). invalid view_id/slot_id → Err(no-op).
     pub fn slot_content(&self, view_id: Uuid, slot_id: Uuid) -> Result<SlotContent, LayoutError> {
         let v = self
             .views
@@ -506,14 +476,12 @@ impl ViewManager {
     }
 
     // ★phase A★: 소스 슬롯 콘텐츠를 담은 임시 View 를 만든다(아직 **어느 창 tabs 에도 안 넣음** — orphan
-    // 방지, phase C 에서 삽입). 새 View id + 옮겨 담은 SlotContent 반환. 소스 슬롯은 안 건드림(phase C
-    // 에서 close). 빈 슬롯(Empty)이면 Err(pop-out 대상 없음 — 메뉴가 empty 를 hideOn 으로 숨기나 코어도 방어).
+    // 방지, phase C 에서 삽입). 소스 슬롯은 안 건드림(phase C 에서 close). 빈 슬롯(Empty)이면 Err
+    // (pop-out 대상 없음 — 메뉴가 empty 를 hideOn 으로 숨기나 코어도 방어).
     //
-    // ★ADR-0064 — 콘텐츠 일반화★: 옛 코드는 agent_id 만 읽어 assign_in_tree(agent 전용)로 배정해
-    // 비-에이전트 콘텐츠(agent_list/preset_palette)를 옮길 수 없었다. 이제 SlotContent 전체를 읽어
-    // set_in_tree(제네릭 콘텐츠 배치, ADR-0063)로 새 View 슬롯에 그대로 넣는다 → 모든 슬롯 종류가 팝업
-    // 가능(불변식 5 — 다중 참조 허용은 Agent 뿐 아니라 콘텐츠 일반에 적용). 반환한 SlotContent 로 호출자가
-    // agent 구독 마이그레이션(still-ours close 가드)이 필요한지(= Agent 인지)를 판별한다.
+    // ★ADR-0064 — 콘텐츠 일반화★: 모든 슬롯 종류가 팝업 가능(불변식 5 — 다중 참조 허용은 Agent 뿐 아니라
+    // 콘텐츠 일반에 적용). 반환한 SlotContent 로 호출자가 agent 구독 마이그레이션(still-ours close 가드)이
+    // 필요한지(= Agent 인지)를 판별한다.
     // ADR-0064
     pub fn prepare_detached_view(
         &mut self,
@@ -521,18 +489,16 @@ impl ViewManager {
         src_slot: Uuid,
         name: String,
     ) -> Result<(ViewId, SlotContent), LayoutError> {
-        // ADR-0064: agent_id 가 아니라 SlotContent 전체를 읽는다. Empty 만 거부(팝업 대상 없음).
         let content = self.slot_content(src_view, src_slot)?;
         if content.is_empty() {
             return Err(LayoutError::SlotNotFound(src_slot));
         }
         let id = self.make_view(name);
-        // 새 View 의 (유일) 슬롯에 원본 콘텐츠 배치(불변식 5 — 다중 참조 허용).
         let slot = {
             let v = self.views.get(&id).expect("방금 만든 View");
             tree::first_slot_id(&v.layout)
         };
-        // view_owner 미배정(아직 어느 창에도 안 속함 — phase C 에서 삽입). 그래서 배치는 tree 직접.
+        // view_owner 미배정. 그래서 배치는 tree 직접.
         // ADR-0064: assign_in_tree(agent 전용) 대신 set_in_tree(제네릭)로 콘텐츠 종류 전체를 옮긴다.
         if let Some(v) = self.views.get_mut(&id) {
             let _ = tree::set_in_tree(&mut v.layout, slot, content.clone());
@@ -549,8 +515,7 @@ impl ViewManager {
     }
 
     // ★phase C — 기존 창에 삽입★: 임시 View 를 `to_window` 의 새 탭으로 삽입·활성화(create_tab 상당).
-    // ★재검증(G4)★: `to_window` 가 여전히 존재할 때만 삽입 — 부재면 Err(호출자가 롤백). 삽입 후
-    // `view_owner[view]==to_window`(불변식 1·2 쌍 갱신). // ADR-0057
+    // ★재검증(G4)★: `to_window` 가 여전히 존재할 때만 삽입 — 부재면 Err(호출자가 롤백).
     pub fn insert_tab_into(&mut self, to_window: &str, view: ViewId) -> Result<(), LayoutError> {
         // to_window 재검증(phase B 언락 중 소멸했을 수 있음).
         if !self.windows.contains_key(to_window) {
@@ -569,7 +534,7 @@ impl ViewManager {
     }
 
     // ★phase C — 새 창 생성 + 임시 View 를 그 창 첫 탭으로★. label 은 호출자 발급(단조 카운터).
-    // 새 창 windows 엔트리 생성 + view_owner 쌍 갱신. label 재사용이면 Err.
+    // 새 창 windows 엔트리 생성 + view_owner 쌍 갱신.
     pub fn attach_view_as_new_window(
         &mut self,
         label: &str,
@@ -599,31 +564,24 @@ impl ViewManager {
 //   에이전트 생존(list_agents 재부착) 문구와 함께 호출자에게 전달한다(§5 실패 가시성 — 하드 롤백=kill 안 함).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpawnSlotError {
-    // 지정 slot 이 이미 점유됨(덮어쓰기 금지 — 호출자가 split_slot 후 재시도, G9).
     #[error("슬롯 {0} 이미 점유됨(덮어쓰기 금지 — split_slot 으로 빈 슬롯을 만든 뒤 재시도)")]
     SlotOccupied(Uuid),
-    // 지정 slot 이 이 view 트리에 없음.
     #[error("슬롯 {0} 없음")]
     SlotNotFound(Uuid),
-    // slot=None 인데 이 탭에 빈 슬롯이 하나도 없음(USER DECISION 2b — 자동 split/덮어쓰기 안 함). // ADR-0059
+    // USER DECISION 2b — 자동 split/덮어쓰기 안 함. // ADR-0059
     #[error("이 탭에 빈 슬롯 없음(slot 미지정 — split_slot 으로 빈 슬롯을 만들거나 다른 탭 사용)")]
     NoEmptySlot,
 }
 
-// ★spawn_into 슬롯 해소(순수·Tauri-free — 단독 테스트 가능, TRD §6 G9)★.
-// 주어진 View 트리 안에서 스폰된 agent 를 배정할 **빈 슬롯 id** 를 정책대로 고른다(배정은 하지 않음 — 순수
-// 조회). // ADR-0057
+// ★spawn_into 슬롯 해소(TRD §6 G9)★.
 // - `slot=None`(USER DECISION 2b): 트리를 전위 순회(좌측 우선)해 **첫 번째 빈 슬롯**을 타깃한다. 빈 슬롯이
 //   하나도 없으면 `NoEmptySlot`(자동 split·덮어쓰기 안 함). ★2b 이전(leftmost-only)과 다름★ — split 된
-//   탭에서 좌측이 점유돼도 다른 빈 슬롯이 있으면 거기로 간다. create_tab 직후(빈 root 1개)면 그 root.
-// - `slot=Some(s)`: `s` 가 트리에 없으면 `SlotNotFound`, 비어 있으면 `s`, 점유돼 있으면 `SlotOccupied`.
+//   탭에서 좌측이 점유돼도 다른 빈 슬롯이 있으면 거기로 간다.
 //
 // ★왜 순수 함수로 분리했나★: 스폰(데몬 async)·락·emit 은 command 레이어가 다루고, 여기 "정책 판정"만 떼어
 //   Tauri 무링크 throwaway-mount 로 회귀 단언한다(ADR-0012 격리). 배정 자체는 assign_agent 가 한다.
 pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, SpawnSlotError> {
     match slot {
-        // slot 지정: 그 슬롯이 트리에 있고 비어 있어야 함(점유=덮어쓰기 금지, G9).
-        // ADR-0059/0060 3-way 점유 판정: Empty=빈(Ok) / Agent=점유(SlotOccupied) / 부재=SlotNotFound.
         Some(target) => match tree::find_slot(&view.layout, target) {
             Some(SlotContent::Empty) => Ok(target),
             // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
@@ -632,15 +590,12 @@ pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, Spawn
             | Some(SlotContent::PresetPalette) => Err(SpawnSlotError::SlotOccupied(target)),
             None => Err(SpawnSlotError::SlotNotFound(target)),
         },
-        // slot=None(2b): 첫 빈 슬롯을 스캔한다. 없으면 NoEmptySlot(자동 split·덮어쓰기 안 함).
         None => tree::first_empty_slot_id(&view.layout).ok_or(SpawnSlotError::NoEmptySlot),
     }
 }
 
-// close_tab 결과 — 창이 살아남았나(빈 탭 강제/인접 승계) vs 팝업 마지막 탭이라 창을 닫아야 하나.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseTabOutcome {
-    // 창은 유지(main 빈 탭 강제 or 인접 탭 승계).
     Stayed,
     // 팝업 마지막 탭 → command 레이어가 OS 창을 닫아야 함(에이전트는 생존).
     WindowClosed,
