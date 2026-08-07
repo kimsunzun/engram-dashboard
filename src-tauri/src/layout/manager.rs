@@ -610,21 +610,17 @@ mod tests {
         tree::first_slot_id(&v.layout)
     }
 
-    // main 창 활성 탭 id.
     fn main_active(mgr: &ViewManager) -> ViewId {
         mgr.windows.get(MAIN_WINDOW_LABEL).unwrap().active
     }
 
-    // ★불변식 1·2 전역 검사(모든 테스트가 끝에 호출해 상태 정합 확인)★. // ADR-0057
     fn assert_invariants(mgr: &ViewManager) {
-        // 불변식 2: 모든 View 는 view_owner 에 정확히 1개.
         for vid in mgr.views.keys() {
             assert!(
                 mgr.view_owner.contains_key(vid),
                 "불변식2: View {vid} 에 소유 창 없음"
             );
         }
-        // view_owner 는 실재 View 만 가리킨다(고아 owner 없음).
         for (vid, label) in &mgr.view_owner {
             assert!(
                 mgr.views.contains_key(vid),
@@ -635,7 +631,6 @@ mod tests {
                 "view_owner 가 없는 창 {label} 가리킴"
             );
         }
-        // 불변식 1: view_owner[v]==L ⟺ windows[L].tabs ∋ v.
         for (label, wt) in &mgr.windows {
             for vid in &wt.tabs {
                 assert_eq!(
@@ -644,14 +639,12 @@ mod tests {
                     "불변식1: windows[{label}].tabs 의 {vid} 소유 불일치"
                 );
             }
-            // 불변식 3: active ∈ tabs.
             assert!(
                 wt.tabs.contains(&wt.active),
                 "불변식3: windows[{label}].active 가 tabs 밖"
             );
             assert!(!wt.tabs.is_empty(), "빈 창은 존재 금지");
         }
-        // 역방향 불변식 1: 모든 view_owner 엔트리는 그 창 tabs 에 있다.
         for (vid, label) in &mgr.view_owner {
             let wt = mgr.windows.get(label).expect("owner 창 존재");
             assert!(
@@ -659,7 +652,6 @@ mod tests {
                 "불변식1 역: view_owner[{vid}]={label} 인데 tabs 에 없음"
             );
         }
-        // 불변식 4: main 최소 1탭.
         assert!(
             mgr.windows
                 .get(MAIN_WINDOW_LABEL)
@@ -678,14 +670,12 @@ mod tests {
         assert_eq!(wt.active, wt.tabs[0]);
         assert_eq!(mgr.view_owner.get(&wt.tabs[0]).unwrap(), MAIN_WINDOW_LABEL);
         assert_eq!(mgr.version, 0);
-        // agent-tree 는 windows 밖.
         assert!(!mgr.windows.contains_key("agent-tree"));
         assert_invariants(&mgr);
     }
 
     #[test]
     fn new_main_default_layout_is_agent_list_split_empty() {
-        // ★ADR-0063 부팅 기본★: main 첫 뷰 = 가로 분할 [AgentList(좌, ratio 0.2) · Empty(우)].
         let mgr = ViewManager::new();
         let v0 = main_active(&mgr);
         let layout = &mgr.views.get(&v0).unwrap().layout;
@@ -720,7 +710,7 @@ mod tests {
 
     #[test]
     fn create_tab_stays_single_empty_slot() {
-        // ★ADR-0063★: 부팅 기본만 분할 — 새 탭은 종전대로 단일 빈 슬롯(트리를 모든 탭에 강제 안 함).
+        // ★ADR-0063★: 부팅 기본만 분할 — 트리를 모든 탭에 강제 안 함.
         let mut mgr = ViewManager::new();
         let t = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         assert!(matches!(
@@ -761,11 +751,9 @@ mod tests {
         let mut mgr = ViewManager::new();
         let main0 = main_active(&mgr);
         let t1 = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        // 다른 창(팝업) 하나 만들어 불변 확인.
         let pv = mgr.create_window("slot-popup-1").unwrap();
         mgr.switch_tab(MAIN_WINDOW_LABEL, main0).unwrap();
         assert_eq!(main_active(&mgr), main0);
-        // 팝업 active 불변.
         assert_eq!(mgr.windows.get("slot-popup-1").unwrap().active, pv);
         mgr.switch_tab(MAIN_WINDOW_LABEL, t1).unwrap();
         assert_eq!(main_active(&mgr), t1);
@@ -796,7 +784,6 @@ mod tests {
         let mut mgr = ViewManager::new();
         mgr.create_window("slot-popup-1").unwrap();
         assert!(mgr.create_window("slot-popup-1").is_err());
-        // main 도 재생성 금지.
         assert!(mgr.create_window("main").is_err());
     }
 
@@ -804,7 +791,6 @@ mod tests {
 
     #[test]
     fn close_active_tab_succeeds_right_neighbor() {
-        // main 탭 3개 [a,b,c], active=b. b 닫으면 오른쪽(c) 승계.
         let mut mgr = ViewManager::new();
         let a = main_active(&mgr);
         let b = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
@@ -822,10 +808,9 @@ mod tests {
 
     #[test]
     fn close_active_last_tab_succeeds_left_neighbor() {
-        // main [a,b], active=b(마지막). b 닫으면 왼쪽(a) 승계.
         let mut mgr = ViewManager::new();
         let a = main_active(&mgr);
-        let b = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap(); // active=b
+        let b = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         mgr.close_tab(MAIN_WINDOW_LABEL, b).unwrap();
         assert_eq!(main_active(&mgr), a, "왼쪽 탭 승계(오른쪽 없음)");
         assert_invariants(&mgr);
@@ -835,15 +820,14 @@ mod tests {
     fn close_non_active_tab_keeps_active() {
         let mut mgr = ViewManager::new();
         let a = main_active(&mgr);
-        let b = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap(); // active=b
-        mgr.close_tab(MAIN_WINDOW_LABEL, a).unwrap(); // a 는 비활성
+        let b = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        mgr.close_tab(MAIN_WINDOW_LABEL, a).unwrap();
         assert_eq!(main_active(&mgr), b, "비활성 닫아도 active 유지");
         assert_invariants(&mgr);
     }
 
     #[test]
     fn close_main_last_tab_forces_empty_tab() {
-        // main 마지막 탭 닫으면 빈 탭 1개 강제(불변식 4). 창은 유지.
         let mut mgr = ViewManager::new();
         let v0 = main_active(&mgr);
         let out = mgr.close_tab(MAIN_WINDOW_LABEL, v0).unwrap();
@@ -865,7 +849,6 @@ mod tests {
 
     #[test]
     fn close_popup_last_tab_closes_window() {
-        // 팝업 마지막 탭 닫으면 창 통째 닫힘(WindowClosed). windows 엔트리·View 드롭.
         let mut mgr = ViewManager::new();
         let pv = mgr.create_window("slot-popup-1").unwrap();
         let out = mgr.close_tab("slot-popup-1", pv).unwrap();
@@ -878,7 +861,6 @@ mod tests {
 
     #[test]
     fn close_popup_non_last_tab_stays() {
-        // 팝업 탭 2개 → 하나 닫아도 창 유지(WindowClosed 아님).
         let mut mgr = ViewManager::new();
         let p0 = mgr.create_window("slot-popup-1").unwrap();
         let p1 = mgr.create_tab("slot-popup-1", None).unwrap();
@@ -910,7 +892,6 @@ mod tests {
 
     #[test]
     fn close_window_main_is_rejected() {
-        // ★불변식 4★: close_window("main") 은 거부(no-op).
         let mut mgr = ViewManager::new();
         let err = mgr.close_window(MAIN_WINDOW_LABEL).unwrap_err();
         assert!(matches!(err, LayoutError::MainNotClosable));
@@ -919,13 +900,12 @@ mod tests {
 
     #[test]
     fn close_window_multitab_drops_all_views() {
-        // ★G1: 멀티탭 팝업 강제 정리★ — tabs 전부 순회 드롭, 잔류 0.
         let mut mgr = ViewManager::new();
         let p0 = mgr.create_window("slot-popup-1").unwrap();
         let p1 = mgr.create_tab("slot-popup-1", None).unwrap();
         let p2 = mgr.create_tab("slot-popup-1", None).unwrap();
         let dropped = mgr.close_window("slot-popup-1").unwrap();
-        // 세 탭 전부 드롭 반환(순서 무관 — 집합 비교).
+        // 순서 무관 — 집합 비교.
         assert_eq!(dropped.len(), 3);
         for v in [p0, p1, p2] {
             assert!(dropped.contains(&v));
@@ -1025,10 +1005,8 @@ mod tests {
 
     #[test]
     fn set_focused_slot_updates_focus_and_bumps_version() {
-        // 부팅 기본은 Split[AgentList·Empty] 라 좌측 슬롯이 focus. 우측(Empty) 슬롯으로 클릭 포커스 이동.
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
-        // 좌/우 슬롯 id 를 트리에서 뽑는다(좌 = first_slot_id, 우 = split 의 b 슬롯).
         let (left, right) = {
             let v = mgr.views.get(&view_id).unwrap();
             match &v.layout {
@@ -1036,7 +1014,6 @@ mod tests {
                 _ => panic!("부팅 기본은 Split"),
             }
         };
-        // 사전조건: 좌측이 focus.
         assert_eq!(mgr.views.get(&view_id).unwrap().focused_slot_id, Some(left));
         let ver = mgr.version;
         mgr.set_focused_slot(view_id, right).unwrap();
@@ -1061,7 +1038,6 @@ mod tests {
 
     #[test]
     fn set_focused_slot_absent_slot_is_err_noop() {
-        // 트리에 없는 slot → SlotNotFound + 상태 불변(no-op — 부분변경 금지).
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
         let before = mgr.views.get(&view_id).unwrap().focused_slot_id;
@@ -1081,7 +1057,6 @@ mod tests {
 
     #[test]
     fn rename_tab_renames_and_bumps_version() {
-        // 새 탭 생성 후 이름 교체 → View.name 반영 + version +1. // ADR-0057
         let mut mgr = ViewManager::new();
         let view_id = mgr
             .create_tab(MAIN_WINDOW_LABEL, Some("Old".to_string()))
@@ -1099,7 +1074,6 @@ mod tests {
 
     #[test]
     fn rename_tab_invalid_view_is_err_noop() {
-        // 없는 view_id → ViewNotFound + version 불변(no-op — 부분변경 금지). // ADR-0057
         let mut mgr = ViewManager::new();
         let ver = mgr.version;
         assert!(matches!(
@@ -1126,14 +1100,12 @@ mod tests {
 
     #[test]
     fn assign_same_agent_to_two_views_is_allowed() {
-        // ★불변식 5★: 같은 agent 를 서로 다른 두 View 에 배정 가능(두 창 같은 에이전트).
         let mut mgr = ViewManager::new();
         let v1 = main_active(&mgr);
         let s1 = first_slot_of(&mgr, v1);
         mgr.assign_agent(v1, s1, "shared".into()).unwrap();
         let v2 = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let s2 = first_slot_of(&mgr, v2);
-        // 두 번째 배정도 성공(dedup/거부 없음).
         mgr.assign_agent(v2, s2, "shared".into()).unwrap();
         assert_eq!(mgr.slot_agent(v1, s1).unwrap().as_deref(), Some("shared"));
         assert_eq!(mgr.slot_agent(v2, s2).unwrap().as_deref(), Some("shared"));
@@ -1152,7 +1124,6 @@ mod tests {
 
     #[test]
     fn set_slot_content_places_agent_list() {
-        // 빈 슬롯을 AgentList 로 배치(비-에이전트 콘텐츠 — assign_agent 로는 불가한 경로).
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let slot = first_slot_of(&mgr, v);
@@ -1169,7 +1140,6 @@ mod tests {
 
     #[test]
     fn set_slot_content_can_clear_to_empty() {
-        // Agent 배정 슬롯을 set_slot_content(Empty)로 비운다(제네릭 — 어느 variant 로도 교체).
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let slot = first_slot_of(&mgr, v);
@@ -1265,7 +1235,6 @@ mod tests {
 
     #[test]
     fn prepare_detached_view_moves_agent_without_window() {
-        // phase A: 임시 View 생성 — agent 담김, 아직 어느 창에도 안 속함(view_owner 미배정).
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
@@ -1273,25 +1242,23 @@ mod tests {
         let (tmp, content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
-        // ADR-0064: 반환 콘텐츠 = 소스 슬롯 그대로(Agent).
         assert_eq!(
             content,
             SlotContent::Agent {
                 agent_id: "moving".into()
             }
         );
-        // 임시 View 슬롯에 agent 담김.
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
             mgr.slot_agent(tmp, tslot).unwrap().as_deref(),
             Some("moving")
         );
-        // 아직 창에 안 속함(orphan 방지 — phase C 에서 삽입).
+        // orphan 방지 — phase C 에서 삽입.
         assert!(
             mgr.view_owner.get(&tmp).is_none(),
             "phase A 는 view_owner 미배정"
         );
-        // 소스는 아직 그대로(phase C 에서 close).
+        // phase C 에서 close.
         assert_eq!(
             mgr.slot_agent(src, slot).unwrap().as_deref(),
             Some("moving")
@@ -1300,7 +1267,6 @@ mod tests {
 
     #[test]
     fn prepare_detached_view_moves_agent_list_content() {
-        // ★ADR-0064★: 비-에이전트 콘텐츠(agent_list)도 팝업 가능 — SlotContent 전체를 임시 View 로 옮긴다.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
@@ -1310,13 +1276,12 @@ mod tests {
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
         assert_eq!(content, SlotContent::AgentList, "반환 콘텐츠 = AgentList");
-        // 임시 View 슬롯에 AgentList 담김(agent 가 아니라 콘텐츠 종류 그대로).
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
             tree::find_slot(&mgr.views.get(&tmp).unwrap().layout, tslot).unwrap(),
             &SlotContent::AgentList
         );
-        // 소스는 아직 그대로(phase C 에서 close).
+        // phase C 에서 close.
         assert_eq!(
             tree::find_slot(&mgr.views.get(&src).unwrap().layout, slot).unwrap(),
             &SlotContent::AgentList
@@ -1334,12 +1299,10 @@ mod tests {
 
     #[test]
     fn insert_tab_into_existing_window_phase_c() {
-        // phase C(기존 창): 임시 View 를 to_window 새 탭으로 삽입·활성화.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "moving".into()).unwrap();
-        // 기존 팝업 창.
         let existing = mgr.create_window("slot-popup-1").unwrap();
         let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
@@ -1362,25 +1325,20 @@ mod tests {
         let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
-        // to_window 가 존재 안 함 → Err.
         let err = mgr.insert_tab_into("gone", tmp).unwrap_err();
         assert!(matches!(err, LayoutError::WindowNotFound(_)));
-        // tmp 는 여전히 orphan(호출자가 drop_detached_view 로 롤백).
         assert!(mgr.view_owner.get(&tmp).is_none());
     }
 
     #[test]
     fn insert_same_agent_into_window_that_has_it_is_allowed() {
-        // ★불변식 5 / G4 dedup 금지★: 같은 agent 를 이미 보고 있는 창으로 옮겨도 정상.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
         mgr.assign_agent(src, slot, "shared".into()).unwrap();
-        // 팝업 창이 이미 같은 agent 를 봄.
         let existing = mgr.create_window("slot-popup-1").unwrap();
         let eslot = first_slot_of(&mgr, existing);
         mgr.assign_agent(existing, eslot, "shared".into()).unwrap();
-        // src 슬롯의 shared 를 그 창으로 옮김 → 두 탭이 같은 agent(dedup 없이 허용).
         let (tmp, _content) = mgr
             .prepare_detached_view(src, slot, "Popup".into())
             .unwrap();
@@ -1391,7 +1349,6 @@ mod tests {
 
     #[test]
     fn attach_view_as_new_window_phase_c() {
-        // phase C(새 창): 임시 View 를 새 창 첫 탭으로.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
@@ -1425,7 +1382,6 @@ mod tests {
 
     #[test]
     fn resolve_none_targets_empty_root_slot() {
-        // 새 탭(빈 root 슬롯) — slot=None 이면 그 root 슬롯을 고른다.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1439,9 +1395,8 @@ mod tests {
 
     #[test]
     fn resolve_none_on_single_occupied_slot_is_no_empty_slot() {
-        // ★USER DECISION 2b★: slot=None 인데 (분할 안 된) 유일 슬롯이 점유 → 다른 빈 슬롯이 없으므로
-        //   NoEmptySlot(자동 split·덮어쓰기 안 함). 2b 이전엔 SlotOccupied 였으나, 이제 "빈 슬롯 스캔"이라
-        //   빈 슬롯 부재를 NoEmptySlot 으로 신고한다.
+        // ★USER DECISION 2b★: 자동 split·덮어쓰기 안 함. 2b 이전엔 SlotOccupied 였으나, 이제 "빈 슬롯
+        //   스캔"이라 빈 슬롯 부재를 NoEmptySlot 으로 신고한다.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1455,8 +1410,7 @@ mod tests {
 
     #[test]
     fn resolve_none_on_split_tab_picks_first_empty_not_leftmost() {
-        // ★USER DECISION 2b 회귀★: split 된 탭에서 좌측(root)이 점유, 우측이 빈 채 → slot=None 은
-        //   좌측을 건너뛰고 첫 빈 슬롯(우측)을 고른다(2b 이전엔 leftmost-only 라 SlotOccupied 였다).
+        // ★USER DECISION 2b 회귀★: 2b 이전엔 leftmost-only 라 SlotOccupied 였다.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1472,7 +1426,7 @@ mod tests {
 
     #[test]
     fn resolve_none_on_fully_occupied_split_tab_is_no_empty_slot() {
-        // split 된 탭이 전부 점유 → slot=None 은 NoEmptySlot(자동 split·덮어쓰기 안 함).
+        // 자동 split·덮어쓰기 안 함.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1488,7 +1442,7 @@ mod tests {
 
     #[test]
     fn resolve_none_after_create_tab_targets_fresh_root() {
-        // create_tab 직후(빈 root 1개) — slot=None 은 그 root(빈 슬롯)을 고른다(2b 에서도 유지).
+        // 2b 에서도 유지.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1498,7 +1452,6 @@ mod tests {
 
     #[test]
     fn resolve_then_assign_holds_invariants() {
-        // 조립 성공 경로 회귀: create_tab → resolve_spawn_slot(None) → assign_agent → 불변식 유지.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let target = {
@@ -1519,7 +1472,6 @@ mod tests {
         //   주장하면 owner_of 불일치로 거부해야 한다(spawn_into 가 이 predicate 로 배치 전 검증).
         let mut mgr = ViewManager::new();
         let popup_view = mgr.create_window("slot-popup-1").unwrap();
-        // popup_view 는 slot-popup-1 소유 — "main" 이 자기 탭이라 주장하면 불일치.
         assert_eq!(
             mgr.owner_of(popup_view).map(|s| s.as_str()),
             Some("slot-popup-1")
@@ -1533,7 +1485,6 @@ mod tests {
 
     #[test]
     fn resolve_some_empty_returns_that_slot() {
-        // split 으로 빈 슬롯 2개 → 지정한 (빈) 슬롯을 그대로 돌려준다.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1548,7 +1499,7 @@ mod tests {
 
     #[test]
     fn resolve_some_occupied_errors_no_overwrite() {
-        // 지정 슬롯이 점유 → SlotOccupied(자동 split/replace 안 함, G9).
+        // 자동 split/replace 안 함(G9).
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
@@ -1562,7 +1513,6 @@ mod tests {
 
     #[test]
     fn resolve_some_missing_slot_errors() {
-        // 트리에 없는 slot id → SlotNotFound.
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let bogus = Uuid::new_v4();
