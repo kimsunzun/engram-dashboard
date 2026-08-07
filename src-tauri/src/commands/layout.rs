@@ -441,6 +441,7 @@ pub async fn spawn_into(
     cwd: String,
 ) -> Result<String, String> {
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
+    // ADR-0058 FIX 1(1a)
     if let Some(b) = &backend {
         let norm = b.trim();
         if !norm.is_empty() {

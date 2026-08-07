@@ -49,30 +49,29 @@ const WEBVIEW2_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required";
 
 // 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
-// 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피). AtomicU64 라 락 없이 안전.
+// 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피).
 #[derive(Default)]
 pub struct PopupCounter(pub AtomicU64);
 
 impl PopupCounter {
-    // 다음 유일 label 발급(`slot-popup-N`). N 은 1 부터 단조 증가.
     fn next_label(&self) -> String {
         let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
         format!("{POPUP_LABEL_PREFIX}{n}")
     }
 }
 
-// 이 label 이 팝업/런타임 창인지(prefix 매칭). lib.rs Destroyed arm 이 main/agent-tree 와 구분하는 데 쓴다.
+// lib.rs Destroyed arm 이 main/agent-tree 와 구분하는 데 쓴다.
 pub fn is_popup_label(label: &str) -> bool {
     label.starts_with(POPUP_LABEL_PREFIX)
 }
 
-// 런타임 창 URL 을 만든다. ★URL 키 = `?window=<label>`(ADR-0057/§3-3)★: 팝업 페이지는 "고정 뷰"가
-// 아니라 "이 창의 활성 탭"을 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위).
+// ★URL 키 = `?window=<label>`(ADR-0057/§3-3)★: 팝업 페이지는 "고정 뷰"가 아니라 "이 창의 활성 탭"을
+// 그린다(활성 탭은 백엔드 `windows[label].active` 가 권위).
 fn window_url(label: &str) -> String {
     format!("index.html#/popup?window={label}")
 }
 
-// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지). label 순번 N 으로 오프셋. 8개마다 wrap.
+// 대각 cascade 위치(창이 겹쳐 뜨는 것 방지).
 fn cascade_position(label: &str) -> (f64, f64) {
     let n: u32 = label
         .strip_prefix(POPUP_LABEL_PREFIX)
@@ -83,7 +82,7 @@ fn cascade_position(label: &str) -> (f64, f64) {
 }
 
 // WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). config 창과 동일한
-// WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054). 실패 시 Err(빌드 문자열).
+// WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054).
 fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
     let (x, y) = cascade_position(label);
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
@@ -96,7 +95,7 @@ fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
         .map_err(|e| format!("런타임 창 생성 실패: {e}"))
 }
 
-// OS 창을 destroy(닫기). Destroyed 이벤트 → lib.rs Destroyed arm → cleanup_popup_window 가 잔여 정리.
+// Destroyed 이벤트 → lib.rs Destroyed arm → cleanup_popup_window 가 잔여 정리.
 // ★창 닫힘 = 백엔드 단일 소스(§5-2/G2)★: 프론트로 별도 view:closed 를 안 쏜다(이중 발화·재진입 방지).
 // registry 는 여기선 안 건드린다(Destroyed→cleanup 이 정리) — 그래서 인자로도 안 받는다(F5).
 pub fn destroy_window(app: &AppHandle, label: &str) {
@@ -105,7 +104,6 @@ pub fn destroy_window(app: &AppHandle, label: &str) {
             tracing::warn!(label, "destroy_window 실패(창 이미 닫힘일 수 있음): {e}");
         }
     } else {
-        // 창이 이미 없음(경합) — no-op. 모델은 이미 정리됨.
         tracing::debug!(label, "destroy_window: OS 창 없음(이미 닫힘) — no-op");
     }
 }
@@ -131,7 +129,6 @@ pub async fn create_empty_window(
         // 빈 슬롯뿐이라 라우팅 델타는 없지만 계약상 rebuild(표 재계산).
         let delta = router.rebuild(&mgr);
         send_subscription_delta(client, delta);
-        // ADR-0056 상한 근접 로그(하드 블록 아님).
         let n_windows = mgr.windows.len();
         if n_windows >= 3 {
             tracing::info!(
@@ -143,7 +140,6 @@ pub async fn create_empty_window(
 
     // ── phase B(락 밖): 웹뷰 빌드(WebviewWindowBuilder 데드락 회피) ────────────────
     if let Err(e) = build_runtime_window(app, &label) {
-        // 빌드 실패 → 모델 롤백(방금 만든 빈 창 제거).
         let delta = {
             let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
             let _ = mgr.close_window(&label);
@@ -180,7 +176,6 @@ pub async fn move_slot_to_window(
     slot_id: Uuid,
     to_window: Option<String>,
 ) -> Result<MoveResult, String> {
-    // 새 창 타깃이면 label 을 미리 발급(phase B 빌드에 필요). 기존 창 타깃이면 그 label.
     let is_new_window = to_window.is_none();
     let target_label = to_window.clone().unwrap_or_else(|| counter.next_label());
 
@@ -188,11 +183,6 @@ pub async fn move_slot_to_window(
     // ★SlotContent 를 락 밖으로 반출★(MOVE 원자성): 창 build 로 락이 풀린 사이 원본 슬롯이 다른 콘텐츠로
     //   재배정될 수 있다 — 2차 락에서 close 전에 이 값과 재조회 결과를 대조해 "옮긴 그 콘텐츠 그대로일 때만"
     //   원본을 닫는다(엉뚱한 콘텐츠 삭제 방지).
-    //
-    // ★ADR-0064 — 모든 슬롯 콘텐츠 팝업★: 옛 코드는 agent_id 만 반출해 agent 슬롯만 옮길 수 있었다. 이제
-    //   SlotContent 전체(Agent/AgentList/PresetPalette)를 반출한다. Empty 만 prepare_detached_view 가 거부.
-    //   비-에이전트 콘텐츠(agent_list/preset_palette)는 백엔드 출력 구독이 없어(프론트 렌더 콘텐츠) 구독
-    //   델타(still-ours close 가드의 agent 대조)가 불필요 — 아래 phase C 에서 Agent 일 때만 구독 마이그레이션.
     //
     // ★owner-less tmp_view 가 phase B(언락) 동안 views 에 있어도 안전한 이유(F3 — BLOCK-1 해소)★:
     //   prepare_detached_view 가 만든 tmp_view 는 `views` 에는 있으나 `view_owner`/`windows[*].tabs`
@@ -205,8 +195,6 @@ pub async fn move_slot_to_window(
     //   때는 이 일시 owner-less 창(phase B)을 전제로 깔아야 한다(무조건 owner 있음 가정 = 이 op 중 패닉).
     let (tmp_view, src_content) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        // ① 임시 View 생성(소스 콘텐츠 담김, 창 미배정 — phase C 에서 삽입). Empty 면 prepare 가 Err.
-        //    ADR-0064: 빈 슬롯만 거부(agent 미배정도 이제 AgentList/PresetPalette 는 유효 팝업 대상).
         let name = if is_new_window {
             format!(
                 "Popup {}",
@@ -230,7 +218,6 @@ pub async fn move_slot_to_window(
             return Err(e);
         }
     } else {
-        // 기존 창 타깃: 창이 실제 존재하는지 확인(부재면 롤백). 빌드 없음.
         if app.get_webview_window(&target_label).is_none() {
             rollback_detached(&state, &router, &client, tmp_view);
             return Err(format!("대상 창 없음: {target_label}"));
@@ -241,7 +228,6 @@ pub async fn move_slot_to_window(
     let (src_tabs, tgt_tabs, src_layout) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
 
-        // 삽입: 새 창 = 창 엔트리 생성 / 기존 창 = windows.contains_key 재검증 후 tabs 삽입(G4).
         let inserted = if is_new_window {
             mgr.attach_view_as_new_window(&target_label, tmp_view)
         } else {
@@ -249,7 +235,6 @@ pub async fn move_slot_to_window(
             mgr.insert_tab_into(&target_label, tmp_view)
         };
         if let Err(e) = inserted {
-            // 삽입 실패(재검증 실패 등) → 임시 View 롤백 + (새 창이면) 이미 뜬 창 destroy. 소스 유지.
             // ★F7 nit — 이 롤백은 실질적으로 기존 창 insert_tab_into 실패(phase B 언락 중 대상 창 소멸)만
             //   가드한다★: 새 창 경로(is_new_window)의 attach_view_as_new_window 는 fresh label(PopupCounter
             //   단조 — 재사용 충돌 없음) + 방금 만든 tmp_view 에 대해 실패 불가라 사실상 dead 분기다. 그래도
@@ -266,16 +251,11 @@ pub async fn move_slot_to_window(
             return Err(format!("탭 삽입 실패(롤백): {e}"));
         }
 
-        // 소스 슬롯 close(MOVE 완성 — still-ours 가드). 창 build 로 락이 풀린 사이 재배정됐으면 스킵.
         // ★F4 — MOVE→COPY 열화는 의도된 best-effort★: phase B(언락) 동안 소스 슬롯이 다른 콘텐츠로
         //   재배정되면(다른 SlotContent) still_ours=false → close 스킵. 즉 "재배정된 엉뚱한 콘텐츠를 지우지
         //   않는 것"이 최우선이고, 그 대가로 원래 콘텐츠가 타깃 탭 + 소스 슬롯 양쪽에 남는다(MOVE 가 사실상
         //   COPY 로 열화). 이 중복은 불변식 5(같은 콘텐츠 두 View 허용, 진도 독립·ADR-0046)로 무해하므로
         //   엄격 롤백(타깃 되돌리기) 대신 이대로 둔다.
-        // ★ADR-0064 — 콘텐츠 종류 무관 대조★: 옛 코드는 slot_agent(agent_id)만 비교해 agent 슬롯만 다뤘다.
-        //   이제 slot_content(SlotContent 전체)를 phase A 반출값(src_content)과 비교한다 →
-        //   agent_list/preset_palette 도 동일 still-ours 시맨틱. Agent 케이스는 SlotContent::Agent{agent_id}
-        //   동등성이 옛 agent_id 문자열 비교와 정확히 일치(동작 불변 — 회귀 없음).
         // ★load-bearing★: 소스 View 자체가 gap 중 소멸(탭/창 닫힘)했으면 slot_content 가 `Err`(ViewNotFound/
         //   SlotNotFound)를 준다 → `matches!(_, Ok(ref c)) if *c == src_content` 가 실패 → still_ours=false →
         //   close 스킵. 이 `Err→스킵`이 이미-사라진 소스를 다시 close 하려다 나는 오작동/패닉을 막는다(수정 금지).
@@ -292,7 +272,6 @@ pub async fn move_slot_to_window(
             );
         }
 
-        // 양 창 탭바 + 소스 View 레이아웃 페이로드(락 안 복사).
         let src_owner = mgr.owner_of(view_id).cloned();
         let src_tabs = src_owner
             .as_deref()
@@ -309,7 +288,6 @@ pub async fn move_slot_to_window(
         (src_tabs, tgt_tabs, src_layout)
     }; // ← 락 드롭
 
-    // emit(락 밖, ADR-0006): 소스 View 레이아웃 + 양 창 탭바.
     if let Some(snap) = src_layout {
         if let Err(e) = app.emit_layout(&snap) {
             tracing::warn!("[move_slot] layout:updated emit 실패: {e}");
@@ -356,7 +334,6 @@ fn rollback_detached(
     };
     mgr.drop_detached_view(tmp_view);
     let delta = router.rebuild(&mgr);
-    // ★락 안 발화(F2)★ — F1 과 동일 이유. drop(mgr) 은 이 스코프 끝에서 자동.
     send_subscription_delta(client, delta);
 }
 
@@ -411,7 +388,7 @@ pub fn cleanup_popup_window(
             tracing::warn!(label, "cleanup_popup_window: lock poisoned — 정리 스킵");
             return;
         };
-        // Tauri-free 코어(G1 멀티탭 드롭 + rebuild 델타). 창이 이미 모델에서 지워졌으면 rebuild 만.
+        // 창이 이미 모델에서 지워졌으면 rebuild 만.
         let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
         // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1). ADR-0046: to_unsubscribe 만 wire.
         for a in delta.to_unsubscribe {
