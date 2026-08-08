@@ -1134,8 +1134,6 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
     }
 }
 
-/// 현재 프로필 목록을 전 연결에 브로드캐스트(ProfileListUpdated). 프로필 CRUD(생성/삭제/토글)는
-/// 공유 ProfileRegistry 상태를 바꾸므로 모든 뷰어가 최신 목록을 보게 한다(agent_list_updated 와 동형).
 fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     let ev = AgentEvent::ProfileListUpdated {
         profiles: core_profiles_to_wire(manager.agent_snapshots()),
@@ -1145,8 +1143,6 @@ fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>)
     }
 }
 
-/// 현재 프리셋 목록을 전 연결에 브로드캐스트(PresetListUpdated, ADR-0061). 프리셋 CRUD(생성/삭제)는
-/// 공유 PresetRegistry 상태를 바꾸므로 모든 창이 최신 목록을 보게 한다(broadcast_profile_list 와 동형).
 /// ★create/delete 는 반드시 이 broadcast 로 이어진다★(안 그러면 다른 창이 stale — ADR-0061 불변식).
 fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     let ev = AgentEvent::PresetListUpdated {
@@ -1157,7 +1153,6 @@ fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) 
     }
 }
 
-/// Error 이벤트를 sink 로 enqueue(control).
 fn send_error(
     sink: &dyn OutboundSink,
     request_id: Option<engram_dashboard_protocol::RequestId>,
@@ -1169,8 +1164,6 @@ fn send_error(
     }));
 }
 
-/// Hello 이벤트(연결 직후 어댑터가 push). protocol_version/daemon_version 동봉.
-/// (어댑터가 carrier-중립으로 만들 수 있게 코어가 헬퍼 제공.)
 pub fn hello_event(daemon_version: String) -> AgentEvent {
     AgentEvent::Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -1179,7 +1172,6 @@ pub fn hello_event(daemon_version: String) -> AgentEvent {
     }
 }
 
-/// 현재 에이전트 목록 이벤트(연결 직후/브로드캐스트). 어댑터·StatusSink 공용.
 pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
     AgentEvent::AgentListUpdated {
         agents: core_agents_to_wire(manager.list_agents()),
@@ -1189,25 +1181,19 @@ pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // ADR-0129 슬라이스 1: 포트 계약은 네트워크 crate 소유다. 모듈째 들여와 아래 `frame_port::Frame`
-    //   철자를 그대로 두되(경계는 이 한 줄에서 보인다), 옛 `crate::frame_port::` 경로는 되살리지 않는다.
     use engram_dashboard_net::frame_port;
     use engram_dashboard_protocol::RequestId;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
-    /// 테스트용 request_id 생성(RequestId 는 Uuid newtype).
     fn rid() -> RequestId {
         RequestId(uuid::Uuid::new_v4())
     }
 
-    /// dispatch 응답을 순서대로 기록하는 mock OutboundSink. control(Outbound::Event)만 검증한다.
     /// ★output 평면은 mock 으로 안 만든다★ — 실 프레임 출구(conn_tx)로 흘려 별도 채널로 받는다
     /// (그래야 control 과 같은 단일 writer 큐에 실려 FIFO 순서를 관측할 수 있다).
-    /// 여기 mock 은 control 평면(Ack/Error/ReplayComplete/Spawned 등)만 본다.
     struct MockOutboundSink {
         events: Arc<StdMutex<Vec<AgentEvent>>>,
-        /// handle_subscribe 가 요구하는 output sink 의 conn_tx(replay binary 가 여기로).
         conn_tx: tokio::sync::mpsc::Sender<frame_port::Frame>,
     }
 
@@ -1227,7 +1213,6 @@ mod tests {
         fn enqueue(&self, out: Outbound) -> Result<(), SinkError> {
             match out {
                 Outbound::Event(ev) => {
-                    // control 은 conn_tx 에도 흘려(FIFO 검증용) 기록도 남긴다.
                     if let Some(text) = event_json(&ev) {
                         let _ = self.conn_tx.try_send(frame_port::Frame::Text(text));
                     }
@@ -1245,9 +1230,6 @@ mod tests {
             }
         }
         fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
-            // 프레임 출구는 포트 더블 — 네트워크 행 실물(`engram_dashboard_net::ws::ConnFrameSink`)의
-            // 큐 포화 종료 신호는
-            //   그쪽 관심사이고 여기서 보는 것은 "frame 이 큐에 실렸나 / 포화면 Err 인가" 뿐이다.
             let sink = Arc::new(crate::agent_conn::FrameOutputSink::new(Arc::new(
                 crate::test_doubles::FakeFrameSink::new(self.conn_tx.clone()),
             )));
@@ -1256,11 +1238,6 @@ mod tests {
         }
     }
 
-    /// ★메시징 커널까지 배선한 core(리뷰 fix D1 — 삭제 정리 훅 통합 테스트용)★.
-    ///
-    /// ★왜 별도 조립인가★: 기본 `test_core` 는 슬롯이 비어 있어 `DeleteProfile` 의 정리 훅이 조용히 넘어간다
-    ///   (그 조립엔 메시징이 없다). 삭제 정리의 **배선**(이름을 언제 뽑나 · 게이트를 무엇으로 거나)은 실물
-    ///   `ManagerDeliveryPort` + 실제 spawn 이 있어야 검증된다 — 가짜 포트 단위 테스트는 그 배선을 타지 않는다.
     /// ★flush 트리거는 꽂지 않는다(의도)★: 운영은 로스터 diff(MessagingFlushSink)가 등장 시 파킹을 비우지만,
     ///   여기서는 "스폰 후에도 파킹분이 남아 있는" 상태가 필요하다(삭제 정리가 그걸 죽이는지가 검증 대상).
     ///   그 diff 배선 자체는 messaging_host.rs·control_send 테스트가 지킨다.
@@ -1278,7 +1255,6 @@ mod tests {
     }
 
     fn test_core() -> (ConnectionCore, watch::Receiver<bool>) {
-        // in-memory manager 배선(lib.rs build_manager_with_store 와 같은 결, 여기선 직접).
         use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
@@ -1296,7 +1272,6 @@ mod tests {
             }
         }
 
-        // ADR-0061: 프리셋 store 도 in-memory 로 배선(프로필과 동형).
         #[derive(Default)]
         struct MemPresetStore {
             saved: StdMutex<Vec<engram_dashboard_core::agent::preset::Preset>>,
@@ -1310,8 +1285,6 @@ mod tests {
             }
         }
 
-        // 전-연결 팬아웃 자리는 기록용 더블 — 이 조립엔 연결이 없다. 나간 것을 관측하는 테스트는
-        //   status_fanout 쪽이고, 여기 테스트들은 per-conn sink(mock)로 오는 control 만 본다.
         let fanout: Arc<dyn FrameFanout> = Arc::new(crate::test_doubles::RecordingFanout::new());
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore::default());
         let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
@@ -1324,36 +1297,28 @@ mod tests {
         ));
         let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        // ADR-0096: dispatch 가 SetEnvelopeFormat 를 쓸 봉투 포맷 전역 상태 거처. 테스트가 read 로 검증할
-        //   수 있게 별도 clone 을 든다(같은 Arc — dispatch 가 쓴 값을 그대로 관측).
         let control_registry = Arc::new(ControlRegistry::new());
         let core = ConnectionCore::new(
             manager,
             MultiViewState::new(),
             fanout,
             control_registry,
-            // 이 테스트 조립엔 메시징 커널이 없다(빈 슬롯) — `DeleteProfile` 의 삭제 정리 훅은 조용히
-            //   건너뛴다. 정리 semantics 자체는 커널 단위 테스트가 지킨다(ADR-0116 — `handle_profile_deleted`).
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             shutdown_tx,
         );
         (core, shutdown_rx)
     }
 
-    /// test_core 의 확장 — dispatch 가 쓴 봉투 포맷 상태를 read 로 검증하려는 테스트용. control_registry
-    /// 핸들을 함께 돌려준다(같은 Arc). ADR-0096 dispatch↔send-path 상태 공유 검증에 쓴다.
     fn test_core_with_control_registry() -> (ConnectionCore, Arc<ControlRegistry>) {
         let (core, _rx) = test_core();
         let control_registry = core.control_registry.clone();
         (core, control_registry)
     }
 
-    // ── R1: Subscribe 시 [Ack, (replay)Binary..., ReplayComplete] 순서가 conn_tx 기록에 그대로 ──
-    //    실 manager 에 결정적 출력 agent 를 띄워 replay binary 가 실제로 끼게 한다.
+    // ── R1: Subscribe ────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn subscribe_emits_ack_then_replay_then_complete_in_order() {
         let (core, _rx) = test_core();
-        // 결정적 출력을 내는 agent 를 띄운다(echo 한 줄). spawn 후 출력이 buffer 에 쌓이길 기다린다.
         let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
             "t".into(),
             engram_dashboard_core::agent::profile::AgentCommand::Shell {
@@ -1368,7 +1333,6 @@ mod tests {
             .manager
             .spawn_agent(&profile, SpawnMode::Fresh)
             .expect("spawn");
-        // 셸 프롬프트/배너가 buffer 에 쌓이도록 잠깐 대기(폴링).
         let agent_id = info.id;
         let mut waited = 0;
         loop {
@@ -1399,27 +1363,23 @@ mod tests {
         )
         .await;
 
-        // conn_rx 에 들어간 순서: 첫 Text=SubscribeAck, (있으면) Binary..., 마지막 Text=ReplayComplete.
         let mut items = Vec::new();
         while let Ok(item) = conn_rx.try_recv() {
             items.push(item);
         }
         assert!(items.len() >= 2, "최소 Ack+ReplayComplete: {}", items.len());
-        // 첫 항목은 SubscribeAck Text.
         match &items[0] {
             frame_port::Frame::Text(s) => {
                 assert!(s.contains("SubscribeAck"), "1번째는 SubscribeAck: {s}")
             }
             other => panic!("1번째는 Text(SubscribeAck) 여야 함: {other:?}"),
         }
-        // 마지막 항목은 ReplayComplete Text.
         match items.last().unwrap() {
             frame_port::Frame::Text(s) => {
                 assert!(s.contains("ReplayComplete"), "마지막은 ReplayComplete: {s}")
             }
             other => panic!("마지막은 Text(ReplayComplete) 여야 함: {other:?}"),
         }
-        // 중간 항목(있다면)은 전부 Binary(replay frame) 여야 한다 — control 이 끼면 FIFO 깨짐.
         for mid in &items[1..items.len() - 1] {
             assert!(
                 matches!(mid, frame_port::Frame::Binary(_)),
@@ -1427,7 +1387,6 @@ mod tests {
             );
         }
 
-        // events 기록상 control 순서도 Ack → ReplayComplete.
         let evs = mock.events();
         assert!(
             matches!(evs.first(), Some(AgentEvent::SubscribeAck { .. })),
@@ -1441,7 +1400,7 @@ mod tests {
         let _ = core.manager.kill_agent(agent_id);
     }
 
-    // ── Subscribe: 없는 agent → Error, Ack 안 나감 ─────────────────────────────────
+    // ── Subscribe: 없는 agent ─────────────────────────────────────────────────────
     #[tokio::test]
     async fn subscribe_unknown_agent_emits_error_no_ack() {
         let (core, _rx) = test_core();
@@ -1463,7 +1422,7 @@ mod tests {
         assert!(matches!(evs[0], AgentEvent::Error { .. }), "Error 여야 함");
     }
 
-    // ── Spawn: 없는 profile → Error(request_id 동봉) ──────────────────────────────
+    // ── Spawn: 없는 profile ──────────────────────────────────────────────────────
     #[tokio::test]
     async fn spawn_missing_profile_errors() {
         let (core, _rx) = test_core();
@@ -1490,14 +1449,12 @@ mod tests {
         }
     }
 
-    // ── ReparentProfile: 거부(false) → Error(request_id 동봉), Ack/broadcast 없음 (ADR-0072) ──
-    //    broadcast_profile_list 는 팬아웃 포트로 나가고 mock sink 은 그 포트 뒤에 없다 → 거부 경로에서
-    //    mock 이 받는 control 은 Error 딱 1건이어야 한다.
+    // ── ReparentProfile: 거부(false) (ADR-0072) ──────────────────────────────────
+    //    broadcast_profile_list 는 팬아웃 포트로 나가고 mock sink 은 그 포트 뒤에 없다.
     //    (성공 경로였다면 mock 에 Ack 가 enqueue 된다 — Ack 부재로 broadcast 분기 스킵을 방증.)
     #[tokio::test]
     async fn reparent_rejected_emits_error_no_ack_no_broadcast() {
         let (core, _rx) = test_core();
-        // 실존 child 하나 등록(존재하지 않는 부모로 reparent → reparent==false).
         let child = engram_dashboard_core::agent::profile::AgentProfile::new(
             "c".into(),
             engram_dashboard_core::agent::profile::AgentCommand::Shell {
@@ -1526,7 +1483,6 @@ mod tests {
         )
         .await;
 
-        // control 은 Error 1건뿐(Ack 없음 = broadcast 분기 스킵).
         match mock.events().as_slice() {
             [AgentEvent::Error {
                 request_id: Some(r),
@@ -1534,7 +1490,6 @@ mod tests {
             }] => assert_eq!(*r, req, "거부 Error 에 request_id 동봉"),
             other => panic!("거부 시 Error 1건만 기대(Ack/broadcast 없음): {other:?}"),
         }
-        // 부작용 없음: child 의 parent_id 는 여전히 None(거부 = no-op).
         assert_eq!(
             core.manager.agent_snapshot(cid).unwrap().parent_id,
             None,
@@ -1542,7 +1497,7 @@ mod tests {
         );
     }
 
-    // ── Kill: 없는 agent → Error(request_id 동봉) ─────────────────────────────────
+    // ── Kill: 없는 agent ─────────────────────────────────────────────────────────
     #[tokio::test]
     async fn kill_unknown_agent_errors() {
         let (core, _rx) = test_core();
@@ -1564,14 +1519,12 @@ mod tests {
         );
     }
 
-    // ── WriteStdin: lease 다른 conn 보유 시 거부 ──────────────────────────────────
+    // ── WriteStdin: lease 다른 conn 보유 ─────────────────────────────────────────
     #[tokio::test]
     async fn write_stdin_denied_when_lease_held_by_other() {
         let (core, _rx) = test_core();
         let agent_id = uuid::Uuid::new_v4();
-        // conn 2 가 lease 획득.
         let _ = core.multiview.acquire(agent_id, 2);
-        // conn 1 이 write 시도 → Denied → Error(manager 호출 없이).
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
@@ -1596,7 +1549,7 @@ mod tests {
         }
     }
 
-    // ── AcquireInput → InputLeaseChanged 브로드캐스트 + Ack ────────────────────────
+    // ── AcquireInput ─────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn acquire_input_acks_and_broadcasts() {
         let (core, _rx) = test_core();
@@ -1614,12 +1567,10 @@ mod tests {
             &mock,
         )
         .await;
-        // requester 엔 Ack(request_id 동봉).
         match mock.events().as_slice() {
             [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
             other => panic!("Ack 기대: {other:?}"),
         }
-        // 재획득(같은 conn)은 멱등 Ack.
         let (tx2, _r) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock2 = MockOutboundSink::new(tx2);
         core.dispatch(
@@ -1637,7 +1588,7 @@ mod tests {
         );
     }
 
-    // ── ListAgents → AgentList(request_id 동봉) ──────────────────────────────────
+    // ── ListAgents ───────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn list_agents_returns_agent_list() {
         let (core, _rx) = test_core();
@@ -1657,14 +1608,10 @@ mod tests {
         }
     }
 
-    // ── ADR-0096: SetEnvelopeFormat → Ack + 전역 상태 변이(send path 가 읽는 그 상태) ──────────
+    // ── ADR-0096: SetEnvelopeFormat ──────────────────────────────────────────────
     #[tokio::test]
     async fn set_envelope_format_acks_and_mutates_send_path_state() {
-        // dispatch 의 SetEnvelopeFormat 이 (a) Ack 를 돌려주고 (b) control_registry(= handle_send 가
-        //   relay 마다 읽는 봉투 포맷 전역 상태)를 실제로 바꾸는지 검증한다. 이게 dispatch↔send-path
-        //   상태 공유의 회귀 가드다(같은 Arc — dispatch 가 쓴 값을 read 로 관측).
         let (core, control_registry) = test_core_with_control_registry();
-        // ★ADR-0103 기본 flip★: 초기 봉투 포맷 = Xml(기본). colon 은 잔존 스위치.
         assert_eq!(
             control_registry.envelope_format(),
             CoreEnvelopeFormat::Xml,
@@ -1674,7 +1621,6 @@ mod tests {
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
-        // colon 으로 전환(잔존 스위치) — 관측 가능한 변경.
         core.dispatch(
             AgentCommand::SetEnvelopeFormat {
                 format: WireEnvelopeFormat::Colon,
@@ -1684,19 +1630,16 @@ mod tests {
             &mock,
         )
         .await;
-        // (a) Ack echo.
         match mock.events().as_slice() {
             [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
             other => panic!("SetEnvelopeFormat 는 Ack 를 돌려줘야: {other:?}"),
         }
-        // (b) send path 가 읽는 전역 상태가 Colon 으로 바뀌었다.
         assert_eq!(
             control_registry.envelope_format(),
             CoreEnvelopeFormat::Colon,
             "dispatch 후 봉투 포맷 전역 상태가 colon 으로 바뀌어야(send path 가 이 값을 읽음)"
         );
 
-        // 되돌리기(xml)도 반영된다.
         core.dispatch(
             AgentCommand::SetEnvelopeFormat {
                 format: WireEnvelopeFormat::Xml,
@@ -1713,7 +1656,7 @@ mod tests {
         );
     }
 
-    // ── CreateProfile → Created(request_id 동봉) + 목록 변경 ───────────────────────
+    // ── CreateProfile ────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn create_profile_returns_created() {
         let (core, _rx) = test_core();
@@ -1742,9 +1685,7 @@ mod tests {
         assert_eq!(core.manager.agent_snapshots().len(), 1, "프로필 1개 등록");
     }
 
-    // ── ADR-0044 M2: CreateProfile(output_format=StreamJson) → 저장 프로필이 json 모드 ──
-    // wire output_format 이 저장 프로필의 core AgentCommand 로 옮겨져, is_json_mode 가 true 인지 확인한다.
-    // 이게 참이면 이후 SpawnProfile → spawn_agent 가 StdioTransport(구조화 caps)를 고른다(M1 검증분).
+    // ── ADR-0044 M2: CreateProfile(output_format=StreamJson) ─────────────────────
     #[tokio::test]
     async fn create_profile_stream_json_stores_json_mode() {
         let (core, _rx) = test_core();
@@ -1773,7 +1714,7 @@ mod tests {
         );
     }
 
-    // ── StopDaemon(force=false, 활성 0) → Ack + DispatchFlow::Close + watch true ──
+    // ── StopDaemon(force=false, 활성 0) ──────────────────────────────────────────
     #[tokio::test]
     async fn stop_daemon_no_active_closes_and_signals() {
         let (core, mut rx) = test_core();
@@ -1796,7 +1737,6 @@ mod tests {
             matches!(mock.events().as_slice(), [AgentEvent::Ack { .. }]),
             "Ack 1건"
         );
-        // watch 가 true 로 신호됐는지.
         assert!(rx.has_changed().unwrap_or(false));
         assert!(*rx.borrow_and_update());
     }
@@ -1815,8 +1755,7 @@ mod tests {
         assert_eq!(kind_to_action(ReplayKind::Resumed), SubscribeAction::Resume);
     }
 
-    // ── core→wire AgentInfo 변환 roundtrip(serde 형태 일치) ────────────────────────
-    //    (ws.rs 에서 이동 — 변환 함수가 이 모듈로 옮겨짐. 단언 무변경.)
+    // ── core→wire AgentInfo 변환 roundtrip ───────────────────────────────────────
     #[test]
     fn core_agent_info_converts_to_wire() {
         use engram_dashboard_core::agent::types::{
@@ -1869,9 +1808,6 @@ mod tests {
     }
 
     // ── (M3) core::AgentStatus 모든 variant 가 wire 로 roundtrip 되는지 ────────────────
-    //    어느 한 variant 라도 serde 태깅/필드가 어긋나면 core_agents_to_wire 가 그 agent 를
-    //    silent drop 하므로 wire.len() < 1 이 되어 실패한다. status 값 자체도 wire 와 동일
-    //    JSON tag 인지 직접 비교해 "변환은 됐지만 다른 variant 로 둔갑" 도 잡는다.
     #[test]
     fn all_core_status_variants_roundtrip_to_wire() {
         use engram_dashboard_core::agent::types::{
@@ -1911,7 +1847,7 @@ mod tests {
             },
         };
 
-        // (core status, 기대 wire status) 쌍 — 6개 variant 전수.
+        // (core status, 기대 wire status) 쌍 — variant 전수(6 케이스).
         let cases: Vec<(CoreStatus, WireStatus)> = vec![
             (CoreStatus::Running, WireStatus::Running),
             (CoreStatus::Exiting, WireStatus::Exiting),
@@ -1945,26 +1881,22 @@ mod tests {
                 epoch: 0,
                 capabilities: caps.clone(),
             };
-            // (a) AgentInfo 전체 변환에서 drop 되지 않아야 한다(silent drop 회귀 방지).
             let wire = core_agents_to_wire(vec![core]);
             assert_eq!(
                 wire.len(),
                 1,
                 "variant {core_status:?} 가 core→wire 에서 drop 됨(태깅/필드 불일치)"
             );
-            // (b) status 가 같은 wire variant 로 정확히 매핑됐는지(둔갑 방지).
             assert_eq!(
                 wire[0].status, expected_wire,
                 "variant {core_status:?} 가 다른 wire status 로 변환됨"
             );
-            // (c) core_status_to_wire 단독 경로도 동일 결과.
             let direct = core_status_to_wire(core_status.clone());
             assert_eq!(direct, expected_wire, "직접 변환 경로도 일치해야 함");
         }
     }
 
     // ── (적용1) core::RestoreOutcome 전 variant → wire 명시 변환 ──────────────────────
-    //    특히 FreshFallback 의 Uuid→String 변환을 명시 검증(옛 reflection 의 우연 호환 제거).
     #[test]
     fn all_restore_outcomes_convert_to_wire() {
         use engram_dashboard_core::agent::profile::RestoreOutcome as Co;
@@ -1973,11 +1905,9 @@ mod tests {
         let old = uuid::Uuid::new_v4();
         let new = uuid::Uuid::new_v4();
 
-        // Resumed / Started — unit variant.
         assert_eq!(restore_outcome_to_wire(&Co::Resumed), Wo::Resumed);
         assert_eq!(restore_outcome_to_wire(&Co::Started), Wo::Started);
 
-        // FreshFallback(old=Some) — Uuid → String 변환 단언.
         match restore_outcome_to_wire(&Co::FreshFallback {
             old_sid: Some(old),
             new_sid: new,
@@ -1995,7 +1925,6 @@ mod tests {
             other => panic!("FreshFallback 기대, got {other:?}"),
         }
 
-        // FreshFallback(old=None) — None 보존.
         match restore_outcome_to_wire(&Co::FreshFallback {
             old_sid: None,
             new_sid: new,
@@ -2005,7 +1934,6 @@ mod tests {
             other => panic!("FreshFallback 기대, got {other:?}"),
         }
 
-        // Blocked / Failed — reason 보존.
         assert_eq!(
             restore_outcome_to_wire(&Co::Blocked { reason: "b".into() }),
             Wo::Blocked { reason: "b".into() }
@@ -2016,13 +1944,11 @@ mod tests {
         );
     }
 
-    // ── S15 B7: output_event_to_wire — core OutputEvent → wire StructuredEvent 필드 보존 ──────
-    //    각 variant 를 명시 매핑하고 turn_id/message_id/id 등 optional 필드가 그대로(None 포함) 옮겨지는지.
+    // ── S15 B7: output_event_to_wire ─────────────────────────────────────────────
     #[tokio::test]
     async fn output_event_to_wire_maps_all_variants_preserving_fields() {
         use engram_dashboard_protocol::StructuredEvent as W;
 
-        // TextDelta — optional 필드 Some/None 혼합 보존.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::TextDelta {
                 text: "hi".into(),
@@ -2036,7 +1962,6 @@ mod tests {
             })
         );
 
-        // ToolCall — id/turn_id/message_id 전부 보존.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::ToolCall {
                 name: "read".into(),
@@ -2054,7 +1979,6 @@ mod tests {
             })
         );
 
-        // Usage — 숫자 필드 보존.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::Usage {
                 input_tokens: 7,
@@ -2068,7 +1992,6 @@ mod tests {
             })
         );
 
-        // MessageDone.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::MessageDone {
                 turn_id: Some("t3".into()),
@@ -2080,7 +2003,6 @@ mod tests {
             })
         );
 
-        // Error(String) → { message } 구조 변환.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::Error("boom".into())),
             Some(W::Error {
@@ -2088,7 +2010,6 @@ mod tests {
             })
         );
 
-        // Structured 탈출구 — kind/json 보존.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::Structured {
                 kind: "k".into(),
@@ -2100,7 +2021,6 @@ mod tests {
             })
         );
 
-        // ★TerminalBytes 는 tag1 매핑 불가 → None(호출부 방어)★. 정상 경로상 tag0 로 갈려 여기 안 옴.
         assert_eq!(
             output_event_to_wire(&CoreOutputEvent::TerminalBytes(vec![1, 2, 3])),
             None,
@@ -2116,12 +2036,6 @@ mod tests {
     /// 있었다 — ① 정리 대상 이름을 프로필 **제거 전에** 뽑나 ② 발동 게이트를 **id** 로 거나. 커널 단위
     /// 테스트는 그 둘을 하네스가 대신 정해 주므로(이름·게이트를 테스트가 직접 스크립트한다) 배선이 뒤바뀐 걸
     /// 볼 수 없다. 여기서는 실제 프로필·실제 spawn·실물 `ManagerDeliveryPort` 로 dispatch 를 태운다.
-    ///
-    /// ★잡는 결함(fail-before)★: 게이트를 **이름**으로 걸면(= 삭제 후 로스터에서 그 이름을 찾으면) **프로필이
-    /// 사라진 순간 그 산 세션의 canonical 이름이 바뀌므로**(`display_name` override 소멸 →
-    /// `basename(session.cwd)`) 절대 매치되지 않고 정리가 **항상** 발동한다 → 산 에이전트의 파킹 메일이
-    /// `RECIPIENT_DELETED` 로 죽고 그가 요청자인 계약이 `reply_failed` 가 된다(spec §5 · ADR-0118 결정 2 금지).
-    /// `RenameProfile` 한 번이면 재현되는 평범한 경로다.
     #[tokio::test]
     async fn deleting_a_renamed_profile_whose_session_is_live_keeps_its_mail_and_contracts() {
         use engram_dashboard_messaging::envelope::Entrance;
@@ -2157,7 +2071,7 @@ mod tests {
             .create_agent(sleepy.clone())
             .expect("등록 성공");
 
-        // (2) ★개명(RenameProfile — 이 결함의 평범한 트리거)★: 이제 canonical 이름은 override 다.
+        // (2) ★개명(RenameProfile)★
         core.dispatch(
             AgentCommand::RenameProfile {
                 profile_id: boss.id,
@@ -2178,7 +2092,6 @@ mod tests {
         );
 
         // (3) boss 가 잠든 동안: ⓐ boss 앞으로 파킹 1건 ⓑ boss 가 **요청자**인 계약 1건.
-        //     (파킹은 이름 키 — 그 이름이 곧 정리 대상 축이다.)
         let sender = SenderIdentity {
             peer_id: uuid::Uuid::new_v4(),
             epoch: 0,
@@ -2227,7 +2140,7 @@ mod tests {
             "boss 가 요청자인 계약이 열렸다"
         );
 
-        // (4) boss 스폰 — 이제 **산 세션**이다(트리 항목만 지우는 삭제의 전제 상황).
+        // (4) boss 스폰 — 이제 **산 세션**이다.
         core.dispatch(
             AgentCommand::Spawn {
                 profile_id: boss.id,
@@ -2253,7 +2166,7 @@ mod tests {
         )
         .await;
 
-        // (6) 보호 단언 — 산 세션의 메일·계약은 **그대로**여야 한다.
+        // (6) 보호 단언.
         assert_eq!(
             messaging.parked_len("boss"),
             1,
@@ -2265,9 +2178,7 @@ mod tests {
             "★D1★ 산 세션이 요청자인 계약이 실패 종결됐다(ADR-0118 결정 2 위반)"
         );
 
-        // (7) ★반대 방향도 못 박는다 — 이름은 **제거 전에** 뽑아야 한다★: 잠든 sleepy 를 지우면 정리가
-        //     **발동해야** 한다. 이름을 제거 후에 뽑으면 프로필이 없어 파생 자체가 불가(None)라 정리가 조용히
-        //     건너뛰어지고, 그 파킹분은 24h TTL 로만 사라진다(그 경로는 D1 의 짝 결함이다).
+        // (7) ★반대 방향도 못 박는다 — 이름은 **제거 전에** 뽑아야 한다★.
         let rows2 = messaging
             .handle_send(
                 "m-sleep",
@@ -2321,7 +2232,6 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Frame>(16);
         let agent_id = uuid::Uuid::new_v4();
 
-        // handle_subscribe 가 보내는 control 순서를 직접 재현(SubscribeAck → [replay binary] → ReplayComplete).
         let ack = event_json(&AgentEvent::SubscribeAck {
             agent_id,
             action: SubscribeAction::Reset,
@@ -2333,14 +2243,12 @@ mod tests {
         })
         .unwrap();
         tx.send(Frame::Text(ack)).await.unwrap();
-        // 가상의 replay binary 1건.
         tx.send(Frame::Binary(encode_terminal_frame(agent_id, 0, 0, b"r")))
             .await
             .unwrap();
         let complete = event_json(&AgentEvent::ReplayComplete { agent_id, epoch: 0 }).unwrap();
         tx.send(Frame::Text(complete)).await.unwrap();
 
-        // 순서 검증: Text(SubscribeAck) → Binary(replay) → Text(ReplayComplete).
         let first = rx.recv().await.unwrap();
         let second = rx.recv().await.unwrap();
         let third = rx.recv().await.unwrap();
