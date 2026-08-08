@@ -52,7 +52,6 @@ use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver
 const MAX_SPAWNS_PER_INVOCATION: u32 = 6;
 const MAX_TURNS_PER_RUN: u32 = 120;
 const MAX_WALLCLOCK_PER_RUN: Duration = Duration::from_secs(45 * 60);
-/// 턴당 대기 상한 — 초과 시 stall 레코드 + graceful abort.
 const TURN_WAIT_CAP: Duration = Duration::from_secs(240);
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
 /// claude 는 **첫 턴을 처리한 뒤에야** 트랜스크립트를 쓰기 시작한다(스모크 실측) — 스폰 직후엔 대개
@@ -151,7 +150,6 @@ async fn run_all(cfg: PilotConfig) -> i32 {
     worst
 }
 
-/// 한 런 실행. 실패해도 summary 는 항상 쓴다(finalize). 반환 = exit 코드(0=정상).
 async fn run_one(
     cfg: &PilotConfig,
     run_idx: u32,
@@ -162,15 +160,14 @@ async fn run_one(
     let run_started = Instant::now();
     let run_id = AgentId::new_v4().to_string();
 
-    // ★finding 8 fix(순서)★: 워크스페이스를 **결과 파일보다 먼저** 만든다 — 워크스페이스 생성이 실패하면
-    //   빈 결과 파일이 남지 않게(이전엔 writer 를 먼저 열어 workspace 실패 시 빈 run-N.jsonl 이 잔존).
+    // ★finding 8★: 워크스페이스를 **결과 파일보다 먼저** 만든다 — 순서를 뒤집으면 workspace 생성 실패 시
+    //   빈 run-N.jsonl 이 잔존한다.
     let workspace = std::env::temp_dir().join(format!("engram-pilot-ws-{run_id}"));
     if let Err(e) = std::fs::create_dir_all(&workspace) {
         eprintln!("워크스페이스 생성 실패: {e}");
         return 1;
     }
 
-    // JSONL writer(truncate — finding 10). 실패면 이 런은 무의미 — workspace 정리 후 다음 런.
     let mut writer = match JsonlWriter::create(out_file) {
         Ok(w) => w,
         Err(e) => {
@@ -182,7 +179,6 @@ async fn run_one(
 
     let config_json = config_to_json(cfg);
 
-    // 배선(control_send.rs wire() 미러).
     let Wiring {
         manager,
         registry,
@@ -204,21 +200,19 @@ async fn run_one(
         }
     };
 
-    // 배달 관측 싱크 설치(주입 레코드용).
     let delivery_seen: Arc<Mutex<Vec<DeliveryObservation>>> = Arc::new(Mutex::new(Vec::new()));
     registry.set_delivery_observer(Arc::new(DeliveryCapture {
         seen: delivery_seen.clone(),
     }));
 
-    // 실 claude(stream-json, Fresh, --model) 스폰. (헤더는 스폰 뒤에 쓴다 — 세션 id 로 트랜스크립트를
-    //   먼저 찾아 resolved_model/transcript_available 을 헤더에 담기 위해.)
+    // 헤더는 스폰 뒤에 쓴다 — 세션 id 로 트랜스크립트를 먼저 찾아야 resolved_model/transcript_available 을
+    //   담을 수 있다.
     let agent = match spawn_pilot_agent(&manager, &workspace, &cfg.model) {
         Some(a) => a,
         None => {
             eprintln!(
                 "FATAL [saturation-pilot]: claude(stream-json) 스폰 실패 — 실험 불성립(부재/인증)."
             );
-            // 스폰 실패면 세션도 트랜스크립트도 없음 — 헤더를 부재 상태로 쓰고 summary.
             writer.write(&Record::Header(HeaderRecord {
                 claude_version,
                 daemon_git_commit: git_commit,
@@ -237,7 +231,6 @@ async fn run_one(
                 total_turns: 0,
                 duration_ms: run_started.elapsed().as_millis() as u64,
                 abort_reason: Some("claude spawn failed".to_string()),
-                // 스폰 실패 = 세션·트랜스크립트 없음(finding 1 필드는 부재).
                 resolved_model: None,
                 transcript_available: false,
                 transcript_path: None,
@@ -259,10 +252,6 @@ async fn run_one(
         }
     };
 
-    // ★트랜스크립트 탭 위치 확보(ADR-0090 Fix 1 / ADR-0008 경계)★: 우리가 통제하는 세션 id 를 프로필
-    //   레지스트리에서 되읽어(spawn_agent 이 Fresh 에서 new_session_id 로 발급·persist), 그 sid.jsonl 을
-    //   ~/.claude/projects 아래에서 재귀 검색한다. 스폰 직후엔 파일이 아직 안 생겼을 수 있어 짧게 폴링.
-    //   못 찾아도(부재) best-effort — transcript_available=false 로 기록하고 문자 추정으로 폴백한다.
     let session_id = manager
         .agent_claude_session_id(agent.id)
         .map(|s| s.to_string());
@@ -279,7 +268,6 @@ async fn run_one(
         );
     }
 
-    // 출력 관측 sink 부착(턴 종료·usage·응답텍스트·compact 스캔).
     let obs = Arc::new(TurnObserver::new());
     let sink_id = match manager.subscribe(agent.id, obs.clone()) {
         Ok(id) => Some(id),
@@ -289,14 +277,11 @@ async fn run_one(
         }
     };
 
-    // ── 런 상태 ── (트랜스크립트 탭 경로 + 세션 id 를 넘긴다. path 가 아직 없어도 턴 진행 중 lazy
-    //   재검색으로 붙는다 — claude 는 첫 턴 처리 후에야 트랜스크립트를 쓰기 시작할 수 있어서.)
+    // ── 런 상태 ──
     let mut state = RunState::new(transcript_path.clone(), session_id.clone());
 
-    // ★finding 10 fix — 헤더-first 계약★: HeaderRecord 를 **파일의 첫 줄**로 쓴다(이전엔 첫 task 턴 뒤에
-    //   써서 turn 이 헤더보다 앞섰다). 스폰 직후엔 트랜스크립트가 아직 없어 resolved_model 이 대개 None
-    //   이지만(note 로 명시), 헤더-first 계약(파일 첫 줄 = header)이 우선이다. 정확 모델 id 는 런 끝
-    //   authoritative 파싱(final_transcript.resolved_model)이 별도로 남긴다.
+    // ★finding 10 — 헤더-first 계약★: HeaderRecord 는 **파일의 첫 줄**이다. 이 write 를 첫 task 턴 뒤로
+    //   미루면 turn 이 헤더보다 앞선다.
     {
         let resolved_model = state
             .transcript_path
@@ -330,11 +315,9 @@ async fn run_one(
         }));
     }
 
-    // ★finding 8 fix — 패닉을 포함한 모든 경로에서 cleanup 보장(RAII/catch_unwind)★: 동기 런 본체
-    //   (턴 루프 + 파이널라이즈)를 catch_unwind 로 감싼다. 본체가 패닉해도 아래 cleanup(kill agent +
-    //   워크스페이스/temp 제거 + MCP 종료)은 반드시 실행된다 — 이전엔 mid-run 패닉이 유일한 cleanup
-    //   호출을 건너뛰어 claude 가 살아남고 temp dir 이 남았다. state/writer 는 본체가 소유(move)하되,
-    //   패닉해도 outcome 만 잃고 정리 리소스(manager/mcp_handle/paths)는 이 스코프에 남아 회수된다.
+    // ★finding 8 — 패닉 경로에서도 cleanup 보장★: 감싸지 않으면 mid-run 패닉이 아래 cleanup 호출을
+    //   건너뛰어 claude 가 살아남고 temp dir 이 남는다. 정리 리소스(manager/mcp_handle/paths)는 이 스코프에
+    //   남겨야 패닉해도 회수된다 — 본체가 move 하는 건 state/writer 뿐이다.
     let run_ctx = RunDriveCtx {
         manager: &manager,
         registry: &registry,
@@ -353,9 +336,6 @@ async fn run_one(
         Ok(outcome) => outcome,
         Err(_) => {
             eprintln!("[pilot] run {run_idx} PANICKED — cleanup 강제 실행(finding 8)");
-            // 패닉해도 summary 를 남긴다(항상 기록 불변식) — writer 는 catch_unwind 밖에서 여전히 유효.
-            //   ★finding 1★: 패닉 경로도 best-effort 로 트랜스크립트를 한 번 파싱해 resolved_model 을 실어
-            //   재현성 핀을 최대한 보존한다(탭 부재/파싱 실패면 None).
             let panic_ts = state
                 .transcript_path
                 .as_deref()
@@ -380,8 +360,6 @@ async fn run_one(
         }
     };
 
-    // cleanup: 구독 해제 → 에이전트 kill → MCP 종료 → data_dir/워크스페이스/profile·preset temp 제거.
-    //   ★finding 8/9★: catch_unwind 밖이라 패닉 시에도 반드시 실행되고, profile/preset temp 도 지운다.
     if let Some(sid) = sink_id {
         let _ = manager.unsubscribe(agent.id, sid);
     }
@@ -409,14 +387,12 @@ async fn run_one(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// drive_run — 동기 런 본체(턴 루프 + 파이널라이즈). catch_unwind 로 감싸 패닉해도 cleanup 이 돌게 한다.
+// drive_run — 동기 런 본체(턴 루프 + 파이널라이즈)
 // ═══════════════════════════════════════════════════════════════════════════════════
 
-/// drive_run 이 빌려 쓰는 런 컨텍스트(불변 리소스 참조 묶음). state/writer 는 별도 &mut 로 받는다.
 struct RunDriveCtx<'a> {
     manager: &'a Arc<AgentManager>,
     registry: &'a Arc<ControlRegistry>,
-    /// C1: 발송 3분기 담당(do_injection → handle_send). Wiring.messaging 참조.
     messaging: &'a Arc<engram_dashboard_messaging::service::MessagingService>,
     agent: &'a AgentInfo,
     obs: &'a Arc<TurnObserver>,
@@ -426,25 +402,18 @@ struct RunDriveCtx<'a> {
     cfg: &'a PilotConfig,
 }
 
-/// 하드 캡 게이트 결과 — 계속 진행 가능(Ok) 또는 캡에 걸려 중단(사유).
-/// ★finding 5/6★: 모든 턴(주입·프로브·compact·FINAL 포함) **직전**에 이 게이트를 통과해야 한다.
+/// ★finding 5/6★: 모든 턴(fill·주입·프로브·FINAL 전부) **직전**에 이 게이트를 통과해야 한다 — 루프
+///   바깥의 후처리 phase 도 예외가 아니다.
 fn cap_gate(ctx: &RunDriveCtx, state: &RunState) -> Result<(), String> {
-    // wallclock 캡 — 어떤 phase(루프 안/후) 진입 전에도 검사(finding 6).
     if ctx.run_started.elapsed() >= MAX_WALLCLOCK_PER_RUN {
         return Err("MAX_WALLCLOCK_PER_RUN reached".to_string());
     }
-    // turn 캡 — 주입/compact/FINAL 도 turn_idx 를 올리므로 모든 턴 직전 검사(finding 5).
     if state.turn_idx >= MAX_TURNS_PER_RUN {
         return Err("MAX_TURNS_PER_RUN reached".to_string());
     }
     Ok(())
 }
 
-/// 동기 런 본체. 반환 = (abort_reason, total_turns, max_context_tokens).
-///
-/// ★불변식(finding 1/2/5/6)★: **모든 stdin-생성 write 는 그 직전에 cap_gate 를 통과하고, 직후 자기 턴의
-///   wait_turn_end 로 펜싱된다** — 두 write 사이에 반드시 wait_turn_end 가 끼어야 응답 오귀속이 안 난다.
-///   주입도 첫급 턴(begin_turn → inject → wait_turn_end → TurnRecord(kind=inject) → turn_idx++)이다.
 fn drive_run(
     ctx: &RunDriveCtx,
     state: &mut RunState,
@@ -463,8 +432,6 @@ fn drive_run(
     } = *ctx;
     let mut abort_reason: Option<String> = None;
 
-    // Turn 1 = 원과제 지시. (drive_turn 이 lazy 재검색으로 트랜스크립트를 붙이고 실 usage 를 채운다.)
-    //   ★finding 5/6★: 첫 턴도 cap_gate 통과 후에만.
     if let Err(r) = cap_gate(ctx, state) {
         abort_reason = Some(r);
     } else {
@@ -488,7 +455,6 @@ fn drive_run(
         }
     }
 
-    // 주입 스케줄: inject_at 분율 → 목표 토큰 대비 문턱.
     let inject_thresholds: Vec<(u32, f64, u64)> = cfg
         .inject_at
         .iter()
@@ -501,25 +467,20 @@ fn drive_run(
             )
         })
         .collect();
-    let mut next_inject = 0usize; // 다음에 발화할 주입 인덱스.
+    let mut next_inject = 0usize;
     let mut pending_probes: Vec<PendingProbe> = Vec::new();
 
     // ── Fill + Inject + Probe 루프 ──
     if abort_reason.is_none() {
         loop {
-            // 하드 캡 체크(finding 5/6 — 모든 턴 직전 단일 게이트).
             if let Err(r) = cap_gate(ctx, state) {
                 abort_reason = Some(r);
                 break;
             }
 
-            // 주입 발화: 현재 컨텍스트가 다음 주입 문턱을 넘었으면 주입.
             if next_inject < inject_thresholds.len() {
                 let (k, frac, threshold) = inject_thresholds[next_inject];
                 if state.max_context_tokens >= threshold {
-                    // ★finding 1 fix★: 주입은 이제 첫급 턴이다 — do_injection 이 begin_turn → inject →
-                    //   wait_turn_end(baseline) → TurnRecord(kind=inject) → turn_idx++ 를 수행한다.
-                    //   그 안에서 실패/스톨하면 abort 시그널을 돌려준다.
                     match do_injection(
                         manager,
                         registry,
@@ -544,12 +505,10 @@ fn drive_run(
                                 codeword: inj.codeword,
                             });
                             next_inject += 1;
-                            // ★finding 5 fix — 불변식: probe gap 은 FILL 턴만 센다★. 이전엔 여기서(주입 턴
-                            //   직후) 모든 대기 프로브의 gap 을 깎아, 방금 넣은 주입 턴 자신과 **다른 주입들**
-                            //   까지 gap 을 소비했다(--probe-gap-turns 정의 = "주입 후 fill 턴 수" 와 어긋남).
-                            //   이제 주입 턴은 gap 을 소비하지 않는다 — gap 감소는 fill 턴 처리 지점 **한 곳**
-                            //   에서만 일어난다(아래 fill 턴 뒤). 방금 push 한 프로브의 gap 은 온전히 fill 턴
-                            //   개수로만 카운트다운된다.
+                            // ★finding 5 — 주입 턴은 probe gap 을 소비하지 않는다★: 여기서 대기 프로브의
+                            //   gap 을 깎으면 방금 넣은 주입 턴 자신과 **다른 주입들**까지 gap 을 먹어
+                            //   `--probe-gap-turns` 정의("주입 후 fill 턴 수")와 어긋난다. gap 감소는 아래
+                            //   fill 턴 처리 지점 **한 곳**에서만 일어난다.
                             continue;
                         }
                         InjectOutcome::Abort(r) => {
@@ -560,7 +519,6 @@ fn drive_run(
                 }
             }
 
-            // 지연 프로브 발화: gap 이 0 이 된 프로브를 실행.
             if let Some(pos) = pending_probes.iter().position(|p| p.remaining_gap == 0) {
                 let probe = pending_probes.remove(pos);
                 if let Err(r) = run_probe(manager, agent.id, obs, &probe, state, writer) {
@@ -570,7 +528,6 @@ fn drive_run(
                 continue;
             }
 
-            // 포화 도달 + 모든 주입/프로브 소진 → fill 루프 종료.
             let fill_target_reached = state.max_context_tokens >= cfg.fill_target_tokens;
             if fill_target_reached
                 && next_inject >= inject_thresholds.len()
@@ -579,7 +536,6 @@ fn drive_run(
                 break;
             }
 
-            // fill 턴 1개 — 다음 doc 을 보낸다.
             state.doc_counter += 1;
             let doc_n = state.doc_counter;
             let body = filler_doc(cfg.seed, doc_n, cfg.doc_chars);
@@ -601,10 +557,6 @@ fn drive_run(
                     break;
                 }
             }
-            // ★finding 5 불변식 — probe gap 감소는 오직 여기(fill 턴 처리 직후) 한 곳★: --probe-gap-turns 는
-            //   "주입 후 몇 개의 FILL 턴을 지나서 프로브를 낼지" 다. 주입 턴·다른 주입은 gap 을 소비하지
-            //   않는다(위 주입 갈래에서 감소 코드를 제거함). 그래서 gap=N 이면 정확히 N 개 fill 턴 뒤 프로브가
-            //   발화한다(프로브 발화 체크가 fill 처리보다 루프 앞에 있어, gap 0 도달 다음 iteration 에 발화).
             for p in pending_probes.iter_mut() {
                 if p.remaining_gap > 0 {
                     p.remaining_gap -= 1;
@@ -613,8 +565,7 @@ fn drive_run(
         }
     }
 
-    // 남은 대기 프로브 전부 소진(gap 여부 무관 — 런 끝에 회상 측정). ★finding 5/6★: 각 프로브 직전
-    //   cap_gate — 후처리 phase 도 캡 밖으로 새지 않게.
+    // 남은 프로브는 gap 여부 무관하게 소진한다 — 런 끝 회상도 측정 대상이라서.
     if abort_reason.is_none() {
         let leftover: Vec<PendingProbe> = std::mem::take(&mut pending_probes);
         for probe in leftover {
@@ -636,7 +587,6 @@ fn drive_run(
     //   캡처(transcript.compact_marker_lines)로만 잡는다 — 스모크가 organic 압축이 실제로 일어나고 캡처됨을
     //   증명했다(런 끝 authoritative 파싱 경로가 이미 그 마커를 CompactSignal 로 기록한다).
 
-    // FINAL REPORT 프로브(원과제 완료). ★finding 5/6★: cap_gate 통과 후에만.
     if abort_reason.is_none() {
         match cap_gate(ctx, state) {
             Ok(()) => {
@@ -664,15 +614,12 @@ fn drive_run(
         }
     }
 
-    // ★런 끝 authoritative 트랜스크립트 파싱(ADR-0090 Fix 1)★: 전체 트랜스크립트를 한 번에 접어 raw event
-    //   히스토그램·compact 마커·실 usage 계열을 확정한다(턴별 best-effort 탭보다 이게 최종 진실). 탭 부재면
-    //   None → 디코딩 variant 히스토그램으로 폴백.
+    // ★런 끝 authoritative 파싱(ADR-0090 Fix 1)★: 턴별 best-effort 탭보다 이게 최종 진실이다.
     let final_transcript: Option<TranscriptSummary> = state
         .transcript_path
         .as_deref()
         .and_then(transcript::parse_transcript);
 
-    // event 히스토그램 — 트랜스크립트가 있으면 raw 타입 히스토그램(authoritative), 없으면 디코딩 variant.
     match &final_transcript {
         Some(ts) => writer.write(&Record::Histogram(HistogramRecord {
             counts: ts.event_histogram.clone(),
@@ -685,11 +632,6 @@ fn drive_run(
         })),
     }
 
-    // ★finding 2 fix — 단일 일관 계열에서만 감지★: authoritative real_usage_series(트랜스크립트, 순수
-    //   실측)가 있으면 그 위에서, 없으면 estimate_samples(순수 추정) 위에서 감지한다. 두 계열 다 단일
-    //   소스라 소스 전환(추정→실측) 지점의 인공 급감이 원천적으로 없다 — 이전엔 turn마다 실측/추정을 섞은
-    //   계열을 써서 탭이 처음 붙는 턴에 가짜 compaction 이 섰다. 선택 로직(never mix)은 순수 함수
-    //   select_detection_series 로 내려 단위 테스트가 직접 커버한다.
     let real_footprints: Option<Vec<u64>> = final_transcript.as_ref().and_then(|ts| {
         if ts.real_usage_series.is_empty() {
             None
@@ -711,7 +653,6 @@ fn drive_run(
         }));
     }
 
-    // compact 마커 — 트랜스크립트에서 잡은 verbatim 라인(authoritative)을 우선 기록.
     if let Some(ts) = &final_transcript {
         for line in &ts.compact_marker_lines {
             writer.write(&Record::CompactSignal(CompactSignalRecord {
@@ -720,12 +661,10 @@ fn drive_run(
             }));
         }
     }
-    // 디코딩 경로에서 스캔한 compact 근사 신호(Structured/Error)도 함께 기록(보완).
     for sig in obs.drain_compact_signals() {
         writer.write(&Record::CompactSignal(sig));
     }
 
-    // summary(항상 기록). max_context_tokens = 실측 최대(트랜스크립트 있으면) 우선, 없으면 문자 추정 최대.
     let max_real = final_transcript.as_ref().and_then(|ts| {
         ts.real_usage_series
             .iter()
@@ -737,9 +676,9 @@ fn drive_run(
     if writer.io_errors > 0 && abort_reason.is_none() {
         abort_reason = Some(format!("{} JSONL write/flush errors", writer.io_errors));
     }
-    // ★finding 1 fix — summary 가 authoritative resolved_model 을 실어 재현성 핀 보존★: 헤더의
-    //   resolved_model 은 스폰 직후(트랜스크립트 미기록)라 대개 None 이었다. 런 끝 authoritative 파싱이
-    //   확정한 모델 id·탭 존재·경로를 summary 에 담아 헤더만 보면 유실되던 핀(ADR-0088 d5a)을 복구한다.
+    // ★finding 1★: 헤더의 resolved_model 은 스폰 직후(트랜스크립트 미기록)라 대개 None 이다 — 런 끝
+    //   authoritative 파싱이 확정한 모델 id·탭 존재·경로를 summary 에도 실어야 재현성 핀(ADR-0088 d5a)이
+    //   남는다. 헤더만 읽으면 핀이 유실된 것으로 보인다.
     let summary_resolved_model = final_transcript
         .as_ref()
         .and_then(|ts| ts.resolved_model.clone());
@@ -761,22 +700,22 @@ fn drive_run(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// 배선 (control_send.rs wire() 미러)
+// 배선
 // ═══════════════════════════════════════════════════════════════════════════════════
 
 struct Wiring {
     manager: Arc<AgentManager>,
     registry: Arc<ControlRegistry>,
-    /// C1: 발송 3분기 담당(handle_send 에 넘긴다). manager 를 감싼 서비스.
+    /// C1: 발송 3분기 담당(handle_send 에 넘긴다).
     messaging: Arc<engram_dashboard_messaging::service::MessagingService>,
     mcp_handle: McpServerHandle,
     data_dir: PathBuf,
-    /// ★finding 9★: per-run profile/preset 임시 dir(cleanup 이 이것도 제거해야 함 — 이전엔 누수).
+    /// ★finding 9★: per-run profile/preset 임시 dir — cleanup 이 이것도 지워야 temp 가 안 샌다.
     profile_dir: PathBuf,
     preset_dir: PathBuf,
 }
 
-/// 실 DaemonControlChannel + MCP 서버 + AgentManager 배선(control_send.rs wire() 순서 미러).
+/// control_send.rs 의 wire() 순서를 미러한다.
 async fn wire(tag: &str) -> Result<Wiring, String> {
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
@@ -798,7 +737,6 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     ));
 
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);
-    // ★finding 9★: profile/preset 임시 dir 경로를 Wiring 으로 넘겨 cleanup 이 제거하게 한다(누수 방지).
     let profile_dir = std::env::temp_dir().join(format!("engram-pilot-prof-{tag}"));
     let preset_dir = std::env::temp_dir().join(format!("engram-pilot-preset-{tag}"));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
@@ -819,7 +757,6 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
-    // C1: MessagingService 조립 후 슬롯 주입. 파일럿은 handle_send 직접 호출 경로만 쓴다(산 수신자).
     let messaging = Arc::new(
         engram_dashboard_daemon::messaging_host::messaging_for_manager(
             manager.clone(),
@@ -839,7 +776,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     })
 }
 
-/// 실 claude(stream-json, Fresh, --model)를 워크스페이스 cwd 로 스폰. control_send.rs spawn_json_agent 미러.
+/// control_send.rs 의 spawn_json_agent 미러.
 fn spawn_pilot_agent(
     manager: &Arc<AgentManager>,
     workspace: &std::path::Path,
@@ -867,9 +804,6 @@ fn spawn_pilot_agent(
     None
 }
 
-/// 세션 id 로 트랜스크립트 파일을 재귀 검색하되, 아직 안 생겼으면 timeout 까지 폴링한다. claude 는 첫
-/// stream-json 라인을 처리한 뒤에야 트랜스크립트를 쓰기 시작할 수 있어(스폰 직후엔 부재) 잠깐 기다린다.
-/// best-effort: timeout 내 못 찾으면 None(문자 추정 폴백).
 // ADR-0090 ADR-0008
 fn locate_transcript_with_wait(session_id: &str, timeout: Duration) -> Option<PathBuf> {
     let deadline = Instant::now() + timeout;
@@ -884,8 +818,6 @@ fn locate_transcript_with_wait(session_id: &str, timeout: Duration) -> Option<Pa
     }
 }
 
-/// 트랜스크립트를 재파싱해 모델 id 가 나올 때까지 timeout 까지 폴링한다(assistant.message.model flush race
-/// 흡수). 파일은 이미 존재하는 상태에서 부른다. best-effort: 못 얻으면 None. ★탭이 하네스를 막지 않는다★.
 // ADR-0090
 fn poll_resolved_model(path: &std::path::Path, timeout: Duration) -> Option<String> {
     let deadline = Instant::now() + timeout;
@@ -901,7 +833,7 @@ fn poll_resolved_model(path: &std::path::Path, timeout: Duration) -> Option<Stri
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// 출력 관측 sink — 턴 종료·usage·응답 텍스트·compact 스캔
+// 출력 관측 sink
 // ═══════════════════════════════════════════════════════════════════════════════════
 
 struct NoopStatus;
@@ -910,7 +842,6 @@ impl StatusSink for NoopStatus {
     fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
 }
 
-/// 배달 관측 캡처(주입 레코드용).
 struct DeliveryCapture {
     seen: Arc<Mutex<Vec<DeliveryObservation>>>,
 }
@@ -920,11 +851,6 @@ impl DeliveryObserver for DeliveryCapture {
     }
 }
 
-/// 턴 관측기 — OutputSink 로 온 디코딩 이벤트를 소비한다.
-///   - MessageDone → done_count 증가(턴 종료 신호). Condvar 로 대기자를 깨운다.
-///   - Usage → 마지막 usage 갱신.
-///   - TextDelta → 현재 턴 응답 버퍼에 누적.
-///   - Structured/Error → event 히스토그램 + "compact" 문자열 스캔.
 struct TurnObserver {
     id: SinkId,
     inner: Mutex<ObserverInner>,
@@ -937,7 +863,6 @@ struct TurnObserver {
 
 #[derive(Default)]
 struct ObserverInner {
-    /// 현재 턴 응답 텍스트 누적(TextDelta).
     response_buf: String,
     /// 최근 usage(input/output).
     last_usage: Option<(u64, u64)>,
@@ -946,7 +871,7 @@ struct ObserverInner {
     /// compact 근사 신호(Structured/Error 텍스트에서 "compact" 발견).
     compact_signals: Vec<CompactSignalRecord>,
     /// ★finding 3★: 현재 턴에서 관측된 **비-compaction** API 에러 메시지(있으면). MessageDone 이 뒤따라도
-    ///   이 턴은 실패로 봐야 한다(abort_reason:null 로 실패 은폐 방지). begin_turn 에서 리셋.
+    ///   이 턴은 실패로 봐야 한다 — 안 그러면 abort_reason:null 로 실패가 은폐된다.
     turn_error: Option<String>,
 }
 
@@ -961,8 +886,6 @@ impl TurnObserver {
         }
     }
 
-    /// 새 턴 시작 — 응답 버퍼·usage·턴 에러를 리셋한다(이전 턴 누적 제거).
-    ///
     /// ★load-bearing(finding 1/2)★: **caller MUST wait_turn_end before the next stdin write** — begin_turn
     ///   으로 리셋한 뒤 stdin write 를 하고 그 턴의 wait_turn_end 로 펜싱해야 한다. 펜싱 없이 다음 stdin
     ///   write 를 하면 이전 턴의 늦은 MessageDone 이 다음 wait 를 조기 해제해 응답이 엉뚱한 턴에 귀속된다.
@@ -973,12 +896,10 @@ impl TurnObserver {
         g.turn_error = None;
     }
 
-    /// 현재 턴에서 관측된 비-compaction API 에러(있으면). MessageDone 후에도 이게 Some 이면 턴 실패.
     fn turn_error(&self) -> Option<String> {
         self.inner.lock().unwrap().turn_error.clone()
     }
 
-    /// 현재 done_count 스냅샷(턴 시작 직전에 잡아 두고, 이보다 커지면 턴 종료).
     fn done_snapshot(&self) -> u64 {
         self.done_count.load(Ordering::Acquire)
     }
@@ -1003,12 +924,10 @@ impl TurnObserver {
         }
     }
 
-    /// 현재 턴 응답 텍스트 스냅샷.
     fn response_text(&self) -> String {
         self.inner.lock().unwrap().response_buf.clone()
     }
 
-    /// 최근 usage 스냅샷.
     fn last_usage(&self) -> Option<(u64, u64)> {
         self.inner.lock().unwrap().last_usage
     }
