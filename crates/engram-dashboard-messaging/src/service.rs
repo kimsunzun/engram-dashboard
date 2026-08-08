@@ -5969,12 +5969,11 @@ mod tests {
 
     #[test]
     fn mixed_target_batch_busy_first_still_delivers_the_idle_target() {
-        // 반대 방향: **첫 항목의 타깃이 busy** 인 경우. 옛 코드는 배치 전량을 되돌려 idle 인 A 몫까지
-        //   근거 없이 지연시켰다(첫 항목만 보는 게이트의 다른 얼굴). 이제 A 는 그대로 배달된다.
+        // 옛 코드는 첫 항목의 타깃이 busy 면 배치 전량을 되돌려 idle 인 A 몫까지 지연시켰다.
         let (svc, port, gate) = svc_gated();
         let (id_a, id_b) = parked_mixed_batch(&svc, &port, &gate, &[(1, "m0"), (0, "m1")]);
         gate.clear();
-        gate.set_busy(id_b, 0); // B(첫 항목 타깃)만 여전히 턴 중.
+        gate.set_busy(id_b, 0); // B = 첫 항목의 타깃.
         svc.flush_for("dup", id_b);
         assert_eq!(
             port.injected_bodies(),
@@ -5989,11 +5988,10 @@ mod tests {
 
     #[test]
     fn mixed_target_batch_inject_failure_does_not_block_the_other_target() {
-        // 한 타깃의 inject 실패는 그 타깃의 남은 몫만 되돌린다 — 다른 에이전트의 배달을 막을 근거가 없다.
         let (svc, port, gate) = svc_gated();
         let (id_a, _id_b) = parked_mixed_batch(&svc, &port, &gate, &[(0, "m0"), (1, "m1")]);
         gate.clear();
-        port.fail_at(&[0]); // 첫 주입(A 몫) 실패.
+        port.fail_at(&[0]); // 첫 주입 = A 몫.
         svc.flush_for("dup", id_a);
         assert_eq!(
             port.injected_bodies(),
@@ -6007,10 +6005,6 @@ mod tests {
 
     #[test]
     fn multi_group_inject_failure_keeps_queue_globally_oldest_first() {
-        // ★round-4 finding 1 회귀(핵심 버그)★: 한 이름 큐에 두 타깃 몫이 섞인 배치에서 **두 그룹 다** inject
-        //   실패하면 복원이 두 번 일어난다. 옛 FRONT 삽입은 두 번째(B 몫)가 첫 번째(A 몫) **앞**에 꽂혀
-        //   큐가 [m1,m3,m0,m2] 로 뒤집혔다 — 수신자가 보는 순서가 역전되고, 나이 역전은 sweep 의 만료 은폐로도
-        //   번진다. admission 순번 merge 는 복원 횟수와 무관하게 [m0,m1,m2,m3] 를 유지한다.
         let (svc, port, gate) = svc_gated();
         let (id_a, _id_b) = parked_mixed_batch(
             &svc,
@@ -6023,7 +6017,7 @@ mod tests {
             vec!["m0", "m1", "m2", "m3"],
             "park 직후 큐 = 수용 순서"
         );
-        gate.clear(); // 둘 다 idle → 두 그룹 모두 배치 시작.
+        gate.clear();
         port.fail_at(&[0, 1]); // 각 그룹의 첫 주입이 실패 → 그룹마다 남은 몫 전량 복원.
         svc.flush_for("dup", id_a);
 
@@ -6044,14 +6038,11 @@ mod tests {
 
     #[test]
     fn busy_skip_and_inject_failure_restores_stay_oldest_first() {
-        // ★두 복원 경로가 섞이는 케이스(round-4 finding 1)★: busy 스킵분은 **락 안**에서, inject 실패분은
-        //   **락 밖**에서 되돌아온다 — 서로 다른 호출이라 옛 FRONT 삽입에선 나중 것(실패분)이 앞에 꽂혔다.
-        //   여기선 A(m0, busy 유지) 스킵 + B(m1, 주입 실패) 복원이 [m0,m1] 순서를 지켜야 한다.
         let (svc, port, gate) = svc_gated();
         let (id_a, id_b) = parked_mixed_batch(&svc, &port, &gate, &[(0, "m0"), (1, "m1")]);
         gate.clear();
-        gate.set_busy(id_a, 0); // A 는 여전히 턴 중 → 락 안에서 m0 복원.
-        port.fail_at(&[0]); // B 몫(m1) 주입 실패 → 락 밖에서 m1 복원.
+        gate.set_busy(id_a, 0);
+        port.fail_at(&[0]); // B 몫(m1) 주입 실패.
         svc.flush_for("dup", id_b);
 
         assert!(port.injected_bodies().is_empty(), "배달 0건");
@@ -6063,7 +6054,6 @@ mod tests {
     }
 
     // ── round-3 finding 4: busy 상한 sweep 이 깨울 수 없는 busy 를 풀고 대기 메일을 배달 ────────────
-    /// 도어벨 통지를 기록하는 IdleNotifier(운영은 flush 채널) — sweep 이 **깨우는지**를 단언한다.
     struct RecordingIdle {
         seen: StdMutex<Vec<PeerId>>,
     }
@@ -6075,9 +6065,6 @@ mod tests {
 
     #[test]
     fn stale_busy_sweep_unblocks_parked_mail() {
-        // ★round-3 finding 4 회귀(전 구간)★: 턴 종료 신호가 영영 오지 않는 턴은 busy 판정을 영구화해 그
-        //   수신자 앞 배달을 TTL 까지 막는다. 상한이 ① 판정을 idle 로 돌리고 ② sweep 이 도어벨을 눌러야
-        //   대기 메일이 나간다.
         use super::super::busy::{BusyPolicy, ScriptedTurnFacts, BUSY_MAX_TURN};
         let port = Arc::new(FakeDeliveryPort::new());
         let notifier = Arc::new(RecordingIdle {
@@ -6093,7 +6080,7 @@ mod tests {
         let (id, agent) = live("recv");
         port.set_roster(vec![agent]);
 
-        // 비정상 턴: 턴 중으로 관측됐고 종료 신호가 오지 않는다(시각은 주입 — 실시간 30분 대기 회피).
+        // 시각은 주입 — 실시간 30분 대기 회피.
         let t0 = Instant::now();
         facts.set_in_turn(id, 0, t0);
         svc.park_absent_for_test(
@@ -6112,7 +6099,6 @@ mod tests {
             "턴 중이므로 주입 없음(정상)"
         );
 
-        // 상한 경과 → 판정이 idle 로 돌아가고 sweep 이 도어벨을 누른다.
         assert_eq!(
             gate.sweep_stale_busy(t0 + BUSY_MAX_TURN + Duration::from_secs(1)),
             1,
@@ -6135,14 +6121,11 @@ mod tests {
 
     #[test]
     fn flush_for_agent_resolves_name_and_is_noop_without_parked() {
-        // id 입구(턴 종료 통지는 이름을 모른다) → canonical name 해석 후 기존 flush 경로 재사용.
-        //   파킹이 없으면 no-op(잉여 idle 통지의 비용을 여기서 깎는다 — 조기 반환).
         let (svc, port, _gate) = svc_gated();
         let (recv_id, recv) = live("recv");
         port.set_roster(vec![recv]);
         svc.flush_for_agent(recv_id);
         assert!(port.injected_bodies().is_empty(), "파킹 없으면 no-op");
-        // 파킹이 있으면 id → 이름으로 풀려 배달된다.
         port.set_roster(vec![]);
         svc.park_absent_for_test(
             "m1",
@@ -6166,7 +6149,6 @@ mod tests {
 
     #[test]
     fn flush_for_agent_unknown_id_is_noop() {
-        // 이미 reap 된 id → canonical_name None → no-op(다음 등장 diff 가 잡는다).
         let (svc, port, _gate) = svc_gated();
         port.set_roster(vec![]);
         svc.park_absent_for_test(
@@ -6189,7 +6171,6 @@ mod tests {
     }
     // ── C3: 회신 계약(request/reply/notice — spec §2·§3 · ADR-0103 결정 2/3) ─────────────────
 
-    /// request 발송 메타(기한 표기 + 파싱값 쌍 — SendMeta 주석의 "둘 다 나르는 이유").
     fn req_meta(raw: &str, secs: u64) -> SendMeta {
         SendMeta {
             request: true,
@@ -6200,7 +6181,6 @@ mod tests {
         }
     }
 
-    /// 회신 발송 메타.
     fn reply_meta(in_reply_to: &str) -> SendMeta {
         SendMeta {
             request: false,
@@ -6213,9 +6193,6 @@ mod tests {
 
     #[test]
     fn notice_uses_the_senders_own_notation_not_a_normalized_one() {
-        // ★리뷰 fix 6 회귀★: 예전엔 Duration 에서 표기를 역산해 `60m` 이 `1h` 로 통지됐다 — 봉투는
-        //   `reply-by="60m"` 인데 통지는 `기한(1h)` 이라 같은 계약이 두 표기로 보였다. 이제 발신자 표기를
-        //   장부가 원본째 들고 있다가 그대로 쓴다.
         let (svc, port) = svc();
         let (_a, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6241,7 +6218,7 @@ mod tests {
 
     #[test]
     fn delivered_request_opens_contract_and_renders_request_envelope() {
-        // ★골든(즉시 배달)★: request 봉투 = from → id → type → reply-by 순서(spec §1 고정).
+        // ★골든★: request 봉투 속성 순서는 spec §1 고정.
         let (svc, port) = svc();
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6279,8 +6256,8 @@ mod tests {
 
     #[test]
     fn parked_request_opens_contract_too_and_keeps_envelope_on_flush() {
-        // ★spec §3 단계 2★: 계약은 **배달이든 파킹이든** 접수되면 열린다. 그리고 늦게 배달돼도 봉투 속성이
-        //   같아야 한다(안 그러면 수신자가 회신할 id 를 모른 채 발신자만 타임아웃 통지를 받는다).
+        // ★spec §3 단계 2★: 늦게 배달돼도 봉투 속성이 같아야 한다 — 아니면 수신자가 회신할 id 를 모른 채
+        //   발신자만 타임아웃 통지를 받는다.
         let (svc, port) = svc();
         port.set_roster(vec![]);
         let out = svc
@@ -6302,7 +6279,6 @@ mod tests {
         );
         assert_eq!(svc.ledger_statuses("m-req2"), vec![DeliveryStatus::Pending]);
 
-        // 등장 → flush. 봉투는 즉시 배달과 **동일**해야 한다.
         let (bob_id, bob) = live("bob");
         port.set_roster(vec![bob]);
         svc.flush_for("bob", bob_id);
@@ -6343,7 +6319,6 @@ mod tests {
             vec![r#"<message from="qa-bravo" in-reply-to="m-7f3k">다 짰음</message>"#.to_string()],
         );
 
-        // 파킹 경로도 동일 속성.
         let (svc2, port2) = super::tests::svc();
         port2.set_roster(vec![]);
         svc2.park_absent_for_test(
@@ -6370,7 +6345,6 @@ mod tests {
 
     #[test]
     fn plain_send_envelope_is_unchanged_by_c3() {
-        // 회귀 방어: 통보는 여전히 속성 없는 plain 봉투(SendMeta::default()).
         let (svc, port) = svc();
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6393,7 +6367,6 @@ mod tests {
 
     #[test]
     fn correct_reply_id_closes_contract_and_marks_replied() {
-        // 엄격 매칭 성공 — 계약 닫힘 + 이력 Delivered→Replied 전이(전이 시각 = 회신 시각).
         let (svc, port) = svc();
         let (_a, alice) = live("alice");
         let (b_id, bob) = live("bob");
@@ -6434,8 +6407,8 @@ mod tests {
 
     #[test]
     fn wrong_reply_id_still_delivers_but_closes_nothing() {
-        // ★엄격 매칭(spec §2)★: 틀린 id 는 아무 것도 닫지 않는다 — 그래도 **회신 메시지 자체는 정상 배달**
-        //   되고 응답 shape 도 그대로다(반려로 승격하면 이미 배달된 메시지에 재시도가 붙어 중복이 난다).
+        // ★spec §2 엄격 매칭★: 틀린 id 를 반려로 승격하면 이미 배달된 메시지에 재시도가 붙어 중복이 난다 —
+        //   그래서 닫지 않되 배달·응답 shape 은 그대로 둔다.
         let (svc, port) = svc();
         let (_a, alice) = live("alice");
         let (_b, bob) = live("bob");
@@ -6518,8 +6491,6 @@ mod tests {
 
     #[test]
     fn parked_request_reply_closes_contract_even_before_delivery() {
-        // 원본이 아직 pending(미주입)인데 회신이 도착 — 계약은 닫히고(정본은 추적) 이력은 anomaly 로 남는다
-        //   (ledger.rs ClosedHistoryAnomaly: 계약 닫힘과 이력 부기는 별개 관심사).
         let (svc, port) = svc();
         let (_a, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6554,7 +6525,7 @@ mod tests {
 
     #[test]
     fn reply_by_timeout_delivers_notice_to_sender_exactly_once() {
-        // ★spec §3 단계 4 · §1 notice 템플릿★: 기한 초과 → **발신자에게** notice. 두 번 sweep 해도 1회.
+        // ★spec §3 단계 4 · §1 notice 템플릿★: 기한 초과 → **발신자에게** notice.
         let (svc, port) = svc();
         let (_a, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6580,7 +6551,6 @@ mod tests {
             "notice 골든(from 속성 없음 = 회신 대상 아님)"
         );
 
-        // 이중 통지 방지(장부 notified 플래그).
         svc.sweep(Instant::now() + Duration::from_secs(1200));
         assert_eq!(port.injected_bodies().len(), 1, "notice 는 정확히 1회");
     }
@@ -6651,11 +6621,8 @@ mod tests {
 
     #[test]
     fn timeout_notice_parks_in_its_own_lane_when_sender_is_absent_and_is_ledgered() {
-        // ★레인 분리(round-6 — 옛 "cap 예외" 를 대체)★: 발신자 보관함이 message 로 가득 차 있어도 notice 는
-        //   자기 레인에서 수용된다(회신 계약 통지가 막히면 계약이 반쪽 — ADR-0103 불변식). 그리고 조용히
-        //   사라지지 않는다 — 장부에 pending 으로 남는다.
         let (svc, port) = svc();
-        port.set_roster(vec![]); // alice 도 부재.
+        port.set_roster(vec![]);
         for i in 0..100 {
             svc.park_absent_for_test(
                 &format!("m{i}"),
@@ -6713,17 +6680,12 @@ mod tests {
         assert_eq!(noticed[0].3, DeliveryStatus::Pending, "파킹이므로 pending");
     }
 
-    /// ★notice 레인도 무계가 아니다(round-6)★ — 옛 구현은 notice 를 두 상한 모두에서 면제하고 그 유계를
-    ///   `ledger::MAX_OPEN_REQUESTS` 가 준다고 적었는데 **거짓이었다**: `due_timeouts` 는 `notified` 를 즉시
-    ///   세워 계약 자리를 비우므로, 앞선 통지가 큐에 파킹된 채로 다음 물결이 계약을 새로 열 수 있다. 이제
-    ///   통지는 자기 레인 상한(20)에서 멈추고, 밀려난 **가장 오래된** 통지는 장부에 `skipped` 로 남는다.
     #[test]
     fn the_notice_lane_is_bounded_and_retires_its_oldest_to_the_ledger() {
         /// mailbox 비공개 `NOTICE_CAP` 미러(값 동기).
-        // ADR-0114 결정 2: 20 → 64 상향(다중 request 의 계약별 통지가 계약 수만큼 쌓인다).
         const NOTICE_CAP_FOR_TEST: usize = 64;
         let (svc, port) = svc();
-        port.set_roster(vec![]); // alice(발신자)·bob(수신자) 모두 부재 → 파킹 + 계약 오픈.
+        port.set_roster(vec![]); // alice(발신자)·bob(수신자) 모두 부재.
         for i in 0..(NOTICE_CAP_FOR_TEST + 1) {
             svc.park_absent_for_test(
                 &format!("req{i}"),
@@ -6736,7 +6698,6 @@ mod tests {
             )
             .expect("parked");
         }
-        // 한 번의 sweep 이 21건을 전부 기한 초과로 걷어 통지 21건을 alice 큐에 park 한다.
         svc.sweep(Instant::now() + Duration::from_secs(61));
 
         assert_eq!(
@@ -6754,7 +6715,6 @@ mod tests {
             NOTICE_CAP_FOR_TEST + 1,
             "밀려난 통지도 장부에 남는다(조용한 유실 0 — 반려가 아니라 회수)"
         );
-        // 장부 스냅샷은 삽입 순서(링 순서)라 첫 통지가 가장 오래된 것이다.
         assert_eq!(
             noticed[0].3,
             DeliveryStatus::Skipped,
@@ -6770,7 +6730,6 @@ mod tests {
 
     #[test]
     fn parked_notice_flushes_as_notice_tag_and_marks_delivered() {
-        // 파킹된 notice 가 등장 flush 로 배달될 때도 notice 태그여야 한다(kind 기반 wrap 분기).
         let (svc, port) = svc();
         port.set_roster(vec![]);
         svc.park_absent_for_test(
@@ -6811,7 +6770,7 @@ mod tests {
 
     #[test]
     fn timeout_notice_parks_when_sender_is_mid_turn() {
-        // idle 게이트는 notice 에도 적용된다(턴 중 주입 금지 — 배치 제어권 유지). 단 cap 만 예외.
+        // 턴 중 주입 금지(배치 제어권 유지)는 notice 에도 걸린다.
         let (svc, port, gate) = svc_gated();
         let (alice_id, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6846,9 +6805,8 @@ mod tests {
 
     #[test]
     fn timeout_notice_reaches_a_renamed_sender_via_id_hint() {
-        // ★fix 2 회귀★: 계약을 연 뒤 발신자가 개명하면 notice 는 **옛 이름** 큐에 파킹된다. 이름-키만
-        //   보는 flush 는 그 큐를 영영 열지 않고, 통지는 notified 라 재발화도 없다 = 영구 stranded.
-        //   장부가 함께 든 발신자 id 를 힌트로 실으면, 개명 후에도 그 incarnation 으로 배달된다.
+        // ★fix 2 회귀★: 개명한 발신자의 notice 는 **옛 이름** 큐에 갇히는데, 통지는 notified 라 재발화도
+        //   없다 = 영구 stranded.
         let (svc, port) = svc();
         let alice_id = PeerId::new_v4();
         let old = LiveAgent {
@@ -6872,7 +6830,6 @@ mod tests {
         )
         .expect("parked(수신자 부재)");
 
-        // 발신자 개명 — 같은 id, 다른 이름. 이제 "alice" 라는 이름은 로스터에 없다.
         let renamed = LiveAgent {
             id: alice_id,
             name: "alice-v2".to_string(),
@@ -6895,8 +6852,6 @@ mod tests {
 
     #[test]
     fn sweep_snapshots_the_roster_once_per_tick() {
-        // ★fix 8★: due 항목마다 로스터를 다시 뜨면 한 틱 안에서 항목별로 다른 스냅샷을 본다(판정 흔들림).
-        //   틱당 1회만 뜨는지 호출 수로 단언한다.
         let (svc, port) = svc();
         port.set_roster(vec![]);
         for i in 0..3 {
@@ -6915,8 +6870,7 @@ mod tests {
         svc.sweep(Instant::now() + Duration::from_secs(61));
         let used = port.roster_call_count() - before;
         // 전제: 발신자들이 로스터에 없어 인라인 flush 폴백이 canonical_name 단계에서 조기 반환한다 —
-        //   그래서 이 틱의 로스터 조회는 sweep 자신의 스냅샷 **하나뿐**이어야 한다. 항목별 재조회로
-        //   되돌리면 due 수(3)만큼 늘어 여기서 잡힌다.
+        //   그래서 이 틱의 로스터 조회는 sweep 자신의 스냅샷 **하나뿐**이어야 한다.
         assert_eq!(
             used, 1,
             "sweep 은 due 수와 무관하게 틱당 로스터 1회만 떠야(항목별 재조회 금지)"
@@ -6926,9 +6880,6 @@ mod tests {
 
     #[test]
     fn timeout_notice_is_skipped_when_reply_lands_before_parking() {
-        // ★fix 5★: due 산출(락 해제)과 notice 파킹 사이에 회신이 도착하면, 발신자는 회신을 받고도
-        //   "회신 없음" 통지를 뒤이어 받는다(모순). 파킹 직전 재확인으로 그 통지를 접는다.
-        //   레이스는 roster hook 으로 결정적으로 만든다(sweep 은 due 산출 뒤 로스터를 뜬다).
         let (svc, port) = svc();
         port.set_roster(vec![]);
         svc.park_absent_for_test(
@@ -6972,8 +6923,6 @@ mod tests {
 
     #[test]
     fn plain_send_with_colliding_id_is_rejected_without_side_effects() {
-        // ★fix 12★: id 충돌은 request 만의 문제가 아니다 — 통보/회신도 같은 id 면 남의 이력 레코드를
-        //   앨리어싱한다. 종류 무관 반려 + 부작용 0(호출자가 새 id 로 재시도).
         let (svc, port) = svc();
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
@@ -6990,7 +6939,6 @@ mod tests {
         let before = svc.ledger_snapshot().len();
         let injected_before = port.injected_bodies().len();
 
-        // 통보 재사용.
         assert_eq!(
             svc.park_absent_for_test(
                 "dup",
@@ -7004,7 +6952,6 @@ mod tests {
             Err(SendFail::Reject(SendReject::IdCollision)),
             "통보도 id 충돌이면 반려"
         );
-        // 회신 재사용.
         assert_eq!(
             svc.park_absent_for_test(
                 "dup",
@@ -7048,8 +6995,6 @@ mod tests {
 
     #[test]
     fn park_payload_decode_falls_back_on_corrupt_input_without_panicking() {
-        // ★fix 4★: 어떤 입력이 와도 패닉하지 않는다 — 특히 길이 필드가 **멀티바이트 문자 중간**을 가리키는
-        //   경우(`split_at` 이 패닉하는 그 지점). 실패는 전부 "속성 잃고 body 만 남는" 폴백이다.
         let good = ParkPayload {
             sender_name: "qa".to_string(),
             from: SenderIdentity {
@@ -7061,14 +7006,14 @@ mod tests {
             meta: req_meta("10m", 600),
         };
         let encoded = good.encode();
-        // 대조군: 정상 payload 는 그대로 복원된다.
+        // 대조군: 정상 payload.
         let ok = ParkPayload::decode(&encoded);
         assert_eq!(ok.body, "안녕\n둘째 줄");
         assert_eq!(ok.sender_name, "qa");
         assert!(ok.meta.request);
 
-        // 버전 태그를 모르는 값으로 바꾼 것(형식 드리프트 모사) — 태그는 항상 맨 앞이라 위치로 자른다
-        //   (옛 `replacen('1', …)` 는 버전 문자가 바뀌면 엉뚱한 자리를 건드려 조용히 유효 payload 가 됐다).
+        // 태그는 항상 맨 앞이라 위치로 자른다 — 옛 `replacen('1', …)` 는 버전 문자가 바뀌면 엉뚱한 자리를
+        //   건드려 조용히 유효 payload 가 됐다.
         let unknown_version = {
             let mut s = encoded.clone();
             s.replace_range(0..PARK_PAYLOAD_VERSION.len(), "9");
@@ -7078,7 +7023,7 @@ mod tests {
         for corrupt in [
             // 헤더 자체가 없음.
             "그냥 본문".to_string(),
-            // 버전 태그가 모르는 값(형식 드리프트) — 오해석 대신 폴백.
+            // 버전 태그가 모르는 값(형식 드리프트).
             unknown_version,
             // 길이 필드가 숫자가 아님.
             "2\nx\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nbody".to_string(),
@@ -7088,17 +7033,17 @@ mod tests {
             "2\n1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
             // reply_to 길이가 경계를 어긋나게 만드는 경우(두 번째 절단점).
             "2\n0\n1\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
-            // ★그룹 라벨 절단점(C4 — 네 번째 절단점)★: 새로 늘어난 칸도 같은 방어를 받아야 한다.
+            // ★그룹 라벨 절단점(C4 — 네 번째 절단점)★.
             "2\n0\n0\n0\n1\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
             // 헤더 줄 수 부족.
             "2\n0\n0\n0\n".to_string(),
-            // ★어휘 밖 입구(fix 3)★: 예전엔 조용히 Cli 로 떨어졌다 — 이제 손상으로 보고 폴백한다.
+            // ★어휘 밖 입구(fix 3)★.
             "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nsmtp\n-\nbody".to_string(),
             // 입구 칸이 비어 있음(형식 드리프트).
             "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\n\n-\nbody".to_string(),
-            // 대소문자도 어휘 밖(정규화하지 않는다 — 우리가 쓴 값만 인정).
+            // 대소문자도 어휘 밖.
             "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nMCP\n-\nbody".to_string(),
-            // ★어휘 밖 플래그(fix 3)★: 예전엔 조용히 "request 아님" 으로 떨어져 계약 속성을 잃었다.
+            // ★어휘 밖 플래그(fix 3)★.
             "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nR\nbody".to_string(),
             "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n\nbody".to_string(),
             "2\n0\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\nr-\nbody".to_string(),
@@ -7114,8 +7059,6 @@ mod tests {
 
     #[test]
     fn one_corrupt_parked_item_does_not_abort_the_flush_batch() {
-        // ★fix 4 의 목적★: decode 는 flush 배치 안에서 항목마다 불린다 — 한 항목이 깨졌다고 배치가
-        //   중단되면 멀쩡한 메시지까지 발이 묶인다(release 는 panic=abort 라 데몬 자체가 죽는다).
         let (svc, port) = svc();
         port.set_roster(vec![]);
         for (id, body) in [("m-a", "첫째"), ("m-b", "둘째"), ("m-c", "셋째")] {
@@ -7130,7 +7073,6 @@ mod tests {
             )
             .expect("parked");
         }
-        // 가운데 항목의 payload 를 손상시킨다(테스트 전용 주입 — 실제로는 일어나지 않지만 방어의 대상).
         svc.corrupt_parked_payload_for_test("bob", 1);
 
         let (bob_id, bob) = live("bob");
@@ -7151,8 +7093,6 @@ mod tests {
 
     #[test]
     fn daemon_notice_id_goes_through_the_same_collision_check_as_sends() {
-        // ★fix 2★: 데몬이 만드는 notice id 도 장부 충돌 검사(`msg_id_in_use`)를 탄다 — 예전엔 무검사라
-        //   기존 id 를 앨리어싱할 수 있었다(이력 레코드 키 공유 = 남의 레코드를 전이·뭉갬).
         let (svc, port) = svc();
         port.set_roster(vec![]);
         svc.park_absent_for_test(
@@ -7166,8 +7106,7 @@ mod tests {
         )
         .expect("parked");
 
-        // ① 첫 draw 가 이미 쓰인 id → 새 id 로 딱 1회 갈아탄다(ingress 재시도와 같은 규율).
-        //    (`pop()` 이 뒤에서 꺼내므로 목록은 draw 순서의 역순이다.)
+        // ① 첫 draw 가 충돌. (`pop()` 이 뒤에서 꺼내므로 목록은 draw 순서의 역순이다.)
         let mut two = vec!["m-fresh".to_string(), "m-taken".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| two.pop().expect("draw"));
         assert_eq!(drawn.id, "m-fresh", "충돌한 id 는 버리고 새 id 를 쓴다");
@@ -7178,7 +7117,7 @@ mod tests {
         );
         assert!(!drawn.still_colliding);
 
-        // ② 두 번째도 충돌 → notice 는 **그래도 나간다**(버리면 계약이 조용히 반쪽) + 신호를 세워 관측.
+        // ② 두 번째도 충돌.
         let mut both = vec!["m-taken".to_string(), "m-taken".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| both.pop().expect("draw"));
         assert_eq!(drawn.id, "m-taken", "통지 유실보다 관측상 오염이 낫다");
@@ -7187,30 +7126,23 @@ mod tests {
             "재-draw 마저 충돌하면 신호(로그 대상)"
         );
 
-        // ③ 대조군: 충돌이 없으면 첫 draw 를 그대로 쓴다(불필요한 재-draw 없음).
+        // ③ 대조군: 충돌 없음.
         let mut once = vec!["m-new".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| once.pop().expect("draw 는 1회뿐이어야"));
         assert_eq!(drawn.id, "m-new");
         assert!(drawn.collided.is_none());
     }
 
-    /// ★H3 — 발급 경로가 **잠정 예약**을 보고 재발급한다★(기존 INTERNAL_ID_COLLISION 테스트와 같은 방식:
-    /// id 생성기를 주입해 충돌을 결정적으로 만든다).
-    ///
-    /// 잠정 은퇴 중인 희생자는 추적에도 이력에도 없을 수 있는데(이력이 이미 밀려난 경우), 그 창에서 같은
-    /// id 가 새로 발급되면 복원이 원본을 잃는다. 그래서 예약 집합이 발급 검사에 참여해야 한다.
+    /// ★H3★: 잠정 은퇴 중인 희생자는 추적에도 이력에도 없을 수 있는데(이력이 이미 밀려난 경우), 그 창에서
+    /// 같은 id 가 새로 발급되면 복원이 원본을 잃는다. 그래서 예약 집합이 발급 검사에 참여해야 한다.
     #[test]
     fn the_mint_path_regenerates_when_it_draws_a_provisionally_retired_id() {
-        // ★7차에 창을 여는 수단이 바뀌었다(ADR-0125 — 이전이지 약화가 아니다)★: 옛 판은 `on_inject` 훅에서
-        //   발급을 시험했다. 그때는 주입이 **표시와 커밋 사이**였기 때문이다. 전부-큐가 되면서 그 사이가 적재
-        //   락 안으로 들어갔고 주입은 락 밖으로 나갔다 — 발급 경로(`draw_daemon_msg_id_with`)는 같은 락을
-        //   잡으므로 **훅에서는 원리적으로 이 창을 볼 수 없다**. 대신 창은 실물로 남아 있다: 예약 가드가
-        //   락을 놓은 채 살아 있는 구간(정산 전 — `Reservation` 헤더의 sweep 보증이 그 구간을 위한 것이다).
-        //   그래서 운영과 같은 동사로 가드를 열어 두고 그 밖에서 발급을 시험한다.
+        // ★ADR-0125 이후 창을 여는 수단이 바뀌었다★: 옛 판은 `on_inject` 훅에서 발급을 시험했지만, 예약
+        //   창이 적재 락 안으로 들어왔고 발급 경로(`draw_daemon_msg_id_with`)도 같은 락을 잡으므로 **훅에서는
+        //   원리적으로 이 창을 볼 수 없다**. 대신 운영과 같은 동사로 예약 가드를 열어 두고 그 밖에서 시험한다.
         let (svc, port) = svc();
         let (boss_from, boss) = live_sender("boss");
         port.set_roster(vec![boss]);
-        // 은퇴 **가능** 계약으로 채운다 — 아래 예약이 희생자를 잠정 표시하는 창을 만들어야 하므로.
         fill_open_request_cap_evictable(&svc, boss_from);
         let cap = svc.occupied_slots_for_test();
         assert!(cap > 0, "상한까지 채워졌다");
@@ -7221,16 +7153,13 @@ mod tests {
 
         // 예약(은퇴 표시) 후 · 커밋 전 — 이 가드가 살아 있는 동안이 잠정 창이다.
         let res = reserve_marked_contract(&svc, boss_from, "m-provisional");
-        // ★잠정 창의 **직접 관측**(C2)★: 은퇴는 표시일 뿐이라 그 창에서는 **희생자 + 새 계약이 동시에**
-        //   추적에 있다(cap + 1). 커밋(결말 확정) 뒤에야 희생자가 물리 제거돼 cap 으로 돌아온다 — 이 두
-        //   단언이 "예약 가시성" 자체를 보므로, 그 가시성을 없애면 여기서 터진다(옛 단언은 이력 링 때문에
-        //   그대로 초록이었다).
+        // ★C2★: 옛 단언은 `msg_id_in_use("cap0")` 뿐이었는데 그 값은 이력 링에 남은 행 때문에도 true 라
+        //   예약 가시성을 없애도 초록이었다 — 그래서 추적 수(cap + 1 → cap)로 창을 직접 관측한다.
         assert_eq!(
             svc.open_request_count(),
             cap + 1,
             "잠정 창: 표시된 희생자와 새 계약이 동시에 추적에 있어야"
         );
-        // 이 창에서 희생자 id 를 뽑으면 재발급돼야 한다(H3).
         let mut two = vec!["m-fresh".to_string(), "cap0".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| two.pop().expect("draw"));
         let in_use = svc.msg_id_in_use_for_test("cap0");
@@ -7246,10 +7175,6 @@ mod tests {
             cap,
             "커밋(결말 확정) 뒤에는 희생자가 물리 제거돼 상한으로 돌아온다"
         );
-        // ★잠정 창을 **직접** 관측한다(리뷰 C2)★: 옛 단언은 `msg_id_in_use("cap0")` 뿐이었는데 그 값은
-        //   이력 링(4096)에 남은 행 때문에도 true 라, 예약 가시성을 없애도 초록이었다(= 창을 관측하지 못함).
-        //   은퇴는 **표시**일 뿐 물리 제거는 커밋에서 일어나므로, 그 표시 창에서는 희생자가 **추적 목록에
-        //   그대로 있어야** 한다(위 두 단언). 아래 `in_use` 는 발급 검사 축이다.
         assert!(
             in_use,
             "잠정 은퇴 중인 cap0 은 발급 검사에서 '사용 중' 이어야(H3)"
