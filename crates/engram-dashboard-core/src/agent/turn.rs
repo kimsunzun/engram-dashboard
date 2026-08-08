@@ -31,7 +31,6 @@
 //!   경로들이 epoch 를 재사용해 여기 두 화신이 같은 키로 앉았다(그 회귀가 이 문단의 존재 이유다).
 //!   남은 잔여는 `u32` 랩어라운드 하나뿐이다(아래 `observe_at` 의 그 항목).
 // ADR-0113
-// ADR-0119
 // ADR-0006
 
 use std::collections::HashMap;
@@ -40,8 +39,7 @@ use std::time::Instant;
 
 use crate::agent::types::AgentId;
 
-/// 출력 이벤트에서 읽어낸 턴 신호 — 표가 아는 어휘 전부. **어떤 이벤트가 어느 신호인지는 여기서 정하지
-/// 않는다**(백엔드 분류자 소유 — 모듈 헤더).
+/// 출력 이벤트에서 읽어낸 턴 신호 — 표가 아는 어휘 전부.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnSignal {
     /// 그 이벤트를 낸 백엔드가 "이 화신은 턴 진행 중" 으로 분류했다.
@@ -103,8 +101,7 @@ impl TurnObservations {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// 턴 신호 1건 반영(관측 시각 = 지금). 호출자는 출력 pump 이거나 입력 에코를 낸 주입 스레드다
-    /// (모듈 헤더) — 어느 쪽이든 짧은 락 하나, 외부 호출 없음.
+    /// 턴 신호 1건 반영(관측 시각 = 지금).
     /// `seq` = 그 이벤트의 출력 시퀀스(발행 순서의 정본 — `observe_at` 의 순서 역전 방어축).
     pub fn observe(&self, id: AgentId, epoch: u32, seq: u64, signal: TurnSignal) {
         self.observe_at(id, epoch, seq, signal, Instant::now());
@@ -150,14 +147,13 @@ impl TurnObservations {
             if cur.epoch > epoch {
                 return;
             }
-            // 같은 화신 안에서 발행 순서가 뒤집혀 도착한 신호 — 이미 더 나중 것을 반영했다.
             if cur.epoch == epoch && seq < cur.last_seq {
                 return;
             }
         }
         // ★`last_signal` 을 뒤로 되감지 않는다★: 시각은 락 **밖**에서 찍히므로(위 `observe`), 늦게 찍은
-        //   신호가 먼저 적용될 수 있다. 되감기면 상한 판정이 그만큼 일찍 잔해로 오판한다 — 실제 폭은 스케줄
-        //   양자 하나라 30분 상한에 비해 무의미하지만, 공짜로 닫히므로 닫는다.
+        //   신호가 먼저 적용될 수 있다. 되감기면 상한 판정이 그만큼 일찍 잔해로 오판한다 — 공짜로
+        //   닫히므로 닫는다.
         let last_signal = match g.get(&id) {
             Some(cur) if cur.epoch == epoch => at.max(cur.last_signal),
             _ => at,
@@ -190,7 +186,7 @@ impl TurnObservations {
         self.get(id, epoch).is_some_and(|o| o.in_turn)
     }
 
-    /// 지금 턴 중으로 관측된 전원 `(id, epoch, 마지막 신호 시각)`. 소비자가 자기 상한으로 훑는 입구다.
+    /// 지금 턴 중으로 관측된 전원. 소비자가 자기 상한으로 훑는 입구다.
     pub fn in_turn_snapshot(&self) -> Vec<(AgentId, u32, Instant)> {
         let g = self.lock();
         g.iter()
@@ -209,7 +205,6 @@ impl TurnObservations {
     ///   경로(자기가 방금 넣은 것을 도로 거둔다 — 그 둘이 같은 표 뮤텍스를 타는 것이 경쟁을 닫는 논증
     ///   자체다). **세 번째 호출자를 늘리면** 그 인과가 갈라진다 — emit 쪽을 "금지된 두 번째 호출자"로
     ///   읽고 지우면 유령 항목 구멍이 다시 열린다.
-    // ADR-0007
     pub fn forget(&self, id: AgentId, epoch: u32) {
         let mut g = self.lock();
         if g.get(&id).is_some_and(|e| e.epoch == epoch) {
@@ -238,7 +233,7 @@ mod tests {
 
     #[test]
     fn progress_then_end_flips_in_turn_and_keeps_the_entry() {
-        // 종료가 항목을 **지우지 않는** 게 계약이다 — 소비자가 "마지막 신호가 언제였나" 를 계속 읽는다.
+        // 소비자가 "마지막 신호가 언제였나" 를 계속 읽으므로 종료가 항목을 지우면 안 된다.
         let t = TurnObservations::new();
         let id = AgentId::new_v4();
         t.observe(id, 0, 1, TurnSignal::Progress);
@@ -306,9 +301,8 @@ mod tests {
 
     #[test]
     fn a_signal_that_arrives_out_of_publication_order_is_ignored() {
-        // ★순서 역전 회귀★: emit 호출자가 둘이라(출력 pump · 입력 에코를 낸 주입 스레드) 발행 순서와
-        //   적용 순서가 갈릴 수 있다. 진행 신호(seq N)가 종료 신호(seq N+1)보다 **늦게** 적용되면 끝난
-        //   턴이 다시 진행 중으로 되돌아가고, 그 수신자 앞 메일이 상한까지 다시 파킹된다.
+        // ★순서 역전 회귀★: 진행 신호(seq N)가 종료 신호(seq N+1)보다 **늦게** 적용되면 끝난 턴이
+        //   다시 진행 중으로 되돌아가고, 그 수신자 앞 메일이 상한까지 다시 파킹된다.
         let t = TurnObservations::new();
         let id = AgentId::new_v4();
         let t0 = Instant::now();
@@ -322,15 +316,13 @@ mod tests {
             !t.is_in_turn(id, 0),
             "늦게 적용된 옛 신호가 끝난 턴을 되살리면 안 된다"
         );
-        // 상한 판정 축(last_signal)은 **발행 순서**를 따른다 — 밀려난 신호가 그 축을 다시 찍지 않는다.
-        //   (그래서 이 축은 적용 순서로 앞당겨지지 않는다. 대가는 `observe_at` 의 "약간 오래된 쪽" 주석.)
         assert_eq!(
             t.get(id, 0).expect("관측됨").last_signal,
             t0,
             "밀려난 신호는 상한 축을 다시 찍지 않는다"
         );
 
-        // 더 나중 신호는 정상 반영(가드가 정상 진행까지 막지는 않는다).
+        // 가드가 정상 진행까지 막지는 않는다.
         t.observe_at(id, 0, 7, TurnSignal::Progress, t0 + Duration::from_secs(2));
         assert!(t.is_in_turn(id, 0));
     }
@@ -360,7 +352,6 @@ mod tests {
 
     #[test]
     fn seq_comparison_does_not_leak_across_incarnations() {
-        // 새 화신은 새 OutputCore 라 seq 가 0 부터 다시 센다 — epoch 이 바뀌면 seq 비교를 하면 안 된다.
         let t = TurnObservations::new();
         let id = AgentId::new_v4();
         let t0 = Instant::now();

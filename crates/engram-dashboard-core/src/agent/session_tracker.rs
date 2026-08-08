@@ -40,7 +40,6 @@ use crate::agent::types::AgentId;
 /// 폴링 주기. sid drift는 사용자가 `/clear`를 친 직후라 1초 지연은 무해하다.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// 세션 파일이 안 보일 때 포기까지의 폴링 횟수(≈ POLL_INTERVAL * N 의 관측 윈도).
-/// 초과 시 해당 에이전트 추적을 degraded(무손상)로 끈다.
 const MAX_RESOLVE_ATTEMPTS: u32 = 15;
 /// 파일 읽기 공유 위반(claude가 쓰는 중) 시 짧은 재시도 횟수.
 const READ_RETRIES: u32 = 3;
@@ -48,7 +47,7 @@ const READ_RETRIES: u32 = 3;
 // ── 세션 파일 표현(관대한 파싱) ────────────────────────────────────────────────
 
 /// `sessions/<pid>.json` 의 부분 표현. 비공식 파일이라 모든 필드를 optional로 두고
-/// 알 수 없는 필드는 무시한다(serde 기본). 우리가 쓰는 건 사실상 pid + sessionId 둘뿐.
+/// 알 수 없는 필드는 무시한다(serde 기본).
 #[derive(Debug, Deserialize)]
 struct SessionFile {
     #[serde(default)]
@@ -67,14 +66,13 @@ fn parse_session_json(bytes: &[u8]) -> Option<SessionFile> {
     serde_json::from_slice::<SessionFile>(bytes).ok()
 }
 
-/// 세션 파일 1개 읽기. 부재면 None, 공유 위반 등 일시 오류는 짧게 재시도.
+/// 부재면 `None`, 공유 위반 등 일시 오류는 짧게 재시도.
 fn read_session_path(path: &Path) -> Option<SessionFile> {
     for attempt in 0..READ_RETRIES {
         match fs::read(path) {
             Ok(bytes) => return parse_session_json(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
             Err(_) => {
-                // claude가 쓰는 중일 수 있음 — 잠깐 쉬고 재시도.
                 if attempt + 1 < READ_RETRIES {
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -86,22 +84,20 @@ fn read_session_path(path: &Path) -> Option<SessionFile> {
 
 // ── PID 해석 ───────────────────────────────────────────────────────────────────
 
-/// `<child_pid>.json` 직접 일치 / 스캔으로 학습 / 못 찾음.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResolveOutcome {
     /// `<child_pid>.json` 의 sessionId가 우리 지정값과 일치 — shim 없음(이상적).
     DirectMatch { pid: u32 },
     /// child_pid는 안 맞고 스캔으로 다른 PID에서 sid 발견 — shim 경유 추정.
     ScanMatch { pid: u32 },
-    /// 못 찾음(아직 미생성이거나 추적 불가).
+    /// 아직 미생성이거나 추적 불가.
     NotFound,
 }
 
 /// 우리가 지정한 (유일한) `expected` sid로 실제 세션 파일의 PID를 결정적으로 찾는다.
-/// 먼저 `<child_pid>.json`을 보고, 안 맞으면 디렉토리 전체를 스캔한다(§8이 금지한
-/// "최신 파일 추정"과 다름 — 우리 sid는 유일하므로 매칭은 결정적).
+/// 디렉토리 전체 스캔은 §8이 금지한 "최신 파일 추정"과 다르다 — 우리 sid는 유일하므로
+/// 매칭이 결정적이다.
 pub fn resolve_in_dir(dir: &Path, child_pid: u32, expected: Uuid) -> ResolveOutcome {
-    // 1) 직접: <child_pid>.json
     let direct = dir.join(format!("{child_pid}.json"));
     if let Some(sf) = read_session_path(&direct) {
         if sf.session_id == Some(expected) {
@@ -109,7 +105,6 @@ pub fn resolve_in_dir(dir: &Path, child_pid: u32, expected: Uuid) -> ResolveOutc
         }
     }
 
-    // 2) 스캔: sessions/*.json 중 sessionId == expected 인 파일의 pid.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -131,7 +126,7 @@ pub fn resolve_in_dir(dir: &Path, child_pid: u32, expected: Uuid) -> ResolveOutc
 
 // ── watch 엔트리 ───────────────────────────────────────────────────────────────
 
-/// 에이전트 1개의 추적 상태. 단일 watcher 스레드가 polling하며 갱신한다.
+/// 에이전트 1개의 추적 상태.
 struct WatchEntry {
     child_pid: u32,
     /// 최초 우리가 지정한 sid — PID 학습(스캔)의 키.
@@ -142,7 +137,7 @@ struct WatchEntry {
     last_seen_sid: Uuid,
     /// 미해석 상태에서의 시도 횟수(포기 판단용).
     attempts: u32,
-    /// 추적 포기(무손상). self_test 실패·버전 깨짐 등에서 set.
+    /// 추적 포기(무손상).
     degraded: bool,
 }
 
@@ -154,7 +149,7 @@ fn poll_entry(dir: &Path, agent_id: AgentId, entry: &mut WatchEntry) -> Option<U
     }
 
     match entry.resolved_pid {
-        // ── 아직 PID 미해석: 해석 시도(self_test 역할도 겸함) ──
+        // ── 아직 PID 미해석: 해석 시도 ──
         None => {
             entry.attempts += 1;
             match resolve_in_dir(dir, entry.child_pid, entry.expected_sid) {
@@ -179,7 +174,6 @@ fn poll_entry(dir: &Path, agent_id: AgentId, entry: &mut WatchEntry) -> Option<U
                 ResolveOutcome::NotFound => {
                     if entry.attempts >= MAX_RESOLVE_ATTEMPTS {
                         entry.degraded = true;
-                        // 무손상 강등: 추적만 끈다. 복원 정확성은 이 파일에 의존하지 않음.
                         tracing::warn!(
                             agent = %agent_id,
                             child_pid = entry.child_pid,
@@ -283,12 +277,10 @@ impl SessionTracker {
         }
     }
 
-    /// 활성 여부 — 비활성(토글 off 또는 디렉토리 미해석)이면 watch가 무의미.
     fn active(&self) -> bool {
         self.enabled && self.dir.is_some()
     }
 
-    /// 에이전트 추적 시작. 비활성이면 no-op. 이미 추적 중이면 갱신.
     pub fn watch(&self, agent_id: AgentId, child_pid: u32, expected_sid: Uuid) {
         if !self.active() {
             return;
@@ -315,7 +307,6 @@ impl SessionTracker {
             .remove(&agent_id);
     }
 
-    /// 단일 폴링 스레드 기동. 비활성이면 띄우지 않는다. 중복 호출은 무시.
     pub fn start(&self) {
         if !self.active() {
             tracing::info!(
@@ -449,7 +440,6 @@ mod tests {
             degraded: false,
         };
 
-        // 1차: PID 해석(변경 없음)
         assert_eq!(poll_entry(&dir, agent, &mut entry), None);
         assert_eq!(entry.resolved_pid, Some(1000));
 
@@ -457,9 +447,7 @@ mod tests {
         let sid2 = Uuid::new_v4();
         write_session(&dir, 1000, sid2);
 
-        // 2차: 변경 감지
         assert_eq!(poll_entry(&dir, agent, &mut entry), Some(sid2));
-        // 3차: 동일 → 변경 없음
         assert_eq!(poll_entry(&dir, agent, &mut entry), None);
         let _ = fs::remove_dir_all(&dir);
     }
