@@ -1,8 +1,8 @@
 //! ClaudeBackend — claude CLI 전용 CommandSpec 산출.
 //!
-//! 세션 인자(`--session-id`/`--resume`) 조립 규칙이 claude에 종속되므로 여기에만 둔다.
-//! 현 `pty/claude.rs`의 build_command 로직과 완전히 동치이며,
-//! 차이점은 (program, args) 대신 CommandSpec(cwd·env 포함)을 반환한다는 것뿐이다.
+//! ★claude 지식 격리(ADR-0004)★: claude 플래그·env 규약 · stream-json 스키마 · `.jsonl` transcript
+//! 파일 배치 지식은 **이 파일 안에만** 둔다. generic 층(manager·backend dispatch)·transport·core 는
+//! 추상 descriptor 와 바이트만 나른다.
 //!
 //! tauri import 0.
 
@@ -17,36 +17,22 @@ use crate::agent::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
 };
 
-/// claude 실행 파일명(논리값). 실제 spawn 시 Windows에선 `console_command`가 `cmd.exe /c claude`로
-/// 감싼다(npm shim 해석, error 193 회피 — backend/mod.rs 참조).
-///
-/// ※ Windows shim 경유 시 우리 child PID는 cmd/shim 프로세스라 `sessions/<pid>.json`이 child PID와
-/// 어긋난다 — session_tracker가 sid 스캔으로 우회한다(설계상 흡수). 복원 정확성은
-/// `--session-id`/`--resume`(우리 통제)에 있으므로 무관.
 const CLAUDE_PROGRAM: &str = "claude";
 
-/// claude 백엔드 unit struct. &'static으로 사용, 상태 없음.
 pub struct ClaudeBackend;
 
 impl AgentBackend for ClaudeBackend {
     fn needs_session(&self) -> bool {
-        // claude는 항상 세션 추적 대상 — sid 발급·watcher 부착 필요.
         true
     }
 
     fn supports_control_channel(&self) -> bool {
-        // claude 는 `--mcp-config` 로 데몬 제어 채널에 붙는다(ADR-0086) → provision 소비.
         true
     }
 
     fn accepts_mcp_config(&self) -> bool {
-        // claude 는 mcp-config 를 `--mcp-config` 로 부착한다(ADR-0099) → MCP-capable.
-        //   이 true 하나가 provision 에서 mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍
-        //   (send_message 만 — ADR-0126 결정 1) + `[Mcp]` grant 를 구동한다.
-        //   ★등호 불변식(ADR-0128)★: 가르치는 채널 집합 **=** 물리로 깐 채널 집합. 그래서 MCP 가능
-        //   스폰엔 engram-send 배선(ENGRAM_SEND_EXE·PATH·CLI 크레덴셜)을 아예 깔지 않는다 — 우편 발신
-        //   채널은 capability 로만 갈리고 런타임 폴백이 없다(build_spec 의 config_path 갈림 참조).
-        // ADR-0099 / ADR-0126 / ADR-0128
+        // claude 는 mcp-config 를 `--mcp-config` 로 부착한다 → MCP-capable.
+        // ADR-0099
         true
     }
 
@@ -66,24 +52,20 @@ impl AgentBackend for ClaudeBackend {
             } => {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
                 // ★AUTO 권한 모드 — `--permission-mode bypassPermissions`(사용자 결정 2026-07-22)★:
-                //   스폰되는 claude 는 헤드리스 워커라 승인자(approver)가 없다 — 기본 거부(default-deny)
-                //   + per-tool grant 배선은 승인 프롬프트를 띄울 사람이 없어 구조적으로 성립하지 않는다
-                //   (CLI 실측 0/38 전량 permission-block). 그래서 스폰 시 auto 모드를 켠다. 이건 **임시 체제**
-                //   이며, 정식 대체는 전 LLM 공용 제약 레이어다(step-log 백로그 — 그때 이 base 플래그를 걷고
-                //   제약 레이어로 대체). 결정 근거·거부한 대안은 이 결정의 전용 ADR 에 박제된다(메인 세션 작성).
-                //   ★두 argv 요소(flag+value, NON-variadic)★: `--permission-mode` 와 `bypassPermissions`
-                //   두 요소를 base 플래그로 **맨 앞**에 둔다 — extra_args 확장·`--allowedTools` variadic 그룹
-                //   보다 훨씬 앞이라 그 그룹의 맨-끝 불변식(테스트 claude_allowed_tools_group_is_last_*)을
-                //   건드리지 않는다. control endpoint 유무와 무관하게 **무조건** 주입(두 spawn 모드 공통).
+                //   스폰되는 claude 는 헤드리스 워커라 승인자가 없다 — 기본 거부 + per-tool grant 배선은
+                //   승인 프롬프트를 띄울 사람이 없어 성립하지 않는다(CLI 실측 0/38 전량 permission-block).
+                //   **임시 체제**이며 정식 대체는 전 LLM 공용 제약 레이어다(그때 이 base 플래그를 걷는다).
+                //   ★맨 앞 배치★: `--permission-mode`+`bypassPermissions` 는 NON-variadic 2요소라 맨 앞에
+                //   둬도 뒤 그룹의 흡수 규칙(아래 extra_args 주석)에 걸리지 않는다. control endpoint 유무·
+                //   spawn 모드와 무관하게 **무조건** 주입.
                 // 사용자 결정 2026-07-22
                 // ADR-0097
                 args.push("--permission-mode".to_string());
                 args.push("bypassPermissions".to_string());
                 match output_format {
-                    // ── 터미널(PTY 대화형) — 기존 경로, 바이트/인자 완전 불변(회귀 금지) ──
+                    // ── 터미널(PTY 대화형) — 바이트/인자 동결(회귀 금지) ──
                     ClaudeOutputFormat::Terminal => {
                         if let Some(sid) = session_id {
-                            // Fresh → --session-id(우리가 sid를 통제), Resume → --resume(무손실 이어받기, ADR-0008).
                             let flag = match mode {
                                 SpawnMode::Fresh => "--session-id",
                                 SpawnMode::Resume => "--resume",
@@ -108,14 +90,10 @@ impl AgentBackend for ClaudeBackend {
                         args.push("--verbose".to_string());
                         // ADR-0044 후속 완료 / ADR-0008 재사용: json(stream-json) resume 활성화.
                         if let Some(sid) = session_id {
-                            // ★json 모드 resume 배선(spike-verified)★: 과거엔 mode 무관 항상
-                            //   --session-id(fresh)로 고정했다(sid 재사용 충돌 회피 명목). 그러나 spike
-                            //   실측(2026-07-13, claude 2.1.170)으로 stream-json 헤드리스도 `--resume <sid>`
-                            //   를 지원함이 확인됐다 — `-p`/`--input-format stream-json`/`--output-format
-                            //   stream-json` 과 공존하고, "session already in use" 없이 과거 대화를 무손실
-                            //   재개한다. 그래서 터미널 분기와 동일하게 mode 로 세션 플래그를 가른다:
-                            //   Fresh → --session-id(우리가 sid 통제), Resume → --resume(무손실 이어받기).
-                            //   통제-sid 인프라(ADR-0008)를 그대로 재사용 — json 전용 신규 기계 없음.
+                            // ★실측(2026-07-13, claude 2.1.170)★: stream-json 헤드리스도 `--resume <sid>`
+                            //   를 지원한다 — `-p`/`--input-format stream-json`/`--output-format stream-json`
+                            //   과 공존하고 "session already in use" 없이 과거 대화를 무손실 재개한다. 그래서
+                            //   터미널 분기와 같은 mode 갈림을 쓴다(통제-sid 인프라 ADR-0008 재사용).
                             let flag = match mode {
                                 SpawnMode::Fresh => "--session-id",
                                 SpawnMode::Resume => "--resume",
@@ -123,20 +101,16 @@ impl AgentBackend for ClaudeBackend {
                             args.push(flag.to_string());
                             args.push(sid.to_string());
                         }
-                        // ADR-0049: json(stream-json) 슬롯은 thinking 블록을 접힘 행으로 표시하는 파이프가
-                        //   이미 있는데(decoder → Structured{kind:"thinking"} → 프론트 ThinkingRow), claude CLI 는
-                        //   기본으로 thinking 을 켜지 않는다 — 실측(2026-07-06, claude 2.1.170): 헤드리스
-                        //   stream-json 은 env MAX_THINKING_TOKENS 가 있어야 "type":"thinking" 블록을 낸다.
-                        //   그래서 json 모드에 한해 기본값 8000 을 주입해 extended thinking 을 켠다(터미널/대화형
-                        //   경로는 CLI parity 유지 — 여기서 건드리지 않는다).
-                        // ★프로필 우선(explicit-skip)★: 프로필이 같은 키를 이미 설정했으면 주입을 건너뛴다 —
-                        //   env 는 (k,v) Vec 이고 transport 가 순서대로 cmd.env(k,v) 하므로 뒤가 이기지만,
-                        //   병합 순서에 기대지 않고 "이미 있으면 건드리지 않는다"로 결정적·가독적으로 프로필이 이기게 한다.
-                        //   ★대소문자 무시(eq_ignore_ascii_case)★: Windows 환경변수는 대소문자를 구분하지 않으므로
-                        //   프로필이 `max_thinking_tokens`(소문자)로 넣어도 같은 키로 인식해 중복 주입을 막는다.
-                        //   ★프로필 내 중복 키 정규화는 이 기능 범위 밖★: 프로필 env 안에 같은 키가 여러 번 들어오는
-                        //   경우는 여기서 정규화하지 않는다 — 모든 키에 동일하게 적용되는 표준 last-wins env 의미론을
-                        //   그대로 따른다(이 기능이 한 키만 특별 처리하면 오히려 일관성이 깨진다).
+                        // ADR-0049: 실측(2026-07-06, claude 2.1.170) — 헤드리스 stream-json 은 env
+                        //   MAX_THINKING_TOKENS 가 있어야 `"type":"thinking"` 블록을 낸다(CLI 기본은 꺼짐).
+                        //   그래서 json 모드에 한해 8000 을 주입한다. 터미널 경로는 CLI parity 유지 — 미주입.
+                        // ★프로필 우선(explicit-skip)★: 프로필이 같은 키를 이미 넣었으면 건너뛴다. env 는
+                        //   (k,v) Vec 이고 transport 가 순서대로 cmd.env 해서 뒤가 이기지만, 병합 순서에
+                        //   기대지 않고 결정적으로 프로필이 이기게 한다.
+                        //   ★대소문자 무시★: Windows 환경변수는 대소문자를 구분하지 않으므로 프로필의
+                        //   `max_thinking_tokens` 도 같은 키로 인식해 중복 주입을 막는다.
+                        //   ★프로필 내 중복 키 정규화는 범위 밖★: 표준 last-wins env 의미론을 그대로 따른다
+                        //   (한 키만 특별 처리하면 일관성이 깨진다).
                         const MAX_THINKING_TOKENS_KEY: &str = "MAX_THINKING_TOKENS";
                         if !env
                             .iter()
@@ -146,25 +120,10 @@ impl AgentBackend for ClaudeBackend {
                         }
                     }
                 }
-                // ADR-0086: 제어 채널 주입 — claude 방식(`--mcp-config <path>` / CLI 크레덴셜 env)으로 번역.
-                //   ★claude 플래그·env 지식은 이 파일에만★(ADR-0004 격리): generic 층(manager/backend
-                //   dispatch)은 추상 ControlEndpoint(url/token/config_path/send_exe)만 나르고 "MCP"·플래그
-                //   문자열을 모른다. 데몬(DaemonControlChannel.provision)이 config_path 파일에
-                //   {mcpServers:{engram:{type:http,url,headers:{Authorization:Bearer <token>}}}} 를 이미
-                //   기록해 뒀다 — 우리는 그 경로를 `--mcp-config` 로 가리키기만 한다. 터미널·json 모드
-                //   둘 다 연결 대상이라 mode 무관 동일 주입(claude 2.1.170 실측: headers Authorization 을
-                //   initialize/tools/list/tools/call 전 요청에 실전송). control=None(제어 채널 미구성·shell)
-                //   이면 args·env 어느 쪽도 건드리지 않는다.
-                //   ★보안★: config_path 만 args 에 실린다(토큰은 파일 안 — args/로그에 토큰 평문 없음).
-                //   ★config_path = 채널 갈림의 유일한 신호(ADR-0128 등호 불변식)★: 우편 발신 채널은 백엔드
-                //     capability 로만 갈리고 런타임 폴백이 없다 — MCP 가능 스폰은 `--mcp-config` **만**,
-                //     비-MCP 스폰은 CLI 크레덴셜·PATH **만** 받는다. 데몬은 MCP-capable 일 때만 config 를
-                //     쓰고 그 write 가 실패하면 provision 자체를 Err 로 끊으므로(fail-closed), `Some` ==
-                //     MCP 가능이 **등호**로 성립한다 — 반쪽 MCP 스폰이 존재하지 않아 이 신호로 갈라도
-                //     안전하다. 그래서 `match` 로 두 갈래를 배타로 못박아 "가르치는 채널 = 깐 채널" 등호가
-                //     구조로 보장되게 한다(한 스폰에 두 입구를 함께 깔면 ADR-0128 위반).
-                //     비-MCP 백엔드(codex/gemini)에서 `None` 인 것은 부재의 타입 인코딩이라 빈-경로 sentinel
-                //     방어 코드가 필요 없다(ADR-0099).
+                // ADR-0086: 제어 채널 주입 — endpoint 를 claude 방식으로 번역한다(config_path 있으면
+                //   `--mcp-config <path>`, 없으면 CLI 크레덴셜 env).
+                //   ★mode 무관 동일 주입★: 터미널·json 둘 다 연결 대상이다(claude 2.1.170 실측 — headers
+                //   Authorization 을 initialize/tools/list/tools/call 전 요청에 실전송).
                 // ADR-0086 / ADR-0099 / ADR-0128
                 if let Some(endpoint) = &control {
                     match &endpoint.config_path {
@@ -176,13 +135,8 @@ impl AgentBackend for ClaudeBackend {
                     }
                 }
                 // ADR-0092: 프라이밍(수신 계약) 주입 — `--append-system-prompt-file <abs-path>`.
-                //   ★claude 플래그 지식은 이 파일 단독(ADR-0004)★: 데몬 PrimingProvider seam 이 프라이밍
-                //   MD 의 **절대경로**를 ControlEndpoint.priming_file 로 실어 보내면(내용은 안 읽음), 여기서
-                //   claude 방식(`--append-system-prompt-file`)으로 번역한다. claude CLI(2.1.170)가 그 파일을
-                //   **직접 읽어** 기본 시스템 프롬프트 뒤에 덧붙인다 — 우리는 내용을 문자열로 넘기지 않는다.
-                //   터미널·json 모드 둘 다 시스템 프롬프트를 받으므로 mode 무관 동일 주입. None(파일 부재·
-                //   미구성)이면 미주입(프라이밍 없이 스폰 진행 — 데몬 seam 이 warn 로그, ADR-0092 graceful).
-                //   ★core 는 여기서도 파일을 열지 않는다★: args 에 경로 문자열만 싣는다(격리 유지).
+                //   claude CLI(2.1.170)가 그 파일을 **직접 읽어** 기본 시스템 프롬프트 **뒤에** 덧붙인다.
+                //   터미널·json 둘 다 시스템 프롬프트를 받으므로 mode 무관 동일 주입.
                 // ADR-0092
                 if let Some(endpoint) = &control {
                     if let Some(priming) = &endpoint.priming_file {
@@ -191,25 +145,16 @@ impl AgentBackend for ClaudeBackend {
                     }
                 }
                 // S18 D(spec §6): 세션 한정 설정 조각 주입 — `--settings <abs-path>`. (ADR-0109)
-                //   ★claude 플래그 지식은 이 파일 단독(ADR-0004)★: 데몬이 조각 파일을 쓰고 경로만
-                //   ControlEndpoint.settings_file 로 실어 보낸다(내용은 데몬 소유 — mcp_config.rs). 여기선
-                //   claude 방식으로 번역만 한다. 부재(None)면 미주입 — 오늘 동작과 바이트 동일.
-                //   ★왜 이 조각이 필요한가★: 유저 전역 설정의 `allowedMcpServers: []`(전면 차단)가 스폰
-                //   에이전트에도 적용돼 engram MCP 서버가 툴 목록에서 사라졌다(실측 2026-07-24). 이 조각이
-                //   그 **세션에만** engram 서버를 허용한다(전역 파일 무변경).
                 //
                 // ★인라인 JSON 이 아니라 **파일 경로**를 쓰는 이유(load-bearing — Windows 인용 지옥)★:
-                //   claude 의 `--settings` 는 JSON 문자열도 받지만, 우리 스폰 경로는 Windows 에서
-                //   `console_command` 가 `cmd.exe /c claude …` 로 감싼다(npm shim 회피 — backend/mod.rs).
-                //   cmd.exe 를 한 겹 더 거치는 argv 에 `{"allowedMcpServers":[…]}` 같은 따옴표·중괄호
+                //   claude 의 `--settings` 는 JSON 문자열도 받지만, Windows 스폰은 `console_command` 가
+                //   cmd.exe 를 한 겹 더 끼운다. 그 argv 에 `{"allowedMcpServers":[…]}` 같은 따옴표·중괄호
                 //   덩어리를 실으면 cmd 의 인용/이스케이프 규칙(따옴표 소실·`&`/`^` 특수문자)에 조용히
                 //   깨지기 쉽고, 깨진 결과는 "설정이 무시된 채 정상 기동"(= MCP 툴 부재 재발)이라 발현이
                 //   늦다. 파일 경로는 공백만 다루면 되고, 같은 경로 전달 방식(`--mcp-config`/
                 //   `--append-system-prompt-file`)이 이미 실측으로 검증돼 있다(M3 심의 기록) — 그래서
                 //   경로를 택한다. 대가는 파일 하나의 수명 관리인데, 그건 mcp-config 파일과 **같은 폴더·
                 //   같은 생성/삭제/부팅스윕 경로**를 그대로 재사용해 흡수한다(mcp_config.rs).
-                //   ★core 는 여기서도 파일을 열지 않는다★: args 에 경로 문자열만 싣는다(격리 유지).
-                // ADR-0004
                 if let Some(endpoint) = &control {
                     if let Some(settings) = &endpoint.settings_file {
                         args.push("--settings".to_string());
@@ -223,56 +168,39 @@ impl AgentBackend for ClaudeBackend {
                 //   뒤에 extra_args 가 오고 그 첫 요소가 bare positional(예: `Bash`)이면, 그 값이
                 //   **추가 허용 툴**로 빨려 들어가 blanket Bash 권한을 부여한다(ADR-0094 최소권한 위반).
                 //   그래서 extra_args 를 먼저 소진하고, `--allowedTools` 그룹을 args 벡터의 **맨 끝**에
-                //   둔다. 두 spawn 모드(Terminal PTY 대화형 / StreamJson `-p`) 모두 프롬프트를 stdin
-                //   (write_input)으로 먹이므로 argv 에 **trailing positional 이 없다**(AgentCommand::Claude
-                //   에 프롬프트 필드 없음) — 따라서 grant 그룹 뒤로 아무 positional 도 오지 않아 흡수가
-                //   구조적으로 불가능하다. (extra_args 안에 자체 `--flag <val...>` variadic 이 있어도 그건
-                //   호출자 의도한 값이고, 우리 grant 패턴을 삼키진 않는다 — grant 가 뒤에 있으므로.)
+                //   둔다. 두 spawn 모드 모두 프롬프트를 stdin(write_input)으로 먹여 argv 에 **trailing
+                //   positional 이 없으므로**(AgentCommand::Claude 에 프롬프트 필드 없음) 그룹 뒤 흡수가
+                //   구조적으로 불가능하다.
                 args.extend(extra_args.iter().cloned());
                 // ADR-0094 / ADR-0106: 내장 SendMessage 차단 — `--disallowedTools SendMessage`,
                 //   **control endpoint 있을 때만** 주입.
                 //   ★왜★: harness 내장 툴 `SendMessage`(PascalCase)와 우리 MCP 툴 `send_message`
-                //   (server: engram, snake_case)가 이름이 충돌한다 — 스폰된 claude 가 프라이밍을
-                //   오독해 내장 SendMessage 를 호출하면, 내장은 engram 에이전트 이름을 몰라
-                //   "No agent named 'X' is reachable" 로 실패한다(실측 2026-07-26 roundtrip 진단 —
-                //   스폰마다 재현). 그래서 스폰 시점에 내장 SendMessage 자체를 `--disallowedTools`
-                //   로 막아 이 오인식 경로를 구조적으로 없앤다(프라이밍 문구 교정만으론 재발 가능 —
-                //   결정적 차단이 필요).
+                //   (server: engram, snake_case)가 이름이 충돌한다 — 스폰된 claude 가 프라이밍을 오독해
+                //   내장 SendMessage 를 호출하면 engram 에이전트 이름을 몰라 "No agent named 'X' is
+                //   reachable" 로 실패한다(실측 2026-07-26 roundtrip 진단 — 스폰마다 재현). 프라이밍 문구
+                //   교정만으론 재발하므로 툴 자체를 막아 결정적으로 끊는다.
                 //   ★스코프 = control 있을 때만(ADR-0106, 리뷰 지적 2026-07-26)★: 충돌이 문제 되는 건
-                //   메시징 프라이밍을 받은 에이전트뿐이다 — control endpoint 가 있는 스폰만 그 프라이밍
-                //   (--mcp-config/--append-system-prompt-file, 위 참조)을 싣는다. 일반(비메시징) 스폰은
-                //   control=None 이라 이 이름 충돌 자체가 없으므로, 그 경우까지 내장 SendMessage 를
-                //   막으면 (a) 이유 없이 내장 기능을 잃고 (b) claude 가 미등록 툴을 deny 목록에서 만나
-                //   매 호출마다 경고 비용을 문다 — 둘 다 회피한다. 그래서 조건을 control 유무로 좁힌다
-                //   (= --mcp-config/--allowedTools 와 동일 조건).
-                //   ★순서(variadic 흡수 방지, 위 extra_args 주석과 동일 원리)★: extra_args 소진
-                //   **직후**, `--allowedTools` 그룹보다 **앞**에 둔다 — 뒤이은 `--allowedTools`(새
-                //   `--flag`)가 이 disallowedTools variadic 을 종료시켜, allowedTools 그룹이 여전히
-                //   args 벡터의 **맨 끝**(claude_allowed_tools_group_is_last_and_exact_* 불변식)을
-                //   유지한다.
+                //   메시징 프라이밍을 받은 에이전트뿐이고 그건 control endpoint 가 있는 스폰뿐이다. 비메시징
+                //   스폰까지 막으면 (a) 이유 없이 내장 기능을 잃고 (b) claude 가 미등록 툴을 deny 목록에서
+                //   만나 매 호출마다 경고 비용을 문다.
+                //   ★순서★: `--disallowedTools` 도 variadic 이라 extra_args **뒤**에 둔다. 뒤이은
+                //   `--allowedTools` 가 새 `--flag` 로서 이 variadic 을 종료시키므로 allowedTools 그룹의
+                //   맨-끝 자리는 유지된다.
                 // ADR-0094 / ADR-0106
                 if control.is_some() {
                     args.push("--disallowedTools".to_string());
                     args.push("SendMessage".to_string());
                 }
                 // ADR-0094: 발신 입구 pre-authorization — `--allowedTools <pattern>...`.
-                //   ★claude 문법 지식 단독(ADR-0004)★: grants(추상 ToolGrant)를 claude allowlist 패턴으로
-                //   번역하는 규칙(`mcp__{server}__{tool}` / `Bash({exe}:*)`+`PowerShell({exe}:*)`)은 이
-                //   파일만 안다. 툴/서버 이름은
-                //   데몬 컨트롤 채널이 정본(ADR-0094 단일 출처) — 여기선 형식만 만든다. grants 가 비면 아무
-                //   플래그도 안 붙인다(권한 플래그 없음 — 회귀 없음).
-                //   ★grant 유지 이유(bypass 가 스폰 기본값이 된 뒤에도)★: 사용자 결정 2026-07-22 로
-                //   `--permission-mode bypassPermissions`(위 base 플래그)가 스폰 기본값이 됐다 — 그래서
-                //   실질 인가는 bypass 가 판다. 그럼에도 이 최소권한 grant 주입은 **유지**한다: (a) bypass
-                //   아래선 무해하고(중복 인가일 뿐), (b) 미래 전 LLM 공용 제약 레이어가 bypass 를 걷을 때
-                //   재사용할 **결정적 정책 표면**이며, (c) "이 에이전트가 어떤 발신 입구를 갖는가"를 드러내는
-                //   문서화 표면이다. 즉 이 그룹은 지금 게이트가 아니라 정책 선언으로 남는다.
-                //   ★arg shape★: `--allowedTools` 한 요소 뒤에 각 패턴을 **개별 args 요소**로 잇는다
-                //   (공백 포함 패턴 `Bash(C:\Program Files\…:*)` 이 한 argv 요소로 유지돼야 claude
-                //   가 공백을 값 구분자로 쪼개지 않는다 — comma-join 단일 값으로 합치지 않는 이유). 터미널·
-                //   json 모드 둘 다 동일 주입(권한 게이트는 mode 무관).
-                //   ★맨 끝 배치(variadic 흡수 방지)★: 위 extra_args 소진 뒤에 둬서 이 그룹 뒤로 positional
-                //   이 절대 오지 않게 한다(회귀 가드 = 테스트 claude_allowed_tools_group_is_last_and_*).
+                //   ★grant 유지 이유(bypass 가 스폰 기본값이 된 뒤에도)★: 실질 인가는 위 base 플래그의
+                //   bypass 가 판다. 그럼에도 이 최소권한 grant 주입은 **유지**한다: (a) bypass 아래선
+                //   무해한 중복 인가고, (b) 미래 공용 제약 레이어가 bypass 를 걷을 때 재사용할 결정적
+                //   정책 표면이며, (c) "이 에이전트가 어떤 발신 입구를 갖는가"를 드러내는 표면이다.
+                //   지금은 게이트가 아니라 정책 선언이다 — 지우지 말 것.
+                //   ★arg shape★: `--allowedTools` 뒤에 각 패턴을 **개별 args 요소**로 잇는다 — 공백 포함
+                //   패턴(`Bash(C:\Program Files\…:*)`)이 한 argv 요소로 유지돼야 claude 가 공백을 값
+                //   구분자로 쪼개지 않는다(comma-join 단일 값으로 합치지 않는 이유). 권한 게이트는 mode 무관.
+                //   ★맨 끝 배치★ 회귀 가드 = 테스트 claude_allowed_tools_group_is_last_and_*.
                 // ADR-0094
                 if let Some(endpoint) = &control {
                     let patterns = grants_to_allowed_tools(&endpoint.grants);
@@ -281,7 +209,6 @@ impl AgentBackend for ClaudeBackend {
                         args.extend(patterns);
                     }
                 }
-                // Windows shim 회피: cmd /c claude … 로 감싼다(비Windows는 그대로).
                 let (program, args) = console_command(CLAUDE_PROGRAM, args);
                 CommandSpec {
                     program,
@@ -290,8 +217,7 @@ impl AgentBackend for ClaudeBackend {
                     cwd,
                 }
             }
-            // dispatch가 ClaudeBackend에는 Claude variant만 보내지만, 방어적으로 Shell도 처리한다.
-            // 현 claude.rs build_command와 동일하게 program/args 패스스루.
+            // dispatch 가 ClaudeBackend 에는 Claude variant 만 보내지만, 방어적으로 Shell 도 처리한다.
             AgentCommand::Shell { program, args } => CommandSpec {
                 program: program.clone(),
                 args: args.clone(),
@@ -301,20 +227,10 @@ impl AgentBackend for ClaudeBackend {
         }
     }
 
-    /// claude 는 터미널·json(stream-json) 모드 **둘 다** `--resume <sid>` 로 세션을 무손실 재개하므로
-    /// resume=true(이 backend 의 결정). cwd_env=true(작업 디렉토리에서 실행). snapshot·model 옵션은
-    /// 미지원(콘솔 CLI).
-    ///
-    /// ★json 모드 resume 활성화(ADR-0044 후속 완료 / ADR-0008 재사용)★: 과거엔 json 경로가 build_spec 에서
-    ///   SpawnMode 무관 항상 --session-id(fresh)로 고정돼 caps 도 resume=false 로 내려야 했다. 이제 spike
-    ///   실측(2026-07-13, claude 2.1.170)으로 stream-json 헤드리스도 `--resume` 를 지원함이 확인돼 build_spec
-    ///   이 mode 로 세션 플래그를 가른다(StreamJson 분기: Fresh→--session-id, Resume→--resume). 따라서 두
-    ///   모드 모두 정직하게 resume=true 로 신고한다 — 통제-sid resume(ADR-0008) 인프라를 그대로 재사용하므로
-    ///   sid 충돌("session already in use")도 없다. command 는 여기서 mode 판정에 쓰지 않지만(두 모드 동일),
-    ///   backend 가 session caps 의 출처라는 시그니처(ADR-0030, type split)는 유지한다.
+    /// 터미널·json(stream-json) **둘 다** `--resume <sid>` 로 무손실 재개하므로 resume=true — 그래서
+    /// `command`(모드)를 보지 않는다. snapshot·model 옵션은 콘솔 CLI 라 미지원.
+    /// 시그니처는 backend 가 session caps 의 출처라는 계약(ADR-0030 type split)을 유지한다.
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
-        // 터미널·json 모드 모두 --resume 지원(spike-verified) → resume=true. 방어적 Shell 도 여기선
-        //   claude backend 경로라 resume 가능(실제 Shell resume caps 는 ShellBackend 소관 — 건드리지 않음).
         let resume = true;
         BackendCaps {
             session: SessionCaps {
@@ -335,23 +251,16 @@ impl AgentBackend for ClaudeBackend {
     }
 }
 
-/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜(`ENGRAM_TOKEN`/`ENGRAM_CONTROL_URL`/
-/// `ENGRAM_SEND_EXE`) + `engram-send` 형제 디렉토리 PATH 프리펜드를 심는다.
+/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + `engram-send` 형제 디렉토리 PATH 프리펜드.
 ///
-/// ★호출 조건 = 비-MCP(CLI 전용) 스폰 **하나뿐**(ADR-0128 등호 불변식)★: MCP 가능 스폰에서 이 함수를
-///   부르면 그 스폰 env 에 `engram-send` 로 가는 경로가 생겨 결정 위반이다 — 채널 통제의 유일한 실효
-///   수단이 물리 배선이라(실측: 권한 제거는 조작이 되지 못했다) 두 채널을 함께 깔면 통제가 사라진다.
-///   되살리지 말 것. 유일한 호출부 = `build_spec` 의 `config_path` 갈림(None 갈래).
-/// ★왜 env 인가★: 에이전트가 shell 로 `engram-send` 를 부를 때 이 env 를 읽어 데몬 제어 라우트에
-///   Bearer 토큰으로 POST 한다. env 는 CommandSpec.env → transport 가 cmd.env(k,v) 로 심고, portable-pty
-///   CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스(Bash·그 손자)까지 상속**한다
-///   (lib.rs ENGRAM_EXE 주석과 동일 메커니즘).
-/// ★claude 지식 격리(ADR-0004)와의 관계★: env 키(ENGRAM_TOKEN/ENGRAM_CONTROL_URL/ENGRAM_SEND_EXE)는
-///   claude 플래그가 아니라 제어 채널 규약이지만, "control endpoint 를 프로세스에 어떻게 먹이나"는
-///   backend 별 방식(claude=mcp-config+env)이라 이 파일이 소유한다. generic 층은 여전히 추상
-///   ControlEndpoint 만 나른다(send_exe 도 그 descriptor 필드).
-/// ★보안★: 토큰이 env 로 노출되나, 같은 OS 유저의 자식 프로세스에만 상속되고(하드 격리는 원래 불가 —
-///   ADR-0086 §불변식), 로그엔 찍지 않는다.
+/// ★호출 조건 = 비-MCP(CLI 전용) 스폰 **하나뿐**★: MCP 가능 스폰에서 부르면 그 스폰에 `engram-send`
+///   경로가 생겨 ADR-0128 위반이다. 채널 통제의 유일한 실효 수단이 물리 배선이라(실측: 권한 제거는
+///   조작이 되지 못했다) 두 채널을 함께 깔면 통제가 사라진다 — 되살리지 말 것.
+/// ★왜 env 인가★: 에이전트가 shell 로 `engram-send` 를 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
+///   토큰으로 POST 한다. portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
+///   (Bash·그 손자)까지 상속**된다.
+/// ★보안★: 토큰이 env 로 노출된다 — 같은 OS 유저의 자식에만 상속되고 로그엔 안 찍지만 하드 격리는
+///   원래 불가다(ADR-0086 §불변식).
 // ADR-0086 / ADR-0128
 fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
     // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
@@ -369,43 +278,31 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
         .to_string();
     env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
-    // ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: `engram-send` 는 원래 PATH 에 없다(데몬 exe 의
-    //   형제로 배포되는 내부 바이너리). 데몬이 부팅 시 자기 exe 형제에서 위치를 찾아 endpoint.send_exe 로
-    //   실어 보내면, 여기서 그 **절대경로**를 env 로 주입한다. CLI-only 프라이밍(B)과 grant 는 bare
-    //   `engram-send`(아래 PATH 주입으로 해석)를 가르치지만, 이 절대경로 env 는 병행 보존한다 — 기존
-    //   소비자(진단·대체 경로)가 있을 수 있어 제거하지 않는다(ADR-0094 정렬은 PATH 로 이룬다).
-    //   send_exe 가 None 이면 이 env 와 PATH 프리펜드만 생략한다 — 이 갈래에선 발신 입구가 하나도 남지
-    //   않으므로 데몬이 provision 단계에서 이미 fail-closed 로 끊는다(그 조합은 여기 도달하지 않는 방어
-    //   경로다 — 도달했다면 크레덴셜만 있고 부를 CLI 가 없는 무해한 상태).
+    // ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare `engram-send`(아래 PATH
+    //   주입으로 해석)를 가르치지만, 이 절대경로 env 는 병행 보존한다 — 기존 소비자(진단·대체 경로)가
+    //   있을 수 있어 제거하지 않는다(ADR-0094 정렬은 PATH 로 이룬다).
+    //   None 갈래는 발신 입구가 하나도 안 남는 조합이라 데몬이 provision 에서 이미 fail-closed 로 끊는다
+    //   — 여기 도달하지 않는 방어 경로다(도달해도 크레덴셜만 있고 부를 CLI 가 없는 무해한 상태).
     if let Some(send_exe) = &endpoint.send_exe {
         env.push((
             "ENGRAM_SEND_EXE".to_string(),
             send_exe.to_string_lossy().into_owned(),
         ));
         // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(engram-send:*)`)와 프라이밍이 모두 bare
-        //   `engram-send` 를 가르치므로, 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
-        //   **찾을** 수 있어야 한다. `engram-send` 는 PATH 에 없는 내부 형제 바이너리라, send_exe 의
-        //   **부모 디렉토리**를 PATH **맨 앞**에 붙여 자식이 상속할 PATH 로 심는다. transport(portable-pty)
-        //   가 부모 env 를 먼저 시드한 뒤 CommandSpec.env 를 순서대로 덮으므로, 이 PATH 항목이 자식이
-        //   상속한 PATH 를 대체한다. 에이전트의 자식들(Bash 도구 등)도 이 PATH 를 상속한다.
-        //   부모 디렉토리를 못 구하면(경로 형태 이상) PATH 주입을 건너뛴다(상속 PATH 그대로).
+        //   `engram-send` 를 가르치므로 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
+        //   **찾을** 수 있어야 한다. send_exe 의 **부모 디렉토리**를 PATH **맨 앞**에 붙인다.
         //
-        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이 지점보다 **먼저** env
-        //   벡터에 들어와 있다(spawn 경로가 profile.env 를 먼저 push). base 로 데몬 프로세스 PATH
-        //   (std::env::var_os) 대신 **env 벡터에 이미 있는 마지막 PATH** 를 쓴다 — 프로필이 커스텀 PATH 를
-        //   실었으면 그 값이 base 가 돼 tail 로 보존된다(데몬 PATH 로 리빌드하면 프로필 PATH 가 통째로
-        //   증발한다). env 벡터에 PATH 가 없을 때만 데몬 프로세스 PATH 로 폴백한다.
-        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수라 Windows
-        //   (=대소문자 무시)에선 eq_ignore_ascii_case 로, 그 외 OS 에선 정확 일치로 찾는다.
+        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이 지점보다 **먼저**
+        //   벡터에 들어와 있다. 데몬 프로세스 PATH(std::env::var_os) 로 리빌드하면 프로필이 실은 커스텀
+        //   PATH 가 통째로 증발하므로, 벡터에 PATH 가 없을 때만 데몬 PATH 로 폴백한다.
+        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수다.
         //   ★last-match-wins + dedupe(load-bearing)★: transport(portable-pty)는 env 를 **순서대로**
-        //   cmd.env(k,v) 하므로, 같은 변수의 중복 항목이 있으면 자식엔 **마지막** 값이 산다(예: Windows
-        //   에서 `[("PATH", 데몬), ("Path", 프로필)]`). 그래서 base 로 **마지막 case-equivalent PATH 의
-        //   값**(= 실제로 자식이 받았을 값)을 쓰고, 그 항목의 **키 표기**를 유지해 제자리 교체한다. 그리고
-        //   **나머지 case-equivalent PATH 항목은 전부 제거**해 최종 spec env 에 PATH 가 **정확히 하나**(그
-        //   승리 항목)만 남게 한다 — 중복을 남겨두면, 우리가 앞쪽 항목만 고치고 뒤쪽 미수정 항목이
-        //   last-wins 로 이겨 send_exe 부모가 빠진 PATH 가 자식에 실리며 주입이 **조용히 무력화**된다
+        //   cmd.env(k,v) 하므로 같은 변수의 중복 항목이 있으면 자식엔 **마지막** 값이 산다(예: Windows
+        //   에서 `[("PATH", 데몬), ("Path", 프로필)]`). 그래서 마지막 case-equivalent PATH 를 base 이자
+        //   승리 항목으로 삼아 그 키 표기 그대로 제자리 교체하고, **나머지 PATH 항목은 전부 제거**한다 —
+        //   중복을 남기면 앞쪽만 고친 뒤 뒤쪽 미수정 항목이 last-wins 로 이겨 주입이 **조용히 무력화**된다
         //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제 디렉토리가
-        //   **맨 앞**(shadowing 방어: 우리 형제 바이너리가 먼저 해석), 프로필/데몬 PATH 는 **tail 로 생존**.
+        //   **맨 앞**(shadowing 방어), 프로필/데몬 PATH 는 **tail 로 생존**.
         if let Some(parent) = send_exe.parent() {
             let is_path_key = |k: &str| {
                 if cfg!(windows) {
@@ -414,11 +311,7 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
                     k == "PATH"
                 }
             };
-            // env 벡터의 **마지막** case-equivalent PATH 를 찾는다 — 순차 적용 시 자식이 받는 값이 이
-            //   마지막 항목이므로 그 값을 base 로, 그 키 표기를 승리 항목으로 삼는다.
             let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
-            // base = 마지막 env PATH 값(자식이 실제 받았을 값) → 없으면 데몬 프로세스 PATH → 둘 다 없으면
-            //   빈 값.
             let base_os = winner_idx
                 .map(|i| std::ffi::OsString::from(env[i].1.clone()))
                 .or_else(|| std::env::var_os("PATH"));
@@ -432,10 +325,7 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
             {
                 Some(joined) => match winner_idx {
                     Some(i) => {
-                        // 승리(마지막) 항목의 값을 교체(그 키 표기 유지).
                         env[i].1 = joined;
-                        // 나머지 case-equivalent PATH 항목을 모두 제거 → PATH 정확히 하나.
-                        //   승리 인덱스(i)만 남기고 다른 PATH 키 항목을 걸러낸다.
                         let mut seen = 0usize;
                         env.retain(|(k, _)| {
                             if is_path_key(k) {
@@ -448,15 +338,11 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
                             }
                         });
                     }
-                    // 기존 PATH 부재 → 새 항목 push.
                     None => env.push(("PATH".to_string(), joined)),
                 },
-                // ★loud skip(FIX-2/3)★: join 실패 또는 결과가 valid UTF-8 이 아니면 주입을 **통째
-                //   건너뛴다** — lossy 변환한 PATH 를 절대 push 하지 않는다(비-Unicode PATH 항목을 조용히
-                //   손상시키면 skip 보다 더 나쁘다). skip 시에는 기존 PATH 항목을 제거·수정하지 않고 env
-                //   벡터를 **원래 그대로** 둔다 — 상속 PATH 가 유지돼 안전 폴백이 되고, warn 으로
-                //   promise-mismatch(grant·프라이밍은 bare `engram-send` 를 약속했는데 이 병적 설치에선
-                //   자식이 그 이름을 해석 못 함)를 **관측 가능**하게 만든다(조용한 실패 방지).
+                // ★loud skip(FIX-2/3)★: join 실패·비-UTF8 이면 주입을 **통째 건너뛴다** — lossy 변환한
+                //   PATH 를 절대 push 하지 않는다(비-Unicode PATH 항목을 조용히 손상시키면 skip 보다
+                //   나쁘다). skip 시 env 벡터는 **원래 그대로** 둬서 상속 PATH 가 안전 폴백이 된다.
                 None => {
                     tracing::warn!(
                         "engram-send PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `engram-send` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지"
@@ -467,26 +353,24 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
     }
 }
 
-/// claude stream-json 이벤트 → 턴 신호(ADR-0113 · ADR-0004 백엔드 지식 격리).
+/// claude stream-json 이벤트 → 턴 신호(ADR-0113).
 ///
 /// ★`Structured` 를 진행으로 세는 게 load-bearing — 그리고 그 판정은 **claude 한정**이다★: claude 는
 ///   **입력 시점 유저 에코**를 이 variant 로 낸다(`user_text_echo_json` · decoder 의 user 라인). 그래서
 ///   대시보드 사용자가 터미널에 직접 입력해 시작한 턴도, 우편 주입이 시작한 턴도 이 갈래로 잡힌다 —
-///   빼면 그 두 경로의 턴 시작이 통째로 관측 밖으로 나간다. 반대로 `Structured` 는 **백엔드별 이벤트
-///   탈출구**라, 다른 백엔드가 턴과 무관한 메타 라인을 여기 실으면 그건 진행 신호가 아니다. 그래서 이
-///   매핑은 공용 층이 아니라 이 파일에 산다(백엔드마다 자기 매핑을 선언한다).
+///   빼면 그 두 경로의 턴 시작이 통째로 관측 밖으로 나간다.
 /// ★`kind` 를 보지 않는 이유(현 범위의 정직한 표기)★: claude decoder 가 내는 `Structured` 는 전부 턴
 ///   안에서 발생하는 라인이라 지금은 kind 구분이 불필요하다. claude 가 턴 밖 구조화 라인을 내기
-///   시작하면 여기서 kind 를 걸러야 한다 — 그 판정 지점이 여기라는 게 이 seam 의 요점이다.
-/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고(decoder 는 result 의 usage 를
-///   `MessageDone` **앞에** 낸다), `Error` 는 스트림 내부 오류지 턴 경계가 아니다(실패 턴도 `MessageDone`
-///   으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계 정보가 없는 콘솔 바이트다.
+///   시작하면 여기서 kind 를 걸러야 한다.
+/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고, `Error` 는 스트림 내부 오류지
+///   턴 경계가 아니다(실패 턴도 `MessageDone` 으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계
+///   정보가 없는 콘솔 바이트다.
 /// ★상관 키가 없다(알려진 범위)★: claude 의 `MessageDone` 은 `turn_id`/`message_id` 가 모두 None 이라
 ///   "어느 턴의 종료인가" 를 맞출 키가 없다. 그래서 턴 카운팅·펜싱을 하지 않고 **마지막 관측이
 ///   결정한다**. 중첩 Task 서브에이전트의 종료 라인이 부모 턴 종료로 새는지는 미검증이고, 새면 증상은
 ///   "부모가 아직 턴 중인데 idle 로 오판 → 조기 주입"(유실 없이 타이밍만 어긋남)이다.
-/// ★터미널 모드와 공유해도 되는 이유★: 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐르므로 이
-///   매핑을 그대로 써도 신호가 하나도 나오지 않는다(모드별 분기가 불필요).
+/// ★터미널 모드와 공유해도 되는 이유(모드별 분기 불필요)★: 터미널 모드는 decoder 가 없어
+///   `TerminalBytes` 만 흐르므로 이 매핑을 그대로 써도 신호가 하나도 나오지 않는다.
 // ADR-0113
 // ADR-0004
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
@@ -499,38 +383,26 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     }
 }
 
-/// ADR-0094: 추상 `ToolGrant` 목록 → claude `--allowedTools` 패턴 문자열 목록(순수 — 단위 테스트 대상).
+/// ADR-0094: 추상 `ToolGrant` 목록 → claude `--allowedTools` 패턴 문자열 목록.
 ///
-/// ★claude 지식 격리(ADR-0004)★: 이 함수만 claude allowlist **문법**을 안다 — 툴/서버 이름은 모른다
-///   (데몬 컨트롤 채널이 grants 에 실어 넘긴 값을 그대로 끼워 넣을 뿐). 번역 규칙:
-///   - `Mcp{server,tool}` → `mcp__{server}__{tool}` (claude MCP 툴 네이밍 규약 — `mcp__<server>__<tool>`).
-///   - `Cli{exe}`         → `Bash({exe}:*)` **와** `PowerShell({exe}:*)` (그 exe 로 **시작하는** 명령만
-///                          — 두 shell 도구 모양 모두. bare 이름은 backend 주입 PATH 로 해석).
-///
-/// ★CLI 패턴 문법(ADR-0094)★: `Bash(<X>:*)` 의 **colon-star** 는 Claude Code 권한 시스템의 문서화된
-///   **prefix 와일드카드** 문법이다 — 예: `Bash(engram-send:*)` 는 `engram-send` 로 **시작하는** 모든
-///   명령을 허용한다(전체 Bash 아님 = 최소권한). exe 는 데몬 컨트롤 채널이 넘긴 bare 명령 이름
-///   (`engram-send`)이고, 스폰된 에이전트는 그 bare 이름을 shell 에서 부른다(backend 가 주입한 PATH 로
-///   해석 — build_spec 의 PATH 주입 참조). 프라이밍이 가르치는 명령·이 grant 패턴·실제 invocation 이
-///   모두 bare `engram-send` 로 정렬된다.
+/// ★MCP 패턴★: `mcp__<server>__<tool>` 은 claude MCP 툴 네이밍 규약이다.
+/// ★CLI 패턴 문법★: `Bash(<X>:*)` 의 **colon-star** 는 Claude Code 권한 시스템의 문서화된 **prefix
+///   와일드카드** 문법이다 — `Bash(engram-send:*)` 는 `engram-send` 로 **시작하는** 명령만 허용한다
+///   (전체 Bash 아님 = 최소권한). exe 는 bare 명령 이름이고, 프라이밍이 가르치는 명령·이 grant 패턴·
+///   실제 invocation 이 모두 그 bare 이름으로 정렬된다.
 ///   ★Windows PowerShell 도구 커버(FIX-4)★: Windows 의 Claude Code 는 **PowerShell 도구**를 별도로
-///     노출하고, 에이전트가 거기서 명령을 실행하기도 한다(실측: 에이전트가 "PowerShell 로 보내겠다"). 그래서
-///     각 `Cli{exe}` 는 `Bash({exe}:*)` **와** `PowerShell({exe}:*)` **두 패턴**을 낸다 — 같은 발신 입구의
-///     두 shell 모양일 뿐 새 명령은 없다(ADR-0094 최소권한 유지 — 발신 입구 전용). PowerShell 도구가 없는
-///     환경에선 이 여분 패턴이 무해한 no-op 다(무조건 추가해도 안전).
+///     노출하고 에이전트가 거기서 명령을 실행하기도 한다(실측: 에이전트가 "PowerShell 로 보내겠다").
+///     그래서 `Cli{exe}` 하나가 두 패턴을 낸다 — 같은 발신 입구의 두 shell 모양일 뿐 새 명령은 없다.
+///     PowerShell 도구가 없는 환경에선 무해한 no-op 다.
 ///   ★옛 `Bash(<abs> *)`(space-star + 절대경로) 폐기★: 라이브 측정에서 0/38 로 전부 permission-blocked
 ///     됐다(미매칭 문법 + 배포 비친화적 절대 좌표). colon-star + bare 이름 + 주입 PATH 로 교체했다.
-///   MCP grant(`mcp__engram__send_message`)는 여전히 병행 발신 경로다(직교 입구).
 /// ★패턴 순서(Cli)★: Bash 먼저, PowerShell 다음 — build_spec 이 이 순서로 args 에 잇는다(테스트 앵커).
-/// 빈 grants → 빈 Vec(호출자가 `--allowedTools` 플래그 자체를 안 붙인다 = 권한 플래그 없음).
 // ADR-0098
 pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
     let mut out = Vec::with_capacity(grants.len());
     for g in grants {
         match g {
             ToolGrant::Mcp { server, tool } => out.push(format!("mcp__{server}__{tool}")),
-            // ★두 shell 모양(FIX-4)★: 같은 발신 입구를 Bash 도구·PowerShell 도구 양쪽에서 인가한다.
-            //   순서 = Bash → PowerShell(테스트 앵커). PowerShell 도구가 없는 환경엔 무해한 no-op.
             ToolGrant::Cli { exe } => {
                 out.push(format!("Bash({exe}:*)"));
                 out.push(format!("PowerShell({exe}:*)"));
@@ -543,33 +415,25 @@ pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
 /// claude stream-json stdin 의 유저 턴 1줄(라인 종단 `\n`)을 만든다(ADR-0044 §4).
 ///
 /// ★1 호출 = 완결된 유저 턴 1개(FIX 6a)★: `text` 를 유저 턴 1줄로 통째 감싼다 — 부분/한 글자
-///   텍스트를 넘기면 그 조각이 그대로 한 턴이 돼 대화가 깨진다. 호출자(AgentSession.write_input →
-///   RichSlot·M2)가 **완성된 메시지 전체**를 넘길 책임이다(계약 정본 = session.write_input 주석).
-/// ★ADR-0004/0044 불변식★: 이 JSON 스키마(`{"type":"user","message":{...},"uuid":…}`)는 **이 함수
-///   안에만** 존재한다. 스키마가 backend/claude.rs 밖으로 새면 ADR-0004(claude 지식 격리) 위반이다.
-///   transport(StdioTransport)·session·통로는 최종 바이트만 알고 이 형태를 모른다.
-/// ★uuid dedup 계약(공식 VS Code 확장 방식)★: 우리가 심은 `uuid` 를 top-level 에 실으면, claude 가
+///   텍스트를 넘기면 그 조각이 그대로 한 턴이 돼 대화가 깨진다. 호출자가 **완성된 메시지 전체**를
+///   넘길 책임이다.
+/// ★uuid dedup 계약(공식 VS Code 확장 방식)★: 우리가 심은 `uuid` 를 top-level 에 실으면 claude 가
 ///   `--replay-user-messages` 로 되울린 user 라인이 **이 uuid 를 그대로 보존**하고 `"isReplay":true` 를
-///   단다(실측 확정, 2026-07-06). decoder 가 그 line-level uuid 를 user 블록 json 에 실어 그대로
-///   통과시키고, 프론트 accumulator 가 uuid 로 dedup 한다(합성 에코 uuid == replay uuid → 한 개).
-///   그래서 여기서 심는 uuid 는 입력-시점 합성 에코(user_text_echo_json)와 **반드시 같아야** 한다 —
-///   호출자(session.write_input)가 한 번 생성해 양쪽에 넘긴다(session 은 불투명 Uuid 토큰만 앎).
+///   단다(실측 확정, 2026-07-06). 그래서 여기 uuid 는 같은 write_input 이 합성 에코
+///   (user_text_echo_json)에 쓴 값과 **반드시 같아야** 한다 — 호출자가 한 번 생성해 양쪽에 넘긴다.
 /// ★정확한 escape★: 따옴표·개행·유니코드는 serde_json 이 처리한다 — 문자열 포맷팅으로 손조립 금지
 ///   (`"` 미escape 시 stdin JSON 파서가 깨진다).
 /// claude 는 라인 단위로 stdin 을 파싱하므로 반드시 `\n` 으로 종단한다.
 ///
 /// ★키 순서★: `serde_json::json!`(Value=BTreeMap)는 키를 알파벳순으로 재배열한다. claude 는 임의
 ///   순서를 받지만, 스키마를 사양(`{"type":"user","message":{"role":"user","content":[…]},"uuid":…}`)
-///   그대로 드러내려고 **typed struct**로 직렬화한다 — serde 는 struct 필드를 선언 순서대로 쓰므로
-///   순서가 결정적이고 사양과 일치한다. escape 는 serde_json 이 처리(손조립 금지).
+///   그대로 드러내려고 **typed struct**로 직렬화한다 — serde 는 struct 필드를 선언 순서대로 쓴다.
 pub(crate) fn wrap_user_turn(text: &str, uuid: Uuid) -> Vec<u8> {
-    // stream-json 유저 턴 스키마(선언 순서 = 직렬화 순서). `type` 은 Rust 예약어라 rename.
     #[derive(serde::Serialize)]
     struct UserTurn<'a> {
         #[serde(rename = "type")]
         kind: &'static str,
         message: UserMessage<'a>,
-        // 우리가 통제하는 메시지 uuid — replay 가 그대로 보존한다(dedup 키).
         uuid: String,
     }
     #[derive(serde::Serialize)]
@@ -601,28 +465,19 @@ pub(crate) fn wrap_user_turn(text: &str, uuid: Uuid) -> Vec<u8> {
 /// 입력-시점 유저 에코의 `Structured{kind:"user"}` json 페이로드를 만든다(ADR-0044/0045).
 ///
 /// ★왜 입력 시점에 만드나★: json(stream-json) 모드는 PTY 처럼 입력이 즉시 로컬 에코되지 않는다 —
-///   claude 가 `--replay-user-messages` 로 유저 턴을 되울릴 때까지(왕복 지연) 화면에 안 뜬다.
-///   그래서 write_input 성공 직후 세션 층(session.rs)이 **합성 유저 이벤트**를 core.emit 해 터미널의
-///   즉시 에코를 흉내낸다. 그 뒤 claude 가 되울린 replay 중복은 프론트 accumulator 가 uuid 로 dedup 한다
-///   (decoder 는 억제하지 않고 uuid 를 실어 그대로 통과 — 아래 shape 계약).
+///   claude 가 `--replay-user-messages` 로 되울릴 때까지(왕복 지연) 화면에 안 뜬다. 그래서 write_input
+///   성공 직후 세션 층이 **합성 유저 이벤트**를 emit 해 터미널의 즉시 에코를 흉내낸다.
 ///
-/// ★uuid dedup shape 계약(load-bearing, blunt-suppress → uuid dedup 교체)★: 이 json 은 decoder 가
-///   유저 text 블록에 대해 만드는 것과 **동일한 shape**(`{"type":"text","text":<raw>,"uuid":"X"}`)여야
-///   한다. decoder 는 replay 된 user 라인의 각 블록에 line-level uuid(우리가 stdin 에 심은 값 그대로)를
-///   `uuid` 키로 얹어 `Structured{kind:"user", json}` 로 낸다(consume_block 참조). 프론트 accumulator 는
-///   user item 을 이 `uuid` 로 dedup 한다 → 이 합성 에코(uuid=X)와 replay 에코(uuid=X)가 정확히 한 개로
-///   합쳐진다. 그래서 여기 uuid 는 같은 write_input 이 stdin(wrap_user_turn)에 심은 uuid 와 **반드시
-///   동일**하다(호출자 session.write_input 이 한 번 생성해 양쪽에 넘김).
-///   스키마(블록 형태·uuid 위치)는 claude 지식이라 이 함수(backend/claude.rs)에만 존재한다(ADR-0004 격리).
-/// ★escape★: 따옴표·개행·유니코드는 serde_json 이 처리(손조립 금지 — wrap_user_turn 과 동일 규율).
+/// ★uuid dedup shape 계약(load-bearing)★: 이 json 은 decoder 가 replay 된 유저 text 블록에 대해 만드는
+///   것과 **동일한 shape**(`{"type":"text","text":<raw>,"uuid":"X"}`)여야 한다 — 프론트 accumulator 가
+///   user item 을 `uuid` 로 dedup 하므로, shape 나 uuid 가 어긋나면 합성 에코와 replay 에코가 두 개로
+///   남는다.
 pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
-    // decoder 가 user replay 라인에서 만드는 블록과 동형: {"type":"text","text":<raw>,"uuid":"X"}.
     #[derive(serde::Serialize)]
     struct TextBlock<'a> {
         #[serde(rename = "type")]
         kind: &'static str,
         text: &'a str,
-        // dedup 키 — replay 에코가 실어 오는 uuid 와 같은 값(자리 대체가 아니라 uuid 로 합쳐짐).
         uuid: String,
     }
     let block = TextBlock {
@@ -636,28 +491,16 @@ pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
 
 // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
 //
-// ★층 소속(ADR-0004)★: claude stream-json 스키마 지식(assistant/user/result 라인, content[]
-//   ContentBlock 4종)은 **이 파일 안에만** 존재한다. transport(StdioTransport)는 바보 파이프라
-//   바이트만 알고(ADR-0044), core(OutputCore)는 wire/직렬화 형식을 모른다(ADR-0003). 그래서
-//   "바이트 → OutputEvent" 재조립·파싱을 backend 인 여기가 소유한다.
-//
-// ★core 도메인 타입만 생성(ADR-0003)★: decoder 는 core 도메인 타입 `OutputEvent` 값만 만든다
-//   (Serialize 미부착). core↔wire 변환은 daemon adapter 몫이다.
-//
-// ★스코프★: 이 유닛은 standalone decoder 다 — pump/session/manager 배선은 별도 모듈(B3/B4)이며
-//   여기서 하지 않는다. 정본 스키마·매핑 근거 = 프론트 파서(src/lab/richslot/parse.ts,
-//   streamParse.ts) + 실측 fixture(backend/fixtures/claude_{text,tool}.jsonl).
+// 스키마 근거 = 실측 fixture `backend/fixtures/claude_{text,tool}.jsonl`.
 
 /// ★미종결 라인 버퍼 상한★: 개행이 영영 오지 않는 malformed/폭주 출력이면 버퍼가 무한 증가해
 ///   OOM 을 낸다. 통로는 바보 파이프(ADR-0044 무정제 불변)라 상류가 라인을 보장하지 않으므로
 ///   소비자(decoder)가 방어한다 — 4MB 넘으면 부분 라인을 버리고 다음 개행부터 복구한다. NDJSON
 ///   한 라인이 4MB 를 넘는 정상 케이스는 없다(thinking/text 블록도 그보다 훨씬 작다) → 상한 초과
-///   = 비정상으로 간주. 프론트 streamParse.ts 의 MAX_BUFFER_CHARS(4MB) 이식(단 여기선 바이트 단위).
+///   = 비정상으로 간주.
 const MAX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-/// claude stream-json 라이브 decoder. `decode`로 임의 크기 바이트 청크를 밀어 넣으면 완성된
-/// NDJSON 라인마다 파싱해 `Vec<OutputEvent>`를 돌려준다. EOF 시 `flush`로 개행 없는 잔여 라인을
-/// 처리한다.
+/// claude stream-json 라이브 decoder.
 ///
 /// ★유일한 상태 = 부분 라인 바이트 버퍼★: 메시지 병합(같은 message.id 블록 concat)은 decoder
 ///   책임이 아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해 뱉는다.
@@ -681,7 +524,7 @@ pub struct ClaudeStreamDecoder {
     ///   바이트, 그리고 clear 후 이어 붙는 바이트)가 다음 `\n` 까지 "새 라인"으로 파싱돼 **가짜
     ///   이벤트**를 낼 수 있다(꼬리에 우연히 valid JSON 조각이 있으면 특히). 오염 라인은 1개만
     ///   손실하고, **그 라인이 끝나는 `\n` 이후부터** 온전히 복구하려면 "다음 개행까지 버리는"
-    ///   상태가 있어야 한다. (프론트 streamParse.ts 는 clear 만 하지만 — 아래 decode 주석 참조.)
+    ///   상태가 있어야 한다.
     discarding: bool,
 }
 
@@ -695,17 +538,14 @@ impl ClaudeStreamDecoder {
     pub fn decode(&mut self, chunk: &[u8]) -> Vec<OutputEvent> {
         let mut events = Vec::new();
 
-        // ★resync(FIX-A)★: 이전 오버플로로 오염 라인의 꼬리를 버리는 중이면, 이번 청크에서 먼저
-        //   다음 `\n` 을 찾아 그 앞(오염 라인의 잔여)을 통째 버린다. 개행을 못 찾으면 청크 전체가
-        //   아직 오염 라인의 일부이므로 전부 버리고(버퍼에 안 쌓음) 종료 — 다음 청크에서 계속 찾는다.
+        // ★resync(FIX-A)★: 오염 라인의 꼬리를 버리는 중이면 다음 `\n` 앞을 통째 버린다. 개행이
+        //   없으면 청크 전체가 아직 그 라인의 일부다 — 버퍼에 쌓지 않고 종료한다.
         let chunk = if self.discarding {
             match chunk.iter().position(|&b| b == b'\n') {
-                // 개행 발견 → 오염 라인 종료. 그 개행 다음 바이트부터 정상 처리 재개.
                 Some(nl) => {
                     self.discarding = false;
                     &chunk[nl + 1..]
                 }
-                // 개행 없음 → 아직 오염 라인 진행 중. 전부 버리고 discarding 유지.
                 None => return events,
             }
         } else {
@@ -714,21 +554,14 @@ impl ClaudeStreamDecoder {
 
         self.buffer.extend_from_slice(chunk);
 
-        // `\n` 기준으로 완성 라인만 잘라 소비. 최초 개행부터 라인 단위로 반복해 drain 하고, 마지막
-        // 개행 뒤 잔여는 tail 로 buffer 에 남겨 다음 청크와 합친다(FIX-D: 주석을 실제 코드와 일치).
+        // 마지막 개행 뒤 잔여는 tail 로 buffer 에 남겨 다음 청크와 합친다(FIX-D: 주석을 실제 코드와 일치).
         while let Some(nl) = self.buffer.iter().position(|&b| b == b'\n') {
-            // 라인 = buffer[..nl] (개행 제외). drain 으로 라인+개행을 버퍼에서 제거한다.
             let line: Vec<u8> = self.buffer.drain(..=nl).collect();
-            // 개행 1바이트를 뺀 라인 바이트. (CRLF 대비 \r 도 뒤에서 trim 처리)
             Self::consume_line(&line[..line.len() - 1], &mut events);
         }
 
-        // 완성 라인을 모두 소비한 뒤 남은 미종결 tail 이 상한을 넘으면 오염 라인으로 간주하고 버린다.
-        // ★단순 clear 가 아니라 resync 진입(FIX-A)★: 여기까지 온 tail 은 개행이 없는 초장문 라인의
-        //   앞부분이다. buffer 를 비우는 것만으로 끝내면, 이 오염 라인의 **나머지 꼬리**(아직 도착
-        //   안 한 바이트 + 이후 청크)가 다음 `\n` 까지 새 라인으로 파싱돼 가짜 이벤트를 낼 수 있다.
-        //   그래서 discarding=true 로 들어가 그 오염 라인의 꼬리를 다음 개행까지 통째 버린다 — 오염
-        //   라인 1개만 손실하고 그 다음 정상 라인부터 온전히 복구한다.
+        // ★단순 clear 가 아니라 resync 진입(FIX-A)★: buffer 만 비우면 이 오염 라인의 나머지 꼬리가
+        //   다음 `\n` 까지 새 라인으로 파싱돼 가짜 이벤트를 낸다. 오염 라인 1개만 잃고 복구한다.
         if self.buffer.len() > MAX_BUFFER_BYTES {
             let dropped = self.buffer.len();
             self.buffer.clear();
@@ -759,16 +592,13 @@ impl ClaudeStreamDecoder {
     /// 파싱 규칙 — 실패·메타는 조용히 skip(panic 금지):
     /// - 비-UTF8 / 비-JSON(예: stderr "Warning: no stdin…") → skip.
     /// - `assistant`/`user` 라인 → message.content[] 의 각 블록을 순서대로 이벤트로.
-    ///   (블록 타입→이벤트 매핑의 정본은 프론트 parse.ts — content[] 스키마 해석만 공유.)
     /// - `result` 라인 → MessageDone(+ result.usage 있으면 Usage 추가 emit;
     ///   is_error/subtype 이 error 계열이면 MessageDone **앞에** Error 도 emit — FIX-C).
-    ///   ※ result 의 is_error/subtype 오류 표면화는 **백엔드 신규 정책**이다 — parse.ts 는
-    ///   result 의 subtype/is_error 를 전혀 검사하지 않는다(`return {kind:'result'}` 뿐).
+    ///   ※ result 의 오류 표면화는 **백엔드 신규 정책**이다(프론트 파서엔 없던 판정).
     /// - `system`/`rate_limit_event`/그 외 unknown type → skip(0개).
     fn consume_line(line: &[u8], events: &mut Vec<OutputEvent>) {
-        // ★여기서 처음 UTF-8 디코딩★(위 buffer 불변식). 라인 하나가 완성됐으므로 문자 경계 잘림
-        //   위험이 없다. 그래도 방어적으로 lossy 를 쓰지 않고 엄격 검증 후 실패 시 skip 한다 —
-        //   비-UTF8 라인은 claude 정상 출력이 아니므로 조용히 버린다(터미널 경로가 아니다).
+        // ★여기서 처음 UTF-8 디코딩★(위 buffer 불변식). lossy 가 아니라 엄격 검증 후 실패 시 skip —
+        //   비-UTF8 라인은 claude 정상 출력이 아니다(터미널 경로가 아니다).
         let text = match std::str::from_utf8(line) {
             Ok(t) => t.trim(), // 앞뒤 공백·CR(\r, CRLF 대비) 제거
             Err(_) => return,  // 비-UTF8 → skip
@@ -783,19 +613,14 @@ impl ClaudeStreamDecoder {
         };
 
         match value.get("type").and_then(|t| t.as_str()) {
-            // assistant/user 는 message.content[] 배열의 각 블록을 이벤트로. message.id 는 병합
-            // 키로 프론트가 쓰지만, decoder 는 message_id 필드에 실어 그대로 전달만 한다(병합 X).
             Some(role @ ("assistant" | "user")) => {
                 let msg = match value.get("message") {
                     Some(m) => m,
                     None => return,
                 };
                 let message_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
-                // ★user replay dedup 키(blunt-suppress → uuid dedup 교체)★: replay 된 user 라인은
-                //   우리가 stdin 에 심은 line-level `uuid` 를 그대로 보존한다(실측 2026-07-06). 그 uuid 를
-                //   여기서 뽑아 각 user 블록 json 에 실어 통과시키면(consume_block), 프론트 accumulator 가
-                //   합성 입력-시점 에코(같은 uuid)와 uuid 로 합친다. line-level 이라 블록 루프 밖에서 1회 추출.
-                //   assistant 라인엔 이 개념이 없어 None(consume_block 이 assistant arm 에선 uuid 미사용).
+                // ★user replay dedup 키★: line-level 이라 블록 루프 밖에서 1회 추출한다. assistant
+                //   라인엔 이 개념이 없어 None 이 된다(consume_block 의 assistant arm 은 안 쓴다).
                 let line_uuid = value.get("uuid").and_then(|v| v.as_str());
                 let blocks = match msg.get("content").and_then(|c| c.as_array()) {
                     Some(arr) => arr,
@@ -805,14 +630,11 @@ impl ClaudeStreamDecoder {
                     Self::consume_block(role, block, message_id.as_deref(), line_uuid, events);
                 }
             }
-            // result = 턴 종료. usage 가 있으면 토큰을 추가 emit(선택적).
             Some("result") => {
-                // ★Usage 를 MessageDone 보다 먼저 emit★: 소비자가 "턴 종료" 신호를 보기 전에
-                //   그 턴의 최종 토큰 집계를 받게 순서를 고정한다(MessageDone 뒤 Usage 면 종료 후
-                //   지연 도착처럼 보인다). result.usage.{input_tokens,output_tokens} — 실측 fixture
-                //   확인(text.jsonl 라인5: input=17095, output=4).
-                // ★0/0 usage 스킵은 의도된 노이즈 방지★: input/output 둘 다 0이면 유의미한 usage 가
-                //   아니므로(빈 집계) Usage 를 만들지 않는다.
+                // ★Usage 를 MessageDone 보다 먼저 emit★: 소비자가 "턴 종료" 신호를 보기 전에 그 턴의
+                //   최종 토큰 집계를 받게 순서를 고정한다(뒤에 오면 종료 후 지연 도착처럼 보인다).
+                //   result.usage.{input_tokens,output_tokens} — 실측 fixture 확인(text.jsonl 라인5:
+                //   input=17095, output=4).
                 if let Some(usage) = value.get("usage") {
                     let input_tokens = usage
                         .get("input_tokens")
@@ -832,13 +654,10 @@ impl ClaudeStreamDecoder {
                         });
                     }
                 }
-                // ★실패 턴 표면화(FIX-C)★: result 라인이 is_error 든 아니든 늘 MessageDone 만 내면
-                //   API 오류·max-turns·거부로 실패한 턴이 "정상 완료"로 위장된다. is_error==true(또는
-                //   subtype 이 error 계열)면 MessageDone **에 더해** Error 를 emit 해 소비자가 실패를
-                //   인지하게 한다. is_error:true payload 는 미캡처(실측 fixture 없음)라 방어적으로:
-                //   존재하는 필드만 문자열화해 메시지에 담는다.
-                // ★순서(Error 먼저)★: 소비자가 종료 신호(MessageDone)를 보기 전에 오류를 알도록
-                //   Error 를 MessageDone 보다 먼저 push 한다.
+                // ★실패 턴 표면화(FIX-C)★: 늘 MessageDone 만 내면 API 오류·max-turns·거부로 실패한
+                //   턴이 "정상 완료"로 위장된다. is_error:true payload 는 미캡처(실측 fixture 없음)라
+                //   존재하는 필드만 문자열화해 담는다. 순서는 Error → MessageDone(소비자가 종료 신호를
+                //   보기 전에 오류를 알도록).
                 let is_error = value
                     .get("is_error")
                     .and_then(|v| v.as_bool())
@@ -853,7 +672,6 @@ impl ClaudeStreamDecoder {
                 //   error 접두사만 오류로 잡고 나머지(success·interrupted·미지 non-error)는 오류 아님.
                 let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
                 if is_error || subtype_is_error {
-                    // 가용 정보만 담아 진단 메시지 조립: subtype + result 텍스트(있으면).
                     let mut detail = String::from("claude stream-json result reported failure");
                     if let Some(s) = subtype {
                         detail.push_str(&format!(" (subtype={s})"));
@@ -873,10 +691,9 @@ impl ClaudeStreamDecoder {
         }
     }
 
-    /// content[] 한 블록 → OutputEvent. 매핑 근거는 각 arm 주석(정본 = 과업 매핑표 + parse.ts).
+    /// content[] 한 블록 → OutputEvent.
     ///
-    /// `line_uuid`: user 라인의 line-level `uuid`(replay dedup 키). user-role 블록에만 실린다 —
-    ///   assistant arm 은 무시. blunt-suppress → uuid dedup 교체(아래 user 분기 참조).
+    /// `line_uuid`: user 라인의 line-level `uuid`(replay dedup 키). user-role 블록에만 쓴다.
     fn consume_block(
         role: &str,
         block: &serde_json::Value,
@@ -884,27 +701,18 @@ impl ClaudeStreamDecoder {
         line_uuid: Option<&str>,
         events: &mut Vec<OutputEvent>,
     ) {
-        // ★user 라인 블록은 통째로 Structured{kind:"user"} 로 보존★: OutputEvent 에 role 개념이
-        //   없어(assistant 전용 필드만) user replay(--replay-user-messages) 턴을 정형 variant 로
-        //   표현할 수 없다 → 원본 블록을 그대로 직렬화해 탈출구로 넘긴다. (블록 type 별로 쪼개지
-        //   않는다 — user 턴은 렌더층이 통째로 해석.)
+        // ★user 라인 블록은 통째로 Structured{kind:"user"} 로 보존★: OutputEvent 에 role 개념이 없어
+        //   (assistant 전용 필드만) user replay 턴을 정형 variant 로 표현할 수 없다 → 원본 블록을
+        //   그대로 탈출구로 넘긴다.
         if role == "user" {
-            // ★blunt-suppress → uuid dedup 교체(ADR-0044/0045)★: 예전엔 user-role text 블록을 **무조건
-            //   억제**했다 — 입력-시점 합성 에코와 중복이라는 이유였지만, resume(과거 대화 재개)을 켜면
-            //   과거 user text 가 전부 사라지는 버그였다(합성 에코를 만든 적 없는 라인까지 삭제). 이제
-            //   억제하지 않고, line-level uuid 를 블록 json 에 실어 그대로 통과시킨다. 프론트 accumulator 가
-            //   uuid 로 dedup 한다 — 방금 보낸 메시지의 replay(uuid == 합성 에코 uuid)만 한 개로 합쳐지고,
-            //   과거/비매칭 uuid 의 user text 는 전부 보존된다(vanish 회귀 제거).
-            //   ★tool_result 안전(불변 유지)★: user-role 라인은 (a) 유저 텍스트 입력 에코와 (b) 도구
-            //     결과(tool_result 블록)를 함께 실어 올 수 있다. 둘 다 여기서 Structured{kind:"user"} 로
-            //     보존한다(억제 없음). 우리는 라인의 **모든** 블록에 같은 line-level uuid 를 실어 통과시키지만,
-            //     프론트 accumulator 의 dedup 은 `type==="text"` 블록에만 적용된다(extractUserUuid 가 비-text
-            //     블록엔 null 반환) — 합성 에코가 만드는 블록이 단일 text 뿐이라 dedup 짝도 text 에서만 생기기
-            //     때문이다. 그래서 한 라인에 text(에코) + tool_result 가 함께 와도 tool_result 는 같은 uuid 를
-            //     공유하지만 dedup 대상이 아니라 **항상 보존**된다(multi-block tool_result 소실 방지 — HIGH FIX).
-            //   uuid 가 있으면 블록 json 에 `uuid` 키를 얹어 shape 를 합성 에코(user_text_echo_json)와
-            //   일치시킨다. 없으면(과거 라인·비-replay) 원본 그대로 — accumulator 는 uuid 없는 user item 을
-            //   dedup 하지 않고 각각 보존한다.
+            // ★억제 금지(되살리지 말 것)★: 예전엔 user-role text 블록을 무조건 억제했다 — 입력-시점
+            //   합성 에코와 중복이라는 이유였지만, resume 을 켜면 과거 user text 가 전부 사라지는
+            //   버그였다(합성 에코를 만든 적 없는 라인까지 삭제). 대신 uuid 를 실어 통과시키고 dedup 은
+            //   프론트에 맡긴다.
+            //   ★tool_result 안전(HIGH FIX)★: 한 user 라인에 텍스트 에코와 tool_result 가 함께 올 수
+            //     있다. 모든 블록에 같은 line-level uuid 를 실어도 프론트 dedup 은 `type==="text"` 에만
+            //     걸리므로(extractUserUuid 가 비-text 에 null 반환) tool_result 는 항상 보존된다.
+            //   uuid 가 없으면(과거 라인·비-replay) 원본 그대로 — 그런 item 은 dedup 되지 않는다.
             let json = match line_uuid {
                 Some(u) => Self::user_block_with_uuid(block, u),
                 None => block.to_string(),
@@ -916,12 +724,10 @@ impl ClaudeStreamDecoder {
             return;
         }
 
-        // assistant 라인: 블록 type 별 매핑.
         match block.get("type").and_then(|t| t.as_str()) {
             Some("text") => {
-                // text 블록 → TextDelta. (통짜 모드라 실은 델타가 아닌 완결 텍스트지만, OutputEvent
-                //   에 "완결 텍스트" variant 가 없고 TextDelta 가 텍스트 증분의 정형 표현이다. 병합은
-                //   프론트 몫 — decoder 는 라인별로 그대로 흘린다.)
+                // 통짜 모드라 실은 델타가 아닌 완결 텍스트지만, OutputEvent 에 "완결 텍스트" variant 가
+                //   없고 TextDelta 가 텍스트 증분의 정형 표현이다.
                 // ★malformed 계약(FIX-B)★: 문자열 `text` 가 없으면(스키마 이탈) 빈 TextDelta 를
                 //   방출하지 않고 skip 한다 — 빈 델타는 다운스트림에 무의미한 노이즈이고, "정상 text
                 //   블록인데 내용이 빈 문자열"과 구분도 안 된다. (Structured 보존 대신 skip 선택:
@@ -936,8 +742,7 @@ impl ClaudeStreamDecoder {
                 });
             }
             Some("tool_use") => {
-                // tool_use → ToolCall. input(임의 JSON 객체)을 그대로 문자열화해 args_json 에 싣는다
-                //   (backend 별 스키마 그대로 — OutputEvent 주석 계약). id 는 tool_use.id(결과 매칭용).
+                // id 는 tool_use.id — 뒤따르는 tool_result 와 짝짓는 키다.
                 // ★malformed 계약(FIX-B)★: 문자열 `name` 이 없으면(스키마 이탈) 빈 name 의 가짜
                 //   ToolCall 을 만들지 않는다 — 빈 name 호출은 다운스트림에 "이름 없는 도구 실행"으로
                 //   위장돼 위험하다. 대신 원본 블록을 Structured{kind:"tool_use"} 로 통째 보존한다
@@ -970,11 +775,10 @@ impl ClaudeStreamDecoder {
             Some(other) => {
                 events.push(Self::structured(other, block));
             }
-            None => {} // type 없는 블록(스키마 이탈) → skip.
+            None => {}
         }
     }
 
-    /// Structured 탈출구 헬퍼 — 블록/라인을 원본 그대로 직렬화해 kind 태그와 함께 보존.
     fn structured(kind: &str, value: &serde_json::Value) -> OutputEvent {
         OutputEvent::Structured {
             kind: kind.to_string(),
@@ -1003,11 +807,7 @@ impl ClaudeStreamDecoder {
     }
 }
 
-// ── ADR-0079: resume 시 `.jsonl` transcript → OutputEvent seed (claude 지식 격리) ──────
-//
-// ★층 소속(ADR-0004)★: `.jsonl` transcript 의 위치(cwd→프로젝트 슬러그 인코딩)·라인 타입 필터·
-//   과거 턴 매핑 지식은 **이 파일 안에만** 있다. manager 는 `read_transcript_events(cwd, sid)` 만
-//   부르고 claude 파일 포맷을 모른다. core/transport 도 모른다.
+// ── ADR-0079: resume 시 `.jsonl` transcript → OutputEvent seed ──────
 //
 // ★매핑 재사용(디코더 한 벌)★: transcript 의 `assistant`/`user` 라인은 라이브 stream-json 과 **동일한**
 //   봉투(top-level `type` + `message.content[]` 블록)를 갖는다(실측 2026-07-13, claude 2.1.170). 그래서
@@ -1073,9 +873,6 @@ fn claude_home() -> Option<PathBuf> {
 /// 문자열만 받는다(ADR-0012 seam 격리).
 ///
 /// - `isSidechain:true`(sub-agent 턴) 라인은 스킵한다 — 원본 대화만 복원한다.
-/// - 나머지 라인은 파일(append) 순서 그대로 라이브 디코더 `consume_line` 에 통과시킨다. summary·
-///   file-history-snapshot·queue-operation 등 non-conversation 라인 타입은 consume_line 의 catch-all
-///   이 스킵하므로 별도 필터가 필요 없다(user/assistant/result 만 이벤트가 된다).
 /// - result 라인은 라이브와 동일하게 MessageDone(+usage) 로 매핑돼 턴 경계 구분선이 생긴다.
 pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     let mut events = Vec::new();
@@ -1084,13 +881,11 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
         if trimmed.is_empty() {
             continue;
         }
-        // sub-agent(sidechain) 턴 스킵 — 라인 레벨에서만 판단 가능(consume_line 은 isSidechain 을 모른다).
-        //   전체 JSON 파싱까지 가지 않고 top-level 필드만 훑어도 되지만, 이미 라인 하나라 파싱 비용이
-        //   작고 정확도가 높아 serde 로 판정한다(비-JSON 라인은 어차피 consume_line 이 스킵).
+        // top-level 필드만 훑어도 되지만 이미 라인 하나라 파싱 비용이 작고 정확도가 높아 serde 로
+        //   판정한다(비-JSON 라인은 어차피 consume_line 이 스킵).
         if is_sidechain_line(trimmed) {
             continue;
         }
-        // 라이브 디코더 재사용 — transcript 라인도 완성된 한 줄이므로 consume_line 이 그대로 처리한다.
         ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events);
     }
     events
@@ -1104,9 +899,8 @@ fn is_sidechain_line(line: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// ADR-0079: resume 스폰 시 데몬이 부르는 진입점 — cwd·sid 로 `.jsonl` transcript 를 찾아 파일 끝에서
-/// 최대 `TRANSCRIPT_TAIL_BYTES` 만큼 읽어 과거 이벤트로 변환한다. 파일이 없거나(신규 세션) 읽기 실패면
-/// 빈 Vec(seed 안 함 = fresh 와 동일). **여기가 유일한 파일 I/O 지점**이고, 파싱은 순수 함수에 위임한다.
+/// ADR-0079: resume 스폰 시 데몬이 부르는 진입점. 파일이 없거나(신규 세션) 읽기 실패면 빈
+/// Vec(seed 안 함 = fresh 와 동일). **여기가 유일한 파일 I/O 지점**이고 파싱은 순수 함수에 위임한다.
 ///
 /// ★tail 읽기(spawn 지연 방지)★: 파일이 상한보다 크면 끝에서 TRANSCRIPT_TAIL_BYTES 만 읽는다. 그 경우
 ///   seek 지점의 첫 (부분) 라인은 오브젝트 중간에서 잘렸으므로 **명시적으로 폐기**한다 — 첫 `\n` 까지의
@@ -1124,15 +918,12 @@ pub(crate) fn read_transcript_events(cwd: &std::path::Path, sid: Uuid) -> Vec<Ou
         return Vec::new();
     };
     let Ok(mut file) = std::fs::File::open(&path) else {
-        // 신규/미대화 세션 등 파일 부재는 정상 — seed 없이 fresh 버퍼로 시작.
         return Vec::new();
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    // 상한 초과분은 끝에서부터만 읽는다(오래된 과거 truncate 수용 — Ring 상한과 동형).
-    //   seek offset 이 0 이면 파일 전체가 상한 이하 → 첫 라인이 온전(부분 라인 폐기 안 함).
     let seeked = len > TRANSCRIPT_TAIL_BYTES;
     if seeked {
-        // seek 실패면 파일 포인터가 어디를 가리키는지 불명 → 임의 위치 읽기 대신 포기(빈 Vec).
+        // seek 실패면 파일 포인터 위치가 불명 → 임의 위치 읽기 대신 포기(빈 Vec).
         if file
             .seek(SeekFrom::Start(len - TRANSCRIPT_TAIL_BYTES))
             .is_err()
@@ -1140,7 +931,6 @@ pub(crate) fn read_transcript_events(cwd: &std::path::Path, sid: Uuid) -> Vec<Ou
             return Vec::new();
         }
     }
-    // ★bounded★: seek 지점부터 최대 상한 바이트만. 파일이 동시에 커져도 여기서 하드 상한이 걸린다.
     let mut buf = Vec::new();
     if file
         .take(TRANSCRIPT_TAIL_BYTES)
@@ -1149,10 +939,9 @@ pub(crate) fn read_transcript_events(cwd: &std::path::Path, sid: Uuid) -> Vec<Ou
     {
         return Vec::new();
     }
-    // 바이트→문자열은 lossy(잘린 첫 라인의 부분 멀티바이트 문자를 흡수 — 그 라인은 아래서 폐기).
+    // 바이트→문자열은 lossy — 잘린 첫 라인의 부분 멀티바이트 문자를 흡수한다(그 라인은 아래서 폐기).
     let text = String::from_utf8_lossy(&buf);
-    // ★부분 첫 라인 명시 폐기★: seek 했으면 첫 `\n` 이후부터 파싱(그 앞은 잘린 오브젝트 조각).
-    //   `\n` 이 없으면(= 상한 안에 개행 하나도 없는 초장문 단일 라인) 온전한 라인이 없다고 보고 빈 Vec.
+    // `\n` 이 없으면(= 상한 안에 개행 하나도 없는 초장문 단일 라인) 온전한 라인이 없다.
     let to_parse: &str = if seeked {
         match text.find('\n') {
             Some(idx) => &text[idx + 1..],
@@ -1165,11 +954,6 @@ pub(crate) fn read_transcript_events(cwd: &std::path::Path, sid: Uuid) -> Vec<Ou
 }
 
 // ── S15 B3: pump→core 배선 seam (ADR-0004/0044) ──────────────────────────────────
-//
-// ★claude 지식은 계속 여기만★: transport(StdioTransport)는 `dyn OutputDecoder` 만 알고 claude 를
-//   모른다(ADR-0004). manager 가 json 모드 세션에 `Box::new(ClaudeStreamDecoder::new())` 를 만들어
-//   StdioTransport 에 주입하면, pump 가 이 트레이트 메서드로 바이트를 정제해 core 로 흘린다.
-//   inherent decode/flush(위 impl)를 그대로 위임 — 파싱 로직은 한 벌만 존재한다.
 impl crate::agent::transport::OutputDecoder for ClaudeStreamDecoder {
     fn decode(&mut self, chunk: &[u8]) -> Vec<OutputEvent> {
         ClaudeStreamDecoder::decode(self, chunk)
@@ -1184,14 +968,11 @@ mod tests {
     use super::*;
 
     // ── backend/claude.rs 단위 테스트 ─────────────────────────────────────────
-    // 현 pty/claude.rs tests의 build_command 검증을 build_spec 시그니처로 이식.
-    // 기존 claude.rs 테스트는 그대로 두고, stage 6에서 claude.rs 제거 시 이쪽만 남는다.
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], None)
     }
 
-    /// control endpoint 주입형 — `--mcp-config` 주입(ADR-0086)을 검증하는 테스트용.
     fn spec_with_control(
         command: &AgentCommand,
         mode: SpawnMode,
@@ -1201,7 +982,6 @@ mod tests {
         ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], control)
     }
 
-    /// 터미널 모드 claude 명령(기존 경로 회귀 테스트용).
     fn terminal(extra: Vec<&str>) -> AgentCommand {
         AgentCommand::Claude {
             extra_args: extra.into_iter().map(String::from).collect(),
@@ -1213,9 +993,6 @@ mod tests {
     fn claude_fresh_uses_session_id_flag() {
         let sid = Uuid::new_v4();
         let s = spec(&terminal(vec!["--verbose"]), SpawnMode::Fresh, Some(sid));
-        // Windows면 cmd /c claude … 로 래핑되므로 기대값도 console_command로 계산.
-        // ★AUTO 권한 모드(사용자 결정 2026-07-22)★: 모든 spawn 은 `--permission-mode bypassPermissions`
-        //   를 base 플래그로 **맨 앞**에 낸다(무조건). 그래서 골든도 그 pair 로 시작한다.
         let (p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
@@ -1224,7 +1001,6 @@ mod tests {
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--verbose".to_string(),
-                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.program, p);
@@ -1235,7 +1011,6 @@ mod tests {
     fn claude_resume_uses_resume_flag() {
         let sid = Uuid::new_v4();
         let s = spec(&terminal(vec![]), SpawnMode::Resume, Some(sid));
-        // AUTO 권한 모드 pair 가 맨 앞(사용자 결정 2026-07-22).
         let (_p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
@@ -1243,7 +1018,6 @@ mod tests {
                 "bypassPermissions".to_string(),
                 "--resume".to_string(),
                 sid.to_string(),
-                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.args, a);
@@ -1304,7 +1078,6 @@ mod tests {
     /// CLI 전용(비-MCP 백엔드) 스폰이 받는 endpoint — `config_path=None` 이 그 갈림 신호다(ADR-0128).
     ///   CLI 입구(크레덴셜 env·PATH 프리펜드)를 검증하는 테스트는 전부 이 변주를 쓴다: MCP 가능 변주
     ///   (`ep()`)로는 그 배선이 **없는 것이 정답**이라 배선 회귀를 못 잡는다.
-    // ADR-0128
     fn ep_cli_only() -> ControlEndpoint {
         ControlEndpoint {
             config_path: None,
@@ -1312,9 +1085,7 @@ mod tests {
         }
     }
 
-    /// CLI 전용 + send_exe=None(형제 바이너리 부재 모사) — 크레덴셜은 주입하되 ENGRAM_SEND_EXE·PATH 는
-    ///   생략됨을 검증한다. 데몬은 이 조합을 provision 에서 fail-closed 로 끊으므로(발신 입구 0) 실
-    ///   스폰엔 오지 않는 방어 경로다.
+    /// CLI 전용 + send_exe=None(형제 바이너리 부재 모사).
     fn ep_cli_only_no_send() -> ControlEndpoint {
         ControlEndpoint {
             config_path: None,
@@ -1325,10 +1096,8 @@ mod tests {
 
     #[test]
     fn claude_control_endpoint_injects_mcp_config_flag() {
-        // control 이 있으면 세션 플래그 뒤에 `--mcp-config <config_path>` 가 붙어야 한다(터미널 모드).
         let sid = Uuid::new_v4();
         let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, Some(sid), Some(ep()));
-        // AUTO 권한 모드 pair 가 맨 앞, 그 뒤 세션·mcp-config(사용자 결정 2026-07-22).
         let (_p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
@@ -1338,8 +1107,6 @@ mod tests {
                 sid.to_string(),
                 "--mcp-config".to_string(),
                 "C:/data/mcp/agent-x.json".to_string(),
-                // ADR-0094/0106: control 있으면 내장 SendMessage 차단 주입(grants 빈 ep() 라
-                //   --allowedTools 는 없음).
                 "--disallowedTools".to_string(),
                 "SendMessage".to_string(),
             ],
@@ -1365,7 +1132,6 @@ mod tests {
 
     #[test]
     fn claude_no_control_endpoint_no_mcp_config() {
-        // control=None(제어 채널 미구성)이면 --mcp-config 를 주입하지 않는다(기존 동작 불변).
         let s = spec(&terminal(vec!["--debug"]), SpawnMode::Fresh, None);
         assert!(
             !s.args.iter().any(|a| a == "--mcp-config"),
@@ -1376,11 +1142,6 @@ mod tests {
 
     #[test]
     fn claude_control_endpoint_none_config_path_no_mcp_config_flag() {
-        // ★ADR-0099★: control endpoint 는 있으되 config_path=None(비-MCP 백엔드가 준 endpoint 모사)이면
-        //   --mcp-config 플래그가 붙지 않는다 — 부재를 타입(Option)으로 인코딩해 backend 가 Some 일 때만
-        //   주입한다(빈-경로 sentinel 방어 코드 없이 타입이 강제). ★ADR-0128★: 같은 신호가 CLI 입구
-        //   주입의 게이트이기도 하다 — None 갈래는 CLI 크레덴셜을 받는다(아래 단언; 배타성은 전용
-        //   ADR-0128 테스트가 양방향으로 못박는다).
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1401,8 +1162,6 @@ mod tests {
     // ── ADR-0086 스텝 2: CLI 크레덴셜 env 주입(ENGRAM_TOKEN / ENGRAM_CONTROL_URL) ──────────────
     #[test]
     fn claude_cli_only_endpoint_injects_cli_env() {
-        // CLI 전용 스폰(config_path=None)이면 env 에 ENGRAM_TOKEN(토큰) + ENGRAM_CONTROL_URL(base=/mcp
-        //   벗긴 값)이 실린다.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1425,7 +1184,6 @@ mod tests {
             Some("http://127.0.0.1:54321"),
             "ENGRAM_CONTROL_URL = MCP url 에서 /mcp 를 벗긴 base"
         );
-        // F1: send_exe 가 있으면 ENGRAM_SEND_EXE(절대경로)도 주입된다.
         let send_exe = s
             .env
             .iter()
@@ -1440,9 +1198,6 @@ mod tests {
 
     #[test]
     fn claude_cli_only_without_send_exe_omits_send_env() {
-        // F1: CLI 전용 스폰인데 send_exe=None(형제 바이너리 부재)이면 ENGRAM_SEND_EXE 만 생략하고 token/
-        //   url 은 그대로 주입한다 — 데몬이 이 조합을 provision 에서 이미 끊으므로(발신 입구 0 → Err)
-        //   여기 남는 크레덴셜은 부를 CLI 가 없는 무해한 잔여다.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1464,7 +1219,6 @@ mod tests {
 
     #[test]
     fn claude_no_control_endpoint_no_cli_env() {
-        // control=None 이면 CLI env 도 주입하지 않는다(기존 동작 불변 — env 오염 없음).
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         assert!(
             !s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN"
@@ -1478,9 +1232,7 @@ mod tests {
     // ── ADR-0094: PATH 주입(bare `engram-send` 해석 — send_exe 부모 디렉토리 prepend) ──────────
     #[test]
     fn claude_cli_only_endpoint_injects_path_with_send_exe_dir_prepended() {
-        // CLI 전용 스폰 + send_exe 가 있으면 PATH env 항목이 실리고, 그 값은 send_exe 부모 디렉토리로
-        //   **시작**하며 기존 프로세스 PATH 를 그 뒤에 보존한다(상위집합 — 아무것도 제거 안 함).
-        //   ep_cli_only() 의 send_exe = C:/app/engram-send.exe → 부모 = C:/app.
+        // ep_cli_only() 의 send_exe = C:/app/engram-send.exe → 부모 = C:/app.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1493,8 +1245,7 @@ mod tests {
             .find(|(k, _)| k == "PATH")
             .map(|(_, v)| v.as_str())
             .expect("send_exe 있으면 PATH env 주입");
-        // 부모 디렉토리(C:/app)가 첫 요소여야 한다 — split_paths 로 분해해 첫 컴포넌트 확인
-        //   (구분자·표기 차를 흡수: 문자열 prefix 비교 대신 경로 분해로 단언).
+        // 문자열 prefix 비교가 아니라 split_paths 분해로 단언한다 — 구분자·표기 차를 흡수.
         let first = std::env::split_paths(path)
             .next()
             .expect("PATH 에 최소 한 요소");
@@ -1503,9 +1254,6 @@ mod tests {
             std::path::PathBuf::from("C:/app"),
             "PATH 첫 요소 = send_exe 부모 디렉토리: {path}"
         );
-        // 기존 프로세스 PATH 가 뒤에 보존됐는지: 주입값의 요소 수가 (부모 1개 + 원래 PATH 요소들)이라
-        //   부모-only(요소 1개, 원래 PATH 가 비었을 때)를 제외하면 원래 PATH 를 포함한다. 원래 PATH 의
-        //   첫 컴포넌트가 주입값 뒤쪽(index>=1)에 나타나는지로 "prepend + 원본 보존"을 확인한다.
         if let Some(orig) = std::env::var_os("PATH") {
             if let Some(orig_first) = std::env::split_paths(&orig).next() {
                 let injected: Vec<std::path::PathBuf> = std::env::split_paths(path).collect();
@@ -1519,8 +1267,6 @@ mod tests {
 
     #[test]
     fn claude_cli_only_without_send_exe_omits_path_env() {
-        // CLI 전용 스폰이라도 send_exe=None(형제 부재)이면 PATH 를 주입하지 않는다 — 해석시킬 바이너리가
-        //   없으므로 상속 PATH 를 그대로 둔다.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1536,7 +1282,6 @@ mod tests {
 
     #[test]
     fn claude_no_control_endpoint_no_path_env() {
-        // control=None 이면 PATH 주입도 없다(env 오염 없음).
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         assert!(
             !s.env.iter().any(|(k, _)| k == "PATH"),
@@ -1563,7 +1308,6 @@ mod tests {
         )
     }
 
-    /// PATH env 항목을 전부 골라낸다(중복 검출용). 승리 PATH 는 정확히 하나여야 한다.
     fn path_entries(s: &CommandSpec) -> Vec<&str> {
         s.env
             .iter()
@@ -1574,10 +1318,6 @@ mod tests {
 
     #[test]
     fn claude_profile_path_survives_as_tail_uppercase_key() {
-        // ★FIX-1(프로필 PATH 우선)★: 프로필이 커스텀 PATH("C:\\custom;C:\\other")를 실었으면, 주입된
-        //   PATH 는 send_exe 부모(C:/app)를 **맨 앞**에, 그 프로필 값을 **tail** 로 보존해야 한다 —
-        //   데몬 프로세스 PATH 로 리빌드하면 프로필 PATH 가 증발하므로 그러면 안 된다. 또 승리 PATH 는
-        //   spec env 에 정확히 하나(기존 프로필 항목을 제자리 교체 — 새 PATH 를 뒤에 또 쌓지 않음).
         let profile_env = vec![("PATH".to_string(), "C:\\custom;C:\\other".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         let entries = path_entries(&s);
@@ -1588,14 +1328,12 @@ mod tests {
             s.env
         );
         let components: Vec<std::path::PathBuf> = std::env::split_paths(entries[0]).collect();
-        // 첫 컴포넌트 = send_exe 부모(shadowing 방어 — 우리 형제가 먼저 해석).
         assert_eq!(
             components.first(),
             Some(&std::path::PathBuf::from("C:/app")),
             "PATH 첫 컴포넌트 = send_exe 부모(C:/app): {:?}",
             components
         );
-        // tail = 프로필 PATH(C:\custom, C:\other) — 데몬 프로세스 PATH 가 아니라 프로필 값이 생존.
         assert!(
             components.contains(&std::path::PathBuf::from("C:\\custom"))
                 && components.contains(&std::path::PathBuf::from("C:\\other")),
@@ -1607,9 +1345,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn claude_profile_path_survives_with_windows_path_key_casing() {
-        // ★FIX-1(Windows 키 대소문자)★: 프로필이 "Path"(혼합 표기)로 PATH 를 실어도 같은 변수로
-        //   인식해(eq_ignore_ascii_case) 그 값을 base 로 쓰고 제자리 교체한다 — 데몬 PATH 로 리빌드
-        //   하거나 별도 "PATH" 항목을 추가하지 않는다. Windows 전용(대소문자 무시 의미론).
         let profile_env = vec![("Path".to_string(), "C:\\custom;C:\\other".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         let entries = path_entries(&s);
@@ -1632,7 +1367,6 @@ mod tests {
             "프로필 'Path' 값이 tail 로 생존: {:?}",
             components
         );
-        // 키 표기는 프로필 것을 유지(제자리 교체) — 새 "PATH" 항목을 추가하지 않았음을 확인.
         assert!(
             s.env.iter().any(|(k, _)| k == "Path"),
             "제자리 교체라 프로필 키 표기('Path')를 유지: {:?}",
@@ -1643,12 +1377,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn claude_duplicate_case_variant_path_uses_last_value_and_dedupes() {
-        // ★must-fix 회귀(last-match-wins + dedupe)★: env 에 case-variant 중복 PATH 두 개가 오면
-        //   (`("PATH", 데몬)` 다음 `("Path", 프로필)`), transport 는 순차 적용이라 자식엔 **마지막**
-        //   값(프로필)이 산다. 그래서 base 는 **마지막** 값이어야 하고(첫 값 아님), 승리 키 표기는
-        //   마지막 것("Path")을 유지하며, 최종 spec env 엔 case-equivalent PATH 가 **정확히 하나**만
-        //   남아야 한다(나머지 중복 제거). 중복을 남기면 우리가 앞 항목만 고쳐도 뒤 미수정 항목이
-        //   last-wins 로 이겨 주입이 조용히 무력화된다.
         let profile_env = vec![
             ("PATH".to_string(), "C:\\daemon".to_string()),
             ("Path".to_string(), "C:\\profile".to_string()),
@@ -1661,21 +1389,18 @@ mod tests {
             "case-equivalent PATH 는 정확히 하나(중복 제거): {:?}",
             s.env
         );
-        // 승리 키 표기 = 마지막 항목("Path") — 제자리 교체라 그 표기가 남는다.
         assert!(
             s.env.iter().any(|(k, _)| k == "Path") && !s.env.iter().any(|(k, _)| k == "PATH"),
             "승리 키 표기 = 마지막 항목('Path'), 'PATH' 는 제거됨: {:?}",
             s.env
         );
         let components: Vec<std::path::PathBuf> = std::env::split_paths(entries[0]).collect();
-        // 첫 컴포넌트 = send_exe 부모(shadowing 방어).
         assert_eq!(
             components.first(),
             Some(&std::path::PathBuf::from("C:/app")),
             "PATH 첫 컴포넌트 = send_exe 부모(C:/app): {:?}",
             components
         );
-        // tail = **마지막** 값(C:\profile) — 첫 값(C:\daemon)이 아니어야 한다.
         assert!(
             components.contains(&std::path::PathBuf::from("C:\\profile")),
             "tail = 마지막 PATH 값(C:\\profile) 보존: {:?}",
@@ -1690,9 +1415,8 @@ mod tests {
 
     #[test]
     fn claude_duplicate_same_key_path_uses_last_value_and_dedupes() {
-        // ★must-fix 회귀(정확히 같은 키 중복 — 모든 OS)★: 같은 "PATH" 키가 두 번 오면 순차 적용에서
-        //   마지막 값이 자식에 산다. base = 마지막 값(C:\second), 승리 항목 정확히 하나로 dedupe.
-        //   case-insensitive 매칭에 의존하지 않아 어느 OS 에서도 돈다.
+        // 정확히 같은 키 중복 — case-insensitive 매칭에 의존하지 않아 모든 OS 에서 돈다
+        //   (cfg(windows) 형제 테스트와의 구분).
         let profile_env = vec![
             ("PATH".to_string(), "C:\\first".to_string()),
             ("PATH".to_string(), "C:\\second".to_string()),
@@ -1733,9 +1457,8 @@ mod tests {
     // ── ADR-0128: 우편 채널 하드 단일화 — 교육 집합 = 물리 배선 집합(등호, 양방향 단언) ────────────
     #[test]
     fn claude_mcp_capable_spawn_has_no_cli_entrance_wiring() {
-        // ★핵심(ADR-0128 결정 2)★: MCP 가능 스폰(config_path=Some)은 mcp-config 만 받고 `engram-send` 로
-        //   가는 경로를 **하나도** 받지 않는다. endpoint 가 send_exe 를 실어 보내도(데몬은 두 갈래 공용
-        //   한 줄로 싣는다) 이 갈림이 막는 것이 계약이라, 그 값이 든 ep() 로 단언해야 의미가 있다.
+        // endpoint 가 send_exe 를 실어 보내도(데몬은 두 갈래 공용 한 줄로 싣는다) 이 갈림이 막는 것이
+        //   계약이라, 그 값이 든 ep() 로 단언해야 의미가 있다.
         // ★프로필 PATH 를 반드시 실어 둔다(빈 env 면 아래 단언이 공허해진다)★: 빈 env 로 지으면 PATH 항목이
         //   0 개라 "우리가 얹지도 깎지도 않았다" 를 견줄 대상이 없다 — 기존 PATH 항목의 앞에 형제 디렉토리를
         //   끼워 넣는 회귀가 초록으로 통과한다.
@@ -1748,9 +1471,8 @@ mod tests {
                 s.env
             );
         }
-        // ★단언 범위 = "우리가 안 얹었다"(사용자 결정)★: PATH 값이 프로필이 준 값과 **글자 그대로 같아야**
-        //   한다 — 형제 디렉토리를 prepend 하지 않았고(결정 위반 방지), 프로필이 실은 값을 깎지도 않았다.
-        //   프로필이 스스로 CLI 경로를 실은 경우까지 막는 것은 이 결정의 범위가 아니다(사용자 책임).
+        // ★단언 범위(사용자 결정)★: 프로필이 스스로 CLI 경로를 실은 경우까지 막는 것은 이 결정의
+        //   범위가 아니다(사용자 책임).
         assert_eq!(
             path_entries(&s),
             vec!["C:\\custom"],
@@ -1766,9 +1488,6 @@ mod tests {
 
     #[test]
     fn claude_cli_only_spawn_gets_full_cli_entrance_wiring() {
-        // ★등호의 반대 절반(ADR-0128)★: CLI 전용 스폰은 크레덴셜 3종 + PATH 프리펜드를 전부 받고
-        //   mcp-config 는 받지 않는다. 프로필 PATH 를 함께 실어 tail 보존·단일 항목까지 한 테스트에서
-        //   못박는다 — 이 갈래가 조용히 열화하면 비-MCP 백엔드의 우편이 죽는다.
         let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", "ENGRAM_SEND_EXE"] {
@@ -1800,7 +1519,6 @@ mod tests {
     // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────
     #[test]
     fn claude_priming_file_injects_append_system_prompt_flag_terminal() {
-        // priming_file 이 있으면 터미널 모드 args 에 `--append-system-prompt-file <abs>` 가 붙는다.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1822,7 +1540,6 @@ mod tests {
 
     #[test]
     fn claude_priming_file_injects_flag_json_mode() {
-        // json(stream-json) 모드도 시스템 프롬프트를 받으므로 프라이밍 주입 대상.
         let s = spec_with_control(
             &json(vec![]),
             SpawnMode::Fresh,
@@ -1838,8 +1555,6 @@ mod tests {
 
     #[test]
     fn claude_no_priming_file_no_append_flag() {
-        // priming_file=None(파일 부재·미구성)이면 플래그를 주입하지 않는다(graceful — 프라이밍 없이 스폰).
-        //   control endpoint 는 있으나(=MCP 는 붙음) 프라이밍만 없는 경우를 검증한다.
         let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
         assert!(
             !s.args.iter().any(|a| a == "--append-system-prompt-file"),
@@ -1850,7 +1565,6 @@ mod tests {
 
     #[test]
     fn claude_no_control_endpoint_no_priming_flag() {
-        // control=None(제어 채널 자체 미구성)이면 프라이밍 플래그도 당연히 없다.
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         assert!(
             !s.args.iter().any(|a| a == "--append-system-prompt-file"),
@@ -1862,8 +1576,6 @@ mod tests {
     // ── S18 D(spec §6): 세션 한정 설정 조각 주입(`--settings`) ────────────────────────────
     #[test]
     fn claude_settings_file_injects_settings_flag_terminal() {
-        // settings_file 이 있으면 터미널 모드 args 에 `--settings <abs>` 가 붙는다(경로 payload — 인라인
-        //   JSON 아님: cmd.exe 인용 지옥 회피, build_spec 주석).
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1901,7 +1613,6 @@ mod tests {
 
     #[test]
     fn claude_no_settings_file_no_settings_flag() {
-        // settings_file=None 이면 플래그 미주입 — 오늘 동작과 바이트 동일(회귀 0).
         let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
         assert!(
             !s.args.iter().any(|a| a == "--settings"),
@@ -1922,9 +1633,6 @@ mod tests {
 
     #[test]
     fn claude_settings_flag_does_not_disturb_the_allowed_tools_tail() {
-        // ★variadic 흡수 방어의 회귀 가드★: `--settings <path>` 는 grant 그룹보다 **앞**에 들어가야 한다.
-        //   뒤로 가면 `--allowedTools` 의 variadic 이 경로를 "허용 툴" 로 삼키거나(권한 오염) grant 그룹의
-        //   맨-끝 불변식이 깨진다. 두 플래그를 함께 켠 조합에서 마지막 요소가 여전히 grant 패턴인지 본다.
         let ep = ControlEndpoint {
             settings_file: Some(PathBuf::from("C:/data/mcp/a.settings.json")),
             ..ep_with_grants()
@@ -1952,7 +1660,6 @@ mod tests {
     // ── ADR-0094: 발신 권한 pre-authorization(`--allowedTools`) ─────────────────────────
     #[test]
     fn grants_to_allowed_tools_mcp_pattern() {
-        // Mcp{server,tool} → mcp__{server}__{tool}. 이름은 그대로 끼워 넣는다(형식만).
         let out = grants_to_allowed_tools(&[ToolGrant::Mcp {
             server: "engram".to_string(),
             tool: "send_message".to_string(),
@@ -1962,9 +1669,6 @@ mod tests {
 
     #[test]
     fn grants_to_allowed_tools_cli_pattern() {
-        // Cli{exe} → Bash({exe}:*) + PowerShell({exe}:*) (colon-star prefix 와일드카드 — Claude Code
-        //   문법; 두 shell 도구 모양, 순서 = Bash → PowerShell). exe 는 데몬이 넘긴 bare 명령 이름
-        //   (`engram-send`). 함수는 이름-무관(값 왜곡 없이 그대로 끼움) — 여기선 bare 이름 검증(FIX-4).
         let out = grants_to_allowed_tools(&[ToolGrant::Cli {
             exe: "engram-send".to_string(),
         }]);
@@ -1979,8 +1683,6 @@ mod tests {
 
     #[test]
     fn grants_to_allowed_tools_both_preserve_order() {
-        // MCP + CLI 모두 → grants 순서대로. CLI 는 Bash → PowerShell 두 패턴으로 전개(FIX-4).
-        //   (build_spec 이 이 순서로 args 에 잇는다.)
         let out = grants_to_allowed_tools(&[
             ToolGrant::Mcp {
                 server: "engram".to_string(),
@@ -2002,13 +1704,11 @@ mod tests {
 
     #[test]
     fn grants_to_allowed_tools_empty_is_empty() {
-        // 빈 grants → 빈 Vec(호출자가 --allowedTools 자체를 안 붙인다).
         assert!(grants_to_allowed_tools(&[]).is_empty());
     }
 
     #[test]
     fn claude_grants_inject_allowed_tools_flag_terminal() {
-        // grants 가 있으면 터미널 모드 args 에 `--allowedTools` + 패턴들이 붙는다(세션/mcp-config 뒤).
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -2042,7 +1742,6 @@ mod tests {
 
     #[test]
     fn claude_grants_inject_allowed_tools_flag_json_mode() {
-        // json(stream-json) 모드도 권한 게이트를 받으므로 --allowedTools 주입 대상.
         let s = spec_with_control(
             &json(vec![]),
             SpawnMode::Fresh,
@@ -2058,7 +1757,6 @@ mod tests {
 
     #[test]
     fn claude_empty_grants_no_allowed_tools_flag() {
-        // grants 가 빈 endpoint(기본 ep()) 면 --allowedTools 를 주입하지 않는다(권한 플래그 없음 = 게이트 유지).
         let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
         assert!(
             !s.args.iter().any(|a| a == "--allowedTools"),
@@ -2069,7 +1767,6 @@ mod tests {
 
     #[test]
     fn claude_no_control_endpoint_no_allowed_tools_flag() {
-        // control=None(제어 채널 미구성)이면 --allowedTools 도 당연히 없다.
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         assert!(
             !s.args.iter().any(|a| a == "--allowedTools"),
@@ -2081,10 +1778,7 @@ mod tests {
     // ── ADR-0094/0106: 내장 SendMessage 차단(`--disallowedTools SendMessage`, control-scoped) ──
     #[test]
     fn claude_no_control_endpoint_no_disallowed_tools_flag() {
-        // ADR-0106(리뷰 지적 2026-07-26): 충돌이 문제 되는 건 메시징 프라이밍을 받은(=control endpoint
-        //   있는) 에이전트뿐이다 — control=None(비메시징 스폰)이면 --disallowedTools 를 주입하지
-        //   않는다. 일반 스폰은 내장 SendMessage 기능을 그대로 유지하고, 미등록 툴 deny 경고 비용도
-        //   피한다(사용자 체감 최소화 스코프).
+        // ADR-0106
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         assert!(
             !s.args.iter().any(|a| a == "--disallowedTools"),
@@ -2095,11 +1789,6 @@ mod tests {
 
     #[test]
     fn claude_disallowed_tools_precedes_allowed_tools_group() {
-        // ★순서 불변(variadic 흡수 방지)★: grants 가 있어 --allowedTools 그룹이 붙어도, disallowedTools
-        //   그룹은 그 **앞**에 있어야 한다 — 그래야 --allowedTools(새 --flag)가 disallowedTools 의
-        //   variadic 값 목록을 종료시키고, allowedTools 그룹이 여전히 args 벡터의 맨 끝(다른 회귀
-        //   테스트가 못박는 불변식)을 유지한다. (grants 가 있는 케이스는 항상 control 도 있으므로
-        //   --disallowedTools 도 함께 주입된다 — ADR-0106 스코프.)
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -2131,8 +1820,6 @@ mod tests {
 
     #[test]
     fn claude_disallowed_tools_present_in_json_mode_too_with_control() {
-        // json(stream-json) 모드도 control 있으면 동일하게 내장 SendMessage 를 차단해야 한다(mode
-        //   무관, scope 는 control 유무 — ADR-0106).
         let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep()));
         assert!(
             s.args.iter().any(|a| a == "--disallowedTools"),
@@ -2141,8 +1828,6 @@ mod tests {
         );
     }
 
-    /// args 벡터에서 `--permission-mode` 바로 뒤에 `bypassPermissions` 가 오는(연속 pair) 위치를
-    /// 찾는다. 없으면 None. 새 auto-권한 회귀 테스트들이 공유한다.
     fn permission_mode_pair_index(args: &[String]) -> Option<usize> {
         args.windows(2)
             .position(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions")
@@ -2150,9 +1835,6 @@ mod tests {
 
     #[test]
     fn claude_terminal_injects_auto_permission_mode_pair() {
-        // ★AUTO 권한 모드(사용자 결정 2026-07-22)★: 헤드리스 워커는 승인자 부재로 기본 거부가 구조적
-        //   한계(CLI 0/38 실측)라, 모든 spawn 이 `--permission-mode bypassPermissions` 를 **무조건**
-        //   낸다 — control endpoint 유무와 무관. 옛 "NEVER bypassPermissions" 가드는 이 결정으로 폐기.
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         // ★첫 `--` 플래그 = pair 핀★: 절대 인덱스는 Windows console_command 래퍼(`cmd.exe /c claude`)가
         //   앞에 토큰을 넣어 플랫폼마다 다르다. 대신 "args 의 첫 번째 플래그가 이 pair" 를 단언 —
@@ -2168,9 +1850,7 @@ mod tests {
 
     #[test]
     fn claude_json_injects_auto_permission_mode_pair() {
-        // json(stream-json) 모드도 동일 — auto 권한 pair 무조건 주입(control 없어도).
         let s = spec(&json(vec![]), SpawnMode::Fresh, None);
-        // 첫 `--` 플래그 = pair 핀(터미널 테스트와 동일 근거 — 래퍼 오프셋 무관).
         let first_flag = s.args.iter().position(|a| a.starts_with("--"));
         assert!(
             first_flag.is_some()
@@ -2182,9 +1862,6 @@ mod tests {
 
     #[test]
     fn claude_auto_permission_mode_precedes_allowed_tools_terminal() {
-        // ★순서 불변(사용자 결정 2026-07-22 × ADR-0094)★: auto 권한 pair 는 base 플래그라 variadic
-        //   `--allowedTools` 그룹보다 **앞**에 와야 한다(그래야 그 그룹의 맨-끝 불변식이 안 깨진다 —
-        //   pair 가 뒤에 오면 variadic 에 흡수될 수 있다). grants 있을 때 인덱스 순서로 단언.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -2206,7 +1883,6 @@ mod tests {
 
     #[test]
     fn claude_auto_permission_mode_precedes_allowed_tools_json() {
-        // json(stream-json) 모드도 동일 순서 불변.
         let s = spec_with_control(
             &json(vec![]),
             SpawnMode::Fresh,
@@ -2226,22 +1902,18 @@ mod tests {
         );
     }
 
-    /// terminal 변주(extra_args 포함) — variadic 흡수 회귀 테스트용.
     fn terminal_extra(extra: Vec<&str>) -> AgentCommand {
         terminal(extra)
     }
 
-    /// grants=[MCP,CLI] 시 기대되는 정확한 allowedTools 값 run(순서 고정). 회귀 테스트 공유 앵커.
     fn expected_grant_patterns() -> Vec<String> {
         grants_to_allowed_tools(&ep_with_grants().grants)
     }
 
     #[test]
     fn claude_allowed_tools_group_is_last_and_exact_terminal() {
-        // ★FIX #1 회귀(variadic 흡수 방지)★: `--allowedTools <tools...>` 는 variadic 이라 뒤에 오는
-        //   positional 을 전부 삼킨다. 그래서 grant 그룹은 args 벡터의 **맨 끝**에 있어야 하고,
-        //   `--allowedTools` 바로 뒤 토큰들은 **정확히 grant 패턴들뿐**이어야 한다(그 뒤에 아무것도 없음).
-        //   extra_args 에 bare positional("Bash")을 넣어 그게 grant 값 run 에 인접-후행하지 않음을 단언.
+        // ★FIX #1 회귀(variadic 흡수 방지)★: extra_args 에 bare positional("Bash")을 넣어 그게
+        //   grant 값 run 에 인접-후행하지 않음을 단언.
         let s = spec_with_control(
             &terminal_extra(vec!["Bash", "--debug"]),
             SpawnMode::Fresh,
@@ -2254,15 +1926,12 @@ mod tests {
             .position(|a| a == "--allowedTools")
             .expect("grants 있으면 --allowedTools 주입");
         let patterns = expected_grant_patterns();
-        // `--allowedTools` 바로 뒤 run = 정확히 patterns, 그리고 그게 args 의 끝이어야 한다.
         assert_eq!(
             &s.args[pos + 1..],
             &patterns[..],
             "allowedTools 뒤 토큰 run 은 정확히 grant 패턴들이고 그 뒤엔 아무것도 없어야 함(변주 흡수 방지): {:?}",
             s.args
         );
-        // bare positional "Bash" 는 grant 값 run 에 인접-후행하지 않는다(= 흡수 불가).
-        //   "Bash" 는 --allowedTools 앞(extra_args 구간)에 있어야 한다.
         let bash_pos = s
             .args
             .iter()
@@ -2277,7 +1946,6 @@ mod tests {
 
     #[test]
     fn claude_allowed_tools_group_is_last_and_exact_json_mode() {
-        // json(stream-json) 모드도 동일 불변 — grant 그룹이 맨 끝, positional 흡수 불가.
         let s = spec_with_control(
             &AgentCommand::Claude {
                 extra_args: vec!["Bash".to_string()],
@@ -2303,11 +1971,8 @@ mod tests {
 
     #[test]
     fn claude_space_containing_bash_pattern_stays_single_argv_element() {
-        // ★공백 포함 grant 는 한 argv 요소로 유지★: `Bash(C:\Program Files\eng\engram-send.exe:*)`
-        //   은 내부 공백이 있어도 하나의 값 요소여야 한다(claude 는 공백을 값 구분자로도 씀 → 쪼개지면
-        //   패턴이 깨진다). comma-join 단일 값으로 합치지 않고 개별 요소로 두는 이유의 회귀 가드.
-        //   (grants_to_allowed_tools 는 이름-무관이라 공백 포함 값도 그대로 colon-star 로 감싼다 —
-        //    운영 grant 는 bare `engram-send` 지만 argv 무결성 회귀는 공백 케이스로 검증한다.)
+        // 운영 grant 는 bare `engram-send` 지만 argv 무결성 회귀는 공백 케이스로 검증한다
+        //   (grants_to_allowed_tools 는 이름-무관이라 공백 포함 값도 그대로 colon-star 로 감싼다).
         let ep = ControlEndpoint {
             grants: vec![ToolGrant::Cli {
                 exe: "C:\\Program Files\\eng\\engram-send.exe".to_string(),
@@ -2322,20 +1987,18 @@ mod tests {
             "공백 포함 Bash 패턴은 한 argv 요소로 유지(쪼개지지 않음): {:?}",
             s.args
         );
-        // FIX-4: PowerShell 모양도 같은 공백-무결성으로 한 argv 요소.
         assert_eq!(
             s.args.get(pos + 2).map(|s| s.as_str()),
             Some("PowerShell(C:\\Program Files\\eng\\engram-send.exe:*)"),
             "공백 포함 PowerShell 패턴도 한 argv 요소로 유지: {:?}",
             s.args
         );
-        // 그리고 그게 마지막 요소(뒤로 positional 없음) — CLI grant 1개 = 패턴 2개.
+        // CLI grant 1개 = 패턴 2개(그래서 pos+3 이 끝).
         assert_eq!(pos + 3, s.args.len(), "패턴이 args 의 마지막: {:?}", s.args);
     }
 
     #[test]
     fn claude_json_mode_control_endpoint_injects_mcp_config() {
-        // json(stream-json) 모드도 MCP 연결 대상 — --mcp-config 가 주입돼야 한다.
         let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep()));
         assert!(
             s.args.iter().any(|a| a == "--mcp-config"),
@@ -2347,15 +2010,12 @@ mod tests {
     #[test]
     fn claude_no_session_id_produces_no_flags() {
         let s = spec(&terminal(vec!["--debug"]), SpawnMode::Fresh, None);
-        // sid 없으면 세션 플래그 없이 base(auto 권한 pair) + extra_args만(Windows면 cmd /c 래핑).
-        //   AUTO 권한 모드 pair 는 무조건 맨 앞(사용자 결정 2026-07-22).
         let (p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
                 "--permission-mode".to_string(),
                 "bypassPermissions".to_string(),
                 "--debug".to_string(),
-                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
             ],
         );
         assert_eq!(s.program, p);
@@ -2364,7 +2024,6 @@ mod tests {
 
     #[test]
     fn shell_passthrough_via_claude_backend() {
-        // dispatch가 보내지 않는 경로지만 방어 코드 검증.
         let s = spec(
             &AgentCommand::Shell {
                 program: "cmd.exe".into(),
@@ -2384,7 +2043,6 @@ mod tests {
 
     #[test]
     fn capabilities_terminal_resume_is_true() {
-        // 터미널 claude 는 --resume 지원 → backend 가 resume=true 를 결정.
         assert!(ClaudeBackend.capabilities(&terminal(vec![])).session.resume);
     }
 
