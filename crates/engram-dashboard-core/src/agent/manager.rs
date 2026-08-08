@@ -2101,7 +2101,6 @@ mod tests {
             Some(3),
             "구멍(1)이 있어도 포화가 아니면 내려가지 않는다"
         );
-        // 포화(최대 = MAX)일 때만 가장 낮은 구멍으로.
         assert_eq!(pick_suffix(&set(&[u32::MAX])), Some(1));
         assert_eq!(pick_suffix(&set(&[1, u32::MAX])), Some(2));
         assert_eq!(pick_suffix(&set(&[1, 2, 3, u32::MAX])), Some(4));
@@ -2110,17 +2109,13 @@ mod tests {
             Some(1),
             "포화 갈래는 가장 낮은 구멍을 쓴다"
         );
-        // ★`None`(계열 전체 점유)은 테스트로 봉인하지 않는다★: 1..=u32::MAX 를 다 채운 입력을 만들 수
-        //   없다(42억 엔트리). 전역 함수를 종결시키기 위한 갈래로만 존재한다.
+        // ★`None`(계열 전체 점유)은 봉인하지 않는다★ — 1..=u32::MAX 를 다 채운 입력을 만들 수 없다.
     }
     #[test]
     fn epoch_replacement_never_renames_an_existing_agent() {
-        // ★★이 슬라이스에서 가장 비싼 실수★★: restart/restore/재활성화는 **같은 AgentId 의 맵 교체**
-        //   (ADR-0007)지 신규 등록이 아니다. 여기서 유일성을 걸면 재시작할 때마다 이름에 (1) 이 붙는다.
         let manager = bare_manager();
         let bob = create(&manager, "C:/x", Some("bob"));
 
-        // 신규 등록(명부에 없는 id) — 접미사가 붙어야 한다.
         let newcomer = agent_profile("C:/x", Some("bob"));
         manager
             .register_for_spawn(&newcomer)
@@ -2131,15 +2126,12 @@ mod tests {
             "명부에 없던 id = 신규 등록 → 접미사"
         );
 
-        // 같은 id 재등록(= epoch 교체) — 이름 불변.
         manager.register_for_spawn(&bob).expect("재등록 성공");
         assert_eq!(
             name_of(&manager, bob.id),
             "bob",
             "재시작이 이름을 바꾸면 안 된다"
         );
-        // 접미사를 받은 쪽도 재등록에 다시 붙지 않는다(bob(1)(1) 금지). 넘기는 건 개명 전 stale
-        //   스냅샷이지만 upsert_preserving_hierarchy 가 live display_name 을 보존한다(ADR-0070).
         manager.register_for_spawn(&newcomer).expect("재등록 성공");
         assert_eq!(
             name_of(&manager, newcomer.id),
@@ -2147,25 +2139,20 @@ mod tests {
             "재등록은 접미사를 누적하지 않는다"
         );
 
-        // 재등록이 계열 번호를 흔들지 않았다 — 다음 신규는 bob(2) 다.
         let third = create(&manager, "C:/x", Some("bob"));
         assert_eq!(third.canonical_name_when_live(), "bob(2)");
 
         // ★★stale 스냅샷 재등록 — 실전 회귀 시나리오★★: 산 세션 도중 트리에서 개명 → 그 뒤 재시작이
         //   **개명 전 스냅샷**을 들고 재등록하는데, 그 옛 이름을 그사이 **다른 에이전트가 차지**했다.
         //   이때 신규-등록 검사가 돌면 옛 이름이 충돌로 판정돼 재시작이 에이전트를 엉뚱한 이름으로 개명한다.
-        //   (`upsert_preserving_hierarchy` 의 live 보존이 2중 방어이므로, 이름이 실제로 새는 것은 신규-등록
-        //   분기 제거와 그 보존 규칙 상실이 **함께** 일어날 때다.)
         let agent = create(&manager, "C:/stale", Some("was-here"));
-        let stale_snapshot = agent.clone(); // display_name = "was-here"
+        let stale_snapshot = agent.clone();
         assert!(renamed_ok(
             manager.rename_agent(agent.id, Some("renamed".into()))
         ));
         assert_eq!(name_of(&manager, agent.id), "renamed");
-        // 옛 이름을 다른 에이전트가 가져간다(개명으로 비었으므로 접미사 없이 그대로 얻는다).
         let squatter = create(&manager, "C:/squat", Some("was-here"));
         assert_eq!(squatter.canonical_name_when_live(), "was-here");
-        // 재시작 = 옛 스냅샷으로 재등록. 이름은 절대 흔들리지 않아야 한다.
         manager
             .register_for_spawn(&stale_snapshot)
             .expect("재등록 성공");
@@ -2183,15 +2170,11 @@ mod tests {
 
     #[test]
     fn renaming_into_a_freed_name_actually_takes_it() {
-        // ★★결정표 3 — "아무도 안 갖고 있으면 준다"★★. 이 갈래가 없으면 **조용한 성공**이 된다:
-        //   계열 판정을 먼저 걸러 버리면 `bob(1)` 을 쥔 에이전트는 `bob` 이 비어 있어도 개명되지 않는데
-        //   호출부는 Ack + 목록 broadcast 까지 해서, 사용자와 LLM 둘 다 "됐다" 고 본다(안 된 일을).
         let manager = bare_manager();
         let first = create(&manager, "C:/x", Some("bob"));
         let second = create(&manager, "C:/y", Some("bob"));
         assert_eq!(second.canonical_name_when_live(), "bob(1)");
 
-        // `bob` 을 비운다 — 이제 요청 이름의 주인이 아무도 없다.
         manager.delete_agent(first.id);
         let out = manager.rename_agent(second.id, Some("bob".into()));
         assert_eq!(
@@ -2204,8 +2187,6 @@ mod tests {
 
     #[test]
     fn clearing_an_override_works_once_the_derived_name_is_free() {
-        // ★같은 결정표 3 — override 해제 갈래★. 계열 판정을 먼저 걸면 해제가 **영구 불가**가 된다:
-        //   `C:/shared` 의 `shared(1)` 은 해제 결과(`shared`)가 늘 제 계열이라 매번 no-op 으로 걸린다.
         let manager = bare_manager();
         let holder = create(&manager, "C:/shared", None);
         assert_eq!(holder.canonical_name_when_live(), "shared");
@@ -2217,7 +2198,6 @@ mod tests {
             "충돌 중엔 접미사 유지"
         );
 
-        // 주인이 사라지면 해제가 실제로 override 를 지워야 한다.
         manager.delete_agent(holder.id);
         let out = manager.rename_agent(b.id, None);
         assert_eq!(out, RenameOutcome::Renamed("shared".to_string()));
@@ -2231,8 +2211,6 @@ mod tests {
 
     #[test]
     fn rename_failures_are_distinguishable_from_each_other() {
-        // ★bool 이면 "그런 에이전트가 없다" 와 "이름을 발급할 수 없다" 가 한 값으로 뭉개져 wire 응답이
-        //   거짓 원인을 말한다★. 성공 두 갈래도 서로 구분돼야 한다(확정 vs 멱등 무변경).
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         let alice = create(&manager, "C:/y", Some("alice"));
@@ -2256,18 +2234,13 @@ mod tests {
 
     #[test]
     fn a_live_agents_own_name_is_read_from_the_roster_not_re_derived() {
-        // ★산 에이전트의 이름은 session.cwd 기반, 프로필 파생은 profile.cwd 기반이라 갈릴 수 있다★
-        //   (`roster()` doc — 두 축은 재료가 다르다). 결정표가 자기 현재 이름을 따로 파생해 비교하면
-        //   계열 판정이 틀려, 이미 유일 이름을 쥔 에이전트에 접미사를 새로 발급한다(= 조용한 개명).
         let manager = bare_manager();
-        create(&manager, "C:/x", Some("bob")); // 남이 `bob` 을 쥔다
-                                               // X: 프로필 파생 이름은 "zeta"(profile.cwd), 명부가 말하는 이름은 "bob(1)"(session.cwd).
+        create(&manager, "C:/x", Some("bob"));
         let x = create(&manager, "C:/somewhere/zeta", None);
         assert_eq!(x.canonical_name_when_live(), "zeta", "프로필 파생 축");
         put_live_session_at(&manager, x.id, "C:/live/bob(1)");
         assert_eq!(name_of_in_roster(&manager, x.id), "bob(1)", "명부 축");
 
-        // `bob` 은 남이 쥐었고 X 는 이미 그 계열(`bob(1)`)이다 → 멱등 무변경이어야 한다.
         let out = manager.rename_agent(x.id, Some("bob".into()));
         assert_eq!(
             out,
@@ -2283,11 +2256,6 @@ mod tests {
 
     #[test]
     fn every_name_gate_entrance_stores_the_override_without_edge_whitespace() {
-        // ★한 입구라도 빠지면 그리로 동명이 새어 들어온다★: 유일성은 문자열 비교라 `" bob "` 은 `bob` 과
-        //   다른 이름으로 통과하는데 화면엔 똑같이 그려지고, 메시징 입구는 수신자를 trim 해 맞추므로 그렇게
-        //   저장된 에이전트는 이름으로 주소 지정도 안 된다.
-        // 지금 override 를 싣는 산 경로는 개명 하나뿐이지만(나머지 둘은 `display_name: None` 로 들어온다)
-        //   셋 다 공개 API 라 함께 봉인한다 — 나중에 생성·spawn 이 이름을 나르게 되는 날 조용히 뚫린다.
         let manager = bare_manager();
 
         let created = create(&manager, "C:/x", Some("  bob  "));
@@ -2312,7 +2280,6 @@ mod tests {
             "개명 경로(탭·개행 포함)"
         );
 
-        // spawn 신규 등록 — 프로필을 그대로 심는 세 번째 입구.
         let spawned = agent_profile("C:/z", Some(" erin "));
         manager
             .register_for_spawn(&spawned)
@@ -2327,7 +2294,7 @@ mod tests {
     #[test]
     fn a_whitespace_only_override_is_stored_as_no_override() {
         // 공백-only override 는 파생 함수들이 이미 무시하지만(빈 라벨 방지), 그건 **표시**만 구제할 뿐
-        //   명부엔 쓸모없는 문자열이 남는다. 저장 단계에서 없앤 override 로 확정해 cwd 파생으로 떨어뜨린다.
+        //   명부엔 쓸모없는 문자열이 남는다.
         let manager = bare_manager();
 
         let blank = create(&manager, "C:/blankdir", Some("   "));
@@ -2353,7 +2320,6 @@ mod tests {
 
     #[test]
     fn interior_whitespace_is_part_of_the_name() {
-        // 양끝만 깎는다 — 안쪽 공백까지 건드리면 사용자가 지은 이름이 조용히 다른 이름이 된다.
         let manager = bare_manager();
         let a = create(&manager, "C:/x", Some("  bob smith  "));
         assert_eq!(a.display_name, Some("bob smith".to_string()));
@@ -2362,9 +2328,6 @@ mod tests {
 
     #[test]
     fn renaming_to_a_padded_form_of_the_current_name_burns_no_number() {
-        // ★개명 멱등 계약과의 접점★: 정규화가 결정표보다 앞에 있어야 `" bob "` 이 자기 현재 이름과 같은
-        //   값으로 판정된다. 뒤에 있으면 `" bob "` 이 빈 이름으로 보여 **다른 이름**으로 확정되고, 그 순간
-        //   `bob` 이 비어 다음 요청자가 화면상 동명을 그대로 가져간다.
         let manager = bare_manager();
         let bob = create(&manager, "C:/a", Some("bob"));
 
@@ -2378,7 +2341,6 @@ mod tests {
             manager.agent_snapshot(bob.id).unwrap().display_name,
             Some("bob".to_string())
         );
-        // 번호도 태우지 않았다 — 다음 신규가 bob(1) 이다(bob 이 여전히 점유돼 있다는 뜻이기도 하다).
         let next = create(&manager, "C:/b", Some("bob"));
         assert_eq!(
             next.canonical_name_when_live(),
@@ -2389,8 +2351,6 @@ mod tests {
 
     #[test]
     fn a_padded_request_for_a_taken_name_gets_the_suffixed_form() {
-        // 남이 `bob` 을 쥔 상태의 `" bob "` 요청은 `bob` 요청과 **같은 취급**이어야 한다 — 별개 이름으로
-        //   저장되면 유일성 검사를 우회한 동명 2건이 된다.
         let manager = bare_manager();
         create(&manager, "C:/h", Some("bob"));
 
@@ -2402,7 +2362,6 @@ mod tests {
         );
         assert_eq!(name_of(&manager, other.id), "bob(1)");
 
-        // 이미 그 계열 이름을 쥔 뒤의 패딩 재요청 = 멱등 무변경(번호 미소모).
         assert_eq!(
             manager.rename_agent(other.id, Some(" bob ".into())),
             RenameOutcome::Unchanged("bob(1)".to_string())
@@ -2415,11 +2374,9 @@ mod tests {
         );
     }
 
-    /// `capabilities()` 가 처음 불릴 때 콜백을 1회 실행하는 테스트 transport.
-    ///
-    /// ★왜 그 지점인가★: `roster()` → `list_agents()` → `agent_info()` 가 세션마다 `capabilities()` 를
-    ///   부른다. 즉 `rename_agent` 의 **관측 도중** 임의 코드를 끼울 수 있는 유일한 주입점이라, "커밋 직전에
-    ///   프로필이 사라지는" 창을 스레드·타이밍 없이 결정적으로 재현할 수 있다.
+    /// ★왜 훅 지점이 `capabilities()` 인가★: `roster()` → `list_agents()` → `agent_info()` 가 세션마다
+    ///   그걸 부른다. 즉 `rename_agent` 의 **관측 도중** 임의 코드를 끼울 수 있는 유일한 주입점이라,
+    ///   "커밋 직전에 프로필이 사라지는" 창을 스레드·타이밍 없이 결정적으로 재현할 수 있다.
     struct HookedTransport {
         hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
@@ -2462,7 +2419,6 @@ mod tests {
         }
     }
 
-    /// 지정 transport 로 산 세션을 맵에 꽂는다(`put_live_session_at` 의 주입 가능 변형).
     fn put_live_session_with(
         manager: &AgentManager,
         id: AgentId,
@@ -2507,16 +2463,10 @@ mod tests {
 
     #[test]
     fn a_delete_landing_mid_rename_reports_not_found_not_success() {
-        // ★배정 게이트는 **이름 배정끼리만** 직렬화한다 — 삭제는 이 게이트를 잡지 않는다★. 그래서
-        //   `get` → `roster()` → `rename` 이 각각 프로필 락을 잡는 사이 다른 연결의 `DeleteProfile` 이 끼면
-        //   커밋이 대상을 못 찾는다. 그 false 를 삼키고 성공으로 보고하면 wire 가 **없는 에이전트**에 Ack 를
-        //   내고 `ProfileListUpdated` 까지 방송한다(사용자·LLM 이 지워진 것을 개명됐다고 본다).
-        //   창은 좁지도 않다: `roster()` 는 override 없는 잠든 에이전트 1건당 canonicalize syscall 을 치른다.
         let manager = bare_manager();
         let victim = create(&manager, "C:/victim", Some("before"));
         let vid = victim.id;
 
-        // 관측 도중(= 커밋 직전) 프로필이 사라지게 만든다.
         let profiles = Arc::clone(&manager.profiles);
         put_live_session_with(
             &manager,
@@ -2527,7 +2477,6 @@ mod tests {
             }),
         );
 
-        // 결정표 3(Free) 갈래 — 요청 이름이 비어 있어 접미사 없이 커밋하는 경로.
         let out = manager.rename_agent(vid, Some("after".into()));
         assert_eq!(
             out,
@@ -2539,7 +2488,6 @@ mod tests {
             "전제 — 프로필은 실제로 사라졌다"
         );
 
-        // ★결정표 4b(Suffixed) 갈래도 같은 커밋을 한다 — 두 arm 을 따로 봉인한다★.
         let holder = create(&manager, "C:/holder", Some("taken"));
         let victim2 = create(&manager, "C:/victim2", Some("other"));
         let vid2 = victim2.id;
@@ -2568,12 +2516,7 @@ mod tests {
 
     #[test]
     fn clearing_an_override_predicts_the_name_from_the_live_axis() {
-        // ★해제 후 이름을 낳는 축은 `session.cwd` 다★(명부가 산 에이전트에 그 축을 쓴다). `profile.cwd` 로
-        //   예측하면 두 축이 갈리는 순간 **남이 쥔 이름을 Free 로 오판**해 커밋하고, 보고하는 이름도 실제와
-        //   다르다 — ADR-0120 전역 유일성이 깨진다. 두 축은 spawn 시 같은 canonicalize 로 만들어지므로
-        //   갈리려면 그 뒤의 파일시스템 변화(junction 재지정·디렉터리 개명·cwd 삭제)가 필요하다.
         let manager = bare_manager();
-        // Y 가 산 축의 basename("q")을 이미 쥔다.
         let y = create(&manager, "C:/other", Some("q"));
         // X: override "x", 프로필 축 basename "p", 산 축 basename "q"(= Y 와 충돌하는 쪽).
         let x = create(&manager, "C:/prof/p", Some("x"));
@@ -2584,7 +2527,6 @@ mod tests {
             "전제 — override 가 이름"
         );
 
-        // override 해제 → 실제로는 "q" 가 되려 하고, 그건 Y 가 쥐고 있다 → 접미사가 붙어야 한다.
         let out = manager.rename_agent(x.id, None);
         assert_eq!(
             out,
@@ -2597,7 +2539,6 @@ mod tests {
             "명부에서도 접미사 이름이어야 한다"
         );
         assert_eq!(name_of_in_roster(&manager, y.id), "q", "Y 의 이름은 그대로");
-        // 어떤 이름도 중복되지 않는다(이 결함의 실제 피해).
         let roster = manager.roster();
         let unique: std::collections::BTreeSet<&String> =
             roster.iter().map(|e| &e.canonical_name).collect();
@@ -2610,12 +2551,8 @@ mod tests {
 
     #[test]
     fn clearing_an_override_predicts_with_the_live_derivation_not_the_dormant_one() {
-        // ★두 축은 재료뿐 아니라 **함수**도 다르다★: 산 축은 raw `session.cwd` basename(canonicalize 없음),
-        //   잠든 축은 canonicalize 후 basename. 산 에이전트의 예측을 잠든 함수에 태우면
-        //   `basename(canonicalize(cwd)) == basename(cwd)` 라는 가정에 기대게 되고, 그 가정이 깨지면
-        //   **남이 쥔 이름을 Free 로 오판해 커밋**한다(ADR-0120 전역 유일성 붕괴).
-        // 이 픽스처는 그 갈림을 `<temp>/.` 로 직접 만든다 — raw basename 은 `"."`, canonicalize 하면 `<temp>`
-        //   의 마지막 세그먼트다.
+        // 이 픽스처는 두 축의 갈림을 `<temp>/.` 로 직접 만든다 — raw basename 은 `"."`, canonicalize 하면
+        //   `<temp>` 의 마지막 세그먼트다.
         let temp = std::env::temp_dir();
         let dotted = format!("{}/.", temp.to_string_lossy());
         let raw_base = crate::agent::name::cwd_basename(&dotted);
@@ -2629,9 +2566,7 @@ mod tests {
         );
 
         let manager = bare_manager();
-        // Y 가 **raw 축** 이름을 쥔다(= 해제 후 X 가 실제로 갖게 될 이름).
         let y = create(&manager, "C:/other", Some(&raw_base));
-        // X: override "x", 산 세션 cwd = 갈림을 만드는 그 경로.
         let x = create(&manager, "C:/prof/whatever", Some("x"));
         put_live_session_at(&manager, x.id, &dotted);
         assert_eq!(
@@ -2640,7 +2575,6 @@ mod tests {
             "전제 — override 가 이름"
         );
 
-        // 해제 → 실제 결과는 raw 축 이름이고 그건 Y 가 쥐었다 → 접미사가 붙어야 한다.
         let out = manager.rename_agent(x.id, None);
         assert_eq!(
             out,
@@ -2661,8 +2595,6 @@ mod tests {
 
     #[test]
     fn concurrent_creates_of_one_name_never_both_take_it() {
-        // ★배정 게이트의 존재 이유 그 자체★: 파생·관측·커밋이 한 임계구역이 아니면 동시 요청 둘 이상이
-        //   같은 이름을 "비어 있다" 고 보고 **둘 다** 가져간다. 순차 테스트로는 절대 드러나지 않는다.
         // ★Barrier 로 겹침을 **설계로** 만든다★: 배리어 없이는 스레드들이 순차로 흘러 우연히 겹칠 때만
         //   경합이 재현된다(그 우연은 하네스의 디스크 쓰기 지연에 얹혀 있어 보증이 아니다). 전원이 배리어를
         //   통과한 직후 동시에 배정에 진입하므로 게이트가 없으면 여러 스레드가 같은 관측을 본다.
@@ -2696,7 +2628,6 @@ mod tests {
             THREADS,
             "동시 배정이 서로 다른 이름을 받아야 한다(중복 = 유일성 붕괴): {names:?}"
         );
-        // 명부 쪽에서도 같은 사실이 보여야 한다(커밋까지 직렬화됐다는 뜻).
         let roster = manager.roster();
         assert_eq!(roster.len(), THREADS);
         let roster_unique: std::collections::BTreeSet<&String> =
@@ -2708,9 +2639,6 @@ mod tests {
         );
     }
 
-    /// ★epoch 재사용 회귀(ADR-0007 · ADR-0113)★: 죽어서 수거된 프로필을 **Fresh 로 다시 띄우면** 앞선
-    /// 화신과 다른 epoch 을 받아야 한다. 재사용하면 (AgentId, epoch) 를 키로 쓰는 구조가 두 화신을 구분하지
-    /// 못한다 — 특히 죽은 화신의 지각 emit 이 산 화신의 턴 관측을 덮고 그 뒤 `forget` 으로 지워 버린다.
     /// ★실 프로세스로 보는 이유★: bump 는 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이 말한다.
     #[cfg(windows)]
     #[test]
@@ -2770,7 +2698,6 @@ mod tests {
             "이미 명부에 있는 에이전트를 띄우는 건 개명 대상이 아니다"
         );
 
-        // ad-hoc spawn(연결이 그 자리에서 만든 프로필 = 명부에 없는 id) — 신규 등록이라 접미사.
         let adhoc = agent_profile(&std::env::temp_dir().to_string_lossy(), Some("bob"));
         let second = manager
             .spawn_agent(&adhoc, SpawnMode::Fresh)
