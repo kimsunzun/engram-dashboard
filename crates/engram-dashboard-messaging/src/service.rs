@@ -7187,8 +7187,6 @@ mod tests {
 
     #[test]
     fn id_collision_rejects_without_side_effects() {
-        // ★부작용 0 보장(SendReject::IdCollision 주석)★: 같은 id 로 두 번째 request 를 보내면 배달·파킹·
-        //   장부 레코드가 **하나도** 늘지 않아야 호출자가 새 id 로 안전하게 재시도할 수 있다.
         let (svc, port) = svc();
         port.set_roster(vec![]);
         svc.park_absent_for_test(
@@ -7241,8 +7239,6 @@ mod tests {
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].status, "delivered");
 
-        // bob 이 회신하면 계약이 닫히고 장부도 replied 로 간다.
-        // ★A6: 회신은 **그 계약의 수신자 본인 신원**으로 보낸다★(새 PeerId 를 뽑으면 자기 계약이 아니다).
         let bob_from = reply_from(b_id);
         let (_a, alice_agent) = live("alice");
         port.set_roster(vec![alice_agent]);
@@ -7263,7 +7259,6 @@ mod tests {
 
     #[test]
     fn message_state_ages_are_measured_from_the_ledger_instants() {
-        // 경과 초는 조회 시각(now) 기준 — 장부는 벽시계를 모르므로 상대값으로만 노출한다.
         let (svc, port) = svc();
         let (from, _s) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -7287,7 +7282,6 @@ mod tests {
             "발송 경과 ≈ 90초: {}",
             view.rows[0].age_secs
         );
-        // now 가 과거여도 패닉하지 않는다(saturating — 손으로 밀어 넣는 시각 방어).
         let view = svc
             .message_state("m1", t0 - Duration::from_secs(10))
             .expect("조회");
@@ -7297,15 +7291,13 @@ mod tests {
     #[test]
     fn open_items_tags_each_direction_and_ignores_other_peoples_business() {
         let (svc, port) = svc();
-        // ★신원과 로스터 항목이 **같은 PeerId** 를 공유하게 만든다(리뷰 B1)★: 의무 귀속이 id 기준이라,
-        //   같은 논리 에이전트의 발신 신원과 로스터 엔트리가 다른 id 를 갖는 픽스처는 현실과 어긋난다.
+        // 한 논리 에이전트의 발신 신원과 로스터 엔트리가 **같은 PeerId** 를 공유하는 픽스처(리뷰 B1).
         let (alice_from, alice_agent) = live_sender("alice");
         let (bob_from, bob_agent) = live_sender("bob");
         let (carol_from, _carol_agent) = live_sender("carol");
         port.set_roster(vec![bob_agent.clone()]);
         let t0 = Instant::now();
 
-        // ① alice → ghost(부재) 통보 = 파킹(outbound_pending).
         svc.park_absent_for_test(
             "m-park",
             alice_from,
@@ -7316,7 +7308,6 @@ mod tests {
             &SendMeta::default(),
         )
         .expect("파킹");
-        // ② alice → bob request = 회신 대기(awaiting_their_reply).
         svc.park_absent_for_test(
             "m-out",
             alice_from,
@@ -7327,7 +7318,6 @@ mod tests {
             &req_meta("10m", 600),
         )
         .expect("request");
-        // ③ carol → alice request = 내가 답할 차례(reply_owed_by_me).
         port.set_roster(vec![alice_agent]);
         svc.park_absent_for_test(
             "m-in",
@@ -7339,7 +7329,6 @@ mod tests {
             &req_meta("30m", 1800),
         )
         .expect("수신 request");
-        // ④ 남의 계약(carol → bob) — 내 미결이 아니다.
         port.set_roster(vec![bob_agent]);
         svc.park_absent_for_test(
             "m-other",
@@ -7357,8 +7346,6 @@ mod tests {
             .iter()
             .map(|i| (i.direction.as_str(), i.id.as_str()))
             .collect();
-        // 1차 정렬은 오래된 순인데 이 테스트는 세 건이 **같은 순간**에 생겨 경과가 전부 0이다 → 동률
-        //   타이브레이크(방향 토큰 사전순 → id)가 순서를 결정한다. 그 결정성 자체가 응답 안정성의 계약이다.
         assert_eq!(
             tags,
             vec![
@@ -7371,7 +7358,6 @@ mod tests {
         assert_eq!(items[0].reply_by.as_deref(), Some("10m"), "기한 표기 원본");
         assert_eq!(items[2].from, "carol", "내가 답할 상대");
         assert!(items.iter().all(|i| !i.timed_out));
-        // 남(bob) 관점에서는 자기 것만 보인다.
         let bob_items = svc.open_items_for("bob", bob_from.peer_id, t0);
         let bob_tags: Vec<(&str, &str)> = bob_items
             .iter()
@@ -7414,8 +7400,6 @@ mod tests {
             &req_meta("10m", 600),
         )
         .expect("req b");
-        // m-a 에 회신이 오면 미결에서 빠진다.
-        // ★A6: 회신은 **그 계약의 수신자 본인 신원**으로 보낸다★(새 PeerId 를 뽑으면 자기 계약이 아니다).
         let bob_from = reply_from(b_id);
         let (_a, alice_agent) = live("alice");
         port.set_roster(vec![alice_agent]);
@@ -7429,7 +7413,6 @@ mod tests {
             &reply_meta("m-a"),
         )
         .expect("회신");
-        // m-b 는 기한 초과 통지가 나가도 **여전히 미결**이다(회신은 아직 안 왔다).
         svc.sweep(t0 + Duration::from_secs(601));
 
         let items = svc.open_items_for("alice", alice_from.peer_id, t0 + Duration::from_secs(601));
@@ -7441,11 +7424,6 @@ mod tests {
         );
     }
 
-    /// ★B1 회귀 그물 — 동명 다수에서 회신 의무가 **쌍둥이에게 잘못 붙지 않는다**★.
-    ///
-    /// 시나리오: 같은 이름("worker")의 산 에이전트가 둘. 발신자가 exact PeerId 로 **A 에게만** request 를
-    /// 건다. 옛 구현은 계약을 이름으로만 기록해, 메시지를 본 적도 없는 B 의 미결 조회가
-    /// `reply_owed_by_me` 를 돌려줬다(답할 수 없는 의무를 떠안김 + A 는 자기 것인지 확신 못 함).
     #[test]
     fn a_request_addressed_by_exact_id_only_obligates_that_twin() {
         let (svc, port) = svc();
@@ -7455,7 +7433,6 @@ mod tests {
         port.set_roster(vec![twin_a.clone(), twin_b.clone()]);
         let t0 = Instant::now();
 
-        // exact PeerId 로 A 만 지목(동명 다수라 이름 지목은 애초에 반려된다 — ingress AMBIGUOUS).
         svc.park_absent_for_test(
             "m-req",
             boss_from,
@@ -7481,7 +7458,6 @@ mod tests {
             b_items.is_empty(),
             "받은 적 없는 쌍둥이 B 에게 의무가 붙으면 안 된다(B1): {b_items:?}"
         );
-        // 발신자 쪽은 그대로 회신 대기.
         let boss_items = svc.open_items_for("boss", boss_from.peer_id, t0);
         assert_eq!(
             boss_items
@@ -7492,13 +7468,7 @@ mod tests {
         );
     }
 
-    /// 상한 은퇴 시나리오 공용 셋업 — `MAX_OPEN_REQUESTS` 개의 **은퇴 가능**(기한 없는) 계약으로 cap 을
-    /// 채운다. 수신자는 미등장이라 레거시 seam 이 직접 파킹한다(발송은 전부 접수 = pending).
     /// ★오픈 계약 상한을 **은퇴 불가** 계약으로 채운다(A7 — `REQUEST_CAPACITY` 재현)★.
-    ///
-    /// 은퇴 가능 조건은 `notified || reply_by.is_none()` 이므로(ledger `open_request`), **기한이 있고 아직
-    /// 통지되지 않은** 계약으로 채우면 희생자 후보가 하나도 없어 `Full` 이 나온다 — 그게 spec §3 항목 5 가
-    /// 말하는 "은퇴 불가 계약만으로 상한이 찬 상태" 다.
     fn fill_open_request_cap(svc: &Arc<MessagingService>, from: SenderIdentity) {
         fill_open_request_cap_with(svc, from, &req_meta("10m", 600));
     }
@@ -7508,7 +7478,6 @@ mod tests {
     ///   가능 후보는 **그 발송이 방금 연 첫 수신자 계약뿐**이 된다(= 자기잠식이 일어날 수 있는 유일한 배치).
     fn fill_open_request_cap_leaving_one_free(svc: &Arc<MessagingService>, from: SenderIdentity) {
         fill_open_request_cap(svc, from);
-        // 마지막 1건을 회신으로 닫아 자리를 하나 비운다(닫힌 계약은 슬롯을 놓는다).
         let last = svc
             .open_items_for("boss", from.peer_id, Instant::now())
             .into_iter()
@@ -7535,8 +7504,7 @@ mod tests {
         );
     }
 
-    /// ★상수를 복제하지 않는다(A7 — 옛 하드코딩 512 는 자기 doc 과 모순이었다)★: 성장축은 **cap 판정이
-    /// 보는 값**(`occupied_slots`)이고, 더 늘지 않는 지점이 곧 상한이다. 상한이 바뀌어도 픽스처가 따라온다.
+    /// ★상수를 복제하지 않는다(A7)★ — 더 늘지 않는 지점이 곧 상한이라 상한이 바뀌어도 픽스처가 따라온다.
     ///   ★`open_request_count`(= `!closed`)를 쓰면 안 된다★: 은퇴 표시된 희생자는 슬롯을 안 세지만 그
     ///   카운트에는 남아 무한히 자란다(실측 — 은퇴 가능 채움에서 루프가 끝나지 않는다).
     fn fill_open_request_cap_with(
@@ -7565,19 +7533,13 @@ mod tests {
         }
     }
 
-    /// ★round-2 리뷰 F2 회귀 그물 — 의무는 **봉투를 실제로 받은 자**를 따른다★.
-    ///
-    /// 시나리오(배달자/의무자 불일치): exact PeerId 로 A 에게 request → A 가 turn 중이라 **이름 큐**에 파킹
-    /// (봉투는 이름 키, id 는 힌트일 뿐) → A 가 죽고 같은 이름의 B 가 등장 → flush 의 이름 폴백이 **B 에게**
-    /// 배달. 옛 구현은 계약의 recipient_id 가 A 로 굳어 있어, 봉투를 받은 B 의 미결 조회가 그 의무를 못 봤다
-    /// (= 받은 쪽은 "답할 게 없다" 고 읽고, A 는 이미 없다 → 계약이 아무에게도 안 보이는 유령이 된다).
     #[test]
     fn the_reply_obligation_follows_whoever_actually_received_the_envelope() {
         let (svc, port, gate) = svc_gated();
         let (boss_from, _boss) = live_sender("boss");
         let (a_from, a_agent) = live_sender("worker");
         port.set_roster(vec![a_agent.clone()]);
-        gate.set_busy(a_agent.id, 0); // 턴 중 → exact-id 지목이어도 이름 큐로 파킹된다.
+        gate.set_busy(a_agent.id, 0);
         let t0 = Instant::now();
 
         svc.park_absent_for_test(
@@ -7592,7 +7554,6 @@ mod tests {
         .expect("busy 수신자 → 파킹된 request");
         assert_eq!(svc.parked_len("worker"), 1, "전제: 이름 큐 파킹");
 
-        // A 가 죽고 **같은 이름의 새 PeerId** B 가 등장(단일 발송은 재스폰 이어받기가 기능 — ADR-0101).
         let (b_from, b_agent) = live_sender("worker");
         port.set_roster(vec![b_agent.clone()]);
         gate.clear();
@@ -7604,7 +7565,6 @@ mod tests {
             port.injected_bodies()
         );
 
-        // ★핵심★: 봉투를 받은 B 가 자기 의무를 본다.
         let b_items = svc.open_items_for("worker", b_from.peer_id, t0);
         assert_eq!(
             b_items
@@ -7614,13 +7574,11 @@ mod tests {
             vec![("reply_owed_by_me", "m-req")],
             "실제 수신자 B 에게 의무가 옮겨져야(F2): {b_items:?}"
         );
-        // 죽은 A 의 신원으로 물으면 그 의무는 더 이상 자기 것이 아니다(유령 귀속 없음).
         let a_items = svc.open_items_for("worker", a_from.peer_id, t0);
         assert!(
             a_items.is_empty(),
             "봉투를 못 받은 옛 incarnation 에는 의무가 남지 않는다: {a_items:?}"
         );
-        // 발신자 쪽은 그대로 회신 대기.
         let boss_items = svc.open_items_for("boss", boss_from.peer_id, t0);
         assert_eq!(boss_items.len(), 1);
         assert_eq!(boss_items[0].direction.as_str(), "awaiting_their_reply");
@@ -7629,21 +7587,13 @@ mod tests {
     #[test]
     fn a_reply_racing_its_own_injection_still_finds_the_contract() {
         // ★F4 — H3(주입 **전** 재바인딩)의 회귀 그물★.
-        //
-        // ★태우는 창★: 이름 큐에 파킹된 request 가 **다른 incarnation** 에게 배달될 수 있다(재스폰 이어받기 =
-        //   기능, ADR-0101). 주입은 그 자체로 수신자 턴을 깨우므로 **회신이 주입 직후 바로** 올라올 수 있다.
-        //   회신 매칭이 두 패스(id 우선 — A6)로 엄격해진 뒤로는 재바인딩 순서가 곧 정확성이다:
-        //     - 재바인딩이 주입 **뒤**면 → 그 회신이 도착한 순간 계약은 아직 **죽은 A 의 id** 를 들고 있다.
-        //       id 패스는 어긋나고 이름 폴백은 `recipient_id.is_none()` 으로 제한돼 있어 `NoMatch` — 회신이
-        //       계약에서 유실되고, 나중에 **거짓 기한 통지**가 발신자에게 나간다.
-        //     - 재바인딩이 주입 **전**이면 → 같은 회신이 자기 계약을 찾아 닫는다.
         // ★레이스를 어떻게 결정적으로 재현하나★: `on_inject` hook 은 write 직전에 불린다. 그 안에서 회신을
         //   발송하면 "주입과 동시에 도착한 회신" 을 **정확히** 모사한다(sleep·스레드 없이 결정적).
         let (svc, port, gate) = svc_gated();
         let (boss_from, boss) = live_sender("boss");
         let (a_from, a_agent) = live_sender("worker");
         port.set_roster(vec![boss.clone(), a_agent.clone()]);
-        gate.set_busy(a_agent.id, 0); // 턴 중 → exact-id 지목이어도 이름 큐로 파킹된다.
+        gate.set_busy(a_agent.id, 0);
         let t0 = Instant::now();
 
         svc.park_absent_for_test(
@@ -7659,14 +7609,12 @@ mod tests {
         assert_eq!(svc.parked_len("worker"), 1, "전제: 이름 큐 파킹");
         assert_eq!(svc.open_request_count(), 1, "전제: 계약 1건 열림");
 
-        // A 가 죽고 **같은 이름의 새 PeerId** B 가 등장.
         let (_b_from, b_agent) = live_sender("worker");
         let b_id = b_agent.id;
         port.set_roster(vec![boss.clone(), b_agent.clone()]);
         gate.clear();
 
-        // hook: **B 에게 주입되는 그 순간** B 가 회신한다(idx 0 = flush 의 주입. 회신 자신의 주입은 idx 1 이라
-        //   재진입하지 않는다 — 재진입하면 무한 재귀가 된다).
+        // idx 0 = flush 의 주입. 회신 자신의 주입은 idx 1 이라 거른다 — 재진입하면 무한 재귀가 된다.
         {
             let svc2 = svc.clone();
             port.set_on_inject(Arc::new(move |idx| {
@@ -7693,8 +7641,7 @@ mod tests {
             2,
             "flush 배달 1 + 회신 1(전제 — 회신이 실제로 나갔다): {bodies:?}"
         );
-        // 회신이 **바깥 write 가 기록되기도 전에** 들어간다(hook 은 write 직전 지점) — 즉 이 그물은 창의
-        //   가장 이른 순간을 태운다. 그래서 순서 단언은 인덱스가 아니라 존재로 한다.
+        // 회신이 바깥 write 보다 먼저 기록되므로 순서 단언은 인덱스가 아니라 존재로 한다.
         assert!(
             bodies.iter().any(|b| b.contains(r#"in-reply-to="m-req""#)),
             "회신 봉투가 실제로 나갔어야: {bodies:?}"
@@ -7704,7 +7651,6 @@ mod tests {
             "파킹돼 있던 request 도 배달됐어야: {bodies:?}"
         );
 
-        // ★핵심 ①★: 주입과 동시에 온 회신이 자기 계약을 찾아 닫았다.
         assert_eq!(
             svc.open_request_count(),
             0,
@@ -7719,7 +7665,6 @@ mod tests {
             "발신자도 더 기다리지 않는다"
         );
 
-        // ★핵심 ②★: 기한을 넘겨도 **거짓 기한 통지가 없다**(유실된 회신의 대가가 여기서 드러난다).
         svc.sweep(t0 + Duration::from_secs(700));
         assert_eq!(
             port.injected_bodies().len(),
@@ -7731,7 +7676,6 @@ mod tests {
         let _ = a_from;
     }
 
-    /// ★B2 — 뷰가 완전성을 단언하는 경우와 유보하는 경우★.
     #[test]
     fn message_state_reports_whether_its_row_list_can_be_trusted_as_complete() {
         let (svc, port) = svc();
@@ -7787,12 +7731,10 @@ mod tests {
     //   여기 단언을 느슨하게 만드는 수정은 곧 **계약 변경**이다(사용자 재가 없이 완화 금지).
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
-    /// 행을 `(to, status, code)` 튜플로 — 순서·상태·코드를 한 번에 단언하기 위한 축약.
     fn rows(v: &[RecipientResult]) -> Vec<(String, SendStatus, Option<FailCode>)> {
         v.iter().map(|r| (r.to.clone(), r.status, r.code)).collect()
     }
 
-    /// 통보 발송 1회(입구가 이미 트림·분해를 끝낸 토큰 목록을 그대로 넘긴다).
     fn send(
         svc: &Arc<MessagingService>,
         msg_id: &str,
@@ -7827,13 +7769,6 @@ mod tests {
 
     #[test]
     fn an_absent_recipient_is_a_failed_row_that_never_parks_but_always_ledgers() {
-        // ★spec §7 "없는 이름 입구 반려"(4차 개정)★: **로스터·프로필 둘 다에** 없는 이름 → 응답 행
-        //   `failed`+`RECIPIENT_NOT_FOUND` · **파킹 큐에 안 실림**(장부에 `pending` 레코드 없음) · 그래도
-        //   **종점 행은 남는다**(§5 "실패 수신자도 장부에"). 그래서 `messages{id}` 행수 = 발신 응답 행수라
-        //   `may_be_truncated` 오탐이 사라진다.
-        // ★4차 보정★: 여기 "없음" 은 **잠든 세션도, 턴 신호 없는 산 세션도 아니다** — 잠듦(프로필 실재)은
-        //   파킹 `pending` 이고(`a_dormant_recipient_is_parked_*`), 턴 신호 없는 산 세션은 게이트 없이
-        //   **배달**된다(`a_live_agent_without_a_turn_signal_*`). 이 테스트는 그 둘과 **배타적**이어야 한다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         port.set_roster(vec![me]);
@@ -7863,7 +7798,6 @@ mod tests {
             "종점 `failed` 행 1개만 남는다"
         );
 
-        // 조회 행수 = 발신 응답 행수(잘림 오탐 없음).
         let view = svc
             .message_state("m1", Instant::now())
             .expect("실패 행도 조회된다");
@@ -7874,8 +7808,6 @@ mod tests {
 
     #[test]
     fn one_roster_snapshot_drives_the_whole_fan_out_and_at_all_uses_the_direct_path() {
-        // ★spec §7 "다중 수신자 fan-out"★: ① 로스터 스냅샷 **1장**으로 전원 판정 ② `@all` 펼침이 직접
-        //   지목과 **같은 코드 경로**임을 동치 입력의 동일 결과로 단언한다(그룹 전용 분기 부활 방지).
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -7900,7 +7832,6 @@ mod tests {
             ]
         );
 
-        // ★스냅샷 1장★: 발송 1회가 로스터를 **한 번만** 뜬다(수신자별 재조회 = 반쪽 판정의 재발 경로).
         let before = port.roster_calls();
         let _ = send(&svc, "m-snap", from, "alice", &["@all", "bob"]).expect("ok");
         assert_eq!(
@@ -7912,9 +7843,6 @@ mod tests {
 
     #[test]
     fn at_all_excludes_the_sender_but_explicit_self_naming_still_delivers() {
-        // ★spec §7 "펼침 발신자 제외"★ 쌍: 생존자가 발신자뿐일 때
-        //   `["@all"]` → 최종 집합 0명 → `GROUP_EMPTY` 전체 반려 **vs**
-        //   `["@all", "<자기이름>"]` → `@all` 기여 0 + 명시 지목 1행 배달(ADR-0114 결정 3).
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         port.set_roster(vec![me]);
@@ -7936,9 +7864,6 @@ mod tests {
             "직접 지목 자기발송은 살아남는다(제외는 **펼침에만** 적용 — spec §4)"
         );
 
-        // ★5차 경계(ADR-0121 결정 1)★: `@all` 은 명부를 보므로 **잠든 이름 하나만 있어도** 최종 집합이
-        //   비지 않는다 — 그 몫은 파킹된다. `@here` 는 산 명단만 보니 여전히 `GROUP_EMPTY` 다. 이 대비가
-        //   없으면 "발신자뿐 → 반려" 를 어휘 구분 없이 읽는 다음 세션이 두 어휘를 다시 합친다.
         port.set_dormant(&["sleepy"]);
         let all = send(&svc, "m3", from, "alice", &["@all"]).expect("잠든 이름이 있으면 반려 아님");
         assert_eq!(
@@ -7955,10 +7880,6 @@ mod tests {
 
     #[test]
     fn an_explicit_dormant_token_and_at_all_fold_into_one_row() {
-        // ★spec §5 해석 순서 ④(중복 제거 = 수신자 1명 = 배달 1회·결과 1행)이 **새 `@all` 에도 성립**★:
-        //   `@all` 이 잠든 이름을 펼치게 된 뒤로 "명시 지목 + 펼침" 이 같은 잠든 이름을 두 번 낼 수 있다.
-        //   행이 갈리면 파킹이 2건 생기고 발신자는 한 사람에게 두 번 보낸 셈이 된다.
-        // ★행 위치는 명시 지목 자리★(먼저 나온 것을 남긴다 — 펼침 결과보다 항상 앞선다).
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -7988,8 +7909,6 @@ mod tests {
 
     #[test]
     fn at_all_reports_a_duplicate_live_name_as_an_ambiguous_row_and_still_delivers_the_rest() {
-        // ★spec §7 "`@all` 동명 예외"(ADR-0114 결정 4 과도기 규칙)★: 임의 선택도, 양쪽 배달도 아니다 —
-        //   그 이름만 `RECIPIENT_AMBIGUOUS` 실패 행이고 나머지 전원은 그대로 받는다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_d1, dup1) = live("dup");
@@ -8019,8 +7938,6 @@ mod tests {
 
     #[test]
     fn mixed_to_folds_duplicates_once_and_row_order_is_deterministic() {
-        // ★spec §7 "혼용 `to` 중복 제거·행 순서"★: 겹친 수신자는 **배달 1회·결과 1행**이고 그 행 위치는
-        //   **명시 지목 자리**를 따른다. 행 순서 = ① 명시 토큰 입력 순 ② 펼침 결과 이름 사전순.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -8044,8 +7961,6 @@ mod tests {
 
     #[test]
     fn a_name_typo_fails_only_its_own_row_while_live_recipients_still_receive() {
-        // ★spec §7 "층위 분리" 의 **이름 축**(ADR-0114 결정 3)★: 이름의 부재 = 런타임 상태 → 그 행만 실패.
-        //   (`@`오타 = 주소 공간 오류 → 전체 반려 축은 통합 테스트 `c3_invalid_contract_args…` 가 커버.)
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -8065,7 +7980,6 @@ mod tests {
         );
         assert_eq!(port.injected_bodies().len(), 1, "산 수신자에겐 그대로 간다");
 
-        // 대조군 — `@`오타는 **전체 반려**라 산 수신자에게도 안 간다(부작용 0).
         let before = port.injected_bodies().len();
         assert!(matches!(
             send(&svc, "m2", from, "alice", &["@typo", "bob"]),
@@ -8076,13 +7990,12 @@ mod tests {
 
     #[test]
     fn partial_progress_mixes_delivered_pending_and_failed_in_one_send() {
-        // ★spec §7 "부분 진행"★: 세 결말이 한 발송에 공존한다. 전원 실패도 `{id, results}` shape 유지.
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("alice");
         let (b_id, bob) = live("bob");
         let (_c, carol) = live("carol");
         port.set_roster(vec![me, bob, carol]);
-        gate.set_busy(b_id, 0); // bob 은 턴 진행 중 → 파킹
+        gate.set_busy(b_id, 0);
 
         let out = svc
             .handle_send(
@@ -8108,7 +8021,6 @@ mod tests {
             ]
         );
 
-        // 전원 실패도 **shape 그대로**(전체 반려로 승격하지 않는다).
         let all_failed = send(&svc, "m2", from, "alice", &["ghost1", "ghost2"]).expect("Ok shape");
         assert!(
             all_failed.iter().all(|r| r.status == SendStatus::Failed),
@@ -8119,15 +8031,12 @@ mod tests {
 
     #[test]
     fn a_full_mailbox_fails_only_that_row_without_any_reclaim_attempt() {
-        // ★spec §7 "다중 수신자 `MAILBOX_FULL` 은 행 실패로만"(ADR-0114 결정 1 — 회수 시도 없음)★.
-        //   ★회수 폐지의 관측 가능한 증거★: cap 을 채운 큐의 **가장 오래된 항목이 그대로 남는다**(옛 압력
-        //   회수는 그걸 걷어내고 신규를 수용했다) + 그 수신자만 실패 행이고 나머지는 배달된다.
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("alice");
         let (f_id, full) = live("full");
         let (_c, carol) = live("carol");
         port.set_roster(vec![me, full, carol]);
-        gate.set_busy(f_id, 0); // 계속 busy → 파킹으로 큐를 채운다
+        gate.set_busy(f_id, 0);
 
         for i in 0..100 {
             let out = send(&svc, &format!("f{i}"), from, "alice", &["full"]).expect("cap 이내");
@@ -8164,8 +8073,6 @@ mod tests {
 
     #[test]
     fn a_multi_recipient_request_opens_one_independent_contract_per_recipient() {
-        // ★spec §7 "다중 request"(ADR-0111 결정 5)★: N 수신자 = 독립 계약 N개(키 = (메시지 id, 수신자)) ·
-        //   한 명이 회신하면 **그 계약만** 닫히고 나머지는 오픈 유지 · 기한 통지는 **계약별 1건**.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (b_id, bob) = live("bob");
@@ -8186,7 +8093,6 @@ mod tests {
         assert!(out.iter().all(|r| r.status == SendStatus::Delivered));
         assert_eq!(svc.open_request_count(), 2, "수신자마다 계약 1건");
 
-        // bob 이 회신 → **bob 의 계약만** 닫힌다.
         let bob_from = SenderIdentity {
             peer_id: b_id,
             epoch: 0,
@@ -8207,7 +8113,6 @@ mod tests {
             "전체회신 없음 — carol 계약은 그대로 열려 있다"
         );
 
-        // 기한 초과 → 남은 계약 **1건에 대해서만** 통지(계약별 1건, 병합 없음 — ADR-0114 결정 2).
         svc.sweep(Instant::now() + Duration::from_secs(601));
         let notices: Vec<_> = svc
             .ledger_snapshot()
@@ -8220,15 +8125,12 @@ mod tests {
 
     #[test]
     fn the_envelope_to_attribute_is_frozen_at_send_time_and_survives_the_flush() {
-        // ★spec §7/§1 "봉투 `to` 속성"★: ① 수용 판정된 수신자 **2인 이상**일 때만 노출 ② 값은 발송 시점에
-        //   **동결**돼 파킹분이 한참 뒤 주입돼도 그대로 ③ **실패 토큰 제외** ④ 나열은 **입력 표기 순**
-        //   (`@`주소는 펼치지 않고 토큰 그대로).
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("alice");
         let (b_id, bob) = live("bob");
         let (_c, carol) = live("carol");
         port.set_roster(vec![me, bob, carol]);
-        gate.set_busy(b_id, 0); // bob 만 파킹 — 그 봉투는 flush 때 조립된다
+        gate.set_busy(b_id, 0);
 
         let out = svc
             .handle_send(
@@ -8237,7 +8139,7 @@ mod tests {
                 "alice",
                 &[
                     "@all".to_string(),
-                    "ghost".to_string(), // 실패 토큰 — `to` 에서 제외돼야
+                    "ghost".to_string(),
                 ],
                 "전원 대기",
                 Entrance::Mcp,
@@ -8256,14 +8158,12 @@ mod tests {
                 ("carol".to_string(), SendStatus::Delivered, None),
             ]
         );
-        // 즉시 배달분(carol)의 봉투 — `@all` 토큰 그대로, 실패한 `ghost` 는 없다.
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="alice" to="@all">전원 대기</message>"#.to_string()],
             "수용 2인 → to 노출 · @주소는 펼치지 않고 토큰 그대로 · 실패 토큰 제외"
         );
 
-        // 파킹분(bob)이 나중에 배달돼도 **같은 `to`**(재계산 금지 — 동결).
         gate.clear();
         svc.flush_for("bob", b_id);
         assert_eq!(
@@ -8277,7 +8177,6 @@ mod tests {
             "발송 순간 표기 그대로(park payload 가 동결값을 flush 까지 나른다)"
         );
 
-        // 대조군 — 수용 1인이면 속성 자체가 없다(혼자 받은 편지).
         drop(svc);
         let (svc2, port2) = super::tests::svc();
         let (from2, me2) = live_sender("alice");
@@ -8293,7 +8192,6 @@ mod tests {
 
     #[test]
     fn the_to_attribute_lists_tokens_in_input_notation_order() {
-        // ★입력 표기 순★ — `results[]` 행 순서 축(명시 → 펼침 사전순)과 **별개**다(spec §1).
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -8312,10 +8210,6 @@ mod tests {
 
     #[test]
     fn the_cap_denominator_counts_the_batch_that_left_the_queue_during_a_flush() {
-        // ★F1 회귀(cap = 큐 + in-flight)★: flush 가 락 밖으로 들고 나간 배치도 그 수신자 앞 미결이다 —
-        //   그 창에서 큐만 세면 신규 유입이 cap 만큼 통째로 통과해 사이클마다 큐가 자란다(무계 성장).
-        //   ★관측 방법★: inject hook 안에서(= 배치가 나가 있는 순간) 같은 수신자에게 발송해 `MAILBOX_FULL`
-        //   행이 나오는지 본다. 옛 구멍에선 "큐가 비었다" 며 수용됐다.
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("alice");
         let (r_id, recv) = live("recv");
@@ -8326,7 +8220,6 @@ mod tests {
         }
         assert_eq!(svc.parked_len("recv"), 100);
 
-        // flush 도중(배치가 락 밖으로 나가 큐가 비어 보이는 순간) 동시 발송.
         gate.clear();
         let during: Arc<StdMutex<Vec<SendStatus>>> = Arc::new(StdMutex::new(Vec::new()));
         let (svc_h, from_h, seen_h) = (svc.clone(), from, during.clone());
@@ -8363,8 +8256,6 @@ mod tests {
 
     #[test]
     fn a_second_flush_defers_while_a_batch_is_in_flight_and_the_settlement_re_rings_the_doorbell() {
-        // ★도어벨/유예 회귀(round-7/8)★: 같은 수신자에 대한 flush 는 겹쳐 돌지 않는다(순서 역전 방지).
-        //   물러난 쪽의 깨우기는 **증발하면 안 되고**(lost wakeup), 영수증을 쥔 쪽이 정산하며 되울린다.
         let (svc, port, gate, bell) = svc_gated_with_doorbell();
         let (from, me) = live_sender("alice");
         let (r_id, recv) = live("recv");
@@ -8376,7 +8267,6 @@ mod tests {
         gate.clear();
         bell.take(); // 파킹 도어벨은 여기서 관심 밖 — 유예/재타 축만 본다.
 
-        // 배치가 락 밖으로 나가 있는 순간(inject hook) 두 번째 flush 를 밀어 넣는다 → 유예돼야 한다.
         let svc_h = svc.clone();
         port.set_on_inject(Arc::new(move |idx| {
             if idx == 0 {
@@ -8404,13 +8294,6 @@ mod tests {
 
     #[test]
     fn a_reply_to_a_requester_that_exists_nowhere_fails_the_contract_and_stops_the_timeout() {
-        // ★spec §7 회신 계약 규칙 ③(ADR-0116 결정 2 · 사용자 결정 2026-07-30)★: 요청자 이름이 로스터·산
-        //   명단·프로필 **전부에 없으면** 회신은 갈 곳이 없다(row = failed/`RECIPIENT_NOT_FOUND`). 그 계약은
-        //   `reply_failed` **실패 종결**이다 — 미결 조회에서 사라지고 기한 스윕이 발화하지 않으며 512 계수도
-        //   줄고, 이력은 남는다.
-        // ★이 테스트는 옛 A1 잠정안(사유 무관 오픈 유지)을 **뒤집은 것**이다★: 옛 단언("계약이 열린 채로
-        //   남고 기한 통지가 나간다")은 재가된 규칙과 정반대라, 그 초록을 근거로 옛 semantics 를 유지하면
-        //   갈 곳 없는 좀비 계약이 상한까지 남는다(ADR-0116 거부한 대안 "계약 열어두기").
         let (svc, port) = svc();
         let (boss_from, boss) = live_sender("boss");
         let (w_id, worker) = live("worker");
@@ -8471,18 +8354,15 @@ mod tests {
             slots_before - 1,
             "512 계수에서 빠진다(ADR-0118 결정 4 — 좀비가 상한을 먹지 않게)"
         );
-        // 일꾼의 미결에서 의무가 사라진다(기다려도 갈 곳이 없다).
         let owed = svc.open_items_for("worker", w_id, Instant::now());
         assert!(
             !owed.iter().any(|i| i.id == "m-req"),
             "종결된 계약은 미결 목록에 없어야: {owed:?}"
         );
-        // 이력은 잔존한다(원 request 의 배달기록은 그대로 delivered — 계약 축과 배달 축은 별개다).
         assert_eq!(
             svc.ledger_statuses("m-req"),
             vec![DeliveryStatus::Delivered]
         );
-        // 기한 스윕이 발화하지 않는다(종결된 계약은 due 대상이 아니다).
         svc.sweep(Instant::now() + Duration::from_secs(601));
         assert!(
             !svc.ledger_snapshot()
