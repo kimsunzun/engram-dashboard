@@ -1,10 +1,6 @@
 //! engram-dashboard-messaging — S18 메시징 커널 crate(ADR-0103/0104/0110).
 //!
-//! ★역할★: "데몬이 살아 있는 동안 에이전트 간 메시지가 확실히 가게 한다" 는 정책을 담는다 —
-//! `mailbox`(부재·busy 수신자 파킹 저장소), `ledger`(전 메시지 이력 + request 회신 추적 + 그룹 배달
-//! 장부), `groups`(그룹 명단 레지스트리 + 해석 seam), `envelope`(봉투 조립 + 배달 관측 어휘),
-//! `service`(그 셋을 발송 파이프라인에 엮는 `MessagingService` + 접합 포트), `busy`(수신자 턴 상태
-//! 게이트).
+//! ★역할★: "데몬이 살아 있는 동안 에이전트 간 메시지가 확실히 가게 한다" 는 정책을 담는다.
 //!
 //! ★완전 상호무지(load-bearing — ADR-0110 결정 2)★: 이 crate 는 **워크스페이스의 어떤 crate 에도
 //! 의존하지 않는다**(core 포함). 외부 의존은 `uuid`·`tracing` 뿐이다. 그래서 에이전트 매니저·출력
@@ -30,24 +26,13 @@
 // ADR-0104
 // ADR-0110
 
-// ADR-0110 결정 5: 봉투 계층(ControlIngress 에서 이사) — messaging↔control 순환 해소 + 형제 소비자
-//   (채팅)가 공유할 커널 부품을 올바른 자리에.
+pub mod busy;
 pub mod envelope;
 pub mod groups;
 pub mod ledger;
 pub mod mailbox;
-// C1: 순수 구조를 발송 파이프라인에 엮는 오케스트레이터(MessagingService + delivery seam). 락은
-//   여기서 소유(위 순수 구조는 무동시성). ADR-0103/0104.
 pub mod service;
-// C2: idle 게이트 — 호스트의 턴 관측 사실(`TurnFacts`)을 우편 정책으로 해석하는 `BusyPolicy` + 서비스가
-//   묻는 `BusyGate` seam. ★위 "순수성 불변식" 의 부분 예외★: 락·호스트 콜백을 다루므로 무동시성은
-//   아니지만(service.rs 와 같은 오케스트레이션 층), 시계는 여전히 읽지 않는다 — 상한 비교는 now 를
-//   주입받는 `sweep_stale_busy` 안에서만 일어난다. ADR-0104 결정 3 · ADR-0113(사실은 공용 계층에,
-//   여기엔 정책만).
-pub mod busy;
 
-/// 메시징 참여자 id — 이 crate 자체의 id 별칭(ADR-0110 결정 2 "완전 상호무지").
-///
 /// ★왜 core 의 `AgentId` 를 안 쓰나(load-bearing)★: 그걸 쓰는 순간 이 crate 가 워크스페이스 crate 에
 ///   의존하게 돼 완전 무지가 깨진다. 바닥 타입이 같은 `uuid::Uuid` 라 호스트(데몬)의 `AgentId` 값이
 ///   경계에서 **무변환으로 통과**한다 — 즉 벽을 세우는 비용이 사실상 0 이다(ADR-0110 근거: 경계 호출
@@ -55,8 +40,6 @@ pub mod busy;
 ///   그대로 버틴다.
 pub type PeerId = uuid::Uuid;
 
-/// 발신자 신원(참여자 + epoch) — 이 crate 자체의 값 타입(ADR-0110 결정 3 "포트 소유 구조").
-///
 /// ★왜 데몬의 `BoundIdentity` 를 안 쓰나★: 그건 제어 채널 토큰 바인딩 개념(호스트 인증의 산물)이라
 ///   메시징 커널이 알 이유가 없다. 커널이 쓰는 건 "누가·어느 세대로 보냈나" 두 필드뿐이다. 호스트가
 ///   경계에서 2필드 복사로 변환한다(데몬 측 `From<BoundIdentity>`).

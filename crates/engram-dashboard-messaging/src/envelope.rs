@@ -15,51 +15,34 @@
 
 use crate::{PeerId, SenderIdentity};
 
-/// ★봉투 포맷 렌더 enum(ADR-0095/0096/0103)★ — `wrap_message` 가 조립할 봉투 모양을 고르는 스위치 값.
+/// ★봉투 포맷 렌더 enum(ADR-0095/0096/0103)★
 /// 이 enum 이 **렌더 규칙(정확한 문자열)의 단일 출처**다 — protocol crate 의 동명 wire 타입은 값만
-/// 나르고(순수 계약), 실제 문자열 조립은 이 메시징 커널(여기)이 소유한다(ADR-0004 격리 결 · 이사는
-/// ADR-0110 결정 5 — 옛 소유처는 데몬 `control::ingress` 였다).
+/// 나르고(순수 계약), 실제 문자열 조립은 이 메시징 커널(여기)이 소유한다(ADR-0004 격리 결).
 ///
 /// - `Xml` → `<message from="{sender}" ...>{body}</message>`(**운영 기본**, ADR-0103). request/reply/
 ///   group 은 속성으로 확장(아래 EnvelopeFields). S18 메시징 v1 이 XML 봉투를 수신 LLM 계약으로 삼는다.
 /// - `Colon` → `{sender}: {body}`(잔존 스위치, ADR-0103 — 삭제 아님). 속성 확장 미지원(레거시 채팅 관례).
 ///
-/// ★기본 = Xml★(ADR-0103 — S18 메시징 v1 봉투 단일화). 데몬 전역 상태 초기값·fold-unknown 도 Xml 로 정합.
+/// 데몬 전역 상태 초기값·fold-unknown 도 Xml 로 정합.
 /// colon 은 SetEnvelopeFormat 커맨드·ENGRAM_WRAP_FORMAT env 로 여전히 선택 가능(잔존 스위치).
-// ADR-0103 (기본 flip Colon→Xml — 메시징 v1 봉투 단일화)
-// ADR-0096
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EnvelopeFormat {
-    /// `<message from="{sender}" ...>{body}</message>` — 구조 봉투, **운영 기본**(ADR-0103).
     #[default]
     Xml,
-    /// `{sender}: {body}` — 인간 채팅 관례, 잔존 스위치(ADR-0103 — 삭제 아님). 속성 확장 미지원.
     Colon,
 }
 
-/// ★봉투 속성 필드(ADR-0103 S18 메시징 v1 — Xml 변형 전용 확장)★: XML `<message>` 태그에 조건부로
-///   렌더되는 속성들의 내부 struct. `wrap_message` 가 sender/body 외에 이걸 받아 XML 렌더 시 속성을 붙인다.
-///
 /// ★가시성 = `pub`(C1 — MessagingService seam 재사용 + ADR-0110 이사)★: S18 메시징 v1 increment C1 이
 ///   파킹된 메시지를 **주입 시점에** 봉투로 감싸므로(park 시점이 아니라), `MessagingService`(service.rs)가
 ///   이 struct 와 `wrap_message` 를 호출한다. 봉투 계층이 커널 crate 로 이사하면서(ADR-0110 결정 5) 호출부
-///   (데몬 입구·서비스)가 crate 밖에 있게 돼 `pub` 로 승격했다 — 단일 wrap point 불변식(ADR-0096)은
-///   그대로다(별도 조립기를 만들지 않는다 — 봉투 조립은 여전히 `wrap_message`/`wrap_notice` 두 함수에만).
+///   (데몬 입구·서비스)가 crate 밖에 있게 돼 `pub` 로 승격했다.
 ///
 /// ★노출 원칙(spec §1 · ADR-0103 결정 1)★: **수신 LLM 의 행동을 바꾸는 필드만** 봉투에 나타난다 —
-///   각 필드는 `Option` 이고 `Some` 일 때만 그 속성이 렌더된다(`None` = 속성 생략). `id` 는 request 에만,
-///   `to` 는 그룹 방송에만 실린다(호출부가 그때만 `Some` 을 채운다) — 시각·장부 상태는 여기 없다(내부 데이터).
+///   각 필드는 `Option` 이고 `Some` 일 때만 그 속성이 렌더된다(`None` = 속성 생략).
+///   시각·장부 상태는 여기 없다(내부 데이터).
 ///
 /// ★표기 매핑(고정, spec §1)★: 툴/CLI 인자 snake_case → XML 속성 kebab-case. 그래서 필드 이름은
 ///   snake_case(`reply_by`·`in_reply_to`)지만 렌더 시 kebab-case 속성(`reply-by`·`in-reply-to`)이 된다.
-///
-/// ★현재 스코프(increment A)★: 현 호출부(handle_send)는 전부 `default()`(빈 필드)를 넘겨 **plain
-///   `<message from>`** 만 렌더한다. id/type/reply-by/in-reply-to/to 는 후속 increment(메일박스·request·
-///   그룹)가 채우려고 seam·렌더를 지금 깔아 둔다(저위험·장기 = 지금 충분히, CLAUDE.md §0).
-///
-/// ★Colon 변형 미지원★: colon 은 레거시 채팅 관례라 속성 확장을 받지 않는다(ADR-0103) — 이 struct 는
-///   XML 렌더 경로에서만 소비된다.
-// ADR-0103 (XML 봉투 속성 확장 — 노출 원칙 = 행동 바꾸는 필드만)
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeFields {
     /// 메시지 id — **request 봉투에만** 실린다(회신 상관용, spec §1). XML 속성 `id`.
@@ -75,10 +58,6 @@ pub struct EnvelopeFields {
 }
 
 /// ★메시지 래퍼(단일 wrap point — ADR-0086 §7 · 포맷 스위칭 ADR-0095/0096 · 속성 확장 ADR-0103 · 실험 seam ADR-0093)★:
-/// B stdin 에 주입할 봉투 텍스트를 만든다. 봉투 조립의 **단일 wrap point**(ADR-0086)라는 불변식은
-/// 유지된다 — 형식이 어디서 오든(실험 env vs 전역 포맷 상태) 이 함수 하나가 여전히 감싼다. 전역 포맷
-/// 상태(ADR-0096)는 이 함수가 읽는 **입력**(param `format`)일 뿐 조립 지점은 한 곳으로 남는다.
-///
 /// ★순수성(테스트 용이)★: env override 를 제외하면 이 함수는 인자만으로 결정된다 — `format`·`fields` 를
 /// param 으로 받아(전역 상태를 이 함수가 직접 읽지 않음) 호출부(handle_send)가 registry 에서 읽어 넘긴다.
 /// 그래야 wrap_message/apply_wrap_template 를 순수 함수로 유지해 포맷별 결과를 단위 테스트로 단언한다.
@@ -88,13 +67,8 @@ pub struct EnvelopeFields {
 ///      placeholder(`{sender}`/`{id}`/`{body}`)를 치환해 반환한다(spike 전용 seam — **verbatim 유지**,
 ///      제거/전용 금지, ADR-0093/0095/0096 불변식). msg_id 는 이 `{id}` placeholder 에만 쓰인다.
 ///      (spike 경로는 속성 확장(fields)을 무시한다 — 운영자 통제 verbatim 템플릿이라 별개.)
-///   2. env 미설정/빈 값이면 전역 포맷 상태(`format`)대로 렌더한다:
-///        Colon → `{sender}: {body}`(속성 무시 — 레거시, ADR-0103)
-///        Xml → `<message from="{sender}"[ 속성...]>{body}</message>`(fields 로 속성 조건부 확장)
-///      (정확한 문자열 = ADR-0095 결정 2/3 + ADR-0103 속성). colon/xml 은 msg_id 를 쓰지 않는다(fields.id 별개).
-// ADR-0103 (envelope attribute extension — Xml variant only)
-// ADR-0096 (envelope format switch — reads the daemon-global format via param)
-// ADR-0093 (spike env override — preserved verbatim as the highest-precedence seam)
+///   2. env 미설정/빈 값이면 전역 포맷 상태(`format`)대로 렌더한다(정확한 문자열 = ADR-0095 결정 2/3 +
+///      ADR-0103 속성).
 pub fn wrap_message(
     sender: &str,
     msg_id: &str,
@@ -103,36 +77,25 @@ pub fn wrap_message(
     fields: &EnvelopeFields,
 ) -> String {
     match std::env::var("ENGRAM_WRAP_FORMAT") {
-        // (1) spike seam — env 템플릿을 verbatim 치환(ADR-0093/0095/0096 불변, 제거 금지). fields 무시.
         Ok(t) if !t.is_empty() => apply_wrap_template(&t, sender, msg_id, body),
-        // (2) 전역 포맷 상태(ADR-0096)대로 렌더. msg_id 미사용(봉투에서 uuid 제거 — ADR-0095 거부 대안).
         _ => match format {
-            // 콜론 = 레거시 채팅 관례 — 속성 확장 미지원(ADR-0103), fields 는 무시된다.
             EnvelopeFormat::Colon => format!("{sender}: {body}"),
-            // ★XML 봉투(ADR-0103 속성 확장)★: from 은 항상, 나머지 속성은 fields 가 Some 일 때만 렌더한다.
-            //   렌더는 render_message_xml 이 소유(속성 순서·이스케이프 규칙 단일 출처).
             EnvelopeFormat::Xml => render_message_xml(sender, body, fields),
         },
     }
 }
 
-/// ★XML `<message>` 봉투 렌더(ADR-0103 — 속성 순서·이스케이프 단일 출처)★: `wrap_message` 의 Xml 갈래가
-///   부른다. from 은 항상, 나머지 속성은 `fields` 가 `Some` 일 때만 붙인다(노출 원칙, spec §1).
+/// ★XML `<message>` 봉투 렌더(ADR-0103 — 속성 순서·이스케이프 단일 출처)★
 ///
 /// ★속성 순서(고정·결정적, spec §1)★: `from → id → type → reply-by → in-reply-to → to`. 안정 순서라
-///   같은 입력이면 바이트 동일 출력(테스트 golden 고정 가능). 필드 이름은 snake_case 지만 속성은 kebab-case
-///   (`reply-by`·`in-reply-to`) 로 렌더한다(표기 매핑 고정, spec §1).
+///   같은 입력이면 바이트 동일 출력(테스트 golden 고정 가능).
 ///
 /// ★이스케이프(보안, ADR-0086 발신자 오인 0 · ADR-0096 FIX-2)★: **모든 속성 값은 attr 문맥 이스케이프**
 ///   (`escape_xml_attr` — `"` 포함 4문자)를 거친다. `"` 를 반드시 이스케이프하는 이유: 속성 값이라 겹따옴표가
 ///   값 경계를 깨 `from="a" from="admin` 식으로 사칭·속성 덮어쓰기가 가능하다(브로커 보장 authenticated-sender
-///   무력화). body 는 element text 문맥(`escape_xml_text` — `"` 불요). 이걸로 `</message>` 조각·속성 브레이크아웃이
-///   전부 리터럴이 돼 봉투를 깨거나 사칭할 수 없다.
-// ADR-0103
+///   무력화). 이걸로 `</message>` 조각·속성 브레이크아웃이 전부 리터럴이 돼 봉투를 깨거나 사칭할 수 없다.
 fn render_message_xml(sender: &str, body: &str, fields: &EnvelopeFields) -> String {
-    // from 은 항상 첫 속성. 이후 순서(id → type → reply-by → in-reply-to → to)는 spec §1 고정.
     let mut out = format!("<message from=\"{}\"", escape_xml_attr(sender));
-    // 속성 값은 전부 attr 문맥 이스케이프(`"` 브레이크아웃 차단) — 순서 고정.
     if let Some(id) = &fields.id {
         out.push_str(&format!(" id=\"{}\"", escape_xml_attr(id)));
     }
@@ -158,22 +121,19 @@ fn render_message_xml(sender: &str, body: &str, fields: &EnvelopeFields) -> Stri
 ///   **없다**. 태그 분리가 load-bearing — 수신 LLM 은 `<notice>` 에 회신하지 않아야 한다(인프라 통지지
 ///   동료 발신이 아님, spec §1·§2 · ADR-0103 불변식). from 이 없어 "누구에게 회신" 대상 자체가 없다.
 ///
-/// ★유일 호출부 = `MessagingService`(C3 타임아웃 통지)★: increment C3 가 이 seam 을 연결했다 — `reply_by`
+/// ★유일 호출부 = `MessagingService`(C3 타임아웃 통지)★: `reply_by`
 ///   초과 시 **발신자에게** notice 를 주입/파킹하는 경로(service.rs `deliver_notice`)가 유일한 생성처다.
 ///   그래서 에이전트는 어떤 입구로도 `<notice>` 를 만들 수 없다(발신 인자에 타입 문자열 자체가 없다).
 /// ★포맷 스위치 무관(의도적)★: `wrap_message` 와 달리 `EnvelopeFormat`·`ENGRAM_WRAP_FORMAT` 을 보지 않는다 —
 ///   colon 변형에는 notice 대응물이 정의돼 있지 않고(ADR-0103: colon = 레거시 채팅 관례), 인프라 통지는
 ///   "회신 대상이 아님" 을 태그로 알려야 하므로 포맷과 무관하게 항상 `<notice>` 다.
-/// ★이스케이프★: body 는 element text 문맥(`escape_xml_text`) — `<notice>` 안에도 `</notice>` 조각 주입을
-///   막는다. notice 는 데몬이 만드는 텍스트지만 요청 id·에이전트 이름을 보간하므로 동일 규율 적용.
-// ADR-0103
+/// ★이스케이프★: notice 는 데몬이 만드는 텍스트지만 요청 id·에이전트 이름을 보간하므로 동일 규율 적용.
 pub fn wrap_notice(body: &str) -> String {
     format!("<notice>{}</notice>", escape_xml_text(body))
 }
 
 /// ★XML attribute 값 이스케이프(ADR-0096 FIX-2 보안)★ — `from="..."` 안에 들어갈 sender 용.
 ///   `&`→`&amp;`(먼저 — 이후 `&` 도입분을 재이스케이프하지 않게), `"`→`&quot;`, `<`→`&lt;`, `>`→`&gt;`.
-///   `"` 을 포함하는 이유: attr 문맥이라 겹따옴표가 값 경계를 깬다.
 fn escape_xml_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -183,15 +143,13 @@ fn escape_xml_attr(s: &str) -> String {
 
 /// ★XML element text 이스케이프(ADR-0096 FIX-2 보안)★ — element 본문에 들어갈 body 용.
 ///   `&`→`&amp;`(먼저), `<`→`&lt;`, `>`→`&gt;`. attr 문맥이 아니라 `"` 는 이스케이프 불요(안전).
-///   이걸로 `</message>` 조각이 리터럴 텍스트(`&lt;/message&gt;`)가 돼 봉투를 깨거나 사칭할 수 없다.
 fn escape_xml_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-/// ★순수 템플릿 치환(ADR-0093 — env-driven 실험 봉투 형식)★: 템플릿 안의 placeholder 를 실제 값으로 바꾼다.
-///   `{sender}`→발신자, `{id}`→msg_id, `{body}`→본문(모든 출현 치환). env I/O 를 타지 않는 순수 함수라
+/// ★순수 템플릿 치환(ADR-0093 — env-driven 실험 봉투 형식)★: env I/O 를 타지 않는 순수 함수라
 ///   단위 테스트로 형식 변형별 결과를 직접 단언할 수 있다(wrap_message 는 env 읽고 이 함수에 위임).
 /// ★순진한 replace★: 치환 순서상 앞서 넣은 값 안에 `{...}` 가 있으면 뒤 치환이 다시 건드릴 수 있으나,
 ///   env 는 운영자 통제(에이전트 아님)라 스파이크에선 무해하다(위 wrap_message 주석 참조).
