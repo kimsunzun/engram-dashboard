@@ -8374,16 +8374,12 @@ mod tests {
 
     #[test]
     fn a_reply_that_failed_for_a_transient_reason_keeps_the_contract_open_and_a_retry_closes_it() {
-        // ★spec §7 회신 계약 규칙 ④(ADR-0118 결정 2)★: `MAILBOX_FULL`·동명·도달 불가는 **그 순간의 환경**이라
-        //   계약을 닫지 않는다(무동작 = 오픈 유지). 여기서 닫으면 잠시 뒤 재시도가 **실제로 배달에 성공해도**
-        //   장부는 영영 "회신 실패" 로 남고 요청자의 미결 목록에서도 사라진다(장부 거짓말의 반대 방향).
         let (svc, port, gate) = svc_gated();
         let (boss_from, boss) = live_sender("boss");
         let (w_id, worker) = live("worker");
         let boss_id = boss_from.peer_id;
         port.set_roster(vec![boss.clone(), worker.clone()]);
 
-        // boss → worker request(즉시 배달).
         svc.handle_send(
             "m-req",
             boss_from,
@@ -8395,7 +8391,6 @@ mod tests {
         )
         .expect("배달");
 
-        // boss 의 보관함을 가득 채운다(busy 로 파킹 100건) → 다음 발송은 `MAILBOX_FULL` 행.
         gate.set_busy(boss_id, 0);
         for i in 0..100 {
             send(&svc, &format!("fill{i}"), boss_from, "boss", &["boss"]).expect("파킹");
@@ -8426,8 +8421,7 @@ mod tests {
             "일시 사유 실패는 **무동작** — 계약은 오픈 유지(ADR-0118 결정 2)"
         );
 
-        // ★회귀 핵심★: 자리가 생긴 뒤 재시도가 정상 경로로 계약을 닫는다.
-        svc.flush_for("boss", boss_id); // busy 라 드레인되지 않지만, 게이트를 풀고 다시 flush 한다.
+        svc.flush_for("boss", boss_id);
         gate.clear();
         svc.flush_for("boss", boss_id);
         let retry = svc
@@ -8455,9 +8449,6 @@ mod tests {
 
     #[test]
     fn an_ambiguous_reply_target_also_leaves_the_contract_open() {
-        // ★리뷰 fix D7 — 위 테스트의 빈칸★: 옛 판은 `MAILBOX_FULL` **하나만** 봐서, 무동작 목록에서 다른
-        //   코드를 빼도 초록이었다. 무동작 부류는 spec §3 항목 7-④가 **둘**로 못 박았다(`MAILBOX_FULL` ·
-        //   `RECIPIENT_AMBIGUOUS`) — 동명은 "그 순간의 환경" 이지 도달 불가 확정이 아니다.
         let (svc, port) = svc();
         let (boss_from, boss) = live_sender("boss");
         let (w_id, worker) = live("worker");
@@ -8473,7 +8464,6 @@ mod tests {
         )
         .expect("배달");
 
-        // 요청자 이름이 산 세션 **둘**에 걸린다(동명) → 회신은 `RECIPIENT_AMBIGUOUS` 실패 행.
         let (_b2, boss_twin) = live("boss");
         let (_w2, worker_again) = live("worker");
         port.set_roster(vec![boss, boss_twin, worker_again]);
@@ -8511,26 +8501,12 @@ mod tests {
 
     #[test]
     fn a_planned_retirement_that_vanished_before_commit_is_not_reported() {
-        // ★R2 — 계측은 **계획**이 아니라 **사실**을 보고해야 한다★.
-        //
-        // ★왜 이 경로가 실재하나★: 은퇴 표시된 희생자는 커밋 전에 사라질 수 있다 — 그 사이 회신으로 닫히고
-        //   자기 이력 행까지 링에서 밀려나면 `purge_finished_without_history` 가 정리한다(`ledger::rollback_open`
-        //   의 "알려진 잔여"). 그러면 커밋의 물리 제거는 **아무 것도 지우지 않는다**. 옛 배선은 그때도 계획을
-        //   그대로 보고해서, ADR-0108 결정 2 가 "은퇴의 유일한 증거" 라고 못 박은 축에 유령 은퇴를 심었다.
-        // ★7차에 재현 수단이 바뀌었다(ADR-0125 — 이전이지 약화가 아니다)★: 옛 판은 `on_inject` 훅(락 밖)에서
-        //   희생자를 증발시켰다. 그때는 주입이 **표시와 커밋 사이**에 있었기 때문이다. 전부-큐가 되면서 커밋은
-        //   적재 락 안으로 들어갔고 주입(드레인)은 그 락을 놓은 **뒤**로 갔다 — 그래서 훅으로는 이 창에 더 이상
-        //   닿지 못한다(닿는다면 락 규율이 깨졌다는 뜻이다). 창 자체는 그대로 있으므로 **예약 가드를 운영과 같은
-        //   동사로 직접 열어**(`reserve_marked_contract` — `open_request` → `open_reservation`) 그 안에서 재현한다.
-        // ★재현★: 표시 뒤·커밋 전에 ① 이력 링을 새 행으로 가득 채워 희생자의 행을 밀어내고 ② 희생자 계약을
-        //   닫고 ③ 한 행 더 써서 evict→purge 를 발화시킨다. 그러면 커밋의 물리 제거가 아무 것도 지우지 않는다.
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         port.set_roster(vec![me]);
         fill_open_request_cap_evictable(&svc, from);
         let _ = retirement_reports::drain();
 
-        // 잠정 창을 연다 — 희생자는 **표시**만 됐고 물리 제거는 커밋에서 일어난다.
         let res = reserve_marked_contract(&svc, from, "m-phantom");
         let (vid, vto) = {
             let r = res.retired.as_ref().expect("전제: 희생자가 표시됐다");
@@ -8540,9 +8516,8 @@ mod tests {
         {
             let mut st = svc.state.lock().expect("lock");
             let now = Instant::now();
-            // ① 희생자의 이력 행을 링에서 밀어낸다(이 시점엔 아직 열려 있어 evict 정리 대상이 아니다).
-            //    ★링 용량 상수를 복제하지 않는다★: "그 행이 사라졌나" 를 직접 보고 멈춘다(용량이 바뀌어도
-            //    픽스처가 따라온다).
+            // ① 희생자의 이력 행을 링에서 밀어낸다(아직 열려 있어 evict 정리 대상이 아니다).
+            //    링 용량 상수를 복제하지 않는다 — "그 행이 사라졌나" 를 직접 보고 멈춘다.
             let mut i = 0usize;
             while !st.ledger.records_for(&vid).is_empty() {
                 st.ledger.record(
@@ -8572,7 +8547,6 @@ mod tests {
             "전제: 희생자가 커밋 전에 사라졌다(purge) — 이 전제가 깨지면 아래 단언이 무의미하다"
         );
 
-        // 커밋 = 결말 확정. 계획한 희생자가 없으므로 은퇴는 **일어나지 않았다**.
         let mut log = RetirementLog::default();
         {
             let mut st = svc.state.lock().expect("lock");
@@ -8584,14 +8558,12 @@ mod tests {
             log.real
         );
         assert_eq!(log.phantom.len(), 1, "대신 이상(유령 계획)으로 남는다");
-        // ★핵심★: 그래서 계측 축(ADR-0108 결정 2 의 유일한 증거)에는 한 줄도 나가지 않는다.
         log_contract_retirements("m-phantom", &log.real);
         let reports = retirement_reports::drain();
         assert!(
             reports.is_empty(),
             "커밋이 실제로 제거한 게 없으면 은퇴 보고도 없어야(유령 은퇴 금지): {reports:?}"
         );
-        // 그래도 이 예약 자신의 계약은 정상이다(표시가 헛돌았을 뿐 접수는 성립).
         assert!(
             svc.contract_tracked_for_test("m-phantom", "ghost-worker"),
             "예약 자신의 계약은 살아 있어야"
@@ -8601,19 +8573,14 @@ mod tests {
 
     #[test]
     fn a_retirement_is_actually_reported_and_only_when_it_happened() {
-        // ★F5 — 은퇴 계측의 **호출 위치**를 고정한다(M1 회귀축)★: ADR-0108 결정 2 에서 이 info 로그는 은퇴의
-        //   **유일한 증거**다. 그런데 커밋이 pass B 로 내려간 뒤(A2) 계측을 결말 루프 **앞**에서 찍으면
-        //   ① 주 경로(idle 수신자 request)의 은퇴가 **한 줄도 기록되지 않고** ② 실패로 끝난 발송이 **일어나지
-        //   않은 은퇴를 보고한다**. 두 회귀 모두 상태 단언으로는 안 잡힌다(상태는 찍는 위치와 무관).
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         let (_w, worker) = live("worker");
         port.set_roster(vec![me, worker]);
         fill_open_request_cap_evictable(&svc, from);
-        // 픽스처(레거시 seam)가 남긴 잉여를 비우고 시작한다 — 이 구간의 보고만 본다.
         let _ = retirement_reports::drain();
 
-        // ① 실제로 은퇴가 일어나는 발송(idle 수신자 = 즉시 배달 갈래) → 정확히 1건 보고.
+        // ① 은퇴가 실제로 일어나는 발송(idle 수신자 = 즉시 배달 갈래).
         let out = svc
             .handle_send(
                 "m-retire",
@@ -8644,8 +8611,8 @@ mod tests {
             "보고된 계약은 실제로 사라졌어야(일어나지 않은 일을 보고하면 안 된다)"
         );
 
-        // ② 실패로 끝난 발송은 **아무 것도 보고하지 않는다**(상한을 **은퇴 불가**로 채워 RequestCapacity 로
-        //    끝낸다 — 새 서비스로 시작해야 ①의 은퇴 가능 계약이 희생자로 잡히지 않는다).
+        // ② 실패로 끝난 발송(상한을 **은퇴 불가**로 채워 RequestCapacity 로 끝낸다 — 새 서비스로 시작해야
+        //    ①의 은퇴 가능 계약이 희생자로 잡히지 않는다).
         let (svc, port) = super::tests::svc();
         let (from, me) = live_sender("boss");
         let (_w2, worker2) = live("worker");
@@ -8676,36 +8643,22 @@ mod tests {
 
     #[test]
     fn a_request_that_ends_as_a_failed_row_retires_nobody() {
-        // ★A2 회귀 — 실패로 끝난 수신자는 **남의 계약을 은퇴시키지 않는다**★.
-        //
-        // ★7차에 이 회귀가 태우는 창이 바뀌었다(ADR-0125 — 이전이지 약화가 아니다)★: 5차엔 "주입 직전
-        //   재확인" 이라는 **락 밖 늦은 갈래**가 있어서, 희생자를 표시한(pass A) 한참 뒤에 그 수신자가 실패
-        //   행으로 떨어질 수 있었다. 전부-큐가 되면서 그 갈래는 사라졌다 — 수용 판정과 적재가 **같은 락
-        //   구간**이라 판정 뒤에 결말이 뒤집히지 않는다. 그래서 옛 판이 몰던 인터리빙(앞 수신자 주입 중에
-        //   뒤 수신자 큐를 채우기)은 이제 **재현 불가**이고, 되살리려면 직발송을 되살려야 한다.
-        // ★남은 진짜 창 = 같은 발송의 수신자 사이★: 수신자 1이 희생자를 표시해 잠정 계약을 든 채로,
-        //   수신자 2가 같은 pass A 에서 cap 에 걸려 실패한다. 둘이 뒤엉키면 ① 성립한 은퇴까지 덤으로 풀리거나
-        //   ② 실패한 쪽 표시가 남아 cap 분모가 영구히 준다. 단언축은 옛 판 그대로다: 표시 잔여 0 · 분모 불변 ·
-        //   실패한 수신자의 잠정 계약 소멸(+ 성공한 쪽 계약과 그 은퇴는 살아 있다).
         {
             let (svc, port, gate) = svc_gated();
             let (from, me) = live_sender("boss");
             let (t_id, target) = live("worker");
             let (_l, lead) = live("lead");
             port.set_roster(vec![me, target, lead]);
-            // worker 큐만 cap 까지 채운다(통보라 계약 축과 무관). ★busy 가 필요한 이유(7차)★: 이제 모든
-            //   발송이 자기 호출에서 드레인을 돌리므로 유휴 수신자에겐 큐가 쌓이지 않는다 — 큐를 채우려면
-            //   드레인을 막아야 하고 그 정식 수단이 idle 게이트다.
+            // worker 큐만 cap 까지 채운다 — 통보라 계약 축과 무관하다.
             gate.set_busy(t_id, 0);
             for i in 0..100 {
                 send(&svc, &format!("filler{i}"), from, "boss", &["worker"]).expect("파킹");
             }
-            // 상한을 **은퇴 가능** 계약으로 채운다 — 그래야 아래 발송이 희생자를 표시한다.
             fill_open_request_cap_evictable(&svc, from);
             let occupied_before = svc.occupied_slots_for_test();
             let tracking_before = svc.tracking_len_for_test();
             assert_eq!(svc.marked_retirements_for_test(), 0, "전제: 남은 표시 없음");
-            let _ = retirement_reports::drain(); // 픽스처(레거시 seam) 잉여를 비우고 이 구간만 본다.
+            let _ = retirement_reports::drain();
 
             let out = svc
                 .handle_send(
@@ -8750,7 +8703,6 @@ mod tests {
                 svc.contract_tracked_for_test("m-late", "lead"),
                 "실패한 수신자의 롤백이 같은 발송의 성공한 수신자 계약까지 걷어가면 안 된다"
             );
-            // 은퇴는 **성공한 수신자 몫 1건뿐**이다 — 실패분이 덤으로 은퇴를 보고하면 계측이 오염된다.
             let reports = retirement_reports::drain();
             assert_eq!(
                 reports.len(),
@@ -8793,15 +8745,8 @@ mod tests {
 
     #[test]
     fn a_send_never_cannibalizes_a_contract_it_opened_itself() {
-        // ★A3 회귀 — **진짜 창을 태운다**(H2)★.
-        //
-        // ★라운드 1 판이 두 번 공허했던 이유(리뷰 prober 실측)★: (a) 픽스처가 상한을 **이 발송보다 오래된**
-        //   계약으로만 채웠고 희생자 선정은 `min_by_key(created_at)` 이라 이 발송 자신의 계약은 **애초에
-        //   뽑힐 수 없었다**(`!r.provisional` 필터를 지워도 초록) (b) 단언이 총수(`>= before`)라 잡아먹혀도
-        //   (희생자 −1 + 신규 +1 = 0) 통과했다.
-        // ★이 판★: 상한을 **은퇴 불가로 한 자리 남기고** 채우고 그 자리를 **은퇴 가능 1건**으로 메운다 →
-        //   첫 수신자가 그 1건을 먹고 들어가면, 두 번째 수신자가 볼 은퇴 가능 후보는 **이 발송이 방금 연 첫
-        //   수신자 계약뿐**이다(그게 뽑히면 자기잠식). 단언은 총수가 아니라 **수신자별 계약 존재**다.
+        // ★픽스처 모양이 load-bearing★: 상한을 이 발송보다 **오래된** 계약으로만 채우면 희생자 선정
+        //   (`min_by_key(created_at)`)이 이 발송 자신의 계약을 애초에 못 뽑아 테스트가 공허해진다.
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         let (_a, w1) = live("w1");
@@ -8876,10 +8821,6 @@ mod tests {
 
     #[test]
     fn an_unsettled_reservation_panics_in_debug_and_rolls_itself_back() {
-        // ★H1 회귀★: 라운드 1의 `Option<Option<_>>` 은 **잊은 정산을 아무도 잡지 못했다**(prober: 재파킹
-        //   갈래 정산을 `let _ = contract.take();` 로 바꿔도 전 스위트 초록). 이제 정산 없이 소멸하면
-        //   ① debug 빌드에서 **즉시 패닉**(= 잊은 갈래가 테스트에서 red) ② 그러면서도 **롤백**해 잠정 계약과
-        //   은퇴 표시를 남기지 않는다.
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         port.set_roster(vec![me]);
@@ -8887,7 +8828,6 @@ mod tests {
         let occupied_before = svc.occupied_slots_for_test();
         let tracking_before = svc.tracking_len_for_test();
 
-        // 상한 압력 아래에서 계약을 열어 **희생자 표시까지** 만든 뒤, 가드를 정산 없이 떨군다.
         {
             let mut st = svc.state.lock().expect("lock");
             let retired = match st.ledger.open_request(
@@ -8904,9 +8844,9 @@ mod tests {
             };
             assert_eq!(st.ledger.marked_retirement_count_for_test(), 1, "표시 1건");
             let res = open_reservation(&mut st, &svc, "m-drop", "ghost-worker", retired);
-            drop(st); // Drop 의 try_lock 이 성공하도록 락을 놓는다(운영에서도 정산은 락 안, Drop 은 락 밖).
+            drop(st); // Drop 의 try_lock 이 성공하도록 락을 놓는다.
             let hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {})); // 기대된 패닉의 노이즈를 죽인다.
+            std::panic::set_hook(Box::new(|_| {}));
             let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let _unsettled = res;
             }));
@@ -8932,19 +8872,12 @@ mod tests {
 
     #[test]
     fn a_parked_recipient_keeps_the_contract_its_own_send_opened() {
-        // ★F3 — A3 그물의 **파킹 갈래**★: 위 A3 판은 첫 수신자가 **즉시 배달**되는 배치만 태웠다. 그런데
-        //   정산 지점은 갈래마다 다르다 — 즉시 배달은 `deliver_one` 뒤, 파킹은 `finish_park` 뒤다. 파킹 갈래의
-        //   커밋을 빼먹으면 ① 첫 수신자의 계약이 `provisional` 로 남아 기한 통지 축에서 사라지고 ② 표시된
-        //   희생자가 안 지워져 cap 분모가 영구히 줄어든다 — **둘 다 배달 갈래 테스트로는 안 잡힌다**.
-        // 배치: 상한을 은퇴 불가로 한 자리 남기고 채움 → 그 자리를 은퇴 가능 1건으로 메움 → 첫 수신자는
-        //   **턴 중(busy)** 이라 파킹되고, 두 번째 수신자가 볼 은퇴 가능 후보는 이 발송이 방금 연 첫 수신자
-        //   계약뿐이다(그게 뽑히면 자기잠식).
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("boss");
         let (w1_id, w1) = live("w1");
         let (_b, w2) = live("w2");
         port.set_roster(vec![me, w1, w2]);
-        gate.set_busy(w1_id, 0); // 첫 수신자만 턴 중 → 파킹 갈래.
+        gate.set_busy(w1_id, 0);
 
         fill_open_request_cap_leaving_one_free(&svc, from);
         svc.park_absent_for_test(
@@ -9006,7 +8939,6 @@ mod tests {
                 "접수된 수신자는 자기 계약을 가져야: {out:?}"
             ),
         }
-        // 발신자 귀속 교차 확인 — 접수(배달+파킹) 수신자 수 == 이 발송으로 열린 계약 수.
         let admitted = out
             .iter()
             .filter(|r| r.status != SendStatus::Failed)
@@ -9045,14 +8977,11 @@ mod tests {
             other => panic!("전제: 상한 압력으로 표시가 붙어야 — {other:?}"),
         };
         assert_eq!(st.ledger.marked_retirement_count_for_test(), 1, "표시 1건");
-        // ★운영과 같은 동사로 가드를 만든다(R1)★ — 생존 토큰 부착까지 한 번에. 여기서 `Reservation::new` 를
-        //   직접 부르면 토큰 없는 예약이 되어 "가드가 살아 있어도 회수된다" 는 가짜 통과를 만든다.
         let res = open_reservation(&mut st, svc, msg_id, "ghost-worker", retired);
         drop(st);
         res
     }
 
-    /// 기대된 패닉의 스택트레이스 노이즈를 죽인 채 클로저를 돌린다.
     fn catch_quietly(f: impl FnOnce()) -> std::thread::Result<()> {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -9063,22 +8992,11 @@ mod tests {
 
     #[test]
     fn a_sweep_during_a_slow_injection_never_touches_the_live_reservation() {
-        // ★R1 행렬 (a) — 라운드 4 프로브가 실측한 구멍의 정본 회귀★.
-        //
-        // ★옛 실패 사슬(나이 기준 회수)★: 주입은 유계가 아니다(자식 stdin 은 backpressure 로 무한 블록 가능 —
-        //   core `stdio.rs`). 그래서 "예약이 5초 넘었으면 버려진 것" 이라는 판정은 **아직 일하는 소유자**를
-        //   회수했고, 그 뒤 주입이 성공해 `commit` 이 돌면 계약이 이미 없었다. 결과는 최악의 조용한 반쪽이다:
-        //   `type="request"` 봉투는 배달됐는데 발신자 `awaiting_their_reply` 0 · 수신자 `reply_owed_by_me` 0 ·
-        //   기한 통지 영원히 없음 · 나중에 온 정당한 회신은 `NoMatch` 라 이력 행이 영구히 `Delivered`
-        //   (= 감사 기록이 "답 없음" 이라 거짓말한다) · 게다가 커밋이 **일어나지 않은 은퇴**를 보고했다.
-        // ★재현 방식★: `on_inject` hook 이 주입 도중에 `sweep` 을 돌린다(= 블록된 주입 위로 sweep 틱이 지나간
-        //   순간). 시각은 **한 시간 뒤**로 준다 — 어떤 시간 임계값도 이 발송을 구할 수 없었다는 뜻이고, 생존
-        //   기준에선 그 값이 아무 의미도 없다는 뜻이다.
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         let (w_id, worker) = live("worker");
         port.set_roster(vec![me, worker]);
-        fill_open_request_cap_evictable(&svc, from); // 상한 포화 → 이 발송은 희생자를 표시한다.
+        fill_open_request_cap_evictable(&svc, from);
         let occupied_before = svc.occupied_slots_for_test();
         let _ = retirement_reports::drain();
 
@@ -9088,6 +9006,7 @@ mod tests {
                 if idx != 0 {
                     return;
                 }
+                // 시각을 **한 시간 뒤**로 주는 이유: 어떤 시간 임계값도 이 발송을 구할 수 없었다는 뜻이다.
                 svc2.sweep(Instant::now() + Duration::from_secs(3600));
             }));
         }
@@ -9108,7 +9027,6 @@ mod tests {
             "전제: 주입 갈래를 탔다: {out:?}"
         );
 
-        // ★① 계약이 살아 있다★ — 프로브가 잡은 "계약 없는 request 배달" 의 직접 반증.
         assert!(
             svc.contract_tracked_for_test("m-slow", "worker"),
             "소유자가 살아 있는 예약을 sweep 이 회수하면 안 된다(R1)"
@@ -9136,7 +9054,6 @@ mod tests {
             "수신자는 답할 의무를 봐야: {recipient_side:?}"
         );
 
-        // ★② 은퇴는 실제로 일어났고 정확히 1줄 보고됐다★(계측 오염 없음 — R2 와 같은 축).
         let reports = retirement_reports::drain();
         assert_eq!(reports.len(), 1, "은퇴 1건 = 보고 1줄: {reports:?}");
         assert_eq!(svc.marked_retirements_for_test(), 0, "표시가 남지 않는다");
@@ -9146,7 +9063,6 @@ mod tests {
             "cap 산술도 그대로(은퇴 1 − 신규 1)"
         );
 
-        // ★③ 나중에 온 정당한 회신이 계약을 닫는다★ — 프로브가 본 `NoMatch`·영구 `Delivered` 의 반증.
         svc.handle_send(
             "m-reply",
             reply_from(w_id),
@@ -9179,10 +9095,6 @@ mod tests {
 
     #[test]
     fn a_reservation_dropped_while_another_thread_holds_the_lock_is_reclaimed_by_the_sweep() {
-        // ★F1-(a) — Drop 은 보증이 아니다★: `Reservation::drop` 은 데드락을 피하려 `try_lock` 만 한다. 그래서
-        //   **다른 스레드가 상태 락을 쥔 순간** 에 떨어지면 롤백이 아예 일어나지 않는다. 그때 남는 잔해의 대가는
-        //   영구적이다(잠정 계약 = 기한 통지 소멸 · 표시된 희생자 = cap 분모 영구 감소 · 추적 목록 무계 증가).
-        //   보증은 **주기 sweep** 이 진다 — 이 테스트가 그 보증을 `try_lock` 실패 경로에서 직접 관측한다.
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         port.set_roster(vec![me]);
@@ -9200,11 +9112,10 @@ mod tests {
             std::thread::spawn(move || {
                 let _st = svc2.state.lock().expect("lock");
                 locked_tx.send(()).expect("신호");
-                release_rx.recv().expect("해제 신호"); // 락을 쥔 채 대기.
+                release_rx.recv().expect("해제 신호");
             })
         };
         locked_rx.recv().expect("락 점유 확인");
-        // debug 빌드에선 정산 누락 가드(`debug_assert`)가 여기서 터진다 — 그게 **의도**이므로 삼킨다.
         let hit = catch_quietly(|| drop(guard));
         if cfg!(debug_assertions) {
             assert!(hit.is_err(), "정산 누락은 debug 에서 red 여야(H1)");
@@ -9212,14 +9123,12 @@ mod tests {
         release_tx.send(()).expect("해제");
         holder.join().expect("holder");
 
-        // ① 실제로 **롤백되지 않았다**(= 이 경로에 구멍이 있다는 사실 자체를 고정한다).
         assert!(
             svc.contract_tracked_for_test("m-locked", "ghost-worker"),
             "try_lock 이 실패했으니 Drop 은 아무 것도 못 했다 — 이 전제가 깨지면 아래 보증 단언이 무의미해진다"
         );
         assert_eq!(svc.marked_retirements_for_test(), 1, "표시도 남아 있다");
 
-        // ② 보증: sweep 이 유예를 넘긴 예약을 회수한다.
         svc.sweep(Instant::now() + Duration::from_secs(30));
         assert!(
             !svc.contract_tracked_for_test("m-locked", "ghost-worker"),
@@ -9236,10 +9145,7 @@ mod tests {
 
     #[test]
     fn a_reservation_dropped_while_unwinding_neither_aborts_nor_leaks() {
-        // ★F1-(b) — 이중 패닉 금지★: Drop 은 패닉 언와인딩 중에도 불린다. 거기서 `debug_assert!(false, …)` 로
-        //   다시 패닉하면 **이중 패닉 → abort** 다: 테스트 프로세스가 통째로 죽어 원래 원인조차 못 본다(그리고
-        //   운영 릴리즈는 `panic = "abort"` 라 더 나쁘다). 그래서 `thread::panicking()` 이면 단언을 건너뛰고
-        //   기록만 남긴다 — 이 테스트가 **끝까지 실행된다는 사실 자체**가 abort 없음의 증거다.
+        // abort 가 없다는 단언은 없다 — 이 테스트가 끝까지 실행된다는 사실 자체가 그 증거다.
         let (svc, port) = svc();
         let (from, me) = live_sender("boss");
         port.set_roster(vec![me]);
@@ -9260,7 +9166,6 @@ mod tests {
             "Drop 이 원래 패닉을 자기 패닉으로 갈아치우면 원인이 사라진다"
         );
 
-        // 락은 아무도 안 쥐고 있었으니 이 갈래에선 Drop 의 `try_lock` 이 성공해 **즉시** 회수된다.
         assert!(
             !svc.contract_tracked_for_test("m-unwind", "ghost-worker"),
             "언와인딩 중에도 롤백은 최선 노력으로 수행된다"
@@ -9272,9 +9177,6 @@ mod tests {
 
     #[test]
     fn a_parked_reply_still_closes_the_contract() {
-        // ★M5(라운드 1 A1 수정의 새 구멍 — prober 실측)★: 닫힘 게이트를 "delivered 만" 으로 좁혀도 전
-        //   스위트가 초록이었다. 그러면 **턴 중인 요청자에게 회신**하면(파킹 = 곧 배달) 계약이 열린 채 남아
-        //   발신자에게 거짓 기한 통지가 가고, 회신자의 `reply_owed_by_me` 가 답한 뒤에도 남는다.
         let (svc, port, gate) = svc_gated();
         let (boss_from, boss) = live_sender("boss");
         let boss_id = boss.id;
@@ -9293,7 +9195,7 @@ mod tests {
         .expect("배달");
         assert_eq!(svc.open_request_count(), 1);
 
-        gate.set_busy(boss_id, 0); // 요청자가 턴 진행 중 → 회신은 파킹된다
+        gate.set_busy(boss_id, 0);
         let rows_out = svc
             .handle_send(
                 "m-rep",
@@ -9326,12 +9228,9 @@ mod tests {
 
     #[test]
     fn the_to_attribute_rules_hold_for_every_token_shape() {
-        // ★M4 + M6 — `build_to_attr` 직접 단위 테스트★.
-        //
-        // ★왜 화이트박스인가(M6 의 도달 가능성)★: "`@`토큰의 펼침이 **전원 실패**" 상태는 `@all` 이 유일한
-        //   소스인 v1 에선 블랙박스로 만들 수 없다 — `@all` 의 키는 곧 산 로스터이고, 봉투가 나가려면(수용
-        //   2인 이상) 그 중 최소 둘이 수용돼야 하므로 "전원 실패" 와 양립하지 않는다. 그래도 그 갈래는
-        //   미래 소스(폴더 그룹)가 곧 쓸 규칙이고 mutation 이 무방비였으므로, 판정 함수를 직접 못 박는다.
+        // ★왜 화이트박스인가★: "`@`토큰의 펼침이 **전원 실패**" 는 `@all` 이 유일한 소스인 v1 에선 블랙박스로
+        //   만들 수 없다 — `@all` 의 키가 곧 산 로스터라 봉투가 나가는 조건(수용 2인 이상)과 양립하지 않는다.
+        //   미래 소스(폴더 그룹)가 곧 쓸 규칙이라 판정 함수를 직접 못 박는다.
         let tok_name = |k: &str| AddressToken::Name { key: k.to_string() };
         let tok_group = |l: &str, keys: &[&str]| AddressToken::Group {
             label: l.to_string(),
@@ -9364,7 +9263,7 @@ mod tests {
             "같은 값을 두 번 적으면 수신 LLM 이 인원수를 오독한다(M4)"
         );
 
-        // ③ M6: `@`토큰의 펼침이 **전원 실패**면 그 토큰은 빠진다.
+        // ③ M6: `@`토큰의 펼침이 **전원 실패**.
         let addr = Addressing {
             recipients: vec![rcpt("carol"), rcpt("dup")],
             tokens: vec![tok_name("carol"), tok_group("@all", &["dup"])],
@@ -9375,7 +9274,7 @@ mod tests {
             "펼침이 전부 실패한 @토큰은 이 발송에 아무 것도 기여하지 않았다(M6)"
         );
 
-        // ④ 하나라도 수용되면 남는다 + A5(흡수도 기여로 센다).
+        // ④ 하나라도 수용되면 남는다(A5 — 흡수 포함).
         let addr = Addressing {
             recipients: vec![rcpt("bob"), rcpt("carol")],
             tokens: vec![
@@ -9400,7 +9299,6 @@ mod tests {
 
     #[test]
     fn a_duplicate_name_token_is_written_once_in_the_envelope() {
-        // ★M4 블랙박스★: `["bob","bob","carol"]` 은 수신자 둘이고 봉투도 `to="bob,carol"` 여야 한다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_b, bob) = live("bob");
@@ -9417,10 +9315,6 @@ mod tests {
 
     #[test]
     fn two_exact_ids_of_same_named_twins_both_get_a_row() {
-        // ★M3(과도기 방어 — 정책 아님, ADR-0116 결정 5)★: park·장부 키가 이름이라 두 쌍둥이는 **한 자리**
-        //   밖에 못 쓴다. 옛 구현은 뒤 토큰을 **행 없이 삼켰다**(spec §6 "수신자 1명 = 1행" 위반). 이제 그
-        //   토큰은 `RECIPIENT_AMBIGUOUS` **실패 행**으로 보인다 — 동명이인 자체는 미지원이고(힌트가 사용자
-        //   에스컬레이션을 가리킨다) 뿌리 제거는 ADR-0115 가 한다. 재가 대기 상태가 아니다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (d1, dup1) = live("dup");
@@ -9476,9 +9370,6 @@ mod tests {
 
     #[test]
     fn a_repeated_identical_id_token_yields_exactly_one_row() {
-        // ★F2-(a)★: 같은 exact-id 를 두 번 적으면 정보량이 0 인 표기 중복이다 — 행은 하나여야 한다. 옛
-        //   구현은 M3 갈래(동명 쌍둥이의 뒤 토큰 = 실패 행)를 **매 토큰마다 새로** 타서 `[A-id, B-id, B-id]`
-        //   에 B 실패 행이 **두 줄** 났고, 두 줄이 같은 장부 키를 발급받아 서로를 덮었다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (d1, dup1) = live("dup");
@@ -9499,7 +9390,6 @@ mod tests {
             ],
             "반복 토큰은 접히고 행은 2개(수용 1 + loser 1): {out:?}"
         );
-        // 종점 키가 행마다 하나씩·서로 달라야 한다(loser 키가 이름 공간 밖이라는 사실의 관측면).
         let keys = svc.ledger_endpoint_keys("m1");
         assert_eq!(keys.len(), 2, "장부 종점도 행 수와 같아야: {keys:?}");
         assert_ne!(keys[0], keys[1], "두 행이 같은 키를 쓰면 서로를 덮는다");
@@ -9508,23 +9398,18 @@ mod tests {
 
     #[test]
     fn a_loser_row_never_collides_with_an_agent_whose_name_is_another_agents_id() {
-        // ★F2-(b)(c) — 최악의 교차 충돌★: 어떤 에이전트 C 의 canonical 이름이 **글자 그대로 다른 에이전트
-        //   B 의 id 문자열**인 병리적 로스터. loser 행의 키가 표기(`display`)였다면 ① C 를 지목한 토큰이 B 의
-        //   loser 행 자리를 물려받아(A8 승격) B 의 실패가 사라지고 C 의 배달이 B 의 표기로 보고되거나
-        //   ② 순서를 뒤집으면 장부 키가 **두 행에 중복 발급**된다. 두 순서 모두 무결해야 한다.
         for order in 0..2 {
             let (svc, port) = svc();
             let (from, me) = live_sender("alice");
             let (d1, dup1) = live("dup");
             let (d2, dup2) = live("dup");
-            // C 의 이름 = B(=d2)의 id 문자열. `resolve_live` 는 id 정확 일치를 먼저 보므로 이 토큰은 B 를 가리킨다.
+            // C 의 이름 = B(=d2)의 id 문자열 → 이 토큰은 B 를 가리킨다.
             let evil_name = d2.to_string();
             let (c, mut trap) = live("placeholder");
             trap.name = evil_name.clone();
             port.set_roster(vec![me, dup1, dup2, trap]);
             let id1 = d1.to_string();
 
-            // 두 토큰: `d1-id`(수용) + `d2-id`(= C 의 이름과 동일한 문자열 → M3 loser 행).
             let list: Vec<&str> = if order == 0 {
                 vec![id1.as_str(), evil_name.as_str()]
             } else {
@@ -9559,13 +9444,11 @@ mod tests {
                 keys.iter().all(|k| *k != evil_name || k == &keys[0]),
                 "order={order}: {keys:?}"
             );
-            // 봉투 `to` 에 loser 토큰이 **수용**으로 세어져선 안 된다 → 단일 수신자라 `to` 속성 자체가 없다.
             let body = &port.injected_bodies()[0];
             assert!(
                 !body.contains(" to=\""),
                 "수용 1명이면 `to` 속성은 나오지 않는다(loser 를 세면 2명이 된다 · order={order}): {body}"
             );
-            // C 자신은 아무 것도 못 받는다 — 그 토큰은 처음부터 B 를 가리켰다(id 우선 해석).
             assert_eq!(svc.parked_len(&evil_name), 0, "order={order}");
             assert_eq!(port.injected_bodies().len(), 1, "order={order}");
             let _ = c;
@@ -9574,9 +9457,6 @@ mod tests {
 
     #[test]
     fn the_loser_key_prefix_keeps_it_outside_the_agent_name_space() {
-        // ★R3 — `loser_key` 의 "충돌은 구조적으로 불가능" 주장을 **테스트로 못 박는다**★. 접두를 지워도 전
-        //   스위트가 초록이었다 = 그 주장이 무방비였다(그리고 짝인 `dup_of.is_none()` 필터는 접두가 성립하는
-        //   동안만 잉여다). 두 층으로 고정한다.
         // ① 성질: loser 키에는 canonical 이름이 담을 수 없는 문자(제어문자)가 반드시 들어 있다.
         assert!(
             loser_key("anything").chars().any(char::is_control),
@@ -9584,12 +9464,11 @@ mod tests {
         );
 
         // ② 병리적 로스터: 어떤 에이전트의 canonical 이름이 **접두를 뗀 loser 키와 글자 그대로 같다**.
-        //    접두가 없으면 그 토큰이 loser 행과 같은 키를 받아 행 하나가 삼켜지거나 장부 키가 중복 발급된다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (d1, dup1) = live("dup");
         let (d2, dup2) = live("dup");
-        let unprefixed = loser_key(&d2.to_string()).replace('\u{1}', ""); // = "ambiguous:<d2>"
+        let unprefixed = loser_key(&d2.to_string()).replace('\u{1}', "");
         let (_t, mut trap) = live("placeholder");
         trap.name = unprefixed.clone();
         port.set_roster(vec![me, dup1, dup2, trap]);
