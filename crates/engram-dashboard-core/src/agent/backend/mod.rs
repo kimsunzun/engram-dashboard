@@ -1,8 +1,7 @@
 //! AgentBackend — 백엔드별 명령 명세 산출 trait + 자유 함수 dispatch.
 //!
 //! transport(PtyTransport)는 claude/codex를 모른다. 누가 어떤 프로그램인지 아는 곳은
-//! 오직 backend/다. manager(stage 6)가 이 dispatch 함수를 호출해 CommandSpec을 받아
-//! PtyTransport에 주입한다.
+//! 오직 backend/다.
 //!
 //! tauri import 0.
 
@@ -25,8 +24,6 @@ use crate::agent::transport::OutputDecoder;
 use crate::agent::turn::TurnSignal;
 use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint, OutputEvent};
 
-/// 콘솔 CLI(claude/codex/gemini 등 npm 설치형)를 플랫폼에서 실행 가능한 (program, args)로 변환.
-///
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
 /// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
 /// `<prog>.cmd` shim을 해석해 실제 프로세스를 띄운다. `cmd /c`는 대상이 종료되면 함께 종료되므로
@@ -48,11 +45,9 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
     }
 }
 
-/// 백엔드별 명령 명세 산출 인터페이스.
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {
-    /// 이 백엔드가 claude 세션 추적 대상인가.
-    /// true면 manager(stage 6)가 sid를 발급·watcher를 부착한다.
+    /// true면 manager가 sid를 발급·watcher를 부착한다.
     fn needs_session(&self) -> bool;
 
     /// 이 백엔드가 데몬 제어 채널(MCP 입구)을 **소비**하는가(ADR-0086 F3).
@@ -82,8 +77,7 @@ pub trait AgentBackend: Send + Sync {
     // ADR-0126
     fn accepts_mcp_config(&self) -> bool;
 
-    /// 프로필 + 모드 → CommandSpec.
-    /// cwd·env는 manager가 정규화한 값을 전달한다(stage 6에서 주입 예정).
+    /// cwd·env는 manager가 정규화한 값을 전달한다.
     ///
     /// `control`(ADR-0086): 데몬이 발급한 제어 채널 엔드포인트(추상 descriptor). 있으면 backend 가
     ///   자기 프로그램 방식으로 명령줄에 주입한다(claude=`--mcp-config <path>` — 그 지식은 claude.rs
@@ -120,7 +114,6 @@ pub trait AgentBackend: Send + Sync {
     ///   소비자 쪽에서 "즉시 배달" 로 흡수되지만(positive-knowledge-only), 근거 없는 진행 신호는
     ///   깨울 수 없는 "턴 중" 을 만든다 — 그래서 기본은 침묵이다.
     // ADR-0004
-    // ADR-0110
     // ADR-0113
     fn turn_classifier(&self) -> TurnClassifier {
         no_turn_signals
@@ -136,7 +129,6 @@ pub trait AgentBackend: Send + Sync {
 ///   포인터로 들고 있으면 할당·락·조회가 전부 0 이다.
 pub type TurnClassifier = fn(&OutputEvent) -> Option<TurnSignal>;
 
-/// 턴 신호를 내지 않는 backend 의 분류자(trait 기본값). 터미널 모드·shell 처럼 구조화 출력이 없는 경로.
 /// 관측이 필요 없는 조립(테스트 하네스)도 이걸 꽂아 "신호 없음" 을 명시한다.
 pub fn no_turn_signals(_event: &OutputEvent) -> Option<TurnSignal> {
     None
@@ -157,28 +149,18 @@ fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
 
 // ── 자유 함수 dispatch ─────────────────────────────────────────────────────────
 
-/// 이 명령이 claude 세션 추적 대상인가.
 pub fn needs_session(c: &AgentCommand) -> bool {
     backend_for(c).needs_session()
 }
 
-/// 이 명령의 backend 가 데몬 제어 채널(MCP)을 소비하는가(ADR-0086 F3). manager 가 provision 호출 여부를
-/// 이 dispatch 로 판정한다 — true(claude)면 provision, false(shell)면 registry 미접촉. ★backend dispatch
-/// 로 판정(ADR-0004)★: manager 가 `matches!(command, ...)` 로 직접 분기하지 않고 backend 지식에 위임한다.
 pub fn supports_control_channel(c: &AgentCommand) -> bool {
     backend_for(c).supports_control_channel()
 }
 
-/// 이 명령의 backend 가 MCP config 를 받아들일 수 있는가(ADR-0099). manager 가 spawn 조립 시 이 dispatch 로
-/// 판정해 `ControlChannel::provision` 에 넘기면, 데몬 구현이 이 플래그로 mcp-config 기록·MCP endpoint bits·
-/// 프라이밍 변형·grant 를 한꺼번에 가른다(정합 불변식). ★backend dispatch 로 판정(ADR-0004)★: manager 가
-/// command 를 직접 matches! 하지 않고 backend 지식에 위임한다(supports_control_channel 선례와 동형).
 pub fn accepts_mcp_config(c: &AgentCommand) -> bool {
     backend_for(c).accepts_mcp_config()
 }
 
-/// 프로필 → CommandSpec. manager가 stage 6에서 호출한다.
-/// `control`(ADR-0086): 데몬 제어 채널 엔드포인트 — backend 가 자기 방식으로 주입(claude=`--mcp-config`).
 pub fn build_command_spec(
     c: &AgentCommand,
     mode: SpawnMode,
@@ -190,16 +172,10 @@ pub fn build_command_spec(
     backend_for(c).build_spec(c, mode, session_id, cwd, env, control)
 }
 
-/// 이 명령의 backend(프로그램)가 결정하는 caps(session/model). manager 가 spawn 시 산출해
-/// AgentSession 에 주입하고, session 이 transport caps 와 합성한다(`Capabilities::compose`).
-/// command 를 backend 에 넘겨 mode 별 caps(예: json 모드 resume=false, FIX 5)를 정직하게 산출한다.
 pub fn backend_caps(c: &AgentCommand) -> BackendCaps {
     backend_for(c).capabilities(c)
 }
 
-/// 이 명령의 턴 신호 분류자(ADR-0113). manager 가 spawn 때 한 번 뽑아 `OutputCore` 에 꽂고, emit 이
-/// 이벤트마다 부른다. 매핑을 선언하지 않은 backend 는 침묵한다(`no_turn_signals`).
-// ADR-0113
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
     backend_for(c).turn_classifier()
 }
@@ -221,8 +197,6 @@ pub enum InputEncoder {
 }
 
 impl InputEncoder {
-    /// 입력 바이트 인코딩. Raw 는 무변환 복사(passthrough) — 터미널 경로 바이트 동일 보장.
-    ///
     /// `msg_uuid`: 이 유저 턴의 메시지 uuid(replay dedup 키). ClaudeStreamJson 은 stdin user 라인에
     ///   심어 claude 가 replay 시 그대로 되울리게 한다(uuid dedup 계약 — claude.rs wrap_user_turn).
     ///   같은 write_input 이 이 uuid 를 input_echo_event 에도 넘겨 합성 에코와 replay 를 uuid 로 합친다.
@@ -230,8 +204,6 @@ impl InputEncoder {
     pub fn encode(&self, bytes: &[u8], msg_uuid: Uuid) -> Vec<u8> {
         match self {
             InputEncoder::Raw => bytes.to_vec(),
-            // json 모드 입력은 텍스트다 — UTF-8 로 해석(lossy)해 claude 유저 턴으로 감싼다.
-            // escape/스키마·uuid 부착은 claude.rs 단독(ADR-0004).
             // ※from_utf8_lossy(FIX 6b): 비-UTF8 입력은 U+FFFD 로 치환돼 손상될 수 있으나, json 모드
             //   입력은 텍스트 챗 메시지라 UTF-8 이 전제다(MVP=텍스트 챗, ADR-0044) → 허용.
             InputEncoder::ClaudeStreamJson => {
@@ -260,10 +232,7 @@ impl InputEncoder {
         msg_uuid: Uuid,
     ) -> Option<crate::agent::types::OutputEvent> {
         match self {
-            // 터미널·shell: PTY 로컬 에코가 이미 있음 → 합성 에코 불필요(중복 방지).
             InputEncoder::Raw => None,
-            // json 모드 claude: 유저 텍스트를 즉시 구조화 유저 이벤트로 에코. json 스키마·uuid 부착은
-            // claude.rs 단독(ADR-0004). from_utf8_lossy 근거는 encode 와 동일(텍스트 챗 전제).
             InputEncoder::ClaudeStreamJson => Some(crate::agent::types::OutputEvent::Structured {
                 kind: "user".to_string(),
                 json: claude::user_text_echo_json(&String::from_utf8_lossy(bytes), msg_uuid),
@@ -272,7 +241,6 @@ impl InputEncoder {
     }
 }
 
-/// 이 명령의 입력 인코딩 방식. json 모드 claude 만 ClaudeStreamJson, 그 외 전부 Raw(터미널 불변).
 pub fn input_encoder(c: &AgentCommand) -> InputEncoder {
     if c.is_json_mode() {
         InputEncoder::ClaudeStreamJson
@@ -283,17 +251,14 @@ pub fn input_encoder(c: &AgentCommand) -> InputEncoder {
 
 // ── 출력 정제(ADR-0044/0004/0045) — 입력 인코더의 대칭 짝 ──────────────────────────
 
-/// 이 명령의 출력 정제 decoder(pump→core 앞에 꽂힘). json 모드 claude 만 `ClaudeStreamDecoder`
-/// (stream-json NDJSON → 구조화 OutputEvent), 그 외 전부 None(바이트 직통 = 터미널·평문 불변).
+/// pump→core 앞에 꽂히는 출력 정제 decoder. None = 바이트 직통(터미널·평문 불변).
 ///
 /// ★대칭★: `input_encoder`(입력 방향)의 출력 방향 짝이다. 둘 다 "claude 스키마 지식"을
 /// backend/claude.rs 에만 두는 격리(ADR-0004) — session 은 encoder 태그만, transport 는
-/// `dyn OutputDecoder` 만 알고 claude 를 모른다. manager.spawn 이 이걸 산출해 StdioTransport 에
-/// 주입한다(json→decoder, 그 외→None). `Box<dyn OutputDecoder>` 반환이라 새 backend(codex 등)는
+/// `dyn OutputDecoder` 만 알고 claude 를 모른다. `Box<dyn OutputDecoder>` 반환이라 새 backend(codex 등)는
 /// 자기 decoder 를 여기 분기에 추가하면 된다(교체성).
 pub fn output_decoder(c: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
     if c.is_json_mode() {
-        // claude stream-json 라이브 decoder. 스키마 지식은 claude.rs 단독(ADR-0004).
         Some(Box::new(claude::ClaudeStreamDecoder::new()))
     } else {
         None
@@ -313,7 +278,6 @@ pub fn resume_transcript_events(
     cwd: &std::path::Path,
     session_id: Uuid,
 ) -> Vec<crate::agent::types::OutputEvent> {
-    // json 모드 claude 만 해당(터미널·shell 은 seed 불필요/불가). command 로 판정해 backend 격리 유지.
     match c {
         AgentCommand::Claude { .. } if c.is_json_mode() => {
             claude::read_transcript_events(cwd, session_id)
@@ -348,8 +312,6 @@ mod tests {
         }
     }
 
-    // ADR-0099: 모든 AgentCommand variant의 채널 capability가 expected_channel_matrix와 일치하는지 검증.
-    // 이 테스트가 깨지면 — expected_channel_matrix의 체크리스트를 따라 capability를 의식적으로 채워야 한다.
     #[test]
     fn backend_channel_matrix_is_consciously_declared() {
         let variants: Vec<AgentCommand> = vec![
@@ -404,7 +366,6 @@ mod tests {
             turn_id: None,
             message_id: None,
         };
-        // claude 는 자기 매핑을 선언한다.
         let claude_classify = turn_classifier(&json);
         assert_eq!(claude_classify(&delta), Some(TurnSignal::Progress));
         assert_eq!(claude_classify(&done), Some(TurnSignal::Ended));
@@ -428,7 +389,6 @@ mod tests {
 
     #[test]
     fn input_encoder_dispatch_by_mode() {
-        // 터미널 claude·shell → Raw. json claude → ClaudeStreamJson.
         let term = AgentCommand::Claude {
             extra_args: vec![],
             output_format: ClaudeOutputFormat::Terminal,
@@ -448,7 +408,6 @@ mod tests {
 
     #[test]
     fn raw_encoder_is_byte_identical() {
-        // 터미널 경로 회귀: Raw 는 입력 바이트를 그대로 돌려준다(변형 0). msg_uuid 는 무시된다.
         let input = b"echo hi\r\n\x1b[A\x03";
         assert_eq!(
             InputEncoder::Raw.encode(input, Uuid::new_v4()),
@@ -460,8 +419,6 @@ mod tests {
     #[test]
     fn input_echo_event_json_mode_emits_structured_user_with_uuid() {
         use crate::agent::types::OutputEvent;
-        // json 모드 → Some(Structured{kind:"user", json:{"type":"text","text":<raw>,"uuid":"X"}}).
-        //   uuid 는 write_input 이 encode 에 넘긴 것과 같은 값(dedup 키) — 여기선 부착 여부만 검증.
         let id = Uuid::new_v4();
         let ev = InputEncoder::ClaudeStreamJson
             .input_echo_event(b"hi there", id)
@@ -484,7 +441,6 @@ mod tests {
 
     #[test]
     fn input_echo_event_raw_is_none() {
-        // 터미널·shell(Raw) → None. PTY 로컬 에코가 이미 있어 합성 에코를 추가하면 중복이 된다.
         assert!(
             InputEncoder::Raw
                 .input_echo_event(b"echo hi\r\n", Uuid::new_v4())
@@ -501,7 +457,6 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("\"type\":\"user\""));
         assert!(s.contains("\"text\":\"hi\""));
-        // stdin user 라인에 msg_uuid 가 실려야 replay 가 그대로 되울린다(dedup 계약).
         assert!(
             s.contains(&id.to_string()),
             "stdin user 라인에 msg_uuid 포함"
@@ -511,7 +466,6 @@ mod tests {
     // ── S15 B3: output_decoder dispatch(입력 encoder 의 대칭) ──────────────────────
     #[test]
     fn output_decoder_dispatch_by_mode() {
-        // json claude → Some(decoder), 터미널 claude·shell → None(바이트 직통).
         let term = AgentCommand::Claude {
             extra_args: vec![],
             output_format: ClaudeOutputFormat::Terminal,
@@ -540,8 +494,6 @@ mod tests {
 
     #[test]
     fn output_decoder_produces_structured_events_through_trait_object() {
-        // 배선 증명: dispatch 가 준 trait object 로 stream-json 라인을 decode 하면 구조화 이벤트가
-        //   나온다(impl OutputDecoder for ClaudeStreamDecoder 위임 확인 — decode/flush 트레이트 경로).
         use crate::agent::types::OutputEvent;
         let json = AgentCommand::Claude {
             extra_args: vec![],

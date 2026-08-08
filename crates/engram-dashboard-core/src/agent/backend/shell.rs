@@ -1,7 +1,5 @@
 //! ShellBackend — 임의 셸 프로그램 전용 CommandSpec 산출.
 //!
-//! 세션 추적 불필요. program/args를 그대로 CommandSpec에 실어 반환한다.
-//!
 //! tauri import 0.
 
 use std::path::PathBuf;
@@ -12,24 +10,20 @@ use crate::agent::backend::AgentBackend;
 use crate::agent::profile::{AgentCommand, SpawnMode};
 use crate::agent::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
-/// 셸 백엔드 unit struct. &'static으로 사용, 상태 없음.
 pub struct ShellBackend;
 
 impl AgentBackend for ShellBackend {
     fn needs_session(&self) -> bool {
-        // 셸은 claude 세션 추적 불필요.
         false
     }
 
     fn supports_control_channel(&self) -> bool {
-        // 셸은 제어 채널(MCP)을 쓰지 않는다(ADR-0086 F3) → manager 가 provision 을 건너뛴다.
-        //   그래서 config-write 실패가 MCP 불필요한 셸 스폰을 중단시키지 않는다(round-2 F3 회귀 차단).
         false
     }
 
     fn accepts_mcp_config(&self) -> bool {
-        // 셸은 mcp-config 를 받지 않는다(ADR-0099). 애초에 provision 을 안 부르므로(위 false) 이 값은
-        //   실제 소비되지 않지만, 계약 완결성 위해 정직하게 false.
+        // provision 을 애초에 안 부르므로(위 false) 이 값은 실제 소비되지 않지만, 계약 완결성 위해
+        //   정직하게 false.
         // ADR-0099
         false
     }
@@ -41,7 +35,6 @@ impl AgentBackend for ShellBackend {
         _session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
-        // ADR-0086: shell 은 제어 채널(MCP)을 쓰지 않는다(needs_session=false) → 무시.
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         match command {
@@ -51,18 +44,14 @@ impl AgentBackend for ShellBackend {
                 env,
                 cwd,
             },
-            // dispatch가 ShellBackend에는 Shell variant만 보내지만, Claude가 들어오면 방어적으로 처리.
-            // Claude 전용 세션 인자를 모르므로 program만 채우고 args는 비운다.
             AgentCommand::Claude { .. } => {
-                // ShellBackend는 Claude 세션 인자 조립 방법을 모른다 — dispatch 오류 방어.
                 unreachable!("ShellBackend는 Claude variant를 처리하지 않음. dispatch 버그.")
             }
         }
     }
 
-    /// ★이번 정확화의 핵심★: 범용 셸은 `--resume` 같은 세션 재개 개념이 없다 → resume=false.
-    /// 예전엔 transport 가 backend 무관하게 resume=true 를 하드코딩해 shell 이 부정확했다.
-    /// cwd_env=true(셸도 cwd 에서 실행). model 옵션 없음. (셸은 mode 개념이 없어 command 미사용.)
+    /// 범용 셸은 `--resume` 같은 세션 재개 개념이 없다 → resume=false. 예전엔 transport 가 backend
+    /// 무관하게 resume=true 를 하드코딩해 shell 이 부정확했다. cwd_env=true — 셸도 cwd 에서 실행한다.
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {
@@ -111,8 +100,6 @@ mod tests {
 
     #[test]
     fn capabilities_resume_is_false() {
-        // 핵심 회귀: 범용 셸은 --resume 없음 → resume=false 여야 한다(이전 부정확 = transport
-        // 가 backend 무관하게 resume=true 하드코딩했던 것을 backend 소관으로 바로잡음).
         let cmd = AgentCommand::Shell {
             program: "cmd.exe".into(),
             args: vec![],
