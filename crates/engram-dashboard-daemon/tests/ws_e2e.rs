@@ -17,11 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
-// ADR-0129 슬라이스 1: `KeepaliveConfig` 의 본가는 네트워크 crate 지만, 이 하네스가 부르는
-//   `start_test_server_with_keepalive` 의 시그니처에 나타나므로 데몬 crate 가 재수출한다 —
-//   조립(데몬)을 구동하는 테스트라 네트워크 crate 를 직접 dev-dependency 로 물지 않는다.
-// ADR-0129 0-4: 핸드셰이크 프레임은 반대로 **네트워크 crate 를 직접** 부른다 — 데몬 crate 의 공개
-//   시그니처에 나타나지 않아 재수출할 사유가 없고, 경계가 이 import 줄에서 그대로 보인다.
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
@@ -39,18 +34,14 @@ use uuid::Uuid;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// 모든 네트워크 await 에 거는 기본 timeout. hang 방지(테스트가 영구 멈추지 않게).
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── 클라이언트 헬퍼 ────────────────────────────────────────────────────────────────
 
-/// 한 WS 연결을 감싼 테스트 클라이언트. connect+auth, command 송신, 이벤트/binary frame 수신을
-/// 작은 메서드로 제공한다. control 은 JSON text, 출력은 codec binary frame 으로 온다.
 struct Client {
     ws: Ws,
 }
 
-/// 수신 단위 — control 이벤트(JSON) 또는 출력 frame(binary 디코드 결과).
 // AgentEvent 가 AgentProfile(failed_reason 추가로 clippy 임계 200B 초과)을 품어 variant 크기차가 크다.
 // 테스트 헬퍼라 Box indirection(동작 변경) 대신 lint 만 허용한다.
 #[allow(clippy::large_enum_variant)]
@@ -63,8 +54,6 @@ enum Incoming {
 }
 
 impl Client {
-    /// ws://127.0.0.1:{port} 로 붙고 auth 까지 마친다(Auth 첫 frame). auth 검증은 하지 않고
-    /// 연결만 — Hello/Error 수신은 호출자가 next_event 로 확인한다.
     async fn connect_and_auth(port: u16, token: &str) -> Self {
         let url = format!("ws://127.0.0.1:{port}");
         let (ws, _resp) = tokio::time::timeout(NET_TIMEOUT, connect_async(url))
@@ -76,7 +65,7 @@ impl Client {
         client
     }
 
-    /// 핸드셰이크 프레임 1개 송신. ★핸드셰이크는 명령이 아니다(ADR-0129 0-4)★ — 모양이 네트워크 lib
+    /// ★핸드셰이크는 명령이 아니다(ADR-0129 0-4)★ — 모양이 네트워크 lib
     /// 소유라 `send`(명령 전용)를 못 탄다. 첫 프레임(정상 인증)과 2차 프레임(case21 의 프로토콜 위반)이
     /// **같은 바이트**여야 하므로 두 자리가 이 헬퍼 하나를 공유한다.
     async fn send_auth(&mut self, token: &str) {
@@ -91,7 +80,6 @@ impl Client {
             .expect("auth send failed");
     }
 
-    /// auth frame 만 보내지 않고 raw 연결만(타임아웃/잘못된 첫 frame 테스트용).
     async fn connect_raw(port: u16) -> Self {
         let url = format!("ws://127.0.0.1:{port}");
         let (ws, _resp) = tokio::time::timeout(NET_TIMEOUT, connect_async(url))
@@ -101,7 +89,6 @@ impl Client {
         Self { ws }
     }
 
-    /// 임의 AgentCommand 를 JSON text 로 송신.
     async fn send(&mut self, cmd: &WireCommand) {
         let text = serde_json::to_string(cmd).unwrap();
         tokio::time::timeout(NET_TIMEOUT, self.ws.send(Message::Text(text.into())))
@@ -110,8 +97,6 @@ impl Client {
             .expect("send failed");
     }
 
-    /// 다음 메시지 1건 수신 → Incoming. control=JSON event, binary=frame 디코드.
-    /// Ping/Pong 은 건너뛰고 다음 실제 메시지를 반환한다. Close/None 은 None.
     async fn next(&mut self) -> Option<Incoming> {
         loop {
             let item = tokio::time::timeout(NET_TIMEOUT, self.ws.next())
@@ -138,7 +123,6 @@ impl Client {
         }
     }
 
-    /// 다음 control event 만 기대(중간 binary frame 은 모아 반환). 순서 검증용.
     async fn next_event(&mut self) -> AgentEvent {
         loop {
             match self.next().await.expect("연결이 끊김(이벤트 기대)") {
@@ -148,7 +132,6 @@ impl Client {
         }
     }
 
-    /// binary frame 도 보내고 싶을 때(프로토콜 위반 케이스 검증용) raw binary 송신.
     async fn send_binary(&mut self, data: Vec<u8>) {
         tokio::time::timeout(NET_TIMEOUT, self.ws.send(Message::Binary(data.into())))
             .await
@@ -156,7 +139,6 @@ impl Client {
             .expect("send binary failed");
     }
 
-    /// 깨진/모르는 raw text 송신(파싱 실패 케이스용).
     async fn send_raw_text(&mut self, text: &str) {
         tokio::time::timeout(
             NET_TIMEOUT,
@@ -167,8 +149,6 @@ impl Client {
         .expect("send raw failed");
     }
 
-    /// 주어진 request_id 의 Ack 가 올 때까지 대기(중간 다른 event/frame 흡수). request_id echo 검증.
-    /// Error(같은 request_id)가 오면 panic(Ack 기대인데 실패).
     async fn await_ack(&mut self, expect_id: engram_dashboard_protocol::RequestId) {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
@@ -190,7 +170,6 @@ impl Client {
         panic!("request_id={expect_id:?} 의 Ack 도달 전 timeout/close");
     }
 
-    /// 주어진 request_id 의 Error 가 올 때까지 대기(request_id echo 검증). 메시지 반환.
     async fn await_error(&mut self, expect_id: engram_dashboard_protocol::RequestId) -> String {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
@@ -213,7 +192,6 @@ impl Client {
         panic!("request_id={expect_id:?} 의 Error 도달 전 timeout/close");
     }
 
-    /// request_id 없는 Error(파싱 실패·resize 실패 등)를 대기. 메시지 반환.
     async fn await_error_no_id(&mut self) -> String {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
@@ -226,7 +204,6 @@ impl Client {
         panic!("Error 도달 전 timeout/close");
     }
 
-    /// ListProfiles 조회 응답(전용 reply ProfileList, req echo) 의 profiles 를 반환(중간 event/frame 흡수).
     async fn await_profile_list(
         &mut self,
         req: RequestId,
@@ -248,9 +225,7 @@ impl Client {
         panic!("ProfileList 도달 전 timeout/close");
     }
 
-    /// CRUD 응답을 한 번에 대기: Ack(req echo) **와** ProfileListUpdated 를 둘 다 본다(순서 무관).
     /// reply(Ack) 와 broadcast_profile_list 의 큐잉 순서에 의존하지 않게 한 루프에서 함께 모은다.
-    /// 반환: 마지막으로 본 ProfileListUpdated 의 profiles.
     async fn await_crud(&mut self, req: RequestId) -> Vec<engram_dashboard_protocol::AgentProfile> {
         let mut saw_ack = false;
         let mut profiles: Option<Vec<engram_dashboard_protocol::AgentProfile>> = None;
@@ -280,9 +255,6 @@ impl Client {
         profiles.unwrap()
     }
 
-    /// CreateProfile 응답 대기: Created(req echo, 프로필 동봉) 를 본다(phase4-2 #6).
-    /// 기존 CRUD 와 달리 Ack 가 아니라 Created 로 응답한다(requester 가 "내 것" 매칭).
-    /// broadcast 되는 ProfileListUpdated 는 흡수. 반환: Created 에 동봉된 프로필.
     async fn await_created(&mut self, req: RequestId) -> engram_dashboard_protocol::AgentProfile {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
@@ -308,9 +280,6 @@ impl Client {
         panic!("request_id={req:?} 의 Created 도달 전 timeout/close");
     }
 
-    /// SpawnByCwd/SpawnProfile 응답 대기: Spawned(req echo, AgentInfo 동봉) 를 본다(phase4-2 #6).
-    /// 기존 Spawn 과 달리 Ack 가 아니라 Spawned 로 응답한다. broadcast 되는 AgentListUpdated 는 흡수.
-    /// 반환: Spawned 에 동봉된 AgentInfo.
     async fn await_spawned(&mut self, req: RequestId) -> engram_dashboard_protocol::AgentInfo {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
@@ -333,7 +302,6 @@ impl Client {
         panic!("request_id={req:?} 의 Spawned 도달 전 timeout/close");
     }
 
-    /// GetSnapshot 조회 응답(전용 reply Snapshot, req echo) 의 (agent_id, chunks) 를 반환(중간 event/frame 흡수).
     async fn await_snapshot(
         &mut self,
         req: RequestId,
@@ -356,8 +324,6 @@ impl Client {
         panic!("Snapshot 도달 전 timeout/close");
     }
 
-    /// ListAgents 조회 응답(전용 reply AgentList, req echo) 의 agents 를 반환(중간 event/frame·
-    /// broadcast AgentListUpdated 흡수). 편승 매칭이 아니라 request_id 로만 매칭함을 검증한다.
     async fn await_agent_list(
         &mut self,
         req: RequestId,
@@ -376,8 +342,7 @@ impl Client {
         panic!("AgentList 도달 전 timeout/close");
     }
 
-    /// Spawn 응답을 한 번에 대기: Ack(req echo) **와** wanted agent_id 포함 AgentListUpdated 를
-    /// **둘 다** 볼 때까지 수신한다(순서 무관). ★중요★: spawn_agent 은 agent_list_updated 브로드캐스트를
+    /// ★중요★: spawn_agent 은 agent_list_updated 브로드캐스트를
     /// reply(Ack) **전에** 큐잉하므로 conn_tx 순서가 [list, Ack] 이다. 따라서 await_ack 를 먼저 부르면
     /// list 를 흘려버린다 — 그래서 둘을 한 루프에서 함께 모은다.
     async fn await_spawn(&mut self, wanted: Uuid, req: RequestId) {
@@ -409,9 +374,7 @@ impl Client {
         );
     }
 
-    /// Kill 응답을 한 번에 대기: Ack(req echo) **와** wanted 가 빠진 AgentListUpdated 를 둘 다 본다.
     /// kill_agent 도 list 갱신을 reply(Ack) 전에 큐잉하므로(순서 [list, Ack]) 함께 모은다.
-    /// 중간 StatusChanged(Exiting/Killed) 등 control 은 흡수한다.
     async fn await_kill(&mut self, wanted: Uuid, req: RequestId) {
         let mut saw_ack = false;
         let mut saw_excluded = false;
@@ -441,8 +404,6 @@ impl Client {
         );
     }
 
-    /// 연결이 서버에 의해 닫히는지 확인 — next 가 None(Close/Err) 을 반환할 때까지.
-    /// 중간에 Error event 가 오면 그것도 수용(닫기 직전 통보). true=닫힘 관측.
     async fn expect_closed(&mut self) -> bool {
         loop {
             match self.next().await {
@@ -453,10 +414,6 @@ impl Client {
         }
     }
 
-    /// expect_closed 의 deadline 형. ★느린 소비자★ 테스트용: 들어오는 메시지를 **읽지 않고**
-    /// (소켓 버퍼/서버 큐가 차야 하므로) raw stream 을 deadline 까지 대기해 Close/Err 만 본다.
-    /// 큐를 비우면 안 되므로 next() 처럼 frame 을 파싱·소비하지 않고, 닫힘 신호만 감지한다.
-    /// deadline 내 닫히면 true, 아니면 false.
     async fn expect_closed_within(&mut self, deadline: Duration) -> bool {
         let end = std::time::Instant::now() + deadline;
         loop {
@@ -465,9 +422,7 @@ impl Client {
                 return false;
             }
             match tokio::time::timeout(remaining, self.ws.next()).await {
-                // 타임아웃 — 아직 안 닫힘.
                 Err(_) => return false,
-                // 스트림 종료/오류 = 닫힘.
                 Ok(None) | Ok(Some(Err(_))) => return true,
                 Ok(Some(Ok(Message::Close(_)))) => return true,
                 // 그 외 메시지는 무시(읽긴 하지만 — tungstenite 는 한 메시지씩 디코드).
@@ -476,7 +431,6 @@ impl Client {
         }
     }
 
-    /// keepalive 검증용: deadline 내에 서버가 보낸 **raw Ping** 프레임을 1회 이상 보면 true.
     /// ★중요★: tungstenite 는 stream 을 poll 할 때 들어온 Ping 에 자동 Pong 한다. 이 메서드는
     /// 정상 클라처럼 계속 읽으며(자동 Pong 유발) 그 와중에 Ping 도착을 관측한다. 다른 control/
     /// binary 는 흡수한다.
@@ -491,25 +445,22 @@ impl Client {
                 Err(_) => return false,
                 Ok(None) | Ok(Some(Err(_))) => return false,
                 Ok(Some(Ok(Message::Ping(_)))) => return true,
-                // 다른 메시지(Pong/Text/Binary/Close)는 흡수하고 계속(자동 Pong 은 tungstenite 처리).
                 Ok(Some(Ok(_))) => continue,
             }
         }
     }
 
-    /// keepalive 회귀 검증용: deadline 동안 **계속 읽으며**(자동 Pong 유발) 연결이 닫히지 않으면
-    /// true(=정상 활성 클라는 keepalive 로 끊기지 않음). 닫히면 false.
     async fn stays_alive_while_reading(&mut self, deadline: Duration) -> bool {
         let end = std::time::Instant::now() + deadline;
         loop {
             let remaining = end.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                return true; // deadline 까지 안 닫힘 = 살아있음.
+                return true;
             }
             match tokio::time::timeout(remaining, self.ws.next()).await {
-                Err(_) => return true, // 타임아웃 = 그 사이 닫힘 없음.
+                Err(_) => return true,
                 Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => return false,
-                Ok(Some(Ok(_))) => continue, // 정상 읽기(자동 Pong) 지속.
+                Ok(Some(Ok(_))) => continue,
             }
         }
     }
@@ -520,9 +471,7 @@ async fn expect_closed_within(c: &mut Client, deadline: Duration) -> bool {
     c.expect_closed_within(deadline).await
 }
 
-/// 협상된 PTY 크기 검증용: manager 의 AgentInfo(cols/rows)가 (cols,rows)가 될 때까지 폴링.
 /// ★resize 는 비동기(WS → read_task → dispatch → manager)라 즉시 반영이 아니다★ → 폴링한다.
-/// AgentInfo 가 cols/rows 를 노출하므로(agent_info_to_wire) manager.list_agents 로 직접 확인 가능.
 async fn wait_for_size(handle: &TestServerHandle, id: Uuid, cols: u16, rows: u16) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -545,10 +494,7 @@ async fn wait_for_size(handle: &TestServerHandle, id: Uuid, cols: u16, rows: u16
 // ── 서버 헬퍼 ──────────────────────────────────────────────────────────────────────
 
 /// 결정적 출력을 위해 interactive `cmd.exe` 를 직접 띄운다(/c 없이 — 살아있는 셸).
-/// ShellBackend 가 program/args 를 그대로 PTY 에 싣는다(claude 같은 shim 아님 → cmd /c 래핑 없음).
-/// 반환 agent_id 로 subscribe/write_stdin 한다. 테스트가 stdin 으로 출력 타이밍을 통제한다.
 fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
-    // Windows 는 interactive cmd.exe(살아있는 셸), 비Windows 는 sh -i.
     #[cfg(windows)]
     let command = AgentCommand::Shell {
         program: "cmd.exe".into(),
@@ -574,7 +520,6 @@ fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
     id
 }
 
-/// 결정적 출력 shell 프로필을 **ProfileRegistry 에 등록만** 하고(spawn 하지 않음) profile_id 를 반환.
 /// WS `Spawn{profile_id}` dispatch 경로를 타려면 manager 의 레지스트리에 알려진 프로필이 있어야 한다.
 /// ★운영 회귀 0★: 등록은 manager 의 공개 API(`create_agent` — 명부 단일 입구, ADR-0119)만 사용 —
 ///   start_test_server/run() 배선을 건드리지 않는다(프로필 주입 인자 추가 불필요). 운영 `CreateProfile`
@@ -602,7 +547,7 @@ fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
     id
 }
 
-/// 출력이 누적될 때까지 짧게 대기(폴링). 결정적 출력은 PTY 가 즉시 내지만, OS 스케줄 지연을
+/// 결정적 출력은 PTY 가 즉시 내지만, OS 스케줄 지연을
 /// 흡수하려고 snapshot seq 수가 min_events 이상이 될 때까지 최대 deadline 대기.
 async fn wait_for_output(handle: &TestServerHandle, id: Uuid, min_events: usize) {
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
@@ -628,14 +573,12 @@ async fn case01_auth_success_hello_and_list() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
 
-    // 첫 control 은 Hello(버전 동봉).
     match c.next_event().await {
         AgentEvent::Hello {
             protocol_version, ..
         } => assert_eq!(protocol_version, PROTOCOL_VERSION),
         ev => panic!("Hello 기대, got {ev:?}"),
     }
-    // 이어서 초기 AgentListUpdated(빈 목록).
     match c.next_event().await {
         AgentEvent::AgentListUpdated { agents } => assert!(agents.is_empty(), "초기 목록은 비어야"),
         ev => panic!("AgentListUpdated 기대, got {ev:?}"),
@@ -649,7 +592,7 @@ async fn case01_auth_success_hello_and_list() {
 async fn case02_auth_wrong_token_closes() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_and_auth(server.port, &"f".repeat(64)).await;
-    // 서버는 Error 후 close 해야 한다. ★짧은 deadline★: 옛 expect_closed 는 10s recv timeout 에
+    // ★짧은 deadline★: 옛 expect_closed 는 10s recv timeout 에
     //   기대 닫힘을 잡아 느리고 불명확했다(mutation D). 닫힘은 즉시 일어나므로 3s 안에 단언한다.
     assert!(
         c.expect_closed_within(Duration::from_secs(3)).await,
@@ -662,7 +605,6 @@ async fn case02_auth_wrong_token_closes() {
 #[tokio::test]
 async fn case03_auth_timeout_closes() {
     let server = start_test_server().await.unwrap();
-    // auth frame 을 보내지 않고 대기 → 서버 AUTH_TIMEOUT(1s) 후 close.
     let mut c = Client::connect_raw(server.port).await;
     assert!(
         c.expect_closed().await,
@@ -679,7 +621,6 @@ async fn case04_output_order_exact() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // subscribe(처음부터) — Hello/list 이후 SubscribeAck → replay binary → ReplayComplete.
     c.send(&WireCommand::Subscribe {
         agent_id: id,
         epoch: None,
@@ -687,13 +628,11 @@ async fn case04_output_order_exact() {
     })
     .await;
 
-    // stdin 으로 결정적 출력 유도(에코됨).
     server
         .manager
         .write_stdin(id, b"echo CASE4_MARKER\r\n")
         .unwrap();
 
-    // SubscribeAck → (replay) → ReplayComplete → 이후 live frame 들. seq 를 수집해 0..n 연속 검증.
     let seqs = collect_frame_seqs_until_marker(&mut c, id, "CASE4_MARKER").await;
     assert!(!seqs.is_empty(), "frame 을 받아야 함");
     assert_seq_contiguous_from_zero(&seqs);
@@ -707,7 +646,6 @@ async fn case05_replay_then_live_order() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
 
-    // 구독 전에 출력 일부 쌓기.
     server.manager.write_stdin(id, b"echo PREFILL\r\n").unwrap();
     wait_for_output(&server, id, 1).await;
 
@@ -720,8 +658,6 @@ async fn case05_replay_then_live_order() {
     })
     .await;
 
-    // 순서: SubscribeAck(text) → [replay binary…] → ReplayComplete(text) → live binary.
-    // 1) 첫 control 은 SubscribeAck.
     let ack = c.next_event().await;
     match ack {
         AgentEvent::SubscribeAck {
@@ -736,7 +672,6 @@ async fn case05_replay_then_live_order() {
         }
         ev => panic!("SubscribeAck 기대, got {ev:?}"),
     }
-    // 2) ReplayComplete 가 올 때까지 사이의 frame 은 모두 replay(데이터 있음).
     let mut replay_frames = 0usize;
     loop {
         match c.next().await.expect("ReplayComplete 전 끊김") {
@@ -753,7 +688,6 @@ async fn case05_replay_then_live_order() {
     }
     assert!(replay_frames >= 1, "PREFILL replay frame 이 1건 이상");
 
-    // 3) ReplayComplete 이후 live — 새 stdin 출력이 frame 으로 도착.
     server.manager.write_stdin(id, b"echo LIVE5\r\n").unwrap();
     let live = collect_frames_until_marker(&mut c, id, "LIVE5").await;
     assert!(!live.is_empty(), "ReplayComplete 후 live frame 도착해야");
@@ -776,14 +710,11 @@ async fn case06_after_seq_resume_tail_only() {
         after_seq: None,
     })
     .await;
-    // 첫 구독에서 일부 받기.
     server.manager.write_stdin(id, b"echo R6A\r\n").unwrap();
     let first = collect_frame_seqs_until_marker(&mut c, id, "R6A").await;
     let last_seq = *first.iter().max().unwrap();
 
-    // 끊고(연결 drop) 재연결 + after_seq=last_seq 로 resume.
     drop(c);
-    // 끊긴 사이 추가 출력(이게 tail 로 와야 함).
     server.manager.write_stdin(id, b"echo R6B\r\n").unwrap();
     wait_for_output(&server, id, (last_seq as usize) + 2).await;
 
@@ -813,7 +744,6 @@ async fn case06_after_seq_resume_tail_only() {
         }
         ev => panic!("SubscribeAck(Resume) 기대, got {ev:?}"),
     }
-    // replay 로 온 frame 들은 모두 seq > last_seq (tail 만).
     let tail = collect_frame_seqs_until_marker(&mut c2, id, "R6B").await;
     for s in &tail {
         assert!(
@@ -832,8 +762,7 @@ async fn case07_truncated_replay() {
     let id = spawn_shell_agent(&server);
     let epoch = server.manager.agent_epoch(id).unwrap();
 
-    // 2MB ring 을 넘기는 대량 출력 — for 루프로 긴 줄 다수 출력.
-    // (한 줄 ~80B × 40000 ≈ 3MB → oldest 가 0 위로 밀린다.)
+    // (한 줄 ~80B × 40000 ≈ 3MB → 2MB ring 의 oldest 가 0 위로 밀린다.)
     server
         .manager
         .write_stdin(
@@ -842,7 +771,6 @@ async fn case07_truncated_replay() {
         )
         .unwrap();
 
-    // oldest 가 0 위로 밀릴 때까지 대기(snapshot 의 첫 seq > 0).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let snap = server.manager.get_snapshot(id).unwrap();
@@ -857,7 +785,6 @@ async fn case07_truncated_replay() {
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
-    // after_seq=0 < oldest → Truncated.
     c.send(&WireCommand::Subscribe {
         agent_id: id,
         epoch: Some(epoch),
@@ -926,7 +853,6 @@ async fn case09_slow_consumer_closed_others_unaffected() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
 
-    // 정상 소비자(B) — 별도 task 가 계속 읽어 살아있게 한다.
     let mut good = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut good).await;
     good.send(&WireCommand::Subscribe {
@@ -937,7 +863,6 @@ async fn case09_slow_consumer_closed_others_unaffected() {
     .await;
     wait_replay_complete(&mut good, id).await;
 
-    // 느린 소비자(A) — 구독만 하고 이후 수신을 멈춘다(읽지 않음 → 서버 큐+소켓 버퍼가 찬다).
     let mut slow = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut slow).await;
     slow.send(&WireCommand::Subscribe {
@@ -948,8 +873,6 @@ async fn case09_slow_consumer_closed_others_unaffected() {
     .await;
     wait_replay_complete(&mut slow, id).await;
 
-    // good 을 백그라운드에서 계속 drain — slow 가 막힌 동안에도 good 은 살아남아야 한다.
-    // good_frames 로 "good 이 새 출력을 계속 받았는지" 를 확인한다.
     let good_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let good_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let drain_task = {
@@ -961,12 +884,10 @@ async fn case09_slow_consumer_closed_others_unaffected() {
                     good_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-            // None = good 연결이 닫힘(있어선 안 됨).
             good_alive.store(false, std::sync::atomic::Ordering::Relaxed);
         })
     };
 
-    // 대량 출력 — slow 의 송신 큐(CONN_TX_CAP=4608)+OS 소켓 버퍼를 넘겨 close_signal 경로를 발동.
     // ★m1(견고화)★: 위양성(소켓 버퍼가 큰 환경에서 안 막힘) 회피를 위해 출력량을 키운다.
     //   한 줄 ~140B(패딩) × 200000 ≈ 28MB. mpsc 4608칸(≈0.6MB) + 어떤 현실적 OS 소켓 송신
     //   버퍼(보통 수십 KB~수 MB)를 합쳐도 28MB 를 흡수할 수 없어, slow 가 안 읽으면 try_send 가
@@ -991,7 +912,6 @@ async fn case09_slow_consumer_closed_others_unaffected() {
         "느린 소비자 연결은 서버가 닫아야 함"
     );
 
-    // good 은 그 사이에도 살아있고 frame 을 계속 받았어야 한다(타 연결 무영향).
     assert!(
         good_alive.load(std::sync::atomic::Ordering::Relaxed),
         "정상 소비자는 닫히면 안 됨"
@@ -1012,7 +932,6 @@ async fn case10_reconnect_lossless() {
     let id = spawn_shell_agent(&server);
     let epoch = server.manager.agent_epoch(id).unwrap();
 
-    // 1차 연결 — 일부 받기.
     let mut c1 = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c1).await;
     c1.send(&WireCommand::Subscribe {
@@ -1026,11 +945,9 @@ async fn case10_reconnect_lossless() {
     let max1 = *got1.iter().max().unwrap();
     drop(c1);
 
-    // 끊긴 사이 출력.
     server.manager.write_stdin(id, b"echo RC10B\r\n").unwrap();
     wait_for_output(&server, id, (max1 as usize) + 2).await;
 
-    // 재연결 + resume(after_seq=max1).
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c2).await;
     c2.send(&WireCommand::Subscribe {
@@ -1043,12 +960,10 @@ async fn case10_reconnect_lossless() {
     let _ = c2.next_event().await;
     let got2 = collect_frame_seqs_until_marker(&mut c2, id, "RC10B").await;
 
-    // 합쳐서 seq 가 max1 까지 연속이고 max1 이후도 연속(gap 0) — dedup(set) 후 검증.
     let mut all: Vec<u64> = got1.clone();
     all.extend(got2.iter().copied());
     all.sort_unstable();
     all.dedup();
-    // 0..=max(all) 모든 seq 가 존재해야 무손실.
     let max_all = *all.last().unwrap();
     let expected: Vec<u64> = (0..=max_all).collect();
     assert_eq!(all, expected, "reconnect+resume 후 seq gap 0(무손실)");
@@ -1072,7 +987,6 @@ async fn case11_high_throughput_no_deadlock() {
     .await;
     wait_replay_complete(&mut c, id).await;
 
-    // 대량(긴 루프) 출력 + 끝 마커. 클라가 계속 읽어 데드락/유실 없이 마커까지 수신.
     server
         .manager
         .write_stdin(
@@ -1120,11 +1034,9 @@ async fn case12_multi_subscribe_demux() {
     .await;
     wait_replay_complete(&mut c, id_b).await;
 
-    // 두 agent 에 서로 다른 마커 출력.
     server.manager.write_stdin(id_a, b"echo AAA12\r\n").unwrap();
     server.manager.write_stdin(id_b, b"echo BBB12\r\n").unwrap();
 
-    // frame 의 agent_id 로 역다중화 — 각 agent 의 payload 가 자기 agent_id 로만 와야 한다.
     let mut saw_a = false;
     let mut saw_b = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -1132,7 +1044,6 @@ async fn case12_multi_subscribe_demux() {
         match c.next().await {
             Some(Incoming::Frame(aid, _, _, payload)) => {
                 let text = String::from_utf8_lossy(&payload);
-                // 마커가 섞여 엉뚱한 agent_id 로 오면 역다중화 실패.
                 if text.contains("AAA12") {
                     assert_eq!(aid, id_a, "AAA12 는 agent A 로만 와야");
                     saw_a = true;
@@ -1180,10 +1091,7 @@ async fn case13_ws_spawn_ack_and_list() {
     })
     .await;
 
-    // dispatch Spawn → manager.spawn_agent → Ack(req echo) + agent_list_updated(새 agent_id).
-    // (spawn_agent 이 list 를 Ack 보다 먼저 큐잉하므로 둘을 한 루프에서 함께 받는다.)
     c.await_spawn(profile_id, req).await;
-    // manager 에도 실제로 떠 있어야(dispatch 가 실제 spawn 했다는 사실 확인).
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
         "WS Spawn 후 manager 에 agent 가 살아있어야"
@@ -1201,7 +1109,6 @@ async fn case14_ws_write_stdin_roundtrip() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // 1) WS Spawn.
     let req_spawn = RequestId::new();
     c.send(&WireCommand::Spawn {
         profile_id,
@@ -1210,7 +1117,6 @@ async fn case14_ws_write_stdin_roundtrip() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // 2) WS Subscribe(출력 평면 받기) — replay 끝까지 소진.
     c.send(&WireCommand::Subscribe {
         agent_id: profile_id,
         epoch: None,
@@ -1219,7 +1125,6 @@ async fn case14_ws_write_stdin_roundtrip() {
     .await;
     wait_replay_complete(&mut c, profile_id).await;
 
-    // 3) WS WriteStdin — dispatch 가 data → InputEvent::Raw 로 변환해 PTY 에 싣는다.
     let req_write = RequestId::new();
     c.send(&WireCommand::WriteStdin {
         agent_id: profile_id,
@@ -1229,7 +1134,6 @@ async fn case14_ws_write_stdin_roundtrip() {
     .await;
     c.await_ack(req_write).await;
 
-    // 출력이 binary frame 으로 도착(VIA_WS 마커 — 에코됨).
     let frames = collect_frames_until_marker(&mut c, profile_id, "VIA_WS").await;
     assert!(!frames.is_empty(), "VIA_WS 출력이 binary frame 으로 와야");
 
@@ -1253,8 +1157,6 @@ async fn case15_ws_kill_ack_and_list_excludes() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // WS Kill → Ack + (kill_agent 이 list 갱신 브로드캐스트). CLAUDE.md 불변식: terminal 판정은
-    // status_changed 가 아니라 agent-list-updated 로 — 목록에서 빠지는 것으로 확인한다.
     let req_kill = RequestId::new();
     c.send(&WireCommand::Kill {
         agent_id: profile_id,
@@ -1287,7 +1189,6 @@ async fn case16_ws_interrupt_ack_process_alive() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // WS Interrupt → Ack. interrupt 는 Ctrl+C 만 — 프로세스는 살아있어야 한다.
     let req_int = RequestId::new();
     c.send(&WireCommand::Interrupt {
         agent_id: profile_id,
@@ -1364,7 +1265,6 @@ async fn case18_ws_unsubscribe_stops_live() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // subscribe → replay 끝 → 출력 한 번 받아 살아있는 구독 확인.
     c.send(&WireCommand::Subscribe {
         agent_id: profile_id,
         epoch: None,
@@ -1378,13 +1278,11 @@ async fn case18_ws_unsubscribe_stops_live() {
         .unwrap();
     let _ = collect_frames_until_marker(&mut c, profile_id, "PRE_UNSUB").await;
 
-    // WS Unsubscribe — 이 연결의 그 agent sink 제거.
     c.send(&WireCommand::Unsubscribe {
         agent_id: profile_id,
     })
     .await;
 
-    // unsubscribe 가 dispatch·코어에 반영될 시간을 준 뒤 새 출력 유발.
     // ★타이밍 비의존 보장★: ListAgents 를 왕복시켜 Unsubscribe 가 read_task 에서 이미 처리됐음을
     //   확정한 뒤(동일 read_task 가 FIFO 처리) 새 출력을 낸다.
     let req_list = RequestId::new();
@@ -1407,7 +1305,6 @@ async fn case18_ws_unsubscribe_stops_live() {
         .write_stdin(profile_id, b"echo POST_UNSUB\r\n")
         .unwrap();
 
-    // 이후 일정 시간 동안 frame 이 더 오면 안 된다(control 만 허용). deadline 동안 frame 0 검증.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1415,7 +1312,7 @@ async fn case18_ws_unsubscribe_stops_live() {
             Ok(Some(Incoming::Frame(..))) => {
                 panic!("Unsubscribe 후 live frame 이 도착하면 안 됨");
             }
-            Ok(Some(Incoming::Event(_))) => continue, // status/list 등 control 은 허용.
+            Ok(Some(Incoming::Event(_))) => continue,
             Ok(None) => break,
             Err(_) => break, // timeout = frame 안 옴(정상).
         }
