@@ -840,42 +840,18 @@ async fn run() -> i32 {
     0
 }
 
-/// 인자 파싱(순수·단위테스트 대상): `--priming <값>`·`--model <값>`·불리언 `--disallow-mcp`/`--cli-only`
-///   /`--seed-request`·`--seed-reply-by <값>`·`--b-task <값>` 를 인식한다. 미지정 model=sonnet, 미지정
-///   priming=None(= 기본 운영 A 프라이밍), 미지정 seed_request=false/seed_reply_by=None/b_task=None(= 오늘
-///   동작). 알 수 없는 토큰은 무시(하네스라 관대). `iter` 로 받아 std::env 의존을 뺀다.
-/// 플래그를 값으로 삼키지 않는다(FIX round-2 #7): `--priming --model opus` 처럼 다음 토큰이 또 플래그
-///   (`--` 로 시작)면 그건 값이 아니라 새 플래그다 — peek 해서 값으로 소비하지 않고 넘긴다(그 플래그는
-///   다음 루프에서 제대로 처리, priming 은 미지정 유지). 이렇게 안 하면 `--model` 이 priming 값으로 먹혀
-///   model 이 조용히 기본값에 남는다.
-/// ★F5 — `--b-task`·`--seed-reply-by` 는 예외(더 엄격)★: 다른 값-플래그(`--priming`/`--model`)는 값이
-///   없거나 플래그처럼 보이면 `take_flag_value` 가 조용히 None 을 돌려 호출자가 기본값을 유지하지만,
-///   `--b-task` 와 `--seed-reply-by` 는 그 세 오용(값 누락·다음이 `--` 로 시작·빈/공백뿐인 값)을 전부
-///   각각 `b_task_error`/`seed_reply_by_error` 에 사유로 기록한다 — B 원과제 프롬프트나 회신 기한이
-///   통째로 조용히 기본값(auth 모듈 과제 / 기한 없음)으로 미끄러지면 오퍼레이터가 눈치채기 어렵기
-///   때문이다(다른 노브는 미지정=오늘 동작이 곧 안전한 기본이라 관대해도 되지만, 이 둘은 "쓰려던 값이
-///   안 먹혔다" 는 신호를 죽인다 — 특히 `--seed-reply-by` 가 조용히 안 먹히면 request 계약이 기한 없이
-///   돈다).
+/// `iter` 로 받아 std::env 의존을 뺀다 — 순수라 단위테스트가 닿는다.
+/// 다음 토큰이 또 플래그(`--` 로 시작)면 값으로 삼키지 않는다(FIX round-2 #7) — 삼키면 `--priming --model
+///   opus` 에서 `--model` 이 priming 값으로 먹혀 model 이 조용히 기본값에 남는다.
 fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     let mut priming = None;
     let mut model = "sonnet".to_string();
-    // ADR-0094: `--disallow-mcp` 는 값 없는 불리언 플래그(존재 = 켜짐) — take_flag_value 로 다음 토큰을
-    //   삼키지 않는다(그 자체로 완결).
     let mut disallow_mcp = false;
-    // ADR-0099 FIX 3: `--cli-only` 도 값 없는 불리언 플래그(존재 = 켜짐).
     let mut cli_only = false;
-    // `--seed-request` 도 값 없는 불리언 플래그(존재 = 켜짐).
     let mut seed_request = false;
     let mut seed_reply_by = None;
-    // ★F5 오용 가드(신규)★ `--seed-reply-by` 도 `--b-task` 와 같은 강화를 받는다 — `take_flag_value` 의
-    //   "조용히 None" 을 받지 않고 잘못 쓴 값(누락/플래그로 오인/빈 값)을 사유째 기록해 `run()` 이 스폰 전에
-    //   fail-fast 하게 한다(조용히 넘기면 request 계약이 기한 없이 돌아 오퍼레이터가 눈치채기 어렵다).
     let mut seed_reply_by_error: Option<String> = None;
     let mut b_task = None;
-    // ★F5 오용 가드★ `--b-task`·`--seed-reply-by` 는 다른 값-플래그(`--priming`/`--model`)와 다르게
-    //   `take_flag_value` 의 "조용히 None" 을 그대로 받지 않는다 — 잘못 쓴 값(누락/플래그로 오인/빈 값)을
-    //   여기서 사유째 기록해 두면 `run()` 이 스폰 전에 fail-fast 한다(다른 플래그는 관대하게 무시하는
-    //   기존 규율을 그대로 유지 — 이건 이 둘의 전용 강화다).
     let mut b_task_error: Option<String> = None;
     let mut it = iter.peekable();
     while let Some(tok) = it.next() {
@@ -893,9 +869,6 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
             "--disallow-mcp" => disallow_mcp = true,
             "--cli-only" => cli_only = true,
             "--seed-request" => seed_request = true,
-            // ★F5 오용 가드(신규)★ 값 누락 / 다음 토큰이 `--` 로 시작(플래그로 오인 가능) / 빈·공백뿐인
-            //   값은 전부 seed_reply_by_error 에 사유째 기록한다(--b-task 와 같은 peek 패턴 — 조용히
-            //   None 을 돌리는 take_flag_value 를 여기선 안 쓴다).
             "--seed-reply-by" => match it.peek() {
                 None => {
                     seed_reply_by_error = Some(
@@ -959,30 +932,19 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     }
 }
 
-/// 플래그 값 하나를 소비하되, 다음 토큰이 또 다른 플래그(`--`)면 소비하지 않는다(FIX round-2 #7).
-///   반환 None = 값 없음(플래그가 값 없이 끝났거나 다음이 또 플래그) → 호출자는 기본값 유지.
 fn take_flag_value<I: Iterator<Item = String>>(it: &mut std::iter::Peekable<I>) -> Option<String> {
     match it.peek() {
-        Some(next) if next.starts_with("--") => None, // 다음이 플래그 → 값 아님(넘김, 소비 X).
-        Some(_) => it.next(),                         // 정상 값 → 소비.
-        None => None,                                 // 값 없이 끝.
+        Some(next) if next.starts_with("--") => None,
+        Some(_) => it.next(),
+        None => None,
     }
 }
 
-/// ★셀렉터→priming 파일 경로(순수·단위테스트 대상, ADR-0099)★: repo 루트 기준 경로로 매핑한다.
-///   - C0(또는 None) → `prompts/agent-priming.md`(운영 A — send_message 만 가르친다, ADR-0126 결정 1).
-///   - 그 외 = **파일 경로로 간주**(절대면 그대로, 상대면 repo 루트 기준 join) — 명시 override. 운영 B
-///     (`prompts/agent-priming-cli.md`)나 임시 실험 파일을 이 경로로 직접 지정한다.
-/// 반환은 항상 절대경로(존재 검사는 하지 않는다 — FilePrimingProvider 가 최종 존재/CLI-안전 검사).
-///   절대화조차 못 하면 None.
-///   ※ 옛 C1~C3 실험 별칭은 ADR-0099 로 제거됐다(실험 변형 파일 정리 — git 이력 보존). C1~C3 문자열을
-///     넘기면 이제 "그 이름의 파일 경로"로 해석돼 repo 루트 기준 join 되고(존재하지 않아 하류에서 None),
-///     별도 특수 매핑은 없다.
+/// 반환은 항상 절대경로 — 존재 검사는 하지 않는다(`FilePrimingProvider` 가 최종 존재·CLI-안전 검사).
 fn resolve_priming_path(selector: Option<&str>, repo_root: &std::path::Path) -> Option<PathBuf> {
     let rel: &str = match selector {
         None | Some("C0") | Some("c0") => "prompts/agent-priming.md",
         Some(path) => {
-            // 명시 경로 override. 절대면 그대로, 상대면 repo 루트 기준.
             let p = PathBuf::from(path);
             let joined = if p.is_absolute() {
                 p
@@ -996,29 +958,23 @@ fn resolve_priming_path(selector: Option<&str>, repo_root: &std::path::Path) -> 
     joined.is_absolute().then_some(joined)
 }
 
-/// 어느 입구 라벨인가(관측 레코드 → 문자열). Entrance 는 daemon crate 내부 as_str 이 private 이라
-///   여기서 매핑한다(하네스 표시 전용).
 fn entrance_str(e: Entrance) -> &'static str {
     match e {
         Entrance::Mcp => "mcp",
         Entrance::Cli => "cli",
-        // C3: 데몬 자가 발신(`<notice>` 타임아웃 통지) — 이 하네스는 A→B 발송만 돌리므로 표시용으로만 존재.
         Entrance::Daemon => "daemon",
     }
 }
 
-/// UUID 앞 8자(hex) — delivery census 출력용 짧은 표시(전체 UUID 는 census 한 줄을 과하게 늘려 눈으로
-///   훑기 어렵게 만든다). `.simple()` 은 하이픈 없는 32자 hex 문자열이라 앞 8자 슬라이스가 전부 ASCII hex임이
-///   보장된다(byte-slice 안전).
+/// 전체 UUID 는 census 한 줄을 과하게 늘려 눈으로 훑기 어렵게 만든다. `.simple()` 은 하이픈 없는 32자 hex
+///   문자열이라 앞 8자 슬라이스가 전부 ASCII hex임이 보장된다(byte-slice 안전).
 fn short_peer_id(id: uuid::Uuid) -> String {
     id.simple().to_string()[..8].to_string()
 }
 
-/// ★delivery census(2026-07-28 · light 리뷰 F1/F2 반영)★ — 왜: [B->A delivery] 는 회신 축(B→A) 한
-///   레코드만 찍는다. 그룹(@all) 방송·B 원과제 턴 중 발송처럼 그 축 밖의 배달은 stdout 어디에도 안 잡혀,
-///   인수 실측이 참가자 자기보고에 의존하게 되는 관측 공백이 있었다(2026-07-28 인수 ③ 실측에서 실발생).
-///   캡처된 전체 레코드를 도착 순서 그대로 덤프한다 — happy tail 과 fail_setup! 양쪽에서 호출된다(F2:
-///   실패/행 턴 조사가 이 공백이 제일 아픈 경로다).
+/// ★왜 축 필터 없이 전부 찍나★: [B->A delivery] 는 회신 축(B→A) 한 레코드만 찍는다. 그룹(@all) 방송·B
+///   원과제 턴 중 발송처럼 그 축 밖의 배달은 stdout 어디에도 안 잡혀, 인수 실측이 참가자 자기보고에
+///   의존하게 되는 관측 공백이 있었다(2026-07-28 인수 ③ 실측에서 실발생).
 /// ★delivered/err 축은 생략 불가(F1)★: 하네스 규율은 "배달된(is_delivered) 레코드만 증거"다 — 상태 축
 ///   없이 찍으면 write 실패 레코드가 배달 증거처럼 읽혀, census 가 없애려던 자기보고 의존을 자기가
 ///   재생산한다(false positive 제조기).
@@ -1039,22 +995,17 @@ fn print_delivery_census(observer: &CapturingObserver) {
     }
 }
 
-/// 이 크레이트 매니페스트에서 두 단계 위로 올라간 repo 루트(`prompts/` 가 그 아래).
-///   ★discovery(FIX round-2 #6)★: `priming_smoke.rs` 와 **같은** 컴파일타임 `CARGO_MANIFEST_DIR` 기반
-///   방식이다(둘 다 동일 — 확인함). 운영 데몬의 exe-walk-up(`discovery::find_install_root`, ADR-0092:
-///   WMI 스폰이라 cwd 불신)과는 다르지만, 이 실험 하네스는 항상 `cargo run` 으로 도는 컴파일타임 소스
-///   트리 안이므로 MANIFEST_DIR 이 신뢰 가능하다(빌드된 bin 을 다른 곳으로 옮겨 실행하는 경로는 없다).
+/// 이 실험 하네스는 항상 `cargo run` 으로 도는 컴파일타임 소스 트리 안이라 `CARGO_MANIFEST_DIR` 이 신뢰
+///   가능하다(빌드된 bin 을 다른 곳으로 옮겨 실행하는 경로는 없다) — 운영 데몬의 exe-walk-up 과 다른 이유.
 fn repo_root_from_manifest() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // .../crates/engram-dashboard-daemon
     manifest
-        .parent() // .../crates
-        .and_then(|p| p.parent()) // .../engram-dashboard (repo 루트)
+        .parent()
+        .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
         .unwrap_or(manifest)
 }
 
-/// 현재 exe 형제에서 `engram-send`(Windows 는 .exe) 를 찾는다 — CLI 입구를 켜려면 필요. 못 찾으면 None
-///   (CLI 입구 비활성, MCP 만). cargo run 시 exe 는 target/<profile>/ 아래라 engram-send 도 그 형제다.
 fn sibling_send_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -1067,8 +1018,6 @@ fn sibling_send_exe() -> Option<PathBuf> {
     cand.is_file().then_some(cand)
 }
 
-/// 에이전트가 아직 살아 있나(비-terminal 상태) — setup 실패 vs valid negative 판별(FIX round-2 #4).
-///   목록에서 사라졌거나 terminal(Exited/Failed/Killed)이면 false. Running/Exiting 은 alive.
 fn is_agent_alive(manager: &Arc<AgentManager>, id: AgentId) -> bool {
     manager
         .list_agents()
@@ -1078,17 +1027,15 @@ fn is_agent_alive(manager: &Arc<AgentManager>, id: AgentId) -> bool {
         .unwrap_or(false)
 }
 
-/// 이름 붙인 primed claude(stream-json, Fresh) 1개 스폰 + 목록 등장 대기. 실패/미등장이면 None.
 fn spawn_named(
     manager: &Arc<AgentManager>,
     name: &str,
     model: &str,
     workspace: &std::path::Path,
 ) -> Option<AgentInfo> {
-    // ★canonical name = display_name(ADR-0101 WYSIWYA)★: 라우팅·로스터·봉투 sender 가 쓰는 이름 =
-    //   display_name ?? basename(session.cwd) 다(profile.name 은 더 이상 주소축 아님). 두 에이전트는
-    //   같은 workspace cwd 를 공유해 basename 이 동일 → cwd 파생이면 alice/bob 이 같은 이름으로 충돌·
-    //   오라우팅(bob 로 답신)한다. 그래서 이름을 display_name 에 심어 **결정적으로** 구분한다.
+    // 두 에이전트는 같은 workspace cwd 를 공유해 basename 이 동일 → cwd 파생 이름이면 alice/bob 이 충돌·
+    //   오라우팅(bob 로 답신)한다. 그래서 이름을 display_name 에 심어 **결정적으로** 구분한다
+    //   (ADR-0101 WYSIWYA).
     let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Claude {
@@ -1111,10 +1058,8 @@ fn spawn_named(
     None
 }
 
-/// baseline **이후** 도착한 from=B·to=A outbound relay 레코드를 상한까지 폴링. 나타나면 그 레코드,
-///   상한 초과면 None(negative — B 가 안 보냄). `baseline` = 씨앗 주입 직전 record_count(FIX round-2 #1
-///   — pre-seed 오탐 차단). 폴링인 이유: relay 는 B 의 실 claude 판단에 달려 비결정적 지연을 가진다
-///   (cv 신호원이 없어 짧은 sleep 폴링이 단순·충분).
+/// 폴링인 이유: relay 는 B 의 실 claude 판단에 달려 비결정적 지연을 가진다(cv 신호원이 없어 짧은 sleep
+///   폴링이 단순·충분).
 fn wait_for_reply(
     observer: &Arc<CapturingObserver>,
     baseline: usize,
@@ -1134,19 +1079,6 @@ fn wait_for_reply(
     }
 }
 
-/// ★F3 레이스를 실제로 닫는 폴링(--seed-request 전용)★: `wait_for_reply` 는 baseline 이후 첫 B→A
-///   레코드(회신과 무관한 "ack" 일 수 있음)에서 멈춘다 — 진짜 계약 회신(배달 + in_reply_to == seed_msg_id)
-///   이 그 뒤에 도착하면 그 시점의 관측만으론 놓친다. 그래서 A 턴 대기까지 끝난 뒤, **잔여** 예산
-///   (`cap` — 호출부가 `REPLY_WAIT_CAP.saturating_sub(elapsed)` 로 계산해 넘긴다, 새 타임아웃 상수 없음)
-///   만큼, 같은 루프 구조·폴링 간격(200ms)으로 그 레코드가 나타나길 마저 기다린다.
-///   ★그 `elapsed` 는 wait_for_reply 만의 소비가 아니다(option b, FIX)★: 호출부가 재는 시각은 씨앗 주입
-///   직후부터라, wait_for_reply 뒤에 이어지는 A 턴 대기(wait_turn_end, 최대 TURN_WAIT_CAP=180s)까지
-///   **같은 REPLY_WAIT_CAP 벽시계를 함께 태운다**(이전 주석은 "wait_for_reply 소비분만 뺀다" 고 잘못
-///   말했었다). 그래서 `cap` 이 0(또는 음수, `saturating_sub` 이 0 으로 바닥침)이면 호출부는 이 함수를
-///   아예 부르지 않는다(폴링 스킵) — 그 스킵은 결과 블록의 REPLY_POLL=skipped-no-budget 으로 반드시
-///   라벨링되며 침묵하지 않는다(항목1, option b). 매치를 찾으면 그 값을 돌려주지만(호출자는 부수효과로만
-///   쓴다 — 실제 사용은 그 뒤 `records_after` 스캔), 예산이 소진되도록 못 찾으면 None(정직한 negative —
-///   호출자가 그대로 스캔해도 같은 결과).
 fn wait_for_matching_reply(
     observer: &Arc<CapturingObserver>,
     baseline: usize,
@@ -1171,7 +1103,6 @@ fn wait_for_matching_reply(
     }
 }
 
-/// 프롬프트를 유저 턴으로 보내고 이번 턴 종료(MessageDone)까지 대기. priming_smoke 와 동일.
 fn send_and_wait(
     manager: &Arc<AgentManager>,
     id: AgentId,
@@ -1207,19 +1138,13 @@ impl StatusSink for NoopStatus {
     fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
 }
 
-/// 턴 관측기 — MessageDone 카운트(턴 종료 신호) + TextDelta 누적(응답 텍스트).
-///
-/// ★lost-wakeup 방지(FIX round-2 #3)★: 이전 판본은 `done_count` 를 `AtomicU64` 로 두고 mutex 밖에서
-///   증가·notify 했다. 그러면 waiter 가 [원자 predicate 체크] 와 [`wait_timeout` 등록] 사이에 완료 신호가
-///   끼면 그 wakeup 을 잃고(cv 는 등록 전 notify 를 기억하지 않는다) 이미 끝난 턴을 상한(cap)까지 헛대기해
-///   **거짓 타임아웃**(A 무응답/ B task 타임아웃)을 낸다. 그래서 표준 condvar 규율로 바꾼다:
-///   predicate 상태(`done_count`)를 **cv 가 쓰는 바로 그 mutex 안**에 넣고, 발신·대기 모두 그 락을 잡은 채
-///   갱신/재확인한다 → notify 는 락 해제 후 관측되므로 wakeup 손실이 원천적으로 없다.
-///   `inner`(응답 텍스트)와 `done_count` 를 한 구조체(`State`)로 묶어 단일 mutex 로 보호한다.
+/// ★lost-wakeup 방지(FIX round-2 #3)★: `done_count` 를 `AtomicU64` 로 두고 mutex 밖에서 증가·notify 하면,
+///   waiter 의 [원자 predicate 체크] 와 [`wait_timeout` 등록] 사이에 낀 완료 신호는 wakeup 을 잃고(cv 는
+///   등록 전 notify 를 기억하지 않는다) 이미 끝난 턴을 상한까지 헛대기해 **거짓 타임아웃**(A 무응답 /
+///   B task 타임아웃)을 낸다. 그래서 predicate 상태(`done_count`)를 **cv 가 쓰는 바로 그 mutex 안**에
+///   두고, 발신·대기 모두 그 락을 잡은 채 갱신·재확인한다.
 struct TurnState {
-    /// 이번 턴 누적 응답 텍스트.
     text: String,
-    /// 관측된 MessageDone 누계(턴 종료 신호). cv predicate 의 단일 출처 — 이 mutex 로만 접근.
     done_count: u64,
 }
 
@@ -1250,7 +1175,6 @@ impl TurnObserver {
         let deadline = Instant::now() + timeout;
         let mut g = self.state.lock().unwrap();
         loop {
-            // predicate 를 mutex 보유 중 재확인(표준 condvar 루프) — notify 는 이 락 안에서만 반영된다.
             if g.done_count > baseline {
                 return true;
             }
@@ -1277,9 +1201,6 @@ impl OutputSink for TurnObserver {
                 self.state.lock().unwrap().text.push_str(text);
             }
             OutputEvent::MessageDone { .. } => {
-                // ★락 보유 중 상태 변경 후 notify(wakeup 손실 방지)★: predicate(done_count)를 cv 의 mutex
-                //   안에서 올린다. guard 를 notify 후 drop 해도 되고 전에 drop 해도 되지만, 표준 규율대로
-                //   보유 중 변경만 지키면 [체크↔등록] 갭에 낀 완료가 사라지지 않는다.
                 let mut g = self.state.lock().unwrap();
                 g.done_count += 1;
                 drop(g);
@@ -1327,8 +1248,6 @@ mod tests {
 
     #[test]
     fn parse_args_cli_only_flag_is_boolean() {
-        // ★ADR-0099 FIX 3★: `--cli-only` 는 값 없는 불리언 플래그(존재 = 켜짐). 뒤 토큰(--model)을 값으로
-        //   삼키지 않고, model 은 정상 파싱돼야 한다.
         let a = parse_args(s(&["--cli-only", "--model", "opus"]));
         assert!(a.cli_only, "--cli-only 존재 → 켜짐");
         assert_eq!(a.model, "opus", "--cli-only 뒤 --model 은 정상 파싱");
@@ -1337,15 +1256,12 @@ mod tests {
 
     #[test]
     fn parse_args_cli_only_absent_is_false() {
-        // 플래그 미지정이면 오늘 동작(강제 없음) 유지 — 운영 회귀 0.
         let a = parse_args(s(&["--priming", "C0", "--model", "haiku"]));
         assert!(!a.cli_only);
     }
 
     #[test]
     fn parse_args_disallow_mcp_flag_is_boolean() {
-        // ★ADR-0094★: `--disallow-mcp` 는 값 없는 불리언 플래그(존재 = 켜짐). 뒤 토큰(--model)을 값으로
-        //   삼키지 않고, model 은 정상 파싱돼야 한다.
         let a = parse_args(s(&["--disallow-mcp", "--model", "opus"]));
         assert!(a.disallow_mcp, "--disallow-mcp 존재 → 켜짐");
         assert_eq!(a.model, "opus", "--disallow-mcp 뒤 --model 은 정상 파싱");
@@ -1354,7 +1270,6 @@ mod tests {
 
     #[test]
     fn parse_args_disallow_mcp_absent_is_false() {
-        // 플래그 미지정이면 오늘 동작(MCP 허용) 유지 — 운영 회귀 0.
         let a = parse_args(s(&["--priming", "some/priming.md", "--model", "haiku"]));
         assert!(!a.disallow_mcp);
     }
@@ -1381,7 +1296,6 @@ mod tests {
 
     #[test]
     fn parse_args_flag_without_value_is_ignored() {
-        // --priming 뒤에 값이 없으면 priming 은 None 유지(패닉 없이 관대).
         let a = parse_args(s(&["--priming"]));
         assert_eq!(a.priming, None);
         assert_eq!(a.model, "sonnet");
@@ -1389,8 +1303,6 @@ mod tests {
 
     #[test]
     fn parse_args_flag_does_not_consume_next_flag_as_value() {
-        // ★FIX round-2 #7★: `--priming --model opus` — --priming 은 값이 없고(다음이 플래그), --model 은
-        //   제대로 opus 로 파싱돼야 한다(이전엔 --model 이 priming 값으로 먹혀 model 이 sonnet 에 남았다).
         let a = parse_args(s(&["--priming", "--model", "opus"]));
         assert_eq!(
             a.priming, None,
@@ -1401,7 +1313,6 @@ mod tests {
 
     #[test]
     fn parse_args_trailing_flag_flags_both_ignored_cleanly() {
-        // 둘 다 값 없이 끝나는 malformed — 패닉 없이 기본값 유지.
         let a = parse_args(s(&["--model", "--priming"]));
         assert_eq!(a.priming, None);
         assert_eq!(
@@ -1419,13 +1330,12 @@ mod tests {
             got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md"),
             "C0 은 현행 priming: {got:?}"
         );
-        // 명시 "C0" 셀렉터도 같은 경로.
         let got2 = resolve_priming_path(Some("C0"), &root).expect("C0 경로");
         assert_eq!(got, got2);
     }
 
-    // ADR-0099: 옛 C1~C3 실험 별칭 매핑 테스트는 별칭 제거와 함께 삭제됐다. C1~C3 는 이제 파일 경로로
-    //   해석돼 repo 루트 기준 join 될 뿐 특수 매핑이 없다(아래 명시 경로 override 테스트가 그 동작을 커버).
+    // ADR-0099: 옛 C1~C3 실험 별칭 매핑 테스트는 별칭 제거와 함께 삭제됐다 — 아래 명시 경로 override
+    //   테스트가 지금 동작을 커버한다.
 
     #[test]
     fn resolve_explicit_absolute_path_passthrough() {
@@ -1450,12 +1360,8 @@ mod tests {
         );
     }
 
-    // ★ADR-0094★: CLI-요구 판정은 basename 리스트가 아니라 프라이밍 **본문(content)** 으로 한다 —
-    //   `engram-send` 또는 `ENGRAM_SEND_EXE` 를 언급하면 CLI 발신 지시. basename 리스트는 rot 하므로
-    //   (새 CLI-지시 프라이밍이 누락돼 가드 우회 → 인프라 부재 오귀속) 본문을 진실의 출처로 삼는다.
     #[test]
     fn priming_text_directs_cli_true_for_engram_send_mention() {
-        // engram-send CLI 를 언급하는 본문 → true(ENGRAM_SEND_EXE 와 engram-send 둘 다 등장).
         let text = "To reply, run in your shell: `$ENGRAM_SEND_EXE --to alice --body ...`\n\
                     i.e. run the engram-send command with the recipient name.";
         assert!(
@@ -1466,7 +1372,6 @@ mod tests {
 
     #[test]
     fn priming_text_directs_cli_true_for_env_var_only() {
-        // ENGRAM_SEND_EXE 만 있어도(engram-send 리터럴 없이) CLI 지시.
         let text = "Invoke the binary referenced by ENGRAM_SEND_EXE to deliver your message.";
         assert!(
             priming_text_directs_cli(text),
@@ -1476,7 +1381,6 @@ mod tests {
 
     #[test]
     fn priming_text_directs_cli_false_for_mcp_only() {
-        // MCP send_message 만 언급하고 CLI 경로는 없음 → false(CLI 없이도 유효한 실험).
         let text = "To reply, call the MCP tool `send_message` with the recipient and body.";
         assert!(
             !priming_text_directs_cli(text),
@@ -1486,13 +1390,11 @@ mod tests {
 
     #[test]
     fn priming_text_directs_cli_false_for_empty() {
-        // 빈 본문(발신 지시 없음) → false.
         assert!(!priming_text_directs_cli(""), "빈 본문 → CLI 지시 아님");
     }
 
     #[test]
     fn priming_text_directs_cli_case_insensitive() {
-        // ★FIX★: 대소문자 무시 — 산문이 대문자/혼합으로 써도 CLI 지시로 잡아야 한다(놓치면 false negative).
         assert!(
             priming_text_directs_cli("Reply via ENGRAM-SEND right away."),
             "대문자 ENGRAM-SEND → CLI 지시"
@@ -1509,22 +1411,15 @@ mod tests {
 
     #[test]
     fn priming_text_directs_cli_negation_is_intentionally_true() {
-        // ★수용된 false positive(문서화)★: "engram-send 를 쓰지 마라" 같은 부정문도 substring 존재만으로
-        //   true → 헛된 SETUP-SKIP. 이는 의도된 보수적 방향이다(요란한 exit-1 로 틀릴 수 있는 발화 거부).
-        //   실 프라이밍엔 그런 부정문이 없고, 부정 파싱은 넣지 않는다. 순수 레벨의 현 동작을 못박아 둔다.
         assert!(
             priming_text_directs_cli("Do NOT use engram-send; use MCP instead."),
             "부정문도 substring 존재로 true — 의도된 보수적 skip 방향"
         );
     }
 
-    // ── ADR-0128: 배선 축 등호 — CLI 교육 ⟺ CLI 배선(두 방향 모두 게이트가 있다) ────────────────────
+    // ── ADR-0128: 배선 축 등호 ──────────────────────────────────────────────────────────────────
     #[test]
     fn cli_priming_without_cli_only_is_rejected() {
-        // ★정방향(ADR-0128)★: MCP 가능 스폰엔 engram-send 배선이 없으므로, CLI 발신을 가르치는 프라이밍을
-        //   `--cli-only` 없이 얹는 조합은 거부 대상이다(가르쳤지만 안 깐 채널 = 발신 freeze 를 정상
-        //   negative 로 오귀속). 이 판정은 send_exe 존재 여부를 보지 않는다 — 바이너리가 있어도 그 스폰의
-        //   자식은 PATH·크레덴셜이 없어 이름을 해석할 수 없다.
         assert!(
             cli_priming_requires_cli_only(true, false),
             "CLI-지시 프라이밍 + --cli-only 없음 → 거부"
@@ -1533,10 +1428,6 @@ mod tests {
 
     #[test]
     fn cli_only_without_cli_priming_is_rejected() {
-        // ★역방향(ADR-0128 등호)★: `--cli-only` 는 CLI 배선을 실제로 깔지만, 프라이밍이 그 입구를 안
-        //   가르치면 B 는 발신 방법을 모른 채 아무것도 보내지 않는다 — 그 B_SENT=false 를 정상 negative 로
-        //   채점하는 것이 이 게이트가 막는 오귀속이다. 뒤쪽 entrance 검사는 *보냈는데 입구가 틀린* 경우만
-        //   잡아 이 갈래를 못 본다.
         assert!(
             cli_only_requires_cli_priming(false, true),
             "--cli-only + CLI 안 가르치는 프라이밍 → 거부"
@@ -1545,20 +1436,14 @@ mod tests {
 
     #[test]
     fn wiring_axis_accepts_only_the_two_aligned_combinations() {
-        // ★등호 진리표★: 두 판정자를 합치면 (가르치는 채널, 깐 채널)이 **같은** 두 조합만 통과한다.
-        //   ★라우팅까지 단언한다(판정자별 셀 고정)★: 어긋난 두 조합은 **각 방향이 하나씩** 거부해야 한다 —
-        //   OR 만 보면 두 판정자가 같은 행을 함께 거부하도록 넓어져도 초록이다(실측: 정방향을
-        //   `directs_cli != cli_only` 로 넓히면 OR 단언만으론 안 잡힌다). 두 게이트는 operator 에게 **서로
-        //   다른 처방**을 안내하므로(`--cli-only` 를 붙여라 / 프라이밍이 CLI 를 가르치는지 보라) 어느 쪽이
-        //   거부하는지가 실제 계약이다.
+        // ★OR 이 아니라 판정자별 셀을 고정하는 이유★: OR 만 보면 두 판정자가 같은 행을 함께 거부하도록
+        //   넓어져도 초록이다(실측: 정방향을 `directs_cli != cli_only` 로 넓히면 OR 단언만으론 안 잡힌다).
+        //   두 게이트는 operator 에게 **서로 다른 처방**을 안내하므로(`--cli-only` 를 붙여라 / 프라이밍이
+        //   CLI 를 가르치는지 보라) 어느 쪽이 거부하는지가 실제 계약이다.
         for (directs_cli, cli_only, expect_forward, expect_converse) in [
-            // (정합) CLI 교육 + CLI 배선(--cli-only) — 어느 방향도 거부하지 않는다.
             (true, true, false, false),
-            // (정합) MCP 교육 + MCP 배선(기본 모드).
             (false, false, false, false),
-            // (어긋남) 가르쳤으나 안 깔림 → **정방향만** 거부.
             (true, false, true, false),
-            // (어긋남) 깔았으나 안 가르침 → **역방향만** 거부.
             (false, true, false, true),
         ] {
             let forward = cli_priming_requires_cli_only(directs_cli, cli_only);
@@ -1584,7 +1469,6 @@ mod tests {
     #[test]
     fn cli_only_rejects_inherited_priming_env() {
         use std::ffi::OsStr;
-        // cli-only + 비어 있지 않은 env override → 충돌(true, SETUP-FAIL 유발). `--priming` co-pass 거부와 대칭.
         assert!(
             cli_only_env_override_conflicts(true, Some(OsStr::new("prompts/agent-priming.md"))),
             "cli-only 인데 상속 env override 있음 → 거부(충돌)"
@@ -1594,7 +1478,6 @@ mod tests {
     #[test]
     fn cli_only_ignores_empty_or_absent_priming_env() {
         use std::ffi::OsStr;
-        // env 미설정(None) 또는 빈 값이면(미설정 취급) 충돌 아님 — 정상 진행.
         assert!(
             !cli_only_env_override_conflicts(true, None),
             "cli-only 인데 env 미설정 → 충돌 아님"
@@ -1608,17 +1491,15 @@ mod tests {
     #[test]
     fn non_cli_only_never_conflicts_with_priming_env() {
         use std::ffi::OsStr;
-        // 일반 모드(cli_only=false)는 env override 를 정당히 쓴다 — 값이 있어도 충돌 아님.
         assert!(
             !cli_only_env_override_conflicts(false, Some(OsStr::new("prompts/agent-priming.md"))),
             "일반 모드는 env override 정당 → 충돌 아님(cli_only=false)"
         );
     }
 
-    // ── ADR-0099: --cli-only 엄격 성공 판정(순수) — b_sent && entrance=cli 여야 pass ────────────────
+    // ── ADR-0099: --cli-only 엄격 성공 판정(순수) ───────────────────────────────────────────────
     #[test]
     fn cli_only_pass_only_when_sent_via_cli() {
-        // 유일한 pass 조합: 실제 발신 + CLI 입구.
         assert!(
             cli_only_run_passed(true, "cli"),
             "b_sent=true & entrance=cli → PASS"
@@ -1627,8 +1508,6 @@ mod tests {
 
     #[test]
     fn cli_only_fail_when_nothing_sent() {
-        // ★핵심(FIX 4)★: 아무것도 안 보낸 경우(b_sent=false/entrance=none)는 일반 모드의 valid-negative 와
-        //   달리 cli-only 에선 FAIL(강제 false path 미실증) — pass 아님.
         assert!(
             !cli_only_run_passed(false, "none"),
             "b_sent=false/entrance=none → FAIL(pass 아님)"
@@ -1637,8 +1516,6 @@ mod tests {
 
     #[test]
     fn cli_only_fail_when_sent_via_non_cli_entrance() {
-        // entrance=mcp(강제 seam 이 MCP 를 못 지움)나 그 밖의 입구는 pass 아님(이중 안전망 — 앞선 SETUP-FAIL 과
-        //   별개로 순수 판정자도 cli 아닌 건 전부 실패로).
         assert!(
             !cli_only_run_passed(true, "mcp"),
             "entrance=mcp → pass 아님"
@@ -1649,11 +1526,9 @@ mod tests {
         );
     }
 
-    // ── REPLY_POLL 라벨 판정(순수) — 우선순위 matched > timeout > skipped-no-budget ──────────────────
+    // ── REPLY_POLL 라벨 판정(순수) ──────────────────────────────────────────────────────────────
     #[test]
     fn reply_poll_label_matched_wins_regardless_of_poll_ran() {
-        // matched 는 폴링이 실제로 돌아 잡았든(poll_ran=true), 폴링 전에 이미 배달돼 있어 스킵됐든
-        // (poll_ran=false) 최우선이다 — 두 조합 모두 "matched".
         assert_eq!(reply_poll_label(true, true), "matched");
         assert_eq!(
             reply_poll_label(true, false),
@@ -1664,20 +1539,17 @@ mod tests {
 
     #[test]
     fn reply_poll_label_timeout_when_ran_but_not_matched() {
-        // 폴링이 예산을 받아 실제로 돌았지만 예산 소진까지 매치를 못 찾은 경우 = timeout.
         assert_eq!(reply_poll_label(false, true), "timeout");
     }
 
     #[test]
     fn reply_poll_label_skipped_no_budget_when_not_ran_and_not_matched() {
-        // 잔여 예산이 0/음수라 폴링 자체가 안 돌았고, 매치도 없는 경우 = skipped-no-budget.
         assert_eq!(reply_poll_label(false, false), "skipped-no-budget");
     }
 
     // ── --seed-request/--seed-reply-by(순수 파싱) ─────────────────────────────────────────────────
     #[test]
     fn parse_args_seed_request_flag_is_boolean() {
-        // --seed-request 는 값 없는 불리언 플래그(존재 = 켜짐) — 뒤 토큰(--model)을 값으로 삼키지 않는다.
         let a = parse_args(s(&["--seed-request", "--model", "opus"]));
         assert!(a.seed_request, "--seed-request 존재 → 켜짐");
         assert_eq!(a.model, "opus", "--seed-request 뒤 --model 은 정상 파싱");
@@ -1686,7 +1558,6 @@ mod tests {
 
     #[test]
     fn parse_args_seed_request_absent_is_false() {
-        // 플래그 미지정이면 오늘 동작(plain 통보) 유지 — 운영 회귀 0.
         let a = parse_args(s(&["--priming", "C0", "--model", "haiku"]));
         assert!(!a.seed_request);
     }
@@ -1700,9 +1571,6 @@ mod tests {
 
     #[test]
     fn parse_args_seed_reply_by_does_not_consume_next_flag_as_value() {
-        // FIX round-2 #7 과 동일 규율: --seed-reply-by 다음이 또 플래그면 값으로 삼키지 않는다.
-        // ★F5 오용 가드(신규)★: 이젠 조용히 넘기지 않고 seed_reply_by_error 에 사유를 남긴다(--b-task
-        //   의 parse_args_b_task_next_looks_like_flag_is_an_error 와 대칭).
         let a = parse_args(s(&["--seed-reply-by", "--model", "opus"]));
         assert_eq!(
             a.seed_reply_by, None,
@@ -1718,7 +1586,6 @@ mod tests {
         );
     }
 
-    // ★F5 오용 가드(신규)★ --seed-reply-by 값 누락/빈 값/공백뿐인 값 — --b-task 오용 가드와 같은 규율.
     #[test]
     fn parse_args_seed_reply_by_missing_value_at_end_is_an_error() {
         let a = parse_args(s(&["--seed-request", "--seed-reply-by"]));
@@ -1761,7 +1628,6 @@ mod tests {
 
     #[test]
     fn seed_reply_by_without_request_is_rejected() {
-        // --seed-reply-by 단독 지정(= --seed-request 없이)은 인자 오류다.
         assert!(
             seed_reply_by_without_request_is_invalid(false, &Some("5m".to_string())),
             "seed_request=false 인데 seed_reply_by=Some → 반려"
@@ -1770,7 +1636,6 @@ mod tests {
 
     #[test]
     fn seed_reply_by_with_request_is_valid() {
-        // --seed-request 와 함께면 유효(반려 아님).
         assert!(!seed_reply_by_without_request_is_invalid(
             true,
             &Some("5m".to_string())
@@ -1779,7 +1644,6 @@ mod tests {
 
     #[test]
     fn seed_reply_by_absent_is_always_valid() {
-        // seed_reply_by=None 이면 seed_request 값과 무관하게 반려 아님(단독 지정이 아니므로).
         assert!(!seed_reply_by_without_request_is_invalid(false, &None));
         assert!(!seed_reply_by_without_request_is_invalid(true, &None));
     }
@@ -1796,13 +1660,10 @@ mod tests {
 
     #[test]
     fn parse_args_b_task_file_reference_kept_raw() {
-        // parse_args 는 순수 토큰화만 한다 — `@` 접두 해석(파일 읽기)은 run() 이 나중에 한다.
         let a = parse_args(s(&["--b-task", "@prompts/experiments/b-task.md"]));
         assert_eq!(a.b_task.as_deref(), Some("@prompts/experiments/b-task.md"));
     }
 
-    // ★F5 오용 가드★ --b-task 는 다른 값-플래그와 달리 "다음이 플래그처럼 보임" 을 조용히 넘기지 않고
-    //   인자 오류로 기록한다(parse_args_defaults 의 b_task_error=None 과 대칭 — 여기선 Some 이어야 한다).
     #[test]
     fn parse_args_b_task_next_looks_like_flag_is_an_error() {
         let a = parse_args(s(&["--b-task", "--model", "opus"]));
@@ -1884,7 +1745,6 @@ mod tests {
 
     #[test]
     fn resolve_b_task_file_path_none_for_inline_text() {
-        // `@` 접두가 아니면 파일 참조가 아니다 — 호출자는 값을 인라인 텍스트 그대로 쓴다.
         let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
         assert_eq!(
             resolve_b_task_file_path("plain inline text", &root),
