@@ -1,14 +1,5 @@
 //! ② 격리 통합테스트 — AgentSession(OutputCore + Box<dyn AgentTransport>) 합성을 직접 단언 검증.
 //!
-//! (구 examples/session_smoke.rs 이관 — 기존 assert 보존·강화, 출력 단언 추가.)
-//!
-//! 검증 기준(합성 표면 전체):
-//!   open → start(manager 흉내) → AgentSession::new → subscribe → echo 입력(session-test 출력) →
-//!   resize(cols/rows 반영) → enter_exiting(Exiting 알림·true) → kill(shutdown THEN join_pump) →
-//!   status 가 Killed 로 finish. hang 없이 즉시 반환.
-//!
-//! start 는 AgentSession 밖(여기서 manager 처럼)에서 호출한다 — impl-spec: new 는 start 를 안 부른다.
-//!
 //! 실 PTY(default shell)를 spawn 한다. 가볍고 전역 경합 없어 default(자동 실행).
 
 use std::path::PathBuf;
@@ -56,7 +47,6 @@ impl RecordingSink {
 
 impl OutputSink for RecordingSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // S15 B5 payload-generic: 콘솔 바이트만 수집(smoke 테스트는 구조화 이벤트를 안 다룸).
         if let OutputPayload::Bytes(b) = frame.payload {
             self.output.lock().unwrap().extend_from_slice(b);
         }
@@ -109,7 +99,6 @@ fn session_compose_resize_exiting_kill() {
     let id = Uuid::new_v4();
     let cwd = PathBuf::from(".");
 
-    // 1) CommandSpec 으로 default shell open(manager 없이 PtyTransport 직접).
     let spec = CommandSpec {
         program: default_shell().to_string(),
         args: vec![],
@@ -118,27 +107,22 @@ fn session_compose_resize_exiting_kill() {
     };
     let (transport, _child_pid) = PtyTransport::open(&spec, 80, 24).expect("open failed");
 
-    // 2) OutputCore + 기록형 status sink.
     let status_sink = RecordingStatusSink::new();
     let status_dyn: Arc<dyn StatusSink> = Arc::new(status_sink.clone());
     let core = Arc::new(OutputCore::new(id, 0, status_dyn, TurnWiring::detached()));
 
-    // 3) start(pump 기동) — AgentSession 밖에서 manager 처럼. new 는 start 를 안 부른다(impl-spec).
     let transport: Box<dyn AgentTransport> = Box::new(transport);
     transport.start(core.clone());
 
-    // 4) AgentSession 합성. 이미 start 된 core/transport 를 묶는다.
-    //    intent: ADR-0019 종료 의도 atomic(이 smoke 는 set_intent 안 함 → None=자연 종료 경로).
+    // intent 0 = TerminationIntent::None — 이 smoke 는 set_intent 를 쓰지 않는다.
     let intent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     // 이 smoke 는 default_shell 을 띄우므로 backend caps 도 셸 기준(resume=false).
-    // FIX 5: capabilities 는 command 를 받는다(mode 별 caps) — 셸 command 주입.
     let backend_caps = ShellBackend.capabilities(
         &engram_dashboard_core::agent::profile::AgentCommand::Shell {
             program: "cmd.exe".into(),
             args: vec![],
         },
     );
-    // 터미널 경로라 입력 인코딩은 Raw(바이트 무변환). ADR-0044.
     let encoder = engram_dashboard_core::agent::backend::InputEncoder::Raw;
     let session = AgentSession::new(
         id,
@@ -153,7 +137,6 @@ fn session_compose_resize_exiting_kill() {
         transport,
     );
 
-    // 5) subscribe → 초기 프롬프트 대기 → echo 입력 → session-test 출력.
     let out_sink = RecordingSink::new();
     let _sid = session.subscribe(Arc::new(out_sink.clone()));
     assert!(
@@ -170,7 +153,6 @@ fn session_compose_resize_exiting_kill() {
         "echo 입력이 PTY 출력에 반영되지 않음(session-test 미수신)"
     );
 
-    // 6) resize → session.cols/rows 가 100/30 으로 반영돼야 함.
     session.resize(100, 30).expect("resize failed");
     assert_eq!(
         (session.cols(), session.rows()),
@@ -178,7 +160,6 @@ fn session_compose_resize_exiting_kill() {
         "resize 후 cols/rows 미반영"
     );
 
-    // 7) enter_exiting → Exiting 알림 + true(아직 Running 이었으므로).
     let entered = session.enter_exiting();
     assert!(entered, "enter_exiting 가 false(Running 이었어야)");
     assert!(
@@ -187,8 +168,6 @@ fn session_compose_resize_exiting_kill() {
         session.status()
     );
 
-    // 8) kill = shutdown() THEN join_pump(). 인과: master drop → reader EOF → pump break →
-    //    core.finish(Killed). 5s 안에 즉시 반환해야 함(hang 이면 recv_timeout 소진).
     let kill_started = Instant::now();
     session.kill(Duration::from_secs(5));
     let kill_elapsed = kill_started.elapsed();
@@ -197,14 +176,12 @@ fn session_compose_resize_exiting_kill() {
         "kill(shutdown+join) 이 5s 안에 끝나지 않음(hang 의심): {kill_elapsed:?}"
     );
 
-    // 9) status 가 Killed 로 finish 되어야 함.
     assert!(
         matches!(session.status(), AgentStatus::Killed),
         "kill 후 status 가 Killed 가 아님: {:?}",
         session.status()
     );
 
-    // 상태 전이 기록에 Exiting → Killed 가 포함돼야 함(과도기→종점 인과).
     let seq = status_sink.statuses();
     assert!(
         seq.iter().any(|s| matches!(s, AgentStatus::Exiting)),

@@ -1,22 +1,7 @@
 //! 수동 활성화(activate_profile) 통합테스트 — ADR-0082(fresh-fallback 폐지, 이어받기 전용).
 //!
-//! 배경(번복된 결정): ADR-0076/0077 은 "resume 조기종료 → fresh-fallback(새 대화 자동 생성)" 이었다.
-//! ADR-0082 가 이를 폐지했다 — resume 실패/조기종료는 **아무것도 kill·재spawn 하지 않고** Failed(시체)
-//! 종점으로 남기고 원인을 로그로 남긴다(LLM 이 읽어 에스컬레이션). 또한 산 에이전트 재활성화는
-//! 무해한 "이미 실행 중" 신호를 돌려주고 산 에이전트를 절대 건드리지 않는다(a4aac1a 회귀 수정).
-//!
-//! 이 파일은 그 두 결정을 실 spawn 으로 결정적으로 단언한다:
-//!   ① resume 조기종료 → Failed(Err), 자동 fresh 없음, epoch 불변, 단 1회만 spawn, 프로필은
-//!      시체로 보존(삭제 아님, auto_restore=true→false 다운그레이드).
-//!   ② 이미 실행 중 재활성화 → 원본 세션 생존·kill 안 됨·epoch 불변·재spawn 없음(run-count 불변),
-//!      무해한 AgentInfo 반환.
-//!
-//! ★실 claude 없이 조기종료를 결정적으로 모사★: 실 claude 를 CI/단위에서 못 띄우므로, resume 자리
-//!   (첫 spawn)가 `exit 1` 로 조기종료하는 셸 프로필을 쓴다. 옛 fresh-fallback 이 살아 있었다면
-//!   둘째 spawn(fresh 자리)이 일어났겠지만, ADR-0082 에선 둘째 spawn 이 아예 없어야 한다 — 이를
-//!   run-count 파일(매 실행 append)로 "정확히 1회 spawn" 을 단언해 fresh-fallback 부재를 증명한다.
-//!
-//! Windows 전용(cmd.exe 배치)이라 #[cfg(windows)]. 단일 spawn·전역 경합 없음 → default.
+//! 실 claude 를 CI/단위에서 못 띄우므로 cmd.exe 배치 프로필로 모사한다(격리). Windows 전용이라
+//! #[cfg(windows)]. 단일 spawn·전역 경합 없음 → default.
 
 #![cfg(windows)]
 
@@ -36,7 +21,6 @@ use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfi
 use engram_dashboard_core::agent::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
-/// agent_list_updated·status 전이를 세는 경량 sink(reaper.rs CountingSink 동형).
 #[derive(Clone)]
 struct CountingSink {
     list_updates: Arc<AtomicUsize>,
@@ -72,7 +56,6 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
     cond()
 }
 
-/// 테스트용 manager 구성(reaper.rs make_manager 동형, tag 로 store 격리). 세션 추적 비활성.
 fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>) {
     let sink = CountingSink::new();
     let sink_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
@@ -97,12 +80,11 @@ fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>)
     (manager, sink, profiles)
 }
 
-/// "매 실행마다 run-count 파일에 한 줄 append 후 즉시 `exit 1`" 하는 배치 프로필을 만든다.
 /// 반환: (프로필, batch 경로, count 경로).
 ///
-/// ★목적(ADR-0082 fresh-fallback 부재 증명)★: 이 배치는 언제 실행돼도 조기종료(exit 1)한다.
-///   옛 fresh-fallback 이 살아 있었다면 resume 조기종료 후 둘째 spawn(fresh 자리)이 일어나
-///   count 가 2 가 됐을 것이다. ADR-0082 에선 fresh 재spawn 이 없어 **정확히 1회**만 실행된다.
+/// ★run-count 가 ADR-0082 의 증거인 이유★: 이 배치는 실행될 때마다 count 에 한 줄을 남기고
+///   조기종료(exit 1)한다. 옛 fresh-fallback 이 살아 있었다면 둘째 spawn(fresh 자리)이 일어나
+///   count 가 2 가 됐을 것이다 — "정확히 1" 이 fresh-fallback 부재의 결정적 증거다.
 ///
 /// ★왜 인라인 복합 cmd 가 아니라 배치 파일인가★: portable-pty CommandBuilder 가 `>`·`&` 를 개별
 ///   quoting 해 ConPTY 통과 중 깨뜨린다(옛 test 실측). 배치는 cmd 가 직접 파싱하니 결정적이다.
@@ -111,7 +93,6 @@ fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     let count = std::env::temp_dir().join(format!("engram-activate-count-{tag}-{uniq}.tmp"));
     let batch = std::env::temp_dir().join(format!("engram-activate-exit-{tag}-{uniq}.cmd"));
 
-    // 매 실행: count 파일에 "x" 한 줄 append(>>) 후 exit 1(비정상 조기종료 = resume 실패 모사).
     let script = format!(
         "@echo off\r\n\
          echo x>>\"{c}\"\r\n\
@@ -120,9 +101,7 @@ fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     );
     std::fs::write(&batch, script).expect("배치 파일 write");
 
-    // ★auto_restore=true 로 시작★: reaper 가 조기종료를 KeepDisableAutoRestore 로 판정해
-    //   **프로필을 지우지 않고 auto_restore 를 false 로 내리는지**(=시체로 보존) 를 아래 테스트가
-    //   단언한다. false 로 태어나면 다운그레이드가 no-op 이라 그 계약을 증명 못 한다 → true 로 둔다.
+    // 마지막 인자 auto_restore=true — false 로 태어나면 다운그레이드가 no-op 이라 관측할 수 없다.
     let profile = AgentProfile::new(
         "activate-exit".into(),
         AgentCommand::Shell {
@@ -136,25 +115,22 @@ fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     (profile, batch, count)
 }
 
-/// count 파일의 실행 횟수(append 된 줄 수)를 센다. 없으면 0.
+/// 파일이 없으면 0(아직 한 번도 실행되지 않음).
 fn run_count(path: &PathBuf) -> usize {
     std::fs::read_to_string(path)
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0)
 }
 
-/// 윈도(3s) 넘게 사는 배치 프로필(재활성화 가드 테스트용 산 에이전트). ping 으로 ≈19s 생존.
+/// EARLY_EXIT_WINDOW(3s)를 넘겨 사는 배치 — ping 20회로 ≈19s 생존해 조기종료로 오판되지 않는다.
 /// 반환: (프로필, batch 경로, count 경로).
 ///
-/// ★매 start 마다 count 파일에 한 줄 append★(always_early_exit_profile 과 동형): 재활성화가
-///   산 에이전트를 **재spawn 하지 않음**을 count 로 증명한다. count 는 ping(≈19s) **전**에 쓰므로
-///   start 직후 즉시 1 이 된다. kill+replace(같은 epoch 로 위장) 회귀가 있었다면 count 가 2 가 된다.
+/// ★count 를 ping **앞**에 두는 이유★: start 직후 곧바로 1 이 되어야 테스트가 즉시 읽을 수 있다.
+///   kill+replace(같은 epoch 로 위장) 회귀가 있었다면 count 가 2 가 된다.
 fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     let uniq = Uuid::new_v4();
     let count = std::env::temp_dir().join(format!("engram-activate-live-count-{tag}-{uniq}.tmp"));
     let batch = std::env::temp_dir().join(format!("engram-activate-live-{tag}-{uniq}.cmd"));
-    // 매 실행: count 에 "x" append(>>) → ping 20회(≈19s, 조기종료 윈도 3s 초과 생존).
-    //   append 를 ping 앞에 둬 start 직후 count 가 즉시 반영되게 한다(테스트가 곧바로 읽음).
     let script = format!(
         "@echo off\r\n\
          echo x>>\"{c}\"\r\n\
@@ -175,16 +151,7 @@ fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     (profile, batch, count)
 }
 
-/// ★ADR-0082 핵심 ①★: resume spawn 이 조기종료하는 프로필을 activate_profile(Resume)로 활성화하면
-/// **fresh-fallback 없이** Failed(Err)로 끝난다 — 자동으로 새 대화를 만들지 않는다. 검증:
-///   (a) activate_profile 이 Err 반환(Failed 시체 → Err 번역).
-///   (b) 배치가 **정확히 1회**만 실행됨(fresh 재spawn 이 있었다면 2회 — fresh-fallback 부재 증명).
-///   (c) epoch 0 유지 — 이 프로필은 **이 프로세스에서 앞선 화신이 없어서** 올릴 대상이 아니다
-///       (`epoch_for_spawn` 의 판정 축). 대신 `had_session` 이 켜졌음을 함께 단언한다 — 그게 다음
-///       spawn 이 올라간다는 실제 계약이고, 여기 0 은 fallback 유무와 무관하다.
-///   (d) claude_session_id/old_session_ids 불변 — 새 sid 발급(fresh) 없음.
-///   (e) 프로필(시체) 생존 — reaper 가 삭제하지 않음(KeepDisableAutoRestore).
-///   (f) auto_restore=true→false 다운그레이드 — 삭제가 아니라 "시체로 보존"임을 결정적으로 단언.
+/// ★ADR-0082 회귀 가드 ①★ — resume 조기종료가 자동 fresh 로 대체되지 않는다.
 #[test]
 fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
     let (manager, _sink, profiles) = make_manager("resume-no-fallback");
@@ -199,23 +166,18 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         .map(|p| p.old_session_ids.len())
         .unwrap_or(0);
 
-    // activate_profile(Resume): resume 자리 spawn → exit 1(조기종료) → resume_no_fallback 이
-    //   early_terminal_status 로 감지 → Failed → Err. 둘째(fresh) spawn 은 없어야 한다.
     let result = manager.activate_profile(&profile, SpawnMode::Resume);
 
-    // (a) Failed 종점 → Err(자동 fresh 로 살아남지 않는다).
     assert!(
         result.is_err(),
         "resume 조기종료는 fresh-fallback 없이 Err(Failed 시체)여야 함 — got Ok: {result:?}"
     );
 
-    // reaper 가 조기종료 세션을 수거해 맵에서 사라질 때까지 잠깐 대기(비동기).
+    // 수거는 비동기라 기다려만 준다 — 수거 자체는 여기서 단언 대상이 아니다.
     let _ = wait_until(Duration::from_secs(5), || {
         !manager.list_agents().iter().any(|a| a.id == id)
     });
 
-    // (b) 배치가 정확히 1회만 실행됨 — fresh 재spawn 이 없다는 결정적 증거.
-    //     (옛 fresh-fallback 이었다면 fresh 자리에서 한 번 더 spawn 돼 2가 됐을 것.)
     assert_eq!(
         run_count(&count),
         1,
@@ -223,14 +185,8 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         run_count(&count)
     );
 
-    // (c) ★epoch 판정 축 = "앞선 화신이 있었나"(모드가 아니다)★: 이 프로필은 이 프로세스에서 **처음**
-    //     떠 봤으므로 구분해야 할 앞선 화신이 없다 → 이번 화신은 epoch 0 을 그대로 쓴다. 옛 판은
-    //     `activate_profile` 진입에서 무조건 bump 해 여기서 1 이 나왔는데, 그 배치가 Fresh 재spawn
-    //     경로들(WS `Spawn`·부팅 복원)을 빠뜨리는 구멍이었다 — 이제 `spawn_agent` 한 지점이 모드 무관하게
-    //     판정한다(manager.rs epoch 확정 주석).
-    //     ★불변식 자체(두 화신이 같은 epoch 를 쓰지 않는다)는 그대로다★: 이 화신이 죽었으므로 프로필엔
-    //     화신 이력이 찍혔고, **다음** spawn 은 반드시 더 큰 epoch 를 받는다(아래 단언 + 전용 회귀
-    //     `manager::tests::a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch`).
+    // 여기 epoch 0 은 "다음 spawn 도 0" 이라는 뜻이 아니다 — 그 회귀는
+    //   `manager::tests::a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch` 가 본다.
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(0),
@@ -242,7 +198,6 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         "화신이 한 번 떠 봤다는 사실이 찍혀야 다음 spawn 이 교체로 판정된다"
     );
 
-    // (d) sid 이력 불변 — 새 sid 발급(fresh)이 없어 claude_session_id/old_session_ids 가 그대로.
     assert_eq!(
         profiles.get(id).and_then(|p| p.claude_session_id),
         sid_before,
@@ -254,37 +209,24 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         "resume 실패로 옛 sid 가 이력으로 밀리면 안 됨(new_session_id 미호출)"
     );
 
-    // (e) ★시체로 보존 — 프로필이 삭제되지 않는다★. reaper 가 조기종료(exit≠0, intent=None)를
-    //     KeepDisableAutoRestore 로 판정하므로 프로필이 살아남아야 한다(fresh-fallback 폐지의 헤드라인
-    //     "시체 보존"의 결정적 단언 — 이제 reaper 유닛테스트에만 기대지 않는다).
     assert!(
         profiles.get(id).is_some(),
         "resume 실패 후 프로필(시체)이 삭제되면 안 됨 — KeepDisableAutoRestore 로 보존돼야 함"
     );
 
-    // (f) ★삭제가 아니라 다운그레이드★. auto_restore=true 로 태어난 프로필이 조기종료 수거로
-    //     false 로 내려가야 한다(부팅 복원 대상에서 빠짐). 프로필이 지워졌거나 그대로 true 면 실패.
     assert_eq!(
         profiles.get(id).map(|p| p.auto_restore),
         Some(false),
         "resume 실패 시체는 auto_restore=false 로 다운그레이드돼야 함(삭제 아님)"
     );
 
-    // 정리.
     let _ = manager.kill_agent(id);
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0082 핵심 ②★: 이미 실행 중인 에이전트를 재활성화하면 산 에이전트를 **절대 건드리지 않고**
-/// 무해한 AgentInfo(이미 실행 중 신호)를 돌려준다. 검증:
-///   (a) 재활성화가 Ok(AgentInfo) 반환.
-///   (b) 원본 세션이 kill 되지 않고 목록에 그대로 살아 있음(종점 상태 아님).
-///   (c) epoch 불변 — 맵 교체(fresh)가 일어나지 않음(a4aac1a 회귀의 핵심 신호).
-///   (d) ★run-count==1 (재활성화 전후 불변)★ — 배치가 딱 1회만 start 됨을 단언한다. 재활성화가
-///       산 에이전트를 **재spawn 하지 않음**의 결정적 증거: 같은 epoch 로 위장한 kill+replace 회귀가
-///       있었다면 배치가 두 번째로 start 돼 count 가 2 가 됐을 것이다(epoch 검사만으론 못 잡는 구멍).
+/// ★ADR-0082 회귀 가드 ②★ — 산 에이전트 재활성화가 그 에이전트를 파괴하지 않는다(a4aac1a).
 #[test]
 fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     let (manager, _sink, profiles) = make_manager("reactivate-live");
@@ -293,13 +235,11 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     let id = profile.id;
     profiles.upsert(profile.clone());
 
-    // 최초 활성화(세션 없음 → Fresh 갈래) → 오래 사는 세션 spawn.
     let first = manager
         .activate_profile(&profile, SpawnMode::Fresh)
         .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
     let epoch_after_first = first.epoch;
 
-    // 세션이 실제로 살아 목록에 잡힐 때까지 대기(조기종료 아님을 확인).
     assert!(
         wait_until(Duration::from_secs(3), || {
             manager.list_agents().iter().any(|a| {
@@ -315,29 +255,22 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
         "최초 활성화 세션이 살아있어야 함"
     );
 
-    // (d-전) ★배치가 딱 1회 start★. 첫 활성화로 배치가 count 에 한 줄 append 했다. 배치의 append 는
-    //   PTY 스폰 프로세스라 약간 지연될 수 있으니 1 에 도달할 때까지 대기한 뒤, 정확히 1 인지 단언한다.
+    // 배치의 append 는 PTY 스폰 프로세스라 지연될 수 있어 1 에 도달할 때까지 기다린다.
     assert!(
         wait_until(Duration::from_secs(3), || run_count(&count) == 1),
         "최초 활성화로 배치가 1회 start 돼야 함 — got {}",
         run_count(&count)
     );
 
-    // ★재활성화★: 같은 프로필을 다시 활성화(Resume 요청). 산 에이전트를 건드리면 안 된다.
-    //   옛 회귀에선 여기서 이중-spawn 가드 Err → fresh-fallback → 산 세션 kill → epoch++ 였다.
-
-    // [추가 하드닝 ①] 재활성화 전 레지스트리 epoch 를 먼저 읽어둔다 — 재활성화 후 레지스트리 epoch
-    //   도 불변임을 단언한다(반환된 AgentInfo.epoch 만 보면 레지스트리 맵 교체를 못 잡는다).
+    // 반환된 AgentInfo.epoch 만 보면 레지스트리 맵 교체를 못 잡으므로 레지스트리 값도 따로 떠 둔다.
     let reg_epoch_before = profiles.get(id).map(|p| p.epoch);
 
     let reactivated = manager
         .activate_profile(&profile, SpawnMode::Resume)
         .expect("재활성화는 무해한 Ok(이미 실행 중 AgentInfo)여야 함 — 죽으면 Err/회귀");
 
-    // [추가 하드닝 ②] activate_profile 은 산 에이전트가 있을 때 재spawn 없이 동기 반환한다.
-    //   재spawn(회귀)이 있었다면 새 배치 프로세스가 count 파일에 append 해 2가 된다. spawn 은 동기지만
-    //   배치 실행(append)은 비동기이므로, 넉넉한 창(2s)을 주고 count 가 2로 오르지 '않음'을 확인한다.
-    //   (결정적 축은 위의 epoch 불변; 이 count 는 보조 heuristic — 비동기 이벤트의 '부재'는 창으로 확인.)
+    // 배치 실행(append)은 비동기라 '부재'는 창으로만 확인된다 — 2s 를 주고 count 가 안 오름을 본다.
+    //   결정적 축은 아래 epoch 불변이고, 이 count 는 보조 heuristic 이다.
     let respawned = wait_until(Duration::from_secs(2), || run_count(&count) >= 2);
     assert!(
         !respawned,
@@ -349,7 +282,6 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
         "재활성화 후 배치 실행은 정확히 1회여야 함(재spawn 없음)"
     );
 
-    // (a)(c) 반환된 info 가 산 세션 그대로: id 동일 + epoch 불변(맵 교체 없음).
     assert_eq!(reactivated.id, id, "재활성화는 같은 에이전트를 가리켜야 함");
     assert_eq!(
         reactivated.epoch, epoch_after_first,
@@ -364,16 +296,13 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
         reactivated.status
     );
 
-    // [추가 하드닝 ①] 레지스트리 epoch 도 불변이어야 한다 — 반환된 AgentInfo.epoch 만 보면
-    //   레지스트리 맵 교체(epoch 내부 bump)를 잡지 못한다.
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         reg_epoch_before,
         "재활성화로 레지스트리 epoch 가 bump 되면 안 됨(맵 교체=fresh 없음)"
     );
 
-    // (b) 잠깐 뒤에도 원본 세션이 여전히 살아 목록에 있음(fresh-fallback 이 kill 하지 않았다).
-    //     epoch 도 여전히 동일해야 한다(비동기 reaper 가 옛 세션을 수거하지 않았다).
+    // 300ms 는 비동기 reaper 가 뒤늦게 옛 세션을 수거하는 회귀를 잡기 위한 창이다.
     std::thread::sleep(Duration::from_millis(300));
     let live = manager.list_agents();
     let entry = live.iter().find(|a| a.id == id);
@@ -386,9 +315,6 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
         "재활성화 후 원본 세션이 kill 되거나 epoch 가 바뀌면 안 됨 — got {entry:?}"
     );
 
-    // (d-후) ★재spawn 없음의 결정적 증거★: 재활성화 뒤에도 배치는 여전히 1회만 start 됐다.
-    //   재활성화가 산 에이전트를 kill+replace(같은 epoch 로 위장) 했다면 배치가 두 번째로 start 돼
-    //   count 가 2 가 됐을 것이다 — epoch 검사만으론 못 잡는 구멍을 이 count 가 닫는다.
     assert_eq!(
         run_count(&count),
         1,
@@ -396,34 +322,25 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
         run_count(&count)
     );
 
-    // 정리.
     let _ = manager.kill_agent(id);
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0084 핵심★: 죽은 시체를 같은 슬롯에서 재활성화(Resume)하면 **epoch 가 엄격히 증가**한다.
-/// reap 으로 세션이 맵에서 빠졌다가 재활성화로 새 세션이 같은 AgentId 로 들어오는 건 맵 교체이므로
-/// ADR-0007("같은 AgentId 맵 교체마다 epoch +1")를 적용한다. epoch 가 안 오르면 프론트 구독
-/// (deps [viewId,agentId,epoch])이 재발화하지 않아 resume 출력이 화면에 안 붙는다(빈 슬롯).
+/// ★ADR-0084 회귀 가드★ — 시체를 같은 슬롯에서 재활성화하면 epoch 가 엄격히 증가한다.
 ///
-/// ★bump 지점(`spawn_agent` 의 `epoch_for_spawn`)이 사라지면 이 테스트가 실패한다★: 그러면 재활성화된
-///   새 세션이 죽은 세션과 동일 epoch(E)를 갖는다 → 아래 `> E` 단언 실패.
-///
-/// 실 claude 없이 셸로 모사: 셸은 needs_session=false 라 --resume 플래그를 붙이진 않지만(그건 별도
-///   backend 단위 테스트가 실증), 이 테스트가 겨냥하는 "재활성화 = 맵 교체 = epoch++" 는 backend
-///   무관하게 성립한다. 셸은 조기종료하지 않아 Resume 재활성화가 Ok(살아있는 세션)로 성공한다.
+/// 셸은 needs_session=false 라 `--resume` 플래그 조립까지는 보지 않는다 — 그건
+///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 몫이고,
+///   이 테스트가 겨냥하는 "재활성화 = 맵 교체 = epoch++" 는 backend 무관하게 성립한다.
 #[test]
 fn reactivate_after_kill_bumps_epoch() {
     let (manager, _sink, profiles) = make_manager("reactivate-epoch-bump");
 
-    // 윈도(EARLY_EXIT_WINDOW)를 넘겨 사는 셸(≈19s) — 재활성화 시 조기종료로 오판되지 않게 한다.
     let (profile, batch, count) = long_lived_profile("reactivate-epoch-bump");
     let id = profile.id;
     profiles.upsert(profile.clone());
 
-    // 1) 최초 활성화(세션 없음 → Fresh 갈래) → 오래 사는 셸 spawn. epoch=E(신규 프로필이라 0).
     let first = manager
         .activate_profile(&profile, SpawnMode::Fresh)
         .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
@@ -439,7 +356,6 @@ fn reactivate_after_kill_bumps_epoch() {
         "최초 활성화 세션이 살아있어야 함"
     );
 
-    // 2) 유저 kill → reaper 가 세션을 맵에서 수거(시체 보존, ADR-0083). 프로필 epoch 는 아직 E.
     manager.kill_agent(id).expect("kill_agent failed");
     assert!(
         wait_until(Duration::from_secs(5), || {
@@ -447,72 +363,55 @@ fn reactivate_after_kill_bumps_epoch() {
         }),
         "유저 kill 후 세션이 맵에서 수거돼야 함"
     );
-    // kill 수거 완료(맵 비었고 프로필은 시체) 확인 — epoch 는 여전히 E(재활성화 전).
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(epoch_e),
         "kill 만으로는 epoch 가 오르지 않는다(재활성화 respawn 이 bump 의 주체)"
     );
 
-    // 3) ★재활성화(Resume)★: 시체를 같은 슬롯에서 재spawn = 맵 교체 → epoch++ 여야 한다.
     let reactivated = manager
         .activate_profile(&profile, SpawnMode::Resume)
         .expect("재활성화가 resume 경로로 Ok(살아있는 세션)여야 함(셸은 조기종료 안 함)");
 
-    // (a) 반환된 산 세션의 epoch 가 죽은 세션(E)보다 엄격히 크다(맵 교체 재구독 트리거, ADR-0007).
     assert!(
         reactivated.epoch > epoch_e,
         "ADR-0084: 재활성화 세션 epoch({}) 가 죽은 세션 epoch({}) 보다 커야 함(맵 교체=epoch++)",
         reactivated.epoch,
         epoch_e
     );
-    // (b) 레지스트리 epoch 도 함께 올랐다(반환 info 만 보면 맵 교체를 못 잡는다).
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(reactivated.epoch),
         "재활성화 후 레지스트리 epoch 와 세션 epoch 가 일치해야 함(bump 가 spawn_agent 읽기 전에 반영)"
     );
 
-    // 정리.
     let _ = manager.kill_agent(id);
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0083 회귀★: 유저 kill 후 재활성화가 "profile not found"(=화면 "실패")로 깨지던 버그를 막는다.
-/// 옛 동작: 유저 kill → reaper `(UserKill,_) => DeleteProfile` → `profiles.remove`(claude_session_id
-/// 포함 삭제) → 재활성화 시 프로필이 없어 resume 진입도 못 하고 실패. ADR-0083 은 유저 kill 도 시체로
-/// 보존하므로, kill 후에도 프로필 + claude_session_id 가 남아 재활성화가 resume 경로로 정상 진입한다.
+/// ★ADR-0083 회귀 가드★ — 유저 kill 이 프로필을 지우면 재활성화가 "profile not found"(화면엔 "실패")로
+/// 깨진다. 옛 reaper 가 UserKill → DeleteProfile 로 claude_session_id 째 지워 실제로 그랬다.
 ///
-/// 검증(★이 테스트가 증명하는 건 "프로필 조회 경로가 온전함"까지다 — 실제 `--resume <sid>` 조립은
-/// backend/claude.rs 의 `build_command_spec(Resume, sid)` 단위 테스트가 실증한다. ADR-0084 로 그
-/// 백엔드 단위 테스트가 추가돼 이 통합 테스트가 --resume 조립을 오버셀할 필요가 없어졌다):
-///   (a) 유저 kill 후 세션은 맵에서 수거되지만 프로필은 보존되고 auto_restore=false 로 다운그레이드.
-///   (b) claude_session_id 가 그대로 남아 있다(--resume 로 이어받기 위한 필수 조건 — 보존만 단언).
-///   (c) `activate_profile(Resume)` 가 "profile not found" 없이 **프로필 조회를 통과해** 재활성화된다
-///       — 셸은 조기종료하지 않으므로 Ok(살아있는 세션). 즉 이 테스트의 결정적 단언은 "삭제로 조회
-///       경로가 깨지지 않았다"이지, 셸이 실제 --resume 를 부착한다는 게 아니다(셸은 needs_session=false).
+/// 여기서 증명되는 건 **프로필 조회 경로가 온전하다**까지다 — 실제 `--resume <sid>` 조립은
+///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 가 실증한다.
 #[test]
 fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (manager, _sink, profiles) = make_manager("kill-reactivate");
 
-    // 윈도(EARLY_EXIT_WINDOW)를 넘겨 사는 셸(≈19s) — 재활성화 시 조기종료로 오판되지 않게 한다.
     let (profile, batch, count) = long_lived_profile("kill-reactivate");
     let id = profile.id;
 
-    // ★claude_session_id 를 심은 프로필★: 유저 kill 후에도 이 sid 가 살아남아야 재활성화 resume 가
-    //   성립한다(ADR-0083 의 헤드라인 — 시체 + sid 보존). auto_restore=true 로 둬서 kill 수거가 false 로
-    //   다운그레이드하는지도 함께 단언한다. ★spawn 경로가 upsert_preserving_hierarchy 로 넘긴 프로필을
-    //   그대로 레지스트리에 심으므로(session_id 포함), activate/kill 에도 이 seeded 프로필을 써야 sid 가
-    //   보존된다★(원본 profile 은 claude_session_id=None 이라 그걸 넘기면 spawn 이 sid 를 덮어써 유실).
+    // ★seeded 프로필을 spawn/activate/kill 전부에 넘겨야 한다★: spawn 은 넘겨받은 스냅샷을
+    //   upsert_preserving_hierarchy 로 그대로 심으므로, claude_session_id=None 인 원본을 넘기면
+    //   심어둔 sid 가 덮여 유실된다. auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.claude_session_id = Some(sid);
     seeded.auto_restore = true;
     profiles.upsert(seeded.clone());
 
-    // 1) 최초 활성화(세션 없음 → Fresh 갈래) → 오래 사는 셸 spawn.
     manager
         .activate_profile(&seeded, SpawnMode::Fresh)
         .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
@@ -523,7 +422,6 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
         "최초 활성화 세션이 살아있어야 함"
     );
 
-    // 2) 유저 kill(UserKill intent 태깅) → reaper 가 세션 수거 + 시체 보존(ADR-0083).
     manager.kill_agent(id).expect("kill_agent failed");
     assert!(
         wait_until(Duration::from_secs(5), || {
@@ -532,7 +430,6 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
         "유저 kill 후 세션이 맵에서 수거돼야 함"
     );
 
-    // (a) 프로필 보존 + auto_restore=false 다운그레이드(삭제 아님).
     assert!(
         wait_until(Duration::from_secs(2), || {
             profiles.get(id).map(|p| !p.auto_restore).unwrap_or(false)
@@ -543,16 +440,12 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
         profiles.get(id).is_some(),
         "유저 kill 후 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083 회귀)"
     );
-    // (b) claude_session_id 보존 — 재활성화 resume 의 필수 조건.
     assert_eq!(
         profiles.get(id).and_then(|p| p.claude_session_id),
         Some(sid),
         "유저 kill 로 claude_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
     );
 
-    // (c) ★재활성화가 "profile not found" 없이 resume 경로로 진입★. 프로필이 살아 있으므로 조회 경로가
-    //   온전하고, 셸은 조기종료하지 않아 Ok(살아있는 세션)로 재활성화된다. 옛 버그였다면 프로필이 없어
-    //   재활성화가 실패(진입 불가)했을 것이다.
     let reactivated = manager
         .activate_profile(&seeded, SpawnMode::Resume)
         .expect("재활성화가 profile not found 없이 resume 경로로 진입해 Ok 여야 함(ADR-0083)");
@@ -569,7 +462,6 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
         reactivated.status
     );
 
-    // 정리.
     let _ = manager.kill_agent(id);
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
