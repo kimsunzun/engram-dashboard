@@ -6,7 +6,6 @@
 //!   끝나는 경우는 **측정 전제가 무너졌을 때뿐**이다 — 보관함 cap 경계가 옮겨졌거나(아래 `MAILBOX_CAP`)
 //!   프리필이 요청한 파킹 수를 못 만들었을 때.
 //! ★회귀 스위트에 넣지 않는다★: 시간 측정은 머신 부하에 흔들려 게이트로 쓰면 flaky 하다.
-//!   `required-features` 로 운영 빌드에서도 제외한다(saturation-pilot 계열과 동일).
 //!
 //! ★`obs_seam` 최소 복제(정직 표기)★: 결정적 수신자(구조화 캐리어를 흉내 내면서 write 를 캡처하는
 //!   transport)는 `tests/control_send.rs` 의 `obs_seam` 과 같은 기법인데, integration test 의 모듈은
@@ -41,67 +40,51 @@ use engram_dashboard_messaging::envelope::Entrance;
 use engram_dashboard_messaging::service::{FlushTrigger, MessagingService};
 use engram_dashboard_messaging::PeerId;
 
-/// 보관함 message 레인 상한. ★정본은 `engram-dashboard-messaging` 의 `mailbox.rs` 상수 `MAILBOX_CAP`
-/// 이고 그건 비공개라 여기 값을 복제했다★ — 그래서 매 실행마다 경계를 **실측 재확인**한다
-/// (`verify_cap_boundary`): cap 에서 반려, cap−1 에서 수용이 아니면 측정을 무효로 보고 실패 종료한다.
+/// ★정본은 `engram-dashboard-messaging` 의 `mailbox.rs` 상수 `MAILBOX_CAP` 이고 그건 비공개라 여기 값을
+/// 복제했다★.
 const MAILBOX_CAP: usize = 100;
 
-/// 한 데이터 포인트의 **기록되는** 반복 횟수. 홀수라 median 이 실제 표본 하나다(짝수면 두 표본의 평균).
+/// ★홀수★ — median 이 두 표본의 평균이 아니라 실제 표본 하나가 된다.
 const REPS: usize = 25;
 
-/// 포인트마다 버리는 선행 반복 수. 첫 반복은 할당자·페이지 폴트·분기 예측이 차가워 다른 반복보다
-/// 몇 배 느리게 나오는데, 그게 max 칸을 통째로 차지하면 표본 산포를 못 읽는다. 버림은 **중앙값이
-/// 아니라 min/max 를 읽을 수 있게** 하려는 것이다(중앙값은 어차피 이상치에 둔감하다).
+/// 첫 반복은 할당자·페이지 폴트·분기 예측이 차가워 다른 반복보다 몇 배 느리게 나오는데, 그게 max 칸을
+/// 통째로 차지하면 표본 산포를 못 읽는다. 버림은 **중앙값이 아니라 min/max 를 읽을 수 있게** 하려는
+/// 것이다(중앙값은 어차피 이상치에 둔감하다).
 const WARMUP: usize = 3;
 
-/// ⑤ 프리필 파킹 수. ★실측: 최악은 cap 이 아니라 **cap−1**(=99)이다★ — 거기서 한 호출이 100건을
-/// 주입하고, cap(=100)은 반대로 **가장 싼 점**이다(반려가 드레인 **전에** 끊어 주입이 0건이다).
-/// 두 점을 함께 재는 이유가 그것이다 — 하나만 재면 어느 쪽이든 라벨이 거짓이 된다.
+/// ⑤ ★실측: 최악은 cap 이 아니라 **cap−1**(=99)이다★ — 거기서 한 호출이 100건을 주입하고, cap(=100)은
+/// 반대로 **가장 싼 점**이다(반려가 드레인 **전에** 끊어 주입이 0건이다). 두 점을 함께 재는 이유가
+/// 그것이다 — 하나만 재면 어느 쪽이든 라벨이 거짓이 된다.
 const BURST_PARKED: &[usize] = &[0, 1, 10, 50, 99, 100];
 
-/// ⑤ 결과에 **반드시 그대로** 실리는 범위 고지(⑧의 `FANOUT_CAVEAT` 와 같은 급). ★이게 없으면 "드레인이
-/// 4ms 다" 라는 문장만 뽑혀 나간다★ — 이 하네스가 재는 것은 **인프로세스 드레인 비용**뿐이고, 배달의
-/// 마지막 한 걸음인 자식 stdin 쓰기는 계측 구간 밖이다(seam 이 메모리 push 로 대체한다. 운영 leaf =
-/// `transport/pty.rs` 의 `send_input` — writer 락 + `write_all` + `flush`, 그리고 그 호출은
-/// service.rs 드레인이 "★락 밖★ … 자식 stdin blocking write" 라고 라벨한 지점이다).
-///
-/// ★"운영이 더 비싸다" 는 **주입한 행에만** 걸린다★: cap-full 행은 입구 반려라 주입이 0건이고, 운영이
-/// 더 비쌀 transport 쓰기가 **애초에 없다** — 범위를 안 걸면 하필 가장 오해받는 행에서 거짓이 된다.
+/// ⑤ ★이게 없으면 "드레인이 4ms 다" 라는 문장만 뽑혀 나간다★ — 범위가 벗겨진 숫자가 그대로 인용된다.
 const BURST_CAVEAT: &str =
     "in-process drain cost ONLY · the real stdin write is NOT in the timed region — the harness captures bytes in memory where production does a blocking write_all+flush into the child's pipe/ConPTY, so for rows that inject production is strictly higher and the omitted part is potentially unbounded (up to 64 KiB × a 100-deep batch into one child's pipe, no timeout), while the cap-full row injects nothing and is unaffected";
 
-/// ⑧ `@all` 수신자 수.
 const FANOUT_N: &[usize] = &[1, 2, 4, 8, 16];
 
-/// median 칸 너비. ★넓은 이유 = 칼럼 헤더가 범위 태그를 달기 때문이다("in-proc"/"aggregate")★ —
-/// 표만 긁어 가면 제목·꼬리의 고지가 떨어져 나가는데, **헤더 줄은 어떤 표 추출에도 딸려 간다**.
-/// 그래서 최소한의 범위 표시를 거기 심고 데이터 칸 너비를 거기 맞춘다(행마다 범위 필드를 다는 것은
-/// 표를 부풀리므로 하지 않는다).
+/// ★넓은 이유 = 칼럼 헤더가 범위 태그를 달기 때문이다("in-proc"/"aggregate")★ — 표만 긁어 가면 제목·
+/// 꼬리의 고지가 떨어져 나가는데, **헤더 줄은 어떤 표 추출에도 딸려 간다**. 그래서 최소한의 범위 표시를
+/// 거기 심고 데이터 칸 너비를 거기 맞춘다(행마다 범위 필드를 다는 것은 표를 부풀리므로 하지 않는다).
 const MEDIAN_COL: usize = 19;
 
-/// ⑧ 결과에 **반드시 그대로** 실리는 범위 고지 — 이 하네스가 재는 것은 N-스케일링 총량이고, ADR-0125 가
-/// 물은 "수신자 A 의 드레인이 B 를 얼마나 늦추나"(수신자별 인과)는 드레인 루프 **안쪽** 타임스탬프가
-/// 있어야 해서 여기서 답하지 않는다. 문구를 지우면 다음 세션이 이 숫자를 그 답으로 오독한다.
+/// ⑧ ADR-0125 가 물은 "수신자 A 의 드레인이 B 를 얼마나 늦추나"(수신자별 인과)는 드레인 루프 **안쪽**
+/// 타임스탬프가 있어야 해서 여기서 답하지 않는다. 문구를 지우면 다음 세션이 이 숫자를 그 답으로 오독한다.
 const FANOUT_CAVEAT: &str =
     "aggregate N-scaling only · per-recipient causality NOT measured (needs production hooks — user decision)";
 
-/// 재현 범위 고지. ★실측(리뷰어 2인 + 발주자 + 작성자 = 4회 독립 실행)★: **한 실행 안**에서는 최악
-/// 포인트가 ±0.2% 로 안정한데 **실행 사이**엔 고정비가 ~2배, 기울기가 ~30% 움직인다. 그래서 계수를
-/// 인용하면 다음 세션이 재현에 실패하고, 재현되는 것은 모양뿐이다 — 소수점을 찍어 없는 정밀도를
-/// 주장하지 않으려고 출력도 정수 µs 로 자른다.
+/// ★실측(리뷰어 2인 + 발주자 + 작성자 = 4회 독립 실행)★: **한 실행 안**에서는 최악 포인트가 ±0.2% 로
+/// 안정한데 **실행 사이**엔 고정비가 ~2배, 기울기가 ~30% 움직인다. 그래서 계수를 인용하면 다음 세션이
+/// 재현에 실패하고, 재현되는 것은 모양뿐이다.
 const VARIANCE_NOTE: &str =
     "debug build · magnitudes vary ~2× across sessions; what reproduces is the shape (linear in batch size, worst ≈ cap−1, cap-full cheapest), not the coefficients";
 
-/// 계측기가 계측 대상에 얹는 비용 고지. `test-harness` 기능(이 bin 의 존재 조건)이 발송 경로에 운영엔
-/// 없는 훅 조회를 심는다 — ingress 의 `fire_mid_send_hook`(RwLock read) + 커널 수용 임계구역의
-/// `fire_accept_hook`(OnceLock lookup, 메시징 락 보유 중).
-///
-/// ★없애려 들지 말 것★: 규모가 락 읽기 수준이라 위 세션 간 편차에 통째로 묻히고, 이 bin 은 그 기능을
-/// **켜야만 존재**한다(seam 세션 주입이 같은 기능 뒤에 있다). 남길 것은 제거가 아니라 이 고지다.
+/// ★훅을 없애려 들지 말 것★: 이 bin 은 `test-harness` 기능을 **켜야만 존재**한다(seam 세션 주입이 같은
+/// 기능 뒤에 있다). 남길 것은 제거가 아니라 이 고지다.
 const INSTRUMENT_NOTE: &str =
     "test-harness feature is ON (this bin requires it) — the timed path carries hook lookups production never pays (mid-send RwLock read + accept-hook OnceLock lookup); lock-read scale, buried under the cross-session variance above";
 
-// ── 결정적 수신자 seam(obs_seam 최소 복제 — 모듈 헤더가 근거) ──────────────────────────────────
+// ── 결정적 수신자 seam ──────────────────────────────────────────────────────────────────────────
 
 struct NoopStatus;
 impl StatusSink for NoopStatus {
@@ -109,8 +92,8 @@ impl StatusSink for NoopStatus {
     fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
 }
 
-/// write 를 캡처만 하는 transport. `structured: true` 로 신고해 도달성 게이트를 통과하고, 그 값이 곧
-/// 커널의 `LiveAgent::turn_signal` 이 된다 — idle 게이트가 이 수신자에게 성립해야 프리필이 파킹된다.
+/// `structured: true` 로 신고해 도달성 게이트를 통과하고, 그 값이 곧 커널의 `LiveAgent::turn_signal` 이
+/// 된다 — idle 게이트가 이 수신자에게 성립해야 프리필이 파킹된다.
 struct SeamTransport {
     captured: Arc<Mutex<Vec<Vec<u8>>>>,
 }
@@ -153,16 +136,14 @@ impl AgentTransport for SeamTransport {
     }
 }
 
-/// 매니저 맵에 꽂은 seam 세션 한 대.
 struct Seam {
     id: AgentId,
-    /// 지목 주소이자 파킹 큐 키(= canonical name).
     name: String,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
-/// seam 수신자를 조립해 맵에 꽂는다. 관측 배선 없는 core 를 쓴다 — 턴 사실은 `ScriptedTurnFacts` 로
-/// 직접 심으므로 코어 표를 경유할 이유가 없다.
+/// 관측 배선 없는 core 를 쓴다 — 턴 사실은 `ScriptedTurnFacts` 로 직접 심으므로 코어 표를 경유할 이유가
+/// 없다.
 fn insert_seam(manager: &Arc<AgentManager>) -> Seam {
     let id = AgentId::new_v4();
     let name = id.to_string()[..8].to_string();
@@ -206,9 +187,9 @@ fn insert_seam(manager: &Arc<AgentManager>) -> Seam {
 
 // ── 배선 ────────────────────────────────────────────────────────────────────────────────────────
 
-/// 도어벨을 **받아 두기만** 하는 계기. 운영은 여기서 flush 레인으로 넘겨 다른 스레드가 큐를 비우는데,
-/// 이 하네스는 그 레인을 띄우지 않는다 — 그래야 프리필한 파킹이 측정 직전까지 큐에 그대로 남는다.
-/// 비용 구조는 운영과 같은 쪽(논블록 enqueue)이라 타이밍을 왜곡하지 않는다.
+/// 운영은 여기서 flush 레인으로 넘겨 다른 스레드가 큐를 비우는데, 이 하네스는 그 레인을 띄우지 않는다 —
+/// 그래야 프리필한 파킹이 측정 직전까지 큐에 그대로 남는다. 비용 구조는 운영과 같은 쪽(논블록 enqueue)
+/// 이라 타이밍을 왜곡하지 않는다.
 struct RecordingBell {
     rings: Mutex<Vec<PeerId>>,
 }
@@ -247,8 +228,8 @@ impl Drop for Stage {
     }
 }
 
-/// 측정 1회분 무대. ★반복마다 새로 만든다★ — 하나를 재사용하면 로스터·장부가 반복 수만큼 커져
-/// 이름 해석·`@all` 정렬 비용이 뒤 반복에서만 오르고, 그 증가분이 측정치에 섞인다.
+/// ★반복마다 새로 만든다★ — 하나를 재사용하면 로스터·장부가 반복 수만큼 커져 이름 해석·`@all` 정렬
+/// 비용이 뒤 반복에서만 오르고, 그 증가분이 측정치에 섞인다.
 fn stage() -> Stage {
     let store_root =
         std::env::temp_dir().join(format!("engram-drain-latency-{}", AgentId::new_v4()));
@@ -289,8 +270,8 @@ fn stage() -> Stage {
     }
 }
 
-/// 발신자 신원 발급 + seam 세션 삽입. 신원이 registry 에 있어야 발송 경로가 "폐기된 발신자" 경고를
-/// 찍지 않는다(경고 자체는 게이트가 아니지만 측정 중 잡음이다).
+/// 신원이 registry 에 있어야 발송 경로가 "폐기된 발신자" 경고를 찍지 않는다(경고 자체는 게이트가
+/// 아니지만 측정 중 잡음이다).
 fn insert_sender(st: &Stage) -> (Seam, BoundIdentity) {
     let seam = insert_seam(&st.manager);
     st.registry
@@ -312,7 +293,6 @@ fn send(st: &Stage, from: BoundIdentity, to: Vec<String>, body: &str) -> Control
     handle_send(&st.manager, &st.registry, &st.messaging, Entrance::Cli, cmd)
 }
 
-/// 발송 응답의 수신자별 결말을 `(status, code)` 로 납작하게 편다. 발송 단위 반려는 `("reject", code)`.
 fn rows(result: &ControlResult) -> Vec<(&'static str, Option<&'static str>)> {
     match result {
         ControlResult::Ok { results, .. } => results.iter().map(|r| (r.status, r.code)).collect(),
@@ -334,7 +314,6 @@ struct Stats {
 }
 
 impl Stats {
-    /// 표본이 비면 `None`. median = 정렬 후 중앙값(짝수면 가운데 둘의 평균).
     fn of(samples: &[u128]) -> Option<Stats> {
         if samples.is_empty() {
             return None;
@@ -354,8 +333,7 @@ impl Stats {
         })
     }
 
-    /// ★정수 µs 로 자른다(0.1µs 는 노이즈 연극 — `VARIANCE_NOTE` 가 근거)★: 세션 간 편차가 배수 규모인
-    /// 데이터에 소수점을 찍으면 없는 재현성을 주장하게 된다.
+    /// ★0.1µs 는 노이즈 연극(근거 = `VARIANCE_NOTE`)★ — 소수점을 찍으면 없는 재현성을 주장하게 된다.
     fn us_columns(&self) -> String {
         format!(
             "{:>MEDIAN_COL$.0} {:>10.0} {:>10.0}",
@@ -370,16 +348,11 @@ impl Stats {
 
 struct BurstPoint {
     parked: usize,
-    /// 측정 호출이 **실제로 stdin 에 쓴** 건수(가정이 아니라 관측 — seam transport 캡처 수).
     injected: usize,
     row: String,
     stats: Stats,
 }
 
-/// 수신자를 턴 중으로 심어 `parked` 건을 큐에 쌓고, idle 로 되돌린 뒤 **한 번의 발송 호출만** 잰다.
-///
-/// ★계측 구간에 들어가는 것 = `handle_send` 한 호출뿐★. 무대 조립·세션 삽입·프리필 발송·응답 판독·
-/// 통계는 전부 밖이다. 프리필이 요청 수를 못 만들면 그 반복은 측정 전제가 깨진 것이라 즉시 멈춘다.
 fn measure_burst(parked: usize) -> Result<BurstPoint, String> {
     let mut samples = Vec::with_capacity(REPS);
     let mut injected = 0usize;
@@ -440,8 +413,7 @@ fn measure_burst(parked: usize) -> Result<BurstPoint, String> {
     })
 }
 
-/// 복제한 `MAILBOX_CAP` 이 아직 커널의 그 값인지 **동작으로** 확인한다 — cap 에서 반려(`MAILBOX_FULL`),
-/// cap−1 에서 수용. 상수가 조용히 갈리면 ⑤의 "최악 케이스" 라벨이 거짓이 되므로 측정을 무효로 만든다.
+/// 복제한 상수가 커널과 조용히 갈리면 ⑤의 "최악 케이스" 라벨이 거짓이 되므로 측정을 무효로 만든다.
 fn verify_cap_boundary(points: &[BurstPoint]) -> Result<(), String> {
     let at = |n: usize| points.iter().find(|p| p.parked == n);
     if let Some(full) = at(MAILBOX_CAP) {
@@ -471,9 +443,6 @@ struct FanoutPoint {
     stats: Stats,
 }
 
-/// 빈 보관함 수신자 N명 + 발신자 1명을 세우고 `@all` 발송 **호출 전체**를 잰다(수신자별 분해 없음 —
-/// 그 인과는 `FANOUT_CAVEAT` 가 밝히는 범위 밖이다).
-///
 /// 턴 사실을 아무것도 심지 않으므로 전원 idle 이다(positive-knowledge-only) — 즉 N명분 드레인이
 /// 전부 이 한 호출 안에서 일어난다.
 fn measure_fanout(n: usize) -> Result<FanoutPoint, String> {
@@ -618,7 +587,6 @@ mod tests {
     use super::*;
 
     // ── 통계 ────────────────────────────────────────────────────────────────
-    // 시간을 재는 단언은 여기 없다 — 순수 계산과 프리필 헬퍼의 결과 수만 본다.
 
     #[test]
     fn median_of_odd_sample_is_the_middle_value() {
@@ -649,8 +617,6 @@ mod tests {
 
     // ── 프리필 ──────────────────────────────────────────────────────────────
 
-    /// 턴 중으로 심은 수신자 앞 발송은 파킹돼 큐에 남는다 = ⑤의 프리필이 실제로 요청한 수를 만든다.
-    /// 이게 깨지면 ⑤는 "0건 드레인" 을 최악 케이스로 착각해 잰다.
     #[test]
     fn prefill_parks_exactly_the_requested_count() {
         let st = stage();
@@ -675,7 +641,6 @@ mod tests {
         );
     }
 
-    /// idle 로 되돌린 뒤의 발송 한 번이 묵은 파킹까지 통째로 낸다 — ⑤가 재는 것이 그 배치다.
     #[test]
     fn one_send_after_idle_drains_the_whole_backlog() {
         let st = stage();

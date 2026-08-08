@@ -1,18 +1,9 @@
 //! priming-smoke — ADR-0092 프라이밍 수용 baseline 스모크 드라이버(검증 전용 bin).
 //!
-//! ## 역할
-//! 실 **primed** claude 에이전트 1개(stream-json, Fresh)를 스폰하고 — 프라이밍(#1 FilePrimingProvider +
-//! #2 스폰 배선)이 `--append-system-prompt-file` 로 주입된 상태 — **자연스러운 1:1 팀원 메시지**를
-//! 실 control 경로(handle_send → wrap_message → write_stdin_observed)로 보낸 뒤, 에이전트의 응답
-//! 텍스트를 캡처해 **PRINT** 한다. 오케스트레이터가 그 응답을 읽고 수용 여부를 **정성 판정**한다
-//! (pass/fail 단언 아님 — ADR-0092 수용 판정은 qualitative).
+//! 실 primed claude 1개에 **자연스러운 1:1 팀원 메시지**를 실 control 경로로 보내고 응답을 **PRINT** 한다.
 //!
-//! ## 핵심 불변식(ADR-0092)
-//! - **required-features = ["test-harness"]** — 운영/릴리즈 빌드는 이 bin 을 컴파일하지 않는다.
-//! - **프라이밍은 실물 파일에서** — 하드코딩 금지. FilePrimingProvider 가 `prompts/agent-priming.md` 를
-//!   (또는 ENGRAM_PRIMING_FILE override) 해석해 주입한다.
-//! - **자연 메시지** — 코드워드/기억-보고 프로브가 아니라 진짜 팀원 메시지(수용 confound 회피, ADR-0092).
-//! - **skip_no_claude loud-skip** — claude 부재/인증 실패면 요란하게 스킵(silent skip 금지).
+//! ★pass/fail 단언이 없다★ — 수용 여부는 오케스트레이터가 그 응답을 읽고 **정성 판정**한다(ADR-0092 수용
+//!   판정은 qualitative).
 // ADR-0092
 
 use std::path::PathBuf;
@@ -42,16 +33,14 @@ use engram_dashboard_daemon::control::DaemonControlChannel;
 use engram_dashboard_daemon::messaging_host::messaging_for_manager;
 use engram_dashboard_messaging::envelope::Entrance;
 
-/// 스폰 후 목록 등장 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
-/// 턴 종료(MessageDone) 대기 상한.
 const TURN_WAIT_CAP: Duration = Duration::from_secs(180);
 
-/// ★자연 1:1 팀원 메시지(ADR-0092 — 코드워드/기억-보고 아님)★: 동료가 코드 리뷰 결과를 알려주는
-///   평범한 협업 메시지. primed 에이전트가 이걸 인젝션으로 격리하는지, 팀원 메시지로 자연 수용하는지를 본다.
+/// ★자연 1:1 팀원 메시지(ADR-0092 — 코드워드/기억-보고 아님)★: primed 에이전트가 이걸 인젝션으로
+///   격리하는지, 팀원 메시지로 자연 수용하는지를 본다.
 const NATURAL_MESSAGE: &str = "모듈 auth 리뷰 끝냈어. 로그인 경로에 이슈 2개 발견 — 확인 부탁.";
 
-/// 원과제(에이전트가 뭔가 작업 중이도록) — 자연스러운 협업 맥락을 만든다.
+/// 에이전트가 뭔가 작업 중이도록 세우는 원과제 — 자연 메시지가 도착할 협업 맥락을 만든다.
 const TASK_PROMPT: &str =
     "너는 지금 auth 모듈 관련 작업을 맡고 있다. 시작 준비가 됐으면 한 줄로 알려줘.";
 
@@ -63,8 +52,8 @@ fn main() {
     std::process::exit(rt.block_on(run()));
 }
 
-/// ★loud skip(saturation_pilot / control_send 이식)★: claude 스폰 불가면 요란하게 스킵(exit 0 이되
-/// SKIPPED 라벨을 stdout+stderr 에 남긴다 — silent skip 금지).
+/// ★loud skip★: claude 스폰 불가면 요란하게 스킵 — exit 0 이되 SKIPPED 라벨을 stdout+stderr **양쪽**에
+/// 남긴다(silent skip 금지).
 fn skip_no_claude(reason: &str) -> i32 {
     let line =
         format!("SKIPPED [priming-smoke]: {reason} — 프라이밍 수용 실측 불가(claude 부재/인증).");
@@ -74,12 +63,8 @@ fn skip_no_claude(reason: &str) -> i32 {
 }
 
 async fn run() -> i32 {
-    // 프라이밍 provider — repo 의 prompts/agent-priming.md 를 해석한다. base = 이 크레이트 매니페스트
-    //   기준 repo 루트(cargo run 은 크레이트 dir 이 cwd 일 수 있어 명시). ENGRAM_PRIMING_FILE override 존중.
     let repo_root = repo_root_from_manifest();
     let priming = FilePrimingProvider::new(repo_root.clone());
-    // ADR-0099/0126: 이 진단 bin 은 claude(MCP-capable) 를 스폰하므로 McpPrimary 변형을 본다
-    //   (= A `prompts/agent-priming.md` — send_message 만 가르친다, ADR-0126 결정 1).
     let priming_path = priming.priming_file(PrimingVariant::McpPrimary);
     match &priming_path {
         Some(p) => eprintln!("[smoke] priming file = {}", p.display()),
@@ -89,7 +74,6 @@ async fn run() -> i32 {
         ),
     }
 
-    // 배선(control_send.rs / saturation_pilot wire() 미러) — 실 FilePrimingProvider 를 채널에 끼운다.
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
     let messaging_slot = Arc::new(MessagingSlot::new());
@@ -138,16 +122,14 @@ async fn run() -> i32 {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
-    // C1: MessagingService 조립 후 슬롯 주입(handle_send 위임 경로). 이 스모크는 산 수신자 = delivered.
     let messaging = Arc::new(messaging_for_manager(manager.clone(), registry.clone()));
     messaging_slot.set(messaging.clone());
 
-    // 모델 핀 — 인자 없으면 sonnet(빠르고 저렴, 파일럿과 동일 계열). 첫 인자로 override 가능.
+    // 모델 핀 — 첫 인자로 override, 기본은 sonnet(빠르고 저렴, 파일럿과 동일 계열).
     let model = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "sonnet".to_string());
 
-    // 실 primed claude 스폰(stream-json, Fresh).
     let profile = AgentProfile::new(
         format!("smoke-{}", &AgentId::new_v4().to_string()[..8]),
         AgentCommand::Claude {
@@ -203,11 +185,9 @@ async fn run() -> i32 {
         agent.id, model
     );
 
-    // 출력 관측 sink 부착.
     let obs = Arc::new(TurnObserver::new());
     let sink_id = manager.subscribe(agent.id, obs.clone()).ok();
 
-    // Turn 1 = 원과제(협업 맥락 형성). 실패해도 계속 — 수용 관측이 목적.
     if !send_and_wait(&manager, agent.id, &obs, TASK_PROMPT) {
         eprintln!("[smoke] WARNING: task 턴이 응답 없이 타임아웃(계속 진행)");
     } else {
@@ -217,7 +197,6 @@ async fn run() -> i32 {
         );
     }
 
-    // 발신자 신원 발급(팀원 A) — 자연 메시지의 from.
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, format!("smoke-sender-{sender}"));
     let from = BoundIdentity {
@@ -225,19 +204,17 @@ async fn run() -> i32 {
         epoch: 0,
     };
 
-    // ★자연 1:1 메시지를 실 control 경로로 주입★: handle_send → wrap_message → write_stdin_observed.
     obs.begin_turn();
     let baseline = obs.done_snapshot();
     let cmd = ControlCommand {
         from,
-        to: vec![agent.id.to_string()], // 정확한 AgentId 로 지목(이름 충돌 회피). 목록 = 1명.
+        to: vec![agent.id.to_string()], // 이름 충돌 회피 — id 로 지목.
         body: NATURAL_MESSAGE.to_string(),
         contract: Default::default(),
     };
     let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
     eprintln!("[smoke] inject ACK = {}", ack.to_json());
 
-    // 응답 대기(자연 수용이면 에이전트가 이 메시지에 팀원처럼 반응한다).
     let responded = obs.wait_turn_end(baseline, TURN_WAIT_CAP);
     let response = obs.response_text();
 
@@ -263,8 +240,7 @@ async fn run() -> i32 {
     0
 }
 
-/// 이 크레이트 매니페스트(`crates/engram-dashboard-daemon`)에서 두 단계 위로 올라간 repo 루트.
-///   `prompts/agent-priming.md` 가 그 아래 산다. cargo run 의 cwd 가 어디든 결정적으로 repo 를 가리킨다.
+/// ★cwd 를 안 쓴다★ — cargo run 의 cwd 가 어디든 매니페스트 기준으로 결정적으로 repo 를 가리킨다.
 fn repo_root_from_manifest() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // .../crates/engram-dashboard-daemon
     manifest
@@ -274,7 +250,6 @@ fn repo_root_from_manifest() -> PathBuf {
         .unwrap_or(manifest)
 }
 
-/// 프롬프트를 유저 턴으로 보내고 이번 턴 종료(MessageDone)까지 대기. 응답 도달=true, 타임아웃=false.
 fn send_and_wait(
     manager: &Arc<AgentManager>,
     id: AgentId,
@@ -317,7 +292,6 @@ impl StatusSink for NoopStatus {
     fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
 }
 
-/// 턴 관측기 — MessageDone 카운트(턴 종료 신호) + TextDelta 누적(응답 텍스트). saturation_pilot 축소판.
 struct TurnObserver {
     id: SinkId,
     inner: Mutex<String>,
