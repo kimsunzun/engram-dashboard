@@ -1,177 +1,85 @@
-//! roundtrip-smoke — ADR-0092 A→B→A 왕복(reply round-trip) 실측 드라이버(검증 전용 bin).
+//! roundtrip-smoke — A→B→A 왕복(reply round-trip) 실측 드라이버(검증 전용 bin).
 //!
-//! ## 역할
-//! priming-smoke 는 A→B **수신**만 증명했다(합성 발신자 1명 → 실 에이전트 1명). 이 하네스는 그 위에
-//! 두 가지를 **추가로** 실측한다:
-//!   ① 실 에이전트 B 가 **발신 절반**(MCP `send_message` 툴 OR `engram-send` CLI)을 **스스로** 호출하고,
-//!   ② A 가 B 의 답신을 자연스럽게 수용한다.
+//! ## 무엇을 실측하나
+//! 실 primed claude 2개(A=alice · B=bob, stream-json/Fresh)를 스폰해, priming-smoke 가 증명한 A→B
+//! **수신** 위에서 두 조각만 새로 본다: ① B 가 **발신 절반**(MCP `send_message` 또는 `engram-send` CLI)을
+//! **스스로** 호출하는가 ② A 가 그 답신을 자연스럽게 수용하는가. 관측 축 둘 — 기계적 = registry
+//! `DeliveryObservation`(from=B, to=A) + B 가 고른 입구, 정성적 = A 의 턴 텍스트. 최종 해석은 아래
+//! stdout 마커로 오케스트레이터가 내린다.
 //!
-//! 즉 실 primed claude **2개**(A·B, stream-json/Fresh)를 스폰하고:
-//!   1. B 에게 짧은 원과제 턴을 줘 "일하는 팀원" 맥락을 만든다.
-//!   2. A→B 로 자연스러운 질문 하나를 실 control 경로(`handle_send`, Entrance::Cli)로 **씨앗 주입**한다
-//!      — B 는 봉투 `[message from alice id:..]` 에서 A 의 이름을 배운다(본문엔 "툴 X 를 써라" 같은 기계적
-//!      지시를 넣지 않는다 — 발신 학습은 프라이밍 변형이 하고, 기본(no-priming/운영 A)은 순수 툴 발견을 본다).
-//!   3. 하네스는 **B 의 답신에 대해 handle_send 를 부르지 않는다** — B(실 claude)가 스스로 MCP/CLI 입구를
-//!      호출하고, 그 요청이 **실제 입구 → handle_send → wrap → A stdin** 으로 흐른다.
-//!   4. 관측: (a) 기계적 = registry `DeliveryObservation`(from=B, to=A)이 실제로 생겼는지 + B 가 고른
-//!      입구(Mcp/Cli). (b) 정성적 = A 의 `TurnObserver` 가 A 가 답신을 처리하며 낸 텍스트를 누적.
-//!   5. 구조화 stdout 마커로 오케스트레이터 판정용 결과를 출력한다.
+//! ## 부정 결과를 오귀속하지 않는 규율(이 하네스의 존재 이유)
+//! "B 가 안 보냄"(`B_SENT=false`)은 **setup 이 온전히 성공했고 A·B 가 모두 살아 있을 때만** 유효한 실험
+//! negative 다. 인프라 부재·인자 조합 오류·프로세스 사망은 전부 SETUP-SKIP / SETUP-FAIL 이라는 **다른
+//! 라벨**로 끝난다. 이 셋이 섞이면 실험 데이터가 오염된다.
 //!
-//! ## 프라이밍 선택(발신 학습 변형 — priming 파일로 조절, ADR-0099 이후)
-//!   - 미지정(또는 `--priming C0`) = `prompts/agent-priming.md`(운영 A — ADR-0126 결정 1 이후 `send_message`
-//!     **만** 가르친다. engram-send 는 계속 깔리되(결정 3) 교육 표면에서 빠졌다). "C0" 는 no-priming 기본과
-//!     동의어인 편의 별칭일 뿐이다(그 하나만 남았다).
-//!   - `--priming <abs-or-rel-path>` 로 임의 프라이밍 파일 직접 지정(예: 운영 B `prompts/agent-priming-cli.md`).
-//!     절대면 그대로, 상대면 repo 루트 기준.
-//!   ※ 옛 C1~C3 케이스 별칭(`prompts/experiments/agent-priming-send-*.md` 로 매핑되던)은 ADR-0099 로 제거됐다
-//!     — 실험 변형 파일이 정리됐고(git 이력 보존), 채널 변형은 이제 백엔드 capability 가 정적 2파일로 가른다.
-//!     C1~C3 문자열을 `--priming` 에 넘기면 이제 "그 이름의 파일 경로"로 해석돼 하류에서 부재로 걸린다(특수
-//!     매핑 없음).
+//! ## 알려진 미확인·미통제
+//! - 게이트 **판정자의 호출부 배선은 단위 테스트가 닿지 않는다** — 게이트가 실 에이전트 2개를 스폰하는
+//!   `run()` 안에 있어 `if false && …` 로 꺼도 스위트는 초록이다. 커버되는 건 순수 판정자뿐이고, 이건
+//!   이 파일의 **모든** 게이트에 해당하는 구조적 공백이다. 호출부를 고칠 때 테스트가 지켜준다고 가정하지 말 것.
+//! - `--seed-reply-by` 는 봉투에 `reply-by` 속성을 **렌더만** 한다 — 이 하네스는 데몬의 60초 sweep 을
+//!   돌리지 않는 단발 실행이라 기한 초과 타임아웃·notice 가 여기서 발화하는 일은 없다.
+//! - 잘못된 기간 표기(파싱 실패)는 두 에이전트가 모두 스폰된 **뒤** 씨앗 발송 시점에야 `validate_contract`
+//!   가 반려한다 — 분류는 SETUP-FAIL 이되 스폰 비용은 이미 썼다.
 //!
-//! ## CLI-only 측정 노브 2종(측정 축이 다르다)
-//!   - **`--disallow-mcp`(ADR-0094)** — `ENGRAM_DISALLOW_MCP_SEND` env 를 세워 MCP `send_message` **grant 만**
-//!     뺀다. MCP 서버는 여전히 mcp-config 로 부착돼 물리(MCP 살아있음)와 권한이 **갈린다** —
-//!     프롬프트-도구 불일치를 일부러 만드는 측정 노브다.
-//!     ★이 노브로는 CLI 라우팅을 만들 수 없다(ADR-0128 · 실측 2026-08-03 6/6 무효)★: MCP 가능 스폰엔
-//!     engram-send 배선도 CLI grant 도 없으므로 남는 발신 grant 가 0 이 되고, 게다가 스폰은 auto 권한
-//!     모드라 grant 자체가 NO-OP 이다(ADR-0097) — 실측에서 이 노브를 켠 에이전트 6/6 이 전부 MCP 로 정상
-//!     발신했다(조작이 성립하지 못했다). CLI 라우팅 실측은 물리를 가르는 `--cli-only` 로만 성립한다.
-//!     이 노브의 존치·폐기는 사용자 결정 대기(코드·플래그는 그대로 둔다).
-//!   - **`--cli-only`(ADR-0099 FIX 3)** — `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 을 **비-MCP 로
-//!     강제**한다. mcp-config 미부착 + CliOnly 프라이밍(`prompts/agent-priming-cli.md`) + [Cli] grant 가 함께
-//!     움직여 정합 불변식을 **보존한 채** false path 전체를 실측한다(실 claude 를 비-MCP 백엔드처럼 굴림).
-//!     이 모드는 `--priming` override 를 주지 않는다(상속된 `ENGRAM_PRIMING_FILE` env 도 거부 = SETUP-FAIL,
-//!     조용히 clear 하지 않는다) — provision 이 CliOnly 파일을 auto-select 하는 걸 보는 게 목적이고,
-//!     entrance=cli 를 기대한다(mcp 관측 시 SETUP-FAIL = 강제 seam 결함).
-//!     ★엄격 판정(다른 모드와 다르다)★: `--cli-only` 는 B 가 실제로 CLI 입구로 보냈을 때만(b_sent=true AND
-//!     entrance=cli) exit 0(PASS). 아무것도 안 보낸 경우(B_SENT=false/ENTRANCE=none)는 일반 모드의
-//!     valid-negative 와 달리 **exit 1**(FAIL — 강제 false path 가 도는 걸 못 봤으니 목적 미달)이고, 전용
-//!     `VERDICT [... --cli-only]:` 줄로 결과를 낸다.
-//!   둘 다 test-only 노브(운영 스위치 아님)이고 CLI 입구(send_exe = engram-send 형제 빌드)가 필수다 — 없으면
-//!   SETUP-SKIP. 미지정이면 오늘 동작(MCP 경로)과 바이트 동일.
+//! ## 플래그(전부 test-only 노브 — 운영 스위치 아님)
+//! - `--priming <path|C0>` — 프라이밍 파일 직접 지정(절대면 그대로, 상대면 repo 루트 기준). 미지정·`C0`
+//!   = 운영 A `prompts/agent-priming.md`. 옛 C1~C3 별칭은 ADR-0099 로 제거됐다 — 지금 넘기면 특수 매핑
+//!   없이 "그 이름의 파일 경로"로 해석돼 부재로 걸린다.
+//! - `--model <name>` — 기본 sonnet.
+//! - `--cli-only` — provision 을 비-MCP 로 강제해 CLI false path 전체를 실측한다. `--priming` co-pass 와
+//!   비어 있지 않은 상속 `ENGRAM_PRIMING_FILE` 을 거부한다(둘 다 관측 대상인 auto-select 를 덮으므로).
+//!   entrance=cli 를 기대한다(mcp 관측 시 SETUP-FAIL = 강제 seam 결함). ★판정이 다른 모드보다 엄격하다★
+//!   — `b_sent=true AND entrance=cli` 여야 exit 0 이고, 미발신은 valid-negative 가 아니라 FAIL(강제
+//!   false path 가 도는 걸 못 봤으니 목적 미달). 전용 `VERDICT [roundtrip-smoke --cli-only]:` 줄로 낸다.
+//! - `--disallow-mcp` — MCP `send_message` grant 만 뺀다. ★이 노브로는 CLI 라우팅을 만들 수 없다
+//!   (ADR-0128 · 실측 2026-08-03 6/6 전원 MCP 정상 발신 = 조작 불성립)★ — CLI 입구 실측은 `--cli-only`
+//!   로만 성립한다. 존치·폐기는 사용자 결정 대기라 코드·플래그는 그대로 둔다.
+//! - `--seed-request` (+ `--seed-reply-by <dur>`, 예 `5m`) — 씨앗 A→B 를 회신 계약으로 보낸다.
+//! - `--b-task <text|@path>` — B 원과제 프롬프트 대체(`@` 접두 = 파일 참조, 상대면 repo 루트 기준).
+//! - `--b-task`·`--seed-reply-by` 는 값 오용(누락 · 다음 토큰이 `--` 로 시작 · 빈 값/공백뿐)을 조용히
+//!   기본값으로 흘리지 않고 **스폰 전 exit 1** 로 반려한다. `--seed-reply-by` 단독 지정(= `--seed-request`
+//!   없이)도 같다. 나머지 노브는 미지정 = 오늘 동작이 곧 안전한 기본이라 관대하다.
 //!
-//! ## 씨앗 계약·B 과제 노브 2종(위 CLI-only 노브와 독립적으로 조합 가능)
-//!   - **`--seed-request`**(+ 선택 `--seed-reply-by <dur>`, 예: `5m`) — 씨앗 A→B 를 **회신 계약**
-//!     (`SendContract{request:true,..}`)으로 보낸다. 같은 실 control 경로(`handle_send`, `Entrance::Cli`)
-//!     그대로 계약 축만 얹는다 — entrance/backend 불변. `--seed-reply-by` 를 `--seed-request` 없이 단독
-//!     지정하면 **인자 오류**(exit 1, 다른 setup 전에 fail-fast — reply_by 는 request 전용, ingress.rs
-//!     `validate_contract` 규칙 1 과 같은 정신). ★`--seed-reply-by` 값 자체의 오용(F5 와 같은 규율)★ 값
-//!     누락 / 다음 토큰이 `--` 로 시작(플래그로 오인 가능) / 빈 값·공백만인 값도 전부 **인자 오류**(exit 1,
-//!     스폰 전 fail-fast — `--b-task` 오용 가드와 같은 분업: parse_args 는 사실만 기록, 반려는 run() 이).
-//!     조용히 넘기면 기한 없이(또는 엉뚱한 값으로) 돌아 오퍼레이터가 눈치채기 어렵다.
-//!     결과 블록에 `SEED_KIND=request|plain` 을 항상 찍고, request 일 때만
-//!     `SEED_REPLY_BY=<value|none>`·`REPLY_IN_REPLY_TO=<id|none>`·`REPLY_MATCHES_SEED=true|false`·
-//!     `REPLY_POLL=matched|timeout|skipped-no-budget`(항목1, option b — 아래 F3 폴링 예산 절 참조)·
-//!     `REPLY_POLL_BUDGET_MS=<ms>`(신규 — 폴링 스킵/타임아웃을 가른 결정 지점의 잔여 예산을 ms 로 그대로
-//!     드러낸다. 0 = 예산 없음(스킵) **또는 1ms 미만 잔여**(ms 절사) — 스킵 판정 정본은 REPLY_POLL 라벨.
-//!     이게 없으면 REPLY_POLL=timeout 뒤에 "100ms 짜리 굶주린 예산" 인지 "정상 예산을
-//!     다 쓰고도 못 찾음" 인지가 안 갈린다)를
-//!     추가로 찍는다(B 의 답신 봉투가 in-reply-to 를 실었는지 + 씨앗 msg_id 와 일치하는지 — 아래 관측 절의
-//!     `DeliveryObservation.in_reply_to` 확장 필드로 판정).
-//!     ★두 마커는 서로 다른 축이다(FIX)★: `REPLY_MATCHES_SEED` 는 baseline 이후 배달된(is_delivered)
-//!     B→A 레코드 중 `in_reply_to == seed_msg_id` 인 것이 있는지의 **엄격 일치** 판정이고,
-//!     `REPLY_IN_REPLY_TO` 는 **그 일치 레코드가 있으면 그 레코드의 값(= seed id)을 우선해서 찍고,
-//!     없을 때만** baseline 이후 첫 배달 레코드 중 `in_reply_to.is_some()` 인 값으로 폴백한다 — 그래야
-//!     "B 가 틀린/환각 id 로 회신함"(REPLY_MATCHES_SEED=false 인데 REPLY_IN_REPLY_TO 엔 값이 있음 — 계약
-//!     위반 중 가장 유력한 형태)과 "B 가 in-reply-to 를 아예 안 실음"(REPLY_IN_REPLY_TO=none)이
-//!     구분된다(이전엔 REPLY_IN_REPLY_TO 가 일치 판정의 `matched` 에서 파생돼 seed id 또는 none 두 값만
-//!     낼 수 있었다 — 가장 유력한 계약 위반 형태를 안 보이게 만드는 결함이었다).
-//!     ★마커쌍 자기모순 재발 방지(리뷰어 NOTE FIX)★: "일치 여부와 **무관하게 항상** 첫 배달 레코드 값을
-//!     찍는다" 로 짜면, B 가 틀린 id 로 먼저 답하고(then) 맞는 id 로 나중에 답할 때
-//!     `REPLY_IN_REPLY_TO=<wrong-id>` 인데 `REPLY_MATCHES_SEED=true` 인 자기모순 쌍이 난다(두 마커가 서로
-//!     다른 레코드를 가리킴 — 첫 레코드 vs 일치 레코드). 그래서 이제 매치가 존재하면 그 매치 레코드를
-//!     **항상** 우선해 두 마커가 같은 레코드에서 파생되게 한다(첫-레코드 폴백은 매치가 아예 없을 때만).
-//!     ★F3 레이스는 폴링으로 닫는다(FIX)★: 판정은 **첫 도착 레코드가 아니라** A 턴 대기까지 끝난 뒤
-//!     baseline 이후 B→A 레코드 **전부**를 스캔해 내리되, 그 스캔에 앞서 "배달 + in_reply_to ==
-//!     seed_msg_id" 레코드가 나타나길 같은 폴링 간격(200ms)으로 마저 기다린다(seed-request 일 때만 —
-//!     plain 씨앗은 in_reply_to 자체가 없어 폴링할 대상이 없으므로 기본 경로를 늦추지 않는다). 첫
-//!     레코드가 실제 회신과 무관한 "ack" 한 통이고 진짜 회신이 그 뒤에 늦게 와도, A 턴 대기 뒤 이 폴링이
-//!     (잔여 예산이 있을 때만) 마저 잡아 두므로 스캔이 놓치지 않는다(이전엔 스캔만 하고 기다리진 않아 A 턴이 먼저 끝나면 여전히
-//!     거짓 negative 가 났다). 배달된(is_delivered) 레코드만 증거로 인정한다 — write 실패 레코드가
-//!     우연히 seed id 를 실었어도 실제로 도달 안 했으므로 "회신 성공" 의 증거가 아니다.
-//!     ★예산은 wait_for_reply 전용이 아니라 A 턴 대기와 공유하는 하나의 벽시계다(option b, FIX)★: 이
-//!     폴링이 쓰는 잔여 예산은 씨앗 주입 직후 잡은 시각부터 `REPLY_WAIT_CAP`(180s)을 잰 나머지다 —
-//!     그 사이엔 `wait_for_reply`(B 의 첫 답신 대기)뿐 아니라 그 뒤 이어지는 `wait_turn_end`(A 턴 종료
-//!     대기, 최대 `TURN_WAIT_CAP`=180s)까지 **같은 벽시계를 함께 태운다**(이전 주석은 "wait_for_reply 가
-//!     소비한 시간만 뺀다" 고 잘못 말했었다 — 실제로는 A 턴 대기가 더 큰 소비자일 수 있다). 즉 A 턴
-//!     대기가 길어지면 이 폴링의 잔여 예산이 0 이하로 떨어질 수 있고, 그러면 폴링은 **아예 돌지 않는다**
-//!     (조용히 스킵) — 새 타임아웃 상수를 만들지 않는 대신 예산을 공유시킨 트레이드오프다(사용자 결정,
-//!     option b: 구조는 그대로 두고 이 사실을 정확히 알리는 쪽). 그래서 결과 블록에
-//!     `REPLY_POLL=matched|timeout|skipped-no-budget` 을 항상 찍어(seed-request 일 때만) 예산 고갈로
-//!     폴링이 안 돈 경우를 침묵시키지 않는다 — skipped-no-budget = 잔여 예산이 0/음수라 폴링 자체가 안
-//!     돎, timeout = 폴링이 돌았으나 예산 소진까지 못 찾음, matched = 폴링이 잡았든(또는 폴링 전에 이미
-//!     배달돼 있었든) 최종 스캔이 일치를 확인함.
-//!     ★N1★ `--seed-reply-by` 는 B 의 봉투에 `reply-by` 속성을 **렌더만** 한다 — 이 하네스는 데몬의 60초
-//!     sweep 을 돌리지 않는 단발 실행이라, 여기서 기한 초과 타임아웃/notice 가 발화하는 일은 없다.
-//!     ★N2★ 잘못된 기간 표기(파싱 실패)는 두 에이전트가 모두 스폰된 **뒤**, 씨앗 발송 시점에야 잡힌다
-//!     (`validate_contract` 가 그 자리서 반려) — 비용은 있으나 분류는 여전히 SETUP-FAIL 이다(스폰 자체는
-//!     헛되지 않았다고 보지 않는다 — 그냥 더 늦게 걸릴 뿐).
-//!   - **`--b-task <text|@path>`** — B 의 원과제 프롬프트(기본 auth 모듈 과제)를 대체한다. `@` 접두면
-//!     파일 참조(절대/상대 — 상대는 repo 루트 기준, `--priming` 명시 경로 override 와 동일 규약)로 그
-//!     내용을 읽는다. 파일 부재/읽기 실패는 SETUP-FAIL(exit 1, 아직 아무것도 스폰하지 않은 시점에
-//!     fail-fast — 정리할 리소스 없음). ★F5 오용 가드★ 값 누락·다음 토큰이 `--` 로 시작(플래그로 오인
-//!     가능해 `take_flag_value` 가 소비하지 않는 바로 그 경우)·빈 값/공백만인 값은 전부 **인자 오류**
-//!     (exit 1, 스폰 전 fail-fast — 조용히 기본값으로 넘기지 않는다). 텍스트를 파일로 좁히는 게 아니다 —
-//!     인라인 텍스트는 여전히 허용, 잘못 쓴 값만 막는다(사용자 결정). 결과 블록에
-//!     `B_TASK=default|file:<path>|inline(<n> bytes)` 를 항상 찍는다(F5).
-//!   둘 다 test-only 노브. 미지정이면 **스폰·프라이밍·발신 동작은 오늘과 바이트 동일**하다 — 다만 결과
-//!   블록 stdout 은 두 노브 모두에 대해 항상 한 줄씩 늘어난다(`SEED_KIND=plain`·`B_TASK=default`, F4).
-//!   ★F4 — 이 두 줄은 의도적으로 항상 찍는다★: `SEED_KIND=` 는 조용히 무시되는 미지정 토큰들 사이에서
-//!   오퍼레이터의 오타(예: `SEED_KIND=plain` 인데 `--seed-request` 를 쳤다고 착각)를 눈에 띄게 하는
-//!   신호이기도 하다. 즉 "오늘과 바이트 동일" 은 에이전트 스폰·프라이밍·전송 로직에 대한 주장이지 stdout
-//!   전문에 대한 주장이 아니다 — 결과 블록에 두 줄이 늘어나는 것과 모순이 아니다.
+//! ## 종료 라벨(stdout+stderr 양쪽에 찍는다 — silent skip 금지)
+//! - `SKIPPED` exit 0 — claude 부재/인증 실패.
+//! - `SETUP-SKIP` exit 1 — 케이스가 요구하는 인프라 부재(CLI 경로인데 engram-send 미빌드).
+//! - `SETUP-FAIL` exit 1 — 인자 오류(스폰 전) · priming 파일 부재/읽기 실패 · A/B 출력 구독 실패 ·
+//!   B 원과제 턴 실패 · A·B process death · 씨앗 ACK 반려.
+//! - 그 밖 exit 0 — valid negative 도 exit 0 이다(유효한 실험 결과지 하네스 실패가 아니다).
+//!   `--cli-only` 만 위 엄격 판정으로 예외.
+//!
+//! ## stdout 결과 블록 마커(오케스트레이터가 파싱한다)
+//! `ROUNDTRIP CASE= B_SENT= ENTRANCE=` 배너 · `[model]` · `[priming]`(존재 검사를 통과한 **실제 in-effect
+//! 경로**만) · `SEED_KIND=` · `B_TASK=` 는 **미지정이어도 항상** 찍는다 — 조용히 무시된 오타를 눈에 띄게
+//! 하는 신호다(그래서 "미지정이면 오늘과 바이트 동일" 은 스폰·프라이밍·전송 로직에 대한 주장이지 stdout
+//! 전문에 대한 주장이 아니다). `--seed-request` 면 다음이 붙는다:
+//! - `REPLY_MATCHES_SEED` = 배달된(is_delivered) B→A 레코드 중 `in_reply_to == 씨앗 msg_id` 인 것이
+//!   있는가(엄격 일치).
+//! - `REPLY_IN_REPLY_TO` = 그 일치 레코드의 값을 우선해 찍고, 일치가 없을 때만 첫 배달 레코드의
+//!   `in_reply_to` 로 폴백한다. 그래야 "틀린/환각 id 로 회신"(matches=false 인데 값이 있음)과
+//!   "in-reply-to 를 아예 안 실음"(none)이 갈린다.
+//! - `REPLY_POLL=matched|timeout|skipped-no-budget` · `REPLY_POLL_BUDGET_MS=<ms>` = 회신 폴링의 예산
+//!   상태. 수치 0 = 예산 없음(스킵) **또는** 1ms 미만 잔여(절사) — 스킵 판정의 정본은 라벨이지 수치가
+//!   아니다. 라벨만으로는 "굶주린 예산 끝의 timeout" 과 "정상 예산을 다 쓰고 못 찾은 negative" 가 안 갈린다.
+//! `[delivery-census]` 는 축 필터 없이 캡처된 전체 배달 레코드를 도착 순서로 덤프한다.
 //!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
-//! ★CLI 입구를 쓰는 실험 = `--cli-only` **한 모드뿐**(ADR-0128)★ — MCP 가능 스폰엔 engram-send 배선이 없어
-//!   CLI-지시 프라이밍을 `--priming` 으로 직접 얹는 조합은 실행 불가라 SETUP-FAIL 로 거부된다. 그리고 그 모드는
-//!   먼저 `engram-send` 를 빌드해야 한다 — 이 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾아
-//!   CLI 입구를 켠다. 형제에 없으면 B 가 그 경로로 못 보내 **인프라 부재를 실험적 negative 로 오인**할 수
-//!   있다. `cargo run` 은 dep bin 을 안 만들므로 별도로 빌드한다(같은 profile/target 이어야 형제로 co-locate):
+//! `--cli-only` 는 CLI 입구 바이너리를 **먼저** 빌드해야 한다 — `cargo run` 은 dep bin 을 안 만들고,
+//! 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾으므로 같은 profile/target 이어야 co-locate 된다.
 //! ```text
-//! # 1) CLI 입구 바이너리 먼저 빌드(CLI 경로 실험 필수 — 형제 위치에 놓이게)
 //! cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send
-//! # 2) 하네스 실행
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke                 # 기본(운영 A, MCP)
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --priming <경로> --model sonnet   # 프라이밍 override(CLI-지시 파일은 아래 --cli-only 로만)
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --cli-only    # provision 강제 비-MCP(false path 전체)
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --seed-request --seed-reply-by 5m   # 씨앗을 회신 계약으로
-//! cargo run -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- --b-task "You are on the billing module. Reply in one line when ready."
+//! cargo run   -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- <flags>
 //! ```
-//! CLI 입구가 필요한 프라이밍(본문이 engram-send/ENGRAM_SEND_EXE 를 언급 — 명시 경로 무관)은 스폰 전에 두
-//!   게이트를 통과해야 한다: ① `--cli-only` 없이 왔으면 **SETUP-FAIL**(그 스폰엔 배선이 없다 — ADR-0128)
-//!   ② `engram-send` 가 형제에 없으면 **SETUP-SKIP**(engram-send not built). 둘 다 normal negative 가 아니라
-//!   요란한 라벨로 종료한다 — 배선·인프라 부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. 판정은 셀렉터·
-//!   basename 이 아니라 **해석된 프라이밍 파일 본문(content)** 이라 명시 경로 override 와 CLI-지시 프라이밍까지
-//!   모두 잡힌다(ADR-0094).
+//! **실행 전 부모 env 의 `ENGRAM_PRIMING_FILE` 을 직접 걷어낼 것** — `--cli-only` 는 이 값이 비어 있지
+//! 않으면 SETUP-FAIL 로 거부한다(operator 가 일부러 세운 값일 수 있어 조용히 지우지 않는다).
 //!
-//! ## 핵심 불변식(ADR-0092/0086/0088)
+//! ## 핵심 불변식
 //! - **required-features = ["test-harness"]** — 운영/릴리즈 빌드는 이 bin 을 컴파일하지 않는다.
-//! - **프라이밍은 실물 파일에서**(ADR-0092) — 하드코딩 금지. 여기선 케이스→경로 매핑만 하고 `ENGRAM_PRIMING_FILE`
-//!   env 로 FilePrimingProvider 에 넘긴다(두 에이전트가 같은 변형을 받게 provider 생성 **전에** set).
-//!   ★`--cli-only` 예외★: 그 모드는 override 를 세우지 않고 `ENGRAM_FORCE_CLI_ONLY_SEND` 만 세운다 —
-//!   provision 이 CliOnly 파일을 스스로 고르는 걸 관측한다(ADR-0099 FIX 3).
-//! - **from 은 토큰 파생**(ADR-0086) — 씨앗 A→B 의 from = A 의 실 발급 신원(BoundIdentity), 본문 문자열 아님.
-//! - **B 의 답신은 실 입구로만**(하네스가 handle_send 를 대신 부르지 않는다) — 이게 이 하네스의 핵심 새 검증.
-//! - **배달 관측 = ADR-0088 in-proc 싱크** — registry 에 `DeliveryObserver` 를 설치해 relay 레코드를 회수한다
-//!   (detached 데몬 로그 스크레이핑 금지). registry 에 read accessor 를 추가하지 않고 이 싱크로만 회수한다.
-//!   ★확장(roundtrip-smoke `--seed-request`)★: `DeliveryObservation.in_reply_to`(Option<String>)는 발신
-//!   시점에 검증된 구조화 메타(`SendMeta.reply_to`)를 각 wrap 호출부가 `observe_success`/
-//!   `observe_failure`(service.rs) 에 **파라미터로 직접 넘겨** 채운다 — 렌더된 봉투 문자열을 다시 파싱하지
-//!   않는다(옛 substring 파서는 본문 이스케이프 허점으로 위조 가능해 리뷰 F1 에서 삭제됐다 — ingress.rs
-//!   `DeliveryObservation.in_reply_to` 주석이 정본). registry 에 새 read accessor 는 없다(ADR-0088 HARD
-//!   CONSTRAINT 준수) — 관측 함수 시그니처에 파라미터 하나가 늘었을 뿐, registry 조회는 없다.
-//!   ★delivery census(2026-07-28)★: 위 회신 축 관측(`[B->A delivery]`)은 baseline 이후 from=B/to=A 로
-//!   필터된 한 레코드만 찍어, 그룹(@all)·과제턴 발송처럼 그 축 밖의 배달은 아무 출력에도 안 잡히는 공백이
-//!   있었다 — END 배너 직전에 캡처된 **전체** `DeliveryObservation` 을 도착 순서대로 `[delivery-census]
-//!   #<idx> from=.. to=.. entrance=.. msg_id=.. in_reply_to=.. bytes=..` 로 덤프해 메운다.
-//! - **결과 3분류(FIX round-2 #2/#4/#5)** — ① **valid negative**(setup 성공했으나 B 가 안 보냄) = 구조화
-//!   결과 출력 후 exit 0(유효한 실험 결과). ② **SETUP-SKIP**(exit 1) = 케이스가 요구하는 인프라 부재
-//!   (CLI-지시 프라이밍인데 engram-send 미빌드 — 판정은 셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**)
-//!   — normal negative 로 오귀속 금지. ③ **SETUP-FAIL**(exit 1) = 준비 단계 실패(**인자 오류** —
-//!   `--b-task`/`--seed-reply-by` 오용 가드·`--cli-only` co-pass 거부 등, 스폰 전 fail-fast / A/B 출력
-//!   구독 실패 / B 원과제 턴 실패 / A·B process death / 씨앗 ACK 에러 / priming 파일 부재). valid negative
-//!   는 setup 이 온전히 성공했고 **A·B 가 모두 살아 있을 때만** 보고한다(A 死 → B 답신이 도달할 대상 없음).
-//! - **skip_no_claude loud-skip** — claude 부재/인증 실패면 요란하게 스킵(silent skip 금지).
+//! - **B 의 답신은 실 입구로만** — 하네스는 B 의 답신에 대해 `handle_send` 를 대신 부르지 않는다.
+//!   이게 이 하네스가 새로 검증하는 것 자체다.
+//! - **CLI 입구를 쓰는 실험 = `--cli-only` 한 모드뿐**(ADR-0128) — MCP 가능 스폰엔 engram-send 배선이
+//!   없어, CLI-지시 프라이밍을 `--priming` 으로 얹는 조합은 스폰 전에 거부된다. CLI-요구 판정은
+//!   셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**으로 한다.
 // ADR-0092
 
 use std::path::PathBuf;
@@ -198,19 +106,16 @@ use engram_dashboard_daemon::control::DaemonControlChannel;
 use engram_dashboard_daemon::messaging_host::messaging_for_manager;
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 
-/// 스폰 후 목록 등장 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
-/// 턴 종료(MessageDone) 대기 상한.
 const TURN_WAIT_CAP: Duration = Duration::from_secs(180);
-/// B 답신(outbound relay) 대기 상한 — 초과 시 NEGATIVE(B did not send) 결과.
+/// B 답신 대기 상한 — 초과는 에러가 아니라 negative(B did not send) 결과다.
 const REPLY_WAIT_CAP: Duration = Duration::from_secs(180);
 
-/// A(발신자 팀원)의 표시 이름 — B 가 봉투에서 배워 `to=alice` 로 답신한다.
+/// B 는 이 이름을 봉투에서 배워 `to=alice` 로 답신한다 — 하네스가 알려주지 않는다.
 const NAME_A: &str = "alice";
-/// B(수신·답신) 표시 이름.
 const NAME_B: &str = "bob";
 
-/// B 원과제(일하는 팀원 맥락) — auth 모듈 작업 중. 자연스러운 협업 셋업.
+/// 씨앗 전에 "일하는 팀원" 맥락을 세우는 원과제 — 그 맥락이 없으면 답신이 자연 반응인지 판정할 수 없다.
 const TASK_PROMPT_B: &str =
     "You are currently working on the auth module (login/session). When you're ready to start, reply in one line.";
 
@@ -229,8 +134,6 @@ fn main() {
     std::process::exit(rt.block_on(run()));
 }
 
-/// ★loud skip(priming_smoke 이식)★: claude 스폰 불가면 요란하게 스킵(exit 0 이되 SKIPPED 라벨을
-///   stdout+stderr 에 남긴다 — silent skip 금지).
 fn skip_no_claude(reason: &str) -> i32 {
     let line =
         format!("SKIPPED [roundtrip-smoke]: {reason} — A→B→A 왕복 실측 불가(claude 부재/인증).");
@@ -239,9 +142,6 @@ fn skip_no_claude(reason: &str) -> i32 {
     0
 }
 
-/// ★SETUP-SKIP(FIX round-2 #2)★: 선택 케이스가 요구하는 인프라(예: CLI 입구용 engram-send)가 없어
-///   실험을 유효하게 돌릴 수 없을 때. **normal negative 와 구분되는** 라벨로 요란히 알린다 — 인프라
-///   부재를 "B 가 안 보냄" 으로 오귀속하지 않는다. exit 1(설정 미비는 실험 결과가 아니라 실행 조건 미충족).
 fn setup_skip(reason: &str) -> i32 {
     let line = format!("SETUP-SKIP [roundtrip-smoke]: {reason}");
     println!("{line}");
@@ -249,9 +149,6 @@ fn setup_skip(reason: &str) -> i32 {
     1
 }
 
-/// ★SETUP-FAIL(FIX round-2 #4)★: 스폰 후 실험 준비(B 원과제 턴 / 씨앗 ACK / B 생존) 중 하나가 진짜로
-///   실패했을 때. valid negative("B did not send")와 **구분되는** 라벨로 알린다 — 유효 negative 는 setup
-///   이 온전히 성공했을 때만 보고한다. exit 1(실험 결과가 아니라 setup 실패).
 fn setup_fail(reason: &str) -> i32 {
     let line = format!("SETUP-FAIL [roundtrip-smoke]: {reason}");
     println!("{line}");
@@ -259,90 +156,54 @@ fn setup_fail(reason: &str) -> i32 {
     1
 }
 
-/// ★프라이밍 본문이 CLI 발신 경로를 지시하는가(순수·단위테스트 대상)★: 텍스트가 `engram-send` 또는
-///   `ENGRAM_SEND_EXE` 를 언급하면 CLI 입구(engram-send)로 보내라는 프라이밍이다. 둘 중 하나만 있어도 true.
-///   ★대소문자 무시(FIX)★: 본문 산문이 `ENGRAM-SEND`/`Engram-Send` 처럼 대소문자를 섞어 써도 잡아야 한다 —
-///   놓치면 false negative(CLI 지시인데 미검출) → 인프라 부재를 정상 negative 로 오귀속. 본문을 한 번
-///   lowercase 로 복사(단일 할당)해 소문자 리터럴과 대조한다.
-///   ★basename 이 아니라 본문(content)인 이유★: 이전 판본은 하드코딩된 basename 리스트
-///   (`agent-priming-send-cli.md`/`-send-both.md`)만 봤다. 그런 리스트는 rot 한다 — 새 CLI-지시 프라이밍
-///   (v3-en-cli 등)이 리스트에서 누락돼 가드가 조용히 우회됐고, engram-send 부재(인프라 부재)가 SETUP-SKIP
-///   대신 정상 negative(B_SENT=false)로 오귀속됐다. 그래서 파일명이 아니라 실제 본문을 진실의 출처로 본다 —
-///   어느 프라이밍이든 CLI 발신을 지시하면 basename 과 무관하게 잡힌다.
-///   ★의도적으로 보수적(부정문 false positive 는 수용 — 사용자 결정 2026-08-04)★: "engram-send 를 쓰지 마라"
-///   같은 부정문도 substring 존재만으로 true → 그 파일을 `--cli-only` 없이 넘기면 헛된 거부(SETUP-FAIL,
-///   `cli_priming_requires_cli_only`)가 된다. 그래도 부정 파싱을 넣지 않는다: 요란한 exit-1 은 틀릴 수 있는
-///   데이터를 발화하는 것보다 안전하고, 내용 기반 검출이 바로 이 오귀속 부류를 닫아 두는 장치라 negation-aware
-///   로 만들면 그 차단이 약해진다. 운영 프라이밍 2종엔 그런 부정문이 없어 실경로 영향은 0 이다. operator 가
-///   이 한계에 부딪히는 자리(그 SETUP-FAIL 문구)가 이유와 우회로를 함께 알린다.
+/// ★basename 이 아니라 본문으로 판정한다 — 되돌리지 마라★: 이전 판본은 하드코딩된 basename 리스트만
+///   봤고, 새 CLI-지시 프라이밍이 그 리스트에서 누락되자 가드가 조용히 우회돼 engram-send 부재(인프라
+///   부재)가 SETUP-SKIP 대신 정상 negative(B_SENT=false)로 오귀속됐다. 대소문자를 접는 이유도 같다 —
+///   `ENGRAM-SEND` 표기를 놓치면 같은 오귀속이 난다.
+/// ★의도적으로 보수적 — 부정문 false positive 는 수용한다(사용자 결정 2026-08-04)★: "engram-send 를 쓰지
+///   마라" 같은 부정문도 substring 만으로 true 라, 그 파일을 `--cli-only` 없이 넘기면 헛된
+///   SETUP-FAIL 이 된다. 그래도 negation-aware 로 만들지 않는다 — 요란한 exit-1 이 틀릴 수 있는 데이터를
+///   발화하는 것보다 안전하고, 내용 기반 검출이 바로 그 오귀속 부류를 닫는 장치다. 운영 프라이밍 2종엔
+///   그런 부정문이 없어 실경로 영향은 0 이다.
 fn priming_text_directs_cli(content: &str) -> bool {
     let lower = content.to_lowercase();
     lower.contains("engram-send") || lower.contains("engram_send_exe")
 }
 
-/// ★CLI-지시 프라이밍이 배선 없는 스폰에 실렸는가(순수·단위테스트 대상, ADR-0128)★: MCP 가능 스폰엔
-///   `engram-send` 배선(PATH·크레덴셜)이 **없다** — 그래서 CLI 발신을 가르치는 프라이밍은 `--cli-only`
-///   (provision 을 비-MCP 로 정렬)와 함께여야만 실행 가능한 조합이 된다. 어긋나면 "가르쳤지만 안 깐 채널"
-///   이 되어 ADR-0099 가 실측한 발신 freeze(~6/7 미발신)를 그대로 재현하고, 하네스는 그것을 정상 negative
-///   로 오귀속한다. send_exe 존재 여부는 이 판정에 **들어오지 않는다** — 바이너리가 있어도 MCP 가능 스폰의
-///   자식은 그 이름을 해석할 수 없다(그 축은 뒤따르는 CLI 입구 부재 SETUP-SKIP 가 본다).
-/// ★분류기의 알려진 한계(수용 — `priming_text_directs_cli` 참조)★: 언급이 **부정문**이어도("never run
-///   engram-send") CLI-지시로 잡혀 `--cli-only` 없이는 거부된다. fail-closed 방향이라 유지하되, 그 파일을
-///   넘긴 operator 가 이유를 알 수 있게 SETUP-FAIL 문구가 이 한계를 함께 알린다.
+/// MCP 가능 스폰엔 `engram-send` 배선(PATH·크레덴셜)이 **없다** — 그래서 CLI 발신을 가르치는 프라이밍은
+///   `--cli-only` 와 함께여야만 실행 가능한 조합이 된다. 어긋나면 "가르쳤지만 안 깐 채널" 이 되어 발신
+///   freeze(ADR-0099 실측 ~6/7 미발신)를 재현하고, 하네스는 그걸 정상 negative 로 오귀속한다.
+/// send_exe 존재 여부는 이 판정에 **들어오지 않는다** — 바이너리가 있어도 MCP 가능 스폰의 자식은 그 이름을
+///   해석할 수 없다(그 축은 뒤따르는 CLI 입구 부재 SETUP-SKIP 이 본다).
 // ADR-0128
 fn cli_priming_requires_cli_only(directs_cli: bool, cli_only: bool) -> bool {
     directs_cli && !cli_only
 }
 
-/// ★역방향 — 배선을 깔았는데 아무도 안 가르치는가(순수·단위테스트 대상, ADR-0128 등호)★: `--cli-only` 는
-///   provision 을 비-MCP 로 정렬해 CLI 배선을 **실제로 깐다**. 그 스폰의 프라이밍이 CLI 발신을 가르치지
-///   않으면 깐 채널을 아무도 안 쓰고, B 는 발신 방법을 배우지 못한 채 조용히 아무것도 안 보낸다 —
-///   `B_SENT=false` 가 정상 negative 로 채점되는 **같은 오귀속의 반대 방향**이다. 위 정방향 판정과 짝을
-///   이뤄 등호(가르치는 채널 == 깐 채널)를 하네스 입력 단계에서 강제한다.
-///   ★유일한 발화 경로 = 운영 B 파일 개정, 즉 defense-in-depth★: `--cli-only` 는 `--priming` co-pass 도,
-///   비어 있지 않은 상속 `ENGRAM_PRIMING_FILE` 도 앞서 거부하고(빈 값은 미설정 취급이라 provision 이 B 를
-///   auto-select 한다) — 그래서 이 갈래의 프라이밍은 **항상** 운영 B 파일(`prompts/agent-priming-cli.md`)
-///   이다. 따라서 이 게이트가 실제로 걸리는 경우는 그 파일이 셸 명령 언급을 잃는 개정 하나뿐이고, 그
-///   회귀는 파일 내용 테스트 `production_priming_files_pin_taught_channels`(priming.rs)가 이미 잡는다.
-///   즉 여기는 그 pin 뒤의 2차 방어선이다 — pin 이 지워지거나 override 정책이 느슨해지면 이쪽이 남는다.
-///   ★entrance 판정과 다른 축★: 뒤쪽 `cli_only && b_sent && entrance != "cli"` 검사는 **보냈는데 입구가
-///   틀린** 경우를 잡는다 — **아예 안 보낸** 경우는 못 잡는다. 그 빈칸을 이 스폰-전 게이트가 메운다.
-/// ★두 판정자의 호출부 배선은 단위 테스트가 없다(알려진 공백)★: 게이트는 실 에이전트 2개를 스폰하는
-///   `run()` 안에 있어 단위 테스트가 닿지 못한다 — `if false && …` 로 꺼도 스위트는 초록이다. 여기 순수
-///   판정자만 커버되며, 이는 이 파일의 **모든** 게이트에 해당하는 구조적 공백이다(이 변경이 만든 게 아니다).
-///   호출부를 고칠 때 테스트가 지켜준다고 가정하지 말 것.
+/// 역방향 — 배선을 깔았는데 아무도 안 가르치는 경우. `--cli-only` 는 CLI 배선을 실제로 깔지만, 그 스폰의
+///   프라이밍이 CLI 발신을 안 가르치면 B 는 방법을 모른 채 조용히 아무것도 안 보내고 그 `B_SENT=false` 가
+///   정상 negative 로 채점된다 — **같은 오귀속의 반대 방향**이다. 뒤쪽 `entrance != "cli"` 검사는
+///   *보냈는데 입구가 틀린* 경우만 잡으므로 그 빈칸을 이 스폰-전 게이트가 메운다.
+/// ★실제 발화 경로는 하나뿐 — 즉 2차 방어선이다★: 이 모드는 `--priming` co-pass 와 비어 있지 않은 상속
+///   `ENGRAM_PRIMING_FILE` 을 앞서 거부하므로 이 갈래의 프라이밍은 **항상** 운영 B 파일이다. 그러니 이
+///   게이트가 걸리는 경우는 그 파일이 셸 명령 언급을 잃는 개정뿐이고, 그 회귀는
+///   `production_priming_files_pin_taught_channels`(priming.rs)가 1차로 잡는다. pin 이 지워지거나 override
+///   정책이 느슨해지면 이쪽이 남는다.
 // ADR-0128
 fn cli_only_requires_cli_priming(directs_cli: bool, cli_only: bool) -> bool {
     cli_only && !directs_cli
 }
 
-/// ★--cli-only 가 상속된 ENGRAM_PRIMING_FILE override 와 충돌하는가(순수·단위테스트 대상, ADR-0099)★:
-///   cli-only 모드는 provision 이 CliOnly 파일을 스스로 고르는 걸 관측하는 게 목적이라, 부모 env 에 미리
-///   깔린 비어 있지 않은 override 는 그 auto-select 를 덮어써 관측을 무의미하게 만든다 → 충돌(true)로 본다.
-///   `--priming` co-pass 거부와 대칭인 순수 판정자다. cli_only=false 면 env 값과 무관하게 충돌 아님(false)
-///   — 운영/일반 모드는 override 를 정당히 쓴다. env 값이 비어 있으면(미설정 취급) 충돌 아님.
 fn cli_only_env_override_conflicts(cli_only: bool, env_value: Option<&std::ffi::OsStr>) -> bool {
     cli_only && matches!(env_value, Some(v) if !v.is_empty())
 }
 
-/// ★--cli-only 성공 판정(순수·단위테스트 대상, ADR-0099)★: cli-only 모드에서 이 실측이 **성공(pass)** 인가.
-///   이 모드는 provision 을 비-MCP 로 강제해 false path 전체가 정합하게 도는지를 실측하는 게 목적이므로,
-///   B 가 실제로 발신했고(b_sent) 그 입구가 반드시 `cli` 여야만 성공이다 — 아무것도 안 보낸(b_sent=false,
-///   entrance="none") 경우는 이 모드에선 **실패**로 본다(일반 모드의 valid-negative 와 다르다: 강제 false
-///   path 가 도는 걸 못 봤으니 실측 목적 미달). entrance="mcp"(강제 seam 이 MCP 를 못 지움)는 앞선
-///   SETUP-FAIL 이 이미 잡지만, 순수 판정자 수준에서도 cli 아닌 건 전부 실패로 매핑해 이중 안전망을 둔다.
+/// entrance="mcp"(강제 seam 이 MCP 를 못 지움)는 앞선 SETUP-FAIL 이 이미 잡지만, 순수 판정자 수준에서도
+///   cli 아닌 건 전부 실패로 매핑해 이중 안전망을 둔다.
 fn cli_only_run_passed(b_sent: bool, entrance_label: &str) -> bool {
     b_sent && entrance_label == "cli"
 }
 
-/// ★REPLY_POLL 라벨 판정(순수·단위테스트 대상)★: `--seed-request` 결과 블록의 `REPLY_POLL=` 값을
-///   결정하는 우선순위 판정자 — matched > timeout > skipped-no-budget. `matched` 는 `wait_for_matching_reply`
-///   가 실제로 돌아 잡았든(poll_ran=true) 폴링이 예산 부족으로 스킵됐지만 이미 그 전에 배달돼 있었든
-///   (poll_ran=false) 최종 스캔(`records_after`)이 seed 와 일치하는 회신을 확인하기만 하면 최우선이다 —
-///   poll_ran 값과 무관하게 이긴다. matched 가 아닐 때만 poll_ran 을 본다: poll_ran=true(폴링이 예산을
-///   받아 실제로 돌았지만 예산 소진까지 못 찾음) = timeout, poll_ran=false(잔여 REPLY_WAIT_CAP 예산이
-///   씨앗 주입 이후 A 턴 대기까지 소비돼 0/음수라 폴링 자체가 안 돎) = skipped-no-budget. 이전엔 이 로직이
-///   호출부(print 시점)에 인라인 if/else 로만 있어 단위테스트가 없었다 — 여기로 뽑아 세 갈래를 각각 검증한다.
 fn reply_poll_label(matched: bool, poll_ran: bool) -> &'static str {
     if matched {
         "matched"
@@ -353,10 +214,6 @@ fn reply_poll_label(matched: bool, poll_ran: bool) -> &'static str {
     }
 }
 
-/// --seed-reply-by 가 --seed-request 없이 단독 지정됐는가(순수·단위테스트 대상): true 면 인자 오류다.
-///   reply_by 는 request 계약의 회신 기한이라 request 자체가 없으면 추적할 계약이 없다 - 조용히 무시하지
-///   않고 반려한다(ingress.rs validate_contract 의 "reply_by 는 request 전용" 규칙과 같은 정신을 CLI 인자
-///   레벨에서 fail-fast 로 앞당긴다 - 실 에이전트를 스폰하기 전에 걸러야 헛된 스폰을 막는다).
 fn seed_reply_by_without_request_is_invalid(
     seed_request: bool,
     seed_reply_by: &Option<String>,
@@ -364,10 +221,7 @@ fn seed_reply_by_without_request_is_invalid(
     !seed_request && seed_reply_by.is_some()
 }
 
-/// --b-task 값이 파일 참조(`@path`)인가(순수·단위테스트 대상) - 그렇다면 repo 루트 기준으로 절대화한
-///   경로를 돌려준다(절대 경로면 그대로, 상대면 join - `--priming` 명시 경로 override 와 동일 규약).
-///   `@` 접두가 아니면 None(호출자는 값을 인라인 텍스트 그대로 쓴다). 존재 검사는 하지 않는다(호출자가
-///   읽기 시도로 판정 - `resolve_priming_path` 와 같은 분업).
+/// 존재 검사는 하지 않는다 — 호출자가 읽기 시도로 판정한다(`resolve_priming_path` 와 같은 분업).
 fn resolve_b_task_file_path(value: &str, repo_root: &std::path::Path) -> Option<PathBuf> {
     let rel = value.strip_prefix('@')?;
     let p = PathBuf::from(rel);
@@ -378,61 +232,21 @@ fn resolve_b_task_file_path(value: &str, repo_root: &std::path::Path) -> Option<
     })
 }
 
-/// CLI 인자 파싱 결과(순수) — priming 셀렉터 + 모델. `run` 이 이걸로 env·스폰을 배선한다.
+/// `*_error` 필드 = `parse_args` 가 오용 **사실만** 순수하게 기록한 것. 반려 여부·시점은 `run()` 이
+///   정한다(실 claude 를 스폰하기 전에 SETUP-FAIL 로 fail-fast).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
-    /// `--priming` 값(프라이밍 파일 경로 — 절대/상대, 또는 편의 별칭 `C0`). 미지정이면 None(= 기본 운영 A
-    ///   프라이밍 `prompts/agent-priming.md`, `C0` 별칭과 동일). C1~C3 는 ADR-0099 로 별칭이 제거돼 이제 그냥
-    ///   파일 경로로 해석된다(특수 매핑 없음 — 부재로 걸림).
     priming: Option<String>,
-    /// `--model` 값(기본 sonnet).
     model: String,
-    /// `--disallow-mcp` 플래그(ADR-0094 CLI-only 측정): 켜지면 `ENGRAM_DISALLOW_MCP_SEND` env 를 세워
-    ///   두 에이전트가 MCP send_message grant **없이** 스폰된다. test-only 측정 노브(운영 스위치 아님).
-    ///   미지정이면 오늘 동작(MCP grant 포함).
-    ///   ★사정거리 정정(ADR-0128 · 실측 2026-08-03 6/6)★: 이 노브는 **CLI 라우팅을 만들지 못한다** —
-    ///   MCP 가능 스폰엔 engram-send 배선도 CLI grant 도 없으므로 발신 grant 가 0 이 되고, auto 권한 모드
-    ///   에선 grant 가 NO-OP 이라(ADR-0097) 에이전트는 그대로 MCP 로 보낸다(6/6 정상 발신 — 조작 실패).
-    ///   물리를 가르는 `--cli-only` 가 유일한 CLI 라우팅 측정 수단이다. 존치·폐기는 사용자 결정 대기.
     disallow_mcp: bool,
-    /// `--cli-only` 플래그(ADR-0099 FIX 3): 켜지면 `ENGRAM_FORCE_CLI_ONLY_SEND` env 를 세워 provision 이
-    ///   실 claude 스폰을 **비-MCP 백엔드로 강제**한다 → false path 전체(no mcp-config + CliOnly 프라이밍 +
-    ///   [Cli] grant)가 돈다. ★`--disallow-mcp` 와 다른 점★: 후자는 MCP grant 만 빼고 MCP 서버는 여전히
-    ///   부착되며 프라이밍도 그대로라(ADR-0126 이후 A 의 교육 표면은 send_message 뿐) 물리·교육·권한이
-    ///   갈린다(측정용 불일치 — 그래서 실측으로는 무효였다, ADR-0128). `--cli-only` 는 provision
-    ///   자체를 CLI-only 로 정렬해 정합 불변식을 보존한 채 false path 를 실측한다. ★이 모드는 `--priming`
-    ///   override 를 주지 않아야 한다★ — provision 이 자동으로 `prompts/agent-priming-cli.md` 를 고르는 걸
-    ///   보는 게 목적이다(entrance=cli 기대). test-only 노브(운영 스위치 아님).
     cli_only: bool,
-    /// `--seed-request` 플래그: 켜지면 씨앗 A->B 를 회신 계약(SendContract{request:true,..})으로 보낸다
-    ///   — 같은 실 control 경로(handle_send, Entrance::Cli) 그대로, 계약 축만 얹는다. 미지정이면 오늘
-    ///   동작(plain 통보, SendContract::default(), 바이트 동일).
     seed_request: bool,
-    /// `--seed-reply-by <dur>` 값(기간 표기 - "5m"/"10m"/"1h", validate_contract 가 최종 검증). 반드시
-    ///   --seed-request 와 함께 써야 한다(단독 지정은 인자 오류) - reply_by 는 request 계약의 기한이라
-    ///   추적할 계약이 없으면 조용한 무시가 된다(ingress.rs validate_contract 규칙 1 과 같은 정신).
     seed_reply_by: Option<String>,
-    /// ★값 자체의 오용(F5 와 같은 규율)★ `--seed-reply-by` 가 값 누락 / 다음 토큰이 `--` 로 시작(플래그로
-    ///   오인 가능해 `take_flag_value` 라면 조용히 소비 안 했을 경우) / 빈 값·공백만인 값으로 잘못 쓰였는가.
-    ///   Some(reason) 이면 `run()` 이 실 claude 를 스폰하기 **전에** SETUP-FAIL 로 fail-fast 한다(`--b-task`
-    ///   오용 가드와 같은 분업 — parse_args 는 사실만 순수하게 기록하고, 반려 여부·시점은 호출자가 정한다).
     seed_reply_by_error: Option<String>,
-    /// `--b-task <text|@path>` 값 - 지정 시 B 원과제 프롬프트(TASK_PROMPT_B)를 대체한다. `@` 접두면
-    ///   파일 참조(절대/상대 - 상대는 repo 루트 기준, --priming 상대경로와 동일 규약)로 해석해 그 내용을
-    ///   읽는다. 미지정이면 기본 auth 모듈 과제(오늘 동작, 바이트 동일).
     b_task: Option<String>,
-    /// ★F5 오용 가드★ `--b-task` 가 잘못 쓰였는가 — 값 누락 / 다음 토큰이 `--` 로 시작(플래그로 오인돼
-    ///   `take_flag_value` 라면 조용히 값 없음으로 넘겼을 경우) / 빈 값·공백만인 값. Some(reason) 이면
-    ///   `run()` 이 실 claude 를 스폰하기 **전에** SETUP-FAIL 로 fail-fast 한다(`--seed-reply-by` 단독
-    ///   지정 검사와 같은 분업 — parse_args 는 사실만 순수하게 기록하고, 반려 여부·시점은 호출자가 정한다).
-    ///   텍스트 값을 막는 가드가 아니다 — 유효한 인라인 텍스트는 그대로 통과(사용자 결정, 파일로 좁히지
-    ///   않는다).
     b_task_error: Option<String>,
 }
 
-/// 배달 관측 싱크(ADR-0088) — relay 레코드를 스레드 안전 Vec 에 모은다. 하네스가 registry 에 설치하고
-///   나중에 from=B·to=A 레코드를 조회한다. registry 는 read accessor 를 노출하지 않으므로(write-only
-///   observer 슬롯) 이 싱크가 회수 경로다.
 struct CapturingObserver {
     records: Mutex<Vec<DeliveryObservation>>,
 }
@@ -443,17 +257,13 @@ impl CapturingObserver {
             records: Mutex::new(Vec::new()),
         }
     }
-    /// 지금까지 관측된 레코드 총수(도착 순서 = Vec push 순서). 씨앗 주입 **직전**에 이 값을 baseline 으로
-    ///   잡아, 그 이후에 도착한 레코드만 B 의 답신 후보로 본다(FIX round-2 #1 — pre-seed 오탐 차단).
     fn record_count(&self) -> usize {
         self.records.lock().unwrap().len()
     }
 
-    /// baseline **이후**에 도착한 레코드 중 from=`from_id`·to=`to_id` 인 첫 배달 스냅샷(있으면).
-    ///   ★왜 baseline 절단인가(FIX round-2 #1)★: observer 는 B 의 원과제 턴 **전에** 설치된다. 만약 B 가
-    ///   task-establishing 턴에서 A 에게 메시지를 하나 흘리면 그 pre-seed 레코드가 "답신" 으로 오인돼
-    ///   거짓 B_SENT=true 를 내 실험을 오염시킨다. 그래서 씨앗 주입 직전 record_count 를 baseline 으로 잡고
-    ///   `records[baseline..]` 만 훑어 씨앗에 인과적으로 뒤따르는 outbound 만 답신으로 본다.
+    /// ★왜 baseline 절단인가★: observer 는 B 의 원과제 턴 **전에** 설치된다. B 가 그 턴에서 A 에게 메시지를
+    ///   하나 흘리면 그 pre-seed 레코드가 "답신" 으로 오인돼 거짓 `B_SENT=true` 로 실험을 오염시킨다. 그래서
+    ///   씨앗 주입 직전 `record_count` 를 baseline 으로 잡고 그 이후만 훑는다.
     fn find_delivery_after(
         &self,
         baseline: usize,
@@ -467,20 +277,9 @@ impl CapturingObserver {
             .cloned()
     }
 
-    /// ★F3★ baseline **이후** 도착한 from=`from_id`·to=`to_id` 레코드 **전부**(순서 보존) — `find_delivery_after`
-    ///   와 달리 첫 매치에서 멈추지 않는다. b_sent/entrance 판정("B 가 뭐라도 보냈나")은 여전히 첫 도착
-    ///   (`find_delivery_after`)으로 충분하지만, 회신 **내용** 검증(REPLY_IN_REPLY_TO/REPLY_MATCHES_SEED)은
-    ///   그래선 안 된다 — 첫 레코드가 회신과 무관한 "ack" 한 통이고 진짜 회신이 그 뒤에 오면 first-wins 는
-    ///   거짓 negative(REPLY_MATCHES_SEED=false)를 낸다. ★이 메서드 자체는 호출 시점까지 쌓인 레코드의
-    ///   스냅샷 스캔일 뿐이다★ — 레이스를 실제로 닫는 건 `run()` 이 A 턴 대기 직후 호출하는
-    ///   `wait_for_matching_reply` 다. ★그런데 그 호출 자체가 조건부다(정정 — 이전 판본은 여기서 "잔여
-    ///   REPLY_WAIT_CAP 예산 = wait_for_reply 가 쓰고 남긴 것" 이라 잘못 말했다)★: REPLY_WAIT_CAP 벽시계는
-    ///   **씨앗 주입 시점부터** 재고, 그 사이엔 `wait_for_reply`(B 첫 답신 대기)뿐 아니라 그 뒤 이어지는
-    ///   A 턴 대기(`wait_turn_end`, 최대 TURN_WAIT_CAP=180s)까지 **함께** 그 벽시계를 소비한다 — A 턴
-    ///   대기가 길면 잔여가 0/음수로 떨어져 `wait_for_matching_reply` 가 **아예 호출되지 않을 수 있다**
-    ///   (폴링 자체가 안 돎). 그래서 이 메서드가 print 시점에 뽑아내는 최종 값은 세 갈래로 갈린다: 폴링이
-    ///   돌아 매치를 찾음(matched) / 폴링이 돌았으나 예산 소진까지 못 찾음(timeout) / 잔여 예산이 없어
-    ///   폴링 자체가 안 돎(skipped-no-budget) — 우선순위 판정은 `reply_poll_label` 참조.
+    /// 회신 **내용** 검증(REPLY_IN_REPLY_TO/REPLY_MATCHES_SEED)은 first-wins 면 안 되므로 전부를 돌려준다 —
+    ///   첫 레코드가 회신과 무관한 "ack" 한 통이고 진짜 회신이 그 뒤에 오면 거짓 negative 가 난다.
+    ///   b_sent/entrance 판정은 첫 도착(`find_delivery_after`)으로 충분하다.
     fn records_after(
         &self,
         baseline: usize,
@@ -499,12 +298,6 @@ impl CapturingObserver {
             .unwrap_or_default()
     }
 
-    /// ★delivery census(2026-07-28 인수 ③ 실측 실발생)★: baseline 절단·from/to 필터 없이 **지금까지 관측된
-    ///   전체** 레코드를 도착 순서(Vec push 순서) 그대로 복제해 돌려준다. 위 세 메서드(`record_count`/
-    ///   `find_delivery_after`/`records_after`)는 전부 "B→A 답신 축" 판정용으로 baseline 이후 + from/to
-    ///   필터가 걸려 있어, 그룹(@all) 방송이나 B 원과제 턴 중의 발송처럼 그 축 밖의 레코드는 잡히지 않는다
-    ///   — 이 메서드는 그 필터를 걷어낸 순수 diagnostic 조회다(DeliveryObservation 은 `derive(Clone)` 이라
-    ///   락을 오래 쥐지 않고 즉시 복제해 반환).
     fn all_records(&self) -> Vec<DeliveryObservation> {
         self.records.lock().unwrap().clone()
     }
@@ -518,43 +311,28 @@ impl DeliveryObserver for CapturingObserver {
 
 async fn run() -> i32 {
     let args = parse_args(std::env::args().skip(1));
-    // ★F5-style 오용 가드(신규)★: --seed-reply-by 값 자체(문법)가 잘못 쓰였으면 — "--seed-request 없이
-    //   단독 지정" 같은 의미 검사보다 먼저 걸러야 한다(값이 애초에 안 먹혔다면 그 의미를 논해도 무의미) —
-    //   --b-task 오용 가드와 같은 분업으로 스폰 전에 fail-fast(인자 오류, exit 1).
+    // 인자 가드 3종은 priming 해석·MCP 서버 기동보다 **먼저** 돈다 — 실 claude 를 스폰하기 전에 걸러야
+    //   헛된 스폰이 없다. 값 문법 오류가 의미 검사(단독 지정 등)보다 앞서는 이유는, 값이 애초에 안 먹혔다면
+    //   그 의미를 논해도 무의미하기 때문이다.
     if let Some(reason) = &args.seed_reply_by_error {
         return setup_fail(reason);
     }
-    // --seed-reply-by 는 --seed-request 없이 의미가 없다 - 다른 setup(priming 해석·MCP 서버 기동 등)보다
-    //   먼저, 실 claude 를 스폰하기 전에 걸러 헛된 스폰을 막는다(인자 오류, exit 1).
     if seed_reply_by_without_request_is_invalid(args.seed_request, &args.seed_reply_by) {
         return setup_fail(
             "--seed-reply-by requires --seed-request (reply_by is only meaningful as the deadline of a request contract) — add --seed-request or drop --seed-reply-by",
         );
     }
-    // ★F5 오용 가드★ --b-task 가 값 누락/플래그처럼 보이는 값/빈·공백 값으로 잘못 쓰였으면 다른 setup 보다
-    //   먼저, 실 claude 를 스폰하기 전에 걸러 헛된 스폰을 막는다(인자 오류, exit 1 — reply_by 단독 지정
-    //   검사와 같은 분업: parse_args 는 사실만 기록, 반려는 여기서).
     if let Some(reason) = &args.b_task_error {
         return setup_fail(reason);
     }
 
     let repo_root = repo_root_from_manifest();
     let priming_selector = args.priming.clone();
-    // ★--cli-only 는 priming override 를 주지 않아야 한다(ADR-0099 FIX 3)★: 이 모드의 목적은 provision 이
-    //   자동으로 `prompts/agent-priming-cli.md`(CliOnly 변형)를 고르는 걸 보는 것이다. 그래서 여기서는
-    //   ENGRAM_PRIMING_FILE override 를 세우지 않고, 보고·CLI-요구 판정용으로 그 CLI-only 운영 파일을
-    //   effective priming 으로 해석만 한다. `--priming` 을 함께 주면 목적(auto-select 관측)과 충돌하므로
-    //   fail-fast 한다(오해 방지).
     if args.cli_only && priming_selector.is_some() {
         return setup_fail(
             "--cli-only 는 --priming override 와 함께 쓸 수 없다 — 이 모드는 provision 이 자동으로 prompts/agent-priming-cli.md 를 고르는 걸 관측하는 게 목적이다(override 를 주면 그 관측이 무의미)",
         );
     }
-    // ★--cli-only 는 **상속된** ENGRAM_PRIMING_FILE 도 거부한다(ADR-0099)★: 부모 env 에 이 override 가 미리
-    //   깔려 있으면 provider(priming.rs)가 그걸 최우선으로 읽어 provision 의 CliOnly auto-select 를 조용히
-    //   덮어쓴다 — `--priming` co-pass 거부와 같은 구멍이 env 로 들어온다. **조용히 clear 하지 않는다**
-    //   (operator 가 일부러 세운 값일 수 있어 지우면 숨은 의도 파괴) — 어느 값이든(비어 있지 않으면) 그 이름을
-    //   박아 SETUP-FAIL 로 요란히 거부하고 operator 가 직접 걷어내게 한다. co-pass 거부와 대칭이다.
     if cli_only_env_override_conflicts(
         args.cli_only,
         std::env::var_os("ENGRAM_PRIMING_FILE").as_deref(),
@@ -563,8 +341,6 @@ async fn run() -> i32 {
             "--cli-only 인데 부모 env 에 ENGRAM_PRIMING_FILE 이 설정돼 있다 — 이 override 가 provision 의 CliOnly auto-select 를 덮어써 관측을 무의미하게 만든다. 조용히 지우지 않으니(숨은 의도 파괴 방지) 실행 전에 직접 unset 하라",
         );
     }
-    // effective priming 경로: cli-only 면 CliOnly 운영 파일(provision 이 auto-select 할 그 파일), 아니면
-    //   셀렉터 해석 결과. 두 경우 모두 repo 루트 기준 절대화.
     let priming_selector_for_resolve = if args.cli_only {
         Some("prompts/agent-priming-cli.md")
     } else {
@@ -573,16 +349,13 @@ async fn run() -> i32 {
     let resolved_priming = match resolve_priming_path(priming_selector_for_resolve, &repo_root) {
         Some(p) => p,
         None => {
-            // 절대화조차 못 함(비정상 셀렉터) — 프라이밍은 실험 필수라 fail-fast.
             return setup_fail(&format!(
                 "priming 셀렉터({priming_selector:?})를 절대경로로 못 풂 — 실험 불가"
             ));
         }
     };
-    // ★존재 검사 fail-fast(FIX round-2 #5)★: `FilePrimingProvider` 는 존재하지 않는 override 를 조용히
-    //   버리고 UNPRIMED 로 스폰한다. 그러면 라벨은 "priming X 로 primed" 라 주장하지만 실제론 unprimed —
-    //   케이스가 거짓말한다. 프라이밍은 이 실험의 본질이므로, 실제로 in-effect 가 아닌 경로는 절대 진행·
-    //   출력하지 않는다. 여기서 확인해 없으면 SETUP-FAIL.
+    // `FilePrimingProvider` 는 존재하지 않는 override 를 조용히 버리고 UNPRIMED 로 스폰한다 — 그래서 여기서
+    //   직접 확인하지 않으면 케이스 라벨이 거짓이 된다.
     if !resolved_priming.is_file() {
         return setup_fail(&format!(
             "priming 파일 없음: {} (case={:?}) — 존재하지 않는 override 는 UNPRIMED 스폰으로 이어져 케이스 라벨을 거짓으로 만든다",
@@ -590,11 +363,9 @@ async fn run() -> i32 {
             priming_selector
         ));
     }
-    // ★프라이밍 본문 단일 읽기 + fail-closed(FIX)★: 여기서 딱 한 번 읽어 아래 CLI-요구 가드가 재사용한다.
-    //   이전 판본은 존재 검사(위)와 가드에서 파일을 두 번 만졌고(TOCTOU 창), 가드 쪽은
-    //   `read_to_string(...).unwrap_or(false)` 라 읽기 실패(공유 위반·권한·검사 후 삭제/교체·비-UTF-8)를
-    //   전부 "CLI 요구 아님" 으로 삼켜 헛된 정상 negative 를 낼 수 있었다. 프라이밍 파일은 실험의 본질이므로
-    //   읽을 수 없으면 조용히 진행하지 않고 SETUP-FAIL(exit 1). is_file 통과 후 여기서 즉시 읽어 그 창을 좁힌다.
+    // ★한 번만 읽어 아래 CLI-요구 가드가 재사용한다 — 되돌리지 마라★: 이전 판본은 존재 검사와 가드에서
+    //   파일을 두 번 만졌고(TOCTOU 창), 가드 쪽 `read_to_string(...).unwrap_or(false)` 가 읽기 실패(공유
+    //   위반·권한·검사 후 교체·비-UTF-8)를 전부 "CLI 요구 아님" 으로 삼켜 헛된 정상 negative 를 냈다.
     let priming_content = match std::fs::read_to_string(&resolved_priming) {
         Ok(c) => c,
         Err(e) => {
@@ -605,11 +376,7 @@ async fn run() -> i32 {
             ));
         }
     };
-    // --b-task 해석(지정 시에만): `@path` 는 파일 참조, 그 외는 인라인 텍스트 그대로. 파일 부재/읽기
-    //   실패는 SETUP-FAIL(인프라 부재를 실험적 negative 로 오인하지 않는다 - priming 파일 읽기와 같은
-    //   분업). 실 claude 를 아직 하나도 스폰하지 않은 시점이라 정리(cleanup)할 리소스가 없다.
-    // ★F5★ `b_task_kind` 는 결과 블록의 `B_TASK=` 자기서술 줄(항상 찍힘) 재료 — default/file:<path>/
-    //   inline(<n> bytes) 셋 중 하나. `<n>` 은 CLI 값의 바이트 길이(String::len — char 수 아님).
+    // 여기까지는 아무것도 스폰하지 않은 시점이라 실패 반환에 정리(cleanup)할 리소스가 없다.
     let (task_prompt_b, b_task_kind): (String, String) = match &args.b_task {
         None => (TASK_PROMPT_B.to_string(), "default".to_string()),
         Some(v) => match resolve_b_task_file_path(v, &repo_root) {
@@ -631,11 +398,8 @@ async fn run() -> i32 {
             }
         },
     };
-    // ★env 로 넘겨 FilePrimingProvider 생성 전에 set★: provision 마다 priming_file() 이 이 env 를
-    //   최우선 override 로 읽어 두 에이전트(A·B) 모두 같은 변형을 받는다.
-    //   ★--cli-only 예외(ADR-0099 FIX 3)★: 이 모드는 override 를 **세우지 않는다** — provision 이 강제된
-    //     비-MCP 분기에서 CliOnly 변형(prompts/agent-priming-cli.md)을 스스로 고르는 걸 관측하는 게 목적이다.
-    //     override 를 세우면 그 auto-select 를 우회하므로 일부러 뺀다.
+    // 아래 세 env 는 provider·manager 배선 **전에** 세워야 두 에이전트(A·B)가 같은 프라이밍 변형·같은
+    //   grant 셋으로 provision 된다.
     if !args.cli_only {
         std::env::set_var("ENGRAM_PRIMING_FILE", &resolved_priming);
     }
@@ -645,27 +409,16 @@ async fn run() -> i32 {
         priming_selector,
         args.cli_only
     );
-    // ★ADR-0094 CLI-only 측정 seam★: `--disallow-mcp` 가 켜지면 provision 전에 env 를 세워, 두 에이전트가
-    //   MCP send_message grant **없이** 스폰돼 engram-send CLI 로만 발신하게 강제한다. build_grants 가 이
-    //   env 를 읽는다(control/mod.rs). 프라이밍 env 와 같은 지점(provider·manager 배선 전)에 세워야 두
-    //   에이전트 모두 같은 grant 셋으로 provision 된다. (CLI 입구 활성 = send_exe 존재는 아래에서 가드.)
     if args.disallow_mcp {
         std::env::set_var("ENGRAM_DISALLOW_MCP_SEND", "1");
         eprintln!("[roundtrip] --disallow-mcp → MCP send grant 제거(CLI-only 측정, ENGRAM_DISALLOW_MCP_SEND=1)");
     }
-    // ★ADR-0099 FIX 3 CLI-only 강제 seam★: `--cli-only` 가 켜지면 provision 전에 env 를 세워, provision 이
-    //   실 claude 스폰을 **비-MCP 로 강제**한다 → false path 전체(no mcp-config + CliOnly 프라이밍 + [Cli]
-    //   grant)가 돈다. control/mod.rs::provision 이 이 env 를 분기 맨 위에서 읽어 effective flag 를 false 로
-    //   덮는다. --disallow-mcp 와 달리 물리/교육 채널이 정합(둘 다 CLI)이라 실 claude 를 비-MCP 백엔드처럼
-    //   굴려 false 분기를 실측한다(CLI 입구 활성 = send_exe 필수 — 아래에서 가드).
     if args.cli_only {
         std::env::set_var("ENGRAM_FORCE_CLI_ONLY_SEND", "1");
         eprintln!("[roundtrip] --cli-only → provision 을 비-MCP 로 강제(false path 전체, ENGRAM_FORCE_CLI_ONLY_SEND=1); entrance=cli 기대");
     }
 
-    // 배선(priming_smoke 미러) — 실 FilePrimingProvider·MCP 서버·AgentManager.
     let registry = Arc::new(ControlRegistry::new());
-    // ADR-0088: 배달 관측 싱크 설치 — B→A outbound relay 를 회수한다(로그 스크레이핑 금지).
     let observer = Arc::new(CapturingObserver::new());
     registry.set_delivery_observer(observer.clone());
 
@@ -687,21 +440,12 @@ async fn run() -> i32 {
     let _ = std::fs::create_dir_all(&ws_a);
     let _ = std::fs::create_dir_all(&ws_b);
 
-    // ★send_exe 배선(CLI 입구 활성화 — CLI-지시 프라이밍/`--cli-only`/`--disallow-mcp` 에 필수)★: engram-send 는 데몬 exe 형제로 배포된다. 이
-    //   하네스는 cargo 가 만든 target 디렉토리(현재 exe 형제)에서 engram-send 를 찾아 endpoint 에 싣는다.
-    //   못 찾으면 None(CLI 입구 비활성 — MCP 만).
     let send_exe = sibling_send_exe();
     match &send_exe {
         Some(p) => eprintln!("[roundtrip] engram-send = {}", p.display()),
         None => eprintln!("[roundtrip] engram-send 형제 바이너리 없음 — CLI 입구 비활성(MCP 만)."),
     }
-    // 배선 축 게이트 3종은 이 한 판정을 공유한다(재읽기·TOCTOU 없음 — 위에서 한 번 읽어 둔 본문으로 판정).
     let directs_cli = priming_text_directs_cli(&priming_content);
-    // ★CLI-지시 프라이밍인데 `--cli-only` 가 없다 = SETUP-FAIL(ADR-0128)★: MCP 가능 스폰엔 engram-send
-    //   배선이 없으므로(결정 2) B 는 배운 명령을 **실행할 수 없다** — send_exe 가 형제에 있든 없든 마찬가지다
-    //   (PATH·크레덴셜이 그 스폰에 안 실린다). 그 상태의 B_SENT=false 는 정상 negative 가 아니라 인자 조합
-    //   오류이므로, 스폰 **전에** 요란히 거부하고 정합 조합(`--cli-only`)을 안내한다. 아래 역방향 게이트·
-    //   인프라 부재 SETUP-SKIP 과 합쳐 "가르치는 채널 == 깐 채널" 을 입력 단계에서 강제한다.
     if cli_priming_requires_cli_only(directs_cli, args.cli_only) {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -713,13 +457,6 @@ async fn run() -> i32 {
             priming_selector
         ));
     }
-    // ★역방향 — `--cli-only` 인데 프라이밍이 CLI 를 안 가르친다 = SETUP-FAIL(ADR-0128 등호)★: 이 모드는 CLI
-    //   배선을 실제로 깔지만, 그 스폰의 프라이밍이 발신 방법을 안 가르치면 B 는 아무것도 보내지 않는다 —
-    //   그 `B_SENT=false` 는 "안 보내기로 함"(정상 negative)이 아니라 **가르치지 않은 결과**다. 뒤쪽
-    //   entrance 검사는 *보냈는데 입구가 틀린* 경우만 잡으므로(안 보낸 경우는 못 잡는다) 이 빈칸을 스폰 전에
-    //   메운다. ★유일한 발화 경로 = 운영 B 파일이 셸 명령 언급을 잃는 개정(defense-in-depth)★: 이 모드는
-    //   `--priming` co-pass 와 비어 있지 않은 상속 override 를 앞서 거부하므로 프라이밍은 항상 그 B 파일이고,
-    //   그 회귀는 priming.rs 의 파일 내용 pin 이 1차로 잡는다 — 여기는 그 pin 뒤의 2차선이다.
     if cli_only_requires_cli_priming(directs_cli, args.cli_only) {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -730,12 +467,8 @@ async fn run() -> i32 {
             "--cli-only 인데 해석된 프라이밍이 CLI 발신(engram-send)을 가르치지 않는다 — 이 모드는 provision 을 비-MCP 로 정렬해 CLI 배선을 깔지만, 가르치지 않으면 B 는 발신 방법을 모른 채 아무것도 보내지 않고 그 B_SENT=false 가 정상 negative 로 오귀속된다(ADR-0128 등호: 가르치는 채널 == 깐 채널). prompts/agent-priming-cli.md 가 engram-send 를 가르치는지 확인하고, 상속된 ENGRAM_PRIMING_FILE override 가 MCP 전용 파일을 가리키고 있지 않은지 보라",
         );
     }
-    // ★CLI 요구 프라이밍인데 engram-send 부재 = SETUP-SKIP(ADR-0094)★: 위 게이트를 통과했다는 건
-    //   `--cli-only`(= CLI 배선이 깔리는 유일한 모드)라는 뜻이다. 그런데 send_exe 가 None 이면 B 는 그
-    //   경로로 물리적으로 못 보내므로, 결과 B_SENT=false 는 "B 가 안 보내기로 함"(정상 negative)이 아니라
-    //   인프라 부재다. 판정은 셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**으로 한다 — 명시 경로
-    //   override 도, basename 리스트에서 누락되던 새 CLI-지시 프라이밍도 잡힌다. 실 claude 2개를 스폰하기
-    //   **전에** 요란히 SETUP-SKIP 하고 종료한다 — 헛된 스폰·오귀속 둘 다 막는다.
+    // 위 두 게이트를 통과했으면 `directs_cli ⟺ cli_only` 가 성립한다 — 그 상태에서 send_exe 가 없으면
+    //   B 는 물리적으로 못 보내므로 B_SENT=false 는 실험 결과가 아니라 인프라 부재다.
     if directs_cli && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -747,13 +480,9 @@ async fn run() -> i32 {
             priming_selector
         ));
     }
-    // ★--disallow-mcp 는 형제 바이너리 부재를 계속 SETUP-SKIP 으로 거른다(ADR-0094 → ADR-0128 정정)★:
-    //   ★send_exe 가 있어도 이 모드엔 CLI grant 가 생기지 않는다★ — CLI grant 는 `!accepts_mcp_config &&
-    //   send_exe.is_some()` 에서만 나오고(control/mod.rs build_grants) `--disallow-mcp` 는 스폰을 MCP 가능
-    //   그대로 두므로, 이 모드의 발신 grant 는 바이너리 유무와 무관하게 **0** 이다. 즉 이 스킵이 지키는 것은
-    //   "CLI grant 가 있다" 가 아니라 하네스의 SETUP 라벨 일관성뿐이다(권한은 auto mode 에서 NO-OP 이라
-    //   에이전트는 그대로 MCP 로 보낸다 — ADR-0097·실측 6/6). 노브 존치·폐기는 사용자 결정 대기라 동작은
-    //   그대로 둔다.
+    // ★이 스킵이 지키는 것은 "CLI grant 가 있다" 가 아니라 하네스의 SETUP 라벨 일관성뿐이다★ — 이 모드의
+    //   발신 grant 는 바이너리 유무와 무관하게 0 이다(아래 문구 참조). 노브 존치·폐기가 사용자 결정 대기라
+    //   동작을 그대로 둔 것이다.
     if args.disallow_mcp && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -764,15 +493,11 @@ async fn run() -> i32 {
             "--disallow-mcp: engram-send 형제 바이너리가 없어 SETUP-SKIP. ※주의(ADR-0128) — 이 모드는 스폰을 MCP 가능 그대로 두므로 바이너리를 빌드해도 **CLI 발신 경로는 생기지 않는다**(CLI grant 는 비-MCP 스폰에서만 방출된다) — 이 모드의 발신 grant 는 바이너리 유무와 무관하게 0 이고, auto 권한 모드에선 grant 가 NO-OP 이라 에이전트는 그대로 MCP 로 보낸다(실측 6/6). 즉 빌드는 이 스킵을 넘기기 위한 절차일 뿐 CLI 라우팅을 만들지 못한다 — CLI 입구를 실측하려면 `--cli-only` 를 쓰라. 스킵을 넘기려면: `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send`",
         );
     }
-    // ★도달 불가 — 그러나 남긴다(belt-and-braces, ADR-0128)★: 위 두 pairing 게이트가 downstream 에
-    //   `directs_cli ⟺ cli_only` 를 세우므로, `--cli-only` 면 directs_cli 도 참이고 그러면 바로 위
-    //   `directs_cli && send_exe.is_none()` 스킵이 **항상 먼저** 걸린다(같은 처방 문구까지 동일). 그래서 이
-    //   분기는 오늘 도달하지 않는다. 지우지 않는 이유는 그 도달 불가가 **다른 게이트의 성질에 의존**하기
-    //   때문이다 — 분류기(`priming_text_directs_cli`)가 좁아지거나 역방향 게이트가 완화되면 이 조합이 되살아나고,
-    //   그때 이게 없으면 provision 의 fail-closed(Err)를 스폰 뒤에 SETUP-FAIL 로 늦게 만난다(진단이 나빠진다).
-    //   ★"죽은 단언" 과 다른 종류★: 성립하지 않는 성질을 보증하는 게 아니라, 되살아났을 때 정확한 처방을 내는
-    //   폴백이다. 다만 도달 불가라 테스트로 고정할 수 없다 — 순서를 바꿔 "되살리는" 리팩터를 하지 말 것.
-    // ADR-0128
+    // ★오늘은 도달 불가 — 그래도 남긴다★: 위 `directs_cli ⟺ cli_only` 때문에 바로 위 스킵이 항상 먼저
+    //   걸린다. 지우지 않는 이유는 그 도달 불가가 **다른 게이트의 성질에 의존**하기 때문이다 —
+    //   `priming_text_directs_cli` 가 좁아지거나 역방향 게이트가 완화되면 이 조합이 되살아나고, 그때 이게
+    //   없으면 provision 의 fail-closed(Err)를 스폰 뒤에 SETUP-FAIL 로 늦게 만난다(진단이 나빠진다).
+    //   도달 불가라 테스트로 고정할 수 없다 — 순서를 바꿔 "되살리는" 리팩터를 하지 말 것.
     if args.cli_only && send_exe.is_none() {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
@@ -822,7 +547,6 @@ async fn run() -> i32 {
     messaging_slot.set(messaging.clone());
 
     // ── A·B 스폰(둘 다 실 primed claude, stream-json, Fresh) ─────────────────────────
-    // A 는 이름 alice(B 가 봉투에서 배워 to=alice 로 답신), B 는 bob.
     let agent_a = match spawn_named(&manager, NAME_A, &args.model, &ws_a) {
         Some(a) => a,
         None => {
@@ -846,18 +570,13 @@ async fn run() -> i32 {
         agent_a.id, agent_b.id, args.model
     );
 
-    // A·B 각각에 출력 관측 sink 부착.
     let obs_a = Arc::new(TurnObserver::new());
     let obs_b = Arc::new(TurnObserver::new());
     let sink_a = manager.subscribe(agent_a.id, obs_a.clone()).ok();
     let sink_b = manager.subscribe(agent_b.id, obs_b.clone()).ok();
 
-    // ★setup-failure 시 공통 정리(FIX round-2 #4)★: 아래 setup 단계에서 hard-fail 하면 이 클로저로 구독
-    //   해제·kill·디렉토리 정리·MCP 종료를 하고 SETUP-FAIL 을 낸다(valid negative 와 구분).
     macro_rules! fail_setup {
         ($reason:expr) => {{
-            // ★실패 경로에도 census(light 리뷰 F2)★ — 관측 공백이 제일 아픈 게 바로 실패/행 턴 조사인데
-            //   happy tail 에서만 찍으면 그 경로에서 다시 자기보고 의존으로 돌아간다. teardown 전에 덤프.
             print_delivery_census(&observer);
             if let Some(id) = sink_a {
                 let _ = manager.unsubscribe(agent_a.id, id);
@@ -872,9 +591,6 @@ async fn run() -> i32 {
         }};
     }
 
-    // ★A 구독 실패 = SETUP-FAIL(FIX round-2 #4)★: A 의 `TurnObserver` 를 못 붙이면(sink_a=None) A 가
-    //   답신을 처리하며 낸 텍스트(정성 관측)를 아예 볼 수 없다 — 그 상태의 정성 결과는 무의미하므로 valid
-    //   negative 로 보고하면 안 된다. B 구독 실패도 같은 이유(B 턴 관측 불가 → 원과제 setup 판정 불가).
     if sink_a.is_none() {
         fail_setup!("A 출력 구독 실패(sink_a=None) — A 턴 관측 불가, 정성 결과 무의미(setup 실패)");
     }
@@ -883,9 +599,8 @@ async fn run() -> i32 {
     }
 
     // ── 1) B 원과제 턴(일하는 팀원 맥락) ────────────────────────────────────────────
-    // ★turn 실패 = setup 실패(FIX round-2 #4)★: 이전엔 warn 후 계속했다 — 그러면 "일하는 팀원 맥락" 이
-    //   서지 않은 채 B_SENT=false 를 정상 negative 로 보고해 setup 실패를 실험 결과로 오인한다. B 가 원과제를
-    //   수용(턴 종료)하지 못하거나 그 사이 죽으면 valid negative 가 아니라 SETUP-FAIL 이다.
+    // ★warn 후 계속하던 옛 형태로 되돌리지 마라★: 팀원 맥락이 서지 않은 채 `B_SENT=false` 를 정상
+    //   negative 로 보고해 setup 실패를 실험 결과로 오인한다.
     if !send_and_wait(&manager, agent_b.id, &obs_b, &task_prompt_b) {
         if !is_agent_alive(&manager, agent_b.id) {
             fail_setup!("B 가 원과제 턴 도중 종료됨(process death) — 팀원 맥락 setup 실패");
@@ -910,21 +625,12 @@ async fn run() -> i32 {
         agent_id: agent_a.id,
         epoch: 0,
     };
-    // A 의 답신 관측 baseline 을 씨앗 주입 **전에** 잡는다(B 답신이 A 턴을 밀어 올리는 걸 본다).
     obs_a.begin_turn();
     let baseline_a = obs_a.done_snapshot();
-    // ★B→A relay baseline(FIX round-2 #1)★: 씨앗 주입 **직전**에 관측 레코드 수를 잡는다. B 가 원과제 턴에서
-    //   A 에게 흘린 pre-seed 레코드가 답신으로 오인되는 걸 막는다 — 이후 도착분만 답신 후보.
     let reply_baseline = observer.record_count();
-    // ★진단(탐색)★: B 가 씨앗을 받고 자기 턴에 응답은 하는데 send 로 라우팅만 안 하는지 보려고 B 의 씨앗-후
-    //   턴 텍스트를 캡처한다. begin_turn 은 text 만 비우고 done_count 는 누적이라, reply 대기 동안 B 턴이
-    //   끝나면 response_text 에 씨앗-후 출력이 담긴다.
     obs_b.begin_turn();
     let baseline_b = obs_b.done_snapshot();
 
-    // --seed-request(지정 시): 씨앗을 회신 계약(SendContract{request:true,..})으로 보낸다 - 같은 실
-    //   control 경로(handle_send, Entrance::Cli) 그대로, 계약 축만 얹는다. 미지정이면 오늘 동작
-    //   (SendContract::default() = plain 통보, 바이트 동일).
     let seed_contract = if args.seed_request {
         SendContract {
             request: true,
@@ -936,36 +642,30 @@ async fn run() -> i32 {
     };
     let seed = ControlCommand {
         from: from_a,
-        to: vec![NAME_B.to_string()], // 이름으로 지목(alice→bob). 수신자 목록 = 1명(ADR-0111).
+        to: vec![NAME_B.to_string()],
         body: SEED_A_TO_B.to_string(),
         contract: seed_contract,
     };
     let ack = handle_send(&manager, &registry, &messaging, Entrance::Cli, seed);
     eprintln!("[roundtrip] seed A→B ACK = {}", ack.to_json());
-    // ★씨앗 ACK 에러 = setup 실패(FIX round-2 #4)★: ACK 가 error(수신자 미해석·write 실패 등)면 B 는 애초에
-    //   씨앗을 못 받았다 — 그 뒤 B_SENT=false 는 "B 가 답 안 함" 이 아니라 씨앗 배달 실패다. B 는 산 수신자라
-    //   접수(delivered) 되어야 한다(파킹이 아님 — is_accepted 로 반려만 거른다).
+    // B 는 산 수신자라 파킹이 아니라 접수(delivered)되어야 한다 — 그래서 `is_accepted` 로 반려만 거른다.
     if !ack.is_accepted() {
         fail_setup!(&format!(
             "씨앗 A→B ACK 가 접수 실패(반려): {}",
             ack.to_json()
         ));
     }
-    // 씨앗 논리 메시지 id(ADR-0088 확장 - --seed-request 판정용): ACK JSON 의 `id` 가 곧 이 씨앗의
-    //   msg_id 다(handle_send 성공 응답 shape, spec §6). B 의 답신이 이 id 로 회신했는지
-    //   (REPLY_MATCHES_SEED) 비교할 기준값을 여기서 한 번 뽑아 둔다.
+    // ACK JSON 의 `id` 가 곧 이 씨앗의 논리 msg_id 다(handle_send 성공 응답 shape, spec §6) — 회신 일치
+    //   판정(REPLY_MATCHES_SEED)의 기준값.
     let seed_msg_id: Option<String> = ack
         .to_json()
         .get("id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    // ★ACK shape-drift 가드(신규)★: 현재 `ControlResult::Ok { id: String, .. }` shape(ingress.rs) 상
-    //   접수된(accepted) ACK 는 `id` 를 항상 싣는다 — 위 파싱이 None 을 내는 건 오늘은 불가능하다. 그런데
-    //   이 가드가 없으면, 그 shape 이 미래에 바뀌어(예: id 가 optional 로) 조용히 None 이 나올 때 --seed-request
-    //   경로가 그걸 알아채지 못하고 REPLY_POLL=skipped-no-budget(예산 고갈)로 **오분류**한다 — 실제 원인은
-    //   예산 부족이 아니라 판정 기준값(seed_msg_id) 자체가 없어 애초에 회신 일치를 판정할 수 없는 것인데,
-    //   같은 라벨 뒤에 숨어 버린다. --seed-request 일 때만 유의미하므로(plain 씨앗은 이 id 를 안 쓴다) 그
-    //   경우로 한정해 스폰 이후 첫 발견 즉시 SETUP-FAIL 로 fail-fast 한다(조용히 진행해 오분류를 내지 않는다).
+    // ★ACK shape-drift 가드 — 오늘은 발화 불가★: 현재 `ControlResult::Ok { id: String, .. }`(ingress.rs)
+    //   상 접수된 ACK 는 `id` 를 항상 싣는다. 그래도 두는 이유는, 그 shape 이 바뀌어 조용히 None 이 나오면
+    //   REPLY_POLL=skipped-no-budget(예산 고갈)으로 **오분류**되기 때문이다 — 실제 원인은 기준값 부재라
+    //   애초에 일치를 판정할 수 없는 것인데 같은 라벨 뒤에 숨는다.
     if args.seed_request && seed_msg_id.is_none() {
         fail_setup!(&format!(
             "seed ACK missing id — request judgment impossible (ACK={})",
@@ -974,15 +674,10 @@ async fn run() -> i32 {
     }
 
     // ── 3) B 의 답신을 **B 자신의 발신 경로**로 대기(하네스는 handle_send 를 부르지 않는다) ──────
-    //    B(실 claude)가 MCP send_message 또는 engram-send CLI 를 스스로 호출 → 실 입구 → handle_send →
-    //    wrap → A stdin. 그 relay 가 관측 싱크에 baseline 이후 from=B·to=A 레코드로 남는지 폴링한다.
-    // ★F3 잔여 예산 계산용 시작점(option b — 예산은 A 턴 대기와 공유)★: 이 시각부터 REPLY_WAIT_CAP(180s)
-    //   을 재는데, 그 사이엔 바로 아래 wait_for_reply 뿐 아니라 그 뒤 이어지는 A 턴 대기(wait_turn_end,
-    //   최대 TURN_WAIT_CAP=180s)까지 **같은 벽시계를 함께 소비한다** — 새 타임아웃 상수를 만들지 않고
-    //   하나의 창을 공유시킨 트레이드오프다(사용자 결정, option b — "wait_for_reply 소비분만 뺀다" 던
-    //   이전 주석은 틀렸다). A 턴 대기가 길면 아래 폴링(wait_for_matching_reply)의 잔여 예산이 0/음수가
-    //   될 수 있고, 그러면 폴링은 아예 돌지 않는다 — 그 경우를 결과 블록의 REPLY_POLL=skipped-no-budget
-    //   으로 반드시 알린다(침묵 금지).
+    // ★이 시각부터 재는 REPLY_WAIT_CAP 은 아래 `wait_for_reply` 만의 예산이 아니다(사용자 결정 option b)★:
+    //   그 뒤 이어지는 A 턴 대기(`wait_turn_end`, 최대 TURN_WAIT_CAP)까지 **같은 벽시계를 함께 태운다** —
+    //   새 타임아웃 상수를 만들지 않고 창 하나를 공유시킨 트레이드오프다. A 턴이 길면 뒤의
+    //   `wait_for_matching_reply` 잔여 예산이 0/음수가 돼 폴링이 아예 안 돈다.
     let reply_wait_started = Instant::now();
     let reply_obs = wait_for_reply(
         &observer,
@@ -992,13 +687,8 @@ async fn run() -> i32 {
         REPLY_WAIT_CAP,
     );
     let b_sent = reply_obs.is_some();
-    // ★valid negative 게이트(FIX round-2 #4)★: B 가 안 보냈는데(reply_obs=None) 그 사이 **A 또는 B** 가
-    //   죽었다면 그건 "B 가 안 보내기로 함"(정상 negative)이 아니라 process death setup 실패다.
-    //   - B 사망: B 가 답신을 만들 주체를 잃음.
-    //   - A 사망: A 가 죽으면(스폰 후 / 씨앗 ACK 후) B 의 답신이 A 에 도달할 대상이 없어 관측이 안 뜨고,
-    //     B 는 살아 있어 기존 B-only 게이트는 이를 정상 negative 로 오분류한다 — 이게 원 blocker 와 같은
-    //     방식으로 실험 데이터를 오염시킨다. 그래서 valid negative 판정 지점에서 A 생존도 함께 확인한다.
-    //   A·B 모두 살아 있는데도 안 보낸 경우만 유효한 실험 negative 로 아래에서 보고한다.
+    // ★A 생존도 함께 본다 — B-only 게이트로 되돌리지 마라★: A 가 죽으면 B 의 답신이 도달할 대상이 없어
+    //   관측이 안 뜨는데 B 는 살아 있어, B 만 보는 게이트는 그걸 정상 negative 로 오분류한다.
     if !b_sent && !is_agent_alive(&manager, agent_b.id) {
         fail_setup!("B 가 답신 대기 중 종료됨(process death) — valid negative 아님(setup 실패)");
     }
@@ -1011,12 +701,9 @@ async fn run() -> i32 {
         Some(o) => entrance_str(o.entrance),
         None => "none",
     };
-    // ★--cli-only 판정(ADR-0099 FIX 3)★: 이 모드는 provision 을 비-MCP 로 강제해 MCP 입구가 물리적으로
-    //   없다 — B 가 보냈다면(b_sent) entrance 는 반드시 `cli` 여야 한다. `mcp` 가 관측되면 강제 seam 이
-    //   실제로 MCP 를 제거하지 못한 것(배관 결함)이므로 SETUP-FAIL(setup 결함)로 요란히 알린다.
-    //   ★entrance=none(B 미발신)은 여기서 안 잡고 끝의 엄격 VERDICT 가 FAIL(exit 1)로 처리한다★ —
-    //   여기 SETUP-FAIL 은 "seam 배관 결함"(mcp 새어나옴) 전용이고, "강제 false path 미실증"(아무도 안 보냄)은
-    //   결과 판정이라 최종 VERDICT 로 분리한다(라벨이 서로 다른 실패 원인을 섞지 않게).
+    // ★`b_sent` 조건이 붙은 이유★: entrance=none(B 미발신)은 여기서 안 잡고 끝의 엄격 VERDICT 가 FAIL 로
+    //   처리한다. 여기 SETUP-FAIL 은 "seam 배관 결함"(mcp 가 새어나옴) 전용이고, "강제 false path 미실증"은
+    //   결과 판정이라 — 서로 다른 실패 원인을 한 라벨에 섞지 않는다.
     if args.cli_only && b_sent && entrance_label != "cli" {
         fail_setup!(&format!(
             "--cli-only 인데 B 가 entrance={entrance_label} 로 발신 — 강제 seam 이 MCP 입구를 제거 못 함(배관 결함, 정상 negative 아님)"
@@ -1024,37 +711,19 @@ async fn run() -> i32 {
     }
 
     // ── 4) A 가 B 답신을 처리하며 낸 텍스트 대기(정성 관측) ───────────────────────────
-    //    B 가 보냈으면 그 relay 가 A stdin 에 꽂혀 A 턴이 돈다. 남은 시간만큼 A 턴 종료를 기다린다.
     let a_responded = if b_sent {
         obs_a.wait_turn_end(baseline_a, TURN_WAIT_CAP)
     } else {
-        // B 가 안 보냈으면 A 턴이 돌 이유가 없다 — 짧게만 확인(이미 REPLY_WAIT_CAP 동안 아무것도 없었음).
+        // B 가 안 보냈으면 A 턴이 돌 이유가 없다 — 이미 REPLY_WAIT_CAP 동안 아무것도 없었으므로 대기 없이 본다.
         obs_a.done_snapshot() > baseline_a
     };
     let a_response = obs_a.response_text();
 
-    // ★F3 레이스를 여기서 실제로 닫는다★: wait_for_reply 는 baseline 이후 첫 B→A 레코드(무관한 "ack" 일
-    //   수 있음)에서 멈춘다 — A 턴 대기까지 끝나도 진짜 계약 회신(in_reply_to == seed_msg_id)이 아직
-    //   안 왔을 수 있어, 그 상태로 바로 print 시점 스캔을 하면 거짓 negative 가 난다. 그래서 A 턴 대기가
-    //   끝난 지금, 그 레코드가 나타나길 잔여 REPLY_WAIT_CAP 예산으로 마저 폴링한다(같은 루프/간격 재사용
-    //   — 새 타임아웃 상수 없음). ★그 잔여 예산은 wait_for_reply 만의 소비가 아니라 방금 끝난 A 턴 대기
-    //   (wait_turn_end, 최대 TURN_WAIT_CAP=180s)까지 같은 REPLY_WAIT_CAP 벽시계를 함께 태운 뒤 남은
-    //   값이다(option b) — A 턴이 길게 돌면 이 잔여가 0/음수일 수 있고, 그럴 땐 바로 아래
-    //   `remaining.is_zero()` 가드가 폴링을 아예 건너뛴다. 그 스킵은 조용히 넘어가지 않고 결과 블록의
-    //   REPLY_POLL=skipped-no-budget 로 반드시 드러낸다(항목1, option b — 아래 reply_poll_ran 이 그
-    //   판정용 신호). seed-request 일 때만 한다 — plain 씨앗은 in_reply_to 자체가 없어 폴링할 대상이
-    //   없고, 기본 경로(SEED_KIND=plain)를 늦추지 않아야 하기 때문이다. 예산이 소진되도록 못 찾으면
-    //   아래 스캔이 정직하게 none/false 로 남긴다.
-    // ★REPLY_POLL 마커용 신호(항목1, option b)★: 이 폴링이 실제로 "돌았는가"(예산이 있어 루프에
-    //   진입했는가)만 기록한다 — 최종 라벨(matched/timeout/skipped-no-budget)은 5) 절에서 이 값과
-    //   reply_matches_seed(최종 스캔 결과)를 함께 봐서 정한다. "matched" 는 폴링이 잡았든 폴링이
-    //   스킵됐지만 이미 배달돼 있었든 상관없이 최우선이므로, 여기서는 예산 유무만 정직하게 담아 둔다.
+    // ★진짜 계약 회신을 여기서 마저 기다린다★: `wait_for_reply` 는 baseline 이후 **첫** B→A 레코드에서
+    //   멈추는데 그게 회신과 무관한 "ack" 한 통일 수 있어, 바로 스캔하면 거짓 negative 가 난다.
+    //   seed-request 일 때만 한다 — plain 씨앗은 `in_reply_to` 자체가 없어 폴링할 대상이 없고, 기본 경로를
+    //   늦추지 않아야 한다.
     let mut reply_poll_ran = false;
-    // ★REPLY_POLL_BUDGET_MS 계측(신규)★: 폴링 돌지/스킵 여부를 가른 바로 그 결정 지점에서 잔여 예산(ms)을
-    //   그대로 남긴다 — 0 = 예산 없음(스킵) 또는 1ms 미만 잔여(as_millis 절사로 poll_ran=true 인데 0 이
-    //   찍힐 수 있다). 스킵 여부의 정본은 REPLY_POLL 라벨이지 이 수치가 아니다. 이게 있어야 "폴링이 100ms 짜리 굶주린 예산만 받고 timeout 이 났다" 는
-    //   기아(starvation) 상황과 "폴링이 정상적인(수십 초) 예산을 다 쓰고도 못 찾은" negative 를 같은
-    //   REPLY_POLL=timeout 라벨 뒤에서 구분할 수 있다(라벨만으로는 두 상황이 안 갈린다).
     let mut reply_poll_budget_ms: u64 = 0;
     if args.seed_request {
         if let Some(sid) = seed_msg_id.as_deref() {
@@ -1075,8 +744,7 @@ async fn run() -> i32 {
     }
 
     // ── 5) 구조화 stdout 마커(오케스트레이터 판정용) ────────────────────────────────
-    // cli-only 모드는 셀렉터가 없으므로(override 금지) 전용 라벨을 단다 — 오케스트레이터가 이 실측이
-    //   false-path(provision 강제 비-MCP) 임을 구분하게.
+    // cli-only 모드엔 셀렉터가 없으므로(override 금지) 전용 CASE 라벨을 단다.
     let case_label = if args.cli_only {
         "CLI-ONLY(forced non-MCP)"
     } else {
@@ -1084,42 +752,24 @@ async fn run() -> i32 {
     };
     println!("\n===== ROUNDTRIP CASE={case_label} B_SENT={b_sent} ENTRANCE={entrance_label} =====");
     println!("[model] {}", args.model);
-    // 존재 검사를 통과한 실제 in-effect 경로만 출력한다(FIX round-2 #5 — 거짓 라벨 금지).
     println!("[priming] {}", resolved_priming.display());
     println!("[seed A->B body] {SEED_A_TO_B}");
-    // --seed-request(지정 시) 결과 마커 - 미지정이면 SEED_KIND=plain 뿐(오늘 동작, 새 줄 하나만 추가).
     let seed_kind = if args.seed_request {
         "request"
     } else {
         "plain"
     };
     println!("SEED_KIND={seed_kind}");
-    // ★F5★ B_TASK 자기서술 줄 — SEED_KIND 와 같은 규율로 항상 찍는다(default 여도).
     println!("B_TASK={b_task_kind}");
     if args.seed_request {
-        // ★F5 규율★ SEED_REPLY_BY 자기서술 줄 — B_TASK/SEED_KIND 와 같은 규율로, request 일 땐 항상 찍는다
-        //   (미지정이면 "none" — 조용히 빠지지 않는다).
         println!(
             "SEED_REPLY_BY={}",
             args.seed_reply_by.as_deref().unwrap_or("none")
         );
-        // ★F3★ "첫 레코드 승" 이 아니라, wait_for_matching_reply(위, A 턴 대기 직후)가 — **잔여
-        //   REPLY_WAIT_CAP 예산이 남아 있을 때만** — 실제 계약 회신을 폴링해 마저 기다린다. 그 예산은
-        //   씨앗 주입 시점부터 A 턴 대기(wait_turn_end)까지 함께 소비한 벽시계라, A 턴이 길면 잔여가
-        //   0/음수가 돼 이 폴링이 **아예 호출되지 않을 수 있다**(무조건 기다리는 게 아니다 — reply_poll_ran
-        //   이 그 실행 여부를 담는다). 폴링이 돌았든 안 돌았든(=스킵), 그 **뒤** baseline 이후 B→A 레코드
-        //   **전부**를 스캔한다 — 첫 레코드가 실제 회신과 무관한 "ack" 한 통이어도, 폴링이 돌아 진짜 회신을
-        //   이미 잡아 뒀다면(또는 폴링 전에 이미 배달돼 있었다면) 여기 스캔이 그걸 찾는다(레이스가 폴링으로
-        //   닫혔으므로 이 스캔은 이미 채워진 결과를 읽는 역할). 폴링이 예산 부족으로 아예 안 돈 경우엔
-        //   스캔이 찾을 게 새로 생기지 않으므로 정직하게 none/false 로 남고, 그 스킵은 아래 REPLY_POLL=
-        //   skipped-no-budget 라벨로 timeout(폴링은 돌았으나 못 찾음)과 구분된다. **배달된(is_delivered)
-        //   레코드만** 증거로 인정한다 — write 가 실패한 레코드는 실제로 도달하지 않았으므로, 그
-        //   in_reply_to 가 우연히 seed id 와 같아도 "B 가 성공적으로 회신했다" 의 증거가 아니다(그래서
-        //   폴링 예산이 소진되도록 못 찾은 "only failed records carry it" 케이스는 정직하게 none/false 로
-        //   남긴다).
+        // ★배달된(is_delivered) 레코드만 증거로 인정한다★ — write 가 실패한 레코드는 실제로 도달하지
+        //   않았으므로, 그 `in_reply_to` 가 우연히 seed id 와 같아도 "B 가 성공적으로 회신했다" 의 증거가
+        //   아니다. 그런 레코드만 남으면 정직하게 none/false 로 낸다.
         let after_seed = observer.records_after(reply_baseline, agent_b.id, agent_a.id);
-        // REPLY_MATCHES_SEED: 엄격 일치 판정(변경 없음) — 배달된 레코드 중 seed_msg_id 와 정확히 같은
-        //   in_reply_to 를 가진 것이 있는가.
         let matched = after_seed.iter().find(|r| {
             r.is_delivered()
                 && seed_msg_id
@@ -1127,18 +777,12 @@ async fn run() -> i32 {
                     .is_some_and(|s| r.in_reply_to.as_deref() == Some(s))
         });
         let reply_matches_seed = matched.is_some();
-        // ★finding 1 FIX★ REPLY_IN_REPLY_TO 는 first-wins 만으로 정하지 않는다 — 아래 항목2 FIX 참조.
-        //   baseline 이후 첫 **배달된** B→A 레코드 중 in_reply_to.is_some() 인 것을 폴백용으로 찾아 둔다
-        //   (매치가 없을 때만 이 값을 쓴다 — "B 가 in-reply-to 를 아예 안 실음" 과 구분하는 용도는 유지).
         let first_reply_with_id = after_seed
             .iter()
             .find(|r| r.is_delivered() && r.in_reply_to.is_some());
-        // ★항목2 마커쌍 자기모순 FIX(reviewer NOTE)★: 이전엔 REPLY_IN_REPLY_TO 를 **항상 무조건**
-        //   first-wins(`first_reply_with_id`)로 찍었다 — B 가 틀린 id 로 먼저 답하고 맞는 id 로 나중에
-        //   답하면 REPLY_IN_REPLY_TO=<wrong-id> 인데 REPLY_MATCHES_SEED=true 인 자기모순 쌍이 났다(두
-        //   마커가 서로 다른 레코드를 가리킴 — 하나는 첫 레코드, 하나는 일치 레코드). 그래서 이제: 일치
-        //   레코드(`matched`)가 있으면 **그 레코드의 값**(= seed id 와 동일)을 우선해서 찍고, 일치가
-        //   아예 없을 때만 first-wins 로 폴백한다 — 두 마커가 항상 같은 레코드에서 파생되어 모순이 없다.
+        // ★무조건 first-wins 로 되돌리지 마라★: 그러면 B 가 틀린 id 로 먼저 답하고 맞는 id 로 나중에 답할 때
+        //   `REPLY_IN_REPLY_TO=<wrong-id>` 인데 `REPLY_MATCHES_SEED=true` 인 자기모순 쌍이 난다(두 마커가
+        //   서로 다른 레코드를 가리킴). 매치가 있으면 그 레코드를 우선해 두 마커가 같은 레코드에서 파생되게 한다.
         let reply_in_reply_to: Option<String> = match matched {
             Some(m) => m.in_reply_to.clone(),
             None => first_reply_with_id.and_then(|r| r.in_reply_to.clone()),
@@ -1148,22 +792,13 @@ async fn run() -> i32 {
             reply_in_reply_to.as_deref().unwrap_or("none")
         );
         println!("REPLY_MATCHES_SEED={reply_matches_seed}");
-        // ★항목1 REPLY_POLL 마커(option b)★: 예산이 A 턴 대기에 다 먹혀 폴링이 조용히 스킵되는 경우를
-        //   절대 침묵시키지 않는다. 우선순위 판정은 순수 함수 `reply_poll_label`(단위테스트 대상)로 뽑아
-        //   뒀다 — matched(폴링이 잡았든 폴링 전에 이미 배달돼 있었든 최종 스캔이 일치를 확인하면 최우선)
-        //   > timeout(폴링이 실제로 돌았는데 예산 소진까지 못 찾음) > skipped-no-budget(잔여 예산이
-        //   0/음수라 폴링 자체가 안 돎 — reply_poll_ran=false).
         let reply_poll = reply_poll_label(reply_matches_seed, reply_poll_ran);
         println!("REPLY_POLL={reply_poll}");
-        // ★REPLY_POLL_BUDGET_MS(신규)★: 위에서 폴링 여부를 가른 그 결정 지점의 잔여 예산(ms)을 그대로
-        //   찍는다(스킵이면 0) — REPLY_POLL 라벨만으로는 "100ms 짜리 굶주린 예산 끝에 난 timeout" 과
-        //   "정상 예산을 다 쓰고도 못 찾은 negative" 가 구분되지 않는다. 이 값이 있어야 그 둘을 가른다.
         println!("REPLY_POLL_BUDGET_MS={reply_poll_budget_ms}");
     }
     println!("[B sent reply to A] {b_sent}");
     println!("[B chosen entrance] {entrance_label}");
     if let Some(o) = &reply_obs {
-        // 봉투 배달 레코드는 body 텍스트를 담지 않는다(보안) — 바이트 수·msg_id 만.
         println!(
             "[B->A delivery] msg_id={} bytes={} to_epoch={:?}",
             o.msg_id, o.bytes_requested, o.to_epoch
@@ -1190,10 +825,6 @@ async fn run() -> i32 {
     let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
     cleanup(&manager, &[agent_a.id, agent_b.id], &dirs).await;
     handle.shutdown().await;
-    // ★--cli-only 는 엄격 판정(ADR-0099)★: 이 모드는 provision 을 비-MCP 로 강제해 false path 전체가
-    //   정합하게 도는지를 실측하는 게 목적이라, B 가 실제로 CLI 입구로 보냈을 때만(b_sent && entrance=cli)
-    //   성공이다. 아무것도 안 보낸 경우(B_SENT=false/ENTRANCE=none)는 일반 모드의 valid-negative 와 달리
-    //   **실패**로 본다(강제 false path 가 도는 걸 못 봤으니 목적 미달). 일반 모드는 종전대로 negative 도 exit 0.
     if args.cli_only {
         if cli_only_run_passed(b_sent, entrance_label) {
             println!("VERDICT [roundtrip-smoke --cli-only]: PASS — B 가 CLI 입구로 발신(b_sent=true, entrance=cli)");
@@ -1206,7 +837,6 @@ async fn run() -> i32 {
         eprintln!("{line}");
         return 1;
     }
-    // ★negative(B did not send)도 정상 exit 0★: 유효한 실험 결과지 하네스 실패가 아니다(ADR-0092).
     0
 }
 
