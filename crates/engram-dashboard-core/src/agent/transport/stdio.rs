@@ -4,21 +4,14 @@
 //! (`-p --output-format stream-json`, 헤드리스)가 이 transport로 뜬다(ADR-0044). 터미널 모드는
 //! 그대로 PtyTransport. 같은 AgentSession 조립에서 transport만 갈아끼운다.
 //!
-//! ★바보 파이프 불변(ADR-0044)★: pump는 stdout 바이트를 **해석하지 않고** 그대로
-//!   `OutputEvent::TerminalBytes`로 core에 넘긴다(캐리어 variant 재사용). transport 층은 내용을 모른다.
-//!
-//! ADR-0045 개정: '무정제'는 transport 층 한정 — 파싱은 backend decoder(pump 출력을 core 앞에서
-//!   소비)가 맡고, 프론트가 아니다. transport 자체는 계속 바이트만 emit한다(위 불변 유지). 즉 옛
-//!   "새 variant 금지 / NDJSON 파싱은 프론트 몫" 서술은 폐기 — 구조화 variant는 추가됐고(B1),
-//!   파싱 위치는 backend decoder다.
+//! ★무정제 불변(ADR-0044/0045)★: transport 층은 stdout 바이트의 스키마를 모른다 — decoder 가
+//!   없으면 `OutputEvent::TerminalBytes`로 그대로 넘기고(캐리어 variant 재사용), 있으면 주입된
+//!   decoder 를 적용만 한다. 파싱은 backend decoder 소관이지 이 층도 프론트도 아니다.
 //!
 //! ★PTY와 결정적 차이 — watcher 불필요★: ConPTY는 master가 살아 있으면 자식이 스스로 exit해도
 //!   reader에 EOF를 안 줘서 PtyTransport가 자연 종료 감지용 watcher 스레드를 둔다. **파이프는
 //!   자식(및 자식 트리)이 write 핸들을 모두 닫으면 read가 EOF(Ok(0))로 깬다** — 자연 종료든
 //!   kill이든 동일하게 pump가 깨므로 별도 watcher가 없다(그만큼 단순).
-//!
-//! 소유권: child(Arc<Mutex> — pump의 try_wait와 shutdown의 kill+wait가 공유) · stdin/stdout/stderr
-//!   (start에서 stdout/stderr를 take해 pump/drain 스레드로 move) · shutdown flag(Arc) · job(Windows).
 //!
 //! tauri import 0. unsafe 0(platform/windows.rs 제외).
 
@@ -39,21 +32,14 @@ use crate::logging::mask_secrets;
 #[cfg(windows)]
 use crate::agent::platform::JobObjectHandle;
 
-/// 파이프 자식 프로세스 transport. child + 세 파이프 + shutdown flag + structured caps + (Windows) Job.
-///
-/// stdin은 send_input(쓰기)·shutdown(kill 후 best-effort try_lock 정리)이 공유하므로 Mutex<Option<..>>.
-/// stdout/stderr는 start()에서 take해 각각 pump·drain 스레드로 move한다(None이면 이미 시작됨 — 멱등 방어).
 pub struct StdioTransport {
     /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child는 wait 후 exit status를 캐시하므로
     /// shutdown이 먼저 reap해도 pump의 try_wait가 같은 status를 회수한다(이중 wait 무해).
     child: Arc<Mutex<Child>>,
-    /// 입력 파이프. send_input이 blocking write_all 내내 이 락을 쥔다 → shutdown 은 이 락을
-    /// **blocking 으로 기다리면 안 된다**(데드락, FIX 1). shutdown 은 kill 후 try_lock 으로만
-    /// best-effort 정리하고, 못 얻으면 transport drop 시 OS 회수에 맡긴다.
     stdin: Mutex<Option<ChildStdin>>,
-    /// 출력 파이프. start()에서 take해 pump 스레드로 move. None이면 이미 시작됨.
+    /// start()에서 take해 pump 스레드로 move. None이면 이미 시작됨.
     stdout: Mutex<Option<ChildStdout>>,
-    /// 에러 파이프. start()에서 take해 drain 스레드로 move(라인별 debug! — claude 진행 noise, 출력 스트림엔 안 섞음).
+    /// start()에서 take해 drain 스레드로 move.
     stderr: Mutex<Option<ChildStderr>>,
     /// shutdown(kill) 진행 신호. set(Release)면 pump가 종료 시 Killed로 전이(pump가 Acquire).
     shutdown: Arc<AtomicBool>,
@@ -61,35 +47,27 @@ pub struct StdioTransport {
     /// "구조화냐"는 파이프가 아니라 claude `--output-format`(backend/mode 지식)이 정하므로,
     /// select_transport 가 mode 로부터 주입한다(하드코딩 금지 — 평문 stdio 엔 false). capabilities()가 그대로 신고.
     structured: bool,
-    /// 출력 정제 decoder(ADR-0004/0044). ★transport 는 어떤 디코더인지 모른다★: `dyn OutputDecoder`
-    /// 만 알고(claude/codex 스키마 지식 없음), manager 가 json 모드 세션에 주입한다(없으면 바이트
+    /// 출력 정제 decoder(ADR-0004/0044). manager 가 json 모드 세션에 주입한다(없으면 바이트
     /// 직통 = 평문·터미널 경로). start()에서 take 해 pump 스레드로 move(=None 이면 이미 시작됨).
-    /// Mutex<Option<..>> 인 이유는 stdout 과 동일 — start 가 소유권을 pump 스레드로 넘기기 위함.
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
     #[cfg(windows)]
     job_handle: JobObjectHandle,
 }
 
 impl StdioTransport {
-    /// CommandSpec으로 파이프 자식 spawn + (Windows) Job 편입 + 세 파이프 확보. **pump는 아직
-    /// 안 띄운다**(start에서). child_pid를 함께 반환한다(claude 세션 추적 부착용 — 호출자 사용).
+    /// **pump는 아직 안 띄운다**(start에서). child_pid를 함께 반환한다(claude 세션 추적 부착용
+    /// — 호출자 사용). PtyTransport::open과 시그니처를 맞추되 cols/rows가 없다.
     ///
-    /// PtyTransport::open과 시그니처를 맞추되 cols/rows가 없다(파이프엔 터미널 크기 개념 없음).
-    /// `structured`: 이 파이프가 나르는 출력이 NDJSON(구조화)인지 — 호출자(select_transport)가
-    /// mode 로부터 주입한다(파이프는 내용을 모름, ADR-0044/0030). capabilities().output.structured 로 신고.
-    /// `decoder`: 출력 정제기(ADR-0004) — json 모드면 backend 가 만든 `ClaudeStreamDecoder` 를,
-    /// 그 외(평문·터미널) 경로면 None 을 넘긴다. ★start 인자가 아니라 open 인자로 받는 이유★:
-    /// decoder 주입은 StdioTransport 전용이라 공용 `AgentTransport::start` 시그니처를 건드리지 않는다
-    /// (건드리면 Pty/Api 도 무의미한 None 인자를 강제로 받아야 함 — 파급 최소화). transport 는 이
-    /// 값이 어떤 디코더인지 모른 채 pump 에서 적용만 한다.
+    /// ★`decoder` 를 start 인자가 아니라 open 인자로 받는 이유★: decoder 주입은 StdioTransport
+    /// 전용이라 공용 `AgentTransport::start` 시그니처를 건드리지 않는다(건드리면 Pty/Api 도
+    /// 무의미한 None 인자를 강제로 받아야 함 — 파급 최소화).
     pub fn open(
         spec: &CommandSpec,
         structured: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
     ) -> Result<(StdioTransport, Option<u32>), PtyError> {
-        // 1. Command 구성. transport는 claude/codex를 모른다 — backend가 산출한 spec만 본다.
-        //    Windows shim(claude.cmd) 처리는 backend/console_command가 이미 `cmd.exe /c claude …`로
-        //    감싼 spec을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
+        // Windows shim(claude.cmd) 처리는 backend/console_command가 이미 `cmd.exe /c claude …`로
+        //   감싼 spec을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
         let mut cmd = Command::new(&spec.program);
         cmd.args(&spec.args);
         cmd.current_dir(&spec.cwd);
@@ -116,12 +94,10 @@ impl StdioTransport {
 
         let child_pid = Some(child.id());
 
-        // 2. 세 파이프 take(Command가 piped로 열어 Child에 담아둔 것).
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        // 3. Windows: Job 생성 + child 편입(트리 kill — 손자 claude까지). PtyTransport와 동일 순서.
         #[cfg(windows)]
         let job_handle = {
             let job = JobObjectHandle::new()?;
@@ -147,9 +123,7 @@ impl StdioTransport {
     }
 }
 
-/// catch_unwind 결과 → 종료 reason 매핑. pty.rs resolve_pump_reason의 파이프판(동일 규칙):
-/// 정상이면 산출 reason 그대로, panic이면 payload에서 메시지를 뽑아 Error로. pump 스레드가
-/// 어디서든 panic하면 그 agent가 영구 silent 정지하므로 Failed로 가시화한다(§5).
+/// pump 스레드가 어디서든 panic하면 그 agent가 영구 silent 정지하므로 Failed로 가시화한다(§5).
 fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
@@ -165,10 +139,8 @@ fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalR
 }
 
 impl AgentTransport for StdioTransport {
-    /// pump 스레드(stdout→core) + stderr drain 스레드 기동 + core 연결.
-    /// stdout이 이미 take됐으면(재호출) 아무것도 안 한다(멱등 방어 — pty와 동형).
+    /// stdout이 이미 take됐으면(재호출) 아무것도 안 한다(멱등 방어).
     fn start(&self, core: Arc<OutputCore>) {
-        // 로그 계측용 agent 식별자(스레드로 move해 필터 키로 씀). core 가 보유한 불변값.
         let agent_id = core.id();
 
         let stdout = match self.stdout.lock().expect("stdout poisoned").take() {
@@ -201,8 +173,8 @@ impl AgentTransport for StdioTransport {
                         }
                     }
                 });
-            // ★spawn 실패를 삼키지 않는다(FIX 4/logging 계측 의무)★: drain 스레드가 안 뜨면 stderr
-            //   파이프가 안 비워져 자식이 블록될 수 있다 — 조용히 버리지 말고 agent 맥락과 함께 warn.
+            // ★spawn 실패를 삼키지 않는다(FIX 4/logging 계측 의무)★: 조용히 버리지 말고 agent
+            //   맥락과 함께 warn.
             if let Err(e) = spawn_result {
                 tracing::warn!(agent = %agent_id, "stdio stderr drain 스레드 기동 실패: {e}");
             }
@@ -213,7 +185,6 @@ impl AgentTransport for StdioTransport {
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
-        // decoder 소유권을 pump 스레드로 넘긴다(&mut 배타 소유 — 단일 스레드). None 이면 바이트 직통.
         // Mutex lock 실패(poison)여도 into_inner 로 회수(패닉 회피) — 시작 경로라 실질 경합 없음.
         let mut decoder = match self.decoder.lock() {
             Ok(mut g) => g.take(),
@@ -221,7 +192,6 @@ impl AgentTransport for StdioTransport {
         };
 
         let handle = std::thread::spawn(move || {
-            // pty.rs와 동일하게 pump 본체를 catch_unwind로 감싼다(panic→Failed 가시화).
             // ★UnwindSafe★: 잡은 stdout/buf/child/shutdown은 panic 후 버려지므로(스레드 종료)
             //   논리 불변 깨짐 없음 → AssertUnwindSafe.
             let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -229,23 +199,17 @@ impl AgentTransport for StdioTransport {
                 let mut buf = [0u8; 4096];
 
                 loop {
-                    // 1. blocking read. 자식 트리가 stdout write 핸들을 모두 닫으면(자연 종료 또는
-                    //    kill+Job terminate) Ok(0)=EOF로 깬다. Err도 종료로 간주.
                     let n = match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => n,
                     };
 
-                    // 2. shutdown 보조 확인(pty와 동일 안전망) — read가 데이터를 막 반환한 직후
-                    //    kill이 걸린 경우. 보통은 write 핸들 close로 인한 EOF가 먼저 깨운다.
+                    // shutdown 보조 확인 — read가 데이터를 막 반환한 직후 kill이 걸린 경우.
+                    //   보통은 write 핸들 close로 인한 EOF가 먼저 깨운다.
                     if shutdown.load(Ordering::Relaxed) {
                         break;
                     }
 
-                    // 3. ★decoder 배선(ADR-0004/0044)★: decoder 가 있으면(json 모드) 바이트를 정제해
-                    //    나온 구조화 OutputEvent 들을 순서대로 emit; 없으면(평문·터미널) 바이트를 그대로
-                    //    TerminalBytes 로 직통 emit(기존 동작 불변 — 회귀 방지). transport 는 어느 쪽이든
-                    //    "적용"만 하고 파싱 스키마를 모른다(무정제 불변은 decoder 유무로 갈림).
                     match decoder.as_mut() {
                         Some(dec) => {
                             for ev in dec.decode(&buf[..n]) {
@@ -269,7 +233,6 @@ impl AgentTransport for StdioTransport {
                 //   ★shutdown flag 로 분기하는 이유★: read 레벨에선 자연 EOF 와 kill 이 둘 다
                 //   Ok(0) 이라 구분이 안 되지만, kill 은 반드시 shutdown.store(Release) 를 거치므로
                 //   여기서 Acquire 로 읽어 확실히 구분된다(아래 reason 산출과 동일 신호원).
-                //   None(직통)이면 flush 할 상태가 없어 어차피 no-op.
                 if !shutdown.load(Ordering::Acquire) {
                     if let Some(dec) = decoder.as_mut() {
                         for ev in dec.flush() {
@@ -278,10 +241,7 @@ impl AgentTransport for StdioTransport {
                     }
                 }
 
-                // exit code 취득(pty와 동일 규율 — poison-tolerant into_inner).
-                // 주: kill 경로는 shutdown의 kill()+wait()가 이미 reap했을 수 있으나 std Child는
-                //     status를 캐시하므로 try_wait가 Some을 돌려준다. 그래도 shutdown=true면 아래서
-                //     code 미사용(Killed)이라 무해.
+                // shutdown=true 면 아래서 code 미사용(Killed)이라, 값이 뭐든 무해.
                 let code = {
                     let mut child = match child.lock() {
                         Ok(g) => g,
@@ -293,7 +253,6 @@ impl AgentTransport for StdioTransport {
                     }
                 };
 
-                // shutdown store(Release)와 페어링되게 Acquire로 읽는다.
                 if shutdown.load(Ordering::Acquire) {
                     TerminalReason::Killed
                 } else {
@@ -303,7 +262,6 @@ impl AgentTransport for StdioTransport {
 
             let reason = resolve_pump_reason(normal_reason);
 
-            // terminal 알림 주체 = pump(=core.finish). finalize 정확히 1회(core가 게이트).
             pump_core.finish(reason);
 
             // G-1: 완료 신호(core.join_pump의 recv_timeout가 받는다). 수신측이 사라졌어도 무시.
@@ -313,9 +271,9 @@ impl AgentTransport for StdioTransport {
         core.attach_pump(handle, done_rx);
     }
 
-    /// 입력 전달 — Raw 바이트를 자식 stdin으로 쓴다. json 모드에선 이 바이트가 이미 backend가
-    /// 감싼 stream-json 유저 턴 라인(`{"type":"user",…}\n`)이다 — transport는 그 형태를 모른다
-    /// (AgentSession이 InputEncoder로 감싸 Raw로 넘긴다, ADR-0044 격리). 여기선 그냥 쓴다.
+    /// json 모드에선 이 바이트가 이미 backend가 감싼 stream-json 유저 턴 라인
+    /// (`{"type":"user",…}\n`)이다 — transport는 그 형태를 모른다(AgentSession이 InputEncoder로
+    /// 감싸 Raw로 넘긴다, ADR-0044 격리).
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         match input {
             InputEvent::Raw(bytes) => {
@@ -334,15 +292,12 @@ impl AgentTransport for StdioTransport {
         }
     }
 
-    /// 미지원 — 파이프엔 터미널 크기 개념이 없다(caps.resize=false). unsupported-op 패턴(ApiTransport 동형).
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
             "StdioTransport::resize (파이프는 터미널 크기 없음)".into(),
         ))
     }
 
-    /// 미지원 — 파이프엔 PTY Ctrl-C 주입 경로가 없다. ★ADR-0044 MVP 한계(의도된 미구현)★:
-    /// 진행 중 작업 중단(interrupt)은 후속 스파이크. kill(shutdown)만 가능. caps.interrupt=false.
     fn interrupt(&self) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
             "StdioTransport::interrupt (ADR-0044 MVP 미지원 — 파이프 Ctrl-C 없음, 후속 스파이크)"
@@ -350,7 +305,7 @@ impl AgentTransport for StdioTransport {
         ))
     }
 
-    /// 자원 강제 종료(멱등) — ADR-0001 2동사의 파이프판. pump 종료 대기는 여기서 안 함(join_pump 몫).
+    /// ADR-0001 2동사의 파이프판.
     ///
     /// ★kill 인과(파이프판)★: PtyTransport는 master drop→ConPTY close→reader EOF로 pump를 깨우지만,
     ///   파이프는 **자식 트리가 stdout write 핸들을 모두 닫아야** reader가 EOF로 깬다. 그래서
@@ -364,57 +319,40 @@ impl AgentTransport for StdioTransport {
     ///   깨지 못해 → core.join_pump 가 영구 hang 한다(ADR-0001 인과가 멈춤). 그래서 **kill + Job
     ///   terminate 를 먼저** 한다: 자식을 죽이면 파이프가 깨져 블록된 write_all 이 에러로 풀리고
     ///   락이 해제된다. 그 뒤에야 try_lock 으로 stdin 을 best-effort 정리한다(blocking lock 절대 금지).
-    /// ※graceful-exit-via-stdin-close 는 필요 없다 — 어차피 여기서 kill 하므로. (예전 "stdin EOF →
-    ///   graceful" 기대는 제거: kill 경로에선 graceful 종료를 기다리지 않는다.)
+    /// ※graceful-exit-via-stdin-close 는 필요 없다 — 어차피 여기서 kill 하므로.
     fn shutdown(&self) {
-        // 1. shutdown 신호 — pump가 종료 시 Killed로 전이(store Release, pump가 Acquire).
+        // 1. shutdown 신호 — pump가 종료 시 Killed로 전이.
         self.shutdown.store(true, Ordering::Release);
 
-        // 2. child kill + wait(reap, 좀비 방지). ★stdin 을 만지기 전에 먼저★(위 순서 불변 — 데드락 회피).
-        //    두 번째 호출은 이미 죽어 Err — 무시(멱등).
+        // 2. wait 는 reap(좀비 방지). 두 번째 호출은 이미 죽어 Err — 무시(멱등).
         {
             let mut child = self.child.lock().expect("child poisoned");
             let _ = child.kill();
             let _ = child.wait();
         }
 
-        // 3. Windows: Job 전체 종료 → 손자(cmd 아래 claude)까지. 이게 claude의 stdout write 핸들을
-        //    닫아 pump reader를 EOF로 깨운다(인과의 핵심). 비Windows는 child.kill이 직접 자식
-        //    (claude, shim 없음)을 죽여 write 핸들이 닫힌다.
+        // 3. Windows: Job 전체 종료 → 손자(cmd 아래 claude)까지. 비Windows는 child.kill이 직접
+        //    자식(claude, shim 없음)을 죽여 write 핸들이 닫힌다.
         #[cfg(windows)]
         {
             let _ = self.job_handle.terminate(1);
         }
 
-        // 4. stdin best-effort 정리 — 위 kill 이 파이프를 깨 blocked write_all 이 풀리며 send_input 이
-        //    락을 놓으므로 try_lock 이 대개 성공한다. 못 얻으면(아직 write_all 이 안 풀린 찰나) 그냥
-        //    skip: 데드락 회피를 위해 **blocking lock 을 절대 걸지 않는다**. 미정리 ChildStdin 은
+        // 4. try_lock 을 못 얻으면(아직 write_all 이 안 풀린 찰나) 그냥 skip. 미정리 ChildStdin 은
         //    transport drop 시 OS 가 회수하므로 누수 없음(kill 로 이미 파이프는 끊겼다).
         if let Ok(mut guard) = self.stdin.try_lock() {
             let _ = guard.take();
         }
     }
 
-    /// 파이프 물리 채널 caps — raw 입력, resize/interrupt 불가, terminal_bytes=false(터미널 아님).
-    /// ★output.structured 는 주입값(ADR-0030/0044)★: "이 바이트가 NDJSON 인가"는 파이프가 아니라
-    ///   claude `--output-format`(backend/mode 지식)이 정한다 — 파이프는 내용을 모른다(통로 무정제).
-    ///   그래서 하드코딩하지 않고 select_transport 가 mode 로부터 주입한 self.structured 를 그대로 신고한다
-    ///   (예전 하드코딩 true 는 평문 stdio 에도 거짓말을 했다). output 이 transport 소유 영역이라는
-    ///   출처 분리(ADR-0030)는 그대로 — 값만 조립점에서 주입받는다.
-    /// ※structured 는 "이 스트림은 터미널이 아니다"라는 렌더 힌트일 뿐 내용 해석 아님. caps 기반
-    ///   렌더러 분기(xterm vs RichSlot)는 **M2 예정이며 아직 미배선**이다(M0 스파이크는 viewStore.richSlots
-    ///   오버레이로 분기) — 이 필드를 "현재 렌더 분기의 유일 근거"로 오독하지 말 것(FIX 6c).
-    /// session(resume)·model은 backend 소관이라 여기서 안 만든다(TransportCaps엔 그 필드 없음).
     fn capabilities(&self) -> TransportCaps {
         TransportCaps {
             input: InputCaps {
-                // stdin에 raw 바이트를 쓴다(그 바이트가 json 라인인지는 backend/session이 결정).
                 raw: true,
                 message: false,
                 attachment: false,
             },
             output: OutputCaps {
-                // 터미널 바이트 아님(파이프). structured 는 조립점 주입값(json 모드=true, 평문 stdio=false).
                 terminal_bytes: false,
                 structured: self.structured,
                 markdown: false,
@@ -475,7 +413,6 @@ mod tests {
             cwd: std::path::PathBuf::from("."),
         };
 
-        // 평문 stdio(구조화 아님) 주입 → structured=false 로 정직 신고(예전 하드코딩 true 회귀 방지).
         let (plain, _pid) = StdioTransport::open(&spec, false, None).expect("open plain");
         assert!(
             !plain.capabilities().output.structured,
@@ -483,7 +420,6 @@ mod tests {
         );
         plain.shutdown();
 
-        // json 캐리어(구조화) 주입 → structured=true + 파이프 물리 caps 나머지 검증.
         let (json, _pid) = StdioTransport::open(&spec, true, None).expect("open json");
         let caps = json.capabilities();
         assert!(caps.output.structured, "json 캐리어 주입 → structured=true");
@@ -491,7 +427,6 @@ mod tests {
         assert!(!caps.control.resize, "파이프 resize 불가");
         assert!(!caps.control.interrupt, "MVP interrupt 미지원");
         assert!(caps.input.raw, "stdin raw 쓰기 가능");
-        // interrupt/resize는 Unsupported를 반환(unsupported-op 패턴).
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
@@ -524,7 +459,7 @@ mod tests {
         let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
         let transport = Arc::new(transport);
 
-        // writer: 파이프 버퍼를 훨씬 초과하는 8MB 를 write → 자식이 안 읽으니 write_all 이 락 쥔 채 블록.
+        // 8MB = 파이프 버퍼를 훨씬 초과하는 크기.
         let writer = transport.clone();
         let writer_thread = std::thread::spawn(move || {
             let big = vec![b'x'; 8 * 1024 * 1024];
@@ -534,7 +469,6 @@ mod tests {
         // writer 가 write_all 에 진입해 stdin 락을 확실히 잡도록 잠깐 양보(넉넉히).
         std::thread::sleep(Duration::from_millis(500));
 
-        // shutdown 을 별도 스레드에서 돌리고 경과시간으로 완료를 단언한다(픽스면 즉시, 버그면 hang).
         let killer = transport.clone();
         let start = Instant::now();
         let shutdown_thread = std::thread::spawn(move || killer.shutdown());
