@@ -4,34 +4,18 @@
 //! 서버 조립·accept loop 를 여기로 모았다. main 은 `run()` 한 줄만 부르고, 테스트는
 //! `start_test_server()` 로 in-process 서버를 띄워 WS 클라이언트로 검증한다.
 //!
-//! ★운영 코드 회귀 0★: 옛 main 의 동작(단일 인스턴스 가드 → data_dir → daemon.json stale 검사
-//! → bind → 토큰 → manager 배선 → restore_all → accept loop → graceful 종료)을 `run()` 이
-//! 그대로 수행한다. accept loop 본체는 `run_accept_loop()` 로 분리해 테스트와 공유한다.
-//!
 //! ★이 crate 의 범위(ADR-0130)★ — 응용 층 + 조립. **데몬 살림의 *구현*은 여기 없다**: 단일 인스턴스
 //! 가드와 portfile 의 실물은 슬라이스 1 로 `engram-dashboard-net` 이 가져갔다. 여기 남은 건 그것들을
-//! 어느 순서로 부르는지(위 `run()` 서술)와 응용 층이다. 이름과 내용물의 이 어긋남은 알고 남긴 것 —
+//! 어느 순서로 부르는지(`run()`)와 응용 층이다. 이름과 내용물의 이 어긋남은 알고 남긴 것 —
 //! rename 하지 않는 이유와 재개 조건은 ADR-0130.
 
-// ADR-0129 슬라이스 1: 네트워크 행은 별도 lib crate(`engram-dashboard-net`)로 떨어졌다 — 포트 계약
-//   (`frame_port`)·WS 서버(`ws`)·단일 인스턴스 가드(`instance`)·portfile 이 그리로 갔고, 컴파일러 벽이
-//   섰다. 여기 남는 `agent_conn` 은 그 포트에 에이전트 시스템 실물을 꽂는 어댑터다(`ConnectionHandler`
-//   /`ConnectionHandlerFactory` 구현 = 명령 해석·이벤트 인코딩·연결 정리).
 pub mod agent_conn;
 pub mod connection_core;
 pub mod control;
-// ADR-0090: Stage 2 컨텍스트 포화 파일럿의 순수 실험 로직. test-harness feature 뒤 — 운영 빌드
-//   미포함(saturation-pilot bin 도 required-features=["test-harness"]). experiment/mod.rs 헤더 참조.
 #[cfg(feature = "test-harness")]
 pub mod experiment;
-// ADR-0110: 메시징 커널은 별도 lib crate(`engram-dashboard-messaging`)로 분리됐다. 여기 남는 건
-//   호스트 어댑터 + 조립실 — 커널 포트(DeliveryPort·ControlPlanePort·TurnFacts)에 AgentManager·
-//   ControlRegistry 실물을 꽂는 유일한 자리다.
 pub mod messaging_host;
-// ADR-0129: 상태 → wire 팬아웃(`DaemonStatusSink`). 코어 어휘와 wire 어휘를 둘 다 아는 자리라
-//   네트워크 행(`engram_dashboard_net::ws`)이 아니라 에이전트 시스템 쪽이다 — 그 파일 헤더가 근거 정본.
 pub mod status_fanout;
-// ADR-0129: 프레임 포트의 테스트 더블(에이전트 행 전용 격리 하네스). 운영 빌드에 없다.
 #[cfg(test)]
 mod test_doubles;
 
@@ -67,28 +51,16 @@ const DAEMON_FILE: &str = "daemon.json";
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
-/// 데이터 디렉토리 결정 — discovery 의 단일 출처(ADR-0024/0029)에 위임한다.
-///
-/// ★app 일치★: app(src-tauri)도 같은 `default_data_dir()` 을 쓰므로 둘이 같은 폴더의
-/// `{agents.json,daemon.json}` 을 본다. ADR-0029(모드 제거): debug=repo 루트 `.engram-data`,
-/// 릴리즈=`%APPDATA%\com.engram.dashboard`.
-///
-/// ★ENGRAM_DATA_DIR override(테스트 격리 탈출구)★: discovery 가 우선순위 1번으로 처리한다 —
-/// 설정 시 그 경로로 간다. 데몬은 `std::process::Command` 로 **직접** spawn 되는 통합 테스트
-/// (`tests/ws_e2e.rs`)에서 이 env 를 상속받아 임시 디렉토리로 격리된다(운영 `.engram-data` 미오염).
-/// WMI-spawn 데몬엔 안 먹는다(부모 env 미상속, discovery 주석 참조).
 fn resolve_data_dir() -> PathBuf {
     engram_dashboard_discovery::default_data_dir()
 }
 
-/// 256-bit(32B) 토큰을 OS CSPRNG 로 생성해 hex 64자 문자열로 반환.
 /// 보안: 반환값은 로그에 찍지 말 것(daemon.json 에만 기록).
 pub fn generate_token() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf)?;
     let mut s = String::with_capacity(64);
     for b in buf {
-        // 소문자 hex 2자/바이트.
         use std::fmt::Write as _;
         let _ = write!(s, "{b:02x}");
     }
@@ -111,9 +83,6 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 // ★best-effort★: 앱 exe 를 못 찾아도(개발 중 부분 빌드 등) 데몬은 계속 뜬다 — env 미세팅이면 에이전트
 // CLI 호출만 실패하고, 그건 매뉴얼이 fallback(직접 exe 지정)을 안내하면 된다(데몬 기동을 막지 않는다).
 
-/// 데몬 프로세스 env 에 `ENGRAM_EXE`(앱 CLI exe 절대경로)를 세팅한다. 자식 PTY 가 상속한다(위 블록 주석).
-/// current_exe(데몬)의 형제 `engram-dashboard.exe` 를 찾는다(locate_daemon_exe 대칭). 못 찾으면 no-op.
-///
 /// ★SAFETY(std::env::set_var)★: 부팅 최초(run 진입 직후, 다른 스레드 spawn 전)에 1회만 호출한다 —
 /// 이 시점엔 tokio worker 외 경쟁 스레드가 env 를 동시 읽지 않으므로 data race 위험이 없다.
 fn set_engram_exe_env() {
@@ -152,9 +121,8 @@ fn set_engram_exe_env() {
 // 백엔드(claude)는 애초에 이 경로를 안 쓰므로 무영향이고, 비-MCP 백엔드 스폰만 provision 에서 fail-closed 로
 // 막힌다(발신 입구 0). warn 로그로 원인을 남긴다(관측성).
 
-/// current_exe(데몬)의 형제 `engram-send[.exe]` 절대경로를 찾는다. 못 찾으면 None(warn 로그).
-/// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다 — 그 값은
-/// DaemonControlChannel 로 흘러 provision 마다 ControlEndpoint.send_exe 에 담긴다(env 주입은 backend 소유).
+/// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다(env 주입은
+/// backend 소유).
 ///
 /// ★"claude 스폰에서 안 쓰여도 지우지 말 것"(ADR-0128)★: 우편 채널은 capability 로만 갈려서 MCP 가능
 /// 스폰(= 현재의 claude)은 이 경로를 받지 않는다 — 그래서 호출자가 하나뿐이고 테스트도 없는 게 정상이다.
@@ -187,10 +155,6 @@ fn locate_send_exe() -> Option<PathBuf> {
 
 // ── panic hook (B-1) ──────────────────────────────────────────────────────────────
 
-/// 데몬 전역 panic hook 설치. panic 한 스레드명·위치·메시지를 tracing::error! 로 남긴다.
-///
-/// ★기존 hook 보존★: set_hook 으로 교체하기 전 take_hook 으로 이전 hook 을 잡아, 새 hook
-///   안에서 먼저 로깅한 뒤 이전 hook 을 이어 호출한다(default backtrace 출력 등 유지).
 /// ★멱등(테스트 안전)★: 여러 테스트가 run()/이 함수를 반복 호출해도 hook 이 무한 중첩되지
 ///   않도록 Once 로 1회만 설치한다. 설치된 hook 은 프로세스 수명 동안 유지된다.
 fn install_panic_hook() {
@@ -201,7 +165,6 @@ fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             let thread = std::thread::current();
             let name = thread.name().unwrap_or("<unnamed>");
-            // payload 는 보통 &str 또는 String — 둘 다 시도해 메시지를 뽑는다.
             let msg = info
                 .payload()
                 .downcast_ref::<&str>()
@@ -213,7 +176,6 @@ fn install_panic_hook() {
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                 .unwrap_or_else(|| "<unknown>".to_string());
             tracing::error!(thread = name, location, "스레드 panic: {msg}");
-            // 이전 hook 이어 호출(default 동작 보존).
             prev(info);
         }));
     });
@@ -242,12 +204,11 @@ fn install_panic_hook() {
 ///   **조립 안에는 없다** —
 ///   그게 이 struct 의 존재 이유다. 이 struct 를 손으로 조립해 남의 레지스트리를 끼우는 것도 한 모듈
 ///   안이라 타입으로 못 막는다.
-///   ★이 괄호는 목록이 아니라 예시다★: 새 운반자가 생기면 여기 덧붙는지로 판정하지 말고 **위 규칙으로**
-///   판정할 것. 목록으로 읽는 습관이 위 두 번의 누락을 만들었다.
 /// ★그 공개 진입점을 여기서 고치지 않는 이유★: `handle_connection` 은 레지스트리가 정당히 필요하고
 ///   **공장이 어떻게 조립됐는지는 알아선 안 된다** — 레지스트리에서 공장을 파생시키면 층이 뒤집힌다.
-///   정공법은 슬라이스 3의 투영(`run_accept_loop` 파생 지점 주석)이다 — **그 슬라이스는 ADR-0130 으로
-///   보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**: 팬아웃을 레지스트리에서만 얻게
+///   정공법은 슬라이스 3의 투영(`impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`)
+///   이다 — **그 슬라이스는 ADR-0130 으로 보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**:
+///   팬아웃을 레지스트리에서만 얻게
 ///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `handle_connection` 도 포함.
 // ADR-0129
 struct DaemonWiring {
@@ -257,21 +218,12 @@ struct DaemonWiring {
     registry: ConnRegistry,
 }
 
-/// src-tauri 의 setup 블록과 동일한 방식으로 AgentManager 를 조립한다(파일 기반 store).
-/// 차이: StatusSink 가 TauriStatusSink 대신 DaemonStatusSink(연결된 WS 클라이언트에 push).
-///
-/// ★manager 만이 아니라 연결 레지스트리까지 **조립이 직접 만들어** 함께 돌려준다★(실제 생성은 아래
-/// `build_daemon_wiring_with_store` 안 — 이 함수는 store 만 골라 위임한다). 호출자가 레지스트리를 따로
-/// 만들어 넘기면 위 `DaemonWiring` 주석의 짝 어긋남이 되살아나므로, 운영 조립에서 `ConnRegistry` 를
-/// 생성하는 코드는 그 한 곳으로 몰아 뒀다.
 fn build_daemon_wiring(
     data_dir: &std::path::Path,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
-    // 프로필 저장 = data_dir/agents.json, 프리셋 저장 = data_dir/presets.json (ADR-0061).
-    // 두 store 모두 디렉토리를 받고 내부에서 파일명을 결합한다.
     let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
     let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
     build_daemon_wiring_with_store(
@@ -283,10 +235,7 @@ fn build_daemon_wiring(
     )
 }
 
-/// build_daemon_wiring 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리할 수
-/// 있게 store 를 인자로 받는다(운영 경로는 위 build_daemon_wiring 이 File{Profile,Preset}Store 를 넘김).
-/// 배선 로직(status_sink/profiles/presets/tracker)은 운영과 동일 — 회귀 없음.
-/// `control`(ADR-0086): 제어 채널 seam — 운영은 DaemonControlChannel, 제어 채널 미사용 테스트는 Noop.
+/// build_daemon_wiring 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리한다.
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
     preset_store: Arc<dyn PresetStore>,
@@ -294,29 +243,19 @@ fn build_daemon_wiring_with_store(
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
-    // ADR-0129: 연결 레지스트리와 그 팬아웃 면(面)을 **여기서** 만든다 — status sink 가 무는 맵과
-    //   accept loop 가 등록하는 맵이 애초에 같은 값이고, 둘은 아래 `DaemonWiring` 으로 묶여 나간다.
-    //   HEAD 는 concrete `ConnRegistry` 를 받아 그 불일치가 타입상 불가능했는데, 포트화(dyn)가 그 보장을
-    //   산문으로 격하시키지 않게 조립을 이 한 자리로 모은 것이다(ADR-0129 결정 3 — 조립 행만 두 행을
-    //   다 안다).
+    // ADR-0129: 운영 조립에서 연결 레지스트리와 그 팬아웃 면(面)을 만드는 **유일한 자리**다 — 포트화(dyn)
+    //   이전엔 concrete `ConnRegistry` 를 받아 짝 불일치가 타입상 불가능했고, 그 보장을 산문으로 격하시키지
+    //   않으려 생성을 한 자리로 모았다(ADR-0129 결정 3 — 조립 행만 두 행을 다 안다).
     let registry = ConnRegistry::new();
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    // ADR-0104(C1): status sink 를 MessagingFlushSink 로 감싼다 — 로스터 등장/epoch bump 를 데몬측에서
-    //   diff 해 파킹 flush 를 건다(코어 seam 무변경). 감싼 DaemonStatusSink 가 프론트 broadcast 를 그대로
-    //   수행하고, wrapper 는 그 전에 flush 대상을 채널로 flush worker 에 넘긴다(finding 5 — 콜백 blocking
-    //   분리). flush worker·MessagingService 는 이 manager 조립 후 부팅에서 배선된다(slot 늦은 주입).
-    //   ADR-0113: 같은 wrapper 가 코어의 턴 종료 push(`StatusSink::turn_ended`)를 flush 도어벨로 중계한다 —
-    //   그래서 flush 레인과 **같은 Idle coalescer** 를 공유한다(잉여 통지 유계화).
     let status_sink = Arc::new(messaging_host::MessagingFlushSink::new(
         DaemonStatusSink::new(fanout),
         flush_tx,
         idle_coalescer,
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    // ADR-0061: 프리셋 레지스트리도 데몬이 소유. 프로필과 동일하게 store 에서 로드해 초기화.
     let presets = Arc::new(PresetRegistry::new(preset_store));
 
-    // 세션 추적: sid 변경(/clear 등) 관측 시 레지스트리에 반영(즉시 persist).
     let profiles_cb = profiles.clone();
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig::default(),
@@ -326,7 +265,6 @@ fn build_daemon_wiring_with_store(
     ));
     tracker.start();
 
-    // ADR-0086: 제어 채널 seam 을 주입해 spawn=provision / terminal=revoke 인과를 코어에 잇는다.
     let manager = Arc::new(AgentManager::new_with_control(
         status_sink,
         profiles,
@@ -339,24 +277,12 @@ fn build_daemon_wiring_with_store(
 
 // ── accept loop (main + 테스트 공유) ──────────────────────────────────────────────
 
-/// 연결 수락 루프. 각 연결을 handle_connection(WS 업그레이드 + auth + 프레임 핸들링)으로 넘긴다.
-/// 연결마다 task spawn — 한 연결의 느림/오류가 다른 연결·accept 를 막지 않는다.
-///
-/// 종료 경로: shutdown_rx 가 true 로 바뀌면(StopDaemon) 또는 Ctrl-C(run() 만 — 테스트는 watch 로
-/// 종료) 루프를 빠져나온다. ★이 함수는 self-contained accept loop 로, main 과 테스트가 동일하게
-/// 쓴다 — 운영/테스트 경로가 한 코드를 공유해 회귀를 막는다.★
 #[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
     listener: TcpListener,
-    // ADR-0129: manager 와 연결 레지스트리를 **한 덩이로** 받는다 — 따로 받으면 남의 레지스트리를 짝지어
-    //   넣는 것이 컴파일된다(왜 그게 조용한 장애인지는 `DaemonWiring` 주석).
     wiring: DaemonWiring,
     multiview: MultiViewState,
-    // ADR-0096: 봉투 포맷 전역 상태 거처(제어 채널 레지스트리) — 연결마다 handle_connection 에 넘겨
-    //   SetEnvelopeFormat dispatch 가 쓰게 한다. handle_send(MCP/CLI)와 같은 Arc(전역 상태 하나).
     control_registry: Arc<control::registry::ControlRegistry>,
-    // ADR-0116 결정 3: `DeleteProfile` dispatch 의 삭제 정리 훅이 쓸 메시징 커널 슬롯(늦은 주입 — 서비스는
-    //   manager 조립 후에 채워진다. 연결마다 handle_connection → ConnectionCore 로 그대로 흘린다).
     messaging_slot: Arc<control::mcp_server::MessagingSlot>,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
@@ -364,38 +290,9 @@ async fn run_accept_loop(
     enable_ctrl_c: bool,
     keepalive: KeepaliveConfig,
 ) {
-    // ADR-0129: 에이전트 시스템 배선을 여기서 **한 번** 묶어 프레임 포트 뒤로 넘긴다 — 그래서
-    //   `handle_connection` 은 manager/multiview/control_registry/messaging 슬롯/shutdown 신호를
-    //   타입으로도 모른다. 연결마다 이 공장이 `ConnectionCore` + per-conn 상태를 조립한다.
-    //
-    // ★팬아웃 포트를 인자로 받지 않고 여기서 뽑는 이유★: 아래 accept 갈래가 등록하는 **그 값**에서
-    //   뽑으므로 "브로드캐스트 대상 ≠ 등록 대상" 을 이 함수 안에서는 쓸 수가 없다.
-    // ★기계적으로 확인 가능한 두 사실★: ① **파라미터 타입으로** 레지스트리와 팬아웃을 **둘 다** 받는 함수가
-    //   **두 crate 어디에도** 없다. 판정 기준은 시그니처 스캔이다 — 레지스트리 쪽 = `ConnRegistry` 를
-    //   파라미터로 받는 함수, 팬아웃 쪽 = `FrameFanout`(`Arc<dyn>`·`&dyn` 무관)을 파라미터로 받는 함수.
-    //   ★두 집합의 구성원을 여기 열거하지 않는다★: 열거는 매번 한 칸 모자랐고(이 주석의 다른 자리가 그걸
-    //   경고한다) ①이 필요로 하는 것은 명단이 아니라 **교집합이 비었다**는 사실뿐이다. 다시 확인하려면
-    //   위 두 기준으로 직접 스캔할 것 ② 조립(이 파일)에서
-    //   만들어지는 `Arc<dyn FrameFanout>` 은 전부 그 함수가 이미 들고 있는 레지스트리에서 제자리 생성된다
-    //   (생성 지점 둘 = `build_daemon_wiring_with_store` 와 이 자리. 테스트는 레지스트리 없이 기록용
-    //   더블을 꽂으므로 ② 밖이고, 운영 경로엔 없다).
-    // ★①② 를 도달 가능성으로 읽으면 거짓이다★: 둘은 **파라미터 타입**을 훑는 문장이고 전이적 운반자
-    //   (manager·공장)를 덮지 않는다. 어긋난 짝의 실제 판정 규칙과, 조립 밖에서 여전히 표현 가능한
-    //   자리는 `DaemonWiring` 주석에 있다.
-    // ★다음 두 문장은 둘 다 거짓이니 여기서 인용하지 말 것★(둘 다 디렉토리 범위 grep 을 crate 전체로
-    //   일반화해 나온 것이고, 두 번 다 전이적 운반자를 가렸다):
-    //   · "팬아웃이 어느 시그니처에도 없다" — 에이전트 행 시그니처에는 있다(위 ① 괄호).
-    //   · "레지스트리를 파라미터로 받는 함수가 없다" — `engram_dashboard_net::ws::handle_connection` 이
-    //     받는다. ① 은 **둘 다**
-    //     받는 함수가 없다는 뜻이지 한쪽도 없다는 뜻이 아니다.
-    // ★이 파생은 과도기 모양이지 종착지가 아니다★: 분리(ADR-0129 결정 3) 후 이 루프는 네트워크 crate 의
-    //   것이 되어 `Arc<dyn ConnectionHandlerFactory>` 하나만 받고, 공장 조립은 얇은 조립 바이너리로
-    //   옮겨간다 — 그때 이 함수는 팬아웃을 아예 보지 않는다. 다만 **그 바이너리는 두 실물을 다 들게 되어
-    //   짝 어긋남이 crate 경계에서 되살아난다**. 그때의 정공법은 파생을 또 베끼거나 인자 2개로 돌아가는
-    //   것이 아니라, 네트워크 crate 가 투영을 직접 내주는 것이다 —
-    //   `impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`. 그러면 팬아웃은 **레지스트리
-    //   에서만** 얻을 수 있고 독립 생성이 불가능해진다. **슬라이스 3 은 ADR-0130 으로 보류됐다** — 이
-    //   문단은 재개 시의 정공법 기록이지 예정된 작업이 아니다.
+    // ★팬아웃 포트를 인자로 받지 않고 여기서 뽑는 이유(ADR-0129)★: 아래 accept 갈래가 등록하는 **그 값**
+    //   에서 뽑으므로 "브로드캐스트 대상 ≠ 등록 대상" 을 이 함수 안에서는 쓸 수가 없다. 조립 밖에서 여전히
+    //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
@@ -418,9 +315,6 @@ async fn run_accept_loop(
                         let handlers = handlers.clone();
                         let expected_token = expected_token.clone();
                         tokio::spawn(async move {
-                            // ADR-0129 0-4: 기대 프로토콜 버전은 **조립부가 주입**한다 — 네트워크 행은
-                            //   그 값을 알지 못하고 "클라가 말한 숫자가 이 숫자와 같은가" 만 본다.
-                            //   토큰과 같은 결(둘 다 조립부가 아는 값)이라 나란히 넘긴다.
                             engram_dashboard_net::ws::handle_connection(
                                 stream,
                                 peer,
@@ -449,7 +343,6 @@ async fn run_accept_loop(
                     Err(_) => break, // 모든 sender drop — 종료
                 }
             }
-            // Ctrl-C 는 운영(run) 경로에서만 활성. 테스트는 watch 로만 종료(시그널 미설치).
             _ = tokio::signal::ctrl_c(), if enable_ctrl_c => {
                 tracing::info!("Ctrl-C 수신 — accept loop 탈출");
                 break;
@@ -462,24 +355,20 @@ async fn run_accept_loop(
 
 /// 데몬 본체. 반환 Err(code) 면 호출자(main)가 그 코드로 exit. 정상 종료(이미 실행 중 포함)는 Ok.
 pub async fn run() -> Result<(), i32> {
-    // 0) 기본 warn(OFF) — RUST_LOG 로 재정의. core 의 init_logging 재사용.
-    //    ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
+    // 0) ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
     //    적용은 호출자 책임이다(민감 출력 로깅 시 명시 적용). 근거: docs/reference/logging-conventions.md.
     logging::init_logging();
 
     // 0.5) panic hook 설치(B-1). 데몬 내부 스레드(pump 등)가 panic 하면 silent 정지로
-    //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단"), panic 위치·스레드명·메시지를
-    //   tracing::error! 로 가시화한다. ★기존 default hook 동작 보존★: backtrace/표준 출력
-    //   동작을 잃지 않게 이전 hook 도 이어서 호출한다(연쇄). 데몬 전체는 죽이지 않는다 —
+    //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단") 가시화한다. ★데몬 전체는 죽이지 않는다★ —
     //   연결 task panic 은 tokio 가 이미 격리하고, pump panic 은 B-2 가 Failed 로 전이시킨다.
     install_panic_hook();
 
-    // 0.6) ENGRAM_EXE 주입(설계 §5 · ADR-0014 방향) — 스폰될 자식 PTY 가 상속할 수 있게 부팅 최초 1회.
-    //   ★반드시 에이전트 spawn 전★: 이 env 를 세팅한 뒤에야 이후 spawn_agent 의 PTY 자식이 상속한다.
-    //   다른 스레드 spawn 전(run 진입 직후)이라 set_var data race 안전(set_engram_exe_env SAFETY 주석).
+    // 0.6) ENGRAM_EXE 주입 — ★반드시 에이전트 spawn 전★(이 env 를 세팅한 뒤에야 spawn_agent 의 PTY
+    //   자식이 상속한다). 이 위치가 set_engram_exe_env SAFETY 주석이 요구하는 "부팅 최초 1회" 다.
     set_engram_exe_env();
 
-    // 1) 단일 인스턴스 가드. 이미 실행 중이면 로그 남기고 정상 종료(exit 0).
+    // 1) 단일 인스턴스 가드.
     //    ★_guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 mutex 해제 = 단일성 깨짐).
     let _guard = match engram_dashboard_net::instance::acquire() {
         Ok(Some(g)) => g,
@@ -493,7 +382,7 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 2) data_dir 결정 + 생성(ADR-0029 — release 에서 %APPDATA%, debug repo 루트 `.engram-data`).
+    // 2) data_dir 결정 + 생성.
     let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         tracing::error!("data_dir 생성 실패({:?}): {e}", data_dir);
@@ -501,8 +390,7 @@ pub async fn run() -> Result<(), i32> {
     }
     let daemon_path = data_dir.join(DAEMON_FILE);
 
-    // 2.5) 기존 daemon.json 검사. stale(죽은 PID)이면 무시(로그만)하고 덮어쓴다.
-    //      살아있으면 방어적으로 덮어쓰지 않고 정상 종료(살아있는 데몬 보호).
+    // 2.5) 기존 daemon.json stale 검사.
     if let Some(prev) = engram_dashboard_net::portfile::read(&daemon_path) {
         if engram_dashboard_net::portfile::is_stale(&prev) {
             tracing::info!(pid = prev.pid, "기존 daemon.json 이 stale — 덮어씀");
@@ -515,7 +403,7 @@ pub async fn run() -> Result<(), i32> {
         }
     }
 
-    // 3) 127.0.0.1:0 바인드 → 실제 포트 취득(로컬 전용).
+    // 3) bind → 실제 포트 취득.
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
@@ -531,7 +419,7 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 4) 256-bit 토큰 생성. 보안: 토큰 자체는 절대 로그에 찍지 않는다.
+    // 4) WS auth 토큰 생성.
     let token = match generate_token() {
         Ok(t) => t,
         Err(e) => {
@@ -540,43 +428,29 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // ADR-0086: 제어 채널 토큰 레지스트리 — MCP auth 미들웨어(검증)와 DaemonControlChannel(발급)이
-    //   공유하는 단일 출처. daemon.json 의 WS 토큰과는 완전히 다른 관심사(혼용 금지 — ADR-0086 §맥락).
+    // ADR-0086: 제어 채널 토큰 레지스트리. **위 4)의 daemon.json WS 토큰과는 완전히 다른 관심사다**
+    //   (혼용 금지 — ADR-0086 §맥락).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
 
-    // 5b) 멀티뷰어 협상 상태(resize smallest + 입력 lease) — 전 연결이 공유한다.
+    // 5b) 멀티뷰어 협상 상태 — 전 연결이 공유한다.
     let multiview = MultiViewState::new();
 
-    // 5b.5) ADR-0086 부팅 스윕(FIX 5): 이전 데몬 크래시/실패 스폰이 남긴 stale mcp-config 를 청소한다.
-    //   ★반드시 MCP 서버·provision 시작 전★: registry 는 방금 빈 상태로 만들었으니(위 5b) 이 시점의
-    //   모든 기존 파일은 dead credential(토큰이 registry 에 없음)이다. 부팅 초입에 일괄 삭제해 평문 토큰
-    //   파일을 방치하지 않는다. (삭제 실패는 warn 만 — 청소 실패로 데몬 기동을 막지 않는다.)
+    // 5b.5) 부팅 스윕(FIX 5). ★반드시 MCP 서버·provision 시작 전★: `control_registry` 를 방금 빈
+    //   상태로 만들었으므로(위) 이 시점의 모든 기존 mcp-config 는 dead credential 이다.
     control::mcp_config::sweep_stale_configs(&data_dir);
 
-    // 5c) ADR-0086: 제어 채널 MCP 서버 기동(WS 서버와 나란히). 스폰될 에이전트가 mcp-config 로 붙는
-    //     입구다. 토큰 레지스트리는 auth 미들웨어(검증)와 provision(발급)이 공유한다.
+    // 5c) 제어 채널 MCP 서버 기동.
     //     ★fail-closed(FIX 1)★: bind/start 실패는 **치명**이다 — 데몬을 NoopControlChannel 로 조용히
     //     계속 띄우면(옛 동작) 제어 채널 없이 도는데도 health 를 위장한다. 대신 이미 만든 자원(WS
     //     listener·control_registry)을 drop 하고 Err(1) 로 데몬 시작을 중단한다. 데몬은 자기 제어
     //     엔드포인트 없이는 뜨지 않는다(에이전트 오케스트레이션이 §5 LLM-우선 제어의 근간이라, 그게
     //     없는 반쪽 데몬은 정상 상태가 아니다). ★반드시 에이전트 spawn 전★.
-    // ADR-0086 스텝 2: send_message 의 relay 대상(AgentManager)을 MCP 서버·CLI 라우트에 늦게 주입하는
-    //   슬롯. ★순환 해소★: MCP 서버는 manager 보다 **먼저** 떠야 한다(그 URL 로 mcp-config 를 발급하는
-    //   DaemonControlChannel 을 만들려면). 그래서 빈 슬롯을 서버에 넘기고, manager 조립 직후 set 한다.
-    //   에이전트가 붙어 send 를 부르는 건 accept loop 이후라 그 시점엔 항상 채워져 있다.
     let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
-    // C1: MessagingService(발송 3분기·flush·sweep) 늦은 주입 슬롯. manager 를 감싸므로 manager 조립
-    //   후에야 서비스가 생긴다 — MCP 서버·flush worker 엔 빈 슬롯을 넘기고 아래에서 set(순환 해소).
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
-    // finding 5: flush 작업을 status-sink 콜백에서 분리하는 채널. sink(status 콜백)는 diff 대상만 push 하고
-    //   즉시 반환하며, 아래 flush worker(sweep task 옆)가 소비해 실제 flush_for(blocking write)를 돈다.
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
-    // C2 리뷰 fix 10: status sink(턴 종료 push 중계)와 flush 레인이 공유하는 `IdleCoalescer` —
-    //   같은 id 의 미처리 Idle 통지를 하나로 접어 채널 압력을 유계로 만든다.
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
-    // MCP 서버 핸들 — Some 이면 프로세스 수명 동안 살아 있어야 서버가 유지된다(drop=종료). fail-closed
-    //   라 실패 시 아래 match 가 early-return 하므로, 여기 도달하면 항상 살아 있는 핸들을 든다.
+    // ★핸들은 프로세스 수명 동안 살아 있어야 한다★(drop = 서버 종료).
     let (control, mut mcp_server_handle): (
         Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
@@ -589,14 +463,7 @@ pub async fn run() -> Result<(), i32> {
     {
         Ok(handle) => {
             let url = handle.url.clone();
-            // F1: 형제 engram-send CLI 경로를 부팅 시 1회 탐색해 채널에 넘긴다(provision 마다 endpoint 로 실림).
             let send_exe = locate_send_exe();
-            // ADR-0092: 프라이밍 seam — exe 기준 설치/repo 루트(discovery::find_install_root, default_data_dir
-            //   과 동일 exe-walk-up 패턴) 기준으로 prompts/agent-priming.md 를 해석한다. ★cwd 를 쓰지 않는
-            //   이유★: 운영 데몬은 WMI-spawn 이라 cwd=System32 를 상속해 cwd 기준 해석이 조용히 어긋난다
-            //   (두 리뷰어 PRIMARY). ENGRAM_PRIMING_FILE env 로 override 가능(최우선). 절대화 불가/cmd
-            //   메타문자/파일 부재면 provider 가 warn 후 None(프라이밍 없이 스폰 진행 — graceful). 미래
-            //   에이전트별 인젝션 시스템으로 구현만 교체(seam).
             let priming: Arc<dyn control::priming::PrimingProvider> =
                 Arc::new(control::priming::FilePrimingProvider::from_install_root());
             let channel = Arc::new(control::DaemonControlChannel::new(
@@ -606,13 +473,12 @@ pub async fn run() -> Result<(), i32> {
                 send_exe,
                 priming,
             ));
-            // 핸들을 살려 둔다(drop 시 서버 종료). 프로세스 수명 동안 유지.
             (channel, Some(handle))
         }
         Err(e) => {
-            // fail-closed: 이미 만든 자원 정리(listener 는 이 스코프 drop 로 회수) 후 중단.
-            //   ★연결 레지스트리는 아직 없다★: 그건 아래 6단계 `build_daemon_wiring` 이 만든다(ADR-0129).
-            //   daemon.json 은 아직 안 썼으므로(아래 8단계) 남는 stale portfile 도 없다.
+            // fail-closed 정리는 이게 전부다 — ★연결 레지스트리는 아직 없고★(아래 6단계
+            //   `build_daemon_wiring` 이 만든다), daemon.json 도 아직 안 썼다(아래 8단계 — 남는
+            //   stale portfile 없음).
             tracing::error!(
                 "MCP 서버 기동 실패 — 제어 채널 없이는 데몬을 띄우지 않는다(fail-closed): {e}"
             );
@@ -621,22 +487,15 @@ pub async fn run() -> Result<(), i32> {
         }
     };
 
-    // 6) AgentManager 배선(src-tauri 미러). status_sink = MessagingFlushSink(DaemonStatusSink) — C1
-    //    파킹 flush 트리거를 로스터 이벤트에 얹는다(messaging_slot 늦은 주입).
+    // 6) AgentManager 배선.
     let wiring = build_daemon_wiring(&data_dir, control, flush_tx.clone(), idle_coalescer.clone());
-    // 아래 배선들이 쓰는 manager 핸들(같은 Arc). 레지스트리는 `wiring` 이 계속 들고 있다가 accept loop 로
-    //   함께 넘어간다 — 여기서 풀어 두면 짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
+    // ★레지스트리는 `wiring` 이 계속 들고 있다가 accept loop 로 함께 넘어간다★ — 여기서 풀어 두면
+    //   짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
     let manager = wiring.manager.clone();
-    // ADR-0086 스텝 2: manager 를 슬롯에 주입 → 이제 send_message/`/control/send` 가 relay 를 수행할 수
-    //   있다(에이전트 spawn·send 이전에 완료). accept loop 이후의 어떤 send 도 채워진 슬롯을 본다.
     manager_slot.set(manager.clone());
 
-    // 6.4) C2: idle 게이트 조립(ADR-0104 결정 3 · ADR-0113) — 코어의 턴 관측 표를 읽어 우편 정책
-    //    (positive-knowledge-only · 30분 상한)으로 답하는 게이트. 관측 자체는 코어가 출력 pump 에서
-    //    직접 적재하므로 여기서 배선할 것이 없고, 턴 종료 push 는 status sink wrapper 가 도어벨로
-    //    중계한다(messaging_host::MessagingFlushSink::turn_ended). 게이트는 아래 MessagingService 가
-    //    주입 전에 조회한다.
-    //    도어벨 출구(ChannelIdleNotifier)는 그 wrapper 와 같은 Idle coalescer 를 공유한다(fix 10).
+    // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
+    //    것이 없다★.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
@@ -646,11 +505,7 @@ pub async fn run() -> Result<(), i32> {
         idle_notifier.clone(),
     ));
 
-    // 6.5) C1: MessagingService 조립(발송 3분기·flush·sweep). manager 를 DeliveryPort 로 감싸고
-    //    control_registry(봉투 포맷·배달 관측)를 공유한다 — handle_send·flush sink 와 같은 Arc.
-    //    C2: idle 게이트(busy)를 함께 주입 — busy 수신자는 주입 대신 파킹된다(spec §5).
-    //    C2 리뷰 fix 11: flush 도어벨(같은 채널)도 주입 — 자가치유·FIFO 합류의 배치 blocking write 가
-    //    발신 스레드(MCP/HTTP 워커)에서 실행되지 않게 flush 레인으로 넘긴다.
+    // 6.5) MessagingService 조립.
     let messaging = Arc::new(
         messaging_host::messaging_for_manager_gated(
             manager.clone(),
@@ -659,22 +514,14 @@ pub async fn run() -> Result<(), i32> {
         )
         .with_flush_trigger(idle_notifier.clone()),
     );
-    // 슬롯 주입 → 이제 send/flush 가 서비스에 닿는다(accept loop·에이전트 등장 이전에 완료).
     messaging_slot.set(messaging.clone());
 
-    // 6.6) C1 TTL sweep task — 주기적으로 만료 파킹분을 걷어 ledger `expired` 로 남긴다(spec §5). 데몬
-    //    수명 동안 도는 long-lived tokio task(accept loop 와 나란히). ★주기 = 60s(내부 선택 — 보고)★:
-    //    TTL(24h)에 비해 촘촘해 만료가 크게 지연되지 않고, 극저 메시지율이라 부하가 무의미하다.
-    //    ★C3 이후 sweep 은 "순수 조작" 이 아니다(리뷰 fix 8 — 옛 주석 보정)★: 만료 장부화에 더해
-    //    **기한 초과 request 통지**를 만든다. 그 경로는 ① 로스터 스냅샷 1회(list_agents — 짧은 락 후 clone)
-    //    ② notice 파킹(짧은 messaging 락) ③ flush 도어벨(논블록 채널 send) 이다. ★여전히 executor 를
-    //    막지 않는 이유★: 자식 stdin **blocking write 를 하지 않는다** — 실제 주입은 도어벨을 받은 flush
-    //    레인이 blocking pool 에서 한다(service.rs `deliver_notice` 주석). 그래서 `spawn_blocking` 없이
-    //    이 async task 에 남겨도 안전하고, abort 도 즉시 먹는다.
-    //    ★C2 round-3 finding 4: 같은 주기가 **busy 상한 sweep** 도 돈다★ — 턴 종료 신호가 영영 오지 않는
-    //    비정상 턴(파싱 실패·decoder 이상)은 busy 판정을 영구화해 그 수신자 앞 배달을 TTL 까지 막는다.
-    //    `BUSY_MAX_TURN`(30분) 을 넘긴 잔해를 idle 로 판정하고 그 id 를 flush 도어벨로 깨운다(busy.rs 헤더 —
-    //    fail-open 안전 밸브).
+    // 6.6) 유지보수 sweep task(데몬 수명 동안 도는 long-lived tokio task).
+    //    ★주기 = 60s(내부 선택 — 보고)★: TTL(24h)에 비해 촘촘해 만료가 크게 지연되지 않고, 극저
+    //    메시지율이라 부하가 무의미하다.
+    //    ★`spawn_blocking` 없이 async task 로 두는 근거★: 두 sweep 어느 쪽도 자식 stdin blocking write 를
+    //    하지 않는다(실제 주입은 도어벨을 받은 flush 레인 몫 — service.rs `deliver_notice` 주석). 그래서
+    //    abort 도 즉시 먹는다.
     //    ★reply_by 하한과의 결합★: 기한 초과 판정 해상도가 곧 이 주기다 — ingress 의 `MIN_REPLY_BY_SECS`
     //    (1분)가 이 값과 짝이므로, 주기를 바꾸면 그 하한도 함께 봐야 한다.
     const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -706,15 +553,7 @@ pub async fn run() -> Result<(), i32> {
         }
     });
 
-    // 6.7) finding 5: flush worker task — MessagingFlushSink 가 채널로 보낸 등장/epoch flush 대상을 소비해
-    //    실제 flush_for(messaging 락 + inject blocking write)를 수행한다. status-sink 콜백을 blocking write
-    //    에서 떼어내 spawn/reap/프론트 업데이트가 배치 flush 에 물리지 않게 한다(sweep task 옆, 종료 시 abort).
-    //    C2: 같은 worker 가 턴 종료 도어벨(Idle)도 집행한다 — blocking write 를 콜백 밖으로 모으는 단일 지점.
-    //    C2 리뷰 fix 3: worker 는 2-레인이다 — 수신 레인이 채널을 비우고 배달(Appear/Idle)은 flush 레인이
-    //    직렬 처리한다(막힌 stdin write 가 수신을 세우지 않게).
-    //    ★round-3 finding 1: 두 레인 task 를 **여기서 함께 소유**한다★(`spawn_flush_worker`) — 옛 구현은
-    //    레인을 worker future 안에서 spawn 해, 종료 시 main abort 가 레인 핸들을 detach 시키고 5s belt 가
-    //    blocking 없는 쪽만 감시했다(진짜 blocking inject 는 레인에 있다 → 런타임 drop 이 hang 가능).
+    // 6.7) flush worker task(sweep task 옆 — 종료 시 abort).
     let flush_worker = messaging_host::spawn_flush_worker(
         flush_rx,
         messaging_host::FlushWiring {
@@ -724,10 +563,9 @@ pub async fn run() -> Result<(), i32> {
     );
 
     // 7) auth 비교용 토큰을 Arc 로 보관(daemon.json 에 token 을 move 하므로 그 전에 공유본을 뜸).
-    //    보안: 이 값은 로그/외부 노출 금지(handle_connection 내부 비교 전용).
     let expected_token = Arc::new(token.clone());
 
-    // 8) daemon.json atomic 기록. 토큰을 포함하나 파일에만 — 로그엔 port/pid 만.
+    // 8) daemon.json 기록.
     let start_time =
         engram_dashboard_core::agent::platform::current_process_start_time().unwrap_or(0);
     let info = engram_dashboard_net::portfile::DaemonInfo {
@@ -740,9 +578,6 @@ pub async fn run() -> Result<(), i32> {
     };
     if let Err(e) = engram_dashboard_net::portfile::write_atomic(&daemon_path, &info) {
         tracing::error!("daemon.json 기록 실패: {e}");
-        // ADR-0086 F5: 여기서 Err 로 반환하면 mcp_server_handle(Some)이 스코프 종료로 drop 되며
-        //   McpServerHandle::drop 이 cancel 토큰을 발화해 detached serve 태스크를 확실히 내린다
-        //   (프로세스 종료가 대개 무의미하게 만들지만 태스크 누수를 airtight 하게 막는다).
         return Err(1);
     }
     tracing::info!(
@@ -753,68 +588,50 @@ pub async fn run() -> Result<(), i32> {
         "데몬 시작 — daemon.json 기록 완료"
     );
 
-    // 9) 복원은 blocking(3s 조기종료 윈도·stagger). spawn_blocking 으로 async executor 보호.
-    // ★자동 부팅 resume 기본 OFF (2026-07-09, 사용자 결정)★ — 부팅 시 auto_restore=true 프로필을
+    // 9) ★자동 부팅 resume 기본 OFF (2026-07-09, 사용자 결정)★ — 부팅 시 auto_restore=true 프로필을
     //   전부 되살리던 mgr.restore_all() 을 비활성화한다. 기본 = "부팅 자동 복원 안 함"(이벤트성으로
     //   꼭 떠야 하는 일부만 명시 복원). auto_restore 필드·reaper disposition·restore_all() 구현은
     //   그대로 유지(호출만 끔) — 특정 에이전트 이벤트성 복원은 향후 명시 command(RestoreAgents 류)에서
     //   restore_all() 을 부른다. handle 은 아래 abort/await 계약 유지용 no-op.
     //   (ADR-0016 "부팅 복원" 기본을 이 stopgap 이 뒤집음 — 정식 opt-in 설계 시 ADR 로 박을 것.)
-    let restore_handle = tokio::task::spawn_blocking(|| {
-        // manager.restore_all();  // ← 자동 부팅 복원 비활성 (위 주석)
-    });
+    let restore_handle = tokio::task::spawn_blocking(|| {});
 
     // 10) 종료 신호 채널(watch). StopDaemon 명령이 이 watch 로 종료를 트리거한다.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // 11) accept loop(운영: Ctrl-C 활성). main 과 테스트가 같은 run_accept_loop 를 공유한다.
+    // 11) accept loop.
     tracing::info!("accept loop 시작(WS 핸들링 활성)");
     run_accept_loop(
         listener,
         wiring,
         multiview,
-        control_registry, // ADR-0096: 봉투 포맷 전역 상태 거처(handle_send 와 같은 Arc)
-        messaging_slot.clone(), // ADR-0116: DeleteProfile 삭제 정리 훅(늦은 주입 슬롯 — 이미 채워져 있다)
+        control_registry,
+        messaging_slot.clone(),
         expected_token,
         shutdown_tx,
         shutdown_rx,
-        true,                       // 운영: Ctrl-C graceful 종료 활성
-        KeepaliveConfig::default(), // 운영 기본 keepalive(20s/50s)
+        true, // 운영: Ctrl-C graceful 종료 활성
+        KeepaliveConfig::default(),
     )
     .await;
 
-    // 12) graceful 종료. 먼저 in-flight restore 를 abort 해 shutdown_all 과의 경합을 막는다.
+    // 12) graceful 종료.
     restore_handle.abort();
-    let _ = restore_handle.await; // abort/완료 결과 무시(Cancelled 또는 Ok)
+    let _ = restore_handle.await;
 
-    // C1: TTL sweep task 종료(데몬 수명 동안 도는 long-lived task — 여기서 abort). 인메모리 파킹이라
-    //    남은 만료 처리는 불요(프로세스 종료 = 상태 소멸, spec §0 "영속화 없음"). sweep 은 짧은 락 조작 +
-    //    로스터 스냅샷 + 논블록 도어벨뿐이라(6.6 주석 — C3 이후 "순수 조작" 은 아니지만 blocking write 는
-    //    여전히 없다) abort 가 항상 즉시 먹는다(flush worker 와 다른 점).
+    // ★남은 만료 처리는 불요★: 파킹은 인메모리라 프로세스 종료 = 상태 소멸이다(spec §0 "영속화 없음").
+    //    sweep 은 blocking write 를 하지 않으므로(6.6) abort 가 항상 즉시 먹는다 — flush worker 와 다르다.
     sweep_task.abort();
     let _ = sweep_task.await;
 
     // ★종료 순서(BLOCK — round-3 finding 1)★: 에이전트 정리(shutdown_all)를 **flush worker 종료보다
-    //   먼저** 한다. 왜: flush worker 는 flush_for 안에서 inject = transport.send_input 을 부르는데,
-    //   그건 자식 stdin 으로의 **동기 blocking write_all+flush**다(pty.rs:302-308 / stdio.rs:322-332 —
-    //   논블록 채널 send 가 아니라 실제 파이프 write). worker 는 이 blocking 을 spawn_blocking 으로 던지지만
-    //   (round-4 finding 1 — executor 굶주림 격리, messaging_host::run_flush_worker), spawn_blocking 클로저 자체는
-    //   abort 불가다 — worker 의 .await 를 abort 해도 blocking pool 스레드의 write_all 은 자식이 stdin 을
-    //   안 비우고 파이프 버퍼가 가득 차면 계속 걸려 있다(tokio abort 는 .await 지점에서만 취소되지, blocking
-    //   syscall 중인 pool 스레드는 못 끊는다). 그래서 abort 를 flush 보다 먼저 걸고 await 하면 데몬 종료가
-    //   영영 hang 한다. shutdown_all 이 자식을 kill 하고 파이프를 닫으면 막힌 write 가 에러로 풀려 pool
-    //   스레드가 flush_for 를 빠져나온다 → 그 다음 abort/await 가 먹는다. (spawn_blocking 은 executor
-    //   굶주림만 없앴을 뿐 이 종료 순서 의존은 그대로 — pool 스레드 회수는 여전히 자식 kill 에 달렸다.)
+    //   먼저** 한다. 자식이 살아 stdin 을 안 비우면 flush 의 blocking write 는 abort 로 끊기지 않으므로,
+    //   순서를 뒤집으면 데몬 종료가 영영 hang 한다(잔여 분석 = `FlushWorkerHandles::shutdown`).
     let mgr = manager.clone();
     if let Err(e) = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await {
         tracing::warn!("shutdown_all join 실패: {e}");
     }
 
-    // finding 5/1: flush worker 종료(**두 레인 모두** — round-3 finding 1). 위 shutdown_all 로 막힌 inject 가
-    //   이미 풀렸으므로 abort 가 먹는다. ★belt★: 각 레인 join 을 5s 타임아웃으로 감싼다 — abort 후에도 어떤
-    //   이유로 안 끝나면(예측 못 한 blocking) 데몬 종료를 hang 시키는 대신 warn 후 detach 한다(프로세스 종료가
-    //   그 스레드를 회수하므로 안전). ★배달 레인이 belt 안에 있는 게 핵심★: 모든 blocking inject 가 그쪽에
-    //   있으므로, 옛 구현처럼 레인을 detach 하면 belt 가 빈 껍데기를 감시하게 된다. ADR-0006(종료 인과).
     flush_worker.shutdown().await;
 
     // ADR-0086: 제어 채널 MCP 서버 graceful 종료(에이전트 정리 후 — 남은 세션도 함께 정리된다).
@@ -825,70 +642,44 @@ pub async fn run() -> Result<(), i32> {
 
     // daemon.json 은 남겨둔다 — 다음 부팅이 stale 판정으로 무시한다.
     tracing::info!("데몬 종료 완료");
-    // _guard 가 여기서 drop 되며 mutex 해제.
     Ok(())
 }
 
 // ── 테스트용 서버 기동 헬퍼 ───────────────────────────────────────────────────────
 
-/// in-process 로 뜬 테스트 서버 핸들. drop 만으로도 서버를 내리지만(shutdown 신호 + abort),
-/// 누수 없는 정리를 위해 테스트는 끝에서 `shutdown().await` 를 권장한다.
+/// in-process 로 뜬 테스트 서버 핸들. 좀비 PTY 를 남기지 않으려면 테스트가 끝에서 반드시
+/// `shutdown().await` 를 부른다 — drop 은 accept loop 만 끝내고 자식 정리를 하지 않는다.
 ///
-/// ★격리 설계★:
-/// - bind 는 127.0.0.1:0 → 실제 포트(`port`)를 OS 가 할당(테스트 병렬 실행 시 충돌 없음).
-/// - token 은 테스트가 아는 값(`token`)을 직접 주입 — daemon.json·파일 IO 없이 auth 검증.
-/// - manager 는 in-memory ProfileStore 로 배선 → 디스크/Embedded 의 agents.json 과 격리.
-/// - 단일 인스턴스 가드·daemon.json·restore_all 은 ★의도적으로 생략★(실프로세스 전용 관심사).
-///   그 경로는 `tests/ws_e2e.rs` 의 #[ignore]/harness 가 실제 .exe 로 검증한다.
+/// 단일 인스턴스 가드·daemon.json 은 ★의도적으로 생략★(실프로세스 전용 관심사). 그 경로는
+/// `tests/ws_e2e.rs` 의 #[ignore]/harness 가 실제 .exe 로 검증한다.
 pub struct TestServerHandle {
-    /// OS 가 할당한 실제 포트(클라가 ws://127.0.0.1:{port} 로 붙는다).
     pub port: u16,
-    /// 이 서버가 기대하는 auth 토큰(테스트가 아는 값).
     pub token: String,
-    /// 에이전트 spawn/kill 등 직접 조작용(테스트가 결정적 출력 agent 를 띄울 때).
     pub manager: Arc<AgentManager>,
-    /// accept loop task 핸들 — shutdown 시 join.
     accept_handle: tokio::task::JoinHandle<()>,
-    /// accept loop 종료 신호(watch). shutdown() 이 true 로 보낸다.
     shutdown_tx: watch::Sender<bool>,
-    /// finding 5: flush worker 2-레인 핸들 — shutdown 시 둘 다 abort + belt(운영 run() 과 동일 패턴,
-    ///   round-3 finding 1: 배달 레인을 detach 하지 않는다).
     flush_worker: messaging_host::FlushWorkerHandles,
 }
 
 impl TestServerHandle {
-    /// 서버를 graceful 하게 내린다: 종료 신호 → accept loop join → **전 에이전트 kill → flush worker
-    /// 종료**(이 순서가 load-bearing). 좀비 PTY 방지를 위해 shutdown_all 까지 동기 대기한다.
+    /// 서버를 graceful 하게 내린다. **전 에이전트 kill → flush worker 종료** 순서가 load-bearing 이며
+    /// (근거 = run() 종료 주석), 좀비 PTY 방지를 위해 shutdown_all 까지 동기 대기한다.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
         let _ = self.accept_handle.await;
-        // ★종료 순서(BLOCK — round-3 finding 1, run() 미러)★: shutdown_all 을 flush worker 종료보다
-        //   **먼저** 한다. flush worker 는 flush_for→inject 에서 자식 stdin 으로 동기 blocking write 를
-        //   하는데(pty.rs/stdio.rs), 이제 그걸 spawn_blocking 으로 던진다(round-4 finding 1 — executor
-        //   굶주림 격리). 하지만 spawn_blocking 클로저는 abort 불가라, 자식이 살아 stdin 을 안 비우면 pool
-        //   스레드가 write 에 걸려 worker abort 후에도 안 끝난다. shutdown_all 이 먼저 자식을 kill·파이프를
-        //   닫아 막힌 write 를 에러로 풀어야 pool 스레드가 빠져나온다(굶주림만 없앴지 이 순서 의존은 그대로).
         let mgr = self.manager.clone();
         let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
-        // flush worker 종료(두 레인). shutdown_all 로 막힌 inject 가 풀렸으므로 abort 가 먹는다. 각 레인
-        //   join 은 5s belt(round-3 finding 1 — 배달 레인을 detach 로 흘리지 않는다).
         self.flush_worker.shutdown().await;
     }
 }
 
-/// in-process 테스트 서버 기동. 127.0.0.1:0 bind → 실제 포트 + 알려진 토큰 + 실제
-/// AgentManager(in-memory store) + DaemonStatusSink 를 배선하고 accept loop 를 tokio task 로 띄운다.
-///
-/// ★main 과의 공유★: accept loop 본체(`run_accept_loop`)와 데몬 배선(`build_daemon_wiring_with_store`)을
-/// 운영 경로와 같은 함수로 호출한다 — 테스트가 검증하는 코드 = 실제 도는 코드.
 pub async fn start_test_server() -> std::io::Result<TestServerHandle> {
-    // in-memory store — 디스크/Embedded agents.json 과 격리. ProfileStore trait 구현체.
     let store: Arc<dyn ProfileStore> = Arc::new(MemProfileStore::default());
     start_test_server_with_store(store).await
 }
 
-/// keepalive 주입형 — keepalive(half-open 감지) 동작을 검증하는 테스트가 짧은 ping/idle 값을
-/// 끼운다(상수 하드코딩 회피 — 테스트가 수십 초 걸리지 않게). 운영 기본은 위 start_test_server.
+/// keepalive 주입형 — keepalive(half-open 감지) 동작을 검증하는 테스트가 짧은 ping/idle 값을 끼운다
+/// (운영 기본값이면 그 테스트가 수십 초 걸린다).
 pub async fn start_test_server_with_keepalive(
     keepalive: KeepaliveConfig,
 ) -> std::io::Result<TestServerHandle> {
@@ -900,11 +691,9 @@ pub async fn start_test_server_with_keepalive(
 pub async fn start_test_server_with_store(
     store: Arc<dyn ProfileStore>,
 ) -> std::io::Result<TestServerHandle> {
-    // keepalive 미관심 테스트는 운영 기본값 사용.
     start_test_server_inner(store, KeepaliveConfig::default()).await
 }
 
-/// store + keepalive 둘 다 주입하는 내부 구현(공유). 위 공개 헬퍼들이 이걸 호출한다.
 async fn start_test_server_inner(
     store: Arc<dyn ProfileStore>,
     keepalive: KeepaliveConfig,
@@ -922,20 +711,17 @@ async fn start_test_server_inner(
     //   제어 채널을 배선하지 않으므로(아래 Noop) accept loop 전용 standalone registry 를 새로 만든다 —
     //   같은 Arc 라 dispatch 가 쓴 값을 그 서버 수명 동안 관측할 수 있다(운영은 control_registry 공유).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
-    // 프리셋 store 는 테스트마다 새 in-memory(디스크 비오염). 프리셋 persist 를 검증하는 테스트는
-    // 별도 store 주입형이 필요하면 추후 추가한다(현재 프리셋 unit 은 core 에서 격리 검증).
+    // 프리셋 persist 를 검증하는 테스트는 없다 — 필요해지면 store 주입형을 추가한다(현재 프리셋 unit 은
+    //   core 에서 격리 검증).
     let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
-    // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 별도 control::mcp_server 테스트가 담당).
+    // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 control::mcp_server 쪽이 담당).
     let control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel> =
         Arc::new(engram_dashboard_core::agent::types::NoopControlChannel);
-    // C1: MessagingFlushSink 용 messaging 슬롯. WS 테스트는 send/flush 를 검증하지 않지만 status sink
-    //   wrapper 가 채널을 요구하므로 배선하고 manager 조립 후 서비스를 채운다(부재여도 worker 가 flush 스킵).
+    // WS 테스트는 send/flush 를 검증하지 않지만 status sink wrapper 가 채널을 요구하므로 메시징 배선을
+    //   함께 세운다.
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
-    // finding 5: flush 채널 + worker(운영 run() 과 동일 패턴). status 콜백은 대상만 push, worker 가 flush.
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
-    // C2 리뷰 fix 10: 운영과 동일하게 Idle coalescer 를 sink/flush 레인이 공유한다.
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
-    // 운영 run() 과 같은 모양 — manager + 연결 레지스트리를 한 덩이로 받는다(ADR-0129 `DaemonWiring`).
     let wiring = build_daemon_wiring_with_store(
         store,
         preset_store,
@@ -944,8 +730,7 @@ async fn start_test_server_inner(
         idle_coalescer.clone(),
     );
     let manager = wiring.manager.clone();
-    // C2: idle 게이트(운영 run() 과 동일 배선). WS 테스트는 메시징을 검증하지 않지만, 배선을 운영과
-    //   동일하게 유지해 "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
+    // ★배선을 운영 run() 과 동일하게 유지한다★ — "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
         idle_coalescer.clone(),
@@ -954,7 +739,6 @@ async fn start_test_server_inner(
         manager.clone(),
         idle_notifier.clone(),
     ));
-    // 서비스 주입(manager 를 감싸므로 조립 후). WS 테스트에선 파킹이 없어 flush 는 사실상 no-op.
     messaging_slot.set(Arc::new(
         messaging_host::messaging_for_manager_gated(
             manager.clone(),
@@ -963,7 +747,6 @@ async fn start_test_server_inner(
         )
         .with_flush_trigger(idle_notifier),
     ));
-    // round-3 finding 1: 운영 run() 과 동일하게 두 레인을 핸들로 소유한다(TestServerHandle::shutdown 이 내림).
     let flush_worker = messaging_host::spawn_flush_worker(
         flush_rx,
         messaging_host::FlushWiring {
@@ -980,8 +763,8 @@ async fn start_test_server_inner(
                 listener,
                 wiring,
                 multiview,
-                control_registry, // ADR-0096: standalone 봉투 포맷 상태 거처(테스트 accept loop 전용)
-                messaging_slot, // ADR-0116: DeleteProfile 삭제 정리 훅(테스트 조립도 같은 슬롯을 공유)
+                control_registry,
+                messaging_slot,
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,
@@ -1002,8 +785,7 @@ async fn start_test_server_inner(
     })
 }
 
-/// 테스트 전용 in-memory ProfileStore. save 를 받아 보관하고 load 로 돌려준다(디스크 IO 없음).
-/// 운영의 FileProfileStore 를 대신해 테스트 격리(디스크/Embedded 비오염)를 만든다.
+/// 운영의 `FileProfileStore` 를 대신해 테스트 격리(디스크/Embedded 비오염)를 만든다.
 #[derive(Default)]
 struct MemProfileStore {
     saved: std::sync::Mutex<Vec<engram_dashboard_core::agent::profile::AgentProfile>>,
@@ -1018,8 +800,7 @@ impl ProfileStore for MemProfileStore {
     }
 }
 
-/// 테스트 전용 in-memory PresetStore(ADR-0061). MemProfileStore 의 프리셋판 — 디스크 IO 없이
-/// 프리셋 배선(PresetRegistry) 을 격리한다. 운영의 FilePresetStore 를 대신한다.
+/// `MemProfileStore` 의 프리셋판 — 운영의 `FilePresetStore` 를 대신한다.
 #[derive(Default)]
 struct MemPresetStore {
     saved: std::sync::Mutex<Vec<engram_dashboard_core::agent::preset::Preset>>,
@@ -1053,16 +834,11 @@ mod tests {
 
     #[test]
     fn tokens_are_unique() {
-        // CSPRNG 라 연속 호출이 충돌하지 않아야 한다(난수성 기본 확인).
         let a = generate_token().unwrap();
         let b = generate_token().unwrap();
         assert_ne!(a, b);
     }
 
-    // resolve_data_dir 는 discovery 의 단일 출처(default_data_dir)에 위임한다(ADR-0024/0029).
-    // 디버그 빌드(테스트는 항상 디버그)에서 env override 가 없으면 repo 루트의 `.engram-data` 로
-    // 끝나야 한다 — app(src-tauri)과 같은 폴더를 가리키는 불변식. (릴리즈는 %APPDATA% 이며 분기
-    // 자체는 discovery 단위테스트가 헬퍼로 검증한다.)
     #[test]
     fn resolve_data_dir_delegates_to_discovery_local_dir() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1078,15 +854,12 @@ mod tests {
             dir.ends_with(".engram-data"),
             "디버그(override 없음)에서 `.engram-data` 로 끝나야(app 과 동일 폴더): {dir:?}"
         );
-        // discovery 의 단일 출처와 바이트 단위로 일치해야(app·daemon 일치 불변식).
         assert_eq!(
             dir, delegated,
             "resolve_data_dir 은 discovery::default_data_dir 와 동일해야"
         );
     }
 
-    // ENGRAM_DATA_DIR override(테스트 격리 탈출구) 가 resolve_data_dir 까지 흘러야 한다 — 통합 테스트
-    // (ws_e2e.rs)가 직접-spawn 데몬을 임시 디렉토리로 보내 운영 `.engram-data` 오염을 막는 메커니즘.
     #[test]
     fn resolve_data_dir_honors_env_override() {
         let _g = ENV_LOCK.lock().unwrap();
