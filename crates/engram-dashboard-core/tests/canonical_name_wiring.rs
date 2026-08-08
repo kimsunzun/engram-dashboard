@@ -1,6 +1,6 @@
 //! canonical 이름 **배선** 통합테스트(ADR-0101 WYSIWYA — 생산 경로 회귀 그물).
 //!
-//! ★왜 이 파일이 따로 있나(뮤테이션 프로브 D9-b)★: `agent/name.rs` 의 파생 테스트 9개는 헬퍼를
+//! ★왜 이 파일이 따로 있나(뮤테이션 프로브 D9-b)★: `agent/name.rs` 의 파생 테스트는 헬퍼를
 //!   **직접** 부른다 — 그래서 생산 코드가 그 헬퍼를 **쓰지 않게 되어도** 전부 초록이다. 실제로
 //!   `manager::resolve_canonical_name` 에 다음 세 뮤테이션을 넣어도 core 290 + daemon 412 테스트가 모두
 //!   통과했다: ① `session.cwd` 대신 `profile.cwd` ② 가드 있는 `canonical_name_or_id_fallback` 대신
@@ -9,17 +9,14 @@
 //!
 //! ★그래서 여기서는 헬퍼를 부르지 않는다★: 실 세션을 스폰해 **manager 의 공개 투영**
 //!   (`spawn_agent` 반환 `AgentInfo.name` · `list_agents()` · `canonical_name(id)`)만 본다. 세 뮤테이션이
-//!   각각 다른 케이스에서 붙잡히도록 케이스를 갈랐다:
-//!     - `name` 필드 ≠ 파생 이름 → ③ 적출
-//!     - 상대 cwd(`"."`) → ① 적출(profile.cwd basename = `"."`, session.cwd basename = 실 디렉터리명)
-//!     - 공백-only override → ② 적출(`resolve_display_name` 은 `"   "` 를 그대로 이름으로 쓴다)
+//!   각각 다른 케이스에서 붙잡히도록 케이스를 갈랐다.
 //!
 //! ★잠듦 파킹 키와의 관계(ADR-0116 결정 1)★: 잠든 프로필의 이름은
 //!   `AgentProfile::canonical_name_when_live()` 가 파생하고, 그 값은 **여기서 단언하는 산 이름과 같아야**
 //!   한다(다르면 파킹 키와 복원 후 이름이 어긋나 편지가 24h TTL 로 조용히 만료된다). 그래서 각 케이스는
 //!   두 파생이 **같은 문자열**을 내는지도 함께 못 박는다 — 한쪽만 바뀌면 여기서 깨진다.
 //!
-//! Windows 전용(cmd.exe 스폰)이라 `#![cfg(windows)]`.
+//! Windows 전용 — cmd.exe 를 스폰한다.
 // ADR-0101 / ADR-0116
 
 #![cfg(windows)]
@@ -79,8 +76,7 @@ fn idle_shell(name: &str, cwd: PathBuf) -> AgentProfile {
     )
 }
 
-/// manager 의 **세 공개 투영**이 같은 이름을 내는지 확인하고 그 값을 돌려준다(하나만 보면 다른 경로가
-/// 갈렸어도 안 잡힌다 — `agent_info`/`canonical_name` 은 같은 코어를 써야 한다는 ADR-0101 계약).
+/// 하나만 보면 다른 경로가 갈렸어도 안 잡힌다 — 그래서 셋을 다 본다.
 fn projected_name(manager: &AgentManager, spawned: &AgentInfo) -> String {
     let listed = manager
         .list_agents()
@@ -105,7 +101,6 @@ fn the_stored_profile_name_field_is_never_used_as_the_routing_address() {
     //   문자열이라 **종종 경로**다. 그걸 이름으로 쓰면 트리 표시명(basename)과 라우팅 주소가 갈린다.
     let manager = make_manager("namefield");
     let cwd = std::env::temp_dir();
-    // name 필드를 파생 이름과 **의도적으로 다르게** 둔다(옛 버그가 이 값을 이름으로 썼다).
     let raw_name = "C:\\some\\raw\\name-field-must-not-be-the-address";
     let profile = idle_shell(raw_name, cwd.clone());
 
@@ -151,7 +146,6 @@ fn a_relative_cwd_derives_the_name_from_the_canonicalized_session_cwd() {
         .to_string_lossy()
         .to_string();
     assert_eq!(name, expected, "canonicalize 된 cwd 의 basename 이어야");
-    // 잠듦 파킹 키(같은 규칙이어야 — ADR-0116 결정 1)와 글자 그대로 일치.
     assert_eq!(
         profile.canonical_name_when_live(),
         name,
@@ -195,8 +189,7 @@ fn a_blank_display_name_override_is_ignored_by_the_production_path() {
 
 #[test]
 fn a_real_display_name_override_wins_over_the_cwd_basename() {
-    // 개명(RenameProfile) 시나리오 — override 가 있으면 그대로가 canonical 이름이고, 잠듦 파킹 키도 같다.
-    //   ★삭제 정리(ADR-0116 결정 3)의 전제★: 이 등식이 깨지면 정리가 엉뚱한 큐를 지목한다.
+    // ★삭제 정리(ADR-0116 결정 3)의 전제★: 이 등식이 깨지면 정리가 엉뚱한 큐를 지목한다.
     let manager = make_manager("override");
     let mut profile = idle_shell("ovr", std::env::temp_dir());
     profile.display_name = Some("Renamed-Boss".into());

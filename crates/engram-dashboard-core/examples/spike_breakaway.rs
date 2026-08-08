@@ -44,7 +44,7 @@ mod win {
         GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    /// 주어진 프로세스 핸들이 (어떤) Job 에 속해 있는지. job=None → "any job".
+    /// job=None → "any job".
     pub fn is_in_any_job(process: HANDLE) -> windows::core::Result<bool> {
         let mut result = BOOL(0);
         unsafe { IsProcessInJob(process, None, &mut result)? };
@@ -56,13 +56,11 @@ mod win {
         unsafe { GetCurrentProcess() }
     }
 
-    /// pid 로 조회 전용 핸들 open(쿼리 최소 권한). 호출자가 CloseHandle 책임 — 여기선
-    /// spike 라 프로세스 종료 시 OS 가 정리하므로 명시적 close 생략.
+    /// 호출자가 CloseHandle 책임 — 여기선 spike 라 프로세스 종료 시 OS 가 정리하므로 명시적 close 생략.
     pub fn open_for_query(pid: u32) -> windows::core::Result<HANDLE> {
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
     }
 
-    /// KILL_ON_JOB_CLOSE Job 생성.
     pub fn create_kill_on_close_job() -> windows::core::Result<HANDLE> {
         unsafe {
             let h = CreateJobObjectW(None, None)?;
@@ -82,8 +80,7 @@ mod win {
         unsafe { AssignProcessToJobObject(job, process) }
     }
 
-    /// 현재 프로세스가 속한 Job 의 LimitFlags 조회(hjob=None → 호출 프로세스의 현재 Job).
-    /// 반환: raw LimitFlags 비트. 실패 시 Err.
+    /// hjob=None → 호출 프로세스의 현재 Job.
     pub fn current_job_limit_flags() -> windows::core::Result<u32> {
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         let mut ret_len: u32 = 0;
@@ -175,7 +172,7 @@ fn run_diag() {
         let exe = std::env::current_exe().expect("current_exe");
         let marker_dir = std::env::temp_dir();
 
-        // 1. breakaway spawn — 자식을 부모 Job 에서 분리 시도.
+        // 1. breakaway spawn
         let marker_a = marker_dir.join("engram_spike_diag_a.txt");
         let _ = std::fs::remove_file(&marker_a);
         let flags = CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
@@ -203,7 +200,6 @@ fn run_diag() {
                 }
             }
             Err(e) => {
-                // spawn 자체가 막힘 = 부모 Job 이 breakaway 불허(JOB_OBJECT_LIMIT_BREAKAWAY_OK X)
                 println!(
                     "[A] breakaway spawn FAILED: {e} (errno={:?}) ⚠",
                     e.raw_os_error()
@@ -212,19 +208,18 @@ fn run_diag() {
             }
         }
 
-        // 2. fallback: cmd /c start /b — start 가 새 프로세스를 부모 job 밖에서 띄우는지.
+        // 2. fallback: cmd /c start /b
         let marker_c = marker_dir.join("engram_spike_diag_c.txt");
         let _ = std::fs::remove_file(&marker_c);
         let exe_str = exe.to_string_lossy().to_string();
         let marker_c_str = marker_c.to_string_lossy().to_string();
-        // cmd /c start "" /b <exe> child <marker>
         let spawn_c = Command::new("cmd")
             .args(["/c", "start", "", "/b", &exe_str, "child", &marker_c_str])
             .creation_flags(DETACHED_PROCESS)
             .spawn();
         match spawn_c {
             Ok(_) => {
-                // start 는 즉시 반환하고 손자가 뜬다. marker 가 곧 생기는지 확인.
+                // start 는 즉시 반환하고 손자가 뜬다.
                 std::thread::sleep(Duration::from_millis(800));
                 let alive = std::fs::read_to_string(&marker_c).unwrap_or_default();
                 println!(
@@ -283,8 +278,6 @@ fn run_wmikill(marker: &str) {
         let exe = std::env::current_exe().expect("current_exe");
         let exe_str = exe.to_string_lossy().replace('\'', "''");
         let marker_q = marker.replace('\'', "''");
-        // PowerShell 로 WMI Create 호출. WmiPrvSE 가 실제 부모 → 우리 Job 미상속.
-        // CommandLine 은 단일 문자열: "<exe>" child "<marker>"
         let ps = format!(
             "$cl = '\"{exe_str}\" child \"{marker_q}\"'; \
              $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = $cl }}; \

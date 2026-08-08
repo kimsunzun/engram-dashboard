@@ -5,7 +5,7 @@
 //   2. kill 시퀀스 후 drain(reader) 스레드가 5초 이내 EOF로 종료
 //   3. Job Object + KILL_ON_JOB_CLOSE 로 손자 프로세스까지 정리
 //
-// 실행: cd src-tauri && cargo run --example spike
+// 실행: cargo run -p engram-dashboard-core --example spike
 
 use std::io::Read;
 use std::sync::mpsc;

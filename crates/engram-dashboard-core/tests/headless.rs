@@ -1,12 +1,5 @@
 //! ② 격리 통합테스트 — AgentManager 전체 흐름을 실 셸 spawn 으로 단언 검증.
 //!
-//! (구 examples/headless.rs 이관 — "로그 eyeball" 을 RecordingSink 기반 명시 단언으로 전환.)
-//!
-//! 검증 기준(구 주석에서 단언으로 이전):
-//!   spawn(실 셸) → subscribe → 일정 시간 내 PTY out 1개 이상 수신 → write(echo) →
-//!   resize 성공 → kill → status 가 종점 Killed 도달 → kill 후 list count=0 →
-//!   kill→list 가 타임아웃(5s) 내 완료(hang 없음).
-//!
 //! 실 OS 프로세스(default shell)를 spawn 한다. 가볍고 named-mutex/전역 경합 없는 단일
 //! spawn 이라 default(자동 실행)로 둔다 — `cargo test -p engram-dashboard-core` 에 잡힌다.
 
@@ -29,15 +22,11 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
-// OutputSink + StatusSink 양쪽을 구현하는 기록형 테스트 sink.
-// 로그(eyeball) 대신 받은 출력 바이트와 status 전이를 Mutex<Vec<..>> 에 push 해 단언에 쓴다.
 
 #[derive(Clone)]
 struct RecordingSink {
     id: SinkId,
-    /// 수신한 PTY 출력 바이트 누적(전 프레임 concat). echo substring 검색용.
     output: Arc<Mutex<Vec<u8>>>,
-    /// 수신한 status 전이 순서. 종점/순서 단언용.
     statuses: Arc<Mutex<Vec<AgentStatus>>>,
 }
 
@@ -87,8 +76,7 @@ impl StatusSink for RecordingSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-/// 조건이 참이 될 때까지 짧게 폴링(최대 `timeout`). 실 PTY 출력은 비동기라 고정 sleep 대신
-/// 조건 폴링으로 빠르고 안정적으로 기다린다.
+/// 실 PTY 출력은 비동기라 고정 sleep 대신 조건 폴링으로 기다린다.
 fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -102,14 +90,11 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
 
 // ── FIX 6: 제어 채널 provision 레이스 가드 — 같은 id 동시 spawn 이 서로를 짓밟지 않는다 ──────────
 //
-// 테스트용 카운팅 ControlChannel: provision/revoke 횟수와 현재 산 (id,epoch) 토큰 수를 관측한다.
 // 실 DaemonControlChannel 없이 core 의 예약(SpawnReservation) 인과만 격리 검증한다(ADR-0012 seam).
 #[derive(Clone, Default)]
 struct CountingControl {
     live: Arc<Mutex<std::collections::HashSet<(AgentId, u32)>>>,
     provisions: Arc<std::sync::atomic::AtomicUsize>,
-    /// ADR-0099(FIX 5): provision 이 전달받은 `accepts_mcp_config` 플래그를 도착 순서대로 기록한다 —
-    ///   manager 가 backend capability 를 provision 으로 올바로 전달하는지 못박는다(옛 doubles 는 버렸다).
     seen_flags: Arc<Mutex<Vec<bool>>>,
 }
 
@@ -131,7 +116,7 @@ impl ControlChannel for CountingControl {
             config_path: None,
             send_exe: None,
             priming_file: None,
-            // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록(SpawnReservation 인과만 격리).
+            // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록.
             grants: vec![],
             // S18 D: 설정 조각도 이 테스트의 관심사가 아니다(spec 조립이 아니라 spawn 인과 격리).
             settings_file: None,
@@ -150,13 +135,8 @@ impl CountingControl {
 
 #[test]
 fn concurrent_same_id_spawn_does_not_clobber() {
-    // 같은 AgentId 프로필을 N 스레드가 동시에 spawn 한다. 예약 가드(SpawnReservation) + 이중-spawn
-    //   가드가 협력해 **정확히 하나만** 세션을 등록하고 나머지는 깨끗이 Err 로 거부돼야 한다(상대의
-    //   세션/자원을 짓밟지 않음).
-    // ★round-2 F3 반영★: 이 테스트는 shell 프로필을 쓴다 — shell 은 supports_control_channel=false 라
-    //   manager 가 provision 을 **아예 부르지 않는다**. 따라서 CountingControl.provisions 는 0 이고
-    //   live_count 도 0 이다(registry 미접촉). 여기서 검증하는 건 SpawnReservation 의 exactly-one-wins
-    //   인과 그 자체다(제어 채널 소비 backend 의 provision-race 는 그 가드가 동일하게 커버한다).
+    // 여기서 검증하는 건 SpawnReservation 의 exactly-one-wins 인과 그 자체다 — 제어 채널 소비
+    //   backend 의 provision-race 는 이 테스트가 다루지 않고, 그 가드가 동일하게 커버한다.
     let control = CountingControl::default();
     let control_dyn: Arc<dyn ControlChannel> = Arc::new(control.clone());
     let status_dyn: Arc<dyn StatusSink> = Arc::new(RecordingSink::new());
@@ -196,7 +176,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         false,
     );
 
-    // N 스레드 동시 spawn(같은 id). barrier 로 최대한 동시에 진입시킨다.
     const N: usize = 8;
     let barrier = Arc::new(std::sync::Barrier::new(N));
     let ok_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -215,7 +194,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         }
     });
 
-    // ★핵심(FIX 6)★: 정확히 하나만 성공해 세션을 등록했다(나머지는 예약/이중-spawn 가드로 거부).
     assert_eq!(
         ok_count.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -226,7 +204,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         1,
         "세션 맵에 정확히 1개(상대 세션을 짓밟지 않음)"
     );
-    // shell 은 provision 을 안 부른다(F3) — registry 미접촉. provision 호출 0, 산 토큰 0.
     assert_eq!(
         control.provisions.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -238,7 +215,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         "shell 경로는 산 제어 채널 토큰을 만들지 않는다(registry 미접촉)"
     );
 
-    // 정리: 성공한 세션 kill.
     let id = manager.list_agents()[0].id;
     manager.kill_agent(id).expect("kill ok");
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -251,7 +227,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
 #[derive(Clone, Default)]
 struct FailingControl {
     calls: Arc<std::sync::atomic::AtomicUsize>,
-    /// ADR-0099(FIX 5): provision 이 받은 `accepts_mcp_config` 를 기록 — claude 스폰이 true 를 전달하는지 pin.
     seen_flags: Arc<Mutex<Vec<bool>>>,
 }
 impl ControlChannel for FailingControl {
@@ -293,7 +268,6 @@ fn make_manager_with(control: Arc<dyn ControlChannel>) -> Arc<AgentManager> {
 
 #[test]
 fn shell_spawn_ignores_failing_control_channel() {
-    // shell(supports_control_channel=false) → provision 미호출 → 실패하는 채널이어도 스폰 성공.
     let control = FailingControl::default();
     let manager = make_manager_with(Arc::new(control.clone()));
     let profile = AgentProfile::new(
@@ -313,7 +287,6 @@ fn shell_spawn_ignores_failing_control_channel() {
         0,
         "셸 경로는 provision 을 호출하지 않아야(F3 backend-conditional)"
     );
-    // ADR-0099(FIX 5): shell 의 실 manager 계약 = provision 미호출 → 전달된 플래그도 없다(비어 있음).
     assert!(
         control.seen_flags.lock().unwrap().is_empty(),
         "shell → provision 미호출이라 전달된 accepts_mcp_config 플래그가 없어야"
@@ -325,8 +298,7 @@ fn shell_spawn_ignores_failing_control_channel() {
 
 #[test]
 fn claude_spawn_fails_closed_on_provision_error() {
-    // claude(supports_control_channel=true) → provision Err → transport open 전에 스폰 중단(fail-closed).
-    //   ★claude 바이너리 불요★: provision Err 가 `?` 로 조기 반환하므로 실제 프로세스 spawn 에 닿지 않는다.
+    // ★claude 바이너리 불요★: provision Err 가 `?` 로 조기 반환하므로 실제 프로세스 spawn 에 닿지 않는다.
     let control = FailingControl::default();
     let manager = make_manager_with(Arc::new(control.clone()));
     let profile = AgentProfile::new(
@@ -346,8 +318,7 @@ fn claude_spawn_fails_closed_on_provision_error() {
         1,
         "claude 경로는 provision 을 정확히 1회 호출해야"
     );
-    // ADR-0099(FIX 5): claude 는 MCP-capable(accepts_mcp_config=true) → manager 가 provision 에 true 를
-    //   전달해야 한다(backend::accepts_mcp_config 가 claude=true 를 반환하고 그 값이 배관을 타고 도착).
+    // ADR-0099(FIX 5): backend::accepts_mcp_config 가 claude=true 를 반환하고 그 값이 배관을 타고 도착.
     assert_eq!(
         *control.seen_flags.lock().unwrap(),
         vec![true],
@@ -364,12 +335,11 @@ fn manager_spawn_write_resize_kill() {
     let status_sink = RecordingSink::new();
     let status_dyn: Arc<dyn StatusSink> = Arc::new(status_sink.clone());
 
-    // 프로필 영속화는 임시 디렉토리(테스트별 unique), 세션 추적 비활성(shell 이라 세션 파일 없음).
+    // 세션 추적 비활성 — shell 이라 세션 파일이 없다.
     let store = Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-test-headless-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    // ADR-0061: 프리셋 레지스트리(이 테스트와 무관 — 빈 상태). 임시 디렉토리 store 로 배선.
     let preset_store = Arc::new(FilePresetStore::new(
         std::env::temp_dir().join(format!("engram-test-headless-preset-{}", Uuid::new_v4())),
     ));
@@ -384,7 +354,6 @@ fn manager_spawn_write_resize_kill() {
     ));
     let manager = AgentManager::new(status_dyn, profiles, presets, tracker);
 
-    // 1) spawn — 기본 셸(Fresh). 생성 직후 Running.
     let profile = AgentProfile::new(
         "headless".into(),
         AgentCommand::Shell {
@@ -399,24 +368,20 @@ fn manager_spawn_write_resize_kill() {
         .spawn_agent(&profile, SpawnMode::Fresh)
         .expect("spawn failed");
 
-    // spawn 직후 목록에 1개.
     assert_eq!(
         manager.list_agents().len(),
         1,
         "spawn 후 에이전트 1개여야 함"
     );
 
-    // 2) subscribe — 이후 PTY 출력이 RecordingSink.send 로 흘러온다.
     let out_sink = RecordingSink::new();
     let _sid = manager
         .subscribe(info.id, Arc::new(out_sink.clone()))
         .expect("subscribe failed");
 
-    // 3) 일정 시간(2s) 내 PTY 출력 1개 이상 수신(초기 프롬프트). eyeball → 단언.
     let got_output = wait_until(Duration::from_secs(2), || out_sink.output_len() > 0);
     assert!(got_output, "2s 내 PTY 초기 출력을 수신하지 못함");
 
-    // 4) stdin write — echo 결과가 출력에 보여야 함(셸 에코 또는 명령 실행 출력).
     manager
         .write_stdin(info.id, b"echo headless-test\r\n")
         .expect("write_stdin failed");
@@ -428,13 +393,8 @@ fn manager_spawn_write_resize_kill() {
         "echo 입력이 PTY 출력에 반영되지 않음(headless-test 미수신)"
     );
 
-    // 5) resize — 성공해야 함.
     manager.resize(info.id, 100, 30).expect("resize failed");
 
-    // 6) kill → 7) list count=0 가 타임아웃(5s) 내 완료되어야 함(hang 없음).
-    //    ADR-0019: 맵 제거가 reaper(비동기)로 옮겨졌다. kill_agent 는 join_pump(5s)까지만 동기로
-    //    기다리고, 실제 sessions 맵 제거·통지는 pump 가 보낸 ReapMsg 를 reaper 가 소비해 수행한다.
-    //    따라서 반환 직후가 아니라 폴링으로 "사라짐"을 단언한다(hang 없이 5s 내 완료).
     let kill_started = Instant::now();
     manager.kill_agent(info.id).expect("kill_agent failed");
     let removed = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -446,8 +406,7 @@ fn manager_spawn_write_resize_kill() {
         "kill→reap 가 5s 안에 끝나지 않음(hang 의심): {kill_elapsed:?}"
     );
 
-    // 8) status 가 종점 Killed 에 도달해야 함. 전이는 status_sink 에 기록됨.
-    //    종점 알림은 pump 단독(ADR-0005)이라 약간 비동기일 수 있어 폴링.
+    // 종점 알림은 pump 단독(ADR-0005)이라 약간 비동기일 수 있어 폴링.
     let reached_killed = wait_until(Duration::from_secs(2), || {
         matches!(status_sink.statuses().last(), Some(AgentStatus::Killed))
     });
@@ -456,7 +415,6 @@ fn manager_spawn_write_resize_kill() {
         reached_killed,
         "status 종점 Killed 미도달 — 전이 기록: {seq:?}"
     );
-    // 종점이 Killed 이고, 그 전에 Exiting 과도기를 거쳤어야 함(kill 인과: Exiting→Killed).
     assert!(
         seq.iter().any(|s| matches!(s, AgentStatus::Exiting)),
         "kill 전이에 Exiting 과도기가 없음: {seq:?}"
