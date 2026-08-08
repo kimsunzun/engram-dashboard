@@ -697,9 +697,6 @@ fn print_error(code: &str, hint: &str) {
 mod tests {
     use super::*;
 
-    /// 발송 경로 파싱 헬퍼 — 기존(C3) 테스트가 쓰던 `parse_args` 시그니처를 유지한다(서브커맨드 도입 후에도
-    /// 발송이 **기본 동사**임을 회귀 그물로 고정하는 효과가 있다). stdin 리더는 **패닉**을 꽂아, 리터럴
-    /// 본문 경로가 실수로 stdin 을 건드리면 즉시 드러나게 한다.
     fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         let parsed = parse_command(args)?;
         match materialize_body(parsed, || {
@@ -710,7 +707,6 @@ mod tests {
         }
     }
 
-    /// 문자열 슬라이스 → 인자 벡터(서브커맨드 테스트 편의).
     fn argv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -759,7 +755,6 @@ mod tests {
 
     #[test]
     fn parse_args_request_flag_takes_no_value() {
-        // `--request` 는 불리언 — 뒤 인자를 삼키면 안 된다(`--request --to bob` 이 깨진다).
         let a = vec![
             "--request".into(),
             "--to".into(),
@@ -810,8 +805,6 @@ mod tests {
 
     #[test]
     fn parse_args_does_not_validate_semantics_daemon_does() {
-        // ★의도적★: 상호배타(`--request` + `--reply-to`)·기간 표기 오류를 CLI 가 판정하면 MCP 입구와 반려
-        //   문구가 갈린다 — 그래서 형태만 보고 통과시키고 데몬(ingress)이 INVALID_SEND_ARGS 로 반려한다.
         let a = vec![
             "--to".into(),
             "bob".into(),
@@ -831,7 +824,6 @@ mod tests {
 
     #[test]
     fn build_request_body_omits_unset_contract_fields() {
-        // 통보 바디는 옛 `{to, body}` 와 **바이트 동형**이어야 한다(통보 경로 wire 회귀 0).
         let v: serde_json::Value =
             serde_json::from_str(&build_request_body(&plain("bob", "hi"))).expect("valid json");
         assert!(v.get("request").is_none(), "미지정 request 키 없음");
@@ -846,7 +838,6 @@ mod tests {
 
     #[test]
     fn build_request_body_maps_kebab_flags_to_snake_case_wire() {
-        // spec §1 표기 매핑 — 셸 플래그는 kebab(`--reply-by`), wire 필드는 snake(`reply_by`).
         let args = CliArgs {
             to: "bob".to_string(),
             body: "해줘".to_string(),
@@ -861,7 +852,6 @@ mod tests {
         assert!(v.get("reply-by").is_none(), "wire 는 snake_case 뿐");
     }
 
-    /// 테스트 편의 — 통보(C3 인자 없음) CliArgs.
     fn plain(to: &str, body: &str) -> CliArgs {
         CliArgs {
             to: to.to_string(),
@@ -879,14 +869,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&b).expect("valid json");
         assert_eq!(v["to"], "bob");
         assert_eq!(v["body"], "line1\n\"quoted\"");
-        // ★from 필드 없음★ — 신원은 토큰에서만(payload from 금지).
         assert!(v.get("from").is_none(), "요청에 from 필드가 없어야");
     }
 
     // ── exit code 매핑 ─────────────────────────────────────────────────────────────
     #[test]
     fn exit_code_delivered_2xx_is_zero() {
-        // spec §6 성공 shape: `{ id, results: [{to, status:"delivered"}] }` → exit 0.
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -898,7 +886,6 @@ mod tests {
 
     #[test]
     fn exit_code_pending_2xx_is_zero() {
-        // 파킹(pending)도 접수 성공 → exit 0(등장 시 배달 보장).
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -910,7 +897,6 @@ mod tests {
 
     #[test]
     fn exit_code_error_is_one() {
-        // 반려(error shape — results 없음) → exit 1.
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -928,7 +914,6 @@ mod tests {
     // ── 성공 shape 완전 검증(리뷰 fix 13) ────────────────────────────────────────────
     #[test]
     fn exit_code_empty_results_is_malformed_not_success() {
-        // `results: []` = 아무에게도 접수되지 않았다 — 예전엔 exit 0(가짜 성공)이었다.
         assert_eq!(
             exit_code_for_response(200, r#"{"id":"m-1","results":[]}"#),
             EXIT_MALFORMED_SUCCESS
@@ -963,12 +948,12 @@ mod tests {
     #[test]
     fn exit_code_bad_result_entry_is_malformed() {
         for body in [
-            r#"{"id":"m-1","results":[{"to":"bob","status":"exploded"}]}"#, // 어휘 밖 상태
-            r#"{"id":"m-1","results":[{"to":"","status":"delivered"}]}"#,   // 빈 to
-            r#"{"id":"m-1","results":[{"status":"delivered"}]}"#,           // to 없음
-            r#"{"id":"m-1","results":[{"to":"bob"}]}"#,                     // status 없음
-            r#"{"id":"m-1","results":[{"to":null,"status":"delivered"}]}"#, // to 가 null
-            r#"{"id":"m-1","results":["bob"]}"#,                            // 항목이 객체가 아님
+            r#"{"id":"m-1","results":[{"to":"bob","status":"exploded"}]}"#,
+            r#"{"id":"m-1","results":[{"to":"","status":"delivered"}]}"#,
+            r#"{"id":"m-1","results":[{"status":"delivered"}]}"#,
+            r#"{"id":"m-1","results":[{"to":"bob"}]}"#,
+            r#"{"id":"m-1","results":[{"to":null,"status":"delivered"}]}"#,
+            r#"{"id":"m-1","results":["bob"]}"#,
         ] {
             assert_eq!(
                 exit_code_for_response(200, body),
@@ -976,7 +961,6 @@ mod tests {
                 "성공 shape 위반은 2: {body}"
             );
         }
-        // 대조군: 한 항목만 깨져도 전체가 malformed(부분 통과 금지).
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -996,8 +980,7 @@ mod tests {
 
     #[test]
     fn exit_code_failed_row_is_still_an_accepted_send() {
-        // ★부분 진행(ADR-0111 결정 3)★: 한 수신자가 실패해도 **발송 자체는 접수**됐다 — exit 0 이고,
-        //   누구에게 안 갔는지는 발신자가 `results[]` 의 `code` 를 읽고 판단한다(자기교정 대상이 아니다).
+        // ★부분 진행(ADR-0111 결정 3)★
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -1005,7 +988,6 @@ mod tests {
             ),
             0
         );
-        // 전원 실패도 같은 shape·같은 판정(전체 반려로 승격하지 않는다 — spec §5).
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -1025,7 +1007,6 @@ mod tests {
 
     #[test]
     fn exit_code_error_shape_stays_plain_failure_not_malformed() {
-        // 반려는 **정상 실패**(1)여야 한다 — shape 결함(2)과 뭉개면 발신자가 자기교정 대상을 오판한다.
         assert_eq!(
             exit_code_for_response(
                 200,
@@ -1033,7 +1014,6 @@ mod tests {
             ),
             EXIT_FAILED
         );
-        // hint 는 선택 — status+code 만으로 검증된 반려다(발신 LLM 은 code 로 분기한다).
         assert_eq!(
             exit_code_for_response(200, r#"{"status":"error","code":"MAILBOX_FULL"}"#),
             EXIT_FAILED
@@ -1042,22 +1022,16 @@ mod tests {
 
     #[test]
     fn send_exit_code_never_reports_success_for_an_error_status_even_with_results() {
-        // ★round-2 리뷰 F4★: 옛 판정은 error-shape 검사를 "results 가 없을 때" 안에만 뒀다 — 그래서
-        //   **혼종** 응답(status:"error" 인데 results 도 있는)이 error 축을 건너뛰고 성공 검사로 흘러
-        //   exit 0 이 났다. 반려당한 발송을 성공으로 읽는 조용한 실패다. 표 = (body, 기대 exit).
         let cases: [(&str, i32); 7] = [
-            // ★핵심 회귀 — 옛 코드가 정확히 **exit 0** 을 내던 혼종★: id 도 있고 results 도 유효해서
-            //   성공 검사를 전부 통과했다(반려를 성공으로 읽음). 완전한 반려 shape 이므로 정상 실패(1).
             (
                 r#"{"status":"error","code":"MAILBOX_FULL","hint":"h","id":"m-1","results":[{"to":"bob","status":"delivered"}]}"#,
                 EXIT_FAILED,
             ),
-            // id 가 없는 혼종도 같은 축(반려)이다 — 옛 코드는 여기서 2 를 냈다(성공 shape 결함으로 오분류).
+            // 옛 코드는 이 혼종에 2 를 냈다(반려를 성공 shape 결함으로 오분류).
             (
                 r#"{"status":"error","code":"MAILBOX_FULL","hint":"h","results":[{"to":"bob","status":"delivered"}]}"#,
                 EXIT_FAILED,
             ),
-            // 혼종 + code 로 분기 불가 → 보고 대상(2).
             (
                 r#"{"status":"error","results":[{"to":"bob","status":"delivered"}]}"#,
                 EXIT_MALFORMED_SUCCESS,
@@ -1066,13 +1040,11 @@ mod tests {
                 r#"{"status":"error","code":"","results":[{"to":"bob","status":"delivered"}]}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
-            // results 없는 기존 두 갈래(회귀 고정).
             (
                 r#"{"status":"error","code":"BODY_TOO_LARGE","hint":"h"}"#,
                 EXIT_FAILED,
             ),
             (r#"{"status":"error"}"#, EXIT_MALFORMED_SUCCESS),
-            // 대조군: error 축이 아니면 정상 성공.
             (
                 r#"{"id":"m-1","results":[{"to":"bob","status":"delivered"}]}"#,
                 0,
@@ -1092,18 +1064,15 @@ mod tests {
 
     #[test]
     fn exit_code_2xx_that_is_neither_success_nor_valid_error_is_malformed() {
-        // ★fix 14★: `results` 가 없다고 전부 "반려" 는 아니다. 반려로 읽으려면 **검증된 error shape**
-        //   (`status:"error"` + 비지 않은 `code`)이어야 하고, 그 밖의 2xx JSON 은 shape 결함(2)이다 —
-        //   반려(1)로 뭉개면 발신 에이전트가 데몬 결함을 자기 인자 탓으로 오판해 무한 자기교정한다.
         for body in [
-            r#"{}"#,                                    // 빈 객체
-            r#"{"id":"m-x"}"#,                          // 성공 응답이 절반만 옴(results 누락)
-            r#"{"status":"error"}"#,                    // code 없음 → 분기 불가
-            r#"{"status":"error","code":""}"#,          // code 빈 문자열
-            r#"{"status":"error","code":7}"#,           // code 가 문자열이 아님
-            r#"{"code":"MAILBOX_FULL"}"#,               // status 없음
-            r#"{"status":"ok","code":"MAILBOX_FULL"}"#, // status 가 error 가 아님
-            r#"{"error":"boom"}"#,                      // 우리 계약 밖 error 표현
+            r#"{}"#,
+            r#"{"id":"m-x"}"#,
+            r#"{"status":"error"}"#,
+            r#"{"status":"error","code":""}"#,
+            r#"{"status":"error","code":7}"#,
+            r#"{"code":"MAILBOX_FULL"}"#,
+            r#"{"status":"ok","code":"MAILBOX_FULL"}"#,
+            r#"{"error":"boom"}"#,
         ] {
             assert_eq!(
                 exit_code_for_response(200, body),
@@ -1115,7 +1084,6 @@ mod tests {
 
     #[test]
     fn exit_code_malformed_classification_does_not_leak_into_non_2xx() {
-        // 비-2xx 는 body 모양과 무관하게 1(프레이밍 축) — fix 14 가 이 게이트를 건드리지 않았음을 고정한다.
         for body in [r#"{}"#, r#"{"id":"m-x"}"#, r#"{"status":"error"}"#, ""] {
             assert_eq!(
                 exit_code_for_response(503, body),
@@ -1127,7 +1095,6 @@ mod tests {
 
     #[test]
     fn exit_code_non_2xx_is_one_even_if_body_looks_ok() {
-        // ★F4★: 비-2xx 는 body 가 성공 shape 처럼 보여도 실패(프레이밍 오류를 성공으로 오인 방지).
         assert_eq!(
             exit_code_for_response(
                 500,
@@ -1168,7 +1135,6 @@ mod tests {
     // ── HTTP 응답 파싱(F4: status·헤더·프레이밍) ─────────────────────────────────────
     #[test]
     fn parse_response_content_length_body() {
-        // Content-Length 만큼만 body 로 취한다(초과 잔재 무시).
         let body = "{\"id\":\"m1\",\"results\":[]}";
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}EXTRA-GARBAGE",
@@ -1182,9 +1148,7 @@ mod tests {
 
     #[test]
     fn parse_response_short_body_is_incomplete() {
-        // ★M1★: Content-Length 가 100 인데 실제 body 는 그보다 짧게 도착(mid-body 절단) → INCOMPLETE_RESPONSE.
-        //   절단 조각이 우연히 유효 JSON 이어도 성공으로 오인하지 않는다(가짜 exit 0 차단).
-        let partial = r#"{"id":"m1","results":[]}"#; // 24바이트 — 100 미달.
+        let partial = r#"{"id":"m1","results":[]}"#;
         assert!(partial.len() < 100, "테스트 전제: partial < 100");
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{partial}"
@@ -1202,7 +1166,6 @@ mod tests {
 
     #[test]
     fn parse_response_case_insensitive_headers() {
-        // 헤더 key 는 대소문자 무시로 인식한다(content-length 소문자).
         let body = "{\"id\":\"m1\",\"results\":[]}";
         let resp = format!(
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
@@ -1215,7 +1178,6 @@ mod tests {
 
     #[test]
     fn parse_response_chunked_body() {
-        // Transfer-Encoding: chunked → 청크 이어붙임(0-청크 종료). "{\"id\":\"m1\",\"" + "results\":[]}".
         let resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
                     c\r\n{\"id\":\"m1\",\"\r\n\
                     c\r\nresults\":[]}\r\n\
@@ -1227,7 +1189,6 @@ mod tests {
 
     #[test]
     fn parse_response_read_to_eof_fallback() {
-        // Content-Length·Transfer-Encoding 둘 다 없으면 나머지 전부가 body(Connection: close).
         let resp =
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"m1\",\"results\":[]}";
         let r = parse_response(resp.as_bytes()).expect("parse");
@@ -1237,7 +1198,6 @@ mod tests {
 
     #[test]
     fn parse_response_non_2xx_status() {
-        // 비-2xx status line 도 파싱해 status 를 정확히 돌려준다(run 이 exit 1 로 매핑).
         let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
         let r = parse_response(resp.as_bytes()).expect("parse");
         assert_eq!(r.status, 401);
@@ -1254,7 +1214,6 @@ mod tests {
 
     #[test]
     fn dechunk_handles_extension_and_multiple_chunks() {
-        // chunk extension(`;`) + 여러 청크 + 0 종료.
         let raw = "3;ext=1\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
         assert_eq!(dechunk(raw.as_bytes()).expect("dechunk"), "abcde");
     }
@@ -1273,7 +1232,6 @@ mod tests {
             a.body, "line1\n\"quoted\" & $stuff\n",
             "본문은 trim 하지 않는다(heredoc 마지막 개행 포함)"
         );
-        // wire 로는 여전히 `body` 한 필드 — escape 는 serde_json 이 처리한다.
         let v: serde_json::Value = serde_json::from_str(&build_request_body(&a)).expect("json");
         assert_eq!(v["body"], "line1\n\"quoted\" & $stuff\n");
         assert!(
@@ -1284,7 +1242,6 @@ mod tests {
 
     #[test]
     fn body_and_body_stdin_are_mutually_exclusive() {
-        // ★CLI 고유 배관★: wire 엔 body 하나뿐이라 데몬은 이 충돌을 볼 수 없다 — 여기서만 잡을 수 있다.
         let err = parse_command(&argv(&["--to", "bob", "--body", "hi", "--body-stdin"]))
             .expect_err("상호배타 반려");
         assert!(err.contains("mutually exclusive"), "사유 문구: {err}");
@@ -1292,7 +1249,6 @@ mod tests {
 
     #[test]
     fn body_stdin_with_no_input_is_rejected_not_sent_empty() {
-        // heredoc 을 안 붙인 흔한 실수 — 빈 봉투를 보내는 대신 형태 오류로 잡는다.
         let parsed = parse_command(&argv(&["--to", "bob", "--body-stdin"])).expect("parse");
         let err = materialize_body(parsed, || Ok(String::new())).expect_err("빈 stdin 반려");
         assert!(err.contains("no input"), "사유 문구: {err}");
@@ -1304,9 +1260,8 @@ mod tests {
         assert!(err.contains("--body-stdin"), "두 경로를 모두 안내: {err}");
     }
 
-    // ── D: 서브커맨드 파싱(status / pending / group) ──────────────────────────────────
+    // ── D: 서브커맨드 파싱(status / pending) ──────────────────────────────────────────
 
-    /// 파싱 → (라우트, 바디 JSON) 한 방에 — 서브커맨드 계약을 wire 수준에서 단언한다.
     fn wire(args: &[&str]) -> (&'static str, serde_json::Value) {
         let parsed = parse_command(&argv(args)).expect("parse");
         let cmd = materialize_body(parsed, || panic!("이 경로는 stdin 을 읽지 않는다"))
@@ -1326,7 +1281,6 @@ mod tests {
                 serde_json::json!({ "id": "m-7f3k9q2d" })
             )
         );
-        // 무인자 조회 = "내 미결". ★신원 인자 없음★ — "나" 는 토큰에서만 온다(--as 같은 플래그 없음).
         assert_eq!(
             wire(&["pending"]),
             ("/control/messages", serde_json::json!({}))
@@ -1335,20 +1289,19 @@ mod tests {
 
     #[test]
     fn subcommand_shape_errors_are_rejected_at_the_cli() {
-        // 형태 오류(값 누락·잉여 인자·모르는 서브커맨드)는 CLI 가 잡는다 — 의미 판정과 구분되는 축이다.
         for args in [
-            vec!["status"],                               // id 누락
-            vec!["status", "m-1", "extra"],               // 잉여 인자
-            vec!["pending", "extra"],                     // pending 은 인자 없음
-            vec!["group"],                                // 서브커맨드 누락
-            vec!["group", "wat"],                         // 모르는 서브커맨드
-            vec!["group", "list", "extra"],               // 잉여 인자
-            vec!["group", "update"],                      // 그룹 이름 누락
-            vec!["group", "update", "--add", "a"],        // 이름 자리에 플래그
-            vec!["group", "update", "@t", "--add"],       // 값 누락
-            vec!["group", "update", "@t", "--nope", "x"], // 모르는 플래그
-            vec!["group", "delete"],                      // 이름 누락
-            vec!["group", "delete", "@t", "extra"],       // 잉여 인자
+            vec!["status"],
+            vec!["status", "m-1", "extra"],
+            vec!["pending", "extra"],
+            vec!["group"],
+            vec!["group", "wat"],
+            vec!["group", "list", "extra"],
+            vec!["group", "update"],
+            vec!["group", "update", "--add", "a"],
+            vec!["group", "update", "@t", "--add"],
+            vec!["group", "update", "@t", "--nope", "x"],
+            vec!["group", "delete"],
+            vec!["group", "delete", "@t", "extra"],
         ] {
             assert!(
                 parse_command(&argv(&args)).is_err(),
@@ -1359,11 +1312,9 @@ mod tests {
 
     #[test]
     fn a_flag_first_invocation_is_still_a_send_for_backward_compatibility() {
-        // 기존 프라이밍·스크립트(`engram-send --to … --body …`)가 서브커맨드 도입 뒤에도 그대로 돌아야 한다.
         let (route, body) = wire(&["--to", "bob", "--body", "hi"]);
         assert_eq!(route, "/control/send");
         assert_eq!(body, serde_json::json!({ "to": "bob", "body": "hi" }));
-        // ★그룹 주소 발송은 여전히 `--to @g`★ — `group` 서브커맨드는 **관리**용이라 서로 안 겹친다.
         let (route, body) = wire(&["--to", "@coders", "--body", "공지"]);
         assert_eq!(route, "/control/send");
         assert_eq!(body["to"], "@coders");
@@ -1372,8 +1323,6 @@ mod tests {
     // ── D: 조회 응답 exit code 매핑 ─────────────────────────────────────────────────────
     #[test]
     fn query_exit_code_accepts_every_daemon_success_shape() {
-        // 다섯 동사의 성공 shape 을 CLI 가 다시 기술하지 않는다("에러가 아니면 성공") — 데몬 응답이 늘어도
-        //   여기가 거짓 경보를 내지 않는 게 이 규칙의 목적이다.
         for body in [
             r#"{"id":"m-1","from":"a","awaiting_reply":false,"rows":[{"to":"b","status":"delivered","age_secs":1,"updated_secs_ago":1}]}"#,
             r#"{"me":"alice","open":[]}"#,
@@ -1398,14 +1347,12 @@ mod tests {
                 "반려: {body}"
             );
         }
-        // 비-2xx·비-JSON 은 프레이밍 축(발송과 동일).
         assert_eq!(exit_code_for_query_response(503, "{}"), EXIT_FAILED);
         assert_eq!(exit_code_for_query_response(200, "not json"), EXIT_FAILED);
     }
 
     #[test]
     fn query_exit_code_flags_non_object_payloads_as_malformed() {
-        // 우리 계약 밖 응답(프록시·버전 불일치) — 재시도가 아니라 보고 대상이라 2 로 가른다.
         for body in ["[]", "null", "42", "\"ok\""] {
             assert_eq!(
                 exit_code_for_query_response(200, body),
@@ -1417,21 +1364,15 @@ mod tests {
 
     #[test]
     fn query_exit_code_never_reports_success_for_an_error_status() {
-        // ★D 리뷰 B5★: 반전 검증("에러가 아니면 성공")만 두면 **반쯤 깨진 반려**가 성공으로 샜다 —
-        //   호출자는 반려당한 걸 성공으로 읽는다(조용한 실패). status:"error" 인 객체는 절대 0 이 아니다.
-        //   표 = (body, 기대 exit): 완전한 반려는 1(인자 고쳐 재시도), 깨진 반려는 2(보고 대상).
         let cases: [(&str, i32); 7] = [
-            // 완전한 반려 shape → 정상 실패.
             (
                 r#"{"status":"error","code":"MESSAGE_NOT_FOUND","hint":"h"}"#,
                 EXIT_FAILED,
             ),
-            // hint 는 선택 — status+code 만으로 분기 가능하면 반려다.
             (
                 r#"{"status":"error","code":"GROUP_NOT_FOUND"}"#,
                 EXIT_FAILED,
             ),
-            // ↓ 여기부터가 옛 구멍: code 로 분기할 수 없는 error → shape 결함(2). **절대 0 이 아니다.**
             (r#"{"status":"error"}"#, EXIT_MALFORMED_SUCCESS),
             (r#"{"status":"error","code":""}"#, EXIT_MALFORMED_SUCCESS),
             (r#"{"status":"error","code":7}"#, EXIT_MALFORMED_SUCCESS),
@@ -1449,7 +1390,6 @@ mod tests {
                 "status:\"error\" 는 어떤 형태든 성공일 수 없다: {body}"
             );
         }
-        // 대조군: status 필드가 error 가 아니면 정상 성공(성공 shape 을 CLI 가 다시 기술하지 않는다).
         assert_eq!(
             exit_code_for_query_response(200, r#"{"status":"ok","groups":["@all"]}"#),
             0
