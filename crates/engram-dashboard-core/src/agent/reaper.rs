@@ -2,8 +2,7 @@
 //!
 //! pump 가 finish 승자일 때 발행한 `ReapMsg` 를 **단일 supervisor 스레드**가 소비해 다음을 수행한다:
 //! sessions 맵에서 제거(epoch 일치 검증 후) → 프로필 disposition(auto_restore=false 다운그레이드 /
-//! 손 안 댐 — ADR-0083 으로 자동 삭제 폐지) → 목록 통지. kill_agent 가 직접 하던 맵 제거·통지를
-//! 여기로 위임해 done 단일 소비자로 만든다.
+//! 손 안 댐 — ADR-0083 으로 자동 삭제 폐지) → 목록 통지.
 //!
 //! 불변식:
 //! - kill 2동사(ADR-0001)·finalize 1회(ADR-0005)는 reaper 가 건드리지 않는다 — done 신호를
@@ -26,32 +25,23 @@ use crate::agent::profile::ProfileRegistry;
 use crate::agent::session::AgentSession;
 use crate::agent::types::{AgentId, AgentInfo, ControlChannel, Disposition, ReapMsg, StatusSink};
 
-/// reaper 스레드로 보내는 메시지. ReapMsg(정상 종료 이벤트) + 명시 Stop(셧다운).
 /// Stop 없이도 모든 Sender drop 시 recv 가 Err 로 끝나 루프가 종료된다(이중 안전).
 pub enum ReaperCmd {
     Reap(ReapMsg),
     Stop,
 }
 
-/// reaper 가 reap_one 수행에 필요한 공유 핸들 묶음. AgentManager 의 필드 Arc 들을 그대로 공유한다
-/// (manager 와 동일 sessions/profiles/status_sink 를 본다 — 두 주체가 같은 모델).
+/// AgentManager 의 필드 Arc 들을 **그대로** 공유한다 — manager 와 reaper 가 같은
+/// sessions/profiles/status_sink/control 을 본다(사본 금지).
 pub struct ReaperDeps {
     pub sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     pub profiles: Arc<ProfileRegistry>,
     pub status_sink: Arc<dyn StatusSink>,
-    /// ADR-0086: 제어 채널 seam(manager 와 공유 Arc). terminal 수렴 지점(여기)에서 revoke 를 부른다 —
-    /// 크래시·EOF·정상 종료 등 kill 이 아닌 모든 terminal 을 커버한다(kill 은 kill_agent 가 선제 revoke).
     pub control: Arc<dyn ControlChannel>,
 }
 
 impl ReaperDeps {
     /// reap 1건 처리(ADR-0019 §reap_one). 이 함수는 reaper 스레드(또는 테스트)에서만 호출된다.
-    ///
-    /// 순서(불변식 고정):
-    ///   1) write lock { epoch 불일치면 return; remove } 즉시 해제 — Arc 만 들고 나온다.
-    ///   2) None(이미 제거됨=패자) 이면 return(idempotent).
-    ///   3) !shutting_down 이면 disposition 적용(lock 밖, ProfileRegistry mutate=디스크 IO).
-    ///   4) 목록 통지(lock 밖, 외부 콜백).
     pub fn reap_one(&self, msg: ReapMsg) {
         // 1. write lock 구간 = epoch 검증 + remove 만(ADR-0006). Arc clone 후 즉시 해제.
         //    ★poison-tolerant★: 다른 스레드(pump 등)가 sessions lock 보유 중 panic 해 lock 이
@@ -62,32 +52,25 @@ impl ReaperDeps {
                 .sessions
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // epoch 불일치 = 재spawn 으로 자리 바뀐 유령 done → 새 세션 보존(ADR-0007).
             match sessions.get(&msg.id) {
                 Some(s) if s.epoch == msg.epoch => sessions.remove(&msg.id),
                 _ => return,
             }
         };
 
-        // 2. 패자(이미 누가 remove) = no-op. remove Some 승자 1명만 아래로 진행(idempotency).
+        // 2. remove Some 승자 1명만 아래로 진행(idempotency).
         if removed.is_none() {
             return;
         }
         drop(removed); // Arc<AgentSession> 폐기 — 여기서 transport/core 자원이 마지막으로 끊긴다.
 
-        // 2.5. ADR-0086: 제어 채널 토큰 폐기 + mcp-config 삭제. ★여기가 모든 terminal 의 단일 수렴점★
-        //   (ADR-0019 reaper) — 크래시·EOF·정상 exit·유저 kill 어떤 경로든 정확히 1회 이 지점을 지난다.
-        //   epoch 검증을 통과한 승자(msg.epoch == session.epoch)만 여기 오므로, stale terminal 이
-        //   재활성화(epoch bump)로 새로 붙은 산 토큰을 지우는 일이 없다(remove epoch-guard 와 같은 원리).
-        //   revoke 는 idempotent(remove-if-present)라 kill_agent 의 선제 revoke 와 겹쳐도 무해.
+        // 2.5. ★여기가 모든 terminal 의 단일 수렴점★ — 크래시·EOF·정상 exit·유저 kill 어떤 경로든
+        //   이 지점을 지나므로 폐기 누락이 없다. epoch 검증 승자만 여기 오므로 stale terminal 이
+        //   재활성화로 새로 붙은 산 토큰을 지우지 않는다. kill_agent 의 선제 revoke 와 겹치는 건 무해.
         // ADR-0086
         self.control.revoke(msg.id, msg.epoch);
 
-        // 3. 셧다운 종료가 아니면 disposition 적용. 셧다운이면 손대지 않음(auto_restore=true 잔류
-        //    → 부팅 복원). lock 밖에서 ProfileRegistry mutate(디스크 IO) — 락 순서 준수.
-        //    ★msg.epoch 를 함께 넘긴다(ADR-0084 epoch-guard)★: sessions.remove 는 이미 epoch 검증을
-        //    거쳤지만, remove 와 이 lock-free disposition 사이 창에서 재활성화(epoch bump)가 일어나면
-        //    stale reap 이 산 세션을 강등할 수 있어 disposition 계층까지 epoch-guard 를 확장한다.
+        // 3. disposition 적용은 lock 밖에서 — ProfileRegistry mutate 는 디스크 IO 다(락 순서 준수).
         if !msg.shutting_down_at_finish {
             let disposition = decide(&msg);
             apply_disposition(&self.profiles, msg.id, msg.epoch, disposition);
@@ -106,33 +89,26 @@ impl ReaperDeps {
     }
 }
 
-/// 종료 분류(ADR-0019 §decide, ADR-0083 개정). frozen snapshot(intent/shutting_down)으로만 판정.
+/// 종료 분류(ADR-0019 §decide). frozen snapshot(intent/shutting_down)으로만 판정.
 ///
 /// ```text
 /// shutting_down_at_finish        => KeepAsIs               // 데몬 셧다운: 부팅 복원(auto_restore 그대로)
 /// 그 외 모든 종료(유저 kill·정상 exit·크래시·EOF·signal)
 ///                                => KeepDisableAutoRestore // 시체 보존 + auto_restore=false
 /// ```
-/// ★ADR-0083: 자동 삭제 폐지★ — 어떤 종료도 프로필을 지우지 않는다(옛 유저 kill·정상 exit(code0)
-///   → DeleteProfile 조항 폐지). 사용자 정책(ADR-0082 계승 "삭제하지마, 시체로라도 남겨")대로
-///   모든 런타임 종료는 세션만 맵에서 수거하고 프로필은 시체로 보존(claude_session_id 유지 →
-///   재활성화 시 --resume 로 이어받음). 프로필 삭제는 자동 처분이 아니라 **명시적 사용자 명령**
-///   (AgentCommand::DeleteProfile / Tauri delete_profile — apply_disposition 을 거치지 않고
-///   ProfileRegistry::remove 직접 호출)으로만 일어난다.
+/// 사용자 정책(ADR-0082 계승 "삭제하지마, 시체로라도 남겨")대로 모든 런타임 종료는 세션만 맵에서
+/// 수거하고 프로필은 시체로 보존한다(claude_session_id 유지 → 재활성화 시 --resume 로 이어받음).
 // ADR-0083
 pub fn decide(msg: &ReapMsg) -> Disposition {
     if msg.shutting_down_at_finish {
         return Disposition::KeepAsIs;
     }
-    // 셧다운이 아니면 종료 원인(유저 kill·정상 exit·크래시·EOF 무관) 전부 시체 보존.
-    // intent/reason 으로 삭제를 가르던 분기는 ADR-0083 으로 폐지.
     Disposition::KeepDisableAutoRestore
 }
 
-/// disposition 을 ProfileRegistry 에 적용(ADR-0019, ADR-0083 개정, ADR-0084 epoch-guard).
+/// disposition 을 ProfileRegistry 에 적용(ADR-0019, ADR-0084 epoch-guard).
 /// **downgrade-only**: auto_restore 를 절대 true 로 올리지 않는다 — KeepDisableAutoRestore 는 false 로만
-/// 내린다. KeepAsIs 는 무동작. ADR-0083: 자동 삭제(옛 DeleteProfile) 폐지 — reaper 는 프로필을 지우지
-/// 않는다(수거 + 다운그레이드만).
+/// 내린다(하드킬 안전망 성립 조건). KeepAsIs 는 무동작.
 ///
 /// ★ADR-0084 epoch-guard★: `reaped_epoch`(= ReapMsg.epoch = 죽은 세션이 spawn 될 때 읽은 프로필
 ///   epoch. session.epoch 과 동일 값)와 **현재 프로필 epoch 이 일치할 때만** auto_restore 를 내린다.
@@ -151,8 +127,6 @@ fn apply_disposition(
 ) {
     match disposition {
         Disposition::KeepDisableAutoRestore => {
-            // 존재 + epoch 일치할 때만 false 로 내린다(이미 false 면 그대로 — 올리지 않음).
-            // epoch 불일치 = 그 사이 재활성화로 epoch 가 올라간 새 산 세션 → 손대지 않는다(ADR-0084).
             profiles.update_with(id, |p| {
                 if p.epoch == reaped_epoch {
                     p.auto_restore = false;
@@ -163,9 +137,8 @@ fn apply_disposition(
     }
 }
 
-/// 현재 살아있는 세션 목록 스냅샷 → AgentInfo. manager.list_agents 와 동일 로직을 reaper 가
-/// lock 밖에서 만들 수 있게 분리(통지용). sessions read lock 으로 Arc 만 모아 즉시 해제한 뒤,
-/// 각 세션의 AgentInfo 를 조립한다(profiles lock 과 sessions lock 비중첩 — ADR-0006).
+/// sessions 맵 스냅샷 → AgentInfo. manager.list_agents 와 동일 로직을 reaper 가 lock 밖에서 만들 수
+/// 있게 분리(통지용). sessions read lock 을 먼저 놓고 조립한다 — profiles lock 과 비중첩(ADR-0006).
 fn list_agents(
     sessions: &Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     profiles: &Arc<ProfileRegistry>,
@@ -212,9 +185,7 @@ fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) ->
     }
 }
 
-/// reaper supervisor 스레드를 기동하고 핸들 + Sender 를 반환한다. AgentManager 가 생성 시 1회 호출.
-/// 스레드는 `while let Ok(cmd) = rx.recv()` 로 ReapMsg 를 직렬 소비하며, Stop 또는 모든 Sender
-/// drop 시 종료한다.
+/// AgentManager 가 생성 시 1회 호출. ReapMsg 를 **직렬** 소비하는 supervisor 스레드를 띄운다.
 pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
     let (tx, rx): (Sender<ReaperCmd>, Receiver<ReaperCmd>) = std::sync::mpsc::channel();
     let handle = std::thread::Builder::new()
@@ -239,7 +210,6 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
                                 .map(|s| s.to_string())
                                 .or_else(|| e.downcast_ref::<String>().cloned())
                                 .unwrap_or_else(|| "<non-string panic>".to_string());
-                            // 다음 메시지로 계속 — reaper 생존이 좀비 방지의 핵심.
                             tracing::error!(panic = %detail, "reap_one panicked — reaper 루프 생존, 다음 메시지 계속");
                         }
                     }
@@ -255,7 +225,6 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // decide 는 이제 셧다운 여부만 보므로 lib 본문은 이 두 타입을 쓰지 않는다(테스트에서만 구성).
     use crate::agent::types::{TerminalReason, TerminationIntent};
 
     fn msg(intent: TerminationIntent, shutting_down: bool, reason: TerminalReason) -> ReapMsg {
@@ -270,14 +239,13 @@ mod tests {
 
     #[test]
     fn decide_user_kill_keeps_corpse() {
-        // ADR-0083: 유저 kill 도 삭제 아님 — 시체 보존(KeepDisableAutoRestore). 재활성화 resume 가능.
         let m = msg(TerminationIntent::UserKill, false, TerminalReason::Killed);
         assert_eq!(decide(&m), Disposition::KeepDisableAutoRestore);
     }
 
     #[test]
     fn decide_clean_exit_keeps_corpse() {
-        // ADR-0083: 정상 exit(code0) 도 삭제 아님 — 시체 보존. code-0 갭(ADR-0082 §열린항목 ②) 닫힘.
+        // code-0 갭(ADR-0082 §열린항목 ②)을 닫는 케이스.
         let m = msg(
             TerminationIntent::None,
             false,
@@ -299,7 +267,6 @@ mod tests {
 
     #[test]
     fn decide_unknown_code_is_crash() {
-        // EOF/StreamClosed/Error/code 불명 → 보수적으로 크래시.
         for reason in [
             TerminalReason::Exited { code: None },
             TerminalReason::StreamClosed,
@@ -312,7 +279,7 @@ mod tests {
 
     #[test]
     fn decide_shutting_down_keeps_as_is() {
-        // 셧다운이면 intent/reason 무관하게 KeepAsIs(부팅 복원 대상 유지).
+        // 픽스처의 UserKill·exit1 은 "그 두 축이 무관하다"를 보이려고 넣은 것.
         let m = msg(
             TerminationIntent::UserKill,
             true,

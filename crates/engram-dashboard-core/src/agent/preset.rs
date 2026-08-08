@@ -4,10 +4,9 @@
 //! 스폰된/예약된 에이전트 인스턴스, sid·epoch·restart 정책 보유)과 **의미가 다르다**: 프리셋은
 //! 인스턴스가 아니라 경로 북마크라 별도 store(presets.json)로 분리한다(ADR-0061 거부한 대안).
 //!
-//! 데이터 모델은 최소 `{ id, cwd }` 만 — 이름은 저장하지 않고 프론트가 cwd basename 으로 파생한다
-//! (리치화 시 `name: Option<String>` 오버라이드로 확장, ADR-0061). model/icon/inject 는 실수요 때 필드 추가.
+//! model/icon/inject 필드는 실수요가 생길 때 추가한다(지금 없는 건 의도).
 //!
-//! tauri import 0 — profile.rs 와 동일한 격리 규칙. `PresetStore` trait 주입으로 headless 테스트 가능.
+//! tauri import 0 — profile.rs 와 동일한 격리 규칙.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,25 +15,19 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 프리셋 식별자. 프로필의 AgentId 와 동일하게 Uuid.
 pub type PresetId = Uuid;
 
 // ── 영속 프리셋 ────────────────────────────────────────────────────────────────
 
 /// 프리셋 1개 — `presets.json` 에 저장되는 단위. (ADR-0061)
-///
-/// ★최소 스키마★: `{ id, cwd }` 만. 이름은 저장 안 함(cwd basename 파생 — ADR-0061). cwd 는
-/// `PresetRegistry::create` 에서 `dunce::canonicalize` 로 정규화(프로필 spawn 경로와 동일한 UNC 회피·
-/// 표기 고정). 정규화 실패(경로 부재 등)면 입력 그대로 보존한다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
-    /// 불변 키. 프리셋 삭제/조회의 참조(프론트 미러 갱신 키).
+    /// 불변 키(프론트 미러 갱신 키).
     pub id: PresetId,
     /// 등록된 작업 디렉토리(정규화됨). 이름 override 가 없으면 이 경로 basename 으로 파생(ADR-0061).
     pub cwd: PathBuf,
-    /// 사용자 지정 표시명 override(ADR-0061 리치화). `Some` → 그대로 표시, `None` → cwd basename 파생
-    /// (기존 동작 불변). `#[serde(default)]` 라 이 필드 없는 옛 presets.json 은 `None` 으로 흡수(마이그레이션
-    /// 불필요). rename command 가 이 값을 set/clear 한다(빈 문자열/미변경은 프론트가 걸러 여기 안 옴).
+    /// 사용자 지정 표시명 override(ADR-0061). `Some` → 그대로 표시, `None` → cwd basename 파생.
+    /// `#[serde(default)]` 라 이 필드 없는 옛 presets.json 은 `None` 으로 흡수(마이그레이션 불필요).
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -82,15 +75,12 @@ impl PresetRegistry {
         }
     }
 
-    /// 변경 클로저를 실행하고, **같은 lock 보유 중** 현재 맵을 그대로 save 한다.
-    /// ★lock 을 풀기 전에 save★ — 두 동시 mutation 이 "각자 스냅샷 → 각자 save" 로 교차해
-    /// 디스크가 stale 로 덮이는 race 를 닫는다(상단 락 규율의 §5 근거). 저장하는 스냅샷은
-    /// 방금 커밋한 최신 맵이라 persisted == observed 가 보장된다.
+    /// 변경 클로저를 실행하고 **lock 을 풀기 전에** 현재 맵을 save 한다 — 커밋과 영속화가 한
+    /// 임계구역이라 persisted == observed 가 보장된다(근거 = struct 락 규율, ADR-0071).
     fn mutate<R>(&self, f: impl FnOnce(&mut HashMap<PresetId, Preset>) -> R) -> R {
         let mut guard = self.presets.lock().expect("presets poisoned");
         let result = f(&mut guard);
         let snapshot: Vec<Preset> = guard.values().cloned().collect();
-        // lock 보유 중 save — 커밋과 영속화를 한 임계구역으로 직렬화(데드락 근거는 struct 주석). ADR-0071.
         self.store.save(&snapshot);
         result
     }
@@ -105,8 +95,7 @@ impl PresetRegistry {
             .collect()
     }
 
-    /// 프리셋 생성. 새 uuid 를 발급하고 cwd 를 정규화(프로필 spawn 경로와 동일하게 `dunce::canonicalize`
-    /// — UNC `\\?\` 회피 + 표기 고정). 정규화 실패(경로 부재 등)면 입력 그대로 보존한다. 변경 즉시 persist.
+    /// 새 uuid 발급 + cwd 정규화(`dunce::canonicalize` — 실패하면 입력 그대로 보존). 변경 즉시 persist.
     pub fn create(&self, cwd: PathBuf) -> Preset {
         // ★정규화 이유★: 같은 폴더를 다른 표기(대소문자·상대경로·UNC)로 등록하면 프론트 basename
         //   파생·중복 판정이 흔들린다 — 저장 전 canonicalize 로 표기를 고정한다(profile spawn 과 동일 정책).
@@ -114,7 +103,6 @@ impl PresetRegistry {
         let preset = Preset {
             id: Uuid::new_v4(),
             cwd,
-            // 생성 시엔 이름 override 없음 — 표시명은 cwd basename 파생(ADR-0061). rename 으로 나중에 set.
             name: None,
         };
         let created = preset.clone();
@@ -171,7 +159,6 @@ mod tests {
         let reg = PresetRegistry::new(store.clone());
         let p = reg.create(PathBuf::from("."));
         assert_eq!(reg.list().len(), 1);
-        // 즉시 persist(store 에도 반영).
         assert_eq!(store.load().len(), 1);
         assert_eq!(store.load()[0].id, p.id);
     }
@@ -199,7 +186,7 @@ mod tests {
     fn remove_missing_is_noop() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
         reg.create(PathBuf::from("."));
-        reg.remove(Uuid::new_v4()); // 없는 id
+        reg.remove(Uuid::new_v4());
         assert_eq!(reg.list().len(), 1, "없는 id 삭제는 no-op");
     }
 
@@ -210,7 +197,6 @@ mod tests {
             let reg = PresetRegistry::new(store.clone());
             reg.create(PathBuf::from("."));
         }
-        // 같은 store 로 새 registry 생성 → 로드돼야 함.
         let reg2 = PresetRegistry::new(store.clone());
         assert_eq!(reg2.list().len(), 1);
     }
@@ -221,7 +207,6 @@ mod tests {
     fn create_starts_with_no_name_override() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
         let p = reg.create(PathBuf::from("."));
-        // 생성 직후엔 override 없음(표시명은 프론트가 cwd basename 으로 파생).
         assert_eq!(reg.list()[0].name, None);
         assert_eq!(p.name, None);
     }
@@ -233,7 +218,6 @@ mod tests {
         let p = reg.create(PathBuf::from("."));
         assert!(reg.rename(p.id, Some("내 프리셋".to_string())));
         assert_eq!(reg.list()[0].name, Some("내 프리셋".to_string()));
-        // 즉시 persist(store 에도 반영).
         assert_eq!(store.load()[0].name, Some("내 프리셋".to_string()));
     }
 
@@ -242,7 +226,6 @@ mod tests {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
         let p = reg.create(PathBuf::from("."));
         reg.rename(p.id, Some("x".to_string()));
-        // None 으로 재설정 → override 해제(basename 파생 복귀).
         assert!(reg.rename(p.id, None));
         assert_eq!(reg.list()[0].name, None);
     }
@@ -251,22 +234,19 @@ mod tests {
     fn rename_missing_is_noop_false() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
         reg.create(PathBuf::from("."));
-        // 없는 id rename 은 false·no-op(기존 항목 불변).
         assert!(!reg.rename(Uuid::new_v4(), Some("y".to_string())));
         assert_eq!(reg.list()[0].name, None);
     }
 
     // ── 동시성: persisted == latest (stale-overwrite race 봉인) ────────────────────
 
-    /// save 가 lock 보유 중 **현재 맵**을 쓰는지 직접 단언 — 스냅샷 지연이 아니라 커밋 직후 상태가
-    /// 곧바로 persist 됨을 본다. 옛 racy 설계(lock 밖 save)에선 이 불변식이 흔들렸다.
+    /// 회귀 가드 — 옛 racy 설계(lock 밖 save)에선 이 불변식이 흔들렸다.
     #[test]
     fn save_writes_current_map_not_stale_snapshot() {
         let store = Arc::new(MemStore::default());
         let reg = PresetRegistry::new(store.clone());
         let p = reg.create(PathBuf::from("."));
         reg.rename(p.id, Some("final".to_string()));
-        // 마지막 save 스냅샷 == 최신 인메모리 맵.
         let disk = store.load();
         let mem = reg.list();
         assert_eq!(disk.len(), mem.len());
@@ -274,11 +254,9 @@ mod tests {
         assert_eq!(disk[0].name, mem[0].name, "persisted == observed");
     }
 
-    /// 여러 스레드가 **서로 다른** 프리셋을 동시에 create/rename → 마지막 save 스냅샷이 최종 인메모리
-    /// 맵과 정확히 일치해야 한다(개수·내용). 옛 racy 설계(lock 밖 save)에선 각 mutation 이 자기
-    /// 스냅샷을 lock 밖에서 save 해, A 가 B 의 insert 를 못 본 stale 스냅샷으로 디스크를 덮어써
-    /// **엔트리가 누락**될 수 있었다(persisted ≠ observed). 이제 mutate+save 가 한 임계구역이라
-    /// 마지막 save 는 반드시 그 시점의 완전한 맵이다. 반복 create+rename 으로 인터리브 창을 넓힌다.
+    /// 회귀 가드 — 옛 racy 설계(lock 밖 save)에선 각 mutation 이 자기 스냅샷을 lock 밖에서 save 해,
+    /// A 가 B 의 insert 를 못 본 stale 스냅샷으로 디스크를 덮어써 **엔트리가 누락**될 수 있었다.
+    /// 반복 create+rename 으로 인터리브 창을 넓힌다.
     #[test]
     fn concurrent_mutations_persisted_equals_final_map() {
         use std::thread;
@@ -300,7 +278,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        // 4 스레드 × 50 create = 200 엔트리. 디스크와 인메모리가 개수·id 집합·내용까지 일치.
+        // 4 스레드 × 50 create = 200 엔트리.
         let mem = reg.list();
         let disk = store.load();
         assert_eq!(mem.len(), 200, "인메모리 create 200건");
@@ -320,8 +298,7 @@ mod tests {
         );
     }
 
-    /// 하위호환: 옛 presets.json(`name` 필드 부재)을 역직렬화해도 크래시 없이 `name=None` 이 된다
-    /// (`#[serde(default)]` — 마이그레이션 불필요). 기존 표시(cwd basename)는 불변.
+    /// 픽스처 = `name` 필드가 없던 옛 presets.json(하위호환).
     #[test]
     fn deserializes_legacy_preset_without_name() {
         let legacy = r#"{ "id": "00000000-0000-0000-0000-000000000001", "cwd": "C:/proj" }"#;

@@ -1,10 +1,8 @@
-/// 에이전트 고유 식별자
 pub type AgentId = uuid::Uuid;
 
-/// 구독자 Sink 고유 식별자 — subscribe 반환값, unsubscribe에 사용
 pub type SinkId = uuid::Uuid;
 
-/// 에이전트 생명주기 상태 — internally-tagged로 프론트에 discriminated union 전달
+/// internally-tagged 직렬화 — 프론트가 discriminated union 으로 받는다.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum AgentStatus {
@@ -16,12 +14,10 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    /// ★"살아 있음" 술어 — `Running|Exiting` 만★(ADR-0116 로스터 술어의 정본).
-    ///
     /// ★"세션 맵에 있음" 과 다르다(load-bearing)★: 세션은 reaper 가 수거할 때까지 맵에 남으므로
     ///   단순 존재로 판정하면 시체가 섞인다. 명부(`AgentManager::roster`)와 데몬 어댑터
     ///   (`messaging_host::is_live` — 이 술어를 호출만 한다)가 **같은 조건**을 봐야 발송 측과
-    ///   flush 측이 다른 세계를 보지 않는다. 복제본을 만들지 말 것.
+    ///   flush 측이 다른 세계를 보지 않는다. 이 술어가 정본 — 복제본을 만들지 말 것.
     // ADR-0116
     pub fn is_live(&self) -> bool {
         matches!(self, AgentStatus::Running | AgentStatus::Exiting)
@@ -37,18 +33,16 @@ impl AgentStatus {
 ///
 /// `turn_id`/`message_id`는 대화 추적용 optional 필드다 — claude는 안 채워도 되고, codex/gemini의
 /// turn·message 모델 누수를 흡수하려 열어 둔다(교체성). backend가 못 채우면 None.
-/// `Structured{kind,json}`은 위 정형 variant로 안 잡히는 backend별 이벤트의 탈출구다.
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
     /// 콘솔 raw 바이트(VT 스트림). PtyTransport·터미널 모드의 유일 payload.
     TerminalBytes(Vec<u8>),
-    /// 어시스턴트 텍스트 증분(스트리밍 델타).
     TextDelta {
         text: String,
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// 도구 호출 — 이름 + 직렬화된 인자(JSON 문자열, backend별 스키마 그대로).
+    /// `args_json` = backend 스키마 그대로의 직렬화 인자(core 무정제).
     ToolCall {
         name: String,
         args_json: String,
@@ -57,7 +51,6 @@ pub enum OutputEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// 토큰 사용량.
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -79,7 +72,6 @@ pub enum OutputEvent {
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     Raw(Vec<u8>), // PTY 키 입력 바이트
-                  // 후일: Message(String) / Reconfigure{..}
 }
 
 /// transport가 산출하는 종료 사유(flat). core가 AgentStatus로 매핑(finalize 1회).
@@ -107,7 +99,7 @@ pub enum TerminationIntent {
 }
 
 impl TerminationIntent {
-    /// AtomicU8 에 저장된 raw 값에서 복원. 알 수 없는 값은 보수적으로 None(=크래시 취급 경로).
+    /// 알 수 없는 값은 보수적으로 None(= 크래시 취급 경로).
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => TerminationIntent::UserKill,
@@ -116,8 +108,7 @@ impl TerminationIntent {
     }
 }
 
-/// pump 가 finish 승자일 때 1회 발행하는 종료 이벤트(ADR-0019 reaper). reaper 한 스레드가
-/// 소비해 sessions 맵 제거 + 프로필 disposition + 통지를 수행한다.
+/// pump 가 finish 승자일 때 1회 발행하는 종료 이벤트(ADR-0019 reaper 가 단일 소비).
 ///
 /// ★race 방지 핵심★: `intent_at_finish`/`shutting_down_at_finish` 는 **finish 그 순간** snapshot
 /// 한 frozen 값이다. reaper 가 reap 시점에 live 로 읽으면 "크래시로 죽은 뒤 reaper 처리 전 유저가
@@ -132,17 +123,14 @@ pub struct ReapMsg {
     pub shutting_down_at_finish: bool,
 }
 
-/// 종료 분류 결과(ADR-0019 §decide, ADR-0083 개정). reap_one 이 lock 밖에서 ProfileRegistry 에
-/// 적용한다. **downgrade-only**: auto_restore 를 true 로 절대 올리지 않는다(하드킬 안전망 성립 조건).
-///
-/// ★ADR-0083: 자동 삭제 폐지★ — 옛 `DeleteProfile`(유저 kill·정상 exit → 프로필 완전 삭제)
-///   variant 를 제거했다. reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않으므로 삭제 처분을
-///   산출하지 않는다. 프로필 삭제는 명시적 사용자 명령(AgentCommand::DeleteProfile /
-///   Tauri delete_profile)이 ProfileRegistry::remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
+/// 종료 분류 결과(ADR-0019 §decide). reap_one 이 lock 밖에서 ProfileRegistry 에 적용한다.
+/// ★삭제 처분이 없는 건 의도다(ADR-0083)★ — reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않는다.
+/// 프로필 삭제는 명시적 사용자 명령(AgentCommand::DeleteProfile / Tauri delete_profile)이
+/// ProfileRegistry::remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// 모든 런타임 종료(유저 kill·정상 exit·크래시·EOF·signal) → 프로필 유지 + auto_restore=false
-    /// (시체 보존 — 재활성화 시 --resume 로 이어받음). ADR-0083 으로 유저 kill·정상 exit 도 이리로.
+    /// (시체 보존 — 재활성화 시 --resume 로 이어받음).
     KeepDisableAutoRestore,
     /// 데몬 셧다운 → 손 안 댐(auto_restore=true 잔류 → 부팅 복원).
     KeepAsIs,
@@ -165,11 +153,6 @@ pub struct CommandSpec {
 //   core 에 들어오면 tauri-import-0 격리와 같은 정신(전송·인프라 무의존)이 깨진다. 그래서 OutputSink/
 //   StatusSink 와 **동일한 idiom(ADR-0003)** 으로, core 는 순수 trait(`ControlChannel`) + 추상
 //   descriptor(`ControlEndpoint`)만 알고 실제 구현은 데몬(`DaemonControlChannel`)이 준다.
-//
-// ★인과 airtight(ADR-0086 토큰 수명 = (AgentId,epoch))★: provision 은 spawn 경로(spec 조립 직전)에서,
-//   revoke 는 **reaper 단일 소비자**(ADR-0019 — 모든 terminal 이 수렴하는 유일 지점) + kill_agent 에서
-//   부른다. 그래서 epoch 회전(재활성화 bump)마다 새 토큰, 크래시/kill/EOF 어떤 terminal 이든 정확히
-//   1회 revoke 가 보장된다(reaper 가 epoch 검증 후 remove 하는 그 자리에서 revoke).
 
 /// ADR-0094: 스폰 에이전트에 **사전 승인**할 툴 1개의 추상 명세(backend-agnostic). 데몬 컨트롤 채널이
 /// 자기 입구 정의 옆에서 채우고, backend 가 자기 프로그램 문법으로 번역한다(claude = `--allowedTools`).
@@ -206,9 +189,8 @@ pub struct ControlEndpoint {
     /// url+token 을 써서 `--mcp-config` 로 주입한다.
     /// ★Option = 부재를 타입으로 인코딩(ADR-0099)★: MCP-capable 백엔드(claude)면 `Some(path)`(mcp-config
     ///   물리 존재), 비-MCP 백엔드(codex/gemini stub)면 `None` — mcp-config 를 **아예 쓰지 않는다**(MCP
-    ///   입구 물리 삭제). 옛 빈 `PathBuf::new()` sentinel 대신 `None` 으로 "없음"을 타입으로 못박아,
-    ///   backend 가 `--mcp-config` 를 `Some` 일 때만 주입한다(빈 경로 방어 코드 불필요 — 타입이 강제).
-    ///   core 는 이 값을 데이터로만 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003/0004 격리).
+    ///   입구 물리 삭제). backend 는 `Some` 일 때만 `--mcp-config` 를 주입한다(빈 경로 방어 코드 불필요 —
+    ///   타입이 강제).
     /// ★ADR-0128: 이 Option 이 우편 발신 채널 갈림의 **단일 신호**★ — `Some`=MCP 배선만, `None`=CLI 배선만
     ///   (backend 가 이 축으로 CLI 크레덴셜·PATH 주입을 가른다). 데몬이 MCP-capable 일 때만 config 를 쓰고
     ///   그 write 실패 시 provision 을 Err 로 끊으므로 반쪽 MCP endpoint 는 존재하지 않는다 — 그 fail-closed
@@ -219,21 +201,18 @@ pub struct ControlEndpoint {
     /// 그 env(claude=`ENGRAM_SEND_EXE`)와 PATH 프리펜드를 주입하지 않는다.
     /// ★소비 조건 = CLI 전용 스폰(`config_path=None`)뿐(ADR-0128)★: 두 갈래가 공유하는 필드라 MCP 가능
     /// endpoint 에도 값이 실리지만 그 갈래는 이 값을 **쓰지 않는다** — 쓰면 채널이 둘로 늘어 결정 위반이다.
-    /// core 는 이 값을 해석하지 않고 문자열 경로만 나른다(형제 exe 탐색 지식은 데몬 소유 — lib.rs).
+    /// 형제 exe 탐색 지식은 데몬 소유(lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
     /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
     /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
     /// backend/claude.rs 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
-    /// 파일을 **직접 읽음** — 데몬/core 는 내용을 안 읽는다). ★core 격리(ADR-0003/0004)★: core 는 이
-    /// 경로를 **데이터로만 나른다** — 파일을 열지 않고 "프라이밍/시스템프롬프트" 개념도 모른다(claude
-    /// 플래그 번역은 backend/claude.rs 단독). MCP 와 직교하는 broker-주입 데이터지만, 데몬이 이미
-    /// 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지 않는다.
+    /// 파일을 **직접 읽음** — 데몬/core 는 내용을 안 읽는다). MCP 와 직교하는 broker-주입 데이터지만,
+    /// 데몬이 이미 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지
+    /// 않는다.
     pub priming_file: Option<std::path::PathBuf>,
-    /// ADR-0094(발신 권한 pre-authorization): 스폰 에이전트에 **사전 승인**할 툴 목록(추상). 데몬
-    /// 컨트롤 채널이 발신 입구(MCP `send_message` / `engram-send` CLI)를 채우고, backend/claude.rs 가
-    /// `--allowedTools` 로 번역한다(형식만 — 이름은 컨트롤 채널이 정본, ADR-0094 단일 출처). 빈 Vec
-    /// 이면 backend 가 아무 것도 주입하지 않는다(권한 플래그 없음 = 기존 게이트 유지). core 는 이
-    /// 목록을 데이터로만 나른다 — "권한"·claude 문법을 모른다(ADR-0004 격리).
+    /// 사전 승인할 툴 목록(ADR-0094 — 계약은 `ToolGrant`). 데몬 컨트롤 채널이 발신 입구(MCP
+    /// `send_message` / `engram-send` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
+    /// (권한 플래그 없음 = 기존 게이트 유지).
     pub grants: Vec<ToolGrant>,
     /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
     /// 데몬이 provision 때 `<data_dir>/mcp-config/<id>-<epoch>.settings.json` 에 쓰고 revoke 때 지운다.
@@ -243,7 +222,6 @@ pub struct ControlEndpoint {
     ///   에이전트에도 그대로 적용**돼 engram MCP 서버가 툴 목록에 뜨지 않았다. 이 조각이 그 세션에만
     ///   engram 서버를 허용한다 — **전역 설정 파일은 절대 건드리지 않는다**(허용 범위 = 엔그램이 스폰한
     ///   에이전트뿐). config_path 와 같은 수명(epoch 단위 생성·폐기)이라 같은 descriptor 에 태운다.
-    /// ★core 격리★: priming_file 과 동형으로 **경로만 나른다** — 파일을 열지 않고 내용·의미도 모른다.
     pub settings_file: Option<std::path::PathBuf>,
 }
 
@@ -262,9 +240,7 @@ impl std::fmt::Display for ProvisionError {
 
 impl std::error::Error for ProvisionError {}
 
-/// 제어 채널 provisioning seam(ADR-0086). 구현은 데몬(`DaemonControlChannel`)이, core 는 이 trait 만
-/// 안다(OutputSink/StatusSink 와 동형 — ADR-0003 격리). 기본 구현체 = `NoopControlChannel`(제어 채널
-/// 없는 경로·테스트용 — provision 이 Ok(None) 을 돌려 backend 가 아무 것도 주입하지 않는다).
+/// 제어 채널 provisioning seam(ADR-0086). AgentManager 기본값 = `NoopControlChannel`.
 pub trait ControlChannel: Send + Sync + 'static {
     /// (AgentId,epoch)용 토큰을 발급하고 (MCP-capable 이면) mcp-config 파일을 만들어 엔드포인트를 돌려준다.
     /// spawn 경로에서 spec 조립 직전 호출. 반환 3-값(fail-closed 계약, ADR-0086):
@@ -281,7 +257,6 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
     ///   결정 1) + `[Mcp]` grant, `engram-send` 배선 없음.
     ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant + `engram-send` 배선(env·PATH).
-    ///   core 는 이 값을 **불투명 bool 로만** 나른다("MCP" 개념·claude 플래그를 모른다 — ADR-0003 격리).
     // ADR-0126
     // ADR-0128
     fn provision(
@@ -292,7 +267,8 @@ pub trait ControlChannel: Send + Sync + 'static {
     ) -> Result<Option<ControlEndpoint>, ProvisionError>;
 
     /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
-    /// 종료)에서든 reaper 단일 소비자가 부른다 → 정확히 1회 revoke. epoch 를 함께 받아 stale terminal 이
+    /// 종료)에서든 reaper 가 부르므로 누락이 없다. kill_agent 와 spawn 실패 가드도 선제로 부르니 같은
+    /// (id,epoch) 에 중복 호출이 온다(remove-if-present 로 흡수). epoch 를 함께 받아 stale terminal 이
     /// 재활성화(epoch bump)로 새로 붙은 산 토큰을 지우지 못하게 한다(ADR-0007/0084 epoch-guard 정신).
     fn revoke(&self, id: AgentId, epoch: u32);
 }
@@ -314,13 +290,13 @@ impl ControlChannel for NoopControlChannel {
     fn revoke(&self, _id: AgentId, _epoch: u32) {}
 }
 
-/// 영역별 capability (bool 폭증 금지). 콘솔 값으로 채움. 직렬화(프론트 공유, snake_case).
+/// 영역별 capability (bool 폭증 금지). 직렬화(프론트 공유, snake_case).
 ///
 /// ★출처 분리(load-bearing)★: 이 합성값의 5영역은 **두 출처**에서 온다 — input/output/control은
 /// 물리 채널(transport)이, session/model은 프로그램(backend)이 결정한다. 예전엔 transport가
 /// session.resume 까지 하드코딩해(claude·shell 무관 resume=true) shell 백엔드가 부정확했다.
 /// 이제 `Capabilities::compose(TransportCaps, BackendCaps)`로만 만들어 출처를 타입으로 강제한다
-/// (CLAUDE.md 「백엔드 확장」 capability 매트릭스: resize=transport-determined, resume/model=backend-determined).
+/// (CLAUDE.md 「백엔드 확장」 capability 매트릭스).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {
     pub input: InputCaps,
@@ -330,8 +306,7 @@ pub struct Capabilities {
     pub model: ModelCaps,
 }
 
-/// 물리 채널(transport)이 **소유·결정**하는 caps. PTY/API 등 데이터 채널의 능력만 담는다.
-/// transport는 session/model을 만들 수 없다(그 필드가 여기 없음 — 소유권을 타입으로 강제).
+/// session/model 이 여기 없는 건 의도다 — transport 는 그걸 만들 수 없다(소유권을 타입으로 강제).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TransportCaps {
     pub input: InputCaps,
@@ -339,9 +314,8 @@ pub struct TransportCaps {
     pub control: ControlCaps,
 }
 
-/// 프로그램(backend: claude/shell/codex…)이 **소유·결정**하는 caps. resume 지원·모델 선택처럼
-/// 채널이 아니라 실행 대상 프로그램의 능력만 담는다. backend는 input/output/control을 만들 수 없다
-/// (그 필드가 여기 없음 — 소유권을 타입으로 강제).
+/// 실행 대상 프로그램(claude/shell/codex…)의 능력. input/output/control 이 여기 없는 건 의도다 —
+/// backend 는 그걸 만들 수 없다(소유권을 타입으로 강제).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BackendCaps {
     pub session: SessionCaps,
@@ -349,9 +323,7 @@ pub struct BackendCaps {
 }
 
 impl Capabilities {
-    /// transport(물리)와 backend(프로그램) caps를 합쳐 최종 5영역 Capabilities를 만든다.
-    /// 이게 Capabilities의 **유일한 정상 생성 경로**다 — 출처가 섞이지 않게(transport는 session을,
-    /// backend는 control을 못 채우게) 타입으로 박았다.
+    /// Capabilities 의 **유일한 정상 생성 경로** — 출처가 섞이지 않게 타입으로 박았다.
     pub fn compose(t: TransportCaps, b: BackendCaps) -> Capabilities {
         Capabilities {
             input: t.input,
@@ -374,11 +346,7 @@ pub struct InputCaps {
 pub struct OutputCaps {
     pub terminal_bytes: bool,
     /// 출력이 구조화 스트림(NDJSON 등)이라 터미널 렌더가 아닌 파싱 렌더(RichSlot)가 필요함을 신고(ADR-0044).
-    /// ★출처(ADR-0030)★: output 은 transport 소유 영역이다 — StdioTransport(json 모드 캐리어)는 조립점
-    /// 주입값(json=true), PtyTransport(터미널)는 false 로 정직 신고한다.
-    /// ★현 배선 상태(FIX 6c)★: caps 기반 렌더러 분기(xterm vs RichSlot)는 **M2 예정이며 아직 미배선**이다
-    /// — 이 필드를 "현재 프론트 렌더 분기의 유일 근거"로 오독하지 말 것. M0 스파이크는 viewStore.richSlots
-    /// 오버레이로 슬롯을 가른다. 이 필드는 M2 에서 그 분기의 근거가 되도록 **의도된** 신호다(ADR-0002).
+    /// 프론트 `defaultRenderMode` 가 이 값 하나로 렌더러를 가른다(true=RichSlot / false=xterm, ADR-0002).
     /// 내용 해석 아님(통로 무정제 불변) — "이 바이트 스트림은 터미널이 아니다"라는 렌더 힌트일 뿐.
     pub structured: bool,
     pub markdown: bool,
@@ -432,8 +400,7 @@ pub struct PtyEvent {
     pub data_b64: String,
 }
 
-/// 코어→sink 출력 payload (S15 B5 payload-generic). **빌려서** 전달 — 콘솔 raw 바이트든
-/// 구조화 이벤트든 sink 가 wire 로 인코딩한다(코어는 wire 를 모른다, ADR-0003).
+/// 코어→sink 출력 payload (S15 B5 payload-generic). **빌려서** 전달 — 코어는 wire 를 모른다(ADR-0003).
 /// ★ADR-0002 (출력 종류 비가정)★: 출력을 터미널 바이트로 강제하지 않는다 — Bytes/Event 두 갈래로
 /// 나눠 sink 가 종류별로 처리(Bytes→tag0 terminal frame, Event→tag1 structured frame, B7)한다.
 /// 참조만 담아 Copy 유지(OutputFrame Copy 계약 보존) — Serialize 미부착(core 도메인 타입, ADR-0003).
@@ -445,12 +412,8 @@ pub enum OutputPayload<'a> {
     Event(&'a OutputEvent),
 }
 
-/// 코어→sink 출력 경계 (S12 raw 경계화 → S15 B5 payload-generic). **payload 를 빌려서** 전달 —
-/// base64/wire 인코딩은 sink 책임(Embedded=base64 PtyEvent, Daemon=binary frame). Copy(참조만)라
-/// fanout 시 복사 0. agent_id/epoch는 OutputCore가 보유한 불변값을 그대로 싣는다(데몬 frame 헤더용).
-///
-/// ★S15 B5★: `data: &[u8]` → `payload: OutputPayload<'a>` — 콘솔 바이트(Bytes)와 구조화 이벤트(Event)
-/// 를 한 경계로 흘린다(ADR-0002 출력 종류 비가정). sink 가 종류별로 인코딩(Bytes→tag0, Event→tag1).
+/// 코어→sink 출력 경계(S15 B5 payload-generic). **payload 를 빌려서** 전달 — Copy(참조만)라 fanout 시
+/// 복사 0. agent_id/epoch는 OutputCore가 보유한 불변값을 그대로 싣는다(데몬 frame 헤더용).
 #[derive(Debug, Clone, Copy)]
 pub struct OutputFrame<'a> {
     pub agent_id: AgentId,
@@ -459,11 +422,11 @@ pub struct OutputFrame<'a> {
     pub payload: OutputPayload<'a>,
 }
 
-/// 에이전트 메타데이터 스냅샷 — 목록 조회 및 상태 동기화용
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentInfo {
     pub id: AgentId,
-    /// 표시용 이름. ProfileRegistry(단일 진실원)에서 채운다. 프로필이 없으면 id 앞 8자.
+    /// canonical 표시명 = display_name(override) ?? basename(cwd) — 프론트 트리·라우팅과 같은 문자열
+    /// (ADR-0101). 파생할 cwd 세그먼트가 없을 때만 id 앞 8자로 degrade.
     pub name: String,
     pub cwd: String,
     pub status: AgentStatus,
@@ -471,11 +434,9 @@ pub struct AgentInfo {
     pub rows: u16,
     /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 트리거(S9 §18-a).
     pub epoch: u32,
-    /// transport 종류별 지원 영역 — 프론트가 UI 분기에 사용.
     pub capabilities: Capabilities,
 }
 
-/// PTY 백엔드 오류 타입
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     #[error("agent not found: {0}")]
@@ -541,11 +502,7 @@ pub struct SubscribeOutcome {
 ///   (거기선 그 논리 메시지 = `wrap_message` 로 만든 봉투 문자열의 바이트).
 #[derive(Debug, Clone, Copy)]
 pub struct WriteOutcome {
-    /// 호출자가 세션 경계에 넘긴 논리 메시지 바이트 수(`bytes.len()` — encoder 감싸기 **전**, char 수 아님).
     pub bytes_requested: usize,
-    /// `bytes_requested` 의 by-construction 복사값. ★독립 측정이 아니다★: write_all 계약상 written 카운트가
-    /// transport 밖으로 나오지 않아, `Ok` 면 요청 = 수용이 항등으로 성립하므로 그대로 복사한다. 완결성은 이
-    /// 값이 아니라 `Ok`(vs `Err`)로 판정한다(struct 주석 참조). 비교는 short-write 를 못 잡는다(항상 같음).
     pub bytes_written: usize,
     /// 이 유저 턴의 메시지 uuid(replay-dedup 키, session.write_input 이 생성 — LOAD-BEARING).
     /// 배달 하네스가 ingress 의 논리 msg_id 와 이 값을 상관시켜 "claude 가 이 턴을 replay 했나"(=
@@ -568,8 +525,8 @@ pub struct WriteOutcome {
 pub struct SinkError;
 
 /// PTY 출력 전달 추상화 — Tauri 의존 없이 headless 테스트 가능하게 격리.
-/// ※S12: send는 **raw OutputFrame**을 받는다(base64 아님). wire 인코딩은 구현체가 소유:
-/// ChannelOutputSink=base64 PtyEvent / 데몬 프레임 sink=binary frame. → 코어 transport-agnostic.
+/// ※S12: wire 인코딩은 구현체가 소유한다(ChannelOutputSink=base64 PtyEvent / 데몬 프레임 sink=binary
+/// frame) → 코어 transport-agnostic.
 pub trait OutputSink: Send + Sync + 'static {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError>;
     fn sink_id(&self) -> SinkId;
@@ -600,18 +557,13 @@ pub trait StatusSink: Send + Sync + 'static {
     fn turn_ended(&self, _id: AgentId, _epoch: u32) {}
 }
 
-// ReplayBuffer 는 session.rs 로 이동 (LLD §1/§4: session.rs 소속).
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ── Capabilities::compose — 출처가 올바른 영역으로 합쳐지는지(소유권 합성 검증) ──
-    // transport가 control.resize 를, backend가 session.resume 을 각각 결정하고, compose 가
-    // 둘을 섞지 않고 제자리에 합치는지 단언한다. (이전 부정확: transport가 resume 까지 소유.)
     #[test]
     fn compose_merges_each_source_into_its_region() {
-        // transport: 물리 채널만(control.resize=true, session/model 필드 없음).
         let t = TransportCaps {
             input: InputCaps {
                 raw: true,
@@ -632,7 +584,6 @@ mod tests {
                 graceful_shutdown: false,
             },
         };
-        // backend: 프로그램만(session.resume=true, model 전부 false).
         let b = BackendCaps {
             session: SessionCaps {
                 resume: true,
@@ -648,7 +599,6 @@ mod tests {
 
         let caps = Capabilities::compose(t, b);
 
-        // 핵심: control.resize(transport 소유) ∧ session.resume(backend 소유)이 모두 살아 합쳐짐.
         assert!(
             caps.control.resize,
             "resize 는 transport 가 결정 → 합성에 보존"
@@ -657,7 +607,6 @@ mod tests {
             caps.session.resume,
             "resume 은 backend 가 결정 → 합성에 보존"
         );
-        // 출처가 뒤섞이지 않았는지 나머지도 확인.
         assert!(caps.input.raw);
         assert!(caps.output.terminal_bytes);
         assert!(caps.session.cwd_env);
