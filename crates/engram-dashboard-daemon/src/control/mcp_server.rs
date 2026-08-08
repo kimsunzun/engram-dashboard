@@ -1,19 +1,12 @@
-//! 데몬 MCP Streamable HTTP 서버(ADR-0086 스텝 1) — 인증 미들웨어 + `engram_ping` 진단 툴.
+//! 데몬 MCP Streamable HTTP 서버 — 스폰된 claude 에이전트가 mcp-config 로 붙는 제어 채널 입구.
 //!
-//! ★역할★: 스폰된 claude 에이전트가 mcp-config 로 붙는 제어 채널 입구. rmcp `StreamableHttpService`
-//!   (Tower service)를 axum `/mcp` 라우트에 nest 하고, 그 앞에 **bearer auth 미들웨어**를 얹는다 —
-//!   토큰이 없거나(no header)·모르거나(unknown)·회전됨(stale-epoch)이면 **MCP handshake 전에 401**.
-//!   유효하면 검증된 신원(BoundIdentity)을 요청 extensions 에 심어, rmcp 가 그걸 `http::request::Parts`
-//!   로 툴 컨텍스트에 흘려준다(공식 "custom extension state" 패턴 — tower.rs docstring).
+//! ★소유★: rmcp `StreamableHttpService`(Tower service)를 axum `/mcp` 에 nest 하고 그 앞에 bearer auth
+//!   미들웨어를 얹는다. 같은 서버·포트·미들웨어에 CLI 평문 라우트(`/control/send`·`/control/messages`)를
+//!   나란히 태운다. 툴 표면 = `engram_ping` · `send_message` · `messages`.
 //!
 //! ★OAuth 메타데이터 미광고(load-bearing, #59467)★: StreamableHttpService 는 `.well-known/*` 라우트를
 //!   만들지 않고, 우리도 추가하지 않는다. claude 는 서버가 OAuth 메타데이터를 광고하면 정적 Authorization
 //!   헤더를 무시하는데(claude-code #59467), 광고 라우트가 없으니 정적 Bearer 가 그대로 실린다(ADR-0086 §근거).
-//!
-//! ★스텝 2 범위(ADR-0086)★: `engram_ping`(진단) + `send_message`(A→B 텍스트 전송) 툴을 노출하고,
-//!   같은 axum 서버에 `/control/send` 평문 HTTP 라우트(CLI 입구)를 추가한다. 두 입구 모두 신원(from)을
-//!   토큰/세션에서만 파생하고(사칭 차단), 정규화한 ControlCommand 로 공통 핸들러(control::ingress)를
-//!   부른다(entrance-agnostic). Mailbox(SQLite)·Dispatcher·idle 게이트는 여전히 범위 밖(후속 스텝).
 //!
 //! tauri import 0(daemon crate).
 
@@ -46,12 +39,12 @@ use super::registry::{BoundIdentity, ControlRegistry};
 /// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. claude backend 가 CLI 용
 ///   base URL(ENGRAM_CONTROL_URL)을 파생할 때 이 리터럴 suffix("/mcp")를 **문자열로 벗긴다** —
 ///   `crates/engram-dashboard-core/src/agent/backend/claude.rs`(strip_suffix("/mcp")). 이 값을 바꾸면
-///   거기 strip 리터럴도 함께 고쳐야 한다(안 그러면 base 파생이 어긋나 CLI 가 조용히 404). 두 곳은
-///   서로를 앵커로 지목한다(빌드 시 강제되는 링크는 없으므로 주석이 유일한 안전망).
+///   거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이 틀어지고 CLI 가
+///   조용히 404 를 받는다.
 const MCP_PATH: &str = "/mcp";
 
-/// CLI 입구(ADR-0086 스텝 2) — `engram-send` 가 POST 하는 평문 HTTP 라우트. 같은 서버·포트·auth
-/// 미들웨어를 공유하되 MCP 가 아닌 단순 JSON POST 다(base URL = ENGRAM_CONTROL_URL, CLI 가 이 경로 조립).
+/// CLI 입구(ADR-0086 스텝 2) — `engram-send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
+/// (ENGRAM_CONTROL_URL)에 이 경로를 조립한다.
 const CONTROL_SEND_PATH: &str = "/control/send";
 
 /// CLI 조회 입구(D · spec §6) — `engram-send status <id>` / `pending` 이 POST 하는 라우트.
@@ -64,7 +57,6 @@ const CONTROL_MESSAGES_PATH: &str = "/control/messages";
 /// 발급하는 DaemonControlChannel 을 만들어야 하므로) 그 다음 AgentManager 를 배선한다 — 즉 서버 start
 /// 시점엔 아직 manager 가 없다. 그래서 서버엔 빈 슬롯을 넘기고, manager 조립 직후 `set` 으로 채운다.
 /// 요청 처리(send)는 accept loop 이후라 이 시점엔 항상 채워져 있다(에이전트가 붙기 전에 set 완료).
-/// OnceLock 이라 set 은 1회, 이후 get 은 lock-free. 미설정(정상 흐름엔 없음)이면 핸들러가 방어적으로 거부.
 #[derive(Default)]
 pub struct ManagerSlot {
     inner: std::sync::OnceLock<Arc<AgentManager>>,
@@ -74,20 +66,16 @@ impl ManagerSlot {
     pub fn new() -> Self {
         Self::default()
     }
-    /// manager 를 1회 주입(데몬 조립 직후). 이미 설정됐으면 무시(멱등 — 테스트 이중 호출 안전).
     pub fn set(&self, manager: Arc<AgentManager>) {
         let _ = self.inner.set(manager);
     }
-    /// 주입된 manager 참조(미설정이면 None — 정상 흐름엔 없음).
     fn get(&self) -> Option<&Arc<AgentManager>> {
         self.inner.get()
     }
 }
 
 /// ★MessagingService 늦은 주입 슬롯(순환 해소 — C1)★: ManagerSlot 과 동형. MessagingService 는
-/// AgentManager 를 감싸므로(DeliveryPort) manager 조립 **후**에야 만들어진다 — 그런데 MCP 서버는 manager
-/// 보다 먼저 뜬다(그 URL 로 mcp-config 발급). 그래서 서버엔 빈 슬롯을 넘기고, manager+service 조립 직후
-/// `set` 으로 채운다. send 요청은 accept loop 이후라 항상 채워져 있다. 미설정이면 핸들러가 방어적 거부.
+/// AgentManager 를 감싸므로(DeliveryPort) manager 조립 **후**에야 만들어진다.
 #[derive(Default)]
 pub struct MessagingSlot {
     inner: std::sync::OnceLock<Arc<engram_dashboard_messaging::service::MessagingService>>,
@@ -97,13 +85,10 @@ impl MessagingSlot {
     pub fn new() -> Self {
         Self::default()
     }
-    /// MessagingService 를 1회 주입(데몬 조립 직후). 이미 설정됐으면 무시(멱등).
     pub fn set(&self, svc: Arc<engram_dashboard_messaging::service::MessagingService>) {
         let _ = self.inner.set(svc);
     }
-    /// 주입된 서비스 참조(미설정이면 None — 정상 흐름엔 없음). messaging_host.rs 의 flush 레인
-    /// (`run_flush_lane`)도 부르므로 crate 내부에 노출한다(mcp_server 밖에서 접근 — ADR-0129 이사 전엔
-    /// 그 호출자가 ws.rs 에 있었다).
+    /// messaging_host 의 flush 레인(`run_flush_lane`)도 부르므로 crate 내부에 노출한다.
     pub(crate) fn get(
         &self,
     ) -> Option<&Arc<engram_dashboard_messaging::service::MessagingService>> {
@@ -111,27 +96,20 @@ impl MessagingSlot {
     }
 }
 
-/// claude 가 Authorization 헤더로 실어 보내는 세션 식별 헤더명(rmcp/스펙 표준, 소문자 비교).
+/// MCP 세션 식별 헤더명(rmcp/스펙 표준, 소문자).
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
 /// ★`send_message` MCP 툴 이름 = **단일 출처(ADR-0094)**★. 아래 `#[tool]` 메서드명이 곧 rmcp 가
-///   `tools/list` 에 노출하는 툴 이름이다 — 이 const 는 그 이름의 **정본**으로, ADR-0094 발신 권한
+///   `tools/list` 에 노출하는 툴 이름이고, 이 const 가 그 이름의 **정본**이다 — ADR-0094 발신 권한
 ///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 tool 로 쓴다(DaemonControlChannel.provision).
-///   ★메서드명과의 일치는 하위 테스트(`tools_list_exposes_send_message_tool`)가 강제한다★ — rmcp
-///   `#[tool]` 매크로가 메서드명을 툴 이름으로 쓰므로 여기 const 를 매크로 attr 로 주입할 수 없어,
-///   대신 런타임 tools/list 에 이 const 이름의 툴이 실제로 있는지 단언해 두 곳을 묶는다(rot 방지).
 ///   claude 문법(`mcp__..`) 지식은 backend/claude.rs 단독 — 이 const 는 이름만 제공한다(ADR-0004/0094).
 pub const SEND_MESSAGE_TOOL: &str = "send_message";
 
-/// ★`messages` MCP 툴 이름(D · spec §6)★ — `SEND_MESSAGE_TOOL` 과 같은 규율(아래 `#[tool]` 메서드명과
-///   일치해야 하고, 하위 테스트 `tools_list_exposes_the_query_tools` 가 그걸 강제한다).
+/// ★`messages` MCP 툴 이름(D · spec §6)★ — `SEND_MESSAGE_TOOL` 과 같은 규율.
 ///   ★grant 대상 아님(의도적)★: ADR-0094 의 pre-authorization 은 **발신 입구**만 담는다는 결정이라
-///   (build_grants "최소권한 — 발신 입구만"), 조회 툴은 grant 목록에 넣지 않는다. 오늘 스폰은
-///   `--permission-mode bypassPermissions`(ADR-0097)라 실질 인가에 영향이 없다 — 그 bypass 를 걷는
-///   제약 레이어가 오면 그때 "조회·관리 툴도 grant 대상인가" 를 사용자 결정으로 다시 물어야 한다.
+///   (control/mod.rs `build_grants`), 조회 툴은 grant 목록에 넣지 않는다.
 pub const MESSAGES_TOOL: &str = "messages";
 
-/// 실행 중 MCP 서버 핸들 — 에이전트가 붙을 엔드포인트 URL + graceful 종료 토큰.
 pub struct McpServerHandle {
     /// mcp-config 에 박아 넣을 엔드포인트 URL(예: `http://127.0.0.1:54321/mcp`).
     pub url: String,
@@ -144,13 +122,11 @@ pub struct McpServerHandle {
 }
 
 impl McpServerHandle {
-    /// 서버를 graceful 하게 내린다(cancel → serve loop 종료 대기).
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         if let Some(h) = self.serve_handle.take() {
             let _ = h.await;
         }
-        // self 가 여기서 drop → Drop::drop 의 cancel 은 멱등 no-op(이미 cancel 됨).
     }
 }
 
@@ -159,42 +135,27 @@ impl Drop for McpServerHandle {
     ///   서버 start 뒤 daemon.json write 같은 **후속** startup 단계가 실패해 에러 반환으로 이 핸들이
     ///   drop 되는 경우) detached serve 태스크가 취소 신호를 못 받고 계속 돌 수 있다. Drop 에서 cancel
     ///   토큰을 발화해, 어느 경로로 drop 되든 serve 태스크(graceful_shutdown 이 cancel 을 관측)가
-    ///   확실히 종료되게 한다. 프로세스 종료가 대개 이를 무의미하게 만들지만, in-process 테스트나 부분
-    ///   실패 경로에서 태스크 누수를 막아 airtight 하게 만든다. (정상 종료는 shutdown() 이 cancel+await
-    ///   를 이미 수행하므로 이 Drop 의 cancel 은 idempotent no-op — CancellationToken.cancel 은 멱등.
-    ///   Drop 은 async await 를 못 하므로 join 없이 cancel 신호만 발화한다 — 태스크는 스스로 종료한다.)
+    ///   확실히 종료되게 한다. 정상 종료 경로에선 `shutdown()` 이 이미 cancel 했으므로 여기 cancel 은
+    ///   멱등 no-op 이다.
     fn drop(&mut self) {
         self.cancel.cancel();
     }
 }
 
-/// `engram_ping`(진단) + `send_message`(A→B 전송) 툴을 노출하는 MCP 서버 핸들러.
-///
 /// ★신원 검증 = 미들웨어(FIX 12)★: 신원은 auth 미들웨어가 검증해 요청 extensions 에 심고(BoundIdentity),
 ///   세션↔신원 바인딩·pinning·정리도 전부 미들웨어(State 로 registry 접근)가 한다 — 핸들러는 extensions
 ///   에서 신원을 읽기만 한다.
-/// ★manager 슬롯 필드(스텝 2)★: send_message 는 수신자 해석·relay 를 위해 AgentManager 가 필요하다 —
-///   서버 start 시점엔 아직 manager 가 없어(순환) 늦은 주입 슬롯(ManagerSlot)을 factory 가 Arc clone 으로
-///   심는다. 신원은 여전히 extensions 에서만 읽고 payload 에서 읽지 않는다(사칭 차단).
-/// ★registry 필드★: send_message 의 relay 직전 **발신자 생존 관측**(is_identity_live)에 쓴다 — 미들웨어와
-///   **같은 Arc**(factory 가 clone)를 든다(두 번째 registry 를 만들지 않는다). ★게이트 아님★: 헤더 시점
-///   검증 이후 kill/rotate 된 발신자여도 배달은 막지 않고(작성 시점 인증으로 유효 — 사용자 결정 2026-07-19)
-///   forensic 로그만 남긴다(handle_send 5단계).
 #[derive(Clone)]
 pub struct EngramMcpHandler {
     tool_router: ToolRouter<Self>,
-    /// 수신자 해석·relay 대상 슬롯(동명 검사용). 요청 시점(에이전트 접속 후)엔 항상 채워져 있다.
     manager: Arc<ManagerSlot>,
-    /// 발신자 신원 commit-point 재검증용(F3). 미들웨어와 공유하는 동일 Arc.
+    /// 미들웨어와 공유하는 **동일 Arc** — 두 번째 registry 를 만들지 않는다.
     registry: Arc<ControlRegistry>,
-    /// ★발송 3분기 담당(C1)★: send_message 가 handle_send 에 넘기는 MessagingService 슬롯. manager 와
-    ///   같은 늦은 주입(순환 해소).
     messaging: Arc<MessagingSlot>,
 }
 
 #[tool_router]
 impl EngramMcpHandler {
-    /// manager+messaging 슬롯 + registry 주입 생성자 — factory 가 세션마다 Arc clone 으로 부른다.
     pub fn new(
         manager: Arc<ManagerSlot>,
         registry: Arc<ControlRegistry>,
@@ -208,13 +169,7 @@ impl EngramMcpHandler {
         }
     }
 
-    /// 진단 툴 — "pong" + 바인딩된 신원(AgentId, epoch)을 돌려준다. 연결된 에이전트가 이 툴을 호출하면
-    /// 세션 바인딩이 end-to-end 로 통함이 증명된다(스텝 1 acceptance). send_message 는 스텝 2.
-    ///
-    /// ★신원 출처 = 토큰(ADR-0086)★: 신원은 요청 페이로드가 아니라 auth 미들웨어가 검증해 extensions 에
-    ///   심은 BoundIdentity 다(사칭 차단). `RequestContext` → `http::request::Parts` → `parts.extensions`
-    ///   순으로 꺼낸다(rmcp 공식 custom-extension 패턴). 없으면(정상적으로는 미들웨어가 401 로 막아 도달
-    ///   불가) tool-level 에러.
+    /// 연결된 에이전트가 이 툴을 호출하면 세션 바인딩이 end-to-end 로 통함이 증명된다(acceptance 관측점).
     #[tool(description = "Diagnostic ping — returns pong and the caller's bound agent identity")]
     async fn engram_ping(
         &self,
@@ -227,7 +182,6 @@ impl EngramMcpHandler {
             .and_then(|parts| parts.extensions.get::<BoundIdentity>().copied());
         match identity {
             Some(BoundIdentity { agent_id, epoch }) => {
-                // 신원은 미들웨어가 검증해 extensions 에 심은 값이다(사칭 차단) — 여기선 그대로 되돌린다.
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "pong agent={agent_id} epoch={epoch}"
                 ))]))
@@ -239,21 +193,11 @@ impl EngramMcpHandler {
         }
     }
 
-    /// `send_message`(ADR-0086 스텝 2) — 산 에이전트 B 에게 텍스트 메시지를 보낸다. 입력 스키마
-    /// `{to, body}`. ★from 은 payload 아님★: 발신자 신원은 세션 바인딩(initialize 때 고정)이 미들웨어를
-    /// 통해 extensions 에 심은 BoundIdentity 에서만 파생한다 — 페이로드에 from 필드를 두지 않는다(사칭 차단).
-    ///
-    /// 결과는 ACK/에러 JSON(CLI 경로와 **동일 shape**)을 text content 로 되돌린다. 정규화·검증·relay 는
-    /// 공통 핸들러(control::ingress::handle_send)가 한다 — 이 툴은 신원+인자를 ControlCommand 로 싸는
-    /// 어댑터일 뿐이다(entrance-agnostic).
-    ///
     /// ★★이 메서드명(`send_message`)은 반드시 `SEND_MESSAGE_TOOL` 상수와 같아야 한다(ADR-0094 단일
     ///   출처)★★. rmcp `#[tool]` 매크로가 **메서드명**을 `tools/list` 툴 이름으로 그대로 쓰므로(2.2.0
     ///   tool.rs: `name = attribute.name.unwrap_or_else(|| fn_ident.to_string())`, 매크로 attr 는 String
     ///   **리터럴**만 받아 const 주입 불가 — 검증함), 이름 정본인 그 const 를 컴파일타임에 여기 붙일 방법이
-    ///   없다. 대신 아래 세 갈래로 결합을 강제한다: (1) 이 주석(리네임하는 사람이 커플링을 즉시 본다),
-    ///   (2) 런타임 테스트 `tools_list_exposes_send_message_tool`(실제 tools/list 에 그 const 이름의 툴이
-    ///   있는지 단언 — rot 방지 강제선), (3) grant 패턴 생성이 그 const 를 tool 로 씀(backend/claude.rs).
+    ///   없다. 런타임 테스트 `tools_list_exposes_send_message_tool` 이 두 곳을 묶는다.
     ///   ⚠️ 이 메서드명을 바꾸려면 `SEND_MESSAGE_TOOL` const 도 함께 바꿔라 — 안 그러면 grant 가 존재하지
     ///   않는 툴을 가리켜 발신 입구가 조용히 막히고, 테스트만 이를 잡는다.
     // ADR-0086 / ADR-0094(단일 출처 결합)
@@ -283,7 +227,6 @@ impl EngramMcpHandler {
         params: Parameters<SendArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        // 신원 = 미들웨어가 검증해 extensions 에 심은 값(engram_ping 과 동일 경로). 없으면 도달 불가 경로.
         let Some(from) = ctx
             .extensions
             .get::<http::request::Parts>()
@@ -295,8 +238,6 @@ impl EngramMcpHandler {
             ));
         };
 
-        // manager 슬롯 조회 — 요청 시점(에이전트 접속 후)엔 항상 채워져 있다. 미설정(정상 흐름엔 없음)이면
-        //   tool-level 에러(제어 채널 미준비).
         let Some(manager) = self.manager.get() else {
             // ★F6 계측(error, M4)★: 정상 흐름엔 없는 branch — manager 슬롯이 아직 안 채워짐(배선 순서 이상).
             //   안전한 폴백이 없다(메시지 배달 불가) → warn 이 아니라 error(logging-conventions: error =
@@ -310,7 +251,6 @@ impl EngramMcpHandler {
                 None,
             ));
         };
-        // 발송 3분기 담당 MessagingService 슬롯 조회(C1) — manager 와 같은 시점에 채워진다.
         let Some(messaging) = self.messaging.get() else {
             tracing::error!(
                 entrance = "mcp",
@@ -328,10 +268,8 @@ impl EngramMcpHandler {
             reply_by,
             reply_to,
         }) = params;
-        // C3: 선택 인자를 그대로 나른다(검증·파싱은 ingress 단일 지점 — 양 입구 동일 반려, ADR-0103).
         let cmd = ControlCommand {
             from,
-            // ★MCP 입구 = 분해 없음★(spec §6) — 배열 원소를 그대로 토큰으로 쓴다.
             to: to.into_tokens(),
             body,
             contract: SendContract {
@@ -341,11 +279,11 @@ impl EngramMcpHandler {
             },
         };
         // ★blocking 경계(C4 리뷰 fix D · load-bearing)★: `handle_send` 안의 `inject` 는 자식 stdin 의
-        //   **blocking write** 다. 그룹 방송이면 한 요청이 멤버 수만큼 그 write 를 **직렬로** 지므로
-        //   (service.rs handle_group_send "주입 = 멤버 수만큼 순차 직접 write"), 이 async 핸들러에서 그대로
-        //   부르면 막힌 파이프 하나가 tokio 워커 스레드를 통째로 잡고 그 스레드에 얹힌 **다른 요청까지**
-        //   head-of-line 블로킹한다(런타임 워커는 코어 수만큼뿐). 그래서 blocking 풀로 옮긴다 — 단일 발송도
-        //   같은 write 를 하므로 같은 대우를 받는다(경로를 갈라 두 규율을 만들지 않는다).
+        //   **blocking write** 다. 그룹 방송이면 한 요청이 멤버 수만큼 그 write 를 **직렬로** 지므로, 이
+        //   async 핸들러에서 그대로 부르면 막힌 파이프 하나가 tokio 워커 스레드를 통째로 잡고 그 스레드에
+        //   얹힌 **다른 요청까지** head-of-line 블로킹한다(런타임 워커는 코어 수만큼뿐). 그래서 blocking
+        //   풀로 옮긴다 — 단일 발송도 같은 write 를 하므로 같은 대우를 받는다(경로를 갈라 두 규율을
+        //   만들지 않는다).
         //   ★flush 레인과 같은 규율★: 배치 write 를 요청 처리 스레드에서 떼어내는 것(service.rs FlushTrigger).
         //
         // ★그 대가 = **at-least-once 배달**(round-3 fix 7 · 의도된 설계, 문서화 필요)★: `spawn_blocking`
@@ -366,22 +304,13 @@ impl EngramMcpHandler {
         })
         .await
         .map_err(|e| {
-            // JoinError = blocking 태스크가 패닉했다(정상 흐름엔 없음). 삼키지 않고 툴 에러로 올린다.
             tracing::error!(entrance = "mcp", "제어 채널 send 태스크 실패(패닉): {e}");
             ErrorData::internal_error("send task failed", None)
         })?;
-        // ACK/에러 JSON 을 text content 로. CLI(/control/send)와 같은 to_json shape 를 그대로 실어 보낸다.
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
-    /// `messages`(D · spec §6) — **읽기 전용** 장부 조회. 인자 `{id?}`.
-    ///
-    /// 신원은 send_message 와 같은 경로(세션 바인딩 → extensions)에서만 온다 — 무인자 조회("내 미결")의
-    /// "나" 가 그 신원이다(payload 로 남을 사칭할 수 없다).
-    /// ★응답 shape 정본 = `ingress::handle_messages` doc-comment★(두 입구 동일 JSON — 여기 복제하지 않는다).
-    /// ★spawn_blocking 없음★: 이 경로엔 자식 stdin blocking write 가 없다(근거는 ingress 조회 섹션 주석).
-    // ADR-0086 / ADR-0103
     #[tool(
         description = "Look up message state on the Engram broker. With no arguments it returns \
         YOUR open items — messages you sent that have not landed yet, requests you are waiting on \
@@ -444,7 +373,6 @@ pub enum ToField {
 }
 
 impl ToField {
-    /// 수신자 토큰 목록으로 편다(**분해 없음** — 위 주석). 트림·펼침·중복 제거는 데몬 단일점이 한다.
     pub fn into_tokens(self) -> Vec<String> {
         match self {
             ToField::One(s) => vec![s],
@@ -489,7 +417,6 @@ pub struct SendArgs {
 
 /// `messages` 인자(D · spec §6 `messages { id? }`). 전부 선택 — 무인자가 "내 미결" 조회다.
 /// ★신원 필드 없음★: "나" 는 세션 신원에서만 온다(payload 로 남의 미결을 볼 수 없다 — ADR-0086 불변식).
-// ADR-0103
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct MessagesArgs {
     /// A message id to inspect (e.g. "m-7f3k9q2d"). Omit to list your own open items instead.
@@ -503,8 +430,6 @@ pub struct MessagesArgs {
 impl ServerHandler for EngramMcpHandler {
     fn get_info(&self) -> ServerInfo {
         // ServerInfo(=InitializeResult)는 #[non_exhaustive] 라 struct 리터럴 불가 → ctor 체인 사용.
-        // tools capability 만 켠다. OAuth/resources/prompts 미광고(#59467 회피). 워커 노출 = 최소권한
-        // (engram_ping + send_message 만 — ADR-0086 least-privilege).
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Engram daemon control channel (ADR-0086). Available tools: engram_ping, send_message, messages.",
         )
@@ -513,25 +438,17 @@ impl ServerHandler for EngramMcpHandler {
 
 /// bearer auth 미들웨어(ADR-0086) — MCP handshake **전에** 토큰을 검증하고 세션↔신원을 고정한다.
 ///
-/// 흐름:
-///   1. Authorization 에서 `Bearer <token>` 추출 → registry.validate. 실패(없음/모름/stale-epoch)면
-///      즉시 401(inner 미호출 = handshake 미생성).
-///   1.5. ★세션 id 헤더 형식/필수성 검사(400, ADR-0086)★: Mcp-Session-Id 헤더가 **있으나 malformed**
-///      (비-UTF-8 등 to_str() 실패)이면 400 — None 으로 접어 sessionless 로 오인시키면 경계를 우회한다.
-///      또 **GET/DELETE 는 세션 operation** 이라 세션 id 가 반드시 있어야 한다 — 없으면 400(POST 무-세션id
-///      는 예외 = initialize). 이 검사가 아래 바인딩 검사가 "session op 는 반드시 바인딩으로 resolve 된다"를
-///      보장한다(rmcp 내부 4xx 동작에 의존하지 않음).
-///   2. ★세션 바인딩 검사(FIX 7 + round-2 F1)★: 요청이 **기존 Mcp-Session-Id 를 실어 오면**, 데몬
-///      레지스트리에 그 세션 바인딩이 있어야 한다. 바인딩 있고 신원 일치=통과 / 바인딩 있으나 신원
-///      불일치=**403**(cross-token takeover — 세션 S 를 토큰 A 로 열고 토큰 B 로 S 에 요청) / 바인딩
-///      **없음**=**404**(orphaned/unknown — revoke 로 바인딩만 prune 됐으나 rmcp 세션이 살아 있는 고아
-///      세션에 다른 유효 토큰이 attach 하는 탈취를 차단). initialize 는 아직 세션 id 가 없어 이 검사를
-///      건너뛴다(세션은 응답에서 생성). DELETE 면 신원 확인 후 세션 바인딩을 prune 한다(FIX 8/F6).
-///   3. 검증된 신원을 요청 extensions 에 심어 inner(StreamableHttpService)로 넘긴다 → rmcp 가 Parts 로
-///      툴에 흘린다.
+/// 검사 순서:
+///   1. Authorization 의 `Bearer <token>` → registry.validate. 실패면 401(inner 미호출 = handshake 미생성).
+///   1.5. Mcp-Session-Id 형식/필수성 → 400. 이 검사가 아래 바인딩 검사의 "session op 는 반드시 바인딩으로
+///      resolve 된다"를 보장한다(rmcp 내부 4xx 동작에 의존하지 않음).
+///   2. 세션 바인딩 검사(FIX 7 + round-2 F1) — 일치=통과 / 신원 불일치=**403** / 바인딩 없음=**404**.
+///      initialize 는 아직 세션 id 가 없어 건너뛴다(세션은 응답에서 생성). DELETE 면 신원 확인 후 세션
+///      바인딩을 prune 한다(FIX 8/F6).
+///   3. 검증된 신원을 요청 extensions 에 심어 inner(StreamableHttpService)로 넘긴다 → rmcp 가
+///      `http::request::Parts` 로 툴에 흘린다(공식 custom-extension 패턴).
 ///   4. 응답에 새 Mcp-Session-Id 가 있으면(initialize 성공) `bind_session_if_absent` 로 신원을 세션에
-///      **한 번만** 고정한다(no-overwrite + validate→bind revoke 재확인 — FIX 7). 실패(중복/죽음)는
-///      바인딩 생략(중복은 무해, 죽음은 다음 요청에서 401/403 로 걸린다).
+///      **한 번만** 고정한다. 실패(중복/죽음)는 바인딩 생략(중복은 무해, 죽음은 다음 요청에서 401/403).
 ///
 /// ★왜 미들웨어에서 401/403(handshake 전)인가★: rmcp 는 인증을 내장하지 않는다(공식 auth 패턴 = axum
 ///   미들웨어). 검증을 handshake 안으로 미루면 잘못된 토큰도 세션을 만든다 — 여기서 막아 "거부는 어떤
@@ -545,7 +462,6 @@ where
     B: Send + 'static,
     Request<B>: Into<Request<axum::body::Body>>,
 {
-    // Authorization: Bearer <token> 추출. 없거나 형식 위반 → 401.
     // ★"Bearer " 접두 엄격성은 의도적(FIX 13)★: 이 헤더는 데몬이 mcp-config 에 **직접 authored** 한
     //   값이라(claude 가 그대로 전송) 형식이 고정돼 있다 — 대소문자 변형·여분 공백 등 관대한 파싱을
     //   할 이유가 없다(범용 서버가 아니다). 정확히 `"Bearer "` prefix 만 허용.
@@ -559,7 +475,6 @@ where
     let Some(token) = token else {
         return unauthorized();
     };
-    // 모름/stale-epoch → validate None → 401. (회전된 구 epoch 토큰은 registry 에서 이미 제거됨.)
     let Some(identity) = registry.validate(&token) else {
         return unauthorized();
     };
@@ -573,7 +488,7 @@ where
     //   **부재**한 헤더만 "sessionless" 로 취급한다(initialize 경로).
     let method = request.method().clone();
     let req_session_id = match request.headers().get(SESSION_ID_HEADER) {
-        None => None, // 진짜 부재 = sessionless(initialize 후보).
+        None => None,
         Some(v) => match v.to_str() {
             Ok(s) => Some(s.to_string()),
             Err(_) => {
@@ -599,11 +514,8 @@ where
     }
 
     if let Some(sid) = &req_session_id {
-        // 세션을 실어 온 요청은 데몬 레지스트리에 바인딩이 **있어야** 한다. 두 갈래로 처리한다:
         match registry.identity_for_session(sid) {
-            // (a) 바인딩 존재 + 신원 일치 → 정상 진행(아래 DELETE prune / next.run).
             Some(bound) if bound == identity => {}
-            // (b) 바인딩 존재하나 신원 불일치 = cross-token takeover(FIX 7) → 403.
             Some(_) => {
                 tracing::warn!(
                     session = %sid,
@@ -611,17 +523,15 @@ where
                 );
                 return forbidden();
             }
-            // (c) ★orphaned-session 거부(round-2 F1)★: 세션 id 를 실어 왔는데 데몬 바인딩이 **없다**.
+            // ★orphaned-session 거부(round-2 F1)★: 세션 id 를 실어 왔는데 데몬 바인딩이 **없다**.
             //   예전엔 이걸 inner(rmcp)로 통과시켜 rmcp 가 404 를 내게 했는데, 그 경로엔 치명적 창이 있다:
             //   에이전트 A 가 세션 S 를 열어 바인딩됐다가 revoke(kill)로 **바인딩만** prune 되면 rmcp 측
             //   세션 S 는 아직 살아 있을 수 있다. 그때 유효 토큰을 든 에이전트 B 가 S 를 제시하면 미들웨어가
             //   그대로 통과시켜 B 가 A 의 고아 세션 워커에 attach 된다(세션 탈취). 이제 **바인딩 없는
             //   세션-실은 요청은 전부 거부**해 그 창을 닫는다 — rmcp 측에 살아 있으나 데몬이 모르는 세션은
             //   도달 불가(unreachable orphan)가 된다. 이는 DELETE-prune 순서도 fail-safe 로 만든다.
-            //   ★404 선택 이유★: "이 세션은 (데몬 인가 관점에서) 존재하지 않는다" 가 정확한 의미이고,
-            //   truly-unknown id 는 예전에도 rmcp 404 를 받았으므로 정상 클라이언트가 보는 상태코드가
-            //   바뀌지 않는다(happy-path 무영향). 토큰 자체는 유효하므로 401 은 부적절, 다른 신원 소유가
-            //   확정된 것도 아니므로(존재 자체가 없음) 403 보다 404 가 정직하다. 응답 body 는 비워 누출 0.
+            //   truly-unknown id 는 예전에도 rmcp 404 를 받았으므로 정상 클라이언트가 보는 상태코드는
+            //   바뀌지 않는다(happy-path 무영향).
             None => {
                 tracing::warn!(
                     session = %sid,
@@ -630,7 +540,6 @@ where
                 return not_found();
             }
         }
-        // 여기 도달 = 바인딩 존재 + 신원 일치. DELETE = 클라이언트가 세션을 접음 → 바인딩 prune.
         // ★unbind-before-inner 순서 선택(round-2 F6)★: inner(rmcp)가 실제 세션 close 를 하기 **전에**
         //   데몬 바인딩을 먼저 지운다. F1(바인딩 없는 세션-실은 요청 거부)이 들어온 지금 이 순서가
         //   fail-safe 다: unbind 후 inner close 가 어떤 이유로 실패해 rmcp 측 세션이 남더라도, 데몬
@@ -643,19 +552,13 @@ where
         }
     }
 
-    // 검증된 신원을 extensions 에 심어 inner 로. body 타입을 axum Body 로 정규화(Into 바운드).
     let mut request: Request<axum::body::Body> = request.into();
     request.extensions_mut().insert(identity);
 
-    // handshake 는 inner(StreamableHttpService)가 수행. 여기까지 왔다는 건 토큰 유효 + (세션 있으면)
-    //   신원 일치 확정.
     let response = next.run(request).await;
 
-    // 세션 바인딩(ADR-0086): initialize 응답의 Mcp-Session-Id 를 신원과 **한 번만** 묶는다. no-overwrite
-    //   + exact-token recheck 는 bind_session_if_absent 가 담당(FIX 7 + round-2 F2) — 여기선 응답 헤더에서
-    //   새 세션 id 만 뽑고, **검증에 쓴 그 토큰 문자열**을 함께 넘긴다. bind 는 그 토큰이 아직 이 agent 의
-    //   현재 크레덴셜인지 국소 비교해, validate→bind 창의 revoke/재발급을 걸러낸다. 후속 tools/call 은 위
-    //   pin 검사를 거친다. 이 바인딩은 acceptance 관측점 + revoke 정리 대상.
+    // ★검증에 쓴 그 토큰 문자열을 함께 넘긴다(FIX 7 + round-2 F2)★: bind 가 그 토큰이 아직 이 agent 의
+    //   현재 크레덴셜인지 국소 비교해, validate→bind 창의 revoke/재발급을 걸러낸다.
     if let Some(session_id) = response
         .headers()
         .get(SESSION_ID_HEADER)
@@ -693,8 +596,7 @@ fn not_found() -> Response {
         .expect("valid 404 response")
 }
 
-/// 400 응답(빈 body) — 클라이언트 요청 형식 오류(ADR-0086). malformed(비-UTF-8) Mcp-Session-Id 헤더, 또는
-/// 세션 id 없는 GET/DELETE(세션 operation 은 세션을 지목해야). 신원·인증 문제가 아니라 요청 형식 문제라
+/// 400 응답(빈 body) — 클라이언트 요청 형식 오류(ADR-0086). 신원·인증 문제가 아니라 요청 형식 문제라
 /// 401/403/404 가 아니라 400. body 는 비워 어떤 정보도 누출하지 않는다.
 fn bad_request() -> Response {
     Response::builder()
@@ -704,17 +606,12 @@ fn bad_request() -> Response {
 }
 
 // ── CLI 입구(/control/send) ────────────────────────────────────────────────────────
-//
-// ★from = 토큰/세션 파생(ADR-0086)★: 미들웨어(bearer_auth)가 토큰을 검증해 신원(BoundIdentity)을 요청
-//   extensions 에 심는다. 이 핸들러는 그 신원을 `Extension<BoundIdentity>` 로 꺼내 ControlCommand 를
-//   조립한다 — payload 의 어떤 from 필드도 신원으로 쓰지 않는다(사칭 차단). MCP 툴 경로와 **같은 공통
-//   핸들러**(ingress::handle_send)를 부르므로 ACK/에러 JSON shape 가 동일하다(entrance-agnostic).
 
 /// `/control/send` 요청 바디. `{to, body, request?, reply_by?, reply_to?}` — from 필드 없음(신원은 토큰에서만).
 /// C3 인자는 전부 선택이라 옛 `{to, body}` 바디와 **wire 호환**이다(누락 = 통보).
 #[derive(Debug, serde::Deserialize)]
 struct SendRequest {
-    /// 수신자 — 문자열 1개(콤마 목록 허용) 또는 배열. ★콤마 분해는 이 CLI 입구 전용★(아래 핸들러 주석).
+    /// 수신자 — 문자열 1개(콤마 목록 허용) 또는 배열.
     to: ToField,
     body: String,
     #[serde(default)]
@@ -726,11 +623,8 @@ struct SendRequest {
 }
 
 /// ★CLI 입구의 수신자 토큰화(순수 함수 — 리뷰 C3)★: `engram-send --to a,b` 는 셸에서 목록을 표현할 방법이
-/// 콤마뿐이라 **이 입구에서만** 한 번 쪼갠다.
-///
-/// ★MCP 배열 원소는 절대 쪼개지 않는다(spec §6)★ — 그쪽은 구조가 이미 경계를 주므로 이중 분해를 하면
-///   `"a,b"` 라는 실제 이름을 표현할 방법이 사라진다. 그래서 분해 규칙이 **입구별로 다른 게 의도**이고,
-///   분해 이후의 정규화(트림·펼침·중복 제거·로스터 대조)는 데몬 단일점이라 두 입구 결과가 같다.
+/// 콤마뿐이라 **이 입구에서만** 한 번 쪼갠다. 분해 규칙이 **입구별로 다른 게 의도**다(MCP 쪽 규칙은
+/// `ToField` 주석).
 fn cli_recipient_tokens(to: ToField) -> Vec<String> {
     to.into_tokens()
         .into_iter()
@@ -738,21 +632,17 @@ fn cli_recipient_tokens(to: ToField) -> Vec<String> {
         .collect()
 }
 
-/// `/control/send` 라우트 State — relay 대상(manager 슬롯) + 발신자 재검증용 registry(F3). MCP factory 와
-/// **같은 Arc** 를 공유한다(두 번째 registry 를 만들지 않는다). Clone 은 Arc clone 이라 값싸다.
+/// `/control/send` 라우트 State — MCP factory 와 **같은 Arc** 를 공유한다(두 번째 registry 를 만들지 않는다).
 #[derive(Clone)]
 struct ControlSendState {
     manager: Arc<ManagerSlot>,
     registry: Arc<ControlRegistry>,
-    /// 발송 3분기 담당(C1) — MCP factory 와 같은 늦은 주입 슬롯 Arc.
     messaging: Arc<MessagingSlot>,
 }
 
-/// `/control/send` 핸들러 — CLI 입구. 신원(extensions)+바디 → ControlCommand → 공통 핸들러 → ACK/에러 JSON.
 /// 항상 200 + JSON body(성공/교정 에러 모두 열린 요청에 실린다 — CLI 가 JSON 을 파싱해 exit code 를 정한다).
 async fn control_send_handler(
     axum::extract::State(state): axum::extract::State<ControlSendState>,
-    // 미들웨어가 심은 검증된 신원. 없으면(정상적으로는 미들웨어가 401 로 막아 도달 불가) 401 로 방어.
     identity: Option<axum::Extension<BoundIdentity>>,
     body: Option<Json<SendRequest>>,
 ) -> Response {
@@ -760,22 +650,16 @@ async fn control_send_handler(
         // 미들웨어가 신원을 심지 않았다 = 인증 경로 이상. 방어적 401(정상 흐름에선 도달 불가).
         return unauthorized();
     };
-    // 바디 파싱 실패(비-JSON·필드 누락)면 400(형식 오류) — 신원 문제가 아니라 요청 형식 문제.
     let Some(Json(req)) = body else {
         return bad_request();
     };
-    // manager 슬롯 조회 — 미설정(정상 흐름엔 없음)이면 503.
     let Some(manager) = state.manager.get() else {
-        // ★F6 계측(error, M4)★: 정상 흐름엔 없는 branch — manager 슬롯 미설정(배선 순서 이상).
-        //   안전한 폴백이 없다(메시지 배달 불가) → warn 이 아니라 error(logging-conventions: error =
-        //   "사람이 반드시 봐야 함" = 배선 결함). MCP 핸들러 쪽과 동일 정책.
         tracing::error!(
             entrance = "cli",
             "제어 채널 send 불가 — manager 슬롯 미설정(배선 순서 이상, ADR-0086 F6)"
         );
         return service_unavailable();
     };
-    // 발송 3분기 담당 MessagingService 슬롯 조회(C1) — manager 와 같은 시점에 채워진다.
     let Some(messaging) = state.messaging.get() else {
         tracing::error!(
             entrance = "cli",
@@ -785,10 +669,6 @@ async fn control_send_handler(
     };
     let cmd = ControlCommand {
         from,
-        // ★콤마 분해는 **CLI 입구 전용**이다(spec §6 · load-bearing)★: `engram-send --to a,b` 는 셸에서
-        //   목록을 표현할 방법이 콤마뿐이라 여기서 한 번 쪼갠다. MCP 배열 원소는 **절대** 쪼개지 않는다
-        //   (그쪽은 구조가 이미 경계를 준다 — 이중 분해는 `"a,b"` 라는 실제 이름을 표현 불가하게 만든다).
-        //   분해 **이후**의 정규화(트림·펼침·중복 제거·로스터 대조)는 데몬 단일점이라 두 입구 결과가 같다.
         to: cli_recipient_tokens(req.to),
         body: req.body,
         contract: SendContract {
@@ -797,9 +677,6 @@ async fn control_send_handler(
             reply_to: req.reply_to,
         },
     };
-    // ★blocking 경계(C4 리뷰 fix D)★ — 근거는 MCP 핸들러 쪽 주석이 정본(같은 이유·같은 규율).
-    // ★at-least-once(round-3 fix 7)★ — 요청이 끊겨도 이 블로킹 태스크는 완주해 배달·장부는 커밋되고 응답만
-    //   유실된다. 근거·대안·확장점(멱등 키)은 MCP 핸들러 쪽 주석이 정본.
     let (manager, registry, messaging) =
         (manager.clone(), state.registry.clone(), messaging.clone());
     let Ok(result) = tokio::task::spawn_blocking(move || {
@@ -816,7 +693,6 @@ async fn control_send_handler(
             .body(axum::body::Body::empty())
             .expect("valid 500 response");
     };
-    // 성공/교정 에러 모두 200 + JSON(CLI 가 status 필드로 성패 판정). MCP 툴 경로와 같은 to_json shape.
     Json(result.to_json()).into_response()
 }
 
@@ -827,9 +703,6 @@ struct MessagesRequest {
     id: Option<String>,
 }
 
-/// `/control/messages` 핸들러 — CLI 조회 입구. MCP `messages` 툴과 **같은 공통 핸들러**를 부른다
-/// (entrance-agnostic — 두 입구 동일 JSON, spec §6).
-///
 /// ★빈 바디 허용★: `pending`(무인자 조회)은 보낼 필드가 없다. CLI 가 `{}` 를 싣지만, 바디 자체가 없거나
 ///   파싱이 안 돼도 **무인자 조회로 접는다** — 조회는 부작용이 없어 관대해도 안전하고, 여기서 400 을 내면
 ///   "인자를 안 준 것" 과 "요청이 깨진 것" 을 CLI 가 구분하지 못해 자기교정이 헛돈다(send 는 반대로 400 —
@@ -854,8 +727,7 @@ async fn control_messages_handler(
     Json(result.to_json()).into_response()
 }
 
-/// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). send·messages **양쪽 전부**가 이 하나를
-/// 쓴다(D 리뷰 A3 — 예전엔 send 쪽 두 곳이 같은 응답을 따로 손조립하고 있었다).
+/// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). 요청 형식·인증 문제가 아니므로 4xx 가 아니다.
 fn service_unavailable() -> Response {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -863,8 +735,7 @@ fn service_unavailable() -> Response {
         .expect("valid 503 response")
 }
 
-/// 데몬 MCP 서버를 127.0.0.1 ephemeral 포트에 띄운다(WS 서버와 나란히). 반환: 엔드포인트 URL·종료 토큰
-/// 을 담은 핸들. registry 는 auth 미들웨어(검증)와 provision(발급)이 공유하는 동일 Arc 다.
+/// registry 는 auth 미들웨어(검증)와 provision(발급)이 공유하는 **동일 Arc** 여야 한다.
 ///
 /// ★로컬 전용 + DNS rebinding 방어★: bind 는 127.0.0.1:0(OS 할당 포트). StreamableHttpServerConfig 는
 ///   기본 allowed_hosts=[localhost,127.0.0.1,::1] 로 로컬 Host 만 허용(rmcp 기본). stateful_mode=true(기본)
@@ -880,13 +751,7 @@ pub async fn start_mcp_server(
 
     let cancel = CancellationToken::new();
 
-    // rmcp Streamable HTTP service — service_factory 는 요청마다(세션마다) 핸들러를 만든다. 신원은
-    //   미들웨어가 extensions 로 흘리지만, send_message 는 relay 대상 AgentManager 가 필요하므로 factory
-    //   가 manager Arc clone 을 심는다(FIX 12 의 "상태 없음"은 신원/registry 한정 — manager 는 relay 자원).
-    //   registry 는 auth 미들웨어와 provision 이 공유한다(아래 layer + DaemonControlChannel).
     // StreamableHttpServerConfig 는 #[non_exhaustive] 라 struct 리터럴 불가 → Default + builder 메서드.
-    //   종료 토큰만 연동(cancel 시 활성 세션 정리). 나머지는 rmcp 기본(stateful_mode=true, allowed_hosts=
-    //   로컬만 — DNS rebinding 방어, OAuth 미광고).
     let config =
         StreamableHttpServerConfig::default().with_cancellation_token(cancel.child_token());
     let factory_manager = manager.clone();
@@ -904,23 +769,17 @@ pub async fn start_mcp_server(
         config,
     );
 
-    // 라우트: /mcp(MCP service nest) + /control/send(CLI 입구 평문 POST). 둘 다 같은 bearer auth 미들웨어를
-    //   공유한다 — /control/send 는 세션 없는 POST 라 미들웨어가 토큰 검증 후 신원을 extensions 에 심고
-    //   통과시킨다(POST 무-세션id 예외 경로, initialize 와 동형). MCP 쪽 401/403/404 시맨틱은 불변.
     // ★nest_service★: StreamableHttpService 는 Tower service 라 axum 라우터에 그대로 얹힌다.
     // ★body 상한 = RequestBodyLimitLayer(round-2 F4)★: 로컬 제어 채널의 요청 바디는 작다 — 악성/폭주 바디로
     //   메모리를 삼키지 않게 상한을 명시한다. axum `DefaultBodyLimit` 는 **extractor**(Json/Bytes 등)에만
     //   걸리는데 rmcp `StreamableHttpService` 는 raw body 를 직접 소비하므로(extractor 미경유) 그 상한이 통하지
     //   않는다. `RequestBodyLimitLayer` 는 body 자체를 감싸 하위 소비자 전부(rmcp 포함)에 상한을 강제하고,
-    //   초과 시 413 로 끊는다. 1MB 면 initialize/tools/call·send POST 페이로드에 충분(body 문자열 상한은
-    //   ingress 가 64KiB 로 별도 방어).
+    //   초과 시 413 로 끊는다. 1MB 면 initialize/tools/call·send POST 페이로드에 충분하다.
     // ★레이어 순서★: 아래는 바깥→안 순서로 body-limit → auth → 라우트로 쌓인다(axum layer 는 나중에 쓴 게
     //   바깥). body-limit 를 가장 바깥에 둬 auth·inner 어느 쪽이 body 를 읽든 그 전에 상한이 적용되게 한다.
     const MAX_BODY_BYTES: usize = 1024 * 1024;
     let app = axum::Router::new()
         .nest_service(MCP_PATH, mcp_service)
-        // ADR-0086 스텝 2: CLI 입구. State 로 manager(relay 대상)+registry(발신자 재검증 F3)를 주입.
-        //   신원은 extensions 에서 읽음. registry 는 미들웨어와 같은 Arc(두 번째 registry 없음).
         .route(
             CONTROL_SEND_PATH,
             axum::routing::post(control_send_handler).with_state(ControlSendState {
@@ -929,7 +788,6 @@ pub async fn start_mcp_server(
                 messaging: messaging.clone(),
             }),
         )
-        // D(spec §6): CLI 조회·관리 미러. send 와 같은 State·같은 auth 미들웨어·같은 공통 핸들러를 쓴다.
         .route(
             CONTROL_MESSAGES_PATH,
             axum::routing::post(control_messages_handler).with_state(ControlSendState {
@@ -949,7 +807,6 @@ pub async fn start_mcp_server(
     let serve_cancel = cancel.clone();
     let serve_handle = tokio::spawn(async move {
         let server = axum::serve(listener, app.into_make_service());
-        // graceful shutdown = cancel 토큰 관측.
         let graceful = server.with_graceful_shutdown(async move {
             serve_cancel.cancelled().await;
         });
@@ -976,7 +833,6 @@ mod tests {
 
     #[test]
     fn ping_args_schema_builds() {
-        // schemars 가 빈 인자 스키마를 만들 수 있어야(tool 매크로가 컴파일되는지 간접 확인).
         let schema = schemars::schema_for!(PingArgs);
         let _ = serde_json::to_string(&schema).expect("serialize schema");
     }
@@ -993,14 +849,12 @@ mod tests {
 
     #[test]
     fn send_args_schema_builds() {
-        // send_message input schema({to,body})가 schemars 로 빌드되는지(tool 매크로 컴파일 간접 확인).
         let schema = schemars::schema_for!(SendArgs);
         let s = serde_json::to_string(&schema).expect("serialize schema");
         assert!(
             s.contains("\"to\"") && s.contains("\"body\""),
             "스키마에 to/body: {s}"
         );
-        // ★from 필드는 스키마에 없어야★(신원은 토큰에서만 — payload from 금지, ADR-0086).
         assert!(
             !s.contains("\"from\""),
             "send_message 스키마에 from 필드가 없어야: {s}"
@@ -1009,9 +863,8 @@ mod tests {
 
     #[test]
     fn to_field_tokenizes_per_entrance_without_double_splitting() {
-        // ★리뷰 C3 — 입구별 토큰화 규칙의 단위 커버(통합 하네스에만 있던 축)★.
         let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
-        // MCP: 배열 원소도 문자열 하나도 **그대로**(콤마 분해 없음).
+        // ── MCP 입구 ──
         assert_eq!(
             ToField::One("a,b".to_string()).into_tokens(),
             owned(&["a,b"])
@@ -1020,7 +873,7 @@ mod tests {
             ToField::Many(owned(&["a,b", "@all"])).into_tokens(),
             owned(&["a,b", "@all"])
         );
-        // CLI: 콤마를 쪼갠다(문자열이든 배열이든 같은 규칙).
+        // ── CLI 입구 ──
         assert_eq!(
             cli_recipient_tokens(ToField::One("a,b".to_string())),
             owned(&["a", "b"])
@@ -1029,7 +882,6 @@ mod tests {
             cli_recipient_tokens(ToField::Many(owned(&["a,b", "@all"]))),
             owned(&["a", "b", "@all"])
         );
-        // 두 입구가 **일부러 다르다**: 같은 문자열이 MCP 에선 이름 하나, CLI 에선 두 수신자다.
         assert_ne!(
             ToField::One("a,b".to_string()).into_tokens(),
             cli_recipient_tokens(ToField::One("a,b".to_string()))
@@ -1038,7 +890,6 @@ mod tests {
 
     #[test]
     fn to_field_deserializes_both_string_and_array_shapes() {
-        // 하위 호환(단일 문자열)과 신규(배열)가 **둘 다** 유효해야 한다(spec §6).
         let one: ToField = serde_json::from_str(r#""bob""#).expect("string 형태");
         assert_eq!(one.into_tokens(), vec!["bob".to_string()]);
         let many: ToField = serde_json::from_str(r#"["bob","@all"]"#).expect("array 형태");
@@ -1050,11 +901,6 @@ mod tests {
 
     #[test]
     fn tools_list_exposes_send_message_tool() {
-        // ★단일 출처 tie(ADR-0094)★: SEND_MESSAGE_TOOL const 가 실제 등록된 툴 이름과 일치하는지
-        //   런타임 라우터로 강제한다. rmcp #[tool] 매크로가 메서드명(send_message)을 툴 이름으로 쓰므로
-        //   const 를 매크로 attr 로 주입할 수 없다 → 대신 라우터가 이 const 이름의 route 를 갖는지 단언해
-        //   두 곳(const ↔ 메서드명)이 어긋나면 이 테스트가 깨지게 묶는다(발신 권한 grant 가 이 const 를
-        //   mcp__{server}__{tool} 의 tool 로 쓴다 — 어긋나면 pre-auth 패턴이 실제 툴명과 불일치).
         let router = EngramMcpHandler::tool_router();
         assert!(
             router.has_route(SEND_MESSAGE_TOOL),
@@ -1064,16 +910,14 @@ mod tests {
 
     #[test]
     fn tools_list_exposes_the_query_tools() {
-        // ★단일 출처 tie(SEND_MESSAGE_TOOL 과 같은 규율)★: const ↔ #[tool] 메서드명이 어긋나면 프라이밍이
-        //   가르치는 툴 이름과 실제 노출 이름이 갈려 조회 입구가 조용히 없는 것이 된다.
+        // const ↔ #[tool] 메서드명이 어긋나면 프라이밍이 가르치는 툴 이름과 실제 노출 이름이 갈려 조회
+        //   입구가 조용히 없는 것이 된다.
         let router = EngramMcpHandler::tool_router();
         assert!(router.has_route(MESSAGES_TOOL), "'{MESSAGES_TOOL}' 툴 등록");
     }
 
     #[test]
     fn query_tool_schemas_build_and_carry_no_identity_field() {
-        // 두 조회 툴 모두 인자가 전부 선택이어야(무인자 호출이 정당한 경로) + 신원 필드가 없어야 한다
-        //   (payload 로 남의 미결을 보거나 남을 사칭할 표면 자체를 없앤다 — ADR-0086 불변식).
         let m =
             serde_json::to_string(&schemars::schema_for!(MessagesArgs)).expect("messages schema");
         assert!(m.contains("\"id\""), "messages 스키마에 id: {m}");
@@ -1097,18 +941,16 @@ mod tests {
         handle.shutdown().await;
     }
 
-    // ── round-2 F5: 핸들 drop(shutdown 미호출)이 serve 태스크를 취소한다 ──────────────────────
+    // ── round-2 F5 ──────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn dropping_handle_cancels_serve_task() {
         let reg = Arc::new(ControlRegistry::new());
         let handle = start_mcp_server(reg, empty_slot(), empty_messaging_slot())
             .await
             .expect("start mcp server");
-        // 핸들에서 serve JoinHandle 을 관측용으로 미리 복제할 수는 없으므로(1개뿐), cancel 토큰을
-        //   복제해 drop 후 cancel 이 발화됐는지 본다. shutdown() 대신 그냥 drop(후속 startup 실패 모사).
         let watch = handle.cancel.clone();
         assert!(!watch.is_cancelled(), "start 직후엔 cancel 안 됨");
-        drop(handle); // ★shutdown().await 없이 drop★ — Drop 이 cancel 을 발화해야(F5).
+        drop(handle);
         assert!(
             watch.is_cancelled(),
             "핸들 drop 시 cancel 토큰이 발화돼 detached serve 태스크가 종료돼야(F5)"
