@@ -1489,9 +1489,6 @@ impl Drop for AgentManager {
 mod tests {
     use super::*;
 
-    /// harmless 자식(cmd.exe /c echo, 즉시 종료)으로 spec을 만든다 — 실 claude 없이 transport
-    /// **선택 로직**만 검증하기 위한 격리 하네스(ADR-0012). transport의 caps로 어느 종류가
-    /// 골렸는지 판정한다(spawn한 프로세스는 shutdown으로 정리).
     #[cfg(windows)]
     fn probe_spec() -> CommandSpec {
         CommandSpec {
@@ -1502,7 +1499,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0044: manager가 json 모드엔 StdioTransport(구조화 caps)를 고른다 ──
+    // ── ADR-0044 ──
     #[cfg(windows)]
     #[test]
     fn select_transport_json_mode_picks_stdio_structured() {
@@ -1518,7 +1515,7 @@ mod tests {
         transport.shutdown();
     }
 
-    // ── 회귀: 터미널 모드는 PtyTransport(터미널 바이트, resize 가능, 구조화 아님) ──
+    // ── 회귀 ──
     #[cfg(windows)]
     #[test]
     fn select_transport_terminal_mode_picks_pty() {
@@ -1534,7 +1531,7 @@ mod tests {
         transport.shutdown();
     }
 
-    // ── write_stdin_observed_if_epoch — incarnation 조건부 write(ADR-0103 방송 소급 금지의 마지막 관문) ──
+    // ── write_stdin_observed_if_epoch ──
     //
     // ★왜 실 spawn 없이 세션을 맵에 직접 꽂나★: 검증 대상은 "맵이 가리키는 세션의 epoch 과 요구 epoch 을
     //   비교해 write 를 집행/거부하는가" 뿐이라, 실 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리).
@@ -1545,7 +1542,6 @@ mod tests {
     };
     use crate::persistence::{FilePresetStore, FileProfileStore};
 
-    /// write 바이트만 캡처하는 최소 transport(자식·파이프 없음, pump 미기동).
     struct RecordingTransport {
         written: Arc<Mutex<Vec<Vec<u8>>>>,
     }
@@ -1593,7 +1589,6 @@ mod tests {
         fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
     }
 
-    /// 빈 레지스트리(임시 디렉토리 store)로 조립한 manager — 이 테스트는 spawn 을 안 쓴다.
     fn bare_manager() -> AgentManager {
         let tag = uuid::Uuid::new_v4();
         let profiles = Arc::new(crate::agent::profile::ProfileRegistry::new(Arc::new(
@@ -1613,7 +1608,7 @@ mod tests {
         AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker)
     }
 
-    /// 주어진 epoch 의 세션을 맵에 꽂는다(같은 id 재삽입 = 재시작 = incarnation 교체 모사).
+    /// 같은 id 재삽입 = 재시작(incarnation 교체) 모사.
     fn put_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<Mutex<Vec<Vec<u8>>>> {
         let written = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(
@@ -1678,12 +1673,9 @@ mod tests {
 
     #[test]
     fn write_stdin_observed_if_epoch_refuses_a_replaced_incarnation_without_writing() {
-        // ★핵심 회귀★: 호출자가 epoch 0 을 보고 결정한 뒤 그 사이 재시작(epoch 1 교체)이 일어난 상황.
-        //   무조건 write 하는 옛 경로는 **새 incarnation** 에 착지했다(방송 소급 배달 — ADR-0103 위반).
         let manager = bare_manager();
         let id = AgentId::new_v4();
         let old_written = put_session(&manager, id, 0);
-        // 재시작 = 같은 AgentId 를 **새 세션**(epoch 1)으로 교체.
         let new_written = put_session(&manager, id, 1);
 
         let err = manager
@@ -1701,7 +1693,6 @@ mod tests {
             old_written.lock().unwrap().is_empty(),
             "옛 세션은 맵에서 밀려났으므로 그쪽에도 쓰지 않는다"
         );
-        // 대조: 요구 epoch 을 현재 값으로 맞추면 그대로 쓴다(거부가 '영구 봉쇄'가 아님).
         manager
             .write_stdin_observed_if_epoch(id, 1, b"broadcast")
             .expect("현재 incarnation 지목은 통과");
@@ -1722,8 +1713,8 @@ mod tests {
 
     // ── 명부 단일 입구(ADR-0119) · 이름 전역 유일(ADR-0120) ─────────────────────
 
-    /// 지정 cwd 로 **산 세션**을 맵에 꽂는다(프로필 없음 = ad-hoc 산 에이전트). `put_session` 은 cwd 가
-    /// `"."` 로 고정이라 이름 축 단언을 못 해서 따로 둔다 — 이름은 `basename(session.cwd)` 로 파생된다.
+    /// 프로필 없음 = ad-hoc 산 에이전트. `put_session` 은 cwd 가 `"."` 로 고정이라 이름 축 단언을
+    /// 못 해서 따로 둔다.
     fn put_live_session_at(manager: &AgentManager, id: AgentId, cwd: &str) {
         let core = Arc::new(OutputCore::new(
             id,
@@ -1763,7 +1754,6 @@ mod tests {
             .insert(id, session);
     }
 
-    /// 잠들 프로필 하나(셸 명령 — spawn 하지 않는 테스트에선 실제로 실행되지 않는다).
     fn agent_profile(cwd: &str, display_name: Option<&str>) -> AgentProfile {
         let mut p = AgentProfile::new(
             "raw".into(),
@@ -1779,19 +1769,16 @@ mod tests {
         p
     }
 
-    /// 등록 성공을 전제로 하는 편의 래퍼(접미사 공간 소진만이 Err 이고 대부분 테스트는 그 경로가 아니다).
     fn create(manager: &AgentManager, cwd: &str, display_name: Option<&str>) -> AgentProfile {
         manager
             .create_agent(agent_profile(cwd, display_name))
             .expect("이 픽스처는 접미사 공간을 소진시키지 않는다")
     }
 
-    /// 개명 요청이 성공했는지(확정 또는 멱등 무변경). 실패 두 갈래는 각각 별도 테스트가 구분한다.
     fn renamed_ok(o: RenameOutcome) -> bool {
         matches!(o, RenameOutcome::Renamed(_) | RenameOutcome::Unchanged(_))
     }
 
-    /// 명부(로스터)가 그 에이전트에 대해 말하는 canonical 이름 — 산 에이전트면 session.cwd 축이다.
     fn name_of_in_roster(manager: &AgentManager, id: AgentId) -> String {
         manager
             .roster()
@@ -1801,7 +1788,6 @@ mod tests {
             .canonical_name
     }
 
-    /// 명부에 저장된 그 에이전트의 현재 canonical 이름.
     fn name_of(manager: &AgentManager, id: AgentId) -> String {
         manager
             .agent_snapshot(id)
@@ -1811,8 +1797,6 @@ mod tests {
 
     #[test]
     fn roster_reports_live_and_dormant_agents_in_one_query() {
-        // ★새 계약(ADR-0119 결정 2)★: "전체 에이전트 + 각자 생사" 를 **한 번의 조회**가 준다.
-        //   소비자가 산 목록과 프로필 목록을 각자 떠서 합치면 그 사본이 drift 한다(이 ADR 의 발생 원인).
         let manager = bare_manager();
         let live_id = AgentId::new_v4();
         put_live_session_at(&manager, live_id, "C:/roster/alpha");
@@ -1842,11 +1826,8 @@ mod tests {
 
     #[test]
     fn a_live_namesake_does_not_hide_a_dormant_agent_with_the_same_name() {
-        // ★봉인 대상 = 잠듦 차집합의 축이 **id** 라는 규칙 자체★. 이름 축으로 빼면 산 동명 하나가
-        //   잠든 다른 에이전트를 통째로 가려, 그 앞으로 온 편지가 주인을 못 만난다.
         let manager = bare_manager();
         let live_id = AgentId::new_v4();
-        // 산 이름 = "twin"(프로필 없는 ad-hoc 세션이라 basename(session.cwd) 파생).
         put_live_session_at(&manager, live_id, "C:/roster/twin");
         // ★유일성을 우회해 직접 심는다★: 정상 경로(create_agent)면 ADR-0120 이 "twin(1)" 로 개명하므로
         //   이 상태를 만들 수 없다. 여기서 보는 건 그 위층 규칙이 아니라 **차집합의 축**이다.
@@ -1873,7 +1854,6 @@ mod tests {
 
     #[test]
     fn two_dormant_agents_sharing_a_name_are_both_reported() {
-        // 동명 잠듦은 **접지 않는다** — dedup 하면 동명 판정(모호 반려)이 조용히 파킹으로 바뀐다.
         let manager = bare_manager();
         manager.profiles.upsert(agent_profile("C:/a", Some("twin")));
         manager.profiles.upsert(agent_profile("C:/b", Some("twin")));
@@ -1891,9 +1871,6 @@ mod tests {
 
     #[test]
     fn a_dormant_agent_with_a_display_name_does_not_depend_on_the_filesystem() {
-        // ★발송 임계 경로 보호(canonical_name_when_live 의 override 단축)★: override 가 있으면 이름이
-        //   fs 에 전혀 의존하지 않아야 한다. 명부가 cwd 를 선제 canonicalize 하면 죽은 네트워크 공유에서
-        //   발송 1회당 수십 초가 붙고, cwd 가 사라진 프로필은 이름이 basename 으로 흔들린다.
         // ★관측 방법의 한계(정직 명시)★: syscall 자체는 세지 못한다 — 실재하지 않는 cwd 를 써서
         //   "canonicalize 를 탔다면 결과가 달라졌을" 상황을 만들고 결과 불변을 단언한다.
         let vanished = "C:/engram-does-not-exist-9f1c/never/created";
@@ -1914,7 +1891,6 @@ mod tests {
 
     #[test]
     fn creating_a_colliding_name_gets_the_next_free_suffix() {
-        // ADR-0120: 명부 전체(산+잠듦)에서 canonical 이름은 유일하다. 충돌은 거부가 아니라 자동 접미사.
         let manager = bare_manager();
         let a = create(&manager, "C:/x", Some("bob"));
         assert_eq!(a.canonical_name_when_live(), "bob", "첫 번째는 그대로");
@@ -1930,8 +1906,6 @@ mod tests {
 
     #[test]
     fn a_suffix_number_is_reused_once_nothing_holds_it() {
-        // 번호 기준은 **지금 명부에 남아 있는 것**뿐이므로(ADR-0123) `bob(1)` 을 지우면 다음 `bob` 충돌은
-        //   다시 `bob(1)` 이다.
         // ★안전 근거★: 프로필 삭제는 메시징 삭제 정리 훅을 돌리므로(connection_core DeleteProfile) 재발급된
         //   이름이 옛 주인의 파킹 메일·오픈 계약을 물려받지 않는다.
         let manager = bare_manager();
@@ -1949,7 +1923,6 @@ mod tests {
 
     #[test]
     fn renaming_into_an_existing_name_gets_a_suffix_but_self_rename_does_not() {
-        // ADR-0120 결정 2: 검사 지점에 **개명**이 포함된다(0115 는 신규 등록만 봤다).
         let manager = bare_manager();
         let bob = create(&manager, "C:/x", Some("bob"));
         let alice = create(&manager, "C:/y", Some("alice"));
@@ -1962,7 +1935,6 @@ mod tests {
             "bob(1)",
             "남의 이름으로 개명하면 접미사가 붙는다"
         );
-        // 자기 자신은 충돌 계산에서 빠진다 — 같은 이름 재확정은 no-op 이어야 한다.
         assert!(renamed_ok(manager.rename_agent(bob.id, Some("bob".into()))));
         assert_eq!(
             name_of(&manager, bob.id),
@@ -1973,10 +1945,8 @@ mod tests {
 
     #[test]
     fn repeating_a_rename_request_does_not_burn_a_new_number() {
-        // ★개명 멱등성(이름 = 메일 주소, ADR-0116)★: B 를 `bob` 으로 개명하면 `bob(1)` 이 되는데, 사용자는 "안 먹었나" 싶어
-        //   같은 요청을 다시 낸다. 그때마다 번호가 타면 `bob(2)`·`bob(3)` … 로 **메일 주소가 계속 바뀌어**
-        //   직전 이름으로 파킹된 편지가 24h TTL 까지 고아가 된다(ADR-0116 이 막으려는 결말).
-        //   프론트의 "값 안 바뀜" 가드는 현재 이름이 `bob(1)` 이라 걸리지 않고, LLM `RenameProfile` 엔 가드가 없다.
+        // ★상류 가드 부재★: 프론트의 "값 안 바뀜" 가드는 현재 이름이 `bob(1)` 이라 재요청에 걸리지
+        //   않고, LLM `RenameProfile` 엔 가드가 없다.
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
         let alice = create(&manager, "C:/y", Some("alice"));
@@ -1985,7 +1955,6 @@ mod tests {
             manager.rename_agent(alice.id, Some("bob".into()))
         ));
         assert_eq!(name_of(&manager, alice.id), "bob(1)");
-        // 같은 요청 재제출 ×2 — 이미 그 계열의 유일 이름을 쥐고 있으므로 완전 no-op.
         assert!(
             renamed_ok(manager.rename_agent(alice.id, Some("bob".into()))),
             "재요청은 실패가 아니라 성공(no-op)으로 보고한다"
@@ -1999,7 +1968,6 @@ mod tests {
             manager.rename_agent(alice.id, Some("bob".into()))
         ));
         assert_eq!(name_of(&manager, alice.id), "bob(1)");
-        // 명부 어디에도 bob(2) 가 생기지 않았다.
         assert!(
             !manager
                 .roster()
@@ -2009,19 +1977,14 @@ mod tests {
             manager.roster()
         );
 
-        // ★★낮은 번호가 비었을 때가 진짜 시험대★★:
-        //   재요청은 자기 자신을 충돌 계산에서 빼므로, **낮은 번호가 비어 있으면** 단축이 없을 때
-        //   재요청이 에이전트를 `bob(3)` → `bob(1)` 로 **끌어내린다**. 이름이 바뀌는 순간 그게 곧 메일
-        //   주소 변경이고 직전 이름으로 파킹된 편지는 24h TTL 까지 고아가 된다(ADR-0116).
-        //   그래서 계약은 "결과가 우연히 같다" 가 아니라 "아무것도 하지 않는다" 다.
-        let filler = create(&manager, "C:/f", Some("bob")); // alice 가 bob(1) 이므로 bob(2)
+        let filler = create(&manager, "C:/f", Some("bob"));
         assert_eq!(filler.canonical_name_when_live(), "bob(2)");
         let carol = create(&manager, "C:/c", Some("carol"));
         assert!(renamed_ok(
             manager.rename_agent(carol.id, Some("bob".into()))
         ));
         assert_eq!(name_of(&manager, carol.id), "bob(3)");
-        manager.delete_agent(filler.id); // bob(2) 가 비었다 — 낮은 번호가 열린 상태
+        manager.delete_agent(filler.id);
         assert!(
             renamed_ok(manager.rename_agent(carol.id, Some("bob".into()))),
             "같은 요청 재제출"
@@ -2035,8 +1998,6 @@ mod tests {
 
     #[test]
     fn clearing_an_override_into_a_collision_suffixes_and_is_idempotent() {
-        // ★override 해제도 개명이다(ADR-0120 결정 2)★: 해제하면 canonical 이름이 cwd basename 으로 바뀌므로
-        //   그 결과가 남의 이름과 겹칠 수 있다. 검사를 빼면 동명 2건이 명부에 앉는다.
         let manager = bare_manager();
         let a = create(&manager, "C:/shared", None);
         assert_eq!(
@@ -2047,7 +2008,6 @@ mod tests {
         let b = create(&manager, "C:/shared", Some("bee"));
         assert_eq!(b.canonical_name_when_live(), "bee");
 
-        // 해제 → cwd 파생 이름이 A 와 충돌 → 접미사 붙은 override 가 남는다(동명 허용의 대안).
         assert!(renamed_ok(manager.rename_agent(b.id, None)));
         assert_eq!(name_of(&manager, b.id), "shared(1)");
         assert_eq!(
@@ -2055,17 +2015,13 @@ mod tests {
             Some("shared(1)".to_string()),
             "충돌하는 해제는 override 를 없애지 않는다(없애면 동명이 된다)"
         );
-        // 같은 해제 요청 재제출 — 이미 그 계열의 유일 이름을 쥐고 있으므로 번호를 태우지 않는다.
         assert!(renamed_ok(manager.rename_agent(b.id, None)));
         assert_eq!(name_of(&manager, b.id), "shared(1)", "해제 재요청도 멱등");
-        // A 는 그대로 "shared" 를 쥐고 있어야 한다(해제가 남의 이름을 흔들지 않는다).
         assert_eq!(name_of(&manager, a.id), "shared");
     }
 
     #[test]
     fn a_literal_zero_suffix_does_not_occupy_the_unsuffixed_name() {
-        // ★`Exact`(접미사 없음)와 `Suffixed(0)`(리터럴 `bob(0)`)을 한 값으로 섞으면★,
-        //   `bob(0)` 하나가 `bob` 을 점유한 것처럼 보여 `bob` 이 비었는데도 `bob(1)` 이 발급된다.
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob(0)"));
 
@@ -2075,15 +2031,12 @@ mod tests {
             "bob",
             "리터럴 bob(0) 은 접미사 없는 bob 을 점유하지 않는다"
         );
-        // 그리고 bob 이 실제로 차면 계열 최대(bob(0) → 0) + 1 = bob(1).
         let next = create(&manager, "C:/z", Some("bob"));
         assert_eq!(next.canonical_name_when_live(), "bob(1)");
     }
 
     #[test]
     fn the_requested_name_is_the_base_verbatim() {
-        // ★문서화돼 있었으나 봉인은 없던 계약★: base 는 요청 문자열 **그대로**다 — 접미사를 벗겨
-        //   다른 계열로 재해석하지 않는다. 그래서 `bob(1)` 요청은 `bob` 계열과 무관하다.
         let manager = bare_manager();
         let one = create(&manager, "C:/x", Some("bob(1)"));
         assert_eq!(
@@ -2091,51 +2044,40 @@ mod tests {
             "bob(1)",
             "비어 있으면 요청한 이름 그대로(계열로 재해석 금지)"
         );
-        // ★`bob` 은 여전히 비어 있다★: `bob(1)` 은 `Suffixed(1)` 이라 `bob` 의 Exact 점유가 아니다.
         let plain = create(&manager, "C:/y", Some("bob"));
         assert_eq!(
             plain.canonical_name_when_live(),
             "bob",
             "bob(1) 이 있다고 bob 을 못 쓰게 되면 삭제로 이름을 회수하는 경로가 막힌다"
         );
-        // 같은 base 를 또 요청하면 중첩 표기가 된다(벗기지 않는다는 계약의 귀결).
         let nested = create(&manager, "C:/z", Some("bob(1)"));
         assert_eq!(nested.canonical_name_when_live(), "bob(1)(1)");
-        // ★파서가 `bob(1)(1)` 을 `bob` 계열로 되읽지 않는다★: 되읽으면 아래가 bob(2) 가 아니라 다른 번호가 된다.
         let bob2 = create(&manager, "C:/w", Some("bob"));
         assert_eq!(
             bob2.canonical_name_when_live(),
             "bob(2)",
             "bob 계열 최대는 bob(1) 의 1 뿐이다(bob(1)(1) 은 계열 아님)"
         );
-        // 중첩 계열도 자기 base 로 정상 증가한다.
         let nested2 = create(&manager, "C:/v", Some("bob(1)"));
         assert_eq!(nested2.canonical_name_when_live(), "bob(1)(2)");
     }
 
     #[test]
     fn a_saturated_family_falls_back_to_the_lowest_free_number() {
-        // ★계열 최대가 `u32::MAX` 여도 배정은 죽지 않는다★: "최대 + 1" 이 없으니 포화 탈출구(가장 낮은
-        //   빈 번호)로 내려간다. 산술 오버플로로 게이트 안에서 패닉하면 그 Mutex 가 poison 돼 생성·개명·
-        //   스폰이 데몬 재시작까지 막히고, 반대로 거부로 처리하면 그 계열의 42억 개 빈 번호가 영구 봉쇄된다
-        //   (`이름(4294967295)` 은 UI 개명 한 번으로 만들 수 있는 평범한 상태다).
+        // ★포화가 이론이 아니다★: `이름(4294967295)` 은 UI 개명 한 번으로 만들 수 있는 평범한 상태다.
         let manager = bare_manager();
         create(&manager, "C:/x", Some("bob"));
-        // u32::MAX 접미사를 **리터럴 이름**으로 가진 에이전트.
         create(&manager, "C:/y", Some("bob(4294967295)"));
 
-        // 최대 + 1 이 불가능 → 가장 낮은 빈 번호(1).
         let first = create(&manager, "C:/z", Some("bob"));
         assert_eq!(
             first.canonical_name_when_live(),
             "bob(1)",
             "포화여도 빈 번호를 준다(거부하면 계열 전체가 영구 봉쇄된다)"
         );
-        // 1 이 차면 다음 구멍은 2.
         let second = create(&manager, "C:/w", Some("bob"));
         assert_eq!(second.canonical_name_when_live(), "bob(2)");
 
-        // 개명도 같은 탈출구를 탄다.
         let carol = create(&manager, "C:/c", Some("carol"));
         assert!(renamed_ok(
             manager.rename_agent(carol.id, Some("bob".into()))
@@ -2152,7 +2094,6 @@ mod tests {
         use std::collections::BTreeSet;
         let set = |v: &[u32]| -> BTreeSet<u32> { v.iter().copied().collect() };
 
-        // 정상 경로 = 관측 최대 + 1(단조 증가 — 산 것끼리 번호가 겹치지 않는다).
         assert_eq!(pick_suffix(&set(&[])), Some(1));
         assert_eq!(pick_suffix(&set(&[1, 2])), Some(3));
         assert_eq!(
