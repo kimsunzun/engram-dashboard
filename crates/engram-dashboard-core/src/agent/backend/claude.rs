@@ -2048,9 +2048,6 @@ mod tests {
 
     #[test]
     fn capabilities_json_mode_resume_is_true() {
-        // ★ADR-0044 후속 완료★: json(stream-json) 모드도 --resume 지원(spike-verified, claude 2.1.170) →
-        //   build_spec 이 SpawnMode::Resume 에서 --resume 을 낸다. 따라서 caps 도 resume=true 로 정직 신고
-        //   (통제-sid ADR-0008 재사용 — sid 충돌 없음). 옛 resume=false(sid fresh 강제) 가정은 폐기.
         assert!(
             ClaudeBackend.capabilities(&json(vec![])).session.resume,
             "json 모드 claude 도 resume=true(--resume 지원, spike-verified)"
@@ -2089,9 +2086,6 @@ mod tests {
             SpawnMode::Fresh,
             Some(sid),
         );
-        // 기대 인자(console_command 래핑 전) — auto 권한 pair + -p + stream-json 입출력 + replay + verbose + session-id + extra.
-        // ★--verbose 필수(실측 확정 2026-07-02)★: 없으면 claude 가 "requires --verbose" 로 즉사(build_spec 주석).
-        // ★AUTO 권한 모드(사용자 결정 2026-07-22)★: json 모드도 base 로 맨 앞에 pair 를 낸다.
         let (p, a) = console_command(
             CLAUDE_PROGRAM,
             vec![
@@ -2108,20 +2102,16 @@ mod tests {
                 sid.to_string(),
                 "--model".to_string(),
                 "sonnet".to_string(),
-                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입(스코프 축소).
+                // ADR-0106: control=None(비메시징 스폰) → --disallowedTools 미주입.
             ],
         );
         assert_eq!(s.program, p);
         assert_eq!(s.args, a, "json 모드 인자 골든 불일치");
-        // --verbose 필수 포함(실측: 없으면 스폰 즉사).
         assert!(s.args.iter().any(|x| x == "--verbose"));
     }
 
     #[test]
     fn json_mode_resume_uses_resume_flag() {
-        // ★ADR-0044 후속 완료 / ADR-0008 재사용★: json 모드도 --resume 지원(spike-verified, claude 2.1.170) →
-        //   SpawnMode::Resume 이면 --resume <sid> 를 낸다(터미널 claude_resume_uses_resume_flag 와 동형).
-        //   옛 "resume 은 --session-id 로 폴백" 동작은 폐기.
         let sid = Uuid::new_v4();
         let s = spec(&json(vec![]), SpawnMode::Resume, Some(sid));
         assert!(
@@ -2132,7 +2122,6 @@ mod tests {
             !s.args.iter().any(|x| x == "--session-id"),
             "json Resume 모드에서 --session-id(fresh) 를 쓰면 안 됨"
         );
-        // resume 인 sid 가 --resume 인자로 실려야 한다(터미널 분기와 동일 계약).
         assert!(
             s.args.iter().any(|x| x == &sid.to_string()),
             "resume sid 가 인자에 실려야 함"
@@ -2141,7 +2130,6 @@ mod tests {
 
     #[test]
     fn terminal_mode_spec_unchanged_regression() {
-        // 회귀: 터미널 모드는 -p/stream-json 인자가 전혀 없어야 함(기존 동작 불변).
         let sid = Uuid::new_v4();
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, Some(sid));
         for forbidden in ["-p", "--input-format", "--output-format", "stream-json"] {
@@ -2155,7 +2143,6 @@ mod tests {
     // ── ADR-0049: json 모드 MAX_THINKING_TOKENS 기본 주입(extended thinking 활성화) ──────
     #[test]
     fn json_mode_injects_default_max_thinking_tokens() {
-        // json 모드는 thinking 을 켜려면 env 가 필요(실측). 프로필이 안 주면 기본 8000 을 주입해야 함.
         let s = spec(&json(vec![]), SpawnMode::Fresh, None);
         let vals: Vec<&str> = s
             .env
@@ -2172,7 +2159,6 @@ mod tests {
 
     #[test]
     fn json_mode_profile_max_thinking_tokens_wins() {
-        // ★프로필 우선(explicit-skip)★: 프로필이 같은 키를 주면 기본을 주입하지 않아 프로필 값이 유일하게 이긴다.
         let env = vec![("MAX_THINKING_TOKENS".to_string(), "1234".to_string())];
         let s = ClaudeBackend.build_spec(
             &json(vec![]),
@@ -2197,10 +2183,6 @@ mod tests {
 
     #[test]
     fn json_mode_profile_lowercase_key_skips_injection() {
-        // ★대소문자 무시 회귀 가드★: Windows 환경변수는 대소문자 구분 없음 — 프로필이 소문자
-        // `max_thinking_tokens` 로 키를 줬을 때도 기본 8000 을 주입하지 않아야 한다.
-        // 대소문자 무감 검색(eq_ignore_ascii_case)이 없으면 uppercase KEY 와 불일치해
-        // 기본값이 추가로 주입되고, env 에 두 쌍이 생겨 프로필 의도가 무시된다.
         let env = vec![("max_thinking_tokens".to_string(), "1234".to_string())];
         let s = ClaudeBackend.build_spec(
             &json(vec![]),
@@ -2210,7 +2192,6 @@ mod tests {
             env,
             None,
         );
-        // 대소문자 무시로 스캔해 MAX_THINKING_TOKENS 관련 쌍이 정확히 1개여야 한다.
         let vals: Vec<&str> = s
             .env
             .iter()
@@ -2226,7 +2207,6 @@ mod tests {
 
     #[test]
     fn terminal_mode_does_not_inject_max_thinking_tokens() {
-        // 터미널/대화형은 CLI parity 유지 — thinking env 주입 없음.
         let sid = Uuid::new_v4();
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, Some(sid));
         assert!(
@@ -2238,16 +2218,13 @@ mod tests {
     // ── ADR-0044/0004: 입력 wrapping(stdin 유저 턴 JSON) 골든 ─────────────────────
     #[test]
     fn wrap_user_turn_exact_line_and_newline_terminated() {
-        // ★uuid dedup 계약★: 우리가 심은 uuid 가 top-level 에 실려야 replay 가 그대로 되울린다.
         let id = Uuid::new_v4();
         let bytes = wrap_user_turn("hello", id);
-        // 정확한 라인 + \n 종단(선언 순서 = 직렬화 순서: type, message, uuid).
         let expected = format!(
             "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"hello\"}}]}},\"uuid\":\"{id}\"}}\n"
         );
         assert_eq!(bytes, expected.into_bytes());
         assert_eq!(*bytes.last().unwrap(), b'\n', "라인 종단 \\n 필수");
-        // 되파싱해 uuid 가 top-level 인지 확인(replay 보존 위치).
         let v: serde_json::Value =
             serde_json::from_str(String::from_utf8(bytes.clone()).unwrap().trim_end()).unwrap();
         assert_eq!(v["uuid"], id.to_string());
@@ -2256,13 +2233,10 @@ mod tests {
     // ── ADR-0044/0045: 입력-시점 유저 에코 json 헬퍼(user_text_echo_json) ─────────────
     #[test]
     fn user_text_echo_json_matches_decoder_uuid_block_shape() {
-        // ★uuid dedup shape 계약★: 합성 유저 에코 json 은 decoder 가 replay user 블록에 대해 만드는
-        //   shape 와 동형이어야 한다(uuid dedup 키): {"type":"text","text":<raw>,"uuid":"X"}.
         let id = Uuid::new_v4();
         let json = user_text_echo_json("hello", id);
         let expected = format!(r#"{{"type":"text","text":"hello","uuid":"{id}"}}"#);
         assert_eq!(json, expected);
-        // escape 확인(serde_json 위임): 따옴표·개행·유니코드 + uuid 보존.
         let json2 = user_text_echo_json("a\"b\nc 한글", id);
         let v: serde_json::Value = serde_json::from_str(&json2).unwrap();
         assert_eq!(v["type"], "text");
@@ -2270,13 +2244,9 @@ mod tests {
         assert_eq!(v["uuid"], id.to_string());
     }
 
-    // ── ADR-0044/0045: user-role replay dedup(blunt-suppress → uuid dedup 교체) ────────
+    // ── ADR-0044/0045: user-role replay dedup ─────────────────────────────────────────
     #[test]
     fn user_role_text_block_passes_through_with_line_uuid() {
-        // (a)+(d) 매칭 replay 에코: claude 가 --replay-user-messages 로 되울린 user text 라인은
-        //   line-level uuid + isReplay:true 를 단다. decoder 는 **억제하지 않고** 그 uuid 를 블록 json 에
-        //   실어 Structured{kind:"user"} 로 통과시킨다(프론트가 uuid 로 합성 에코와 dedup). 예전엔 여기서
-        //   무조건 억제했다(blunt-suppress) — resume 시 과거 user text vanish 버그라 uuid dedup 으로 교체.
         let line = concat!(
             r#"{"type":"user","message":{"role":"user","content":["#,
             r#"{"type":"text","text":"내가 친 메시지"}"#,
@@ -2289,7 +2259,6 @@ mod tests {
             vec!["structured:user"],
             "replay user text 는 억제 아님 — uuid 실어 통과: {ev:?}"
         );
-        // 블록 json 에 line-level uuid 가 실려야 프론트 accumulator 가 합성 에코와 dedup 한다.
         match &ev[0] {
             OutputEvent::Structured { kind, json } => {
                 assert_eq!(kind, "user");
@@ -2307,13 +2276,10 @@ mod tests {
 
     #[test]
     fn user_role_past_text_block_without_uuid_is_preserved_vanish_guard() {
-        // (b) vanish 회귀 가드: uuid 없는(=과거/비-replay) user text 블록은 절대 사라지면 안 된다 —
-        //   예전 blunt-suppress 는 이걸 통째로 삭제해 resume 시 과거 대화를 소실시켰다. 이제 uuid 없이
-        //   원본 그대로 보존(프론트는 uuid 없는 user item 을 dedup 하지 않고 각각 렌더).
         let line = concat!(
             r#"{"type":"user","message":{"role":"user","content":["#,
             r#"{"type":"text","text":"과거에 친 메시지"}"#,
-            "]}}\n", // uuid 없음
+            "]}}\n",
         );
         let ev = decode_all(line.as_bytes());
         assert_eq!(
@@ -2336,8 +2302,6 @@ mod tests {
 
     #[test]
     fn user_role_tool_result_block_still_emitted_regression_guard() {
-        // ★회귀 가드★: tool_result 는 user-role 라인에 실려 오지만 유저 입력 에코가 아니라 실제 도구
-        //   결과 데이터다 — 억제하면 안 된다. type != "text" 인 user-role 블록은 그대로 Structured 로.
         let line = concat!(
             r#"{"type":"user","message":{"role":"user","content":["#,
             r#"{"tool_use_id":"toolu_1","type":"tool_result","content":"파일 내용"}"#,
@@ -2349,7 +2313,6 @@ mod tests {
             vec!["structured:user"],
             "user-role tool_result 는 억제 대상 아님 — 보존돼야 함"
         );
-        // 원본 블록이 통째 보존됐는지(tool_use_id·content 유실 없음).
         match &ev[0] {
             OutputEvent::Structured { kind, json } => {
                 assert_eq!(kind, "user");
@@ -2364,8 +2327,6 @@ mod tests {
 
     #[test]
     fn user_role_mixed_blocks_all_preserved_with_line_uuid() {
-        // (c 확장) 한 user replay 라인에 text(에코) + tool_result 가 섞여 오면 **둘 다 보존**한다
-        //   (uuid dedup 교체 — 예전엔 text 만 억제했다). 각 블록에 line-level uuid 가 실린다.
         let line = concat!(
             r#"{"type":"user","message":{"role":"user","content":["#,
             r#"{"type":"text","text":"echo"},"#,
@@ -2379,7 +2340,6 @@ mod tests {
             vec!["structured:user", "structured:user"],
             "text·tool_result 둘 다 보존(각각 structured:user)"
         );
-        // 두 블록 모두 line-level uuid 를 실어야 한다.
         for e in &ev {
             if let OutputEvent::Structured { json, .. } = e {
                 let v: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -2390,8 +2350,6 @@ mod tests {
 
     #[test]
     fn tool_fixture_user_tool_result_survives_suppression() {
-        // 실측 fixture 회귀: tool.jsonl 의 user-role tool_result 라인은 그대로 보존된다(uuid dedup 교체
-        //   후에도 시퀀스 불변 — tool_result 는 억제 대상이었던 적 없고, uuid 부착은 tags 시퀀스에 무영향).
         let events = decode_all(TOOL_JSONL.as_bytes());
         assert_eq!(
             tags(&events),
@@ -2410,10 +2368,8 @@ mod tests {
 
     #[test]
     fn wrap_user_turn_escapes_quotes_newlines_unicode() {
-        // 따옴표·개행·유니코드(한글)·백슬래시가 serde_json 으로 정확히 escape 돼야 stdin 파서가 안 깨진다.
         let bytes = wrap_user_turn("a\"b\nc\\d 한글 😀", Uuid::new_v4());
         let line = String::from_utf8(bytes).unwrap();
-        // 한 줄(마지막 \n 외 내부 개행 없음) — 개행은 \\n 으로 escape.
         assert_eq!(
             line.matches('\n').count(),
             1,
@@ -2422,7 +2378,6 @@ mod tests {
         assert!(line.contains("\\\""), "따옴표 escape");
         assert!(line.contains("\\n"), "개행 escape");
         assert!(line.contains("\\\\d"), "백슬래시 escape");
-        // 되파싱해 원문 복원 확인(round-trip) — text 필드가 정확히 보존.
         let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(v["message"]["content"][0]["text"], "a\"b\nc\\d 한글 😀");
         assert_eq!(v["type"], "user");
@@ -2430,13 +2385,11 @@ mod tests {
 
     // ── S15 B2: ClaudeStreamDecoder(stream-json → OutputEvent) ────────────────────
     //
-    // 정본 = 실측 fixture(backend/fixtures/claude_{text,tool}.jsonl, claude 2.1.170 캡처).
-    // include_str! 는 이 소스 파일 기준 상대경로라 경로가 안정적이다(cwd 무관).
+    // 정본 = 실측 fixture(claude 2.1.170 캡처).
 
     const TEXT_JSONL: &str = include_str!("fixtures/claude_text.jsonl");
     const TOOL_JSONL: &str = include_str!("fixtures/claude_tool.jsonl");
-    // ADR-0079: resume seed 용 transcript 픽스처(실측 봉투 재현: parentUuid/uuid/timestamp/isSidechain +
-    //   summary/queue-operation/file-history-snapshot/ai-title 라인, sidechain 턴 1개 포함).
+    // ADR-0079: resume seed 용 transcript 픽스처 — 실측 봉투 재현, sidechain 턴 1개 포함.
     const TRANSCRIPT_JSONL: &str = include_str!("fixtures/claude_transcript.jsonl");
 
     /// ★env 직렬화 락★: `CLAUDE_CONFIG_DIR` 은 프로세스 전역이라 cargo 기본 병렬 실행에서 이 키를
@@ -2445,8 +2398,7 @@ mod tests {
     ///   panic 이 이 테스트를 오염시키지 않게).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// 지정 cwd/sid 로 `transcript_path` 가 가리킬 위치에 `content` 를 쓴 임시 transcript 파일을 만든다.
-    ///   반환한 임시 base 디렉토리(`CLAUDE_CONFIG_DIR` 로 넘길 값)는 호출자가 drop 시 정리한다.
+    /// 반환한 임시 base 디렉토리(`CLAUDE_CONFIG_DIR` 로 넘길 값)는 호출자가 drop 시 정리한다.
     ///   ENV_LOCK 을 잡은 상태에서만 호출할 것(경로 파생이 env 에 의존).
     fn write_temp_transcript(cwd: &std::path::Path, sid: Uuid, content: &[u8]) -> PathBuf {
         // 유니크 base(pid+sid) — 병렬이라도 파일 경로가 겹치지 않게(락은 env 파생 구간만 보호).
@@ -2461,7 +2413,6 @@ mod tests {
         base
     }
 
-    /// 이벤트를 사람이 읽기 쉬운 태그 문자열로 요약(시퀀스 단언용 — 매핑을 그대로 검증).
     fn tags(events: &[OutputEvent]) -> Vec<String> {
         events
             .iter()
@@ -2477,7 +2428,6 @@ mod tests {
             .collect()
     }
 
-    /// 통짜(한 방에) 디코드 헬퍼 — 바이트 전체를 한 번에 decode + flush.
     fn decode_all(bytes: &[u8]) -> Vec<OutputEvent> {
         let mut d = ClaudeStreamDecoder::new();
         let mut out = d.decode(bytes);
@@ -2491,7 +2441,6 @@ mod tests {
         let events = decode_all(TEXT_JSONL.as_bytes());
         assert_eq!(tags(&events), vec!["text", "usage", "done"]);
 
-        // text 내용·message_id 정확성.
         match &events[0] {
             OutputEvent::TextDelta {
                 text, message_id, ..
@@ -2501,7 +2450,6 @@ mod tests {
             }
             other => panic!("expected TextDelta, got {other:?}"),
         }
-        // result.usage 추출(실측: input=17095, output=4).
         match &events[1] {
             OutputEvent::Usage {
                 input_tokens,
@@ -2519,8 +2467,8 @@ mod tests {
     fn tool_fixture_maps_thinking_tooluse_toolresult_text() {
         // tool.jsonl 실측 시퀀스:
         //  9  assistant[thinking]           → structured:thinking
-        //  10 assistant[tool_use Read]      → tool:Read  (같은 msg id, disjoint 배치 — decoder 는 병합 안 함)
-        //  11 user[tool_result]             → structured:user  (user 라인은 통째 보존)
+        //  10 assistant[tool_use Read]      → tool:Read  (9 와 같은 msg id)
+        //  11 user[tool_result]             → structured:user
         //  16 assistant[thinking]           → structured:thinking
         //  17 assistant[text]               → text
         //  18 result(usage)                 → usage, done
@@ -2539,7 +2487,6 @@ mod tests {
             ]
         );
 
-        // tool_use 매핑 세부: id·args_json(input 직렬화) 보존.
         let tool = events
             .iter()
             .find(|e| matches!(e, OutputEvent::ToolCall { .. }))
@@ -2555,7 +2502,6 @@ mod tests {
                 assert_eq!(name, "Read");
                 assert_eq!(id.as_deref(), Some("toolu_01LDdR9FU6CFjgEKeLPF1x1D"));
                 assert_eq!(message_id.as_deref(), Some("msg_01DXXosoarwv9i1cBXa8wVXJ"));
-                // args_json 은 input 객체를 그대로 직렬화한 유효 JSON — file_path 필드 보존.
                 let v: serde_json::Value = serde_json::from_str(args_json).unwrap();
                 assert_eq!(
                     v["file_path"],
@@ -2568,8 +2514,6 @@ mod tests {
 
     #[test]
     fn chunk_boundary_invariance_arbitrary_offsets() {
-        // 청크 경계 불변: fixture 전체 바이트를 여러 오프셋 크기로 쪼개 순차 투입해도, 통짜로 넣은
-        // 것과 동일한 이벤트 시퀀스가 나와야 한다(라인 재조립이 청크 분할에 견고).
         for fixture in [TEXT_JSONL, TOOL_JSONL] {
             let whole = tags(&decode_all(fixture.as_bytes()));
             for chunk_size in [1usize, 3, 7, 64, 4096] {
@@ -2590,13 +2534,10 @@ mod tests {
 
     #[test]
     fn utf8_multibyte_split_across_chunks_is_recovered() {
-        // 한글·이모지가 든 라인을 멀티바이트 문자 중간 바이트에서 쪼개도 깨짐 없이 복원돼야 한다
-        // (완성 라인 전엔 UTF-8 디코딩 안 함 불변식 검증).
         let line = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"안녕 😀 world"}]}}"#;
         let mut bytes = line.as_bytes().to_vec();
         bytes.push(b'\n');
 
-        // 통짜 기준값.
         let whole = decode_all(&bytes);
         let whole_text = match &whole[0] {
             OutputEvent::TextDelta { text, .. } => text.clone(),
@@ -2604,7 +2545,6 @@ mod tests {
         };
         assert_eq!(whole_text, "안녕 😀 world");
 
-        // 1바이트씩 쪼개 투입(멀티바이트 경계가 반드시 갈림) → 동일 복원.
         let mut d = ClaudeStreamDecoder::new();
         let mut ev = Vec::new();
         for b in &bytes {
@@ -2619,7 +2559,6 @@ mod tests {
 
     #[test]
     fn non_json_and_meta_lines_are_skipped_without_panic() {
-        // 비-JSON(stderr 경고), 메타 라인(system/rate_limit_event), 빈 줄 → 이벤트 0개, panic 없음.
         let input = concat!(
             "Warning: no stdin data received in 3s, proceeding without it.\n",
             "{\"type\":\"system\",\"subtype\":\"init\"}\n",
@@ -2646,7 +2585,6 @@ mod tests {
 
     #[test]
     fn flush_processes_trailing_line_without_newline() {
-        // EOF 시 개행 없이 끝난 마지막 라인도 flush 로 처리된다.
         let mut d = ClaudeStreamDecoder::new();
         let line = br#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"tail"}]}}"#;
         assert!(d.decode(line).is_empty(), "개행 전엔 아무것도 안 나온다");
@@ -2656,7 +2594,6 @@ mod tests {
 
     #[test]
     fn result_without_usage_emits_only_done() {
-        // usage 없는 result 라인 → MessageDone 만(0 토큰 Usage 노이즈 없음).
         let ev = decode_all(b"{\"type\":\"result\",\"subtype\":\"success\"}\n");
         assert_eq!(tags(&ev), vec!["done"]);
     }
@@ -2670,8 +2607,6 @@ mod tests {
         assert_eq!(tags(&ev), vec!["error"], "오버플로 → Error 1개 + 버퍼 리셋");
         assert!(d.buffer.is_empty(), "오버플로 후 버퍼 리셋");
 
-        // 오버플로 라인은 아직 끝나지 않았다(개행 안 옴) → resync 상태에서 꼬리를 마저 버린다.
-        // 오염 라인의 나머지 꼬리 + 그 라인을 끝내는 개행까지 통째 폐기하고, 개행 이후부터 복구.
         let tail_then_newline = b"garbage-tail-continues{\"type\":\"assistant\"}\n";
         let ev_tail = d.decode(tail_then_newline);
         assert!(
@@ -2679,7 +2614,6 @@ mod tests {
             "오염 라인 꼬리는 개행까지 통째 폐기 — 이벤트 0개: {ev_tail:?}"
         );
 
-        // 복구: 오염 라인 종료(개행) 이후 정상 assistant 라인은 다시 이벤트를 낸다.
         let line = b"{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n";
         let ev2 = d.decode(line);
         assert_eq!(tags(&ev2), vec!["text"], "오버플로 후 정상 라인 복구");
@@ -2687,25 +2621,18 @@ mod tests {
 
     #[test]
     fn buffer_overflow_tail_with_valid_json_fragment_does_not_forge_events() {
-        // FIX-A (2): 오버플로 라인의 꼬리에 우연히 valid JSON 조각(가짜 이벤트가 될 수 있는)이 섞여
-        //   있어도, 그 꼬리는 오염 라인의 일부라 다음 개행까지 통째 폐기돼야 한다(가짜 이벤트 금지).
-        //   그리고 그 개행 뒤의 **진짜** 정상 라인부터 복구된다.
+        // FIX-A (2): 오버플로 라인 꼬리에 섞인 valid JSON 조각도 다음 개행까지 통째 폐기(가짜 이벤트 금지).
         let mut d = ClaudeStreamDecoder::new();
 
-        // 오버플로 유발: 개행 없는 4MB 초과 바이트(오염 라인 시작).
         let huge = vec![b'x'; MAX_BUFFER_BYTES + 1];
         let ev = d.decode(&huge);
         assert_eq!(tags(&ev), vec!["error"], "오버플로 → Error");
 
-        // 꼬리에 valid JSON 라인 조각이 붙는다: `...xxx{"type":"result"}\n{정상 text}\n`.
-        // 첫 번째 `{"type":"result"}` 는 오염 라인의 꼬리에 이어붙은 것 → resync 로 버려야 한다
-        //   (버려지지 않으면 여기서 가짜 done 이벤트가 새어 나온다).
         let tail = concat!(
             "still-part-of-poisoned-line{\"type\":\"result\",\"subtype\":\"success\"}\n",
             "{\"type\":\"assistant\",\"message\":{\"id\":\"m2\",\"content\":[{\"type\":\"text\",\"text\":\"recovered\"}]}}\n",
         );
         let ev2 = d.decode(tail.as_bytes());
-        // 첫 라인(오염 꼬리)의 result 조각은 안 나오고, 다음 정상 라인의 text 만 나와야 한다.
         assert_eq!(
             tags(&ev2),
             vec!["text"],
@@ -2724,17 +2651,14 @@ mod tests {
         let huge = vec![b'x'; MAX_BUFFER_BYTES + 1];
         assert_eq!(tags(&d.decode(&huge)), vec!["error"]);
 
-        // 개행 없는 꼬리 청크 여러 개 → 전부 폐기, 이벤트 0개.
         assert!(d.decode(b"tail-part-1").is_empty());
         assert!(d.decode(b"tail-part-2{\"type\":\"result\"}").is_empty());
-        // 마침내 개행 도착 → 그 뒤부터 복구.
         let ev = d.decode(b"final-tail\n{\"type\":\"result\",\"subtype\":\"success\"}\n");
         assert_eq!(tags(&ev), vec!["done"], "resync 종료 후 정상 result 복구");
     }
 
     #[test]
     fn multiple_blocks_in_one_line_expand_in_order() {
-        // 한 라인에 여러 블록 → 블록 순서대로 여러 이벤트(text, tool_use).
         let line = concat!(
             r#"{"type":"assistant","message":{"id":"m1","content":["#,
             r#"{"type":"text","text":"first"},"#,
@@ -2752,7 +2676,7 @@ mod tests {
         // FIX-B: 문자열 name 이 없는 tool_use 는 빈 name ToolCall 을 만들지 않고 Structured 로 보존.
         let line = concat!(
             r#"{"type":"assistant","message":{"id":"m1","content":["#,
-            r#"{"type":"tool_use","id":"t1","input":{"cmd":"ls"}}"#, // name 없음
+            r#"{"type":"tool_use","id":"t1","input":{"cmd":"ls"}}"#,
             "]}}\n",
         );
         let ev = decode_all(line.as_bytes());
@@ -2761,7 +2685,6 @@ mod tests {
             vec!["structured:tool_use"],
             "name 없는 tool_use → 빈 ToolCall 금지, Structured 보존"
         );
-        // 원본 블록이 통째 보존됐는지(input 등 정보 유실 없음).
         match &ev[0] {
             OutputEvent::Structured { kind, json } => {
                 assert_eq!(kind, "tool_use");
@@ -2779,7 +2702,7 @@ mod tests {
         // FIX-B: name 이 문자열이 아닌 경우(스키마 이탈)도 as_str() 실패 → Structured 보존.
         let line = concat!(
             r#"{"type":"assistant","message":{"id":"m1","content":["#,
-            r#"{"type":"tool_use","id":"t1","name":123,"input":{}}"#, // name 이 숫자
+            r#"{"type":"tool_use","id":"t1","name":123,"input":{}}"#,
             "]}}\n",
         );
         let ev = decode_all(line.as_bytes());
@@ -2791,8 +2714,8 @@ mod tests {
         // FIX-B: 문자열 text 가 없는 text 블록은 빈 TextDelta 대신 skip(정보 유실 없음 → 조용히 버림).
         let line = concat!(
             r#"{"type":"assistant","message":{"id":"m1","content":["#,
-            r#"{"type":"text"},"#,              // text 필드 없음 → skip
-            r#"{"type":"text","text":"kept"}"#, // 정상 → 유지
+            r#"{"type":"text"},"#,
+            r#"{"type":"text","text":"kept"}"#,
             "]}}\n",
         );
         let ev = decode_all(line.as_bytes());
@@ -2812,7 +2735,6 @@ mod tests {
     #[test]
     fn result_is_error_emits_error_before_done() {
         // FIX-C: is_error:true 를 담은 result 라인 → Error 를 MessageDone 보다 먼저 emit.
-        //   subtype·result 텍스트 등 가용 정보를 Error 메시지에 담는다.
         let line = concat!(
             r#"{"type":"result","subtype":"error_during_execution",""#,
             r#"is_error":true,"result":"API rate limit exceeded"}"#,
@@ -2849,9 +2771,7 @@ mod tests {
 
     #[test]
     fn result_interrupted_subtype_emits_only_done_no_error() {
-        // FIX-E 회귀: 유저 Esc 정상 중단 턴(subtype:"interrupted", is_error 없음)은 error allowlist
-        //   (starts_with "error")에 안 걸린다 → Error 없이 MessageDone 만. interrupt 는 1급 정상 경로라
-        //   실패 턴으로 오분류하면 안 된다. (과거 denylist `!= "success"` 는 이걸 오류로 잡았다.)
+        // FIX-E 회귀: 유저 Esc 정상 중단 턴(subtype:"interrupted").
         let line = r#"{"type":"result","subtype":"interrupted"}"#.to_string() + "\n";
         let ev = decode_all(line.as_bytes());
         assert_eq!(
@@ -2881,7 +2801,6 @@ mod tests {
     #[test]
     fn result_error_with_usage_orders_usage_error_done() {
         // FIX-C + Usage 순서: usage 가 있고 is_error 면 Usage → Error → MessageDone 순.
-        //   (Usage 는 종료 전 토큰 집계, Error 는 종료 전 실패 통지, 둘 다 MessageDone 앞.)
         let line = concat!(
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"#,
             r#""usage":{"input_tokens":10,"output_tokens":2}}"#,
@@ -2895,14 +2814,12 @@ mod tests {
 
     #[test]
     fn transcript_maps_conversation_turns_and_skips_meta_and_sidechain() {
-        // 실측 봉투 픽스처를 파싱하면 대화 턴만 순서대로 이벤트가 되고, non-conversation 라인
-        //   (summary/queue-operation/file-history-snapshot/ai-title)과 sidechain 턴은 배제돼야 한다.
-        //   기대 시퀀스:
+        // 픽스처 라인 ↔ 기대 시퀀스:
         //     user "첫 질문"                   → structured:user
         //     assistant thinking               → structured:thinking
         //     assistant tool_use Read          → tool:Read
         //     user tool_result                 → structured:user
-        //     assistant [text + tool_use Write]→ text, tool:Write  (한 메시지 다중 블록 — 둘 다 매핑)
+        //     assistant [text + tool_use Write]→ text, tool:Write
         //     (sidechain assistant text        → 제외)
         //     assistant text "최종 답변"        → text
         //     result(usage) success            → usage, done
@@ -2923,8 +2840,6 @@ mod tests {
             "대화 턴만 매핑 + 다중블록 턴 둘 다 매핑 + 메타·sidechain 배제: {events:?}"
         );
 
-        // ★다중 블록 턴★: content[] 에 text+tool_use 2블록을 가진 단일 assistant 메시지가 두 이벤트로
-        //   순서대로 펼쳐지는지(블록별 매핑) — text "확인했습니다" 직후 tool_use Write.
         let mb_text_idx = events
             .iter()
             .position(
@@ -2942,7 +2857,6 @@ mod tests {
             other => panic!("다중블록 턴의 2번째 블록이 ToolCall 이어야 함, got {other:?}"),
         }
 
-        // 라이브 디코더 재사용 확인 — tool_use 세부(name/id/args_json)가 라이브와 동일하게 보존.
         let tool = events
             .iter()
             .find(|e| matches!(e, OutputEvent::ToolCall { .. }))
@@ -2962,7 +2876,6 @@ mod tests {
             _ => unreachable!(),
         }
 
-        // 첫 user 텍스트가 보존되는지(resume 시 과거 user vanish 회귀 가드).
         match &events[0] {
             OutputEvent::Structured { kind, json } => {
                 assert_eq!(kind, "user");
@@ -2975,7 +2888,6 @@ mod tests {
 
     #[test]
     fn transcript_empty_or_meta_only_yields_no_events() {
-        // 빈 문자열·메타 전용(대화 없음)은 이벤트 0개 → seed 없음(fresh 버퍼와 동일).
         assert!(parse_transcript_events("").is_empty());
         let meta_only = concat!(
             "{\"type\":\"summary\",\"summary\":\"x\"}\n",
@@ -2990,7 +2902,6 @@ mod tests {
 
     #[test]
     fn transcript_sidechain_line_is_filtered_even_with_valid_content() {
-        // sidechain:true 인 assistant text 라인은 유효한 content 를 담고 있어도 제외돼야 한다.
         let line = concat!(
             r#"{"isSidechain":true,"type":"assistant","message":{"id":"m","role":"assistant",""#,
             r#"content":[{"type":"text","text":"sub"}]},"uuid":"x"}"#,
@@ -3004,7 +2915,6 @@ mod tests {
 
     #[test]
     fn project_slug_matches_claude_encoding() {
-        // 실측 확정 슬러그 규칙: 비-영숫자 전부 `-`. (로컬 프로젝트 디렉토리 대조로 확인)
         use std::path::Path;
         assert_eq!(
             project_slug(Path::new(
@@ -3013,7 +2923,6 @@ mod tests {
             "C--Users-X-AppData-Local-Temp-engram-resume-test"
         );
         assert_eq!(project_slug(Path::new(r"C:\")), "C--");
-        // 언더스코어·점도 `-` 로(Engram_Workspace → Engram-Workspace).
         assert_eq!(
             project_slug(Path::new(r"I:\Engram_Workspace\a")),
             "I--Engram-Workspace-a"
@@ -3022,9 +2931,6 @@ mod tests {
 
     #[test]
     fn transcript_path_uses_projects_slug_and_sid() {
-        // CLAUDE_CONFIG_DIR 을 세팅해 결정적으로 경로를 구성(테스트가 실제 home 에 의존하지 않게).
-        //   ★env 는 프로세스 전역이라, 이 키를 만지는 여러 테스트가 cargo 기본 병렬에서 경합한다. 그래서
-        //     ENV_LOCK 을 잡아 set→호출→remove 를 직렬화한다(락 정의·이유는 ENV_LOCK 주석 참조).
         let sid = Uuid::parse_str("d75b7f40-a13a-4cf3-b872-e4d5ba2cec55").unwrap();
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("CLAUDE_CONFIG_DIR", r"C:\claude-cfg");
@@ -3041,7 +2947,6 @@ mod tests {
 
     #[test]
     fn read_transcript_events_missing_file_is_empty() {
-        // 존재하지 않는 세션(신규/미대화) → 파일 부재 → 빈 Vec(seed 없음, fresh 동작).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("CLAUDE_CONFIG_DIR", r"C:\nonexistent-claude-cfg-xyz");
         let ev =
@@ -3050,14 +2955,11 @@ mod tests {
         assert!(ev.is_empty(), "파일 없으면 빈 Vec(seed 안 함)");
     }
 
-    /// ADR-0079 read_transcript_events: 상한 이하 파일(작은 파일)은 tail seek 없이 전량 파싱된다 —
-    ///   첫 라인부터 온전히 파싱되고 부분 라인 폐기가 일어나지 않는다(seek offset 0).
     #[test]
     fn read_transcript_events_small_file_reads_whole() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let cwd = std::path::Path::new(r"C:\proj\small");
         let sid = Uuid::new_v4();
-        // 실측 픽스처 전체(상한보다 훨씬 작음)를 그대로 파일로 → include_str 파싱과 동일 결과여야.
         let base = write_temp_transcript(cwd, sid, TRANSCRIPT_JSONL.as_bytes());
         let ev = read_transcript_events(cwd, sid);
         std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -3069,7 +2971,6 @@ mod tests {
         );
     }
 
-    /// ADR-0079 read_transcript_events: 빈 파일은 빈 Vec(seek 없음, 첫 라인 폐기 없음).
     #[test]
     fn read_transcript_events_empty_file_is_empty() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -3082,9 +2983,6 @@ mod tests {
         assert!(ev.is_empty(), "빈 파일 → 빈 Vec");
     }
 
-    /// ADR-0079 read_transcript_events: 상한 초과 파일 → tail seek 발생 + seek 지점의 부분 첫 라인이
-    ///   **명시 폐기**되고, 그 폐기된 조각이 그 자체로 **유효한 JSON 라인**이어도 가짜 이벤트가 안 생긴다.
-    ///
     /// ★테스트가 실제로 폐기를 증명하는 구성(cross-family review 2026-07-13 FIX B)★: seek 지점(= len-4MB)이
     ///   **함정 라인 안의 내부 유효 JSON 오브젝트 시작 바이트**에 정확히 떨어지게 맞춘다. 그래서 seek 후 첫 `\n`
     ///   전까지의 앞조각(= drop 대상)은 **그 자체로 온전히 파싱되는 유효 대화 라인**(phantom "text" 이벤트를
@@ -3098,12 +2996,10 @@ mod tests {
         let cwd = std::path::Path::new(r"C:\proj\big");
         let sid = Uuid::new_v4();
 
-        // ★함정 라인★ = [잘려나갈 접두 쓰레기][내부 유효 JSON 라인]. seek 지점을 내부 유효 JSON 시작 바이트에
-        //   맞추면 seek 후 첫 `\n` 전 앞조각 = 내부 유효 JSON 라인 그대로가 된다(= drop 대상이 phantom 을
-        //   합성하는 온전 라인). 접두 쓰레기는 seek 지점 앞이라 read buffer 에 들어오지 않는다.
+        // ★함정 라인★ = [접두 쓰레기][내부 유효 JSON 라인]. 접두 쓰레기는 seek 지점 앞이라 read buffer 에
+        //   들어오지 않는다.
         let junk_prefix =
             br#"{"type":"summary","summary":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}garbage"#;
-        // 이 inner_valid 는 그 자체로 완결된 유효 대화 라인이라, 폐기 안 하면 "phantom" text 이벤트가 된다.
         let inner_valid = br#"{"type":"assistant","message":{"id":"phantom","content":[{"type":"text","text":"phantom"}]}}"#;
         let real = r#"{"isSidechain":false,"type":"assistant","message":{"id":"real","content":[{"type":"text","text":"진짜 답변"}]}}"#.as_bytes();
 
@@ -3113,7 +3009,6 @@ mod tests {
         let trail_len = inner_start_to_eof - (inner_valid.len() + 1 + real.len() + 1);
         let mut content: Vec<u8> =
             Vec::with_capacity(inner_start_to_eof + junk_prefix.len() + 4096);
-        // 함정 라인 = junk_prefix + inner_valid (한 줄, 내부 개행 없음). seek 이 inner_valid 시작을 가른다.
         content.extend_from_slice(junk_prefix);
         content.extend_from_slice(inner_valid);
         content.push(b'\n');
@@ -3125,10 +3020,8 @@ mod tests {
         while content.len() - trail_start < trail_len {
             content.extend_from_slice(pad_line);
         }
-        content.truncate(trail_start + trail_len); // 후행 패딩 길이를 정확히 맞춰 seek 지점 = inner_valid 시작.
+        content.truncate(trail_start + trail_len);
 
-        // ★paired 반증★: seek 후 read buffer 의 앞조각(= inner_valid, drop 대상)을 그대로 파싱하면 phantom 이
-        //   실제로 합성됨을 확인한다. 이 단언이 "앞조각이 유효 라인"이라는 전제(=이 테스트가 유효)를 고정한다.
         let leading = String::from_utf8(inner_valid.to_vec()).unwrap();
         assert_eq!(
             tags(&parse_transcript_events(&leading)),
@@ -3141,8 +3034,6 @@ mod tests {
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&base);
 
-        // 첫 (잘린) 라인 폐기 → phantom 이벤트 없음. 온전한 "진짜 답변" text 하나만 남아야 한다.
-        //   drop 을 빼면 여기 앞에 phantom text 가 하나 더 붙어 이 단언이 실패한다(= drop 의 존재를 증명).
         assert_eq!(
             tags(&ev),
             vec!["text"],
@@ -3154,8 +3045,6 @@ mod tests {
         }
     }
 
-    /// ADR-0079 read_transcript_events: seek 오프셋이 정확히 멀티바이트(UTF-8) 문자 중간을 가르는 경우 —
-    ///   from_utf8_lossy 로 깨진 앞부분을 흡수하고 부분 첫 라인 폐기로 온전 라인만 남는지(panic 없음).
     #[test]
     fn read_transcript_events_tail_utf8_split_is_safe() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -3163,7 +3052,6 @@ mod tests {
         let sid = Uuid::new_v4();
 
         // 패딩을 한글(3바이트/문자) 라인으로 채워 seek 지점(len-4MB)이 멀티바이트 문자 경계를 비껴가게 한다.
-        //   길이를 홀수 바이트로 밀어 4MB 경계가 문자 중간에 떨어질 확률을 높인다.
         let pad_line = "{\"type\":\"summary\",\"summary\":\"가나다라마\"}\n".as_bytes();
         let mut content: Vec<u8> = Vec::with_capacity((TRANSCRIPT_TAIL_BYTES as usize) + 4096);
         while (content.len() as u64) < TRANSCRIPT_TAIL_BYTES + 1 {
@@ -3177,11 +3065,10 @@ mod tests {
         content.push(b'\n');
 
         let base = write_temp_transcript(cwd, sid, &content);
-        let ev = read_transcript_events(cwd, sid); // panic 없이 반환돼야(lossy 흡수 + 부분 라인 폐기).
+        let ev = read_transcript_events(cwd, sid);
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&base);
 
-        // 패딩(summary)은 이벤트 0 → 온전 대화 라인 "안녕" 하나만.
         assert_eq!(
             tags(&ev),
             vec!["text"],
@@ -3189,25 +3076,21 @@ mod tests {
         );
     }
 
-    /// ADR-0079 read_transcript_events: 파일이 정확히 상한(4MB)이면 seek 없음(len > 상한 아님) →
-    ///   첫 라인부터 온전 파싱(경계 off-by-one 가드). 온전한 대화 라인이 첫 줄부터 이벤트가 돼야 한다.
     #[test]
     fn read_transcript_events_exact_boundary_no_seek() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let cwd = std::path::Path::new(r"C:\proj\boundary");
         let sid = Uuid::new_v4();
 
-        // 첫 줄을 온전한 대화 라인으로 두고, 뒤를 패딩으로 채워 총 길이를 정확히 4MB 로 맞춘다.
         let first = r#"{"isSidechain":false,"type":"assistant","message":{"id":"first","content":[{"type":"text","text":"경계"}]}}"#;
         let mut content: Vec<u8> = Vec::with_capacity(TRANSCRIPT_TAIL_BYTES as usize);
         content.extend_from_slice(first.as_bytes());
         content.push(b'\n');
-        // 나머지를 스킵되는 comment-free 패딩으로: 정확히 상한 바이트가 되도록 마지막을 잘라 맞춘다.
         let pad = b"{\"type\":\"summary\",\"summary\":\"p\"}\n";
         while (content.len() as u64) < TRANSCRIPT_TAIL_BYTES {
             content.extend_from_slice(pad);
         }
-        content.truncate(TRANSCRIPT_TAIL_BYTES as usize); // 정확히 4MB.
+        content.truncate(TRANSCRIPT_TAIL_BYTES as usize);
         assert_eq!(content.len() as u64, TRANSCRIPT_TAIL_BYTES);
 
         let base = write_temp_transcript(cwd, sid, &content);
@@ -3215,7 +3098,6 @@ mod tests {
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&base);
 
-        // len == 상한 → seek 안 함 → 첫 라인 온전 → "경계" text 가 첫 이벤트.
         assert_eq!(
             ev.first()
                 .map(|e| matches!(e, OutputEvent::TextDelta { text, .. } if text == "경계")),
@@ -3226,8 +3108,7 @@ mod tests {
 
     // ── ADR-0084: 재활성화(Resume) 시 `--resume <sid>` 조립 실증(dispatch 레벨) ──────────────────
     //
-    // ADR-0083 회귀 ③의 약한 Shell 테스트 보강: activation.rs 통합 테스트는 셸(needs_session=false)
-    // 이라 실제 --resume 를 부착하지 않는다. 재활성화가 통제 sid 를 `--resume` 인자로 실제 흘리는지는
+    // ADR-0083 회귀 ③의 약한 Shell 테스트 보강: 재활성화가 통제 sid 를 `--resume` 인자로 실제 흘리는지는
     // **공개 dispatch `build_command_spec`** 를 통해 backend 계약으로 직접 단언한다(실 claude 프로세스
     // 없음). manager.spawn_agent(Resume) 이 이 dispatch 를 부르므로, 여기서 --resume<sid> 를 검증하면
     // 재활성화 respawn 이 이어받기 sid 를 무손실 전달함이 증명된다(ADR-0008).
@@ -3236,7 +3117,6 @@ mod tests {
         use crate::agent::backend::build_command_spec;
 
         let sid = Uuid::new_v4();
-        // 공개 dispatch(backend_for → ClaudeBackend.build_spec) 경로로 조립.
         let spec = build_command_spec(
             &terminal(vec![]),
             SpawnMode::Resume,
@@ -3246,7 +3126,6 @@ mod tests {
             None,
         );
 
-        // --resume 플래그가 있고, 그 **바로 뒤** 인자가 정확히 통제 sid(uuid 문자열)여야 한다.
         let pos = spec
             .args
             .iter()
