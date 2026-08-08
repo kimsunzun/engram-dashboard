@@ -1,21 +1,19 @@
 //! transport-중립 연결 코어(ConnectionCore) — ADR-0020 Stage 1.
 //!
-//! net crate 의 ws.rs 의 dispatch 로직을 carrier(WS/embedded/gRPC) 와 무관하게 빼낸 곳이다. 입력은
-//! `AgentCommand`, 출력은 `Outbound`(AgentEvent/binary/close)를 `OutboundSink` 로만 흘린다 —
-//! TcpStream/tungstenite/frame codec 을 이 모듈은 모른다. WS 어댑터(net crate 의 ws.rs)가 `OutboundSink`
-//! 를 구현해 이 코어를 구동한다(미래 carrier 는 sink 만 새로 구현).
+//! carrier(WS/embedded/gRPC) 와 무관한 dispatch 를 소유한다. 입력은 `AgentCommand`, 출력은
+//! `Outbound`(AgentEvent/binary/close)를 `OutboundSink` 로만 흘린다 — TcpStream/tungstenite/frame
+//! codec 을 이 모듈은 모른다. 어댑터(`agent_conn::FrameOutboundSink`)가 `OutboundSink` 를 구현해
+//! 이 코어를 구동한다(미래 carrier 는 sink 만 새로 구현).
 //!
-//! ★불변식(R1~R7, ADR-0020) 보존이 절대 원칙 — Stage 1 은 behavior-preserving★:
-//! - **R1 Ack→replay→ReplayComplete FIFO**: handle_subscribe 가 subscribers lock 보유 중
-//!   on_ready 콜백으로 SubscribeAck 를 replay binary 보다 **먼저** enqueue 한다(아래 §3 참조).
+//! ★불변식(R1~R7, ADR-0020) 보존이 절대 원칙★:
+//! - **R1 Ack→replay→ReplayComplete FIFO** — 유지 기전은 `handle_subscribe`.
 //! - **R6 close_signal**: 큐 포화 out-of-band 종료는 WS-특정 → sink 구현(어댑터)이 SinkError
 //!   해석으로 처리한다. 코어는 SinkError 만 본다(이 모듈은 close_signal 을 모른다).
 //!
 //! ★status fanout(broadcast)도 carrier-중립이다★: lease/profile 변경의 전-연결 브로드캐스트는
 //! per-conn 응답(OutboundSink)이 아니라 `engram_dashboard_net::frame_port::FrameFanout`(전-연결
-//! 출구)으로 간다 —
-//! 인코딩된 text 하나를 넘길 뿐이라 연결이 몇 개인지도, 누가 등록돼 있는지도 이 모듈은 모른다
-//! (ADR-0129 — Stage 1 이 registry 실물을 들던 자리가 포트로 바뀌었다).
+//! 출구)으로 간다 — 인코딩된 text 하나를 넘길 뿐이라 연결이 몇 개인지도, 누가 등록돼 있는지도
+//! 이 모듈은 모른다(ADR-0129).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,30 +56,22 @@ use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
-//
-// dispatch 가 쓰던 reply/send_error/event_json 은 모두 conn_tx.send(Frame::Text/Binary)
-// 였다. 이를 carrier-중립 Outbound enqueue 로 치환한다. 인코딩(JSON text / binary frame)은
-// sink 구현이 소유한다(코어는 모름) — OutputSink 가 frame→codec 을 sink 에 맡기는 것과 동형.
 
 /// carrier-중립 송신 단위. 네트워크 행의 `Frame`(Text/Binary/Close)에 대응하되, control 은 아직
 /// 인코딩 전 `AgentEvent` 라는 점이 다르다(인코딩은 어댑터가 소유).
-/// Event=control(AgentEvent), Binary=출력 frame(이미 인코딩된 바이트), Close=연결 종료 요청.
 ///
 /// ★Box<AgentEvent>★: AgentEvent 가 ~272B 라 다른 variant(24B)와 크기 차가 크다(clippy
 /// large_enum_variant). control 경로는 hot path 가 아니므로(출력 binary 는 Binary variant) Box
 /// 1회 할당이 무해하다. 생성은 `Outbound::event()` 헬퍼로 통일해 Box 를 숨긴다.
 #[derive(Debug)]
 pub enum Outbound {
-    /// control 이벤트 — 직렬화(JSON 등)는 sink 구현이 소유. Box 로 enum 크기 축소.
     Event(Box<AgentEvent>),
-    /// 이미 인코딩된 출력 frame 바이트(codec). subscribe 경로 외엔 거의 안 쓰임.
+    /// 이미 인코딩된 출력 frame 바이트(codec).
     Binary(Vec<u8>),
-    /// 연결 종료 요청(reason 은 로그/디버깅용).
     Close(String),
 }
 
 impl Outbound {
-    /// control 이벤트 Outbound 생성(Box 래핑을 숨기는 헬퍼).
     pub fn event(ev: AgentEvent) -> Self {
         Outbound::Event(Box::new(ev))
     }
@@ -100,38 +90,29 @@ impl std::fmt::Display for SinkError {
 impl std::error::Error for SinkError {}
 
 /// 한 연결의 출력 송신 추상. dispatch 의 모든 응답/이벤트가 이걸 통해 나간다.
-/// 어댑터(`agent_conn::FrameOutboundSink`)가 프레임 출구에 push 하며 인코딩을 소유한다.
 pub trait OutboundSink: Send + Sync {
-    /// Outbound(control/binary/close)를 큐잉. 실패(포화/닫힘)면 SinkError(어댑터가 carrier 별로 해석).
     fn enqueue(&self, out: Outbound) -> Result<(), SinkError>;
 
-    /// 코어 subscribe_from 에 넘길 output sink(코어 OutputSink 구현) + replay drop 플래그를 만든다.
+    /// 코어 `subscribe_from` 에 넘길 output sink + replay drop 플래그를 만든다.
     ///
-    /// ★Stage 2 generic 화★: output frame 평면(replay/live binary)은 코어가 `Arc<dyn OutputSink>`
-    /// (코어 trait)로 받는다. carrier(WS/embedded/gRPC)마다 인코딩이 달라(WS=binary frame,
-    /// embedded=base64 PtyEvent) sink 구현이 다르므로, 반환을 trait object 로 두어 carrier-중립으로
-    /// 만든다. 함께 반환하는 `Arc<AtomicBool>` 은 replay 구간 중 frame drop(try_send full) 여부 —
-    /// handle_subscribe 가 ReplayComplete 직전 검사해 SubscribeAck.truncated 를 사후 보정한다.
+    /// carrier(WS/embedded/gRPC)마다 인코딩이 달라(WS=binary frame, embedded=base64 PtyEvent) sink
+    /// 구현이 다르므로, 반환을 trait object 로 두어 carrier-중립으로 만든다. 함께 반환하는
+    /// `Arc<AtomicBool>` 은 replay 구간 중 frame drop(try_send full)이 있었는지다.
     fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>);
 }
 
-/// dispatch 의 연결 종료 흐름. 현 dispatch 의 bool 반환(true=StopDaemon)을 대체한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchFlow {
-    /// 연결 유지(현 dispatch 의 false).
     Continue,
-    /// 연결 종료(현 dispatch 의 true — StopDaemon).
+    /// 연결 종료 — StopDaemon 수신에서만 난다.
     Close,
 }
 
 // ── per-conn 수명 상태(ConnectionSession) ─────────────────────────────────────────
-//
-// 현 handle_connection 의 지역변수(subs/owned_viewports)와 conn_id 를 묶었다. 연결당 1개.
-// read_task/cleanup 이 공유하므로 내부 필드는 그대로 Arc<Mutex<..>> 를 유지한다(동시성 동일).
 
-/// 한 연결의 수명 상태. dispatch 가 구독/viewport 추적을 갱신한다.
+/// 한 연결의 수명 상태. dispatch(`on_text`)와 정리(`on_disconnect`)가 공유하므로 내부 필드는
+/// `Arc<Mutex<..>>` 다.
 pub struct ConnectionSession {
-    /// 연결 식별자(lease 보유자 판정·등).
     pub conn_id: ConnId,
     /// 이 연결이 등록한 (agent_id → sink_id) — cleanup 에서 누수 없이 unsubscribe.
     pub subs: Arc<Mutex<HashMap<AgentId, SinkId>>>,
@@ -160,7 +141,6 @@ impl ConnectionSession {
 // ★동시성★: 여러 연결 task 가 동시 접근하므로 Arc<Mutex>. **lock 보유 중 manager.resize/await 호출
 //   금지** — lock 을 잡고 짧게 협상값만 계산해 해제한 뒤 그 결과로 manager 를 부른다(코어 §10 락 순서).
 
-/// agent 별 viewport 크기 맵 + agent 별 입력 lease 를 묶은 멀티뷰어 협상 상태.
 #[derive(Clone, Default)]
 pub struct MultiViewState {
     inner: Arc<Mutex<MultiViewInner>>,
@@ -168,17 +148,13 @@ pub struct MultiViewState {
 
 #[derive(Default)]
 struct MultiViewInner {
-    /// agent_id → (viewport_id → (cols, rows)). 빈 맵이면 협상 대상 없음(직접 resize).
+    /// agent_id → (viewport_id → (cols, rows)).
     viewports: HashMap<AgentId, HashMap<String, (u16, u16)>>,
-    /// agent_id → 입력 lease 보유 conn(None = 비어 있음 → WriteStdin/Interrupt 자유 통과).
     leases: HashMap<AgentId, ConnId>,
 }
 
-/// 입력 lease 정책 판정 결과.
 enum LeasePass {
-    /// 통과 — lease 가 비었거나 이 conn 이 보유자.
     Allow,
-    /// 거부 — 다른 conn 이 보유 중.
     Denied,
 }
 
@@ -187,8 +163,7 @@ impl MultiViewState {
         Self::default()
     }
 
-    /// viewport 크기를 등록/갱신하고, 그 agent 의 협상된 smallest 크기를 반환한다.
-    /// 반환 None = 등록된 viewport 가 없음(이론상 방금 넣었으므로 항상 Some). lock 은 이 안에서만 보유.
+    /// 반환 None = 등록된 viewport 가 없음(이론상 방금 넣었으므로 항상 Some).
     fn set_viewport(
         &self,
         agent_id: AgentId,
@@ -204,15 +179,12 @@ impl MultiViewState {
         smallest(g.viewports.get(&agent_id))
     }
 
-    /// 한 연결이 보유한 viewport 들을 제거하고, 영향받은 agent 별 재협상 결과를 반환한다.
     /// 반환: (agent_id, Some(min) = 남은 viewport 의 smallest / None = 이제 viewport 없음).
-    /// cleanup 에서 호출 — 끊긴 연결의 크기를 빼고 남은 뷰어 기준으로 다시 키운다(tmux detach 동치).
     pub fn remove_conn_viewports(
         &self,
         owned: &[(AgentId, String)],
     ) -> Vec<(AgentId, Option<(u16, u16)>)> {
         let mut g = self.inner.lock().expect("multiview poisoned");
-        // 같은 agent 가 여러 viewport 를 가질 수 있어 agent 단위로 1회만 재협상한다.
         let mut affected: Vec<AgentId> = Vec::new();
         for (agent_id, viewport_id) in owned {
             if let Some(m) = g.viewports.get_mut(agent_id) {
@@ -231,8 +203,7 @@ impl MultiViewState {
             .collect()
     }
 
-    /// 입력 lease 획득 시도. Ok(true)=새로 획득(상태 변경), Ok(false)=이미 이 conn 보유(idempotent),
-    /// Err=다른 conn 이 보유 중. lock 은 이 안에서만.
+    /// Ok(true)=새로 획득(상태 변경), Ok(false)=이미 이 conn 보유(멱등), Err=다른 conn 이 보유 중.
     fn acquire(&self, agent_id: AgentId, conn_id: ConnId) -> Result<bool, ()> {
         let mut g = self.inner.lock().expect("multiview poisoned");
         match g.leases.get(&agent_id) {
@@ -240,13 +211,13 @@ impl MultiViewState {
                 g.leases.insert(agent_id, conn_id);
                 Ok(true)
             }
-            Some(&holder) if holder == conn_id => Ok(false), // 재획득 idempotent
-            Some(_) => Err(()),                              // 타 conn 보유
+            Some(&holder) if holder == conn_id => Ok(false),
+            Some(_) => Err(()),
         }
     }
 
-    /// 입력 lease 해제 시도. Ok(true)=해제됨(상태 변경), Ok(false)=원래 비어 있었음,
-    /// Err=다른 conn 이 보유 중(보유자만 해제 가능).
+    /// Ok(true)=해제됨(상태 변경), Ok(false)=원래 비어 있었음, Err=다른 conn 이 보유 중
+    /// (보유자만 해제 가능).
     fn release(&self, agent_id: AgentId, conn_id: ConnId) -> Result<bool, ()> {
         let mut g = self.inner.lock().expect("multiview poisoned");
         match g.leases.get(&agent_id) {
@@ -259,18 +230,17 @@ impl MultiViewState {
         }
     }
 
-    /// WriteStdin/Interrupt 입력 권한 판정. lease 비었으면 Allow, 보유자면 Allow, 타 conn 이면 Denied.
     fn check_input(&self, agent_id: AgentId, conn_id: ConnId) -> LeasePass {
         let g = self.inner.lock().expect("multiview poisoned");
         match g.leases.get(&agent_id) {
             None => LeasePass::Allow,
             Some(&holder) if holder == conn_id => LeasePass::Allow,
-            Some(_) => LeasePass::Denied, // 타 conn 이 lease 보유 중 → 거부
+            Some(_) => LeasePass::Denied,
         }
     }
 
-    /// 한 연결이 보유한 모든 agent lease 를 해제하고, 실제 해제된 agent 들을 반환한다(좀비 lock 방지).
-    /// 반환된 agent 들은 이제 lease 가 비었으므로 InputLeaseChanged{held:false} 를 브로드캐스트할 대상.
+    /// 좀비 lock 방지. 반환된 agent 들은 이제 lease 가 비었으므로 InputLeaseChanged{held:false} 를
+    /// 브로드캐스트할 대상이다.
     pub fn release_all_for_conn(&self, conn_id: ConnId) -> Vec<AgentId> {
         let mut g = self.inner.lock().expect("multiview poisoned");
         let freed: Vec<AgentId> = g
@@ -286,8 +256,6 @@ impl MultiViewState {
     }
 }
 
-/// viewport 맵에서 smallest(min cols, min rows) 계산. tmux 기본 정책 — 가장 작은 뷰에 맞춰
-/// 어느 뷰도 PTY 보다 작아 깨지지 않게 한다. 빈/없는 맵이면 None.
 fn smallest(views: Option<&HashMap<String, (u16, u16)>>) -> Option<(u16, u16)> {
     let m = views?;
     let mut it = m.values();
@@ -301,14 +269,13 @@ fn smallest(views: Option<&HashMap<String, (u16, u16)>>) -> Option<(u16, u16)> {
 
 // ── 타입 변환(core → wire) ─────────────────────────────────────────────────────
 //
-// ★명시 매핑(runtime reflection 폐기)★: 옛 구현은 serde_json::to_value→from_value 로 core↔wire
-// 를 변환했다. 이러면 한쪽 필드/태그가 어긋나도 컴파일은 통과하고 런타임에 silent drop(None) 됐다.
-// 이제는 필드를 하나하나 명시 매핑한다 — core 에 필드가 추가/개명되면 **컴파일 에러**가 나게.
+// ★reflection 왕복 금지(되살리지 말 것)★: serde_json::to_value→from_value 로 core↔wire 를 돌리면
+// 한쪽 필드/태그가 어긋나도 컴파일은 통과하고 런타임에 silent drop(None) 된다. 그래서 필드를 하나씩
+// 명시 매핑한다 — core 에 필드가 추가/개명되면 **컴파일 에러**가 나게.
 //
 // 변환은 데몬 crate 에 둔다(core 는 protocol 무의존 유지 — §1 불변). orphan rule 때문에 외부 두
 // 타입 사이 `impl From` 은 불가하나, 데몬이 양쪽을 다 의존하므로 자유 함수로 직접 필드 접근한다.
 
-/// core Capabilities → wire. 5개 sub-cap 의 모든 bool 필드를 명시 매핑.
 fn caps_to_wire(c: &CoreCaps) -> WireCaps {
     WireCaps {
         input: WireInputCaps {
@@ -342,7 +309,6 @@ fn caps_to_wire(c: &CoreCaps) -> WireCaps {
     }
 }
 
-/// core AgentStatus → wire. 5개 variant 전수 명시 — variant 추가 시 컴파일 에러로 강제.
 fn status_to_wire(status: &CoreStatus) -> engram_dashboard_protocol::AgentStatus {
     use engram_dashboard_protocol::AgentStatus as W;
     match status {
@@ -356,7 +322,6 @@ fn status_to_wire(status: &CoreStatus) -> engram_dashboard_protocol::AgentStatus
     }
 }
 
-/// core AgentInfo → wire. 모든 필드 명시(누락 시 컴파일 에러).
 pub(crate) fn agent_info_to_wire(a: &CoreAgentInfo) -> WireAgentInfo {
     WireAgentInfo {
         id: a.id,
@@ -370,10 +335,6 @@ pub(crate) fn agent_info_to_wire(a: &CoreAgentInfo) -> WireAgentInfo {
     }
 }
 
-/// core RestoreOutcome → wire. 전 variant 명시.
-/// ★Uuid→String★: core FreshFallback{old_sid: Option<Uuid>, new_sid: Uuid} 를 wire 의
-/// {Option<String>, String} 으로 `to_string()` 변환(옛 reflection 은 JSON string 우연 호환에
-/// 의존했음). 명시 변환으로 이 변환을 코드로 못박는다.
 pub(crate) fn restore_outcome_to_wire(outcome: &CoreRestoreOutcome) -> WireRestoreOutcome {
     match outcome {
         CoreRestoreOutcome::Resumed => WireRestoreOutcome::Resumed,
@@ -400,7 +361,6 @@ pub(crate) fn core_agents_to_wire(agents: Vec<CoreAgentInfo>) -> Vec<WireAgentIn
     agents.iter().map(agent_info_to_wire).collect()
 }
 
-/// core profile::AgentCommand → wire AgentSpawnCommand. 2 variant 전수 명시.
 fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
     match cmd {
         CoreSpawnCommand::Claude {
@@ -408,7 +368,6 @@ fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
             output_format,
         } => WireSpawnCommand::Claude {
             extra_args: extra_args.clone(),
-            // output_format(ADR-0044) 명시 매핑 — 두 enum 전수 대응(추가 시 컴파일 에러).
             output_format: match output_format {
                 CoreClaudeOutputFormat::Terminal => WireClaudeOutputFormat::Terminal,
                 CoreClaudeOutputFormat::StreamJson => WireClaudeOutputFormat::StreamJson,
@@ -421,7 +380,6 @@ fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
     }
 }
 
-/// core RestartPolicy → wire. 3 variant 전수 명시(추가 시 컴파일 에러).
 fn restart_policy_to_wire(p: CoreRestartPolicy) -> WireRestartPolicy {
     match p {
         CoreRestartPolicy::Never => WireRestartPolicy::Never,
@@ -430,16 +388,12 @@ fn restart_policy_to_wire(p: CoreRestartPolicy) -> WireRestartPolicy {
     }
 }
 
-/// core AgentProfile → wire. 모든 필드 명시(누락/개명 시 컴파일 에러).
-/// ★Uuid→String / PathBuf→String★: claude_session_id·old_session_ids 는 Uuid, cwd 는 PathBuf 라
-/// JSON 표현(문자열)으로 명시 변환한다(reflection 왕복 금지 — agent_info_to_wire 와 동일 원칙).
 fn profile_to_wire(p: &CoreProfile) -> WireProfile {
     WireProfile {
         id: p.id,
         name: p.name.clone(),
-        // ADR-0061 리치화: 표시명 override(트리 rename). None 이면 프론트가 cwd basename 파생(기존 동작 불변).
         display_name: p.display_name.clone(),
-        // ADR-0072: 트리 계층 부모 id. None 이면 루트. AgentId/ProfileId 는 동일 Uuid alias 라 그대로 복사.
+        // core AgentId 와 wire ProfileId 는 같은 Uuid alias 라 변환 없이 복사한다.
         parent_id: p.parent_id,
         command: spawn_command_to_wire(&p.command),
         cwd: p.cwd.to_string_lossy().into_owned(),
@@ -461,9 +415,6 @@ fn core_profiles_to_wire(profiles: Vec<CoreProfile>) -> Vec<WireProfile> {
     profiles.iter().map(profile_to_wire).collect()
 }
 
-/// core Preset → wire(ADR-0061). profile_to_wire 와 동일 원칙 — PathBuf→String 명시 변환
-/// (reflection 왕복 금지, 필드 추가/개명 시 컴파일 에러). 표시명 override(name)는 그대로 옮기고,
-/// None 이면 프론트가 cwd basename 을 파생한다(리치화 전 동작 불변, ADR-0061).
 fn preset_to_wire(p: &CorePreset) -> WirePreset {
     WirePreset {
         id: p.id,
@@ -476,7 +427,6 @@ fn core_presets_to_wire(presets: Vec<CorePreset>) -> Vec<WirePreset> {
     presets.iter().map(preset_to_wire).collect()
 }
 
-/// core OutputChunk → wire SnapshotChunk. {seq, data} 명시 매핑.
 fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
     WireSnapshotChunk {
         seq: c.seq,
@@ -484,21 +434,14 @@ fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
     }
 }
 
-/// ★S15 B7 (ADR-0045)★: core `OutputEvent` → wire `StructuredEvent`(tag1 payload). 각 core variant 를
-/// wire variant 로 **명시 매핑**(필드 그대로 옮김) — variant/필드 추가·개명 시 컴파일 에러로 강제한다
-/// (다른 `*_to_wire` 와 동일 원칙: reflection 왕복 금지, silent drop 차단). turn_id/message_id/id 는
-/// optional 그대로 옮겨 교체성(codex/gemini 가 못 채우면 None)을 보존한다.
-///
 /// ★반환이 Option 인 이유(TerminalBytes 방어)★: 정상 경로에서 `OutputEvent::TerminalBytes` 는 이 변환에
 /// **오지 않는다** — 콘솔 raw 바이트는 sink 에서 tag0 terminal frame(`OutputPayload::Bytes`)으로 갈리고,
-/// 이 함수는 `OutputPayload::Event` arm(tag1)에서만 불린다(net crate 의 ws.rs). wire `StructuredEvent` 에는 TerminalBytes
+/// 이 함수는 `OutputPayload::Event` arm(tag1)에서만 불린다. wire `StructuredEvent` 에는 TerminalBytes
 /// variant 가 없으므로(tag1 payload 에 raw 바이트를 안 싣는다 — ADR-0045), 만약 TerminalBytes 가 이 arm 에
-/// 도달하면 매핑 불가다. 그때 패닉 대신 `None` 을 돌려 호출부(net crate 의 ws.rs)가 warn 후 drop 하게 한다(런타임 안전 —
-/// tag0/tag1 오분류는 상류 배선 버그지 이 frame 하나로 연결을 죽일 사안이 아님). debug 빌드는 호출부에서
-/// debug_assert 로 조기 발견한다.
+/// 도달하면 매핑 불가다. 그때 패닉 대신 `None` 을 돌린다 — tag0/tag1 오분류는 상류 배선 버그지 이 frame
+/// 하나로 연결을 죽일 사안이 아니다(호출부 처리는 `agent_conn::FrameOutputSink::send`).
 pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructuredEvent> {
     match ev {
-        // tag0 전용 — tag1 payload 에 안 실린다(위 주석). 매핑 불가 → None(호출부 방어).
         CoreOutputEvent::TerminalBytes(_) => None,
         CoreOutputEvent::TextDelta {
             text,
@@ -538,7 +481,6 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             turn_id: turn_id.clone(),
             message_id: message_id.clone(),
         }),
-        // core 는 tuple variant Error(String), wire 는 struct variant { message } — 명시 옮김.
         CoreOutputEvent::Error(message) => Some(WireStructuredEvent::Error {
             message: message.clone(),
         }),
@@ -549,7 +491,6 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
     }
 }
 
-/// core RestoreReport → wire. 모든 필드 명시(누락 시 컴파일 에러).
 pub(crate) fn core_report_to_wire(report: CoreRestoreReport) -> RestoreReport {
     RestoreReport {
         agent_id: report.agent_id,
@@ -558,13 +499,11 @@ pub(crate) fn core_report_to_wire(report: CoreRestoreReport) -> RestoreReport {
     }
 }
 
-/// core AgentStatus → wire. StatusChanged 직렬화에 사용.
 pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protocol::AgentStatus {
     status_to_wire(&status)
 }
 
-/// AgentEvent 를 JSON 문자열로 직렬화(control 전송용). 실패는 거의 불가능하나 로그 후 None.
-/// (DaemonStatusSink·FrameOutboundSink 가 인코딩에 재사용한다.)
+/// None = 직렬화 실패(이 함수가 이미 로그를 남겼다).
 pub(crate) fn event_json(ev: &AgentEvent) -> Option<String> {
     match serde_json::to_string(ev) {
         Ok(s) => Some(s),
@@ -575,8 +514,6 @@ pub(crate) fn event_json(ev: &AgentEvent) -> Option<String> {
     }
 }
 
-/// 코어 ReplayKind → protocol SubscribeAction 매핑. SubscribeAck.action 구성에 사용한다.
-/// (옛 predict_ack 의 별도 분기 예측을 제거 — 분기는 코어 subscribe_from 단일 스냅샷이 소유한다.)
 fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
     match kind {
         ReplayKind::FromOldest => SubscribeAction::Reset,
@@ -587,8 +524,6 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 
 // ── ConnectionCore ────────────────────────────────────────────────────────────────
 
-/// transport-중립 연결 코어. dispatch + 멀티뷰어 협상 + 전-연결 팬아웃 출구.
-///
 /// ★이 struct 는 **연결마다 새로 만들어진다**(`agent_conn::AgentConnections::handler_for`)★. 서버 전체에
 /// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 아래 6개
 /// (manager · multiview · fanout · control_registry · messaging · shutdown_tx)가 전부 그렇다.
@@ -598,24 +533,14 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 pub struct ConnectionCore {
     manager: Arc<AgentManager>,
     multiview: MultiViewState,
-    /// status/lease/profile 브로드캐스트용 전-연결 출구. carrier 디테일(연결 등록·해제)은 포트
-    /// 너머라 여기서 표현할 수 있는 것은 "전부에게 이 text" 하나뿐이다(ADR-0129).
     // ADR-0129
     fanout: Arc<dyn FrameFanout>,
-    /// ★제어 채널 레지스트리(ADR-0086)★ — 봉투 포맷 전역 상태(ADR-0096)의 거처. SetEnvelopeFormat
-    ///   dispatch 가 여기 `set_envelope_format` 을 부른다. handle_send(MCP/CLI 입구)가 relay 마다 읽는
-    ///   그 **같은 Arc** 다(전역 상태 하나 — 두 봉투 조립 경로가 동일 값을 본다). 위 `fanout` 과 다른
-    ///   것임에 주의: 저건 전-연결 출구, 이건 제어 채널 토큰·봉투 포맷 상태.
     // ADR-0096
     control_registry: Arc<ControlRegistry>,
-    /// ★메시징 커널 늦은 주입 슬롯(ADR-0116 결정 3 — 프로필 삭제 정리 배선)★: `DeleteProfile` dispatch 가
-    ///   프로필을 지운 **직후** `handle_profile_deleted` 를 불러 그 이름 앞 파킹분·오픈 계약을 정리한다.
-    ///   ★슬롯(OnceLock)인 이유★: MessagingService 는 manager 를 감싸므로 manager·연결보다 **뒤에** 조립된다
-    ///   (mcp_server::MessagingSlot 과 같은 순환 해소). 미설정이면 정리를 건너뛴다 — 그 조립(실험 bin·일부
-    ///   테스트)엔 메시징이 아예 없어 정리할 것도 없다.
+    /// 빈 슬롯 = 이 조립(실험 bin·일부 테스트)엔 메시징이 아예 없다는 뜻 — `DeleteProfile` 의 삭제
+    ///   정리를 건너뛰어도 정리할 것이 없다.
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    /// StopDaemon 수신 시 main 종료를 트리거하는 watch(어댑터가 주입).
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -638,24 +563,18 @@ impl ConnectionCore {
         }
     }
 
-    /// 멀티뷰어 협상 상태 접근(어댑터 cleanup 이 viewport/lease 정리에 사용).
     pub fn multiview(&self) -> &MultiViewState {
         &self.multiview
     }
 
-    /// 팬아웃 포트 접근(어댑터 cleanup 의 lease-freed 브로드캐스트에 사용).
     pub fn fanout(&self) -> &dyn FrameFanout {
         self.fanout.as_ref()
     }
 
-    /// manager 접근(어댑터 cleanup 의 unsubscribe/resize 에 사용).
     pub fn manager(&self) -> &Arc<AgentManager> {
         &self.manager
     }
 
-    /// 단일 명령 dispatch. 반환 Close = 연결 종료 요청(StopDaemon). side-effect 명령은
-    /// request_id 있으면 Ack/Error 를 sink 로 enqueue.
-    ///
     /// ★sink.enqueue 실패(SinkError)는 무시★: side-effect 명령의 Ack/Error 송신 실패는 삼킨다.
     /// 어댑터의 enqueue 는 논블록(try_send)이라 큐 포화면 backpressure 로 기다리는 게 아니라 즉시
     /// drop + close 신호다 — 정상 단일 연결은 큐 여유로 control drop 이 안 나고, 포화 시 종착점
@@ -675,7 +594,6 @@ impl ConnectionCore {
         let subs = &session.subs;
         let owned_viewports = &session.owned_viewports;
 
-        /// side-effect 결과를 Ack/Error 로 변환해 sink 로 enqueue.
         fn reply(sink: &dyn OutboundSink, request_id: RequestId, result: Result<(), String>) {
             let ev = match result {
                 Ok(()) => AgentEvent::Ack { request_id },
@@ -688,20 +606,10 @@ impl ConnectionCore {
         }
 
         match cmd {
-            // ★2번째 Auth arm 은 여기 없다(ADR-0129 0-4)★: 핸드셰이크 프레임이 이 enum 을 떠나
-            //   네트워크 lib 소유가 됐으므로, 인증 뒤 도착한 Auth 프레임은 **명령으로 디코드되지 않는다**.
-            //   그 응답("already authenticated")은 디코드 지점인 `agent_conn::AgentConnection::on_text`
-            //   이 태그로 되잡아 그대로 낸다 — 회귀 방어는 `ws_e2e` case21 이다.
-            //   ★불변인 것과 바뀐 것을 구분할 것★: 온전한 2차 핸드셰이크가 받는 **응답 문구**는 그대로다.
-            //   어긋난 프레임이 받는 **진단 텍스트**는 바뀌었다 — Auth 태그를 단 어긋난 프레임은 이제 그
-            //   태그 판정에 걸려 같은 "already authenticated" 를 받고(옛 경로는 이 arm 까지 와서 serde 의
-            //   필드 누락 오류를 냈다), 그 밖의 프레임이 받는 "unknown variant" 문구의 기대 목록에서는
-            //   `Auth` 가 빠졌다. case23 이 보는 것은 그 목록이 아니라 `invalid command` 접두다.
             AgentCommand::Spawn {
                 profile_id,
                 request_id,
             } => {
-                // 프로필 기반 spawn(profile.rs spawn_profile 미러, resume=false=Fresh).
                 let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => manager
                         .spawn_agent(&profile, SpawnMode::Fresh)
@@ -724,7 +632,6 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                // Interrupt(Ctrl+C)도 입력 평면이라 lease 게이트를 거친다(WriteStdin 과 동일 정책).
                 let result = match multiview.check_input(agent_id, conn_id) {
                     LeasePass::Allow => manager.interrupt(agent_id).map_err(|e| e.to_string()),
                     LeasePass::Denied => {
@@ -739,8 +646,6 @@ impl ConnectionCore {
                 data,
                 request_id,
             } => {
-                // ★입력 lease 게이트★: lease 가 비었거나(단일 뷰어 흔한 경우 마찰 0) 이 conn 이 보유자면
-                //   통과, 타 conn 이 보유 중이면 거부(stdin 인터리브 방지). lock 은 check_input 안에서만.
                 let result = match multiview.check_input(agent_id, conn_id) {
                     LeasePass::Allow => manager
                         .write_stdin(agent_id, &data)
@@ -758,15 +663,8 @@ impl ConnectionCore {
                 rows,
                 viewport_id,
             } => {
-                // Resize 는 request_id 가 없는 명령(messages.rs) — Ack 없이 best-effort, 실패만 Error.
-                // ★멀티뷰어 협상(tmux smallest)★: viewport_id 가 있으면 그 뷰의 크기를 협상 맵에 기록하고
-                //   그 agent 의 모든 viewport 중 smallest 로 PTY 를 맞춘다(작은 화면이 안 깨짐). viewport_id
-                //   가 없으면(v1 프론트 기본) 협상을 우회해 그 크기로 직접 resize(하위호환).
-                //   ★lock 순서★: set_viewport 가 multiview lock 안에서 협상값만 계산해 반환한 뒤 lock 을 푼
-                //   상태에서 manager.resize 를 부른다(lock 보유 중 코어 호출 금지).
                 let target = match viewport_id {
                     Some(v) => {
-                        // 이 연결이 등록한 viewport 추적(cleanup 재협상용). 중복 등록은 무시.
                         {
                             let mut owned =
                                 owned_viewports.lock().expect("owned_viewports poisoned");
@@ -778,7 +676,7 @@ impl ConnectionCore {
                             .set_viewport(agent_id, v, cols, rows)
                             .unwrap_or((cols, rows))
                     }
-                    // 단일 뷰어 — 협상 우회.
+                    // viewport_id 없음(v1 프론트) = 협상 우회, 그 크기로 직접 resize(하위호환).
                     None => (cols, rows),
                 };
                 if let Err(e) = manager.resize(agent_id, target.0, target.1) {
@@ -791,13 +689,10 @@ impl ConnectionCore {
                 epoch,
                 after_seq,
             } => {
-                // Step 4c: epoch/after_seq 를 코어 subscribe_from 으로 전달 → 무손실 resume(tail 만)
-                // 또는 truncated/full replay 분기.
                 self.handle_subscribe(agent_id, epoch, after_seq, subs, sink);
             }
 
             AgentCommand::Unsubscribe { agent_id } => {
-                // 이 연결의 그 agent sink_id 로 unsubscribe + 기록 제거.
                 let sink_id = subs.lock().expect("subs poisoned").remove(&agent_id);
                 if let Some(sid) = sink_id {
                     let _ = manager.unsubscribe(agent_id, sid);
@@ -808,14 +703,12 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                // lease 비었으면 획득(Ack) + InputLeaseChanged{held:true} 브로드캐스트. 같은 conn 재획득은
-                // 멱등(Ack, 상태 변경 없음 → 브로드캐스트 생략). 타 conn 보유면 Error.
                 match multiview.acquire(agent_id, conn_id) {
                     Ok(true) => {
                         broadcast_lease_changed(fanout, agent_id, true);
                         reply(sink, request_id, Ok(()));
                     }
-                    Ok(false) => reply(sink, request_id, Ok(())), // idempotent
+                    Ok(false) => reply(sink, request_id, Ok(())),
                     Err(()) => reply(
                         sink,
                         request_id,
@@ -828,14 +721,12 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                // 보유자만 해제 가능. 해제 시 InputLeaseChanged{held:false} 브로드캐스트. 원래 비어 있었으면
-                // 멱등(Ack). 타 conn 이 보유 중이면 Error(남의 lease 를 뺏지 못함).
                 match multiview.release(agent_id, conn_id) {
                     Ok(true) => {
                         broadcast_lease_changed(fanout, agent_id, false);
                         reply(sink, request_id, Ok(()));
                     }
-                    Ok(false) => reply(sink, request_id, Ok(())), // 원래 비어 있음
+                    Ok(false) => reply(sink, request_id, Ok(())),
                     Err(()) => reply(
                         sink,
                         request_id,
@@ -845,8 +736,6 @@ impl ConnectionCore {
             }
 
             AgentCommand::ListAgents { request_id } => {
-                // 조회 응답은 request_id 동봉 전용 reply(AgentList)로 요청 연결에만 — 편승 매칭 제거.
-                // broadcast 인 AgentListUpdated(트리 실시간 갱신)는 StatusSink/agent_list_updated 가 별도 담당.
                 let _ = sink.enqueue(Outbound::event(AgentEvent::AgentList {
                     request_id,
                     agents: core_agents_to_wire(manager.list_agents()),
@@ -859,8 +748,7 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ── M4: force 정책 ──────────────────────────────────────────────────
-                // force=false 인데 **실활성** 에이전트가 남아 있으면 거부(종료하지 않음). 실수로 데몬을
-                // 내려 살아있는 PTY 세션을 모두 죽이는 사고를 막는다. 실활성 0이거나 force=true 면 진행.
+                // force=false 거부는 실수로 데몬을 내려 살아있는 PTY 세션을 모두 죽이는 사고를 막는다.
                 // ★실활성만 카운트★: 이미 죽은(Exited/Killed/Failed)·종료중(Exiting) 세션은 제외한다 —
                 //   이들 때문에 거부하면 살릴 게 없는데도 데몬을 못 내리는 오작동이 된다.
                 let active_count = manager
@@ -869,7 +757,7 @@ impl ConnectionCore {
                     .filter(|a| {
                         matches!(
                             a.status,
-                            CoreStatus::Running // 비-terminal·비-Exiting 만 실활성
+                            CoreStatus::Running
                         )
                     })
                     .count();
@@ -881,15 +769,14 @@ impl ConnectionCore {
                             "active agents present ({active_count}); use force=true to stop the daemon"
                         ),
                     );
-                    return DispatchFlow::Continue; // 거부 — 연결 유지, main 종료 안 함.
+                    return DispatchFlow::Continue;
                 }
 
-                // ★kill_agents 는 v1 에서 무시(always-kill)★: 데몬은 자식 PTY 를 자기
-                //   KILL_ON_JOB_CLOSE Job Object 에 담는다. 따라서 데몬이 종료되면 Job 핸들이
-                //   닫히며 자식이 **무조건** 함께 죽는다 — detach(데몬만 내리고 자식 유지)는 현
-                //   Job 모델에선 불가능하다. kill_agents 플래그는 미래에 detach 를 지원하게 될
-                //   여지로 protocol 에 남겨두되, v1 동작은 값과 무관하게 항상 자식을 정리한다.
-                let _ = kill_agents; // 의도적 무시(위 주석) — 미래 detach 지원 여지.
+                // ★kill_agents 는 v1 에서 무시(always-kill)★: 자식 PTY 가 데몬의 KILL_ON_JOB_CLOSE
+                //   Job 에 담기므로 데몬이 죽으면 자식도 **무조건** 함께 죽는다 — detach(데몬만 내리고
+                //   자식 유지)가 현 Job 모델에선 불가능하다. 플래그는 미래 detach 여지로 protocol 에
+                //   남겨두되 v1 동작은 값과 무관하다.
+                let _ = kill_agents;
                 let mgr = manager.clone();
                 let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
 
@@ -900,10 +787,7 @@ impl ConnectionCore {
             }
 
             // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────
-            // 각 arm 은 대응 Tauri command(EmbeddedClient)와 같은 동작을 해야 한다(인자/부작용 동일).
             AgentCommand::SpawnByCwd { cwd, request_id } => {
-                // Tauri `spawn_agent(cwd)` 미러: 기본 셸 ad-hoc 프로필(auto_restore=false)을 Fresh spawn.
-                // (영속 등록은 manager.spawn_agent 내부 upsert 가 처리 — Tauri 경로와 동일.)
                 let profile = CoreProfile::new(
                     cwd.clone(),
                     CoreSpawnCommand::Shell {
@@ -914,8 +798,6 @@ impl ConnectionCore {
                     vec![],
                     false,
                 );
-                // spawn 성공 시 AgentInfo 를 request_id 에 동봉(Spawned)해 requester 가 "내 것"을 식별.
-                // agent_list_updated 는 StatusSink 가 이미 전 연결에 브로드캐스트(Spawn arm 과 동일).
                 match manager.spawn_agent(&profile, SpawnMode::Fresh) {
                     Ok(info) => {
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
@@ -928,8 +810,6 @@ impl ConnectionCore {
             }
 
             AgentCommand::ListProfiles { request_id } => {
-                // Tauri `list_profiles` 미러 — 읽기 전용 조회. request_id 동봉 전용 reply(ProfileList)로
-                // 요청 연결에만 응답(ListAgents 와 동형). broadcast ProfileListUpdated 는 CRUD 후 별도 push.
                 let _ = sink.enqueue(Outbound::event(AgentEvent::ProfileList {
                     request_id,
                     profiles: core_profiles_to_wire(manager.agent_snapshots()),
@@ -945,10 +825,6 @@ impl ConnectionCore {
                 output_format,
                 request_id,
             } => {
-                // Tauri `create_claude_profile` 미러: claude 프로필 생성·upsert(스폰 안 함).
-                // ADR-0044 M2: wire output_format → core 로 명시 매핑(spawn_command_to_wire 의 역방향).
-                //   StreamJson 이면 프로필이 json 모드로 저장돼, 이후 SpawnProfile → spawn_agent 가
-                //   is_json_mode 로 StdioTransport(구조화 caps)를 고른다. Terminal 은 기존 동작 불변.
                 let core_output_format = match output_format {
                     WireClaudeOutputFormat::Terminal => CoreClaudeOutputFormat::Terminal,
                     WireClaudeOutputFormat::StreamJson => CoreClaudeOutputFormat::StreamJson,
@@ -963,20 +839,14 @@ impl ConnectionCore {
                     env,
                     auto_restore,
                 );
-                // ★wire 변환은 등록 **뒤**에 뜬다(ADR-0120)★: 명부 전역 이름 유일성 강제가 접미사를
-                //   붙일 수 있으므로, requester 에게 돌려주는 프로필은 이 호출이 등록한 값이어야 한다
-                //   (등록 전 스냅샷을 보내면 화면과 명부가 다른 이름을 갖는다).
-                // ★Err(접미사 공간 소진)은 등록 없이 Error 로 반려한다★ — 중복 이름을 명부에 넣지 않는다.
-                //   그 경우 broadcast 도 하지 않는다(바뀐 게 없다).
                 match manager.create_agent(profile) {
                     Ok(stored) => {
                         let wire = profile_to_wire(&stored);
-                        // requester 에겐 Created(생성된 프로필 동봉)로 응답 — Ack 는 보내지 않는다(중복 resolve 방지).
+                        // Created 하나로 응답한다 — Ack 는 보내지 않는다(중복 resolve 방지).
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Created {
                             request_id,
                             profile: wire,
                         }));
-                        // 생성은 공유 상태 변경 → 나머지 연결엔 갱신된 목록 broadcast.
                         broadcast_profile_list(fanout, manager);
                     }
                     Err(e) => reply(sink, request_id, Err(e.to_string())),
@@ -987,16 +857,8 @@ impl ConnectionCore {
                 profile_id,
                 request_id,
             } => {
-                // Tauri `delete_profile` 미러: 등록 해제·persist(실행 중 세션은 별도 Kill).
-                // remove 는 무조건 성공(없는 id 면 no-op) — Tauri 경로와 동일하게 Ack.
-                //
-                // ★삭제 정리(spec §5 · ADR-0116 결정 3)★: 지운 프로필 이름 앞 파킹분과 그 이름이 요청자인
-                //   오픈 계약을 메시징 커널이 종결한다. 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
-                // ★이름은 **삭제 전에** 뽑는다★: 지운 뒤엔 파생할 재료(display_name·cwd)가 없다. 파생 규칙은
-                //   `canonical_name_when_live`(산 세션과 같은 함수 + 같은 cwd 정규화) — 파킹 키가 그 값이므로
-                //   여기서 규칙을 복제하면 정리가 엉뚱한 큐를 보거나 아무것도 못 찾는다.
-                // ★락 순서(ADR-0006)★: `get`/`remove` 는 각각 프로필 레지스트리 락을 잡고 즉시 놓는다 —
-                //   정리 호출은 그 **뒤**(락 미보유 상태)라 "레지스트리 락 보유 중 메시징 락" 이 성립하지 않는다.
+                // ★삭제 정리 훅(ADR-0116 결정 3)★: 여기가 유일한 프로필 제거 지점이라 훅도 여기 하나다.
+                //   호출자 의무(이름 파생 시점·락 순서·게이트 축)는 `handle_profile_deleted` 가 정본이다.
                 // ★발동 조건(로스터 부재)은 커널이 판정한다★: 로스터는 커널의 DeliveryPort 소유 축이고, 여기서
                 //   미리 보면 조건이 두 곳에 갈린다(그 판정이 곧 정책 — spec §5).
                 let deleted_name = manager
@@ -1005,10 +867,6 @@ impl ConnectionCore {
                 manager.delete_agent(profile_id);
                 reply(sink, request_id, Ok(()));
                 broadcast_profile_list(fanout, manager);
-                // ★게이트는 커널이 **프로필 id** 로 판정한다(리뷰 fix D1 — load-bearing)★: 이름으로 물으면
-                //   지금 이 순간 이후로 그 산 세션의 canonical 이름이 **바뀌기 때문에**(프로필이 사라져
-                //   `display_name` override 가 없어지고 `basename(session.cwd)` 로 강등된다) 게이트가 늘 헛돌아
-                //   산 에이전트의 파킹 메일·계약을 죽인다. `RenameProfile` 한 번이면 재현되는 평범한 경로다.
                 if let (Some(name), Some(messaging)) = (deleted_name, self.messaging.get()) {
                     // 이 경로엔 자식 stdin blocking write 가 없다(큐 정리 + 장부 전이 + 짧은 로스터 스냅샷) —
                     //   그래서 spawn_blocking 없이 이 async 컨텍스트에서 그대로 돈다(ingress 조회 경로와 동형).
@@ -1029,27 +887,11 @@ impl ConnectionCore {
                 resume,
                 request_id,
             } => {
-                // Tauri `spawn_profile` 미러: 저장된 프로필을 Resume/Fresh 로 spawn. 없으면 Error.
-                //
-                // ★모드 = 세션 존재 여부로 유도(ADR-0076 — "activate=resume, fresh=new agent")★:
-                //   사용자 결정 — "에이전트 활성화 = 기존 세션 이어받기, 새로 로드할 거면 새 에이전트를 만든다".
-                //   그래서 저장된 세션이 있는 프로필을 활성화하면 wire `resume` 플래그(프론트가 false 로 보냄)와
-                //   무관하게 **항상 Resume** 으로 이어받는다. 세션이 없는(진짜 신규) 프로필만 Fresh 로 시작한다.
-                //   ★resume=true 는 존중★: 명시적 resume 요청은 세션이 없어도 Resume 로 남긴다 — 그 경우
-                //     spawn_agent(Resume)가 ensure_session_id 로 최초 sid 를 발급하므로 안전하다(sid 발급은
-                //     spawn_agent 단일 권위점, ADR-0076). 즉 mode = resume-요청 OR 세션-존재.
-                //
-                // ★이어받기 전용 + 재활성화 가드(ADR-0082 — fresh-fallback 폐지)★:
-                //   spawn_agent 이 아니라 activate_profile 을 부른다. activate_profile 이 세 갈래를 처리한다:
-                //   ① 이미 실행 중이면 산 에이전트를 놔두고 현재 AgentInfo 를 그대로 반환(재활성화 가드 —
-                //      a4aac1a 회귀 수정: 이중-spawn 가드 Err 가 옛 fresh-fallback 을 발화해 산 에이전트를
-                //      파괴하던 경로를 원천 차단). ② Fresh(세션 없음)는 정상 신규 spawn. ③ Resume 은
-                //      이어받기만 시도하고, 이어받을 수 없으면(빈/미대화/손상 — claude "No conversation
-                //      found ...") **새 대화를 만들지 않고** Failed(시체)로 남기고 원인을 로그로 남긴다
-                //      (LLM 이 읽어 사용자에게 에스컬레이션 — 사용자 결정: "아무것도 죽지마, 새로 만들지마").
-                //   Resume 은 blocking(EARLY_EXIT_WINDOW)이라 이 연결 응답만 지연(다른 세션 무영향).
-                // 성공(resume·재활성화·fresh) 시 Spawned(AgentInfo 동봉)로 응답, 실패/없음은 Error.
-                // agent_list_updated 는 StatusSink 가 브로드캐스트(Spawn arm 과 동일).
+                // ★모드 = 세션 존재 여부로 유도(ADR-0076)★: 사용자 결정 — "에이전트 활성화 = 기존 세션
+                //   이어받기, 새로 로드할 거면 새 에이전트를 만든다". 그래서 저장된 세션이 있으면 wire
+                //   `resume` 플래그(프론트는 false 로 보낸다)와 무관하게 **항상 Resume** 이다.
+                //   ★resume=true 는 존중★: 세션이 없어도 Resume 로 남긴다 — spawn_agent(Resume)가
+                //     ensure_session_id 로 최초 sid 를 발급하므로 안전하다. 즉 mode = resume-요청 OR 세션-존재.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         let mode = if resume || profile.claude_session_id.is_some() {
@@ -1080,7 +922,6 @@ impl ConnectionCore {
                 auto_restore,
                 request_id,
             } => {
-                // Tauri `set_profile_auto_restore` 미러: update_with 로 토글. 없으면 Error(Tauri 와 동일).
                 let ok = manager.set_agent_auto_restore(profile_id, auto_restore);
                 if ok {
                     reply(sink, request_id, Ok(()));
@@ -1099,12 +940,6 @@ impl ConnectionCore {
                 name,
                 request_id,
             } => {
-                // ADR-0061 리치화(트리 rename): 표시명 override set/clear. SetProfileAutoRestore 와 동형 —
-                // update_with(persist 일원화) 로 mutate 후 없으면 Error. 성공 시 전 연결에 broadcast(모든 창
-                // 동기화·낙관 갱신 X — 프론트는 broadcast 로만 표시명 반영).
-                // ★실패 사유를 구분해 응답한다★: "그런 에이전트가 없다" 와 "이름을 발급할 수 없다" 는
-                //   서로 다른 사실이고, 둘을 같은 문구로 뭉개면 호출자(사용자·LLM)가 거짓 원인을 본다.
-                //   성공 두 갈래(확정·멱등 무변경)는 기존과 동일하게 Ack + 전 연결 broadcast 다.
                 match manager.rename_agent(profile_id, name) {
                     CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_) => {
                         reply(sink, request_id, Ok(()));
@@ -1130,9 +965,6 @@ impl ConnectionCore {
                 parent_id,
                 request_id,
             } => {
-                // ADR-0072 트리 계층 reparent: 부모 지정/해제. 검증(self-parent·nonexistent parent·1단 상한·
-                // 2단 금지)은 ProfileRegistry::reparent 가 한 임계구역에서 수행 — 위반이면 false 로 Error,
-                // 성공이면 Ack + 전 연결 broadcast(RenameProfile 와 동형, 모든 창 동기화·낙관 갱신 X).
                 let ok = manager.reparent_agent(child_id, parent_id);
                 if ok {
                     reply(sink, request_id, Ok(()));
@@ -1152,9 +984,7 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                // Tauri `get_agent_snapshot` 미러: 그 시점 replay buffer 스냅샷 1회 조회. 없으면 Error.
-                // Snapshot 에 request_id 를 동봉(전용 reply)하므로 별도 Ack 는 보내지 않는다 — Created/
-                // Spawned 와 동형(응답 1건만, 중복 resolve 방지).
+                // Snapshot 하나로 응답한다 — 별도 Ack 는 보내지 않는다(중복 resolve 방지).
                 match manager.get_snapshot(agent_id) {
                     Ok(chunks) => {
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Snapshot {
@@ -1167,10 +997,8 @@ impl ConnectionCore {
                 }
             }
 
-            // ── 프리셋 CRUD(ADR-0061) — 프로필 arm 미러 ─────────────────────────────
+            // ── 프리셋 CRUD(ADR-0061) ──────────────────────────────────────────────
             AgentCommand::ListPresets { request_id } => {
-                // 읽기 전용 조회. request_id 동봉 전용 reply(PresetList)로 요청 연결에만 응답
-                // (ListProfiles 와 동형). broadcast PresetListUpdated 는 CRUD 후 별도 push.
                 let _ = sink.enqueue(Outbound::event(AgentEvent::PresetList {
                     request_id,
                     presets: core_presets_to_wire(manager.presets().list()),
@@ -1178,9 +1006,6 @@ impl ConnectionCore {
             }
 
             AgentCommand::CreatePreset { cwd, request_id } => {
-                // 프리셋 생성·persist(스폰 안 함). cwd 정규화(dunce::canonicalize)는 PresetRegistry 가 한다.
-                // remove/create 는 무조건 성공(중복 판정 없음 — MVP) → Ack. 생성은 공유 상태 변경이므로
-                // 전 연결에 갱신 목록 broadcast(모든 창 동기화, ADR-0061 불변식).
                 manager.presets().create(std::path::PathBuf::from(cwd));
                 reply(sink, request_id, Ok(()));
                 broadcast_preset_list(fanout, manager);
@@ -1190,8 +1015,6 @@ impl ConnectionCore {
                 preset_id,
                 request_id,
             } => {
-                // 등록 해제·persist. ★프리셋 삭제 ≠ 에이전트 종료★(ADR-0061) — remove 는 프리셋만 지운다.
-                // 없는 id 면 no-op(프로필 DeleteProfile 과 동일하게 Ack). 이후 broadcast.
                 manager.presets().remove(preset_id);
                 reply(sink, request_id, Ok(()));
                 broadcast_preset_list(fanout, manager);
@@ -1202,21 +1025,13 @@ impl ConnectionCore {
                 name,
                 request_id,
             } => {
-                // ADR-0061 리치화: 표시명 override set/clear. DeletePreset 과 동형 — 없는 id 면 no-op(Ack).
-                // 변경은 공유 PresetRegistry 상태를 바꾸므로 전 연결에 broadcast(모든 창 동기화·낙관 갱신 X).
                 manager.presets().rename(preset_id, name);
                 reply(sink, request_id, Ok(()));
                 broadcast_preset_list(fanout, manager);
             }
 
             AgentCommand::SetEnvelopeFormat { format, request_id } => {
-                // ADR-0096: 봉투 포맷 전역 상태 전환. src-tauri Tauri command set_envelope_format 이 이
-                //   커맨드를 데몬으로 전달하는 **조종 표면 전용** 경로다(워커 MCP 채널엔 미노출 —
-                //   ADR-0096 결정 3·ADR-0094). control_registry(handle_send 가 relay 마다 읽는 그 Arc)에
-                //   써서, 이후 모든 A→B 봉투 조립이 새 포맷으로 렌더된다(단일 wrap point 유지 — 상태는
-                //   입력일 뿐). wire enum → 데몬 렌더 enum 명시 매핑(다른 *_to_wire 와 동일 원칙 — variant
-                //   추가 시 컴파일 에러). 상태 변경뿐이라 reply=Ack(broadcast 없음 — 전역 상태는 다음
-                //   메시지에서 관측되지 별도 목록 push 대상이 아니다).
+                // broadcast 하지 않는다 — 전역 상태는 다음 메시지에서 관측되지 목록 push 대상이 아니다.
                 let core_format = match format {
                     WireEnvelopeFormat::Colon => CoreEnvelopeFormat::Colon,
                     WireEnvelopeFormat::Xml => CoreEnvelopeFormat::Xml,
@@ -1228,24 +1043,13 @@ impl ConnectionCore {
         DispatchFlow::Continue
     }
 
-    /// Subscribe 처리(Step 4c — afterSeq resume). **M-A(TOCTOU) 근본 해결판.**
+    /// ★get_snapshot 으로 SubscribeAck 를 예측하지 말 것★: 예측이 뜬 스냅샷과 subscribe_from 이 실제로
+    /// replay 하는 스냅샷 사이에 evict 가 끼면 Ack.replay_from/latest 가 첫 전송 seq 와 어긋나 클라가
+    /// 손실을 인지하지 못한다. Ack 의 모든 필드는 subscribe_from 의 **단일 스냅샷 outcome** 으로 채운다.
     ///
-    /// ★TOCTOU 제거★: 옛 구현은 get_snapshot(스냅샷 A)으로 SubscribeAck 를 예측해 보낸 뒤,
-    /// subscribe_from 이 내부에서 다시 스냅샷 B 를 떠 replay 했다. A≠B(사이에 evict 가 끼면)면
-    /// Ack.replay_from/latest 가 실제 첫 전송 seq 와 어긋나 클라가 손실을 인지 못 했다. 이제는
-    /// SubscribeAck 의 모든 필드를 subscribe_from 의 **단일 스냅샷 outcome** 으로 채운다 —
-    /// get_snapshot/predict_ack 자체를 제거했다.
-    ///
-    /// ★불변식 R1(Ack→replay FIFO) 유지★: subscribe_from 은 subscribers lock 을 보유한 채,
-    /// replay 를 sink 로 보내기 **직전**에 on_ready(&outcome) 콜백을 1회 호출한다. 콜백 안에서
-    /// SubscribeAck(control)를 sink 로 enqueue 하므로, 그 enqueue 가 replay binary 의 enqueue
-    /// 보다 반드시 먼저 일어난다(단일 writer FIFO → Ack→replay→ReplayComplete 순서).
-    ///
-    /// ★output sink 의 정체★: 코어 subscribe_from 에 넘기는 sink 는 어댑터가 만든
-    /// `agent_conn::FrameOutputSink`(코어 OutputSink) 다 — 이건 응답용 `OutboundSink`(dispatch 의
-    /// sink)와는 다른 평면(코어 출력 frame 평면). control(Ack/ReplayComplete/Error)만 dispatch
-    /// sink(OutboundSink)로 enqueue 한다 — 둘 다 **같은 프레임 출구**(연결당 단일 writer 큐)로
-    /// 합류하므로 FIFO 가 보존된다.
+    /// ★두 평면★: 코어 subscribe_from 에 넘기는 sink(`agent_conn::FrameOutputSink`)는 출력 frame
+    /// 평면이고, control(Ack/ReplayComplete/Error)만 dispatch 의 `OutboundSink` 로 나간다. 둘 다
+    /// **같은 프레임 출구**(연결당 단일 writer 큐)로 합류하므로 FIFO 가 보존된다 — R1 이 여기 걸려 있다.
     fn handle_subscribe(
         &self,
         agent_id: AgentId,
@@ -1256,7 +1060,7 @@ impl ConnectionCore {
     ) {
         let manager = &self.manager;
 
-        // 1. current_epoch 경량 조회. agent 없으면 즉시 error(이 경우 subscribe_from 미호출 → Ack 안 나감).
+        // agent 가 없으면 subscribe_from 을 부르지 않으므로 Ack 도 나가지 않는다.
         let current_epoch = match manager.agent_epoch(agent_id) {
             Some(e) => e,
             None => {
@@ -1268,21 +1072,12 @@ impl ConnectionCore {
                 return;
             }
         };
-        // epoch 일치 = 요청 epoch 이 현재 epoch 과 정확히 같을 때만. None(미지정)은 불일치 취급
-        // → 코어가 FromOldest 로 전체 replay(안전 기본값).
         let epoch_matches = requested_epoch == Some(current_epoch);
 
-        // 2. output sink 생성(코어 OutputSink) + replay drop 플래그. carrier 가 인코딩을 소유한다
-        //    (WS=binary frame, embedded=base64 PtyEvent). 반환은 trait object 라 carrier-중립.
-        //    ★output frame 평면★: 이 sink 는 replay/live 출력 frame 을 carrier 큐로 보낸다.
         let (out_sink, replay_dropped) = sink.make_output_sink();
 
-        // 3. subscribe_from(.., on_ready). on_ready 는 코어가 replay 를 sink 로 보내기 직전
-        //    (subscribers lock 보유 중) 1회 호출 → 그 안에서 SubscribeAck 를 control sink 로 먼저 enqueue.
-        //    ★콜백은 sync 클로저(await 불가) → enqueue(try_send)만★. control 은 작아 보통 성공하나,
-        //    full 이면 어차피 같은 큐(output sink)도 막혀 replay 가 truncated 로 잡히므로 진행한다.
-        //    ★FIFO 핵심★: 두 sink(control/output)가 같은 conn_tx 단일 writer 로 합류하므로,
-        //    여기서 control 을 먼저 enqueue 하면 replay binary 보다 반드시 앞선다(R1).
+        // enqueue 실패를 삼키는 이유: control 은 작아 보통 성공하고, 큐가 full 이면 어차피 같은 큐를
+        //   쓰는 replay 도 막혀 truncated 로 잡힌다.
         let on_ready = |outcome: &SubscribeOutcome| {
             let _ = sink.enqueue(Outbound::event(AgentEvent::SubscribeAck {
                 agent_id,
@@ -1291,7 +1086,6 @@ impl ConnectionCore {
                 oldest_seq: outcome.oldest_seq,
                 latest_seq: outcome.latest_seq,
                 replay_from: outcome.replay_from,
-                // 단일 스냅샷 기준 truncated. 실측 drop 보정은 호출 후 별도(아래 5).
                 truncated: outcome.kind == ReplayKind::Truncated,
             }));
         };
@@ -1300,13 +1094,11 @@ impl ConnectionCore {
             match manager.subscribe_from(agent_id, out_sink, after_seq, epoch_matches, on_ready) {
                 Ok(o) => o,
                 Err(e) => {
-                    // agent 없음 등 — 콜백 미호출이라 Ack 안 나감(정상).
                     send_error(sink, None, format!("subscribe failed: {e}"));
                     return;
                 }
             };
 
-        // 4. 같은 agent 재구독 시 옛 sink 가 남지 않게 교체(옛 것 unsubscribe).
         let old = subs
             .lock()
             .expect("subs poisoned")
@@ -1317,10 +1109,8 @@ impl ConnectionCore {
             }
         }
 
-        // 5. ReplayComplete 직전 사후 보정: replay 동기 전송 중 실제 drop 이 있었다면(코어가 sink 로
-        //    try_send 하다 full 을 만남) Error 로 통보한다. Ack 엔 이미 정확한 kind 기반 truncated 가
-        //    나갔고, 여기선 kind!=Truncated 인데 실측 drop 이 추가로 발생한 경우만 추가 통보한다.
-        //    ★사전 capacity 추정 제거★: 단일 스냅샷이라 추정이 무의미 — replay_dropped 실측이 더 정확.
+        // Ack 에는 kind 기반 truncated 가 이미 나갔다. 여기서 더 통보하는 것은 kind!=Truncated 인데
+        //   replay 동기 전송 중 실제 drop 이 난 경우뿐이다.
         if outcome.kind != ReplayKind::Truncated && replay_dropped.load(Ordering::Acquire) {
             send_error(
                 sink,
@@ -1329,7 +1119,6 @@ impl ConnectionCore {
             );
         }
 
-        // 6. ReplayComplete — 이후는 라이브(클라측 C4 전환 신호).
         let _ = sink.enqueue(Outbound::event(AgentEvent::ReplayComplete {
             agent_id,
             epoch: current_epoch,
@@ -1337,9 +1126,7 @@ impl ConnectionCore {
     }
 }
 
-/// 입력 lease 상태 변경을 전 연결에 브로드캐스트(다른 뷰어가 "잠김/해제" 를 알게). 보유자 식별값은
-/// 노출하지 않고 held(bool) 만 — §5(LLM 도 leaseholder 변화를 관측 가능). 팬아웃 포트가 논블록 구현을
-/// 요구하므로 pump/cleanup 등 어느 컨텍스트에서 불려도 안전하다.
+/// 팬아웃 포트가 논블록 구현을 요구하므로 pump/cleanup 등 어느 컨텍스트에서 불려도 안전하다.
 pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentId, held: bool) {
     let ev = AgentEvent::InputLeaseChanged { agent_id, held };
     if let Some(text) = event_json(&ev) {
