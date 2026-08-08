@@ -3635,9 +3635,8 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
-    /// 헤드리스 테스트용 ControlPlanePort — 운영 데몬(`ControlRegistry` 어댑터)의 기본 동작을 모사한다:
-    ///   봉투 포맷은 기본값 Xml(ADR-0103), 배달 관측은 no-op(운영 데몬도 observer 미설치 = no-op).
-    ///   관측 레코드를 단언하는 검증은 데몬 통합 하네스가 한다(ADR-0088 — 여기 단위 테스트 범위 밖).
+    /// 배달 관측이 no-op 인 이유 — 운영 데몬도 observer 미설치이고, 관측 레코드를 단언하는 검증은
+    ///   데몬 통합 하네스가 한다(ADR-0088 — 여기 단위 테스트 범위 밖).
     struct FakeControlPlane;
     impl ControlPlanePort for FakeControlPlane {
         fn envelope_format(&self) -> EnvelopeFormat {
@@ -3646,43 +3645,32 @@ mod tests {
         fn record_delivery(&self, _obs: DeliveryObservation) {}
     }
 
-    /// 헤드리스 테스트용 DeliveryPort — 로스터·주입 성공/실패를 스크립트한다(claude/PTY 없음).
     struct FakeDeliveryPort {
-        /// 살아있는 도달 가능 로스터(테스트가 세팅). ★Arc 인 이유★: 테스트가 핸들을 복제해 **inject 도중**
-        ///   (on_inject hook 안에서) 로스터를 갈아끼울 수 있어야 한다 — "로스터 스냅샷 이후·write 이전에
-        ///   수신자가 재시작했다" 는 TOCTOU 를 결정적으로 재현하는 유일한 방법이다(port 자체를 hook 에
-        ///   캡처하면 자기참조 순환이 된다).
+        /// ★Arc 인 이유★: 테스트가 핸들을 복제해 **inject 도중**(on_inject hook 안에서) 로스터를 갈아끼울 수
+        ///   있어야 한다 — "로스터 스냅샷 이후·write 이전에 수신자가 재시작했다" 는 TOCTOU 를 결정적으로
+        ///   재현하는 유일한 방법이다(port 자체를 hook 에 캡처하면 자기참조 순환이 된다).
         roster: Arc<StdMutex<Vec<LiveAgent>>>,
-        /// 주입 시도 로그(순서대로 (to_id, 바이트)). 오래된 순 주입·개별 봉투 단언용.
         injected: StdMutex<Vec<(PeerId, Vec<u8>)>>,
-        /// inject 호출 횟수(0-based) — fail_at_call 인덱스 매칭용.
         call_count: StdMutex<usize>,
-        /// 이 호출 인덱스(0-based)들에서 inject 를 실패시킨다(부분 실패·전체 실패 시나리오 스크립트).
         fail_at_call: StdMutex<Vec<usize>>,
-        /// inject 호출 시점에 실행할 부수 hook(drain↔inject 사이 동시 park 레이스 재현용). 호출 인덱스를
-        ///   받아 임의 조작(예: 재파킹으로 큐 재충전)을 한다 — 이 hook 안에서 서비스 락을 다시 잡지 않는다
-        ///   (inject 는 락 밖 호출이므로 안전).
         /// ★Box 가 아니라 Arc 인 이유(round-7)★: hook 안에서 **다시 주입이 일어날 수 있다**(예: 유예된
         ///   flush 가 되울려 그 자리에서 배달). Box 를 락 가드 아래에서 호출하면 그 재진입이 이 뮤텍스에
         ///   걸려 **데드락**(std Mutex 는 비재진입)이라, 복제 가능한 Arc 로 바꿔 락을 놓고 부른다.
         on_inject: StdMutex<Option<Arc<dyn Fn(usize) + Send + Sync>>>,
-        /// roster 밖 id 의 canonical_name override(비-도달 수신자 = TUI 시나리오 — finding 4). roster 에
-        ///   없어도 이 맵에 있으면 canonical_name 이 그 이름을 돌려준다(로스터엔 안 뜨는 산 에이전트 모사).
+        /// roster 밖 id 의 canonical_name override(비-도달 수신자 = TUI 시나리오 — finding 4).
         canonical_overrides: StdMutex<std::collections::HashMap<PeerId, String>>,
-        /// live_agents 조회 횟수(late-appearance 스크립트용 + sweep 스냅샷 1회 단언 — fix 8).
+        /// live_agents 조회 횟수 — "발송 1회당 스냅샷 1장"(ADR-0111 결정 2) 회귀가 세는 축(fix 8).
         roster_calls: StdMutex<usize>,
-        /// 세팅되면 **첫 조회 이후**부터 이 roster 를 돌려준다(첫 조회 = resolve 는 원래 roster, 이후 =
-        ///   self_heal 이 보는 late-appearance roster). finding 3 TOCTOU self-heal 재현용.
+        /// 세팅되면 **첫 조회 이후**부터 이 roster 를 돌려준다 — finding 3 TOCTOU self-heal 재현용.
         roster_after_first: StdMutex<Option<Vec<LiveAgent>>>,
-        /// ★일회성 roster 조회 hook(fix 5 레이스 재현)★ — 로스터를 뜨는 **그 순간** 다른 일이 벌어진 상황을
-        ///   결정적으로 만든다(예: sweep 의 due 산출 뒤·notice 파킹 전에 회신이 도착). 한 번 쓰고 비우므로
-        ///   hook 안에서 다시 발송해도 재귀하지 않는다.
+        /// ★일회성 roster 조회 hook(fix 5 레이스 재현)★ — 한 번 쓰고 비우므로 hook 안에서 다시 발송해도
+        ///   재귀하지 않는다.
         on_roster: StdMutex<Option<Box<dyn Fn() + Send>>>,
         /// ★잠든 이름 목록(프로필 실재 · 세션 없음 — spec §5 분기 3)★. **중복을 접지 않는다**(같은 이름 2개 =
-        ///   잠듦 층 동명). 운영 어댑터는 `ProfileRegistry::list()` 에서 산 세션 몫을 뺀 뒤 canonical 규칙으로
-        ///   파생하고, 여기선 그 결과만 스크립트한다.
+        ///   잠듦 층 동명).
         dormant: StdMutex<Vec<String>>,
-        /// ★`is_agent_live` 가 참을 돌려줄 id 들(삭제 정리 게이트 시나리오 — 리뷰 fix D1)★.
+        /// ★`is_agent_live` 가 참을 돌려줄 id 들(삭제 정리 게이트 시나리오 — 리뷰 fix D1)★. 터미널 모드로
+        ///   살아 있는 세션·개명된 프로필처럼 **이름으로는 안 잡히는** 경우를 모사한다.
         ///
         /// ★로스터와 **따로** 스크립트한다(의도)★: 게이트는 그 좁은 동사로 물으므로, 로스터에서 유도해 버리면
         ///   "게이트가 로스터를 본다" 는 배선을 fake 가 대신 만들어 버려 테스트가 실물 배선을 못 본다.
@@ -3705,44 +3693,36 @@ mod tests {
                 live_ids: StdMutex::new(Vec::new()),
             }
         }
-        /// 잠든 이름 세팅(중복 허용 — 잠듦 층 동명 시나리오) — spec §5 분기 3.
         fn set_dormant(&self, names: &[&str]) {
             *self.dormant.lock().unwrap() = names.iter().map(|n| n.to_string()).collect();
         }
-        /// ★삭제 정리 게이트가 "아직 살아 있다" 로 볼 id 세팅(리뷰 fix D1)★ — 로스터와 독립이다(터미널
-        ///   모드로 살아 있는 세션·개명된 프로필처럼 이름으로는 안 잡히는 경우를 그대로 모사한다).
         fn set_live_ids(&self, ids: &[PeerId]) {
             *self.live_ids.lock().unwrap() = ids.to_vec();
         }
-        /// 다음 roster 조회 때 **한 번만** 실행할 hook(fix 5 레이스 재현).
         fn arm_on_next_roster(&self, f: Box<dyn Fn() + Send>) {
             *self.on_roster.lock().unwrap() = Some(f);
         }
-        /// live_agents 총 호출 수(fix 8 — sweep 이 틱당 1회만 뜨는지 단언).
         fn roster_call_count(&self) -> usize {
             *self.roster_calls.lock().unwrap()
         }
         fn set_roster(&self, roster: Vec<LiveAgent>) {
             *self.roster.lock().unwrap() = roster;
         }
-        /// ★`inject_if_epoch` 이 보는 "지금" 로스터★ — armed(late-appearance) 가 있으면 그것, 없으면 기본.
-        ///   `live_agents` 와 달리 호출 카운터·hook 을 건드리지 않는다(주입 경계의 판정이지
-        ///   로스터 **조회**가 아니다 — 운영 구현도 세션 맵을 직접 보지 로스터를 다시 뜨지 않는다).
+        /// `live_agents` 와 달리 호출 카운터·hook 을 건드리지 않는다 — 주입 경계의 판정이지 로스터
+        ///   **조회**가 아니다(운영 구현도 세션 맵을 직접 보지 로스터를 다시 뜨지 않는다).
         fn effective_roster(&self) -> Vec<LiveAgent> {
             match self.roster_after_first.lock().unwrap().as_ref() {
                 Some(r) => r.clone(),
                 None => self.roster.lock().unwrap().clone(),
             }
         }
-        /// 주어진 inject 호출 인덱스(0-based)들에서 Err 를 낸다(그 외는 성공).
+        /// 주어진 inject 호출 인덱스(0-based)들에서 Err 를 낸다.
         fn fail_at(&self, indices: &[usize]) {
             *self.fail_at_call.lock().unwrap() = indices.to_vec();
         }
-        /// inject 호출마다(성공/실패 결정 전) 부를 hook 설치 — 동시 park 레이스 재현용.
         fn set_on_inject(&self, f: Arc<dyn Fn(usize) + Send + Sync>) {
             *self.on_inject.lock().unwrap() = Some(f);
         }
-        /// 지금까지의 로스터 조회 횟수 — "발송 1회당 스냅샷 1장"(ADR-0111 결정 2) 단언용.
         fn roster_calls(&self) -> usize {
             *self.roster_calls.lock().unwrap()
         }
@@ -3754,8 +3734,6 @@ mod tests {
                 .map(|(_, b)| String::from_utf8_lossy(b).to_string())
                 .collect()
         }
-        /// 주입이 **누구에게** 갔는지 — "발신자 stdin 엔 아무것도 쓰이지 않는다" 처럼 대상 축을 봐야 하는
-        ///   단언용(본문만 보면 자기발송을 못 잡는다).
         fn injected_targets(&self) -> Vec<PeerId> {
             self.injected
                 .lock()
@@ -3767,9 +3745,6 @@ mod tests {
     }
 
     impl FakeDeliveryPort {
-        /// 두 주입 동사의 공통 본체 — 호출 인덱스 부여·hook·실패 스크립트·기록을 한 벌로 유지한다.
-        ///   `expected_epoch = Some(e)` 면 **운영 구현과 같은 판정**(그 id 의 현재 epoch 과 다르면 쓰지 않고
-        ///   Err)을 한다. hook 은 판정 **전에** 부른다 — "스냅샷 이후·write 이전 재시작" 이 그 순서다.
         fn inject_inner(
             &self,
             to_id: PeerId,
@@ -3782,8 +3757,6 @@ mod tests {
                 *c += 1;
                 i
             };
-            // 동시 park·재시작 레이스 재현 hook(설치돼 있으면). epoch 판정·fail/success 결정 전에 호출한다.
-            //   ★락을 놓고 부른다★ — hook 이 다시 주입을 유발해도 이 뮤텍스에 재진입하지 않게(필드 주석).
             let hook = self.on_inject.lock().unwrap().clone();
             if let Some(f) = hook {
                 f(idx);
@@ -3795,7 +3768,6 @@ mod tests {
                     .find(|a| a.id == to_id)
                     .map(|a| a.epoch);
                 if now_epoch != Some(expected) {
-                    // 부작용 0(기록도 안 남긴다) — 운영 core 계약과 동일.
                     return Err(format!(
                         "epoch mismatch: agent {to_id} is now at epoch {now_epoch:?}, caller required {expected} — nothing was written"
                     ));
@@ -3826,12 +3798,10 @@ mod tests {
                 *c += 1;
                 i
             };
-            // 일회성 hook — 락을 놓고 부른다(hook 이 다시 발송해도 자기 락에 걸리지 않게).
             let hook = self.on_roster.lock().unwrap().take();
             if let Some(f) = hook {
                 f();
             }
-            // 첫 조회(call 0) = 원래 roster(resolve 가 봄). 이후 = armed roster(있으면 — late appearance).
             if call >= 1 {
                 if let Some(r) = self.roster_after_first.lock().unwrap().as_ref() {
                     return r.clone();
@@ -3841,8 +3811,7 @@ mod tests {
         }
         /// ★입구 판정 소스 한 장(ADR-0116)★ — 운영 어댑터와 **같은 관계**를 모사한다: `roster` 는
         ///   `live_agents()` 와 **같은 값**이고(술어 = 상태만) `dormant_names` 는 별도 소스다.
-        ///   ★로스터 조회 카운터를 **함께 올린다**★: "발송 1회당 스냅샷 1장" 회귀 테스트가 세는 축이 곧 이
-        ///   호출이다(입구가 `live_agents` 대신 이걸 부르게 됐으므로 카운터가 그쪽으로 옮겨간다).
+        ///   `self.roster` 를 직접 읽으면 로스터 조회 카운터가 안 올라 "발송 1회당 스냅샷 1장" 회귀가 눈이 먼다.
         fn addressing_sources(&self) -> AddressingSources {
             AddressingSources {
                 roster: self.live_agents(),
@@ -3850,16 +3819,10 @@ mod tests {
             }
         }
 
-        /// ★삭제 정리 게이트(리뷰 fix D1)★ — 테스트가 세팅한 id 집합만 본다(로스터에서 유도하지 않는다 —
-        ///   필드 주석).
         fn is_agent_live(&self, id: PeerId) -> bool {
             self.live_ids.lock().unwrap().contains(&id)
         }
         fn canonical_name(&self, id: PeerId) -> Option<String> {
-            // roster 우선 → armed(late-appearance) roster → override(비-도달 산 에이전트) 조회.
-            //   ★armed 도 보는 이유★: `arm_roster_after_first_call` 은 "그 사이 등장했다" 를 모사하는데,
-            //   canonical_name 이 그걸 못 보면 fake 가 자기모순이다(등장했는데 이름이 없는 에이전트).
-            //   실 구현(호스트 ManagerDeliveryPort)은 같은 manager 스냅샷을 보므로 항상 일관된다.
             let by_roster = self
                 .roster
                 .lock()
@@ -3879,9 +3842,9 @@ mod tests {
         }
     }
 
-    /// ★회신자 신원(A6)★ — 계약은 `(id, 수신자)` 로 지목되고 매칭은 **id 우선**이므로(ledger
-    ///   `close_on_reply`), 회신은 **그 수신자 본인의 신원**으로 보내야 자기 계약을 닫는다. 옛 테스트들은
-    ///   고정 `ident()` 로 회신해 이름 매치에 기댔는데, 그 관대함이 남의 계약을 닫는 경로였다.
+    /// ★회신자 신원(A6)★ — 회신은 **그 수신자 본인의 신원**으로 보내야 자기 계약을 닫는다(매칭은 id 우선 —
+    ///   ledger `close_on_reply`). 옛 테스트들은 고정 `ident()` 로 회신해 이름 매치에 기댔는데, 그 관대함이
+    ///   남의 계약을 닫는 경로였다.
     fn reply_from(id: PeerId) -> SenderIdentity {
         SenderIdentity {
             peer_id: id,
@@ -3889,7 +3852,7 @@ mod tests {
         }
     }
 
-    /// 산 발신자 하나 — 신원과 로스터 항목을 함께 만든다(발신자도 로스터에 있어야 `@all` 제외 규칙을 본다).
+    /// 발신자도 로스터에 있어야 `@all` 제외 규칙을 본다.
     fn live_sender(name: &str) -> (SenderIdentity, LiveAgent) {
         let (id, agent) = live(name);
         (
@@ -3913,7 +3876,6 @@ mod tests {
         Parked { hint: String },
     }
 
-    /// shim 의 실패 축 — 수신자별 실패 코드 + 발송 단위 반려를 한 값으로 접는다(테스트 편의).
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum SendFail {
         Row(FailCode),
@@ -3962,9 +3924,6 @@ mod tests {
         ///   (flush 순서·게이트·TTL·재파킹·in-flight 회계)이므로, 진입만 대체하고 그 뒤 경로는 전부 실제
         ///   코드가 돌게 한다.
         ///
-        /// ★운영 경로를 우선한다★: 수신자가 로스터에 있으면 **그냥 `handle_single_send`** 다(즉 busy 파킹·
-        ///   적재-후-드레인이 실제로 검증된다). `RECIPIENT_NOT_FOUND` 로 반려된 경우에만 `park_into` 로
-        ///   직행한다 — 장부 `pending` 기록·payload 인코딩은 운영과 **같은 함수**를 쓴다.
         /// ★이 seam 은 "부재는 실패" 계약을 가리지 않는다★: 그 계약의 회귀 그물은 `handle_send` 를 직접
         ///   부르는 신설 테스트들이 맡는다(부재 → 실패 행 + 파킹 레코드 없음).
         #[allow(clippy::too_many_arguments)]
@@ -4006,7 +3965,7 @@ mod tests {
                         let mut st = self.state.lock().expect("messaging state poisoned");
                         let reply_by = meta.reply_by.zip(meta.reply_by_raw.clone());
                         // ★은퇴 표시를 반드시 커밋으로 넘긴다★: 안 넘기면 표시된 희생자가 영원히 목록에
-                        //   남아(표시된 항목은 슬롯을 안 세므로) 상한이 **절대 도달하지 않는다** — cap 픽스처가
+                        //   남아(ledger `occupies_slot`) 상한이 **절대 도달하지 않는다** — cap 픽스처가
                         //   무한 루프가 된다(실측). 운영 경로(`commit_contract`)와 같은 규율이다.
                         let retired = match st.ledger.open_request(
                             msg_id,
@@ -4053,7 +4012,6 @@ mod tests {
                         .map_err(|_| SendFail::Row(FailCode::MailboxFull))?;
                     }
                     effects.log(to);
-                    // 접수된 회신은 계약을 닫는다(운영과 같은 규율 — 매칭 실패는 무동작).
                     if let Some(in_reply_to) = &meta.reply_to {
                         // 레거시 seam 은 동명 판정을 하지 않는다 — 이름 폴백 허용(옛 동작 유지).
                         self.close_reply_contract(in_reply_to, sender_name, from.peer_id, true);
@@ -4071,7 +4029,7 @@ mod tests {
 
     fn svc() -> (Arc<MessagingService>, Arc<FakeDeliveryPort>) {
         let port = Arc::new(FakeDeliveryPort::new());
-        let registry = Arc::new(FakeControlPlane); // 기본 봉투 = xml(ADR-0103).
+        let registry = Arc::new(FakeControlPlane);
         let svc = Arc::new(MessagingService::new(port.clone(), registry));
         (svc, port)
     }
@@ -4091,8 +4049,6 @@ mod tests {
                 id,
                 name: name.to_string(),
                 epoch: 0,
-                // 기본 = 턴 신호 있음(구조화 출력 백엔드) — 이 파일의 게이트·파킹 회귀 자산이 보는 부류다.
-                //   턴 신호 **없는** 부류(즉시 주입 — ADR-0116 결정 7)는 `live_no_turn_signal` 로 만든다.
                 turn_signal: true,
             },
         )
@@ -4107,12 +4063,9 @@ mod tests {
     }
 
     // ── C2 idle 게이트 테스트 하네스 ─────────────────────────────────────────────────
-    /// 가짜 idle 게이트 — (id, epoch) 별 busy 를 테스트가 세팅하고, 호출 횟수를 세어 TOCTOU 시나리오
-    ///   (첫 확인은 busy, 재확인은 idle)를 스크립트한다. 실 관측/PTY 없이 게이트 분기만 결정적으로 단언.
     struct FakeGate {
         busy: StdMutex<std::collections::HashSet<(PeerId, u32)>>,
         calls: StdMutex<usize>,
-        /// 세팅되면 이 호출 인덱스(0-based) **이후** 부터는 항상 idle 로 답한다(park↔턴종료 레이스 모사).
         idle_after_call: StdMutex<Option<usize>>,
     }
     impl FakeGate {
@@ -4154,8 +4107,8 @@ mod tests {
         }
     }
 
-    /// 게이트를 끼운 서비스 조립(C2). ★도어벨 미배선★ = 인라인 flush 폴백(FlushTrigger 주석) — 자가치유가
-    ///   동기라 단언이 결정적이다. 도어벨 배선 자체는 `svc_gated_with_doorbell` 이 검증한다.
+    /// ★도어벨 미배선(C2)★ = 인라인 flush 폴백(FlushTrigger 주석) — 자가치유가 동기라 단언이 결정적이다.
+    ///   도어벨 배선 자체는 `svc_gated_with_doorbell` 이 검증한다.
     fn svc_gated() -> (Arc<MessagingService>, Arc<FakeDeliveryPort>, Arc<FakeGate>) {
         let port = Arc::new(FakeDeliveryPort::new());
         let gate = FakeGate::new();
@@ -4168,8 +4121,8 @@ mod tests {
         (svc, port, gate)
     }
 
-    /// 도어벨 요청을 기록만 하는 FlushTrigger — 운영 조립처럼 flush 를 **다른 스레드로 넘기는** 모양을
-    ///   모사한다(여기선 아무도 소비하지 않으므로 "발신 스레드에서 주입이 일어나지 않음" 을 단언할 수 있다).
+    /// 운영 조립처럼 flush 를 **다른 스레드로 넘기는** 모양을 모사한다 — 여기선 아무도 소비하지 않으므로
+    ///   "발신 스레드에서 주입이 일어나지 않음" 을 단언할 수 있다.
     struct FakeTrigger {
         seen: StdMutex<Vec<PeerId>>,
     }
@@ -4182,7 +4135,7 @@ mod tests {
         fn seen(&self) -> Vec<PeerId> {
             self.seen.lock().unwrap().clone()
         }
-        /// 지금까지 본 도어벨을 **꺼내 비운다**(구간별 단언 — 앞 구간의 잉여 도어벨이 섞이지 않게).
+        /// 구간별 단언 — 앞 구간의 잉여 도어벨이 섞이지 않게 꺼내 비운다.
         fn take(&self) -> Vec<PeerId> {
             std::mem::take(&mut *self.seen.lock().unwrap())
         }
@@ -4233,7 +4186,6 @@ mod tests {
             vec![DeliveryStatus::Delivered],
             "즉시 주입 = delivered(ADR-0104)"
         );
-        // 봉투는 주입 시점에 xml 로 감싸진다(단일 wrap point).
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="bob">hi</message>"#.to_string()],
@@ -4243,11 +4195,10 @@ mod tests {
 
     #[test]
     fn inject_failure_parks_pending() {
-        // spec §5 분기 3(주입 실패) → 파킹. 해석은 성공하나 inject Err.
         let (svc, port) = svc();
         let (_id, alice) = live("alice");
         port.set_roster(vec![alice]);
-        port.fail_at(&[0]); // 첫(유일) inject 실패.
+        port.fail_at(&[0]);
         let out = svc
             .park_absent_for_test(
                 "m1",
@@ -4275,8 +4226,8 @@ mod tests {
     fn inject_failure_parks_pending_without_a_turn_signal() {
         // ★막는 회귀 2종★: ① 이 부류의 주입 실패를 실패 행/유실로 바꾸는 변경(ADR-0116 결정 7) ② 그렇게
         //   쌓인 백로그를 **새 발송이 앞지르게** 만드는 변경(ADR-0121 결정 2 — 게이트 생략은 유지하되 순서는
-        //   지킨다). ②의 성립 근거가 7차에 바뀌었다: 판정 지점을 봉인하는 게 아니라 **적재 순서**가 답한다
-        //   (ADR-0125 — 새 편지도 큐 꼬리로 가므로 앞지를 방법 자체가 없다).
+        //   지킨다). ②를 성립시키는 것은 판정 지점 봉인이 아니라 **적재 순서**다(ADR-0125 — 새 편지도 큐
+        //   꼬리로 가므로 앞지를 방법 자체가 없다).
         // ★고립 없음의 계기 ㉠도 여기서 단언한다(spec §7 ④)★: m1 의 주입 실패분을 여는 것은 **뒤이은 발송의
         //   동기 드레인**이다 — 도어벨도, 자기 재시도도 아니다(자기 주입 실패로 자기 도어벨을 누르는 것은
         //   금지 — spec §5). 그래서 m2 발송 하나만으로 m1 이 나가야 한다.
@@ -4284,9 +4235,8 @@ mod tests {
         let (from, me) = live_sender("alice");
         let (_tui_id, tui) = live_no_turn_signal("tui");
         port.set_roster(vec![me, tui]);
-        port.fail_at(&[0]); // 첫 inject 실패 → m1 파킹.
+        port.fail_at(&[0]);
 
-        // 본문을 갈라 둔다 — 주입 **순서**를 바이트로 단언하려면 두 편지가 구별돼야 한다.
         let out =
             send_body(&svc, "m1", from, "alice", &["tui"], "묵은 편지").expect("파킹은 반려 아님");
         assert_eq!(
@@ -4301,9 +4251,6 @@ mod tests {
             "장부도 pending 으로 남아야(유실 금지)"
         );
 
-        // ★새 편지는 묵은 것을 앞지르지 않는다(ADR-0121 결정 2 · ADR-0125)★ — 큐 꼬리에 적재된 뒤 **같은
-        //   호출의 드레인**이 앞에서부터 비우므로 m1 이 먼저, m2 가 그 뒤에 나간다. m2 의 응답은 그 드레인이
-        //   자기 편지까지 넣은 것을 확인했으므로 `delivered` 다(6차의 `pending` 은 ADR-0125로 반전됐다).
         let second = send_body(&svc, "m2", from, "alice", &["tui"], "새 편지").expect("행 응답");
         assert_eq!(
             second[0].status,
@@ -4331,13 +4278,12 @@ mod tests {
 
     #[test]
     fn a_mid_batch_injection_failure_stops_there_and_leaves_the_rest_pending() {
-        // ★ADR-0121 결정 2 후단 — 배치 부분 실패의 결말★: 실패 지점에서 멈추고, **이미 나간 앞부분은
-        //   `delivered`**, 실패 지점 이후는 파킹에 `pending` 으로 남는다. 부분 성공을 전량 실패로 되돌리지
-        //   않는다 — `delivered → failed` 는 장부 전이 그래프상 **불법**이라(ledger `fail_pending` 가드가
-        //   정본) 롤백을 표현할 수단 자체가 없다. 그래서 이 단언이 곧 "장부 행이 그래프를 지킨다" 의 관측이다.
-        // ★백로그를 게이트로 만드는 이유(7차 — ADR-0125)★: 이제 **모든 발송이 자기 호출에서 드레인을
-        //   돌리므로**, 도어벨 미소비만으로는 큐가 쌓이지 않는다(예전엔 그 방법이 통했다). 3건 배치를 만들려면
-        //   드레인이 **못 나가게** 해야 하고, 그 정식 수단이 idle 게이트다(턴 신호 있는 수신자를 busy 로).
+        // ★ADR-0121 결정 2 후단★: 부분 성공을 전량 실패로 되돌리지 않는다 — `delivered → failed` 는 장부
+        //   전이 그래프상 **불법**이라(ledger `fail_pending` 가드가 정본) 롤백을 표현할 수단 자체가 없다.
+        //   그래서 이 단언이 곧 "장부 행이 그래프를 지킨다" 의 관측이다.
+        // ★백로그를 게이트로 만드는 이유(ADR-0125)★: **모든 발송이 자기 호출에서 드레인을 돌리므로**,
+        //   도어벨 미소비만으로는 큐가 쌓이지 않는다. 3건 배치를 만들려면 드레인이 **못 나가게** 해야 하고,
+        //   그 정식 수단이 idle 게이트다(턴 신호 있는 수신자를 busy 로).
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("alice");
         let (recv_id, recv) = live("recv"); // 턴 신호 있음 = 게이트 대상.
@@ -4358,7 +4304,6 @@ mod tests {
             "적재 순서 = 큐 순서(오래된 순)"
         );
 
-        // 턴이 끝난 뒤의 배치에서 **2번째 주입**을 실패시킨다(게이트에 걸린 동안엔 주입이 0회였다).
         gate.clear();
         port.fail_at(&[1]);
         svc.flush_for("recv", recv_id);
@@ -4390,15 +4335,15 @@ mod tests {
 
     #[test]
     fn an_overlapping_drain_retreats_with_pending_and_the_letter_still_goes_out_in_order() {
-        // ★spec §7 ⑦ · ADR-0125 §영향 미검증 ② — 옛 좌석 단언의 **이전분**★. 좌석 예약은 폐지됐지만 그것이
-        //   봉인하던 두 성질은 남는다: **순서 역전 없음**과 **고립 없음(`parked_len == 0`)**.
-        // 재현하는 인터리빙(7차엔 상시 경우다 — 드레인이 발송 호출 안에서 돈다):
+        // ★spec §7 ⑦ · ADR-0125 §영향 미검증 ②★ — 좌석 예약은 폐지됐지만 그것이 봉인하던 두 성질은 남는다:
+        //   **순서 역전 없음**과 **고립 없음(`parked_len == 0`)**.
+        // 재현하는 인터리빙(드레인이 발송 호출 안에서 도니 상시 경우다):
         //   ① m1 이 적재 후 자기 드레인에 들어가 inject 안에서 멈춘다(배치가 in-flight)
         //   ② 그 사이 m2 가 도착해 같은 수신자를 지목한다 → 적재는 되고, 그 드레인은 **0단계에서 물러난다**
         //   ③ m1 의 inject 가 실패해 그 배치가 재파킹되고, 정산이 물러난 쪽 도어벨을 되울린다
         // 가드가 없으면 ②가 큐를 다시 드레인해 **m1 의 잔여보다 먼저** 수신자에게 닿는다(순서 역전).
-        // ★결정론★: `set_on_inject` hook 은 fake port 의 `inject` **안에서 같은 스레드로** 돌므로 "드레인 중에
-        //   도착한 동시 발송" 을 sleep 없이 정확히 그 지점에 꽂는다(스레드·타이밍 의존 0).
+        // ★결정론★: hook 이 fake port 의 `inject` **안에서 같은 스레드로** 도는 덕에 sleep·스레드 타이밍
+        //   의존이 0 이다.
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
         let (_tui_id, tui) = live_no_turn_signal("tui");
@@ -4411,7 +4356,6 @@ mod tests {
         let armed = Arc::new(StdMutex::new(true));
         let armed_h = armed.clone();
         port.set_on_inject(Arc::new(move |idx| {
-            // m1 의 주입(호출 0) 한가운데 — 여기서 m2 가 도착한다.
             if idx != 0 || !std::mem::replace(&mut *armed_h.lock().unwrap(), false) {
                 return;
             }
@@ -4419,7 +4363,7 @@ mod tests {
                 send_body(&svc_h, "m2", from, "alice", &["tui"], "새 편지").expect("행 응답");
             *observed_h.lock().unwrap() = Some(second[0].clone());
         }));
-        port.fail_at(&[0]); // m1 의 주입 실패 → 그 배치가 재파킹(나이 보존).
+        port.fail_at(&[0]);
 
         let first =
             send_body(&svc, "m1", from, "alice", &["tui"], "묵은 편지").expect("파킹은 반려 아님");
@@ -4434,9 +4378,8 @@ mod tests {
             loser.hint.unwrap_or_default().contains("at the same time"),
             "그 pending 은 ㉯(확인 불가)여야 — ㉮(큐에 남음) 사유로 답하면 '안 갔다' 로 오독된다(spec §6)"
         );
-        // ★유실 0 · 순서 유지 · 고립 없음★: m2 는 m1 이 in-flight 인 동안 꼬리에 적재됐고, 재파킹된 m1 은
-        //   나이(admission 순번)로 그 앞에 선다. 물러난 쪽 도어벨을 영수증 보유자가 되울려 주므로 수동 flush
-        //   없이 여기까지 온다(spec §7 ④ ㉡ — 어느 계기가 냈는지가 곧 이 단언이다).
+        // 수동 flush 없이 여기까지 오는 것은 물러난 쪽 도어벨을 영수증 보유자가 되울려 주기 때문이다
+        //   (spec §7 ④ ㉡ — 어느 계기가 냈는지가 곧 이 단언이다).
         assert_eq!(
             port.injected_bodies(),
             vec![
@@ -4464,12 +4407,8 @@ mod tests {
         //   지워도 이 테스트는 **확률적으로만** 빨개진다. 가드의 결정적 봉인은 `an_overlapping_drain_...`
         //   (hook 으로 인터리빙을 그 지점에 꽂는다)과 두 유예-되울림 hook 테스트가 진다 — 그쪽을 지우고
         //   여기를 근거로 삼지 말 것.
-        // ★그래서 여기가 실제로 고정하는 것★: 실 스레드 경합 아래에서 ① 한 발신자가 자기 프로그램 순서대로
-        //   적재한 편지들의 상대 순서가 배달에서도 유지되는가(자기 앞 편지는 항상 큐에서 자기보다 앞이다 —
-        //   깨지면 배치가 큐 앞머리를 건너뛴 것이다) ② 유실 0 · 중복 0 ③ 큐 잔여 0(고립 없음 — 물러난 쪽
-        //   도어벨을 영수증 보유자가 갚는다) ④ 응답이 `delivered|pending` 뿐(경합은 신원 축을 안 건드리므로
-        //   `failed` 가 없다). 7차엔 여러 발신 스레드가 같은 수신자를 동시에 드레인하는 것이 **상시 경우**라
-        //   이 넷이 실경로에서 무너지지 않는지 보는 값이 있다.
+        //   여러 발신 스레드가 같은 수신자를 동시에 드레인하는 것이 **상시 경우**라, 아래 단언들이 실 스레드
+        //   경합 아래에서 무너지지 않는지 보는 값이 있다.
         // ★cap 은 일부러 안 건드린다★ — 총량을 cap(100) 아래로 잡아 경합이 `MAILBOX_FULL` 로 새지 않게 한다
         //   (그 축은 `the_cap_gate_applies_to_a_live_idle_recipient_too` 소관).
         const SENDERS: usize = 4;
@@ -4477,7 +4416,7 @@ mod tests {
 
         let (svc, port) = svc();
         let (from, me) = live_sender("alice");
-        let (_tui_id, tui) = live_no_turn_signal("tui"); // 게이트 없음 = 드레인이 항상 시도된다.
+        let (_tui_id, tui) = live_no_turn_signal("tui");
         port.set_roster(vec![me, tui]);
 
         let handles: Vec<_> = (0..SENDERS)
@@ -4542,10 +4481,9 @@ mod tests {
 
     #[test]
     fn the_cap_gate_applies_to_a_live_idle_recipient_too() {
-        // ★ADR-0125 §영향 · spec §5 — cap 적용 표면 확대★: 5차까지 보관함 cap 검사는 **파킹 갈래에서만** 돌았다.
-        //   빈 큐 + idle 이면 직발송이 cap 을 우회했고 "101번째도 즉시 주입되며 그것은 cap 위반이 아니다" 가
-        //   명시 계약이었다. 전부-큐가 되면서 **모든 발송이 적재 게이트를 지나므로** 산 수신자에게도
-        //   `MAILBOX_FULL` 이 날 수 있다 — **설계 귀결이지 회귀가 아니다**.
+        // ★ADR-0125 §영향 · spec §5 — cap 적용 표면 확대★: **모든 발송이 적재 게이트를 지나므로** 산
+        //   수신자에게도 `MAILBOX_FULL` 이 날 수 있다 — **설계 귀결이지 회귀가 아니다**. 옛 계약("빈 큐 +
+        //   idle 이면 101번째도 즉시 주입되며 cap 위반이 아니다")을 되살리지 말 것.
         // ★"전반적으로 늘어난다" 로 읽지 않게 좁은 구간까지 함께 고정한다(spec §5 정정)★: 수신자가 유휴면
         //   드레인이 큐를 비우므로 아무리 보내도 cap 은 애초에 물리지 않는다(①). 실제로 달라지는 구간은
         //   드레인이 따라잡기 전에 큐가 cap 을 넘길 때뿐이고, 여기선 그것을 idle 게이트로 결정적으로 만든다(②③).
@@ -4554,7 +4492,7 @@ mod tests {
         let (r_id, recv) = live("recv");
         port.set_roster(vec![me, recv]);
 
-        // ① 유휴 수신자 — cap(100)의 두 배를 보내도 한 건도 안 걸린다(드레인이 매번 큐를 비운다).
+        // ① 유휴 수신자 — 드레인이 매번 큐를 비운다.
         for i in 0..200 {
             let out = send(&svc, &format!("idle{i}"), from, "boss", &["recv"]).expect("행 응답");
             assert_eq!(
@@ -4577,7 +4515,7 @@ mod tests {
         }
         assert_eq!(svc.parked_len("recv"), 100);
 
-        // ③ 그 다음 발송은 **산 수신자인데도** cap 게이트에 걸린다 — 5차엔 직발송이 우회하던 자리다.
+        // ③ 그 다음 발송은 **산 수신자인데도** cap 게이트에 걸린다.
         let over = send(&svc, "over", from, "boss", &["recv"]).expect("행 응답");
         assert_eq!(
             (over[0].status, over[0].code),
@@ -4585,18 +4523,15 @@ mod tests {
             "산 수신자도 cap 게이트를 지난다(직발송 우회 폐지 — ADR-0125): {over:?}"
         );
         assert_eq!(svc.parked_len("recv"), 100, "반려분은 큐에 안 들어간다");
-        // 실패 행도 장부 종점으로 남는다(spec §5 — 조회 행수 = 응답 행수).
         assert_eq!(svc.ledger_statuses("over"), vec![DeliveryStatus::Failed]);
     }
 
     #[test]
     fn a_drain_that_deferred_a_flush_repays_it_even_when_its_own_inject_fails() {
-        // ★영수증을 쥔 쪽이 유예 깨우기를 갚는다(spec §5 불변식 · ADR-0121 → ADR-0125로 상시 경우가 됐다)★:
-        //   배치가 in-flight 인 동안 같은 이름 앞 flush 를 시도한 쪽은 `flush_for` 0단계에서 물러나며
-        //   `deferred_flush` 에 표식만 남긴다(진행 중 배치를 앞지르지 않으려고 = 드레인 중복 진입 가드).
-        //   영수증 보유자가 정산하며 되울려 주지 않으면 그 깨우기가 증발해(lost wakeup) 재파킹분이 다음
-        //   사건이나 TTL 까지 묶인다. ★7차엔 이 의무를 **발송 호출의 동기 드레인**도 진다★ — 드레인이 발신
-        //   스레드에서 도니까 영수증을 쥐는 것이 상시 경우이고, 그래서 이 갈래가 예외가 아니라 주 경로다.
+        // ★영수증을 쥔 쪽이 유예 깨우기를 갚는다(spec §5 불변식 · ADR-0121 · ADR-0125)★: 영수증 보유자가
+        //   정산하며 `deferred_flush` 표식을 되울려 주지 않으면 그 깨우기가 증발해(lost wakeup) 재파킹분이
+        //   다음 사건이나 TTL 까지 묶인다. 드레인이 발신 스레드에서 도니 영수증을 쥐는 것이 상시 경우이고,
+        //   그래서 이 갈래는 예외가 아니라 주 경로다.
         // ★자기 재시도가 아니다★: 여기서 갚는 것은 *다른 호출자가 요청해 둔* 깨우기다. 표식이 없는 단독 실패
         //   경로는 여전히 아무 도어벨도 누르지 않는다(`inject_failure_parks_pending_without_a_turn_signal` 의
         //   "발송 후 parked_len == 1" 단언이 그쪽을 지킨다).
@@ -4612,14 +4547,12 @@ mod tests {
             if idx != 0 || !std::mem::replace(&mut *armed_h.lock().unwrap(), false) {
                 return;
             }
-            // 앞 배치가 in-flight 라 이 flush 는 드레인 없이 물러나고 표식만 남긴다(0단계 = 중복 진입 가드).
             svc_h.flush_for("tui", tui_id);
         }));
-        port.fail_at(&[0]); // 드레인의 주입 실패 → 재파킹(자기 도어벨은 금지 — spec §5).
+        port.fail_at(&[0]);
 
         send_body(&svc, "m1", from, "alice", &["tui"], "묵은 편지").expect("파킹");
 
-        // 되울림이 없으면 m1 은 큐에 남고 주입 기록도 없다(= 유예 깨우기 증발).
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="alice">묵은 편지</message>"#.to_string()],
@@ -4646,7 +4579,7 @@ mod tests {
             if idx != 0 || !std::mem::replace(&mut *armed_h.lock().unwrap(), false) {
                 return;
             }
-            // 주입 중에 그 이름 앞으로 파킹분이 생기고(도어벨을 누르지 않는 경로) flush 가 물러난다.
+            // 파킹분을 **도어벨을 누르지 않는 경로**로 만든다 — 그래야 뒤이은 flush 가 물러난다.
             svc_h
                 .park_absent_for_test(
                     "m0",
@@ -4684,14 +4617,12 @@ mod tests {
         port.set_roster(vec![me, tui]);
         gate.set_busy(tui_id, 0);
 
-        // 적재 → 드레인의 첫 주입이 실패 → 재파킹. 도어벨은 안 눌린다(자기 주입 실패로 자기 도어벨을 누르는
-        //   것은 spec §5 금지 — 도달 불가해진 수신자에 재주입을 반복하게 된다).
         port.fail_at(&[0]);
         let out = send(&svc, "m1", from, "alice", &["tui"]).expect("행 응답");
         assert_eq!(out[0].status, SendStatus::Pending, "{out:?}");
         assert_eq!(svc.parked_len("tui"), 1);
 
-        port.fail_at(&[]); // 다음 주입은 성공한다.
+        port.fail_at(&[]);
         svc.flush_for("tui", tui_id);
         assert_eq!(
             svc.ledger_statuses("m1"),
@@ -4703,7 +4634,6 @@ mod tests {
 
     #[test]
     fn flush_on_appearance_delivers_oldest_first_individually_wrapped() {
-        // 부재 시 3건 파킹 → 등장 flush → 오래된 순 + 각자 개별 봉투 주입.
         let (svc, port) = svc();
         port.set_roster(vec![]);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
@@ -4719,11 +4649,10 @@ mod tests {
             .expect("park");
         }
         assert_eq!(svc.parked_len("late"), 3);
-        // 등장 — 로스터에 유일 도달로 올린다(finding 2: flush_for 는 execution 시점 로스터로 재검증).
+        // finding 2: `flush_for` 는 execution 시점 로스터로 유일 도달을 재검증한다 — 그래서 flush 전에 올린다.
         let (late_id, late) = live("late");
         port.set_roster(vec![late]);
         svc.flush_for("late", late_id);
-        // 오래된 순 + 각자 봉투(단일 wrap point, 배치 내 개별).
         assert_eq!(
             port.injected_bodies(),
             vec![
@@ -4733,7 +4662,6 @@ mod tests {
             ],
             "flush = 오래된 순 개별 봉투 일괄 주입(ADR-0104)"
         );
-        // 전부 delivered 로 전이.
         assert_eq!(svc.ledger_statuses("m0"), vec![DeliveryStatus::Delivered]);
         assert_eq!(svc.ledger_statuses("m2"), vec![DeliveryStatus::Delivered]);
         assert_eq!(svc.parked_len("late"), 0, "flush 후 큐 비움");
@@ -4741,8 +4669,6 @@ mod tests {
 
     #[test]
     fn flush_partial_failure_reparks_remaining_no_loss() {
-        // ★부분 실패 무손실(load-bearing, ADR-0104)★: 3건 파킹 → flush 중 **두 번째** inject 실패 →
-        //   첫 건은 delivered, 둘째(실패분)+셋째(미시도)는 재파킹돼 다음 등장에 재시도된다(조용한 유실 금지).
         let (svc, port) = svc();
         port.set_roster(vec![]);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
@@ -4758,12 +4684,9 @@ mod tests {
             .expect("park");
         }
         let (late_id, late) = live("late");
-        // finding 2: flush_for 는 로스터 유일 도달 재검증 후 진행.
         port.set_roster(vec![late]);
-        // inject 호출 인덱스 1(= 둘째 배치 항목 b1)에서 실패 → idx 1 에서 break, [1..](b1·b2) 재파킹.
         port.fail_at(&[1]);
         svc.flush_for("late", late_id);
-        // 첫 건(b0)만 주입 성사.
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">b0</message>"#.to_string()],
@@ -4774,7 +4697,6 @@ mod tests {
             vec![DeliveryStatus::Delivered],
             "b0 delivered"
         );
-        // b1·b2 는 재파킹(pending 유지) — 큐에 2건.
         assert_eq!(svc.parked_len("late"), 2, "실패분+미시도분 재파킹(무손실)");
         assert_eq!(
             svc.ledger_statuses("m1"),
@@ -4786,7 +4708,6 @@ mod tests {
             vec![DeliveryStatus::Pending],
             "b2 재파킹 pending"
         );
-        // 이제 실패 예약 해제 후 재-flush → 남은 b1·b2 가 오래된 순 보존돼 주입.
         port.fail_at(&[]);
         svc.flush_for("late", late_id);
         assert_eq!(
@@ -4808,7 +4729,6 @@ mod tests {
         //   동시 park 신규분보다 앞서야 한다(FIFO 역전 방지). 옛 park-기반 재파킹은 MailboxFull 로 유실됐다.
         let (svc, port) = svc();
         let (late_id, late) = live("late");
-        // 오래된 파킹 3건(m0,m1,m2) — 로스터 부재라 파킹된다.
         port.set_roster(vec![]);
         for (i, m) in ["m0", "m1", "m2"].iter().enumerate() {
             svc.park_absent_for_test(
@@ -4822,18 +4742,15 @@ mod tests {
             )
             .expect("park");
         }
-        // ★finding 2 정합★: flush_for 는 execution 시점 로스터로 "late" 를 유일 도달로 재검증하므로, flush
-        //   호출 직전 "late" 를 올린다. 단 hook 의 동시 sends 는 **부재**여야 파킹되므로, hook 이 idx 0
-        //   진입에서 로스터를 잠시 비운 뒤 sends 를 돌린다(재검증은 이미 통과 후라 무영향).
+        // hook 의 동시 sends 는 **부재**여야 파킹되므로 idx 0 진입에서 로스터를 잠시 비운다 — flush_for 의
+        //   유일 도달 재검증은 이미 통과한 뒤라 무영향이다.
         let svc_hook = svc.clone();
         let port_hook = port.clone();
         let late_for_hook = late.clone();
         port.set_on_inject(Arc::new(move |idx| {
             if idx == 0 {
-                // 동시 park 가 파킹되도록 로스터를 잠시 비운다(부재). flush_for 재검증은 이 hook 전에 끝남.
                 port_hook.set_roster(vec![]);
                 for i in 0..MAILBOX_CAP_FOR_TEST {
-                    // 동시 발송(신규 admission) — cap 까지 채운다(로스터 부재라 파킹).
                     let _ = svc_hook.park_absent_for_test(
                         &format!("c{i}"),
                         ident(),
@@ -4848,13 +4765,10 @@ mod tests {
                 port_hook.set_roster(vec![late_for_hook.clone()]);
             }
         }));
-        // flush_for 진입 재검증(finding 2)이 통과하도록 "late" 를 유일 도달로 올린다.
         port.set_roster(vec![late.clone()]);
-        // idx 1(둘째 항목 b1)에서 실패 → [b1,b2] 재파킹. 그 사이 hook(idx 0)이 큐를 cap 까지 채웠다.
         port.fail_at(&[1]);
         svc.flush_for("late", late_id);
 
-        // b0 만 배달.
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">b0</message>"#.to_string()],
@@ -4862,10 +4776,8 @@ mod tests {
         );
         // ★유실 0 — 단 cap 을 넘기지도 않는다(F1 에서 기대값 보정: 102 → 99)★. 옛 기대값은 "동시 park 가
         //   cap(100)까지 다 들어오고 재파킹분 2건이 그 위에 얹힌다" 였는데, 그게 바로 사이클마다 큐를 키우던
-        //   구멍이다(빈 큐 창). 이제 drain 한 배치 3건이 in-flight 로 분모에 남아 동시 park 는 97건만
-        //   수용되고, 재파킹분 2건이 되돌아와 97 + 2 = 99 ≤ cap 이 된다. **무손실 성질은 그대로**다 —
-        //   b1·b2 는 한 건도 안 사라졌고(아래 pending 단언), 못 들어온 3건은 발신자에게 `MAILBOX_FULL` 로
-        //   가시화됐다(조용한 드롭 아님 — spec §5).
+        //   구멍이다(빈 큐 창). 지금은 drain 한 배치 3건이 in-flight 로 분모에 남아 동시 park 는 97건만
+        //   수용되고, 재파킹분 2건이 되돌아와 97 + 2 = 99 ≤ cap 이 된다.
         assert_eq!(
             svc.parked_len("late"),
             MAILBOX_CAP_FOR_TEST - 1,
@@ -4885,12 +4797,11 @@ mod tests {
             vec![DeliveryStatus::Pending],
             "b2 재파킹 pending(유령 아님)"
         );
-        // ★순서★: hook 을 제거하고 재-flush → 재파킹분(b1,b2)이 동시 park 분(c0..)보다 먼저 나와야.
+        // ★순서★
         port.set_on_inject(Arc::new(|_| {}));
         port.fail_at(&[]);
         svc.flush_for("late", late_id);
         let bodies = port.injected_bodies();
-        // b0(첫 flush) 다음이 b1,b2(재파킹 오래된 순) 그 뒤 c0..(동시 park 최근).
         assert_eq!(bodies[0], r#"<message from="s">b0</message>"#);
         assert_eq!(
             bodies[1], r#"<message from="s">b1</message>"#,
@@ -4904,10 +4815,10 @@ mod tests {
         assert_eq!(svc.parked_len("late"), 0, "재-flush 후 큐 비움");
     }
 
-    /// 테스트에서 mailbox cap(100)을 참조하기 위한 상수(mailbox 비공개 MAILBOX_CAP 미러 — 값 동기).
+    /// mailbox 비공개 `MAILBOX_CAP` 미러 — 값을 함께 고쳐야 한다.
     const MAILBOX_CAP_FOR_TEST: usize = 100;
 
-    /// 테스트에서 mailbox TTL(24h)을 참조하기 위한 상수(mailbox 비공개 PARK_TTL 미러 — 값 동기, ADR-0105).
+    /// mailbox 비공개 `PARK_TTL` 미러 — 값을 함께 고쳐야 한다(ADR-0105).
     const PARK_TTL_FOR_TEST: Duration = Duration::from_secs(24 * 60 * 60);
 
     #[test]
