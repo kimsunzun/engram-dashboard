@@ -8137,10 +8137,7 @@ mod tests {
                 "m1",
                 from,
                 "alice",
-                &[
-                    "@all".to_string(),
-                    "ghost".to_string(),
-                ],
+                &["@all".to_string(), "ghost".to_string()],
                 "전원 대기",
                 Entrance::Mcp,
                 &SendMeta::default(),
