@@ -1,8 +1,7 @@
 //! ADR-0086 스텝 2 · F7(b) — `engram-send` CLI **프로세스 레벨** 테스트.
 //!
-//! 실제 빌드된 바이너리(`CARGO_BIN_EXE_engram-send`)를 스폰하고, 테스트가 띄운 tiny std TcpListener
-//! 스텁이 canned HTTP 응답을 돌려주게 해 **wire → 파싱 → stdout JSON → exit code** 전 경로를 검증한다.
-//! (단위 테스트는 순수 함수만 봤다 — 이건 env 읽기·TCP·프로세스 종료코드까지 실측.)
+//! 단위 테스트는 순수 함수만 봤다 — 여기선 **wire → 파싱 → stdout JSON → exit code** 전 경로를 실측한다
+//! (env 읽기·TCP·프로세스 종료코드 포함).
 //!
 //! ★claude 불요·결정적★: 스텁은 std 만 쓰고 고정 응답을 내므로 claude/데몬 없이 항상 같은 결과다.
 
@@ -11,19 +10,14 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 
-/// 스텁 리스너를 127.0.0.1:0 에 띄우고, 첫 연결 1건에 canned 응답을 돌려준다. (host, port, join) 반환.
-/// 요청 바디는 무시(핸드셰이크만 소비) — 이 테스트는 CLI 의 응답 파싱·exit code 매핑을 본다.
 fn spawn_stub(response: &'static str) -> (String, u16, thread::JoinHandle<()>) {
     let (host, port, handle) = spawn_capturing_stub(response);
-    // 캡처를 안 쓰는 기존 테스트용 어댑터 — join 핸들의 반환값(요청 텍스트)을 버린다.
     let handle = thread::spawn(move || {
         let _ = handle.join();
     });
     (host, port, handle)
 }
 
-/// 요청을 **캡처하는** 스텁(D) — join 하면 CLI 가 보낸 raw 요청 텍스트를 돌려준다. 라우트 선택(경로)과
-/// 바디가 실제 바이너리에서 어떻게 나가는지를 프로세스 레벨로 단언하는 데 쓴다.
 fn spawn_capturing_stub(response: &'static str) -> (String, u16, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
     let addr = listener.local_addr().expect("addr");
@@ -44,7 +38,6 @@ fn spawn_capturing_stub(response: &'static str) -> (String, u16, thread::JoinHan
     (addr.ip().to_string(), addr.port(), handle)
 }
 
-/// 200 + Content-Length 응답 문자열을 만든다(스텁 canned 응답 조립 — 반복 제거).
 fn ok_response(body: &str) -> &'static str {
     let s = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -54,7 +47,6 @@ fn ok_response(body: &str) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-/// 임의 인자로 바이너리를 스폰하되 stdin 에 **raw 바이트**를 먹인다(비-UTF8 경로 검증용 — A2).
 fn run_cli_bytes(control_url: &str, args: &[&str], stdin: &[u8]) -> (String, i32) {
     use std::process::Stdio;
     let exe = env!("CARGO_BIN_EXE_engram-send");
@@ -78,7 +70,6 @@ fn run_cli_bytes(control_url: &str, args: &[&str], stdin: &[u8]) -> (String, i32
     )
 }
 
-/// 임의 인자로 바이너리를 스폰(선택적으로 stdin 을 먹인다). (stdout, exit code) 반환.
 fn run_cli(control_url: &str, args: &[&str], stdin: Option<&str>) -> (String, i32) {
     use std::process::Stdio;
     let exe = env!("CARGO_BIN_EXE_engram-send");
@@ -98,7 +89,7 @@ fn run_cli(control_url: &str, args: &[&str], stdin: Option<&str>) -> (String, i3
     if let Some(text) = stdin {
         let mut sink = child.stdin.take().expect("stdin piped");
         sink.write_all(text.as_bytes()).expect("write stdin");
-        // drop → EOF: `--body-stdin` 의 read_to_string 이 여기서 끝난다.
+        // drop → EOF: `--body-stdin` 의 read_to_end 가 여기서 끝난다.
     }
     let out = child.wait_with_output().expect("wait engram-send");
     (
@@ -107,7 +98,6 @@ fn run_cli(control_url: &str, args: &[&str], stdin: Option<&str>) -> (String, i3
     )
 }
 
-/// 빌드된 engram-send 바이너리를 env(ENGRAM_TOKEN/ENGRAM_CONTROL_URL) 붙여 스폰. (stdout, exit code) 반환.
 fn run_send(control_url: &str, to: &str, body: &str) -> (String, i32) {
     let exe = env!("CARGO_BIN_EXE_engram-send");
     let out = Command::new(exe)
@@ -123,8 +113,6 @@ fn run_send(control_url: &str, to: &str, body: &str) -> (String, i32) {
 
 #[test]
 fn engram_send_delivered_prints_ack_and_exits_zero() {
-    // ★C1(spec §6)★: 200 + 성공 shape `{ id, results:[{to,status:"delivered"}] }`(Content-Length)
-    //   → stdout ACK + exit 0. 옛 `{"status":"enqueued"}` 는 S18 메시징 v1 이 이 shape 로 교체(ADR-0103).
     let body = r#"{"id":"m1","results":[{"to":"bob","status":"delivered"}]}"#;
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -149,8 +137,7 @@ fn engram_send_delivered_prints_ack_and_exits_zero() {
 
 #[test]
 fn engram_send_corrective_error_prints_body_and_exits_one() {
-    // 200 + error JSON(chunked) → stdout 에러 body + exit 1(교정 에러도 CLI 는 1 로 매핑).
-    // chunked: "{\"status\":\"error\"," (0x12=18) + "\"code\":\"X\"}" (0xb=11) + 0.
+    // chunk 크기는 16진 — "{\"status\":\"error\"," (0x12=18) + "\"code\":\"X\"}" (0xb=11) + 0.
     let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
                     12\r\n{\"status\":\"error\",\r\n\
                     b\r\n\"code\":\"X\"}\r\n\
@@ -172,7 +159,6 @@ fn engram_send_corrective_error_prints_body_and_exits_one() {
 
 #[test]
 fn engram_send_non_2xx_exits_one() {
-    // 401 + 빈 body → exit 1(비-2xx).
     let response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     let (host, port, handle) = spawn_stub(response);
     let url = format!("http://{host}:{port}");

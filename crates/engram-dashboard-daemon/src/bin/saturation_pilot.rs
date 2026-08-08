@@ -1,33 +1,14 @@
 //! saturation-pilot — ADR-0090 Stage 2 컨텍스트 포화 실측 드라이버(실험 전용 bin).
 //!
 //! ## 역할
-//! 런마다 **실 claude 에이전트 1개**(stream-json, Fresh)를 격리 임시 워크스페이스에 스폰하고, 결정적
-//! 필러 문서로 컨텍스트를 목표까지 채운 뒤, **실 control 경로**(handle_send → wrap_message →
-//! write_stdin_observed)로 inter-agent 메시지를 주입하고, 지연 프로브로 "지속 처리"(회상 유지)를 측정한다.
-//! 관측치는 런당 JSONL 1파일로 영속한다. 순수 로직은 전부 `experiment::{cli,filler,probe,record}` 에
-//! 있고 이 파일은 **thin 드라이버**(배선 + 턴 루프)다.
+//! 실 claude 1스폰을 격리 워크스페이스에서 몰고, 배달은 **실 control 경로**(handle_send → wrap_message →
+//! write_stdin_observed)를 그대로 태운다 — 실험 경로 = 운영 경로 동일성이 결과 해석의 전제다(ADR-0090 d2).
+//! 순수 로직은 `experiment::{cli,filler,probe,record,transcript}` 소관이고 이 파일은 배선 + 턴 루프다.
 //!
-//! ## 핵심 불변식(ADR-0090)
-//! - **required-features = ["test-harness"]** — 운영 빌드는 이 bin 을 컴파일하지 않는다(릴리즈 청정).
-//! - **하드 캡**: MAX_SPAWNS/MAX_TURNS/MAX_WALLCLOCK/fill clamp — 초과 시 graceful abort(코드 상수).
-//! - **summary 항상 기록** — 정상/타임아웃/abort 어떤 경로든 마지막에 summary 레코드를 쓴다.
+//! ## 파일 경계 불변식
+//! - **summary 항상 기록** — 정상/타임아웃/abort/패닉 어떤 경로든 마지막에 summary 레코드를 쓴다.
 //! - **격리 워크스페이스** — fresh 임시 dir 이 cwd, 비밀 미기록, 종료 시 제거(--keep-workspace 예외).
-//! - **판정 = 지연 후 회상 유지**(ADR-0088) — 즉시 ack 는 성공 아님.
-//!
-//! ## ★관측 경로(정직 범위)★
-//! 스폰된 json 에이전트의 pump 는 decoder(ClaudeStreamDecoder)를 거쳐 **디코딩된 OutputEvent 만**
-//! OutputSink 로 흘린다 — raw stream-json 라인(cache 토큰·system/init 모델 id·compact 라인)은 decoder
-//! 내부에서 소비돼 사라진다(코어 무수정 제약). 두 경로로 관측을 조립한다:
-//!   1. **디코딩 이벤트(항상)**: 턴 종료 = MessageDone, 토큰 = Usage(증분 input), 응답 = TextDelta 누적.
-//!   2. **트랜스크립트 탭(best-effort — ADR-0090 Fix 1)**: 우리가 통제하는 세션 id(ADR-0008)로 claude 가
-//!      `~/.claude/projects/<munged>/<sid>.jsonl` 에 남기는 raw 트랜스크립트를 재귀 검색해 파싱한다 →
-//!      실 컨텍스트 footprint(input + cache_creation + cache_read)·정확 모델 id·event 히스토그램·compact
-//!      마커. 탭이 부재하면(transcript_available=false) 하네스는 죽지 않고 문자 추정으로 폴백한다.
-//! per-turn 레코드는 실측(context_tokens_real)과 추정(context_tokens_estimate)을 **둘 다** 남긴다
-//! (캘리브레이션 = 파일럿 산출물). 히스토그램은 raw 트랜스크립트 타입을 우선하고, 탭 부재 시에만 디코딩
-//! variant 로 폴백한다(source 필드로 명시).
 // ADR-0090
-// ADR-0008
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -65,31 +46,22 @@ use engram_dashboard_daemon::experiment::record::{
     UsageSnapshot,
 };
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
-// ★트랜스크립트 탭(ADR-0090 Fix 1)★: 우리가 통제하는 세션 id(ADR-0008)로 claude 가 디스크에 남기는 raw
-//   세션 JSONL 을 best-effort 로 읽어 실 usage(cache 항 합)·모델 id·compact 마커를 보강한다. 탭 부재는
-//   하네스를 실패시키지 않는다 — 문자 추정으로 폴백. record.rs 의 raw 파서(parse_init_model/event_type_key/
-//   line_mentions_compact)는 이 탭이 라인마다 호출하는 live 경로다(transcript 모듈 내부에서 재사용).
 use engram_dashboard_daemon::experiment::transcript::{self, TranscriptSummary};
 
-// ── 하드 캡(ADR-0090 불변식 — 코드 상수) ────────────────────────────────────────────
+// ── 하드 캡(ADR-0090 불변식) ────────────────────────────────────────────────────────
 const MAX_SPAWNS_PER_INVOCATION: u32 = 6;
 const MAX_TURNS_PER_RUN: u32 = 120;
 const MAX_WALLCLOCK_PER_RUN: Duration = Duration::from_secs(45 * 60);
-/// 턴당 대기 상한(초). 초과 시 stall 레코드 + graceful abort.
+/// 턴당 대기 상한 — 초과 시 stall 레코드 + graceful abort.
 const TURN_WAIT_CAP: Duration = Duration::from_secs(240);
-/// 에이전트가 목록에 나타날 때까지의 스폰 대기.
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
-/// 스폰 직후 트랜스크립트 파일 초기 탐색 대기(짧게). claude 는 보통 **첫 턴을 처리한 뒤에야** 트랜스크립트를
-/// 쓰기 시작하므로(스모크 실측) 스폰 직후엔 대개 부재다 — 여기선 짧게만 보고, 실제 확보는 턴 루프의 lazy
-/// 재검색(RunState::refresh_real_context)이 담당한다. best-effort — 못 찾아도 하네스는 실패 안 함.
-// ADR-0090
+/// claude 는 **첫 턴을 처리한 뒤에야** 트랜스크립트를 쓰기 시작한다(스모크 실측) — 스폰 직후엔 대개
+/// 부재라 여기선 짧게만 보고, 실제 확보는 턴 루프의 lazy 재검색(RunState::refresh_real_context)이 맡는다.
 const TRANSCRIPT_APPEAR_TIMEOUT: Duration = Duration::from_secs(3);
-/// 헤더 작성 시 모델 id 폴링 상한(첫 턴 직후 assistant 라인 flush race 흡수). 파일은 이미 있으니 짧게.
-// ADR-0090
+/// 모델 id 폴링 상한 — assistant 라인 flush race 흡수. 파일은 이미 있으니 짧게.
 const MODEL_RESOLVE_POLL: Duration = Duration::from_secs(4);
 
 fn main() {
-    // 프로그램명 제외 argv.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let cfg = match cli::parse_args(&argv) {
         Ok(c) => c,
@@ -109,7 +81,7 @@ fn main() {
         }
     };
 
-    // tokio 멀티스레드 런타임(MCP 서버가 async). 드라이버 본체는 blocking 로직이라 block_on 안에서 돈다.
+    // MCP 서버가 async 라 런타임이 필요하다 — 드라이버 본체는 blocking 이라 block_on 안에서 돈다.
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -125,13 +97,11 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-/// 전 런 실행. runs·스폰 캡을 지키며 각 런을 순차 실행한다.
 async fn run_all(cfg: PilotConfig) -> i32 {
-    // 재현성 핀(런 전체 공통): claude 버전·git 커밋.
     let claude_version = capture_claude_version();
     let git_commit = capture_git_commit();
     if claude_version.is_none() {
-        // ★skip_no_claude 이식(loud)★: claude 부재면 실험 자체가 불성립 — loud 에러 + nonzero exit.
+        // claude 부재면 실험 자체가 불성립 — 스킵하지 않고 실패시킨다.
         eprintln!(
             "FATAL [saturation-pilot]: claude CLI 를 찾을 수 없습니다(`claude --version` 실패). \
              stream-json 스폰 불가 — 실험 불성립. claude 설치/인증 확인 필요."
@@ -139,7 +109,6 @@ async fn run_all(cfg: PilotConfig) -> i32 {
         return 3;
     }
 
-    // 출력 디렉토리 결정. 미지정이면 target/experiments/pilot-<UTC>.
     let out_dir = cfg
         .out
         .clone()
