@@ -2,7 +2,7 @@
 //!
 //! ★역할★: 세 축을 담는다.
 //!   ① **이력 링버퍼** — 전 메시지의 상태 전이 + 시각(`pending→delivered→replied` / `expired` / `skipped`).
-//!      "상태 전이 시각이 곧 회신·발신 시각 데이터"(봉투 미노출 — spec §5). 용량 초과 = 오래된 것부터 evict.
+//!      "상태 전이 시각이 곧 회신·발신 시각 데이터"(봉투 미노출 — spec §5).
 //!   ② **request 추적** — `awaiting_reply` 오픈 + `in_reply_to` **엄격 매칭**으로 닫기 + `reply_by` 초과
 //!      타임아웃 산출(발신자에게 notice 는 후속 increment 가 생성 — 여기선 "누가 초과했나"만 산출).
 //!      ★종결 사유는 둘(4차 — ADR-0116 결정 2/3 · ADR-0118 결정 1)★: 회신 수용(`replied`) 또는 **실패
@@ -38,8 +38,7 @@ use crate::PeerId;
 ///   스트림에서는 그보다 훨씬 크다는 뜻이다. 인메모리 단계 한정 값이고 무파괴 변경 가능한 조율 대상이다.
 /// ★후속(식별만 — 지금 구현하지 않는다, 사용자 언급 2026-07-26)★: ⓐ 이 값을 런타임 설정/커맨드로 노출
 ///   ⓑ 감사 목적상 본문을 절단해 저장(전문 보관 대신). 둘 다 별건이며 이 상수 변경의 전제가 아니다.
-/// ★evict 와 request 추적의 관계(C3 리뷰 fix 3 로 좁혀짐)★: 이력 evict 는 **끝난 계약**(closed 또는 이미
-///   통지된)의 추적 항목만 함께 드롭한다. 살아 있는(미회신·미통지) 계약은 evict 를 견디고 남는다 — 예전엔
+/// ★evict 와 request 추적의 관계(C3 리뷰 fix 3 로 좁혀짐)★: 예전엔 이력 evict 가 추적 항목을
 ///   무조건 드롭해서, 이력이 밀려난 오픈 request 가 **회신으로 닫힐 길과 기한 초과 통지를 동시에 잃었다**
 ///   (조용한 계약 소멸 = 최악 실패 모드). 유계는 이제 이력 용량이 아니라 `MAX_OPEN_REQUESTS` 가 준다.
 const HISTORY_CAPACITY: usize = 4096;
@@ -58,17 +57,14 @@ const MAX_OPEN_REQUESTS: usize = 512;
 /// 메시지 배달 1건의 상태(spec §5·§6 상태 어휘 — 새 어휘 발명 금지).
 ///
 /// ★상태 전이(load-bearing)★: `Pending → Delivered → Replied`(request 만) / `Expired`(TTL) / `Skipped`
-///   (notice 레인 은퇴) / `Failed`(입구 반려·`MAILBOX_FULL`·`REQUEST_CAPACITY` — **기록 시점부터 종점**,
-///   단 **삭제 정리만** `Pending → Failed` 로 사후 종결한다 — ADR-0116 결정 4 · `fail_pending`).
+///   (notice 레인 은퇴) / `Failed`.
 ///   각 전이는 시각을 남긴다(spec §5 "상태 전이 시각이 곧 회신·발신 시각"). busy 대기·주입 실패 파킹·
 ///   **잠듦 파킹**(ADR-0116 결정 1)은 전부 `Pending`(상태 어휘 공유 — spec §5 분기 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
-    /// 주입 대기(busy 대기 또는 주입 실패 파킹 — 어휘 공유, spec §5).
     Pending,
     /// 실제 주입 완료(delivered = 실제 주입 시점, ADR-0104 불변식).
     Delivered,
-    /// request 에 회신이 도착해 닫힘(엄격 매칭 성공).
     Replied,
     /// TTL(24h) 초과로 파킹 만료(장부 잔존, spec §5, ADR-0105).
     Expired,
@@ -84,8 +80,7 @@ pub enum DeliveryStatus {
     ///   (spec §5·§6). 파킹은 없지만 기록은 있다.
     /// ★기록 시점이 곧 종점 — **단 하나의 예외**(4차 · ADR-0116 결정 4)★: 입구 반려 계열은 이 상태로
     ///   `record` 되고 어떤 전이도 나가지 않는다. 삭제 정리만 *이미 파킹된* 레코드를 사후 종결하므로
-    ///   `Pending → Failed` 한 간선을 쓰는데, 그 간선은 **전용 동사 `fail_pending` 에만** 열려 있다
-    ///   (범용 `transition(.., Failed, ..)` 은 여전히 전부 불법 — 아래 `can_transition_to`).
+    ///   `Pending → Failed` 한 간선을 쓴다.
     // ADR-0111
     // ADR-0116 (pending→failed = 삭제 정리 한정)
     Failed,
@@ -94,11 +89,6 @@ pub enum DeliveryStatus {
 impl DeliveryStatus {
     /// 이 상태에서 `next` 로의 전이가 **합법**인가(spec §5 상태 전이 그래프 — load-bearing).
     ///
-    /// ★합법 전이 그래프(spec §5)★:
-    ///   - `Pending → Delivered`(실제 주입)
-    ///   - `Pending → Expired`(TTL 초과 — 주입 전 만료)
-    ///   - `Pending → Skipped` / `Delivered → Skipped`(notice 레인 은퇴 — as applicable)
-    ///   - `Delivered → Replied`(request 회신 도착)
     /// 그 밖의 모든 간선은 불법이다 — 특히 **terminal**(`Replied`/`Expired`/`Skipped`/`Failed`)에서의
     ///   재전이, 그리고 되돌림(`*→Pending`)·건너뜀(`Pending→Replied`, `Expired→Delivered` 등)은 거부한다.
     ///   되돌림·건너뜀을 허용하면 "상태 전이 시각 = 회신·발신 시각" 이라는 장부 의미가 오염된다(오발 닫힘·
@@ -106,8 +96,7 @@ impl DeliveryStatus {
     /// ★`Failed` 로 들어오는 간선은 이 **범용** 그래프에 없다(ADR-0111 · 4차에도 유지)★: 실패 행은
     ///   **처음부터** 그 상태로 기록된다. 범용 전이로 열어 두면 "배달됐다가 실패로 돌아간" 불가능한 이력이
     ///   표현 가능해지므로, 4차에서 추가된 `Pending → Failed`(삭제 정리)도 여기에 넣지 않고 **전용 동사**
-    ///   (`fail_pending` → `can_fail_by_cleanup`)로만 연다. 그래서 `transition(.., Failed, ..)` 은 어느
-    ///   상태에서든 `Illegal` 이고(임의 호출 차단), 삭제 정리만 그 간선을 쓴다(spec §6 전이 그래프 개정).
+    ///   (`fail_pending` → `can_fail_by_cleanup`)로만 연다.
     // ADR-0116 (pending→failed 는 경로 한정 — 범용 그래프 불변)
     fn can_transition_to(self, next: DeliveryStatus) -> bool {
         use DeliveryStatus::*;
@@ -122,7 +111,7 @@ impl DeliveryStatus {
     }
 
     /// ★삭제 정리 전용 간선(`Pending → Failed`, spec §6 · ADR-0116 결정 4)★ — 이 상태에서 **삭제 정리로**
-    /// `Failed` 로 갈 수 있나. 파킹 중(`Pending`)인 레코드만 해당한다.
+    /// `Failed` 로 갈 수 있나.
     ///
     /// ★왜 별도 술어인가(load-bearing)★: 이 간선은 "이미 파킹된 레코드를 사후 종결하는 유일한 경로" 에만
     ///   합법이다. 범용 그래프(`can_transition_to`)에 넣으면 **어떤 호출자든** pending 행을 실패로 만들 수
@@ -134,7 +123,7 @@ impl DeliveryStatus {
     }
 }
 
-/// 이력 레코드 1건 — 한 (메시지, 수신자) 쌍의 배달 이력. 그룹 방송은 이 레코드 N개가 한 `msg_id` 를 공유한다.
+/// 이력 레코드 1건 — 한 (메시지, 수신자) 쌍의 배달 이력.
 ///
 /// ★메시지 1 : 배달기록 N(spec §4 · load-bearing)★: 그룹 발송은 하나의 논리 메시지(`msg_id` 공유)를 여러
 ///   수신자에게 개별 배달하므로, 배달 레코드는 **수신자별로 하나**다(각자 status·시각 독립). 단일 발송은 N=1.
@@ -143,19 +132,13 @@ impl DeliveryStatus {
 ///   메모리는 링 용량(HISTORY_CAPACITY)이 상한 — v2 영속화(SQLite) 때 요약/오프로드를 재검토한다(무파괴).
 #[derive(Debug, Clone)]
 pub struct MessageRecord {
-    /// 논리 메시지 id(그룹 방송은 여러 레코드가 공유 — 1:N 상관 키).
     pub msg_id: String,
     /// 발신자 이름(WYSIWYA — ADR-0101).
     pub from: String,
-    /// 이 레코드의 수신자 이름. 그룹 방송이면 멤버 하나(레코드마다 다름).
     pub to: String,
-    /// 본문 전문(요약 아님 — 위 struct 주석의 설계 결정).
     pub body: String,
-    /// 현재 상태.
     pub status: DeliveryStatus,
-    /// 레코드 생성(발신) 시각 = 발신 시각 데이터(봉투 미노출, spec §5).
     pub created_at: Instant,
-    /// 상태가 마지막으로 전이된 시각(delivered/replied/expired/skipped 시점). 회신·완료 시각 데이터.
     pub transitioned_at: Instant,
     /// ★이 논리 메시지가 남길 **배달기록 총수**(발송 시점에 확정 — round-2 리뷰 F3)★. 단일 발송·notice = 1,
     /// 그룹 fan-out = 멤버 수 N. 같은 `msg_id` 의 모든 행이 **같은 값**을 든다.
@@ -170,7 +153,7 @@ pub struct MessageRecord {
     ///   8KiB 만 더한다(본문 보관 비용에 비하면 무시 가능).
     // round-2 리뷰 F3
     pub expected_rows: u16,
-    /// ★조회에 실을 실패 코드(4차 신설 — spec §6 `RECIPIENT_DELETED`)★. `None` = 코드 없음.
+    /// ★조회에 실을 실패 코드(4차 신설 — spec §6 `RECIPIENT_DELETED`)★.
     ///
     /// ★왜 wire 문자열을 그대로 담나(load-bearing)★: 이 코드가 처음 보이는 곳은 **발송 응답이 아니라
     ///   `messages{id}` 조회**다(발송 시점엔 `pending` 이었다 — spec §6). 즉 값을 발송 응답과 다른 시점까지
@@ -191,24 +174,21 @@ pub struct MessageRecord {
 // R1: `reservation_token`(Weak)은 값 비교의 의미가 없어 PartialEq/Eq 파생을 뺐다(아무도 쓰지 않았다).
 #[derive(Debug, Clone)]
 struct RequestEntry {
-    /// request 메시지 id(회신의 `in_reply_to` 가 이걸 정확히 가리켜야 닫힘 — 엄격 매칭).
     request_id: String,
-    /// 요청 발신자 이름(타임아웃 notice 를 받을 대상 — spec §3 "발신자에게"). **발송 시점의** 표시 이름이다.
+    /// **발송 시점의** 표시 이름이다.
     sender: String,
     /// ★요청 발신자의 PeerId(C3 리뷰 fix 2 — load-bearing)★: 이름은 발송 후 바뀔 수 있고(display_name
     ///   변경), 그러면 이름-키 파킹만으로는 notice 가 옛 이름 큐에 갇혀 **영영 배달되지 않는다**(통지는
     ///   `notified` 라 재발화도 없다 = 계약이 조용히 반쪽). id 를 함께 들고 있으면 상위가 그걸 파킹 힌트로
     ///   실어 이름과 무관하게 그 incarnation 으로 배달할 수 있다.
     sender_id: PeerId,
-    /// 요청 수신자(누가 회신해야 하나 — 관측/보고용).
     recipient: String,
     /// ★해석된 수신자 PeerId(D 리뷰 B1 — load-bearing)★: 발송 시점에 수신자가 **산 에이전트로 해석됐으면**
     /// 그 PeerId.
     /// ★`None` 은 4차부터 **운영 경로에 다시 존재한다**(ADR-0116 결정 1 — 잠듦 파킹 부활)★: 잠든(프로필만
     /// 있는) 수신자에게 건 request 는 계약을 열지만 그 순간 산 incarnation 이 없어 id 를 못 붙인다. 그
     /// 계약은 **이름으로** 의무를 귀속하다가(아래 폴백), 복원 후 실제 배달 시점에
-    /// `rebind_request_recipient` 가 착지 incarnation 의 id 를 박는다. (3차 서술 "None 은 테스트 seam
-    /// 뿐" 은 폐기 — 잠듦 파킹이 그 전제를 뒤집었다.)
+    /// `rebind_request_recipient` 가 착지 incarnation 의 id 를 박는다.
     ///
     /// ★왜 이름만으로는 안 되나★: 같은 이름의 산 에이전트가 둘일 때(동명 다수) 발신자는 exact PeerId 로
     ///   지목해 한쪽에만 request 를 보낼 수 있는데, 계약은 이름(`recipient`)으로만 기록됐다 — 그러면
@@ -227,10 +207,7 @@ struct RequestEntry {
     ///   문구가 어긋났다. 계약 문구는 발신자가 쓴 그대로여야 하므로 표기를 원본째 보관한다(둘을 한 튜플로
     ///   묶어 "기한이 있으면 표기도 반드시 있다" 를 타입으로 강제한다).
     reply_by: Option<(Duration, String)>,
-    /// 요청 오픈(발송) 시각 — reply_by 절대 기한 = created_at + reply_by.
     created_at: Instant,
-    /// ★계약이 종결됐나(종점 도달)★ — true 면 오픈 목록·due_timeouts·상한 계수에서 빠진다.
-    ///   종결 사유는 둘이다: 회신 수용(`replied`) 또는 **실패 종결**(`reply_failed` — 아래 필드).
     closed: bool,
     /// ★실패 종결 표식(4차 신설 — ADR-0116 결정 2/3 · ADR-0118 결정 1)★. `closed` 와 **항상 함께** 세워지고,
     /// 이 값이 `true` 면 종점 어휘가 `replied` 가 아니라 `reply_failed` 다(계약 축 — spec §6).
@@ -244,7 +221,6 @@ struct RequestEntry {
     ///   ② 요청자 프로필 삭제 정리(`fail_open_requests_from`). 그 밖의 회신 실패는 **무동작**이다.
     // ADR-0116 (결정 2) / ADR-0118 (결정 1·4)
     reply_failed: bool,
-    /// 타임아웃이 이미 보고됐나 — 이중 통지 방지(위 struct 주석).
     notified: bool,
     /// ★상한 압력으로 **은퇴 예정 표시**됨(round-5 mark-and-sweep)★ — 아직 목록에 살아 있고 회신도 받을 수
     /// 있다. 커밋 때 비로소 물리 제거되고, 롤백이면 표시만 지워져 아무 일도 없던 상태로 돌아간다.
@@ -253,7 +229,6 @@ struct RequestEntry {
     ///   **꺼냈다**. 그 창 동안 그 계약은 세상에 없는 것처럼 굴어서 ① 정당한 회신이 `close_on_reply` 에서
     ///   `NoMatch` 로 빗나가고 ② 롤백이 "열린 채" 되돌려 유령 상태·헛 통지를 만들었다. 꺼내지 않고 표시만
     ///   하면 그 창 자체가 없다 — 회신·조회·중복검사 전부 평소 경로로 계속 동작한다.
-    /// ★상한 계수에서만 빠진다★: `occupies_slot` 참조(곧 비워질 자리로 계산해 새 계약을 받아들인다).
     // round-5 mark-and-sweep
     pending_retirement: bool,
     /// ★아직 접수 확정되지 않은 신규 계약(round-5 mark-and-sweep)★ — 발송이 dispatch 를 통과하면 커밋에서
@@ -284,11 +259,6 @@ struct RequestEntry {
 }
 
 impl RequestEntry {
-    /// 아직 **살아 있는**(= 종결되지 않은) 계약인가. 이 부류만 이력 evict 를 견디고(`record`),
-    /// `MAX_OPEN_REQUESTS` cap 의 계수 대상이다.
-    /// ★4차 보정★: 종결(`closed`)에는 회신 수용(`replied`)과 **실패 종결**(`reply_failed`)이 함께 들어온다 —
-    ///   둘 다 결말이 확정된 계약이라 여기서 갈리지 않는다(ADR-0118 결정 4 "단일 술어 유지").
-    ///
     /// ★기준 = `!closed` 단독(D 리뷰 B3 — 옛 `!closed && !notified` 에서 교정)★: 예전엔 기한 초과 통지가
     ///   나간 계약(`notified`)을 "끝난 것" 으로 취급해 이력 evict 때 함께 지웠다. 그런데 통지는 **발신자에게
     ///   알렸다**는 사실일 뿐 회신이 온 게 아니다 — 수신자는 여전히 답할 의무가 있고(spec §3 "늦어도
@@ -331,7 +301,6 @@ impl RequestEntry {
     }
 }
 
-/// request 회신 결과(엄격 매칭, spec §2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyOutcome {
     /// 오픈된 request 를 정확히 닫음(첫 유효 회신). 이력도 `Replied` 로 정상 전이됨.
@@ -346,7 +315,7 @@ pub enum ReplyOutcome {
     ClosedHistoryAnomaly { from: DeliveryStatus },
     /// 매칭되는 오픈 request 없음 — 틀린 id 이거나 이미 닫힘/미존재(엄격: 아무 것도 안 닫음).
     NoMatch,
-    /// 이미 닫힌 request 에 대한 두 번째 회신 — no-op(중복 회신, 아래 close_on_reply 주석 참조).
+    /// 이미 닫힌 request 에 대한 두 번째 회신 — no-op(첫 회신이 이미 계약을 이행했다).
     AlreadyClosed,
 }
 
@@ -375,8 +344,6 @@ pub struct RequesterCleanup {
     pub guard_held: usize,
 }
 
-/// `transition` 실패 사유 — 불법 상태 전이(spec §5 그래프 위반) 또는 대상 레코드 부재.
-///
 /// ★왜 typed 에러인가(load-bearing)★: 예전 `transition` 은 `bool`(성공/미존재)만 냈고 **불법 전이를 조용히
 ///   수행**했다(`Expired → Delivered` 같은 되돌림·건너뜀 허용). 이는 "상태 전이 시각 = 회신·발신 시각"
 ///   장부 의미를 오염시킨다. 이제 불법 전이는 타입으로 거부해 상위가 버그를 즉시 감지한다(spec §5).
@@ -384,31 +351,26 @@ pub struct RequesterCleanup {
 pub enum TransitionError {
     /// (msg_id, to) 레코드가 없음 — evict 됐거나 미존재.
     NotFound,
-    /// 현재 상태에서 요청한 상태로의 전이가 합법 그래프에 없음(되돌림·건너뜀·terminal 재전이 등).
     Illegal {
         from: DeliveryStatus,
         to: DeliveryStatus,
     },
 }
 
-/// ★상한 압력으로 은퇴한 계약 1건(round-2 리뷰 F1 · 사용자 결정 2026-07-27)★ — 호출자가 **락 밖에서**
-/// 계측 로그를 남길 재료다(조용한 소멸 금지).
+/// ★상한 압력으로 **은퇴 예정 표시**된 계약 1건(round-2 리뷰 F1 · 사용자 결정 2026-07-27)★ — 호출자가
+/// **락 밖에서** 계측 로그를 남길 재료다(조용한 소멸 금지).
 ///
 /// ★언제 생기나★: 미회신 계약이 `MAX_OPEN_REQUESTS` 에 닿았는데 새 request 가 들어왔고, 추적 목록에
 ///   **은퇴 가능한**(= 발신자에게 남은 통지 약속이 없는) 계약이 있을 때. 그 중 가장 오래된 하나가 자리를
 ///   내준다 — 메일박스·notice 레인이 cap 에서 "가장 오래된 것을 은퇴" 시키는 것과 같은 패턴이다.
-/// ★은퇴 **예정** 표시된 계약의 표시 정보(round-5 mark-and-sweep)★ — 커밋 시점의 계측 로그용이다.
 ///
 /// ★값만 담는다(원본 항목을 들고 다니지 않는다)★: 희생자는 목록에서 나간 적이 없으므로 되돌릴 상태가
 ///   없다 — 롤백은 그 항목의 표시를 지우기만 하면 된다. 그래서 이 구조체는 "무엇이 은퇴하려 했나" 를
-///   사람이 읽을 수 있게 나르는 것 이상을 하지 않는다(옛 설계의 entry/index 운반은 삭제됐다).
+///   사람이 읽을 수 있게 나르는 것 이상을 하지 않는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetiredContract {
-    /// 은퇴 예정으로 표시된 request id.
     pub request_id: String,
-    /// 그 계약의 발신자 이름.
     pub sender: String,
-    /// 그 계약의 수신자 이름.
     pub recipient: String,
     /// 표시 시점 기준 나이(로그용 — 벽시계가 아니라 경과).
     pub age: Duration,
@@ -435,7 +397,6 @@ impl ReservationLiveness {
         Self(Arc::new(()))
     }
 
-    /// 장부에 심을 약한 쪽 — 이걸로 sweep 이 "소유자가 아직 있나" 를 묻는다.
     pub fn watch(&self) -> Weak<()> {
         Arc::downgrade(&self.0)
     }
@@ -462,10 +423,8 @@ pub struct CommitOutcome {
     pub retired: bool,
 }
 
-/// request 오픈 결과 — 중복 id 방어(spec §3 · 아래 open_request 주석).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenOutcome {
-    /// 새 request 를 열었음.
     Opened,
     /// 새 request 를 (잠정으로) 열되, 상한 압력으로 **가장 오래된 은퇴 가능 계약**에 은퇴 예정 표시를 했음.
     ///
@@ -498,21 +457,17 @@ pub enum DropOutcome {
     NotFound,
 }
 
-/// 타임아웃 초과 request 1건의 보고 정보(발신자에게 notice 를 만드는 `MessagingService` 용).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueTimeout {
-    /// 초과한 request id.
     pub request_id: String,
     /// notice 를 받을 발신자 이름(**발송 시점** 표시 이름 — 그 뒤 개명됐을 수 있다).
     pub sender: String,
     /// ★notice 배달용 발신자 id(C3 리뷰 fix 2)★ — 이름이 바뀌었어도 이 id 로 배달 경로를 찾는다
     ///   (`RequestEntry.sender_id` 주석). 상위가 파킹 힌트 + flush 도어벨 대상으로 쓴다.
     pub sender_id: PeerId,
-    /// 회신하지 않은 수신자(notice 문구용).
     pub recipient: String,
     /// ★초과된 기한의 **표기 원본**(C3 리뷰 fix 6 — notice 문구용)★: spec §1 notice 템플릿이
-    ///   `기한({reply_by})` 을 그대로 노출하므로, 발신자가 쓴 표기(`"60m"`)를 **그대로** 싣는다. 예전엔
-    ///   Duration 만 넘기고 상위가 표기를 역산해(`60m` → `1h`) 봉투 속성과 통지 문구가 어긋났다.
+    ///   `기한({reply_by})` 을 그대로 노출하므로, 발신자가 쓴 표기(`"60m"`)를 **그대로** 싣는다.
     pub reply_by_raw: String,
 }
 
@@ -526,45 +481,25 @@ pub struct DueTimeout {
 ///   나갔다는 사실은 구분할 수 있게 함께 싣는다(상위가 표시 여부를 정한다).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRequestView {
-    /// request 메시지 id(회신의 `in_reply_to` 가 가리킬 값).
     pub request_id: String,
-    /// 요청 발신자 이름(발송 시점 표시 이름).
     pub sender: String,
     /// 요청 발신자의 PeerId — 미결 조회가 "내가 건 요청" 을 **이름이 아니라 id 로** 가르는 축(리뷰 B1).
     pub sender_id: PeerId,
-    /// 요청 수신자 이름 — 회신 의무를 진 쪽.
     pub recipient: String,
-    /// 해석된 수신자 PeerId — 동명 다수에서 의무를 정확히 귀속시키는 축(리뷰 B1).
-    /// ★`None` 은 테스트 seam 이 아니다(4차 — ADR-0116 결정 1)★: **잠든 수신자**의 계약은 산 incarnation 이
-    /// 없어 `None` 으로 열리고(`service` 발송 경로), 복원 후 실제 주입 시점에 `rebind_request_recipient` 가
-    /// 착지 id 를 박는다. 즉 운영 경로에 `None` 인 구간이 실재한다 — 그 구간의 회신은 `close_on_reply` 의
-    /// **이름 폴백**만이 닫을 수 있다(그래서 그 팔은 dead code 가 아니다).
     pub recipient_id: Option<PeerId>,
-    /// 발신자가 쓴 기한 표기 원본(`"10m"`). 기한 없는 request 는 None.
     pub reply_by_raw: Option<String>,
-    /// 계약 오픈(발송) 시각 — 상위가 `now` 와 빼서 경과를 만든다(장부는 벽시계를 모른다).
     pub created_at: Instant,
-    /// 기한 초과 통지가 이미 나갔나(계약은 여전히 열려 있다 — struct 주석).
     pub notified: bool,
 }
 
-/// 메시지 장부 — 이력 링버퍼 + request 추적. 순수(주입 시계).
 #[derive(Debug)]
 pub struct Ledger {
-    /// 이력 링버퍼(오래된 순, front = 가장 오래됨). 용량 초과 시 front evict.
     history: VecDeque<MessageRecord>,
-    /// 오픈/닫힘 request 추적. 이력과 별도 컬렉션이고, **끝난 항목만** 이력 evict 에 결박된다(record 참조).
-    ///   이력이 먼저 사라진 채 끝난 항목은 그 순간 정리된다(`purge_finished_without_history` — fix 1).
     requests: Vec<RequestEntry>,
-    /// 링버퍼 용량(테스트가 작은 값으로 evict 를 빨리 검증하도록 주입 가능).
     capacity: usize,
-    /// ★evict 가 한 번이라도 일어났나(D 리뷰 B2 — 조회 정직성)★. 링이 가득 차 앞쪽 레코드를 버리기
-    /// 시작하면 `records_for` 가 돌려주는 행 집합이 **그 메시지의 전부라는 보장이 사라진다** — 그런데
-    /// `messages { id }` 응답은 그걸 완전한 목록인 양 보여 준다(그룹 방송이면 "일부 멤버는 아예 없었던 것"
-    /// 처럼 읽힌다). 이 플래그가 그 불완전 가능성을 조회에 실어 나르는 최소 신호다.
+    /// ★evict 가 한 번이라도 일어났나(D 리뷰 B2 — 조회 정직성)★.
     /// ★왜 "정확히 몇 건 잘렸나" 가 아닌가★: 어떤 msg_id 의 행이 몇 개 사라졌는지는 이미 버린 데이터라
-    ///   재구성할 수 없다. 없는 정확도를 지어내지 않고 **"잘렸을 수 있다" 는 사실만** 정직하게 전한다
-    ///   (`records_for_detailed` 가 이 플래그와 위치로 판정을 좁힌다).
+    ///   재구성할 수 없다. 없는 정확도를 지어내지 않고 **"잘렸을 수 있다" 는 사실만** 정직하게 전한다.
     // 리뷰 B2
     evicted_any: bool,
 }
@@ -576,7 +511,6 @@ impl Default for Ledger {
 }
 
 impl Ledger {
-    /// 기본 용량(HISTORY_CAPACITY) 장부.
     pub fn new() -> Self {
         Self::default()
     }
@@ -592,8 +526,6 @@ impl Ledger {
         }
     }
 
-    /// 새 메시지 배달 레코드를 이력에 append(초기 상태 지정). 용량 초과 시 가장 오래된 레코드 evict.
-    ///
     /// ★초기 상태 인자화★: 단일/그룹 발송은 `Pending`(주입 대기) 또는 `Delivered`(즉시 주입 폴백)로,
     ///   그룹 죽은 멤버는 `Skipped` 로 시작하므로 호출자가 초기 상태를 정한다(spec §4·§5).
     /// ★evict = front(오래된 것) + **회신으로 닫힌 계약만** 동반 정리(C3 fix 3 → D 리뷰 B3 로 좁힘)★: 링버퍼라
@@ -603,12 +535,6 @@ impl Ledger {
     ///   증발**했다(리뷰 B3 — `RequestEntry::is_live` 주석에 시퀀스). 계약의 정본은 추적이지 이력이 아니므로
     ///   (ReplyOutcome 주석), 이력 용량이 계약을 죽이면 안 된다. 미회신 계약의 유계는 `MAX_OPEN_REQUESTS`
     ///   (open_request 의 `Full`)가 따로 준다.
-    /// ★그 evict 를 견딘 계약이 나중에 **닫히면**(fix 1)★ 정리해 줄 evict 이벤트가 이미 지나갔으므로 닫힘
-    ///   시점에 즉시 지운다 — 여기 evict 경로의 정리는 그 짝(belt)이다(`purge_finished_without_history`).
-    /// ★evict 사실은 남긴다(리뷰 B2)★: 한 번이라도 버렸으면 `evicted_any` 를 세워, 조회(`messages { id }`)가
-    ///   자기 행 목록이 완전하다고 단언하지 못하게 한다(`records_for_detailed`).
-    /// 단일 수신자 발송(및 notice)용 — 기대 배달기록 수 = 1. 그룹 fan-out 은 `record_with_expected` 로
-    /// 멤버 수 N 을 실어야 조회가 잘림을 정확히 판정한다(`MessageRecord.expected_rows`).
     pub fn record(
         &mut self,
         msg_id: &str,
@@ -621,8 +547,8 @@ impl Ledger {
         self.record_with_expected(msg_id, from, to, body, status, now, 1);
     }
 
-    /// `record` + **기대 배달기록 수**(round-2 리뷰 F3). 같은 `msg_id` 의 모든 행이 같은 `expected` 를 든다 —
-    /// 그룹 fan-out 은 두 단계(계획 락 / 멤버별 구간)로 기록하므로 두 곳 모두 같은 N 을 넘겨야 한다.
+    /// `record` + **기대 배달기록 수**(round-2 리뷰 F3). 그룹 fan-out 은 두 단계(계획 락 / 멤버별 구간)로
+    /// 기록하므로 두 곳 모두 같은 N 을 넘겨야 한다.
     #[allow(clippy::too_many_arguments)]
     pub fn record_with_expected(
         &mut self,
@@ -645,12 +571,8 @@ impl Ledger {
             // 0 은 의미가 없다(모든 발송은 최소 1행) — 방어적으로 1 로 올려 `rows < expected` 판정이
             //   "행이 있는데 기대가 0" 같은 모순 상태에 빠지지 않게 한다.
             expected_rows: expected_rows.max(1),
-            // 기록 시점엔 코드가 없다 — 삭제 정리(`fail_pending`)만 사후에 채운다(그 필드 주석).
             fail_code: None,
         });
-        // 용량 초과 — 가장 오래된(front) 것부터 evict(오래된 순 유지). evict 뒤 **닫힌 계약 중 이력이 사라진
-        // 것**을 정리한다(`purge_finished_without_history`) — 미회신 계약은 남겨야 회신·통지·미결 조회 경로가
-        // 유지된다(위 주석 B3). 미회신분의 상한은 MAX_OPEN_REQUESTS 가 준다.
         let mut evicted_now = false;
         while self.history.len() > self.capacity {
             if self.history.pop_front().is_some() {
@@ -675,8 +597,6 @@ impl Ledger {
     ///   것" 으로 보고 함께 지웠는데, 통지는 회신이 아니다 — 그 삭제가 미결 조회에서 의무를 증발시켰다
     ///   (`RequestEntry::is_live` 주석의 4단계 시퀀스). 이제 `is_live() == !closed` 라 통지분은 여기 걸리지
     ///   않고, 그 유계는 `MAX_OPEN_REQUESTS` 가 준다.
-    /// ★비용★: 닫힌 항목이 하나도 없으면(대부분) 선형 스캔 한 번으로 즉시 반환하고, 있을 때만 이력
-    ///   msg_id 집합(≤ capacity)을 만들어 O(이력 + 추적)으로 판정한다.
     // 리뷰 B3
     // ADR-0108 (잠정 purge 면제 — 미정산 항목의 수명은 가드 소유)
     fn purge_finished_without_history(&mut self) {
@@ -693,14 +613,8 @@ impl Ledger {
             .retain(|r| r.is_live() || r.provisional || live_ids.contains(r.request_id.as_str()));
     }
 
-    /// (msg_id, to) 쌍의 이력 레코드를 새 상태로 전이하고 전이 시각을 기록한다. 불법 전이는 거부한다.
-    ///
     /// ★왜 (msg_id, to) 로 지목★: 그룹 방송은 한 msg_id 에 수신자별 레코드가 N개라 msg_id 만으로는 어느
     ///   배달인지 특정 못 한다 — 수신자까지 함께 지목해 정확히 한 레코드를 전이한다(1:N 회계, spec §4).
-    /// ★합법 전이만 허용(load-bearing — spec §5 그래프)★: 현재 상태에서 `status` 로의 간선이 합법 그래프
-    ///   (`can_transition_to`)에 없으면 `TransitionError::Illegal` 로 거부한다 — 되돌림·건너뜀·terminal
-    ///   재전이는 장부 시각 의미를 오염시키므로 상태를 바꾸지 않는다. 레코드가 없으면 `NotFound`.
-    /// ★반환★: `Ok(())` = 전이 성공(now 를 전이 시각으로 기록). 그 외는 위 typed 에러.
     pub fn transition(
         &mut self,
         msg_id: &str,
@@ -728,14 +642,9 @@ impl Ledger {
 
     /// ★삭제 정리 전용 종결(`Pending → Failed` + 사유 코드 — spec §5 삭제 정리 · §6 전이 그래프 개정)★.
     ///
-    /// ★왜 `transition` 이 아니라 전용 동사인가(load-bearing)★: 이 간선은 **삭제 정리 한 경로에만** 합법이다
-    ///   (`can_fail_by_cleanup` 주석). 범용 전이에 열면 임의 호출자가 배달 대기 중인 행을 사유 없이 실패로
-    ///   바꿀 수 있다. 그래서 능력을 이 동사 하나에 가두고, 그 동사는 **사유 코드를 필수 인자로** 받는다 —
-    ///   조회가 코드 없는 `failed` 를 보고 "왜 실패했나" 를 답할 수 없는 상태를 타입으로 막는다.
-    /// ★`Delivered → Failed` 는 여전히 불법★: 이미 꽂힌 메시지가 사후에 실패로 뒤집히면 "배달됐다가 실패로
-    ///   돌아간" 불가능한 이력이 된다(spec §6). 그 경우 `Illegal` 을 돌려준다.
-    /// ★반환★: `Ok(())` = 종결 성공 · `Illegal` = pending 이 아님 · `NotFound` = 레코드가 링에서 밀려남
-    ///   (호출자가 락 밖에서 debug 로 남긴다 — 조용한 유실 금지).
+    /// ★왜 **사유 코드가 필수 인자**인가(load-bearing)★: 조회가 코드 없는 `failed` 를 보고 "왜 실패했나" 를
+    ///   답할 수 없는 상태를 타입으로 막는다.
+    /// ★`NotFound`(레코드가 링에서 밀려남)는 호출자가 **락 밖에서** debug 로 남긴다 — 조용한 유실 금지.
     // ADR-0116 (결정 3/4 — 삭제 정리)
     pub fn fail_pending(
         &mut self,
@@ -767,8 +676,8 @@ impl Ledger {
     ///
     /// ★다중 수신자 request = 독립 계약 N개(ADR-0111 결정 5 · load-bearing)★: 메시지 id 는 N계약 공통이고
     ///   (장부 = 메시지 1 : 배달기록 N 원칙 유지) **회신자가 누구냐로 계약이 갈린다**. 그래서 이 함수는 같은
-    ///   `request_id` 로 **수신자마다 한 번씩** 불린다 — 옛 "id 하나당 계약 하나" 전제(그룹 request 금지)는
-    ///   폐기됐다. 배달되지 못한 수신자(입구 반려·`MAILBOX_FULL`·`REQUEST_CAPACITY`)의 계약은 열지 않는다.
+    ///   `request_id` 로 **수신자마다 한 번씩** 불린다.
+    ///   배달되지 못한 수신자(입구 반려·`MAILBOX_FULL`·`REQUEST_CAPACITY`)의 계약은 열지 않는다.
     ///
     /// ★reply_by 시계 = 발송 기준(spec §3·§5 · ADR-0104)★: 절대 기한 = `created_at(now) + reply_by`. 수신
     ///   지연과 무관한 발신자 관점 계약이라 now(발송 시각)를 기준으로 굳힌다.
@@ -777,7 +686,7 @@ impl Ledger {
     ///   (no-op). 메시지 id 는 **데몬이 생성하는 유일 값**이고 수신자는 발송 해석 단계에서 이미 중복 제거되므로
     ///   (spec §5 해석 순서 ④) 이 조합의 재사용은 non-scenario 다. ★파킹된 수신자도 계약을 연다(spec §3
     ///   항목 2)★ — busy 든 **잠듦**(ADR-0116 결정 1)이든 수용은 수용이라 회신 의무가 성립하고 기한 스윕도
-    ///   정상 발화한다. 잠듦 계약은 `recipient_id = None` 으로 열린다(산 incarnation 이 없다).
+    ///   정상 발화한다.
     ///   예전의 "닫힌 id 는 재오픈 허용" 관대함은
     ///   두 항목을 동시에 남겨 (a) 회신이 앞쪽 닫힌 항목을 먼저 만나 `AlreadyClosed` 오발, (b) 같은-id 이력
     ///   evict 가 재오픈 추적을 드롭하는 shadowing 버그를 낳았다.
@@ -793,17 +702,10 @@ impl Ledger {
     ///     (b) `reply_by == None` — 애초에 기한이 없어 통지를 약속한 적이 없다.
     ///   ★절대 은퇴시키지 않는 것★: 기한이 남아 있는데 아직 통지 안 된 계약 — 그 계약은 **데몬이 발신자에게
     ///   진 빚**(기한 초과 시 notice)이다. 그걸 지우면 약속한 통지가 영영 안 나가는 조용한 위약이 된다.
-    /// ★오래된 순★: `requests` 는 append 순서 = 발송 순서라 첫 매치가 가장 오래된 것이다.
-    /// ★조용한 소멸 금지★: 표시 사실은 `OpenedAfterMarking` 으로 호출자에게 올라가, **커밋 시점**에 락 밖
-    ///   계측 로그가 된다(표시만 하고 롤백되면 아무 일도 없었으므로 로그도 없다).
-    ///   이력 링의 행은 손대지 않는다(링이 자기 수명을 소유 — 은퇴는 **계약 추적**만의 일이다).
+    /// ★이력 링의 행은 손대지 않는다★(링이 자기 수명을 소유 — 은퇴는 **계약 추적**만의 일이다).
     // round-2 리뷰 F1 / 사용자 결정 2026-07-27
-    /// ★인자 `reply_by` = (기한, 표기 원본)★: 표기는 통지 문구에 그대로 쓰인다(`DueTimeout.reply_by_raw`).
-    ///   튜플로 묶어 "기한이 있으면 표기도 있다" 를 타입으로 강제한다(둘이 어긋날 여지 자체를 없앤다).
-    /// ★인자 `recipient_id`(D 리뷰 B1)★: 발송 시점에 해석된 수신자의 PeerId. 동명 다수에서 회신 의무를
-    ///   정확히 귀속시키는 축이다(`RequestEntry.recipient_id`).
-    ///   ★`None` 은 운영 경로에 실재한다(4차 — ADR-0116 결정 1. 옛 "테스트 seam 전용" 서술은 **거짓이라
-    ///   폐기**)★: **잠든 수신자**에게 파킹되는 request 는 산 incarnation 이 없어 `None` 으로 열린다
+    /// ★인자 `recipient_id` 의 `None` 은 운영 경로에 실재한다(4차 — ADR-0116 결정 1)★:
+    ///   **잠든 수신자**에게 파킹되는 request 는 산 incarnation 이 없어 `None` 으로 열린다
     ///   (`service::handle_send` 의 잠듦 갈래). 그 구간의 계약을 닫는 유일한 경로가 `close_on_reply` 의
     ///   **이름 폴백**이므로 그 팔을 "죽은 코드" 로 읽고 지우면 잠든 요청자 계약이 영영 안 닫힌다.
     ///   복원 후 실제 주입 시점에 `rebind_request_recipient` 가 착지 id 를 박아 그 뒤로는 id 축이 산다.
@@ -818,7 +720,6 @@ impl Ledger {
         reply_by: Option<(Duration, String)>,
         now: Instant,
     ) -> OpenOutcome {
-        // 같은 **계약 키**(id, 수신자)가 추적에 하나라도 있으면(open/closed 무관) 거부 — 위 doc 참조.
         if self
             .requests
             .iter()
@@ -826,16 +727,12 @@ impl Ledger {
         {
             return OpenOutcome::DuplicateId;
         }
-        // 슬롯 계수 정본 = `occupies_slot`(은퇴 표시 제외 · 잠정은 닫혀도 포함) — 그 주석 참조.
         let mut retired = None;
         if self.occupied_slots() >= MAX_OPEN_REQUESTS {
-            // cap 압력 — 가장 오래된 **은퇴 가능** 계약에 은퇴 예정 표시를 한다(제거하지 않는다).
             // ★후보에서 빼는 두 부류(round-5 mark-and-sweep · load-bearing)★:
             //   ① 이미 은퇴 표시된 계약(`pending_retirement`) — 두 발송이 같은 희생자를 노리면 한쪽 커밋이
             //      다른 쪽의 희생자를 먼저 지워, 남은 쪽의 롤백/커밋이 허공을 가리킨다(계수도 어긋난다).
-            //   ② **잠정 계약**(`provisional`) — 아직 접수 확정 전인 남의 신규 계약이다. 이걸 희생자로 고르면
-            //      그 발송은 **배달에 성공했는데 계약이 없는** 상태가 되고, 그 request 로 온 회신이 전부
-            //      `NoMatch` 로 빗나간다(발신자는 영원히 기다리고 기한 통지도 못 받는다).
+            //   ② **잠정 계약**(`provisional`) — 그 필드 주석의 실패 모드.
             // ADR-0108 (cap 은퇴 — 은퇴 가능분 최고령 선택)
             // ★"가장 오래된" 은 `created_at` 기준★ — 목록 위치에 의존하지 않는다. 동률이면 `min_by_key` 가
             //   첫 원소를 주므로 append 순서가 타이브레이크로 남는다.
@@ -856,9 +753,7 @@ impl Ledger {
                         age: now.saturating_duration_since(v.created_at),
                     });
                 }
-                // 표시할 수 있는 계약이 하나도 없다 = 남은 건 데몬이 진 통지 빚이거나 남의 미확정 접수분뿐.
-                //   그때만 반려한다(가시적 실패 — 발신자가 통보로 우회하거나 잠시 뒤 재시도한다).
-                //   ★잠정 계약만 남아 `Full` 이 나오는 것도 정직한 답이다★: 그 순간 상한은 실제로 차 있고,
+                // ★잠정 계약만 남아 `Full` 이 나오는 것도 정직한 답이다★: 그 순간 상한은 실제로 차 있고,
                 //   경합 상대가 커밋/롤백을 끝내면 곧 자리가 난다.
                 None => return OpenOutcome::Full,
             }
@@ -875,13 +770,10 @@ impl Ledger {
             reply_failed: false,
             notified: false,
             pending_retirement: false,
-            // 접수 확정 전 — 커밋이 이 표시를 지운다(그전엔 남의 희생자가 될 수 없다).
             provisional: true,
-            // F1: 이 예약이 붙인 표시를 장부가 기억한다(sweep 회수의 근거).
             marked_victim: retired
                 .as_ref()
                 .map(|r: &RetiredContract| (r.request_id.clone(), r.recipient.clone())),
-            // R1: 여는 쪽이 곧바로(같은 락 구간에서) 가드의 생존 토큰을 붙인다 — 위 필드 주석.
             reservation_token: None,
         });
         match retired {
@@ -890,16 +782,6 @@ impl Ledger {
         }
     }
 
-    /// ★예약 확정(커밋) — 표시된 희생자를 **물리 제거**하고 잠정 표시를 지운다(round-5 mark-and-sweep)★.
-    ///
-    /// 여기가 은퇴가 실제 사건이 되는 유일한 지점이다(호출자는 이 뒤에 계측 로그를 찍는다 — 그전에 찍으면
-    /// 일어나지 않은 일을 보고하게 된다).
-    /// ★희생자가 그 사이 회신으로 닫혔어도 그냥 제거한다★: `replied` 는 종점이라 더 볼 일이 없고, 그
-    ///   사실은 이력 레코드에 이미 `Replied` 로 남아 있다(추적 항목은 회계용일 뿐이다).
-    /// ★희생자를 못 찾으면 no-op★: 정상 흐름엔 없다(표시된 항목은 커밋/롤백까지 목록에 남는다).
-    // round-5 mark-and-sweep
-    /// ★인자 = 계약 키 `(request_id, recipient)`(ADR-0111 결정 5)★ — 한 msg_id 아래 계약이 여러 개라
-    ///   id 만으로는 어느 계약인지 특정할 수 없다.
     /// ★방금 연 잠정 예약에 **소유자 생존 토큰**을 붙인다(R1)★ — 반드시 `open_request` 와 **같은 락 구간**에서
     /// 부른다(그 사이에 sweep 이 끼어들면 가드가 붙기 전의 항목을 버려진 것으로 읽는다 —
     /// `RequestEntry::reservation_token` 주석).
@@ -921,8 +803,14 @@ impl Ledger {
         }
     }
 
+    /// ★예약 확정(커밋) — 표시된 희생자를 **물리 제거**하고 잠정 표시를 지운다(round-5 mark-and-sweep)★.
+    ///
+    /// ★희생자가 그 사이 회신으로 닫혔어도 그냥 제거한다★: `replied` 는 종점이라 더 볼 일이 없고, 그
+    ///   사실은 이력 레코드에 이미 `Replied` 로 남아 있다(추적 항목은 회계용일 뿐이다).
+    /// ★희생자를 못 찾으면 no-op★: 정상 흐름엔 없다(표시된 항목은 커밋/롤백까지 목록에 남는다).
     /// ★반환 = **실제로 한 일**(R2)★ — 계획한 은퇴가 일어났는지는 호출자가 가정하지 말고 이 값을 봐야 한다
     /// (`CommitOutcome` 헤더의 계측 오염 근거).
+    // round-5 mark-and-sweep
     pub fn commit_open(
         &mut self,
         provisional: Option<(&str, &str)>,
@@ -953,7 +841,6 @@ impl Ledger {
             // ★purge **전에** 판정한다(R2)★: purge 도 항목을 지우므로 뒤에서 길이를 비교하면 "내가 은퇴시킨
             //   것" 과 "좀비 정리로 사라진 것" 이 섞인다.
             out.retired = self.requests.len() < before;
-            // 이력이 이미 밀려난 채 끝난 항목이 있으면 함께 정리(좀비 방지 — purge 주석).
             self.purge_finished_without_history();
         }
         out
@@ -1006,7 +893,6 @@ impl Ledger {
     ///   조회는 그 의무를 **못 본다** — 봉투를 실제로 받은 쪽이 "답할 게 없다" 고 읽는 최악의 조합이다.
     ///   그래서 **봉투가 실제로 꽂힌 시점**(pending→delivered 전이 자리, 착지 incarnation 을 아는 유일한
     ///   지점)에 의무를 그 수신자에게 옮긴다 — "의무는 봉투를 받은 자를 따른다".
-    /// ★epoch 은 담지 않는다★: 같은 에이전트의 재시작은 PeerId 를 유지한다(ADR-0007) — 의무는 유지돼야 한다.
     /// ★닫힌 계약은 건드리지 않는다★: 이미 회신이 온 계약의 상대를 뒤늦게 바꾸면 이력이 오염된다.
     // round-2 리뷰 F2
     pub fn rebind_request_recipient(
@@ -1024,9 +910,6 @@ impl Ledger {
         }
     }
 
-    /// 이 `msg_id` 가 장부에서 **이미 쓰이고 있나** — 이력 레코드(그룹 방송 포함) 또는 request 추적
-    /// (open/closed 무관) 어느 쪽에든 있으면 true.
-    ///
     /// ★왜 모든 발송이 이걸 보나(C3 리뷰 fix 12 · load-bearing)★: 예전엔 id 충돌을 **request 발송만**
     ///   잡았다(`open_request` 의 DuplicateId). 그런데 id 는 이력 레코드의 상관 키이자 회신 매칭 키라,
     ///   통보/회신이 기존 id 와 겹치면 (a) `records_for`·`transition` 이 남의 레코드를 집고 (b) 관측 레코드가
@@ -1042,8 +925,6 @@ impl Ledger {
             || self.requests.iter().any(|r| r.request_id == msg_id)
     }
 
-    /// 이 request 가 **회신으로 닫혔나**(추적에 있고 `closed`). 없는 id 는 false.
-    ///
     /// ★용도(C3 리뷰 fix 5 — 타임아웃↔회신 레이스 좁히기)★: `due_timeouts` 로 걷은 뒤 notice 를 파킹하기
     ///   직전에 상위가 다시 확인한다 — 그 사이 회신이 도착해 계약이 닫혔으면 "회신 없음" 통지를 보내지
     ///   않는다. 없는 id 가 false 인 건 의도적이다: evict 등으로 추적이 사라진 경우 타임아웃은 실제로
@@ -1058,43 +939,19 @@ impl Ledger {
             .any(|r| r.request_id == request_id && r.recipient == recipient && r.closed)
     }
 
-    /// 회신 도착 처리 — **엄격 매칭**(spec §2 · ADR-0103 불변식). `in_reply_to` 가 오픈된 request id 를
-    /// 정확히 가리킬 때만 그 request 를 닫고(`Closed`), 그 시각으로 이력 레코드를 `Replied` 전이한다.
-    /// 틀린 id = `NoMatch`(아무 것도 안 닫음). 이미 닫힌 request 에 대한 두 번째 회신 = `AlreadyClosed`(no-op).
-    ///
-    /// ★엄격의 근거★: 관대 매칭(미회신 상대의 다음 메시지를 회신 간주)은 우연 닫힘 오발이라 거부됐다
-    ///   (ADR-0103 거부 대안). 오직 `request_id == in_reply_to` 동등만 인정한다.
     /// ★표시(은퇴 예정·잠정)는 매칭을 가리지 않는다(round-5 mark-and-sweep · load-bearing)★: 두 표시는
     ///   **회계용**이지 존재 여부가 아니다. 여기서 `!closed` 만 보므로 ① 은퇴 예정으로 표시된 계약에 온
     ///   정당한 회신도 정상적으로 닫히고(옛 물리 제거 설계에선 이게 `NoMatch` 로 빗나갔다 — 발신자는 답을
     ///   받았는데 계약은 안 닫히고 나중에 헛 기한 통지까지 날 수 있었다) ② 아직 확정 전인 잠정 계약에 온
     ///   빠른 회신도 닫힌다. 닫힌 뒤의 커밋(제거)·롤백(표시 해제) 어느 쪽도 그 사실을 되돌리지 않는다.
-    /// ★회신자로 계약을 고른다(ADR-0111 결정 5 — 옛 "회신자 신원 미검증" 폐기)★: 한 `request_id` 아래
+    /// ★회신자로 계약을 고른다(ADR-0111 결정 5)★: 한 `request_id` 아래
     ///   계약이 **여러 개**일 수 있으므로(다중 수신자 request) `in_reply_to` 만으로는 어느 계약을 닫을지
     ///   특정할 수 없다. spec §3 은 "그 **회신자의 계약만** 닫힌다(다른 수신자 계약은 오픈 유지 — 전체회신
     ///   없음)" 이므로, 매칭 키는 `(request_id, 회신자)` 다.
-    /// ★조회 축과의 관계(A6 — 옛 "두 규칙은 미러" 주장 정정)★: 미결 조회의 귀속 판정
-    ///   (`service::matches_contract_party`)은 **id 단독**이고 여기는 **id 우선 → 이름 폴백**이다. 완전한
-    ///   미러가 아니라 여기가 한 겹 더 관대하다 — 계약이 id 를 안 들고 있는 경우(**테스트 seam·레거시뿐**,
-    ///   L1)의 회신을 살리기 위한 폴백이며, 그 대가와 종료 조건은 아래 본문 주석에 적었다.
     /// ★"내 계약이 아니다" = `NoMatch` = **배달은 그대로**(spec §3 항목 7-②)★: 모르는 id·이미 닫힌 계약·
     ///   나에게 없는 계약 어느 쪽이든 **계약 쪽만 무동작**이고 회신 메시지 자체는 정상 배달된다. 회신이
     ///   통째로 사라지는 편이 더 나쁘다.
-    /// ★now 로 회신 시각 기록(finding 4 · spec §5)★: `Closed` 시 request 추적을 닫는 것과 **원자적으로**
-    ///   매칭 이력 레코드((request_id, recipient))를 `now`(회신 시각)로 `Replied` 전이한다. "상태 전이 시각이
-    ///   곧 회신 시각" 이기 때문이다.
-    /// ★이력 전이 실패의 정직한 반환(finding 1 · load-bearing)★: 이력 전이는 **best-effort** 지만 결과는
-    ///   조용히 삼키지 않는다. 계약 닫힘과 이력 부기는 **별개 관심사**다 — 회신은 실제로 일어났으니 계약은
-    ///   항상 닫고(재오픈이 더 나쁨), 이력이 반영 못 하면 그 사실을 variant 로 노출한다:
-    ///     - 레코드 부재(evict 됨) → `NotFound`: 가리킬 이력이 아예 없으니 anomaly 아님 → 그냥 `Closed`.
-    ///     - 불법 간선(`Illegal` — 아직 `Delivered` 아님 등) → 이력이 회신을 못 담은 채 남음 → 이건 관측
-    ///       대상이라 `ClosedHistoryAnomaly { from }`(그 순간 이력 상태)으로 반환한다. 상위가 로깅·관측.
-    ///   즉 예전에 `Closed` 로 은폐하던 불법 전이만 anomaly 로 승격한다(evict 는 정상 best-effort skip).
-    /// ★두 번째 회신 = no-op 로 문서화★: 같은 request 에 두 번째 회신이 와도 상태를 되돌리거나 재-닫지
-    ///   않는다(첫 회신이 이미 계약 이행). 에러가 아니라 `AlreadyClosed` 로 구분해 반환한다(상위 판단용).
-    /// ★인자 `allow_name_fallback`(리뷰 fix D4)★: `false` 면 **id 매치만** 인정한다. 상위가 "그 회신자
-    ///   이름이 산 세션 2개 이상에 걸린다" 를 관측했을 때 내려보낸다 — 그 상황에서 이름 폴백을 태우면 어느
-    ///   쌍둥이가 실제로 요청을 받았는지 알 수 없는 채 계약을 닫는다(귀속 날조).
+    // L1
     pub fn close_on_reply(
         &mut self,
         in_reply_to: &str,
@@ -1104,7 +961,6 @@ impl Ledger {
         now: Instant,
     ) -> ReplyOutcome {
         // 1) 추적 항목을 닫는다(정본). recipient 를 꺼내 뒤이어 이력 전이에 쓴다(borrow 분리).
-        //    ★키 = (id, 회신자)★ — 다중 수신자 request 는 같은 id 아래 계약이 N개다(위 doc).
         // ★계약 선택 = **두 패스**(id 먼저, 없으면 이름) — load-bearing(A6 회귀)★.
         //
         // ★왜 한 패스 OR 이 틀렸나★: `find` 는 **먼저 만나는 항목**을 집는다. 그래서 계약 A(recipient
@@ -1134,9 +990,6 @@ impl Ledger {
             }
             None => return ReplyOutcome::NoMatch,
         };
-        // 2) 매칭 이력 레코드를 Replied 로 전이. 계약은 이미 닫혔다(위) — 여기 결과는 이력 부기 정직성만
-        //    가른다. 불법 간선이면 이력이 회신을 못 담은 채 남으므로 anomaly 로 승격(위 주석), evict(NotFound)
-        //    는 가리킬 레코드가 없어 정상 best-effort skip → Closed.
         let outcome = match self.transition(in_reply_to, &recipient, DeliveryStatus::Replied, now) {
             Ok(()) => ReplyOutcome::Closed,
             Err(TransitionError::NotFound) => ReplyOutcome::Closed,
@@ -1144,9 +997,6 @@ impl Ledger {
                 ReplyOutcome::ClosedHistoryAnomaly { from }
             }
         };
-        // 3) 방금 끝난 계약의 이력이 이미 evict 됐다면 그 항목은 **정리해 줄 evict 이벤트가 영영 없다** —
-        //    여기서 지운다(좀비 방지, `purge_finished_without_history` 주석). 이력이 남아 있으면 그대로 두고
-        //    그 이력이 밀려날 때 함께 정리된다(닫힌 id 재오픈 차단이 그동안 유지된다).
         self.purge_finished_without_history();
         outcome
     }
@@ -1158,10 +1008,6 @@ impl Ledger {
     ///   `reply_failed`)이다. 선택 규칙이 갈리면 **같은 회신이 서로 다른 계약을 지목**해, 성공 경로가 닫은
     ///   계약과 실패 경로가 종결한 계약이 어긋난다(A6 가 잡은 부류의 재발 — 그때도 원인은 "한 규칙을 두 곳에
     ///   따로 쓴 것" 이었다). 규칙 본문의 근거·수용된 잔여는 `close_on_reply` 헤더가 정본이다.
-    /// ★`allow_name_fallback = false` = **이름 폴백 금지**(리뷰 fix D4 — 귀속 모호)★: 그 회신자 이름이 산
-    /// 세션 여러 개에 걸릴 때 상위가 내려보낸다. 이름으로 닫으면 "받은 적 없는 요청" 을 닫아 버릴 수 있고
-    /// (두 쌍둥이가 서로의 계약을 닫는다) 미결 조회는 **id 단독**이라 양쪽 다 `reply_owed_by_me` 로 보는
-    /// 비대칭까지 난다. 그래서 그때는 아무 것도 고르지 않는다(`NoMatch` → 무동작, 계약 오픈 유지).
     fn match_contract_for_replier(
         &self,
         in_reply_to: &str,
@@ -1186,7 +1032,7 @@ impl Ledger {
 
     /// ★회신이 **도달 불가 확정**이라 계약을 실패 종결한다(spec §3 항목 7-④ · ADR-0116 결정 2 · ADR-0118)★ —
     /// 회신 발송 행이 `RECIPIENT_NOT_FOUND`(= 요청자 이름이 로스터·프로필 **둘 다에 없다**) 일 때만
-    /// 호출된다. 계약을 `reply_failed` 종점으로 닫아 오픈 목록·기한 스윕·512 계수에서 빼고 이력은 남긴다.
+    /// 호출된다.
     ///
     /// ★그 밖의 회신 실패는 이 동사를 부르지 않는다(load-bearing)★: `MAILBOX_FULL`·`RECIPIENT_AMBIGUOUS`
     ///   는 **그 순간의 환경**이라 재시도가 실제로 배달에 성공할 수 있다 — 그때
@@ -1200,8 +1046,6 @@ impl Ledger {
     ///   배달기록은 그대로 `delivered`(또는 `pending`)에 머문다. 여기서 이력을 전이하면 "배달됐다가 실패로
     ///   돌아간" 이력이 표현 가능해진다.
     // ADR-0116 (결정 2) / ADR-0118 (결정 1·2·3)
-    /// ★인자 `allow_name_fallback`(리뷰 fix D4)★ — `close_on_reply` 와 **같은 의미·같은 값**을 받는다
-    ///   (선택 규칙이 갈리면 성공 경로와 실패 경로가 다른 계약을 지목한다 — `match_contract_for_replier` doc).
     pub fn fail_on_undeliverable_reply(
         &mut self,
         in_reply_to: &str,
@@ -1221,14 +1065,11 @@ impl Ledger {
         if entry.closed {
             return ReplyFailOutcome::AlreadyClosed;
         }
-        // 가드 우선 — 미정산 항목은 그 소유자(ReservationGuard)가 정산할 때까지 남의 것이다.
         if entry.provisional || entry.pending_retirement {
             return ReplyFailOutcome::GuardHeld;
         }
         entry.closed = true;
         entry.reply_failed = true;
-        // 이력이 이미 밀려난 채 끝난 항목은 정리 계기가 영영 없다 — 닫는 그 자리에서 지운다(좀비 방지,
-        //   `close_on_reply` 3단계와 같은 규율).
         self.purge_finished_without_history();
         ReplyFailOutcome::Failed
     }
@@ -1266,14 +1107,12 @@ impl Ledger {
             out.failed.push((r.request_id.clone(), r.recipient.clone()));
         }
         if !out.failed.is_empty() {
-            // 닫힌 계약 중 이력이 없는 것을 정리(좀비 방지 — `close_on_reply` 와 같은 규율).
             self.purge_finished_without_history();
         }
         out
     }
 
     /// ★오픈된 request 추적을 **통째로 제거**한다(C3 — 발송이 반려돼 계약이 애초에 성립하지 않은 경우)★.
-    /// 제거했으면 `Removed { notified }`(그 항목이 이미 통지된 상태였는지 동봉), 그런 id 가 없으면 `NotFound`.
     ///
     /// ★왜 `close_on_reply` 가 아니라 별도 출구인가(load-bearing — 유계 보장)★: 닫기(`closed=true`)는
     ///   "회신이 와서 계약이 이행됐다" 는 **이력**이라 추적 목록에 남는다. 그 잔존 항목은 같은 msg_id 의
@@ -1281,9 +1120,6 @@ impl Ledger {
     ///   이력 레코드가 애초에 없다(park 조차 안 됐다) — 그래서 닫기만 하면 그 항목을 evict 할 계기가 영영
     ///   없어 반려가 반복될수록 추적 목록이 무계 증식한다. 반려는 "계약이 이행됨" 이 아니라 "계약이 성립한
     ///   적 없음" 이므로, 이력을 남기지 않고 흔적째 지우는 게 의미상으로도 맞다.
-    /// ★멱등★: 없는 id 면 아무 것도 하지 않는다(`NotFound`).
-    /// ★notified 동봉(C3 리뷰 fix 5)★: 제거 시점에 이미 타임아웃 통지가 나갔던 항목이면 그 사실을 함께
-    ///   돌려준다 — 호출자가 "통지도 갔는데 반려도 됐다" 는 이중 결말을 로그로 남긴다(`DropOutcome` 주석).
     // ADR-0103
     pub fn drop_request(&mut self, request_id: &str, recipient: &str) -> DropOutcome {
         let Some(idx) = self
@@ -1308,10 +1144,6 @@ impl Ledger {
     ///   희생자는 `occupies_slot()` 에서 빠져 cap 분모가 영구히 줄고 ③ 추적 목록이 무계로 자란다.
     ///   그래서 **주기 sweep**(락을 정상적으로 소유하는 유일한 유지보수 지점)이 같은 일을 다시 한다 —
     ///   Drop 은 빠른 경로, 이쪽이 보증이다.
-    /// ★판정 기준 = **소유자 생존**, 시간이 아니다(R1 — 옛 `now - created_at > stale_after` 를 폐기)★:
-    ///   나이 기준은 "아직 주입 중인" 예약을 버려진 것으로 오판할 수 있었고(주입은 무계 — backpressure),
-    ///   그 오판의 결과가 **계약 없는 request 배달**이었다(`ReservationLiveness` 헤더에 실패 사슬 전문).
-    ///   이제 upgrade 되는 토큰을 가진 항목은 건드리지 않으므로 그 경쟁이 구조적으로 없다.
     /// ★멱등★: 정산된 항목은 잠정이 아니므로(커밋 = 표시 해제 · 롤백 = 제거) 두 번째 호출은 아무 것도 하지
     ///   않는다.
     /// ★회수는 파괴적이지 않다★: 잠정 계약은 **아직 발신자에게 접수를 보고하지 않은** 예약이거나(패닉으로
@@ -1322,8 +1154,6 @@ impl Ledger {
             .requests
             .iter()
             .filter(|r| {
-                // 소유자가 아직 있으면(upgrade 성공) 회수 대상이 아니다. `None` = 가드가 붙은 적 없음 →
-                //   회수(fail-safe — `reservation_token` 필드 주석).
                 r.provisional
                     && r.reservation_token
                         .as_ref()
@@ -1355,12 +1185,6 @@ impl Ledger {
         reclaimed
     }
 
-    /// 기한 초과된 미회신 request 목록을 산출한다(발신자에게 notice 를 만들 상위 increment 용).
-    ///
-    /// ★due 판정(spec §3 단계 4 · load-bearing)★: `reply_by` 가 있고, `now > created_at + reply_by`(경계
-    ///   초과), 아직 열려 있고(`!closed`), 아직 통지 안 된(`!notified`) request 만 반환한다.
-    /// ★이중 통지 방지(spec §7)★: 반환하며 **그 자리에서 notified 를 세운다** — 같은 request 는 다음 호출에
-    ///   다시 나오지 않는다. 회신으로 닫힌(replied) request 는 `closed` 라 절대 반환하지 않는다.
     /// ★경계★: `>` 비교라 정확히 기한인 순간은 아직 due 아님(mailbox TTL 경계와 동일 규약 — 결정적 테스트).
     /// ★은퇴 예정 표시는 건너뛰지 않고, **잠정 계약은 건너뛴다**(round-5 → round-6 I2 로 갈래 분리)★:
     ///   - **은퇴 표시된 계약은 애초에 due 가 될 수 없다**(구조적, 그대로 유지): 희생자 자격이
@@ -1379,28 +1203,24 @@ impl Ledger {
     pub fn due_timeouts(&mut self, now: Instant) -> Vec<DueTimeout> {
         let mut due = Vec::new();
         for r in self.requests.iter_mut() {
-            // `provisional` = 아직 접수 확정 전 — 위 doc 의 hand-off 규약(커밋 후 다음 sweep 이 집는다).
             if r.closed || r.notified || r.provisional {
                 continue;
             }
             let Some((reply_by, reply_by_raw)) = r.reply_by.clone() else {
-                continue; // 기한 없는 request 는 타임아웃 없음.
+                continue;
             };
             let deadline = r.created_at + reply_by;
             if now > deadline {
-                r.notified = true; // 이중 통지 방지 — 반환 시점에 마킹.
+                r.notified = true;
                 due.push(DueTimeout {
                     request_id: r.request_id.clone(),
                     sender: r.sender.clone(),
                     sender_id: r.sender_id,
                     recipient: r.recipient.clone(),
-                    // 표기는 발신자가 쓴 원본 그대로 — 통지 문구가 봉투 `reply-by` 와 어긋나지 않게(fix 6).
                     reply_by_raw,
                 });
             }
         }
-        // 통지로 끝난 계약 중 이력이 이미 evict 된 것은 정리 계기가 영영 없다 — 그 자리에서 지운다(좀비
-        //   방지, `purge_finished_without_history` 주석). due 가 빈 대부분의 sweep 은 스캔조차 안 한다.
         if !due.is_empty() {
             self.purge_finished_without_history();
         }
@@ -1412,7 +1232,6 @@ impl Ledger {
         self.history.len()
     }
 
-    /// msg_id 로 이력 레코드들을 조회한다(그룹 방송은 여러 개 — `messages { id }` 조회 지원, spec §6).
     /// 오래된 순.
     pub fn records_for(&self, msg_id: &str) -> Vec<&MessageRecord> {
         self.history.iter().filter(|r| r.msg_id == msg_id).collect()
@@ -1423,27 +1242,19 @@ impl Ledger {
     /// ★왜 필요한가★: 링(4096)이 가득 차면 앞쪽 행이 조용히 사라진다. 그런데 `messages { id }` 응답은 남은
     ///   행을 **그 메시지의 전부**인 양 보여 준다 — 10인 방송의 6행이 밀려나면 발신자는 "4명에게만 나갔다"
     ///   고 오독한다(실제로는 10명 모두에게 나갔고 기록만 사라졌다).
-    /// ★판정 = `남은 행 수 < 기대 행 수`(결정적)★. 기대 수는 발송 시점에 각 행에 박힌다
-    ///   (`MessageRecord.expected_rows`) — 단일 발송·notice = 1, 그룹 fan-out = 멤버 수 N.
-    /// ★옛 "front 위치" 증명을 폐기한 이유(round-2 F3 — 거짓 음성)★: 그 판정은 "한 msg_id 의 행이 링에서
-    ///   **연속**" 이라는 전제 위에 있었는데 그게 틀렸다. 그룹 행은 **두 단계**로 기록된다(계획 락에서
-    ///   parked/skipped → 그 뒤 멤버별 구간에서 delivered), 그 사이 다른 메시지의 행이 끼어든다. 그래서
-    ///   앞쪽 행이 evict 됐는데도 링 front 는 남의 행일 수 있고, 그때 옛 판정은 `false`(= "확실히 완전")를
-    ///   내놨다 — 증명을 자처하면서 틀리는 최악의 형태였다. 위치가 아니라 **개수**를 보면 그 전제가 필요 없다.
+    /// ★판정 = `남은 행 수 < 기대 행 수`(결정적)★ — `MessageRecord.expected_rows`.
     /// ★행이 **통째로** 사라진 경우는 여기서 안 보인다★: 그건 빈 목록으로 나가고 상위가 계약 뷰 또는
     ///   `MESSAGE_NOT_FOUND` 로 답한다(그 hint 가 이력 회전을 알린다).
     // 리뷰 B2 / round-2 리뷰 F3
     pub fn records_for_detailed(&self, msg_id: &str) -> (Vec<&MessageRecord>, bool) {
         let rows: Vec<&MessageRecord> =
             self.history.iter().filter(|r| r.msg_id == msg_id).collect();
-        // 기대 수는 모든 행이 공유하므로 남은 아무 행에서나 읽으면 된다(첫 행 사용).
         let truncated = rows
             .first()
             .is_some_and(|r| rows.len() < usize::from(r.expected_rows));
         (rows, truncated)
     }
 
-    /// 이력 링이 한 번이라도 evict 했나(B2 — 조회 정직성 신호의 원천). 테스트·상위 판정용.
     pub fn history_evicted(&self) -> bool {
         self.evicted_any
     }
@@ -1532,8 +1343,7 @@ impl Ledger {
             .any(|r| r.request_id == request_id && r.recipient == recipient)
     }
 
-    /// 테스트 전용 — 계약 키의 나머지 절반(수신자 이름·id)을 id 로 되찾는다(닫힌 계약 포함).
-    ///   ★왜 테스트에만★: 운영 호출부는 계약 키를 **둘 다** 손에 쥔 채 부른다(발송·회신 경로가 수신자를
+    /// ★왜 테스트에만★: 운영 호출부는 계약 키를 **둘 다** 손에 쥔 채 부른다(발송·회신 경로가 수신자를
     ///   이미 안다) — 이 역조회는 옛 "id 하나짜리 계약" 시절 테스트를 새 키에 맞추는 편의일 뿐이다.
     #[cfg(test)]
     fn party_of(&self, request_id: &str) -> Option<(String, Option<PeerId>)> {
@@ -1543,7 +1353,7 @@ impl Ledger {
             .map(|r| (r.recipient.clone(), r.recipient_id))
     }
 
-    /// 오픈(미회신) request 수(관측/테스트). closed 제외.
+    /// 오픈(미회신) request 수(관측/테스트).
     pub fn open_request_count(&self) -> usize {
         self.requests.iter().filter(|r| !r.closed).count()
     }
@@ -1571,12 +1381,9 @@ impl Ledger {
     ///     제거를 조회가 먼저 보고하는 셈이라 더 나쁘다.
     ///   - **잠정 계약**: 실재하는 접수분이라 보이는 게 맞다. 반려로 끝나면 그때 사라진다.
     ///
-    /// ★포함 기준 = `!closed`(= `is_live()`) — load-bearing★: 통지가 나갔어도 회신은 여전히 안 왔고,
-    ///   수신자는 아직 답할 의무가 있다(spec §3: 늦어도 회신하라). 미결 조회에서 빼면 발신자·수신자 양쪽이
-    ///   "목록에 없으니 끝난 것" 으로 오독한다. 그래서 통지 여부는 **필드로 노출**하고 목록에서 제외하지 않는다.
-    /// ★`is_live()` 와 같은 기준이라는 게 핵심(D 리뷰 B3)★: 예전엔 `is_live()` 가 `!closed && !notified` 라
-    ///   둘이 갈렸고, 그 틈으로 evict-후-통지된 계약이 추적에서 삭제돼 이 목록에서도 증발했다. 이제 두
-    ///   정의가 하나다 — **여기 기준을 바꾸면 `is_live()` 도 함께 바꿔야 한다**(갈리면 같은 버그가 재발).
+    /// ★포함 기준 = `!closed`(= `is_live()`) — load-bearing★: 통지 여부는 **필드로 노출**하고 목록에서
+    ///   제외하지 않는다. **여기 기준을 바꾸면 `is_live()` 도 함께 바꿔야 한다**(갈리면 같은 버그가 재발 —
+    ///   `is_live` 주석의 4단계 시퀀스).
     /// ★필터는 상위가★: 이름별(발신/수신) 갈래는 호출자가 정한다 — 장부는 이름 규약을 모른다.
     // ADR-0103 (spec §6 messages 무인자 = 내 미결)
     pub fn open_requests(&self) -> Vec<OpenRequestView> {
@@ -1595,7 +1402,6 @@ impl Ledger {
                 notified: r.notified,
             })
             .collect();
-        // stable sort — 같은 시각이면 현재 목록 순서(= 발송 순서)가 타이브레이크로 남는다.
         out.sort_by_key(|r| r.created_at);
         out
     }
