@@ -44,8 +44,7 @@ pub enum ClaudeOutputFormat {
 #[serde(tag = "kind")]
 pub enum AgentCommand {
     /// claude CLI. `extra_args`는 세션 인자(`--session-id` 등)를 제외한 사용자 추가 인자.
-    /// `output_format` 은 터미널/JSON 모드 선택(ADR-0044) — `#[serde(default)]` 라 옛 프로필·
-    /// 기존 호출자는 Terminal 로 흡수돼 동작 불변.
+    /// `output_format` 은 `#[serde(default)]` 라 옛 프로필·기존 호출자는 Terminal 로 흡수돼 동작 불변.
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
@@ -140,7 +139,6 @@ pub struct AgentProfile {
     /// 트리 계층의 부모 프로필 id. `Some(pid)` → 이 프로필은
     /// pid 의 자식(트리에서 pid 밑에 들여쓰기), `None` → 최상위(루트). **1단 중첩만 허용**: 자식은 다시
     /// 부모가 될 수 없고(cycle 방지 단순화), 부모는 반드시 루트여야 한다 — 검증은 `ProfileRegistry::reparent`.
-    /// 부모 삭제 시 자식은 여기서 `None` 으로 풀려 루트로 승격한다(orphan-to-root, cascade 삭제 아님).
     /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None`(루트)으로 흡수(마이그레이션 불필요).
     // ADR-0072
     #[serde(default)]
@@ -181,8 +179,6 @@ pub struct AgentProfile {
     ///   보존해야 한다(epoch 과 같은 이유 — ADR-0084). 이 값을 **평범한 `upsert` 로** 쓰는 경로가 새로
     ///   생기면 그 사본이 표식을 지우고, 다음 Fresh 가 교체를 최초로 오판해 죽은 화신의 epoch 를
     ///   재사용한다. 새 spawn 명령이 caller 가 만든 프로필을 그대로 받는 모양이면 여기를 먼저 볼 것.
-    /// ★유계★: 프로필의 한 필드라 개수는 정의상 프로필 수와 같다 — 따로 회수할 표가 없다(별도 집합이었을
-    ///   땐 삭제가 표식만 지운 뒤 spawn 이 다시 심으면 회수 불가였다).
     // ADR-0007
     // ADR-0113
     #[serde(skip)]
@@ -305,7 +301,6 @@ pub trait ProfileStore: Send + Sync + 'static {
 ///
 /// **idempotent**: 이미 유효한 1단 forest(정상 reparent 결과)는 어떤 규칙에도 걸리지 않아 그대로
 /// 살아남는다 — 두 번 돌려도 결과가 같다.
-// ADR-0072
 fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
     // 판정은 변경 전 스냅샷 기준(같은 pass 안에서의 clear 가 다른 노드 판정을 오염시키지 않게).
     // has_own_parent(= 자식) 과 is_a_parent(= 자식을 가진 노드) 를 섞으면 정상 자식이 오검출된다.
@@ -321,10 +316,10 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
     let mut clear: Vec<AgentId> = Vec::new();
     for p in map.values() {
         if let Some(pid) = p.parent_id {
-            let dangling = !existing.contains(&pid); // 부모가 맵에 없음
-            let self_parent = pid == p.id; // 자기 자신을 부모로
-            let two_level = has_own_parent.contains(&pid); // 부모 pid 자신이 또 부모를 가짐 → 2단
-            let node_is_parent = is_a_parent.contains(&p.id); // 이 노드가 누군가의 부모 → 자식이 될 수 없음
+            let dangling = !existing.contains(&pid);
+            let self_parent = pid == p.id;
+            let two_level = has_own_parent.contains(&pid);
+            let node_is_parent = is_a_parent.contains(&p.id);
             if dangling || self_parent || two_level || node_is_parent {
                 clear.push(p.id);
             }
@@ -373,7 +368,7 @@ impl ProfileRegistry {
         let result = f(&mut guard);
         normalize_hierarchy(&mut guard);
         let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
-        // lock 보유 중 save — 커밋과 영속화를 한 임계구역으로 직렬화(데드락 근거는 struct 주석). ADR-0071.
+        // ADR-0071
         self.store.save(&snapshot);
         result
     }
@@ -407,7 +402,6 @@ impl ProfileRegistry {
             .cloned()
     }
 
-    /// auto_restore=true인 프로필만(복원 대상).
     pub fn restorable(&self) -> Vec<AgentProfile> {
         self.profiles
             .lock()
@@ -447,8 +441,7 @@ impl ProfileRegistry {
                 profile.display_name = live.display_name.clone();
                 profile.epoch = live.epoch;
                 // 같은 이유로 화신 이력도 live 값이 이긴다 — 스냅샷은 그 사실의 author 가 아니다
-                //   (되돌리면 다음 Fresh 가 교체를 최초로 오판해 죽은 화신의 epoch 를 재사용한다).
-                // ADR-0007
+                //   (`had_session` 필드 주석).
                 profile.had_session = live.had_session;
             }
             m.insert(profile.id, profile);
@@ -477,7 +470,6 @@ impl ProfileRegistry {
     /// ★정규화는 저장 게이트(`AgentManager::rename_agent`) 책임★: 양끝 공백 제거와 "공백만 남으면 override
     /// 없음" 판정은 이름 유일성 판정 **전에** 거기서 끝난다(`normalize_display_name`) — 여기서 또 깎으면
     /// 판정이 본 값과 저장되는 값이 갈린다. 여기엔 이미 정규화된 값 또는 명시적 None 만 온다.
-    /// update_with 위임(persist 일원화).
     pub fn rename(&self, id: AgentId, display_name: Option<String>) -> bool {
         self.update_with(id, |p| p.display_name = display_name)
     }
@@ -505,12 +497,10 @@ impl ProfileRegistry {
                 if pid == child_id {
                     return false;
                 }
-                // 대상 부모 실존 + 그 자신이 루트여야 함(2단 금지).
                 match m.get(&pid) {
                     Some(parent) if parent.parent_id.is_none() => {}
                     _ => return false,
                 }
-                // child 가 누군가의 부모면 자식이 될 수 없음(1단 상한).
                 if m.values().any(|p| p.parent_id == Some(child_id)) {
                     return false;
                 }
@@ -537,12 +527,9 @@ impl ProfileRegistry {
     }
 
     /// 세션 id 확보 — `claude_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
-    /// **세션 id 생성 책임은 ProfileRegistry**(H-1.4).
     ///
     /// ★Resume 전용(ADR-0076)★: 기존 대화를 이어받으려면 저장된 sid 를 그대로 써야 한다.
-    ///   Fresh 모드는 절대 이걸 쓰면 안 된다: 기존 sid 를 그대로 돌려주므로 Fresh 가
-    ///   `--session-id <저장된 sid>` 로 떠 디스크 세션과 충돌한다("Session ID already in use" — claude
-    ///   즉사). Fresh 는 `new_session_id`(항상 새 uuid).
+    ///   Fresh 모드는 절대 이걸 쓰면 안 된다 — Fresh 는 `new_session_id`(항상 새 uuid).
     pub fn ensure_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
@@ -564,7 +551,6 @@ impl ProfileRegistry {
     pub fn new_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            // 기존 sid 는 이력으로 보존(silent 소실 금지 — observe_session_id 와 동형).
             if let Some(old) = p.claude_session_id.take() {
                 p.old_session_ids.push(old);
             }
@@ -650,8 +636,6 @@ mod tests {
 
     #[test]
     fn canonical_name_when_live_mirrors_the_live_session_rule() {
-        // ADR-0116 결정 1 — 잠듦 파킹 키의 전제: 잠든 프로필의 이름은 **산 세션과 같은 규칙**으로
-        //   파생돼야 한다(`canonical_name_or_id_fallback` + canonicalize 된 cwd).
         // ★상대 경로가 이 테스트의 핵심★: `PathBuf::from(".")` 은 raw 라 basename 이 `"."` 이 되지만, 산
         //   세션은 canonicalize 된 절대경로의 basename 을 쓴다. 두 값이 같아야 한다는 것을 여기서 못 박는다
         //   (`resolve_display_name(None, ".")` 로 뽑으면 `"."` 이 나와 조용히 어긋난다).
@@ -681,8 +665,7 @@ mod tests {
 
     #[test]
     fn canonical_name_when_live_survives_a_vanished_cwd_when_an_override_exists() {
-        // ★리뷰 fix(D3)★: override 가 있으면 이름이 fs 에 전혀 의존하지 않아야 한다 — cwd 디렉터리가
-        //   사라져 canonicalize 가 실패해도 잠듦 시점에 파생된 이름과 같아야 한다는 게 이 테스트의 계약이다.
+        // ★리뷰 fix(D3)★: override 가 있으면 이름이 fs 에 전혀 의존하지 않아야 한다.
         let vanished = PathBuf::from("C:/engram-does-not-exist-9f1c/never/created");
         assert!(
             dunce::canonicalize(&vanished).is_err(),
@@ -698,7 +681,6 @@ mod tests {
             "override 가 있으면 fs 를 보지 않는다(canonicalize 실패가 이름을 흔들면 안 된다)"
         );
 
-        // ★수용된 갭(함수 doc)★: override 가 없으면 raw basename 으로 degrade 한다.
         let mut anon = sample();
         anon.cwd = vanished;
         anon.display_name = None;
@@ -767,8 +749,6 @@ mod tests {
         assert_eq!(persisted[0].claude_session_id, Some(sid2));
     }
 
-    /// ADR-0076: new_session_id 는 항상 **새** sid 를 발급하고 옛 sid 를 이력으로 민다.
-    /// (Fresh spawn 이 저장된 sid 를 재사용하는 "Session ID already in use" 버그를 봉인.)
     #[test]
     fn new_session_id_mints_fresh_and_pushes_old() {
         let store = Arc::new(MemStore::default());
@@ -796,7 +776,6 @@ mod tests {
         assert_eq!(store.load()[0].claude_session_id, Some(sid2));
     }
 
-    /// ADR-0076: sid 가 없던(진짜 신규) 프로필에 new_session_id → 새 sid 발급, 이력은 비어 있음.
     #[test]
     fn new_session_id_on_fresh_profile_has_no_history() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -812,7 +791,6 @@ mod tests {
         );
     }
 
-    /// ADR-0076: 두 번 연속 new_session_id → 매번 새 sid(재사용 없음), 이력이 누적된다.
     #[test]
     fn new_session_id_always_differs_and_accumulates_history() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -833,7 +811,7 @@ mod tests {
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        // 최초 화신 — 올릴 앞선 epoch 이 없다(ADR-0007 은 *교체*에만 건다).
+        // 최초 화신 — 올릴 앞선 epoch 이 없다.
         assert_eq!(reg.epoch_for_spawn(id), Some(0));
         assert_eq!(reg.epoch_for_spawn(id), Some(0), "판정은 멱등이어야");
 
@@ -842,7 +820,6 @@ mod tests {
         assert_eq!(reg.epoch_for_spawn(id), Some(1));
         assert_eq!(reg.epoch_for_spawn(id), Some(2));
 
-        // ★삭제와의 원자성★: 사라진 프로필은 epoch 를 만들어 내지 않는다(호출자가 spawn 을 중단한다).
         reg.remove(id);
         assert_eq!(
             reg.epoch_for_spawn(id),
@@ -853,8 +830,6 @@ mod tests {
 
     #[test]
     fn had_session_survives_a_stale_snapshot_upsert() {
-        // ★스냅샷은 화신 이력의 author 가 아니다★: 되돌아가면 다음 Fresh 가 교체를 최초로 오판해
-        //   죽은 화신의 epoch 를 재사용한다(epoch 보존과 같은 이유 — ADR-0084).
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         let p = sample();
         let id = p.id;
@@ -1040,7 +1015,7 @@ mod tests {
             .all(|p| p.parent_id.is_none()));
     }
 
-    // ── 쓰기 경계 정규화(ADR-0072) — reparent 를 우회하는 경로도 불변식 유지 ───────────
+    // ── 쓰기 경계 정규화(ADR-0072) ────────────────────────────────────────────────
 
     /// ★재현 경로★: store 에 이미 cyclic 쌍이 있는 상태(손상된/손편집 agents.json, 또는 reparent 검증을
     /// 우회하는 legacy write)를 load 로 그대로 들여온 뒤(load 는 정규화 안 함), 아무 write 나 한 번 트리거하면
@@ -1073,7 +1048,6 @@ mod tests {
         );
     }
 
-    /// ★정규화 없이는 실패★: update_with 는 임의 클로저라 검증이 없다.
     #[test]
     fn update_with_dangling_parent_is_normalized() {
         let store = Arc::new(MemStore::default());
@@ -1101,8 +1075,6 @@ mod tests {
         );
     }
 
-    /// 정규화는 idempotent + 유효 계층 불변: 정상 reparent 결과(1단 forest)는 어떤 재-write 로도
-    /// 훼손되지 않는다. rename(무관한 write)이 자식의 parent_id 를 건드리지 않아야 한다.
     #[test]
     fn normalization_preserves_valid_hierarchy() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1121,8 +1093,6 @@ mod tests {
         );
     }
 
-    /// 동시성: reparent(child→parent) 와 remove(parent) 를 경쟁시켜도 최종 persisted 에 dangling 없음.
-    /// 부모가 사라지면 자식은 루트여야 한다(orphan-to-root + 경계 정규화 이중 안전망).
     #[test]
     fn concurrent_reparent_vs_remove_no_dangling() {
         use std::thread;
@@ -1167,7 +1137,6 @@ mod tests {
         }
     }
 
-    /// ADR-0070/0072 lost-update 봉인: spawn 스냅샷이 최신 parent_id/display_name 을 덮지 않는다.
     #[test]
     fn spawn_preserving_upsert_does_not_revert_concurrent_reparent_or_rename() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1199,7 +1168,6 @@ mod tests {
         );
     }
 
-    /// ad-hoc spawn(맵에 없던 id)은 preserving-upsert 여도 스냅샷 그대로 삽입됨을 함께 확인.
     #[test]
     fn preserving_upsert_inserts_snapshot_when_no_live_entry() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1210,7 +1178,6 @@ mod tests {
         assert_eq!(reg.get(id).unwrap().display_name, Some("adhoc".into()));
     }
 
-    /// serde default: parent_id 없는 JSON → None(무마이그레이션, ADR-0072).
     #[test]
     fn deserializes_profile_without_parent_id_as_none() {
         let json = r#"{
@@ -1230,8 +1197,6 @@ mod tests {
         assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
     }
 
-    /// 동시성: 여러 스레드가 서로 다른 자식을 같은 루트에 동시 reparent 해도 persisted == 최신 인메모리.
-    /// mutate+save 한 임계구역이라 stale-overwrite·검증 race 없음(struct 주석 §5, ADR-0071).
     #[test]
     fn concurrent_reparent_persisted_equals_final_map() {
         use std::thread;
@@ -1271,7 +1236,6 @@ mod tests {
 
     // ── 동시성: persisted == latest (stale-overwrite race 봉인) ────────────────────
 
-    /// save 가 lock 보유 중 **현재 맵**을 쓰는지 직접 단언 — 커밋 직후 상태가 곧바로 persist 됨을 본다.
     #[test]
     fn save_writes_current_map_not_stale_snapshot() {
         let store = Arc::new(MemStore::default());
@@ -1290,9 +1254,6 @@ mod tests {
         );
     }
 
-    /// 여러 스레드가 서로 다른 프로필을 동시에 upsert/rename → 마지막 save 스냅샷이 최종 인메모리 맵과
-    /// 개수·내용까지 일치해야 한다. save 를 lock 밖으로 빼면 stale 스냅샷이 디스크를 덮어써
-    /// 엔트리 누락이 가능하다(persisted ≠ observed).
     #[test]
     fn concurrent_mutations_persisted_equals_final_map() {
         use std::thread;
@@ -1338,8 +1299,6 @@ mod tests {
         );
     }
 
-    /// 하위호환: 옛 agents.json(필드명 `last_restore`, 신규 필드 부재)을 역직렬화해도
-    /// 크래시 없이 신규 필드는 default(restart_count=0, failed_reason=None, last_start_at=None)가 된다.
     /// 옛 `last_restore` 키는 알려지지 않은 필드로 무시된다(serde 기본 deny_unknown 미적용).
     #[test]
     fn deserializes_legacy_profile_without_new_fields() {
@@ -1360,15 +1319,11 @@ mod tests {
         let p: AgentProfile =
             serde_json::from_str(legacy).expect("legacy profile must deserialize");
         assert_eq!(p.epoch, 3);
-        // restart_policy 부재 → #[serde(default)] = 신규 기본 Always
         assert_eq!(p.restart_policy, RestartPolicy::Always);
         assert_eq!(p.restart_count, 0);
         assert_eq!(p.failed_reason, None);
-        // 옛 last_restore 키는 무시되고 신규 last_start_at 은 default None
         assert_eq!(p.last_start_at, None);
-        // 신규 display_name 부재 → #[serde(default)] = None(마이그레이션 불필요, 트리 basename 파생 불변).
         assert_eq!(p.display_name, None);
-        // 신규 parent_id 부재 → #[serde(default)] = None(루트, ADR-0072 무마이그레이션).
         assert_eq!(p.parent_id, None);
     }
 
@@ -1397,7 +1352,6 @@ mod tests {
             output_format: ClaudeOutputFormat::StreamJson,
         };
         assert!(cmd.is_json_mode(), "StreamJson 은 json 모드");
-        // 직렬화→역직렬화 왕복 보존(wire/persist 호환).
         let json = serde_json::to_string(&cmd).unwrap();
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(cmd, back);

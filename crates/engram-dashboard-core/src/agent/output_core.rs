@@ -23,8 +23,6 @@ use crate::agent::types::{
     ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
 };
 
-/// finalize 1회 종료 hook(ADR-0019). spawn_session 이 {id,epoch,intent,shutting_down,reaper_tx}
-/// 를 캡처한 클로저를 주입하고, finalize 승자 경로에서 정확히 1회 호출된다.
 type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
 
 /// 에이전트 1개의 출력 측 핵심 상태. 필드별 독립 Mutex(session.rs 모듈 주석의 분리 동기와 동일):
@@ -32,41 +30,32 @@ type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
 pub struct OutputCore {
     // ── 불변 (생성 후 변경 없음) ──────────────────────────────
     id: AgentId,
-    /// 이 세션 인스턴스의 epoch. status_changed에 동봉해 프론트가 stale terminal 알림을
-    /// epoch 불일치로 버릴 수 있게 한다(S9 §18-d).
     epoch: u32,
 
     // ── 출력 시퀀스 / 상태 ────────────────────────────────────
     seq: AtomicU64,
     status: Mutex<AgentStatus>,
-    /// finish 정확히 1회 게이트.
     finalized: AtomicBool,
 
-    // ── 출력 구독 (독립 lock) ─────────────────────────────────
+    // ── 출력 구독 ─────────────────────────────────────────────
     subscribers: Mutex<Vec<Arc<dyn OutputSink>>>,
 
-    // ── Replay buffer (독립 lock) ─────────────────────────────
-    // ★S15 B4★: ReplayBuffer(바이트 전용) → Ring(payload-generic, StoredOutput 저장).
+    // ── Replay buffer ─────────────────────────────────────────
     replay: Mutex<Ring>,
 
     // ── 상태 알림 ─────────────────────────────────────────────
     status_sink: Arc<dyn StatusSink>,
 
-    // ── pump thread 제어 (transport.start가 attach_pump로 적재) ─
+    // ── pump thread 제어 ──────────────────────────────────────
     drain_handle: Mutex<Option<JoinHandle<()>>>,
     drain_done_rx: Mutex<Option<Receiver<()>>>,
 
     // ── finalize 1회 hook (ADR-0019 reaper) ───────────────────
-    /// finalize 승자(finalized.swap 통과) 경로에서 정확히 1회 호출되는 종료 hook.
-    /// spawn_session 이 {id, epoch, intent, shutting_down, reaper_tx} 를 캡처한 클로저를
-    /// 주입한다 — 그 안에서 intent·shutting_down 을 **그 순간 snapshot** 해 ReapMsg 를 송신한다.
-    /// transport 는 이 의미를 모른다(transport 는 그냥 core.finish 만 부른다).
     /// 단위테스트는 OutputCore::new 만 쓰고 hook 을 주입하지 않으므로 Option(None=no-op).
     on_terminal: Mutex<Option<OnTerminalHook>>,
 
     // ── ADR-0113 턴 관측 ──────────────────────────────────────
-    /// 공용 표 + 이 세션 백엔드의 신호 분류자. **생성자 인자**라 배선 없는 core 를 만들 수 없다(아래
-    /// `TurnWiring` 주석). 생성 후 불변이라 hot path 에 원자 load 도 락도 없다.
+    /// 생성 후 불변이라 hot path 에 원자 load 도 락도 없다.
     turn: TurnWiring,
 }
 
@@ -115,8 +104,6 @@ impl TurnWiring {
 }
 
 impl OutputCore {
-    /// 새 core 생성. status는 Running, seq 0, finalized false. pump 핸들은 None
-    /// — transport.start가 attach_pump로 채운다(stage 3).
     pub fn new(
         id: AgentId,
         epoch: u32,
@@ -139,7 +126,6 @@ impl OutputCore {
         }
     }
 
-    /// 이 core 의 agent 식별자(불변). transport 가 로그 계측(stderr drain 등)에 맥락 필드로 쓴다.
     pub fn id(&self) -> AgentId {
         self.id
     }
@@ -175,7 +161,6 @@ impl OutputCore {
     ///   관측으로 먹이면 새 화신이 "턴 중" 으로 찍히는데 그 턴의 종료는 **영원히 오지 않는다** — 그 상태를
     ///   기다리는 소비자(우편 파킹 등)가 깨울 수 없이 멈춘다. 관측은 라이브 emit 에서만 시작한다.
     pub fn seed(&self, events: Vec<OutputEvent>) {
-        // replay lock 을 한 번 잡고 순서대로 push(각 이벤트에 연속 seq 발급). subscribers 는 만지지 않는다.
         let mut replay = self.replay.lock().expect("replay poisoned");
         for event in events {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
@@ -188,10 +173,8 @@ impl OutputCore {
         }
     }
 
-    /// transport(pump)가 만든 출력 이벤트를 받아 replay 저장 + 구독자 fanout.
     /// **payload-generic (S15 B4)** — 모든 OutputEvent variant(콘솔 바이트 + 구조화)를 받아
-    /// Ring 에 저장하고 payload-generic 으로 fanout 한다(ADR-0002 출력 종류 비가정). event 가
-    /// TerminalBytes 면 OutputPayload::Bytes, 그 외 구조화면 OutputPayload::Event 로 뷰를 만든다.
+    /// Ring 에 저장하고 payload-generic 으로 fanout 한다(ADR-0002 출력 종류 비가정).
     ///
     /// ★핵심 불변식 (ADR-0006 §10 규칙3 — payload 만 바뀌지 락 구조는 불변)★
     /// - `sink.send()` 호출 시 어떤 lock도 보유하지 않는다. subscribers를 clone으로
@@ -199,18 +182,12 @@ impl OutputCore {
     /// - replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게).
     ///   두 lock 동시 취득은 subscribe 함수 단독 예외이며 emit은 절대 금지.
     pub fn emit(&self, event: OutputEvent) {
-        // eviction 예산(cost_bytes)을 event 참조로 미리 근사(ADR-0003: core 는 wire 크기를 모르므로
-        // payload 문자열 길이 합으로 구조적 근사 — estimate_cost_bytes 주석 참조).
         let cost_bytes = estimate_cost_bytes(&event);
 
         // 3~4. ★seq 발급 + replay push 를 replay 락 안에서 원자적으로★ — brief lock(락 순서 1단계,
         //    ADR-0006). **순서 중요(gap 방지)**: replay.push 가 fanout 보다 먼저여야, subscribe 가
         //    이 사이에 끼어들어도 새 sink 는 replay 에서 이 seq 를 받는다(최악 dup, 프론트 seq dedup 이
         //    흡수). 역순이면 gap 발생.
-        //    ★payload-generic★: Ring 에는 event 를 **clone 해서** 저장하고, fanout 은 로컬 원본
-        //    `event` 를 borrow 한다(원 emit 이 replay 엔 clone 넣고 로컬 `&data` 로 fanout 하던 것과
-        //    동형 — 락 밖 send 를 위해 fanout 참조를 로컬에 둔다). N=1 구독 기준 clone 1회로 구
-        //    base64 String clone 과 실질 동률.
         //
         // ★ADR-0079: seq 발급을 replay 락 안에서 push 직전에 한다(왜 락 밖이면 안 되나)★
         //    pump 스레드(transport stdio/pty)와 write_input 의 synthetic user-echo(session.rs)가
@@ -231,8 +208,6 @@ impl OutputCore {
                 cost_bytes,
             });
         }
-        // ↑ replay lock 은 push 직후 즉시 drop(블록 스코프 종료). 아래 send 는 lock 미보유.
-        //   seq 는 로컬에 캡처해 락 밖 fanout 이 그대로 사용(ADR-0006 규칙3: send 는 무락).
 
         // ★ADR-0113 턴 관측★: 표 갱신을 **fanout·통지보다 먼저** 한다. 통지를 받은 소비자가 곧바로
         //   표를 조회하므로(도어벨→flush 등) 순서가 뒤집히면 그 조회가 갱신 전 값을 본다.
@@ -265,17 +240,13 @@ impl OutputCore {
             }
         }
 
-        // event 종류로 payload 뷰 분기(ADR-0002 출력 종류 비가정): TerminalBytes→Bytes, 그 외 구조화
-        // →Event. 로컬 `event`(Ring 에 넣은 것과 별개 원본)를 borrow 하므로 lock 수명과 무관.
         let payload = match &event {
             OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
             other => OutputPayload::Event(other),
         };
 
-        // 5. ★불변식 1(ADR-0006 §10 규칙3)★ subscribers 를 clone 스냅샷 뜨고 즉시 lock 해제 →
-        //    **lock 밖에서 send**. send 는 blocking/try_send 가능하므로 lock 을 쥔 채 send 하면
-        //    subscribe/다른 send 와 교착·정체. replay lock 은 이미 위에서 drop, subscribers lock 도
-        //    clone 직후 drop → send 구간에는 **어떤 core lock 도 보유하지 않는다**(구조 불변, payload 만 바뀜).
+        // 5. ★불변식 1(ADR-0006 §10 규칙3)★ send 는 blocking/try_send 가능하므로 lock 을 쥔 채
+        //    send 하면 subscribe/다른 send 와 교착·정체.
         let frame = OutputFrame {
             agent_id: self.id,
             epoch: self.epoch,
@@ -295,7 +266,6 @@ impl OutputCore {
             }
         }
 
-        // 6. 죽은 구독자 제거 — 다시 짧게 lock. (clone 시점 이후 새로 붙은 sink는 건드리지 않음)
         if !dead.is_empty() {
             self.subscribers
                 .lock()
@@ -305,17 +275,14 @@ impl OutputCore {
     }
 
     /// 종료 전이 — pump가 루프 탈출 후 1회 호출. finalize 정확히 1회 게이트로 중복 호출을 흡수한다.
-    /// (drain.rs transition + spawn_drain_thread의 status_changed를 대체.)
     ///
     /// terminal 알림 주체는 pump(=여기) 단독. reason→AgentStatus 매핑은 impl-spec 표 그대로.
     pub fn finish(&self, reason: TerminalReason) {
-        // finalize 1회: 이미 종료 처리됐으면 즉시 반환(idempotent).
         if self.finalized.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        // reason→AgentStatus 매핑(AgentStatus 변형 추가 금지, impl-spec 표):
-        // Interrupted/Cancelled→Killed, StreamClosed→Exited{None}, Error(s)→Failed, 나머지 직역.
+        // AgentStatus 변형 추가 금지(impl-spec 표).
         // ★reason 은 reaper hook 에도 넘겨야 하므로 매핑 전에 clone 해 둔다(소비 전 보존).
         let new_status = match reason.clone() {
             TerminalReason::Exited { code } => AgentStatus::Exited { code },
@@ -344,11 +311,8 @@ impl OutputCore {
         self.status_sink
             .status_changed(self.id, new_status, self.epoch);
 
-        // ★ADR-0019 reaper hook★: finalize 승자 경로에서 정확히 1회. status_sink 통지·done_tx·
-        //   join_pump 동작은 위에서 그대로 보존하고 send 만 얹는다. 클로저 내부에서 intent·
-        //   shutting_down 을 **그 순간** snapshot 해 ReapMsg 를 송신한다(reap 시점 live read 금지).
-        //   on_terminal lock 은 짧게 잡고 즉시 clone 없이 호출 — 다른 core lock 미보유 구간이라 안전.
-        //   (단위테스트·hook 미주입 세션은 None → no-op.)
+        // ★ADR-0019 reaper hook★: on_terminal lock 은 짧게 잡고 즉시 clone 없이 호출 — 다른 core
+        //   lock 미보유 구간이라 안전.
         if let Some(hook) = self
             .on_terminal
             .lock()
@@ -395,8 +359,8 @@ impl OutputCore {
         true
     }
 
-    /// pump 종료 대기 — kill 6단계. done_rx를 take해 recv_timeout. 수신측이 이미 사라졌어도
-    /// (타임아웃 후 detach) 무시 가능하도록 결과를 버린다.
+    /// pump 종료 대기 — kill 6단계. 수신측이 이미 사라졌어도(타임아웃 후 detach) 무시 가능하도록
+    /// 결과를 버린다.
     pub fn join_pump(&self, timeout: Duration) {
         let rx = self
             .drain_done_rx
@@ -426,21 +390,16 @@ impl OutputCore {
     pub fn subscribe(&self, sink: Arc<dyn OutputSink>) -> SinkId {
         let sink_id = sink.sink_id();
 
-        // (C4) subscribers lock 보유 시작 — drop 전까지 emit의 live send와 직렬화된다.
         let mut subscribers_guard = self.subscribers.lock().expect("subscribers poisoned");
-
-        // (A) live 구독을 먼저 등록 → 이후 도착하는 live chunk는 이 sink에도 전달됨.
         subscribers_guard.push(sink.clone());
 
-        // (B) subscribers 보유 중 replay 스냅샷 취득 (규칙 3의 유일한 허용 예외).
         let snapshot = {
             let replay_guard = self.replay.lock().expect("replay poisoned");
             replay_guard.snapshot()
         };
 
-        // replay 전송 — snapshot의 seq와 이후 live chunk의 seq가 끊기지 않아 프론트가
-        // seq로 dedup/정렬 가능. 막 등록된 sink라 send 실패는 unlikely → 무시(§7).
-        // ★payload-generic★: StoredOutput.event 를 borrow 해 OutputPayload 뷰로 전달(인코딩은 sink 책임).
+        // snapshot의 seq와 이후 live chunk의 seq가 끊기지 않아 프론트가 seq로 dedup/정렬 가능.
+        // 막 등록된 sink라 send 실패는 unlikely → 무시(§7).
         for stored in &snapshot {
             let payload = match &stored.event {
                 OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
@@ -455,7 +414,6 @@ impl OutputCore {
             let _ = sink.send(frame);
         }
 
-        // lock 해제 → emit 재개. (명시적 drop으로 lock 보유 구간을 분명히 표시)
         drop(subscribers_guard);
 
         sink_id
@@ -484,10 +442,8 @@ impl OutputCore {
         on_ready: impl FnOnce(&SubscribeOutcome),
     ) -> SubscribeOutcome {
         let sink_id = sink.sink_id();
-        // C4: subscribers lock 보유 시작 — emit live send 와 직렬화.
         let mut subscribers_guard = self.subscribers.lock().expect("subscribers poisoned");
         subscribers_guard.push(sink.clone());
-        // subscribers 보유 중 replay 스냅샷(규칙3 유일 허용 예외, subscribe 와 동일).
         let snapshot = {
             let replay_guard = self.replay.lock().expect("replay poisoned");
             replay_guard.snapshot()
@@ -497,7 +453,6 @@ impl OutputCore {
         let latest = snapshot.last().map(|c| c.seq).unwrap_or(0);
 
         let (kind, start_idx) = match after_seq {
-            // epoch 불일치이거나 after_seq 미지정 → 전체 replay(안전 기본값).
             _ if !epoch_matches => (ReplayKind::FromOldest, 0usize),
             None => (ReplayKind::FromOldest, 0usize),
             Some(s) => {
@@ -515,8 +470,6 @@ impl OutputCore {
 
         let to_send = &snapshot[start_idx..];
 
-        // 보낼 게 있으면 첫 seq, 없으면 "다음 live seq" 추정(after_seq+1 또는 latest+1).
-        // ★replay 전송 전에 미리 계산★ — on_ready 가 정확한 outcome 을 받아야 TOCTOU 가 제거된다.
         let replay_from = to_send
             .first()
             .map(|c| c.seq)
@@ -534,15 +487,8 @@ impl OutputCore {
             replayed: to_send.len(),
         };
 
-        // ★불변식 2 + TOCTOU 제거의 핵심★: replay frame 들을 sink 로 보내기 **직전**에,
-        //   여전히 subscribers lock 을 보유한 채 on_ready 를 1회 호출한다. 데몬이 이 안에서
-        //   SubscribeAck(control)를 conn_tx 에 try_send 하면, 그 enqueue 가 아래 replay 의
-        //   conn_tx try_send(binary) 보다 반드시 먼저 일어난다(단일 writer FIFO → Ack→replay 순서).
-        //   동시에 Ack 필드는 이 단일 스냅샷에서 나온 outcome 으로 채워지므로 A/B 두 스냅샷
-        //   불일치(M-A)가 원천 제거된다.
         on_ready(&outcome);
 
-        // ★payload-generic★: StoredOutput.event borrow → OutputPayload 뷰(인코딩은 sink 책임).
         for stored in to_send {
             let payload = match &stored.event {
                 OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
@@ -561,7 +507,6 @@ impl OutputCore {
         outcome
     }
 
-    /// 구독 해제 (창 닫힘 시 cleanup에서 호출). 해당 sink_id만 제거.
     pub fn unsubscribe(&self, sink_id: SinkId) {
         self.subscribers
             .lock()
@@ -584,12 +529,9 @@ impl OutputCore {
             .into_iter()
             .filter_map(|s| match s.event {
                 OutputEvent::TerminalBytes(data) => Some(OutputChunk { seq: s.seq, data }),
-                // 구조화 이벤트는 바이트 전용 wire snapshot 으로 아직 표현 불가(B7 몫) → 스킵.
-                //
-                // ★무음 유실 관측 훅★: B7 이 구조화→wire 매핑을 담당하며, 그전까지 이 경로(get_snapshot,
-                // 늦게 붙는 창의 초기 복원)로 붙는 구독자는 구조화 출력을 못 받는다. subscribe_from replay
-                // 경로는 payload-generic 이라 정상 전달돼 두 복원 경로가 비대칭 — B3 배선 순간 무음 유실이
-                // 되므로 drop 을 warn 으로 관측 가능하게 남긴다. 실제 wire 변환(B7)은 이 스코프 밖.
+                // ★무음 유실 관측 훅★: subscribe_from replay 경로는 payload-generic 이라 정상 전달돼
+                // 두 복원 경로가 비대칭 — B3 배선 순간 무음 유실이 되므로 drop 을 warn 으로 관측
+                // 가능하게 남긴다.
                 ref other => {
                     // variant 태그만 로그(payload 내용은 로그에 싣지 않음 — 민감/대용량 회피).
                     let kind = match other {
@@ -612,7 +554,6 @@ impl OutputCore {
             .collect()
     }
 
-    /// 현재 상태 clone 반환.
     pub fn status(&self) -> AgentStatus {
         self.status.lock().expect("status poisoned").clone()
     }
@@ -620,12 +561,8 @@ impl OutputCore {
 
 // ── S15 B4: payload-generic replay 버퍼 ───────────────────────────────────────────
 //
-// ReplayBuffer(OutputChunk=바이트 전용)를 일반화해 **owned OutputEvent** 를 저장한다.
-// TerminalBytes(Vec<u8>)도 OutputEvent 라 그대로 owned 저장되고, 구조화 이벤트(TextDelta·
-// ToolCall 등)도 같은 버퍼에 담긴다. replay 시 `&stored.event` 를 빌려 OutputPayload 뷰를 만든다.
 // ADR-0002: 출력 종류 비가정 — 버퍼가 바이트/이벤트를 차별하지 않는다.
 
-/// replay 버퍼 저장 단위. owned OutputEvent + seq + eviction 예산용 크기.
 #[derive(Debug, Clone)]
 pub struct StoredOutput {
     pub seq: u64,
@@ -667,23 +604,18 @@ fn estimate_cost_bytes(event: &OutputEvent) -> usize {
     }
 }
 
-/// Option<String> 의 바이트 길이(None=0). estimate_cost_bytes 보조.
 fn opt_len(s: &Option<String>) -> usize {
     s.as_deref().map(str::len).unwrap_or(0)
 }
 
 /// 늦게 붙는 창을 위한 출력 replay ring buffer — 상한 2MB **그리고** event 수 상한.
-/// ReplayBuffer 를 payload-generic(StoredOutput) 로 일반화한 것. StoredOutput 전용 구체 타입으로 둔다
-/// (제네릭 `Ring<T>` 는 이 프로젝트에 다른 저장 대상이 없어 과함 — 단순한 쪽).
+/// StoredOutput 전용 구체 타입으로 둔다(제네릭 `Ring<T>` 는 이 프로젝트에 다른 저장 대상이 없어
+/// 과함 — 단순한 쪽).
 ///
 /// ★event 수 상한 이유(S12 consult, GPT 단독 catch): byte 상한만 있으면 1바이트 청크가
 /// 폭주할 때 event 수가 수백만으로 불어, 신규 구독자가 replay를 받을 때 bounded mpsc를
 /// 즉시 가득 채워 매 재연결이 slow-consumer로 끊기는 영구 루프가 생긴다. 둘 중 하나라도
-/// 초과하면 앞부터 evict. (불변식: max_events ≤ 데몬 WS 송신 큐 cap − control_slack.)
-///
-/// ★byte 상한 = cost_bytes 합(구조화 이벤트도 예산 반영)★: 구 ReplayBuffer 는 data.len() 만 셌으나,
-/// 구조화 이벤트는 큰 args_json 을 담아도 "건수 1" 로만 세면 2MB 상한을 우회한다. Ring 은
-/// StoredOutput.cost_bytes(estimate_cost_bytes 근사) 합으로 예산을 잡아 이 우회를 막는다.
+/// 초과하면 앞부터 evict.
 pub struct Ring {
     items: VecDeque<StoredOutput>,
     total_bytes: usize,
@@ -698,7 +630,7 @@ impl Ring {
             total_bytes: 0,
             max_bytes: 2 * 1024 * 1024,
             // 4096: 데몬 WS 송신 큐 cap(예 4608) − control_slack(512) 이하로 잡아
-            // replay만으로 신규 구독자 큐가 넘치지 않게 한다(ReplayBuffer 와 동일 상수).
+            // replay만으로 신규 구독자 큐가 넘치지 않게 한다.
             max_events: 4096,
         }
     }
@@ -708,8 +640,6 @@ impl Ring {
     pub fn push(&mut self, item: StoredOutput) {
         self.total_bytes += item.cost_bytes;
         self.items.push_back(item);
-        // byte 예산(cost_bytes 합) OR event 수 상한 둘 중 하나라도 넘으면 앞부터 제거.
-        //
         // ★최신 1건 보존 불변식(len() > 1 가드)★: 방금 push 한 단일 이벤트의 cost_bytes 가
         // max_bytes(2MB)를 홀로 초과하면(예: 큰 args_json/Structured.json), len() > 1 가드가 없을 때
         // eviction 루프가 그 최신 이벤트까지 pop_front 로 빼내 버퍼가 비어 버린다 → 늦게 붙는 구독자가
@@ -728,8 +658,7 @@ impl Ring {
     }
 
     /// 현재 버퍼 전체를 clone 해 반환(seq 오름차순). 호출부가 after_seq 필터는 partition_point 로.
-    /// clone 반환 계약은 ReplayBuffer::snapshot 과 동일 — 호출부(subscribe)가 lock 밖에서 borrow 하려면
-    /// 소유 스냅샷이 필요하다(락 보유 시간 최소화).
+    /// 호출부(subscribe)가 lock 밖에서 borrow 하려면 소유 스냅샷이 필요하다(락 보유 시간 최소화).
     pub fn snapshot(&self) -> Vec<StoredOutput> {
         self.items.iter().cloned().collect()
     }
@@ -747,7 +676,6 @@ mod tests {
     use std::sync::Mutex;
 
     /// 받은 출력을 (seq, bytes, is_event)로 순서대로 수집하는 mock OutputSink.
-    /// raw 경계화 검증: base64 아닌 raw 바이트가 그대로 오는지 + payload 종류(Bytes/Event) 태그.
     struct MockSink {
         id: SinkId,
         events: Mutex<Vec<(u64, Vec<u8>, bool)>>,
@@ -772,8 +700,6 @@ mod tests {
 
     impl OutputSink for MockSink {
         fn send(&self, frame: OutputFrame<'_>) -> Result<(), crate::agent::types::SinkError> {
-            // payload 종류별 수집(테스트 검증용): Bytes→raw 바이트 그대로(is_event=false),
-            // Event→디버그 문자열화 후 UTF-8 바이트(is_event=true, 구조화 이벤트 도달을 단언 가능하게).
             let (bytes, is_event) = match frame.payload {
                 OutputPayload::Bytes(b) => (b.to_vec(), false),
                 OutputPayload::Event(e) => (format!("{e:?}").into_bytes(), true),
@@ -789,7 +715,6 @@ mod tests {
         }
     }
 
-    /// 받은 status 변경과 턴 종료 통지를 순서대로 수집하는 mock StatusSink.
     struct MockStatusSink {
         statuses: Mutex<Vec<AgentStatus>>,
         turn_ends: Mutex<Vec<(AgentId, u32)>>,
@@ -879,7 +804,6 @@ mod tests {
 
     #[test]
     fn emit_of_non_turn_events_leaves_the_table_untouched() {
-        // 비-구조화 세션은 TerminalBytes 만 낸다 — 그래서 관측 대상 집합이 구조적으로 좁혀진다.
         let (core, turns, id) = core_with_turns(MockStatusSink::new(), 0);
         core.emit(OutputEvent::TerminalBytes(b"raw".to_vec()));
         core.emit(OutputEvent::Usage {
@@ -897,7 +821,6 @@ mod tests {
 
     #[test]
     fn every_message_done_pushes_a_turn_end_notification() {
-        // 전이 없는 종료(연속 MessageDone)도 통지한다 — 누락은 소비자를 영구 대기시키고, 잉여는 무해하다.
         let sink = MockStatusSink::new();
         let (core, _turns, id) = core_with_turns(sink.clone(), 2);
         core.emit(delta());
@@ -920,11 +843,6 @@ mod tests {
 
     #[test]
     fn a_late_echo_after_finish_cannot_resurrect_the_entry() {
-        // ★유령 항목 회귀(같은 epoch 지각 신호)★ 실제 순서를 그대로 재현한다: 주입 스레드가
-        //   transport write 에 막힌 사이 pump 가 EOF→finish 로 표를 비우고, 깨어난 그 스레드가 **같은
-        //   epoch** 으로 입력 에코를 emit 한다. epoch 단조 규칙은 더 작은 epoch 만 버리므로 이걸 못 막는다
-        //   — emit 의 finalize 재확인이 막는다. 안 막으면 종료 신호가 영영 오지 않는 항목이 프로세스
-        //   수명 내내 남아(in_turn_snapshot 에 계속 잡혀) 죽은 에이전트로 도어벨이 반복된다.
         let (core, turns, id) = core_with_turns(MockStatusSink::new(), 0);
         core.emit(delta());
         assert!(turns.is_in_turn(id, 0), "전제: 턴 중으로 관측됨");
@@ -947,10 +865,6 @@ mod tests {
 
     #[test]
     fn a_dead_incarnations_late_echo_cannot_delete_the_live_ones_observation() {
-        // ★epoch 재사용이 왜 치명적인지의 반대 증명★: 두 화신이 **다른 epoch** 을 가지면, 죽은 쪽의 지각
-        //   emit 은 ① 표를 덮지 못하고(더 작은 epoch) ② 그 emit 의 finalize 재확인이 부르는
-        //   `forget(id, 죽은 epoch)` 도 epoch 이 안 맞아 산 항목을 지우지 못한다. epoch 이 같으면 둘 다
-        //   통과해 산 에이전트가 미관측이 되고, 그 결과가 턴 중 주입이다(spawn_agent 의 epoch 확정 주석).
         use crate::agent::profile::{AgentCommand, ClaudeOutputFormat};
         let id = uuid::Uuid::new_v4();
         let turns = Arc::new(TurnObservations::new());
@@ -991,7 +905,6 @@ mod tests {
 
     #[test]
     fn a_backend_without_a_turn_mapping_never_records_a_signal() {
-        // 기본값 = 침묵(fail-open). 근거 없는 진행 신호는 깨울 수 없는 "턴 중" 을 만든다.
         use crate::agent::profile::AgentCommand;
         let id = uuid::Uuid::new_v4();
         let turns = Arc::new(TurnObservations::new());
@@ -1018,7 +931,6 @@ mod tests {
 
     #[test]
     fn an_unwired_core_records_nothing_at_all() {
-        // 분류자가 없으면 어떤 이벤트가 신호인지 알 수 없다 — 공용 층이 추측하지 않는다(ADR-0004).
         let sink = MockStatusSink::new();
         let core = new_core(sink.clone());
         core.emit(delta());
@@ -1028,8 +940,6 @@ mod tests {
 
     #[test]
     fn seed_never_bootstraps_turn_observation_from_a_transcript() {
-        // ★되살리지 말 것★: 턴 중간에 끊긴 transcript 를 관측으로 먹이면 종료 신호가 영영 오지 않는
-        //   "턴 중" 이 만들어져 그 화신을 기다리는 소비자가 깨울 수 없이 멈춘다.
         let sink = MockStatusSink::new();
         let (core, turns, id) = core_with_turns(sink.clone(), 0);
         core.seed(vec![delta(), message_done(), delta()]);
@@ -1049,11 +959,8 @@ mod tests {
         core.emit(OutputEvent::TerminalBytes(b"hello".to_vec()));
         core.emit(OutputEvent::TerminalBytes(b"world".to_vec()));
 
-        // seq 0,1로 증가.
         assert_eq!(sink.seqs(), vec![0, 1]);
-        // 구독자에 2건 전달.
         assert_eq!(sink.len(), 2);
-        // ★raw 경계화 검증: sink가 base64 아닌 raw 바이트를 받았는지 + payload=Bytes(is_event=false).
         {
             let ev = sink.events.lock().unwrap();
             assert_eq!(ev[0].1, b"hello");
@@ -1061,7 +968,6 @@ mod tests {
             assert!(!ev[0].2, "TerminalBytes 는 OutputPayload::Bytes 로 와야 함");
             assert!(!ev[1].2);
         }
-        // replay에 2건 누적.
         let snap = core.snapshot();
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].seq, 0);
@@ -1070,14 +976,10 @@ mod tests {
         assert_eq!(snap[1].data, b"world");
     }
 
-    /// S15 B4 payload-generic fanout: 구조화 이벤트를 emit 하면 (1) 구독자가 OutputPayload::Event
-    /// 로 수신하고, (2) Ring 에 저장돼 늦게 붙는 구독자의 replay 도 동일하게 Event 로 받는지 검증.
-    /// (바이트 경로 회귀는 emit_increments_seq_and_fans_out 이 커버 — 여기선 구조화 경로 신규.)
     #[test]
     fn emit_structured_event_fans_out_as_event_and_replays() {
         let core = new_core(MockStatusSink::new());
 
-        // (a) live 구독자 등록 후 구조화 이벤트 emit.
         let live = MockSink::new();
         core.subscribe(live.clone());
         core.emit(OutputEvent::TextDelta {
@@ -1085,13 +987,11 @@ mod tests {
             turn_id: None,
             message_id: None,
         });
-        // 바이트도 하나 섞어 payload 분기(Bytes vs Event)를 함께 본다.
         core.emit(OutputEvent::TerminalBytes(b"raw".to_vec()));
 
         {
             let ev = live.events.lock().unwrap();
             assert_eq!(ev.len(), 2);
-            // 첫 이벤트(구조화) → Event 로 수신.
             assert!(
                 ev[0].2,
                 "구조화 이벤트는 OutputPayload::Event 로 fanout 돼야 함"
@@ -1100,28 +1000,23 @@ mod tests {
                 String::from_utf8_lossy(&ev[0].1).contains("TextDelta"),
                 "Event payload 가 해당 이벤트를 담아야 함"
             );
-            // 둘째(TerminalBytes) → Bytes 로 수신.
             assert!(!ev[1].2, "TerminalBytes 는 Bytes 로 fanout");
             assert_eq!(ev[1].1, b"raw");
         }
 
-        // (b) 늦게 붙는 구독자 → replay 로 두 건을 동일 payload 종류로 받는다(seq 순서 보존).
         let late = MockSink::new();
         core.subscribe(late.clone());
         {
             let ev = late.events.lock().unwrap();
             assert_eq!(ev.len(), 2);
-            assert_eq!(ev[0].0, 0); // 구조화, seq 0.
+            assert_eq!(ev[0].0, 0);
             assert!(ev[0].2, "replay 된 구조화 이벤트도 Event payload");
-            assert_eq!(ev[1].0, 1); // 바이트, seq 1.
+            assert_eq!(ev[1].0, 1);
             assert!(!ev[1].2);
             assert_eq!(ev[1].1, b"raw");
         }
     }
 
-    /// ADR-0079 seed: resume 시 seed 한 과거 이벤트가 (1) Ring 에 순서대로 쌓이고, (2) seed 시점엔
-    /// 구독자가 없어 fanout 이 일어나지 않으며(구독 전이므로), (3) seed 뒤 첫 라이브 emit 의 seq 가
-    /// seed 마지막 seq+1 로 이어지는지(seq 연속성) 검증. 헤드리스(mock sink) — 실 프로세스 없음.
     #[test]
     fn seed_pushes_to_ring_in_order_without_fanout_then_live_seq_continues() {
         let core = new_core(MockStatusSink::new());
@@ -1145,7 +1040,6 @@ mod tests {
 
         // Ring 에 seq 0,1,2 로 순서대로 적재됐는지(snapshot 은 TerminalBytes 만 변환하므로 seq 검증은
         // 아래 늦은 구독자 replay 로 한다 — snapshot() 은 구조화 이벤트를 스킵).
-        // (2) fanout 없음: seed 후 뒤늦게 붙는 구독자가 replay 로 3건을 seq 0,1,2 순서로 받는다.
         let late = MockSink::new();
         core.subscribe(late.clone());
         assert_eq!(
@@ -1154,7 +1048,6 @@ mod tests {
             "seed 한 과거 3건이 Ring 에 seq 0,1,2 로 순서대로 있어야 하고 replay 로 전달됨"
         );
 
-        // (3) seq 연속성: seed 뒤 첫 라이브 emit 은 seq 3(= seed 마지막 2 + 1).
         core.emit(OutputEvent::TextDelta {
             text: "새 라이브 토큰".into(),
             turn_id: None,
@@ -1167,8 +1060,6 @@ mod tests {
         );
     }
 
-    /// ADR-0079 seed: seed 시점에 (설령) 구독자가 이미 있어도 fanout 하지 않음을 명시 검증.
-    /// seed 는 "버퍼 사전 적재"라 라이브 send 경로를 타지 않는다 — 구독자는 나중 replay 로만 과거를 받는다.
     #[test]
     fn seed_does_not_fanout_to_existing_subscriber() {
         let core = new_core(MockStatusSink::new());
@@ -1182,10 +1073,8 @@ mod tests {
             message_id: None,
         }]);
 
-        // seed 는 fanout 하지 않으므로 이미 붙은 구독자는 seed 시점에 아무 것도 못 받는다.
         assert_eq!(sink.len(), 0, "seed 는 기존 구독자로 fanout 하지 않아야 함");
 
-        // 이후 라이브 emit 은 정상 fanout — seq 는 seed(0) 다음인 1.
         core.emit(OutputEvent::TextDelta {
             text: "live".into(),
             turn_id: None,
@@ -1206,18 +1095,15 @@ mod tests {
         core.emit(OutputEvent::TerminalBytes(b"a".to_vec()));
         core.emit(OutputEvent::TerminalBytes(b"b".to_vec()));
 
-        // 늦게 붙는 sink → replay 스냅샷이 먼저 전달돼야 함.
         let sink = MockSink::new();
         core.subscribe(sink.clone());
         assert_eq!(sink.seqs(), vec![0, 1]);
 
-        // 이후 live emit → seq 끊김 없이 이어짐.
         core.emit(OutputEvent::TerminalBytes(b"c".to_vec()));
         assert_eq!(sink.seqs(), vec![0, 1, 2]);
     }
 
-    // ── S15 B4 Ring 단위테스트(격리) — 구 replay_buffer_caps_event_count 는 ────────
-    //    ring_evicts_on_event_count_cap 이 대체(ReplayBuffer→Ring 일반화). ──────────
+    // ── S15 B4 Ring 단위테스트(격리) ──────────────────────────────────────────────
 
     fn stored(seq: u64, event: OutputEvent) -> StoredOutput {
         let cost_bytes = estimate_cost_bytes(&event);
@@ -1240,16 +1126,12 @@ mod tests {
             snap.iter().map(|s| s.seq).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        // event 종류·내용 보존.
         assert!(matches!(&snap[0].event, OutputEvent::TerminalBytes(v) if v == b"a"));
         assert!(matches!(&snap[2].event, OutputEvent::Error(s) if s == "boom"));
     }
 
     #[test]
     fn ring_evicts_on_byte_budget_independent_of_count() {
-        // 큰 args_json 이벤트 한 건이 max_bytes(2MB) 를 초과하면, 건수 상한(4096) 과 무관하게
-        // 오래된 것부터 evict 돼야 한다. 구 ReplayBuffer(data.len() 만 셈)라면 "건수 1" 로 새어
-        // 2MB 상한을 우회했을 케이스. cost_bytes 근사가 이를 막는지 검증.
         let mut ring = Ring::new();
         // 각 ~1MB args_json 이벤트 3건 → cost 합 ~3MB > 2MB → 가장 오래된 것 evict.
         let big = "x".repeat(1024 * 1024);
@@ -1284,13 +1166,11 @@ mod tests {
             },
         ));
         let snap = ring.snapshot();
-        // 건수는 3보다 작아야 함(byte 예산이 먼저 걸림) — 건수 상한(4096) 과 독립.
         assert!(
             snap.len() < 3,
             "cost_bytes 합이 2MB 초과 시 건수 상한과 무관하게 evict 돼야 함(len={})",
             snap.len()
         );
-        // 남은 것은 최신 쪽(seq 2 는 반드시 살아 있음, 방금 push).
         assert_eq!(snap.last().unwrap().seq, 2);
     }
 
@@ -1312,8 +1192,6 @@ mod tests {
     fn ring_preserves_latest_when_single_event_exceeds_byte_budget() {
         // FIX-A: 방금 push 한 단일 이벤트의 cost_bytes 가 max_bytes(2MB)를 홀로 초과해도,
         // 최신 1건 보존 불변식(len() > 1 가드)에 의해 그 이벤트는 replay 버퍼에 남아야 한다.
-        // 가드가 없으면 eviction 루프가 최신까지 pop_front 해 버퍼가 비고, 늦은 구독자가
-        // 최신 seq 를 통째로 놓친다.
         let mut ring = Ring::new();
         let huge = "y".repeat(3 * 1024 * 1024); // > 2MB (max_bytes)
         ring.push(stored(
@@ -1330,8 +1208,7 @@ mod tests {
 
     #[test]
     fn ring_evicts_only_old_when_latest_exceeds_budget() {
-        // FIX-A: 오래된 작은 이벤트들 + 예산을 홀로 초과하는 큰 최신 이벤트 →
-        // 오래된 것들만 빠지고(byte 예산 회복 시도) 최신 1건은 반드시 남는다.
+        // FIX-A: 오래된 작은 이벤트들 + 예산을 홀로 초과하는 큰 최신 이벤트.
         let mut ring = Ring::new();
         ring.push(stored(0, OutputEvent::TerminalBytes(b"old0".to_vec())));
         ring.push(stored(1, OutputEvent::TerminalBytes(b"old1".to_vec())));
@@ -1344,7 +1221,6 @@ mod tests {
             },
         ));
         let snap = ring.snapshot();
-        // 오래된 것(seq 0,1)은 evict, 최신(seq 2)만 남는다.
         assert_eq!(snap.len(), 1, "오래된 것만 빠지고 최신 1건 남아야 함");
         assert_eq!(snap[0].seq, 2, "남은 것은 최신 이벤트");
     }
@@ -1382,7 +1258,6 @@ mod tests {
         core.finish(TerminalReason::Killed);
         core.finish(TerminalReason::Killed);
 
-        // 2번 호출해도 status_sink에는 Killed 1회만.
         let statuses = status_sink.statuses();
         assert_eq!(statuses.len(), 1);
         assert!(matches!(statuses[0], AgentStatus::Killed));
@@ -1391,8 +1266,6 @@ mod tests {
 
     /// ADR-0019 reaper hook(on_terminal) 1회 보장: finalize 승자 경로(finalized.swap 통과)에서
     /// hook 이 정확히 1회 호출되고, 중복 finish(swap 패자)에서는 0회임을 단언한다.
-    /// `finish_finalizes_exactly_once` 는 status_sink(status_changed) 횟수를 보지만, reaper hook
-    /// 은 그와 별개의 경로(on_terminal Option)라 hook 자체의 1회성은 미커버 → 여기서 신규 단언.
     #[test]
     fn on_terminal_hook_fires_exactly_once() {
         let core = new_core(MockStatusSink::new());
@@ -1403,7 +1276,6 @@ mod tests {
             c.fetch_add(1, Ordering::SeqCst);
         }));
 
-        // 1회차 = finalize 승자 → hook 1회.
         core.finish(TerminalReason::Exited { code: Some(0) });
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -1411,7 +1283,6 @@ mod tests {
             "finalize 승자 경로에서 on_terminal hook 이 정확히 1회 호출돼야 함"
         );
 
-        // 2회차 = finalized.swap 패자 → 즉시 return → hook 0회 추가(누계 1 유지).
         core.finish(TerminalReason::Killed);
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -1429,7 +1300,6 @@ mod tests {
         let sink = MockSink::new();
         let out = core.subscribe_from(sink.clone(), Some(2), true, |_| {});
 
-        // after_seq=2 → seq>2 인 [3,4] 만 전송.
         assert_eq!(sink.seqs(), vec![3, 4]);
         assert_eq!(out.kind, ReplayKind::Resumed);
         assert_eq!(out.replayed, 2);
@@ -1446,7 +1316,6 @@ mod tests {
         let sink = MockSink::new();
         let out = core.subscribe_from(sink.clone(), Some(10), true, |_| {});
 
-        // after_seq=10 < oldest(904) → Truncated, oldest 부터 전체.
         assert_eq!(out.kind, ReplayKind::Truncated);
         assert_eq!(out.oldest_seq, 904);
         assert_eq!(sink.seqs().first().copied(), Some(904));
@@ -1462,7 +1331,6 @@ mod tests {
         let sink = MockSink::new();
         let out = core.subscribe_from(sink.clone(), Some(1), false, |_| {});
 
-        // epoch 불일치 → after_seq 무시하고 전체.
         assert_eq!(out.kind, ReplayKind::FromOldest);
         assert_eq!(sink.seqs(), vec![0, 1, 2]);
         assert_eq!(out.replay_from, 0);
@@ -1482,7 +1350,6 @@ mod tests {
         assert_eq!(out.replay_from, 3);
         assert_eq!(sink.len(), 0);
 
-        // 이후 live emit(seq3) → gap 없이 sink 가 받음(C4: 구독이 lock 보유 중 끝나 역전 없음).
         core.emit(OutputEvent::TerminalBytes(b"d".to_vec()));
         assert_eq!(sink.seqs(), vec![3]);
     }
@@ -1505,7 +1372,6 @@ mod tests {
     /// (3) 콜백이 받는 outcome 이 반환 outcome 과 동일(단일 스냅샷 기준)임을 확인.
     #[test]
     fn subscribe_from_calls_on_ready_before_replay() {
-        // send 가 처음 불릴 때 replay_started 를 true 로 세우는 sink.
         struct OrderSink {
             id: SinkId,
             replay_started: Arc<AtomicBool>,
@@ -1539,7 +1405,6 @@ mod tests {
         let started = replay_started.clone();
         let seen_cb = seen.clone();
         let out = core.subscribe_from(sink, Some(1), true, move |outcome| {
-            // (1) 콜백 시점엔 아직 어떤 frame 도 sink 로 안 나갔다.
             assert!(
                 !started.load(Ordering::SeqCst),
                 "on_ready 는 replay 전송 전에 호출돼야 함"
@@ -1548,11 +1413,9 @@ mod tests {
             *seen_cb.lock().unwrap() = Some(*outcome);
         });
 
-        // (2) 정확히 1회 호출.
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
         // replay 가 실제로 전송됐는지(after_seq=1 → seq 2 전송) → started true.
         assert!(replay_started.load(Ordering::SeqCst));
-        // (3) 콜백이 본 outcome == 반환 outcome.
         let seen = seen.lock().unwrap().expect("콜백이 호출됨");
         assert_eq!(seen.kind, out.kind);
         assert_eq!(seen.oldest_seq, out.oldest_seq);
@@ -1566,7 +1429,6 @@ mod tests {
         let status_sink = MockStatusSink::new();
         let core = new_core(status_sink.clone());
 
-        // Running 상태 → true + Exiting 알림.
         assert!(core.enter_exiting());
         assert!(matches!(core.status(), AgentStatus::Exiting));
         assert!(matches!(
@@ -1574,7 +1436,6 @@ mod tests {
             AgentStatus::Exiting
         ));
 
-        // terminal로 전이 후 → false(덮어쓰지 않음).
         core.finish(TerminalReason::Exited { code: Some(0) });
         assert!(!core.enter_exiting());
     }
@@ -1582,12 +1443,8 @@ mod tests {
     /// ADR-0079 회귀 방지: 동시 emit 하에서도 replay ring 이 seq 오름차순(단조)을 유지하는지.
     ///
     /// ★왜 이 테스트가 성립하나(hermetic)★: pump 스레드와 write_input synthetic echo 가 동시에 emit 을
-    ///   부르는 실제 상황을 여러 스레드의 emit 루프로 재현한다. FIX 전에는 seq 발급(fetch_add)이 replay
-    ///   락 **밖**이라, 두 스레드가 N/N+1 을 발급받고도 락 진입 순서가 뒤집혀 ring 에 N+1 이 N 보다 먼저
-    ///   push 될 수 있었다 → ring 비단조 → subscribe_from 의 partition_point(seq 오름차순 전제) 붕괴.
-    ///   발급+push 를 같은 락 구간에 묶은 뒤에는 락 획득 순서 = seq 순서 = ring 항상 단조.
-    ///   확률적이지만 스레드×반복이 크면 발급/push 역전 창을 거의 확실히 밟아 회귀를 잡는다(플래키하지
-    ///   않게 반복 수를 넉넉히 잡음). max_events(4096) 이하로 유지해 eviction 없이 전량을 검사한다.
+    ///   부르는 실제 상황을 여러 스레드의 emit 루프로 재현한다. 확률적이지만 스레드×반복이 크면
+    ///   발급/push 역전 창을 거의 확실히 밟아 회귀를 잡는다(플래키하지 않게 반복 수를 넉넉히 잡음).
     #[test]
     fn concurrent_emit_keeps_replay_ring_monotonic() {
         let core = Arc::new(new_core(MockStatusSink::new()));
@@ -1609,7 +1466,6 @@ mod tests {
             h.join().expect("emit thread panicked");
         }
 
-        // ring 을 직접 들여다봐 seq 가 push 순서대로 엄격 오름차순인지 단언(fanout 순서가 아니라 저장 순서).
         let stored = core.replay.lock().expect("replay poisoned").snapshot();
         let seqs: Vec<u64> = stored.iter().map(|s| s.seq).collect();
         assert_eq!(
@@ -1617,7 +1473,6 @@ mod tests {
             THREADS * PER_THREAD,
             "eviction 없이 전량 저장돼야(검사 완전성)"
         );
-        // 엄격 단조 증가(중복·역전 없음) — FIX 가 빠지면 여기서 역전이 잡힌다.
         assert!(
             seqs.windows(2).all(|w| w[0] < w[1]),
             "replay ring 은 seq 로 엄격 오름차순이어야 한다(동시 emit 원자성): {seqs:?}"
