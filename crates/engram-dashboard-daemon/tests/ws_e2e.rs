@@ -1321,7 +1321,7 @@ async fn case18_ws_unsubscribe_stops_live() {
     server.shutdown().await;
 }
 
-// ── 케이스 19: WS ListAgents → AgentListUpdated ────────────────────────────────────
+// ── 케이스 19: WS ListAgents → AgentList ───────────────────────────────────────────
 #[tokio::test]
 async fn case19_ws_list_agents() {
     let server = start_test_server().await.unwrap();
@@ -1338,7 +1338,6 @@ async fn case19_ws_list_agents() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // 명시 WS ListAgents → 전용 reply AgentList(req echo, 그 agent 포함).
     let req_list = RequestId::new();
     c.send(&WireCommand::ListAgents {
         request_id: req_list,
@@ -1371,7 +1370,6 @@ async fn case20_ws_stop_daemon_force_policy() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // 1) force=false + 활성 agent → 거부 Error(req echo). 서버는 살아있어야 한다.
     let req_reject = RequestId::new();
     c.send(&WireCommand::StopDaemon {
         force: false,
@@ -1384,7 +1382,6 @@ async fn case20_ws_stop_daemon_force_policy() {
         msg.contains("active agents"),
         "force=false 거부 메시지에 active agents 명시: {msg}"
     );
-    // 서버 생존 확인 — 같은 연결로 ListAgents 가 정상 응답(연결·서버 살아있음).
     let req_alive = RequestId::new();
     c.send(&WireCommand::ListAgents {
         request_id: req_alive,
@@ -1392,7 +1389,6 @@ async fn case20_ws_stop_daemon_force_policy() {
     .await;
     let _ = c.await_agent_list(req_alive).await;
 
-    // 2) force=true + kill_agents=true → Ack 후 종료(연결 close + 서버 watch 종료).
     let req_stop = RequestId::new();
     c.send(&WireCommand::StopDaemon {
         force: true,
@@ -1401,37 +1397,28 @@ async fn case20_ws_stop_daemon_force_policy() {
     })
     .await;
     c.await_ack(req_stop).await;
-    // 종료 신호 → main(accept loop) 종료 → 이 연결도 닫힌다.
     assert!(
         c.expect_closed().await,
         "StopDaemon(force) 후 연결이 닫혀야"
     );
 
-    // accept loop 가 watch 로 종료됐는지 — 새 연결이 더는 안 붙어야(서버 종료 실증).
-    // accept_handle join 으로 확정(shutdown 은 idempotent — 이미 종료된 watch 에 재send).
+    // accept_handle join 으로 accept loop 종료 확정(shutdown 은 idempotent — 이미 종료된 watch 에 재send).
     server.shutdown().await;
 }
 
-// ── 케이스 21: 2차 Auth → already authenticated Error(현 dispatch 동작) ─────────────
+// ── 케이스 21: 2차 Auth → already authenticated Error ───────────────────────────────
 #[tokio::test]
 async fn case21_ws_second_auth_rejected() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // 이미 auth 된 연결에서 또 Auth — request_id 없는 Error("already authenticated").
-    // ★ADR-0129 0-4 이후 응답 주인이 바뀌었다★: 예전엔 이 프레임이 명령으로 디코드돼 dispatch 가 답했다.
-    //   지금은 명령으로 디코드되지 않으므로 `agent_conn::on_text` 의 파싱 실패 갈래가 **태그로** 되잡아
-    //   같은 문구를 낸다. 아래 단언이 지키는 것은 **온전한 핸드셰이크가 받는 그 문구**다 — 어긋난
-    //   프레임의 진단 텍스트까지 그대로라는 뜻은 아니다(무엇이 어떻게 바뀌었는지는 `connection_core`
-    //   의 그 arm 자리 주석).
     c.send_auth(&server.token).await;
     let msg = c.await_error_no_id().await;
     assert!(
         msg.contains("already authenticated"),
         "2차 Auth 는 already authenticated Error 여야: {msg}"
     );
-    // 연결은 닫히지 않고 유지(Error 만) — 후속 ListAgents 가 응답하는지로 확인.
     let req_alive = RequestId::new();
     c.send(&WireCommand::ListAgents {
         request_id: req_alive,
@@ -1449,9 +1436,7 @@ async fn case22_ws_binary_frame_rejected() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // 클라→데몬 binary 는 프로토콜에 없음 → read_task 가 Error 후 close.
     c.send_binary(vec![0xde, 0xad, 0xbe, 0xef]).await;
-    // Error("unexpected binary frame") 후 연결 close. expect_closed 가 Error 를 흡수하며 닫힘 관측.
     assert!(
         c.expect_closed().await,
         "control 자리 binary 는 Error 후 연결이 닫혀야"
@@ -1467,14 +1452,12 @@ async fn case23_ws_parse_failure_error() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // 모르는/깨진 명령 JSON → serde 파싱 실패 → Error(request_id None). 연결은 유지된다.
     c.send_raw_text("{\"NotACommand\":true}").await;
     let msg = c.await_error_no_id().await;
     assert!(
         msg.contains("invalid command"),
         "파싱 실패 Error 메시지: {msg}"
     );
-    // 연결 유지 확인 — 후속 ListAgents 정상 응답.
     let req_alive = RequestId::new();
     c.send(&WireCommand::ListAgents {
         request_id: req_alive,
@@ -1486,8 +1469,6 @@ async fn case23_ws_parse_failure_error() {
 }
 
 // ── 케이스 24: dispatch 실패 arm — 없는 agent_id Kill → Error(req echo) ─────────────
-//   정상계(case13~)만 타던 갭을 메운다. manager 가 NotFound 를 반환하면 dispatch 가 그 에러를
-//   Error{request_id: Some(보낸 req)} 로 매핑하는지.
 #[tokio::test]
 async fn case24_ws_kill_unknown_agent_error() {
     let server = start_test_server().await.unwrap();
@@ -1496,7 +1477,7 @@ async fn case24_ws_kill_unknown_agent_error() {
 
     let req = RequestId::new();
     c.send(&WireCommand::Kill {
-        agent_id: Uuid::new_v4(), // 존재하지 않는 agent
+        agent_id: Uuid::new_v4(),
         request_id: req,
     })
     .await;
@@ -1541,7 +1522,7 @@ async fn case26_ws_spawn_unknown_profile_error() {
 
     let req = RequestId::new();
     c.send(&WireCommand::Spawn {
-        profile_id: Uuid::new_v4(), // 레지스트리에 없는 프로필
+        profile_id: Uuid::new_v4(),
         request_id: req,
     })
     .await;
@@ -1556,11 +1537,8 @@ async fn case26_ws_spawn_unknown_profile_error() {
 
 // ══════════════════════════════════════════════════════════════════════════════════
 // A: WS application-level keepalive (half-open 연결 감지).
-//   데몬이 능동 Ping 을 보내고, 마지막 클라 수신 후 idle_timeout 초과 시 연결을 닫는다.
-//   ★짧은 주입값★(ping 200ms / idle 600ms)으로 테스트가 수 초 내 끝나게 한다.
 // ══════════════════════════════════════════════════════════════════════════════════
 
-/// 테스트용 짧은 keepalive 설정(상수 하드코딩 회피 — 운영 20s/50s 와 분리).
 fn fast_keepalive() -> KeepaliveConfig {
     KeepaliveConfig {
         ping_interval: Duration::from_millis(200),
@@ -1587,9 +1565,6 @@ async fn case27_keepalive_server_sends_ping() {
 }
 
 // ── 케이스 28: Pong 미응답(죽은 클라) → idle_timeout 후 서버가 close ─────────────────
-//   tungstenite 는 stream 을 poll 할 때만 자동 Pong 한다. 죽은 클라를 흉내내려고 auth 후
-//   idle 구간 동안 **전혀 읽지 않는다**(자동 Pong 미발생) → 서버 last_recv 가 갱신되지 않아
-//   idle_timeout(600ms) 초과 → close_signal → 서버가 이 연결을 닫는다.
 #[tokio::test]
 async fn case28_keepalive_dead_client_closed() {
     let server = start_test_server_with_keepalive(fast_keepalive())
@@ -1602,8 +1577,6 @@ async fn case28_keepalive_dead_client_closed() {
     //   그 sleep 동안 서버 ping arm 이 idle 을 감지(last_recv=auth 시점 고정)해 연결을 닫는다.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    // 이제 비로소 poll → 이미 닫혔거나(backlog 소진 후 Close) 즉시 Close 를 관측해야 한다.
-    // (이 시점에 버퍼된 Ping 들에 뒤늦게 Pong 을 쓰려 해도 서버는 이미 닫는 중 → 무해.)
     assert!(
         c.expect_closed_within(Duration::from_secs(3)).await,
         "Pong 미응답(죽은 클라)이면 idle_timeout 후 서버가 연결을 닫아야"
@@ -1613,8 +1586,6 @@ async fn case28_keepalive_dead_client_closed() {
 }
 
 // ── 케이스 29: 정상 활성 클라는 keepalive 로 끊기지 않음(회귀 방지) ──────────────────
-//   클라가 계속 읽으면 tungstenite 가 서버 Ping 에 자동 Pong → 서버 last_recv 가 갱신돼
-//   idle_timeout 을 넘지 않는다. idle_timeout(600ms)의 수 배 동안 살아있어야 한다.
 #[tokio::test]
 async fn case29_keepalive_active_client_survives() {
     let server = start_test_server_with_keepalive(fast_keepalive())
@@ -1635,7 +1606,6 @@ async fn case29_keepalive_active_client_survives() {
 
 // ══════════════════════════════════════════════════════════════════════════════════
 // 멀티뷰어: resize 협상(tmux smallest) + 입력 lease(Zellij 명시 lease).
-//   두 연결로 같은 agent 를 동시 attach 한 상황을 시뮬한다.
 // ══════════════════════════════════════════════════════════════════════════════════
 
 // ── 케이스 30: resize 협상 — 두 viewport 의 smallest 로 PTY, detach 후 재협상 ──────────
@@ -1644,7 +1614,6 @@ async fn case30_multiviewer_resize_smallest_and_renegotiate() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
 
-    // 연결1: viewport "a" → (80,40).
     let mut c1 = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c1).await;
     c1.send(&WireCommand::Resize {
@@ -1654,13 +1623,11 @@ async fn case30_multiviewer_resize_smallest_and_renegotiate() {
         viewport_id: Some("a".into()),
     })
     .await;
-    // viewport 하나뿐이면 그 크기가 곧 협상값.
     assert!(
         wait_for_size(&server, id, 80, 40).await,
         "viewport a 단독이면 (80,40)"
     );
 
-    // 연결2: viewport "b" → (40,20). 두 뷰어 중 smallest = (40,20) 로 PTY 가 맞춰져야 한다.
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c2).await;
     c2.send(&WireCommand::Resize {
@@ -1675,7 +1642,6 @@ async fn case30_multiviewer_resize_smallest_and_renegotiate() {
         "두 viewport(a=80x40, b=40x20)의 smallest = (40,20)"
     );
 
-    // 연결2 끊김 → 그 viewport 가 빠지고 남은 a 기준 (80,40) 으로 재협상(복귀).
     drop(c2);
     assert!(
         wait_for_size(&server, id, 80, 40).await,
@@ -1693,7 +1659,6 @@ async fn case31_resize_no_viewport_id_bypasses_negotiation() {
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
-    // viewport_id=None(v1 프론트 기본) → 협상 없이 그 크기로 직접.
     c.send(&WireCommand::Resize {
         agent_id: id,
         cols: 120,
@@ -1720,7 +1685,6 @@ async fn case32_input_lease_locks_other_viewer() {
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c2).await;
 
-    // 연결1 이 lease 획득 → Ack.
     let req_acq = RequestId::new();
     c1.send(&WireCommand::AcquireInput {
         agent_id: id,
@@ -1729,7 +1693,6 @@ async fn case32_input_lease_locks_other_viewer() {
     .await;
     c1.await_ack(req_acq).await;
 
-    // 연결2 WriteStdin → lease 가 c1 에 잠겨 있어 Error.
     let req_w2 = RequestId::new();
     c2.send(&WireCommand::WriteStdin {
         agent_id: id,
@@ -1743,7 +1706,6 @@ async fn case32_input_lease_locks_other_viewer() {
         "lease 보유 중 타 연결 WriteStdin 은 locked Error 여야: {msg}"
     );
 
-    // 보유자(c1) WriteStdin 은 통과(Ack).
     let req_w1 = RequestId::new();
     c1.send(&WireCommand::WriteStdin {
         agent_id: id,
@@ -1753,7 +1715,6 @@ async fn case32_input_lease_locks_other_viewer() {
     .await;
     c1.await_ack(req_w1).await;
 
-    // c1 이 ReleaseInput → 이후 c2 WriteStdin 통과.
     let req_rel = RequestId::new();
     c1.send(&WireCommand::ReleaseInput {
         agent_id: id,
@@ -1785,7 +1746,6 @@ async fn case33_input_lease_auto_released_on_disconnect() {
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c2).await;
 
-    // c1 이 lease 획득.
     let req_acq = RequestId::new();
     c1.send(&WireCommand::AcquireInput {
         agent_id: id,
@@ -1794,11 +1754,9 @@ async fn case33_input_lease_auto_released_on_disconnect() {
     .await;
     c1.await_ack(req_acq).await;
 
-    // c1 끊김 → cleanup 이 lease 자동 해제해야 한다(보유자 사망 시 다른 뷰어가 영영 막히면 안 됨).
     drop(c1);
 
-    // c2 가 acquire 시도 → 끊긴 보유자 lease 가 풀렸으므로 성공해야 한다.
-    //   끊김 cleanup 이 비동기라 즉시 반영 아님 → 재시도 폴링.
+    // 끊김 cleanup 이 비동기라 즉시 반영 아님 → 재시도 폴링.
     let mut acquired = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     while std::time::Instant::now() < deadline {
@@ -1808,7 +1766,6 @@ async fn case33_input_lease_auto_released_on_disconnect() {
             request_id: req,
         })
         .await;
-        // Ack 또는 Error 중 무엇이 오는지 본다.
         let mut got = None;
         let inner = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < inner {
@@ -1851,7 +1808,6 @@ async fn case34_no_lease_write_stdin_passes_freely() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // lease 를 잡지 않은 상태에서 WriteStdin → 자유 통과(Ack). 단일 뷰어 흔한 경우.
     let req = RequestId::new();
     c.send(&WireCommand::WriteStdin {
         agent_id: id,
@@ -1866,11 +1822,9 @@ async fn case34_no_lease_write_stdin_passes_freely() {
 
 // ══════════════════════════════════════════════════════════════════════════════════
 // phase4 1단계: 프로필 CRUD + ad-hoc spawn 의 WS wire 경로.
-//   각 case 는 EmbeddedClient(invoke)와 동일 의미인지(인자/부작용)를 dispatch 경로로 검증한다.
 // ══════════════════════════════════════════════════════════════════════════════════
 
 // ── 케이스 35: WS CreateProfile → Created(req echo, 생성 프로필 동봉) ────────────────
-// phase4-2 #6: Ack 대신 Created 로 응답. request_id 에 생성된 프로필을 동봉(DaemonClient 매칭용).
 #[tokio::test]
 async fn case35_ws_create_profile() {
     let server = start_test_server().await.unwrap();
@@ -1890,7 +1844,6 @@ async fn case35_ws_create_profile() {
     })
     .await;
 
-    // Created event 가 생성된 프로필을 직접 동봉 — request_id race 없이 "내 것" 식별.
     let created = c.await_created(req).await;
     assert_eq!(created.name, "p35", "Created 에 동봉된 프로필 이름 일치");
     assert_eq!(created.cwd, sent_cwd, "Created 에 동봉된 cwd 일치");
@@ -1900,7 +1853,6 @@ async fn case35_ws_create_profile() {
         "claude 프로필이 extra_args 보존 + 기본 output_format=Terminal"
     );
     assert!(created.auto_restore, "auto_restore 반영");
-    // manager(공유 레지스트리)에도 실제 등록됐는지 — dispatch 가 upsert 했다는 사실 확인.
     assert!(
         server.manager.agent_snapshot(created.id).is_some(),
         "create 후 manager 레지스트리에 존재해야"
@@ -1924,7 +1876,6 @@ async fn case35_ws_create_profile() {
             if *output_format == WireOutputFormat::StreamJson),
         "StreamJson 으로 만든 프로필이 wire 로 json 모드로 돌아와야"
     );
-    // 저장된 core 프로필도 json 모드인지(dispatch 가 wire→core 매핑을 정확히 옮겼나).
     assert!(
         server
             .manager
@@ -1942,7 +1893,6 @@ async fn case35_ws_create_profile() {
 #[tokio::test]
 async fn case36_ws_list_profiles() {
     let server = start_test_server().await.unwrap();
-    // 미리 1개 등록(공개 API — start_test_server 배선 무수정).
     let pre_id = register_shell_profile(&server);
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
@@ -1963,7 +1913,6 @@ async fn case36_ws_list_profiles() {
 }
 
 // ── 케이스 37: WS SpawnProfile → Spawned(req echo, AgentInfo 동봉) ───────────────────
-// phase4-2 #6: Ack 대신 Spawned 로 응답. agent_id == profile_id(프로필 id 가 곧 agent id).
 #[tokio::test]
 async fn case37_ws_spawn_profile() {
     let server = start_test_server().await.unwrap();
@@ -1972,7 +1921,6 @@ async fn case37_ws_spawn_profile() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // resume=false → Fresh spawn. agent_id == profile_id(프로필 id 가 곧 agent id).
     let req = RequestId::new();
     c.send(&WireCommand::SpawnProfile {
         profile_id,
@@ -2022,7 +1970,6 @@ async fn case38_ws_delete_profile() {
 #[tokio::test]
 async fn case39_ws_set_auto_restore() {
     let server = start_test_server().await.unwrap();
-    // register_shell_profile 은 auto_restore=false 로 등록 → true 로 토글되는지 본다.
     let profile_id = register_shell_profile(&server);
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
@@ -2054,7 +2001,6 @@ async fn case39_ws_set_auto_restore() {
 }
 
 // ── 케이스 40: WS SpawnByCwd → Spawned(req echo, AgentInfo 동봉) ─────────────────────
-// phase4-2 #6: Ack 대신 Spawned 로 응답 — 새 uuid 를 미리 모르던 문제를 동봉 AgentInfo 로 해소.
 #[tokio::test]
 async fn case40_ws_spawn_by_cwd() {
     let server = start_test_server().await.unwrap();
@@ -2068,7 +2014,6 @@ async fn case40_ws_spawn_by_cwd() {
         request_id: req,
     })
     .await;
-    // Spawned 가 새 agent 의 AgentInfo 를 직접 동봉 → id 를 미리 몰라도 식별 가능.
     let agent = c.await_spawned(req).await;
     assert!(
         server.manager.agent_epoch(agent.id).is_some(),
@@ -2088,7 +2033,6 @@ async fn case41_ws_get_snapshot() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
 
-    // 결정적 출력을 쌓아 snapshot 에 chunk 가 있게 한다.
     server.manager.write_stdin(id, b"echo SNAP41\r\n").unwrap();
     wait_for_output(&server, id, 1).await;
 
@@ -2104,7 +2048,6 @@ async fn case41_ws_get_snapshot() {
     let (aid, chunks) = c.await_snapshot(req).await;
     assert_eq!(aid, id, "Snapshot 의 agent_id echo");
     assert!(!chunks.is_empty(), "쌓인 출력이 snapshot chunk 로 와야");
-    // Snapshot 에 request_id 동봉(전용 reply)이라 별도 Ack 는 오지 않는다(await_snapshot 이 req echo 검증).
 
     server.shutdown().await;
 }
@@ -2179,25 +2122,20 @@ async fn case44_ws_get_snapshot_unknown_error() {
 
 // ── 보조 함수 ──────────────────────────────────────────────────────────────────────
 
-/// connect 직후의 Hello + 초기 AgentListUpdated 2건을 소진한다(이후 검증 노이즈 제거).
 /// AgentListUpdated 는 spawn 으로 추가 발생할 수 있어 Hello 만 보장 소진하고, 첫 list 1건도 소진.
 async fn drain_handshake(c: &mut Client) {
-    // Hello.
     match c.next_event().await {
         AgentEvent::Hello { .. } => {}
         ev => panic!("Hello 기대(handshake), got {ev:?}"),
     }
-    // 초기 AgentListUpdated 1건.
     loop {
         match c.next_event().await {
             AgentEvent::AgentListUpdated { .. } => break,
-            // spawn 타이밍에 따라 StatusChanged 등이 먼저 올 수 있어 흡수.
             _ => continue,
         }
     }
 }
 
-/// SubscribeAck 후 ReplayComplete 까지(중간 replay frame·이벤트 소진) 대기.
 async fn wait_replay_complete(c: &mut Client, id: Uuid) {
     loop {
         match c.next().await.expect("ReplayComplete 전 끊김") {
@@ -2231,7 +2169,6 @@ async fn collect_frame_seqs_until_marker(c: &mut Client, id: Uuid, marker: &str)
     );
 }
 
-/// id 의 frame(payload)을 모으며 marker 도달 시 멈춘다.
 async fn collect_frames_until_marker(c: &mut Client, id: Uuid, marker: &str) -> Vec<Vec<u8>> {
     let mut frames = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -2251,8 +2188,7 @@ async fn collect_frames_until_marker(c: &mut Client, id: Uuid, marker: &str) -> 
     panic!("marker '{marker}' 도달 전 timeout/close");
 }
 
-/// seq 들이 0 부터 연속(0,1,2,…)인지 검증. PTY 가 첫 구독부터 모든 출력을 흘리므로
-/// FromOldest replay+live 는 0 부터 빈틈없이 와야 한다.
+/// PTY 가 첫 구독부터 모든 출력을 흘리므로 FromOldest replay+live 는 0 부터 빈틈없이 와야 한다.
 fn assert_seq_contiguous_from_zero(seqs: &[u64]) {
     let mut sorted = seqs.to_vec();
     sorted.sort_unstable();
@@ -2265,20 +2201,8 @@ fn assert_seq_contiguous_from_zero(seqs: &[u64]) {
 // ══════════════════════════════════════════════════════════════════════════════════
 // 실프로세스 전용 케이스 (#[cfg(windows)] + #[ignore]) — in-process 로는 검증 불가.
 //
-// 아래는 실제 데몬 .exe / OS Job Object / named mutex / 파일시스템 discovery 가 필요해
-// in-process 서버로는 재현할 수 없다(데몬을 진짜 별도 프로세스로 띄워야만 인과가 성립).
 // 기본 `cargo test` 에서는 제외(#[ignore] — 실 OS·느림)하고, 다음으로 돌린다:
 //   cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture
-//
-// ★Step7 구현 완료★: 세 케이스 모두 실제 데몬 .exe 를 spawn 해 검증한다(이전 unimplemented! RED →
-// 이제 GREEN). 각 테스트는 ENGRAM_DATA_DIR 로 임시 data_dir 을 격리한다 — ★이 격리가 먹는 이유★:
-// 아래 spawn 은 `std::process::Command`(직접 spawn)라 자식이 **부모 env 를 상속**하므로
-// ENGRAM_DATA_DIR override 가 데몬까지 전달돼 daemon.json/agents.json 을 임시 디렉토리에 쓴다.
-// 따라서 운영 data_dir(디버그=repo 루트 `.engram-data`, 더는 %APPDATA% 가 아님)을 오염시키지 않는다.
-// ★차이 명시★: 만약 이 경로가 WMI(Win32_Process.Create) spawn 이었다면 자식이 부모 env 를 상속하지
-//   않아 이 격리가 안 먹었을 것이다(그 경우 데몬은 운영 `.engram-data` 를 본다 — discovery 의
-//   real_wmi_spawn_* smoke 가 그래서 env 격리 대신 백업/복원으로 운영 파일을 보호한다).
-// 끝에서 데몬·자식 프로세스 kill + 임시 디렉토리 삭제로 자원 누수 0.
 //
 // ★Windows 전용★: 데몬은 Windows 1차. named mutex/Job Object/child_pids 가 Windows 구현이라
 //   #[cfg(windows)] 로 한정한다(다른 OS 에선 컴파일 자체에서 제외 — 위장 PASS 없음).
@@ -2292,7 +2216,6 @@ mod real_process {
 
     use engram_dashboard_protocol::DaemonInfo;
 
-    /// 데몬 바이너리 절대경로(cargo 가 통합테스트에 주입). 실제 빌드된 .exe.
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
 
     /// 테스트별 고유 격리 컨텍스트. data_dir(ENGRAM_DATA_DIR)·instance_key(ENGRAM_INSTANCE_KEY)를
@@ -2303,10 +2226,6 @@ mod real_process {
         instance_key: String,
     }
 
-    /// 테스트마다 고유한 임시 data_dir + instance_key 생성(이전 잔여 정리). nanos + 테스트명 + 카운터로
-    /// 유니크 — 병렬 실행 충돌 없음. ENGRAM_DATA_DIR/ENGRAM_INSTANCE_KEY 로 데몬에 주입해 운영
-    /// data_dir(디버그=repo 루트 `.engram-data`)과 운영 USERNAME mutex 를 둘 다 건드리지 않는다.
-    /// (직접-spawn 이라 env 가 상속돼 ENGRAM_DATA_DIR 격리가 먹는다 — 모듈 상단 주석 참조.)
     fn fresh_iso(tag: &str) -> IsoCtx {
         use std::sync::atomic::{AtomicU64, Ordering};
         // 같은 나노초에 두 번 불려도 충돌하지 않게 프로세스 내 단조 카운터를 섞는다.
@@ -2326,12 +2245,6 @@ mod real_process {
         }
     }
 
-    /// 주어진 격리 컨텍스트로 데몬 .exe 를 별도 OS 프로세스로 spawn.
-    /// ENGRAM_DATA_DIR override 로 daemon.json/agents.json 을 임시 디렉토리에 쓰게 하고,
-    /// ENGRAM_INSTANCE_KEY override 로 단일 인스턴스 mutex 를 테스트별로 격리한다.
-    /// ★stderr 캡처(진단)★: 데몬이 왜 daemon.json 을 못 쓰는지(mutex 거부? data_dir? panic?)를
-    ///   실패 시 인용할 수 있도록 stderr 를 piped 로 받고 RUST_LOG=info 로 진단 로그를 켠다.
-    ///   (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
     fn spawn_daemon_iso(ctx: &IsoCtx) -> Child {
         spawn_daemon_with_key(&ctx.data_dir, &ctx.instance_key)
     }
@@ -2341,7 +2254,6 @@ mod real_process {
         Command::new(DAEMON_EXE)
             .env("ENGRAM_DATA_DIR", data_dir)
             .env("ENGRAM_INSTANCE_KEY", instance_key)
-            // 진단용: info 레벨로 "데몬 시작/이미 실행 중/stale 덮어씀" 등 진단 로그를 받는다.
             .env("RUST_LOG", "info")
             .stdin(std::process::Stdio::null())
             // ★stdout 캡처(진단)★: core 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
@@ -2353,9 +2265,7 @@ mod real_process {
             .expect("데몬 .exe spawn")
     }
 
-    /// 실행 중/종료된 데몬의 진단 로그(stdout+stderr)를 비차단으로 회수(진단 인용용). 핸들을 take 해
-    /// 끝까지 읽는다 — 호출 전 데몬이 이미 종료했거나(EOF) kill 됐어야 블록되지 않는다.
-    /// tracing fmt 는 stdout 으로 쓰므로 stdout 이 주된 출처다(stderr 는 패닉 백트레이스 등 보조).
+    /// 핸들을 take 해 끝까지 읽는다 — 호출 전 데몬이 이미 종료했거나(EOF) kill 됐어야 블록되지 않는다.
     fn drain_logs(child: &mut Child) -> String {
         use std::io::Read;
         let mut buf = String::new();
@@ -2373,7 +2283,6 @@ mod real_process {
         buf
     }
 
-    /// daemon.json 이 써질 때까지 폴링해 DaemonInfo 회수. deadline 초과면 None.
     fn poll_daemon_json(data_dir: &Path, deadline: std::time::Duration) -> Option<DaemonInfo> {
         let path = data_dir.join("daemon.json");
         let end = std::time::Instant::now() + deadline;
@@ -2388,7 +2297,6 @@ mod real_process {
         None
     }
 
-    /// 특정 조건(predicate)이 참이 될 때까지 폴링(true 반환). deadline 초과면 false.
     fn poll_until(deadline: std::time::Duration, mut pred: impl FnMut() -> bool) -> bool {
         let end = std::time::Instant::now() + deadline;
         while std::time::Instant::now() < end {
@@ -2400,23 +2308,16 @@ mod real_process {
         pred()
     }
 
-    /// 데몬 프로세스를 확실히 종료(kill + wait). 정리 경로에서 호출(누수 0).
     fn kill_daemon(child: &mut Child) {
         let _ = child.kill();
         let _ = child.wait();
     }
 
-    /// auto_restore=true 인 cmd.exe shell 프로필 1개를 담은 agents.json 을 data_dir 에 써둔다.
     /// 데몬이 부팅 시 restore_all 로 이 프로필을 복원 → 살아있는 PTY child(cmd.exe)를 만든다.
     /// ShellBackend 는 program/args 를 그대로 PTY 에 싣는다(shim 래핑 없음) → cmd.exe 가 데몬의
     /// 직계 자식이 되어 child_pids(daemon_pid) 로 식별 가능하다.
-    ///
-    /// ★왜 agents.json 직접 작성★: WS 프로토콜에는 프로필 생성(CRUD)이 아직 없어(messages.rs)
-    ///   WS Spawn 만으로는 실프로세스 데몬에 새 프로필을 만들 수 없다. 데몬의 부팅 복원 경로
-    ///   (restore_all)를 통해 살아있는 PTY child 를 띄우는 것이 현 프로토콜에서 가능한 길이다.
-    ///   FileProfileStore 의 디스크 포맷({schema_version, profiles})에 맞춰 직접 직렬화한다.
     fn write_restorable_shell_agents_json(data_dir: &Path) {
-        // FileProfileStore::SCHEMA_VERSION == 1 (persistence/mod.rs). 형태 고정(회귀 시 감지).
+        // SCHEMA_VERSION == 1 (persistence/mod.rs). 형태 고정(회귀 시 감지).
         let profile = AgentProfile::new(
             "step7-restore-shell".into(),
             AgentCommand::Shell {
@@ -2434,13 +2335,6 @@ mod real_process {
     }
 
     // ── case1: 데몬 .exe kill → PTY child(cmd.exe) Job(KILL_ON_JOB_CLOSE) 동반 정리 ──────
-    //
-    // 검증: 데몬 .exe spawn(임시 data_dir, restorable cmd.exe 프로필 동봉) → 데몬이 부팅 복원으로
-    //   cmd.exe child 를 띄움 → child_pids(daemon_pid) 로 그 PID 식별 → 데몬 프로세스 kill →
-    //   그 child PID 가 죽는지(pid_alive=false) 폴링. KILL_ON_JOB_CLOSE 면 동반 사망 → PASS.
-    //
-    // child PID 식별: AgentInfo/WS 프로토콜은 child pid 를 노출하지 않으므로, OS 프로세스 트리
-    //   열거(core platform::child_pids, Toolhelp32Snapshot)로 데몬의 직계 자식 cmd.exe 를 찾는다.
     #[tokio::test]
     #[ignore = "실프로세스/Job 필요 — `-- --ignored` 로 실행(Windows 전용)"]
     async fn ignored_daemon_kill_cleans_pty_child() {
@@ -2453,7 +2347,6 @@ mod real_process {
         write_restorable_shell_agents_json(&data_dir);
         let mut daemon = spawn_daemon_iso(&ctx);
 
-        // 1) 데몬 기동 확인(daemon.json) + 그 PID 회수. 미발행 시 stderr 를 인용해 원인 가시화.
         let info = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {
             Some(i) => i,
             None => {
@@ -2467,15 +2360,13 @@ mod real_process {
         let daemon_pid = info.pid;
         assert!(daemon_pid != 0, "데몬 PID 유효");
 
-        // 2) 부팅 복원으로 cmd.exe child 가 뜰 때까지 대기 → 그 PID 들 기록.
-        //    복원은 3s 조기종료 윈도가 있어 넉넉히 대기한다.
+        // 복원은 3s 조기종료 윈도가 있어 넉넉히 대기한다.
         let mut child_set: Vec<u32> = Vec::new();
         let appeared = poll_until(std::time::Duration::from_secs(20), || {
             child_set = child_pids(daemon_pid);
             !child_set.is_empty()
         });
         if !appeared {
-            // 식별 실패 — 은폐 금지: 정리 후 명확히 실패 보고(자식을 못 찾으면 검증 불가).
             kill_daemon(&mut daemon);
             let _ = std::fs::remove_dir_all(&data_dir);
             panic!(
@@ -2483,12 +2374,6 @@ mod real_process {
                  복원이 자식을 안 띄웠거나 ppid 미반영. 이 케이스는 살아있는 child 식별이 전제다."
             );
         }
-        // 식별된 자식들의 (pid, creation_time) 을 기록한다.
-        // ★왜 creation_time 인가★: `pid_alive` 는 OpenProcess 실패 시 *보수적으로 true* 를 반환해
-        //   "죽음" 검증에 부적합하다(실측: 죽은 PID 도 pid_alive=true → 오판). 죽음을 정확히 보려면
-        //   creation_time 을 사전 기록하고 kill 후 `pid_alive_with_start_time(pid, 기록값)` 로 판정한다.
-        //   죽으면 process_creation_time=None + expected!=0 → false(dead). PID 재사용되면 creation_time
-        //   이 달라 false. 살아있고 같으면 true. = 정확한 동일-프로세스 생존 판정.
         let live_children: Vec<(u32, u64)> = child_set
             .iter()
             .copied()
@@ -2499,22 +2384,18 @@ mod real_process {
             "kill 전 데몬의 살아있는 PTY child 가 있어야(creation_time 조회됨): {child_set:?}"
         );
 
-        // 3) 데몬 프로세스를 강제 종료(TerminateProcess). Job 핸들이 닫히며 KILL_ON_JOB_CLOSE 발동.
         let _ = daemon.kill();
         let _ = daemon.wait();
 
-        // 4) 자식 PID 들이 동반 사망하는지 폴링(Job 정리는 즉시는 아닐 수 있어 여유).
-        //    pid_alive_with_start_time(p, 기록 creation_time): 같은 프로세스가 살아있을 때만 true.
+        // 자식 PID 들이 동반 사망하는지 폴링(Job 정리는 즉시는 아닐 수 있어 여유).
         let all_dead = poll_until(std::time::Duration::from_secs(15), || {
             live_children
                 .iter()
                 .all(|&(p, ct)| !pid_alive_with_start_time(p, ct))
         });
 
-        // 정리 — 만약 안 죽었으면 잔존 자식을 직접 kill(누수 방지) 후 단언.
         if !all_dead {
             for &(p, _) in &live_children {
-                // best-effort 잔존 정리(taskkill).
                 let _ = Command::new("taskkill")
                     .args(["/PID", &p.to_string(), "/F"])
                     .stdout(std::process::Stdio::null())
@@ -2532,10 +2413,6 @@ mod real_process {
 
     // ── case2: single-instance — 두 번째 데몬이 named mutex 로 거부(빠른 정상 종료 + json 불변) ──
     //
-    // 검증: 데몬 A spawn → daemon.json 발행 확인 → 데몬 B spawn(같은 data_dir/env) → B 가
-    //   named mutex 로 거부돼 빠르게(3s 내) 정상 종료(exit 0)하고, A 의 daemon.json 이 보존
-    //   (B 가 안 덮어씀 = pid/token 불변)되는지 확인.
-    //
     // exit code: instance.rs 가 중복 시 run() 이 Ok(()) → main 이 정상 종료(exit 0). 따라서
     //   "exit 0 + 빠른 종료 + json 불변" 으로 단언한다(중복 전용 특수 코드는 없음 — 그 사실 명시).
     #[tokio::test]
@@ -2548,7 +2425,6 @@ mod real_process {
         let data_dir = ctx.data_dir.clone();
         let key = ctx.instance_key.clone();
 
-        // 1) 데몬 A — daemon.json 발행 확인 + 원본 정보 보관.
         let mut daemon_a = spawn_daemon_with_key(&data_dir, &key);
         let info_a = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {
             Some(i) => i,
@@ -2561,19 +2437,15 @@ mod real_process {
             }
         };
 
-        // 2) 데몬 B — 같은 instance_key + data_dir 로 spawn. named mutex 거부 → 빠르게 정상 종료해야 한다.
         let mut daemon_b = spawn_daemon_with_key(&data_dir, &key);
         let exited_fast = poll_until(std::time::Duration::from_secs(3), || {
             matches!(daemon_b.try_wait(), Ok(Some(_)))
         });
 
-        // B 종료 상태 회수(아직이면 정리에서 kill).
         let b_status = daemon_b.try_wait().ok().flatten();
 
-        // 3) A 의 daemon.json 이 보존됐는지(B 가 안 덮어씀) — pid/token 동일.
         let info_after = poll_daemon_json(&data_dir, std::time::Duration::from_secs(2));
 
-        // 정리 — A kill, B 가 혹시 살아있으면 kill, B stderr 회수(진단), 디렉토리 삭제.
         kill_daemon(&mut daemon_a);
         if b_status.is_none() {
             let _ = daemon_b.kill();
@@ -2582,12 +2454,10 @@ mod real_process {
         let b_logs = drain_logs(&mut daemon_b);
         let _ = std::fs::remove_dir_all(&data_dir);
 
-        // 단언: B 가 3s 내 종료.
         assert!(
             exited_fast,
             "두 번째 데몬은 mutex 거부로 빠르게(3s 내) 종료해야 — B 로그:\n{b_logs}"
         );
-        // 단언: B 가 정상 종료(exit 0). 중복은 run() 이 Ok → exit 0(중복 전용 코드 없음).
         if let Some(status) = b_status {
             assert!(
                 status.success(),
@@ -2596,7 +2466,6 @@ mod real_process {
         } else {
             panic!("두 번째 데몬이 3s 내 종료하지 않음(mutex 거부 실패 가능) — B 로그:\n{b_logs}");
         }
-        // 단언: A 의 daemon.json 이 보존(B 가 안 덮어씀) — pid/token 동일.
         let info_after = info_after.expect("A 의 daemon.json 이 유지돼야");
         assert_eq!(
             info_after.pid, info_a.pid,
@@ -2610,20 +2479,14 @@ mod real_process {
 
     // ── case3: stale daemon.json → 데몬이 stale 감지 후 자기 정보로 덮어쓰기 ────────────────
     //
-    // 검증(선택지 A — 데몬 자가 발행): 죽은 PID 를 가진 stale daemon.json 을 임시 data_dir 에 써둠 →
-    //   데몬 .exe spawn(같은 data_dir) → 데몬이 is_stale 판정 후 자기 pid/port/token/start_time 으로
-    //   덮어쓰는지(run() 2.5단계) 확인. 새 pid != stale pid, start_time != 0, port/token 발행.
-    //
     // src-tauri 의 ensure_daemon(WMI spawn) 경로는 별도 테스트(discovery::real_wmi_spawn_smoke)로
-    //   분리해 채운다(daemon crate 에서 src-tauri 함수 호출 불가). 그건 같은 step7 에서 구현.
+    //   분리해 채운다(daemon crate 에서 src-tauri 함수 호출 불가).
     #[tokio::test]
     #[ignore = "실프로세스 + 파일 discovery 필요 — `-- --ignored` 로 실행(Windows 전용)"]
     async fn ignored_stale_daemon_json_discovery() {
         let ctx = fresh_iso("stale");
         let data_dir = ctx.data_dir.clone();
 
-        // 1) 죽은 PID 를 가진 stale daemon.json 을 써둔다.
-        //    죽은 PID 만들기: 짧은 자식 spawn 후 kill → 그 PID 는 곧 dead(creation time 없음 → is_stale).
         let mut tmp_child = Command::new("cmd.exe")
             .args(["/c", "exit"])
             .stdin(std::process::Stdio::null())
@@ -2638,7 +2501,7 @@ mod real_process {
             pid: dead_pid,
             host: "127.0.0.1".into(),
             port: 59999,
-            token: "d".repeat(64), // stale 토큰(데몬이 새 것으로 바꿔야 함)
+            token: "d".repeat(64),
             protocol_version: PROTOCOL_VERSION,
             // ★start_time 은 0 이 아닌 임의값★. is_stale 로직: start_time==0 이면 pid_alive() 로
             //   fallback 하는데, pid_alive() 는 OpenProcess 실패(죽은 PID) 시 *보수적으로 true*(살아있음)
@@ -2650,17 +2513,14 @@ mod real_process {
         let stale_json = serde_json::to_vec_pretty(&stale).expect("stale 직렬화");
         std::fs::write(data_dir.join("daemon.json"), &stale_json).expect("stale daemon.json 작성");
 
-        // 2) 데몬 .exe spawn — stale 을 감지하고 덮어써야 한다.
         let mut daemon = spawn_daemon_iso(&ctx);
 
-        // 3) daemon.json 이 새 데몬 정보(살아있는 pid != dead_pid)로 바뀔 때까지 폴링.
         let mut latest: Option<DaemonInfo> = None;
         let overwritten = poll_until(std::time::Duration::from_secs(15), || {
             latest = poll_daemon_json(&data_dir, std::time::Duration::from_millis(100));
             matches!(&latest, Some(i) if i.pid != dead_pid)
         });
 
-        // 정리 — 데몬 kill, stderr 회수(진단), 임시 디렉토리 삭제.
         kill_daemon(&mut daemon);
         let err = drain_logs(&mut daemon);
         let _ = std::fs::remove_dir_all(&data_dir);
