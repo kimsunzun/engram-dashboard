@@ -2883,7 +2883,7 @@ fn absent_disposition(r: &ResolvedRecipient, roster_names: &str) -> AbsentDispos
     }
 }
 
-/// ★회신 발송의 계약 처리 갈래(spec §3 항목 7-④)★ — `handle_send` 6단계가 이 값으로 분기한다.
+/// ★회신 발송의 계약 처리 갈래(spec §3 항목 7-④)★ — `handle_send` 5단계가 이 값으로 분기한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplyDisposition {
     /// 수용됨(`delivered`|`pending`) → `replied` 닫힘. **파킹도 수용이다**.

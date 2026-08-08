@@ -66,8 +66,9 @@ pub trait AgentBackend: Send + Sync {
     /// 로 직접 분기하지 않는다.
     ///
     /// 이 플래그 하나가 provision 의 채널 물리 배선·grant·프라이밍 변형을 전부 구동한다(정합 불변식 =
-    /// 프라이밍이 가르치는 채널 ⊆ 깐 채널 — ADR-0099 의 등호를 ADR-0126 결정 4 가 단방향으로 개정했다.
-    /// 깐 채널을 안 가르치는 쪽은 허용이고, 결정 3 이 그 상태를 의도적으로 만든다). true 면
+    /// 프라이밍이 가르치는 채널 **=** 깐 채널 — ADR-0126 결정 4 의 단방향(⊆)을 ADR-0128 결정 3 이 등호로
+    /// 되돌렸다. 안 깐 채널을 가르치면 발신 freeze 가 재발하고, 깔고도 안 가르치면 통제 없는 우회 표면이
+    /// 남는다). true 면
     /// `DaemonControlChannel::provision` 이 mcp-config 를 쓰고 MCP bits 를 endpoint 에 실으며 MCP-only 교육
     /// 프라이밍(`send_message` 만 — ADR-0126 결정 1)을, false 면 mcp-config 미기록 + CLI-only 프라이밍을 고른다.
     ///
@@ -75,6 +76,7 @@ pub trait AgentBackend: Send + Sync {
     ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 현재 claude 는 둘 다 true,
     ///   codex/gemini 는 둘 다 false 지만, 미래 "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 다.
     // ADR-0126
+    // ADR-0128
     fn accepts_mcp_config(&self) -> bool;
 
     /// cwd·env는 manager가 정규화한 값을 전달한다.
