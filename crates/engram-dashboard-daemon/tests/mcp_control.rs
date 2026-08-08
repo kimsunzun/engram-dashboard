@@ -277,7 +277,6 @@ async fn cross_token_session_takeover_is_rejected() {
         "다른 토큰(B)으로 세션 S 접근 → 403(cross-token takeover 거부)"
     );
 
-    // 대조군 — 403 이 무차별 거부가 아님을 확인한다.
     assert_eq!(
         post_tools_list(url, "token-a", &sid).await,
         reqwest::StatusCode::OK,
@@ -319,7 +318,7 @@ async fn revoked_mid_session_request_is_rejected() {
 }
 
 // ── FIX 9: epoch 회전 ───────────────────────────────────────────────────────────────
-// registry 회전(issue)이 구 토큰을 evict 하는 건 registry unit 이 이미 커버한다 — 여기선 **파일** 측만 본다.
+// registry 회전(issue)의 구 토큰 evict 는 registry unit 이 커버한다 — 여기선 config 파일 수명까지 본다.
 #[tokio::test]
 async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_core::agent::types::ControlChannel;
@@ -490,8 +489,6 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
 }
 
 // ── REGRESSION: POST initialize(무-세션id) ───────────────────────────────────────────
-// happy-path initialize→bind 는 위 별도 테스트가 rmcp 클라로 end-to-end 커버한다 — 여기선 raw POST 로
-// "POST 무-세션id 예외가 유지됨"만 국소 확인한다.
 #[tokio::test]
 async fn post_initialize_without_session_id_still_reaches_inner() {
     let registry = Arc::new(ControlRegistry::new());

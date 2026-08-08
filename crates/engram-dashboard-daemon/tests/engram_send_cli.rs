@@ -174,9 +174,6 @@ fn engram_send_transport_error_exits_one_with_error_json() {
     // ★결정적 연결 실패(TOCTOU 없음)★: 포트 0 은 OS 가 예약한 포트로 어떤 프로세스도 리스닝할 수 없다.
     //   bind→drop 방식은 drop 과 connect 사이에 다른 프로세스가 그 포트를 재사용하는 TOCTOU 가 있지만,
     //   http://127.0.0.1:0 을 직접 목표로 하면 connect 가 즉시 실패하고 리스너 경합이 아예 없다.
-    //   바이너리가 전송 실패에 내는 코드는 CONNECT_FAILED(연결/쓰기/읽기 IO 실패·프레이밍 파싱 실패)와
-    //   INCOMPLETE_RESPONSE(Content-Length 미달 절단) 둘뿐이다 — 두 코드만 허용한다(교정 에러
-    //   RECIPIENT_NOT_FOUND 등은 서버가 200 으로 응답해야 나오므로 이 경로에선 불가).
     let url = "http://127.0.0.1:0";
     let (stdout, code) = run_send(url, "bob", "hi");
 
@@ -191,10 +188,6 @@ fn engram_send_transport_error_exits_one_with_error_json() {
 }
 
 // ── D(spec §6): 서브커맨드 미러 — 라우트 선택·stdin 본문을 **프로세스 레벨**로 실측 ────────────────
-//
-// ★단위 테스트와 다른 축★: 단위 테스트는 `Command::route()`/`request_body()` 값을 본다. 여기선 실제
-//   바이너리가 그 값으로 **정말 그 경로에 POST 하는지**를 wire 에서 확인한다(라우트 조립이 base URL 의
-//   path prefix 처리와 엮여 있어, 값이 맞아도 조립이 틀릴 수 있다).
 
 #[test]
 fn engram_send_pending_posts_to_the_messages_route_and_exits_zero() {
@@ -214,7 +207,6 @@ fn engram_send_pending_posts_to_the_messages_route_and_exits_zero() {
         request.contains("Authorization: Bearer test-token"),
         "신원은 토큰으로만(요청 바디엔 신원 없음): {request}"
     );
-    // 바디는 무인자 조회 = 빈 객체. `--as` 같은 신원 인자가 새어 나가면 안 된다.
     assert!(request.ends_with("{}"), "무인자 조회 바디: {request}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert_eq!(v["me"], "alice");
@@ -222,7 +214,6 @@ fn engram_send_pending_posts_to_the_messages_route_and_exits_zero() {
 
 #[test]
 fn engram_send_query_subcommands_hit_their_routes_and_group_is_gone() {
-    // status <id> → /control/messages + {"id": …}
     let response =
         ok_response(r#"{"id":"m-7f3k9q2d","from":"a","awaiting_reply":false,"rows":[]}"#);
     let (host, port, stub) = spawn_capturing_stub(response);
@@ -236,7 +227,6 @@ fn engram_send_query_subcommands_hit_their_routes_and_group_is_gone() {
     );
     assert!(request.contains(r#"{"id":"m-7f3k9q2d"}"#), "{request}");
 
-    // pending → /control/messages + 빈 객체(무인자 = "내 미결").
     let response = ok_response(r#"{"me":"a","open":[]}"#);
     let (host, port, stub) = spawn_capturing_stub(response);
     let url = format!("http://{host}:{port}");
@@ -248,9 +238,8 @@ fn engram_send_query_subcommands_hit_their_routes_and_group_is_gone() {
         "{request}"
     );
 
-    // ★`group` 서브커맨드는 제거됐다(ADR-0111 결정 4 · ADR-0112 결정 1)★ — 사용자 정의 그룹 관리 표면
-    //   자체가 사라졌으므로 CLI 도 그 동사를 모른다. 남아 있으면 프라이밍이 없는 명령을 가르친다.
-    //   ★네트워크를 타지 않는다★: 인자 파싱 단계에서 끝나므로 스텁 서버가 필요 없다.
+    // 회귀 가드(ADR-0111 결정 4 · ADR-0112 결정 1) — group 동사가 부활하면 프라이밍이 없는 명령을 가르친다.
+    // ★네트워크를 타지 않는다★: 인자 파싱 단계에서 끝나므로 스텁 서버가 필요 없다.
     let (stdout, code) = run_cli("http://127.0.0.1:1", &["group", "list"], None);
     assert_eq!(code, 1, "모르는 서브커맨드는 BAD_ARGS: {stdout}");
     assert!(
@@ -284,9 +273,6 @@ fn engram_send_body_stdin_sends_the_piped_text_verbatim() {
 
 #[test]
 fn engram_send_body_stdin_lossily_replaces_invalid_utf8_instead_of_refusing_to_send() {
-    // ★D 리뷰 A2 — 문서와 코드를 **구현 쪽으로** 정렬★: 이전엔 `read_to_string` 이라 비-UTF8 stdin 이
-    //   `InvalidData` 로 발송 자체를 막았다(주석은 lossy 라고 적혀 있었다). Windows 셸에서 cp949 파이프는
-    //   현실적으로 들어오는데, 그때 "아예 못 보낸다" 보다 "몇 글자 깨진 채라도 전달된다" 가 낫다.
     let response = ok_response(r#"{"id":"m1","results":[{"to":"bob","status":"delivered"}]}"#);
     let (host, port, stub) = spawn_capturing_stub(response);
     let url = format!("http://{host}:{port}");
@@ -313,7 +299,6 @@ fn engram_send_body_stdin_lossily_replaces_invalid_utf8_instead_of_refusing_to_s
 
 #[test]
 fn engram_send_rejects_body_and_body_stdin_together_without_touching_the_network() {
-    // 형태 오류는 연결 전에 끝난다 — 스텁 없이(연결 불가 주소로) 돌려도 BAD_ARGS 가 나와야 한다.
     let (stdout, code) = run_cli(
         "http://127.0.0.1:0",
         &["--to", "bob", "--body", "hi", "--body-stdin"],
