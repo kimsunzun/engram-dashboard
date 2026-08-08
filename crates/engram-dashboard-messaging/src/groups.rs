@@ -27,6 +27,8 @@
 //!   살아있음 판정·발신자 제외·중복 제거·로스터 대조는 전부 상위(`MessagingService`)의 몫이다. 특히
 //!   **"펼침 결과 0명" 은 여기서 에러가 아니다**(빈 목록을 그대로 돌려준다): `GROUP_EMPTY` 는 펼침 + 명시
 //!   지목을 합친 **최종 수신자 집합**이 비었을 때만 나는 판정이라(ADR-0114 결정 3) 이 층에서 알 수 없다.
+// ADR-0111
+// ADR-0112
 
 /// 내장 어휘 `@all` — **명부 전원**(산 것 + 잠든 것) **− 발신자**(spec §4 · ADR-0121 결정 1).
 pub const ALL_GROUP: &str = "@all";
@@ -77,6 +79,7 @@ pub enum GroupError {
 /// 시작해야 한다. 선행 `@` 가 없으면(`coders`) `InvalidName` — 관대 보정(`coders` → `@coders`)은 사람/그룹
 /// 구분이 `@` 하나에 걸린 계약을 흐려 거부됐다. `@` 뒤 본문이 비었거나 공백만이면, 또 본문에 `@` 가 더
 /// 있으면(`@@x`·`@a@b`) 역시 `InvalidName`.
+// ADR-0104
 pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     let trimmed = name.trim();
     let Some(body) = trimmed.strip_prefix('@') else {
@@ -103,6 +106,7 @@ pub trait GroupSource {
 pub struct BuiltinGroups;
 
 impl GroupSource for BuiltinGroups {
+    // ADR-0121
     fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
         let norm = normalize_group_name(group)?;
         if norm == HERE_GROUP {

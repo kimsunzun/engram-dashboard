@@ -17,7 +17,6 @@
 //!   request id 를 가리킬 때만 그 request 를 닫는다. 관대 매칭(미회신 상대의 다음 메시지를 회신 간주)은
 //!   우연 닫힘 오발이라 거부됐다 — 틀린 id 는 아무 것도 닫지 않는다.
 // ADR-0103
-// ADR-0104
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Weak};
@@ -1120,7 +1119,6 @@ impl Ledger {
     ///   이력 레코드가 애초에 없다(park 조차 안 됐다) — 그래서 닫기만 하면 그 항목을 evict 할 계기가 영영
     ///   없어 반려가 반복될수록 추적 목록이 무계 증식한다. 반려는 "계약이 이행됨" 이 아니라 "계약이 성립한
     ///   적 없음" 이므로, 이력을 남기지 않고 흔적째 지우는 게 의미상으로도 맞다.
-    // ADR-0103
     pub fn drop_request(&mut self, request_id: &str, recipient: &str) -> DropOutcome {
         let Some(idx) = self
             .requests
