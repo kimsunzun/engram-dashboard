@@ -76,6 +76,10 @@ impl Default for KeepaliveConfig {
     }
 }
 
+/// 허용 Origin allowlist. Origin 없음(네이티브/하네스)은 허용 — 토큰이 주 방어.
+/// ★미실측 — 알려진 미확인★: 아래 네 문자열은 **설계값**이다. 실제 Tauri WebView2·모바일이 보내는
+///   Origin 을 실측해 확정한 적이 없다. 불일치 = 403. 클라이언트 표면(패키징 변형·모바일 터널 등)을
+///   늘릴 때 이 목록을 검증된 것으로 다루지 말 것 — 403 은 클라 버그가 아니라 이 목록 쪽일 수 있다.
 const ALLOWED_ORIGINS: &[&str] = &[
     "http://localhost:1420",
     "http://127.0.0.1:1420",

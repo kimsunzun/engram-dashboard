@@ -32,7 +32,13 @@ impl AgentBackend for ClaudeBackend {
 
     fn accepts_mcp_config(&self) -> bool {
         // claude 는 mcp-config 를 `--mcp-config` 로 부착한다 → MCP-capable.
+        // ★등호 불변식(ADR-0128)★: 가르치는 채널 집합 = 물리로 깐 채널 집합. 그래서 MCP 가능 스폰엔
+        // engram-send 배선(ENGRAM_SEND_EXE·PATH·CLI 크레덴셜)을 아예 깔지 않는다. ADR-0126 결정 4 의
+        // 단방향(⊆)은 ADR-0128 결정 3 이 등호로 되돌렸다 — ⊆ 로 읽고 CLI 교육을 얹으면 ADR-0099 가
+        // 실측한 발신 freeze 가 재현된다.
         // ADR-0099
+        // ADR-0126
+        // ADR-0128
         true
     }
 
