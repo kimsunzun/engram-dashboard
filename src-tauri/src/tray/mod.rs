@@ -63,7 +63,7 @@ fn build_icons() -> tauri::Result<TrayIcons> {
 //
 // 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
 // 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
-// UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 더블클릭**으로 대체(on_tray_icon_event).
+// UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 좌클릭(단발)** 으로 대체(on_tray_icon_event).
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
     // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정).
