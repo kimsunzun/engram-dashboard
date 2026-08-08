@@ -702,38 +702,34 @@ impl ConnectionCore {
             AgentCommand::AcquireInput {
                 agent_id,
                 request_id,
-            } => {
-                match multiview.acquire(agent_id, conn_id) {
-                    Ok(true) => {
-                        broadcast_lease_changed(fanout, agent_id, true);
-                        reply(sink, request_id, Ok(()));
-                    }
-                    Ok(false) => reply(sink, request_id, Ok(())),
-                    Err(()) => reply(
-                        sink,
-                        request_id,
-                        Err("input held by another viewer".to_string()),
-                    ),
+            } => match multiview.acquire(agent_id, conn_id) {
+                Ok(true) => {
+                    broadcast_lease_changed(fanout, agent_id, true);
+                    reply(sink, request_id, Ok(()));
                 }
-            }
+                Ok(false) => reply(sink, request_id, Ok(())),
+                Err(()) => reply(
+                    sink,
+                    request_id,
+                    Err("input held by another viewer".to_string()),
+                ),
+            },
 
             AgentCommand::ReleaseInput {
                 agent_id,
                 request_id,
-            } => {
-                match multiview.release(agent_id, conn_id) {
-                    Ok(true) => {
-                        broadcast_lease_changed(fanout, agent_id, false);
-                        reply(sink, request_id, Ok(()));
-                    }
-                    Ok(false) => reply(sink, request_id, Ok(())),
-                    Err(()) => reply(
-                        sink,
-                        request_id,
-                        Err("input lease held by another viewer".to_string()),
-                    ),
+            } => match multiview.release(agent_id, conn_id) {
+                Ok(true) => {
+                    broadcast_lease_changed(fanout, agent_id, false);
+                    reply(sink, request_id, Ok(()));
                 }
-            }
+                Ok(false) => reply(sink, request_id, Ok(())),
+                Err(()) => reply(
+                    sink,
+                    request_id,
+                    Err("input lease held by another viewer".to_string()),
+                ),
+            },
 
             AgentCommand::ListAgents { request_id } => {
                 let _ = sink.enqueue(Outbound::event(AgentEvent::AgentList {
@@ -754,12 +750,7 @@ impl ConnectionCore {
                 let active_count = manager
                     .list_agents()
                     .iter()
-                    .filter(|a| {
-                        matches!(
-                            a.status,
-                            CoreStatus::Running
-                        )
-                    })
+                    .filter(|a| matches!(a.status, CoreStatus::Running))
                     .count();
                 if !force && active_count > 0 {
                     send_error(
@@ -939,26 +930,24 @@ impl ConnectionCore {
                 profile_id,
                 name,
                 request_id,
-            } => {
-                match manager.rename_agent(profile_id, name) {
-                    CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_) => {
-                        reply(sink, request_id, Ok(()));
-                        broadcast_profile_list(fanout, manager);
-                    }
-                    CoreRenameOutcome::NotFound => reply(
-                        sink,
-                        request_id,
-                        Err(format!("profile not found: {profile_id}")),
-                    ),
-                    CoreRenameOutcome::Exhausted => reply(
-                        sink,
-                        request_id,
-                        Err(format!(
-                            "name suffix space exhausted — cannot assign a unique name: {profile_id}"
-                        )),
-                    ),
+            } => match manager.rename_agent(profile_id, name) {
+                CoreRenameOutcome::Renamed(_) | CoreRenameOutcome::Unchanged(_) => {
+                    reply(sink, request_id, Ok(()));
+                    broadcast_profile_list(fanout, manager);
                 }
-            }
+                CoreRenameOutcome::NotFound => reply(
+                    sink,
+                    request_id,
+                    Err(format!("profile not found: {profile_id}")),
+                ),
+                CoreRenameOutcome::Exhausted => reply(
+                    sink,
+                    request_id,
+                    Err(format!(
+                        "name suffix space exhausted — cannot assign a unique name: {profile_id}"
+                    )),
+                ),
+            },
 
             AgentCommand::ReparentProfile {
                 child_id,

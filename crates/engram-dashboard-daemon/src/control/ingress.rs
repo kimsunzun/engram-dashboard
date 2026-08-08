@@ -224,7 +224,10 @@ pub enum ControlResult {
         id: String,
         results: Vec<SendResult>,
     },
-    Error { code: &'static str, hint: String },
+    Error {
+        code: &'static str,
+        hint: String,
+    },
 }
 
 impl ControlResult {

@@ -45,8 +45,8 @@ use engram_dashboard_daemon::experiment::record::{
     ProbeRecord, Record, StallRecord, SummaryRecord, SuspectedCompactionRecord, TurnRecord,
     UsageSnapshot,
 };
-use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 use engram_dashboard_daemon::experiment::transcript::{self, TranscriptSummary};
+use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 
 // ── 하드 캡(ADR-0090 불변식) ────────────────────────────────────────────────────────
 const MAX_SPAWNS_PER_INVOCATION: u32 = 6;
