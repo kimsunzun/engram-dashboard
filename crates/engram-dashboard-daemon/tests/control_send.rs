@@ -1177,50 +1177,20 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 // ADR-0088 Stage 1 — 배달 정확성 오라클 (결정적·seam 기반, 실 claude 불요)
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// ★프레이밍(정직 범위 — 무엇을 증명하고 무엇을 못 하나)★: 아래는 green-chasing 이 아니라 **정확성**
-//   테스트다. 다만 seam 기반이라 증명 범위가 seam 관측면에 갇힌다 — 이 한계를 각 오라클 docstring 이
-//   정확히 밝힌다(과대 주장 금지, 리뷰 FIX). seam 은 handle_send → registry → write_stdin_observed
-//   → session.write_input_observed(봉투 조립·encoder) → SeamTransport.send_input **까지**를 관측한다.
-//   그 아래 물리 계층(운영 StdioTransport 의 `stdin.lock()` + `write_all`/`flush`, stdio.rs ~322)은
-//   이 seam 이 **우회**한다 — SeamTransport 는 이미 완결된 Vec 을 받아 `push` 로 원자 캡처하므로.
-//   ▶ 이 하네스가 **확립**하는 것: 경계(본체 크기·바이트-vs-char) + 순차 수명(부재/실패/epoch 교체)
-//     + 동시 **입구(entry)** exact-once(handle_send/registry/observed-write 레벨의 무유실·무중복) +
-//     각 봉투가 transport 에 **완결된 정확-바이트 버퍼 1개**로 넘어감(session 조립 계약).
-//   ▶ 이 하네스가 **커버하지 않는 것**(coverage gap / follow-up): (1) 물리 OS-pipe 바이트 무인터리브
-//     — `stdin.lock()` 이 담당, 이 seam 아래라 lock 을 지워도 여기선 안 걸린다; (2) 부분 write 후 Err
-//     (prefix 만 쓰고 실패) — seam 은 push 전에 실패하므로 truncation 관측 불가; (3) 진짜 mid-flight
-//     epoch race(resolve 가 epoch0 을 보고 write 가 epoch1 로 간 뒤 도착) — resolve↔write 사이 yield
-//     seam 이 프로덕션에 없어 결정적 재현 불가.
-//   운영 동작이 (확립 범위 안에서) 오라클을 위반하면 테스트를 약화하지 않고 실패로 남겨 FINDING 으로
-//   보고한다(마스킹 금지). 커버 안 되는 축은 아래 각 오라클의 "커버리지 공백" 및 반환 follow-up 목록.
+// seam 관측 범위 = handle_send → registry → write_stdin_observed → session.write_input_observed
+//   (봉투 조립·encoder) → SeamTransport.send_input **까지**. 그 아래 물리 계층(운영
+//   `StdioTransport::send_input` 의 `stdin.lock()` + `write_all`/`flush`)은 이 seam 이 **우회**한다 —
+//   SeamTransport 는 이미 완결된 Vec 을 받아 `push` 로 원자 캡처하므로.
+// 운영 동작이 오라클을 위반하면 테스트를 약화하지 않고 실패로 남겨 FINDING 으로 보고한다(마스킹 금지).
 
 /// ── ADR-0088 Stage 1-오라클 1: 동시 **입구** exact-once + N 개 distinct 본체 무결 배달(seam handoff) ──
-/// N 개 OS 스레드가 `Barrier` 로 **입구를 정렬 후 near-simultaneous** handle_send 발화 → 하나의 seam
-///   수신자에게 각기 고유 본체를 보낸다(barrier 로 **진입(entry)** 을 near-simultaneous 하게 정렬 — 초반
-///   스레드가 후반 시작 전에 끝나 race window 가 안 열리는 문제 제거. 단 barrier 는 진입 정렬만 보장할 뿐
-///   handle_send **내부의 실행 겹침**까지는 강제하지 못한다 — 단일코어/스케줄러가 여전히 직렬화할 수 있다).
-///
-/// ★증명한다(seam 관측면)★:
-///   (i) **exact-once (N distinct 본체)**: handle_send/registry/observed-write 레벨에서 각 메시지 정확히
-///       1회 — 관측 레코드 N건 + msg_id 전부 distinct + ACK id 전부 distinct + **수신된 본체 다중집합 ==
-///       발신된 N 개 distinct 본체 집합(각 정확히 1회 — 무유실·무중복·무치환)**. 이 본체 다중집합 등식이
-///       "치환 버그(모든 메시지 → 같은 본체)" 를 차단한다(각 write 자기일관 검사만으론 안 잡힘).
-///   (ii) **session→transport handoff 무결**: 각 봉투가 transport 에 **완결된 정확-바이트 버퍼 1개**로
-///       넘어감 — 캡처된 write 다중집합이 (각 관측의 msg_uuid 로 재구성한) 기대 encoded 라인 다중집합과
-///       **정확히 일치**(exact bytes). 즉 session 이 encoder 출력을 잘라내거나 두 메시지 바이트를 한
-///       write 로 합치는 등 **handoff 를 오염시키면** 여기서 깨진다. (encoder **내부** 정확성은 이 검사가
-///       증명하지 않는다 — actual·expected 가 같은 encoder 를 쓰므로. FIX-2 참조: encoder 정확성은
-///       claude.rs 의 golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 가 커버.)
-/// ★증명하지 않는다(커버리지 공백)★: **물리 OS-pipe 바이트 무인터리브**. 그 직렬화는
-///   운영 StdioTransport 의 `stdin.lock()`(write_all+flush 내내 보유, stdio.rs ~322)이 담당하는데
-///   이 seam 은 그 계층을 **우회**한다(SeamTransport 는 완결 Vec 을 원자 push). 그 응용계층 직렬화를
-///   지우는 회귀는 여기서 **안 잡힌다**.
-///   ▶ follow-up 존재: 실 StdioTransport+실 pipe(느린 reader/backpressure) 하네스가 이 물리 계층을
-///     커버한다 — core 크레이트 `tests/stdio_physical_pipe.rs` ::
-///     `physical_pipe_concurrent_sends_no_interleave`(런렝스로 무인터리브 단언). 단 그 테스트가 잡는
-///     회귀 형태는 **"한 논리 메시지를 배타 락 없이 여러 OS write 로 쓰는 것"(응용계층 직렬화 회귀)**
-///     로 한정된다 — 락 없는 단일-WriteFile 구현은 NPFS 커널 직렬화(문서화 안 됨) 가능성 때문에
-///     잡는다고 주장하지 않는다(그 테스트 docstring 의 "증명하지 않는다" 참조).
+/// ★증명하지 않는다(커버리지 공백)★:
+///   (1) **물리 OS-pipe 바이트 무인터리브** — 그 직렬화는 이 seam 이 우회하는 `stdin.lock()` 계층
+///       소관이라, 그 응용계층 직렬화를 지우는 회귀는 여기서 **안 잡힌다**. ▶ core 크레이트
+///       `tests/stdio_physical_pipe.rs` :: `physical_pipe_concurrent_sends_no_interleave` 가 커버한다.
+///   (2) **encoder 내부 정확성** — actual·expected 가 같은 encoder 를 쓰므로 encoder 자체 결함(예:
+///       wrap_user_turn 이 개행을 빠뜨림)은 양쪽을 똑같이 오염시켜 여기선 안 걸린다. ▶ claude.rs 의
+///       golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 가 커버한다.
 #[tokio::test]
 async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     use engram_dashboard_core::agent::backend::InputEncoder;
@@ -1232,16 +1202,14 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-concurrency").await;
 
-    // 하나의 seam 수신자(성공 경로). captured 는 순서 있는 다중 write 를 그대로 담는다.
+    // 하나의 seam 수신자(fail=false → 성공 경로).
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
-    // 배달 관측 싱크 — N건이 전부 성공 레코드로 남는지 본다(exact-once 의 관측 축). 관측 레코드는
-    //   봉투 재구성에 필요한 (msg_id, msg_uuid) 쌍도 담아 아래 exact-bytes 다중집합 검사의 기대치를 만든다.
     let seen = Arc::new(Mutex::new(Vec::new()));
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
-    // 발신자 신원(유효) — 모든 스레드가 같은 신원으로 보낸다(수신자 1개에 몰아치는 게 요점).
+    // 모든 스레드가 같은 신원으로 보낸다 — 수신자 1개에 몰아치는 게 요점.
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "stage1-conc-sender".to_string());
     let from = BoundIdentity {
@@ -1250,16 +1218,13 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     };
 
     const N: usize = 100;
-    // 각 스레드의 고유 본체 = 안정 마커(BODY-<zero-padded idx>). 특수문자 없음(JSON escape 회피 → 봉투
-    //   문자열이 캡처 라인에 부분열로 그대로 들어감). idx 를 zero-pad 해 부분열 오검(1 ⊂ 10)도 방지.
+    // 마커에 특수문자가 없어야 JSON escape 를 피해 봉투 문자열이 캡처 라인에 부분열로 그대로 들어간다.
+    //   idx zero-pad 는 부분열 오검(1 ⊂ 10) 방지.
     let markers: Vec<String> = (0..N).map(|i| format!("BODY-{i:04}")).collect();
 
-    // ★Barrier(입구 정렬)★: N 스레드가 handle_send **진입 직전**에 전부 모여 near-simultaneous 하게
-    //   풀린다 — 초반 스레드가 후반 스레드 spawn 전에 끝나 race window 가 안 열리는 문제를 제거한다.
-    //   ★한계★: barrier 는 진입(entry) 을 near-simultaneous 하게 정렬할 뿐 handle_send **내부의 실행
-    //   겹침**까지 강제하지 못한다(단일코어/스케줄러가 여전히 직렬화 가능). 그래도 진입 정렬만으로 초반-
-    //   스레드-먼저-끝남 문제는 사라져 registry/observed-write 경로의 exact-once 를 near-simultaneous
-    //   진입 하에서 실측한다.
+    // ★Barrier(입구 정렬)★: N 스레드를 handle_send **진입 직전**에 모아 "초반 스레드가 후반 스레드 spawn
+    //   전에 끝나 race window 가 안 열리는" 문제를 없앤다. ★한계★: 진입 정렬만 보장할 뿐 handle_send
+    //   **내부의 실행 겹침**까지는 강제하지 못한다(단일코어/스케줄러가 여전히 직렬화 가능).
     let barrier = Arc::new(Barrier::new(N));
 
     let mut handles = Vec::with_capacity(N);
@@ -1272,7 +1237,7 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         let barrier = barrier.clone();
         // handle_send 는 sync(&Arc<..>) — OS 스레드로 near-simultaneous 발화(tokio task 아님, 병렬성 확보).
         handles.push(std::thread::spawn(move || {
-            barrier.wait(); // ★입구 정렬 — 모든 스레드가 여기 모인 뒤 near-simultaneous 하게 handle_send 로 돌진(실행 겹침 강제는 아님)★.
+            barrier.wait();
             let cmd = ControlCommand {
                 from,
                 to: vec![to],
@@ -1281,8 +1246,6 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
             };
             let result = handle_send(&manager, &registry, &messaging, Entrance::Cli, cmd);
             let v = result.to_json();
-            // 각 발화는 접수 성공 + 고유 msg_id 를 받아야(중복/유실 없음의 발신측 증거). 행 상태는 보지
-            //   않는다 — 겹친 드레인에서 물러난 쪽은 `pending` 이 정상이다(아래 주석).
             assert!(
                 v.get("results").is_some(),
                 "동시 발화도 각기 접수(results): {v}"
@@ -1292,17 +1255,9 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     }
     let ack_ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-    // ★동시 버스트의 결말 = `delivered`/`pending` **혼합**이다(7차 · ADR-0125)★: 모든 발송이 큐 꼬리에
-    //   적재된 뒤 **자기 호출 안에서** 그 수신자 큐를 드레인한다. 여러 발신이 겹치면 먼저 배치를 든 쪽이
-    //   영수증(in-flight)을 쥐고, 뒤따른 드레인은 **중복 진입 가드**에 걸려 물러나며 유예 표식만 남긴다
-    //   (진행 중 배치를 앞지르면 배달 순서가 적재 순서에서 풀리므로). 물러난 쪽은 자기 편지의 주입 여부를
-    //   모르니 응답을 `pending` 으로 답하지만(spec §6 ㉯ — "안 갔다" 가 아니다) 그 편지는 **이긴 쪽 배치에
-    //   실려 나가거나**, 영수증 보유자가 정산하며 되울린 도어벨 → flush 레인이 집어 간다.
-    //   ★그래서 여기 단언 대상은 차수와 무관하게 그대로다★: 유실·중복 없음(고유 msg_id N개) · 봉투 바이트
-    //   무결(multiset 일치). 아래에서 기다리는 것은 그 파이프라인의 정지(quiescence)뿐이고, 운영 경로
-    //   (동기 드레인 → 물러남 → 되울린 도어벨 → 레인 → `flush_for_agent`)를 그대로 태우므로 물러난 몫이
-    //   실제로 배달되는지도 함께 실증된다. ★위 "산 수신자라 delivered" 주석을 근거로 전원 `delivered` 를
-    //   단언으로 승격시키지 말 것★ — 겹친 드레인에서 물러난 쪽은 정상적으로 `pending` 이다.
+    // ★전원 `delivered` 를 단언으로 승격시키지 말 것★: 겹친 드레인에서 물러난 발신은 `pending` 으로
+    //   답하고(ADR-0125), 그 편지는 이긴 쪽 배치나 되울린 도어벨로 뒤늦게 나간다. 그래서 단언 축은
+    //   차수와 무관하게 유실·중복 없음 + 봉투 바이트 무결이다.
     for _ in 0..600 {
         if seen.lock().unwrap().len() >= N && messaging.parked_len(&to_name) == 0 {
             break;
@@ -1310,7 +1265,6 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // (i) exact-once — 관측 레코드 N건, msg_id 전부 distinct + ACK id 전부 distinct.
     let obs_records = { seen.lock().unwrap().clone() };
     assert_eq!(
         obs_records.len(),
@@ -1327,21 +1281,6 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
     let distinct_ack: std::collections::HashSet<&String> = ack_ids.iter().collect();
     assert_eq!(distinct_ack.len(), N, "ACK id 전부 distinct");
 
-    // (ii) ★봉투 조립 정확-바이트 다중집합 등식★: 각 캡처 write 에 대해 그 봉투가 session 에 넘어갔을
-    //   **정확한 encoded 바이트**를 재구성해 exact-eq 비교하고, N 개 write 가 N 개 관측 레코드에 1:1 로
-    //   매칭됨(다중집합 등식)을 단언한다. 재구성 경로(관측 레코드엔 body 가 없으므로 캡처 write 에서 결합):
-    //     ① 캡처 라인(stream-json)의 top-level "uuid" = 그 봉투를 만든 msg_uuid(wrap_user_turn 이 심음).
-    //     ② 그 msg_uuid 로 관측 레코드를 찾아 msg_id 를 얻는다(봉투 prefix `id:<msg_id>` 확정).
-    //     ③ 캡처 write 안의 유일 마커 = body(각 스레드 고유).
-    //     ④ wrapped = "[message from <sender8> id:<msg_id>] <body>" →
-    //        expected = InputEncoder::ClaudeStreamJson.encode(wrapped, msg_uuid)
-    //   ④ 는 session.write_input_observed 가 실제로 send_input 에 넘긴 바로 그 바이트다(같은 encoder·
-    //   같은 msg_uuid). ★이 검사가 증명하는 것★: session→transport **handoff 무결** — session 이
-    //   encoder 출력을 잘라내거나(truncate) 오염시키거나 두 봉투를 한 write 로 합치면 캡처 write ≠
-    //   expected 라 깨진다(그리고 `bytes_requested` 만으론 이 handoff 오염을 못 잡는다). ★증명하지
-    //   않는 것★: encoder **내부** 정확성 — expected 도 같은 encoder 로 만들므로 encoder 자체 결함
-    //   (예: wrap_user_turn 이 개행을 빠뜨림)은 양쪽을 똑같이 오염시켜 여기선 안 걸린다. encoder
-    //   정확성은 claude.rs 의 golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 소관.
     let sender_name = obs_seam::fallback_name(sender);
     let writes = obs_seam::all_written(&captured);
     assert_eq!(
@@ -1349,7 +1288,6 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         N,
         "캡처된 write 수 == N(각 send_input 이 완결 봉투 1개 — 잘림/합병 없음)"
     );
-    // msg_uuid → 관측 레코드(정확 봉투 재구성용). 성공 레코드는 msg_uuid Some.
     let by_uuid: std::collections::HashMap<
         uuid::Uuid,
         &engram_dashboard_messaging::envelope::DeliveryObservation,
@@ -1363,19 +1301,11 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
         "성공 레코드마다 고유 msg_uuid(상관 키 충돌 없음)"
     );
 
-    // 각 캡처 write 를 정확 기대 바이트와 대조한다. write 안의 유일 마커로 body 를, 그 write 의 encoded
-    //   라인을 파싱해 담긴 msg_uuid 로 관측 레코드를 찾아 msg_id 를 얻어 봉투를 완성 → 재-encode 해 exact-eq.
     let mut matched_uuids: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
-    // ★수신 본체 다중집합★(FIX-1): 각 write 에서 실제로 배달된 body 마커를 모은다. 아래 exact-bytes
-    //   재구성은 body 를 그 write 자신에서 뽑아(self-consistent) 검사하므로 "모든 메시지 → 같은 body"
-    //   치환 버그를 자기일관적으로 통과시킨다. 그걸 막으려면 수신된 본체 다중집합이 발신된 N 개 distinct
-    //   마커 집합과 정확히 같은지(각 1회) 별도로 대조해야 한다.
     let mut received_bodies: Vec<String> = Vec::with_capacity(N);
     for (i, w) in writes.iter().enumerate() {
-        // 온전한 UTF-8 라인이어야(물리 인터리브면 여기서 U+FFFD 로 깨질 수 있으나 — 그 검증은 seam 밖·follow-up).
         let s = std::str::from_utf8(w)
             .unwrap_or_else(|e| panic!("write[{i}] 가 온전한 UTF-8 이 아님: {e}"));
-        // 캡처 라인(stream-json)에서 이 봉투의 msg_uuid 를 파싱한다(top-level "uuid" 필드 = wrap_user_turn).
         let line_json: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap_or_else(|e| {
             panic!("write[{i}] 가 온전한 stream-json 라인이 아님(합병/잘림 의심): {e} in {s:?}")
         });
@@ -1390,8 +1320,6 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
             matched_uuids.insert(line_uuid),
             "write[{i}] 의 msg_uuid={line_uuid} 가 두 번 캡처됨(중복 write)"
         );
-        // 이 write 안의 유일 마커 = body(각 스레드 고유). 정확히 1개여야(두 메시지 바이트가 한 write 에
-        //   섞이면 2개가 보인다 — seam 레벨 합병 탐지).
         let hits: Vec<&String> = markers.iter().filter(|m| s.contains(m.as_str())).collect();
         assert_eq!(
             hits.len(),
@@ -1399,12 +1327,9 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
             "write[{i}] 는 봉투 마커 정확히 1개만 담아야(seam 레벨 무합병) — 관측: {hits:?}"
         );
         let body = hits[0];
-        // ★FIX-1: 수신 본체 다중집합에 적재(치환 버그 차단용 — 루프 뒤 발신 마커 집합과 대조)★.
         received_bodies.push(body.clone());
-        // ★정확-바이트 재구성★: 이 봉투가 session 에 넘어갔을 바로 그 바이트 = encoder(봉투, 그 msg_uuid).
-        //   ADR-0103: 운영 기본 봉투 = xml(`<message from="{sender}">{body}</message>`) — 봉투에 msg_id 미포함.
-        //   (obs 는 위 msg_uuid→레코드 매칭·유령 write 검증에 여전히 쓰인다 — msg_id 만 봉투에서 빠짐.)
-        //   body 마커는 XML 특수문자를 안 쓰므로(BODY-NNNN) 이스케이프 없이 데몬 렌더와 바이트 일치.
+        // ★정확-바이트 재구성★: 같은 encoder·같은 msg_uuid 로 만든 이 라인이 곧 session 이
+        //   send_input 에 넘긴 바이트다 — 그래서 exact-eq 가 handoff 오라클로 성립한다.
         let wrapped = obs_seam::expected_default_envelope(&sender_name, body);
         let expected_line = InputEncoder::ClaudeStreamJson.encode(wrapped.as_bytes(), line_uuid);
         assert_eq!(
@@ -1413,19 +1338,15 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
             obs.msg_id
         );
     }
-    // 모든 성공 레코드의 msg_uuid 가 정확히 한 write 로 매칭됐는지(집합 등식 = 유실/중복 없음).
     assert_eq!(
         matched_uuids.len(),
         N,
         "N 개 msg_uuid 전부 정확히 1 write 로 배달(exact-once, 다중집합 등식)"
     );
 
-    // ★FIX-1: 수신 본체 다중집합 == 발신된 N 개 distinct 본체(각 정확히 1회)★.
-    //   위 exact-bytes 재구성은 body 를 그 write 자신에서 뽑아 검사하므로 "모든 메시지 → 같은 body"
-    //   치환 버그를 자기일관적으로 통과시킨다(각 write 가 BODY-0000 을 담고 BODY-0000 으로 재구성 → 통과).
-    //   여기서 수신 본체 다중집합을 발신 마커 집합과 직접 대조해 그 구멍을 막는다: sorted 두 벡터가
-    //   같아야(발신 마커는 전부 distinct 이므로 이 등식 = "N 개 distinct 본체가 각 정확히 1회 배달,
-    //   무유실·무중복·무치환"). 발신 마커는 이미 distinct 이나 방어적으로 확인한다.
+    // ★치환 버그 차단(FIX-1)★: 위 exact-bytes 재구성은 body 를 그 write 자신에서 뽑아 검사하므로
+    //   "모든 메시지 → 같은 body" 치환 버그를 자기일관적으로 통과시킨다(각 write 가 BODY-0000 을 담고
+    //   BODY-0000 으로 재구성 → 통과). 발신 마커 집합과의 직접 대조가 그 구멍을 막는다.
     {
         let mut sent_sorted: Vec<String> = markers.clone();
         sent_sorted.sort();
@@ -1451,20 +1372,8 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
 }
 
 /// ── ADR-0088 Stage 1-오라클 2: 본체 크기 경계(MAX_BODY_BYTES = 64 KiB), 바이트 vs char ──────────
-/// 상한 근처 본체: 정확히 64 KiB, 64 KiB−1, 64 KiB+1, 그리고 바이트 길이가 경계를 straddle 하는
-///   멀티바이트(UTF-8) 본체. 오라클:
-///   - >64 KiB → BODY_TOO_LARGE 교정(write 시도 없음 = 캡처 0),
-///   - ≤64 KiB → 배달됨 + seam 캡처 write 가 **기대 encoded 봉투와 바이트-정확 일치**(msg_uuid 로 재구성)
-///     + DeliveryObservation.bytes_requested == 봉투의 정확 바이트 길이,
-///   - 상한은 char 수가 아니라 **바이트** 로 잰다(멀티바이트 본체의 char 수는 64Ki 미만인데 바이트는 초과).
-/// ★정직 범위(FIX-2)★: 수용 케이스의 캡처 write 대조가 증명하는 것은 **session→transport handoff
-///   무결** — session 이 encoder 출력을 잘라내거나(truncate) 오염시키지 않고 그대로 transport 에
-///   넘겼는가다. `bytes_requested` 는 encoding **이전** 봉투 복사값이라 handoff 에서의 truncation 을
-///   못 잡으므로 캡처 바이트를 직접 대조한다. ★증명하지 않는 것★: encoder **내부** 정확성 — expected
-///   도 같은 `InputEncoder::ClaudeStreamJson.encode` 로 만들므로 encoder 자체 결함(예: wrap_user_turn
-///   이 개행/본체를 빠뜨림)은 actual·expected 를 똑같이 오염시켜 여기선 안 걸린다. encoder 정확성은
-///   claude.rs 의 golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 소관.
-///   이 아래 물리 write(부분 write/OS-pipe)는 seam 밖(follow-up).
+/// ★캡처 write 를 직접 대조하는 이유(FIX-2)★: `bytes_requested` 는 encoding **이전** 봉투 복사값이라
+///   session→transport handoff 에서의 truncation·오염을 못 잡는다.
 #[tokio::test]
 async fn stage1_body_size_boundary_bytes_not_chars() {
     use engram_dashboard_core::agent::backend::InputEncoder;
@@ -1484,11 +1393,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         epoch: 0,
     };
 
-    // 한 요청을 보내고 (ControlResult, 관측 레코드 Option, 마지막 캡처 write, 기대 봉투 바이트 길이,
-    //   ★기대 encoded 라인★, 수신자 id) 를 돌려주는 로컬 헬퍼. 매 케이스마다 fresh seam 수신자 + fresh
-    //   observer 를 심어 상태 누적을 피한다. 기대 encoded 라인 = 성공 시 관측 레코드의 msg_uuid 로
-    //   `InputEncoder::ClaudeStreamJson.encode(봉투, msg_uuid)` 재구성(= session 이 send_input 에 넘긴
-    //   바로 그 바이트) — 수용 케이스의 캡처 write 와 exact-eq 비교용. 실패/거부면 빈 Vec.
+    // 매 케이스마다 fresh seam 수신자 + fresh observer 를 심어 상태 누적을 피한다.
     async fn send_once(
         manager: &Arc<AgentManager>,
         registry: &Arc<ControlRegistry>,
@@ -1518,13 +1423,9 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         let v = result.to_json();
         let obs = seen.lock().unwrap().first().cloned();
         let written = obs_seam::last_written(&captured);
-        // ADR-0103: 운영 기본 봉투 = xml(`<message from="{sender}">{body}</message>`) — 봉투에 msg_id 미포함.
-        //   기대 봉투 바이트 = xml 봉투의 UTF-8 len. body 는 XML 특수문자 없는 픽스처라 이스케이프 무영향.
-        //   ★MAX 게이트는 body 기준★: 64 KiB 는 body 길이라 게이트를 통과하고, 봉투 wrapper 는 그 위에 얹힌다.
+        // ★MAX 게이트는 body 기준★: 64 KiB 는 body 길이라 게이트를 통과하고, 봉투 wrapper 는 그 위에 얹힌다.
         let sender_name = obs_seam::fallback_name(from.agent_id);
         let expected_env_bytes = obs_seam::expected_default_envelope(&sender_name, &body).len();
-        // ★기대 encoded 라인 재구성★: 성공 시 봉투를 관측 레코드의 msg_uuid 로 재-encode 한다(= session 이
-        //   실제 send_input 에 넘긴 바이트). msg_uuid 가 있어야 encode 하므로 성공 레코드에서만 만든다.
         let expected_line = match obs.as_ref().and_then(|o| o.msg_uuid) {
             Some(uuid) => {
                 let wrapped = obs_seam::expected_default_envelope(&sender_name, &body);
@@ -1550,9 +1451,6 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         "요청 바이트 = 봉투의 정확 바이트 길이"
     );
     assert!(obs.is_delivered(), "정확히 64 KiB 는 is_delivered()");
-    // ★캡처 write 가 기대 encoded 봉투와 바이트-정확 일치★ — session 이 64 KiB 봉투를 handoff 에서
-    //   잘라내거나 오염시키면 여기서 잡힌다(bytes_requested 는 encoding 이전 복사라 handoff truncation
-    //   못 잡음 — 캡처 바이트를 직접 대조). encoder 내부 정확성 아님(expected 도 같은 encoder).
     assert_eq!(
         written, expected_line,
         "seam 캡처가 64 KiB 봉투의 정확 encoded 바이트여야(session→transport handoff 잘림/오염 탐지)"
@@ -1649,7 +1547,6 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
     manager.kill_agent(b_id).ok();
 
     // ── (5) 멀티바이트 straddle: char 수는 그대로인데 바이트가 경계 바로 아래 → 배달됨(경계의 바이트성 확인) ──
-    // (MAX/3) char → 정확히 MAX 바이트(MAX 가 3 의 배수는 아니므로 MAX - (MAX%3) 바이트). ≤ MAX 라 배달돼야.
     let char_count_ok = MAX / 3; // floor → 바이트 = char_count_ok*3 ≤ MAX
     let body_mb_ok = "가".repeat(char_count_ok);
     assert!(
@@ -1668,9 +1565,6 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         env_bytes,
         "멀티바이트 straddle: 요청 바이트 = 봉투 정확 UTF-8 길이(char 수 아님)"
     );
-    // 멀티바이트 수용 케이스도 캡처 write 가 기대 encoded 봉투와 바이트-정확 일치(session 이 멀티바이트
-    //   봉투를 handoff 에서 잘못 자르거나 오염시키는 회귀를 잡는다 — encoder 내부 정확성 아님, expected
-    //   도 같은 encoder). encoder 자체 결함은 claude.rs golden test 소관.
     assert_eq!(
         written, expected_line,
         "멀티바이트 straddle: 캡처 write 가 기대 encoded 봉투와 바이트-정확 일치(handoff 무결)"
@@ -1682,9 +1576,6 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
 }
 
 /// ── ADR-0088 Stage 1-오라클 3(a) → ADR-0111 갱신: 수신자 부재 → **실패 행** + 배달 관측 없음 ──────────
-/// ★ADR-0111 결정 1★: 해석 시점 수신자 부재는 **수신자별 실패 행**(`failed` + `RECIPIENT_NOT_FOUND`)이다 —
-///   파킹하지 않는다("없는 이름 파킹" = 스폰 전 선지시는 v1 비지원). 배달 관측 레코드는 **0** 이다(주입이
-///   없으므로 유령 배달도 없다) — 관측은 실제 inject 에서만 생긴다. 이 두 성질을 함께 못 박는다.
 #[tokio::test]
 async fn stage1_lifecycle_recipient_absent_is_a_failed_row_with_no_observation() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1731,20 +1622,10 @@ async fn stage1_lifecycle_recipient_absent_is_a_failed_row_with_no_observation()
 }
 
 // ── S18 메시징 v1 수용 시나리오(spec §7): **busy 파킹 → 턴 종료 → 자동 배달**(실 claude) ──────────────
-// ★acceptance(spec §7)★: 실 에이전트가 **턴 진행 중**일 때 보내면 `pending`(파킹) → 그 턴이 끝나면 idle
-//   트리거가 flush 를 걸어 파킹분이 **자동 배달**된다. 배달을 DeliveryObserver 로 관측한다(from=발신자·
-//   to=그 이름). claude(stream-json) 스폰 필요 — 없으면 loud skip.
-// ★★이 테스트는 더 이상 로스터 등장 diff 를 태우지 않는다(ADR-0111 결정 1 · 본문 안 주석이 정본)★★:
-//   옛 판은 "부재 파킹 → 스폰" 이었고 부재 파킹이 폐지돼 그 진입로가 없다. 지금 남은 축은 "실 claude 를
-//   상대로도 idle→flush 배선이 돈다" 이고, **등장 diff(MessagingFlushSink) 축은 현재 미커버**다(백로그).
-// ★multi_thread 런타임(이 테스트 고유 사유 — round-4 finding 1)★: flush 는 별도 flush worker(tokio task)가
-//   수행한다(콜백 blocking 분리). worker 는 이제 inject 를 spawn_blocking 으로 던져 runtime worker 를 굶기지
-//   않으므로 executor 굶주림은 해소됐다 — 그래도 이 테스트는 multi_thread 가 필요하다. 이유는 worker 가 아니라
-//   **이 테스트 본문**이다: 아래 `wait_until` 은 std::thread::sleep 로 블록하는 **동기** 폴링이라, current-thread
-//   런타임에선 이 test task 가 그 스레드를 붙잡고 sleep 을 도는 동안 worker task(recv().await·JoinHandle await)
-//   가 폴링될 틈이 없어 flush 가 진행되지 않는다. multi_thread 로 worker 를 다른 런타임 스레드에서 돌려
-//   test 본문의 동기 대기와 병렬로 진행시킨다. (wait_until 을 async tokio::time 폴링으로 바꾸면 default 런타임도
-//   가능하나, 이 헬퍼는 다수 동기 테스트가 공유하므로 여기선 런타임 flavor 로만 격리 — 최소 변경.)
+// ★multi_thread 런타임이 필요한 이유★: 아래 `wait_until` 은 std::thread::sleep 로 블록하는 **동기**
+//   폴링이라, current-thread 런타임에선 이 test task 가 스레드를 붙잡고 도는 동안 flush worker task 가
+//   폴링될 틈이 없어 flush 가 진행되지 않는다. (`wait_until` 을 async 폴링으로 바꾸면 default 런타임도
+//   가능하나 이 헬퍼는 다수 동기 테스트가 공유하므로 런타임 flavor 로만 격리한다.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_park_then_spawn_auto_delivers() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1753,11 +1634,9 @@ async fn c1_park_then_spawn_auto_delivers() {
 
     let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c1-park-spawn").await;
 
-    // 배달 관측 싱크 — flush 자동 배달을 여기로 회수(로그 스크레이핑 없이).
     let seen = Arc::new(Mutex::new(Vec::new()));
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
-    // 발신자 신원(유효 토큰).
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, "c1-sender".to_string());
     let from = BoundIdentity {
@@ -1766,15 +1645,15 @@ async fn c1_park_then_spawn_auto_delivers() {
     };
 
     // ── 1) 실 에이전트를 먼저 띄운다 ────────────────────────────────────────────────────
-    // ★ADR-0111 결정 1 로 setup 이 바뀌었다★: 옛 판은 "아직 안 뜬 이름으로 보내 파킹 → 나중에 스폰" 이었다.
-    //   부재는 이제 **입구 반려(실패 행)** 라 그 진입로가 없어졌다. 이 테스트가 지키는 건 부재가 아니라
-    //   **"파킹된 메일이 flush 계기에 자동으로 배달된다"** 는 배선이므로, 파킹 사유를 spec §5 가 남긴 유일한
-    //   경로(busy = 턴 진행 중)로 바꾼다 — 관측 대상(등장/idle diff → flush 워커 → 주입 → 관측)은 그대로다.
-    // ★미커버 축의 정직한 표기(리뷰 C1)★: 이 테스트의 setup 이 busy→idle 로 바뀌면서, **로스터 등장
-    //   diff → flush**(MessagingFlushSink 가 agent_list_updated 를 보고 그 이름 큐를 여는 배선) 축은 지금
-    //   **어떤 테스트도 덮지 않는다**(커널 테스트는 `flush_for` 를 직접 부른다). 옛 판은 "부재 파킹 → 스폰"
-    //   으로 그 축을 태웠지만 부재 파킹이 폐지돼 그 진입로가 없어졌다. 되찾으려면 "산 수신자에게 파킹 →
-    //   그 에이전트의 epoch 교체(재활성화)" 로 등장 diff 를 만드는 데몬 레벨 테스트가 필요하다(백로그).
+    // ★ADR-0111 결정 1 로 setup 이 바뀌었다★: 옛 판은 "아직 안 뜬 이름으로 보내 파킹 → 나중에 스폰" 이었고,
+    //   부재가 **입구 반려(실패 행)** 가 되며 그 진입로가 없어졌다. 이 테스트가 지키는 건 부재가 아니라
+    //   **"파킹된 메일이 flush 계기에 자동으로 배달된다"** 는 배선이라, 파킹 사유만 남은 유일한 경로
+    //   (busy = 턴 진행 중)로 바꿨다 — 관측 대상(idle diff → flush 워커 → 주입 → 관측)은 그대로다.
+    // ★미커버 축의 정직한 표기(리뷰 C1)★: 그 교체로 **로스터 등장 diff → flush**(MessagingFlushSink 가
+    //   agent_list_updated 를 보고 그 이름 큐를 여는 배선) 축은 **통합 경로로는** 아무 테스트도 안 덮는다 —
+    //   양 끝만 단위로 덮인다(데몬 `flush_sink_appears_*` · 커널 `flush_on_appearance_*` 는 `flush_for` 를
+    //   직접 부른다). 되찾으려면 "산 수신자에게 파킹 → 그 에이전트의 epoch 교체(재활성화)" 로 등장 diff 를
+    //   만드는 데몬 레벨 테스트가 필요하다(백로그).
     let target_name = "late-recv";
     let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target_name) else {
         skip_no_claude("c1_park_then_spawn_auto_delivers");
@@ -1846,13 +1725,9 @@ async fn c1_park_then_spawn_auto_delivers() {
 // ── S18 메시징 v1 C2 수용 시나리오(spec §7 "배치 검증 강화"): busy 중 도착 → 미주입 → 턴 종료 시 일괄 flush ──
 // ★무엇을 증명하나★: idle 게이트 배선 **전 구간**이 실제로 이어져 있음 — core.emit(분류) → 턴 관측 표 →
 //   MessagingService 게이트(파킹) → IdleNotifier → flush 채널 → flush worker → flush_for_agent → 주입.
-//   단언은 ① busy 중 도착분이 **주입되지 않고** pending ② 턴 종료(MessageDone) 후 **한 배치로 오래된 순**
-//   주입 ③ 장부가 pending→delivered 로만 전이(유령 delivered 없음).
-// ★왜 claude 없이 결정적인가★: 수신자는 obs_seam 의 structured 세션(실 PTY·claude 불요, write 캡처 가능)이고,
-//   턴 이벤트는 그 세션 core 에 **직접** emit 한다 — 실 claude 턴의 타이밍(응답 지연·인증)에 의존하지
-//   않는다. 실경로 e2e 축은 아래 `c2_live_*` 가 담당한다(claude-gated). 두 축이 상보적이다.
-// ★multi_thread 런타임★: flush 는 flush worker(tokio task)가 수행하고 이 본문의 `wait_until` 은 동기
-//   블로킹 폴링이다 — c1 테스트와 같은 사유(현재 스레드를 붙잡으면 worker 가 폴링될 틈이 없다).
+// ★왜 claude 없이 결정적인가★: 턴 이벤트를 수신자 core 에 **직접** emit 하므로 실 claude 턴의 타이밍
+//   (응답 지연·인증)에 의존하지 않는다.
+// ★multi_thread 런타임★: c1 테스트와 같은 사유(동기 폴링이 현재 스레드를 붙잡으면 worker 가 못 돈다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1872,12 +1747,10 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
         epoch: 0,
     };
 
-    // 도달 가능(structured) 수신자 — write 성공 + 바이트 캡처 + 턴 관측 배선(ADR-0113).
     let (b_id, captured, core) = obs_seam::insert_observed_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
-    // ★턴 이벤트를 그 수신자의 core 에 직접 emit 한다★: 운영에서 pump 가 하는 일과 같은 진입점이라
-    //   분류(이벤트→턴 신호) → 코어 표 → 턴 종료 push → 도어벨까지 **운영 경로 그대로** 탄다.
+    // core.emit 은 운영에서 pump 가 쓰는 것과 **같은 진입점**이다 — 그래서 위 전 구간이 그대로 탄다.
     let feed = |ev: OutputEvent| core.emit(ev);
 
     // ── 1) 턴 시작 관측(어시스턴트 델타) → busy ────────────────────────────────────────
@@ -1941,7 +1814,6 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
         "턴 종료 시 파킹분이 **한 배치로** 주입돼야(idle 게이트 flush): 실제 {}건",
         written.len()
     );
-    // 오래된 순 — 각 write 는 개별 봉투(stream-json 라인)로 분리돼 있다.
     let first = String::from_utf8_lossy(&written[0]).to_string();
     let second = String::from_utf8_lossy(&written[1]).to_string();
     assert!(
@@ -1952,7 +1824,7 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
         second.contains("second"),
         "배치 둘째 주입 = 그 다음 메시지: {second}"
     );
-    // 장부는 실제 주입 시점에만 delivered(ADR-0104) + 배달 관측 2건.
+    // 장부는 실제 주입 시점에만 delivered(ADR-0104).
     for id in &ids {
         assert_eq!(
             messaging.ledger_statuses(id),
@@ -1977,12 +1849,9 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
 
 // ── C2 리뷰 fix 1: 재개 transcript 로 busy 를 부트스트랩하지 않는다 ──────────────────────────────
 // ★무엇을 막는 회귀인가(치명)★: resume 스폰은 transcript 를 링에 seed 하는데(core ADR-0079
-//   seed-before-publish), 그 transcript 가 **턴 중간에 끊긴** 것이면 진행 신호로 끝나고 종료 신호가 없다.
+//   seed-before-pump), 그 transcript 가 **턴 중간에 끊긴** 것이면 진행 신호로 끝나고 종료 신호가 없다.
 //   그걸 관측으로 먹이면 (id, epoch) 가 "턴 중" 으로 찍히는데 그 턴의 종료는 **영원히 오지 않는다** → 그
 //   수신자 앞 모든 발송이 TTL 까지 파킹된다(깨울 수 없는 false-busy = 배달 정지).
-// ★어떻게 결정적으로 재현하나(claude 불요)★: 관측 배선된 seam 수신자의 core 에 `seed` 로 "종료 신호 없이
-//   끝난 과거" 를 정확히 쌓고, ① 그게 관측으로 새지 않는지 ② 그래도 라이브 emit 은 관측되는지 ③ 결과적으로
-//   발송이 즉시 배달되는지를 본다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2001,20 +1870,18 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     let (b_id, captured, core) = obs_seam::insert_observed_seam_recipient(&manager, false);
     let to_name = obs_seam::fallback_name(b_id);
 
-    // 1) 링에 "턴 중간에서 끝난 과거"(진행 신호만, 종료 신호 없음)를 seed = 죽은 incarnation 의 transcript.
+    // seed 픽스처 = 죽은 incarnation 의 transcript("턴 중간에서 끝난 과거" — 진행 신호만, 종료 신호 없음).
     core.seed(vec![OutputEvent::TextDelta {
         text: "past mid-turn".to_string(),
         turn_id: None,
         message_id: None,
     }]);
 
-    // 2) ★핵심 단언★: seed 는 관측이 아니므로 busy 가 아니다.
     assert!(
         !busy.is_busy(b_id, 0),
         "재개 transcript 로 busy 를 부트스트랩하면 그 busy 는 깨울 수 없다(TTL 까지 배달 정지)"
     );
 
-    // 3) 사용자 관점 결과: 발송이 파킹되지 않고 즉시 배달된다(false-busy 가 없다는 증거).
     let written_before = obs_seam::all_written(&captured).len();
     let v = handle_send(
         &manager,
@@ -2035,8 +1902,6 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     );
     assert_eq!(messaging.parked_len(&to_name), 0, "파킹 0");
 
-    // 4) 그러나 관측은 살아 있다 — 방금 그 주입이 만든 **라이브** 유저 에코가 표에 들어간다.
-    //    (주입은 write_stdin_observed 경로라 반환 시점에 이미 emit 됐다 = 결정적.)
     assert!(
         obs_seam::all_written(&captured).len() > written_before,
         "주입이 실제로 일어났어야(전제)"
@@ -2051,9 +1916,8 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
 }
 
 // ── C2: 턴 중에 죽은 수신자가 유령 busy 를 남기지 않는다(데몬 전 구간, claude 불요) ─────────────────
-// ★무엇을 증명하나★: 코어의 종료 청소(`OutputCore::finish` → 턴 관측 제거)와 종료 후 지각 emit 가드가
-//   **실 데몬 조립**(매니저 표 → ManagerTurnFacts → BusyPolicy 게이트) 위에서 성립함. 단위 테스트는
-//   코어 안에서만 보므로 어댑터·게이트가 같은 표를 보는지는 여기서만 잡힌다.
+// ★왜 데몬 레벨인가★: 단위 테스트는 코어 안에서만 보므로, 어댑터·게이트(매니저 표 → ManagerTurnFacts
+//   → BusyPolicy)가 코어와 **같은 표**를 보는지는 여기서만 잡힌다.
 // ★막는 회귀★: 턴 중에 죽은 화신의 "턴 중" 이 남으면 ① 그 이름 앞 파킹이 영영 안 풀리고 ② 상한 sweep 이
 //   죽은 에이전트에게 60초마다 도어벨을 울린다(프로세스 수명 내내).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2070,7 +1934,7 @@ async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
     });
     assert!(busy.is_busy(b_id, 0), "전제: 게이트가 턴 중으로 본다");
 
-    // 턴 종료 신호 없이 죽는다(비정상 종료 — 상한 sweep 이 원래 다루던 그 모양).
+    // 턴 종료 신호 없는 비정상 종료 = 상한 sweep 이 원래 다루던 그 모양.
     core.finish(TerminalReason::Killed);
     assert!(
         !busy.is_busy(b_id, 0),
@@ -2100,15 +1964,11 @@ async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
 }
 
 // ── C2 실경로 축(claude-gated): 실 claude 턴 중 발송이 파킹되는지 ────────────────────────────────
-// ★위 결정적 테스트와의 차이★: 여기선 busy 관측이 **실 claude decoder** 가 만든 이벤트로 일어난다(합성
-//   emit 아님). 즉 "capability 프록시(structured=turn 이벤트 있음)" 가 실제로 성립하는지의 실측이다.
-// ★어디까지 결정적인가(정직 범위)★: 첫 주입 직후의 busy 관측은 결정적이다 — `write_input_observed` 가
-//   send_input 성공 직후 **동기로** 입력-시점 유저 에코(`Structured{kind:"user"}`)를 core.emit 하므로,
-//   handle_send 가 반환한 시점에 표는 이미 그 이벤트를 반영했다(claude 응답·인증과 무관). 그래서 "턴 중
-//   발송 → pending" 까지는 hard assert 한다.
-//   반면 **턴 종료 후 배달**은 claude 가 실제로 응답해 `result` 라인을 내야 한다(인증·네트워크·모델 지연에
-//   의존) — 그건 관측되면 단언하고, 시간 내 안 오면 loud 경고 후 넘어간다(`ENGRAM_TEST_REQUIRE_CLAUDE=1`
-//   레인에선 panic 으로 승격 — silent skip 금지 정책 정합). 그 축의 결정적 커버리지는 위 테스트가 갖는다.
+// ★이 축이 더하는 것★: busy 관측이 **실 claude decoder** 가 만든 이벤트로 일어난다(합성 emit 아님) —
+//   "capability 프록시(structured = 턴 이벤트 있음)" 가 실제로 성립하는지의 실측이다.
+// ★단언이 비대칭인 이유★: "턴 중 발송 → pending" 은 hard assert 다. 반면 **턴 종료 후 배달**은 claude 가
+//   실제로 `result` 라인을 내야 하므로(인증·네트워크·모델 지연) 관측되면 단언하고 시간 내 안 오면 loud
+//   경고로 넘어간다 — `ENGRAM_TEST_REQUIRE_CLAUDE=1` 레인에선 panic 으로 승격한다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2135,16 +1995,15 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
         return;
     };
 
-    // 1) 입력 전 claude 는 조용하다(system/init 은 decoder 가 흘린다) → 시작 상태 = idle 확인.
-    //    ★관측 배선이 실제로 살아 있다는 증거는 아래 2)의 hard assert 가 진다★ — 그게 없으면 이 테스트가
-    //    "게이트가 아예 없어서 통과" 하는 위약이 된다.
+    // 입력 전 claude 는 조용하다 — system/init 은 decoder 가 흘린다.
+    //   ★이 단언 하나로는 위약★: "게이트가 아예 없어서 통과" 와 구별되지 않는다. 관측 배선이 살아
+    //   있다는 증거는 첫 주입 뒤의 `is_busy` hard assert 가 진다.
     assert!(
         wait_until(Duration::from_secs(5), || !busy
             .is_busy(info.id, info.epoch)),
         "입력 전 수신자는 idle 로 관측돼야(턴 이벤트 없음)"
     );
 
-    // 2) 첫 발송 → idle 이라 즉시 배달. 이 write 가 동기 유저 에코를 내므로 반환 시점에 표는 turn-중.
     let v1 = handle_send(
         &manager,
         &registry,
@@ -2167,7 +2026,6 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
         "주입 = 턴 시작 — 입력-시점 유저 에코(Structured)가 실 emit 경로로 표에 들어가야"
     );
 
-    // 3) 턴 진행 중 두 번째 발송 → 파킹(pending). 실 claude 턴 중 주입 금지의 e2e 증거.
     let v2 = handle_send(
         &manager,
         &registry,
@@ -2188,7 +2046,6 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     let msg2 = v2["id"].as_str().expect("msg id").to_string();
     assert_eq!(messaging.parked_len(target), 1, "턴 중 도착분이 대기");
 
-    // 4) 턴 종료(claude 의 result 라인)를 기다린다 → idle 트리거 → 파킹분 배달.
     let delivered = wait_until(Duration::from_secs(90), || {
         seen.lock().unwrap().iter().any(
             |o: &engram_dashboard_messaging::envelope::DeliveryObservation| {
@@ -2199,7 +2056,6 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     if delivered {
         assert_eq!(messaging.parked_len(target), 0, "턴 종료 flush 로 큐 비움");
     } else {
-        // 실 claude 왕복(인증·네트워크·모델)에 달린 축 — 결정적 커버리지는 위 c2_busy_* 가 갖는다.
         eprintln!(
             "[c2_live] 턴 종료(result)가 90s 내 관측되지 않아 turn-end 배달 축은 미확인 \
              (parked={}) — 실 claude 응답 의존 축, 결정적 단언은 c2_busy_recipient_parks_* 가 담당",
@@ -2220,16 +2076,10 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
 }
 
 /// ── ADR-0088 Stage 1-오라클 4(write 실패): 실패 **관측 형태** — 단일 실패 레코드(부분/중복 관측 없음) ──
-/// 수신자가 도달 가능(structured)하나 relay write(send_input)가 Err.
-/// ★증명한다★: 실패의 **관측 형태(observation shape)** — send_input 이 Err 를 낼 때 레코드가 정확히
-///   1건 + error=Some + bytes_written=None + msg_uuid=None + **to_epoch=None** + !is_delivered(성공 필드가
-///   하나도 새지 않음). 봉투 바이트(bytes_requested)는 실려도(무엇을 배달하려다 실패했나의 forensic) 성공 신호는 안 샌다.
-/// ★증명하지 않는다(커버리지 공백)★: **실제 OS write 가 prefix 를 쓴 뒤 Err 를 내는
-///   부분 배달/truncation 부재**. 이 seam 은 send_input 이 push **전에** 통째로 Err 를 반환하므로(원자
-///   all-or-nothing 모사) "prefix 만 쓰이고 실패" 상황 자체가 발생하지 않는다.
-///   ▶ follow-up 존재: 실 pipe(자식이 K 바이트만 읽고 종료 → prefix 를 물리적으로 받아들인 뒤 끊김)
-///     하네스가 이 축을 커버한다 — core 크레이트 `tests/stdio_physical_pipe.rs` ::
-///     `physical_pipe_partial_write_then_err_surfaces_as_err`(prefix 쓴 뒤에도 WriteFailed 로 표면화).
+/// ★증명하지 않는다(커버리지 공백)★: **실제 OS write 가 prefix 를 쓴 뒤 Err 를 내는 부분 배달** — 이 seam
+///   은 send_input 이 push **전에** 통째로 Err 를 반환하므로(원자 all-or-nothing 모사) "prefix 만 쓰이고
+///   실패" 상황 자체가 발생하지 않는다. ▶ core 크레이트 `tests/stdio_physical_pipe.rs` ::
+///   `physical_pipe_partial_write_then_err_surfaces_as_err` 가 커버한다.
 #[tokio::test]
 async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2239,7 +2089,7 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("stage1-write-err").await;
 
-    // fail=true → 도달성(structured) 통과하되 send_input 이 Err.
+    // fail=true → 로스터에 든 산 수신자이나 send_input 이 Err.
     let (b_id, captured) = obs_seam::insert_seam_recipient(&manager, true);
     let to_name = obs_seam::fallback_name(b_id);
 
@@ -2266,13 +2116,11 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
         },
     );
     let v = result.to_json();
-    // ★C1(spec §5)★: inject 실패 → 파킹(pending). 실패 관측 shape 는 그대로(성공 필드 누출 없음, 아래).
     assert_eq!(
         v["results"][0]["status"], "pending",
         "write 실패는 파킹(pending): {v}"
     );
 
-    // 정확히 1건의 실패 레코드 — 부분/중복 없음.
     let g = seen.lock().unwrap();
     assert_eq!(
         g.len(),
@@ -2287,14 +2135,11 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
         "실패 = bytes_written None(성공 필드 누출 없음)"
     );
     assert_eq!(obs.msg_uuid, None, "실패 = msg_uuid None");
-    // ★None 계약 고정(ADR-0088)★: 실패 분기가 to_epoch 를 Some(epoch)으로 뒤집으면(완결 write 없이 착지
-    //   incarnation 을 참칭) 성공 필드 누출이다 — 이 단언이 그 회귀를 잡는다.
     assert_eq!(
         obs.to_epoch, None,
         "실패 = to_epoch None(완결 write 없음 → attest 할 착지 incarnation 없음, 성공 필드 누출 없음)"
     );
     assert!(!obs.is_delivered(), "실패 = !is_delivered()");
-    // fail seam 은 send_input 에서 Err 를 내기 전 push 하지 않으므로 캡처는 비어야(바이트가 안 꽂혔다).
     assert!(
         obs_seam::all_written(&captured).is_empty(),
         "write 실패면 수신자에 바이트가 꽂히지 않아야(캡처 0)"
@@ -2307,25 +2152,7 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
 }
 
 /// ── ADR-0088 Stage 1-오라클 5(epoch): **순차** incarnation 교체 시맨틱 — 현재 incarnation 에 배달 ──────
-/// ★증명한다(순차 교체)★: ADR-0086 §F5 는 epoch pinning 을 **하지 않는다**(메일은 논리 에이전트=안정
-///   주소를 향함). 이 테스트는 그 **순차** 시맨틱을 결정적으로 확인한다: seam 수신자를 같은 AgentId 로
-///   **교체 주입**(=incarnation 교체가 이미 끝난 맵 상태)한 뒤 그 이름으로 보내면, 메시지는 **현재 맵에
-///   있는 그 AgentId 의 incarnation** 으로 배달되고(유실 없음), 교체된 맵 상태에서 wrong-epoch 로 이중
-///   배달되지 않는다(레코드 1건). 배달 실패 시 조용히 유실되지 않고 도달 에러로 표면화돼야 한다.
-///
-/// ★진짜 mid-flight epoch race 는 별도 오라클이 결정적으로 커버(follow-up 닫힘)★: resolve 가 epoch 0 을
-///   보고 그 직후 재시작으로 epoch 1 이 current 가 된 뒤 write 가 epoch 1 로 착지하는 resolve↔write
-///   **사이**의 경쟁은 이 순차 교체 테스트가 다루는 범위가 아니다. 그 race 는 이제
-///   `stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_deterministic` 가 프로덕션
-///   yield-seam(handle_send 의 write 직전 test hook — ControlRegistry::set_mid_send_hook, ADR-0088)으로
-///   **결정적으로** 재현·단언한다. ★ADR-0086 §F5 는 이 race 를 design-accepted 로 표시★(메일은 논리
-///   에이전트를 향하므로 새 incarnation 착지가 올바른 동작) — seam 은 그 동작을 **관측**할 뿐 epoch 를
-///   pin 하지 않는다.
-///
-/// ★관측 한계 닫힘(follow-up)★: DeliveryObservation 이 이제 착지 incarnation 의 epoch(`to_epoch`)을
-///   담는다(ADR-0088 — core WriteOutcome.epoch 를 실은 값 = write 를 집행한 세션의 epoch). 그래서 이
-///   테스트는 "현재 incarnation(epoch 1)이 받았다" 를 (i) 배달 성사·(ii) 새 버퍼에만 바이트 착지 라는
-///   간접 증거에 더해 **레코드의 `to_epoch == Some(1)` 로 직접** 단언한다(record-self-sufficient).
+/// ★설계 의도★: 메일은 논리 에이전트(안정 주소)를 향하므로 epoch pinning 을 **하지 않는다**(ADR-0086 §F5).
 #[tokio::test]
 async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     use engram_dashboard_core::agent::backend::InputEncoder;
@@ -2414,9 +2241,6 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
             Arc::new(NoopStatus),
             TurnWiring::detached(),
         ));
-        // ADR-0101 (WYSIWYA): 프로필 없는 seam 세션의 canonical name = basename(session.cwd) 이므로,
-        //   테스트가 fallback_name(id)=id[:8] 로 지목하려면 cwd basename 을 id[:8] 로 맞춰야 한다
-        //   (옛 cwd="." 는 basename="." 이라 id[:8] 지목이 RECIPIENT_NOT_FOUND 로 튄다).
         let cwd = std::path::PathBuf::from(format!("seam-root/{}", &id.to_string()[..8]));
         let session = Arc::new(AgentSession::new(
             id,
@@ -2441,10 +2265,9 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     let id = CoreAgentId::new_v4();
     let to_name = obs_seam::fallback_name(id);
 
-    // incarnation A(epoch 0) 주입 → 그 버퍼 old_buf.
     let old_buf = insert_epoch(&manager, id, 0);
-    // incarnation B(epoch 1) 를 같은 AgentId 로 교체 주입(재시작=epoch bump 모사). insert_test_session 은
-    //   같은 id 를 교체하므로 맵엔 이제 B 만 남는다(A 는 맵에서 빠진다).
+    // 같은 AgentId 로 교체 주입 = 재시작(epoch bump) 모사 — `insert_test_session` 은 같은 id 를 덮으므로
+    //   맵엔 이제 B(epoch 1)만 남는다.
     let new_buf = insert_epoch(&manager, id, 1);
 
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2470,13 +2293,11 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
         },
     );
     let v = result.to_json();
-    // 배달은 성사돼야(안정 주소로 향함) — 유실이면 여기서 error 가 뜬다.
     assert_eq!(
         v["results"][0]["status"], "delivered",
         "교체된 현재 incarnation 으로 배달돼야(유실 없음, ADR-0086 §F5): {v}"
     );
 
-    // 레코드 1건 — wrong-epoch 이중배달 없음(같은 논리 메시지가 2건으로 안 남는다).
     let g = seen.lock().unwrap();
     assert_eq!(
         g.len(),
@@ -2485,8 +2306,6 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
         *g
     );
     assert_eq!(g[0].to_id, id, "레코드 수신자 = 그 안정 AgentId");
-    // ADR-0088: 착지 incarnation epoch 을 레코드가 직접 담는다 — 교체된 현재 incarnation(epoch 1)에 배달됐음을
-    //   레코드만으로 단언(record-self-sufficient, 옛 docstring 의 "간접 확인" 한계 제거).
     assert_eq!(
         g[0].to_epoch,
         Some(1),
@@ -2494,7 +2313,6 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     );
     drop(g);
 
-    // 바이트는 **현재(B, epoch 1)** incarnation 버퍼에만 꽂혀야 — 구(A) 버퍼엔 안 꽂힘.
     assert_eq!(
         new_buf.lock().unwrap().len(),
         1,
