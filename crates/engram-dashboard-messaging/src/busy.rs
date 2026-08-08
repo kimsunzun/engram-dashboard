@@ -31,12 +31,7 @@
 //! ★알려진 미확인(측정 항목 — spec §7)★: 중첩 Task 서브에이전트의 `result` 라인이 **부모 턴 종료**
 //!   신호로 새는지 미검증이다. 새면 부모가 아직 턴 중인데 idle 로 오판해 조기 주입할 수 있다
 //!   (유실은 없고 타이밍만 어긋남). 해결하지 않고 실 하네스 측정 항목으로 남긴다.
-//!
-//! 워크스페이스 crate import 0(ADR-0110 — 컴파일러 강제).
 // ADR-0103
-// ADR-0104
-// ADR-0110
-// ADR-0113
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -64,8 +59,6 @@ pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 /// ★계약★: 순수 조회 — 부작용 없음, 블로킹 없음(짧은 락만). messaging 락을 **든 채** 불려도 안전해야
 ///   한다(현 호출부는 락 밖에서 부르지만, 이 계약을 지켜 두면 미래 호출 지점이 늘어도 데드락이 없다).
 pub trait BusyGate: Send + Sync {
-    /// 이 (id, epoch) 가 **관측상** 턴 진행 중인가. ★모르는 대상은 반드시 false(idle)★ —
-    ///   positive-knowledge-only(모듈 헤더). true 는 "턴 중이라는 관측 근거가 있다" 는 뜻이다.
     fn is_busy(&self, id: PeerId, epoch: u32) -> bool;
 }
 
@@ -82,19 +75,17 @@ impl BusyGate for AlwaysIdleGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnFact {
     pub in_turn: bool,
-    /// 마지막 턴 신호 관측 시각. 이 값이 상한 판정의 유일한 축이다(모듈 헤더 `BUSY_MAX_TURN`).
     pub last_signal: Instant,
 }
 
 /// ★턴 사실 조회 포트(ADR-0110 결정 3 · ADR-0113 결정 1)★ — 호스트의 공용 관측 계층을 커널이 **타입으로도
 ///   모른 채** 읽는 문. 운영 구현은 호스트 어댑터가 소유한다.
 ///
-/// ★읽기 전용이 계약이다★: 이 포트에 "지워라/표시해라" 를 추가하지 말 것 — 표는 다른 소비자와 공유하는
-///   공용 시설이라 우편의 판정이 남의 사실을 바꾸면 안 된다(모듈 헤더).
+/// ★읽기 전용이 계약이다★: 이 포트에 "지워라/표시해라" 를 추가하지 말 것(근거 = 모듈 헤더).
 /// ★두 값을 한 번에 돌려주는 이유★: `in_turn` 과 `last_signal` 을 따로 물으면 두 조회 사이에 신호가 끼어
 ///   "턴 중인데 시각은 옛것" 같은 합성 불가능한 조합으로 판정하게 된다.
 pub trait TurnFacts: Send + Sync {
-    /// 이 (id, epoch)의 관측값. `None` = 미관측(= 이 모듈에선 idle — positive-knowledge-only).
+    /// 이 (id, epoch)의 관측값. `None` = 미관측.
     fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact>;
 
     /// 지금 턴 중으로 관측된 전원 `(id, epoch, 마지막 신호 시각)` — 상한 sweep 의 입구.
@@ -104,14 +95,12 @@ pub trait TurnFacts: Send + Sync {
 /// ★턴 종료(idle 전이) 통지 seam★ — 호스트가 "이 에이전트 턴이 끝났다" 를 알리는 입구이자, 상한 sweep 이
 ///   멈춘 턴을 깨우는 출구. 운영 구현은 flush worker 채널로 논블록 send 한다.
 ///
-/// ★계약(load-bearing)★: **논블록·비-재진입**이어야 한다 — 출력 pump 스레드에서 불린다(모듈 헤더 콜백
-///   규율). 락 취득·IO·주입 금지.
+/// ★계약(load-bearing)★: **논블록·비-재진입**(근거 = 모듈 헤더 콜백 규율).
 /// ★idempotency 의존(수용된 설계)★: 통지는 **턴 종료 신호마다** 나간다(전이 여부를 따지지 않는다). 왜:
 ///   "직전이 busy 였을 때만" 으로 좁히면, 어시스턴트 이벤트 없이 곧장 끝나는 턴에서 통지가 빠져 파킹이
 ///   다음 턴까지 stranded 된다 — 배달 누락(치명)보다 **잉여 통지(무해)** 를 택한다. 잉여 통지의 대가는
 ///   빈 큐 drain no-op 뿐이다. 채널 압력의 상한은 호스트 통지 구현이 책임진다.
 pub trait IdleNotifier: Send + Sync {
-    /// 이 에이전트가 방금 턴을 끝냈다(= 쌓인 파킹을 일괄 주입할 시점). **논블록**.
     fn notify_idle(&self, id: PeerId);
 }
 
@@ -151,7 +140,6 @@ impl BusyPolicy {
     /// ★잔해 하나당 도어벨 1회★: 사실을 지울 수 없으므로 같은 잔해가 매 주기 다시 보인다 — 마지막 신호
     ///   시각이 장부와 같으면 이미 처리한 잔해다. 새 신호가 왔다가 다시 멈추면 그건 새 잔해다.
     /// ★장부는 매번 "지금 잔해인 것" 으로 갈아 끼운다★: 되살아났거나 reap 된 화신의 항목이 쌓이지 않는다.
-    /// ★락 밖 통지(ADR-0006)★: 장부 갱신(락)과 통지(락 밖)를 분리한다.
     pub fn sweep_stale_busy(&self, now: Instant) -> usize {
         let stale_now: Vec<(PeerId, u32, Instant)> = self
             .facts
@@ -184,8 +172,6 @@ impl BusyPolicy {
         to_wake.len()
     }
 
-    /// 이 (id, epoch)가 지금 턴 중인가. 미관측 = false(positive-knowledge-only), 상한 sweep 이 잔해로
-    /// 판정한 신호 = false(fail-open).
     pub fn is_busy(&self, id: PeerId, epoch: u32) -> bool {
         let Some(fact) = self.facts.turn_fact(id, epoch) else {
             return false;
@@ -205,7 +191,6 @@ impl BusyGate for BusyPolicy {
 }
 
 /// ★하네스/테스트 전용 사실 소스★ — 호스트 관측 계층 대신 손으로 사실을 심어 정책을 결정적으로 구동한다.
-/// 운영 구현은 호스트가 소유한다(ADR-0110 결정 3).
 #[cfg(any(test, feature = "test-harness"))]
 #[derive(Default)]
 pub struct ScriptedTurnFacts {
@@ -218,7 +203,6 @@ impl ScriptedTurnFacts {
         Arc::new(Self::default())
     }
 
-    /// 이 화신을 "턴 중, 마지막 신호 = `at`" 으로 심는다.
     pub fn set_in_turn(&self, id: PeerId, epoch: u32, at: Instant) {
         self.facts.lock().unwrap().insert(
             (id, epoch),
@@ -266,7 +250,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    /// 통지된 PeerId 순서를 모으는 IdleNotifier.
     struct RecordingNotifier {
         seen: StdMutex<Vec<PeerId>>,
     }
@@ -328,8 +311,6 @@ mod tests {
 
     #[test]
     fn the_ceiling_flips_the_verdict_without_touching_the_facts() {
-        // ★ADR-0113 결정 2★: 판정은 이쪽, 사실은 저쪽 — 상한을 넘겨도 공용 표를 지우지 않는다
-        //   (같은 표를 보는 다른 소비자의 상한은 다르다).
         let (p, f, _n) = policy();
         let id = PeerId::new_v4();
         let t0 = Instant::now();
@@ -353,8 +334,6 @@ mod tests {
 
     #[test]
     fn a_fresh_turn_signal_restores_busy_without_waiting_for_a_sweep() {
-        // 관측마다 시각이 갱신되므로 "출력이 계속 오는 턴" 은 늙지 않는다. 갱신을 무시하면 30분 넘게 도는
-        //   정상 턴이 잘려 턴 중 주입이 된다.
         let (p, f, _n) = policy();
         let id = PeerId::new_v4();
         let t0 = Instant::now();
@@ -367,8 +346,6 @@ mod tests {
 
     #[test]
     fn sweep_wakes_only_stale_turns() {
-        // 잉여 도어벨은 무해하지만(빈 큐 no-op) 신선한 턴을 깨우는 건 의미가 없다 — 그 수신자는 여전히
-        //   busy 판정이라 배달되지 않는다. 늙은 것만 깨운다.
         let (p, f, n) = policy();
         let stale = PeerId::new_v4();
         let fresh = PeerId::new_v4();
@@ -399,7 +376,6 @@ mod tests {
 
     #[test]
     fn the_same_stale_turn_is_woken_once_but_a_new_one_wakes_again() {
-        // 사실을 지울 수 없으니 잔해는 매 주기 다시 보인다 — 마지막 신호 시각이 그대로면 같은 잔해다.
         let (p, f, n) = policy();
         let id = PeerId::new_v4();
         let t0 = Instant::now();
@@ -409,7 +385,6 @@ mod tests {
         assert_eq!(p.sweep_stale_busy(late + Duration::from_secs(60)), 0);
         assert_eq!(n.seen(), vec![id], "도어벨 1회");
 
-        // 새 신호가 왔다가 다시 멈추면 그건 새 잔해다.
         let t1 = late + Duration::from_secs(120);
         f.set_in_turn(id, 0, t1);
         assert_eq!(p.sweep_stale_busy(t1 + BUSY_MAX_TURN), 1);
@@ -418,14 +393,12 @@ mod tests {
 
     #[test]
     fn sweep_forgets_incarnations_that_left_the_facts() {
-        // 장부가 사라진 화신을 계속 들고 있으면 재시작마다 항목이 쌓인다.
         let (p, f, n) = policy();
         let id = PeerId::new_v4();
         let t0 = Instant::now();
         f.set_in_turn(id, 0, t0);
         let late = t0 + BUSY_MAX_TURN + Duration::from_secs(1);
         assert_eq!(p.sweep_stale_busy(late), 1);
-        // reap 으로 사실이 사라졌다가 같은 시각으로 되살아나면 그건 다시 깨울 대상이다.
         f.forget(id, 0);
         assert_eq!(p.sweep_stale_busy(late), 0);
         f.set_in_turn(id, 0, t0);

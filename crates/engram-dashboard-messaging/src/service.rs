@@ -2242,37 +2242,20 @@ fn status_label(s: DeliveryStatus) -> &'static str {
 /// `messages { id }` 조회 결과(입구가 JSON 으로 옮긴다 — shape 정본은 ingress `handle_messages` 주석).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageStateView {
-    /// 조회한 논리 메시지 id.
     pub id: String,
-    /// 발신자 이름(모든 배달기록이 공유).
     pub from: String,
-    /// 이 메시지가 request 이고 아직 회신이 안 왔나.
     pub awaiting_reply: bool,
-    /// ★행 목록이 불완전할 수 있나(D 리뷰 B2)★ — `true` = 이력 링에서 이 메시지의 앞쪽 행이 밀려났을
-    /// 가능성이 있다(그러니 `rows` 를 전부로 읽지 말 것) · `false` = **확실히 전부**다. 판정 근거는
-    /// `Ledger::records_for_detailed` 주석. 항상 싣는다 — 없으면 조회자가 침묵을 완전성으로 읽는다.
     pub may_be_truncated: bool,
-    /// 수신자별 배달기록(그룹 방송이면 N 줄 — spec §4 1:N).
     pub rows: Vec<DeliveryRowView>,
 }
 
-/// 배달기록 한 줄(수신자 1명분).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryRowView {
-    /// 이 줄의 수신자 이름.
     pub to: String,
-    /// 상태 어휘(pending|delivered|replied|expired|failed|skipped).
     pub status: &'static str,
-    /// 발송(레코드 생성)으로부터 경과 초.
     pub age_secs: u64,
-    /// 마지막 상태 전이로부터 경과 초.
     pub updated_secs_ago: u64,
-    /// ★실패 사유 코드(4차 — spec §6)★. 지금 채워지는 경로는 **삭제 정리**(`RECIPIENT_DELETED`) 하나다:
-    ///   발송 시점엔 `pending` 이었고 이 코드는 사후에 찍히므로 **조회에서 처음 보인다**. 입구 반려 계열의
-    ///   `failed` 행은 발송 응답이 이미 code/hint 를 전달했으므로 여기선 `None` 이다.
     pub code: Option<&'static str>,
-    /// 그 코드의 자기교정 힌트(코드가 있을 때만) — 발신 LLM 이 다음 행동(재발송 무의미 → 사용자 보고)을
-    ///   코드만 보고도, 힌트까지 보면 확실히 알게 하는 것이 요구사항이다(spec §6).
     pub hint: Option<String>,
 }
 
@@ -2284,7 +2267,7 @@ pub struct DeliveryRowView {
 fn row_hint(code: &'static str) -> Option<String> {
     match code {
         c if c == FailCode::RecipientDeleted.as_str() => Some(deleted_hint()),
-        // 다른 코드는 조회 축에 힌트를 두지 않는다(발송 응답이 이미 전달했다 — 위 필드 주석).
+        // 다른 코드는 조회 축에 힌트를 두지 않는다(발송 응답이 그 자리에서 이미 전달했다 — spec §6).
         _ => None,
     }
 }
@@ -2311,18 +2294,12 @@ impl Direction {
     }
 }
 
-/// 미결 항목 한 줄.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenItemView {
-    /// 이 줄이 무엇인지(위 enum) — 없으면 LLM 이 남의 숙제를 자기 것으로 오독한다.
     pub direction: Direction,
-    /// 논리 메시지 id(회신에 되쓸 값).
     pub id: String,
-    /// 발신자 이름.
     pub from: String,
-    /// 수신자 이름.
     pub to: String,
-    /// 발송으로부터 경과 초.
     pub age_secs: u64,
     /// request 였다면 발신자가 쓴 기한 표기 원본(`"10m"`). 통보·기한 없는 request 는 None.
     pub reply_by: Option<String>,
@@ -2339,7 +2316,6 @@ pub struct OpenItemView {
 ///   실패 행이다 — "지금 바로 주입한다"(옛 `Deliver`) 갈래는 직발송 지름길과 함께 사라졌다. 되살리면 적재를
 ///   건너뛰는 경로가 생겨 순서가 적재 순서에서 풀린다.
 enum RecipientPlan<'a> {
-    /// 적재 예정 — pass B 가 실제 적재를 끝내고, 락 밖에서 공용 드레인을 한 번 돌린다.
     Park {
         /// ★드레인 대상(`None` = 잠듦 — ADR-0116 결정 1)★: 산 수신자면 이 id 로 드레인하고 park 항목의
         ///   id 힌트로도 쓴다. 잠듦은 **드레인할 산 실체가 없다**(그래서 `hinted_id` 도 `None` 이고, 배달
@@ -2361,13 +2337,12 @@ enum RecipientPlan<'a> {
 ///   이미 냈을 수 있다. 그래서 사유 셋(㉮)에 섞지 않는다.
 #[derive(Debug, Default)]
 struct DrainReport {
-    /// 이 드레인이 실제로 주입한 메시지 id(주입 순서).
     injected: Vec<String>,
-    /// 0단계에서 물러났다(같은 수신자 앞 배치가 주입 중) — 자기 편지의 결말을 알 수 없다.
+    /// 0단계에서 물러났다 — 같은 수신자 앞 배치가 주입 중.
     retreated: bool,
     /// idle 게이트에 걸려 미룬 타깃이 있었다(턴 신호 있는 백엔드가 턴 중).
     gated: bool,
-    /// 이 드레인 안에서 주입이 실패했다(그 사유). ★자기 도어벨 금지의 판정 근거이기도 하다★.
+    /// ★자기 도어벨 금지의 판정 근거이기도 하다★.
     inject_error: Option<String>,
 }
 
@@ -2411,10 +2386,8 @@ struct DrainReport {
 ///   말 것★ — 이 가드가 실제로 막는 것은 **정적으로 못 잡는 정산 누락(잊은 갈래)** 이고 그 위험은 창의 길이와
 ///   무관하다(오히려 두 pass 를 오가는 지금 형태에서 더 쉽게 생긴다). 제거 = ADR-0108 재론이며, 그 순간
 ///   `STALE_RESERVATION_AFTER` 부류의 회귀가 되돌아온다.
-/// ★그 회수는 **이 가드의 생존**을 본다(R1 — load-bearing)★: 가드가 `ReservationLiveness`(강한 쪽)를 들고
-///   장부 항목은 약한 쪽만 본다. 그래서 "아직 주입 중인" 예약은 sweep 이 볼 자격이 없다 — 옛 나이 기준이
-///   만들었던 **회수 후 커밋**(= 계약 없는 request 배달) 경쟁이 구조적으로 사라졌다. 근거 전문은
-///   `ledger::ReservationLiveness` 헤더. 이 필드를 지우거나 `mem::forget` 로 우회하면 그 보증이 무너진다.
+/// ★그 회수는 **이 가드의 생존**을 본다(R1 — load-bearing)★: 근거 전문은 `ledger::ReservationLiveness`
+///   헤더. 이 필드를 지우거나 `mem::forget` 로 우회하면 그 보증이 무너진다.
 /// ★언와인딩 중에는 `debug_assert` 를 건너뛴다★: Drop 은 패닉 중에도 불리고 거기서 다시 패닉하면 **이중
 ///   패닉 → abort** 다(테스트 프로세스가 죽어 원인조차 못 본다). 그래서 `thread::panicking()` 이면 기록만
 ///   남기고, 회수는 sweep 이 맡는다.
@@ -2439,7 +2412,6 @@ struct Reservation<'a> {
 /// 유일한 방법을 이 함수로 만든다 — `Reservation::new` 를 직접 부르는 새 경로를 추가하지 말 것.
 /// ★호출 위치 = `open_request` 와 **같은 락 구간**★(그래서 `st` 를 받는다 — 그 사이 sweep 이 끼어들 창을
 /// 만들지 않는다).
-// R1
 fn open_reservation<'a>(
     st: &mut MessagingState,
     svc: &'a MessagingService,
@@ -2455,7 +2427,7 @@ fn open_reservation<'a>(
 
 impl<'a> Reservation<'a> {
     /// ★호출자 의무(R1)★: `liveness.watch()` 를 **같은 락 구간에서** 장부 항목에 붙여야 한다
-    /// (`Ledger::attach_reservation_liveness`). 안 붙이면 sweep 이 이 예약을 버려진 것으로 읽는다.
+    /// (`Ledger::attach_reservation_liveness`).
     fn new(
         svc: &'a MessagingService,
         msg_id: &str,
@@ -2473,8 +2445,6 @@ impl<'a> Reservation<'a> {
         }
     }
 
-    /// 결말 확정 — 잠정 표시를 지우고, 표시된 희생자를 **물리 제거**한다(그때 비로소 은퇴가 사건이 된다).
-    /// ★호출자는 락을 쥐고 있어야 한다★(그래서 `st` 를 받는다 — Drop 의 `try_lock` 규율과 짝).
     fn commit(mut self, st: &mut MessagingState, log: &mut RetirementLog) {
         self.settled = true;
         let retired = self.retired.take();
@@ -2496,7 +2466,6 @@ impl<'a> Reservation<'a> {
         }
     }
 
-    /// 예약 취소 — 잠정 계약을 제거하고 희생자 표시를 해제한다(상한 교환 미성립).
     fn rollback(mut self, st: &mut MessagingState) {
         self.settled = true;
         let retired = self.retired.take();
@@ -2515,7 +2484,6 @@ impl Drop for Reservation<'_> {
             return;
         }
         let retired = self.retired.take();
-        // 락 보유 중일 수 있으므로 **try_lock 만**(데드락 금지 — 위 헤더).
         match self.svc.state.try_lock() {
             Ok(mut st) => {
                 rollback_reservation(
@@ -2536,10 +2504,8 @@ impl Drop for Reservation<'_> {
                 "정산되지 않은 계약 예약을 롤백하지 못함(락 보유 중이거나 poison) — 잠정 계약과 은퇴 표시가 남는다(H1)"
             ),
         }
-        // ★잊은 갈래 = 즉시 red(테스트·debug)★ — 이 가드의 존재 이유다(위 헤더).
-        //   ★롤백 **뒤에** 터뜨린다★: 순서를 뒤집으면 패닉이 복구를 막아 "정산을 잊었을 때 상태가 온전한가" 를
+        // ★롤백 **뒤에** 터뜨린다★: 순서를 뒤집으면 패닉이 복구를 막아 "정산을 잊었을 때 상태가 온전한가" 를
         //   테스트가 관측할 수 없다(그리고 릴리즈에선 debug_assert 가 없어 복구만 남는다 — 같은 코드 경로).
-        //   ★단 **언와인딩 중이면 건너뛴다**(F1)★ — 거기서 패닉하면 이중 패닉 → abort 다.
         debug_assert!(
             std::thread::panicking(),
             "회신 계약 예약이 정산 없이 소멸했다 — commit/rollback 중 하나를 반드시 거쳐야 한다(H1)"
@@ -2563,7 +2529,6 @@ fn rollback_reservation(
 /// 아직 정산되지 않은 예약(계약이 없는 통보/회신은 `None`).
 type PendingContract<'a> = Option<Reservation<'a>>;
 
-/// ★해석된 수신자 1명(spec §5 해석 순서 ①~⑤의 산출물)★.
 struct ResolvedRecipient {
     /// 응답 행에 실을 **발신자 표기**(트림만 — WYSIWYA, ADR-0101). `@` 펼침 결과면 로스터 이름이다.
     display: String,
@@ -2580,17 +2545,12 @@ struct ResolvedRecipient {
     ///   단계에서 `key` 로 다시 풀면 **exact-PeerId 지목이 이름 해석으로 강등**돼, 동명 다수를 의도적으로
     ///   통과하던 id 지목이 `RECIPIENT_AMBIGUOUS` 로 뒤집힌다(같은 스냅샷인데 답이 갈리는 자기모순).
     target: Option<LiveAgent>,
-    /// 그 이름을 지금 달고 있는 **로스터** 에이전트 수 — 실패 사유를 로스터 밖(0)과 동명 다수(2+)로 가르는 축.
     live_count: usize,
-    /// ★같은 이름으로 파생되는 **잠든 프로필** 수(spec §5 분기 3 · 잠듦 층 동명 차단)★ — **로스터에 없을
-    ///   때만** 계산한다(그 전에 판정이 끝나면 0). `1` = 잠듦 파킹 · `2+` =
-    ///   `RECIPIENT_AMBIGUOUS`(이름 키 파킹은 "먼저 복원된 쪽이 조용히 받는" 구멍을 만든다) · `0` = 없음.
     // ADR-0116 (결정 1 — 잠듦 파킹 · 잠듦 층 동명)
     dormant_count: usize,
-    /// ★자기 행을 가질 수 없는 중복 지목(M3 — 과도기 방어, ADR-0116 결정 5)★ — `Some(접힌 키)` 면 이 토큰은
-    ///   **다른 실체**를 가리키는데 park/장부 키(= 이름)가 앞선 행과 같아 자기 자리를 만들 수 없다. 그 사실을
+    /// ★자기 행을 가질 수 없는 중복 지목(M3 · ADR-0116 결정 5)★ — `Some(접힌 키)` 면 이 토큰은 **다른
+    ///   실체**를 가리키는데 park/장부 키(= 이름)가 앞선 행과 같아 자기 자리를 만들 수 없다. 그 사실을
     ///   `RECIPIENT_AMBIGUOUS` **실패 행**으로 드러낸다(조용히 사라지지 않게 — `push_recipient` 주석).
-    ///   정책으로 승격하지 않는다(동명이인 미지원 · 뿌리 제거 = ADR-0115). 재가 대기 상태가 아니다.
     dup_of: Option<String>,
 }
 
@@ -2603,17 +2563,12 @@ struct ResolvedRecipient {
 ///   그래서 토큰마다 자기가 해석해 낸 키 전부를 (중복 제거 **이전**에) 기록하고, 포함 조건을 "그 키들 중
 ///   하나라도 수용 판정됐나" 로 바꾼다.
 enum AddressToken {
-    /// 이름 토큰 — 봉투에는 **정규 이름**(해석되면 canonical, 아니면 표기 그대로)이 실린다.
     Name { key: String },
-    /// `@`주소 토큰 — **펼치지 않고** 정규화된 토큰 그대로 실린다(spec §1). `keys` = 그 펼침이 낸 수신자 키.
     Group { label: String, keys: Vec<String> },
 }
 
-/// 발송 1건의 주소 해석 결과.
 struct Addressing {
-    /// **행 순서**대로의 수신자(중복 제거 완료) — spec §5 "행 순서 = 결정적".
     recipients: Vec<ResolvedRecipient>,
-    /// 입력 토큰(입력 표기 순) — 봉투 `to` 값의 나열 순서를 정한다.
     tokens: Vec<AddressToken>,
 }
 
@@ -2644,9 +2599,8 @@ fn resolve_addressing(
     sender_name: &str,
     sources: &AddressingSources,
 ) -> Result<Addressing, SendReject> {
-    // ★펼침이 볼 명단 풀 두 개(ADR-0121 결정 1)★ — 어느 어휘가 어느 풀을 읽는지는 **소스**가 정한다
-    //   (`groups::MemberPools`): `@here` = 산 명단만 · `@all` = 산 + 잠듦. 여기서 하는 일은 풀을 만들고
-    //   **발신자를 빼는 것**뿐이다.
+    // ★어느 어휘가 어느 풀을 읽는지는 **소스**가 정한다(`groups::MemberPools`)★ — 여기서 하는 일은 풀을
+    //   만들고 **발신자를 빼는 것**뿐이다(ADR-0121 결정 1).
     //   ★산 풀에서 id 로 빼는 이유★: 이름은 겹칠 수 있어 동명 타인까지 함께 빠지면 안 된다(그 타인은 동명
     //   규칙으로 따로 판정된다 — ADR-0114 결정 4).
     //   ★턴 신호 없는 산 세션은 산 풀에 **들어온다**★ — 로스터 자격에 capability 조건이 없으므로(ADR-0116
@@ -2675,7 +2629,6 @@ fn resolve_addressing(
 
     let mut tokens: Vec<AddressToken> = Vec::with_capacity(to.len());
     let mut recipients: Vec<ResolvedRecipient> = Vec::new();
-    // 펼침 결과는 (토큰 인덱스, 이름)으로 모아 두었다가 **이름 사전순**으로 뒤에 붙인다(행 순서 규칙).
     let mut expanded: Vec<(usize, String)> = Vec::new();
 
     for (i, raw) in to.iter().enumerate() {
@@ -2697,11 +2650,9 @@ fn resolve_addressing(
             tokens.push(AddressToken::Name { key });
         }
     }
-    // 사전순(동률이면 토큰 순서) — 결정성 고정.
     expanded.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     for (i, name) in expanded {
         let key = push_recipient(&mut recipients, name, sources);
-        // 그 `@`토큰이 기여한 키로 기록한다 — **중복 제거로 흡수됐어도** 기록한다(A5: 흡수 ≠ 실패).
         if let AddressToken::Group { keys, .. } = &mut tokens[i] {
             if !keys.contains(&key) {
                 keys.push(key);
@@ -2756,12 +2707,9 @@ fn push_recipient(
         .iter()
         .position(|r| r.dup_of.is_none() && r.key == key)
     {
-        // ★아래 두 규칙(해석 우선 · 중복 실체의 가시적 실패) = 과도기 **방어**다(ADR-0116 결정 5 — 정책
-        //   비승격, ADR-0115 로 사문화 예정). 위 함수 doc 이 그 지위의 정본이다.
         let existing_target = recipients[pos].target.as_ref().map(|a| a.id);
         let new_target = target.as_ref().map(|a| a.id);
         match (existing_target, new_target) {
-            // A8: 앞 행이 해석되지 않았고 이 토큰이 해석됐다 → 행 자리는 유지하고 해석만 갈아끼운다.
             (None, Some(_)) => {
                 recipients[pos].live_count =
                     sources.roster.iter().filter(|a| a.name == key).count();
@@ -2770,7 +2718,6 @@ fn push_recipient(
                 //   (안 지우면 앞 행이 잠듦으로 판정됐던 흔적이 남아 3분기가 두 갈래를 동시에 본다.)
                 recipients[pos].dormant_count = 0;
             }
-            // M3: 둘 다 해석됐는데 **다른 실체**다 → 뒤 토큰은 자기 행을 만들 수 없으니 보이게 실패시킨다.
             (Some(e), Some(n)) if e != n => {
                 let lkey = loser_key(&display);
                 recipients.push(ResolvedRecipient {
@@ -2781,11 +2728,9 @@ fn push_recipient(
                     dormant_count: 0,
                     dup_of: Some(key),
                 });
-                // 봉투 `to` 판정이 이 토큰을 "수용" 으로 세지 않게 **loser 키**를 돌려준다(이름 공간 밖이라
-                //   다른 수신자의 키와 절대 겹치지 않는다 — `loser_key`).
+                // 봉투 `to` 판정이 이 토큰을 "수용" 으로 세지 않게 **loser 키**를 돌려준다(`loser_key`).
                 return lkey;
             }
-            // 그 밖(같은 실체·둘 다 미해석·앞이 해석됨) = 표기 중복 → 흡수(먼저 나온 자리를 남긴다).
             _ => {}
         }
         return key;
@@ -2823,7 +2768,6 @@ fn push_recipient(
 /// ★행마다 유일★: 표기별로 유일하고(같은 표기는 위 ① 검사에서 이미 접힌다) 그래서 장부 종점 키도 행마다
 ///   하나씩이다. 응답 `results[].to` 는 여전히 **발신자 표기**라 이 내부 키는 발신 LLM 에게 보이지 않는다.
 fn loser_key(display: &str) -> String {
-    // U+0001(START OF HEADING) = canonical 이름에 절대 나타날 수 없는 제어문자.
     format!("\u{1}ambiguous:{display}")
 }
 
@@ -2850,7 +2794,7 @@ fn group_reject(e: GroupError, raw: &str) -> SendReject {
 ///   자리를 남기고 뒤 중복을 접는다(행 순서 규칙과 같은 방향).
 /// ★펼친 명단을 대신 싣지 않는다★ — 수신자 명단·역할 공개(cc)는 v2 다(spec §8).
 fn build_to_attr(addr: &Addressing, admitted: &[bool]) -> String {
-    // 키 → 그 수신자가 수용 판정됐나(행 인덱스는 `recipients` 순서와 같다).
+    // `admitted` 의 인덱스는 `recipients` 순서와 같다.
     let admitted_key = |key: &str| {
         addr.recipients
             .iter()
@@ -2875,7 +2819,6 @@ fn build_to_attr(addr: &Addressing, admitted: &[bool]) -> String {
     parts.join(",")
 }
 
-/// 자기교정 로스터(부재 실패 행의 hint) — 지금 살아 있는 이름들. 비면 `(none)`.
 fn live_names_hint(roster: &[LiveAgent]) -> String {
     if roster.is_empty() {
         return "(none)".to_string();
@@ -2987,8 +2930,7 @@ fn ambiguous_hint(display: &str, count: usize, layer: &str) -> String {
     format!("'{display}' matches {count} {layer} agents, so the broker cannot tell which one you mean — nothing was queued. {AMBIGUOUS_ESCALATION}")
 }
 
-/// ★삭제 정리로 종결된 파킹분의 조회 힌트(spec §6 `RECIPIENT_DELETED`)★ — 이 코드는 발송 응답이 아니라
-/// `messages{id}` 조회에서 처음 보이므로, 코드 옆에 다음 행동까지 실어 준다.
+/// ★삭제 정리로 종결된 파킹분의 조회 힌트(spec §6 `RECIPIENT_DELETED`)★ — 코드 옆에 다음 행동까지 실어 준다.
 fn deleted_hint() -> String {
     "The recipient was deleted while this message was still parked, so it was closed as undelivered — that name no longer exists, resending is pointless. Tell the user if this still matters.".to_string()
 }
@@ -3004,14 +2946,14 @@ fn park_hint_dormant(display: &str) -> String {
     )
 }
 
-/// busy hint(spec §6 ㉮①) — 발신자가 "왜 아직 안 갔나" 를 스스로 읽게 한다.
+/// busy hint(spec §6 ㉮①).
 fn park_hint_busy(display: &str) -> String {
     format!(
         "'{display}' is mid-turn — queued; it will be delivered as one batch when that turn ends."
     )
 }
 
-/// 주입 실패 hint(spec §6 ㉮③) — 큐에 남았고 다음 계기에 재시도된다.
+/// 주입 실패 hint(spec §6 ㉮③).
 fn park_hint_inject_failed(display: &str, err: &str) -> String {
     format!(
         "Delivery to '{display}' failed ({err}) — it stays queued and is retried on the next drain (expires after TTL)."
@@ -3036,8 +2978,8 @@ fn park_hint_queued(display: &str) -> String {
     )
 }
 
-/// ★드레인이 이번 편지를 못 냈을 때의 `pending` hint 선택(spec §6)★ — 물러남(㉯)이 최우선이다: 그건
-/// "안 갔다" 가 아니라 "확인 못 했다" 라 다른 사유와 섞이면 발신자가 결말을 오독한다.
+/// ★드레인이 이번 편지를 못 냈을 때의 `pending` hint 선택(spec §6)★ — 물러남(㉯)이 최우선이다(다른 사유와
+/// 섞이면 발신자가 결말을 오독한다 — `park_hint_overlapping`).
 fn pending_hint(display: &str, report: &DrainReport) -> String {
     if report.retreated {
         return park_hint_overlapping(display);
@@ -3063,9 +3005,7 @@ fn mailbox_full_hint(display: &str) -> String {
 /// 둘을 한 통에 담으면 계측이 오염된다(`Reservation::commit` 주석). 락 밖에서 각각 다른 급으로 찍는다.
 #[derive(Default)]
 struct RetirementLog {
-    /// 실제로 물리 제거된 희생자 — ADR-0108 결정 2 가 말하는 "은퇴의 유일한 증거" 대상.
     real: Vec<RetiredContract>,
-    /// 표시까지 붙였는데 커밋 시점에 그 항목이 없었다 — 은퇴가 아니라 **이상**이다(warn).
     phantom: Vec<RetiredContract>,
 }
 
@@ -3108,11 +3048,7 @@ pub(crate) mod retirement_reports {
 ///   `Reservation` 헤더가 정본). 되돌리면 A2/A3 회귀다.
 fn log_contract_retirements(new_msg_id: &str, retired: &[RetiredContract]) {
     for r in retired {
-        // ★F5 — 계측의 **관측면**★: 위 doc(M1/M2)이 말하는 대로 이 로그는 은퇴의 **유일한 증거**이고, 그
-        //   증거를 좌우하는 건 코드 내용이 아니라 **호출 위치**다(루프 앞에서 찍으면 주 경로의 은퇴가 통째로
-        //   기록되지 않는다 — 그리고 상태 단언만으로는 그 회귀가 안 잡힌다: 상태는 어느 위치에서 찍어도 같다).
-        //   그래서 "실제로 보고됐나" 를 테스트가 볼 수 있게 thread-local 로 한 벌 흘린다.
-        //   ★thread-local 인 이유★: 이 함수는 서비스 핸들이 없는 자유 함수이고(시그니처를 관측을 위해
+        // ★thread-local 인 이유(F5)★: 이 함수는 서비스 핸들이 없는 자유 함수이고(시그니처를 관측을 위해
         //   바꾸지 않는다), 발송 경로는 호출 스레드에서 끝까지 돌아 관측이 스레드 경계를 넘지 않는다.
         #[cfg(any(test, feature = "test-harness"))]
         retirement_reports::push(&r.request_id, &r.recipient);
@@ -3129,7 +3065,6 @@ fn log_contract_retirements(new_msg_id: &str, retired: &[RetiredContract]) {
     }
 }
 
-/// `park_into` 인자 묶음 — 파킹 1건에 필요한 재료(인자 수가 많아 struct 로 묶는다).
 struct ParkRequest<'a> {
     msg_id: &'a str,
     sender_name: &'a str,
@@ -3180,8 +3115,6 @@ struct ReplyClosing<'a> {
 }
 
 impl ReplyClosing<'_> {
-    /// ★수용이 확정된 그 락 구간에서 계약을 닫는다★ — 호출부는 반드시 `st` 를 **보유한 상태**여야 한다
-    /// (그게 이 장치의 존재 이유다). 회신이 아니거나 이미 닫았으면 아무 것도 하지 않는다.
     fn close_in_lock(&mut self, st: &mut MessagingState) {
         let Some(in_reply_to) = self.in_reply_to else {
             return;
@@ -3240,7 +3173,6 @@ fn log_reply_close(outcome: ReplyOutcome, in_reply_to: &str, replier_name: &str)
 struct EvictedTransition {
     msg_id: String,
     recipient: String,
-    /// 전이하려던 종점 상태(`Expired` = TTL 만료 / `Skipped` = 수신자 소멸로 회수).
     intended: DeliveryStatus,
 }
 
@@ -3292,7 +3224,6 @@ fn log_evicted_transitions(evicted: &[EvictedTransition]) {
 struct FlightSettle<'a> {
     svc: &'a MessagingService,
     recipient: &'a str,
-    /// 아직 반납하지 않은 몫. 갈래별 정산이 `split` 으로 떼어 가고, 남은 건 Drop 이 갚는다.
     owed: FlightTicket,
 }
 
@@ -3315,16 +3246,12 @@ impl Drop for FlightSettle<'_> {
 ///   **장부 어휘 자체가 다르다**(`expired` — F3).
 #[derive(Debug, Default)]
 struct ParkSideEffects {
-    /// notice 레인 상한으로 밀려난 옛 통지의 msg_id(같은 전이·같은 규율).
     retired_notices: Vec<String>,
-    /// ★회수 시점에 이미 TTL 을 넘겨 있던 항목(F3)★ — 장부 어휘가 `expired` 라 위 둘과 분리한다(레인 무관).
     retired_expired: Vec<String>,
-    /// 그 전이가 링 evict 로 실패한 항목(의도 상태 동반 — finding 2).
     evicted: Vec<EvictedTransition>,
 }
 
 impl ParkSideEffects {
-    /// 락 밖 로깅. 아무 일도 없었으면(대부분) no-op.
     fn log(&self, recipient: &str) {
         if !self.retired_expired.is_empty() {
             tracing::debug!(
@@ -3343,6 +3270,24 @@ impl ParkSideEffects {
             );
         }
         log_evicted_transitions(&self.evicted);
+    }
+}
+
+/// `ParkRequest` → 저장 항목 1건. 조립을 한 곳에 모아 두면 봉투 payload·id 힌트·TTL 기준시각이 삽입
+/// 경로마다 갈리지 않는다(옛 좌석 복원 경로가 사라진 뒤로 호출자는 `park_into` 하나다 — ADR-0125).
+fn build_parked(
+    req: &ParkRequest<'_>,
+    payload: ParkPayload,
+    now: Instant,
+    admission_seq: u64,
+) -> ParkedMessage {
+    ParkedMessage {
+        msg_id: req.msg_id.to_string(),
+        envelope: payload.encode(),
+        kind: req.kind,
+        parked_at: now,
+        admission_seq,
+        hinted_id: req.hinted_id,
     }
 }
 
@@ -3365,24 +3310,6 @@ impl ParkSideEffects {
 ///   회수될 수 있다. 그건 spec §5 계약상 `expired` 다(시계가 먼저 그 항목의 운명을 정했고, 회수는 그저 그
 ///   사실을 늦게 발견한 것이다). 판정은 mailbox 의 `ParkedMessage::is_expired(now)` 를 그대로 재사용한다 —
 ///   TTL 상수도 `>=` 경계 규약도 저장소 한 곳에만 두려고 리터럴을 복제하지 않는다.
-/// `ParkRequest` → 저장 항목 1건. 조립을 한 곳에 모아 두면 봉투 payload·id 힌트·TTL 기준시각이 삽입
-/// 경로마다 갈리지 않는다(옛 좌석 복원 경로가 사라진 뒤로 호출자는 `park_into` 하나다 — ADR-0125).
-fn build_parked(
-    req: &ParkRequest<'_>,
-    payload: ParkPayload,
-    now: Instant,
-    admission_seq: u64,
-) -> ParkedMessage {
-    ParkedMessage {
-        msg_id: req.msg_id.to_string(),
-        envelope: payload.encode(),
-        kind: req.kind,
-        parked_at: now,
-        admission_seq,
-        hinted_id: req.hinted_id,
-    }
-}
-
 // ADR-0107 (회수분 장부 종점 — skipped/expired 분류)
 fn park_into(
     st: &mut MessagingState,
@@ -3390,9 +3317,6 @@ fn park_into(
     now: Instant,
     effects: &mut ParkSideEffects,
 ) -> Result<(), ParkError> {
-    // park 는 raw body + 봉투/관측에 필요한 최소 메타(sender 이름·발신자 신원·입구·회신 계약·그룹 라벨)를
-    //   나른다(봉투는 flush 주입 시점 조립 — 단일 wrap point). ParkedMessage.envelope 계약이 "완성 봉투"라
-    //   여기선 ParkPayload 로 인코딩해 그 문자열 슬롯에 실어 보관하고, flush 때 decode 한다.
     let payload = ParkPayload {
         sender_name: req.sender_name.to_string(),
         from: req.from,
@@ -3404,9 +3328,6 @@ fn park_into(
     //   무시되므로 placeholder.
     let parked = build_parked(&req, payload, now, 0);
     let admitted = st.mailbox.park(req.recipient, parked)?;
-    // 회수분 종점 — 기본 어휘는 `skipped`(배달할 수신자가 사라졌거나 더 최신 통지에 밀림)이고, **이미 TTL 을
-    //   넘긴 항목만 `expired`**(위 doc "TTL 이 skipped 보다 우선" — F3). 레코드가 이미 링에서 밀려났으면
-    //   사실만 모아 락 밖 debug. 로그 갈래는 어휘 우선, 그 다음 레인(`kind`)으로 가른다.
     for m in admitted.retired {
         let expired = m.is_expired(now);
         let intended = if expired {
@@ -3442,6 +3363,24 @@ fn park_into(
     Ok(())
 }
 
+/// ★인코딩(C3 리뷰 fix 4 에서 버전 헤더 도입)★:
+///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<group_len>\n<from_agent_id>\n<from_epoch>\n`
+///   `<entrance>\n<flags>\n<sender><reply_by><reply_to><group><body>`
+///   앞 9줄은 개행 없는 필드(숫자/uuid/짧은 리터럴)라 개행으로 안전 분리하고, 가변 문자열 앞 4개는 **길이
+///   접두**로 경계를 잡는다(body 는 나머지 전부 — body·reply_to 에 개행이 들어와도 안전하고, reply_to 는
+///   에이전트 입력이라 임의 문자열일 수 있다). 길이 0 = `None`(빈 문자열 `Some("")` 은 입구 검증이 이미
+///   반려하므로 모호하지 않다).
+///
+/// ★왜 버전 태그인가(fix 4)★: 이 형식은 **프로세스 내부**에서만 쓰이지만(파킹은 인메모리라 데몬 재시작이면
+///   소멸), 형식이 바뀌는 순간 옛 payload 가 새 decode 를 만나면 조용히 오해석될 수 있다(길이 필드가 다른
+///   자리로 밀려 body 가 잘리는 식). 1글자 태그가 있으면 **모르는 버전 = 즉시 폴백**으로 갈라져, 오해석
+///   대신 "봉투 속성 잃고 body 만 남음"(보이는 열화)으로 실패한다. v2 영속화가 파킹을 디스크에 남기면
+///   이 태그가 마이그레이션 분기점이 된다.
+/// ★레이아웃을 바꾸면 이 값도 올린다★: 같은 프로세스 안에서만 쓰는 형식이라 옛 payload 가 실재할 수는
+///   없지만, 태그를 그대로 두면 **레이아웃이 바뀌었는데 버전은 같은** 상태가 되어 태그의 의미(= 이 문자열의
+///   레이아웃 계약)가 무너진다.
+const PARK_PAYLOAD_VERSION: &str = "3";
+
 /// 파킹 payload — flush 주입 시점에 봉투 조립·관측 레코드 발행에 필요한 최소 메타(sender 이름·발신자
 ///   신원·입구·raw body). ParkedMessage.envelope 계약("완성 봉투")을 우회해 raw 를 나르기 위한 내부 인코딩.
 ///   flush 주입 시점에 decode → wrap_now 로 **현재** 포맷 봉투를 조립하고(단일 wrap point), 발신자 신원으로
@@ -3454,23 +3393,6 @@ fn park_into(
 ///   동일한 봉투 속성**(id/type/reply-by/in-reply-to)이 붙어야 한다. 안 나르면 파킹을 거친 request 는
 ///   속성 없는 plain 메시지로 도착해 수신 LLM 이 회신할 id 를 모르고, 발신자만 기한 초과 notice 를 받는다
 ///   (계약이 조용히 깨지는 최악 모드). 봉투를 park 시점에 굳히지 않는 설계의 대가로 재료를 나른다.
-/// ★인코딩(v2 태그 — C3 리뷰 fix 4 에서 버전 헤더 도입, C4 에서 그룹 라벨 추가)★:
-///   `<ver>\n<sender_len>\n<reply_by_len>\n<reply_to_len>\n<group_len>\n<from_agent_id>\n<from_epoch>\n`
-///   `<entrance>\n<flags>\n<sender><reply_by><reply_to><group><body>`
-///   앞 9줄은 개행 없는 필드(숫자/uuid/짧은 리터럴)라 개행으로 안전 분리하고, 가변 문자열 5개는 **길이
-///   접두**로 경계를 잡는다(body·reply_to 에 개행이 들어와도 안전 — reply_to 는 에이전트 입력이라 임의
-///   문자열일 수 있다). 길이 0 = `None`(빈 문자열 `Some("")` 은 입구 검증이 이미 반려하므로 모호하지 않다).
-///
-/// ★왜 버전 태그인가(fix 4)★: 이 형식은 **프로세스 내부**에서만 쓰이지만(파킹은 인메모리라 데몬 재시작이면
-///   소멸), 형식이 바뀌는 순간 옛 payload 가 새 decode 를 만나면 조용히 오해석될 수 있다(길이 필드가 다른
-///   자리로 밀려 body 가 잘리는 식). 1글자 태그가 있으면 **모르는 버전 = 즉시 폴백**으로 갈라져, 오해석
-///   대신 "봉투 속성 잃고 body 만 남음"(보이는 열화)으로 실패한다. v2 영속화가 파킹을 디스크에 남기면
-///   이 태그가 마이그레이션 분기점이 된다.
-/// ★C4 에서 `1` → `2`★: 필드가 하나 늘었다(그룹 라벨). 같은 프로세스 안에서만 쓰는 형식이라 옛 payload 가
-///   실재할 수는 없지만, 태그를 그대로 두면 **레이아웃이 바뀌었는데 버전은 같은** 상태가 되어 태그의
-///   의미(= 이 문자열의 레이아웃 계약)가 무너진다 — "형식이 바뀌면 태그도 바뀐다" 는 규율을 지킨다.
-const PARK_PAYLOAD_VERSION: &str = "3";
-
 struct ParkPayload {
     sender_name: String,
     from: SenderIdentity,
@@ -3521,8 +3443,7 @@ impl ParkPayload {
     ///   `split_at` 이 패닉하는 그 경우) 버전이 모르는 값이면, 봉투 속성을 잃되 원문을 body 로 살려 보낸다.
     ///   덕분에 배치의 다른 항목은 정상 배달된다(테스트: corrupt 항목 1개가 배치를 중단시키지 않음).
     fn decode(s: &str) -> Self {
-        // 버전 + 앞 8개 개행 필드 + 나머지(sender+reply_by+reply_to+group+body). splitn(10) 으로 body 안
-        //   개행을 보존한다(마지막 조각은 자르지 않는다).
+        // splitn(10) — 마지막 조각을 자르지 않아 body 안 개행이 보존된다.
         let mut it = s.splitn(10, '\n');
         let fallback = || Self {
             sender_name: String::new(),
@@ -3560,7 +3481,6 @@ impl ParkPayload {
         else {
             return fallback();
         };
-        // 모르는 버전 = 오해석 금지(위 상수 주석) — 폴백으로 갈라 보이는 열화로 실패한다.
         if ver != PARK_PAYLOAD_VERSION {
             return fallback();
         }
@@ -3584,7 +3504,6 @@ impl ParkPayload {
         ) else {
             return fallback();
         };
-        // 길이 합이 남은 문자열을 넘으면 인코딩이 깨진 것 — 폴백(패닉 대신).
         let Some(total) = sender_len
             .checked_add(rb_len)
             .and_then(|v| v.checked_add(rt_len))
@@ -3595,9 +3514,6 @@ impl ParkPayload {
         if rest.len() < total {
             return fallback();
         }
-        // ★char 경계 검증(fix 4)★: 길이는 우리가 쓴 **바이트** 길이라 정상 payload 에선 항상 경계와 맞지만,
-        //   payload 가 깨졌다면(외부 주입·형식 드리프트) 멀티바이트 문자 중간을 가리킬 수 있고 그때
-        //   `split_at` 은 **패닉**한다. 세 절단점을 모두 미리 확인하고, 하나라도 어긋나면 폴백한다.
         let cut1 = sender_len;
         let cut2 = cut1 + rb_len;
         let cut3 = cut2 + rt_len;
@@ -3624,7 +3540,6 @@ impl ParkPayload {
             meta: SendMeta {
                 request,
                 reply_by_raw: (!reply_by.is_empty()).then(|| reply_by.to_string()),
-                // 파싱값은 복원하지 않는다(위 struct 주석 — flush 는 표기만 필요).
                 reply_by: None,
                 reply_to: (!reply_to.is_empty()).then(|| reply_to.to_string()),
                 to_attr: (!group.is_empty()).then(|| group.to_string()),
@@ -3633,8 +3548,8 @@ impl ParkPayload {
     }
 }
 
-/// `ParkPayload` 의 입구 어휘 ↔ enum(**엄격** — 어휘 밖은 `None` = 손상 신호, fix 3). `encode` 의 리터럴과
-///   한 쌍이라 입구 종류가 늘면 둘을 함께 고친다(어긋나면 정상 payload 가 폴백돼 round-trip 테스트가 잡는다).
+/// `encode` 의 리터럴과 한 쌍이라 입구 종류가 늘면 둘을 함께 고친다(어긋나면 정상 payload 가 폴백돼
+///   round-trip 테스트가 잡는다).
 fn parse_entrance(s: &str) -> Option<Entrance> {
     match s {
         "mcp" => Some(Entrance::Mcp),
@@ -3644,7 +3559,6 @@ fn parse_entrance(s: &str) -> Option<Entrance> {
     }
 }
 
-/// `ParkPayload` 의 request 플래그 어휘 ↔ bool(**엄격**). `r` = request, `-` = 통보/회신, 그 밖 = 손상.
 fn parse_request_flag(s: &str) -> Option<bool> {
     match s {
         "r" => Some(true),
@@ -3679,21 +3593,16 @@ struct DrawnMsgId {
 //   발신자 표기를 원본째 보관하고(ledger.rs `RequestEntry.reply_by`) 통지는 그걸 그대로 쓴다 — 역산 함수가
 //   다시 생기면 같은 불일치가 재발한다.
 
-/// `to`(이름 또는 PeerId 문자열) → **산 수신자**(LiveAgent). 4차 이후 "도달 가능" 은 로스터 자격이 아니다
-///   (턴 신호 없는 산 세션도 로스터에 있다 — ADR-0116 결정 7. 이름만 남은 함수명은 유지: 호출부가 많다).
-///   매치 규칙(ingress::resolve_recipient
-///   미러 — F2): PeerId 문자열 정확 일치 우선 → 이름 정확 일치. 동명 다수·부재는 여기선 None 으로 접고
-///   상위(handle_send)가 AMBIGUOUS/파킹을 판정한다.
+/// 이름 → **산 수신자**(LiveAgent). 4차 이후 "도달 가능" 은 로스터 자격이 아니다(턴 신호 없는 산 세션도
+///   로스터에 있다 — ADR-0116 결정 7. 이름만 남은 함수명은 유지: 호출부가 많다).
 ///
-/// ★C1 스코프 = 단일 수신자★: 동명 다수(RECIPIENT_AMBIGUOUS)는 상위가 로스터로 판정(파킹 전에). 여기선
-///   유일 매치만 Some — 0개 또는 2개+ 면 None. 상위가 로스터를 다시 보지 않도록 여기 로직을 최소로 둔다.
-/// ★이름 유일 판정(단일 출처)★: 주어진 로스터 **스냅샷**에서 그 이름의 산 후보가 정확히 1개면
-///   그 항목, 0개(부재)·2개+(동명 다수)면 None. 스냅샷을 인자로 받는 이유: flush 배치는 이름 판정과
-///   id-힌트 생존 판정을 **같은 스냅샷**으로 해야 배치 도중 판정이 흔들리지 않는다(로스터 재조회 금지).
+/// ★유일 매치만 Some — 0개(부재)·2개+(동명 다수)는 None★: 그 판정(`RECIPIENT_AMBIGUOUS`/파킹)은 상위가
+///   한다(파킹 전에). 상위가 로스터를 다시 보지 않도록 여기 로직을 최소로 둔다.
+/// ★스냅샷을 인자로 받는 이유★: flush 배치는 이름 판정과 id-힌트 생존 판정을 **같은 스냅샷**으로 해야
+///   배치 도중 판정이 흔들리지 않는다(로스터 재조회 금지).
 fn unique_reachable_in(roster: &[LiveAgent], name: &str) -> Option<LiveAgent> {
     let mut matches = roster.iter().filter(|a| a.name == name);
     let first = matches.next()?;
-    // 두 번째가 있으면 동명 다수 — None(파킹 유지). 없으면 유일.
     match matches.next() {
         Some(_) => None,
         None => Some(first.clone()),

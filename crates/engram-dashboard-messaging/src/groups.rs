@@ -27,26 +27,14 @@
 //!   살아있음 판정·발신자 제외·중복 제거·로스터 대조는 전부 상위(`MessagingService`)의 몫이다. 특히
 //!   **"펼침 결과 0명" 은 여기서 에러가 아니다**(빈 목록을 그대로 돌려준다): `GROUP_EMPTY` 는 펼침 + 명시
 //!   지목을 합친 **최종 수신자 집합**이 비었을 때만 나는 판정이라(ADR-0114 결정 3) 이 층에서 알 수 없다.
-// ADR-0104
-// ADR-0111
-// ADR-0112
-// ADR-0121
 
 /// 내장 어휘 `@all` — **명부 전원**(산 것 + 잠든 것) **− 발신자**(spec §4 · ADR-0121 결정 1).
-///
-/// ★`@here` 와 갈리는 지점★: 이 어휘만 `MemberPools::dormant` 를 함께 읽는다. 잠든 몫은 상위에서 파킹되고
-///   그 에이전트가 등장할 때 배달된다 — "정말 전원에게" 가 필요한 발신자를 위한 어휘다.
-/// ★내장 불변식(load-bearing)★: 저장소가 없으므로 생성·삭제·증감이라는 개념 자체가 없다(관리 표면 제거 —
-///   ADR-0112 영향 절). 해석 시엔 호출자가 넘긴 풀을 verbatim 이어 붙여 돌려준다(레지스트리는 liveness 를
-///   모른다 — 발신자 제외는 호출자가 풀을 만들 때 이미 적용한다).
-// ADR-0121
 pub const ALL_GROUP: &str = "@all";
 
 /// 내장 어휘 `@here` — **지금 살아 있는 전원** **− 발신자**(spec §4 · ADR-0121 결정 1).
 ///
 /// ★어휘 선택 근거★: Slack 이 같은 구분을 쓴다(`@channel` = 전원 / `@here` = 지금 활성) — 에이전트를
 ///   구동하는 LLM 이 그 관례를 이미 알고 있을 가능성이 높다(ADR-0121 §근거).
-// ADR-0121
 pub const HERE_GROUP: &str = "@here";
 
 /// 해석기가 읽는 **명단 풀 두 개**(ADR-0121 결정 1) — 호출자가 락 밖 스냅샷에서 만들어 주입한다.
@@ -59,31 +47,26 @@ pub const HERE_GROUP: &str = "@here";
 ///   아니라 spec 이라는 점이 load-bearing: 0111 결정 4 에 그 문구가 없어 거기만 보면 빠뜨린다).
 #[derive(Debug, Clone, Copy)]
 pub struct MemberPools<'a> {
-    /// 지금 살아 있는 이름들(로스터 verbatim, 발신자 제외 후) — `@here` 의 명단이자 `@all` 의 앞부분.
+    /// 지금 살아 있는 이름들 — `@here` 의 명단이자 `@all` 의 앞부분.
     pub live: &'a [String],
     /// 잠든 이름들(프로필 실재·그 세션은 살아 있지 않음) — **`@all` 만** 이걸 함께 읽는다.
-    ///   ★중복을 접지 않은 채 온다 — 이유는 "접으면 뭔가 깨진다" 가 아니다★: 이 층의 계약이 **호출자가 준 풀을
-    ///   verbatim 돌려준다**(정렬·dedup·필터 금지 — 트레잇 계약 축 1)라서 그렇다. 동명 판정은 상위가 **펼침
-    ///   결과가 아니라 `AddressingSources.dormant_names` 를 직접 세어** 하고(service.rs `push_recipient`),
-    ///   같은 이름이 두 번 펼쳐져도 표기 중복은 거기서 한 행으로 접힌다 — 즉 여기서 접든 안 접든 결과 행은
-    ///   같다. 그래도 verbatim 을 지키는 이유는 이 층에 판정 지식을 흘리지 않는 것 자체가 seam 계약이기 때문이다.
+    ///   ★중복을 접지 않은 채 온다★: 이 층의 계약이 **호출자가 준 풀을 verbatim 돌려준다**(정렬·dedup·필터
+    ///   금지)라서다. 동명 판정은 상위가 `AddressingSources.dormant_names` 를 직접 세어 하므로
+    ///   (service.rs `push_recipient`) 여기서 접든 안 접든 결과 행은 같지만, 판정 지식을 이 층에 흘리지
+    ///   않는 것 자체가 seam 계약이다.
     pub dormant: &'a [String],
 }
 
 /// `@`주소 해석 에러 — 상위가 wire 에러 코드로 매핑한다(spec §4).
-///
-/// ★두 값뿐인 이유(ADR-0111/0114)★: 등록 명단이 사라져 `Builtin`·`InvalidMemberName` 은 표현할 상태가
-///   없어졌고, `Empty` 는 판정 시점이 **최종 수신자 집합**으로 올라가 이 층을 떠났다(모듈 헤더).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupError {
-    /// 이름이 `@` 네임스페이스 규약을 어김(선행 `@` 없음·`@` 단독·중복 `@`). 정규화 실패.
+    /// `@` 네임스페이스 규약 위반 — 정규화 실패.
     InvalidName { name: String },
     /// 내장 어휘가 아닌 `@이름` — 존재하지 않는 주소 → `GROUP_NOT_FOUND`(발송 단위 전체 반려, ADR-0114 결정 3).
     NotFound { name: String },
 }
 
-/// ★그룹 주소 정규화 — **seam 레벨** 자유 함수(C4 리뷰 fix F · ADR-0104 결정 1)★. `@` 네임스페이스 규약을
-/// 검증하고 정규화된 이름을 돌려준다. 실패는 `InvalidName`.
+/// ★그룹 주소 정규화 — **seam 레벨** 자유 함수(C4 리뷰 fix F · ADR-0104 결정 1)★
 ///
 /// ★왜 소스 구현의 메서드가 아니라 자유 함수인가(load-bearing — seam 경계)★: 발송 파이프라인은 소스에
 ///   물어보기 **전에** 이름을 정규화한다(봉투 `to` 토큰·에러 hint 가 그 값을 쓴다). 그 정규화가 특정 소스
@@ -94,17 +77,13 @@ pub enum GroupError {
 /// 시작해야 한다. 선행 `@` 가 없으면(`coders`) `InvalidName` — 관대 보정(`coders` → `@coders`)은 사람/그룹
 /// 구분이 `@` 하나에 걸린 계약을 흐려 거부됐다. `@` 뒤 본문이 비었거나 공백만이면, 또 본문에 `@` 가 더
 /// 있으면(`@@x`·`@a@b`) 역시 `InvalidName`.
-// ADR-0104
 pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     let trimmed = name.trim();
-    // 정확히 하나의 선행 `@` 요구 — 없으면 거부.
     let Some(body) = trimmed.strip_prefix('@') else {
         return Err(GroupError::InvalidName {
             name: name.to_string(),
         });
     };
-    // 본문이 비었거나(`@` 단독) 공백만 → 거부. 그리고 본문에 또 `@` 가 있으면(`@@x`·`@a@b`) 거부 —
-    // "정확히 하나의 `@`" 계약(선행 하나만, 내부·중복 `@` 불가).
     if body.is_empty() || body.chars().all(char::is_whitespace) || body.contains('@') {
         return Err(GroupError::InvalidName {
             name: name.to_string(),
@@ -114,33 +93,16 @@ pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
 }
 
 /// 그룹 해석 소스(seam — ADR-0104 결정 1). "`@`주소 → 멤버 이름 목록" 해석기의 확장점.
-///
-/// ★왜 트레잇인가★: v1 소스는 내장 하나뿐이지만, 폴더(`@폴더명`)가 데몬 소유로 생기면 **다른
-///   구현**을 추가하고 상위가 소스들을 순회하게만 하면 된다 — 메시징 파이프라인은 그대로다. 지금은
-///   확장점만 깔고(저위험·장기, CLAUDE.md §0) 폴더/계층 구현은 만들지 않는다.
-/// ★명단 풀 주입★: 해석은 순수해야 하므로 펼침에 필요한 이름들을 **호출자가** 넘긴다(소스가 프로세스
-///   생사·프로필 저장소를 조회하지 않음 — 순수성·seam 격리). 어느 풀을 읽을지는 소스가 고른다
-///   (`MemberPools` doc — 그 선택이 파이프라인으로 새면 미래 소스가 자기 풀을 못 고른다).
 pub trait GroupSource {
-    /// `group` 주소를 멤버 이름 목록으로 펼친다. 이 소스가 그 주소를 모르면 `NotFound`.
-    /// ★빈 결과는 에러가 아니다★ — `Ok(vec![])` 로 돌려준다(모듈 헤더 "GROUP_EMPTY 는 최종 집합 판정").
+    /// 이 소스가 그 주소를 모르면 `NotFound`.
     fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError>;
 }
 
 /// v1 유일 소스 — 내장 두 어휘(`@all`·`@here`)만 안다(무저장 즉석 계산, ADR-0111 결정 4 · ADR-0121 결정 1).
-///
-/// ★상태가 없다(ZST)★: 저장할 명단이 없으므로 단일 락 아래 둘 이유도 없다 —
-/// `MessagingService` 가 필드로 들고 락 밖에서 부른다(로스터 스냅샷도 락 밖이라 자연스럽다).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BuiltinGroups;
 
 impl GroupSource for BuiltinGroups {
-    /// `@here` = `live` verbatim · `@all` = `live` 뒤에 `dormant` 를 이어 붙인 것(정렬·dedup·필터 금지 —
-    /// 그건 전부 상위 몫). 그 밖의 `@이름` = `NotFound`.
-    ///
-    /// ★풀을 갈라 읽는 이유(ADR-0121 결정 1)★: 이름이 "all" 인데 잠든 상대가 빠지면 이름이 거짓이 된다.
-    ///   반대로 `@here` 가 잠든 이름까지 읽으면 "지금 여기 있는 사람들" 이라는 뜻이 사라진다.
-    // ADR-0121
     fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
         let norm = normalize_group_name(group)?;
         if norm == HERE_GROUP {
@@ -168,14 +130,10 @@ impl GroupSource for BuiltinGroups {
 /// ★이 스위트가 빨개지면★: 고칠 대상은 **스위트가 아니라 결정**이다. 해석 의미론은 spec §4 · ADR-0111
 ///   결정 4 · ADR-0114 결정 3 · ADR-0121 결정 1 이 정한 사용자 결정 사항이라, 여기 단언을 느슨하게 만드는
 ///   수정은 곧 계약 변경이다 — 사용자 재가 없이 완화하지 말 것.
-// ADR-0104
-// ADR-0111
-// ADR-0121
 #[cfg(any(test, feature = "test-harness"))]
 pub mod contract {
     use super::{GroupError, GroupSource, MemberPools, ALL_GROUP, HERE_GROUP};
 
-    /// 계약 스위트가 소스를 두드리는 데 필요한 **소스별 픽스처**.
     #[derive(Debug, Clone)]
     pub struct GroupSourceFixture {
         /// 이 소스가 **모르는** 주소 이름(`NotFound` 축). 이미 정규화된 형태(`@nope`)여야 한다.
@@ -191,26 +149,13 @@ pub mod contract {
 
     /// ★`GroupSource` 해석 의미론 계약 — 어떤 구현이든 이걸 통과해야 한다(spec §4 · ADR-0111/0114/0121)★.
     ///
-    /// 단언하는 축:
-    ///   1. `@all` = `live` **+ `dormant`** verbatim(정렬·dedup·필터 금지 — 상위가 판정한다)
-    ///   1b. `@here` = `live` verbatim(잠든 이름 **불포함**)
-    ///   1c. 두 어휘는 **다른 명단**을 낸다(잠든 이름이 있는 상황에서 — ADR-0121 §영향 불변식)
-    ///   2. 두 어휘 + 빈 풀 = **`Ok(vec![])`**(에러 아님 — `GROUP_EMPTY` 는 최종 집합 판정, ADR-0114 결정 3)
-    ///   3. 모르는 주소 = `NotFound`(전체 반려 층 — 주소 공간 오류)
-    ///   4. `@` 네임스페이스 규약 위반 = `InvalidName`(조용한 보정 금지)
-    ///   5. 결정적 — 같은 입력을 두 번 물으면 같은 답(내부 가변 상태·시계 의존 금지)
-    ///
     /// ★단언 문구 앞의 `axisN-…:` 토큰(load-bearing)★: 모든 실패 메시지는 **축마다 유일한** 토큰으로
     ///   시작한다. 자체검증 테스트가 `#[should_panic(expected = …)]` 로 "그물이 무는지" 확인하는데, 부분
     ///   문자열이 여러 축에 겹치면 엉뚱한 축이 먼저 터져도 초록이 된다. **토큰을 바꾸면 핀도 함께 고칠 것.**
     pub fn assert_group_source_contract(src: &dyn GroupSource, fx: &GroupSourceFixture) {
         // ── 1·1b·1c·2. 내장 어휘 축 ────────────────────────────────────────────────────────
-        // `live` 는 "발송 순간 살아있는 이름들(발신자 제외 적용 후)", `dormant` 는 "잠든 이름들" 이고 소스는
-        //   그걸 **그대로** 돌려줘야 한다. 정렬하면 상위의 행 순서 규칙(명시 토큰 → 펼침 사전순)이 두 층에
-        //   흩어지고, dedup 하면 산 층 동명 다수(RECIPIENT_AMBIGUOUS 사유)가 소스 단계에서 지워져 상위가
-        //   그 사실을 못 본다. 잠듦 층 중복은 사정이 다르다 — 그쪽 동명 판정은 상위가 `dormant_names` 를 직접
-        //   세어 하므로 접어도 결과는 같다. 그래도 단언하는 이유는 **verbatim 이 이 층의 계약**이라는 것이고,
-        //   미래 소스가 임의로 가공하기 시작하면 그 경계가 흐려진다.
+        // 정렬하면 상위의 행 순서 규칙(명시 토큰 → 펼침 사전순)이 두 층에 흩어지고, dedup 하면 산 층
+        //   동명 다수(RECIPIENT_AMBIGUOUS 사유)가 소스 단계에서 지워져 상위가 그 사실을 못 본다.
         let live = owned(&["zeta", "alpha", "zeta", "mid"]);
         let dormant = owned(&["sleepy", "twin", "twin"]);
         let pools = MemberPools {
@@ -271,8 +216,6 @@ pub mod contract {
         );
 
         // ── 4. `@` 네임스페이스 규약 ───────────────────────────────────────────────────────
-        // 관대한 보정(`coders` → `@coders`)은 사람 이름과 그룹 이름의 구분이 `@` 하나에 걸려 있는 계약을
-        //   흐린다 — 소스가 조용히 보정하면 오타 하나로 엉뚱한 방송이 나간다.
         for bad in ["", "@", "  @  ", "@@x", "@@", "@a@b", "plain-name"] {
             assert!(
                 matches!(src.resolve(bad, pools), Err(GroupError::InvalidName { .. })),
@@ -281,8 +224,7 @@ pub mod contract {
         }
 
         // ── 5. 결정성 — 같은 입력 두 번, 같은 답 ────────────────────────────────────────────
-        // 소스는 순수해야 한다(시계·내부 가변 상태 금지). 이게 깨지면 "발송 순간 스냅샷 한 장" 계약이
-        //   의미를 잃는다(같은 순간의 두 질문이 다른 세계를 본다).
+        // 이게 깨지면 "발송 순간 스냅샷 한 장" 계약이 의미를 잃는다(같은 순간의 두 질문이 다른 세계를 본다).
         assert_eq!(
             src.resolve(&fx.unknown, pools),
             src.resolve(&fx.unknown, pools),
@@ -309,7 +251,6 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 풀 둘을 한 줄로 — 테스트가 `MemberPools` 를 손으로 조립하지 않게.
     fn pools<'a>(live: &'a [String], dormant: &'a [String]) -> MemberPools<'a> {
         MemberPools { live, dormant }
     }
@@ -318,7 +259,6 @@ mod tests {
     fn here_resolves_to_the_live_snapshot_verbatim() {
         let live = names(&["zeta", "alpha", "zeta"]);
         let dormant = names(&["sleepy"]);
-        // 정렬·dedup 없음 — 상위(MessagingService)가 행 순서·중복 제거·동명 판정을 소유한다.
         assert_eq!(
             BuiltinGroups.resolve("@here", pools(&live, &dormant)),
             Ok(live),
@@ -328,7 +268,6 @@ mod tests {
 
     #[test]
     fn all_appends_the_dormant_names_to_the_live_snapshot() {
-        // ★ADR-0121 결정 1★: 이름이 "all" 이면 잠든 상대도 명단이다 — 그 몫은 상위가 파킹한다.
         let live = names(&["zeta", "alpha"]);
         let dormant = names(&["sleepy", "twin", "twin"]);
         assert_eq!(
@@ -340,8 +279,6 @@ mod tests {
 
     #[test]
     fn builtin_vocabularies_with_no_names_are_empty_lists_not_errors() {
-        // ADR-0114 결정 3: 펼침 0명은 에러가 아니다 — `["@all", "<자기이름>"]` 이 명시 지목 1행으로
-        //   살아남는 규칙이 여기 성립한다(최종 집합이 비어야만 GROUP_EMPTY).
         assert_eq!(
             BuiltinGroups.resolve("@all", pools(&[], &[])),
             Ok(Vec::new())
@@ -394,7 +331,6 @@ mod tests {
         }
     }
 
-    /// ★그물이 공허하지 않다는 증거★ — 일부러 어긋난 소스(정렬하는 내장 어휘)를 스위트에 물린다.
     struct SortingSource;
     impl GroupSource for SortingSource {
         fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
@@ -417,8 +353,7 @@ mod tests {
         assert_group_source_contract(&SortingSource, &builtin_fixture());
     }
 
-    /// ★ADR-0121 그물★ — 옛 `@all`(로스터만 읽는 것)을 스위트에 물린다. 이 회귀가 조용히 돌아오면 방송이
-    ///   잠든 상대를 놓치고 이름이 다시 거짓이 된다.
+    /// ★ADR-0121 그물★ — 옛 `@all`(로스터만 읽는 것) 회귀.
     struct LiveOnlyAllSource;
     impl GroupSource for LiveOnlyAllSource {
         fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
@@ -436,7 +371,7 @@ mod tests {
         assert_group_source_contract(&LiveOnlyAllSource, &builtin_fixture());
     }
 
-    /// ★ADR-0121 그물(반대 방향)★ — `@here` 가 잠든 이름까지 읽는 소스. "지금 여기" 의 뜻이 사라진다.
+    /// ★ADR-0121 그물(반대 방향)★ — `@here` 가 dormant 를 읽는 회귀.
     struct HereReadsDormantSource;
     impl GroupSource for HereReadsDormantSource {
         fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
@@ -456,7 +391,7 @@ mod tests {
         assert_group_source_contract(&HereReadsDormantSource, &builtin_fixture());
     }
 
-    /// 빈 스냅샷을 에러로 접는 소스 — axis2 가 물어야 한다(옛 `GroupError::Empty` 회귀 그물).
+    /// 옛 `GroupError::Empty` 회귀 그물 — axis2 가 물어야 한다.
     struct EmptyRejectingSource;
     impl GroupSource for EmptyRejectingSource {
         fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<String>, GroupError> {
