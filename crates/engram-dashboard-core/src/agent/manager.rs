@@ -1333,47 +1333,30 @@ impl AgentManager {
 
     // ── kill (LLD §6 절대순서) ───────────────────────────────────────────────
 
-    /// 에이전트 종료 — ★인과 순서 보존 + ADR-0019 reaper 위임★.
-    /// intent=UserKill 태깅(shutdown **전**) → enter_exiting(Exiting 알림) → session.kill
-    /// (transport.shutdown → master drop → pump EOF → core.finish(Killed)+finish hook→ReapMsg
-    /// → join_pump). **맵 제거·disposition·통지는 하지 않는다** — pump 가 보낸 ReapMsg 를 reaper 가
-    /// 단일 소비해 처리한다(done 단일 소비자). tracker unwatch 만 직접(reaper 는 tracker 를 모름).
-    ///
-    /// 의미 변경: 맵 제거가 reaper(비동기)로 옮겨졌다. kill_agent 반환 직후엔 아직 맵에 있을 수
-    /// 있으므로, 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
+    /// 에이전트 종료(ADR-0019 reaper 위임). **맵 제거·disposition·통지는 하지 않는다** — pump 가 보낸
+    /// ReapMsg 를 reaper 가 단일 소비해 처리한다. 그래서 반환 직후에도 세션이 아직 맵에 있을 수 있다 —
+    /// 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
-        // 대상 세션 epoch 을 Arc clone 직후(락 해제 상태) 확정한다 — revoke 대상 (AgentId,epoch).
         let epoch = session.epoch;
 
-        // 0. ★제어 채널 토큰 즉시 폐기 — 블로킹 kill **전에**(FIX 4)★. get_session 이 Arc 를 clone 하고
-        //    sessions read lock 을 이미 해제했으므로(§10), 여기서 revoke 를 불러도 락 보유 중이 아니다
-        //    (ADR-0006 — registry 는 leaf lock, sessions/status 락 미보유). 예전엔 이 revoke 가
-        //    session.kill(최대 5s join) **뒤**라, 죽어가는 에이전트의 토큰이 그 5s 창 동안 유효했다 —
-        //    그 사이 에이전트가 제어 채널로 명령을 낼 수 있었다(TOCTOU). 이제 kill 을 시작하기 전에 먼저
-        //    폐기해 그 창을 없앤다. revoke 는 idempotent(remove-if-present)라 아래 pump/reaper 의
-        //    terminal revoke 와 겹쳐도 무해(그게 backstop). 산 세션이므로 이 epoch 토큰이 지금 폐기 대상.
+        // 0. ★제어 채널 토큰 즉시 폐기 — 블로킹 kill **전에**(FIX 4)★. 이 revoke 가 session.kill(최대
+        //    5s join) **뒤**에 있으면 죽어가는 에이전트의 토큰이 그 5s 창 동안 유효해, 그 사이 에이전트가
+        //    제어 채널로 명령을 낼 수 있다(TOCTOU). 여기선 락 미보유라 안전하고(§10 — registry 는 leaf
+        //    lock, ADR-0006), revoke 는 idempotent 라 reaper 의 terminal revoke 와 겹쳐도 무해(그게 backstop).
         // ADR-0086
         self.control.revoke(agent_id, epoch);
 
-        // 0.1. ★intent 태깅을 shutdown 전에★ — finish hook 이 finish 순간 snapshot 하므로, shutdown
-        //    이 pump 를 깨워 finish 하기 전에 UserKill 이 보여야 reaper 가 DeleteProfile 로 분류한다.
         session.set_intent(TerminationIntent::UserKill);
 
-        // 0.5. 과도기 Exiting 전이 — kill 누르면 즉시 '종료중' 알림. 전이+발행은 core 안에서
-        //      이뤄진다(manager가 트리거, core가 status_changed(Exiting) 발행). 이미 terminal이면
-        //      false 반환하나 별도 처리 없음(개별 status_changed(Killed)는 pump의 finish 단독).
         let _ = session.enter_exiting();
 
-        // 1~6. 자원 강제 종료 + pump 완료 대기. shutdown이 master를 drop해 pump read를 EOF로
-        //       깨우고(→core.finish(Killed)+hook→ReapMsg), join_pump가 그 pump 종료를 5s 대기한다.
-        //       timeout이면 그냥 진행(세션 제거로 Arc 끊겨 자연 종료). ★revoke 배치가 이 인과를 건드리지
-        //       않는다(ADR-0001)★: revoke 는 registry/파일만 만지고 shutdown 체인(child.kill→master
-        //       drop→pump EOF→finish)에 개입하지 않는다 — kill 을 블록/재정렬하지 않는다.
+        // 1~6. ★revoke 배치가 이 인과를 건드리지 않는다(ADR-0001)★ — revoke 는 registry/파일만 만지고
+        //       shutdown 체인에 개입하지 않아 kill 을 블록·재정렬하지 않는다. join 이 timeout 나도 그냥
+        //       진행한다(세션 제거로 Arc 가 끊겨 자연 종료).
         session.kill(Duration::from_secs(5));
 
-        // 7. 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지). 맵 제거·통지는 reaper 가 한다.
-        //    (제어 채널 revoke 는 위 0단계에서 선제 완료 — reaper terminal revoke 가 idempotent backstop.)
+        // 7. 세션 추적 해제(S9 — 좀비 watcher 엔트리 방지). reaper 는 tracker 를 모른다.
         self.tracker.unwatch(agent_id);
 
         Ok(())
@@ -1381,7 +1364,6 @@ impl AgentManager {
 
     // ── 조회/종료 ─────────────────────────────────────────────────────────────
 
-    /// 전체 목록 스냅샷.
     pub fn list_agents(&self) -> Vec<AgentInfo> {
         let sessions: Vec<Arc<AgentSession>> = {
             let guard = self.sessions.read().expect("sessions poisoned");
@@ -1390,14 +1372,12 @@ impl AgentManager {
         sessions.iter().map(|s| self.agent_info(s)).collect()
     }
 
-    /// replay 스냅샷 조회.
     pub fn get_snapshot(&self, agent_id: AgentId) -> Result<Vec<OutputChunk>, PtyError> {
         let session = self.get_session(agent_id)?;
         Ok(session.snapshot())
     }
 
-    /// 단일 에이전트의 현재 epoch 경량 조회(없으면 None). list_agents 전체 순회·AgentInfo
-    /// 조립(profiles lock 등)을 피해 epoch 만 본다 — handle_subscribe 의 epoch_matches 계산용.
+    /// list_agents 전체 순회·AgentInfo 조립(profiles lock)을 피해 epoch 만 보는 경량 형제.
     pub fn agent_epoch(&self, agent_id: AgentId) -> Option<u32> {
         self.sessions
             .read()
@@ -1406,11 +1386,10 @@ impl AgentManager {
             .map(|s| s.epoch)
     }
 
-    /// 앱 종료 시 전체 정리. id를 먼저 모아 sessions lock을 풀고, 각 kill을 병렬 실행한다.
     pub fn shutdown_all(&self) {
         // ★ADR-0019★: shutting_down 을 각 kill **전에** set 한다. 이게 kill 보다 늦으면 그 틈에
-        //   종료된 세션의 finish hook 이 shutting_down=false 를 snapshot 해 크래시/유저kill 로
-        //   오분류(disposition 적용 → 부팅 복원 대상에서 탈락)하는 race 가 생긴다. set 이 먼저면
+        //   종료된 세션의 finish hook 이 shutting_down=false 를 snapshot 해 KeepDisableAutoRestore 를
+        //   맞고(auto_restore=false → 부팅 복원 대상에서 탈락) 마는 race 가 생긴다. set 이 먼저면
         //   이 시점 이후 모든 finish 가 shutting_down=true 를 snapshot → reaper 가 KeepAsIs(손 안 댐).
         self.shutting_down.store(true, Ordering::SeqCst);
 
@@ -1432,7 +1411,7 @@ impl AgentManager {
 
     // ── 내부 헬퍼 ─────────────────────────────────────────────
 
-    /// sessions에서 Arc<AgentSession>을 clone해 반환(§10 규칙1: read lock 즉시 해제).
+    /// §10 규칙1 — read lock 을 즉시 해제한 뒤 Arc clone 을 반환한다(호출부는 락 미보유 상태로 이어간다).
     fn get_session(&self, agent_id: AgentId) -> Result<Arc<AgentSession>, PtyError> {
         self.sessions
             .read()
@@ -1442,27 +1421,22 @@ impl AgentManager {
             .ok_or(PtyError::NotFound(agent_id))
     }
 
-    /// id 로 세션을 찾아 AgentInfo 를 조립(없으면 NotFound). activate_profile 이 resume 성공 후
-    /// 살아있는 세션의 info 를 얻는 데 쓴다 — resume_no_fallback 은 세션을 맵에 등록만 하고 info 를
-    /// 돌려주지 않으므로(RestoreOutcome 반환) id 로 재조회한다. §10 락 순서 준수(get_session 이 read
-    /// lock 즉시 해제 → agent_info 는 lock 미보유 상태에서 호출).
+    /// activate_profile 이 resume 성공 후 산 세션의 info 를 얻는 데 쓴다 — resume_no_fallback 은
+    /// 세션을 맵에 등록만 하고 info 를 돌려주지 않으므로(RestoreOutcome 반환) id 로 재조회한다.
     fn agent_info_by_id(&self, id: AgentId) -> Result<AgentInfo, PtyError> {
         let session = self.get_session(id)?;
         Ok(self.agent_info(&session))
     }
 
-    /// id 로 canonical 표시명만 조회(없으면 None). 봉투 sender 등 AgentInfo 전체가 필요 없는
-    /// 호출부(daemon ingress::sender_display_name)가 **agent_info 와 byte-identical** 한 이름을
+    /// 봉투 sender 등 AgentInfo 전체가 필요 없는 호출부가 **agent_info 와 byte-identical** 한 이름을
     /// 얻게 하는 단일 출처다 — session.cwd 기반 resolve 를 여기 한 곳에 모아 로직 복제를 막는다.
-    /// §10 락 순서: get_session 이 read lock 을 즉시 해제 → resolve 는 lock 미보유에서 수행.
-    // ADR-0101
     pub fn canonical_name(&self, id: AgentId) -> Option<String> {
         let session = self.get_session(id).ok()?;
         Some(self.resolve_canonical_name(&session))
     }
 
-    /// session → canonical 표시명(display_name ?? basename(session.cwd)). agent_info·canonical_name
-    /// 공유 코어 — 이름 파생을 한 곳으로 모아 reaper/ingress/cli 와 어긋나지 않게 한다.
+    /// agent_info·canonical_name 공유 코어 — 이름 파생을 한 곳으로 모아 reaper/ingress/cli 와
+    /// 어긋나지 않게 한다.
     ///
     /// ADR-0101 (WYSIWYA — canonical 이름 통일): AgentInfo.name = "사람이 트리에서 보는 이름"으로
     ///   맞춘다. 예전엔 profile.name(= createClaudeProfile 에 넘긴 full cwd 문자열, 종종 경로)을 그대로
@@ -1476,18 +1450,14 @@ impl AgentManager {
     ///   **같은 값**(session.cwd)에서 파생한다.
     // ADR-0101
     fn resolve_canonical_name(&self, session: &Arc<AgentSession>) -> String {
-        // session.cwd = AgentInfo.cwd 와 동일 출처(canonical). 프론트 basename 규칙과 1:1.
         let cwd = session.cwd.to_string_lossy();
-        // get()이 profiles lock을 잡아 clone 후 즉시 해제하므로 sessions lock과 동시에 보유하지 않는다
-        //   (§10 락 순서, 이 함수는 sessions lock 미보유 상태에서만 호출).
+        // get()은 profiles lock 을 잡아 clone 후 즉시 해제한다 — 이 함수 자체가 sessions lock 미보유
+        //   상태에서만 호출되므로 두 락을 동시에 잡지 않는다(§10 락 순서).
         let display_name = self.profiles.get(session.id).and_then(|p| p.display_name);
-        // 프로필 부재(ad-hoc / 산 세션에 DeleteProfile) 시에도 트리는 basename(cwd)를 그리므로 여기도
-        //   cwd basename 으로 파생해야 트리 ≠ 라우팅 이 안 생긴다. cwd 가 placeholder/빈값을 낼 때만
-        //   id 앞 8자로 degrade(blank·경로없음 라벨을 주소로 쓰지 않게).
         crate::agent::name::canonical_name_or_id_fallback(display_name.as_deref(), &cwd, session.id)
     }
 
-    /// session 스냅샷 → AgentInfo. (sessions lock을 보유하지 않은 상태에서만 호출)
+    /// sessions lock 을 보유하지 않은 상태에서만 호출한다.
     fn agent_info(&self, session: &Arc<AgentSession>) -> AgentInfo {
         let name = self.resolve_canonical_name(session);
         AgentInfo {
@@ -1498,18 +1468,16 @@ impl AgentManager {
             cols: session.cols.load(Ordering::Relaxed),
             rows: session.rows.load(Ordering::Relaxed),
             epoch: session.epoch,
-            // transport 종류별 capability — session.capabilities()가 transport.capabilities()를 위임.
             capabilities: session.capabilities(),
         }
     }
 }
 
 impl Drop for AgentManager {
-    /// reaper 스레드 정리 — Stop 송신 후 join. manager 의 reaper_tx 가 drop 되면 channel 이
-    /// 닫혀 recv 가 Err 로도 끝나지만(이중 안전), 세션들이 보유한 hook 클로저가 reaper_tx clone 을
-    /// 들고 있어 그것만으로는 즉시 안 닫힐 수 있다. 명시 Stop 으로 확실히 깨운 뒤 join 한다.
+    /// ★명시 Stop 이 필요한 이유★: reaper_tx drop 만으로도 channel 이 닫혀 recv 가 Err 로 끝나지만,
+    /// 세션들이 보유한 finish hook 클로저가 reaper_tx clone 을 들고 있어 즉시 안 닫힐 수 있다.
+    /// 송신 실패(reaper 가 이미 종료)는 무시한다.
     fn drop(&mut self) {
-        // Stop 송신(reaper 가 이미 죽었으면 Err — 무시).
         let _ = self.reaper_tx.send(ReaperCmd::Stop);
         if let Some(handle) = self.reaper_handle.take() {
             let _ = handle.join();

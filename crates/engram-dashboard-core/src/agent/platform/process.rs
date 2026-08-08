@@ -7,13 +7,10 @@
 //! ★왜 creation time 까지 보나★: PID 는 OS 가 재사용한다. 데몬이 죽고 같은 PID 를 다른
 //! 프로세스가 받으면 "PID 살아있음"만으로는 false-live(엉뚱한 프로세스를 데몬으로 오인)가
 //! 난다. 그래서 "PID 살아있음 AND 그 PID 의 현재 creation time == 기록된 값"으로 판정해
-//! PID 재사용을 직접 구분한다. creation time 은 GetProcessTimes 의 lpCreationTime(FILETIME)을
-//! u64(100ns 단위, 1601-01-01 기준)로 합친 값이다 — 같은 프로세스면 불변, 재사용 PID 면 다르다.
+//! PID 재사용을 직접 구분한다.
 
-/// 주어진 PID 의 프로세스 시작시각(creation FILETIME)을 u64 로 반환. 조회 실패면 None.
-///
-/// u64 단위/의미: Windows FILETIME = 1601-01-01 UTC 부터 100나노초 간격 수.
-/// high/low 32비트를 합쳐 u64 로 만든다. 조회 실패(부재/권한)는 None. PID 0 은 항상 None.
+/// u64 = GetProcessTimes lpCreationTime(FILETIME — 1601-01-01 UTC 부터 100나노초 간격 수)의
+/// high/low 32비트를 합친 값. 같은 프로세스면 불변, 재사용 PID 면 다르다.
 #[cfg(windows)]
 pub fn process_creation_time(pid: u32) -> Option<u64> {
     use windows::Win32::Foundation::{CloseHandle, FILETIME};
@@ -24,7 +21,7 @@ pub fn process_creation_time(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
     }
-    // SAFETY: 최소 권한으로 PID 핸들 open. 대상 부재/권한부족이면 Err.
+    // SAFETY: 최소 권한으로 PID 핸들 open.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
 
     let mut creation = FILETIME::default();
@@ -44,14 +41,12 @@ pub fn process_creation_time(pid: u32) -> Option<u64> {
     Some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
 }
 
-/// 현재(자기) 프로세스의 시작시각. 데몬이 daemon.json 에 기록할 값.
+/// 데몬이 daemon.json 에 기록할 값.
 #[cfg(windows)]
 pub fn current_process_start_time() -> Option<u64> {
     process_creation_time(std::process::id())
 }
 
-/// HRESULT(i32) → win32 에러코드(u32) 추출(순수, 테스트 가능).
-///
 /// windows-rs 의 `OpenProcess` 실패는 `windows::core::Error` 이고, 그 `.code().0` 은
 /// `HRESULT_FROM_WIN32` 로 래핑된 HRESULT 다(예: INVALID_PARAMETER=0x80070057,
 /// ACCESS_DENIED=0x80070005). FACILITY_WIN32(0x7) HRESULT 의 하위 16비트가 원래 win32
@@ -62,8 +57,6 @@ fn win32_from_hresult(hr: i32) -> u32 {
     (hr as u32) & 0xFFFF
 }
 
-/// OpenProcess 실패 시의 win32 에러코드 → 생존 판정(순수, 테스트 가능).
-///
 /// ★왜 코드별 분기인가(false-live 버그 맥락)★: 기존엔 OpenProcess 실패를 무조건 live 로
 /// 봤다(`Err(_) => true`). 그 결과 "그런 프로세스 없음"(ERROR_INVALID_PARAMETER)도 살아있다고
 /// 오판 → 죽은 데몬에 앱이 붙으려다 'reconnecting' 고착(직전 세션 실제 발생). 부재와 권한부족을
@@ -86,14 +79,13 @@ fn alive_from_open_error(win32_code: u32) -> bool {
     const ERROR_ACCESS_DENIED: u32 = 5;
     const ERROR_INVALID_PARAMETER: u32 = 87;
     match win32_code {
-        ERROR_INVALID_PARAMETER => false, // 프로세스 부재 → dead.
-        ERROR_ACCESS_DENIED => true,      // 존재하나 권한부족 → live.
-        _ => true,                        // 불명 → 보수적으로 live.
+        ERROR_INVALID_PARAMETER => false,
+        ERROR_ACCESS_DENIED => true,
+        _ => true,
     }
 }
 
-/// PID 단독 생존 판정(creation time 무시) — OpenProcess + GetExitCodeProcess.
-/// start_time 미상(0)일 때의 보수 fallback 으로만 쓴다.
+/// creation time 을 무시하는 형제 — start_time 미상(0)일 때의 보수 fallback 으로만 쓴다.
 #[cfg(windows)]
 pub fn pid_alive(pid: u32) -> bool {
     use windows::Win32::Foundation::CloseHandle;
@@ -104,8 +96,7 @@ pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    // SAFETY: 최소 권한으로 PID 핸들 open. 못 열면 win32 에러코드로 부재/권한부족을 구분한다.
-    // (옛 무조건 true 는 부재도 live 로 오판 → 'reconnecting' 고착. alive_from_open_error 주석 참조.)
+    // SAFETY: 최소 권한으로 PID 핸들 open.
     let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
         Err(e) => return alive_from_open_error(win32_from_hresult(e.code().0)),
@@ -140,15 +131,11 @@ pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
     match process_creation_time(pid) {
         Some(actual) => {
             if expected_start == 0 {
-                // 미상 → PID 가 살아있다는 사실만으로 보수적으로 live.
                 true
             } else {
                 actual == expected_start
             }
         }
-        // creation time 조회 실패 = 프로세스 부재(또는 권한). expected_start 가 미상이면
-        // 보수적으로 OpenProcess 생존 fallback 으로 한 번 더 본다. 알려진 start_time 이 있는데
-        // 조회조차 안 되면 데몬은 죽은 것으로 본다.
         None => {
             if expected_start == 0 {
                 pid_alive(pid)
@@ -159,13 +146,10 @@ pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
     }
 }
 
-/// 주어진 부모 PID 의 **직계 자식 프로세스 PID 목록**을 OS 스냅샷으로 열거한다(Windows).
-///
 /// ★왜 필요한가★: AgentInfo/WS 프로토콜은 PTY child 의 PID 를 노출하지 않는다(설계상 손발/두뇌
 /// 분리 — 프론트는 PID 를 몰라도 된다). 그러나 실프로세스 격리테스트(데몬 .exe kill → PTY child
 /// 동반 사망)는 "데몬이 띄운 자식 프로세스가 실제로 죽었는지"를 PID 로 확인해야 한다. 그 PID 를
-/// 외부에서 알아내는 유일한 길이 OS 프로세스 트리 열거다. Toolhelp32Snapshot 으로 전 프로세스를
-/// 훑어 `th32ParentProcessID == parent` 인 항목의 PID 를 모은다.
+/// 외부에서 알아내는 유일한 길이 OS 프로세스 트리 열거다.
 ///
 /// best-effort: 스냅샷/순회 실패 시 빈 Vec. ppid 는 OS 가 즉시 갱신하지 않는 경우가 있어
 /// (부모가 죽으면 ppid 가 stale 일 수 있음) "살아있는 부모의 직계 자식" 용도로만 신뢰한다.
@@ -181,7 +165,7 @@ pub fn child_pids(parent: u32) -> Vec<u32> {
     if parent == 0 {
         return out;
     }
-    // SAFETY: 전체 프로세스 스냅샷 생성. 실패면 빈 핸들 → 빈 결과.
+    // SAFETY: 전체 프로세스 스냅샷 생성.
     let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
         Ok(h) => h,
         Err(_) => return out,
@@ -192,14 +176,14 @@ pub fn child_pids(parent: u32) -> Vec<u32> {
         ..Default::default()
     };
 
-    // SAFETY: 유효 스냅샷 핸들 + dwSize 가 채워진 entry. First 가 성공하면 Next 로 순회한다.
+    // SAFETY: 유효 스냅샷 핸들 + dwSize 가 채워진 entry.
     let first = unsafe { Process32FirstW(snapshot, &mut entry) };
     if first.is_ok() {
         loop {
             if entry.th32ParentProcessID == parent {
                 out.push(entry.th32ProcessID);
             }
-            // SAFETY: 같은 유효 핸들 + entry. 더 없으면 Err → break.
+            // SAFETY: 같은 유효 핸들 + entry.
             if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
                 break;
             }
@@ -219,7 +203,7 @@ pub fn process_creation_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// non-windows: 프로세스 트리 열거 미구현(데몬은 Windows 1차) — 빈 목록.
+/// non-windows: 프로세스 트리 열거 미구현(데몬은 Windows 1차).
 #[cfg(not(windows))]
 pub fn child_pids(_parent: u32) -> Vec<u32> {
     Vec::new()
@@ -247,7 +231,6 @@ mod tests {
 
     #[test]
     fn pid_zero_is_not_alive() {
-        // PID 0 = 시스템 idle. 어떤 경로든 live 가 아니어야 한다.
         assert!(!pid_alive(0));
         assert!(!pid_alive_with_start_time(0, 0));
         assert!(!pid_alive_with_start_time(0, 12345));
@@ -257,7 +240,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_process_is_alive_with_matching_start_time() {
-        // 자기 PID + 자기 creation time → live.
         let pid = std::process::id();
         let start = current_process_start_time().expect("자기 creation time 조회 가능");
         assert!(start != 0, "creation time 은 0 이 아니어야 함");
@@ -268,10 +250,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_pid_with_wrong_start_time_is_dead() {
-        // 같은 PID 라도 creation time 이 다르면(=재사용된 PID 시나리오) dead 로 판정.
         let pid = std::process::id();
         let real = current_process_start_time().unwrap();
-        let wrong = real.wrapping_add(1); // 의도적으로 불일치
+        let wrong = real.wrapping_add(1);
         assert!(
             !pid_alive_with_start_time(pid, wrong),
             "creation time 불일치면 dead(PID 재사용 방어)"
@@ -281,15 +262,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn child_pids_parent_zero_is_empty() {
-        // 부모 0(시스템 idle) 은 우리 관심 대상이 아님 → 빈 목록.
         assert!(child_pids(0).is_empty());
     }
 
     #[cfg(windows)]
     #[test]
     fn child_pids_finds_spawned_child() {
-        // 자기 자신이 자식을 띄우면 그 PID 가 child_pids(자기 PID) 에 나타나야 한다.
-        // best-effort 헬퍼의 기본 동작(부모-자식 매칭)을 현재 프로세스 기준으로 실측.
         let mut child = std::process::Command::new("cmd.exe")
             .args(["/c", "ping -n 3 127.0.0.1 > NUL"]) // 잠깐 살아있는 자식
             .stdin(std::process::Stdio::null())
@@ -320,7 +298,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn unknown_start_time_falls_back_to_pid_liveness() {
-        // start_time==0(미상, 옛 daemon.json) → PID 생존만으로 보수 판정(자기 PID 는 live).
         let pid = std::process::id();
         assert!(
             pid_alive_with_start_time(pid, 0),
@@ -333,11 +310,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn alive_from_open_error_classifies_codes() {
-        // 부재(INVALID_PARAMETER=87) → dead. false-live 버그의 핵심 수정점.
         assert!(!alive_from_open_error(87), "부재 → dead");
-        // 권한부족(ACCESS_DENIED=5) → 프로세스는 존재하므로 live.
         assert!(alive_from_open_error(5), "권한부족이나 존재 → live");
-        // 그 외/불명(0 등) → 보수적으로 live(오탐보다 안전).
         assert!(alive_from_open_error(0), "불명 → 보수적 live");
         assert!(alive_from_open_error(1234), "불명 → 보수적 live");
     }
@@ -345,7 +319,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn win32_from_hresult_extracts_low_word() {
-        // HRESULT_FROM_WIN32 래핑 해제: 하위 16비트가 원래 win32 코드.
         assert_eq!(win32_from_hresult(0x8007_0057u32 as i32), 87); // INVALID_PARAMETER
         assert_eq!(win32_from_hresult(0x8007_0005u32 as i32), 5); // ACCESS_DENIED
     }
