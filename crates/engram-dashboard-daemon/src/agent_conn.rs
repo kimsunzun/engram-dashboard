@@ -33,10 +33,9 @@ use engram_dashboard_net::frame_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
 };
 
-// ── 출력 평면 sink(연결당 구독 1개, pump 스레드에서 호출) ─────────────────────────
+// ── 출력 평면 sink ────────────────────────────────────────────────────────────────
 
 /// 한 연결의 한 에이전트 구독에 대응하는 `OutputSink`. pump 스레드가 `send` 를 호출한다.
-/// frame 을 codec binary 로 인코딩해 `FrameSink` 에 **논블록으로만** 넣는다.
 /// 큐가 full/closed 면 `SinkError` 반환(코어가 dead-sink 로 제거).
 pub struct FrameOutputSink {
     frames: Arc<dyn FrameSink>,
@@ -56,7 +55,6 @@ impl FrameOutputSink {
         }
     }
 
-    /// replay 구간 동안 frame 이 drop 됐는지 사후 검사용 핸들(handle_subscribe 가 공유 보관).
     pub(crate) fn replay_dropped_flag(&self) -> Arc<AtomicBool> {
         self.replay_dropped.clone()
     }
@@ -111,12 +109,9 @@ impl OutputSink for FrameOutputSink {
                 encode_structured_frame(frame.agent_id, frame.epoch, frame.seq, &payload)
             }
         };
-        // ★pump 스레드 — 논블록만(절대 block 금지). full/closed = 느린 소비자 → 코어가 이 sink 제거.
-        //   포화 시 큐 밖 종료 신호는 FrameSink 구현이 울린다(좀비 연결 방지).
         match self.frames.try_send(Frame::Binary(buf)) {
             Ok(()) => Ok(()),
             Err(_) => {
-                // frame 이 drop 됐음을 기록(replay 구간 truncated 사후 보정용).
                 self.replay_dropped.store(true, Ordering::Release);
                 Err(SinkError)
             }
@@ -130,9 +125,6 @@ impl OutputSink for FrameOutputSink {
 
 // ── control 평면 sink(ConnectionCore.dispatch 의 응답 경로) ─────────────────────────
 
-/// `ConnectionCore` 의 `OutboundSink` 를 프레임 포트로 구현한다. dispatch 가 enqueue 하는
-/// `Outbound` 를 프레임으로 인코딩해 `FrameSink` 에 넣는다 — 인코딩(AgentEvent→JSON text)은 이
-/// 어댑터가 소유한다(코어는 모름 — ADR-0003 정합).
 pub struct FrameOutboundSink {
     frames: Arc<dyn FrameSink>,
 }
@@ -146,7 +138,7 @@ impl FrameOutboundSink {
 impl CoreOutboundSink for FrameOutboundSink {
     fn enqueue(&self, out: Outbound) -> Result<(), CoreSinkError> {
         let frame = match out {
-            // control 이벤트 — JSON text 로 인코딩(어댑터 소유). 직렬화 실패는 drop(event_json 동작).
+            // 직렬화 실패는 drop(event_json 동작).
             Outbound::Event(ev) => match event_json(&ev) {
                 Some(text) => Frame::Text(text),
                 None => return Ok(()),
@@ -154,15 +146,10 @@ impl CoreOutboundSink for FrameOutboundSink {
             Outbound::Binary(b) => Frame::Binary(b),
             Outbound::Close(reason) => Frame::Close(reason),
         };
-        // 논블록만 — 이 trait 은 sync 라 await 가 불가능하다. 큐 포화/닫힘 → SinkError 이고,
-        //   종료 신호는 FrameSink 구현이 울린다(carrier 특정 처리).
         self.frames.try_send(frame).map_err(|_| CoreSinkError)
     }
 
     fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
-        // handle_subscribe 가 코어 subscribe_from 에 넘길 output 평면 sink. 같은 FrameSink 를 공유해
-        // control(이 sink)과 output 이 한 단일 writer 큐로 합류한다(FIFO). replay_dropped 플래그를
-        // 함께 돌려 handle_subscribe 가 truncated 사후 보정에 쓰게 한다.
         let sink = Arc::new(FrameOutputSink::new(self.frames.clone()));
         let flag = sink.replay_dropped_flag();
         (sink, flag)
@@ -177,13 +164,11 @@ pub struct AgentConnection {
     session: Arc<ConnectionSession>,
 }
 
-/// 이 text 가 **핸드셰이크 프레임**인가(ADR-0129 0-4). `on_text` 이 명령 디코드에 실패한 뒤에만 부른다.
+/// `on_text` 이 명령 디코드에 실패한 뒤에만 부른다(ADR-0129 0-4).
 ///
-/// ★왜 필요한가★: 인증은 이미 네트워크 행이 첫 프레임에서 끝냈다. 그 뒤에 또 오는 핸드셰이크는
-/// **프로토콜 위반**이고, 예전엔 그게 명령 enum 의 variant 라 dispatch 가 거절 문구를 냈다. 0-4 로
-/// 모양이 네트워크 lib 로 가면서 그 경로가 끊겼으므로 여기서 되잡는다.
-/// ★연결을 닫지 않는다★: 옛 동작 그대로 Error 한 줄만 내고 연결은 살려 둔다(case21 이 후속 명령이
-/// 여전히 응답되는지까지 본다).
+/// ★왜 필요한가★: 인증은 이미 네트워크 행이 첫 프레임에서 끝냈으므로 그 뒤에 오는 핸드셰이크는
+/// **프로토콜 위반**이다. 0-4 로 그 모양이 네트워크 lib 소유가 되면서 명령으로 디코드되지 않으니
+/// 여기서 되잡는다.
 ///
 /// ★온전함이 아니라 **태그**로 판정한다★: 필드가 빠졌거나 본문 모양이 어긋난 Auth 프레임도 핸드셰이크로
 /// 센다. 온전한 것만 세면 낡은 클라가 ``unknown variant `Auth` `` 를 받는데, 이 서버가 첫 프레임으로
@@ -191,10 +176,7 @@ pub struct AgentConnection {
 /// ★위층 어휘가 늘지 않는다★: 최상위 키 하나만 보므로 명령 목록을 알 필요가 없고, 본문은
 /// `IgnoredAny` 로 건너뛰어 값 트리를 만들지 않는다 — 피어가 프레임마다 도달시킬 수 있는 경로라
 /// 할당을 얹지 않는다.
-///
-/// 순수 함수라 연결 실물(manager·소켓) 없이 단위 검증된다 — 아래 테스트.
 fn is_handshake_frame(text: &str) -> bool {
-    /// externally-tagged 단일 variant — `{"Auth": …}` 만 성공하고 본문은 건너뛴다.
     /// ★태그 문자열의 정본은 `engram_dashboard_net::auth::AuthFrame`★ — 아래
     /// `handshake_frame_is_recognized_after_auth` 가 그 타입을 직렬화한 바이트로 이 판정을 걸어,
     /// 두 쪽이 갈라지면 깨지게 한다.
@@ -212,7 +194,6 @@ impl ConnectionHandler for AgentConnection {
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            // Hello + 현재 목록을 단일 writer 큐로 push — 이후 모든 출력과 FIFO 정렬된다.
             // ★2프레임 고정★: 이 호출 시점엔 큐 소비자가 없고 여유도 status fanout 과 나눠 쓰므로
             //   상한을 숫자로 못 잡는다(포트 계약). 그래서 상수 개수만 넣는다.
             if let Some(text) = event_json(&hello_event(env!("CARGO_PKG_VERSION").into())) {
@@ -237,12 +218,9 @@ impl ConnectionHandler for AgentConnection {
                     DispatchFlow::Close => ConnFlow::Close,
                     DispatchFlow::Continue => ConnFlow::Continue,
                 },
-                // ★인증 뒤 도착한 2차 핸드셰이크(ADR-0129 0-4)★: 옛 코드에선 Auth 가 명령 enum 의
-                //   variant 라 dispatch 가 "already authenticated" 를 냈다. 0-4 로 그 모양이 네트워크
-                //   lib 소유가 되면서 이 프레임은 **명령으로 디코드되지 않는다** — 되잡지 않으면 클라가
-                //   조용히 일반 파싱 오류를 받게 되는 **관측 가능한 동작 변경**이 된다(회귀 방어 =
-                //   `tests/ws_e2e.rs` case21). 그래서 파싱 실패 갈래에서 한 번 더 본다.
-                //   ★순서가 이렇다★: 명령 파싱이 **먼저**다. 태그가 겹치지 않아 결과는 순서와 무관하지만,
+                // ★연결을 닫지 않는다★: Error 한 줄만 내고 살려 둔다 — 회귀 방어 `tests/ws_e2e.rs`
+                //   case21 이 후속 명령이 여전히 응답되는지까지 본다.
+                // ★순서가 이렇다★: 명령 파싱이 **먼저**다. 태그가 겹치지 않아 결과는 순서와 무관하지만,
                 //   정상 경로(명령)에 프레임마다 추가 파싱을 얹지 않으려는 것이다.
                 Err(_) if is_handshake_frame(text) => {
                     tracing::warn!(conn = conn_id, "인증 완료된 연결에 2차 핸드셰이크 — 거절");
@@ -272,7 +250,7 @@ impl ConnectionHandler for AgentConnection {
     ) -> BoxFuture<'a, ConnFlow> {
         let sink = FrameOutboundSink::new(frames.clone());
         Box::pin(async move {
-            // 클라→데몬 binary 는 프로토콜에 없음 — 내용을 보지 않고 오류로 보고 종료한다.
+            // 클라→데몬 binary 는 프로토콜에 없다.
             tracing::warn!(conn = conn_id, "예상치 못한 binary frame — close");
             let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                 request_id: None,
@@ -287,15 +265,14 @@ impl ConnectionHandler for AgentConnection {
         let manager = self.core.manager();
 
         // ── 구독 누수 방지 ──────────────────────────────────────────────────────
-        // 이 연결이 등록한 모든 (agent_id, sink_id) 를 manager 에서 unsubscribe. 안 하면 죽은 큐로
-        // 영원히 try_send 하는 좀비 sink 가 코어 subscribers 에 남는다(코어가 try_send 실패로 결국
-        // 제거하긴 하나, 다음 emit 까지 잔존 — 명시적으로 끊는다).
+        // 안 하면 죽은 큐로 영원히 try_send 하는 좀비 sink 가 코어 subscribers 에 남는다(코어가
+        // try_send 실패로 결국 제거하긴 하나, 다음 emit 까지 잔존 — 명시적으로 끊는다).
         //
-        // ★알려진 경쟁 — 이 스냅샷이 구독 하나를 놓칠 수 있다(HEAD 도 동일, 이 슬라이스 범위 밖)★:
+        // ★알려진 경쟁 — 이 스냅샷이 구독 하나를 놓칠 수 있다★:
         //   `handle_subscribe` 는 코어에 sink 를 등록한 **뒤** `subs` 에 기록한다. 그 두 단계 사이엔
         //   `.await` 가 없어 *취소*는 못 끼어들지만, ① 다른 워커에서 도는 read_task 가 아직 그 구간에
         //   있는 동안 이 정리가 스냅샷을 뜨거나(`ConnectionHandler::on_disconnect` 문서의 abort-겹침
-        //   경쟁 — 같은 뿌리) ② 그 구간에서 패닉하면(debug 빌드) 코어에만 남고 여기엔 안 잡힌다.
+        //   경쟁) ② 그 구간에서 패닉하면(debug 빌드) 코어에만 남고 여기엔 안 잡힌다.
         // ★결과 2가지★: (a) 좀비 sink 가 다음 emit 까지 잔존(코어의 dead-sink 제거로 자연 회복)
         //   (b) 그 sink 가 `Sender<Frame>` 사본을 붙들어 **write_task 의 송신단-드롭 자기종료가 깨진다**
         //   — `handle_connection` 의 select! 가 write 쪽 `abort()` 를 지워선 안 되는 이유(거기 주석).
@@ -308,8 +285,8 @@ impl ConnectionHandler for AgentConnection {
         }
 
         // ── 멀티뷰어 cleanup ───────────────────────────────────────────────────
-        // (a) viewport 재협상: 끊긴 연결의 viewport 들을 맵에서 빼고, 영향받은 agent 를 남은 뷰어 기준
-        //     smallest 로 다시 resize 한다(tmux detach 후 잔여 클라 기준으로 다시 키우는 것과 동일).
+        // (a) viewport 재협상 — 남은 뷰어 기준 smallest 로 다시 resize(tmux detach 후 잔여 클라
+        //     기준으로 다시 키우는 것과 동일).
         //     ★lock 순서★: remove_conn_viewports 가 multiview lock 안에서 협상값만 계산해 반환한 뒤
         //     lock 을 푼 상태에서 manager.resize 를 부른다(lock 보유 중 코어 호출 금지).
         let owned: Vec<(AgentId, String)> = {
@@ -323,38 +300,27 @@ impl ConnectionHandler for AgentConnection {
         if !owned.is_empty() {
             for (agent_id, negotiated) in self.core.multiview().remove_conn_viewports(&owned) {
                 if let Some((cols, rows)) = negotiated {
-                    // 남은 뷰어가 있으면 그 smallest 로 복귀. 없으면(None) 그대로 둔다(마지막 크기 유지).
                     let _ = manager.resize(agent_id, cols, rows);
                 }
+                // None = 남은 뷰어 없음 → 그대로 둔다(마지막 크기 유지).
             }
         }
-        // (b) 입력 lease 자동 해제: 보유자가 끊기면 다른 뷰어가 영영 막히면 안 된다(좀비 lock 방지).
-        //     해제된 agent 는 이제 lease 가 비었으니 InputLeaseChanged{held:false} 를 전 연결에 통보.
+        // (b) 입력 lease 자동 해제.
         for agent_id in self.core.multiview().release_all_for_conn(conn_id) {
             broadcast_lease_changed(self.core.fanout(), agent_id, false);
         }
     }
 }
 
-/// 연결마다 `AgentConnection` 을 조립하는 공장. 전 연결이 공유하는 실물(manager·multiview·
-/// 팬아웃 포트·control_registry·messaging 슬롯·shutdown 신호)을 한 번만 들고, 소켓이 설 때마다
-/// 그것들로 연결 1개짜리 `ConnectionCore` 를 묶는다.
 pub struct AgentConnections {
     manager: Arc<AgentManager>,
     multiview: MultiViewState,
-    /// 전-연결 브로드캐스트 출구(ADR-0129). 네트워크 행의 연결 레지스트리가 조립 시점에 꽂히지만,
-    ///   이 행이 표현할 수 있는 것은 "전부에게 이 text" 뿐이다.
     // ADR-0129
     fanout: Arc<dyn FrameFanout>,
-    /// ADR-0096: 봉투 포맷 전역 상태 거처 — SetEnvelopeFormat dispatch 가 쓴다. handle_send(MCP/CLI)가
-    ///   relay 마다 읽는 그 **같은 Arc**(전역 상태 하나).
     // ADR-0096
     control_registry: Arc<crate::control::registry::ControlRegistry>,
-    /// ADR-0116 결정 3: `DeleteProfile` dispatch 가 삭제 정리를 부를 메시징 커널 슬롯(늦은 주입 —
-    ///   서비스는 manager 조립 후에 생긴다).
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    /// StopDaemon 수신 시 main 종료를 트리거하는 watch.
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -380,8 +346,6 @@ impl AgentConnections {
 
 impl ConnectionHandlerFactory for AgentConnections {
     fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler> {
-        // ConnectionCore 는 연결마다 새로 묶는다 — 안에 든 manager/multiview/fanout/shutdown_tx 는
-        //   전 연결이 공유하나, dispatch 호출 경로를 연결 단위로 캡슐화한다.
         let core = Arc::new(ConnectionCore::new(
             self.manager.clone(),
             self.multiview.clone(),
@@ -410,10 +374,9 @@ mod tests {
     use crate::test_doubles::FakeFrameSink;
     use tokio::sync::mpsc;
 
-    /// 프레임 출구 더블. 네트워크 행 실물(`engram_dashboard_net::ws::ConnFrameSink`)은 이제
-    /// **부를 수도 없다** — 슬라이스 1 로 crate 가 갈리며 그 타입이 네트워크 crate 내부
-    /// (`pub(crate)`)에 남았다(ADR-0129). 그래서 이 행의 테스트는 포트 계약(`frame_port`)에만
-    /// 의존하는 더블을 쓴다.
+    /// 네트워크 행 실물(`engram_dashboard_net::ws::ConnFrameSink`)은 네트워크 crate 내부
+    /// (`pub(crate)`)라 **부를 수 없다**(ADR-0129) — 그래서 이 행의 테스트는 포트 계약
+    /// (`frame_port`)에만 의존하는 더블을 쓴다.
     fn frame_sink(tx: mpsc::Sender<Frame>) -> Arc<dyn FrameSink> {
         Arc::new(FakeFrameSink::new(tx))
     }
@@ -435,7 +398,6 @@ mod tests {
 
         match rx.recv().await.expect("one item") {
             Frame::Binary(buf) => {
-                // codec 으로 디코드해 헤더가 맞는지 확인.
                 let decoded = engram_dashboard_protocol::decode_frame(&buf).expect("decode");
                 assert_eq!(decoded.agent_id, agent_id);
                 assert_eq!(decoded.epoch, 7);
@@ -447,8 +409,6 @@ mod tests {
     }
 
     // ── 1b. (S15 B7) Event(구조화) payload 를 tag1 frame 으로 인코딩하는지 ──────
-    //    합성 OutputEvent → send → conn_tx 의 Binary 를 decode_frame 으로 풀어 tag1·헤더 확인 후,
-    //    payload 를 다시 wire StructuredEvent 로 serde 파싱해 필드가 보존됐는지 단언(ADR-0045 self-describing).
     #[tokio::test]
     async fn frame_output_sink_encodes_event_as_tag1_structured_frame() {
         use engram_dashboard_core::agent::types::OutputEvent as CoreOutputEvent;
@@ -459,7 +419,6 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
         let sink = FrameOutputSink::new(frame_sink(tx));
         let agent_id = uuid::Uuid::new_v4();
-        // 합성 구조화 이벤트(B3 미배선이라 런타임 생산자 없음 — 여기선 직접 만들어 tag1 경로를 태운다).
         let ev = CoreOutputEvent::ToolCall {
             name: "read".into(),
             args_json: r#"{"path":"/x"}"#.into(),
@@ -478,12 +437,10 @@ mod tests {
         match rx.recv().await.expect("one item") {
             Frame::Binary(buf) => {
                 let decoded = decode_frame(&buf).expect("decode");
-                // tag=1(structured) + 헤더 필드 그대로.
                 assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT, "tag1 이어야 함");
                 assert_eq!(decoded.agent_id, agent_id);
                 assert_eq!(decoded.epoch, 3);
                 assert_eq!(decoded.seq, 100);
-                // payload = JSON self-describing StructuredEvent. 파싱해 필드 보존 단언.
                 let parsed: WireStructuredEvent =
                     serde_json::from_slice(decoded.payload).expect("payload JSON 파싱");
                 assert_eq!(
@@ -505,12 +462,9 @@ mod tests {
     // ── 2. full → SinkError + replay_dropped ──────────────────────────────────
     #[tokio::test]
     async fn frame_output_sink_full_returns_error_and_marks_replay_dropped() {
-        // cap 1 채널을 가득 채운 뒤: send 가 Err 를 반환하고 replay_dropped 가 set 되는지.
-        // ★큐 포화의 out-of-band 종료 신호는 여기 관심사가 아니다★: 그건 프레임 출구 **구현**의 계약이고,
-        //   그걸 지키는 테스트는 `impl FrameSink for ConnFrameSink` 옆에 있다(★테스트 더블 쪽이 아니다★ —
-        //   더블은 종료 신호를 울리지 않는다). 테스트 함수명 대신 impl 블록을 가리키는 이유는 함수명이
-        //   개명·crate 분리 때 끊긴 참조가 되기 때문. 이 행이 책임지는 것은 `FrameSink` 가 준 Err 를
-        //   SinkError 로 올리고 replay 구간 사후 보정 플래그를 세우는 것까지다.
+        // ★큐 포화의 out-of-band 종료 신호는 여기 관심사가 아니다★: 그건 프레임 출구 **구현**의
+        //   계약이라 `impl FrameSink for ConnFrameSink` 옆에서 지켜진다(★테스트 더블은 종료 신호를
+        //   울리지 않는다★). 함수명 대신 impl 블록을 가리키는 것은 개명·crate 분리에 끊기지 않게.
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
         let sink = FrameOutputSink::new(frame_sink(tx));
         let replay_dropped = sink.replay_dropped_flag();
@@ -521,28 +475,19 @@ mod tests {
             seq,
             payload: OutputPayload::Bytes(b"x"),
         };
-        // 첫 send 성공(큐 1칸 채움).
         sink.send(frame(0)).expect("first ok");
-        // 두 번째는 full → Err.
         assert!(sink.send(frame(1)).is_err(), "full 이면 SinkError");
-
-        // replay 구간 사후 보정용 플래그도 set.
         assert!(
             replay_dropped.load(Ordering::Acquire),
             "drop 시 replay_dropped set"
         );
 
-        // 큐 첫 항목은 Binary(첫 frame).
         assert!(matches!(rx.recv().await.unwrap(), Frame::Binary(_)));
     }
 
     // ── 2b. 2차 핸드셰이크 판별(ADR-0129 0-4) ────────────────────────────────────
-    //    `on_text` 의 파싱 실패 갈래가 이 판정으로 갈린다: 핸드셰이크면 "already authenticated",
-    //    아니면 일반 "invalid command". e2e 회귀 방어는 ws_e2e case21 이고, 여기선 판정 자체를 고정한다.
     #[test]
     fn handshake_frame_is_recognized_after_auth() {
-        // ★태그의 정본과 묶는 자리★: 문자열 리터럴이 아니라 네트워크 crate 의 타입을 직렬화해 태운다.
-        //   그쪽이 태그를 바꾸면 이 판정이 못 따라간다는 것이 여기서 드러난다.
         let frame = engram_dashboard_net::auth::AuthFrame::Auth {
             token: "deadbeef".into(),
             protocol_version: 3,
@@ -556,9 +501,6 @@ mod tests {
 
     #[test]
     fn malformed_handshake_frames_are_recognized_too() {
-        // ★온전함이 아니라 태그로 센다★: 아래가 false 가 되면 낡은 클라가 ``unknown variant `Auth` ``
-        //   를 받는다 — 이 서버가 첫 프레임으로 유일하게 받아 주는 것이 Auth 인데 그런 건 없다고 답하는
-        //   꼴이라 디버깅을 반대 방향으로 보낸다.
         for text in [
             r#"{"Auth":{"token":"deadbeef"}}"#, // protocol_version 누락
             r#"{"Auth":123}"#,                  // 본문이 객체가 아님

@@ -6,14 +6,6 @@
 //!   더 이상 유효하지 않다(401). `from`(발신자 신원)은 항상 이 토큰에서 파생한다 — 페이로드가 아니라
 //!   토큰이 신원의 단일 출처다(ADR-0086 §불변식 "from 은 토큰에서만 파생", 사칭 차단).
 //!
-//! ★불변식(load-bearing)★:
-//!   - 토큰 → 신원 매핑은 (AgentId, epoch) 단위다. 같은 AgentId 라도 epoch 이 다르면 다른 토큰이다.
-//!   - `issue` 는 그 AgentId 의 **이전 epoch 토큰을 제거**하고 새 토큰을 넣는다(한 AgentId = 산 토큰
-//!     1개). 이렇게 하면 epoch 회전이 곧 구 토큰 폐기가 된다(별도 호출 불요 — 회전 자체가 폐기).
-//!   - `validate` 는 토큰 문자열 → 신원. 없거나 폐기됐으면 None(호출자가 401).
-//!   - 바인딩(`bind_session`)은 handshake 성공 후 Mcp-Session-Id → 신원을 기록한다(툴 호출이 세션에서
-//!     신원을 되찾게). revoke 시 그 세션 바인딩도 함께 지운다.
-//!
 //! ★보안★: 토큰 문자열은 로그에 찍지 않는다(tracing 은 AgentId/epoch 만). 토큰↔신원 역방향 조회를
 //!   위해 토큰 문자열을 key 로 쓰는 맵을 두되, Debug 파생은 하지 않는다(로그 누출 방지).
 //!
@@ -25,19 +17,16 @@ use std::sync::{Arc, RwLock};
 
 use engram_dashboard_core::agent::types::AgentId;
 
-// ADR-0110: 봉투 포맷·배달 관측 어휘는 메시징 커널 crate 소유(옛 자리는 control::ingress).
+// ADR-0110
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, EnvelopeFormat};
 
-/// 검증 성공 시 되돌리는 신원 — 토큰이 묶인 (AgentId, epoch). `from` 파생의 단일 출처(ADR-0086).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundIdentity {
     pub agent_id: AgentId,
     pub epoch: u32,
 }
 
-/// ★제어 채널 신원 → 메시징 커널 신원(ADR-0110 경계 번역)★ — 2필드 복사. 커널은 "토큰이 묶였다" 는
-///   호스트 인증 개념을 알 이유가 없어 자기 값 타입(`SenderIdentity`)을 쓴다. 이 impl 이 경계에서
-///   그 둘을 잇는 **유일한 지점**이다(입구가 `cmd.from.into()` 로 넘긴다).
+/// 이 impl 이 두 신원 타입을 잇는 경계의 **유일한 지점**이다(입구가 `cmd.from.into()` 로 넘긴다).
 // ADR-0110
 impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
     fn from(b: BoundIdentity) -> Self {
@@ -48,13 +37,13 @@ impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
     }
 }
 
-/// (AgentId, epoch)별 제어 채널 토큰 레지스트리. 데몬이 1개 소유(Arc 공유). 내부 RwLock —
-/// 읽기(validate, 툴 호출마다)가 쓰기(issue/revoke, 스폰·종료 때)보다 훨씬 잦다.
+/// 데몬이 1개 소유(Arc 공유). 내부 RwLock — 읽기(validate, 툴 호출마다)가 쓰기(issue/revoke,
+/// 스폰·종료 때)보다 훨씬 잦다.
 ///
 /// ★ADR-0088 배달 관측 슬롯★: `delivery_observer` 는 제어 채널 relay 의 배달-경계 관측 레코드를
 ///   받는 **선택적 in-process 싱크**다. 왜 여기 사나 = registry 는 이미 `handle_send` 를 포함한 모든
 ///   제어-플레인 경로에 `Arc` 로 스레드되는 유일한 공유 객체라, 관측 싱크를 여기 매달면 `handle_send`
-///   시그니처(+ 3개 호출부)를 건드리지 않고 in-proc 하네스가 관측을 설치할 수 있다(최소 풋프린트).
+///   시그니처와 그 호출부를 건드리지 않고 in-proc 하네스가 관측을 설치할 수 있다(최소 풋프린트).
 ///   운영 데몬은 이 슬롯을 비워 둔다(observer=None) → 기존 tracing 경로만 남고 오버헤드 0. 하네스는
 ///   `set_delivery_observer` 로 설치해 **detached 데몬 로그 스크레이핑 없이** 레코드를 직접 회수한다
 ///   (ADR-0088 HARD CONSTRAINT · ADR-0012 인프로세스 하네스 결).
@@ -74,11 +63,10 @@ pub struct ControlRegistry {
     ///   으로 리셋(영속화는 백로그 — ADR-0096 결정 4). read=relay 마다(Acquire), write=set_envelope_format
     ///   커맨드(드묾, Release) — Release/Acquire 짝으로 스위치 이후 첫 메시지가 새 포맷을 확실히 보게
     ///   한다(FIX-4). 단일 스칼라라 찢김은 없으나 cross-thread 가시성을 명시적으로 성립시킨다.
-    // ADR-0103 (기본 flip Colon→Xml — 값 매핑 0=Xml·1=Colon 으로 재배정)
+    // ADR-0103
     // ADR-0096
     envelope_format: AtomicU8,
-    /// 배달-경계 관측 싱크(ADR-0088) — 설치되지 않으면 None(운영 기본). RwLock: 설치는 드물고(테스트
-    ///   셋업 1회) 조회는 relay 마다지만 짧다. Debug 파생 안 함(위 Inner 와 함께 — 이 struct 는 Debug 없음).
+    /// RwLock: 설치는 드물고(테스트 셋업 1회) 조회는 relay 마다지만 짧다.
     delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
     /// ★mid-send yield-seam hook(ADR-0088 Stage 1 — test-harness 전용)★: `handle_send` 가 resolve↔write
     ///   갭의 **가장 늦은 지점**(write_stdin_observed 직전)에서 발화하는 test hook. 결정적 mid-flight
@@ -95,12 +83,8 @@ pub struct ControlRegistry {
 
 #[derive(Default)]
 struct Inner {
-    /// 토큰 문자열 → 신원. validate 의 역방향 조회(에이전트가 제시한 토큰 → 누구인가).
     token_to_identity: HashMap<String, BoundIdentity>,
-    /// AgentId → 현재 산 토큰. issue 가 이전 epoch 토큰을 token_to_identity 에서 제거하는 데 쓴다
-    /// (한 AgentId = 산 토큰 1개 — epoch 회전 = 구 토큰 폐기).
     agent_to_token: HashMap<AgentId, String>,
-    /// Mcp-Session-Id → 신원. handshake 성공 후 바인딩(bind_session) — 툴 핸들러가 세션에서 신원 복원.
     session_to_identity: HashMap<String, BoundIdentity>,
 }
 
@@ -109,17 +93,16 @@ impl ControlRegistry {
         Self::default()
     }
 
-    /// (AgentId, epoch)에 새 토큰을 발급해 등록하고 토큰 문자열을 돌려준다. 그 AgentId 의 **이전
-    /// epoch 토큰은 제거**한다(회전=폐기). token 은 호출자(provision)가 CSPRNG 로 만들어 넘긴다 —
-    /// 이 레지스트리는 난수 생성을 하지 않고 매핑만 소유한다(생성·매핑 관심사 분리).
+    /// 그 AgentId 의 **이전 epoch 토큰은 제거**한다(회전=폐기 — 한 AgentId = 산 토큰 1개).
+    /// token 은 호출자(provision)가 CSPRNG 로 만들어 넘긴다 — 이 레지스트리는 난수 생성을 하지 않고
+    /// 매핑만 소유한다(생성·매핑 관심사 분리).
     ///
     /// ★lock 순서(ADR-0006)★: write lock 은 이 함수 안에서만 잡고, 외부 호출을 하지 않는다(순수 맵 조작).
     pub fn issue(&self, id: AgentId, epoch: u32, token: String) {
         let mut inner = self.inner.write().expect("control registry poisoned");
-        // 이전 epoch 토큰 제거(있으면) — 회전 시 구 토큰이 살아남지 않게.
         if let Some(old) = inner.agent_to_token.remove(&id) {
             inner.token_to_identity.remove(&old);
-            // 옛 세션 바인딩도 무효(옛 토큰으로 붙은 세션은 이제 stale). 값 매칭으로 제거.
+            // 옛 토큰으로 붙은 세션 바인딩도 이제 stale — 함께 지운다.
             inner
                 .session_to_identity
                 .retain(|_, ident| ident.agent_id != id);
@@ -135,7 +118,7 @@ impl ControlRegistry {
         tracing::info!(agent = %id, epoch, "제어 채널 토큰 발급(ADR-0086)");
     }
 
-    /// 토큰 문자열 → 신원. 없거나 폐기됐으면 None(호출자 = auth 미들웨어가 401). 읽기 전용(read lock).
+    /// 없거나 폐기됐으면 None — 호출자(auth 미들웨어)가 401.
     pub fn validate(&self, token: &str) -> Option<BoundIdentity> {
         self.inner
             .read()
@@ -147,9 +130,8 @@ impl ControlRegistry {
 
     /// 발신자 생존 "관측"용 (게이트 아님 — 배달은 막지 않고 기록만, 사용자 결정 2026-07-19).
     ///
-    /// ★동작★: 그 AgentId 의 **현재** 산 토큰의 epoch 이 신원 epoch 과 같으면 true(생존), 아니면 false
-    ///   (kill/rotate 로 토큰이 폐기·교체됨). relay 시점엔 원본 토큰 문자열이 남아 있지 않으므로
-    ///   agent_to_token → token_to_identity 로 되짚어 epoch 일치를 본다(read lock 만, 순수 조회).
+    /// false = kill/rotate 로 토큰이 폐기·교체됨. relay 시점엔 원본 토큰 문자열이 남아 있지 않으므로
+    ///   agent_to_token → token_to_identity 로 되짚어 epoch 일치를 본다.
     pub fn is_identity_live(&self, identity: BoundIdentity) -> bool {
         let inner = self.inner.read().expect("control registry poisoned");
         inner
@@ -160,9 +142,9 @@ impl ControlRegistry {
             .unwrap_or(false)
     }
 
-    /// Mcp-Session-Id → **미들웨어가 검증한 신원**을 바인딩한다(ADR-0086). auth 미들웨어가 initialize
-    /// 응답에서 Mcp-Session-Id 를 발견했을 때 부른다 — 그 세션 키에 이 신원을 매단다. 이후 그 세션으로
-    /// 오는 요청의 신원 확인·acceptance 관측·revoke 정리 대상이 된다.
+    /// 넘기는 신원은 **미들웨어가 이미 검증한 것**이어야 한다(ADR-0086). auth 미들웨어가 initialize
+    /// 응답에서 Mcp-Session-Id 를 발견했을 때 부른다. 이후 그 세션으로 오는 요청의 신원 확인·
+    /// acceptance 관측·revoke 정리 대상이 된다.
     ///
     /// ★no-overwrite + exact-token recheck(FIX 7 + round-2 F2)★: 세션↔신원은 **initialize 때 한 번만**
     ///   고정한다(identity pinning). 이미 바인딩이 있으면 덮어쓰지 않는다 — 그래야 세션 S 를 토큰 A 로 열고
@@ -186,19 +168,14 @@ impl ControlRegistry {
         validated_token: &str,
     ) -> Option<BoundIdentity> {
         let mut inner = self.inner.write().expect("control registry poisoned");
-        // ★exact-token recheck(F2)★: 검증에 쓴 **그 토큰 문자열**이 아직 이 agent 의 현재 크레덴셜이어야
-        //   한다. validate→bind 사이에 revoke(evict) 또는 재발급(같은 agent 새 토큰)이 끼면 여기서 걸러진다.
-        //   identity(id,epoch) 일치만 보던 예전 방식은 epoch-always-bumps 불변식에 의존했으나, 이 국소 비교는
-        //   그 불변식이 깨져도(같은 id·epoch 재발급) stale 토큰의 바인딩을 막는다.
         let token_current = inner
             .agent_to_token
             .get(&identity.agent_id)
             .map(|cur| cur == validated_token)
             .unwrap_or(false);
         if !token_current {
-            return None; // 토큰이 evict/교체됨 → 바인딩 안 함(호출자가 unauthorized 처리).
+            return None;
         }
-        // no-overwrite: 이미 바인딩된 세션이면 그대로 둔다(identity pinning — 첫 init 신원 고정).
         if inner.session_to_identity.contains_key(session_id) {
             return None;
         }
@@ -213,7 +190,6 @@ impl ControlRegistry {
         Some(identity)
     }
 
-    /// Mcp-Session-Id → 신원 조회(툴 핸들러·미들웨어 identity-pin 검사가 부른다). 없으면 None.
     pub fn identity_for_session(&self, session_id: &str) -> Option<BoundIdentity> {
         self.inner
             .read()
@@ -223,9 +199,9 @@ impl ControlRegistry {
             .copied()
     }
 
-    /// Mcp-Session-Id 바인딩 제거(FIX 8) — 클라이언트가 세션을 DELETE 로 접으면 미들웨어가 부른다.
-    /// revoke-time 정리(revoke 가 값 매칭으로 지움)와 별개로, 정상 teardown 경로에서 session_to_identity
-    /// 가 무한 성장하지 않게 한다(반복 initialize→DELETE 가 엔트리를 쌓지 않음). 없으면 no-op.
+    /// 클라이언트가 세션을 DELETE 로 접으면 미들웨어가 부른다(FIX 8). revoke-time 정리와 별개로,
+    /// 정상 teardown 경로에서 session_to_identity 가 무한 성장하지 않게 한다(반복 initialize→DELETE 가
+    /// 엔트리를 쌓지 않음). 없으면 no-op.
     pub fn unbind_session(&self, session_id: &str) {
         let mut inner = self.inner.write().expect("control registry poisoned");
         if inner.session_to_identity.remove(session_id).is_some() {
@@ -245,12 +221,11 @@ impl ControlRegistry {
         match inner.agent_to_token.get(&id) {
             Some(token) => {
                 let cur = inner.token_to_identity.get(token).map(|i| i.epoch);
-                // epoch 불일치 = 그 사이 회전으로 새 토큰이 자리를 차지 → 지우지 않는다(산 토큰 보호).
                 if cur != Some(epoch) {
                     return;
                 }
             }
-            None => return, // 이미 폐기됨(idempotent).
+            None => return,
         }
         if let Some(token) = inner.agent_to_token.remove(&id) {
             inner.token_to_identity.remove(&token);
@@ -261,8 +236,8 @@ impl ControlRegistry {
         tracing::info!(agent = %id, epoch, "제어 채널 토큰 폐기(ADR-0086)");
     }
 
-    /// 관측용(ADR-0086 acceptance — "queryable registry method used by tests") — 현재 산 토큰이 걸린
-    /// AgentId 수. 통합 테스트(별도 크레이트)도 쓰므로 cfg(test) 로 감추지 않고 공개한다(순수 조회, 안전).
+    /// 관측용(ADR-0086 acceptance) — 통합 테스트(별도 크레이트)도 쓰므로 cfg(test) 로 감추지 않고
+    /// 공개한다(순수 조회, 안전).
     pub fn live_token_count(&self) -> usize {
         self.inner
             .read()
@@ -271,8 +246,7 @@ impl ControlRegistry {
             .len()
     }
 
-    /// 관측용(acceptance) — 바인딩된 MCP 세션 수(handshake 후 (AgentId,epoch) 세션 바인딩 존재 확인).
-    /// 통합 테스트가 "에이전트 연결 후 데몬이 세션을 붙잡았다"를 이 값으로 단언한다.
+    /// 관측용(acceptance) — 통합 테스트가 "에이전트 연결 후 데몬이 세션을 붙잡았다"를 이 값으로 단언한다.
     pub fn bound_session_count(&self) -> usize {
         self.inner
             .read()
@@ -281,8 +255,6 @@ impl ControlRegistry {
             .len()
     }
 
-    /// 배달-경계 관측 싱크 설치(ADR-0088) — in-proc 하네스가 relay 관측 레코드를 회수하려고 부른다.
-    /// 운영 데몬은 부르지 않는다(observer=None 유지 → 오버헤드 0). 재호출은 마지막 것으로 교체.
     pub fn set_delivery_observer(&self, observer: Arc<dyn DeliveryObserver>) {
         *self
             .delivery_observer
@@ -290,9 +262,9 @@ impl ControlRegistry {
             .expect("delivery observer poisoned") = Some(observer);
     }
 
-    /// 배달 관측 레코드 발행(ADR-0088) — `handle_send` 가 relay 성공/실패마다 부른다. 싱크가 설치돼
-    /// 있으면 넘기고, 없으면 no-op(운영 경로). ★락 규율(ADR-0006)★: observer Arc 를 clone 해 lock 을
-    /// 즉시 놓은 뒤 lock 밖에서 `observe` 를 호출한다(external call 을 lock 보유 중 하지 않는다).
+    /// 배달 관측 레코드 발행(ADR-0088) — `handle_send` 가 relay 성공/실패마다 부른다.
+    /// ★락 규율(ADR-0006)★: observer Arc 를 clone 해 lock 을 즉시 놓은 뒤 lock 밖에서 `observe` 를
+    /// 호출한다(external call 을 lock 보유 중 하지 않는다).
     ///
     /// ★관측은 배달·ACK 를 절대 교란하지 않는다(FIX-2 — 즉시 push 불변식)★: 유저 공급 `observe` 가
     ///   panic 하면 그 panic 이 `handle_send` 를 타고 올라가 relay(바이트는 이미 write 됨) 뒤 ACK 를
@@ -313,15 +285,12 @@ impl ControlRegistry {
             .expect("delivery observer poisoned")
             .clone();
         if let Some(sink) = sink {
-            // observe 는 유저(하네스) 코드다 → panic 이 배달 스레드를 오염시키지 않게 격리.
             // AssertUnwindSafe: panic 시 obs 는 소비돼 사라지고 우리는 로그만 남긴다(공유 불변식을
             //   깨진 채로 관측하지 않는다 — sink/obs 어느 것도 catch 이후 재사용하지 않음).
             let msg_id = obs.msg_id.clone();
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || sink.observe(obs)));
             if result.is_err() {
-                // ★배달은 이미 완료됐고 ACK 는 정상 진행된다★ — 이 warn 은 관측 싱크 버그의 forensic 이지
-                //   배달 실패가 아니다. body/토큰은 없다(레코드에 애초 안 담김, 보안).
                 tracing::warn!(
                     msg_id = %msg_id,
                     "ADR-0088: DeliveryObserver.observe 가 panic — 격리 삼킴(배달/ACK 는 영향 없음). 관측 싱크 버그."
@@ -331,46 +300,27 @@ impl ControlRegistry {
     }
 
     // ── 봉투 포맷 전역 상태(ADR-0096·0103) ──────────────────────────────────────────
-    //
-    // A→B 메시지 봉투 형식(xml/colon)의 데몬 전역 스위치. `handle_send` 가 relay 마다 read 하고,
-    // WS dispatch 의 SetEnvelopeFormat 커맨드가 write 한다. AtomicU8 **0=Xml·1=Colon(Default=Xml)**
-    // — ADR-0103 으로 기본 flip 하며 파생 Default(0) 를 새 기본값 Xml 에 매달려고 값 매핑을 뒤집었다.
 
-    /// 현재 봉투 포맷(ADR-0096·0103) — `handle_send` 가 봉투 조립 시 읽어 wrap_message 에 넘긴다.
-    /// ★알 수 없는 값 방어(fold-unknown = Xml)★: 저장은 아래 set_envelope_format 만 하므로 항상 0/1 이나,
-    ///   방어적으로 **1(Colon)만 Colon, 그 외는 Xml** 로 접는다 — 기본 안전 = 운영 정상값이 이제 xml
-    ///   이므로(ADR-0103) fold-unknown 도 Xml 로 정합시킨다(파생 Default 0 도 이 갈래로 Xml).
-    // ADR-0103 (fold-unknown → Xml)
+    /// ★알 수 없는 값 방어(fold-unknown = Xml)★: 저장은 set_envelope_format 만 하므로 항상 0/1 이나,
+    ///   방어적으로 **1(Colon)만 Colon, 그 외는 Xml** 로 접는다 — 기본 안전 = 운영 정상값이 xml
+    ///   이므로 fold-unknown 도 Xml 로 정합시킨다(파생 Default 0 도 이 갈래로 Xml).
+    // ADR-0103
     pub fn envelope_format(&self) -> EnvelopeFormat {
-        // ★Acquire(FIX-4)★: set_envelope_format 의 Release store 와 짝지어, 스위치 이후 첫 메시지가
-        //   새 포맷을 명확히 보게 한다(cross-thread 가시성 애매함 제거). 단일 스칼라라 Relaxed 로도
-        //   찢김은 없지만, 스위치 순간의 happens-before 를 명시적으로 성립시킨다.
         match self.envelope_format.load(Ordering::Acquire) {
             1 => EnvelopeFormat::Colon,
             _ => EnvelopeFormat::Xml,
         }
     }
 
-    /// 봉투 포맷 전역 상태를 설정한다(ADR-0096) — WS dispatch 의 SetEnvelopeFormat 커맨드가 부른다.
-    /// ★조종 표면 전용★: 이 setter 로 이어지는 유일 경로는 src-tauri Tauri command `set_envelope_format`
-    ///   → 데몬 SetEnvelopeFormat 커맨드다. 워커 MCP 채널엔 노출하지 않는다(ADR-0096 결정 3·ADR-0094).
-    ///   ★메모리-only★: 영속화하지 않는다 — 데몬 재시작 시 Xml 로 리셋(ADR-0103·백로그).
     pub fn set_envelope_format(&self, format: EnvelopeFormat) {
-        // ADR-0103: 값 매핑 재배정(0=Xml·1=Colon) — envelope_format() fold 와 대칭.
         let v = match format {
             EnvelopeFormat::Xml => 0u8,
             EnvelopeFormat::Colon => 1u8,
         };
-        // ★Release(FIX-4)★: envelope_format() 의 Acquire load 와 짝. 스위치 write 가 이후 relay 의
-        //   read 에 확실히 보이도록 happens-before 를 성립시킨다.
         self.envelope_format.store(v, Ordering::Release);
         tracing::info!(?format, "봉투 포맷 전역 상태 전환(ADR-0096)");
     }
 
-    /// ★mid-send yield-seam hook 설치/해제(ADR-0088 Stage 1 — test-harness 전용)★. `Some(hook)` 로 설치,
-    ///   `None` 으로 해제한다. 결정적 mid-flight epoch race 오라클이 이걸로 resolve↔write 갭에 개입한다.
-    ///   운영 빌드엔 이 메서드 자체가 없다(feature OFF).
-    // ADR-0088
     #[cfg(feature = "test-harness")]
     pub fn set_mid_send_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         // ★락 규율(ADR-0006 정신)★: 새 hook 을 꽂고 옛 hook Arc 는 **lock 밖에서** drop 한다. 락 보유 중
@@ -383,11 +333,8 @@ impl ControlRegistry {
         };
     }
 
-    /// ★mid-send yield-seam hook 발화(ADR-0088 Stage 1 — test-harness 전용)★: `handle_send` 가
-    ///   write_stdin_observed **직전**에 부른다. ★락 규율(ADR-0006)★: hook Arc 를 short read lock 밑에서
-    ///   clone 해 lock 을 즉시 놓은 뒤 **lock 밖에서** 호출한다 — foreign code(hook)를 registry lock 보유
-    ///   중에 절대 부르지 않는다(record_delivery 와 동일 규율). 설치 안 됐으면 no-op.
-    // ADR-0088
+    /// ★락 규율(ADR-0006)★: hook Arc 를 short read lock 밑에서 clone 해 lock 을 즉시 놓은 뒤
+    ///   **lock 밖에서** 호출한다 — foreign code(hook)를 registry lock 보유 중에 절대 부르지 않는다.
     #[cfg(feature = "test-harness")]
     pub fn fire_mid_send_hook(&self) {
         let hook = self
@@ -412,7 +359,6 @@ mod tests {
         t
     }
 
-    // 현재 산 토큰 문자열을 조회(exact-token bind 인자용 — 테스트가 registry 내부를 안 들여다보게 헬퍼로).
     fn current_token(reg: &ControlRegistry, id: AgentId) -> String {
         reg.inner
             .read()
@@ -441,7 +387,7 @@ mod tests {
 
     #[test]
     fn is_identity_live_tracks_revoke_and_rotation() {
-        // ★F3 회귀★: commit-point 재검증용. 산 토큰이 있으면 live, revoke/회전 후엔 그 신원은 dead.
+        // ★F3 회귀★ — commit-point 재검증.
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         tok(&reg, id, 0);
@@ -451,7 +397,6 @@ mod tests {
         };
         assert!(reg.is_identity_live(ident0), "발급 직후 신원은 live");
 
-        // 회전(epoch bump) → 옛 신원(epoch 0)은 dead, 새 신원(epoch 1)은 live.
         tok(&reg, id, 1);
         assert!(
             !reg.is_identity_live(ident0),
@@ -465,7 +410,6 @@ mod tests {
             "새 epoch 신원은 live"
         );
 
-        // revoke → 완전히 dead.
         reg.revoke(id, 1);
         assert!(
             !reg.is_identity_live(BoundIdentity {
@@ -475,7 +419,6 @@ mod tests {
             "revoke 후 신원은 dead(F3)"
         );
 
-        // 아예 발급된 적 없는 신원도 dead.
         assert!(
             !reg.is_identity_live(BoundIdentity {
                 agent_id: AgentId::new_v4(),
@@ -487,7 +430,6 @@ mod tests {
 
     #[test]
     fn epoch_rotation_revokes_old_token() {
-        // 재활성화(epoch bump) 시 새 issue 가 이전 epoch 토큰을 폐기해야 한다(stale 401).
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let old = tok(&reg, id, 0);
@@ -503,7 +445,6 @@ mod tests {
 
     #[test]
     fn revoke_matching_epoch_removes_token() {
-        // kill/terminal revoke(epoch 일치) → 토큰 폐기.
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let t = tok(&reg, id, 3);
@@ -514,23 +455,20 @@ mod tests {
 
     #[test]
     fn revoke_is_idempotent() {
-        // kill 선제 revoke + reaper revoke 이중 호출 안전(remove-if-present).
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         tok(&reg, id, 0);
         reg.revoke(id, 0);
-        reg.revoke(id, 0); // 두 번째는 no-op.
+        reg.revoke(id, 0);
         assert_eq!(reg.live_token_count(), 0);
     }
 
     #[test]
     fn stale_revoke_does_not_kill_live_token() {
-        // ★epoch-guard 회귀★: epoch 0 세션이 죽은 뒤 재활성화로 epoch 1 이 붙었는데, 지연된 epoch 0
-        //   terminal 이 revoke(id,0)을 부르면 산 epoch 1 토큰을 지우면 안 된다.
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         tok(&reg, id, 0); // 구 세션 토큰
-        let live = tok(&reg, id, 1); // 재활성화 — 새 산 토큰(구 토큰은 issue 가 이미 폐기)
+        let live = tok(&reg, id, 1); // 재활성화 — 새 산 토큰
         reg.revoke(id, 0); // 지연된 stale terminal
         assert!(
             reg.validate(&live).is_some(),
@@ -558,8 +496,7 @@ mod tests {
 
     #[test]
     fn bind_if_absent_no_overwrite_pins_identity() {
-        // ★identity pinning(FIX 7)★: 세션이 이미 신원 A 로 바인딩되면, 다른 신원 B 로 재바인딩 시도는
-        //   무시된다(None 반환, 기존 A 유지) — cross-token takeover 방지의 레지스트리 측 기반.
+        // ★identity pinning(FIX 7)★ — cross-token takeover 방지의 레지스트리 측 기반.
         let reg = ControlRegistry::new();
         let a = AgentId::new_v4();
         let b = AgentId::new_v4();
@@ -591,7 +528,6 @@ mod tests {
 
     #[test]
     fn bind_if_absent_rejects_revoked_token() {
-        // ★exact-token recheck(FIX 7 + F2)★: validate→bind 사이 revoke 가 끼어 토큰이 죽었으면 바인딩 안 함.
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let t = tok(&reg, id, 0);
@@ -610,11 +546,8 @@ mod tests {
 
     #[test]
     fn bind_if_absent_rejects_stale_token_after_same_agent_reissue() {
-        // ★round-2 F2 — exact-token(국소) 검사 회귀★: 같은 agent 로 토큰을 재발급하면(구 토큰 evict → 새
-        //   토큰), 구 토큰으로 검증됐던 뒤늦은 initialize 는 바인딩되면 안 된다. epoch-always-bumps 불변식에
-        //   기대지 않고, bind 가 넘겨받은 **정확한 토큰 문자열**이 현재 크레덴셜과 다름을 국소 비교로 잡는다.
-        //   (issue 는 같은 (id,epoch) 재호출이 가능하므로 여기서 epoch 를 올리지 않아도 재현된다 — 이것이
-        //    "원거리 불변식이 깨져도 안전" 을 증명하는 핵심.)
+        // ★round-2 F2 회귀★: issue 는 같은 (id,epoch) 재호출이 가능하므로 여기서 epoch 를 올리지 않아도
+        //   재현된다 — 이것이 "epoch-always-bumps 원거리 불변식이 깨져도 안전" 을 증명하는 핵심이다.
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let stale = tok(&reg, id, 0); // 최초 발급 — 이 토큰으로 validate 됐다고 가정.
@@ -622,21 +555,20 @@ mod tests {
             agent_id: id,
             epoch: 0,
         };
-        // 같은 agent(같은 epoch)로 재발급 — 구 토큰 evict, 새 토큰이 현재 크레덴셜.
+        // 같은 agent·같은 epoch 로 재발급.
         reg.issue(id, 0, "reissued-token".to_string());
         assert_ne!(
             current_token(&reg, id),
             stale,
             "재발급으로 현재 토큰이 바뀜"
         );
-        // 구(stale) 토큰으로 온 initialize 의 bind 시도 → 현재 크레덴셜과 불일치 → 바인딩 거부.
         assert_eq!(
             reg.bind_session_if_absent("sess", ident, &stale),
             None,
             "재발급된 뒤 stale 토큰의 세션은 바인딩되지 않아야(exact-token F2)"
         );
         assert!(reg.identity_for_session("sess").is_none());
-        // 대조군: 현재 토큰으로는 정상 바인딩.
+        // 대조군.
         let cur = current_token(&reg, id);
         assert_eq!(
             reg.bind_session_if_absent("sess", ident, &cur),
@@ -647,7 +579,6 @@ mod tests {
 
     #[test]
     fn unbind_session_prunes_binding() {
-        // ★FIX 8★: DELETE teardown 이 세션 바인딩을 제거한다(무한 성장 방지).
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let t = tok(&reg, id, 0);
@@ -689,15 +620,12 @@ mod tests {
     // ── ADR-0096·0103: 봉투 포맷 전역 상태 ────────────────────────────────────────────
     #[test]
     fn envelope_format_defaults_to_xml_and_toggles() {
-        // ★ADR-0103 기본 flip★: 새 registry 기본 = **Xml**(데몬 전역 상태 초기값, 파생 Default AtomicU8=0
-        //   → Xml). set 으로 Colon(잔존 스위치) 전환, 다시 Xml 복귀.
         let reg = ControlRegistry::new();
         assert_eq!(
             reg.envelope_format(),
             EnvelopeFormat::Xml,
             "새 registry 기본 봉투 포맷은 xml 이어야(ADR-0103 flip)"
         );
-        // colon 은 잔존 스위치 — 여전히 선택 가능.
         reg.set_envelope_format(EnvelopeFormat::Colon);
         assert_eq!(
             reg.envelope_format(),
@@ -714,7 +642,6 @@ mod tests {
 
     #[test]
     fn concurrent_issue_validate_is_safe() {
-        // 동시 접근 안전(RwLock) — 여러 스레드가 issue/validate 를 섞어도 panic·데이터 손상 없음.
         use std::sync::Arc;
         let reg = Arc::new(ControlRegistry::new());
         let mut handles = Vec::new();
