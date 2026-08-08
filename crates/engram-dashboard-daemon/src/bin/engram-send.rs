@@ -27,8 +27,7 @@
 //!
 //! ★의미 검증은 데몬(ingress) 단독★: 상호배타(`--request` + `--reply-to`)·기간 표기·수신자 해석은 전부
 //!   데몬이 판정한다 — MCP 입구와 반려 코드/문구가 같아야 하기 때문이다(entrance-agnostic). CLI 는 **형태**
-//!   (값 누락·모르는 플래그)와 **CLI 고유 배관**(`--body` ↔ `--body-stdin` 상호배타 — 데몬은 body 필드 하나만
-//!   알아서 이 충돌을 볼 수 없다)만 본다.
+//!   (값 누락·모르는 플래그)와 **CLI 고유 배관**(`--body` ↔ `--body-stdin` 상호배타)만 본다.
 //!
 //! ★의존성 최소화★: 블로킹 HTTP 클라이언트로 std `TcpStream` 위에 최소 HTTP/1.1 POST 를 손조립한다.
 //!   reqwest(blocking) 를 정식 의존으로 넣으면 tokio 런타임·TLS 스택까지 딸려 오는데, 이 CLI 는 로컬
@@ -49,10 +48,7 @@ fn main() {
     std::process::exit(code);
 }
 
-/// 진입 로직(main 이 부름) — exit code 반환. env 읽기·인자 파싱·요청·출력 매핑을 순서대로 한다.
-/// 실패는 전부 stdout 에 에러 JSON 을 찍고 1 을 돌려준다(발신 에이전트가 파싱해 자기교정).
 fn run(args: &[String]) -> i32 {
-    // 1) 인자 파싱(서브커맨드 포함 — D). stdin 본문 읽기도 여기서(파싱 결과가 요구할 때만).
     let parsed = match parse_command(args) {
         Ok(p) => p,
         Err(msg) => {
@@ -68,7 +64,6 @@ fn run(args: &[String]) -> i32 {
         }
     };
 
-    // 2) env 크레덴셜.
     let token = match std::env::var("ENGRAM_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         _ => {
@@ -90,14 +85,12 @@ fn run(args: &[String]) -> i32 {
         }
     };
 
-    // 3) 요청 조립 + 전송. 라우트·바디·판정기는 커맨드가 정한다(동사별 성공 shape 이 다르므로).
     let route = command.route();
     let request_body = command.request_body();
     let is_send = matches!(command, Command::Send { .. });
     match post_json(&base, route, &token, &request_body) {
         Ok(resp) => {
-            // 응답 body 를 그대로 찍는다(verbatim). exit code 는 HTTP status(2xx?) + body status 필드 둘 다 반영.
-            //   비-2xx 라도 body 가 있으면 찍는다(교정 JSON 일 수 있어 발신 에이전트가 파싱). status·body 로 매핑.
+            // 비-2xx 라도 body 를 찍는다 — 교정 JSON 이 실려 있어 발신 에이전트가 파싱한다.
             println!("{}", resp.body);
             if is_send {
                 exit_code_for_response(resp.status, &resp.body)
@@ -105,10 +98,6 @@ fn run(args: &[String]) -> i32 {
                 exit_code_for_query_response(resp.status, &resp.body)
             }
         }
-        // ★에러 코드 분기(M1)★: 전송 계층 실패는 그 종류에 맞는 코드로 stdout 에 찍는다. 특히
-        //   INCOMPLETE_RESPONSE(Content-Length 미달 = mid-body 절단)는 CONNECT_FAILED 와 구분해야 한다 —
-        //   절단된 버퍼가 우연히 JSON 으로 파싱돼 "가짜 성공(exit 0)"으로 새는 걸 막고(그래서 애초에 에러로
-        //   승격), 발신 에이전트가 "연결 자체 실패"와 "응답 절단"을 구별해 재시도/보고하게 한다.
         Err(e) => {
             print_error(e.code(), &e.to_string());
             1
@@ -117,8 +106,6 @@ fn run(args: &[String]) -> i32 {
 }
 
 /// 전송 계층 실패 분류(M1) — exit code 는 항상 1 이지만 **에러 코드**는 원인별로 갈라 stdout JSON 에 싣는다.
-/// CONNECT_FAILED = 연결/쓰기/읽기 IO 실패(전송 못 함) · INCOMPLETE_RESPONSE = 응답이 선언된
-/// Content-Length 보다 짧게 도착(mid-body 절단 — 우연 파싱으로 가짜 성공 나는 걸 원천 차단).
 #[derive(Debug)]
 enum SendError {
     /// 연결·쓰기·읽기 IO 실패 또는 응답 프레이밍 파싱 실패(base/URL 문제 포함).
@@ -128,7 +115,6 @@ enum SendError {
 }
 
 impl SendError {
-    /// stdout 에러 JSON 의 `code` 필드.
     fn code(&self) -> &'static str {
         match self {
             SendError::Connect(_) => "CONNECT_FAILED",
@@ -149,21 +135,15 @@ impl std::fmt::Display for SendError {
     }
 }
 
-/// 파싱된 CLI 인자(발송).
 #[derive(Debug)]
 struct CliArgs {
     to: String,
     body: String,
-    /// C3 — `--request`(회신 요구 플래그, 값 없음).
     request: bool,
-    /// C3 — `--reply-by <10m>`(기간 표기, `--request` 전용). 검증은 데몬(ingress)이 한다.
     reply_by: Option<String>,
-    /// C3 — `--reply-to <m-xxxx>`(어느 request 의 회신인가). `--request` 와 상호배타(데몬이 반려).
     reply_to: Option<String>,
 }
 
-/// 본문 출처(D) — `--body <text>` 리터럴이냐 `--body-stdin` 이냐.
-///
 /// ★왜 파싱 단계에서 stdin 을 읽지 않나(load-bearing — 테스트 가능성)★: 파서를 순수하게 유지해야 인자
 ///   조합 전수를 단위 테스트할 수 있다(stdin 은 프로세스 전역 자원이라 테스트 병렬 실행에서 공유된다).
 ///   그래서 파서는 "stdin 에서 읽어라" 는 **의도만** 값으로 남기고, 실제 읽기는 `materialize_body` 가
@@ -174,7 +154,6 @@ enum BodySource {
     Stdin,
 }
 
-/// 파싱 결과 — 아직 stdin 을 읽기 전 상태(`materialize_body` 가 `Command` 로 굳힌다).
 #[derive(Debug)]
 enum ParsedCommand {
     Send {
@@ -190,7 +169,6 @@ enum ParsedCommand {
     Pending,
 }
 
-/// 실행 가능한 커맨드(본문까지 확정됨) — 라우트·바디를 자기가 안다.
 #[derive(Debug)]
 enum Command {
     Send(CliArgs),
@@ -199,8 +177,6 @@ enum Command {
 }
 
 impl Command {
-    /// 이 커맨드가 POST 할 데몬 라우트(base 뒤에 붙는 경로).
-    ///
     /// ★경로 지식은 CLI 소유(ADR-0086)★: 데몬은 base URL 만 env 로 준다 — 라우트 조립은 여기가 정본이고,
     ///   데몬측 상수(`mcp_server.rs` CONTROL_*_PATH)와 **손으로 맞춰져** 있다(빌드가 강제 못 함).
     fn route(&self) -> &'static str {
@@ -210,28 +186,19 @@ impl Command {
         }
     }
 
-    /// 요청 JSON 문자열. escape 는 serde_json 이 처리(손조립 금지). 신원 필드 없음(토큰 파생).
     fn request_body(&self) -> String {
         match self {
             Command::Send(a) => build_request_body(a),
             Command::Status { id } => serde_json::json!({ "id": id }).to_string(),
-            // 무인자 조회 = "내 미결". 빈 객체를 실어 라우트만 지목한다(신원은 토큰).
             Command::Pending => serde_json::json!({}).to_string(),
         }
     }
 }
 
-/// 인자 → `ParsedCommand`(순수 — stdin·env 를 읽지 않는다).
-///
-/// ★서브커맨드 판정(D)★: 첫 인자가 `--` 로 시작하지 **않으면** 서브커맨드로 본다. 인자가 아예 없거나 첫
-///   인자가 플래그면 기본 동사 = 발송이다(옛 호출 형태 `engram-send --to … --body …` 와 100% 하위호환 —
-///   기존 프라이밍·스크립트가 그대로 돈다).
+/// ★기본 동사 = 발송(D)★: 인자가 아예 없거나 첫 인자가 플래그면 발송이다 — 옛 호출 형태
+///   `engram-send --to … --body …` 와 100% 하위호환이라 기존 프라이밍·스크립트가 그대로 돈다.
 /// ★kebab-case 플래그 ↔ snake_case wire(spec §1 표기 매핑)★: 셸 관례는 `--reply-by`, JSON 필드는
 ///   `reply_by` 다 — 변환은 `Command::request_body` 한 곳에서만 한다.
-/// ★의미 검증은 여기서 안 한다(의도적)★: 상호배타(`--request` + `--reply-to`)·기간 표기·그룹 인자 조합은
-///   **데몬**이 판정한다(ingress 단일 지점 — MCP 입구와 반려 코드/문구가 동일해야 하므로). CLI 는 형태만
-///   본다. 예외는 `--body` ↔ `--body-stdin` 충돌 하나인데, 그건 wire 계약이 아니라 **CLI 고유 배관**이라
-///   (데몬은 body 필드 하나만 알아 이 충돌을 볼 수조차 없다) 여기서 잡는 게 유일한 자리다.
 fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
     match args.first().map(|s| s.as_str()) {
         Some("status") => {
@@ -252,12 +219,10 @@ fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
             }
             Ok(ParsedCommand::Pending)
         }
-        // 첫 인자가 플래그이거나 인자가 없다 = 발송(기본 동사, 하위호환).
         _ => parse_send_args(args),
     }
 }
 
-/// 발송 플래그 파싱(순서 무관). `--to` 필수 + 본문은 `--body` 또는 `--body-stdin` 중 **정확히 하나**.
 /// ★플래그 설계(메인 재량, 보고)★: 명시 `--to`/`--body` 한 쌍 — 위치 인자는 body 에 공백/따옴표가 섞이면
 ///   셸 인용이 깨지기 쉬워(스파이크에서 관찰된 실패 모드) 명시 플래그로 고정한다.
 fn parse_send_args(args: &[String]) -> Result<ParsedCommand, String> {
@@ -278,7 +243,6 @@ fn parse_send_args(args: &[String]) -> Result<ParsedCommand, String> {
                 i += 1;
                 body = Some(args.get(i).ok_or("--body requires a value")?.clone());
             }
-            // 값 없는 불리언 플래그 — 뒤 인자를 소비하지 않는다.
             "--body-stdin" => body_stdin = true,
             "--request" => request = true,
             "--reply-by" => {
@@ -322,13 +286,11 @@ fn parse_send_args(args: &[String]) -> Result<ParsedCommand, String> {
     })
 }
 
-/// stdin 을 끝까지 읽어 문자열로(운영 리더). **비-UTF8 바이트는 lossy 치환**한다(U+FFFD).
-///
 /// ★왜 lossy 인가(D 리뷰 A2 — 구현으로 정렬)★: 이전 구현은 `read_to_string` 이라 잘못된 UTF-8 을 만나면
-///   `InvalidData` 로 **발송 자체를 거부**했다(주석은 lossy 라고 적혀 있어 코드와 문서가 어긋나 있었다).
-///   이 CLI 가 도는 자리는 Windows 셸이고, cp949 로 인코딩된 파이프 입력이 현실적으로 들어온다 — 그때
-///   "메시지를 아예 못 보낸다" 보다 "몇 글자가 U+FFFD 로 깨진 채라도 팀에 전달된다" 가 낫다. 본문은 사람이
-///   읽는 텍스트지 바이트 정확성이 계약인 데이터가 아니고(봉투 XML 이스케이프는 데몬이 별도 처리),
+///   `InvalidData` 로 **발송 자체를 거부**했다. 이 CLI 가 도는 자리는 Windows 셸이고, cp949 로 인코딩된
+///   파이프 입력이 현실적으로 들어온다 — 그때 "메시지를 아예 못 보낸다" 보다 "몇 글자가 U+FFFD 로 깨진
+///   채라도 팀에 전달된다" 가 낫다. 본문은 사람이 읽는 텍스트지 바이트 정확성이 계약인 데이터가
+///   아니고(봉투 XML 이스케이프는 데몬이 별도 처리),
 ///   조용한 유실보다 가시적 열화를 택하는 이 프로젝트의 기조와도 같은 방향이다.
 /// ★상한 방어는 데몬이 한다★: 64KiB 초과는 `BODY_TOO_LARGE` 로 반려된다(ingress).
 fn read_stdin_to_string() -> Result<String, String> {
@@ -339,9 +301,6 @@ fn read_stdin_to_string() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// `ParsedCommand` → 실행 가능한 `Command`(본문 확정). stdin 리더를 **주입**받아 파서·본문 조립을 순수하게
-/// 테스트할 수 있게 한다(BodySource 주석).
-///
 /// ★본문 trim 하지 않음★: 앞뒤 공백·개행은 발신자가 의도한 내용일 수 있다(코드 블록·heredoc 마지막 개행).
 ///   데몬도 body 를 trim 하지 않는다(ingress 규율) — 두 층이 같은 규칙을 지킨다.
 /// ★빈 stdin 은 반려★: heredoc 을 붙이지 않고 `--body-stdin` 만 친 경우(흔한 실수)를 빈 본문 발송으로
@@ -385,7 +344,7 @@ fn materialize_body(
 }
 
 /// `{to, body, request?, reply_by?, reply_to?}` 요청 JSON 문자열. escape 는 serde_json 이 처리(손조립
-/// 금지). from 필드 없음(신원=토큰).
+/// 금지).
 ///
 /// ★미지정 인자는 **키 자체를 안 싣는다**★: `request:false`/`reply_by:null` 을 실어도 데몬은 같게 읽지만,
 ///   옛 `{to, body}` 바디와 바이트 동형을 유지해 통보 경로의 wire 회귀 위험을 0 으로 둔다.
@@ -403,7 +362,6 @@ fn build_request_body(args: &CliArgs) -> String {
     v.to_string()
 }
 
-/// 발송이 실패(반려·전송 오류)했을 때의 exit code — 발신 에이전트가 "안 갔다" 로 읽는 값.
 const EXIT_FAILED: i32 = 1;
 
 /// ★성공 shape 자체가 깨졌을 때의 exit code(리뷰 fix 13)★ — 2xx 인데 body 가 spec §6 성공 shape 을 만족하지
@@ -413,9 +371,24 @@ const EXIT_FAILED: i32 = 1;
 const EXIT_MALFORMED_SUCCESS: i32 = 2;
 
 /// 성공 `results[]` 항목이 가질 수 있는 상태 어휘(spec §5·§6). 이 밖의 값은 shape 위반으로 본다.
-///   ★`skipped` 는 폐지되고 `failed` 가 들어왔다(ADR-0111 결정 3)★ — 실패 행은 그 수신자만의 실패이고
-///   발송 자체는 접수됐으므로 **exit 0** 이다(부분 진행이 정상 경로 — 발신자가 `results[]` 를 읽고 판단한다).
+///   ★`failed` 행이 있어도 exit 0(ADR-0111 결정 3 부분 진행)★ — 그 수신자만의 실패이고 발송 자체는
+///   접수됐다. 누구에게 안 갔는지는 발신자가 `results[]` 를 읽고 판단한다.
 const VALID_RESULT_STATUSES: [&str; 3] = ["delivered", "pending", "failed"];
+
+/// 반려 shape(`{ status:"error", code, hint }` — spec §6)을 **검증**한다: `status` 가 정확히 `"error"` 이고
+/// `code` 가 비어 있지 않은 문자열일 때만 true.
+///
+/// ★왜 검증하나(리뷰 fix 14 · load-bearing)★: 예전엔 `results` 키가 없기만 하면 무조건 실패(1)로 뭉갰다 —
+///   `{}` 나 `{"id":"m-x"}`(성공 응답이 절반만 온 경우)도 "반려" 로 보고했다는 뜻이다. 반려는 `code` 로
+///   분기할 수 있을 때만 반려다 — 그 외 2xx JSON 은 전부 shape 결함(2)으로 갈라 "보고 대상" 임을 알린다.
+fn is_validated_error_shape(v: &serde_json::Value) -> bool {
+    let status_is_error = v.get("status").and_then(|s| s.as_str()) == Some("error");
+    let code_ok = v
+        .get("code")
+        .and_then(|c| c.as_str())
+        .is_some_and(|s| !s.is_empty());
+    status_is_error && code_ok
+}
 
 /// (HTTP status, body) → exit code. 성공(0) 조건 = **HTTP 2xx** 이고 body 가 spec §6 성공 shape 을 **완전히**
 /// 만족할 때. **검증된** 반려 shape(`is_validated_error_shape`)·프레이밍 오류(비-JSON)·비-2xx 는
@@ -434,25 +407,6 @@ const VALID_RESULT_STATUSES: [&str; 3] = ["delivered", "pending", "failed"];
 /// ★비-2xx 는 항상 1★: status 를 무시하면 프레이밍 오류를 성공으로 오인할 위험이 있어 게이트를 둔다.
 ///   body 파싱 실패(비-JSON)도 1 — 2xx + 비-JSON 은 "성공 shape 위반" 이 아니라 프레이밍 실패로 본다
 ///   (절단·프록시 오류가 이 모양이라, 이미 있는 실패 축에 붙이는 게 정직하다).
-/// ★stderr 로 사유 한 줄★: stdout 은 응답 body **verbatim** 전용이라(발신 에이전트가 파싱) 오염시키지
-///   않는다. 사람이/로그가 읽을 사유는 stderr 로 낸다.
-/// 반려 shape(`{ status:"error", code, hint }` — spec §6)을 **검증**한다: `status` 가 정확히 `"error"` 이고
-/// `code` 가 비어 있지 않은 문자열일 때만 true.
-///
-/// ★왜 검증하나(리뷰 fix 14 · load-bearing)★: 예전엔 `results` 키가 없기만 하면 무조건 실패(1)로 뭉갰다 —
-///   `{}` 나 `{"id":"m-x"}`(성공 응답이 절반만 온 경우)도 "반려" 로 보고했다는 뜻이다. 그러면 발신 에이전트는
-///   **자기 인자를 고쳐 재시도**하는데(반려의 처방), 실제 원인은 데몬/프록시/버전 불일치라 몇 번을 고쳐도
-///   같은 결과가 나온다(무한 자기교정). 반려는 `code` 로 분기할 수 있을 때만 반려다 — 그 외 2xx JSON 은
-///   전부 shape 결함(2)으로 갈라 "보고 대상" 임을 알린다.
-fn is_validated_error_shape(v: &serde_json::Value) -> bool {
-    let status_is_error = v.get("status").and_then(|s| s.as_str()) == Some("error");
-    let code_ok = v
-        .get("code")
-        .and_then(|c| c.as_str())
-        .is_some_and(|s| !s.is_empty());
-    status_is_error && code_ok
-}
-
 fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
     if !(200..300).contains(&status) {
         return EXIT_FAILED;
@@ -462,11 +416,8 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
     };
     // ★`status:"error"` 를 **가장 먼저** 본다(round-2 리뷰 F4 · load-bearing)★: 예전엔 이 검사가 "results 가
     //   없을 때" 안에만 있어서, **혼종** 응답(`{"status":"error", …, "results":[…]}`)이 error 축을 건너뛰고
-    //   성공 shape 검사로 흘러 **exit 0** 이 났다 — 반려당한 발송을 성공으로 읽는 조용한 실패다. 조회 경로
-    //   (`exit_code_for_query_response`)와 **같은 불변식**을 여기서도 최우선으로 세운다:
+    //   성공 shape 검사로 흘러 **exit 0** 이 났다 — 반려당한 발송을 성공으로 읽는 조용한 실패다.
     //   status 가 error 인 2xx 객체는 어떤 형태든 0 이 될 수 없다.
-    //     · 검증된 반려 shape(status+비지 않은 code) → `EXIT_FAILED`(발신자가 인자를 고쳐 재시도)
-    //     · code 로 분기 불가한 error → `EXIT_MALFORMED_SUCCESS`(자기교정 대상이 아니라 보고 대상 — fix 14)
     if v.get("status").and_then(|s| s.as_str()) == Some("error") {
         if is_validated_error_shape(&v) {
             return EXIT_FAILED;
@@ -476,7 +427,6 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
         );
         return EXIT_MALFORMED_SUCCESS;
     }
-    // 여기 도달 = error 축이 아니다. `results` 가 없으면 성공 shape 도 아니므로 shape 결함(2)이다.
     let Some(results) = v.get("results") else {
         eprintln!(
             "engram-send: malformed success response — neither a success shape ('results') nor a valid error shape ('status':\"error\" + non-empty 'code')"
@@ -534,10 +484,7 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
 /// ★`status:"error"` 는 **절대 0 이 될 수 없다**(D 리뷰 B5 · load-bearing)★: 반전 검증만 두면
 ///   `{"status":"error"}`(code 없음)나 `{"status":"error","code":""}` 같은 **반쯤 깨진 반려**가 "에러 shape 도
 ///   아니고 객체이긴 하다" 로 통과해 **exit 0** 이 났다 — 호출자는 반려당한 걸 성공으로 읽는다(조용한 실패의
-///   교과서적 형태). 그래서 `status` 필드가 `"error"` 인 객체는 먼저 걸러 두 갈래로만 보낸다:
-///   완전한 반려 shape → `EXIT_FAILED`(발신자가 인자를 고쳐 재시도) / 깨진 반려 shape → `EXIT_MALFORMED_SUCCESS`
-///   (code 로 분기할 수 없으니 자기교정 대상이 아니라 **보고** 대상 — 발송 경로의 fix 14 와 같은 판단).
-/// ★비-2xx·비-JSON 은 1★: 발송과 같은 프레이밍 축(절단·인증 실패 등).
+///   교과서적 형태). 그래서 `status` 필드가 `"error"` 인 객체는 먼저 걸러 두 갈래로만 보낸다.
 fn exit_code_for_query_response(status: u16, resp_body: &str) -> i32 {
     if !(200..300).contains(&status) {
         return EXIT_FAILED;
@@ -548,7 +495,6 @@ fn exit_code_for_query_response(status: u16, resp_body: &str) -> i32 {
     if is_validated_error_shape(&v) {
         return EXIT_FAILED;
     }
-    // ★반려를 성공으로 새게 하지 않는 게이트(B5)★ — 검증 통과 못 한 error-status 는 shape 결함(2).
     if v.get("status").and_then(|s| s.as_str()) == Some("error") {
         eprintln!(
             "engram-send: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
@@ -564,7 +510,6 @@ fn exit_code_for_query_response(status: u16, resp_body: &str) -> i32 {
     0
 }
 
-/// 파싱된 HTTP 응답 — status code + body 텍스트. run() 이 둘 다 봐서 exit code 를 정한다.
 /// (Debug = 단위 테스트에서 expect_err 시 Ok 쪽 표시용.)
 #[derive(Debug)]
 struct HttpResponse {
@@ -572,10 +517,9 @@ struct HttpResponse {
     body: String,
 }
 
-/// base URL(`http://host:port`) + 라우트로 최소 HTTP/1.1 POST → 파싱된 응답(status+body).
-/// 로컬 평문 HTTP 전용(TLS 미지원 — 데몬은 127.0.0.1 평문). 실패는 SendError(연결/절단 구분, M1).
+/// 로컬 평문 HTTP 전용(TLS 미지원 — 데몬은 127.0.0.1 평문).
 ///
-/// ★라우트 인자화(D)★: 발송·조회·그룹이 같은 서버·같은 auth·같은 프레이밍을 쓰므로 경로만 갈아 끼운다
+/// ★라우트 인자화(D)★: 발송·조회가 같은 서버·같은 auth·같은 프레이밍을 쓰므로 경로만 갈아 끼운다
 ///   (동사마다 HTTP 클라이언트를 복제하면 절단 처리·헤더 규약이 세 벌이 된다).
 fn post_json(
     base: &str,
@@ -593,8 +537,8 @@ fn post_json(
         .and_then(|_| stream.set_write_timeout(Some(TIMEOUT)))
         .map_err(|e| SendError::Connect(format!("set timeout failed: {e}")))?;
 
-    // HTTP/1.1 POST 손조립. Content-Length 필수(서버가 body 경계를 알게), Connection: close(응답 후 종료 →
-    //   서버가 응답 뒤 소켓을 닫아 read_to_end 가 결정적으로 EOF 를 본다).
+    // Content-Length 필수(서버가 body 경계를 알게), Connection: close(응답 후 종료 → 서버가 응답 뒤 소켓을
+    //   닫아 read_to_end 가 결정적으로 EOF 를 본다).
     let req = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host}:{port}\r\n\
@@ -626,9 +570,7 @@ fn post_json(
 ///     body 가 선언된 길이보다 **짧으면**(mid-body 절단) INCOMPLETE_RESPONSE 에러 — 절단 버퍼가 우연히
 ///     JSON 으로 파싱돼 가짜 성공(exit 0)으로 새는 걸 원천 차단한다(M1).
 ///   - 둘 다 없으면 나머지 전부를 body 로(Connection: close read-to-EOF fallback).
-/// body 는 UTF-8 lossy 로 문자열화(로컬 데몬은 JSON UTF-8). 파싱 불가·절단이면 SendError.
 fn parse_response(raw: &[u8]) -> Result<HttpResponse, SendError> {
-    // 헤더/본문 경계 = 최초 CRLF CRLF.
     let sep = find_subslice(raw, b"\r\n\r\n").ok_or_else(|| {
         SendError::Connect("malformed HTTP response (no header/body separator)".to_string())
     })?;
@@ -637,7 +579,6 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse, SendError> {
     let head_text = String::from_utf8_lossy(head);
     let mut lines = head_text.split("\r\n");
 
-    // status line — `HTTP/1.1 200 OK`. 두 번째 토큰이 status code.
     let status_line = lines.next().ok_or_else(|| {
         SendError::Connect("malformed HTTP response (no status line)".to_string())
     })?;
@@ -647,7 +588,6 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse, SendError> {
         .and_then(|c| c.parse().ok())
         .ok_or_else(|| SendError::Connect(format!("malformed HTTP status line: {status_line}")))?;
 
-    // 헤더 파싱(대소문자 무시 key). Content-Length·Transfer-Encoding 만 관심.
     let mut content_length: Option<usize> = None;
     let mut chunked = false;
     for line in lines {
@@ -670,10 +610,6 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse, SendError> {
     let body = if chunked {
         dechunk(body_bytes)?
     } else if let Some(len) = content_length {
-        // ★short read = 에러(M1)★: 수신 body 가 선언된 Content-Length 보다 짧으면 연결이 body 도중 끊긴
-        //   것이다. 예전엔 min() 으로 있는 만큼만 취했는데, 절단된 조각이 우연히 유효 JSON 이면
-        //   exit_code_for_response 가 "enqueued" 로 오인해 가짜 성공(exit 0)이 날 수 있다. 그래서 절단은
-        //   조용히 받지 않고 INCOMPLETE_RESPONSE 로 승격한다. (초과분은 파이프라인 잔재라 무시 — len 만큼만.)
         if body_bytes.len() < len {
             return Err(SendError::Incomplete {
                 received: body_bytes.len(),
@@ -682,7 +618,6 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse, SendError> {
         }
         String::from_utf8_lossy(&body_bytes[..len]).to_string()
     } else {
-        // read-to-EOF fallback(Connection: close). 남은 전부가 body.
         String::from_utf8_lossy(body_bytes).to_string()
     };
     Ok(HttpResponse {
@@ -698,25 +633,22 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse, SendError> {
 fn dechunk(mut bytes: &[u8]) -> Result<String, SendError> {
     let mut out: Vec<u8> = Vec::new();
     loop {
-        // 청크 크기 라인 = 다음 CRLF 까지.
         let line_end = find_subslice(bytes, b"\r\n").ok_or_else(|| {
             SendError::Connect("malformed chunked body (no size line)".to_string())
         })?;
         let size_line = String::from_utf8_lossy(&bytes[..line_end]);
-        // chunk extension 제거(`;` 앞만) + hex 파싱.
         let hex = size_line.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(hex, 16)
             .map_err(|e| SendError::Connect(format!("malformed chunk size '{hex}': {e}")))?;
-        bytes = &bytes[line_end + 2..]; // 크기 라인 CRLF 소비.
+        bytes = &bytes[line_end + 2..];
         if size == 0 {
-            break; // 마지막 청크(trailer 무시).
+            break;
         }
         if bytes.len() < size {
             return Err(SendError::Connect("truncated chunked body".to_string()));
         }
         out.extend_from_slice(&bytes[..size]);
         bytes = &bytes[size..];
-        // 청크 데이터 뒤 CRLF 소비(있으면).
         if bytes.starts_with(b"\r\n") {
             bytes = &bytes[2..];
         }
@@ -724,7 +656,7 @@ fn dechunk(mut bytes: &[u8]) -> Result<String, SendError> {
     Ok(String::from_utf8_lossy(&out).to_string())
 }
 
-/// haystack 안에서 needle 의 첫 시작 인덱스(std 만 — memchr 미의존).
+/// std 만 — memchr 미의존.
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -732,12 +664,11 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// base URL 의 host·port 추출. `http://127.0.0.1:PORT` 형태 전제(스킴은 http 만). 실패는 Err.
+/// `http://127.0.0.1:PORT` 형태 전제(스킴은 http 만).
 fn parse_host_port(base: &str) -> Result<(String, u16), String> {
     let rest = base
         .strip_prefix("http://")
         .ok_or_else(|| format!("unsupported control url (expected http://): {base}"))?;
-    // path 가 붙어 있으면 잘라낸다(authority 만).
     let authority = rest.split('/').next().unwrap_or(rest);
     let (host, port) = authority
         .rsplit_once(':')
@@ -748,7 +679,6 @@ fn parse_host_port(base: &str) -> Result<(String, u16), String> {
     Ok((host.to_string(), port))
 }
 
-/// base URL 에서 path prefix 추출(authority 뒤). 대개 빈 문자열(base=host:port). 있으면 그대로 붙인다.
 fn base_path(base: &str) -> String {
     let rest = base.strip_prefix("http://").unwrap_or(base);
     match rest.find('/') {
@@ -757,7 +687,7 @@ fn base_path(base: &str) -> String {
     }
 }
 
-/// 에러 JSON 을 stdout 에 찍는다(ACK/에러와 같은 shape — status/code/hint). 발신 에이전트가 파싱해 자기교정.
+/// 데몬 ACK/에러와 **같은 shape**(status/code/hint)으로 낸다 — 발신 에이전트가 파싱해 자기교정한다.
 fn print_error(code: &str, hint: &str) {
     let v = serde_json::json!({ "status": "error", "code": code, "hint": hint });
     println!("{v}");
