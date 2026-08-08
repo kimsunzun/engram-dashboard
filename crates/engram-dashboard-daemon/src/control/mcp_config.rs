@@ -2,10 +2,9 @@
 //!
 //! ★역할★: provision 시 (AgentId, epoch)용 파일을 데이터 디렉토리 아래에 쓰고 revoke 시 지운다. 두 종류다:
 //!   ① **mcp-config**(`--mcp-config`) — 제어 채널 엔드포인트 + Bearer 토큰.
-//!   ② **세션 설정 조각**(`--settings`, S18 D) — 그 세션에만 engram MCP 서버를 허용하는 최소 조각
-//!      (`settings_path` 주석 — 같은 폴더·같은 수명·같은 부팅 스윕을 재사용한다).
-//!   아래 설명은 ①을 기준으로 읽되, 생성/삭제/스윕 규율은 ②에도 그대로 적용된다. 파일에는 데몬 MCP 엔드포인트 URL + Bearer 토큰(Authorization 헤더)이 담긴다 — claude 가
-//!   이 파일을 읽어 initialize/tools/list/tools/call 전 요청에 헤더를 실어 보낸다(claude 2.1.170 실측).
+//!   ② **세션 설정 조각**(`--settings`, S18 D) — 그 세션에만 engram MCP 서버를 허용하는 최소 조각.
+//!   아래 설명은 ①을 기준으로 읽되, 생성/삭제/스윕 규율은 ②에도 그대로 적용된다. claude 는 ① 을 읽어
+//!   initialize/tools/list/tools/call 전 요청에 Authorization 헤더를 실어 보낸다(claude 2.1.170 실측).
 //!
 //! ★스키마(claude Streamable HTTP MCP 서버)★:
 //! ```json
@@ -29,8 +28,7 @@ use std::path::{Path, PathBuf};
 
 use engram_dashboard_core::agent::types::AgentId;
 
-/// 스폰 부착 파일(mcp-config + 세션 설정 조각)이 사는 하위 디렉토리명(데이터 디렉토리 기준). 다른
-/// 산출물(agents.json 등)과 섞이지 않게 전용 폴더로 격리한다. revoke 시 파일만 지우고 폴더는 남긴다(재사용).
+/// 다른 산출물(agents.json 등)과 섞이지 않게 전용 폴더로 격리한다.
 /// ★이름은 `mcp-config` 로 유지★: 폴더명을 바꾸면 옛 데이터 디렉토리에 남은 파일이 스윕 대상에서 빠져
 ///   영원히 방치된다(마이그레이션 없는 인메모리 단계에선 이름 유지가 더 안전하다).
 const MCP_CONFIG_SUBDIR: &str = "mcp-config";
@@ -39,30 +37,22 @@ const MCP_CONFIG_SUBDIR: &str = "mcp-config";
 ///   이름으로 서버가 뜨고, mcp-config JSON 의 `mcpServers.<이 값>` 키도 이 값이다. ADR-0094 발신 권한
 ///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 이 상수를 server 로 쓴다(DaemonControlChannel.provision).
 ///   ADR-0086 §engram-ctl 이름 재사용 금지 — 데몬 자체 브랜드로 `engram`(폐기된 크레이트명 아님).
-///   ★rot 방지★: 예전엔 render_config 의 `Servers.engram` 필드명이 암묵 키였다 — 이제 이 const 를
-///   mcpServers 맵의 키로 직접 써서(아래 render_config) grant·mcp-config 가 같은 출처를 공유한다.
 pub const MCP_SERVER_NAME: &str = "engram";
 
-/// (AgentId, epoch)용 mcp-config 파일 경로. epoch 를 파일명에 넣어 회전 시 옛 파일과 충돌하지 않게 한다
-/// (구 파일은 revoke 가 지운다). `<data_dir>/mcp-config/<agent_id>-<epoch>.json`.
+/// epoch 를 파일명에 넣어 회전 시 옛 파일과 충돌하지 않게 한다.
 pub fn config_path(data_dir: &Path, id: AgentId, epoch: u32) -> PathBuf {
     data_dir
         .join(MCP_CONFIG_SUBDIR)
         .join(format!("{id}-{epoch}.json"))
 }
 
-/// mcp-config JSON 문자열을 만든다(순수 함수 — 파일 IO 없음, 단위 테스트 대상). url·token 으로 위
-/// 스키마를 조립한다. escape 는 serde_json 이 처리(손조립 금지).
+/// escape 는 serde_json 이 처리(손조립 금지).
 ///
 /// ★typed struct 직렬화(키 순서 결정적)★: serde 는 struct 필드를 선언 순서대로 쓴다 — 스키마를 사양
 ///   그대로 드러낸다(claude 는 임의 순서 수용).
 pub fn render_config(url: &str, token: &str) -> String {
     #[derive(serde::Serialize)]
     struct Root<'a> {
-        // ★단일 출처(ADR-0094)★: mcpServers 맵의 키는 `MCP_SERVER_NAME` const 하나에서만 온다.
-        //   BTreeMap 키로 그 const 를 직접 써서, grant(`mcp__{server}__..`)와 이 config 가 같은 출처를
-        //   공유한다(예전 `Servers.engram` 필드명 암묵 키 → const 직접 사용으로 rot 제거). 맵은 서버
-        //   1개라 순서 이슈 없음. escape 는 serde_json 이 처리(손조립 금지).
         #[serde(rename = "mcpServers")]
         mcp_servers: std::collections::BTreeMap<&'a str, Server<'a>>,
     }
@@ -94,8 +84,6 @@ pub fn render_config(url: &str, token: &str) -> String {
     serde_json::to_string_pretty(&root).unwrap_or_default()
 }
 
-/// mcp-config 파일을 디스크에 쓴다(디렉토리 없으면 생성). 성공 시 경로를 돌려준다.
-/// ★보안★: token 은 파일에만(로그 금지). 반환 경로가 backend `--mcp-config` 로 전달된다.
 pub fn write_config(
     data_dir: &Path,
     id: AgentId,
@@ -112,22 +100,17 @@ pub fn write_config(
     Ok(path)
 }
 
-/// ★세션 한정 설정 조각 파일 경로(S18 D · spec §6)★ — `<data_dir>/mcp-config/<id>-<epoch>.settings.json`.
-///
 /// ★왜 mcp-config 와 **같은 폴더**인가(load-bearing — 수명 관리 단일화)★: 이 조각은 mcp-config 와 정확히
 ///   같은 수명이다(같은 (id,epoch)에 provision 때 생기고 revoke 때 사라진다). 전용 폴더를 새로 파면
 ///   ① revoke ② 부팅 스윕 ③ 데이터 디렉토리 규약이 각각 두 벌이 되고, 한쪽만 갱신되면 조각 파일이 영원히
 ///   쌓인다. 같은 폴더를 쓰면 **기존 부팅 스윕(`sweep_stale_configs`)이 폴더 안 파일을 전부 지우므로**
 ///   추가 스윕 코드 없이 청소가 따라온다. 파일명 접미(`.settings.json`)로 mcp-config(`.json`)와 구분한다.
-/// ★비밀 없음★: 조각엔 토큰이 없다(허용 목록뿐) — 그래도 같은 폴더 규약(데이터 디렉토리 아래)에 둔다.
 pub fn settings_path(data_dir: &Path, id: AgentId, epoch: u32) -> PathBuf {
     data_dir
         .join(MCP_CONFIG_SUBDIR)
         .join(format!("{id}-{epoch}.settings.json"))
 }
 
-/// 세션 한정 설정 조각 JSON 문자열(순수 함수 — 파일 IO 없음, 단위 테스트 대상).
-///
 /// ★내용 = `{"allowedMcpServers":[{"serverName":"engram"}]}`(spec §6)★. 유저 전역 설정의
 ///   `allowedMcpServers: []`(전면 차단)가 스폰 에이전트에도 적용돼 engram MCP 서버가 툴 목록에서 사라지는
 ///   문제(실측 2026-07-24)를 **이 세션에만** 뒤집는다. 전역 파일은 건드리지 않는다.
@@ -135,8 +118,6 @@ pub fn settings_path(data_dir: &Path, id: AgentId, epoch: u32) -> PathBuf {
 ///   높은 우선순위 층이라(user → project → local → `--settings` → managed), 여기 들어간 키는 사용자의
 ///   프로젝트/로컬 설정을 조용히 덮어쓴다. 그래서 우리가 반드시 필요한 한 키만 싣는다 — 이 파일이
 ///   "잡다한 스폰 설정" 서랍이 되면 사용자 설정을 침범한다(설정 IR 레이어가 오면 그쪽이 정본이 된다).
-/// ★서버 이름 단일 출처★: `MCP_SERVER_NAME` — mcp-config 의 `mcpServers` 키와 **같은 값**이어야 허용이
-///   실제 서버에 걸린다(두 곳이 갈리면 허용 목록이 존재하지 않는 서버를 가리켜 조용히 무력).
 // ADR-0103 (spec §6 allowedMcpServers 대책)
 // ADR-0109 (--settings 조각 — 단일 키 유지·파일 주입)
 pub fn render_settings() -> String {
@@ -158,7 +139,6 @@ pub fn render_settings() -> String {
     serde_json::to_string_pretty(&root).unwrap_or_default()
 }
 
-/// 설정 조각 파일을 디스크에 쓴다(디렉토리 없으면 생성). 성공 시 경로 — backend 가 `--settings` 로 가리킨다.
 pub fn write_settings(data_dir: &Path, id: AgentId, epoch: u32) -> std::io::Result<PathBuf> {
     let path = settings_path(data_dir, id, epoch);
     if let Some(parent) = path.parent() {
@@ -169,8 +149,7 @@ pub fn write_settings(data_dir: &Path, id: AgentId, epoch: u32) -> std::io::Resu
     Ok(path)
 }
 
-/// 설정 조각 파일 삭제(revoke). 없으면 조용히 성공(idempotent — mcp-config 삭제와 같은 규율).
-/// 실패해도 provision/revoke 를 막지 않는다 — 이 파일엔 비밀이 없고, 다음 부팅 스윕이 어차피 쓸어낸다.
+/// 삭제 실패는 provision/revoke 를 막지 않는다 — 이 파일엔 비밀이 없고, 다음 부팅 스윕이 어차피 쓸어낸다.
 pub fn remove_settings(data_dir: &Path, id: AgentId, epoch: u32) {
     let path = settings_path(data_dir, id, epoch);
     match std::fs::remove_file(&path) {
@@ -180,8 +159,6 @@ pub fn remove_settings(data_dir: &Path, id: AgentId, epoch: u32) {
     }
 }
 
-/// mcp-config 파일 삭제(revoke). 없으면 조용히 성공(idempotent — 이중 revoke 안전).
-///
 /// ★삭제 실패는 provision 을 막지 않는다(무해 이유 — FIX 5)★: 파일 삭제가 실패해도 warn 만 남기고
 ///   진행한다. 그 잔여 파일은 **inert** 하다 — 그 안의 토큰은 registry.revoke 가 이미 evict 했으므로
 ///   (validate 가 None → 401), 파일이 디스크에 남아도 어떤 에이전트도 그 토큰으로 인증할 수 없다.
@@ -198,11 +175,9 @@ pub fn remove_config(data_dir: &Path, id: AgentId, epoch: u32) {
     }
 }
 
-/// ★부팅 스윕(FIX 5)★: 데몬 시작 시 `<data_dir>/mcp-config/` 안의 파일을 **전부**(mcp-config + 세션 설정
-/// 조각) 삭제한다. 데몬 크래시나 세션 등록 전 실패로 살아남은 stale mcp-config 는 dead credential 이다 — 그 안의 토큰은 registry 가
-/// **부팅마다 빈 상태로 시작**하므로 어떤 것도 유효하지 않다(validate None → 401). 그래도 평문 토큰
-/// 파일을 디스크에 방치하지 않으려 부팅 시 일괄 청소한다. 디렉토리가 없으면 no-op(첫 부팅). 개별 파일
-/// 삭제 실패는 warn 만 남기고 계속한다(다음 부팅이 재시도 — 청소 실패로 데몬 기동을 막지 않는다).
+/// ★부팅 스윕(FIX 5)★: 데몬 크래시나 세션 등록 전 실패로 stale 파일이 살아남을 수 있다. 평문 토큰
+/// 파일을 디스크에 방치하지 않으려 부팅 시 일괄 청소한다. 개별 파일 삭제 실패는 warn 만 남기고
+/// 계속한다(다음 부팅이 재시도 — 청소 실패로 데몬 기동을 막지 않는다).
 pub fn sweep_stale_configs(data_dir: &Path) {
     let dir = data_dir.join(MCP_CONFIG_SUBDIR);
     let entries = match std::fs::read_dir(&dir) {
@@ -267,12 +242,10 @@ mod tests {
         let path = write_config(&dir, id, 0, "http://127.0.0.1:6000/mcp", "tok-xyz")
             .expect("write config");
         assert!(path.exists(), "파일이 생성돼야 함");
-        // 내용에 토큰이 담겨 있어야(claude 가 읽는다). 파일 안에만 — 로그엔 없음.
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Bearer tok-xyz"));
         remove_config(&dir, id, 0);
         assert!(!path.exists(), "revoke 시 파일이 지워져야 함");
-        // 이중 remove 안전(idempotent).
         remove_config(&dir, id, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -288,7 +261,6 @@ mod tests {
             arr[0]["serverName"], MCP_SERVER_NAME,
             "서버 이름은 mcp-config 키와 같은 단일 출처여야(갈리면 허용이 무력): {s}"
         );
-        // ★최소 조각 회귀 가드★: 다른 키가 섞이면 사용자 project/local 설정을 조용히 덮어쓴다.
         assert_eq!(
             v.as_object().map(|o| o.len()),
             Some(1),
@@ -320,7 +292,6 @@ mod tests {
         assert!(!path.exists(), "revoke 시 삭제");
         remove_settings(&dir, id, 0); // idempotent
 
-        // 부팅 스윕이 설정 조각도 함께 쓸어내는지(같은 폴더를 쓰기로 한 결정의 실증).
         let path = write_settings(&dir, id, 1).expect("write settings again");
         assert!(path.exists());
         sweep_stale_configs(&dir);

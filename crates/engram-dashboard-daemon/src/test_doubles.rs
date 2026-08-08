@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 
 use engram_dashboard_net::frame_port::{Frame, FrameError, FrameFanout, FrameSink};
 
-/// 한 연결의 프레임 출구 더블. 프레임을 그대로 채널로 흘려 테스트가 나간 것을 순서대로 본다.
 /// 채널 용량이 곧 포화 조건이라, cap 을 작게 잡으면 위층의 drop 처리 경로를 태울 수 있다.
 pub(crate) struct FakeFrameSink {
     tx: mpsc::Sender<Frame>,
@@ -52,7 +51,6 @@ impl RecordingFanout {
         Self::default()
     }
 
-    /// 팬아웃으로 나간 text 전부(호출 순서).
     pub(crate) fn texts(&self) -> Vec<String> {
         self.texts
             .lock()
@@ -60,8 +58,6 @@ impl RecordingFanout {
             .clone()
     }
 
-    /// 팬아웃 호출이 **정확히 1회** 였음을 못 박고 그 원문을 돌려준다. 0회·2회면 실패 —
-    /// "사실 1건 → 봉투 1개" 가 호출자 테스트들의 관심사라 개수를 여기서 확정한다.
     pub(crate) fn sole_text(&self) -> String {
         let texts = self.texts();
         assert_eq!(

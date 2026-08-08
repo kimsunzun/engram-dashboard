@@ -15,8 +15,7 @@
 //!   그 한 갈래 끝이 여기다.
 //! ★"이벤트당 1회 송신" 이 아니다(오독 주의)★: 이 파일에서의 인코딩·팬아웃 호출은 이벤트당 1회지만
 //!   **실제 송신은 등록된 연결 수만큼**이다 — 포트 구현이 연결마다 try_send 한다. ADR-0028 은 *푸시
-//!   갈래가 하나*라는 결정이지 *전송이 한 번*이라는 보장이 아니다. 느린 연결 하나가 실패해도 나머지는
-//!   그대로 나간다(`FrameFanout` 계약).
+//!   갈래가 하나*라는 결정이지 *전송이 한 번*이라는 보장이 아니다.
 // ADR-0129
 // ADR-0005
 // ADR-0028
@@ -35,12 +34,6 @@ use std::sync::Arc;
 
 // ── DaemonStatusSink(global) ─────────────────────────────────────────────────────
 
-/// AgentManager 에 주입되는 전역 StatusSink. status_changed/agent_list_updated/restore_result
-/// 를 AgentEvent JSON 으로 직렬화해 팬아웃 포트로 넘긴다.
-/// (LogStatusSink 대체 — build_manager 가 이걸 주입.)
-///
-/// ★호출 컨텍스트: pump/manager 의 동기 스레드★ → 절대 block 금지. `FrameFanout` 계약이 논블록
-/// 구현을 요구하는 이유가 이 호출 컨텍스트다.
 pub struct DaemonStatusSink {
     fanout: Arc<dyn FrameFanout>,
 }
@@ -92,12 +85,6 @@ mod tests {
     };
     use serde_json::json;
 
-    /// 소켓 없는 격리 하네스 — 팬아웃 포트 자리에 기록용 더블을 꽂는다.
-    ///
-    /// ★이 층에서 관측 가능한 것은 "포트로 무엇이 몇 번 나갔나" 가 전부다★: 연결·등록·복제는 포트
-    ///   건너편(`engram_dashboard_net::ws::ConnRegistry`)의 개념이라 여기서 보이지 않는다. 그쪽 몫
-    ///   (한 text 를 연결마다 같은 바이트로 복제 · 포화한 연결을 건너뛰고 계속)은 네트워크 crate 의
-    ///   자기 테스트가 지킨다.
     fn sink_with_fanout() -> (DaemonStatusSink, Arc<RecordingFanout>) {
         let fanout = Arc::new(RecordingFanout::new());
         (DaemonStatusSink::new(fanout.clone()), fanout)
@@ -107,7 +94,6 @@ mod tests {
         serde_json::from_str(&fanout.sole_text()).expect("wire 는 JSON")
     }
 
-    /// 테스트용 core AgentInfo — 로스터 인코딩 경로에 태울 최소 스냅샷(상태는 인자로).
     fn info(id: AgentId, name: &str, epoch: u32, status: CoreStatus) -> CoreAgentInfo {
         CoreAgentInfo {
             id,
@@ -183,16 +169,8 @@ mod tests {
 
     #[test]
     fn a_status_change_goes_out_as_exactly_one_whole_envelope() {
-        // ★이 sink 의 계약★: 코어 사실 1건 → wire 봉투 1개 → 팬아웃 포트로 **정확히 1회**.
-        //   ★봉투 **전체**와 비교한다★: 고른 필드만 보면 필드 추가·미검사 필드 오염이 통과한다.
-        //   ★payload 를 지닌 상태(`Exited{code}`)를 쓰는 이유★: 유닛 variant 만 태우면 상태 payload 를
-        //     떨어뜨리는 회귀가 안 잡힌다.
-        //   ★"연결마다 같은 바이트" 는 여기서 단언할 수 없다(관측 불가)★: 이 sink 는 포트에 text 를 하나
-        //     넘길 뿐이고 연결이 몇 개인지 모른다. 그 복제의 바이트 동일성은 **포트 구현측 계약**이고,
-        //     그걸 지키는 테스트는 `impl FrameFanout for ConnRegistry` 옆에 있다.
-        //     ★테스트 더블 쪽을 보면 안 된다★: 더블도 같은 trait 을 구현하지만 **복제를 하지 않는다**
-        //     (기록만) — 확인하려는 성질이 거기엔 없다. 테스트 함수명 대신 impl 블록을 가리키는 이유는
-        //     함수명은 개명·crate 분리 때 끊긴 참조가 되고 아무것도 그 끊김을 잡아주지 않기 때문.
+        // ★payload 를 지닌 상태(`Exited{code}`)를 쓰는 이유★: 유닛 variant 만 태우면 상태 payload 를
+        //   떨어뜨리는 회귀가 안 잡힌다.
         let (sink, fanout) = sink_with_fanout();
         let id = AgentId::new_v4();
 
@@ -203,7 +181,6 @@ mod tests {
             json!({
                 "StatusChanged": {
                     "agent_id": id.to_string(),
-                    // 상태는 **내부 태깅**(`#[serde(tag = "type")]`) — 프론트가 discriminated union 으로 받는다.
                     "status": { "type": "Exited", "code": 3 },
                     "epoch": 7
                 }
@@ -217,7 +194,6 @@ mod tests {
         //   판정 쪽 관심사고, 프론트 목록은 죽은 것까지 봐야 terminal 전이를 판정한다(ADR-0005 —
         //   프론트는 status_changed 가 아니라 이 목록으로 terminal 을 판정한다). 그래서 fixture 에
         //   **비-Running 을 섞는다** — 여기에 필터가 생기면 프론트가 종료를 영영 못 본다.
-        // ★배열 전체를 비교한다★: 길이+몇 필드만 보면 잘림·필드 오염이 통과한다.
         let (sink, fanout) = sink_with_fanout();
         let (a, b, c) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
 
@@ -253,7 +229,7 @@ mod tests {
     fn every_restore_outcome_is_forwarded_with_its_payload() {
         // ★결말 **전 variant** 를 태운다★: 한 종류만 태우면 `Resumed` 를 하드코딩한 구현이 통과하고,
         //   payload 를 지닌 결말(FreshFallback/Failed/Blocked)이 깨져도 안 잡힌다. FreshFallback 은
-        //   Uuid→String 변환까지 지나므로 그 경계도 여기서 함께 못 박힌다(연결 코어 주석 참조).
+        //   Uuid→String 변환까지 지나므로 그 경계도 여기서 함께 못 박힌다.
         let old = uuid::Uuid::new_v4();
         let new = uuid::Uuid::new_v4();
         let cases = vec![

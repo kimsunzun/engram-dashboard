@@ -11,13 +11,6 @@
 //! 컴파일하지 않는다 — 실험 코드가 릴리즈 아티팩트에 유입되면 ADR-0090 위반(기존 obs_seam / test-harness
 //! feature 와 같은 계열). bin(`saturation-pilot`)도 `required-features = ["test-harness"]` 라 통상
 //! 워크스페이스 빌드는 이 모듈도 bin 도 만지지 않는다.
-//!
-//! ## 진입점
-//! - `cli::parse_args` → `PilotConfig`
-//! - `filler::filler_doc` / `filler::doc_title`
-//! - `probe::score_probe` / `probe::detect_suspected_compaction`
-//! - `record::Record`(+ 하위) / `record::sha256_hex` / raw 파서들
-//! - `transcript::locate_transcript` / `transcript::parse_transcript` / `RealUsage`
 // ADR-0090
 
 pub mod cli;
