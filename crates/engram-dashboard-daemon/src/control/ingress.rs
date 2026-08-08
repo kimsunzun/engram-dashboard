@@ -9,75 +9,42 @@
 //!     BoundIdentity(auth 미들웨어/세션 바인딩이 검증한 신원)를 넣어 ControlCommand 를 만든다(사칭 차단).
 //!   - ACK/에러 JSON 은 **두 입구에서 동일 shape** 다(같은 코드가 만든다) — 자기교정 로스터(RECIPIENT_*
 //!     hint)도 동일.
-//!   - "enqueued" 워딩은 미래 장부(ledger)와의 forward-compat 로 유지한다 — 이 최소 버전은 즉시 배달
-//!     (relay)이지만 ACK 문구는 바꾸지 않는다.
-//!
-//! ★봉투(ADR-0096/0103)★: 봉투 조립은 **단일 wrap point**(`wrap_message`/`wrap_notice` — ADR-0096)에만
-//!   있다. S18 메시징 v1(ADR-0103)이 기본 포맷을 XML 로 flip 하고 `<message>` 속성(id/type/reply-by/
-//!   in-reply-to/to)과 `<notice>`(데몬 전용, from 없음) 렌더를 이 seam 에 얹었다(`EnvelopeFields`). colon 은
-//!   잔존 스위치(속성 미지원).
-//!
-//! ★발송 개편(ADR-0111/0112/0114)★: `to` 는 **수신자 목록**이고(다중 수신자 직접 발송), `@all` 은 주소
-//!   해석 매크로일 뿐 전용 경로가 없다. 부재·동명 수신자는 **수신자별 실패 행**(`failed` + code)으로
-//!   보고되고 나머지 수신자에겐 그대로 배달된다(부분 진행) — 이 입구는 로스터를 보지 않고, 존재 판정은
-//!   커널이 **발송 순간 스냅샷 한 장**으로 한다. 사용자 정의 그룹(`group` 툴/라우트)은 제거됐다.
-//!
-//! ★회신 계약 인자(C3 · spec §3 · ADR-0103 결정 2/3)★: 두 입구가 `SendContract`(request/reply_by/reply_to)를
-//!   실어 오고, **구문 검증은 전부 여기서**(서비스 위임 전에) 한다 — 상호배타·기간 표기·빈 값. 통과한 인자는
-//!   `engram_dashboard_messaging::service::SendMeta`(파싱된 Duration 포함)로 정규화돼 서비스로 내려간다.
-//!
-//! ★`type="notice"` 밀반입 불가(구조적 — ADR-0103 불변식)★: 발신 인자에는 **타입 문자열이 없다**(`request:
-//!   bool` 뿐). `<notice>` 는 데몬이 `wrap_notice` 로만 만들고 그 호출부는 MessagingService 의 타임아웃 통지
-//!   경로뿐이다 — 에이전트가 어떤 입구로도 notice 를 발신할 수 없다.
+//!   - 발신 인자의 **구문 검증은 전부 여기 소유**다 — 서비스 위임 전에 끝나고, 양 입구가 같은 반려를 받는다.
 //!
 //! tauri import 0(daemon crate).
 
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::manager::AgentManager;
-// ADR-0110: 봉투 계층·관측 어휘·논리 메시지 id 는 메시징 커널 crate 소유(옛 자리는 이 파일이었다).
 use engram_dashboard_messaging::envelope::{new_msg_id, Entrance, EnvelopeFormat};
 
 use super::registry::{BoundIdentity, ControlRegistry};
 
-/// body 상한(64 KiB). 최소 버전의 방어적 상한 — 초과 시 BODY_TOO_LARGE 로 교정 에러(같은 shape).
-/// (MCP 라우트의 전송 계층 상한(RequestBodyLimitLayer 1MB)과 별개 — 여기선 body **문자열** 자체의 상한.)
+/// body **문자열** 자체의 상한 — MCP 라우트의 전송 계층 상한(`mcp_server` `RequestBodyLimitLayer`)과 별개다.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// 정규화된 제어 커맨드(ADR-0086) — 두 입구가 이 형태로 만들어 `handle_send` 에 넘긴다.
-///
-/// ★from = 토큰/세션 파생 신원★: 페이로드가 아니라 어댑터가 검증된 BoundIdentity 를 넣는다(사칭 차단).
-/// 이 최소 버전은 커맨드 종류가 send 하나뿐이라 별도 cmd 태그 없이 send 전용 필드만 담는다(spawn/창이동
-/// 등은 후속 additive — ADR-0086 §커맨드=의도별 전용 툴).
 #[derive(Debug, Clone)]
 pub struct ControlCommand {
-    /// 발신자 신원 — 토큰/세션에서 파생(페이로드 아님). 사칭 차단의 단일 출처.
     pub from: BoundIdentity,
-    /// ★수신자 토큰 목록(ADR-0111 — 다중 수신자 직접 발송)★. 각 원소 = 에이전트 이름 · 정확한 AgentId
-    ///   문자열 · `@`주소(혼용 가능). **콤마 분해는 CLI 입구 전용**이라 어댑터가 이 목록을 만들 때 이미
-    ///   끝나 있다(MCP 배열 원소는 절대 쪼개지 않는다 — spec §6). 트림·펼침·중복 제거는 데몬 단일점
-    ///   (`handle_send` → 커널)이 한다.
+    /// 각 원소 = 에이전트 이름 · 정확한 AgentId 문자열 · `@`주소(혼용 가능). **콤마 분해는 CLI 입구
+    ///   전용**이라 어댑터가 이 목록을 만들 때 이미 끝나 있다(MCP 배열 원소는 절대 쪼개지 않는다 — spec §6).
     pub to: Vec<String>,
-    /// 메시지 본문(텍스트). 최소 버전은 순수 텍스트(첨부·구조화는 범위 밖).
+    /// 순수 텍스트(첨부·구조화는 범위 밖).
     pub body: String,
-    /// ★회신 계약 인자(C3, spec §3)★ — 전부 선택이라 별도 struct 로 묶는다(`Default` = 통보 = 기존 동작).
     pub contract: SendContract,
 }
 
 /// ★회신 계약 발송 인자(C3 · spec §6 `send_message { …, request?, reply_by?, reply_to? }`)★.
 ///
-/// ★왜 별도 struct 인가★: 세 인자는 전부 **선택**이고 기본값(`Default`)이 곧 "통보"(기존 v1 이전 동작)다.
-///   `ControlCommand` 에 평평하게 늘어놓으면 plain 발송을 만드는 모든 자리(테스트·스모크 bin 포함)가 세
-///   필드를 매번 써야 한다 — 묶어 두면 `contract: SendContract::default()` 한 줄이면 된다.
-/// ★검증은 여기가 아니라 `handle_send`(입구 공통)★: 이 struct 는 **날것 그대로**를 나른다(파싱 안 함).
-///   상호배타·기간 표기 유효성은 `validate_contract` 가 서비스 위임 전에 한 번만 본다(양 입구 동일 반려).
-/// ★표기 매핑(spec §1)★: 여기 필드는 snake_case(`reply_by`/`reply_to`) — 봉투 XML 속성은 kebab-case
-///   (`reply-by`/`in-reply-to`)로 렌더된다(`EnvelopeFields` 주석).
+/// ★왜 별도 struct 인가★: 세 인자는 전부 **선택**이고 기본값(`Default`)이 곧 "통보"다. `ControlCommand` 에
+///   평평하게 늘어놓으면 plain 발송을 만드는 모든 자리(테스트·스모크 bin 포함)가 세 필드를 매번 써야 한다.
+/// ★어댑터는 파싱하지 않는다★: 이 struct 는 **날것 그대로**를 나르고 검증은 `validate_contract` 한 곳뿐이다.
 // ADR-0103 (결정 2/3 — request 타입 + 회신 계약)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SendContract {
     /// `true` = 회신 요구(장부에 미회신 오픈 + 봉투 `type="request"`). ★다중 수신자·`@all` 도 허용★ —
-    ///   수신자마다 **독립 계약 1건**이 열린다(ADR-0111 결정 5 · 옛 "그룹 주소엔 v1 금지" 폐기).
+    ///   수신자마다 **독립 계약 1건**이 열린다(ADR-0111 결정 5).
     pub request: bool,
     /// 회신 기한 **기간 표기**(`"5m"`/`"10m"`/`"1h"`, 최소 1분). `request` 전용 — 단독 지정은 반려.
     pub reply_by: Option<String>,
@@ -95,29 +62,21 @@ const MAX_REPLY_BY_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// `reply_by` 하한 — 1분. 미만은 반려한다.
 ///
-/// ★왜 하한이 필요한가(리뷰 fix 7 · load-bearing — 계약 정직성)★: 기한 **초과 판정은 sweep 주기(60초)에서만**
-///   일어난다(lib.rs). 그래서 `30s` 를 받아 주면 실제 통지는 60~120초 뒤에 나간다 — 파서가 표현할 수 있는
-///   정밀도와 데몬이 지킬 수 있는 정밀도가 어긋나, 발신자는 "30초 뒤 알려준다" 는 약속을 받고 두 배 넘게
-///   기다린다. 지킬 수 없는 기한은 받지 않는 게 맞다(모호하면 반려 — parse_reply_by 의 기조와 동일).
+/// ★왜 하한이 필요한가(load-bearing — 계약 정직성)★: 기한 **초과 판정은 sweep 주기(60초)에서만** 일어난다
+///   (lib.rs `SWEEP_INTERVAL`). `30s` 를 받아 주면 실제 통지는 60~120초 뒤에 나가, 발신자는 "30초 뒤
+///   알려준다" 는 약속을 받고 두 배 넘게 기다린다 — 지킬 수 없는 기한은 받지 않는다.
 ///   `s` 단위 자체는 계속 받는다(`120s` 처럼 60 이상이면 유효) — 막는 건 **값의 크기**지 표기가 아니다.
-/// ★sweep 주기와의 결합★: 이 값은 lib.rs 의 `SWEEP_INTERVAL`(60s)과 짝이다. 주기를 바꾸면 이 하한도 함께
-///   봐야 한다(더 촘촘해지면 낮출 수 있다).
 const MIN_REPLY_BY_SECS: u64 = 60;
 
-/// ★`reply_by` 기간 표기 파서(C3 · spec §3 "기간 표기 10m/1h — 데몬이 절대시각 환산")★ — 엄격.
+/// ★`reply_by` 기간 표기 파서(spec §3 "기간 표기 10m/1h — 데몬이 절대시각 환산")★ — 엄격.
 ///
-/// 허용 형태는 **정수 + 단위 1글자**뿐이다: `<digits>(s|m|h)` — 공백·부호·소수점·복합 표기(`1h30m`)·
-/// 대문자 단위 전부 거부한다. 왜 관대하게 받지 않나: 이 값은 발신 LLM 이 자유롭게 쓰는 자리라 "받아는
-/// 줬는데 뜻이 어긋나는" 해석(예: `"10"` 을 분으로 추측)이 조용한 계약 오차가 된다 — 모호하면 반려하고
-/// 힌트로 형태를 알려 자기교정시킨다.
-///
-/// 반려: 빈 값 · 단위 없음/모름 · 숫자 아님 · `0` · u64 곱셈 오버플로 · 하한(1분) 미만 · 상한(30일) 초과.
+/// ★왜 관대하게 받지 않나★: 이 값은 발신 LLM 이 자유롭게 쓰는 자리라 "받아는 줬는데 뜻이 어긋나는"
+///   해석(예: `"10"` 을 분으로 추측)이 조용한 계약 오차가 된다 — 모호하면 반려하고 힌트로 형태를 알려
+///   자기교정시킨다.
 /// (`0` 을 막는 이유: 기한 0 = 발송 즉시 초과라 notice 를 즉발한다 — 계약이 아니라 오타로 보는 게 안전하다.)
-/// (하한 1분의 근거: `MIN_REPLY_BY_SECS` 주석 — 판정 해상도가 sweep 주기라 더 짧은 약속은 지킬 수 없다.)
-// ADR-0103
 pub(crate) fn parse_reply_by(s: &str) -> Result<std::time::Duration, String> {
     let bytes = s.as_bytes();
-    // 최소 2바이트(숫자 1 + 단위 1). 바이트 단위로 자르므로 멀티바이트 문자는 단위 매치에서 자연히 걸린다.
+    // 바이트 단위로 자르므로 멀티바이트 문자는 단위 매치에서 자연히 걸린다.
     if bytes.len() < 2 {
         return Err(format!(
             "reply_by '{s}' is not a duration; use an integer with a unit like 5m, 10m, or 1h (minimum 1 minute)."
@@ -166,14 +125,7 @@ pub(crate) fn parse_reply_by(s: &str) -> Result<std::time::Duration, String> {
     Ok(std::time::Duration::from_secs(secs))
 }
 
-/// ★C3 인자 정합 검증(spec §6 상호배타 · 양 입구 동일 반려)★ — 통과하면 서비스용 `SendMeta` 로 정규화한다.
-///
-/// 규칙(첫 위반에서 반려, 코드는 전부 `INVALID_SEND_ARGS`):
-///   1. `request` + `reply_to` 동시 지정 → 반려. 한 메시지가 "새 요청" 이면서 "남의 요청에 대한 회신" 일 수
-///      없다(spec §6 상호배타). 실제로 회신하며 새 요청을 걸고 싶으면 메시지 2건으로 나눈다.
-///   2. `reply_by` 는 `request` 전용 — 단독 지정은 반려(기한만 있고 추적할 계약이 없다 = 조용한 무시가 되므로).
-///   3. `reply_by` 표기 파싱 실패 → 반려(허용 형태를 hint 로).
-///   4. `reply_to` 빈 문자열/공백만 → 반려(장부 매칭 키가 못 된다). 앞뒤 공백은 **잘라서** 받는다.
+/// 인자 정합 검증 — 첫 위반에서 반려하고, 반려 코드는 전부 `INVALID_SEND_ARGS` 다(호출부가 붙인다).
 fn validate_contract(
     c: &SendContract,
 ) -> Result<engram_dashboard_messaging::service::SendMeta, String> {
@@ -195,12 +147,9 @@ fn validate_contract(
     };
     let reply_to = match &c.reply_to {
         Some(raw) => {
-            // ★입구 정규화로서의 trim(의도적 — 리뷰에서 제기됐으나 유지)★: 이 값은 발신 LLM 이 봉투에서
-            //   눈으로 옮겨 적는 id 라 앞뒤 공백이 섞이기 쉽다. 여기서 한 번 다듬은 값이 **봉투 렌더와 장부
-            //   엄격 매칭 양쪽에 그대로** 쓰이므로(SendMeta.reply_to 하나), 두 곳이 서로 다른 문자열을 볼
-            //   여지가 없다 — 즉 trim 은 매칭 규칙을 느슨하게 만드는 게 아니라 **입구에서 표준형을 정하는**
-            //   것이다. 다듬지 않으면 `" m-7f3k"` 가 같은 id 를 가리키는데도 NoMatch 로 조용히 빗나간다
-            //   (엄격 매칭의 취지는 "틀린 id 는 안 닫는다" 이지 "공백 하나로 빗나간다" 가 아니다).
+            // ★입구 정규화로서의 trim(의도적 — 리뷰에서 제기됐으나 유지)★: 다듬은 값이 **봉투 렌더와 장부
+            //   엄격 매칭 양쪽에 그대로** 쓰이므로(`SendMeta.reply_to` 하나) 매칭이 느슨해지지 않는다. 안
+            //   다듬으면 `" m-7f3k"` 가 같은 id 를 가리키는데도 NoMatch 로 조용히 빗나간다.
             let t = raw.trim();
             if t.is_empty() {
                 return Err(
@@ -217,40 +166,28 @@ fn validate_contract(
         reply_by_raw: c.reply_by.clone(),
         reply_by,
         reply_to,
-        // ★봉투 `to` 는 발신 인자가 아니다(spec §1 동결 규칙)★ — 전 수신자의 수용 판정이 끝난 뒤
-        //   커널(`handle_send`)이 1회 확정한다. 입구가 채우면 그 값이 판정 전 상태로 굳는다.
         to_attr: None,
     })
 }
 
-/// ★`reply_to` 표기 규칙(spec §3 항목 7-① · 순수 함수)★ — 회신은 **수신자가 정확히 1명**일 때만 유효하다.
+/// ★`reply_to` 표기 규칙(spec §3 항목 7-①)★ — 회신은 **수신자가 정확히 1명**일 때만 유효하다.
 ///
 /// ★왜 "표기 단계" 인가(load-bearing)★: `@`토큰이 섞이면 **펼침 결과가 1명이어도** 거부한다. 펼침 뒤에 세면
 ///   같은 발송이 로스터 상태에 따라 어떤 날은 통과하고 어떤 날은 반려돼(비결정) 발신 LLM 이 규칙을 배울 수
 ///   없다 — 표기만 보면 답이 항상 같다.
-/// ★순수 함수로 뽑은 이유(리뷰 C3)★: 판정 자체는 로스터·데몬 상태와 무관한데 통합 하네스(20초)로만 덮여
-///   있었다. 단위 테스트가 전수(단일/다중/@토큰/@단독)를 값으로 못 박는다.
-// ADR-0111
 fn reply_to_has_single_recipient(recipients: &[String]) -> bool {
     recipients.len() == 1 && !recipients[0].starts_with('@')
 }
 
-/// ★계약 필드(request/reply_to)가 **현재 봉투 렌더 경로에서 표현 불가**인가(C3 리뷰 fix 1 · load-bearing)★.
-/// 불가면 교정 hint(`INVALID_SEND_ARGS` 용)를 돌려주고, 가능하면 `None`.
+/// ★계약 필드(request/reply_to)가 **현재 봉투 렌더 경로에서 표현 불가**인가(load-bearing)★.
 ///
-/// ★왜 반려까지 하나(조용한 열화 거부)★: 봉투 포맷 스위치는 두 갈래로 살아 있다 — 런타임
-///   `SetEnvelopeFormat`(Colon, connection_core 경유로 실시간 전환) 과 스파이크용 `ENGRAM_WRAP_FORMAT`
-///   템플릿(`wrap_message` 가 **format 인자보다 먼저** 본다). 두 갈래 모두 렌더가 `sender/id/body` 수준이라
-///   **id·type·reply-by·in-reply-to 속성을 통째로 버린다**(`EnvelopeFields` 주석 "Colon 변형 미지원",
-///   `apply_wrap_template` 의 플레이스홀더 집합).
-///   그 상태에서 request 를 받아 주면 결말이 **정해져 있다**: 수신자는 회신에 쓸 id 를 본 적이 없는데 장부는
-///   엄격 매칭을 요구하므로(spec §2) 회신이 구조적으로 불가능하고, 기한이 지나면 발신자에게 "회신 없음"
-///   통지가 **반드시** 간다 — 거짓 타임아웃이 보장된 계약이다. 회신(`reply_to`)도 `in-reply-to` 가 사라져
-///   수신자가 무엇에 대한 답인지 모른다. 그래서 열화 배달 대신 입구에서 반려한다.
-/// ★통보는 영향 없음★: 속성이 없는 발송이라 어느 포맷에서도 그대로 나간다(기존 동작 불변).
+/// ★왜 반려까지 하나(조용한 열화 거부)★: colon 렌더와 `ENGRAM_WRAP_FORMAT` 템플릿은 둘 다 id·type·
+///   reply-by·in-reply-to 속성을 버린다. 그 상태의 request 는 결말이 **정해져 있다** — 수신자는 회신에 쓸
+///   id 를 본 적이 없는데 장부는 엄격 매칭을 요구하므로(spec §2) 회신이 구조적으로 불가능하고, 기한이
+///   지나면 "회신 없음" 통지가 **반드시** 간다(거짓 타임아웃이 보장된 계약). 회신도 `in-reply-to` 가 사라져
+///   수신자가 무엇에 대한 답인지 모른다.
 /// ★env 를 여기서 읽는 이유★: 템플릿은 `wrap_message` 가 **최우선**으로 보는 전역 스위치라, 이 판정이
 ///   registry 포맷만 보면 템플릿이 켜진 프로세스에서 그대로 새 나간다. 판정과 렌더가 같은 입력을 봐야 한다.
-// ADR-0103
 fn contract_unsupported_by_envelope(
     meta: &engram_dashboard_messaging::service::SendMeta,
     format: EnvelopeFormat,
@@ -268,47 +205,29 @@ fn contract_unsupported_by_envelope(
     )
 }
 
-/// 한 수신자에 대한 발송 결과(spec §6 `results[]` 원소). status = delivered|pending|failed.
-///
-/// ★spec §6 shape★: 발송 성공 응답은 `{ id, results: [{to, status, code?, hint?}] }` 다. 수신자 1명당 1행이라
-///   다중 수신자·`@all` 이면 길이 N 이다(그룹 단위 요약이 아니라 수신자별 회계).
-/// ★`code` 는 `failed` 행에만 실린다(spec §6)★ — 발신 LLM 이 그 값으로 재시도/교정을 분기한다.
+/// 한 수신자에 대한 발송 결과 — spec §6 `results[]` 원소(수신자 1명당 1행, 그룹 단위 요약이 아니다).
 #[derive(Debug, Clone)]
 pub struct SendResult {
-    /// 수신자 표기 — 발신자가 쓴 토큰(트림만). `@`주소 펼침 결과는 명부의 canonical 이름이다
-    ///   (`@here` = 로스터 · `@all` = 로스터 + 잠든 프로필 — ADR-0121).
     pub to: String,
-    /// `"delivered"`(실제 주입) · `"pending"`(파킹) · `"failed"`(그 수신자만 실패) — spec §5·§6 상태 어휘.
-    ///   ★`skipped` 는 응답 어휘에서 폐지됐다(ADR-0111 결정 3)★ — 장부 종점 어휘의 `skipped` 는 다른 축이다.
     pub status: &'static str,
-    /// 실패 행 코드(`RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS`/`MAILBOX_FULL`/`REQUEST_CAPACITY`).
-    ///   `failed` 가 아니면 None(응답에서 생략).
     pub code: Option<&'static str>,
-    /// 자기교정용 힌트(파킹 사유·실패 사유). None 이면 응답에서 생략.
     pub hint: Option<String>,
 }
 
-/// 제어 커맨드 처리 결과 — 성공(수신자별 결과 배열) 또는 교정 에러(발송 단위 반려). 두 입구 모두 이 값을
-/// 그대로 JSON 직렬화해 열린 요청에 돌려준다(동일 shape 보장, spec §6). `to_json` 이 wire JSON 을 만든다.
+/// 제어 커맨드 처리 결과 — `to_json` 이 wire JSON 을 만든다.
 ///
-/// ★spec §6 응답 계약★: 성공 = `{ id, results: [{to, status, code?, hint?}] }`, 반려 = `{ status:"error",
-///   code, hint }`. **전원이 실패해도 성공 shape 이다**(전 행 `failed`) — 발송 단위 반려로 승격하지 않는다
-///   (단일 수신자 부재도 예외가 아니다: 답은 `error` 가 아니라 `failed` 행 1개다 — ADR-0111 결정 3).
 /// ★파서 분기 기준(수용된 비대칭 — 명시)★: 성공 응답엔 top-level `status` 가 없고, 반려 응답엔 `results` 가
 ///   없다 — 수신 측은 `status == "error"` 존재 여부로 분기한다(shape 통일은 하지 않는다, 기존 계약 유지).
 #[derive(Debug, Clone)]
 pub enum ControlResult {
-    /// 발송 접수 — 논리 메시지 id + 수신자별 결과 배열(spec §6). delivered/pending/failed 가 섞일 수 있다.
     Ok {
         id: String,
         results: Vec<SendResult>,
     },
-    /// 발송 단위 반려 — code + hint(자기교정용). 발신자가 이걸 보고 재시도한다.
     Error { code: &'static str, hint: String },
 }
 
 impl ControlResult {
-    /// wire JSON(serde_json::Value). 두 입구가 이 값을 직렬화해 응답 body/툴 결과로 쓴다(spec §6 shape).
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             ControlResult::Ok { id, results } => {
@@ -316,7 +235,6 @@ impl ControlResult {
                     .iter()
                     .map(|r| {
                         let mut obj = serde_json::json!({ "to": r.to, "status": r.status });
-                        // 노출 원칙 — 실패 행에만 code, 사유가 있을 때만 hint(빈 키를 만들지 않는다).
                         if let Some(c) = r.code {
                             obj["code"] = serde_json::Value::String(c.to_string());
                         }
@@ -336,42 +254,31 @@ impl ControlResult {
         }
     }
 
-    /// 발송이 접수됐나(발송 단위 반려가 아님) — CLI 가 exit code(0/1) 매핑에 쓴다.
-    ///
     /// ★행 실패는 여기서 실패가 아니다★: 부분 진행이 정상 경로라(ADR-0111 결정 3) "일부가 못 받았다" 는
-    ///   발신자가 `results[]` 를 읽고 판단할 사실이지 호출 자체의 실패가 아니다. 발송 단위 반려(인자 오류·
-    ///   주소 공간 오류)만 실패로 본다.
+    ///   발신자가 `results[]` 를 읽고 판단할 사실이지 호출 자체의 실패가 아니다. **전원이 실패해도 접수**다
+    ///   — 발송 단위 반려(인자 오류·주소 공간 오류)만 실패로 본다.
     pub fn is_accepted(&self) -> bool {
         matches!(self, ControlResult::Ok { .. })
     }
 }
 
-/// ★듀얼 입구 공통 핸들러(ADR-0086 · S18 메시징 v1 · ADR-0111 발송 개편)★: 정규화된 ControlCommand →
-/// 인자 검증 → 다중 수신자 발송(MessagingService) → 응답(spec §6). 두 어댑터(MCP 툴 · HTTP 라우트)가
-/// 유일하게 부르는 진입점이다 — 이 아래는 입구를 모른다(entrance-agnostic).
+/// ★듀얼 입구 공통 핸들러★ — 두 어댑터(MCP 툴 · HTTP 라우트)가 유일하게 부르는 진입점이다.
 ///
-/// 검사 순서(첫 실패에서 발송 단위 반려 — 같은 shape 양 입구):
-///   0. ★회신 계약 인자 정합★ → `INVALID_SEND_ARGS`(상호배타·reply_by 단독·표기 오류·빈 reply_to).
-///      주소보다 **먼저** 본다: 순수 구문 오류라 로스터 상태와 무관하게 항상 같은 답이 나와야 한다.
-///   0-b. 계약 필드는 XML 봉투 전용 → `INVALID_SEND_ARGS`(비-XML 포맷에서 속성이 떨어져 회신 불가).
-///   1. ★수신자 목록 정규화★ — 트림 + 빈 조각 제거. 남은 게 없으면 `INVALID_SEND_ARGS`(빈 목록·빈 문자열).
-///      ★콤마 분해는 여기서 하지 않는다★: 그건 **CLI 입구 전용** 규칙이라 어댑터가 이미 끝냈다(spec §6 —
-///      MCP 배열 원소는 절대 쪼개지 않는다).
-///   2. ★`reply_to` 는 수신자 정확히 1명★ → 다중 수신자·`@`토큰 동반이면 `INVALID_SEND_ARGS`.
-///      **표기 단계에서 막는다**(펼침 결과가 1명이어도 반려) — spec §3 항목 7-①.
-///   3. body 상한(64 KiB) → `BODY_TOO_LARGE`.
-///   4. ★그 외 전부 MessagingService 위임★(spec §5 수신자별 3분기 · 부분 진행). 주소 공간 오류
-///      (`GROUP_NOT_FOUND`/`GROUP_EMPTY`)와 id 충돌만 발송 단위 반려로 되돌아온다.
+/// 검사 순서(첫 실패에서 발송 단위 반려):
+///   0. 회신 계약 인자 정합 → `INVALID_SEND_ARGS`. 주소보다 **먼저** 본다: 순수 구문 오류라 로스터 상태와
+///      무관하게 항상 같은 답이 나와야 한다.
+///   0-b. 계약 필드는 XML 봉투 전용 → `INVALID_SEND_ARGS`.
+///   1. 수신자 목록 정규화 — 남은 게 없으면 `INVALID_SEND_ARGS`.
+///   2. `reply_to` 는 수신자 정확히 1명 → 아니면 `INVALID_SEND_ARGS`.
+///   3. body 상한 → `BODY_TOO_LARGE`.
+///   4. 그 외 전부 MessagingService 위임. 주소 공간 오류(`GROUP_NOT_FOUND`/`GROUP_EMPTY`)와 id 충돌만
+///      발송 단위 반려로 되돌아온다.
 ///
-/// ★부재 수신자는 여기서 걸러지지 않는다(ADR-0111 결정 1)★: 옛 구현은 동명 다수를 입구에서 미리 반려했지만,
-///   이제 존재·동명 판정은 **발송 순간 로스터 스냅샷 한 장**으로 서비스가 수신자마다 한다(스냅샷을 두 번
-///   뜨면 반쪽 판정이 재발한다 — 옛 입구 사전검사의 TOCTOU 가 그 자리였다). 그래서 입구는 로스터를 보지
-///   않는다.
-/// ★발신자 생존 관측(기록용만 — 게이트 아님, 사용자 결정 2026-07-19)★: relay 직전에 발신자가 아직 산
-///   신원인지 registry 로 조회하되 죽었어도 거부하지 않는다(작성 시점 인증으로 유효).
-/// ★self-send 허용★: to 에 자기 이름을 명시하면 정상 배달된다(`@all` 펼침에서만 발신자를 뺀다 — spec §4).
+/// ★부재 수신자는 여기서 걸러지지 않는다(ADR-0111 결정 1)★: 존재·동명 판정은 **발송 순간 로스터 스냅샷 한
+///   장**으로 서비스가 수신자마다 한다. 스냅샷을 두 번 뜨면 반쪽 판정이 재발한다 — 옛 입구 사전검사의
+///   TOCTOU 가 그 자리였다. 그래서 입구는 로스터를 보지 않는다.
+/// ★self-send 허용★: `to` 에 자기 이름을 명시하면 정상 배달된다(spec §4).
 // ADR-0086
-// ADR-0103
 // ADR-0111
 pub fn handle_send(
     manager: &Arc<AgentManager>,
@@ -382,7 +289,6 @@ pub fn handle_send(
 ) -> ControlResult {
     use engram_dashboard_messaging::service::{SendReject, SendStatus};
 
-    // 0. 회신 계약 인자 정합(순수 구문 — 로스터 무관). 통과분은 파싱된 SendMeta 로 정규화된다.
     let meta = match validate_contract(&cmd.contract) {
         Ok(m) => m,
         Err(hint) => {
@@ -393,7 +299,6 @@ pub fn handle_send(
         }
     };
 
-    // 0-b. ★계약 필드는 XML 봉투 전용★ — 판정 정본은 `contract_unsupported_by_envelope`.
     if let Some(hint) = contract_unsupported_by_envelope(&meta, registry.envelope_format()) {
         return ControlResult::Error {
             code: "INVALID_SEND_ARGS",
@@ -401,14 +306,8 @@ pub fn handle_send(
         };
     }
 
-    // 1. ★수신자 목록 정규화(spec §5 해석 순서 ① — 데몬 단일점)★.
-    //
-    // ★트림은 하되 그 이상은 하지 않는다★: 앞뒤 공백은 셸·JSON 배열 표기에서 쉽게 섞이는 잡티라 두 입구가
-    //   같은 결과를 내려면 데몬에서 한 번 다듬어야 한다(spec §5 가 해석 순서 ①에 트림을 명시한다). 대신
-    //   **그 밖의 보정은 없다** — 콤마 분해는 CLI 입구가 이미 했고(MCP 배열은 분해 금지), 이름 자체는
-    //   바이트 그대로의 주소 네임스페이스다(WYSIWYA — ADR-0101).
-    // ★빈 조각은 버린다★: `--to a,,b` 같은 표기의 빈 칸은 수신자가 아니다. 전부 버려 남은 게 없으면
-    //   그건 "수신자를 안 적은 것" 이므로 반려한다(빈 목록·빈 문자열 = `INVALID_SEND_ARGS`, spec §6).
+    // ★트림은 하되 그 이상의 보정은 없다★: 이름 자체는 바이트 그대로의 주소 네임스페이스다
+    //   (WYSIWYA — ADR-0101).
     let recipients: Vec<String> = cmd
         .to
         .iter()
@@ -424,10 +323,6 @@ pub fn handle_send(
         };
     }
 
-    // 2. ★`reply_to` 는 수신자가 정확히 1명(spec §3 항목 7-①)★ — 회신은 원 요청자에게만 간다.
-    //    ★표기 단계에서 막는다★: `@`토큰이 섞이면 **펼침 결과가 1명이어도** 반려한다. 펼침 뒤에 세면 같은
-    //    발송이 로스터 상태에 따라 어떤 날은 통과하고 어떤 날은 반려돼(비결정) 발신 LLM 이 규칙을 배울 수
-    //    없다 — 표기만 보면 답이 항상 같다.
     if meta.reply_to.is_some() && !reply_to_has_single_recipient(&recipients) {
         return ControlResult::Error {
             code: "INVALID_SEND_ARGS",
@@ -436,7 +331,6 @@ pub fn handle_send(
         };
     }
 
-    // 3. body 상한(수신자 수와 무관한 순수 구문 상한).
     if cmd.body.len() > MAX_BODY_BYTES {
         return ControlResult::Error {
             code: "BODY_TOO_LARGE",
@@ -446,10 +340,9 @@ pub fn handle_send(
         };
     }
 
-    // ★발신자 생존 관측(기록용만 — 게이트 아님)★. body/토큰 미로깅(보안).
-    // ★id = `m-` + base36 8자(spec §1)★ — 수신 LLM 이 회신에 되받아 적는 값이라 짧은 불투명 id 다.
     let mut msg_id = new_msg_id();
     if !registry.is_identity_live(cmd.from) {
+        // ★이 로그에 body/토큰을 싣지 않는다(보안)★.
         tracing::warn!(
             from = %cmd.from.agent_id,
             from_epoch = cmd.from.epoch,
@@ -459,16 +352,11 @@ pub fn handle_send(
         );
     }
 
-    // 봉투 sender 표시 이름 = canonical(WYSIWYA ADR-0101) — 라우팅/로스터가 보는 이름과 byte-identical.
     let sender_name = sender_display_name(manager, cmd.from);
 
-    // 4. 발송 위임(spec §5). MessagingService 가 해석/resolve/inject/park/장부를 소유한다.
-    //    ★mid-send yield-seam(ADR-0088)★ — test-harness 전용이라 운영 빌드엔 컴파일 안 됨.
     #[cfg(feature = "test-harness")]
     registry.fire_mid_send_hook();
 
-    // ★id 충돌 재시도★: 서비스는 **부작용 없이** `IdCollision` 만 돌려주므로(id 검사가 첫 부작용 지점)
-    //   새 id 로 딱 한 번 더 시도하고, 두 번째도 걸리면 내부 결함으로 보고 반려한다(무한 재시도 금지).
     let mut outcome = messaging.handle_send(
         &msg_id,
         cmd.from.into(),
@@ -479,8 +367,6 @@ pub fn handle_send(
         &meta,
     );
     if matches!(outcome, Err(SendReject::IdCollision)) {
-        // ★로그는 **충돌한 id** 를 찍는다★: 조사 가치는 옛 id 에 있으므로 그걸 먼저 붙들고, 대체 id 는
-        //   상관용으로 함께 남긴다.
         let collided = std::mem::replace(&mut msg_id, new_msg_id());
         tracing::error!(
             collided = %collided,
@@ -516,7 +402,6 @@ pub fn handle_send(
                 })
                 .collect(),
         },
-        // ★주소 공간 오류 = 전체 반려(ADR-0114 결정 3)★ — 혼용 `to` 여도 산 수신자에게 가지 않는다.
         Err(SendReject::GroupNotFound { name }) => ControlResult::Error {
             code: "GROUP_NOT_FOUND",
             hint: format!(
@@ -537,34 +422,24 @@ pub fn handle_send(
 
 // ── 조회 입구(D · spec §6 `messages`) ─────────────────────────────────────────────────────
 //
-// ★`group` 관리 표면은 제거됐다(ADR-0111 결정 4 · ADR-0112 결정 1)★ — 이 절에 남은 동사는 `messages` 뿐이다.
-// ★같은 규율, 다른 동사(ADR-0086 entrance-agnostic)★: `handle_send` 와 마찬가지로 MCP 툴과 CLI HTTP 라우트가
-//   **이 함수들만** 부른다 — 두 입구의 응답 JSON 이 같은 코드에서 나오므로 갈릴 수 없다(spec §6 "두 입구 동일
-//   JSON"). 신원 역시 두 입구 모두 토큰/세션 파생 `BoundIdentity` 다(payload 신원 금지).
-// ★읽기 전용/부작용 최소★: `messages` 는 장부를 **바꾸지 않는다**(조회 전용 — 전이·닫기 없음). `group` 은
-//   명단만 바꾸고 메시지·장부·큐를 건드리지 않는다(스냅샷 원칙 — service.rs 그룹 관리 섹션).
 // ★spawn_blocking 을 쓰지 않는 이유★: 이 경로엔 자식 stdin blocking write 가 없다(inject 없음). 잡는 락은
 //   messaging state 하나이고 그 임계구역은 순수 자료구조 조작뿐이라(port 호출은 락 밖) 짧다 — async 워커를
 //   붙들지 않는다. `handle_send` 가 blocking 풀로 가는 이유(막힌 파이프)가 여기엔 성립하지 않는다.
 
-/// 조회·관리 커맨드의 결과 — 성공(임의 JSON 객체) 또는 교정 에러. 발송(`ControlResult`)과 **에러 shape 이
-/// 동일**하다(`{status:"error", code, hint}` — spec §6): 발신 LLM·CLI 가 성공/실패를 한 규칙으로 읽는다.
+/// 조회 커맨드의 결과 — 발송(`ControlResult`)과 **에러 shape 이 동일**하다(`{status:"error", code, hint}`):
+/// 발신 LLM·CLI 가 성공/실패를 한 규칙으로 읽는다.
 ///
 /// ★왜 발송과 다른 타입인가★: 발송 성공은 `{id, results[]}` 로 **shape 이 고정**돼 있지만(계약), 조회 성공은
-///   동사마다 모양이 다르다(메시지 상태 / 미결 목록 / 그룹 목록 / 멤버 목록). 억지로 한 enum 에 넣으면
-///   variant 가 동사마다 늘어 계약이 흐려지므로, 성공 payload 는 만든 쪽이 통째로 싣고 **에러 축만** 공유한다.
-// PartialEq(Eq 아님 — serde_json::Value 가 f64 를 담아 Eq 를 못 준다)는 단위 테스트가 결과를 통째로
-//   비교하려고 붙였다. wire 계약엔 영향 없다.
+///   동사마다 모양이 다르다. 억지로 한 enum 에 넣으면 variant 가 동사마다 늘어 계약이 흐려지므로, 성공
+///   payload 는 만든 쪽이 통째로 싣고 **에러 축만** 공유한다.
+// Eq 가 아니라 PartialEq 인 것은 `serde_json::Value` 가 f64 를 담아 Eq 를 못 주기 때문이다.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlQueryResult {
-    /// 조회/관리 성공 — 동사별 payload(아래 각 핸들러 doc-comment 가 shape 정본).
     Ok(serde_json::Value),
-    /// 교정 에러(반려) — 발송과 같은 code/hint 규약.
     Error { code: &'static str, hint: String },
 }
 
 impl ControlQueryResult {
-    /// wire JSON. 성공은 payload 그대로, 에러는 `{status:"error", code, hint}`(발송과 동일 shape).
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             ControlQueryResult::Ok(v) => v.clone(),
@@ -576,7 +451,6 @@ impl ControlQueryResult {
         }
     }
 
-    /// 성공인가 — CLI 가 exit code(0/1) 매핑에 쓴다.
     pub fn is_ok(&self) -> bool {
         matches!(self, ControlQueryResult::Ok(_))
     }
@@ -594,18 +468,14 @@ impl ControlQueryResult {
 /// - `status` = **장부 어휘**(`pending|delivered|replied|expired|failed|skipped`). 발송 응답 어휘
 ///   (`delivered|pending|failed`)와 **같은 집합이 아니다** — 둘은 spec §6 대응표가 잇는 **다른 축**이다:
 ///   응답은 "그 발송 호출이 어떻게 끝났나" 의 순간 스냅샷, 조회는 "그 배달기록이 지금 어디까지 갔나" 다.
-///   `failed` 는 수신자별 실패의 종점(ADR-0111), `skipped` 는 **장부 전용**(notice 레인 은퇴)이다.
-/// - ★`code`/`hint`(행에 있을 때만 — 4차 신설)★: 사후에 종결된 행의 사유다. 지금 나타나는 값은
-///   **`RECIPIENT_DELETED`** 하나로, "파킹 대기 중 수신자가 삭제돼 미배달 종결" 을 뜻한다(ADR-0116 결정 3).
-///   발송 시점엔 `pending` 이었으므로 **발송 응답엔 절대 없는 코드**이고, 여기가 그 사실이 처음 보이는 곳이다.
+/// - `code`/`hint` 는 **행에 있을 때만** 실린다 — 사후에 종결된 행의 사유다(지금 나타나는 값은
+///   `RECIPIENT_DELETED` 하나).
 /// - `awaiting_reply` = 이 메시지가 request 인데 아직 회신이 안 왔다(통보면 항상 false).
-/// - ★`may_be_truncated`(리뷰 B2)★ = `rows` 가 **그 메시지의 전부라는 보장이 없다**(인메모리 이력 링이
-///   밀려 앞쪽 행이 사라졌을 수 있다). `false` 면 확실히 전부다. `true` 일 때는 `hint` 도 함께 실어
-///   사람/LLM 이 읽을 문장으로도 알린다 — 이 필드가 없으면 조회자가 남은 행을 전체로 오독한다(10인
-///   방송의 앞 6행이 밀려나면 "4명에게만 나갔다" 로 읽힌다).
-/// - 없는 id → `{status:"error", code:"MESSAGE_NOT_FOUND", hint}`. 단 이력이 통째로 밀려났어도 **회신
-///   계약이 살아 있으면** 행 0줄 + `awaiting_reply:true` + `may_be_truncated:true` 로 답한다(무인자
-///   조회가 미결로 보여 주는 id 를 여기선 "없다" 고 하는 자기모순 제거).
+/// - ★`may_be_truncated`★ = `rows` 가 **그 메시지의 전부라는 보장이 없다**(인메모리 이력 링이 밀려 앞쪽
+///   행이 사라졌을 수 있다). `false` 면 확실히 전부다 — 그래서 **항상 싣는다**: 참일 때만 실으면 필드의
+///   부재가 완전성으로 읽혀 조회자가 남은 행을 전체로 오독한다(10인 방송의 앞 6행이 밀려나면 "4명에게만
+///   나갔다" 로 읽힌다). `true` 면 `hint` 도 함께 실어 사람/LLM 이 읽을 문장으로도 알린다.
+/// - 없는 id → `{status:"error", code:"MESSAGE_NOT_FOUND", hint}`.
 ///
 /// `id` 없음 = **호출자의 미결**(세 갈래를 한 목록으로, 오래된 순):
 /// ```json
@@ -615,20 +485,13 @@ impl ControlQueryResult {
 ///       "reply_by": "10m", "timed_out": false },
 ///     { "direction": "reply_owed_by_me",     "id": "m-3", "from": "carol", "to": "alice", "age_secs": 5 } ] }
 /// ```
-/// - `direction` = 이 줄이 무엇인지(안정 토큰). 세 값의 **할 일이 정반대**라 이 태그가 필수다:
-///   `outbound_pending`(내 발송이 아직 안 꽂힘 — 기다림) · `awaiting_their_reply`(내 요청의 회신 대기 —
-///   기다림) · `reply_owed_by_me`(**내가 지금 답해야 함**).
-/// - `reply_by`·`timed_out` 은 request 줄에만 실린다(통보 줄에선 생략 — 노출 원칙과 같은 정신).
+/// - `direction` = 이 줄이 무엇인지(안정 토큰). 세 값의 **할 일이 정반대**라 이 태그가 필수다.
+/// - `reply_by`·`timed_out` 은 request 줄에만 실린다.
 /// - 미결이 없으면 `open: []`.
 ///
-/// ★시각을 절대시각이 아니라 경과 초로 주는 이유★: 장부 시각은 단조 시계(`Instant`)라 벽시계 값이 없다
-///   (spec §5 — 상태 전이 시각은 상대 비교용). 절대시각을 내려면 장부에 새 시간 축을 들여야 하는데 v1 범위
-///   밖이다. "3분 전" 은 수신 LLM 에게도 타임스탬프보다 바로 쓸모 있다(`MessagingService::message_state` 주석).
 /// ★호출자 이름 = canonical(WYSIWYA — ADR-0101)★: 장부는 이름으로 기록되므로 신원(BoundIdentity)을 발송
 ///   봉투와 **같은 계산**으로 표시 이름으로 바꿔 매칭한다(`sender_display_name` 재사용 — 두 곳이 갈리면
 ///   "내 미결" 이 남의 것으로 보이거나 통째로 비어 버린다).
-// ADR-0086 (듀얼 입구 공통 핸들러)
-// ADR-0103 (spec §6 messages)
 pub fn handle_messages(
     manager: &Arc<AgentManager>,
     messaging: &Arc<engram_dashboard_messaging::service::MessagingService>,
@@ -638,8 +501,6 @@ pub fn handle_messages(
     let now = std::time::Instant::now();
     match id {
         Some(raw) => {
-            // ★trim 은 여기서 한다(입구 정규화 — reply_to 와 같은 규율)★: 이 값도 발신 LLM 이 봉투에서 눈으로
-            //   옮겨 적는 id 라 앞뒤 공백이 섞이기 쉽다. 조회는 부작용이 없으므로 관대해도 안전하다.
             let msg_id = raw.trim();
             if msg_id.is_empty() {
                 return ControlQueryResult::Error {
@@ -665,13 +526,8 @@ pub fn handle_messages(
                         "age_secs": r.age_secs,
                         "updated_secs_ago": r.updated_secs_ago,
                     });
-                    // ★조회 시점 실패 코드 + 힌트(4차 — spec §6 `RECIPIENT_DELETED`)★: 이 코드는 **발송
-                    //   응답에 나타나지 않는다**(발송 시점엔 `pending` 이었다) — 파킹 대기 중 수신자가 삭제돼
-                    //   미배달 종결된 사실을 발신 LLM 이 여기서 처음 본다. 그래서 발송 실패 행과 **같은 어휘**
-                    //   (`code`/`hint`)로 싣는다: 코드만 봐도 읽히고, 힌트까지 보면 다음 행동(재발송 무의미 →
-                    //   사용자 보고)이 나오는 것이 요구사항이다.
-                    // ★있을 때만 싣는다★: 정상 행에 `code: null` 을 붙이면 노출 원칙(행동을 바꾸는 필드만)이
-                    //   흐려지고, 조회자가 모든 행에 사유가 있다고 오독한다.
+                    // ★있을 때만 싣는다★: 정상 행에 `code: null` 을 붙이면 조회자가 모든 행에 사유가
+                    //   있다고 오독한다.
                     if let Some(code) = r.code {
                         row["code"] = serde_json::Value::String(code.to_string());
                     }
@@ -685,13 +541,10 @@ pub fn handle_messages(
                 "id": view.id,
                 "from": view.from,
                 "awaiting_reply": view.awaiting_reply,
-                // ★항상 싣는다(리뷰 B2)★: `false` 는 "확실히 전부" 라는 **적극적 완전성 단언**이라 그 자체로
-                //   정보다. 참일 때만 실으면 필드의 부재가 완전성으로 읽혀 같은 오독이 남는다.
                 "may_be_truncated": view.may_be_truncated,
                 "rows": rows,
             });
             if view.may_be_truncated {
-                // 기계 판독용 불리언 옆에 사람/LLM 이 읽을 문장을 붙인다(발송 반려의 hint 와 같은 역할).
                 out["hint"] = serde_json::Value::String(
                     "The in-memory ledger has rotated, so some delivery rows for this message may already be gone — treat the list below as partial, not as the full set of recipients.".to_string(),
                 );
@@ -701,7 +554,6 @@ pub fn handle_messages(
         None => {
             let me = sender_display_name(manager, from);
             let open: Vec<serde_json::Value> = messaging
-                // 의무 귀속은 이름이 아니라 신원(AgentId)으로 가른다(리뷰 B1 — 동명 다수 오귀속 차단).
                 .open_items_for(&me, from.agent_id, now)
                 .iter()
                 .map(|i| {
@@ -712,7 +564,6 @@ pub fn handle_messages(
                         "to": i.to,
                         "age_secs": i.age_secs,
                     });
-                    // 계약 축은 request 줄에만 — 통보 줄에 `reply_by: null` 을 실으면 노출 원칙이 흐려진다.
                     if let Some(rb) = &i.reply_by {
                         obj["reply_by"] = serde_json::Value::String(rb.clone());
                     }
@@ -727,27 +578,16 @@ pub fn handle_messages(
     }
 }
 
-/// 발신자 표시 이름 — canonical 표시명(display_name ?? basename(session.cwd)). 없으면 id 앞 8자.
-///
 /// ADR-0101 (WYSIWYA): 봉투 sender 이름은 수신자가 로스터·트리·라우팅에서 보는 이름과 **byte-identical**
 ///   해야 한다 — 안 그러면 "A: 안녕" 봉투를 받고도 로스터엔 A 가 다른 문자열로 떠 지목이 어긋난다.
-///
-/// ★단일 출처 = manager.canonical_name(session.cwd 기반)★: 예전엔 여기서 profile.cwd(raw)로 재파생해
-///   agent_info(session.cwd 기반)와 갈릴 수 있었다. 이제 라우팅(resolve_recipient)이 쓰는 AgentInfo.name
-///   과 **정확히 같은 계산**을 manager 한 곳에서 얻어 로직 복제·어긋남을 없앤다. 산 세션이면 그 값을 쓰고,
-///   relay 시점에 세션이 이미 수거됐으면(발신자 terminal — line 328 케이스) 프로필+공유 fallback 으로
-///   best-effort 표시(이 봉투는 이미 인증된 발신자의 표시용이라 라우팅 어긋남과 무관).
 fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> String {
-    // 산 세션이면 AgentInfo.name 과 byte-identical 한 canonical 이름(session.cwd 기반).
     if let Some(name) = manager.canonical_name(from.agent_id) {
         return name;
     }
-    // 세션 수거됨(발신자 terminal) → 프로필 있으면 공유 fallback 으로 best-effort. profile.cwd 는 raw 라
-    //   canonical 과 다를 수 있으나, 이 경로는 산 세션이 없어 라우팅 대상도 아니다(표시 전용).
-    // ★공유 fallback 을 **무조건** 부른다(단축 금지 — 동작 보존)★: `canonical_name_when_live()` 는
-    //   display_name 이 있으면 fs 를 안 보는 단축이 있지만, 여기선 그 함수가 아니라 순수 파생
-    //   (`canonical_name_or_id_fallback`)을 raw `profile.cwd` 로 부른다. 두 경로는 cwd 정규화 유무가
-    //   달라 결과가 갈릴 수 있다 — 이 자리는 표시 전용 best-effort 라 기존 계산을 그대로 유지한다.
+    // 세션 수거됨(발신자 terminal). `profile.cwd` 는 raw 라 canonical 과 다를 수 있으나, 이 경로는 산
+    //   세션이 없어 라우팅 대상도 아니다(표시 전용 best-effort).
+    // ★`canonical_name_when_live()` 로 바꾸지 말 것(동작 보존)★: 그쪽은 display_name 이 있으면 fs 를 안
+    //   보는 단축이 있어 cwd 정규화 유무가 갈리고 결과가 달라진다.
     if let Some(p) = manager.agent_snapshot(from.agent_id) {
         return engram_dashboard_core::agent::name::canonical_name_or_id_fallback(
             p.display_name.as_deref(),
@@ -764,24 +604,21 @@ mod tests {
     use super::*;
     use engram_dashboard_core::agent::types::AgentId;
 
-    /// 테스트용 신원(토큰 파생 신원의 스텁 — payload from 금지 불변식과 무관한 값 축).
     fn ident(id: AgentId) -> BoundIdentity {
         BoundIdentity {
             agent_id: id,
             epoch: 0,
         }
     }
-    // ADR-0110: 봉투 조립 seam 은 커널 crate — 이 아래 테스트는 "계약 인자 → 봉투 속성" 매핑을 본다.
     use engram_dashboard_messaging::envelope::wrap_message;
 
     /// ENGRAM_WRAP_FORMAT 은 프로세스 전역 env — set/remove·미설정 단언 테스트끼리 직렬화한다
     /// (병렬 실행 시 한 테스트의 set 이 다른 테스트의 "미설정" 단언을 짓밟지 않게).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // ── ControlResult wire shape(양 입구 동일 — spec §6) ──────────────────────────────
+    // ── ControlResult wire shape ──────────────────────────────
     #[test]
     fn ok_delivered_json_shape() {
-        // spec §6: 성공 = `{ id, results: [{to, status}] }`. delivered 는 hint 없음.
         let r = ControlResult::Ok {
             id: "mid".to_string(),
             results: vec![SendResult {
@@ -808,7 +645,6 @@ mod tests {
 
     #[test]
     fn ok_pending_json_shape_includes_hint() {
-        // spec §6: 파킹 = `{ id, results: [{to, status:"pending", hint}] }`.
         let r = ControlResult::Ok {
             id: "mid".to_string(),
             results: vec![SendResult {
@@ -837,10 +673,9 @@ mod tests {
         assert!(!r.is_accepted(), "반려는 접수 성공 아님");
     }
 
-    // ── ControlCommand 정규화: from 은 값(신원)으로만 들어온다(페이로드 아님) ──────────────
+    // ── ControlCommand 정규화 ──────────────
     #[test]
     fn control_command_carries_identity_not_payload_from() {
-        // ControlCommand 는 from 을 BoundIdentity 값으로만 담는다 — payload 에 from 필드가 없다(구조적 보장).
         let id = AgentId::new_v4();
         let cmd = ControlCommand {
             from: ident(id),
@@ -855,7 +690,6 @@ mod tests {
 
     #[test]
     fn reply_to_requires_exactly_one_non_group_recipient() {
-        // ★리뷰 C3 — 표기 단계 판정의 단위 커버(통합 하네스에만 있던 축)★.
         let one = |v: &[&str]| {
             reply_to_has_single_recipient(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
         };
@@ -877,13 +711,11 @@ mod tests {
             Duration::from_secs(600)
         );
         assert_eq!(parse_reply_by("1h").expect("1h"), Duration::from_secs(3600));
-        // ★`s` 단위는 계속 유효하다(리뷰 fix 7)★ — 하한은 **값**에 걸리는 것이지 표기에 거는 게 아니다.
         assert_eq!(parse_reply_by("60s").expect("60s"), Duration::from_secs(60));
         assert_eq!(
             parse_reply_by("120s").expect("120s"),
             Duration::from_secs(120)
         );
-        // 상한 경계(30일)는 수용.
         assert_eq!(
             parse_reply_by("720h").expect("720h = 30d"),
             Duration::from_secs(30 * 24 * 3600)
@@ -892,8 +724,6 @@ mod tests {
 
     #[test]
     fn parse_reply_by_rejects_below_one_minute_floor() {
-        // ★리뷰 fix 7★: 기한 판정 해상도 = sweep 주기(60s)라 1분 미만은 지킬 수 없는 약속이다 —
-        //   `30s` 를 받아 주면 실제 통지는 60~120초 뒤에 나간다(계약 문구가 거짓말이 된다).
         for bad in ["1s", "30s", "59s"] {
             let err = parse_reply_by(bad).expect_err("1분 미만은 반려");
             assert!(
@@ -901,14 +731,12 @@ mod tests {
                 "hint 가 하한을 알려야: {err}"
             );
         }
-        // 경계: 정확히 60초는 수용(`>=` 아님 — `< MIN` 만 반려).
         assert!(parse_reply_by("60s").is_ok(), "정확히 1분은 수용");
         assert!(parse_reply_by("1m").is_ok(), "1m 도 같은 값이라 수용");
     }
 
     #[test]
     fn parse_reply_by_rejects_malformed_forms() {
-        // 엄격 — 모호하면 반려하고 hint 로 형태를 알린다(조용한 오해석 금지).
         for bad in [
             "", "s", "m", "10", "10 m", " 10m", "10m ", "10M", "1H", "10x", "-5m", "1.5h", "1h30m",
             "0s", "0m", "0h", "십분", "10초",
@@ -922,7 +750,6 @@ mod tests {
 
     #[test]
     fn parse_reply_by_rejects_overflow_and_beyond_cap() {
-        // ★가용성 방어★: 상한이 없으면 `Instant + Duration` 오버플로 패닉으로 sweep task 가 죽는다.
         assert!(parse_reply_by("721h").is_err(), "30일 초과는 반려");
         assert!(
             parse_reply_by("18446744073709551615s").is_err(),
@@ -940,7 +767,6 @@ mod tests {
 
     // ── C3 리뷰 fix 1: 계약 필드는 XML 봉투 전용 ─────────────────────────────────────────────
 
-    /// request 발송 메타(검증 통과분 모양).
     fn req_meta() -> engram_dashboard_messaging::service::SendMeta {
         engram_dashboard_messaging::service::SendMeta {
             request: true,
@@ -962,8 +788,6 @@ mod tests {
 
     #[test]
     fn contract_fields_are_rejected_under_colon_envelope() {
-        // ★fix 1★: colon 렌더는 id/type/reply-by/in-reply-to 를 통째로 버린다 — 그 상태의 request 는
-        //   회신이 구조적으로 불가능하고 거짓 타임아웃이 **보장**된다. 조용히 열화시키지 않고 반려한다.
         let _g = ENV_LOCK.lock().unwrap();
         assert!(
             std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
@@ -974,7 +798,6 @@ mod tests {
                 .expect("colon 에선 계약 필드 반려");
             assert!(hint.contains("XML envelope"), "교정 hint: {hint}");
         }
-        // 대조군: 같은 colon 이라도 **통보**는 통과한다(속성이 없으니 열화될 게 없다).
         assert_eq!(
             contract_unsupported_by_envelope(
                 &engram_dashboard_messaging::service::SendMeta::default(),
@@ -983,7 +806,6 @@ mod tests {
             None,
             "통보는 포맷과 무관하게 허용(기존 동작 불변)"
         );
-        // 대조군: xml 이면 계약 필드도 통과.
         assert_eq!(
             contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml),
             None
@@ -992,9 +814,6 @@ mod tests {
 
     #[test]
     fn contract_fields_are_rejected_when_wrap_template_env_is_active() {
-        // ★fix 1 의 두 번째 갈래★: `ENGRAM_WRAP_FORMAT` 템플릿은 wrap_message 가 **format 인자보다 먼저**
-        //   보는 전역 스위치라, 포맷이 Xml 이어도 실제 렌더는 템플릿(sender/id/body)이다 — 판정도 같은
-        //   입력을 봐야 새지 않는다.
         let _g = ENV_LOCK.lock().unwrap();
         assert!(
             std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
@@ -1006,10 +825,9 @@ mod tests {
             &engram_dashboard_messaging::service::SendMeta::default(),
             EnvelopeFormat::Xml,
         );
-        // 빈 값은 "미설정" 과 같게 취급한다(wrap_message 의 판정과 동일 규칙).
         std::env::set_var("ENGRAM_WRAP_FORMAT", "");
         let under_empty = contract_unsupported_by_envelope(&req_meta(), EnvelopeFormat::Xml);
-        std::env::remove_var("ENGRAM_WRAP_FORMAT"); // 반드시 제거(다른 테스트로 새지 않게).
+        std::env::remove_var("ENGRAM_WRAP_FORMAT");
 
         assert!(
             under_template.is_some(),
@@ -1103,7 +921,6 @@ mod tests {
 
     #[test]
     fn valid_request_contract_carries_both_raw_and_parsed_deadline() {
-        // 봉투는 raw 표기("10m")를, 장부는 파싱값(600s)을 쓴다(SendMeta 주석).
         let c = SendContract {
             request: true,
             reply_by: Some("10m".to_string()),
@@ -1119,7 +936,6 @@ mod tests {
 
     #[test]
     fn request_envelope_exposes_id_type_reply_by_only() {
-        // ★노출 원칙★: id 는 request 에만. 통보/회신 봉투에 id 가 새면 수신 LLM 의 회신 판단이 흐려진다.
         let _g = ENV_LOCK.lock().unwrap();
         let m = validate_contract(&SendContract {
             request: true,
@@ -1176,13 +992,8 @@ mod tests {
         assert_eq!(w, r#"<message from="alice">빌드 끝났음</message>"#);
     }
 
-    // ── D: `group` 인자 조합 규칙(순수 — handle_group doc-comment 1~7) ────────────────────────
-
-    // ── D 리뷰 A1: 멤버 이름 정규화가 **공용 핸들러**에 있다 ────────────────────────────────
-
     #[test]
     fn query_result_error_shape_matches_the_send_entrance() {
-        // 두 입구·두 동사가 같은 규칙으로 읽히려면 에러 shape 이 발송과 동일해야 한다(spec §6).
         let e = ControlQueryResult::Error {
             code: "GROUP_NOT_FOUND",
             hint: "h".to_string(),
