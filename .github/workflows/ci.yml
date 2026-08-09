@@ -5,18 +5,39 @@ on:
     branches:
       - master
       - 'ci/**'
+    # 버전 태그 push = 릴리즈 트리거(맨 아래 release-build → release-publish 2단). 태그 push 에서는
+    # 검증 3잡도 함께 도는데 이건 중복 낭비가 아니라 게이트다 — release-build 가
+    # `needs: [backend, gates, frontend]` 로 그 결과에 매달린다.
+    # 태그는 아무 커밋에나 달 수 있어(master 를 거치지 않은 커밋·CI 가 빨간 커밋 포함)
+    # "이 커밋은 master 에서 이미 초록이었다"를 전제할 수 없다. 3잡에 `if` 를 달아 태그에서 건너뛰면
+    # 그 전제를 CI 가 확인 없이 믿게 되고, 검증된 적 없는 커밋에서 배포물이 나갈 수 있다.
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - master
   workflow_dispatch:
 
 # 같은 ref 에 새 push 가 오면 앞 실행을 취소한다(뒤진 결과로 판정하지 않기 위해).
+# ★단 태그 실행은 예외★ — 이 워크플로에는 이제 되돌릴 수 없는 외부 부작용(릴리즈 생성 + 에셋 업로드)을
+# 가진 잡(release-publish)이 있다. 실행 중 취소는 잡을 죽이므로 "릴리즈는 생겼는데 에셋이 없거나 잘린"
+# 상태를 남기고, 재시도는 'release already exists' 로 죽는다(자동 회복 없음).
+# job-level concurrency 로는 이걸 막을 수 없다 — 워크플로 레벨 취소는 **런 전체**를 죽이고, 그 안의 잡은
+# 자기 그룹이 무엇이든 함께 죽는다. 그래서 취소 여부 자체를 여기서 ref 종류로 가른다.
+# 검증 3잡의 브랜치·PR 동작은 종전과 동일(true)하다 — 그들이 태그에서 도는 것 자체가 이번에 생긴 일이라
+# 이 예외로 바뀌는 기존 동작이 없다.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
-# 검증 전용 워크플로라 쓰기 권한이 필요 없다. 각 job 의 checkout 은 persist-credentials: false 로
-# 토큰을 작업본에 남기지 않는다 — 검증 대상 코드가 같은 러너에서 돌기 때문.
+# 워크플로 기본값은 읽기 전용이다. job-level permissions 는 최상위를 상속이 아니라 **치환**하므로,
+# 잡마다 선언한 값이 그 잡의 전부다. 현재 선언 상태:
+#   backend · gates · frontend  — 선언 없음 → 최상위 그대로 contents: read
+#   release-build               — contents: read 를 **명시** 선언(읽기 전용임을 눈에 보이게)
+#   release-publish             — contents: write ★워크플로 전체에서 쓰기 토큰을 쥔 유일한 잡★
+# 이 기본값을 write 로 넓히면 검증 3잡과 release-build 까지 쓰기 토큰을 쥐게 된다 — 넓히지 말 것.
+# 각 job 의 checkout 은 persist-credentials: false 로 토큰을 작업본에 남기지 않는다
+# — 검증 대상 코드가 같은 러너에서 돌기 때문.
 permissions:
   contents: read
 
@@ -359,3 +380,460 @@ jobs:
       - name: npx tsc --noEmit
         shell: bash
         run: npx tsc --noEmit
+
+  # ── 릴리즈 (버전 태그 전용) — 빌드 잡과 발행 잡을 가른다 ──────────────────────
+  # ★두 잡으로 가르는 이유(공급망)★
+  # 패키징은 `npm ci` 와 tauri 빌드로 수백 개 전이 의존성의 코드를 러너에서 실행한다. 그중 하나가
+  # `GITHUB_PATH` 에 가짜 `gh` 를 앞세우면, **같은 잡에서** 나중에 부르는 `gh` 는 그 가짜다 — 스텝 단위
+  # `env:` 로 토큰을 좁혀도 소용없다. 공격 대상은 "누가 env 를 읽을 수 있나"가 아니라 "`gh` 가 무엇으로
+  # 해석되나"이기 때문이다. 그래서 쓰기 토큰은 서드파티 코드가 한 줄도 돌지 않는 잡에만 둔다.
+  #   release-build   : contents=read  · 서드파티 코드가 도는 곳 · 결과를 아티팩트로만 넘긴다
+  #   release-publish : contents=write · 아티팩트 다운로드 + gh 호출뿐 · npm/cargo/패키징 스크립트 없음
+  # ★release-publish 에 스텝을 늘리지 말 것★ — 스텝 하나가 곧 서드파티 코드가 다시 기어들 자리다.
+  #
+  # ★`ref_type == 'tag'` 만으로는 부족★ — 위 `tags: ['v*']` 글롭은 **push 에만** 걸린다.
+  # workflow_dispatch 는 아무 ref 나 겨눌 수 있어서, 태그 조건만 보면 `backup/comments-pass-20260731`
+  # 같은 비-버전 태그를 겨눈 수동 실행이 그대로 **공개 GitHub Release** 를 만들어 버린다.
+  # 그래서 push 글롭과 같은 조건을 직접 재현한다: v 로 시작 + `/` 없음(GitHub 글롭의 `*` 는 `/` 를 넘지
+  # 않는다). 조건을 **두 잡 모두**에 건다 — build 가 skip 되면 needs 로 publish 도 skip 되므로 build 쪽만
+  # 으로도 닫히지만, 실제로 릴리즈를 만드는 잡이 스스로도 같은 조건을 들고 있게 한다.
+  #
+  # 패키징 로직을 여기서 다시 짜지 않는다. ADR-0100 co-location 불변식과 "무엇을 배송하는가"의 단일
+  # 출처는 scripts/build-release.ps1 의 manifest 이고, 이 잡은 그 스크립트를 부르고 결과를 zip 으로
+  # 옮길 뿐이다. 기대 파일 목록을 이 YAML 에 적으면 출처가 둘이 되어 반드시 어긋난다.
+  release-build:
+    name: release build (package + zip)
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '/')
+    needs: [backend, gates, frontend]
+    runs-on: windows-latest
+    # 최적화 빌드는 디버그 테스트 잡보다 훨씬 오래 걸린다. 컴파일 캐시를 쓰지 않아(아래) 매번 cold 로 돈다.
+    timeout-minutes: 90
+    # 이 잡은 읽기만 한다. 쓰기 토큰은 release-publish 에만 있다(위 분리 이유 참조).
+    permissions:
+      contents: read
+    env:
+      # 태그 문자열을 run 본문에 `${{ }}` 로 직접 보간하지 않는다(스크립트 인젝션 표면) — env 로 넘긴다.
+      # 버전은 태그가 곧 정답이다. 여기서 버전을 계산·가공하지 않는다.
+      TAG: ${{ github.ref_name }}
+    # ★이 잡이 발행 잡으로 넘기는 값은 이것 하나뿐이다★ — 파일 이름조차 넘기지 않는다.
+    # 이름을 넘기면 빌드 잡이 통제하는 문자열이 쓰기 토큰 잡의 `gh` 인자로 들어간다(글롭을 품은 이름 +
+    # 짝 맞는 파일들로 다른 에셋을 올리게 유도할 수 있다). 발행 잡은 TAG 에서 스스로 이름을 만든다.
+    outputs:
+      built_commit: ${{ steps.built.outputs.commit }}
+    steps:
+      # ★가장 먼저 돈다(checkout 보다도 앞)★ — 태그 이름이 경로·파일명으로 안전한지부터 본다.
+      # 아래 스텝들이 태그 문자열을 조립 폴더 이름과 zip 파일 이름에 그대로 박기 때문이다. 특히 `/` 가
+      # 들어가면 조립 경로가 한 단계 더 파여(`…\engram-dashboard-v1\beta`) `Split-Path -Leaf` 가 `beta` 만
+      # 집어, zip 이름도 co-location 폴더 이름도 버전을 잃는다. 그리고 아래 zip 게이트는 그걸 못 잡는다 —
+      # 게이트의 기대 루트명이 **같은 오염된 경로에서 파생**되므로 사이좋게 통과한다(구조적 사각).
+      # `if` 의 `/` 차단과 중복이지만, 이건 값 자체를 보는 마지막 방어선이고 빌드 앞에서 몇 초에 끝난다.
+      # 버전 **형식**을 강제하지 않는 이유: 태그가 곧 버전이라 형식은 이 잡이 정할 문제가 아니다.
+      # 여기서 보는 것은 "경로·파일명으로 쓸 수 있는가" 하나뿐이다.
+      - name: 'Gate: tag name is safe as a path and file name'
+        shell: bash
+        run: |
+          echo "TAG=$TAG"
+          # 허용 문자만 통과(allowlist). 여기 없는 것은 전부 거부되므로 / \ : * ? " < > | 와 공백·제어문자가
+          # 자동으로 걸린다. 선두 v 도 함께 단언한다.
+          # ★이 allowlist 는 글롭 차단으로도 load-bearing 이다 — 느슨하게 풀지 말 것★
+          # 아래 스텝의 PowerShell 파라미터 3개가 값을 **와일드카드 패턴으로 해석**한다:
+          # `Compress-Archive -Path`, 그리고 zip 게이트의 `Get-ChildItem -Path` 2회.
+          # 지금 안전한 유일한 이유가 allowlist 에 * ? [ ] 가 없어서다. 여기에 그 문자들을 들이면
+          # 조립 폴더 경로가 조용히 패턴 매칭으로 바뀌어(엉뚱한 폴더를 담거나 빈 결과를 내고)
+          # 게이트의 기대값마저 같은 패턴에서 파생되므로 사이좋게 통과한다.
+          if [[ ! "$TAG" =~ ^v[0-9A-Za-z._+-]+$ ]]; then
+            echo "FAIL — 태그에 경로·파일명으로 안전하지 않은 문자가 있다(허용: v 로 시작 + 영숫자 . _ + -)"
+            exit 1
+          fi
+          # allowlist 를 통과하지만 여전히 위험한 두 형태를 따로 막는다.
+          case "$TAG" in
+            *..*) echo "FAIL — 태그에 '..' 이 있다(경로 상위 이동)"; exit 1 ;;
+            *.)   echo "FAIL — 태그가 '.' 로 끝난다(Windows 가 파일명 끝 점을 잘라낸다)"; exit 1 ;;
+          esac
+          # 경로 길이 상한 여유분. RUNNER_TEMP + 조립 폴더 + prompts/agent-priming-cli.md 가 MAX_PATH 를
+          # 넘지 않게 하는 안전 한도지 버전 형식 규칙이 아니다.
+          if [ "${#TAG}" -gt 64 ]; then echo "FAIL — 태그가 64자를 넘는다(${#TAG})"; exit 1; fi
+          echo "PASS — tag name is usable as a path/file name"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # checkout 직후, 서드파티 코드가 한 줄이라도 돌기 **전에** 기록한다. 이 값이 발행 잡으로 건너가
+      # "그때 원격 태그가 아직 이 커밋을 가리키나"를 판정하는 기준이 된다.
+      # HEAD 를 읽는 이유: checkout 은 github.sha 를 체크아웃하는데 annotated 태그면 그 값이 태그
+      # 오브젝트일 수 있고, 실제로 컴파일되는 것은 언제나 peel 된 커밋이다. 여기서 읽으면 그 애매함이 없다.
+      - name: Record the commit that is actually being built
+        id: built
+        shell: bash
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ -z "$sha" ]; then echo "FAIL — git rev-parse HEAD 가 비었다"; exit 1; fi
+          echo "commit=$sha" >> "$GITHUB_OUTPUT"
+          echo "built commit = $sha"
+
+      # ★검증만 한다 — 버전 필드를 절대 고쳐 쓰지 않는다★(사용자 결정).
+      # 빌드 중에 버전을 써넣으면 레포 내용과 배포물의 대응이 깨져서, 나중에 그 태그를 체크아웃해도
+      # 나간 물건을 재현할 수 없다. 사람이 버전 올리는 커밋을 먼저 만들고 그 커밋에 태그를 단다.
+      # 비싼 빌드 앞에 둔다 — 여기서 걸리면 몇 초 만에 끝난다.
+      #
+      # ── 무엇을 보나 (5건) ──
+      #   1. src-tauri/tauri.conf.json — Tauri 제품 버전. 설정에 있으면 이 값이 이긴다.
+      #   2. src-tauri/Cargo.toml — ★tauri.conf.json 의 version 이 **없을 때의 폴백**이라 그 자체로
+      #      load-bearing 이다★. 실측(tauri-utils 2.9.3 `src/config.rs` `Config::version` 문서):
+      #      "a semver version number or a path to a `package.json` file … If removed the version number
+      #      from `Cargo.toml` is used." → 암묵 폴백은 Cargo.toml 이다. 1이 있다고 이걸 중복으로 보고
+      #      지우지 말 것 — 1을 지우는 순간 이게 제품 버전이 된다.
+      #   3. crates/engram-dashboard-daemon/Cargo.toml — daemon.exe·engram-send.exe 를 만드는 crate.
+      #      코드가 실제로 읽는다: agent_conn.rs 가 env!("CARGO_PKG_VERSION") 로 hello 이벤트에 실어
+      #      보낸다 → 어긋나면 에이전트에게 거짓 버전이 나간다.
+      #   4. package.json — ★산출물에 닿지 않는다★. 어디서도 import 되지 않고, Tauri 가 여기를 읽는 것은
+      #      tauri.conf.json 의 version 을 **package.json 경로 문자열로 명시**했을 때뿐이다(위 실측 인용).
+      #      그럼에도 거는 이유는 배포 경로가 아니라 자기기술 일관성 — 레포 루트가 스스로를 다른 버전이라
+      #      말하면 사람이 잘못된 답을 얻는다. 이건 배송 결함이 아니라 문서 결함이라 등급이 다르다.
+      #   5. package-lock.json (루트 `version` 만) — npm 이 package.json 에서 받아쓰는 거울값.
+      #      `npm ci` 의 정합성 검사는 의존성 스펙만 보고 이 필드는 안 본다 → 버전만 올리고 install 을
+      #      안 하면 조용히 어긋난 채 남는다. 루트 키만 단언한다(들여쓰기 2칸 = 루트, 구조적으로 유일).
+      #      packages[""].version 이라는 사본이 하나 더 있지만 따로 안 본다 — npm 이 둘을 항상 같이 쓰므로
+      #      현실의 drift 는 "lock 을 아예 갱신 안 함"이고 그건 루트 단언이 그대로 잡는다.
+      # ── 일부러 뺀 것 ──
+      #   - 라이브러리 crate 5종(core·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
+      #     내부 semver. 정적 링크돼 사용자에게 보이지 않는다. 첫 비-0.1.0 태그부터 제품 버전과 갈리는데
+      #     그건 의도된 결과다.
+      #   - PROTOCOL_VERSION(protocol crate, 현재 3): wire 계약 버전이라 릴리즈가 아니라 계약이 바뀔 때
+      #     움직인다. 릴리즈 버전에 묶으면 의미를 잃는다.
+      #   - Cargo.lock: 여기 없어도 된다. 버전만 올리고 lock 을 갱신 안 하면 backend 잡의 `--locked` 가
+      #     먼저 죽고, release-build 는 그 잡을 needs 하므로 애초에 시작하지 못한다.
+      - name: 'Gate: product versions match the tag'
+        shell: bash
+        run: |
+          expected="${TAG#v}"
+          echo "expected product version = $expected  (from tag $TAG)"
+          fail=0
+          # [package] 섹션 안의 version 만 읽는다 — 의존성 테이블의 version 과 섞이지 않게.
+          cargo_version() {
+            awk '
+              /^[[:space:]]*\[/ { inpkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/); next }
+              inpkg && match($0, /^[[:space:]]*version[[:space:]]*=[[:space:]]*"[^"]+"/) {
+                s = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); print s; exit
+              }
+            ' "$1"
+          }
+          # 들여쓰기 2칸에 앵커한다 = JSON 최상위 키. package-lock.json 은 `"version"` 이 여러 번
+          # 나오는데(packages[""] · 모든 의존성) 루트만 2칸이라 이 앵커가 정확히 하나를 고른다.
+          # 앵커를 `[[:space:]]*` 로 느슨하게 두면 의존성 버전을 집어 엉뚱한 값을 단언하게 된다.
+          json_root_version() {
+            sed -nE 's/^  "version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$1" | head -1
+          }
+          check() {
+            if [ ! -f "$1" ]; then echo "  FAIL $1 — 파일이 없다(경로가 바뀌었나)"; fail=1; return; fi
+            if [ -z "$2" ]; then echo "  FAIL $1 — version 필드를 읽지 못했다(형식이 바뀌었나)"; fail=1; return; fi
+            if [ "$2" != "$expected" ]; then echo "  FAIL $1 — expected '$expected', found '$2'"; fail=1; return; fi
+            echo "  OK   $1 — $2"
+          }
+          check src-tauri/tauri.conf.json                  "$(json_root_version src-tauri/tauri.conf.json)"
+          check src-tauri/Cargo.toml                      "$(cargo_version     src-tauri/Cargo.toml)"
+          check crates/engram-dashboard-daemon/Cargo.toml "$(cargo_version     crates/engram-dashboard-daemon/Cargo.toml)"
+          check package.json                              "$(json_root_version package.json)"
+          check package-lock.json                         "$(json_root_version package-lock.json)"
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL — 태그가 말하는 버전과 제품이 보고할 버전이 다르다."
+            echo "  CI 는 버전을 고쳐 쓰지 않는다(레포 내용 ↔ 배포물 대응 유지). 위에서 FAIL 난 파일의"
+            echo "  version 을 '$expected' 로 올린 커밋을 만들고, 그 커밋에 태그를 달아 다시 돌릴 것."
+            exit 1
+          fi
+          echo "PASS — 제품 버전 선언 5건 전부 $expected"
+
+      - name: Resolve and assert pinned toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$expected" ]; then echo "FAIL — rust-toolchain.toml 에서 channel 을 읽지 못했다"; exit 1; fi
+          actual=$(rustc --version | awk '{print $2}')
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL — pinned '$expected' but active rustc is '$actual'"
+            exit 1
+          fi
+          echo "PASS — toolchain $actual matches rust-toolchain.toml"
+
+      # ★rust-cache 를 일부러 쓰지 않는다★ — 컴파일 산출물(target/)은 아무것도 복원하지 않고 매번
+      # cold 로 굽는다. 캐시는 검증 잡처럼 자주 도는 레인에서 값이 나오는 것이고, 태그당 한 번 도는
+      # 이 잡에서는 절약분보다 "복원된 오브젝트가 배포 바이너리에 섞였는가"를 사람이 배제할 수 없게
+      # 되는 비용이 크다.
+      # ★단 아래 setup-node 의 `cache: npm` 은 켠다 — 이건 target/ 캐시와 성질이 다르다.★
+      # 복원 대상이 `~/.npm`(패키지 tarball 캐시)뿐이고 node_modules 가 아니다. `npm ci` 는 node_modules 를
+      # 통째로 지우고 package-lock.json 의 integrity 해시로 tarball 을 검증하므로, 캐시에서 온 것이
+      # 락파일과 다르면 설치가 실패한다. 즉 "cold" 주장은 컴파일 산출물 축에 한정된다.
+
+      # build-release.ps1 은 `npm run tauri -- build --no-bundle` 을 부르고, 그 tauri build 가
+      # tauri.conf.json 의 beforeBuildCommand(`npm run build`)로 프론트를 굽는다 → node_modules 가
+      # 반드시 있어야 한다(@tauri-apps/cli · vite · tsc 전부 여기서 온다).
+      # ※여기부터가 서드파티 코드가 도는 구간이다 — 위 게이트·커밋 기록은 전부 이 앞에서 끝났다.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: npm ci
+        shell: bash
+        run: npm ci
+
+      # ★별도 `npm run build` 스텝을 두지 않는다★ — 두면 프론트를 두 번 굽고, 더 나쁘게는 "dist/ 는
+      # 이 스텝이 만든다"는 오해를 남긴다. 실제로는 tauri build 가 beforeBuildCommand 로 직접 굽고
+      # 그 산출물을 exe 에 embed 하며(그래야 프로덕션 컨텍스트가 된다), 스크립트가 직후
+      # dist/index.html 부재를 tripwire 로 잡는다. 굽는 주체는 tauri CLI 다.
+      #
+      # 호출형은 launch\빌드.bat 과 동일하다(-NoProfile -File + 절대 -OutDir). 같은 세션에서 `&` 로
+      # 부르지 않고 자식 프로세스로 띄우는 이유: 스크립트가 실패를 `exit 1` 로 알리는데, 같은 세션
+      # 호출에서는 그게 $LASTEXITCODE 로만 남아 넘어갈 여지가 있다. 자식 프로세스면 종료코드가 곧
+      # 프로세스 종료코드다. $ErrorActionPreference 는 네이티브 종료코드를 잡지 않으므로 명시 확인도 둔다.
+      #
+      # -OutDir 를 주는 이유: 조립 폴더 이름이 곧 zip 의 루트 폴더 이름이 된다. 버전이 박힌 폴더로
+      # 조립해 두면 사용자가 압축을 풀었을 때 3 exe + prompts/ 가 한 폴더에 함께 떨어진다
+      # (= ADR-0100 co-location 이 사용자 손에서 깨지지 않는다).
+      - name: Package portable release (scripts/build-release.ps1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP "engram-dashboard-${env:TAG}"
+          & pwsh -NoProfile -File "scripts/build-release.ps1" -OutDir $stage
+          if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 exited $LASTEXITCODE" }
+          if (-not (Test-Path $stage)) { throw "조립 폴더가 없다: $stage" }
+          "STAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # 파일명에 버전을 박는다(태그 그대로). 릴리즈 페이지에서 에셋만 보고 어느 버전인지 알아야 한다.
+      # 이름은 여기서 한 번만 만들고 발행 잡에는 job output 으로 넘긴다 — 양쪽에서 각자 조립하면
+      # 규칙이 두 곳에 생겨 어긋난다.
+      - name: Zip the packaged folder
+        id: zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactName = "engram-dashboard-${env:TAG}-windows-x64"
+          $zipName = "$artifactName.zip"
+          $zip = Join-Path $env:RUNNER_TEMP $zipName
+          # -Path 에 와일드카드 없이 폴더 자체를 주면 그 폴더가 zip 의 루트 엔트리가 된다.
+          Compress-Archive -Path $env:STAGE_DIR -DestinationPath $zip -CompressionLevel Optimal
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # upload-artifact 는 경로를 glob 으로 해석한다. Windows 에서 역슬래시가 구분자로 처리되긴 하지만
+          # 이 판단에 90분짜리 빌드의 회수 여부를 걸 이유가 없어, 그 스텝에는 슬래시 형태를 따로 넘긴다.
+          "ZIP_PATH_POSIX=$($zip -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # 같은 잡 안의 upload-artifact 만 쓴다(신뢰 경계를 넘지 않는다). 발행 잡은 이 값을 받지 않고
+          # TAG 에서 같은 규칙으로 스스로 만든다 — 두 곳이 어긋나면 download-artifact 가 아티팩트를
+          # 못 찾아 시끄럽게 죽는다(조용한 drift 대신 tripwire).
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # manifest 자체(부족/여분/co-location)는 build-release.ps1 의 tripwire 가 이미 본다 — 여기서
+      # 다시 세지 않는다. 이 게이트가 맡는 건 그 다음 경계 하나다: **압축이 그 집합을 그대로 옮겼는가.**
+      # 기대값을 YAML 에 적지 않고 조립 폴더에서 읽는 이유도 같다(단일 출처는 스크립트의 manifest).
+      # Expand-Archive 가 손상 zip 에서 죽으므로 아카이브 판독 가능성까지 같이 확인된다.
+      - name: 'Gate: the zip carries exactly the packaged file set'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = $env:STAGE_DIR
+          $zip   = $env:ZIP_PATH
+          if (-not (Test-Path $zip)) { throw "zip 이 만들어지지 않았다: $zip" }
+          $expected = @(Get-ChildItem -Recurse -File -Force -Path $stage |
+            ForEach-Object { $_.FullName.Substring($stage.Length + 1) } | Sort-Object)
+          # "빈 것을 조용히 배송" 차단. 스크립트 tripwire 상 도달 불가여야 하지만, 그 가정이 깨지는
+          # 날에는 빈 zip 이 릴리즈에 붙는 게 최악이라 여기서 한 번 더 막는다.
+          if ($expected.Count -eq 0) { throw "조립 폴더가 비었다 — 배송할 것이 없다: $stage" }
+          $verifyRoot = Join-Path $env:RUNNER_TEMP 'zip-verify'
+          if (Test-Path $verifyRoot) { Remove-Item -Recurse -Force $verifyRoot }
+          Expand-Archive -Path $zip -DestinationPath $verifyRoot
+          $rootName = Split-Path -Leaf $stage
+          $unpacked = Join-Path $verifyRoot $rootName
+          if (-not (Test-Path $unpacked)) { throw "zip 루트 폴더가 '$rootName' 이 아니다" }
+          $actual = @(Get-ChildItem -Recurse -File -Force -Path $unpacked |
+            ForEach-Object { $_.FullName.Substring($unpacked.Length + 1) } | Sort-Object)
+          # -cne(대소문자 구분) — PowerShell 기본 비교는 대소문자를 무시해서, 이름의 케이스가 바뀐 채
+          # 압축된 경우를 그냥 통과시킨다. 케이스 변화는 무언가가 이름을 다시 썼다는 신호라 잡아야 한다.
+          if (($expected -join '|') -cne ($actual -join '|')) {
+            Write-Host 'expected:'; $expected | ForEach-Object { Write-Host "  $_" }
+            Write-Host 'actual:';   $actual   | ForEach-Object { Write-Host "  $_" }
+            throw 'zip 내용이 조립 폴더와 다르다 — 부분 배송 차단'
+          }
+          Write-Host "PASS — $($actual.Count) file(s) under $rootName/"
+          $actual | ForEach-Object { Write-Host "  $_" }
+
+      # 검증된 zip 을 아티팩트로 올린다. 이게 발행 잡으로 넘기는 **유일한** 통로다(러너가 다르므로
+      # 파일이 저절로 건너가지 않는다). 덤으로 회복 레인이기도 하다 — 발행이 실패해도 90분 빌드가
+      # 통째로 버려지지 않고, 사람이 내려받아 손으로 붙일 수 있다.
+      # `overwrite: true` — "Re-run all jobs" 로 같은 런에서 다시 돌면 앞 시도의 아티팩트가 남아 있어
+      #   기본값(false)이면 마지막 스텝에서 죽는다. 같은 런·같은 태그의 재생성물이라 교체가 맞는 의미다.
+      # `if-no-files-found: error` — 경로가 비면 조용히 warn 하고 넘어가지 않는다.
+      # `archive` 는 기본값(zip 으로 감쌈)을 그대로 쓴다 — 그래야 download-artifact 가 알아서 풀어
+      #   `<zip_name>` 파일 하나를 그대로 내려놓는 가장 검증된 조합이 된다.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.zip.outputs.artifact_name }}
+          path: ${{ env.ZIP_PATH_POSIX }}
+          if-no-files-found: error
+          overwrite: true
+
+  # ── 릴리즈 발행 — 쓰기 토큰을 쥔 유일한 잡 ──────────────────────────────────
+  # 여기서는 서드파티 코드를 돌리지 않는다: npm·cargo·build-release.ps1 전부 금지. 스텝은
+  # ① 태그↔커밋 게이트 ② 아티팩트 다운로드 ③ gh release create 셋뿐이고, 늘리지 말 것.
+  # 게이트를 다운로드보다 **앞**에 두는 이유: 게이트는 아티팩트가 필요 없다(gh api + env 만 본다).
+  #   순서를 뒤집으면 "발행해도 되는가"를 정하기 전에 쓰기 토큰 잡이 빌드 잡이 만든 아카이브를 먼저
+  #   풀게 된다. 공짜로 없앨 수 있는 순서 의존이므로 없앤다.
+  # ubuntu-latest 인 이유: 여기엔 Windows 여야 할 일이 하나도 없다(바이트를 옮기고 gh 를 부를 뿐).
+  #   부팅이 빠르고 토큰을 쥔 잡의 표면이 그만큼 작아진다. Windows 전용 작업이 생기면 그때 옮길 것.
+  #
+  # ★이 워크플로가 **막지 못하는 것** (다음 읽는 사람에게: 여기가 경계다)★
+  #   1. 산출물 무결성. 잡 분리는 **쓰기 토큰 탈취**를 막을 뿐, 손상된 빌드 의존성이 트로이 목마
+  #      바이너리를 zip 에 넣는 것은 못 막는다. 그러면 이 잡은 그걸 성실히 발행한다.
+  #      재현 가능 빌드·코드 서명·의존성 감사는 이 워크플로 범위 밖이다.
+  #   2. 빌드 프로버넌스 증명(actions/attest-build-provenance) 미도입 — 아래 발행 스텝 주석 참조.
+  #   3. 아래 게이트와 `gh release create` 사이의 TOCTOU(약 1초). 창을 90분에서 1초로 줄였을 뿐
+  #      없앤 것이 아니다. 이 도구 조합으로는 더 줄일 수 없다.
+  #   4. 발행 재시도 없음(비멱등). 의도적이다 — 조용한 덮어쓰기보다 시끄러운 실패가 낫다.
+  release-publish:
+    name: release publish (GitHub Release)
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '/')
+    needs: release-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 최상위 contents: read 를 넓히지 않고 이 잡에만 write 를 준다(job-level 은 최상위를 상속이 아니라
+    # 치환한다) — 릴리즈 생성·에셋 업로드에 필요한 최소 권한. 워크플로에서 쓰기 토큰은 여기뿐이다.
+    permissions:
+      contents: write
+    # 워크플로 레벨 그룹과 별개로 이 잡만의 그룹을 둔다(cancel-in-progress: false) — 같은 태그를 겨눈
+    # 두 실행이 동시에 릴리즈를 만들지 못하게 직렬화한다. 워크플로 그룹은 `CI-<github.ref>` 이고
+    # github.ref 는 항상 `refs/` 로 시작하므로 `CI-release-publish-<github.ref>` 와는 어떤 ref 로도
+    # 같아질 수 없다. 빌드 잡에는 걸지 않는다 — 되돌릴 수 없는 부작용은 여기에만 있다.
+    concurrency:
+      group: ${{ github.workflow }}-release-publish-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      TAG: ${{ github.ref_name }}
+      # ★이름을 빌드 잡에서 받지 않고 여기서 만든다★ — 빌드 잡이 통제하는 문자열이 쓰기 토큰 잡의
+      # `gh` 파일 인자로 들어가면, 글롭을 품은 이름 + 짝 맞는 파일들로 다른/여러 에셋을 올리게 유도할 수
+      # 있다. github.ref_name 은 빌드 잡이 건드릴 수 없다. 규칙은 release-build 의 zip 스텝과 같아야 하고,
+      # 어긋나면 아래 download-artifact 가 아티팩트를 못 찾아 죽는다(조용한 drift 대신 tripwire).
+      ARTIFACT_NAME: engram-dashboard-${{ github.ref_name }}-windows-x64
+      BUILT_COMMIT: ${{ needs.release-build.outputs.built_commit }}
+      # 런 컨텍스트 값(GitHub 이 런 생성 시점에 박는다). 아래 게이트의 (3)에서 쓴다.
+      RUN_SHA: ${{ github.sha }}
+    steps:
+      # ★이 게이트가 실제로 지키는 것: "빌드가 도는 동안 태그가 움직였는가"★
+      # checkout 과 발행 사이에 90분 가까운 창이 있고, 그동안 "태그를 엉뚱한 커밋에 달았다"는 흔한 복구
+      # (태그 삭제 후 재push)가 일어날 수 있다. 그러면 릴리즈는 커밋 B 를 가리키는데 에셋은 커밋 A 에서
+      # 나온 물건이 된다. 이걸 보는 곳이 여기 말고는 없다. 값지고 실제로 일어나는 사고다.
+      #
+      # ★이 게이트가 지키지 **못하는** 것 — 산출물 무결성★ (오해 방지를 위해 명시)
+      #   - BUILT_COMMIT 은 **빌드 전 HEAD** 를 증언할 뿐 패키징된 트리를 증언하지 않는다. npm 라이프사이클
+      #     스크립트가 패키징 전에 소스를 고쳐도 이 게이트는 전부 통과한다.
+      #   - 두 참조(원격 태그·github.sha) 모두 빌드 잡 **안에서도 읽을 수 있다**. 정보 비대칭이 없으므로
+      #     손상된 빌드 잡의 최적 거짓말 — "진짜 태그 커밋을 정직하게 보고하고 바이트만 바꿔치기" — 은
+      #     두 검사를 모두 통과한다. 이 게이트는 신뢰의 근거가 아니라 사고 탐지기다.
+      #   - 아래 (3)의 github.sha 비교가 보태는 신호는 **결합 케이스 하나뿐**이다: 태그가 움직였고
+      #     동시에 빌드 잡이 새 태그 커밋에 맞춰 거짓 보고한 경우. 독립적인 2차 검증이 아니다.
+      # 복구를 시도하지 않는다 — 태그를 옮기거나 다시 붙이는 일은 사람이 판단할 몫이다.
+      - name: 'Gate: the remote tag still points at the commit that was built'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$BUILT_COMMIT" ]; then echo "FAIL — 빌드 잡이 커밋 SHA 를 넘기지 않았다"; exit 1; fi
+          # (1) 지금 이 순간의 원격 태그를 푼다. 경량 태그면 object 가 곧 커밋, annotated 면 태그
+          #     오브젝트라 한 번 더 푼다(peel). 두 API 모두 실패하면 assignment 가 죽어 스텝이 실패한다.
+          line=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          obj_type=${line%% *}
+          obj_sha=${line##* }
+          case "$obj_type" in
+            commit) remote_commit="$obj_sha" ;;
+            tag)
+              line2=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$obj_sha" --jq '.object.type + " " + .object.sha')
+              t2=${line2%% *}
+              s2=${line2##* }
+              if [ "$t2" != "commit" ]; then echo "FAIL — annotated 태그가 커밋을 가리키지 않는다(type=$t2)"; exit 1; fi
+              remote_commit="$s2"
+              ;;
+            *) echo "FAIL — 예상 밖의 태그 오브젝트 타입: '$obj_type'"; exit 1 ;;
+          esac
+          echo "tag $TAG -> $obj_type $obj_sha -> commit $remote_commit"
+          echo "built commit (release-build) = $BUILT_COMMIT"
+          # (2) 본 게이트 — 빌드 이후 태그가 움직였나.
+          if [ "$remote_commit" != "$BUILT_COMMIT" ]; then
+            echo "FAIL — 태그가 빌드 시점 이후 다른 커밋으로 옮겨졌다. 이 에셋은 그 태그의 물건이 아니다."
+            echo "  built   : $BUILT_COMMIT"
+            echo "  tag now : $remote_commit"
+            echo "  자동 복구하지 않는다. 태그를 원래 커밋으로 되돌리거나, 올바른 커밋에 새 버전 태그를"
+            echo "  달아 처음부터 다시 돌릴 것."
+            exit 1
+          fi
+          # (3) 결합 케이스 탐지(위 주석 참조 — 독립 검증이 아니다). 경량 태그면 github.sha 가 커밋과
+          #     같고 annotated 면 태그 오브젝트일 수 있어 두 형태를 모두 인정한다 — 어느 쪽인지는 실제
+          #     태그를 push 하기 전에는 확정할 수 없다(미검증 지점).
+          if [ "$RUN_SHA" != "$BUILT_COMMIT" ] && [ "$RUN_SHA" != "$obj_sha" ]; then
+            echo "FAIL — 빌드 잡이 보고한 커밋이 이 런의 ref 값과 이어지지 않는다."
+            echo "  github.sha : $RUN_SHA"
+            echo "  built      : $BUILT_COMMIT"
+            echo "  tag object : $obj_sha"
+            exit 1
+          fi
+          echo "PASS — 원격 태그가 여전히 빌드된 커밋을 가리킨다"
+
+      # 이름은 위 env 의 ARTIFACT_NAME(= TAG 파생)만 쓴다. 빌드 잡이 다른 이름으로 올렸다면 여기서
+      # 못 찾고 죽는다 — 그게 의도한 tripwire 다.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist-release
+
+      # 새 서드파티 action 을 들이지 않는다 — gh CLI 는 GitHub-hosted 러너 이미지에 기본 탑재라
+      # 업로드용 릴리즈 action 을 추가하면 핀 관리 대상(공급망 표면)만 하나 늘어난다.
+      # --verify-tag: 원격에 그 태그가 없으면 릴리즈를 만들지 않고 실패한다.
+      # 같은 태그의 릴리즈가 이미 있으면 gh 가 실패한다 — 조용한 덮어쓰기 대신 시끄럽게 죽는 쪽을 택한다
+      # (비멱등. 재시도가 필요하면 사람이 판단해서 지우고 다시 돌린다).
+      #
+      # ★provenance attestation(actions/attest-build-provenance)은 일부러 넣지 않았다★
+      # 그게 닫는 것은 "이 파일이 이 레포의 CI 에서 나왔는가"이지 "빌드 의존성이 깨끗했는가"가 아니라,
+      # 위에 적은 산출물 무결성 갭을 닫지 못한다. 반면 값이 나오는 배치(빌드 잡)는 서드파티 코드가 도는
+      # 바로 그 잡에 id-token: write + attestations: write 를 줘야 해서, 이 워크플로가 잡을 둘로 가른
+      # 이유를 정면으로 되돌린다. 그래서 안 넣는다 — 대신 그 갭을 위 잡 헤더에 명시해 뒀다.
+      - name: Create the GitHub Release and attach the zip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          zip_name="${ARTIFACT_NAME}.zip"
+          expected="dist-release/$zip_name"
+          # 내려받은 것이 **정확히 파일 하나**이고 그 이름이 기대와 정확히 같아야 한다.
+          # 개수를 먼저 보는 이유: 기대 이름의 파일 + 곁다리 파일들이 함께 온 경우를 이름 검사만으로는
+          # 못 잡는다. 여러 개면 무엇을 올릴지 사람이 다시 판단해야 하므로 여기서 멈춘다.
+          n=$(find dist-release -type f | wc -l | tr -d '[:space:]')
+          if [ "$n" -ne 1 ]; then
+            echo "FAIL — 내려받은 파일이 정확히 1개가 아니다(n=$n). 받은 것:"
+            find dist-release
+            exit 1
+          fi
+          got=$(find dist-release -type f)
+          if [ "$got" != "$expected" ]; then
+            echo "FAIL — 내려받은 파일 이름이 기대와 다르다"
+            echo "  expected: $expected"
+            echo "  found   : $got"
+            exit 1
+          fi
+          # 프리릴리즈 판정은 태그 하나로 한다(새 설정을 만들지 않는다). semver 상 프리릴리즈 표식은
+          # build metadata(+) **앞**의 하이픈이다 → v1.0.0-rc1 은 프리릴리즈, v1.0.0+build5 는 아니다.
+          # 이걸 안 하면 gh 가 rc 태그를 정식 릴리즈로 올리고 GitHub 이 그걸 Latest 로 표시한다
+          # (기본 다운로드 대상이 되고, 되돌리려면 사람이 UI 에서 손봐야 한다 — 재실행으로는 안 고쳐진다).
+          core="${TAG#v}"
+          core="${core%%+*}"
+          gh_extra=()
+          case "$core" in
+            *-*) gh_extra+=(--prerelease); echo "prerelease tag ($TAG) -> --prerelease" ;;
+            *)   echo "stable tag ($TAG) -> GitHub 이 Latest 로 표시한다" ;;
+          esac
+          gh release create "$TAG" "$expected" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            "${gh_extra[@]}"
+          echo "PASS — released $TAG"
