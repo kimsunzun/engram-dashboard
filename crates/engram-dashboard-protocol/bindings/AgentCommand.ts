@@ -3,15 +3,9 @@ import type { ClaudeOutputFormat } from "./ClaudeOutputFormat";
 import type { EnvelopeFormat } from "./EnvelopeFormat";
 import type { RequestId } from "./RequestId";
 
-/**
- * UI→core 요청 envelope(설계 §3). side-effect 명령은 `request_id` 로 idempotent.
- */
 export type AgentCommand = { "Spawn": { profile_id: string, request_id: RequestId, } } | { "Kill": { agent_id: string, request_id: RequestId, } } | { "Interrupt": { agent_id: string, request_id: RequestId, } } | { "WriteStdin": { agent_id: string, data: number[], request_id: RequestId, } } | { "Resize": { agent_id: string, cols: number, rows: number, viewport_id: string | null, } } | { "Subscribe": { agent_id: string, epoch: number | null, after_seq: number | null, } } | { "Unsubscribe": { agent_id: string, } } | { "AcquireInput": { agent_id: string, request_id: RequestId, } } | { "ReleaseInput": { agent_id: string, request_id: RequestId, } } | { "ListAgents": { request_id: RequestId, } } | { "StopDaemon": { force: boolean, kill_agents: boolean, request_id: RequestId, } } | { "SpawnByCwd": { cwd: string, request_id: RequestId, } } | { "ListProfiles": { request_id: RequestId, } } | { "CreateProfile": { name: string, cwd: string, extra_args: Array<string>, env: Array<[string, string]>, auto_restore: boolean, 
 /**
- * claude 출력 포맷(ADR-0044 M2) — Terminal=PTY 대화형(기본) / StreamJson=헤드리스 NDJSON.
  * `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
  * PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
- * 데몬이 이 값을 저장 프로필의 AgentCommand::Claude { output_format } 로 옮기고, 이후
- * SpawnProfile → manager.spawn_agent 가 is_json_mode 로 StdioTransport 를 고른다.
  */
 output_format: ClaudeOutputFormat, request_id: RequestId, } } | { "DeleteProfile": { profile_id: string, request_id: RequestId, } } | { "SpawnProfile": { profile_id: string, resume: boolean, request_id: RequestId, } } | { "SetProfileAutoRestore": { profile_id: string, auto_restore: boolean, request_id: RequestId, } } | { "RenameProfile": { profile_id: string, name: string | null, request_id: RequestId, } } | { "ReparentProfile": { child_id: string, parent_id: string | null, request_id: RequestId, } } | { "GetSnapshot": { agent_id: string, request_id: RequestId, } } | { "ListPresets": { request_id: RequestId, } } | { "CreatePreset": { cwd: string, request_id: RequestId, } } | { "DeletePreset": { preset_id: string, request_id: RequestId, } } | { "RenamePreset": { preset_id: string, name: string | null, request_id: RequestId, } } | { "SetEnvelopeFormat": { format: EnvelopeFormat, request_id: RequestId, } };

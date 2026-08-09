@@ -6,6 +6,6 @@ import type { OutputCaps } from "./OutputCaps";
 import type { SessionCaps } from "./SessionCaps";
 
 /**
- * 영역별 capability(bool 폭증 방지). 슬롯이 렌더러/UI 분기에 사용.
+ * 영역별 capability(bool 폭증 방지).
  */
 export type Capabilities = { input: InputCaps, output: OutputCaps, control: ControlCaps, session: SessionCaps, model: ModelCaps, };

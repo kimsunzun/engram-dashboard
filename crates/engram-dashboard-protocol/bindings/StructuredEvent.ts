@@ -13,13 +13,12 @@
  * → 이 wire 타입은 daemon `connection_core::output_event_to_wire` 가 명시 매핑한다. protocol 은 wire
  * 타입만 소유(core 무의존).
  *
- * ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고 tag1
- * payload 에 실리지 않는다(codec.rs: tag0=TerminalBytes / tag1=StructuredEvent). 따라서 이 미러에는
- * TerminalBytes variant 를 두지 않는다 — core `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가
- * 방어적으로 흡수(근거 주석은 output_event_to_wire).
+ * ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고
+ * tag1 payload 에 실리지 않는다. 따라서 이 미러에는 TerminalBytes variant 를 두지 않는다 — core
+ * `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가 방어적으로 흡수(근거 주석은 output_event_to_wire).
  *
  * ★self-describing serde★: internally-tagged(`#[serde(tag="type")]`) — payload JSON 에 `"type"` 판별자가
- * 박혀 프론트가 JSON.parse 후 variant 를 가른다(codec 은 이 스키마를 모른다 — opaque tag1 payload, ADR-0045).
+ * 박혀 프론트가 JSON.parse 후 variant 를 가른다.
  * wire 직렬화 형식 = JSON(serde_json) — daemon adapter 가 `serde_json::to_vec` 로 tag1 payload 를 만든다.
  */
 export type StructuredEvent = { "type": "TextDelta", text: string, turn_id: string | null, message_id: string | null, } | { "type": "ToolCall", name: string, args_json: string, 

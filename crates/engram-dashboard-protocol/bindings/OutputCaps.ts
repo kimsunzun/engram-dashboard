@@ -2,7 +2,7 @@
 
 export type OutputCaps = { terminal_bytes: boolean, 
 /**
- * 구조화 스트림(NDJSON) 여부 — M2 렌더러 분기(xterm vs RichSlot)를 위한 신호(ADR-0044). core 미러.
+ * 구조화 스트림(NDJSON) 여부(ADR-0044).
  * `#[serde(default)]`(FIX 3): M1 에서 새로 추가된 필드라, 이 필드가 없는 옛 wire(구 데몬/프론트)를
  * 받아도 관용적으로 false 로 역직렬화한다(sibling `output_format` 과 같은 additive·tolerant 접근 —
  * PROTOCOL_VERSION 유지). ts-rs 는 serde(default) 를 optional 로 표기하지 않으므로 TS 는 여전히

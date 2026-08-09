@@ -2,39 +2,27 @@
 import type { AgentSpawnCommand } from "./AgentSpawnCommand";
 import type { RestartPolicy } from "./RestartPolicy";
 
-/**
- * 영속 프로필 wire 미러 — core `profile::AgentProfile` 의 직렬화 형태와 일치.
- * 프로필 CRUD command/event(ProfileListUpdated)에 실린다.
- */
 export type AgentProfile = { id: string, name: string, 
 /**
  * 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). `Some` → 그대로 표시, `None` → cwd
- * basename 파생(기존 동작 불변). core `AgentProfile::display_name` 미러. 프론트 트리가 `name` 대신
+ * basename 파생(기존 동작 불변). 프론트 트리가 `name` 대신
  * 이 값을 우선 표시명으로 쓴다(`name` 은 CreateProfile 이름/ad-hoc cwd 문자열이라 표시명 부적합).
  */
 display_name: string | null, 
 /**
  * 트리 계층 부모 프로필 id(ADR-0072). `Some` → 이 프로필은 해당 부모의 자식(트리 들여쓰기), `None` →
- * 최상위(루트). core `AgentProfile::parent_id` 미러. 1단 중첩·부모삭제=루트승격 규칙은 데몬(reparent).
+ * 최상위(루트). 1단 중첩·부모삭제=루트승격 규칙은 데몬(reparent).
  * `#[serde(default)]` 라 이 필드 없는 옛 wire → None(루트, PROTOCOL_VERSION 유지 — display_name 과 동형).
  */
 parent_id: string | null, command: AgentSpawnCommand, 
 /**
- * 정규화된 cwd(PathBuf 의 JSON 표현 = 문자열).
+ * 정규화된 cwd.
  */
 cwd: string, 
 /**
  * ※자격증명 금지(평문 persist).
  */
-env: Array<[string, string]>, claude_session_id: string | null, 
-/**
- * 폐기된 과거 세션 id 이력.
- */
-old_session_ids: string[], epoch: number, auto_restore: boolean, 
-/**
- * **예약(reserved)** — 동작 미구현, 제거 금지(RestartPolicy 주석 참조).
- */
-restart_policy: RestartPolicy, 
+env: Array<[string, string]>, claude_session_id: string | null, old_session_ids: string[], epoch: number, auto_restore: boolean, restart_policy: RestartPolicy, 
 /**
  * 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 유효.
  */

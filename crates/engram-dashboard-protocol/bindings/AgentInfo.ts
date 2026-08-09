@@ -3,8 +3,7 @@ import type { AgentStatus } from "./AgentStatus";
 import type { Capabilities } from "./Capabilities";
 
 /**
- * 에이전트 메타데이터 스냅샷 — AgentListUpdated 및 연결 직후 list 스냅샷에 실림.
- * core(types.rs) AgentInfo 와 일치. epoch 는 재구독 트리거(`[agentId,epoch]`).
+ * epoch 는 재구독 트리거(`[agentId,epoch]`).
  */
 export type AgentInfo = { id: string, 
 /**

@@ -10,9 +10,6 @@ import type { RestoreReport } from "./RestoreReport";
 import type { SnapshotChunk } from "./SnapshotChunk";
 import type { SubscribeAction } from "./SubscribeAction";
 
-/**
- * core→UI 이벤트 envelope(설계 §3, JSON 경로). TerminalBytes 출력은 여기 없음(binary frame).
- */
 export type AgentEvent = { "Hello": { protocol_version: number, daemon_version: string, 
 /**
  * 데몬 전체 capability(에이전트별 capability 는 AgentInfo 에).
@@ -23,6 +20,6 @@ capabilities: Capabilities | null, } } | { "Ack": { request_id: RequestId, } } |
  */
 replay_from: number, 
 /**
- * ring 밖으로 밀려 일부 손실(clear+tail). UI "output truncated" 표시.
+ * ring 밖으로 밀려 일부 손실(clear+tail).
  */
 truncated: boolean, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "AgentList": { request_id: RequestId, agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "ProfileListUpdated": { profiles: Array<AgentProfile>, } } | { "ProfileList": { request_id: RequestId, profiles: Array<AgentProfile>, } } | { "PresetListUpdated": { presets: Array<Preset>, } } | { "PresetList": { request_id: RequestId, presets: Array<Preset>, } } | { "Snapshot": { request_id: RequestId, agent_id: string, chunks: Array<SnapshotChunk>, } } | { "Created": { request_id: RequestId, profile: AgentProfile, } } | { "Spawned": { request_id: RequestId, agent: AgentInfo, } } | { "Error": { request_id: RequestId | null, message: string, } };

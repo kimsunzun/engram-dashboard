@@ -2,8 +2,7 @@
 
 /**
  * 봉투 포맷 wire 타입(ADR-0096/0103) — 데몬이 A→B 메시지를 감쌀 때 쓰는 형식 스위치의 값.
- * `Xml` = `<message from="{sender}" ...>{body}</message>`(운영 기본, ADR-0103), `Colon` = `{sender}: {body}`
- * (잔존 스위치). 렌더 규칙(정확한 문자열·속성)은 데몬 `control::ingress` 단독 소유 — 이 wire 타입은 스위치
+ * 렌더 규칙(정확한 문자열·속성)은 데몬 `control::ingress` 단독 소유 — 이 wire 타입은 스위치
  * 값만 나른다(설계·조립은 데몬, 이 crate 는 순수 wire 계약). 실제 렌더 enum(데몬측)과 이름은 같으나 별개 타입.
  *
  * ★serde lowercase(load-bearing)★: `#[serde(rename_all="lowercase")]` 라 wire JSON 이 `"colon"`/`"xml"`
