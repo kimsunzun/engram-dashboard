@@ -40,7 +40,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **세부 이름은 역할로 바꿔 부른다.** 변수·함수·정규식·플래그는 문서에 박고, 채팅에선 그것이 무엇을 지키는지만 말한다.
 - **풀어 쓸 땐 경계를 정확히.** 의역이 다른 거시 개념과 충돌하면 역효과다. 모호하면 거시 이름을 박고 풀이를 매단다.
 - **서브에이전트를 돌리면 스폰 방식·지시·회수물을 한두 줄로 보고한다.** 결과만 던지지 않는다.
-- **혼동 쌍은 갈라 부른다(고정 용어).** 재시작 = 에이전트(claude 프로세스)/클라이언트(셸)/데몬 · 화면 = 웹뷰(창)/컴포넌트/슬롯(레이아웃 한 칸) · **에이전트 상태 3(살아 있음·잠듦·없음) ≠ 메시지 결말 3 — 맨 "부재"·"비활성" 금지**(두 축을 섞어 결정이 꼬인 적이 있다. 정본 = ADR-0116).
+- **혼동 쌍은 갈라 부른다(고정 용어).** 재시작 = 에이전트(claude 프로세스)/클라이언트(셸)/데몬 · 화면 = 웹뷰(창)/컴포넌트/슬롯(레이아웃 한 칸) · **셸 = 클라이언트 셸**(창·트레이를 띄우는 앱 껍데기)**/셸 백엔드**(에이전트가 띄우는 명령 프롬프트) · **백엔드 = 에이전트 백엔드**(claude·shell 등 에이전트가 띄우는 프로그램)**/Rust 쪽 전체**(「백엔드 모듈 맵」의 용법) · **에이전트 상태 3(살아 있음·잠듦·없음) ≠ 메시지 결말 3 — 맨 "부재"·"비활성" 금지**(두 축을 섞어 결정이 꼬인 적이 있다. 정본 = ADR-0116).
 
 <examples>
 <bad>
@@ -97,7 +97,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 ### 백엔드 확장
 
-모든 백엔드가 같은 인터페이스(start/write_input/resize/kill/output)를 구현하고 **차이는 구조가 아니라 capability 유무**다 — 출력 종류를 가정하지 않고 capability로 구분해 슬롯이 렌더러를 고른다. **백엔드 전용 지식**(claude의 `--session-id`/`--resume` 등)은 backend 한 곳에 가둔다 — manager는 dispatch만 부르고 transport는 백엔드를 모른다. codex/gemini는 CLI 확인 후 추가. (ADR-0002/0004/0030)
+**에이전트 백엔드 전용 코드는 없앨 수 없고 한 곳에 모을 수 있을 뿐이다 — 그 한 곳이 `backend`다.** claude의 `--session-id`/`--resume` 같은 지식이 거기서 새면 위반이고, manager는 dispatch만 부르고 transport는 백엔드를 모른다. 그래서 새 백엔드는 그 한 곳만 늘리면 흡수된다. (ADR-0004 · capability 산출 = ADR-0002/0030)
 
 ### 5. LLM-우선 제어
 
@@ -127,10 +127,10 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 **데이터 흐름:** `AgentManager → AgentSession(= OutputCore + dyn AgentTransport)`. 출력·상태는 `OutputSink`/`StatusSink` trait으로만 흐른다(「코어 격리」 계약의 실물). 종료 분류는 reaper 단일 소비자(ADR-0019).
 
 - **core** — 에이전트 코어(agent·persistence·logging), tauri import 0. seam: `transport`·`backend`.
-- **messaging** — 메시징 커널. **워크스페이스 crate 무의존**(컴파일러 강제 벽). 접합은 lib이 소유한 포트 trait뿐이고 실물 어댑터는 데몬이 소유한다. (ADR-0110)
+- **messaging** — 메시징 커널. **워크스페이스 crate 무의존**(컴파일러 강제 벽). 접합은 lib이 소유한 포트 trait뿐이고 실물 어댑터는 데몬이 소유한다. (ADR-0110 — 턴 관측 명단·분류는 ADR-0127이 코어로 승격, TapHost 포트는 폐지)
 - **net** — 데몬의 네트워크 행(WS·Origin·핸드셰이크·연결 수명·단일 writer·keepalive·팬아웃·프레임 포트·단일 인스턴스·portfile). **경계·격리 게이트·의존 상한의 정본은 그 crate `src/lib.rs` 헤더.** (ADR-0129)
 - **daemon** — `AgentManager` 소유, 소켓 수락 루프와 네트워크 행 조립. 이벤트버스 single-push(ADR-0028). 메시징 호스트 조립실(ADR-0110).
-- **discovery** — 데몬 발견 순수 로직(no WMI/no sleep) + `ensure_daemon` + `default_data_dir`. (ADR-0024)
+- **discovery** — 데몬 발견·기동(`ensure_daemon`·WMI spawn·폴링) + `default_data_dir`. **판정 로직만 주입 seam 뒤로 분리**돼 WMI·sleep 없이 단독 테스트된다(crate 전체가 순수한 게 아니다). (ADR-0024)
 - **protocol** — wire 계약 + codec + ts-rs 바인딩.
 - **src-tauri** — 데몬 클라이언트 셸(창·트레이·discovery·로컬 command). **에이전트 in-proc 호스팅 X — `AgentManager` 소유는 데몬이다.** (ADR-0029)
 
@@ -141,8 +141,10 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **락 순서:** sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers clone 후 lock 미보유 send. (ADR-0006)
 - **상태 알림 분담:** 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. 프론트는 `status_changed`로 terminal 판정 금지 → `agent-list-updated`로 판정. (ADR-0005)
 - **replay→live:** subscribers lock 보유 중 replay 전송(순서 역전 방지) + 프론트 seq dedup.
-- **epoch:** 같은 AgentId 맵 교체마다 +1 → 프론트 `[agentId, epoch]` 재구독. (ADR-0007)
+- **epoch:** 같은 AgentId 맵 교체마다 +1 → 프론트 재구독. 재구독 원칙은 `[agentId, epoch]`(ADR-0007)이고 실제 effect deps는 `viewId`가 앞에 붙는다(뷰 단위 구독 — ADR-0046 결정 3의 귀결).
 - **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows.
+- **턴 관측 정리 = 두 지점뿐:** `finish` + `emit`의 finalize 재확인. **세 번째 호출자를 늘리면 인과가 갈라진다.** 빠지면 턴 도중 죽은 에이전트가 "진행 중"으로 남아 30분 상한(fail-open)이 풀 때까지 우편이 막힌다. (ADR-0127)
+- **등록 순서:** sessions insert가 pump 시작보다 **먼저** — 뒤집히면 즉시 종료하는 세션이 명부에 오르기 전에 끝나 수거되지 않는다(런타임엔 무신호 — reaper 테스트가 회귀를 잡는다). (ADR-0019)
 
 ### 세션 복원
 
@@ -150,9 +152,9 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 
 ## 프론트 구조 (`src/`)
 
-- **제어 표면(불변):** 컴포넌트·스토어는 `agentClient`(단일 `ProtocolClient`)에만 의존한다(`ptyApi` 직접 호출 X — ADR-0011). carrier = transport seam, 운영은 `TauriTransport` 고정(ADR-0036). 교체점은 transport이고, `WsTransport`는 테스트·직결 흔적이다(ADR-0020/0029).
+- **제어 표면(불변):** 컴포넌트·스토어는 `agentClient`(단일 `ProtocolClient`)에만 의존한다(개별 IPC 헬퍼 직접 호출 금지 — ADR-0011이 거부한 `ptyApi` 형태. 그런 모듈은 지금 없다). carrier = transport seam, 운영은 `TauriTransport` 고정(ADR-0036). 교체점은 transport이고, `WsTransport`는 테스트·직결 흔적이다(ADR-0020/0029).
 - **폴더:** api · commands(제어 표면 — registry/dispatch/contributions) · components(layout/agent/slot/diff/ui) · i18n · lab · lib · pages · store · styles · theme · util.
-- **`eventBus`가 Tauri 이벤트를 1회 등록**한다(agent-list-updated / status-changed / restore-result).
+- **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — raw listener 수명은 각 등록 주체가 진다(`TauriTransport.close` · `viewStore` dispose). 등록 주체는 둘로 갈린다: **에이전트 이벤트 6종**(목록·상태·복원 결과·프로필·프리셋·연결 상태)은 `TauriTransport`가 `listen`을 걸고 `eventBus`는 `agentClient`의 추상 구독만 받는다 · **레이아웃·탭 이벤트**는 `viewStore`가 Tauri `listen`을 직접 건다(백엔드가 권위라 의도된 예외).
 - **통합 micro-rules:** 구독 effect deps `[viewId, agentId, epoch]`(ADR-0046) · 구독 전 `terminal.reset()` · seq dedup · replay 경계 = gen 펜스 성공 마커 · `delete channel.onmessage`(null 아님) · 입력 가드 · resize debounce 50ms.
 
 ## 창 구성
@@ -189,6 +191,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
 - 프론트: `npm test`(vitest run) + `npx tsc --noEmit`(별도 typecheck 스크립트 없음)
 - 전체 E2E: `npm run tauri dev` · 로그 ON: `RUST_LOG=debug`(기본 warn)
+- **CI 정본 = `.github/workflows/ci.yml`** — 로컬 게이트에 없는 검사가 더 있다(여기서 세지 않는다). 그중 wire 바인딩 동기 게이트는 실제로 깨진 적이 있으니, 생성물 drift를 남긴 채 밀지 말 것.
 
 ### 네트워크 행 격리 게이트
 
@@ -208,7 +211,7 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tau
 # 2) 포트 대기: curl http://127.0.0.1:9223/json/version
 # 3) 검증
 node scripts/cdp.mjs info                  # 페이지 목록
-node scripts/cdp.mjs shot out.png          # 스크린샷 → Read로 확인
+node scripts/cdp.mjs shot out.png          # 스크린샷(맨 파일명은 _wip/shots/ 아래로) → Read로 확인
 node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행
 ```
 
@@ -218,7 +221,7 @@ node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행
 
 ## 컨벤션
 
-> **주석 규약은 미설정 — 보류지 종결이 아니다.** clean-comment 스킬이 안정화되면 이 자리에 건다. 그때까지 모델 기본 판단으로 쓰고, **이 자리를 임의 규칙으로 채우지 말 것** — 없는 정본을 가리키던 옛 문장이 세션마다 즉흥 규칙을 만들어냈다.
+> **주석 규약 정본 = `/code-conventions`의 주석 규약 파일.** 코더·리뷰어 지시서에 그 파일을 주입해 쓴다. **이 자리에 규칙을 베끼지 않는다** — 없는 정본을 가리키던 옛 문장이 세션마다 즉흥 규칙을 만들어냈고, 베껴 두면 같은 일이 두 출처로 반복된다.
 
 - 자격증명을 프로필 env에 넣지 말 것(평문 저장 — persistence가 경고한다).
 - 모듈마다 build/test/커밋. 커밋 메시지 끝에 Co-Authored-By 트레일러.
