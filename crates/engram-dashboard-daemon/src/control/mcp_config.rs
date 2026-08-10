@@ -182,8 +182,15 @@ pub fn sweep_stale_configs(data_dir: &Path) {
     let dir = data_dir.join(MCP_CONFIG_SUBDIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        // 디렉토리 부재(첫 부팅) 등은 정상 — 청소할 게 없다.
-        Err(_) => return,
+        // 첫 부팅엔 폴더 자체가 없다 — 청소할 것도 없다.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                "부팅 스윕 미실행 — stale 평문 토큰 파일이 디스크에 남아 있을 수 있다: {e}"
+            );
+            return;
+        }
     };
     let mut removed = 0usize;
     for entry in entries.flatten() {
