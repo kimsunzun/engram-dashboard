@@ -35,6 +35,15 @@
 
 **핫패스 = 불변식 영역:** spawn/kill/pump·이벤트버스·transport·epoch·replay→live 등 동시성·lifetime 경로(CLAUDE.md "핵심 불변식")가 닿으면 full — 이 경로는 test PASS만으론 race·lifetime 동작을 보장 못 한다. **정직 note:** full의 cdp 실측 **1회 통과도 race-free 증명이 아니다** — smoke(존재 증거)일 뿐, 핫패스는 1회 관찰로 race를 배제하지 못한다(과청구 금지).
 
+## CI와의 분담
+
+**어느 브랜치든 push하면 CI(`.github/workflows/ci.yml`)가 standard 범위를 windows 러너에서 돌린다.** 그래서 **로컬에서 같은 것을 선행 반복하지 않는다**(사용자 결정) — 아래 강도 판정 규칙은 그대로 두고, 그 강도의 **build/test 부분을 CI 결과로 갈음**한다.
+
+- **강도 하향이 아니다.** 경로→강도 매핑도 escalation-only도 그대로다. 바뀐 것은 *누가 돌리나*뿐이다.
+- **게이트 성립 = CI 초록.** push 후 결과를 확인한다 — 초록을 못 봤으면 그 변경은 아직 게이트를 통과한 게 아니다. CI가 못 도는 상황(오프라인·워크플로 자체 수정·CI 장애)이면 아래 강도별 실명령을 로컬에서 그대로 돈다.
+- **CI 미커버 3건 — 로컬 몫이다:** ① GUI 실측(창 필요) ② 실 claude 의존 테스트(워크플로가 `--skip`으로 제외하며 **그 목록이 정본**) ③ ADR-0130 재론 트리거(게이트가 아니라 알림이라 CI에 못 얹는다 — daemon crate가 닿으면 로컬에서 돌 것).
+- **★아래 목록에 없고 CI에만 있는 게이트 2건★** — ts-rs 바인딩 sync(`git diff --exit-code -- crates/engram-dashboard-protocol/bindings/`, protocol 테스트 **직후**)와 discovery async 반입(`cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all` → `^(tokio|mio|tokio-tungstenite|futures-util) ` 0줄). 로컬 fallback으로 돌 때 이 둘을 빠뜨리면 CI보다 약하다.
+
 ## 강도별 실명령 (골격 §2 "게이트 실행"에 주입)
 
 모두 **워크스페이스 루트에서** 실행한다. 게이트 순서(빌드 → 테스트 → 격리 → 타입체크·프론트 → 실측)·실패 시 멈춤은 골격이 강제한다.

@@ -4,6 +4,23 @@
 
 ## 보류 (재도입 예정)
 
+### T-16. 실 claude 의존 테스트 6건 — CI 커버리지 0
+- **상태:** 보류. 로컬에서만 검증되고, 그 로컬 검증도 새는 구멍이 있다.
+- **출처:** ADR-0131 결정 3. 러너에 claude가 없고, `skip_no_claude` 가드가 러너에서 작동하지 않는다(spawn은 성공하고 프로세스가 뒤늦게 죽어 가드를 통과) — 어느 건이 터질지가 타이밍에 따라 달라져 축 단위로 `--skip` 했다. 게다가 `control_send.rs`의 turn-end 대기는 90초 내 미관측이면 eprintln 후 **통과**한다(`ENGRAM_TEST_REQUIRE_CLAUDE=1`로만 승격).
+- **선택지 3:** ① 그대로 둔다 ② **가짜 claude CLI 하네스**(stream-json을 흉내내는 작은 바이너리) — 조사한 AI 도구 OSS 5곳이 전부 이 형태(모델 HTTP mock)라 우리 형태로 옮기면 CLI mock. 진짜와의 drift는 별도 위험 ③ skip을 실패로 승격(가장 싸고, 최소한 눈에 보인다).
+- **조치:** 사용자 결정 후 착수. `crates/engram-dashboard-daemon/tests/control_send.rs`에 "이 파일의 실 claude 의존 테스트는 CI에서 안 돈다"를 남길 것 — 지금은 ADR·step-log에만 있어 테스트 작성자가 못 본다.
+
+### T-17. GUI 실측 CI 편입 — 등록된 시나리오가 없다
+- **상태:** 보류. 자동화 대상 자체가 없어서 CI 얹기가 뒷일이다.
+- **출처:** ADR-0131 미결 ③. `scripts/cdp.mjs`는 `shot`/`eval`/`info` 3명령뿐이고 스위트·시나리오 개념이 없다 — 변경 내용을 보고 사람이 그때그때 정하는 방식.
+- **선행 조사 필요:** 러너에 WebView2가 있는지, 화면 없는 환경에서 창이 뜨는지 **둘 다 미실측**. Tauri E2E 전용 도구(WebDriver 계열) 채택 여부도 미조사 — 지금 방식으로 밀지 그쪽으로 갈지 갈림길.
+- **참고(업계 대조):** 조사한 데스크톱 앱 9곳 중 매 PR에 GUI E2E를 도는 곳은 1곳뿐. **CI에서 뺀 것이 다수파**라 서두를 일은 아니다.
+
+### T-18. branch protection(초록 아니면 머지 금지) — 도입 안 함
+- **상태:** **사용자 결정: 권하지 않음 → 도입 안 함.** 재론은 필요가 생길 때만.
+- **출처:** ADR-0131 거부한 대안. 걸면 master 직접 push가 막히고 모든 변경이 PR을 탄다. 에이전트는 하네스가 이미 master push를 막아 어차피 PR을 타므로 **실질 변화는 사용자 쪽 왕복 증가뿐**이고, CI 자체를 고칠 때도 PR을 타야 한다.
+- **재론 트리거:** 협업자가 늘거나, CI 초록 없이 master에 들어간 변경이 실제로 사고를 낸 경우.
+
 ### T-2. 프론트 seq dedup 확인 — Phase 3
 - **상태:** 전제 조건, Phase 3에서 검증
 - **출처:** dr26 session.rs 리뷰. drain이 replay push와 subscribers lock 취득 사이에 subscribe가 끼면 새 sink에 같은 seq 중복 전달 가능(§7 고유 속성).

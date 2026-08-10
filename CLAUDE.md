@@ -176,6 +176,15 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 
 # 검증
 
+## CI — push하면 자동으로 돈다 (`.github/workflows/ci.yml`)
+
+**어느 브랜치든 push하면** 아래 「빌드·검증 명령」과 격리 게이트가 windows 러너에서 돈다. 로컬에서 같은 것을 다시 돌리지 않는다 — 범위 분담의 정본은 `/qa` 바인딩.
+
+- **CI가 못 하는 것 = GUI 실측**(창이 필요하다) **+ 실 claude 의존 테스트**(러너에 claude 없음 — 워크플로가 이름으로 제외하며 그 목록이 정본) **+ ADR-0130 재론 트리거**(게이트가 아니라 알림이라 CI에 못 얹는다). 셋 다 로컬 몫이다.
+- **CI에만 있고 이 목록엔 없는 게이트 2건** — ts-rs 바인딩 sync(`git diff --exit-code -- crates/engram-dashboard-protocol/bindings/`)와 discovery async 반입. 로컬 fallback으로 돌 때 빠뜨리기 쉽다.
+- **`v*` 태그를 push하면 릴리즈까지 간다** — 배포판 zip을 만들어 GitHub Release에 붙인다. 태그와 제품 버전이 다르면 빌드 전에 멈춘다(대조 대상 목록은 워크플로의 버전 게이트가 정본). 릴리즈 잡은 검증 3잡에 `needs`로 매달려 있어 **빨간 게이트에서는 배포가 시작되지 않는다.**
+- 워크플로를 고치기 전에 **ADR-0131을 읽을 것** — 러너 단일화·검증 전용 범위·빌드/발행 잡 분리의 근거가 거기 있다.
+
 ## 빌드·검증 명령 (워크스페이스 루트에서 실행)
 
 - `cargo test --workspace --exclude engram-dashboard` — 전 workspace 회귀. src-tauri 패키지를 빼는 이유는 그 lib 테스트 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽기 때문이다(실측 2026-08-05). **루트 bare `cargo test` 금지.**
