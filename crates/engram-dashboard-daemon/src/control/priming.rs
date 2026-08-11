@@ -19,6 +19,199 @@
 
 use std::path::PathBuf;
 
+use engram_dashboard_core::agent::types::{
+    CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
+};
+
+/// 토큰을 이어 가는 문자 — 이 문자가 매치 양옆에 붙어 있으면 **다른 낱말의 일부**다.
+///
+/// ★경계 없이 substring 만 보면 평범한 산문이 걸린다(실측 리뷰)★: `The Engram mailbox is managed by the
+///   daemon.` 이 `engram mail` 을 품고 `--token` 이 `--to` 를 품는다. 그 오탐은 단순 소음이 아니라
+///   **오진단**이다 — 금지 게이트가 죄 없는 문장을 걸고, 에러 메시지는 운영자에게 그 문장을 지우라고 한다.
+///   `-`·`_` 까지 포함하는 이유는 플래그·식별자가 그 문자로 이어지기 때문이다(`--to-be`·`--token`).
+fn continues_token(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '-' || ch == '_'
+}
+
+/// `needle` 이 **낱말 경계**로 끊겨 등장하는가. `engram mail send` ✓ · `engram mailbox` ✗ ·
+/// `--to bob` ✓ · `--token` ✗.
+fn contains_bounded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0usize;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !continues_token(c));
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !continues_token(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + needle.chars().next().map(char::len_utf8).unwrap_or(1);
+    }
+    false
+}
+
+/// 프라이밍 본문 토큰 매칭용 정규화. **순서가 load-bearing 이다**: ① 문자 단위 접기(소문자 · 구분 기호 →
+/// 공백 · 무의미 문자 삭제) → ② 구조 제거(HTML 주석) → ③ 공백 축약. **모든 판정 arm 이 이걸 통과한
+/// 문자열만 본다**(원문 비교 경로 없음) — 그래야 "어느 arm 은 접히고 어느 arm 은 안 접힌다" 는 예외가 없다.
+///
+/// ★①이 ②보다 먼저인 이유(뒤집으면 서로를 무력화한다 — 실측 리뷰)★: 제로폭 문자나 이스케이프가 주석 닫는
+///   표시 안에 끼면(`<!--x--` + 제로폭 + `>`) ②는 그 주석을 못 닫힌 것으로 보고 남긴다. 그러면 명령이 주석
+///   텍스트에 끊긴 채 판정을 통과한다. 먼저 접어 두면 그 조합이 성립하지 않는다.
+/// ★왜 정규화가 필요한가(여러 낱말 토큰의 취약점)★: 판정 토큰이 여러 낱말이라, 원문 그대로 비교하면
+///   줄바꿈으로 끊긴 문장·연속 공백·`**engram** mail` 같은 강조가 전부 "안 가르침" 으로 읽힌다. 그 방향의
+///   오판은 MCP 가능 스폰에 CLI-교육 프라이밍을 통과시켜 ADR-0099 의 발신 freeze 를 정상 negative 로
+///   오귀속하게 만든다 — 판정기가 막으려던 바로 그 부류다.
+/// ★두 문자 부류를 가른다★: **구분 기호**(`*`·백틱·`~`·중괄호·따옴표)는 낱말 **사이**에 서므로 **공백으로**
+///   바꾼다 — 지워 버리면 `` `--to`-recipient `` 가 `--to-recipient` 로 **붙어** 판정이 뒤집히고,
+///   `"${ENGRAM_CLI_EXE}" mail send` 의 인접이 깨진다. **무의미 문자**(`_`·백슬래시·제로폭류)는 낱말 **안**에
+///   끼므로 지운다 — 이스케이프된 env 이름이 한 토큰으로 접혀야 실제 이름과 맞는다.
+/// ★닫히지 않은 `<!--` 는 남긴다★: 프라이밍은 렌더링되지 않고 **원문 그대로** 시스템 프롬프트에 주입되므로,
+///   렌더러 흉내로 뒷부분을 통째로 버리면 에이전트에겐 보이는 텍스트가 판정기에게만 사라진다.
+/// ★찾는 토큰도 같은 정규화를 거친 값으로 만든다★: 리터럴을 손으로 적지 말고 `normalized_token()` 을 쓸 것.
+fn normalize_for_token_match(content: &str) -> String {
+    // ① 문자 단위 접기.
+    let mut folded = String::with_capacity(content.len());
+    for ch in content.chars() {
+        match ch {
+            // 낱말 사이에 서는 구분 기호 — 공백으로(삭제하면 양옆 토큰이 붙는다).
+            '*' | '`' | '~' | '{' | '}' | '"' | '\'' => folded.push(' '),
+            // 낱말 안에 끼는 무의미 문자 — 삭제(마크다운 강조/이스케이프 + 보이지 않는 서식 문자).
+            '_' | '\\' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{200E}' | '\u{200F}'
+            | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' => {}
+            other => folded.extend(other.to_lowercase()),
+        }
+    }
+
+    // ② 구조 제거 — 닫힌 HTML 주석만.
+    let mut stripped = String::with_capacity(folded.len());
+    let mut rest = folded.as_str();
+    while let Some(open) = rest.find("<!--") {
+        match rest[open..].find("-->") {
+            Some(close_rel) => {
+                stripped.push_str(&rest[..open]);
+                stripped.push(' ');
+                rest = &rest[open + close_rel + 3..];
+            }
+            None => break,
+        }
+    }
+    stripped.push_str(rest);
+
+    // ③ 공백 축약(①·②가 만든 연속 공백까지 여기서 한 번에).
+    let mut out = String::with_capacity(stripped.len());
+    let mut last_was_space = false;
+    for ch in stripped.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space && !out.is_empty() {
+                out.push(' ');
+                last_was_space = true;
+            }
+            continue;
+        }
+        last_was_space = false;
+        out.push(ch);
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// 찾는 토큰을 본문과 **같은 규칙**으로 접는다(리터럴 손타이핑 금지 — 정규화가 바뀌면 함께 움직인다).
+fn normalized_token(raw: &str) -> String {
+    normalize_for_token_match(raw)
+}
+
+/// 본문이 **우편 CLI 발신을 가르치는가**(강한 신호) — 판정 대상은 **실행 가능한 호출 형태**뿐이다:
+/// 실행 주체(실행파일 이름 또는 env 변수) + 계열 토큰 + **동사**의 인접(`engram mail send` 등).
+///
+/// ★이름만 등장하는 것은 교육이 아니다★: `ENGRAM_CLI_EXE is reserved for diagnostics; do not use it to send
+///   mail.` 은 **쓰지 말라는 문장**인데 예전 판정은 이걸 교육으로 셌다. 그래서 변수는 뒤에 계열 토큰이
+///   붙을 때만 교육이고, 맨 언급은 `mentions_mail_cli_surface`(표면 흔적)로만 센다.
+/// ★변수 형태를 교육에서 빼지 않는 이유(실재하는 교육 형태다)★: 변수로 부르는 호출은 명령 이름을 **한 번도
+///   적지 않는다** — `run \`$ENGRAM_CLI_EXE mail send --to alice\`` 가 그 예이고, ADR-0098 이 기록한 옛
+///   프라이밍이 정확히 그 형태였다(그래서 grant 가 미매칭됐다). 이걸 교육에서 빼면 그런 파일이 "발신을 안
+///   가르침" 으로 읽혀 `--cli-only` 요구 게이트가 멀쩡한 실험을 거부한다.
+/// ★basename 이 아니라 본문으로 판정한다 — 되돌리지 마라★: 이전 판본은 하드코딩된 basename 리스트만 봤고,
+///   새 CLI-지시 프라이밍이 그 리스트에서 누락되자 가드가 조용히 우회돼 CLI 바이너리 부재(인프라 부재)가
+///   SETUP-SKIP 대신 정상 negative(B_SENT=false)로 오귀속됐다. 대소문자·공백·강조를 접는 이유도 같다.
+/// ★bare 실행파일 이름으로 보면 안 된다★: MCP 프라이밍이 같은 단어를 MCP **서버 이름**으로 정당하게
+///   쓰므로(`on the engram server`), bare 판정은 MCP 전용 파일을 CLI-지시로 잡아 모든 MCP 실행을 스폰 전에
+///   거부한다. 그래서 판정은 **계열 토큰과의 인접**이고, 그 매치는 낱말 경계로 끊는다(`engram mailbox` 제외).
+/// ★동사까지 요구한다★: `engram mail` 만으로는 **실행되지 않는 조각**이라 "가르쳤다" 가 거짓이 된다.
+///   그 조각을 교육으로 세면 `--cli-only` 요구 게이트가 만족돼, 동사를 모르는 B 의 미발신이 정상 negative 로
+///   채점된다 — 이 판정기가 막으려는 오귀속 그 자체다. 동사 목록은 core `CLI_MAIL_VERBS`(파서와 공유).
+/// ★이 게이트가 **못 잡는** 것(알려진 한계 — 늘리려 하기 전에 읽을 것)★:
+///   - **부정문**: `Do NOT use engram mail send; use MCP instead.` 는 여전히 "가르침" 으로 잡힌다. 문장의
+///     부정 여부를 텍스트로 판정하는 것은 휴리스틱 늪이라 **의도적으로 시도하지 않는다**(사용자 결정
+///     2026-08-04, 이번 라운드 재확인). 대가는 그런 파일을 `--cli-only` 없이 넘길 때의 헛된 SETUP-FAIL
+///     이고, 운영 프라이밍 2종엔 그런 문장이 없어 실경로 영향은 0 이다. **요란한 거부가 조용한 오귀속보다
+///     낫다** 는 이 게이트의 기조와 같은 방향이다.
+///   - **셸 문법 일반**: 이건 토큰 인접 매처지 셸 파서가 아니다. 변수 재바인딩(`X=$ENGRAM_CLI_EXE; $X mail
+///     send`)·별칭·여러 줄 분할 호출은 못 본다. 여기를 파서로 키우는 대신, 그 부류가 실제로 나오면 그때
+///     프라이밍 쪽을 고친다.
+///   - **괄호류 구분 기호**: `{}`·따옴표는 낱말 사이 기호로 접지만 `()`·`[]` 는 접지 않는다 — `engram
+///     (mail) 계열` 같은 산문이 명령으로 잡히는 오탐(그쪽이 더 나쁘다)을 피하기 위해서다.
+/// ★계열을 **우편으로 한정**하는 것도 의도다(임의 계열로 넓히지 말 것)★: 이 판정이 지키는 불변식은
+///   ADR-0128/0099 의 **우편** 교육↔배선 등호이고, 오귀속되는 관측도 우편 발신(`B_SENT`)이다. 제어 계열
+///   (`engram help`·후속 `engram agent …`)은 **모든** 스폰이 쓰는 표면이라(ADR-0132 결정 4·5) 그것까지
+///   세면 ① MCP 프라이밍이 제어 한 줄만으로 거부되고 ② "발신 방법을 하나도 안 가르친 `--cli-only`
+///   프라이밍" 이 역방향 게이트를 통과한다 — 지금 막고 있는 오귀속이 양쪽에서 되살아난다.
+// ADR-0128
+// ADR-0132
+pub fn teaches_mail_cli(content: &str) -> bool {
+    let normalized = normalize_for_token_match(content);
+    let group = normalized_token(CLI_GROUP_MAIL);
+    CLI_MAIL_VERBS.iter().any(|verb| {
+        let verb = normalized_token(verb);
+        [CLI_EXE_NAME, CLI_EXE_ENV].iter().any(|invoker| {
+            contains_bounded(
+                &normalized,
+                &format!("{} {group} {verb}", normalized_token(invoker)),
+            )
+        })
+    })
+}
+
+/// 본문에 **우편 CLI 표면의 흔적이 있는가**(넓은 신호) — 강한 신호 ∪ CLI 절대경로 env 변수 이름 ∪ CLI 전용
+/// 플래그 표기.
+///
+/// ★왜 강한 신호와 나눠 두는가(둘을 합치면 한쪽이 반드시 틀린다)★: 두 게이트의 요구가 반대다.
+///   - **금지 방향**(MCP 가능 스폰이 CLI 교육을 지니면 안 된다)은 의심스러우면 막는 게 안전하다 →
+///     이 넓은 신호를 쓴다. 명령 이름을 안 적고 플래그·변수만 적은 문서도 CLI 표면이 새어 든 것이다.
+///   - **요구 방향**(`--cli-only` 는 CLI 발신 교육을 **요구**한다)에 이 넓은 신호를 쓰면, 플래그만 스치고
+///     호출 형태는 안 가르친 문서가 통과해 B 가 발신 방법을 모른 채 도는 실험이 valid 로 채점된다.
+///     그쪽은 `teaches_mail_cli`(강한 신호)여야 한다.
+pub fn mentions_mail_cli_surface(content: &str) -> bool {
+    if teaches_mail_cli(content) {
+        return true;
+    }
+    let normalized = normalize_for_token_match(content);
+    // 동사 없는 `engram mail` 조각도 **표면**으로는 센다 — 실행은 못 해도 CLI 표면이 새어 든 문서다.
+    let group_form = format!(
+        "{} {}",
+        normalized_token(CLI_EXE_NAME),
+        normalized_token(CLI_GROUP_MAIL)
+    );
+    if contains_bounded(&normalized, &group_form)
+        || contains_bounded(&normalized, &normalized_token(CLI_EXE_ENV))
+    {
+        return true;
+    }
+    CLI_MAIL_FLAGS
+        .iter()
+        .any(|f| contains_bounded(&normalized, &normalized_token(f)))
+}
+
 /// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식(ADR-0128 로 등호
 /// 복원)**: 이 변형이 **가르치는** 채널 집합 **=** provision 이 물리적으로 **깐** 채널 집합. 안 깐 채널을
 /// 가르치면 발신 freeze 가 재발하고(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099), 반대로 깔고도 안
@@ -28,12 +221,12 @@ use std::path::PathBuf;
 // ADR-0128
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimingVariant {
-    /// MCP-capable 백엔드(claude). **send_message 툴만** 가르친다(ADR-0126 결정 1 — engram-send CLI 우회
-    ///   교육 폐지). 그 스폰엔 engram-send 배선 자체가 없다(ADR-0128 결정 2) — 고장난 MCP 를 조용히
+    /// MCP-capable 백엔드(claude). **send_message 툴만** 가르친다(ADR-0126 결정 1 — 우편 CLI 우회
+    ///   교육 폐지). 그 스폰엔 CLI 배선 자체가 없다(ADR-0128 결정 2) — 고장난 MCP 를 조용히
     ///   우회하면 고장이 관측되지 않으므로, 대신 principal 에게 보고하도록 가르친다(ADR-0126 결정 2).
     ///   → `prompts/agent-priming.md`.
     McpPrimary,
-    /// 비-MCP 백엔드(codex/gemini 등 미래). engram-send CLI 만 가르친다(send_message 단어 자체 부재).
+    /// 비-MCP 백엔드(codex/gemini 등 미래). `engram mail` CLI 만 가르친다(send_message 단어 자체 부재).
     ///   → `prompts/agent-priming-cli.md`.
     CliOnly,
 }
@@ -184,6 +377,7 @@ impl PrimingProvider for FixedPrimingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
     use std::io::Write as _;
     use std::sync::Mutex;
 
@@ -364,6 +558,144 @@ mod tests {
             .to_path_buf()
     }
 
+    // ── 판정기 정규화(두 단어 토큰의 취약점) ────────────────────────────────────────────────
+    /// 되돌리면 MCP 가능 스폰이 CLI-교육 프라이밍을 달고 통과한다 — 각 케이스가 그 우회 경로 하나씩이다.
+    #[test]
+    fn teaches_mail_cli_survives_whitespace_case_and_markdown_between_the_two_words() {
+        for text in [
+            "run engram mail send --to bob",
+            "RUN ENGRAM MAIL SEND",
+            "Use Engram Mail Send to deliver.",
+            "run `engram mail send`",
+            "run **engram** mail send",
+            "run *engram* *mail* send",
+            "run engram  mail send",    // 공백 2칸
+            "run engram\nmail send",    // 줄바꿈으로 끊긴 문장
+            "run engram\n   mail send", // 줄바꿈 + 들여쓰기
+            "run engram\tmail send",
+        ] {
+            assert!(teaches_mail_cli(text), "CLI 교육으로 잡혀야: {text:?}");
+        }
+    }
+
+    /// bare 이름 판정으로 되돌아가면 MCP 전용 프라이밍이 전부 CLI-교육으로 잡혀 MCP 실행이 스폰 전에
+    /// 거부된다 — 그 회귀를 막는 음성 케이스.
+    #[test]
+    fn mcp_only_prose_is_not_mistaken_for_cli_teaching() {
+        for text in [
+            "call the MCP tool `send_message` with the recipient and body.",
+            "on the `engram` server",
+            "**engram** server tools are listed at startup",
+            "its body opens with an [engram] marker",
+            "the Engram broker daemon attaches the envelope",
+            "",
+        ] {
+            assert!(!teaches_mail_cli(text), "CLI 교육이 아니어야: {text:?}");
+            assert!(
+                !mentions_mail_cli_surface(text),
+                "CLI 표면 흔적도 없어야: {text:?}"
+            );
+        }
+    }
+
+    /// ★경계 없는 substring 으로 되돌리면 평범한 산문이 걸린다★ — 그 오탐은 소음이 아니라 오진단이다:
+    ///   금지 게이트가 죄 없는 문장을 걸고, 메시지는 운영자에게 그 문장을 지우라고 지시한다.
+    #[test]
+    fn ordinary_prose_that_merely_contains_the_tokens_is_not_a_match() {
+        for text in [
+            "The Engram mailbox is managed by the daemon.",
+            "engram mailbox",
+            "engram mailing list",
+            "pass the --token to the server",
+            "see the --tool and --topic switches",
+            "the --bodyguard flag is unrelated",
+        ] {
+            assert!(!teaches_mail_cli(text), "교육이 아니어야: {text:?}");
+            assert!(
+                !mentions_mail_cli_surface(text),
+                "표면 흔적도 아니어야: {text:?}"
+            );
+        }
+    }
+
+    /// 렌더링엔 안 보이지만 정규화를 그냥 통과하던 구성 — 금지 게이트를 우회시킨다.
+    #[test]
+    fn markdown_constructs_between_the_two_words_do_not_hide_the_command() {
+        for text in [
+            "Run engram<!--split--> mail pending",
+            "Run engram <!-- comment --> mail pending",
+            "Run engram\u{200B} mail pending",
+            "Run engram\u{00AD} mail pending",
+            "Run engram\\ mail pending",
+            // 문자 접기가 구조 제거보다 **먼저** 돌지 않으면 이 조합이 주석을 살린 채 통과한다.
+            "Run engram<!--split--\u{200B}> mail pending",
+            "Run engram<!--split--\\> mail pending",
+            // 구분 기호는 지우지 않고 **공백으로** 바꿔야 인접이 산다.
+            "run \"${ENGRAM_CLI_EXE}\" mail send --to alice --body hi",
+            "run `engram` `mail` `send`",
+        ] {
+            assert!(teaches_mail_cli(text), "CLI 교육으로 잡혀야: {text:?}");
+        }
+        // 닫히지 않은 주석은 뒤를 버리지 않는다 — 프라이밍은 렌더링 없이 원문 그대로 주입되므로,
+        //   렌더러 흉내로 잘라내면 에이전트에겐 보이는 텍스트가 판정기에게만 사라진다.
+        assert!(
+            teaches_mail_cli("intro <!-- unterminated\nRun engram mail send --to bob"),
+            "닫히지 않은 주석 뒤의 교육도 보여야"
+        );
+    }
+
+    /// ★변수 이름을 **부르는** 것과 **언급하는** 것은 다르다★: 금지 문장이 교육으로 세지면 안 되고,
+    ///   변수로 부르는 실제 호출(옛 프라이밍의 형태 — ADR-0098)은 교육으로 세야 한다.
+    #[test]
+    fn env_var_counts_as_teaching_only_in_an_invocation_shape() {
+        let mention = "ENGRAM_CLI_EXE is reserved for diagnostics; do not use it to send mail.";
+        assert!(
+            !teaches_mail_cli(mention),
+            "맨 언급 + 금지문은 교육이 아니다: {mention:?}"
+        );
+        assert!(
+            mentions_mail_cli_surface(mention),
+            "그래도 CLI 표면 흔적이므로 금지 방향에선 걸려야: {mention:?}"
+        );
+
+        for text in [
+            "run `$ENGRAM_CLI_EXE mail send --to alice --body hi`",
+            "invoke $engram_cli_exe mail pending",
+            "invoke $ENGRAM\\_CLI\\_EXE mail pending",
+        ] {
+            assert!(teaches_mail_cli(text), "변수 호출은 교육이다: {text:?}");
+        }
+    }
+
+    /// 넓은 신호만 잡는 자리 — 실행 가능한 호출을 안 적은 문서(금지 방향에서만 쓰인다).
+    #[test]
+    fn surface_evidence_without_a_runnable_invocation_is_not_teaching() {
+        for text in [
+            "pass --to <name> and --body <text> to deliver",
+            // 동사 없는 조각 — 실행되지 않으므로 "가르쳤다" 가 아니다.
+            "Run engram mail",
+            "the engram mail surface exists",
+            // 구분 기호를 공백으로 접기 때문에 이 표기도 플래그로 보인다.
+            "the `--to`-recipient argument",
+        ] {
+            assert!(mentions_mail_cli_surface(text), "표면 흔적: {text:?}");
+            assert!(
+                !teaches_mail_cli(text),
+                "명령을 가르친 것은 아니다(요구 방향에서 이게 통과하면 B 는 발신법을 모른 채 돈다): {text:?}"
+            );
+        }
+    }
+
+    /// ★알려진 한계를 **테스트로 박제**한다★: 부정문은 여전히 "가르침" 으로 잡힌다 — 문장 부정 판정은
+    ///   휴리스틱 늪이라 의도적으로 시도하지 않는다(요란한 거부 > 조용한 오귀속). 이 테스트가 빨개지면
+    ///   누군가 negation 판정을 넣은 것이고, 그건 결정 사항이다.
+    #[test]
+    fn a_prohibition_sentence_still_reads_as_teaching_known_limit() {
+        assert!(teaches_mail_cli(
+            "Do NOT use engram mail send; use MCP instead."
+        ));
+    }
+
     // ADR-0126
     // ADR-0128
     #[test]
@@ -375,25 +707,22 @@ mod tests {
             a.contains("send_message"),
             "A(McpPrimary)는 send_message 를 가르쳐야(A 의 유일한 교육 표면)"
         );
-        // A 의 CLI 표면 **전면** 부재 — ADR-0126 영향/불변식의 검사 목록 그대로(바이너리 이름 + 딸린 플래그).
+        // A 의 CLI 표면 **전면** 부재 — ADR-0126 영향/불변식의 검사 목록 그대로(명령 표기 + 딸린 플래그).
         //   이름만 지우고 플래그 표기가 남으면 우회 교육이 반쪽으로 살아남는다.
-        for token in [
-            "engram-send",
-            "--to",
-            "--body",
-            "--request",
-            "--reply-by",
-            "--reply-to",
-        ] {
-            assert!(
-                !a.contains(token),
-                "A(McpPrimary)에 CLI 표면 {token:?} 이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — \
-                 MCP 가능 스폰엔 engram-send 배선 자체가 없다(ADR-0128)"
-            );
-        }
+        // ★맨 `contains` 로 되돌리지 말 것★: 대소문자·줄바꿈·마크다운 강조로 표기만 흐트러뜨려도
+        //   `!a.contains(...)` 는 통과한다 — 판정기와 **같은 정규화·같은 낱말 경계**를 써야 이 pin 이
+        //   실제로 막고, `--token` 같은 평범한 낱말에 헛걸리지도 않는다.
+        //   (`mentions_mail_cli_surface` = 호출 형태 ∪ `engram mail` 조각 ∪ env 변수 이름 ∪ CLI 전용 플래그.)
         assert!(
-            b.contains("engram-send"),
-            "B(CliOnly)는 engram-send 를 가르쳐야"
+            !mentions_mail_cli_surface(&a),
+            "A(McpPrimary)에 CLI 표면(호출 형태 · `engram mail` 조각 · env 변수 이름 · CLI 전용 플래그 중 \
+             하나)이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — MCP 가능 스폰엔 CLI 배선 \
+             자체가 없다(ADR-0128)"
+        );
+        let cli_command = format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL}");
+        assert!(
+            teaches_mail_cli(&b),
+            "B(CliOnly)는 우편 CLI 명령({cli_command})을 가르쳐야"
         );
         assert!(
             !b.contains("send_message"),
@@ -403,7 +732,7 @@ mod tests {
 
     /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: "우회하지 마라" 와 "대신 principal 에게 보고하라"
     ///   는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면 결정이 반쪽이 된다.
-    ///   ★ADR-0128 이후에도 이 교육은 필요하다★: 셸 우회 갈래는 배선 제거로 소멸했지만(engram-send 가
+    ///   ★ADR-0128 이후에도 이 교육은 필요하다★: 셸 우회 갈래는 배선 제거로 소멸했지만(우편 CLI 가
     ///   MCP 스폰에 없다) **조용한 포기** 갈래는 그대로 남고, auto mode 에선 grant 가 NO-OP 이라(ADR-0097)
     ///   이 지시를 붙드는 장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
     ///

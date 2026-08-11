@@ -1,7 +1,7 @@
 # ADR-0128: 우편 채널 하드 단일화 — capability로만 갈리고 물리 배선도 교육과 등호
 
-- 상태: 확정 (2026-08-03, 근거: 사용자 결정 + 우편 채널 실측 2건 — 아래 근거)
-- 관련: Amends ADR-0126 (결정 3 배선 존치) · Amends ADR-0099 (결정 2 engram-send 물리 주입) · ADR-0086(듀얼 입구 — CLI 크레덴셜 env 주입의 출처) · ADR-0094(bare-name grant·PATH 주입·최소권한) · ADR-0097(auto mode — grant NO-OP) · `crates/engram-dashboard-core/src/agent/backend/claude.rs`(168~211: env·PATH 주입) · `crates/engram-dashboard-daemon/src/control/mod.rs`(grants·provision) · step-log S18.13
+- 상태: 확정 (2026-08-03, 근거: 사용자 결정 + 우편 채널 실측 2건 — 아래 근거) · 부분 폐기 by ADR-0132 (제어 CLI 우편 동사 금지 제약)
+- 관련: Amends ADR-0126 (결정 3 배선 존치) · Amends ADR-0099 (결정 2 engram-send 물리 주입) · ADR-0086(듀얼 입구 — CLI 크레덴셜 env 주입의 출처) · ADR-0094(bare-name grant·PATH 주입·최소권한) · ADR-0097(auto mode — grant NO-OP) · `crates/engram-dashboard-core/src/agent/backend/claude.rs`(168~211: env·PATH 주입) · `crates/engram-dashboard-daemon/src/control/mod.rs`(grants·provision) · step-log S18.13 · Amended by ADR-0132 (제어 CLI 우편 동사 금지 제약)
 
 ## 맥락
 

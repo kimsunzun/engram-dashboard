@@ -1,24 +1,44 @@
-//! `engram-send` — CLI 입구(ADR-0086 스텝 2 · S18 D). 스폰된 claude 에이전트가 Bash 로 팀에 말을 걸고
-//! 자기 미결을 확인하는 최소 클라이언트다. **MCP 툴 2종의 미러**(spec §6 듀얼 입구 — `group` 툴/서브커맨드는
-//! ADR-0111 결정 4 로 제거됐다).
+//! `engram` — 제어 평면 CLI(ADR-0086 스텝 2 · S18 D · ADR-0132). 스폰된 에이전트가 셸로 팀에 말을 걸고
+//! 자기 미결을 확인하는 최소 클라이언트다. 지금 이 실행파일이 소유한 계열은 **`mail` 하나**(우편 —
+//! MCP 툴 2종의 미러. `group` 툴/서브커맨드는 ADR-0111 결정 4 로 제거됐다).
 //!
-//! ★동작★: 환경변수 `ENGRAM_TOKEN`(Bearer 토큰) + `ENGRAM_CONTROL_URL`(데몬 제어 base URL)을 읽어
-//!   `<base>/control/<verb>` 로 JSON 을 POST 한다(Authorization: Bearer <token>). 응답 JSON 을 stdout 에
-//!   **그대로** 찍는다.
+//! ★인자 표면의 정본은 이 파일이다★ — S18 spec §6 의 CLI 블록은 그룹 구조 이전의 표기라 인자 계약으로
+//!   읽으면 안 된다(그 절이 자기 supersede 를 적고 있다). 그 spec 이 계속 정본인 것은 **응답 shape·상태
+//!   어휘** 쪽이고, 아래 exit code 판정자들이 §6 을 인용하는 것도 그 축이다. 표면 결정 = ADR-0132.
+//!
+//! ★표면 = `engram <계열> <동사>`★: 계열·동사 없이 플래그만 친 호출은 인자 오류다(기본 동사 없음).
+//!   실행파일 이름은 core 의 `CLI_EXE_NAME` 이 정본이고 help 문구도 거기서 만들어진다 — grant·프라이밍·
+//!   PATH 해석이 그 한 이름에 정렬돼야 하기 때문이다(ADR-0094).
+//!
+//! ★발견은 help 로만★(ADR-0132 결정 4 — MCP 가 툴 스키마를 스스로 드러내는 것의 CLI 대응): 인자 없는
+//!   호출과 `engram help`(`--help`·`-h` 동일)가 계열 목록을, `engram help <계열>`(= `engram <계열> --help`)
+//!   이 그 계열 사용법을 낸다. help 는 stdout **평문**이고 exit 0 이다 — 읽는 쪽이 LLM 이라 파싱이 아니라
+//!   독해 대상이다. 모르는 계열·동사는 다른 인자 오류와 같은 반려 JSON(exit 1)으로 끝난다.
+//! ★help 는 크레덴셜·데몬 없이 답한다★: env 검사보다 **먼저** 처리한다 — 표면을 배우는 자리가 "이미
+//!   스폰돼 있어야" 하면 발견이 아니다.
 //!
 //! ```text
-//! engram-send --to <수신자[,수신자…]> --body "…" [--request [--reply-by 10m]] [--reply-to m-xxxx]
+//! engram mail send --to <수신자[,수신자…]> --body "…" [--request [--reply-by 10m]] [--reply-to m-xxxx]
 //!     # 수신자 = 이름 | agent id | @here(나 빼고 지금 산 전원) | @all(나 빼고 명부 전원 — 잠든 것 포함,
 //!     #          ADR-0121). **콤마로 여러 명**(ADR-0111 다중 수신자).
-//! engram-send --to <수신자> --body-stdin <<'EOF' … EOF   # 인용 지옥 회피(D)
-//! engram-send status <m-id>                              # 그 메시지의 배달 장부
-//! engram-send pending                                    # 내 미결(보낸 것·기다리는 것·내가 답할 것)
+//! engram mail send --to <수신자> --body-stdin <<'EOF' … EOF   # 인용 지옥 회피(D)
+//! engram mail status <m-id>                                   # 그 메시지의 배달 장부
+//! engram mail pending                                         # 내 미결(보낸 것·기다리는 것·내가 답할 것)
 //! ```
+//!
+//! ★동작★: 환경변수 `ENGRAM_TOKEN`(Bearer 토큰) + `ENGRAM_CONTROL_URL`(데몬 제어 base URL)을 읽어
+//!   `<base>/control/<route>` 로 JSON 을 POST 한다(Authorization: Bearer <token>). 응답 body 를 stdout 에
+//!   **그대로** 찍는다.
+//! ★stdout 이 JSON 이라는 보장은 없다(파서를 이 가정 위에 쓰지 말 것)★: 비-2xx 응답도 body 를 그대로
+//!   흘린다 — 401 은 빈 줄, 프록시가 끼면 HTML 이 나올 수 있다. **일부러** 그렇게 둔다: 반려 body 엔
+//!   발신 에이전트가 파싱해 자기교정할 교정 JSON 이 실려 있을 수 있어, 우리가 형태로 걸러 버리면 그
+//!   정보가 사라진다. 이 CLI 가 **스스로** 내는 반려(BAD_ARGS·NO_TOKEN·전송 실패)만 항상 봉투 JSON 이고,
+//!   help 는 평문이다. 기계 판정은 stdout 형태가 아니라 **exit code** 로 한다.
 //!
 //! ★exit code 3분법★: **0** = 접수/조회 성공 · **1** = 실패(반려 `{status:"error",code,hint}`·연결/env
 //!   오류·비-2xx·비-JSON) · **2** = 2xx 인데 응답 shape 이 깨짐(데몬/프록시 결함 — 재시도 대상이 아니라
-//!   보고 대상, stderr 에 사유 한 줄). 발송 판정 정본 = `exit_code_for_response`, 조회/관리 판정 정본 =
-//!   `exit_code_for_query_response`(성공 shape 이 동사마다 달라 "에러가 아니면 성공" 규칙을 쓴다).
+//!   보고 대상, stderr 에 사유 한 줄). 발송 판정 정본 = `exit_code_for_response`, 조회(`status`·`pending`) 판정
+//!   정본 = `exit_code_for_query_response`(성공 shape 이 동사마다 달라 "에러가 아니면 성공" 규칙을 쓴다).
 //!
 //! ★신원(from·"나")은 payload 아님 — `--as` 같은 플래그를 두지 않는다(D 결정)★: 발신자도, `pending` 의
 //!   "나" 도 **토큰에서만** 파생된다(데몬이 토큰→신원 조회). 이 프로세스는 자기 신원을 주장하지 않는다
@@ -39,8 +59,58 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use engram_dashboard_core::agent::types::{
+    CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
+};
+
 /// 연결/응답 타임아웃(로컬 데몬이라 짧게). 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// help 동사. `--help`/`-h` 도 같은 자리로 받는다 — `is_help_token`.
+const HELP_VERB: &str = "help";
+
+/// help 템플릿의 실행파일 이름 자리. 출력 직전 `CLI_EXE_NAME` 으로 치환한다 — help 는 에이전트가 표면을
+/// 배우는 유일한 자리라, 여기 적힌 이름이 실제 실행파일과 갈리면 배운 대로 쳐도 명령을 못 찾는다.
+const HELP_TOOL_SLOT: &str = "{tool}";
+
+/// 계열 목록(인자 없음 · `help`). 동사·플래그는 계열 help 로 미룬다 — 목록이 길어지면 정작 읽어야 할
+/// 한 줄이 묻힌다(ADR-0132 결정 4 가 프라이밍에 목록을 안 싣는 것과 같은 이유).
+const HELP_ROOT: &str = "\
+{tool} — CLI for the Engram broker daemon. Usage: {tool} <group> <verb> [flags]
+
+Groups:
+  mail    message your teammates and check your own outstanding items
+
+Run `{tool} help <group>` for that group's verbs (`{tool} <group> --help` works too).
+";
+
+/// `help mail` — 우편 동사 전량과 그 플래그. 읽는 쪽이 LLM 이라 한 동사당 한 줄 + 플래그 목록으로 짧게
+/// 유지한다(산문 금지).
+const HELP_MAIL: &str = "\
+{tool} mail — messages between the agents on this team.
+
+  {tool} mail send --to <name[,name...]> (--body <text> | --body-stdin) [--request] [--reply-by <dur>] [--reply-to <m-id>]
+      Send a message. Prints one result row per recipient.
+      --to <name[,name...]>  teammate name or agent id; comma-separated for several;
+                             @here = everyone live except you, @all = every agent in the tree except you
+      --body <text>          the body, on the command line
+      --body-stdin           read the body from stdin instead (heredoc-friendly); exactly one of --body / --body-stdin
+      --request              an answer is owed; you get notified if none arrives
+      --reply-by <dur>       deadline for that answer, e.g. 5m / 10m / 1h (1 minute minimum)
+      --reply-to <m-id>      this message answers that request; mutually exclusive with --request
+  {tool} mail status <m-id>
+      Delivery state of one message you sent, one row per recipient.
+  {tool} mail pending
+      Your open items: answers you owe, answers you are waiting for, sends not confirmed as delivered yet.
+
+Your identity is taken from the token the broker injected, never from an argument — there is no flag to send or query as somebody else.
+
+Exit codes: 0 = accepted or read | 1 = rejected, or the daemon could not be reached — stdout carries the daemon's own reply when there was one, and {\"status\":\"error\",\"code\":...,\"hint\":...} when this CLI rejected the call itself | 2 = the daemon answered 2xx in a shape this CLI cannot read; report it, retrying will not help. Judge the outcome by the exit code, not by the shape of stdout.
+";
+
+fn render_help(template: &str) -> String {
+    template.replace(HELP_TOOL_SLOT, CLI_EXE_NAME)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -56,7 +126,15 @@ fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let command = match materialize_body(parsed, read_stdin_to_string) {
+    // help 는 크레덴셜도 데몬도 없이 답한다 — 표면을 배우는 자리가 "먼저 스폰돼 있어야" 하면 발견이 아니다.
+    let mail = match parsed {
+        ParsedCommand::Help(template) => {
+            println!("{}", render_help(template));
+            return 0;
+        }
+        ParsedCommand::Mail(m) => m,
+    };
+    let command = match materialize_body(mail, read_stdin_to_string) {
         Ok(c) => c,
         Err(msg) => {
             print_error("BAD_ARGS", &msg);
@@ -154,8 +232,17 @@ enum BodySource {
     Stdin,
 }
 
+/// 파싱 결과의 최상위 갈래. help 를 우편 동사와 **타입으로** 갈라 두면 네트워크·크레덴셜 경로가 help 를
+/// 영영 만나지 않는다(그 경로에 "help 면 건너뛴다" 분기를 둘 필요가 없다).
 #[derive(Debug)]
 enum ParsedCommand {
+    /// 출력할 help 템플릿(`render_help` 가 실행파일 이름을 채운다).
+    Help(&'static str),
+    Mail(ParsedMail),
+}
+
+#[derive(Debug)]
+enum ParsedMail {
     Send {
         to: String,
         body: BodySource,
@@ -195,37 +282,145 @@ impl Command {
     }
 }
 
-/// ★기본 동사 = 발송(D)★: 인자가 아예 없거나 첫 인자가 플래그면 발송이다 — 옛 호출 형태
-///   `engram-send --to … --body …` 와 100% 하위호환이라 기존 프라이밍·스크립트가 그대로 돈다.
+/// ★기본 동사 없음★: 계열·동사를 생략한 호출은 발송으로 흘리지 않는다 — 인자 0 은 help 고, 플래그로
+///   시작하면 인자 오류다. 그래야 계열이 늘어도 "어느 동사인지" 를 첫 토큰만 보고 안다.
 /// ★kebab-case 플래그 ↔ snake_case wire(spec §1 표기 매핑)★: 셸 관례는 `--reply-by`, JSON 필드는
 ///   `reply_by` 다 — 변환은 `Command::request_body` 한 곳에서만 한다.
 fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
-    match args.first().map(|s| s.as_str()) {
+    let Some(first) = args.first().map(|s| s.as_str()) else {
+        return Ok(ParsedCommand::Help(HELP_ROOT));
+    };
+    match first {
+        t if is_help_token(t) => parse_help_topic(&args[1..]),
+        CLI_GROUP_MAIL => {
+            let rest = &args[1..];
+            if rest.first().is_some_and(|a| is_help_token(a)) {
+                reject_help_with_extra_args(rest)?;
+                return Ok(ParsedCommand::Help(HELP_MAIL));
+            }
+            parse_mail(rest).map(ParsedCommand::Mail)
+        }
+        other if other.starts_with('-') => Err(format!(
+            "the first argument must be a group, not a flag ({other}) — e.g. `{CLI_EXE_NAME} {CLI_GROUP_MAIL} send --to <name> --body <text>`; run `{CLI_EXE_NAME} help` to list groups"
+        )),
+        other => Err(format!(
+            "unknown group: {other} — run `{CLI_EXE_NAME} help` to list groups"
+        )),
+    }
+}
+
+/// ★help 토큰의 유일한 규칙 — **키워드 자리에서만** help 다★: 계열 자리(`engram --help`)와 동사 자리
+///   (`engram mail --help`)에서만 발견 요청으로 읽는다. **값이 와야 하는 자리**에서는 절대 help 가 아니다:
+///   명시 플래그의 값(`--body -h`)은 **그대로 값으로** 쓰이고(임의 텍스트라 가로채면 편지가 사라진다),
+///   동사의 위치 인자(`status --help`)는 **인자 오류**로 끊는다(그 자리에 올 수 있는 값이 아니고, 그대로
+///   보내면 무의미한 조회가 네트워크를 탄다).
+fn is_help_token(arg: &str) -> bool {
+    matches!(arg, HELP_VERB | "--help" | "-h")
+}
+
+/// ★help 호출에 인자가 더 붙으면 성공(0)으로 삼키지 않는다★: `engram mail --help --to bob --body hi` 를
+///   help 로 처리하면 보내려던 편지가 사라지고 **exit 0** 이라 호출자는 성공으로 읽는다 — 값 자리에서 막은
+///   것과 같은 조용한 유실이 계열 자리에서 나는 것뿐이다. 그래서 help 는 **단독 호출**일 때만 help 다.
+fn reject_help_with_extra_args(args: &[String]) -> Result<(), String> {
+    if args.len() > 1 {
+        return Err(format!(
+            "help takes no further arguments: {} — run `{CLI_EXE_NAME} help` on its own, or run the command you meant",
+            args[1]
+        ));
+    }
+    Ok(())
+}
+
+fn parse_help_topic(rest: &[String]) -> Result<ParsedCommand, String> {
+    let Some(topic) = rest.first().map(|s| s.as_str()) else {
+        return Ok(ParsedCommand::Help(HELP_ROOT));
+    };
+    reject_help_with_extra_args(rest)?;
+    match topic {
+        CLI_GROUP_MAIL => Ok(ParsedCommand::Help(HELP_MAIL)),
+        // help 뒤에 또 help 토큰이 오는 것은 계열 이름이 아니다 — 규칙("help 는 단독 호출") 그대로 반려한다.
+        other => Err(format!(
+            "unknown help topic: {other} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`"
+        )),
+    }
+}
+
+fn parse_mail(rest: &[String]) -> Result<ParsedMail, String> {
+    match rest.first().map(|s| s.as_str()) {
+        Some("send") => parse_send_args(&rest[1..]),
         Some("status") => {
-            let id = args
-                .get(1)
-                .ok_or("status requires a message id, e.g. engram-send status m-7f3k9q2d")?;
-            if args.len() > 2 {
+            let id = rest.get(1).ok_or_else(|| {
+                format!(
+                    "status requires a message id, e.g. `{CLI_EXE_NAME} {CLI_GROUP_MAIL} status m-7f3k9q2d`"
+                )
+            })?;
+            // ★위치 인자에 플래그 표기가 오면 값이 아니라 오타다★: 브로커가 발급하는 id 는 `-` 로 시작하지
+            //   않는다. 그대로 실어 보내면 `--help` 가 메시지 id 로 조회돼 무의미한 왕복 + MESSAGE_NOT_FOUND 로
+            //   끝난다(인자 오류가 네트워크를 타면 안 된다는 이 파일의 규율에도 어긋난다).
+            if id.starts_with('-') {
                 return Err(format!(
-                    "unexpected argument after status <id>: {}",
-                    args[2]
+                    "`{id}` is not a message id (ids look like m-7f3k9q2d) — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`"
                 ));
             }
-            Ok(ParsedCommand::Status { id: id.clone() })
+            if rest.len() > 2 {
+                return Err(format!(
+                    "unexpected argument after status <id>: {} — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`",
+                    rest[2]
+                ));
+            }
+            Ok(ParsedMail::Status { id: id.clone() })
         }
         Some("pending") => {
-            if args.len() > 1 {
-                return Err(format!("pending takes no arguments: {}", args[1]));
+            if rest.len() > 1 {
+                return Err(format!(
+                    "pending takes no arguments: {} — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`",
+                    rest[1]
+                ));
             }
-            Ok(ParsedCommand::Pending)
+            Ok(ParsedMail::Pending)
         }
-        _ => parse_send_args(args),
+        Some(other) => Err(format!(
+            "unknown {CLI_GROUP_MAIL} verb: {other} — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`"
+        )),
+        None => Err(format!(
+            "{CLI_GROUP_MAIL} needs a verb ({}) — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`",
+            CLI_MAIL_VERBS.join("|")
+        )),
     }
+}
+
+/// 값 플래그 1개를 **한 번만** 받는다.
+///
+/// ★두 번째 값이 첫 번째를 조용히 덮게 두지 않는다★: `--body first --body second` 는 예전엔 `second` 만
+///   보내고 `first` 를 말없이 버렸다. argv 를 이어 붙여 명령을 고쳐 쓰는 호출자(에이전트가 흔히 그렇게
+///   한다)는 그 유실을 볼 방법이 없다 — `--body` ↔ `--body-stdin` 상호배타를 반려하는 이유와 **같은**
+///   이유라, 같은 자리에서 같게 끊는다.
+fn take_once(slot: &mut Option<String>, flag: &str, value: Option<&String>) -> Result<(), String> {
+    let value = value.ok_or_else(|| {
+        format!("{flag} requires a value — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags")
+    })?;
+    // ★값 자리에 **우리가 아는 플래그**가 오면 값이 아니라 빠뜨린 값이다★: `--body --body-stdin` 은 예전엔
+    //   `--body-stdin` 을 본문 문자열로 삼켰다 — 그러면 상호배타 검사가 발화하지 않고, 파이프로 들어온
+    //   진짜 본문이 버려진 채 리터럴 `--body-stdin` 이 팀에 배달된다(exit 0 으로).
+    // ★판정 기준은 `-` 로 시작하는지가 **아니라** 이 CLI 가 아는 플래그인지다★: 본문·수신자는 임의
+    //   텍스트라 `--body -h` 나 `--body --anything-we-do-not-know` 는 그대로 값으로 실려야 한다.
+    if CLI_MAIL_FLAGS.contains(&value.as_str()) {
+        return Err(format!(
+            "{flag} has no value — the next argument is another flag ({value}); give {flag} its value, or drop it; run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags"
+        ));
+    }
+    if slot.is_some() {
+        return Err(format!(
+            "{flag} was given more than once — pass it once (the later value would silently replace the earlier one); run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags"
+        ));
+    }
+    *slot = Some(value.clone());
+    Ok(())
 }
 
 /// ★플래그 설계(메인 재량, 보고)★: 명시 `--to`/`--body` 한 쌍 — 위치 인자는 body 에 공백/따옴표가 섞이면
 ///   셸 인용이 깨지기 쉬워(스파이크에서 관찰된 실패 모드) 명시 플래그로 고정한다.
-fn parse_send_args(args: &[String]) -> Result<ParsedCommand, String> {
+fn parse_send_args(args: &[String]) -> Result<ParsedMail, String> {
     let mut to: Option<String> = None;
     let mut body: Option<String> = None;
     let mut body_stdin = false;
@@ -237,23 +432,28 @@ fn parse_send_args(args: &[String]) -> Result<ParsedCommand, String> {
         match args[i].as_str() {
             "--to" => {
                 i += 1;
-                to = Some(args.get(i).ok_or("--to requires a value")?.clone());
+                take_once(&mut to, "--to", args.get(i))?;
             }
             "--body" => {
                 i += 1;
-                body = Some(args.get(i).ok_or("--body requires a value")?.clone());
+                take_once(&mut body, "--body", args.get(i))?;
             }
+            // 불리언 플래그는 반복돼도 버려지는 값이 없다(같은 뜻의 반복) — 그래서 반려하지 않는다.
             "--body-stdin" => body_stdin = true,
             "--request" => request = true,
             "--reply-by" => {
                 i += 1;
-                reply_by = Some(args.get(i).ok_or("--reply-by requires a value")?.clone());
+                take_once(&mut reply_by, "--reply-by", args.get(i))?;
             }
             "--reply-to" => {
                 i += 1;
-                reply_to = Some(args.get(i).ok_or("--reply-to requires a value")?.clone());
+                take_once(&mut reply_to, "--reply-to", args.get(i))?;
             }
-            other => return Err(format!("unknown argument: {other}")),
+            other => {
+                return Err(format!(
+                    "unknown argument: {other} — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags"
+                ))
+            }
         }
         i += 1;
     }
@@ -277,7 +477,7 @@ fn parse_send_args(args: &[String]) -> Result<ParsedCommand, String> {
             )
         }
     };
-    Ok(ParsedCommand::Send {
+    Ok(ParsedMail::Send {
         to,
         body,
         request,
@@ -306,11 +506,11 @@ fn read_stdin_to_string() -> Result<String, String> {
 /// ★빈 stdin 은 반려★: heredoc 을 붙이지 않고 `--body-stdin` 만 친 경우(흔한 실수)를 빈 본문 발송으로
 ///   흘려보내면 수신자에게 빈 봉투가 도착한다 — 형태 오류로 잡는 게 낫다.
 fn materialize_body(
-    parsed: ParsedCommand,
+    parsed: ParsedMail,
     read_stdin: impl FnOnce() -> Result<String, String>,
 ) -> Result<Command, String> {
     Ok(match parsed {
-        ParsedCommand::Send {
+        ParsedMail::Send {
             to,
             body,
             request,
@@ -338,8 +538,8 @@ fn materialize_body(
                 reply_to,
             })
         }
-        ParsedCommand::Status { id } => Command::Status { id },
-        ParsedCommand::Pending => Command::Pending,
+        ParsedMail::Status { id } => Command::Status { id },
+        ParsedMail::Pending => Command::Pending,
     })
 }
 
@@ -423,18 +623,18 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
             return EXIT_FAILED;
         }
         eprintln!(
-            "engram-send: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
+            "{CLI_EXE_NAME}: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
         );
         return EXIT_MALFORMED_SUCCESS;
     }
     let Some(results) = v.get("results") else {
         eprintln!(
-            "engram-send: malformed success response — neither a success shape ('results') nor a valid error shape ('status':\"error\" + non-empty 'code')"
+            "{CLI_EXE_NAME}: malformed success response — neither a success shape ('results') nor a valid error shape ('status':\"error\" + non-empty 'code')"
         );
         return EXIT_MALFORMED_SUCCESS;
     };
     let Some(items) = results.as_array() else {
-        eprintln!("engram-send: malformed success response — 'results' is not an array");
+        eprintln!("{CLI_EXE_NAME}: malformed success response — 'results' is not an array");
         return EXIT_MALFORMED_SUCCESS;
     };
     let id_ok = v
@@ -442,12 +642,12 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
         .and_then(|i| i.as_str())
         .is_some_and(|s| !s.is_empty());
     if !id_ok {
-        eprintln!("engram-send: malformed success response — missing or empty 'id'");
+        eprintln!("{CLI_EXE_NAME}: malformed success response — missing or empty 'id'");
         return EXIT_MALFORMED_SUCCESS;
     }
     if items.is_empty() {
         eprintln!(
-            "engram-send: malformed success response — 'results' is empty (nothing was accepted)"
+            "{CLI_EXE_NAME}: malformed success response — 'results' is empty (nothing was accepted)"
         );
         return EXIT_MALFORMED_SUCCESS;
     }
@@ -462,7 +662,7 @@ fn exit_code_for_response(status: u16, resp_body: &str) -> i32 {
             .is_some_and(|s| VALID_RESULT_STATUSES.contains(&s));
         if !to_ok || !status_ok {
             eprintln!(
-                "engram-send: malformed success response — result entry needs a non-empty 'to' and a status of delivered|pending|failed"
+                "{CLI_EXE_NAME}: malformed success response — result entry needs a non-empty 'to' and a status of delivered|pending|failed"
             );
             return EXIT_MALFORMED_SUCCESS;
         }
@@ -497,13 +697,13 @@ fn exit_code_for_query_response(status: u16, resp_body: &str) -> i32 {
     }
     if v.get("status").and_then(|s| s.as_str()) == Some("error") {
         eprintln!(
-            "engram-send: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
+            "{CLI_EXE_NAME}: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
         );
         return EXIT_MALFORMED_SUCCESS;
     }
     if !v.is_object() {
         eprintln!(
-            "engram-send: malformed response — expected a JSON object from the daemon query route"
+            "{CLI_EXE_NAME}: malformed response — expected a JSON object from the daemon query route"
         );
         return EXIT_MALFORMED_SUCCESS;
     }
@@ -697,9 +897,19 @@ fn print_error(code: &str, hint: &str) {
 mod tests {
     use super::*;
 
-    fn parse_args(args: &[String]) -> Result<CliArgs, String> {
-        let parsed = parse_command(args)?;
-        match materialize_body(parsed, || {
+    fn parse_mail_command(args: &[String]) -> Result<ParsedMail, String> {
+        match parse_command(args)? {
+            ParsedCommand::Mail(m) => Ok(m),
+            ParsedCommand::Help(_) => Err("help 는 우편 커맨드가 아니다".to_string()),
+        }
+    }
+
+    /// 플래그 조합 전수 테스트가 계열·동사를 매번 다시 적지 않게 여기서 한 번 붙인다. 표기 자체
+    /// (`mail send` 여야 한다)는 아래 「계열·동사 표기」 구획이 본다.
+    fn parse_args(flags: &[String]) -> Result<CliArgs, String> {
+        let mut args = argv(&[CLI_GROUP_MAIL, "send"]);
+        args.extend_from_slice(flags);
+        match materialize_body(parse_mail_command(&args)?, || {
             panic!("리터럴 본문 경로가 stdin 을 읽으면 안 된다")
         })? {
             Command::Send(a) => Ok(a),
@@ -751,7 +961,7 @@ mod tests {
         assert!(parse_args(&a).is_err(), "알 수 없는 플래그는 에러");
     }
 
-    // ── C3: 회신 계약 플래그(spec §6 CLI 미러) ────────────────────────────────────────────────
+    // ── C3: 회신 계약 플래그(MCP 툴 미러 — 표면 정본 = ADR-0132) ─────────────────────────────
 
     #[test]
     fn parse_args_request_flag_takes_no_value() {
@@ -1218,10 +1428,11 @@ mod tests {
         assert_eq!(dechunk(raw.as_bytes()).expect("dechunk"), "abcde");
     }
 
-    // ── D: `--body-stdin`(인용 지옥 회피, spec §6) ──────────────────────────────────────
+    // ── D: `--body-stdin`(인용 지옥 회피 — 표면 정본 = ADR-0132) ──────────────────────────
     #[test]
     fn body_stdin_reads_the_body_from_the_injected_reader() {
-        let parsed = parse_command(&argv(&["--to", "bob", "--body-stdin"])).expect("parse");
+        let parsed = parse_mail_command(&argv(&["mail", "send", "--to", "bob", "--body-stdin"]))
+            .expect("parse");
         let cmd = materialize_body(parsed, || Ok("line1\n\"quoted\" & $stuff\n".to_string()))
             .expect("materialize");
         let Command::Send(a) = cmd else {
@@ -1242,28 +1453,37 @@ mod tests {
 
     #[test]
     fn body_and_body_stdin_are_mutually_exclusive() {
-        let err = parse_command(&argv(&["--to", "bob", "--body", "hi", "--body-stdin"]))
-            .expect_err("상호배타 반려");
+        let err = parse_command(&argv(&[
+            "mail",
+            "send",
+            "--to",
+            "bob",
+            "--body",
+            "hi",
+            "--body-stdin",
+        ]))
+        .expect_err("상호배타 반려");
         assert!(err.contains("mutually exclusive"), "사유 문구: {err}");
     }
 
     #[test]
     fn body_stdin_with_no_input_is_rejected_not_sent_empty() {
-        let parsed = parse_command(&argv(&["--to", "bob", "--body-stdin"])).expect("parse");
+        let parsed = parse_mail_command(&argv(&["mail", "send", "--to", "bob", "--body-stdin"]))
+            .expect("parse");
         let err = materialize_body(parsed, || Ok(String::new())).expect_err("빈 stdin 반려");
         assert!(err.contains("no input"), "사유 문구: {err}");
     }
 
     #[test]
     fn missing_body_mentions_both_ways_to_supply_it() {
-        let err = parse_command(&argv(&["--to", "bob"])).expect_err("본문 누락");
+        let err = parse_command(&argv(&["mail", "send", "--to", "bob"])).expect_err("본문 누락");
         assert!(err.contains("--body-stdin"), "두 경로를 모두 안내: {err}");
     }
 
-    // ── D: 서브커맨드 파싱(status / pending) ──────────────────────────────────────────
+    // ── D: 우편 동사 파싱(send / status / pending) ─────────────────────────────────────
 
     fn wire(args: &[&str]) -> (&'static str, serde_json::Value) {
-        let parsed = parse_command(&argv(args)).expect("parse");
+        let parsed = parse_mail_command(&argv(args)).expect("parse");
         let cmd = materialize_body(parsed, || panic!("이 경로는 stdin 을 읽지 않는다"))
             .expect("materialize");
         let route = cmd.route();
@@ -1275,33 +1495,43 @@ mod tests {
     #[test]
     fn status_and_pending_hit_the_messages_route() {
         assert_eq!(
-            wire(&["status", "m-7f3k9q2d"]),
+            wire(&["mail", "status", "m-7f3k9q2d"]),
             (
                 "/control/messages",
                 serde_json::json!({ "id": "m-7f3k9q2d" })
             )
         );
         assert_eq!(
-            wire(&["pending"]),
+            wire(&["mail", "pending"]),
             ("/control/messages", serde_json::json!({}))
         );
     }
 
     #[test]
+    fn send_hits_the_send_route() {
+        let (route, body) = wire(&["mail", "send", "--to", "bob", "--body", "hi"]);
+        assert_eq!(route, "/control/send");
+        assert_eq!(body, serde_json::json!({ "to": "bob", "body": "hi" }));
+        let (route, body) = wire(&["mail", "send", "--to", "@coders", "--body", "공지"]);
+        assert_eq!(route, "/control/send");
+        assert_eq!(body["to"], "@coders");
+    }
+
+    #[test]
     fn subcommand_shape_errors_are_rejected_at_the_cli() {
         for args in [
-            vec!["status"],
-            vec!["status", "m-1", "extra"],
-            vec!["pending", "extra"],
-            vec!["group"],
-            vec!["group", "wat"],
-            vec!["group", "list", "extra"],
-            vec!["group", "update"],
-            vec!["group", "update", "--add", "a"],
-            vec!["group", "update", "@t", "--add"],
-            vec!["group", "update", "@t", "--nope", "x"],
-            vec!["group", "delete"],
-            vec!["group", "delete", "@t", "extra"],
+            vec!["mail"],
+            vec!["mail", "status"],
+            vec!["mail", "status", "m-1", "extra"],
+            vec!["mail", "pending", "extra"],
+            vec!["mail", "send"],
+            // 회귀 가드(ADR-0111 결정 4 · ADR-0112 결정 1) — group 동사가 부활하면 프라이밍이 없는
+            //   명령을 가르치게 된다. 계열 자리(옛 표기)와 우편 동사 자리 양쪽에서 막는다.
+            vec!["group", "list"],
+            vec!["group", "update", "@t", "--add", "a"],
+            vec!["group", "delete", "@t"],
+            vec!["mail", "group"],
+            vec!["mail", "group", "list"],
         ] {
             assert!(
                 parse_command(&argv(&args)).is_err(),
@@ -1310,14 +1540,277 @@ mod tests {
         }
     }
 
+    // ── 계열·동사 표기 ────────────────────────────────────────────────────────────────
+
     #[test]
-    fn a_flag_first_invocation_is_still_a_send_for_backward_compatibility() {
-        let (route, body) = wire(&["--to", "bob", "--body", "hi"]);
+    fn a_flag_first_invocation_is_an_argument_error() {
+        // 기본 동사가 없으므로 계열 없는 플래그 호출은 발송으로 흐르지 않는다.
+        for args in [
+            vec!["--to", "bob", "--body", "hi"],
+            vec!["--body-stdin"],
+            vec!["send", "--to", "bob", "--body", "hi"],
+            vec!["status", "m-1"],
+            vec!["pending"],
+        ] {
+            let err = match parse_command(&argv(&args)) {
+                Err(e) => e,
+                Ok(cmd) => panic!("계열 없는 호출은 인자 오류여야: {args:?} → {cmd:?}"),
+            };
+            assert!(
+                err.contains(CLI_EXE_NAME) && err.contains("help"),
+                "반려 사유가 help 로 안내해야: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_value_flags_are_rejected_instead_of_silently_replacing() {
+        // 예전엔 두 번째 값이 첫 번째를 말없이 덮었다 — argv 를 이어 붙이는 호출자에겐 무신호 유실이다.
+        for args in [
+            vec![
+                "mail", "send", "--to", "alice", "--body", "first", "--body", "second",
+            ],
+            vec![
+                "mail", "send", "--to", "alice", "--to", "bob", "--body", "hi",
+            ],
+            vec![
+                "mail",
+                "send",
+                "--to",
+                "a",
+                "--body",
+                "hi",
+                "--reply-by",
+                "5m",
+                "--reply-by",
+                "10m",
+            ],
+            vec![
+                "mail",
+                "send",
+                "--to",
+                "a",
+                "--body",
+                "hi",
+                "--reply-to",
+                "m-1",
+                "--reply-to",
+                "m-2",
+            ],
+        ] {
+            let err = match parse_command(&argv(&args)) {
+                Err(e) => e,
+                Ok(cmd) => panic!("중복 값 플래그는 반려여야({args:?}): {cmd:?}"),
+            };
+            assert!(err.contains("more than once"), "사유 문구({args:?}): {err}");
+        }
+        // 불리언 반복은 버려지는 값이 없으므로 그대로 통과한다.
+        let (_, body) = wire(&[
+            "mail",
+            "send",
+            "--to",
+            "a",
+            "--body",
+            "hi",
+            "--request",
+            "--request",
+        ]);
+        assert_eq!(body["request"], true);
+    }
+
+    /// ★값 자리에 아는 플래그가 오면 "값을 빠뜨린 것"★ — 예전엔 그걸 본문 문자열로 삼켜, 파이프로 들어온
+    ///   진짜 본문이 사라지고 리터럴 `--body-stdin` 이 배달됐다(그리고 exit 0).
+    #[test]
+    fn a_value_flag_followed_by_another_known_flag_is_rejected_not_swallowed() {
+        for args in [
+            vec!["mail", "send", "--to", "bob", "--body", "--body-stdin"],
+            vec!["mail", "send", "--to", "--body", "hi"],
+            vec![
+                "mail",
+                "send",
+                "--to",
+                "bob",
+                "--body",
+                "hi",
+                "--reply-by",
+                "--request",
+            ],
+            vec![
+                "mail",
+                "send",
+                "--to",
+                "bob",
+                "--body",
+                "hi",
+                "--reply-to",
+                "--to",
+            ],
+        ] {
+            let err = match parse_command(&argv(&args)) {
+                Err(e) => e,
+                Ok(cmd) => panic!("빠뜨린 값은 반려여야({args:?}): {cmd:?}"),
+            };
+            assert!(err.contains("has no value"), "사유 문구({args:?}): {err}");
+        }
+    }
+
+    /// 반대 방향 — 값은 임의 텍스트다. `-` 로 시작한다는 이유로 가로채면 정당한 본문이 사라진다.
+    #[test]
+    fn values_that_merely_look_like_flags_are_still_sent_verbatim() {
+        for value in ["-h", "--help", "--not-a-flag-we-know", "-", "--"] {
+            let (_, body) = wire(&["mail", "send", "--to", "bob", "--body", value]);
+            assert_eq!(body["body"], value, "본문은 그대로 실린다: {value:?}");
+        }
+        let (_, body) = wire(&["mail", "send", "--to", "--not-a-flag", "--body", "hi"]);
+        assert_eq!(body["to"], "--not-a-flag");
+    }
+
+    #[test]
+    fn every_value_flag_reports_a_missing_value_at_end_of_args() {
+        for flag in ["--to", "--body", "--reply-by", "--reply-to"] {
+            let err = match parse_command(&argv(&["mail", "send", flag])) {
+                Err(e) => e,
+                Ok(cmd) => panic!("값 없는 {flag} 는 반려여야: {cmd:?}"),
+            };
+            assert!(err.contains("requires a value"), "{flag}: {err}");
+        }
+    }
+
+    /// ★공용 어휘 ↔ 파서 드리프트 가드★: core 의 목록에 플래그·동사를 더하고 파서 arm 을 안 고치면 값 자리
+    ///   방어와 프라이밍 판정이 그 새 표기를 못 본다 — 여기서 잡는다.
+    #[test]
+    fn the_parser_recognises_every_flag_and_verb_in_the_shared_vocabulary() {
+        for flag in CLI_MAIL_FLAGS {
+            let err = parse_command(&argv(&["mail", "send", flag])).err();
+            assert!(
+                !err.as_deref()
+                    .unwrap_or_default()
+                    .contains("unknown argument"),
+                "파서가 모르는 플래그가 공용 목록에 있다: {flag}"
+            );
+        }
+        for verb in CLI_MAIL_VERBS {
+            let err = parse_command(&argv(&["mail", verb]))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                !err.contains("unknown"),
+                "파서가 모르는 동사가 공용 목록에 있다: {verb} ({err})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_help_token_is_not_a_help_topic() {
+        for args in [
+            vec!["help", "--help"],
+            vec!["--help", "help"],
+            vec!["help", "-h"],
+            vec!["mail", "--help", "-h"],
+        ] {
+            assert!(
+                parse_command(&argv(&args)).is_err(),
+                "help 는 단독 호출일 때만 help 다: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_group_and_unknown_verb_point_at_help() {
+        for args in [vec!["wat"], vec!["mail", "wat"], vec!["help", "wat"]] {
+            let err = parse_command(&argv(&args)).expect_err("모르는 이름은 인자 오류");
+            assert!(err.contains("help"), "반려 사유가 help 로 안내해야: {err}");
+        }
+    }
+
+    #[test]
+    fn help_lists_groups_and_each_group_documents_its_verbs() {
+        for args in [vec![], vec!["help"]] {
+            match parse_command(&argv(&args)).expect("help 는 성공") {
+                ParsedCommand::Help(t) => assert_eq!(t, HELP_ROOT, "인자 없음·help = 계열 목록"),
+                other => panic!("help 여야: {other:?}"),
+            }
+        }
+        match parse_command(&argv(&["help", "mail"])).expect("help mail") {
+            ParsedCommand::Help(t) => assert_eq!(t, HELP_MAIL),
+            other => panic!("help 여야: {other:?}"),
+        }
+        assert!(parse_command(&argv(&["help", "mail", "extra"])).is_err());
+
+        // 관례 철자 — 발견 입구가 가장 흔한 표기에서 실패하면 안 된다.
+        for (args, want) in [
+            (vec!["--help"], HELP_ROOT),
+            (vec!["-h"], HELP_ROOT),
+            (vec!["--help", "mail"], HELP_MAIL),
+            (vec!["mail", "--help"], HELP_MAIL),
+            (vec!["mail", "-h"], HELP_MAIL),
+        ] {
+            match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
+                ParsedCommand::Help(t) => assert_eq!(t, want, "{args:?}"),
+                other => panic!("help 여야({args:?}): {other:?}"),
+            }
+        }
+        // ★값 자리의 help 토큰은 값이다★ — 발송이 조용히 help 로 새면 편지가 사라진다.
+        let (route, body) = wire(&["mail", "send", "--to", "bob", "--body", "-h"]);
         assert_eq!(route, "/control/send");
-        assert_eq!(body, serde_json::json!({ "to": "bob", "body": "hi" }));
-        let (route, body) = wire(&["--to", "@coders", "--body", "공지"]);
-        assert_eq!(route, "/control/send");
-        assert_eq!(body["to"], "@coders");
+        assert_eq!(body["body"], "-h", "본문 `-h` 는 그대로 실린다");
+        let (_, body) = wire(&["mail", "send", "--to", "-h", "--body", "hi"]);
+        assert_eq!(body["to"], "-h", "수신자 값도 가로채지 않는다");
+
+        // ★위치 인자 자리의 help 토큰은 인자 오류다 — 네트워크를 타면 안 된다★: 그대로 실어 보내면
+        //   `--help` 가 메시지 id 로 조회된다(실제로 왕복해 MESSAGE_NOT_FOUND 로 끝났다).
+        for args in [
+            vec!["mail", "status", "--help"],
+            vec!["mail", "status", "-h"],
+            vec!["mail", "pending", "--help"],
+            vec!["mail", "send", "--help"],
+        ] {
+            let err = match parse_command(&argv(&args)) {
+                Err(e) => e,
+                Ok(cmd) => panic!("인자 오류여야({args:?}): {cmd:?}"),
+            };
+            assert!(
+                err.contains("help"),
+                "복구 경로를 안내해야({args:?}): {err}"
+            );
+        }
+
+        // ★help + 추가 인자 = 인자 오류★: exit 0 으로 삼키면 보내려던 편지가 성공 코드와 함께 사라진다.
+        for args in [
+            vec!["mail", "--help", "--to", "bob", "--body", "hi"],
+            vec!["mail", "-h", "send"],
+            vec!["--help", "mail", "--to", "bob"],
+            vec!["help", "mail", "--to", "bob"],
+        ] {
+            assert!(
+                parse_command(&argv(&args)).is_err(),
+                "help 에 붙은 잔여 인자는 오류여야: {args:?}"
+            );
+        }
+
+        let root = render_help(HELP_ROOT);
+        let mail = render_help(HELP_MAIL);
+        for text in [&root, &mail] {
+            assert!(
+                !text.contains(HELP_TOOL_SLOT),
+                "치환 안 된 자리가 남으면 안 된다: {text}"
+            );
+            assert!(text.contains(CLI_EXE_NAME), "실행파일 이름이 상수에서 와야");
+        }
+        assert!(root.contains(CLI_GROUP_MAIL), "계열 목록에 mail: {root}");
+        for verb in ["send", "status", "pending"] {
+            assert!(mail.contains(verb), "{verb} 동사가 help 에: {mail}");
+        }
+        for flag in [
+            "--to",
+            "--body",
+            "--body-stdin",
+            "--request",
+            "--reply-by",
+            "--reply-to",
+        ] {
+            assert!(mail.contains(flag), "{flag} 가 help 에: {mail}");
+        }
     }
 
     // ── D: 조회 응답 exit code 매핑 ─────────────────────────────────────────────────────
@@ -1326,9 +1819,8 @@ mod tests {
         for body in [
             r#"{"id":"m-1","from":"a","awaiting_reply":false,"rows":[{"to":"b","status":"delivered","age_secs":1,"updated_secs_ago":1}]}"#,
             r#"{"me":"alice","open":[]}"#,
-            r#"{"groups":["@all"]}"#,
-            r#"{"group":"@coders","members":["alice"]}"#,
-            r#"{"group":"@coders","deleted":true}"#,
+            r#"{"me":"alice","open":[{"id":"m-1","direction":"reply_owed_by_me"}]}"#,
+            r#"{"id":"m-1","from":"a","awaiting_reply":true,"rows":[]}"#,
         ] {
             assert_eq!(exit_code_for_query_response(200, body), 0, "성공: {body}");
         }
@@ -1338,8 +1830,7 @@ mod tests {
     fn query_exit_code_maps_rejections_to_failure() {
         for body in [
             r#"{"status":"error","code":"MESSAGE_NOT_FOUND","hint":"h"}"#,
-            r#"{"status":"error","code":"GROUP_NOT_FOUND","hint":"h"}"#,
-            r#"{"status":"error","code":"INVALID_GROUP_ARGS","hint":"h"}"#,
+            r#"{"status":"error","code":"BAD_ARGS","hint":"h"}"#,
         ] {
             assert_eq!(
                 exit_code_for_query_response(200, body),
@@ -1370,17 +1861,14 @@ mod tests {
                 EXIT_FAILED,
             ),
             (
-                r#"{"status":"error","code":"GROUP_NOT_FOUND"}"#,
+                r#"{"status":"error","code":"MESSAGE_NOT_FOUND"}"#,
                 EXIT_FAILED,
             ),
             (r#"{"status":"error"}"#, EXIT_MALFORMED_SUCCESS),
             (r#"{"status":"error","code":""}"#, EXIT_MALFORMED_SUCCESS),
             (r#"{"status":"error","code":7}"#, EXIT_MALFORMED_SUCCESS),
             (r#"{"status":"error","code":null}"#, EXIT_MALFORMED_SUCCESS),
-            (
-                r#"{"status":"error","groups":["@all"]}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
+            (r#"{"status":"error","rows":[]}"#, EXIT_MALFORMED_SUCCESS),
         ];
         for (body, want) in cases {
             let got = exit_code_for_query_response(200, body);
@@ -1391,7 +1879,7 @@ mod tests {
             );
         }
         assert_eq!(
-            exit_code_for_query_response(200, r#"{"status":"ok","groups":["@all"]}"#),
+            exit_code_for_query_response(200, r#"{"status":"ok","rows":[]}"#),
             0
         );
     }

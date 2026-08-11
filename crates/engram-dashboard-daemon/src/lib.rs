@@ -26,6 +26,7 @@ use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
 use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_core::agent::types::CLI_EXE_NAME;
 use engram_dashboard_core::logging;
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_protocol::PROTOCOL_VERSION;
@@ -108,14 +109,14 @@ fn set_engram_exe_env() {
     tracing::warn!("ENGRAM_EXE 미주입 — 앱 exe 형제를 못 찾음(에이전트 CLI 호출은 fallback 필요)");
 }
 
-// ── engram-send CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
+// ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
 //
 // ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
-// 보내려면 CLI(`engram-send[.exe]`)를 shell 로 불러야 하는데, 이 바이너리는 **PATH 에 없다**(데몬과 함께
-// 배포되는 내부 도구라 bare 이름 `engram-send` 로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
+// 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
+// **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
 // **형제**에서 절대경로를 찾아(set_engram_exe_env·locate_daemon_exe 와 동일 대칭 — 배포 시 세 exe 동거),
 // provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 가 CLI 전용 스폰에서만 그걸
-// ENGRAM_SEND_EXE·PATH 로 주입한다(MCP 가능 스폰은 받지 않는다 — ADR-0128).
+// ENGRAM_CLI_EXE·PATH 로 주입한다(MCP 가능 스폰은 받지 않는다 — ADR-0128).
 //
 // ★best-effort(fail-open)★: 못 찾아도(개발 중 부분 빌드 등) None 을 돌려주고 데몬은 계속 뜬다 — MCP 가능
 // 백엔드(claude)는 애초에 이 경로를 안 쓰므로 무영향이고, 비-MCP 백엔드 스폰만 provision 에서 fail-closed 로
@@ -130,25 +131,28 @@ fn set_engram_exe_env() {
 /// fail-closed 로 스폰을 막는다 — 즉 삭제는 dead-code 정리가 아니라 CLI 백엔드 우편의 제거다. 이 구간은
 /// 테스트가 없어(지우고 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간
 /// (provision→endpoint→스폰 env)은 daemon control 테스트
-/// `provision_non_mcp_wires_engram_send_into_spawn_env` 가 잡는다.
+/// `provision_non_mcp_wires_the_cli_into_spawn_env` 가 잡는다.
 // ADR-0128
 fn locate_send_exe() -> Option<PathBuf> {
-    const SEND_EXE: &str = if cfg!(windows) {
-        "engram-send.exe"
+    // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
+    //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
+    let file_name = if cfg!(windows) {
+        format!("{CLI_EXE_NAME}.exe")
     } else {
-        "engram-send"
+        CLI_EXE_NAME.to_string()
     };
     if let Ok(daemon_exe) = std::env::current_exe() {
         if let Some(dir) = daemon_exe.parent() {
-            let send_exe = dir.join(SEND_EXE);
+            let send_exe = dir.join(&file_name);
             if send_exe.is_file() {
-                tracing::info!(path = %send_exe.display(), "engram-send CLI 위치 확정(ADR-0086 F1)");
+                tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
                 return Some(send_exe);
             }
         }
     }
     tracing::warn!(
-        "engram-send CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
+        name = %file_name,
+        "제어 평면 CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
     );
     None
 }

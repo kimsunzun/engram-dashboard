@@ -43,11 +43,12 @@ use super::registry::{BoundIdentity, ControlRegistry};
 ///   조용히 404 를 받는다.
 const MCP_PATH: &str = "/mcp";
 
-/// CLI 입구(ADR-0086 스텝 2) — `engram-send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
+/// CLI 입구(ADR-0086 스텝 2) — `engram mail send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
 /// (ENGRAM_CONTROL_URL)에 이 경로를 조립한다.
 const CONTROL_SEND_PATH: &str = "/control/send";
 
-/// CLI 조회 입구(D · spec §6) — `engram-send status <id>` / `pending` 이 POST 하는 라우트.
+/// CLI 조회 입구(D · 표면 정본 = ADR-0132) — `engram mail status <id>` / `engram mail pending` 이 POST
+/// 하는 라우트.
 /// ★POST 인 이유(GET 아님)★: 같은 bearer 미들웨어를 타야 하는데, 미들웨어는 세션 id 없는 **GET 을 400** 으로
 ///   끊는다(세션 operation 규약 — bearer_auth 1.5단계). 조회는 세션을 쓰지 않으므로 send 와 같은 무-세션
 ///   POST 형태로 맞춘다(경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다).
@@ -622,7 +623,7 @@ struct SendRequest {
     reply_to: Option<String>,
 }
 
-/// ★CLI 입구의 수신자 토큰화(순수 함수 — 리뷰 C3)★: `engram-send --to a,b` 는 셸에서 목록을 표현할 방법이
+/// ★CLI 입구의 수신자 토큰화(순수 함수 — 리뷰 C3)★: `engram mail send --to a,b` 는 셸에서 목록을 표현할 방법이
 /// 콤마뿐이라 **이 입구에서만** 한 번 쪼갠다. 분해 규칙이 **입구별로 다른 게 의도**다(MCP 쪽 규칙은
 /// `ToField` 주석).
 fn cli_recipient_tokens(to: ToField) -> Vec<String> {

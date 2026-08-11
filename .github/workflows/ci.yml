@@ -485,7 +485,7 @@ jobs:
       #      "a semver version number or a path to a `package.json` file … If removed the version number
       #      from `Cargo.toml` is used." → 암묵 폴백은 Cargo.toml 이다. 1이 있다고 이걸 중복으로 보고
       #      지우지 말 것 — 1을 지우는 순간 이게 제품 버전이 된다.
-      #   3. crates/engram-dashboard-daemon/Cargo.toml — daemon.exe·engram-send.exe 를 만드는 crate.
+      #   3. crates/engram-dashboard-daemon/Cargo.toml — daemon.exe·engram.exe 를 만드는 crate.
       #      코드가 실제로 읽는다: agent_conn.rs 가 env!("CARGO_PKG_VERSION") 로 hello 이벤트에 실어
       #      보낸다 → 어긋나면 에이전트에게 거짓 버전이 나간다.
       #   4. package.json — ★산출물에 닿지 않는다★. 어디서도 import 되지 않고, Tauri 가 여기를 읽는 것은

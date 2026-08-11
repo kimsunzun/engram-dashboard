@@ -97,7 +97,7 @@ async fn wire(
         .await
         .expect("start mcp server");
     let url = handle.url.clone();
-    let data_dir = std::env::temp_dir().join(format!("engram-send-{tag}-{}", AgentId::new_v4()));
+    let data_dir = std::env::temp_dir().join(format!("engram-cli-{tag}-{}", AgentId::new_v4()));
 
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
         registry.clone(),
@@ -119,10 +119,10 @@ async fn wire(
         ),
     );
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
-        std::env::temp_dir().join(format!("engram-send-prof-{tag}-{}", AgentId::new_v4())),
+        std::env::temp_dir().join(format!("engram-cli-prof-{tag}-{}", AgentId::new_v4())),
     ))));
     let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-send-preset-{tag}-{}", AgentId::new_v4())),
+        std::env::temp_dir().join(format!("engram-cli-preset-{tag}-{}", AgentId::new_v4())),
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {

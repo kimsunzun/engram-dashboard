@@ -153,7 +153,7 @@ fn apply_wrap_template(template: &str, sender: &str, id: &str, body: &str) -> St
 pub enum Entrance {
     /// MCP `send_message` 툴 경로.
     Mcp,
-    /// `/control/send` 평문 HTTP 라우트(CLI `engram-send`).
+    /// `/control/send` 평문 HTTP 라우트(CLI `engram mail send`).
     Cli,
     /// ★데몬 자가 발신(C3 — `<notice>`)★: 어떤 에이전트 입구도 거치지 않고 데몬이 스스로 만든 배달이다
     ///   (request 기한 초과 통지 — spec §3 단계 4). 관측 레코드에서 "이건 인프라 통지지 동료 발신이 아니다"

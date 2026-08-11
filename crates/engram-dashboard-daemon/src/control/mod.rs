@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engram_dashboard_core::agent::types::{
-    AgentId, ControlChannel, ControlEndpoint, ProvisionError, ToolGrant,
+    AgentId, ControlChannel, ControlEndpoint, ProvisionError, ToolGrant, CLI_EXE_NAME,
 };
 
 use mcp_config::MCP_SERVER_NAME;
@@ -67,12 +67,12 @@ impl DaemonControlChannel {
             });
         }
         // exe 는 send_exe 에서 파생하지 않는다 — grant 문자열은 프라이밍이 가르치는 bare 명령 이름과
-        //   글자 그대로 같아야 하므로 여기 리터럴이 정본이고, send_exe 는 CLI 입구 **존재 여부**만
-        //   판정에 쓴다.
+        //   글자 그대로 같아야 해서 `CLI_EXE_NAME`(정본)을 쓰고, send_exe 는 CLI 입구 **존재 여부**만
+        //   판정에 쓴다(절대경로를 넣으면 bare 이름 호출과 매칭되지 않는다 — ADR-0098).
         // ADR-0128
         if !accepts_mcp_config && send_exe.is_some() {
             grants.push(ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             });
         }
         grants
@@ -144,11 +144,13 @@ impl ControlChannel for DaemonControlChannel {
             "제어 채널 provision fork(ADR-0099 채널 스위치)"
         );
         if !accepts_mcp_config && self.send_exe.is_none() {
-            let msg = "non-MCP backend with no engram-send binary — zero physical send channels while CLI-only priming teaches engram-send (pairing invariant violation)";
+            let msg = format!(
+                "non-MCP backend with no `{CLI_EXE_NAME}` binary — zero physical send channels while CLI-only priming teaches that command (pairing invariant violation)"
+            );
             tracing::warn!(agent = %id, epoch, "제어 채널 provision fail-closed(ADR-0099): {msg}");
             // 회수 코드가 없는 이유: 이 분기는 !accepts_mcp_config 일 때만 참이라 위 write_config 를 타지
             //   않았고 token 도 아직 issue 전이다 — 되돌릴 자원이 없다.
-            return Err(ProvisionError(msg.to_string()));
+            return Err(ProvisionError(msg));
         }
         self.registry.issue(id, epoch, token.clone());
         let priming_file = self.priming.priming_file(priming_variant);
@@ -176,6 +178,7 @@ impl ControlChannel for DaemonControlChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engram_dashboard_core::agent::types::CLI_EXE_ENV;
     use std::path::Path;
 
     /// ★노브별 락이 아니라 **단일** 락★: `provision` 이 두 env 를 모두 읽으므로, 노브별로 나누면 한쪽만
@@ -217,7 +220,7 @@ mod tests {
     fn build_grants_cli_grant_follows_the_channel_axis_not_send_exe_presence() {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
-        let exe = Path::new("C:/app/engram-send.exe");
+        let exe = Path::new("C:/app/engram.exe");
         assert_eq!(
             DaemonControlChannel::build_grants(Some(exe), true),
             vec![ToolGrant::Mcp {
@@ -229,7 +232,7 @@ mod tests {
         assert_eq!(
             DaemonControlChannel::build_grants(Some(exe), false),
             vec![ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             }],
             "비-MCP + send_exe → [Cli](CLI grant 는 이 축으로만 나온다)"
         );
@@ -239,7 +242,7 @@ mod tests {
     fn build_grants_is_minimal_privilege() {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
-        let exe = Path::new("C:/app/engram-send.exe");
+        let exe = Path::new("C:/app/engram.exe");
         for accepts_mcp_config in [true, false] {
             let grants = DaemonControlChannel::build_grants(Some(exe), accepts_mcp_config);
             assert_eq!(
@@ -249,7 +252,7 @@ mod tests {
             );
             match &grants[0] {
                 ToolGrant::Mcp { tool, .. } => assert_eq!(tool, SEND_MESSAGE_TOOL),
-                ToolGrant::Cli { exe } => assert_eq!(exe, "engram-send"),
+                ToolGrant::Cli { exe } => assert_eq!(exe, CLI_EXE_NAME),
             }
         }
     }
@@ -264,7 +267,7 @@ mod tests {
             "테스트 진입 시 env 미설정이어야(leak 감지)"
         );
         std::env::set_var(DISALLOW_MCP_ENV, "1");
-        let exe = Path::new("C:/app/engram-send.exe");
+        let exe = Path::new("C:/app/engram.exe");
         let mcp_capable = DaemonControlChannel::build_grants(Some(exe), true);
         let non_mcp = DaemonControlChannel::build_grants(Some(exe), false);
         std::env::remove_var(DISALLOW_MCP_ENV);
@@ -275,7 +278,7 @@ mod tests {
         assert_eq!(
             non_mcp,
             vec![ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             }],
             "env 켜짐이어도 비-MCP 갈래의 CLI grant 는 그대로(seam 은 MCP grant 만 제거)"
         );
@@ -299,8 +302,7 @@ mod tests {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         std::env::set_var(DISALLOW_MCP_ENV, "");
-        let grants =
-            DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram-send.exe")), true);
+        let grants = DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram.exe")), true);
         std::env::remove_var(DISALLOW_MCP_ENV);
         assert_eq!(
             grants,
@@ -318,12 +320,12 @@ mod tests {
     fn build_grants_non_mcp_backend_emits_cli_only() {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
-        let exe = Path::new("C:/app/engram-send.exe");
+        let exe = Path::new("C:/app/engram.exe");
         let grants = DaemonControlChannel::build_grants(Some(exe), false);
         assert_eq!(
             grants,
             vec![ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             }],
             "비-MCP 백엔드 → CLI grant 만(MCP 입구 물리 부재)"
         );
@@ -380,7 +382,7 @@ mod tests {
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(None));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from("engram-send")));
+            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, true)
@@ -420,7 +422,7 @@ mod tests {
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(None));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from("engram-send")));
+            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, false)
@@ -447,7 +449,7 @@ mod tests {
         assert_eq!(
             ep.grants,
             vec![ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             }],
             "비-MCP → grants == [Cli]"
         );
@@ -466,7 +468,7 @@ mod tests {
             .provision(id, 0, false)
             .expect_err("비-MCP + send_exe=None → fail-closed Err");
         assert!(
-            err.0.contains("non-MCP") && err.0.contains("engram-send"),
+            err.0.contains("non-MCP") && err.0.contains(CLI_EXE_NAME),
             "ProvisionError 사유에 원인 명시: {}",
             err.0
         );
@@ -486,7 +488,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let (channel, data_dir) = provision_test_channel_with_send(
             seen.clone(),
-            Some(PathBuf::from("C:/app/engram-send.exe")),
+            Some(PathBuf::from("C:/app/engram.exe")),
         );
         let id = AgentId::new_v4();
         let cfg_dir = mcp_config::config_path(&data_dir, id, 0)
@@ -569,13 +571,13 @@ mod tests {
     ///   않는다★(배타성을 만드는 건 backend 의 `config_path` 갈림뿐이므로).
     /// ★미커버★: 부팅 시 형제 exe 탐색(`lib.rs::locate_send_exe`)은 이 테스트 범위 밖이다.
     #[test]
-    fn provision_mcp_capable_does_not_wire_engram_send_into_spawn_env() {
+    fn provision_mcp_capable_does_not_wire_the_cli_into_spawn_env() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(None));
         // **절대**경로여야 한다 — 부모 디렉토리가 PATH prepend 대상이라, bare 이름이면 부모가 없어 짝
         //   테스트의 PATH 주입이 성립하지 않는다.
-        let send_exe = PathBuf::from("C:/app/engram-send.exe");
+        let send_exe = PathBuf::from("C:/app/engram.exe");
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
         let id = AgentId::new_v4();
@@ -602,7 +604,7 @@ mod tests {
             "MCP 가능 → grants == [Mcp](CLI 권한도 함께 사라진다)"
         );
         let spec = spawn_spec_from(id, ep, vec![("PATH".to_string(), "C:\\custom".to_string())]);
-        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", "ENGRAM_SEND_EXE"] {
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
             assert!(
                 !spec.env.iter().any(|(k, _)| k == key),
                 "MCP 가능 스폰 env 에 {key} 가 실리면 ADR-0128 위반: {:?}",
@@ -632,11 +634,11 @@ mod tests {
     /// ★위 테스트만 있으면 "CLI 배선을 통째로 지워도 초록" 이라 짝으로 둔다★ — 이 갈래가 열화하면 비-MCP
     ///   백엔드의 우편이 죽는다(그 백엔드엔 MCP 입구가 아예 없다).
     #[test]
-    fn provision_non_mcp_wires_engram_send_into_spawn_env() {
+    fn provision_non_mcp_wires_the_cli_into_spawn_env() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(None));
-        let send_exe = PathBuf::from("C:/app/engram-send.exe");
+        let send_exe = PathBuf::from("C:/app/engram.exe");
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
         let id = AgentId::new_v4();
@@ -653,10 +655,10 @@ mod tests {
         assert_eq!(
             spec.env
                 .iter()
-                .find(|(k, _)| k == "ENGRAM_SEND_EXE")
+                .find(|(k, _)| k == CLI_EXE_ENV)
                 .map(|(_, v)| v.as_str()),
-            Some("C:/app/engram-send.exe"),
-            "CLI 절대경로가 ENGRAM_SEND_EXE 로 스폰 env 에 실려야: {:?}",
+            Some("C:/app/engram.exe"),
+            "CLI 절대경로가 ENGRAM_CLI_EXE 로 스폰 env 에 실려야: {:?}",
             spec.env
         );
         assert!(
@@ -674,7 +676,7 @@ mod tests {
         assert_eq!(
             std::env::split_paths(path).next(),
             Some(PathBuf::from("C:/app")),
-            "PATH 맨 앞 = engram-send 형제 디렉토리: {path}"
+            "PATH 맨 앞 = CLI 형제 디렉토리: {path}"
         );
         assert!(
             !spec.args.iter().any(|a| a == "--mcp-config"),
@@ -695,7 +697,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         // send_exe 를 켠다 — seam 이 스폰을 CLI-only 로 만들므로 CLI 입구가 없으면 fail-closed edge 에 걸린다.
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from("engram-send")));
+            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "1");
         let id = AgentId::new_v4();
         let result = channel.provision(id, 0, true);
@@ -717,7 +719,7 @@ mod tests {
         assert_eq!(
             ep.grants,
             vec![ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             }],
             "seam 켜짐 → grants == [Cli](권한 절반)"
         );
@@ -730,7 +732,7 @@ mod tests {
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(None));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from("engram-send")));
+            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "");
         let id = AgentId::new_v4();
         let result = channel.provision(id, 0, true);

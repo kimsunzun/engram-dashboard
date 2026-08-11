@@ -2,7 +2,7 @@
 //!
 //! ## 무엇을 실측하나
 //! 실 primed claude 2개(A=alice · B=bob, stream-json/Fresh)를 스폰해, priming-smoke 가 증명한 A→B
-//! **수신** 위에서 두 조각만 새로 본다: ① B 가 **발신 절반**(MCP `send_message` 또는 `engram-send` CLI)을
+//! **수신** 위에서 두 조각만 새로 본다: ① B 가 **발신 절반**(MCP `send_message` 또는 `engram mail send` CLI)을
 //! **스스로** 호출하는가 ② A 가 그 답신을 자연스럽게 수용하는가. 관측 축 둘 — 기계적 = registry
 //! `DeliveryObservation`(from=B, to=A) + B 가 고른 입구, 정성적 = A 의 턴 텍스트. 최종 해석은 아래
 //! stdout 마커로 오케스트레이터가 내린다.
@@ -42,7 +42,7 @@
 //!
 //! ## 종료 라벨(stdout+stderr 양쪽에 찍는다 — silent skip 금지)
 //! - `SKIPPED` exit 0 — claude 부재/인증 실패.
-//! - `SETUP-SKIP` exit 1 — 케이스가 요구하는 인프라 부재(CLI 경로인데 engram-send 미빌드).
+//! - `SETUP-SKIP` exit 1 — 케이스가 요구하는 인프라 부재(CLI 경로인데 제어 평면 CLI 미빌드).
 //! - `SETUP-FAIL` exit 1 — 인자 오류(스폰 전) · priming 파일 부재/읽기 실패 · A/B 출력 구독 실패 ·
 //!   B 원과제 턴 실패 · A·B process death · 씨앗 ACK 반려.
 //! - 그 밖 exit 0 — valid negative 도 exit 0 이다(유효한 실험 결과지 하네스 실패가 아니다).
@@ -65,9 +65,9 @@
 //!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
 //! `--cli-only` 는 CLI 입구 바이너리를 **먼저** 빌드해야 한다 — `cargo run` 은 dep bin 을 안 만들고,
-//! 하네스는 자기 exe 형제에서 `engram-send`(Win: `.exe`) 를 찾으므로 같은 profile/target 이어야 co-locate 된다.
+//! 하네스는 자기 exe 형제에서 `engram`(Win: `.exe`) 를 찾으므로 같은 profile/target 이어야 co-locate 된다.
 //! ```text
-//! cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send
+//! cargo build -p engram-dashboard-daemon --features test-harness --bin engram
 //! cargo run   -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- <flags>
 //! ```
 //! **실행 전 부모 env 의 `ENGRAM_PRIMING_FILE` 을 직접 걷어낼 것** — `--cli-only` 는 이 값이 비어 있지
@@ -77,7 +77,7 @@
 //! - **required-features = ["test-harness"]** — 운영/릴리즈 빌드는 이 bin 을 컴파일하지 않는다.
 //! - **B 의 답신은 실 입구로만** — 하네스는 B 의 답신에 대해 `handle_send` 를 대신 부르지 않는다.
 //!   이게 이 하네스가 새로 검증하는 것 자체다.
-//! - **CLI 입구를 쓰는 실험 = `--cli-only` 한 모드뿐**(ADR-0128) — MCP 가능 스폰엔 engram-send 배선이
+//! - **CLI 입구를 쓰는 실험 = `--cli-only` 한 모드뿐**(ADR-0128) — MCP 가능 스폰엔 CLI 배선이
 //!   없어, CLI-지시 프라이밍을 `--priming` 으로 얹는 조합은 스폰 전에 거부된다. CLI-요구 판정은
 //!   셀렉터·basename 이 아니라 **해석된 프라이밍 파일 본문**으로 한다.
 // ADR-0092
@@ -94,13 +94,15 @@ use engram_dashboard_core::agent::profile::{
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, OutputEvent, OutputFrame, OutputPayload,
-    OutputSink, SinkError, SinkId, StatusSink,
+    OutputSink, SinkError, SinkId, StatusSink, CLI_EXE_NAME,
 };
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
 use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
-use engram_dashboard_daemon::control::priming::{FilePrimingProvider, PrimingProvider};
+use engram_dashboard_daemon::control::priming::{
+    mentions_mail_cli_surface, teaches_mail_cli, FilePrimingProvider, PrimingProvider,
+};
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
 use engram_dashboard_daemon::messaging_host::messaging_for_manager;
@@ -156,21 +158,7 @@ fn setup_fail(reason: &str) -> i32 {
     1
 }
 
-/// ★basename 이 아니라 본문으로 판정한다 — 되돌리지 마라★: 이전 판본은 하드코딩된 basename 리스트만
-///   봤고, 새 CLI-지시 프라이밍이 그 리스트에서 누락되자 가드가 조용히 우회돼 engram-send 부재(인프라
-///   부재)가 SETUP-SKIP 대신 정상 negative(B_SENT=false)로 오귀속됐다. 대소문자를 접는 이유도 같다 —
-///   `ENGRAM-SEND` 표기를 놓치면 같은 오귀속이 난다.
-/// ★의도적으로 보수적 — 부정문 false positive 는 수용한다(사용자 결정 2026-08-04)★: "engram-send 를 쓰지
-///   마라" 같은 부정문도 substring 만으로 true 라, 그 파일을 `--cli-only` 없이 넘기면 헛된
-///   SETUP-FAIL 이 된다. 그래도 negation-aware 로 만들지 않는다 — 요란한 exit-1 이 틀릴 수 있는 데이터를
-///   발화하는 것보다 안전하고, 내용 기반 검출이 바로 그 오귀속 부류를 닫는 장치다. 운영 프라이밍 2종엔
-///   그런 부정문이 없어 실경로 영향은 0 이다.
-fn priming_text_directs_cli(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    lower.contains("engram-send") || lower.contains("engram_send_exe")
-}
-
-/// MCP 가능 스폰엔 `engram-send` 배선(PATH·크레덴셜)이 **없다** — 그래서 CLI 발신을 가르치는 프라이밍은
+/// MCP 가능 스폰엔 CLI 배선(PATH·크레덴셜)이 **없다** — 그래서 CLI 발신을 가르치는 프라이밍은
 ///   `--cli-only` 와 함께여야만 실행 가능한 조합이 된다. 어긋나면 "가르쳤지만 안 깐 채널" 이 되어 발신
 ///   freeze(ADR-0099 실측 ~6/7 미발신)를 재현하고, 하네스는 그걸 정상 negative 로 오귀속한다.
 /// send_exe 존재 여부는 이 판정에 **들어오지 않는다** — 바이너리가 있어도 MCP 가능 스폰의 자식은 그 이름을
@@ -442,18 +430,23 @@ async fn run() -> i32 {
 
     let send_exe = sibling_send_exe();
     match &send_exe {
-        Some(p) => eprintln!("[roundtrip] engram-send = {}", p.display()),
-        None => eprintln!("[roundtrip] engram-send 형제 바이너리 없음 — CLI 입구 비활성(MCP 만)."),
+        Some(p) => eprintln!("[roundtrip] {CLI_EXE_NAME} = {}", p.display()),
+        None => {
+            eprintln!("[roundtrip] {CLI_EXE_NAME} 형제 바이너리 없음 — CLI 입구 비활성(MCP 만).")
+        }
     }
-    let directs_cli = priming_text_directs_cli(&priming_content);
-    if cli_priming_requires_cli_only(directs_cli, args.cli_only) {
+    // 금지 방향은 넓은 신호(의심스러우면 막는다), 요구 방향은 강한 신호(명령을 실제로 가르쳐야 한다).
+    //   두 게이트가 같은 신호를 쓰면 한쪽이 반드시 틀린다 — 근거는 그 두 함수의 주석.
+    let directs_cli = teaches_mail_cli(&priming_content);
+    let mentions_cli_surface = mentions_mail_cli_surface(&priming_content);
+    if cli_priming_requires_cli_only(mentions_cli_surface, args.cli_only) {
         handle.shutdown().await;
         let dirs = [&data_dir, &ws_a, &ws_b];
         for d in dirs {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_fail(&format!(
-            "CLI-teaching priming on an MCP-capable spawn (case={:?}): ADR-0128 이후 MCP 가능 스폰엔 engram-send 배선(PATH·ENGRAM_* 크레덴셜)이 없어 B 가 배운 명령을 실행할 수 없다 — 가르쳤지만 안 깐 채널 = 발신 freeze(ADR-0099 실측 ~6/7 미발신)를 정상 negative 로 오귀속하게 된다. CLI 입구를 실측하려면 `--cli-only` 로 provision 을 비-MCP 로 정렬하라(그 모드가 CliOnly 프라이밍을 자동 선택하므로 `--priming` 은 함께 주지 않는다). ※판정은 본문에 `engram-send`/`ENGRAM_SEND_EXE` 가 **등장하는지**로만 한다 — \"never run engram-send\" 같은 부정문도 CLI-지시로 잡힌다(의도된 fail-closed: 오귀속보다 거부가 안전하다). MCP 전용 파일로 돌리려면 그 언급 자체를 빼라",
+            "CLI-teaching priming on an MCP-capable spawn (case={:?}): ADR-0128 이후 MCP 가능 스폰엔 CLI 배선(PATH·ENGRAM_* 크레덴셜)이 없어 B 가 배운 명령을 실행할 수 없다 — 가르쳤지만 안 깐 채널 = 발신 freeze(ADR-0099 실측 ~6/7 미발신)를 정상 negative 로 오귀속하게 된다. CLI 입구를 실측하려면 `--cli-only` 로 provision 을 비-MCP 로 정렬하라(그 모드가 CliOnly 프라이밍을 자동 선택하므로 `--priming` 은 함께 주지 않는다). ※이 금지 방향의 판정은 **넓게** 본다(`mentions_mail_cli_surface`) — 우편 CLI 호출 형태(`engram mail …`/`$ENGRAM_CLI_EXE mail …`)·env 변수 이름 자체·CLI 전용 플래그(`--to`·`--body`·`--body-stdin`·`--request`·`--reply-by`·`--reply-to`) 중 **하나라도 등장하면** 걸린다. 모든 arm 은 같은 정규화(소문자 · 공백/줄바꿈 축약 · 마크다운 강조/이스케이프 기호 제거 · HTML 주석 제거 · 제로폭 문자 제거)를 거친 뒤 **낱말 경계**로 비교하므로, 대소문자·공백/줄바꿈·마크다운 강조·HTML 주석·제로폭 문자 정도의 흐트러짐은 접히고 `engram mailbox`·`--token` 같은 평범한 낱말은 걸리지 않는다. **셸 문법 일반(변수 재바인딩·별칭)과 문장 부정은 판정하지 않는다** — 그 한계는 `teaches_mail_cli` 주석이 정본이다. 부정문(\"그 명령을 쓰지 마라\")은 변수 **맨 언급**으로 여전히 이 금지 방향에 걸린다(의도된 fail-closed: 오귀속보다 거부가 안전하다 — 다만 그건 '가르쳤다' 는 판정은 아니다). MCP 전용 파일로 돌리려면 그 언급 자체를 빼라",
             priming_selector
         ));
     }
@@ -464,7 +457,7 @@ async fn run() -> i32 {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_fail(
-            "--cli-only 인데 해석된 프라이밍이 CLI 발신(engram-send)을 가르치지 않는다 — 이 모드는 provision 을 비-MCP 로 정렬해 CLI 배선을 깔지만, 가르치지 않으면 B 는 발신 방법을 모른 채 아무것도 보내지 않고 그 B_SENT=false 가 정상 negative 로 오귀속된다(ADR-0128 등호: 가르치는 채널 == 깐 채널). prompts/agent-priming-cli.md 가 engram-send 를 가르치는지 확인하고, 상속된 ENGRAM_PRIMING_FILE override 가 MCP 전용 파일을 가리키고 있지 않은지 보라",
+            "--cli-only 인데 해석된 프라이밍이 CLI 발신을 가르치지 않는다 — 이 모드는 provision 을 비-MCP 로 정렬해 CLI 배선을 깔지만, 가르치지 않으면 B 는 발신 방법을 모른 채 아무것도 보내지 않고 그 B_SENT=false 가 정상 negative 로 오귀속된다(ADR-0128 등호: 가르치는 채널 == 깐 채널). prompts/agent-priming-cli.md 가 그 명령을 가르치는지 확인하고, 상속된 ENGRAM_PRIMING_FILE override 가 MCP 전용 파일을 가리키고 있지 않은지 보라",
         );
     }
     // 위 두 게이트를 통과했으면 `directs_cli ⟺ cli_only` 가 성립한다 — 그 상태에서 send_exe 가 없으면
@@ -476,7 +469,7 @@ async fn run() -> i32 {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_skip(&format!(
-            "engram-send not built, CLI inlet unavailable (case={:?} requires the CLI send path). 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
+            "control CLI not built, inlet unavailable (case={:?} requires the CLI send path). 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram` 로 형제 위치에 빌드하라",
             priming_selector
         ));
     }
@@ -490,12 +483,12 @@ async fn run() -> i32 {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_skip(
-            "--disallow-mcp: engram-send 형제 바이너리가 없어 SETUP-SKIP. ※주의(ADR-0128) — 이 모드는 스폰을 MCP 가능 그대로 두므로 바이너리를 빌드해도 **CLI 발신 경로는 생기지 않는다**(CLI grant 는 비-MCP 스폰에서만 방출된다) — 이 모드의 발신 grant 는 바이너리 유무와 무관하게 0 이고, auto 권한 모드에선 grant 가 NO-OP 이라 에이전트는 그대로 MCP 로 보낸다(실측 6/6). 즉 빌드는 이 스킵을 넘기기 위한 절차일 뿐 CLI 라우팅을 만들지 못한다 — CLI 입구를 실측하려면 `--cli-only` 를 쓰라. 스킵을 넘기려면: `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send`",
+            "--disallow-mcp: 제어 평면 CLI 형제 바이너리가 없어 SETUP-SKIP. ※주의(ADR-0128) — 이 모드는 스폰을 MCP 가능 그대로 두므로 바이너리를 빌드해도 **CLI 발신 경로는 생기지 않는다**(CLI grant 는 비-MCP 스폰에서만 방출된다) — 이 모드의 발신 grant 는 바이너리 유무와 무관하게 0 이고, auto 권한 모드에선 grant 가 NO-OP 이라 에이전트는 그대로 MCP 로 보낸다(실측 6/6). 즉 빌드는 이 스킵을 넘기기 위한 절차일 뿐 CLI 라우팅을 만들지 못한다 — CLI 입구를 실측하려면 `--cli-only` 를 쓰라. 스킵을 넘기려면: `cargo build -p engram-dashboard-daemon --features test-harness --bin engram`",
         );
     }
     // ★오늘은 도달 불가 — 그래도 남긴다★: 위 `directs_cli ⟺ cli_only` 때문에 바로 위 스킵이 항상 먼저
     //   걸린다. 지우지 않는 이유는 그 도달 불가가 **다른 게이트의 성질에 의존**하기 때문이다 —
-    //   `priming_text_directs_cli` 가 좁아지거나 역방향 게이트가 완화되면 이 조합이 되살아나고, 그때 이게
+    //   `teaches_mail_cli` 가 좁아지거나 역방향 게이트가 완화되면 이 조합이 되살아나고, 그때 이게
     //   없으면 provision 의 fail-closed(Err)를 스폰 뒤에 SETUP-FAIL 로 늦게 만난다(진단이 나빠진다).
     //   도달 불가라 테스트로 고정할 수 없다 — 순서를 바꿔 "되살리는" 리팩터를 하지 말 것.
     if args.cli_only && send_exe.is_none() {
@@ -505,7 +498,7 @@ async fn run() -> i32 {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_skip(
-            "--cli-only requires the CLI inlet (engram-send) but it is not built — forced non-MCP spawn has no MCP inlet, and no CLI grant means agents have no send path (provision would fail-closed). 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram-send` 로 형제 위치에 빌드하라",
+            "--cli-only requires the CLI inlet but it is not built — forced non-MCP spawn has no MCP inlet, and no CLI grant means agents have no send path (provision would fail-closed). 먼저 `cargo build -p engram-dashboard-daemon --features test-harness --bin engram` 로 형제 위치에 빌드하라",
         );
     }
 
@@ -1010,9 +1003,9 @@ fn sibling_send_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let name = if cfg!(windows) {
-        "engram-send.exe"
+        format!("{CLI_EXE_NAME}.exe")
     } else {
-        "engram-send"
+        CLI_EXE_NAME.to_string()
     };
     let cand = dir.join(name);
     cand.is_file().then_some(cand)
@@ -1361,59 +1354,64 @@ mod tests {
     }
 
     #[test]
-    fn priming_text_directs_cli_true_for_engram_send_mention() {
-        let text = "To reply, run in your shell: `$ENGRAM_SEND_EXE --to alice --body ...`\n\
-                    i.e. run the engram-send command with the recipient name.";
+    fn teaches_mail_cli_true_for_cli_command_mention() {
+        let text =
+            "To reply, run in your shell: `$ENGRAM_CLI_EXE mail send --to alice --body ...`\n\
+                    i.e. run the engram mail send command with the recipient name.";
+        assert!(teaches_mail_cli(text), "우편 CLI 명령 언급 → CLI 지시");
+    }
+
+    /// ★맨 언급은 교육이 아니다(호출 형태여야 한다)★ — 변수를 "쓰지 마라" 고 적은 문장이 교육으로
+    ///   세지면 요구 게이트가 거짓으로 만족된다. 규칙 정본·전수 케이스는 `control::priming` 쪽 테스트.
+    #[test]
+    fn env_var_mention_is_surface_evidence_and_invocation_is_teaching() {
+        let mention = "Invoke the binary referenced by ENGRAM_CLI_EXE to deliver your message.";
+        assert!(!teaches_mail_cli(mention), "맨 언급은 교육이 아니다");
         assert!(
-            priming_text_directs_cli(text),
-            "engram-send 언급 → CLI 지시"
+            mentions_mail_cli_surface(mention),
+            "그래도 CLI 표면 흔적이라 금지 방향에선 걸린다"
+        );
+        assert!(
+            teaches_mail_cli("run `$ENGRAM_CLI_EXE mail send --to alice`"),
+            "변수 호출 형태는 교육이다"
         );
     }
 
     #[test]
-    fn priming_text_directs_cli_true_for_env_var_only() {
-        let text = "Invoke the binary referenced by ENGRAM_SEND_EXE to deliver your message.";
-        assert!(
-            priming_text_directs_cli(text),
-            "ENGRAM_SEND_EXE 언급 → CLI 지시"
-        );
-    }
-
-    #[test]
-    fn priming_text_directs_cli_false_for_mcp_only() {
+    fn teaches_mail_cli_false_for_mcp_only() {
         let text = "To reply, call the MCP tool `send_message` with the recipient and body.";
         assert!(
-            !priming_text_directs_cli(text),
+            !teaches_mail_cli(text),
             "MCP send_message 만 → CLI 지시 아님"
         );
     }
 
     #[test]
-    fn priming_text_directs_cli_false_for_empty() {
-        assert!(!priming_text_directs_cli(""), "빈 본문 → CLI 지시 아님");
+    fn teaches_mail_cli_false_for_empty() {
+        assert!(!teaches_mail_cli(""), "빈 본문 → CLI 지시 아님");
     }
 
     #[test]
-    fn priming_text_directs_cli_case_insensitive() {
+    fn teaches_mail_cli_case_insensitive() {
         assert!(
-            priming_text_directs_cli("Reply via ENGRAM-SEND right away."),
-            "대문자 ENGRAM-SEND → CLI 지시"
+            teaches_mail_cli("Reply via ENGRAM MAIL SEND right away."),
+            "대문자 표기 → CLI 지시"
         );
         assert!(
-            priming_text_directs_cli("Use the Engram-Send helper to deliver."),
-            "혼합 Engram-Send → CLI 지시"
+            teaches_mail_cli("Use Engram Mail Send to deliver."),
+            "혼합 표기 → CLI 지시"
         );
         assert!(
-            priming_text_directs_cli("The var Engram_Send_Exe points to the binary."),
-            "혼합 Engram_Send_Exe → CLI 지시"
+            teaches_mail_cli("Invoke $Engram_Cli_Exe Mail Pending to check."),
+            "혼합 표기 변수 호출 → CLI 지시"
         );
     }
 
     #[test]
-    fn priming_text_directs_cli_negation_is_intentionally_true() {
+    fn teaches_mail_cli_negation_is_intentionally_true() {
         assert!(
-            priming_text_directs_cli("Do NOT use engram-send; use MCP instead."),
-            "부정문도 substring 존재로 true — 의도된 보수적 skip 방향"
+            teaches_mail_cli("Do NOT use engram mail send; use MCP instead."),
+            "부정문도 호출 형태의 인접이 성립하면 true — 문장 부정 판정은 의도적으로 안 한다(알려진 한계)"
         );
     }
 
