@@ -33,7 +33,7 @@
 5. **에이전트끼리도 말을 건넨다** — 에이전트(그 안의 LLM)가 데몬을 통해 다른 에이전트에게 메시지를 보낸다. S17이 입구(**제어 채널**)를 뚫었고, S18이 그 뒤에 **브로커**(보관함·회신 장부·그룹)를 붙여 상대가 바쁘거나 없어도 배달이 이어진다. 이것도 데몬이 소유한다 — 단 **데몬이 사는 동안만**(영속화 없음).
 6. **"왜"의 출처는 여기가 아니다** — 근거·거부한 대안은 코드의 `// ADR-` 앵커와 `decisions/` ADR에 있다. 이 문서는 지도지 진실의 출처가 아니다.
 
-## 큰 그림 — 3 프로세스 + 실행파일 3개(앱·데몬·engram-send)
+## 큰 그림 — 3 프로세스 + 실행파일 3개(앱·데몬·engram CLI)
 
 ```mermaid
 flowchart TD
@@ -152,7 +152,7 @@ flowchart TD
 
 ### crate 계층 (의존 아래→위)
 
-**실행 산출 = `daemon.exe` + `engram-send`(제어 채널 CLI 입구 bin — 발송·조회·그룹 서브커맨드)** — 나머지는 그것들이 쓰는 라이브러리다. (앱 exe는 src-tauri crate 산출 — 그래서 우리 실행파일은 앱·데몬·engram-send 3개.)
+**실행 산출 = `daemon.exe` + `engram`(제어 평면 CLI bin — 현재는 `mail` 계열의 발송·조회)** — 나머지는 그것들이 쓰는 라이브러리다. (앱 exe는 src-tauri crate 산출 — 그래서 우리 실행파일은 앱·데몬·engram 3개.)
 
 ```mermaid
 flowchart BT
@@ -161,7 +161,7 @@ flowchart BT
   discovery["discovery [lib]<br/>데몬 찾기/띄우기 + default_data_dir 단일결정"]
   messaging["messaging [lib]<br/>메시징 커널(보관함·장부·그룹·봉투·발송·busy 게이트)<br/>워크스페이스 crate 무의존 — 접합은 포트 trait 뿐(ADR-0110)"]
   net["net [lib]<br/>네트워크 행(WS 서버·Origin·토큰 핸드셰이크·연결 수명·단일 writer·keepalive<br/>팬아웃 레지스트리 · 프레임 포트 계약 · 단일인스턴스 · 포트파일)<br/>경계·격리 게이트의 정본 = 그 crate lib.rs 헤더(ADR-0129)"]
-  daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host)<br/>· bin: daemon / engram-send"]
+  daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host)<br/>· bin: daemon / engram"]
 
   net -->|"의존"| protocol
   net -->|"의존"| core
@@ -174,7 +174,7 @@ flowchart BT
   daemon -->|"의존"| messaging
 ```
 
-- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram-send` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
+- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정).
 - **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(core 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
 - **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 범위와 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3의 이동 대상이었으나 **ADR-0130 으로 보류** — 옮기지 않는다). 격리 게이트와 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다.
 - **daemon(2026-08-05 · ADR-0130)** 은 응용 층(연결 코어 · 연결 어댑터 · 상태 팬아웃 · 메시징 호스트 · 제어 평면)과 조립을 **한 crate 로 유지**한다. ADR-0129 는 이 crate 를 다시 "에이전트 시스템 lib + 얇은 조립 바이너리" 로 가르려 했으나 **그 결정 2·3 은 보류됐다** — 재사용 목적은 net 분리로 달성·측정됐고(측정치와 재확인 명령 = ADR-0130 §근거 ①), 나머지 두 덩어리엔 따로 쓸 소비자가 없으며, 벽 없이도 production 의존 그래프가 이미 단방향이다. **재개 조건은 ADR-0130 §영향**(그 조건이 관측되기 전까지 이 crate 를 더 쪼개지 않는다). 한편 **데몬 살림의 *구현*은 이 crate 에 없다** — 단일 인스턴스 가드와 portfile 은 net 이 소유하고, 여기 남은 것은 그것들을 부르는 순서다(`run()`).
@@ -298,7 +298,7 @@ flowchart TD
 flowchart TD
   A["에이전트 A (child claude)"]
   MCP["입구① MCP send_message 툴<br/>웜 연결 · Bearer 토큰 (mcp-config에 박힘)"]
-  CLI["입구② engram-send CLI<br/>별도 exe · 콜마다 HTTP POST · ENGRAM_TOKEN"]
+  CLI["입구② engram mail CLI<br/>별도 exe · 콜마다 HTTP POST · ENGRAM_TOKEN"]
   CI["[데몬] 라우트 핸들러 — 신원(from) 확정 + ControlCommand 조립<br/>from = 토큰에서 파생 (페이로드 아님 → 사칭 차단)"]
   VAL["ControlIngress.handle_send() — 공통 핸들러<br/>의미 검증·정규화 단일점 (ADR-0109)"]
   DELIV["MessagingService — 배달 3분기<br/>즉시 주입 / 파킹(pending) / 반려 (다음 절)"]
@@ -312,7 +312,7 @@ flowchart TD
   DELIV -.->|"세 분기 공통 — 결과를 동기 반환"| ACK
 ```
 
-- **입구는 원문을 나르고, 계약은 데몬이 만든다.** MCP 툴과 CLI(`engram-send` — 별도 exe라 HTTP로 붙는다)는 요청을 **그대로** 넘기고, `ControlCommand` 조립과 **의미 검증·정규화**(수신자 · 회신 계약 인자 · 멤버명 분해·트림)는 데몬 공유 핸들러 한 곳에서만 한다. 그래서 두 입구의 응답 JSON이 바이트 동일하고, 그 아래는 어느 입구로 들어왔는지 모른다(entrance-agnostic — ADR-0109). 입구별 인자 표면은 `crates/engram-dashboard-daemon/src/bin/engram-send.rs`.
+- **입구는 원문을 나르고, 계약은 데몬이 만든다.** MCP 툴과 CLI(`engram mail` — 별도 exe라 HTTP로 붙는다)는 요청을 **그대로** 넘기고, `ControlCommand` 조립과 **의미 검증·정규화**(수신자 · 회신 계약 인자 · 멤버명 분해·트림)는 데몬 공유 핸들러 한 곳에서만 한다. 그래서 두 입구의 응답 JSON이 바이트 동일하고, 그 아래는 어느 입구로 들어왔는지 모른다(entrance-agnostic — ADR-0109). 입구별 인자 표면은 `crates/engram-dashboard-daemon/src/bin/engram.rs`.
 - **노출 표면 = 메시징 3툴(`send_message` 발송 · `messages` 상태·미결 조회 · `group` 그룹 명단) + 진단 `engram_ping`.** 이름이 닮은 Claude Code 내장 `SendMessage` 툴은 메시징 스폰에서 deny로 막는다(오발 방지 — ADR-0106).
 - **스폰 때 입구를 깔아 준다:** 에이전트별 `mcp-config`와 `--settings` 조각(전역 차단 설정을 세션 한정으로 우회 — 인라인 JSON이 아니라 **파일 경로**)을 만들어 주고, **프라이밍**이 "너는 팀의 한 명이고 이 툴로 동료에게 말을 건다"를 시스템 프롬프트에 얹는다(ADR-0092/0099/0109).
 
@@ -619,7 +619,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   M1["[스폰 시] 데몬이 A에게 (AgentId,epoch)별 토큰 발급 + mcp-config·settings 조각 생성 + 프라이밍"]
-  M2["A(LLM)가 send_message(to:'B', body) 호출<br/>· 입구① MCP 툴(웜 연결) 또는 · 입구② engram-send CLI — 둘 다 원문 전달"]
+  M2["A(LLM)가 send_message(to:'B', body) 호출<br/>· 입구① MCP 툴(웜 연결) 또는 · 입구② engram mail send CLI — 둘 다 원문 전달"]
   M3["[데몬] 인증 미들웨어: Bearer 토큰 → registry.validate → 신원(from) 확정 (페이로드 from 무시)"]
   M4["ControlIngress.handle_send: 의미 검증·정규화(단일점) → MessagingService"]
   M5["배달 3분기 = 즉시 주입 / 파킹 / 반려<br/>(그룹이면 멤버별로 주입·파킹·skipped — 상세는 §에이전트 간 메시징)"]
@@ -711,7 +711,7 @@ flowchart TD
 
 **제어 채널(S17) · 메시징(S18):**
 - **제어 채널(control channel)** = 에이전트↔에이전트 메시지의 **입구**(에이전트→데몬 MCP/HTTP). 기존 출력/입력 경로와 별개의 인바운드.
-- **send_message** = 발송 명령(조회는 `messages`, 그룹 관리는 `group`). 입구 = MCP 툴 또는 `engram-send` CLI.
+- **send_message** = 발송 명령(조회는 `messages`, 그룹 관리는 `group`). 입구 = MCP 툴 또는 `engram mail send` CLI.
 - **토큰((AgentId,epoch))** = 발신자 신원의 단일 출처. 페이로드 from은 무시(사칭 차단).
 - **보관함(Mailbox)** = 지금 못 넣는 메시지를 데몬이 들고 있는 수신자별 FIFO 큐(인메모리).
 - **파킹(parking)** = 그 큐에 넣어 두는 것(상태 = `pending`).

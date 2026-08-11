@@ -30,11 +30,13 @@ test-harness = [
 name = "engram-dashboard-daemon"
 path = "src/main.rs"
 
-# ADR-0086 스텝 2: CLI 입구. 스폰된 claude 가 Bash 로 부르는 최소 클라이언트 — env(ENGRAM_TOKEN/
-# ENGRAM_CONTROL_URL)를 읽어 데몬 /control/send 로 POST 한다. 의존성 최소화(std TcpStream 손조립 HTTP).
+# ADR-0086 스텝 2 · ADR-0132: 제어 평면 CLI. 스폰된 에이전트가 셸로 부르는 최소 클라이언트 —
+# env(ENGRAM_TOKEN/ENGRAM_CONTROL_URL)를 읽어 데몬 제어 라우트로 POST 한다. 의존성 최소화(std TcpStream
+# 손조립 HTTP). ★bin 이름 = core 의 `CLI_EXE_NAME`★ — grant·프라이밍·PATH 해석이 이 이름에 정렬된다
+# (ADR-0094). 여기서 이름을 바꾸면 그 상수도 함께 바꿔야 하고, 어긋나면 우편이 조용히 멈춘다.
 [[bin]]
-name = "engram-send"
-path = "src/bin/engram-send.rs"
+name = "engram"
+path = "src/bin/engram.rs"
 
 # ★ADR-0090 Stage 2 파일럿 실험 드라이버★: 실 claude 를 스폰해 컨텍스트 포화·주입·프로브를 실측하고
 #   JSONL 로 영속하는 실험 전용 bin. required-features 로 **운영/릴리즈 빌드가 절대 컴파일하지 않게**
@@ -55,7 +57,7 @@ path = "src/bin/priming_smoke.rs"
 required-features = ["test-harness"]
 
 # ★ADR-0092/0099 A→B→A 왕복(reply round-trip) 실측 드라이버★: 실 primed claude 2개(A·B)를 스폰해 B 가 발신
-#   절반(MCP send_message OR engram-send CLI)을 스스로 호출하고 A 가 답신을 수용하는지 실측한다. 프라이밍은
+#   절반(MCP send_message OR `engram mail send` CLI)을 스스로 호출하고 A 가 답신을 수용하는지 실측한다. 프라이밍은
 #   `--priming <경로>`(예: prompts/agent-priming-cli.md)로, CLI-only false-path 는 `--cli-only`(provision
 #   강제 비-MCP)로 파라미터화한다(옛 C1~C3 실험 별칭은 ADR-0099 로 제거). required-features 로 릴리즈 빌드가
 #   컴파일하지 않게 막는다(실험/검증 전용, priming-smoke·saturation-pilot 과 동일 계열).

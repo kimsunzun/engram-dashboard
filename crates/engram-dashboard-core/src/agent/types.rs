@@ -154,6 +154,104 @@ pub struct CommandSpec {
 //   StatusSink 와 **동일한 idiom(ADR-0003)** 으로, core 는 순수 trait(`ControlChannel`) + 추상
 //   descriptor(`ControlEndpoint`)만 알고 실제 구현은 데몬(`DaemonControlChannel`)이 준다.
 
+/// 스폰 에이전트가 셸에서 **실제로 치는 bare 실행파일 이름**(경로·확장자 없음). 배포되는 실행파일의
+/// stem, `ToolGrant::Cli` 의 exe, backend 가 PATH 에 붙여 해석시키는 이름, 프라이밍이 가르치는 명령 —
+/// 넷이 **글자 그대로 같아야** 한다(ADR-0094 정렬 불변식).
+///
+/// ★어디서도 다시 타이핑하지 말 것★: 이름이 한 자리라도 갈라지면 에이전트는 PATH 에 없거나 grant 에
+///   안 걸린 명령을 부르고, 우편은 에러 없이 **조용히 멈춘다**(ADR-0099 실측: 7건 중 6건 미발신).
+/// ★지금 CI 가 잡는 것 / 못 잡는 것★: grant 문자열·PATH 해석 이름은 이 상수에서 파생돼 따로 어긋날 수
+///   없고, **배송 파일명 ↔ 상수**(daemon `tests/engram_cli.rs`)와 **프라이밍 ↔ 상수**(daemon
+///   `control/priming.rs` pin)는 claude 없이 도는 테스트라 CI 가 본다. CI 밖에 남는 축은 **에이전트가 실제로
+///   그 이름을 해석해 실행하는지**다 — 실 claude 스폰 테스트가 러너에 claude 가 없어 제외되기 때문이고,
+///   그건 로컬 실측으로만 확인된다.
+// ADR-0094
+pub const CLI_EXE_NAME: &str = "engram";
+
+/// CLI 우편 계열 이름 — `engram mail <동사>` 의 가운데 토큰(ADR-0132 그룹 구조).
+///
+/// ★왜 core 가 이걸 아는가★: 우편 채널의 **교육↔배선 등호**(ADR-0128/0099)를 지키는 판정자들이 프라이밍
+///   **본문에서 우편 CLI 교육을 찾아내야** 하는데, 그 판정 토큰이 CLI 가 실제로 받는 표기와 갈리면 판정이
+///   조용히 뒤집힌다. 그래서 CLI 의 디스패치와 그 판정자들이 같은 값을 본다.
+/// ★bare 실행파일 이름만으로는 그 판정을 할 수 없다★: MCP 프라이밍이 같은 단어를 MCP **서버 이름**으로
+///   정당하게 쓴다(`on the engram server`) — 그래서 판정은 `CLI_EXE_NAME` + 이 토큰의 **인접**으로 한다.
+// ADR-0132
+pub const CLI_GROUP_MAIL: &str = "mail";
+
+/// CLI 실행파일의 **절대경로**를 스폰 env 로 실어 보낼 때 쓰는 변수 이름.
+///
+/// backend 가 이 이름으로 값을 넣고(claude), 프라이밍 판정자들은 본문에서 이 이름을 찾아 "CLI 표면이
+/// 적혀 있는가" 를 본다 — 두 자리가 같은 값을 봐야 판정이 실제 배선과 어긋나지 않는다.
+/// ★이름만 등장하는 것은 교육이 아니다★: 발신 교육으로 세는 것은 **호출 형태**(이 변수 뒤에 계열 토큰이
+///   붙는 형태)뿐이다. 판정 규칙의 정본은 daemon `control/priming.rs`.
+// ADR-0132
+pub const CLI_EXE_ENV: &str = "ENGRAM_CLI_EXE";
+
+/// 우편 계열의 동사 전량 — `engram mail <동사>`.
+///
+/// 세 소비자가 같은 값을 봐야 한다: CLI 파서(무엇을 받나) · 프라이밍 판정자(본문이 **실행 가능한** 호출을
+/// 가르쳤나) · 사용자 안내 문구. 판정자가 계열 토큰까지만 보면 `engram mail` 처럼 **동사 없는 조각**도
+/// 교육으로 세는데, 그건 실행되지 않는 명령이라 "가르쳤다" 가 거짓이 된다.
+// ADR-0132
+pub const CLI_MAIL_VERBS: [&str; 3] = ["send", "status", "pending"];
+
+/// 우편 CLI 전용 플래그 표기(kebab) 전량.
+///
+/// 파서가 인식하는 집합이자, 프라이밍 판정자가 "CLI 표면이 적혀 있나" 를 보는 어휘다. MCP 입구는 같은
+/// 개념을 snake_case JSON 필드(`reply_to`)로 받으므로 **표기 축이 두 입구를 가른다**.
+/// ★파서의 match arm 과 이 목록이 갈리면★ 값 자리 방어(플래그를 값으로 삼키는 사고)와 프라이밍 판정이
+///   새 플래그를 못 본다 — daemon `bin/engram.rs` 의 드리프트 테스트가 그 어긋남을 잡는다.
+// ADR-0132
+pub const CLI_MAIL_FLAGS: [&str; 6] = [
+    "--to",
+    "--body",
+    "--body-stdin",
+    "--request",
+    "--reply-by",
+    "--reply-to",
+];
+
+/// CLI 제어 계열 이름 — `engram agent <동사>` 의 가운데 토큰.
+///
+/// ★우편 계열(`CLI_GROUP_MAIL`)과 달리 프라이밍 판정에 쓰이지 않는다★: 우편은 "가르친 채널 = 깐 배선"
+///   등호(ADR-0128)를 판정자가 지켜야 해서 core 가 그 토큰을 알아야 했지만, 제어는 그런 등호가 없다
+///   (ADR-0132 결정 5 — 권한은 전원 개방). 여기 있는 이유는 **CLI 파서·help·드리프트 테스트가 한 문자열을
+///   보게** 하는 것뿐이다.
+// ADR-0132
+pub const CLI_GROUP_AGENT: &str = "agent";
+
+/// 제어 계열의 동사 전량 — `engram agent <동사>`.
+///
+/// ★`kill`·`rm` 이 없는 것은 미구현이 아니라 **보류된 결정**이다★: 트리에서 지우는 것이 에이전트의 생을
+///   끝내는가(ADR-0122)가 아직 코드와 어긋나 있어(현 `delete_agent` 는 프로필만 지우고 프로세스를 남긴다)
+///   그 둘을 여기 얹으면 새 입구로 그 불일치가 노출된다. 그 결정이 서기 전에는 이 목록에 넣지 말 것.
+// ADR-0132
+// ADR-0122
+pub const CLI_AGENT_VERBS: [&str; 5] = ["list", "spawn", "new", "rename", "move"];
+
+/// 제어 계열 전용 플래그 표기(kebab) 전량 — 파서가 인식하는 집합이자 값 자리 방어의 어휘다
+/// (`CLI_MAIL_FLAGS` 와 같은 규율, 계열별로 따로 둔다 — 한 계열의 플래그가 다른 계열 값 자리를 가로채면
+/// 안 되기 때문이다).
+// ADR-0132
+pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
+
+/// 제어 응답이 싣는 **에이전트 상태 축**(살아 있음·잠듦·없음)의 wire 표기.
+///
+/// ★왜 core 에 있나★: 이 문자열의 생산자(데몬 `control/agent.rs`)와 소비자(CLI 의 응답 판정기)가 **다른
+///   crate** 라, 각자 리터럴을 적으면 한쪽만 바뀌어도 아무도 못 본다 — 증상은 정상 응답이 "읽을 수 없는
+///   shape"(exit 2)로 튀는 거짓 경보다. 한 값을 양쪽이 본다.
+/// ★"없음" 에 해당하는 값이 없는 것은 의도다★ — 부재는 상태값이 아니라 반려 코드(`AGENT_NOT_FOUND`)로
+///   표현된다. 메시지 결말 어휘(`delivered`/`pending`/`failed`)와 섞지 않는다(ADR-0116).
+// ADR-0132
+pub const AGENT_STATE_LIVE: &str = "live";
+pub const AGENT_STATE_SLEEPING: &str = "sleeping";
+
+/// 개명 응답의 `outcome` 어휘 — 위와 같은 이유로 core 가 소유한다. 실패 두 갈래(부재·이름 공간 소진)는
+/// 반려 코드로 나가므로 여기 없다.
+// ADR-0132
+pub const RENAME_OUTCOME_RENAMED: &str = "renamed";
+pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
+
 /// ADR-0094: 스폰 에이전트에 **사전 승인**할 툴 1개의 추상 명세(backend-agnostic). 데몬 컨트롤 채널이
 /// 자기 입구 정의 옆에서 채우고, backend 가 자기 프로그램 문법으로 번역한다(claude = `--allowedTools`).
 ///
@@ -191,14 +289,17 @@ pub struct ControlEndpoint {
     ///   물리 존재), 비-MCP 백엔드(codex/gemini stub)면 `None` — mcp-config 를 **아예 쓰지 않는다**(MCP
     ///   입구 물리 삭제). backend 는 `Some` 일 때만 `--mcp-config` 를 주입한다(빈 경로 방어 코드 불필요 —
     ///   타입이 강제).
+    /// ★ADR-0132 를 근거로 이 갈림을 먼저 지우지 말 것★: 그 결정은 격리 수단을 데몬 거절로 옮기지만
+    ///   **결정 3(데몬이 자격증명으로 우편을 거절)이 아직 구현 전**이라, 지금 이 신호가 사라지면 우편
+    ///   격리가 0 이 된다. 실물 갈림은 `backend/claude.rs` 의 `config_path` match 다.
     /// ★ADR-0128: 이 Option 이 우편 발신 채널 갈림의 **단일 신호**★ — `Some`=MCP 배선만, `None`=CLI 배선만
     ///   (backend 가 이 축으로 CLI 크레덴셜·PATH 주입을 가른다). 데몬이 MCP-capable 일 때만 config 를 쓰고
     ///   그 write 실패 시 provision 을 Err 로 끊으므로 반쪽 MCP endpoint 는 존재하지 않는다 — 그 fail-closed
     ///   가 이 신호의 등호를 지탱한다(깨지면 MCP 스폰에 CLI 배선이 새어 ADR-0128 위반).
     pub config_path: Option<std::path::PathBuf>,
-    /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram-send` CLI 바이너리 절대경로(있으면).
+    /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram` CLI 바이너리 절대경로(있으면).
     /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
-    /// 그 env(claude=`ENGRAM_SEND_EXE`)와 PATH 프리펜드를 주입하지 않는다.
+    /// 그 env(claude=`ENGRAM_CLI_EXE`)와 PATH 프리펜드를 주입하지 않는다.
     /// ★소비 조건 = CLI 전용 스폰(`config_path=None`)뿐(ADR-0128)★: 두 갈래가 공유하는 필드라 MCP 가능
     /// endpoint 에도 값이 실리지만 그 갈래는 이 값을 **쓰지 않는다** — 쓰면 채널이 둘로 늘어 결정 위반이다.
     /// 형제 exe 탐색 지식은 데몬 소유(lib.rs).
@@ -211,7 +312,7 @@ pub struct ControlEndpoint {
     /// 않는다.
     pub priming_file: Option<std::path::PathBuf>,
     /// 사전 승인할 툴 목록(ADR-0094 — 계약은 `ToolGrant`). 데몬 컨트롤 채널이 발신 입구(MCP
-    /// `send_message` / `engram-send` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
+    /// `send_message` / `engram` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
     /// (권한 플래그 없음 = 기존 게이트 유지).
     pub grants: Vec<ToolGrant>,
     /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
@@ -255,8 +356,8 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///   물리적으로 **깐** 채널 집합 — ADR-0128 이 ADR-0126 결정 4 의 포함관계를 등호로 되돌렸다. 안 깐
     ///   채널을 가르치면 발신 freeze 가 재발하고, 깔고도 안 가르치면 통제 없는 우회 표면이 남는다).
     ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
-    ///   결정 1) + `[Mcp]` grant, `engram-send` 배선 없음.
-    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant + `engram-send` 배선(env·PATH).
+    ///   결정 1) + `[Mcp]` grant, `engram` CLI 배선 없음.
+    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant + `engram` CLI 배선(env·PATH).
     // ADR-0126
     // ADR-0128
     fn provision(
@@ -453,6 +554,15 @@ pub enum PtyError {
     /// transport가 해당 동작을 지원하지 않음(ApiTransport 껍데기 등). 동사별 미지원 신호.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// ★명부 총량 상한에 걸려 **새 에이전트 등록을 거부**했다(폭주 백스톱 — `AgentManager::MAX_ROSTER_SIZE`)★.
+    ///
+    /// ★전용 변형인 이유★: 호출부가 이걸 이름 공간 소진(`Unsupported`)과 구분해야 한다 — 사용자가 할 일이
+    ///   정반대다(이름을 바꿔 다시 시도 vs 에이전트를 지워 자리를 비우기). 문자열 매칭으로 가르는 것은
+    ///   문구가 바뀌는 순간 조용히 깨진다.
+    /// ★기존 에이전트에는 걸리지 않는다★: 상한은 **신규 등록**만 본다. 이미 상한을 넘은 명부의 복원·재spawn
+    ///   (같은 id 의 화신 교체)은 그대로 통과한다 — 백스톱이 기존 팀을 인질로 잡으면 복구가 불가능해진다.
+    #[error("roster is full: {current} agents (ceiling {limit}) — refusing to register another")]
+    RosterFull { current: usize, limit: usize },
 }
 
 /// 구독 replay 분기 결과(코어 중립 — 데몬이 protocol::SubscribeAction 으로 매핑).

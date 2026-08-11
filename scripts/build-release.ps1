@@ -5,7 +5,14 @@
 #   릴리즈는 인스톨러/사이드카가 아니라 "한 폴더에 필요한 것만" 형태로 배포한다. 세 exe 와 prompts/ 가
 #   **반드시 같은 디렉토리(release/)에 동거**해야 런타임이 서로를 찾는다:
 #     - 실행되는 앱(engram-dashboard.exe)은 형제 engram-dashboard-daemon.exe 를 spawn 한다.
-#     - 데몬은 형제 engram-send.exe 를 locate_send_exe(current_exe().parent())로 찾는다(ADR-0086 F1).
+#     - 데몬은 형제 engram.exe(제어 평면 CLI)를 locate_send_exe(current_exe().parent())로 찾는다(ADR-0086 F1).
+#       ★그 파일명의 정본은 core 의 CLI_EXE_NAME★ — 아래 manifest 는 그 값을 손으로 복사한 것이다.
+#       어긋남은 보통 요란하게 깨진다: [[bin]] 개명이면 아래 빌드 단계의 --bin 인자가 실패하고, 상수만
+#       어긋나면 CI 의 배송-파일명 가드 테스트(daemon tests/engram_cli.rs)가 빨개진다.
+#       ★단 하나 조용한 구멍이 있다 — cargo 산출 디렉토리의 stale 파일★: 이 스크립트는 target/release 를
+#       청소하지 않으므로, 옛 이름의 exe 가 남아 있는 상태에서 아래 manifest 만 그 옛 이름으로 고치면
+#       존재 검사도 tripwire 도 통과하고 **그 stale 바이너리가 그대로 패키징된다**(빌드가 그 파일을
+#       갱신하지 않았는데도). manifest 를 고칠 땐 산출 디렉토리를 함께 확인할 것.
 #     - 데몬은 프라이밍 prompts/agent-priming[-cli].md 를 find_install_root(=릴리즈에선 exe 폴더) 기준
 #       상대해석한다(ADR-0092). 릴리즈 폴더엔 .git·[workspace] 마커가 없으므로 install_root = exe 디렉토리.
 #   따라서 manifest(이 스크립트의 EXPECTED_*)가 곧 "무엇을 배송하는가"의 단일 출처다. manifest 를 바꾸면
@@ -35,7 +42,7 @@ $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
 # $TargetRel(cargo 산출 release 디렉토리)은 하드코딩하지 않는다 — 아래에서 cargo metadata 로 실측 확정(FIX-2).
 
 # ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서. ──
-$ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram-send.exe')
+$ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
 $ExpectedPrompts = @('agent-priming.md', 'agent-priming-cli.md')
 
 function Fail([string]$msg) {
@@ -113,15 +120,15 @@ if (-not (Test-Path (Join-Path $ProjectRoot 'dist\index.html'))) {
     Fail 'dist/index.html 부재 — tauri build 의 beforeBuildCommand(프론트 빌드)가 산출물을 안 만들었다(embed 실패 위험)'
 }
 
-# ── (a) 릴리즈 바이너리: 데몬 + send ─────────────────────────────────────────────────────────
-#   데몬+send 는 UI 앱과 **별개 crate 의 두 [[bin]]** — tauri build 는 이들을 빌드하지 않으므로 별도 컴파일한다.
+# ── (a) 릴리즈 바이너리: 데몬 + CLI ─────────────────────────────────────────────────────────
+#   데몬+CLI 는 UI 앱과 **별개 crate 의 두 [[bin]]** — tauri build 는 이들을 빌드하지 않으므로 별도 컴파일한다.
 #   **명시 --bin** 으로만 빌드(측정 전용 bin(saturation-pilot/priming-smoke/roundtrip-smoke)은
 #    required-features=test-harness 로 이미 릴리즈 그래프에서 제외되지만, 명시 --bin 으로 유입 가능성 봉쇄).
 #   ★--all-targets 금지★: daemon crate 의 self-dev-dependency(test-harness) 유니피케이션으로 yield-seam hook
 #    이 운영 바이너리에 박힐 수 있다(Cargo.toml 경고). 아래 명령은 --all-targets 를 쓰지 않는다.
-Invoke-Step 'cargo build daemon + send (engram-dashboard-daemon)' {
+Invoke-Step 'cargo build daemon + cli (engram-dashboard-daemon)' {
     & cargo build --release --manifest-path (Join-Path $ProjectRoot 'Cargo.toml') `
-        -p engram-dashboard-daemon --bin engram-dashboard-daemon --bin engram-send
+        -p engram-dashboard-daemon --bin engram-dashboard-daemon --bin engram
 }
 
 # ── 산출 exe 위치 확정(가정 금지 — 실제 파일 존재 확인) ───────────────────────────────────

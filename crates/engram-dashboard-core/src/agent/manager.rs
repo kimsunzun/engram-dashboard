@@ -97,6 +97,11 @@ pub struct RosterEntry {
     pub canonical_name: String,
     /// `Some` = 살아 있음(Running|Exiting 세션 부착) · `None` = 잠듦(프로필만 있음).
     pub live: Option<AgentInfo>,
+    /// 작업 폴더. 산 항목은 세션 cwd(spawn 시 canonicalize), 잠든 항목은 저장된 raw cwd — **이름 파생이
+    /// 보는 재료와 같은 것**이다(`roster()` 의 "산/잠듦 출처가 다르다" 규율). 세션도 프로필도 없으면 빈 문자열.
+    pub cwd: String,
+    /// 트리 부모. 저장 계층이 유일한 출처이므로 산 항목도 프로필에서 읽는다 — `None` = 최상위.
+    pub parent: Option<AgentId>,
 }
 
 /// **지금 실제로 override 를 싣는 경로는 개명 하나뿐**이다 — 표시명 override 를 나르는 wire 명령은
@@ -107,7 +112,7 @@ pub struct RosterEntry {
 ///   문자열 비교라 `bob` 과 `" bob "` 은 서로 다른 이름으로 **둘 다** 통과하는데 트리에는 똑같이 그려진다 —
 ///   사용자는 편지가 둘 중 누구에게 가는지 구분할 수 없다. 게다가 메시징 입구가 수신자 토큰을 trim 해서
 ///   맞추므로 `" bob "` 으로 저장된 에이전트는 보이면서도 이름으로 주소 지정이 안 된다.
-/// ★그 입구 trim(`messaging` service 수신자 대조)은 지우지 말 것★: **CLI 입구**(`engram-send --to a,b`)가
+/// ★그 입구 trim(`messaging` service 수신자 대조)은 지우지 말 것★: **CLI 입구**(`engram mail send --to a,b`)가
 ///   셸 제약 때문에 수신자 목록을 콤마로 쪼개는데 그때 공백을 떼지 않아(`"alice, bob"` → `["alice", " bob"]`)
 ///   두 번째 이후 수신자를 그 trim 이 구제한다. 저장을 정규화하면 그 trim 은 잘 저장된 이름에 대해
 ///   no-op 이 될 뿐이고, 콤마 목록 구제 역할은 그대로 남는다.
@@ -158,6 +163,40 @@ fn classify_name(base: &str, name: &str) -> Option<NameKind> {
         return None;
     }
     digits.parse::<u32>().ok().map(NameKind::Suffixed)
+}
+
+/// ★명부 총량 상한 = **폭주 백스톱**이지 제품 한도가 아니다★ (사용자 결정 2026-08-11).
+///
+/// 제어 평면은 모든 에이전트에게 열려 있고(ADR-0132 결정 5) 그 결정은 유지된다 — 그러나 무언가가
+/// "에이전트 만들기" 를 반복 호출하면 명부와 `agents.json` 이 **상한 없이** 자란다. 그 루프만 끊는다.
+///
+/// ★왜 코어인가(입구가 아니라)★: 상한을 입구에 두면 입구마다 사본이 생기고, 사본이 없는 입구는 그냥
+///   통과한다 — 실제로 제어 라우트에만 두었더니 데스크톱(WS `CreateProfile`)과 ad-hoc spawn 이 그대로
+///   빠져나갔다. 등록을 **커밋하는 자리**에 두면 입구 수와 무관하게 참이고, 이름 배정 게이트 안이라
+///   **원자적**이다(여러 요청이 각자 511 을 관측하고 다 같이 등록하는 창이 없다).
+/// ★왜 개수 검사인가(속도 제한이 아니라)★: 타이머·호출자별 상태·튜닝 노브가 하나도 없어야 이 방어가 스스로
+///   고장 나지 않는다. 세는 것은 명부 총량 하나뿐이다.
+/// ★왜 이 숫자인가 — **튜닝하지 말 것**★: 정당한 사용이 도달할 수 없는 자리에 있으면 그만이다. 실제 팀
+///   트리는 수십 단위다. **"자원이 먼저 바닥나니 상한은 형식" 이라는 논리는 쓰지 말 것** — 그 논리는
+///   프로세스를 띄우는 등록에만 통하고, 프로세스를 하나도 띄우지 않는 **잠든 에이전트 등록**엔 통하지
+///   않는다(그쪽은 아무것도 밀어내지 않으므로 물리적 제동이 아예 없다). 상한이 필요한 이유가 바로 그것이다.
+/// ★기존 명부는 인질이 아니다★: 상한은 **신규 등록**만 본다 — 이미 상한을 넘은 명부의 복원·재spawn 은
+///   그대로 돌아간다(`register_for_spawn` 의 기존-id 분기는 이 검사를 지나지 않는다).
+// ADR-0132
+pub const MAX_ROSTER_SIZE: usize = 512;
+
+/// 신규 등록 전 총량 검사 — **이름 배정 게이트를 보유한 상태에서만** 부른다(그래야 원자적이다).
+///
+/// ★삭제와는 원자적이지 않다(의도)★: 삭제는 이 게이트를 잡지 않지만 개수를 **줄이기만** 하므로, 최악이
+/// "방금 자리가 났는데 이번 호출은 거부" 이고 다음 호출이 통과한다. 백스톱에 필요한 방향의 안전이다.
+fn check_roster_capacity(roster: &[RosterEntry]) -> Result<(), PtyError> {
+    if roster.len() >= MAX_ROSTER_SIZE {
+        return Err(PtyError::RosterFull {
+            current: roster.len(),
+            limit: MAX_ROSTER_SIZE,
+        });
+    }
+    Ok(())
 }
 
 /// 접미사 공간 소진의 단일 에러 문구 — 유일성을 포기하고 중복 이름을 발급하는 대신 거부한다(이름 =
@@ -447,11 +486,36 @@ impl AgentManager {
     ///   TTL 24h 로 유계임을 수용했다. "이제 한 입구니 원자적으로" 는 0116 이 기각한 방향이다.
     // ADR-0119
     pub fn roster(&self) -> Vec<RosterEntry> {
-        let snapshot = self.list_agents();
-        let mut live_ids: HashSet<AgentId> = HashSet::with_capacity(snapshot.len());
-        let mut entries: Vec<RosterEntry> = Vec::with_capacity(snapshot.len());
-        for info in snapshot {
+        // ★프로필 스냅샷은 **한 장**이고, 산 항목의 이름·계층도 그 한 장에서 나온다(load-bearing)★.
+        //   예전엔 산 항목의 이름을 `list_agents()` 가 세션마다 따로 뜬 프로필에서 얻고 계층은 뒤이은
+        //   목록 조회에서 얻었다 — 그 사이에 개명 + 계층 이동이 커밋되면 **한 번도 존재한 적 없는 조합**
+        //   (옛 이름 + 새 부모)이 한 행에 실린다. 한 장에서 뽑으면 그 조합 자체가 만들어질 수 없다.
+        //   ★세션↔프로필 사이의 비원자성은 그대로 남고, 그건 이미 수용된 성질이다★(위 doc · ADR-0116).
+        //   여기서 닫은 것은 프로필↔프로필 불일치다.
+        // ★부수 효과 = 더 싸졌다★: 옛 경로는 세션 하나마다 `profiles.get`(= AgentProfile 통째 clone +
+        //   뮤텍스 획득)을 했다. 이제 목록 1회로 끝나므로 산 세션 수만큼의 프로필 clone 이 사라진다 —
+        //   이 조회는 우편 발송의 임계 경로에 있다(ADR-0119 · messaging_host `addressing_sources`).
+        let sessions: Vec<Arc<AgentSession>> = {
+            let guard = self.sessions.read().expect("sessions poisoned");
+            guard.values().cloned().collect()
+        };
+        let mut profiles: HashMap<AgentId, AgentProfile> = self
+            .profiles
+            .list()
+            .into_iter()
+            .map(|p| (p.id, p))
+            .collect();
+        let mut live_ids: HashSet<AgentId> = HashSet::with_capacity(sessions.len());
+        let mut entries: Vec<RosterEntry> = Vec::with_capacity(sessions.len() + profiles.len());
+        for session in &sessions {
+            let info = self.agent_info_with(
+                session,
+                profiles
+                    .get(&session.id)
+                    .and_then(|p| p.display_name.as_deref()),
+            );
             // 시체(terminal)는 reap 까지 맵에 남는다 — 존재가 아니라 상태로 가른다(ADR-0116 술어).
+            //   ★프로필은 맵에 남겨 둔다★: 시체의 프로필은 아래 루프에서 **잠듦** 항목으로 올라와야 한다.
             if !info.status.is_live() {
                 continue;
             }
@@ -459,16 +523,25 @@ impl AgentManager {
             entries.push(RosterEntry {
                 id: info.id,
                 canonical_name: info.name.clone(),
+                cwd: info.cwd.clone(),
+                parent: profiles.get(&info.id).and_then(|p| p.parent_id),
                 live: Some(info),
             });
         }
-        for p in self.profiles.list() {
+        for (_, p) in profiles.drain() {
             if live_ids.contains(&p.id) {
                 continue;
             }
             entries.push(RosterEntry {
                 id: p.id,
                 canonical_name: p.canonical_name_when_live(),
+                // 소유한 값이라 **옮긴다** — 유효 UTF-8 이면 버퍼 재사용이고, 아니면 그때만 lossy 사본.
+                cwd: p
+                    .cwd
+                    .into_os_string()
+                    .into_string()
+                    .unwrap_or_else(|os| os.to_string_lossy().to_string()),
+                parent: p.parent_id,
                 live: None,
             });
         }
@@ -506,8 +579,12 @@ impl AgentManager {
         // ★파생도 게이트 안에서★: 요청 이름을 정하는 읽기가 게이트 밖에 있으면 관측과 커밋 사이가 아니라
         //   **파생과 관측 사이**에 창이 생긴다(그 사이 남이 같은 이름을 커밋하면 둘 다 자유로 판정한다).
         let _gate = self.lock_name_allocation();
+        // 명부 한 장으로 상한과 이름을 **함께** 판정한다 — 두 번 뜨면 그 사이가 다시 창이 되고, 조회 비용도
+        //   두 배가 된다.
+        let roster = self.roster();
+        check_roster_capacity(&roster)?;
         let desired = profile.canonical_name_when_live();
-        match self.decide_name(profile.id, &desired, None) {
+        match self.decide_name_with_roster(&roster, profile.id, &desired, None) {
             NameDecision::Free => {}
             NameDecision::Suffixed(assigned) => profile.display_name = Some(assigned),
             NameDecision::Exhausted => return Err(name_space_exhausted(&desired)),
@@ -655,13 +732,11 @@ impl AgentManager {
     ///   4a) 남이 갖고 있고 `current` 가 `desired` 계열(`desired` 또는 `desired(n)`)이면 → `KeepCurrent`.
     ///       재요청이 번호를 태우거나 빈 낮은 번호로 끌어내리는 것을 막는다(이름 = 메일 주소, ADR-0116).
     ///   4b) 그 밖 → 계열의 빈 번호로 `Suffixed`.
+    ///
+    /// ★로스터 스냅샷을 **받는다**(스스로 뜨지 않는다)★: 호출자는 같은 게이트 구간에서 그 명부로 총량 상한도
+    ///   보고(개명은 자기 현재 이름도 거기서 읽는다) — 두 번 뜨면 판정마다 다른 세계를 보게 되고 조회 비용도
+    ///   배가 된다.
     // ADR-0120
-    fn decide_name(&self, self_id: AgentId, desired: &str, current: Option<&str>) -> NameDecision {
-        self.decide_name_with_roster(&self.roster(), self_id, desired, current)
-    }
-
-    /// `decide_name` 의 본체 — 이미 뜬 로스터 스냅샷 위에서 판정한다(개명은 자기 현재 이름을 그 **같은**
-    /// 스냅샷에서 읽어야 하므로 두 번 뜨지 않는다).
     fn decide_name_with_roster(
         &self,
         roster: &[RosterEntry],
@@ -725,8 +800,12 @@ impl AgentManager {
         let mut fresh = profile.clone();
         fresh.display_name = normalize_display_name(fresh.display_name.take());
         let _gate = self.lock_name_allocation();
+        // ★상한은 여기도 본다★: 이 분기가 **ad-hoc spawn 의 신규 등록 지점**이라, 여기를 비워 두면 명부가
+        //   `create_agent` 를 거치지 않고도 무한히 자란다(상한이 "총량" 이라는 말이 거짓이 된다).
+        let roster = self.roster();
+        check_roster_capacity(&roster)?;
         let desired = fresh.canonical_name_when_live();
-        match self.decide_name(fresh.id, &desired, None) {
+        match self.decide_name_with_roster(&roster, fresh.id, &desired, None) {
             NameDecision::Free => {}
             NameDecision::Suffixed(assigned) => fresh.display_name = Some(assigned),
             NameDecision::Exhausted => return Err(name_space_exhausted(&desired)),
@@ -1459,11 +1538,27 @@ impl AgentManager {
 
     /// sessions lock 을 보유하지 않은 상태에서만 호출한다.
     fn agent_info(&self, session: &Arc<AgentSession>) -> AgentInfo {
-        let name = self.resolve_canonical_name(session);
+        // get()은 profiles lock 을 잡아 clone 후 즉시 해제한다 — 이 함수는 sessions lock 미보유 상태에서만
+        //   불리므로 두 락을 동시에 잡지 않는다(§10 락 순서).
+        let display_name = self.profiles.get(session.id).and_then(|p| p.display_name);
+        self.agent_info_with(session, display_name.as_deref())
+    }
+
+    /// `agent_info` 의 **표시명 주입형** — 여러 세션분을 만들 때 프로필 스냅샷을 이미 손에 쥔 호출자
+    /// (`roster`)가 세션마다 프로필을 다시 뜨지 않게 한다. 이름 파생 규칙 자체는 여기 하나뿐이다
+    /// (`canonical_name_or_id_fallback` — 규칙을 복제하지 않는다는 `resolve_canonical_name` 의 규율 그대로).
+    fn agent_info_with(
+        &self,
+        session: &Arc<AgentSession>,
+        display_name: Option<&str>,
+    ) -> AgentInfo {
+        let cwd = session.cwd.to_string_lossy().to_string();
+        let name =
+            crate::agent::name::canonical_name_or_id_fallback(display_name, &cwd, session.id);
         AgentInfo {
             id: session.id,
             name,
-            cwd: session.cwd.to_string_lossy().to_string(),
+            cwd,
             status: session.status(),
             cols: session.cols.load(Ordering::Relaxed),
             rows: session.rows.load(Ordering::Relaxed),
@@ -1773,6 +1868,171 @@ mod tests {
         manager
             .create_agent(agent_profile(cwd, display_name))
             .expect("이 픽스처는 접미사 공간을 소진시키지 않는다")
+    }
+
+    /// ★산 항목의 이름과 계층은 **같은 프로필 스냅샷**에서 나온다★.
+    ///
+    /// 예전엔 이름이 `list_agents()` 안의 세션별 프로필 조회에서, 계층은 그 뒤의 목록 조회에서 왔다 — 그
+    /// 사이에 개명 + 계층 이동이 커밋되면 한 행에 **한 번도 존재한 적 없는 조합**(옛 이름 + 새 부모)이 실린다.
+    /// ★이 테스트가 증명하는 것과 못 하는 것★: 두 사실이 프로필 등록부에서 함께 읽힌다는 것은 여기서 본다.
+    /// 두 읽기 사이의 창이 **없다**는 것은 구조로 보장되며(조회 자체가 하나뿐이다) 결정적 재현 테스트는
+    /// 만들 수 없다 — 재현하려면 이제 존재하지 않는 두 읽기 사이에 seam 을 넣어야 한다.
+    #[test]
+    fn a_live_roster_row_reads_its_name_and_hierarchy_from_one_profile_snapshot() {
+        let manager = bare_manager();
+        let lead = create(&manager, "C:/lead", Some("lead"));
+        let helper = create(&manager, "C:/helper", Some("helper"));
+        put_live_session_at(&manager, helper.id, "C:/live/helper");
+
+        assert!(manager.reparent_agent(helper.id, Some(lead.id)), "전제");
+        assert!(
+            renamed_ok(manager.rename_agent(helper.id, Some("helper-renamed".into()))),
+            "전제"
+        );
+
+        let entry = manager
+            .roster()
+            .into_iter()
+            .find(|e| e.id == helper.id)
+            .expect("명부에 있어야");
+        assert_eq!(entry.canonical_name, "helper-renamed", "새 이름");
+        assert_eq!(
+            entry.parent,
+            Some(lead.id),
+            "새 부모 — 옛 이름과 짝지어지지 않는다"
+        );
+        let live = entry.live.as_ref().expect("살아 있어야");
+        assert_eq!(
+            live.name, entry.canonical_name,
+            "한 파생에서 나온 값이라 항목 안에서 갈릴 수 없다"
+        );
+        assert_eq!(
+            entry.cwd, "C:/live/helper",
+            "산 항목의 cwd 는 세션 cwd(ADR-0101)"
+        );
+    }
+
+    // ── 폭주 백스톱(명부 총량 상한) ──────────────────────────────────────────────────
+
+    /// 상한 테스트 전용 매니저 — 프로필 저장이 **메모리**다. `bare_manager` 의 파일 저장은 등록마다 명부
+    /// 전체를 디스크에 쓰므로(락 보유 중 save) 512건 채우기가 O(n²) 디스크 I/O 가 된다. 여기서 보는 것은
+    /// 개수 판정이지 영속이 아니다.
+    fn capacity_manager() -> AgentManager {
+        #[derive(Default)]
+        struct MemStore(Mutex<Vec<AgentProfile>>);
+        impl crate::agent::profile::ProfileStore for MemStore {
+            fn save(&self, profiles: &[AgentProfile]) {
+                *self.0.lock().expect("mem store poisoned") = profiles.to_vec();
+            }
+            fn load(&self) -> Vec<AgentProfile> {
+                self.0.lock().expect("mem store poisoned").clone()
+            }
+        }
+        let tag = uuid::Uuid::new_v4();
+        let profiles = Arc::new(crate::agent::profile::ProfileRegistry::new(Arc::new(
+            MemStore::default(),
+        )));
+        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
+            std::env::temp_dir().join(format!("engram-cap-preset-{tag}")),
+        ))));
+        let tracker = Arc::new(SessionTracker::new(
+            crate::agent::session_tracker::TrackerConfig {
+                sessions_dir: None,
+                enabled: false,
+                poll_interval: Duration::from_secs(1),
+            },
+            Arc::new(|_, _| {}),
+        ));
+        AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker)
+    }
+
+    /// 상한 직전까지 채운다. 유일성 배정을 거치지 않는 seam 을 쓰는 이유는 속도뿐이다(정상 경로로 채우면
+    /// 등록마다 명부를 훑어 O(n²)이 된다).
+    fn fill_roster_to(manager: &AgentManager, count: usize) {
+        for i in 0..count {
+            let mut p = agent_profile(&format!("C:/filler/{i}"), Some(&format!("filler-{i}")));
+            p.id = AgentId::new_v4();
+            manager.profiles.upsert(p);
+        }
+        assert_eq!(manager.roster().len(), count, "채움 전제");
+    }
+
+    /// ★상한은 입구가 아니라 **등록 커밋 자리**에 있다★ — 그래서 어느 입구로 들어와도 같은 답이다.
+    ///   입구에 두었을 때 실제로 새던 두 경로(데스크톱 CreateProfile · ad-hoc spawn 등록)를 여기서 함께 본다.
+    #[test]
+    fn both_registration_paths_refuse_a_new_agent_at_the_ceiling() {
+        let manager = capacity_manager();
+        fill_roster_to(&manager, MAX_ROSTER_SIZE - 1);
+
+        // 마지막 한 자리는 통과한다 — 경계가 "근처" 가 아니라 정확히 상한에서 닫힌다.
+        let last = manager
+            .create_agent(agent_profile("C:/last", Some("last-one")))
+            .expect("상한 미만은 통과");
+        assert_eq!(manager.roster().len(), MAX_ROSTER_SIZE);
+
+        let err = manager
+            .create_agent(agent_profile("C:/over", Some("one-too-many")))
+            .expect_err("상한 초과 등록은 거부");
+        assert!(
+            matches!(
+                err,
+                PtyError::RosterFull {
+                    current: MAX_ROSTER_SIZE,
+                    limit: MAX_ROSTER_SIZE
+                }
+            ),
+            "이름 공간 소진과 **구분되는** 전용 신호여야(호출자가 할 일이 다르다): {err}"
+        );
+
+        // ad-hoc spawn 의 신규 등록 경로도 같은 답 — 이쪽이 뚫려 있으면 "총량" 이 거짓이 된다.
+        let err = manager
+            .register_for_spawn(&agent_profile("C:/adhoc", Some("adhoc")))
+            .expect_err("ad-hoc 신규 등록도 거부");
+        assert!(matches!(err, PtyError::RosterFull { .. }), "{err}");
+        assert_eq!(
+            manager.roster().len(),
+            MAX_ROSTER_SIZE,
+            "거부된 등록은 명부를 늘리지 않는다"
+        );
+
+        // ★기존 에이전트는 인질이 아니다★: 같은 id 재등록(복원·재spawn)과 개명은 상한에서도 계속 된다.
+        manager
+            .register_for_spawn(&last)
+            .expect("기존 id 재등록은 상한과 무관");
+        assert!(
+            renamed_ok(manager.rename_agent(last.id, Some("still-renameable".into()))),
+            "상한이 명부를 얼려 버리면 복구 자체가 불가능해진다"
+        );
+    }
+
+    /// ★검사와 커밋이 같은 임계구역★ — 동시 등록이 각자 상한 미만을 관측하고 다 함께 커밋하는 창이 없다.
+    #[test]
+    fn concurrent_registrations_cannot_all_slip_through_the_last_slot() {
+        let manager = Arc::new(capacity_manager());
+        fill_roster_to(&manager, MAX_ROSTER_SIZE - 1);
+
+        // 남은 자리는 하나인데 여덟이 동시에 등록을 시도한다.
+        let winners = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let manager = Arc::clone(&manager);
+                let winners = Arc::clone(&winners);
+                s.spawn(move || {
+                    if manager
+                        .create_agent(agent_profile(&format!("C:/racer/{i}"), Some("racer")))
+                        .is_ok()
+                    {
+                        winners.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            winners.load(Ordering::SeqCst),
+            1,
+            "빈 자리가 하나면 정확히 하나만 통과해야"
+        );
+        assert_eq!(manager.roster().len(), MAX_ROSTER_SIZE);
     }
 
     fn renamed_ok(o: RenameOutcome) -> bool {

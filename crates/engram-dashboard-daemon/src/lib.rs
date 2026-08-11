@@ -26,6 +26,7 @@ use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
 use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_core::agent::types::CLI_EXE_NAME;
 use engram_dashboard_core::logging;
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_protocol::PROTOCOL_VERSION;
@@ -108,14 +109,14 @@ fn set_engram_exe_env() {
     tracing::warn!("ENGRAM_EXE 미주입 — 앱 exe 형제를 못 찾음(에이전트 CLI 호출은 fallback 필요)");
 }
 
-// ── engram-send CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
+// ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
 //
 // ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
-// 보내려면 CLI(`engram-send[.exe]`)를 shell 로 불러야 하는데, 이 바이너리는 **PATH 에 없다**(데몬과 함께
-// 배포되는 내부 도구라 bare 이름 `engram-send` 로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
+// 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
+// **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
 // **형제**에서 절대경로를 찾아(set_engram_exe_env·locate_daemon_exe 와 동일 대칭 — 배포 시 세 exe 동거),
 // provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 가 CLI 전용 스폰에서만 그걸
-// ENGRAM_SEND_EXE·PATH 로 주입한다(MCP 가능 스폰은 받지 않는다 — ADR-0128).
+// ENGRAM_CLI_EXE·PATH 로 주입한다(MCP 가능 스폰은 받지 않는다 — ADR-0128).
 //
 // ★best-effort(fail-open)★: 못 찾아도(개발 중 부분 빌드 등) None 을 돌려주고 데몬은 계속 뜬다 — MCP 가능
 // 백엔드(claude)는 애초에 이 경로를 안 쓰므로 무영향이고, 비-MCP 백엔드 스폰만 provision 에서 fail-closed 로
@@ -130,25 +131,28 @@ fn set_engram_exe_env() {
 /// fail-closed 로 스폰을 막는다 — 즉 삭제는 dead-code 정리가 아니라 CLI 백엔드 우편의 제거다. 이 구간은
 /// 테스트가 없어(지우고 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간
 /// (provision→endpoint→스폰 env)은 daemon control 테스트
-/// `provision_non_mcp_wires_engram_send_into_spawn_env` 가 잡는다.
+/// `provision_non_mcp_wires_the_cli_into_spawn_env` 가 잡는다.
 // ADR-0128
 fn locate_send_exe() -> Option<PathBuf> {
-    const SEND_EXE: &str = if cfg!(windows) {
-        "engram-send.exe"
+    // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
+    //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
+    let file_name = if cfg!(windows) {
+        format!("{CLI_EXE_NAME}.exe")
     } else {
-        "engram-send"
+        CLI_EXE_NAME.to_string()
     };
     if let Ok(daemon_exe) = std::env::current_exe() {
         if let Some(dir) = daemon_exe.parent() {
-            let send_exe = dir.join(SEND_EXE);
+            let send_exe = dir.join(&file_name);
             if send_exe.is_file() {
-                tracing::info!(path = %send_exe.display(), "engram-send CLI 위치 확정(ADR-0086 F1)");
+                tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
                 return Some(send_exe);
             }
         }
     }
     tracing::warn!(
-        "engram-send CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
+        name = %file_name,
+        "제어 평면 CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
     );
     None
 }
@@ -216,6 +220,20 @@ struct DaemonWiring {
     /// 연결이 등록되는 맵. `manager` 안의 status sink 가 팬아웃하는 그 맵과 **같은 것**이다
     /// (`ConnRegistry` 는 내부가 Arc — clone 이 같은 맵을 본다).
     registry: ConnRegistry,
+}
+
+impl DaemonWiring {
+    /// 제어 라우트(`/control/agent`)가 명부 변경을 알릴 때 쓰는 팬아웃 어댑터(ADR-0132).
+    ///
+    /// ★필드를 밖으로 풀지 않고 **여기서** 만든다★: 팬아웃과 매니저를 따로 꺼내 조립하면 위 struct 주석이
+    ///   막으려는 어긋난 짝(다른 조립의 레지스트리 + 이 매니저)이 다시 표현 가능해진다. 이 메서드는 제 필드
+    ///   둘만 쓰므로 그 조합이 구조적으로 불가능하다.
+    fn roster_broadcast(&self) -> Arc<dyn control::agent::RosterBroadcast> {
+        Arc::new(connection_core::RosterFanout::new(
+            Arc::new(self.registry.clone()),
+            self.manager.clone(),
+        ))
+    }
 }
 
 fn build_daemon_wiring(
@@ -447,6 +465,7 @@ pub async fn run() -> Result<(), i32> {
     //     없는 반쪽 데몬은 정상 상태가 아니다). ★반드시 에이전트 spawn 전★.
     let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
+    let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
@@ -458,6 +477,7 @@ pub async fn run() -> Result<(), i32> {
         control_registry.clone(),
         manager_slot.clone(),
         messaging_slot.clone(),
+        roster_broadcast_slot.clone(),
     )
     .await
     {
@@ -493,6 +513,10 @@ pub async fn run() -> Result<(), i32> {
     //   짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
     let manager = wiring.manager.clone();
     manager_slot.set(manager.clone());
+    // 제어 라우트가 바꾼 명부를 붙어 있는 클라이언트가 보게 하는 배선(ADR-0132). ★이 한 줄이 빠지면★
+    //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
+    //   보여 준다(에러도 로그도 없다).
+    roster_broadcast_slot.set(wiring.roster_broadcast());
 
     // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
     //    것이 없다★.

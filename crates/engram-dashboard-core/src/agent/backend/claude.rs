@@ -15,6 +15,7 @@ use crate::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
 use crate::agent::turn::TurnSignal;
 use crate::agent::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
+    CLI_EXE_ENV, CLI_EXE_NAME,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
@@ -33,7 +34,7 @@ impl AgentBackend for ClaudeBackend {
     fn accepts_mcp_config(&self) -> bool {
         // claude 는 mcp-config 를 `--mcp-config` 로 부착한다 → MCP-capable.
         // ★등호 불변식(ADR-0128)★: 가르치는 채널 집합 = 물리로 깐 채널 집합. 그래서 MCP 가능 스폰엔
-        // engram-send 배선(ENGRAM_SEND_EXE·PATH·CLI 크레덴셜)을 아예 깔지 않는다. ADR-0126 결정 4 의
+        // CLI 배선(ENGRAM_CLI_EXE·PATH·CLI 크레덴셜)을 아예 깔지 않는다. ADR-0126 결정 4 의
         // 단방향(⊆)은 ADR-0128 결정 3 이 등호로 되돌렸다 — ⊆ 로 읽고 CLI 교육을 얹으면 ADR-0099 가
         // 실측한 발신 freeze 가 재현된다.
         // ADR-0099
@@ -130,7 +131,12 @@ impl AgentBackend for ClaudeBackend {
                 //   `--mcp-config <path>`, 없으면 CLI 크레덴셜 env).
                 //   ★mode 무관 동일 주입★: 터미널·json 둘 다 연결 대상이다(claude 2.1.170 실측 — headers
                 //   Authorization 을 initialize/tools/list/tools/call 전 요청에 실전송).
-                // ADR-0086 / ADR-0099 / ADR-0128
+                //   ★이 갈림이 **지금 우편 격리를 하는 유일한 물건**이다 — 결정 문서를 근거로 지우지 말 것★:
+                //   ADR-0132 는 격리 수단을 "MCP 가능 스폰에 CLI 를 안 깐다"에서 "데몬이 자격증명으로
+                //   우편 요청을 거절한다"로 옮기지만, **그 거절(결정 3)은 아직 구현 전**이다. 먼저 지우면
+                //   격리가 0 이 되고 ADR-0128 의 채널 단일화가 조용히 무너진다(ADR-0132 §영향이 같은 경고를
+                //   적고 있다). 순서 = 데몬 거절이 서고 **그 다음** 이 갈림을 연다.
+                // ADR-0086 / ADR-0099 / ADR-0128 / ADR-0132
                 if let Some(endpoint) = &control {
                     match &endpoint.config_path {
                         Some(config_path) => {
@@ -257,17 +263,20 @@ impl AgentBackend for ClaudeBackend {
     }
 }
 
-/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + `engram-send` 형제 디렉토리 PATH 프리펜드.
+/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
+/// PATH 프리펜드.
 ///
-/// ★호출 조건 = 비-MCP(CLI 전용) 스폰 **하나뿐**★: MCP 가능 스폰에서 부르면 그 스폰에 `engram-send`
-///   경로가 생겨 ADR-0128 위반이다. 채널 통제의 유일한 실효 수단이 물리 배선이라(실측: 권한 제거는
+/// ★호출 조건 = 비-MCP(CLI 전용) 스폰 **하나뿐**★: MCP 가능 스폰에서 부르면 그 스폰에 CLI 경로가
+///   생겨 ADR-0128 위반이다. 채널 통제의 유일한 실효 수단이 물리 배선이라(실측: 권한 제거는
 ///   조작이 되지 못했다) 두 채널을 함께 깔면 통제가 사라진다 — 되살리지 말 것.
-/// ★왜 env 인가★: 에이전트가 shell 로 `engram-send` 를 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
+/// ★왜 env 인가★: 에이전트가 shell 로 그 명령을 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
 ///   토큰으로 POST 한다. portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
 ///   (Bash·그 손자)까지 상속**된다.
 /// ★보안★: 토큰이 env 로 노출된다 — 같은 OS 유저의 자식에만 상속되고 로그엔 안 찍지만 하드 격리는
 ///   원래 불가다(ADR-0086 §불변식).
-// ADR-0086 / ADR-0128
+/// ★호출 조건을 넓히는 것은 ADR-0132 결정 3(데몬측 우편 거절)이 **선** 다음이다★ — 그 전에 넓히면 우편
+///   격리가 남지 않는다(호출부 주석에 순서가 적혀 있다).
+// ADR-0086 / ADR-0128 / ADR-0132
 fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
     // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
     //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를 벗겨 base 만
@@ -284,18 +293,21 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
         .to_string();
     env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
-    // ★ENGRAM_SEND_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare `engram-send`(아래 PATH
-    //   주입으로 해석)를 가르치지만, 이 절대경로 env 는 병행 보존한다 — 기존 소비자(진단·대체 경로)가
-    //   있을 수 있어 제거하지 않는다(ADR-0094 정렬은 PATH 로 이룬다).
+    // ★ENGRAM_CLI_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare 실행파일 이름
+    //   (`CLI_EXE_NAME` — 아래 PATH 주입으로 해석)을 가르치지만, 이 절대경로 env 도 함께 싣는다 —
+    //   진단·수동 조작용이다(ADR-0094 의 이름 정렬 자체는 PATH 로 이룬다).
+    //   ★이 값을 가르치는 프라이밍은 없다 — 그러니 아래 loud skip 갈래(PATH 조합 실패·비-UTF8)의 복구
+    //     수단으로 세지 말 것★: 그 갈래에서 에이전트는 bare 이름만 배운 채 PATH 로 해석하지 못하므로
+    //     실질적으로 발신 불가이고, 신호는 그 warn 로그 하나뿐이다.
     //   None 갈래는 발신 입구가 하나도 안 남는 조합이라 데몬이 provision 에서 이미 fail-closed 로 끊는다
     //   — 여기 도달하지 않는 방어 경로다(도달해도 크레덴셜만 있고 부를 CLI 가 없는 무해한 상태).
     if let Some(send_exe) = &endpoint.send_exe {
         env.push((
-            "ENGRAM_SEND_EXE".to_string(),
+            CLI_EXE_ENV.to_string(),
             send_exe.to_string_lossy().into_owned(),
         ));
-        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(engram-send:*)`)와 프라이밍이 모두 bare
-        //   `engram-send` 를 가르치므로 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
+        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(<CLI_EXE_NAME>:*)`)와 프라이밍이 모두 bare
+        //   실행파일 이름을 가르치므로 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
         //   **찾을** 수 있어야 한다. send_exe 의 **부모 디렉토리**를 PATH **맨 앞**에 붙인다.
         //
         // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이 지점보다 **먼저**
@@ -351,7 +363,8 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
                 //   나쁘다). skip 시 env 벡터는 **원래 그대로** 둬서 상속 PATH 가 안전 폴백이 된다.
                 None => {
                     tracing::warn!(
-                        "engram-send PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `engram-send` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지"
+                        "CLI PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `{}` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지",
+                        CLI_EXE_NAME
                     );
                 }
             }
@@ -393,9 +406,22 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 ///
 /// ★MCP 패턴★: `mcp__<server>__<tool>` 은 claude MCP 툴 네이밍 규약이다.
 /// ★CLI 패턴 문법★: `Bash(<X>:*)` 의 **colon-star** 는 Claude Code 권한 시스템의 문서화된 **prefix
-///   와일드카드** 문법이다 — `Bash(engram-send:*)` 는 `engram-send` 로 **시작하는** 명령만 허용한다
-///   (전체 Bash 아님 = 최소권한). exe 는 bare 명령 이름이고, 프라이밍이 가르치는 명령·이 grant 패턴·
-///   실제 invocation 이 모두 그 bare 이름으로 정렬된다.
+///   와일드카드** 문법이다 — 그 문자열로 **시작하는** 명령만 허용한다(전체 Bash 아님). exe 는 bare 명령
+///   이름이고, 프라이밍이 가르치는 명령·이 grant 패턴·실제 invocation 이 모두 그 bare 이름으로 정렬된다.
+///   ★이 prefix 가 지금 덮는 범위(사용자 수용, 좁히지 않기로 결정)★: 실행파일 이름이 `engram` 이라
+///     `Bash(engram:*)` 는 그 이름으로 **시작하는** 형제들 — 릴리즈 폴더에 동거하는 `engram-dashboard`·
+///     `engram-dashboard-daemon`(ADR-0100 co-location) — 도 함께 덮는다. 그 형제들은 아래 PATH 프리펜드
+///     때문에 bare 이름으로도 닿는다. **매처가 토큰 경계를 보는지는 미검증**이라("prefix" 가 문자열 접두인지
+///     인자 경계까지 보는지) 좁히려면 그 동작부터 실측해야 한다.
+///   ★그래도 지금 위험이 아닌 이유 — 그리고 언제 다시 볼지★: 스폰은 `--permission-mode bypassPermissions`
+///     아래 무조건 돌아서(ADR-0097) grant 는 런타임 게이트가 **아니라 정책 표면**이다(= 지금 이 목록의
+///     넓이는 아무 것도 열지 않는다). 그 auto 모드는 임시 체제이고 후계가 지명돼 있으므로(`ToolGrant`
+///     주석의 "전 LLM 공용 제약 레이어"), **그 플래그가 걷히는 순간 이 prefix 범위를 먼저 재검토해야
+///     한다** — 그때는 넓이가 곧 권한이 된다.
+///   ★그 "무조건" 에 붙은 미확인 하나(ADR-0132 §영향)★: 프로필 `extra_args` 는 우리 플래그 **뒤에** 붙는다.
+///     사용자가 거기 `--permission-mode` 를 또 넣었을 때 **뒤 값이 이기는지는 미검증**이다 — 이긴다면 그
+///     스폰만 auto 가 아니게 되고, 위 "지금은 inert" 전제가 그 스폰에서만 깨져 넓은 prefix 가 **실제 권한**이
+///     된다. 즉 이 절의 수용 판단은 그 미확인에 조건부다.
 ///   ★Windows PowerShell 도구 커버(FIX-4)★: Windows 의 Claude Code 는 **PowerShell 도구**를 별도로
 ///     노출하고 에이전트가 거기서 명령을 실행하기도 한다(실측: 에이전트가 "PowerShell 로 보내겠다").
 ///     그래서 `Cli{exe}` 하나가 두 패턴을 낸다 — 같은 발신 입구의 두 shell 모양일 뿐 새 명령은 없다.
@@ -1036,8 +1062,8 @@ mod tests {
             token: "deadbeef".to_string(),
             // ADR-0099: config_path 는 Option — MCP-capable(claude) 케이스라 Some.
             config_path: Some(PathBuf::from("C:/data/mcp/agent-x.json")),
-            // 기본 헬퍼는 send_exe 를 담아 ENGRAM_SEND_EXE 주입 경로를 검증할 수 있게 한다.
-            send_exe: Some(PathBuf::from("C:/app/engram-send.exe")),
+            // 기본 헬퍼는 send_exe 를 담아 ENGRAM_CLI_EXE 주입 경로를 검증할 수 있게 한다.
+            send_exe: Some(PathBuf::from("C:/app/engram.exe")),
             // 기본 헬퍼는 프라이밍 파일을 담지 않는다(ADR-0092) — 프라이밍 주입 테스트가 명시로 채운다.
             priming_file: None,
             // ADR-0094: 기본 헬퍼는 grants 를 비워둔다 — grant 주입 테스트가 명시로 채운다(회귀 격리:
@@ -1066,7 +1092,7 @@ mod tests {
                     tool: "send_message".to_string(),
                 },
                 ToolGrant::Cli {
-                    exe: "engram-send".to_string(),
+                    exe: CLI_EXE_NAME.to_string(),
                 },
             ],
             ..ep()
@@ -1193,12 +1219,12 @@ mod tests {
         let send_exe = s
             .env
             .iter()
-            .find(|(k, _)| k == "ENGRAM_SEND_EXE")
+            .find(|(k, _)| k == CLI_EXE_ENV)
             .map(|(_, v)| v.as_str());
         assert_eq!(
             send_exe,
-            Some("C:/app/engram-send.exe"),
-            "ENGRAM_SEND_EXE = endpoint.send_exe 절대경로"
+            Some("C:/app/engram.exe"),
+            "ENGRAM_CLI_EXE = endpoint.send_exe 절대경로"
         );
     }
 
@@ -1217,8 +1243,8 @@ mod tests {
             s.env
         );
         assert!(
-            !s.env.iter().any(|(k, _)| k == "ENGRAM_SEND_EXE"),
-            "send_exe=None 이면 ENGRAM_SEND_EXE 는 생략: {:?}",
+            !s.env.iter().any(|(k, _)| k == CLI_EXE_ENV),
+            "send_exe=None 이면 ENGRAM_CLI_EXE 는 생략: {:?}",
             s.env
         );
     }
@@ -1227,18 +1253,18 @@ mod tests {
     fn claude_no_control_endpoint_no_cli_env() {
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
         assert!(
-            !s.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN"
-                || k == "ENGRAM_CONTROL_URL"
-                || k == "ENGRAM_SEND_EXE"),
+            !s.env
+                .iter()
+                .any(|(k, _)| k == "ENGRAM_TOKEN" || k == "ENGRAM_CONTROL_URL" || k == CLI_EXE_ENV),
             "control 없으면 CLI env 없음: {:?}",
             s.env
         );
     }
 
-    // ── ADR-0094: PATH 주입(bare `engram-send` 해석 — send_exe 부모 디렉토리 prepend) ──────────
+    // ── ADR-0094: PATH 주입(bare 실행파일 이름 해석 — send_exe 부모 디렉토리 prepend) ──────────
     #[test]
     fn claude_cli_only_endpoint_injects_path_with_send_exe_dir_prepended() {
-        // ep_cli_only() 의 send_exe = C:/app/engram-send.exe → 부모 = C:/app.
+        // ep_cli_only() 의 send_exe = C:/app/engram.exe → 부모 = C:/app.
         let s = spec_with_control(
             &terminal(vec![]),
             SpawnMode::Fresh,
@@ -1470,7 +1496,7 @@ mod tests {
         //   끼워 넣는 회귀가 초록으로 통과한다.
         let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
-        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", "ENGRAM_SEND_EXE"] {
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
             assert!(
                 !s.env.iter().any(|(k, _)| k == key),
                 "MCP 가능 스폰에 {key} 가 실리면 ADR-0128 위반: {:?}",
@@ -1496,7 +1522,7 @@ mod tests {
     fn claude_cli_only_spawn_gets_full_cli_entrance_wiring() {
         let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
-        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", "ENGRAM_SEND_EXE"] {
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
             assert!(
                 s.env.iter().any(|(k, _)| k == key),
                 "CLI 전용 스폰은 {key} 를 받아야: {:?}",
@@ -1657,7 +1683,7 @@ mod tests {
         );
         assert_eq!(
             s.args.last().map(|s| s.as_str()),
-            Some("PowerShell(engram-send:*)"),
+            Some(format!("PowerShell({CLI_EXE_NAME}:*)").as_str()),
             "grant 그룹이 여전히 맨 끝: {:?}",
             s.args
         );
@@ -1676,13 +1702,13 @@ mod tests {
     #[test]
     fn grants_to_allowed_tools_cli_pattern() {
         let out = grants_to_allowed_tools(&[ToolGrant::Cli {
-            exe: "engram-send".to_string(),
+            exe: CLI_EXE_NAME.to_string(),
         }]);
         assert_eq!(
             out,
             vec![
-                "Bash(engram-send:*)".to_string(),
-                "PowerShell(engram-send:*)".to_string(),
+                format!("Bash({CLI_EXE_NAME}:*)"),
+                format!("PowerShell({CLI_EXE_NAME}:*)"),
             ]
         );
     }
@@ -1695,15 +1721,15 @@ mod tests {
                 tool: "send_message".to_string(),
             },
             ToolGrant::Cli {
-                exe: "engram-send".to_string(),
+                exe: CLI_EXE_NAME.to_string(),
             },
         ]);
         assert_eq!(
             out,
             vec![
                 "mcp__engram__send_message".to_string(),
-                "Bash(engram-send:*)".to_string(),
-                "PowerShell(engram-send:*)".to_string(),
+                format!("Bash({CLI_EXE_NAME}:*)"),
+                format!("PowerShell({CLI_EXE_NAME}:*)"),
             ]
         );
     }
@@ -1734,13 +1760,13 @@ mod tests {
         );
         assert_eq!(
             s.args.get(pos + 2).map(|s| s.as_str()),
-            Some("Bash(engram-send:*)"),
+            Some(format!("Bash({CLI_EXE_NAME}:*)").as_str()),
             "둘째 패턴 = CLI 발신 입구 Bash 모양(bare 이름 colon-star): {:?}",
             s.args
         );
         assert_eq!(
             s.args.get(pos + 3).map(|s| s.as_str()),
-            Some("PowerShell(engram-send:*)"),
+            Some(format!("PowerShell({CLI_EXE_NAME}:*)").as_str()),
             "셋째 패턴 = CLI 발신 입구 PowerShell 모양(FIX-4 — 같은 입구의 두 shell 도구): {:?}",
             s.args
         );
@@ -1977,11 +2003,11 @@ mod tests {
 
     #[test]
     fn claude_space_containing_bash_pattern_stays_single_argv_element() {
-        // 운영 grant 는 bare `engram-send` 지만 argv 무결성 회귀는 공백 케이스로 검증한다
+        // 운영 grant 는 bare 실행파일 이름이지만 argv 무결성 회귀는 공백 케이스로 검증한다
         //   (grants_to_allowed_tools 는 이름-무관이라 공백 포함 값도 그대로 colon-star 로 감싼다).
         let ep = ControlEndpoint {
             grants: vec![ToolGrant::Cli {
-                exe: "C:\\Program Files\\eng\\engram-send.exe".to_string(),
+                exe: "C:\\Program Files\\eng\\engram.exe".to_string(),
             }],
             ..ep()
         };
@@ -1989,13 +2015,13 @@ mod tests {
         let pos = s.args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(
             s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("Bash(C:\\Program Files\\eng\\engram-send.exe:*)"),
+            Some("Bash(C:\\Program Files\\eng\\engram.exe:*)"),
             "공백 포함 Bash 패턴은 한 argv 요소로 유지(쪼개지지 않음): {:?}",
             s.args
         );
         assert_eq!(
             s.args.get(pos + 2).map(|s| s.as_str()),
-            Some("PowerShell(C:\\Program Files\\eng\\engram-send.exe:*)"),
+            Some("PowerShell(C:\\Program Files\\eng\\engram.exe:*)"),
             "공백 포함 PowerShell 패턴도 한 argv 요소로 유지: {:?}",
             s.args
         );

@@ -20,7 +20,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, McpServerHandle, MessagingSlot,
+    start_mcp_server, ManagerSlot, McpServerHandle, MessagingSlot, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -93,11 +93,17 @@ async fn wire(
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
     let messaging_slot = Arc::new(MessagingSlot::new());
-    let handle = start_mcp_server(registry.clone(), slot.clone(), messaging_slot.clone())
-        .await
-        .expect("start mcp server");
+    let handle = start_mcp_server(
+        registry.clone(),
+        slot.clone(),
+        messaging_slot.clone(),
+        // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
+        Arc::new(RosterBroadcastSlot::new()),
+    )
+    .await
+    .expect("start mcp server");
     let url = handle.url.clone();
-    let data_dir = std::env::temp_dir().join(format!("engram-send-{tag}-{}", AgentId::new_v4()));
+    let data_dir = std::env::temp_dir().join(format!("engram-cli-{tag}-{}", AgentId::new_v4()));
 
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
         registry.clone(),
@@ -119,10 +125,10 @@ async fn wire(
         ),
     );
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
-        std::env::temp_dir().join(format!("engram-send-prof-{tag}-{}", AgentId::new_v4())),
+        std::env::temp_dir().join(format!("engram-cli-prof-{tag}-{}", AgentId::new_v4())),
     ))));
     let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-send-preset-{tag}-{}", AgentId::new_v4())),
+        std::env::temp_dir().join(format!("engram-cli-preset-{tag}-{}", AgentId::new_v4())),
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {

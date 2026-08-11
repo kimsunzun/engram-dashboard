@@ -1,8 +1,10 @@
 //! 데몬 MCP Streamable HTTP 서버 — 스폰된 claude 에이전트가 mcp-config 로 붙는 제어 채널 입구.
 //!
 //! ★소유★: rmcp `StreamableHttpService`(Tower service)를 axum `/mcp` 에 nest 하고 그 앞에 bearer auth
-//!   미들웨어를 얹는다. 같은 서버·포트·미들웨어에 CLI 평문 라우트(`/control/send`·`/control/messages`)를
-//!   나란히 태운다. 툴 표면 = `engram_ping` · `send_message` · `messages`.
+//!   미들웨어를 얹는다. 같은 서버·포트·미들웨어에 CLI 평문 라우트(`/control/send`·`/control/messages`·
+//!   `/control/agent`)를 나란히 태운다. 툴 표면 = `engram_ping` · `send_message` · `messages`.
+//!   ★제어 동사는 MCP 툴로 내지 않는다★(ADR-0132 결정 = CLI) — 툴 스키마는 모든 에이전트 컨텍스트에 상시
+//!   상주하는데 제어는 빈도가 낮다. 그래서 `/control/agent` 에는 짝이 되는 `#[tool]` 이 없다.
 //!
 //! ★OAuth 메타데이터 미광고(load-bearing, #59467)★: StreamableHttpService 는 `.well-known/*` 라우트를
 //!   만들지 않고, 우리도 추가하지 않는다. claude 는 서버가 OAuth 메타데이터를 광고하면 정적 Authorization
@@ -43,15 +45,26 @@ use super::registry::{BoundIdentity, ControlRegistry};
 ///   조용히 404 를 받는다.
 const MCP_PATH: &str = "/mcp";
 
-/// CLI 입구(ADR-0086 스텝 2) — `engram-send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
+/// CLI 입구(ADR-0086 스텝 2) — `engram mail send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
 /// (ENGRAM_CONTROL_URL)에 이 경로를 조립한다.
 const CONTROL_SEND_PATH: &str = "/control/send";
 
-/// CLI 조회 입구(D · spec §6) — `engram-send status <id>` / `pending` 이 POST 하는 라우트.
+/// CLI 조회 입구(D · 표면 정본 = ADR-0132) — `engram mail status <id>` / `engram mail pending` 이 POST
+/// 하는 라우트.
 /// ★POST 인 이유(GET 아님)★: 같은 bearer 미들웨어를 타야 하는데, 미들웨어는 세션 id 없는 **GET 을 400** 으로
 ///   끊는다(세션 operation 규약 — bearer_auth 1.5단계). 조회는 세션을 쓰지 않으므로 send 와 같은 무-세션
 ///   POST 형태로 맞춘다(경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다).
 const CONTROL_MESSAGES_PATH: &str = "/control/messages";
+
+/// CLI 제어 입구(ADR-0132 결정 6) — `engram agent <동사>` 가 POST 하는 라우트. 동사는 경로가 아니라
+/// **바디**(`{verb: …}`)로 온다: CLI 의 HTTP 클라이언트는 std 만으로 손조립한 단발 POST 하나뿐이라, 동사마다
+/// 경로를 늘리면 그 클라이언트가 경로 표를 지게 되고 라우트 상수도 동사 수만큼 늘어난다.
+/// ★인증은 `/control/send` 와 같은 미들웨어다★ — 무-세션 POST 라 위 `CONTROL_MESSAGES_PATH` 주석의 규율이
+///   그대로 적용된다(경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다).
+/// ★**지금 이 라우트에 닿을 수 있는 자는 전원이 아니다** — 사유와 순서는 `control/agent.rs` 헤더가 정본★
+///   (ADR-0132 결정 5 는 우편 거절 게이트가 선 다음에야 도달 가능하다). "왜 스폰 배선을 안 고쳤나" 를
+///   여기서 다시 판단하지 말 것.
+const CONTROL_AGENT_PATH: &str = "/control/agent";
 
 /// ★manager 늦은 주입 슬롯(순환 해소)★: 데몬 기동은 MCP 서버를 **먼저** 띄우고(그 URL 로 mcp-config 를
 /// 발급하는 DaemonControlChannel 을 만들어야 하므로) 그 다음 AgentManager 를 배선한다 — 즉 서버 start
@@ -92,6 +105,28 @@ impl MessagingSlot {
     pub(crate) fn get(
         &self,
     ) -> Option<&Arc<engram_dashboard_messaging::service::MessagingService>> {
+        self.inner.get()
+    }
+}
+
+/// ★명부 통지 팬아웃 늦은 주입 슬롯(ADR-0132)★: ManagerSlot 과 동형. 팬아웃은 연결 레지스트리에서
+/// 파생되는데 그 레지스트리는 MCP 서버보다 **뒤에** 조립된다(lib.rs `run()` 5c → 6).
+///
+/// ★비어 있는 것이 정상인 조립이 있다★: 스모크 bin·격리 하네스는 붙을 클라이언트가 없다. 운영 데몬에서
+///   비어 있으면 제어 동사로 바뀐 명부가 화면에 반영되지 않는다(`agent::RosterBroadcast` 참조).
+#[derive(Default)]
+pub struct RosterBroadcastSlot {
+    inner: std::sync::OnceLock<Arc<dyn super::agent::RosterBroadcast>>,
+}
+
+impl RosterBroadcastSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn set(&self, broadcast: Arc<dyn super::agent::RosterBroadcast>) {
+        let _ = self.inner.set(broadcast);
+    }
+    fn get(&self) -> Option<&Arc<dyn super::agent::RosterBroadcast>> {
         self.inner.get()
     }
 }
@@ -622,7 +657,7 @@ struct SendRequest {
     reply_to: Option<String>,
 }
 
-/// ★CLI 입구의 수신자 토큰화(순수 함수 — 리뷰 C3)★: `engram-send --to a,b` 는 셸에서 목록을 표현할 방법이
+/// ★CLI 입구의 수신자 토큰화(순수 함수 — 리뷰 C3)★: `engram mail send --to a,b` 는 셸에서 목록을 표현할 방법이
 /// 콤마뿐이라 **이 입구에서만** 한 번 쪼갠다. 분해 규칙이 **입구별로 다른 게 의도**다(MCP 쪽 규칙은
 /// `ToField` 주석).
 fn cli_recipient_tokens(to: ToField) -> Vec<String> {
@@ -727,6 +762,72 @@ async fn control_messages_handler(
     Json(result.to_json()).into_response()
 }
 
+// ── CLI 제어 입구(/control/agent) ──────────────────────────────────────────────────
+
+/// `/control/agent` 라우트 State. manager 는 send 라우트와 **같은 슬롯**을 공유한다(두 번째 매니저 참조를
+/// 만들지 않는다). registry·messaging 은 이 라우트가 쓰지 않으므로 담지 않는다 — 제어 동사는 신원을
+/// 인가에만 쓰고 발신자 파생이 없다.
+#[derive(Clone)]
+struct ControlAgentState {
+    manager: Arc<ManagerSlot>,
+    roster_broadcast: Arc<RosterBroadcastSlot>,
+}
+
+/// 항상 200 + JSON body(성공/반려 모두) — `/control/messages` 와 같은 계약이라 CLI 의 조회 판정기가
+/// 그대로 쓰인다.
+///
+/// ★신원은 인가에만 쓴다★: 제어 동사엔 "나" 가 등장하지 않는다(발신자 파생 없음). 그래도 미들웨어가 심은
+///   신원의 **존재**는 요구한다 — 토큰 없는 호출이 여기 닿으면 안 되기 때문이다(방어적 401).
+/// ★blocking 경계★: 아래 `handle_agent` 는 blocking 이다(그 함수 doc — resume 폴링 ~3초 + 프로필 디스크
+///   저장). async 핸들러에서 그대로 부르면 tokio 워커 스레드 하나가 그 시간 동안 묶여 같은 스레드에 얹힌
+///   **다른 요청까지** 막힌다(send 라우트가 자식 stdin write 를 blocking 풀로 옮긴 것과 같은 이유).
+async fn control_agent_handler(
+    axum::extract::State(state): axum::extract::State<ControlAgentState>,
+    identity: Option<axum::Extension<BoundIdentity>>,
+    body: axum::body::Bytes,
+) -> Response {
+    if identity.is_none() {
+        return unauthorized();
+    }
+    // ★`Json<…>` 추출기를 쓰지 않는 이유(round-2 적출)★: 그 추출기는 역직렬화가 실패하면 **빈 400** 을 낸다 —
+    //   타입이 어긋난 값·중복 키·객체가 아닌 바디·깨진 JSON 이 전부 그 자리로 떨어져, 호출자(LLM)는 무엇을
+    //   고쳐야 하는지 모른 채 재시도한다. 직접 역직렬화하면 serde 의 사유를 그대로 봉투에 실을 수 있고,
+    //   그러면 이 라우트가 빈 body 를 내는 경우는 인증 실패와 크기 초과뿐이다.
+    let req: super::agent::AgentRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return Json(
+                super::agent::malformed_body(&e.to_string(), &String::from_utf8_lossy(&body))
+                    .to_json(),
+            )
+            .into_response()
+        }
+    };
+    let Some(manager) = state.manager.get() else {
+        tracing::error!(
+            entrance = "cli",
+            "제어 동사 처리 불가 — manager 슬롯 미설정(배선 순서 이상, ADR-0086 F6)"
+        );
+        return service_unavailable();
+    };
+    let manager = manager.clone();
+    let broadcast = state.roster_broadcast.get().cloned();
+    let Ok(result) = tokio::task::spawn_blocking(move || {
+        super::agent::handle_agent(&manager, broadcast.as_ref(), req)
+    })
+    .await
+    else {
+        // JoinError = blocking 태스크 패닉. 답 자체가 없으므로 "항상 200 + JSON" 계약 밖이다 — 500 으로
+        //   갈라 CLI 가 성공으로 오독하지 않게 한다(send 라우트와 같은 규율).
+        tracing::error!(entrance = "cli", "제어 동사 태스크 실패(패닉)");
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::empty())
+            .expect("valid 500 response");
+    };
+    Json(result.to_json()).into_response()
+}
+
 /// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). 요청 형식·인증 문제가 아니므로 4xx 가 아니다.
 fn service_unavailable() -> Response {
     Response::builder()
@@ -744,6 +845,7 @@ pub async fn start_mcp_server(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
     messaging: Arc<MessagingSlot>,
+    roster_broadcast: Arc<RosterBroadcastSlot>,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr: SocketAddr = listener.local_addr()?;
@@ -796,6 +898,13 @@ pub async fn start_mcp_server(
                 messaging: messaging.clone(),
             }),
         )
+        .route(
+            CONTROL_AGENT_PATH,
+            axum::routing::post(control_agent_handler).with_state(ControlAgentState {
+                manager: manager.clone(),
+                roster_broadcast,
+            }),
+        )
         .layer(axum::middleware::from_fn_with_state(
             registry.clone(),
             bearer_auth,
@@ -845,6 +954,11 @@ mod tests {
     /// 빈 messaging 슬롯(위와 동일 — start/drop 테스트용, send 미호출).
     fn empty_messaging_slot() -> Arc<MessagingSlot> {
         Arc::new(MessagingSlot::new())
+    }
+
+    /// 빈 팬아웃 슬롯(위와 동일 — 제어 동사 미호출).
+    fn empty_broadcast_slot() -> Arc<RosterBroadcastSlot> {
+        Arc::new(RosterBroadcastSlot::new())
     }
 
     #[test]
@@ -930,9 +1044,14 @@ mod tests {
     #[tokio::test]
     async fn server_starts_and_reports_local_url() {
         let reg = Arc::new(ControlRegistry::new());
-        let handle = start_mcp_server(reg, empty_slot(), empty_messaging_slot())
-            .await
-            .expect("start mcp server");
+        let handle = start_mcp_server(
+            reg,
+            empty_slot(),
+            empty_messaging_slot(),
+            empty_broadcast_slot(),
+        )
+        .await
+        .expect("start mcp server");
         assert!(
             handle.url.starts_with("http://127.0.0.1:") && handle.url.ends_with("/mcp"),
             "로컬 엔드포인트 URL: {}",
@@ -945,9 +1064,14 @@ mod tests {
     #[tokio::test]
     async fn dropping_handle_cancels_serve_task() {
         let reg = Arc::new(ControlRegistry::new());
-        let handle = start_mcp_server(reg, empty_slot(), empty_messaging_slot())
-            .await
-            .expect("start mcp server");
+        let handle = start_mcp_server(
+            reg,
+            empty_slot(),
+            empty_messaging_slot(),
+            empty_broadcast_slot(),
+        )
+        .await
+        .expect("start mcp server");
         let watch = handle.cancel.clone();
         assert!(!watch.is_cancelled(), "start 직후엔 cancel 안 됨");
         drop(handle);

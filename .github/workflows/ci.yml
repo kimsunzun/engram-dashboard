@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
+    # ★모든 브랜치★ — 좁히면 그 브랜치 작업에는 게이트가 아예 없어진다. 로컬을 quick 으로 낮춘
+    # 분담(`/qa` 바인딩)과 맞물리면 무게이트 구간이 생긴다. public repo 라 러너 비용이 0 이다.
     branches:
-      - master
-      - 'ci/**'
+      - '**'
     # 버전 태그 push = 릴리즈 트리거(맨 아래 release-build → release-publish 2단). 태그 push 에서는
     # 검증 3잡도 함께 도는데 이건 중복 낭비가 아니라 게이트다 — release-build 가
     # `needs: [backend, gates, frontend]` 로 그 결과에 매달린다.
@@ -484,7 +485,7 @@ jobs:
       #      "a semver version number or a path to a `package.json` file … If removed the version number
       #      from `Cargo.toml` is used." → 암묵 폴백은 Cargo.toml 이다. 1이 있다고 이걸 중복으로 보고
       #      지우지 말 것 — 1을 지우는 순간 이게 제품 버전이 된다.
-      #   3. crates/engram-dashboard-daemon/Cargo.toml — daemon.exe·engram-send.exe 를 만드는 crate.
+      #   3. crates/engram-dashboard-daemon/Cargo.toml — daemon.exe·engram.exe 를 만드는 crate.
       #      코드가 실제로 읽는다: agent_conn.rs 가 env!("CARGO_PKG_VERSION") 로 hello 이벤트에 실어
       #      보낸다 → 어긋나면 에이전트에게 거짓 버전이 나간다.
       #   4. package.json — ★산출물에 닿지 않는다★. 어디서도 import 되지 않고, Tauri 가 여기를 읽는 것은

@@ -74,7 +74,7 @@ graph TB
     Client <-->|WebSocket| Daemon
     Daemon <--> PTY
     PTY <--> Agent
-    Agent -.->|MCP 또는 engram-send| Daemon
+    Agent -.->|MCP 또는 engram CLI| Daemon
 ```
 
 모델별 실행 방식은 공통 추상화 아래에서 분리되어 있어, Codex 같은 다른 CLI 에이전트나 API 기반 모델(로컬 모델 포함)도 같은 인터페이스 위에 백엔드로 추가하는 구조입니다.
