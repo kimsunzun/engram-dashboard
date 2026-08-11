@@ -1,6 +1,6 @@
 ---
 name: adr
-description: ADR(설계 결정 기록)를 박제한다 — 채번·인덱스·supersede 양방향은 결정적 스크립트, 전체/부분 폐기 판단과 본문 prose만 스킬. 결정은 호출자가 제공(날조 금지). 1차 축 = 오퍼레이션. 트리거 /adr [new|supersede|lint|index].
+description: ADR(설계 결정 기록)를 박제한다 — 새 결정·번복(supersede)·정합성 점검(lint)·인덱스 재생성. 트리거 /adr [new|supersede|lint|index].
 ---
 
 # ADR
@@ -30,8 +30,8 @@ ADR 기록은 결정적 작업이라 "대충/철저히" 강도 축이 없다.
 
 ## 프로젝트 바인딩
 
-서기 스크립트는 **스킬 폴더 안** `scripts/adr.mjs`(자족 — 스킬과 함께 이동)다. 하나의 스크립트가 여러 소비처를 섬기고, 프로젝트 실값(ADR 폴더·인덱스 파일·템플릿·상태 어휘·앵커 루트)은 CLI 플래그로 주입한다 — 기본값은 dashboard 동작 그대로다. 실명령·경로·플래그는 **소비처 프로젝트 트리**의 `.claude/skill-bindings/adr.md`가 정본(cwd-상대 Read — ADR-0004, 스킬 폴더에 프로젝트 바인딩을 두지 않는다). 스캐폴드 템플릿 실체는 `references/formats/`(dashboard = `adr.template.md`, 경량 = `adr-light.template.md`). 골격은 스택을 모른다 — 경로·명령·템플릿을 하드코딩하지 않고, 다른 프로젝트는 자기 트리에 바인딩 파일만 추가한다.
+바인딩 정본·서기 스크립트 위치 = `references/flow.md` 바인딩 절. 스캐폴드 템플릿 실체는 `references/formats/`(dashboard = `adr.template.md`, 경량 = `adr-light.template.md`).
 
 ## 자기개선 피드백
 
-결함·개선점은 **그 자리서 고치지 말고** 작업 종료 후 이 폴더 `feedback.md`에 누적(반영은 관련 주제 재등장 시 사용자 승인 하에). 검증 상태(보장 범위)도 feedback.md가 정본. 정상 사용 기록은 `usage-log.md`에 한 줄(권장·비강제 — 학습용). 전체 규약 = `../_shared/self-improvement-feedback.md`.
+결함·개선점은 그 자리서 고치지 말고 작업 종료 후 `feedback.md`에 누적한다(검증 상태도 그쪽이 정본). 전체 규약 = `../_shared/self-improvement-feedback.md`.

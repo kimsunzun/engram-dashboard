@@ -1,6 +1,6 @@
 ---
 name: code-conventions
-description: 코딩 규약(현재 = 주석)의 정본. 코더·리뷰어 지시서에 규약 파일을 주입해 쓰고, 기존 코드 일괄 정리는 retrofit 스윕으로 돌린다. 트리거 /code-conventions retrofit <규약> [경로...].
+description: 코딩 규약(현재 = 주석)의 정본 — 코더·리뷰어 지시서에 주입해 쓰고, 기존 코드 일괄 정리는 retrofit으로 돌린다. 트리거 /code-conventions retrofit <규약> [경로...].
 ---
 
 # code-conventions
