@@ -19,7 +19,9 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::mcp_config;
-use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
+use engram_dashboard_daemon::control::mcp_server::{
+    start_mcp_server, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
+};
 use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -54,6 +56,8 @@ async fn make_manager_with_control(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
+        // 이 파일은 제어 동사를 부르지 않는다 — 명부 통지 팬아웃은 비운다.
+        Arc::new(RosterBroadcastSlot::new()),
     )
     .await
     .expect("start mcp server");
@@ -86,6 +90,8 @@ async fn make_manager_with_control_channel(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
+        // 이 파일은 제어 동사를 부르지 않는다 — 명부 통지 팬아웃은 비운다.
+        Arc::new(RosterBroadcastSlot::new()),
     )
     .await
     .expect("start mcp server");

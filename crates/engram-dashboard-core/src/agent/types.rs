@@ -211,6 +211,47 @@ pub const CLI_MAIL_FLAGS: [&str; 6] = [
     "--reply-to",
 ];
 
+/// CLI 제어 계열 이름 — `engram agent <동사>` 의 가운데 토큰.
+///
+/// ★우편 계열(`CLI_GROUP_MAIL`)과 달리 프라이밍 판정에 쓰이지 않는다★: 우편은 "가르친 채널 = 깐 배선"
+///   등호(ADR-0128)를 판정자가 지켜야 해서 core 가 그 토큰을 알아야 했지만, 제어는 그런 등호가 없다
+///   (ADR-0132 결정 5 — 권한은 전원 개방). 여기 있는 이유는 **CLI 파서·help·드리프트 테스트가 한 문자열을
+///   보게** 하는 것뿐이다.
+// ADR-0132
+pub const CLI_GROUP_AGENT: &str = "agent";
+
+/// 제어 계열의 동사 전량 — `engram agent <동사>`.
+///
+/// ★`kill`·`rm` 이 없는 것은 미구현이 아니라 **보류된 결정**이다★: 트리에서 지우는 것이 에이전트의 생을
+///   끝내는가(ADR-0122)가 아직 코드와 어긋나 있어(현 `delete_agent` 는 프로필만 지우고 프로세스를 남긴다)
+///   그 둘을 여기 얹으면 새 입구로 그 불일치가 노출된다. 그 결정이 서기 전에는 이 목록에 넣지 말 것.
+// ADR-0132
+// ADR-0122
+pub const CLI_AGENT_VERBS: [&str; 5] = ["list", "spawn", "new", "rename", "move"];
+
+/// 제어 계열 전용 플래그 표기(kebab) 전량 — 파서가 인식하는 집합이자 값 자리 방어의 어휘다
+/// (`CLI_MAIL_FLAGS` 와 같은 규율, 계열별로 따로 둔다 — 한 계열의 플래그가 다른 계열 값 자리를 가로채면
+/// 안 되기 때문이다).
+// ADR-0132
+pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
+
+/// 제어 응답이 싣는 **에이전트 상태 축**(살아 있음·잠듦·없음)의 wire 표기.
+///
+/// ★왜 core 에 있나★: 이 문자열의 생산자(데몬 `control/agent.rs`)와 소비자(CLI 의 응답 판정기)가 **다른
+///   crate** 라, 각자 리터럴을 적으면 한쪽만 바뀌어도 아무도 못 본다 — 증상은 정상 응답이 "읽을 수 없는
+///   shape"(exit 2)로 튀는 거짓 경보다. 한 값을 양쪽이 본다.
+/// ★"없음" 에 해당하는 값이 없는 것은 의도다★ — 부재는 상태값이 아니라 반려 코드(`AGENT_NOT_FOUND`)로
+///   표현된다. 메시지 결말 어휘(`delivered`/`pending`/`failed`)와 섞지 않는다(ADR-0116).
+// ADR-0132
+pub const AGENT_STATE_LIVE: &str = "live";
+pub const AGENT_STATE_SLEEPING: &str = "sleeping";
+
+/// 개명 응답의 `outcome` 어휘 — 위와 같은 이유로 core 가 소유한다. 실패 두 갈래(부재·이름 공간 소진)는
+/// 반려 코드로 나가므로 여기 없다.
+// ADR-0132
+pub const RENAME_OUTCOME_RENAMED: &str = "renamed";
+pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
+
 /// ADR-0094: 스폰 에이전트에 **사전 승인**할 툴 1개의 추상 명세(backend-agnostic). 데몬 컨트롤 채널이
 /// 자기 입구 정의 옆에서 채우고, backend 가 자기 프로그램 문법으로 번역한다(claude = `--allowedTools`).
 ///
@@ -513,6 +554,15 @@ pub enum PtyError {
     /// transport가 해당 동작을 지원하지 않음(ApiTransport 껍데기 등). 동사별 미지원 신호.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// ★명부 총량 상한에 걸려 **새 에이전트 등록을 거부**했다(폭주 백스톱 — `AgentManager::MAX_ROSTER_SIZE`)★.
+    ///
+    /// ★전용 변형인 이유★: 호출부가 이걸 이름 공간 소진(`Unsupported`)과 구분해야 한다 — 사용자가 할 일이
+    ///   정반대다(이름을 바꿔 다시 시도 vs 에이전트를 지워 자리를 비우기). 문자열 매칭으로 가르는 것은
+    ///   문구가 바뀌는 순간 조용히 깨진다.
+    /// ★기존 에이전트에는 걸리지 않는다★: 상한은 **신규 등록**만 본다. 이미 상한을 넘은 명부의 복원·재spawn
+    ///   (같은 id 의 화신 교체)은 그대로 통과한다 — 백스톱이 기존 팀을 인질로 잡으면 복구가 불가능해진다.
+    #[error("roster is full: {current} agents (ceiling {limit}) — refusing to register another")]
+    RosterFull { current: usize, limit: usize },
 }
 
 /// 구독 replay 분기 결과(코어 중립 — 데몬이 protocol::SubscribeAction 으로 매핑).

@@ -1,6 +1,7 @@
-//! `engram` — 제어 평면 CLI(ADR-0086 스텝 2 · S18 D · ADR-0132). 스폰된 에이전트가 셸로 팀에 말을 걸고
-//! 자기 미결을 확인하는 최소 클라이언트다. 지금 이 실행파일이 소유한 계열은 **`mail` 하나**(우편 —
-//! MCP 툴 2종의 미러. `group` 툴/서브커맨드는 ADR-0111 결정 4 로 제거됐다).
+//! `engram` — 제어 평면 CLI(ADR-0086 스텝 2 · S18 D · ADR-0132). 스폰된 에이전트가 셸로 팀에 말을 걸고,
+//! 자기 미결을 확인하고, 팀의 구성을 바꾸는 최소 클라이언트다. 계열은 둘이다: **`mail`**(우편 — MCP 툴
+//! 2종의 미러. `group` 툴/서브커맨드는 ADR-0111 결정 4 로 제거됐다)과 **`agent`**(에이전트 제어 —
+//! 짝이 되는 MCP 툴이 **없다**. 제어를 CLI 로만 내는 것이 ADR-0132 의 결정이다).
 //!
 //! ★인자 표면의 정본은 이 파일이다★ — S18 spec §6 의 CLI 블록은 그룹 구조 이전의 표기라 인자 계약으로
 //!   읽으면 안 된다(그 절이 자기 supersede 를 적고 있다). 그 spec 이 계속 정본인 것은 **응답 shape·상태
@@ -24,7 +25,17 @@
 //! engram mail send --to <수신자> --body-stdin <<'EOF' … EOF   # 인용 지옥 회피(D)
 //! engram mail status <m-id>                                   # 그 메시지의 배달 장부
 //! engram mail pending                                         # 내 미결(보낸 것·기다리는 것·내가 답할 것)
+//!
+//! engram agent list                                           # 명부(산 것·잠든 것)
+//! engram agent spawn <이름>                                    # 있는 에이전트 깨우기
+//! engram agent spawn --cwd <경로> [--name <이름>]               # 새로 만들어 바로 띄우기
+//! engram agent new --cwd <경로> [--name <이름>]                 # 만들기만(잠든 채)
+//! engram agent rename <이름> <새-이름>
+//! engram agent move <이름> --parent <이름|none>                 # none = 루트로 떼기
 //! ```
+//!
+//! ★제어 동사의 **의미 검증도 데몬 단독**이다★(우편과 같은 규율): 대상 실재·이름 유일성·계층 규칙은 전부
+//!   데몬이 판정한다. CLI 는 형태(값 누락·모르는 플래그·`spawn` 두 형태의 양립 불가)만 본다.
 //!
 //! ★동작★: 환경변수 `ENGRAM_TOKEN`(Bearer 토큰) + `ENGRAM_CONTROL_URL`(데몬 제어 base URL)을 읽어
 //!   `<base>/control/<route>` 로 JSON 을 POST 한다(Authorization: Bearer <token>). 응답 body 를 stdout 에
@@ -60,7 +71,9 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use engram_dashboard_core::agent::types::{
-    CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
+    AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS, CLI_EXE_NAME,
+    CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS, RENAME_OUTCOME_RENAMED,
+    RENAME_OUTCOME_UNCHANGED,
 };
 
 /// 연결/응답 타임아웃(로컬 데몬이라 짧게). 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
@@ -79,7 +92,8 @@ const HELP_ROOT: &str = "\
 {tool} — CLI for the Engram broker daemon. Usage: {tool} <group> <verb> [flags]
 
 Groups:
-  mail    message your teammates and check your own outstanding items
+  mail     message your teammates and check your own outstanding items
+  agent    list, create, start, rename and re-parent the agents on this team
 
 Run `{tool} help <group>` for that group's verbs (`{tool} <group> --help` works too).
 ";
@@ -108,6 +122,38 @@ Your identity is taken from the token the broker injected, never from an argumen
 Exit codes: 0 = accepted or read | 1 = rejected, or the daemon could not be reached — stdout carries the daemon's own reply when there was one, and {\"status\":\"error\",\"code\":...,\"hint\":...} when this CLI rejected the call itself | 2 = the daemon answered 2xx in a shape this CLI cannot read; report it, retrying will not help. Judge the outcome by the exit code, not by the shape of stdout.
 ";
 
+/// `help agent` — 제어 동사 전량. `mail` 화면과 같은 규율(동사당 한 줄 + 플래그, 산문 금지).
+///
+/// ★없는 동사를 여기 적지 않는다★: 죽이기·지우기는 표면에 없다(`CLI_AGENT_VERBS` 주석이 사유의 정본).
+///   "지금은 안 된다" 는 안내도 넣지 않는다 — 읽는 쪽이 LLM 이라 목록에 있는 낱말은 시도 대상이 된다.
+const HELP_AGENT: &str = "\
+{tool} agent — the agents on this team: who exists, and starting or re-arranging them.
+
+  {tool} agent list
+      Every agent, running or asleep. One JSON object: agents[] with id, name, state (live|sleeping), cwd, parent.
+      Names are how you address teammates in `{tool} mail send --to <name>`.
+  {tool} agent spawn <name>
+      Start an agent that already exists (it keeps its own past session when it has one).
+  {tool} agent spawn --cwd <path> [--name <name>]
+      Create a new agent in that folder and start it right away.
+  {tool} agent new --cwd <path> [--name <name>]
+      Create a new agent without starting it. It shows up as sleeping.
+      --cwd <path>           the folder the agent works in (required)
+      --name <name>          what to call it; without this the folder name is used
+  {tool} agent rename <name> <new-name>
+      Rename an agent. `outcome` says what happened: renamed (with the name it actually got — a
+      number is appended when that name is taken) or unchanged (it already held that name).
+  {tool} agent move <name> --parent <name|none>
+      Put an agent under another one, or `--parent none` to move it back to the top level.
+      --parent <name|none>   the new parent, or the word none to detach (required)
+
+Agents are named exactly: no case-folding, no prefixes. If two agents share a name the command is
+refused rather than guessing — pass the id from `{tool} agent list` instead. An agent literally
+called `none` can only be used as a parent by its id.
+
+Exit codes: 0 = done | 1 = refused, or the daemon could not be reached — stdout carries the daemon's own reply when there was one, and {\"status\":\"error\",\"code\":...,\"hint\":...} when this CLI refused the call itself | 2 = the daemon answered 2xx in a shape this CLI cannot read; report it, retrying will not help. Judge the outcome by the exit code, not by the shape of stdout.
+";
+
 fn render_help(template: &str) -> String {
     template.replace(HELP_TOOL_SLOT, CLI_EXE_NAME)
 }
@@ -127,19 +173,20 @@ fn run(args: &[String]) -> i32 {
         }
     };
     // help 는 크레덴셜도 데몬도 없이 답한다 — 표면을 배우는 자리가 "먼저 스폰돼 있어야" 하면 발견이 아니다.
-    let mail = match parsed {
+    let command = match parsed {
         ParsedCommand::Help(template) => {
             println!("{}", render_help(template));
             return 0;
         }
-        ParsedCommand::Mail(m) => m,
-    };
-    let command = match materialize_body(mail, read_stdin_to_string) {
-        Ok(c) => c,
-        Err(msg) => {
-            print_error("BAD_ARGS", &msg);
-            return 1;
-        }
+        // 제어 동사는 stdin 을 읽지 않으므로 materialize 단계가 없다(본문이라는 개념이 없다).
+        ParsedCommand::Agent(a) => Command::Agent(a),
+        ParsedCommand::Mail(m) => match materialize_body(m, read_stdin_to_string) {
+            Ok(c) => c,
+            Err(msg) => {
+                print_error("BAD_ARGS", &msg);
+                return 1;
+            }
+        },
     };
 
     let token = match std::env::var("ENGRAM_TOKEN") {
@@ -165,15 +212,18 @@ fn run(args: &[String]) -> i32 {
 
     let route = command.route();
     let request_body = command.request_body();
-    let is_send = matches!(command, Command::Send { .. });
     match post_json(&base, route, &token, &request_body) {
         Ok(resp) => {
             // 비-2xx 라도 body 를 찍는다 — 교정 JSON 이 실려 있어 발신 에이전트가 파싱한다.
             println!("{}", resp.body);
-            if is_send {
-                exit_code_for_response(resp.status, &resp.body)
-            } else {
-                exit_code_for_query_response(resp.status, &resp.body)
+            // ★판정기는 계열·동사가 고른다★: 발송은 고정 shape, 우편 조회는 "에러가 아니면 성공", 제어는
+            //   동사별 성공 shape 를 직접 본다(각 함수 doc 이 그 차이의 근거).
+            match &command {
+                Command::Send(_) => exit_code_for_response(resp.status, &resp.body),
+                Command::Status { .. } | Command::Pending => {
+                    exit_code_for_query_response(resp.status, &resp.body)
+                }
+                Command::Agent(a) => exit_code_for_agent_response(a, resp.status, &resp.body),
             }
         }
         Err(e) => {
@@ -239,6 +289,33 @@ enum ParsedCommand {
     /// 출력할 help 템플릿(`render_help` 가 실행파일 이름을 채운다).
     Help(&'static str),
     Mail(ParsedMail),
+    Agent(ParsedAgent),
+}
+
+/// 제어 계열의 파싱 결과(ADR-0132 결정 6). 데몬 검증과 **겹치지 않는 것만** 여기서 본다 — 형태(값 누락·
+/// 모르는 플래그·양립 불가 조합)뿐이고, 대상이 실재하는지·이름이 유일한지는 데몬이 판정한다.
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedAgent {
+    List,
+    /// `target` 과 `cwd` 는 **정확히 하나만** 채워진다(파서가 그 전에 반려한다 — `parse_agent_spawn`).
+    Spawn {
+        target: Option<String>,
+        cwd: Option<String>,
+        name: Option<String>,
+    },
+    New {
+        cwd: String,
+        name: Option<String>,
+    },
+    Rename {
+        target: String,
+        name: String,
+    },
+    Move {
+        target: String,
+        /// `None` = 루트로 떼기(`--parent none`).
+        parent: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -261,6 +338,7 @@ enum Command {
     Send(CliArgs),
     Status { id: String },
     Pending,
+    Agent(ParsedAgent),
 }
 
 impl Command {
@@ -270,6 +348,7 @@ impl Command {
         match self {
             Command::Send(_) => "/control/send",
             Command::Status { .. } | Command::Pending => "/control/messages",
+            Command::Agent(_) => "/control/agent",
         }
     }
 
@@ -278,6 +357,45 @@ impl Command {
             Command::Send(a) => build_request_body(a),
             Command::Status { id } => serde_json::json!({ "id": id }).to_string(),
             Command::Pending => serde_json::json!({}).to_string(),
+            Command::Agent(a) => build_agent_body(a).to_string(),
+        }
+    }
+}
+
+/// 제어 동사의 요청 JSON. **동사는 바디의 `verb` 로 간다**(경로가 아니라) — 라우트 상수 하나로 계열 전체를
+/// 태우기 위해서다(데몬측 `CONTROL_AGENT_PATH` 주석).
+///
+/// ★미지정 인자는 키 자체를 안 싣는다★ — `mail` 쪽과 같은 규율. 단 `move` 의 `parent` 는 **null 을 명시**
+///   한다: 그 자리에서 부재는 "안 줬다" 가 아니라 "루트로 떼라" 는 **적극적 의도**라, 키를 빼면 두 뜻이
+///   구별되지 않는다.
+fn build_agent_body(agent: &ParsedAgent) -> serde_json::Value {
+    match agent {
+        ParsedAgent::List => serde_json::json!({ "verb": "list" }),
+        ParsedAgent::Spawn { target, cwd, name } => {
+            let mut v = serde_json::json!({ "verb": "spawn" });
+            if let Some(t) = target {
+                v["target"] = serde_json::Value::String(t.clone());
+            }
+            if let Some(c) = cwd {
+                v["cwd"] = serde_json::Value::String(c.clone());
+            }
+            if let Some(n) = name {
+                v["name"] = serde_json::Value::String(n.clone());
+            }
+            v
+        }
+        ParsedAgent::New { cwd, name } => {
+            let mut v = serde_json::json!({ "verb": "new", "cwd": cwd });
+            if let Some(n) = name {
+                v["name"] = serde_json::Value::String(n.clone());
+            }
+            v
+        }
+        ParsedAgent::Rename { target, name } => {
+            serde_json::json!({ "verb": "rename", "target": target, "name": name })
+        }
+        ParsedAgent::Move { target, parent } => {
+            serde_json::json!({ "verb": "move", "target": target, "parent": parent })
         }
     }
 }
@@ -299,6 +417,14 @@ fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
                 return Ok(ParsedCommand::Help(HELP_MAIL));
             }
             parse_mail(rest).map(ParsedCommand::Mail)
+        }
+        CLI_GROUP_AGENT => {
+            let rest = &args[1..];
+            if rest.first().is_some_and(|a| is_help_token(a)) {
+                reject_help_with_extra_args(rest)?;
+                return Ok(ParsedCommand::Help(HELP_AGENT));
+            }
+            parse_agent(rest).map(ParsedCommand::Agent)
         }
         other if other.starts_with('-') => Err(format!(
             "the first argument must be a group, not a flag ({other}) — e.g. `{CLI_EXE_NAME} {CLI_GROUP_MAIL} send --to <name> --body <text>`; run `{CLI_EXE_NAME} help` to list groups"
@@ -338,6 +464,7 @@ fn parse_help_topic(rest: &[String]) -> Result<ParsedCommand, String> {
     reject_help_with_extra_args(rest)?;
     match topic {
         CLI_GROUP_MAIL => Ok(ParsedCommand::Help(HELP_MAIL)),
+        CLI_GROUP_AGENT => Ok(ParsedCommand::Help(HELP_AGENT)),
         // help 뒤에 또 help 토큰이 오는 것은 계열 이름이 아니다 — 규칙("help 는 단독 호출") 그대로 반려한다.
         other => Err(format!(
             "unknown help topic: {other} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`"
@@ -389,29 +516,263 @@ fn parse_mail(rest: &[String]) -> Result<ParsedMail, String> {
     }
 }
 
+/// `--parent` 가 "부모 없음(루트)" 을 뜻하는 낱말.
+///
+/// ★플래그를 생략하는 형태로 두지 않은 이유★: 생략은 "안 줬다" 와 구분되지 않아 오타 하나가 조용히 루트로
+///   떼는 동작이 된다. 명시 낱말이면 의도가 argv 에 남는다.
+/// ★대가(문서화된 한계)★: **`none` 이라는 이름의 에이전트는 이 플래그로 부모 지정이 안 된다** — 그 경우는
+///   id 로 지목한다(help 에 적혀 있다). 이름이 유일해도 낱말과 이름은 같은 공간을 쓰므로 어느 쪽이든 한
+///   자리는 내줘야 하고, 데몬이 그 이름을 실제로 갖는지 물어보는 왕복은 파싱을 네트워크에 매단다.
+const AGENT_PARENT_NONE: &str = "none";
+
+fn parse_agent(rest: &[String]) -> Result<ParsedAgent, String> {
+    match rest.first().map(|s| s.as_str()) {
+        Some("list") => {
+            if rest.len() > 1 {
+                return Err(format!(
+                    "list takes no arguments: {} — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`",
+                    rest[1]
+                ));
+            }
+            Ok(ParsedAgent::List)
+        }
+        Some("spawn") => parse_agent_spawn(&rest[1..]),
+        Some("new") => parse_agent_new(&rest[1..]),
+        Some("rename") => parse_agent_rename(&rest[1..]),
+        Some("move") => parse_agent_move(&rest[1..]),
+        Some(other) => Err(format!(
+            "unknown {CLI_GROUP_AGENT} verb: {other} — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )),
+        None => Err(format!(
+            "{CLI_GROUP_AGENT} needs a verb ({}) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`",
+            CLI_AGENT_VERBS.join("|")
+        )),
+    }
+}
+
+/// 위치 인자 1개를 **한 번만** 받는다 — 값 플래그의 `take_once` 와 같은 규율(두 번째 값이 첫 번째를 조용히
+/// 덮지 않는다).
+///
+/// ★`-` 로 시작하면 이름이 아니라 오타다★: 에이전트 이름은 cwd basename 또는 사용자가 준 표시명이라 대시로
+///   시작하지 않는다. 그대로 실어 보내면 `--help` 가 에이전트 이름으로 조회돼 무의미한 왕복 + NOT_FOUND 로
+///   끝난다(우편의 `status <id>` 자리와 같은 판단).
+/// 제어 계열 값 플래그 — `take_once` 에 **빈 값 반려**를 더한다.
+///
+/// ★왜 계열 전용인가★: 빈 값이 인자 오류인 것은 이 계열의 성질이다(이름·경로·부모는 전부 무언가를 가리키는
+///   토큰이다). 우편 본문은 반대로 빈 문자열이 유효할 수 있어 공용 `take_once` 에 이 규칙을 얹지 않는다 —
+///   그쪽 동작을 바꾸지 않는다.
+/// ★막는 사고★: 셸에서 미설정 변수는 **빈 인자**로 펼쳐진다(`--parent "$UNSET"`). 그걸 값으로 실어 보내면
+///   데몬이 반려하긴 하지만(같은 규율), 인자 오류가 네트워크를 타지 않는다는 이 파일의 규율에 어긋난다.
+fn take_agent_value(
+    slot: &mut Option<String>,
+    flag: &str,
+    value: Option<&String>,
+) -> Result<(), String> {
+    take_once(slot, flag, value, CLI_GROUP_AGENT, &CLI_AGENT_FLAGS)?;
+    if slot.as_deref().is_some_and(|s| s.trim().is_empty()) {
+        return Err(format!(
+            "{flag} was given an empty value — that is usually an unset shell variable; pass a value or drop the flag; run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        ));
+    }
+    Ok(())
+}
+
+fn take_positional(
+    slot: &mut Option<String>,
+    what: &str,
+    value: &str,
+    verb: &str,
+) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!(
+            "{verb} was given an empty {what} — that is usually an unset shell variable; run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        ));
+    }
+    if value.starts_with('-') {
+        return Err(format!(
+            "`{value}` is not {what} — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}` for this group's flags"
+        ));
+    }
+    if slot.is_some() {
+        return Err(format!(
+            "{verb} takes one {what}, but got a second one ({value}) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        ));
+    }
+    *slot = Some(value.to_string());
+    Ok(())
+}
+
+fn unknown_agent_argument(arg: &str) -> String {
+    format!(
+        "unknown argument: {arg} — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}` for this group's flags"
+    )
+}
+
+/// `spawn <name>`(깨우기) 와 `spawn --cwd <path>`(만들어서 띄우기)가 한 동사를 나눠 쓴다.
+///
+/// ★두 형태를 여기서 갈라 반려한다 — 네트워크 전에★: 둘 다 주거나 둘 다 안 준 호출은 데몬도 반려하지만,
+///   왕복 없이 끝내는 편이 낫다(인자 오류가 네트워크를 타지 않는다는 이 파일의 규율). 데몬 쪽 검사는
+///   지우지 말 것 — 이 CLI 가 그 라우트의 유일한 호출자라는 보장은 없다.
+fn parse_agent_spawn(args: &[String]) -> Result<ParsedAgent, String> {
+    let mut target: Option<String> = None;
+    let mut cwd: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cwd" => {
+                i += 1;
+                take_agent_value(&mut cwd, "--cwd", args.get(i))?;
+            }
+            "--name" => {
+                i += 1;
+                take_agent_value(&mut name, "--name", args.get(i))?;
+            }
+            other if other.starts_with('-') => return Err(unknown_agent_argument(other)),
+            other => take_positional(&mut target, "an agent name", other, "spawn")?,
+        }
+        i += 1;
+    }
+    match (&target, &cwd) {
+        (Some(_), Some(_)) => Err(format!(
+            "spawn takes either the name of an agent to wake or --cwd for a new one, not both — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )),
+        (None, None) => Err(format!(
+            "spawn needs either the name of an agent to wake or --cwd <path> to create a new one — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )),
+        // ★조용히 무시하지 않는다★: 깨우기는 이름을 바꾸지 않으므로 `--name` 이 아무 일도 못 한다. 삼키면
+        //   호출자는 이름이 바뀐 줄 안다(개명은 `rename` 이다).
+        (Some(t), None) if name.is_some() => Err(format!(
+            "--name does not apply when waking an existing agent ({t}); use `{CLI_EXE_NAME} {CLI_GROUP_AGENT} rename` to change a name, or drop --name"
+        )),
+        _ => Ok(ParsedAgent::Spawn {
+            target: target.clone(),
+            cwd: cwd.clone(),
+            name,
+        }),
+    }
+}
+
+fn parse_agent_new(args: &[String]) -> Result<ParsedAgent, String> {
+    let mut cwd: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cwd" => {
+                i += 1;
+                take_agent_value(&mut cwd, "--cwd", args.get(i))?;
+            }
+            "--name" => {
+                i += 1;
+                take_agent_value(&mut name, "--name", args.get(i))?;
+            }
+            other if other.starts_with('-') => return Err(unknown_agent_argument(other)),
+            other => {
+                return Err(format!(
+                    "new takes no positional arguments ({other}); the folder goes in --cwd <path> — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+                ))
+            }
+        }
+        i += 1;
+    }
+    let cwd = cwd.ok_or_else(|| {
+        format!("new requires --cwd <path> — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`")
+    })?;
+    Ok(ParsedAgent::New { cwd, name })
+}
+
+fn parse_agent_rename(args: &[String]) -> Result<ParsedAgent, String> {
+    let mut target: Option<String> = None;
+    let mut name: Option<String> = None;
+    for arg in args {
+        if arg.starts_with('-') {
+            return Err(unknown_agent_argument(arg));
+        }
+        // 첫 위치 인자가 대상, 둘째가 새 이름. 셋째부터는 `take_positional` 이 반려한다.
+        if target.is_none() {
+            take_positional(&mut target, "an agent name", arg, "rename")?;
+        } else {
+            take_positional(&mut name, "a new name", arg, "rename")?;
+        }
+    }
+    let target = target.ok_or_else(|| {
+        format!(
+            "rename needs the agent to rename and its new name, e.g. `{CLI_EXE_NAME} {CLI_GROUP_AGENT} rename qa-bravo qa-lead` — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )
+    })?;
+    let name = name.ok_or_else(|| {
+        format!(
+            "rename needs the new name, e.g. `{CLI_EXE_NAME} {CLI_GROUP_AGENT} rename {target} qa-lead` — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )
+    })?;
+    Ok(ParsedAgent::Rename { target, name })
+}
+
+fn parse_agent_move(args: &[String]) -> Result<ParsedAgent, String> {
+    let mut target: Option<String> = None;
+    let mut parent: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--parent" => {
+                i += 1;
+                take_agent_value(&mut parent, "--parent", args.get(i))?;
+            }
+            other if other.starts_with('-') => return Err(unknown_agent_argument(other)),
+            other => take_positional(&mut target, "an agent name", other, "move")?,
+        }
+        i += 1;
+    }
+    let target = target.ok_or_else(|| {
+        format!(
+            "move needs the agent to move, e.g. `{CLI_EXE_NAME} {CLI_GROUP_AGENT} move qa-bravo --parent lead` — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )
+    })?;
+    let parent = parent.ok_or_else(|| {
+        format!(
+            "move requires --parent <name|{AGENT_PARENT_NONE}> ({AGENT_PARENT_NONE} moves it back to the top level) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+        )
+    })?;
+    Ok(ParsedAgent::Move {
+        target,
+        parent: (parent != AGENT_PARENT_NONE).then_some(parent),
+    })
+}
+
 /// 값 플래그 1개를 **한 번만** 받는다.
 ///
 /// ★두 번째 값이 첫 번째를 조용히 덮게 두지 않는다★: `--body first --body second` 는 예전엔 `second` 만
 ///   보내고 `first` 를 말없이 버렸다. argv 를 이어 붙여 명령을 고쳐 쓰는 호출자(에이전트가 흔히 그렇게
 ///   한다)는 그 유실을 볼 방법이 없다 — `--body` ↔ `--body-stdin` 상호배타를 반려하는 이유와 **같은**
 ///   이유라, 같은 자리에서 같게 끊는다.
-fn take_once(slot: &mut Option<String>, flag: &str, value: Option<&String>) -> Result<(), String> {
+/// ★`group`·`known_flags` 를 받는 이유★: 두 계열이 각자의 플래그 집합과 각자의 help 화면을 갖는다. 한
+///   계열의 목록으로 다른 계열의 값 자리를 방어하면 `--parent` 를 본문으로 삼키는 부류의 사고가 되살아난다.
+fn take_once(
+    slot: &mut Option<String>,
+    flag: &str,
+    value: Option<&String>,
+    group: &str,
+    known_flags: &[&str],
+) -> Result<(), String> {
     let value = value.ok_or_else(|| {
-        format!("{flag} requires a value — run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags")
+        format!(
+            "{flag} requires a value — run `{CLI_EXE_NAME} help {group}` for this group's flags"
+        )
     })?;
     // ★값 자리에 **우리가 아는 플래그**가 오면 값이 아니라 빠뜨린 값이다★: `--body --body-stdin` 은 예전엔
     //   `--body-stdin` 을 본문 문자열로 삼켰다 — 그러면 상호배타 검사가 발화하지 않고, 파이프로 들어온
     //   진짜 본문이 버려진 채 리터럴 `--body-stdin` 이 팀에 배달된다(exit 0 으로).
     // ★판정 기준은 `-` 로 시작하는지가 **아니라** 이 CLI 가 아는 플래그인지다★: 본문·수신자는 임의
     //   텍스트라 `--body -h` 나 `--body --anything-we-do-not-know` 는 그대로 값으로 실려야 한다.
-    if CLI_MAIL_FLAGS.contains(&value.as_str()) {
+    if known_flags.contains(&value.as_str()) {
         return Err(format!(
-            "{flag} has no value — the next argument is another flag ({value}); give {flag} its value, or drop it; run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags"
+            "{flag} has no value — the next argument is another flag ({value}); give {flag} its value, or drop it; run `{CLI_EXE_NAME} help {group}` for this group's flags"
         ));
     }
     if slot.is_some() {
         return Err(format!(
-            "{flag} was given more than once — pass it once (the later value would silently replace the earlier one); run `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}` for this group's flags"
+            "{flag} was given more than once — pass it once (the later value would silently replace the earlier one); run `{CLI_EXE_NAME} help {group}` for this group's flags"
         ));
     }
     *slot = Some(value.clone());
@@ -432,22 +793,34 @@ fn parse_send_args(args: &[String]) -> Result<ParsedMail, String> {
         match args[i].as_str() {
             "--to" => {
                 i += 1;
-                take_once(&mut to, "--to", args.get(i))?;
+                take_once(&mut to, "--to", args.get(i), CLI_GROUP_MAIL, &CLI_MAIL_FLAGS)?;
             }
             "--body" => {
                 i += 1;
-                take_once(&mut body, "--body", args.get(i))?;
+                take_once(&mut body, "--body", args.get(i), CLI_GROUP_MAIL, &CLI_MAIL_FLAGS)?;
             }
             // 불리언 플래그는 반복돼도 버려지는 값이 없다(같은 뜻의 반복) — 그래서 반려하지 않는다.
             "--body-stdin" => body_stdin = true,
             "--request" => request = true,
             "--reply-by" => {
                 i += 1;
-                take_once(&mut reply_by, "--reply-by", args.get(i))?;
+                take_once(
+                    &mut reply_by,
+                    "--reply-by",
+                    args.get(i),
+                    CLI_GROUP_MAIL,
+                    &CLI_MAIL_FLAGS,
+                )?;
             }
             "--reply-to" => {
                 i += 1;
-                take_once(&mut reply_to, "--reply-to", args.get(i))?;
+                take_once(
+                    &mut reply_to,
+                    "--reply-to",
+                    args.get(i),
+                    CLI_GROUP_MAIL,
+                    &CLI_MAIL_FLAGS,
+                )?;
             }
             other => {
                 return Err(format!(
@@ -710,6 +1083,115 @@ fn exit_code_for_query_response(status: u16, resp_body: &str) -> i32 {
     0
 }
 
+/// ★제어 동사 응답의 exit code 매핑(ADR-0132 조각 ②)★ — `agent` 계열 전용.
+///
+/// ★왜 우편 조회 판정기를 쓰지 않는가(load-bearing)★: 그쪽은 **"검증된 에러가 아니면 성공"** 이라, 2xx 로
+///   온 `{}` 나 `{"status":"ok"}` 도 exit 0 이다. 우편에서는 그 관대함이 감수된 선재 결함이고(T-19) 이번에
+///   건드리지 않는다 — 응답 shape 이 동사마다 다른데 CLI 가 그걸 다시 기술하면 두 곳을 함께 고쳐야 하기
+///   때문이다. **제어는 사정이 다르다**: 이 계열은 양쪽 끝(데몬 라우트·이 CLI)을 우리가 같은 조각에서
+///   만들었으므로 동사별 성공 shape 이 계약이고, 그걸 검사할 수 있다.
+/// ★검사하지 않으면 나는 증상★: `engram agent new --cwd …` 가 아무것도 만들지 않은 응답에 대해 exit 0 을
+///   내고, 호출자(LLM)는 만들어졌다고 믿고 그 이름으로 편지를 쓴다. 그래서 **변경의 증거를 싣지 않은 2xx 는
+///   성공이 아니라 "읽을 수 없는 응답"(2)** 이다 — 재시도가 아니라 보고 대상이라는 뜻이고, 반려(1)와도 갈린다.
+fn exit_code_for_agent_response(agent: &ParsedAgent, status: u16, resp_body: &str) -> i32 {
+    if !(200..300).contains(&status) {
+        return EXIT_FAILED;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(resp_body) else {
+        return EXIT_FAILED;
+    };
+    if is_validated_error_shape(&v) {
+        return EXIT_FAILED;
+    }
+    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+        eprintln!(
+            "{CLI_EXE_NAME}: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
+        );
+        return EXIT_MALFORMED_SUCCESS;
+    }
+    // ★증거는 **있기만** 해선 안 되고 **요청한 동작과 맞아야** 한다★: 깨우기가 "만들었다" 고 답하거나
+    //   루트로 떼라는 요청이 부모를 달고 오면, 필드가 다 있어도 그건 우리가 시킨 일의 결과가 아니다.
+    //   그런 응답을 성공으로 읽으면 호출자는 일어나지 않은 일을 사실로 기록한다.
+    let ok = match agent {
+        // 빈 명부는 정상적인 답이다 — 배열이라는 것과 각 행의 형태만 본다. 행의 형태는 `help agent` 가
+        //   약속하는 다섯 필드 그대로다 — 약속과 검사가 갈리면 둘 중 하나가 거짓말이 된다.
+        ParsedAgent::List => v
+            .get("agents")
+            .and_then(|a| a.as_array())
+            .is_some_and(|rows| rows.iter().all(list_row_ok)),
+        // 띄우기는 **무엇이 떴는지** + **깨운 것인지 만든 것인지**가 증거다. 후자는 우리가 무엇을 요청했는지로
+        //   이미 정해져 있으므로(`cwd` 를 준 호출만 새로 만든다) 값이 그 요청과 맞는지까지 본다.
+        ParsedAgent::Spawn { cwd, .. } => {
+            agent_object_ok(&v, true) && v.get("created") == Some(&serde_json::json!(cwd.is_some()))
+        }
+        // `new` 는 프로세스를 띄우지 않는다 — 살아 있다는 답은 우리가 시킨 일의 결과일 수 없다.
+        ParsedAgent::New { .. } => {
+            agent_object_ok(&v, true)
+                && v["agent"].get("state").and_then(|s| s.as_str()) == Some(AGENT_STATE_SLEEPING)
+        }
+        // 개명은 **확정된 이름**과 결말이 증거다(확정 이름은 요청 이름과 다를 수 있어 값 자체는 대조하지 않는다).
+        ParsedAgent::Rename { .. } => {
+            agent_object_ok(&v, false)
+                && v.get("outcome")
+                    .and_then(|o| o.as_str())
+                    .is_some_and(|o| o == RENAME_OUTCOME_RENAMED || o == RENAME_OUTCOME_UNCHANGED)
+        }
+        // 이동은 **결과 부모**가 증거다. 데몬은 id 로 답하고 우리는 이름으로 물었으니 값은 대조할 수 없지만,
+        //   **붙였나 뗐나**는 우리가 고른 축이라 그건 맞아야 한다.
+        ParsedAgent::Move { parent, .. } => {
+            agent_object_ok(&v, false)
+                && match parent {
+                    None => v.get("parent").is_some_and(|p| p.is_null()),
+                    Some(_) => v
+                        .get("parent")
+                        .is_some_and(|p| p.as_str().is_some_and(|s| !s.is_empty())),
+                }
+        }
+    };
+    if ok {
+        return 0;
+    }
+    eprintln!(
+        "{CLI_EXE_NAME}: malformed success response — the daemon answered 2xx without the evidence this verb must carry (see `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`)"
+    );
+    EXIT_MALFORMED_SUCCESS
+}
+
+/// `list` 행 하나 — **`engram help agent` 가 약속하는 다섯 필드**가 정본이다.
+///
+/// ★`cwd`·`parent` 는 값 대신 **형태**만 본다★: 경로는 비어 있을 수 있고(저장된 cwd 가 그럴 수 있다) 부모는
+///   최상위면 null 이다. 요구하는 것은 "그 자리가 답해졌다" 이지 특정 값이 아니다.
+fn list_row_ok(row: &serde_json::Value) -> bool {
+    nonempty_str(row, "id")
+        && nonempty_str(row, "name")
+        && has_agent_state(row)
+        && row.get("cwd").is_some_and(|c| c.is_string())
+        && row
+            .get("parent")
+            .is_some_and(|p| p.is_null() || p.as_str().is_some_and(|s| !s.is_empty()))
+}
+
+fn nonempty_str(v: &serde_json::Value, key: &str) -> bool {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+fn has_agent_state(v: &serde_json::Value) -> bool {
+    v.get("state")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| s == AGENT_STATE_LIVE || s == AGENT_STATE_SLEEPING)
+}
+
+/// 변경 동사 공통 증거 — 어느 에이전트인지(id·이름). `with_state` 는 생사까지 실리는 동사에만 켠다
+/// (개명·이동은 생사를 바꾸지 않으므로 그 필드를 요구하지 않는다).
+fn agent_object_ok(v: &serde_json::Value, with_state: bool) -> bool {
+    let Some(a) = v.get("agent") else {
+        return false;
+    };
+    nonempty_str(a, "id") && nonempty_str(a, "name") && (!with_state || has_agent_state(a))
+}
+
 /// (Debug = 단위 테스트에서 expect_err 시 Ok 쪽 표시용.)
 #[derive(Debug)]
 struct HttpResponse {
@@ -900,7 +1382,7 @@ mod tests {
     fn parse_mail_command(args: &[String]) -> Result<ParsedMail, String> {
         match parse_command(args)? {
             ParsedCommand::Mail(m) => Ok(m),
-            ParsedCommand::Help(_) => Err("help 는 우편 커맨드가 아니다".to_string()),
+            other => Err(format!("우편 커맨드가 아니다: {other:?}")),
         }
     }
 
@@ -1698,6 +2180,387 @@ mod tests {
                 "파서가 모르는 동사가 공용 목록에 있다: {verb} ({err})"
             );
         }
+        for verb in CLI_AGENT_VERBS {
+            let err = parse_command(&argv(&[CLI_GROUP_AGENT, verb]))
+                .err()
+                .unwrap_or_default();
+            assert!(
+                !err.contains("unknown"),
+                "파서가 모르는 동사가 공용 목록에 있다: {verb} ({err})"
+            );
+        }
+        // 제어 플래그는 동사마다 쓰이는 자리가 달라(`--parent` 는 move 전용) 계열의 **어느 동사에선가**
+        //   인식되면 통과로 본다 — 어디서도 안 알려지는 플래그만 잡는다.
+        for flag in CLI_AGENT_FLAGS {
+            let recognised = CLI_AGENT_VERBS.iter().any(|verb| {
+                !parse_command(&argv(&[CLI_GROUP_AGENT, verb, flag]))
+                    .err()
+                    .unwrap_or_default()
+                    .contains("unknown argument")
+            });
+            assert!(
+                recognised,
+                "파서가 어느 동사에서도 모르는 플래그가 공용 목록에 있다: {flag}"
+            );
+        }
+    }
+
+    // ── ADR-0132 조각 ②: 제어 계열(`agent`) ──────────────────────────────────────────
+
+    fn parse_agent_command(args: &[&str]) -> Result<ParsedAgent, String> {
+        match parse_command(&argv(args))? {
+            ParsedCommand::Agent(a) => Ok(a),
+            other => Err(format!("제어 커맨드가 아니다: {other:?}")),
+        }
+    }
+
+    /// 동사별 wire(라우트 + 바디) — 계열 전체가 라우트 하나를 탄다.
+    fn agent_wire(args: &[&str]) -> (&'static str, serde_json::Value) {
+        let cmd = Command::Agent(parse_agent_command(args).expect("parse"));
+        let body: serde_json::Value =
+            serde_json::from_str(&cmd.request_body()).expect("valid json");
+        (cmd.route(), body)
+    }
+
+    #[test]
+    fn every_agent_verb_posts_to_the_one_control_route_with_the_verb_in_the_body() {
+        let cases: [(&[&str], serde_json::Value); 6] = [
+            (&["agent", "list"], serde_json::json!({ "verb": "list" })),
+            (
+                &["agent", "spawn", "qa-bravo"],
+                serde_json::json!({ "verb": "spawn", "target": "qa-bravo" }),
+            ),
+            (
+                &["agent", "spawn", "--cwd", "C:/work", "--name", "qa"],
+                serde_json::json!({ "verb": "spawn", "cwd": "C:/work", "name": "qa" }),
+            ),
+            (
+                &["agent", "new", "--cwd", "C:/work"],
+                serde_json::json!({ "verb": "new", "cwd": "C:/work" }),
+            ),
+            (
+                &["agent", "rename", "qa-bravo", "qa-lead"],
+                serde_json::json!({ "verb": "rename", "target": "qa-bravo", "name": "qa-lead" }),
+            ),
+            (
+                &["agent", "move", "qa-bravo", "--parent", "lead"],
+                serde_json::json!({ "verb": "move", "target": "qa-bravo", "parent": "lead" }),
+            ),
+        ];
+        for (args, want) in cases {
+            let (route, body) = agent_wire(args);
+            assert_eq!(route, "/control/agent", "{args:?}");
+            assert_eq!(body, want, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn detaching_sends_an_explicit_null_parent_not_an_absent_key() {
+        // 부재로 표현하면 "부모를 안 줬다" 와 "루트로 떼라" 가 wire 에서 같은 모양이 된다.
+        let (_, body) = agent_wire(&["agent", "move", "qa-bravo", "--parent", "none"]);
+        assert!(body.get("parent").is_some(), "키 자체는 실린다: {body}");
+        assert!(body["parent"].is_null(), "값은 null: {body}");
+    }
+
+    #[test]
+    fn spawn_rejects_both_forms_and_neither_before_touching_the_network() {
+        for args in [
+            vec!["agent", "spawn", "qa-bravo", "--cwd", "C:/work"],
+            vec!["agent", "spawn", "--cwd", "C:/work", "qa-bravo"],
+        ] {
+            let err = parse_agent_command(&args).expect_err("양립 불가");
+            assert!(err.contains("not both"), "사유 문구({args:?}): {err}");
+            assert!(err.contains("help"), "복구 경로({args:?}): {err}");
+        }
+        let err = parse_agent_command(&["agent", "spawn"]).expect_err("둘 다 없음");
+        assert!(err.contains("either"), "사유 문구: {err}");
+    }
+
+    #[test]
+    fn waking_an_agent_rejects_a_name_flag_instead_of_ignoring_it() {
+        let err = parse_agent_command(&["agent", "spawn", "qa-bravo", "--name", "qa-lead"])
+            .expect_err("깨우기엔 --name 이 없다");
+        assert!(err.contains("rename"), "개명 동사로 안내: {err}");
+    }
+
+    #[test]
+    fn agent_shape_errors_are_rejected_at_the_cli() {
+        for args in [
+            vec!["agent"],
+            vec!["agent", "wat"],
+            vec!["agent", "list", "extra"],
+            vec!["agent", "new"],
+            vec!["agent", "new", "C:/work"],
+            vec!["agent", "rename"],
+            vec!["agent", "rename", "only-one"],
+            vec!["agent", "rename", "a", "b", "c"],
+            vec!["agent", "move", "qa-bravo"],
+            vec!["agent", "move", "--parent", "lead"],
+            vec!["agent", "spawn", "a", "b"],
+            // 값 자리에 아는 플래그 — 우편 쪽과 같은 사고(값을 빠뜨린 것을 값으로 삼킴).
+            vec!["agent", "new", "--cwd", "--name"],
+            vec!["agent", "move", "a", "--parent", "--cwd"],
+            // 중복 값 플래그.
+            vec!["agent", "new", "--cwd", "a", "--cwd", "b"],
+            vec!["agent", "move", "a", "--parent", "x", "--parent", "y"],
+            // 위치 인자 자리의 help 토큰 — 네트워크를 타면 안 된다.
+            vec!["agent", "spawn", "--help"],
+            vec!["agent", "rename", "-h", "x"],
+            vec!["agent", "move", "--help", "--parent", "none"],
+            // 모르는 플래그.
+            vec!["agent", "list", "--json"],
+            vec!["agent", "new", "--cwd", "a", "--to", "bob"],
+        ] {
+            let err = match parse_command(&argv(&args)) {
+                Err(e) => e,
+                Ok(cmd) => panic!("형태 오류여야({args:?}): {cmd:?}"),
+            };
+            assert!(
+                err.contains("help"),
+                "복구 경로를 안내해야({args:?}): {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_values_are_argument_errors_not_silently_absent_fields() {
+        // 셸의 미설정 변수는 빈 인자로 펼쳐진다 — 그걸 "안 준 것" 으로 접으면 `move --parent "$UNSET"` 가
+        //   계층 해제로 실행된다(그게 --parent 를 필수로 둔 이유 자체를 무력화한다).
+        for args in [
+            vec!["agent", "move", "helper", "--parent", ""],
+            vec!["agent", "move", "helper", "--parent", "   "],
+            vec!["agent", "new", "--cwd", ""],
+            vec!["agent", "new", "--cwd", "C:/x", "--name", ""],
+            vec!["agent", "spawn", ""],
+            vec!["agent", "rename", "a", ""],
+            vec!["agent", "rename", "", "b"],
+        ] {
+            let err = match parse_command(&argv(&args)) {
+                Err(e) => e,
+                Ok(cmd) => panic!("빈 값은 인자 오류여야({args:?}): {cmd:?}"),
+            };
+            assert!(err.contains("empty"), "사유 문구({args:?}): {err}");
+        }
+        // 대조군 — 값을 준 같은 명령은 통과한다(위 반려가 "이 형태 자체가 막힌 것" 이 아님을 못박는다).
+        let (_, body) = agent_wire(&["agent", "move", "helper", "--parent", "lead"]);
+        assert_eq!(body["parent"], "lead");
+    }
+
+    // ── 제어 응답 exit code 매핑 ──────────────────────────────────────────────────────
+
+    fn agent_of(args: &[&str]) -> ParsedAgent {
+        parse_agent_command(args).expect("parse")
+    }
+
+    #[test]
+    fn agent_exit_code_accepts_only_payloads_that_carry_the_evidence() {
+        let cases: [(&[&str], &str, i32); 12] = [
+            (&["agent", "list"], r#"{"agents":[]}"#, 0),
+            (
+                &["agent", "list"],
+                r#"{"agents":[{"id":"i","name":"n","state":"live","cwd":"c","parent":null}]}"#,
+                0,
+            ),
+            // 상태 어휘 밖 값 = 우리가 아는 응답이 아니다.
+            (
+                &["agent", "list"],
+                r#"{"agents":[{"id":"i","name":"n","state":"zombie"}]}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (&["agent", "list"], r#"{}"#, EXIT_MALFORMED_SUCCESS),
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
+                0,
+            ),
+            // created 누락 = 깨운 건지 만든 건지 모른다.
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent":{"id":"i","name":"w","state":"live"}}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "new", "--cwd", "c"],
+                r#"{"agent":{"id":"i","name":"n","state":"sleeping"}}"#,
+                0,
+            ),
+            // 만들었다면서 무엇을 만들었는지가 없다 — 예전 판정기는 이걸 exit 0 으로 흘렸다.
+            (
+                &["agent", "new", "--cwd", "c"],
+                r#"{"status":"ok"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "rename", "a", "b"],
+                r#"{"agent":{"id":"i","name":"b"},"outcome":"renamed"}"#,
+                0,
+            ),
+            (
+                &["agent", "rename", "a", "b"],
+                r#"{"agent":{"id":"i","name":"b"},"outcome":"maybe"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent":{"id":"i","name":"a"},"parent":null}"#,
+                0,
+            ),
+            // parent 키 자체가 없으면 어디로 갔는지 모른다.
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent":{"id":"i","name":"a"}}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+        ];
+        for (args, body, want) in cases {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(args), 200, body),
+                want,
+                "{args:?} ← {body}"
+            );
+        }
+    }
+
+    /// ★필드가 다 있어도 **요청한 동작과 어긋나면** 성공이 아니다★ — 호출자가 일어나지 않은 일을 사실로
+    ///   기록하는 것을 막는 축이다.
+    #[test]
+    fn agent_exit_code_rejects_evidence_that_contradicts_the_request() {
+        let cases: [(&[&str], &str, i32); 6] = [
+            // 깨우기인데 "만들었다" 고 답한다.
+            (
+                &["agent", "spawn", "worker"],
+                r#"{"agent":{"id":"i","name":"worker","state":"live"},"created":true}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 만들어 띄우라 했는데 "깨웠다" 고 답한다.
+            (
+                &["agent", "spawn", "--cwd", "C:/x"],
+                r#"{"agent":{"id":"i","name":"x","state":"live"},"created":false}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 루트로 떼라 했는데 부모를 달고 온다.
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent":{"id":"i","name":"a"},"parent":"p-id"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 부모 밑으로 넣으라 했는데 루트라고 답한다.
+            (
+                &["agent", "move", "a", "--parent", "lead"],
+                r#"{"agent":{"id":"i","name":"a"},"parent":null}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // `new` 는 아무것도 띄우지 않는다 — 살아 있다는 답은 그 동사의 결과일 수 없다.
+            (
+                &["agent", "new", "--cwd", "C:/x"],
+                r#"{"agent":{"id":"i","name":"x","state":"live"}}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 대조군 — 요청과 맞는 응답은 그대로 통과한다.
+            (
+                &["agent", "move", "a", "--parent", "lead"],
+                r#"{"agent":{"id":"i","name":"a"},"parent":"p-id"}"#,
+                0,
+            ),
+        ];
+        for (args, body, want) in cases {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(args), 200, body),
+                want,
+                "{args:?} ← {body}"
+            );
+        }
+    }
+
+    /// `list` 행은 help 가 약속하는 다섯 필드를 다 싣는다 — 약속과 검사가 갈리면 둘 중 하나가 거짓말이다.
+    #[test]
+    fn agent_exit_code_requires_every_list_field_the_help_screen_promises() {
+        let full =
+            r#"{"agents":[{"id":"i","name":"n","state":"live","cwd":"C:/x","parent":null}]}"#;
+        assert_eq!(
+            exit_code_for_agent_response(&agent_of(&["agent", "list"]), 200, full),
+            0
+        );
+        for missing in [
+            r#"{"agents":[{"name":"n","state":"live","cwd":"C:/x","parent":null}]}"#,
+            r#"{"agents":[{"id":"i","state":"live","cwd":"C:/x","parent":null}]}"#,
+            r#"{"agents":[{"id":"i","name":"n","cwd":"C:/x","parent":null}]}"#,
+            r#"{"agents":[{"id":"i","name":"n","state":"live","parent":null}]}"#,
+            r#"{"agents":[{"id":"i","name":"n","state":"live","cwd":"C:/x"}]}"#,
+        ] {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(&["agent", "list"]), 200, missing),
+                EXIT_MALFORMED_SUCCESS,
+                "help 가 약속한 필드가 빠졌다: {missing}"
+            );
+        }
+        // help 화면이 실제로 그 다섯을 약속하는지까지 여기서 묶는다(한쪽만 바뀌는 것을 막는다).
+        let help = render_help(HELP_AGENT);
+        for promised in ["id", "name", "state", "cwd", "parent"] {
+            assert!(help.contains(promised), "{promised} 가 help 에: {help}");
+        }
+    }
+
+    #[test]
+    fn agent_exit_code_maps_rejections_and_transport_failures_to_one() {
+        let list = agent_of(&["agent", "list"]);
+        for body in [
+            r#"{"status":"error","code":"AGENT_NOT_FOUND","hint":"h"}"#,
+            r#"{"status":"error","code":"ROSTER_FULL","hint":"h"}"#,
+        ] {
+            assert_eq!(exit_code_for_agent_response(&list, 200, body), EXIT_FAILED);
+        }
+        assert_eq!(
+            exit_code_for_agent_response(&list, 200, "not json"),
+            EXIT_FAILED
+        );
+        assert_eq!(
+            exit_code_for_agent_response(&list, 503, r#"{"agents":[]}"#),
+            EXIT_FAILED,
+            "비-2xx 는 body 가 멀쩡해도 1"
+        );
+    }
+
+    #[test]
+    fn agent_exit_code_never_reports_success_for_an_error_status() {
+        let list = agent_of(&["agent", "list"]);
+        for body in [
+            r#"{"status":"error"}"#,
+            r#"{"status":"error","code":""}"#,
+            r#"{"status":"error","code":7}"#,
+            r#"{"status":"error","agents":[]}"#,
+        ] {
+            let got = exit_code_for_agent_response(&list, 200, body);
+            assert_eq!(got, EXIT_MALFORMED_SUCCESS, "{body}");
+            assert_ne!(
+                got, 0,
+                "status:\"error\" 는 어떤 형태든 성공일 수 없다: {body}"
+            );
+        }
+    }
+
+    /// ★우편 판정기는 이 조각에서 바뀌지 않는다(T-19 는 그대로)★ — 제어를 엄격하게 만들면서 우편까지 함께
+    ///   조인 것으로 오독되지 않게 못박는다.
+    #[test]
+    fn the_mail_query_judge_keeps_its_documented_permissiveness() {
+        assert_eq!(exit_code_for_query_response(200, r#"{}"#), 0);
+        assert_eq!(exit_code_for_query_response(200, r#"{"status":"ok"}"#), 0);
+        // 같은 body 를 제어 판정기는 통과시키지 않는다 — 두 판정기가 실제로 다르다는 것이 요점이다.
+        let new = agent_of(&["agent", "new", "--cwd", "c"]);
+        assert_eq!(
+            exit_code_for_agent_response(&new, 200, r#"{}"#),
+            EXIT_MALFORMED_SUCCESS
+        );
+    }
+
+    /// 우편 쪽 방어와 같은 반대 방향 — 값은 임의 텍스트다. 계열이 다른 플래그(`--to`)는 이 계열의 값 자리를
+    /// 가로채지 않는다(경로·이름에 그런 문자열이 올 수 있다).
+    #[test]
+    fn agent_values_are_only_guarded_against_this_groups_flags() {
+        let (_, body) = agent_wire(&["agent", "new", "--cwd", "--to"]);
+        assert_eq!(body["cwd"], "--to", "다른 계열의 플래그는 그냥 값이다");
+        let (_, body) = agent_wire(&["agent", "new", "--cwd", "C:/x", "--name", "-weird"]);
+        assert_eq!(body["name"], "-weird");
     }
 
     #[test]
@@ -1788,9 +2651,37 @@ mod tests {
             );
         }
 
+        // 제어 계열도 같은 발견 규칙을 따른다(계열이 늘 때 이 규칙이 계열마다 갈리면 안 된다).
+        for (args, want) in [
+            (vec!["help", CLI_GROUP_AGENT], HELP_AGENT),
+            (vec![CLI_GROUP_AGENT, "--help"], HELP_AGENT),
+            (vec![CLI_GROUP_AGENT, "-h"], HELP_AGENT),
+            (vec!["--help", CLI_GROUP_AGENT], HELP_AGENT),
+        ] {
+            match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
+                ParsedCommand::Help(t) => assert_eq!(t, want, "{args:?}"),
+                other => panic!("help 여야({args:?}): {other:?}"),
+            }
+        }
+
         let root = render_help(HELP_ROOT);
         let mail = render_help(HELP_MAIL);
-        for text in [&root, &mail] {
+        let agent = render_help(HELP_AGENT);
+        assert!(root.contains(CLI_GROUP_AGENT), "계열 목록에 agent: {root}");
+        for verb in CLI_AGENT_VERBS {
+            assert!(agent.contains(verb), "{verb} 동사가 help 에: {agent}");
+        }
+        for flag in CLI_AGENT_FLAGS {
+            assert!(agent.contains(flag), "{flag} 가 help 에: {agent}");
+        }
+        // 표면에 없는 동사를 help 가 가르치면 LLM 이 없는 명령을 시도한다(ADR-0122 미해소분).
+        for absent in ["kill", " rm ", "delete"] {
+            assert!(
+                !agent.contains(absent),
+                "표면에 없는 동사가 help 에 있다({absent}): {agent}"
+            );
+        }
+        for text in [&root, &mail, &agent] {
             assert!(
                 !text.contains(HELP_TOOL_SLOT),
                 "치환 안 된 자리가 남으면 안 된다: {text}"

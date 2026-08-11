@@ -99,7 +99,9 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
-use engram_dashboard_daemon::control::mcp_server::{start_mcp_server, ManagerSlot, MessagingSlot};
+use engram_dashboard_daemon::control::mcp_server::{
+    start_mcp_server, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
+};
 use engram_dashboard_daemon::control::priming::{
     mentions_mail_cli_surface, teaches_mail_cli, FilePrimingProvider, PrimingProvider,
 };
@@ -413,14 +415,21 @@ async fn run() -> i32 {
     let slot = Arc::new(ManagerSlot::new());
     // C1: MessagingService 늦은 주입 슬롯 — send/flush 담당(manager 조립 후 채운다).
     let messaging_slot = Arc::new(MessagingSlot::new());
-    let handle =
-        match start_mcp_server(registry.clone(), slot.clone(), messaging_slot.clone()).await {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("[roundtrip] MCP 서버 기동 실패: {e}");
-                return 1;
-            }
-        };
+    let handle = match start_mcp_server(
+        registry.clone(),
+        slot.clone(),
+        messaging_slot.clone(),
+        // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
+        Arc::new(RosterBroadcastSlot::new()),
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[roundtrip] MCP 서버 기동 실패: {e}");
+            return 1;
+        }
+    };
     let url = handle.url.clone();
     let data_dir = std::env::temp_dir().join(format!("engram-roundtrip-{}", AgentId::new_v4()));
     let ws_a = std::env::temp_dir().join(format!("engram-roundtrip-ws-a-{}", AgentId::new_v4()));

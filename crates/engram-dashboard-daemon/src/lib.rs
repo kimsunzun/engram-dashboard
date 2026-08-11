@@ -222,6 +222,20 @@ struct DaemonWiring {
     registry: ConnRegistry,
 }
 
+impl DaemonWiring {
+    /// 제어 라우트(`/control/agent`)가 명부 변경을 알릴 때 쓰는 팬아웃 어댑터(ADR-0132).
+    ///
+    /// ★필드를 밖으로 풀지 않고 **여기서** 만든다★: 팬아웃과 매니저를 따로 꺼내 조립하면 위 struct 주석이
+    ///   막으려는 어긋난 짝(다른 조립의 레지스트리 + 이 매니저)이 다시 표현 가능해진다. 이 메서드는 제 필드
+    ///   둘만 쓰므로 그 조합이 구조적으로 불가능하다.
+    fn roster_broadcast(&self) -> Arc<dyn control::agent::RosterBroadcast> {
+        Arc::new(connection_core::RosterFanout::new(
+            Arc::new(self.registry.clone()),
+            self.manager.clone(),
+        ))
+    }
+}
+
 fn build_daemon_wiring(
     data_dir: &std::path::Path,
     control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
@@ -451,6 +465,7 @@ pub async fn run() -> Result<(), i32> {
     //     없는 반쪽 데몬은 정상 상태가 아니다). ★반드시 에이전트 spawn 전★.
     let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
+    let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
@@ -462,6 +477,7 @@ pub async fn run() -> Result<(), i32> {
         control_registry.clone(),
         manager_slot.clone(),
         messaging_slot.clone(),
+        roster_broadcast_slot.clone(),
     )
     .await
     {
@@ -497,6 +513,10 @@ pub async fn run() -> Result<(), i32> {
     //   짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
     let manager = wiring.manager.clone();
     manager_slot.set(manager.clone());
+    // 제어 라우트가 바꾼 명부를 붙어 있는 클라이언트가 보게 하는 배선(ADR-0132). ★이 한 줄이 빠지면★
+    //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
+    //   보여 준다(에러도 로그도 없다).
+    roster_broadcast_slot.set(wiring.roster_broadcast());
 
     // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
     //    것이 없다★.

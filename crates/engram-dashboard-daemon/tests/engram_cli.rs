@@ -307,6 +307,167 @@ fn engram_mail_send_body_stdin_lossily_replaces_invalid_utf8_instead_of_refusing
     );
 }
 
+// ── ADR-0132 조각 ②: 제어 계열(`agent`) — 라우트 선택·바디·exit code 를 프로세스 레벨로 실측 ──────
+
+/// 스텁이 받은 요청에서 JSON 바디만 꺼낸다.
+fn request_body(request: &str) -> serde_json::Value {
+    let start = request.find("\r\n\r\n").expect("본문 경계") + 4;
+    serde_json::from_str(request[start..].trim()).expect("요청 바디 json")
+}
+
+#[test]
+fn engram_agent_verbs_post_to_the_control_agent_route_with_the_verb_in_the_body() {
+    let cases: [(&[&str], serde_json::Value, &'static str); 5] = [
+        (
+            &["agent", "list"],
+            serde_json::json!({ "verb": "list" }),
+            r#"{"agents":[]}"#,
+        ),
+        (
+            &["agent", "spawn", "qa-bravo"],
+            serde_json::json!({ "verb": "spawn", "target": "qa-bravo" }),
+            r#"{"agent":{"id":"i","name":"qa-bravo","state":"live"},"created":false}"#,
+        ),
+        (
+            &["agent", "new", "--cwd", "C:/work", "--name", "qa"],
+            serde_json::json!({ "verb": "new", "cwd": "C:/work", "name": "qa" }),
+            r#"{"agent":{"id":"i","name":"qa","state":"sleeping"}}"#,
+        ),
+        (
+            &["agent", "rename", "qa", "qa-lead"],
+            serde_json::json!({ "verb": "rename", "target": "qa", "name": "qa-lead" }),
+            r#"{"agent":{"id":"i","name":"qa-lead"},"outcome":"renamed"}"#,
+        ),
+        (
+            &["agent", "move", "qa-lead", "--parent", "none"],
+            serde_json::json!({ "verb": "move", "target": "qa-lead", "parent": null }),
+            r#"{"agent":{"id":"i","name":"qa-lead"},"parent":null}"#,
+        ),
+    ];
+    for (args, want_body, response) in cases {
+        let (host, port, stub) = spawn_capturing_stub(ok_response(response));
+        let url = format!("http://{host}:{port}");
+        let (stdout, code) = run_cli(&url, args, None);
+        let request = stub.join().expect("stub join");
+
+        assert_eq!(code, 0, "성공 응답 → exit 0({args:?}): {stdout}");
+        assert!(
+            request.starts_with("POST /control/agent HTTP/1.1"),
+            "제어 계열은 한 라우트로({args:?}): {request}"
+        );
+        assert!(
+            request.contains("Authorization: Bearer test-token"),
+            "토큰을 실어야({args:?}): {request}"
+        );
+        assert_eq!(request_body(&request), want_body, "{args:?}");
+        // stdout 은 데몬 응답 그대로 — CLI 가 산문으로 다시 쓰지 않는다.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("stdout json"),
+            serde_json::from_str::<serde_json::Value>(response).expect("response json"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn engram_agent_rejections_from_the_daemon_exit_one_with_the_body_intact() {
+    let response = ok_response(r#"{"status":"error","code":"AGENT_NOT_FOUND","hint":"no agent"}"#);
+    let (host, port, stub) = spawn_capturing_stub(response);
+    let url = format!("http://{host}:{port}");
+    let (stdout, code) = run_cli(&url, &["agent", "spawn", "ghost"], None);
+    let _ = stub.join().expect("stub join");
+
+    assert_eq!(code, 1, "반려 → exit 1: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v["code"], "AGENT_NOT_FOUND", "{stdout}");
+}
+
+/// ★변경의 증거가 없는 2xx 는 성공이 아니다★: 우편 조회 판정기를 그대로 썼을 땐 `{}` 도 exit 0 이라,
+///   아무것도 만들지 않은 응답을 받고도 호출자가 만들어졌다고 믿었다. 재시도 대상(1)이 아니라 보고
+///   대상(2)이라는 것까지 프로세스 레벨로 못박는다.
+#[test]
+fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
+    for (args, body) in [
+        (vec!["agent", "new", "--cwd", "C:/x"], r#"{}"#),
+        (vec!["agent", "new", "--cwd", "C:/x"], r#"{"status":"ok"}"#),
+        (vec!["agent", "list"], r#"{"agents":"not-an-array"}"#),
+        (
+            vec!["agent", "rename", "a", "b"],
+            r#"{"agent":{"id":"i","name":"b"}}"#,
+        ),
+    ] {
+        let (host, port, stub) = spawn_capturing_stub(ok_response(body));
+        let url = format!("http://{host}:{port}");
+        let (stdout, code) = run_cli(&url, &args, None);
+        let _ = stub.join().expect("stub join");
+        assert_eq!(code, 2, "증거 없는 2xx → exit 2({args:?}): {stdout}");
+    }
+}
+
+#[test]
+fn engram_agent_argument_errors_never_touch_the_network() {
+    // 목적지가 포트 0 이므로 하나라도 POST 를 시도하면 CONNECT_FAILED 가 나와 단언이 깨진다.
+    for args in [
+        vec!["agent"],
+        vec!["agent", "wat"],
+        vec!["agent", "list", "--json"],
+        // 만들기와 깨우기를 동시에 요구한 호출 — 어느 뜻인지 고를 근거가 없다.
+        vec!["agent", "spawn", "qa-bravo", "--cwd", "C:/work"],
+        vec!["agent", "spawn"],
+        vec!["agent", "new"],
+        vec!["agent", "rename", "only-one"],
+        vec!["agent", "move", "qa-bravo"],
+        vec!["agent", "new", "--cwd", "a", "--cwd", "b"],
+        vec!["agent", "new", "--cwd", "--name"],
+        vec!["agent", "spawn", "--help"],
+        // 셸의 미설정 변수가 빈 인자로 펼쳐지는 형태 — "안 준 것" 으로 접으면 다른 명령이 실행된다.
+        vec!["agent", "move", "helper", "--parent", ""],
+        vec!["agent", "new", "--cwd", ""],
+    ] {
+        let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
+        assert_eq!(code, 1, "인자 오류 → exit 1({args:?}): {stdout}");
+        let v: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
+        assert_eq!(v["code"], "BAD_ARGS", "{args:?} → BAD_ARGS: {stdout}");
+        let suggestions = backticked_help_commands(v["hint"].as_str().unwrap_or_default());
+        assert!(
+            !suggestions.is_empty(),
+            "hint 에 실행 가능한 help 명령이 하나도 없다({args:?}): {stdout}"
+        );
+        for suggested in suggestions {
+            let argv: Vec<&str> = suggested.split_whitespace().skip(1).collect();
+            let (out, code) = run_cli_without_credentials(&argv);
+            assert_eq!(
+                code, 0,
+                "hint 가 제안한 명령이 실제로 돌아야({args:?}): `{suggested}` → {out}"
+            );
+        }
+    }
+}
+
+#[test]
+fn engram_agent_help_is_discoverable_the_same_way_as_the_mail_group() {
+    let (root, code) = run_cli_without_credentials(&["help"]);
+    assert_eq!(code, 0);
+    assert!(root.contains("agent"), "계열 목록에 agent: {root}");
+
+    let (canonical, code) = run_cli_without_credentials(&["help", "agent"]);
+    assert_eq!(code, 0, "계열 help 는 성공 종료: {canonical}");
+    for token in [
+        "list", "spawn", "new", "rename", "move", "--cwd", "--name", "--parent",
+    ] {
+        assert!(
+            canonical.contains(token),
+            "{token} 이 계열 help 에: {canonical}"
+        );
+    }
+    for alias in [vec!["agent", "--help"], vec!["agent", "-h"]] {
+        let (out, code) = run_cli_without_credentials(&alias);
+        assert_eq!(code, 0);
+        assert_eq!(out, canonical, "계열 help 화면이 같아야: {alias:?}");
+    }
+}
+
 // ── ADR-0132: 계열 표면 — help 와 인자 오류(둘 다 네트워크를 타지 않는다) ──────────────────────
 
 /// ★목적지 = 아무도 리스닝할 수 없는 포트 0★: 이 구획의 케이스가 전부 인자 파싱 단계에서 끝난다는
