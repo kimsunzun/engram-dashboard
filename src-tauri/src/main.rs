@@ -1,17 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// ADR-0132: 이 exe 는 argv 로 동사를 받지 않는다 — GUI init 앞에 동사 분기를 두면 첫 인자가 GUI 인자와
+// 겹칠 때 창이 안 뜨고, 그 충돌을 동사가 늘 때마다 관리해야 한다. 제어 CLI 는 `engram` 실행파일 소유다.
 fn main() {
-    // ★CLI 겸용 분기(설계 §5 · ADR-0014 방향) — load-bearing 순서★: 이 판정이 Tauri/GUI init 보다
-    //   먼저여야 창·트레이·single-instance 플러그인을 절대 건드리지 않는다(먼저가 아니면 CLI 호출에서
-    //   창이 뜬다).
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(first) = args.first() {
-        if engram_dashboard_lib::cli::is_cli_verb(first) {
-            let code = engram_dashboard_lib::cli::run_cli(&args);
-            std::process::exit(code);
-        }
-    }
-
     engram_dashboard_lib::run()
 }

@@ -9,11 +9,14 @@
 //! `#[serde(tag=…)]` 류 재정의가 **없다**. 그래서 프레임은 정확히
 //!   `{"Auth":{"token":"…","protocol_version":N}}`
 //! 이고, 이건 옮겨오기 전 정의가 내던 바이트와 같다. 이 crate 밖에서 이 모양을 그대로 만드는 발신자 —
-//! 트레이 stop 경로 · CLI · 데몬 클라이언트 셸 · 프론트 `wsTransport` · `scripts/engram.mjs`.
+//! 트레이 stop 경로(`discovery`) · 데몬 클라이언트 셸(`daemon_client/connection.rs`) · 프론트
+//! `wsTransport` · `scripts/engram.mjs`.
 //! ★뒤의 둘은 **손조립 JS 라 컴파일러가 못 잡는다**★: 둘 다 타입 없이 객체 리터럴로 프레임을 짓고,
 //! `scripts/engram.mjs` 쪽은 테스트가 덮지 않는데도 실행되는 경로다(`run-dashboard-release.bat` ·
 //! `docs/process/S17-llm-control-surface/spec/trd.md`). 그래서 계약을 지키는 것은 아래 golden 문자열
 //! 테스트다. 모양을 바꾸려면 그 발신자를 **동시에** 바꾸고 프로토콜 버전을 올려야 한다.
+//! ★제어 CLI `engram` 은 그 명단에 없다★ — 데몬의 HTTP 제어 라우트(`<base>/control/<route>` + Bearer)로
+//! 붙어 이 프레임을 만들지 않으므로, wire 를 바꿔도 그쪽은 대상이 아니다.
 //!
 //! ★단일 variant enum 인 이유★: 구조체로 두면 `{"token":…}` 이 되어 태그가 사라진다. 태그 `"Auth"` 가
 //! wire 계약의 일부라 enum 이어야 한다(그 대가로 `AuthFrame::Auth` 라는 겹말이 생기지만, 겹말 쪽이
