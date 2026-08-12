@@ -57,3 +57,7 @@ Both commands only read; they never send.
 
 - `engram mail pending` = **your open items**. Each row has a `direction`: `reply_owed_by_me` (a teammate asked and **you still owe them an answer** — go reply), `awaiting_their_reply` (you asked, still waiting), `outbound_pending` (that message is not recorded as injected yet). Worth checking before you finish a turn, so you don't leave a request hanging.
 - `engram mail status m-7f3k` = that message's delivery state, **one row per recipient** (`pending` / `delivered` / `replied` / `expired` / `failed`). A `pending` row is where that record stands at the moment you read it, not a verdict: the message leaves that recipient's queue when their turn ends, when they are restored, or when anyone's next message to them goes out — nothing re-attempts it on a timer of its own, and anything still queued at 24h expires silently. Only `expired` and `failed` mean it will not arrive. A `failed` row here can carry `code: RECIPIENT_DELETED` — the recipient was **deleted while your message was still queued**, so it was closed as undelivered. That name no longer exists: resending is pointless, tell the user if it still matters.
+
+## Changing the team itself
+
+Who exists, starting an agent, renaming one, moving one under another — that is done from your shell, not from this file. Run `engram help` there to see what you can do.

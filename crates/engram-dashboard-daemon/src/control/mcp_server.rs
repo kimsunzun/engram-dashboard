@@ -61,10 +61,97 @@ const CONTROL_MESSAGES_PATH: &str = "/control/messages";
 /// 경로를 늘리면 그 클라이언트가 경로 표를 지게 되고 라우트 상수도 동사 수만큼 늘어난다.
 /// ★인증은 `/control/send` 와 같은 미들웨어다★ — 무-세션 POST 라 위 `CONTROL_MESSAGES_PATH` 주석의 규율이
 ///   그대로 적용된다(경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다).
-/// ★**지금 이 라우트에 닿을 수 있는 자는 전원이 아니다** — 사유와 순서는 `control/agent.rs` 헤더가 정본★
-///   (ADR-0132 결정 5 는 우편 거절 게이트가 선 다음에야 도달 가능하다). "왜 스폰 배선을 안 고쳤나" 를
-///   여기서 다시 판단하지 말 것.
+/// ★제어는 전원 개방이다(ADR-0132 결정 5)★ — 스폰된 에이전트는 백엔드와 무관하게 이 라우트에 닿는다.
+///   우편만 자격증명으로 갈린다(`ControlRoute::is_mail`).
 const CONTROL_AGENT_PATH: &str = "/control/agent";
+
+/// 제어 평면 경로의 네임스페이스 접두 — **분류를 빠뜨린 경로를 fail-closed 로 접는 기준**이다.
+///
+/// ★비교는 **경로 세그먼트 경계**로 한다(맨 `starts_with` 금지)★: 문자열 접두만 보면 `/controlfoo`·
+///   `/control-x` 처럼 이 네임스페이스와 무관한 이름까지 접혀, 그 자리에 생길 미래 라우트가 이유 없이
+///   거절당한다. 대상은 `/control` 자신과 `/control/` 아래뿐이다.
+// ADR-0133
+const CONTROL_PATH_PREFIX: &str = "/control";
+
+/// 데몬이 여는 CLI 평문 라우트 전량(`/mcp` nest 는 rmcp 소유라 여기 없다).
+///
+/// ★라우터 조립과 우편 분류의 **단일 명단**이다★: `start_mcp_server` 가 이 명단을 돌며 라우트를 얹는다.
+///   명단에 들어온 라우트는 아래 `is_mail` 의 exhaustive match 가 **컴파일 단계에서** 분류를 강제한다.
+/// ★명단 밖 제어 경로는 우편으로 접힌다(`mail_gated_path`)★ — 순회 뒤에 `.route()` 를 손으로 덧붙이는
+///   실수를 컴파일러가 막지는 못하지만, 그렇게 생긴 경로는 **분류 누락이 곧 거절**이 되어 조용히 열리지
+///   않는다. 그래서 `.route()` 호출 지점을 이 순회 하나로 유지하는 것은 여전히 규약이되, 그 규약이 깨졌을 때
+///   기본값이 안전한 쪽이다.
+// ADR-0133
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlRoute {
+    Send,
+    Messages,
+    Agent,
+}
+
+impl ControlRoute {
+    const ALL: [ControlRoute; 3] = [Self::Send, Self::Messages, Self::Agent];
+
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Send => CONTROL_SEND_PATH,
+            Self::Messages => CONTROL_MESSAGES_PATH,
+            Self::Agent => CONTROL_AGENT_PATH,
+        }
+    }
+
+    /// 이 라우트가 **우편**인가 — 우편 가부 거절(ADR-0133 결정 3)이 걸리는 축.
+    ///
+    /// ★`_` arm 을 넣지 말 것★: catch-all 이 생기는 순간 새 라우트가 조용히 "우편 아님"(= 전원 통과)으로
+    ///   분류된다. 그 실수는 런타임에 아무 신호도 내지 않는다.
+    const fn is_mail(self) -> bool {
+        match self {
+            Self::Send | Self::Messages => true,
+            Self::Agent => false,
+        }
+    }
+
+    /// 명단 밖 경로(예: `/mcp` 와 그 하위)는 `None`.
+    fn from_path(path: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.path() == path)
+    }
+}
+
+/// 이 요청 경로에 우편 거절 게이트가 걸리는가(ADR-0133 결정 3).
+///
+/// ★분류 누락은 **거절**로 접는다(fail-closed)★: 명단에 있는 라우트는 자기 분류를 따르고, 명단 **밖**의
+///   제어 경로(`/control…`)는 우편으로 본다. 이 게이트의 목적 자체가 거절이라, 누군가 라우트를 늘리며
+///   분류를 빠뜨렸을 때의 기본값은 "막힌다" 여야 한다 — 반대로 두면 그 실수가 런타임에 아무 신호도 없이
+///   입구를 하나 여는 것이 된다.
+/// ★`/mcp` 와 제어 밖 경로는 대상이 아니다★: MCP 는 그 자격증명의 **자기 채널**이고(ADR-0128 결정 1),
+///   나머지는 애초에 이 서버가 열지 않는 경로다.
+// ADR-0133
+fn mail_gated_path(path: &str) -> bool {
+    match ControlRoute::from_path(path) {
+        Some(route) => route.is_mail(),
+        None => {
+            path == CONTROL_PATH_PREFIX
+                || path
+                    .strip_prefix(CONTROL_PATH_PREFIX)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }
+    }
+}
+
+/// 이 자격증명으로 **이 HTTP/CLI 우편 입구**를 쓸 수 없을 때의 반려 코드(ADR-0133 결정 3).
+///
+/// ★이름이 주장하는 범위를 좁혀 읽을 것 — "우편 금지" 가 아니다★: 이 코드가 나가는 스폰(= MCP 가능
+///   백엔드)은 `/mcp` 의 `send_message` 로 **정상적으로 우편을 쓴다**. 채널은 백엔드 capability 로만
+///   갈리고 런타임 스위칭이 없다는 것이 설계이고(ADR-0128 결정 1), 이 게이트는 그 설계에서 **닫혀 있어야
+///   할 쪽 입구**를 닫는다. 이름만 보고 "MCP 로 우회 가능 = 게이트 구멍" 으로 읽지 말 것.
+const MAIL_NOT_ALLOWED_CODE: &str = "MAIL_NOT_ALLOWED";
+
+/// ★대안 채널을 알리지 않는다(ADR-0133 결정 3)★: 여기서 "대신 이걸 써라" 를 말하는 순간, 프라이밍 두 파일이
+///   서로의 채널을 이름조차 언급하지 않도록 봉인한 게이트(ADR-0128 의 실질 게이트)가 이 응답 경로로
+///   우회된다. 그래서 문구는 "이 자격증명으로는 우편을 못 쓴다" 까지이고 상대 채널 이름·툴 이름을 담지
+///   않는다. 재시도 무의미까지만 알려 무한 재시도를 막는다.
+const MAIL_NOT_ALLOWED_HINT: &str =
+    "This credential is not allowed to use mail. Retrying will not change that.";
 
 /// ★manager 늦은 주입 슬롯(순환 해소)★: 데몬 기동은 MCP 서버를 **먼저** 띄우고(그 URL 로 mcp-config 를
 /// 발급하는 DaemonControlChannel 을 만들어야 하므로) 그 다음 AgentManager 를 배선한다 — 즉 서버 start
@@ -475,6 +562,8 @@ impl ServerHandler for EngramMcpHandler {
 ///
 /// 검사 순서:
 ///   1. Authorization 의 `Bearer <token>` → registry.validate. 실패면 401(inner 미호출 = handshake 미생성).
+///   1.2. 우편 가부(ADR-0133 결정 3) — 요청 **경로**가 우편 라우트인데 이 자격증명의 우편이 막혀 있으면
+///      여기서 반려한다. `/mcp` 와 제어 라우트는 이 검사에 걸리지 않는다(`ControlRoute::is_mail`).
 ///   1.5. Mcp-Session-Id 형식/필수성 → 400. 이 검사가 아래 바인딩 검사의 "session op 는 반드시 바인딩으로
 ///      resolve 된다"를 보장한다(rmcp 내부 4xx 동작에 의존하지 않음).
 ///   2. 세션 바인딩 검사(FIX 7 + round-2 F1) — 일치=통과 / 신원 불일치=**403** / 바인딩 없음=**404**.
@@ -510,9 +599,31 @@ where
     let Some(token) = token else {
         return unauthorized();
     };
-    let Some(identity) = registry.validate(&token) else {
+    let Some(binding) = registry.validate(&token) else {
         return unauthorized();
     };
+    let identity = binding.identity;
+
+    // ★우편 거절은 핸들러가 아니라 여기다(ADR-0133 결정 3)★: 이 미들웨어는 라우터 **전체**를 감싸므로
+    //   우편 라우트가 늘어도 한 자리로 덮인다 — 핸들러마다 검사를 두면 새 핸들러가 검사를 빠뜨린다.
+    //   판정 재료는 발급 시점에 박힌 자격증명의 사실 하나뿐이라 매니저 조회도, 바디 파싱도 필요 없다.
+    // ★이것이 유일한 강제 지점이다★: 에이전트 쪽 표식(`MAIL_MARKER_ENV`)은 사용법을 가릴 뿐이고 조작
+    //   가능하다 — 이 검사를 빼고 표식만 남기면 표식을 떼는 순간 우편이 열린다.
+    // ★막는 것은 이 HTTP/CLI 우편 표면뿐이다★: MCP 가능 에이전트는 `/mcp` 의 `send_message` 로 계속 우편을
+    //   쓴다(ADR-0128 결정 1 — 채널은 capability 로만 갈린다). 이 거절은 "우편 금지" 가 아니라 "이 입구는
+    //   네 채널이 아니다" 다.
+    // ★warn 인 이유(info 아님)★: 기본 로그 레벨이 warn 이라 info 로 두면 "왜 이 에이전트가 편지를 못
+    //   보내나" 를 쫓는 운영자에게 **아무 흔적도 남지 않는다**. ADR-0133 의 재검토 트리거(거절만 받은
+    //   에이전트의 행동 관측)도 이 줄이 보여야 발동한다. 형제 거부(401/403/404/400)와 같은 레벨로 맞춘다.
+    // ADR-0133
+    if !binding.mail_allowed && mail_gated_path(request.uri().path()) {
+        tracing::warn!(
+            agent = %identity.agent_id,
+            epoch = identity.epoch,
+            "우편 요청 거절 — 이 자격증명은 CLI/HTTP 우편 입구의 것이 아니다(ADR-0133)"
+        );
+        return mail_not_allowed();
+    }
 
     // ★요청이 실어 온 기존 세션 id(있으면)★ — initialize 이후의 후속 요청(tools/call·GET·DELETE)은
     //   Mcp-Session-Id 를 헤더로 싣는다. 이 값으로 identity pinning 을 검사한다(초기 initialize 는 없음).
@@ -629,6 +740,26 @@ fn not_found() -> Response {
         .status(StatusCode::NOT_FOUND)
         .body(axum::body::Body::empty())
         .expect("valid 404 response")
+}
+
+/// 우편 거절 응답(ADR-0133 결정 3).
+///
+/// ★200 + 반려 봉투인 이유(빈 403 이 아니라)★: 우편 라우트의 계약이 "항상 200 + JSON" 이고, CLI 는
+///   stdout 형태가 아니라 **exit code** 로 판정한다 — 이 봉투는 검증된 반려 shape 이라 기존 3분법의
+///   **실패(1)** 로 그대로 접힌다(새 결말 부류를 만들지 않는다). 빈 403 으로 내면 CLI 는 빈 줄만 찍고
+///   호출자는 왜 실패했는지 알 방법이 없다.
+/// ★body 문구는 `MAIL_NOT_ALLOWED_HINT` 가 정본★ — 대안 채널을 알리지 않는다.
+// ADR-0133
+fn mail_not_allowed() -> Response {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "error",
+            "code": MAIL_NOT_ALLOWED_CODE,
+            "hint": MAIL_NOT_ALLOWED_HINT,
+        })),
+    )
+        .into_response()
 }
 
 /// 400 응답(빈 body) — 클라이언트 요청 형식 오류(ADR-0086). 신원·인증 문제가 아니라 요청 형식 문제라
@@ -880,31 +1011,36 @@ pub async fn start_mcp_server(
     // ★레이어 순서★: 아래는 바깥→안 순서로 body-limit → auth → 라우트로 쌓인다(axum layer 는 나중에 쓴 게
     //   바깥). body-limit 를 가장 바깥에 둬 auth·inner 어느 쪽이 body 를 읽든 그 전에 상한이 적용되게 한다.
     const MAX_BODY_BYTES: usize = 1024 * 1024;
-    let app = axum::Router::new()
-        .nest_service(MCP_PATH, mcp_service)
-        .route(
-            CONTROL_SEND_PATH,
-            axum::routing::post(control_send_handler).with_state(ControlSendState {
-                manager: manager.clone(),
-                registry: registry.clone(),
-                messaging: messaging.clone(),
-            }),
-        )
-        .route(
-            CONTROL_MESSAGES_PATH,
-            axum::routing::post(control_messages_handler).with_state(ControlSendState {
-                manager: manager.clone(),
-                registry: registry.clone(),
-                messaging: messaging.clone(),
-            }),
-        )
-        .route(
-            CONTROL_AGENT_PATH,
-            axum::routing::post(control_agent_handler).with_state(ControlAgentState {
-                manager: manager.clone(),
-                roster_broadcast,
-            }),
-        )
+    let send_state = ControlSendState {
+        manager: manager.clone(),
+        registry: registry.clone(),
+        messaging: messaging.clone(),
+    };
+    let agent_state = ControlAgentState {
+        manager: manager.clone(),
+        roster_broadcast,
+    };
+    // ★명단(`ControlRoute::ALL`)을 돌며 얹는다 — 빌더 체인으로 되돌리지 말 것★: 새 라우트가 명단에
+    //   들어와야 서빙이 되고, 들어오면 `is_mail` 의 exhaustive match 가 우편 분류를 컴파일 단계에서
+    //   강제한다(ADR-0133). 체인은 그 강제를 우회한다.
+    let mut app = axum::Router::new().nest_service(MCP_PATH, mcp_service);
+    for route in ControlRoute::ALL {
+        app = match route {
+            ControlRoute::Send => app.route(
+                route.path(),
+                axum::routing::post(control_send_handler).with_state(send_state.clone()),
+            ),
+            ControlRoute::Messages => app.route(
+                route.path(),
+                axum::routing::post(control_messages_handler).with_state(send_state.clone()),
+            ),
+            ControlRoute::Agent => app.route(
+                route.path(),
+                axum::routing::post(control_agent_handler).with_state(agent_state.clone()),
+            ),
+        };
+    }
+    let app = app
         .layer(axum::middleware::from_fn_with_state(
             registry.clone(),
             bearer_auth,
@@ -939,6 +1075,128 @@ pub async fn start_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ADR-0133: 라우트 분류 — 새 라우트가 조용히 "우편 아님" 으로 새지 않는다 ──────────────────
+
+    /// ★이 함수가 이 테스트의 본체다★: variant 를 늘리면 여기서 **컴파일이 깨져** 분류를 손으로 적게 된다.
+    ///   `ControlRoute::is_mail` 과 **따로** 진술하는 것이 요점이라 그쪽을 부르지 않는다 — 둘이 갈리면
+    ///   아래 단언이 빨개진다.
+    fn expected_is_mail(route: ControlRoute) -> bool {
+        match route {
+            ControlRoute::Send => true,
+            ControlRoute::Messages => true,
+            ControlRoute::Agent => false,
+        }
+    }
+
+    #[test]
+    fn every_registered_control_route_is_explicitly_classified() {
+        for route in ControlRoute::ALL {
+            assert_eq!(
+                route.is_mail(),
+                expected_is_mail(route),
+                "{route:?}({}) 의 우편 분류가 갈렸다",
+                route.path()
+            );
+            assert_eq!(
+                ControlRoute::from_path(route.path()),
+                Some(route),
+                "명단에 있으면 경로로 되찾을 수 있어야: {route:?}"
+            );
+        }
+        // 라우터는 이 명단을 돌며 조립된다 — 길이가 줄면 라우트가 조용히 사라진 것이다.
+        assert_eq!(ControlRoute::ALL.len(), 3);
+        assert_eq!(
+            ControlRoute::ALL.iter().filter(|r| r.is_mail()).count(),
+            2,
+            "우편 라우트는 발송·조회 둘"
+        );
+    }
+
+    /// `/mcp` 와 제어 밖 경로는 게이트 대상이 아니다(MCP 는 그 자격증명의 자기 채널이다).
+    #[test]
+    fn the_mcp_route_is_outside_the_mail_gate() {
+        for path in [MCP_PATH, "/mcp/", "/mcp/whatever", "/", "/health"] {
+            assert!(
+                !mail_gated_path(path),
+                "제어 평면 밖 경로에 우편 게이트가 걸리면 안 된다: {path}"
+            );
+        }
+    }
+
+    /// ★분류를 빠뜨린 제어 경로는 거절 쪽으로 접힌다★: 이 방향이 뒤집히면, 라우트를 늘리며 명단 등록을
+    ///   잊은 실수가 **아무 신호 없이 우편 입구를 하나 여는 것**이 된다.
+    #[test]
+    fn an_unclassified_control_path_folds_to_the_mail_gate() {
+        for path in [
+            "/control/whatever",
+            "/control/send/extra",
+            "/control",
+            "/control/",
+        ] {
+            assert_eq!(
+                ControlRoute::from_path(path),
+                None,
+                "전제: 명단 밖 경로여야 이 단언이 의미를 가진다({path})"
+            );
+            assert!(
+                mail_gated_path(path),
+                "명단 밖 제어 경로는 우편으로 접혀야(fail-closed): {path}"
+            );
+        }
+        // 명단에 있는 라우트는 자기 분류를 그대로 따른다(접기가 분류를 덮어쓰지 않는다).
+        assert!(
+            !mail_gated_path(CONTROL_AGENT_PATH),
+            "제어 동사는 전원 개방"
+        );
+        for route in ControlRoute::ALL {
+            assert_eq!(mail_gated_path(route.path()), route.is_mail(), "{route:?}");
+        }
+        // ★세그먼트 경계★: 이름만 비슷할 뿐 이 네임스페이스가 아닌 경로까지 접으면, 그 자리에 생길 미래
+        //   라우트가 이유 없이 거절당한다(맨 문자열 접두 비교의 실패 모드).
+        for path in [
+            "/controlfoo",
+            "/control-x",
+            "/controls/send",
+            "/CONTROL/send",
+        ] {
+            assert!(
+                !mail_gated_path(path),
+                "제어 네임스페이스 밖 이름을 접으면 안 된다: {path}"
+            );
+        }
+    }
+
+    /// ★거절 응답은 대안 채널을 알리지 않는다(ADR-0133 결정 3)★: 여기서 상대 채널을 알리면 프라이밍 두
+    ///   파일의 상호 배타성 봉인이 이 경로로 우회된다.
+    ///
+    /// ★실제 생성자(`mail_not_allowed`)가 만든 body 를 읽는다 — 같은 JSON 을 여기서 다시 조립하지 말 것★:
+    ///   사본을 검사하면 생성자가 필드를 하나 더 싣거나 문구를 바꿔도 이 테스트는 초록으로 남는다.
+    #[tokio::test]
+    async fn the_mail_rejection_names_no_other_channel() {
+        let resp = mail_not_allowed();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "우편 라우트의 '항상 200 + JSON' 계약을 따른다(CLI 는 exit code 로 판정)"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("거절 body");
+        let body = String::from_utf8(bytes.to_vec()).expect("UTF-8 body");
+        let lowered = body.to_lowercase();
+        for forbidden in [SEND_MESSAGE_TOOL, MESSAGES_TOOL, "mcp", "tool", "server"] {
+            assert!(
+                !lowered.contains(&forbidden.to_lowercase()),
+                "거절 응답이 상대 채널을 가리키면 안 된다({forbidden}): {body}"
+            );
+        }
+        // 반려 shape 은 CLI 의 기존 3분법에 그대로 접힌다(새 결말 부류를 만들지 않는다).
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(v["status"], "error");
+        assert!(v["code"].as_str().is_some_and(|c| !c.is_empty()));
+        assert!(v["hint"].as_str().is_some_and(|h| !h.is_empty()));
+    }
 
     #[test]
     fn ping_args_schema_builds() {

@@ -150,8 +150,8 @@ async fn post_tools_list_with_padding(
 async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "valid-token-epoch0".to_string());
-    registry.issue(id, 1, "valid-token-epoch1".to_string());
+    registry.issue(id, 0, "valid-token-epoch0".to_string(), true);
+    registry.issue(id, 1, "valid-token-epoch1".to_string(), true);
 
     let handle = start_mcp_server(
         registry.clone(),
@@ -198,7 +198,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
 
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 7, "good-token".to_string());
+    registry.issue(id, 7, "good-token".to_string(), true);
 
     let handle = start_mcp_server(
         registry.clone(),
@@ -281,8 +281,8 @@ async fn cross_token_session_takeover_is_rejected() {
     let registry = Arc::new(ControlRegistry::new());
     let id_a = AgentId::new_v4();
     let id_b = AgentId::new_v4();
-    registry.issue(id_a, 0, "token-a".to_string());
-    registry.issue(id_b, 0, "token-b".to_string());
+    registry.issue(id_a, 0, "token-a".to_string(), true);
+    registry.issue(id_b, 0, "token-b".to_string(), true);
 
     let handle = start_mcp_server(
         registry.clone(),
@@ -318,7 +318,7 @@ async fn cross_token_session_takeover_is_rejected() {
 async fn revoked_mid_session_request_is_rejected() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "live-token".to_string());
+    registry.issue(id, 0, "live-token".to_string(), true);
 
     let handle = start_mcp_server(
         registry.clone(),
@@ -417,8 +417,8 @@ async fn orphaned_session_attach_is_rejected() {
     let registry = Arc::new(ControlRegistry::new());
     let id_a = AgentId::new_v4();
     let id_b = AgentId::new_v4();
-    registry.issue(id_a, 0, "token-a".to_string());
-    registry.issue(id_b, 0, "token-b".to_string());
+    registry.issue(id_a, 0, "token-a".to_string(), true);
+    registry.issue(id_b, 0, "token-b".to_string(), true);
 
     let handle = start_mcp_server(
         registry.clone(),
@@ -456,7 +456,7 @@ async fn orphaned_session_attach_is_rejected() {
 async fn unknown_session_id_is_rejected_not_forwarded() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "valid".to_string());
+    registry.issue(id, 0, "valid".to_string(), true);
     let handle = start_mcp_server(
         registry,
         empty_slot(),
@@ -481,7 +481,7 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
 async fn malformed_session_id_header_is_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "malformtok".to_string());
+    registry.issue(id, 0, "malformtok".to_string(), true);
     let handle = start_mcp_server(
         registry,
         empty_slot(),
@@ -520,7 +520,7 @@ async fn malformed_session_id_header_is_rejected_with_400() {
 async fn session_ops_without_session_id_are_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "optok".to_string());
+    registry.issue(id, 0, "optok".to_string(), true);
     let handle = start_mcp_server(
         registry,
         empty_slot(),
@@ -550,7 +550,7 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
 async fn post_initialize_without_session_id_still_reaches_inner() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "inittok".to_string());
+    registry.issue(id, 0, "inittok".to_string(), true);
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
@@ -585,7 +585,7 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
 async fn oversize_body_is_rejected_with_413() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
-    registry.issue(id, 0, "sizetok".to_string());
+    registry.issue(id, 0, "sizetok".to_string(), true);
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),

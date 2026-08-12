@@ -187,6 +187,22 @@ pub const CLI_GROUP_MAIL: &str = "mail";
 // ADR-0132
 pub const CLI_EXE_ENV: &str = "ENGRAM_CLI_EXE";
 
+/// 스폰 시 실어 보내는 **CLI 우편 계열 가부 표식**의 변수 이름과 두 값(ADR-0133 결정 2).
+///
+/// ★`off` 는 "우편 금지" 가 아니라 "이 입구가 네 채널이 아니다" 다★: 그 스폰은 MCP 툴로 우편을 쓴다
+///   (ADR-0128 결정 1 — 채널은 백엔드 capability 로만 갈린다).
+/// ★이것은 교육 수단이지 강제가 아니다★: CLI 는 이 값을 읽어 **사용법 목록에서 우편 계열을 감출 뿐**이고,
+///   실제 발송 허용 여부는 데몬이 자격증명으로 판정한다. 표식은 에이전트 자신의 프로세스에 붙어 조작
+///   가능하며, 조작을 수용한다 — 표식을 떼면 목록에 우편이 보이지만 발송은 여전히 거절된다.
+///   **표식 필터에 강제를 의존하는 구현은 위반이다**: 표식을 떼는 순간 우편이 열린다.
+/// ★부재·모르는 값 = 전부 보인다(fail-open, 의도)★: 사람이 스폰 밖 셸에서 `engram help` 를 열었을 때
+///   사용법이 반쪽으로 나오면 안 된다. 숨김은 교육이지 권한이 아니므로 모르는 값에 fail-closed 할 이유가
+///   없다.
+// ADR-0133
+pub const MAIL_MARKER_ENV: &str = "ENGRAM_MAIL";
+pub const MAIL_MARKER_ON: &str = "on";
+pub const MAIL_MARKER_OFF: &str = "off";
+
 /// 우편 계열의 동사 전량 — `engram mail <동사>`.
 ///
 /// 세 소비자가 같은 값을 봐야 한다: CLI 파서(무엇을 받나) · 프라이밍 판정자(본문이 **실행 가능한** 호출을
@@ -289,21 +305,30 @@ pub struct ControlEndpoint {
     ///   물리 존재), 비-MCP 백엔드(codex/gemini stub)면 `None` — mcp-config 를 **아예 쓰지 않는다**(MCP
     ///   입구 물리 삭제). backend 는 `Some` 일 때만 `--mcp-config` 를 주입한다(빈 경로 방어 코드 불필요 —
     ///   타입이 강제).
-    /// ★ADR-0132 를 근거로 이 갈림을 먼저 지우지 말 것★: 그 결정은 격리 수단을 데몬 거절로 옮기지만
-    ///   **결정 3(데몬이 자격증명으로 우편을 거절)이 아직 구현 전**이라, 지금 이 신호가 사라지면 우편
-    ///   격리가 0 이 된다. 실물 갈림은 `backend/claude.rs` 의 `config_path` match 다.
-    /// ★ADR-0128: 이 Option 이 우편 발신 채널 갈림의 **단일 신호**★ — `Some`=MCP 배선만, `None`=CLI 배선만
-    ///   (backend 가 이 축으로 CLI 크레덴셜·PATH 주입을 가른다). 데몬이 MCP-capable 일 때만 config 를 쓰고
-    ///   그 write 실패 시 provision 을 Err 로 끊으므로 반쪽 MCP endpoint 는 존재하지 않는다 — 그 fail-closed
-    ///   가 이 신호의 등호를 지탱한다(깨지면 MCP 스폰에 CLI 배선이 새어 ADR-0128 위반).
+    /// ★이 Option 은 **MCP 입구의 유무**만 뜻한다(ADR-0133)★ — CLI 배선의 유무가 아니다. CLI 는 두 갈래
+    ///   전원에게 깔리고, 우편 가부는 `mail_allowed` 표식(교육)과 데몬 거절(강제)이 가른다. 데몬이
+    ///   MCP-capable 일 때만 config 를 쓰고 그 write 실패 시 provision 을 Err 로 끊으므로 반쪽 MCP endpoint
+    ///   는 존재하지 않는다.
     pub config_path: Option<std::path::PathBuf>,
     /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram` CLI 바이너리 절대경로(있으면).
     /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
     /// 그 env(claude=`ENGRAM_CLI_EXE`)와 PATH 프리펜드를 주입하지 않는다.
-    /// ★소비 조건 = CLI 전용 스폰(`config_path=None`)뿐(ADR-0128)★: 두 갈래가 공유하는 필드라 MCP 가능
-    /// endpoint 에도 값이 실리지만 그 갈래는 이 값을 **쓰지 않는다** — 쓰면 채널이 둘로 늘어 결정 위반이다.
-    /// 형제 exe 탐색 지식은 데몬 소유(lib.rs).
+    /// ★소비 조건 = control endpoint 가 있는 스폰 전부(ADR-0133 · ADR-0132 결정 5)★: 제어 동사는 전원에게
+    /// 열리므로 두 갈래 모두 이 값을 쓴다. 형제 exe 탐색 지식은 데몬 소유(lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
+    /// 이 스폰이 **CLI 우편 계열(`engram mail …`)을 쓸 수 있는가**(ADR-0133 결정 2). backend 가 표식
+    /// env(`MAIL_MARKER_ENV`)로 번역해 싣고, CLI 는 그 값을 읽어 사용법에서 우편 계열을 보이거나 감춘다.
+    ///
+    /// ★이름보다 좁다 — "우편을 쓸 수 있는가" 가 아니다★: `false` 인 스폰(= MCP 가능 백엔드)은 MCP 툴로
+    ///   **우편을 정상적으로 쓴다**. 채널은 백엔드 capability 로만 갈리고 런타임 폴백이 없다(ADR-0128
+    ///   결정 1) — 이 값은 그 설계에서 닫혀 있어야 할 쪽 입구(CLI/HTTP)만 가리킨다.
+    ///
+    /// ★core 는 정책을 파생하지 않는다★: 이 값은 데몬이 판정해 실어 주는 **사실**이고, backend 는 실린
+    ///   대로 주입만 한다. `config_path` 유무 같은 다른 필드에서 이 값을 다시 유도하지 말 것 — 두 곳이
+    ///   갈리면 교육과 강제가 어긋난다.
+    /// ★교육 수단이지 강제가 아니다★: 강제는 데몬이 자격증명으로 하는 거절뿐이다(`MAIL_MARKER_ENV` 주석).
+    // ADR-0133
+    pub mail_allowed: bool,
     /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
     /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
     /// backend/claude.rs 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
@@ -351,15 +376,17 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///     이 Err 를 만나면 fail-closed 로 중단한다(제어 채널 없이 몰래 도는 에이전트 금지, health 위장 방지).
     ///
     /// `accepts_mcp_config`(ADR-0099): 이 backend 가 mcp-config 를 받아들이는가(= MCP-capable 인가). manager 가
-    ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **채널 물리 배선·
-    ///   프라이밍 변형·grant 를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 채널 집합 **=**
-    ///   물리적으로 **깐** 채널 집합 — ADR-0128 이 ADR-0126 결정 4 의 포함관계를 등호로 되돌렸다. 안 깐
-    ///   채널을 가르치면 발신 freeze 가 재발하고, 깔고도 안 가르치면 통제 없는 우회 표면이 남는다).
+    ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **MCP 입구·
+    ///   프라이밍 변형·grant·우편 가부를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 우편 채널
+    ///   **=** 그 스폰이 실제로 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면 ADR-0099 가 실측한 발신
+    ///   freeze 가 재발한다).
     ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
-    ///   결정 1) + `[Mcp]` grant, `engram` CLI 배선 없음.
-    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `[Cli]` grant + `engram` CLI 배선(env·PATH).
+    ///   결정 1) + `mail_allowed=false`(데몬이 이 자격증명의 우편 요청을 거절한다 — ADR-0133).
+    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `mail_allowed=true`.
+    ///   `engram` CLI 배선(env·PATH)은 **두 갈래 모두** 받는다 — 제어 동사가 전원 개방이기 때문이다
+    ///   (ADR-0132 결정 5).
     // ADR-0126
-    // ADR-0128
+    // ADR-0133
     fn provision(
         &self,
         id: AgentId,

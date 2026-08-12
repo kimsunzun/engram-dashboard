@@ -141,7 +141,7 @@ async fn fixture(tag: &str) -> Fixture {
     // 호출자 신원 — 제어 동사는 신원을 인가에만 쓴다(발신자 파생이 없다). 그래서 아무 에이전트 신원이나
     //   유효하고, 여기선 명부에 없는 id 로 발급해 "제어는 자기 존재를 전제하지 않는다" 도 함께 고정한다.
     let token = format!("test-token-{tag}");
-    registry.issue(AgentId::new_v4(), 0, token.clone());
+    registry.issue(AgentId::new_v4(), 0, token.clone(), true);
 
     let base = handle
         .url

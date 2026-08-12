@@ -115,24 +115,23 @@ fn set_engram_exe_env() {
 // 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
 // **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
 // **형제**에서 절대경로를 찾아(set_engram_exe_env·locate_daemon_exe 와 동일 대칭 — 배포 시 세 exe 동거),
-// provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 가 CLI 전용 스폰에서만 그걸
-// ENGRAM_CLI_EXE·PATH 로 주입한다(MCP 가능 스폰은 받지 않는다 — ADR-0128).
+// provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
+// **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
+// 경로가 아니다.
 //
 // ★best-effort(fail-open)★: 못 찾아도(개발 중 부분 빌드 등) None 을 돌려주고 데몬은 계속 뜬다 — MCP 가능
-// 백엔드(claude)는 애초에 이 경로를 안 쓰므로 무영향이고, 비-MCP 백엔드 스폰만 provision 에서 fail-closed 로
-// 막힌다(발신 입구 0). warn 로그로 원인을 남긴다(관측성).
+// 백엔드(claude)는 제어 CLI 를 잃을 뿐이고, 비-MCP 백엔드 스폰은 우편 입구가 0 이 되므로 provision 에서
+// fail-closed 로 막힌다. warn 로그로 원인을 남긴다(관측성).
 
 /// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다(env 주입은
 /// backend 소유).
 ///
-/// ★"claude 스폰에서 안 쓰여도 지우지 말 것"(ADR-0128)★: 우편 채널은 capability 로만 갈려서 MCP 가능
-/// 스폰(= 현재의 claude)은 이 경로를 받지 않는다 — 그래서 호출자가 하나뿐이고 테스트도 없는 게 정상이다.
-/// 그러나 이 값은 **비-MCP 백엔드의 유일한 발신 입구**이고(그쪽은 MCP 입구가 아예 없다) 없으면 provision 이
-/// fail-closed 로 스폰을 막는다 — 즉 삭제는 dead-code 정리가 아니라 CLI 백엔드 우편의 제거다. 이 구간은
-/// 테스트가 없어(지우고 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간
-/// (provision→endpoint→스폰 env)은 daemon control 테스트
-/// `provision_non_mcp_wires_the_cli_into_spawn_env` 가 잡는다.
-// ADR-0128
+/// ★호출자가 하나뿐이어도 지우지 말 것★: 이 값은 **비-MCP 백엔드의 유일한 우편 입구**이자(그쪽은 MCP
+/// 입구가 아예 없다) **모든 스폰의 제어 입구**이고, 없으면 비-MCP provision 이 fail-closed 로 스폰을 막는다
+/// — 즉 삭제는 dead-code 정리가 아니라 CLI 우편과 제어 평면의 제거다. 이 구간은 테스트가 없어(지우고
+/// 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간(provision→endpoint→
+/// 스폰 env)은 daemon control 테스트 `provision_*_wires_the_*_cli_*` 두 짝이 잡는다.
+// ADR-0133
 fn locate_send_exe() -> Option<PathBuf> {
     // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
     //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).

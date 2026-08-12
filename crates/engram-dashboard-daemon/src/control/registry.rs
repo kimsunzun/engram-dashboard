@@ -26,6 +26,31 @@ pub struct BoundIdentity {
     pub epoch: u32,
 }
 
+/// 토큰 하나에 매인 것 전부 — 신원 + **발급 시점에 확정된** 우편 가부(ADR-0133 결정 3의 판정 재료).
+///
+/// ★왜 발급 시점에 박나(요청마다 조회하지 않는 이유)★: 우편 채널은 백엔드 capability 로만 갈리고
+///   **런타임 스위칭·폴백이 없다**(ADR-0128 결정 1) — 그래서 발급 시점의 값이 곧 진실이다. 토큰은
+///   (AgentId, epoch)마다 새로 나므로 재활성화하면 새 값으로 다시 박힌다. 우편은 오가는 양이 많은
+///   경로라(그게 ADR-0128 이 MCP 를 고른 이유다) 요청마다 매니저를 조회할 이유도 없다.
+/// ★신원과 권한을 한 값에 담되 **동일성 비교는 신원으로만** 한다★: 세션 pinning 이 비교하는 것은
+///   `identity` 이고, 이 구조체째로 비교하지 않는다 — 권한 비트가 동일성 판정에 끼면 인가 문제가
+///   세션 탈취 오탐(403)으로 둔갑한다.
+// ADR-0133
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenBinding {
+    pub identity: BoundIdentity,
+    /// **HTTP/CLI 우편 입구**(`/control/send`·`/control/messages`)를 이 자격증명으로 쓸 수 있는가.
+    ///
+    /// ★이름보다 좁다 — "우편을 쓸 수 있는가" 가 아니다★: `false` 인 자격증명(= MCP 가능 백엔드 스폰)은
+    ///   `/mcp` 의 `send_message` 로 **우편을 정상적으로 쓴다**. 채널이 백엔드 capability 로만 갈리고
+    ///   런타임 폴백이 없다는 것이 설계이며(ADR-0128 결정 1), 이 값은 그 설계에서 닫혀 있어야 할 쪽 입구를
+    ///   닫는 데만 쓰인다. 이 필드를 "우편 권한" 일반으로 읽고 MCP 툴 경로에까지 검사를 얹으면 그 결정을
+    ///   뒤집는 것이다.
+    // ADR-0133
+    // ADR-0128
+    pub mail_allowed: bool,
+}
+
 /// 이 impl 이 두 신원 타입을 잇는 경계의 **유일한 지점**이다(입구가 `cmd.from.into()` 로 넘긴다).
 // ADR-0110
 impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
@@ -83,7 +108,7 @@ pub struct ControlRegistry {
 
 #[derive(Default)]
 struct Inner {
-    token_to_identity: HashMap<String, BoundIdentity>,
+    token_to_binding: HashMap<String, TokenBinding>,
     agent_to_token: HashMap<AgentId, String>,
     session_to_identity: HashMap<String, BoundIdentity>,
 }
@@ -97,33 +122,42 @@ impl ControlRegistry {
     /// token 은 호출자(provision)가 CSPRNG 로 만들어 넘긴다 — 이 레지스트리는 난수 생성을 하지 않고
     /// 매핑만 소유한다(생성·매핑 관심사 분리).
     ///
+    /// `mail_allowed` = 이 자격증명으로 우편 요청을 받을 것인가(ADR-0133). 판정 자체는 호출자
+    ///   (`DaemonControlChannel::provision`) 단독이다 — 여기선 받은 값을 기록만 한다(파생 금지: 두 곳이
+    ///   판정하면 갈린다).
     /// ★lock 순서(ADR-0006)★: write lock 은 이 함수 안에서만 잡고, 외부 호출을 하지 않는다(순수 맵 조작).
-    pub fn issue(&self, id: AgentId, epoch: u32, token: String) {
+    pub fn issue(&self, id: AgentId, epoch: u32, token: String, mail_allowed: bool) {
         let mut inner = self.inner.write().expect("control registry poisoned");
         if let Some(old) = inner.agent_to_token.remove(&id) {
-            inner.token_to_identity.remove(&old);
+            inner.token_to_binding.remove(&old);
             // 옛 토큰으로 붙은 세션 바인딩도 이제 stale — 함께 지운다.
             inner
                 .session_to_identity
                 .retain(|_, ident| ident.agent_id != id);
         }
-        inner.token_to_identity.insert(
+        inner.token_to_binding.insert(
             token.clone(),
-            BoundIdentity {
-                agent_id: id,
-                epoch,
+            TokenBinding {
+                identity: BoundIdentity {
+                    agent_id: id,
+                    epoch,
+                },
+                mail_allowed,
             },
         );
         inner.agent_to_token.insert(id, token);
-        tracing::info!(agent = %id, epoch, "제어 채널 토큰 발급(ADR-0086)");
+        tracing::info!(agent = %id, epoch, mail_allowed, "제어 채널 토큰 발급(ADR-0086)");
     }
 
     /// 없거나 폐기됐으면 None — 호출자(auth 미들웨어)가 401.
-    pub fn validate(&self, token: &str) -> Option<BoundIdentity> {
+    ///
+    /// ★신원과 우편 가부를 **한 번의 조회로** 함께 낸다★: 둘을 따로 조회하면 그 사이의 폐기·재발급이
+    ///   "신원은 A 인데 권한은 B" 를 만들 수 있고, 그 조합엔 정의된 답이 없다.
+    pub fn validate(&self, token: &str) -> Option<TokenBinding> {
         self.inner
             .read()
             .expect("control registry poisoned")
-            .token_to_identity
+            .token_to_binding
             .get(token)
             .copied()
     }
@@ -131,14 +165,14 @@ impl ControlRegistry {
     /// 발신자 생존 "관측"용 (게이트 아님 — 배달은 막지 않고 기록만, 사용자 결정 2026-07-19).
     ///
     /// false = kill/rotate 로 토큰이 폐기·교체됨. relay 시점엔 원본 토큰 문자열이 남아 있지 않으므로
-    ///   agent_to_token → token_to_identity 로 되짚어 epoch 일치를 본다.
+    ///   agent_to_token → token_to_binding 으로 되짚어 epoch 일치를 본다.
     pub fn is_identity_live(&self, identity: BoundIdentity) -> bool {
         let inner = self.inner.read().expect("control registry poisoned");
         inner
             .agent_to_token
             .get(&identity.agent_id)
-            .and_then(|token| inner.token_to_identity.get(token))
-            .map(|bound| bound.epoch == identity.epoch)
+            .and_then(|token| inner.token_to_binding.get(token))
+            .map(|bound| bound.identity.epoch == identity.epoch)
             .unwrap_or(false)
     }
 
@@ -220,7 +254,7 @@ impl ControlRegistry {
         let mut inner = self.inner.write().expect("control registry poisoned");
         match inner.agent_to_token.get(&id) {
             Some(token) => {
-                let cur = inner.token_to_identity.get(token).map(|i| i.epoch);
+                let cur = inner.token_to_binding.get(token).map(|b| b.identity.epoch);
                 if cur != Some(epoch) {
                     return;
                 }
@@ -228,7 +262,7 @@ impl ControlRegistry {
             None => return,
         }
         if let Some(token) = inner.agent_to_token.remove(&id) {
-            inner.token_to_identity.remove(&token);
+            inner.token_to_binding.remove(&token);
         }
         inner
             .session_to_identity
@@ -242,7 +276,7 @@ impl ControlRegistry {
         self.inner
             .read()
             .expect("control registry poisoned")
-            .token_to_identity
+            .token_to_binding
             .len()
     }
 
@@ -352,10 +386,12 @@ impl ControlRegistry {
 mod tests {
     use super::*;
 
+    /// 우편 가부는 이 헬퍼를 쓰는 테스트들의 관심사가 아니다 — 우편이 열린 쪽(비-MCP 스폰의 값)으로 둔다.
+    ///   그 축을 보는 테스트는 `issue` 를 직접 부른다.
     fn tok(reg: &ControlRegistry, id: AgentId, epoch: u32) -> String {
         // 결정적 테스트 토큰(실제 provision 은 CSPRNG). 유일성만 유지.
         let t = format!("tok-{id}-{epoch}");
-        reg.issue(id, epoch, t.clone());
+        reg.issue(id, epoch, t.clone(), true);
         t
     }
 
@@ -374,9 +410,29 @@ mod tests {
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let t = tok(&reg, id, 0);
-        let ident = reg.validate(&t).expect("valid token");
-        assert_eq!(ident.agent_id, id);
-        assert_eq!(ident.epoch, 0);
+        let bound = reg.validate(&t).expect("valid token");
+        assert_eq!(bound.identity.agent_id, id);
+        assert_eq!(bound.identity.epoch, 0);
+    }
+
+    /// ★우편 가부는 자격증명에 박히고 **회전 때 다시 박힌다**(ADR-0133 결정 2)★: 재활성화가 채널을
+    ///   바꾸면 새 토큰이 새 판정을 들고 나온다 — 옛 판정이 남아 있으면 백엔드를 바꿔 재스폰한 에이전트가
+    ///   옛 권한으로 돈다.
+    #[test]
+    fn issue_records_the_mail_verdict_and_rotation_replaces_it() {
+        let reg = ControlRegistry::new();
+        let id = AgentId::new_v4();
+        reg.issue(id, 0, "mail-off".to_string(), false);
+        assert!(
+            !reg.validate("mail-off").expect("valid").mail_allowed,
+            "발급 시 false 면 검증도 false"
+        );
+        reg.issue(id, 1, "mail-on".to_string(), true);
+        assert!(reg.validate("mail-on").expect("valid").mail_allowed);
+        assert!(
+            reg.validate("mail-off").is_none(),
+            "회전으로 옛 토큰(과 그 판정)은 폐기"
+        );
     }
 
     #[test]
@@ -438,8 +494,8 @@ mod tests {
             reg.validate(&old).is_none(),
             "회전된 구 epoch 토큰은 폐기(stale) — validate None"
         );
-        let ident = reg.validate(&new).expect("새 토큰 유효");
-        assert_eq!(ident.epoch, 1);
+        let bound = reg.validate(&new).expect("새 토큰 유효");
+        assert_eq!(bound.identity.epoch, 1);
         assert_eq!(reg.live_token_count(), 1, "한 AgentId = 산 토큰 1개");
     }
 
@@ -556,7 +612,7 @@ mod tests {
             epoch: 0,
         };
         // 같은 agent·같은 epoch 로 재발급.
-        reg.issue(id, 0, "reissued-token".to_string());
+        reg.issue(id, 0, "reissued-token".to_string(), true);
         assert_ne!(
             current_token(&reg, id),
             stale,
@@ -650,8 +706,8 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let id = AgentId::new_v4();
                 let t = format!("t-{i}");
-                reg.issue(id, i, t.clone());
-                assert_eq!(reg.validate(&t).map(|x| x.epoch), Some(i));
+                reg.issue(id, i, t.clone(), true);
+                assert_eq!(reg.validate(&t).map(|b| b.identity.epoch), Some(i));
                 reg.revoke(id, i);
             }));
         }

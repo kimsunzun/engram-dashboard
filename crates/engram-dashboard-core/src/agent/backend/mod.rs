@@ -65,18 +65,18 @@ pub trait AgentBackend: Send + Sync {
     /// 프로그램이 MCP config 를 소비하나"는 backend-kind 지식이라 여기서 선언한다 — manager 가 `matches!`
     /// 로 직접 분기하지 않는다.
     ///
-    /// 이 플래그 하나가 provision 의 채널 물리 배선·grant·프라이밍 변형을 전부 구동한다(정합 불변식 =
-    /// 프라이밍이 가르치는 채널 **=** 깐 채널 — ADR-0126 결정 4 의 단방향(⊆)을 ADR-0128 결정 3 이 등호로
-    /// 되돌렸다. 안 깐 채널을 가르치면 발신 freeze 가 재발하고, 깔고도 안 가르치면 통제 없는 우회 표면이
-    /// 남는다). true 면
+    /// 이 플래그 하나가 provision 의 MCP 입구·grant·프라이밍 변형·**우편 가부**를 전부 구동한다(정합
+    /// 불변식 = 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
+    /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
     /// `DaemonControlChannel::provision` 이 mcp-config 를 쓰고 MCP bits 를 endpoint 에 실으며 MCP-only 교육
-    /// 프라이밍(`send_message` 만 — ADR-0126 결정 1)을, false 면 mcp-config 미기록 + CLI-only 프라이밍을 고른다.
+    /// 프라이밍(`send_message` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 mcp-config 미기록 +
+    /// CLI-only 프라이밍 + 우편 가능 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
     ///
     /// ★`supports_control_channel` 과의 관계★: 후자는 "provision 을 **부르나**"(제어 채널 자체를 소비하나),
     ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 현재 claude 는 둘 다 true,
     ///   codex/gemini 는 둘 다 false 지만, 미래 "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 다.
     // ADR-0126
-    // ADR-0128
+    // ADR-0133
     fn accepts_mcp_config(&self) -> bool;
 
     /// cwd·env는 manager가 정규화한 값을 전달한다.

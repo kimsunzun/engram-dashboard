@@ -207,7 +207,7 @@ async fn run() -> i32 {
     }
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, format!("smoke-sender-{sender}"));
+    registry.issue(sender, 0, format!("smoke-sender-{sender}"), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,

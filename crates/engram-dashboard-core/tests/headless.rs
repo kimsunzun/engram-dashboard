@@ -120,6 +120,8 @@ impl ControlChannel for CountingControl {
             grants: vec![],
             // S18 D: 설정 조각도 이 테스트의 관심사가 아니다(spec 조립이 아니라 spawn 인과 격리).
             settings_file: None,
+            // ADR-0133: 표식 산출도 관심사 밖 — 데몬 산출 규칙(!accepts_mcp_config)만 흉내 낸다.
+            mail_allowed: !accepts_mcp_config,
         }))
     }
     fn revoke(&self, id: AgentId, epoch: u32) {

@@ -18,6 +18,11 @@
 //! ★help 는 크레덴셜·데몬 없이 답한다★: env 검사보다 **먼저** 처리한다 — 표면을 배우는 자리가 "이미
 //!   스폰돼 있어야" 하면 발견이 아니다.
 //!
+//! ★우편 계열은 보이기도 하고 안 보이기도 한다 — 그러나 막지는 않는다(ADR-0133)★: 스폰이 심은 표식
+//!   (`MAIL_MARKER_ENV`)이 off 면 우편 계열을 **사용법에서만** 감춘다(감춰진 계열의 help 요청은 오타와
+//!   같은 반려를 받는다). 우편 **동사 자체는 그대로 데몬으로 나간다** — 거절은 데몬이 자격증명으로 하는
+//!   일이고, 여기서 막으면 그 거절이 관측되지 않는다. 표식은 조작 가능하므로 여기에 강제를 기대면 안 된다.
+//!
 //! ```text
 //! engram mail send --to <수신자[,수신자…]> --body "…" [--request [--reply-by 10m]] [--reply-to m-xxxx]
 //!     # 수신자 = 이름 | agent id | @here(나 빼고 지금 산 전원) | @all(나 빼고 명부 전원 — 잠든 것 포함,
@@ -72,8 +77,8 @@ use std::time::Duration;
 
 use engram_dashboard_core::agent::types::{
     AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS, CLI_EXE_NAME,
-    CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS, RENAME_OUTCOME_RENAMED,
-    RENAME_OUTCOME_UNCHANGED,
+    CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS, MAIL_MARKER_ENV,
+    MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
 };
 
 /// 연결/응답 타임아웃(로컬 데몬이라 짧게). 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
@@ -86,15 +91,47 @@ const HELP_VERB: &str = "help";
 /// 배우는 유일한 자리라, 여기 적힌 이름이 실제 실행파일과 갈리면 배운 대로 쳐도 명령을 못 찾는다.
 const HELP_TOOL_SLOT: &str = "{tool}";
 
-/// 계열 목록(인자 없음 · `help`). 동사·플래그는 계열 help 로 미룬다 — 목록이 길어지면 정작 읽어야 할
-/// 한 줄이 묻힌다(ADR-0132 결정 4 가 프라이밍에 목록을 안 싣는 것과 같은 이유).
-const HELP_ROOT: &str = "\
+/// 이 프로세스가 **사용법에 보여 줄** 표면(ADR-0133 결정 1·2). 스폰이 심은 표식에서 읽는다.
+///
+/// ★강제가 아니라 교육이다★: `Hidden` 은 우편 계열을 사용법과 예시에서 빼기만 한다 — 우편 동사는 그대로
+///   데몬으로 나가고 거기서 거절당한다. 여기서 실행까지 막으면 ① 강제가 두 곳(에이전트 프로세스 · 데몬)에
+///   생기고 ② 표식을 뗀 프로세스는 그 두 곳 중 하나를 잃어 **우편이 열린 것처럼 보인다**.
+/// ★기본이 `Shown` 인 것은 의도다★: 표식은 스폰이 심는 것이라 사람이 셸에서 직접 부르면 없다 — 그때
+///   사용법이 반쪽으로 나오면 안 된다. 모르는 값도 같은 이유로 `Shown` 이다(모르는 값에 fail-closed 해도
+///   막히는 건 사용법뿐이라 얻는 게 없다).
+// ADR-0133
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum MailSurface {
+    #[default]
+    Shown,
+    Hidden,
+}
+
+impl MailSurface {
+    fn from_env() -> Self {
+        match std::env::var(MAIL_MARKER_ENV) {
+            Ok(v) if v == MAIL_MARKER_OFF => Self::Hidden,
+            _ => Self::Shown,
+        }
+    }
+
+    fn shows_mail(self) -> bool {
+        self == Self::Shown
+    }
+}
+
+/// 계열 목록의 머리·꼬리와 **계열당 한 줄**. 줄 단위로 쪼갠 이유는 필터가 필터로 남게 하기 위해서다 —
+/// 완성된 두 번째 목록 문자열을 따로 두면 한쪽만 고쳐진 채 갈린다(ADR-0133 결정 1).
+const HELP_ROOT_HEAD: &str = "\
 {tool} — CLI for the Engram broker daemon. Usage: {tool} <group> <verb> [flags]
 
 Groups:
-  mail     message your teammates and check your own outstanding items
-  agent    list, create, start, rename and re-parent the agents on this team
-
+";
+const HELP_ROOT_GROUP_MAIL: &str =
+    "  mail     message your teammates and check your own outstanding items\n";
+const HELP_ROOT_GROUP_AGENT: &str =
+    "  agent    list, create, start, rename and re-parent the agents on this team\n";
+const HELP_ROOT_TAIL: &str = "
 Run `{tool} help <group>` for that group's verbs (`{tool} <group> --help` works too).
 ";
 
@@ -126,12 +163,19 @@ Exit codes: 0 = accepted or read | 1 = rejected, or the daemon could not be reac
 ///
 /// ★없는 동사를 여기 적지 않는다★: 죽이기·지우기는 표면에 없다(`CLI_AGENT_VERBS` 주석이 사유의 정본).
 ///   "지금은 안 된다" 는 안내도 넣지 않는다 — 읽는 쪽이 LLM 이라 목록에 있는 낱말은 시도 대상이 된다.
-const HELP_AGENT: &str = "\
+const HELP_AGENT_HEAD: &str = "\
 {tool} agent — the agents on this team: who exists, and starting or re-arranging them.
 
   {tool} agent list
       Every agent, running or asleep. One JSON object: agents[] with id, name, state (live|sleeping), cwd, parent.
-      Names are how you address teammates in `{tool} mail send --to <name>`.
+";
+
+/// 우편이 보이는 프로세스에서만 붙는 상호참조 한 줄(ADR-0133) — 감춘 계열을 다른 계열의 help 가 가르치면
+/// 필터가 무의미해진다.
+const HELP_AGENT_MAIL_XREF: &str =
+    "      Names are how you address teammates in `{tool} mail send --to <name>`.\n";
+
+const HELP_AGENT_TAIL: &str = "\
   {tool} agent spawn <name>
       Start an agent that already exists (it keeps its own past session when it has one).
   {tool} agent spawn --cwd <path> [--name <name>]
@@ -154,8 +198,28 @@ called `none` can only be used as a parent by its id.
 Exit codes: 0 = done | 1 = refused, or the daemon could not be reached — stdout carries the daemon's own reply when there was one, and {\"status\":\"error\",\"code\":...,\"hint\":...} when this CLI refused the call itself | 2 = the daemon answered 2xx in a shape this CLI cannot read; report it, retrying will not help. Judge the outcome by the exit code, not by the shape of stdout.
 ";
 
-fn render_help(template: &str) -> String {
-    template.replace(HELP_TOOL_SLOT, CLI_EXE_NAME)
+/// 화면 하나 = 조각들의 이어붙임 + 실행파일 이름 치환. 조각 선택이 곧 표면 필터다(ADR-0133).
+fn render_help(topic: HelpTopic, mail: MailSurface) -> String {
+    let mut out = String::new();
+    match topic {
+        HelpTopic::Root => {
+            out.push_str(HELP_ROOT_HEAD);
+            if mail.shows_mail() {
+                out.push_str(HELP_ROOT_GROUP_MAIL);
+            }
+            out.push_str(HELP_ROOT_GROUP_AGENT);
+            out.push_str(HELP_ROOT_TAIL);
+        }
+        HelpTopic::Mail => out.push_str(HELP_MAIL),
+        HelpTopic::Agent => {
+            out.push_str(HELP_AGENT_HEAD);
+            if mail.shows_mail() {
+                out.push_str(HELP_AGENT_MAIL_XREF);
+            }
+            out.push_str(HELP_AGENT_TAIL);
+        }
+    }
+    out.replace(HELP_TOOL_SLOT, CLI_EXE_NAME)
 }
 
 fn main() {
@@ -165,7 +229,10 @@ fn main() {
 }
 
 fn run(args: &[String]) -> i32 {
-    let parsed = match parse_command(args) {
+    // ★표식은 파싱보다 먼저, 크레덴셜보다 먼저 읽는다★: help 가 크레덴셜 검사 앞에서 답한다는 성질을
+    //   유지해야 하는데(ADR-0132 조각 ①) 그 화면이 표식에 따라 갈리기 때문이다.
+    let mail = MailSurface::from_env();
+    let parsed = match parse_command(args, mail) {
         Ok(p) => p,
         Err(msg) => {
             print_error("BAD_ARGS", &msg);
@@ -174,16 +241,25 @@ fn run(args: &[String]) -> i32 {
     };
     // help 는 크레덴셜도 데몬도 없이 답한다 — 표면을 배우는 자리가 "먼저 스폰돼 있어야" 하면 발견이 아니다.
     let command = match parsed {
-        ParsedCommand::Help(template) => {
-            println!("{}", render_help(template));
+        ParsedCommand::Help(topic) => {
+            println!("{}", render_help(topic, mail));
             return 0;
         }
         // 제어 동사는 stdin 을 읽지 않으므로 materialize 단계가 없다(본문이라는 개념이 없다).
         ParsedCommand::Agent(a) => Command::Agent(a),
+        // ★이 단계의 반려도 같은 접기를 탄다★: 파싱이 성공한 **뒤**에 나는 인자 오류(빈 stdin 등)라
+        //   `parse_command` 의 접기를 지나쳐 온다 — 그 문구가 계열의 다른 플래그를 되돌려 주면 감춘 계열이
+        //   여기로 새어 나간다(실제로 `--body-stdin` 빈 입력 반려가 `--body` 를 안내했다).
+        // ★진짜 stdin I/O 실패(EIO·EISDIR 등)까지 함께 접히는 것은 **감수한 대가**다★: 접기가 발동하는
+        //   프로세스는 우편이 감춰진 에이전트뿐이고, 그 요청은 어차피 데몬이 거절하므로 구체적 진단이
+        //   그에게 줄 값이 거의 없다. 반대로 사유를 그대로 흘리면 그 문구가 **계열의 존재와 인자 표기를
+        //   드러내** 감춘 것이 무의미해진다 — 진단 가능성보다 은닉을 택한 자리다. 이걸 "실패 원인이 안
+        //   보인다" 로 읽고 원문을 되살리지 말 것.
+        // ADR-0133
         ParsedCommand::Mail(m) => match materialize_body(m, read_stdin_to_string) {
             Ok(c) => c,
             Err(msg) => {
-                print_error("BAD_ARGS", &msg);
+                print_error("BAD_ARGS", &hide_mail_reason(mail, msg));
                 return 1;
             }
         },
@@ -282,12 +358,21 @@ enum BodySource {
     Stdin,
 }
 
+/// 어느 help 화면인가. 완성된 문자열이 아니라 **주제**를 나르는 이유는 화면 조립이 표면 필터
+/// (`MailSurface`)에 달려 있어서다 — 파서가 문자열을 골라 버리면 필터가 파서로 새어 든다.
+// ADR-0133
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpTopic {
+    Root,
+    Mail,
+    Agent,
+}
+
 /// 파싱 결과의 최상위 갈래. help 를 우편 동사와 **타입으로** 갈라 두면 네트워크·크레덴셜 경로가 help 를
 /// 영영 만나지 않는다(그 경로에 "help 면 건너뛴다" 분기를 둘 필요가 없다).
 #[derive(Debug)]
 enum ParsedCommand {
-    /// 출력할 help 템플릿(`render_help` 가 실행파일 이름을 채운다).
-    Help(&'static str),
+    Help(HelpTopic),
     Mail(ParsedMail),
     Agent(ParsedAgent),
 }
@@ -404,34 +489,85 @@ fn build_agent_body(agent: &ParsedAgent) -> serde_json::Value {
 ///   시작하면 인자 오류다. 그래야 계열이 늘어도 "어느 동사인지" 를 첫 토큰만 보고 안다.
 /// ★kebab-case 플래그 ↔ snake_case wire(spec §1 표기 매핑)★: 셸 관례는 `--reply-by`, JSON 필드는
 ///   `reply_by` 다 — 변환은 `Command::request_body` 한 곳에서만 한다.
-fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
+/// ★표식이 가리는 것은 **렌더링**뿐이다(ADR-0133 결정 1)★: 계열이 감춰지면 그 계열의 사용법 요청과
+///   **인자 오류**가 전부 "모르는 계열" 로 렌더된다 — 반려 문구도 목록·상호참조와 같은 교육 표면이고,
+///   특히 동사 목록을 되돌려 주는 문구(`mail needs a verb (send|status|pending)`)는 감춘 화면보다 **더 많이**
+///   가르친다. 반면 **말이 되는 호출은 그대로 통과**해 데몬에 닿는다: 강제는 데몬 한 곳에만 남아야 그
+///   거절이 실제로 관측된다. 인자 오류는 애초에 네트워크를 타지 않으므로(이 파일의 규율) 문구를 바꾼다고
+///   강제가 클라이언트로 옮겨 오지 않는다.
+fn parse_command(args: &[String], mail: MailSurface) -> Result<ParsedCommand, String> {
     let Some(first) = args.first().map(|s| s.as_str()) else {
-        return Ok(ParsedCommand::Help(HELP_ROOT));
+        return Ok(ParsedCommand::Help(HelpTopic::Root));
     };
     match first {
-        t if is_help_token(t) => parse_help_topic(&args[1..]),
+        t if is_help_token(t) => parse_help_topic(&args[1..], mail),
         CLI_GROUP_MAIL => {
             let rest = &args[1..];
             if rest.first().is_some_and(|a| is_help_token(a)) {
+                if !mail.shows_mail() {
+                    // 감춰진 계열의 사용법 요청 = 모르는 계열을 친 것과 같은 답(구분되면 감춘 의미가 없다).
+                    return Err(unknown_group(first));
+                }
                 reject_help_with_extra_args(rest)?;
-                return Ok(ParsedCommand::Help(HELP_MAIL));
+                return Ok(ParsedCommand::Help(HelpTopic::Mail));
             }
-            parse_mail(rest).map(ParsedCommand::Mail)
+            // ★반려를 여기 한 곳에서 갈아끼운다★: 계열 안쪽 문구를 자리마다 고치면 새 동사·새 플래그가
+            //   생길 때마다 한 자리가 빠지고, 그 한 자리가 감춘 계열을 되돌려 준다. 성공 갈래는 손대지
+            //   않으므로 실행 경로는 그대로다.
+            parse_mail(rest)
+                .map(ParsedCommand::Mail)
+                .map_err(|e| hide_mail_reason(mail, e))
         }
         CLI_GROUP_AGENT => {
             let rest = &args[1..];
             if rest.first().is_some_and(|a| is_help_token(a)) {
                 reject_help_with_extra_args(rest)?;
-                return Ok(ParsedCommand::Help(HELP_AGENT));
+                return Ok(ParsedCommand::Help(HelpTopic::Agent));
             }
             parse_agent(rest).map(ParsedCommand::Agent)
         }
         other if other.starts_with('-') => Err(format!(
-            "the first argument must be a group, not a flag ({other}) — e.g. `{CLI_EXE_NAME} {CLI_GROUP_MAIL} send --to <name> --body <text>`; run `{CLI_EXE_NAME} help` to list groups"
+            "the first argument must be a group, not a flag ({other}) — e.g. `{}`; run `{CLI_EXE_NAME} help` to list groups",
+            example_invocation(mail)
         )),
-        other => Err(format!(
-            "unknown group: {other} — run `{CLI_EXE_NAME} help` to list groups"
-        )),
+        other => Err(unknown_group(other)),
+    }
+}
+
+fn unknown_group(name: &str) -> String {
+    format!("unknown group: {name} — run `{CLI_EXE_NAME} help` to list groups")
+}
+
+/// 우편 계열의 반려 사유를 **표면에 맞게 렌더한다**(ADR-0133) — 감춰져 있으면 "모르는 계열" 한 문구로 접고,
+/// 보이면 원래 사유를 그대로 낸다.
+///
+/// ★우편 계열이 자기 사유를 내는 자리는 전부 여기를 지나야 한다★: 반려 문구는 목록·상호참조와 같은 교육
+///   표면이고, 특히 계열의 다른 동사·플래그를 되돌려 주는 문구는 감춘 화면보다 더 많이 가르친다. 자리가
+///   둘 이상이면 하나가 빠지고, 실제로 파싱 **이후** 단계(`materialize_body`)가 그렇게 빠져 있었다.
+// ADR-0133
+fn hide_mail_reason(mail: MailSurface, reason: String) -> String {
+    if mail.shows_mail() {
+        reason
+    } else {
+        unknown_group(CLI_GROUP_MAIL)
+    }
+}
+
+/// 반려 문구가 드는 예시·계열 이름은 **보이는 표면에서만** 고른다 — 감춘 계열을 에러 메시지가 가르치면
+/// 필터가 무의미해진다(ADR-0133).
+fn example_invocation(mail: MailSurface) -> String {
+    if mail.shows_mail() {
+        format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} send --to <name> --body <text>")
+    } else {
+        format!("{CLI_EXE_NAME} {CLI_GROUP_AGENT} list")
+    }
+}
+
+fn example_help_topic(mail: MailSurface) -> &'static str {
+    if mail.shows_mail() {
+        CLI_GROUP_MAIL
+    } else {
+        CLI_GROUP_AGENT
     }
 }
 
@@ -457,17 +593,19 @@ fn reject_help_with_extra_args(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_help_topic(rest: &[String]) -> Result<ParsedCommand, String> {
+fn parse_help_topic(rest: &[String], mail: MailSurface) -> Result<ParsedCommand, String> {
     let Some(topic) = rest.first().map(|s| s.as_str()) else {
-        return Ok(ParsedCommand::Help(HELP_ROOT));
+        return Ok(ParsedCommand::Help(HelpTopic::Root));
     };
     reject_help_with_extra_args(rest)?;
     match topic {
-        CLI_GROUP_MAIL => Ok(ParsedCommand::Help(HELP_MAIL)),
-        CLI_GROUP_AGENT => Ok(ParsedCommand::Help(HELP_AGENT)),
+        CLI_GROUP_MAIL if mail.shows_mail() => Ok(ParsedCommand::Help(HelpTopic::Mail)),
+        CLI_GROUP_AGENT => Ok(ParsedCommand::Help(HelpTopic::Agent)),
         // help 뒤에 또 help 토큰이 오는 것은 계열 이름이 아니다 — 규칙("help 는 단독 호출") 그대로 반려한다.
+        // 감춰진 계열도 여기로 떨어진다(ADR-0133) — 오타와 같은 답이라야 감춘 의미가 있다.
         other => Err(format!(
-            "unknown help topic: {other} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`"
+            "unknown help topic: {other} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {}`",
+            example_help_topic(mail)
         )),
     }
 }
@@ -1378,6 +1516,13 @@ fn print_error(code: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engram_dashboard_core::agent::types::MAIL_MARKER_ON;
+
+    /// 표식 없는 프로세스(= 전부 보이는 기본 표면)로 파싱한다. **표면 축을 보는 테스트만**
+    /// `super::parse_command` 를 직접 불러 `MailSurface` 를 명시한다 — 나머지는 그 축과 무관하다.
+    fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
+        super::parse_command(args, MailSurface::default())
+    }
 
     fn parse_mail_command(args: &[String]) -> Result<ParsedMail, String> {
         match parse_command(args)? {
@@ -2495,7 +2640,7 @@ mod tests {
             );
         }
         // help 화면이 실제로 그 다섯을 약속하는지까지 여기서 묶는다(한쪽만 바뀌는 것을 막는다).
-        let help = render_help(HELP_AGENT);
+        let help = render_help(HelpTopic::Agent, MailSurface::Shown);
         for promised in ["id", "name", "state", "cwd", "parent"] {
             assert!(help.contains(promised), "{promised} 가 help 에: {help}");
         }
@@ -2590,23 +2735,25 @@ mod tests {
     fn help_lists_groups_and_each_group_documents_its_verbs() {
         for args in [vec![], vec!["help"]] {
             match parse_command(&argv(&args)).expect("help 는 성공") {
-                ParsedCommand::Help(t) => assert_eq!(t, HELP_ROOT, "인자 없음·help = 계열 목록"),
+                ParsedCommand::Help(t) => {
+                    assert_eq!(t, HelpTopic::Root, "인자 없음·help = 계열 목록")
+                }
                 other => panic!("help 여야: {other:?}"),
             }
         }
         match parse_command(&argv(&["help", "mail"])).expect("help mail") {
-            ParsedCommand::Help(t) => assert_eq!(t, HELP_MAIL),
+            ParsedCommand::Help(t) => assert_eq!(t, HelpTopic::Mail),
             other => panic!("help 여야: {other:?}"),
         }
         assert!(parse_command(&argv(&["help", "mail", "extra"])).is_err());
 
         // 관례 철자 — 발견 입구가 가장 흔한 표기에서 실패하면 안 된다.
         for (args, want) in [
-            (vec!["--help"], HELP_ROOT),
-            (vec!["-h"], HELP_ROOT),
-            (vec!["--help", "mail"], HELP_MAIL),
-            (vec!["mail", "--help"], HELP_MAIL),
-            (vec!["mail", "-h"], HELP_MAIL),
+            (vec!["--help"], HelpTopic::Root),
+            (vec!["-h"], HelpTopic::Root),
+            (vec!["--help", "mail"], HelpTopic::Mail),
+            (vec!["mail", "--help"], HelpTopic::Mail),
+            (vec!["mail", "-h"], HelpTopic::Mail),
         ] {
             match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
                 ParsedCommand::Help(t) => assert_eq!(t, want, "{args:?}"),
@@ -2652,21 +2799,21 @@ mod tests {
         }
 
         // 제어 계열도 같은 발견 규칙을 따른다(계열이 늘 때 이 규칙이 계열마다 갈리면 안 된다).
-        for (args, want) in [
-            (vec!["help", CLI_GROUP_AGENT], HELP_AGENT),
-            (vec![CLI_GROUP_AGENT, "--help"], HELP_AGENT),
-            (vec![CLI_GROUP_AGENT, "-h"], HELP_AGENT),
-            (vec!["--help", CLI_GROUP_AGENT], HELP_AGENT),
+        for args in [
+            vec!["help", CLI_GROUP_AGENT],
+            vec![CLI_GROUP_AGENT, "--help"],
+            vec![CLI_GROUP_AGENT, "-h"],
+            vec!["--help", CLI_GROUP_AGENT],
         ] {
             match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
-                ParsedCommand::Help(t) => assert_eq!(t, want, "{args:?}"),
+                ParsedCommand::Help(t) => assert_eq!(t, HelpTopic::Agent, "{args:?}"),
                 other => panic!("help 여야({args:?}): {other:?}"),
             }
         }
 
-        let root = render_help(HELP_ROOT);
-        let mail = render_help(HELP_MAIL);
-        let agent = render_help(HELP_AGENT);
+        let root = render_help(HelpTopic::Root, MailSurface::Shown);
+        let mail = render_help(HelpTopic::Mail, MailSurface::Shown);
+        let agent = render_help(HelpTopic::Agent, MailSurface::Shown);
         assert!(root.contains(CLI_GROUP_AGENT), "계열 목록에 agent: {root}");
         for verb in CLI_AGENT_VERBS {
             assert!(agent.contains(verb), "{verb} 동사가 help 에: {agent}");
@@ -2701,6 +2848,211 @@ mod tests {
             "--reply-to",
         ] {
             assert!(mail.contains(flag), "{flag} 가 help 에: {mail}");
+        }
+    }
+
+    // ── ADR-0133: 우편 표식 — 목록만 가리고 실행은 가리지 않는다 ─────────────────────────
+
+    /// 표식 값 → 표면. **부재·모르는 값이 전부 보이는 쪽**인 것이 계약이다(사람이 셸에서 여는 자리).
+    ///
+    /// ★운영 함수(`MailSurface::from_env`)를 직접 부른다 — 매핑을 여기서 다시 적지 말 것★: 다시 적으면
+    ///   테스트가 자기 사본을 검사하게 되어 진짜 파서의 회귀를 못 잡는다.
+    /// ★env 를 만지므로 직렬화한다★: 프로세스 전역 자원이라 병렬 테스트와 겹치면 플레이키해진다.
+    #[test]
+    fn only_the_explicit_off_marker_hides_mail() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(MAIL_MARKER_ENV).ok();
+        for (value, want) in [
+            (Some(MAIL_MARKER_OFF), MailSurface::Hidden),
+            (Some(MAIL_MARKER_ON), MailSurface::Shown),
+            (Some("OFF"), MailSurface::Shown),
+            (Some("off "), MailSurface::Shown),
+            (Some("no"), MailSurface::Shown),
+            (Some(""), MailSurface::Shown),
+            (None, MailSurface::Shown),
+        ] {
+            match value {
+                Some(v) => std::env::set_var(MAIL_MARKER_ENV, v),
+                None => std::env::remove_var(MAIL_MARKER_ENV),
+            }
+            assert_eq!(MailSurface::from_env(), want, "표식 {value:?}");
+        }
+        match previous {
+            Some(v) => std::env::set_var(MAIL_MARKER_ENV, v),
+            None => std::env::remove_var(MAIL_MARKER_ENV),
+        }
+        assert_eq!(
+            MailSurface::default(),
+            MailSurface::Shown,
+            "기본(표식 부재) = 전부 보인다"
+        );
+    }
+
+    #[test]
+    fn the_marker_filters_the_group_list_and_the_cross_reference_only() {
+        let shown = render_help(HelpTopic::Root, MailSurface::Shown);
+        let hidden = render_help(HelpTopic::Root, MailSurface::Hidden);
+        assert!(shown.contains(CLI_GROUP_MAIL), "표식 on: 우편 계열 노출");
+        assert!(
+            !hidden.contains(CLI_GROUP_MAIL),
+            "표식 off: 계열 목록에 우편이 없어야: {hidden}"
+        );
+        for text in [&shown, &hidden] {
+            assert!(text.contains(CLI_GROUP_AGENT), "제어 계열은 늘 보인다");
+            assert!(
+                !text.contains(HELP_TOOL_SLOT),
+                "치환 안 된 자리가 남으면 안 된다: {text}"
+            );
+        }
+        // 다른 계열의 화면이 감춘 계열을 가르치면 필터가 무의미해진다.
+        let agent_hidden = render_help(HelpTopic::Agent, MailSurface::Hidden);
+        assert!(
+            !agent_hidden.contains(CLI_GROUP_MAIL),
+            "표식 off: 제어 help 도 우편을 가르치지 않아야: {agent_hidden}"
+        );
+        let agent_shown = render_help(HelpTopic::Agent, MailSurface::Shown);
+        assert!(
+            agent_shown.contains(&format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} send")),
+            "표식 on: 상호참조 한 줄은 그대로: {agent_shown}"
+        );
+        for verb in CLI_AGENT_VERBS {
+            assert!(
+                agent_hidden.contains(verb),
+                "제어 동사는 표식과 무관하게 전부({verb}): {agent_hidden}"
+            );
+        }
+    }
+
+    /// 감춘 계열의 **사용법 요청**은 오타와 구별되지 않아야 한다 — 구별되면 목록에 없는 계열의 존재가
+    /// 반려 문구로 새어 나간다.
+    #[test]
+    fn asking_for_a_hidden_groups_usage_reads_as_a_typo() {
+        let hidden = MailSurface::Hidden;
+        let typo_topic = super::parse_command(&argv(&["help", "nosuch"]), hidden)
+            .expect_err("모르는 주제는 반려");
+        let mail_topic =
+            super::parse_command(&argv(&["help", CLI_GROUP_MAIL]), hidden).expect_err("감춘 주제");
+        assert_eq!(
+            typo_topic.replace("nosuch", CLI_GROUP_MAIL),
+            mail_topic,
+            "같은 문형이어야(주제 이름만 다름)"
+        );
+        let typo_group =
+            super::parse_command(&argv(&["nosuch", "--help"]), hidden).expect_err("모르는 계열");
+        let mail_group = super::parse_command(&argv(&[CLI_GROUP_MAIL, "--help"]), hidden)
+            .expect_err("감춘 계열의 --help");
+        assert_eq!(typo_group.replace("nosuch", CLI_GROUP_MAIL), mail_group);
+        // 반려 문구가 감춘 계열을 예시로 들면 그 자체가 교육이다.
+        for err in [&mail_topic, &mail_group] {
+            assert!(
+                !err.contains(&format!("help {CLI_GROUP_MAIL}")),
+                "반려 문구가 감춘 계열을 안내하면 안 된다: {err}"
+            );
+        }
+        let flag_first = super::parse_command(&argv(&["--to"]), hidden).expect_err("플래그 먼저");
+        assert!(
+            !flag_first.contains(CLI_GROUP_MAIL),
+            "예시도 보이는 계열에서 골라야: {flag_first}"
+        );
+    }
+
+    /// ★반려 문구도 교육 표면이다★: 감춘 계열의 인자 오류가 자기 사유를 그대로 돌려주면 두 연속 명령이
+    ///   서로 모순되고(`mail --help` 는 "모르는 계열", `mail` 은 동사 목록), 특히 동사 없는 호출의 반려는
+    ///   **감춘 화면보다 더 많이** 가르친다(계열 전체 동사 목록). 그래서 감춰진 계열의 모든 인자 오류는
+    ///   한 문구로 접힌다.
+    #[test]
+    fn a_hidden_groups_argument_errors_never_hand_back_its_inventory() {
+        let folded = unknown_group(CLI_GROUP_MAIL);
+        let malformed = [
+            vec!["mail"],
+            vec!["mail", "wat"],
+            vec!["mail", "send"],
+            vec!["mail", "send", "--to", "bob"],
+            vec!["mail", "send", "--nope"],
+            vec!["mail", "send", "--help"],
+            vec!["mail", "status"],
+            vec!["mail", "status", "--help"],
+            vec!["mail", "pending", "extra"],
+        ];
+        for args in &malformed {
+            let err = super::parse_command(&argv(args), MailSurface::Hidden)
+                .expect_err("형태가 틀린 호출은 반려");
+            assert_eq!(
+                err, folded,
+                "감춘 계열의 인자 오류는 한 문구로 접힌다: {args:?}"
+            );
+            for verb in CLI_MAIL_VERBS {
+                assert!(
+                    !err.contains(verb),
+                    "동사 목록이 새면 안 된다({verb}): {err}"
+                );
+            }
+            for flag in CLI_MAIL_FLAGS {
+                assert!(
+                    !err.contains(flag),
+                    "플래그 표기가 새면 안 된다({flag}): {err}"
+                );
+            }
+        }
+        // 대조군 — 보이는 표면에선 각자의 구체적 사유가 그대로 나온다(접기가 표식에 달렸다는 증명).
+        for args in &malformed {
+            let err = super::parse_command(&argv(args), MailSurface::Shown)
+                .expect_err("형태가 틀린 호출은 반려");
+            assert_ne!(err, folded, "표식 on 에선 구체적 사유를 준다: {args:?}");
+        }
+    }
+
+    /// ★파싱 **이후** 단계의 반려도 같은 접기를 탄다★: 위 스위트는 파서 반려만 쓸어 담으므로 이 갈래를
+    ///   덮지 못한다 — 실제로 `--body-stdin` 빈 입력 반려가 `--body` 를 되돌려 주며 새고 있었다.
+    #[test]
+    fn a_post_parse_rejection_is_folded_too_when_the_family_is_hidden() {
+        let args = argv(&["mail", "send", "--to", "bob", "--body-stdin"]);
+        for surface in [MailSurface::Hidden, MailSurface::Shown] {
+            let parsed = super::parse_command(&args, surface).expect("형태는 유효하다(파싱 통과)");
+            let ParsedCommand::Mail(m) = parsed else {
+                panic!("우편 커맨드여야")
+            };
+            // 빈 stdin = 파싱 뒤에야 드러나는 인자 오류.
+            let reason = materialize_body(m, || Ok(String::new())).expect_err("빈 본문은 반려");
+            let rendered = hide_mail_reason(surface, reason);
+            match surface {
+                MailSurface::Hidden => {
+                    assert_eq!(rendered, unknown_group(CLI_GROUP_MAIL));
+                    for flag in CLI_MAIL_FLAGS {
+                        assert!(
+                            !rendered.contains(flag),
+                            "치지도 않은 플래그를 되돌려 주면 안 된다({flag}): {rendered}"
+                        );
+                    }
+                }
+                MailSurface::Shown => assert!(
+                    rendered.contains("--body"),
+                    "보이는 표면에선 구체적 복구 안내를 그대로: {rendered}"
+                ),
+            }
+        }
+    }
+
+    /// ★강제는 데몬 하나뿐이다(ADR-0133 §영향)★: 표식이 off 여도 우편 동사는 **그대로 조립돼 나간다** —
+    ///   여기서 막으면 데몬 거절이 관측되지 않고, 표식을 뗀 프로세스에선 아무도 막지 않게 된다.
+    #[test]
+    fn a_hidden_mail_verb_still_goes_to_the_daemon() {
+        let parsed = super::parse_command(
+            &argv(&["mail", "send", "--to", "bob", "--body", "hi"]),
+            MailSurface::Hidden,
+        )
+        .expect("표식 off 여도 발송은 로컬에서 막지 않는다");
+        let cmd = match parsed {
+            ParsedCommand::Mail(m) => materialize_body(m, || panic!("stdin 미사용")).expect("본문"),
+            other => panic!("우편 커맨드여야: {other:?}"),
+        };
+        assert_eq!(cmd.route(), "/control/send");
+        for args in [vec!["mail", "pending"], vec!["mail", "status", "m-1"]] {
+            assert!(
+                super::parse_command(&argv(&args), MailSurface::Hidden).is_ok(),
+                "조회도 로컬에서 막지 않는다: {args:?}"
+            );
         }
     }
 

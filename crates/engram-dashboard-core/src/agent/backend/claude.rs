@@ -15,7 +15,7 @@ use crate::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
 use crate::agent::turn::TurnSignal;
 use crate::agent::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
-    CLI_EXE_ENV, CLI_EXE_NAME,
+    CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
@@ -33,13 +33,24 @@ impl AgentBackend for ClaudeBackend {
 
     fn accepts_mcp_config(&self) -> bool {
         // claude 는 mcp-config 를 `--mcp-config` 로 부착한다 → MCP-capable.
-        // ★등호 불변식(ADR-0128)★: 가르치는 채널 집합 = 물리로 깐 채널 집합. 그래서 MCP 가능 스폰엔
-        // CLI 배선(ENGRAM_CLI_EXE·PATH·CLI 크레덴셜)을 아예 깔지 않는다. ADR-0126 결정 4 의
-        // 단방향(⊆)은 ADR-0128 결정 3 이 등호로 되돌렸다 — ⊆ 로 읽고 CLI 교육을 얹으면 ADR-0099 가
-        // 실측한 발신 freeze 가 재현된다.
+        //
+        // ★이 값이 가르는 것 — 배선이 아니라 교육과 강제다(ADR-0133)★:
+        //   - **배선은 전원에게 간다.** `engram` 실행파일·크레덴셜·PATH 는 MCP 가능 스폰에도 깔린다 —
+        //     제어 동사가 전원 개방이고(ADR-0132 결정 5) 실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다.
+        //   - **교육만 갈린다.** 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식(`MAIL_MARKER_ENV`)이
+        //     이 값으로 갈려, MCP 가능 스폰의 `engram help` 에는 우편 계열이 나오지 않는다.
+        //   - **강제는 데몬 거절 하나뿐이다.** MCP 가능 스폰의 자격증명으로 온 우편 요청은 데몬이 거절한다.
+        // ★표식 필터를 강제로 세지 말 것★: 표식은 에이전트 자신의 env 라 떼면 목록에 우편이 보인다 —
+        //   그때도 막는 것은 데몬 거절뿐이므로, 거절을 지우고 표식만 남기면 우편이 열린다.
+        // ★못 쓰는 채널을 가르치면 ADR-0099 가 실측한 발신 freeze 가 재현된다★ — 프라이밍 변형과 우편
+        //   가부는 반드시 같은 값에서 갈려야 한다.
+        // ★이 플래그가 구현하는 살아 있는 불변식은 여전히 채널 단일화다(ADR-0128 결정 1)★: 우편 채널은
+        //   백엔드 capability 로만 갈리고 런타임 스위칭·폴백이 없다. ADR-0133 이 바꾼 것은 그 단일화를
+        //   **어떻게 강제하느냐**뿐이다.
         // ADR-0099
         // ADR-0126
         // ADR-0128
+        // ADR-0133
         true
     }
 
@@ -127,23 +138,20 @@ impl AgentBackend for ClaudeBackend {
                         }
                     }
                 }
-                // ADR-0086: 제어 채널 주입 — endpoint 를 claude 방식으로 번역한다(config_path 있으면
-                //   `--mcp-config <path>`, 없으면 CLI 크레덴셜 env).
+                // ADR-0086: 제어 채널 주입 — endpoint 를 claude 방식으로 번역한다. CLI 입구(크레덴셜 env·
+                //   PATH·우편 표식)는 **control endpoint 가 있는 모든 스폰**에 깔고, `--mcp-config` 는
+                //   config_path 가 있을 때 **더한다**(둘은 배타가 아니다 — ADR-0133).
                 //   ★mode 무관 동일 주입★: 터미널·json 둘 다 연결 대상이다(claude 2.1.170 실측 — headers
                 //   Authorization 을 initialize/tools/list/tools/call 전 요청에 실전송).
-                //   ★이 갈림이 **지금 우편 격리를 하는 유일한 물건**이다 — 결정 문서를 근거로 지우지 말 것★:
-                //   ADR-0132 는 격리 수단을 "MCP 가능 스폰에 CLI 를 안 깐다"에서 "데몬이 자격증명으로
-                //   우편 요청을 거절한다"로 옮기지만, **그 거절(결정 3)은 아직 구현 전**이다. 먼저 지우면
-                //   격리가 0 이 되고 ADR-0128 의 채널 단일화가 조용히 무너진다(ADR-0132 §영향이 같은 경고를
-                //   적고 있다). 순서 = 데몬 거절이 서고 **그 다음** 이 갈림을 연다.
-                // ADR-0086 / ADR-0099 / ADR-0128 / ADR-0132
+                //   ★두 주입을 배타로 되돌리면 제어 평면이 반쪽이 된다★: MCP 가능 스폰이 `engram` 을 못 부르면
+                //   제어 동사(ADR-0132 결정 5 = 전원 개방)에 닿을 수 없다. 우편 격리는 이 갈림이 아니라
+                //   데몬의 자격증명 거절이 한다.
+                // ADR-0086 / ADR-0099 / ADR-0133
                 if let Some(endpoint) = &control {
-                    match &endpoint.config_path {
-                        Some(config_path) => {
-                            args.push("--mcp-config".to_string());
-                            args.push(config_path.to_string_lossy().into_owned());
-                        }
-                        None => inject_cli_entrance(&mut env, endpoint),
+                    inject_cli_entrance(&mut env, endpoint);
+                    if let Some(config_path) = &endpoint.config_path {
+                        args.push("--mcp-config".to_string());
+                        args.push(config_path.to_string_lossy().into_owned());
                     }
                 }
                 // ADR-0092: 프라이밍(수신 계약) 주입 — `--append-system-prompt-file <abs-path>`.
@@ -264,19 +272,19 @@ impl AgentBackend for ClaudeBackend {
 }
 
 /// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
-/// PATH 프리펜드.
+/// PATH 프리펜드 + 우편 가부 표식.
 ///
-/// ★호출 조건 = 비-MCP(CLI 전용) 스폰 **하나뿐**★: MCP 가능 스폰에서 부르면 그 스폰에 CLI 경로가
-///   생겨 ADR-0128 위반이다. 채널 통제의 유일한 실효 수단이 물리 배선이라(실측: 권한 제거는
-///   조작이 되지 못했다) 두 채널을 함께 깔면 통제가 사라진다 — 되살리지 말 것.
+/// ★호출 조건 = control endpoint 가 있는 스폰 전부★: 제어 동사는 전원에게 열려 있고(ADR-0132 결정 5)
+///   실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다. 우편은 여기서 가리지 않는다 — 표식이 사용법을
+///   가리고(교육), 데몬이 자격증명으로 거절한다(강제).
+/// ★표식은 강제가 아니다★: 에이전트가 자기 env 를 지울 수 있으므로 표식을 뗀 프로세스는 우편 사용법을
+///   **본다**. 그때 막는 것은 데몬 거절뿐이라, 거절 없이 이 표식만으로 통제하려 들면 우편이 열린다.
 /// ★왜 env 인가★: 에이전트가 shell 로 그 명령을 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
 ///   토큰으로 POST 한다. portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
 ///   (Bash·그 손자)까지 상속**된다.
 /// ★보안★: 토큰이 env 로 노출된다 — 같은 OS 유저의 자식에만 상속되고 로그엔 안 찍지만 하드 격리는
 ///   원래 불가다(ADR-0086 §불변식).
-/// ★호출 조건을 넓히는 것은 ADR-0132 결정 3(데몬측 우편 거절)이 **선** 다음이다★ — 그 전에 넓히면 우편
-///   격리가 남지 않는다(호출부 주석에 순서가 적혀 있다).
-// ADR-0086 / ADR-0128 / ADR-0132
+// ADR-0086 / ADR-0133
 fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
     // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
     //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를 벗겨 base 만
@@ -293,6 +301,19 @@ fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoi
         .to_string();
     env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
+    // ★두 값 다 명시로 싣는다(부재를 off 로 쓰지 않는다)★: 부재는 "스폰 밖" 을 뜻해 CLI 가 전부 보여
+    //   준다(`MAIL_MARKER_ENV`). 켜짐을 생략하면 두 뜻이 겹쳐, 표식을 못 실은 배선 사고가 정상 스폰과
+    //   구별되지 않는다.
+    // ADR-0133
+    env.push((
+        MAIL_MARKER_ENV.to_string(),
+        if endpoint.mail_allowed {
+            MAIL_MARKER_ON
+        } else {
+            MAIL_MARKER_OFF
+        }
+        .to_string(),
+    ));
     // ★ENGRAM_CLI_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare 실행파일 이름
     //   (`CLI_EXE_NAME` — 아래 PATH 주입으로 해석)을 가르치지만, 이 절대경로 env 도 함께 싣는다 —
     //   진단·수동 조작용이다(ADR-0094 의 이름 정렬 자체는 PATH 로 이룬다).
@@ -1072,6 +1093,8 @@ mod tests {
             // S18 D: 기본 헬퍼는 설정 조각을 담지 않는다 — `--settings` 주입 테스트가 명시로 채운다
             //   (기존 arg-golden 테스트가 새 플래그의 영향을 안 받게 — priming_file 과 같은 규율).
             settings_file: None,
+            // ADR-0133: MCP 가능 갈래(config_path=Some)의 데몬 산출값과 같은 짝 — 우편 불가.
+            mail_allowed: false,
         }
     }
 
@@ -1107,22 +1130,22 @@ mod tests {
         }
     }
 
-    /// CLI 전용(비-MCP 백엔드) 스폰이 받는 endpoint — `config_path=None` 이 그 갈림 신호다(ADR-0128).
-    ///   CLI 입구(크레덴셜 env·PATH 프리펜드)를 검증하는 테스트는 전부 이 변주를 쓴다: MCP 가능 변주
-    ///   (`ep()`)로는 그 배선이 **없는 것이 정답**이라 배선 회귀를 못 잡는다.
+    /// 비-MCP 백엔드 스폰이 받는 endpoint — `config_path=None`(MCP 입구 부재) + 우편 허용. CLI 배선 자체는
+    ///   두 변주가 똑같이 받으므로(ADR-0133), 이 변주가 홀로 지키는 것은 **mcp-config 부재**와 **우편 표식
+    ///   on** 두 축이다.
     fn ep_cli_only() -> ControlEndpoint {
         ControlEndpoint {
             config_path: None,
+            mail_allowed: true,
             ..ep()
         }
     }
 
-    /// CLI 전용 + send_exe=None(형제 바이너리 부재 모사).
+    /// 비-MCP + send_exe=None(형제 바이너리 부재 모사).
     fn ep_cli_only_no_send() -> ControlEndpoint {
         ControlEndpoint {
-            config_path: None,
             send_exe: None,
-            ..ep()
+            ..ep_cli_only()
         }
     }
 
@@ -1252,13 +1275,18 @@ mod tests {
     #[test]
     fn claude_no_control_endpoint_no_cli_env() {
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
-        assert!(
-            !s.env
-                .iter()
-                .any(|(k, _)| k == "ENGRAM_TOKEN" || k == "ENGRAM_CONTROL_URL" || k == CLI_EXE_ENV),
-            "control 없으면 CLI env 없음: {:?}",
-            s.env
-        );
+        for key in [
+            "ENGRAM_TOKEN",
+            "ENGRAM_CONTROL_URL",
+            CLI_EXE_ENV,
+            MAIL_MARKER_ENV,
+        ] {
+            assert!(
+                !s.env.iter().any(|(k, _)| k == key),
+                "control 없으면 CLI env 없음({key}): {:?}",
+                s.env
+            );
+        }
     }
 
     // ── ADR-0094: PATH 주입(bare 실행파일 이름 해석 — send_exe 부모 디렉토리 prepend) ──────────
@@ -1486,46 +1514,24 @@ mod tests {
     //   단위 테스트로 강제하지 않는다(FIX-2/3 주석·loud warn 으로 관측성 확보). 실패 시 오늘 동작
     //   (상속 PATH 유지)이라 안전 폴백 — 회귀 위험 낮음.
 
-    // ── ADR-0128: 우편 채널 하드 단일화 — 교육 집합 = 물리 배선 집합(등호, 양방향 단언) ────────────
+    // ── ADR-0133: 배선은 전원에게, 우편만 표식으로 갈린다(두 갈래 양방향 단언) ──────────────────
+    fn env_value<'a>(s: &'a CommandSpec, key: &str) -> Option<&'a str> {
+        s.env
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// ★프로필 PATH 를 반드시 실어 둔다(빈 env 면 PATH 단언이 공허해진다)★: 항목이 0 개면 tail 생존을
+    ///   견줄 대상이 없다.
     #[test]
-    fn claude_mcp_capable_spawn_has_no_cli_entrance_wiring() {
-        // endpoint 가 send_exe 를 실어 보내도(데몬은 두 갈래 공용 한 줄로 싣는다) 이 갈림이 막는 것이
-        //   계약이라, 그 값이 든 ep() 로 단언해야 의미가 있다.
-        // ★프로필 PATH 를 반드시 실어 둔다(빈 env 면 아래 단언이 공허해진다)★: 빈 env 로 지으면 PATH 항목이
-        //   0 개라 "우리가 얹지도 깎지도 않았다" 를 견줄 대상이 없다 — 기존 PATH 항목의 앞에 형제 디렉토리를
-        //   끼워 넣는 회귀가 초록으로 통과한다.
+    fn claude_mcp_capable_spawn_gets_cli_wiring_with_mail_marked_off() {
         let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep()), profile_env);
         for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
             assert!(
-                !s.env.iter().any(|(k, _)| k == key),
-                "MCP 가능 스폰에 {key} 가 실리면 ADR-0128 위반: {:?}",
-                s.env
-            );
-        }
-        // ★단언 범위(사용자 결정)★: 프로필이 스스로 CLI 경로를 실은 경우까지 막는 것은 이 결정의
-        //   범위가 아니다(사용자 책임).
-        assert_eq!(
-            path_entries(&s),
-            vec!["C:\\custom"],
-            "MCP 가능 스폰의 PATH 는 프로필 값 그대로여야(우리가 얹지도 깎지도 않는다): {:?}",
-            s.env
-        );
-        assert!(
-            s.args.iter().any(|a| a == "--mcp-config"),
-            "MCP 갈래는 mcp-config 를 받아야(등호의 반대 절반): {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_cli_only_spawn_gets_full_cli_entrance_wiring() {
-        let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
-        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
-        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
-            assert!(
                 s.env.iter().any(|(k, _)| k == key),
-                "CLI 전용 스폰은 {key} 를 받아야: {:?}",
+                "MCP 가능 스폰도 제어 CLI 입구를 받아야({key}) — 제어는 전원 개방: {:?}",
                 s.env
             );
         }
@@ -1541,11 +1547,71 @@ mod tests {
             components.contains(&PathBuf::from("C:\\custom")),
             "프로필 PATH 가 tail 로 생존: {components:?}"
         );
+        assert_eq!(
+            env_value(&s, MAIL_MARKER_ENV),
+            Some(MAIL_MARKER_OFF),
+            "MCP 가능 스폰은 우편 표식이 off — 사용법에서 우편 계열을 감춘다: {:?}",
+            s.env
+        );
         assert!(
-            !s.args.iter().any(|a| a == "--mcp-config"),
-            "CLI 전용 갈래엔 mcp-config 없음: {:?}",
+            s.args.iter().any(|a| a == "--mcp-config"),
+            "MCP 갈래는 mcp-config 도 함께 받아야(배선과 배타가 아니다): {:?}",
             s.args
         );
+    }
+
+    #[test]
+    fn claude_non_mcp_spawn_gets_the_same_wiring_with_mail_marked_on() {
+        let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
+        let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
+            assert!(
+                s.env.iter().any(|(k, _)| k == key),
+                "비-MCP 스폰은 {key} 를 받아야: {:?}",
+                s.env
+            );
+        }
+        let entries = path_entries(&s);
+        assert_eq!(entries.len(), 1, "PATH 는 정확히 하나: {:?}", s.env);
+        let components: Vec<PathBuf> = std::env::split_paths(entries[0]).collect();
+        assert_eq!(
+            components.first(),
+            Some(&PathBuf::from("C:/app")),
+            "PATH 맨 앞 = send_exe 형제 디렉토리: {components:?}"
+        );
+        assert!(
+            components.contains(&PathBuf::from("C:\\custom")),
+            "프로필 PATH 가 tail 로 생존: {components:?}"
+        );
+        assert_eq!(
+            env_value(&s, MAIL_MARKER_ENV),
+            Some(MAIL_MARKER_ON),
+            "비-MCP 스폰은 우편 표식이 on: {:?}",
+            s.env
+        );
+        assert!(
+            !s.args.iter().any(|a| a == "--mcp-config"),
+            "비-MCP 갈래엔 mcp-config 없음: {:?}",
+            s.args
+        );
+    }
+
+    /// ★표식은 endpoint 가 실어 준 사실을 그대로 옮긴다 — backend 가 다른 필드에서 유도하지 않는다★:
+    ///   `config_path` 로 정책을 재파생하면 데몬 판정과 backend 판정 두 곳이 생겨 갈릴 수 있다.
+    #[test]
+    fn claude_mail_marker_follows_the_endpoint_not_the_mcp_config_field() {
+        let mcp_with_mail = ControlEndpoint {
+            mail_allowed: true,
+            ..ep()
+        };
+        let s = spec_with_control(
+            &terminal(vec![]),
+            SpawnMode::Fresh,
+            None,
+            Some(mcp_with_mail),
+        );
+        assert_eq!(env_value(&s, MAIL_MARKER_ENV), Some(MAIL_MARKER_ON));
+        assert!(s.args.iter().any(|a| a == "--mcp-config"));
     }
 
     // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────

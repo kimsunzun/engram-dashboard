@@ -1215,7 +1215,7 @@ fn do_injection(
 ) -> InjectOutcome {
     // 발신자 신원 발급(control_send.rs 패턴 — 등록된 발신자 토큰).
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, format!("pilot-sender-{k}-{run_id}"));
+    registry.issue(sender, 0, format!("pilot-sender-{k}-{run_id}"), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
