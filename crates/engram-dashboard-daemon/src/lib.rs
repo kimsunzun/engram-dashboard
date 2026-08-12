@@ -68,21 +68,21 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
     Ok(s)
 }
 
-// ── ENGRAM_EXE 주입 (설계 §5 · ADR-0014 방향, CLI 이식성) ─────────────────────────────
+// ── ENGRAM_EXE 주입 (설계 §5 · ADR-0014 방향) ─────────────────────────────────────────
 //
-// ★왜 데몬 프로세스 env 에 넣는가★: 스폰된 에이전트(claude)가 다른 에이전트를 조종하려면 CLI exe
-// (`engram-dashboard.exe`) 절대경로를 알아야 하는데, 매뉴얼에 하드코딩하면 머신마다 깨진다. 데몬은
-// 자기 exe 폴더를 알고 앱 exe 는 그 **형제**다(locate_daemon_exe 와 대칭 — 배포 시 두 exe 동거). 그래서
-// 데몬이 부팅 시 자기 env 에 ENGRAM_EXE 를 세팅해 두면, 이후 스폰되는 모든 PTY 자식이 이 env 를
-// **상속**한다(portable-pty CommandBuilder::new 는 std::env::vars_os() 로 부모 env 를 시드한다 — 실측).
-// 그러면 에이전트 매뉴얼은 `"$ENGRAM_EXE" send DEF "..."` 로 어느 머신에서든 동작한다.
+// ★리포 안에 이 값을 읽는 코드·프라이밍이 없다(실측 2026-08-12)★ — 앱 exe 는 argv 로 동사를 받지 않고
+// (ADR-0132 결정 1), 에이전트가 쓰는 제어·우편 CLI 는 `engram` 이다(ENGRAM_CLI_EXE — locate_send_exe).
+// 값은 데몬 exe 의 **형제**인 앱 exe 절대경로다(locate_daemon_exe 와 대칭 — 배포 시 동거).
 //
-// ★왜 core spawn 경로를 안 건드리나★: env 를 CommandSpec/manager.spawn_agent 로 threading 하면 core
-// crate 가 "형제 exe 경로" 개념을 알게 돼 tauri-import-0 격리 원칙과 무관하게 관심사가 샌다. 데몬 프로세스
-// env 1회 세팅은 자식 전파를 공짜로 얻고 core 를 순수하게 둔다(부수효과는 데몬 부팅 1지점에 국한).
+// ★그래도 남겨 둔 이유·지울 조건★: 리포 밖 스크립트·매뉴얼이 이 env 를 읽는지는 여기서 확인할 수 없다.
+// 그것들이 안 읽는다는 게 확인되면 이 함수와 호출부(run 의 0.6)를 함께 지운다 — 형제 블록
+// locate_send_exe 의 "지우지 말 것" 과 상태가 반대다(그쪽은 지우면 CLI 입구가 사라진다).
 //
-// ★best-effort★: 앱 exe 를 못 찾아도(개발 중 부분 빌드 등) 데몬은 계속 뜬다 — env 미세팅이면 에이전트
-// CLI 호출만 실패하고, 그건 매뉴얼이 fallback(직접 exe 지정)을 안내하면 된다(데몬 기동을 막지 않는다).
+// ★core 를 안 건드린다★: env 를 CommandSpec/manager.spawn_agent 로 threading 하면 core crate 가
+// "형제 exe 경로" 개념을 알게 된다 — 주입은 데몬 부팅 1지점에 가둔다.
+//
+// ★best-effort★: 앱 exe 를 못 찾아도(개발 중 부분 빌드 등) env 만 미세팅으로 남고 데몬 기동은 막지
+// 않는다.
 
 /// ★SAFETY(std::env::set_var)★: 부팅 최초(run 진입 직후, 다른 스레드 spawn 전)에 1회만 호출한다 —
 /// 이 시점엔 tokio worker 외 경쟁 스레드가 env 를 동시 읽지 않으므로 data race 위험이 없다.
@@ -106,7 +106,9 @@ fn set_engram_exe_env() {
             }
         }
     }
-    tracing::warn!("ENGRAM_EXE 미주입 — 앱 exe 형제를 못 찾음(에이전트 CLI 호출은 fallback 필요)");
+    tracing::warn!(
+        "ENGRAM_EXE 미주입 — 데몬 exe 형제에 앱 exe 가 없음(에이전트 CLI 입구와 무관 — 그쪽은 ENGRAM_CLI_EXE)"
+    );
 }
 
 // ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
@@ -115,24 +117,23 @@ fn set_engram_exe_env() {
 // 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
 // **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
 // **형제**에서 절대경로를 찾아(set_engram_exe_env·locate_daemon_exe 와 동일 대칭 — 배포 시 세 exe 동거),
-// provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 가 CLI 전용 스폰에서만 그걸
-// ENGRAM_CLI_EXE·PATH 로 주입한다(MCP 가능 스폰은 받지 않는다 — ADR-0128).
+// provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
+// **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
+// 경로가 아니다.
 //
 // ★best-effort(fail-open)★: 못 찾아도(개발 중 부분 빌드 등) None 을 돌려주고 데몬은 계속 뜬다 — MCP 가능
-// 백엔드(claude)는 애초에 이 경로를 안 쓰므로 무영향이고, 비-MCP 백엔드 스폰만 provision 에서 fail-closed 로
-// 막힌다(발신 입구 0). warn 로그로 원인을 남긴다(관측성).
+// 백엔드(claude)는 제어 CLI 를 잃을 뿐이고, 비-MCP 백엔드 스폰은 우편 입구가 0 이 되므로 provision 에서
+// fail-closed 로 막힌다. warn 로그로 원인을 남긴다(관측성).
 
 /// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다(env 주입은
 /// backend 소유).
 ///
-/// ★"claude 스폰에서 안 쓰여도 지우지 말 것"(ADR-0128)★: 우편 채널은 capability 로만 갈려서 MCP 가능
-/// 스폰(= 현재의 claude)은 이 경로를 받지 않는다 — 그래서 호출자가 하나뿐이고 테스트도 없는 게 정상이다.
-/// 그러나 이 값은 **비-MCP 백엔드의 유일한 발신 입구**이고(그쪽은 MCP 입구가 아예 없다) 없으면 provision 이
-/// fail-closed 로 스폰을 막는다 — 즉 삭제는 dead-code 정리가 아니라 CLI 백엔드 우편의 제거다. 이 구간은
-/// 테스트가 없어(지우고 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간
-/// (provision→endpoint→스폰 env)은 daemon control 테스트
-/// `provision_non_mcp_wires_the_cli_into_spawn_env` 가 잡는다.
-// ADR-0128
+/// ★호출자가 하나뿐이어도 지우지 말 것★: 이 값은 **비-MCP 백엔드의 유일한 우편 입구**이자(그쪽은 MCP
+/// 입구가 아예 없다) **모든 스폰의 제어 입구**이고, 없으면 비-MCP provision 이 fail-closed 로 스폰을 막는다
+/// — 즉 삭제는 dead-code 정리가 아니라 CLI 우편과 제어 평면의 제거다. 이 구간은 테스트가 없어(지우고
+/// 호출부에 None 을 넘겨도 전 스위트가 초록) 이 앵커가 유일한 방어선이다 — 뒤 구간(provision→endpoint→
+/// 스폰 env)은 daemon control 테스트 `provision_*_wires_the_*_cli_*` 두 짝이 잡는다.
+// ADR-0133
 fn locate_send_exe() -> Option<PathBuf> {
     // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
     //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
@@ -382,8 +383,8 @@ pub async fn run() -> Result<(), i32> {
     //   연결 task panic 은 tokio 가 이미 격리하고, pump panic 은 B-2 가 Failed 로 전이시킨다.
     install_panic_hook();
 
-    // 0.6) ENGRAM_EXE 주입 — ★반드시 에이전트 spawn 전★(이 env 를 세팅한 뒤에야 spawn_agent 의 PTY
-    //   자식이 상속한다). 이 위치가 set_engram_exe_env SAFETY 주석이 요구하는 "부팅 최초 1회" 다.
+    // 0.6) ENGRAM_EXE 주입 — 이 위치가 set_engram_exe_env SAFETY 주석이 요구하는 "부팅 최초 1회"(다른
+    //   스레드 spawn 전)다. 값의 소비자와 존치 조건은 그 함수 주석.
     set_engram_exe_env();
 
     // 1) 단일 인스턴스 가드.

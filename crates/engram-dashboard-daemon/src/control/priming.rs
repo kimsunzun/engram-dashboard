@@ -212,17 +212,17 @@ pub fn mentions_mail_cli_surface(content: &str) -> bool {
         .any(|f| contains_bounded(&normalized, &normalized_token(f)))
 }
 
-/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식(ADR-0128 로 등호
-/// 복원)**: 이 변형이 **가르치는** 채널 집합 **=** provision 이 물리적으로 **깐** 채널 집합. 안 깐 채널을
-/// 가르치면 발신 freeze 가 재발하고(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099), 반대로 깔고도 안
-/// 가르치면 아무도 통제하지 못하는 우회 표면이 남는다. 그래서 백엔드 capability 하나가 이 변형과 채널 배선을
-/// 함께 움직인다.
+/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식**: 이 변형이
+/// **가르치는** 우편 채널 **=** 그 스폰이 실제로 **쓸 수 있는** 우편 채널. 못 쓰는 채널을 가르치면 발신
+/// freeze 가 재발하고(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099), 반대로 쓸 수 있는데 안 가르치면
+/// 아무도 통제하지 못하는 우회 표면이 남는다. 그래서 백엔드 capability 하나가 이 변형과 우편 가부를 함께
+/// 움직인다(ADR-0133 — 그 짝의 정본은 `DaemonControlChannel::provision`).
 // ADR-0126
-// ADR-0128
+// ADR-0133
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimingVariant {
     /// MCP-capable 백엔드(claude). **send_message 툴만** 가르친다(ADR-0126 결정 1 — 우편 CLI 우회
-    ///   교육 폐지). 그 스폰엔 CLI 배선 자체가 없다(ADR-0128 결정 2) — 고장난 MCP 를 조용히
+    ///   교육 폐지). 그 스폰의 CLI 우편은 데몬이 자격증명으로 거절한다(ADR-0133) — 고장난 MCP 를 조용히
     ///   우회하면 고장이 관측되지 않으므로, 대신 principal 에게 보고하도록 가르친다(ADR-0126 결정 2).
     ///   → `prompts/agent-priming.md`.
     McpPrimary,
@@ -716,8 +716,8 @@ mod tests {
         assert!(
             !mentions_mail_cli_surface(&a),
             "A(McpPrimary)에 CLI 표면(호출 형태 · `engram mail` 조각 · env 변수 이름 · CLI 전용 플래그 중 \
-             하나)이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — MCP 가능 스폰엔 CLI 배선 \
-             자체가 없다(ADR-0128)"
+             하나)이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — 그 스폰의 CLI 우편은 데몬이 \
+             거절하므로 가르쳐도 쓸 수 없다(ADR-0133)"
         );
         let cli_command = format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL}");
         assert!(
@@ -730,11 +730,41 @@ mod tests {
         );
     }
 
+    /// ★제어 발견은 두 변형 공통이다(ADR-0132 결정 4·5 · ADR-0133)★: 제어 동사는 전원에게 열려 있으므로
+    ///   양쪽 파일이 같은 한 줄(`engram help`)로 그 표면을 가리킨다. 우편 계열이 그 목록에 나오는지는
+    ///   **스폰이 심은 표식**이 정하지 이 파일들이 정하지 않는다.
+    ///
+    /// ★이 줄이 판정기를 건드리면 안 된다★: 그러면 A 의 CLI-표면 부재 pin(위 테스트)이 깨진다. 제어 계열을
+    ///   판정기에 넣어 그 pin 을 완화하는 방향으로 고치지 말 것 — 제어는 전원이 쓰는 표면이라 채널을
+    ///   가르는 신호가 될 수 없고, 넣으면 게이트가 양방향으로 무의미해진다(`teaches_mail_cli` 주석 정본).
+    // ADR-0133
+    #[test]
+    fn production_priming_files_point_at_the_control_surface() {
+        let root = repo_root();
+        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
+        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
+        let discovery = format!("{CLI_EXE_NAME} help");
+        for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
+            assert!(
+                text.contains(&discovery),
+                "{label}: 제어 발견 입구(`{discovery}`)를 가리켜야"
+            );
+            assert!(
+                !teaches_mail_cli(&discovery),
+                "발견 한 줄 자체는 우편 교육이 아니어야(그렇게 읽히면 A 의 pin 이 깨진다)"
+            );
+        }
+        assert!(
+            !mentions_mail_cli_surface(&discovery),
+            "발견 한 줄은 우편 표면 흔적도 아니어야"
+        );
+    }
+
     /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: "우회하지 마라" 와 "대신 principal 에게 보고하라"
     ///   는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면 결정이 반쪽이 된다.
-    ///   ★ADR-0128 이후에도 이 교육은 필요하다★: 셸 우회 갈래는 배선 제거로 소멸했지만(우편 CLI 가
-    ///   MCP 스폰에 없다) **조용한 포기** 갈래는 그대로 남고, auto mode 에선 grant 가 NO-OP 이라(ADR-0097)
-    ///   이 지시를 붙드는 장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
+    ///   ★셸 우회를 데몬이 거절하는 지금도 이 교육은 필요하다★: 그 갈래는 거절로 닫히지만(ADR-0133)
+    ///   **조용한 포기** 갈래는 그대로 남고, auto mode 에선 grant 가 NO-OP 이라(ADR-0097) 이 지시를 붙드는
+    ///   장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
     ///
     /// ★왜 "broken channel" 한 토큰만 pin 하나★: 문장 전체를 pin 하면 평범한 문구 손질에도 깨진다. "우회
     ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 pin_taught_channels 가 A 의 CLI 표면 부재와 B 의

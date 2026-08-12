@@ -376,6 +376,36 @@ function nextNum(dir) {
 const INDEX_HEADER = '## 인덱스';
 // 인덱스 파일명은 프로젝트별(cfg.indexName, 기본 README.md).
 
+// 관련줄에서 "Amended by ADR-N (조항)" 을 **전부** 뽑는다. 조항의 끝은 *괄호 균형*으로 끊는다.
+//   ★[^)]* 로 끊으면 조항 안에 든 반각 괄호("… 강등 못 하게(reaped …)")의 첫 ')' 를 조항 끝으로 오인해
+//     셀 문구가 어절 한복판에서 잘린다(대시보드 실데이터 13건). 균형 스캔은 진짜 짝까지 담는다.
+//   균형이 안 맞으면(오타·손편집으로 열림이 안 닫힘) 종전 동작(첫 ')' 까지)으로 폴백하고 truncated 로
+//   표시한다 — 줄 끝까지 삼켜 다음 절을 먹는 쪽으로 번지지 않게 하는 보수적 방향이다.
+//   전각（）도 반각과 같이 센다(한글 문서에 섞여 들어온다 — PAREN_OPEN/CLOSE 와 같은 규약).
+function extractAmendedBy(relatedLine) {
+  const out = [];
+  const re = /Amended by ADR-(\d+)\s*\(/gi;
+  let m;
+  while ((m = re.exec(relatedLine))) {
+    const open = m.index + m[0].length - 1; // 여는 괄호 위치
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < relatedLine.length; i++) {
+      const ch = relatedLine[i];
+      if (PAREN_OPEN.has(ch)) depth++;
+      else if (PAREN_CLOSE.has(ch) && --depth === 0) { end = i; break; }
+    }
+    let stop = end;
+    if (end < 0) {
+      const firstClose = relatedLine.indexOf(')', open + 1);
+      stop = firstClose < 0 ? relatedLine.length : firstClose;
+    }
+    out.push({ num: parseInt(m[1], 10), clause: relatedLine.slice(open + 1, stop).trim(), truncated: end < 0 });
+    re.lastIndex = stop + 1;
+  }
+  return out;
+}
+
 // 본문에서 인덱스 한 행의 "상태 칸"을 만든다.
 // 우선순위: ① 관련줄에 Amended by 링크(부분폐기) → "<어휘> (부분 폐기 by ADR-N: <clause>)"
 //          ② 없으면 본문 상태줄에서 단서절을 정돈해 쓰되, 안전하게 어휘 + 전체폐기 링크만.
@@ -389,18 +419,21 @@ function deriveIndexStatus(adr, oldRowStatus) {
   const fullSup = head.match(/Superseded by ADR-(\d+)/i);
   if (fullSup && vocab === '폐기') return { status: `폐기 (Superseded by ADR-${pad4(parseInt(fullSup[1], 10))})`, derivedFully: true };
 
-  // 부분 폐기: 관련줄에 "Amended by ADR-N (clause)" 가 있으면 인덱스에 단서를 합성.
-  //   조항 캡처는 첫 *반각* ')' 에서 끊긴다([^)]*) — 조항 안에 반각 괄호가 있으면 셀 문구가 잘린다.
-  //   이번 라운드는 파생 *출력*을 안 바꾼다(기존 인덱스 바이트 안정성 유지) → 잘림을 경고로만 드러낸다.
-  //   판정은 *반각만* 센다: 캡처는 전각（）를 안 끊으므로 전각만 든 조항은 온전하다(거짓 경고 금지).
-  const amendedBy = (adr.relatedLine || '').match(/Amended by ADR-(\d+)\s*\(([^)]*)\)/i);
-  if (amendedBy) {
-    const clause = amendedBy[2].trim();
+  // 부분 폐기: 관련줄의 "Amended by ADR-N (clause)" 를 **전부** 모아 인덱스 단서를 합성한다.
+  //   ★비-g `.match()` 는 첫 건만 준다 — 개정을 2건 이상 받은 ADR의 둘째 단서가 재생성 때마다
+  //     조용히 사라졌다(대시보드 실측 9회 재발, 매번 사람이 로그의 action:"rewritten" 을 보고 손복구).
+  //     본문 관련줄엔 링크가 다 있으므로 정보 유실은 아니나, 인덱스만 읽는 독자가 개정을 하나만 본다.
+  //     matchAll 로 전부 모으고 " / " 로 잇는다 — 1건일 때의 출력은 종전과 바이트 동일(회귀 없음).
+  //   조항의 끝은 extractAmendedBy 가 *괄호 균형*으로 끊는다 — 균형이 깨진 줄만 truncated 로 남는다.
+  const parts = extractAmendedBy(adr.relatedLine || '');
+  if (parts.length) {
+    const truncated = parts.filter((p) => p.truncated);
     return {
-      status: `${vocab} (부분 폐기 by ADR-${pad4(parseInt(amendedBy[1], 10))}: ${clause})`,
+      status: `${vocab} (부분 폐기 by ${parts.map((p) => `ADR-${pad4(p.num)}: ${p.clause}`).join(' / ')})`,
       derivedFully: true,
-      clauseTruncated: countChar(clause, '(') > countChar(clause, ')'),
-      clause,
+      clauseTruncated: truncated.length > 0,
+      // 잘린 조항만 보고한다(여러 건이면 " / " 로 이어 어느 절이 불완전한지 그대로 보이게).
+      clause: (truncated.length ? truncated : parts).map((p) => p.clause).join(' / '),
     };
   }
 

@@ -1,4 +1,3 @@
-pub mod cli;
 pub mod commands;
 pub mod daemon_client;
 pub mod layout;

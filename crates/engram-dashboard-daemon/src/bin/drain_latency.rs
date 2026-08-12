@@ -275,7 +275,7 @@ fn stage() -> Stage {
 fn insert_sender(st: &Stage) -> (Seam, BoundIdentity) {
     let seam = insert_seam(&st.manager);
     st.registry
-        .issue(seam.id, 0, format!("drain-lat-{}", seam.id));
+        .issue(seam.id, 0, format!("drain-lat-{}", seam.id), true);
     let from = BoundIdentity {
         agent_id: seam.id,
         epoch: 0,

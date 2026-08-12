@@ -304,7 +304,7 @@ async fn kill_revokes_token_before_pump_join() {
         wait_until(Duration::from_secs(3), || manager.list_agents().len() == 1),
         "spawn 직후 세션 존재"
     );
-    registry.issue(info.id, 0, "simulated-live-token".to_string());
+    registry.issue(info.id, 0, "simulated-live-token".to_string(), true);
     assert_eq!(registry.live_token_count(), 1, "심은 산 토큰 1개");
 
     manager.kill_agent(info.id).expect("kill ok");

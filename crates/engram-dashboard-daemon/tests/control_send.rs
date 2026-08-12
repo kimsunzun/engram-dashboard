@@ -225,7 +225,7 @@ fn spawn_json_agent(
     // registry 에 발급 토큰 조회 API 가 없어 provision 이 이 (id, epoch) 에 발급한 토큰을 못 꺼낸다 —
     //   발신자용 토큰을 따로 issue 해 심는다(발신자 신원만 맞으면 relay 는 동일).
     let token = format!("sender-tok-{}", info.id);
-    registry.issue(info.id, info.epoch, token.clone());
+    registry.issue(info.id, info.epoch, token.clone(), true);
     Some((info, token))
 }
 
@@ -261,7 +261,7 @@ async fn control_send_wrong_token_is_401() {
 async fn control_send_corrective_errors() {
     let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("corrective").await;
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "valid-sender".to_string());
+    registry.issue(sender, 0, "valid-sender".to_string(), true);
 
     let (status, body) = post_send(&base, Some("valid-sender"), "nobody", "hi").await;
     assert_eq!(status, reqwest::StatusCode::OK, "접수도 200 + JSON");
@@ -309,7 +309,7 @@ async fn control_send_shell_recipient_is_in_the_roster_and_delivered() {
     let (manager, registry, base, data_dir, handle, messaging, _busy) =
         wire("no-turn-signal").await;
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "valid-sender".to_string());
+    registry.issue(sender, 0, "valid-sender".to_string(), true);
 
     let mut profile = AgentProfile::new(
         "sheller".to_string(),
@@ -438,7 +438,7 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     manager.subscribe(b_info.id, sink).expect("subscribe B");
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "relay-sender".to_string());
+    registry.issue(sender, 0, "relay-sender".to_string(), true);
 
     let (status, body) = post_send(&base, Some("relay-sender"), "bee", "ping-body-XYZ").await;
     assert_eq!(status, reqwest::StatusCode::OK);
@@ -509,7 +509,7 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     manager.subscribe(b_info.id, sink).expect("subscribe B");
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "sender-tok".to_string());
+    registry.issue(sender, 0, "sender-tok".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -806,7 +806,7 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "seam-ok-sender".to_string());
+    registry.issue(sender, 0, "seam-ok-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -897,7 +897,7 @@ async fn control_send_reply_to_carries_structured_in_reply_to_no_claude() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "obs-reply-sender".to_string());
+    registry.issue(sender, 0, "obs-reply-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -952,7 +952,7 @@ async fn control_send_plain_send_has_no_in_reply_to_no_claude() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "obs-plain-sender".to_string());
+    registry.issue(sender, 0, "obs-plain-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1014,7 +1014,7 @@ async fn control_send_observer_panic_does_not_break_delivery_or_ack() {
     registry.set_delivery_observer(Arc::new(PanicObserver));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "panic-sender".to_string());
+    registry.issue(sender, 0, "panic-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1056,7 +1056,7 @@ async fn control_send_delivery_failure_observation_records_error_not_success() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "fail-sender".to_string());
+    registry.issue(sender, 0, "fail-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1122,7 +1122,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "obs-sender-tok".to_string());
+    registry.issue(sender, 0, "obs-sender-tok".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1217,7 +1217,7 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
 
     // 모든 스레드가 같은 신원으로 보낸다 — 수신자 1개에 몰아치는 게 요점.
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "stage1-conc-sender".to_string());
+    registry.issue(sender, 0, "stage1-conc-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1393,7 +1393,7 @@ async fn stage1_body_size_boundary_bytes_not_chars() {
         wire("stage1-boundary").await;
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "stage1-boundary-sender".to_string());
+    registry.issue(sender, 0, "stage1-boundary-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1595,7 +1595,7 @@ async fn stage1_lifecycle_recipient_absent_is_a_failed_row_with_no_observation()
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "stage1-absent-sender".to_string());
+    registry.issue(sender, 0, "stage1-absent-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1644,7 +1644,7 @@ async fn c1_park_then_spawn_auto_delivers() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c1-sender".to_string());
+    registry.issue(sender, 0, "c1-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1747,7 +1747,7 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c2-sender".to_string());
+    registry.issue(sender, 0, "c2-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1867,7 +1867,7 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
     let (manager, registry, _base, data_dir, handle, messaging, busy) = wire("c2-seed").await;
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c2-seed-sender".to_string());
+    registry.issue(sender, 0, "c2-seed-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -1987,7 +1987,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c2-live-sender".to_string());
+    registry.issue(sender, 0, "c2-live-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -2103,7 +2103,7 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "stage1-write-err-sender".to_string());
+    registry.issue(sender, 0, "stage1-write-err-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -2280,7 +2280,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "stage1-epoch-sender".to_string());
+    registry.issue(sender, 0, "stage1-epoch-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -2497,7 +2497,7 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     })));
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "stage1-midflight-sender".to_string());
+    registry.issue(sender, 0, "stage1-midflight-sender".to_string(), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
@@ -2590,7 +2590,7 @@ async fn mcp_send_message_tool_happy_and_error() {
     };
 
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "mcp-sender-tok".to_string());
+    registry.issue(sender, 0, "mcp-sender-tok".to_string(), true);
 
     let config = StreamableHttpClientTransportConfig::with_uri(handle.url.clone())
         .auth_header("mcp-sender-tok");
@@ -2704,8 +2704,8 @@ async fn c3_request_reply_roundtrip_transitions_ledger_to_replied() {
     let (b_id, b_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let a_name = obs_seam::fallback_name(a_id);
     let b_name = obs_seam::fallback_name(b_id);
-    registry.issue(a_id, 0, "c3-a".to_string());
-    registry.issue(b_id, 0, "c3-b".to_string());
+    registry.issue(a_id, 0, "c3-a".to_string(), true);
+    registry.issue(b_id, 0, "c3-b".to_string(), true);
     let from_a = BoundIdentity {
         agent_id: a_id,
         epoch: 0,
@@ -2823,7 +2823,7 @@ async fn c3_reply_by_timeout_injects_notice_to_the_sender() {
     let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let (b_id, _b_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let silent_worker = obs_seam::fallback_name(b_id);
-    registry.issue(a_id, 0, "c3-timeout-a".to_string());
+    registry.issue(a_id, 0, "c3-timeout-a".to_string(), true);
     let from_a = BoundIdentity {
         agent_id: a_id,
         epoch: 0,
@@ -2906,7 +2906,7 @@ async fn c3_invalid_contract_args_are_rejected_identically_at_the_cli_entrance()
     // 두 입구의 반려 코드/shape 가 같아야 한다(entrance-agnostic — ADR-0086). 여기선 HTTP 입구로 확인.
     let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("c3-args").await;
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c3-args-sender".to_string());
+    registry.issue(sender, 0, "c3-args-sender".to_string(), true);
     let tok = Some("c3-args-sender");
 
     // 상호배타.
@@ -3059,7 +3059,7 @@ async fn c3_contract_fields_are_rejected_while_the_colon_envelope_is_active() {
 
     let (_m, registry, base, data_dir, handle, _messaging, _busy) = wire("c3-colon").await;
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c3-colon-sender".to_string());
+    registry.issue(sender, 0, "c3-colon-sender".to_string(), true);
     let tok = Some("c3-colon-sender");
 
     registry.set_envelope_format(EnvelopeFormat::Colon);
@@ -3141,7 +3141,7 @@ async fn c4_all_group_fans_out_to_live_agents_and_excludes_the_sender() {
     let sender_name = obs_seam::fallback_name(sender_id);
     let a_name = obs_seam::fallback_name(a_id);
     let b_name = obs_seam::fallback_name(b_id);
-    registry.issue(sender_id, 0, "c4-all-token".to_string());
+    registry.issue(sender_id, 0, "c4-all-token".to_string(), true);
 
     let (status, body) = post_send(&base, Some("c4-all-token"), "@all", "전원 리베이스 대기").await;
     assert_eq!(status, reqwest::StatusCode::OK, "방송 접수도 200: {body}");
@@ -3210,7 +3210,7 @@ async fn c4_leading_whitespace_in_the_destination_does_not_change_routing() {
     let (a_id, a_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let a_name = obs_seam::fallback_name(a_id);
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "c4-trim-token".to_string());
+    registry.issue(sender, 0, "c4-trim-token".to_string(), true);
     let tok = Some("c4-trim-token");
 
     // ① `" @all"` — 공백이 있어도 **그룹 갈래**로 간다(단일 발송이 아니라 멤버별 회계).
@@ -3276,7 +3276,7 @@ async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
     let (recv_id, _recv_captured) = obs_seam::insert_seam_recipient(&manager, false);
     let recv_name = obs_seam::fallback_name(recv_id);
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "d-msg-tok".to_string());
+    registry.issue(sender, 0, "d-msg-tok".to_string(), true);
     let tok = Some("d-msg-tok");
     let sender_name = obs_seam::fallback_name(sender);
 
@@ -3332,7 +3332,7 @@ async fn d_messages_reports_delivery_state_by_id_and_the_callers_open_items() {
 
     // ④ 다른 신원으로 물으면 자기 것만 본다(남의 미결이 새지 않는다 — 신원은 토큰 파생).
     let other = AgentId::new_v4();
-    registry.issue(other, 0, "d-msg-other".to_string());
+    registry.issue(other, 0, "d-msg-other".to_string(), true);
     let (_s, body) = post_control(
         &base,
         "/control/messages",
@@ -3358,9 +3358,9 @@ async fn d_messages_shows_the_reply_debt_on_both_sides_of_a_request() {
     let (recv_id, _c) = obs_seam::insert_seam_recipient(&manager, false);
     let recv_name = obs_seam::fallback_name(recv_id);
     // 수신자 신원 토큰 — 그쪽 관점의 미결(내가 답할 것)을 물어본다.
-    registry.issue(recv_id, 0, "d-recv-tok".to_string());
+    registry.issue(recv_id, 0, "d-recv-tok".to_string(), true);
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "d-send-tok".to_string());
+    registry.issue(sender, 0, "d-send-tok".to_string(), true);
 
     let (_s, body) = post_send_json(
         &base,
@@ -3445,7 +3445,7 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
 
     let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("d-parity").await;
     let caller = AgentId::new_v4();
-    registry.issue(caller, 0, "d-parity-tok".to_string());
+    registry.issue(caller, 0, "d-parity-tok".to_string(), true);
     let tok = Some("d-parity-tok");
 
     let config = StreamableHttpClientTransportConfig::with_uri(handle.url.clone())
@@ -3552,10 +3552,10 @@ async fn d_messages_does_not_misassign_a_reply_obligation_to_a_same_named_twin()
     let twin_b = AgentId::new_v4();
     let (_a, _cap_a) = obs_seam::insert_seam_recipient_named(&manager, false, twin_a, "worker");
     let (_b, _cap_b) = obs_seam::insert_seam_recipient_named(&manager, false, twin_b, "worker");
-    registry.issue(twin_a, 0, "d-twin-a".to_string());
-    registry.issue(twin_b, 0, "d-twin-b".to_string());
+    registry.issue(twin_a, 0, "d-twin-a".to_string(), true);
+    registry.issue(twin_b, 0, "d-twin-b".to_string(), true);
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "d-twin-send".to_string());
+    registry.issue(sender, 0, "d-twin-send".to_string(), true);
 
     // exact AgentId 로 A 에게만 request.
     let (_s, body) = post_send_json(
@@ -3607,7 +3607,7 @@ async fn d_messages_declares_whether_the_row_list_is_complete() {
     let (recv_id, _c) = obs_seam::insert_seam_recipient(&manager, false);
     let recv_name = obs_seam::fallback_name(recv_id);
     let sender = AgentId::new_v4();
-    registry.issue(sender, 0, "d-trunc-tok".to_string());
+    registry.issue(sender, 0, "d-trunc-tok".to_string(), true);
     let tok = Some("d-trunc-tok");
 
     let (_s, body) = post_send(&base, tok, &recv_name, "hello").await;

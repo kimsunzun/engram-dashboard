@@ -10,7 +10,9 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 
-use engram_dashboard_core::agent::types::CLI_EXE_NAME;
+use engram_dashboard_core::agent::types::{
+    CLI_EXE_NAME, CLI_GROUP_MAIL, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+};
 
 fn spawn_stub(response: &'static str) -> (String, u16, thread::JoinHandle<()>) {
     let (host, port, handle) = spawn_capturing_stub(response);
@@ -56,6 +58,8 @@ fn run_cli_bytes(control_url: &str, args: &[&str], stdin: &[u8]) -> (String, i32
         .args(args)
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
+        // 표식 부재 = 전부 보이는 표면(ADR-0133). 상속된 값이 화면을 갈라 놓지 않게 지운다.
+        .env_remove(MAIL_MARKER_ENV)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -79,6 +83,7 @@ fn run_cli(control_url: &str, args: &[&str], stdin: Option<&str>) -> (String, i3
         .args(args)
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
+        .env_remove(MAIL_MARKER_ENV)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -106,6 +111,7 @@ fn run_send(control_url: &str, to: &str, body: &str) -> (String, i32) {
         .args(["mail", "send", "--to", to, "--body", body])
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
+        .env_remove(MAIL_MARKER_ENV)
         .output()
         .expect("spawn engram CLI");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -537,6 +543,7 @@ fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
         .args(args)
         .env_remove("ENGRAM_TOKEN")
         .env_remove("ENGRAM_CONTROL_URL")
+        .env_remove(MAIL_MARKER_ENV)
         .output()
         .expect("spawn engram CLI");
     (
@@ -701,4 +708,169 @@ fn engram_mail_send_rejects_body_and_body_stdin_together_without_touching_the_ne
         v["hint"].as_str().unwrap_or_default().contains("mutually"),
         "사유가 상호배타임을 알려야: {stdout}"
     );
+}
+
+// ── ADR-0133: 우편 표식 — 목록만 가리고 실행은 가리지 않는다(프로세스 레벨) ─────────────────────
+
+/// 표식 값을 명시해 돌린다. 크레덴셜은 주지 않는다 — 여기 케이스는 전부 파싱·렌더 단계에서 끝난다.
+fn run_cli_with_marker(marker: Option<&str>, args: &[&str]) -> (String, i32) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_engram"));
+    cmd.args(args)
+        .env_remove("ENGRAM_TOKEN")
+        .env_remove("ENGRAM_CONTROL_URL");
+    match marker {
+        Some(v) => cmd.env(MAIL_MARKER_ENV, v),
+        None => cmd.env_remove(MAIL_MARKER_ENV),
+    };
+    let out = cmd.output().expect("spawn engram CLI");
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// ★부재·모르는 값은 전부 보인다★: 사람이 스폰 밖 셸에서 여는 자리라 반쪽 사용법이 나오면 안 된다.
+#[test]
+fn only_the_explicit_off_marker_hides_the_mail_group_from_help() {
+    for marker in [None, Some(MAIL_MARKER_ON), Some("nonsense"), Some("")] {
+        let (out, code) = run_cli_with_marker(marker, &["help"]);
+        assert_eq!(code, 0, "help 는 성공 종료({marker:?}): {out}");
+        assert!(
+            out.contains(CLI_GROUP_MAIL),
+            "표식 {marker:?} 에서는 우편 계열이 보여야: {out}"
+        );
+    }
+    let (hidden, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &["help"]);
+    assert_eq!(code, 0, "표식 off 여도 help 자체는 성공: {hidden}");
+    assert!(
+        !hidden.contains(CLI_GROUP_MAIL),
+        "표식 off: 계열 목록에 우편이 없어야: {hidden}"
+    );
+    // 제어 계열은 표식과 무관하다(전원 개방 — ADR-0132 결정 5).
+    assert!(hidden.contains("agent"), "제어 계열은 그대로: {hidden}");
+    let (agent_help, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &["help", "agent"]);
+    assert_eq!(code, 0);
+    assert!(
+        !agent_help.contains(CLI_GROUP_MAIL),
+        "표식 off: 제어 계열 help 도 우편을 가르치지 않아야: {agent_help}"
+    );
+}
+
+/// 감춘 계열의 사용법 요청·**인자 오류**는 오타와 같은 반려(exit 1 + 봉투)로 끝난다. 하나라도 자기 사유를
+/// 돌려주면 두 연속 명령이 서로 모순되고, 동사 없는 호출의 반려는 감춘 화면보다 더 많이 가르친다.
+#[test]
+fn asking_for_the_hidden_mail_usage_is_refused_like_a_typo() {
+    for args in [
+        vec!["help", "mail"],
+        vec!["mail", "--help"],
+        vec!["mail", "-h"],
+        vec!["mail"],
+        vec!["mail", "wat"],
+        vec!["mail", "send"],
+        vec!["mail", "status"],
+    ] {
+        let (out, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &args);
+        assert_eq!(code, 1, "감춘 계열의 잘못된 호출은 반려({args:?}): {out}");
+        let v: serde_json::Value = serde_json::from_str(out.trim())
+            .unwrap_or_else(|e| panic!("반려는 봉투 JSON 이어야({args:?}): {e} — {out}"));
+        assert_eq!(v["code"], "BAD_ARGS", "{out}");
+        let hint = v["hint"].as_str().unwrap_or_default();
+        for leak in ["send", "status", "pending", "--to", "--body"] {
+            assert!(
+                !hint.contains(leak),
+                "반려 문구가 감춘 계열의 내용물을 돌려주면 안 된다({leak}, {args:?}): {hint}"
+            );
+        }
+    }
+    // 대조군 — 같은 인자가 표식 없이는 화면·구체적 사유를 낸다(= 접기가 표식 때문이라는 증명).
+    let (shown, code) = run_cli_with_marker(None, &["help", "mail"]);
+    assert_eq!(code, 0, "표식 없으면 화면: {shown}");
+    assert!(shown.contains("--to"), "{shown}");
+    let (verbless, code) = run_cli_with_marker(None, &["mail"]);
+    assert_eq!(code, 1);
+    assert!(
+        verbless.contains("send"),
+        "표식 없으면 동사 목록을 그대로 안내한다: {verbless}"
+    );
+}
+
+/// ★강제는 데몬 하나뿐이다(ADR-0133 §영향)★: 표식이 off 여도 발송은 **실제로 네트워크를 탄다** —
+///   여기서 막으면 데몬 거절이 관측되지 않고, 표식을 뗀 프로세스에선 아무도 막지 않게 된다.
+#[test]
+fn a_hidden_mail_verb_still_posts_to_the_daemon() {
+    let rejection = r#"{"status":"error","code":"MAIL_NOT_ALLOWED","hint":"This credential is not allowed to use mail. Retrying will not change that."}"#;
+    let (host, port, stub) = spawn_capturing_stub(ok_response(rejection));
+    let out = Command::new(env!("CARGO_BIN_EXE_engram"))
+        .args(["mail", "send", "--to", "bob", "--body", "hi"])
+        .env("ENGRAM_TOKEN", "test-token")
+        .env("ENGRAM_CONTROL_URL", format!("http://{host}:{port}"))
+        .env(MAIL_MARKER_ENV, MAIL_MARKER_OFF)
+        .output()
+        .expect("spawn engram CLI");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let request = stub.join().expect("stub thread");
+    assert!(
+        request.contains("POST /control/send"),
+        "표식 off 여도 요청은 나가야 — 로컬 차단이 아니다: {request}"
+    );
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        1,
+        "데몬 거절은 기존 3분법의 실패(1): {stdout}"
+    );
+    assert!(
+        stdout.contains("MAIL_NOT_ALLOWED"),
+        "거절 사유가 그대로 흘러야: {stdout}"
+    );
+}
+
+/// ★파싱 뒤에 나는 반려도 접힌다(프로세스 레벨)★: 파서 반려만 보는 스위트가 못 잡던 갈래다 — 빈 stdin
+/// 반려가 `--body` 를 되돌려 주면 치지도 않은 플래그로 감춘 계열이 새어 나간다.
+#[test]
+fn a_hidden_post_parse_rejection_does_not_hand_back_a_sibling_flag() {
+    use std::process::Stdio;
+    let run = |marker: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_engram"));
+        cmd.args(["mail", "send", "--to", "bob", "--body-stdin"])
+            .env_remove("ENGRAM_TOKEN")
+            .env_remove("ENGRAM_CONTROL_URL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match marker {
+            Some(v) => cmd.env(MAIL_MARKER_ENV, v),
+            None => cmd.env_remove(MAIL_MARKER_ENV),
+        };
+        let mut child = cmd.spawn().expect("spawn engram CLI");
+        // stdin 을 열자마자 닫는다 = 빈 입력(리뷰어 repro 의 `</dev/null`).
+        drop(child.stdin.take().expect("stdin piped"));
+        let out = child.wait_with_output().expect("wait engram CLI");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+
+    let (hidden, code) = run(Some(MAIL_MARKER_OFF));
+    assert_eq!(code, 1, "빈 본문은 반려: {hidden}");
+    let v: serde_json::Value =
+        serde_json::from_str(hidden.trim()).unwrap_or_else(|e| panic!("봉투 JSON: {e} — {hidden}"));
+    assert_eq!(v["code"], "BAD_ARGS");
+    let hint = v["hint"].as_str().unwrap_or_default();
+    for leak in ["--body", "--to", "send", "status", "pending"] {
+        assert!(
+            !hint.contains(leak),
+            "감춘 계열의 내용물이 파싱-후 반려로 새면 안 된다({leak}): {hint}"
+        );
+    }
+
+    // 대조군 — 표식이 없거나 on 이면 구체적 복구 안내를 그대로 준다.
+    for marker in [None, Some(MAIL_MARKER_ON)] {
+        let (shown, code) = run(marker);
+        assert_eq!(code, 1, "{marker:?}: {shown}");
+        assert!(
+            shown.contains("--body"),
+            "{marker:?}: 보이는 표면에선 복구 안내가 그대로여야: {shown}"
+        );
+    }
 }
