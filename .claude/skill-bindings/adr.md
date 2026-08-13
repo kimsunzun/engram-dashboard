@@ -22,6 +22,15 @@ node <skill>/scripts/adr.mjs supersede --old <N> --mode full    --title "<새 �
 # supersede 부분 — 새 ADR 스캐폴드 + 옛 status 유지 + 양방향 Amends/Amended by (바뀐 조항 단서).
 node <skill>/scripts/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<새 제목>"
 
+# supersede 다중 대상 — 한 결정이 여러 ADR을 함께 개정할 때. --clause 는 직전 --old 에 붙는다(순서 유의).
+# 새 ADR 은 대상 수와 무관하게 하나만 생긴다. 대상 중 하나라도 없으면 아무것도 안 쓰고 중단한다.
+node <skill>/scripts/adr.mjs supersede --old <N> --clause "<조항>" --old <M> --clause "<조항>" --mode partial --title "<새 제목>"
+
+# link — 이미 있는 두 ADR 사이에 링크·도장만 박는다. 채번도 새 파일도 없다.
+# 한쪽만 박혀 있으면 빠진 쪽만 채운다(lint 「단방향」 수리 도구). 양쪽 다 있으면 no-op.
+node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode partial --clause "<바뀐 조항>"
+node <skill>/scripts/adr.mjs link --old <N> --new <M> --mode full
+
 # index — 본문 H1·상태 스캔해 README 인덱스 표 재생성. 기본 --check(diff만, 안 고침), --write만 실제 갱신.
 node <skill>/scripts/adr.mjs index --check     # 점검(read-only diff·경고)
 node <skill>/scripts/adr.mjs index --write     # 실제 재생성(본문서 파생 가능한 것만, 큐레이션 셀 보존)
@@ -32,7 +41,7 @@ node <skill>/scripts/adr.mjs lint
 
 - **격리 테스트** — `--dir <폴더>` 또는 `ADR_DIR` 환경변수로 대상 폴더를 바꿔 실데이터 밖에서 dry-run. 기본 = `docs/decisions/`(cwd 기준). 스캔/상대경로 기준 루트는 `--root`(기본 = cwd).
 - **파라미터 플래그(멀티 소비처)** — 스크립트는 여러 소비처를 하나로 섬긴다. dashboard는 위 기본값이 실값이라 플래그 불필요. 다른 소비처는 `--dir · --index-name · --template · --status-vocab a,b,c · --default-status · --anchor-roots a,b`로 실값을 주입한다(각 프로젝트 바인딩 소관).
-- **호출 순서** — `new`/`supersede`로 파일을 만든 뒤 **본문 prose를 채우고**, 그 다음 `index --write`로 인덱스를 재생성한다(스캐폴드만으론 prose가 TODO라 인덱스 제목이 임시값일 수 있음 — prose 먼저, 인덱스 나중).
+- **호출 순서** — `new`/`supersede`로 파일을 만든 뒤 **본문 prose를 채우고**, 그 다음 `index --write`로 인덱스를 재생성한다. `link`는 파일을 안 만드니 곧바로 `index --write`다(스캐폴드만으론 prose가 TODO라 인덱스 제목이 임시값일 수 있음 — prose 먼저, 인덱스 나중).
 
 ## ADR 폴더 + 파일명 규약 (골격 §2에 주입)
 

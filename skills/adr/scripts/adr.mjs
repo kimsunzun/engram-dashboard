@@ -7,6 +7,13 @@
 //   node <경로>/adr.mjs supersede --old <N> --mode full    --title "<제목>" [--status ...] [--dir ...]
 //   node <경로>/adr.mjs supersede --old <N> --mode partial --clause "<바뀐 조항>" --title "<제목>" [--dir ...]
 //     partial = 관련줄 Amends/Amended by 양방향 링크 + 옛 상태줄에 "· 부분 폐기 by ADR-N (조항)" 도장(어휘는 보존).
+//     ★대상 여럿 = --old/--clause 쌍을 반복한다(--clause 는 *직전* --old 에 묶인다 — 순서가 곧 짝):
+//       supersede --old 110 --clause "결정 3·4 대체" --old 113 --clause "결정 3 대체" --mode partial --title "..."
+//       새 ADR 은 대상 수와 무관하게 *하나*만 채번·생성된다. --mode 는 그 실행의 모든 대상에 같이 적용된다.
+//   node <경로>/adr.mjs link      --old <N> --new <M> --mode full    [--dir ...]
+//   node <경로>/adr.mjs link      --old <N> --new <M> --mode partial --clause "<바뀐 조항>" [--dir ...]
+//     link = *이미 있는* 두 ADR 사이에 supersede 와 같은 양방향 링크·도장을 박는다. 새 파일도, 채번도 없다.
+//     (뒤늦게 관계를 발견했을 때 손편집 대신 쓰는 경로 — 손편집은 스킬 가드레일이 금지한다.)
 //   node <경로>/adr.mjs index  [--check | --write] [--dir <폴더>]
 //   node <경로>/adr.mjs lint   [--dir <폴더>]
 //
@@ -35,9 +42,13 @@ const DEFAULT_DEFAULT_STATUS = '확정';
 // 값 검증: `--flag` 다음 토큰이 없거나 `--`로 시작하면 값으로 흡수하지 않고 에러.
 //   (안 막으면 `--title --status` 가 title="--status" 로 빨려 들어가 잘못된 제목·슬러그를 만든다.)
 //   parseArgs는 fail(process.exit)을 직접 부르지 않고 errors를 모아 진입부에서 처리(테스트 가능성).
+//   ★pairs = 등장 순서를 보존한 (키,값) 목록. opts 는 같은 키가 반복되면 *마지막 값만* 남으므로
+//     supersede 의 반복 --old/--clause 쌍을 복원할 수 없다 — 짝짓기는 순서 정보가 있어야 한다.
+//     (opts 는 종전 그대로 둔다 — 단일 값 플래그 소비처가 전부 그걸 읽는다.)
 function parseArgs(argv) {
   const cmd = argv[0];
   const opts = {};
+  const pairs = [];
   const errors = [];
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
@@ -49,12 +60,38 @@ function parseArgs(argv) {
       // 값 토큰이 없거나(끝) `--`로 시작하면(다음 플래그) = 이 플래그의 값 누락.
       if (next === undefined || next.startsWith('--')) { errors.push(`${a} 값 누락`); continue; }
       opts[key] = next;
+      pairs.push({ key, value: next });
       i++;
     }
   }
   // --check 와 --write 는 상호배타(둘 다 켜면 의도 모호 → 거부).
   if (opts.check && opts.write) errors.push('--check 와 --write 는 동시 지정 불가(상호배타)');
-  return { cmd, opts, errors };
+  return { cmd, opts, errors, pairs };
+}
+
+// ── supersede 대상 목록(반복 --old/--clause) ─────────────────────────────────
+// --clause 는 *직전 --old* 에 묶인다(위치 의존). 앞선 --old 없이 온 --clause 는 어디에 묶일지
+//   기계가 정할 수 없으므로 거부한다 — 임의로 뒤 --old 에 붙이면 조항이 엉뚱한 ADR에 박힌다.
+//   중복 번호도 거부: 같은 옛 ADR에 한 실행에서 두 번 도장·링크를 박으면 관련줄이 늘어난다(비가역).
+function collectTargets(pairs) {
+  const targets = [];
+  const errors = [];
+  for (const { key, value } of pairs) {
+    if (key === 'old') {
+      const raw = value.trim();
+      // parseInt 는 "1abc" 를 1 로 삼켜 조용히 엉뚱한 대상을 잡는다 → 전체가 숫자일 때만 받는다.
+      if (!/^\d+$/.test(raw)) { errors.push(`--old 는 ADR 번호(정수)여야 함: "${value}"`); continue; }
+      const num = parseInt(raw, 10);
+      if (targets.some((t) => t.num === num)) { errors.push(`--old ${num} 중복 지정 — 한 실행에서 같은 ADR을 두 번 대상으로 못 삼는다`); continue; }
+      targets.push({ num, clause: undefined });
+    } else if (key === 'clause') {
+      if (!targets.length) { errors.push(`--clause 가 --old 보다 앞에 옴 — --clause 는 직전 --old 에 묶인다(순서: --old <N> --clause "<조항>"): "${value}"`); continue; }
+      const t = targets[targets.length - 1];
+      if (t.clause !== undefined) { errors.push(`--old ${t.num} 에 --clause 가 두 번 지정됨 — 대상당 조항은 하나: "${t.clause}" / "${value}"`); continue; }
+      t.clause = value;
+    }
+  }
+  return { targets, errors };
 }
 
 // 제목/조항/상태 같은 단일행 필드에 파이프·개행이 오면 거부.
@@ -595,52 +632,134 @@ function cmdNew(opts, cfg) {
   out({ op: 'new', num, file, path: full, status, note: '본문 prose 슬롯은 TODO — 스킬/LLM이 채운다. 인덱스는 index --write 로 재생성.' });
 }
 
-function cmdSupersede(opts, cfg) {
-  if (!opts.title) fail('--title 필요');
-  if (!opts.old) fail('--old <N> 필요');
-  assertSingleLineField('--title', opts.title);
-  assertSingleLineField('--clause', opts.clause);
-  assertClauseSafe('--clause', opts.clause); // 파서 토큰(· — 도장/링크 키워드)·괄호 불균형 거부
-  const mode = opts.mode;
-  if (mode !== 'full' && mode !== 'partial') fail('--mode full|partial 필요');
-  if (mode === 'partial' && !opts.clause) fail('partial 은 --clause "<바뀐 조항>" 필요');
-  const dir = cfg.dir;
-  const oldNum = parseInt(opts.old, 10);
-  const oldEntry = listAdrFiles(dir).find((f) => f.num === oldNum);
-  if (!oldEntry) fail(`옛 ADR 없음: ${oldNum}`);
+// ── supersede / link 공용 원시연산 ────────────────────────────────────────────
+// 옛 ADR 한 건에 가하는 변형은 supersede 와 link 가 *완전히 같다*(양방향 링크 + partial 상태줄 도장).
+//   두 경로로 갈라 쓰면 한쪽만 고쳐져 조용히 어긋난다 → 검증(validateOldTarget)·적용(applyOldLinkage)을
+//   각각 한 함수로 두고 두 명령이 그대로 부른다. 여기 손대면 두 명령이 같이 바뀐다(그게 의도다).
 
-  // ★원자성(ADR 데이터 무손상): 옛 ADR을 *먼저 완전 검증*한 뒤에야 새 파일을 쓴다.
-  //   (새 파일을 먼저 쓰고 옛 파일을 나중에 검증하면, 중간 실패 시 새 파일만 남는 반쪽 상태가 된다.)
-  const oldAdr = parseAdr(dir, oldEntry.file, cfg);
-  const oldLines = oldAdr.lines.slice();
+// 새 ADR 관련줄에 들어갈 링크 문구(새 → 옛 방향).
+function newSideLink(mode, oldNum, clause) {
+  return mode === 'full' ? `Supersedes ADR-${pad4(oldNum)}` : `Amends ADR-${pad4(oldNum)} (${clause})`;
+}
+
+// 옛 ADR 상태줄이 이미 전체폐기면 그 "폐기시킨 ADR 번호"를 준다(아니면 null).
+//   full 재래핑 가드(취소선 ~~ 무한 중첩 방지)와 link 의 멱등 판정이 같은 신호를 본다.
+function fullSupersededBy(oldAdr) {
+  const m = /폐기\s*\(Superseded by ADR-(\d+)/i.exec(oldAdr.statusLine || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// 관련줄에 이미 그 링크가 있나(번호 단위 — 조항 문구는 안 본다. 같은 번호면 같은 관계다).
+const hasAmendedByLink = (rl, newNum) => new RegExp(`Amended by ADR-${pad4(newNum)}(?!\\d)`, 'i').test(rl || '');
+const hasAmendsLink = (rl, oldNum) => new RegExp(`Amends ADR-${pad4(oldNum)}(?!\\d)`, 'i').test(rl || '');
+const hasSupersedesLink = (rl, oldNum) => new RegExp(`Supersedes ADR-${pad4(oldNum)}(?!\\d)`, 'i').test(rl || '');
+
+// 옛 ADR 이 이 mode 의 변형을 받을 수 있는 형태인지 검증. 에러 문자열 | null.
+//   ★쓰기 전에 *모든* 대상을 이걸로 통과시킨다 — 중간 실패로 일부만 박힌 반쪽 상태를 만들지 않는다.
+function validateOldTarget(oldAdr, mode) {
   if (mode === 'full') {
     // 옛 ADR에 상태줄이 있어야 폐기 표시를 박을 수 있다.
-    if (oldAdr.statusLineIdx < 0) fail(`옛 ADR-${oldNum} 에 "- 상태:" 줄이 없어 폐기 표시를 못 박음(수동 처리 필요)`);
+    if (oldAdr.statusLineIdx < 0) return `옛 ADR-${oldAdr.num} 에 "- 상태:" 줄이 없어 폐기 표시를 못 박음(수동 처리 필요)`;
     // full 폐기는 상태를 *독립 "- 상태:" 줄*로 재기록한다 — 결합 메타 줄(예: "- 날짜: … · 상태: … · 결정자: …")
     //   형식에는 안전하게 못 박으므로(다른 필드 손실) 거부하고 수동 처리로 넘긴다.
     if (!/^-\s*상태:/.test(oldAdr.lines[oldAdr.statusLineIdx])) {
-      fail(`옛 ADR-${oldNum} 상태가 독립 "- 상태:" 줄이 아님(결합 메타 줄) — full supersede 자동화 불가(수동 처리 필요): ${oldAdr.lines[oldAdr.statusLineIdx].trim()}`);
+      return `옛 ADR-${oldAdr.num} 상태가 독립 "- 상태:" 줄이 아님(결합 메타 줄) — full supersede 자동화 불가(수동 처리 필요): ${oldAdr.lines[oldAdr.statusLineIdx].trim()}`;
     }
+    return null;
+  }
+  // 부분 폐기: 옛 ADR에 관련줄이 있어야 Amended by 양방향 링크를 박는다.
+  if (oldAdr.relatedLineIdx < 0) return `옛 ADR-${oldAdr.num} 에 "- 관련:" 줄이 없어 Amended by 링크를 못 박음(수동 처리 필요)`;
+  return null;
+}
+
+// 옛 ADR 줄 배열을 제자리 변형한다(호출자가 slice() 한 사본을 준다). partial 도장 결과를 돌려준다(full 은 null).
+//   validateOldTarget 을 통과한 oldAdr 만 넘긴다 — 여기선 다시 안 막는다.
+function applyOldLinkage(oldLines, oldAdr, { mode, newNum, clause }) {
+  if (mode === 'full') {
+    // 기존 status 텍스트는 ~~취소선~~ 으로 이력 보존(0023 관습).
+    const prevBody = oldAdr.statusLine; // "확정 (...)" 등
+    oldLines[oldAdr.statusLineIdx] = `- 상태: **폐기 (Superseded by ADR-${pad4(newNum)})** — TODO 사유. ~~${prevBody}~~`;
+    return null;
+  }
+  const amend = `Amended by ADR-${pad4(newNum)} (${clause})`;
+  oldLines[oldAdr.relatedLineIdx] = `${oldLines[oldAdr.relatedLineIdx]} · ${amend}`;
+  // 상태줄 도장은 *독립 "- 상태:" 줄*에만 박는다. 결합 메타 줄(- 날짜: … · 상태: … · 결정자: …)에
+  //   붙이면 도장이 또 하나의 메타 필드처럼 보여 필드 경계가 모호해진다(full 이 결합 줄을 거부하는 것과 같은 이유)
+  //   → 건너뛰고 사유만 보고한다(관련줄 양방향 링크는 그대로 박힌다 — 종전 동작 보존).
+  if (oldAdr.statusLineIdx < 0) return { stamped: false, reason: 'no-status-line' };
+  if (!/^-\s*상태:/.test(oldLines[oldAdr.statusLineIdx])) return { stamped: false, reason: 'combined-meta-line' };
+  const st = stampPartialStatusLine(oldLines[oldAdr.statusLineIdx], newNum, clause);
+  oldLines[oldAdr.statusLineIdx] = st.line;
+  return st;
+}
+
+// 보고용 문자열/필드 — supersede·link 가 같은 계약으로 낸다.
+function stampDescOf(statusStamp, newNum, clause) {
+  if (statusStamp && statusStamp.stamped) return ` + 상태줄 도장 "· 부분 폐기 by ADR-${pad4(newNum)} (${clause})"`;
+  return statusStamp ? ` (상태줄 도장 생략 — ${statusStamp.reason})` : '';
+}
+function bidirectionalOf(mode, oldNum, newNum, clause, statusStamp) {
+  return mode === 'full'
+    ? { new: `Supersedes ADR-${pad4(oldNum)}`, old: `상태→폐기 (Superseded by ADR-${pad4(newNum)}), 기존 상태 취소선 보존` }
+    : { new: `Amends ADR-${pad4(oldNum)} (${clause})`, old: `상태 어휘 유지 + 관련줄에 Amended by ADR-${pad4(newNum)} (${clause})${stampDescOf(statusStamp, newNum, clause)}` };
+}
+const statusStampOf = (s) => ({ stamped: s.stamped, position: s.position ?? null, reason: s.reason ?? null });
+
+function cmdSupersede(opts, cfg, pairs = []) {
+  if (!opts.title) fail('--title 필요');
+  if (!opts.old) fail('--old <N> 필요'); // 종전 순서 보존(title → old) — 인자 오류 메시지도 회귀 대상이다.
+  // 반복 --old/--clause → 대상 목록(순서 = 짝). 대상이 1개면 종전 단일 대상 동작과 바이트 동일.
+  const { targets, errors: targetErrors } = collectTargets(pairs);
+  if (targetErrors.length) fail(`인자 오류: ${targetErrors.join('; ')}`);
+  if (!targets.length) fail('--old <N> 필요');
+  assertSingleLineField('--title', opts.title);
+  for (const t of targets) {
+    assertSingleLineField('--clause', t.clause);
+    assertClauseSafe('--clause', t.clause); // 파서 토큰(· — 도장/링크 키워드)·괄호 불균형 거부
+  }
+  const mode = opts.mode;
+  if (mode !== 'full' && mode !== 'partial') fail('--mode full|partial 필요');
+  if (mode === 'partial') {
+    const noClause = targets.filter((t) => !t.clause);
+    if (noClause.length) {
+      fail(targets.length === 1
+        ? 'partial 은 --clause "<바뀐 조항>" 필요'
+        : `partial 은 대상마다 --clause 필요 — 누락: ${noClause.map((t) => `--old ${t.num}`).join(', ')}`);
+    }
+  }
+  const dir = cfg.dir;
+  const files = listAdrFiles(dir);
+  const missing = targets.filter((t) => !files.some((f) => f.num === t.num));
+  if (missing.length) fail(`옛 ADR 없음: ${missing.map((t) => t.num).join(', ')}`);
+
+  // ★원자성(ADR 데이터 무손상): 옛 ADR을 *전부 먼저 완전 검증*한 뒤에야 새 파일을 쓴다.
+  //   (새 파일을 먼저 쓰고 옛 파일을 나중에 검증하면, 중간 실패 시 새 파일만 남는 반쪽 상태가 된다.
+  //    대상이 여럿이면 "n번째 대상이 부적합" 도 같은 반쪽 상태를 만든다 → 전수 선검증.)
+  const plans = targets.map((t) => {
+    const entry = files.find((f) => f.num === t.num);
+    return { num: t.num, clause: t.clause, entry, adr: parseAdr(dir, entry.file, cfg) };
+  });
+  const structErrors = plans.map((p) => validateOldTarget(p.adr, mode)).filter(Boolean);
+  if (structErrors.length) fail(structErrors.join('; '));
+  if (mode === 'full') {
     // ★멱등성: 이미 전체폐기(상태줄에 "폐기 (Superseded by ADR-")면 재래핑 금지(취소선 ~~ 무한 중첩 방지).
-    if (/폐기\s*\(Superseded by ADR-/i.test(oldAdr.statusLine)) {
-      fail(`옛 ADR-${oldNum} 은 이미 전체폐기됨 — 재래핑 거부(취소선 중첩 방지): ${oldAdr.statusLine}`);
+    const already = plans.filter((p) => fullSupersededBy(p.adr) !== null);
+    if (already.length) {
+      fail(already.map((p) => `옛 ADR-${p.num} 은 이미 전체폐기됨 — 재래핑 거부(취소선 중첩 방지): ${p.adr.statusLine}`).join('; '));
     }
-  } else {
-    // 부분 폐기: 옛 ADR에 관련줄이 있어야 Amended by 양방향 링크를 박는다.
-    if (oldAdr.relatedLineIdx < 0) fail(`옛 ADR-${oldNum} 에 "- 관련:" 줄이 없어 Amended by 링크를 못 박음(수동 처리 필요)`);
   }
 
   // 새 ADR 스캐폴드 메타 검증(파일은 옛 ADR 검증을 통과한 뒤에만 쓴다).
   const status = opts.status || cfg.defaultStatus;
   if (!cfg.statusVocab.includes(status)) fail(`--status 는 ${cfg.statusVocab.join('/')} 중 하나`);
-  const newNum = nextNum(dir);
+  const newNum = nextNum(dir); // 대상이 몇이든 새 ADR 은 하나 — 채번도 한 번.
 
   // partial 멱등성: 옛 관련줄에 동일 "Amended by ADR-N" 이 이미 있으면 중복 append 금지.
   //   (재실행 시 같은 링크를 두 번 박아 관련줄이 늘어나는 손상을 막는다. 번호 단위로 검출 — 같은 N이면 거부.)
   if (mode === 'partial') {
-    const reExisting = new RegExp(`Amended by ADR-${pad4(newNum)}(?!\\d)`, 'i');
-    if (reExisting.test(oldAdr.relatedLine)) {
-      fail(`옛 ADR-${oldNum} 관련줄에 이미 "Amended by ADR-${pad4(newNum)}" 존재 — 중복 append 거부: ${oldAdr.relatedLine}`);
+    const dup = plans.filter((p) => hasAmendedByLink(p.adr.relatedLine, newNum));
+    if (dup.length) {
+      fail(dup.map((p) => `옛 ADR-${p.num} 관련줄에 이미 "Amended by ADR-${pad4(newNum)}" 존재 — 중복 append 거부: ${p.adr.relatedLine}`).join('; '));
     }
   }
 
@@ -650,43 +769,119 @@ function cmdSupersede(opts, cfg) {
   const newFull = path.join(dir, newFile);
   if (fs.existsSync(newFull)) fail(`이미 존재: ${newFile}`);
 
-  // 여기까지 도달 = 옛 ADR·새 메타 전부 검증 통과. 이제 새 파일을 쓴다(반쪽 상태 불가).
-  const relLink = mode === 'full'
-    ? `Supersedes ADR-${pad4(oldNum)}`
-    : `Amends ADR-${pad4(oldNum)} (${opts.clause})`;
+  // 여기까지 도달 = 옛 ADR 전수·새 메타 전부 검증 통과. 이제 쓴다(반쪽 상태 불가).
+  const relLink = plans.map((p) => newSideLink(mode, p.num, p.clause)).join(' · ');
   fs.writeFileSync(newFull, scaffold({ num: newNum, title: opts.title, status, related: relLink + ' · TODO 나머지 관련' }, cfg), 'utf8');
 
   // 옛 ADR 변형(검증 시 확인한 줄·인덱스만 사용).
-  let statusStamp = null; // partial 상태줄 도장 결과(보고용)
-  if (mode === 'full') {
-    // 기존 status 텍스트는 ~~취소선~~ 으로 이력 보존(0023 관습).
-    const prevBody = oldAdr.statusLine; // "확정 (...)" 등
-    oldLines[oldAdr.statusLineIdx] = `- 상태: **폐기 (Superseded by ADR-${pad4(newNum)})** — TODO 사유. ~~${prevBody}~~`;
-  } else {
-    const amend = `Amended by ADR-${pad4(newNum)} (${opts.clause})`;
-    oldLines[oldAdr.relatedLineIdx] = `${oldLines[oldAdr.relatedLineIdx]} · ${amend}`;
-    // 상태줄 도장은 *독립 "- 상태:" 줄*에만 박는다. 결합 메타 줄(- 날짜: … · 상태: … · 결정자: …)에
-    //   붙이면 도장이 또 하나의 메타 필드처럼 보여 필드 경계가 모호해진다(full 이 결합 줄을 거부하는 것과 같은 이유)
-    //   → 건너뛰고 사유만 보고한다(관련줄 양방향 링크는 그대로 박힌다 — 종전 동작 보존).
-    if (oldAdr.statusLineIdx < 0) statusStamp = { stamped: false, reason: 'no-status-line' };
-    else if (!/^-\s*상태:/.test(oldLines[oldAdr.statusLineIdx])) statusStamp = { stamped: false, reason: 'combined-meta-line' };
-    else {
-      statusStamp = stampPartialStatusLine(oldLines[oldAdr.statusLineIdx], newNum, opts.clause);
-      oldLines[oldAdr.statusLineIdx] = statusStamp.line;
-    }
+  for (const p of plans) {
+    const oldLines = p.adr.lines.slice();
+    p.statusStamp = applyOldLinkage(oldLines, p.adr, { mode, newNum, clause: p.clause });
+    fs.writeFileSync(path.join(dir, p.entry.file), oldLines.join('\n'), 'utf8');
   }
-  fs.writeFileSync(path.join(dir, oldEntry.file), oldLines.join('\n'), 'utf8');
 
-  const stampDesc = statusStamp && statusStamp.stamped
-    ? ` + 상태줄 도장 "· 부분 폐기 by ADR-${pad4(newNum)} (${opts.clause})"`
-    : statusStamp ? ` (상태줄 도장 생략 — ${statusStamp.reason})` : '';
+  const note = '새 ADR 본문 prose + 옛 ADR의 TODO 사유는 스킬/LLM이 채운다. 인덱스는 index --write 로 재생성.';
+  if (plans.length === 1) {
+    // 단일 대상 = 종전 출력 형태 그대로(바이트 동일 — 이 분기를 없애면 기존 소비처가 깨진다).
+    const p = plans[0];
+    out({
+      op: 'supersede', mode, newNum, newFile, oldNum: p.num, oldFile: p.entry.file,
+      bidirectional: bidirectionalOf(mode, p.num, newNum, p.clause, p.statusStamp),
+      ...(p.statusStamp ? { statusStamp: statusStampOf(p.statusStamp) } : {}),
+      note,
+    });
+    return;
+  }
   out({
-    op: 'supersede', mode, newNum, newFile, oldNum, oldFile: oldEntry.file,
-    bidirectional: mode === 'full'
-      ? { new: `Supersedes ADR-${pad4(oldNum)}`, old: `상태→폐기 (Superseded by ADR-${pad4(newNum)}), 기존 상태 취소선 보존` }
-      : { new: `Amends ADR-${pad4(oldNum)} (${opts.clause})`, old: `상태 어휘 유지 + 관련줄에 Amended by ADR-${pad4(newNum)} (${opts.clause})${stampDesc}` },
-    ...(statusStamp ? { statusStamp: { stamped: statusStamp.stamped, position: statusStamp.position ?? null, reason: statusStamp.reason ?? null } } : {}),
-    note: '새 ADR 본문 prose + 옛 ADR의 TODO 사유는 스킬/LLM이 채운다. 인덱스는 index --write 로 재생성.',
+    op: 'supersede', mode, newNum, newFile,
+    targets: plans.map((p) => ({
+      oldNum: p.num, oldFile: p.entry.file,
+      bidirectional: bidirectionalOf(mode, p.num, newNum, p.clause, p.statusStamp),
+      ...(p.statusStamp ? { statusStamp: statusStampOf(p.statusStamp) } : {}),
+    })),
+    note,
+  });
+}
+
+// ── link: 이미 있는 두 ADR 을 잇는다(새 파일 없음·채번 없음) ─────────────────
+// supersede 와 같은 원시연산을 쓰되, "새 ADR" 쪽도 스캐폴드가 아니라 기존 파일이라 관련줄에 append 한다.
+//   멱등은 *양쪽 각각* 본다 — 한쪽만 박힌 반쪽 상태(lint 의 unidirectional)를 재실행으로 메울 수 있어야 한다.
+//   양쪽 다 이미 있으면 아무것도 안 쓰고 noop 으로 보고한다(중복 도장 금지).
+function cmdLink(opts, cfg) {
+  if (!opts.old) fail('--old <N> 필요');
+  if (!opts.new) fail('--new <M> 필요');
+  assertSingleLineField('--clause', opts.clause);
+  assertClauseSafe('--clause', opts.clause);
+  const mode = opts.mode;
+  if (mode !== 'full' && mode !== 'partial') fail('--mode full|partial 필요');
+  if (mode === 'partial' && !opts.clause) fail('partial 은 --clause "<바뀐 조항>" 필요');
+  if (!/^\d+$/.test(String(opts.old).trim())) fail(`--old 는 ADR 번호(정수)여야 함: "${opts.old}"`);
+  if (!/^\d+$/.test(String(opts.new).trim())) fail(`--new 는 ADR 번호(정수)여야 함: "${opts.new}"`);
+  const oldNum = parseInt(opts.old, 10);
+  const newNum = parseInt(opts.new, 10);
+  if (oldNum === newNum) fail(`--old 와 --new 가 같음(ADR-${pad4(oldNum)}) — 자기 자신과는 링크 불가`);
+
+  const dir = cfg.dir;
+  const files = listAdrFiles(dir);
+  const oldEntry = files.find((f) => f.num === oldNum);
+  const newEntry = files.find((f) => f.num === newNum);
+  const missing = [];
+  if (!oldEntry) missing.push(oldNum);
+  if (!newEntry) missing.push(newNum);
+  if (missing.length) fail(`ADR 없음: ${missing.join(', ')} — link 는 양쪽이 이미 있어야 한다(새 결정이면 supersede).`);
+
+  const oldAdr = parseAdr(dir, oldEntry.file, cfg);
+  const newAdr = parseAdr(dir, newEntry.file, cfg);
+
+  // 쓰기 전 전수 검증(supersede 와 같은 원시연산 — 결합 메타 줄 full 거부가 여기 그대로 걸린다).
+  const structErr = validateOldTarget(oldAdr, mode);
+  if (structErr) fail(structErr);
+  // 새 쪽은 스캐폴드가 아니라 기존 파일이다 — 관련줄이 없으면 링크를 박을 자리가 없다.
+  if (newAdr.relatedLineIdx < 0) {
+    fail(`새 ADR-${newNum} 에 "- 관련:" 줄이 없어 ${mode === 'full' ? 'Supersedes' : 'Amends'} 링크를 못 박음(수동 처리 필요)`);
+  }
+
+  // 멱등(양쪽 각각): 이미 있는 링크는 다시 안 박는다.
+  let oldSideDone;
+  if (mode === 'full') {
+    const by = fullSupersededBy(oldAdr);
+    // 다른 ADR 이 이미 전체폐기시켰으면 재래핑 거부(취소선 중첩 방지 — supersede 와 같은 가드).
+    if (by !== null && by !== newNum) fail(`옛 ADR-${oldNum} 은 이미 전체폐기됨 — 재래핑 거부(취소선 중첩 방지): ${oldAdr.statusLine}`);
+    oldSideDone = by === newNum;
+  } else {
+    oldSideDone = hasAmendedByLink(oldAdr.relatedLine, newNum);
+  }
+  const newSideDone = mode === 'full'
+    ? hasSupersedesLink(newAdr.relatedLine, oldNum)
+    : hasAmendsLink(newAdr.relatedLine, oldNum);
+
+  // 두 파일의 새 내용을 *먼저 다 만들고* 나서 쓴다(중간 실패로 한쪽만 바뀌는 창을 최소화).
+  let statusStamp = oldSideDone && mode === 'partial' ? { stamped: false, reason: 'already-linked' } : null;
+  let oldText = null;
+  if (!oldSideDone) {
+    const oldLines = oldAdr.lines.slice();
+    statusStamp = applyOldLinkage(oldLines, oldAdr, { mode, newNum, clause: opts.clause });
+    oldText = oldLines.join('\n');
+  }
+  let newText = null;
+  if (!newSideDone) {
+    const newLines = newAdr.lines.slice();
+    newLines[newAdr.relatedLineIdx] = `${newLines[newAdr.relatedLineIdx]} · ${newSideLink(mode, oldNum, opts.clause)}`;
+    newText = newLines.join('\n');
+  }
+  if (oldText !== null) fs.writeFileSync(path.join(dir, oldEntry.file), oldText, 'utf8');
+  if (newText !== null) fs.writeFileSync(path.join(dir, newEntry.file), newText, 'utf8');
+
+  const noop = oldSideDone && newSideDone;
+  out({
+    op: 'link', mode, newNum, newFile: newEntry.file, oldNum, oldFile: oldEntry.file,
+    applied: { old: !oldSideDone, new: !newSideDone },
+    ...(noop ? { noop: true, reason: 'already-linked' } : {}),
+    bidirectional: bidirectionalOf(mode, oldNum, newNum, opts.clause, statusStamp),
+    ...(statusStamp ? { statusStamp: statusStampOf(statusStamp) } : {}),
+    note: noop
+      ? '양쪽에 이미 같은 링크가 있어 아무것도 쓰지 않음(멱등 no-op). 인덱스는 index --write 로 재생성.'
+      : '옛 ADR의 TODO 사유·본문 prose 는 스킬/LLM이 채운다. 인덱스는 index --write 로 재생성.',
   });
 }
 
@@ -833,12 +1028,13 @@ function scanCodeAnchors(cfg) {
 const LIB_ONLY = ['1', 'true'].includes(String(process.env.ADR_LIB_ONLY ?? '').trim().toLowerCase());
 if (LIB_ONLY) console.error('ADR_LIB_ONLY: CLI entry skipped');
 if (!LIB_ONLY) {
-  const { cmd, opts, errors } = parseArgs(process.argv.slice(2));
+  const { cmd, opts, errors, pairs } = parseArgs(process.argv.slice(2));
   if (errors.length) fail(`인자 오류: ${errors.join('; ')}`);
   const cfg = resolveConfig(opts);
   switch (cmd) {
     case 'new': cmdNew(opts, cfg); break;
-    case 'supersede': cmdSupersede(opts, cfg); break;
+    case 'supersede': cmdSupersede(opts, cfg, pairs); break;
+    case 'link': cmdLink(opts, cfg); break;
     case 'index': cmdIndex(opts, cfg); break;
     case 'lint': cmdLint(opts, cfg); break;
     default:
@@ -846,6 +1042,9 @@ if (!LIB_ONLY) {
         'node <경로>/adr.mjs new --title "<제목>" [--status ...] [--dir <폴더>] [--template <파일>] [--index-name <이름>] [--status-vocab a,b,c] [--default-status <값>] [--root <루트>] [--anchor-roots a,b]',
         'node <경로>/adr.mjs supersede --old <N> --mode full --title "<제목>" [--dir <폴더>]',
         'node <경로>/adr.mjs supersede --old <N> --mode partial --clause "<조항>" --title "<제목>" [--dir <폴더>]',
+        'node <경로>/adr.mjs supersede --old <N> --clause "<조항>" --old <M> --clause "<조항>" --mode partial --title "<제목>"   # 대상 여럿(--clause 는 직전 --old 에 묶임), 새 ADR 은 하나',
+        'node <경로>/adr.mjs link --old <N> --new <M> --mode full [--dir <폴더>]',
+        'node <경로>/adr.mjs link --old <N> --new <M> --mode partial --clause "<조항>" [--dir <폴더>]   # 이미 있는 두 ADR 을 잇는다(새 파일·채번 없음)',
         'node <경로>/adr.mjs index [--check | --write] [--dir <폴더>] [--index-name <이름>]',
         'node <경로>/adr.mjs lint [--dir <폴더>] [--status-vocab a,b,c] [--anchor-roots a,b]',
       ] }, null, 2));
@@ -853,4 +1052,9 @@ if (!LIB_ONLY) {
   }
 }
 
-export { stampPartialStatusLine, partialStampRe, headEndIndex, extractStatusVocab, slugify };
+export {
+  stampPartialStatusLine, partialStampRe, headEndIndex, extractStatusVocab, slugify,
+  // supersede/link 공용 원시연산 + 인자 짝짓기 — 하네스가 함수 레벨로 직접 찌른다.
+  collectTargets, validateOldTarget, applyOldLinkage, newSideLink, fullSupersededBy,
+  hasAmendedByLink, hasAmendsLink, hasSupersedesLink,
+};
