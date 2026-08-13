@@ -1015,10 +1015,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-dashboard-command"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "engram-dashboard-core"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "engram-dashboard-command",
  "portable-pty",
  "regex",
  "serde",
@@ -1026,6 +1037,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
+ "ts-rs",
  "uuid",
  "windows 0.58.0",
 ]
@@ -2015,6 +2027,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a588916bfdfd92e71cacef98a63d9b1f0d74d6599980d11894290e7ddefffcf7"
 dependencies = [
  "cfb",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 
 > 상태: **개정 2판(2026-08-13).** 이 판은 **ADR-0134**(S20 구조 자체)와 **ADR-0135**(발견 경로 3건 — 등록 패킷에 모양 동봉 · 값 읽기 v1 포함 · tombstone 만료 없음)를 반영해, 그 셋에 걸려 있던 미확정·미결 항목을 닫는다.
 > 이력 — **개정 1판(2026-08-13).** 구판(2026-08-12)은 **선언을 `engram-dashboard-protocol` 한 곳에 모으는 안** 위에 세워졌고, 같은 세션 후반 대화에서 그 안이 뒤집혔다. 1판의 정본은 세션 인계 `.claude/handoff/latest.md` 「확정된 구조」·「세션 중 뒤집힌 판단 3건」이며, 두 절과 어긋나는 구판 문장은 전부 1판에서 개정했다.
+> 부분 정정 — **Step 1 실측(2026-08-14).** 구현이 끝난 칸을 실측값으로 고치고(고친 자리마다 `★개정(Step 1 실측 2026-08-14)★`), §4에 ⑨(릴리즈 패닉 정책 — 사용자 결정)를 더했다. **판을 올리지 않는다** — 설계가 뒤집힌 것이 아니라 회계와 서술이 틀렸던 자리라, 같은 표기 규약(구판 축약 보존)으로 그 칸에만 박았다.
 > **읽는 법:** 뒤집힌 자리는 `★개정★`으로 표시하고 **구판 문장을 줄여서 남긴다.** 결과만 남기면 다음 세션이 같은 안을 다시 꺼낸다.
 > 앵커: **ADR-0134(S20 구조) · ADR-0135(발견 경로 3건)** · ADR-0022(방향) · ADR-0055(프론트 레지스트리 골격) · ADR-0064(메뉴 = command id 참조) · ADR-0081(릴레이 형태 — 이 문서는 **확장**이지 번복이 아니다) · ADR-0132 결정 7(후속 순서) · ADR-0129(net 격리) · ADR-0035/0057(레이아웃 권위) · ADR-0003(코어 격리) · ADR-0012(테스트 격리) · CLAUDE.md 「LLM-우선 제어」.
 > ★개정★ **선행 조건이 사라졌다.** 구판: "선행 = ADR-0081 릴레이 구현. 이 TRD 밖. §6 Step 3 이후는 그 배선 위에 선다." → 현판: **그 배선을 이 TRD가 짓는다**(§6 Step 3). 확정 구조가 "새로 짓는 것은 둘뿐 — 공통 도구 crate + 데몬→셸 인바운드 수신"이라, 인바운드 수신기가 곧 ADR-0081 릴레이의 실물이기 때문이다. 실측 근거는 그대로 유효하다(재확인 2026-08-13): `RegisterRole`·`RelayUi`·`UiCommand`·`UiResult` `.rs` hit 0 · `src-tauri/src/daemon_client/`(`connection.rs`·`lifecycle.rs`·`mod.rs`·`protocol_state.rs`·`replay_flight.rs`·`tests.rs` — 6개. 구판은 `tests.rs`를 빼고 5개로 적었다)의 읽기 루프가 `Message::Text`를 `AgentEvent`로만 디코드한다(`src-tauri/src/daemon_client/connection.rs:805`, 이벤트 분기 `:1041~1072`).
@@ -107,7 +108,7 @@ pub fn make_table(manager: Arc<AgentManager>) -> CommandTable { /* … */ }
 
 매크로가 만드는 것은 넷이다.
 
-1. **인자·반환 struct** — `#[derive(Serialize, Deserialize, TS)] #[ts(export)]`가 붙는다. `messages.rs:12-13`의 기존 패턴 그대로다.
+1. **인자·반환 struct** — ★개정(Step 1 실측 2026-08-14)★ 매크로가 다는 것은 `#[derive(Serialize, Deserialize, TS)]`**까지**다. **구판(축약 보존):** "`#[derive(Serialize, Deserialize, TS)] #[ts(export)]`가 붙는다 · `messages.rs:12-13`의 기존 패턴 그대로다." → `#[ts(export)]`는 **안 단다**(실측: 매크로 출력·선언 어디에도 0건). 대신 `crates/engram-dashboard-core/tests/ts_export.rs`가 `export_all_to`로 **명시 export**한다(그 파일 헤더가 근거를 적고 있다). `#[ts(export)]`가 만드는 것은 ts-rs의 암묵 테스트이고, 거기 기댔다가 손관리 생성물이 된 `src-tauri/bindings/`의 실패 모드는 **§5가 정본**이다 — 되풀이하지 않으려고 protocol의 `tests/ts_export.rs`와 같은 형태로 export를 직접 부른다.
 2. **`CommandSpec` 정적 항목** — ★개정★ 구판은 `protocol` 안의 `COMMAND_CATALOG: &[CommandSpec]` 배열 하나에 넣었다. 현판은 **링커 수집**으로 모은다: 각 선언이 자기 crate에서 정적 항목을 등록하고, 링크된 실행 파일이 `command_specs()`로 자기 바이너리 안의 전량을 훑는다. → **바이너리마다 보이는 집합이 다르다**(데몬 = core+daemon 선언, 셸 = core+protocol+src-tauri 선언). 이것은 결함이 아니라 의도다 — 각 프로세스는 자기가 조립할 수 있는 것만 알면 된다.
    - **대가(보고 대상):** 링커 수집은 **새 외부 crate 1개**(`inventory` 계열)를 들인다. CLAUDE.md 「의존성(변경 시 보고)」에 걸리는 항목이다. 구판의 "새 crate·새 툴체인 0"은 여기서 깨진다 — 다만 깨지는 것은 **외부 의존 1개**이지 새 IDL 툴체인이 아니다.
 3. **JSON Schema 문자열** — 매크로가 필드 이름·타입을 구문에서 읽어 그대로 찍는다. ★2판 추가★ **이 문자열이 곧 등록 패킷의 `help`가 된다**(§3-7 · ADR-0135) — Rust 선언은 매크로가 자동으로 채우므로 손으로 적을 것이 없고, TypeScript 선언만 한 줄을 손으로 적는다.
@@ -525,6 +526,14 @@ pub struct CommandError {
 - **이 설계가 그것을 가능케 하는 이유:** `name`이 겉봉에 있기 때문이다(§3-2). 이름을 속에 감췄으면 명령 단위 인가가 원천 불가능하다.
 - **범위:** v1은 「어떤 자격이 어떤 명령을 부를 수 있나」의 정책 내용을 정하지 않는다 — 그건 ADR-0086(least-privilege) 계열의 별건이고 **보안 정책 판단이라 담당 결정 경로를 탄다.** v1이 확정하는 것은 **검사 지점이 호출마다라는 형태**뿐이다.
 
+### ⑨ 릴리즈 프로필의 패닉 정책 ★신설 — 사용자 결정 기록★
+
+**릴리즈 프로필의 `panic = "abort"`를 유지한다**(루트 `Cargo.toml:24-30`). 사용자 결정이고, 이 TRD는 재론하지 않는다.
+
+- **근거:** 패닉이 난 뒤의 프로세스 상태는 믿을 수 없다. 미심쩍은 상태로 살려 두고 이어 가는 것보다 **죽고 다시 오는 것**이 잃는 게 적다 — 세션 복원이 그 값을 치러 준다(CLAUDE.md 「세션 복원」 · ADR-0008/0082).
+- ★**귀결 — 릴리즈 빌드에서는 패닉 그물이 서지 않는다. 그것이 의도다.**★ 패닉 그물 둘 — `blocking_handler`가 두르는 `guard_panic`(`crates/engram-dashboard-command/src/route.rs:20`, 호출부 `table.rs:178`)과 `route()`가 두르는 `CatchUnwind`(`route.rs:60`) — 은 **개발·테스트 빌드에서만** 실효가 있다. 릴리즈에서는 핸들러 패닉이 오류 답장이 아니라 **프로세스 종료**가 된다. 그물을 「릴리즈에서도 답장 하나를 보장한다」로 읽지 말 것 — §4-⑤의 「한 `request_id`에 답장 하나」는 그 빌드에서 그물이 아니라 **호출자의 마감시각**(⑥)이 지킨다.
+- **그래서 규약이 하나 선다: 명령 핸들러는 터져서 죽지 않는다 — 오류를 값으로 돌려준다.** 그물은 실수를 덮는 안전망이지 오류 경로가 아니다. 릴리즈에서 그물이 없어지므로, 패닉을 오류 전달 수단으로 쓰면 그 빌드에서 **에이전트 하나의 잘못된 인자가 데몬을 내린다.** 리뷰 체크리스트가 이 항목을 본다(`.claude/skill-bindings/review.md` 「code 단계 게이트」).
+
 ---
 
 ## 5. 모듈 경계 ★개정 — 표 전면 교체★
@@ -534,7 +543,7 @@ pub struct CommandError {
 
 | crate / 폴더 | 이 설계가 넣는 것 |
 |---|---|
-| **`engram-dashboard-command`(신규)** — ★개정★ 구판 "이름 잠정" → 이름 확정(ADR-0134) | 선언 매크로 · `CommandSpec`/`command_specs()` · `CommandEnvelope`/`CommandReply`/`CommandError`/`ErrorCode` · ★2판★ **`CommandDecl`**(§3-1 — 등록 단위) · `CommandTable`/`CommandHandler`/`CommandLink`/`InboundCommands`/`Roster` · `route()`. **워크스페이스 의존 0 · 명령 0개.** 외부 의존 = serde + 링커 수집 crate. ★오해 방지★ 아래 protocol 행이 **이 crate를 의존한다** — 그건 protocol의 의존이지 **이 crate의 의존이 아니다.** 화살표는 `protocol → command` 한 방향뿐이라 「의존 0」은 깨지지 않는다 |
+| **`engram-dashboard-command`(신규)** — ★개정★ 구판 "이름 잠정" → 이름 확정(ADR-0134) | 선언 매크로 · `CommandSpec`/`command_specs()` · `CommandEnvelope`/`CommandReply`/`CommandError`/`ErrorCode` · ★2판★ **`CommandDecl`**(§3-1 — 등록 단위) · `CommandTable`/`CommandHandler`/`CommandLink`/`InboundCommands`/`Roster` · `route()`. **워크스페이스 의존 0 · 명령 0개.** ★개정(Step 1 실측 2026-08-14)★ 외부 의존은 **넷**(`serde`·`serde_json`·`inventory`·`uuid`)이다. 구판(축약 보존): "외부 의존 = serde + 링커 수집 crate" — 둘로 줄여 적었다. 회계 전체는 아래 게이트 표의 「코어 워크스페이스 의존 0」 칸에 모았다. ★오해 방지★ 아래 protocol 행이 **이 crate를 의존한다** — 그건 protocol의 의존이지 **이 crate의 의존이 아니다.** 화살표는 `protocol → command` 한 방향뿐이라 「의존 0」은 깨지지 않는다 |
 | `engram-dashboard-core` | ★개정★ 구판 "변경 없음" → **`agent.*` 선언 + `make_table(manager)`.** 그리고 **이 crate의 첫 워크스페이스 의존**이 생긴다(오늘 0개 — 실측). 받는 것은 도구 crate 하나뿐이고 `protocol`은 여전히 안 본다 |
 | `engram-dashboard-daemon` | `mail.*` 선언 + `make_table` · 주인 명부(토큰 → 이름, tombstone 포함 — ★2판★ 각 이름의 `help` 문자열을 **불투명하게** 보관한다. 파싱·검증·분기 금지, 자료형은 `String` 고정: §3-7 하드 제약) · 라우팅 표(ADR-0081 형태) · `connection_core.rs:582` `dispatch`(sink 인자 `:586`)에 새 variant arm |
 | `src-tauri` | `window`/`tab`/`slot` 선언 + `make_table` · **ADR-0081이 요구한 공유 적용 서비스**(오늘 없음) · `daemon_client` 인바운드 수신기(오늘 없음 — `connection.rs:805`에 `Request` 갈래 추가) · 웹뷰 몫 대리 등록 |
@@ -547,14 +556,14 @@ pub struct CommandError {
 
 | 게이트 (CLAUDE.md · `.github/workflows/ci.yml`) | 영향 |
 |---|---|
-| 코어 tauri import 0줄 (`ci.yml:239`) | **없음.** 도구 crate에 tauri가 없다. 셸·화면 명령의 *본문*은 코어 밖이고 코어가 참조하지 않는다. (ADR-0003) |
-| **코어 워크스페이스 의존 0** | ★**0 → 1로 바뀐다.**★ 실측: `crates/engram-dashboard-core/Cargo.toml`에 `path =` 0줄(2026-08-13). 도구 crate 하나가 들어온다. **이 수치를 지키는 CI 게이트는 오늘 없다**(있는 것은 tauri import 게이트뿐) — 즉 게이트가 깨지지는 않지만, 「코어는 아무것도 안 본다」는 문장이 「코어는 도구 하나만 본다」로 바뀐다. 이 완화가 개정의 대가이고, `protocol`을 보게 하는 것(=wire 타입까지 유입)보다 작다는 것이 도구 crate를 판 이유다 |
-| 메시징 커널 워크스페이스 crate 참조 0줄 (`ci.yml:252`) | ★**게이트에 구멍이 생긴다.**★ 정규식이 `engram_dashboard_(core\|daemon\|protocol\|discovery)`라 **신규 crate 이름이 알파벳에 없다.** 메시징이 도구 crate를 쓰게 돼도 게이트가 안 잡는다. **조치: 정규식에 새 이름을 더한다**(ADR-0110 불변식을 지키려면 필수). 메시징엔 net 같은 의존 상한(`cargo tree`) 게이트가 없어 정규식이 유일한 벽이다 |
-| net 소스 참조 0줄 (`ci.yml:265`, `daemon\|messaging\|discovery`) | **정규식은 같은 구멍이 있으나 실질 영향 없음** — net의 의존 상한 게이트(아래)가 새 간선을 잡는다 |
-| **net — core 심볼 allowlist 정확히 2줄** (`ci.yml:280`) | ★**바뀌지 않는다.**★ 허용된 둘은 `agent::platform::pid_alive_with_start_time`·`current_process_start_time`(portfile stale 판정 전용). 이 설계는 core 심볼을 net에서 새로 쓰지 않는다 |
-| **net — 직접 워크스페이스 의존 정확히 3줄** (`ci.yml:304`) | ★**바뀌지 않는다 — 단 근거가 바뀐다.**★ 구판 근거: "카탈로그가 사는 곳이 **이미 그 3에 든 protocol**이라 새 의존이 생기지 않는다." 현판 근거: **net은 명령을 선언하지도 실행하지도 않아 도구 crate를 볼 일이 없다.** 상한 3(자기 + core + protocol)은 그대로다. ★2판 확인★ `protocol`이 도구 crate를 의존하게 되지만(위 §5 protocol 행) **이 게이트는 `--depth 1`이라 net의 *직접* 의존만 센다**(`ci.yml`의 `cargo tree --locked -p engram-dashboard-net --depth 1 …` — 실측 확인 2026-08-13). 도구 crate는 net에게 **깊이 2**라 3줄에 안 잡힌다 |
-| net — auth 어휘 재유입 금지 (`ci.yml:325`) | **없음.** 봉투는 `AgentCommand::Command`/`AgentEvent::CommandReply` variant로 실려(§3-2) net에겐 **불투명 텍스트 프레임**이다 — `ws.rs:553`이 `handler.on_text(...)`로 넘길 뿐 안을 안 본다 |
-| **생성물 sync 게이트** (`ci.yml:124-131`) | ★**그대로 못 쓴다 — 구판의 「새 게이트 0」이 여기서 깨진다.**★ 근거 둘: ㉠ 게이트가 보는 경로가 `crates/engram-dashboard-protocol/bindings/` **하나**다. `core/bindings/`(신설)와 `src-tauri/bindings/`(이미 8개 존재)는 **오늘 아무도 안 본다.** ㉡ 워크스페이스 테스트는 `--exclude engram-dashboard`(`ci.yml:96-99`)라 **src-tauri의 ts-rs export가 CI에서 돌지 않는다.** 즉 셸 소유 선언은 기존 파생 게이트에 그냥 얹히지 않는다. ★실측으로 닫힘(2026-08-13)★ — 아래 문단: `src-tauri/bindings/`는 **오늘 실질적으로 손으로 관리되는 생성물**이다 |
+| 코어 tauri import 0줄 (`ci.yml:254`) | **없음.** 도구 crate에 tauri가 없다. 셸·화면 명령의 *본문*은 코어 밖이고 코어가 참조하지 않는다. (ADR-0003) |
+| **코어 워크스페이스 의존 0** | ★**0 → 1로 바뀐다.**★ 실측: `crates/engram-dashboard-core/Cargo.toml`에 `path =` 0줄(2026-08-13). 도구 crate 하나가 들어온다. **이 수치를 지키는 CI 게이트는 오늘 없다**(있는 것은 tauri import 게이트뿐) — 즉 게이트가 깨지지는 않지만, 「코어는 아무것도 안 본다」는 문장이 「코어는 도구 하나만 본다」로 바뀐다. 이 완화가 개정의 대가이고, `protocol`을 보게 하는 것(=wire 타입까지 유입)보다 작다는 것이 도구 crate를 판 이유다.<br>★**개정(Step 1 실측 2026-08-14) — 대가는 이 한 줄이 아니었다**★ 구판(축약 보존): 이 칸은 「0 → 1」만 적고 "이 완화가 개정의 대가"로 닫았다. 실측하니 셋이 더 있다. ㉠ **`core`가 `ts-rs`를 `[dependencies]`로 받는다** — 선언 매크로가 `TS` derive를 달아야 해서이고, dev가 아니라 **production 의존**이다(`crates/engram-dashboard-core/Cargo.toml`). ㉡ `command`와 그것이 데려온 `inventory`는 `core`를 타고 **데몬·셸 릴리즈 바이너리에 함께 링크된다**(`cargo tree -i`로 확인 — `core` → `daemon`/`net`/`discovery`/`src-tauri`). ㉢ 외부 의존 수가 표 첫 행의 「serde + 링커 수집 crate」보다 둘 많다(위 정정). **단 `ts-rs`는 이번에 처음 들어온 것이 아니다** — `protocol`과 `src-tauri`가 이미 `ts-rs = "10"`을 production으로 쓰고 있어 릴리즈 그래프에 **새로 든 crate는 `inventory` 하나**다(`Cargo.lock` 신규 패키지 = `inventory` + 워크스페이스 멤버 자신, 둘뿐 — 실측). 즉 늘어난 것은 **바이너리 크기·컴파일 시간이 아니라 의존 간선**이 주고, `core`가 이제 TS 생성 도구를 production 그래프에 안고 있다는 사실이 남는다 |
+| 메시징 커널 워크스페이스 crate 참조 0줄 (`ci.yml:269`) | ★**게이트에 구멍이 생긴다.**★ 정규식이 `engram_dashboard_(core\|daemon\|protocol\|discovery)`라 **신규 crate 이름이 알파벳에 없다.** 메시징이 도구 crate를 쓰게 돼도 게이트가 안 잡는다. **조치: 정규식에 새 이름을 더한다**(ADR-0110 불변식을 지키려면 필수). 메시징엔 net 같은 의존 상한(`cargo tree`) 게이트가 없어 정규식이 유일한 벽이다 |
+| net 소스 참조 0줄 (`ci.yml:340`, `daemon\|messaging\|discovery`) | **정규식은 같은 구멍이 있으나 실질 영향 없음** — net의 의존 상한 게이트(아래)가 새 간선을 잡는다 |
+| **net — core 심볼 allowlist 정확히 2줄** (`ci.yml:355`) | ★**바뀌지 않는다.**★ 허용된 둘은 `agent::platform::pid_alive_with_start_time`·`current_process_start_time`(portfile stale 판정 전용). 이 설계는 core 심볼을 net에서 새로 쓰지 않는다 |
+| **net — 직접 워크스페이스 의존 정확히 3줄** (`ci.yml:379`) | ★**바뀌지 않는다 — 단 근거가 바뀐다.**★ 구판 근거: "카탈로그가 사는 곳이 **이미 그 3에 든 protocol**이라 새 의존이 생기지 않는다." 현판 근거: **net은 명령을 선언하지도 실행하지도 않아 도구 crate를 볼 일이 없다.** 상한 3(자기 + core + protocol)은 그대로다. ★2판 확인★ `protocol`이 도구 crate를 의존하게 되지만(위 §5 protocol 행) **이 게이트는 `--depth 1`이라 net의 *직접* 의존만 센다**(`ci.yml`의 `cargo tree --locked -p engram-dashboard-net --depth 1 …` — 실측 확인 2026-08-13). 도구 crate는 net에게 **깊이 2**라 3줄에 안 잡힌다 |
+| net — auth 어휘 재유입 금지 (`ci.yml:400`) | **없음.** 봉투는 `AgentCommand::Command`/`AgentEvent::CommandReply` variant로 실려(§3-2) net에겐 **불투명 텍스트 프레임**이다 — `ws.rs:553`이 `handler.on_text(...)`로 넘길 뿐 안을 안 본다 |
+| **생성물 sync 게이트** (`ci.yml:142`) | ★**그대로 못 쓴다 — 구판의 「새 게이트 0」이 여기서 깨진다.**★ 근거 둘: ㉠ 게이트가 보는 경로가 `crates/engram-dashboard-protocol/bindings/` **하나**다. `core/bindings/`(신설)와 `src-tauri/bindings/`(이미 8개 존재)는 **오늘 아무도 안 본다.** ㉡ 워크스페이스 테스트는 `--exclude engram-dashboard`(`ci.yml:96-99`)라 **src-tauri의 ts-rs export가 CI에서 돌지 않는다.** 즉 셸 소유 선언은 기존 파생 게이트에 그냥 얹히지 않는다. ★개정(Step 1 실측 2026-08-14)★ **㉠의 절반은 닫혔다** — Step 1이 이 게이트를 `core/bindings/`까지 넓히고 `git add -N -f`로 신규 미커밋 파일도 잡게 했다(위 앵커가 그 게이트다). 남은 것은 `src-tauri/bindings/`이고 ㉡은 그대로다. ★실측으로 닫힘(2026-08-13)★ — 아래 문단: `src-tauri/bindings/`는 **오늘 실질적으로 손으로 관리되는 생성물**이다 |
 
 ★**net 게이트 둘이 안 바뀌는 이유 한 줄**★: **이 설계는 네트워크 행에 아무 개념도 추가하지 않는다.** 명령 어휘는 선언처(core·daemon·src-tauri·웹뷰)에서 시작해 거기서 끝나고, net은 그 사이를 나르는 바이트 통로로만 참여한다(ADR-0129의 계층 분리 그대로).
 

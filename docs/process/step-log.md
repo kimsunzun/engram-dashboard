@@ -1662,7 +1662,36 @@
 - **★리뷰가 잡은 것 — 두 렌즈가 다른 층을 봤다★:** cross-family blind(cut-advocate) **FIX 11건** + doc-aware(load-bearing 수호) **FIX 10건**. 두 판정이 일치했고 **정면 대립은 없었다.** 이 리뷰로 잡힌 것 = **계약 모순 3건**(등록 명단 함수의 반환형 · 가정 A의 옛 문장 잔존 · 웹뷰 `help` 경로 부재)과 **도장 누락 2건**.
 - **★소스 코드는 한 줄도 안 바뀌었다 — 문서 전용★.** 따라서 빌드·테스트 게이트는 돌리지 않았다(범위 분담 = `/qa` 바인딩). 구현 착수는 다음 스텝.
 
+## S20.3 Step 1 — 명령 버스 도구 crate + 첫 입주자(`agent.*`), 배선 0 (2026-08-14, `wt2`, 자율 세션) · `/review code` 5라운드(doc-aware 불변식 breaker + 타계열 blind, 매 라운드 교차 판정) · `/qa standard` PASS · **미커밋**
+
+- **무엇:** TRD §6 Step 1 구현. 신규 crate `crates/engram-dashboard-command/` — 선언 매크로·봉투·오류 어휘·표·명부·라우팅(구성물 목록의 정본은 그 crate `src/lib.rs` 헤더). **워크스페이스 crate 의존 0.** 첫 입주자 = `crates/engram-dashboard-core/src/agent/commands.rs` 신설(`agent.*` 5동사 선언 + `make_table` + 테스트 하네스). 신규 테스트 3개(`core/tests/{ts_export,command_declarations,command_alphabet}.rs`) + 신규 생성물 `crates/engram-dashboard-core/bindings/`.
+- **★배선은 0이다 — 설계다★:** 이 표로 라우팅하는 곳이 아직 없다(TRD §6 Step 1). "미완성"으로 읽고 Step 2를 앞당기지 말 것.
+- **곁다리 변경:** 루트 `Cargo.toml`(멤버 추가) · `Cargo.lock` · `core/Cargo.toml` · `core/src/agent/mod.rs`(`pub mod` 한 줄) · `daemon/src/control/agent.rs`(새 에이전트 출력 형식 상수를 core로 이관 + import 교체 + TODO 한 줄 — **동작 무변경 확인**) · `.github/workflows/ci.yml`.
+- **CI 게이트 3건 신설 + 2건 확장:** `cargo test -p engram-dashboard-command` · 메시징 의존 상한 `cargo tree` · 도구 crate 의존 상한 `cargo tree` · 메시징 소스 정규식 알파벳에 `command` 추가 · **생성물 sync 게이트가 `core/bindings/`까지 보고 `git add -N -f`로 신규 미커밋 파일도 잡는다**(옛 게이트는 untracked를 못 봐 초록으로 지나갔다. `SlotContent.ts` 사건과 같은 실패 모드).
+- **검증(실제로 돌려 통과한 것):** `cargo build` · `cargo test --workspace --exclude engram-dashboard`(**0 실패**) · `cargo fmt --check` · 코어 `use tauri` 0줄 · 메시징 워크스페이스 참조 0줄 · `cargo tree` 상한 = `command`·`messaging` **각 1줄** · ADR-0130 재론 트리거 0줄(보류 유지) · protocol 바인딩 sync · discovery async 반입 0 · `npx tsc --noEmit` · `npm test` **634 통과**.
+- **★안 한 것★:** GUI/CDP 실측(**배선이 0이라 이번 강도의 대상이 아니다** — 화면에 닿는 변경이 없다) · 릴리즈 프로필 빌드 재현 · **CI 실제 실행**(미커밋이라 push 전이다 — 위 게이트는 전부 로컬 등가물로만 확인했다).
+- **리뷰 5라운드에서 적출됐으나 Step 1 범위 밖으로 미룬 것은 아래 「다음」에 적립했다 — 거기가 정본이다.** 그중 하나(여분 인자 방어)는 **Step 2 착수를 막는 결정**이다.
+- **코드 주석에 반영할 것(그 파일을 다음에 열 때):** ① 릴리즈 `panic = "abort"`가 **의도**라는 사실과 그 근거가 `crates/engram-dashboard-command/src/lib.rs:29`에 없다 — 거긴 "그물이 실효가 없다"는 현상만 적혀 있고, 결정·근거의 정본은 TRD §4-⑨다 ② 같은 헤더의 불변식 1(`:8-9`)이 적은 게이트(`rg "path\s*=" Cargo.toml`)와 CI가 실제로 세운 게이트(`cargo tree` 상한, `ci.yml:321`)가 **다르다** — CI가 텍스트 정규식을 의도적으로 안 쓴 것이라 헤더 쪽이 뒤처졌다.
+
 ## 다음 (미진행)
+
+**[S20 Step 1 리뷰 적립 2026-08-14 — 통합 command 버스] 적대 리뷰 5라운드가 잡았으나 Step 1 범위 밖으로 미룬 것.**
+
+- **★㉠ Step 2 착수 전 사용자 결정 필요 — 동사 match를 표 조회로 바꾸는 순간 「동작 불변」 약속이 깨진다★:** 데몬 입구의 여분 인자 방어(`crates/engram-dashboard-daemon/src/control/agent.rs:243` `guard` · `:284` `reject_unknown_fields`)에 **새 표 쪽 대응물이 없고**, TRD §4-③(`docs/process/S20-command-bus/trd.md:450`)은 어떤 struct에도 `deny_unknown_fields`를 금지한다. 지금 `engram agent new --cwd C:/x --target alpha`는 반려된다("new does not use: target"). 표를 타면 `target`을 **무시하고** 에이전트를 만든 뒤 **성공으로 답한다** — 인자가 조용히 사라지는, 이 CLI가 계속 막아 온 부류다. 즉 TRD §6 Step 2의 「동작 불변」(`trd.md:607`)이 적힌 대로는 못 선다. **리뷰어 관찰:** `CommandSpec`이 이미 선언된 속성 집합을 들고 있으므로(`crates/engram-dashboard-command/src/spec.rs:34-35`) 동사별 guard를 **거기서 파생**할 수 있다 — 버릴 필요가 없다. **어느 쪽으로 갈지는 미정.**
+- **㉡ 기록만 하고 안 고친 결함 — ★대부분은 이 목록이 유일한 기록이다. 「코드 주석에 있으니 중복」으로 읽고 지우지 말 것★:** 코드 주석이 그 결함을 실제로 덮는 자리는 **넷뿐이다**(`coerce.rs:29-33` · `route.rs:98-100` · `roster.rs:129-132` · `macros.rs:55-57` — 실측 2026-08-14). 나머지는 주석이 **아예 없거나**(`route.rs`의 `panic_detail`) 있어도 **다른 것을 설명한다**(`error.rs`는 `deny_unknown_fields`만 · `spec.rs`는 카탈로그 **파일**만 · `route.rs:76`은 재폴링 이야기 · `ts_export.rs`는 오히려 그 실패 모드가 없어진 것처럼 읽힌다). 즉 봉인 안 된 것들은 **여기가 지워지면 기록이 사라진다.**
+  - `crates/engram-dashboard-command/src/coerce.rs:29` — `[2^52, 2^53)` 안의 소수부 있는 값은 조정이 보기 **전에** JSON→f64 파싱이 이미 망가뜨린다. 어떤 문턱을 골라도 「호출자가 소수를 보냈다」를 되살릴 수 없다.
+  - `crates/engram-dashboard-command/src/coerce.rs:42` — 객체 층의 `anyOf` 갈래를 **따로** 훑어, `number` 갈래였으면 거부됐을 값을 `integer` 갈래가 접을 수 있다. 오늘 매크로 출력으로는 도달 불가.
+  - `crates/engram-dashboard-command/src/coerce.rs:31-33` — 스키마 순회가 아는 키워드는 `properties`·`items`·`anyOf`·`type` 넷뿐이다(`$ref`·`allOf`·`oneOf`·`prefixItems` 미추적). 오늘 매크로 출력으로는 도달 불가.
+  - `crates/engram-dashboard-command/src/route.rs:98-100` — 라우팅 future를 drop하면 왕복이 **통보 없이** 버려진다(상대 홉은 모른 채 남는다). 백스톱 = Step 2의 마감시각 sweep.
+  - `crates/engram-dashboard-command/src/route.rs:82` — `CatchUnwind`의 접기 함수가 **그물 밖에서** 돈다. 지금 두 접기는 문자열만 만들지만, 일하는 접기를 넣으면 무방비로 터진다.
+  - `crates/engram-dashboard-command/src/route.rs:29`·`:41` — 패닉 페이로드 **원문**이 그대로 호출자 메시지에 실린다(로컬 핸들러 = `INTERNAL`, 전달 = `OUTCOME_UNKNOWN`). 테스트 둘(`:367`·`:415`)이 그 문구를 **진단 목적의 의도**로 못 박았으므로, 바꾸는 것은 수정이 아니라 **결정**이다.
+  - `crates/engram-dashboard-command/src/roster.rs:131-132` — 주인당 상한이 **연결마다 새로 나는** 주인 토큰에 걸려, 재연결한 클라이언트는 몫이 매번 0에서 시작한다. 그 축을 막는 것은 전체 상한 하나뿐. 안정적 주인 신원이 필요하고 그건 Step 2의 wire 질문이다.
+  - `crates/engram-dashboard-command/src/error.rs:281` — 상대가 `"code": null`을 보내면 `CommandReply` **전체**가 디코드 실패해 상관 키까지 잃는다 → 호출자는 `OUTCOME_UNKNOWN`을 보는 대신 마감시각까지 매달린다. **Step 2의 상관 층이 「답장 디코드 실패 → 그 pending id를 `OUTCOME_UNKNOWN`」으로 바꿔야 한다.**
+  - `crates/engram-dashboard-command/src/macros.rs:57` — `usize`·`isize`가 64비트 범위를 광고한다(실무상 Windows x64 전용이라 지금은 참).
+  - `crates/engram-dashboard-command/src/spec.rs:281` — `$schema` 방언 선언이 카탈로그 **파일**에만 붙고 `help` 문자열(`:142` — LLM이 실제로 읽는 표면)에는 없다. **리뷰어 방향:** 패킷마다 키를 더하지 말고 **TRD에 계약 상수로 못 박는다.** 미반영.
+  - `crates/engram-dashboard-core/tests/ts_export.rs:12` — `CATALOG_VERSION`을 여전히 **단일 모듈**에서 가져온다. core에 선언 블록이 하나 더 생기면 파생 파일이 **첫 블록의 세대**로 찍힌다(같은 파일이 명단 쪽에서는 이미 링커 수집으로 그 실패 모드를 없앴다 — 세대만 남았다). 블록별 카탈로그 설계가 필요.
+  - `crates/engram-dashboard-command/src/roster.rs:102` — 디코드된 등록 패킷의 **원소 개수** 상한은 `Roster`가 아니라 `net`의 프레임 크기 제한이 질 몫이다.
+- **㉢ 선재 CI 게이트 회피 경로 — 이번 변경이 만든 것이 아니고 범위 밖이다.** 리포를 고치는 사람이 곧 게이트를 피할 수 있는 자리라 한 묶음으로 남긴다: 코어 `use tauri` 정규식이 `tauri::` 경로 한정 use와 `include!` 생성 코드를 못 본다(`.github/workflows/ci.yml:258`) · 메시징 격리 게이트 둘과 상한 게이트 둘이 워크스페이스 crate를 **`engram-dashboard` 이름 접두**로 식별해 다른 이름의 멤버는 보이지 않는다(`:269`·`:296`·`:321`·`:379`) · net core 심볼 allowlist가 중괄호 import를 놓친다(`:359`) · auth 어휘 게이트가 **커밋된 `src/` 텍스트만** 훑는다(`:400`) · discovery 게이트가 async 런타임을 **범주**가 아니라 패키지 이름 넷으로 금지한다(`:427`) · 버전 게이트가 중복 JSON 키의 **첫 값만** 읽는다(`:606`) · 태그 검사와 `gh release create` 사이에 발행 TOCTOU 창이 있다(`:771`·`:913` — 워크플로가 이미 자인한다).
 
 **[사용자 방향 2026-08-12 — 통합 command 버스: ADR-0022를 제안에서 확정으로 올리는 작업] 사람과 LLM이 같은 명령을 조합해 쏘고, 분기는 "누가 조합하느냐"까지이며 그 뒤는 합류한다. 명령은 하나다.** 사용자가 대화로 도출한 구도이고 **ADR-0022(제안, 2026-06-17 방향만 고정)와 같은 곳을 가리킨다** — 그 "나중"의 형태를 잡는 것이 이 항목이다.
 - **핵심 형태:** 명령 이름·인자를 **Rust 한 곳에 선언**하고 TypeScript 쪽을 **자동 생성**한다. 새 체계가 아니다 — wire 정의가 이미 그 방식으로 돌고(생성물 23개) 어긋나면 게이트가 잡는다. 그 기계를 명령 어휘에 한 번 더 적용하는 것.

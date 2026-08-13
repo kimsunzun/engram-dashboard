@@ -28,10 +28,9 @@
 
 use std::sync::Arc;
 
+use engram_dashboard_core::agent::commands::NEW_AGENT_OUTPUT_FORMAT;
 use engram_dashboard_core::agent::manager::{AgentManager, RenameOutcome, RosterEntry};
-use engram_dashboard_core::agent::profile::{
-    AgentCommand, AgentProfile, ClaudeOutputFormat, SpawnMode,
-};
+use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
 use engram_dashboard_core::agent::types::{
     AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_EXE_NAME,
     CLI_GROUP_AGENT, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
@@ -176,6 +175,8 @@ pub enum TargetResolution {
 ///   `tests/control_agent.rs` 의 교차 대조가 (a) 다듬을 것 없는 토큰에서의 규칙 일치와 (b) 이 한 축의
 ///   불일치를 **둘 다** 단언한다(우편 입구를 실제로 태워서).
 // ADR-0132
+// TODO(S20 Step 2 — ADR-0134): core `agent::commands::resolve` 가 같은 규칙의 사본이다. 이 파일의 동사
+//   match 가 그 표 조회로 바뀔 때 **여기를** 지운다(그때까지는 이 입구가 정본이라 옮기지 않는다).
 pub fn resolve_target(roster: &[RosterEntry], token: &str) -> TargetResolution {
     if let Some(e) = roster.iter().find(|e| e.id.to_string() == token) {
         return TargetResolution::Found(e.id);
@@ -188,13 +189,9 @@ pub fn resolve_target(roster: &[RosterEntry], token: &str) -> TargetResolution {
     }
 }
 
-/// 새로 만드는 에이전트의 백엔드(내부 결정 — 사용자 보고 대상).
-///
-/// ★왜 StreamJson 인가★: 이 계열을 부르는 주체가 LLM 이고, 프론트에서 **LLM 이 부르는** 생성 커맨드
-///   (`agentlist.createAgent`)의 기본값이 이미 StreamJson 이다(ADR-0078). 두 입구가 같은 동사에 다른 기본을
-///   주면 "만들었는데 화면이 다르다" 가 된다. 형식을 고르는 플래그는 두지 않았다 — 지금 표면에 필요한 축이
-///   아니고, 필요해지면 플래그 하나를 더하는 무파괴 확장이다.
-const NEW_AGENT_OUTPUT_FORMAT: ClaudeOutputFormat = ClaudeOutputFormat::StreamJson;
+// 새로 만드는 에이전트의 백엔드 출력 형식은 **core 가 소유한다**(`agent::commands`) — 두 입구가 같은
+//   동사에 다른 기본을 주면 "만들었는데 화면이 다르다" 가 되는데, 값이 두 집에 있으면 그 어긋남을
+//   아무도 못 잡는다. 형식을 고르는 플래그는 두지 않았다(필요해지면 플래그 하나를 더하는 무파괴 확장).
 
 /// 제어 동사 공통 핸들러 — HTTP 어댑터가 유일하게 부르는 진입점.
 ///
