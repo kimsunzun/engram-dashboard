@@ -69,7 +69,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0019](0019-세션-종료-분류-프로필-disposition.md) | 세션 종료 분류 — disposition(유저kill·정상=삭제 / 크래시=예약 / 셧다운=유지), 런타임 자동재시작 폐기 | 확정 (부분 폐기 by ADR-0083: 유저 kill·정상 exit(code0) → 프로필 삭제 조항 폐지: 모든 종료는 프로필 시체 보존(KeepDisableAutoRestore), 자동 삭제 없음 — 삭제는 명시적 사용자 명령으로만 / ADR-0084: apply_disposition epoch-guard 추가 — stale reap 이 재활성화된 산 세션을 auto_restore=false 로 강등 못 하게(reaped msg.epoch 가 현재 세션 epoch 와 일치할 때만 적용). 재활성화(resume)는 맵 교체이므로 epoch bump(ADR-0007 재확인).) |
 | [0020](0020-클라이언트-경로-통합-단일-프로토콜.md) | 클라이언트/백엔드 경로 통합 — 단일 프로토콜 + transport-중립 dispatch core(embedded/daemon carrier만 교체) | 확정 (부분 폐기 by ADR-0037: 결정3: 프로토콜 의미론 위치 — JS ProtocolClient → Rust(DaemonClient/protocol_state)) |
 | [0021](0021-데몬-수명-on-demand-무재시작.md) | 데몬 수명 — on-demand spawn + 자동재시작 없음(tmux/wezterm 모델), ensure(명시)/reconnect(attach-only) 분리 | 확정 |
-| [0022](0022-통합-command-registry-palette-키바인딩.md) | 통합 command registry — palette+키바인딩+LLM+메뉴/트레이 단일 출처(VS Code 모델, 추가 여파 0 지향) | 제안 |
+| [0022](0022-통합-command-registry-palette-키바인딩.md) | 통합 command registry — palette+키바인딩+LLM+메뉴/트레이 단일 출처(VS Code 모델, 추가 여파 0 지향) | 제안 (부분 폐기 by ADR-0134: 미해결 forks 3건 소진) |
 | [0023](0023-트레이-프로세스-토폴로지.md) | 트레이/프로세스 토폴로지 — 순수-Rust tray-host + detached 데몬 + UI(X=hide), 3프로세스 | 폐기 (Superseded by ADR-0026) |
 | [0024](0024-데몬-소유-생사-종료-데이터위치.md) | 데몬 소유·생사·종료·데이터 위치 — self-owned detached + WS/lockfile liveness + 재입양 + `.engram-data/` | 확정 (C3은 0025가 폐기 · 데이터위치/공유는 0027이 폐기) |
 | [0025](0025-UI-부팅-데몬-ensure-유지.md) | UI 부팅 1회 데몬 ensure 유지 — ADR-0024 C3("UI ensure 금지") 폐기 | 확정 |
@@ -128,7 +128,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
 | [0079](0079-jsonrichslot-모드-resume-시-대화-스크롤백-복원-데몬이-claude-jsonl-transcript를-읽어-history-프레임으로-전달.md) | JSON(RichSlot) 모드 resume 시 대화 스크롤백 복원 — 데몬이 Claude `.jsonl`을 읽어 OutputCore 버퍼에 seed(단일 소스 · pump 전) | 확정 |
 | [0080](0080-llm-제어-표면-아키텍처-bashengram-ctl데몬-ws백엔드-직행-데몬-opaque-relay앱-viewmanagerui.md) | LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI) | 폐기 (Superseded by ADR-0085) |
-| [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 |
+| [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0134: 결정 1과 2 대체) |
 | [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 |
 | [0083](0083-종료-시-프로필-자동-삭제-폐지-유저-kill정상-exit-포함-모든-종료는-시체-보존-삭제는-명시적-사용자-명령으로만.md) | 종료 시 프로필 자동 삭제 폐지 — 유저 kill·정상 exit 포함 모든 종료는 시체 보존, 삭제는 명시적 사용자 명령으로만 | 확정 |
 | [0084](0084-재활성화resume-epoch-bump-apply-disposition-epoch-guard-stale-reap-산-세션-강등프론트-재구독-누락-차단.md) | 재활성화(resume) epoch bump + apply_disposition epoch-guard — stale reap 산-세션 강등·프론트 재구독 누락 차단 | 확정 |
@@ -181,3 +181,5 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0131](0131-CI-도입-windows-단일-러너-검증-전용-릴리즈는-태그-트리거.md) | CI 도입 — windows 단일 러너 · 검증 전용 · 릴리즈는 태그 트리거 | 확정 |
 | [0132](0132-제어-평면-cli-단일-실행파일에-우편과-제어를-담고-우편-격리를-데몬-거절로-옮긴다.md) | 제어 평면 CLI — 단일 실행파일에 우편과 제어를 담고 우편 격리를 데몬 거절로 옮긴다 | 확정 |
 | [0133](0133-우편-노출은-스폰-시-주입한-표식으로-가리고-거절-응답은-대안-채널을-알리지-않는다.md) | 우편 노출은 스폰 시 주입한 표식으로 가리고 거절 응답은 대안 채널을 알리지 않는다 | 확정 |
+| [0134](0134-통합-command-버스-선언은-생산자-옆-배달은-홉마다-같은-3단계-명부는-런타임-등록만.md) | 통합 command 버스 — 선언은 생산자 옆, 배달은 홉마다 같은 3단계, 명부는 런타임 등록만 | 확정 |
+| [0135](0135-명령-발견-인자와-반환-모양을-등록-패킷에-불투명-문자열로-동봉하고-조회를-v1에-포함한다.md) | 명령 발견 — 인자와 반환 모양을 등록 패킷에 불투명 문자열로 동봉하고 조회를 v1에 포함한다 | 확정 |
