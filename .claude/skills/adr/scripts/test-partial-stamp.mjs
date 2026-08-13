@@ -200,7 +200,9 @@ test('5. index --write 2회: 멱등 + 도장 생존 + 셀 파생 정상', () => 
 
   assert.ok(statusLineOf(A_OLD).includes('· 부분 폐기 by ADR-0002 (조항 A)'), '도장 소실');
   const row = after1.split(/\r?\n/).find((l) => l.startsWith('| [0001]'));
-  assert.ok(row && row.includes('확정 (부분 폐기 by ADR-0002: 조항 A)'), `셀 파생 이상: ${row}`);
+  // 케이스 1~3 으로 개정 3건이 누적된 상태 → deriveIndexStatus 가 " / " 로 *전부* 잇는다.
+  //   (종전 이 단언은 첫 건만 기대했다 — 다중 조항 합성이 들어오기 전 기대치라 stale 이었다. 1건일 때 출력은 여전히 종전과 동일.)
+  assert.ok(row && row.includes('확정 (부분 폐기 by ADR-0002: 조항 A / ADR-0003: 조항 B / ADR-0004: 조항 C)'), `셀 파생 이상: ${row}`);
   assert.equal(run(['index', '--check', ...A_FLAGS]).json.clean, true);
 });
 
@@ -491,13 +493,26 @@ test('15. F3 전각 괄호（）: 깊이 계산·조항 균형 검사 모두 인
   assert.match(bad.json.error, /괄호가 안 맞음/);
 });
 
-test('16. F4 인덱스 조항 잘림: 파생 출력은 그대로 + 경고로 노출 + 재실행 멱등', () => {
+test('16. F4 인덱스 조항 잘림: 균형 잡힌 괄호는 온전히 캡처 + 진짜 불균형만 경고 + 재실행 멱등', () => {
   const L = mkFixture('L1', { '0001-옛-결정.md': DASH_ADR(1, '옛 결정') });
   assert.equal(run(['supersede', '--old', '1', '--mode', 'partial', '--clause', '결정 2(배치) → 우클릭 메뉴', '--title', '개정', '--dir', L]).code, 0);
 
+  // 조항 안 반각 괄호가 *균형* 잡혀 있으면 extractAmendedBy 의 균형 스캔이 진짜 짝까지 담는다 → 잘림 아님.
+  //   (종전 이 단언은 경고 1건을 기대했다 — [^)]* 캡처 시절 기대치라 stale.)
   const c = run(['index', '--check', '--anchor-roots', '', '--dir', L]);
-  const w = c.json.warnings.filter((x) => x.kind === 'index-clause-truncated');
-  assert.equal(w.length, 1, `잘림 경고 없음: ${JSON.stringify(c.json.warnings)}`);
+  assert.equal(c.json.warnings.filter((x) => x.kind === 'index-clause-truncated').length, 0,
+    `균형 잡힌 조항에 거짓 잘림 경고: ${JSON.stringify(c.json.warnings)}`);
+  assert.equal(run(['index', '--write', '--anchor-roots', '', '--dir', L]).json.changed, true);
+  const lrow = read(path.join(L, 'README.md')).split(/\r?\n/).find((x) => x.startsWith('| [0001]'));
+  assert.ok(lrow.includes('결정 2(배치) → 우클릭 메뉴'), `균형 조항이 셀에서 잘림: ${lrow}`);
+
+  // 진짜 불균형(손편집으로 여는 괄호가 안 닫힌 관련줄)만 잘림 경고 대상이다.
+  const U = mkFixture('L4', {
+    '0001-불균형.md': DASH_ADR(1, '불균형', '확정 (2026-07-01, 근거: TODO)', 'CLAUDE.md §1 · Amended by ADR-0002 (조항 (미완'),
+  });
+  const uc = run(['index', '--check', '--anchor-roots', '', '--dir', U]);
+  const w = uc.json.warnings.filter((x) => x.kind === 'index-clause-truncated');
+  assert.equal(w.length, 1, `불균형 관련줄에 잘림 경고 없음: ${JSON.stringify(uc.json.warnings)}`);
   assert.equal(w[0].num, 1);
   assert.ok(w[0].clause.includes('('), '경고가 잘린 조항을 안 담음');
 
@@ -516,10 +531,291 @@ test('16. F4 인덱스 조항 잘림: 파생 출력은 그대로 + 경고로 노
   assert.ok(prow.includes('조항 （전각 괄호）'), `전각 조항이 셀에서 잘림: ${prow}`); // 실제로 온전히 들어간다
 
   // 경고가 떠도 write 는 정상·멱등(출력 자체는 종전과 동일).
-  assert.equal(run(['index', '--write', '--anchor-roots', '', '--dir', L]).json.changed, true);
-  const after1 = read(path.join(L, 'README.md'));
-  assert.equal(run(['index', '--write', '--anchor-roots', '', '--dir', L]).json.changed, false);
-  assert.equal(read(path.join(L, 'README.md')), after1);
+  assert.equal(run(['index', '--write', '--anchor-roots', '', '--dir', U]).json.changed, true);
+  const after1 = read(path.join(U, 'README.md'));
+  assert.equal(run(['index', '--write', '--anchor-roots', '', '--dir', U]).json.changed, false);
+  assert.equal(read(path.join(U, 'README.md')), after1);
+});
+
+// ── 케이스 21~24: 다중 대상 supersede(--old/--clause 반복 쌍) ─────────────────
+const TRIO = () => ({
+  '0001-첫-결정.md': DASH_ADR(1, '첫 결정'),
+  '0002-둘째-결정.md': DASH_ADR(2, '둘째 결정'),
+  '0003-셋째-결정.md': DASH_ADR(3, '셋째 결정'),
+});
+
+test('21. 다중 partial: 새 ADR 은 하나 + 대상마다 도장·양방향 링크 + 무관 ADR 불변', () => {
+  const S = mkFixture('S1', TRIO());
+  const before3 = read(path.join(S, '0003-셋째-결정.md'));
+  const r = run(['supersede', '--old', '1', '--clause', '조항 α', '--old', '2', '--clause', '조항 β',
+    '--mode', 'partial', '--title', '다중 개정', '--dir', S]);
+  assert.equal(r.code, 0, r.stdout);
+
+  // 새 ADR 은 대상 수와 무관하게 하나(채번 1회).
+  assert.equal(r.json.newNum, 4);
+  assert.equal(fs.readdirSync(S).filter((n) => /^\d{4}-.*\.md$/.test(n)).length, 4, '대상 수만큼 새 파일이 생김');
+  assert.equal(r.json.oldNum, undefined, '다중 대상인데 단일 대상 필드가 남음');
+  assert.equal(r.json.targets.length, 2);
+  assert.deepEqual(r.json.targets.map((t) => t.oldNum), [1, 2]);
+  for (const t of r.json.targets) assert.deepEqual(t.statusStamp, { stamped: true, position: 'line-end', reason: null });
+
+  // 옛 ADR 두 건 모두 단일 대상 실행과 *같은 형태*로 도장·링크된다.
+  const f1 = path.join(S, '0001-첫-결정.md'), f2 = path.join(S, '0002-둘째-결정.md');
+  assert.equal(statusLineOf(f1), '- 상태: 확정 (2026-07-01, 근거: TODO) · 부분 폐기 by ADR-0004 (조항 α)');
+  assert.equal(statusLineOf(f2), '- 상태: 확정 (2026-07-01, 근거: TODO) · 부분 폐기 by ADR-0004 (조항 β)');
+  assert.match(relatedLineOf(f1), /· Amended by ADR-0004 \(조항 α\)$/);
+  assert.match(relatedLineOf(f2), /· Amended by ADR-0004 \(조항 β\)$/);
+  assert.equal(read(path.join(S, '0003-셋째-결정.md')), before3, '대상 아닌 ADR 이 변형됨');
+
+  // 새 ADR 관련줄에 두 링크가 다 들어간다(양방향 lint 통과 조건).
+  assert.equal(relatedLineOf(inDir(S, 4)), '- 관련: Amends ADR-0001 (조항 α) · Amends ADR-0002 (조항 β) · TODO 나머지 관련');
+  const l = run(['lint', '--anchor-roots', '', '--dir', S]);
+  assert.equal(l.json.errorCount, 0, JSON.stringify(l.json.findings));
+
+  // 인덱스 파생: 두 옛 ADR 셀에 각자 조항이 실린다 + --check 깨끗.
+  run(['index', '--write', '--anchor-roots', '', '--dir', S]);
+  const rows = read(path.join(S, 'README.md')).split(/\r?\n/);
+  assert.ok(rows.find((x) => x.startsWith('| [0001]')).includes('확정 (부분 폐기 by ADR-0004: 조항 α)'), rows.join('\n'));
+  assert.ok(rows.find((x) => x.startsWith('| [0002]')).includes('확정 (부분 폐기 by ADR-0004: 조항 β)'), rows.join('\n'));
+  assert.equal(run(['index', '--check', '--anchor-roots', '', '--dir', S]).json.clean, true);
+});
+
+test('22. 다중 full: 대상 전부 폐기+취소선, statusStamp 없음(full 계약), lint 0', () => {
+  const S = mkFixture('S2', TRIO());
+  const r = run(['supersede', '--old', '1', '--old', '3', '--mode', 'full', '--title', '전체 대체', '--dir', S]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(r.json.newNum, 4);
+  assert.equal(r.json.targets.length, 2);
+  for (const t of r.json.targets) assert.equal(t.statusStamp, undefined, 'full 에 statusStamp 가 붙음(경로 오염)');
+
+  assert.equal(statusLineOf(path.join(S, '0001-첫-결정.md')),
+    '- 상태: **폐기 (Superseded by ADR-0004)** — TODO 사유. ~~확정 (2026-07-01, 근거: TODO)~~');
+  assert.equal(statusLineOf(path.join(S, '0003-셋째-결정.md')),
+    '- 상태: **폐기 (Superseded by ADR-0004)** — TODO 사유. ~~확정 (2026-07-01, 근거: TODO)~~');
+  assert.equal(statusLineOf(path.join(S, '0002-둘째-결정.md')), '- 상태: 확정 (2026-07-01, 근거: TODO)');
+  assert.equal(relatedLineOf(inDir(S, 4)), '- 관련: Supersedes ADR-0001 · Supersedes ADR-0003 · TODO 나머지 관련');
+  assert.ok(!read(path.join(S, '0001-첫-결정.md')).includes('부분 폐기'), '부분폐기 도장이 full 에 섞임');
+  assert.equal(run(['lint', '--anchor-roots', '', '--dir', S]).json.errorCount, 0);
+  assert.equal(run(['index', '--write', '--anchor-roots', '', '--dir', S]).code, 0);
+  assert.equal(run(['index', '--check', '--anchor-roots', '', '--dir', S]).json.clean, true);
+});
+
+test('23. 다중 대상 인자 오류: 전부 쓰기 전 중단(옛 파일 무변경 + 새 파일 없음)', () => {
+  const S = mkFixture('S3', TRIO());
+  const snap = () => fs.readdirSync(S).sort().map((n) => `${n} ${read(path.join(S, n))}`).join('');
+  const before = snap();
+  const bad = [
+    // [인자, 기대 에러]
+    [['--clause', '조항 α', '--old', '1'], /--clause 가 --old 보다 앞에 옴/],           // clause 가 old 앞
+    [['--old', '1', '--clause', 'α', '--old', '1', '--clause', 'β'], /--old 1 중복 지정/], // 같은 대상 2회
+    [['--old', '1', '--clause', 'α', '--old', '2'], /대상마다 --clause 필요/],             // partial 인데 조항 누락
+    [['--old', '1', '--clause', 'α', '--old', '9', '--clause', 'β'], /옛 ADR 없음: 9/],    // 없는 대상
+    // 없는 대상이 여럿이면 한 번에 전부 보고한다(하나씩 고쳐가며 재실행하게 만들지 않는다).
+    [['--old', '1', '--clause', 'α', '--old', '8', '--clause', 'γ', '--old', '9', '--clause', 'β'], /옛 ADR 없음: 8, 9/],
+    [['--old', '1', '--clause', 'α', '--clause', 'β'], /--clause 가 두 번 지정됨/],        // 한 대상에 조항 2개
+    [['--old', 'abc', '--clause', 'α'], /--old 는 ADR 번호\(정수\)여야 함/],
+    // 조항 위생은 대상마다 적용된다(둘째 대상의 오염도 잡아야 한다).
+    [['--old', '1', '--clause', 'α', '--old', '2', '--clause', '조항 · 가짜'], /가운뎃점/],
+  ];
+  for (const [args, reMsg] of bad) {
+    const r = run(['supersede', ...args, '--mode', 'partial', '--title', '개정', '--dir', S]);
+    assert.equal(r.code, 1, `거부돼야 함: ${args.join(' ')} → ${r.stdout}`);
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.error, reMsg, `에러 메시지 부적절: ${r.json.error}`);
+    assert.equal(snap(), before, `거부인데 파일 변형: ${args.join(' ')}`);
+    assert.equal(inDir(S, 4), null, `거부인데 새 파일 생성: ${args.join(' ')}`);
+  }
+  // 다중 full 도 같은 all-or-nothing: 둘째 대상이 결합 메타 줄이면 첫째도 안 건드린다.
+  const T = mkFixture('S4', { '0001-첫-결정.md': DASH_ADR(1, '첫 결정'), '0002-경량.md': LIGHT_ADR(2, '경량', true) });
+  const tsnap = fs.readdirSync(T).sort().map((n) => read(path.join(T, n))).join('');
+  const rf = run(['supersede', '--old', '1', '--old', '2', '--mode', 'full', '--title', '전체 대체', '--dir', T]);
+  assert.equal(rf.code, 1, rf.stdout);
+  assert.match(rf.json.error, /결합 메타 줄/);
+  assert.equal(fs.readdirSync(T).sort().map((n) => read(path.join(T, n))).join(''), tsnap, '전수 검증 실패인데 일부가 반영됨');
+  assert.equal(inDir(T, 3), null);
+});
+
+test('24. 단일 대상 인자 오류 메시지는 종전 그대로(회귀)', () => {
+  const S = mkFixture('S5', { '0001-첫-결정.md': DASH_ADR(1, '첫 결정') });
+  assert.equal(run(['supersede', '--mode', 'partial', '--clause', 'α', '--title', 'x', '--dir', S]).json.error, '--old <N> 필요');
+  assert.equal(run(['supersede', '--old', '1', '--mode', 'partial', '--title', 'x', '--dir', S]).json.error, 'partial 은 --clause "<바뀐 조항>" 필요');
+  assert.equal(run(['supersede', '--old', '9', '--mode', 'full', '--title', 'x', '--dir', S]).json.error, '옛 ADR 없음: 9');
+  assert.equal(run(['supersede', '--old', '1', '--title', 'x', '--dir', S]).json.error, '--mode full|partial 필요');
+  assert.equal(run(['supersede', '--old', '1', '--mode', 'full', '--dir', S]).json.error, '--title 필요');
+});
+
+// ── 케이스 25~29: link(이미 있는 두 ADR 잇기) ────────────────────────────────
+const PAIR = () => ({ '0001-옛-결정.md': DASH_ADR(1, '옛 결정'), '0002-새-결정.md': DASH_ADR(2, '새 결정') });
+
+test('25. link partial: supersede 와 같은 도장·양방향 + 새 파일 없음 + lint/index 정합', () => {
+  const K = mkFixture('K2', PAIR());
+  const f1 = path.join(K, '0001-옛-결정.md'), f2 = path.join(K, '0002-새-결정.md');
+  const r = run(['link', '--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 L', '--dir', K]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(r.json.op, 'link');
+  assert.deepEqual(r.json.applied, { old: true, new: true });
+  assert.deepEqual(r.json.statusStamp, { stamped: true, position: 'line-end', reason: null });
+  assert.equal(r.json.noop, undefined);
+
+  // 파일 생성·채번 없음.
+  assert.equal(fs.readdirSync(K).filter((n) => /^\d{4}-.*\.md$/.test(n)).length, 2, 'link 가 새 파일을 만듦');
+  assert.equal(inDir(K, 3), null);
+
+  // 도장 형태가 supersede partial 과 동일(원시연산 공유 증명).
+  assert.equal(statusLineOf(f1), '- 상태: 확정 (2026-07-01, 근거: TODO) · 부분 폐기 by ADR-0002 (조항 L)');
+  assert.match(relatedLineOf(f1), /· Amended by ADR-0002 \(조항 L\)$/);
+  assert.match(relatedLineOf(f2), /· Amends ADR-0001 \(조항 L\)$/);
+  assert.equal(run(['lint', '--anchor-roots', '', '--dir', K]).json.errorCount, 0);
+  run(['index', '--write', '--anchor-roots', '', '--dir', K]);
+  assert.ok(read(path.join(K, 'README.md')).split(/\r?\n/).find((x) => x.startsWith('| [0001]')).includes('확정 (부분 폐기 by ADR-0002: 조항 L)'));
+  assert.equal(run(['index', '--check', '--anchor-roots', '', '--dir', K]).json.clean, true);
+
+  // 멱등 재실행 = 아무것도 안 쓴다(중복 도장 금지).
+  const s1 = read(f1), s2 = read(f2);
+  const again = run(['link', '--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 L', '--dir', K]);
+  assert.equal(again.code, 0, again.stdout);
+  assert.equal(again.json.noop, true);
+  assert.deepEqual(again.json.applied, { old: false, new: false });
+  assert.deepEqual(again.json.statusStamp, { stamped: false, position: null, reason: 'already-linked' });
+  assert.equal(read(f1), s1, '멱등 재실행이 옛 파일을 건드림');
+  assert.equal(read(f2), s2, '멱등 재실행이 새 파일을 건드림');
+
+  // 조항 문구가 달라도 같은 번호면 같은 관계 → 여전히 no-op(중복 링크 금지).
+  const other = run(['link', '--old', '1', '--new', '2', '--mode', 'partial', '--clause', '다른 조항', '--dir', K]);
+  assert.equal(other.json.noop, true);
+  assert.equal(read(f1), s1);
+});
+
+test('26. link full: 폐기+취소선 + Supersedes 링크 + statusStamp 없음 + 멱등', () => {
+  const K = mkFixture('K3', PAIR());
+  const f1 = path.join(K, '0001-옛-결정.md'), f2 = path.join(K, '0002-새-결정.md');
+  const r = run(['link', '--old', '1', '--new', '2', '--mode', 'full', '--dir', K]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(r.json.statusStamp, undefined, 'full 에 statusStamp 가 붙음(supersede 계약과 갈림)');
+  assert.equal(statusLineOf(f1), '- 상태: **폐기 (Superseded by ADR-0002)** — TODO 사유. ~~확정 (2026-07-01, 근거: TODO)~~');
+  assert.match(relatedLineOf(f2), /· Supersedes ADR-0001$/);
+  assert.ok(!read(f1).includes('부분 폐기'), '부분폐기 도장이 full 에 섞임');
+  assert.equal(run(['lint', '--anchor-roots', '', '--dir', K]).json.errorCount, 0);
+
+  const s1 = read(f1), s2 = read(f2);
+  const again = run(['link', '--old', '1', '--new', '2', '--mode', 'full', '--dir', K]);
+  assert.equal(again.code, 0, again.stdout);
+  assert.equal(again.json.noop, true);
+  assert.equal(read(f1), s1, '재실행이 취소선을 중첩시킴');
+  assert.equal(read(f2), s2);
+
+  // full 도 반쪽 상태를 메운다: 새 쪽 Supersedes 만 사라진 상태에서 재실행하면 그쪽만 채운다.
+  fs.writeFileSync(f2, read(f2).replace(' · Supersedes ADR-0001', ''), 'utf8');
+  assert.ok(run(['lint', '--anchor-roots', '', '--dir', K]).json.errorCount > 0, '전제 조건(반쪽 상태) 미성립');
+  const half = run(['link', '--old', '1', '--new', '2', '--mode', 'full', '--dir', K]);
+  assert.equal(half.code, 0, half.stdout);
+  assert.deepEqual(half.json.applied, { old: false, new: true });
+  assert.equal(read(f1), s1, '이미 폐기된 옛 쪽을 다시 래핑함');
+  assert.match(relatedLineOf(f2), /· Supersedes ADR-0001$/);
+  assert.equal(run(['lint', '--anchor-roots', '', '--dir', K]).json.errorCount, 0, '반쪽 상태가 안 메워짐');
+
+  // 다른 ADR 로의 전체폐기 재래핑은 종전 supersede 가드와 같은 사유로 거부.
+  fs.writeFileSync(path.join(K, '0003-셋째.md'), DASH_ADR(3, '셋째'), 'utf8');
+  const conflict = run(['link', '--old', '1', '--new', '3', '--mode', 'full', '--dir', K]);
+  assert.equal(conflict.code, 1, conflict.stdout);
+  assert.match(conflict.json.error, /이미 전체폐기됨/);
+  assert.equal(read(f1), s1, '거부인데 파일 변형');
+});
+
+test('27. link 반쪽 상태 복구: 한쪽만 있는 링크는 없는 쪽만 채운다(중복 없음)', () => {
+  const K = mkFixture('K4', {
+    // 옛 쪽엔 Amended by 가 손으로 들어가 있고 새 쪽 Amends 가 없다 = lint 의 amend-unidirectional.
+    '0001-옛-결정.md': DASH_ADR(1, '옛 결정', '확정 (2026-07-01, 근거: TODO) · 부분 폐기 by ADR-0002 (조항 H)', 'CLAUDE.md §1 · Amended by ADR-0002 (조항 H)'),
+    '0002-새-결정.md': DASH_ADR(2, '새 결정'),
+  });
+  const f1 = path.join(K, '0001-옛-결정.md'), f2 = path.join(K, '0002-새-결정.md');
+  assert.ok(run(['lint', '--anchor-roots', '', '--dir', K]).json.errorCount > 0, '전제 조건(반쪽 상태) 미성립');
+  const s1 = read(f1);
+
+  const r = run(['link', '--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 H', '--dir', K]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.deepEqual(r.json.applied, { old: false, new: true });
+  assert.equal(r.json.noop, undefined);
+  assert.equal(read(f1), s1, '이미 링크된 옛 쪽을 다시 건드림');
+  assert.match(relatedLineOf(f2), /· Amends ADR-0001 \(조항 H\)$/);
+  assert.equal(countOf(statusLineOf(f1), '부분 폐기 by ADR-0002'), 1, `중복 도장: ${statusLineOf(f1)}`);
+  assert.equal(run(['lint', '--anchor-roots', '', '--dir', K]).json.errorCount, 0, '반쪽 상태가 안 메워짐');
+});
+
+test('28. link 오류: 전부 쓰기 전 중단 + 파일 무변경', () => {
+  const K = mkFixture('K5', PAIR());
+  const snap = () => fs.readdirSync(K).sort().map((n) => `${n} ${read(path.join(K, n))}`).join('');
+  const before = snap();
+  const bad = [
+    [['--old', '1', '--new', '9', '--mode', 'full'], /ADR 없음: 9/],
+    [['--old', '8', '--new', '9', '--mode', 'full'], /ADR 없음: 8, 9/],
+    [['--old', '1', '--new', '1', '--mode', 'full'], /자기 자신과는 링크 불가/],
+    [['--old', '1', '--new', '2', '--mode', 'partial'], /partial 은 --clause "<바뀐 조항>" 필요/],
+    [['--old', '1', '--new', '2'], /--mode full\|partial 필요/],
+    [['--old', '1', '--new', '2', '--mode', 'sideways'], /--mode full\|partial 필요/],
+    [['--new', '2', '--mode', 'full'], /--old <N> 필요/],
+    [['--old', '1', '--mode', 'full'], /--new <M> 필요/],
+    [['--old', 'abc', '--new', '2', '--mode', 'full'], /--old 는 ADR 번호\(정수\)여야 함/],
+    [['--old', '1', '--new', 'x2', '--mode', 'full'], /--new 는 ADR 번호\(정수\)여야 함/],
+    // 조항 위생은 supersede 와 같은 검사를 탄다.
+    [['--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 · 가짜'], /가운뎃점/],
+    [['--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 (미완'], /괄호가 안 맞음/],
+    [['--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 Amends ADR-0009'], /Amends/],
+  ];
+  for (const [args, reMsg] of bad) {
+    const r = run(['link', ...args, '--dir', K]);
+    assert.equal(r.code, 1, `거부돼야 함: ${args.join(' ')} → ${r.stdout}`);
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.error, reMsg, `에러 메시지 부적절: ${r.json.error}`);
+    assert.equal(snap(), before, `거부인데 파일 변형: ${args.join(' ')}`);
+  }
+});
+
+test('29. link + 경량(결합 메타 줄): full 은 거부, partial 은 도장만 생략하고 링크는 박는다', () => {
+  // full: 결합 메타 줄엔 안전하게 못 박으므로 거부(supersede 와 같은 가드) + 양쪽 파일 무변경.
+  const C = mkFixture('K6', { '0001-경량.md': LIGHT_ADR(1, '경량', true), '0002-새-결정.md': DASH_ADR(2, '새 결정') });
+  const cf1 = path.join(C, '0001-경량.md'), cf2 = path.join(C, '0002-새-결정.md');
+  const b1 = read(cf1), b2 = read(cf2);
+  const rf = run(['link', '--old', '1', '--new', '2', '--mode', 'full', '--dir', C]);
+  assert.equal(rf.code, 1, rf.stdout);
+  assert.match(rf.json.error, /결합 메타 줄/);
+  assert.equal(read(cf1), b1, '거부인데 옛 파일 변형');
+  assert.equal(read(cf2), b2, '거부인데 새 파일 변형');
+
+  // partial: 결합 메타 줄엔 도장 생략, 관련줄 양방향 링크는 그대로.
+  const meta = metaLineOf(cf1);
+  const rp = run(['link', '--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 M', '--dir', C]);
+  assert.equal(rp.code, 0, rp.stdout);
+  assert.deepEqual(rp.json.statusStamp, { stamped: false, position: null, reason: 'combined-meta-line' });
+  assert.equal(metaLineOf(cf1), meta, '결합 메타 줄이 변형됨');
+  assert.match(relatedLineOf(cf1), /· Amended by ADR-0002 \(조항 M\)$/);
+  assert.match(relatedLineOf(cf2), /· Amends ADR-0001 \(조항 M\)$/);
+
+  // 관련줄 없는 ADR 은 어느 쪽이든 거부(옛 쪽 = 종전 supersede 와 같은 사유, 새 쪽 = 링크 박을 자리 없음).
+  const D = mkFixture('K7', { '0001-경량.md': LIGHT_ADR(1, '경량', false), '0002-새-결정.md': DASH_ADR(2, '새 결정') });
+  const dsnap = fs.readdirSync(D).sort().map((n) => read(path.join(D, n))).join('');
+  const oldSide = run(['link', '--old', '1', '--new', '2', '--mode', 'partial', '--clause', '조항 N', '--dir', D]);
+  assert.equal(oldSide.code, 1, oldSide.stdout);
+  assert.match(oldSide.json.error, /옛 ADR-1 에 "- 관련:" 줄이 없어/);
+  const newSide = run(['link', '--old', '2', '--new', '1', '--mode', 'partial', '--clause', '조항 N', '--dir', D]);
+  assert.equal(newSide.code, 1, newSide.stdout);
+  assert.match(newSide.json.error, /새 ADR-1 에 "- 관련:" 줄이 없어/);
+  assert.equal(fs.readdirSync(D).sort().map((n) => read(path.join(D, n))).join(''), dsnap, '거부인데 파일 변형');
+});
+
+test('30. 철회된(취소선) 도장은 인덱스 파생이 계속 무시한다(회귀)', () => {
+  const W = mkFixture('W1', {
+    '0001-철회-도장.md': DASH_ADR(1, '철회 도장', '확정 (2026-07-01, 근거: TODO) · ~~부분 폐기 by ADR-0002 (철회된 조항)~~'),
+  });
+  const f = path.join(W, '0001-철회-도장.md');
+  const body = read(f);
+  assert.equal(run(['lint', '--anchor-roots', '', '--dir', W]).json.errorCount, 0, '취소선 도장이 어휘 파싱을 깸');
+  run(['index', '--write', '--anchor-roots', '', '--dir', W]);
+  const row = read(path.join(W, 'README.md')).split(/\r?\n/).find((x) => x.startsWith('| [0001]'));
+  assert.ok(row.includes('| 확정 |'), `철회된 도장이 인덱스 셀에 실림: ${row}`);
+  assert.ok(!row.includes('부분 폐기'), `철회된 도장이 인덱스 셀에 실림: ${row}`);
+  assert.equal(read(f), body, 'index --write 가 본문을 건드림');
+  assert.equal(run(['index', '--check', '--anchor-roots', '', '--dir', W]).json.clean, true);
 });
 
 // ── 케이스 7: 실데이터 회귀(read-only, 옵션) ──────────────────────────────────

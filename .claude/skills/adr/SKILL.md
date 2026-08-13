@@ -1,6 +1,6 @@
 ---
 name: adr
-description: ADR(설계 결정 기록)를 박제한다 — 새 결정·번복(supersede)·정합성 점검(lint)·인덱스 재생성. 트리거 /adr [new|supersede|lint|index].
+description: ADR(설계 결정 기록)를 박제한다 — 새 결정·번복(supersede)·기존 ADR 간 개정 링크(link)·정합성 점검(lint)·인덱스 재생성. 트리거 /adr [new|supersede|link|lint|index].
 ---
 
 # ADR
@@ -20,13 +20,14 @@ ADR 기록은 결정적 작업이라 "대충/철저히" 강도 축이 없다.
 | 오퍼레이션 | 무엇 | 스크립트(기계) | 스킬(판단) |
 |---|---|---|---|
 | **new** | 새 결정 1건 박제 | 채번 → 스캐폴드 → 인덱스 재생성 | 본문 prose |
-| **supersede** | 결정 번복(전체/부분) | 새 ADR + 옛 ADR 양방향 링크 | **전체 vs 부분 판단** + prose |
+| **supersede** | 결정 번복(전체/부분) | 새 ADR + 옛 ADR **전부** 양방향 링크 | **전체 vs 부분 판단** + prose |
+| **link** | 이미 있는 두 ADR 사이 개정 링크만 | 양방향 링크 + 상태줄 도장(채번·새 파일 없음) | **전체 vs 부분 판단** |
 | **lint** | 정합성 점검(read-only) | 번호·양방향·상태어휘·앵커고아 검사 | error/advisory 해석·보고 |
 | **index** | 인덱스 단독 재생성 | 본문 파생 표 갱신(큐레이션 셀 보존) | — |
 
 ## 트리거
 
-`/adr [new|supersede|lint|index]`. 오퍼레이션은 옵션 — 미지정이면 요청으로 추정(새 결정=new / "폐기"·"바뀜"=supersede / "점검"·인자 없음=lint / "인덱스 다시"=index). 파싱·추정 규칙 = `references/flow.md §0`. 호출 시 **어느 오퍼레이션을 도는지 한 줄을 사용자에게 명시**한다.
+`/adr [new|supersede|link|lint|index]`. 오퍼레이션은 옵션 — 미지정이면 요청으로 추정(새 결정=new / "폐기"·"바뀜"=supersede / "이미 있는 두 ADR을 잇기"=link / "점검"·인자 없음=lint / "인덱스 다시"=index). 파싱·추정 규칙 = `references/flow.md §0`. 호출 시 **어느 오퍼레이션을 도는지 한 줄을 사용자에게 명시**한다.
 
 ## 프로젝트 바인딩
 
