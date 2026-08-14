@@ -1047,6 +1047,7 @@ name = "engram-dashboard-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "engram-dashboard-command",
  "engram-dashboard-core",
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",
@@ -1114,6 +1115,7 @@ dependencies = [
 name = "engram-dashboard-protocol"
 version = "0.1.0"
 dependencies = [
+ "engram-dashboard-command",
  "serde",
  "serde_bytes",
  "serde_json",

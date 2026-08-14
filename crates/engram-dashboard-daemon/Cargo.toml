@@ -90,6 +90,9 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 #   (`ws`·`frame_port`·`instance`·`portfile`)을 쓰는 것은 이 crate 뿐이고, 그것을 켜는 자리가 여기다.
 #   근거(왜 기본을 비웠나)는 그 crate `Cargo.toml` 의 `[features]` 주석이 정본이다.
 engram-dashboard-net = { path = "../engram-dashboard-net", features = ["server"] }
+# ADR-0134: 명령 버스 도구(봉투·오류·선언 매크로·표·라우팅). 이 crate 는 도구를 **표 조립에만** 쓴다 —
+#   자기 명령을 선언하지 않으므로 `ts-rs` 는 넣지 않는다(선언 crate 만 바인딩을 낸다).
+engram-dashboard-command = { path = "../engram-dashboard-command" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # ★ADR-0129 슬라이스 1 — `tokio-tungstenite` 를 [dev-dependencies] 로 내렸다★: 이 crate 운영 코드의
@@ -179,6 +182,10 @@ engram-dashboard-core = { path = "../engram-dashboard-core", features = ["test-h
 #   — connection_core 의 삭제 정리 테스트가 계약 **종결 사유**를 본다)을 cross-crate 로 쓰므로 dev 그래프
 #   에서만 그 기능을 켠다(운영 daemon 바이너리엔 미유니피케이션).
 engram-dashboard-messaging = { path = "../engram-dashboard-messaging", features = ["test-harness"] }
+# 같은 계열(feature-only 재선언) — 데몬 표 하네스가 도구 crate 의 실행기
+#   (`engram_dashboard_command::testing::block_on`)로 핸들러 future 를 돌린다. dev 그래프에만 있으므로
+#   운영 daemon 바이너리엔 유니피케이션되지 않는다.
+engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # happy-path handshake(initialize + tools/list + tools/call)는 rmcp 클라이언트 role 로 정직하게 검증.

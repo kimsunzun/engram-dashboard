@@ -1028,6 +1028,23 @@ impl ConnectionCore {
                 self.control_registry.set_envelope_format(core_format);
                 reply(sink, request_id, Ok(()));
             }
+
+            // ── 명령 버스 등록 wire — 형태만 열려 있고 명부가 아직 없다(ADR-0134/0135, TRD §6 Step 2) ──
+            //
+            // ★조용히 흘리지 않고 오류로 답하는 이유★: 셋 다 request_id 를 실어 보낸 쪽이 답장을 기다린다.
+            //   여기서 no-op 하면 그 왕복은 연결이 끊길 때까지 안 깨는 pending 이 된다.
+            // ★`_ =>` 로 묶지 않는 이유★: 이 match 가 exhaustive 라서 variant 를 늘릴 때마다 여기가
+            //   컴파일 에러로 걸린다. 그게 「배선을 빠뜨리지 않았나」를 묻는 유일한 지점이라 catch-all 로
+            //   덮으면 다음 variant 는 아무 신호 없이 조용히 무시된다.
+            AgentCommand::RegisterCommands { request_id, .. }
+            | AgentCommand::UpdateCommands { request_id, .. }
+            | AgentCommand::ListCommands { request_id } => {
+                reply(
+                    sink,
+                    request_id,
+                    Err("command roster not wired yet (S20 Step 2)".to_string()),
+                );
+            }
         }
         DispatchFlow::Continue
     }

@@ -25,7 +25,7 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::priming::{
     FilePrimingProvider, PrimingProvider, PrimingVariant,
@@ -85,6 +85,7 @@ async fn run() -> i32 {
         messaging_slot.clone(),
         // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
         Arc::new(RosterBroadcastSlot::new()),
+        Arc::new(CommandTableSlot::new()),
     )
     .await
     {

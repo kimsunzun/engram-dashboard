@@ -20,7 +20,8 @@ use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
 };
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, McpServerHandle, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
+    RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
@@ -103,6 +104,7 @@ async fn fixture(tag: &str) -> Fixture {
         // ★비워 둔다★: 우편 핸들러가 503 을 내야 "게이트를 통과했다" 가 거절과 구별된다.
         Arc::new(MessagingSlot::new()),
         Arc::new(RosterBroadcastSlot::new()),
+        Arc::new(CommandTableSlot::new()),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -281,6 +283,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
         Arc::new(RosterBroadcastSlot::new()),
+        Arc::new(CommandTableSlot::new()),
     )
     .await
     .expect("start mcp server");

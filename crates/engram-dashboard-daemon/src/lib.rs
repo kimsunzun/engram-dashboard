@@ -467,6 +467,7 @@ pub async fn run() -> Result<(), i32> {
     let manager_slot = Arc::new(control::mcp_server::ManagerSlot::new());
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
+    let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
@@ -479,6 +480,7 @@ pub async fn run() -> Result<(), i32> {
         manager_slot.clone(),
         messaging_slot.clone(),
         roster_broadcast_slot.clone(),
+        command_table_slot.clone(),
     )
     .await
     {
@@ -518,6 +520,13 @@ pub async fn run() -> Result<(), i32> {
     //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
     //   보여 준다(에러도 로그도 없다).
     roster_broadcast_slot.set(wiring.roster_broadcast());
+    // ★배선 0(ADR-0134)★: 표를 조립해 슬롯에 꽂기만 한다 — 제어 동사의 실제 입구는 여전히
+    //   `/control/agent` 의 동사 match 다. ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은
+    //   팬아웃 값이 아니라 슬롯이라 통지 시점에 읽는다(`control::commands::make_daemon_table`).
+    command_table_slot.set(Arc::new(control::commands::make_daemon_table(
+        manager.clone(),
+        roster_broadcast_slot.clone(),
+    )));
 
     // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
     //    것이 없다★.

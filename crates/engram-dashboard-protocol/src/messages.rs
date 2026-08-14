@@ -1,6 +1,7 @@
 //! wire 메시지 — UI→core [`AgentCommand`], core→UI [`AgentEvent`].
 //! 둘 다 externally-tagged JSON(serde 기본).
 
+use engram_dashboard_command::{CommandDecl, OwnerToken};
 use ts_rs::TS;
 
 use crate::domain::{
@@ -211,6 +212,67 @@ pub enum AgentCommand {
         format: EnvelopeFormat,
         request_id: RequestId,
     },
+
+    // ── 명령 버스 등록 wire(ADR-0134/0135 · TRD §3-7) ───────────────────────────────
+    // ★배선 없음★ — 이 셋과 [`AgentEvent::CommandList`] 는 지금 아무도 보내지도 받지도 않는다.
+    //   등록 경로가 서기 전에 형태만 additive 로 열어 둔 자리다.
+    //
+    // ★`request_id` 에 `#[serde(default)]` 를 달지 말 것★ — 이 crate 의 [`RequestId::default`] 는
+    //   **새 v4 를 찍는다**(`ids.rs`). 기본값을 허용하면 그 칸이 빠진 패킷이 거절 대신 **아무와도 짝이
+    //   안 맞는 새 상관 키**를 얻어 답장이 영영 안 붙는다(도구 crate 쪽 동명 타입은 정반대로 `Default`
+    //   자체가 없다 — `engram-dashboard-command` 의 `envelope.rs` 가 그 이유를 적고 있다).
+    /// 주인이 **붙는 순간** 자기 선언 전량을 한 방에 얹는다(TRD §3-7 조항 1). 이름마다 왕복하지 않고,
+    /// 재연결마다 전량 재전송하며 같은 `owner` 는 last-wins 로 인수인계된다.
+    ///
+    /// `decls` 의 `help` 는 **불투명 문자열**이다 — 받는 쪽(데몬)이 파싱·검증하거나 그 내용으로
+    /// 분기하면 위반이다(TRD §3-7 하드 제약). 자료형을 `String` 위로 올리지 않는 것 자체가 그 게이트다.
+    /// `catalog_version` 은 보낸 쪽 crate 의 세대 번호이고 **진단용**이다 — 받는 쪽이 자기 번호와
+    /// 비교해 거절하면 틀린다(TRD §4-①).
+    RegisterCommands {
+        #[ts(type = "string")]
+        owner: OwnerToken,
+        #[ts(type = "Array<{ name: string, help: string }>")]
+        decls: Vec<CommandDecl>,
+        catalog_version: u32,
+        request_id: RequestId,
+    },
+
+    /// 붙어 있는 동안의 **차분** — 늦게 뜬 기능이 이름을 더하고 꺼진 기능이 이름을 내린다
+    /// (TRD §3-7 조항 3). 전량 재전송은 [`AgentCommand::RegisterCommands`] 뿐이다.
+    ///
+    /// `removed` 가 이름만 나르는 것은 의도다 — 내릴 때 모양은 필요 없다. 그리고 내린 이름은 명부에서
+    /// **지워지지 않고 자취로 남는다**(ADR-0135) — 지우면 아직 붙어 있는 주인의 실재했던 이름이
+    /// `UNKNOWN_COMMAND`(재시도 무의미)로 나간다.
+    UpdateCommands {
+        #[ts(type = "string")]
+        owner: OwnerToken,
+        #[ts(type = "Array<{ name: string, help: string }>")]
+        added: Vec<CommandDecl>,
+        removed: Vec<String>,
+        request_id: RequestId,
+    },
+
+    /// 명부 전량 조회. 응답은 request_id 동봉 [`AgentEvent::CommandList`](전용 reply).
+    ListCommands { request_id: RequestId },
+}
+
+/// 데몬 명부의 **클라이언트 투영** 한 줄([`AgentEvent::CommandList`] 의 원소).
+///
+/// ★버스 계약이 아니라 wire 계약이라 여기 산다★ — 도구 crate 의 `CommandDecl`(등록 단위)과 필드가
+/// 겹치지만 방향과 주인이 다르다: `CommandDecl` 은 주인→데몬이 얹는 것이고, 이쪽은 데몬이 명부를
+/// 훑어 내려 주는 것이라 명부만 아는 칸(`available`)이 하나 더 붙는다.
+///
+/// `available=false` = **이름은 명부에 있으나 주인이 지금 없다**(연결이 끊긴 자취). 없는 이름과 갈라야
+/// 호출자가 재시도할지를 정할 수 있어서 지우지 않고 남긴다 — 전자는 `OWNER_UNAVAILABLE`(나중에 다시),
+/// 후자는 `UNKNOWN_COMMAND`(재시도 무의미)다(TRD §4-②). 만료는 없다 — 시간이 지나 자취가 사라지면
+/// 같은 질문의 답이 시계에 따라 갈려 그 구분 자체가 무너진다(ADR-0135).
+/// `help` 는 주인이 얹은 문자열 **그대로**다(데몬이 열어보지 않으므로 가공도 없다).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct CommandListEntry {
+    pub name: String,
+    pub help: String,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
@@ -330,6 +392,21 @@ pub enum AgentEvent {
         agent: AgentInfo,
     },
 
+    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0134/0135) — request_id 에코.
+    /// broadcast 가 아니다(요청한 연결에만 간다). ★배선 없음★ — 아직 아무도 보내지 않는다.
+    ///
+    /// ★구형 셸 안전은 오직 "전용 reply" 라는 사실에만 기댄다★ — 구형 셸은 `ListCommands` 를 보내지
+    /// 않으니 이 답장도 못 받고, 설령 받아도 모르는 externally-tagged variant 키는 조용히 버린다(에러도
+    /// 로그도 없음). **이 variant 를 나중에 broadcast(요청 없이 push)로 바꾸는 순간** 모든 구형 셸이
+    /// 그 이벤트를 아무 신호 없이 잃는다 — broadcast 로 바꾸려면 이 안전을 다시 설계해야 한다.
+    ///
+    /// 주인이 지금 없는 이름도 함께 실려 온다(`available=false`) — 걸러 내면 「이름은 아는데 주인이
+    /// 없다」를 호출자가 볼 수 없어 §4-② 의 두 오류가 합쳐진다.
+    CommandList {
+        request_id: RequestId,
+        entries: Vec<CommandListEntry>,
+    },
+
     /// request_id 있으면 특정 command 실패.
     Error {
         request_id: Option<RequestId>,
@@ -434,6 +511,96 @@ pub enum OutputChunk {
         kind: String,
         json: String,
     },
+}
+
+// ── request_id 추출(request/reply 상관, wire 계약) ────────────────────────────────────
+/// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
+/// 일부(Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
+/// (핸드셰이크는 이 표에 없다 — 명령이 아니라 네트워크 lib 소유 프레임이라 이 함수에 오지 않는다.
+///  ADR-0129 0-4.)
+///
+/// ★계약★: 데몬 클라이언트의 pending 매칭(`send_command`, src-tauri)은 reply 를 기대하므로
+/// request_id 가 있는 명령에만 쓴다. None 인 명령을 넣으면 매칭할 키가 없어 영구 pending(hang)이
+/// 되므로 호출자가 None 을 거른다.
+pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
+    match cmd {
+        AgentCommand::Spawn { request_id, .. }
+        | AgentCommand::Kill { request_id, .. }
+        | AgentCommand::Interrupt { request_id, .. }
+        | AgentCommand::WriteStdin { request_id, .. }
+        | AgentCommand::AcquireInput { request_id, .. }
+        | AgentCommand::ReleaseInput { request_id, .. }
+        | AgentCommand::ListAgents { request_id }
+        | AgentCommand::StopDaemon { request_id, .. }
+        | AgentCommand::SpawnByCwd { request_id, .. }
+        | AgentCommand::ListProfiles { request_id }
+        | AgentCommand::CreateProfile { request_id, .. }
+        | AgentCommand::DeleteProfile { request_id, .. }
+        | AgentCommand::SpawnProfile { request_id, .. }
+        | AgentCommand::SetProfileAutoRestore { request_id, .. }
+        // 트리 rename(ADR-0061 리치화) — Ack 매칭 대상(SetProfileAutoRestore 와 동형).
+        | AgentCommand::RenameProfile { request_id, .. }
+        // 트리 reparent(ADR-0072 계층) — Ack 매칭 대상(RenameProfile 와 동형).
+        | AgentCommand::ReparentProfile { request_id, .. }
+        | AgentCommand::GetSnapshot { request_id, .. }
+        // 프리셋 CRUD(ADR-0061) — 넷 다 request_id 동봉(reply 매칭 대상).
+        | AgentCommand::ListPresets { request_id }
+        | AgentCommand::CreatePreset { request_id, .. }
+        | AgentCommand::DeletePreset { request_id, .. }
+        // 프리셋 rename(ADR-0061 리치화) — Ack 매칭 대상.
+        | AgentCommand::RenamePreset { request_id, .. }
+        // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
+        | AgentCommand::SetEnvelopeFormat { request_id, .. }
+        // 명령 버스 등록 wire(ADR-0134/0135) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
+        //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
+        | AgentCommand::RegisterCommands { request_id, .. }
+        | AgentCommand::UpdateCommands { request_id, .. }
+        | AgentCommand::ListCommands { request_id } => Some(*request_id),
+        // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
+        AgentCommand::Resize { .. }
+        | AgentCommand::Subscribe { .. }
+        | AgentCommand::Unsubscribe { .. } => None,
+    }
+}
+
+/// reply 이벤트에 실린 request_id 를 꺼낸다(매칭용). 전용 reply variant(Ack/Spawned/Created/
+/// SubscribeAck-는 request_id 없음/AgentList/ProfileList/Snapshot/Error)만 request_id 를 echo 한다 —
+/// broadcast(AgentListUpdated/StatusChanged/…)는 `None` 이라 pending 매칭을 우회한다(편승 매칭 제거).
+///
+/// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
+/// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
+/// None — 데몬 클라이언트의 pending 매칭 대상이 아니다(Subscribe 는 request_id 없는 명령).
+pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
+    match ev {
+        AgentEvent::Ack { request_id }
+        | AgentEvent::AgentList { request_id, .. }
+        | AgentEvent::ProfileList { request_id, .. }
+        // PresetList = 전용 reply(request_id echo, ADR-0061). PresetListUpdated 는 broadcast(아래 None).
+        | AgentEvent::PresetList { request_id, .. }
+        | AgentEvent::Snapshot { request_id, .. }
+        | AgentEvent::Created { request_id, .. }
+        // ★CommandList 는 상관 대상이다★(ADR-0134) — ListCommands 조회의 전용 reply라 AgentList/
+        //   ProfileList/PresetList 와 같은 자리다. 여기서 None 을 고르면 셸이 확실히 매달린다: 위
+        //   command_request_id 가 ListCommands 에 Some 을 돌려주므로 pending 매칭이 슬롯을 만드는데,
+        //   그걸 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다. 두 함수는 명령↔답장 쌍마다 같이
+        //   움직여야 하는 한 쌍이다 — 이 쌍의 고정은 이 crate 의 테스트가 박는다
+        //   (`cargo test -p engram-dashboard-protocol`, CI 가 항상 실행).
+        | AgentEvent::CommandList { request_id, .. }
+        | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
+        AgentEvent::Error { request_id, .. } => *request_id,
+        // request_id 없는 이벤트(broadcast 또는 agent_id 기반) — pending 매칭 대상 아님.
+        AgentEvent::Hello { .. }
+        | AgentEvent::SubscribeAck { .. }
+        | AgentEvent::Output { .. }
+        | AgentEvent::ReplayComplete { .. }
+        | AgentEvent::StatusChanged { .. }
+        | AgentEvent::AgentListUpdated { .. }
+        | AgentEvent::RestoreResult { .. }
+        | AgentEvent::InputLeaseChanged { .. }
+        | AgentEvent::ProfileListUpdated { .. }
+        // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
+        | AgentEvent::PresetListUpdated { .. } => None,
+    }
 }
 
 #[cfg(test)]
@@ -722,6 +889,226 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── 명령 버스 등록 wire(ADR-0134/0135) ─────────────────────────────────────────
+    //
+    // 이 구획은 **아직 배선이 없는** variant 를 지킨다 — 보내는 코드가 없으니 형태가 조용히 틀려도
+    // 런타임에 아무 신호가 없고, Step 2 배선이 붙는 날에야 터진다. golden 이 그때까지의 유일한 벽이다.
+
+    /// `#[ts(type = "…")]` 로 손으로 적은 TypeScript 텍스트를 Rust 모양에 묶는다.
+    ///
+    /// ★이 경로의 유일한 drift 위험이 이 문자열이다★ — `CommandDecl` 은 도구 crate 소유라 `TS` 를
+    /// 구현하지 않고(그 crate 의 외부 의존을 최소로 두려는 의도), 그래서 바인딩 텍스트를 ts-rs 가
+    /// 파생하지 않고 **사람이 적는다.** 필드가 늘거나 개명되면 Rust 는 컴파일되고 생성 TS 만 거짓말을
+    /// 하게 되므로, 여기서 둘을 대조한다.
+    #[test]
+    fn command_decl_hand_written_ts_matches_rust_shape() {
+        use std::collections::BTreeSet;
+
+        // 두 attribute(`RegisterCommands.decls` · `UpdateCommands.added`)에 적은 것과 같은 문자열.
+        const DECLS_TS: &str = "Array<{ name: string, help: string }>";
+
+        let inlined = <AgentCommand as TS>::inline();
+        assert!(
+            inlined.matches(DECLS_TS).count() == 2,
+            "생성 TS 가 손으로 적은 텍스트와 불일치(등록 2자리) — attribute 를 고쳤으면 여기도 고친다:\n{inlined}"
+        );
+
+        let decl = CommandDecl {
+            name: "agent.spawn".into(),
+            help: r#"{"name":"agent.spawn"}"#.into(),
+        };
+        let json = serde_json::to_value(&decl).expect("CommandDecl 직렬화");
+        let rust_fields: BTreeSet<String> = json
+            .as_object()
+            .expect("CommandDecl 은 JSON object 로 나간다")
+            .iter()
+            .map(|(k, v)| {
+                assert!(
+                    v.is_string(),
+                    "{k} 가 string 이 아니면 위 TS 텍스트가 거짓말이다"
+                );
+                k.clone()
+            })
+            .collect();
+
+        // ★위 rust_fields 만으론 안 잡히는 구멍★: `#[serde(skip_serializing_if = "Option::is_none")]`
+        //   필드는 값이 None 이면 직렬화 결과 자체에서 키가 사라진다 — 새 옵셔널 필드가 이 fixture 에서
+        //   None 이면 rust_fields 에 안 뜨고, ts_fields 도 그 필드를 안 적었으면(TS 갱신을 잊음) 둘 다
+        //   "없음"으로 일치해 아래 첫 assert_eq 가 조용히 통과한다. Debug 는 serde 속성과 무관하게 모든
+        //   필드를 항상 찍으므로(derive 는 필드를 가리지 않는다) 이걸로 실제 필드 집합을 다시 뽑아
+        //   ts_fields 와 대조한다. pretty-print(`{:#?}`) 최상위 필드 줄만 거른다(4칸 들여쓰기, 더 깊은
+        //   들여쓰기는 중첩 값이라 제외) — 필드 값 안의 `,`·`:` 에 흔들리지 않는다.
+        let debug_fields: BTreeSet<String> = format!("{decl:#?}")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("    ")?;
+                if rest.starts_with(' ') {
+                    return None;
+                }
+                let (name, _) = rest.split_once(':')?;
+                Some(name.trim().to_string())
+            })
+            .collect();
+
+        // 손으로 적은 텍스트에서 `<이름>: <타입>` 의 이름만 뽑는다.
+        let ts_fields: BTreeSet<String> = DECLS_TS
+            .trim_start_matches("Array<{")
+            .trim_end_matches("}>")
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|pair| {
+                let (name, ty) = pair.split_once(':').expect("`이름: 타입` 형태");
+                assert_eq!(ty.trim(), "string", "{name} 의 TS 타입이 string 이 아니다");
+                name.trim().to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            rust_fields, ts_fields,
+            "CommandDecl 의 Rust 필드와 손으로 적은 TS 필드가 갈렸다"
+        );
+        assert_eq!(
+            debug_fields, ts_fields,
+            "CommandDecl 의 실제 필드(Debug 기준, skip_serializing_if 로도 안 가려짐)와 손으로 적은 \
+             TS 필드가 갈렸다 — 위 rust_fields 비교는 값이 None 이라 직렬화에서 빠진 필드를 못 잡는다"
+        );
+    }
+
+    /// 등록 패킷이 선언을 실어 왕복한다 — `owner` 는 맨 문자열, `help` 는 **바이트 그대로** 보존된다.
+    #[test]
+    fn register_commands_round_trips_declarations() {
+        let help = r#"{"name":"agent.spawn","effect":"Write","since":1}"#;
+        let cmd = AgentCommand::RegisterCommands {
+            owner: OwnerToken::new("shell"),
+            decls: vec![CommandDecl {
+                name: "agent.spawn".into(),
+                help: help.into(),
+            }],
+            catalog_version: 1,
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"RegisterCommands":{"owner":"shell","decls":[{"name":"agent.spawn","help":"{\"name\":\"agent.spawn\",\"effect\":\"Write\",\"since\":1}"}],"catalog_version":1,"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "RegisterCommands wire 형태가 golden 과 불일치(owner 는 맨 문자열, help 는 통짜 문자열)"
+        );
+
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        match back {
+            AgentCommand::RegisterCommands { owner, decls, .. } => {
+                assert_eq!(owner.as_str(), "shell");
+                assert_eq!(decls.len(), 1);
+                assert_eq!(
+                    decls[0].help, help,
+                    "help 는 한 글자도 안 바뀌고 건너야 한다 — 중계자가 열어보지 않는다는 계약의 실물"
+                );
+            }
+            other => panic!("variant 불일치: {other:?}"),
+        }
+    }
+
+    /// 차분은 `added`(모양 포함) + `removed`(이름만)로 갈린다 — 둘을 한 모양으로 합치면 내릴 때
+    /// 없는 `help` 를 지어내야 한다.
+    #[test]
+    fn update_commands_carries_added_shapes_and_removed_names() {
+        let cmd = AgentCommand::UpdateCommands {
+            owner: OwnerToken::new("shell"),
+            added: vec![CommandDecl {
+                name: "chat.get".into(),
+                help: "{}".into(),
+            }],
+            removed: vec!["chat.reset".into()],
+            request_id: RequestId(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"UpdateCommands":{"owner":"shell","added":[{"name":"chat.get","help":"{}"}],"removed":["chat.reset"],"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
+            "UpdateCommands wire 형태가 golden 과 불일치"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    /// 조회 왕복 — 자취(`available=false`)도 목록에 실려야 §4-② 의 두 오류가 갈린다.
+    #[test]
+    fn list_commands_and_command_list_round_trip() {
+        let req = AgentCommand::ListCommands {
+            request_id: RequestId(Uuid::nil()),
+        };
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"ListCommands":{"request_id":"00000000-0000-0000-0000-000000000000"}}"#
+        );
+
+        let reply = AgentEvent::CommandList {
+            request_id: RequestId(Uuid::nil()),
+            entries: vec![
+                CommandListEntry {
+                    name: "agent.spawn".into(),
+                    help: "{}".into(),
+                    available: true,
+                },
+                CommandListEntry {
+                    name: "tab.create".into(),
+                    help: "{}".into(),
+                    available: false,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            r#"{"CommandList":{"request_id":"00000000-0000-0000-0000-000000000000","entries":[{"name":"agent.spawn","help":"{}","available":true},{"name":"tab.create","help":"{}","available":false}]}}"#,
+            "CommandList wire 형태가 golden 과 불일치"
+        );
+        let back: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    /// ★명령↔답장 쌍 박제(ADR-0134)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
+    /// `AgentEvent::CommandList` 가 그걸 깨우는 쪽이다. 한쪽만 고치면(예: 새 reply variant 를
+    /// broadcast 로 잘못 분류) 그 왕복은 연결이 끊길 때까지 안 풀린다. 동형 검증이 `src-tauri`
+    /// `daemon_client::protocol_state` 에도 있었으나 그 lib 테스트 타깃은 로컬/CI 모두
+    /// 0xc0000139(ENTRYPOINT_NOT_FOUND)로 실행되지 않는다 — 실제로 도는 건 이 crate 테스트뿐이다.
+    #[test]
+    fn list_commands_reply_request_id_pairing() {
+        let r = RequestId::new();
+        let cmd = AgentCommand::ListCommands { request_id: r };
+        assert_eq!(
+            command_request_id(&cmd),
+            Some(r),
+            "ListCommands 는 request_id 동봉 — pending 슬롯을 만드는 쪽"
+        );
+        let reply = AgentEvent::CommandList {
+            request_id: r,
+            entries: vec![],
+        };
+        assert_eq!(
+            event_reply_request_id(&reply),
+            Some(r),
+            "CommandList 는 ListCommands 의 전용 reply — 같은 request_id 로 매칭돼야 슬롯이 깨어난다"
+        );
+    }
+
+    /// `request_id` 가 빠진 패킷은 **거절돼야 한다** — 이 crate 의 `RequestId::default()` 는 새 v4 를
+    /// 찍으므로 `#[serde(default)]` 가 붙으면 조용히 짝 없는 상관 키가 생긴다(답장이 영영 안 붙는다).
+    /// 그 attribute 가 실수로 들어오면 이 단언이 먼저 깨진다.
+    #[test]
+    fn registration_variants_reject_missing_request_id() {
+        for json in [
+            r#"{"RegisterCommands":{"owner":"shell","decls":[],"catalog_version":1}}"#,
+            r#"{"UpdateCommands":{"owner":"shell","added":[],"removed":[]}}"#,
+            r#"{"ListCommands":{}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AgentCommand>(json).is_err(),
+                "request_id 부재는 기본값으로 흡수되면 안 된다: {json}"
+            );
+        }
     }
 
     #[test]

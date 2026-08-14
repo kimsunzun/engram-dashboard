@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use engram_dashboard_core::agent::types::AgentId;
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 
@@ -22,6 +22,10 @@ fn empty_messaging_slot() -> Arc<MessagingSlot> {
 /// 이 파일은 제어 동사를 부르지 않으므로 명부 통지 팬아웃도 비운다.
 fn empty_broadcast_slot() -> Arc<RosterBroadcastSlot> {
     Arc::new(RosterBroadcastSlot::new())
+}
+
+fn empty_commands_slot() -> Arc<CommandTableSlot> {
+    Arc::new(CommandTableSlot::new())
 }
 
 fn initialize_body() -> serde_json::Value {
@@ -158,6 +162,7 @@ async fn missing_unknown_stale_tokens_are_rejected_before_session() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -205,6 +210,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -256,6 +262,7 @@ async fn get_and_delete_without_token_are_rejected() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -289,6 +296,7 @@ async fn cross_token_session_takeover_is_rejected() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -325,6 +333,7 @@ async fn revoked_mid_session_request_is_rejected() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -364,6 +373,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -425,6 +435,7 @@ async fn orphaned_session_attach_is_rejected() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -462,6 +473,7 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -487,6 +499,7 @@ async fn malformed_session_id_header_is_rejected_with_400() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -526,6 +539,7 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -556,6 +570,7 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");
@@ -591,6 +606,7 @@ async fn oversize_body_is_rejected_with_413() {
         empty_slot(),
         empty_messaging_slot(),
         empty_broadcast_slot(),
+        empty_commands_slot(),
     )
     .await
     .expect("start mcp server");

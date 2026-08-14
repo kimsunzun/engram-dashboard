@@ -3,6 +3,7 @@ import type { AgentInfo } from "./AgentInfo";
 import type { AgentProfile } from "./AgentProfile";
 import type { AgentStatus } from "./AgentStatus";
 import type { Capabilities } from "./Capabilities";
+import type { CommandListEntry } from "./CommandListEntry";
 import type { OutputChunk } from "./OutputChunk";
 import type { Preset } from "./Preset";
 import type { RequestId } from "./RequestId";
@@ -22,4 +23,4 @@ replay_from: number,
 /**
  * ring 밖으로 밀려 일부 손실(clear+tail).
  */
-truncated: boolean, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "AgentList": { request_id: RequestId, agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "ProfileListUpdated": { profiles: Array<AgentProfile>, } } | { "ProfileList": { request_id: RequestId, profiles: Array<AgentProfile>, } } | { "PresetListUpdated": { presets: Array<Preset>, } } | { "PresetList": { request_id: RequestId, presets: Array<Preset>, } } | { "Snapshot": { request_id: RequestId, agent_id: string, chunks: Array<SnapshotChunk>, } } | { "Created": { request_id: RequestId, profile: AgentProfile, } } | { "Spawned": { request_id: RequestId, agent: AgentInfo, } } | { "Error": { request_id: RequestId | null, message: string, } };
+truncated: boolean, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "AgentList": { request_id: RequestId, agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "ProfileListUpdated": { profiles: Array<AgentProfile>, } } | { "ProfileList": { request_id: RequestId, profiles: Array<AgentProfile>, } } | { "PresetListUpdated": { presets: Array<Preset>, } } | { "PresetList": { request_id: RequestId, presets: Array<Preset>, } } | { "Snapshot": { request_id: RequestId, agent_id: string, chunks: Array<SnapshotChunk>, } } | { "Created": { request_id: RequestId, profile: AgentProfile, } } | { "Spawned": { request_id: RequestId, agent: AgentInfo, } } | { "CommandList": { request_id: RequestId, entries: Array<CommandListEntry>, } } | { "Error": { request_id: RequestId | null, message: string, } };

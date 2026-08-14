@@ -18,7 +18,8 @@ use engram_dashboard_core::agent::types::{
 };
 use engram_dashboard_daemon::control::agent::{resolve_target, RosterBroadcast, TargetResolution};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, McpServerHandle, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
+    RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 
@@ -117,6 +118,9 @@ async fn fixture(tag: &str) -> Fixture {
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
         broadcast_slot,
+        // ★배선 0★: 이 파일이 태우는 것은 여전히 `/control/agent` 의 동사 match 다 — 명령 표는 아직
+        //   어느 라우트도 읽지 않으므로 비운다(ADR-0134).
+        Arc::new(CommandTableSlot::new()),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));

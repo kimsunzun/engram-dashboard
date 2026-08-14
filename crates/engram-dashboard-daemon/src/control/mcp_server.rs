@@ -213,7 +213,33 @@ impl RosterBroadcastSlot {
     pub fn set(&self, broadcast: Arc<dyn super::agent::RosterBroadcast>) {
         let _ = self.inner.set(broadcast);
     }
-    fn get(&self) -> Option<&Arc<dyn super::agent::RosterBroadcast>> {
+    /// 명령 표의 통지 어댑터도 읽는다 — 그쪽은 **부를 때마다** 이것을 본다(`commands` 모듈).
+    pub(crate) fn get(&self) -> Option<&Arc<dyn super::agent::RosterBroadcast>> {
+        self.inner.get()
+    }
+}
+
+/// ★데몬 명령 표 늦은 주입 슬롯(ADR-0134)★: ManagerSlot 과 동형. 표는 매니저를 쥐므로 매니저 조립
+/// **뒤**에야 만들어지는데, 그 매니저를 담을 슬롯 자체는 MCP 서버보다 앞에 있어야 한다.
+///
+/// ★표가 늦게 와도 명부 통지는 안 늦는다★ — 표가 쥐는 것은 팬아웃 값이 아니라 위 슬롯이다
+/// (`commands::make_daemon_table`).
+#[derive(Default)]
+pub struct CommandTableSlot {
+    inner: std::sync::OnceLock<Arc<engram_dashboard_command::CommandTable>>,
+}
+
+impl CommandTableSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn set(&self, table: Arc<engram_dashboard_command::CommandTable>) {
+        let _ = self.inner.set(table);
+    }
+    /// ★배선 0★: 다음 조각의 `/control/agent` 어댑터가 동사 match 대신 이것을 읽는다. 그때까지는 표를
+    ///   조립·주입만 하고 아무도 조회하지 않는다.
+    #[allow(dead_code)]
+    pub(crate) fn get(&self) -> Option<&Arc<engram_dashboard_command::CommandTable>> {
         self.inner.get()
     }
 }
@@ -902,6 +928,10 @@ async fn control_messages_handler(
 struct ControlAgentState {
     manager: Arc<ManagerSlot>,
     roster_broadcast: Arc<RosterBroadcastSlot>,
+    /// ★배선 0 — 아직 아무도 읽지 않는다(ADR-0134)★: 아래 핸들러의 동사 match 를 이 표 조회로 바꾸는
+    ///   것이 다음 조각이다. 표를 먼저 여기까지 태워 두면 그 조각의 diff 가 match 교체 하나로 좁아진다.
+    #[allow(dead_code)]
+    commands: Arc<CommandTableSlot>,
 }
 
 /// 항상 200 + JSON body(성공/반려 모두) — `/control/messages` 와 같은 계약이라 CLI 의 조회 판정기가
@@ -977,6 +1007,7 @@ pub async fn start_mcp_server(
     manager: Arc<ManagerSlot>,
     messaging: Arc<MessagingSlot>,
     roster_broadcast: Arc<RosterBroadcastSlot>,
+    commands: Arc<CommandTableSlot>,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr: SocketAddr = listener.local_addr()?;
@@ -1019,6 +1050,7 @@ pub async fn start_mcp_server(
     let agent_state = ControlAgentState {
         manager: manager.clone(),
         roster_broadcast,
+        commands,
     };
     // ★명단(`ControlRoute::ALL`)을 돌며 얹는다 — 빌더 체인으로 되돌리지 말 것★: 새 라우트가 명단에
     //   들어와야 서빙이 되고, 들어오면 `is_mail` 의 exhaustive match 가 우편 분류를 컴파일 단계에서
@@ -1219,6 +1251,11 @@ mod tests {
         Arc::new(RosterBroadcastSlot::new())
     }
 
+    /// 빈 명령 표 슬롯(위와 동일 — 배선 0 이라 어느 라우트도 읽지 않는다).
+    fn empty_commands_slot() -> Arc<CommandTableSlot> {
+        Arc::new(CommandTableSlot::new())
+    }
+
     #[test]
     fn send_args_schema_builds() {
         let schema = schemars::schema_for!(SendArgs);
@@ -1307,6 +1344,7 @@ mod tests {
             empty_slot(),
             empty_messaging_slot(),
             empty_broadcast_slot(),
+            empty_commands_slot(),
         )
         .await
         .expect("start mcp server");
@@ -1327,6 +1365,7 @@ mod tests {
             empty_slot(),
             empty_messaging_slot(),
             empty_broadcast_slot(),
+            empty_commands_slot(),
         )
         .await
         .expect("start mcp server");

@@ -31,7 +31,7 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, McpServerHandle, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -727,6 +727,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         messaging_slot.clone(),
         // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
         Arc::new(RosterBroadcastSlot::new()),
+        Arc::new(CommandTableSlot::new()),
     )
     .await
     .map_err(|e| format!("start mcp server: {e}"))?;
