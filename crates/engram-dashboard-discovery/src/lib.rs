@@ -39,7 +39,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 //     를 폴링하며 운영 파일은 백업/복원으로 보호한다.
 
 // ADR-0029: debug 분기(walk-up `.engram-data`)와 그 단위테스트에서만 쓰인다 — release
-// default_data_dir 은 exe 옆 `engram-data` 만 쓰므로 release 비-test 빌드에선 dead_code.
+// default_data_dir 은 exe 옆 `data` 만 쓰므로 release 비-test 빌드에선 dead_code.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 const LOCAL_DATA_DIR: &str = ".engram-data";
 
@@ -47,7 +47,13 @@ const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
 /// ADR-0134 결정 2: 릴리스 데이터는 실행 폴더 **하위 한 폴더**에 모인다 — exe 옆에 흩어두면 배포
 /// 파일과 섞여 새 버전 압축을 덮어쓸 때 사용자 데이터가 함께 날아간다.
-const RELEASE_DATA_DIR: &str = "engram-data";
+///
+/// ★`engram-` 접두사를 붙이지 마라(되살리지 마라)★: 이 폴더는 사용자가 이미 이름 붙인 배포 폴더
+/// **안에** 있어 접두사가 부모 이름을 되풀이할 뿐이고, 형제인 `prompts/` 는 접두사가 없어 규칙도
+/// 어긋난다. 위 [`LOCAL_DATA_DIR`] 과 이름이 다른 것은 실수가 아니다 — 디버그 쪽은 폴더가 많은 repo
+/// 루트에 맨몸으로 놓이고 앞의 점이 가려 주므로 접두사가 값을 한다. 대칭을 맞추려 하지 말 것.
+/// (사용자 결정 2026-08-14)
+const RELEASE_DATA_DIR: &str = "data";
 
 /// 쓰기 프로브 파일 이름의 앞부분. 뒤에 **프로세스·호출마다 다른 꼬리**가 붙는다.
 ///
@@ -71,7 +77,7 @@ const WRITE_PROBE_PAYLOAD: &[u8] = b"engram-write-probe";
 /// 2. **디버그(`cfg!(debug_assertions)`)**: current_exe 에서 위로 올라가 repo 루트(`.git` 또는
 ///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-data`. 루트 못 찾으면 exe 디렉토리
 ///    fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드(app·daemon)가 한 폴더 공유.
-/// 3. **릴리즈(`not(debug_assertions)`)**: **실행 파일 폴더 하위 `engram-data/`**
+/// 3. **릴리즈(`not(debug_assertions)`)**: **실행 파일 폴더 하위 `data/`**
 ///    ([`release_data_dir`]). 배포판 폴더를 지우면 흔적이 남지 않는다 — 완전 포터블(ADR-0134 결정 1).
 ///
 /// 어느 경로든 **절대 패닉하지 않는다**(배포·루트 미발견 상황에서도 PathBuf 를 반드시 반환).
@@ -125,7 +131,7 @@ fn data_dir_env_override() -> Option<PathBuf> {
     Some(PathBuf::from(val))
 }
 
-/// 릴리스 데이터 폴더 = `<exe 폴더>/engram-data`(ADR-0134 결정 1·2).
+/// 릴리스 데이터 폴더 = `<exe 폴더>/data`(ADR-0134 결정 1·2).
 ///
 /// ★cfg 를 걸지 않는다(load-bearing)★: 호출부인 [`default_data_dir`] 의 릴리즈 분기는
 /// `not(debug_assertions)` 아래에 있고 **테스트는 항상 debug 로 돈다** — 이 함수까지 cfg 로 가리면
@@ -1271,7 +1277,7 @@ mod tests {
     fn data_dir_env_override_returns_path_verbatim() {
         let _g = ENV_LOCK.lock().unwrap();
         let prev = std::env::var_os(DATA_DIR_ENV);
-        let want = std::env::temp_dir().join("engram-data-dir-override-test");
+        let want = std::env::temp_dir().join("engram-override-data-dir-test");
         std::env::set_var(DATA_DIR_ENV, &want);
         let got = default_data_dir();
         // 단언 전에 복원해 단언 실패에도 env 가 leak 되지 않게 한다.
@@ -1321,8 +1327,8 @@ mod tests {
         let exe_dir = Path::new("C:\\portable\\engram");
         assert_eq!(
             release_data_dir(exe_dir),
-            exe_dir.join("engram-data"),
-            "릴리스 데이터 폴더는 exe 폴더 하위 engram-data"
+            exe_dir.join("data"),
+            "릴리스 데이터 폴더는 exe 폴더 하위 data(`engram-` 접두사 없음 — 상수 주석 참조)"
         );
     }
 
@@ -1427,7 +1433,7 @@ mod tests {
     fn concurrent_checks_racing_on_folder_creation_do_not_produce_a_false_failure() {
         let parent = fresh_probe_dir("concurrent");
         std::fs::create_dir_all(&parent).expect("상위 폴더 생성");
-        let target = parent.join("engram-data");
+        let target = parent.join("data");
 
         // 사전 점검(만들고 되돌림)과 데몬 경로(만들고 유지)를 섞는다 — 실제로 겹치는 두 주체다.
         let results: Vec<Result<(), DiscoveryError>> = std::thread::scope(|s| {
@@ -1462,7 +1468,7 @@ mod tests {
     fn check_writable_leaves_no_folder_behind_including_intermediates() {
         let root = fresh_probe_dir("nocreate");
         std::fs::create_dir_all(&root).expect("루트 폴더 생성");
-        let target = root.join("a").join("b").join("engram-data");
+        let target = root.join("a").join("b").join("data");
 
         check_data_dir_writable(&target).expect("만들 수 있으면 통과");
 
@@ -1512,7 +1518,7 @@ mod tests {
         let root = fresh_probe_dir("keep-mid");
         let mid = root.join("a");
         std::fs::create_dir_all(&mid).expect("중간 폴더까지 미리 생성");
-        let target = mid.join("b").join("engram-data");
+        let target = mid.join("b").join("data");
 
         check_data_dir_writable(&target).expect("만들 수 있으면 통과");
 
@@ -1527,7 +1533,7 @@ mod tests {
     #[test]
     fn check_writable_does_not_remove_pre_existing_folders() {
         let root = fresh_probe_dir("preexisting");
-        let target = root.join("engram-data");
+        let target = root.join("data");
         std::fs::create_dir_all(&target).expect("대상까지 미리 생성");
         check_data_dir_writable(&target).expect("통과");
         let survived = target.exists();
@@ -1541,7 +1547,7 @@ mod tests {
     fn check_writable_rejects_a_path_that_exists_as_a_file() {
         let parent = fresh_probe_dir("asfile");
         std::fs::create_dir_all(&parent).expect("상위 폴더 생성");
-        let target = parent.join("engram-data");
+        let target = parent.join("data");
         std::fs::write(&target, b"not a folder").expect("같은 이름 파일 생성");
         let err = check_data_dir_writable(&target).unwrap_err();
         let _ = std::fs::remove_dir_all(&parent);

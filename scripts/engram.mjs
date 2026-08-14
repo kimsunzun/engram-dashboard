@@ -9,7 +9,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
-// daemon.json 위치 해결 — dev(repo <root>/.engram-data) 와 release(<exe 폴더>/engram-data) 둘 다 커버.
+// daemon.json 위치 해결 — dev(repo <root>/.engram-data) 와 release(<exe 폴더>/data) 둘 다 커버.
 // 이 후보 탐색이 "release-safe" 의 핵심: 어느 빌드든 데몬이 떠 있으면 portfile 로 붙는다.
 //
 // ★ENGRAM_DATA_DIR 로 릴리스 데몬을 가리키게 하지 말 것★: ADR-0134 이후 그 변수는 단일 인스턴스
@@ -56,13 +56,13 @@ function findPortfile() {
     if (parent === dir) break
     dir = parent
   }
-  // release: <exe 폴더>/engram-data/daemon.json (ADR-0134 · discovery::default_data_dir).
+  // release: <exe 폴더>/data/daemon.json (ADR-0134 · discovery::default_data_dir).
   //   릴리스 exe 는 repo 밖에도 풀릴 수 있으므로 repo 기준 후보(target/release)와 cwd 기준 후보를 함께 둔다.
   try {
     const scriptDir = path.dirname(fileURLToPath(import.meta.url)) // <repo>/scripts
-    candidates.push(path.join(scriptDir, '..', 'target', 'release', 'engram-data', 'daemon.json'))
+    candidates.push(path.join(scriptDir, '..', 'target', 'release', 'data', 'daemon.json'))
   } catch {}
-  candidates.push(path.join(process.cwd(), 'engram-data', 'daemon.json'))
+  candidates.push(path.join(process.cwd(), 'data', 'daemon.json'))
   // 살아있는 데몬을 가리키는 첫 portfile 선택 — 죽은 dev portfile 을 건너뛴다(ENGRAM_DATA_DIR 목발 제거).
   // 이게 없으면 스테일 .engram-data/daemon.json 이 죽은 데몬을 가리켜 연결 실패한다.
   const existing = candidates.filter((c) => fs.existsSync(c))

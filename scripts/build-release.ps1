@@ -144,8 +144,8 @@ foreach ($md in $ExpectedPrompts) {
 # ── (b) release/ clean 재생성 ────────────────────────────────────────────────────────────
 #
 # ★지우기 전에 막는다(load-bearing)★: Remove-Item -Recurse 는 **중간에 멈출 수 있다**. 앱이 그 폴더에서
-#   돌고 있으면 데몬이 engram-data\daemon.json 을 붙잡고 있어(ADR-0135 — 삭제 공유 없음) 삭제가 거부되는데,
-#   실측상 그 전에 이미 engram-data\agents.json 이 지워진다. 결과 = 에이전트 명부만 날아가고 빌드는 시작도
+#   돌고 있으면 데몬이 data\daemon.json 을 붙잡고 있어(ADR-0135 — 삭제 공유 없음) 삭제가 거부되는데,
+#   실측상 그 전에 이미 data\agents.json 이 지워진다. 결과 = 에이전트 명부만 날아가고 빌드는 시작도
 #   못 한 채 raw PowerShell 오류. `launch\빌드.bat` 은 taskkill 을 하지 않고 `launch\실행.bat` 이 같은
 #   폴더에서 앱을 띄우므로 "돌려보고 다시 빌드"가 평범한 진입 경로다.
 #   ★데이터를 몰래 보존하는 것으로 고치지 말 것★: clean 재생성이 데이터를 함께 지우는 것은 ADR 이

@@ -1,7 +1,7 @@
 //! discovery 커맨드 — LLM/프론트가 데몬 발견을 호출하는 thin wrapper(§5 제어 표면).
 //!
 //! ADR-0029: 모드 제거 → AppState 없음. data_dir 은 `default_data_dir()`(무인자, debug=repo 루트
-//! walk-up / release=exe 폴더 하위 `engram-data`)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
+//! walk-up / release=exe 폴더 하위 `data`)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
 
 use std::sync::OnceLock;
 use std::time::Duration;
