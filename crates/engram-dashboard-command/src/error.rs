@@ -2,82 +2,79 @@
 
 use std::fmt;
 
-/// 전송·라우팅 계층 + 공통 오류 코드.
+/// 어휘를 **한 표에서** 찍는다 — 변형 · wire 문자열 · [`ErrorCode::ALL`] 멤버십 · 재시도 지시가 같은
+/// 줄에서 함께 난다.
 ///
-/// ★wire 표현은 문자열이고 디코더는 **모르는 코드를 받아들인다**★ — 모르는 코드는 [`ErrorCode::Internal`]
-/// 로 낮춘다([`CommandError`] 의 역직렬화가 `retry` 도 [`RetryMode::Never`] 로 낮춘다). 닫힌 열거형으로
-/// 디코드하면 코드가 하나 느는 additive 확장이 옛 클라이언트를 깨뜨린다.
-/// ★코드 추가는 additive, 뜻 변경은 금지★(TRD §4-③).
-// ADR-0134
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorCode {
-    InvalidArgument,
-    UnknownCommand,
-    OwnerUnavailable,
-    OutcomeUnknown,
-    Timeout,
-    RequestIdConflict,
-    AlreadyApplied,
-    AuthFailed,
-    ProtocolMismatch,
-    NotFound,
-    Conflict,
-    Unsupported,
-    Internal,
+/// ★목록이 둘이면 코드를 하나 더하는 편집이 한쪽만 고친다★: 손으로 적은 `as_str` 옆에서는 컴파일러가
+/// 새 변형의 `as_str` 갈래만 요구하고 `ALL` 등재는 요구하지 않아, 새 코드가 **제 이름으로 나가고
+/// `INTERNAL` 로 돌아오는** 비대칭이 조용히 선다(왕복 테스트가 `ALL` 을 돌므로 그것도 못 본다).
+/// 여기서는 세 칸을 다 적지 않으면 규칙에 안 맞아 **컴파일이 멈춘다.**
+macro_rules! error_codes {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $( $(#[$code_meta:meta])* $variant:ident => $wire:literal retry $retry:ident, )+
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum $name {
+            $( $(#[$code_meta])* $variant, )+
+        }
+
+        impl $name {
+            /// 어휘 전량 — 위 표가 그대로 난다.
+            const ALL: &'static [Self] = &[ $( Self::$variant, )+ ];
+
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $wire, )+
+                }
+            }
+
+            /// 모르는 코드에 `None` — 호출자가 「낮출지」를 스스로 정하게 한다.
+            pub fn from_wire(code: &str) -> Option<Self> {
+                Self::ALL.iter().copied().find(|c| c.as_str() == code)
+            }
+
+            /// 코드가 정하는 재시도 지시.
+            ///
+            /// ★한 자리에 모아 두는 이유★: 「재시도해도 되나」는 **확실성**의 함수인데(TRD §4-④),
+            /// 호출처마다 손으로 붙이면 같은 코드가 자리마다 다른 지시를 달고 나간다 — 그러면 호출자는
+            /// 코드가 아니라 운에 따라 재시도 여부를 정하게 된다.
+            /// ★표의 세 번째 칸인 이유★: 밖에 두면 포괄 갈래(`_ => Never`)가 서고, 그러면 새 코드가
+            /// **아무 결정 없이** 「재시도 금지」를 달고 나간다.
+            pub const fn default_retry(self) -> RetryMode {
+                match self {
+                    $( Self::$variant => RetryMode::$retry, )+
+                }
+            }
+        }
+    };
 }
 
-impl ErrorCode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidArgument => "INVALID_ARGUMENT",
-            Self::UnknownCommand => "UNKNOWN_COMMAND",
-            Self::OwnerUnavailable => "OWNER_UNAVAILABLE",
-            Self::OutcomeUnknown => "OUTCOME_UNKNOWN",
-            Self::Timeout => "TIMEOUT",
-            Self::RequestIdConflict => "REQUEST_ID_CONFLICT",
-            Self::AlreadyApplied => "ALREADY_APPLIED",
-            Self::AuthFailed => "AUTH_FAILED",
-            Self::ProtocolMismatch => "PROTOCOL_MISMATCH",
-            Self::NotFound => "NOT_FOUND",
-            Self::Conflict => "CONFLICT",
-            Self::Unsupported => "UNSUPPORTED",
-            Self::Internal => "INTERNAL",
-        }
-    }
-
-    /// 모르는 코드에 `None` — 호출자가 「낮출지」를 스스로 정하게 한다.
-    pub fn from_wire(code: &str) -> Option<Self> {
-        let found = [
-            Self::InvalidArgument,
-            Self::UnknownCommand,
-            Self::OwnerUnavailable,
-            Self::OutcomeUnknown,
-            Self::Timeout,
-            Self::RequestIdConflict,
-            Self::AlreadyApplied,
-            Self::AuthFailed,
-            Self::ProtocolMismatch,
-            Self::NotFound,
-            Self::Conflict,
-            Self::Unsupported,
-            Self::Internal,
-        ]
-        .into_iter()
-        .find(|c| c.as_str() == code);
-        found
-    }
-
-    /// 코드가 정하는 재시도 지시.
+error_codes! {
+    /// 전송·라우팅 계층 + 공통 오류 코드.
     ///
-    /// ★한 자리에 모아 두는 이유★: 「재시도해도 되나」는 **확실성**의 함수인데(TRD §4-④), 호출처마다
-    /// 손으로 붙이면 같은 코드가 자리마다 다른 지시를 달고 나간다 — 그러면 호출자는 코드가 아니라
-    /// 운에 따라 재시도 여부를 정하게 된다.
-    pub const fn default_retry(self) -> RetryMode {
-        match self {
-            Self::OwnerUnavailable => RetryMode::AfterCondition,
-            Self::OutcomeUnknown | Self::Timeout => RetryMode::SameRequestId,
-            _ => RetryMode::Never,
-        }
+    /// ★wire 표현은 문자열이고 디코더는 **모르는 코드를 받아들인다**★ — 모르는 코드는 [`ErrorCode::Internal`]
+    /// 로 낮춘다([`CommandError`] 의 역직렬화가 `retry` 도 [`RetryMode::Never`] 로 낮춘다). 닫힌 열거형으로
+    /// 디코드하면 코드가 하나 느는 additive 확장이 옛 클라이언트를 깨뜨린다.
+    /// ★코드 추가는 additive, 뜻 변경은 금지★(TRD §4-③).
+    // ADR-0134
+    pub enum ErrorCode {
+        InvalidArgument => "INVALID_ARGUMENT" retry Never,
+        UnknownCommand => "UNKNOWN_COMMAND" retry Never,
+        OwnerUnavailable => "OWNER_UNAVAILABLE" retry AfterCondition,
+        OutcomeUnknown => "OUTCOME_UNKNOWN" retry SameRequestId,
+        Timeout => "TIMEOUT" retry SameRequestId,
+        RequestIdConflict => "REQUEST_ID_CONFLICT" retry Never,
+        AlreadyApplied => "ALREADY_APPLIED" retry Never,
+        AuthFailed => "AUTH_FAILED" retry Never,
+        ProtocolMismatch => "PROTOCOL_MISMATCH" retry Never,
+        NotFound => "NOT_FOUND" retry Never,
+        Conflict => "CONFLICT" retry Never,
+        Unsupported => "UNSUPPORTED" retry Never,
+        Internal => "INTERNAL" retry Never,
     }
 }
 
@@ -151,11 +148,20 @@ pub struct CommandError {
     received: Option<Box<ReceivedError>>,
 }
 
+/// 받은 `code` 칸이 타입드 칸으로 복원되지 않는 두 얼굴 — 아는 코드는 여기 담지 않는다.
+#[derive(Debug, Clone)]
+enum ReceivedCode {
+    /// 그 칸이 **없었거나 `null` 이었다** — 나갈 때도 싣지 않는다(없던 코드를 지어내지 않는다).
+    Absent,
+    /// 모르는 코드 문자열 — 낮춰 읽되 나갈 때는 받은 그대로 싣는다.
+    Unknown(String),
+}
+
 /// 디코드가 붙잡아 두는 원문 조각 — [`CommandError`] 의 세 칸으로 복원할 수 없는 것만 담는다.
 #[derive(Debug, Clone)]
 struct ReceivedError {
-    /// 미지 코드 문자열. 아는 코드였으면 `None`(타입드 칸이 그대로 나른다).
-    code: Option<String>,
+    /// 아는 코드였으면 `None`(타입드 칸이 그대로 나른다). 두 예외는 [`ReceivedCode`].
+    code: Option<ReceivedCode>,
     /// 받은 `retry` 원문. ★`None` = 그 필드가 **없었거나 `null` 이었다**★ — 나갈 때도 싣지 않는다.
     retry: Option<String>,
     /// `message` 칸이 실려 있었나(`null` 은 부재로 센다). 빈 문구를 지어내지 않으려고 부재를 기억한다.
@@ -230,11 +236,14 @@ impl CommandError {
         self.message = message.into();
     }
 
-    /// 나갈 때 실리는 코드 문자열 — 미지 코드를 받았으면 **받은 그대로**다.
-    pub fn wire_code(&self) -> &str {
-        match self.received.as_deref().and_then(|r| r.code.as_deref()) {
-            Some(code) => code,
-            None => self.code.as_str(),
+    /// 나갈 때 실리는 코드 문자열 — 미지 코드를 받았으면 **받은 그대로**이고, `code` 칸이 **없이**
+    /// (또는 `null` 로) 온 오류에는 `None`(나갈 때도 그 칸이 없다).
+    /// [`CommandError::set_code`] 로 갈아 끼운 뒤에는 그 타입드 값이 나간다.
+    pub fn wire_code(&self) -> Option<&str> {
+        match self.received.as_deref().map(|r| &r.code) {
+            Some(Some(ReceivedCode::Absent)) => None,
+            Some(Some(ReceivedCode::Unknown(code))) => Some(code),
+            _ => Some(self.code.as_str()),
         }
     }
 
@@ -278,7 +287,10 @@ struct WireError<'a> {
 
 #[derive(serde::Deserialize)]
 struct RawError {
-    code: String,
+    /// ★필수로 두지 않는다★ — 코드 없는(또는 `null` 인) 오류 하나가 디코드를 실패시키면 그것을 실은
+    /// [`crate::CommandReply`] 가 통째로 못 읽히고 **상관 키까지 사라진다**. 그러면 호출자는 결말 대신
+    /// 마감시각을 보게 되는데, 상대는 이미 답을 보냈다(TRD §4-⑤·§4-⑥).
+    code: Option<String>,
     message: Option<String>,
     retry: Option<String>,
     /// 계약 밖 필드를 버리지 않고 모은다 — `deny_unknown_fields` 는 additive 확장을 깨므로 달지 않는다.
@@ -300,7 +312,9 @@ impl serde::Serialize for CommandError {
         };
 
         let mut map = s.serialize_map(None)?;
-        map.serialize_entry("code", self.wire_code())?;
+        if let Some(code) = self.wire_code() {
+            map.serialize_entry("code", code)?;
+        }
         if received.message_present || !self.message.is_empty() {
             map.serialize_entry("message", &self.message)?;
         }
@@ -317,9 +331,10 @@ impl serde::Serialize for CommandError {
 impl<'de> serde::Deserialize<'de> for CommandError {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = RawError::deserialize(d)?;
-        let known_code = ErrorCode::from_wire(&raw.code);
+        let known_code = raw.code.as_deref().and_then(ErrorCode::from_wire);
         let known_retry = raw.retry.as_deref().and_then(RetryMode::from_wire);
         // 낮춘 해석: 모르는 코드는 INTERNAL + never(§4-⑦), 모르는 지시는 코드의 파생값.
+        //   코드가 **없는** 것도 같은 자리로 접는다 — 아는 코드가 아니면 뜻을 모르는 것은 매한가지다.
         let code = known_code.unwrap_or(ErrorCode::Internal);
         let retry = match known_code {
             Some(_) => known_retry.unwrap_or_else(|| code.default_retry()),
@@ -333,7 +348,11 @@ impl<'de> serde::Deserialize<'de> for CommandError {
             && raw.extra.is_empty();
         let received = (!expressible).then(|| {
             Box::new(ReceivedError {
-                code: known_code.is_none().then_some(raw.code),
+                code: match (known_code, raw.code) {
+                    (Some(_), _) => None,
+                    (None, Some(text)) => Some(ReceivedCode::Unknown(text)),
+                    (None, None) => Some(ReceivedCode::Absent),
+                },
                 message_present: raw.message.is_some(),
                 retry: raw.retry,
                 extra: raw.extra,
@@ -351,6 +370,62 @@ impl<'de> serde::Deserialize<'de> for CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CommandReply, RequestId};
+
+    /// ★어휘가 늘 때 나가는 이름과 들어오는 이름이 함께 늘어야 한다★ — 한쪽만 늘면 새 코드가 제 이름으로
+    /// 나가고 `INTERNAL` 로 돌아와, 코드를 더한 그 편집이 스스로를 무장 해제한다.
+    ///
+    /// 목록 어긋남 자체는 이제 표(`error_codes!`)가 막는다 — 여기 남는 위험은 **두 변형이 같은 wire
+    /// 문자열을 쓰는 것**이고, 그러면 뒤 줄이 앞 줄의 이름으로 돌아온다(`from_wire` 는 표를 훑어 먼저
+    /// 맞는 것을 낸다).
+    #[test]
+    fn every_code_in_the_alphabet_round_trips_through_its_wire_string() {
+        for code in ErrorCode::ALL {
+            assert_eq!(
+                ErrorCode::from_wire(code.as_str()),
+                Some(*code),
+                "{} 가 돌아오지 않는다",
+                code.as_str()
+            );
+        }
+    }
+
+    /// ★코드가 없어도 답장 전체는 읽혀야 한다★ — 여기서 디코드가 실패하면 [`CommandReply`] 가 통째로
+    /// 깨져 **상관 키까지 잃고**, 호출자는 이미 도착한 결말 대신 마감시각을 본다(TRD §4-⑤).
+    #[test]
+    fn a_reply_whose_code_is_null_still_decodes_and_keeps_its_request_id() {
+        let id = RequestId::new();
+        let wire = format!(
+            r#"{{"request_id":"{id}","outcome":{{"Err":{{"code":null,"message":"the owner fell over"}}}}}}"#
+        );
+
+        let decoded: CommandReply =
+            serde_json::from_str(&wire).expect("code 가 null 이어도 디코드된다");
+
+        assert_eq!(decoded.request_id, id, "상관 키가 살아남는다");
+        let err = decoded.outcome.expect_err("오류 답장");
+        assert_eq!(err.code(), ErrorCode::Internal);
+        assert_eq!(err.retry(), RetryMode::Never);
+        assert_eq!(err.wire_code(), None, "없던 코드를 지어내지 않는다");
+        assert_eq!(
+            serde_json::to_string(&err).expect("재직렬화"),
+            r#"{"message":"the owner fell over"}"#
+        );
+    }
+
+    /// 칸이 아예 없는 경우도 `null` 과 같이 접힌다 — 둘 다 「값 없음」이다(아래 정규화 규칙과 같은 축).
+    #[test]
+    fn an_error_with_no_code_field_decodes_as_internal_and_stays_codeless() {
+        let decoded: CommandError =
+            serde_json::from_str(r#"{"message":"x","retry":"never"}"#).expect("디코드");
+
+        assert_eq!(decoded.code(), ErrorCode::Internal);
+        assert_eq!(decoded.retry(), RetryMode::Never);
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("재직렬화"),
+            r#"{"message":"x","retry":"never"}"#
+        );
+    }
 
     #[test]
     fn unknown_wire_code_degrades_to_internal_never() {
@@ -370,7 +445,7 @@ mod tests {
         let wire = r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#;
         let decoded: CommandError = serde_json::from_str(wire).expect("디코드");
         assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
-        assert_eq!(decoded.wire_code(), "FROM_THE_FUTURE");
+        assert_eq!(decoded.wire_code(), Some("FROM_THE_FUTURE"));
     }
 
     #[test]
@@ -469,7 +544,7 @@ mod tests {
         .expect("디코드");
         decoded.set_message("relayed through the shell");
 
-        assert_eq!(decoded.wire_code(), "FROM_THE_FUTURE");
+        assert_eq!(decoded.wire_code(), Some("FROM_THE_FUTURE"));
         assert_eq!(
             serde_json::to_string(&decoded).expect("재직렬화"),
             r#"{"code":"FROM_THE_FUTURE","message":"relayed through the shell","retry":"whenever","details":{"agent":"alpha"}}"#
@@ -495,7 +570,7 @@ mod tests {
             serde_json::from_str(r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#)
                 .expect("디코드");
         recoded.set_code(ErrorCode::Timeout);
-        assert_eq!(recoded.wire_code(), "TIMEOUT");
+        assert_eq!(recoded.wire_code(), Some("TIMEOUT"));
         assert_eq!(
             serde_json::to_string(&recoded).expect("재직렬화"),
             r#"{"code":"TIMEOUT","message":"x","retry":"never"}"#

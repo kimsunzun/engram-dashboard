@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CommandDecl, CommandError, OwnerToken};
+use crate::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 
 /// 이름 하나의 명부 항목.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,21 @@ pub enum OwnerLookup {
     Available(OwnerToken),
     Unavailable,
     Unknown,
+}
+
+/// 「이 이름의 주인은 누구인가」 하나만 묻는 창구 — [`crate::route`] 가 명부에 대해 필요로 하는 전부다.
+///
+/// ★배달이 명부를 **왕복 내내** 붙들지 않게 하는 자리다★: 공유 명부를 쥔 조립부가 `route` 에 참조를
+/// 넘기려면 답장이 올 때까지 락을 들고 있어야 하고, 그동안 등록도 연결 정리도 다른 배달도 전부 멈춘다
+/// (느린 상대 하나가 명부 전체를 세운다). 구현이 락을 **이 호출 안에서만** 잡으면 그 정지가 없어진다.
+pub trait OwnerLookupSource: Send + Sync {
+    fn lookup(&self, name: &str) -> OwnerLookup;
+}
+
+impl OwnerLookupSource for Roster {
+    fn lookup(&self, name: &str) -> OwnerLookup {
+        Roster::lookup(self, name)
+    }
 }
 
 /// ★빌드 목록을 조회하지 않는다★ — 명부가 런타임 등록만으로 차야 「지금 부를 수 있는가」가 사실이 된다
@@ -55,7 +70,22 @@ pub struct Roster {
 struct Registration {
     owner: OwnerToken,
     help: String,
-    available: bool,
+    presence: Presence,
+}
+
+/// 자취 하나의 상태 — [`RosterEntry::available`] 은 여기서 난다.
+///
+/// ★`Dropped` 와 `Gone` 은 조회에 같은 답을 낸다(둘 다 `OWNER_UNAVAILABLE`)★ — 갈라 두는 이유는 조회가
+/// 아니라 **쓰기** 쪽이다: `Gone` 이 「그 연결은 이제 없다」의 유일한 기억이라, 뒤늦게 도착한 그 주인의
+/// 차분을 반려할 근거가 된다([`Roster::update`]). 주인 단위 상태를 따로 들지 않는 이유는 만료가 없는
+/// 자료에 **연결마다 새로 나는 토큰**의 목록을 하나 더 만들면 그것이 무한히 자라기 때문이다(ADR-0135).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    Held,
+    /// 이름만 내려갔다 — 주인은 아직 붙어 있다(차분 `removed` · 재등록에 안 실린 옛 이름).
+    Dropped,
+    /// 주인이 끊겼다.
+    Gone,
 }
 
 impl Roster {
@@ -99,30 +129,135 @@ impl Roster {
     /// 등록이 기존 상태를 바꾸지 않는다.
     /// ★이 상한은 ADR-0135 가 거부한 TTL 과 다른 축이다★ — 거기서 거부한 것은 **시간**이라 같은 질문의
     /// 답이 시계에 따라 갈렸다. 개수 상한은 명부에 든 이름의 답을 바꾸지 않는다.
+    /// ★남이 쥔 이름을 가져가는 것이 여기서는 적법하다★ — 등록은 **붙는 순간**에 매인 전량 선언이라
+    /// (TRD §3-7 조항 1) 새 연결이 옛 연결의 이름을 이어받는 것이 인수인계 그 자체다. 붙어 있는 동안의
+    /// 차분([`Roster::update`])에는 그 닻이 없어 같은 인수인계가 허용되지 않는다.
     pub fn register(
         &mut self,
         owner: &OwnerToken,
         decls: Vec<CommandDecl>,
     ) -> Result<(), CommandError> {
         self.check_room_for(owner, &decls)?;
-        self.tombstone_owner(owner);
+        // 이 주인의 자취를 전부 내린다 — `Gone` 도 함께 풀린다. 등록이 「붙었다」의 닻이므로 여기서
+        //   풀지 않으면 같은 토큰으로 다시 붙은 주인이 자기 차분을 영영 반려당한다.
+        self.mark_owner(owner, Presence::Dropped);
         for decl in decls {
             self.entries.insert(
                 decl.name,
                 Registration {
                     owner: owner.clone(),
                     help: decl.help,
-                    available: true,
+                    presence: Presence::Held,
                 },
             );
         }
         Ok(())
     }
 
+    /// 붙어 있는 동안의 **차분** — 늦게 뜬 기능이 이름을 더하고 꺼진 기능이 이름을 내린다(TRD §3-7 조항 3).
+    /// 전량 재전송은 [`Roster::register`] 뿐이다.
+    ///
+    /// ★`removed` 는 자취를 **남긴다** — 지우지 않는다★(ADR-0135): 지우면 그 이름이 `UNKNOWN_COMMAND`
+    /// 로 나가 「재시도 무의미, 이름을 다시 발견하라」가 되는데, 주인은 아직 붙어 있고 이름도 실재했다
+    /// (TRD §4-②).
+    /// ★`removed` 는 **자기가 아직 쥔 이름만** 내린다★ — [`Roster::disconnect`] 와 같은 규칙이다. 지나간
+    /// 주인의 늦은 차분이 방금 붙은 주인의 등록을 내리면 살아 있는 명령이 `OWNER_UNAVAILABLE` 이 된다
+    /// (재연결 겹침). 남의 이름·없는 이름은 조용히 지나간다 — 차분은 「내 몫을 이렇게 바꿔라」이지 남의
+    /// 상태에 대한 주장이 아니다.
+    /// ★`added` 는 남이 **살아서 쥔** 이름을 가져가지 못한다 — 여기가 [`Roster::register`] 와 갈리는
+    /// 자리다★. 등록의 last-wins 는 **붙는 순간**에 매여 있어(TRD §3-7 조항 1) 인수인계로 읽히지만,
+    /// 차분은 정의상 「붙어 있는 동안」이라 그 닻이 없다. 닻 없는 덮어쓰기를 허용하면 죽은 연결의 늦은
+    /// 차분이 방금 붙은 셸의 등록을 **자기 토큰으로 덮어** 조회가 죽은 주인을 `Available` 로 답하고,
+    /// 산 셸은 다시 등록할 계기가 없어(등록은 붙을 때 한 번뿐) 그 상태가 그대로 굳는다.
+    /// ★끊긴 주인의 차분은 통째로 반려한다★ — 그러지 않으면 [`Roster::disconnect`] 가 전부 내린 뒤 도착한
+    /// `added` 한 줄이 이름을 되살리는데, 그 연결에는 다시 올 정리가 없어 그 이름은 데몬 수명 내내
+    /// 없는 주인을 `Available` 로 답한다(경합조차 필요 없는 경로다).
+    /// ★조용히 넘기지 않고 반려하는 이유★(`removed` 의 남의 이름은 조용히 지나간다): 남의 이름을 안
+    /// 내리는 것은 차분이 말한 「내 몫」이 이미 그러하다는 뜻이라 잃는 것이 없지만, `added` 를 조용히
+    /// 무시하면 **성공을 보고하면서** 호출자는 그 이름이 자기 앞으로 온다고 믿는다. 두 반려 다
+    /// `CONFLICT` 다 — 패킷이 틀린 것이(`INVALID_ARGUMENT`) 아니라 명부의 **상태**가 아니라고 답한다.
+    ///
+    /// 상한은 `added` 만 세어 다시 본다 — `removed` 는 자리를 비우지 않는다(자취가 남으므로). 넘치면
+    /// **한 이름도 건드리지 않는다**([`Roster::register`] 와 같은 계약이고, 위 두 반려도 같다).
+    pub fn update(
+        &mut self,
+        owner: &OwnerToken,
+        added: Vec<CommandDecl>,
+        removed: Vec<String>,
+    ) -> Result<(), CommandError> {
+        self.check_owner_attached(owner)?;
+        // 길이 상한을 먼저 통과시킨다 — 아래 충돌 반려가 이름을 문구에 인용한다(`check_room_for` 안의
+        //   같은 순서와 같은 이유).
+        self.check_room_for(owner, &added)?;
+        self.check_added_are_not_taken(owner, &added)?;
+        for decl in added {
+            self.entries.insert(
+                decl.name,
+                Registration {
+                    owner: owner.clone(),
+                    help: decl.help,
+                    presence: Presence::Held,
+                },
+            );
+        }
+        for name in removed {
+            if let Some(reg) = self.entries.get_mut(&name) {
+                if &reg.owner == owner && reg.presence == Presence::Held {
+                    reg.presence = Presence::Dropped;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 이 주인이 아직 붙어 있나 — [`Roster::disconnect`] 가 남긴 표식이 유일한 근거다.
+    ///
+    /// ★자취가 하나도 안 남은 주인은 「붙어 있다」로 읽힌다(알려진 한계)★: 끊긴 주인의 이름을 다른
+    /// 주인들이 전부 가져가면 그 연결의 죽음을 기억할 자리가 남지 않는다. 그 상태에서 남는 그물은
+    /// [`Roster::check_added_are_not_taken`] 하나뿐이라 **산 등록은 지켜지고**, 아무도 안 쥔 새 이름만
+    /// 죽은 토큰 앞으로 들어온다.
+    fn check_owner_attached(&self, owner: &OwnerToken) -> Result<(), CommandError> {
+        if self
+            .entries
+            .values()
+            .any(|reg| &reg.owner == owner && reg.presence == Presence::Gone)
+        {
+            return Err(CommandError::of(
+                ErrorCode::Conflict,
+                "this owner has already disconnected — a late delta cannot revive its names",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `added` 가 **살아 있는 남의 등록**을 덮지 않나 — tombstone 은 덮어도 된다(주인이 없는 자취다).
+    fn check_added_are_not_taken(
+        &self,
+        owner: &OwnerToken,
+        decls: &[CommandDecl],
+    ) -> Result<(), CommandError> {
+        for decl in decls {
+            let taken = self
+                .entries
+                .get(&decl.name)
+                .is_some_and(|reg| &reg.owner != owner && reg.presence == Presence::Held);
+            if taken {
+                return Err(CommandError::of(
+                    ErrorCode::Conflict,
+                    format!(
+                        "'{}' is registered to another owner that is still attached",
+                        decl.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// 이 등록이 상한 안인가 — **명부를 건드리기 전에** 본다.
     ///
-    /// ★주인당 상한은 패킷 하나가 아니라 그 주인의 **누적**을 잰다★: [`Roster::tombstone_owner`] 는
-    /// 이번에 안 실린 옛 이름을 지우지 않고 플래그만 내리므로(만료 없음 — ADR-0135), 패킷만 재면 서로
+    /// ★주인당 상한은 패킷 하나가 아니라 그 주인의 **누적**을 잰다★: 자취를 내리는 것은
+    /// 이번에 안 실린 옛 이름을 지우지 않고 상태만 내리는 것이므로(만료 없음 — ADR-0135), 패킷만 재면 서로
     /// 겹치지 않는 512개짜리 스냅샷을 잇달아 보내는 주인 하나가 명부 전체를 자기 자취로 채운다. 그러면
     /// 진짜 셸의 등록이 전체 상한에 막히고 `tab.*`·`window.*` 가 전부 `UNKNOWN_COMMAND` 로 나가는데,
     /// 그 코드는 「재시도가 무의미하니 이름을 다시 발견하라」는 뜻이라(TRD §4-②) 호출자는 실재하는
@@ -184,15 +319,18 @@ impl Roster {
         Ok(())
     }
 
-    /// 연결이 끊겼다 — **그 주인이 아직 쥐고 있는** 이름만 내린다. 이름은 남는다.
+    /// 연결이 끊겼다 — **그 주인 앞으로 남은** 자취를 전부 내리고 그 주인을 끊긴 것으로 표시한다
+    /// (뒤늦게 오는 차분을 반려할 근거 — [`Roster::update`]). 이름은 남는다.
     pub fn disconnect(&mut self, owner: &OwnerToken) {
-        self.tombstone_owner(owner);
+        self.mark_owner(owner, Presence::Gone);
     }
 
     pub fn lookup(&self, name: &str) -> OwnerLookup {
         match self.entries.get(name) {
             None => OwnerLookup::Unknown,
-            Some(reg) if reg.available => OwnerLookup::Available(reg.owner.clone()),
+            Some(reg) if reg.presence == Presence::Held => {
+                OwnerLookup::Available(reg.owner.clone())
+            }
             Some(_) => OwnerLookup::Unavailable,
         }
     }
@@ -202,7 +340,7 @@ impl Roster {
             name: name.clone(),
             help: reg.help.clone(),
             owner: reg.owner.clone(),
-            available: reg.available,
+            available: reg.presence == Presence::Held,
         })
     }
 
@@ -215,10 +353,10 @@ impl Roster {
         self.entries.is_empty()
     }
 
-    fn tombstone_owner(&mut self, owner: &OwnerToken) {
+    fn mark_owner(&mut self, owner: &OwnerToken, presence: Presence) {
         for reg in self.entries.values_mut() {
             if &reg.owner == owner {
-                reg.available = false;
+                reg.presence = presence;
             }
         }
     }
@@ -491,6 +629,180 @@ mod tests {
         roster.register(&owner, repeated).expect("이름은 하나다");
 
         assert_eq!(roster.len(), 1);
+    }
+
+    // ── 차분 등록(TRD §3-7 조항 3) ────────────────────────────────────────────────────────────
+
+    /// ★차분이 지우면 두 오류를 가를 수 없게 된다★ — 내린 이름은 tombstone 으로 남아야 `OWNER_UNAVAILABLE`
+    /// 이 나가고, 안 실린 이름은 손대지 않아야 `register` 의 전량 last-wins 와 뜻이 갈린다(TRD §4-②).
+    #[test]
+    fn an_update_tombstones_only_the_names_it_removes() {
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(&owner, vec![decl("tab.create"), decl("tab.close")])
+            .expect("상한 안");
+
+        roster
+            .update(
+                &owner,
+                vec![decl("tab.split")],
+                vec!["tab.close".to_string()],
+            )
+            .expect("상한 안");
+
+        assert_eq!(
+            roster.lookup("tab.create"),
+            OwnerLookup::Available(owner.clone()),
+            "차분에 안 실린 이름은 그대로다"
+        );
+        assert_eq!(roster.lookup("tab.split"), OwnerLookup::Available(owner));
+        assert_eq!(roster.lookup("tab.close"), OwnerLookup::Unavailable);
+        assert_eq!(roster.len(), 3, "내린 이름도 자취로 남는다");
+    }
+
+    /// ★재연결 겹침 — 차분에도 같은 그물이 서야 한다★
+    ///
+    /// 옛 연결의 늦은 차분이 이름 단위로 내려가면, 같은 이름을 방금 등록한 새 연결의 명령이
+    /// `OWNER_UNAVAILABLE` 이 된다(`disconnect` 가 막는 것과 같은 사고).
+    #[test]
+    fn an_update_from_a_superseded_owner_does_not_take_down_the_current_registration() {
+        let old = OwnerToken::new("shell-conn-1");
+        let new = OwnerToken::new("shell-conn-2");
+        let mut roster = Roster::new();
+        roster
+            .register(&old, vec![decl("tab.create")])
+            .expect("상한 안");
+        roster
+            .register(&new, vec![decl("tab.create")])
+            .expect("상한 안");
+
+        roster
+            .update(&old, vec![], vec!["tab.create".to_string()])
+            .expect("상한 안");
+
+        assert_eq!(
+            roster.lookup("tab.create"),
+            OwnerLookup::Available(new),
+            "방금 등록한 주인이 답해야 한다"
+        );
+    }
+
+    /// ★재연결 겹침 — `added` 쪽에도 같은 그물이 서야 한다★
+    ///
+    /// 위 테스트의 거울이다. 옛 연결의 늦은 차분이 같은 이름을 **더하면** 항목이 죽은 토큰으로 덮이고,
+    /// 조회는 그 죽은 주인을 `Available` 로 답해 배달이 끊긴 링크로 나간다. 산 셸은 다시 등록할 계기가
+    /// 없으므로(등록은 붙을 때 한 번) 그 상태는 저절로 풀리지 않는다.
+    #[test]
+    fn an_update_from_a_superseded_owner_does_not_add_over_the_current_registration() {
+        let old = OwnerToken::new("shell-conn-1");
+        let new = OwnerToken::new("shell-conn-2");
+        let mut roster = Roster::new();
+        roster
+            .register(&old, vec![decl("tab.create")])
+            .expect("상한 안");
+        roster
+            .register(&new, vec![decl("tab.create")])
+            .expect("상한 안");
+
+        let err = roster
+            .update(&old, vec![decl("tab.create")], vec![])
+            .expect_err("산 남의 등록은 못 가져간다");
+
+        assert_eq!(err.code(), crate::ErrorCode::Conflict);
+        assert_eq!(
+            roster.lookup("tab.create"),
+            OwnerLookup::Available(new),
+            "방금 등록한 주인이 답해야 한다"
+        );
+    }
+
+    /// tombstone 은 덮어도 된다 — 주인이 없는 자취라 산 등록을 뺏는 것이 아니다.
+    #[test]
+    fn an_update_may_take_over_a_name_whose_owner_is_gone() {
+        let old = OwnerToken::new("shell-conn-1");
+        let new = OwnerToken::new("shell-conn-2");
+        let mut roster = Roster::new();
+        roster
+            .register(&old, vec![decl("tab.create")])
+            .expect("상한 안");
+        roster.disconnect(&old);
+        roster
+            .register(&new, vec![decl("tab.close")])
+            .expect("상한 안");
+
+        roster
+            .update(&new, vec![decl("tab.create")], vec![])
+            .expect("주인 없는 자취는 가져갈 수 있다");
+
+        assert_eq!(roster.lookup("tab.create"), OwnerLookup::Available(new));
+    }
+
+    /// ★경합조차 필요 없는 경로★ — 끊긴 주인의 늦은 차분 한 줄이 이름을 되살리면, 그 연결에는 다시 올
+    /// 정리가 없으므로 그 이름은 데몬 수명 내내 **없는 주인**을 `Available` 로 답한다.
+    #[test]
+    fn an_update_from_a_disconnected_owner_cannot_revive_or_add_names() {
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(&owner, vec![decl("tab.create")])
+            .expect("상한 안");
+        roster.disconnect(&owner);
+
+        let err = roster
+            .update(&owner, vec![decl("tab.split")], vec![])
+            .expect_err("끊긴 주인의 차분");
+
+        assert_eq!(err.code(), crate::ErrorCode::Conflict);
+        assert_eq!(roster.lookup("tab.split"), OwnerLookup::Unknown);
+        assert_eq!(
+            roster.lookup("tab.create"),
+            OwnerLookup::Unavailable,
+            "제 이름도 되살리지 못한다"
+        );
+
+        roster
+            .update(&owner, vec![decl("tab.create")], vec![])
+            .expect_err("자기가 쥐었던 이름도 마찬가지다");
+        assert_eq!(roster.lookup("tab.create"), OwnerLookup::Unavailable);
+    }
+
+    /// 다시 붙어 등록하면 차분이 되살아난다 — 등록이 「붙었다」의 닻이다(TRD §3-7 조항 1).
+    #[test]
+    fn registering_again_reattaches_an_owner_that_had_disconnected() {
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(&owner, vec![decl("tab.create")])
+            .expect("상한 안");
+        roster.disconnect(&owner);
+        roster
+            .register(&owner, vec![decl("tab.create")])
+            .expect("상한 안");
+
+        roster
+            .update(&owner, vec![decl("tab.split")], vec![])
+            .expect("다시 붙은 주인의 차분은 통과한다");
+
+        assert_eq!(roster.lookup("tab.split"), OwnerLookup::Available(owner));
+    }
+
+    /// 상한은 차분에서도 **누적**으로 재고, 넘치면 한 이름도 안 들어간다.
+    #[test]
+    fn an_update_over_the_per_owner_cap_is_refused_whole() {
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(&owner, decls("wave0", Roster::MAX_NAMES_PER_OWNER))
+            .expect("상한 안");
+
+        let err = roster
+            .update(&owner, vec![decl("one.more")], vec![])
+            .expect_err("자취가 자리를 쥐고 있다");
+
+        assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
+        assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
+        assert_eq!(roster.lookup("one.more"), OwnerLookup::Unknown);
     }
 
     #[test]

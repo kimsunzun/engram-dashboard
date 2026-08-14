@@ -410,6 +410,47 @@ fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
     }
 }
 
+/// ★평면 성공 shape(`{agent_id,name,state,…}`)도 프로세스 레벨에서 exit 0★ — 데몬 라우트와 이 CLI 는 서로
+///   다른 조각에서 손보므로, 여기서 새면 정상 데몬 앞에서 `engram agent spawn` 이 exit 2 를 낸다.
+///   ★평면이어도 대조는 그대로★: 마지막 케이스가 그 축을 같이 못박는다(필드만 다 있고 요청과 어긋난 응답).
+#[test]
+fn engram_agent_accepts_the_flat_success_shape_with_the_same_cross_checks() {
+    let cases: [(&[&str], &str, i32); 5] = [
+        (
+            &["agent", "spawn", "qa-bravo"],
+            r#"{"agent_id":"i","name":"qa-bravo","state":"live","created":false}"#,
+            0,
+        ),
+        (
+            &["agent", "new", "--cwd", "C:/work", "--name", "qa"],
+            r#"{"agent_id":"i","name":"qa","state":"sleeping"}"#,
+            0,
+        ),
+        (
+            &["agent", "rename", "qa", "qa-lead"],
+            r#"{"agent_id":"i","name":"qa-lead","outcome":"renamed"}"#,
+            0,
+        ),
+        (
+            &["agent", "move", "qa-lead", "--parent", "none"],
+            r#"{"agent_id":"i","name":"qa-lead","parent":null}"#,
+            0,
+        ),
+        (
+            &["agent", "spawn", "qa-bravo"],
+            r#"{"agent_id":"i","name":"qa-bravo","state":"live","created":true}"#,
+            2,
+        ),
+    ];
+    for (args, response, want) in cases {
+        let (host, port, stub) = spawn_capturing_stub(ok_response(response));
+        let url = format!("http://{host}:{port}");
+        let (stdout, code) = run_cli(&url, args, None);
+        let _ = stub.join().expect("stub join");
+        assert_eq!(code, want, "{args:?} ← {response}: {stdout}");
+    }
+}
+
 #[test]
 fn engram_agent_argument_errors_never_touch_the_network() {
     // 목적지가 포트 0 이므로 하나라도 POST 를 시도하면 CONNECT_FAILED 가 나와 단언이 깨진다.

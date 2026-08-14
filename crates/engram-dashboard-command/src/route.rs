@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use crate::{
     CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable, ErrorCode, OwnerLookup,
-    Roster,
+    OwnerLookupSource,
 };
 
 /// 동기 본문의 패닉을 오류 답장으로 접는다.
@@ -88,7 +88,17 @@ where
 /// 내 표에 있나 → 명부에 있나 → 오류.
 ///
 /// ★홉마다 다른 규칙을 두지 않는다★ — 새 주인(모바일 클라이언트 등)이 붙어도 배달 코드는 안 바뀌고
-/// 등록이 하나 늘 뿐이다. 명부가 없는 프로세스는 빈 [`Roster`] 를 넘긴다.
+/// 등록이 하나 늘 뿐이다. 명부가 없는 프로세스는 빈 [`crate::Roster`] 를 넘긴다.
+/// ★명부는 **조회 한 번**만 받는다([`OwnerLookupSource`])★ — 참조로 붙들면 공유 명부를 쥔 조립부가
+/// `link.send` 왕복 내내 락을 들어야 하고, 느린 상대 하나가 그동안 등록·연결 정리·다른 배달을 전부
+/// 세운다. **인자로 되돌리지 말 것** — 여기 참조가 서면 그 정지는 호출자가 피할 수 없다.
+/// ★인자 검문은 여기 없다★ — 선언에 없는 칸의 거절은 **사람·LLM 이 치는 입구**의 일이고
+/// ([`CommandTable::check_args`] · ADR-0136), 홉 간 배선은 모르는 칸을 무시하고 옛 의미로 실행해야
+/// additive 진화가 산다(TRD §4-③).
+/// ★그래서 **남의 이름**으로 온 인자는 이 경로 어디서도 검문받지 않는다(알려진 구멍)★ — 치는 쪽 입구는
+/// 그 선언을 안 들어 검문하지 못하고, 여기서 넣으면 위 이유로 additive 진화가 죽는다. 그 구멍을 누가
+/// 메우나는 입구 어댑터 **쌍**(치는 쪽 · 주인 쪽)의 배선 결정으로 남아 있다 —
+/// [`CommandTable::check_args`] 의 통과 목록에 그 갈림이 적혀 있다.
 /// 나가는 봉투에는 명부가 답한 주인 토큰을 **덮어 싣는다** — 받는 홉이 「누구 앞으로 온 것인가」를
 /// 자기 명부와 대조할 수 있어야 2단 배달에서 중간 홉이 갈라 줄 수 있다(TRD §3-8).
 /// ★마감시각은 여기서 걸지 않는다 — 조립부의 몫이다★: 마감은 **호출자가 정하고**(TRD §4-⑥) 최초 수신
@@ -103,7 +113,7 @@ where
 // ADR-0134
 pub async fn route(
     table: &CommandTable,
-    roster: &Roster,
+    roster: &dyn OwnerLookupSource,
     link: &dyn CommandLink,
     mut env: CommandEnvelope,
 ) -> CommandReply {
@@ -192,7 +202,7 @@ mod tests {
     use crate::testing::block_on;
     use crate::{
         blocking_handler, CommandDecl, CommandHandler, CommandSpec, CommandTable, Effect,
-        OwnerToken, RequestId,
+        OwnerToken, RequestId, Roster,
     };
 
     static AGENT_LIST: CommandSpec = CommandSpec {
@@ -507,6 +517,66 @@ mod tests {
         assert_eq!(
             reply.outcome.expect_err("상관 깨짐").code(),
             ErrorCode::OutcomeUnknown
+        );
+    }
+
+    /// ★배달은 명부를 **조회 한 번** 동안만 본다★ — 공유 명부를 쥔 조립부가 왕복 내내 락을 들지 않아도
+    /// 되는 것이 [`OwnerLookupSource`] 의 존재 이유다. 락을 조회 안에서만 잡는 구현으로 단언한다: 배달이
+    /// 명부를 붙들고 있으면 링크가 도는 동안 `try_lock` 이 실패한다.
+    #[test]
+    fn the_roster_is_not_held_while_the_link_is_in_flight() {
+        struct SharedRoster(Arc<Mutex<Roster>>);
+        impl OwnerLookupSource for SharedRoster {
+            fn lookup(&self, name: &str) -> OwnerLookup {
+                self.0.lock().expect("shared roster poisoned").lookup(name)
+            }
+        }
+
+        struct LockProbingLink {
+            roster: Arc<Mutex<Roster>>,
+            free_while_sending: Mutex<Option<bool>>,
+        }
+        impl CommandLink for LockProbingLink {
+            fn send(
+                &self,
+                env: CommandEnvelope,
+            ) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
+                *self.free_while_sending.lock().expect("probe poisoned") =
+                    Some(self.roster.try_lock().is_ok());
+                let request_id = env.request_id;
+                Box::pin(async move { CommandReply::ok(request_id, json!({ "forwarded": true })) })
+            }
+        }
+
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(
+                &owner,
+                vec![CommandDecl {
+                    name: "tab.create".to_string(),
+                    help: "{}".to_string(),
+                }],
+            )
+            .expect("한 이름은 상한 안이다");
+        let roster = Arc::new(Mutex::new(roster));
+        let link = LockProbingLink {
+            roster: Arc::clone(&roster),
+            free_while_sending: Mutex::new(None),
+        };
+
+        let reply = block_on(route(
+            &CommandTable::new(DECLARED),
+            &SharedRoster(Arc::clone(&roster)),
+            &link,
+            envelope("tab.create"),
+        ));
+
+        assert_eq!(reply.outcome, Ok(json!({ "forwarded": true })));
+        assert_eq!(
+            *link.free_while_sending.lock().expect("probe poisoned"),
+            Some(true),
+            "왕복이 도는 동안에도 명부는 잠겨 있지 않다"
         );
     }
 

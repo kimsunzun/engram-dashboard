@@ -17,9 +17,13 @@
 //! ## 진입점
 //!
 //! [`declare_commands!`] 선언 · [`CommandTable`] 내 표 · [`Roster`] 명부 · [`route`] 배달 3단계 ·
-//! [`command_specs`] 이 바이너리에 링크된 선언 전량.
+//! [`CommandTable::check_args`] 입구 전용 인자 검문 · [`command_specs`] 이 바이너리에 링크된 선언 전량.
 //!
 //! ## 알려진 예정 사항 (Step 2 착수 전에 읽을 것)
+//!
+//! - **입구 검문은 배선이 부르지 않는다(ADR-0136).** [`CommandTable::check_args`] 는 **사람·LLM 이 치는
+//!   표면**에서만 부른다 — [`route`] 안에 넣으면 버전이 앞선 호출자가 실은 신규 칸이 옛 주인을 하드
+//!   실패시켜 additive 진화가 죽는다(TRD §4-③). 표면별 안내 문구는 어댑터가 덧붙인다.
 //!
 //! - **봉투 타입들은 ts-rs 를 구현하지 않는다.** `protocol` 의 wire 메시지는 전부 `#[derive(TS)]` 라
 //!   [`CommandEnvelope`]·[`CommandReply`]·[`RequestId`]·[`CommandDecl`] 을 그 enum 에 additive variant 로
@@ -47,7 +51,7 @@ pub use envelope::{CommandEnvelope, CommandReply, OwnerToken, RequestId};
 pub use error::{CommandError, ErrorCode, RetryMode};
 pub use link::{CommandLink, InboundCommands, ReplySink};
 pub use macros::transmitted;
-pub use roster::{OwnerLookup, Roster, RosterEntry};
+pub use roster::{OwnerLookup, OwnerLookupSource, Roster, RosterEntry};
 pub use route::route;
 pub use spec::{
     catalog_json, command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of,

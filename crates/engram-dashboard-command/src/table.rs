@@ -131,6 +131,73 @@ impl CommandTable {
         Some(entry.handler.call(args.take()))
     }
 
+    /// 인자가 **선언과 맞는지** 부르기 전에 본다 — 모르는 칸·빠진 필수 칸을 이름 지어 반려한다.
+    ///
+    /// ★부르는 자리는 사람·LLM 이 방금 친 것이 들어오는 표면뿐이다(ADR-0136)★. 홉 간 배선에서 부르면
+    /// 버전이 앞선 호출자가 실은 신규 칸이 옛 주인을 하드 실패시켜 additive 진화가 죽는다(TRD §4-③) —
+    /// [`crate::route`] 가 이것을 부르지 않는 것이 그 결정의 실물이고, 거기 끼워 넣으면 무너진다.
+    ///
+    /// 반려 문구는 **틀린 칸과 선언된 칸 전량**을 함께 싣는다 — 호출자가 스스로 고칠 수 있어야 그물이
+    /// 값을 한다. ★문구에 호출 표면의 어휘를 넣지 않는다★: 그 표면이 무엇인지 이 crate 는 모르고, 자기
+    /// 안내는 어댑터가 [`CommandError::set_message`] 로 덧붙인다.
+    ///
+    /// 통과시키는 것 셋(검사할 재료가 없는 자리다):
+    /// - **이 표에 없는 이름** — 그 계약은 남이 쥐고 있어 대조할 선언이 여기 없다. ★뒤에서 아무도 대신
+    ///   봐 주지 않는다★: 명부가 그 이름을 알면 배달은 봉투를 **그대로 전달**하고, 받는 홉의
+    ///   [`crate::route`]→[`CommandTable::call`] 도 검문하지 않는다(바로 위 문단의 그 결정이다). 그래서
+    ///   사람·LLM 이 남의 이름을 오타 낀 칸과 함께 치면 그 칸은 어디서도 안 걸리고, 역직렬화가 조용히
+    ///   버린 뒤 성공이 보고된다 — ADR-0136 이 막으려던 그 실패가 한 홉 건너에서 그대로 산다(그 결정의
+    ///   층 가름은 **출처**이지 이름의 주인이 아니다).
+    ///   ★이 구멍은 입구 어댑터 **쌍**의 의무로 남아 있다 — 배선 wave 가 어느 쪽인지 정한다★: 치는 쪽
+    ///   어댑터는 남의 선언을 안 들고(명부의 모양은 데몬에게 불투명 문자열이다 — ADR-0135), 주인 쪽
+    ///   어댑터는 그 봉투가 사람·LLM 이 방금 친 것인지를 봉투만 보고 모른다. 어느 쪽이 그 재료를 갖게
+    ///   할지가 결정 사항이라 이 crate 에서 닫지 않는다.
+    /// - **`properties` 를 안 실은 선언** — 허용 집합을 모르는 채로 반려하면 멀쩡한 인자를 막는다.
+    /// - **꼭대기 아래** — 여기는 스키마 검증기가 아니라 선언 속성 집합과의 대조다. 중첩 객체 안의 오타는
+    ///   통과하고, 그 자리는 역직렬화가 잡는다(선언된 칸이면 타입이 안 맞고, 아니면 무시된다).
+    // ADR-0136
+    pub fn check_args(&self, name: &str, args: &serde_json::Value) -> Result<(), CommandError> {
+        let Some(entry) = self.entries.get(name) else {
+            return Ok(());
+        };
+        let serde_json::Value::Object(given) = args else {
+            return Err(CommandError::invalid_argument(format!(
+                "arguments for '{name}' must be an object — declared arguments: {}",
+                declared_names(&entry.args_schema)
+            )));
+        };
+        let Some(declared) = entry
+            .args_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Ok(());
+        };
+        // 모르는 칸을 먼저 본다 — 오타는 「모르는 칸 하나 + 빠진 필수 칸 하나」로 함께 걸리는데, 호출자가
+        //   고칠 것은 **자기가 친 그 칸**이다.
+        if let Some(unknown) = given
+            .keys()
+            .find(|key| !declared.contains_key(key.as_str()))
+        {
+            return Err(CommandError::invalid_argument(format!(
+                "'{}' is not an argument of '{name}' — declared arguments: {}",
+                quoted_input(unknown),
+                declared_names(&entry.args_schema)
+            )));
+        }
+        if let Some(serde_json::Value::Array(required)) = entry.args_schema.get("required") {
+            for wanted in required.iter().filter_map(serde_json::Value::as_str) {
+                if !given.contains_key(wanted) {
+                    return Err(CommandError::invalid_argument(format!(
+                        "'{name}' requires '{wanted}' — declared arguments: {}",
+                        declared_names(&entry.args_schema)
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         self.entries.contains_key(name)
     }
@@ -157,6 +224,47 @@ impl CommandTable {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// 반려 문구가 싣는 허용 집합 — 자르지 않는다. 잘린 목록은 호출자가 고르지 못한 이름이 잘린 쪽에
+/// 있는지 알 수 없어 스스로 고칠 수 없다(이 이름들은 **우리 선언**이라 크기가 우리 손에 있다 —
+/// 호출자가 준 문자열은 [`quoted_input`] 이 자른다).
+fn declared_names(args_schema: &serde_json::Value) -> String {
+    let Some(properties) = args_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        // 허용 집합을 안 실은 선언 — 그 자리는 통과시키므로(`check_args`) 여기 오는 것은 객체가 아닌
+        //   인자로 걸린 경우뿐이다.
+        return "(not declared)".to_string();
+    };
+    if properties.is_empty() {
+        return "(none)".to_string();
+    }
+    properties
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 반려 문구가 인용하는 **호출자 입력**의 상한.
+///
+/// ★없으면 100 MiB 짜리 칸 이름 하나가 그만한 문구를 만든다★ — 그 문구는 오류 답장에 실려 선을 타고,
+/// 그것을 만드는 비용은 인자를 친 쪽이 아니라 받는 쪽이 낸다. 값은 사람이 자기 오타를 알아볼 만큼이다.
+const MAX_QUOTED_INPUT_BYTES: usize = 128;
+
+/// 호출자가 준 문자열을 문구에 인용할 수 있게 다듬는다 — 자를 때는 **잘랐다고 말한다**(안 그러면
+/// 호출자는 잘린 이름을 자기가 친 이름으로 읽고 멀쩡한 칸을 고치러 간다).
+fn quoted_input(text: &str) -> String {
+    if text.len() <= MAX_QUOTED_INPUT_BYTES {
+        return text.to_string();
+    }
+    let mut cut = MAX_QUOTED_INPUT_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…(truncated, {} bytes)", &text[..cut], text.len())
 }
 
 struct Blocking<F, A, O> {
@@ -251,7 +359,23 @@ mod tests {
         args_type: "NumbersArgs",
         ok_type: "NumbersOk",
     };
-    static DECLARED: &[&CommandSpec] = &[&PING, &NUMBERS];
+    /// 필수 칸과 생략 가능한 칸을 함께 든 선언 — 입구 검문이 그 둘을 가르는지 여기서 본다.
+    static ENTRANCE: CommandSpec = CommandSpec {
+        name: "fixture.entrance",
+        effect: Effect::Write,
+        since: 1,
+        summary: "입구 검문 픽스처",
+        args_schema: concat!(
+            r#"{"type":"object","properties":{"cwd":{"type":"string"},"#,
+            r#""label":{"anyOf":[{"type":"string"},{"type":"null"}]}},"#,
+            r#""required":["cwd"]}"#
+        ),
+        ok_schema: "{\"type\":\"object\",\"properties\":{}}",
+        errors: &[],
+        args_type: "EntranceArgs",
+        ok_type: "EntranceOk",
+    };
+    static DECLARED: &[&CommandSpec] = &[&PING, &NUMBERS, &ENTRANCE];
 
     #[derive(serde::Deserialize)]
     struct NoArgs {}
@@ -519,6 +643,164 @@ mod tests {
             outcome.expect_err("정수 칸에 담을 수 없다").code(),
             ErrorCode::InvalidArgument
         );
+    }
+
+    // ── 입구 검문(ADR-0136) ──────────────────────────────────────────────────────────────────
+
+    fn entrance_table() -> CommandTable {
+        let mut table = CommandTable::new(DECLARED);
+        table
+            .insert("fixture.entrance", handler())
+            .expect("선언된 이름");
+        table
+    }
+
+    /// ★모르는 칸을 조용히 무시하면 **성공이 보고된다**★ — 호출자는 자기가 지시한 것과 다른 일이 일어난
+    /// 줄 모른다(ADR-0136 이 이 그물을 세운 이유). 그래서 반려하되 **스스로 고칠 재료**를 함께 낸다.
+    #[test]
+    fn an_undeclared_argument_field_is_named_and_refused() {
+        let err = entrance_table()
+            .check_args(
+                "fixture.entrance",
+                &json!({ "cwd": "C:/x", "target": "alpha" }),
+            )
+            .expect_err("선언에 없는 칸");
+
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("target"),
+            "틀린 칸을 지목한다: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("cwd") && err.message().contains("label"),
+            "허용 집합을 함께 낸다: {}",
+            err.message()
+        );
+    }
+
+    /// ★핸들러가 돌기 전에 걸린다★ — 검문은 순수한 사전 판정이라 본문이 없어도, 본문이 터지는 것이어도
+    /// 같은 답을 낸다(터지는 핸들러가 그것을 단언한다).
+    #[test]
+    fn a_missing_required_field_is_refused_before_the_handler() {
+        let mut table = CommandTable::new(DECLARED);
+        table
+            .insert(
+                "fixture.entrance",
+                blocking_handler(|_: NoArgs| -> Result<serde_json::Value, CommandError> {
+                    panic!("검문이 통과시키면 안 되는 인자다")
+                }),
+            )
+            .expect("선언된 이름");
+
+        let err = table
+            .check_args("fixture.entrance", &json!({ "label": "alpha" }))
+            .expect_err("필수 칸이 빠졌다");
+
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("cwd"),
+            "빠진 칸을 지목한다: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn a_declared_optional_field_may_be_absent() {
+        let table = entrance_table();
+
+        table
+            .check_args("fixture.entrance", &json!({ "cwd": "C:/x" }))
+            .expect("생략 가능한 칸은 없어도 된다");
+        table
+            .check_args(
+                "fixture.entrance",
+                &json!({ "cwd": "C:/x", "label": "alpha" }),
+            )
+            .expect("실어도 된다");
+    }
+
+    /// ★반려는 **언제나** 허용 집합을 함께 낸다★ — 「객체가 아니다」만 받은 호출자는 무엇을 실어야 하는지
+    /// 모르는 채로 다시 찍어 봐야 한다(스스로 고칠 재료를 내는 것이 이 검문의 계약이다).
+    #[test]
+    fn a_non_object_refusal_also_carries_the_declared_set() {
+        let err = entrance_table()
+            .check_args("fixture.entrance", &json!("C:/x"))
+            .expect_err("객체가 아니다");
+
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("cwd") && err.message().contains("label"),
+            "허용 집합을 함께 낸다: {}",
+            err.message()
+        );
+    }
+
+    /// ★반려 문구는 호출자가 준 문자열을 되받아 인용한다★ — 상한이 없으면 거대한 칸 이름 하나가 그만한
+    /// 문구를 만들고, 그것이 오류 답장에 실려 선을 탄다.
+    #[test]
+    fn a_huge_unknown_key_is_quoted_within_a_bound() {
+        let huge = "k".repeat(1 << 20);
+        let mut given = serde_json::Map::new();
+        given.insert("cwd".to_string(), json!("C:/x"));
+        given.insert(huge, json!(1));
+
+        let err = entrance_table()
+            .check_args("fixture.entrance", &serde_json::Value::Object(given))
+            .expect_err("선언에 없는 칸");
+
+        assert!(
+            err.message().len() < 512,
+            "문구가 입력만큼 커지지 않는다: {} 바이트",
+            err.message().len()
+        );
+        assert!(
+            err.message().contains("truncated"),
+            "잘랐다고 말한다: {}",
+            err.message()
+        );
+    }
+
+    /// ★문구가 호출 표면을 배우면 안 된다★ — 이 crate 는 자기 반려가 어느 표면에 뜨는지 모른다. 표면별
+    /// 안내는 어댑터가 [`CommandError::set_message`] 로 덧붙이므로, 여기서 지어내면 두 안내가 어긋난다.
+    #[test]
+    fn check_args_does_not_know_any_cli_vocabulary() {
+        let table = entrance_table();
+        let refusals = [
+            table.check_args(
+                "fixture.entrance",
+                &json!({ "cwd": "C:/x", "target": "alpha" }),
+            ),
+            table.check_args("fixture.entrance", &json!({})),
+            table.check_args("fixture.entrance", &json!("not an object")),
+        ];
+
+        for refusal in refusals {
+            let message = refusal.expect_err("반려").message().to_lowercase();
+            for vocabulary in [
+                "engram",
+                "--",
+                "flag",
+                "cli",
+                "command line",
+                "usage",
+                "help",
+            ] {
+                assert!(
+                    !message.contains(vocabulary),
+                    "호출 표면의 어휘가 샜다({vocabulary}): {message}"
+                );
+            }
+        }
+    }
+
+    /// ★남의 이름은 판정하지 않는다★ — 그 계약은 이 표에 없다. 여기서 반려하면 명부로 갈 봉투가 입구에서
+    /// 죽어 2단 배달(TRD §3-8)이 성립하지 않는다.
+    #[test]
+    fn a_name_this_table_does_not_hold_is_left_to_the_next_step() {
+        entrance_table()
+            .check_args("tab.create", &json!({ "anything": 1 }))
+            .expect("남의 이름은 통과한다");
     }
 
     /// ★그물은 표에도 있다★ — 라우팅 밖에서 핸들러를 직접 부르는 경로(하네스 · 조립부)에서도 패닉이

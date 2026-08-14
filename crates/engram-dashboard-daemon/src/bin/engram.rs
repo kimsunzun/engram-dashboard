@@ -1265,7 +1265,7 @@ fn exit_code_for_agent_response(agent: &ParsedAgent, status: u16, resp_body: &st
         // `new` 는 프로세스를 띄우지 않는다 — 살아 있다는 답은 우리가 시킨 일의 결과일 수 없다.
         ParsedAgent::New { .. } => {
             agent_object_ok(&v, true)
-                && v["agent"].get("state").and_then(|s| s.as_str()) == Some(AGENT_STATE_SLEEPING)
+                && read_agent_evidence(&v).and_then(|e| e.state) == Some(AGENT_STATE_SLEEPING)
         }
         // 개명은 **확정된 이름**과 결말이 증거다(확정 이름은 요청 이름과 다를 수 있어 값 자체는 대조하지 않는다).
         ParsedAgent::Rename { .. } => {
@@ -1318,16 +1318,48 @@ fn nonempty_str(v: &serde_json::Value, key: &str) -> bool {
 fn has_agent_state(v: &serde_json::Value) -> bool {
     v.get("state")
         .and_then(|s| s.as_str())
-        .is_some_and(|s| s == AGENT_STATE_LIVE || s == AGENT_STATE_SLEEPING)
+        .is_some_and(is_agent_state)
+}
+
+fn is_agent_state(s: &str) -> bool {
+    s == AGENT_STATE_LIVE || s == AGENT_STATE_SLEEPING
+}
+
+/// 변경 동사 응답이 나르는 "어느 에이전트인가". 값 검사는 하지 않는다 — 비지 않았나·어휘 안인가는 호출부 몫.
+struct AgentEvidence<'a> {
+    id: &'a str,
+    name: &'a str,
+    /// 생사를 싣지 않는 동사(개명·이동)의 응답에선 `None`.
+    state: Option<&'a str>,
+}
+
+/// 중첩(`{agent:{id,name,state}}`)·평면(`{agent_id,name,state}`) 두 shape 을 한 값으로 접는다.
+///
+/// ★둘 다 받는 이유★: 데몬 라우트와 이 CLI 는 서로 다른 조각에서 손보므로, 한 shape 만 아는 판정기는
+///   반대편 데몬 앞에서 **모든 성공 응답**을 exit 2 로 읽는다 — 호출자에겐 데몬이 고장 난 것으로 보인다.
+///   한쪽만 남기는 정리는 데몬 전환이 끝난 뒤의 조각이 한다.
+/// ★두 shape 을 섞어 읽지 않는다★: id 는 중첩에서 생사는 최상위에서 집는 식으로 fallback 을 걸면 어느 계약도
+///   만족하지 않는 혼종 body 가 통과한다. `agent` 키가 있으면 그 안만 본다.
+fn read_agent_evidence(v: &serde_json::Value) -> Option<AgentEvidence<'_>> {
+    let (holder, id_key) = match v.get("agent") {
+        Some(nested) => (nested, "id"),
+        None => (v, "agent_id"),
+    };
+    Some(AgentEvidence {
+        id: holder.get(id_key)?.as_str()?,
+        name: holder.get("name")?.as_str()?,
+        state: holder.get("state").and_then(|s| s.as_str()),
+    })
 }
 
 /// 변경 동사 공통 증거 — 어느 에이전트인지(id·이름). `with_state` 는 생사까지 실리는 동사에만 켠다
 /// (개명·이동은 생사를 바꾸지 않으므로 그 필드를 요구하지 않는다).
 fn agent_object_ok(v: &serde_json::Value, with_state: bool) -> bool {
-    let Some(a) = v.get("agent") else {
-        return false;
-    };
-    nonempty_str(a, "id") && nonempty_str(a, "name") && (!with_state || has_agent_state(a))
+    read_agent_evidence(v).is_some_and(|e| {
+        !e.id.is_empty()
+            && !e.name.is_empty()
+            && (!with_state || e.state.is_some_and(is_agent_state))
+    })
 }
 
 /// (Debug = 단위 테스트에서 expect_err 시 Ok 쪽 표시용.)
@@ -2613,6 +2645,144 @@ mod tests {
                 exit_code_for_agent_response(&agent_of(args), 200, body),
                 want,
                 "{args:?} ← {body}"
+            );
+        }
+    }
+
+    /// 위 두 표의 **평면 쌍둥이**(`{agent_id,name,state}`) — 두 shape 이 같은 검사를 받는다는 것이 요점이다.
+    /// (`list` 는 두 shape 이 동형이라 여기 없다.)
+    #[test]
+    fn agent_exit_code_accepts_only_flat_payloads_that_carry_the_evidence() {
+        let cases: [(&[&str], &str, i32); 10] = [
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent_id":"i","name":"w","state":"live","created":false}"#,
+                0,
+            ),
+            // created 누락 = 깨운 건지 만든 건지 모른다.
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent_id":"i","name":"w","state":"live"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "new", "--cwd", "c"],
+                r#"{"agent_id":"i","name":"n","state":"sleeping"}"#,
+                0,
+            ),
+            // 신원 자리가 반만 답해졌다.
+            (
+                &["agent", "new", "--cwd", "c"],
+                r#"{"agent_id":"i","state":"sleeping"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "rename", "a", "b"],
+                r#"{"agent_id":"i","name":"b","outcome":"renamed"}"#,
+                0,
+            ),
+            (
+                &["agent", "rename", "a", "b"],
+                r#"{"agent_id":"i","name":"b","outcome":"maybe"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent_id":"i","name":"a","parent":null}"#,
+                0,
+            ),
+            // parent 키 자체가 없으면 어디로 갔는지 모른다.
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent_id":"i","name":"a"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent_id":"","name":"a","parent":null}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 혼종 — 신원을 두 shape 에 나눠 실은 body 는 어느 계약도 만족하지 않는다(중첩이 있으면 그 안만 본다).
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent":{"id":"i"},"name":"w","state":"live","created":false}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+        ];
+        for (args, body, want) in cases {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(args), 200, body),
+                want,
+                "{args:?} ← {body}"
+            );
+        }
+    }
+
+    /// 요청과의 대조는 shape 과 무관하다 — 평면이라고 통과시키면 그 순간 두 shape 모두에서 게이트가 풀린다.
+    #[test]
+    fn agent_exit_code_rejects_flat_evidence_that_contradicts_the_request() {
+        let cases: [(&[&str], &str, i32); 6] = [
+            // 깨우기인데 "만들었다" 고 답한다.
+            (
+                &["agent", "spawn", "worker"],
+                r#"{"agent_id":"i","name":"worker","state":"live","created":true}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 만들어 띄우라 했는데 "깨웠다" 고 답한다.
+            (
+                &["agent", "spawn", "--cwd", "C:/x"],
+                r#"{"agent_id":"i","name":"x","state":"live","created":false}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 루트로 떼라 했는데 부모를 달고 온다.
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent_id":"i","name":"a","parent":"p-id"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 부모 밑으로 넣으라 했는데 루트라고 답한다.
+            (
+                &["agent", "move", "a", "--parent", "lead"],
+                r#"{"agent_id":"i","name":"a","parent":null}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // `new` 는 아무것도 띄우지 않는다 — 최상위 `state` 를 읽고도 이 대조가 살아 있나.
+            (
+                &["agent", "new", "--cwd", "C:/x"],
+                r#"{"agent_id":"i","name":"x","state":"live"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 대조군 — 요청과 맞는 응답은 그대로 통과한다.
+            (
+                &["agent", "move", "a", "--parent", "lead"],
+                r#"{"agent_id":"i","name":"a","parent":"p-id"}"#,
+                0,
+            ),
+        ];
+        for (args, body, want) in cases {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(args), 200, body),
+                want,
+                "{args:?} ← {body}"
+            );
+        }
+    }
+
+    /// ★평면 reader 가 "필드가 다 있으면 통과" 로 무너지지 않았나★ — 신원(`agent_id`·`name`·`state`)만 완전한
+    ///   응답은 어느 변경 동사에서도 성공이 아니다. 동사마다 요구하는 대조 필드가 따로 있다.
+    #[test]
+    fn a_flat_payload_without_the_cross_check_still_exits_two() {
+        let identity_only = r#"{"agent_id":"i","name":"n","state":"live"}"#;
+        for args in [
+            &["agent", "spawn", "n"][..],
+            &["agent", "new", "--cwd", "c"][..],
+            &["agent", "rename", "a", "n"][..],
+            &["agent", "move", "a", "--parent", "lead"][..],
+        ] {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(args), 200, identity_only),
+                EXIT_MALFORMED_SUCCESS,
+                "신원만으론 부족하다({args:?}): {identity_only}"
             );
         }
     }
