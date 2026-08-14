@@ -142,7 +142,44 @@ foreach ($md in $ExpectedPrompts) {
 }
 
 # ── (b) release/ clean 재생성 ────────────────────────────────────────────────────────────
-if (Test-Path $ReleaseDir) { Remove-Item -Recurse -Force $ReleaseDir }
+#
+# ★지우기 전에 막는다(load-bearing)★: Remove-Item -Recurse 는 **중간에 멈출 수 있다**. 앱이 그 폴더에서
+#   돌고 있으면 데몬이 engram-data\daemon.json 을 붙잡고 있어(ADR-0135 — 삭제 공유 없음) 삭제가 거부되는데,
+#   실측상 그 전에 이미 engram-data\agents.json 이 지워진다. 결과 = 에이전트 명부만 날아가고 빌드는 시작도
+#   못 한 채 raw PowerShell 오류. `launch\빌드.bat` 은 taskkill 을 하지 않고 `launch\실행.bat` 이 같은
+#   폴더에서 앱을 띄우므로 "돌려보고 다시 빌드"가 평범한 진입 경로다.
+#   ★데이터를 몰래 보존하는 것으로 고치지 말 것★: clean 재생성이 데이터를 함께 지우는 것은 ADR 이
+#   의도한 동작이다. 여기서 고치는 것은 **중간에 멈추는 것**뿐이라, 손대기 전에 거부한다.
+if (Test-Path $ReleaseDir) {
+    $locked = @()
+    foreach ($f in @(Get-ChildItem -Force -Recurse -File -Path $ReleaseDir -ErrorAction SilentlyContinue)) {
+        try {
+            # 쓰기 접근 + 공유 없음 = "이 파일을 지울 수 있나"에 가장 가까운 질문.
+            $h = [System.IO.File]::Open($f.FullName, 'Open', 'ReadWrite', 'None')
+            $h.Close()
+        } catch {
+            # ★공유 위반만 센다★: 읽기 전용 속성·권한 거부(UnauthorizedAccessException)는 여기 걸려도
+            #   Remove-Item -Force 가 지운다 — 그걸 "다른 프로세스가 쓰고 있다"고 보고하면 멀쩡한 빌드를
+            #   엉뚱한 이유로 막는다. 검사 도중 사라진 파일(FileNotFoundException)도 막을 이유가 없다.
+            # ★InnerException 을 풀어야 한다(실측)★: PowerShell 은 .NET **메서드**가 던진 예외를
+            #   MethodInvocationException 으로 감싸므로 `$_.Exception -is [IOException]` 은 공유 위반에도
+            #   거짓이다 — 풀지 않으면 이 가드가 아무것도 못 잡는다.
+            $ex = $_.Exception
+            while ($ex -and -not ($ex -is [System.IO.IOException]) -and $ex.InnerException) {
+                $ex = $ex.InnerException
+            }
+            if (($ex -is [System.IO.IOException]) -and (Test-Path -LiteralPath $f.FullName)) {
+                $locked += $f.FullName
+            }
+        }
+    }
+    if ($locked.Count -gt 0) {
+        Write-Host "[build-release] 아래 파일을 다른 프로세스가 쓰고 있습니다:" -ForegroundColor Yellow
+        foreach ($l in $locked) { Write-Host "    $l" -ForegroundColor Yellow }
+        Fail "release 폴더를 통째로 지울 수 없습니다 — 앱(engram-dashboard.exe)과 데몬을 완전히 종료한 뒤 다시 실행하세요. (지우다 만 상태로 데이터만 날리지 않으려고 시작 전에 멈춥니다)"
+    }
+    Remove-Item -Recurse -Force $ReleaseDir
+}
 New-Item -ItemType Directory -Path $ReleaseDir | Out-Null
 $ReleasePrompts = Join-Path $ReleaseDir 'prompts'
 New-Item -ItemType Directory -Path $ReleasePrompts | Out-Null

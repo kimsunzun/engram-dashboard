@@ -8,9 +8,13 @@ REM   dev-dependency of src-tauri, so `tauri build` does NOT produce it. locate_
 REM   the daemon RIGHT NEXT TO the app exe (current_exe().parent()), so BOTH must land in target\release\.
 REM   Without this the release app cannot spawn the daemon (ExeNotFound) and hosts no agents.
 REM
-REM Release data dir (daemon.json) = %APPDATA%\com.engram.dashboard  (NOT the dev .engram-data).
-REM   To drive this release app with scripts\engram.mjs, point the CLI at that portfile first, e.g.:
-REM     set "ENGRAM_DATA_DIR=%APPDATA%\com.engram.dashboard"  &&  node scripts\engram.mjs list
+REM Release data dir (daemon.json) = engram-data\ NEXT TO the app exe, i.e. target\release\engram-data
+REM   (ADR-0134; NOT the dev .engram-data, and no longer %APPDATA%).
+REM   scripts\engram.mjs finds that portfile on its own - just run `node scripts\engram.mjs list`.
+REM ★Do NOT set ENGRAM_DATA_DIR to "point the CLI at" the release daemon (do not remove this warning):
+REM   under ADR-0134 that variable is ALSO the single-instance scope, so setting it makes the next
+REM   daemon claim a DIFFERENT folder - you silently get a second daemon with its own roster and no
+REM   error. Let the CLI discover the portfile instead.
 cd /d "%~dp0"
 
 echo [release] Stopping any running daemon (so the freshly built one is used)...
@@ -28,5 +32,5 @@ echo [release] Launching target\release\engram-dashboard.exe ...
 start "" "target\release\engram-dashboard.exe"
 echo.
 echo [release] Launched. Full installers (msi/nsis): run "npm run tauri build" WITHOUT --no-bundle.
-echo [release] This build's daemon.json -^> %%APPDATA%%\com.engram.dashboard
+echo [release] This build's daemon.json -^> target\release\engram-data\
 pause

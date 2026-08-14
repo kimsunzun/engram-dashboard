@@ -12,6 +12,11 @@ launch/release/
 # 로컬 런타임 데이터(데몬 토큰·프로필 등) — 절대 커밋 금지. data_dir 기본 위치(S13 TRD).
 .engram-data/
 
+# 릴리즈 배포판의 런타임 데이터(실행파일 옆 — ADR-0134). 같은 이유로 절대 커밋 금지:
+#   daemon.json 에 256-bit WS 토큰, agents.json 에 프로필이 담긴다. 배포판을 추적 폴더 안에 풀어도
+#   스테이징되지 않게 이름만으로 막는다(위 hidden 이름과 가시성 요구가 달라 둘 다 필요하다).
+engram-data/
+
 # 핸드오프 히스토리(/handoff용) — 기록 보존 위해 git 추적(2026-07-09, 사용자 결정). history/ append-only.
 .ccb/
 

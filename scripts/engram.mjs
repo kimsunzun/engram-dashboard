@@ -9,8 +9,36 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
-// daemon.json 위치 해결 — dev(repo <root>/.engram-data) 와 release(%APPDATA%) 둘 다 커버.
+// daemon.json 위치 해결 — dev(repo <root>/.engram-data) 와 release(<exe 폴더>/engram-data) 둘 다 커버.
 // 이 후보 탐색이 "release-safe" 의 핵심: 어느 빌드든 데몬이 떠 있으면 portfile 로 붙는다.
+//
+// ★ENGRAM_DATA_DIR 로 릴리스 데몬을 가리키게 하지 말 것★: ADR-0134 이후 그 변수는 단일 인스턴스
+//   스코프이기도 해서, 설정한 채로 데몬이 뜨면 다른 폴더를 잡아 조용히 두 번째 데몬이 된다. 이 함수가
+//   알아서 찾는다.
+// ★찢긴 읽기를 견뎌야 한다(ADR-0135)★: 데몬은 daemon.json 을 붙잡은 채 **제자리에** 쓴다(임시 파일 +
+//   rename 이 불가능하다 — 우리가 삭제 공유를 닫고 잡고 있다). 그래서 길이 0으로 줄인 직후나 쓰는
+//   도중에 읽으면 빈 파일·반쪽 JSON 이 보인다. 그건 손상이 아니라 **아직 준비 안 됨**이므로 짧게 다시
+//   읽는다. ★JSON.parse 를 맨몸으로 부르지 마라★ — 데몬이 멀쩡한데 SyntaxError 로 죽는다.
+//   열기 실패(제3자가 좁은 공유로 잠깐 여는 경우)도 같은 취급이다.
+const PORTFILE_READ_ATTEMPTS = 10   // 총 대기 상한 ≈ 500ms — 데몬 발행은 ms 단위라 넉넉하다.
+const PORTFILE_READ_DELAY_MS = 50   // discovery 폴링 주기와 같은 값.
+
+function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+
+// 성공하면 파싱된 레코드, 예산 안에 온전한 내용을 못 보면 null(던지지 않는다).
+// ★후보 추리기(isLive)는 예산을 짧게 준다★: 후보마다 전체 예산을 쓰면 죽은 후보 몇 개만으로 CLI 가
+//   몇 초씩 멈춘다. 붙을 파일을 확정한 뒤(connect)에만 넉넉히 기다린다.
+function readPortfile(p, attempts = PORTFILE_READ_ATTEMPTS) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const info = JSON.parse(fs.readFileSync(p, 'utf8'))
+      if (info && typeof info.port === 'number' && typeof info.token === 'string') return info
+    } catch {}
+    if (i < attempts - 1) sleepSync(PORTFILE_READ_DELAY_MS)
+  }
+  return null
+}
+
 function findPortfile() {
   const candidates = []
   if (process.env.ENGRAM_DATA_DIR) candidates.push(path.join(process.env.ENGRAM_DATA_DIR, 'daemon.json'))
@@ -28,17 +56,21 @@ function findPortfile() {
     if (parent === dir) break
     dir = parent
   }
-  // release: %APPDATA%\com.engram.dashboard\daemon.json (discovery::default_data_dir)
-  if (process.env.APPDATA) candidates.push(path.join(process.env.APPDATA, 'com.engram.dashboard', 'daemon.json'))
+  // release: <exe 폴더>/engram-data/daemon.json (ADR-0134 · discovery::default_data_dir).
+  //   릴리스 exe 는 repo 밖에도 풀릴 수 있으므로 repo 기준 후보(target/release)와 cwd 기준 후보를 함께 둔다.
+  try {
+    const scriptDir = path.dirname(fileURLToPath(import.meta.url)) // <repo>/scripts
+    candidates.push(path.join(scriptDir, '..', 'target', 'release', 'engram-data', 'daemon.json'))
+  } catch {}
+  candidates.push(path.join(process.cwd(), 'engram-data', 'daemon.json'))
   // 살아있는 데몬을 가리키는 첫 portfile 선택 — 죽은 dev portfile 을 건너뛴다(ENGRAM_DATA_DIR 목발 제거).
   // 이게 없으면 스테일 .engram-data/daemon.json 이 죽은 데몬을 가리켜 연결 실패한다.
   const existing = candidates.filter((c) => fs.existsSync(c))
   const isLive = (c) => {
-    try {
-      const info = JSON.parse(fs.readFileSync(c, 'utf8'))
-      try { process.kill(info.pid, 0); return true } // 신호 0 = 존재 확인(안 죽임)
-      catch (e) { return e.code === 'EPERM' } // EPERM = 존재하나 권한없음 = 살아있음
-    } catch { return false }
+    const info = readPortfile(c, 2)
+    if (!info) return false
+    try { process.kill(info.pid, 0); return true } // 신호 0 = 존재 확인(안 죽임)
+    catch (e) { return e.code === 'EPERM' } // EPERM = 존재하나 권한없음 = 살아있음
   }
   const live = existing.find(isLive)
   if (live) return live
@@ -50,7 +82,9 @@ const rid = () => crypto.randomUUID()
 
 // 연결 + Auth(첫 프레임) → {send, waitFor} 반환. 실패(토큰 불일치/버전) 시 throw.
 async function connect() {
-  const info = JSON.parse(fs.readFileSync(findPortfile(), 'utf8'))
+  const portfile = findPortfile()
+  const info = readPortfile(portfile)
+  if (!info) throw new Error(`daemon.json 을 온전히 읽지 못했습니다(쓰는 중이거나 다른 프로그램이 붙들고 있음): ${portfile}`)
   const ws = new WebSocket(`ws://${info.host}:${info.port}/`)
   ws.binaryType = 'arraybuffer'
   const texts = []       // 수신한 제어(JSON Text) 메시지 누적

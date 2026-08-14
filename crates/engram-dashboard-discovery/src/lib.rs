@@ -27,8 +27,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 //   - **유일한 용도 = 통합 테스트의 데이터 격리.** 실프로세스 통합 테스트(daemon `tests/ws_e2e.rs`)가
 //     데몬을 임시 디렉토리로 보내 운영 `<repo>/.engram-data` 오염을 막기 위함이다. 이 env 가 없으면
 //     테스트 데몬이 운영 폴더에 daemon.json/agents.json 을 쓴다(오염).
-//   - **배포용 경로 커스터마이즈 노브가 아니다.** 배포 단계의 데이터 위치는 추후 appdata 로 갈 때
-//     별도 결정한다(ADR-0024). 이 override 를 "사용자가 데이터 폴더를 바꾸는 수단"으로 쓰지 말 것.
+//   - **배포용 경로 커스터마이즈 노브가 아니다.** 배포 단계의 데이터 위치는 실행 폴더 하위로
+//     확정돼 있다(ADR-0134). 이 override 를 "사용자가 데이터 폴더를 바꾸는 수단"으로 쓰지 말 것.
+//   - ★ADR-0134 이후 부수 효과★: 데이터 폴더가 곧 단일 인스턴스 스코프라, 이 env 만 갈라 주면
+//     인스턴스도 함께 갈린다(따로 챙길 열쇠 변수가 없다).
 //   - ★중요 한계 — WMI 경로엔 닿지 않는다★: 이 override 는 **부모 env 를 상속하는 spawn 에만** 먹는다.
 //     즉 `std::process::Command` 로 데몬을 **직접** 띄우는 ws_e2e.rs 만 격리된다. discovery 의 운영
 //     spawn 경로(WMI Win32_Process.Create)는 자식이 WmiPrvSE 자식이라 **부모 env 를 상속하지 않아**
@@ -36,15 +38,28 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 //     discovery 의 smoke 테스트(real_wmi_spawn_*)는 env 로 격리하지 못하고, default 경로(`.engram-data`)
 //     를 폴링하며 운영 파일은 백업/복원으로 보호한다.
 
-// ADR-0029: debug 분기(walk-up `.engram-data`)와 그 단위테스트에서만 쓰인다 — release default_data_dir
-// 은 %APPDATA% 만 쓰므로 release 비-test 빌드에선 dead_code.
+// ADR-0029: debug 분기(walk-up `.engram-data`)와 그 단위테스트에서만 쓰인다 — release
+// default_data_dir 은 exe 옆 `engram-data` 만 쓰므로 release 비-test 빌드에선 dead_code.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 const LOCAL_DATA_DIR: &str = ".engram-data";
 
 const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
-/// Tauri identifier 와 동일(ADR-0027/0029).
-const APP_IDENTIFIER: &str = "com.engram.dashboard";
+/// ADR-0134 결정 2: 릴리스 데이터는 실행 폴더 **하위 한 폴더**에 모인다 — exe 옆에 흩어두면 배포
+/// 파일과 섞여 새 버전 압축을 덮어쓸 때 사용자 데이터가 함께 날아간다.
+const RELEASE_DATA_DIR: &str = "engram-data";
+
+/// 쓰기 프로브 파일 이름의 앞부분. 뒤에 **프로세스·호출마다 다른 꼬리**가 붙는다.
+///
+/// ★고정 이름을 쓰지 말 것(되살리지 마라)★: 데몬과 클라이언트 관문이 같은 폴더를 동시에 프로브할 수
+/// 있고(트레이 "데몬 켜기"와 부팅 ensure 는 직렬화되지 않는다 — `commands/discovery.rs` 참조), 이름이
+/// 같으면 진 쪽이 `create_new` 에서 실패해 **멀쩡한 폴더를 "쓰기 불가"로 판정**한다. 더해 삭제만 막는
+/// ACL 에서는 남은 파일 하나가 이후 모든 프로브를 영구히 막는다.
+const WRITE_PROBE_PREFIX: &str = ".engram-write-probe-";
+
+/// ★0바이트로 쓰지 말 것★: 디스크가 꽉 찼거나 할당량이 소진된 상태에서도 길이 0 파일 생성은 흔히
+/// 성공한다 — 그러면 프로브는 통과하고 첫 실제 쓰기가 실패한다. 실제로 바이트를 실어야 검사가 된다.
+const WRITE_PROBE_PAYLOAD: &[u8] = b"engram-write-probe";
 
 /// engram 프로세스의 데이터 디렉토리(ADR-0024/0029).
 ///
@@ -56,15 +71,13 @@ const APP_IDENTIFIER: &str = "com.engram.dashboard";
 /// 2. **디버그(`cfg!(debug_assertions)`)**: current_exe 에서 위로 올라가 repo 루트(`.git` 또는
 ///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-data`. 루트 못 찾으면 exe 디렉토리
 ///    fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드(app·daemon)가 한 폴더 공유.
-/// 3. **릴리즈(`not(debug_assertions)`)**: **유저 영역 `%APPDATA%\com.engram.dashboard`**
-///    (`appdata_data_dir`). 데몬은 dockerd/tailscaled 처럼 per-user 서비스라 폴더에 안 묶인다.
+/// 3. **릴리즈(`not(debug_assertions)`)**: **실행 파일 폴더 하위 `engram-data/`**
+///    ([`release_data_dir`]). 배포판 폴더를 지우면 흔적이 남지 않는다 — 완전 포터블(ADR-0134 결정 1).
 ///
 /// 어느 경로든 **절대 패닉하지 않는다**(배포·루트 미발견 상황에서도 PathBuf 를 반드시 반환).
 pub fn default_data_dir() -> PathBuf {
-    if let Some(val) = std::env::var_os(DATA_DIR_ENV) {
-        if !val.is_empty() {
-            return PathBuf::from(val);
-        }
+    if let Some(path) = data_dir_env_override() {
+        return path;
     }
 
     #[cfg(debug_assertions)]
@@ -87,27 +100,236 @@ pub fn default_data_dir() -> PathBuf {
 
     #[cfg(not(debug_assertions))]
     {
-        appdata_data_dir()
+        // exe 경로는 WMI spawn(부모 cwd 미상속) 아래서도 신뢰 가능한 유일한 기준점이다 — 디버그
+        // 분기의 walk-up 이 exe 에서 출발하는 것과 같은 이유.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                return release_data_dir(dir);
+            }
+        }
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(RELEASE_DATA_DIR)
     }
 }
 
-/// release 데이터 위치 = `%APPDATA%\com.engram.dashboard`(ADR-0027/0029).
+/// `ENGRAM_DATA_DIR` override 가 **활성**이면 그 경로. 빈 값은 미설정과 같다.
 ///
-/// ★release-only(load-bearing)★: 이 헬퍼는 **릴리즈 분기에서만** 호출된다. dirs crate 의존을
-/// 추가하지 않으려고 APPDATA env 를 직접 읽는다(의존 추가 0). APPDATA 미설정(드문 환경) 시 cwd
-/// join 으로 강등 — **절대 패닉 금지**. 디버그 빌드에선 호출처(release 분기)가 cfg-out 돼
-/// dead_code 이므로 디버그에서만 allow.
-#[cfg_attr(debug_assertions, allow(dead_code))]
-fn appdata_data_dir() -> PathBuf {
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        if !appdata.is_empty() {
-            return PathBuf::from(appdata).join(APP_IDENTIFIER);
+/// ★단일 출처★: "override 가 켜져 있나"를 묻는 곳이 둘 이상이라 여기로 모은다 — 판정이 갈리면
+/// 한쪽은 데몬이 안 쓸 폴더를 보게 된다(`ensure_daemon` 의 사전 점검이 그 자리다).
+fn data_dir_env_override() -> Option<PathBuf> {
+    let val = std::env::var_os(DATA_DIR_ENV)?;
+    if val.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(val))
+}
+
+/// 릴리스 데이터 폴더 = `<exe 폴더>/engram-data`(ADR-0134 결정 1·2).
+///
+/// ★cfg 를 걸지 않는다(load-bearing)★: 호출부인 [`default_data_dir`] 의 릴리즈 분기는
+/// `not(debug_assertions)` 아래에 있고 **테스트는 항상 debug 로 돈다** — 이 함수까지 cfg 로 가리면
+/// 릴리스 규칙을 단언할 수단이 사라진다.
+pub fn release_data_dir(exe_dir: &Path) -> PathBuf {
+    exe_dir.join(RELEASE_DATA_DIR)
+}
+
+/// ★sync_all 까지 간다★: 캐시에만 얹힌 쓰기는 꽉 찬 디스크·소진된 할당량을 그대로 통과한다 —
+/// 바이트가 실제로 안착해야 "쓸 수 있다"가 참이다.
+fn write_probe_payload(mut f: std::fs::File) -> std::io::Result<()> {
+    use std::io::Write;
+    f.write_all(WRITE_PROBE_PAYLOAD)?;
+    f.sync_all()
+}
+
+fn unwritable(dir: &Path, e: &std::io::Error) -> DiscoveryError {
+    DiscoveryError::DataDirUnwritable {
+        path: dir.display().to_string(),
+        reason: e.to_string(),
+    }
+}
+
+/// `dir` **안에** 파일을 만들어 바이트를 쓸 수 있는지 실제로 해 본다. `dir` 은 이미 존재해야 한다.
+///
+/// 프로브 파일은 `create_new` 로 만든다 — 같은 이름의 기존 파일을 절대 덮어쓰지 않는다. 이미 있으면
+/// 지난 번 정리가 실패한 흔적이므로 지우고 한 번 더 시도한다(존재 자체는 실패 사유가 아니다).
+///
+/// ★남길 수 있다(계약)★: 만든 파일은 지우지만, 생성은 되고 삭제는 막는 폴더에서는 **삭제가 실패해
+/// 파일이 남는다**. 그때는 경고 로그를 남기고 성공으로 본다 — 쓸 수 있다는 것은 이미 증명됐다.
+/// 이 프로세스·이 호출만의 프로브 경로. pid 로 프로세스를, 카운터로 같은 프로세스의 동시 호출을 가른다.
+fn probe_path(dir: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{WRITE_PROBE_PREFIX}{}-{n}", std::process::id()))
+}
+
+fn probe_write_in(dir: &Path) -> std::io::Result<()> {
+    probe_write_at(&probe_path(dir))
+}
+
+/// 프로브 경로를 인자로 받는 본체 — 테스트가 "그 이름으로 파일을 만들 수 없는" 실패 분기를 결정적으로
+/// 재현하려면 이름을 정할 수 있어야 한다. 운영 진입점은 [`probe_write_in`] 뿐이다.
+///
+/// ★`io::Result` 로 돌려주는 이유★: 호출자가 `ErrorKind` 를 봐야 한다 — 폴더가 검사 도중 사라진
+/// `NotFound` 는 "쓸 수 없다"가 아니라 경합이고, 그 둘을 여기서 뭉치면 구분할 방법이 사라진다.
+fn probe_write_at(probe: &Path) -> std::io::Result<()> {
+    let create = |p: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(p)
+    };
+
+    let file = match create(probe) {
+        Ok(f) => f,
+        // 같은 pid 의 지난 실행이 정리에 실패하고 남긴 흔적일 수 있다 — 지우고 한 번만 다시 시도한다.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(probe)?;
+            create(probe)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    let written = write_probe_payload(file);
+    let cleanup = std::fs::remove_file(probe);
+    written?;
+    if let Err(e) = cleanup {
+        tracing::warn!(
+            "쓰기 프로브 파일 삭제 실패({}) — 남긴다: {e}",
+            probe.display()
+        );
+    }
+    Ok(())
+}
+
+/// 폴더가 검사 도중 사라지면 **한 번만** 다시 해 본다.
+///
+/// ★왜 필요한가(실재하는 경합)★: 사전 점검([`check_data_dir_writable`])은 자기가 만든 폴더를 되돌리므로,
+/// 두 호출이 겹치면 A 가 만든 폴더를 B 가 "있다"고 본 직후 A 가 지워 B 의 프로브가 `NotFound` 로
+/// 넘어진다. 그건 권한 문제가 아니라 타이밍이라 멀쩡한 폴더를 "쓰기 불가"로 판정하면 안 된다.
+/// 트레이 "데몬 켜기"와 부팅 ensure 는 직렬화되지 않는다(`src-tauri/src/commands/discovery.rs`).
+fn retry_if_vanished(
+    dir: &Path,
+    mut once: impl FnMut() -> std::io::Result<()>,
+) -> Result<(), DiscoveryError> {
+    match once() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            once().map_err(|e| unwritable(dir, &e))
+        }
+        Err(e) => Err(unwritable(dir, &e)),
+    }
+}
+
+/// 데이터 폴더를 **만들고** 실제로 쓸 수 있는지 확인한다(ADR-0134 결정 4 — 폴백 없음).
+///
+/// ★폴더를 소유하는 쪽(데몬) 전용★: 폴더를 생성하는 부수효과가 있다. 아직 그 폴더를 쓸지 확정하지
+/// 않은 쪽(클라이언트 사전 점검)은 [`check_data_dir_writable`] 을 쓴다.
+///
+/// 존재 검사만으로는 부족하다: 권한 없는 위치(`C:\Program Files` 하위 등)는 폴더가 이미 있어도 첫
+/// 쓰기에서 막힌다.
+///
+/// 실패는 [`DiscoveryError::DataDirUnwritable`] 하나로 접는다 — 원인이 무엇이든 사용자가 할 일은
+/// "쓸 수 있는 곳에 풀기" 하나다.
+pub fn ensure_data_dir_writable(dir: &Path) -> Result<(), DiscoveryError> {
+    retry_if_vanished(dir, || {
+        std::fs::create_dir_all(dir)?;
+        probe_write_in(dir)
+    })
+}
+
+/// 데이터 폴더에 쓸 수 있을지를 **아무것도 만들지 않고** 본다(클라이언트 사전 점검).
+///
+/// ★폴더를 만들지 않는 것이 요점이다★: 이 검사는 "데몬이 이 폴더를 쓸 수 있을까"를 묻는 것이지 그
+/// 폴더를 확정하는 것이 아니다. 검사가 폴더를 만들어 두면, 데몬이 결국 다른 폴더를 쓰게 되는 경로에서
+/// 영영 비는 폴더가 남는다.
+///
+/// 해석:
+/// - `dir` 이 이미 폴더면 그 안에 프로브를 쓴다.
+/// - `dir` 이 **파일**이면 실패다. 상위를 보고 통과시키면 안 된다 — `create_dir_all` 이 반드시 실패한다.
+/// - 없으면 **폴더를 실제로 만들어 보고** 프로브까지 쓴 뒤, 우리가 만든 것이면 되돌린다.
+///
+/// ★상위 폴더에 파일을 만들어 보는 것으로 대신하지 말 것(되살리지 마라)★: Windows 의
+/// `FILE_ADD_FILE` 과 `FILE_ADD_SUBDIRECTORY` 는 **따로 부여된다**. 파일만 만들 수 있는 폴더에서는
+/// 그 대체 검사가 통과하고 데몬의 `create_dir_all` 이 실패해, 사용자는 메시지 대신 시간 초과를 본다.
+/// 필요한 권한을 그대로 시험해야 한다.
+///
+/// ★되돌리기의 범위 = 우리가 만든 것 **전부, 그리고 그것만**★: 중간 폴더까지 줄줄이 만들 수 있어 잎
+/// 하나만 지우면 나머지가 영구히 남는다. 그래서 위에서 아래로 **한 겹씩** 만들고 생성에 **우리가 이긴**
+/// 겹만 기록해 잎부터 위로 되돌린다. 실패한 경로에서도 되돌린다.
+///
+/// ★"만들기 전 스냅샷"으로 되돌리지 마라(되살리지 마라)★: 없던 조상 목록을 미리 찍어 두면 소유가
+/// 성립하지 않는다 — A 가 `a/` 를 없다고 기록한 사이 B 가 `a/` 를 만들면, A 는 나중에 **B 의 폴더**를
+/// 지운다. 겹마다 `AlreadyExists` 를 본 쪽이 남의 것이라고 판정해야 그 창이 닫힌다.
+///
+/// ★계약의 한계 — 지우는 대상은 "우리가 만든 **경로**" 이지 그 순간의 디렉터리 **객체**가 아니다★:
+/// 우리가 만든 뒤 남이 그것을 지우고 같은 이름으로 다시 만들면(ABA) 우리의 `remove_dir` 이 남의 것을
+/// 지운다. 정밀하게 막으려면 생성 시점의 파일 ID 를 들고 삭제 직전에 대조해야 하는데, 피해가 이만큼
+/// 좁아서 하지 않았다: `remove_dir` 은 **빈 디렉터리만** 지우므로 남이 쓰기 시작했으면 실패하고, 그
+/// 피해자도 프로브에서 `NotFound` 를 만나 [`retry_if_vanished`] 로 한 번 더 시도해 회복한다.
+///
+/// 이미 있던 폴더는 손대지 않고, 그 사이 데몬이 쓰기 시작한 폴더는 비어 있지 않아 삭제가 실패하는데
+/// 그건 무해하다(이미 쓰이는 폴더다).
+pub fn check_data_dir_writable(dir: &Path) -> Result<(), DiscoveryError> {
+    retry_if_vanished(dir, || check_data_dir_writable_once(dir))
+}
+
+fn check_data_dir_writable_once(dir: &Path) -> std::io::Result<()> {
+    // ★한 번의 stat 으로 세 갈래를 가른다(되살리지 마라 — `is_dir()` 뒤에 `exists()` 를 잇지 말 것)★:
+    //   두 번 물으면 그 사이 남이 폴더를 만들었을 때 "폴더 아님 + 존재함" = **파일이 있다**로 읽혀,
+    //   멀쩡한 경합을 "같은 이름의 파일이 이미 있음"으로 잘못 보고한다(겹친 점검 테스트가 실측으로
+    //   재현했다). 겹치는 두 주체가 실재한다 — 트레이 "데몬 켜기"와 부팅 ensure.
+    match std::fs::metadata(dir) {
+        Ok(m) if m.is_dir() => return probe_write_in(dir),
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "같은 이름의 파일이 이미 있어 폴더를 만들 수 없음",
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    // 없는 조상들을 잎→위로 모은다(첫 존재 조상에서 멈춘다 — 루트까지 올라가지 않는다: 드라이브
+    //   루트에 대한 create_dir 은 AlreadyExists 가 아니라 PermissionDenied 다, 실측 2026-08-14).
+    let mut missing: Vec<&Path> = Vec::new();
+    let mut cur = Some(dir);
+    while let Some(p) = cur {
+        // 상대경로의 마지막 parent 는 빈 경로다 — 만들 수도 지울 수도 없으니 여기서 끊는다.
+        if p.as_os_str().is_empty() || p.exists() {
+            break;
+        }
+        missing.push(p);
+        cur = p.parent();
+    }
+
+    // 위→아래로 한 겹씩. `created` 에는 **우리가 만든** 겹만 담긴다.
+    let mut created: Vec<&Path> = Vec::new();
+    let mut failed: Option<std::io::Error> = None;
+    for p in missing.iter().rev() {
+        match std::fs::create_dir(p) {
+            Ok(()) => created.push(p),
+            // 그 사이 남이 만들었다 = 남의 것 → 우리가 되돌릴 대상이 아니다.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
         }
     }
-    // 운영 Windows 에선 APPDATA 가 사실상 항상 설정돼 있다.
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(APP_IDENTIFIER)
+
+    // ★조기 반환하지 마라(되살리지 마라)★: 중간에서 `?` 로 빠져나가면 이미 만든 겹이 그대로 남는다.
+    let outcome = match failed {
+        Some(e) => Err(e),
+        None => probe_write_in(dir),
+    };
+    for p in created.iter().rev() {
+        // 비어 있는 것만 지워진다 — 남이 쓰기 시작한 폴더는 그대로 둔다.
+        let _ = std::fs::remove_dir(p);
+    }
+    outcome
 }
 
 /// exe 기준으로 해석한 **설치/repo 루트 절대경로**(빌드모드 무관). 데몬이 상대 리소스(예: ADR-0092
@@ -168,6 +390,10 @@ pub enum DiscoveryError {
     Timeout(Duration),
     #[error("protocol 버전 불일치: 데몬={daemon}, 기대={expected}")]
     VersionMismatch { daemon: u32, expected: u32 },
+    /// ★메시지에 조치가 들어 있다(ADR-0134 결정 4)★: 이 문자열이 그대로 프론트의 실패 표면까지
+    /// 올라간다 — 원인 없는 연결 시간 초과를 대신하는 것이 이 변형의 존재 이유다.
+    #[error("데이터 폴더에 쓸 수 없음({path}): {reason} — 쓰기 가능한 위치에 압축을 풀어 주세요")]
+    DataDirUnwritable { path: String, reason: String },
     #[error("io: {0}")]
     Io(String),
 }
@@ -216,11 +442,26 @@ fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) -> AcceptChec
     AcceptCheck::Accept
 }
 
-/// ★stale 파일 false-live 회피★: (a) 에서 본 옛 daemon.json 이 깨졌거나 stale 이면 spawn 전에
-/// **삭제**(stale_cleanup)를 호출자가 수행한다. 폴링은 "유효 파싱 + live pid + 버전 호환" 만
-/// 수락하므로, 새 데몬이 파일을 덮어쓰기 전까지(=삭제돼 None) 옛 pid 를 보지 않는다.
-/// 단, 삭제와 새 데몬 write 사이 경합으로 옛 파일이 잠깐 남아도 그 pid 는 이미 dead 라
-/// is_dead 가 걸러낸다(이중 안전망).
+/// ★클라이언트는 daemon.json 을 지우지 않는다(되살리지 마라 — ADR-0134)★
+///
+/// 옛 구현은 (a) 에서 stale·깨짐으로 판정한 파일을 spawn 전에 **삭제**했다. 그 삭제는
+/// ① 아무것도 벌지 못하고 ② 두 가지 손상을 만든다.
+///
+/// ① 벌지 못하는 이유: 폴링은 "유효 파싱 + live pid + 버전 호환"만 수락하므로 옛 파일이 남아 있어도
+///    이미 죽은 pid 는 `check_acceptable` 이 거른다. 그리고 이긴 데몬은 **잠금을 얻은 뒤에** 자기
+///    daemon.json 을 덮어쓴다 — 자리를 미리 비워 줄 필요가 없다.
+/// ② 손상: (가) 삭제가 관문(`pre_spawn`)보다 앞서면, 관문이 막았을 때 되돌릴 수 없는 삭제만 남는다.
+///    (나) 더 나쁘게, 네트워크 공유의 포터블 폴더(ADR-0134 결정 3이 지원한다고 명시한 구성)에서는
+///    **다른 컴퓨터**의 pid 를 로컬 `OpenProcess` 로 판정하게 된다. 남의 살아있는 데몬을 stale 로 읽고
+///    그 portfile 을 지우면, 그 데몬은 다시 발행하지 않으므로 **원 소유자가 재접속 불가**가 된다.
+///    로컬 pid 검사는 남의 폴더에서 죽음의 증거가 아니다.
+///
+/// 그래서 이 함수는 **읽기만** 한다. 판정이 틀려도 남의 파일을 부수지 않는 것이 불변식이다.
+///
+/// `pre_spawn` = spawn 직전에만 도는 관문(ADR-0134 결정 4의 사전 점검 자리).
+///
+/// ★붙는 자리가 계약이다★: 살아있는 데몬에 attach 하는 경로는 **읽기만** 하면 되므로 이 관문을 지나지
+/// 않는다 — 폴더가 잠깐 못 쓰는 상태가 됐다고 이미 잘 도는 데몬에 못 붙으면 그게 더 나쁜 실패다.
 #[allow(clippy::too_many_arguments)]
 fn ensure_with(
     reader: &dyn DaemonReader,
@@ -228,22 +469,21 @@ fn ensure_with(
     liveness: &dyn PidLiveness,
     clock: &dyn Clock,
     exe: &Path,
-    stale_cleanup: &mut dyn FnMut(),
+    pre_spawn: &mut dyn FnMut() -> Result<(), DiscoveryError>,
     timeout: Duration,
 ) -> Result<DaemonInfo, DiscoveryError> {
-    // M1 안전망: stale 판정으로 삭제한 옛 DaemonInfo 를 메모리에 보관한다. 폴링이 timeout 나면
-    // (=새 데몬이 안 떴다 = 단일 인스턴스 mutex 충돌로 기존 데몬이 실제 살아있었을 가능성)
-    // 이 옛 정보가 지금도 live 인지 재검사해 live 면 복구 반환한다. "살아있는 데몬 파일 삭제→영구교착"
-    // 자동 복구. 깨진 파일은 내용을 신뢰할 수 없어 보관하지 않는다(None).
-    let mut removed_live_candidate: Option<DaemonInfo> = None;
+    // 안전망: dead 로 판정한 옛 DaemonInfo 를 메모리에 보관한다. 폴링이 timeout 나면(=새 데몬이 안
+    // 떴다 = 단일 인스턴스 잠금 충돌로 기존 데몬이 실제 살아있었을 가능성) 이 옛 정보가 지금도 live
+    // 인지 재검사해 live 면 복구 반환한다 — 우리 판정이 틀렸을 때의 자가 복구다. 깨진 파일은 내용을
+    // 신뢰할 수 없어 보관하지 않는다(None).
+    let mut dead_candidate: Option<DaemonInfo> = None;
 
-    // (a) 기존 파일 검사.
+    // (a) 기존 파일 검사 — **읽기 전용**.
     match reader.read() {
         Ok(Some(info)) => match check_acceptable(&info, liveness) {
             AcceptCheck::Accept => return Ok(info),
             AcceptCheck::DeadPid => {
-                removed_live_candidate = Some(info);
-                stale_cleanup();
+                dead_candidate = Some(info);
             }
             AcceptCheck::VersionMismatch { daemon } => {
                 // 살아있는 데몬을 spawn 으로 덮지 않고 명확히 실패한다(재기동 정책은 phase4
@@ -255,13 +495,19 @@ fn ensure_with(
             }
         },
         Ok(None) => {}
-        Err(DiscoveryError::Parse(_)) => {
-            stale_cleanup();
+        // 깨진 파일도 지우지 않는다 — 쓰는 도중일 수 있고, 이긴 데몬이 어차피 덮어쓴다.
+        Err(DiscoveryError::Parse(_)) => {}
+        // ★io 실패를 파싱 실패보다 엄하게 다루지 마라★: 제3자(백신·인덱서)가 파일을 잠깐 좁은 공유로
+        //   열면 여기 읽기가 32로 실패하는데, 데몬 쪽은 같은 조건을 5회/400ms 재시도한다. 여기서
+        //   하드 실패하면 **멀쩡한 데몬을 두고** ensure 가 통째로 무너진다. "아직 못 읽었다"로 보고
+        //   아래 spawn+폴링으로 흘려보낸다 — 이미 떠 있으면 폴링이 그 데몬을 찾고, 없으면 새로 뜬다.
+        Err(e) => {
+            tracing::warn!("{DAEMON_FILE} 초기 읽기 실패 — 아직 못 읽은 것으로 보고 계속: {e}");
         }
-        Err(e) => return Err(e),
     }
 
-    // (b) spawn.
+    // (b) spawn — 그 전에 관문 1회.
+    pre_spawn()?;
     spawner.spawn(exe)?;
 
     // (c) 폴링 — timeout 까지 새 daemon.json 을 기다린다.
@@ -275,16 +521,21 @@ fn ensure_with(
             }
             Ok(None) => {}
             Err(DiscoveryError::Parse(_)) => {} // 쓰는 중 부분 파일일 수 있음 → 계속.
-            Err(e) => return Err(e),
+            // ★루프 안에서 중단하지 마라★: 한 번의 일시적 열기 실패(제3자가 좁은 공유로 잠깐 여는
+            //   경우 — 데몬 쪽은 같은 조건을 재시도한다)로 **남은 대기 전부**를 버리게 된다. 다음
+            //   tick 에 다시 읽으면 되고, 진짜 못 읽는 상태면 어차피 timeout 으로 귀결된다.
+            Err(e) => {
+                tracing::debug!("{DAEMON_FILE} 폴링 읽기 실패 — 다음 tick 에 재시도: {e}");
+            }
         }
         if clock.now() >= deadline {
-            if let Some(old) = removed_live_candidate.take() {
+            if let Some(old) = dead_candidate.take() {
                 if !liveness.is_dead(old.pid, old.start_time)
                     && old.protocol_version == PROTOCOL_VERSION
                 {
                     tracing::warn!(
                         pid = old.pid,
-                        "daemon.json 을 stale 로 삭제했으나 폴링 timeout — 옛 데몬이 여전히 live: 복구"
+                        "dead 로 판정했던 daemon.json 이 폴링 timeout 시점엔 live — 그 데몬으로 복구"
                     );
                     return Ok(old);
                 }
@@ -634,9 +885,22 @@ pub fn ensure_daemon(
     let spawner = WmiSpawner { console };
     let liveness = RealLiveness;
     let clock = RealClock;
-    let mut stale_cleanup = || {
-        // 삭제 실패는 무시 — 새 데몬이 어차피 atomic rename 으로 덮어쓴다.
-        let _ = std::fs::remove_file(&daemon_path);
+    // ADR-0134 결정 4: 데몬을 띄우기 **전에** 우리 쪽에서 데이터 폴더를 확인한다. 못 쓰는 폴더면
+    // 데몬은 뜨자마자 죽고 클라이언트에는 원인 없는 연결 시간 초과만 남으므로, 여기서 원인을 붙여
+    // 기존 실패 경로(command Err / DaemonClient Err)로 그대로 올린다.
+    //
+    // ★override 가 켜져 있으면 단언하지 않는다(load-bearing)★: WMI 로 뜨는 데몬은 **부모 env 를
+    // 상속하지 않아**(이 파일 상단 override 주석) `ENGRAM_DATA_DIR` 를 못 본다 — 우리가 보는 폴더와
+    // 데몬이 쓸 폴더가 서로 다르다. 그 상태에서 우리 폴더를 검사하면 **엉뚱한 폴더에 대해** 통과/실패를
+    // 선언하게 되므로, 아무 말도 하지 않는 쪽이 맞다(폴링 timeout 이라는 기존 동작으로 남는다).
+    let mut pre_spawn = || {
+        if data_dir_env_override().is_some() {
+            tracing::debug!(
+                "ENGRAM_DATA_DIR 설정됨 — WMI 데몬은 이 값을 상속하지 않으므로 데이터 폴더 사전 점검을 건너뛴다"
+            );
+            return Ok(());
+        }
+        check_data_dir_writable(data_dir)
     };
 
     ensure_with(
@@ -645,7 +909,7 @@ pub fn ensure_daemon(
         &liveness,
         &clock,
         &exe_abs,
-        &mut stale_cleanup,
+        &mut pre_spawn,
         timeout,
     )
 }
@@ -1050,27 +1314,285 @@ mod tests {
         );
     }
 
+    /// release 분기는 `not(debug_assertions)` 라 테스트(항상 debug)가 직접 못 탄다 — 그래서 규칙을
+    /// 담은 순수 헬퍼를 cfg 없이 두고 여기서 단언한다(ADR-0134).
     #[test]
-    fn appdata_data_dir_uses_appdata_env() {
-        // release 전용 헬퍼지만 빌드모드 무관 순수 함수라 debug 테스트로 규칙을 검증한다.
-        let _g = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os("APPDATA");
-        let want_root = std::env::temp_dir().join("engram-appdata-test");
-        std::env::set_var("APPDATA", &want_root);
-        let got = appdata_data_dir();
-        match &prev {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
-        }
+    fn release_data_dir_is_exe_adjacent() {
+        let exe_dir = Path::new("C:\\portable\\engram");
         assert_eq!(
-            got,
-            want_root.join(APP_IDENTIFIER),
-            "APPDATA/com.engram.dashboard 이어야"
+            release_data_dir(exe_dir),
+            exe_dir.join("engram-data"),
+            "릴리스 데이터 폴더는 exe 폴더 하위 engram-data"
+        );
+    }
+
+    // ── 데이터 폴더 쓰기 가능 프로브(ADR-0134 결정 4) ─────────────────────────────────
+
+    /// 프로브 전용 유니크 폴더(테스트 병렬 실행에서 서로 밟지 않게).
+    fn fresh_probe_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "engram-writable-probe-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// 폴더 안에 프로브 잔여물이 하나라도 있나(이름이 호출마다 달라 접두사로 센다).
+    fn probe_leftovers(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with(WRITE_PROBE_PREFIX)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn writable_probe_accepts_temp_dir_and_leaves_nothing() {
+        let dir = fresh_probe_dir("ok");
+        ensure_data_dir_writable(&dir).expect("temp 하위는 쓸 수 있어야");
+        let left = probe_leftovers(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(left, 0, "프로브 파일을 남기면 안 됨");
+    }
+
+    #[test]
+    fn writable_probe_rejects_child_of_a_file() {
+        // 파일의 자식 경로는 만들 수 없다 — 폴더 생성 자체가 막히는 경우의 대표.
+        let file = fresh_probe_dir("blocker");
+        std::fs::create_dir_all(file.parent().unwrap()).ok();
+        std::fs::write(&file, b"x").expect("blocker 파일 생성");
+        let err = ensure_data_dir_writable(&file.join("child")).unwrap_err();
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            matches!(err, DiscoveryError::DataDirUnwritable { .. }),
+            "{err:?}"
         );
         assert!(
-            got.ends_with(APP_IDENTIFIER),
-            "release-daemon 경로는 com.engram.dashboard 로 끝나야: {got:?}"
+            err.to_string().contains("쓰기 가능한 위치"),
+            "사용자가 할 일이 메시지에 있어야: {err}"
         );
+    }
+
+    /// ★프로브의 존재 이유를 겨눈다★: 폴더는 있는데 그 안에 **파일을 만들 수 없는** 경우. 폴더 생성만
+    /// 보는 검사는 여기서 통과해 버린다. ACL 조작 없이 결정적으로 재현하려고 프로브 이름을 주입해
+    /// 그 이름을 폴더로 선점한다 — 그 이름으로는 파일을 만들 수도 지울 수도 없다(실측: 둘 다 code 5).
+    #[test]
+    fn writable_probe_rejects_a_name_it_cannot_create() {
+        let dir = fresh_probe_dir("nofile");
+        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        let taken = dir.join("taken-by-a-directory");
+        std::fs::create_dir_all(&taken).expect("프로브 이름을 폴더로 선점");
+        let err = probe_write_at(&taken).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        // 경합(NotFound)과 구분돼야 재시도가 헛돌지 않는다.
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "폴더가 있는데 파일을 못 만드는 것은 경합이 아니다: {err:?}"
+        );
+    }
+
+    /// 같은 pid 의 지난 실행이 정리에 실패해 남긴 프로브는 실패 사유가 아니다 — 지우고 다시 만든다.
+    #[test]
+    fn writable_probe_recovers_from_a_leftover_probe_file() {
+        let dir = fresh_probe_dir("leftover");
+        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        let leftover = dir.join(format!("{WRITE_PROBE_PREFIX}{}-0", std::process::id()));
+        std::fs::write(&leftover, b"leftover").expect("잔여 프로브 생성");
+        let got = probe_write_at(&leftover);
+        let still_there = leftover.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(got.is_ok(), "잔여 프로브는 실패 사유가 아님: {got:?}");
+        assert!(!still_there, "잔여 프로브까지 정리돼야");
+    }
+
+    /// ★실재하는 경합을 겨눈다★: 사전 점검은 **자기가 만든 폴더를 되돌리므로**, 두 호출이 겹치면
+    /// A 가 만든 폴더를 B 가 "있다"고 본 직후 A 가 지워 B 의 프로브가 NotFound 로 넘어진다. 그건
+    /// 타이밍이지 권한이 아니라서 멀쩡한 폴더를 "쓰기 불가"로 판정하면 안 된다.
+    /// 트레이 "데몬 켜기"와 부팅 ensure 는 직렬화되지 않는다(commands/discovery.rs).
+    ///
+    /// ★대상 폴더를 미리 만들지 말 것★: 만들어 두면 아무도 되돌리지 않아 위 인터리빙이 아예 일어나지
+    /// 않는다(그러면 이 테스트는 통과해도 아무것도 증명하지 못한다).
+    #[test]
+    fn concurrent_checks_racing_on_folder_creation_do_not_produce_a_false_failure() {
+        let parent = fresh_probe_dir("concurrent");
+        std::fs::create_dir_all(&parent).expect("상위 폴더 생성");
+        let target = parent.join("engram-data");
+
+        // 사전 점검(만들고 되돌림)과 데몬 경로(만들고 유지)를 섞는다 — 실제로 겹치는 두 주체다.
+        let results: Vec<Result<(), DiscoveryError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..12)
+                .map(|i| {
+                    let target = &target;
+                    s.spawn(move || {
+                        if i % 3 == 0 {
+                            ensure_data_dir_writable(target)
+                        } else {
+                            check_data_dir_writable(target)
+                        }
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let left = probe_leftovers(&parent) + probe_leftovers(&target);
+        let _ = std::fs::remove_dir_all(&parent);
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "겹친 점검이 서로를 실패시키면 안 됨: {results:?}"
+        );
+        assert_eq!(left, 0, "겹쳐도 프로브 잔여물은 없어야");
+    }
+
+    /// ★사전 점검은 폴더를 남기지 않는다 — 중간 폴더까지★: `create_dir_all` 은 줄줄이 만들 수 있어
+    /// 잎 하나만 지우면 나머지가 영구히 남는다. 그래서 **없던 조상들을 만들게 하는** 깊은 경로로 본다
+    /// (바로 위 폴더를 미리 만들어 두면 이 손상 모드가 재현되지 않는다).
+    #[test]
+    fn check_writable_leaves_no_folder_behind_including_intermediates() {
+        let root = fresh_probe_dir("nocreate");
+        std::fs::create_dir_all(&root).expect("루트 폴더 생성");
+        let target = root.join("a").join("b").join("engram-data");
+
+        check_data_dir_writable(&target).expect("만들 수 있으면 통과");
+
+        let leaf = target.exists();
+        let mid_b = root.join("a").join("b").exists();
+        let mid_a = root.join("a").exists();
+        let left = probe_leftovers(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(!leaf, "대상 폴더를 남기면 안 됨");
+        assert!(
+            !mid_b && !mid_a,
+            "중간 폴더도 되돌려야(a={mid_a}, a/b={mid_b})"
+        );
+        assert_eq!(left, 0, "프로브도 남기면 안 됨");
+        assert!(root.parent().is_some(), "루트 자체는 손대지 않는다");
+    }
+
+    /// ★중간에서 실패해도 되돌린다★: 조기 반환으로 빠져나가면 이미 만든 겹이 그대로 남는다.
+    /// 마지막 겹만 실패하게 만들려고 Windows 가 거부하는 이름을 쓴다(`?` — `ERROR_INVALID_NAME`).
+    #[cfg(windows)]
+    #[test]
+    fn check_writable_unwinds_what_it_created_even_when_creation_fails_midway() {
+        let root = fresh_probe_dir("partial-unwind");
+        std::fs::create_dir_all(&root).expect("루트 폴더 생성");
+        let mid = root.join("a");
+        let target = mid.join("b?");
+
+        let err = check_data_dir_writable(&target).unwrap_err();
+
+        let mid_left = mid.exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(err, DiscoveryError::DataDirUnwritable { .. }),
+            "만들 수 없는 이름은 실패여야: {err:?}"
+        );
+        assert!(
+            !mid_left,
+            "실패 경로에서도 우리가 만든 중간 폴더를 되돌려야"
+        );
+    }
+
+    /// 이미 있던 **중간** 폴더는 되돌리지 않는다 — 우리가 이긴 겹만 기록한다는 계약의 관측 가능한 절반
+    /// (남이 먼저 만든 겹을 지우지 않는다는 쪽은 경합이라 `concurrent_checks_...` 가 확률적으로 훑는다).
+    #[test]
+    fn check_writable_keeps_intermediate_folders_it_did_not_create() {
+        let root = fresh_probe_dir("keep-mid");
+        let mid = root.join("a");
+        std::fs::create_dir_all(&mid).expect("중간 폴더까지 미리 생성");
+        let target = mid.join("b").join("engram-data");
+
+        check_data_dir_writable(&target).expect("만들 수 있으면 통과");
+
+        let mid_left = mid.exists();
+        let ours_left = mid.join("b").exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(mid_left, "이미 있던 중간 폴더는 남아야");
+        assert!(!ours_left, "우리가 만든 겹은 되돌려야");
+    }
+
+    /// 이미 있던 폴더는 되돌리지 않는다 — 우리가 만든 것만 되돌린다는 계약의 반대편.
+    #[test]
+    fn check_writable_does_not_remove_pre_existing_folders() {
+        let root = fresh_probe_dir("preexisting");
+        let target = root.join("engram-data");
+        std::fs::create_dir_all(&target).expect("대상까지 미리 생성");
+        check_data_dir_writable(&target).expect("통과");
+        let survived = target.exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(survived, "이미 있던 폴더를 검사가 지우면 안 됨");
+    }
+
+    /// ★R10★: 대상 경로가 **파일**이면 `create_dir_all` 이 반드시 실패한다 — 상위를 보고 통과시키면
+    /// 사용자는 메시지 대신 시간 초과를 본다.
+    #[test]
+    fn check_writable_rejects_a_path_that_exists_as_a_file() {
+        let parent = fresh_probe_dir("asfile");
+        std::fs::create_dir_all(&parent).expect("상위 폴더 생성");
+        let target = parent.join("engram-data");
+        std::fs::write(&target, b"not a folder").expect("같은 이름 파일 생성");
+        let err = check_data_dir_writable(&target).unwrap_err();
+        let _ = std::fs::remove_dir_all(&parent);
+        assert!(
+            matches!(err, DiscoveryError::DataDirUnwritable { .. }),
+            "같은 이름의 파일이 있으면 실패여야: {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_writable_fails_when_the_folder_cannot_be_created() {
+        let blocker = fresh_probe_dir("blocked");
+        std::fs::create_dir_all(blocker.parent().unwrap()).ok();
+        std::fs::write(&blocker, b"x").expect("blocker 파일 생성");
+        let err = check_data_dir_writable(&blocker.join("a").join("b")).unwrap_err();
+        let _ = std::fs::remove_file(&blocker);
+        assert!(
+            matches!(err, DiscoveryError::DataDirUnwritable { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// ★부분 기록 = 아직 준비 안 됨(ADR-0135)★: 데몬이 daemon.json 을 **제자리에** 쓰므로(원자적 교체
+    /// 불가 — 데몬이 그 파일을 붙잡고 있다) 클라이언트가 반쯤 쓰인 내용을 실제로 볼 수 있다. 그때 하드
+    /// 실패가 아니라 `Parse` 로 갈려야 폴링이 계속된다(`ensure_with` 의 (c) 갈래가 `Parse` 만 무시한다).
+    #[test]
+    fn real_reader_treats_a_partially_written_file_as_not_ready() {
+        let dir = fresh_probe_dir("partial-json");
+        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        let path = dir.join(DAEMON_FILE);
+        let full = serde_json::to_vec_pretty(&info(1234, PROTOCOL_VERSION)).expect("직렬화");
+
+        std::fs::write(&path, &full[..full.len() / 2]).expect("절반만 기록");
+        let partial = FileReader { path: path.clone() }.read();
+        // 길이를 0으로 줄인 직후의 창.
+        std::fs::write(&path, b"").expect("빈 파일");
+        let empty = FileReader { path: path.clone() }.read();
+        // 온전히 쓰인 뒤에는 그대로 읽힌다 — 위 둘이 "영영 못 읽는다"가 아님을 함께 못 박는다.
+        std::fs::write(&path, &full).expect("전체 기록");
+        let whole = FileReader { path }.read();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            matches!(partial, Err(DiscoveryError::Parse(_))),
+            "부분 파일은 Parse(= 아직 준비 안 됨)여야: {partial:?}"
+        );
+        assert!(
+            matches!(empty, Err(DiscoveryError::Parse(_))),
+            "빈 파일도 Parse 여야: {empty:?}"
+        );
+        assert!(matches!(whole, Ok(Some(_))), "완성되면 읽혀야: {whole:?}");
     }
 
     fn info(pid: u32, version: u32) -> DaemonInfo {
@@ -1154,8 +1676,9 @@ mod tests {
         }
     }
 
-    fn noop_cleanup() -> impl FnMut() {
-        || {}
+    /// 대부분의 ensure_with 테스트는 spawn 관문을 다루지 않는다 — 통과시킨다.
+    fn noop_pre_spawn() -> impl FnMut() -> Result<(), DiscoveryError> {
+        || Ok(())
     }
 
     #[test]
@@ -1164,7 +1687,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let got = ensure_with(
             &reader,
@@ -1172,12 +1694,162 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_secs(5),
         )
         .expect("live 파일이면 성공");
         assert_eq!(got.pid, 100);
         assert_eq!(spawner.count.get(), 0, "live 면 spawn 금지");
+    }
+
+    /// ★attach 는 관문을 지나지 않는다(ADR-0134)★: 폴더가 못 쓰는 상태여도 이미 도는 데몬에는
+    /// 붙어야 한다 — 붙는 데는 읽기만 필요하다. 관문이 앞에 서면 잘 도는 데몬을 못 쓰게 만든다.
+    #[test]
+    fn attach_to_live_daemon_skips_the_pre_spawn_gate() {
+        let reader = FakeReader::new(vec![Ok(Some(info(100, PROTOCOL_VERSION)))]);
+        let spawner = CountingSpawner::ok();
+        let liveness = FakeLiveness { dead: vec![] };
+        let clock = FakeClock::new();
+        let gate_calls = Cell::new(0usize);
+        let mut pre_spawn = || {
+            gate_calls.set(gate_calls.get() + 1);
+            Err(DiscoveryError::DataDirUnwritable {
+                path: "X".into(),
+                reason: "테스트".into(),
+            })
+        };
+
+        let got = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut pre_spawn,
+            Duration::from_secs(5),
+        )
+        .expect("live 데몬엔 관문과 무관하게 붙어야");
+        assert_eq!(got.pid, 100);
+        assert_eq!(gate_calls.get(), 0, "attach 경로는 관문을 부르지 않는다");
+    }
+
+    /// 반대 방향: spawn 하러 가는 경로에서는 관문이 서고, 실패하면 spawn 자체가 없다.
+    #[test]
+    fn pre_spawn_gate_failure_blocks_spawn_and_propagates() {
+        let reader = FakeReader::new(vec![Ok(None)]);
+        let spawner = CountingSpawner::ok();
+        let liveness = FakeLiveness { dead: vec![] };
+        let clock = FakeClock::new();
+        let mut pre_spawn = || {
+            Err(DiscoveryError::DataDirUnwritable {
+                path: "X".into(),
+                reason: "테스트".into(),
+            })
+        };
+
+        let err = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut pre_spawn,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DiscoveryError::DataDirUnwritable { .. }),
+            "{err:?}"
+        );
+        assert_eq!(spawner.count.get(), 0, "관문이 막으면 spawn 하지 않는다");
+    }
+
+    /// ★R3 회귀 방지★: 관문이 막았을 때 남의 portfile 이 살아남아야 한다. 옛 구현은 stale 판정 직후
+    /// 파일을 지우고 그 다음에 관문을 돌려서, 관문이 막으면 되돌릴 수 없는 삭제만 남았다.
+    /// (네트워크 공유에선 그 파일이 **다른 컴퓨터의 살아있는 데몬**의 것일 수 있다.)
+    #[test]
+    fn gate_failure_leaves_an_existing_portfile_intact() {
+        let dir = fresh_probe_dir("portfile-survives");
+        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        let path = dir.join(DAEMON_FILE);
+        let existing = info(4321, PROTOCOL_VERSION);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&existing).expect("기존 portfile 직렬화"),
+        )
+        .expect("기존 portfile 작성");
+
+        let reader = FileReader { path: path.clone() };
+        let spawner = CountingSpawner::ok();
+        // 로컬 판정이 "죽었다"고 보는 상황 — 옛 구현이 삭제로 넘어가던 바로 그 분기.
+        let liveness = FakeLiveness { dead: vec![4321] };
+        let clock = FakeClock::new();
+        let mut pre_spawn = || {
+            Err(DiscoveryError::DataDirUnwritable {
+                path: dir.display().to_string(),
+                reason: "테스트".into(),
+            })
+        };
+
+        let err = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut pre_spawn,
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        let survived = path.exists();
+        let same = std::fs::read(&path).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            matches!(err, DiscoveryError::DataDirUnwritable { .. }),
+            "{err:?}"
+        );
+        assert!(survived, "관문이 막아도 남의 portfile 을 지우면 안 된다");
+        assert_eq!(
+            same,
+            Some(serde_json::to_vec(&existing).unwrap()),
+            "내용까지 그대로여야"
+        );
+        assert_eq!(spawner.count.get(), 0);
+    }
+
+    /// dead 로 판정해도 파일은 그대로 둔다 — 폴링이 새 파일을 보면 되고, 이긴 데몬이 덮어쓴다.
+    #[test]
+    fn a_dead_looking_portfile_is_never_deleted() {
+        let dir = fresh_probe_dir("portfile-kept");
+        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        let path = dir.join(DAEMON_FILE);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&info(4321, PROTOCOL_VERSION)).unwrap(),
+        )
+        .unwrap();
+
+        let reader = FileReader { path: path.clone() };
+        let spawner = CountingSpawner::ok();
+        let liveness = FakeLiveness { dead: vec![4321] };
+        let clock = FakeClock::new();
+
+        let _ = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut noop_pre_spawn(),
+            Duration::from_millis(50),
+        );
+
+        let survived = path.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(survived, "dead 판정만으로 남의 portfile 을 지우지 않는다");
+        assert_eq!(spawner.count.get(), 1, "대신 spawn 은 한다");
     }
 
     #[test]
@@ -1191,8 +1863,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![7] };
         let clock = FakeClock::new();
-        let cleanup_calls = Cell::new(0);
-        let mut cleanup = || cleanup_calls.set(cleanup_calls.get() + 1);
 
         let got = ensure_with(
             &reader,
@@ -1200,13 +1870,16 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_secs(5),
         )
         .expect("새 데몬 발견 성공");
         assert_eq!(got.pid, 200);
         assert_eq!(spawner.count.get(), 1, "stale 면 spawn 1회");
-        assert_eq!(cleanup_calls.get(), 1, "stale 파일 1회 삭제");
+        assert!(
+            reader.calls.get() >= 2,
+            "옛 파일을 지우지 않고 폴링으로 새 파일을 본다"
+        );
     }
 
     #[test]
@@ -1218,7 +1891,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let got = ensure_with(
             &reader,
@@ -1226,7 +1898,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_secs(5),
         )
         .unwrap();
@@ -1240,7 +1912,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let err = ensure_with(
             &reader,
@@ -1248,7 +1919,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_millis(200), // 50ms 간격 → 몇 번 폴링 후 timeout
         )
         .unwrap_err();
@@ -1261,7 +1932,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let err = ensure_with(
             &reader,
@@ -1269,7 +1939,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_secs(5),
         )
         .unwrap_err();
@@ -1289,8 +1959,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let cleanup_calls = Cell::new(0);
-        let mut cleanup = || cleanup_calls.set(cleanup_calls.get() + 1);
 
         let got = ensure_with(
             &reader,
@@ -1298,12 +1966,11 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_secs(5),
         )
         .unwrap();
         assert_eq!(got.pid, 500);
-        assert_eq!(cleanup_calls.get(), 1);
         assert_eq!(spawner.count.get(), 1);
     }
 
@@ -1318,7 +1985,6 @@ mod tests {
         let reader = FakeReader::new(vec![Ok(None)]);
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let err = ensure_with(
             &reader,
@@ -1326,7 +1992,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_secs(5),
         )
         .unwrap_err();
@@ -1349,7 +2015,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let err = ensure_with(
             &reader,
@@ -1357,7 +2022,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_millis(200),
         )
         .unwrap_err();
@@ -1375,7 +2040,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = FakeLiveness { dead: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let err = ensure_with(
             &reader,
@@ -1383,7 +2047,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_millis(200),
         )
         .unwrap_err();
@@ -1431,8 +2095,6 @@ mod tests {
             calls: Cell::new(0),
         };
         let clock = FakeClock::new();
-        let cleanup_calls = Cell::new(0);
-        let mut cleanup = || cleanup_calls.set(cleanup_calls.get() + 1);
 
         let got = ensure_with(
             &reader,
@@ -1440,12 +2102,11 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_millis(150),
         )
         .expect("옛 데몬이 사실 live 면 복구");
-        assert_eq!(got.pid, 42, "삭제했던 옛 데몬 정보를 복구");
-        assert_eq!(cleanup_calls.get(), 1, "stale 로 봐 한 번 삭제는 했음");
+        assert_eq!(got.pid, 42, "dead 로 봤던 옛 데몬 정보를 복구");
     }
 
     #[test]
@@ -1457,7 +2118,6 @@ mod tests {
         let spawner = CountingSpawner::ok();
         let liveness = StartTimeLiveness { live: vec![] };
         let clock = FakeClock::new();
-        let mut cleanup = noop_cleanup();
 
         let err = ensure_with(
             &reader,
@@ -1465,7 +2125,7 @@ mod tests {
             &liveness,
             &clock,
             Path::new("daemon.exe"),
-            &mut cleanup,
+            &mut noop_pre_spawn(),
             Duration::from_millis(150),
         )
         .unwrap_err();
@@ -1918,7 +2578,7 @@ mod tests {
 
     // ── 실제 WMI spawn smoke(실프로세스) — `-- --ignored` 로 실행(Windows 전용) ───────────
     //
-    // ★기존 데몬이 살아있으면 단일-인스턴스 mutex 로 우리 spawn 이 거부돼 검증이 무의미하므로
+    // ★기존 데몬이 살아있으면 단일 인스턴스 잠금으로 우리 spawn 이 거부돼 검증이 무의미하므로
     //   그 경우 skip(return) 한다.★
     //
     // 한계(은폐 금지): 이 smoke 는 운영 data_dir(`.engram-data`)을 건드리므로(백업/복원으로 최소화하나

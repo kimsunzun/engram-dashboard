@@ -1,3 +1,4 @@
+import ConnectionNotice from './ConnectionNotice'
 import WindowLayout from './WindowLayout'
 import { MAIN_WINDOW_LABEL } from '../../store/viewStore'
 
@@ -10,8 +11,12 @@ import { MAIN_WINDOW_LABEL } from '../../store/viewStore'
 //   viewStore(=백엔드 ViewManager 미러)로 단일화. main·팝업이 같은 WindowLayout 을 마운트해 동일 코드경로(D-2).
 export default function AppLayout() {
   return (
-    <div style={{ height: '100%' }}>
-      <WindowLayout label={MAIN_WINDOW_LABEL} />
+    // 세로 스택 — 알림은 덮지 않고 밀어낸다(오버레이면 TabBar 클릭을 먹는다, ConnectionNotice 주석).
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <ConnectionNotice />
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <WindowLayout label={MAIN_WINDOW_LABEL} />
+      </div>
     </div>
   )
 }

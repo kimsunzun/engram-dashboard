@@ -1,8 +1,12 @@
 //! 데몬 발견(discovery) 공유 계약 — daemon.json 의 내용.
 //!
 //! 두 프로세스의 공유 계약이라 protocol 에 둔다:
-//!   - daemon 이 이 구조체를 atomic 하게 **기록**한다(portfile::write_atomic).
+//!   - daemon 이 이 구조체를 **기록**한다(portfile::write_in_place).
 //!   - src-tauri 셸(또는 외부 클라)이 **읽어** 데몬에 붙는다(discovery::ensure_daemon).
+//!
+//! ★교체가 원자적이지 않다(ADR-0135)★: daemon.json 은 단일 인스턴스 잠금 파일을 겸해 데몬이 붙잡고
+//! 있으므로 임시 파일 + rename 으로 갈아끼울 수 없고, 데몬은 제자리에 쓴다. 읽는 쪽은 **부분적으로
+//! 쓰인 내용**을 볼 수 있으니 파싱 실패를 손상이 아니라 "아직 준비 안 됨"으로 다뤄야 한다.
 //!
 //! ★ts-rs export 안 함★: 프론트가 직접 안 읽는 Rust 전용 IPC 파일이다(daemon.json 은
 //! 백엔드 두 프로세스 사이에서만 흐른다). 그래서 serde 만 달고 TS 바인딩은 만들지 않는다.

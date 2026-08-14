@@ -48,7 +48,9 @@ pub use engram_dashboard_net::ws::KeepaliveConfig;
 //   `tests/ws_e2e.rs` 는 네트워크 crate 를 직접 부른다(그 crate 는 여기 normal 의존이라 테스트 타깃에서
 //   그대로 보인다) — 경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
 
-const DAEMON_FILE: &str = "daemon.json";
+// ★파일 이름을 여기 다시 적지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
+//   성립한다(ADR-0135). 이름이 두 곳에 있으면 한쪽만 바뀌어도 그 등식이 조용히 깨진다.
+use engram_dashboard_net::portfile::DAEMON_FILE;
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
@@ -387,39 +389,76 @@ pub async fn run() -> Result<(), i32> {
     //   스레드 spawn 전)다. 값의 소비자와 존치 조건은 그 함수 주석.
     set_engram_exe_env();
 
-    // 1) 단일 인스턴스 가드.
-    //    ★_guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 mutex 해제 = 단일성 깨짐).
-    let _guard = match engram_dashboard_net::instance::acquire() {
-        Ok(Some(g)) => g,
-        Ok(None) => {
-            tracing::info!("데몬이 이미 실행 중 — 종료");
+    // 1) data_dir 결정 + 생성 + 쓰기 가능 확인.
+    //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
+    //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
+    let data_dir = resolve_data_dir();
+    if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
+        // e 안에 폴더 경로와 조치가 이미 들어 있다(DiscoveryError::DataDirUnwritable).
+        tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");
+        return Err(1);
+    }
+    // ADR-0134 §영향: 잠금에 이름이 없으므로, 어느 폴더를 잡았는지 사람이 확인할 유일한 수단이다.
+    tracing::info!(data_dir = %data_dir.display(), "데이터 폴더 결정");
+
+    // 2) 단일 인스턴스 가드 = 그 데이터 폴더 안의 daemon.json 을 붙잡는 것(ADR-0135 결정 1 — 잠그는
+    //    파일과 클라이언트가 읽는 파일이 같다. 스코프는 여전히 폴더다).
+    //    ★guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 해제 = 단일성 깨짐). 여기서 얻은
+    //    핸들이 아래 8)에서 접속 정보를 쓰는 그 핸들이다 — 순서가 곧 불변식이다(획득 → 쓰기).
+    //    ★세 갈래를 뭉치지 말 것★: 중복(정상 양보)·제3자 방해·시스템 오류는 사용자가 할 일이 서로
+    //    다르다. 하나의 에러로 접으면 릴리스에서 "왜 안 뜨는지"가 사라진다(ADR-0134 결정 4).
+    use engram_dashboard_net::instance::{AcquireError, Acquired};
+    let mut guard = match engram_dashboard_net::instance::acquire(&data_dir) {
+        Ok(Acquired::Held(g)) => g,
+        Ok(Acquired::AlreadyRunning { pid }) => {
+            // 어느 폴더가 잡혀 있었는지가 이 줄의 존재 이유다 — 없으면 "왜 안 뜨지"를 추적할 수 없다.
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                owner_pid = pid,
+                "이 데이터 폴더의 데몬이 이미 실행 중 — 종료"
+            );
             return Ok(());
         }
+        Err(e @ AcquireError::FileBusy { .. }) => {
+            tracing::error!(
+                data_dir = %data_dir.display(),
+                "다른 프로그램이 {DAEMON_FILE} 을 붙들고 있어 시작할 수 없음(중복 데몬 아님 — 백신·인덱서·백업 확인): {e}"
+            );
+            return Err(1);
+        }
+        // ★재시작해도 안 풀리는 상태라 문구가 달라야 한다★: 위 FileBusy 는 "기다리면 풀린다", 이건
+        //   "권한을 고치거나 다른 곳에 풀어라". 뭉치면 사용자가 정반대 조치를 한다.
+        Err(e @ AcquireError::AccessDenied { .. }) => {
+            tracing::error!(
+                data_dir = %data_dir.display(),
+                "{DAEMON_FILE} 에 쓸 수 없어 시작할 수 없음: {e}"
+            );
+            return Err(1);
+        }
         Err(e) => {
-            tracing::error!("단일 인스턴스 가드 획득 실패: {e}");
+            tracing::error!(
+                data_dir = %data_dir.display(),
+                "단일 인스턴스 가드 획득 실패: {e}"
+            );
             return Err(1);
         }
     };
 
-    // 2) data_dir 결정 + 생성.
-    let data_dir = resolve_data_dir();
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        tracing::error!("data_dir 생성 실패({:?}): {e}", data_dir);
-        return Err(1);
-    }
     let daemon_path = data_dir.join(DAEMON_FILE);
 
-    // 2.5) 기존 daemon.json stale 검사.
+    // 2.5) 기존 내용을 덮어쓰기 전 진단 로그.
+    //
+    // ★pid 생존은 더 이상 거부권이 아니다(ADR-0134 결정 3)★: 이 줄에 닿았다는 것은 우리가 이 폴더의
+    //   파일을 **이미 쥐었다**는 뜻이고, 그건 이 폴더를 소유한 다른 데몬이 없다는 증명이다. 그 위에
+    //   pid 생존 검사를 얹으면 무관한 프로세스가 옛 pid 를 재사용했을 때 데몬이 **영구히** 못 뜬다
+    //   (사용자가 daemon.json 을 손으로 지우기 전까지 회복 경로가 없다). 보유가 권위다 — 여기서
+    //   되돌리지 말 것.
     if let Some(prev) = engram_dashboard_net::portfile::read(&daemon_path) {
-        if engram_dashboard_net::portfile::is_stale(&prev) {
-            tracing::info!(pid = prev.pid, "기존 daemon.json 이 stale — 덮어씀");
-        } else {
-            tracing::warn!(
-                pid = prev.pid,
-                "기존 daemon.json 의 PID 가 살아있음 — 덮어쓰지 않고 종료(살아있는 데몬 보호)"
-            );
-            return Ok(());
-        }
+        tracing::info!(
+            pid = prev.pid,
+            stale = engram_dashboard_net::portfile::is_stale(&prev),
+            "기존 daemon.json 을 덮어씀(폴더 잠금은 우리 소유)"
+        );
     }
 
     // 3) bind → 실제 포트 취득.
@@ -497,9 +536,12 @@ pub async fn run() -> Result<(), i32> {
             (channel, Some(handle))
         }
         Err(e) => {
-            // fail-closed 정리는 이게 전부다 — ★연결 레지스트리는 아직 없고★(아래 6단계
-            //   `build_daemon_wiring` 이 만든다), daemon.json 도 아직 안 썼다(아래 8단계 — 남는
-            //   stale portfile 없음).
+            // fail-closed 정리는 이게 전부다 — ★연결 레지스트리는 아직 없다★(아래 6단계
+            //   `build_daemon_wiring` 이 만든다).
+            // ★daemon.json 에 **레코드**는 아직 안 썼다(발행은 아래 8단계)★. 단 파일 자체는 위 2)의
+            //   acquire 가 이미 열었거나(있던 파일) 만들었다(없던 폴더) — 우리는 물러나며 guard 를
+            //   Drop 할 뿐이라 옛 데몬의 레코드는 그대로 남고, 새 폴더였다면 0바이트 파일이 남는다.
+            //   둘 다 다음 기동이 덮어쓴다(0바이트는 읽는 쪽이 "아직 준비 안 됨"으로 본다).
             tracing::error!(
                 "MCP 서버 기동 실패 — 제어 채널 없이는 데몬을 띄우지 않는다(fail-closed): {e}"
             );
@@ -601,8 +643,10 @@ pub async fn run() -> Result<(), i32> {
         protocol_version: PROTOCOL_VERSION,
         start_time,
     };
-    if let Err(e) = engram_dashboard_net::portfile::write_atomic(&daemon_path, &info) {
-        tracing::error!("daemon.json 기록 실패: {e}");
+    // ★2)에서 얻은 그 핸들로 쓴다(ADR-0135)★: 임시 파일 + rename 은 우리가 삭제 공유를 닫은 채
+    //   쥐고 있어 거부되고, 무엇보다 획득보다 먼저 쓰면 두 데몬의 쓰기가 섞인다.
+    if let Err(e) = guard.publish(&info) {
+        tracing::error!("{DAEMON_FILE} 기록 실패: {e}");
         return Err(1);
     }
     tracing::info!(
@@ -610,8 +654,12 @@ pub async fn run() -> Result<(), i32> {
         pid = info.pid,
         protocol_version = PROTOCOL_VERSION,
         path = %daemon_path.display(),
-        "데몬 시작 — daemon.json 기록 완료"
+        "데몬 시작 — {DAEMON_FILE} 기록 완료"
     );
+
+    // ★사라진 파일을 다시 발행하는 주기 작업을 되살리지 마라(ADR-0135 결정 4)★: 이 파일은 우리가
+    //   쥐고 있는 동안 지워지지 않으므로 되살릴 일이 없고, 실행 중인 앱이 사용자가 방금 지운 파일을
+    //   말없이 다시 쓰는 동작은 선례 전부에서 버그로 신고돼 있다.
 
     // 9) ★자동 부팅 resume 기본 OFF (2026-07-09, 사용자 결정)★ — 부팅 시 auto_restore=true 프로필을
     //   전부 되살리던 mgr.restore_all() 을 비활성화한다. 기본 = "부팅 자동 복원 안 함"(이벤트성으로

@@ -1,7 +1,7 @@
 //! discovery 커맨드 — LLM/프론트가 데몬 발견을 호출하는 thin wrapper(§5 제어 표면).
 //!
 //! ADR-0029: 모드 제거 → AppState 없음. data_dir 은 `default_data_dir()`(무인자, debug=repo 루트
-//! walk-up / release=appdata)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
+//! walk-up / release=exe 폴더 하위 `engram-data`)로 산출 — 데몬과 같은 폴더를 본다(daemon.json 공유).
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use crate::discovery::{self, locate_daemon_exe};
 //
 // ★왜 필요한가★: 창들(main/agent-tree)의 각 WebView 가 부팅 시 동시에
 // discover_daemon/daemon_start(=ensure_internal)를 호출한다(StrictMode 로 2회씩 더). daemon.json
-// 이 아직 없으니 각 호출이 제각각 데몬을 WMI spawn → 데몬 mutex 가 1개만 살리고 나머지는 즉시 exit.
+// 이 아직 없으니 각 호출이 제각각 데몬을 WMI spawn → 데몬 잠금이 1개만 살리고 나머지는 즉시 exit.
 // debug 데몬은 console 앱이라 콘솔 창이 여러 개 깜빡인다(losers).
 //
 // 이 락으로 ensure 구간을 직렬화하면 첫 호출만 spawn+daemon.json 을 발행하고, 직렬화로 뒤따르는
@@ -26,11 +26,11 @@ use crate::discovery::{self, locate_daemon_exe};
 // ★범위 한정(load-bearing)★: 이 락은 **command 경로(discover_daemon/daemon_start=ensure_internal)
 // 한정** 직렬화다. 트레이 "데몬 켜기"(`tray/mod.rs` spawn_daemon_action)는 동기 spawn_blocking 워커라
 // 이 async 락을 안 거치고 `discovery::ensure_daemon` 을 직접 부른다 — 즉 트레이-켜기와 부팅 ensure 가
-// 동시에 나면 직렬화 밖이라 다중 spawn 이 날 수 있다. **그래도 정합성은 데몬 named mutex
-// (`Global\EngramDashboardDaemon-<user>`, daemon instance.rs)가 최종 1개를 보장**한다 — 이 락은
+// 동시에 나면 직렬화 밖이라 다중 spawn 이 날 수 있다. **그래도 정합성은 데몬의 단일 인스턴스 잠금
+// (데이터 폴더 안 daemon.json 을 붙잡는 것, net instance.rs — ADR-0134/0135)이 최종 1개를 보장**한다 — 이 락은
 // 정합성 수단이 아니라 부팅 다중-WebView 동시 ensure 의 콘솔 깜빡임(UX)을 없애는 보강이다. 트레이
 // 경로까지 묶으려면 락을 ensure_daemon(discovery crate)으로 내리거나 트레이를 command 경유로 — 실익
-// (트레이 켜기는 단발 사용자 클릭이라 부팅 race 와 시점 분리) 대비 비용이 커 현재는 named mutex 에 위임.
+// (트레이 켜기는 단발 사용자 클릭이라 부팅 race 와 시점 분리) 대비 비용이 커 현재는 그 잠금에 위임.
 fn ensure_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

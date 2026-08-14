@@ -77,6 +77,8 @@ export async function bootstrapDaemonIfNeeded(): Promise<void> {
       },
     })
   } catch (err) {
+    // ★이유 기록은 여기가 아니라 DaemonControl.start 안이다★: 명시 시작 경로가 전부 거기를 지나므로
+    //   한 곳에서 싣는다. 여기서 또 실으면 두 곳이 갈릴 뿐이다.
     console.error('[clientFactory] 부팅 daemon start 최종 실패 — 수동 daemon_start 필요:', err)
   }
 }
