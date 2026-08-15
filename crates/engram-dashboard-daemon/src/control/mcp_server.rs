@@ -236,9 +236,8 @@ impl CommandTableSlot {
     pub fn set(&self, table: Arc<engram_dashboard_command::CommandTable>) {
         let _ = self.inner.set(table);
     }
-    /// ★배선 0★: 다음 조각의 `/control/agent` 어댑터가 동사 match 대신 이것을 읽는다. 그때까지는 표를
-    ///   조립·주입만 하고 아무도 조회하지 않는다.
-    #[allow(dead_code)]
+    /// `/control/agent` 어댑터가 요청마다 읽는다 — 비어 있으면 그 라우트는 503 이다(요청 형식·인증
+    /// 문제가 아니라 배선 순서 이상이라 4xx 가 아니다).
     pub(crate) fn get(&self) -> Option<&Arc<engram_dashboard_command::CommandTable>> {
         self.inner.get()
     }
@@ -921,16 +920,14 @@ async fn control_messages_handler(
 
 // ── CLI 제어 입구(/control/agent) ──────────────────────────────────────────────────
 
-/// `/control/agent` 라우트 State. manager 는 send 라우트와 **같은 슬롯**을 공유한다(두 번째 매니저 참조를
-/// 만들지 않는다). registry·messaging 은 이 라우트가 쓰지 않으므로 담지 않는다 — 제어 동사는 신원을
-/// 인가에만 쓰고 발신자 파생이 없다.
+/// `/control/agent` 라우트 State — 명령 표 슬롯 하나뿐이다(ADR-0134).
+///
+/// ★매니저·팬아웃 슬롯을 담지 않는다★: 둘 다 **표가** 쥐고 있다(`commands::make_daemon_table`). 여기서
+///   다시 담으면 같은 실물로 가는 두 번째 경로가 생기고, 통지가 두 곳에서 나가면 동사별 통지 횟수(깨우기
+///   0 · 변경 1)라는 분담이 무너진다. registry·messaging 도 안 담는다 — 제어 동사는 신원을 인가에만
+///   쓰고 발신자 파생이 없다.
 #[derive(Clone)]
 struct ControlAgentState {
-    manager: Arc<ManagerSlot>,
-    roster_broadcast: Arc<RosterBroadcastSlot>,
-    /// ★배선 0 — 아직 아무도 읽지 않는다(ADR-0134)★: 아래 핸들러의 동사 match 를 이 표 조회로 바꾸는
-    ///   것이 다음 조각이다. 표를 먼저 여기까지 태워 두면 그 조각의 diff 가 match 교체 하나로 좁아진다.
-    #[allow(dead_code)]
     commands: Arc<CommandTableSlot>,
 }
 
@@ -950,7 +947,7 @@ async fn control_agent_handler(
     if identity.is_none() {
         return unauthorized();
     }
-    // ★`Json<…>` 추출기를 쓰지 않는 이유(round-2 적출)★: 그 추출기는 역직렬화가 실패하면 **빈 400** 을 낸다 —
+    // ★`Json<…>` 추출기를 쓰지 않는 이유★: 그 추출기는 역직렬화가 실패하면 **빈 400** 을 낸다 —
     //   타입이 어긋난 값·중복 키·객체가 아닌 바디·깨진 JSON 이 전부 그 자리로 떨어져, 호출자(LLM)는 무엇을
     //   고쳐야 하는지 모른 채 재시도한다. 직접 역직렬화하면 serde 의 사유를 그대로 봉투에 실을 수 있고,
     //   그러면 이 라우트가 빈 body 를 내는 경우는 인증 실패와 크기 초과뿐이다.
@@ -964,19 +961,16 @@ async fn control_agent_handler(
             .into_response()
         }
     };
-    let Some(manager) = state.manager.get() else {
+    let Some(table) = state.commands.get() else {
         tracing::error!(
             entrance = "cli",
-            "제어 동사 처리 불가 — manager 슬롯 미설정(배선 순서 이상, ADR-0086 F6)"
+            "제어 동사 처리 불가 — 명령 표 슬롯 미설정(배선 순서 이상, ADR-0134)"
         );
         return service_unavailable();
     };
-    let manager = manager.clone();
-    let broadcast = state.roster_broadcast.get().cloned();
-    let Ok(result) = tokio::task::spawn_blocking(move || {
-        super::agent::handle_agent(&manager, broadcast.as_ref(), req)
-    })
-    .await
+    let table = table.clone();
+    let Ok(result) =
+        tokio::task::spawn_blocking(move || super::agent::handle_agent(&table, req)).await
     else {
         // JoinError = blocking 태스크 패닉. 답 자체가 없으므로 "항상 200 + JSON" 계약 밖이다 — 500 으로
         //   갈라 CLI 가 성공으로 오독하지 않게 한다(send 라우트와 같은 규율).
@@ -1006,7 +1000,9 @@ pub async fn start_mcp_server(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
     messaging: Arc<MessagingSlot>,
-    roster_broadcast: Arc<RosterBroadcastSlot>,
+    // ★팬아웃 슬롯은 여기로 오지 않는다★: 그것을 읽는 것은 명령 표뿐이고(`commands::make_daemon_table`),
+    //   서버가 두 번째 사본을 쥐면 **조립부가 다른 슬롯 둘을 넘겨도 아무도 안 알려 준다** — 증상은 에러도
+    //   로그도 없이 트리가 영원히 옛 명부를 보여 주는 것이다. 인자에서 뺀 것이 그 갈림을 없앤다.
     commands: Arc<CommandTableSlot>,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1047,11 +1043,7 @@ pub async fn start_mcp_server(
         registry: registry.clone(),
         messaging: messaging.clone(),
     };
-    let agent_state = ControlAgentState {
-        manager: manager.clone(),
-        roster_broadcast,
-        commands,
-    };
+    let agent_state = ControlAgentState { commands };
     // ★명단(`ControlRoute::ALL`)을 돌며 얹는다 — 빌더 체인으로 되돌리지 말 것★: 새 라우트가 명단에
     //   들어와야 서빙이 되고, 들어오면 `is_mail` 의 exhaustive match 가 우편 분류를 컴파일 단계에서
     //   강제한다(ADR-0133). 체인은 그 강제를 우회한다.
@@ -1246,12 +1238,7 @@ mod tests {
         Arc::new(MessagingSlot::new())
     }
 
-    /// 빈 팬아웃 슬롯(위와 동일 — 제어 동사 미호출).
-    fn empty_broadcast_slot() -> Arc<RosterBroadcastSlot> {
-        Arc::new(RosterBroadcastSlot::new())
-    }
-
-    /// 빈 명령 표 슬롯(위와 동일 — 배선 0 이라 어느 라우트도 읽지 않는다).
+    /// 빈 명령 표 슬롯 — 이 파일의 테스트는 제어 동사를 부르지 않는다(부르면 그 라우트는 503 이다).
     fn empty_commands_slot() -> Arc<CommandTableSlot> {
         Arc::new(CommandTableSlot::new())
     }
@@ -1343,7 +1330,6 @@ mod tests {
             reg,
             empty_slot(),
             empty_messaging_slot(),
-            empty_broadcast_slot(),
             empty_commands_slot(),
         )
         .await
@@ -1364,7 +1350,6 @@ mod tests {
             reg,
             empty_slot(),
             empty_messaging_slot(),
-            empty_broadcast_slot(),
             empty_commands_slot(),
         )
         .await

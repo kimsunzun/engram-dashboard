@@ -1,8 +1,9 @@
-//! `/control/agent` 입구(ADR-0132 결정 6) — 에이전트 명부·수명 제어 동사의 공통 파이프라인.
+//! `/control/agent` 입구(ADR-0132 결정 6) — CLI 동사를 **명령 표**로 배달하는 어댑터(ADR-0134).
 //!
-//! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 **WS 디스패처가 부르는 것과 같은
-//!   `AgentManager` 메서드**를 부른다. 매니저 로직을 복제하지 않는다 — 이 모듈이 더하는 것은 (a) 이름/id
-//!   지목의 해석 (b) 결말의 wire 번역 (c) 명부 변경의 클라이언트 통지, 셋뿐이다.
+//! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 `agent.<verb>` 를 표에서 찾아 부른다.
+//!   동사 본문은 이 파일에 없다 — `agent.*` 의 선언과 본문은 **core 가 소유**하고(선언이 사는 곳이 곧
+//!   주인), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 입구 인자 검문(ADR-0136)
+//!   (c) 표의 결말 → wire 봉투. 표가 아직 안 꽂혔을 때의 503 은 HTTP 어댑터 몫이다(`mcp_server`).
 //!
 //! ★이 라우트는 전원 개방이다(ADR-0132 결정 5)★: 스폰된 에이전트는 백엔드와 무관하게 `engram` 배선을
 //!   받으므로 여기 닿는다. 그 배선이 **우편 CLI 도 함께** 깐다는 것은 사실이고(실행파일이 하나라 계열
@@ -11,30 +12,26 @@
 //!
 //! ★`kill`·`rm` 이 없는 것도 미구현이 아니다★ — `CLI_AGENT_VERBS` 주석이 정본(ADR-0122 미해소).
 //!
-//! ★입력 규율(세 가지 — 전부 조용한 오작동을 막으려는 것)★
-//!   - **모르는 필드는 거부한다.** `parnet` 오타를 흘려보내면 `move … --parent lead` 가 **루트로 떼기**로
-//!     조용히 바뀐다. 동사가 쓰지 않는 필드도 같은 이유로 거부한다(무시하면 인자가 사라진 걸 호출자가 못 본다).
-//!   - **공백만 있는 값은 거부한다.** 셸에서 미설정 변수가 빈 인자로 펼쳐지는 형태(`--parent "$UNSET"`)가
-//!     현실적으로 들어오는데, 그걸 "안 준 것" 으로 접으면 같은 사고가 난다.
-//!   - **지목 토큰을 다듬지 않는다(trim 없음).** 이 라우트는 **정확 일치**를 약속하므로 `"worker "` 는
-//!     `worker` 가 아니다 — 다듬으면 약속과 코드가 갈리고, 패딩된 이름이 도착했다는 호출자 버그가 묻힌다.
-//!     (저장 측 표시명 정규화는 매니저 소관이라 그대로 둔다 — 여기서 흉내 내지 않는다.)
+//! ★입력 규율은 층이 둘이다(ADR-0136)★
+//!   - **모르는 칸·빠진 필수 칸은 이 입구가 거절한다.** 사람·LLM 이 방금 친 것이 오는 자리라 「모르는
+//!     칸 = 오타」로 읽어도 안전하다. `parnet` 오타를 흘려보내면 `move … --parent lead` 가 **루트로 떼기**로
+//!     조용히 바뀐다. 판정 목록은 손으로 두지 않고 **선언에서 파생**한다(`CommandTable::check_args`) —
+//!     사본을 두면 동사를 하나 늘릴 때마다 두 곳이 갈리고, 갈린 쪽이 조용히 통과시킨다.
+//!   - **공백 값·부재/`null` 의 구분은 표 쪽(core `agent::commands`)이 본다.** 어느 칸이 그런지는 동사마다
+//!     다르고, 그 판정은 동사 본문과 한 집에 있어야 둘이 갈리지 않는다.
 //!
-//! ★어휘★: wire 필드·힌트 문구는 전부 **에이전트 어휘**다(ADR-0119 결정 5 — "프로필" 은 매니저 경계 밖으로
-//!   나가지 않는다). 매니저 호출에 `AgentProfile` 이 필요한 것은 그 API 형태 때문이고, 그 타입은 이 파일
-//!   밖으로도 wire 로도 나가지 않는다.
+//! ★지목 토큰을 다듬지 않는다(trim 없음)★ — 이 계열은 **정확 일치**를 약속하므로 `"worker "` 는
+//!   `worker` 가 아니다. 규칙도 그 실물도 core 하나가 소유한다(`agent::commands::resolve_in`) — 이 입구는
+//!   토큰을 손대지 않고 그대로 표에 넘긴다. 우편 입구와의 규칙 일치는 `tests/control_agent.rs` 의 교차
+//!   대조가 그 함수를 태워 지킨다.
 //!
 //! tauri import 0(daemon crate).
+// ADR-0134
+// ADR-0136
 
-use std::sync::Arc;
-
-use engram_dashboard_core::agent::commands::NEW_AGENT_OUTPUT_FORMAT;
-use engram_dashboard_core::agent::manager::{AgentManager, RenameOutcome, RosterEntry};
-use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
-use engram_dashboard_core::agent::types::{
-    AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_EXE_NAME,
-    CLI_GROUP_AGENT, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
-};
+use engram_dashboard_command::{CommandError, CommandFuture, CommandTable, ErrorCode};
+use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
+use futures_util::FutureExt as _;
 
 use super::ingress::ControlQueryResult;
 
@@ -46,6 +43,8 @@ use super::ingress::ControlQueryResult;
 ///   어댑터는 조립부가 준다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
 /// ★이게 없으면 나는 증상★: 에이전트가 이름을 바꾸거나 형제를 띄워도 대시보드 트리는 **무관한 이벤트가
 ///   올 때까지 옛 명부를 보여 준다**(조용한 stale).
+/// ★부르는 쪽은 표다★ — 명부를 바꾼 동사가 통지까지 책임진다(core `agent::commands::RosterChanged`).
+///   이 입구는 통지를 겹쳐 보내지 않는다(겹치면 깨우기 0회·변경 1회라는 분담이 무너진다).
 // ADR-0132
 // ADR-0130
 pub trait RosterBroadcast: Send + Sync {
@@ -53,79 +52,15 @@ pub trait RosterBroadcast: Send + Sync {
     fn roster_changed(&self);
 }
 
-/// 상태 → wire 어휘의 **단일 매핑**.
+/// `/control/agent` 요청 바디 — `verb` 하나만 이 입구의 어휘이고 **나머지는 통째로 명령 인자**다.
 ///
-/// ★한 함수여야 하는 이유(실제로 갈렸던 자리)★: 전엔 변경 동사가 `"live"` 를 박고 `list` 는 명부 항목에서
-///   파생해, **같은 라우트의 두 동사가 같은 에이전트를 두고 서로 다른 답을 낼 수 있었다** — 깨우자마자 죽은
-///   에이전트(ADR-0082 resume 조기 종료)를 `spawn` 은 살아 있다고, 직후의 `list` 는 잠들었다고 보고한다.
-///   그러면 호출자는 시체에게 편지를 쓴다.
-/// ★술어는 `AgentStatus::is_live` 하나★ — 명부(`roster`)가 시체를 거르는 데 쓰는 그 술어다(ADR-0116).
-fn state_of(status: &AgentStatus) -> &'static str {
-    if status.is_live() {
-        AGENT_STATE_LIVE
-    } else {
-        AGENT_STATE_SLEEPING
-    }
-}
-
-fn agent_payload(id: AgentId, name: &str, state: &str) -> serde_json::Value {
-    serde_json::json!({ "id": id.to_string(), "name": name, "state": state })
-}
-
-/// 띄우기 응답 본문 — `spawn` 두 형태가 공유한다.
-///
-/// ★별도 함수인 이유는 **테스트 가능성** 하나다★: 상태를 지어내지 않고 `state_of` 로 파생한다는 성질은 이
-///   슬라이스를 시작하게 만든 결함(하드코딩된 `"live"`)의 재발 방지선인데, 라우트 통합 테스트로는 그걸 못
-///   고정한다 — 그 자리에서 결정적으로 **살아 있지 않은** 에이전트를 만들 방법이 없어(셸은 계속 살아 있고,
-///   죽는 백엔드는 머신에 달렸다) 어떤 응답이든 `"live"` 로도 맞아떨어진다. 순수 함수로 떼어 내면 terminal
-///   상태의 `AgentInfo` 를 손으로 만들어 넣을 수 있고, 그때 리터럴은 즉시 틀린다.
-fn spawn_payload(
-    id: AgentId,
-    name: &str,
-    status: &AgentStatus,
-    created: bool,
-) -> serde_json::Value {
-    serde_json::json!({
-        "agent": agent_payload(id, name, state_of(status)),
-        "created": created,
-    })
-}
-
-/// wire 필드 이름 — 반려 문구와 동사별 허용 목록이 같은 문자열을 봐야 "모르는 필드" 판정이 실제 표면과
-/// 어긋나지 않는다.
-const FIELD_TARGET: &str = "target";
-const FIELD_CWD: &str = "cwd";
-const FIELD_NAME: &str = "name";
-const FIELD_PARENT: &str = "parent";
-
-/// 문자열 필드 역직렬화 — **부재 · null · 값** 셋을 가른다(바깥 `Option` = 실렸나, 안쪽 = 값이 있나).
-///
-/// ★왜 모든 필드에 셋이 필요한가(load-bearing)★: 두 가지가 여기 걸려 있다.
-///   ① `move` 에서 `null` 은 "안 줬다" 가 아니라 **"루트로 떼라"** 는 적극적 지시다. 평범한
-///      `Option<String>` 은 둘을 같은 값으로 접어, 필드를 빠뜨린 요청이 조용히 계층 해제로 실행된다.
-///   ② 동사별 허용 검사가 **실린 것**을 봐야 한다. 접어 버리면 `{"verb":"new","target":null}` 이
-///      "target 을 안 보냈다" 로 보여 검사를 통과하고, 호출자는 자기가 보낸 필드가 무시된 줄 모른다.
-fn transmitted<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde::Deserialize::deserialize(de).map(Some)
-}
-
-/// 실렸든 아니든 **값**만 꺼낸다(동사 본문이 보는 축).
-fn value(field: &Option<Option<String>>) -> Option<&str> {
-    field.as_ref().and_then(|v| v.as_deref())
-}
-
-/// `/control/agent` 요청 바디. `verb` 만 필수이고 나머지는 동사별로 쓰인다.
-///
-/// ★평평한 struct 인 이유(태그드 enum 아님)★: 태그드 enum 은 동사마다 형태가 갈려 **역직렬화가 실패**하는
-///   경우가 훨씬 넓고, 실패는 호출자에게 "무엇을 고쳐야 하는지" 를 말해 주지 못한다. 평평하게 받아 동사별로
-///   검증하면 그 대부분이 코드·힌트가 붙은 반려로 나간다.
-/// ★그래도 역직렬화가 실패하는 부류는 남는다(정직한 범위)★: 타입이 어긋난 값(`{"verb": 5}`)·중복 키·객체가
-///   아닌 바디·깨진 JSON 바이트는 여기까지 오지 못한다. 그 부류도 빈 400 이 되지 않도록 **어댑터가 직접
-///   역직렬화해 serde 의 사유 문구를 봉투에 실어 보낸다**(`mcp_server::control_agent_handler`) — 즉 이 라우트가
-///   빈 body 를 내는 경우는 인증 실패와 요청 크기 초과뿐이다.
+/// ★인자를 타입으로 받지 않는 이유(load-bearing)★: 인자의 계약은 선언(core)이 쥐고 있다. 여기서 다시
+///   struct 로 받으면 **두 번째 인자 어휘**가 생겨, 선언에 칸이 하나 늘 때 이 파일이 함께 안 늘면 그 칸이
+///   조용히 사라진다. 날 것으로 실어 보내면 모르는 칸의 판정도(ADR-0136) 값의 해석도 선언 한 곳에서 난다.
+/// ★그래도 역직렬화가 실패하는 부류는 남는다(정직한 범위)★: `verb` 의 타입이 어긋난 값(`{"verb": 5}`)·
+///   중복 키·객체가 아닌 바디·깨진 JSON 은 여기까지 오지 못한다. 그 부류도 빈 400 이 되지 않도록
+///   **어댑터가 직접 역직렬화해 serde 의 사유 문구를 봉투에 실어 보낸다**(`mcp_server::control_agent_handler`)
+///   — 즉 이 라우트가 빈 body 를 내는 경우는 인증 실패와 요청 크기 초과뿐이다.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AgentRequest {
     /// ★필수인데 `default` 인 이유★: 없으면 역직렬화가 실패해 **빈 400** 으로 끝나는데, 그 응답은 무엇을
@@ -133,732 +68,380 @@ pub struct AgentRequest {
     ///   호출자가 help 로 갈 수 있다.
     #[serde(default)]
     pub verb: String,
-    /// 대상 지목 — 이름 또는 정확한 agent id(`resolve_target`).
-    #[serde(default, deserialize_with = "transmitted")]
-    pub target: Option<Option<String>>,
-    #[serde(default, deserialize_with = "transmitted")]
-    pub cwd: Option<Option<String>>,
-    #[serde(default, deserialize_with = "transmitted")]
-    pub name: Option<Option<String>>,
-    /// `move` 의 새 부모. `None` = 필드 부재(반려) · `Some(None)` = 루트로 떼기 · `Some(Some(n))` = 그 부모로.
-    #[serde(default, deserialize_with = "transmitted")]
-    pub parent: Option<Option<String>>,
-    /// ★모르는 필드를 여기로 모은다(`deny_unknown_fields` 대신)★: 그 attribute 는 역직렬화를 실패시켜 빈
-    ///   400 이 되는데, 그러면 호출자는 **어느 키가 문제인지** 알 수 없다. 모아 두면 반려 문구가 그 키를
-    ///   지목할 수 있다.
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub args: CommandArgs,
 }
 
-/// 지목 해석 결과. **모호(동명 2개 이상)를 부재와 갈라 놓는 것이 요점**이다 — 뭉치면 "그런 에이전트 없음"
-/// 이라고 답하면서 실제로는 둘이 있는 상태가 된다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetResolution {
-    Found(AgentId),
-    NotFound,
-    Ambiguous,
-}
-
-/// 지목 토큰 → 에이전트 하나.
+/// 명령 인자 칸 전량 — **같은 키가 두 번 실리면 반려한다.**
 ///
-/// ★규칙(우편 입구와 **같아야** 한다)★: ① agent id 문자열 정확 일치를 **먼저** 본다 — 그래야 UUID 처럼
-///   생긴 *이름* 이 id 지목을 가로채지 못한다 ② 그다음 이름 **정확** 일치(대소문자 구분 · 접두 매칭 없음 ·
-///   공백 보정 없음) ③ 같은 이름이 둘 이상이면 아무도 고르지 않고 거부한다.
-/// ★왜 "같아야" 가 계약인가★: 사람과 LLM 은 `engram mail send --to X` 와 `engram agent rename X …` 가 같은
-///   X 를 가리킨다고 읽는다. 두 입구의 해석이 갈리면 편지를 받은 그 에이전트와 이름이 바뀐 에이전트가
-///   달라진다. 이 저장소엔 **관대한 해석기가 따로 있었다**(옛 앱 CLI 의 대소문자 무시 + 유일 접두 매칭) —
-///   그 규칙을 여기로 들이지 말 것.
-/// ★같은 것은 **매칭 규칙**이고, 토큰 전처리는 의도적으로 다르다(정확히 이 축만)★: 우편 입구는 수신자
-///   토큰을 대조 **전에** trim 한다(`service.rs` — CLI 가 `--to a, b` 를 콤마로 쪼갠 뒤 남는 공백을 구제하는
-///   load-bearing 처리라 지우면 안 된다). 이 라우트는 토큰이 argv/JSON 값 하나로 오므로 쪼갬이 없고, 그래서
-///   trim 하지 않는다 — 즉 `"worker "` 는 우편에선 닿고 여기선 안 닿는다. **그 차이는 알고 남긴 것**이며
-///   `tests/control_agent.rs` 의 교차 대조가 (a) 다듬을 것 없는 토큰에서의 규칙 일치와 (b) 이 한 축의
-///   불일치를 **둘 다** 단언한다(우편 입구를 실제로 태워서).
-// ADR-0132
-// TODO(S20 Step 2 — ADR-0134): core `agent::commands::resolve` 가 같은 규칙의 사본이다. 이 파일의 동사
-//   match 가 그 표 조회로 바뀔 때 **여기를** 지운다(그때까지는 이 입구가 정본이라 옮기지 않는다).
-pub fn resolve_target(roster: &[RosterEntry], token: &str) -> TargetResolution {
-    if let Some(e) = roster.iter().find(|e| e.id.to_string() == token) {
-        return TargetResolution::Found(e.id);
-    }
-    let mut by_name = roster.iter().filter(|e| e.canonical_name == token);
-    match (by_name.next(), by_name.next()) {
-        (Some(e), None) => TargetResolution::Found(e.id),
-        (Some(_), Some(_)) => TargetResolution::Ambiguous,
-        _ => TargetResolution::NotFound,
+/// ★마지막 값이 이기게 두면 오타 하나가 다른 동작이 된다★: `{"parent":"lead","parent":null}` 에서 뒤 값이
+///   이기면 계층에 붙이려던 요청이 **루트로 떼기**로 조용히 바뀐다 — ADR-0136 이 막으려는 바로 그 형태다.
+///   JSON 이 중복 키의 뜻을 정하지 않으므로 어느 값을 고르든 근거가 없고, 근거 없는 선택을 조용히 하지
+///   않는 것이 이 입구의 규율이다.
+/// ★`serde_json::Map` 을 그대로 쓰지 못하는 이유★: 그 타입의 역직렬화는 중복 키를 덮어쓰기로 접는다.
+/// ★보는 깊이는 **꼭대기 한 겹뿐**이다★ — 인자 객체 안의 객체(`{"target":{"parent":1,"parent":2}}`)는
+///   `serde_json::Value` 가 삼키므로 거기서는 마지막 값이 이긴다. 오늘 선언된 `agent.*` 인자는 전부
+///   문자열이라 그 모양은 인자 타입 검사에서 죽지만, **객체 값을 선언하는 명령이 생기면 같은 사고가 한 겹
+///   아래에서 되살아난다**. 그때는 이 자리를 깊이 우선으로 바꿔야 한다(입구 검문도 같은 깊이 한계를 갖는다 —
+///   `CommandTable::check_args`).
+#[derive(Debug, Default)]
+pub struct CommandArgs(serde_json::Map<String, serde_json::Value>);
+
+impl CommandArgs {
+    fn into_value(self) -> serde_json::Value {
+        serde_json::Value::Object(self.0)
     }
 }
 
-// 새로 만드는 에이전트의 백엔드 출력 형식은 **core 가 소유한다**(`agent::commands`) — 두 입구가 같은
-//   동사에 다른 기본을 주면 "만들었는데 화면이 다르다" 가 되는데, 값이 두 집에 있으면 그 어긋남을
-//   아무도 못 잡는다. 형식을 고르는 플래그는 두지 않았다(필요해지면 플래그 하나를 더하는 무파괴 확장).
+impl std::ops::Deref for CommandArgs {
+    type Target = serde_json::Map<String, serde_json::Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CommandArgs {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CommandArgs;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object of command arguments")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<CommandArgs, M::Error> {
+                let mut args = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if args.insert(key.clone(), value).is_some() {
+                        // 문구는 serde 의 중복 필드 반려와 같은 모양으로 맞춘다 — `verb` 중복과 인자 중복이
+                        //   호출자에게 다른 사고로 보이면 안 된다.
+                        // ★키를 짧게 싣는 이유★: 이 문구는 봉투의 `hint` 앞자리에 들어가고 회복 안내는
+                        //   그 뒤에 붙는다. 키를 통째로 실으면 안내가 문구 저 끝으로 밀려 사람도 LLM 도
+                        //   다음에 무엇을 할지 못 읽는다.
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate field `{}`",
+                            preview(&key)
+                        )));
+                    }
+                }
+                Ok(CommandArgs(args))
+            }
+        }
+
+        de.deserialize_map(Visitor)
+    }
+}
 
 /// 제어 동사 공통 핸들러 — HTTP 어댑터가 유일하게 부르는 진입점.
 ///
-/// ★blocking 함수다(호출자 계약)★: `activate_profile` 은 resume 모드에서 조기 종료를 **약 3초 폴링**하고
-///   (manager doc), 이름 변경·계층 이동은 프로필 락을 쥔 채 디스크에 저장한다. 그래서 async 런타임 스레드가
-///   아니라 blocking 풀에서 불러야 한다 — WS 디스패처가 같은 메서드를 async 컨텍스트에서 인라인으로 부르는
-///   것은 따라 할 패턴이 아니라 남아 있는 흠이다. 어댑터(`mcp_server::control_agent_handler`)가
-///   `spawn_blocking` 으로 감싼다.
-/// ★`broadcast` 가 `None` 인 조립★: 클라이언트가 붙을 수 없는 하네스·스모크 bin(팬아웃 자체가 없다). 운영
-///   데몬에서 None 이면 명부 변경이 화면에 반영되지 않는다.
-pub fn handle_agent(
-    manager: &Arc<AgentManager>,
-    broadcast: Option<&Arc<dyn RosterBroadcast>>,
-    req: AgentRequest,
-) -> ControlQueryResult {
-    // 형태 검사는 동사 해석보다 먼저다 — 오타 하나가 **다른 동작**이 되는 것을 막는 게 목적이라, 어느
-    //   동사인지와 무관하게 걸려야 한다.
-    if let Some(rejection) = reject_unknown_fields(&req) {
-        return rejection;
-    }
-    if let Some(rejection) = reject_blank_fields(&req) {
-        return rejection;
-    }
+/// ★blocking 함수다(호출자 계약)★: 표의 `agent.*` 핸들러는 전부 blocking 이다 — resume 모드의 조기 종료를
+///   **약 3초 폴링**하고, 이름 변경·계층 이동은 프로필 락을 쥔 채 디스크에 저장한다(core `make_table` doc).
+///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 어댑터
+///   (`mcp_server::control_agent_handler`)가 `spawn_blocking` 으로 감싼다.
+/// ★명부 통지는 여기서 안 한다★ — 표가 조립될 때 꽂힌 통지 포트가 동사별로 부른다(위 [`RosterBroadcast`]).
+pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResult {
+    // CLI 표면과 카탈로그 이름은 점↔공백 하나 차이다(TRD §2-1) — 그래서 동사별 표를 손으로 두지 않는다.
+    let name = format!("{CLI_GROUP_AGENT}.{}", req.verb);
+    let mut args = req.args.into_value();
 
-    match req.verb.as_str() {
-        "list" => guard(&req, "list", &[], || verb_list(manager)),
-        "spawn" => guard(&req, "spawn", &[FIELD_TARGET, FIELD_CWD, FIELD_NAME], || {
-            verb_spawn(manager, broadcast, &req)
-        }),
-        "new" => guard(&req, "new", &[FIELD_CWD, FIELD_NAME], || {
-            verb_new(manager, broadcast, &req)
-        }),
-        "rename" => guard(&req, "rename", &[FIELD_TARGET, FIELD_NAME], || {
-            verb_rename(manager, broadcast, &req)
-        }),
-        "move" => guard(&req, "move", &[FIELD_TARGET, FIELD_PARENT], || {
-            verb_move(manager, broadcast, &req)
-        }),
-        other => bad_args(format!(
-            "unknown verb '{other}' — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}` for this group's verbs."
-        )),
+    // 표에 없는 이름은 **인자 검문보다 먼저** 갈라낸다: `check_args` 는 모르는 이름을 통과시키므로(대조할
+    //   선언이 이 표에 없다) 순서를 뒤집으면 오타 동사가 "인자 이상 없음" 을 지나 여기까지 온다.
+    if !table.contains(&name) {
+        return unknown_verb(&req.verb);
     }
-}
-
-/// 동사가 쓰지 않는 필드가 실려 있으면 **무시하지 않고 반려**한다.
-///
-/// ★무시가 위험한 이유★: `spawn <이름> --name x` 를 흘려보내면 호출자는 이름이 바뀐 줄 알지만 아무 일도
-///   일어나지 않았다(개명은 `rename` 이다). 인자가 조용히 사라지는 형태의 사고는 이 CLI 가 계속 막아 온 부류다.
-fn guard(
-    req: &AgentRequest,
-    verb: &str,
-    allowed: &[&str],
-    run: impl FnOnce() -> ControlQueryResult,
-) -> ControlQueryResult {
-    let stray: Vec<&str> = present_fields(req)
-        .into_iter()
-        .filter(|f| !allowed.contains(f))
-        .collect();
-    if stray.is_empty() {
-        return run();
+    // ADR-0136: 사람·LLM 이 치는 입구라 선언에 없는 칸·빠진 필수 칸을 거절한다. 홉 간 배선은 관용이므로
+    //   (`route` 는 이것을 안 부른다) 이 호출을 배달 경로로 옮기지 말 것 — additive 진화가 죽는다.
+    if let Err(rejection) = table.check_args(&name, &args) {
+        return refused(rejection);
     }
-    let takes = if allowed.is_empty() {
-        "no other fields".to_string()
-    } else {
-        allowed.join(", ")
+    let Some(future) = table.call(&name, &mut args) else {
+        // 바로 위 `contains` 를 통과했다 — 표는 이 호출 동안 불변이라 여기 오지 않는다.
+        return unknown_verb(&req.verb);
     };
-    bad_args(format!(
-        "{verb} does not use: {} (it takes {takes}) — dropping them silently would hide an argument that never took effect; run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`.",
-        stray.join(", ")
-    ))
+    match run_here(future, &name) {
+        Ok(payload) => ControlQueryResult::Ok(payload),
+        Err(e) => refused(e),
+    }
 }
 
-fn present_fields(req: &AgentRequest) -> Vec<&'static str> {
-    let mut present = Vec::new();
-    if req.target.is_some() {
-        present.push(FIELD_TARGET);
-    }
-    if req.cwd.is_some() {
-        present.push(FIELD_CWD);
-    }
-    if req.name.is_some() {
-        present.push(FIELD_NAME);
-    }
-    if req.parent.is_some() {
-        present.push(FIELD_PARENT);
-    }
-    present
+/// 표가 준 future 를 **이 스레드에서** 끝낸다.
+///
+/// ★실행기를 두지 않는 근거★: 이 표의 핸들러는 전부 `blocking_handler` 라 본문이 **첫 poll 에서 끝까지
+///   돈다**(도구 crate 가 그것을 계약으로 적었다). 이미 blocking 풀 위에 있으므로 여기서 async 런타임을
+///   다시 부르면 blocking 경계가 두 겹이 된다.
+/// ★계약이 깨지면 조용히 성공하지 않는다★: 진짜 async 핸들러가 표에 들어오면 첫 poll 이 `Pending` 이고,
+///   그때 이 어댑터는 답을 지어내는 대신 `OUTCOME_UNKNOWN` 으로 드러낸다.
+/// ★`INTERNAL` 이 아니다★: 그 코드는 `retry: never` = **이 홉에서 확실히 실패했다**는 뜻인데, 첫 poll 이
+///   이미 일의 일부를 적용했을 수 있다(그리고 폐기되는 future 는 나머지를 안 돌린다). 확실성은 「불명」이라
+///   같은 request_id 로만 다시 묻게 해야 한다(TRD §4-④ · 도구 crate 의 전달 패닉이 같은 코드를 쓴다).
+/// ★타입이 강제하지 않는 계약이라 계측한다★: 이 갈래는 표에 async 핸들러가 들어오는 순간에만 나고, 그때
+///   증상은 오류 답장 하나뿐이라 로그가 없으면 원인을 못 찾는다.
+fn run_here(future: CommandFuture, name: &str) -> Result<serde_json::Value, CommandError> {
+    future.now_or_never().unwrap_or_else(|| {
+        tracing::error!(
+            entrance = "cli",
+            command = name,
+            "명령이 첫 poll 에서 끝나지 않았다 — 이 입구는 blocking 핸들러만 몬다(표에 async 핸들러가 들어왔다)"
+        );
+        Err(CommandError::of(
+            ErrorCode::OutcomeUnknown,
+            format!(
+                "'{name}' did not finish on its first poll — this entrance only drives blocking handlers, so part of it may already have been applied"
+            ),
+        ))
+    })
 }
 
-fn reject_unknown_fields(req: &AgentRequest) -> Option<ControlQueryResult> {
-    if req.extra.is_empty() {
-        return None;
+/// 표의 실패 → wire 봉투.
+///
+/// ★코드는 타입드 어휘 그대로 나간다★(TRD §4-⑦) — 입구마다 도메인 문자열을 지어내면 같은 실패가 표면마다
+///   다른 이름으로 나가고, 기계 분기가 그 이름에 묶인다.
+/// ★자기교정 경로는 **어댑터가** 붙인다★: 표와 도구 crate 는 자기가 어느 표면에서 불렸는지 모른다(그래서
+///   문구에 CLI 어휘를 넣지 않는다). 이 한 줄이 없으면 호출자(LLM)는 반려를 받고도 어디서 규격을 확인할지
+///   모른 채 같은 인자로 재시도한다.
+fn refused(e: CommandError) -> ControlQueryResult {
+    ControlQueryResult::Error {
+        code: e.code().as_str(),
+        hint: format!("{} — {}.", e.message(), recovery_for(e.code())),
     }
-    let keys: Vec<&str> = req.extra.keys().map(|k| k.as_str()).collect();
-    Some(bad_args(format!(
-        "unknown field(s): {} — a typo here would silently become a different operation, so the call is refused; run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`.",
-        keys.join(", ")
-    )))
 }
 
-/// 값이 공백만인 필드는 **부재로 접지 않고** 반려한다(모듈 헤더 입력 규율).
-fn reject_blank_fields(req: &AgentRequest) -> Option<ControlQueryResult> {
-    let blanks: Vec<&str> = [
-        (FIELD_TARGET, value(&req.target)),
-        (FIELD_CWD, value(&req.cwd)),
-        (FIELD_NAME, value(&req.name)),
-        (FIELD_PARENT, value(&req.parent)),
-    ]
-    .into_iter()
-    .filter(|(_, v)| v.is_some_and(|s| s.trim().is_empty()))
-    .map(|(field, _)| field)
-    .collect();
-    if blanks.is_empty() {
-        return None;
+/// 코드마다 **다음에 할 일**이 다르다.
+///
+/// ★한 문구를 전부에 붙이면 거짓말이 된다★: 인자를 고칠 수 없는 실패(대상 부재 · 내부 실패)에 "인자 규격을
+///   보라" 를 달면 호출자는 없는 오타를 찾는다. 반대로 아무 경로도 안 달면 자기교정이 멈춘다.
+/// ★붙이는 것은 언제나 **칠 수 있는 명령 하나**다★ — 문장으로만 안내하면 LLM 이 그 문장을 명령으로 친다.
+fn recovery_for(code: ErrorCode) -> String {
+    match code {
+        // 무엇을 실을 수 있는지가 답이다.
+        ErrorCode::InvalidArgument | ErrorCode::UnknownCommand => {
+            format!("run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}` for this group's verbs and fields")
+        }
+        // 인자 문법 문제가 아니다 — 지금 명부에 무엇이 있는지를 봐야 대상을 고른다(부재 · 동명 · 상한).
+        ErrorCode::NotFound | ErrorCode::Conflict => {
+            format!("run `{CLI_EXE_NAME} {CLI_GROUP_AGENT} {AGENT_LIST_VERB}` to see the roster")
+        }
+        // 고칠 인자가 없다 — 무엇이 실제로 남았는지 확인하는 것이 다음 걸음이다(예: 만들어졌지만 못 뜬 것).
+        _ => format!(
+            "run `{CLI_EXE_NAME} {CLI_GROUP_AGENT} {AGENT_LIST_VERB}` to see what actually exists now"
+        ),
     }
-    Some(bad_args(format!(
-        "blank value(s) for: {} — an empty argument is usually an unset shell variable, and treating it as 'not given' would run a different command than you typed; pass a value or drop the field.",
-        blanks.join(", ")
-    )))
+}
+
+/// 회복 안내가 제안하는 조회 동사. 어느 동사를 제안할지는 **선택**이지만, 그 동사가 실재하는지는 선택이
+/// 아니다 — 아래 테스트가 계열 동사 명단과 대조한다(안 하면 안내가 없는 명령을 치게 한다).
+const AGENT_LIST_VERB: &str = "list";
+
+fn unknown_verb(verb: &str) -> ControlQueryResult {
+    ControlQueryResult::Error {
+        code: ErrorCode::UnknownCommand.as_str(),
+        hint: format!(
+            "unknown verb '{verb}' — {}.",
+            recovery_for(ErrorCode::UnknownCommand)
+        ),
+    }
+}
+
+/// 문구 **한 조각**이 차지해도 되는 몫(문자 수).
+const PREVIEW_CHARS: usize = 80;
+
+/// 호출자가 준 문자열을 문구의 한 조각으로 줄인다 — 자를 때는 **잘랐다고 말한다**.
+///
+/// ★이 함수가 지키는 것은 **자기 조각**뿐이다★: 부르는 자리에서 호출자 문자열이 문구를 다 먹지 않게 해,
+/// 뒤에 붙는 회복 안내(칠 수 있는 명령)가 문구 안에 남게 한다. 잘랐다고 말하지 않으면 호출자는 잘린 값을
+/// 자기가 친 값으로 읽고 멀쩡한 자리를 고치러 간다.
+/// ★반려 문구 전체에 대한 상한은 **없다**(알려진 열린 조건)★ — 이 함수를 안 거치고 호출자 문자열을 싣는
+/// 생산 지점이 이 라우트에도 이웃 라우트에도 있고, 그것들은 길이 그대로 나간다. 그 축은 이 조각의 범위가
+/// 아니다. **여기에 「모든 문구가 어딘가에서 잘린다」는 문장을 쓰지 말 것** — 네 판 연속 거짓이었다.
+fn preview(text: &str) -> String {
+    let mut head: String = text.chars().take(PREVIEW_CHARS).collect();
+    if head.len() < text.len() {
+        head.push_str(&format!("…(truncated, {} bytes)", text.len()));
+    }
+    head
 }
 
 /// 바디 자체가 JSON 계약을 못 지킨 경우의 반려 — 어댑터가 부른다(`control_agent_handler`).
 ///
 /// ★빈 body 400 을 쓰지 않는 이유★: 이 라우트의 호출자는 자기교정하는 LLM 이라 **사유가 실려야** 한다.
 ///   serde 의 문구(어느 필드가 어떤 타입이어야 하는지·중복 키·JSON 구문 위치)를 그대로 싣는다.
-/// ★바디 원문은 싣지 않는다★ — 잘린 앞부분만 형태 파악용으로 붙인다(요청 바디에 뭐가 들었든 응답으로
-///   되돌려 주는 것은 입구가 할 일이 아니다).
+/// ★바디 원문은 [`preview`] 로 줄인다★ — 요청 바디를 통째로 되돌려 주는 것은 입구가 할 일이 아니고,
+///   앞자리를 다 먹으면 뒤에 붙는 회복 안내가 문구 저 끝으로 밀린다.
+/// ★`reason` 은 여기서 자르지 않는다(알려진 열린 조건)★: serde 문구는 대개 짧지만 호출자 문자열이 섞여
+///   길어질 수 있고, 그때는 길이 그대로 나간다. 이미 짧은 문구를 한 번 더 자르면 우리 문구가 경계에서
+///   잘려 무엇이 문제인지조차 안 보이므로 여기서는 안 자른다.
 pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
-    const PREVIEW: usize = 80;
-    let head: String = raw.chars().take(PREVIEW).collect();
-    bad_args(format!(
-        "the request body is not a valid {CLI_GROUP_AGENT} command object: {reason} — it must be a JSON object like {{\"verb\":\"list\"}}; got: {head}"
-    ))
-}
-
-fn bad_args(hint: String) -> ControlQueryResult {
     ControlQueryResult::Error {
-        code: "INVALID_AGENT_ARGS",
-        hint,
-    }
-}
-
-fn verb_list(manager: &Arc<AgentManager>) -> ControlQueryResult {
-    // ★한 번의 명부 조회로 전부 만든다★: 이름·생사·cwd·계층이 **같은 스냅샷**에서 나와야 한 응답 안의
-    //   행끼리 정합한다. 예전엔 저장 스냅샷을 따로 떠 합쳤고, 그 사이에 생긴 에이전트가 cwd 없는 행으로,
-    //   그 사이의 계층 이동이 옛 부모로 나왔다(ADR-0119 가 금지한 소비자측 합성이기도 하다).
-    let agents: Vec<serde_json::Value> = manager
-        .roster()
-        .into_iter()
-        .map(|entry| {
-            let state = entry
-                .live
-                .as_ref()
-                .map(|info| state_of(&info.status))
-                .unwrap_or(AGENT_STATE_SLEEPING);
-            let mut row = agent_payload(entry.id, &entry.canonical_name, state);
-            row["cwd"] = serde_json::Value::String(entry.cwd);
-            row["parent"] = match entry.parent {
-                Some(p) => serde_json::Value::String(p.to_string()),
-                None => serde_json::Value::Null,
-            };
-            row
-        })
-        .collect();
-    ControlQueryResult::Ok(serde_json::json!({ "agents": agents }))
-}
-
-fn verb_spawn(
-    manager: &Arc<AgentManager>,
-    broadcast: Option<&Arc<dyn RosterBroadcast>>,
-    req: &AgentRequest,
-) -> ControlQueryResult {
-    // ★두 동사가 한 이름을 쓴다(깨우기 / 만들어서 띄우기)★: 어느 쪽인지는 **인자가** 가른다. 둘 다 주면
-    //   어느 뜻인지 고를 근거가 없고, 조용히 한쪽을 고르면 만들려던 에이전트 대신 남을 깨운다.
-    match (value(&req.target), value(&req.cwd)) {
-        (Some(_), Some(_)) => bad_args(format!(
-            "spawn takes either an existing agent (target) or cwd for a new one, not both — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        )),
-        (None, None) => bad_args(format!(
-            "spawn needs either an existing agent to wake (target) or cwd to create a new one — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        )),
-        // ★조용히 무시하지 않는다★: 깨우기는 이름을 바꾸지 않으므로 `name` 이 아무 일도 못 한다.
-        (Some(token), None) if value(&req.name).is_some() => bad_args(format!(
-            "name does not apply when waking an existing agent ({token}); use `{CLI_EXE_NAME} {CLI_GROUP_AGENT} rename` to change a name, or drop it."
-        )),
-        (Some(token), None) => wake_existing(manager, token),
-        (None, Some(cwd)) => {
-            create_and_start(manager, broadcast, cwd, value(&req.name).map(str::to_string))
-        }
-    }
-}
-
-fn wake_existing(manager: &Arc<AgentManager>, token: &str) -> ControlQueryResult {
-    let id = match resolve_or_reject(manager, token) {
-        Ok(id) => id,
-        Err(e) => return e,
-    };
-    let Some(agent) = manager.agent_snapshot(id) else {
-        return not_found(token);
-    };
-    // ★모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076)★: 저장된 세션이 있으면 이어받기, 없으면 새로.
-    //   여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다.
-    let mode = if agent.claude_session_id.is_some() {
-        SpawnMode::Resume
-    } else {
-        SpawnMode::Fresh
-    };
-    match manager.activate_profile(&agent, mode) {
-        // 깨우기는 명부의 **구성**을 바꾸지 않는다(항목 수·이름·계층 불변). 생사 전이는 매니저가 이미
-        //   흘린다 — `spawn_agent` 가 성공 직전 `status_sink.agent_list_updated` 를 내고 데몬 sink 이 그걸
-        //   전 연결에 팬아웃한다. 그래서 여기서 명부 통지를 겹쳐 보내지 않는다(WS 의 깨우기 경로도 같다).
-        Ok(info) => ControlQueryResult::Ok(spawn_payload(info.id, &info.name, &info.status, false)),
-        Err(e) => ControlQueryResult::Error {
-            code: "SPAWN_FAILED",
-            hint: format!("could not start agent '{token}': {e}"),
-        },
-    }
-}
-
-fn create_and_start(
-    manager: &Arc<AgentManager>,
-    broadcast: Option<&Arc<dyn RosterBroadcast>>,
-    cwd: &str,
-    name: Option<String>,
-) -> ControlQueryResult {
-    let stored = match register(manager, cwd, name) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    notify(broadcast);
-    match manager.activate_profile(&stored, SpawnMode::Fresh) {
-        Ok(info) => ControlQueryResult::Ok(spawn_payload(info.id, &info.name, &info.status, true)),
-        // ★등록을 되돌리지 않는다★: 만들어진 에이전트는 명부에 남아 잠든 상태로 보인다. 되감기는 두 번째
-        //   삭제 경로를 만드는데 삭제의 semantics 자체가 미결이고(ADR-0122), 조용히 지우면 호출자는 이름을
-        //   점유한 채 사라진 에이전트를 못 본다. 그래서 사실대로 알린다.
-        Err(e) => ControlQueryResult::Error {
-            code: "SPAWN_FAILED",
-            hint: format!(
-                "agent '{}' ({}) was created but did not start: {e} — it is registered and asleep; try `{CLI_EXE_NAME} {CLI_GROUP_AGENT} spawn {}`.",
-                stored.canonical_name_when_live(),
-                stored.id,
-                stored.canonical_name_when_live()
-            ),
-        },
-    }
-}
-
-fn verb_new(
-    manager: &Arc<AgentManager>,
-    broadcast: Option<&Arc<dyn RosterBroadcast>>,
-    req: &AgentRequest,
-) -> ControlQueryResult {
-    let Some(cwd) = value(&req.cwd) else {
-        return bad_args(format!(
-            "new needs cwd (the folder the agent works in) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        ));
-    };
-    let stored = match register(manager, cwd, value(&req.name).map(str::to_string)) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    notify(broadcast);
-    ControlQueryResult::Ok(serde_json::json!({
-        "agent": agent_payload(
-            stored.id,
-            &stored.canonical_name_when_live(),
-            AGENT_STATE_SLEEPING,
-        ),
-    }))
-}
-
-/// 명부 등록 공통부 — `new` 와 `spawn --cwd` 가 같은 자리를 쓴다.
-///
-/// ★확정 이름은 요청 이름과 다를 수 있다★: 명부 전역 유일성 때문에 접미사가 붙는다(ADR-0120/0123). 그래서
-///   응답은 **등록된 값**에서 이름을 읽는다 — 요청 이름을 되돌려주면 화면·주소와 어긋난다.
-fn register(
-    manager: &Arc<AgentManager>,
-    cwd: &str,
-    name: Option<String>,
-) -> Result<AgentProfile, ControlQueryResult> {
-    let mut agent = AgentProfile::new(
-        cwd.to_string(),
-        AgentCommand::Claude {
-            extra_args: vec![],
-            output_format: NEW_AGENT_OUTPUT_FORMAT,
-        },
-        std::path::PathBuf::from(cwd),
-        vec![],
-        false,
-    );
-    agent.display_name = name;
-    // ★상한 판정은 코어가 한다(입구가 아니라)★: 여기서 미리 세면 입구마다 사본이 생기고, 그 사본이 없는
-    //   입구(데스크톱 CreateProfile · ad-hoc spawn)는 그냥 통과한다 — 실제로 그렇게 새어 있었다. 코어는
-    //   등록을 커밋하는 게이트 안에서 세므로 원자적이고 입구 수와 무관하다. 여기 남는 일은 **번역**뿐이다.
-    manager.create_agent(agent).map_err(|e| match e {
-        PtyError::RosterFull { current, limit } => ControlQueryResult::Error {
-            code: "ROSTER_FULL",
-            hint: format!(
-                "the team already has {current} agents, which is the safety ceiling ({limit}) that stops a runaway create loop — it is not a product limit and raising it is not the fix. Remove agents you no longer need from the tree in the dashboard, then try again."
-            ),
-        },
-        other => ControlQueryResult::Error {
-            code: "NAME_SPACE_EXHAUSTED",
-            hint: format!("could not register a new agent: {other}"),
-        },
-    })
-}
-
-fn verb_rename(
-    manager: &Arc<AgentManager>,
-    broadcast: Option<&Arc<dyn RosterBroadcast>>,
-    req: &AgentRequest,
-) -> ControlQueryResult {
-    let Some(token) = value(&req.target) else {
-        return bad_args(format!(
-            "rename needs the agent to rename (target) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        ));
-    };
-    let Some(name) = value(&req.name).map(str::to_string) else {
-        return bad_args(format!(
-            "rename needs the new name — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        ));
-    };
-    let id = match resolve_or_reject(manager, token) {
-        Ok(id) => id,
-        Err(e) => return e,
-    };
-    // ★네 결말을 뭉개지 않는다★: 확정된 이름(접미사가 붙었을 수 있다) · 이미 그 계열을 쥐어 무변경 · 대상
-    //   부재 · 이름 공간 소진. 앞 둘은 성공이지만 **다른 사실**이라 outcome 으로 갈라 싣는다 — 뭉치면
-    //   호출자는 자기가 요청한 이름이 실제로 붙었는지 알 수 없다.
-    match manager.rename_agent(id, Some(name)) {
-        RenameOutcome::Renamed(committed) => {
-            notify(broadcast);
-            ControlQueryResult::Ok(serde_json::json!({
-                "agent": { "id": id.to_string(), "name": committed },
-                "outcome": RENAME_OUTCOME_RENAMED,
-            }))
-        }
-        RenameOutcome::Unchanged(kept) => {
-            notify(broadcast);
-            ControlQueryResult::Ok(serde_json::json!({
-                "agent": { "id": id.to_string(), "name": kept },
-                "outcome": RENAME_OUTCOME_UNCHANGED,
-            }))
-        }
-        RenameOutcome::NotFound => not_found(token),
-        RenameOutcome::Exhausted => ControlQueryResult::Error {
-            code: "NAME_SPACE_EXHAUSTED",
-            hint: format!(
-                "every numbered variant of that name is taken, so '{token}' was left as it is."
-            ),
-        },
-    }
-}
-
-fn verb_move(
-    manager: &Arc<AgentManager>,
-    broadcast: Option<&Arc<dyn RosterBroadcast>>,
-    req: &AgentRequest,
-) -> ControlQueryResult {
-    let Some(token) = value(&req.target) else {
-        return bad_args(format!(
-            "move needs the agent to move (target) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        ));
-    };
-    // 부재는 반려다 — "부모를 안 줬으니 떼자" 로 읽으면 오타 한 번이 계층 해제가 된다(null 이 그 지시다).
-    let Some(parent_request) = req.parent.as_ref() else {
-        return bad_args(format!(
-            "move needs parent: a name/id to move under, or null to move it back to the top level — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`."
-        ));
-    };
-    let child = match resolve_or_reject(manager, token) {
-        Ok(id) => id,
-        Err(e) => return e,
-    };
-    let parent_id = match parent_request.as_deref() {
-        None => None,
-        Some(p) => match resolve_or_reject(manager, p) {
-            Ok(id) => Some(id),
-            Err(e) => return e,
-        },
-    };
-    if manager.reparent_agent(child, parent_id) {
-        notify(broadcast);
-        ControlQueryResult::Ok(serde_json::json!({
-            "agent": { "id": child.to_string(), "name": name_of(manager, child) },
-            "parent": parent_id.map(|p| p.to_string()),
-        }))
-    } else {
-        // ★사유 목록은 `ProfileRegistry::reparent` 의 거부 조건과 **한 줄씩 대응**한다★: 목록에 없는 사유로
-        //   거부당한 호출자는 다음에 무엇을 할지 알 수 없다. 특히 **"옮기려는 쪽이 이미 부모"** 는 2단 트리에서
-        //   실제로 자주 걸리는 조건인데 예전 문구엔 빠져 있었다.
-        ControlQueryResult::Error {
-            code: "MOVE_REJECTED",
-            hint: format!(
-                "'{token}' cannot go there. The tree is one level deep, so: an agent cannot be its own parent; the new parent must itself be top-level (an agent that already has a parent cannot take children); the agent being moved must not already have children of its own; and both agents must still exist."
-            ),
-        }
-    }
-}
-
-fn name_of(manager: &Arc<AgentManager>, id: AgentId) -> String {
-    manager
-        .roster()
-        .into_iter()
-        .find(|e| e.id == id)
-        .map(|e| e.canonical_name)
-        .unwrap_or_default()
-}
-
-fn resolve_or_reject(
-    manager: &Arc<AgentManager>,
-    token: &str,
-) -> Result<AgentId, ControlQueryResult> {
-    match resolve_target(&manager.roster(), token) {
-        TargetResolution::Found(id) => Ok(id),
-        TargetResolution::NotFound => Err(not_found(token)),
-        TargetResolution::Ambiguous => Err(ControlQueryResult::Error {
-            code: "AGENT_AMBIGUOUS",
-            hint: format!(
-                "more than one agent is called '{token}', so this command would have to guess — use the agent id instead (`{CLI_EXE_NAME} {CLI_GROUP_AGENT} list` shows them)."
-            ),
-        }),
-    }
-}
-
-fn not_found(token: &str) -> ControlQueryResult {
-    ControlQueryResult::Error {
-        code: "AGENT_NOT_FOUND",
+        code: ErrorCode::InvalidArgument.as_str(),
         hint: format!(
-            "no agent called '{token}' — names are matched exactly, with no case-folding, prefixes or trimming (`{CLI_EXE_NAME} {CLI_GROUP_AGENT} list` shows the roster)."
-        ),
-    }
-}
-
-fn notify(broadcast: Option<&Arc<dyn RosterBroadcast>>) {
-    match broadcast {
-        Some(b) => b.roster_changed(),
-        None => tracing::debug!(
-            "명부 변경 통지 생략 — 팬아웃 포트 미설정(클라이언트가 붙을 수 없는 조립)"
+            "the request body is not a valid {CLI_GROUP_AGENT} command object: {reason} — it must be a JSON object like {{\"verb\":\"list\"}}; got: {} — {}.",
+            preview(raw),
+            recovery_for(ErrorCode::InvalidArgument)
         ),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use engram_dashboard_core::agent::types::CLI_AGENT_VERBS;
 
-    fn entry(id: AgentId, name: &str) -> RosterEntry {
-        RosterEntry {
-            id,
-            canonical_name: name.to_string(),
-            live: None,
-            cwd: String::new(),
-            parent: None,
-        }
-    }
+    use super::*;
 
     fn parse(body: serde_json::Value) -> AgentRequest {
         serde_json::from_value(body).expect("요청 역직렬화")
     }
 
-    #[test]
-    fn resolve_matches_names_exactly_and_never_by_prefix_or_case() {
-        let a = AgentId::new_v4();
-        let roster = vec![entry(a, "alpha")];
-        assert_eq!(resolve_target(&roster, "alpha"), TargetResolution::Found(a));
-        for miss in ["alph", "alpha2", "ALPHA", "Alpha", " alpha", "alpha "] {
-            assert_eq!(
-                resolve_target(&roster, miss),
-                TargetResolution::NotFound,
-                "정확 일치만: {miss}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_id_looking_name_cannot_hijack_id_targeting() {
-        let real = AgentId::new_v4();
-        let impostor = AgentId::new_v4();
-        // 남의 id 를 **이름으로** 달고 있는 에이전트가 먼저 나와도 id 지목은 진짜에게 간다.
-        let roster = vec![entry(impostor, &real.to_string()), entry(real, "real")];
-        assert_eq!(
-            resolve_target(&roster, &real.to_string()),
-            TargetResolution::Found(real)
-        );
-        assert_eq!(
-            resolve_target(&roster, "real"),
-            TargetResolution::Found(real)
-        );
-    }
-
-    #[test]
-    fn duplicate_names_refuse_instead_of_picking_one() {
-        let a = AgentId::new_v4();
-        let b = AgentId::new_v4();
-        let roster = vec![entry(a, "twin"), entry(b, "twin")];
-        assert_eq!(resolve_target(&roster, "twin"), TargetResolution::Ambiguous);
-        // 모호해도 id 지목은 여전히 통한다(그게 탈출구다).
-        assert_eq!(
-            resolve_target(&roster, &b.to_string()),
-            TargetResolution::Found(b)
-        );
-    }
-
-    #[test]
-    fn an_empty_roster_finds_nothing() {
-        assert_eq!(resolve_target(&[], "anyone"), TargetResolution::NotFound);
-    }
-
-    // ── 상태 어휘 ────────────────────────────────────────────────────────────────
-
-    /// ★변경 동사와 `list` 가 같은 함수를 지나야 두 답이 갈릴 수 없다★ — 전 상태를 여기서 못박는다.
-    #[test]
-    fn every_status_maps_to_one_of_the_two_agent_state_words() {
-        assert_eq!(state_of(&AgentStatus::Running), AGENT_STATE_LIVE);
-        assert_eq!(state_of(&AgentStatus::Exiting), AGENT_STATE_LIVE);
-        for dead in [
-            AgentStatus::Exited { code: Some(0) },
-            AgentStatus::Exited { code: None },
-            AgentStatus::Killed,
-            AgentStatus::Failed {
-                message: "boom".to_string(),
-            },
-        ] {
-            assert_eq!(
-                state_of(&dead),
-                AGENT_STATE_SLEEPING,
-                "시체는 산 것이 아니다: {dead:?}"
-            );
-        }
-        // 메시지 결말 어휘와 섞이지 않는다(CLAUDE.md 고정 용어 — 두 축을 섞어 결정이 꼬인 적이 있다).
-        for message_word in ["delivered", "pending", "failed"] {
-            assert_ne!(AGENT_STATE_LIVE, message_word);
-            assert_ne!(AGENT_STATE_SLEEPING, message_word);
-        }
-    }
-
-    // ── 입력 규율 ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn parent_distinguishes_absent_from_explicit_null() {
-        let absent = parse(serde_json::json!({ "verb": "move", "target": "a" }));
-        assert_eq!(absent.parent, None, "필드 부재");
-        let detach = parse(serde_json::json!({ "verb": "move", "target": "a", "parent": null }));
-        assert_eq!(detach.parent, Some(None), "명시 null = 루트로 떼기");
-        let under = parse(serde_json::json!({ "verb": "move", "target": "a", "parent": "lead" }));
-        assert_eq!(under.parent, Some(Some("lead".to_string())));
-    }
-
-    #[test]
-    fn unknown_fields_are_collected_and_refused() {
-        let req = parse(serde_json::json!({ "verb": "move", "target": "a", "parnet": "lead" }));
-        assert!(req.extra.contains_key("parnet"), "모르는 키를 모은다");
-        let rejection = reject_unknown_fields(&req).expect("반려");
-        match rejection {
-            ControlQueryResult::Error { code, hint } => {
-                assert_eq!(code, "INVALID_AGENT_ARGS");
-                assert!(hint.contains("parnet"), "어느 키인지 지목해야: {hint}");
-            }
+    fn error_of(result: ControlQueryResult) -> (&'static str, String) {
+        match result {
+            ControlQueryResult::Error { code, hint } => (code, hint),
             other => panic!("반려여야: {other:?}"),
         }
     }
 
-    /// 명시 null 은 **모르는 필드가 아니다** — 아는 필드를 null 로 준 요청까지 "오타" 로 반려하면 정상
-    /// 호출이 막힌다. 대신 그 필드는 **실린 것**으로 세어져 동사별 허용 검사를 받는다(아래 테스트).
+    // ── 요청 → 명령 ──────────────────────────────────────────────────────────────
+
+    /// ★`verb` 만 이 입구의 어휘다★ — 나머지는 아는 칸이든 모르는 칸이든 **전부** 인자로 실려 표가 본다.
+    ///   여기서 아는 칸만 골라 담으면 모르는 칸이 이 파일에서 증발해 ADR-0136 의 거절이 성립하지 않는다.
     #[test]
-    fn an_explicit_null_on_a_known_field_is_not_an_unknown_field() {
+    fn every_field_but_the_verb_is_carried_through_as_command_arguments() {
         let req = parse(serde_json::json!({
-            "verb": "spawn", "cwd": "C:/x", "name": null
+            "verb": "move", "target": "a", "parent": null, "parnet": "lead"
         }));
-        assert!(req.extra.is_empty(), "아는 필드는 extra 로 새지 않는다");
-        assert!(reject_unknown_fields(&req).is_none());
-        assert_eq!(value(&req.name), None, "null 은 값이 없는 것이다");
+        assert_eq!(req.verb, "move");
+        assert_eq!(
+            *req.args,
+            *serde_json::json!({ "target": "a", "parent": null, "parnet": "lead" })
+                .as_object()
+                .expect("객체")
+        );
     }
 
-    /// ★null 로 보낸 필드도 "보냈다" 로 센다★: 접어 버리면 `{"verb":"new","target":null}` 이 검사를 통과해
-    ///   에이전트를 만들고, 호출자는 자기가 보낸 `target` 이 아무 일도 못 했다는 것을 못 본다.
+    /// ★같은 칸이 두 번 실리면 어느 값도 고르지 않는다★: `{"parent":"lead","parent":null}` 에서 뒤 값을
+    ///   택하면 붙이려던 요청이 **루트로 떼기**로 조용히 바뀐다. `verb` 든 인자 칸이든 같은 규율이다 —
+    ///   한쪽만 막으면 막히지 않은 쪽으로 같은 사고가 들어온다.
     #[test]
-    fn a_field_sent_as_null_still_counts_as_sent_for_the_per_verb_guard() {
-        let req = parse(serde_json::json!({ "verb": "new", "cwd": "C:/x", "target": null }));
-        assert_eq!(present_fields(&req), vec![FIELD_TARGET, FIELD_CWD]);
-        let out = guard(&req, "new", &[FIELD_CWD, FIELD_NAME], || {
-            panic!("허용 밖 필드가 실렸으면 본문이 돌면 안 된다")
-        });
-        match out {
-            ControlQueryResult::Error { code, hint } => {
-                assert_eq!(code, "INVALID_AGENT_ARGS");
-                assert!(hint.contains(FIELD_TARGET), "{hint}");
-            }
-            other => panic!("반려여야: {other:?}"),
-        }
-    }
-
-    // ── 상태 정직성(라운드 1 HIGH 의 회귀망) ──────────────────────────────────────────
-
-    /// ★이 테스트가 막는 것 = 응답에 상태를 **박는** 것★. terminal 상태의 에이전트를 넣으므로 리터럴
-    ///   `"live"` 로는 절대 통과할 수 없다 — 라우트 레벨에서는 그 자리에 결정적으로 죽은 에이전트를 만들
-    ///   방법이 없어(셸은 계속 살아 있다) 이 축을 여기서 못박는다.
-    #[test]
-    fn the_spawn_payload_derives_state_and_cannot_be_a_literal() {
-        let id = AgentId::new_v4();
-        let live = spawn_payload(id, "worker", &AgentStatus::Running, false);
-        assert_eq!(live["agent"]["state"], AGENT_STATE_LIVE);
-        assert_eq!(live["created"], false);
-
-        for dead in [
-            AgentStatus::Exited { code: Some(1) },
-            AgentStatus::Killed,
-            AgentStatus::Failed {
-                message: "resume died".to_string(),
-            },
-        ] {
-            let payload = spawn_payload(id, "worker", &dead, true);
-            assert_eq!(
-                payload["agent"]["state"], AGENT_STATE_SLEEPING,
-                "깨우자마자 죽은 에이전트를 살아 있다고 보고하면 호출자가 시체에게 편지를 쓴다: {dead:?}"
-            );
-            assert_ne!(
-                payload["agent"]["state"], AGENT_STATE_LIVE,
-                "상태를 박아 두면 여기서 죽는다: {dead:?}"
-            );
-            assert_eq!(payload["created"], true);
-        }
-    }
-
-    #[test]
-    fn blank_values_are_refused_not_folded_into_absent() {
+    fn a_duplicate_key_is_refused_for_the_verb_and_for_arguments_alike() {
         for body in [
-            serde_json::json!({ "verb": "move", "target": "a", "parent": "" }),
-            serde_json::json!({ "verb": "move", "target": "a", "parent": "   " }),
-            serde_json::json!({ "verb": "rename", "target": "", "name": "x" }),
-            serde_json::json!({ "verb": "new", "cwd": " " }),
-            serde_json::json!({ "verb": "new", "cwd": "C:/x", "name": "" }),
+            r#"{"verb":"list","verb":"move"}"#,
+            r#"{"verb":"move","target":"a","target":"b"}"#,
+            r#"{"verb":"move","target":"a","parent":"lead","parent":null}"#,
         ] {
-            let req = parse(body.clone());
+            let refusal = serde_json::from_str::<AgentRequest>(body).map(|_| ());
+            assert!(refusal.is_err(), "중복 키는 반려여야: {body}");
+        }
+        // 다른 이름의 칸 여럿은 정상이다(중복 판정이 「칸이 여럿이면 반려」로 번지지 않는다).
+        let ok = parse(serde_json::json!({ "verb": "move", "target": "a", "parent": null }));
+        assert_eq!(ok.args.len(), 2);
+    }
+
+    /// ★반려 문구는 요청만큼 커지지 않는다★ — 키를 그대로 실으면 500 KB 짜리 키 하나가 그만한 200 응답을
+    /// 만들고, 그 비용은 친 쪽이 아니라 받는 쪽이 낸다. 잘랐다는 사실도 함께 나가야 호출자가 오해하지 않는다.
+    #[test]
+    fn a_huge_duplicate_key_is_reported_within_a_bound() {
+        let huge = "k".repeat(500_000);
+        let body = format!(r#"{{"verb":"move","{huge}":1,"{huge}":2}}"#);
+
+        let reason = serde_json::from_str::<AgentRequest>(&body)
+            .expect_err("중복 키")
+            .to_string();
+        let (_, hint) = error_of(malformed_body(&reason, &body));
+
+        assert!(hint.contains("duplicate field"), "{hint}");
+        assert!(hint.contains("truncated"), "잘랐다고 말한다: {hint}");
+        // 실측은 ~434 B다 — 아래 수는 **여유이지 계약이 아니다**(그래서 `PREVIEW_CHARS` 를 250 까지 올려도
+        //   이 단언은 통과한다). 계약은 「요청 크기와 무관」이고, 그것을 세우는 것은 조각마다의 [`preview`] 다.
+        assert!(
+            hint.len() < 1024,
+            "문구가 요청만큼 커졌다: {} 바이트",
+            hint.len()
+        );
+    }
+
+    /// ★중복 판정이 닿는 깊이는 꼭대기 한 겹뿐이다(알려진 경계)★ — 중첩 객체 안의 중복은 `serde_json::Value`
+    /// 가 삼켜 마지막 값이 이긴다. 오늘은 선언된 인자가 전부 문자열이라 그 모양이 인자 타입 검사에서 죽지만,
+    /// 객체 값을 선언하는 명령이 생기면 같은 사고가 한 겹 아래에서 되살아난다.
+    #[test]
+    fn duplicate_detection_is_top_level_only() {
+        let nested = parse(serde_json::json!({ "verb": "move", "target": "a" }));
+        assert_eq!(nested.args.len(), 1, "전제: 꼭대기 칸은 그대로 실린다");
+
+        let req: AgentRequest =
+            serde_json::from_str(r#"{"verb":"move","target":{"parent":1,"parent":2}}"#)
+                .expect("중첩 중복은 여기서 안 걸린다(알려진 경계)");
+        assert_eq!(req.args["target"]["parent"], 2);
+    }
+
+    // ── 반려 봉투 ────────────────────────────────────────────────────────────────
+
+    /// ★반려는 언제나 **칠 수 있는 명령 하나**를 달고 나간다★ — 표와 도구 crate 는 이 표면을 모르므로
+    ///   그 안내는 여기서만 붙는다. 문장만 있으면 LLM 이 그 문장을 명령으로 친다.
+    #[test]
+    fn every_rejection_carries_the_typed_code_and_a_runnable_command() {
+        let cases = [
+            CommandError::invalid_argument("bad field"),
+            CommandError::not_found("no agent called 'ghost'"),
+            CommandError::of(ErrorCode::Conflict, "more than one agent"),
+            CommandError::internal("was created but did not start"),
+        ];
+        for error in cases {
+            let (code, hint) = error_of(refused(error.clone()));
+            assert_eq!(code, error.code().as_str());
+            assert!(hint.contains(error.message()), "{hint}");
             assert!(
-                reject_blank_fields(&req).is_some(),
-                "공백 값은 반려여야: {body}"
+                hint.contains(&format!("`{CLI_EXE_NAME} ")),
+                "칠 수 있는 명령이 없다: {hint}"
             );
         }
-        let ok = parse(serde_json::json!({ "verb": "move", "target": "a", "parent": null }));
+    }
+
+    /// 코드마다 **다음에 할 일**이 다르다 — 고칠 인자가 없는 실패에 "인자 규격을 보라" 를 달면 호출자는
+    /// 없는 오타를 찾고, 대상을 못 고른 실패에 규격을 달면 명부를 볼 생각을 못 한다.
+    #[test]
+    fn the_suggested_recovery_matches_what_the_caller_can_actually_fix() {
+        let help = format!("`{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`");
+        let roster = format!("`{CLI_EXE_NAME} {CLI_GROUP_AGENT} {AGENT_LIST_VERB}`");
+
+        for argument_fault in [ErrorCode::InvalidArgument, ErrorCode::UnknownCommand] {
+            assert!(
+                recovery_for(argument_fault).contains(&help),
+                "{argument_fault:?}"
+            );
+        }
+        for targeting_fault in [ErrorCode::NotFound, ErrorCode::Conflict] {
+            assert!(
+                recovery_for(targeting_fault).contains(&roster),
+                "{targeting_fault:?}"
+            );
+        }
+        // 고칠 인자가 없는 실패(내부·불명)도 다음 걸음은 있다 — 무엇이 실제로 남았는지 본다.
+        for opaque_fault in [ErrorCode::Internal, ErrorCode::OutcomeUnknown] {
+            assert!(
+                recovery_for(opaque_fault).contains(&roster),
+                "{opaque_fault:?}"
+            );
+        }
+    }
+
+    /// 제안하는 동사가 **실재해야** 한다 — 없는 동사를 안내하면 자기교정이 반려로 이어진다.
+    #[test]
+    fn the_suggested_roster_verb_is_one_this_group_actually_has() {
         assert!(
-            reject_blank_fields(&ok).is_none(),
-            "명시 null 은 공백이 아니다"
+            CLI_AGENT_VERBS.contains(&AGENT_LIST_VERB),
+            "{AGENT_LIST_VERB} 이 계열 동사 명단에 없다: {CLI_AGENT_VERBS:?}"
         );
     }
 
     #[test]
-    fn fields_a_verb_does_not_use_are_refused() {
-        let req = parse(serde_json::json!({ "verb": "list", "target": "a" }));
-        let out = guard(&req, "list", &[], || {
-            panic!("허용 밖 필드가 있으면 본문이 돌면 안 된다")
-        });
-        match out {
-            ControlQueryResult::Error { code, hint } => {
-                assert_eq!(code, "INVALID_AGENT_ARGS");
-                assert!(hint.contains(FIELD_TARGET), "{hint}");
-            }
-            other => panic!("반려여야: {other:?}"),
-        }
-        let clean = parse(serde_json::json!({ "verb": "list" }));
-        assert!(matches!(
-            guard(&clean, "list", &[], || ControlQueryResult::Ok(
-                serde_json::json!({})
-            )),
-            ControlQueryResult::Ok(_)
-        ));
+    fn an_unknown_verb_names_the_verb_and_points_at_the_group_help() {
+        let (code, hint) = error_of(unknown_verb("explode"));
+        assert_eq!(code, "UNKNOWN_COMMAND");
+        assert!(hint.contains("explode"), "{hint}");
+        assert!(hint.contains("help"), "{hint}");
     }
 }

@@ -175,13 +175,16 @@ impl CommandTable {
         };
         // 모르는 칸을 먼저 본다 — 오타는 「모르는 칸 하나 + 빠진 필수 칸 하나」로 함께 걸리는데, 호출자가
         //   고칠 것은 **자기가 친 그 칸**이다.
-        if let Some(unknown) = given
+        // ★틀린 칸을 **전부** 센다★: 하나만 짚으면 호출자는 고치고 다시 보내고 또 반려당하기를 반복한다
+        //   (칸 순서는 사전순이라 「먼저 친 것」도 아니다). 오타 셋을 한 번에 보여 주는 것이 그물의 값이다.
+        let unknown: Vec<&String> = given
             .keys()
-            .find(|key| !declared.contains_key(key.as_str()))
-        {
+            .filter(|key| !declared.contains_key(key.as_str()))
+            .collect();
+        if !unknown.is_empty() {
             return Err(CommandError::invalid_argument(format!(
-                "'{}' is not an argument of '{name}' — declared arguments: {}",
-                quoted_input(unknown),
+                "not an argument of '{name}': {} — declared arguments: {}",
+                quoted_list(&unknown),
                 declared_names(&entry.args_schema)
             )));
         }
@@ -248,23 +251,72 @@ fn declared_names(args_schema: &serde_json::Value) -> String {
         .join(", ")
 }
 
-/// 반려 문구가 인용하는 **호출자 입력**의 상한.
+/// 한 문구에 이름 지어 싣는 **틀린 칸 수**의 상한.
+///
+/// ★전부 세되 전부 싣지는 않는다★: 칸 수는 요청 바디 크기만큼 늘 수 있어(수천 개) 상한이 없으면 반려
+/// 문구가 그만큼 커진다 — 그 비용은 친 쪽이 아니라 받는 쪽이 낸다([`quoted_input`] 과 같은 논거). 넘치면
+/// **몇 개가 더 있는지 말한다**(말 안 하면 호출자는 목록을 전부로 읽고 남은 칸을 못 고친다).
+/// ★이름 지어지는 여덟은 「호출자가 먼저 친 여덟」이 **아니다**★ — 인자 맵은 정렬 자료구조라 사전순 앞
+/// 여덟이고, 그 순서는 호출자가 만든 것이 아니다. 「먼저 친 것부터」를 원하면 맵을 삽입 순서 보존형으로
+/// 바꿔야 하고 그건 이 crate 밖 결정이다(아래 테스트가 이 선택을 못박는다).
+const MAX_NAMED_UNKNOWN: usize = 8;
+
+/// 이름 하나의 **리터럴**(`"…"` — 여닫이 따옴표와 말줄임표 포함) 크기 상한(바이트).
 ///
 /// ★없으면 100 MiB 짜리 칸 이름 하나가 그만한 문구를 만든다★ — 그 문구는 오류 답장에 실려 선을 타고,
 /// 그것을 만드는 비용은 인자를 친 쪽이 아니라 받는 쪽이 낸다. 값은 사람이 자기 오타를 알아볼 만큼이다.
+/// ★이 수가 **재는 것과 안 재는 것**★: 재는 것은 리터럴이고, 문구에 실제로 들어가는 조각은 여기에 잘림
+/// 표시(`(truncated, input was N bytes)` — 30 B 남짓)가 더 붙어 **~170 B**까지 간다. 조각 전체의 수가 필요하면
+/// 그 합을 쓸 것 — 이 상수를 그 자리에 그대로 옮겨 적지 말 것.
+/// ★줄이려고 두는 상한이 아니다★: 이스케이프 표기가 129~158 B 인 입력에서는 잘린 형태가 원본 표기보다 오히려
+/// **길다**(꼬리표가 붙으니까). 이 상한이 지키는 것은 평균 크기가 아니라 **꼬리의 유한함**이다.
 const MAX_QUOTED_INPUT_BYTES: usize = 128;
 
-/// 호출자가 준 문자열을 문구에 인용할 수 있게 다듬는다 — 자를 때는 **잘랐다고 말한다**(안 그러면
-/// 호출자는 잘린 이름을 자기가 친 이름으로 읽고 멀쩡한 칸을 고치러 간다).
+/// 틀린 칸 이름들을 문구에 싣는다 — 각 이름은 [`quoted_input`] 상한을, 개수는 [`MAX_NAMED_UNKNOWN`] 을 탄다.
+fn quoted_list(keys: &[&String]) -> String {
+    let named: Vec<String> = keys
+        .iter()
+        .take(MAX_NAMED_UNKNOWN)
+        .map(|key| quoted_input(key))
+        .collect();
+    let listed = named.join(", ");
+    match keys.len().checked_sub(MAX_NAMED_UNKNOWN) {
+        Some(rest) if rest > 0 => format!("{listed} (+{rest} more)"),
+        _ => listed,
+    }
+}
+
+/// 호출자가 준 이름을 문구에 인용할 수 있게 다듬는다 — 자를 때는 **잘랐다고 말한다**(안 그러면 호출자는
+/// 잘린 이름을 자기가 친 이름으로 읽고 멀쩡한 칸을 고치러 간다).
+///
+/// ★이름은 Rust 문자열 리터럴 표기로 감싼다★: 작은따옴표로 감싸면 `a', 'b` 라는 칸 **하나**가 `'a', 'b'`
+/// 로 찍혀 **틀린 칸 둘**로 읽힌다 — 호출자는 있지도 않은 칸을 고치러 간다. `{:?}` 는 따옴표·역슬래시·제어
+/// 문자를 이스케이프해 그 애매함을 없앤다.
+/// ★잘린 이름도 **따옴표를 닫는다**(load-bearing)★: 안 닫으면 이름 여럿을 이어 붙인 문구에서 따옴표 짝이
+/// 어긋나, 방금 없앤 그 애매함이 그대로 돌아온다(닫는 따옴표 없는 조각 + 다음 이름의 여는 따옴표가 한 쌍으로
+/// 읽힌다).
+/// ★상한은 **이스케이프한 뒤** 건다★: 먼저 자르면 제어문자 한 글자가 `\u{1b}` 여섯 바이트로 부풀어 문구가
+/// 상한의 여섯 배까지 커진다 — 상한이 「입력 종류에 따라」 달라져 문서에 적은 숫자가 거짓이 된다.
+/// ★이스케이프 시퀀스 한가운데서 자르지 않는다★: 글자 단위로 쌓다가 예산에서 멈추므로 `\` 하나만 남는
+/// 조각이 생기지 않는다 — 그런 조각은 표기가 깨져 위의 「리터럴 표기」 약속을 어긴다.
+/// ★잘림 표시는 **무엇을 센 수인지** 밝힌다★: 보이는 것은 이스케이프된 표기이고 수는 원본 바이트라, 라벨이
+/// 없으면 제어문자 30개(표기로는 180자)가 「30 바이트를 잘랐다」로 읽혀 서로 어긋나 보인다.
 fn quoted_input(text: &str) -> String {
-    if text.len() <= MAX_QUOTED_INPUT_BYTES {
-        return text.to_string();
+    let quoted = format!("{text:?}");
+    if quoted.len() <= MAX_QUOTED_INPUT_BYTES {
+        return quoted;
     }
-    let mut cut = MAX_QUOTED_INPUT_BYTES;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
+    // 여는 따옴표 · 닫는 따옴표 · 말줄임표 자리를 미리 뺀다.
+    let budget = MAX_QUOTED_INPUT_BYTES.saturating_sub('"'.len_utf8() * 2 + '…'.len_utf8());
+    let mut shown = String::with_capacity(budget);
+    for ch in text.chars() {
+        let piece = ch.escape_debug().to_string();
+        if shown.len() + piece.len() > budget {
+            break;
+        }
+        shown.push_str(&piece);
     }
-    format!("{}…(truncated, {} bytes)", &text[..cut], text.len())
+    format!("\"{shown}…\"(truncated, input was {} bytes)", text.len())
 }
 
 struct Blocking<F, A, O> {
@@ -679,6 +731,235 @@ mod tests {
         );
     }
 
+    /// ★틀린 칸이 여럿이면 여럿 다 나온다★ — 하나만 짚으면 호출자는 반려·수정·재시도를 오타 수만큼
+    /// 반복한다. 칸 순서는 사전순이라 「처음 친 칸」이라는 뜻도 없다.
+    #[test]
+    fn every_undeclared_argument_field_is_named_not_just_the_first() {
+        let err = entrance_table()
+            .check_args(
+                "fixture.entrance",
+                &json!({ "cwd": "C:/x", "target": "alpha", "zzz": 1, "aaa": 2 }),
+            )
+            .expect_err("선언에 없는 칸 셋");
+
+        for offender in ["target", "zzz", "aaa"] {
+            assert!(
+                err.message().contains(offender),
+                "{offender} 이 빠졌다: {}",
+                err.message()
+            );
+        }
+    }
+
+    /// 선언에 없는 칸 `count` 개(각 `key_bytes` 바이트)를 실은 반려 문구.
+    ///
+    /// ★넣는 순서를 **사전 역순**으로 둔다★: 오름차순으로 넣으면 삽입 순서와 사전순이 같아져, 맵이 삽입
+    /// 순서 보존형으로 바뀌어도(`preserve_order`) 「사전순 앞 여덟」 단언이 그대로 통과한다 — 그 단언이
+    /// 재려던 성질이 사라진 줄 아무도 모른다.
+    fn flood_refusal(count: usize, key_bytes: usize) -> String {
+        flood_refusal_of(count, key_bytes, "x")
+    }
+
+    /// `fill` = 이름을 채우는 문자 — 인쇄 가능 문자와 이스케이프되는 문자가 같은 상한을 타는지 재려고
+    /// 갈라 둔다(이스케이프 확장은 상한을 종류별로 다르게 만들 수 있는 축이다).
+    fn flood_refusal_of(count: usize, key_bytes: usize, fill: &str) -> String {
+        let mut given = serde_json::Map::new();
+        given.insert("cwd".to_string(), json!("C:/x"));
+        for i in (0..count).rev() {
+            given.insert(format!("stray{i:04}{}", fill.repeat(key_bytes)), json!(1));
+        }
+        entrance_table()
+            .check_args("fixture.entrance", &serde_json::Value::Object(given))
+            .expect_err("선언에 없는 칸 다수")
+            .message()
+            .to_string()
+    }
+
+    /// 개수 상한을 넘으면 **몇 개가 더 있는지** 말한다 — 목록이 전부인 줄 알면 남은 칸을 못 고친다.
+    #[test]
+    fn a_flood_of_unknown_fields_is_capped_and_says_how_many_are_left() {
+        let message = flood_refusal(40, 0);
+
+        assert!(
+            message.contains("(+32 more)"),
+            "남은 개수를 말한다: {message}"
+        );
+        assert!(
+            message.contains("stray0000"),
+            "이름 지어진 칸이 실제로 실린다: {message}"
+        );
+    }
+
+    /// ★문구 길이는 요청 크기와 **무관**하다★ — 지켜야 할 성질은 「몇 바이트 이하」가 아니라 「입력이 커져도
+    /// 안 자란다」다. 이름 하나의 상한은 [`quoted_input`], 이름 개수의 상한은 [`MAX_NAMED_UNKNOWN`] 이 잡고,
+    /// 둘이 함께 서야 이 성질이 선다(한쪽만 있으면 다른 축으로 자란다).
+    ///
+    /// 실측 최악은 **약 1.4 KB**(이름 여덟 × 인용 상한 128B + 잘림 표시 + 선언 집합)이고, 이스케이프되는
+    /// 이름도 같은 값이다(상한이 이스케이프 **뒤**에 걸리므로) — 그래도 숫자를 계약처럼 읽지 말 것. 계약은
+    /// 아래 첫 단언(입력이 커져도 문구는 자릿수만큼만 는다)이다.
+    #[test]
+    fn the_refusal_message_does_not_grow_with_the_body() {
+        let small = flood_refusal(40, 1 << 10);
+        let huge = flood_refusal(4_000, 1 << 14);
+
+        // 자라도 되는 폭 = **자릿수뿐**이다: 이름 여덟의 「N 바이트」 표기와 「+N more」의 숫자가 길어진다.
+        //   여유 32 는 그 자릿수 증가분(입력이 1000배여도 십진 자릿수는 몇 자리만 는다)을 덮는 크기다.
+        assert!(
+            huge.len() <= small.len() + 32,
+            "칸 수 100배·이름 크기 16배인데 문구가 자릿수 이상으로 자랐다: {} → {} 바이트",
+            small.len(),
+            huge.len()
+        );
+        // 이스케이프되는 이름도 같은 상한을 탄다 — 여기가 이전 두 판에서 문서 숫자를 거짓으로 만든 축이다.
+        let escaped = flood_refusal_of(40, 1 << 10, "\u{1b}");
+        for (label, measured) in [("printable", small.len()), ("escaped", escaped.len())] {
+            assert!(
+                measured < 2048,
+                "{label}: 실측 최악(~1.4 KB) 근처를 벗어났다 — 상한 둘 중 하나가 풀렸다: {measured} 바이트"
+            );
+        }
+    }
+
+    /// ★이름 지어지는 여덟은 **사전순 앞 여덟**이고, 실리는 **차례도 사전순**이다★ — 호출자가 먼저 친
+    /// 여덟이 아니다(인자 맵이 정렬 자료구조다). 픽스처가 사전 **역순**으로 넣으므로 맵이 삽입 순서
+    /// 보존형으로 바뀌면 여기가 빨개진다.
+    /// ★이름을 잘리게 두는 것이 요점이다★: 이름 상한과 개수 상한이 **함께** 걸리는 조합이라야 둘이 서로를
+    /// 가리지 않는지 본다(짧은 이름만 쓰면 잘림 경로가 이 조합에서 한 번도 안 돈다).
+    #[test]
+    fn the_named_subset_is_the_alphabetically_first_ones_in_order() {
+        let message = flood_refusal(40, 1 << 8);
+
+        let at = |name: &str| message.find(name);
+        // 양 끝만 보면 가운데 여섯이 섞여도 통과한다 — 여덟 자리를 전부 본다.
+        let places: Vec<usize> = (0..MAX_NAMED_UNKNOWN)
+            .map(|i| at(&format!("stray{i:04}")).expect("이름 지어진 여덟"))
+            .collect();
+        assert!(
+            places.windows(2).all(|pair| pair[0] < pair[1]),
+            "사전순 차례로 이어 붙인다: {message}"
+        );
+        assert!(
+            at("stray0008").is_none(),
+            "아홉째부터는 개수로만 센다: {message}"
+        );
+        assert!(
+            at("stray0039").is_none(),
+            "삽입 순서(역순 첫 칸)가 아니라 사전순으로 고른다: {message}"
+        );
+        assert!(
+            message.contains("truncated"),
+            "이 조합에서 이름 상한도 함께 걸린다: {message}"
+        );
+    }
+
+    /// 잘린 조각을 `"본문…"` + 잘림 표시로 가른다 — 본문에 무엇이 들었나를 재려면 경계가 필요하다.
+    fn literal_and_body(rendered: &str) -> (&str, &str) {
+        let marker = rendered
+            .find("(truncated")
+            .expect("잘림 표시가 있어야 한다");
+        let literal = &rendered[..marker];
+        let body = literal
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .trim_end_matches('…');
+        (literal, body)
+    }
+
+    /// ★잘린 이름도 **닫힌 문자열 리터럴**이어야 한다★ — 이름 여럿을 이어 붙인 문구에서 따옴표 짝이
+    /// 어긋나면 `{:?}` 로 없애려던 애매함(칸 하나가 둘로 읽힘)이 그대로 돌아온다.
+    ///
+    /// ★재는 것은 셋이고, 셋 다 있어야 한다★: ① 리터럴 **크기**가 상한을 지키나(예산에서 여닫이 따옴표
+    /// 자리를 빼먹으면 여기서 걸린다) ② 본문에 **이스케이프 안 된 따옴표**가 없나(잘림 갈래에서 이스케이프를
+    /// 빼먹으면 여기서 걸린다 — 그래서 픽스처 이름이 따옴표를 품는다) ③ 이스케이프 중간에서 안 잘렸나.
+    /// 셋 중 하나라도 빠지면 이 함수의 옛 판본들이 실제로 낸 결함이 그대로 통과한다.
+    #[test]
+    fn a_truncated_name_is_still_a_closed_string_literal() {
+        let key = format!("a\"b{}", "c".repeat(300));
+        let rendered = quoted_input(&key);
+        let (literal, body) = literal_and_body(&rendered);
+
+        assert!(rendered.starts_with('"'), "여는 따옴표: {rendered}");
+        assert!(
+            rendered.contains("…\"(truncated"),
+            "닫는 따옴표가 잘림 표시 **앞**에 온다: {rendered}"
+        );
+        assert!(
+            literal.len() <= MAX_QUOTED_INPUT_BYTES,
+            "리터럴이 상한을 넘었다(따옴표·말줄임표 자리를 예산에서 안 뺐다): {} 바이트 — {rendered}",
+            literal.len()
+        );
+        assert!(
+            rendered.contains(&format!("input was {} bytes", key.len())),
+            "무엇을 센 수인지 밝힌다: {rendered}"
+        );
+
+        // ★본문의 따옴표는 **전부 이스케이프돼 있어야** 한다★ — 하나라도 날것이면 그 자리가 칸 경계로
+        //   읽힌다(개수만 세면 `\"` 도 한 개로 세어져 이 결함을 놓친다).
+        let mut escaped = false;
+        for ch in body.chars() {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => panic!("본문에 이스케이프 안 된 따옴표가 있다: {rendered}"),
+                _ => {}
+            }
+        }
+
+        // ★본문의 **마지막 이스케이프가 온전한지**를 본다★: `\u{1b}` 는 여섯 글자라 중간에서 잘릴 자리가
+        //   다섯이고, 그중 「`\` 바로 뒤」 하나만 역슬래시 홀짝으로 잡힌다. 나머지 넷(`\u`·`\u{`·`\u{1`·
+        //   `\u{1b`)은 홀짝 검사를 그대로 통과하므로, 마지막 `\` 부터 끝까지가 **닫힌 시퀀스**인지 본다.
+        let control = quoted_input(&"\u{1b}".repeat(200));
+        let (control_literal, control_body) = literal_and_body(&control);
+        if let Some(last) = control_body.rfind('\\') {
+            let tail = &control_body[last..];
+            let complete = match tail.chars().nth(1) {
+                // `\u{…}` 는 닫는 중괄호까지 있어야 한 글자를 뜻한다.
+                Some('u') => tail.contains('}'),
+                // 한 글자짜리 이스케이프(`\n`·`\\`·`\"` 등)는 그 한 글자가 붙어 있으면 온전하다.
+                Some(_) => true,
+                // 역슬래시로 끝났다 — 아무것도 안 이스케이프하는 조각이다.
+                None => false,
+            };
+            assert!(
+                complete,
+                "본문이 미완성 이스케이프로 끝났다(시퀀스 한가운데서 잘렸다): {control}"
+            );
+        }
+        assert!(
+            control_literal.len() <= MAX_QUOTED_INPUT_BYTES,
+            "제어문자 이름의 리터럴이 상한을 넘었다: {} 바이트 — {control}",
+            control_literal.len()
+        );
+        assert!(
+            control.contains("input was 200 bytes"),
+            "표기는 이스케이프된 것이고 수는 원본이라는 것을 라벨이 밝힌다: {control}"
+        );
+    }
+
+    /// ★상한은 입력 **종류**와도 무관해야 한다★: 이스케이프 전에 자르면 제어문자 한 글자가 여섯 바이트로
+    /// 부풀어, 같은 상한이 인쇄 가능 문자에는 128 B·제어문자에는 그 여섯 배로 달라진다 — 문서에 적은 숫자가
+    /// 그 순간 거짓이 된다.
+    #[test]
+    fn an_escape_heavy_key_obeys_the_same_bound_as_a_printable_one() {
+        let refusal_len = |key: String| {
+            let mut given = serde_json::Map::new();
+            given.insert(key, json!(1));
+            entrance_table()
+                .check_args("fixture.entrance", &serde_json::Value::Object(given))
+                .expect_err("선언에 없는 칸")
+                .message()
+                .len()
+        };
+
+        let printable = refusal_len("k".repeat(4096));
+        let escaped = refusal_len("\u{1b}".repeat(4096));
+
+        assert!(
+            escaped <= printable + 8,
+            "제어문자 이름이 인쇄 가능 이름보다 긴 문구를 만들었다: {printable} → {escaped} 바이트"
+        );
+    }
+
     /// ★핸들러가 돌기 전에 걸린다★ — 검문은 순수한 사전 판정이라 본문이 없어도, 본문이 터지는 것이어도
     /// 같은 답을 낸다(터지는 핸들러가 그것을 단언한다).
     #[test]
@@ -749,9 +1030,12 @@ mod tests {
             .check_args("fixture.entrance", &serde_json::Value::Object(given))
             .expect_err("선언에 없는 칸");
 
+        // 이름 하나짜리 문구의 실측은 ~230 바이트다(인용 상한 128 + 잘림 표시 + 선언 집합) — 아래 숫자는
+        //   그 실측에 여유를 준 값이지 계약이 아니다. 계약은 「입력 크기와 무관」이고
+        //   `the_refusal_message_does_not_grow_with_the_body` 가 그것을 잰다.
         assert!(
             err.message().len() < 512,
-            "문구가 입력만큼 커지지 않는다: {} 바이트",
+            "1 MiB 이름 하나가 그만한 문구를 만들었다: {} 바이트",
             err.message().len()
         );
         assert!(

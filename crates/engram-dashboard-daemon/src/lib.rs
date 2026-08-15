@@ -479,7 +479,6 @@ pub async fn run() -> Result<(), i32> {
         control_registry.clone(),
         manager_slot.clone(),
         messaging_slot.clone(),
-        roster_broadcast_slot.clone(),
         command_table_slot.clone(),
     )
     .await
@@ -520,9 +519,9 @@ pub async fn run() -> Result<(), i32> {
     //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
     //   보여 준다(에러도 로그도 없다).
     roster_broadcast_slot.set(wiring.roster_broadcast());
-    // ★배선 0(ADR-0134)★: 표를 조립해 슬롯에 꽂기만 한다 — 제어 동사의 실제 입구는 여전히
-    //   `/control/agent` 의 동사 match 다. ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은
-    //   팬아웃 값이 아니라 슬롯이라 통지 시점에 읽는다(`control::commands::make_daemon_table`).
+    // ★제어 동사의 실입구가 이 표다(ADR-0134)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
+    //   ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은 팬아웃 값이 아니라 슬롯이라 통지
+    //   시점에 읽는다(`control::commands::make_daemon_table`).
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(
         manager.clone(),
         roster_broadcast_slot.clone(),

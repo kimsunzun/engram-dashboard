@@ -253,10 +253,10 @@ pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
 
 /// 제어 응답이 싣는 **에이전트 상태 축**(살아 있음·잠듦·없음)의 wire 표기.
 ///
-/// ★왜 core 에 있나★: 이 문자열의 생산자(데몬 `control/agent.rs`)와 소비자(CLI 의 응답 판정기)가 **다른
+/// ★왜 core 에 있나★: 이 문자열의 생산자(`agent::commands` 의 표)와 소비자(CLI 의 응답 판정기)가 **다른
 ///   crate** 라, 각자 리터럴을 적으면 한쪽만 바뀌어도 아무도 못 본다 — 증상은 정상 응답이 "읽을 수 없는
 ///   shape"(exit 2)로 튀는 거짓 경보다. 한 값을 양쪽이 본다.
-/// ★"없음" 에 해당하는 값이 없는 것은 의도다★ — 부재는 상태값이 아니라 반려 코드(`AGENT_NOT_FOUND`)로
+/// ★"없음" 에 해당하는 값이 없는 것은 의도다★ — 부재는 상태값이 아니라 반려 코드(`NOT_FOUND`)로
 ///   표현된다. 메시지 결말 어휘(`delivered`/`pending`/`failed`)와 섞지 않는다(ADR-0116).
 // ADR-0132
 pub const AGENT_STATE_LIVE: &str = "live";

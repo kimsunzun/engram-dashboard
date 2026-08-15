@@ -21,7 +21,6 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
-    RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -98,8 +97,7 @@ async fn wire(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
-        // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
-        Arc::new(RosterBroadcastSlot::new()),
+        // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
         Arc::new(CommandTableSlot::new()),
     )
     .await

@@ -19,6 +19,7 @@ use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfi
 use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
 };
+use engram_dashboard_daemon::control::commands::make_daemon_table;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -98,13 +99,14 @@ fn is_mail_rejection(status: u16, body: &str) -> bool {
 async fn fixture(tag: &str) -> Fixture {
     let registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
+    let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
+    let command_slot = Arc::new(CommandTableSlot::new());
     let handle = start_mcp_server(
         registry.clone(),
         manager_slot.clone(),
         // ★비워 둔다★: 우편 핸들러가 503 을 내야 "게이트를 통과했다" 가 거절과 구별된다.
         Arc::new(MessagingSlot::new()),
-        Arc::new(RosterBroadcastSlot::new()),
-        Arc::new(CommandTableSlot::new()),
+        command_slot.clone(),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -124,7 +126,10 @@ async fn fixture(tag: &str) -> Fixture {
         )),
         control,
     ));
-    manager_slot.set(manager);
+    manager_slot.set(manager.clone());
+    // ★제어 라우트는 표를 태운다(ADR-0134)★: 여기를 비워 두면 그 라우트가 503 을 내, 아래 「제어는 전원
+    //   개방」 단언이 게이트가 아니라 배선 부재를 재게 된다.
+    command_slot.set(Arc::new(make_daemon_table(manager, broadcast_slot)));
 
     // ★판정을 손으로 심는다 — 그래서 이 픽스처만으로는 부족하다★: `provision` 이 판정을 잘못 파생해도
     //   여기 심은 값은 그대로라 전부 초록으로 남는다. 그 축은 아래
@@ -282,7 +287,6 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
-        Arc::new(RosterBroadcastSlot::new()),
         Arc::new(CommandTableSlot::new()),
     )
     .await

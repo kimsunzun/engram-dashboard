@@ -602,7 +602,9 @@ pub struct CommandError {
 
 `mail.*` 선언(`types.rs:212` 3동사) + `make_table` · 주인 명부(tombstone 포함) · `RegisterCommands`/`UpdateCommands`/`ListCommands`를 `connection_core.rs:582` dispatch에 additive arm으로 추가. `engram` CLI(`crates/engram-dashboard-daemon/src/bin/engram.rs`)가 이름으로 부르게 바꾸고, 문자열 패턴매칭 오류 합성(S17 TRD `trd.md:69`)을 타입드 오류로 교체한다.
 - 에이전트 문(HTTP `/control`)의 5동사 match(`crates/engram-dashboard-daemon/src/control/agent.rs:222-236`)가 **지금의 벽**이다 — 이 Step이 그 match를 표 조회로 바꾼다.
+  - ★착지(2026-08-16, 슬라이스 3)★ **그 match는 삭제됐다 — 위 줄번호로 찾지 말 것.** 현행 입구는 `handle_agent`(`crates/engram-dashboard-daemon/src/control/agent.rs`) 하나이고 `{verb}` → `agent.<verb>` 이름 조립 → `contains` → `check_args`(ADR-0136) → `call` 순으로 간다.
 - **검증:** 데몬 단위 테스트(§7) · `engram agent list`/`spawn`/`new`/`rename`/`move` 동작 불변.
+  - ★정정(2026-08-16, 슬라이스 3 착지)★ **「동작 불변」은 wire 층까지 참이 아니다.** 불변인 것은 **`engram agent <verb>`의 종료코드와 사용자가 보는 결말**이고, 봉투 **구조**(`{status,code,hint}` · `status:"error"`)와 hint 꼬리에 칠 수 있는 명령이 붙는다는 성질도 그대로다. **의도적으로 바뀐 것 둘은 사용자 승인분이다:** ① 성공 payload가 중첩(`{"agent":{id,name,state}}`)에서 표의 평평한 Ok 구조체(`{agent_id,name,state,created}` 등)로 — 평평한 모양 독해는 슬라이스 2가 CLI에 미리 깔았고 중첩 독해 제거는 슬라이스 4다 ② 오류 `code` 어휘가 도메인 문자열에서 도구 crate의 타입드 `ErrorCode` wire 문자열로(`AGENT_NOT_FOUND`→`NOT_FOUND` · `AGENT_AMBIGUOUS`·`MOVE_REJECTED`·`ROSTER_FULL`·`NAME_SPACE_EXHAUSTED`→`CONFLICT` · `SPAWN_FAILED`→`INTERNAL` · `INVALID_AGENT_ARGS`→`INVALID_ARGUMENT` · 모르는 동사→`UNKNOWN_COMMAND`). **이 줄을 근거로 문을 중첩 모양·도메인 코드로 되돌리지 말 것.**
 
 ### Step 3 — 셸: 인바운드 수신기 + 공유 적용 서비스 + 자기 선언
 

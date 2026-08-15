@@ -9,6 +9,8 @@
 
 지금의 벽은 데몬 에이전트 문(HTTP `/control`)의 5동사 손 match다 — `crates/engram-dashboard-daemon/src/control/agent.rs:222-239`(5동사 arm `:223-235`). 새 동사는 이 match를 고쳐야 생긴다.
 
+**[포인터 정정 2026-08-16 — 결정 불변]** 그 손 match는 **S20 Step 2 슬라이스 3에서 삭제됐다** — 위 줄번호로 찾지 말 것. 지금 그 자리는 `{verb}`로 명령 이름을 만들어 표에서 찾아 부르는 어댑터 하나다(`crates/engram-dashboard-daemon/src/control/agent.rs`의 `handle_agent`). 이 ADR이 겨눈 벽이 실제로 사라진 것이고, 결정 본문은 그대로다.
+
 이 결정은 ADR-0022(방향만 고정한 제안)의 구체화이고, ADR-0055가 세운 프론트 레지스트리 골격 위에 선다. 설계 정본은 `docs/process/S20-command-bus/trd.md`이고 여기는 그 문서가 확정한 **형태**만 박제한다.
 
 ## 결정
