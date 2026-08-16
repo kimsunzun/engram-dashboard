@@ -121,15 +121,27 @@ function withCandidateDiagnostics(headerLines, found) {
 // ★raw TCP 로 원인을 보충한다★: WHATWG ErrorEvent(.error, undici 기반) 는 message 가 비어 있어(실측,
 //   node v24) 아무 정보가 없다 — 그대로 문자열 결합하면 '[object ErrorEvent]' 로만 찍힌다(실측 증상).
 //   이미 실패가 확정된 뒤라, 같은 host:port 로 raw socket 을 한 번 더 열어 OS 에러(code/message, 예:
-//   ECONNREFUSED)를 얻는다. 성공 경로는 이 함수를 안 타므로 지연이 없다.
+//   ECONNREFUSED)를 얻는다. 성공 경로는 절대 안 탄다 — connect() 가 open 직후 onerror 를 떼어낸다(아래).
+// 반환 kind 셋: 'connected'(TCP 는 열렸다 — 실패는 WS 핸드셰이크 단계) · 'error'(OS 에러, text 에 담김) ·
+//   'timeout'(그 무엇도 안 왔다). 예전엔 성공·타임아웃이 둘 다 null 로 뭉개져 호출부가 못 갈랐다.
 function probeTcpReason(host, port, ms = 800) {
   return new Promise((resolve) => {
     let done = false
-    const finish = (text) => { if (done) return; done = true; sock.destroy(); resolve(text) }
-    const sock = net.createConnection({ host, port })
-    sock.once('connect', () => finish(null)) // 소켓은 열렸다 — 실패는 WS 핸드셰이크 단계였다는 뜻
-    sock.once('error', (e) => finish(e.code ? `${e.message} (${e.code})` : e.message))
-    setTimeout(() => finish(null), ms)
+    let sock
+    const finish = (result) => { if (done) return; done = true; sock?.destroy(); resolve(result) }
+    try {
+      sock = net.createConnection({ host, port })
+    } catch (e) {
+      // 기형 host(JSON 은 파싱됐지만 값이 이상 — 예: "host:123")는 net.createConnection 이 비동기
+      // 'error' 대신 여기서 동기로 던진다. 못 잡으면 이 executor 의 throw 가 그대로 promise reject 로
+      // 번져 describeWsError → connect() 의 onerror(비동기 함수) 안에서 죽고, 바깥 auth 프라미스가
+      // 영영 안 정착한다(무한 대기 → 잘못된 종료).
+      finish({ kind: 'error', text: e.code ? `${e.message} (${e.code})` : e.message })
+      return
+    }
+    sock.once('connect', () => finish({ kind: 'connected' }))
+    sock.once('error', (e) => finish({ kind: 'error', text: e.code ? `${e.message} (${e.code})` : e.message }))
+    setTimeout(() => finish({ kind: 'timeout' }), ms)
   })
 }
 
@@ -139,7 +151,9 @@ async function describeWsError(e, host, port) {
   const code = err?.code
   if (msg) return code ? `${msg} (${code})` : msg
   const probed = await probeTcpReason(host, port)
-  return probed || String(e)
+  if (probed.kind === 'connected') return 'TCP 연결은 됐지만 WebSocket 핸드셰이크가 거부됨(Origin 검사·HTTP 4xx 등 의심 — ErrorEvent 는 그 이상을 안 줌)'
+  if (probed.kind === 'timeout') return `TCP 연결도 응답 없음(${host}:${port})`
+  return probed.text || String(e)
 }
 
 const rid = () => crypto.randomUUID()
@@ -172,13 +186,23 @@ async function connect() {
   await new Promise((res, rej) => {
     ws.onopen = () => res()
     ws.onerror = async (e) => {
-      const reason = await describeWsError(e, info.host, info.port)
+      let reason
+      try {
+        reason = await describeWsError(e, info.host, info.port)
+      } catch (probeErr) {
+        // 진단 경로 자체가 무엇을 던지든(동기 throw 포함) 이 프라미스는 반드시 reject 로 정착해야
+        // 한다 — 안 그러면 onerror 가 안에서 죽어 connect() 가 영영 안 끝난다.
+        reason = `${String(e)} (원인 진단 실패: ${probeErr.message})`
+      }
       rej(new Error(withCandidateDiagnostics(
         [`daemon 연결 실패: ${endpoint}`, `원인: ${reason}`],
         chosen,
       )))
     }
   })
+  // ★open 이후 onerror 를 떼어낸다★: 안 그러면 나중 소켓 리셋이 이 핸들러를 다시 태워 이미 정착된 위
+  //   프라미스에 헛rej 하면서 probeTcpReason(최대 800ms)까지 또 돌아 Hello 대기만 지연시킨다.
+  ws.onerror = null
   // 첫 프레임 = Auth. 데몬은 1s 안에 Auth 안 오면 끊는다.
   ws.send(JSON.stringify({ Auth: { token: info.token, protocol_version: info.protocol_version } }))
   const waitFor = (match, ms = 5000) => new Promise((res, rej) => {

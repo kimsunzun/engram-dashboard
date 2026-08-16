@@ -5,7 +5,7 @@
 //   node scripts/cdp.mjs info               타깃 목록
 // 환경: CDP_PORT(기본 9223), CDP_MATCH(url·title 부분 매치용 정규식 문자열).
 //   CDP_MATCH 미지정 = 기존 동작(메인, popup/tree 제외). 매치 0건 = exit 1 + 타깃 목록 출력(폴백 금지).
-//   매치 다건 = list 순서상 첫 매치를 선택하고 나머지도 stderr에 표시.
+//   매치 다건 = list 순서상 첫 매치를 선택하고 나머지도 stderr에 표시. 정규식 자체가 무효해도 동일 처리.
 import fs from 'node:fs';
 
 const PORT = process.env.CDP_PORT || '9223';
@@ -66,7 +66,16 @@ if (cmd === 'info') { console.log(JSON.stringify(list.map(t => ({ type: t.type, 
 const match = process.env.CDP_MATCH;
 let target;
 if (match) {
-  const matches = pickByMatch(list, match);
+  let matches;
+  try {
+    matches = pickByMatch(list, match);
+  } catch (e) {
+    // new RegExp(pattern) 이 무효한 CDP_MATCH 에 던지는 SyntaxError — 헤더가 약속한 대로(메시지 +
+    // 타깃 목록 + exit 1) 처리한다. raw stack trace 로 새지 않게.
+    console.error(`CDP_MATCH="${match}" 정규식 무효: ${e.message}. 사용 가능한 타깃:`);
+    console.error(JSON.stringify(list.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2));
+    process.exit(1);
+  }
   if (matches.length === 0) {
     console.error(`CDP_MATCH="${match}" 매치 없음. 사용 가능한 타깃:`);
     console.error(JSON.stringify(list.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2));
