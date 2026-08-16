@@ -41,7 +41,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_protocol::{
     AgentCommand, AgentEvent, AgentInfo as WireAgentInfo, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
+    ClaudeOutputFormat as WireClaudeOutputFormat, CommandListEntry, ControlCaps as WireControlCaps,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
     OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
     RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
@@ -51,7 +51,9 @@ use engram_dashboard_protocol::{
 
 use tokio::sync::watch;
 
+use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
+use engram_dashboard_command::{CommandError, OwnerToken};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 
@@ -118,6 +120,8 @@ pub struct ConnectionSession {
     pub subs: Arc<Mutex<HashMap<AgentId, SinkId>>>,
     /// 이 연결이 등록한 (agent_id, viewport_id) 들 — cleanup 에서 viewport 협상 맵 정리.
     pub owned_viewports: Arc<Mutex<Vec<(AgentId, String)>>>,
+    /// 남의 토큰 형식을 적은 등록을 이 연결에서 이미 한 번 남겼나(`note_claimed_owner`).
+    claimed_owner_warned: AtomicBool,
 }
 
 impl ConnectionSession {
@@ -126,7 +130,27 @@ impl ConnectionSession {
             conn_id,
             subs: Arc::new(Mutex::new(HashMap::new())),
             owned_viewports: Arc::new(Mutex::new(Vec::new())),
+            claimed_owner_warned: AtomicBool::new(false),
         }
+    }
+
+    /// 이 연결이 명령 명부에서 갖는 주인 토큰.
+    ///
+    /// ★연결 id 에서 **파생**한다 — 등록 패킷의 `owner` 칸을 신뢰하지 않는다★: 그 칸을 그대로 쓰면 아무
+    /// 연결이나 남의 토큰을 적어 그 이름들을 가져갈 수 있다(등록은 **살아 있는** 주인의 이름도 인수인계로
+    /// 덮는다 — `Roster::register`). 신원이 봉투가 아니라 **그 봉투가 온 연결**이라는 계약은 이미 서 있고
+    /// (TRD §4-⑧ · `CommandEnvelope::owner` 주석), TRD §3-7 은 데몬이 어느 쪽을 쓰는지를 열어 두었다.
+    /// ★연결마다 새 토큰이 난다★ — 재연결은 새 `ConnId` 를 받으므로 옛 연결의 자취를 물려받지 않고,
+    /// 그 인수인계는 명부의 이름 last-wins 규칙이 한다.
+    /// ★이 토큰은 wire 에 나가지 않는다★ — 그래서 클라이언트는 자기 토큰을 알 길이 없고, 등록 패킷의
+    /// `owner` 칸이 데몬의 파생값과 다른 것은 위반이 아니라 **정상**이다(그래서 거절이 아니다 —
+    /// `note_claimed_owner`).
+    ///
+    /// 파생 자체는 [`CommandRoster::owner_of`] 하나뿐이다 — 명부를 건드리는 쪽과 조회하는 쪽이 같은 값을
+    /// 봐야 하므로 형식을 두 곳에 두지 않는다.
+    // ADR-0134
+    pub fn owner_token(&self) -> OwnerToken {
+        CommandRoster::owner_of(self.conn_id)
     }
 }
 
@@ -541,6 +565,8 @@ pub struct ConnectionCore {
     ///   정리를 건너뛰어도 정리할 것이 없다.
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
+    // ADR-0134
+    commands: CommandRoster,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -551,6 +577,7 @@ impl ConnectionCore {
         fanout: Arc<dyn FrameFanout>,
         control_registry: Arc<ControlRegistry>,
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
+        commands: CommandRoster,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -559,12 +586,17 @@ impl ConnectionCore {
             fanout,
             control_registry,
             messaging,
+            commands,
             shutdown_tx,
         }
     }
 
     pub fn multiview(&self) -> &MultiViewState {
         &self.multiview
+    }
+
+    pub fn commands(&self) -> &CommandRoster {
+        &self.commands
     }
 
     pub fn fanout(&self) -> &dyn FrameFanout {
@@ -603,6 +635,37 @@ impl ConnectionCore {
                 },
             };
             let _ = sink.enqueue(Outbound::event(ev));
+        }
+
+        /// 명부 조작의 실패를 답장으로 만든다 — **코드까지 실어 보낸다**.
+        ///
+        /// `Error` 이벤트엔 타입드 칸이 없어 `CommandError` 의 Display(`CODE: 문구`)로 나간다. 코드가
+        /// 빠지면 호출자는 문구를 패턴매칭해 재시도 여부를 정해야 하고, 그 취약함이 타입드 오류 모델이
+        /// 없애려던 것이다(TRD §4-⑦). 실패를 답장 없이 흘리는 것은 더 나쁘다 — 보낸 쪽은 `request_id` 의
+        /// 답을 기다리므로 연결이 끊길 때까지 안 깨는 pending 이 된다.
+        ///
+        /// ★거절은 서버에도 남긴다★: 이름 도둑질을 막은 그물이 발동한 자리인데, 답장만으로는 **그 짓을 한
+        /// 쪽**에만 보이고 운영자에겐 아무 흔적이 없다. 정상 경로는 조용하다(등록은 연결마다 한 번이라
+        /// 거절만 올려도 시끄럽지 않다).
+        /// ★문구는 클라이언트 문자열을 인용한다★ — 명부가 길이를 이미 묶어 두지만(`MAX_NAME_BYTES`)
+        /// 모양은 안 묶으므로 `sanitize_for_log` 를 거쳐 나간다(거기 적힌 위조 항목 문제).
+        fn reply_roster(
+            sink: &dyn OutboundSink,
+            conn_id: ConnId,
+            verb: &'static str,
+            request_id: RequestId,
+            result: Result<(), CommandError>,
+        ) {
+            if let Err(e) = &result {
+                tracing::warn!(
+                    conn = conn_id,
+                    verb,
+                    code = %e.code(),
+                    "명령 명부 거절: {}",
+                    sanitize_for_log(e.message())
+                );
+            }
+            reply(sink, request_id, result.map_err(|e| e.to_string()));
         }
 
         match cmd {
@@ -1029,21 +1092,73 @@ impl ConnectionCore {
                 reply(sink, request_id, Ok(()));
             }
 
-            // ── 명령 버스 등록 wire — 형태만 열려 있고 명부가 아직 없다(ADR-0134/0135, TRD §6 Step 2) ──
+            // ── 명령 버스 등록 wire(ADR-0134/0135, TRD §3-7) ──────────────────────────────
             //
-            // ★조용히 흘리지 않고 오류로 답하는 이유★: 셋 다 request_id 를 실어 보낸 쪽이 답장을 기다린다.
-            //   여기서 no-op 하면 그 왕복은 연결이 끊길 때까지 안 깨는 pending 이 된다.
             // ★`_ =>` 로 묶지 않는 이유★: 이 match 가 exhaustive 라서 variant 를 늘릴 때마다 여기가
             //   컴파일 에러로 걸린다. 그게 「배선을 빠뜨리지 않았나」를 묻는 유일한 지점이라 catch-all 로
             //   덮으면 다음 variant 는 아무 신호 없이 조용히 무시된다.
-            AgentCommand::RegisterCommands { request_id, .. }
-            | AgentCommand::UpdateCommands { request_id, .. }
-            | AgentCommand::ListCommands { request_id } => {
-                reply(
-                    sink,
-                    request_id,
-                    Err("command roster not wired yet (S20 Step 2)".to_string()),
+            AgentCommand::RegisterCommands {
+                owner: claimed,
+                decls,
+                catalog_version,
+                request_id,
+            } => {
+                note_claimed_owner(session, &claimed);
+                // ★`catalog_version` 으로 거절하지 않는다★: 세대 번호는 crate 마다라 받는 쪽이 자기
+                //   번호와 비교해 뜻을 부여하면 틀린다 — 진단용이다(TRD §4-①).
+                tracing::debug!(
+                    conn = conn_id,
+                    catalog_version,
+                    names = decls.len(),
+                    "명령 등록"
                 );
+                reply_roster(
+                    sink,
+                    conn_id,
+                    "register",
+                    request_id,
+                    self.commands.register(conn_id, decls),
+                );
+            }
+
+            AgentCommand::UpdateCommands {
+                owner: claimed,
+                added,
+                removed,
+                request_id,
+            } => {
+                note_claimed_owner(session, &claimed);
+                tracing::debug!(
+                    conn = conn_id,
+                    added = added.len(),
+                    removed = removed.len(),
+                    "명령 차분"
+                );
+                reply_roster(
+                    sink,
+                    conn_id,
+                    "update",
+                    request_id,
+                    self.commands.update(conn_id, added, removed),
+                );
+            }
+
+            AgentCommand::ListCommands { request_id } => {
+                // 주인 토큰은 안 내린다 — 선언처가 주인이라 등급 칸이 없어졌다(TRD §3-7 개정 ㉠).
+                let entries: Vec<CommandListEntry> = self
+                    .commands
+                    .entries()
+                    .into_iter()
+                    .map(|entry| CommandListEntry {
+                        name: entry.name,
+                        help: entry.help,
+                        available: entry.available,
+                    })
+                    .collect();
+                let _ = sink.enqueue(Outbound::event(AgentEvent::CommandList {
+                    request_id,
+                    entries,
+                }));
             }
         }
         DispatchFlow::Continue
@@ -1130,6 +1245,74 @@ impl ConnectionCore {
             epoch: current_epoch,
         }));
     }
+}
+
+/// 등록 패킷이 적어 온 주인 토큰은 **광고**일 뿐 권한이 아니다 — 명부의 주인은 언제나
+/// `ConnectionSession::owner_token` 이다.
+///
+/// ★거절하지 않는 이유★: 연결 id 는 wire 에 나가지 않아 클라이언트가 자기 토큰을 알 수 없다
+/// (`owner_token` 주석). 같지 않다고 거절하면 정상 등록이 **채울 수 없는 칸** 때문에 전부 막힌다.
+/// ★그래서 어긋남 자체는 기본 채널로 올리지 않는다★: 위 이유로 **정상 등록도 어긋난다.** 등록마다
+/// warn 을 한 줄씩 쌓으면 기본 레벨(warn)에서 진짜 경고가 그 밑에 묻힌다.
+/// ★한 갈래만 올린다 — **우리 토큰 형식**을 적어 온 경우★: 그 형식은 데몬 안에서만 나므로(`conn-<id>`),
+/// 남의 연결 앞으로 이름을 얹으려는 시도가 아니고서는 클라이언트가 그 모양을 적을 이유가 없다.
+/// ★빈 칸은 아무것도 남기지 않는다★: `owner` 는 필수 칸이라 빠질 수는 없고, 빈 문자열은 「채울 값을
+/// 모른다」는 뜻이다 — 주장이 아니므로 보고할 것도 없다.
+/// ★그 갈래도 연결당 한 줄뿐이다★: 패킷은 클라이언트가 원하는 만큼 밀 수 있고 그 속도는 우리 손에
+/// 없다. 같은 연결의 두 번째 줄은 운영자에게 새 사실을 주지 않으면서 기본 채널만 채운다.
+/// ★한 줄 제한을 debug 갈래와 **같은 표식으로 묶지 않는다**★ — 묶으면 무해한 패킷 하나를 먼저 보내는
+/// 것만으로 뒤따르는 경고를 잠글 수 있다.
+/// ★찍는 길이를 자른다★: 이 칸은 검증 안 된 클라이언트 문자열이고 프레임 크기 상한이 없어, 통째로
+/// 찍으면 프레임 하나가 메가바이트짜리 로그 줄이 된다.
+// ADR-0134
+fn note_claimed_owner(session: &ConnectionSession, claimed: &OwnerToken) {
+    if claimed.as_str().is_empty() || *claimed == session.owner_token() {
+        return;
+    }
+    let conn_id = session.conn_id;
+    if claimed
+        .as_str()
+        .starts_with(CommandRoster::OWNER_TOKEN_PREFIX)
+    {
+        if !session.claimed_owner_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                conn = conn_id,
+                claimed = %sanitize_for_log(claimed.as_str()),
+                "다른 연결의 주인 토큰을 적은 등록 — 무시하고 이 연결의 토큰으로 얹는다(이 연결에서 한 번만 남긴다)"
+            );
+        }
+    } else {
+        tracing::debug!(
+            conn = conn_id,
+            claimed = %sanitize_for_log(claimed.as_str()),
+            "등록 패킷의 주인 토큰은 쓰지 않는다"
+        );
+    }
+}
+
+/// 로그에 실을 **클라이언트가 준 문자열**을 다듬는다 — 길이와 **모양** 둘 다.
+///
+/// ★길이★: wire 에 프레임 크기 상한이 없어 자르지 않으면 로그 줄 하나가 프레임만큼 커진다. 문자
+/// 경계로 자른다(바이트로 자르면 멀티바이트가 쪼개진다).
+/// ★모양★: 제어문자를 이스케이프한다. 로그 레이어는 Display 값을 **그대로** 쓰므로, 이름에 개행을 넣은
+/// 등록 하나가 줄을 둘로 쪼개고 뒤 줄이 우리가 찍은 것처럼 보이는 **위조 항목**이 된다(타임스탬프·레벨을
+/// 흉내 낸 문자열을 그 자리에 앉힐 수 있다).
+/// 알려진 범위: `char::is_control`(C0/C1)까지다 — U+2028 같은 유니코드 줄 구분자는 그대로 나가고, 지금
+/// 쓰는 fmt 레이어는 그것으로 줄을 쪼개지 않는다.
+fn sanitize_for_log(text: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let mut out = String::new();
+    for ch in text.chars().take(MAX_CHARS) {
+        if ch.is_control() {
+            out.extend(ch.escape_debug());
+        } else {
+            out.push(ch);
+        }
+    }
+    if text.chars().nth(MAX_CHARS).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// 팬아웃 포트가 논블록 구현을 요구하므로 pump/cleanup 등 어느 컨텍스트에서 불려도 안전하다.
@@ -1334,6 +1517,7 @@ mod tests {
             fanout,
             control_registry,
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
+            CommandRoster::new(),
             shutdown_tx,
         );
         (core, shutdown_rx)
@@ -1636,6 +1820,277 @@ mod tests {
             [AgentEvent::AgentList { request_id, .. }] => assert_eq!(*request_id, req),
             other => panic!("AgentList 기대: {other:?}"),
         }
+    }
+
+    // ── 명령 버스 등록 wire(ADR-0134/0135 · TRD §3-7) ────────────────────────────
+    use engram_dashboard_command::{CommandDecl, ErrorCode, Roster};
+
+    fn decl(name: &str) -> CommandDecl {
+        CommandDecl {
+            name: name.to_string(),
+            help: format!("{{\"name\":\"{name}\"}}"),
+        }
+    }
+
+    /// ★주인 칸에 파생값이 **아닌** 토큰을 일부러 싣는다★ — 명부의 주인이 패킷이 아니라 연결에서
+    /// 난다는 것이 이 wire 의 계약이다(`ConnectionSession::owner_token`).
+    fn register(decls: Vec<CommandDecl>, request_id: RequestId) -> AgentCommand {
+        AgentCommand::RegisterCommands {
+            owner: OwnerToken::new("whatever-the-client-thinks"),
+            decls,
+            catalog_version: 7,
+            request_id,
+        }
+    }
+
+    fn update(added: Vec<CommandDecl>, removed: Vec<&str>, request_id: RequestId) -> AgentCommand {
+        AgentCommand::UpdateCommands {
+            owner: OwnerToken::new("whatever-the-client-thinks"),
+            added,
+            removed: removed.into_iter().map(str::to_string).collect(),
+            request_id,
+        }
+    }
+
+    /// 연결이 선 상태의 세션 — 명부는 **붙어 있는 연결**의 등록만 받으므로, 명단에 올리는 이 한 줄이
+    /// 운영의 `on_connect` 자리다(`CommandRoster::attach`).
+    fn attached(core: &ConnectionCore, conn_id: ConnId) -> ConnectionSession {
+        core.commands().attach(conn_id);
+        ConnectionSession::new(conn_id)
+    }
+
+    #[tokio::test]
+    async fn register_commands_acks_and_fills_the_roster() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        let req = rid();
+
+        core.dispatch(register(vec![decl("tab.create")], req), &session, &mock)
+            .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+            other => panic!("등록은 Ack 로 답한다: {other:?}"),
+        }
+        let entries = core.commands().entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "tab.create");
+        assert!(entries[0].available);
+        assert_eq!(
+            entries[0].owner,
+            session.owner_token(),
+            "주인은 연결에서 파생한다 — 패킷이 적어 온 토큰이 아니다"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_commands_acks_and_applies_the_delta() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(
+            register(vec![decl("tab.create"), decl("tab.close")], rid()),
+            &session,
+            &mock,
+        )
+        .await;
+
+        let req = rid();
+        core.dispatch(
+            update(vec![decl("tab.split")], vec!["tab.close"], req),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [_, AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+            other => panic!("차분도 Ack 로 답한다: {other:?}"),
+        }
+        let available: Vec<(String, bool)> = core
+            .commands()
+            .entries()
+            .into_iter()
+            .map(|e| (e.name, e.available))
+            .collect();
+        assert_eq!(
+            available,
+            vec![
+                ("tab.close".to_string(), false),
+                ("tab.create".to_string(), true),
+                ("tab.split".to_string(), true),
+            ],
+            "내린 이름은 자취로 남고(TRD §4-②) 차분에 안 실린 이름은 그대로다"
+        );
+    }
+
+    /// ★`help` 는 데몬에게 불투명 문자열 한 칸이다★ — JSON 이 아닌 값을 넣어도 등록·조회가 그대로
+    /// 성공해야 한다. 데몬이 파싱·검증을 끼우면 여기서 깨진다(TRD §3-7 하드 제약 · §7 seam 표).
+    #[tokio::test]
+    async fn list_commands_returns_the_roster_projection_with_the_help_bytes_intact() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        let opaque = "not json at all — 임의의 바이트 {[(";
+        core.dispatch(
+            register(
+                vec![CommandDecl {
+                    name: "tab.create".to_string(),
+                    help: opaque.to_string(),
+                }],
+                rid(),
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        let req = rid();
+        core.dispatch(
+            AgentCommand::ListCommands { request_id: req },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [_, AgentEvent::CommandList {
+                request_id,
+                entries,
+            }] => {
+                assert_eq!(*request_id, req);
+                assert_eq!(
+                    entries,
+                    &vec![CommandListEntry {
+                        name: "tab.create".to_string(),
+                        help: opaque.to_string(),
+                        available: true,
+                    }]
+                );
+            }
+            other => panic!("조회는 CommandList 로 답한다: {other:?}"),
+        }
+    }
+
+    /// 정리 뒤에 내려앉는 등록(겹침의 근거 = `CommandRoster` 헤더). 갈래별 단언은 `command_roster` 쪽에
+    /// 있고, **여기서 보는 것은 dispatch 가 그 판정에 연결 id 를 넘기는지 하나**다 — 안 넘기면 이 반려가
+    /// 아예 서지 않는다.
+    #[tokio::test]
+    async fn a_registration_dispatched_after_the_disconnect_is_refused() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.commands().detach(1);
+        let req = rid();
+
+        core.dispatch(register(vec![decl("tab.create")], req), &session, &mock)
+            .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error {
+                request_id,
+                message,
+            }] => {
+                assert_eq!(*request_id, Some(req));
+                assert!(
+                    message.starts_with(ErrorCode::Conflict.as_str()),
+                    "끊긴 연결의 등록은 명부 **상태** 거절이다: {message}"
+                );
+            }
+            other => panic!("거절은 Error 로 답한다: {other:?}"),
+        }
+        assert!(
+            core.commands().entries().is_empty(),
+            "이름이 하나도 얹히면 안 된다"
+        );
+    }
+
+    /// ★실패를 삼키지 않는다 — 코드까지 실어 보낸다★: 코드가 없으면 부르는 쪽이 문구를 패턴매칭해
+    /// 재시도 여부를 정해야 한다(TRD §4-⑦).
+    #[tokio::test]
+    async fn a_refused_registration_replies_with_the_error_code() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        let req = rid();
+        let too_long = CommandDecl {
+            name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
+            help: "{}".to_string(),
+        };
+
+        core.dispatch(register(vec![too_long], req), &session, &mock)
+            .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error {
+                request_id,
+                message,
+            }] => {
+                assert_eq!(*request_id, Some(req));
+                assert!(
+                    message.starts_with(ErrorCode::InvalidArgument.as_str()),
+                    "코드가 문구 앞에 실린다: {message}"
+                );
+            }
+            other => panic!("거절은 Error 로 답한다: {other:?}"),
+        }
+        assert!(
+            core.commands().entries().is_empty(),
+            "실패한 등록은 명부를 건드리지 않는다"
+        );
+    }
+
+    /// 연결마다 주인이 갈리므로 남의 산 등록은 못 가져간다 — 두 세션이 **같은 명부**를 본다는 것도 함께
+    /// 단언한다(공유가 끊기면 conn 2 는 빈 명부를 보고 성공한다).
+    #[tokio::test]
+    async fn an_update_from_another_connection_cannot_take_a_live_name() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let first = attached(&core, 1);
+        let second = attached(&core, 2);
+        let mock = MockOutboundSink::new(tx.clone());
+        core.dispatch(register(vec![decl("tab.create")], rid()), &first, &mock)
+            .await;
+
+        let intruder = MockOutboundSink::new(tx);
+        let req = rid();
+        core.dispatch(
+            update(vec![decl("tab.create")], vec![], req),
+            &second,
+            &intruder,
+        )
+        .await;
+
+        match intruder.events().as_slice() {
+            [AgentEvent::Error {
+                request_id,
+                message,
+            }] => {
+                assert_eq!(*request_id, Some(req));
+                assert!(
+                    message.starts_with(ErrorCode::Conflict.as_str()),
+                    "산 남의 등록을 뺏는 것은 명부 **상태** 거절이다: {message}"
+                );
+            }
+            other => panic!("거절은 Error 로 답한다: {other:?}"),
+        }
+        let entries = core.commands().entries();
+        let kept = &entries[0];
+        assert!(
+            kept.available,
+            "거절이 남의 이름을 자취로 내려놓고 끝나면 산 명령이 조용히 사라진다"
+        );
+        assert_eq!(
+            kept.owner,
+            first.owner_token(),
+            "먼저 붙은 연결이 그대로 주인이다"
+        );
     }
 
     // ── ADR-0096: SetEnvelopeFormat ──────────────────────────────────────────────

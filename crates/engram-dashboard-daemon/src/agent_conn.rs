@@ -24,6 +24,7 @@ use engram_dashboard_protocol::{
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 
+use crate::command_roster::CommandRoster;
 use crate::connection_core::{
     agent_list_event, broadcast_lease_changed, event_json, hello_event, output_event_to_wire,
     ConnectionCore, ConnectionSession, DispatchFlow, MultiViewState, Outbound,
@@ -190,7 +191,7 @@ fn is_handshake_frame(text: &str) -> bool {
 impl ConnectionHandler for AgentConnection {
     fn on_connect<'a>(
         &'a self,
-        _conn_id: ConnId,
+        conn_id: ConnId,
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
@@ -202,6 +203,12 @@ impl ConnectionHandler for AgentConnection {
             if let Some(text) = event_json(&agent_list_event(self.core.manager())) {
                 let _ = frames.send(Frame::Text(text)).await;
             }
+            // ★인사 **뒤에** 명단에 올린다★: 위 `send` 는 큐가 이미 찼으면 영영 반환하지 않을 수 있는데
+            //   (포트 계약 — 이 시점엔 소비자가 없다), 그 앞에 올려 두면 그렇게 멈춘 연결의 id 가
+            //   `on_disconnect` 없이 명단에 영구히 남는다. 뒤로 미뤄도 등록보다는 앞이다 — 네트워크 행이
+            //   수신 task 를 **이 호출이 반환한 뒤에** 띄우므로(`ws.rs` 의 on_connect await → read_task
+            //   spawn 순서) 여기 도달하지 못한 연결은 프레임 한 장도 못 보낸다.
+            self.core.commands().attach(conn_id);
         })
     }
 
@@ -262,6 +269,14 @@ impl ConnectionHandler for AgentConnection {
     }
 
     fn on_disconnect(&self, conn_id: ConnId) {
+        // ── 명령 명부 자취 내리기(ADR-0135) — ★이 정리의 **첫 줄**이어야 한다★ ────────────
+        // 뒤로 밀면 그 앞 정리가 도는 **동안** 이 연결이 아직 붙어 있는 것으로 읽혀, 그 창에 겹쳐 든
+        //   등록이 통과한다(겹침 자체의 근거 = `CommandRoster` 헤더). 그러면 이미 죽은 연결이 산 연결이
+        //   가져간 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 내린다 — 멀쩡한 연결의 명령이
+        //   `OWNER_UNAVAILABLE` 이 된다. 맨 앞이면 그 창 자체가 없다(패닉으로 건너뛸 구간도 없어진다).
+        // 이름은 지우지 않는다(TRD §4-②).
+        self.core.commands().detach(conn_id);
+
         let manager = self.core.manager();
 
         // ── 구독 누수 방지 ──────────────────────────────────────────────────────
@@ -321,6 +336,8 @@ pub struct AgentConnections {
     control_registry: Arc<crate::control::registry::ControlRegistry>,
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
+    // ADR-0134
+    commands: CommandRoster,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -331,6 +348,7 @@ impl AgentConnections {
         fanout: Arc<dyn FrameFanout>,
         control_registry: Arc<crate::control::registry::ControlRegistry>,
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
+        commands: CommandRoster,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -339,25 +357,37 @@ impl AgentConnections {
             fanout,
             control_registry,
             messaging,
+            commands,
             shutdown_tx,
         }
     }
 }
 
-impl ConnectionHandlerFactory for AgentConnections {
-    fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler> {
+impl AgentConnections {
+    /// `handler_for` 의 본체 — **구체 타입**을 낸다. 이 갈래가 따로 있는 이유는 정리 순서를 보는 테스트가
+    /// 그 연결의 수명 상태(`session`)를 쥐어야 하는데 `dyn ConnectionHandler` 로는 못 꺼내기 때문이다.
+    /// 운영 경로는 아래 `handler_for` 하나뿐이라 **조립이 갈리지 않는다**(테스트가 제 손으로 조립하면
+    /// 그 사본이 운영과 조용히 어긋난다).
+    fn build(&self, conn_id: ConnId) -> Arc<AgentConnection> {
         let core = Arc::new(ConnectionCore::new(
             self.manager.clone(),
             self.multiview.clone(),
             self.fanout.clone(),
             self.control_registry.clone(),
             self.messaging.clone(),
+            self.commands.clone(),
             self.shutdown_tx.clone(),
         ));
         Arc::new(AgentConnection {
             core,
             session: Arc::new(ConnectionSession::new(conn_id)),
         })
+    }
+}
+
+impl ConnectionHandlerFactory for AgentConnections {
+    fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler> {
+        self.build(conn_id)
     }
 
     fn handshake_error_frame(&self, message: &str) -> Option<String> {
@@ -557,5 +587,203 @@ mod tests {
             Frame::Close(r) => assert_eq!(r, "bye"),
             other => panic!("Close 여야 함: {other:?}"),
         }
+    }
+
+    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 자취로 내리는지(ADR-0134/0135) ──
+
+    /// 공장 하나가 만든 연결들이 **같은 명부**를 보는지까지 이 하네스가 본다 — 연결마다 새 명부가 나면
+    /// 아래 conn 2 의 조회가 빈 목록을 받는다.
+    fn test_factory() -> AgentConnections {
+        test_factory_with(
+            Arc::new(crate::test_doubles::RecordingFanout::new()),
+            CommandRoster::new(),
+        )
+    }
+
+    fn test_factory_with(
+        fanout: Arc<dyn FrameFanout>,
+        commands: CommandRoster,
+    ) -> AgentConnections {
+        use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
+        use engram_dashboard_core::agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+        use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+
+        struct NoStore;
+        impl ProfileStore for NoStore {
+            fn save(&self, _: &[AgentProfile]) {}
+            fn load(&self) -> Vec<AgentProfile> {
+                Vec::new()
+            }
+        }
+        impl PresetStore for NoStore {
+            fn save(&self, _: &[Preset]) {}
+            fn load(&self) -> Vec<Preset> {
+                Vec::new()
+            }
+        }
+
+        let manager = Arc::new(AgentManager::new(
+            Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone())),
+            Arc::new(ProfileRegistry::new(Arc::new(NoStore))),
+            Arc::new(PresetRegistry::new(Arc::new(NoStore))),
+            Arc::new(SessionTracker::new(
+                TrackerConfig::default(),
+                Arc::new(|_agent_id, _sid| {}),
+            )),
+        ));
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        AgentConnections::new(
+            manager,
+            MultiViewState::new(),
+            fanout,
+            Arc::new(crate::control::registry::ControlRegistry::new()),
+            Arc::new(crate::control::mcp_server::MessagingSlot::new()),
+            commands,
+            shutdown_tx,
+        )
+    }
+
+    fn command_json(cmd: &AgentCommand) -> String {
+        serde_json::to_string(cmd).expect("명령 직렬화")
+    }
+
+    async fn next_event(rx: &mut mpsc::Receiver<Frame>) -> AgentEvent {
+        match rx.recv().await.expect("프레임 하나") {
+            Frame::Text(text) => serde_json::from_str(&text).expect("이벤트 디코드"),
+            other => panic!("Text 여야 함: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_tombstones_that_connections_commands_without_removing_them() {
+        use engram_dashboard_command::{CommandDecl, OwnerToken};
+        use engram_dashboard_protocol::RequestId;
+
+        let factory = test_factory();
+        let owner = factory.handler_for(1);
+        let onlooker = factory.handler_for(2);
+        let (owner_tx, mut owner_rx) = mpsc::channel::<Frame>(8);
+        let (onlooker_tx, mut onlooker_rx) = mpsc::channel::<Frame>(8);
+        let owner_frames = frame_sink(owner_tx);
+        let onlooker_frames = frame_sink(onlooker_tx);
+        // 운영 순서 그대로 — 등록은 `on_connect` 이 연결을 명단에 올린 뒤에만 받아들여진다.
+        owner.on_connect(1, &owner_frames).await;
+        onlooker.on_connect(2, &onlooker_frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut owner_rx).await;
+            let _ = next_event(&mut onlooker_rx).await;
+        }
+
+        let registration = command_json(&AgentCommand::RegisterCommands {
+            owner: OwnerToken::new("shell"),
+            decls: vec![CommandDecl {
+                name: "tab.create".to_string(),
+                help: "{}".to_string(),
+            }],
+            catalog_version: 1,
+            request_id: RequestId(uuid::Uuid::new_v4()),
+        });
+        owner.on_text(1, &registration, &owner_frames).await;
+        assert!(
+            matches!(next_event(&mut owner_rx).await, AgentEvent::Ack { .. }),
+            "등록은 Ack"
+        );
+
+        let list = command_json(&AgentCommand::ListCommands {
+            request_id: RequestId(uuid::Uuid::new_v4()),
+        });
+        onlooker.on_text(2, &list, &onlooker_frames).await;
+        match next_event(&mut onlooker_rx).await {
+            AgentEvent::CommandList { entries, .. } => {
+                assert_eq!(entries.len(), 1, "다른 연결도 같은 명부를 본다");
+                assert!(entries[0].available);
+            }
+            other => panic!("CommandList 여야 함: {other:?}"),
+        }
+
+        owner.on_disconnect(1);
+
+        onlooker.on_text(2, &list, &onlooker_frames).await;
+        match next_event(&mut onlooker_rx).await {
+            AgentEvent::CommandList { entries, .. } => {
+                assert_eq!(entries.len(), 1, "이름은 지우지 않는다(TRD §4-②)");
+                assert_eq!(entries[0].name, "tab.create");
+                assert!(
+                    !entries[0].available,
+                    "주인이 없으므로 비가용 자취로 남는다"
+                );
+            }
+            other => panic!("CommandList 여야 함: {other:?}"),
+        }
+
+        // 정리가 **끝난 뒤** 도착한 프레임(겹침의 뒷자락) — 순서가 이미 갈린 상태라 이건 쉬운 쪽이다.
+        //   정리가 **도는 도중**의 겹침은 아래 `..._detached_before_the_rest_of_the_cleanup` 가 본다.
+        owner.on_text(1, &registration, &owner_frames).await;
+        match next_event(&mut owner_rx).await {
+            AgentEvent::Error { message, .. } => assert!(
+                message.contains(crate::command_roster::DETACHED_REFUSAL),
+                "연결 수명 그물이 잡은 것이어야 한다: {message}"
+            ),
+            other => panic!("Error 여야 함: {other:?}"),
+        }
+        onlooker.on_text(2, &list, &onlooker_frames).await;
+        match next_event(&mut onlooker_rx).await {
+            AgentEvent::CommandList { entries, .. } => {
+                assert!(!entries[0].available, "늦은 등록이 자취를 되살리면 안 된다")
+            }
+            other => panic!("CommandList 여야 함: {other:?}"),
+        }
+    }
+
+    /// ★정리의 **첫 줄**이 `detach` 인지를 못으로 박는다★
+    ///
+    /// `detach` 가 한 칸이라도 뒤로 밀리면, 그 앞 단계가 도는 **동안** 이 연결은 아직 붙어 있는 것으로
+    /// 읽힌다 — 그 창에 겹쳐 든 등록이 통과해 이미 죽은 연결이 산 연결의 이름을 도로 빼앗는다.
+    ///
+    /// ★관측 방법 — 정리의 **첫 단계에서** 세운다★: 정리 안에서 우리가 꽂을 수 있는 더블은 lease 해제
+    /// 통지 하나뿐인데 그건 **마지막** 단계라, 거기서 보면 「끝 직전엔 빠져 있다」밖에 못 본다(중간
+    /// 배치가 그대로 통과한다). 대신 첫 단계가 잡는 자물쇠(`session.subs`)를 시험이 먼저 쥐고 정리를
+    /// 다른 스레드에서 돌린다 — 정리는 그 자물쇠에서 멈추므로, 멈춘 동안 이 연결이 이미 명단에서
+    /// 빠져 있다면 `detach` 는 그 자물쇠보다 **앞**이다.
+    /// ★교착 없음★: 정리 스레드의 명부 잠금은 `detach` 안에서 끝나고(그 뒤 자물쇠를 기다린다), 시험
+    /// 스레드는 자물쇠를 쥔 채 명부를 **짧게** 잡았다 놓는다 — 서로를 기다리는 고리가 안 생긴다.
+    /// ★탐침이 명부를 건드리지 않는다★: 빈 차분은 통과해도 아무것도 안 바꾼다.
+    #[test]
+    fn the_command_roster_is_detached_before_the_first_cleanup_step() {
+        use std::time::{Duration, Instant};
+
+        let commands = CommandRoster::new();
+        let factory = test_factory_with(
+            Arc::new(crate::test_doubles::RecordingFanout::new()),
+            commands.clone(),
+        );
+        let conn = factory.build(1);
+        let session = conn.session.clone();
+        commands.attach(1);
+
+        let held = session.subs.lock().expect("subs poisoned");
+        let cleanup = std::thread::spawn(move || conn.on_disconnect(1));
+
+        // 정리가 자물쇠에서 멈춰 있는 동안 관측한다. 스레드가 아직 안 떴을 수 있어 잠깐 되풀이하되,
+        //   `detach` 가 자물쇠 뒤에 있으면 이 창에서는 **영영** 거절이 안 나므로 마감시각이 판정이 된다.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut refused = None;
+        while Instant::now() < deadline {
+            if let Err(e) = commands.update(1, vec![], vec![]) {
+                refused = Some(e);
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        drop(held);
+        cleanup.join().expect("정리 스레드");
+
+        let refused = refused.expect("정리가 첫 단계에 멈춘 동안 이 연결은 이미 빠져 있어야 한다");
+        assert_eq!(
+            refused.message(),
+            crate::command_roster::DETACHED_REFUSAL,
+            "연결 수명 그물이 잡은 것이어야 한다"
+        );
     }
 }

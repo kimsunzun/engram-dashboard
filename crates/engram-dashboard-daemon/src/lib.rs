@@ -10,6 +10,7 @@
 //! rename 하지 않는 이유와 재개 조건은 ADR-0130.
 
 pub mod agent_conn;
+pub mod command_roster;
 pub mod connection_core;
 pub mod control;
 #[cfg(feature = "test-harness")]
@@ -314,6 +315,9 @@ async fn run_accept_loop(
     //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
+    // 명령 주인 명부(ADR-0134/0135) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
+    //   말고는 아직 아무도 쥐지 않는다(배달 라우팅이 붙으면 조립 위로 올라갈 자리다).
+    let commands = command_roster::CommandRoster::new();
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
@@ -321,6 +325,7 @@ async fn run_accept_loop(
             fanout,
             control_registry,
             messaging_slot,
+            commands,
             shutdown_tx,
         ));
 

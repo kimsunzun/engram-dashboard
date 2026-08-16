@@ -132,12 +132,23 @@ impl Roster {
     /// ★남이 쥔 이름을 가져가는 것이 여기서는 적법하다★ — 등록은 **붙는 순간**에 매인 전량 선언이라
     /// (TRD §3-7 조항 1) 새 연결이 옛 연결의 이름을 이어받는 것이 인수인계 그 자체다. 붙어 있는 동안의
     /// 차분([`Roster::update`])에는 그 닻이 없어 같은 인수인계가 허용되지 않는다.
+    /// ★단 그 닻은 **붙어 있는** 주인의 것이다 — 끊긴 것으로 표시된 주인이 산 주인의 이름을 가져가는 것은
+    /// `CONFLICT` 다★. 비대칭이 성립하는 근거: 재연결하는 클라이언트는 새 연결 식별자를 받아 **새 토큰**
+    /// 으로 오므로 `Gone` 토큰으로 도착하는 정상 패킷이란 없다 — 그 토큰으로 오는 것은 이미 죽은 연결의
+    /// 늦은 패킷뿐이고, 죽은 연결이 산 연결에게서 이름을 빼앗으면 조회가 그 이름을 **없는 주인** 앞으로
+    /// `Available` 이라 답한다(그 연결엔 다시 올 정리가 없어 영구히 굳는다). 자기가 쥐었던 이름과 아무도
+    /// 안 쥔 이름은 그대로 되찾는다 — 그것이 재부착이고, `Gone` 표식은 여전히 여기서 풀린다.
+    /// ★이 그물이 닿지 않는 자리★ = 그 주인의 자취가 하나도 안 남은 경우([`Roster::owner_is_gone`] 의
+    /// 알려진 한계). 거기 적힌 대로 명부만으로는 못 닫는다.
     pub fn register(
         &mut self,
         owner: &OwnerToken,
         decls: Vec<CommandDecl>,
     ) -> Result<(), CommandError> {
         self.check_room_for(owner, &decls)?;
+        if self.owner_is_gone(owner) {
+            self.check_added_are_not_taken(owner, &decls)?;
+        }
         // 이 주인의 자취를 전부 내린다 — `Gone` 도 함께 풀린다. 등록이 「붙었다」의 닻이므로 여기서
         //   풀지 않으면 같은 토큰으로 다시 붙은 주인이 자기 차분을 영영 반려당한다.
         self.mark_owner(owner, Presence::Dropped);
@@ -210,18 +221,28 @@ impl Roster {
         Ok(())
     }
 
-    /// 이 주인이 아직 붙어 있나 — [`Roster::disconnect`] 가 남긴 표식이 유일한 근거다.
+    /// 이 주인이 끊긴 것으로 표시돼 있나 — [`Roster::disconnect`] 가 남긴 표식이 유일한 근거다.
     ///
     /// ★자취가 하나도 안 남은 주인은 「붙어 있다」로 읽힌다(알려진 한계)★: 끊긴 주인의 이름을 다른
     /// 주인들이 전부 가져가면 그 연결의 죽음을 기억할 자리가 남지 않는다. 그 상태에서 남는 그물은
     /// [`Roster::check_added_are_not_taken`] 하나뿐이라 **산 등록은 지켜지고**, 아무도 안 쥔 새 이름만
     /// 죽은 토큰 앞으로 들어온다.
-    fn check_owner_attached(&self, owner: &OwnerToken) -> Result<(), CommandError> {
-        if self
-            .entries
+    /// ★이 한계는 등록 쪽에서 **열려 있다** — 차분 쪽과 한 항목으로 읽지 말 것★: [`Roster::register`] 의
+    /// 「끊긴 주인은 산 이름을 못 가져간다」는 이 술어 위에 서므로, **자취가 남은** 주인에게만 걸린다.
+    /// 죽은 주인이 쥐었던 이름을 산 주인이 **전부** 가져간 뒤 도착한 그 죽은 주인의 늦은 등록은 여전히
+    /// 통과해 이름을 되가져간다(이름이 하나뿐이던 주인이 정확히 이 경우다). 명부만으로는 그 두 상황이
+    /// 구분되지 않는다 — 주인 단위 상태를 따로 들면 만료 없는 자료에 무한히 자라는 목록이 하나 더
+    /// 생긴다(ADR-0135). 남은 답은 **연결 수명을 아는 쪽**(데몬)이 죽은 연결의 늦은 패킷을 아예 안
+    /// 넘기는 것이고, 그건 이 crate 밖이다.
+    fn owner_is_gone(&self, owner: &OwnerToken) -> bool {
+        self.entries
             .values()
             .any(|reg| &reg.owner == owner && reg.presence == Presence::Gone)
-        {
+    }
+
+    /// 끊긴 주인의 차분은 통째로 반려한다 — 근거와 알려진 한계는 [`Roster::owner_is_gone`].
+    fn check_owner_attached(&self, owner: &OwnerToken) -> Result<(), CommandError> {
+        if self.owner_is_gone(owner) {
             return Err(CommandError::of(
                 ErrorCode::Conflict,
                 "this owner has already disconnected — a late delta cannot revive its names",
@@ -265,6 +286,12 @@ impl Roster {
     /// 이번 패킷에 실린 이름은 덮어쓰기라 자리를 새로 먹지 않으므로 두 번 세지 않는다.
     /// ★남는 축(형태로 못 막는다)★: 주인 토큰은 연결마다 새로 나므로 재연결하며 매번 다른 512개를
     /// 등록하면 이 상한이 매번 0에서 시작한다. 그 축을 막는 것은 [`Roster::MAX_NAMES`] 하나뿐이다.
+    /// ★그 축의 귀결 — **결정 대기(여기서 고치지 말 것)**★: 「붙어서 제 몫만큼 등록하고 끊기」를 전체
+    /// 상한에 닿을 때까지 되풀이하면 명부가 **영구히** 찬다 — 지우는 수단이 없어 데몬 재시작 말고는 안
+    /// 풀리고, 그 뒤로는 명부에 없던 이름을 실은 등록이 전부 거절돼 그 이름들이 `UNKNOWN_COMMAND`(=
+    /// 「재시도 말고 다시 발견하라」)로 나간다. 악의 없이도 **런타임에 이름을 짓는 클라이언트가 재시작을
+    /// 반복하면** 닿는다. 닫으려면 재연결을 가로질러 살아남는 클라이언트 신원이 있어야 하는데 지금
+    /// 핸드셰이크가 그것을 나르지 않는다 — 빠뜨린 것이 아니라 **결정 대기**다.
     ///
     /// 이름·`help` 는 등록 패킷이 실어 온 문자열이라 길이도 함께 잰다 — 만료가 없어 과장된 `help` 하나가
     /// 주인이 끊긴 뒤에도 데몬 수명 내내 상주한다.
@@ -629,6 +656,95 @@ mod tests {
         roster.register(&owner, repeated).expect("이름은 하나다");
 
         assert_eq!(roster.len(), 1);
+    }
+
+    /// ★죽은 연결이 산 연결에게서 이름을 빼앗지 못한다★
+    ///
+    /// 빼앗기면 조회가 그 이름을 **없는 주인** 앞으로 `Available` 이라 답하고, 그 연결엔 다시 올 정리가
+    /// 없어 데몬 수명 내내 그대로 굳는다(배달이 끊긴 링크로 나간다).
+    #[test]
+    fn a_late_registration_from_a_gone_owner_cannot_take_a_live_owners_name() {
+        let old = OwnerToken::new("shell-conn-1");
+        let new = OwnerToken::new("shell-conn-2");
+        let mut roster = Roster::new();
+        roster
+            .register(&old, vec![decl("tab.create"), decl("tab.close")])
+            .expect("상한 안");
+        roster.disconnect(&old);
+        roster
+            .register(&new, vec![decl("tab.create")])
+            .expect("산 주인이 이름 하나를 이어받는다");
+
+        let err = roster
+            .register(&old, vec![decl("tab.create")])
+            .expect_err("끊긴 주인의 늦은 등록");
+
+        assert_eq!(err.code(), crate::ErrorCode::Conflict);
+        assert_eq!(
+            roster.lookup("tab.create"),
+            OwnerLookup::Available(new),
+            "산 주인이 그대로 답한다"
+        );
+    }
+
+    /// 위 반려의 **경계** — 같은 `Gone` 주인이라도 아무도 안 쥔 이름은 그대로 되찾고 다시 붙는다.
+    /// (전량 재부착은 `registering_again_reattaches_an_owner_that_had_disconnected` 가 따로 본다.)
+    #[test]
+    fn a_gone_owner_still_reattaches_on_the_names_nobody_took() {
+        let old = OwnerToken::new("shell-conn-1");
+        let new = OwnerToken::new("shell-conn-2");
+        let mut roster = Roster::new();
+        roster
+            .register(&old, vec![decl("tab.create"), decl("tab.close")])
+            .expect("상한 안");
+        roster.disconnect(&old);
+        roster
+            .register(&new, vec![decl("tab.create")])
+            .expect("산 주인이 이름 하나를 이어받는다");
+
+        roster
+            .register(&old, vec![decl("tab.close")])
+            .expect("남이 안 쥔 이름은 되찾는다");
+
+        assert_eq!(
+            roster.lookup("tab.close"),
+            OwnerLookup::Available(old.clone())
+        );
+        roster
+            .update(&old, vec![decl("tab.split")], vec![])
+            .expect("다시 붙었으므로 차분도 통과한다");
+        assert_eq!(roster.lookup("tab.split"), OwnerLookup::Available(old));
+    }
+
+    /// ★알려진 구멍 — 여기서 닫히지 않았다는 것을 못으로 박아 둔다★
+    ///
+    /// 위 반려는 [`Roster::owner_is_gone`] 위에 서고, 그 술어는 **자취가 남은** 주인만 본다. 산 주인이
+    /// 죽은 주인의 이름을 **전부** 가져가면 죽음을 기억할 자리가 없어져 늦은 등록이 그대로 통과한다
+    /// (이름이 하나뿐이던 주인이 정확히 이 경우다 — 실제 셸은 수십 개를 한 번에 얹어 덜 닿는다).
+    /// 명부만으로는 못 닫는 자리이고 남은 답은 연결 수명을 아는 쪽(데몬)이다 — 그쪽이 닫히면
+    /// **이 테스트가 먼저 깨져** 이 주석으로 데려온다.
+    #[test]
+    fn the_register_side_net_does_not_reach_an_owner_whose_last_trace_was_taken() {
+        let old = OwnerToken::new("shell-conn-1");
+        let new = OwnerToken::new("shell-conn-2");
+        let mut roster = Roster::new();
+        roster
+            .register(&old, vec![decl("tab.create")])
+            .expect("상한 안");
+        roster.disconnect(&old);
+        roster
+            .register(&new, vec![decl("tab.create")])
+            .expect("산 주인이 그 하나뿐인 이름을 가져간다");
+
+        roster
+            .register(&old, vec![decl("tab.create")])
+            .expect("죽음을 기억할 자취가 안 남아 통과한다(구멍)");
+
+        assert_eq!(
+            roster.lookup("tab.create"),
+            OwnerLookup::Available(old),
+            "없는 주인이 답한다 — 이것이 남아 있는 구멍이다"
+        );
     }
 
     // ── 차분 등록(TRD §3-7 조항 3) ────────────────────────────────────────────────────────────
