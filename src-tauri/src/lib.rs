@@ -26,6 +26,10 @@ pub fn run() {
     let mut builder = tauri::Builder::default();
     // single-instance 플러그인은 가장 먼저 등록(플러그인 규약). ADR-0029: 앱은 데몬 클라 전역 단일 —
     // 무조건 등록.
+    // ★"전역 단일"의 범위 = 번들 identifier★: 플러그인은 Windows 뮤텍스 이름을 `{identifier}-sim` 으로
+    //   만든다(tauri-plugin-single-instance 2.4.2 `platform_impl/windows.rs:67`). 그래서 identifier 를
+    //   공유하는 두 빌드는 서로를 죽인다 — dev 빌드는 `src-tauri/tauri.dev.conf.json` 오버레이로
+    //   identifier 를 갈라 릴리즈와 공존한다. ★두 identifier 를 통일하지 말 것★(사유 = 그 파일 주석).
     builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         crate::tray::actions::show_main_ui(app);
     }));
@@ -53,7 +57,13 @@ pub fn run() {
 
     builder
         .setup(move |app| {
-            logging::init_logging();
+            // 데몬과 **다른 파일**(`app-*.log`)에 쓴다 — 한 파일을 두 프로세스가 나눠 쓰면 줄이
+            //   섞인다. 폴더는 데몬과 같은 `default_data_dir()` 이라 기동 실패를 쫓을 때 두 로그가
+            //   한자리에 모인다.
+            logging::init_logging_with_file(
+                &crate::discovery::default_data_dir(),
+                logging::LogKind::App,
+            );
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).

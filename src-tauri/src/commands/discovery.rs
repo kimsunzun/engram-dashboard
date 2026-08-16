@@ -174,7 +174,10 @@ pub async fn daemon_stop() -> Result<Option<u32>, String> {
 
 async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
     let data_dir = discovery::default_data_dir();
-    let exe = locate_daemon_exe().map_err(|e| e.to_string())?;
+    let exe = locate_daemon_exe().map_err(|e| {
+        tracing::error!("데몬 실행 파일을 찾지 못함: {e}");
+        e.to_string()
+    })?;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
 
     // ★다중 spawn 직렬화★: 다중 WebView 동시 ensure 를 프로세스 전역 락으로 줄 세운다(ensure_lock
@@ -191,7 +194,13 @@ async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<Daemo
     .map_err(|e| format!("discover_daemon join 실패: {e}"))?
     .map(DaemonInfoDto::from)
     // 보안: 에러 메시지엔 token 이 없다(DiscoveryError 는 token 미포함).
-    .map_err(|e| e.to_string())
+    //
+    // ★문자열만 프론트로 넘기고 끝내지 마라★: 그러면 릴리즈에서 원인이 배너 하나로만 존재하고,
+    //   배너를 닫는 순간 사라진다. 기본 레벨에 남겨 로그 파일이 그 배너를 대신 설명하게 한다.
+    .map_err(|e| {
+        tracing::warn!("데몬 ensure 실패 — 프론트에 문자열로 전달: {e}");
+        e.to_string()
+    })
 }
 
 #[cfg(test)]

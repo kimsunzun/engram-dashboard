@@ -518,6 +518,7 @@ fn ensure_with(
 
     // (c) 폴링 — timeout 까지 새 daemon.json 을 기다린다.
     let deadline = clock.now() + timeout;
+    let mut last_read_err: Option<String> = None;
     loop {
         match reader.read() {
             Ok(Some(info)) => {
@@ -530,8 +531,11 @@ fn ensure_with(
             // ★루프 안에서 중단하지 마라★: 한 번의 일시적 열기 실패(제3자가 좁은 공유로 잠깐 여는
             //   경우 — 데몬 쪽은 같은 조건을 재시도한다)로 **남은 대기 전부**를 버리게 된다. 다음
             //   tick 에 다시 읽으면 되고, 진짜 못 읽는 상태면 어차피 timeout 으로 귀결된다.
+            // ★tick 마다 기본 레벨로 올리지 마라★: 폴링이 같은 줄로 로그를 도배한다. 사유는 마지막
+            //   것만 들고 있다가 아래 timeout 에서 한 번 낸다 — 사용자가 실제로 보는 실패는 그 한 번뿐이다.
             Err(e) => {
                 tracing::debug!("{DAEMON_FILE} 폴링 읽기 실패 — 다음 tick 에 재시도: {e}");
+                last_read_err = Some(e.to_string());
             }
         }
         if clock.now() >= deadline {
@@ -546,6 +550,16 @@ fn ensure_with(
                     return Ok(old);
                 }
             }
+            // ★기본 레벨(warn)에 반드시 남는다★: 이 timeout 이 사용자가 배너로 보는 그 실패다.
+            //   여기가 조용하면 릴리즈 로그 파일에 원인이 한 줄도 안 남아, 배너를 닫는 순간 사고가
+            //   추적 불가가 된다(파일 로그를 만든 이유 그 자체).
+            tracing::warn!(
+                ?timeout,
+                last_read_error = last_read_err
+                    .as_deref()
+                    .unwrap_or("(없음 — daemon.json 이 끝내 생기지 않음)"),
+                "데몬 기동 대기 시간 초과"
+            );
             return Err(DiscoveryError::Timeout(timeout));
         }
         clock.sleep(POLL_INTERVAL);

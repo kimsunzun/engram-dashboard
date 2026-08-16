@@ -376,9 +376,14 @@ async fn run_accept_loop(
 
 /// 데몬 본체. 반환 Err(code) 면 호출자(main)가 그 코드로 exit. 정상 종료(이미 실행 중 포함)는 Ok.
 pub async fn run() -> Result<(), i32> {
-    // 0) ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
+    // 0) ★data_dir 해석이 로깅보다 먼저다★ — 파일 로그가 그 폴더 안에 살기 때문이다. 이 함수는
+    //    순수(env 조회 + 경로 조립)라 로깅 없이 돌려도 잃는 줄이 없다. 이 순서를 뒤집으면
+    //    아래 1)~2) 의 기동 실패가 다시 stdout 으로만 가고, 릴리즈에서 stdout 은 아무 데도 없다.
+    let data_dir = resolve_data_dir();
+
+    // 0.1) ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
     //    적용은 호출자 책임이다(민감 출력 로깅 시 명시 적용). 근거: docs/reference/logging-conventions.md.
-    logging::init_logging();
+    let log_file = logging::init_logging_with_file(&data_dir, logging::LogKind::Daemon);
 
     // 0.5) panic hook 설치(B-1). 데몬 내부 스레드(pump 등)가 panic 하면 silent 정지로
     //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단") 가시화한다. ★데몬 전체는 죽이지 않는다★ —
@@ -389,17 +394,20 @@ pub async fn run() -> Result<(), i32> {
     //   스레드 spawn 전)다. 값의 소비자와 존치 조건은 그 함수 주석.
     set_engram_exe_env();
 
-    // 1) data_dir 결정 + 생성 + 쓰기 가능 확인.
+    // 1) data_dir 생성 + 쓰기 가능 확인.
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
     //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
-    let data_dir = resolve_data_dir();
     if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
         // e 안에 폴더 경로와 조치가 이미 들어 있다(DiscoveryError::DataDirUnwritable).
         tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");
         return Err(1);
     }
     // ADR-0134 §영향: 잠금에 이름이 없으므로, 어느 폴더를 잡았는지 사람이 확인할 유일한 수단이다.
-    tracing::info!(data_dir = %data_dir.display(), "데이터 폴더 결정");
+    tracing::info!(
+        data_dir = %data_dir.display(),
+        log_file = ?log_file,
+        "데이터 폴더 결정"
+    );
 
     // 2) 단일 인스턴스 가드 = 그 데이터 폴더 안의 daemon.json 을 붙잡는 것(ADR-0135 결정 1 — 잠그는
     //    파일과 클라이언트가 읽는 파일이 같다. 스코프는 여전히 폴더다).
