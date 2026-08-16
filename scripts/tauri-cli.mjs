@@ -2,6 +2,7 @@
 // scripts/tauri-cli.mjs — package.json 의 `tauri` 스크립트 실체. Tauri CLI 를 그대로 대행하되
 // **dev 서브커맨드에만** dev 오버레이 설정(`src-tauri/tauri.dev.conf.json`)을 끼워 넣는다.
 //
+// ADR-0137 — dev 서브커맨드에만 오버레이를 끼우는 이 한 겹이 identifier 분리의 주입 지점이다.
 // ★왜 래퍼가 필요한가(`"tauri": "tauri"` 로 되돌리지 마라)★: dev 빌드는 릴리즈와 **다른 번들
 //   identifier** 로 떠야 한다 — 같으면 single-instance 뮤텍스가 겹쳐 릴리즈 앱이 떠 있는 동안
 //   dev 앱이 즉시 죽는다(사유 전문 = 오버레이 파일 주석). identifier 를 가르는 공식 수단은

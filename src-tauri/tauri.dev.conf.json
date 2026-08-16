@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
 
+  // ADR-0137 — dev 빌드에 별도 번들 identifier(릴리스 앱과 동시 실행)
   // ★dev 전용 오버레이 — 릴리즈(`tauri.conf.json`)의 identifier 와 절대 통일하지 말 것(되살리지 마라)★
   //   tauri-plugin-single-instance 는 Windows 전역 뮤텍스 이름을 `{identifier}-sim` 으로 만든다
   //   (실측: tauri-plugin-single-instance 2.4.2 `src/platform_impl/windows.rs:67`). 두 빌드가 같은

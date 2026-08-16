@@ -9,6 +9,7 @@ REM   so without an explicit `cargo build` the app keeps connecting to a STALE d
 REM   your Rust changes silently have no effect. (does NOT touch claude.exe)
 cd /d "%~dp0"
 
+REM ADR-0139 - launchers kill only their OWN deployment's daemon.
 REM ★Kill ONLY THIS (dev) deployment's daemon - never go back to `taskkill /IM` (do not remove)★:
 REM   by image name this killed EVERY daemon on the machine, including the release build's, destroying
 REM   in-progress agent work in other deployments (agents are CHILDREN of the daemon - measured, not

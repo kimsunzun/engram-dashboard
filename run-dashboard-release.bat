@@ -17,6 +17,7 @@ REM   daemon claim a DIFFERENT folder - you silently get a second daemon with it
 REM   error. Let the CLI discover the portfile instead.
 cd /d "%~dp0"
 
+REM ADR-0139 - launchers kill only their OWN deployment's daemon.
 REM ★Kill ONLY THIS deployment's daemon - never go back to `taskkill /IM` (do not remove)★:
 REM   by image name this killed EVERY daemon on the machine, including a dev one hosting live agents.
 REM   Agents are CHILDREN of the daemon, so running this launcher while developing destroyed
