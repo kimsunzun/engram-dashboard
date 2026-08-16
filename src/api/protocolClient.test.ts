@@ -516,6 +516,78 @@ describe('재연결(connected 재전이) → 모든 뷰 buffering 리셋 + 재�
   })
 })
 
+// ── 연결 실패 이유(ADR-0134) ────────────────────────────────────────────────────────
+describe('연결 실패 이유가 연결 상태 표면에 함께 실린다', () => {
+  it('상태가 그대로여도 이유가 생기면 구독자에게 통지된다', () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    const seen: Array<ConnectionState> = []
+    c.onConnectionStateChange((s) => seen.push(s))
+    expect(seen).toEqual(['down']) // 등록 즉시 1회
+    expect(c.connectionError).toBeNull()
+
+    c.reportConnectionError('데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요')
+
+    // 상태 문자열은 'down' 그대로지만 다시 통지돼야 화면이 이유를 그릴 수 있다.
+    expect(seen).toEqual(['down', 'down'])
+    expect(c.connectionError).toContain('쓰기 가능한 위치')
+  })
+
+  it('같은 이유를 다시 보고하면 통지하지 않는다', () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    const seen: Array<ConnectionState> = []
+    c.onConnectionStateChange((s) => seen.push(s))
+    c.reportConnectionError('같은 이유')
+    c.reportConnectionError('같은 이유')
+    expect(seen.length).toBe(2) // 최초 1 + 변화 1
+  })
+
+  it('connected 로 전이하면 이유가 지워진다', () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    c.reportConnectionError('폴더 문제')
+    expect(c.connectionError).toBe('폴더 문제')
+    t.setState('connected')
+    expect(c.connectionError).toBeNull()
+  })
+
+  // ★R4 회귀 방지★: 이미 connected 인 상태에서 이유를 기록하면 지울 전이가 영영 오지 않아 배너가
+  //   고착된다. 이 표면은 window.__ENGRAM_AGENT__ 로 공개돼 LLM·cdp 호출로도 닿는다.
+  it('이미 연결된 상태에서 보고된 이유는 남지 않는다', () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    const seen: Array<ConnectionState> = []
+    c.onConnectionStateChange((s) => seen.push(s))
+
+    c.reportConnectionError('연결돼 있는데 들어온 이유')
+
+    expect(c.connectionError).toBeNull()
+    expect(seen).toEqual(['connected']) // 등록 1회뿐 — 통지도 없다
+  })
+
+  it('끊긴 뒤 기록한 이유는 재연결 전까지 유지된다', () => {
+    const t = new MockTransport('connected')
+    const c = new ProtocolClient(t)
+    t.setState('down')
+    c.reportConnectionError('폴더 문제')
+    expect(c.connectionError).toBe('폴더 문제')
+    t.setState('connected')
+    expect(c.connectionError).toBeNull()
+  })
+
+  it('구독 해제 후에는 통지가 가지 않는다', () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    const seen: Array<ConnectionState> = []
+    const off = c.onConnectionStateChange((s) => seen.push(s))
+    off()
+    c.reportConnectionError('이유')
+    t.setState('connected')
+    expect(seen).toEqual(['down'])
+  })
+})
+
 // ── 실패 마커 → 사다리 → 3회 후 error ─────────────────────────────────────────────────
 describe('실패 마커 → 재요청 사다리 → 상한(3) 도달 시 error', () => {
   it('실패 마커마다 백오프 재요청, 3회 소진 후 error 상태 + onState 통지', async () => {

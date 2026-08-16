@@ -36,6 +36,13 @@ export interface DaemonControl {
   status(): Promise<DaemonStatus>
 }
 
+/** invoke 거부는 문자열로 오지만(Rust `Err(String)`) Error 인스턴스일 수도 있다 — 둘 다 문장으로 편다. */
+function describeError(err: unknown): string {
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  return String(err)
+}
+
 export class DaemonDaemonControl implements DaemonControl {
   private readonly client: AgentClient
 
@@ -43,18 +50,30 @@ export class DaemonDaemonControl implements DaemonControl {
     this.client = client
   }
 
+  // ★실패 이유가 화면에 닿는 단일 지점(ADR-0134 결정 4)★: 명시 시작은 부팅 bootstrap·UI·
+  //   window.__ENGRAM_DAEMON__ 이 전부 여기를 지나므로, 이유 기록도 여기 한 곳에 둔다. 호출부마다
+  //   report 를 흩어 놓으면 어느 경로는 조용히 실패한다(사용자가 폴더를 고치고 다시 누른 재시도가
+  //   그런 경로였다).
   async start(opts?: { console?: boolean; timeoutMs?: number }): Promise<DaemonInfo> {
-    // 1) 데몬 spawn(없으면) — daemon_start Tauri command(WMI/CREATE_NO_WINDOW). console 은
-    //    spawn-time 파라미터(런타임 토글은 후속 — set_daemon_console 미구현, M-2). 이미 살아있으면 attach.
-    const info = await invoke<DaemonInfo>('daemon_start', {
-      console: opts?.console ?? false,
-      timeoutMs: opts?.timeoutMs ?? null,
-    })
-    // 2) ★명시 연결★(ADR-0021 §1): client.connect → transport.start(discover 허용 + 캐시 채움 +
-    //    closedByUser/attempt 리셋). 이게 spawn 을 유발할 수 있는 유일한 클라 경로다. 명령 경로
-    //    (ensureReady)는 attach-only 라 데몬을 못 깨운다 → 부팅/명시 start 만 데몬을 띄운다(B-1).
-    await this.client.connect()
-    return info
+    try {
+      // 1) 데몬 spawn(없으면) — daemon_start Tauri command(WMI/CREATE_NO_WINDOW). console 은
+      //    spawn-time 파라미터(런타임 토글은 후속 — set_daemon_console 미구현, M-2). 이미 살아있으면 attach.
+      const info = await invoke<DaemonInfo>('daemon_start', {
+        console: opts?.console ?? false,
+        timeoutMs: opts?.timeoutMs ?? null,
+      })
+      // 2) ★명시 연결★(ADR-0021 §1): client.connect → transport.start(discover 허용 + 캐시 채움 +
+      //    closedByUser/attempt 리셋). 이게 spawn 을 유발할 수 있는 유일한 클라 경로다. 명령 경로
+      //    (ensureReady)는 attach-only 라 데몬을 못 깨운다 → 부팅/명시 start 만 데몬을 띄운다(B-1).
+      await this.client.connect()
+      this.client.reportConnectionError(null)
+      return info
+    } catch (err) {
+      // Rust 가 붙여 보낸 원인(예: 데이터 폴더에 쓸 수 없음)을 연결 상태 표면에 싣는다. throw 는
+      // 그대로 이어가 호출자의 재시도·로깅을 바꾸지 않는다.
+      this.client.reportConnectionError(describeError(err))
+      throw err
+    }
   }
 
   async stop(opts?: { force?: boolean }): Promise<void> {

@@ -14,13 +14,16 @@ function fakeClient(
     stopDaemon?: ReturnType<typeof vi.fn>
     connect?: ReturnType<typeof vi.fn>
     disconnect?: ReturnType<typeof vi.fn>
+    reportConnectionError?: ReturnType<typeof vi.fn>
   } = {},
 ): AgentClient {
   return {
     connectionState: state,
+    connectionError: null,
     stopDaemon: overrides.stopDaemon ?? vi.fn(async () => undefined),
     connect: overrides.connect ?? vi.fn(async () => undefined),
     disconnect: overrides.disconnect ?? vi.fn(() => undefined),
+    reportConnectionError: overrides.reportConnectionError ?? vi.fn(() => undefined),
   } as unknown as AgentClient
 }
 
@@ -33,6 +36,26 @@ afterEach(() => {
 })
 
 describe('DaemonDaemonControl (daemon 모드)', () => {
+  // ★R7★: 명시 시작이 실패하면 그 이유가 연결 상태 표면에 실려야 한다 — 부팅·UI·
+  //   window.__ENGRAM_DAEMON__ 이 전부 이 한 경로를 지나므로 여기서 실어야 모두 덮인다.
+  it('start 실패 → 이유를 연결 상태 표면에 싣고 그대로 throw', async () => {
+    const report = vi.fn(() => undefined)
+    const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
+    invokeMock.mockRejectedValueOnce('데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요')
+    await expect(ctrl.start()).rejects.toBeDefined()
+    expect(report).toHaveBeenCalledWith(
+      '데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요',
+    )
+  })
+
+  it('start 성공 → 남아 있던 이유를 지운다', async () => {
+    const report = vi.fn(() => undefined)
+    const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
+    invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, token: 't', protocol_version: 1 })
+    await ctrl.start()
+    expect(report).toHaveBeenCalledWith(null)
+  })
+
   it('start → daemon_start invoke(console/timeout 전달) + client.connect(명시 spawn 연결)', async () => {
     const connect = vi.fn(async () => undefined)
     const ctrl = new DaemonDaemonControl(fakeClient('down', { connect }))

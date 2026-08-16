@@ -142,8 +142,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # http = axum 미들웨어에서 StatusCode/HeaderMap 직접 조작(rmcp 와 동일 1.x wire 타입).
 http = "1"
 
-# ★ADR-0129 슬라이스 1 — `windows` 직접 의존을 제거했다★: 이 crate 의 유일한 소비자가 named mutex
-#   단일 인스턴스 가드(`instance.rs`)였고 그게 네트워크 crate 로 갔다. 지금 이 crate 의 `windows::` 사용은
+# ★ADR-0129 슬라이스 1 — `windows` 직접 의존을 제거했다★: 이 crate 의 유일한 소비자가 단일 인스턴스
+#   가드(`instance.rs`)였고 그게 네트워크 crate 로 갔다. 지금 이 crate 의 `windows::` 사용은
 #   **0**이다(pid liveness 는 원래 core 의 `agent::platform` 몫이었다 — 옛 주석의 "pid liveness(OpenProcess)"
 #   는 이 crate 에서 참인 적이 없다). ★`#[cfg(windows)]`·`windows_subsystem` 은 crate 사용이 **아니다**★ —
 #   토큰만 보고 "아직 쓰네" 로 되돌리지 말 것. Job Object 등으로 Win32 를 다시 직접 쓸 일이 생기면 그때

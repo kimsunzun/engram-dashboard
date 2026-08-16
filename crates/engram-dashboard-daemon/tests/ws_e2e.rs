@@ -9,7 +9,7 @@
 //! 모든 await 에 timeout 가드를 둬 hang 시 영구 멈추지 않는다.
 //!
 //! ★실프로세스 케이스 분리(은폐 금지)★: 아래 in-process 테스트가 커버하지 **못하는** 것들
-//! (데몬 .exe kill→PTY child Job 동반 정리, single-instance mutex, stale daemon.json discovery)은
+//! (데몬 .exe kill→PTY child Job 동반 정리, single-instance 폴더 잠금, stale daemon.json discovery)은
 //! 실제 OS 프로세스/Job 이 필요하다. 이들은 이 파일 하단 `#[ignore]` 테스트로 두고 수동 실행법을
 //! 주석에 적었다. 기본 `cargo test` 는 in-process 케이스만 빠르게 돈다.
 
@@ -2204,7 +2204,7 @@ fn assert_seq_contiguous_from_zero(seqs: &[u64]) {
 // 기본 `cargo test` 에서는 제외(#[ignore] — 실 OS·느림)하고, 다음으로 돌린다:
 //   cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture
 //
-// ★Windows 전용★: 데몬은 Windows 1차. named mutex/Job Object/child_pids 가 Windows 구현이라
+// ★Windows 전용★: 데몬은 Windows 1차. 단일 인스턴스 잠금/Job Object/child_pids 가 Windows 구현이라
 //   #[cfg(windows)] 로 한정한다(다른 OS 에선 컴파일 자체에서 제외 — 위장 PASS 없음).
 // ══════════════════════════════════════════════════════════════════════════════════
 
@@ -2218,12 +2218,11 @@ mod real_process {
 
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
 
-    /// 테스트별 고유 격리 컨텍스트. data_dir(ENGRAM_DATA_DIR)·instance_key(ENGRAM_INSTANCE_KEY)를
-    /// 함께 묶어 데몬에 주입한다. 둘 다 유니크하면 데몬이 ★data_dir·mutex 모두 독립★이라 cargo 의
-    /// 병렬 실행에서도 다른 테스트 데몬과 충돌하지 않는다(USERNAME Global mutex 공유가 flaky 원인이었음).
+    /// 테스트별 고유 격리 컨텍스트. 유니크한 data_dir(ENGRAM_DATA_DIR) 하나면 충분하다 — ADR-0134
+    /// 이후 단일 인스턴스 잠금 스코프가 **데이터 폴더**라, 폴더가 다르면 명부도 잠금도 함께 갈린다
+    /// (별도 열쇠 변수를 짝지어 챙기던 것이 사라졌다).
     struct IsoCtx {
         data_dir: PathBuf,
-        instance_key: String,
     }
 
     fn fresh_iso(tag: &str) -> IsoCtx {
@@ -2239,25 +2238,21 @@ mod real_process {
         let dir = std::env::temp_dir().join(format!("engram-step7-{uniq}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp data_dir 생성");
-        IsoCtx {
-            data_dir: dir,
-            instance_key: format!("step7-{uniq}"),
-        }
+        IsoCtx { data_dir: dir }
     }
 
     fn spawn_daemon_iso(ctx: &IsoCtx) -> Child {
-        spawn_daemon_with_key(&ctx.data_dir, &ctx.instance_key)
+        spawn_daemon_in(&ctx.data_dir)
     }
 
-    /// data_dir + instance_key 를 명시 주입하는 spawn(단일인스턴스 테스트가 같은 key 2개를 띄울 때 사용).
-    fn spawn_daemon_with_key(data_dir: &Path, instance_key: &str) -> Child {
+    /// data_dir 을 명시 주입하는 spawn(단일 인스턴스 테스트가 같은 폴더로 2개를 띄울 때 사용).
+    fn spawn_daemon_in(data_dir: &Path) -> Child {
         Command::new(DAEMON_EXE)
             .env("ENGRAM_DATA_DIR", data_dir)
-            .env("ENGRAM_INSTANCE_KEY", instance_key)
             .env("RUST_LOG", "info")
             .stdin(std::process::Stdio::null())
             // ★stdout 캡처(진단)★: core 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
-            //   daemon.json 을 못 쓰는지(mutex 거부? data_dir? panic?)를 실패 시 인용하려고 stdout 을
+            //   daemon.json 을 못 쓰는지(잠금 거부? data_dir? panic?)를 실패 시 인용하려고 stdout 을
             //   piped 로 받는다. (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -2411,21 +2406,19 @@ mod real_process {
         );
     }
 
-    // ── case2: single-instance — 두 번째 데몬이 named mutex 로 거부(빠른 정상 종료 + json 불변) ──
+    // ── case2: single-instance — 두 번째 데몬이 폴더 잠금으로 거부(빠른 정상 종료 + json 불변) ──
     //
     // exit code: instance.rs 가 중복 시 run() 이 Ok(()) → main 이 정상 종료(exit 0). 따라서
     //   "exit 0 + 빠른 종료 + json 불변" 으로 단언한다(중복 전용 특수 코드는 없음 — 그 사실 명시).
     #[tokio::test]
     #[ignore = "실프로세스 2개 필요 — `-- --ignored` 로 실행(Windows 전용)"]
     async fn ignored_single_instance_second_rejected() {
-        // ★single-instance 충돌을 의도적으로 유발★: A·B 가 **같은 instance_key + data_dir** 를 쓴다.
-        //   다른 테스트와는 유니크한 key 라 격리되지만, 이 테스트 내부 두 데몬은 동일 key 라 같은 mutex 를
-        //   다퉈 B 가 거부된다(검증 목적). 다른 ignored 테스트가 병렬로 돌아도 key 가 달라 영향 없음.
+        // ★single-instance 충돌을 의도적으로 유발★: A·B 가 **같은 data_dir** 를 쓴다(ADR-0134 —
+        //   잠금 스코프가 폴더라 이것만으로 충돌한다). 다른 ignored 테스트는 폴더가 유니크해 무영향.
         let ctx = fresh_iso("single");
         let data_dir = ctx.data_dir.clone();
-        let key = ctx.instance_key.clone();
 
-        let mut daemon_a = spawn_daemon_with_key(&data_dir, &key);
+        let mut daemon_a = spawn_daemon_in(&data_dir);
         let info_a = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {
             Some(i) => i,
             None => {
@@ -2437,7 +2430,7 @@ mod real_process {
             }
         };
 
-        let mut daemon_b = spawn_daemon_with_key(&data_dir, &key);
+        let mut daemon_b = spawn_daemon_in(&data_dir);
         let exited_fast = poll_until(std::time::Duration::from_secs(3), || {
             matches!(daemon_b.try_wait(), Ok(Some(_)))
         });
@@ -2456,7 +2449,7 @@ mod real_process {
 
         assert!(
             exited_fast,
-            "두 번째 데몬은 mutex 거부로 빠르게(3s 내) 종료해야 — B 로그:\n{b_logs}"
+            "두 번째 데몬은 잠금 거부로 빠르게(3s 내) 종료해야 — B 로그:\n{b_logs}"
         );
         if let Some(status) = b_status {
             assert!(
@@ -2464,7 +2457,7 @@ mod real_process {
                 "두 번째 데몬은 정상 종료(exit 0)해야 — got {status:?}, B 로그:\n{b_logs}"
             );
         } else {
-            panic!("두 번째 데몬이 3s 내 종료하지 않음(mutex 거부 실패 가능) — B 로그:\n{b_logs}");
+            panic!("두 번째 데몬이 3s 내 종료하지 않음(잠금 거부 실패 가능) — B 로그:\n{b_logs}");
         }
         let info_after = info_after.expect("A 의 daemon.json 이 유지돼야");
         assert_eq!(
@@ -2503,11 +2496,9 @@ mod real_process {
             port: 59999,
             token: "d".repeat(64),
             protocol_version: PROTOCOL_VERSION,
-            // ★start_time 은 0 이 아닌 임의값★. is_stale 로직: start_time==0 이면 pid_alive() 로
-            //   fallback 하는데, pid_alive() 는 OpenProcess 실패(죽은 PID) 시 *보수적으로 true*(살아있음)
-            //   를 반환해 stale 판정이 안 된다 → 데몬이 "살아있는 데몬 보호"로 종료해버린다(run() 2.5).
-            //   start_time!=0 이면 process_creation_time(dead_pid)=None(죽음) + expected!=0 → false(dead)
-            //   로 확실히 stale 판정된다(이 분기가 stale 판정을 보장).
+            // ADR-0134 이후 stale 판정은 **진단 로그용**이라 이 값이 기동 여부를 가르지 않는다 —
+            //   덮어쓸 권한은 폴더 잠금에서 나온다. 값은 "죽은 pid + 불일치 생성시각"이라는 현실적인
+            //   조합을 유지하려고 그대로 둔다.
             start_time: 0xDEAD_BEEF,
         };
         let stale_json = serde_json::to_vec_pretty(&stale).expect("stale 직렬화");

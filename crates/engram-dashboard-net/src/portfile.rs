@@ -1,54 +1,65 @@
-//! daemon.json — 데몬 발견(discovery) 파일.
+//! `daemon.json` — 데몬 발견(discovery) 파일이자 **단일 인스턴스 잠금 파일**(ADR-0135 결정 1).
 //!
-//! 여기엔 daemon 측 IO(write_atomic/read)와 stale 판정만 둔다.
+//! 여기엔 파일 이름·daemon 측 쓰기/읽기·stale 판정만 둔다. 그 파일을 **붙잡는** 쪽은
+//! [`crate::instance`] 이고, crate 밖에서 오는 쓰기는 거기(guard)를 지나야 한다.
 //!
-//! **atomic 보장(persistence/mod.rs 와 동일 패턴):** 같은 디렉토리에 tmp 를 쓰고
-//! `sync_all` 후 `rename` 한다. 같은 파일시스템 내 rename 이라 교체가 원자적 —
-//! 크래시가 나도 daemon.json 은 완전한 옛 내용이거나 완전한 새 내용 둘 중 하나다.
+//! ★[`read`] 의 로그가 토큰을 흘리지 않는지 지키는 것은 지금 이 주석뿐이다(알려진 공백)★: 파싱 실패
+//! 시 serde 에러의 `Display` 를 찍는데, 그 안엔 위치·기대 타입만 담기고 값은 담기지 않는다 —
+//! `token` 이 `String` 이라 `invalid type` 류의 값 에코가 나올 자리가 없기 때문이다. 필드 타입을
+//! 바꾸면 그 전제가 깨진다. 같은 함정을 `ws.rs` 는 회귀 테스트로 막는데 여기엔 테스트가 없다.
+//!
+//! ★원자적 교체(임시 파일 + rename)를 되살리지 마라★: 데몬이 이 파일을 삭제 공유 없이 쥐고 있어
+//! rename 이 거부된다(실측 `ERROR_SHARING_VIOLATION`). 그래서 [`write_in_place`] 는 보유 중인 핸들에
+//! 제자리로 쓴다.
+//!
+//! ★그래서 읽는 쪽은 부분적으로 쓰인 내용을 볼 수 있다★: 파싱 실패는 손상이 아니라 **아직 준비 안 됨**
+//! 으로 다뤄야 한다([`read`] 가 `None` 을 주는 이유). 클라이언트는 이미 50ms 로 폴링한다.
+//!
+//! ★사라진 파일을 주기적으로 다시 발행하지 마라(되살리지 마라)★: 실행 중인 앱이 사용자가 방금 지운
+//! 파일을 말없이 다시 쓰는 동작은 조사한 선례 전부에서 버그로 신고돼 있다(ADR-0135 거부한 대안 1번).
+//! 합친 뒤로는 지워지지도 않으므로 되살릴 일 자체가 없다.
 //!
 //! **보안:** token 은 이 파일에만 둔다(로그 금지).
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub use engram_dashboard_protocol::DaemonInfo;
 
-const TMP_NAME: &str = "daemon.json.tmp";
+/// 데이터 폴더 안 접속·잠금 파일 이름. 런타임 생성이라 배포판 압축에는 없다.
+///
+/// ★데몬은 이 상수로만 경로를 만들어야 한다★: 잡는 파일과 쓰는 파일이 갈리면 단일성이 조용히 깨진다.
+pub const DAEMON_FILE: &str = "daemon.json";
 
-/// 부모 디렉토리는 호출자가 만들어 두었다고 가정하되,
-/// 안전하게 create_dir_all 도 한 번 더 한다(idempotent).
-pub fn write_atomic(path: &Path, info: &DaemonInfo) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent dir"))?;
-    fs::create_dir_all(dir)?;
-
+/// 데몬이 **보유 중인 핸들**로 접속 레코드를 제자리에 쓴다.
+///
+/// ★crate 밖 진입점은 [`crate::instance::InstanceGuard::publish`] 하나다★ — 그래서 `pub(crate)` 다.
+/// 이 함수를 `pub` 으로 열거나 경로(`&Path`)를 받는 형태로 되돌리면, 소유를 증명하지 않은 쪽이 발행할
+/// 수 있게 되고 두 데몬의 쓰기가 섞인다.
+///
+/// ★단 타입이 막는 것은 거기까지다★: crate 안(이 파일의 테스트 포함)에서는 임의의 `File` 로 부를 수
+/// 있고, **실제 강제는 보유 중인 OS 공유 모드**다 — 획득 전이나 Drop 뒤에는 아무것도 막지 않는다.
+///
+/// 길이를 먼저 0으로 줄이므로 그 사이 읽는 쪽은 빈 파일을 볼 수 있다 — 모듈 헤더의 "아직 준비 안 됨"
+/// 계약이 그 창을 덮는다.
+// ADR-0135
+pub(crate) fn write_in_place(f: &mut File, info: &DaemonInfo) -> io::Result<()> {
     let json = info
         .to_json_pretty()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let tmp = dir.join(TMP_NAME);
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(&json)?;
-        f.sync_all()?;
-    }
-
-    if let Err(e) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-
-    // parent 디렉토리 fsync — rename(디렉토리 엔트리 변경)을 영속화.
-    // Windows 에선 디렉토리 핸들 fsync 지원이 제한적이라 best-effort(실패 무시).
-    if let Ok(d) = File::open(dir) {
-        let _ = d.sync_all();
-    }
-    Ok(())
+    f.set_len(0)?;
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&json)?;
+    // 다른 프로세스의 가시성은 write_all 시점에 이미 확보된다(같은 캐시를 본다). sync_all 은 전원이
+    //   끊겨도 주소가 남게 하는 내구성 몫이고, 부팅당 1회라 비용이 문제되지 않는다.
+    f.sync_all()
 }
 
-/// 없거나 파싱 불가면 None(부팅 시 무시하고 새로 발행).
+/// 없거나 파싱 불가면 None.
+///
+/// ★파싱 실패를 손상으로 승격하지 말 것★: 데몬이 쓰는 도중일 수 있다(모듈 헤더). 호출자는 "아직
+/// 준비 안 됨"으로 보고 다시 본다.
 pub fn read(path: &Path) -> Option<DaemonInfo> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -57,7 +68,7 @@ pub fn read(path: &Path) -> Option<DaemonInfo> {
     match DaemonInfo::parse(&bytes) {
         Ok(info) => Some(info),
         Err(e) => {
-            tracing::warn!("daemon.json 파싱 실패: {e} — 무시");
+            tracing::warn!("{DAEMON_FILE} 파싱 실패: {e} — 무시(쓰는 중일 수 있음)");
             None
         }
     }
@@ -98,22 +109,66 @@ mod tests {
         }
     }
 
+    fn open_held(path: &Path) -> File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap()
+    }
+
     #[test]
     fn write_read_roundtrip() {
         let dir = temp_dir("roundtrip");
-        let path = dir.join("daemon.json");
+        let path = dir.join(DAEMON_FILE);
         let info = sample();
-        write_atomic(&path, &info).unwrap();
+        write_in_place(&mut open_held(&path), &info).unwrap();
 
         let loaded = read(&path).expect("should read back");
         assert_eq!(loaded, info);
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// 제자리 쓰기라 옛 내용이 더 길면 꼬리가 남을 수 있다 — set_len 이 그것을 자른다는 단언.
+    #[test]
+    fn rewrite_leaves_no_tail_of_the_previous_record() {
+        let dir = temp_dir("no-tail");
+        let path = dir.join(DAEMON_FILE);
+        let mut long = sample();
+        long.token = "b".repeat(4096);
+        let mut f = open_held(&path);
+        write_in_place(&mut f, &long).unwrap();
+
+        let short = sample();
+        write_in_place(&mut f, &short).unwrap();
+        assert_eq!(
+            read(&path).expect("재파싱"),
+            short,
+            "옛 꼬리가 남으면 안 됨"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn read_missing_is_none() {
         let dir = temp_dir("missing");
-        let path = dir.join("daemon.json");
+        let path = dir.join(DAEMON_FILE);
+        assert!(read(&path).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ★부분 기록 = 준비 안 됨★: 제자리 쓰기라 이 상태를 클라이언트가 실제로 볼 수 있다.
+    #[test]
+    fn read_partial_is_none_not_an_error() {
+        let dir = temp_dir("partial");
+        let path = dir.join(DAEMON_FILE);
+        let full = sample().to_json_pretty().unwrap();
+        fs::write(&path, &full[..full.len() / 2]).unwrap();
+        assert!(read(&path).is_none());
+        // 빈 파일(길이 0으로 줄인 직후의 창)도 같다.
+        fs::write(&path, b"").unwrap();
         assert!(read(&path).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -121,7 +176,7 @@ mod tests {
     #[test]
     fn read_corrupt_is_none() {
         let dir = temp_dir("corrupt");
-        let path = dir.join("daemon.json");
+        let path = dir.join(DAEMON_FILE);
         fs::write(&path, b"{ not valid json").unwrap();
         assert!(read(&path).is_none());
         let _ = fs::remove_dir_all(&dir);
