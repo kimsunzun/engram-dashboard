@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 
 // daemon.json 위치 해결 — dev(repo <root>/.engram-data) 와 release(<exe 폴더>/data) 둘 다 커버.
@@ -26,8 +27,8 @@ const PORTFILE_READ_DELAY_MS = 50   // discovery 폴링 주기와 같은 값.
 function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 
 // 성공하면 파싱된 레코드, 예산 안에 온전한 내용을 못 보면 null(던지지 않는다).
-// ★후보 추리기(isLive)는 예산을 짧게 준다★: 후보마다 전체 예산을 쓰면 죽은 후보 몇 개만으로 CLI 가
-//   몇 초씩 멈춘다. 붙을 파일을 확정한 뒤(connect)에만 넉넉히 기다린다.
+// ★후보 추리기(findPortfile 의 생존 진단)는 예산을 짧게 준다★: 후보마다 전체 예산을 쓰면 죽은 후보
+//   몇 개만으로 CLI 가 몇 초씩 멈춘다. 붙을 파일을 확정한 뒤(connect)에만 넉넉히 기다린다.
 function readPortfile(p, attempts = PORTFILE_READ_ATTEMPTS) {
   for (let i = 0; i < attempts; i++) {
     try {
@@ -65,27 +66,97 @@ function findPortfile() {
   candidates.push(path.join(process.cwd(), 'data', 'daemon.json'))
   // 살아있는 데몬을 가리키는 첫 portfile 선택 — 죽은 dev portfile 을 건너뛴다(ENGRAM_DATA_DIR 목발 제거).
   // 이게 없으면 스테일 .engram-data/daemon.json 이 죽은 데몬을 가리켜 연결 실패한다.
-  const existing = candidates.filter((c) => fs.existsSync(c))
-  const isLive = (c) => {
-    const info = readPortfile(c, 2)
-    if (!info) return false
-    try { process.kill(info.pid, 0); return true } // 신호 0 = 존재 확인(안 죽임)
-    catch (e) { return e.code === 'EPERM' } // EPERM = 존재하나 권한없음 = 살아있음
-  }
-  const live = existing.find(isLive)
-  if (live) return live
-  if (existing.length) return existing[0] // 살아있는 게 없으면 첫 후보로(연결 시도 → 명확한 에러)
+  // ★후보별 진단을 전부 계산해 둔다★: 예전엔 첫 살아있는 후보에서 멈췄지만, 그 뒤 연결이 실패했을 때
+  //   "왜 이 파일을 골랐고 다른 후보는 어땠나"를 보여주려면 전체 진단이 필요하다(연결 실패 메시지가 씀).
+  //   후보 수가 적어(보통 4개 이하) 전부 계산해도 비용은 무시할 만하다.
+  const diagnostics = candidates.map((c) => {
+    const exists = fs.existsSync(c)
+    let alive = false
+    if (exists) {
+      const info = readPortfile(c, 2)
+      if (info) {
+        try { process.kill(info.pid, 0); alive = true } // 신호 0 = 존재 확인(안 죽임)
+        catch (e) { alive = e.code === 'EPERM' } // EPERM = 존재하나 권한없음 = 살아있음
+      }
+    }
+    return { path: c, exists, alive }
+  })
+  const existing = diagnostics.filter((d) => d.exists)
+  const live = existing.find((d) => d.alive)
+  // reason = 이 portfile 을 왜 골랐나(연결 실패 시 사용자에게 설명하는 용도).
+  if (live) return { path: live.path, reason: 'live-pid-match', candidates: diagnostics }
+  if (existing.length) return { path: existing[0].path, reason: 'fallback-no-live-candidate', candidates: diagnostics } // 살아있는 게 없으면 첫 후보로(연결 시도 → 명확한 에러)
   throw new Error('daemon.json not found. 데몬이 떠 있나요? tried:\n  ' + candidates.join('\n  '))
+}
+
+function reasonText(found) {
+  return found.reason === 'live-pid-match'
+    ? '기록된 pid 가 살아있어 선택됨'
+    : '살아있는 후보가 없어 첫 존재 후보로 fallback'
+}
+
+function formatCandidateLine(c) {
+  if (!c.exists) return `  ${c.path}  [missing]`
+  return `  ${c.path}  [exists, pid ${c.alive ? 'alive' : 'dead/unreadable'}]`
+}
+
+// 화면 표시 전용 중복 제거 — 선택 로직(findPortfile 의 live/existing[0])은 원본 순서를 그대로 쓰고
+//   이 함수는 안 건드린다. 스크립트-상대 후보와 .git 워크업 후보가 같은 파일로 수렴하는 경우가 있어
+//   (Windows 는 대소문자 무시) 정규화한 절대경로 기준 첫 등장만 남긴다.
+function dedupeForDisplay(candidates) {
+  const seen = new Set()
+  return candidates.filter((c) => {
+    const key = path.resolve(c.path).toLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+// portfile 선택 정보(found)를 실패 메시지에 붙인다 — 어느 portfile 을 왜 골랐고 다른 후보는 어땠는지.
+function withCandidateDiagnostics(headerLines, found) {
+  return [...headerLines, `사용한 portfile: ${found.path} (${reasonText(found)})`, 'candidates:', dedupeForDisplay(found.candidates).map(formatCandidateLine).join('\n')].join('\n')
+}
+
+// ★raw TCP 로 원인을 보충한다★: WHATWG ErrorEvent(.error, undici 기반) 는 message 가 비어 있어(실측,
+//   node v24) 아무 정보가 없다 — 그대로 문자열 결합하면 '[object ErrorEvent]' 로만 찍힌다(실측 증상).
+//   이미 실패가 확정된 뒤라, 같은 host:port 로 raw socket 을 한 번 더 열어 OS 에러(code/message, 예:
+//   ECONNREFUSED)를 얻는다. 성공 경로는 이 함수를 안 타므로 지연이 없다.
+function probeTcpReason(host, port, ms = 800) {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (text) => { if (done) return; done = true; sock.destroy(); resolve(text) }
+    const sock = net.createConnection({ host, port })
+    sock.once('connect', () => finish(null)) // 소켓은 열렸다 — 실패는 WS 핸드셰이크 단계였다는 뜻
+    sock.once('error', (e) => finish(e.code ? `${e.message} (${e.code})` : e.message))
+    setTimeout(() => finish(null), ms)
+  })
+}
+
+async function describeWsError(e, host, port) {
+  const err = e?.error
+  const msg = err?.message || e?.message
+  const code = err?.code
+  if (msg) return code ? `${msg} (${code})` : msg
+  const probed = await probeTcpReason(host, port)
+  return probed || String(e)
 }
 
 const rid = () => crypto.randomUUID()
 
 // 연결 + Auth(첫 프레임) → {send, waitFor} 반환. 실패(토큰 불일치/버전) 시 throw.
 async function connect() {
-  const portfile = findPortfile()
+  const chosen = findPortfile() // 이름을 waitFor 내부의 지역 found 와 겹치지 않게 chosen 으로.
+  const portfile = chosen.path
   const info = readPortfile(portfile)
-  if (!info) throw new Error(`daemon.json 을 온전히 읽지 못했습니다(쓰는 중이거나 다른 프로그램이 붙들고 있음): ${portfile}`)
-  const ws = new WebSocket(`ws://${info.host}:${info.port}/`)
+  if (!info) {
+    throw new Error(withCandidateDiagnostics(
+      [`daemon.json 을 온전히 읽지 못했습니다(쓰는 중이거나 다른 프로그램이 붙들고 있음)`],
+      chosen,
+    ))
+  }
+  const endpoint = `ws://${info.host}:${info.port}/`
+  const ws = new WebSocket(endpoint)
   ws.binaryType = 'arraybuffer'
   const texts = []       // 수신한 제어(JSON Text) 메시지 누적
   const waiters = []     // {match, resolve}
@@ -100,7 +171,13 @@ async function connect() {
   }
   await new Promise((res, rej) => {
     ws.onopen = () => res()
-    ws.onerror = (e) => rej(new Error('ws connect error: ' + (e?.message || e)))
+    ws.onerror = async (e) => {
+      const reason = await describeWsError(e, info.host, info.port)
+      rej(new Error(withCandidateDiagnostics(
+        [`daemon 연결 실패: ${endpoint}`, `원인: ${reason}`],
+        chosen,
+      )))
+    }
   })
   // 첫 프레임 = Auth. 데몬은 1s 안에 Auth 안 오면 끊는다.
   ws.send(JSON.stringify({ Auth: { token: info.token, protocol_version: info.protocol_version } }))
