@@ -397,6 +397,10 @@ pub async fn run() -> Result<(), i32> {
     // 1) data_dir 생성 + 쓰기 가능 확인.
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
     //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
+    //    ★이 줄이 어디에 남는지가 이 실패의 전부다★: 폴더를 못 쓰면 파일 로그도 같은 폴더에서
+    //    막히므로, 코어가 `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(core `logging` 머리말).
+    //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
+    //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
     if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
         // e 안에 폴더 경로와 조치가 이미 들어 있다(DiscoveryError::DataDirUnwritable).
         tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");

@@ -518,16 +518,32 @@ fn ensure_with(
 
     // (c) 폴링 — timeout 까지 새 daemon.json 을 기다린다.
     let deadline = clock.now() + timeout;
-    let mut last_read_err: Option<String> = None;
+    // ★"못 읽었다"가 아니라 "마지막에 본 것"을 들고 있는다★: 여기 읽기 실패만 담으면, 끝내 안 고쳐지는
+    //   깨진 파일이나 거절당한 파일(죽은 pid·버전 불일치)로 timeout 났을 때 아래 진단이 "파일이 끝내
+    //   생기지 않았다"고 **틀린 말**을 한다 — 사용자가 볼 수 있는 유일한 줄이 엉뚱한 곳을 가리킨다.
+    let mut last_reason: Option<String> = None;
     loop {
         match reader.read() {
-            Ok(Some(info)) => {
-                if let AcceptCheck::Accept = check_acceptable(&info, liveness) {
-                    return Ok(info);
+            Ok(Some(info)) => match check_acceptable(&info, liveness) {
+                AcceptCheck::Accept => return Ok(info),
+                AcceptCheck::DeadPid => {
+                    last_reason = Some(format!(
+                        "{DAEMON_FILE} 은 있으나 적힌 pid {} 가 살아있지 않음",
+                        info.pid
+                    ));
                 }
-            }
+                AcceptCheck::VersionMismatch { daemon } => {
+                    last_reason = Some(format!(
+                        "{DAEMON_FILE} 의 프로토콜 버전 {daemon} ≠ 이 클라이언트 {PROTOCOL_VERSION}"
+                    ));
+                }
+            },
             Ok(None) => {}
-            Err(DiscoveryError::Parse(_)) => {} // 쓰는 중 부분 파일일 수 있음 → 계속.
+            // 쓰는 중 부분 파일일 수 있어 계속 돈다 — 다만 **영영 안 고쳐지는 깨진 파일**도 같은
+            //   모양이라, 사유는 들고 간다(위 주석).
+            Err(e @ DiscoveryError::Parse(_)) => {
+                last_reason = Some(format!("{DAEMON_FILE} 파싱 실패: {e}"));
+            }
             // ★루프 안에서 중단하지 마라★: 한 번의 일시적 열기 실패(제3자가 좁은 공유로 잠깐 여는
             //   경우 — 데몬 쪽은 같은 조건을 재시도한다)로 **남은 대기 전부**를 버리게 된다. 다음
             //   tick 에 다시 읽으면 되고, 진짜 못 읽는 상태면 어차피 timeout 으로 귀결된다.
@@ -535,7 +551,7 @@ fn ensure_with(
             //   것만 들고 있다가 아래 timeout 에서 한 번 낸다 — 사용자가 실제로 보는 실패는 그 한 번뿐이다.
             Err(e) => {
                 tracing::debug!("{DAEMON_FILE} 폴링 읽기 실패 — 다음 tick 에 재시도: {e}");
-                last_read_err = Some(e.to_string());
+                last_reason = Some(format!("{DAEMON_FILE} 읽기 실패: {e}"));
             }
         }
         if clock.now() >= deadline {
@@ -555,7 +571,7 @@ fn ensure_with(
             //   추적 불가가 된다(파일 로그를 만든 이유 그 자체).
             tracing::warn!(
                 ?timeout,
-                last_read_error = last_read_err
+                last_reason = last_reason
                     .as_deref()
                     .unwrap_or("(없음 — daemon.json 이 끝내 생기지 않음)"),
                 "데몬 기동 대기 시간 초과"

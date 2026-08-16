@@ -60,9 +60,15 @@ pub fn run() {
             // 데몬과 **다른 파일**(`app-*.log`)에 쓴다 — 한 파일을 두 프로세스가 나눠 쓰면 줄이
             //   섞인다. 폴더는 데몬과 같은 `default_data_dir()` 이라 기동 실패를 쫓을 때 두 로그가
             //   한자리에 모인다.
-            logging::init_logging_with_file(
-                &crate::discovery::default_data_dir(),
-                logging::LogKind::App,
+            let data_dir = crate::discovery::default_data_dir();
+            // 데몬과 같은 이유로 자기 로그 위치를 남긴다(daemon `run()` 의 "데이터 폴더 결정"): 1차
+            //   폴더를 못 쓰면 이 경로가 `%TEMP%` 아래로 갈릴 수 있어, 반환값 말고는 어디에 쓰고
+            //   있는지 아는 수단이 없다.
+            let log_file = logging::init_logging_with_file(&data_dir, logging::LogKind::App);
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                log_file = ?log_file,
+                "앱 로그 파일 결정"
             );
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
