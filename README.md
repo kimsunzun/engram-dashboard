@@ -171,11 +171,17 @@ Node.js 20+와 Rust stable 툴체인이 필요합니다.
 git clone https://github.com/kimsunzun/engram-dashboard.git
 cd engram-dashboard
 npm install
-cargo build -p engram-dashboard-daemon   # 데몬은 별도 바이너리 — 없으면 에이전트를 못 띄웁니다
-npm run tauri dev
+scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 서버 + 앱 실행까지 한 번에
 ```
 
-Windows에서는 저장소 루트의 `run-dashboard-clean.bat`도 쓸 수 있습니다.
+**실행은 `scripts/`의 런처로 합니다**(Windows). 앱을 셸에서 직접 띄우지 않습니다 — 터미널의 자손으로 붙으면 앱 출력이 터미널로 거슬러 올라가고, 그 조합에서 터미널이 반복 크래시해 앱까지 함께 내려갑니다(실측). 런처는 작업 스케줄러로 앱을 프로세스 트리 밖에 띄우고 출력을 파일로만 보냅니다.
+
+| 런처 | 하는 일 |
+|---|---|
+| `scripts\run-debug.bat` | 클라이언트만 빌드 + dev 서버 확인 + 실행 |
+| `scripts\rebuild-run-debug.bat` | 데몬까지 재빌드(백엔드 수정 후) + 실행 |
+| `scripts\run-release.bat` | 이미 빌드된 릴리즈 실행 |
+| `scripts\rebuild-run-release.bat` | 릴리즈 새로 빌드 + 실행 |
 
 ```bash
 # src-tauri만 제외(그 크레이트의 테스트 타깃이 Windows에서 크래시) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)

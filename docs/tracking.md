@@ -11,7 +11,7 @@
 - **의심(미확정):** 마운트/통지 경합 + `src/api/protocolClient.ts`의 중복 억제(`if (this.connError === next) return` — **같은 문자열은 다시 통지하지 않는다**). 첫 통지를 놓치면 그 값이 그대로 남아 있는 한 재통지가 영영 없다는 구조는 증상과 맞지만, **인과를 확정하지 못했다.**
 - **파일:** `src/api/protocolClient.ts` · `src/components/layout/ConnectionNotice.tsx`.
 
-### T-26. `run-dashboard-clean.bat`의 kill 경로가 한 번도 실행되지 않았다
+### T-26. `scripts/rebuild-run-debug.bat`(구 `run-dashboard-clean.bat`)의 kill 경로가 한 번도 실행되지 않았다
 - **상태:** 보류(검증 공백 — 결함이 발견된 것이 아니다).
 - **출처:** S21(2026-08-16). ADR-0139 구현 시 **릴리스 런처 쪽만 표본 확인**했다.
 - **증상 아님 — 미검증:** dev 런처의 pid 읽기·이미지 이름·exe 경로 3중 확인과 kill 후 재확인이 실제로 도는 것을 본 사람이 없다. 릴리스 쪽과 구조가 같지만 **연결키 경로(`.engram-data\daemon.json`)와 기대 exe 경로(`target\debug\`)가 다르고 라벨·레이블명도 전부 별개**라, 한쪽의 통과가 다른 쪽을 보증하지 않는다.
@@ -22,7 +22,7 @@
 - **출처:** ADR-0132 조각 ④ 리뷰(2026-08-12), doc-aware 적출 + cross-family가 잔존 표면 하나를 추가 적출.
 - **증상:** 지운 `src-tauri/src/cli.rs`는 `daemon.json`을 **디스크에서 읽어** 붙었다 — 자격증명이 필요 없어 셸의 사람이 그대로 썼다. 새 `engram`은 `ENGRAM_TOKEN`+`ENGRAM_CONTROL_URL`이 없으면 `NO_TOKEN`으로 끝나고(`bin/engram.rs`), 그 토큰은 **스폰 시 발급되는 에이전트별 바인딩**이라(`control/registry.rs`) 사람이 `daemon.json`을 읽어도 통하지 않는다. 그래서 잃은 것은 `kill`·주입 둘이 아니라 **옛 4동사 전부 + 앞으로 `engram`에 추가될 제어 동사 전부**다. 남은 사람용 표면은 GUI뿐.
 - **★ADR-0132 §영향의 "이 갭은 kill을 여는 순간 닫힌다"는 에이전트 축 한정이다★** — 사람 축은 `agent kill`을 열어도 안 닫힌다(자격증명 문제라 동사 추가와 무관).
-- **잔존 표면 1건(부분 완화이자 결정 1의 미완):** `scripts/engram.mjs`가 같은 무자격증명 경로(`daemon.json` → WS)로 살아 있고 `run-dashboard-release.bat`이 릴리즈 앱 조종법으로 이를 안내한다. 그러나 ① 자기 헤더가 PoC라 밝히고 ② 배포 폴더에 **포함되지 않으며**(`scripts/build-release.ps1` 미참조) ③ 문법이 `engram`과 별개라 **두 문법이 갈릴 수 있다** — 결정 1이 막으려던 "같은 일을 하는 입구가 둘"이 이 축에 남아 있다.
+- **잔존 표면 1건(부분 완화이자 결정 1의 미완):** `scripts/engram.mjs`가 같은 무자격증명 경로(`daemon.json` → WS)로 살아 있고 `scripts/rebuild-run-release.bat`(구 `run-dashboard-release.bat`)이 릴리즈 앱 조종법으로 이를 안내한다. 그러나 ① 자기 헤더가 PoC라 밝히고 ② 배포 폴더에 **포함되지 않으며**(`scripts/build-release.ps1` 미참조) ③ 문법이 `engram`과 별개라 **두 문법이 갈릴 수 있다** — 결정 1이 막으려던 "같은 일을 하는 입구가 둘"이 이 축에 남아 있다.
 - **필요한 것:** 사람용 자격증명 획득 경로를 정하는 결정(예: 데몬이 사람용 토큰을 발급·노출하는 방식, 또는 `engram`이 `daemon.json`을 직접 읽는 관리자 모드). 그 결정이 서면 `scripts/engram.mjs`의 거취도 함께 정해진다.
 
 ### T-24. `ENGRAM_EXE`가 읽는 이가 없는 채로 모든 스폰 env에 실린다

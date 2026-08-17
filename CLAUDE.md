@@ -183,7 +183,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 코어 격리 게이트. import 라인 앵커라 주석 자기인용이 오탐되지 않는다.
 - `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
 - 프론트: `npm test`(vitest run) + `npx tsc --noEmit`(별도 typecheck 스크립트 없음)
-- 전체 E2E: `npm run tauri dev` · 로그 ON: `RUST_LOG=debug`(기본 warn)
+- 전체 E2E: `scripts/`의 `run-*.bat` 런처로 띄운다(목록·용도 = README). **셸에서 직접 띄우지 않는다**(아래 「GUI 실측」). 로그 ON: `RUST_LOG=debug`(기본 warn — 분리 실행에선 스크립트 인자로 넘긴다)
 - **CI 정본 = `.github/workflows/ci.yml`** — 로컬 게이트에 없는 검사가 더 있다(여기서 세지 않는다). 그중 wire 바인딩 동기 게이트는 실제로 깨진 적이 있으니, 생성물 drift를 남긴 채 밀지 말 것.
 
 ### 네트워크 행 격리 게이트
@@ -198,19 +198,8 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 
 실제 Tauri 창(WebView2)에 CDP로 붙어 스크린샷·DOM 조회·실제 `invoke` 호출까지 한다(node 내장 WebSocket만, **Windows 전용**).
 
-```bash
-# 1) 디버그 포트 열고 앱 실행
-WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev
-# 2) 포트 대기: curl http://127.0.0.1:9223/json/version
-# 3) 검증
-node scripts/cdp.mjs info                  # 페이지 목록
-node scripts/cdp.mjs shot out.png          # 스크린샷(맨 파일명은 _wip/shots/ 아래로) → Read로 확인
-node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행
-```
-
-- `eval`로 DOM 텍스트와 백엔드 직접 호출(`window.__TAURI__.core.invoke(...)`)을 확인해 spawn/write/interrupt/kill을 실제 IPC로 검증한다.
-- **검증엔 스샷보다 `eval` 텍스트가 유리하다**(픽셀 해석 회피).
-- 포트 9223 고정(9222는 Gemini Chrome과 충돌 — `CDP_PORT`로 변경).
+- **★앱을 셸에서 직접 띄우지 않는다★** — `scripts/`의 런처나 `scripts/launch-detached.ps1`로 띄운다. 셸에서 띄우면 앱이 터미널의 자손이 되고 **앱 출력이 그 사슬을 거슬러 올라간다** — 그 조합에서 터미널이 반복 크래시해 앱까지 함께 내려간다(실측 2026-08-16). **끊어야 할 조건이 둘이다 — 프로세스 트리 밖 + 출력은 파일로만.** `start`·백그라운드 잡·`nohup`은 둘 다 못 끊으므로 대체재가 아니다.
+- 절차(기동 인자·환경변수·PID·teardown)는 `/qa` 바인딩 §full이 갖는다. 여기 되올리지 않는다.
 
 ## 컨벤션
 

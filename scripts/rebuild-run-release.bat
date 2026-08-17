@@ -15,7 +15,16 @@ REM ★Do NOT set ENGRAM_DATA_DIR to "point the CLI at" the release daemon (do n
 REM   under ADR-0134 that variable is ALSO the single-instance scope, so setting it makes the next
 REM   daemon claim a DIFFERENT folder - you silently get a second daemon with its own roster and no
 REM   error. Let the CLI discover the portfile instead.
-cd /d "%~dp0"
+REM ★setlocal (do not remove)★: without it, RELEASE_DAEMON_EXE below survives into a SECOND run in the
+REM   same cmd window. Combined with a failed Get-Process lookup that stale value makes the path check
+REM   pass, so a pid we could NOT confirm gets killed - the exact opposite of what that check promises.
+setlocal
+cd /d "%~dp0.."
+REM ★%CD%, not a %~dp0.. path (do not remove)★: this launcher lives in scripts\, so a %~dp0-relative
+REM   path would carry a literal ".." segment. EXPECTED_DAEMON_EXE below is string-compared against the
+REM   running process's own Path (canonical, no ".."), so the comparison would never match and every
+REM   daemon kill would be silently skipped. Anchoring on %CD% after the cd gives a canonical root.
+set "ROOT=%CD%"
 
 REM ADR-0139 - launchers kill only their OWN deployment's daemon.
 REM ★Kill ONLY THIS deployment's daemon - never go back to `taskkill /IM` (do not remove)★:
@@ -32,9 +41,13 @@ REM   Missing/unreadable portfile, a missing/zero/non-numeric pid, a dead pid, a
 REM   or a different executable path => kill nothing and say so. If the kill itself fails (e.g. an
 REM   elevated daemon), the script stops instead of silently building/launching against a still-locked
 REM   binary.
-set "RELEASE_PORTFILE=%~dp0target\release\data\daemon.json"
-set "EXPECTED_DAEMON_EXE=%~dp0target\release\engram-dashboard-daemon.exe"
+set "RELEASE_PORTFILE=%ROOT%\target\release\data\daemon.json"
+set "EXPECTED_DAEMON_EXE=%ROOT%\target\release\engram-dashboard-daemon.exe"
 set "RELEASE_DAEMON_PID="
+REM ★Pre-clear RELEASE_DAEMON_EXE too (do not remove)★: `for /f` does not run its body when the lookup
+REM   fails, so an uninitialised variable keeps whatever was there before. The comment below promises
+REM   "cannot confirm => stays empty => do not kill"; without this line that promise is false.
+set "RELEASE_DAEMON_EXE="
 if not exist "%RELEASE_PORTFILE%" goto :daemon_kill_no_portfile
 REM ★Portfile path travels to PowerShell via env var, never interpolated into a quoted literal (do
 REM   not revert)★: a checkout path containing an apostrophe (e.g. C:\O'Brien\Engram) would break out
@@ -97,9 +110,21 @@ echo [release] Building daemon binary (release, lands next to the app exe)...
 cargo build --release -p engram-dashboard-daemon
 if errorlevel 1 ( echo [release] DAEMON BUILD FAILED - not launching. & pause & exit /b 1 )
 
-echo [release] Launching target\release\engram-dashboard.exe ...
-start "" "target\release\engram-dashboard.exe"
+REM ★Launched detached (scripts\launch-detached.ps1) - do NOT go back to `start` (do not remove)★:
+REM   launched from a terminal, the app becomes a DESCENDANT of that terminal and its output travels
+REM   back up the pipe chain. That combination repeatedly crashed the terminal (measured 2026-08-16),
+REM   taking the app down with it. The scheduler path fixes BOTH halves - the app is created by a
+REM   service so it is outside our process tree, AND its output goes to a file only. `start` satisfies
+REM   NEITHER.
+REM ★`-Command`, not `-File` (do not remove)★: with -File, PowerShell takes every following argument
+REM   as a literal string, so a comma-separated -EnvVars list collapses into ONE value. The debug port
+REM   argument is then malformed, 9223 never opens, and the script still prints a PID - silent failure
+REM   (measured 2026-08-17).
+echo [release] Launching target\release\engram-dashboard.exe detached...
+powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe 'target/release/engram-dashboard.exe' -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+if errorlevel 1 ( echo [release] LAUNCH FAILED - see the log tail above. & pause & exit /b 1 )
 echo.
+echo [release] The PID above is the app. NOTE: closing this window does NOT stop it - close the app window.
 echo [release] Launched. Full installers (msi/nsis): run "npm run tauri build" WITHOUT --no-bundle.
 echo [release] This build's daemon.json -^> target\release\data\
 pause

@@ -86,7 +86,7 @@
 ### HIGH
 1. **프론트 로직 단위테스트 도입 (vitest)** — vitest 설치 + `npm test` 스크립트. `src/api/daemonClient.test.ts` 식 **코로케이션**. mock `WebSocket` + mock `@tauri-apps/api/core` invoke 로 브라우저 없이: decodeOutputFrame(바이트/UUID), high-water dedup, **재연결 resume(드롭→재연결→무손실·무중복)**, request_id 매칭, #13133 정리, clientFactory 모드. `embeddedClient`/`decodeBase64`/store 전이도. 재연결 버그류 회귀를 ①에서 잡는 그물 — ②③ 부하·EDR 마찰 감소의 핵심.
 2. **core `examples/` 검증 하네스 → `tests/` 이관(§0-a)** — `examples/{headless,transport_smoke,session_smoke}` 의 "로그 eyeball" 을 **단언 기반 통합테스트**(`crates/engram-dashboard-core/tests/`)로 전환: spawn→write→resize→kill 인과, hang 없음, finish(Killed) 종점 등. 그러면 `cargo test` 가 core 격리까지 자동 회귀(현 구멍 메움). `spike*.rs` 는 스파이크라 `examples/` 잔류.
-3. **CDP 역할 재정의 + 최소화** — CDP eval 로 로직 검증하던 관행 중단. CDP = 시각(shot)·레이아웃·실앱 최종 스모크 전용. CLAUDE.md 의 "검증은 스샷보다 eval 텍스트 유리" 문구도 이 분리에 맞게 보정 검토(eval 은 실앱 스모크 한정).
+3. **CDP 역할 재정의 + 최소화** — CDP eval 로 로직 검증하던 관행 중단. CDP = 시각(shot)·레이아웃·실앱 최종 스모크 전용. `/qa` 바인딩 §full 의 "검증은 스샷보다 eval 텍스트 유리" 문구도 이 분리에 맞게 보정 검토(eval 은 실앱 스모크 한정).
 
 ### MED
 3. **프론트↔wire 타입 드리프트 게이트** — ts-rs `bindings/*.ts` 가 있으나 프론트가 `src/api/types.ts` 로 손-미러. `ts_export` 산출물과 프론트 소비 타입의 drift 검출(빌드 시 diff 비교) 또는 bindings 직접 소비로 전환.
@@ -120,9 +120,8 @@ rg "^\s*use tauri" crates/engram-dashboard-core/src/      # → 0줄 (import 라
 rg "engram_dashboard_protocol" crates/engram-dashboard-core/src/   # → 0줄
 
 # ③ 실앱/시각 (CDP — EDR 탐지 대상, 최소 사용)
-# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev
-# node scripts/cdp.mjs shot out.png   # 스샷(시각 확인)
-# node scripts/cdp.mjs info           # 페이지 목록
+# 실명령 정본 = /qa 바인딩 §full (여기 베끼지 않는다).
+# 앱은 셸에서 직접 띄우지 않는다 — scripts/launch-detached.ps1 경유.
 ```
 
 ## 4. 보안(EDR) 주의 — CDP
