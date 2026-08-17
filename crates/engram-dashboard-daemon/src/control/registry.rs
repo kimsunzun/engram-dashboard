@@ -94,7 +94,7 @@ pub struct ControlRegistry {
     /// RwLock: 설치는 드물고(테스트 셋업 1회) 조회는 relay 마다지만 짧다.
     delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
     /// ★mid-send yield-seam hook(ADR-0088 Stage 1 — test-harness 전용)★: `handle_send` 가 resolve↔write
-    ///   갭의 **가장 늦은 지점**(write_stdin_observed 직전)에서 발화하는 test hook. 결정적 mid-flight
+    ///   갭의 **가장 늦은 지점**(수신자 주입 직전)에서 발화하는 test hook. 결정적 mid-flight
     ///   epoch race 재현용 — hook 안에서 같은 AgentId 를 새 epoch incarnation 으로 교체 주입하면 resolve 는
     ///   구 incarnation 을 봤는데 write 는 새 incarnation 에 착지한다. ★race 는 ADR-0086 §F5 가
     ///   design-accepted 로 표시★(메일은 **논리 에이전트**를 향하므로 새 incarnation 착지가 올바른 동작이다)

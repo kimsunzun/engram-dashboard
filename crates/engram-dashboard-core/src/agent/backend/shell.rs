@@ -28,6 +28,13 @@ impl AgentBackend for ShellBackend {
         false
     }
 
+    /// ★셸은 편지를 읽는 주체가 아니다(사용자 결정 2026-08-17)★ — 셸에 도착한 봉투는 읽히는 게 아니라
+    /// **명령으로 실행된다**. 본문은 LLM 자유 텍스트라 `&`·`|`·`;` 가 섞이면 그 뒤가 별도 명령으로
+    /// 파싱된다. 그래서 수신자 명단(`@all` 포함)에서 아예 뺀다 — 제출 바이트를 빼는 식의 완화가 아니다.
+    fn reads_messages(&self) -> bool {
+        false
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,

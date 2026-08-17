@@ -117,13 +117,15 @@ fn session_compose_resize_exiting_kill() {
     // intent 0 = TerminationIntent::None — 이 smoke 는 set_intent 를 쓰지 않는다.
     let intent = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     // 이 smoke 는 default_shell 을 띄우므로 backend caps 도 셸 기준(resume=false).
-    let backend_caps = ShellBackend.capabilities(
-        &engram_dashboard_core::agent::profile::AgentCommand::Shell {
-            program: "cmd.exe".into(),
-            args: vec![],
-        },
-    );
+    let shell_cmd = engram_dashboard_core::agent::profile::AgentCommand::Shell {
+        program: "cmd.exe".into(),
+        args: vec![],
+    };
+    let backend_caps = ShellBackend.capabilities(&shell_cmd);
     let encoder = engram_dashboard_core::agent::backend::InputEncoder::Raw;
+    // ★리터럴로 쓰지 마라★: 하네스가 실물과 반대값을 들면 "산 세션 값 == 백엔드 파생값" 이라는 우편
+    //   자격 방어의 전제가 인트리에서 먼저 깨진다. 같은 명령에서 파생시킨다.
+    let reads_messages = engram_dashboard_core::agent::backend::reads_messages(&shell_cmd);
     let session = AgentSession::new(
         id,
         cwd,
@@ -133,6 +135,7 @@ fn session_compose_resize_exiting_kill() {
         intent,
         backend_caps,
         encoder,
+        reads_messages,
         core,
         transport,
     );

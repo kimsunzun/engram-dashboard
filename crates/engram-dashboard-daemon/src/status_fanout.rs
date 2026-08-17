@@ -133,6 +133,7 @@ mod tests {
                     max_tokens: false,
                 },
             },
+            reads_messages: true,
         }
     }
 

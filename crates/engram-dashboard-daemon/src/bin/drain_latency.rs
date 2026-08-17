@@ -176,6 +176,7 @@ fn insert_seam(manager: &Arc<AgentManager>) -> Seam {
             },
         },
         InputEncoder::ClaudeStreamJson,
+        true,
         core,
         Box::new(SeamTransport {
             captured: written.clone(),

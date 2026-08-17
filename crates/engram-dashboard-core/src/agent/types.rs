@@ -564,6 +564,17 @@ pub struct AgentInfo {
     /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 트리거(S9 §18-a).
     pub epoch: u32,
     pub capabilities: Capabilities,
+    /// 이 에이전트가 **편지를 읽는 주체**인가(= 우편 수신자 명단 자격). 세션이 spawn 때 backend 에서
+    /// 받아 든 값을 **이 스냅샷에 그대로 실어** 내보낸다.
+    ///
+    /// ★스냅샷에 싣는 이유(load-bearing — 재조회로 되돌리지 마라)★: 소비자가 목록을 받아 놓고 항목마다
+    ///   매니저에 되물으면 ① 자격 확인과 주입 사이에 같은 id 가 다른 세션으로 갈릴 수 있고(TOCTOU)
+    ///   ② 두 조회 사이에 reaper 가 세션을 거두면 그 항목이 산 명단에서도 잠듦에서도 떨어져, 파킹돼
+    ///   재등장 때 배달되던 편지가 "그런 수신자 없음" 으로 **유실**되며 ③ 세션당 락 획득이 N회 되살아난다
+    ///   (`AgentManager::roster` doc — 우편 발송 임계 경로). 한 스냅샷에서 나오면 셋 다 성립하지 않는다.
+    /// ★capability 가 아니다★: `capabilities` 는 "무엇을 할 수 있나", 이건 "입력이 무엇으로 해석되나" 다.
+    ///   그래서 `Capabilities` 안이 아니라 별도 필드이고, wire 로도 나가지 않는다(데몬 내부 판정 축).
+    pub reads_messages: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
