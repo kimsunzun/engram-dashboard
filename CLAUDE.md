@@ -103,7 +103,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 **데이터 흐름:** `AgentManager → AgentSession(= OutputCore + dyn AgentTransport)`. 출력·상태는 `OutputSink`/`StatusSink` trait으로만 흐른다(「코어 격리」 계약의 실물). 종료 분류는 reaper 단일 소비자(ADR-0019).
 
 - **core** — 에이전트 코어(agent·persistence·logging), tauri import 0. seam: `transport`·`backend`.
-- **command** — 명령 버스 **도구**. **워크스페이스 crate 의존 0 · 명령 0개** — 어휘는 생산자 옆에서 선언한다. **불변식·격리 게이트·구성물 목록의 정본은 그 crate `src/lib.rs` 헤더.** 화살표는 **들어오는 쪽 한 방향뿐** — **`core`가 이 crate를 의존한다(코어의 첫 워크스페이스 의존 — 그 대가의 회계는 TRD S20 §5)** · `protocol`도 뒤따른다(Step 2). 그 반대는 없다. (ADR-0134)
+- **command** — 명령 버스 **도구**. **워크스페이스 crate 의존 0 · 명령 0개** — 어휘는 생산자 옆에서 선언한다. **불변식·격리 게이트·구성물 목록의 정본은 그 crate `src/lib.rs` 헤더.** 화살표는 **들어오는 쪽 한 방향뿐** — **`core`가 이 crate를 의존한다(코어의 첫 워크스페이스 의존 — 그 대가의 회계는 TRD S20 §5)** · `protocol`도 뒤따른다(Step 2). 그 반대는 없다. (ADR-0140)
 - **messaging** — 메시징 커널. **워크스페이스 crate 무의존**(컴파일러 강제 벽). 접합은 lib이 소유한 포트 trait뿐이고 실물 어댑터는 데몬이 소유한다. (ADR-0110 — 턴 관측 명단·분류는 ADR-0127이 코어로 승격, TapHost 포트는 폐지)
 - **net** — 데몬의 네트워크 행(WS·Origin·핸드셰이크·연결 수명·단일 writer·keepalive·팬아웃·프레임 포트·단일 인스턴스·portfile). **경계·격리 게이트·의존 상한의 정본은 그 crate `src/lib.rs` 헤더.** (ADR-0129)
 - **daemon** — `AgentManager` 소유, 소켓 수락 루프와 네트워크 행 조립. 이벤트버스 single-push(ADR-0028). 메시징 호스트 조립실(ADR-0110).
@@ -150,7 +150,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `tauri = "2"` — Channel 무손실 Windows 실측 확인(spike).
 - `portable-pty = "0.8.1"` · `uuid` · `thiserror` · `regex`(로그 마스킹) · `tracing` · `dunce`(cwd canonicalize UNC 회피).
 - `windows`(Job Object) — `#[cfg(windows)]`.
-- `inventory`(명령 선언 링커 수집) — S20 Step 1이 들인 **유일한 신규 서드파티 crate**다(`Cargo.lock` 신규 패키지 = 이것 + 워크스페이스 멤버 자신, 둘뿐 — 실측 2026-08-14). `core`를 타고 데몬·셸 릴리즈 바이너리에 함께 링크된다. (ADR-0134)
+- `inventory`(명령 선언 링커 수집) — S20 Step 1이 들인 **유일한 신규 서드파티 crate**다(`Cargo.lock` 신규 패키지 = 이것 + 워크스페이스 멤버 자신, 둘뿐 — 실측 2026-08-14). `core`를 타고 데몬·셸 릴리즈 바이너리에 함께 링크된다. (ADR-0140)
 - `ts-rs = "10"` — 워크스페이스엔 이미 있었으나(`protocol`·`src-tauri`) **`core`의 production 의존으로 새로 들어왔다** — 선언 매크로가 `TS` derive를 달기 때문. 즉 코어가 TS 생성 도구를 운영 그래프에 안고 있다.
 
 ---
@@ -170,7 +170,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 
 - `cargo test --workspace --exclude engram-dashboard` — 전 workspace 회귀. src-tauri 패키지를 빼는 이유는 그 lib 테스트 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽기 때문이다(실측 2026-08-05). **루트 bare `cargo test` 금지.**
 - `cargo test -p engram-dashboard-core` — 코어 unit + 통합(실 PTY로 단언)
-- `cargo test -p engram-dashboard-command` — 명령 버스 도구 단위(워크스페이스 의존 0 격리 하네스, ADR-0134)
+- `cargo test -p engram-dashboard-command` — 명령 버스 도구 단위(워크스페이스 의존 0 격리 하네스, ADR-0140)
 - `cargo test -p engram-dashboard-protocol` — codec golden + ts-rs 바인딩
 - `cargo test -p engram-dashboard-messaging` — 메시징 커널 단위(무의존 격리 하네스, ADR-0110)
 - `cargo test -p engram-dashboard-net --all-features` — 네트워크 행 단위(ADR-0129). ★`--all-features`를 빼지 말 것★ — net의 기본 feature가 비어 있어 맨 명령은 `auth`만 컴파일해 6개만 돈다(켜면 31개, 실측 2026-08-05). **두 조합을 다 도는 것이 게이트 5.**
@@ -179,7 +179,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 코어 격리 게이트. import 라인 앵커라 주석 자기인용이 오탐되지 않는다.
 - `rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
 - `cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 메시징 커널 의존 상한. 바로 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표·`[build-dependencies]`·rename)를 **해석된 의존 그래프**로 덮는다. **그중 가장 큰 구멍은 정규식이 crate 이름 알파벳을 손으로 박아 둔다는 것** — 새 crate는 누가 그 알파벳에 이름을 더할 때까지 **아예 안 보인다**(`command`를 더한 것이 이 게이트를 세운 계기다). net 상한 게이트와 같은 계기이고 플래그도 같은 이유로 줄이지 않는다.
-- `cargo tree -p engram-dashboard-command --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 도구 crate 의존 상한. 이 crate의 **존재 이유가 「워크스페이스 의존 0」**이라 이 줄이 그 벽이다. ★**정규식·상한 게이트에 공통으로 남는 구멍**★ — 둘 다 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별한다. 다른 이름을 단 멤버는 양쪽 다 그냥 통과한다. (ADR-0134)
+- `cargo tree -p engram-dashboard-command --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 도구 crate 의존 상한. 이 crate의 **존재 이유가 「워크스페이스 의존 0」**이라 이 줄이 그 벽이다. ★**정규식·상한 게이트에 공통으로 남는 구멍**★ — 둘 다 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별한다. 다른 이름을 단 멤버는 양쪽 다 그냥 통과한다. (ADR-0140)
 - 프론트: `npm test`(vitest run) + `npx tsc --noEmit`(별도 typecheck 스크립트 없음)
 - 전체 E2E: `npm run tauri dev` · 로그 ON: `RUST_LOG=debug`(기본 warn)
 - **CI 정본 = `.github/workflows/ci.yml`** — 로컬 게이트에 없는 검사가 더 있다(여기서 세지 않는다). 그중 wire 바인딩 동기 게이트는 실제로 깨진 적이 있으니, 생성물 drift를 남긴 채 밀지 말 것.

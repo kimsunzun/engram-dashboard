@@ -315,7 +315,7 @@ async fn run_accept_loop(
     //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    // 명령 주인 명부(ADR-0134/0135) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
+    // 명령 주인 명부(ADR-0140/0141) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
     //   말고는 아직 아무도 쥐지 않는다(배달 라우팅이 붙으면 조립 위로 올라갈 자리다).
     let commands = command_roster::CommandRoster::new();
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
@@ -524,7 +524,7 @@ pub async fn run() -> Result<(), i32> {
     //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
     //   보여 준다(에러도 로그도 없다).
     roster_broadcast_slot.set(wiring.roster_broadcast());
-    // ★제어 동사의 실입구가 이 표다(ADR-0134)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
+    // ★제어 동사의 실입구가 이 표다(ADR-0140)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
     //   ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은 팬아웃 값이 아니라 슬롯이라 통지
     //   시점에 읽는다(`control::commands::make_daemon_table`).
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(

@@ -1,4 +1,4 @@
-//! 명령 주인 명부의 공유 핸들 — **전 연결이 같은 한 부를 본다**(ADR-0134/0135 · TRD §3-7).
+//! 명령 주인 명부의 공유 핸들 — **전 연결이 같은 한 부를 본다**(ADR-0140/0141 · TRD §3-7).
 //!
 //! 명부의 규칙(등록 전량 last-wins · 차분 · tombstone · 상한)은 전부 도구 crate 의 [`Roster`] 가
 //! 소유한다. 여기가 더하는 것은 **연결 수명**뿐이다 — 명부는 이름만 알고 어느 연결이 아직 붙어
@@ -59,7 +59,7 @@ impl CommandRoster {
 
     /// 연결 하나의 주인 토큰 — **연결 id 에서 파생한다**. 파생 규칙이 여기 하나뿐이라 등록·정리·조회가
     /// 같은 값을 본다(정책과 그 근거는 `connection_core::ConnectionSession::owner_token`).
-    // ADR-0134
+    // ADR-0140
     pub fn owner_of(conn_id: ConnId) -> OwnerToken {
         OwnerToken::new(format!("{}{conn_id}", Self::OWNER_TOKEN_PREFIX))
     }
@@ -73,7 +73,7 @@ impl CommandRoster {
     /// 일어난다(겹쳐 도는 등록이 그 사이로 못 들어온다).
     ///
     /// 이름은 **지우지 않는다** — 지우면 「모르는 이름」과 「주인이 지금 없는 이름」이 같은 답이 된다
-    /// (ADR-0135 · TRD §4-②).
+    /// (ADR-0141 · TRD §4-②).
     pub fn detach(&self, conn_id: ConnId) {
         let mut shared = self.lock();
         shared.live.remove(&conn_id);

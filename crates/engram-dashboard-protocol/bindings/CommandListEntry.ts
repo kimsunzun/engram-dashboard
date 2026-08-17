@@ -10,7 +10,7 @@
  * `available=false` = **이름은 명부에 있으나 주인이 지금 없다**(연결이 끊긴 자취). 없는 이름과 갈라야
  * 호출자가 재시도할지를 정할 수 있어서 지우지 않고 남긴다 — 전자는 `OWNER_UNAVAILABLE`(나중에 다시),
  * 후자는 `UNKNOWN_COMMAND`(재시도 무의미)다(TRD §4-②). 만료는 없다 — 시간이 지나 자취가 사라지면
- * 같은 질문의 답이 시계에 따라 갈려 그 구분 자체가 무너진다(ADR-0135).
+ * 같은 질문의 답이 시계에 따라 갈려 그 구분 자체가 무너진다(ADR-0141).
  * `help` 는 주인이 얹은 문자열 **그대로**다(데몬이 열어보지 않으므로 가공도 없다).
  */
 export type CommandListEntry = { name: string, help: string, available: boolean, };

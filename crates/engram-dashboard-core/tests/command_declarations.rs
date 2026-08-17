@@ -25,7 +25,7 @@ fn declared_names_are_the_cli_verbs() {
     );
 }
 
-/// 조회는 v1 목록에 **실린다**(ADR-0135 — 가정 B 채택). 빼면 발견이 절반에서 멈춘다.
+/// 조회는 v1 목록에 **실린다**(ADR-0141 — 가정 B 채택). 빼면 발견이 절반에서 멈춘다.
 #[test]
 fn the_read_verb_is_in_the_v1_list() {
     let list = spec_of("agent.list").expect("agent.list 는 링크된 선언에 있다");
@@ -96,7 +96,7 @@ fn every_declaration_passes_the_schema_lint() {
     }
 }
 
-/// ★스키마가 「없어도 된다」고 광고한 필드만 실제로 생략 가능해야 한다★(ADR-0135 — 광고가 곧 사용법이다).
+/// ★스키마가 「없어도 된다」고 광고한 필드만 실제로 생략 가능해야 한다★(ADR-0141 — 광고가 곧 사용법이다).
 ///
 /// 광고를 목록끼리 견주면 **광고가 틀렸을 때 둘 다 같이 틀린다** — 그래서 광고 옆에 실제 역직렬화를
 /// 세우고, 칸을 하나씩 빼면서 「required 라고 적힌 것만 빠질 때 터지는지」를 본다.
@@ -188,7 +188,7 @@ fn linker_collection_sees_the_declaring_crate() {
     assert_eq!(collected, declared);
 }
 
-/// 파생 파일의 원소와 등록 패킷의 `help` 가 **같은 한 출처**에서 나온다(ADR-0135).
+/// 파생 파일의 원소와 등록 패킷의 `help` 가 **같은 한 출처**에서 나온다(ADR-0141).
 #[test]
 fn every_schema_item_is_valid_json_with_the_agreed_keys() {
     for spec in COMMAND_SPECS {

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use crate::ErrorCode;
 
-/// 읽기/쓰기 표식. `Read` 는 멱등이라 dedup 대상에서 면제된다(ADR-0135 · TRD §4-⑥).
+/// 읽기/쓰기 표식. `Read` 는 멱등이라 dedup 대상에서 면제된다(ADR-0141 · TRD §4-⑥).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     Write,
@@ -25,7 +25,7 @@ impl Effect {
 /// ★링커 수집이 담아도 되는 것은 여기까지다(규칙 T-1)★ — 핸들러 실물은 `make_table(deps)` 가 조립 때
 /// 주입한다. 이 타입에 `Arc<dyn CommandHandler>` 를 얹으면 그 규칙이 무너진다.
 /// `args_schema`·`ok_schema` 는 **JSON Schema 텍스트**(선언 매크로 생성)다.
-// ADR-0134
+// ADR-0140
 pub struct CommandSpec {
     pub name: &'static str,
     pub effect: Effect,
@@ -126,7 +126,7 @@ pub(crate) fn find_unique<'a>(
 /// 등록이 나르는 단위(TRD §3-1 · §3-7).
 ///
 /// `help` = 그 명령의 **파생 스키마 항목 하나를 통째로 직렬화한 JSON 텍스트**([`spec_item_json`]).
-/// `args_schema` 한 칸이 아니다 — `ok` 까지 실려야 조회 명령의 반환 모양이 함께 발견된다(ADR-0135).
+/// `args_schema` 한 칸이 아니다 — `ok` 까지 실려야 조회 명령의 반환 모양이 함께 발견된다(ADR-0141).
 /// ★받는 쪽(데몬)에게 이 값은 불투명 문자열이다★ — 파싱·검증·분기하면 위반이고, 그래서 자료형을
 /// `String` 위로 올리지 않는다(TRD §3-7 하드 제약).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

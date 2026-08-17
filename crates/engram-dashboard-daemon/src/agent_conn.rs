@@ -269,7 +269,7 @@ impl ConnectionHandler for AgentConnection {
     }
 
     fn on_disconnect(&self, conn_id: ConnId) {
-        // ── 명령 명부 자취 내리기(ADR-0135) — ★이 정리의 **첫 줄**이어야 한다★ ────────────
+        // ── 명령 명부 자취 내리기(ADR-0141) — ★이 정리의 **첫 줄**이어야 한다★ ────────────
         // 뒤로 밀면 그 앞 정리가 도는 **동안** 이 연결이 아직 붙어 있는 것으로 읽혀, 그 창에 겹쳐 든
         //   등록이 통과한다(겹침 자체의 근거 = `CommandRoster` 헤더). 그러면 이미 죽은 연결이 산 연결이
         //   가져간 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 내린다 — 멀쩡한 연결의 명령이
@@ -336,7 +336,7 @@ pub struct AgentConnections {
     control_registry: Arc<crate::control::registry::ControlRegistry>,
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    // ADR-0134
+    // ADR-0140
     commands: CommandRoster,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -589,7 +589,7 @@ mod tests {
         }
     }
 
-    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 자취로 내리는지(ADR-0134/0135) ──
+    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 자취로 내리는지(ADR-0140/0141) ──
 
     /// 공장 하나가 만든 연결들이 **같은 명부**를 보는지까지 이 하네스가 본다 — 연결마다 새 명부가 나면
     /// 아래 conn 2 의 조회가 빈 목록을 받는다.

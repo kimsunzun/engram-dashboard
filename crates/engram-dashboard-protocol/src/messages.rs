@@ -213,7 +213,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    // ── 명령 버스 등록 wire(ADR-0134/0135 · TRD §3-7) ───────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0140/0141 · TRD §3-7) ───────────────────────────────
     // ★받는 쪽만 서 있다★ — 데몬 dispatch 가 이 셋을 주인 명부에 반영하고 [`AgentEvent::CommandList`]
     //   로 답한다(`connection_core.rs`). **보내는 쪽은 아직 없다** — 셸·화면이 자기 선언을 얹는 것은
     //   TRD §6 Step 3·4 다.
@@ -248,7 +248,7 @@ pub enum AgentCommand {
     /// (TRD §3-7 조항 3). 전량 재전송은 [`AgentCommand::RegisterCommands`] 뿐이다.
     ///
     /// `removed` 가 이름만 나르는 것은 의도다 — 내릴 때 모양은 필요 없다. 그리고 내린 이름은 명부에서
-    /// **지워지지 않고 자취로 남는다**(ADR-0135) — 지우면 아직 붙어 있는 주인의 실재했던 이름이
+    /// **지워지지 않고 자취로 남는다**(ADR-0141) — 지우면 아직 붙어 있는 주인의 실재했던 이름이
     /// `UNKNOWN_COMMAND`(재시도 무의미)로 나간다.
     UpdateCommands {
         #[ts(type = "string")]
@@ -272,7 +272,7 @@ pub enum AgentCommand {
 /// `available=false` = **이름은 명부에 있으나 주인이 지금 없다**(연결이 끊긴 자취). 없는 이름과 갈라야
 /// 호출자가 재시도할지를 정할 수 있어서 지우지 않고 남긴다 — 전자는 `OWNER_UNAVAILABLE`(나중에 다시),
 /// 후자는 `UNKNOWN_COMMAND`(재시도 무의미)다(TRD §4-②). 만료는 없다 — 시간이 지나 자취가 사라지면
-/// 같은 질문의 답이 시계에 따라 갈려 그 구분 자체가 무너진다(ADR-0135).
+/// 같은 질문의 답이 시계에 따라 갈려 그 구분 자체가 무너진다(ADR-0141).
 /// `help` 는 주인이 얹은 문자열 **그대로**다(데몬이 열어보지 않으므로 가공도 없다).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -399,7 +399,7 @@ pub enum AgentEvent {
         agent: AgentInfo,
     },
 
-    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0134/0135) — request_id 에코.
+    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0140/0141) — request_id 에코.
     /// broadcast 가 아니다(요청한 연결에만 간다). 데몬 dispatch 가 명부를 훑어 이걸 낸다.
     ///
     /// ★구형 셸 안전은 오직 "전용 reply" 라는 사실에만 기댄다★ — 구형 셸은 `ListCommands` 를 보내지
@@ -558,7 +558,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::RenamePreset { request_id, .. }
         // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
         | AgentCommand::SetEnvelopeFormat { request_id, .. }
-        // 명령 버스 등록 wire(ADR-0134/0135) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
+        // 명령 버스 등록 wire(ADR-0140/0141) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
         //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
         | AgentCommand::RegisterCommands { request_id, .. }
         | AgentCommand::UpdateCommands { request_id, .. }
@@ -586,7 +586,7 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::PresetList { request_id, .. }
         | AgentEvent::Snapshot { request_id, .. }
         | AgentEvent::Created { request_id, .. }
-        // ★CommandList 는 상관 대상이다★(ADR-0134) — ListCommands 조회의 전용 reply라 AgentList/
+        // ★CommandList 는 상관 대상이다★(ADR-0140) — ListCommands 조회의 전용 reply라 AgentList/
         //   ProfileList/PresetList 와 같은 자리다. 여기서 None 을 고르면 셸이 확실히 매달린다: 위
         //   command_request_id 가 ListCommands 에 Some 을 돌려주므로 pending 매칭이 슬롯을 만드는데,
         //   그걸 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다. 두 함수는 명령↔답장 쌍마다 같이
@@ -898,7 +898,7 @@ mod tests {
         ));
     }
 
-    // ── 명령 버스 등록 wire(ADR-0134/0135) ─────────────────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0140/0141) ─────────────────────────────────────────
     //
     // 이 구획은 **아직 배선이 없는** variant 를 지킨다 — 보내는 코드가 없으니 형태가 조용히 틀려도
     // 런타임에 아무 신호가 없고, Step 2 배선이 붙는 날에야 터진다. golden 이 그때까지의 유일한 벽이다.
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// ★명령↔답장 쌍 박제(ADR-0134)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
+    /// ★명령↔답장 쌍 박제(ADR-0140)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
     /// `AgentEvent::CommandList` 가 그걸 깨우는 쪽이다. 한쪽만 고치면(예: 새 reply variant 를
     /// broadcast 로 잘못 분류) 그 왕복은 연결이 끊길 때까지 안 풀린다. 동형 검증이 `src-tauri`
     /// `daemon_client::protocol_state` 에도 있었으나 그 lib 테스트 타깃은 로컬/CI 모두

@@ -127,7 +127,7 @@ async fn fixture(tag: &str) -> Fixture {
         control,
     ));
     manager_slot.set(manager.clone());
-    // ★제어 라우트는 표를 태운다(ADR-0134)★: 여기를 비워 두면 그 라우트가 503 을 내, 아래 「제어는 전원
+    // ★제어 라우트는 표를 태운다(ADR-0140)★: 여기를 비워 두면 그 라우트가 503 을 내, 아래 「제어는 전원
     //   개방」 단언이 게이트가 아니라 배선 부재를 재게 된다.
     command_slot.set(Arc::new(make_daemon_table(manager, broadcast_slot)));
 

@@ -1,8 +1,8 @@
-//! `/control/agent` 입구(ADR-0132 결정 6) — CLI 동사를 **명령 표**로 배달하는 어댑터(ADR-0134).
+//! `/control/agent` 입구(ADR-0132 결정 6) — CLI 동사를 **명령 표**로 배달하는 어댑터(ADR-0140).
 //!
 //! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 `agent.<verb>` 를 표에서 찾아 부른다.
 //!   동사 본문은 이 파일에 없다 — `agent.*` 의 선언과 본문은 **core 가 소유**하고(선언이 사는 곳이 곧
-//!   주인), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 입구 인자 검문(ADR-0136)
+//!   주인), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 입구 인자 검문(ADR-0142)
 //!   (c) 표의 결말 → wire 봉투. 표가 아직 안 꽂혔을 때의 503 은 HTTP 어댑터 몫이다(`mcp_server`).
 //!
 //! ★이 라우트는 전원 개방이다(ADR-0132 결정 5)★: 스폰된 에이전트는 백엔드와 무관하게 `engram` 배선을
@@ -12,7 +12,7 @@
 //!
 //! ★`kill`·`rm` 이 없는 것도 미구현이 아니다★ — `CLI_AGENT_VERBS` 주석이 정본(ADR-0122 미해소).
 //!
-//! ★입력 규율은 층이 둘이다(ADR-0136)★
+//! ★입력 규율은 층이 둘이다(ADR-0142)★
 //!   - **모르는 칸·빠진 필수 칸은 이 입구가 거절한다.** 사람·LLM 이 방금 친 것이 오는 자리라 「모르는
 //!     칸 = 오타」로 읽어도 안전하다. `parnet` 오타를 흘려보내면 `move … --parent lead` 가 **루트로 떼기**로
 //!     조용히 바뀐다. 판정 목록은 손으로 두지 않고 **선언에서 파생**한다(`CommandTable::check_args`) —
@@ -26,8 +26,8 @@
 //!   대조가 그 함수를 태워 지킨다.
 //!
 //! tauri import 0(daemon crate).
-// ADR-0134
-// ADR-0136
+// ADR-0140
+// ADR-0142
 
 use engram_dashboard_command::{CommandError, CommandFuture, CommandTable, ErrorCode};
 use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
@@ -56,7 +56,7 @@ pub trait RosterBroadcast: Send + Sync {
 ///
 /// ★인자를 타입으로 받지 않는 이유(load-bearing)★: 인자의 계약은 선언(core)이 쥐고 있다. 여기서 다시
 ///   struct 로 받으면 **두 번째 인자 어휘**가 생겨, 선언에 칸이 하나 늘 때 이 파일이 함께 안 늘면 그 칸이
-///   조용히 사라진다. 날 것으로 실어 보내면 모르는 칸의 판정도(ADR-0136) 값의 해석도 선언 한 곳에서 난다.
+///   조용히 사라진다. 날 것으로 실어 보내면 모르는 칸의 판정도(ADR-0142) 값의 해석도 선언 한 곳에서 난다.
 /// ★그래도 역직렬화가 실패하는 부류는 남는다(정직한 범위)★: `verb` 의 타입이 어긋난 값(`{"verb": 5}`)·
 ///   중복 키·객체가 아닌 바디·깨진 JSON 은 여기까지 오지 못한다. 그 부류도 빈 400 이 되지 않도록
 ///   **어댑터가 직접 역직렬화해 serde 의 사유 문구를 봉투에 실어 보낸다**(`mcp_server::control_agent_handler`)
@@ -75,7 +75,7 @@ pub struct AgentRequest {
 /// 명령 인자 칸 전량 — **같은 키가 두 번 실리면 반려한다.**
 ///
 /// ★마지막 값이 이기게 두면 오타 하나가 다른 동작이 된다★: `{"parent":"lead","parent":null}` 에서 뒤 값이
-///   이기면 계층에 붙이려던 요청이 **루트로 떼기**로 조용히 바뀐다 — ADR-0136 이 막으려는 바로 그 형태다.
+///   이기면 계층에 붙이려던 요청이 **루트로 떼기**로 조용히 바뀐다 — ADR-0142 이 막으려는 바로 그 형태다.
 ///   JSON 이 중복 키의 뜻을 정하지 않으므로 어느 값을 고르든 근거가 없고, 근거 없는 선택을 조용히 하지
 ///   않는 것이 이 입구의 규율이다.
 /// ★`serde_json::Map` 을 그대로 쓰지 못하는 이유★: 그 타입의 역직렬화는 중복 키를 덮어쓰기로 접는다.
@@ -155,7 +155,7 @@ pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResu
     if !table.contains(&name) {
         return unknown_verb(&req.verb);
     }
-    // ADR-0136: 사람·LLM 이 치는 입구라 선언에 없는 칸·빠진 필수 칸을 거절한다. 홉 간 배선은 관용이므로
+    // ADR-0142: 사람·LLM 이 치는 입구라 선언에 없는 칸·빠진 필수 칸을 거절한다. 홉 간 배선은 관용이므로
     //   (`route` 는 이것을 안 부른다) 이 호출을 배달 경로로 옮기지 말 것 — additive 진화가 죽는다.
     if let Err(rejection) = table.check_args(&name, &args) {
         return refused(rejection);
@@ -307,7 +307,7 @@ mod tests {
     // ── 요청 → 명령 ──────────────────────────────────────────────────────────────
 
     /// ★`verb` 만 이 입구의 어휘다★ — 나머지는 아는 칸이든 모르는 칸이든 **전부** 인자로 실려 표가 본다.
-    ///   여기서 아는 칸만 골라 담으면 모르는 칸이 이 파일에서 증발해 ADR-0136 의 거절이 성립하지 않는다.
+    ///   여기서 아는 칸만 골라 담으면 모르는 칸이 이 파일에서 증발해 ADR-0142 의 거절이 성립하지 않는다.
     #[test]
     fn every_field_but_the_verb_is_carried_through_as_command_arguments() {
         let req = parse(serde_json::json!({

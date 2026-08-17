@@ -148,7 +148,7 @@ impl ConnectionSession {
     ///
     /// 파생 자체는 [`CommandRoster::owner_of`] 하나뿐이다 — 명부를 건드리는 쪽과 조회하는 쪽이 같은 값을
     /// 봐야 하므로 형식을 두 곳에 두지 않는다.
-    // ADR-0134
+    // ADR-0140
     pub fn owner_token(&self) -> OwnerToken {
         CommandRoster::owner_of(self.conn_id)
     }
@@ -565,7 +565,7 @@ pub struct ConnectionCore {
     ///   정리를 건너뛰어도 정리할 것이 없다.
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    // ADR-0134
+    // ADR-0140
     commands: CommandRoster,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -1092,7 +1092,7 @@ impl ConnectionCore {
                 reply(sink, request_id, Ok(()));
             }
 
-            // ── 명령 버스 등록 wire(ADR-0134/0135, TRD §3-7) ──────────────────────────────
+            // ── 명령 버스 등록 wire(ADR-0140/0141, TRD §3-7) ──────────────────────────────
             //
             // ★`_ =>` 로 묶지 않는 이유★: 이 match 가 exhaustive 라서 variant 를 늘릴 때마다 여기가
             //   컴파일 에러로 걸린다. 그게 「배선을 빠뜨리지 않았나」를 묻는 유일한 지점이라 catch-all 로
@@ -1264,7 +1264,7 @@ impl ConnectionCore {
 /// 것만으로 뒤따르는 경고를 잠글 수 있다.
 /// ★찍는 길이를 자른다★: 이 칸은 검증 안 된 클라이언트 문자열이고 프레임 크기 상한이 없어, 통째로
 /// 찍으면 프레임 하나가 메가바이트짜리 로그 줄이 된다.
-// ADR-0134
+// ADR-0140
 fn note_claimed_owner(session: &ConnectionSession, claimed: &OwnerToken) {
     if claimed.as_str().is_empty() || *claimed == session.owner_token() {
         return;
@@ -1822,7 +1822,7 @@ mod tests {
         }
     }
 
-    // ── 명령 버스 등록 wire(ADR-0134/0135 · TRD §3-7) ────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0140/0141 · TRD §3-7) ────────────────────────────
     use engram_dashboard_command::{CommandDecl, ErrorCode, Roster};
 
     fn decl(name: &str) -> CommandDecl {
