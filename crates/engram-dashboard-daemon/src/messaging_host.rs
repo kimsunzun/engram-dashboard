@@ -657,6 +657,7 @@ const FLUSH_JOIN_BELT: Duration = Duration::from_secs(5);
 ///
 /// ★running 플래그를 따로 두지 않는 이유★: 같은 사실을 두 곳에 적으면 갈린다 — "돌고 있는데 엔트리가 없다"
 ///   (다음 배달이 겹쳐 시작) 또는 "엔트리만 남았다"(그 수신자 우편이 영구 정지)가 컴파일 에러 없이 생긴다.
+// ADR-0142
 type DeliveryLanes = HashMap<AgentId, VecDeque<FlushMsg>>;
 
 /// 이 작업이 향하는 수신자 — 배달 직렬화의 분할 키.
@@ -804,6 +805,7 @@ fn advance_lane(
 ///   점유하고 (2) 디스패처는 늘 아래 select 의 `.await` 지점에 있어 abort 가 즉시 먹으며 (3) 5s join belt·
 ///   종료 task 가 계속 폴링돼 current-thread 런타임도 건강하게 유지된다. 이 격리가 고치는 건 executor
 ///   굶주림뿐이다 — 종료 순서 의존은 그대로 남는다(`FlushWorkerHandles::shutdown`).
+// ADR-0142
 async fn run_flush_lane(
     mut lane_rx: mpsc::UnboundedReceiver<FlushMsg>,
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,

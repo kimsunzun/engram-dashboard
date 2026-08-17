@@ -1670,10 +1670,10 @@
 - **안 한 것 / 미해결 2건:** ① **메인 창이 연결 배너를 놓치는 간헐 증상**(2회 중 1회) ② **`run-dashboard-clean.bat`의 kill 경로 미실행** — 둘 다 `docs/tracking.md` T-25·T-26에 등록.
 - **기록 정리(사후):** 이 배치의 결정 3건이 어디에도 기록돼 있지 않아 ADR-0137·0138·0139로 박제하고 앵커를 달았으며, `docs/reference/logging-conventions.md`의 인프라·보안 절이 옛 상태(진입점 1개·마스킹 "목표")로 남아 있던 drift를 함께 정정했다.
 
-## S22 — 우편 배달 수신자별 병렬화 + 두 번째 동시성 배제 축 도입 (2026-08-18, `fix/tui-message-submit`, 대화 세션) · 커밋 `c2e56cb`(master 미병합) · ADR-0140 · `/review code deep` 3라운드(적대 리뷰어 3인: doc-aware 불변식 파괴자·cross-family 블라인드 파괴자·동시성/teardown 렌즈) · `/qa full` PASS(실측 2회)
+## S22 — 우편 배달 수신자별 병렬화 + 두 번째 동시성 배제 축 도입 (2026-08-18, `fix/tui-message-submit`, 대화 세션) · 커밋 `c2e56cb`(master 미병합) · ADR-0142 · `/review code deep` 3라운드(적대 리뷰어 3인: doc-aware 불변식 파괴자·cross-family 블라인드 파괴자·동시성/teardown 렌즈) · `/qa full` PASS(실측 2회)
 
-- **무엇:** 우편 배달을 수신자별로 병렬화하고(플러시 레인 → 수신자별 디스패처), 대상(target) 축의 in-flight 배제를 새로 추가했다(호출자 스코프 `DrainReport` 판정 포함). 파일 2건 — `crates/engram-dashboard-daemon/src/messaging_host.rs`(플러시 레인 → 수신자별 디스패처) · `crates/engram-dashboard-messaging/src/service.rs`(대상 축 in-flight 배제 + 호출자 스코프 판정). 근거·거부한 대안 = ADR-0140.
-- **리뷰:** `/review code deep` 3라운드, 매 라운드 3인 적대 리뷰(doc-aware 불변식 파괴자 · cross-family 블라인드 파괴자 · 동시성/teardown 렌즈). 1라운드에서 핵심 결함 적출 — 파티션 키가 실제 주입 대상이 아니라 도어벨을 울린 AgentId였다. 최종 라운드 PASS.
+- **무엇:** 우편 배달을 수신자별로 병렬화하고(플러시 레인 → 수신자별 디스패처), 대상(target) 축의 in-flight 배제를 새로 추가했다(호출자 스코프 `DrainReport` 판정 포함). 파일 2건 — `crates/engram-dashboard-daemon/src/messaging_host.rs`(플러시 레인 → 수신자별 디스패처) · `crates/engram-dashboard-messaging/src/service.rs`(대상 축 in-flight 배제 + 호출자 스코프 판정). 근거·거부한 대안 = ADR-0142.
+- **리뷰:** `/review code deep` 3라운드, 매 라운드 3인 적대 리뷰(doc-aware 불변식 파괴자 · cross-family 블라인드 파괴자 · 동시성/teardown 렌즈). 1라운드에서 핵심 결함 적출 — 파티션 키가 실제 주입 대상이 아니라 도어벨을 울린 AgentId였다. **★"3라운드 통과"가 아니다(라운드별 커버리지 정본 = 이 줄)★** — 3라운드는 doc-aware PASS · blind 2건 FIX 였고, 그 2건(하나가 결정 3의 `caller_inject_error` 스코프)은 리뷰 없는 4차 코더 라운드에서 고쳐졌다. 그 갭은 ADR 문서 리뷰가 적출했고(FIX 5건 — 거부 근거의 결정 1/2 뒤집힘 · 불변식 문장 반례 · 이 과대 진술 · `// ADR-0142` 앵커 0줄 · ADR-0125 양방향 링크 누락), 5차(앵커·문구) + 4·5차 묶음 후속 리뷰로 닫았다.
 - **QA:** `/qa full` — 빌드 · 워크스페이스 회귀 38개 타깃 1312건 · fmt · 격리 게이트 5종 · tsc · 프론트 647건 · 실측 2회.
 - **실측(방법·결과):** 우편을 먼저 파킹해 둔 뒤 Raw 수신자와 StreamJson 수신자를 연달아 스폰해 두 도어벨이 겹치게 만들고, 데몬 debug 로그 타임스탬프를 대조했다. 도어벨→배달까지 Raw 수신자는 501ms(페이싱 창), JSON 수신자는 1ms 미만이었고 JSON 쪽이 Raw보다 265ms·383ms 먼저 끝났다. 데몬에 직결한 상태로 수행 — 다른 워크트리의 앱이 단일 인스턴스 슬롯을 쥐고 있어 앱 UI는 실측하지 못했다.
 - **신규 발견(이번 변경이 만든 것 아님, 별도 추적 항목으로 등록):** 갓 스폰된 터미널 수신자에게 배달된 우편이 제출되지 않는다 — CR은 스폰+약 0.5초 시점에 도착하는데 그 세션의 claude는 약 0.5초 더 늦게 부팅을 마친다.
