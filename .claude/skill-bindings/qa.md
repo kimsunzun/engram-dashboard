@@ -55,8 +55,9 @@
 영향받은 멤버만 좁게 돌린다(예: core만 바뀐 경우):
 ```bash
 cargo build -p engram-dashboard-core        # 빌드
-cargo test  -p engram-dashboard-core        # 영향 crate 테스트
+cargo test  -p engram-dashboard-core -- --test-threads=4   # 영향 crate 테스트 — 실 PTY = 실 자식 프로세스라 플래그를 붙인다
 ```
+- **★`-- --test-threads=4`는 워크스페이스 명령 전용이 아니다 — 병렬은 테스트 바이너리마다 걸린다★** 좁혀 돌릴 때도 **실 자식 프로세스를 띄우는 crate면 붙인다**: `core`(실 PTY) · `daemon`(프로세스 레벨 CLI 스위트 + 실 `.exe` spawn `#[ignore]` 분). **인메모리 단위 테스트뿐인 crate엔 붙이지 않는다**: `command`·`protocol`·`messaging`·`net`. 층별 근거 = `docs/testing-strategy.md` §1, 플래그 근거·실측의 정본 = CLAUDE.md 「빌드·검증 명령」(여기 되올리지 않는다).
 - **core crate가 닿으면 격리 게이트도 포함**(quick이어도 — 아래 "코어 격리 불변식"): `rg "^\s*use tauri" crates/engram-dashboard-core/src/` → 0줄 PASS. quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다.
 - 프론트가 닿았으면(quick 범위라도) 프론트 게이트(위 확정 절차): `npm test` + `npx tsc --noEmit`.
 
@@ -65,12 +66,13 @@ cargo test  -p engram-dashboard-core        # 영향 crate 테스트
 순서대로:
 ```bash
 cargo build                                 # 1) 빌드 (루트, 전 workspace)
-cargo test --workspace --exclude engram-dashboard   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05, 정본 CLAUDE.md·2026-07-19 드리프트 수정)
+cargo test --workspace --exclude engram-dashboard -- --test-threads=4   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05, 정본 CLAUDE.md·2026-07-19 드리프트 수정). `-- --test-threads=4` 도 빼지 않는다(아래 첫 항목)
 cargo fmt --check                           # 3) 포맷 게이트 (검사형 — rewrite 안 함)
 rg "^\s*use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
+- **★2번의 `-- --test-threads=4`를 빼지 말 것 — 근거·실측의 정본은 CLAUDE.md 「빌드·검증 명령」★** 여기 되올리지 않는다. 4로도 터미널이 죽으면 2로 낮춘다. **아래 §full의 「앱을 셸에서 직접 띄우지 않는다」와 뿌리는 같고 위험은 다르다** — 그건 *앱* 출력이 셸 사슬을 거슬러 올라가는 경로, 이건 *테스트*가 자식 프로세스를 한꺼번에 만드는 경로다. 한 규칙으로 합치지 않는다.
 - 코어 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(코어가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13).
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
 - **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다.

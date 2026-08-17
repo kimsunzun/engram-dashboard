@@ -185,7 +185,8 @@ scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 
 
 ```bash
 # src-tauri만 제외(그 크레이트의 테스트 타깃이 Windows에서 크래시) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)
-cargo test --workspace --exclude engram-dashboard
+# `-- --test-threads=4`도 빼지 말 것 — 근거·실측의 정본은 CLAUDE.md 「빌드·검증 명령」
+cargo test --workspace --exclude engram-dashboard -- --test-threads=4
 npm test
 ```
 
