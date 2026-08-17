@@ -208,7 +208,8 @@ impl ConnectionHandler for AgentConnection {
             //   `on_disconnect` 없이 명단에 영구히 남는다. 뒤로 미뤄도 등록보다는 앞이다 — 네트워크 행이
             //   수신 task 를 **이 호출이 반환한 뒤에** 띄우므로(`ws.rs` 의 on_connect await → read_task
             //   spawn 순서) 여기 도달하지 못한 연결은 프레임 한 장도 못 보낸다.
-            self.core.commands().attach(conn_id);
+            // ADR-0148
+            self.core.commands().attach(conn_id, frames);
         })
     }
 
@@ -274,6 +275,11 @@ impl ConnectionHandler for AgentConnection {
         //   등록이 통과한다(겹침 자체의 근거 = `CommandRoster` 헤더). 그러면 이미 죽은 연결이 산 연결이
         //   얹은 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 지운다 — 멀쩡한 연결의 명령이 조용히
         //   사라진다. 맨 앞이면 그 창 자체가 없다(패닉으로 건너뛸 구간도 없어진다).
+        // ★이 줄이 명부가 든 **프레임 출구 사본**도 함께 놓는다★ — `on_connect` 에서 명부에 넣은
+        //   그 사본이고, 포트 계약이 「반환 시점까지 자기가 만든 사본을 전부 놓아야 한다」고 요구하는
+        //   대상 중 하나다(`frame_port::ConnectionHandler::on_disconnect`). 아래 구독 정리와 달리 이건
+        //   놓치는 경쟁이 없다 — 넣은 곳도 빼는 곳도 각각 한 곳이고 둘 다 명부의 한 잠금 안에서 돈다.
+        // ADR-0148
         self.core.commands().detach(conn_id);
 
         let manager = self.core.manager();
@@ -758,7 +764,8 @@ mod tests {
         );
         let conn = factory.build(1);
         let session = conn.session.clone();
-        commands.attach(1);
+        let (tx, _rx) = mpsc::channel::<Frame>(1);
+        commands.attach(1, &frame_sink(tx));
 
         let held = session.subs.lock().expect("subs poisoned");
         let cleanup = std::thread::spawn(move || conn.on_disconnect(1));

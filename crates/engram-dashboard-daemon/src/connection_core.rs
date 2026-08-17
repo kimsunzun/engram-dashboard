@@ -160,8 +160,15 @@ impl ConnectionSession {
     /// `note_claimed_owner`). 그 칸은 식별자가 들어온 뒤에도 계속 무시한다 — 떼는 것도 계약 변경인데 얻는
     /// 것이 없다(ADR-0144 영향절).
     ///
-    /// 파생 자체는 [`CommandRoster::owner_of`] 하나뿐이다 — 명부를 건드리는 쪽과 조회하는 쪽이 같은 값을
-    /// 봐야 하므로 형식을 두 곳에 두지 않는다.
+    /// 파생 자체는 [`CommandRoster::owner_of`] 하나뿐이다 — 형식을 두 곳에 두지 않는다.
+    ///
+    /// ★이 값이 **권위는 아니다**★: 명부가 실제로 쓰는 주인 토큰은 `attach` 가 그때 계산해 표에 넣어 둔
+    /// 값이고, 그것을 묻는 곳은 [`CommandRoster::attached_owner`] 다(ADR-0148). 오늘 둘이 같은 것은
+    /// 「파생 지점이 하나여서」가 아니라 **`attach` 가 마침 같은 규칙으로 파생하기 때문**이다 — 슬라이스 B
+    /// 가 `attach` 를 클라이언트 자작 식별자로 바꾸면 이 메서드는 그 값을 따라가지 못한다.
+    /// ★그래서 운영 경로에는 이 메서드의 소비자가 없다★ — 클라이언트의 주장을 견주는
+    /// `note_claimed_owner` 도 표의 저장값을 쓴다. 여기 남은 것은 위 정책 서술과, `attach` 가 **무엇을
+    /// 저장하는지**를 무는 테스트의 기대값이다.
     // ADR-0144
     pub fn owner_token(&self) -> OwnerToken {
         CommandRoster::owner_of(self.conn_id)
@@ -1117,7 +1124,17 @@ impl ConnectionCore {
                 catalog_version,
                 request_id,
             } => {
-                note_claimed_owner(session, &claimed);
+                // ★`attached_owner` 를 `session.owner_token()` 으로 되돌리지 마라 — 저장소 어느 테스트도
+                //   안 잡는다★: 오늘은 둘이 같은 값이라 두 구현이 같은 로그를 내고, 둘이 갈리는 상태
+                //   (저장값 ≠ 파생값)를 이 층에서는 만들 수 없다 — 명부의 표는 `command_roster` 사설이다.
+                //   되돌리면 슬라이스 B 에서 사칭이 조용히 통과한다(인과 = `note_claimed_owner` 주석,
+                //   판정 자체를 무는 것 = 그 함수를 직접 부르는 세 테스트).
+                // ADR-0148
+                note_claimed_owner(
+                    session,
+                    &claimed,
+                    self.commands.attached_owner(conn_id).as_ref(),
+                );
                 // ★`catalog_version` 으로 거절하지 않는다★: 세대 번호는 crate 마다라 받는 쪽이 자기
                 //   번호와 비교해 뜻을 부여하면 틀린다 — 진단용이다(TRD §4-①).
                 tracing::debug!(
@@ -1141,7 +1158,17 @@ impl ConnectionCore {
                 removed,
                 request_id,
             } => {
-                note_claimed_owner(session, &claimed);
+                // ★`attached_owner` 를 `session.owner_token()` 으로 되돌리지 마라 — 저장소 어느 테스트도
+                //   안 잡는다★: 오늘은 둘이 같은 값이라 두 구현이 같은 로그를 내고, 둘이 갈리는 상태
+                //   (저장값 ≠ 파생값)를 이 층에서는 만들 수 없다 — 명부의 표는 `command_roster` 사설이다.
+                //   되돌리면 슬라이스 B 에서 사칭이 조용히 통과한다(인과 = `note_claimed_owner` 주석,
+                //   판정 자체를 무는 것 = 그 함수를 직접 부르는 세 테스트).
+                // ADR-0148
+                note_claimed_owner(
+                    session,
+                    &claimed,
+                    self.commands.attached_owner(conn_id).as_ref(),
+                );
                 tracing::debug!(
                     conn = conn_id,
                     added = added.len(),
@@ -1295,8 +1322,16 @@ impl ConnectionCore {
     }
 }
 
-/// 등록 패킷이 적어 온 주인 토큰은 **광고**일 뿐 권한이 아니다 — 명부의 주인은 언제나
-/// `ConnectionSession::owner_token` 이다.
+/// 등록 패킷이 적어 온 주인 토큰은 **광고**일 뿐 권한이 아니다 — 명부의 주인은 그 연결이 붙을 때 명부가
+/// 저장한 값(`actual`)이고, 그 출처는 [`CommandRoster::attached_owner`] 하나다.
+///
+/// ★`actual` 을 여기서 파생하지 않는 것이 이 함수의 정확성을 좌우한다★: 파생값과 견주면, 저장값이 파생을
+/// 떠나는 날 **정직한 클라이언트가 걸리고 사칭이 통과한다** — 자기 저장 토큰을 그대로 적어 온 연결은
+/// 「다르다」로 갈라지고, 옛 파생형(`conn-<id>`)을 적어 온 연결은 아래 첫 갈래에서 조용히 빠져나간다.
+/// 그 형식을 잡자고 세운 갈래가 정확히 그것을 못 잡게 된다(ADR-0148).
+/// ★`None`(안 붙은 연결) 이면 견줄 값이 없다★ — 어떤 주장도 「같다」로 접지 않고 아래 형식 갈래로 보낸다.
+/// 그 패킷은 어차피 명부가 반려하지만(`CommandRoster::register`), 그 상태에서 우리 형식을 적어 온 것은
+/// 오히려 더 또렷한 사칭 시도다.
 ///
 /// ★거절하지 않는 이유★: 연결 id 는 wire 에 나가지 않아 클라이언트가 자기 토큰을 알 수 없다
 /// (`owner_token` 주석). 같지 않다고 거절하면 정상 등록이 **채울 수 없는 칸** 때문에 전부 막힌다.
@@ -1313,8 +1348,12 @@ impl ConnectionCore {
 /// ★찍는 길이를 자른다★: 이 칸은 검증 안 된 클라이언트 문자열이고 프레임 크기 상한이 없어, 통째로
 /// 찍으면 프레임 하나가 메가바이트짜리 로그 줄이 된다.
 // ADR-0140
-fn note_claimed_owner(session: &ConnectionSession, claimed: &OwnerToken) {
-    if claimed.as_str().is_empty() || *claimed == session.owner_token() {
+fn note_claimed_owner(
+    session: &ConnectionSession,
+    claimed: &OwnerToken,
+    actual: Option<&OwnerToken>,
+) {
+    if claimed.as_str().is_empty() || Some(claimed) == actual {
         return;
     }
     let conn_id = session.conn_id;
@@ -1880,6 +1919,109 @@ mod tests {
         }
     }
 
+    /// `note_claimed_owner` 가 낸 이벤트를 **레벨과 함께** 모은다 — 이 파일엔 로그 수집기가 없어 여기 둔다.
+    /// `with_default` 는 이 스레드에만 걸려 병렬 테스트와 섞이지 않는다(`command_roster` 의 같은 형태).
+    ///
+    /// ★DEBUG 까지 켜는 이유★: 「조용하다」를 WARN 만 보고 판정하면 **debug 갈래로 떨어진 것**과 **아무
+    /// 갈래에도 안 간 것**이 같아 보인다.
+    fn capture_logs(body: impl FnOnce()) -> Vec<(tracing::Level, String)> {
+        use tracing::subscriber;
+
+        struct Collector {
+            lines: Arc<StdMutex<Vec<(tracing::Level, String)>>>,
+        }
+        struct Visit<'a>(&'a mut String);
+        impl tracing::field::Visit for Visit<'_> {
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={:?} ", f.name(), v));
+            }
+        }
+        impl subscriber::Subscriber for Collector {
+            fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+                *m.level() <= tracing::Level::DEBUG
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+                tracing::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut buf = String::new();
+                event.record(&mut Visit(&mut buf));
+                self.lines
+                    .lock()
+                    .expect("lines poisoned")
+                    .push((*event.metadata().level(), buf));
+            }
+            fn enter(&self, _: &tracing::Id) {}
+            fn exit(&self, _: &tracing::Id) {}
+        }
+
+        let lines: Arc<StdMutex<Vec<(tracing::Level, String)>>> = Arc::default();
+        subscriber::with_default(
+            Collector {
+                lines: lines.clone(),
+            },
+            body,
+        );
+        let captured = lines.lock().expect("lines poisoned");
+        captured.clone()
+    }
+
+    // ── 주장한 주인 토큰의 판정(ADR-0148) ────────────────────────────────────────
+    //
+    // ★셋 다 **명부의 저장값과 견주는가**를 문다★ — 세션에서 다시 파생하는 구현은 셋 다 뒤집힌다.
+    // 저장값을 인자로 받으므로 그 상태를 여기서 그냥 만들 수 있다(명부도 `attach` 도 안 건드린다).
+    // ★판정을 전부 **warn callsite** 로 몬 것은 의도다★: 이 자리를 때리는 테스트가 여기 셋뿐이라
+    // 다른 테스트가 tracing 의 전역 callsite 관심 캐시를 먼저 눌러 놓을 길이 없다. debug 갈래는
+    // 그렇지 않아(등록 wire 테스트들이 구독자 없이 그 자리를 때린다) 판정 근거로 쓰지 않는다.
+
+    /// 사칭 — 우리 형식을 적어 왔고 진짜 주인은 그게 아니다. 재파생 구현은 `conn-7` 이 자기 파생값과
+    /// 같아 보여 **조용히 통과시킨다**.
+    #[test]
+    fn a_claim_of_our_token_shape_is_warned_when_the_real_owner_is_not_derived() {
+        let session = ConnectionSession::new(7);
+        let actual = OwnerToken::new("shell-a1");
+
+        let logged = capture_logs(|| {
+            note_claimed_owner(&session, &OwnerToken::new("conn-7"), Some(&actual))
+        });
+
+        assert_eq!(logged.len(), 1, "한 줄이어야: {logged:?}");
+        assert_eq!(logged[0].0, tracing::Level::WARN, "사칭은 warn: {logged:?}");
+        assert!(
+            session.claimed_owner_warned.load(Ordering::Relaxed),
+            "연결당 1회 래치가 서야 한다"
+        );
+    }
+
+    /// 정직 — 자기 저장 토큰을 그대로 적어 왔다. 재파생 구현은 그것이 자기 파생값과 달라 **정직한 쪽을
+    /// 사칭으로 경고한다**.
+    ///
+    /// 저장 토큰을 우리 형식(`conn-9`)으로 잡은 것은 그 뒤집힘이 warn 으로 나오게 하려는 것이다 —
+    /// `shell-a1` 같은 모양이면 뒤집힘이 debug 로 떨어져 위 「판정 근거」 조건을 못 채운다.
+    #[test]
+    fn a_claim_that_matches_the_real_owner_is_silent() {
+        let session = ConnectionSession::new(7);
+        let actual = OwnerToken::new("conn-9");
+
+        let logged = capture_logs(|| note_claimed_owner(&session, &actual, Some(&actual)));
+
+        assert!(logged.is_empty(), "진짜 주인과 같으면 조용하다: {logged:?}");
+    }
+
+    /// 안 붙은 연결 — 견줄 값이 아예 없다. 재파생 구현은 여기서도 `conn-7` 을 만들어 내 통과시킨다.
+    #[test]
+    fn a_claim_of_our_token_shape_is_warned_when_nothing_is_attached() {
+        let session = ConnectionSession::new(7);
+
+        let logged =
+            capture_logs(|| note_claimed_owner(&session, &OwnerToken::new("conn-7"), None));
+
+        assert_eq!(logged.len(), 1, "한 줄이어야: {logged:?}");
+        assert_eq!(logged[0].0, tracing::Level::WARN, "{logged:?}");
+    }
+
     /// ★주인 칸에 파생값이 **아닌** 토큰을 일부러 싣는다★ — 명부의 주인이 패킷이 아니라 연결에서
     /// 난다는 것이 이 wire 의 계약이다(`ConnectionSession::owner_token`).
     fn register(decls: Vec<CommandDecl>, request_id: RequestId) -> AgentCommand {
@@ -1903,7 +2045,14 @@ mod tests {
     /// 연결이 선 상태의 세션 — 명부는 **붙어 있는 연결**의 등록만 받으므로, 명단에 올리는 이 한 줄이
     /// 운영의 `on_connect` 자리다(`CommandRoster::attach`).
     fn attached(core: &ConnectionCore, conn_id: ConnId) -> ConnectionSession {
-        core.commands().attach(conn_id);
+        // 닿는 길은 여기 관심사가 아니라 자리만 채운다 — 그 표를 재는 것은 `command_roster` 쪽이다.
+        // ★받는 쪽이 이 함수와 함께 죽는다★: 여기 든 출구로는 아무것도 못 나간다. 이 파일이 언젠가
+        //   **배달**을 단언하려 들면 그 단언은 조용히 빈손이 되므로, 그때는 받는 쪽을 호출자에게
+        //   돌려주도록 이 헬퍼를 고쳐야 한다.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(1);
+        let frames: Arc<dyn frame_port::FrameSink> =
+            Arc::new(crate::test_doubles::FakeFrameSink::new(tx));
+        core.commands().attach(conn_id, &frames);
         ConnectionSession::new(conn_id)
     }
 
