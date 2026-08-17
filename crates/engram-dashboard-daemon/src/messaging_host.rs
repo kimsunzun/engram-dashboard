@@ -21,6 +21,8 @@
 //!       그 위에서 등장/epoch bump 를 diff 해(`RosterDiff`) 위 도어벨과 **같은 채널**로 flush 를 건다.
 //!     - `spawn_flush_worker`/`run_flush_worker`/`run_flush_lane`/`FlushWorkerHandles`/`FlushWiring` —
 //!       위 채널의 소비단 → `MessagingSlot`(늦은 주입된 `MessagingService`)의 `flush_for`.
+//!       (배달 레인의 내부 부품 — `DeliveryLanes`·`flush_recipient`·`spawn_delivery`·`advance_lane`·
+//!        `DeliveryDone` — 은 그 소비단의 스케줄링 살림이라 여기 딸린 것으로 본다.)
 //!
 //! ★불변식 1 — 커널 판정 재구현 금지(load-bearing · ADR-0110 "포트는 얇게, 정책은 lib에")★: 커널이
 //!   내리는 판정을 어댑터가 되풀이하거나 앞질러 내리지 않는다. busy 판정(positive-knowledge-only·상한)·
@@ -48,7 +50,7 @@
 // ADR-0110
 // ADR-0129
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -534,11 +536,11 @@ impl MessagingFlushSink {
 }
 
 /// ★2-레인 파이프라인(C2 리뷰 fix 3 — head-of-line blocking 격리, load-bearing)★:
-///   - **main lane(이 함수)** — 채널에서 꺼내 flush 레인으로 **forward** 만 한다(논블록). 여기가 막히지
+///   - **main lane(이 함수)** — 채널에서 꺼내 배달 레인으로 **forward** 만 한다(논블록). 여기가 막히지
 ///     않아야 status 콜백이 넣은 작업이 계속 흡수된다.
-///   - **flush lane(`run_flush_lane`)** — 자체 task + 자체 채널. `spawn_blocking` 이 자식 stdin write 로
-///     막히는 곳이 여기다. 레인 내부는 **여전히 직렬**이라 같은 수신자 배치 순서(오래된 순)는 보존된다
-///     (병렬화하면 순서가 깨진다).
+///   - **배달 레인(`run_flush_lane`)** — 자체 task + 자체 채널. `spawn_blocking` 이 자식 stdin write 와
+///     제출 페이싱으로 막히는 곳이 여기다. 레인은 **수신자(AgentId)별로 직렬**이고 서로 다른 수신자는
+///     병렬로 돈다(분할 축의 근거·불변식은 그 함수 헤더가 정본).
 ///
 /// ★레인 task 는 **호출자(부팅)가 소유**한다 — 이 함수가 spawn 하지 않는다(round-3 finding 1, BLOCK)★:
 ///   레인을 이 future **안에서** spawn 하고 JoinHandle 을 지역 변수로 들면, 종료 경로가 main lane 을 abort
@@ -577,7 +579,8 @@ pub async fn run_flush_worker(
 pub struct FlushWorkerHandles {
     /// 수신 레인 — 채널에서 꺼내 배달 레인으로 넘기기만 한다(blocking 작업 없음).
     main: tokio::task::JoinHandle<()>,
-    /// 배달 레인(Appear/Idle) — 여기 `spawn_blocking` 이 자식 stdin write 로 막힐 수 있다.
+    /// 배달 레인(Appear/Idle) — 여기서 띄운 `spawn_blocking` 배달이 자식 stdin write·제출 페이싱으로
+    ///   막힐 수 있다(수신자별 최대 1건, 서로 다른 수신자는 동시에 여러 건).
     lane: tokio::task::JoinHandle<()>,
 }
 
@@ -596,6 +599,25 @@ impl FlushWorkerHandles {
     ///   그건 위 두 전제 중 하나가 깨졌다는 신호(warn 로그)이고, 그러려면 kill 된 자식의 파이프 write 가 에러도
     ///   안 내고 영원히 blocking 하는 **병리적 OS 동작**이 필요하다. 그래서 여기서 더 강한 취소 수단(별도
     ///   프로세스·스레드 강제 종료 등)을 도입하지 않는다 — 비용은 크고 막는 실패는 가정상 존재하지 않는다.
+    ///
+    /// ★파이프를 닫아도 **제출 페이싱 대기는 풀리지 않는다**(잔여 지연의 실체)★: 배달 1건은 본문 write →
+    ///   `core::agent::backend::SUBMIT_PACING`(0.5초) 대기 → 제출 write 다. ①의 파이프 닫힘은 **write** 를
+    ///   에러로 풀지만 그 대기는 그대로 잔다. 그래서 진행 중인 배달 클로저는 abort 뒤에도 최대 ~0.5초(+ write)
+    ///   더 돌고 나서 반환한다.
+    /// ★데몬 프로세스 종료가 그 ~0.5초를 실제로 기다린다★: bin 은 `#[tokio::main]` 이고 종료 경로에
+    ///   `shutdown_timeout`/`shutdown_background` 가 없어, 런타임 drop 이 **시작된 blocking task 의 반환을
+    ///   기다린다**. 이 대기를 없애려면 페이싱을 건드려야 하는데 그건 TUI 수신자의 제출 자체를 깨뜨린다
+    ///   (`SUBMIT_PACING` doc).
+    /// ★그 "belt + ~0.5초" 상한이 서는 전제 4가지(하나라도 깨지면 상한이 아니다)★:
+    ///   ① **동시 배달 수 ≤ blocking pool 용량**(tokio 기본 512). 그 아래에서는 클로저들이 **동시에** 자므로
+    ///      대기가 누적되지 않는다. 넘으면 초과분이 줄을 서 건수에 비례해 늘고, 게다가 `shutdown_all` 도
+    ///      **같은 pool** 에 실리므로(lib.rs 종료 절) 포화는 위 kill-first 순서 자체를 늦춘다. 사람이 띄우는
+    ///      에이전트 수에서 512 는 닿지 않는 수라 위험이 아니라 전제로 적는다.
+    ///   ② **belt 시간 = 5초 × 2**. `shutdown` 은 main·배달 레인에 belt 를 **순차로** 두 번 건다(아래 본문).
+    ///   ③ **남은 주입이 빨리 실패한다** — 파이프가 닫혀 본문 write 가 페이싱 **전에** 에러로 끊긴다는 뜻이다.
+    ///      계속 성공하는 배치라면 그 배치의 남은 건수 × 0.5초를 낸다.
+    ///   ④ **정상(Ok) 종료 경로일 때만 기다린다** — `main.rs` 의 에러 경로는 `std::process::exit` 라 런타임
+    ///      drop 자체를 건너뛴다(그 갈래에서는 기다림도 없고 정리도 없다).
     pub async fn shutdown(self) {
         // main 먼저 — abort 시 lane_tx 가 drop 되어 레인이 새 작업을 받지 않는다.
         self.main.abort();
@@ -631,12 +653,146 @@ pub fn spawn_flush_worker(
 /// 종료 join belt — abort 후 이 시간 안에 안 끝나면 warn 후 detach(데몬 종료 hang 방지, round-3 finding 1).
 const FLUSH_JOIN_BELT: Duration = Duration::from_secs(5);
 
-/// ★flush 레인(C2 리뷰 fix 3)★ — 배달 작업(Appear/Idle) 전용 **직렬** 소비자. 여기의 blocking write 가
-///   막혀도 수신 레인은 계속 돌아 채널을 비운다.
+/// 수신자별 배달 대기열 — **엔트리 존재 = 그 수신자의 배달이 지금 돌고 있다**, 값 = 그 뒤에 기다리는 작업.
 ///
-/// ★직렬 유지가 load-bearing★: 같은 수신자의 배치는 "오래된 순" 을 지켜야 하므로(ADR-0104) 이 레인 안에서
-///   병렬 실행하지 않는다. 서로 다른 수신자끼리도 직렬이라 한 막힌 수신자가 다른 수신자의 배달을 늦출 수는
-///   있으나(수용된 잔여 — 사람 대화 수준 메시지율), 채널 수신 자체는 그 뒤에 서지 않는다.
+/// ★running 플래그를 따로 두지 않는 이유★: 같은 사실을 두 곳에 적으면 갈린다 — "돌고 있는데 엔트리가 없다"
+///   (다음 배달이 겹쳐 시작) 또는 "엔트리만 남았다"(그 수신자 우편이 영구 정지)가 컴파일 에러 없이 생긴다.
+type DeliveryLanes = HashMap<AgentId, VecDeque<FlushMsg>>;
+
+/// 이 작업이 향하는 수신자 — 배달 직렬화의 분할 키.
+fn flush_recipient(msg: &FlushMsg) -> AgentId {
+    match msg {
+        FlushMsg::Appear { id, .. } | FlushMsg::Idle { id } => *id,
+    }
+}
+
+/// 배달 클로저의 **종료 보고**(정상 종료·패닉 언와인딩 공통) — Drop 으로 완료를 디스패처에 알린다.
+///
+/// ★왜 JoinHandle await 이 아니라 Drop 인가(load-bearing)★: 핸들을 인라인 await 하면 디스패처가 그 배달에
+///   묶여 head-of-line blocking 이 그대로 되살아난다(그게 이 디스패처가 없애는 것이다). 그래서 완료 신호가
+///   클로저 안에 있고, Drop 이라 패닉 언와인딩에서도 발화한다. ★이 신호가 빠지면 증상★: 그 AgentId 의
+///   대기열이 영원히 안 열려 그 수신자 앞 우편이 **조용히** 멈춘다(로그도 없다).
+/// ★패닉 격리는 **debug 한정**이다★: 워크스페이스 `[profile.release] panic = "abort"` 라 release 에선
+///   패닉 = 프로세스 즉사다(언와인딩이 없어 이 Drop 도 안 돈다). "패닉해도 운영에서 레인이 살아남는다" 로
+///   읽지 말 것.
+struct DeliveryDone {
+    id: AgentId,
+    tx: mpsc::UnboundedSender<AgentId>,
+    stage: DeliveryStage,
+}
+
+/// 배달 클로저가 어디까지 갔나 — `DeliveryDone` 의 Drop 이 남길 말을 가른다.
+///
+/// ★두 미완 갈래를 반드시 갈라야 한다★: 하나로 뭉치면 **release 에서 항상 거짓말**이 된다 — 그 빌드에는
+///   패닉 언와인딩 자체가 없으므로(`panic = "abort"`) Drop 이 미완으로 도는 유일한 경우가 아래
+///   `NotStarted` 다. "패닉했다" 로 찍으면 종료 때마다 없는 버그를 보고한다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeliveryStage {
+    /// blocking pool 이 클로저를 **한 번도 실행하지 않았다** — 런타임 종료 중 큐에서 취소된 경우.
+    NotStarted,
+    /// 실행에는 들어갔으나 끝내지 못했다 = 언와인딩(debug/테스트 빌드에서만 가능).
+    Started,
+    Finished,
+}
+
+impl Drop for DeliveryDone {
+    fn drop(&mut self) {
+        match self.stage {
+            DeliveryStage::Finished => {}
+            DeliveryStage::NotStarted => tracing::debug!(
+                agent = %self.id,
+                "flush 배달이 시작 전에 취소됐다(런타임 종료 중) — 레인만 해제"
+            ),
+            DeliveryStage::Started => tracing::warn!(
+                agent = %self.id,
+                "flush 배달이 완료 전에 언와인딩됐다(그 수신자 레인은 계속 — 이 갈래는 debug 한정, release=abort)"
+            ),
+        }
+        // 채널이 닫혔으면(디스패처 종료) 버린다 — 그 시점엔 데몬이 내려가는 중이다.
+        let _ = self.tx.send(self.id);
+    }
+}
+
+/// 이 작업의 배달을 blocking pool 로 띄운다. `false` = 띄우지 못했다(서비스 미주입 — 그 작업은 소비됐고
+///   완료 통지도 오지 않으므로 호출자가 그 수신자 레인을 직접 이어야 한다).
+fn spawn_delivery(
+    msg: FlushMsg,
+    messaging: &Arc<crate::control::mcp_server::MessagingSlot>,
+    idle: &IdleCoalescer,
+    done_tx: &mpsc::UnboundedSender<AgentId>,
+) -> bool {
+    let id = flush_recipient(&msg);
+    if matches!(msg, FlushMsg::Idle { .. }) {
+        // ★집어들 때 coalescing 집합에서 먼저 지운다(fix 10 — lost wakeup 방지)★: 이 flush 처리 도중
+        //   도착하는 새 MessageDone 은 다시 enqueue 돼야 한다(그 턴 종료는 이 배치가 대표하지 않는다).
+        // ★지우는 시점 = 이 배달이 **실제로 시작하는** 순간이다★: 채널에서 꺼낸 시점이나 대기열에 넣는
+        //   시점으로 앞당기면, 아직 시작도 안 한 대기 항목이 대표할 턴 종료가 **새 항목으로 또 쌓여**
+        //   중복이 불어난다. 반대로 flush 뒤로 미루면 그 사이의 턴 종료가 접혀 사라진다(lost wakeup).
+        idle.taken(id);
+    }
+    let Some(svc) = messaging.get() else {
+        // 서비스 미주입(부팅 초기) — 파킹이 없으니 스킵. 다음 등장/턴 종료 이벤트에 다시 온다.
+        return false;
+    };
+    let svc = svc.clone();
+    let report = DeliveryDone {
+        id,
+        tx: done_tx.clone(),
+        stage: DeliveryStage::NotStarted,
+    };
+    tokio::task::spawn_blocking(move || {
+        let mut report = report;
+        report.stage = DeliveryStage::Started;
+        match msg {
+            FlushMsg::Appear { name, id } => svc.flush_for(&name, id),
+            FlushMsg::Idle { id } => svc.flush_for_agent(id),
+        }
+        report.stage = DeliveryStage::Finished;
+    });
+    true
+}
+
+/// 이 수신자의 다음 대기 작업을 시작한다 — 시작할 것이 없으면 엔트리를 지운다(유계 상태).
+fn advance_lane(
+    id: AgentId,
+    lanes: &mut DeliveryLanes,
+    messaging: &Arc<crate::control::mcp_server::MessagingSlot>,
+    idle: &IdleCoalescer,
+    done_tx: &mpsc::UnboundedSender<AgentId>,
+) {
+    loop {
+        // 스킵된 작업(서비스 미주입)은 완료 통지가 오지 않으므로 여기서 곧바로 다음 것을 본다.
+        let Some(next) = lanes.get_mut(&id).and_then(|q| q.pop_front()) else {
+            lanes.remove(&id);
+            return;
+        };
+        if spawn_delivery(next, messaging, idle, done_tx) {
+            return;
+        }
+    }
+}
+
+/// ★배달 레인(C2 리뷰 fix 3) — 수신자별 직렬 디스패처★. 배달 작업(Appear/Idle) 전용 소비자로, 여기의
+///   blocking write 가 막혀도 수신 레인은 계속 돌아 채널을 비운다.
+///
+/// ★분할 키 = **도어벨 AgentId**(load-bearing — 이 축을 넓히지 말 것)★: 한 도어벨 id 앞 배달은 한 번에
+///   하나만 돈다. 노리는 것은 **처리량**이다 — 페이싱(제출 대기 0.5초)이 필요한 쪽은 터미널(Raw) 수신자뿐인데
+///   (구조화 입력 수신자는 제출 시퀀스가 아예 없다) 전원을 한 줄로 세우면 그 0.5초를 **모두가** 낸다.
+///   같은 도어벨 id 안에서 순서를 지키는 것도 여기 얹혀 있다(배치 "오래된 순" — ADR-0104).
+///
+/// ★같은 세션에 두 배달이 겹치지 않는 보장은 **여기 없다**(호스트가 못 하는 일)★: 실제 주입 타깃은 도어벨
+///   id 가 아니라 커널이 항목마다 해석한 세션이라(힌트 우선 → 이름 유일 도달), 도어벨 id 가 다른 두 레인이
+///   같은 세션으로 수렴할 수 있다. 그 배제는 커널의 **타깃 축 in-flight 가드**가 진다 — 트리거·실패 모드·
+///   되울림은 `MessagingService::drain_queue` 헤더의 "배제는 두 축" 절이 정본이다. 이 분할을 그 보장으로
+///   읽고 커널 가드를 걷어내면 봉투 둘이 한 턴으로 합쳐 제출된다.
+///
+/// ★디스패처 자신은 막지 않는다★: 띄운 blocking task 를 **인라인 await 하지 않는다**. 완료는 별도 채널로
+///   돌아오고(`DeliveryDone`), 그 사이에도 `lane_rx` 를 계속 비운다 — 이 성질이 깨지면 수신자별 직렬화만
+///   남고 head-of-line blocking 이 그대로 되살아난다.
+///
+/// ★Appear 는 접지 않는다★: 대기열에 세우는 것은 무손실이지만(flush 는 그 수신자 앞 파킹을 통째로 drain
+///   하므로 늦게 돌아도 효과가 남는다) 버리면 그 이름 앞 파킹이 TTL 까지 stranded 된다. coalescing 은
+///   통지 측 Idle 전용이다(`IdleCoalescer`).
 ///
 /// ★spawn_blocking 격리(round-4 finding 1 — executor starvation)★: `flush_for` 안의 `inject` 는
 ///   transport.send_input = **동기 blocking write_all+flush**다(논블록 채널 send 가 아니라 실제 자식
@@ -645,48 +801,40 @@ const FLUSH_JOIN_BELT: Duration = Duration::from_secs(5);
 ///   executor 를 독점해 다른 task(종료 시 shutdown_all·5s join belt 등)가 폴링될 틈이 없다(실제로 통합
 ///   테스트가 이 굶주림 때문에 multi_thread 로 우회해야 했다). 그래서 각 flush 를 `spawn_blocking` 으로
 ///   던져 blocking pool 스레드에서 돌린다: (1) blocking write 는 runtime worker 가 아닌 blocking pool 을
-///   점유하고 (2) abort 는 아래 `.await` 지점에서 즉시 먹으며 (3) 5s join belt·종료 task 가 계속 폴링돼
-///   current-thread 런타임도 건강하게 유지된다. 이 fix 가 고치는 건 executor 굶주림뿐이다 — 종료 순서
-///   의존은 그대로 남는다(`FlushWorkerHandles::shutdown`).
+///   점유하고 (2) 디스패처는 늘 아래 select 의 `.await` 지점에 있어 abort 가 즉시 먹으며 (3) 5s join belt·
+///   종료 task 가 계속 폴링돼 current-thread 런타임도 건강하게 유지된다. 이 격리가 고치는 건 executor
+///   굶주림뿐이다 — 종료 순서 의존은 그대로 남는다(`FlushWorkerHandles::shutdown`).
 async fn run_flush_lane(
     mut lane_rx: mpsc::UnboundedReceiver<FlushMsg>,
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     idle: Arc<IdleCoalescer>,
 ) {
-    while let Some(msg) = lane_rx.recv().await {
-        match msg {
-            FlushMsg::Appear { name, id } => {
-                let Some(svc) = messaging.get() else {
-                    // 서비스 미주입(부팅 초기) — 파킹이 없으니 스킵. 다음 등장 이벤트에 다시 온다.
-                    continue;
-                };
-                let svc = svc.clone();
-                let join = tokio::task::spawn_blocking(move || svc.flush_for(&name, id));
-                if let Err(e) = join.await {
-                    // blocking task 실패(패닉 또는 취소). 레인은 죽지 않고 다음 대상으로 계속 — 한 flush 의
-                    //   실패가 이후 배달을 막지 않게(유계 격리).
-                    // ★release 빌드엔 **패닉 갈래가 없다**(리뷰 fix 9 — 옛 주석 보정)★: 워크스페이스
-                    //   `[profile.release] panic = "abort"` 라 blocking task 가 패닉하면 프로세스가 즉시
-                    //   죽는다(JoinError::is_panic 을 볼 기회 자체가 없다). 즉 이 격리가 실제로 작동하는
-                    //   건 **debug/테스트 빌드**이고, release 에서 이 갈래는 사실상 abort(Cancelled) —
-                    //   런타임 종료 중 — 뿐이다. "패닉해도 운영에서 레인이 살아남는다" 로 읽지 말 것.
-                    tracing::warn!("flush blocking task 실패(레인 계속 — 패닉 격리는 debug 한정, release=abort): {e}");
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<AgentId>();
+    let mut lanes: DeliveryLanes = DeliveryLanes::new();
+    // 수신 채널이 닫힌 뒤에도 **진행 중·대기 중 배달을 다 비운 뒤** 끝난다(수명 계약 = `run_flush_worker`
+    //   헤더). done_tx 를 이 스코프가 들고 있으므로 완료 채널은 절대 먼저 닫히지 않는다.
+    let mut open = true;
+
+    while open || !lanes.is_empty() {
+        tokio::select! {
+            incoming = lane_rx.recv(), if open => match incoming {
+                Some(msg) => {
+                    let id = flush_recipient(&msg);
+                    match lanes.entry(id) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push_back(msg),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(VecDeque::new());
+                            if !spawn_delivery(msg, &messaging, &idle, &done_tx) {
+                                advance_lane(id, &mut lanes, &messaging, &idle, &done_tx);
+                            }
+                        }
+                    }
                 }
-            }
-            FlushMsg::Idle { id } => {
-                // ★집어들 때 coalescing 집합에서 먼저 지운다(fix 10 — lost wakeup 방지)★: 이 flush 처리
-                //   도중 도착하는 새 MessageDone 은 다시 enqueue 돼야 한다(그 턴 종료는 이 배치가 대표하지
-                //   않는다). 지우는 시점이 flush **전**인 게 핵심이다.
-                idle.taken(id);
-                let Some(svc) = messaging.get() else {
-                    continue;
-                };
-                let svc = svc.clone();
-                let join = tokio::task::spawn_blocking(move || svc.flush_for_agent(id));
-                if let Err(e) = join.await {
-                    tracing::warn!("idle flush blocking task 실패(레인 계속 — 패닉 격리는 debug 한정, release=abort): {e}");
-                }
-            }
+                None => open = false,
+            },
+            Some(id) = done_rx.recv() => advance_lane(id, &mut lanes, &messaging, &idle, &done_tx),
+            // 두 갈래가 모두 닫힌 상태(위 루프 조건이 이미 막지만, select 는 전 갈래 불활성이면 패닉한다).
+            else => break,
         }
     }
     tracing::debug!("flush 레인 종료(채널 닫힘)");
@@ -1262,5 +1410,231 @@ mod tests {
             .is_err(),
             "shutdown 후 수신 레인은 더 이상 수신하지 않는다"
         );
+    }
+
+    // ── 9c. 배달 레인: 수신자별 직렬 · 수신자 간 병렬 ─────────────────────────────────────────
+
+    /// 배달 클로저의 진입/이탈 표식. Appear/Idle 이 서로 **다른 포트 조회**로 시작하므로 같은 수신자
+    /// 앞에서도 두 배달을 구분할 수 있다.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Probe {
+        EnterAppear,
+        ExitAppear,
+        EnterIdle(AgentId),
+        ExitIdle(AgentId),
+    }
+
+    /// 배달 클로저의 진입/이탈을 관측하고 **시점을 테스트가 통제**하게 하는 fake DeliveryPort.
+    ///
+    /// ★관측점이 하필 로스터 조회인 이유(커널 코드가 정하는 외부 사실)★: 파킹이 비어 있는 수신자의 비동기
+    ///   flush 는 이 포트를 **정확히 한 번** 부른 뒤 조기 반환한다 — `flush_for_agent` 는 `canonical_name`
+    ///   (그 뒤 빈 큐 조기 반환), `flush_for` 는 `drain_queue` 의 `live_agents`(그 뒤 빈 배치). 그래서 그 두
+    ///   조회가 "이 배달 클로저가 지금 blocking pool 에서 돌고 있다" 의 표식이 된다 — 파킹·게이트·실
+    ///   에이전트 조립 없이 배달의 시작과 끝을 잡을 수 있다.
+    struct LaneProbe {
+        roster: Vec<(AgentId, String)>,
+        events: mpsc::UnboundedSender<Probe>,
+        /// 이 표식으로 진입한 클로저는 허가를 받을 때까지 막힌다.
+        blocked: Vec<Probe>,
+        /// 허가 채널 — 테스트가 send 할 때마다 막힌 클로저 하나가 풀린다. Mutex 는 `Receiver` 가 `!Sync`
+        ///   이기 때문이고(포트는 `Sync` 여야 한다), 대기 중 이 락을 든다 — 표식 send 는 그 **앞**이라
+        ///   막힌 클로저의 진입도 관측된다.
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        inflight: std::sync::atomic::AtomicUsize,
+        peak_inflight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LaneProbe {
+        fn agents(&self) -> Vec<LiveAgent> {
+            self.roster
+                .iter()
+                .map(|(id, name)| LiveAgent {
+                    id: *id,
+                    name: name.clone(),
+                    epoch: 0,
+                    turn_signal: false,
+                })
+                .collect()
+        }
+
+        fn checkpoint(&self, enter: Probe, exit: Probe) {
+            use std::sync::atomic::Ordering::SeqCst;
+            let n = self.inflight.fetch_add(1, SeqCst) + 1;
+            self.peak_inflight.fetch_max(n, SeqCst);
+            let _ = self.events.send(enter);
+            if self.blocked.contains(&enter) {
+                self.release
+                    .lock()
+                    .expect("허가 채널 poisoned")
+                    .recv()
+                    .expect("허가 채널이 살아 있어야");
+            }
+            self.inflight.fetch_sub(1, SeqCst);
+            let _ = self.events.send(exit);
+        }
+
+        fn peak(&self) -> usize {
+            self.peak_inflight.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl DeliveryPort for LaneProbe {
+        fn inject(&self, _to_id: PeerId, _bytes: &[u8]) -> Result<InjectReceipt, String> {
+            unreachable!("파킹이 비어 있으므로 주입까지 가지 않는다")
+        }
+        fn live_agents(&self) -> Vec<LiveAgent> {
+            self.checkpoint(Probe::EnterAppear, Probe::ExitAppear);
+            self.agents()
+        }
+        fn addressing_sources(&self) -> AddressingSources {
+            AddressingSources {
+                roster: self.agents(),
+                dormant_names: vec![],
+            }
+        }
+        fn is_agent_live(&self, id: PeerId) -> bool {
+            self.roster.iter().any(|(rid, _)| *rid == id)
+        }
+        fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
+            self.roster
+                .iter()
+                .find(|(_, n)| n == name)
+                .map(|(id, _)| *id)
+        }
+        fn canonical_name(&self, id: PeerId) -> Option<String> {
+            self.checkpoint(Probe::EnterIdle(id), Probe::ExitIdle(id));
+            self.roster
+                .iter()
+                .find(|(rid, _)| *rid == id)
+                .map(|(_, n)| n.clone())
+        }
+    }
+
+    struct LaneHarness {
+        handles: FlushWorkerHandles,
+        tx: mpsc::UnboundedSender<FlushMsg>,
+        events: mpsc::UnboundedReceiver<Probe>,
+        release: std::sync::mpsc::Sender<()>,
+        probe: Arc<LaneProbe>,
+    }
+
+    /// 실 `MessagingService`(fake 포트) + 실 2-레인 worker 조립 — 레인 스케줄링만 관측 대상으로 남긴다.
+    fn lane_harness(roster: Vec<(AgentId, String)>, blocked: Vec<Probe>) -> LaneHarness {
+        let (ev_tx, events) = mpsc::unbounded_channel::<Probe>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let probe = Arc::new(LaneProbe {
+            roster,
+            events: ev_tx,
+            blocked,
+            release: Mutex::new(release_rx),
+            inflight: std::sync::atomic::AtomicUsize::new(0),
+            peak_inflight: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let slot = Arc::new(crate::control::mcp_server::MessagingSlot::new());
+        slot.set(Arc::new(MessagingService::new(
+            probe.clone(),
+            Arc::new(ControlRegistry::new()),
+        )));
+        let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
+        let handles = spawn_flush_worker(
+            rx,
+            FlushWiring {
+                messaging: slot,
+                idle: Arc::new(IdleCoalescer::new()),
+            },
+        );
+        LaneHarness {
+            handles,
+            tx,
+            events,
+            release,
+            probe,
+        }
+    }
+
+    /// 다음 표식을 **유계 대기**로 받는다 — 타임아웃은 동기화 수단이 아니라 실패 backstop 이다(표식이 안
+    /// 오는 것 자체가 회귀다).
+    async fn next_probe(events: &mut mpsc::UnboundedReceiver<Probe>) -> Probe {
+        tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("배달 표식이 5s 안에 와야 — 오지 않으면 그 배달이 시작조차 못 했다")
+            .expect("표식 채널이 살아 있어야")
+    }
+
+    /// ★막힌 수신자가 다른 수신자의 배달을 막지 않는다★ — 배달 1건은 제출 페이싱으로 0.5초 넘게 잡혀 있고,
+    /// 그 뒤에 전원이 줄을 서면 페이싱이 필요 없는 수신자까지 그 시간을 낸다.
+    #[tokio::test]
+    async fn a_stalled_recipient_does_not_hold_up_another_recipients_delivery() {
+        let a = AgentId::new_v4();
+        let b = AgentId::new_v4();
+        let mut h = lane_harness(
+            vec![(a, "alpha".to_string()), (b, "bravo".to_string())],
+            vec![Probe::EnterIdle(a)],
+        );
+
+        h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
+        assert_eq!(next_probe(&mut h.events).await, Probe::EnterIdle(a));
+        h.tx.send(FlushMsg::Idle { id: b }).expect("수신 레인 수신");
+
+        assert_eq!(
+            next_probe(&mut h.events).await,
+            Probe::EnterIdle(b),
+            "a 가 막혀 있어도 b 의 배달은 시작해야"
+        );
+        assert_eq!(
+            next_probe(&mut h.events).await,
+            Probe::ExitIdle(b),
+            "a 가 아직 막혀 있는 동안 b 는 완주해야"
+        );
+        assert!(
+            h.probe.peak() >= 2,
+            "두 수신자 배달이 실제로 겹쳐 돌았어야(순차로 흘러가면 이 테스트가 무의미해진다)"
+        );
+
+        h.release.send(()).expect("허가");
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitIdle(a));
+        h.handles.shutdown().await;
+    }
+
+    /// ★같은 도어벨 id 의 배달은 겹치지 않고 디스패치 순서로 돈다★ — 이 축이 배치의 "오래된 순" 을 떠받친다.
+    /// (같은 **세션**에 두 배달이 겹치지 않는 보장은 여기 축이 아니다 — `run_flush_lane` 헤더가 가리키는
+    /// 커널의 타깃 축 가드 몫이고, 그쪽 회귀는 커널 테스트가 진다.)
+    #[tokio::test]
+    async fn same_recipient_deliveries_are_serialized_in_dispatch_order() {
+        let a = AgentId::new_v4();
+        let mut h = lane_harness(
+            vec![(a, "alpha".to_string())],
+            vec![Probe::EnterAppear, Probe::EnterIdle(a)],
+        );
+
+        // 둘을 **먼저 다 넣는다** — 직렬화가 없으면 두 배달이 함께 in-flight 가 되어 아래 peak 단언이 잡는다.
+        h.tx.send(FlushMsg::Appear {
+            name: "alpha".to_string(),
+            id: a,
+        })
+        .expect("수신 레인 수신");
+        h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
+
+        assert_eq!(
+            next_probe(&mut h.events).await,
+            Probe::EnterAppear,
+            "먼저 디스패치한 Appear 가 먼저 시작"
+        );
+        h.release.send(()).expect("허가");
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitAppear);
+        assert_eq!(
+            next_probe(&mut h.events).await,
+            Probe::EnterIdle(a),
+            "앞 배달이 끝난 뒤에야 다음 배달이 시작"
+        );
+        h.release.send(()).expect("허가");
+        assert_eq!(next_probe(&mut h.events).await, Probe::ExitIdle(a));
+
+        assert_eq!(
+            h.probe.peak(),
+            1,
+            "같은 수신자 배달은 절대 겹치지 않는다(봉투 합쳐짐 방지)"
+        );
+        h.handles.shutdown().await;
     }
 }
