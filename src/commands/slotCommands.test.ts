@@ -48,13 +48,15 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('공통 슬롯 ops(slotCommands) 라우팅', () => {
-  it('slot.split.h → split(viewId, slotId, horizontal)', () => {
-    run('slot.split.h', CTX)
-    expect(vs.split).toHaveBeenCalledWith('v1', 's1', 'horizontal')
+  // ★라벨↔command↔방향 결선(ADR-0140)★: `가로 분할`(slot.split.topBottom) → 위/아래. 라벨 렌더 층은
+  //   ViewLayoutRenderer.test 가 잡고, 여기선 command id → 방향값을 고정한다.
+  it('slot.split.topBottom → split(viewId, slotId, top_bottom)', () => {
+    run('slot.split.topBottom', CTX)
+    expect(vs.split).toHaveBeenCalledWith('v1', 's1', 'top_bottom')
   })
-  it('slot.split.v → split(viewId, slotId, vertical)', () => {
-    run('slot.split.v', CTX)
-    expect(vs.split).toHaveBeenCalledWith('v1', 's1', 'vertical')
+  it('slot.split.leftRight → split(viewId, slotId, left_right)', () => {
+    run('slot.split.leftRight', CTX)
+    expect(vs.split).toHaveBeenCalledWith('v1', 's1', 'left_right')
   })
   it('slot.popout → moveSlotToWindow(viewId, slotId)', () => {
     run('slot.popout', CTX)
@@ -69,7 +71,7 @@ describe('공통 슬롯 ops(slotCommands) 라우팅', () => {
     expect(vs.closeSlot).toHaveBeenCalledWith('v1', 's1')
   })
   it('viewId/slotId 누락 → throw(side-effect 전 loud fail)', () => {
-    expect(() => run('slot.split.h', { slotId: 's1' })).toThrow(/viewId/)
+    expect(() => run('slot.split.topBottom', { slotId: 's1' })).toThrow(/viewId/)
     expect(() => run('slot.close', { viewId: 'v1' })).toThrow(/slotId/)
     expect(vs.split).not.toHaveBeenCalled()
     expect(vs.closeSlot).not.toHaveBeenCalled()
@@ -79,7 +81,7 @@ describe('공통 슬롯 ops(slotCommands) 라우팅', () => {
 describe("'*' 공통 기여(모든 슬롯)", () => {
   it('공통 5항목이 slot-ops 그룹으로 어느 콘텐츠에도 붙는다', () => {
     const ids = buildSlotMenu('agent').map(i => i.id)
-    for (const id of ['slot.split.h', 'slot.split.v', 'slot.popout', 'slot.empty', 'slot.close']) {
+    for (const id of ['slot.split.topBottom', 'slot.split.leftRight', 'slot.popout', 'slot.empty', 'slot.close']) {
       expect(ids).toContain(id)
     }
   })
@@ -124,8 +126,8 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(items.map(i => i.id)).toEqual([
       'slot.assignRunningAgent',
       'container:새 콘텐츠',
-      'slot.split.h',
-      'slot.split.v',
+      'slot.split.topBottom',
+      'slot.split.leftRight',
       'slot.close',
     ])
     // ADR-0067: "생성" 은 뺀다 — 스폰은 트리 소관.

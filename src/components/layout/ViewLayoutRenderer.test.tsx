@@ -76,9 +76,15 @@ vi.mock('allotment', async () => {
       children,
     )
   }
+  // ★vertical 노출(ADR-0140)★: dir → allotment 방향 매핑이 "유일한 진실 경계"라 테스트가 단언할 수 있게
+  //   prop 을 data 속성으로 새 낸다(뒤집히면 메뉴·타입이 다 맞는데 화면만 반대가 되는 자리).
   const Allotment = Object.assign(
-    ({ children }: { children: React.ReactNode }) =>
-      React.createElement('div', { 'data-testid': 'allotment' }, children),
+    ({ children, vertical }: { children: React.ReactNode; vertical?: boolean }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'allotment', 'data-vertical': String(vertical === true) },
+        children,
+      ),
     { Pane },
   )
   return { Allotment }
@@ -136,7 +142,7 @@ vi.mock('@xterm/addon-fit', () => ({
 //   레지스트리에 등록돼 있어야 한다. 매니페스트를 side-effect import 해 부팅과 동일하게 등록한다.
 import '../../commands/contributions'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
-import type { LayoutNode, SlotContent } from '../../api/layoutTypes'
+import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
 import { useViewStore } from '../../store/viewStore'
 
@@ -155,8 +161,13 @@ function slotNode(id: string, agentId: string | null): LayoutNode {
   }
 }
 
-function splitNode(a: LayoutNode, b: LayoutNode, ratio = 0.5): LayoutNode {
-  return { type: 'split', dir: 'horizontal', ratio, a, b }
+function splitNode(a: LayoutNode, b: LayoutNode, ratio = 0.5, dir: SplitDir = 'left_right'): LayoutNode {
+  return { type: 'split', dir, ratio, a, b }
+}
+
+/** 빈 슬롯 플레이스홀더 = `+` 아이콘 버튼(ADR-0141 — 옛 `Slot <id8>` / `— empty —` 텍스트 대체). */
+function emptyPluses(): HTMLElement[] {
+  return screen.queryAllByRole('button', { name: '슬롯 메뉴 열기' })
 }
 
 function contentSlotNode(id: string, content: SlotContent): LayoutNode {
@@ -204,10 +215,13 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(terminal.getAttribute('data-agent-id')).toBe(agentId)
   })
 
-  it('agent_id null slot → "— empty —" 플레이스홀더가 뜨고 TerminalSlot 은 없다', () => {
+  it('agent_id null slot → `+` 아이콘 플레이스홀더가 뜨고 TerminalSlot 은 없다(옛 텍스트 없음)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
-    expect(screen.getByText('— empty —')).toBeTruthy()
+    expect(emptyPluses()).toHaveLength(1)
+    // 옛 플레이스홀더 텍스트 회귀 방어(ADR-0141).
+    expect(screen.queryByText(/^Slot /)).toBeNull()
+    expect(screen.queryByText('— empty —')).toBeNull()
   })
 
   it('focusedSlotId == node.id → 포커스 링 오버레이(inset box-shadow, accent 65%)가 컨텐츠 위에 뜬다', () => {
@@ -246,7 +260,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
     expect(screen.getByTestId('agent-list')).toBeTruthy()
     // empty 플레이스홀더가 아니라 실 렌더러 — 중앙정렬 flex 없어야 목록 레이아웃이 안 깨진다.
-    expect(screen.queryByText('— empty —')).toBeNull()
+    expect(emptyPluses()).toHaveLength(0)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper.style.justifyContent).not.toBe('center')
   })
@@ -376,7 +390,7 @@ describe('ViewLayoutRenderer — split 분기', () => {
     const terminals = screen.getAllByTestId('terminal-slot')
     expect(terminals).toHaveLength(1)
     expect(terminals[0].getAttribute('data-agent-id')).toBe(agentId)
-    expect(screen.getByText('— empty —')).toBeTruthy()
+    expect(emptyPluses()).toHaveLength(1)
   })
 
   // ── ★ADR-0063: node.ratio → 첫 Pane 의 preferredSize % 초기 사이징★ ──────────────────────────────
@@ -424,6 +438,21 @@ describe('ViewLayoutRenderer — split 분기', () => {
     expect(preferredBefore).toBe('20%')
   })
 
+  // ── ★dir → allotment 방향(ADR-0140 유일한 진실 경계)★ ─────────────────────────────────────────
+  // 이 두 케이스가 막는 것: 매핑이 뒤집히면 라벨·command·타입·백엔드가 전부 맞는데도 화면만 반대가 된다
+  // (라벨↔command 단언만으로는 절대 안 잡히는 층).
+  it('dir="top_bottom" → Allotment vertical=true(위/아래로 쌓임)', () => {
+    const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.5, 'top_bottom')
+    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
+    expect(screen.getAllByTestId('allotment')[0].getAttribute('data-vertical')).toBe('true')
+  })
+
+  it('dir="left_right" → Allotment vertical=false(좌/우로 나란히)', () => {
+    const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.5, 'left_right')
+    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
+    expect(screen.getAllByTestId('allotment')[0].getAttribute('data-vertical')).toBe('false')
+  })
+
   /** 최상위 Allotment 의 직속 Pane 두 개만(중첩 Allotment 의 pane 은 제외). */
   function topLevelPanes(): HTMLElement[] {
     const outer = screen.getAllByTestId('allotment')[0]
@@ -464,6 +493,15 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
 
   it('empty 슬롯 클릭 → focusSlot(viewId, slotId) 호출(콘텐츠 슬롯 = 포커스 대상)', () => {
     clickSlot({ type: 'empty' })
+    expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
+  })
+
+  // ★버블 허용 불변식(ADR-0141 결정 5)★: `+` 는 메뉴를 열면서 컨테이너의 포커스 이동까지 함께 발화시킨다.
+  //   여기가 없으면 아이콘 핸들러에 stopPropagation 을 넣어도 스위트가 전부 초록이라 click-to-focus 가
+  //   조용히 죽는다(메뉴는 계속 열리므로 눈으로도 안 보인다).
+  it('`+` 아이콘 클릭도 컨테이너까지 버블해 focusSlot 을 부른다', () => {
+    render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'empty' })} focusedSlotId={null} />)
+    fireEvent.click(screen.getByRole('button', { name: '슬롯 메뉴 열기' }), { detail: 1, clientX: 5, clientY: 5 })
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
@@ -578,16 +616,92 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  it('"가로 분할" → split(viewId, slotId, "horizontal") 호출(§5 command 경로)', () => {
-    openMenu('slot-A', null)
-    fireEvent.click(screen.getByText('가로 분할'))
-    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-A', 'horizontal')
+  // ── ★빈 슬롯 `+` 아이콘 = 우클릭과 같은 메뉴(ADR-0141)★ ────────────────────────────────────────
+  // 이 스위트가 막는 것: `+` 가 자기만의 두 번째 메뉴를 짓는 것(항목 구성이 갈라진다). 같은
+  // setContextMenu 상태·같은 SlotContextMenu 라야 빈 슬롯 메뉴 구성(ADR-0065/0067)이 하나로 유지된다.
+  //
+  // ★detail 을 명시하는 이유★: fireEvent.click 의 defaultInit 엔 detail 이 없어 0 으로 온다 = 브라우저에서
+  //   좌표 없는 합성 클릭과 같은 값이다. 포인터 경로를 검증하려면 detail:1 을 직접 줘야 한다.
+  /** 메뉴 div(position:fixed 컨테이너) — 좌표 단언용. */
+  function openedMenu(): HTMLElement {
+    return screen.getByText('가로 분할').closest('[style*="position: fixed"]') as HTMLElement
+  }
+
+  /** 아이콘 rect 를 실측값으로 심는다 — jsdom 의 getBoundingClientRect 는 전부 0 을 준다. */
+  const STUB_RECT = { x: 120, y: 200, left: 120, top: 200, right: 152, bottom: 232, width: 32, height: 32 }
+  function stubRect(el: HTMLElement): void {
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({ ...STUB_RECT, toJSON: () => ({}) } as DOMRect)
+  }
+
+  it('`+` 포인터 클릭 → 우클릭과 동일한 빈 슬롯 메뉴가 클릭 좌표에 열린다', () => {
+    render(<ViewLayoutRenderer node={slotNode('slot-plus', null)} focusedSlotId={null} />)
+    expect(screen.queryByText('새 콘텐츠')).toBeNull()
+    fireEvent.click(emptyPluses()[0], { detail: 1, clientX: 42, clientY: 77 })
+    // jsdom 은 메뉴 rect 도 0 을 주므로 clamp 가 좌표를 그대로 통과시킨다.
+    expect(openedMenu().style.left).toBe('42px')
+    expect(openedMenu().style.top).toBe('77px')
+    expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
+    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
+    expect(screen.getByText('가로 분할')).toBeTruthy()
+    expect(screen.getByText('세로 분할')).toBeTruthy()
+    expect(screen.getByText('닫기')).toBeTruthy()
   })
 
-  it('"세로 분할" → split(viewId, slotId, "vertical") 호출', () => {
+  // ★탭 순회 제외(ADR-0141 결정 6)★: 이 부재가 의도임을 고정한다 — SlotContextMenu 에 키보드 조작이
+  //   없어서, 순회에 되돌리면 Tab→Enter 로 열고 마우스 없이 못 빠져나오는 막다른 상태가 생긴다.
+  it('`+` 는 탭 순회 밖이다(tabIndex=-1)', () => {
+    render(<ViewLayoutRenderer node={slotNode('slot-tab', null)} focusedSlotId={null} />)
+    expect(emptyPluses()[0].tabIndex).toBe(-1)
+  })
+
+  // ★좌표 없는 클릭 위치 불변식(ADR-0141)★: 코드(`el.click()`)·보조기술이 부르는 클릭은 좌표가 0,0 으로
+  //   온다. 좌표를 그대로 믿으면 메뉴가 뷰포트 좌상단에 열리므로 아이콘 rect 로 폴백해야 한다.
+  it('`+` 좌표 없는 클릭(detail=0) → 0,0 이 아니라 아이콘 rect 자리에 열린다', () => {
+    render(<ViewLayoutRenderer node={slotNode('slot-synth', null)} focusedSlotId={null} />)
+    const plus = emptyPluses()[0]
+    stubRect(plus)
+    fireEvent.click(plus, { detail: 0 })
+    const menu = openedMenu()
+    expect(menu.style.left).toBe('120px')
+    expect(menu.style.top).toBe('232px')
+    expect(menu.style.left).not.toBe('0px')
+    expect(menu.style.top).not.toBe('0px')
+  })
+
+  // ★판별 기준이 좌표가 아니라 클릭 횟수임을 고정★: 뷰포트 좌상단을 실제로 누르면 좌표는 0,0 이지만
+  //   detail≥1 이라 폴백이 걸리면 안 된다. 이 케이스가 없으면 가드를 좌표 검사로 바꿔도 스위트가 통과해
+  //   판별 근거가 무방비가 된다(위 두 케이스는 좌표와 클릭 횟수가 함께 움직여 구별하지 못한다).
+  it('`+` 포인터 클릭이 뷰포트 좌상단(0,0)이면 rect 폴백 없이 0,0 에 연다', () => {
+    render(<ViewLayoutRenderer node={slotNode('slot-corner', null)} focusedSlotId={null} />)
+    const plus = emptyPluses()[0]
+    stubRect(plus)
+    fireEvent.click(plus, { detail: 1, clientX: 0, clientY: 0 })
+    const menu = openedMenu()
+    expect(menu.style.left).toBe('0px')
+    expect(menu.style.top).toBe('0px')
+    expect(menu.style.left).not.toBe(`${STUB_RECT.left}px`)
+    expect(menu.style.top).not.toBe(`${STUB_RECT.bottom}px`)
+  })
+
+  it('`+` 로 열린 메뉴의 "가로 분할"도 같은 command 경로로 split(…, "top_bottom") 을 부른다', () => {
+    render(<ViewLayoutRenderer node={slotNode('slot-plus2', null)} focusedSlotId={null} />)
+    fireEvent.click(emptyPluses()[0], { detail: 1 })
+    fireEvent.click(screen.getByText('가로 분할'))
+    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-plus2', 'top_bottom')
+  })
+
+  // ★라벨↔방향 결선(ADR-0140 = vim 관례)★: 가로줄이 생겨 위/아래로 나뉜다 → top_bottom. 뒤집히면
+  //   사용자가 고른 관례가 깨진다(tmux 축 관례로 회귀).
+  it('"가로 분할" → split(viewId, slotId, "top_bottom") 호출(§5 command 경로)', () => {
+    openMenu('slot-A', null)
+    fireEvent.click(screen.getByText('가로 분할'))
+    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-A', 'top_bottom')
+  })
+
+  it('"세로 분할" → split(viewId, slotId, "left_right") 호출', () => {
     openMenu('slot-B', null)
     fireEvent.click(screen.getByText('세로 분할'))
-    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-B', 'vertical')
+    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-B', 'left_right')
   })
 
   it('"닫기" → closeSlot(viewId, slotId) 호출', () => {
@@ -659,8 +773,8 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   it('viewIdOverride 있으면 "가로 분할"이 오버라이드 view 로 split 을 부른다', () => {
     openMenu('slot-po', null, POPUP_VIEW)
     fireEvent.click(screen.getByText('가로 분할'))
-    expect(splitSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-po', 'horizontal')
-    expect(splitSpy).not.toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-po', 'horizontal')
+    expect(splitSpy).toHaveBeenCalledWith(POPUP_VIEW, 'slot-po', 'top_bottom')
+    expect(splitSpy).not.toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-po', 'top_bottom')
   })
 
   it('viewIdOverride 있으면 "닫기"가 오버라이드 view 로 closeSlot 을 부른다', () => {
@@ -678,6 +792,6 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   it('viewIdOverride 없으면(메인 창 경로) 종전대로 activeViewId 로 폴백한다(하위호환)', () => {
     openMenu('slot-main', null)
     fireEvent.click(screen.getByText('가로 분할'))
-    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-main', 'horizontal')
+    expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-main', 'top_bottom')
   })
 })

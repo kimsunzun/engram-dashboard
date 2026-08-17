@@ -14,7 +14,7 @@ import type { ResolvedSlotMenuItem } from '../../commands/slotMenu'
 const MENU_MARGIN = 4
 
 /**
- * 창 하단/우측 가장자리 우클릭 시 메뉴가 잘려 클릭 못 하던 버그(Bug1) 방지.
+ * 창 가장자리에서 메뉴가 잘려 클릭 못 하던 버그(Bug1) 방지. 앵커(여는 지점)는 항상 메뉴 모서리에 남는다.
  */
 export function clampMenuPosition(
   x: number,
@@ -24,9 +24,19 @@ export function clampMenuPosition(
   vw: number,
   vh: number,
 ): { top: number; left: number } {
-  const left = x + w > vw ? Math.max(MENU_MARGIN, Math.min(x, vw - w - MENU_MARGIN)) : x
-  const top = y + h > vh ? Math.max(MENU_MARGIN, Math.min(y, vh - h - MENU_MARGIN)) : y
-  return { top, left }
+  return { top: placeAlongAxis(y, h, vh), left: placeAlongAxis(x, w, vw) }
+}
+
+// ★밀지 말고 뒤집는다★: 밀어 넣으면 앵커(여는 지점)가 메뉴 *안*으로 들어가 커서 밑에 항목이 놓인다.
+//   빈 슬롯 `+` 가 좌클릭으로 같은 메뉴를 열게 된 뒤로는(ADR-0141) 그 상태에서 더블클릭 한 번이 커서 밑
+//   항목을 실행해 버린다 — 닫기가 걸리면 슬롯이 사라진다. 뒤집으면 앵커는 어느 방향이든 모서리에 남는다.
+//   뒤집어도 화면을 벗어나는 퇴화 케이스(메뉴가 뷰포트보다 큼)에서만 밀기로 떨어진다 — 그때는
+//   "화면 안에 있다"가 앵커 규칙보다 우선이다.
+function placeAlongAxis(anchor: number, size: number, viewport: number): number {
+  if (anchor + size <= viewport) return anchor
+  const flipped = anchor - size
+  if (flipped >= 0) return flipped
+  return Math.max(MENU_MARGIN, Math.min(anchor, viewport - size - MENU_MARGIN))
 }
 
 export function flyoutPosition(

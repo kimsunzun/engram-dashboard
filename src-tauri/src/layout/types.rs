@@ -9,13 +9,15 @@ use uuid::Uuid;
 
 use super::spatial::SlotSpatial;
 
-/// Horizontal = 좌우(│로 가름), Vertical = 상하(─로 가름).
+/// 이름이 결과 배치를 말한다 — `LeftRight` 는 항상 좌/우, `TopBottom` 은 항상 위/아래.
+/// 축 어휘(`Horizontal`/`Vertical`)로 되돌리지 않는다: tmux(축 기준)와 vim(분할선 기준) 관례가
+/// 상반돼 그 이름만으로는 어느 배치인지 판정되지 않았다. // ADR-0140
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum SplitDir {
-    Horizontal,
-    Vertical,
+    LeftRight,
+    TopBottom,
 }
 
 /// 슬롯 점유자 = 타입드 유니온(ADR-0060).
