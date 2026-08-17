@@ -142,7 +142,7 @@ vi.mock('@xterm/addon-fit', () => ({
 //   레지스트리에 등록돼 있어야 한다. 매니페스트를 side-effect import 해 부팅과 동일하게 등록한다.
 import '../../commands/contributions'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
-// 메뉴 배치의 앵커 간격(ADR-0142 결정 4)은 SlotContextMenu 소관 — 여기선 좌표 기대값을 그 상수에서 파생시킨다.
+// 메뉴 배치의 앵커 간격(ADR-0143 결정 4)은 SlotContextMenu 소관 — 여기선 좌표 기대값을 그 상수에서 파생시킨다.
 import { ANCHOR_GAP } from '../slot/SlotContextMenu'
 import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
@@ -169,7 +169,7 @@ function splitNode(a: LayoutNode, b: LayoutNode, ratio = 0.5, dir: SplitDir = 'l
 
 /**
  * 빈 슬롯 플레이스홀더 = `+` 아이콘(ADR-0141 로 옛 `Slot <id8>` / `— empty —` 텍스트를 대체).
- * ADR-0142 로 버튼이 아니라 순수 그림이라 role·접근성 이름이 없다 — 슬롯 래퍼 직속 svg 가 유일한 표면이다.
+ * ADR-0143 로 버튼이 아니라 순수 그림이라 role·접근성 이름이 없다 — 슬롯 래퍼 직속 svg 가 유일한 표면이다.
  */
 function emptyIcons(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('[data-slot-id] > svg'))
@@ -501,7 +501,7 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
-  // ★아이콘은 클릭을 삼키지 않는다(ADR-0142)★: 좌클릭 한 번이 포커스와 메뉴를 함께 일으켜야 하므로
+  // ★아이콘은 클릭을 삼키지 않는다(ADR-0143)★: 좌클릭 한 번이 포커스와 메뉴를 함께 일으켜야 하므로
   //   아이콘 위 클릭도 컨테이너까지 닿아야 한다. 여기가 없으면 아이콘에 상호작용을 되붙여도 스위트가
   //   초록이라 click-to-focus 가 조용히 죽는다(메뉴는 계속 열리므로 눈으로도 안 보인다).
   it('`+` 아이콘 위 클릭도 컨테이너까지 닿아 focusSlot 을 부른다', () => {
@@ -621,7 +621,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  // ── ★빈 슬롯 좌클릭 = 우클릭과 같은 메뉴(ADR-0142)★ ────────────────────────────────────────────
+  // ── ★빈 슬롯 좌클릭 = 우클릭과 같은 메뉴(ADR-0143)★ ────────────────────────────────────────────
   // 이 스위트가 막는 것 둘: ① 좌클릭 표적이 슬롯 전체에서 아이콘으로 좁아지는 회귀 — 빈 여백을 눌러도
   // 열려야 한다 ② 좌클릭이 자기만의 두 번째 메뉴를 짓는 것 — 같은 setContextMenu 상태·같은
   // SlotContextMenu 라야 빈 슬롯 메뉴 구성(ADR-0065/0067)이 하나로 유지된다.
@@ -642,7 +642,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     render(<ViewLayoutRenderer node={slotNode('slot-lc', null)} focusedSlotId={null} />)
     expect(screen.queryByText('새 콘텐츠')).toBeNull()
     leftClickSlot('slot-lc', 42, 77)
-    // jsdom 은 메뉴 rect 를 0 으로 주므로 뒤집기 없이 앵커+간격(ANCHOR_GAP, ADR-0142 결정 4)에 놓인다.
+    // jsdom 은 메뉴 rect 를 0 으로 주므로 뒤집기 없이 앵커+간격(ANCHOR_GAP, ADR-0143 결정 4)에 놓인다.
     //   간격의 크기·유도는 SlotContextMenu 소관이고 여기 관심사는 "클릭 좌표를 앵커로 쓴다"뿐이다.
     expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
     expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
@@ -653,7 +653,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.getByText('닫기')).toBeTruthy()
   })
 
-  // ★아이콘은 클릭을 삼키지 않는다(ADR-0142)★: 실브라우저에선 pointer-events 가 끊겨 아이콘이 애초에
+  // ★아이콘은 클릭을 삼키지 않는다(ADR-0143)★: 실브라우저에선 pointer-events 가 끊겨 아이콘이 애초에
   //   이벤트 대상이 되지 않는데, jsdom 엔 히트테스트(elementFromPoint)가 없어 그 층은 여기서 재현되지
   //   않는다(실측은 GUI 몫) — 대신 계산된 pointer-events 값과, 대상이 되더라도 컨테이너까지 닿는다는 것
   //   (자체 핸들러·전파 차단 부재)을 함께 고정한다.
@@ -667,7 +667,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.getByText('새 콘텐츠')).toBeTruthy()
   })
 
-  // ★상호작용을 되붙이지 않는다(ADR-0142 §영향)★: 빈 슬롯 안에는 role·tabindex·버튼이 없어야 한다 —
+  // ★상호작용을 되붙이지 않는다(ADR-0143 §영향)★: 빈 슬롯 안에는 role·tabindex·버튼이 없어야 한다 —
   //   되붙이면 컨테이너 핸들러와 겹쳐 이중 오픈이 되고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 살아난다.
   //   ★한계★: React 는 핸들러를 루트에 위임하므로 아이콘에 onClick 을 되붙였는지는 DOM 으로 볼 수 없다
   //   (양쪽이 같은 좌표를 쓰면 동작으로도 구별되지 않는다). 그 조항은 리뷰가 지키는 몫으로 남는다.
@@ -681,7 +681,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(icon.hasAttribute('aria-label')).toBe(false)
   })
 
-  // ★아이콘 크기 = 32px 초과(ADR-0142 결정 3)★: Tailwind `size-N` = N×0.25rem = N×4px(기본 스케일)이라
+  // ★아이콘 크기 = 32px 초과(ADR-0143 결정 3)★: Tailwind `size-N` = N×0.25rem = N×4px(기본 스케일)이라
   //   클래스에서 px 를 되짚는다. jsdom 은 Tailwind 를 적용하지 않아 계산된 값으로는 볼 수 없다(실측은 GUI).
   it('`+` 아이콘은 32px 보다 크다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-size', null)} focusedSlotId={null} />)
@@ -690,7 +690,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(Number(sizeClass![1]) * 4).toBeGreaterThan(32)
   })
 
-  // ★열린 메뉴는 재앵커되지 않는다(ADR-0142 §영향 — 메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라
+  // ★열린 메뉴는 재앵커되지 않는다(ADR-0143 §영향 — 메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라
   //   슬롯 래퍼 안에 마운트돼 서브메뉴 컨테이너 행 클릭이 컨테이너 좌클릭까지 버블한다. 재앵커하면 메뉴가
   //   커서 밑으로 점프해 앵커가 메뉴에 겹치고 이어지는 클릭이 커서 밑 항목을 실행한다.
   it('열린 메뉴의 "새 콘텐츠" 행 클릭은 메뉴를 다시 앵커하지 않는다', () => {
@@ -701,7 +701,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
   })
 
-  // ★반면 메뉴 *바깥*(슬롯 여백) 클릭은 메뉴를 새 자리로 옮긴다 — 위 가드가 삼켜서는 안 된다(ADR-0142 §영향)★
+  // ★반면 메뉴 *바깥*(슬롯 여백) 클릭은 메뉴를 새 자리로 옮긴다 — 위 가드가 삼켜서는 안 된다(ADR-0143 §영향)★
   //   이 동작은 SlotContextMenu 의 바깥닫기가 `mousedown` 에서 먼저 돌아 상태를 비우는 순서에 의존한다.
   //   그 리스너를 `click` 으로 옮기거나 없애면 여백 클릭이 가드에 걸려 메뉴를 옮길 수도 닫을 수도 없게 되므로,
   //   click 만 쏘는 테스트로는 절반만 고정된다 — mousedown 을 함께 쏴 순서까지 고정한다.
@@ -723,7 +723,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-lc2', 'top_bottom')
   })
 
-  // ★좌클릭 분기는 빈 슬롯에만(ADR-0142)★: 터미널 입력·트리 노드 선택·팔레트 항목 클릭 위에 메뉴가 뜨면
+  // ★좌클릭 분기는 빈 슬롯에만(ADR-0143)★: 터미널 입력·트리 노드 선택·팔레트 항목 클릭 위에 메뉴가 뜨면
   //   그 슬롯들이 가진 자기 클릭 의미를 덮는다. 이 경계가 이번에 새로 생긴 자리라 가장 먼저 회귀한다
   //   ('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
   it('agent(터미널) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
