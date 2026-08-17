@@ -45,8 +45,11 @@ function registerSplit(id: string, title: string, dir: SplitDir): void {
   })
 }
 
-registerSplit('slot.split.h', t('slot.splitH'), 'horizontal')
-registerSplit('slot.split.v', t('slot.splitV'), 'vertical')
+// ★라벨↔방향 결선 = vim 관례(ADR-0140)★: `가로 분할` = 가로줄(수평 분할선)이 생겨 위/아래로 나뉜다 →
+//   `top_bottom`. 라벨 단어만 보면 뒤바뀐 것처럼 읽히지만 뒤집으면 사용자가 고른 관례가 깨진다
+//   (tmux 축 관례로 회귀 = ADR-0140 이 거부한 대안). 여기가 두 어휘가 만나는 유일한 지점이다.
+registerSplit('slot.split.topBottom', t('slot.splitTopBottom'), 'top_bottom')
+registerSplit('slot.split.leftRight', t('slot.splitLeftRight'), 'left_right')
 
 register({
   id: 'slot.focus',
@@ -118,8 +121,8 @@ register({
 //   빈 슬롯에서 무의미하므로 hideOn:['empty'] 로 제외한다. '*' 보편 등록은 유지(공통 ops 단일소스 불변식) —
 //   콘텐츠 타입별 재선언이 아니라 subtraction 필터일 뿐이다(ADR-0065 거부 대안 참조).
 registerSlotMenu('*', [
-  { commandId: 'slot.split.h', group: 'slot-ops', order: 10 },
-  { commandId: 'slot.split.v', group: 'slot-ops', order: 20 },
+  { commandId: 'slot.split.topBottom', group: 'slot-ops', order: 10 },
+  { commandId: 'slot.split.leftRight', group: 'slot-ops', order: 20 },
   { commandId: 'slot.popout', group: 'slot-ops', order: 30, hideOn: ['empty'] },
   { commandId: 'slot.empty', group: 'slot-ops', order: 40, hideOn: ['empty'] },
   { commandId: 'slot.close', group: 'slot-ops', order: 99 },

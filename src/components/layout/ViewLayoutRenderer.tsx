@@ -4,6 +4,7 @@
 
 import { useState } from 'react'
 import { Allotment } from 'allotment'
+import { Plus } from 'lucide-react'
 
 import type { LayoutNode } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
@@ -146,10 +147,33 @@ export default function ViewLayoutRenderer({
           // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
           <AgentList />
         ) : (
-          <>
-            <span>Slot {node.id.slice(0, 8)}</span>
-            <span>{t('common.viewEmpty')}</span>
-          </>
+          // ★메뉴 오픈 경로는 하나뿐(ADR-0141)★: `+` 는 빈 슬롯 메뉴로 가는 두 번째 입구일 뿐이라 우클릭이
+          //   쓰는 setContextMenu 상태와 아래 SlotContextMenu 를 그대로 쓴다 — 별도 메뉴를 세우면 항목
+          //   구성이 두 곳으로 갈라진다(ADR-0064 단일소스 불변식).
+          //   ★버블 허용★: stopPropagation 안 해 컨테이너 click-to-focus(ADR-0066)도 함께 발화한다.
+          //   ★탭 순회 밖 — 이 부재는 의도다(ADR-0141 결정 6, 사용자 결정)★: SlotContextMenu 는 키보드로
+          //   조작되지 않아(Esc 닫기도 없다) 순회에 넣으면 Tab→Enter 로 열고 마우스 없이는 못 빠져나온다.
+          //   tabIndex 를 되살리려면 그 메뉴에 최소한 Esc 경로를 먼저 넣어야 한다 — 순서를 뒤집지 말 것.
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label={t('slot.openMenu')}
+            className="cursor-pointer text-muted hover:text-foreground"
+            onClick={e => {
+              // ★좌표 없는 클릭 보정(ADR-0141)★: 탭 순회에서 빠져도 코드(`el.click()`)·보조기술이 부르는
+              //   클릭은 남고, 그런 클릭은 좌표가 0,0 으로 온다 — 그대로 믿으면 메뉴가 뷰포트 좌상단에
+              //   열린다. 판별은 detail(클릭 횟수)로 한다: 실제 포인터 클릭은 ≥1, 합성 클릭은 0.
+              //   좌표가 0 인지로 보면 뷰포트 좌상단을 진짜로 누른 경우와 구별되지 않는다.
+              if (e.detail === 0) {
+                const rect = e.currentTarget.getBoundingClientRect()
+                setContextMenu({ x: rect.left, y: rect.bottom })
+                return
+              }
+              setContextMenu({ x: e.clientX, y: e.clientY })
+            }}
+          >
+            <Plus className="size-8" />
+          </button>
         )}
         {contextMenu && (
           // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
@@ -180,7 +204,8 @@ export default function ViewLayoutRenderer({
       </div>
     )
   }
-  // dir='vertical' = 상하(allotment vertical).
+  // ★ADR-0140 유일한 진실 경계★: dir='top_bottom' = 위/아래 → allotment 의 vertical(수직 스택). 여기가
+  //   뒤집히면 메뉴·타입·테스트가 전부 맞는데도 화면만 반대가 된다.
   // ★ratio 초기 사이징(ADR-0063)★: node.ratio = a(왼/위) 자식의 비율. ★Allotment 의 `defaultSizes` 는
   //   비율이 아니라 *픽셀*이다★ — [0.2,0.8] 을 주면 0.2px/0.8px 로 먹어 split-view 가 ~1px 로 붕괴하고
   //   자식들이 흐름 밖으로 쌓인다(실측 스샷으로 확인한 회귀). 대신 첫 pane(a=왼/위)에 `preferredSize` 를
@@ -196,7 +221,7 @@ export default function ViewLayoutRenderer({
   //   preferredSize(=ratio 파생 초기 사이징 %)는 첫 pane(a)에만 — 마운트 시 1회 적용·이후 보존(ADR-0063).
   return (
     <div style={{ height: '100%' }}>
-      <Allotment vertical={node.dir === 'vertical'}>
+      <Allotment vertical={node.dir === 'top_bottom'}>
         <Allotment.Pane key="pane-a" preferredSize={`${Math.round(node.ratio * 100)}%`}>
           <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
