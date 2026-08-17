@@ -73,6 +73,7 @@
 - **① 단위**: 18건(discovery DTO 변환, `ensure_with` OS/WMI/clock trait 주입 순수 검증, ComGuard 분류 등).
 - thin command wrapper(spawn/kill/write/profile)는 로직이 core 에 있어 여기선 배선만.
 - 실행: `cargo test -p engram-dashboard` 은 현재 lib 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 로 죽는다(실측 2026-08-05). 그래서 전 멤버 회귀는 이 패키지를 빼고 `cargo test --workspace --exclude engram-dashboard -- --test-threads=4` 로 돈다 — 루트 bare `cargo test` 도 같은 이유로 금지(§3 치트시트).
+  - ★**죽는 것은 lib 타깃뿐이다 — 통합 타깃은 선다**★(실측 2026-08-17). `src-tauri/tests/` 의 통합 스위트는 `engram_dashboard_lib` 를 링크하고 정상 실행된다. 그래서 이 패키지에 새로 쓰는 테스트는 **`#[cfg(test)]` 가 아니라 `src-tauri/tests/` 로 간다** — 전자는 게이트에서 한 번도 돌지 않는다. 실행은 타깃을 집어서: `cargo test -p engram-dashboard --test <이름>`(`-p` 만 쓰거나 `--tests` 로 넓히면 죽는 lib 타깃을 도로 끌어온다). 현재 등재분·근거 정본 = CLAUDE.md 「빌드·검증 명령」.
 
 ### frontend (`src/`)
 - **① 로직 단위**: **없음** (JS 테스트 러너 미설치 — vitest/jest 부재). ← **최대 갭**.
@@ -97,6 +98,7 @@
 6. **~~CI 부재~~ → 도입 완료(ADR-0131)** — 어느 브랜치든 push하면 `.github/workflows/ci.yml` 이 검증 명령 + 격리 게이트 전부를 windows 러너에서 돈다. `v*` 태그면 릴리즈까지. **CI 미커버 3건(로컬 몫)** = GUI 실측 · 실 claude 의존 테스트(워크플로가 `--skip`) · ADR-0130 재론 트리거. 분담 정본 = `/qa` 바인딩 「CI와의 분담」. (clippy 는 정본에 없어 CI 에도 넣지 않았다.)
 7. **`net → protocol` 심볼 게이트 부재** — 허용된 그 간선에는 core 쪽 같은 심볼 allowlist 게이트가 없어, 간선을 타고 에이전트 어휘가 늘어도 어느 게이트도 울리지 않는다(ADR-0129 슬라이스 1 note 가 의도적 유예로 기록 — 작업항목 0-4 뒤의 자연스러운 후속).
 8. **src-tauri 단위테스트가 로컬 회귀에서 안 돈다** — §1 src-tauri 항목의 단위테스트는 존재하지만 `cargo test -p engram-dashboard`의 lib 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽어(실측 2026-08-05) 실행되지 않는다 — 그래서 `cargo test --workspace --exclude engram-dashboard -- --test-threads=4`가 이 패키지를 뺀다. 사전부터 있던 환경 요인이며 원인 미해결 — 이력은 `docs/process/step-log.md` 494/532/761행 부근.
+   - ★**이 갭은 이제 `#[cfg(test)]` 단위테스트에 한정된다**★(2026-08-17) — 같은 패키지의 **통합** 타깃은 정상 실행되고 게이트에도 등재됐다(§1 src-tauri 실행 항목). 그러므로 이 줄을 「셸은 테스트가 불가능하다」로 읽지 말 것. **아직 이관되지 않은 잔여 = 그 패키지의 `#[cfg(test)]` 전부**다(12개 파일 — ★목록을 여기 손으로 베끼지 않는다. 정본 = `rg -l "#\[cfg\(test\)\]" src-tauri/src/`★). 존재하지만 한 번도 돈 적이 없다. ★그중 `output_router.rs`(ArcSwap·RMW 동시성)와 `commands/popout.rs`(팝업 label 발급)가 가장 아프다 — 앞의 「구독 재동기는 락 안」 계약이 기대는 코드가 바로 전자다.★ 통합 타깃 이관이 해소 경로이며 아직 미착수다.
 
 ## 3. 명령 치트시트 (workspace 루트 `I:\Engram\apps\engram-dashboard`)
 

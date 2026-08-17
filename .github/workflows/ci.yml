@@ -104,6 +104,22 @@ jobs:
             --skip control_send_revoked_sender_still_delivers_observation \
             --skip mcp_send_message_tool_happy_and_error
 
+      # ★위 스텝이 통째로 뺀 `engram-dashboard`(셸) 패키지 — 이 스텝이 그 스위트의 유일한 실행 경로다★
+      # `--exclude` 의 근거인 0xc0000139(ENTRYPOINT_NOT_FOUND)로 죽는 것은 그 패키지의 **lib** 테스트
+      # 타깃뿐이다. 통합 타깃(`src-tauri/tests/`)은 engram_dashboard_lib 를 링크해 정상 기립한다
+      # (실측 2026-08-17). 그래서 패키지를 뺀 채로도 이 타깃만 집어서 돌릴 수 있다.
+      # ★맨 아래 `cargo build --locked` 가 이걸 대신하지 않는다★ — build 는 테스트 타깃을 컴파일하지
+      #   않는다. 이 스텝이 없으면 스위트는 "안 도는" 게 아니라 **컴파일이 깨져도 안 보인다**.
+      # ★`--test <이름>` 을 `-p` 단독이나 `--tests` 로 넓히지 말 것★ — 둘 다 죽는 lib 타깃을 도로 끌어와
+      #   이 스텝이 통째로 실패한다. 대상 선택은 타깃 단위여야 한다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 쓰지 않고(CLAUDE.md 「빌드·검증 명령」),
+      #   애초에 이 스위트는 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 띄우지 않는다.
+      # 검증 레인(ADR-0131 결정 2)에 둔다 — 릴리즈 잡이 아니다. release-build 는 태그에서만 돌고
+      #   `needs: [backend, …]` 로 이 잡에 매달리므로, 여기 두면 배포 앞 게이트로도 함께 선다.
+      - name: cargo test -p engram-dashboard --test layout_apply
+        shell: bash
+        run: cargo test --locked -p engram-dashboard --test layout_apply
+
       # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.

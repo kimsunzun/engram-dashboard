@@ -128,9 +128,9 @@ impl OutputRouter {
     //
     // ★ADR-0006★: 락 안에서 호출해도 위반 아님 — 본문은 **순수 계산 + lock-free `ArcSwap::store`** 뿐이고
     //  락 보유 중 이 함수가 하는 외부 호출(emit / DaemonClient / network I/O)이 0 이다. 반환된 델타의
-    //  enqueue 도 **같은 락 안**이 원칙이다(T6 배선 = `commands::layout::send_subscription_delta` —
-    //  창 생성 실패 롤백 경로만 락 밖). 락 밖으로 미루면 계산~발화 사이 재추가로 stale unsubscribe 가
-    //  라이브 구독을 죽인다.
+    //  enqueue 도 **같은 락 안**이다(배선 = `layout::apply::SubscriptionSync::resync` 구현 +
+    //  `commands::popout` 의 두 정리 경로 — 예외 없음). 락 밖으로 미루면 계산~발화 사이 재추가로 stale
+    //  unsubscribe 가 라이브 구독을 죽인다.
     pub fn rebuild(&self, mgr: &ViewManager) -> SubscriptionDelta {
         let mut by_agent: HashMap<AgentKey, Vec<WindowLabel>> = HashMap::new();
 
