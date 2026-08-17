@@ -1,7 +1,7 @@
 # ADR-0063: 슬롯 콘텐츠 배치 제어표면 = set_slot_content 제네릭 command + 부팅 기본 = AgentList·Empty 분할 (고정 사이드패널 제거)
 
-- 상태: 확정 (2026-07-10, 근거: 사용자 결정("완전 슬롯화") + 레이아웃 권위 grounding)
-- 관련: CLAUDE.md §5(LLM-우선 제어)·아키텍처 §5 · ADR-0060(SlotContent 유니온) · ADR-0035(레이아웃 권위=src-tauri) · ADR-0055/0022(command registry) · `src-tauri/src/layout/{manager.rs,tree.rs,types.rs}` · `src-tauri/src/commands/layout.rs` · `src/store/viewStore.ts` · `src/components/layout/AppLayout.tsx`
+- 상태: 확정 (2026-07-10, 근거: 사용자 결정("완전 슬롯화") + 레이아웃 권위 grounding) · 부분 폐기 by ADR-0140 (부팅 기본 레이아웃 방향 어휘)
+- 관련: CLAUDE.md §5(LLM-우선 제어)·아키텍처 §5 · ADR-0060(SlotContent 유니온) · ADR-0035(레이아웃 권위=src-tauri) · ADR-0055/0022(command registry) · `src-tauri/src/layout/{manager.rs,tree.rs,types.rs}` · `src-tauri/src/commands/layout.rs` · `src/store/viewStore.ts` · `src/components/layout/AppLayout.tsx` · Amended by ADR-0140 (부팅 기본 레이아웃 방향 어휘)
 
 ## 맥락
 

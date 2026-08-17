@@ -126,11 +126,11 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
 
   it('split → split_slot invoke(viewId/slotId/dir) + 새 slot id 반환', async () => {
     invokeMock.mockResolvedValueOnce('new-slot-id')
-    const id = await useViewStore.getState().split('v1', 's1', 'horizontal')
+    const id = await useViewStore.getState().split('v1', 's1', 'top_bottom')
     expect(invokeMock).toHaveBeenCalledWith('split_slot', {
       viewId: 'v1',
       slotId: 's1',
-      dir: 'horizontal',
+      dir: 'top_bottom',
     })
     expect(id).toBe('new-slot-id')
   })
