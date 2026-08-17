@@ -269,12 +269,11 @@ impl ConnectionHandler for AgentConnection {
     }
 
     fn on_disconnect(&self, conn_id: ConnId) {
-        // ── 명령 명부 자취 내리기(ADR-0141) — ★이 정리의 **첫 줄**이어야 한다★ ────────────
+        // ── 명령 명부에서 이 연결의 이름 지우기(ADR-0144) — ★이 정리의 **첫 줄**이어야 한다★ ────
         // 뒤로 밀면 그 앞 정리가 도는 **동안** 이 연결이 아직 붙어 있는 것으로 읽혀, 그 창에 겹쳐 든
         //   등록이 통과한다(겹침 자체의 근거 = `CommandRoster` 헤더). 그러면 이미 죽은 연결이 산 연결이
-        //   가져간 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 내린다 — 멀쩡한 연결의 명령이
-        //   `OWNER_UNAVAILABLE` 이 된다. 맨 앞이면 그 창 자체가 없다(패닉으로 건너뛸 구간도 없어진다).
-        // 이름은 지우지 않는다(TRD §4-②).
+        //   얹은 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 지운다 — 멀쩡한 연결의 명령이 조용히
+        //   사라진다. 맨 앞이면 그 창 자체가 없다(패닉으로 건너뛸 구간도 없어진다).
         self.core.commands().detach(conn_id);
 
         let manager = self.core.manager();
@@ -589,7 +588,7 @@ mod tests {
         }
     }
 
-    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 자취로 내리는지(ADR-0140/0141) ──
+    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 지우는지(ADR-0140/0144) ──
 
     /// 공장 하나가 만든 연결들이 **같은 명부**를 보는지까지 이 하네스가 본다 — 연결마다 새 명부가 나면
     /// 아래 conn 2 의 조회가 빈 목록을 받는다.
@@ -654,8 +653,12 @@ mod tests {
         }
     }
 
+    /// ★끊기면 그 연결의 이름이 명부에서 **사라진다**★ — 자취를 남기면 주인 토큰이 연결마다 새로 나는
+    /// 탓에 재접속마다 쌓이고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다(ADR-0144 결정 3).
+    /// 조회하는 쪽을 **다른 연결**로 두는 것은 한 공장이 만든 연결들이 같은 명부를 본다는 것까지 함께
+    /// 보기 위해서다.
     #[tokio::test]
-    async fn a_disconnect_tombstones_that_connections_commands_without_removing_them() {
+    async fn a_disconnect_removes_that_connections_commands_from_the_roster() {
         use engram_dashboard_command::{CommandDecl, OwnerToken};
         use engram_dashboard_protocol::RequestId;
 
@@ -696,7 +699,7 @@ mod tests {
         match next_event(&mut onlooker_rx).await {
             AgentEvent::CommandList { entries, .. } => {
                 assert_eq!(entries.len(), 1, "다른 연결도 같은 명부를 본다");
-                assert!(entries[0].available);
+                assert_eq!(entries[0].name, "tab.create");
             }
             other => panic!("CommandList 여야 함: {other:?}"),
         }
@@ -706,12 +709,7 @@ mod tests {
         onlooker.on_text(2, &list, &onlooker_frames).await;
         match next_event(&mut onlooker_rx).await {
             AgentEvent::CommandList { entries, .. } => {
-                assert_eq!(entries.len(), 1, "이름은 지우지 않는다(TRD §4-②)");
-                assert_eq!(entries[0].name, "tab.create");
-                assert!(
-                    !entries[0].available,
-                    "주인이 없으므로 비가용 자취로 남는다"
-                );
+                assert!(entries.is_empty(), "자취 없이 사라진다: {entries:?}")
             }
             other => panic!("CommandList 여야 함: {other:?}"),
         }
@@ -728,9 +726,10 @@ mod tests {
         }
         onlooker.on_text(2, &list, &onlooker_frames).await;
         match next_event(&mut onlooker_rx).await {
-            AgentEvent::CommandList { entries, .. } => {
-                assert!(!entries[0].available, "늦은 등록이 자취를 되살리면 안 된다")
-            }
+            AgentEvent::CommandList { entries, .. } => assert!(
+                entries.is_empty(),
+                "늦은 등록이 이름을 되살리면 안 된다: {entries:?}"
+            ),
             other => panic!("CommandList 여야 함: {other:?}"),
         }
     }

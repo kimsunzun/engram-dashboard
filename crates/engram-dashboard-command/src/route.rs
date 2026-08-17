@@ -179,10 +179,8 @@ pub async fn route(
             }
             reply
         }
-        OwnerLookup::Unavailable => CommandReply::err(
-            request_id,
-            CommandError::of(ErrorCode::OwnerUnavailable, env.name),
-        ),
+        // ★끊긴 주인의 이름은 명부에서 사라지므로 여기 「주인 부재」 갈래가 없다★ — 그 이름은 한 번도
+        //   등록되지 않았던 이름과 같은 답을 받는다(ADR-0144 가 감수한 구분 손실).
         OwnerLookup::Unknown => CommandReply::err(
             request_id,
             CommandError::of(ErrorCode::UnknownCommand, env.name),
@@ -301,8 +299,13 @@ mod tests {
         assert_eq!(sent[0].request_id, request_id, "id 는 전 구간 동일");
     }
 
+    /// ★끊긴 주인의 이름과 한 번도 본 적 없는 이름이 **같은 답**을 받는다★
+    ///
+    /// 명부가 끊긴 주인의 등록을 지우므로(ADR-0144 결정 3) 배달에는 두 상황을 가를 근거가 없다 — 알고
+    /// 감수한 손실이다. 그 구분이 실제로 필요해지면 자취를 되살리는 것이 아니라 연결 목록을 응답에 싣는
+    /// 쪽으로 푼다.
     #[test]
-    fn step3_splits_unknown_command_from_owner_unavailable() {
+    fn step3_answers_a_disconnected_owners_name_as_an_unknown_command() {
         let table = CommandTable::new(DECLARED);
         let owner = OwnerToken::new("shell-1");
         let mut roster = Roster::new();
@@ -321,13 +324,11 @@ mod tests {
         let gone = block_on(route(&table, &roster, &link, envelope("tab.create")));
         let never = block_on(route(&table, &roster, &link, envelope("theme.set")));
 
-        let gone = gone.outcome.expect_err("주인 부재");
-        assert_eq!(gone.code(), ErrorCode::OwnerUnavailable);
-        assert_eq!(gone.retry(), crate::RetryMode::AfterCondition);
-
-        let never = never.outcome.expect_err("모르는 이름");
-        assert_eq!(never.code(), ErrorCode::UnknownCommand);
-        assert_eq!(never.retry(), crate::RetryMode::Never);
+        for (reply, what) in [(gone, "끊긴 주인의 이름"), (never, "모르는 이름")] {
+            let err = reply.outcome.expect_err(what);
+            assert_eq!(err.code(), ErrorCode::UnknownCommand, "{what}");
+            assert_eq!(err.retry(), crate::RetryMode::Never, "{what}");
+        }
 
         assert!(
             link.sent.lock().unwrap().is_empty(),

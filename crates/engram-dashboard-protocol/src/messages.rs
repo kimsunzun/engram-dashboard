@@ -247,9 +247,9 @@ pub enum AgentCommand {
     /// 붙어 있는 동안의 **차분** — 늦게 뜬 기능이 이름을 더하고 꺼진 기능이 이름을 내린다
     /// (TRD §3-7 조항 3). 전량 재전송은 [`AgentCommand::RegisterCommands`] 뿐이다.
     ///
-    /// `removed` 가 이름만 나르는 것은 의도다 — 내릴 때 모양은 필요 없다. 그리고 내린 이름은 명부에서
-    /// **지워지지 않고 자취로 남는다**(ADR-0141) — 지우면 아직 붙어 있는 주인의 실재했던 이름이
-    /// `UNKNOWN_COMMAND`(재시도 무의미)로 나간다.
+    /// `removed` 가 이름만 나르는 것은 의도다 — 내릴 때 모양은 필요 없다. 내린 이름은 명부에서 **자리째
+    /// 지워지고**(ADR-0144 결정 3) 그 뒤로 `UNKNOWN_COMMAND` 로 답한다 — 자취로 남기면 붙어 있는 주인이
+    /// 이름을 바꿔 가며 자기 몫 상한을 영구히 채울 수 있다.
     UpdateCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
@@ -269,10 +269,10 @@ pub enum AgentCommand {
 /// 겹치지만 방향과 주인이 다르다: `CommandDecl` 은 주인→데몬이 얹는 것이고, 이쪽은 데몬이 명부를
 /// 훑어 내려 주는 것이라 명부만 아는 칸(`available`)이 하나 더 붙는다.
 ///
-/// `available=false` = **이름은 명부에 있으나 주인이 지금 없다**(연결이 끊긴 자취). 없는 이름과 갈라야
-/// 호출자가 재시도할지를 정할 수 있어서 지우지 않고 남긴다 — 전자는 `OWNER_UNAVAILABLE`(나중에 다시),
-/// 후자는 `UNKNOWN_COMMAND`(재시도 무의미)다(TRD §4-②). 만료는 없다 — 시간이 지나 자취가 사라지면
-/// 같은 질문의 답이 시계에 따라 갈려 그 구분 자체가 무너진다(ADR-0141).
+/// ★`available` 은 **지금 항상 `true`** 이고 분기 근거로 쓰지 말 것★ — 주인이 끊기면 그 이름이 명부에서
+/// 사라져 목록에 아예 실리지 않으므로(ADR-0144 결정 3) 실려 온 항목은 전부 살아 있는 등록이다. `false` 는
+/// 도달 불가고, 이 칸으로 가용성을 판정하는 코드는 **판정할 것이 없는 판정**이다. 칸을 떼지 않은 이유는
+/// 떼는 것 자체가 wire 계약 변경인데 얻는 것이 없어서다(TRD §3-7).
 /// `help` 는 주인이 얹은 문자열 **그대로**다(데몬이 열어보지 않으므로 가공도 없다).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -407,8 +407,8 @@ pub enum AgentEvent {
     /// 로그도 없음). **이 variant 를 나중에 broadcast(요청 없이 push)로 바꾸는 순간** 모든 구형 셸이
     /// 그 이벤트를 아무 신호 없이 잃는다 — broadcast 로 바꾸려면 이 안전을 다시 설계해야 한다.
     ///
-    /// 주인이 지금 없는 이름도 함께 실려 온다(`available=false`) — 걸러 내면 「이름은 아는데 주인이
-    /// 없다」를 호출자가 볼 수 없어 §4-② 의 두 오류가 합쳐진다.
+    /// 주인이 끊긴 이름은 실려 오지 않는다 — 명부에서 사라졌기 때문이다(ADR-0144 결정 3). 그래서 목록에
+    /// 없는 이름은 「없는 이름」과 「주인이 자리 비움」이 합쳐진 답이다(감수한 손실).
     CommandList {
         request_id: RequestId,
         entries: Vec<CommandListEntry>,
@@ -1040,7 +1040,8 @@ mod tests {
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// 조회 왕복 — 자취(`available=false`)도 목록에 실려야 §4-② 의 두 오류가 갈린다.
+    /// 조회 왕복. `available=false` 를 함께 굽는 것은 지금 의도다 — 데몬은 그 값을 내지 않지만
+    /// (ADR-0144 결정 3) 계약은 두 값을 다 나르고, 이 골든이 그 칸이 조용히 사라지지 않게 붙든다.
     #[test]
     fn list_commands_and_command_list_round_trip() {
         let req = AgentCommand::ListCommands {

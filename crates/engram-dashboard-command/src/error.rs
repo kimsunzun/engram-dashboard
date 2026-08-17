@@ -64,6 +64,12 @@ error_codes! {
     pub enum ErrorCode {
         InvalidArgument => "INVALID_ARGUMENT" retry Never,
         UnknownCommand => "UNKNOWN_COMMAND" retry Never,
+        /// ★이 코드를 내는 생산 경로가 지금 없다 — 어휘에만 남아 있다★: 끊긴 주인의 이름은 명부에서
+        /// 사라지므로([`crate::Roster::disconnect`] · ADR-0144 결정 3) 배달은 「주인 부재」 대신
+        /// `UNKNOWN_COMMAND` 로 답한다.
+        /// 떼지 않은 이유: 이 어휘는 wire 문자열이고 **모르는 코드는 `INTERNAL`·`retry: never` 로
+        /// 낮춰진다**(위 헤더) — 떼면 이 코드를 실어 보내는 상대의 답장이 「조건이 바뀐 뒤 재시도」라는
+        /// 지시를 잃고 영구 실패로 읽힌다. 뜻 변경도 금지다(TRD §4-③).
         OwnerUnavailable => "OWNER_UNAVAILABLE" retry AfterCondition,
         OutcomeUnknown => "OUTCOME_UNKNOWN" retry SameRequestId,
         Timeout => "TIMEOUT" retry SameRequestId,
@@ -457,6 +463,9 @@ mod tests {
         assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
     }
 
+    /// ★`OWNER_UNAVAILABLE` 을 예로 쓰는 것은 지금 의도다★ — 이 코드를 내는 생산 경로가 없어졌으므로
+    /// (ADR-0144) 이 테스트와 아래 [`retry_is_derived_from_code`] 가 그 코드를 어휘에 붙들어 두는 유일한
+    /// 사용처다. 남겨 두는 이유는 변형 주석에 있다.
     #[test]
     fn known_code_keeps_wire_retry() {
         let e: CommandError = serde_json::from_str(
