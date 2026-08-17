@@ -7,7 +7,16 @@ REM   only the CLIENT SHELL (engram-dashboard.exe), NOT the daemon binary. Agent
 REM   in the DAEMON process (ADR-0029), and ensure_daemon reuses a live compatible daemon,
 REM   so without an explicit `cargo build` the app keeps connecting to a STALE daemon and
 REM   your Rust changes silently have no effect. (does NOT touch claude.exe)
-cd /d "%~dp0"
+REM ★setlocal (do not remove)★: without it, DEV_DAEMON_EXE below survives into a SECOND run in the
+REM   same cmd window. Combined with a failed Get-Process lookup that stale value makes the path check
+REM   pass, so a pid we could NOT confirm gets killed - the exact opposite of what that check promises.
+setlocal
+cd /d "%~dp0.."
+REM ★%CD%, not a %~dp0.. path (do not remove)★: this launcher lives in scripts\, so a %~dp0-relative
+REM   path would carry a literal ".." segment. EXPECTED_DEV_DAEMON_EXE below is string-compared against
+REM   the running process's own Path (canonical, no ".."), so the comparison would never match and
+REM   every daemon kill would be silently skipped. Anchoring on %CD% after the cd gives a canonical root.
+set "ROOT=%CD%"
 
 REM ADR-0139 - launchers kill only their OWN deployment's daemon.
 REM ★Kill ONLY THIS (dev) deployment's daemon - never go back to `taskkill /IM` (do not remove)★:
@@ -24,12 +33,16 @@ REM   than the stale-daemon bug this step exists for.
 REM   Missing/unreadable portfile, a missing/zero/non-numeric pid, a dead pid, a different image name,
 REM   or a different executable path => kill nothing and say so. If the kill itself fails, the script
 REM   stops instead of silently rebuilding/launching against a still-locked binary.
-set "DEV_PORTFILE=%~dp0.engram-data\daemon.json"
-set "EXPECTED_DEV_DAEMON_EXE=%~dp0target\debug\engram-dashboard-daemon.exe"
+set "DEV_PORTFILE=%ROOT%\.engram-data\daemon.json"
+set "EXPECTED_DEV_DAEMON_EXE=%ROOT%\target\debug\engram-dashboard-daemon.exe"
 set "DEV_DAEMON_PID="
+REM ★Pre-clear DEV_DAEMON_EXE too (do not remove)★: `for /f` does not run its body when the lookup
+REM   fails, so an uninitialised variable keeps whatever was there before. The comment below promises
+REM   "cannot confirm => stays empty => do not kill"; without this line that promise is false.
+set "DEV_DAEMON_EXE="
 if not exist "%DEV_PORTFILE%" goto :dev_daemon_kill_no_portfile
 REM Portfile path travels to PowerShell via env var, never interpolated into a quoted literal - see
-REM   run-dashboard-release.bat for why (apostrophe/injection risk in the checkout path).
+REM   rebuild-run-release.bat for why (apostrophe/injection risk in the checkout path).
 REM The [int] cast is a guard, not decoration: a portfile carrying a non-numeric "pid" throws into the
 REM   catch and prints nothing. A missing pid field casts to [int]$null = 0, caught by the same
 REM   explicit "-eq 0" check as a literal 0, so neither slips past as a bare "0".
@@ -81,9 +94,49 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-set "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223"
-echo Starting Engram Dashboard... (close window to stop)
-call npm run tauri dev
+
+REM ★The client shell must be built too (do not remove)★: `tauri dev` used to compile it for us as
+REM   part of launching. We no longer call it (see the detached-launch note below), so nothing else
+REM   builds engram-dashboard.exe - without this you would relaunch the PREVIOUS shell binary.
+echo [clean] Rebuilding client shell...
+cargo build -p engram-dashboard
+if errorlevel 1 (
+  echo [clean] BUILD FAILED - see errors above. Not launching.
+  pause
+  exit /b 1
+)
+
+REM ★The debug build does NOT embed the frontend (do not remove)★: it loads devUrl
+REM   (http://localhost:1420), so vite must be running or the window opens EMPTY. `tauri dev` used to
+REM   start vite for us as a child process; a detached app cannot, so we start it here.
+REM   Left running on purpose - a warm vite renders the next launch in ~0.2s instead of ~60-90s
+REM   (measured 2026-08-17). Output goes to a file so it never travels up a terminal's pipe chain.
+powershell -NoProfile -Command "try { $null = Invoke-WebRequest -Uri 'http://localhost:1420' -UseBasicParsing -TimeoutSec 2; exit 0 } catch { exit 1 }" >nul 2>&1
+if errorlevel 1 (
+  echo [clean] Starting vite dev server ^(log: %TEMP%\engram-vite.log^)...
+  start "engram-vite" /MIN cmd /c "npm run dev > "%TEMP%\engram-vite.log" 2>&1"
+  powershell -NoProfile -Command "for ($i=0; $i -lt 60; $i++) { try { $null = Invoke-WebRequest -Uri 'http://localhost:1420' -UseBasicParsing -TimeoutSec 2; exit 0 } catch { Start-Sleep -Seconds 1 } }; exit 1"
+  if errorlevel 1 ( echo [clean] vite did not come up on 1420 - see %TEMP%\engram-vite.log & pause & exit /b 1 )
+) else (
+  echo [clean] vite already up on 1420 - reusing it.
+)
+
+REM ★The app is launched detached (scripts\launch-detached.ps1) - do NOT go back to `npm run tauri dev`
+REM   (do not remove)★: launched from a terminal, `tauri dev` makes the app a DESCENDANT of that
+REM   terminal and the app's output travels back up the pipe chain. That combination repeatedly
+REM   crashed the terminal (measured 2026-08-16), taking the app down with it. The scheduler path
+REM   fixes BOTH halves - the app is created by a service so it is outside our process tree, AND its
+REM   output goes to a file only. `start` / background jobs satisfy NEITHER.
+REM ★`-Command`, not `-File` (do not remove)★: with -File, PowerShell takes every following argument
+REM   as a literal string, so a comma-separated -EnvVars list collapses into ONE value. The debug port
+REM   argument is then malformed, 9223 never opens, and the script still prints a PID - silent failure
+REM   (measured 2026-08-17).
+echo [clean] Launching app detached...
+powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe 'target/debug/engram-dashboard.exe' -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+if errorlevel 1 ( echo [clean] LAUNCH FAILED - see the log tail above. & pause & exit /b 1 )
+
 echo.
-echo [stopped] Press any key to close.
-pause >nul
+echo [clean] Launched. The PID above is the app - use it if you need to force-kill.
+echo [clean] NOTE: closing this window does NOT stop the app - it is no longer our child. Close the app window.
+echo [clean] First render after a fresh vite can take ~60-90s. Later launches are near-instant.
+pause

@@ -4,7 +4,7 @@
 
 골격이 "프로젝트 빌드 명령"·"프로젝트 격리 게이트"·"프로젝트 코드 불변식"이라 부르는 자리에 끼우는 **engram 전용 실명령·체크리스트**다. 골격은 스택을 모른다 — 이 파일이 engram(Cargo workspace + Tauri + React)으로 바인딩한다.
 
-> **정본 = CLAUDE.md 「빌드·검증 명령」 절 + 「GUI 실측」 절.** 이 파일은 그 **현재 바인딩 스냅샷**일 뿐이다 — 충돌하면 CLAUDE.md를 따르고 이 파일을 고친다(rot 방지). 명령을 통째 복붙해 두 출처가 갈리게 만들지 않는다. **예외 — net 격리 게이트(ADR-0129):** CLAUDE.md 의 그 대목은 스스로 "발췌"라 밝히고 게이트 1~3만 싣는다. 그 다섯 게이트의 명령 텍스트·기대값·근거 정본은 **`crates/engram-dashboard-net/src/lib.rs` 헤더**이고, 충돌하면 그 헤더를 따른다(역할 분담의 서술 = `docs/testing-strategy.md` §net).
+> **정본 = CLAUDE.md 「빌드·검증 명령」 절.** 이 파일은 그 **현재 바인딩 스냅샷**일 뿐이다 — 충돌하면 CLAUDE.md를 따르고 이 파일을 고친다(rot 방지). 명령을 통째 복붙해 두 출처가 갈리게 만들지 않는다. **예외 — net 격리 게이트(ADR-0129):** CLAUDE.md 의 그 대목은 스스로 "발췌"라 밝히고 게이트 1~3만 싣는다. 그 다섯 게이트의 명령 텍스트·기대값·근거 정본은 **`crates/engram-dashboard-net/src/lib.rs` 헤더**이고, 충돌하면 그 헤더를 따른다(역할 분담의 서술 = `docs/testing-strategy.md` §net). **예외 — GUI 실측 절차:** CLAUDE.md 「GUI 실측」 절은 **금지 조항만** 싣고 절차를 이 파일로 내렸다. 기동·환경변수·PID·teardown의 정본은 아래 §full이다 — 그쪽으로 되올리지 않는다.
 
 ## 프로젝트 구조 (강도·범위 매핑의 전제)
 
@@ -95,22 +95,48 @@ npm test                                    # 6) 프론트 테스트 (vitest run
 
 ### full — standard + GUI 실측 (cdp)
 
-standard 게이트를 전부 PASS시킨 뒤, 실제 앱을 띄워 화면 동작을 확인한다(**Windows 전용** — WebView2 CDP, 포트 9223 고정):
-```powershell
-# 1) 디버그 포트 열고 앱 실행 (백그라운드) — PowerShell (bash면: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev)
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9223"; npm run tauri dev
-# 2) 포트 뜰 때까지 대기
-curl http://127.0.0.1:9223/json/version
+standard 게이트를 전부 PASS시킨 뒤, 실제 앱을 띄워 화면 동작을 확인한다(**Windows 전용** — WebView2 CDP, 포트 9223 고정).
+
+**★앱을 셸에서 직접 띄우지 않는다★** — 셸에서 띄우면 앱이 터미널의 자손이 되고 **앱 출력이 그 사슬을 거슬러 올라간다.** 그 조합에서 터미널이 반복 크래시해 실측이 통째로 날아간다(실측 2026-08-16). **끊어야 할 조건이 둘이다 — 프로세스 트리 밖 + 출력은 파일로만.** `start`·백그라운드 잡·`nohup`은 둘 다 못 끊으므로 대체재가 아니다.
+
+**사람이 손으로 볼 때는 `scripts/`의 `run-*.bat` 런처를 쓴다**(목록·용도 = README) — 빌드·dev 서버·분리 실행을 한 번에 한다. 아래는 그 런처가 하는 일을 게이트에서 단계별로 돌리는 형태다.
+
+**★게이트에서는 런처를 쓰지 말고 아래 단계를 쓴다★** — 디버그 런처는 dev 서버를 자식으로 남기므로, 출력을 파이프로 받으면 **dev 서버가 죽을 때까지 파이프가 안 닫혀 호출이 매달린다**(실측 2026-08-17). 사람이 창에서 쓸 땐 무해하다.
+
+아래는 **Git Bash 한 셸에서 전부 돈다**(실측 2026-08-17). PowerShell로 옮겨 쓰지 말 것 — teardown이 Git Bash 전용 접두를 쓴다.
+
+```bash
+# 0) 이번 변경을 담은 빌드를 만든다 + dev 서버를 띄운다(디버그 빌드는 화면을 품지 않는다)
+cargo build -p engram-dashboard          # 백엔드/데몬을 고쳤으면 -p engram-dashboard-daemon 도
+nohup npm run dev > /tmp/engram-vite.log 2>&1 & disown   # 이미 1420이 떠 있으면 건너뛴다
+curl -s -o /dev/null --retry 60 --retry-delay 1 --retry-connrefused --max-time 120 http://localhost:1420
+# 1) 분리 실행으로 기동 — 스케줄러가 새 프로세스를 만들어 터미널 트리 밖에 둔다
+powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe 'target/debug/engram-dashboard.exe' -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+#    성공 시 stdout 마지막 두 줄 = LOG=<로그경로> · PID=<pid>   ★PID를 기록한다★(teardown이 이걸 쓴다)
+#    로그까지 켜려면 값을 콤마로 잇는다 — 반드시 작은따옴표 각각:
+#      ... -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223','RUST_LOG=debug'
+# 2) 포트 뜰 때까지 대기 — ★재시도 필수★(PID 반환 ≠ 포트 준비. 단발 curl은 첫 거부와 기동 실패를 못 가른다)
+curl -s -o /dev/null -w 'cdp=%{http_code}\n' --retry 60 --retry-delay 1 --retry-connrefused --max-time 120 http://127.0.0.1:9223/json/version
 # 3) 실측
 node scripts/cdp.mjs info                   # 페이지 목록 확인
 node scripts/cdp.mjs eval "<js>"            # 앱 안 JS·실제 invoke 호출 (spawn/write/interrupt/kill 등 IPC 검증)
 node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로 확인
 ```
+- **★`-Command`를 `-File`로 바꾸지 말 것★** — `-File`은 뒤 인자를 전부 문자열 리터럴로 넘겨 `'A=B','C=D'`가 **한 값 `A=B,C=D`로 뭉개진다.** 그러면 포트 인자가 오염돼 **9223이 안 열리는데 스크립트는 PID를 정상 반환**한다 — 게이트가 조용히 죽는 경로다(실측 2026-08-17). 경로에 `\`를 쓰는 것도 금지 — Git Bash가 먹어서 `exe not found`가 난다. 슬래시로 쓴다.
+- **★환경변수는 상속되지 않는다★** — 새 프로세스를 스케줄러가 만들어서 현재 셸의 `$env:...`가 안 넘어간다. 디버그 포트·`RUST_LOG`는 반드시 `-EnvVars`로 넘긴다. 빠뜨리면 포트가 안 열려 "왜 9223이 안 뜨지"로 헤맨다.
+- **★실측 대상이 이번 변경을 담은 빌드인지 먼저 확인한다★** — 분리 실행은 **이미 만들어진 exe**를 띄운다. 소스를 고치고 재빌드 없이 띄우면 옛 바이너리로 실측하고 **통과로 오판한다**. `cargo build -p engram-dashboard`는 **데몬을 빌드하지 않는다** — 백엔드를 고쳤으면 `-p engram-dashboard-daemon`도 돌린다(안 그러면 옛 데몬에 붙어 Rust 변경이 조용히 무효가 된다, ADR-0029).
+- **디버그 대신 릴리스로 볼 수도 있다** — `target/release/engram-dashboard.exe`는 화면을 품고 있어 dev 서버가 필요 없고 렌더가 즉시다. 대신 빌드가 4분대다(실측 2026-08-17). 반복 확인엔 디버그가 낫다 — dev 서버를 살려두면 재기동 렌더가 1초 안쪽이다.
+- **★`target/release/`와 `release/`는 다른 배포판이다★** — 전자는 위 런처가 만들고, 후자는 `scripts/build-release.ps1`이 조립하는 portable 폴더다. 데이터 폴더도 각자라 섞으면 엉뚱한 데몬·엉뚱한 로스터를 본다.
+- **같은 이름 프로세스가 미리 떠 있으면 안 된다** — 스크립트는 이미지 이름 차집합으로 새 PID를 찾고 여럿이면 첫 번째만 쓴다. 잔여 앱 프로세스를 먼저 확인한다.
+- **기동 실패 판정** — 20초 안에 새 프로세스를 못 찾으면 `LAUNCH_FAILED ...` + 로그 꼬리 20줄 출력 후 종료코드 1. 실측 실패로 보고한다.
+- **앱 출력은 화면에 안 나온다** — 전부 `LOG=` 파일로 리다이렉트된다(기본 `%TEMP%\detached-<exe이름>.log`). `RUST_LOG` 미설정이면 앱이 stdout에 아무것도 안 써서 **로그 0바이트가 정상**이다 — 빈 로그를 기동 실패로 읽지 말 것. **거꾸로 `RUST_LOG=debug`를 넘겼는데도 0바이트면 위 `-EnvVars` 문법이 깨진 것이다**(정상이면 수 KB — 실측 2026-08-17: 0 B → 1672 B).
 - 포트 9223 고정(9222=Gemini Chrome 충돌 회피, `CDP_PORT`로 변경).
 - **검증엔 스샷보다 `eval` 텍스트가 토큰·정확도 유리**(픽셀 해석 회피) — DOM 텍스트·`window.__TAURI__.core.invoke(...)` 결과를 직접 확인. shot은 레이아웃·시각 확인이 필요할 때만.
 - 변경이 닿은 동작을 실제로 한 번 통과시켜 본다(예: spawn → 출력 도착 → kill → 상태 전이). **이게 통과해야 동작 확인 = 완료**.
-- 로그가 필요하면 `$env:RUST_LOG = "debug"`(기본 OFF=warn — bash면 `RUST_LOG=debug` 접두)로 앱을 띄운다.
-- **teardown — 자기가 띄운 건 자기가 치운다(실발동 2026-07-10):** 실측 종료 시 1)에서 띄운 런처의 **PID 트리째** 강제 종료한다(`taskkill /PID <런처PID> /T /F` — 자식 `engram-dashboard.exe`·vite watcher까지). 런처 PID를 실측 시작 시 기록해 둔다. **경계: 공유 데몬(`engram-dashboard-daemon.exe`)은 불가침** — qa가 띄운 게 아니면 죽이지 않는다(persist 모델·타 에이전트 호스팅 가능).
+- **teardown — 자기가 띄운 건 자기가 치운다(실발동 2026-07-10):** 1)에서 받은 **PID**로 종료한다 — `MSYS_NO_PATHCONV=1 taskkill /PID <기록한PID> /T /F`(Git Bash면 접두 필수 — 안 붙이면 `/PID`가 경로로 변환된다). **`/T`가 잡는 것 = 앱 + 그 WebView2 렌더러 자식들**뿐이다(옛 "런처 트리" 모델이 아니다 — 분리 실행엔 런처 부모가 없다). 앱을 감싼 임시 `cmd`는 자식이 아니라 **부모**라 `/T`가 안 건드리고, 앱이 끝나면 스스로 빠진다.
+- **★데몬은 위 `/T`에 안 걸린다 — 따로 판단한다★** — 앱이 데몬을 WMI(`Win32_Process.Create`)로 띄워 부모가 `WmiPrvSE.exe`가 되기 때문이다(근거 = `crates/engram-dashboard-discovery/src/lib.rs` `wmi_spawn` 주석 · 실측 2026-08-17). 처리는 **소유권으로 갈린다:**
+  - **실측 시작 전부터 떠 있던 데몬 = 불가침.** 죽이지 않는다(persist 모델·타 에이전트 호스팅 가능 — 에이전트는 데몬의 자식이라 죽이면 진행 중인 작업이 날아간다). 그래서 **기동 전에 데몬 유무를 기록해 둔다**(위 "잔여 프로세스 확인"과 같은 단계).
+  - **이번 실측이 띄운 데몬 = 자기가 치운다.** 남기면 그 배포판의 데몬 exe가 잠겨 **다음 재빌드가 하드 실패한다**(`scripts/build-release.ps1`이 "앱과 데몬을 완전히 종료한 뒤 다시 실행하세요"로 멈춘다). 죽이기 전 `ExecutablePath`가 이번에 띄운 배포판(`target/debug/` 또는 `target/release/`) 것인지 **반드시 확인한다** — 이미지 이름만 보고 죽이면 남의 배포판 데몬을 죽인다(ADR-0139).
 - **비-Windows에선 cdp 불가** → standard까지가 한계 + "동작 미확인" 정직 보고(골격 §4).
 
 ## 실패 보고 시 게이트 명칭 (골격 §3에 주입)
