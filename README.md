@@ -33,7 +33,9 @@
 
 코드 서명을 하지 않아서 첫 실행 때 Windows SmartScreen 경고가 뜰 수 있습니다.
 
-에이전트 명부와 프리셋은 앱 폴더가 아니라 `%APPDATA%\com.engram.dashboard`에 저장됩니다. 앱 폴더를 지워도 이 설정은 남으니, 완전히 지우려면 이쪽도 함께 삭제하세요.
+에이전트 명부와 프리셋은 실행파일 옆에 만들어지는 `data\` 폴더에 저장됩니다. **이 폴더를 지우거나 옮기기 전에 앱을 완전히 종료하세요** — 앱이 켜져 있는 동안에는 데몬이 `data\daemon.json`(접속 정보 겸 중복 실행 방지 장치)을 붙들고 있어서 그 폴더의 삭제도 이동·이름 변경도 거부됩니다. 앱을 끈 뒤에는 앱 폴더째 지우면 데이터도 함께 사라지고, 폴더째 옮기면 따라옵니다. 쓰기 권한이 없는 곳(`C:\Program Files` 등)에 압축을 풀면 이 폴더를 만들 수 없어 데몬이 기동하지 않으니, 사용자 폴더처럼 쓸 수 있는 위치에 두세요.
+
+클라우드 동기화 폴더(OneDrive·Dropbox·Google Drive 등) 안에 풀 때는 한 가지를 알아 두세요. 데몬은 켤 때마다 새 접속 토큰을 만들어 `daemon.json`에 쓰는데, 실행 중에는 이 파일을 지우거나 갈아끼울 수 없어 동기화 엔진은 **버전을 계속 쌓기만** 합니다. 즉 그동안 발급된 토큰이 전부 그 서비스의 버전 기록에 남습니다. 로컬 전용 폴더에 두는 쪽을 권합니다.
 
 ## 주요 기능
 
@@ -169,11 +171,17 @@ Node.js 20+와 Rust stable 툴체인이 필요합니다.
 git clone https://github.com/kimsunzun/engram-dashboard.git
 cd engram-dashboard
 npm install
-cargo build -p engram-dashboard-daemon   # 데몬은 별도 바이너리 — 없으면 에이전트를 못 띄웁니다
-npm run tauri dev
+scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 서버 + 앱 실행까지 한 번에
 ```
 
-Windows에서는 저장소 루트의 `run-dashboard-clean.bat`도 쓸 수 있습니다.
+**실행은 `scripts/`의 런처로 합니다**(Windows). 앱을 셸에서 직접 띄우지 않습니다 — 터미널의 자손으로 붙으면 앱 출력이 터미널로 거슬러 올라가고, 그 조합에서 터미널이 반복 크래시해 앱까지 함께 내려갑니다(실측). 런처는 작업 스케줄러로 앱을 프로세스 트리 밖에 띄우고 출력을 파일로만 보냅니다.
+
+| 런처 | 하는 일 |
+|---|---|
+| `scripts\run-debug.bat` | 클라이언트만 빌드 + dev 서버 확인 + 실행 |
+| `scripts\rebuild-run-debug.bat` | 데몬까지 재빌드(백엔드 수정 후) + 실행 |
+| `scripts\run-release.bat` | 이미 빌드된 릴리즈 실행 |
+| `scripts\rebuild-run-release.bat` | 릴리즈 새로 빌드 + 실행 |
 
 ```bash
 # src-tauri만 제외(그 크레이트의 테스트 타깃이 Windows에서 크래시) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)

@@ -66,7 +66,7 @@
 ### daemon (`crates/engram-dashboard-daemon`)
 - **① 단위**: `src/` 내 `#[cfg(test)]` — `connection_core`·`agent_conn`·`status_fanout`·`messaging_host`·`control/*`. 목록의 정본은 `rg -l "#\[cfg\(test\)\]" crates/engram-dashboard-daemon/src/`. ws·portfile·instance 는 net crate 로 이사했다(ADR-0129 슬라이스 1).
 - **② 통합**: `crates/engram-dashboard-daemon/tests/`(ws_e2e·control_send·engram_cli·mcp_control·mcp_manager_lifecycle 등) — in-process WS E2E는 `ws_e2e.rs`가 데몬 WS 서버를 127.0.0.1:0 + MemProfileStore 로 기동해 tokio-tungstenite 클라로 전 경로(auth/구독/replay/resume/truncated/epoch/backpressure/dispatch 전 command/keepalive/lease/resize 협상)를 검증하고, 나머지 파일들은 제어 채널 듀얼 입구 배달(`control_send.rs`)·제어 평면 CLI 프로세스 레벨(`engram_cli.rs`)·MCP 제어 채널 입구 인증(`mcp_control.rs`)·제어 채널 생명주기(`mcp_manager_lifecycle.rs`)를 각각 검증한다.
-- **③ 실프로세스(#[cfg(windows)] + #[ignore])**: `tests/ws_e2e.rs` 하단의 `#[ignore]` 분(② 파일 안에 있다) — 실제 데몬 .exe spawn(데몬 kill→PTY child Job 동반사망 / single-instance mutex / stale discovery 자가덮어쓰기). `ENGRAM_DATA_DIR`·`ENGRAM_INSTANCE_KEY` 로 운영환경 격리.
+- **③ 실프로세스(#[cfg(windows)] + #[ignore])**: `tests/ws_e2e.rs` 하단의 `#[ignore]` 분(② 파일 안에 있다) — 실제 데몬 .exe spawn(데몬 kill→PTY child Job 동반사망 / single-instance 폴더 잠금 / stale discovery 자가덮어쓰기). `ENGRAM_DATA_DIR` 하나로 운영환경 격리 — 단일 인스턴스 스코프가 데이터 폴더라 폴더를 가르면 잠금도 함께 갈린다(ADR-0134).
 - 실행: `cargo test -p engram-dashboard-daemon` · 실프로세스 `cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture`.
 
 ### src-tauri (`src-tauri`)
@@ -86,7 +86,7 @@
 ### HIGH
 1. **프론트 로직 단위테스트 도입 (vitest)** — vitest 설치 + `npm test` 스크립트. `src/api/daemonClient.test.ts` 식 **코로케이션**. mock `WebSocket` + mock `@tauri-apps/api/core` invoke 로 브라우저 없이: decodeOutputFrame(바이트/UUID), high-water dedup, **재연결 resume(드롭→재연결→무손실·무중복)**, request_id 매칭, #13133 정리, clientFactory 모드. `embeddedClient`/`decodeBase64`/store 전이도. 재연결 버그류 회귀를 ①에서 잡는 그물 — ②③ 부하·EDR 마찰 감소의 핵심.
 2. **core `examples/` 검증 하네스 → `tests/` 이관(§0-a)** — `examples/{headless,transport_smoke,session_smoke}` 의 "로그 eyeball" 을 **단언 기반 통합테스트**(`crates/engram-dashboard-core/tests/`)로 전환: spawn→write→resize→kill 인과, hang 없음, finish(Killed) 종점 등. 그러면 `cargo test` 가 core 격리까지 자동 회귀(현 구멍 메움). `spike*.rs` 는 스파이크라 `examples/` 잔류.
-3. **CDP 역할 재정의 + 최소화** — CDP eval 로 로직 검증하던 관행 중단. CDP = 시각(shot)·레이아웃·실앱 최종 스모크 전용. CLAUDE.md 의 "검증은 스샷보다 eval 텍스트 유리" 문구도 이 분리에 맞게 보정 검토(eval 은 실앱 스모크 한정).
+3. **CDP 역할 재정의 + 최소화** — CDP eval 로 로직 검증하던 관행 중단. CDP = 시각(shot)·레이아웃·실앱 최종 스모크 전용. `/qa` 바인딩 §full 의 "검증은 스샷보다 eval 텍스트 유리" 문구도 이 분리에 맞게 보정 검토(eval 은 실앱 스모크 한정).
 
 ### MED
 3. **프론트↔wire 타입 드리프트 게이트** — ts-rs `bindings/*.ts` 가 있으나 프론트가 `src/api/types.ts` 로 손-미러. `ts_export` 산출물과 프론트 소비 타입의 drift 검출(빌드 시 diff 비교) 또는 bindings 직접 소비로 전환.
@@ -120,9 +120,8 @@ rg "^\s*use tauri" crates/engram-dashboard-core/src/      # → 0줄 (import 라
 rg "engram_dashboard_protocol" crates/engram-dashboard-core/src/   # → 0줄
 
 # ③ 실앱/시각 (CDP — EDR 탐지 대상, 최소 사용)
-# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev
-# node scripts/cdp.mjs shot out.png   # 스샷(시각 확인)
-# node scripts/cdp.mjs info           # 페이지 목록
+# 실명령 정본 = /qa 바인딩 §full (여기 베끼지 않는다).
+# 앱은 셸에서 직접 띄우지 않는다 — scripts/launch-detached.ps1 경유.
 ```
 
 ## 4. 보안(EDR) 주의 — CDP

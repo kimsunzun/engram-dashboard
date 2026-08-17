@@ -1,0 +1,14 @@
+# ★Batch files MUST be CRLF (do not remove)★
+#   cmd.exe re-seeks the file by byte offset after every executed line, assuming CRLF. An LF-only
+#   .bat drifts one byte per line and eventually starts executing the MIDDLE OF A COMMENT as a
+#   command — `cd /d "%~dp0.."` itself never runs, so every guard the comments describe is void.
+#   Measured 2026-08-17: two launchers written with LF failed exactly this way; the same bytes with
+#   CRLF ran correctly.
+#   Without this rule the breakage is machine-dependent (core.autocrlf), so it survives review on
+#   one checkout and reappears on another.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell is tolerant of LF, but these sit next to the launchers and are edited together —
+# keeping them uniform avoids mixed-ending diffs in the same directory.
+*.ps1 text eol=crlf

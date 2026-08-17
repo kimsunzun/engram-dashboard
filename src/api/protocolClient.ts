@@ -110,6 +110,11 @@ export class ProtocolClient implements AgentClient {
 
   private lastState: ConnectionState
 
+  // ADR-0134: 연결 상태와 같은 표면에 실리는 실패 이유. 구독자 집합을 여기서 갖는 이유는, 상태
+  //   문자열이 안 바뀌어도(이유만 밝혀져도) 통지해야 하기 때문이다 — transport 는 상태 전이만 안다.
+  private connError: string | null = null
+  private stateCbs = new Set<(state: ConnectionState) => void>()
+
   constructor(transport: Transport) {
     this.transport = transport
     this.lastState = transport.connectionState
@@ -120,6 +125,8 @@ export class ProtocolClient implements AgentClient {
       const prev = this.lastState
       this.lastState = s
       if (s === 'connected' && prev !== 'connected') {
+        // 연결이 살아났으면 옛 실패 이유는 더 이상 참이 아니다.
+        this.connError = null
         // ADR-0046: pendingBuffers/resubscribeAll(wire Subscribe 송신) 삭제 — 뷰 buffering 리셋+재요청으로 대체.
         this.reconnectResetAllViews()
       } else if (s !== 'connected' && prev === 'connected') {
@@ -127,6 +134,7 @@ export class ProtocolClient implements AgentClient {
         for (const p of this.pending.values()) p.reject(lost)
         this.pending.clear()
       }
+      this.notifyState()
     })
   }
 
@@ -135,8 +143,32 @@ export class ProtocolClient implements AgentClient {
     return this.transport.connectionState
   }
 
+  get connectionError(): string | null {
+    return this.connError
+  }
+
+  reportConnectionError(reason: string | null): void {
+    // ★연결돼 있으면 이유를 기록하지 않는다(load-bearing)★: 지우는 계기가 'connected' 로의 *전이*
+    //   하나뿐이라, 이미 connected 인 상태에서 기록을 허용하면 지울 전이가 영영 오지 않아 배너가
+    //   고착된다. 이 표면은 window.__ENGRAM_AGENT__ 로 공개돼 있어 LLM·cdp 호출로도 닿는다.
+    const next = this.transport.connectionState === 'connected' ? null : reason
+    if (this.connError === next) return
+    this.connError = next
+    this.notifyState()
+  }
+
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void {
-    return this.transport.onConnectionStateChange(cb)
+    this.stateCbs.add(cb)
+    // 등록 즉시 현재 상태 1회 통지(transport 동형 — 구독자가 초기 상태를 놓치지 않는다).
+    cb(this.transport.connectionState)
+    return () => {
+      this.stateCbs.delete(cb)
+    }
+  }
+
+  private notifyState(): void {
+    const s = this.transport.connectionState
+    for (const cb of this.stateCbs) cb(s)
   }
 
   // ── 명시 연결/해제(ADR-0021 §1·note3, transport 위임) ─────────────────────────────

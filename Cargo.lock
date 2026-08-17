@@ -1108,7 +1108,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "windows 0.58.0",
 ]
 
 [[package]]

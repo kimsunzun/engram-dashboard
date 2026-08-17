@@ -12,6 +12,17 @@ launch/release/
 # 로컬 런타임 데이터(데몬 토큰·프로필 등) — 절대 커밋 금지. data_dir 기본 위치(S13 TRD).
 .engram-data/
 
+# 릴리즈 배포판의 런타임 데이터(실행파일 옆 `data/` — ADR-0134). 같은 이유로 절대 커밋 금지:
+#   daemon.json 에 256-bit WS 토큰, agents.json 에 프로필(평문 env 포함 가능)이 담긴다.
+#
+# ★폴더 이름 한 줄(`data/`)로 막지 마라(되살리지 마라)★: ADR-0134 개명으로 이름이 흔해져 무관한
+#   data 폴더까지 조용히 삼킨다 — 무시는 눈에 안 보여서, 넓은 규칙은 없느니만 못하다.
+# ★그렇다고 지우지도 마라★: 조립 산출 경로(위 release/ · launch/release/ · target/)는 이미 덮이지만,
+#   배포판 zip 을 추적 폴더 안 **임의 위치**에 풀거나 build-release.ps1 을 -OutDir 로 딴 데 돌리면
+#   그 경로들 밖이다. 그 몫만 비밀 파일 이름으로 정확히 겨눈다.
+**/data/daemon.json
+**/data/agents.json
+
 # 핸드오프 히스토리(/handoff용) — 기록 보존 위해 git 추적(2026-07-09, 사용자 결정). history/ append-only.
 .ccb/
 

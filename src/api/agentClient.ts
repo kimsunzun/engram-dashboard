@@ -57,8 +57,38 @@ export interface ViewOutputState {
 export interface AgentClient {
   // ── 연결 상태 ──────────────────────────────────────────────────────────────
   readonly connectionState: ConnectionState
-  /** 상태 변화 구독. 반환은 해제 함수. */
+  /**
+   * 연결이 끊긴 **이유**(사람이 읽는 문장). 이유를 모르면 null.
+   *
+   * ★왜 상태와 같은 표면에 두나(ADR-0134)★: 데이터 폴더에 쓸 수 없어 데몬이 못 뜨는 실패는
+   * 'down' 만으로는 원인 없는 시간 초과와 구분되지 않는다. 별도 핸들을 새로 파지 않고 이미 있는
+   * 연결 상태 표면에 이유를 실어, 상태를 그리는 쪽이 같은 구독으로 함께 받는다(§5 LLM-우선 제어 —
+   * 제어 표면은 하나다).
+   */
+  readonly connectionError: string | null
+  /**
+   * 상태 변화 구독. 반환은 해제 함수.
+   * ★[`connectionError`] 가 바뀔 때도 통지된다★ — 상태 문자열이 그대로여도(예: 'down' 인 채 이유만
+   * 밝혀져도) 구독자가 다시 그릴 수 있어야 한다.
+   */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
+  /**
+   * 연결 실패 이유를 기록한다(null = 지움). 다음 'connected' 전이에서 자동으로 지워진다.
+   *
+   * ★연결된 상태에서의 기록은 무시된다★: 지우는 계기가 'connected' 로의 *전이* 뿐이라, 이미
+   * 연결된 채로 기록하면 지울 전이가 오지 않아 영구 고착된다. 그래서 connected 면 null 로 접는다.
+   *
+   * ★쓰는 곳은 지금 정확히 하나다★ — `DaemonControl.start()`. 부팅 bootstrap 과
+   * `window.__ENGRAM_DAEMON__.start()` 가 그 한 곳을 지나므로 둘 다 덮인다.
+   *
+   * ★덮이지 **않는** 경로(알려진 공백 — 넓혀 적지 말 것)★:
+   * - `AgentClient.connect()` — 공개 표면이고 내부적으로 spawn 까지 가지만 `DaemonControl` 을
+   *   거치지 않는다. LLM·cdp 가 이걸 직접 부르면 실패 이유가 화면에 안 실린다.
+   * - `DaemonControl.stop()` — 실패해도 기록하지 않는다(끄기 실패는 "연결 실패 이유"가 아니다).
+   * - 네이티브 트레이의 "데몬 켜기" — Rust 가 `discovery::ensure_daemon` 을 직접 부르므로 프론트를
+   *   아예 지나지 않는다(트레이는 자기 아이콘 상태로 표현한다).
+   */
+  reportConnectionError(reason: string | null): void
 
   /**
    * **명시 연결(spawn 허용)** — ADR-0021 §1. 부팅 1회 / 사용자 daemon_start 가

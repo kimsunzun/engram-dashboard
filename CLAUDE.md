@@ -41,7 +41,15 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **인라인 허용 예외:** 1~2줄 사소 수정 · 사소한 문서(오타·서식) · 조사 · 스파이크. **소스가 한 줄이라도 바뀌면 커밋 전 QA는 그대로 돌린다**(예외는 코더 스폰 생략이지 검증 생략이 아니다). **문서·설정만 바뀐 경우의 범위는 `/qa` 바인딩이 정한다.** **load-bearing 문서는 예외 아님 → `/review doc` 거쳐 커밋.**
 - **역할→모델·effort 배치 = 전역 사전이 정본.** 메인 세션만 예외 명시 = xhigh.
 - **커밋은 게이트 통과 후에만.**
-- **브랜치 = 세션을 띄운 워크트리 이름.** 메인 폴더 세션은 `wt1`, wt2 폴더 세션은 `wt2`에만 커밋한다. 주제 브랜치를 새로 파지 않는다. master 통합은 덩어리 단위로.
+### 브랜치·커밋
+
+> 목적 하나 = **그래프에서 "이 커밋 뭉치가 무슨 작업이었나"를 나중에 식별.** 아래는 전부 그 한 줄에서 나온다. (사용자 결정 2026-08-16/17 — 옛 "브랜치 = 워크트리 이름" 규약 폐기)
+
+- **브랜치 = 주제 하나.** master에서 판다. 그 주제의 모든 스텝·소주제를 여기 쌓는다 — 소주제마다 새로 파지 않는다.
+- **브랜치 이름 = `<타입>/<슬러그>`.** 타입 어휘는 커밋과 같다(`feat`·`fix`·`refactor`·`docs`·`chore`·`ci`). **워크트리 이름(`wt1`·`wt2`) 금지** — 그래프에서 무슨 작업인지 안 보인다.
+- **커밋 제목 = `S21: <타입>(<범위>): <요약>`.** 스텝 번호는 `docs/process/step-log.md`의 마지막 스텝을 잇는다 — **세션이 임의로 올리지 않는다**(새 스텝 시작 = 사용자 결정). 커밋 끊는 단위는 세션 판단. **머지 커밋엔 접두어를 붙이지 않는다.**
+- **통합 = push → CI 초록 → `git merge --no-ff`.** ★fast-forward 금지★ — 머지 커밋이 없으면 덩어리 경계가 그래프에 안 남는다. **머지 커밋 본문에 무엇이 들어갔는지 항목으로 적는다** — 브랜치 이름은 자유 텍스트라 못 믿으므로, 이 본문이 "그 덩어리가 무슨 작업이었나"를 남기는 유일한 수단이다.
+- **태그 = 버전 전용**(`v1.2.0`). 스텝·작업 태그 만들지 않는다. ★`v*` 태그를 push하면 릴리스가 발행된다★ — 되돌리기 어렵고 재시도도 안 된다(「검증」 절).
 
 ## 설계 결정 기록 (ADR)
 
@@ -173,7 +181,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `cargo test -p engram-dashboard-command` — 명령 버스 도구 단위(워크스페이스 의존 0 격리 하네스, ADR-0140)
 - `cargo test -p engram-dashboard-protocol` — codec golden + ts-rs 바인딩
 - `cargo test -p engram-dashboard-messaging` — 메시징 커널 단위(무의존 격리 하네스, ADR-0110)
-- `cargo test -p engram-dashboard-net --all-features` — 네트워크 행 단위(ADR-0129). ★`--all-features`를 빼지 말 것★ — net의 기본 feature가 비어 있어 맨 명령은 `auth`만 컴파일해 6개만 돈다(켜면 31개, 실측 2026-08-05). **두 조합을 다 도는 것이 게이트 5.**
+- `cargo test -p engram-dashboard-net --all-features` — 네트워크 행 단위(ADR-0129). ★`--all-features`를 빼지 말 것★ — net의 기본 feature가 비어 있어 맨 명령은 `auth`만 컴파일해 6개만 돈다(켜면 42개, 실측 2026-08-14). **두 조합을 다 도는 것이 게이트 5.**
 - `cargo build` — 전체 workspace 빌드
 - `cargo fmt --check` — 포맷 게이트(검사형)
 - `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 코어 격리 게이트. import 라인 앵커라 주석 자기인용이 오탐되지 않는다.
@@ -181,7 +189,7 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 메시징 커널 의존 상한. 바로 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표·`[build-dependencies]`·rename)를 **해석된 의존 그래프**로 덮는다. **그중 가장 큰 구멍은 정규식이 crate 이름 알파벳을 손으로 박아 둔다는 것** — 새 crate는 누가 그 알파벳에 이름을 더할 때까지 **아예 안 보인다**(`command`를 더한 것이 이 게이트를 세운 계기다). net 상한 게이트와 같은 계기이고 플래그도 같은 이유로 줄이지 않는다.
 - `cargo tree -p engram-dashboard-command --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 도구 crate 의존 상한. 이 crate의 **존재 이유가 「워크스페이스 의존 0」**이라 이 줄이 그 벽이다. ★**정규식·상한 게이트에 공통으로 남는 구멍**★ — 둘 다 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별한다. 다른 이름을 단 멤버는 양쪽 다 그냥 통과한다. (ADR-0140)
 - 프론트: `npm test`(vitest run) + `npx tsc --noEmit`(별도 typecheck 스크립트 없음)
-- 전체 E2E: `npm run tauri dev` · 로그 ON: `RUST_LOG=debug`(기본 warn)
+- 전체 E2E: `scripts/`의 `run-*.bat` 런처로 띄운다(목록·용도 = README). **셸에서 직접 띄우지 않는다**(아래 「GUI 실측」). 로그 ON: `RUST_LOG=debug`(기본 warn — 분리 실행에선 스크립트 인자로 넘긴다)
 - **CI 정본 = `.github/workflows/ci.yml`** — 로컬 게이트에 없는 검사가 더 있다(여기서 세지 않는다). 그중 wire 바인딩 동기 게이트는 실제로 깨진 적이 있으니, 생성물 drift를 남긴 채 밀지 말 것.
 
 ### 네트워크 행 격리 게이트
@@ -196,19 +204,8 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 
 실제 Tauri 창(WebView2)에 CDP로 붙어 스크린샷·DOM 조회·실제 `invoke` 호출까지 한다(node 내장 WebSocket만, **Windows 전용**).
 
-```bash
-# 1) 디버그 포트 열고 앱 실행
-WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" npm run tauri dev
-# 2) 포트 대기: curl http://127.0.0.1:9223/json/version
-# 3) 검증
-node scripts/cdp.mjs info                  # 페이지 목록
-node scripts/cdp.mjs shot out.png          # 스크린샷(맨 파일명은 _wip/shots/ 아래로) → Read로 확인
-node scripts/cdp.mjs eval "<js>"           # 앱 안에서 JS 실행
-```
-
-- `eval`로 DOM 텍스트와 백엔드 직접 호출(`window.__TAURI__.core.invoke(...)`)을 확인해 spawn/write/interrupt/kill을 실제 IPC로 검증한다.
-- **검증엔 스샷보다 `eval` 텍스트가 유리하다**(픽셀 해석 회피).
-- 포트 9223 고정(9222는 Gemini Chrome과 충돌 — `CDP_PORT`로 변경).
+- **★앱을 셸에서 직접 띄우지 않는다★** — `scripts/`의 런처나 `scripts/launch-detached.ps1`로 띄운다. 셸에서 띄우면 앱이 터미널의 자손이 되고 **앱 출력이 그 사슬을 거슬러 올라간다** — 그 조합에서 터미널이 반복 크래시해 앱까지 함께 내려간다(실측 2026-08-16). **끊어야 할 조건이 둘이다 — 프로세스 트리 밖 + 출력은 파일로만.** `start`·백그라운드 잡·`nohup`은 둘 다 못 끊으므로 대체재가 아니다.
+- 절차(기동 인자·환경변수·PID·teardown)는 `/qa` 바인딩 §full이 갖는다. 여기 되올리지 않는다.
 
 ## 컨벤션
 

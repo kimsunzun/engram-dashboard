@@ -1,7 +1,7 @@
 # ADR-0100: 릴리즈 패키징 — 포터블 폴더 조립 스크립트 (co-location 불변식)
 
-- 상태: 확정 (2026-07-23, 근거: 사용자 결정 + S10 백엔드 조사 실측)
-- 관련: CLAUDE.md "아키텍처 원칙" · ADR-0023(3-프로세스 토폴로지) · ADR-0024(데몬 생사·데이터 위치) · ADR-0086(듀얼 입구 CLI/MCP) · ADR-0092(프라이밍 파일) · ADR-0099(채널 capability 스위치·프라이밍 2파일) · `scripts/build-release.ps1` · `.gitignore`
+- 상태: 확정 (2026-07-23, 근거: 사용자 결정 + S10 백엔드 조사 실측) · 부분 폐기 by ADR-0134 (런타임 데이터 위치를 실행 폴더 하위로 대체)
+- 관련: CLAUDE.md "아키텍처 원칙" · ADR-0023(3-프로세스 토폴로지) · ADR-0024(데몬 생사·데이터 위치) · ADR-0086(듀얼 입구 CLI/MCP) · ADR-0092(프라이밍 파일) · ADR-0099(채널 capability 스위치·프라이밍 2파일) · `scripts/build-release.ps1` · `.gitignore` · Amended by ADR-0134 (런타임 데이터 위치를 실행 폴더 하위로 대체)
 
 ## 맥락
 릴리즈 빌드가 한 번도 검증된 적 없는 영역이었다. 실사용 확인("사용자가 대시보드에서 에이전트에게 명령")이 최초 관문인데, 현 `src-tauri/tauri.conf.json` 번들 설정에는 `resources`·`externalBin`·`sidecar`가 전혀 없어 `npm run tauri build`가 런타임 필수 동반물을 **하나도 포함하지 않는다**.

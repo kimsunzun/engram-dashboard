@@ -38,7 +38,6 @@ server = [
     "dep:tokio",
     "dep:tokio-tungstenite",
     "dep:tracing",
-    "dep:windows",
 ]
 
 # ★의존성 상한 — 열거가 아니라 **규칙**(load-bearing, ADR-0129 결정 1)★: 워크스페이스 crate 는
@@ -121,13 +120,12 @@ tracing = { version = "0.1", optional = true }
 [dev-dependencies]
 serde_json = "1"
 
-# `instance` 의 named mutex 살림에 쓴다. 심볼 목록을 여기 열거하지 않는다(열거는 한 칸 모자라기 쉽고,
-#   `windows::core::PCWSTR` 처럼 아래 어느 feature 에도 안 걸리는 것도 있다) — 실제 사용은
-#   `rg "windows::" src/` 가 답이다.
-#   ★pid liveness 는 여기 없다★: 그건 core 의 `agent::platform` 헬퍼가 한다(위 core 의존 주석) — 옛
-#   데몬 주석의 "pid liveness(OpenProcess)" 를 이 자리로 옮겨 적지 말 것. core 와 동일 0.58 버전 고정.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_System_Threading",
-    "Win32_Foundation",
-], optional = true }
+# ★Win32 크레이트 의존 0(의도)★: `instance` 의 단일 인스턴스 배제는 std 만으로 짠다 —
+#   `std::os::windows::fs::OpenOptionsExt::share_mode` 하나면 된다(그대로 `CreateFileW` 의 dwShareMode 로
+#   내려가 같은 커널 동작을 unsafe 없이 얻는다).
+#   ★구간 잠금(`std::fs::File::try_lock`)을 되살리지 말 것★: MS 문서상 배타 구간 잠금은 다른 프로세스의
+#   **읽기까지** 거부하는데, 이 파일은 클라이언트가 읽어야 하는 접속 파일을 겸한다(ADR-0135). 그래서
+#   `LockFileEx` 를 부르려고 `windows` 를 되살릴 이유도 함께 사라졌다.
+#   ★공유 모드를 넓히지 말 것★ — 쓰기·삭제 공유는 각각 배제와 파일 보호를 무너뜨린다
+#   (`src/instance.rs` 헤더의 ★되살리지 마라★ 두 절).
+#   ★pid liveness 도 여기 없다★: 그건 core 의 `agent::platform` 헬퍼가 한다(위 core 의존 주석).
