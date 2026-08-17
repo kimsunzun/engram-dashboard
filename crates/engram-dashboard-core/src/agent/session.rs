@@ -43,8 +43,22 @@ pub struct AgentSession {
     ///   않는다. 프로필로 판정하면 프로필이 지워진 산 셸이 "모름" 이 되어 명단에 되돌아오고, 봉투가
     ///   명령으로 실행된다. 세션은 자기가 무엇으로 spawn 됐는지 알고 그 사실은 프로필 삭제로 안 변한다.
     reads_messages: bool,
+    /// 본문 write 와 제출 write 사이의 대기 — 근거·값 출처는 `backend::SUBMIT_PACING`.
+    ///
+    /// ★기본값은 `new` 가 박는다(생성자 인자가 아니다)★: 호출자가 값을 고를 수 있게 하면 어느 조립
+    ///   경로 하나가 0 을 넘기는 순간 이 결함이 조용히 재발한다. 낮추는 길은 테스트 전용 seam 하나뿐이다.
+    submit_pacing: Duration,
+    /// 위 대기를 실제로 재우는 함수. 운영은 블로킹 sleep 이고, 테스트는 **재우지 않고 호출만 기록**하는
+    /// 것을 꽂아 "대기가 발행됐다" 를 시간 측정 없이(= 비플래키) 단언한다.
+    sleeper: fn(Duration),
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
+}
+
+/// 운영 sleeper — 이 층은 동기 경로라 그냥 블로킹으로 잔다(배달 루프가 그만큼 붙잡히는 것은 수용한 성질:
+/// 터미널 수신은 시연 용도이고, 비동기 분리는 구조 변경이라 별도 결정 사항이다).
+fn blocking_sleep(d: Duration) {
+    std::thread::sleep(d);
 }
 
 impl AgentSession {
@@ -74,9 +88,21 @@ impl AgentSession {
             backend_caps,
             encoder,
             reads_messages,
+            submit_pacing: crate::agent::backend::SUBMIT_PACING,
+            sleeper: blocking_sleep,
             core,
             transport,
         }
+    }
+
+    /// ★테스트 전용 seam★ — 제출 대기를 낮추거나(하네스가 0.5초씩 자지 않게) 대기 발행 자체를 관측한다.
+    /// **운영 기본값은 언제나 `backend::SUBMIT_PACING`**(위 필드 doc) — 이 함수는 그 기본값을 바꾸지 않고,
+    /// 테스트가 자기 인스턴스에 대해서만 명시로 내린다.
+    #[cfg(test)]
+    pub(crate) fn with_submit_pacing(mut self, pacing: Duration, sleeper: fn(Duration)) -> Self {
+        self.submit_pacing = pacing;
+        self.sleeper = sleeper;
+        self
     }
 
     /// 이 세션이 편지를 읽는 주체인가 — 판정 근거는 필드 doc.
@@ -163,6 +189,9 @@ impl AgentSession {
     /// (제출 바이트는 논리 메시지가 아니라 `WriteOutcome` 에 세지 않는다).
     ///
     /// ★왜 두 번 쓰나 · 왜 encoder 가 못 합치나★ = `InputEncoder::submit_sequence` 주석(실측 근거).
+    /// ★두 write 사이에 `backend::SUBMIT_PACING` 만큼 잔다★: 나눠 쓰는 것만으로는 부족하고, 간격이
+    ///   없으면 PTY 에서 한 덩이로 묶여 수신자가 한 번의 read 로 받는다(그 상수 doc — "0ms 로 된다" 는
+    ///   옛 관측은 측정 오류였다). **그래서 이 동사는 호출 스레드를 그만큼 붙잡는다.**
     /// ★왜 이 층인가★: transport 를 소유해 `send_input` 을 두 번 낼 수 있는 가장 낮은 층이 여기다. 위층
     ///   (manager·데몬 어댑터·메시징 커널)은 transport 를 모르고, 아래층(encoder)은 바이트열 하나를
     ///   돌려주는 계약이라 write 경계를 만들 수 없다.
@@ -174,7 +203,9 @@ impl AgentSession {
     pub fn submit_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
         let outcome = self.write_input_observed(bytes)?;
         if let Some(submit) = self.encoder.submit_sequence() {
-            // 지연이 필요해지면 자리는 여기다(본문 write 와 제출 write 사이). 실측상 0ms 로 제출되므로 없다.
+            // ★이 대기가 제출의 일부다(빼면 제출되지 않는다 — 실측)★: 근거·값 출처·"0ms 로 된다" 는
+            //   옛 관측이 왜 틀렸는지는 `backend::SUBMIT_PACING` doc.
+            (self.sleeper)(self.submit_pacing);
             //
             // ★두 실패를 로그에서 가른다(본문도 못 감 vs 본문은 갔고 제출만 실패)★: 후자는 수신자
             //   입력창에 미제출 봉투가 남은 상태라, 상위의 무손실 재파킹이 다음 flush 에서 같은 봉투를
@@ -396,7 +427,10 @@ mod tests {
             true,
             core,
             transport,
-        );
+        )
+        // 하네스는 안 잔다 — 대기 **발행 여부**는 아래 전용 테스트가 sleeper 호출로 단언한다(시간
+        //   측정 없이). 여기서 실제로 자면 단위 테스트가 호출마다 0.5초씩 붙잡힌다.
+        .with_submit_pacing(Duration::ZERO, |_| {});
         (session, captured)
     }
 
@@ -521,6 +555,53 @@ mod tests {
             expected,
             "인코더 산출물과 바이트 정확 일치여야: {}",
             String::from_utf8_lossy(&got[0])
+        );
+    }
+
+    /// ★대기가 **실제로 발행되는지** + 운영 기본값이 무엇인지를 함께 못 박는다★.
+    ///
+    /// 이 결함의 본체는 write 횟수가 아니라 수신자의 read 경계였다 — 나눠 써도 간격이 없으면 한 덩이로
+    /// 묶여 제출되지 않는다(`backend::SUBMIT_PACING` doc). 그래서 "제출 write 전에 대기가 있었나" 와
+    /// "그 값이 운영 기본값인가" 둘 다 회귀 축이다. 시간을 재지 않고 sleeper 호출을 기록해 단언하므로
+    /// 플래키하지 않고, 테스트가 0.5초를 실제로 자지도 않는다.
+    #[test]
+    fn submit_input_waits_between_the_body_and_the_submit_write() {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        // 이 테스트 전용 기록판 — 다른 테스트의 하네스는 no-op sleeper 를 쓰므로 여기 안 닿는다.
+        static SLEPT_MICROS: AtomicU64 = AtomicU64::new(0);
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        fn recording_sleep(d: Duration) {
+            SLEPT_MICROS.store(d.as_micros() as u64, AtomicOrdering::SeqCst);
+            CALLS.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        let (session, captured) = session_harness(InputEncoder::Raw, None);
+        // ★운영 기본값 그대로 두고 재우는 함수만 바꾼다★: 값까지 테스트가 정하면 기본값 회귀를 못 본다.
+        let session =
+            session.with_submit_pacing(crate::agent::backend::SUBMIT_PACING, recording_sleep);
+
+        session
+            .submit_input_observed(b"envelope")
+            .expect("submit ok");
+
+        assert_eq!(
+            CALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "본문과 제출 사이에 대기가 정확히 한 번 발행돼야(빠지면 두 write 가 한 read 로 묶인다)"
+        );
+        assert_eq!(
+            SLEPT_MICROS.load(AtomicOrdering::SeqCst),
+            crate::agent::backend::SUBMIT_PACING.as_micros() as u64,
+            "대기 값 = 운영 기본값(줄이면 이 결함이 재발한다 — 상수 doc 의 근거를 먼저 읽을 것)"
+        );
+        assert!(
+            crate::agent::backend::SUBMIT_PACING > Duration::ZERO,
+            "★운영 기본값이 0 이 되는 형태 금지★ — 0 이면 나눠 쓴 의미가 사라진다"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "대기를 넣어도 write 는 여전히 본문 + 제출 둘"
         );
     }
 
