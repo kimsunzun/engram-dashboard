@@ -927,6 +927,7 @@ fn claude_home() -> Option<PathBuf> {
 ///
 /// - `isSidechain:true`(sub-agent 턴) 라인은 스킵한다 — 원본 대화만 복원한다.
 /// - result 라인은 라이브와 동일하게 MessageDone(+usage) 로 매핑돼 턴 경계 구분선이 생긴다.
+/// - 그 result 라인이 **없이 끝나면** 마지막에 합성 MessageDone 을 하나 덧붙인다(아래 이유).
 pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     let mut events = Vec::new();
     for line in transcript.lines() {
@@ -940,6 +941,26 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
             continue;
         }
         ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events);
+    }
+    // ★복원 히스토리는 반드시 "닫힌 턴"으로 끝낸다(load-bearing)★: 실제 `.jsonl` transcript 에는 라이브
+    //   stream-json 의 `result` 라인이 **들어 있지 않다**(실측 2026-08-17 — 최근 transcript 12개 전부 0건.
+    //   라인 종류는 user/assistant + queue-operation·attachment·last-prompt 등 메타뿐). 그래서 seed 는
+    //   진행 신호(text/tool/user)로만 끝나고 턴 종료 신호가 없다. 그 상태를 받은 구조화 슬롯은
+    //   `!turnDone && items>0` 을 스트리밍으로 읽어, resume 직후 **아무것도 안 보냈는데** 대기 인디케이터
+    //   (Wait …)가 영구 표시된다(실측 버그 2026-08-17). 새 화신은 resume 직후 idle 이고 과거 턴을 이어
+    //   쓰지 않으므로, 복원분을 MessageDone 하나로 닫는 것이 사실과 맞다.
+    //
+    //   ★관측(ADR-0113)과 무관★: 이 합성 신호는 **replay 버퍼 전용**이다 — seed 는 턴 관측 경로를 아예
+    //   거치지 않으므로(OutputCore::seed) 이걸로 busy/idle 이 부트스트랩되지 않는다. 되살리지 말 것.
+    //
+    //   이미 MessageDone 으로 끝나면(픽스처·미래 claude 가 result 를 남기는 경우) 덧붙이지 않는다 —
+    //   중복 턴 경계 방지. 이벤트가 0개면(빈·메타 전용 transcript) 그대로 0개 = fresh 와 동일.
+    let already_closed = matches!(events.last(), Some(OutputEvent::MessageDone { .. }));
+    if !events.is_empty() && !already_closed {
+        events.push(OutputEvent::MessageDone {
+            turn_id: None,
+            message_id: None,
+        });
     }
     events
 }
@@ -2984,6 +3005,41 @@ mod tests {
         }
     }
 
+    // ── FIX(2026-08-17): result 라인 없는 transcript 를 합성 MessageDone 으로 닫는다 ──────────
+    //
+    // ★무엇을 막는 회귀인가★: 실 `.jsonl` 에는 `result` 라인이 없다(실측 — 최근 12개 파일 0건). 닫지
+    //   않으면 resume 직후 구조화 슬롯이 `!turnDone && items>0` 을 스트리밍으로 읽어, 채팅을 한 줄도
+    //   안 쳤는데 대기 인디케이터(Wait …)가 영구 표시된다.
+    #[test]
+    fn transcript_without_result_line_is_closed_with_synthetic_done() {
+        // 실측 shape 축약: user → assistant 로 끝나고 result 라인이 없다(메타 라인 last-prompt 포함).
+        let jsonl = concat!(
+            r#"{"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"질문"}]},"uuid":"aaaa1111-1111-1111-1111-111111111111"}"#,
+            "\n",
+            r#"{"isSidechain":false,"type":"assistant","message":{"id":"msg_A","role":"assistant","content":[{"type":"text","text":"답변"}]},"uuid":"bbbb2222-2222-2222-2222-222222222222"}"#,
+            "\n",
+            r#"{"type":"last-prompt","prompt":"질문"}"#,
+            "\n",
+        );
+        let events = parse_transcript_events(jsonl);
+        assert_eq!(
+            tags(&events),
+            vec!["structured:user", "text", "done"],
+            "result 없는 transcript 는 합성 MessageDone 으로 닫는다: {events:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_ending_with_result_line_is_not_double_closed() {
+        // 픽스처는 result 라인으로 끝난다 → 이미 done 이므로 합성분을 덧붙이지 않는다(중복 턴 경계 방지).
+        let events = parse_transcript_events(TRANSCRIPT_JSONL);
+        assert_eq!(
+            tags(&events).iter().filter(|t| *t == "done").count(),
+            1,
+            "이미 닫힌 transcript 에 done 을 덧붙이지 않는다: {events:?}"
+        );
+    }
+
     #[test]
     fn transcript_empty_or_meta_only_yields_no_events() {
         assert!(parse_transcript_events("").is_empty());
@@ -3123,7 +3179,9 @@ mod tests {
         let leading = String::from_utf8(inner_valid.to_vec()).unwrap();
         assert_eq!(
             tags(&parse_transcript_events(&leading)),
-            vec!["text"],
+            // 꼬리 "done" = 복원 히스토리를 닫는 합성 MessageDone(위 FIX). 이 테스트의 주제(앞조각 폐기)와
+            //   무관한 상수 꼬리다 — 관심은 그 앞의 phantom "text" 유무뿐.
+            vec!["text", "done"],
             "전제: 앞조각(drop 대상)은 그 자체로 phantom text 를 합성하는 유효 라인이어야 한다"
         );
 
@@ -3134,7 +3192,8 @@ mod tests {
 
         assert_eq!(
             tags(&ev),
-            vec!["text"],
+            // 꼬리 "done" = 복원 히스토리 마감(합성 MessageDone). phantom 은 그 앞에 없어야 한다.
+            vec!["text", "done"],
             "부분 첫 라인 폐기 → phantom 없이 온전 라인만: {ev:?}"
         );
         match &ev[0] {
@@ -3169,7 +3228,8 @@ mod tests {
 
         assert_eq!(
             tags(&ev),
-            vec!["text"],
+            // 꼬리 "done" = 복원 히스토리 마감(합성 MessageDone) — 절단 경계 주제와 무관한 상수 꼬리.
+            vec!["text", "done"],
             "UTF-8 절단 경계에서도 온전 라인만: {ev:?}"
         );
     }
