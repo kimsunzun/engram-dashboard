@@ -1,7 +1,7 @@
 //! wire 메시지 — UI→core [`AgentCommand`], core→UI [`AgentEvent`].
 //! 둘 다 externally-tagged JSON(serde 기본).
 
-use engram_dashboard_command::{CommandDecl, OwnerToken};
+use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandReply, OwnerToken};
 use ts_rs::TS;
 
 use crate::domain::{
@@ -261,6 +261,27 @@ pub enum AgentCommand {
 
     /// 명부 전량 조회. 응답은 request_id 동봉 [`AgentEvent::CommandList`](전용 reply).
     ListCommands { request_id: RequestId },
+
+    /// 데몬이 배달한 명령([`AgentEvent::CommandRequest`])의 **결말**.
+    ///
+    /// ★이것은 요청이 아니라 답장이다★ — 그래서 자기 `request_id` 칸이 없고 상관 키는 `reply` 안에 있다
+    /// (봉투가 받은 그 키 그대로 — 홉마다 새로 만들지 않는다, ADR-0081 「request_id 왕복 보존」).
+    /// [`command_request_id`] 가 이 variant 에 `None` 을 주는 것이 그 사실의 표현이다: pending 매칭에 넣으면
+    /// 깨울 짝이 없어 영구 pending 이 된다.
+    /// ★방향 필드가 없는 것과 짝이다★ — 같은 봉투 어휘가 두 방향으로 흐르고, 어느 연결에 썼는가가 방향이다
+    /// (TRD §3-2 · [`CommandEnvelope::owner`] 주석).
+    ///
+    /// ★TS 칸은 **Rust 가 받아들이는 것**을 적는다 — 내보내는 것만 적으면 거짓이 된다★: 오류 세 칸은 전부
+    /// 생략·`null` 이 허용되고(`CommandError` 의 `RawError` 가 `Option<String>` 셋) 계약 밖 필드도 그대로
+    /// 통과한다(`#[serde(flatten)] extra` — `deny_unknown_fields` 는 additive 진화를 깨므로 안 단다). 필수
+    /// 문자열로 적으면 **유효한 입력을 TS 로는 표현할 수 없다.** 되보내는 방향에도 그 관용이 실재한다 —
+    /// 릴레이 홉이 받은 원문을 재직렬화하면 세 칸 중 일부가 빠진 채 나간다(그 `Serialize` 구현).
+    CommandOutcome {
+        #[ts(
+            type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
+        )]
+        reply: CommandReply,
+    },
 }
 
 /// 데몬 명부의 **클라이언트 투영** 한 줄([`AgentEvent::CommandList`] 의 원소).
@@ -412,6 +433,26 @@ pub enum AgentEvent {
     CommandList {
         request_id: RequestId,
         entries: Vec<CommandListEntry>,
+    },
+
+    /// 데몬이 이 클라이언트 앞으로 배달하는 **명령**(ADR-0140 결정 3 의 2단계).
+    ///
+    /// 이 variant 가 클라이언트를 「데몬 명령 **수신** peer」로 만든다 — ADR-0081 이 「신규 능력」으로 적은
+    /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0140 이 이 통합 봉투로 대체했다.
+    ///
+    /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지 18개는 알림이거나 내가 보낸 명령의 답장이다. 그래서
+    /// 받는 쪽은 이것만 [`AgentEvent`] 소비 흐름에서 갈라내 인바운드 수신기로 넘기고, 답은
+    /// [`AgentCommand::CommandOutcome`] 으로 되돌린다. [`event_reply_request_id`] 가 여기 `None` 을 주는 것이
+    /// 계약이다 — `Some` 이면 받는 쪽 pending 매칭이 이 요청을 「내가 기다린 답장」으로 읽고 삼킨다(그 봉투는
+    /// 실행되지 않고 사라지고, 보낸 쪽은 마감시각까지 매달린다).
+    ///
+    /// `envelope.args` 는 데몬이 **파싱하지 않고 통과시킨** 값이다(ADR-0081 「데몬 opaque 유지」 —
+    /// ADR-0140 이 그 조항을 살려 두었다). `envelope.owner` 는 **목적지** 토큰이고 보낸 이가 아니다.
+    CommandRequest {
+        #[ts(
+            type = "{ name: string, request_id: string, owner: string, proto_ver: number, args: unknown }"
+        )]
+        envelope: CommandEnvelope,
     },
 
     /// request_id 있으면 특정 command 실패.
@@ -566,7 +607,11 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
         AgentCommand::Resize { .. }
         | AgentCommand::Subscribe { .. }
-        | AgentCommand::Unsubscribe { .. } => None,
+        | AgentCommand::Unsubscribe { .. }
+        // ★CommandOutcome 은 **내가 보내는 답장**이라 여기 None 이다★ — 상관 키가 `reply` 안에 있지만 그것은
+        //   데몬이 나에게 준 요청의 키이고, 내 pending 표의 키가 아니다. Some 을 돌려주면 답장을 보내는 그
+        //   순간 그 키로 빈 pending 슬롯이 생겨 연결이 끊길 때까지 남는다.
+        | AgentCommand::CommandOutcome { .. } => None,
     }
 }
 
@@ -606,7 +651,12 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::InputLeaseChanged { .. }
         | AgentEvent::ProfileListUpdated { .. }
         // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
-        | AgentEvent::PresetListUpdated { .. } => None,
+        | AgentEvent::PresetListUpdated { .. }
+        // ★CommandRequest 는 **들어오는 요청**이라 여기 None 이다(load-bearing)★ — 봉투에 request_id 가
+        //   있으니 Some 이 자연스러워 보이지만, 그 키는 **데몬이 만든 요청의 키**이고 내 pending 표의 키가
+        //   아니다. Some 을 돌려주면 받는 쪽이 이것을 「내가 기다린 답장」으로 읽어 봉투를 삼킨다 — 명령은
+        //   실행되지 않고 보낸 쪽은 마감시각까지 매달린다.
+        | AgentEvent::CommandRequest { .. } => None,
     }
 }
 
@@ -1174,5 +1224,131 @@ mod tests {
         }"#;
         let p: WireProfile = serde_json::from_str(legacy).expect("parent_id 없는 wire 역직렬화");
         assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
+    }
+
+    // ── 중계 다리 wire 계약(ADR-0140 결정 3 의 2단계) ─────────────────────────────────
+    //
+    // ★이 두 golden 이 지키는 것은 손으로 적은 `#[ts(type = …)]` 이다★ — 봉투 타입은 도구 crate 소유라
+    //   ts-rs derive 가 없고(그 crate 가 ts-rs 를 안 든다), 그래서 TS 칸을 이 파일이 손으로 적는다. Rust 쪽
+    //   모양이 바뀌어도 그 문자열은 조용히 그대로 남으므로, 실제 JSON 을 여기서 못박아 갈림을 드러낸다
+    //   (`CommandDecl` 이 같은 이유로 같은 짝을 갖는다).
+
+    fn nil_relay_envelope() -> engram_dashboard_command::CommandEnvelope {
+        engram_dashboard_command::CommandEnvelope {
+            name: "tab.create".to_string(),
+            request_id: engram_dashboard_command::RequestId(Uuid::nil()),
+            owner: OwnerToken::new("shell"),
+            proto_ver: 1,
+            args: serde_json::json!({ "window": "main" }),
+        }
+    }
+
+    #[test]
+    fn command_request_json_golden_and_roundtrip() {
+        let ev = AgentEvent::CommandRequest {
+            envelope: nil_relay_envelope(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"CommandRequest":{"envelope":{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}}}"#,
+            "CommandRequest wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+        );
+        let back: AgentEvent = serde_json::from_str(&json).unwrap();
+        let AgentEvent::CommandRequest { envelope } = &back else {
+            panic!("CommandRequest 로 복호돼야 한다");
+        };
+        assert_eq!(envelope, &nil_relay_envelope());
+    }
+
+    #[test]
+    fn command_outcome_json_golden_and_roundtrip() {
+        let request_id = engram_dashboard_command::RequestId(Uuid::nil());
+        let failed = AgentCommand::CommandOutcome {
+            reply: engram_dashboard_command::CommandReply::err(
+                request_id,
+                engram_dashboard_command::CommandError::of(
+                    engram_dashboard_command::ErrorCode::NotFound,
+                    "no view 'x'",
+                ),
+            ),
+        };
+        let json = serde_json::to_string(&failed).unwrap();
+        assert_eq!(
+            json,
+            r#"{"CommandOutcome":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}}}"#,
+            "실패 결말의 wire 형태가 golden 과 불일치 — 손으로 적은 TS 칸도 함께 고칠 것"
+        );
+        let back: AgentCommand = serde_json::from_str(&json).unwrap();
+        let AgentCommand::CommandOutcome { reply } = &back else {
+            panic!("CommandOutcome 으로 복호돼야 한다");
+        };
+        assert_eq!(reply.request_id, request_id, "상관 키가 왕복을 건넌다");
+
+        let ok = AgentCommand::CommandOutcome {
+            reply: engram_dashboard_command::CommandReply::ok(
+                request_id,
+                serde_json::json!({ "view_id": "v1" }),
+            ),
+        };
+        assert_eq!(
+            serde_json::to_string(&ok).unwrap(),
+            r#"{"CommandOutcome":{"reply":{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Ok":{"view_id":"v1"}}}}}"#,
+            "성공 결말도 같은 봉투 모양이어야"
+        );
+    }
+
+    /// ★손으로 적은 TS 칸이 광고하는 **관용**을 Rust 쪽에 못박는다★.
+    ///
+    /// 그 칸은 컴파일러가 안 보므로, Rust 가 나중에 조여지면(세 칸을 필수로 만들거나 계약 밖 필드를 거부)
+    /// 광고가 조용히 거짓이 된다 — 그때 TS 호출자는 Rust 가 받는 값을 타입으로 표현할 수 없게 된다.
+    /// ★위 두 골든은 이 클래스를 못 잡는다★(그것들은 Rust→JSON 한 방향만 본다). 그래서 방향을 뒤집어 잰다.
+    #[test]
+    fn the_outcome_accepts_everything_its_ts_type_advertises() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        // 세 칸 전부 **부재** + 계약 밖 필드.
+        let sparse = format!(
+            r#"{{"CommandOutcome":{{"reply":{{"request_id":"{nil}","outcome":{{"Err":{{"detail":{{"n":1}}}}}}}}}}}}"#
+        );
+        let cmd: AgentCommand =
+            serde_json::from_str(&sparse).expect("세 칸이 없어도 받는다(TS 칸이 그렇게 광고한다)");
+        let AgentCommand::CommandOutcome { reply } = &cmd else {
+            panic!("CommandOutcome");
+        };
+        assert!(reply.outcome.is_err());
+        // ★계약 밖 필드는 되보낼 때 살아 있어야 한다★ — additive 확장이 중계 홉에서 증발하지 않는다는 계약.
+        assert!(
+            serde_json::to_string(&cmd).unwrap().contains("\"detail\""),
+            "계약 밖 필드가 중계에서 사라졌다"
+        );
+
+        // 세 칸 전부 **`null`**.
+        let nulls = format!(
+            r#"{{"CommandOutcome":{{"reply":{{"request_id":"{nil}","outcome":{{"Err":{{"code":null,"message":null,"retry":null}}}}}}}}}}"#
+        );
+        serde_json::from_str::<AgentCommand>(&nulls).expect("null 세 칸도 받는다");
+    }
+
+    /// ★중계 다리의 두 variant 는 pending 매칭 밖이다★ — 하나는 들어오는 **요청**이고 하나는 나가는
+    /// **답장**이라, 둘 중 어느 쪽이든 `Some` 을 주면 봉투가 삼켜지거나 빈 슬롯이 영구히 남는다.
+    #[test]
+    fn the_relay_leg_is_outside_pending_correlation() {
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::CommandRequest {
+                envelope: nil_relay_envelope(),
+            }),
+            None,
+            "들어온 요청을 「내가 기다린 답장」으로 읽으면 그 명령은 실행되지 않고 사라진다"
+        );
+        assert_eq!(
+            command_request_id(&AgentCommand::CommandOutcome {
+                reply: engram_dashboard_command::CommandReply::ok(
+                    engram_dashboard_command::RequestId(Uuid::nil()),
+                    serde_json::Value::Null,
+                ),
+            }),
+            None,
+            "답장을 보내면서 pending 슬롯을 만들면 깨울 짝이 없다"
+        );
     }
 }

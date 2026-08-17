@@ -992,6 +992,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "dunce",
+ "engram-dashboard-command",
  "engram-dashboard-core",
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",

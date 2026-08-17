@@ -13,7 +13,7 @@
 
 **경로 → 강도 매핑(골격 §1 "변경 범위 판정"에 주입):**
 - `crates/<name>/` → 해당 crate(단일이면 quick 후보)
-- `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향). ★`src-tauri/`는 standard 2번이 통째로 빼는 유일한 패키지다★ — 이 행이 집어 오는 실제 커버리지는 **standard 2b**(아래)이고, 그 줄이 빠지면 이 경로 변경은 게이트가 0이다.
+- `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향). ★`src-tauri/`는 standard 2번이 통째로 빼는 유일한 패키지다★ — 이 행이 집어 오는 실제 커버리지는 **standard 2b·2c**(아래)이고, 그 줄들이 빠지면 이 경로 변경은 게이트가 0이다.
 - `src/` · `public/` · `index.html` · `package*.json` · `vite.config.*` · `src-tauri/tauri.conf.json` → **UI=full**(cdp 실측)
 - `tests/` → **standard 이상**
 - **산문 문서만 바뀐 경우** → **테스트 게이트 없음.** 테스트는 대상 자체가 없다(실측 2026-08-06: 소스 0 변경에 전체 회귀를 5회 돌려 매번 동일 결과 — 정보량 0). 판정·절차는 아래 「산문 문서 전용」 절.
@@ -68,13 +68,14 @@ cargo test  -p engram-dashboard-core -- --test-threads=4   # 영향 crate 테스
 cargo build                                 # 1) 빌드 (루트, 전 workspace)
 cargo test --workspace --exclude engram-dashboard -- --test-threads=4   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05, 정본 CLAUDE.md·2026-07-19 드리프트 수정). `-- --test-threads=4` 도 빼지 않는다(아래 첫 항목)
 cargo test -p engram-dashboard --test layout_apply                      # 2b) 2번이 뺀 그 패키지의 **통합** 타깃 — 죽는 건 lib 타깃뿐이고 통합 타깃은 정상 기립한다(실측 2026-08-17). 2번이 이 스위트를 못 보므로 이 줄이 유일한 실행 경로다(아래 둘째 항목)
+cargo test -p engram-dashboard --test layout_commands                   # 2c) 같은 패키지의 또 다른 **통합** 타깃 — layout_apply 는 적용 서비스 자체, 이쪽은 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅)를 잰다. 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립·실측 2026-08-17) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
 cargo fmt --check                           # 3) 포맷 게이트 (검사형 — rewrite 안 함)
 rg "^\s*use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
 - **★2번의 `-- --test-threads=4`를 빼지 말 것 — 근거·실측의 정본은 CLAUDE.md 「빌드·검증 명령」★** 여기 되올리지 않는다. 4로도 터미널이 죽으면 2로 낮춘다. **아래 §full의 「앱을 셸에서 직접 띄우지 않는다」와 뿌리는 같고 위험은 다르다** — 그건 *앱* 출력이 셸 사슬을 거슬러 올라가는 경로, 이건 *테스트*가 자식 프로세스를 한꺼번에 만드는 경로다. 한 규칙으로 합치지 않는다.
-- **★2b의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. **거꾸로 `-- --test-threads=4`는 붙이지 않는다** — 이 스위트는 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 안 띄운다(위 첫 항목의 판정 규칙을 그대로 적용한 결과지 예외가 아니다). **`cargo build`·2번 어느 쪽도 이 타깃을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄이 빠지면 스위트가 깨진 것조차 안 보인다.
+- **★2b·2c의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. **거꾸로 `-- --test-threads=4`는 붙이지 않는다** — 이 스위트들은 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 안 띄운다(위 첫 항목의 판정 규칙을 그대로 적용한 결과지 예외가 아니다). **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다.
 - 코어 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(코어가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13).
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
 - **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다.

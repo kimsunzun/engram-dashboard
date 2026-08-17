@@ -22,7 +22,7 @@ use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
     AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync, ViewManager,
-    ViewSnapshot, WindowTabsPayload,
+    ViewSnapshot, WindowHost, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 
@@ -104,6 +104,98 @@ impl AgentSpawner for DaemonSpawner<'_> {
                 other => Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}")),
             }
         })
+    }
+}
+
+// ── 명령 표가 쥐는 소유형 어댑터 ──────────────────────────────────────────────
+//
+// ★위 어댑터 넷과 **같은 구현을 재사용한다**★: 표의 핸들러는 `'static` 이라야 하므로 빌린 참조를 담을 수
+// 없고, 그렇다고 emit·창 빌드·스폰 로직을 두 번 적으면 사람 경로와 LLM 경로가 다시 갈린다(ADR-0081 결정 3
+// 이 없애려던 그 2 코드 경로). 그래서 소유형은 자기 것을 빌려 위 구현에 그대로 넘긴다 — 로직은 한 벌이다.
+
+struct OwnedEvents {
+    app: AppHandle,
+}
+
+impl LayoutEvents for OwnedEvents {
+    fn layout_updated(&self, snapshot: &ViewSnapshot) {
+        TauriEvents { app: &self.app }.layout_updated(snapshot);
+    }
+
+    fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
+        TauriEvents { app: &self.app }.window_tabs_updated(tabs);
+    }
+}
+
+struct OwnedSubs {
+    router: Arc<OutputRouter>,
+    client: Arc<DaemonClient>,
+}
+
+impl SubscriptionSync for OwnedSubs {
+    fn resync(&self, mgr: &ViewManager) {
+        RouterSubs {
+            router: &self.router,
+            client: &self.client,
+        }
+        .resync(mgr);
+    }
+}
+
+struct OwnedWindowHost {
+    app: AppHandle,
+}
+
+impl WindowHost for OwnedWindowHost {
+    fn open(&self, label: &str) -> Result<(), String> {
+        TauriWindowHost { app: &self.app }.open(label)
+    }
+
+    fn close(&self, label: &str) {
+        TauriWindowHost { app: &self.app }.close(label);
+    }
+}
+
+struct OwnedSpawner {
+    client: Arc<DaemonClient>,
+}
+
+impl AgentSpawner for OwnedSpawner {
+    fn spawn_by_cwd<'a>(
+        &'a self,
+        cwd: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            DaemonSpawner {
+                client: &self.client,
+            }
+            .spawn_by_cwd(cwd)
+            .await
+        })
+    }
+}
+
+/// 레이아웃 명령 표가 쥘 포트 묶음 — 조립부(`lib.rs` setup)가 한 번 만든다.
+///
+/// ★사람 클릭 경로와 **같은 상태·같은 라우터·같은 발급기**를 받는다★: 다른 인스턴스를 주면 LLM 이 만든 창이
+/// 사람이 보는 목록에 없고 label 이 충돌한다(ADR-0035 레이아웃 권위가 하나라는 것의 실물).
+pub fn command_ports(
+    app: AppHandle,
+    state: LayoutState,
+    router: Arc<OutputRouter>,
+    labels: Arc<PopupCounter>,
+    client: Arc<DaemonClient>,
+) -> crate::layout::commands::LayoutPorts {
+    crate::layout::commands::LayoutPorts {
+        state,
+        subs: Arc::new(OwnedSubs {
+            router: Arc::clone(&router),
+            client: Arc::clone(&client),
+        }),
+        events: Arc::new(OwnedEvents { app: app.clone() }),
+        windows: Arc::new(OwnedWindowHost { app }),
+        labels,
+        spawner: Arc::new(OwnedSpawner { client }),
     }
 }
 

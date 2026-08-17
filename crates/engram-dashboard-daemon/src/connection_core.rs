@@ -122,6 +122,12 @@ pub struct ConnectionSession {
     pub owned_viewports: Arc<Mutex<Vec<(AgentId, String)>>>,
     /// 남의 토큰 형식을 적은 등록을 이 연결에서 이미 한 번 남겼나(`note_claimed_owner`).
     claimed_owner_warned: AtomicBool,
+    /// 배달 표 없이 온 명령 결말을 이 연결에서 이미 한 번 경고했나(아래 `CommandOutcome` arm).
+    ///
+    /// ★래치가 필요한 이유★: 이 프레임은 **클라이언트가 몇 번이든 보낼 수 있고** 릴리즈 데몬의 파일 sink 는
+    /// 무조건 켜져 있다(`docs/reference/logging-conventions.md`). 프레임마다 `warn!` 이면 로그 크기가 상대에게
+    /// 통제권을 넘긴다 — 형제 래치(`claimed_owner_warned`)와 같은 이유다.
+    stray_outcome_warned: AtomicBool,
 }
 
 impl ConnectionSession {
@@ -131,6 +137,7 @@ impl ConnectionSession {
             subs: Arc::new(Mutex::new(HashMap::new())),
             owned_viewports: Arc::new(Mutex::new(Vec::new())),
             claimed_owner_warned: AtomicBool::new(false),
+            stray_outcome_warned: AtomicBool::new(false),
         }
     }
 
@@ -1168,6 +1175,37 @@ impl ConnectionCore {
                 let _ = sink.enqueue(Outbound::event(AgentEvent::CommandList {
                     request_id,
                     entries,
+                }));
+            }
+
+            // ★결말을 붙일 왕복이 아직 없다 — 그래도 **침묵하지 않는다**★: 데몬이 명령을 **배달**하는 다리
+            //   (`request_id` → 원 연결 라우팅 표)는 미구현이라, 지금 이 프레임이 오는 경로는 미솔리시트뿐이다.
+            //   그렇다고 조용히 버리면 보낸 쪽은 답도 오류도 없이 자기 마감시각을 다 쓴다 — 이 파일이 다른
+            //   자리에서 이미 적어 둔 그 손실(`reply` 헬퍼 주석)이다.
+            // ★그래서 형제 위반 경로와 **같은 답**을 낸다 — `Error{request_id: None}`★. 상관 없는 오류라
+            //   라우팅 표가 필요 없고(`agent_conn.rs` 의 2차 핸드셰이크·파싱 실패와 동형), 그 형태가 「이
+            //   데몬은 그 명령을 배달하지 않는다」를 상대에게 말하는 유일한 수단이다.
+            // ★`Ack` 는 못 낸다★: 그건 「전달했다」는 뜻이 되고, 상관도 안 된다(보낸 쪽은 이 명령으로 pending
+            //   슬롯을 만들지 않는다 — protocol `command_request_id` 가 이 variant 에 `None`).
+            // 배달 다리가 서면 이 자리가 그 표를 보고 **원 연결로 중계**하는 곳이 된다.
+            AgentCommand::CommandOutcome { reply } => {
+                // 첫 건만 warn — 나머지는 debug(래치 근거는 `stray_outcome_warned` doc).
+                if !session.stray_outcome_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        conn = conn_id,
+                        request_id = %reply.request_id,
+                        "명령 결말이 왔으나 이 데몬은 명령을 배달하지 않는다 — 거절(이 연결에서 한 번만 남긴다)"
+                    );
+                } else {
+                    tracing::debug!(
+                        conn = conn_id,
+                        request_id = %reply.request_id,
+                        "명령 결말 거절(반복)"
+                    );
+                }
+                let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
+                    request_id: None,
+                    message: "this daemon does not relay commands, so it has nothing to attach this outcome to".into(),
                 }));
             }
         }

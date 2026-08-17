@@ -85,9 +85,8 @@ pub fn run() {
             app.manage(router.clone());
             app.manage(registry.clone());
 
-            app.manage(std::sync::Arc::new(
-                crate::commands::popout::PopupCounter::default(),
-            ));
+            let labels = std::sync::Arc::new(crate::commands::popout::PopupCounter::default());
+            app.manage(labels.clone());
 
             // ── DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
             // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
@@ -100,7 +99,33 @@ pub fn run() {
                 app.handle().clone(),
             ) {
                 Ok(client) => {
-                    app.manage(std::sync::Arc::new(client));
+                    let client = std::sync::Arc::new(client);
+                    // ── 명령 표를 그 클라이언트에 꽂는다(ADR-0140 결정 4·5) ──
+                    // ★순서가 계약이다★: 표의 스폰 포트가 이 클라이언트를 쥐므로 클라이언트가 먼저 서야 하고,
+                    //   연결은 아직 안 섰으므로(위 주석 — connect 는 프론트/부팅 시퀀스가 부른다) 첫 봉투보다
+                    //   표가 먼저 꽂힌다. 여기서 빠뜨리면 데몬이 배달한 명령이 「표 없음」 오류로 되돌아간다.
+                    // ★사람 클릭과 **같은** 상태·라우터·발급기를 넘긴다★ — 다른 인스턴스면 LLM 이 만든 창이
+                    //   사람이 보는 목록에 없다(ADR-0035 레이아웃 권위는 하나).
+                    match app.try_state::<crate::layout::LayoutState>() {
+                        Some(state) => client.install_command_table(
+                            crate::layout::commands::make_table(
+                                crate::commands::layout::command_ports(
+                                    app.handle().clone(),
+                                    state.inner().clone(),
+                                    router.clone(),
+                                    labels.clone(),
+                                    client.clone(),
+                                ),
+                            ),
+                            crate::layout::commands::CATALOG_VERSION,
+                        ),
+                        // LayoutState 는 빌더에서 manage 되므로(위 ADR-0102) 여기 닿지 않는다 — 닿았다면 그
+                        //   pre-build 등록이 사라진 것이라 조용히 넘기지 않는다.
+                        None => tracing::error!(
+                            "LayoutState 미등록 — 레이아웃 명령 표를 꽂지 못했다(데몬이 배달한 명령이 실패한다)"
+                        ),
+                    }
+                    app.manage(client);
                 }
                 Err(e) => {
                     tracing::warn!("DaemonClient 런타임 생성 실패(데몬 명령 불가, 앱 계속): {e}")
