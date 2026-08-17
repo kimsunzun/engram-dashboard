@@ -23,8 +23,6 @@ use crate::agent::types::{
 
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
-// TODO(S20 Step 4 — ADR-0134): CLI 의 중첩 reader 를 지운다 — `daemon/src/bin/engram.rs` 의
-//   `read_agent_evidence` 가 아직 `{"agent":{…}}` 갈래를 함께 받는다(데몬은 이제 평평하게만 답한다).
 declare_commands! {
     catalog_version: 1;
 

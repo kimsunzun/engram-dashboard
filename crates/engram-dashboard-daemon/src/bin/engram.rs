@@ -1292,6 +1292,13 @@ fn exit_code_for_agent_response(agent: &ParsedAgent, status: u16, resp_body: &st
     eprintln!(
         "{CLI_EXE_NAME}: malformed success response — the daemon answered 2xx without the evidence this verb must carry (see `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`)"
     );
+    // ★한 줄 더 내는 이유(load-bearing)★: 이 exit 2 가 dev 에서 가장 자주 나는 경로는 데몬 결함이 아니라
+    //   **빌드 세대 차**다 — `cargo build` 는 이 CLI 만 갈아 끼우고 이미 떠 있는 데몬은 relink 하지 않는데,
+    //   기존 에이전트는 다음 호출부터 새 CLI 를 집는다. 그 자리에서 옛 shape 을 받으면 성공한 조작이
+    //   exit 2 로 보고된다. 단정하지 않고 후보로만 적는다 — CLI 는 상대 데몬의 빌드 세대를 알 수 없다.
+    eprintln!(
+        "{CLI_EXE_NAME}: one possible cause is a daemon from an older build — rebuilding this CLI does not relink a daemon that is already running, so restart the daemon and retry before reporting it (`cargo build` alone is not enough)"
+    );
     EXIT_MALFORMED_SUCCESS
 }
 
@@ -1329,26 +1336,23 @@ fn is_agent_state(s: &str) -> bool {
 struct AgentEvidence<'a> {
     id: &'a str,
     name: &'a str,
-    /// 생사를 싣지 않는 동사(개명·이동)의 응답에선 `None`.
+    /// 생사를 싣지 않는 동사(개명·이동)의 응답에선 `None` — 값이 문자열이 아닐 때도 같게 접힌다.
+    /// 이 자리를 요구할지는 `agent_object_ok` 의 `with_state` 가 정한다.
     state: Option<&'a str>,
 }
 
-/// 중첩(`{agent:{id,name,state}}`)·평면(`{agent_id,name,state}`) 두 shape 을 한 값으로 접는다.
+/// 성공 body 최상위에서 신원을 집는다 — 신원 두 자리(`agent_id`·`name`) 중 하나라도 없거나 문자열이 아니면
+/// 증거 자체가 없는 것으로 접는다(신원을 반만 읽고 통과시키면 그 반쪽이 어느 에이전트인지 말해주지 못한다).
+/// `state` 는 접는 축이 아니다 — 부재·비문자열이면 `None` 이고, 요구 여부는 호출부가 `with_state` 로 정한다.
 ///
-/// ★둘 다 받는 이유★: 데몬 라우트와 이 CLI 는 서로 다른 조각에서 손보므로, 한 shape 만 아는 판정기는
-///   반대편 데몬 앞에서 **모든 성공 응답**을 exit 2 로 읽는다 — 호출자에겐 데몬이 고장 난 것으로 보인다.
-///   한쪽만 남기는 정리는 데몬 전환이 끝난 뒤의 조각이 한다.
-/// ★두 shape 을 섞어 읽지 않는다★: id 는 중첩에서 생사는 최상위에서 집는 식으로 fallback 을 걸면 어느 계약도
-///   만족하지 않는 혼종 body 가 통과한다. `agent` 키가 있으면 그 안만 본다.
+/// ★`{agent:{…}}` 갈래를 되살리지 말 것★: 데몬은 평평하게만 답한다(사용자 결정 2026-08-13, 라우트 착지
+///   732c9b8). 그 갈래는 **어떤 데몬도 내지 않는** shape 을 받는 죽은 코드라, 되살리면 계약 밖 body 에
+///   exit 0 을 내주는 통로가 된다.
 fn read_agent_evidence(v: &serde_json::Value) -> Option<AgentEvidence<'_>> {
-    let (holder, id_key) = match v.get("agent") {
-        Some(nested) => (nested, "id"),
-        None => (v, "agent_id"),
-    };
     Some(AgentEvidence {
-        id: holder.get(id_key)?.as_str()?,
-        name: holder.get("name")?.as_str()?,
-        state: holder.get("state").and_then(|s| s.as_str()),
+        id: v.get("agent_id")?.as_str()?,
+        name: v.get("name")?.as_str()?,
+        state: v.get("state").and_then(|s| s.as_str()),
     })
 }
 
@@ -2531,7 +2535,7 @@ mod tests {
 
     #[test]
     fn agent_exit_code_accepts_only_payloads_that_carry_the_evidence() {
-        let cases: [(&[&str], &str, i32); 12] = [
+        let cases: [(&[&str], &str, i32); 16] = [
             (&["agent", "list"], r#"{"agents":[]}"#, 0),
             (
                 &["agent", "list"],
@@ -2545,115 +2549,6 @@ mod tests {
                 EXIT_MALFORMED_SUCCESS,
             ),
             (&["agent", "list"], r#"{}"#, EXIT_MALFORMED_SUCCESS),
-            (
-                &["agent", "spawn", "w"],
-                r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
-                0,
-            ),
-            // created 누락 = 깨운 건지 만든 건지 모른다.
-            (
-                &["agent", "spawn", "w"],
-                r#"{"agent":{"id":"i","name":"w","state":"live"}}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            (
-                &["agent", "new", "--cwd", "c"],
-                r#"{"agent":{"id":"i","name":"n","state":"sleeping"}}"#,
-                0,
-            ),
-            // 만들었다면서 무엇을 만들었는지가 없다 — 예전 판정기는 이걸 exit 0 으로 흘렸다.
-            (
-                &["agent", "new", "--cwd", "c"],
-                r#"{"status":"ok"}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            (
-                &["agent", "rename", "a", "b"],
-                r#"{"agent":{"id":"i","name":"b"},"outcome":"renamed"}"#,
-                0,
-            ),
-            (
-                &["agent", "rename", "a", "b"],
-                r#"{"agent":{"id":"i","name":"b"},"outcome":"maybe"}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            (
-                &["agent", "move", "a", "--parent", "none"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":null}"#,
-                0,
-            ),
-            // parent 키 자체가 없으면 어디로 갔는지 모른다.
-            (
-                &["agent", "move", "a", "--parent", "none"],
-                r#"{"agent":{"id":"i","name":"a"}}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-        ];
-        for (args, body, want) in cases {
-            assert_eq!(
-                exit_code_for_agent_response(&agent_of(args), 200, body),
-                want,
-                "{args:?} ← {body}"
-            );
-        }
-    }
-
-    /// ★필드가 다 있어도 **요청한 동작과 어긋나면** 성공이 아니다★ — 호출자가 일어나지 않은 일을 사실로
-    ///   기록하는 것을 막는 축이다.
-    #[test]
-    fn agent_exit_code_rejects_evidence_that_contradicts_the_request() {
-        let cases: [(&[&str], &str, i32); 6] = [
-            // 깨우기인데 "만들었다" 고 답한다.
-            (
-                &["agent", "spawn", "worker"],
-                r#"{"agent":{"id":"i","name":"worker","state":"live"},"created":true}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            // 만들어 띄우라 했는데 "깨웠다" 고 답한다.
-            (
-                &["agent", "spawn", "--cwd", "C:/x"],
-                r#"{"agent":{"id":"i","name":"x","state":"live"},"created":false}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            // 루트로 떼라 했는데 부모를 달고 온다.
-            (
-                &["agent", "move", "a", "--parent", "none"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":"p-id"}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            // 부모 밑으로 넣으라 했는데 루트라고 답한다.
-            (
-                &["agent", "move", "a", "--parent", "lead"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":null}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            // `new` 는 아무것도 띄우지 않는다 — 살아 있다는 답은 그 동사의 결과일 수 없다.
-            (
-                &["agent", "new", "--cwd", "C:/x"],
-                r#"{"agent":{"id":"i","name":"x","state":"live"}}"#,
-                EXIT_MALFORMED_SUCCESS,
-            ),
-            // 대조군 — 요청과 맞는 응답은 그대로 통과한다.
-            (
-                &["agent", "move", "a", "--parent", "lead"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":"p-id"}"#,
-                0,
-            ),
-        ];
-        for (args, body, want) in cases {
-            assert_eq!(
-                exit_code_for_agent_response(&agent_of(args), 200, body),
-                want,
-                "{args:?} ← {body}"
-            );
-        }
-    }
-
-    /// 위 두 표의 **평면 쌍둥이**(`{agent_id,name,state}`) — 두 shape 이 같은 검사를 받는다는 것이 요점이다.
-    /// (`list` 는 두 shape 이 동형이라 여기 없다.)
-    #[test]
-    fn agent_exit_code_accepts_only_flat_payloads_that_carry_the_evidence() {
-        let cases: [(&[&str], &str, i32); 10] = [
             (
                 &["agent", "spawn", "w"],
                 r#"{"agent_id":"i","name":"w","state":"live","created":false}"#,
@@ -2674,6 +2569,12 @@ mod tests {
             (
                 &["agent", "new", "--cwd", "c"],
                 r#"{"agent_id":"i","state":"sleeping"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 만들었다면서 무엇을 만들었는지가 없다 — 예전 판정기는 이걸 exit 0 으로 흘렸다.
+            (
+                &["agent", "new", "--cwd", "c"],
+                r#"{"status":"ok"}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             (
@@ -2702,7 +2603,14 @@ mod tests {
                 r#"{"agent_id":"","name":"a","parent":null}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
-            // 혼종 — 신원을 두 shape 에 나눠 실은 body 는 어느 계약도 만족하지 않는다(중첩이 있으면 그 안만 본다).
+            // 신원을 `agent` 밑에 넣은 body 는 최상위가 비어 있는 것과 같다 — 이 줄이 중첩 갈래의 부활을 막는다.
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 혼종 — 신원을 두 자리에 나눠 실은 body. 위 줄과 잡는 실수가 다르다: 위는 중첩 갈래의 부활을,
+            //   이 줄은 id 는 중첩에서 이름은 최상위에서 집는 **병합** reader 를 막는다.
             (
                 &["agent", "spawn", "w"],
                 r#"{"agent":{"id":"i"},"name":"w","state":"live","created":false}"#,
@@ -2718,9 +2626,10 @@ mod tests {
         }
     }
 
-    /// 요청과의 대조는 shape 과 무관하다 — 평면이라고 통과시키면 그 순간 두 shape 모두에서 게이트가 풀린다.
+    /// ★필드가 다 있어도 **요청한 동작과 어긋나면** 성공이 아니다★ — 호출자가 일어나지 않은 일을 사실로
+    ///   기록하는 것을 막는 축이다.
     #[test]
-    fn agent_exit_code_rejects_flat_evidence_that_contradicts_the_request() {
+    fn agent_exit_code_rejects_evidence_that_contradicts_the_request() {
         let cases: [(&[&str], &str, i32); 6] = [
             // 깨우기인데 "만들었다" 고 답한다.
             (
@@ -2746,7 +2655,7 @@ mod tests {
                 r#"{"agent_id":"i","name":"a","parent":null}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
-            // `new` 는 아무것도 띄우지 않는다 — 최상위 `state` 를 읽고도 이 대조가 살아 있나.
+            // `new` 는 아무것도 띄우지 않는다 — 살아 있다는 답은 그 동사의 결과일 수 없다.
             (
                 &["agent", "new", "--cwd", "C:/x"],
                 r#"{"agent_id":"i","name":"x","state":"live"}"#,
@@ -2768,10 +2677,10 @@ mod tests {
         }
     }
 
-    /// ★평면 reader 가 "필드가 다 있으면 통과" 로 무너지지 않았나★ — 신원(`agent_id`·`name`·`state`)만 완전한
+    /// ★reader 가 "필드가 다 있으면 통과" 로 무너지지 않았나★ — 신원(`agent_id`·`name`·`state`)만 완전한
     ///   응답은 어느 변경 동사에서도 성공이 아니다. 동사마다 요구하는 대조 필드가 따로 있다.
     #[test]
-    fn a_flat_payload_without_the_cross_check_still_exits_two() {
+    fn a_payload_without_the_cross_check_still_exits_two() {
         let identity_only = r#"{"agent_id":"i","name":"n","state":"live"}"#;
         for args in [
             &["agent", "spawn", "n"][..],
