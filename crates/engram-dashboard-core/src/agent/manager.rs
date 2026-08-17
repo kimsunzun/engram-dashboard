@@ -458,6 +458,12 @@ impl AgentManager {
         &self.presets
     }
 
+    // ★우편 자격 조회 동사를 여기 두지 않는다(되돌리지 마라)★: 소비자는 명단 스냅샷의
+    //   `AgentInfo::reads_messages` 를 읽는다. id 로 되묻는 동사를 만들면 그 자리에서 TOCTOU·비원자성·
+    //   세션당 락이 되살아난다(그 필드 doc). 판정 출처는 세션이 spawn 때 backend 에서 받아 든 값이고
+    //   (`AgentSession::reads_messages`), **프로필이 아니다** — `DeleteProfile` 은 산 세션을 죽이지 않아
+    //   프로필 축은 운영에서 "모름" 이 되고, 그 fail-open 이 실제로 셸을 명단에 되돌린 구멍이었다.
+
     // ── 명부(roster) — 단일 입구 ────────────────────────────────────────────
 
     /// "전체 에이전트 + 각자 살아있음/잠듦" 을 만드는 **유일한 곳**(ADR-0119 결정 2).
@@ -955,6 +961,9 @@ impl AgentManager {
         let encoder = backend::input_encoder(&profile.command);
         let decoder = backend::output_decoder(&profile.command);
         let turn_classifier = backend::turn_classifier(&profile.command);
+        // 우편 자격도 여기서 뽑아 세션에 싣는다 — 프로필이 지워져도 산 세션이 그 사실을 계속 안다
+        //   (`AgentManager::reads_messages` doc).
+        let reads_messages = backend::reads_messages(&profile.command);
 
         // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
         //   복원되고 shell 은 대화가 없어, 그 외 backend 는 빈 Vec 을 돌려준다.
@@ -971,6 +980,7 @@ impl AgentManager {
             spec,
             bcaps,
             encoder,
+            reads_messages,
             decoder,
             json_mode,
             epoch,
@@ -1048,6 +1058,7 @@ impl AgentManager {
         spec: CommandSpec,
         backend_caps: BackendCaps,
         encoder: InputEncoder,
+        reads_messages: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
         json_mode: bool,
         epoch: u32,
@@ -1117,6 +1128,7 @@ impl AgentManager {
             intent,
             backend_caps,
             encoder,
+            reads_messages,
             core,
             transport,
         ));
@@ -1310,6 +1322,19 @@ impl AgentManager {
         data: &[u8],
     ) -> Result<crate::agent::types::WriteOutcome, PtyError> {
         self.get_session(agent_id)?.write_input_observed(data)
+    }
+
+    /// `write_stdin_observed` 의 **제출 포함** 판 — 백엔드가 제출 바이트를 요구하면(터미널) 본문 뒤에
+    /// 그것이 별도 write 로 한 번 더 나간다(근거·실측 = `AgentSession::submit_input_observed`).
+    ///
+    /// ★어느 쪽을 부를지 = 호출자의 성격★: "완성된 메시지 하나 = 턴 하나"(우편 배달)면 이것, 사람이
+    ///   Enter 를 직접 치는 키 입력 스트리밍이면 `write_stdin`/`write_stdin_observed`.
+    pub fn submit_stdin_observed(
+        &self,
+        agent_id: AgentId,
+        data: &[u8],
+    ) -> Result<crate::agent::types::WriteOutcome, PtyError> {
+        self.get_session(agent_id)?.submit_input_observed(data)
     }
 
     /// ★incarnation 조건부 write★ — `expected_epoch` 가 **지금** 그 AgentId 가 가리키는 세션의 epoch 과
@@ -1564,6 +1589,8 @@ impl AgentManager {
             rows: session.rows.load(Ordering::Relaxed),
             epoch: session.epoch,
             capabilities: session.capabilities(),
+            // 같은 세션 Arc 에서 뽑는다 — 소비자가 나중에 되묻지 않아도 되게(그 필드 doc).
+            reads_messages: session.reads_messages(),
         }
     }
 }
@@ -1732,6 +1759,7 @@ mod tests {
                 },
             },
             InputEncoder::Raw,
+            true,
             core,
             Box::new(RecordingTransport {
                 written: written.clone(),
@@ -1837,6 +1865,7 @@ mod tests {
                 },
             },
             InputEncoder::Raw,
+            true,
             core,
             Box::new(RecordingTransport {
                 written: Arc::new(Mutex::new(Vec::new())),
@@ -2711,6 +2740,7 @@ mod tests {
                 },
             },
             InputEncoder::Raw,
+            true,
             core,
             transport,
         ));

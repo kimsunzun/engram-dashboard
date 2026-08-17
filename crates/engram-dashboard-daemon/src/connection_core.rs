@@ -1813,6 +1813,7 @@ mod tests {
                     max_tokens: false,
                 },
             },
+            reads_messages: true,
         };
         let wire = core_agents_to_wire(vec![core.clone()]);
         assert_eq!(wire.len(), 1, "변환 성공(JSON 형태 일치)");
@@ -1893,6 +1894,7 @@ mod tests {
                 rows: 24,
                 epoch: 0,
                 capabilities: caps.clone(),
+                reads_messages: true,
             };
             let wire = core_agents_to_wire(vec![core]);
             assert_eq!(

@@ -297,13 +297,19 @@ try {
     const text = rest.slice(1).join(' ')
     if (!target || !text) throw new Error('usage: engram send <name|id> <text...>')
     const agent = resolveAgent(await fetchAgents(conn), target)
-    // \r = PTY Enter(제출) — 이게 있어야 상대 에이전트가 입력을 실제로 받는다.
     // data: serde_bytes → JSON 숫자배열(uint8 list)로 직렬화.
+    // ★`\r` = PTY Enter. 이 한 버퍼 방식은 셸·JSON 에이전트에는 통하지만 **claude TUI 에는 제출되지
+    //   않는다**(실측 2026-08-17 — TUI 는 본문과 CR 이 한 write 로 오면 텍스트를 입력창에 담아 둔다).
+    //   ★그렇다고 여기서 두 프레임으로 쪼개지 마라★: 프레임마다 세션 인코더가 따로 감싸므로 JSON
+    //   에이전트에게 CR 만 든 **빈 턴이 하나 더** 생긴다. 제출 판정은 코어(백엔드별 seam)가 갖는다 —
+    //   CLI 는 상대가 무엇인지 모르고, 알 필요도 없다. CLI 로 터미널 claude 를 제출까지 시키는 건 미지원.
     const data = Array.from(Buffer.from(text + '\r', 'utf8'))
     const request_id = rid()
     conn.send({ WriteStdin: { agent_id: agent.id, data, request_id } })
-    // Ack 오면 즉시, 안 오면 3s 후 종료(WriteStdin ack 여부 미확정 — 걸어놓고 넘어감).
-    await conn.waitFor((m) => (m.Ack && m.Ack.request_id === request_id) || (m.Error && m.Error.request_id === request_id), 3000).catch(() => {})
+    // ★ack 없이 성공이라 말하지 않는다★: 타임아웃·연결 끊김은 "갔는지 모른다" 이지 "갔다" 가 아니다.
+    const reply = await conn.waitFor((m) => (m.Ack && m.Ack.request_id === request_id) || (m.Error && m.Error.request_id === request_id), 3000).catch(() => null)
+    if (!reply) throw new Error(`WriteStdin: 3s 안에 응답 없음 — 전달 여부 미확인 (${agent.label})`)
+    if (reply.Error) throw new Error('WriteStdin failed: ' + (reply.Error.message ?? JSON.stringify(reply.Error)))
     console.log('sent →', agent.label, `(${agent.id})`)
   } else if (op === 'reparent') {
     // 주의: ReparentProfile 은 profile id 대상(agent id 아님). 스파이크라 raw id 만 받는다.

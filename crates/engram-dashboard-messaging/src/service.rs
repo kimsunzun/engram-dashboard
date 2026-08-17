@@ -310,6 +310,12 @@ pub trait DeliveryPort: Send + Sync {
     /// 완성된 봉투 바이트를 수신자에게 주입한다(= 수신자 stdin write). `Err` = 도달 불가·write 실패이고
     /// **상위가 파킹으로 처리**한다. 봉투 조립은 상위가 이미 끝냈다.
     ///
+    /// ★계약 = "수신자가 이걸 **받아 처리하기 시작**한다" 까지★: 바이트를 채널에 밀어 넣는 것만으로 끝나지
+    ///   않는 수신자가 있다(입력을 담아 두고 별도 제출 신호를 기다리는 부류). 그 제출을 무엇으로·몇 번의
+    ///   write 로 내는지는 **호스트 어댑터 뒤의 지식**이고, 이 crate 는 봉투 바이트만 넘긴다 — 여기서
+    ///   수신자 종류를 분기하면 커널이 호스트를 알게 된다(ADR-0110 무의존). ★그래서 봉투에 제출 문자를
+    ///   덧붙이는 방식으로 우회하지 마라★: 봉투는 내용이고 제출은 채널 행위다.
+    ///
     /// ★이건 **incarnation 무조건** 주입이다★: 그 PeerId 가 지금 가리키는 세션에 그대로 쓴다 — 재시작으로
     ///   epoch 이 올랐어도 새 incarnation 에 착지한다. 그게 **옳다**: 주소 단위는 이름이고 재스폰 이어받기가
     ///   기능이다(ADR-0101). ★옛 `inject_if_epoch`(발송 순간 incarnation 결박용 조건부 주입)는 제거됐다★ —
@@ -321,9 +327,14 @@ pub trait DeliveryPort: Send + Sync {
     /// ★로스터 = 지금 **프로세스가 붙어 있는** 에이전트 전원(`Running`|`Exiting`)★ — (name, id, epoch,
     /// turn_signal) 스냅샷. resolve(이름→id)·flush(등장/epoch 교체 감지)·`@`주소 펼침·입구 판정 공용.
     ///
-    /// ★술어는 **상태뿐**이다(load-bearing — ADR-0116 결정 1·7)★: 구조화 출력(턴 신호) 유무는 **자격
-    ///   조건이 아니다**. 옛 술어는 `structured` 를 함께 걸어 터미널/콘솔 모드 세션을 로스터에서 빼고 그
-    ///   부류를 반려(`RECIPIENT_UNREACHABLE`)했는데, 그 전제가 틀렸다(근거 = `LiveAgent::turn_signal`).
+    /// ★**턴 관측 가능성**은 자격 조건이 아니다(load-bearing — ADR-0116 결정 1·7)★: 구조화 출력(턴 신호)
+    ///   유무로 거르지 않는다. 옛 술어는 `structured` 를 함께 걸어 터미널/콘솔 모드 세션을 로스터에서 빼고
+    ///   그 부류를 반려(`RECIPIENT_UNREACHABLE`)했는데, 그 전제가 틀렸다(근거 = `LiveAgent::turn_signal`).
+    ///
+    /// ★단 축이 하나 더 있다 — **입력이 무엇으로 해석되나**(2026-08-17 사용자 결정)★: 호스트는 편지를
+    ///   *읽지 않고 실행하는* 부류(셸)를 이 명단에서 뺀다. 위 조항과 **다른 질문**이다 — "턴을 관측할 수
+    ///   있나"가 아니라 "이게 편지를 읽는 주체인가"다. 그래서 터미널 claude 는 그대로 들어온다.
+    ///   ★이 둘을 합쳐 "명단 = 산 세션 전원"으로 되돌리지 말 것★ — 되돌리면 셸이 봉투를 명령으로 실행한다.
     ///   capability 는 멤버십이 아니라 **"언제 넣을지"** 를 가르는 축이다.
     /// ★"세션 목록에 있음" 이 아니다(load-bearing)★: 세션은 reaper 가 수거하기 전까지 맵에 남으므로, 단순
     ///   존재로 판정하면 **방금 종료된 에이전트**가 잠듦(파킹) 대신 배달 대상으로 오분류된다. 이 술어는
@@ -338,8 +349,9 @@ pub trait DeliveryPort: Send + Sync {
     ///   재발한다(ADR-0111 결정 2 가 금지한 부류). 한 동사로 묶으면 "세션 스냅샷 1회 + 프로필 1회" 를
     ///   어댑터가 **구조적으로** 보장한다.
     /// ★구현 계약(어댑터가 지켜야 하는 것 — 어기면 조용히 오분류된다)★:
-    ///   - `roster` = `live_agents()` 와 **동일 술어**(`Running|Exiting`, capability 조건 없음)이고 같은
-    ///     `list_agents()` **한 장**에서 유도한다. 두 번 뜨면 그 자체가 결함이다.
+    ///   - `roster` = `live_agents()` 와 **동일 술어**(`Running|Exiting` + 편지를 읽는 부류만 — capability
+    ///     조건은 여전히 없다)이고 같은 `list_agents()` **한 장**에서 유도한다. 두 번 뜨면 그 자체가 결함이다
+    ///     (재조회는 TOCTOU·비원자성·세션당 락을 함께 되살린다 — 2026-08-17 리뷰).
     ///   - `dormant_names` = **그 프로필의 세션이 살아 있지 않은** 프로필의 canonical 이름이고, **산 세션과
     ///     같은 규칙으로 파생**해야 한다(spec §5 — 다르면 파킹 키와 복원 후 이름이 어긋나 편지가 주인을 못
     ///     만난다). 동명 판정을 위해 **중복을 접지 않는다**(같은 이름 2개면 2개 그대로).
@@ -356,6 +368,16 @@ pub trait DeliveryPort: Send + Sync {
     ///   둔다(어댑터는 같은 `is_live` 술어를 공유해 두 판정이 갈리지 않게 한다).
     // ADR-0116 (결정 3 — 삭제 정리 게이트) / 리뷰 fix D1
     fn is_agent_live(&self, id: PeerId) -> bool;
+
+    /// ★이 **이름**을 쥔 산 세션이 있으면 그 id(삭제 정리 게이트의 이름 축 — 리뷰 fix N1)★.
+    ///
+    /// ★`live_agents()` 로 대신하지 마라(실제로 뚫렸던 회귀)★: 그쪽은 **수신자 명단**이라 호스트가 우편
+    ///   자격으로 걸러 낸 부류가 빠져 있다. 이 질문은 "편지를 받나" 가 아니라 **"그 이름을 쥔 산 세션이
+    ///   있나"** 다 — 아래 정리가 지우는 게 id 가 아니라 **이름 전체**라, 명단에 없는 산 세션이라도 그
+    ///   이름의 계약·파킹을 함께 잃는다(`handle_profile_deleted` doc ②). 두 술어는 다른 질문이므로
+    ///   합치지 말 것.
+    /// ★비교는 정확 일치★: 로스터 해석(`resolve_live`)과 같은 축이어야 판정이 갈리지 않는다.
+    fn live_id_for_name(&self, name: &str) -> Option<PeerId>;
 
     /// id → canonical 표시 이름(봉투 sender·수신자 이름 단일 출처, ADR-0101). 없으면 None.
     fn canonical_name(&self, id: PeerId) -> Option<String>;
@@ -1052,7 +1074,10 @@ impl MessagingService {
     ///     프로필이 없으면 그 산 세션의 canonical 이름이 `display_name` → `basename(session.cwd)` 로
     ///     **바뀐다**. 그래서 삭제 전에 뽑은 이름(= `display_name`)으로만 삭제 후 명단을 찾으면 절대 매치되지
     ///     않고 정리가 **항상** 발동한다 — `RenameProfile` 한 번이면 재현되는 평범한 경로다.
-    ///   - **② 이름 축(`live_agents()` 에 그 이름이 있나) — 파괴의 축이 이름이기 때문이다(리뷰 fix N1)**:
+    ///   - **② 이름 축(`live_id_for_name(name)` — 그 이름을 쥔 산 세션이 있나) — 파괴의 축이 이름이기
+    ///     때문이다(리뷰 fix N1)**. ★`live_agents()` 로 되돌리지 말 것★: 그쪽은 **우편 자격 필터**가 걸려
+    ///     있어 셸처럼 편지를 안 받는 산 세션이 안 보인다 — 이 축이 묻는 것은 "편지를 받나" 가 아니라
+    ///     "살아 있나" 다(두 술어를 합치면 아래 결말이 그대로 재현된다, 2026-08-17 리뷰):
     ///     아래가 지우는 것은 id 가 아니라 **이름 전체**(`purge_recipient(name)` ·
     ///     `fail_open_requests_from(name)`)다. 그래서 id 축만 보면 **그 이름을 공유하는 다른 산 세션**의
     ///     파킹 메일이 `RECIPIENT_DELETED`(그 수신자는 삭제되지 않았으니 **거짓 사유**)로 죽고, 그가 요청자인
@@ -1094,13 +1119,14 @@ impl MessagingService {
                 ..Default::default()
             };
         }
-        // 1-b) 이름 축(위 doc ② · 리뷰 fix N1). 비교는 로스터 해석과 같은 **정확 일치**다
-        //      (`resolve_live`/`push_recipient` 와 같은 축).
-        if let Some(alive) = self.port.live_agents().into_iter().find(|a| a.name == name) {
+        // 1-b) 이름 축(위 doc ② · 리뷰 fix N1). ★수신자 명단(`live_agents`)이 아니라 **생존 조회**를
+        //      쓴다★ — 명단에서 빠진 부류(호스트가 우편 자격으로 거른 것)도 이 이름의 계약·파킹을 함께
+        //      잃기 때문이다(`live_id_for_name` doc).
+        if let Some(live_id) = self.port.live_id_for_name(name) {
             tracing::debug!(
                 deleted = %name,
                 profile = %profile_id,
-                live_id = %alive.id,
+                live_id = %live_id,
                 "프로필 삭제 정리 건너뜀 — 같은 canonical 이름의 **다른 산 세션**이 있다(과도기 동명 — ADR-0115 전). 이름 축으로 지우면 그 산 세션의 메일·계약이 죽는다(리뷰 fix N1). 잔여는 삭제 시점 단발 + TTL 24h 소관(spec §5)"
             );
             return ProfileDeletedOutcome {
@@ -3676,6 +3702,10 @@ mod tests {
         /// ★로스터와 **따로** 스크립트한다(의도)★: 게이트는 그 좁은 동사로 물으므로, 로스터에서 유도해 버리면
         ///   "게이트가 로스터를 본다" 는 배선을 fake 가 대신 만들어 버려 테스트가 실물 배선을 못 본다.
         live_ids: StdMutex<Vec<PeerId>>,
+        /// ★로스터에 **없으면서** 살아 있는 이름들(이름 축 게이트 시나리오)★ — 호스트가 우편 자격으로
+        ///   명단에서 걸러 낸 산 세션(셸 등)을 모사한다. `live_id_for_name` 은 로스터 ∪ 이 목록을 본다:
+        ///   전자만 보면 그게 곧 `live_agents()` 라 두 술어를 합치는 회귀를 fake 가 덮어 준다.
+        extra_live_names: StdMutex<Vec<(String, PeerId)>>,
     }
 
     impl FakeDeliveryPort {
@@ -3692,7 +3722,12 @@ mod tests {
                 on_roster: StdMutex::new(None),
                 dormant: StdMutex::new(Vec::new()),
                 live_ids: StdMutex::new(Vec::new()),
+                extra_live_names: StdMutex::new(Vec::new()),
             }
+        }
+        fn set_extra_live_names(&self, entries: &[(&str, PeerId)]) {
+            *self.extra_live_names.lock().unwrap() =
+                entries.iter().map(|(n, id)| (n.to_string(), *id)).collect();
         }
         fn set_dormant(&self, names: &[&str]) {
             *self.dormant.lock().unwrap() = names.iter().map(|n| n.to_string()).collect();
@@ -3822,6 +3857,23 @@ mod tests {
 
         fn is_agent_live(&self, id: PeerId) -> bool {
             self.live_ids.lock().unwrap().contains(&id)
+        }
+        /// 로스터 ∪ `extra_live_names` — 후자가 "산 세션인데 수신자 명단엔 없는" 부류다(그 필드 doc).
+        fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
+            self.roster
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.id)
+                .or_else(|| {
+                    self.extra_live_names
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, id)| *id)
+                })
         }
         fn canonical_name(&self, id: PeerId) -> Option<String> {
             let by_roster = self
@@ -10250,6 +10302,52 @@ mod tests {
         gate.clear();
         svc.flush_for("boss", boss_id);
         assert_eq!(svc.ledger_statuses("m-in"), vec![DeliveryStatus::Delivered]);
+    }
+
+    /// ★이름 축 게이트는 **수신자 명단이 아니라 생존**을 물어야 한다(리뷰 fix N1 의 회귀 방어)★.
+    ///
+    /// 호스트가 우편 자격으로 명단에서 걸러 낸 산 세션(셸 등)은 `live_agents()` 에 없다. 그 술어로 이름 축을
+    /// 물으면 **그 산 세션이 요청자인 오픈 계약이 `reply_failed` 로 닫히고** 그 이름 앞 파킹분이 거짓 사유로
+    /// 죽는다 — ADR-0118 결정 2·spec §5 가 금지한 결말이다. 재현은 지원되는 조작뿐이다: 프로필 둘을 같은
+    /// 이름으로 개명 → 명단 밖 부류만 스폰 → 잠든 쪽 삭제.
+    #[test]
+    fn the_name_axis_gate_sees_a_live_session_that_is_not_in_the_mail_roster() {
+        let (svc, port) = svc();
+        let (_alice_from, alice) = live_sender("alice");
+        // 산 동명은 **로스터에 넣지 않는다** — 명단에서 걸러진 부류를 모사한다.
+        let shell_id = PeerId::new_v4();
+        port.set_roster(vec![alice.clone()]);
+        port.set_extra_live_names(&[("boss", shell_id)]);
+
+        let boss_from = SenderIdentity {
+            peer_id: shell_id,
+            epoch: 0,
+        };
+        svc.handle_send(
+            "m-out",
+            boss_from,
+            "boss",
+            &["alice".to_string()],
+            "해줘",
+            Entrance::Cli,
+            &req_meta("10m", 600),
+        )
+        .expect("배달");
+
+        // id 축은 다른 id 라 통과한다(잠든 쪽 프로필 삭제) → 이름 축만이 마지막 방어선이다.
+        let dormant_p = PeerId::new_v4();
+        port.set_live_ids(&[shell_id]);
+        let out = svc.handle_profile_deleted(dormant_p, "boss");
+
+        assert!(
+            out.skipped_live,
+            "명단 밖이어도 그 이름을 쥔 산 세션이 있으면 정리를 건너뛴다: {out:?}"
+        );
+        assert_eq!(
+            svc.contract_outcome_for_test("m-out", "alice"),
+            Some("awaiting_reply"),
+            "★그 산 세션이 요청자인 오픈 계약이 닫히면 안 된다(ADR-0118 결정 2)★"
+        );
     }
 
     #[test]

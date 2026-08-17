@@ -119,9 +119,13 @@ fn receipt(o: engram_dashboard_core::agent::types::WriteOutcome) -> InjectReceip
 }
 
 impl DeliveryPort for ManagerDeliveryPort {
+    /// ★`submit_stdin_observed` 여야 한다(`write_stdin_observed` 로 되돌리지 마라)★: 봉투 바이트만 쓰면
+    ///   터미널(TUI) 수신자는 그걸 입력창에 담아 둔 채 턴을 시작하지 않는다 — 배달은 "바이트가 닿았다" 가
+    ///   아니라 "수신자가 턴으로 받았다" 까지다(`DeliveryPort::inject` 계약). 제출이 필요한 백엔드인지의
+    ///   판정은 core seam 뒤 backend 소유라(ADR-0004) 이 어댑터는 동사만 고른다.
     fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
         self.manager
-            .write_stdin_observed(to_id, bytes)
+            .submit_stdin_observed(to_id, bytes)
             .map(receipt)
             .map_err(|e| e.to_string())
     }
@@ -138,12 +142,20 @@ impl DeliveryPort for ManagerDeliveryPort {
     ///   생산 지점)이라 해석기는 여전히 받은 그대로 돌려준다.
     /// ★2차 키가 id 인 이유★: 동명 다수(dup-name)여도 순서가 안정되게 — 이름만으로는 두 항목의 상대 순서가
     ///   여전히 HashMap 순서에 좌우된다.
+    /// ★편지를 읽는 주체만 명단에 올린다(사용자 결정 2026-08-17)★: 상태 술어(`is_live`)에 더해
+    ///   `reads_messages` 로 셸을 뺀다 — 셸에 도착한 봉투는 읽히는 게 아니라 **명령으로 실행된다**.
+    ///   ★ADR-0116 결정 1·7 로의 회귀가 아니다★: 그건 "턴을 관측할 수 없으니 배달할 수 없다" 를 기각한
+    ///   것이고(터미널 claude 는 그대로 받는다), 이건 관측이 아니라 **입력이 무엇으로 해석되는가** 축이다.
+    /// ★`addressing_sources` 와 같은 술어여야 한다★: 한쪽만 걸면 입구 판정과 배달 명단이 갈려 셸이
+    ///   `@all` 로 해석된 뒤 주입까지 간다.
+    /// ★자격은 **스냅샷 필드**로 읽는다(매니저에 되묻지 마라)★: 항목마다 재조회하면 TOCTOU·비원자성·
+    ///   세션당 락이 한꺼번에 생긴다(`AgentInfo::reads_messages` doc).
     fn live_agents(&self) -> Vec<LiveAgent> {
         let mut live: Vec<LiveAgent> = self
             .manager
             .list_agents()
             .into_iter()
-            .filter(is_live)
+            .filter(|a| is_live(a) && a.reads_messages)
             .map(to_live_agent)
             .collect();
         live.sort_by(sort_key);
@@ -160,7 +172,14 @@ impl DeliveryPort for ManagerDeliveryPort {
         let mut dormant_names: Vec<String> = Vec::new();
         for entry in self.manager.roster() {
             match entry.live {
-                Some(info) => roster.push(to_live_agent(info)),
+                // 산 명단은 `live_agents` 와 **같은 술어**여야 한다(위 doc) — 여기만 걸고 한쪽을 빠뜨리면
+                // 셸이 입구에선 해석되고 배달 명단엔 없어 판정이 갈린다. 자격은 이 한 스냅샷의 필드다.
+                Some(info) if info.reads_messages => roster.push(to_live_agent(info)),
+                // ★잠든 이름은 거르지 않는다(알려진 잔여 — 배달 안전과 무관)★: 잠든 셸 이름 앞으로 편지가
+                //   파킹될 수는 있으나, 깨어나도 산 명단에 오르지 않으므로 **주입은 일어나지 않는다**(TTL 로
+                //   만료). 여기까지 거르면 셸 프로필을 산 에이전트 대역으로 쓰는 기존 통합 테스트의 전제가
+                //   무너진다 — 그 fixture 전략은 별도 결정 사항이라 이 수정에서 건드리지 않는다.
+                Some(_) => {}
                 None => dormant_names.push(entry.canonical_name),
             }
         }
@@ -177,6 +196,16 @@ impl DeliveryPort for ManagerDeliveryPort {
             .list_agents()
             .into_iter()
             .any(|a| a.id == id && is_live(&a))
+    }
+
+    /// ★우편 자격을 걸지 않는다(그 이유는 trait doc)★ — 술어는 `is_agent_live` 와 같은 **생존 한 축**이고
+    /// 축만 id 에서 이름으로 바뀐다. 이름 파생은 `live_agents` 와 같은 `list_agents()` 출처를 쓴다.
+    fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
+        self.manager
+            .list_agents()
+            .into_iter()
+            .find(|a| is_live(a) && a.name == name)
+            .map(|a| a.id)
     }
 
     fn canonical_name(&self, id: PeerId) -> Option<String> {
@@ -828,9 +857,19 @@ mod tests {
             cond()
         }
 
+        /// ★셸은 편지를 읽는 주체가 아니다(사용자 결정 2026-08-17)★ — 셸에 도착한 봉투는 읽히는 게
+        /// 아니라 명령으로 실행되므로 수신자 명단에서 뺀다(`@all` 자동 포함도 이걸로 닫힌다).
+        ///
+        /// ★삭제 정리 게이트(`is_agent_live`)는 **같이 걸지 않는다**★: 그 게이트가 묻는 건 "이 세션이
+        ///   지금 살아 있나" 지 "편지를 받나" 가 아니다. 함께 걸면 셸 프로필을 지울 때 다른 축의 정리가
+        ///   엉뚱하게 발동한다 — 그래서 두 축이 갈린다는 사실을 여기서 못 박는다.
+        /// ★멤버십 술어의 capability 무관성(ADR-0116 결정 1·7)은 별도 테스트가 지킨다★
+        ///   (`tests/control_send.rs` — `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`)
+        ///   — 이 fixture 는 셸이라 그 축을 더 이상 대변하지 못한다(터미널 claude 는 실 바이너리가 필요해
+        ///   여기서 못 띄우고, 세션 주입 seam 은 통합 테스트 쪽에 있다).
         #[cfg(windows)]
         #[test]
-        fn a_live_session_without_a_turn_signal_is_in_the_roster_with_turn_signal_false() {
+        fn a_live_shell_is_excluded_from_the_mail_roster_but_still_counts_as_live() {
             let manager = manager("live");
             let port = ManagerDeliveryPort::new(manager.clone());
             let info = manager
@@ -841,27 +880,44 @@ mod tests {
                 .iter()
                 .any(|a| a.id == info.id)));
 
-            let roster = port.live_agents();
-            let entry = roster
-                .iter()
-                .find(|a| a.id == info.id)
-                .expect("턴 신호 없는 산 세션도 로스터에 있어야(멤버십 조건은 상태뿐)");
             assert!(
-                !entry.turn_signal,
-                "그 사실은 turn_signal=false 로만 나타난다(= 즉시 주입 대상)"
+                !port.live_agents().iter().any(|a| a.id == info.id),
+                "셸은 배달 명단에 오르면 안 된다(봉투가 명령으로 실행된다)"
             );
             let sources = port.addressing_sources();
             assert!(
-                sources.roster.iter().any(|a| a.id == info.id),
-                "addressing_sources 의 로스터도 같은 술어여야: {sources:?}"
+                !sources.roster.iter().any(|a| a.id == info.id),
+                "입구 판정 소스도 같은 술어여야(한쪽만 걸면 해석과 배달이 갈린다): {sources:?}"
             );
             assert!(
                 port.is_agent_live(info.id),
-                "삭제 정리 게이트도 같은 술어여야(리뷰 fix D1 — 이 부류를 놓치면 배달될 메일이 죽는다)"
+                "삭제 정리 게이트는 '살아 있나' 축이라 그대로 true 여야(리뷰 fix D1)"
+            );
+
+            // ★실제로 뚫렸던 구멍★: `DeleteProfile` 은 산 세션을 죽이지 않는다. 판정을 프로필에서 뽑으면
+            //   여기서 "모름" 이 되어 셸이 명단으로 되돌아온다 — 판정 근거가 세션에 있어야 이 단언이 산다.
+            manager.delete_agent(info.id);
+            assert!(
+                !port.live_agents().iter().any(|a| a.id == info.id),
+                "프로필이 사라져도 산 셸은 여전히 배달 명단 밖이어야"
+            );
+            assert!(
+                !port
+                    .addressing_sources()
+                    .roster
+                    .iter()
+                    .any(|a| a.id == info.id),
+                "입구 판정 소스도 마찬가지"
             );
 
             manager.kill_agent(info.id).ok();
         }
+
+        // ADR-0116 결정 1·7(capability ≠ 멤버십)의 봉인은 어댑터 **산출 함수 두 개**를 실제로 태워야
+        // 성립하므로 세션 주입 seam 이 있는 통합 테스트가 맡는다
+        // (`tests/control_send.rs` — `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`).
+        // ★여기서 `is_live` 만 부르는 테스트로 대신하지 말 것★: 그 술어는 상태 한 줄이라 capability 를
+        //   읽지도 않아 항상 참이다(항진명제). 실제로 그렇게 썼다가 리뷰에서 걸렸다.
 
         #[test]
         fn two_dormant_profiles_sharing_a_name_are_both_reported() {
@@ -905,10 +961,9 @@ mod tests {
             manager.seed_agent_bypassing_uniqueness(profile("raw-dormant-twin", "twin"));
 
             let sources = port.addressing_sources();
-            assert!(
-                sources.roster.iter().any(|a| a.id == info.id),
-                "산 동명이 로스터에 있어야(전제): {sources:?}"
-            );
+            // ★전제가 바뀌었다★: 산 쪽은 셸이라 배달 명단엔 안 오른다(`reads_messages`). 그래도 이 테스트가
+            //   보는 축은 그대로다 — 차집합은 **core `roster()`** 가 id 로 끝내고 어댑터는 그 뒤에서 거를
+            //   뿐이라, 이름 축으로 빼는 회귀가 생기면 산 `twin` 이 잠든 `twin` 을 삼켜 아래가 비어 버린다.
             assert_eq!(
                 sources.dormant_names,
                 vec!["twin".to_string()],
@@ -975,6 +1030,7 @@ mod tests {
                     max_tokens: false,
                 },
             },
+            reads_messages: true,
         }
     }
 
