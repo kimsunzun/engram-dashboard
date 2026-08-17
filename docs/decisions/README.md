@@ -128,7 +128,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
 | [0079](0079-jsonrichslot-모드-resume-시-대화-스크롤백-복원-데몬이-claude-jsonl-transcript를-읽어-history-프레임으로-전달.md) | JSON(RichSlot) 모드 resume 시 대화 스크롤백 복원 — 데몬이 Claude `.jsonl`을 읽어 OutputCore 버퍼에 seed(단일 소스 · pump 전) | 확정 |
 | [0080](0080-llm-제어-표면-아키텍처-bashengram-ctl데몬-ws백엔드-직행-데몬-opaque-relay앱-viewmanagerui.md) | LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI) | 폐기 (Superseded by ADR-0085) |
-| [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0140: 결정 1과 2 대체) |
+| [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0140: 결정 1과 2 대체 / ADR-0148: 대상 주소지정 불요 전제) |
 | [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 |
 | [0083](0083-종료-시-프로필-자동-삭제-폐지-유저-kill정상-exit-포함-모든-종료는-시체-보존-삭제는-명시적-사용자-명령으로만.md) | 종료 시 프로필 자동 삭제 폐지 — 유저 kill·정상 exit 포함 모든 종료는 시체 보존, 삭제는 명시적 사용자 명령으로만 | 확정 |
 | [0084](0084-재활성화resume-epoch-bump-apply-disposition-epoch-guard-stale-reap-산-세션-강등프론트-재구독-누락-차단.md) | 재활성화(resume) epoch bump + apply_disposition epoch-guard — stale reap 산-세션 강등·프론트 재구독 누락 차단 | 확정 |
@@ -195,3 +195,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0145](0145-crate-분리-판정-기준은-독립적으로-쓸-수-있는가-소비자-수-기준을-대체한다.md) | crate 분리 판정 기준은 독립적으로 쓸 수 있는가 — 소비자 수 기준을 대체한다 | 확정 |
 | [0146](0146-거절-응답에-되돌려-보내는-호출자-문자열에-길이-상한을-두지-않는다.md) | 거절 응답에 되돌려 보내는 호출자 문자열에 길이 상한을 두지 않는다 | 확정 |
 | [0147](0147-명령-명부-식별자의-위협-모형-인증-경계-안에서는-문자열-지식만으로-신뢰한다.md) | 명령 명부 식별자의 위협 모형 — 인증 경계 안에서는 문자열 지식만으로 신뢰한다 | 확정 |
+| [0148](0148-명령-배달의-대상-지목은-데몬이-자기-표로-한다.md) | 명령 배달의 대상 지목은 데몬이 자기 표로 한다 | 확정 |
