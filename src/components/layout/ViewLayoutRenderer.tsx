@@ -1,6 +1,7 @@
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
-// 사람 우클릭(SlotContextMenu)이든 LLM(window.__engramLayout)이든 같은 invoke→emit 권위 루프로 갱신된다.
+// 사람 클릭(SlotContextMenu — 빈 슬롯은 좌클릭도)이든 LLM(window.__engramLayout)이든 같은 invoke→emit
+// 권위 루프로 갱신된다.
 
 import { useState } from 'react'
 import { Allotment } from 'allotment'
@@ -107,7 +108,18 @@ export default function ViewLayoutRenderer({
         //   이 게이트가 없으면 트리 노드 좌클릭이 트리 슬롯 pane 까지 버블해 트리 슬롯이 포커스되고, 이어
         //   우클릭 "열기"가 그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다(선존 UX 버그).
         //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
-        onClick={() => {
+        //   ★빈 슬롯 좌클릭 = 메뉴(ADR-0142)★: 표적은 아이콘이 아니라 슬롯 전체이고, 우클릭과 같은
+        //     setContextMenu 상태·같은 좌표를 쓴다. 콘텐츠 슬롯(터미널·트리·팔레트)의 좌클릭은 포커스
+        //     이동뿐이다 — 자기 클릭 의미를 가진 렌더러들이라 메뉴를 열면 그 의미를 덮는다.
+        //   ★이미 열린 메뉴는 재앵커하지 않는다★: SlotContextMenu 는 포털이 아니라 이 래퍼 안에 마운트돼
+        //     서브메뉴 컨테이너 행·항목 사이 여백 클릭이 여기까지 버블한다. 재앵커하면 메뉴가 커서 밑으로
+        //     점프해 앵커가 메뉴 사각형 안에 들어가고(SlotContextMenu 의 뒤집기 불변식이 막으려는 상태)
+        //     이어지는 클릭이 커서 밑 항목을 실행한다. 슬롯 여백 클릭은 메뉴의 mousedown 바깥닫기가 먼저
+        //     상태를 비우므로 이 가드에 걸리지 않는다(= 메뉴가 새 좌표로 옮겨 열린다).
+        onClick={e => {
+          if (node.content.type === 'empty' && contextMenu == null) {
+            setContextMenu({ x: e.clientX, y: e.clientY })
+          }
           if (!isContentSlot(node.content)) return
           if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
         }}
@@ -147,33 +159,12 @@ export default function ViewLayoutRenderer({
           // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
           <AgentList />
         ) : (
-          // ★메뉴 오픈 경로는 하나뿐(ADR-0141)★: `+` 는 빈 슬롯 메뉴로 가는 두 번째 입구일 뿐이라 우클릭이
-          //   쓰는 setContextMenu 상태와 아래 SlotContextMenu 를 그대로 쓴다 — 별도 메뉴를 세우면 항목
-          //   구성이 두 곳으로 갈라진다(ADR-0064 단일소스 불변식).
-          //   ★버블 허용★: stopPropagation 안 해 컨테이너 click-to-focus(ADR-0066)도 함께 발화한다.
-          //   ★탭 순회 밖 — 이 부재는 의도다(ADR-0141 결정 6, 사용자 결정)★: SlotContextMenu 는 키보드로
-          //   조작되지 않아(Esc 닫기도 없다) 순회에 넣으면 Tab→Enter 로 열고 마우스 없이는 못 빠져나온다.
-          //   tabIndex 를 되살리려면 그 메뉴에 최소한 Esc 경로를 먼저 넣어야 한다 — 순서를 뒤집지 말 것.
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label={t('slot.openMenu')}
-            className="cursor-pointer text-muted hover:text-foreground"
-            onClick={e => {
-              // ★좌표 없는 클릭 보정(ADR-0141)★: 탭 순회에서 빠져도 코드(`el.click()`)·보조기술이 부르는
-              //   클릭은 남고, 그런 클릭은 좌표가 0,0 으로 온다 — 그대로 믿으면 메뉴가 뷰포트 좌상단에
-              //   열린다. 판별은 detail(클릭 횟수)로 한다: 실제 포인터 클릭은 ≥1, 합성 클릭은 0.
-              //   좌표가 0 인지로 보면 뷰포트 좌상단을 진짜로 누른 경우와 구별되지 않는다.
-              if (e.detail === 0) {
-                const rect = e.currentTarget.getBoundingClientRect()
-                setContextMenu({ x: rect.left, y: rect.bottom })
-                return
-              }
-              setContextMenu({ x: e.clientX, y: e.clientY })
-            }}
-          >
-            <Plus className="size-8" />
-          </button>
+          // ★순수 그림(ADR-0142)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
+          //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
+          //   pointer-events 를 끊어 아이콘 위 클릭도 슬롯에 그대로 닿는다 — 유틸리티 클래스가 아니라 인라인인
+          //   이유는 이 끊음이 스타일 취향이 아니라 동작 계약이라서다(클래스 규칙으로 덮이지 않고, Tailwind 를
+          //   적용하지 않는 테스트 환경에서도 계산된 값으로 검증된다).
+          <Plus className="size-11 text-muted" style={{ pointerEvents: 'none' }} />
         )}
         {contextMenu && (
           // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
