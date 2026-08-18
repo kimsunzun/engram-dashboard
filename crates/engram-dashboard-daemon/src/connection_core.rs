@@ -51,9 +51,10 @@ use engram_dashboard_protocol::{
 
 use tokio::sync::watch;
 
+use crate::command_delivery::CommandDeliveries;
 use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
-use engram_dashboard_command::{CommandError, CommandReply, ErrorCode, OwnerToken};
+use engram_dashboard_command::{CommandError, OwnerToken};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 
@@ -122,15 +123,12 @@ pub struct ConnectionSession {
     pub owned_viewports: Arc<Mutex<Vec<(AgentId, String)>>>,
     /// 남의 토큰 형식을 적은 등록을 이 연결에서 이미 한 번 남겼나(`note_claimed_owner`).
     claimed_owner_warned: AtomicBool,
-    /// 배달 표 없이 온 명령 결말을 이 연결에서 이미 한 번 경고했나(아래 `CommandOutcome` arm).
+    /// 붙일 왕복이 없는 명령 결말을 이 연결에서 이미 한 번 경고했나(아래 `CommandOutcome` arm).
     ///
     /// ★래치가 필요한 이유★: 이 프레임은 **클라이언트가 몇 번이든 보낼 수 있고** 릴리즈 데몬의 파일 sink 는
     /// 무조건 켜져 있다(`docs/reference/logging-conventions.md`). 프레임마다 `warn!` 이면 로그 크기가 상대에게
     /// 통제권을 넘긴다 — 형제 래치(`claimed_owner_warned`)와 같은 이유다.
     stray_outcome_warned: AtomicBool,
-    /// 배달 다리가 없어 반려한 명령 요청을 이 연결에서 이미 한 번 경고했나(아래 `Command` arm).
-    /// 래치가 필요한 이유는 형제(`stray_outcome_warned`)와 같다.
-    undelivered_command_warned: AtomicBool,
 }
 
 impl ConnectionSession {
@@ -141,7 +139,6 @@ impl ConnectionSession {
             owned_viewports: Arc::new(Mutex::new(Vec::new())),
             claimed_owner_warned: AtomicBool::new(false),
             stray_outcome_warned: AtomicBool::new(false),
-            undelivered_command_warned: AtomicBool::new(false),
         }
     }
 
@@ -592,10 +589,13 @@ pub struct ConnectionCore {
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     // ADR-0149
     commands: CommandRoster,
+    // ADR-0148
+    deliveries: CommandDeliveries,
     shutdown_tx: watch::Sender<bool>,
 }
 
 impl ConnectionCore {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         manager: Arc<AgentManager>,
         multiview: MultiViewState,
@@ -603,6 +603,7 @@ impl ConnectionCore {
         control_registry: Arc<ControlRegistry>,
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         commands: CommandRoster,
+        deliveries: CommandDeliveries,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -612,6 +613,7 @@ impl ConnectionCore {
             control_registry,
             messaging,
             commands,
+            deliveries,
             shutdown_tx,
         }
     }
@@ -622,6 +624,10 @@ impl ConnectionCore {
 
     pub fn commands(&self) -> &CommandRoster {
         &self.commands
+    }
+
+    pub fn deliveries(&self) -> &CommandDeliveries {
+        &self.deliveries
     }
 
     pub fn fanout(&self) -> &dyn FrameFanout {
@@ -1209,78 +1215,62 @@ impl ConnectionCore {
                 }));
             }
 
-            // ★배달 다리가 아직 안 섰다 — 그래도 답장은 **계약 모양 그대로** 낸다★: 보낸 쪽은 이 봉투로
-            //   pending 슬롯을 만들었으므로(protocol `command_request_id` 가 이 variant 에 `Some`) 조용히
-            //   버리면 마감시각을 다 쓴다. 아래 형제(`CommandOutcome`)가 `Error{request_id: None}` 밖에 못
-            //   내는 것은 그쪽이 상관 밖이라서고, 이쪽은 상관 키가 있어 `CommandReply` 로 답할 수 있다.
-            // ★`INTERNAL` 인 이유 — 없는 것은 **이름이 아니라 이 빌드의 배달 다리**다★: 같은 소켓의
-            //   `ListCommands` 는 명부에 있는 그 이름에 `available: true` 를 답한다(위 arm). 여기서
-            //   `UNSUPPORTED`·`UNKNOWN_COMMAND` 를 내면 한 연결이 같은 이름에 두 가지 답을 하고, 그것이
-            //   ADR-0148 이 「거짓 확신」으로 거부한 바로 그 모양이다. 우리 쪽 결함이므로 `route.rs` 의
-            //   `handler_panicked`(같은 「이 홉에서 못 했다」)와 같은 코드를 쓴다.
-            // ★`retry: Never`(코드가 파생)가 맞는 이유★: 기다린다고 이 빌드에 다리가 생기지 않는다 —
-            //   「안전 × 쓸모」의 쓸모 항이 거짓이다(ADR-0153).
-            // ★warn 을 연결당 1회만 내는 이유★: 형제 래치(`stray_outcome_warned` doc)와 같다.
-            // 배달 다리가 서면 이 자리가 명부에서 주인을 찾아 그 연결로 중계하는 곳이 된다(ADR-0148).
+            // ★답장은 이 자리에서 안 낸다 — **왕복이 끝난 뒤** 배달 태스크가 원 연결로 실어 보낸다★
+            //   (`command_delivery::deliver`). 그래서 여기 `sink` 를 쓰지 않는다: 답장은 이 dispatch 가
+            //   반환한 한참 뒤에 나므로 빌린 `OutboundSink` 로는 닿을 수 없고, 명부가 든 그 연결의 프레임
+            //   출구로 나간다(둘 다 같은 단일 writer 큐에 합류하므로 순서는 보존된다).
+            // ★★여기서 왕복을 기다리면 안 된다★★: 한 연결의 프레임은 그 연결의 읽기 루프가 한 장씩
+            //   **끝까지 기다려** 처리하므로, 주인이 곧 이 연결일 때(셸이 자기 이름을 얹고 자기가 부르는
+            //   경로가 그렇다) 자기 답을 자기가 못 꺼낸다 — ADR-0081 결정 3 개정이 잡아낸 self-deadlock
+            //   그대로다. `spawn` 이 그 회귀를 막는 유일한 수단이고, 되돌리면 그 조합에서 마감시각까지
+            //   연결 하나가 통째로 선다(TRD §3-6 — 셸·데몬·웹뷰 공통 규칙).
+            // ADR-0148
             AgentCommand::Command { envelope } => {
-                let name = sanitize_for_log(&envelope.name);
-                if !session
-                    .undelivered_command_warned
-                    .swap(true, Ordering::Relaxed)
-                {
-                    tracing::warn!(
-                        conn = conn_id,
-                        request_id = %envelope.request_id,
-                        %name,
-                        "이 데몬은 아직 명령을 배달하지 않는다 — 반려(이 연결에서 한 번만 남긴다)"
-                    );
-                } else {
-                    tracing::debug!(
-                        conn = conn_id,
-                        request_id = %envelope.request_id,
-                        %name,
-                        "명령 반려(반복)"
-                    );
-                }
-                let _ = sink.enqueue(Outbound::event(AgentEvent::CommandReply {
-                    reply: CommandReply::err(
-                        envelope.request_id,
-                        CommandError::of(
-                            ErrorCode::Internal,
-                            "this daemon does not forward bus commands yet",
-                        ),
-                    ),
-                }));
+                tracing::debug!(
+                    conn = conn_id,
+                    request_id = %envelope.request_id,
+                    name = %sanitize_for_log(&envelope.name),
+                    "명령 요청 — 명부에서 주인을 찾아 배달한다"
+                );
+                tokio::spawn(crate::command_delivery::deliver(
+                    self.commands.clone(),
+                    self.deliveries.clone(),
+                    conn_id,
+                    envelope,
+                ));
             }
 
-            // ★결말을 붙일 왕복이 아직 없다 — 그래도 **침묵하지 않는다**★: 데몬이 명령을 **배달**하는 다리
-            //   (`request_id` → 원 연결 라우팅 표)는 미구현이라, 지금 이 프레임이 오는 경로는 미솔리시트뿐이다.
-            //   그렇다고 조용히 버리면 보낸 쪽은 답도 오류도 없이 자기 마감시각을 다 쓴다 — 이 파일이 다른
-            //   자리에서 이미 적어 둔 그 손실(`reply` 헬퍼 주석)이다.
-            // ★그래서 형제 위반 경로와 **같은 답**을 낸다 — `Error{request_id: None}`★. 상관 없는 오류라
-            //   라우팅 표가 필요 없고(`agent_conn.rs` 의 2차 핸드셰이크·파싱 실패와 동형), 그 형태가 「이
-            //   데몬은 그 명령을 배달하지 않는다」를 상대에게 말하는 유일한 수단이다.
-            // ★`Ack` 는 못 낸다★: 그건 「전달했다」는 뜻이 되고, 상관도 안 된다(보낸 쪽은 이 명령으로 pending
-            //   슬롯을 만들지 않는다 — protocol `command_request_id` 가 이 variant 에 `None`).
-            // 배달 다리가 서면 이 자리가 그 표를 보고 **원 연결로 중계**하는 곳이 된다.
+            // 주인이 돌려준 결말을 그 왕복에 붙인다 — 붙는 순간 배달 태스크가 깨어나 **원래 물어본 연결**로
+            //   답장을 실어 보낸다(`command_delivery`).
+            // ★붙일 자리가 없어도 **침묵하지 않는다**★: 조용히 버리면 보낸 쪽은 답도 오류도 없이 자기
+            //   마감시각을 다 쓴다 — 이 파일이 다른 자리에서 이미 적어 둔 그 손실(`reply` 헬퍼 주석).
+            // ★그 답은 `Error{request_id: None}` 다★ — 이 프레임에는 **내가 낸 요청의 상관 키가 없으므로**
+            //   (protocol `command_request_id` 가 이 variant 에 `None`) 붙일 pending 이 애초에 없다. 여기서
+            //   `CommandReply` 를 되쏘면 그 키의 답장이 **두 번** 나가고(하나는 이미 원 연결로 갔다), 그것이
+            //   TRD §4-⑤ 위반이다.
+            // ★두 원인을 **가르지 않는다**★: 마감이 지나 자리가 거둬진 늦은 결말과 아무도 안 물은 결말은
+            //   표에 아무것도 없다는 점에서 같다 — 표가 지나간 키를 기억하지 않으므로 가를 근거가 없다
+            //   (자취를 두면 그 목록이 무한히 자란다 — ADR-0144 가 명부에서 자취를 버린 것과 같은 이유).
+            // ADR-0148
             AgentCommand::CommandOutcome { reply } => {
+                let request_id = reply.request_id;
+                if self.deliveries.complete(reply) {
+                    tracing::debug!(conn = conn_id, %request_id, "명령 결말을 그 왕복에 붙였다");
+                    return DispatchFlow::Continue;
+                }
                 // 첫 건만 warn — 나머지는 debug(래치 근거는 `stray_outcome_warned` doc).
                 if !session.stray_outcome_warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         conn = conn_id,
-                        request_id = %reply.request_id,
-                        "명령 결말이 왔으나 이 데몬은 명령을 배달하지 않는다 — 거절(이 연결에서 한 번만 남긴다)"
+                        %request_id,
+                        "붙일 왕복이 없는 명령 결말 — 거절(이 연결에서 한 번만 남긴다)"
                     );
                 } else {
-                    tracing::debug!(
-                        conn = conn_id,
-                        request_id = %reply.request_id,
-                        "명령 결말 거절(반복)"
-                    );
+                    tracing::debug!(conn = conn_id, %request_id, "명령 결말 거절(반복)");
                 }
                 let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                     request_id: None,
-                    message: "this daemon does not relay commands, so it has nothing to attach this outcome to".into(),
+                    message: "no round trip is waiting for this outcome — it may have passed its deadline, or nothing asked for it".into(),
                 }));
             }
         }
@@ -1434,7 +1424,7 @@ fn note_claimed_owner(
 /// 흉내 낸 문자열을 그 자리에 앉힐 수 있다).
 /// 알려진 범위: `char::is_control`(C0/C1)까지다 — U+2028 같은 유니코드 줄 구분자는 그대로 나가고, 지금
 /// 쓰는 fmt 레이어는 그것으로 줄을 쪼개지 않는다.
-fn sanitize_for_log(text: &str) -> String {
+pub(crate) fn sanitize_for_log(text: &str) -> String {
     const MAX_CHARS: usize = 64;
     let mut out = String::new();
     for ch in text.chars().take(MAX_CHARS) {
@@ -1603,6 +1593,11 @@ mod tests {
     }
 
     fn test_core() -> (ConnectionCore, watch::Receiver<bool>) {
+        test_core_with(CommandDeliveries::new())
+    }
+
+    /// 상관 표를 밖에서 꽂는 갈래 — 마감 갈래를 재는 시험이 **손으로 미는 시계**를 넣어야 한다.
+    fn test_core_with(deliveries: CommandDeliveries) -> (ConnectionCore, watch::Receiver<bool>) {
         use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
@@ -1653,6 +1648,7 @@ mod tests {
             control_registry,
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             CommandRoster::new(),
+            deliveries,
             shutdown_tx,
         );
         (core, shutdown_rx)
@@ -2216,9 +2212,13 @@ mod tests {
         }
     }
 
-    // ── 배달 다리 없는 명령 요청의 반려(3단위 전까지의 자리) ──────────────────────
+    // ── 명령 배달의 두 arm(ADR-0148) ────────────────────────────────────────────
     //
-    // ★이 arm 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다★ — 아래 경합 하나 때문이다.
+    // 갈래별 단언(정상 왕복 · 주인 부재 · 찢어진 창 · 마감 · 끊김 정리)은 `command_delivery` 쪽에 있다.
+    // 여기서 보는 것은 **dispatch 가 그 배달로 잇는가**와 두 arm 이 wire 로 내는 답이다.
+    //
+    // ★`CommandOutcome` 의 거절 warn 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다★ — 아래 경합
+    //   하나 때문이다.
     //
     // ★관심 캐시는 **끈적하지 않다**★(tracing 0.1.44 / tracing-core 0.1.36 실측): `with_default` 는
     //   `Dispatch::new` 를 거치고(`tracing/src/subscriber.rs`), 그것이 `callsite::register_dispatch` →
@@ -2237,16 +2237,21 @@ mod tests {
     // dispatch 가 async 라 현재 스레드 런타임으로 감싼다 — `with_default` 는 스레드 로컬이므로 그래야
     //   구독자와 같은 스레드에서 돈다.
 
-    fn deliver(name: &str, request_id: engram_dashboard_command::RequestId) -> AgentCommand {
+    fn bus_command(name: &str, request_id: engram_dashboard_command::RequestId) -> AgentCommand {
         AgentCommand::Command {
+            // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0148).
             envelope: engram_dashboard_command::CommandEnvelope {
                 name: name.to_string(),
                 request_id,
-                owner: OwnerToken::new("some-owner"),
+                owner: OwnerToken::new("whatever-the-caller-thinks"),
                 proto_ver: 7,
                 args: serde_json::json!({ "window": "main" }),
             },
         }
+    }
+
+    fn bus_outcome(reply: engram_dashboard_command::CommandReply) -> AgentCommand {
+        AgentCommand::CommandOutcome { reply }
     }
 
     fn on_current_thread<T>(body: impl std::future::Future<Output = T>) -> T {
@@ -2264,14 +2269,6 @@ mod tests {
             .count()
     }
 
-    /// 이 arm 의 **첫 경고**만 잡는 조각.
-    ///
-    /// ★형제 arm(`CommandOutcome`)의 경고와 갈라야 한다★ — 그쪽 문구도 「…명령을 배달하지 않는다…」를
-    /// 품으므로, 그 공통 부분으로 세면 이 arm 이 아예 침묵해도 형제가 수를 채워 테스트가 통과한다.
-    /// 「아직」이 붙은 이 형태는 형제 문구에 없다. **문구를 고치면 이 상수도 같이 고치고, 고른 조각이
-    /// 형제 문구에 없는지 다시 확인할 것.**
-    const FIRST_REFUSAL_WARN: &str = "아직 명령을 배달";
-
     fn total_warns(logged: &[(tracing::Level, String)]) -> usize {
         logged
             .iter()
@@ -2279,149 +2276,258 @@ mod tests {
             .count()
     }
 
-    /// ★반려도 **그 요청의 답장**이어야 한다★: 셸은 이 봉투로 pending 슬롯을 이미 세웠으므로(protocol
-    /// `command_request_id` 가 이 variant 에 `Some`) 키가 어긋나면 답을 받고도 마감시각까지 매달린다.
+    /// 붙일 왕복이 없는 결말의 **첫 경고**만 잡는 조각 — 문구를 고치면 이 상수도 같이 고친다.
+    const STRAY_OUTCOME_WARN: &str = "붙일 왕복이 없는";
+
+    /// 명부에 붙어 있고 **그 연결로 나간 프레임을 받아 볼 수 있는** 세션.
     ///
-    /// ★결말의 갈래까지 재는 이유★: `Ok` 로 답하면 호출자는 **적용된 적 없는 조작을 적용됐다고 읽는다.**
-    /// ★명부에 **있는** 이름을 일부러 쓴다★: 같은 소켓의 `ListCommands` 가 그 이름에 `available: true` 를
-    /// 답하므로, 여기서 이름을 탓하는 코드(`UNKNOWN_COMMAND`·`UNSUPPORTED`)를 내면 한 연결이 같은 이름에
-    /// 두 가지 답을 한다 — ADR-0148 이 「거짓 확신」으로 거부한 모양이다. 없는 것은 이 빌드의 배달 다리다.
-    #[test]
-    fn an_undelivered_command_is_refused_with_the_requests_own_id() {
-        let mut seen = None;
-        capture_logs(|| {
-            seen = Some(on_current_thread(async {
-                let (core, _rx) = test_core();
-                let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
-                let mock = MockOutboundSink::new(tx);
-                let session = attached(&core, 1);
-                core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
-                    .await;
+    /// ★배달을 재려면 받는 쪽이 살아 있어야 한다★ — 형제 [`attached`] 는 받는 쪽을 그 자리에서 버리므로
+    /// (그 doc 이 예고한 그대로) 배달 단언이 조용히 빈손이 된다.
+    fn attached_with_inbox(
+        core: &ConnectionCore,
+        conn_id: ConnId,
+    ) -> (
+        ConnectionSession,
+        tokio::sync::mpsc::Receiver<frame_port::Frame>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let frames: Arc<dyn frame_port::FrameSink> =
+            Arc::new(crate::test_doubles::FakeFrameSink::new(tx));
+        core.commands().attach(conn_id, &frames);
+        (ConnectionSession::new(conn_id), rx)
+    }
 
-                let req = engram_dashboard_command::RequestId::new();
-                core.dispatch(deliver("tab.create", req), &session, &mock)
-                    .await;
+    /// ★기다림에 상한을 둔다 — 배달이 엉뚱한 연결로 가면 **hang 이 아니라 실패**여야 한다★
+    /// (상한은 판정 기준이 아니라 「깨졌다」의 관측 수단이다 — `command_delivery` 의 같은 헬퍼).
+    async fn next_frame_event(
+        rx: &mut tokio::sync::mpsc::Receiver<frame_port::Frame>,
+    ) -> AgentEvent {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("프레임을 기다리다 상한을 넘겼다 — 배달이 이 연결로 오지 않는다")
+            .expect("프레임 하나");
+        match frame {
+            frame_port::Frame::Text(text) => serde_json::from_str(&text).expect("이벤트 디코드"),
+            other => panic!("Text 여야 함: {other:?}"),
+        }
+    }
 
-                match mock.events().as_slice() {
-                    [AgentEvent::Ack { .. }, AgentEvent::CommandReply { reply }] => {
-                        (reply.clone(), req)
-                    }
-                    other => panic!("명령 요청은 CommandReply 로 답한다: {other:?}"),
-                }
-            }));
-        });
+    /// ★요청은 주인에게, 답장은 **원래 물어본 연결**에게★ — 한 dispatch 쌍으로 그 왕복 전부를 잰다.
+    ///
+    /// ★답장이 `dispatch` 의 반환 경로로 나가지 **않는다**는 것도 함께 못으로 박는다★: 그 경로로 답하려면
+    /// 이 자리에서 왕복을 기다려야 하고, 주인이 곧 이 연결인 경우(셸이 자기 이름을 얹고 자기가 부르는
+    /// 경로) 자기 답을 자기가 못 꺼낸다(TRD §3-6 self-deadlock). 그래서 요청 arm 은 **조용히 반환**한다.
+    #[tokio::test]
+    async fn a_command_is_delivered_to_its_owner_and_its_reply_returns_to_the_caller() {
+        let (core, _rx) = test_core();
+        let (owner, mut owner_inbox) = attached_with_inbox(&core, 1);
+        let (caller, mut caller_inbox) = attached_with_inbox(&core, 2);
+        let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let owner_mock = MockOutboundSink::new(tx.clone());
+        let caller_mock = MockOutboundSink::new(tx);
+        core.dispatch(
+            register(vec![decl("tab.create")], rid()),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+        let req = engram_dashboard_command::RequestId::new();
 
-        let (reply, req) = seen.expect("본문이 돌았다");
-        assert_eq!(
-            reply.request_id, req,
-            "봉투가 품고 온 키 그대로여야 셸의 pending 이 깨진다"
+        core.dispatch(bus_command("tab.create", req), &caller, &caller_mock)
+            .await;
+
+        match next_frame_event(&mut owner_inbox).await {
+            AgentEvent::CommandRequest { envelope } => {
+                assert_eq!(envelope.request_id, req, "id 는 전 구간 동일");
+                assert_eq!(
+                    Some(envelope.owner),
+                    core.commands().attached_owner(1),
+                    "명부가 저장한 주인이 겉봉에 실린다 — 부르는 쪽이 적어 온 값이 아니다"
+                );
+                assert_eq!(
+                    envelope.args,
+                    serde_json::json!({ "window": "main" }),
+                    "속은 파싱 없이 통과한다"
+                );
+            }
+            other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
+        }
+
+        core.dispatch(
+            bus_outcome(engram_dashboard_command::CommandReply::ok(
+                req,
+                serde_json::json!({ "tab": 4 }),
+            )),
+            &owner,
+            &owner_mock,
+        )
+        .await;
+
+        match next_frame_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, req);
+                assert_eq!(
+                    reply.outcome,
+                    Ok(serde_json::json!({ "tab": 4 })),
+                    "주인의 결말이 그대로 온다"
+                );
+            }
+            other => panic!("물어본 연결은 CommandReply 를 받는다: {other:?}"),
+        }
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "답장이 주인 쪽으로 새면 안 된다"
         );
-        let err = reply
-            .outcome
-            .expect_err("반려를 Ok 로 답하면 안 적용된 조작이 적용된 것으로 읽힌다");
-        assert_eq!(
-            err.code(),
-            ErrorCode::Internal,
-            "이름은 명부에 있다 — 탓할 것은 이 빌드의 배달 다리다"
+        assert!(
+            caller_mock.events().is_empty(),
+            "요청 arm 은 동기 답을 내지 않는다: {:?}",
+            caller_mock.events()
+        );
+        assert!(
+            matches!(owner_mock.events().as_slice(), [AgentEvent::Ack { .. }]),
+            "결말 arm 도 조용하다(등록 Ack 하나뿐): {:?}",
+            owner_mock.events()
         );
         assert_eq!(
-            err.retry(),
-            engram_dashboard_command::RetryMode::Never,
-            "기다린다고 다리가 생기지 않는다 — 쓸모 항이 거짓(ADR-0153)"
+            core.deliveries().in_flight(),
+            0,
+            "끝난 왕복은 표에서 빠진다"
         );
     }
 
-    /// ★반려 경고는 연결당 한 줄이다★: 이 프레임은 클라이언트가 몇 번이든 보낼 수 있어, 요청마다 warn 이면
-    /// 로그 크기의 통제권이 상대에게 넘어간다(래치 근거 = `undelivered_command_warned` doc).
-    /// ★래치가 답장까지 삼키면 안 된다★ — 두 번째 요청도 자기 키로, **자기 결말로** 답을 받아야 한다.
+    /// ★마감이 지나면 답장이 **정확히 한 번** 나가고, 늦게 온 결말은 두 번째 답장을 만들지 못한다★
     ///
-    /// ★이 테스트가 **못** 박는 것 — 래치의 원자성★: 여기 dispatch 는 순차라, `swap(true)` 와
-    /// 「`load()` 로 보고 나서 `store(true)`」가 이 테스트에는 **똑같아 보인다**. 한 `ConnectionSession`
-    /// 에 명령 둘이 동시에 들어와 양쪽이 false 를 읽고 **둘 다 경고하는** 경합은 여기서 안 잡힌다.
-    ///
-    /// ★단 그 경합은 오늘 **도달 불가**다 — 그러니 핀을 찾아 시간을 태우지 말 것★: 한 연결의 프레임은
-    /// 수신 루프가 한 장씩 **끝까지 기다려** 처리한다(`net` 의 `ws.rs` 읽기 루프가
-    /// `handler.on_text(..).await` 를 순차로 돌고, `agent_conn.rs` 의 `on_text` 가 그 안에서
-    /// `core.dispatch(..).await` 를 기다린다). 즉 **이 연결에 `dispatch` 생산자는 하나뿐**이고, 그래서
-    /// 이 래치는 두 번 켜질 수 없다.
-    ///
-    /// ★확인된 것은 딱 그것뿐이다 — 「이 세션을 동시에 아무도 안 건드린다」가 **아니다**★: `on_disconnect`
-    /// 는 abort 한 핸들을 **기다리지 않고** 불리므로(`ws.rs` 의 select! → `handler.on_disconnect`) 다른
-    /// 워커에서 아직 `dispatch` 안에 있는 read_task 와 겹칠 수 있고, 겹친 채로 같은 세션의 Mutex 칸들
-    /// (`subs` · `owned_viewports`)을 잠근다 — `agent_conn.rs` 가 그 경쟁을 자기 주석에 이미 적어 뒀다.
-    /// 래치가 무사한 것은 **그쪽이 `dispatch` 생산자가 아니기** 때문이지 겹침이 없어서가 아니다.
-    /// ★그러므로 `&self` 상태를 이 자리에 새로 더할 때 「어차피 단독」을 전제로 read-then-write 하지 말 것★
-    /// — `swap` 은 그 전제를 안 쓰는 형태이고, 동시 dispatcher 가 생기는 날의 방어이기도 하다.
-    /// 타이밍 의존 테스트는 대개 통과해 버려 없느니만 못하므로 일부러 안 쓴다.
+    /// 시계를 손으로 밀어 재므로 실시간 대기가 없다. 늦은 결말은 붙을 자리를 못 찾아 형제 arm 의 거절로
+    /// 떨어지고, 그 거절은 **물어본 연결이 아니라 결말을 보낸 연결**에게 간다.
     #[test]
-    fn the_refusal_warns_once_per_connection_and_still_answers_every_request() {
+    fn a_command_whose_owner_never_answers_is_timed_out_exactly_once() {
+        let clock = crate::command_delivery::tests::ManualClock::new();
+        let deliveries = crate::command_delivery::tests::deliveries_with(clock.clone());
+        let mut seen = None;
+        capture_logs(|| {
+            seen = Some(on_current_thread(async {
+                let (core, _rx) = test_core_with(deliveries.clone());
+                let (owner, mut owner_inbox) = attached_with_inbox(&core, 1);
+                let (caller, mut caller_inbox) = attached_with_inbox(&core, 2);
+                let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+                let mock = MockOutboundSink::new(tx);
+                core.dispatch(register(vec![decl("tab.create")], rid()), &owner, &mock)
+                    .await;
+                let req = engram_dashboard_command::RequestId::new();
+
+                core.dispatch(bus_command("tab.create", req), &caller, &mock)
+                    .await;
+                assert!(matches!(
+                    next_frame_event(&mut owner_inbox).await,
+                    AgentEvent::CommandRequest { .. }
+                ));
+
+                clock.advance(std::time::Duration::from_secs(11));
+                assert_eq!(deliveries.expire(), 1, "마감이 지나면 거둔다");
+                let timed_out = next_frame_event(&mut caller_inbox).await;
+
+                // 주인이 뒤늦게 답한다 — 붙을 자리가 없다.
+                core.dispatch(
+                    bus_outcome(engram_dashboard_command::CommandReply::ok(
+                        req,
+                        serde_json::json!({ "tab": 4 }),
+                    )),
+                    &owner,
+                    &mock,
+                )
+                .await;
+
+                (
+                    timed_out,
+                    mock.events(),
+                    caller_inbox.try_recv().is_err(),
+                    deliveries.in_flight(),
+                )
+            }));
+        });
+
+        let (timed_out, events, caller_quiet, in_flight) = seen.expect("본문이 돌았다");
+        match timed_out {
+            AgentEvent::CommandReply { reply } => {
+                let err = reply.outcome.expect_err("마감 초과");
+                assert_eq!(err.code(), ErrorCode::Timeout);
+                assert_eq!(
+                    err.retry(),
+                    engram_dashboard_command::RetryMode::Never,
+                    "dedup 저장소가 없어 재질의가 재실행이 된다 — 이 경로는 재시도를 지시하지 않는다\
+                     (근거 = `command_delivery::no_retry`)"
+                );
+            }
+            other => panic!("마감은 CommandReply 로 답한다: {other:?}"),
+        }
+        assert!(
+            caller_quiet,
+            "늦게 온 결말이 두 번째 답장이 되면 안 된다(TRD §4-⑤)"
+        );
+        assert_eq!(in_flight, 0, "거둔 자리가 남으면 안 된다");
+        match events.as_slice() {
+            [AgentEvent::Ack { .. }, AgentEvent::Error {
+                request_id,
+                message,
+            }] => {
+                assert_eq!(*request_id, None, "이 프레임엔 상관 키가 없다");
+                assert!(message.contains("deadline"), "{message}");
+            }
+            other => panic!("늦은 결말은 결말을 보낸 연결에게 거절로 답한다: {other:?}"),
+        }
+    }
+
+    /// ★붙일 왕복이 없어도 침묵하지 않는다 — 단 경고는 연결당 한 줄이다★
+    ///
+    /// 이 프레임은 클라이언트가 몇 번이든 보낼 수 있어, 프레임마다 warn 이면 로그 크기의 통제권이 상대에게
+    /// 넘어간다(래치 근거 = `stray_outcome_warned` doc).
+    #[test]
+    fn a_stray_outcome_is_refused_and_warns_once_per_connection() {
         let mut seen = None;
         let logged = capture_logs(|| {
             seen = Some(on_current_thread(async {
                 let (core, _rx) = test_core();
-                let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(64);
+                let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(32);
                 let mock = MockOutboundSink::new(tx);
+                let first = ConnectionSession::new(1);
+                let second = ConnectionSession::new(2);
 
-                let first = attached(&core, 1);
-                let (a, b) = (
-                    engram_dashboard_command::RequestId::new(),
-                    engram_dashboard_command::RequestId::new(),
-                );
-                core.dispatch(deliver("tab.create", a), &first, &mock).await;
-                let latched = first.undelivered_command_warned.load(Ordering::Relaxed);
-                core.dispatch(deliver("tab.create", b), &first, &mock).await;
-
-                // 다른 연결은 자기 래치를 새로 든다 — 한 연결의 소음이 다른 연결의 첫 경고를 먹지 않는다.
-                let second = attached(&core, 2);
-                let c = engram_dashboard_command::RequestId::new();
-                core.dispatch(deliver("tab.create", c), &second, &mock)
+                for session in [&first, &second, &first] {
+                    core.dispatch(
+                        bus_outcome(engram_dashboard_command::CommandReply::ok(
+                            engram_dashboard_command::RequestId::new(),
+                            serde_json::json!({}),
+                        )),
+                        session,
+                        &mock,
+                    )
                     .await;
-
-                let answered: Vec<_> = mock
-                    .events()
-                    .into_iter()
-                    .filter_map(|ev| match ev {
-                        AgentEvent::CommandReply { reply } => Some(reply),
-                        _ => None,
-                    })
-                    .collect();
-                (latched, answered, vec![a, b, c])
+                }
+                (
+                    mock.events(),
+                    first.stray_outcome_warned.load(Ordering::Relaxed),
+                )
             }));
         });
 
-        let (latched, answered, sent) = seen.expect("본문이 돌았다");
-        assert!(latched, "첫 반려가 래치를 세워야 한다");
-        assert_eq!(
-            answered.len(),
-            sent.len(),
-            "요청마다 답장 하나씩: {answered:?}"
-        );
-        // ★키만 보고 넘어가지 않는다★ — 뒤쪽 답장 하나만 `Ok` 로 새면 그 호출자는 **적용된 적 없는
-        //   조작을 적용됐다고 읽는다.** 래치가 선 뒤의 답장도 첫 답장과 같은 결말이어야 한다.
-        for (reply, req) in answered.iter().zip(&sent) {
-            assert_eq!(reply.request_id, *req, "봉투가 품고 온 키 그대로여야 한다");
-            let err = reply
-                .outcome
-                .as_ref()
-                .expect_err("반려는 전부 실패 결말이어야 한다");
-            assert_eq!(err.code(), ErrorCode::Internal, "{reply:?}");
-            assert_eq!(
-                err.retry(),
-                engram_dashboard_command::RetryMode::Never,
-                "{reply:?}"
-            );
+        let (events, latched) = seen.expect("본문이 돌았다");
+        assert!(latched, "첫 거절이 래치를 세워야 한다");
+        assert_eq!(events.len(), 3, "거절도 답이다 — 삼키지 않는다: {events:?}");
+        for event in &events {
+            match event {
+                AgentEvent::Error { request_id, .. } => assert_eq!(*request_id, None),
+                other => panic!("거절은 상관 키 없는 Error 다: {other:?}"),
+            }
         }
         // 두 단언은 **다른 것**을 잰다. 하나만 남기면 각자의 도피로가 열린다.
-        // ① 문구로 세기 — 경고를 낸 자리가 **이 arm** 임을 박는다(형제 arm 이 수를 채우는 것을 막는다).
+        // ① 문구로 세기 — 경고를 낸 자리가 **이 arm** 임을 박는다.
         assert_eq!(
-            warns_matching(&logged, FIRST_REFUSAL_WARN),
+            warns_matching(&logged, STRAY_OUTCOME_WARN),
             2,
             "연결당 한 줄이라 두 연결이면 둘: {logged:?}"
         );
-        // ② 전체로 세기 — 이 캡처에 WARN 이 **그 둘뿐**임을 박는다. 문구에 안 묶여 있는 것이 요점이다:
-        //    반복 갈래를 `debug!` → `warn!` 로 올리면서 그 문구까지 갈아도 여기서 걸린다(문구로만 세면
-        //    갈린 문구가 아무 데도 안 맞아 **공허하게 통과**한다 — 래치가 막으려던 프레임당 로그 홍수가
-        //    그대로 나간다).
+        // ② 전체로 세기 — 반복 갈래를 `debug!` → `warn!` 로 올리면서 문구까지 갈아도 여기서 걸린다
+        //    (문구로만 세면 갈린 문구가 아무 데도 안 맞아 **공허하게 통과**한다).
         assert_eq!(
             total_warns(&logged),
             2,

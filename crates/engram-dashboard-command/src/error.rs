@@ -231,9 +231,35 @@ impl CommandError {
     }
 
     /// 재시도 지시를 갈아 끼운다 — **원문 사본을 버린다**([`CommandError::set_code`] 와 같은 이유).
+    ///
+    /// ★남의 오류를 중계하면서 지시만 내리려는 것이면 이걸 쓰지 말 것★ —
+    /// [`CommandError::set_retry_for_relay`] 가 그 자리다. 여기 부르면 받은 코드와 계약 밖 필드가 함께
+    /// 사라진다.
     pub fn set_retry(&mut self, retry: RetryMode) {
         self.retry = retry;
         self.received = None;
+    }
+
+    /// 재시도 지시만 갈아 끼우고 **원문 사본은 살린다** — ★중계 홉 전용★.
+    ///
+    /// [`CommandError::set_retry`] 와 갈리는 지점 하나: 그쪽은 사본을 통째로 버려 **받은 코드와 계약 밖
+    /// 필드까지 함께 지운다.** 코드를 바꿀 때는 그게 맞다(바뀐 코드 옆에서 옛 부속은 어긋난다). 그러나
+    /// **지시만** 내리는 홉에는 틀리다 — 어휘는 그대로인데 어휘를 담은 칸이 사라져, 「수용이 파괴여선 안
+    /// 된다」는 [`CommandError::received`] 의 취지가 바로 그 홉에서 깨진다.
+    ///
+    /// 그래서 사본의 `retry` 칸만 새 지시로 덮는다. 그 칸이 나갈 때 실리는 값의 출처이므로
+    /// ([`CommandError::wire_retry`]) **나가는 지시는 실제로 이 값이 되고**, `code` · `message` 유무 ·
+    /// 계약 밖 필드는 받은 그대로 최종 호출자까지 간다.
+    /// ★받은 오류에 `retry` 칸이 **없었어도** 채운다★ — 안 채우면 그 칸이 빠진 채 나가고, 받는 쪽이
+    /// 코드에서 파생해 버려 내린 지시가 무효가 된다.
+    ///
+    /// ★쓰는 자리★: 자기 정책상 지시를 낮춰야 하지만 **답을 지은 것은 남**인 홉
+    /// (`engram-dashboard-daemon` 의 `command_delivery::send_reply` 가 그 하나다).
+    pub fn set_retry_for_relay(&mut self, retry: RetryMode) {
+        self.retry = retry;
+        if let Some(received) = self.received.as_deref_mut() {
+            received.retry = Some(retry.as_str().to_string());
+        }
     }
 
     /// 문구를 갈아 끼운다 — 사본은 그대로 둔다.

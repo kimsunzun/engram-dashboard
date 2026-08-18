@@ -24,6 +24,7 @@ use engram_dashboard_protocol::{
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 
+use crate::command_delivery::CommandDeliveries;
 use crate::command_roster::CommandRoster;
 use crate::connection_core::{
     agent_list_event, broadcast_lease_changed, event_json, hello_event, output_event_to_wire,
@@ -282,6 +283,21 @@ impl ConnectionHandler for AgentConnection {
         // ADR-0148
         self.core.commands().detach(conn_id);
 
+        // ── 이 연결이 낸 명령 왕복 거두기(ADR-0148) ───────────────────────────────
+        // ★명부 정리 **뒤**다★: 순서가 뒤집히면 왕복이 풀려 답장을 내려는 순간 이 연결이 아직 명부에 있어,
+        //   이미 죽은 출구로 프레임을 한 장 쓰고 버린다(무해하지만 인과가 흐려진다).
+        // ★상관 표와 명부는 다른 표라 정리도 두 줄이다★ — 합치지 않는 근거는 `command_delivery` 헤더
+        //   (수명 단위가 다르다: 왕복 하나 대 연결 하나). 이 줄이 빠지면 답장을 받아 갈 곳이 사라진 항목이
+        //   마감시각까지 표에 앉고, 그 왕복을 돌던 태스크도 그때까지 안 끝난다.
+        let dropped = self.core.deliveries().drop_origin(conn_id);
+        if dropped > 0 {
+            tracing::debug!(
+                conn = conn_id,
+                dropped,
+                "연결 끊김 — 이 연결이 낸 명령 왕복을 거뒀다"
+            );
+        }
+
         let manager = self.core.manager();
 
         // ── 구독 누수 방지 ──────────────────────────────────────────────────────
@@ -343,10 +359,13 @@ pub struct AgentConnections {
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
     // ADR-0149
     commands: CommandRoster,
+    // ADR-0148
+    deliveries: CommandDeliveries,
     shutdown_tx: watch::Sender<bool>,
 }
 
 impl AgentConnections {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         manager: Arc<AgentManager>,
         multiview: MultiViewState,
@@ -354,6 +373,7 @@ impl AgentConnections {
         control_registry: Arc<crate::control::registry::ControlRegistry>,
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         commands: CommandRoster,
+        deliveries: CommandDeliveries,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -363,6 +383,7 @@ impl AgentConnections {
             control_registry,
             messaging,
             commands,
+            deliveries,
             shutdown_tx,
         }
     }
@@ -381,6 +402,7 @@ impl AgentConnections {
             self.control_registry.clone(),
             self.messaging.clone(),
             self.commands.clone(),
+            self.deliveries.clone(),
             self.shutdown_tx.clone(),
         ));
         Arc::new(AgentConnection {
@@ -602,12 +624,14 @@ mod tests {
         test_factory_with(
             Arc::new(crate::test_doubles::RecordingFanout::new()),
             CommandRoster::new(),
+            CommandDeliveries::new(),
         )
     }
 
     fn test_factory_with(
         fanout: Arc<dyn FrameFanout>,
         commands: CommandRoster,
+        deliveries: CommandDeliveries,
     ) -> AgentConnections {
         use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
@@ -644,6 +668,7 @@ mod tests {
             Arc::new(crate::control::registry::ControlRegistry::new()),
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             commands,
+            deliveries,
             shutdown_tx,
         )
     }
@@ -652,8 +677,14 @@ mod tests {
         serde_json::to_string(cmd).expect("명령 직렬화")
     }
 
+    /// ★기다림에 상한을 둔다 — 프레임이 이 연결로 안 오면 **hang 이 아니라 실패**여야 한다★
+    /// (상한은 판정 기준이 아니라 「깨졌다」의 관측 수단이다).
     async fn next_event(rx: &mut mpsc::Receiver<Frame>) -> AgentEvent {
-        match rx.recv().await.expect("프레임 하나") {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("프레임을 기다리다 상한을 넘겼다 — 이 연결로 오지 않는다")
+            .expect("프레임 하나");
+        match frame {
             Frame::Text(text) => serde_json::from_str(&text).expect("이벤트 디코드"),
             other => panic!("Text 여야 함: {other:?}"),
         }
@@ -740,6 +771,77 @@ mod tests {
         }
     }
 
+    /// ★끊긴 연결이 **낸** 명령 왕복도 함께 거둔다★
+    ///
+    /// 명부와 상관 표는 **다른 표**라(수명 단위가 다르다 — `command_delivery` 헤더) 정리도 두 줄이다.
+    /// 상관 표 쪽 줄이 빠지면 답장을 받아 갈 곳이 사라진 항목이 마감시각까지 표에 앉고 그 왕복을 돌던
+    /// 태스크도 그때까지 안 끝나는데, **런타임엔 아무 신호도 없다** — 그래서 이 테스트가 그 줄의 유일한
+    /// 그물이다(거두는 동작 자체의 갈래별 단언은 `command_delivery` 쪽에 있다).
+    // ADR-0148
+    #[tokio::test]
+    async fn a_disconnect_also_reclaims_that_connections_command_round_trips() {
+        use engram_dashboard_command::{CommandDecl, CommandEnvelope, OwnerToken, RequestId};
+
+        let commands = CommandRoster::new();
+        let deliveries = CommandDeliveries::new();
+        let factory = test_factory_with(
+            Arc::new(crate::test_doubles::RecordingFanout::new()),
+            commands,
+            deliveries.clone(),
+        );
+        let owner = factory.handler_for(1);
+        let caller = factory.handler_for(2);
+        let (owner_tx, mut owner_rx) = mpsc::channel::<Frame>(8);
+        let (caller_tx, mut caller_rx) = mpsc::channel::<Frame>(8);
+        let owner_frames = frame_sink(owner_tx);
+        let caller_frames = frame_sink(caller_tx);
+        owner.on_connect(1, &owner_frames).await;
+        caller.on_connect(2, &caller_frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut owner_rx).await;
+            let _ = next_event(&mut caller_rx).await;
+        }
+        let registration = command_json(&AgentCommand::RegisterCommands {
+            owner: OwnerToken::new("shell"),
+            decls: vec![CommandDecl {
+                name: "tab.create".to_string(),
+                help: "{}".to_string(),
+            }],
+            catalog_version: 1,
+            request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+        });
+        owner.on_text(1, &registration, &owner_frames).await;
+        assert!(matches!(
+            next_event(&mut owner_rx).await,
+            AgentEvent::Ack { .. }
+        ));
+
+        let request = command_json(&AgentCommand::Command {
+            envelope: CommandEnvelope {
+                name: "tab.create".to_string(),
+                request_id: RequestId::new(),
+                owner: OwnerToken::new("whatever-the-caller-thinks"),
+                proto_ver: 1,
+                args: serde_json::json!({}),
+            },
+        });
+        caller.on_text(2, &request, &caller_frames).await;
+        // 봉투가 주인에게 나간 것을 본 시점부터 그 왕복은 답을 기다리는 중이다.
+        assert!(matches!(
+            next_event(&mut owner_rx).await,
+            AgentEvent::CommandRequest { .. }
+        ));
+        assert_eq!(deliveries.in_flight(), 1, "왕복이 표에 앉아 있다");
+
+        caller.on_disconnect(2);
+
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "정리가 이 연결의 왕복을 거둬야 한다"
+        );
+    }
+
     /// ★정리의 **첫 줄**이 `detach` 인지를 못으로 박는다★
     ///
     /// `detach` 가 한 칸이라도 뒤로 밀리면, 그 앞 단계가 도는 **동안** 이 연결은 아직 붙어 있는 것으로
@@ -761,6 +863,7 @@ mod tests {
         let factory = test_factory_with(
             Arc::new(crate::test_doubles::RecordingFanout::new()),
             commands.clone(),
+            CommandDeliveries::new(),
         );
         let conn = factory.build(1);
         let session = conn.session.clone();

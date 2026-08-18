@@ -483,7 +483,9 @@ pub enum AgentEvent {
     /// TS 칸이 광고하는 관용(오류 세 칸 생략·`null` 허용, 계약 밖 필드 통과)의 근거는
     /// [`AgentCommand::CommandOutcome`] 에 적었다 — 같은 타입이라 같은 관용이다.
     ///
-    /// ★이 답장이 프론트까지 가는 길은 **이미 이어져 있다 — 빠진 것은 생산자 한 다리뿐이다**★.
+    /// ★생산자는 이제 있다★ — 데몬이 자기 명부에서 주인을 찾아 배달하고 그 결말을 이 답장으로 되돌린다
+    /// (`engram_dashboard_daemon::command_delivery` · ADR-0148). ★그래도 **프론트까지는 안 닿는다**★ —
+    /// 아래 두 조각이 아직 비어 있고, 그 둘은 **같은 변경에서** 서야 한다(마지막 문단).
     ///
     /// 셸은 상관한다: [`command_request_id`] 가 [`AgentCommand::Command`] 에 `Some` 을 주므로
     /// `forward_daemon_command`(`src-tauri/src/commands/agent.rs`)가 **답장 대기** 갈래를 탄다(그 함수엔
@@ -501,8 +503,11 @@ pub enum AgentEvent {
     /// `close()` 의 일괄 reject 뿐이다. 셸의 30초 답장 상한은 **답장이 안 오는 경우**를 막는 장치라
     /// 여기(답장이 와서 버려진 경우)엔 닿지 않는다.
     ///
-    /// ★그러므로 생산자를 얹는 그 변경이 `handleEvent` 갈래도 **같은 변경에서** 얹어야 한다★ — 이 파일의
-    /// 두 상관 함수가 한 쌍으로만 성립하는 것과 같은 요구가 한 층 아래에서 그대로 반복된다.
+    /// ★그러므로 **화면 쪽 producer**(웹뷰가 [`AgentCommand::Command`] 를 내는 자리 — 오늘 `src/` 에 0건)를
+    /// 얹는 변경이 `handleEvent` 갈래도 **같은 변경에서** 얹어야 한다★ — 이 파일의 두 상관 함수가 한 쌍으로만
+    /// 성립하는 것과 같은 요구가 한 층 아래에서 그대로 반복된다. 그 producer 가 없는 동안 이 구멍은 **도달
+    /// 불가**다: 데몬이 배달하는 봉투는 셸이 자기 표에서 실행하고(`daemon_client::inbound`) 답장도 셸이
+    /// 받으므로 웹뷰의 pending 을 거치지 않는다.
     CommandReply {
         #[ts(
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"

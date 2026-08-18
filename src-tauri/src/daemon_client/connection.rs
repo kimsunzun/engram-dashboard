@@ -1006,18 +1006,11 @@ async fn main_loop(
                         };
                         // ★send 전에 pending 등록★: 인코딩/송신 사이에 reply 가 먼저 도착해도(loopback
                         //   극단) take 할 슬롯이 있어야 한다. 송신 실패 시 아래서 도로 꺼낸다.
-                        // ★중복 request_id 가드(FIX-4 — 계약 명시)★: UUIDv4 충돌은 사실상 불가능하나,
-                        //   insert 가 prior oneshot 을 *조용히* 떨어뜨리면 그 호출자는 영구 hang 한다. 그래서
-                        //   반환값을 잡아 Some(prev)면 그 옛 슬롯을 Err 로 깨우고(no-hang) warn + debug_assert
-                        //   로 uniqueness 계약 위반을 시끄럽게 드러낸다(prod 은 계속 진행 = 새 reply 가 승계).
-                        if let Some(prev) = pending.insert(rid, reply) {
-                            tracing::warn!(
-                                generation = my_gen,
-                                "중복 request_id 충돌 — 옛 pending 슬롯을 Err 로 깨움(UUIDv4 라 사실상 불가)"
-                            );
-                            let _ = prev.send(Err("중복 request_id — 옛 요청 취소".to_string()));
-                            debug_assert!(false, "request_id 는 UUIDv4 로 유일해야 한다(충돌 발생)");
-                        }
+                        // ★중복 request_id 가드(FIX-4 — 계약 명시)★: insert 가 prior oneshot 을 *조용히*
+                        //   떨어뜨리면 그 호출자는 영구 hang 한다. 그래서 승계 규칙을 한 함수에 모아 태운다 —
+                        //   옛 슬롯을 Err 로 깨우고(no-hang) 새 reply 가 그 번호를 잇는다. ★이 번호는 바깥
+                        //   호출자 것이라 겹칠 수 있다★(그래서 여기서 패닉하지 않는다 — `register_pending` doc).
+                        register_pending(pending, rid, reply, my_gen);
                         match serde_json::to_string(&cmd) {
                             Ok(text) => {
                                 if let Err(e) = sink.send(Message::Text(text.into())).await {
@@ -1186,6 +1179,53 @@ async fn send_fire(
     }
 }
 
+/// 승계당한 옛 대기 슬롯이 받는 문구 — 하네스가 **이 상수**를 단언한다(문구를 두 곳에 적으면 갈린다).
+pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
+
+/// pending 슬롯을 건다 — 같은 `request_id` 가 이미 걸려 있으면 **옛 슬롯을 오류로 깨우고 새 것이 승계**한다.
+///
+/// ## ★전제가 바뀌었다 — 이 번호는 더 이상 우리 것이 아니다★
+/// 옛 코드는 이 자리의 충돌을 「UUIDv4 라 사실상 불가」로 적고 `debug_assert!(false)` 로 터뜨렸다. 그 전제는
+/// 이 키를 *우리 코드가* 만들 때만 참이었다. 지금은 아니다 — `AgentCommand::Command { envelope }` 의 키는
+/// **봉투를 지은 바깥 호출자**의 것이고(`engram_dashboard_protocol::command_request_id` 가
+/// `envelope.request_id` 를 그대로 이 맵의 키로 넘긴다), 웹뷰가 그 봉투를 `forward_daemon_command`
+/// (`src-tauri/src/commands/agent.rs`)로 실어 보낸다. 즉 유일성은 **통제 못 하는 입력의 성질**이지 우리
+/// 코드의 불변식이 아니다. 겹친 번호로 이 연결 태스크를 죽이면 그 뒤 모든 명령이 「연결 task 가 명령을 받지
+/// 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI 실측 2026-08-18 — 명부 0, 창은 살아 있는 채 단절).
+///
+/// ## ★겹침의 답은 데몬이 짓는다★
+/// 배달 쪽은 이 겹침을 견디도록 이미 지어져 있다 — `engram_dashboard_daemon::command_delivery` 가 같은 번호의
+/// 재질의를 `Seat::Coalesced`(같은 연결·같은 요청 = 진행 중 왕복에 합침) · `Seat::Conflict`
+/// (`ErrorCode::RequestIdConflict`) · `Seat::Taken`(임자 생존이면 `REQUEST_ID_CONFLICT`, 떠났으면
+/// `OUTCOME_UNKNOWN`)로 가르고 **타입 있는 답을 낸다**. 그 답이 셸에 닿기도 전에 셸이 죽으면 한쪽만 견디는
+/// 짝이 된다.
+///
+/// ## 그래서 하는 일
+/// 디버그·릴리즈가 **같은 길**을 간다(옛 코드의 릴리즈 동작으로 통일): 옛 슬롯을 `Err` 로 깨워 영구 hang 을
+/// 막고, 새 슬롯이 그 번호를 승계하고, 관측은 `warn!` 하나로 남는다. 승계 뒤 그 번호로 오는 답장은 **먼저
+/// 도착한 한 장**만 새 슬롯을 풀고 나머지는 짝 없는 답장으로 무시된다([`protocol_state::take_pending`] 이
+/// `None`) — 어느 쪽도 매달리지 않는다.
+///
+/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓·실 `AppHandle` 없이 세울 수 없어(그래서 이 파일엔
+/// `#[cfg(test)]` 가 없다) 이 함수가 그 승계 규칙을 **소켓 없이 태울 수 있는 지점**이다 —
+/// `tests/daemon_client_pending.rs` 가 여기를 태운다.
+pub fn register_pending(
+    pending: &mut PendingMap<CommandReply>,
+    request_id: RequestId,
+    reply: CommandReply,
+    generation: u64,
+) {
+    let Some(prev) = pending.insert(request_id, reply) else {
+        return;
+    };
+    tracing::warn!(
+        generation,
+        request_id = %request_id.0,
+        "같은 request_id 로 새 요청이 들어왔다 — 옛 대기 슬롯을 오류로 깨우고 새 요청이 그 번호를 승계한다(번호는 바깥 호출자가 정한다)"
+    );
+    let _ = prev.send(Err(PENDING_SUPERSEDED.to_string()));
+}
+
 // ── 명령 버스: 인바운드 배달 + 자기 이름 등록 ────────────────────────────────
 //
 // ★등록 패킷의 `owner` 는 **광고**다★ — 데몬은 이 값을 쓰지 않고 **그 패킷이 온 연결**에서 주인 토큰을
@@ -1329,17 +1369,10 @@ async fn register_own_commands(
 
     let (outcome_tx, outcome_rx) = oneshot::channel();
     // 송신 **전에** 슬롯을 건다 — loopback 에서 답장이 먼저 도착해도 담을 자리가 있어야 한다(형제 경로와 동형).
-    // ★반환값을 버리지 않는다(형제 `SendCommand` 와 같은 규율)★: insert 가 prior 슬롯을 조용히 떨어뜨리면
-    //   그 호출자는 영구 hang 한다. UUIDv4 충돌은 사실상 불가능하나, 한 파일 안에서 두 규율이 공존하면 다음
-    //   편집이 느슨한 쪽을 본보기로 삼는다.
-    if let Some(prev) = pending.insert(request_id, outcome_tx) {
-        tracing::warn!(
-            generation = my_gen,
-            "중복 request_id 충돌(등록) — 옛 pending 슬롯을 Err 로 깨움(UUIDv4 라 사실상 불가)"
-        );
-        let _ = prev.send(Err("중복 request_id — 옛 요청 취소".to_string()));
-        debug_assert!(false, "request_id 는 UUIDv4 로 유일해야 한다(충돌 발생)");
-    }
+    // ★승계도 형제와 **같은 함수**를 탄다★: 이 번호는 방금 우리가 만든 것이라 겹칠 일이 없지만, 맵은 바깥
+    //   호출자의 번호와 **한 칸을 나눠 쓴다**(`SendCommand` 경로) — 규율을 갈라 두면 다음 편집이 느슨한
+    //   쪽을 본보기로 삼는다.
+    register_pending(pending, request_id, outcome_tx, my_gen);
     if !send_fire(sink, &cmd, my_gen, "RegisterCommands").await {
         // 송신 실패 → 슬롯 회수(좀비 pending 금지). 소켓은 곧 끊기고 재연결이 다시 등록한다.
         let _ = protocol_state::take_pending(pending, &request_id);

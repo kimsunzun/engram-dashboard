@@ -34,7 +34,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use engram_dashboard_command::{
-    CommandDecl, CommandError, ErrorCode, OwnerToken, Roster, RosterEntry,
+    CommandDecl, CommandError, ErrorCode, OwnerLookup, OwnerLookupSource, OwnerToken, Roster,
+    RosterEntry,
 };
 use engram_dashboard_net::frame_port::{ConnId, FrameSink};
 
@@ -206,6 +207,35 @@ impl CommandRoster {
             .map(|conn| conn.sink.clone())
     }
 
+    /// **연결 하나**의 프레임 출구 — 배달이 답장을 되돌릴 때 쓴다(형제 [`CommandRoster::sink_of`] 는 주인
+    /// 토큰으로 찾는다).
+    ///
+    /// ★두 조회를 하나로 합치지 않는 이유★: 나가는 봉투의 목적지는 **주인**이고 돌아오는 답장의 목적지는
+    /// **물어본 연결**이라 키가 다르다. 오늘 둘이 1:1 이라 같은 표를 보지만, 슬라이스 B 가 주인 키를
+    /// 클라이언트 자작 식별자로 바꾸면 한 주인에 연결이 여럿이 되고 그때 답장이 엉뚱한 연결로 간다.
+    ///
+    /// ★받은 핸들은 즉시 쓰고 버린다★ — 보관 금지의 근거는 [`CommandRoster::sink_of`] 와 같다.
+    /// **부재 = 그 연결이 이미 끊겼다**(답장을 낼 곳이 없다는 뜻이고, 오류가 아니다).
+    ///
+    /// ★[`ConnId`] 하나로 지목하는 것이 안전한 근거는 **할당기가 그 값을 재사용하지 않는다**는 사실
+    /// 뿐이다★ — 세대 번호가 없으므로, 재사용이 생기는 날 오래 남은 상관 표 항목이 같은 번호를 새로 받은
+    /// 다른 피어에게 남의 답장을 건넨다. 실측과 그때의 처방은 `command_delivery` 의 `Pending::origin`.
+    // ADR-0148
+    pub fn sink_for_conn(&self, conn_id: ConnId) -> Option<Arc<dyn FrameSink>> {
+        self.lock().live.get(&conn_id).map(|conn| conn.sink.clone())
+    }
+
+    /// 시험 전용 — 저장된 주인 토큰만 갈아 끼워 **찢어진 창**(명부 조회는 `Available` 인데 닿는 길이 없다)을
+    /// 결정적으로 만든다. 운영 경로에서 그 상태는 조회와 전달 사이에 낀 `detach` 로만 생겨 손으로 못 세운다.
+    #[cfg(test)]
+    pub(crate) fn overwrite_stored_owner(&self, conn_id: ConnId, owner: OwnerToken) {
+        self.lock()
+            .live
+            .get_mut(&conn_id)
+            .expect("붙어 있는 연결이어야 한다")
+            .owner = owner;
+    }
+
     /// 연결이 끊겼다 — 그 주인의 이름을 명부에서 지우고 그 연결에 닿는 길을 거둔다. **둘은 한 잠금
     /// 안에서** 일어난다(겹쳐 도는 등록이 그 사이로 못 들어온다).
     ///
@@ -295,6 +325,17 @@ impl CommandRoster {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.inner.lock().expect("command roster poisoned")
+    }
+}
+
+/// 배달 3단계의 2단계가 명부에 묻는 **한 가지**(`engram_dashboard_command::route`).
+///
+/// ★잠금은 이 호출 안에서 끝난다 — 그것이 이 trait 의 존재 이유다★: 참조를 통째로 넘기면 배달이 답장을
+/// 기다리는 내내 명부가 잠겨 등록·연결 정리·다른 배달이 전부 선다(근거 정본 = 그 trait 주석).
+// ADR-0148
+impl OwnerLookupSource for CommandRoster {
+    fn lookup(&self, name: &str) -> OwnerLookup {
+        self.lock().roster.lookup(name)
     }
 }
 

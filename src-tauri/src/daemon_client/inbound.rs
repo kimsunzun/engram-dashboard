@@ -10,14 +10,17 @@
 //! 배달 규칙은 홉마다 같은 3단계를 쓴다(`engram_dashboard_command::route` — ADR-0149 결정 3): 내 표에
 //! 있나 → 명부에 있나 → 오류. 셸의 2·3단계는 아직 비어 있다([`Hop::roster`] 주석).
 //!
-//! ## ★배선은 서 있다 — 아직 아무것도 도착하지 않는다(알고 남긴 것)★
+//! ## 배선
 //! 부르는 자리는 `connection.rs` 의 `Message::Text` 갈래이고(그 파일의 `accept_inbound`), 봉투를 나르는 wire
 //! 프레임도 서 있다 — `AgentEvent::CommandRequest`(데몬→셸)와 `AgentCommand::CommandOutcome`(셸→데몬).
 //! 셸이 자기 이름을 데몬 명부에 얹는 것도 매 (재)연결마다 나간다(`register_own_commands`).
+//! 보내는 쪽도 이제 있다 — 데몬이 자기 명부에서 주인을 찾아 그 연결로 봉투를 쓴다
+//! (`engram_dashboard_daemon::command_delivery` · ADR-0148). 그 다리가 서면서 이 모듈은 한 줄도 안 바뀌었다.
 //!
-//! ★그런데 **보내는 쪽이 없다**★: 데몬은 자기 명부를 보고 주인에게 봉투를 **배달하는 다리**가 아직 없다
-//! (그쪽 `dispatch` 에 `route` 호출도, `request_id`→원 연결 표도 없다). 그래서 `CommandRequest` 의 생산자는
-//! 0이고, 이 경로는 **끝에서 끝까지 도는 것을 아직 관측할 수 없다.** 그 다리가 서면 이 모듈은 안 바뀐다.
+//! ★단 **화면까지는 아직 안 닿는다**★: 데몬→셸 왕복의 답장(`AgentEvent::CommandReply`)을 웹뷰의
+//! `handleEvent`(`src/api/protocolClient.ts`)가 아직 갈라내지 않아, 웹뷰가 낸 명령의 promise 는 안 풀린다
+//! (그 사실의 정본 = `engram_dashboard_protocol` 의 `AgentEvent::CommandReply` 주석). 이 모듈이 도는 방향
+//! (데몬→셸)과는 별개의 다리다.
 //!
 //! ★검증이 서는 자리★: 실 소켓·실 `AppHandle` 이 필요한 조각(연결 select 루프)은 이 패키지에서 테스트가
 //! 아예 안 돌아(`0xc0000139`) 그 갈래 선택만 무커버로 남고, 그 아래 전부(슬롯 조회 · 결말 조립 · 채널 배달 ·

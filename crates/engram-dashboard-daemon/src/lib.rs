@@ -10,6 +10,7 @@
 //! rename 하지 않는 이유와 재개 조건은 ADR-0130.
 
 pub mod agent_conn;
+pub mod command_delivery;
 pub mod command_roster;
 pub mod connection_core;
 pub mod control;
@@ -320,6 +321,16 @@ async fn run_accept_loop(
     // 명령 주인 명부(ADR-0149/0150) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
     //   말고는 아직 아무도 쥐지 않는다(배달 라우팅이 붙으면 조립 위로 올라갈 자리다).
     let commands = command_roster::CommandRoster::new();
+    // 진행 중인 명령 왕복의 상관 표(ADR-0148) — 명부와 **다른 표**다(수명 단위가 다르다).
+    // ★수거 태스크를 함께 띄운다 — 빠뜨리면 마감이 영영 안 지나가고 답 못 받는 요청이 쌓인다★
+    //   (`CommandDeliveries::spawn_sweeper`). 데몬 종료 신호를 구독해 함께 멈춘다.
+    let deliveries = command_delivery::CommandDeliveries::new();
+    // ★수거기의 정지 신호는 데몬 종료 watch 가 아니라 **이 루프가 소유한 별개 신호**다★: 종료 갈래가
+    //   셋인데(StopDaemon · Ctrl-C · 송신단 소멸) 그중 Ctrl-C 는 그 watch 를 건드리지 않아, 그것을
+    //   구독시키면 그 갈래에서 수거기가 영영 안 깨어나 아래 await 가 안 끝난다. 이 신호는 **탈출 이유와
+    //   무관하게** 루프를 빠져나온 그 자리에서 한 번 켜진다.
+    let (sweeper_stop, sweeper_stopped) = watch::channel(false);
+    let sweeper = deliveries.spawn_sweeper(sweeper_stopped);
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
@@ -328,6 +339,7 @@ async fn run_accept_loop(
             control_registry,
             messaging_slot,
             commands,
+            deliveries,
             shutdown_tx,
         ));
 
@@ -374,6 +386,15 @@ async fn run_accept_loop(
                 break;
             }
         }
+    }
+
+    // ── 명령 왕복 정리(ADR-0148) ───────────────────────────────────────────────────
+    // ★수거기를 기다리는 것이 종료를 유계로 만든다★: 그 태스크가 나가는 길에 남은 자리를 전부 답하고
+    //   (`CommandDeliveries::drain`) 그 답이 배달 태스크들의 기다림을 **즉시** 푼다. 안 기다리면
+    //   「종료했다」고 적은 뒤에도 그 자리들과 태스크가 마감(기본 10초)까지 살아 있다.
+    let _ = sweeper_stop.send(true);
+    if let Err(e) = sweeper.await {
+        tracing::warn!("명령 왕복 수거기 종료 대기 실패: {e}");
     }
 }
 
