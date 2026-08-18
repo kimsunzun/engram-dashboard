@@ -1,6 +1,6 @@
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
-// 사람 클릭(SlotContextMenu — 빈 슬롯은 좌클릭도)이든 LLM(window.__engramLayout)이든 같은 invoke→emit
+// 사람 클릭(SlotContextMenu — 우클릭 전용, ADR-0144)이든 LLM(window.__engramLayout)이든 같은 invoke→emit
 // 권위 루프로 갱신된다.
 
 import { useState } from 'react'
@@ -108,18 +108,9 @@ export default function ViewLayoutRenderer({
         //   이 게이트가 없으면 트리 노드 좌클릭이 트리 슬롯 pane 까지 버블해 트리 슬롯이 포커스되고, 이어
         //   우클릭 "열기"가 그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다(선존 UX 버그).
         //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
-        //   ★빈 슬롯 좌클릭 = 메뉴(ADR-0143)★: 표적은 아이콘이 아니라 슬롯 전체이고, 우클릭과 같은
-        //     setContextMenu 상태·같은 좌표를 쓴다. 콘텐츠 슬롯(터미널·트리·팔레트)의 좌클릭은 포커스
-        //     이동뿐이다 — 자기 클릭 의미를 가진 렌더러들이라 메뉴를 열면 그 의미를 덮는다.
-        //   ★이미 열린 메뉴는 재앵커하지 않는다★: SlotContextMenu 는 포털이 아니라 이 래퍼 안에 마운트돼
-        //     서브메뉴 컨테이너 행·항목 사이 여백 클릭이 여기까지 버블한다. 재앵커하면 메뉴가 커서 밑으로
-        //     점프해 앵커가 메뉴 사각형 안에 들어가고(SlotContextMenu 의 뒤집기 불변식이 막으려는 상태)
-        //     이어지는 클릭이 커서 밑 항목을 실행한다. 슬롯 여백 클릭은 메뉴의 mousedown 바깥닫기가 먼저
-        //     상태를 비우므로 이 가드에 걸리지 않는다(= 메뉴가 새 좌표로 옮겨 열린다).
-        onClick={e => {
-          if (node.content.type === 'empty' && contextMenu == null) {
-            setContextMenu({ x: e.clientX, y: e.clientY })
-          }
+        // ADR-0144: 빈 슬롯 좌클릭은 메뉴를 열지 않는다(포커스만) — 매 클릭마다 메뉴가 뜨는 게 불편하다는
+        //   제보로 ADR-0141/0143 의 좌클릭 오프너를 되돌렸다. 메뉴는 우클릭 전용(아래 onContextMenu).
+        onClick={() => {
           if (!isContentSlot(node.content)) return
           if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
         }}

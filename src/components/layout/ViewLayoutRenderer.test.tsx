@@ -501,9 +501,16 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
-  // ★아이콘은 클릭을 삼키지 않는다(ADR-0143)★: 좌클릭 한 번이 포커스와 메뉴를 함께 일으켜야 하므로
-  //   아이콘 위 클릭도 컨테이너까지 닿아야 한다. 여기가 없으면 아이콘에 상호작용을 되붙여도 스위트가
-  //   초록이라 click-to-focus 가 조용히 죽는다(메뉴는 계속 열리므로 눈으로도 안 보인다).
+  // ADR-0144: 빈 슬롯 좌클릭은 메뉴를 열지 않는다 — 포커스 이동은 그대로다.
+  it('empty 슬롯 좌클릭은 focusSlot 만 부르고 메뉴는 열지 않는다', () => {
+    clickSlot({ type: 'empty' })
+    expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
+    expect(screen.queryByText('가로 분할')).toBeNull()
+  })
+
+  // ★아이콘은 클릭을 삼키지 않는다★: 아이콘 위 클릭도 컨테이너까지 닿아야 focusSlot 이 불린다. 여기가
+  //   없으면 아이콘에 상호작용을 되붙여도 스위트가 초록이라 click-to-focus 가 조용히 죽는다(좌클릭이
+  //   메뉴를 열지 않는 지금은 포커스링 외엔 눈으로 확인할 신호도 없다, ADR-0144).
   it('`+` 아이콘 위 클릭도 컨테이너까지 닿아 focusSlot 을 부른다', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'empty' })} focusedSlotId={null} />)
     fireEvent.click(emptyIcons()[0], { clientX: 5, clientY: 5 })
@@ -621,16 +628,17 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  // ── ★빈 슬롯 좌클릭 = 우클릭과 같은 메뉴(ADR-0143)★ ────────────────────────────────────────────
-  // 이 스위트가 막는 것 둘: ① 좌클릭 표적이 슬롯 전체에서 아이콘으로 좁아지는 회귀 — 빈 여백을 눌러도
-  // 열려야 한다 ② 좌클릭이 자기만의 두 번째 메뉴를 짓는 것 — 같은 setContextMenu 상태·같은
-  // SlotContextMenu 라야 빈 슬롯 메뉴 구성(ADR-0065/0067)이 하나로 유지된다.
+  // ── ★메뉴는 우클릭 전용(ADR-0144)★ ────────────────────────────────────────────────────────
+  // ADR-0141/0143 은 빈 슬롯 좌클릭도 메뉴를 열게 했으나, "클릭할 때마다 메뉴가 뜬다"는 불편 제보로
+  // ADR-0144 가 되돌렸다 — 빈 슬롯 좌클릭도 이제 다른 콘텐츠 슬롯과 같이 포커스만 옮긴다. 아래 세
+  // 케이스는 우클릭으로 연 메뉴에 걸려 있던 불변식(재앵커 금지·바깥 클릭 처리·command 경로)이 좌클릭
+  // 오프너 제거 후에도 유지되는지를 검증한다.
   /** 메뉴 div(position:fixed 컨테이너) — 좌표 단언용. */
   function openedMenu(): HTMLElement {
     return screen.getByText('가로 분할').closest('[style*="position: fixed"]') as HTMLElement
   }
 
-  /** 아이콘이 아닌 빈 여백 좌클릭 = 슬롯 래퍼가 표적. */
+  /** 아이콘이 아닌 빈 여백 좌클릭 = 슬롯 래퍼가 표적(ADR-0144 이후엔 메뉴를 열지 않는다). */
   function leftClickSlot(slotId: string, x: number, y: number): void {
     fireEvent.click(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement, {
       clientX: x,
@@ -638,34 +646,13 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   }
 
-  it('빈 슬롯 여백 좌클릭 → 우클릭과 동일한 메뉴가 클릭 좌표에서 열린다', () => {
-    render(<ViewLayoutRenderer node={slotNode('slot-lc', null)} focusedSlotId={null} />)
-    expect(screen.queryByText('새 콘텐츠')).toBeNull()
-    leftClickSlot('slot-lc', 42, 77)
-    // jsdom 은 메뉴 rect 를 0 으로 주므로 뒤집기 없이 앵커+간격(ANCHOR_GAP, ADR-0143 결정 4)에 놓인다.
-    //   간격의 크기·유도는 SlotContextMenu 소관이고 여기 관심사는 "클릭 좌표를 앵커로 쓴다"뿐이다.
-    expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
-    expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
-    expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
-    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
-    expect(screen.getByText('가로 분할')).toBeTruthy()
-    expect(screen.getByText('세로 분할')).toBeTruthy()
-    expect(screen.getByText('닫기')).toBeTruthy()
-  })
-
-  // ★아이콘은 클릭을 삼키지 않는다(ADR-0143)★: 실브라우저에선 pointer-events 가 끊겨 아이콘이 애초에
-  //   이벤트 대상이 되지 않는데, jsdom 엔 히트테스트(elementFromPoint)가 없어 그 층은 여기서 재현되지
-  //   않는다(실측은 GUI 몫) — 대신 계산된 pointer-events 값과, 대상이 되더라도 컨테이너까지 닿는다는 것
-  //   (자체 핸들러·전파 차단 부재)을 함께 고정한다.
-  it('`+` 아이콘 위 좌클릭도 같은 메뉴를 클릭 좌표에서 연다', () => {
-    render(<ViewLayoutRenderer node={slotNode('slot-icon', null)} focusedSlotId={null} />)
-    const icon = emptyIcons()[0]
-    expect(getComputedStyle(icon).pointerEvents).toBe('none')
-    fireEvent.click(icon, { clientX: 12, clientY: 34 })
-    expect(openedMenu().style.left).toBe(`${12 + ANCHOR_GAP}px`)
-    expect(openedMenu().style.top).toBe(`${34 + ANCHOR_GAP}px`)
-    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
-  })
+  /** 메뉴 오프너는 우클릭뿐(ADR-0144) — 좌표가 필요한 케이스(재앵커·바깥 클릭)는 openMenu() 대신 이걸 쓴다. */
+  function rightClickSlot(slotId: string, x: number, y: number): void {
+    fireEvent.contextMenu(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement, {
+      clientX: x,
+      clientY: y,
+    })
+  }
 
   // ★상호작용을 되붙이지 않는다(ADR-0143 §영향)★: 빈 슬롯 안에는 role·tabindex·버튼이 없어야 한다 —
   //   되붙이면 컨테이너 핸들러와 겹쳐 이중 오픈이 되고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 살아난다.
@@ -679,6 +666,8 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(icon.hasAttribute('tabindex')).toBe(false)
     expect(icon.hasAttribute('role')).toBe(false)
     expect(icon.hasAttribute('aria-label')).toBe(false)
+    // ADR-0143 결정 2: 순수 그림 — pointer-events 를 끊어 클릭이 항상 컨테이너까지 닿는다(ADR-0144 이후도 유효).
+    expect(getComputedStyle(icon).pointerEvents).toBe('none')
   })
 
   // ★아이콘 크기 = 32px 초과(ADR-0143 결정 3)★: Tailwind `size-N` = N×0.25rem = N×4px(기본 스케일)이라
@@ -690,42 +679,43 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(Number(sizeClass![1]) * 4).toBeGreaterThan(32)
   })
 
-  // ★열린 메뉴는 재앵커되지 않는다(ADR-0143 §영향 — 메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라
-  //   슬롯 래퍼 안에 마운트돼 서브메뉴 컨테이너 행 클릭이 컨테이너 좌클릭까지 버블한다. 재앵커하면 메뉴가
-  //   커서 밑으로 점프해 앵커가 메뉴에 겹치고 이어지는 클릭이 커서 밑 항목을 실행한다.
+  // ★열린 메뉴는 재앵커되지 않는다(메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라 슬롯 래퍼 안에
+  //   마운트돼 서브메뉴 컨테이너 행 클릭이 래퍼까지 버블한다. 재앵커하면 메뉴가 커서 밑으로 점프해 앵커가
+  //   메뉴에 겹치고 이어지는 클릭이 커서 밑 항목을 실행한다. 좌클릭이 메뉴를 열지 않게 된 뒤에도(ADR-0144)
+  //   우클릭으로 연 메뉴 안쪽 클릭에 대해선 이 불변식이 여전히 성립해야 한다.
   it('열린 메뉴의 "새 콘텐츠" 행 클릭은 메뉴를 다시 앵커하지 않는다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-reanchor', null)} focusedSlotId={null} />)
-    leftClickSlot('slot-reanchor', 42, 77)
+    rightClickSlot('slot-reanchor', 42, 77)
     fireEvent.click(screen.getByText('새 콘텐츠'), { clientX: 300, clientY: 400 })
     expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
     expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
   })
 
-  // ★반면 메뉴 *바깥*(슬롯 여백) 클릭은 메뉴를 새 자리로 옮긴다 — 위 가드가 삼켜서는 안 된다(ADR-0143 §영향)★
-  //   이 동작은 SlotContextMenu 의 바깥닫기가 `mousedown` 에서 먼저 돌아 상태를 비우는 순서에 의존한다.
-  //   그 리스너를 `click` 으로 옮기거나 없애면 여백 클릭이 가드에 걸려 메뉴를 옮길 수도 닫을 수도 없게 되므로,
-  //   click 만 쏘는 테스트로는 절반만 고정된다 — mousedown 을 함께 쏴 순서까지 고정한다.
-  it('열린 메뉴 밖(슬롯 여백) 좌클릭은 메뉴를 새 좌표로 옮겨 연다', () => {
+  // ★메뉴 *바깥*(슬롯 여백) 좌클릭은 메뉴를 닫을 뿐, 새 좌표로 다시 열지 않는다(ADR-0144)★: SlotContextMenu
+  //   의 바깥닫기는 여전히 `mousedown` 에서 먼저 돌아 상태를 비운다(ADR-0143 시절과 동일). 달라진 건 그
+  //   다음이다 — 좌클릭이 더는 메뉴를 열지 않으므로(위 "메뉴는 우클릭 전용" 섹션) 바깥 클릭 뒤 메뉴는 새
+  //   좌표로 옮겨 열리지 않고 닫힌 채로 남는다.
+  it('열린 메뉴 밖(슬롯 여백) 좌클릭은 메뉴를 닫고 새 좌표로 다시 열지 않는다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-move', null)} focusedSlotId={null} />)
-    leftClickSlot('slot-move', 42, 77)
+    rightClickSlot('slot-move', 42, 77)
     expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
     const wrapper = document.querySelector('[data-slot-id="slot-move"]') as HTMLElement
     fireEvent.mouseDown(wrapper, { clientX: 300, clientY: 400 })
     leftClickSlot('slot-move', 300, 400)
-    expect(openedMenu().style.left).toBe(`${300 + ANCHOR_GAP}px`)
-    expect(openedMenu().style.top).toBe(`${400 + ANCHOR_GAP}px`)
+    expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  it('좌클릭으로 열린 메뉴의 "가로 분할"도 같은 command 경로로 split(…, "top_bottom") 을 부른다', () => {
+  it('우클릭으로 열린 메뉴의 "가로 분할"도 같은 command 경로로 split(…, "top_bottom") 을 부른다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-lc2', null)} focusedSlotId={null} />)
-    leftClickSlot('slot-lc2', 8, 9)
+    rightClickSlot('slot-lc2', 8, 9)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-lc2', 'top_bottom')
   })
 
-  // ★좌클릭 분기는 빈 슬롯에만(ADR-0143)★: 터미널 입력·트리 노드 선택·팔레트 항목 클릭 위에 메뉴가 뜨면
-  //   그 슬롯들이 가진 자기 클릭 의미를 덮는다. 이 경계가 이번에 새로 생긴 자리라 가장 먼저 회귀한다
-  //   ('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
+  // ★좌클릭은 어느 슬롯 타입도 메뉴를 열지 않는다(ADR-0144)★: 터미널 입력·트리 노드 선택·팔레트 항목
+  //   클릭 위에 메뉴가 뜨면 그 슬롯들이 가진 자기 클릭 의미를 덮는다. 빈 슬롯도 이제 같은 규칙이고(그
+  //   케이스는 focusSlot 과 함께 위 click-to-focus 게이트 스위트가 검증한다) 아래 세 케이스는 제어
+  //   슬롯 몫이다('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
   it('agent(터미널) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
     seedAgents(agentInfo('a-lc', false))
     render(<ViewLayoutRenderer node={slotNode('slot-agent-lc', 'a-lc')} focusedSlotId={null} />)
