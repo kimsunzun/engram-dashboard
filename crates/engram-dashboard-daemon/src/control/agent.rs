@@ -1,9 +1,10 @@
 //! `/control/agent` 입구(ADR-0132 결정 6) — CLI 동사를 **명령 표**로 배달하는 어댑터(ADR-0155).
 //!
-//! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 `agent.<verb>` 를 표에서 찾아 부른다.
-//!   동사 본문은 이 파일에 없다 — `agent.*` 의 선언과 본문은 **core 가 소유**하고(선언이 사는 곳이 곧
-//!   주인), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 입구 인자 검문(ADR-0157)
-//!   (c) 표의 결말 → wire 봉투. 표가 아직 안 꽂혔을 때의 503 은 HTTP 어댑터 몫이다(`mcp_server`).
+//! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 `agent.<verb>` 를 표의 공통 입구
+//!   (`commands::call_daemon_command`)에 넘긴다. 동사 본문도 검문도 이 파일에 없다 — `agent.*` 의 선언과
+//!   본문은 **core 가 소유**하고(선언이 사는 곳이 곧 주인) 검문·실행은 그 공통 입구가 하며(버스 배달과
+//!   **같은 함수**다), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 이 표면의 어휘로 쓰는
+//!   회복 안내 (c) 표의 결말 → wire 봉투. 표가 아직 안 꽂혔을 때의 503 은 HTTP 어댑터 몫이다(`mcp_server`).
 //!
 //! ★이 라우트는 전원 개방이다(ADR-0132 결정 5)★: 스폰된 에이전트는 백엔드와 무관하게 `engram` 배선을
 //!   받으므로 여기 닿는다. 그 배선이 **우편 CLI 도 함께** 깐다는 것은 사실이고(실행파일이 하나라 계열
@@ -13,10 +14,11 @@
 //! ★`kill`·`rm` 이 없는 것도 미구현이 아니다★ — `CLI_AGENT_VERBS` 주석이 정본(ADR-0122 미해소).
 //!
 //! ★입력 규율은 층이 둘이다(ADR-0157)★
-//!   - **모르는 칸·빠진 필수 칸은 이 입구가 거절한다.** 사람·LLM 이 방금 친 것이 오는 자리라 「모르는
-//!     칸 = 오타」로 읽어도 안전하다. `parnet` 오타를 흘려보내면 `move … --parent lead` 가 **루트로 떼기**로
-//!     조용히 바뀐다. 판정 목록은 손으로 두지 않고 **선언에서 파생**한다(`CommandTable::check_args`) —
-//!     사본을 두면 동사를 하나 늘릴 때마다 두 곳이 갈리고, 갈린 쪽이 조용히 통과시킨다.
+//!   - **모르는 칸·빠진 필수 칸은 거절된다** — 판정 자체는 공통 입구가 한다(`call_daemon_command`).
+//!     사람·LLM 이 방금 친 것이 오는 자리라 「모르는 칸 = 오타」로 읽어도 안전하다. `parnet` 오타를
+//!     흘려보내면 `move … --parent lead` 가 **루트로 떼기**로 조용히 바뀐다. 판정 목록은 손으로 두지 않고
+//!     **선언에서 파생**한다(`CommandTable::check_args`) — 사본을 두면 동사를 하나 늘릴 때마다 두 곳이
+//!     갈리고, 갈린 쪽이 조용히 통과시킨다.
 //!   - **공백 값·부재/`null` 의 구분은 표 쪽(core `agent::commands`)이 본다.** 어느 칸이 그런지는 동사마다
 //!     다르고, 그 판정은 동사 본문과 한 집에 있어야 둘이 갈리지 않는다.
 //!
@@ -29,9 +31,8 @@
 // ADR-0155
 // ADR-0157
 
-use engram_dashboard_command::{CommandError, CommandFuture, CommandTable, ErrorCode};
+use engram_dashboard_command::{CommandError, CommandTable, ErrorCode};
 use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
-use futures_util::FutureExt as _;
 
 use super::ingress::ControlQueryResult;
 
@@ -150,52 +151,13 @@ pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResu
     let name = format!("{CLI_GROUP_AGENT}.{}", req.verb);
     let mut args = req.args.into_value();
 
-    // 표에 없는 이름은 **인자 검문보다 먼저** 갈라낸다: `check_args` 는 모르는 이름을 통과시키므로(대조할
-    //   선언이 이 표에 없다) 순서를 뒤집으면 오타 동사가 "인자 이상 없음" 을 지나 여기까지 온다.
-    if !table.contains(&name) {
-        return unknown_verb(&req.verb);
+    // ★검문·실행은 이웃 `commands` 의 공통 입구가 한다★ — 이 라우트가 표를 직접 부르면 버스 배달과
+    //   **다른 검문**을 갖게 되고, 두 입구 중 하나만 ADR-0157 을 지키는 상태가 된다.
+    match super::commands::call_daemon_command(table, &name, &mut args, "cli") {
+        None => unknown_verb(&req.verb),
+        Some(Ok(payload)) => ControlQueryResult::Ok(payload),
+        Some(Err(e)) => refused(e),
     }
-    // ADR-0157: 사람·LLM 이 치는 입구라 선언에 없는 칸·빠진 필수 칸을 거절한다. 홉 간 배선은 관용이므로
-    //   (`route` 는 이것을 안 부른다) 이 호출을 배달 경로로 옮기지 말 것 — additive 진화가 죽는다.
-    if let Err(rejection) = table.check_args(&name, &args) {
-        return refused(rejection);
-    }
-    let Some(future) = table.call(&name, &mut args) else {
-        // 바로 위 `contains` 를 통과했다 — 표는 이 호출 동안 불변이라 여기 오지 않는다.
-        return unknown_verb(&req.verb);
-    };
-    match run_here(future, &name) {
-        Ok(payload) => ControlQueryResult::Ok(payload),
-        Err(e) => refused(e),
-    }
-}
-
-/// 표가 준 future 를 **이 스레드에서** 끝낸다.
-///
-/// ★실행기를 두지 않는 근거★: 이 표의 핸들러는 전부 `blocking_handler` 라 본문이 **첫 poll 에서 끝까지
-///   돈다**(도구 crate 가 그것을 계약으로 적었다). 이미 blocking 풀 위에 있으므로 여기서 async 런타임을
-///   다시 부르면 blocking 경계가 두 겹이 된다.
-/// ★계약이 깨지면 조용히 성공하지 않는다★: 진짜 async 핸들러가 표에 들어오면 첫 poll 이 `Pending` 이고,
-///   그때 이 어댑터는 답을 지어내는 대신 `OUTCOME_UNKNOWN` 으로 드러낸다.
-/// ★`INTERNAL` 이 아니다★: 그 코드는 `retry: never` = **이 홉에서 확실히 실패했다**는 뜻인데, 첫 poll 이
-///   이미 일의 일부를 적용했을 수 있다(그리고 폐기되는 future 는 나머지를 안 돌린다). 확실성은 「불명」이라
-///   같은 request_id 로만 다시 묻게 해야 한다(TRD §4-④ · 도구 crate 의 전달 패닉이 같은 코드를 쓴다).
-/// ★타입이 강제하지 않는 계약이라 계측한다★: 이 갈래는 표에 async 핸들러가 들어오는 순간에만 나고, 그때
-///   증상은 오류 답장 하나뿐이라 로그가 없으면 원인을 못 찾는다.
-fn run_here(future: CommandFuture, name: &str) -> Result<serde_json::Value, CommandError> {
-    future.now_or_never().unwrap_or_else(|| {
-        tracing::error!(
-            entrance = "cli",
-            command = name,
-            "명령이 첫 poll 에서 끝나지 않았다 — 이 입구는 blocking 핸들러만 몬다(표에 async 핸들러가 들어왔다)"
-        );
-        Err(CommandError::of(
-            ErrorCode::OutcomeUnknown,
-            format!(
-                "'{name}' did not finish on its first poll — this entrance only drives blocking handlers, so part of it may already have been applied"
-            ),
-        ))
-    })
 }
 
 /// 표의 실패 → wire 봉투.

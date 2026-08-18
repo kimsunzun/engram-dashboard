@@ -51,10 +51,10 @@ use engram_dashboard_protocol::{
 
 use tokio::sync::watch;
 
-use crate::command_delivery::CommandDeliveries;
+use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
-use engram_dashboard_command::{CommandError, OwnerToken};
+use engram_dashboard_command::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 
@@ -591,6 +591,9 @@ pub struct ConnectionCore {
     commands: CommandRoster,
     // ADR-0154
     deliveries: CommandDeliveries,
+    /// 이 데몬이 **스스로 답하는** 명령 — 배달 1단계이자 발견 목록의 한쪽(`command_delivery`).
+    // ADR-0155
+    locals: Arc<dyn LocalCommands>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -604,6 +607,7 @@ impl ConnectionCore {
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         commands: CommandRoster,
         deliveries: CommandDeliveries,
+        locals: Arc<dyn LocalCommands>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -614,6 +618,7 @@ impl ConnectionCore {
             messaging,
             commands,
             deliveries,
+            locals,
             shutdown_tx,
         }
     }
@@ -636,6 +641,42 @@ impl ConnectionCore {
 
     pub fn manager(&self) -> &Arc<AgentManager> {
         &self.manager
+    }
+
+    /// 데몬이 **스스로 답하는** 이름은 클라이언트가 등록할 수 없다 — 겹치면 `CONFLICT` 로 반려한다.
+    ///
+    /// ★조용히 받아 주면 성공을 보고하면서 트래픽은 안 준다★: 명부는 데몬 자기 표를 모르므로 그 이름의
+    /// 등록을 그대로 성공시키는데(`Roster::register` 에는 부딪힐 항목이 없다) 배달은 1단계에서 데몬이
+    /// 먼저 답하므로(`command_delivery::deliver`) 그 주인에게는 봉투가 **한 장도** 가지 않는다. 등록한
+    /// 쪽은 자기가 그 이름을 쥐었다고 믿은 채 영영 아무것도 못 받고, 그 사실을 알 방법도 없다. 명부가
+    /// 자기 내부 충돌에 대해 이미 그렇게 판정한다 — 「`added` 를 조용히 무시하면 성공을 보고하면서
+    /// 호출자는 그 이름이 자기 앞으로 온다고 믿는다. 반려는 `CONFLICT` 다」(`Roster::update` doc).
+    /// ★한 이름만 빼고 나머지를 넣지 않는다 — **패킷 통째로** 반려다★: 명부가 자기 충돌·상한에 쓰는
+    /// all-or-nothing 과 같은 계약이고(부분 적용은 「성공했는데 일부가 조용히 없는 상태」를 만든다),
+    /// 판정이 **명부를 건드리기 전에** 끝나므로 실패한 등록이 기존 상태를 바꾸지 않는다.
+    /// ★`CONFLICT` 인 이유★: 패킷이 틀린 것이 아니라(`INVALID_ARGUMENT`) 이 데몬의 **상태**가 그 이름을
+    /// 이미 쥐고 있다는 답이다 — 명부의 형제 판정과 같은 어휘를 쓴다.
+    // ADR-0155
+    fn refuse_names_i_answer(&self, decls: &[CommandDecl]) -> Result<(), CommandError> {
+        // ★겹친 이름을 **전부** 센다★: 첫 하나만 짚으면, 패킷 통째로 반려하는 이 계약에서는 호출자가
+        //   나머지를 알아내려고 등록을 N번 다시 시도해야 한다 — 그런데 등록은 **붙을 때 한 번**이라
+        //   (TRD §3-7 조항 1) 다시 보내려면 연결을 다시 맺어야 한다. 그러면 이름 하나당 재접속 한 번이다.
+        //   (명부가 자기 검문에서 「틀린 칸을 전부 센다」와 같은 논거 — `CommandTable::check_args`.)
+        let clashing: Vec<String> = decls
+            .iter()
+            .filter(|decl| self.locals.claim(&decl.name).is_some())
+            .map(|decl| format!("'{}'", sanitize_for_log(&decl.name)))
+            .collect();
+        if clashing.is_empty() {
+            return Ok(());
+        }
+        Err(CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "answered by this daemon itself, so they cannot be registered: {} — pick different names; this packet was not applied",
+                clashing.join(", ")
+            ),
+        ))
     }
 
     /// ★sink.enqueue 실패(SinkError)는 무시★: side-effect 명령의 Ack/Error 송신 실패는 삼킨다.
@@ -1158,7 +1199,8 @@ impl ConnectionCore {
                     conn_id,
                     "register",
                     request_id,
-                    self.commands.register(conn_id, decls),
+                    self.refuse_names_i_answer(&decls)
+                        .and_then(|()| self.commands.register(conn_id, decls)),
                 );
             }
 
@@ -1190,16 +1232,44 @@ impl ConnectionCore {
                     conn_id,
                     "update",
                     request_id,
-                    self.commands.update(conn_id, added, removed),
+                    self.refuse_names_i_answer(&added)
+                        .and_then(|()| self.commands.update(conn_id, added, removed)),
                 );
             }
 
             AgentCommand::ListCommands { request_id } => {
                 // 주인 토큰은 안 내린다 — 선언처가 주인이라 등급 칸이 없어졌다(TRD §3-7 개정 ㉠).
-                let entries: Vec<CommandListEntry> = self
+                //
+                // ★목록은 **두 곳**에서 나온다★: 붙어 있는 주인들의 명부와 **데몬 자기 표**. 자기 표를
+                //   빼면 `agent.*` 는 배달되는데 발견에는 안 보여, 부를 수 있는 이름을 물어본 LLM 이 그
+                //   목록만 믿고 영영 안 부른다.
+                // ★같은 이름이 양쪽에 있으면 **데몬 것이 이긴다**★ — 배달이 그렇게 정해져 있기 때문이다
+                //   (내 표가 1단계, 명부가 2단계 — `command_delivery::deliver`). 목록이 반대로 말하면
+                //   호출자는 남의 help 를 보고 인자를 맞춘 뒤 데몬 핸들러에게 반려당한다.
+                // ★이 dedup 은 **오늘 도달 불가한 상태**를 위한 것이다 — 그래도 지운다는 뜻이 아니다★:
+                //   겹침을 만들려면 데몬 표가 비어 있는 사이에 등록이 도착해야 하는데
+                //   (`refuse_names_i_answer` 는 그 순간의 표를 본다), 조립된 서버 둘은 **연결을 받기 전에**
+                //   슬롯을 채운다(운영 `run()` 과 테스트 서버 모두 accept loop 진입 전이다). 즉 지금의
+                //   조립에서는 이 갈래로 들어오는 항목이 없다.
+                //   ★그것이 이 코드가 죽었다는 뜻이 아니다★: 표를 늦게 꽂는 조립이 **불가능하지는** 않고
+                //   (슬롯은 정의상 늦은 주입이다) 그때 이 자리가 유일한 그물이다. 조립 순서를 확인한 다음
+                //   세션이 「닿지 않으니 지우자」로 읽지 않도록 여기 적어 둔다 — 이 판정은 두 출처를 합치는
+                //   함수의 **자기 정합성**이지 특정 조립 순서에 기댄 것이 아니다.
+                let mine: Vec<CommandListEntry> = self
+                    .locals
+                    .decls()
+                    .into_iter()
+                    .map(|decl| CommandListEntry {
+                        name: decl.name,
+                        help: decl.help,
+                        available: true,
+                    })
+                    .collect();
+                let mut entries: Vec<CommandListEntry> = self
                     .commands
                     .entries()
                     .into_iter()
+                    .filter(|entry| !mine.iter().any(|held| held.name == entry.name))
                     .map(|entry| CommandListEntry {
                         name: entry.name,
                         help: entry.help,
@@ -1209,6 +1279,9 @@ impl ConnectionCore {
                         available: true,
                     })
                     .collect();
+                entries.extend(mine);
+                // 두 출처를 이어 붙였으므로 여기서 한 번 정렬한다 — 각각은 이름순인데 합치면 아니다.
+                entries.sort_by(|a, b| a.name.cmp(&b.name));
                 let _ = sink.enqueue(Outbound::event(AgentEvent::CommandList {
                     request_id,
                     entries,
@@ -1235,6 +1308,7 @@ impl ConnectionCore {
                 tokio::spawn(crate::command_delivery::deliver(
                     self.commands.clone(),
                     self.deliveries.clone(),
+                    Arc::clone(&self.locals),
                     conn_id,
                     envelope,
                 ));
@@ -1254,23 +1328,32 @@ impl ConnectionCore {
             // ADR-0154
             AgentCommand::CommandOutcome { reply } => {
                 let request_id = reply.request_id;
-                if self.deliveries.complete(reply) {
-                    tracing::debug!(conn = conn_id, %request_id, "명령 결말을 그 왕복에 붙였다");
-                    return DispatchFlow::Continue;
-                }
+                // ★거절 사유가 둘이고 **무게가 다르다**★: 「붙일 자리가 없다」는 흔한 정상 경합(마감이
+                //   먼저 지났다)이고, 「위임한 적 없다」는 **있을 수 없는 프레임**이다 — 그 번호의 왕복은
+                //   아무에게도 안 나갔으므로 결말을 보낼 주인이 존재하지 않는다. 뭉치면 뒤엣것이 앞엣것의
+                //   소음에 묻힌다.
+                let refusal = match self.deliveries.complete(reply) {
+                    OutcomeLanding::Attached => {
+                        tracing::debug!(conn = conn_id, %request_id, "명령 결말을 그 왕복에 붙였다");
+                        return DispatchFlow::Continue;
+                    }
+                    OutcomeLanding::NoSeat => "no round trip is waiting for this outcome — it may have passed its deadline, or nothing asked for it",
+                    OutcomeLanding::NotDelegated => "this daemon answers that command itself, so it never handed it to anyone and takes no outcome for it",
+                };
                 // 첫 건만 warn — 나머지는 debug(래치 근거는 `stray_outcome_warned` doc).
                 if !session.stray_outcome_warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         conn = conn_id,
                         %request_id,
-                        "붙일 왕복이 없는 명령 결말 — 거절(이 연결에서 한 번만 남긴다)"
+                        refusal,
+                        "명령 결말 거절(이 연결에서 한 번만 남긴다)"
                     );
                 } else {
-                    tracing::debug!(conn = conn_id, %request_id, "명령 결말 거절(반복)");
+                    tracing::debug!(conn = conn_id, %request_id, refusal, "명령 결말 거절(반복)");
                 }
                 let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                     request_id: None,
-                    message: "no round trip is waiting for this outcome — it may have passed its deadline, or nothing asked for it".into(),
+                    message: refusal.into(),
                 }));
             }
         }
@@ -1424,17 +1507,25 @@ fn note_claimed_owner(
 /// 흉내 낸 문자열을 그 자리에 앉힐 수 있다).
 /// 알려진 범위: `char::is_control`(C0/C1)까지다 — U+2028 같은 유니코드 줄 구분자는 그대로 나가고, 지금
 /// 쓰는 fmt 레이어는 그것으로 줄을 쪼개지 않는다.
+/// ★폭은 **이름 한 조각**을 재는 값이다★ — 그보다 긴 것을 실어야 하는 자리는 자기 폭을 정해
+/// [`sanitize_within`] 을 직접 부른다. 이 값을 그런 자리에 맞춰 넓히지 말 것: 여기 붙어 있는 호출자
+/// 대부분은 클라이언트가 준 **이름**이고, 그 폭이 넓어지면 로그 한 줄의 크기를 상대가 정하게 된다.
 pub(crate) fn sanitize_for_log(text: &str) -> String {
     const MAX_CHARS: usize = 64;
+    sanitize_within(text, MAX_CHARS)
+}
+
+/// [`sanitize_for_log`] 의 폭을 부르는 쪽이 정하는 갈래 — 다듬는 규칙(길이·모양)은 같다.
+pub(crate) fn sanitize_within(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
-    for ch in text.chars().take(MAX_CHARS) {
+    for ch in text.chars().take(max_chars) {
         if ch.is_control() {
             out.extend(ch.escape_debug());
         } else {
             out.push(ch);
         }
     }
-    if text.chars().nth(MAX_CHARS).is_some() {
+    if text.chars().nth(max_chars).is_some() {
         out.push('…');
     }
     out
@@ -1598,6 +1689,47 @@ mod tests {
 
     /// 상관 표를 밖에서 꽂는 갈래 — 마감 갈래를 재는 시험이 **손으로 미는 시계**를 넣어야 한다.
     fn test_core_with(deliveries: CommandDeliveries) -> (ConnectionCore, watch::Receiver<bool>) {
+        test_core_built(deliveries, &|_| {
+            Arc::new(crate::command_delivery::NoLocalCommands)
+        })
+    }
+
+    /// ★데몬이 **자기 `agent.*` 표를 쥔** 조립★ — 배달 1단계와 발견의 자기 몫이 실제로 도는 자리다.
+    ///
+    /// 표는 운영과 같은 조립기(`control::commands::make_daemon_table`)로 만든다 — 여기서 손으로 표를
+    /// 꾸미면 그 사본이 운영과 조용히 어긋난다. 매니저는 디스크도 PTY 도 없는 이 하네스의 것을 그대로 쓴다.
+    fn test_core_with_own_agent_table() -> (ConnectionCore, watch::Receiver<bool>) {
+        test_core_built(CommandDeliveries::new(), &|manager| {
+            let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
+            slot.set(Arc::new(crate::control::commands::make_daemon_table(
+                manager.clone(),
+                Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
+            )));
+            Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
+        })
+    }
+
+    /// ★표를 **나중에** 채우는 조립★ — 슬롯 주입은 연결 공장 조립보다 늦을 수 있고, 그 창에 도착한 등록은
+    /// 반려할 근거가 없어 명부에 그대로 남는다. 겹침이 실제로 생길 수 있는 상태가 이것 하나다.
+    fn test_core_with_late_agent_table() -> (
+        ConnectionCore,
+        watch::Receiver<bool>,
+        Arc<crate::control::mcp_server::CommandTableSlot>,
+    ) {
+        let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
+        let for_locals = slot.clone();
+        let (core, rx) = test_core_built(CommandDeliveries::new(), &move |_| {
+            Arc::new(crate::control::commands::DaemonLocalCommands::new(
+                for_locals.clone(),
+            ))
+        });
+        (core, rx, slot)
+    }
+
+    fn test_core_built(
+        deliveries: CommandDeliveries,
+        locals: &dyn Fn(&Arc<AgentManager>) -> Arc<dyn LocalCommands>,
+    ) -> (ConnectionCore, watch::Receiver<bool>) {
         use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
@@ -1639,6 +1771,7 @@ mod tests {
             Arc::new(|_aid, _sid| {}),
         ));
         let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
+        let manager_for_locals = manager.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let control_registry = Arc::new(ControlRegistry::new());
         let core = ConnectionCore::new(
@@ -1649,6 +1782,7 @@ mod tests {
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             CommandRoster::new(),
             deliveries,
+            locals(&manager_for_locals),
             shutdown_tx,
         );
         (core, shutdown_rx)
@@ -2212,6 +2346,158 @@ mod tests {
         }
     }
 
+    /// ★발견 목록은 **두 출처**를 합친다★ — 붙어 있는 주인들의 명부와 **데몬 자기 표**. 자기 표를 빼면
+    /// `agent.*` 는 배달되는데 목록에는 없어서, 부를 수 있는 이름을 물어본 LLM 이 그 목록만 믿고 그 계열을
+    /// 영영 안 부른다(에러도 로그도 없다).
+    ///
+    /// ★같은 이름이 겹치면 **데몬 것이 이긴다**★ — 배달의 단계 순서(내 표 → 명부)가 그렇게 정해져 있으므로
+    /// (`command_delivery::deliver`) 목록도 같은 답을 해야 한다. 반대로 말하면 호출자는 남의 `help` 로
+    /// 인자를 맞춘 뒤 데몬 핸들러에게 반려당한다.
+    #[tokio::test]
+    async fn list_commands_merges_the_daemons_own_names_and_wins_on_a_clash() {
+        // ★조립된 서버에서는 이 상태가 안 난다 — 이 시험은 **포트 계약**을 재는 것이다★: 표를 늦게 꽂는
+        //   조립을 손으로 만든다(운영·테스트 서버는 연결을 받기 전에 채운다). 그 뒤로는 등록 자체가
+        //   `CONFLICT` 로 반려되므로(이웃 시험) 겹침을 만들 다른 길이 없다.
+        let (core, _rx, slot) = test_core_with_late_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(
+            register(
+                vec![
+                    decl("tab.create"),
+                    CommandDecl {
+                        name: "agent.list".to_string(),
+                        help: "stolen".to_string(),
+                    },
+                ],
+                rid(),
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+        assert_eq!(
+            core.commands().entries().len(),
+            2,
+            "전제: 표가 비어 있던 창이라 그 등록은 통과했다"
+        );
+
+        slot.set(Arc::new(crate::control::commands::make_daemon_table(
+            core.manager().clone(),
+            Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
+        )));
+
+        let req = rid();
+        core.dispatch(
+            AgentCommand::ListCommands { request_id: req },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [_, AgentEvent::CommandList {
+                request_id,
+                entries,
+            }] => {
+                assert_eq!(*request_id, req);
+                let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    vec![
+                        "agent.list",
+                        "agent.move",
+                        "agent.new",
+                        "agent.rename",
+                        "agent.spawn",
+                        "tab.create"
+                    ],
+                    "두 출처가 이름순 한 목록으로 합쳐진다"
+                );
+                let clashed = entries
+                    .iter()
+                    .find(|e| e.name == "agent.list")
+                    .expect("겹친 이름");
+                assert_ne!(
+                    clashed.help, "stolen",
+                    "겹친 이름의 모양은 실제로 그것을 실행하는 쪽(데몬)이 낸다"
+                );
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(&clashed.help)
+                        .is_ok_and(|item| item["name"] == "agent.list"),
+                    "데몬 표의 선언이 그대로 실린다: {}",
+                    clashed.help
+                );
+            }
+            other => panic!("조회는 CommandList 로 답한다: {other:?}"),
+        }
+    }
+
+    /// ★데몬이 쥔 이름의 등록은 **성공으로 답하면 안 된다**★ — 명부에는 그 이름이 없어 그대로 들어가지만
+    /// (`Roster::register` 에는 부딪힐 항목이 없다) 배달은 1단계에서 데몬이 먼저 답하므로 그 주인에게는
+    /// 봉투가 한 장도 가지 않는다. 성공을 보고하면서 트래픽을 안 주는 그 상태가 `Roster::update` 가 자기
+    /// 충돌에 대해 이미 금지한 형태이고, 여기서도 같은 어휘(`CONFLICT`)로 같은 all-or-nothing 을 쓴다.
+    #[tokio::test]
+    async fn registering_a_name_this_daemon_answers_is_refused_as_a_conflict() {
+        let (core, _rx) = test_core_with_own_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+
+        core.dispatch(
+            register(
+                vec![decl("agent.list"), decl("tab.create"), decl("agent.new")],
+                rid(),
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => {
+                assert!(message.contains("CONFLICT"), "{message}");
+                // ★겹친 이름을 **전부** 짚는다★ — 패킷 통째로 반려하는데 하나만 알려 주면, 등록이 붙을 때
+                //   한 번뿐이라 나머지를 알아내는 데 이름 하나당 재접속 한 번이 든다.
+                assert!(
+                    message.contains("agent.list") && message.contains("agent.new"),
+                    "겹친 이름이 다 실려야: {message}"
+                );
+            }
+            other => panic!("겹친 이름은 반려여야: {other:?}"),
+        }
+        assert!(
+            core.commands().entries().is_empty(),
+            "패킷 통째로 반려다 — 겹치지 않은 이름도 들어가면 안 된다"
+        );
+
+        // 겹치지 않는 패킷은 그대로 통과한다(반려가 계열 전체를 막지 않는다).
+        core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
+            .await;
+        assert_eq!(core.commands().entries().len(), 1);
+
+        // 차분도 같은 판정이다 — 한쪽만 막으면 막히지 않은 쪽으로 같은 상태가 들어온다.
+        core.dispatch(
+            update(vec![decl("agent.new")], vec![], rid()),
+            &session,
+            &mock,
+        )
+        .await;
+        match mock.events().last() {
+            Some(AgentEvent::Error { message, .. }) => {
+                assert!(message.contains("CONFLICT"), "{message}");
+                assert!(message.contains("agent.new"), "{message}");
+            }
+            other => panic!("차분도 반려여야: {other:?}"),
+        }
+        assert_eq!(
+            core.commands().entries().len(),
+            1,
+            "반려는 명부를 건드리지 않는다"
+        );
+    }
+
     // ── 명령 배달의 두 arm(ADR-0154) ────────────────────────────────────────────
     //
     // 갈래별 단언(정상 왕복 · 주인 부재 · 찢어진 창 · 마감 · 끊김 정리)은 `command_delivery` 쪽에 있다.
@@ -2238,6 +2524,14 @@ mod tests {
     //   구독자와 같은 스레드에서 돈다.
 
     fn bus_command(name: &str, request_id: engram_dashboard_command::RequestId) -> AgentCommand {
+        bus_command_with(name, serde_json::json!({ "window": "main" }), request_id)
+    }
+
+    fn bus_command_with(
+        name: &str,
+        args: serde_json::Value,
+        request_id: engram_dashboard_command::RequestId,
+    ) -> AgentCommand {
         AgentCommand::Command {
             // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0154).
             envelope: engram_dashboard_command::CommandEnvelope {
@@ -2245,7 +2539,7 @@ mod tests {
                 request_id,
                 owner: OwnerToken::new("whatever-the-caller-thinks"),
                 proto_ver: 7,
-                args: serde_json::json!({ "window": "main" }),
+                args,
             },
         }
     }
@@ -2276,8 +2570,8 @@ mod tests {
             .count()
     }
 
-    /// 붙일 왕복이 없는 결말의 **첫 경고**만 잡는 조각 — 문구를 고치면 이 상수도 같이 고친다.
-    const STRAY_OUTCOME_WARN: &str = "붙일 왕복이 없는";
+    /// 거절당한 결말의 **첫 경고**만 잡는 조각 — 문구를 고치면 이 상수도 같이 고친다.
+    const STRAY_OUTCOME_WARN: &str = "한 번만 남긴다";
 
     /// 명부에 붙어 있고 **그 연결로 나간 프레임을 받아 볼 수 있는** 세션.
     ///
@@ -2569,8 +2863,14 @@ mod tests {
         );
     }
 
-    /// ★실패를 삼키지 않는다 — 코드까지 실어 보낸다★: 코드가 없으면 부르는 쪽이 문구를 패턴매칭해
-    /// 재시도 여부를 정해야 한다(TRD §4-⑦).
+    /// ★실패를 삼키지 않는다 — 코드까지 실어 보낸다★
+    ///
+    /// ★그 코드가 **문구 앞자리에 실려** 간다는 것이 이 프레임의 사실이다★: `AgentEvent::Error` 에는 타입드
+    /// 코드 칸이 없어 `CommandError` 의 `Display`(`CODE: 문구`)가 유일한 운반 수단이다. 그러니 이 단언은
+    /// 「호출자가 문구를 파싱하지 않아도 된다」를 지키는 것이 **아니다** — 지키는 것은 「그 자리에서 코드가
+    /// 사라지지 않는다」 하나다(문구 형식을 바꾸는 편집이 코드를 조용히 떨어뜨리는 것을 여기서 잡는다).
+    /// ★파싱해야 한다는 비용은 남아 있다★ — 없애려면 이 프레임에 타입드 칸을 더해야 하고(wire 계약 변경)
+    /// 그건 이 시험이 정할 일이 아니다.
     #[tokio::test]
     async fn a_refused_registration_replies_with_the_error_code() {
         let (core, _rx) = test_core();
@@ -3308,5 +3608,104 @@ mod tests {
             Frame::Text(s) => assert!(s.contains("ReplayComplete")),
             _ => panic!("3번째는 ReplayComplete Text 여야 함"),
         }
+    }
+
+    // ── 데몬 자기 표가 버스로 답한다(배달 1단계) ──────────────────────────────────
+
+    /// ★대화상자 없이 등록되는 길 전체★ — 클라이언트가 버스로 `agent.new` 를 내면 데몬이 **자기 표로**
+    /// 답하고, 그 결과가 곧바로 `agent.list` 에 보인다. 이 왕복이 깨지면 LLM 이 에이전트를 만들 수단은
+    /// 클릭뿐이다(CLAUDE.md 「LLM-우선 제어」).
+    #[tokio::test]
+    async fn the_daemons_own_agent_verbs_answer_over_the_bus() {
+        let (core, _rx) = test_core_with_own_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let (session, mut inbox) = attached_with_inbox(&core, 2);
+
+        let made = engram_dashboard_command::RequestId::new();
+        core.dispatch(
+            bus_command_with(
+                "agent.new",
+                serde_json::json!({ "cwd": "C:/work/bus", "name": "from-bus" }),
+                made,
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        let agent_id = match next_frame_event(&mut inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, made);
+                let ok = reply.outcome.expect("등록 성공");
+                assert_eq!(ok["state"], "sleeping", "만들기는 띄우지 않는다: {ok}");
+                assert_eq!(ok["name"], "from-bus", "{ok}");
+                ok["agent_id"].as_str().expect("id 문자열").to_string()
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        };
+
+        let listed = engram_dashboard_command::RequestId::new();
+        core.dispatch(
+            bus_command_with("agent.list", serde_json::json!({}), listed),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match next_frame_event(&mut inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, listed);
+                let ok = reply.outcome.expect("조회 성공");
+                let agents = ok["agents"].as_array().expect("배열");
+                assert_eq!(agents.len(), 1, "방금 만든 것이 명부에 보인다: {ok}");
+                assert_eq!(agents[0]["id"], agent_id, "{ok}");
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        }
+    }
+
+    /// ★버스 입구도 **같은 검문**을 받는다(ADR-0157)★ — 여기가 검문 없이 돌면 제어 라우트에서 막히는
+    /// 오타가 버스로는 통과해 조용히 다른 동작이 된다(`parnet` 하나가 계층 해제로 실행되는 그 형태).
+    /// 검문 자리가 두 표면에 **하나**라는 것이 그 보장이다(`control::commands::call_daemon_command`).
+    #[tokio::test]
+    async fn a_typo_in_an_argument_is_refused_on_the_bus_too() {
+        let (core, _rx) = test_core_with_own_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let (session, mut inbox) = attached_with_inbox(&core, 2);
+
+        let req = engram_dashboard_command::RequestId::new();
+        core.dispatch(
+            bus_command_with(
+                "agent.new",
+                serde_json::json!({ "cwdd": "C:/work/bus" }),
+                req,
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match next_frame_event(&mut inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let err = reply.outcome.expect_err("모르는 칸은 반려");
+                assert_eq!(
+                    err.code(),
+                    engram_dashboard_command::ErrorCode::InvalidArgument
+                );
+                assert!(
+                    err.message().contains("cwdd"),
+                    "어느 칸인지 짚어야: {}",
+                    err.message()
+                );
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        }
+        assert_eq!(
+            core.manager().roster().len(),
+            0,
+            "반려는 아무것도 만들지 않는다"
+        );
     }
 }

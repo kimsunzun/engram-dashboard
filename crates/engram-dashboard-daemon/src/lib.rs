@@ -307,6 +307,7 @@ async fn run_accept_loop(
     multiview: MultiViewState,
     control_registry: Arc<control::registry::ControlRegistry>,
     messaging_slot: Arc<control::mcp_server::MessagingSlot>,
+    command_table_slot: Arc<control::mcp_server::CommandTableSlot>,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -331,6 +332,13 @@ async fn run_accept_loop(
     //   무관하게** 루프를 빠져나온 그 자리에서 한 번 켜진다.
     let (sweeper_stop, sweeper_stopped) = watch::channel(false);
     let sweeper = deliveries.spawn_sweeper(sweeper_stopped);
+    // 데몬이 스스로 답하는 명령(배달 1단계 + 발견 목록의 자기 몫) — ★값이 아니라 슬롯을 넘긴다★:
+    //   표는 매니저 조립 뒤에 생기고 이 루프는 그보다 앞설 수 있다(테스트 서버 조립이 그렇다). 값을 잡으면
+    //   그때 비어 있던 표가 프로세스 수명 내내 「내 명령 없음」으로 굳고, 증상은 `agent.*` 가 조용히 모르는
+    //   명령으로 되돌아오는 것이다(`command_delivery::LocalCommands` 의 그 성질).
+    let locals: Arc<dyn command_delivery::LocalCommands> = Arc::new(
+        control::commands::DaemonLocalCommands::new(command_table_slot),
+    );
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
@@ -340,6 +348,7 @@ async fn run_accept_loop(
             messaging_slot,
             commands,
             deliveries,
+            locals,
             shutdown_tx,
         ));
 
@@ -726,6 +735,7 @@ pub async fn run() -> Result<(), i32> {
         multiview,
         control_registry,
         messaging_slot.clone(),
+        command_table_slot,
         expected_token,
         shutdown_tx,
         shutdown_rx,
@@ -849,6 +859,16 @@ async fn start_test_server_inner(
         idle_coalescer.clone(),
     );
     let manager = wiring.manager.clone();
+    // ★제어 동사의 실입구를 운영과 같은 자리에 꽂는다★(ADR-0155): 이 표가 버스 배달의 1단계이자 발견
+    //   목록의 자기 몫이다. 안 꽂으면 이 서버에서만 `agent.*` 가 「모르는 명령」으로 되돌아가고, WS 통합
+    //   시험은 그 사실을 **운영이 그렇다는 뜻으로** 읽는다.
+    let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
+    let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
+    roster_broadcast_slot.set(wiring.roster_broadcast());
+    command_table_slot.set(Arc::new(control::commands::make_daemon_table(
+        manager.clone(),
+        roster_broadcast_slot,
+    )));
     // ★배선을 운영 run() 과 동일하게 유지한다★ — "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
@@ -884,6 +904,7 @@ async fn start_test_server_inner(
                 multiview,
                 control_registry,
                 messaging_slot,
+                command_table_slot,
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,

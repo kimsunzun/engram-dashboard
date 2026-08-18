@@ -225,6 +225,19 @@ impl CommandRoster {
         self.lock().live.get(&conn_id).map(|conn| conn.sink.clone())
     }
 
+    /// 그 연결이 아직 붙어 있나 — ★출구 **사본을 만들지 않는** 조회다★.
+    ///
+    /// 살아 있는지만 알면 되는 자리(부수효과를 내기 전 호출자 확인)가 형제 [`CommandRoster::sink_for_conn`]
+    /// 을 쓰면 강참조 하나가 그 자리의 수명만큼 산다. 그 자리가 수 초짜리 blocking 본문이면 사본이 그동안
+    /// 살아 있어 **끊긴 연결의 writer 가 자기 종료를 못 한다**(ADR-0154 의 「내준 사본을 왕복 너머로 들지
+    /// 않는다」 — 그 문장이 막는 누수 그대로다). 그래서 판정만 필요한 호출자는 이쪽을 쓴다.
+    /// ★`ConnId` 는 재사용되지 않는다★ — 이 술어가 「같은 피어인가」로도 읽히는 근거이고, 그 실측의 정본은
+    /// `command_delivery` 의 `Pending::origin`.
+    // ADR-0154
+    pub fn is_attached(&self, conn_id: ConnId) -> bool {
+        self.lock().live.contains_key(&conn_id)
+    }
+
     /// 시험 전용 — 저장된 주인 토큰만 갈아 끼워 **찢어진 창**(명부 조회는 `Available` 인데 닿는 길이 없다)을
     /// 결정적으로 만든다. 운영 경로에서 그 상태는 조회와 전달 사이에 낀 `detach` 로만 생겨 손으로 못 세운다.
     #[cfg(test)]
