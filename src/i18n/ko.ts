@@ -36,9 +36,6 @@ export const ko = {
     fillAgentList: '에이전트 트리 열기',
     fillPresetPalette: '프리셋 팔레트 열기',
     newContent: '새 콘텐츠', // ADR-0065 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨.
-    // 빈 슬롯 `+` 아이콘의 접근성 이름 — newContent 를 재사용하지 않는다(그 서브메뉴 라벨을 고치는 편집이
-    //   이 버튼 이름까지 바꾼다). 메뉴엔 채움 말고 분할·닫기도 있어 "새 콘텐츠"로는 좁다. // ADR-0141
-    openMenu: '슬롯 메뉴 열기',
   },
   window: {
     create: '새 창',

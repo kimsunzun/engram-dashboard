@@ -108,7 +108,9 @@ standard 게이트를 전부 PASS시킨 뒤, 실제 앱을 띄워 화면 동작�
 ```bash
 # 0) 이번 변경을 담은 빌드를 만든다 + dev 서버를 띄운다(디버그 빌드는 화면을 품지 않는다)
 export CLIENT_EXE="$(node scripts/build-client-shell.mjs)"   # ★클라이언트 셸은 이걸로만★(ADR-0137 — 아래 첫 불릿). ★빈 값이면 빌드 실패다 → 여기서 멈춘다★(경로는 stdout 한 줄, 진행·에러는 stderr). 백엔드/데몬을 고쳤으면 `cargo build -p engram-dashboard-daemon` 도 — ★조건부다★: 데몬이 떠 있으면 그 명령은 os error 5 로 하드 FAIL 한다(아래 "공유 데몬 바이너리 락"), 그러니 무조건 붙여 돌리지 말 것
-nohup npm run dev > /tmp/engram-vite.log 2>&1 & disown   # 이미 1420이 떠 있으면 건너뛴다
+# ★1420이 떠 있어도 그냥 재사용하지 말 것 — 그게 이 워크트리 것인지 먼저 확인한다★(아래 절)
+powershell -NoProfile -Command "\$c = Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue; if (\$c) { (Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$c[0].OwningProcess)\").CommandLine }"
+nohup npm run dev > /tmp/engram-vite.log 2>&1 & disown   # 위가 빈 출력일 때만(= 아무도 안 잡고 있을 때만)
 curl -s -o /dev/null --retry 60 --retry-delay 1 --retry-connrefused --max-time 120 http://localhost:1420
 # 1) 분리 실행으로 기동 — 스케줄러가 새 프로세스를 만들어 터미널 트리 밖에 둔다
 powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe \$env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
@@ -124,6 +126,8 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 ```
 - **★띄우는 exe 경로도 하드코딩하지 말 것★** — `target/debug`는 기본값일 뿐이라 `CARGO_TARGET_DIR`·`.cargo/config.toml`의 `build.target-dir`이 산출물을 딴 데로 돌린다. 그러면 옛 경로에 **남아 있는 낡은 exe**가 존재 검사를 통과해 그걸 띄우고, 이번 변경이 안 담긴 바이너리로 실측하고도 통과로 오판한다. 0)이 `cargo metadata`로 실측한 경로를 `$CLIENT_EXE`로 물려주므로 그대로 쓴다(`\$env:` 이스케이프는 Git Bash가 `$env`를 자기 변수로 먹는 것을 막는 것 — 값은 PowerShell이 환경에서 직접 읽으므로 경로에 작은따옴표가 있어도 안전하다).
 - **★클라이언트 셸을 생 `cargo build -p engram-dashboard`로 짓지 말 것(ADR-0137)★** — 그 명령은 Tauri CLI를 지나지 않아 dev 오버레이(`src-tauri/tauri.dev.conf.json`)가 안 먹고 **release identifier가 찍힌다.** `TAURI_CONFIG`는 `cargo:rerun-if-env-changed`라 *변수를 빼는 것만으로도 재빌드가 돌아* 멀쩡하던 exe를 되돌려 놓는다(실측). 그러면 릴리즈 앱이 떠 있는 동안 실측 대상이 **창도 없이 즉시 죽어** 게이트가 앱 결함으로 오판한다. `scripts/build-client-shell.mjs`가 주입과 산출물 대조를 함께 하며 **런처·이 게이트가 같은 구현을 쓴다**(위 "런처를 쓰지 말 것"은 그대로 유효 — 저건 dev 서버 자식 때문이고, 이 스크립트는 앱을 띄우지 않는다).
+- **★1420을 남이 잡고 있으면 디버그 경로를 쓰지 않는다 — 릴리스로 간다★(실측 2026-08-17):** 디버그 빌드는 화면을 품지 않고 1420에서 받아오는데 그 포트는 **먼저 잡은 워크트리 것**이다. 남의 vite를 재사용하면 **남의 화면을 측정하고 통과로 오판한다** — 앱은 정상으로 보이므로 눈치챌 단서가 없다. 위 0)의 명령줄 출력에 **지금 워크트리 경로가 아닌 다른 경로**가 보이면(예: `...engram-dashboard-wt2\...\vite.js`) 그 vite를 쓰지 말고, 사용자에게 그 프로세스를 알리고 릴리스 경로로 전환한다(릴리스 exe는 화면을 품어 포트가 필요 없다). **남의 vite를 죽이지 않는다** — 그 워크트리에서 다른 작업이 돌고 있을 수 있다.
+- **★릴리스로 갈 땐 순수 `cargo build --release`가 아니다★(실측 2026-08-18):** 그렇게 만든 exe는 여전히 `localhost:1420`을 로드해 **같은 함정에 그대로 빠진다.** 화면을 품은 exe는 `npm run tauri build -- --no-bundle`이 만든다(근거·경고 = `scripts/build-release.ps1` 헤더). 띄운 뒤 앱 안에서 URL을 확인해 `http://tauri.localhost/`인지 본다 — `localhost:1420`이면 잘못된 빌드를 측정하는 것이다.
 - **★`-Command`를 `-File`로 바꾸지 말 것★** — `-File`은 뒤 인자를 전부 문자열 리터럴로 넘겨 `'A=B','C=D'`가 **한 값 `A=B,C=D`로 뭉개진다.** 그러면 포트 인자가 오염돼 **9223이 안 열리는데 스크립트는 PID를 정상 반환**한다 — 게이트가 조용히 죽는 경로다(실측 2026-08-17). 경로에 `\`를 쓰는 것도 금지 — Git Bash가 먹어서 `exe not found`가 난다. 슬래시로 쓴다.
 - **★환경변수는 상속되지 않는다★** — 새 프로세스를 스케줄러가 만들어서 현재 셸의 `$env:...`가 안 넘어간다. 디버그 포트·`RUST_LOG`는 반드시 `-EnvVars`로 넘긴다. 빠뜨리면 포트가 안 열려 "왜 9223이 안 뜨지"로 헤맨다.
 - **★실측 대상이 이번 변경을 담은 빌드인지 먼저 확인한다★** — 분리 실행은 **이미 만들어진 exe**를 띄운다. 소스를 고치고 재빌드 없이 띄우면 옛 바이너리로 실측하고 **통과로 오판한다**. `node scripts/build-client-shell.mjs`는 **데몬을 빌드하지 않는다** — 백엔드를 고쳤으면 `-p engram-dashboard-daemon`도 돌린다(안 그러면 옛 데몬에 붙어 Rust 변경이 조용히 무효가 된다, ADR-0029).
@@ -136,6 +140,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - **검증엔 스샷보다 `eval` 텍스트가 토큰·정확도 유리**(픽셀 해석 회피) — DOM 텍스트·`window.__TAURI__.core.invoke(...)` 결과를 직접 확인. shot은 레이아웃·시각 확인이 필요할 때만.
 - 변경이 닿은 동작을 실제로 한 번 통과시켜 본다(예: spawn → 출력 도착 → kill → 상태 전이). **이게 통과해야 동작 확인 = 완료**.
 - **teardown — 자기가 띄운 건 자기가 치운다(실발동 2026-07-10):** 1)에서 받은 **PID**로 종료한다 — `MSYS_NO_PATHCONV=1 taskkill /PID <기록한PID> /T /F`(Git Bash면 접두 필수 — 안 붙이면 `/PID`가 경로로 변환된다). **`/T`가 잡는 것 = 앱 + 그 WebView2 렌더러 자식들**뿐이다(옛 "런처 트리" 모델이 아니다 — 분리 실행엔 런처 부모가 없다). 앱을 감싼 임시 `cmd`는 자식이 아니라 **부모**라 `/T`가 안 건드리고, 앱이 끝나면 스스로 빠진다.
+- **★dev 서버(vite)도 `/T`에 안 걸린다 — 데몬과 같은 소유권 규칙으로 따로 치운다★(누락 적출 2026-08-18):** vite는 앱과 무관한 별도 프로세스라 **앱을 닫아도 1420을 계속 잡고 있다.** 위 0)에서 **자기가 띄웠으면** 자기가 끈다(그 `npm run dev` 잡의 pid). **실측 시작 전부터 떠 있던 것은 불가침** — 사람이나 다른 워크트리 세션 것일 수 있다. 남기면 다음 실측이 그걸 재사용해 남의 화면을 측정한다(위 「1420을 남이 잡고 있으면」).
 - **★데몬은 위 `/T`에 안 걸린다 — 따로 판단한다★** — 앱이 데몬을 WMI(`Win32_Process.Create`)로 띄워 부모가 `WmiPrvSE.exe`가 되기 때문이다(근거 = `crates/engram-dashboard-discovery/src/lib.rs` `wmi_spawn` 주석 · 실측 2026-08-17). 처리는 **소유권으로 갈린다:**
   - **실측 시작 전부터 떠 있던 데몬 = 불가침.** 죽이지 않는다(persist 모델·타 에이전트 호스팅 가능 — 에이전트는 데몬의 자식이라 죽이면 진행 중인 작업이 날아간다). 그래서 **기동 전에 데몬 유무를 기록해 둔다**(위 "잔여 프로세스 확인"과 같은 단계).
   - **이번 실측이 띄운 데몬 = 자기가 치운다.** 남기면 그 배포판의 데몬 exe가 잠겨 **다음 재빌드가 하드 실패한다**(`scripts/build-release.ps1`이 "앱과 데몬을 완전히 종료한 뒤 다시 실행하세요"로 멈춘다). 죽이기 전 `ExecutablePath`가 이번에 띄운 배포판(`target/debug/` 또는 `target/release/`) 것인지 **반드시 확인한다** — 이미지 이름만 보고 죽이면 남의 배포판 데몬을 죽인다(ADR-0139).
