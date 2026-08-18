@@ -47,8 +47,8 @@ export const ko = {
   agent: {
     spawn: '에이전트 생성(spawn)',
     create: '에이전트 생성', // ADR-0078 생성 서브메뉴 컨테이너 라벨과 값 재사용.
-    createTerminal: '클로드 터미널 생성', // 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
-    createJson: '클로드 JSON 생성', // 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
+    createTerminal: '클로드코드 터미널', // 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
+    createJson: '클로드코드 JSON', // 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
     spawnInto: '스폰 + 배치',
     kill: '에이전트 종료',
     monitor: '에이전트 모니터링',
@@ -59,6 +59,9 @@ export const ko = {
     noRunning: '실행중 에이전트 없음 — 트리에서 에이전트를 생성/활성화하세요.',
     terminatedPlaceholder: '종료된 에이전트', // 오버레이 '종료됨'과 별개.
     inputPlaceholder: '메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)',
+    // 빈 상태(ADR-0145) 가운데 입력창 전용. 하단 배치는 위 inputPlaceholder 를 그대로 쓴다 —
+    // Enter/Shift+Enter 안내가 사라지면 안 되므로 한 키로 합치지 않는다(사용자 지정 문구).
+    emptyInputPlaceholder: '메시지를 입력하세요',
     treeLabel: '에이전트 트리',
     emptyList: '에이전트 없음 — 우클릭으로 생성',
     terminatedOverlay: '종료됨', // placeholder '종료된 에이전트'와 별개.
