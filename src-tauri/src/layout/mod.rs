@@ -9,7 +9,8 @@ pub mod tree;
 pub mod types;
 
 pub use apply::{
-    AgentSpawner, LabelSource, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
+    AgentSpawner, LabelSource, LayoutEvents, SlotMove, SubscriptionSync, WindowHost,
+    WindowTabsPayload,
 };
 pub use manager::{
     resolve_spawn_slot, CloseTabOutcome, LayoutError, SpawnSlotError, ViewManager,

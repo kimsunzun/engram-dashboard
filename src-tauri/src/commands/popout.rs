@@ -1,18 +1,16 @@
-//! 슬롯 팝업 분리(move_slot_to_window) invoke 핸들러 + 런타임 창 label·빌드·destroy(= 적용 서비스의 OS
-//! 창 포트 어댑터, `crate::layout::apply`) — 탭 소유 모델(ADR-0057).
+//! 슬롯 팝업 분리(move_slot_to_window) invoke 껍데기 + 런타임 창 label·빌드·destroy(= 적용 서비스의 OS
+//! 창 포트·label 발급 포트 어댑터, `crate::layout::apply`) — 탭 소유 모델(ADR-0057).
 //!
-//! ★§5 LLM 제어 표면★: 사람 우클릭(window.__engramLayout.moveSlotToWindow)과 LLM 이 같은 command 를 흔든다.
+//! ★§5 LLM 제어 표면★: 사람 우클릭(window.__engramLayout.moveSlotToWindow)과 LLM(명령 버스의
+//! `slot.popout`)이 **같은 적용 서비스**에 떨어진다 — 이 파일에 MOVE 로직은 없다(`apply::move_slot_to_window`).
+//! 여기 남는 것은 Tauri 세계로의 번역뿐이다: 창 빌드·destroy·존재 확인, label·탭 이름 발급, 창 정리.
 //!
-//! ## 무엇을 하나 (MOVE, not mirror)
-//! 원본 슬롯의 **콘텐츠(SlotContent)** 를 **새 탭**(새 창 or 지정 기존 창)으로 옮기고, 원본 슬롯을 원본
-//! View 에서 제거한다. agent 자체(데몬 프로세스)는 안 건드린다 — 순수 I/O 표시 표면만 이동(§5 손발/두뇌
-//! 분리).
-//!
-//! ## ★2-phase 롤백 + 기존창 타깃 orphan 방지(§5-3, G4)★
-//! 락이 풀린 사이 대상 창이 소멸/동시 close 될 수 있어, **기존 창 타깃의 탭 삽입을 phase C 로 이연**하고
-//! phase C 에서 `windows.contains_key(to_window)` 재검증 후에만 삽입한다(부재면 롤백). 새 창 타깃은 phase C
-//! 에서 새 label 로 창 엔트리 생성(label = PopupCounter 단조라 재사용 충돌 없음). 소스 detach 는 still-ours
-//! 가드로 2차 락에서 close.
+//! ★두 경로가 **백엔드에서만** 합류한다 — 그 앞은 아직 다르다★: 프론트는 invoke 전에 그 슬롯의 렌더 모드
+//! 오버라이드를 지운다(`src/store/viewStore.ts` 의 `clearRenderMode` — 슬롯이 사라지므로 누수 방지). 버스
+//! 경로엔 그 단계가 없어 죽은 slot id 의 오버라이드가 웹뷰에 남는다. 같은 부류가 셋 더 있다 —
+//! `slot.close`·`slot.assignAgent`·`layout.setSlotContent` 도 프론트 쪽에서 같은 정리를 하고 버스 쪽에서는
+//! 안 한다. 해소는 웹뷰 소유 상태를 백엔드로 올리는 후속 스텝 몫이다(여기서 흉내내지 말 것 — 셸은 그
+//! 상태를 갖고 있지 않다).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,9 +18,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
 
-use crate::commands::layout::{emit_window_tabs, send_subscription_delta};
+use crate::commands::layout::{RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
-use crate::layout::{LabelSource, LayoutState, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL};
+use crate::layout::{apply, LabelSource, LayoutState, SlotMove, WindowHost, MAIN_WINDOW_LABEL};
 use crate::output_router::OutputRouter;
 
 // 팝업/런타임 창 label prefix. capabilities/popup.json 의 `"slot-popup-*"` glob 과 짝(변경 시 양쪽 동기).
@@ -54,9 +52,19 @@ impl LabelSource for PopupCounter {
     fn next_label(&self) -> String {
         PopupCounter::next_label(self)
     }
+
+    // label 형식(`slot-popup-<n>`)을 아는 쪽이 짓는다 — "slot-popup-3" → "Popup 3".
+    // ★바이트 슬라이싱 금지★: 이건 공개 포트라 어떤 `&str` 이든 들어올 수 있고, 인덱스로 자르면 문자
+    //   경계가 아닌 자리에서 패닉한다 — 릴리즈는 `panic = "abort"` 라 받아 줄 그물이 없다.
+    fn tab_name(&self, label: &str) -> String {
+        format!(
+            "Popup {}",
+            label.strip_prefix(POPUP_LABEL_PREFIX).unwrap_or(label)
+        )
+    }
 }
 
-// 적용 서비스의 OS 창 포트(`crate::layout::apply`) — 창 빌드·destroy 는 이 파일이 소유한 Tauri 기법이다.
+// 적용 서비스의 OS 창 포트(`crate::layout::apply`) — 창 빌드·destroy·존재 확인은 이 파일이 소유한 Tauri 기법이다.
 pub(crate) struct TauriWindowHost<'a> {
     pub app: &'a AppHandle,
 }
@@ -68,6 +76,10 @@ impl WindowHost for TauriWindowHost<'_> {
 
     fn close(&self, label: &str) {
         destroy_window(self.app, label);
+    }
+
+    fn is_open(&self, label: &str) -> bool {
+        self.app.get_webview_window(label).is_some()
     }
 }
 
@@ -119,16 +131,9 @@ pub fn destroy_window(app: &AppHandle, label: &str) {
     }
 }
 
-// ★슬롯을 다른 창의 새 탭으로 MOVE(move_slot_to_window)★. §5-3 2-phase 롤백(G4).
-//   `to_window` 지정 → 그 기존 창 새 탭으로(phase C 삽입·재검증). 미지정 → 새 팝업 창 생성.
-// 반환 = `{ window, tab }`(호출자가 옮겨간 창·탭을 안다, G4). 빈 슬롯(Empty)이면 Err.
+// 슬롯을 다른 창의 새 탭으로 MOVE — 로직·락 규율·롤백은 전부 적용 서비스가 소유한다.
 //
-// ★ADR-0064 — 모든 슬롯 콘텐츠 팝업★: agent 슬롯뿐 아니라 agent_list/preset_palette 슬롯도 새 창으로
-//   옮긴다(SlotContent 전체를 옮김). 비-에이전트 콘텐츠는 백엔드 출력 구독이 없어 구독 마이그레이션이
-//   자연히 no-op(rebuild 가 Agent 슬롯만 라우팅 — collect_agents). Empty 만 거부(메뉴가 empty 를 hideOn 으로
-//   숨기지만 코어도 방어).
-//
-// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(새 창 타깃은 phase B 에서 빌드).
+// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(새 창 타깃은 서비스의 phase B 에서 빌드된다).
 #[tauri::command]
 pub async fn move_slot_to_window(
     app: AppHandle,
@@ -139,177 +144,20 @@ pub async fn move_slot_to_window(
     view_id: Uuid,
     slot_id: Uuid,
     to_window: Option<String>,
-) -> Result<MoveResult, String> {
-    let is_new_window = to_window.is_none();
-    let target_label = to_window.clone().unwrap_or_else(|| counter.next_label());
-
-    // ── phase A(락): 소스 콘텐츠 → 임시 View(아직 어느 창 tabs 에도 안 넣음 — orphan 방지) ──────────
-    // ★SlotContent 를 락 밖으로 반출★(MOVE 원자성): 창 build 로 락이 풀린 사이 원본 슬롯이 다른 콘텐츠로
-    //   재배정될 수 있다 — 2차 락에서 close 전에 이 값과 재조회 결과를 대조해 "옮긴 그 콘텐츠 그대로일 때만"
-    //   원본을 닫는다(엉뚱한 콘텐츠 삭제 방지).
-    //
-    // ★owner-less tmp_view 가 phase B(언락) 동안 views 에 있어도 안전한 이유(F3 — BLOCK-1 해소)★:
-    //   prepare_detached_view 가 만든 tmp_view 는 `views` 에는 있으나 `view_owner`/`windows[*].tabs`
-    //   어디에도 없다(불변식 1·2 의 "모든 View 는 owner 1개"를 phase B 동안 일시 위배). 그럼에도 이 상태는
-    //   안전하다: ① 이 view id 는 이 op 만 손에 쥔다(다른 command 는 uuid 를 모르니 건드릴 수 없음) ② 어느
-    //   창 tabs 에도 없어 rebuild 라우팅 순회(창→tabs walk)에 안 걸린다(구독/출력 영향 0) ③ 소스 콘텐츠는
-    //   소스 슬롯이 아직 살아있어 그 경유로 계속 표시된다(사용자 화면 손실 없음) ④ 종점은 항상 둘 중 하나 —
-    //   phase C attach(owner 부여 → 불변식 복구) 또는 rollback drop_detached_view(views 에서도 제거).
-    //   ⚠️ 다음 세션 주의: rebuild/정리 로직에 "views 전체를 순회하며 owner 를 요구/가정"하는 코드를 넣을
-    //   때는 이 일시 owner-less 창(phase B)을 전제로 깔아야 한다(무조건 owner 있음 가정 = 이 op 중 패닉).
-    let (tmp_view, src_content) = {
-        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        let name = if is_new_window {
-            format!(
-                "Popup {}",
-                &target_label[POPUP_LABEL_PREFIX.len().min(target_label.len())..]
-            )
-        } else {
-            "Tab".to_string()
-        };
-        let (tmp_view, src_content) = mgr
-            .prepare_detached_view(view_id, slot_id, name)
-            .map_err(|_| "빈 슬롯은 다른 창으로 옮길 수 없음(콘텐츠 없음)".to_string())?;
-        let delta = router.rebuild(&mgr);
-        send_subscription_delta(&client, delta);
-        (tmp_view, src_content)
-    }; // ← 락 드롭
-
-    // ── phase B(락 밖): 새 창 타깃이면 웹뷰 빌드 / 기존 창 타깃이면 존재 확인만 ─────────────────
-    if is_new_window {
-        if let Err(e) = build_runtime_window(&app, &target_label) {
-            rollback_detached(&state, &router, &client, tmp_view);
-            return Err(e);
-        }
-    } else {
-        if app.get_webview_window(&target_label).is_none() {
-            rollback_detached(&state, &router, &client, tmp_view);
-            return Err(format!("대상 창 없음: {target_label}"));
-        }
-    }
-
-    // ── phase C(락): 임시 View 를 타깃 창 탭으로 삽입(★기존창 재검증★) + 소스 슬롯 close ───────────
-    let (src_tabs, tgt_tabs, src_layout) = {
-        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-
-        let inserted = if is_new_window {
-            mgr.attach_view_as_new_window(&target_label, tmp_view)
-        } else {
-            // ★재검증(G4)★: phase B 언락 중 대상 창이 소멸/동시 close 됐을 수 있음 → 존재할 때만 삽입.
-            mgr.insert_tab_into(&target_label, tmp_view)
-        };
-        if let Err(e) = inserted {
-            // ★F7 nit — 이 롤백은 실질적으로 기존 창 insert_tab_into 실패(phase B 언락 중 대상 창 소멸)만
-            //   가드한다★: 새 창 경로(is_new_window)의 attach_view_as_new_window 는 fresh label(PopupCounter
-            //   단조 — 재사용 충돌 없음) + 방금 만든 tmp_view 에 대해 실패 불가라 사실상 dead 분기다. 그래도
-            //   is_new_window 일 때 destroy 를 남기는 건 방어(미래에 attach 가 실패 가능해질 경우 유령 창 방지).
-            let _ = mgr.drop_detached_view(tmp_view);
-            let delta = router.rebuild(&mgr);
-            // ★F1/F2 일관★: 롤백 델타의 to_unsubscribe 발화도 락 안(drop 전). registry 는 안 건드리니
-            //   destroy_window(OS)만 락 밖으로.
-            send_subscription_delta(&client, delta);
-            drop(mgr);
-            if is_new_window {
-                destroy_window(&app, &target_label);
-            }
-            return Err(format!("탭 삽입 실패(롤백): {e}"));
-        }
-
-        // ★F4 — MOVE→COPY 열화는 의도된 best-effort★: phase B(언락) 동안 소스 슬롯이 다른 콘텐츠로
-        //   재배정되면(다른 SlotContent) still_ours=false → close 스킵. 즉 "재배정된 엉뚱한 콘텐츠를 지우지
-        //   않는 것"이 최우선이고, 그 대가로 원래 콘텐츠가 타깃 탭 + 소스 슬롯 양쪽에 남는다(MOVE 가 사실상
-        //   COPY 로 열화). 이 중복은 불변식 5(같은 콘텐츠 두 View 허용, 진도 독립·ADR-0046)로 무해하므로
-        //   엄격 롤백(타깃 되돌리기) 대신 이대로 둔다.
-        // ★load-bearing★: 소스 View 자체가 gap 중 소멸(탭/창 닫힘)했으면 slot_content 가 `Err`(ViewNotFound/
-        //   SlotNotFound)를 준다 → `matches!(_, Ok(ref c)) if *c == src_content` 가 실패 → still_ours=false →
-        //   close 스킵. 이 `Err→스킵`이 이미-사라진 소스를 다시 close 하려다 나는 오작동/패닉을 막는다(수정 금지).
-        let still_ours = matches!(
-            mgr.slot_content(view_id, slot_id),
-            Ok(ref c) if *c == src_content
-        );
-        if still_ours {
-            let _ = mgr.close_slot(view_id, slot_id);
-        } else {
-            tracing::warn!(
-                view = %view_id, slot = %slot_id,
-                "원본 슬롯이 창 생성 중 재배정/제거됨 — MOVE 의 close 스킵(대상 탭은 그대로 유지)"
-            );
-        }
-
-        let src_owner = mgr.owner_of(view_id).cloned();
-        let src_tabs = src_owner
-            .as_deref()
-            .and_then(|l| mgr.list_tabs(l).ok())
-            .map(WindowTabsPayload::from);
-        let tgt_tabs = mgr
-            .list_tabs(&target_label)
-            .ok()
-            .map(WindowTabsPayload::from);
-        let src_layout = mgr.snapshot(view_id).ok();
-
-        let delta = router.rebuild(&mgr);
-        send_subscription_delta(&client, delta);
-        (src_tabs, tgt_tabs, src_layout)
-    }; // ← 락 드롭
-
-    if let Some(snap) = src_layout {
-        if let Err(e) = app.emit_layout(&snap) {
-            tracing::warn!("[move_slot] layout:updated emit 실패: {e}");
-        }
-    }
-    if let Some(t) = &src_tabs {
-        emit_window_tabs(&app, t);
-    }
-    if let Some(t) = &tgt_tabs {
-        emit_window_tabs(&app, t);
-    }
-
-    tracing::info!(window = %target_label, view = %tmp_view, "슬롯 MOVE 완료(detach)");
-    Ok(MoveResult {
-        window: target_label,
-        tab: tmp_view,
-    })
-}
-
-// move_slot_to_window 반환(G4) — 옮겨간 창 label + 새 탭 View id.
-#[derive(serde::Serialize, Clone)]
-pub struct MoveResult {
-    pub window: String,
-    pub tab: Uuid,
-}
-
-// phase A 임시 View 롤백(창 삽입 전이라 tabs 갱신 불필요). 소스 슬롯은 유지(사용자가 슬롯 안 잃음).
-//
-// ★F2 REAL 동시성 버그 수정★: 옛 코드는 rebuild 델타를 락 안에서 계산하고 `send_subscription_delta`
-//   발화를 `drop(mgr)` 뒤(락 밖)에 했다 → F1 과 같은 클래스(계산~발화 사이 재추가로 stale 1→0
-//   unsubscribe). 이제 발화도 락 안(drop 전) — send_subscription_delta 는 동기 try_send(await/network 0)라
-//   ADR-0006 위반 아님. tmp_view 는 orphan(view_owner 없음)이라 이 rebuild 델타에 to_subscribe 는 안 나오고
-//   (라우팅 순회는 windows→tabs walk 인데 tmp_view 는 어느 tabs 에도 없음), drop 으로 to_unsubscribe 가
-//   나올 수 있어(0→1 이 애초에 안 나갔으니 대개 no-op) 발화를 락 안으로 옮기는 게 안전.
-fn rollback_detached(
-    state: &LayoutState,
-    router: &Arc<OutputRouter>,
-    client: &Arc<DaemonClient>,
-    tmp_view: Uuid,
-) {
-    let Ok(mut mgr) = state.0.lock() else {
-        tracing::warn!("rollback_detached: lock poisoned — 롤백 스킵");
-        return;
-    };
-    mgr.drop_detached_view(tmp_view);
-    let delta = router.rebuild(&mgr);
-    send_subscription_delta(client, delta);
-}
-
-// AppHandle 확장(layout:updated emit 을 popout 에서도 — commands/layout.rs 상수 재정의 회피).
-trait EmitLayout {
-    fn emit_layout(&self, snap: &crate::layout::ViewSnapshot) -> tauri::Result<()>;
-}
-impl EmitLayout for AppHandle {
-    fn emit_layout(&self, snap: &crate::layout::ViewSnapshot) -> tauri::Result<()> {
-        use tauri::Emitter;
-        self.emit("layout:updated", snap)
-    }
+) -> Result<SlotMove, String> {
+    apply::move_slot_to_window(
+        &state,
+        &RouterSubs {
+            router: &router,
+            client: &client,
+        },
+        &TauriEvents { app: &app },
+        &TauriWindowHost { app: &app },
+        &**counter,
+        view_id,
+        slot_id,
+        to_window,
+    )
 }
 
 // ★창 Destroyed 정리(수명/누수 임계 — 멀티탭, G1)★. 팝업/런타임 창이 닫히면(titlebar close·강제 destroy·

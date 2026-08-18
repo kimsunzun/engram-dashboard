@@ -39,15 +39,18 @@ use super::{
     WindowHost,
 };
 
-// ★이름은 프론트 레지스트리가 **오늘 등록한 id** 를 그대로 쓴다★: `tab.create`·`slot.focus`·
+// ★이름은 프론트 레지스트리가 **오늘 등록한 id** 를 그대로 쓴다★: `tab.create`·`slot.focus`·`slot.popout`·
 //   `layout.setSlotContent`·`agent.spawnInto` 는 `src/commands/*Commands.ts` 에 실재하는 id 다(실측
 //   2026-08-17). 여기서 다른 철자를 지으면 같은 동작에 이름이 둘이 되고, 화면 몫 등록(TRD §6 Step 4 —
 //   그 id 를 바꾸지 않는다고 적은 자리)이 그 둘을 다 지고 간다.
 // ★새로 짓는 이름은 셋뿐★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다)와 `slot.split`(프론트는
 //   방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만, 버스에서는 방향이
 //   **인자**다 — 그래야 호출자가 방향을 값으로 고른다).
+// ★세대 2 = `slot.popout` 이 들어온 세대★. 선언이 바뀌면 손으로 올린다(매크로 계약 — `declare_commands!`
+//   의 `CATALOG_VERSION` 항목). 안 올리면 어휘가 다른 두 셸이 같은 세대를 보고해 진단이 거짓말을 한다.
+//   ★분기 재료가 아니다★ — 받는 쪽이 이 번호로 거절하면 그게 틀린 것이다(`CommandEnvelope::proto_ver`).
 declare_commands! {
-    catalog_version: 1;
+    catalog_version: 2;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -158,6 +161,24 @@ declare_commands! {
         view_id: String,
         slot_id: String,
     } -> ok SlotCloseOk {} errors [CONFLICT];
+
+    // ★알려진 과도기 분열 — 같은 id 가 두 표면에서 **받는 것도 주는 것도** 다르다★: 프론트 레지스트리에도
+    //   `slot.popout` 이 있다(`src/commands/slotCommands.ts`). 받는 것 — 그쪽은 목적지 인자가 없어 **항상 새
+    //   창**이고(포커스된 좌표만 쓴다), 여기는 `to_window` 로 기존 창도 고른다. 주는 것 — 그쪽은
+    //   `{window, tab}`, 여기는 `{window, new_view_id}`. 한쪽만 맞춰 고치지 말 것 — 합류는 프론트 자체
+    //   레지스트리를 은퇴시키는 후속 스텝(화면 몫 등록) 몫이고, 지금 한쪽을 바꾸면 그 스텝이 옮길 대상만
+    //   늘어난다. 반대편에도 같은 메모가 붙어 있다.
+    /// 슬롯의 내용을 다른 창의 새 탭으로 옮긴다(원본 슬롯은 닫힌다) — to_window 를 빼면 새 창을 연다.
+    #[effect(Write)]
+    #[since(2)]
+    "slot.popout" => args SlotPopoutArgs {
+        view_id: String,
+        slot_id: String,
+        to_window: Option<String>,
+    } -> ok SlotPopoutOk {
+        window: String,
+        new_view_id: String,
+    } errors [CONFLICT];
 
     /// 포커스를 그 슬롯으로 옮긴다(출력 라우팅은 안 바뀐다).
     #[effect(Write)]
@@ -295,6 +316,12 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         &mut table,
         "slot.close",
         blocking_handler(move |args: SlotCloseArgs| verb_slot_close(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "slot.popout",
+        blocking_handler(move |args: SlotPopoutArgs| verb_slot_popout(&p, args)),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -479,6 +506,34 @@ fn verb_slot_close(ports: &LayoutPorts, args: SlotCloseArgs) -> Result<SlotClose
     )
     .map_err(not_applied)?;
     Ok(SlotCloseOk {})
+}
+
+fn verb_slot_popout(
+    ports: &LayoutPorts,
+    args: SlotPopoutArgs,
+) -> Result<SlotPopoutOk, CommandError> {
+    let view = uuid_arg("view_id", &args.view_id)?;
+    let slot = uuid_arg("slot_id", &args.slot_id)?;
+    let target = optional_text("to_window", args.to_window.as_deref())?;
+    let moved = apply::move_slot_to_window(
+        &ports.state,
+        ports.subs.as_ref(),
+        ports.events.as_ref(),
+        ports.windows.as_ref(),
+        ports.labels.as_ref(),
+        view,
+        slot,
+        target.map(str::to_string),
+    )
+    .map_err(not_applied)?;
+    // ★`view_id` 라 부르지 않는다★ — 이 명령의 인자에 이미 `view_id`(떼어낼 **원본** 탭)가 있어서, 답의 같은
+    //   이름은 반대쪽을 뜻하게 된다. 답을 그대로 되먹여 두 번 부르는 호출자는 원본 대신 방금 만든 탭을
+    //   집어 엉뚱한 뷰에서 슬롯을 떼어낸다. `new_` 접두는 그 혼동을 막으면서도 값이 view id 임을 남겨
+    //   `tab.rename`·`tab.switch` 의 `view_id` 에 그대로 꽂힌다. 서비스 쪽 이름은 `tab` 이다(프론트 wire).
+    Ok(SlotPopoutOk {
+        window: moved.window,
+        new_view_id: moved.tab.to_string(),
+    })
 }
 
 fn verb_slot_focus(ports: &LayoutPorts, args: SlotFocusArgs) -> Result<SlotFocusOk, CommandError> {

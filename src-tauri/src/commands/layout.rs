@@ -49,8 +49,9 @@ pub(crate) fn emit_window_tabs(app: &AppHandle, tabs: &WindowTabsPayload) {
 
 // ── 적용 서비스 포트의 Tauri 어댑터 ──────────────────────────────────────────
 
-struct TauriEvents<'a> {
-    app: &'a AppHandle,
+// popout 껍데기도 같은 어댑터를 빌려 쓴다 — emit 로직을 두 번 적으면 사람 경로와 LLM 경로가 갈린다.
+pub(crate) struct TauriEvents<'a> {
+    pub app: &'a AppHandle,
 }
 
 impl LayoutEvents for TauriEvents<'_> {
@@ -65,9 +66,9 @@ impl LayoutEvents for TauriEvents<'_> {
     }
 }
 
-struct RouterSubs<'a> {
-    router: &'a OutputRouter,
-    client: &'a DaemonClient,
+pub(crate) struct RouterSubs<'a> {
+    pub router: &'a OutputRouter,
+    pub client: &'a DaemonClient,
 }
 
 impl SubscriptionSync for RouterSubs<'_> {
@@ -153,6 +154,10 @@ impl WindowHost for OwnedWindowHost {
 
     fn close(&self, label: &str) {
         TauriWindowHost { app: &self.app }.close(label);
+    }
+
+    fn is_open(&self, label: &str) -> bool {
+        TauriWindowHost { app: &self.app }.is_open(label)
     }
 }
 
