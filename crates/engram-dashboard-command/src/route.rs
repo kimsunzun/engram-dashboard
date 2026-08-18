@@ -35,6 +35,7 @@ fn panic_detail(payload: &Box<dyn Any + Send>) -> String {
 }
 
 /// 핸들러가 터졌다 — 이 홉에서 **확실히** 실패했다(봉투가 나간 적이 없다).
+// ADR-0153
 fn handler_panicked(detail: String) -> CommandError {
     CommandError::of(
         ErrorCode::Internal,
@@ -47,6 +48,7 @@ fn handler_panicked(detail: String) -> CommandError {
 /// 봉투는 이미 선을 탔을 수 있으므로 **이 홉의 확실성은 「불명」**이다(TRD §4-④). `INTERNAL`(= `retry:
 /// never`)로 답하면 호출자는 「여기서 확실히 실패했다」로 읽고 새 id 로 다시 부르는데, 그러면 상대가
 /// 이미 적용한 조작이 두 번 적용될 수 있다. `OUTCOME_UNKNOWN` 은 **같은 id 로만** 다시 묻게 한다.
+// ADR-0153
 fn forwarding_unknown(detail: String) -> CommandError {
     CommandError::of(
         ErrorCode::OutcomeUnknown,

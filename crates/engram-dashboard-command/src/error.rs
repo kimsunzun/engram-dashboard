@@ -44,6 +44,7 @@ macro_rules! error_codes {
             /// 코드가 아니라 운에 따라 재시도 여부를 정하게 된다.
             /// ★표의 세 번째 칸인 이유★: 밖에 두면 포괄 갈래(`_ => Never`)가 서고, 그러면 새 코드가
             /// **아무 결정 없이** 「재시도 금지」를 달고 나간다.
+            // ADR-0153
             pub const fn default_retry(self) -> RetryMode {
                 match self {
                     $( Self::$variant => RetryMode::$retry, )+
@@ -94,6 +95,7 @@ impl fmt::Display for ErrorCode {
 ///
 /// ★`SameRequestId` 는 「안전하게 재실행해도 된다」가 아니다★ — 적용 여부가 **불명**이라 **같은 id 로만**
 /// 다시 물어야 한다는 뜻이다(새 id 로 재시도하면 같은 조작이 두 번 적용될 수 있다 — TRD §4-⑥).
+// ADR-0153
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetryMode {
     Never,
