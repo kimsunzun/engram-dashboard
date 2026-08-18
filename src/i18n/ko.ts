@@ -47,18 +47,24 @@ export const ko = {
   agent: {
     spawn: '에이전트 생성(spawn)',
     create: '에이전트 생성', // ADR-0078 생성 서브메뉴 컨테이너 라벨과 값 재사용.
-    createTerminal: '클로드 터미널 생성', // 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
-    createJson: '클로드 JSON 생성', // 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
+    createTerminal: '클로드코드 터미널', // 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
+    createJson: '클로드코드 JSON', // 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
     spawnInto: '스폰 + 배치',
     kill: '에이전트 종료',
     monitor: '에이전트 모니터링',
     connecting: '에이전트 연결 중…', // caps 미도착 슬롯의 중립 플레이스홀더.
+    // ADR-0148: 명부를 받았는데 그 id 의 프로필도 없는 슬롯(트리에서 삭제됨). 위 connecting 과 구분한다 —
+    // 그쪽은 "곧 온다", 이쪽은 "올 것이 없다".
+    noneConnected: '연결된 에이전트가 없습니다',
     monitoringLabel: '에이전트 모니터링 — 이 슬롯에 실행중 에이전트 배정',
     monitoringSearch: '에이전트 검색 (이름·경로)',
     noCandidates: '검색 결과 없음', // 실행중은 있으나 검색 미스.
     noRunning: '실행중 에이전트 없음 — 트리에서 에이전트를 생성/활성화하세요.',
     terminatedPlaceholder: '종료된 에이전트', // 오버레이 '종료됨'과 별개.
     inputPlaceholder: '메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)',
+    // 빈 상태(ADR-0145) 가운데 입력창 전용. 하단 배치는 위 inputPlaceholder 를 그대로 쓴다 —
+    // Enter/Shift+Enter 안내가 사라지면 안 되므로 한 키로 합치지 않는다(사용자 지정 문구).
+    emptyInputPlaceholder: '메시지를 입력하세요',
     treeLabel: '에이전트 트리',
     emptyList: '에이전트 없음 — 우클릭으로 생성',
     terminatedOverlay: '종료됨', // placeholder '종료된 에이전트'와 별개.

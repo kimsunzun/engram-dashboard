@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
-import { mergeTreeNodes } from './mergeTreeNodes'
+import { agentPresence, mergeTreeNodes } from './mergeTreeNodes'
 
 const caps = (interrupt: boolean): Capabilities => ({
   input: { raw: true, message: false, attachment: false },
@@ -281,5 +281,35 @@ describe('mergeTreeNodes', () => {
       expect(forward).toEqual(['z', 'y', 'x'])
       expect(reversed).toEqual(forward)
     })
+  })
+})
+
+// ADR-0148: 트리의 "실행중 vs 예약" 판정을 id 하나로 물어보는 형태. 슬롯 렌더 게이트가 같은 함수를 쓴다 —
+// 규칙이 두 곳에서 갈리면 종료된 에이전트의 슬롯 표현이 트리와 어긋난다.
+describe('agentPresence', () => {
+  it('명부에 있으면 running — terminal 상태여도 세션이 아직 있으므로 running 이다', () => {
+    const dead = agent('A', '', true, { type: 'Killed' })
+    expect(agentPresence('A', [dead], [])).toBe('running')
+  })
+
+  it('명부엔 없고 프로필만 있으면 reserved(= 종료 후 수거된 모습)', () => {
+    expect(agentPresence('A', [], [profile('A')])).toBe('reserved')
+  })
+
+  it('둘 다 없으면 unknown', () => {
+    expect(agentPresence('A', [agent('B')], [profile('C')])).toBe('unknown')
+  })
+
+  it('트리의 예약 노드 집합과 같은 판정이다(같은 입력에서 서로 어긋나지 않는다)', () => {
+    const agents = [agent('run')]
+    const profiles = [profile('run'), profile('dead')]
+    const reservedInTree = mergeTreeNodes(profiles, agents)
+      .filter(n => n.kind === 'reserved')
+      .map(n => n.id)
+    const reservedByRule = [...profiles, ...agents]
+      .map(x => x.id)
+      .filter(id => agentPresence(id, agents, profiles) === 'reserved')
+    expect(reservedInTree).toEqual(['dead'])
+    expect([...new Set(reservedByRule)]).toEqual(reservedInTree)
   })
 })

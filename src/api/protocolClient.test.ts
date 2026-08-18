@@ -482,6 +482,23 @@ describe('epoch 회전 중 buffering(폐기 + 재요청, 구 epoch 마커 무시
     t.marker(AGENT, 2, gen2)
     expect(got).toEqual([0, 1]) // epoch 2 프레임만
   })
+
+  // ADR-0145: buffering 재시작도 통지한다(소비자가 '복원 완료' 판정을 내릴 수 있게).
+  //   ★이 경로에 live 뷰는 오지 않는다★ — handleOutput 이 live 뷰의 상위 epoch 프레임을 drop 해
+  //   remount 흐름에 맡기고 error 뷰는 아예 건너뛰므로, epoch 회전으로 startBuffering 하는 건
+  //   buffering 뷰뿐이다. live → buffering 역전이를 만드는 경로는 재연결 전량 리셋 하나다(아래 describe).
+  it("epoch 회전으로 buffer 를 폐기하고 재요청할 때 onState('buffering') 이 온다", async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const states: string[] = []
+    await c.subscribeOutput(V1, AGENT, () => {}, (s) => states.push(s))
+    t.output(AGENT, 1, 0)
+    expect(states).toEqual([])
+
+    t.output(AGENT, 2, 0) // 더 높은 epoch → startBuffering(폐기 + 재요청)
+    expect(states).toEqual(['buffering'])
+    expect(c.getViewOutputState(V1)?.phase).toBe('buffering')
+  })
 })
 
 // ── 재연결 중 buffering(폐기 + 재요청) ─────────────────────────────────────────────────
@@ -504,6 +521,26 @@ describe('재연결(connected 재전이) → 모든 뷰 buffering 리셋 + 재�
     t.output(AGENT, 1, 1)
     t.marker(AGENT, 1, gen2)
     expect(got).toEqual([0, 1])
+  })
+
+  // ADR-0145: 재연결 리셋도 같은 역전이다 — 끊긴 동안 쌓인 이력이 재flush 되므로, 통지 없이는 소비자가
+  //   그 사이를 '복원 완료' 로 오인한 채 화면을 유지하다 뒤집힌다.
+  it("재연결로 되돌아간 뷰에도 onState('buffering') → 재flush 후 다시 'live' 가 온다", async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const states: string[] = []
+    await c.subscribeOutput(V1, AGENT, () => {}, (s) => states.push(s))
+    t.marker(AGENT, 1, t.replayCalls[0].gen)
+    expect(states).toEqual(['live'])
+
+    t.setState('reconnecting')
+    t.setState('connected')
+    expect(states).toEqual(['live', 'buffering'])
+
+    const gen2 = t.replayCalls[1].gen
+    await Promise.resolve() // myGen=gen2 확정
+    t.marker(AGENT, 1, gen2)
+    expect(states).toEqual(['live', 'buffering', 'live'])
   })
 
   it('connected→비connected 전이 시 pending 명령 reject(connection lost)', async () => {

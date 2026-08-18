@@ -36,7 +36,14 @@ vi.mock('../../api/clientFactory', () => ({
 // FIX 1(ADR-0041): 렌더러 분기가 store 의 AgentInfo 유무·caps 에 의존하므로 테스트가 agents 를 제어할 수
 // 있어야 한다. vi.hoisted 로 가변 holder 를 만들어 selector 에 흘린다(TerminalSlot/RichSlot 은 stub 이라
 // 자기 useAgentStore 호출은 무해). afterEach 에서 초기화.
-const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], presets: [] as unknown[] }))
+// ADR-0148: 세 갈래 게이트(명부 미수신 / 프로필 생존 / 프로필 부재)가 agentsLoaded·profiles 를 함께 본다.
+const agentStoreState = vi.hoisted(() => ({
+  agents: [] as unknown[],
+  agentsLoaded: false,
+  profiles: [] as unknown[],
+  profilesLoaded: false,
+  presets: [] as unknown[],
+}))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: Object.assign(
     (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
@@ -90,22 +97,25 @@ vi.mock('allotment', async () => {
   return { Allotment }
 })
 
-// ── TerminalSlot stub — xterm DOM 의존 없이 마운트 여부만 확인 ─────────────────
+// ── 슬롯 stub 3종 — 실 구독/xterm 없이 마운트 여부·전달된 prop 만 확인 ─────────────────
+// ★epoch 를 data 속성으로 노출한다(ADR-0148)★: 슬롯 컴포넌트의 재구독 트리거가 [viewId, agentId, epoch] 라,
+//   상위가 넘기는 epoch 이 흔들리면 재마운트·reset 이 돌아 화면 내용이 지워진다. prop 을 그리지 않으면
+//   그 회귀를 DOM 에서 관측할 수 없다.
 vi.mock('../slot/TerminalSlot', () => ({
-  default: ({ agentId }: { agentId: string }) => (
-    <div data-testid="terminal-slot" data-agent-id={agentId} />
+  default: ({ agentId, epoch }: { agentId: string; epoch?: number }) => (
+    <div data-testid="terminal-slot" data-agent-id={agentId} data-epoch={String(epoch)} />
   ),
 }))
 
-// ── RichSlot stub(라이브 구조화 슬롯) — 실스트림 구독/누산 없이 마운트 여부만 확인 ──
 vi.mock('../slot/RichSlot', () => ({
-  default: () => <div data-testid="rich-slot" />,
+  default: ({ agentId, epoch }: { agentId: string; epoch?: number }) => (
+    <div data-testid="rich-slot" data-agent-id={agentId} data-epoch={String(epoch)} />
+  ),
 }))
 
-// ── DomSlot stub(§5 관측용) — 구독 배선 없이 마운트 여부·agentId prop 만 확인 ──
 vi.mock('../slot/DomSlot', () => ({
-  default: ({ agentId }: { agentId: string }) => (
-    <div data-testid="dom-slot" data-agent-id={agentId} />
+  default: ({ agentId, epoch }: { agentId: string; epoch?: number }) => (
+    <div data-testid="dom-slot" data-agent-id={agentId} data-epoch={String(epoch)} />
   ),
 }))
 
@@ -152,6 +162,9 @@ afterEach(() => {
   cleanup()
   useViewStore.setState({ renderModeOverride: {} })
   agentStoreState.agents = []
+  agentStoreState.agentsLoaded = false
+  agentStoreState.profiles = []
+  agentStoreState.profilesLoaded = false
 })
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────────
@@ -190,7 +203,12 @@ function caps(structured: boolean): Capabilities {
   }
 }
 
-function agentInfo(id: string, structured: boolean): AgentInfo {
+/**
+ * ★epoch 기본값 2 = 정상 세대(ADR-0148)★: 백엔드는 매 spawn 마다 epoch 을 올리고 첫 세션 후 그 사실을
+ * 영속화하므로, 부팅 복원·트리 재활성화로 뜬 에이전트는 항상 epoch ≥ 1 이다. 0 으로 시딩하면 "죽는 순간
+ * epoch 이 0 으로 떨어져 재마운트된다" 는 회귀가 값이 같아서 안 잡힌다(실제로 그렇게 새어 나갔다).
+ */
+function agentInfo(id: string, structured: boolean, epoch = 2): AgentInfo {
   return {
     id,
     name: id,
@@ -198,7 +216,7 @@ function agentInfo(id: string, structured: boolean): AgentInfo {
     status: { type: 'Running' },
     cols: 80,
     rows: 24,
-    epoch: 0,
+    epoch,
     capabilities: caps(structured),
   }
 }
@@ -291,6 +309,164 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
     expect(screen.queryByTestId('terminal-slot')).toBeNull()
     expect(screen.queryByTestId('rich-slot')).toBeNull()
+  })
+
+  // ── ADR-0148: "명부에 없는 에이전트" 를 세 갈래로 가른다 ────────────────────────────────
+  //
+  // 한 상태(agent==null)가 세 가지 뜻을 겹쳐 갖고 있었다. 종료(kill)의 실제 결말은 reaper 가 세션을
+  // 수거하며 **명부에서 지우고 프로필은 남기는** 것이라, 옛 게이트는 죽은 슬롯을 「연결 중」으로 그리며
+  // 뷰를 내렸다 — 데몬이 replay ring 을 세션과 함께 버리므로 그 순간 대화가 영구 소실됐다.
+  describe('ADR-0148 — 에이전트 없는 슬롯 세 갈래', () => {
+    const GONE = 'gone-agent'
+
+    /**
+     * epoch 를 담는다 — 백엔드가 spawn 때 프로필에 올려 영속화하므로 수거 후에도 같은 값이 남는다.
+     * 종료 구간의 epoch 정상 출처가 이것이고, 기억은 프로필을 못 받은 구간의 폴백이다.
+     */
+    function profile(id: string, epoch = 3): unknown {
+      return { id, name: id, cwd: '/tmp', display_name: null, parent_id: null, created_at: 0, epoch }
+    }
+
+    /** 살아있는 에이전트로 한 번 마운트해 "기억"을 만든다(epoch ≥ 1 = 정상 세대). */
+    function mountAlive(structured = true, epoch = 3) {
+      seedAgents(agentInfo(GONE, structured, epoch))
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = true
+      agentStoreState.profiles = [profile(GONE, epoch)]
+      return render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+    }
+
+    it('프로필 있음 + 마운트 기억 없음 → 「에이전트 연결 중…」(스폰 대기·부팅 대기가 여기)', () => {
+      // 예약 노드를 활성화한 직후가 이 상태다: 프로필은 이미 있고 에이전트는 아직 없다.
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = true
+      agentStoreState.profiles = [profile(GONE)]
+      render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
+      // 아직 뜬 적 없는 슬롯이라 죽은 에이전트로 구독을 걸지 않는다.
+      expect(screen.queryByTestId('rich-slot')).toBeNull()
+      expect(screen.queryByTestId('terminal-slot')).toBeNull()
+    })
+
+    it('명부·프로필 목록 자체를 못 받은 구간도 「에이전트 연결 중…」(「없습니다」로 새지 않는다)', () => {
+      // profilesLoaded=false = refreshProfiles 미도착·실패. 여기서 「없습니다」로 새면 대화를 보존 중인
+      //   뷰가 조기 언마운트된다.
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = false
+      agentStoreState.profiles = []
+      render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
+    })
+
+    // ★F1 회귀★: 종료 순간 epoch 을 0 으로 떨어뜨리면 [viewId,agentId,epoch] 가 흔들려 슬롯이 재마운트되고
+    //   보존하려던 대화가 그 자리에서 지워진다. "같은 DOM 노드가 그대로 있나" 로 본다 — 텍스트 존재만
+    //   보면 재마운트와 리렌더가 구분되지 않는다.
+    it('프로필 있음 + 기억 있음 → 같은 노드를 유지하고 epoch 도 기억한 값을 그대로 넘긴다', () => {
+      const { rerender } = mountAlive(true, 3)
+      const before = screen.getByTestId('rich-slot')
+      expect(before.getAttribute('data-epoch')).toBe('3')
+
+      // 종료 = 명부에서 사라지고 프로필만 남는다.
+      agentStoreState.agents = []
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      const after = screen.getByTestId('rich-slot')
+      expect(Object.is(before, after)).toBe(true) // 재마운트되지 않았다 = 대화 보존
+      expect(after.getAttribute('data-epoch')).toBe('3') // 0 으로 떨어지지 않았다
+      expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
+      expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
+    })
+
+    it('터미널 모드도 같다 — 노드 유지 + epoch prop 유지', () => {
+      const { rerender } = mountAlive(false, 5)
+      const before = screen.getByTestId('terminal-slot')
+      expect(before.getAttribute('data-epoch')).toBe('5')
+
+      agentStoreState.agents = []
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      const after = screen.getByTestId('terminal-slot')
+      expect(Object.is(before, after)).toBe(true)
+      expect(after.getAttribute('data-epoch')).toBe('5')
+    })
+
+    // ★F2 회귀★: 기억은 그 에이전트 것이다. 다른 에이전트를 배정하면 caps 게이트를 건너뛰어선 안 된다 —
+    //   B 가 터미널 모드인데 A 의 기억으로 RichSlot 이 뜨면 tag0 바이트를 버린다.
+    it('슬롯에 다른 에이전트를 배정하면 기억을 쓰지 않는다(caps 게이트 유지)', () => {
+      const { rerender } = mountAlive(true, 3)
+      expect(screen.getByTestId('rich-slot')).toBeTruthy()
+
+      // B 배정 — 아직 명부에 없다(caps 미도착).
+      const OTHER = 'other-agent'
+      agentStoreState.profiles = [profile(GONE), profile(OTHER)]
+      rerender(<ViewLayoutRenderer node={slotNode('s1', OTHER)} focusedSlotId={null} />)
+
+      expect(screen.queryByTestId('rich-slot')).toBeNull()
+      expect(screen.queryByTestId('terminal-slot')).toBeNull()
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+    })
+
+    // ★G1 회귀★: 프로필 목록을 못 받은 채(단발 pull 실패·지연) 종료되면 presence 는 'unknown' 이다.
+    //   그걸로 뷰를 내리면 보존하려던 대화가 영구 소실된다 — "프로필이 없다" 는 목록을 받은 뒤에만 믿는다.
+    it('프로필 목록을 못 받은 상태에서 종료돼도 기억이 있으면 뷰를 지킨다', () => {
+      // 명부는 받았고(에이전트가 실제로 떴다) 프로필 목록만 못 받은 조합.
+      seedAgents(agentInfo(GONE, true, 4))
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = false
+      agentStoreState.profiles = []
+      const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      const before = screen.getByTestId('rich-slot')
+      expect(before.getAttribute('data-epoch')).toBe('4')
+
+      agentStoreState.agents = []
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      const after = screen.getByTestId('rich-slot')
+      expect(Object.is(before, after)).toBe(true)
+      // 프로필이 없으니 epoch 은 기억에서 온다 — 이 폴백이 없으면 0 으로 떨어져 재구독·reset 이 돈다.
+      expect(after.getAttribute('data-epoch')).toBe('4')
+      expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
+    })
+
+    // ★G2 회귀★: 기억을 안 지우면 배정을 뺐다가 되돌릴 때 되살아난다. 그 사이 뷰는 이미 언마운트돼
+    //   대화가 없으므로, 되살아난 기억은 "빈 화면 + 흐림 + 수거된 에이전트로 구독" 을 만든다.
+    it('배정을 다른 에이전트로 옮겼다가 되돌리면 기억이 되살아나지 않는다', () => {
+      const OTHER = 'other-agent'
+      const { rerender } = mountAlive(true, 3)
+      expect(screen.getByTestId('rich-slot')).toBeTruthy()
+
+      // 종료 → 뷰 유지(정상).
+      agentStoreState.agents = []
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      expect(screen.getByTestId('rich-slot')).toBeTruthy()
+
+      // 같은 슬롯에 B 배정 → A 의 뷰는 언마운트되고(대화 state 도 여기서 죽는다) 기억도 버려져야 한다.
+      agentStoreState.profiles = [profile(GONE), profile(OTHER)]
+      rerender(<ViewLayoutRenderer node={slotNode('s1', OTHER)} focusedSlotId={null} />)
+      expect(screen.queryByTestId('rich-slot')).toBeNull()
+
+      // 다시 A 배정 — 되살릴 대화가 없으므로 빈 뷰를 띄우지 않는다.
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      expect(screen.queryByTestId('rich-slot')).toBeNull()
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+    })
+
+    it('프로필 없음 → 「연결된 에이전트가 없습니다」(보존 중이던 뷰도 여기서 내려간다 — 의도)', () => {
+      const { rerender } = mountAlive(true, 3)
+      expect(screen.getByTestId('rich-slot')).toBeTruthy()
+
+      // 종료 후 프로필까지 삭제 = 사용자의 명시적 정리 동작.
+      agentStoreState.agents = []
+      agentStoreState.profiles = []
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      expect(screen.getByText('연결된 에이전트가 없습니다')).toBeTruthy()
+      expect(screen.queryByTestId('rich-slot')).toBeNull()
+    })
   })
 
   it('agent 가 store 에 있고 structured caps → RichSlot(TerminalSlot 없음)', () => {
@@ -501,9 +677,16 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
   })
 
-  // ★아이콘은 클릭을 삼키지 않는다(ADR-0143)★: 좌클릭 한 번이 포커스와 메뉴를 함께 일으켜야 하므로
-  //   아이콘 위 클릭도 컨테이너까지 닿아야 한다. 여기가 없으면 아이콘에 상호작용을 되붙여도 스위트가
-  //   초록이라 click-to-focus 가 조용히 죽는다(메뉴는 계속 열리므로 눈으로도 안 보인다).
+  // ADR-0144: 빈 슬롯 좌클릭은 메뉴를 열지 않는다 — 포커스 이동은 그대로다.
+  it('empty 슬롯 좌클릭은 focusSlot 만 부르고 메뉴는 열지 않는다', () => {
+    clickSlot({ type: 'empty' })
+    expect(focusSlotSpy).toHaveBeenCalledWith(FOCUS_VIEW, 's1')
+    expect(screen.queryByText('가로 분할')).toBeNull()
+  })
+
+  // ★아이콘은 클릭을 삼키지 않는다★: 아이콘 위 클릭도 컨테이너까지 닿아야 focusSlot 이 불린다. 여기가
+  //   없으면 아이콘에 상호작용을 되붙여도 스위트가 초록이라 click-to-focus 가 조용히 죽는다(좌클릭이
+  //   메뉴를 열지 않는 지금은 포커스링 외엔 눈으로 확인할 신호도 없다, ADR-0144).
   it('`+` 아이콘 위 클릭도 컨테이너까지 닿아 focusSlot 을 부른다', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'empty' })} focusedSlotId={null} />)
     fireEvent.click(emptyIcons()[0], { clientX: 5, clientY: 5 })
@@ -621,16 +804,17 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  // ── ★빈 슬롯 좌클릭 = 우클릭과 같은 메뉴(ADR-0143)★ ────────────────────────────────────────────
-  // 이 스위트가 막는 것 둘: ① 좌클릭 표적이 슬롯 전체에서 아이콘으로 좁아지는 회귀 — 빈 여백을 눌러도
-  // 열려야 한다 ② 좌클릭이 자기만의 두 번째 메뉴를 짓는 것 — 같은 setContextMenu 상태·같은
-  // SlotContextMenu 라야 빈 슬롯 메뉴 구성(ADR-0065/0067)이 하나로 유지된다.
+  // ── ★메뉴는 우클릭 전용(ADR-0144)★ ────────────────────────────────────────────────────────
+  // ADR-0141/0143 은 빈 슬롯 좌클릭도 메뉴를 열게 했으나, "클릭할 때마다 메뉴가 뜬다"는 불편 제보로
+  // ADR-0144 가 되돌렸다 — 빈 슬롯 좌클릭도 이제 다른 콘텐츠 슬롯과 같이 포커스만 옮긴다. 아래 세
+  // 케이스는 우클릭으로 연 메뉴에 걸려 있던 불변식(재앵커 금지·바깥 클릭 처리·command 경로)이 좌클릭
+  // 오프너 제거 후에도 유지되는지를 검증한다.
   /** 메뉴 div(position:fixed 컨테이너) — 좌표 단언용. */
   function openedMenu(): HTMLElement {
     return screen.getByText('가로 분할').closest('[style*="position: fixed"]') as HTMLElement
   }
 
-  /** 아이콘이 아닌 빈 여백 좌클릭 = 슬롯 래퍼가 표적. */
+  /** 아이콘이 아닌 빈 여백 좌클릭 = 슬롯 래퍼가 표적(ADR-0144 이후엔 메뉴를 열지 않는다). */
   function leftClickSlot(slotId: string, x: number, y: number): void {
     fireEvent.click(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement, {
       clientX: x,
@@ -638,34 +822,13 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   }
 
-  it('빈 슬롯 여백 좌클릭 → 우클릭과 동일한 메뉴가 클릭 좌표에서 열린다', () => {
-    render(<ViewLayoutRenderer node={slotNode('slot-lc', null)} focusedSlotId={null} />)
-    expect(screen.queryByText('새 콘텐츠')).toBeNull()
-    leftClickSlot('slot-lc', 42, 77)
-    // jsdom 은 메뉴 rect 를 0 으로 주므로 뒤집기 없이 앵커+간격(ANCHOR_GAP, ADR-0143 결정 4)에 놓인다.
-    //   간격의 크기·유도는 SlotContextMenu 소관이고 여기 관심사는 "클릭 좌표를 앵커로 쓴다"뿐이다.
-    expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
-    expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
-    expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
-    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
-    expect(screen.getByText('가로 분할')).toBeTruthy()
-    expect(screen.getByText('세로 분할')).toBeTruthy()
-    expect(screen.getByText('닫기')).toBeTruthy()
-  })
-
-  // ★아이콘은 클릭을 삼키지 않는다(ADR-0143)★: 실브라우저에선 pointer-events 가 끊겨 아이콘이 애초에
-  //   이벤트 대상이 되지 않는데, jsdom 엔 히트테스트(elementFromPoint)가 없어 그 층은 여기서 재현되지
-  //   않는다(실측은 GUI 몫) — 대신 계산된 pointer-events 값과, 대상이 되더라도 컨테이너까지 닿는다는 것
-  //   (자체 핸들러·전파 차단 부재)을 함께 고정한다.
-  it('`+` 아이콘 위 좌클릭도 같은 메뉴를 클릭 좌표에서 연다', () => {
-    render(<ViewLayoutRenderer node={slotNode('slot-icon', null)} focusedSlotId={null} />)
-    const icon = emptyIcons()[0]
-    expect(getComputedStyle(icon).pointerEvents).toBe('none')
-    fireEvent.click(icon, { clientX: 12, clientY: 34 })
-    expect(openedMenu().style.left).toBe(`${12 + ANCHOR_GAP}px`)
-    expect(openedMenu().style.top).toBe(`${34 + ANCHOR_GAP}px`)
-    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
-  })
+  /** 메뉴 오프너는 우클릭뿐(ADR-0144) — 좌표가 필요한 케이스(재앵커·바깥 클릭)는 openMenu() 대신 이걸 쓴다. */
+  function rightClickSlot(slotId: string, x: number, y: number): void {
+    fireEvent.contextMenu(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement, {
+      clientX: x,
+      clientY: y,
+    })
+  }
 
   // ★상호작용을 되붙이지 않는다(ADR-0143 §영향)★: 빈 슬롯 안에는 role·tabindex·버튼이 없어야 한다 —
   //   되붙이면 컨테이너 핸들러와 겹쳐 이중 오픈이 되고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 살아난다.
@@ -679,6 +842,8 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(icon.hasAttribute('tabindex')).toBe(false)
     expect(icon.hasAttribute('role')).toBe(false)
     expect(icon.hasAttribute('aria-label')).toBe(false)
+    // ADR-0143 결정 2: 순수 그림 — pointer-events 를 끊어 클릭이 항상 컨테이너까지 닿는다(ADR-0144 이후도 유효).
+    expect(getComputedStyle(icon).pointerEvents).toBe('none')
   })
 
   // ★아이콘 크기 = 32px 초과(ADR-0143 결정 3)★: Tailwind `size-N` = N×0.25rem = N×4px(기본 스케일)이라
@@ -690,42 +855,43 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(Number(sizeClass![1]) * 4).toBeGreaterThan(32)
   })
 
-  // ★열린 메뉴는 재앵커되지 않는다(ADR-0143 §영향 — 메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라
-  //   슬롯 래퍼 안에 마운트돼 서브메뉴 컨테이너 행 클릭이 컨테이너 좌클릭까지 버블한다. 재앵커하면 메뉴가
-  //   커서 밑으로 점프해 앵커가 메뉴에 겹치고 이어지는 클릭이 커서 밑 항목을 실행한다.
+  // ★열린 메뉴는 재앵커되지 않는다(메뉴 *안쪽* 클릭)★: SlotContextMenu 는 포털이 아니라 슬롯 래퍼 안에
+  //   마운트돼 서브메뉴 컨테이너 행 클릭이 래퍼까지 버블한다. 재앵커하면 메뉴가 커서 밑으로 점프해 앵커가
+  //   메뉴에 겹치고 이어지는 클릭이 커서 밑 항목을 실행한다. 좌클릭이 메뉴를 열지 않게 된 뒤에도(ADR-0144)
+  //   우클릭으로 연 메뉴 안쪽 클릭에 대해선 이 불변식이 여전히 성립해야 한다.
   it('열린 메뉴의 "새 콘텐츠" 행 클릭은 메뉴를 다시 앵커하지 않는다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-reanchor', null)} focusedSlotId={null} />)
-    leftClickSlot('slot-reanchor', 42, 77)
+    rightClickSlot('slot-reanchor', 42, 77)
     fireEvent.click(screen.getByText('새 콘텐츠'), { clientX: 300, clientY: 400 })
     expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
     expect(openedMenu().style.top).toBe(`${77 + ANCHOR_GAP}px`)
   })
 
-  // ★반면 메뉴 *바깥*(슬롯 여백) 클릭은 메뉴를 새 자리로 옮긴다 — 위 가드가 삼켜서는 안 된다(ADR-0143 §영향)★
-  //   이 동작은 SlotContextMenu 의 바깥닫기가 `mousedown` 에서 먼저 돌아 상태를 비우는 순서에 의존한다.
-  //   그 리스너를 `click` 으로 옮기거나 없애면 여백 클릭이 가드에 걸려 메뉴를 옮길 수도 닫을 수도 없게 되므로,
-  //   click 만 쏘는 테스트로는 절반만 고정된다 — mousedown 을 함께 쏴 순서까지 고정한다.
-  it('열린 메뉴 밖(슬롯 여백) 좌클릭은 메뉴를 새 좌표로 옮겨 연다', () => {
+  // ★메뉴 *바깥*(슬롯 여백) 좌클릭은 메뉴를 닫을 뿐, 새 좌표로 다시 열지 않는다(ADR-0144)★: SlotContextMenu
+  //   의 바깥닫기는 여전히 `mousedown` 에서 먼저 돌아 상태를 비운다(ADR-0143 시절과 동일). 달라진 건 그
+  //   다음이다 — 좌클릭이 더는 메뉴를 열지 않으므로(위 "메뉴는 우클릭 전용" 섹션) 바깥 클릭 뒤 메뉴는 새
+  //   좌표로 옮겨 열리지 않고 닫힌 채로 남는다.
+  it('열린 메뉴 밖(슬롯 여백) 좌클릭은 메뉴를 닫고 새 좌표로 다시 열지 않는다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-move', null)} focusedSlotId={null} />)
-    leftClickSlot('slot-move', 42, 77)
+    rightClickSlot('slot-move', 42, 77)
     expect(openedMenu().style.left).toBe(`${42 + ANCHOR_GAP}px`)
     const wrapper = document.querySelector('[data-slot-id="slot-move"]') as HTMLElement
     fireEvent.mouseDown(wrapper, { clientX: 300, clientY: 400 })
     leftClickSlot('slot-move', 300, 400)
-    expect(openedMenu().style.left).toBe(`${300 + ANCHOR_GAP}px`)
-    expect(openedMenu().style.top).toBe(`${400 + ANCHOR_GAP}px`)
+    expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
-  it('좌클릭으로 열린 메뉴의 "가로 분할"도 같은 command 경로로 split(…, "top_bottom") 을 부른다', () => {
+  it('우클릭으로 열린 메뉴의 "가로 분할"도 같은 command 경로로 split(…, "top_bottom") 을 부른다', () => {
     render(<ViewLayoutRenderer node={slotNode('slot-lc2', null)} focusedSlotId={null} />)
-    leftClickSlot('slot-lc2', 8, 9)
+    rightClickSlot('slot-lc2', 8, 9)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-lc2', 'top_bottom')
   })
 
-  // ★좌클릭 분기는 빈 슬롯에만(ADR-0143)★: 터미널 입력·트리 노드 선택·팔레트 항목 클릭 위에 메뉴가 뜨면
-  //   그 슬롯들이 가진 자기 클릭 의미를 덮는다. 이 경계가 이번에 새로 생긴 자리라 가장 먼저 회귀한다
-  //   ('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
+  // ★좌클릭은 어느 슬롯 타입도 메뉴를 열지 않는다(ADR-0144)★: 터미널 입력·트리 노드 선택·팔레트 항목
+  //   클릭 위에 메뉴가 뜨면 그 슬롯들이 가진 자기 클릭 의미를 덮는다. 빈 슬롯도 이제 같은 규칙이고(그
+  //   케이스는 focusSlot 과 함께 위 click-to-focus 게이트 스위트가 검증한다) 아래 세 케이스는 제어
+  //   슬롯 몫이다('가로 분할'은 콘텐츠 종류와 무관한 공통 항목이라 "메뉴가 떴는지"의 판별자로 쓴다).
   it('agent(터미널) 슬롯 좌클릭은 메뉴를 열지 않는다', () => {
     seedAgents(agentInfo('a-lc', false))
     render(<ViewLayoutRenderer node={slotNode('slot-agent-lc', 'a-lc')} focusedSlotId={null} />)
