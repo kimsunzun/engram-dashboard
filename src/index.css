@@ -25,12 +25,6 @@ html, body, #root {
   background: var(--bg, #0a0a0a);
 }
 
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
 /* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).
    xterm 은 자체 .xterm-viewport 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서
    같은 theme.css 토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은
