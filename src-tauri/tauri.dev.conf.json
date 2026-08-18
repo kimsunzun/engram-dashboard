@@ -9,6 +9,11 @@
   //   없이 즉시 종료된다(실측). 플러그인 Builder 는 Windows 용 이름 override 를 노출하지 않아
   //   (`callback` 과 Linux 전용 `dbus_id` 뿐) identifier 를 가르는 것이 유일한 수단이다.
   //   dev/release 는 데이터 폴더부터 서로 다른 독립 배포다(discovery `default_data_dir`).
+  //   ★이 파일을 실제로 먹이는 주입 지점은 둘이다(하나만 고치지 마라)★: (1) `scripts/tauri-cli.mjs`
+  //   가 `tauri dev` 서브커맨드에 `--config` 로 끼운다(Tauri CLI 경로 전용) · (2)
+  //   `scripts/build-client-shell.mjs` 가 `TAURI_CONFIG` 로 실어 `cargo build -p engram-dashboard`
+  //   에 넘긴다(CLI 를 지나지 않는 경로 — debug 런처 `.bat` 둘과 `/qa` 게이트가 그 스크립트를 부른다).
+  //   (2)가 없던 동안 debug exe 가 release identifier 로 빌드됐다(실측).
   //   대가(의도된 것): identifier 는 WebView2 데이터 폴더도 정하므로 dev 빌드의 웹 상태가 한 번
   //   초기화된다. 데몬 데이터 폴더(`.engram-data`)는 identifier 와 무관해 그대로다.
   //   ★값 제약★: `.app` 으로 끝내지 말 것(macOS 가 디렉터리를 앱으로 오인 — tauri#12674, CLI 가
