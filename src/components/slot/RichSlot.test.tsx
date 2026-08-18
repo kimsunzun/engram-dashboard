@@ -62,10 +62,14 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — 슬롯이 종료 판정용으로 useAgentStore(s => s.agents) 를 조회. 빈 목록 = 살아있음. ──
-const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[] }))
+// ── agentStore stub — 슬롯이 부재 판정용으로 agents·agentsLoaded 를 조회한다. ──
+// agentsLoaded=false 가 기본 = "권위 명부 미수신" → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
+const agentStoreState = vi.hoisted(() => ({
+  agents: [] as unknown[],
+  agentsLoaded: false,
+}))
 vi.mock('../../store/agentStore', () => ({
-  useAgentStore: (selector: (s: { agents: unknown[] }) => unknown) => selector(agentStoreState),
+  useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
 // ── 테스트 대상 ────────────────────────────────────────────────────────────────
@@ -116,6 +120,7 @@ beforeEach(() => {
   clientMock.connectionState = 'connected'
   clientMock.stateCbs.clear()
   agentStoreState.agents = []
+  agentStoreState.agentsLoaded = false
 })
 
 afterEach(() => {
@@ -546,6 +551,38 @@ describe('RichSlot(live) — ADR-0146 에이전트 부재 표현', () => {
     expect(mascot()).not.toBeNull()
     expect(screen.getByText('Claude Code')).toBeTruthy()
     expect(deadOverlay()).not.toBeNull()
+  })
+
+  // ★종료(kill)의 실제 결말★: reaper 가 세션을 수거하며 **명부에서 지운다**(프로필은 시체로 남는다).
+  //   그래서 status 로는 안 잡히고, 명부를 받은 뒤에도 해석 안 되는 id 가 곧 부재다. 이걸 부재로 안 보면
+  //   죽은 에이전트의 입력창이 활성으로 남는다.
+  it('명부 수신 후 해석 안 되는 에이전트도 부재로 본다 — 내용 유지 + 오버레이 + 입력 차단', async () => {
+    // 살아있는 동안 대화가 쌓인 상태를 만든다(명부에 있음).
+    agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' } }]
+    agentStoreState.agentsLoaded = true
+    const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} epoch={0} />)
+    await flush()
+    feedCompletedTurn()
+    expect(deadOverlay()).toBeNull()
+    expect(textarea().disabled).toBe(false)
+
+    // 수거 완료 = 명부에서 사라짐(프로필만 남는다 — 이 컴포넌트는 프로필을 부재 판정에 쓰지 않는다).
+    agentStoreState.agents = []
+    rerender(<RichSlot viewId="v1" agentId={AGENT} epoch={0} />)
+
+    expect(screen.getByText('assistant reply')).toBeTruthy() // 내용은 그대로
+    expect(deadOverlay()).not.toBeNull()
+    expect(textarea().disabled).toBe(true)
+    expect(textarea().placeholder).toBe(t('agent.terminatedPlaceholder'))
+  })
+
+  it('명부를 아직 못 받은 구간(agentsLoaded=false)은 부재로 보지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} epoch={0} />)
+    await flush()
+
+    // agents 가 비어 있지만 명부 미수신이므로 판정을 보류한다 — 기동 직후 슬롯을 죽이면 안 된다.
+    expect(deadOverlay()).toBeNull()
+    expect(textarea().disabled).toBe(false)
   })
 
   it('연결이 끊기면 살아있는 에이전트도 같게 취급하고, 다시 붙으면 걷힌다', async () => {

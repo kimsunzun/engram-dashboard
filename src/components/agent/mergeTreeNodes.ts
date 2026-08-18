@@ -9,6 +9,31 @@
 
 import type { AgentInfo, AgentProfile } from '../../api/types'
 
+/**
+ * 한 id 가 지금 무엇인가 — 트리의 "실행중 vs 예약" 판정을 **id 하나**로 물어보는 형태(ADR-0148).
+ *
+ * - `running`   : 권위 명부(agents)에 있다. 상태가 terminal 이어도 세션이 아직 수거 안 된 것이라 여기 든다.
+ * - `reserved`  : 명부엔 없고 프로필만 있다. **종료(kill) 후 reaper 가 세션을 수거한 뒤의 모습**이 이것이다
+ *                 — reaper 는 명부에서 지우지만 프로필은 시체로 남긴다. 트리의 "예약" 노드와 같은 집합.
+ * - `unknown`   : 둘 다 없다(트리에서 삭제됨).
+ *
+ * ★이 규칙을 두 곳에 각각 적지 않는다★: 트리 합성(mergeTreeNodes)과 슬롯 렌더 게이트(ViewLayoutRenderer)가
+ *   같은 판정을 쓰므로, 한쪽만 고쳐 어긋나는 일이 생기지 않게 여기 한 함수로 둔다. 호출자는 명부·프로필을
+ *   그대로 넘긴다(수십 건 규모 — 인덱스를 미리 만들 이유가 없다).
+ *
+ * 명부 자체를 아직 못 받은 구간은 이 함수로 갈리지 않는다(그때 agents 는 빈 배열이라 `reserved` 로 보인다) —
+ * 호출자가 `agentsLoaded` 를 먼저 확인해야 한다.
+ */
+export function agentPresence(
+  id: string,
+  agents: AgentInfo[],
+  profiles: AgentProfile[],
+): 'running' | 'reserved' | 'unknown' {
+  if (agents.some(a => a.id === id)) return 'running'
+  if (profiles.some(p => p.id === id)) return 'reserved'
+  return 'unknown'
+}
+
 export type AgentTreeNode = {
   id: string
   name: string
@@ -46,7 +71,6 @@ export function mergeTreeNodes(
   profiles: AgentProfile[],
   agents: AgentInfo[],
 ): AgentTreeNode[] {
-  const runningIds = new Set(agents.map(a => a.id))
   // 표시명 override(display_name)와 parent_id 는 AgentProfile 에만 있다(AgentInfo wire 엔 없음). running
   //   노드가 매칭 프로필의 값을 이어받게 id→profile 맵을 만든다(reserved 는 프로필을 직접 매핑).
   const profileById = new Map(profiles.map(p => [p.id, p]))
@@ -66,7 +90,8 @@ export function mergeTreeNodes(
   }))
 
   const reservedNodes: AgentTreeNode[] = profiles
-    .filter(p => !runningIds.has(p.id))
+    // 예약 판정 = 위 agentPresence 와 같은 규칙(슬롯 렌더 게이트와 공유 — 두 곳에 각각 적지 않는다).
+    .filter(p => agentPresence(p.id, agents, profiles) === 'reserved')
     .map(p => ({
       id: p.id,
       name: p.name || p.id.slice(0, 8),

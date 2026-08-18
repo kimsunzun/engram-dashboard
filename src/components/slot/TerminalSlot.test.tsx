@@ -13,7 +13,7 @@
 //   잡아두므로(언마운트 ref-null 방어), 보임 *이전에* container 에 canvas 를 심고 그 canvas 의 getContext 를
 //   spy 해 잡힌 컨텍스트의 loseContext 호출과 순서를 검사한다.
 
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk } from '../../api/agentClient'
@@ -105,6 +105,8 @@ const termState = vi.hoisted(() => ({
   dispose: vi.fn(),
   reset: vi.fn(),
   write: vi.fn(),
+  // 입력 핸들러 캡처 — 부재 시 입력 차단(ADR-0148)을 관측하려면 실제로 데이터를 먹여봐야 한다.
+  onDataCb: null as ((data: string) => void) | null,
 }))
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -113,7 +115,10 @@ vi.mock('@xterm/xterm', () => ({
     reset = termState.reset
     write = termState.write
     refresh = termState.refresh
-    onData = vi.fn(() => ({ dispose: vi.fn() }))
+    onData = (cb: (data: string) => void) => {
+      termState.onDataCb = cb
+      return { dispose: vi.fn() }
+    }
     dispose = termState.dispose
     cols = 80
     rows = 24
@@ -144,9 +149,10 @@ vi.mock('../../api/clientFactory', () => ({
 }))
 
 // ── agentStore stub — 슬롯이 종료 판정용으로 useAgentStore(s => s.agents) 를 조회. 빈 목록 = 살아있음. ──
-const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[] }))
+// agentsLoaded=false 기본 = 권위 명부 미수신 → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
+const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], agentsLoaded: false }))
 vi.mock('../../store/agentStore', () => ({
-  useAgentStore: (selector: (s: { agents: unknown[] }) => unknown) => selector(agentStoreState),
+  useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
 // ── 테스트 대상 ────────────────────────────────────────────────────────────────────
@@ -196,6 +202,8 @@ beforeEach(() => {
   captured.onChunk = null
   captured.unsubscribe = null
   agentStoreState.agents = []
+  agentStoreState.agentsLoaded = false
+  termState.onDataCb = null
   termState.loadAddon.mockReset()
   termState.refresh.mockClear()
   termState.dispose.mockClear()
@@ -335,5 +343,67 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
 
     expect(fitState.fit).not.toHaveBeenCalled()
     expect(agentClient.resizePty).not.toHaveBeenCalled()
+  })
+})
+
+// ★ADR-0148: 부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨★
+//
+// 종료(kill)의 실제 결말은 reaper 가 세션을 수거하며 **명부에서 지우는** 것이다. status 로만 판정하면
+// 그 순간 부재 플래그가 풀려 죽은 에이전트로 입력이 나가고(거절은 조용히 삼켜져 무반응으로만 보인다)
+// 종료 오버레이도 사라진다.
+describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
+  it('명부 수신 후 해석 안 되는 에이전트면 입력을 막고 종료 표시를 유지한다', async () => {
+    const { agentClient } = await import('../../api/clientFactory')
+    agentStoreState.agents = []
+    agentStoreState.agentsLoaded = true
+
+    render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    await flushSubscribe()
+
+    expect(screen.getByText('종료됨')).toBeTruthy()
+    ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
+    act(() => termState.onDataCb!('x'))
+    expect(agentClient.writeStdin).not.toHaveBeenCalled()
+  })
+
+  // ★live → 부재 전이를 실제로 태운다★: 처음부터 없는 상태로만 렌더하면 epoch prop 을 되돌려도 통과한다
+  //   (구독이 한 번밖에 안 걸리므로). 살아있는 채로 마운트해 구독·reset 을 소비한 뒤 수거를 재현한다.
+  it('마운트된 뒤 수거되면 입력이 막히고, 재구독·reset 이 다시 돌지 않는다', async () => {
+    const { agentClient } = await import('../../api/clientFactory')
+    agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 2 }]
+    agentStoreState.agentsLoaded = true
+
+    const { rerender } = render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    await flushSubscribe()
+    expect(screen.queryByText('종료됨')).toBeNull()
+    const subCalls = (agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length
+    const resetCalls = termState.reset.mock.calls.length
+
+    // 수거 = 명부에서 사라짐. 상위(ViewLayoutRenderer)는 이때 epoch 을 그대로 유지한 채 넘긴다.
+    agentStoreState.agents = []
+    rerender(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    await flushSubscribe()
+
+    expect(screen.getByText('종료됨')).toBeTruthy()
+    ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
+    act(() => termState.onDataCb!('x'))
+    expect(agentClient.writeStdin).not.toHaveBeenCalled()
+    // epoch 이 유지됐으므로 구독 effect 가 다시 돌지 않는다(돌면 터미널 버퍼가 reset 된다).
+    expect((agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length).toBe(subCalls)
+    expect(termState.reset.mock.calls.length).toBe(resetCalls)
+  })
+
+  it('명부를 아직 못 받은 구간은 부재로 보지 않는다 — 입력이 그대로 나간다', async () => {
+    const { agentClient } = await import('../../api/clientFactory')
+    agentStoreState.agents = []
+    agentStoreState.agentsLoaded = false
+
+    render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    await flushSubscribe()
+
+    expect(screen.queryByText('종료됨')).toBeNull()
+    ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
+    act(() => termState.onDataCb!('x'))
+    expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
   })
 })

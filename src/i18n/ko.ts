@@ -53,6 +53,9 @@ export const ko = {
     kill: '에이전트 종료',
     monitor: '에이전트 모니터링',
     connecting: '에이전트 연결 중…', // caps 미도착 슬롯의 중립 플레이스홀더.
+    // ADR-0148: 명부를 받았는데 그 id 의 프로필도 없는 슬롯(트리에서 삭제됨). 위 connecting 과 구분한다 —
+    // 그쪽은 "곧 온다", 이쪽은 "올 것이 없다".
+    noneConnected: '연결된 에이전트가 없습니다',
     monitoringLabel: '에이전트 모니터링 — 이 슬롯에 실행중 에이전트 배정',
     monitoringSearch: '에이전트 검색 (이름·경로)',
     noCandidates: '검색 결과 없음', // 실행중은 있으나 검색 미스.

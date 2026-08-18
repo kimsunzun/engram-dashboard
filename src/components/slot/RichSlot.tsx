@@ -92,16 +92,22 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
 
   const agents = useAgentStore((s) => s.agents)
   const agent = agents.find((a) => a.id === agentId) ?? null
-  const isTerminated =
-    agent != null &&
-    (agent.status.type === 'Exited' || agent.status.type === 'Killed' || agent.status.type === 'Failed')
+  // ADR-0148: 권위 명부를 받았나 — 받기 전(기동·재연결 직후)의 빈 명부를 "없어졌다" 로 오인하지 않기 위한 가드.
+  const agentsLoaded = useAgentStore((s) => s.agentsLoaded)
+  // ★부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨(ADR-0148)★. 후자가 종료(kill)의 실제 결말이다
+  //   — reaper 가 세션을 수거하며 명부에서 지우므로 status 로는 잡히지 않는다. 이걸 부재로 안 보면 죽은
+  //   에이전트의 입력창이 활성으로 남아 전송을 시도할 수 있다.
+  const agentGone =
+    (agentsLoaded && agent == null) ||
+    (agent != null &&
+      (agent.status.type === 'Exited' || agent.status.type === 'Killed' || agent.status.type === 'Failed'))
 
   // ADR-0146: 연결이 끊긴 것도 "타겟한 에이전트가 지금 없다" 로 같게 본다(사용자 결정). 기존 연결 상태
   //   표면(agentClient)을 **읽기만** 한다 — 새 전역 핸들·새 스토어를 만들지 않는다(ConnectionNotice 와
   //   동형). 구독 콜백은 등록 즉시 현재 상태로 1회 발화하므로 초기값 동기화가 따로 필요 없다.
   const [connected, setConnected] = useState(() => agentClient.connectionState === 'connected')
   useEffect(() => agentClient.onConnectionStateChange((s) => setConnected(s === 'connected')), [])
-  const agentUnavailable = isTerminated || !connected
+  const agentUnavailable = agentGone || !connected
 
   // ★정체성 라벨(§ user request)★: json 모드는 터미널의 claude 웰컴 배너 같은 "어느 에이전트인지" 신호가
   //   없다. 우측 상단에 작은 라벨을 오버랩해 이름만 표시한다(아래 render — 줄을 차지하지 않음). 표시명은
@@ -193,7 +199,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     //   claude 유저 JSON 라인으로 감싸므로 여기서 개행 추가·래핑 금지(raw 텍스트 바이트만).
     // ★전송 게이트는 turnDone 을 검사하지 않는다 — 의도된 동작(ADR-0044 메커니즘 A: 스트리밍 중
     //   mid-turn 가이던스 주입 허용)★. 여기에 턴 잠금(스트리밍 중 전송 차단)을 넣지 말 것.
-    if (!input.trim() || isTerminated) return
+    if (!input.trim() || agentGone) return
     // FIX 5a: 가드도 trim 으로 판정하므로 실제 전송도 trim 일관.
     const text = input.trim()
     setInput('')
@@ -309,13 +315,13 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
           }}
           // 우선순위 = 종료 > 빈 상태 > 하단. 종료 표시가 먼저다(어느 배치든 종료면 그 사실이 이긴다).
           placeholder={
-            isTerminated
+            agentGone
               ? t('agent.terminatedPlaceholder')
               : showEmpty
                 ? t('agent.emptyInputPlaceholder')
                 : t('agent.inputPlaceholder')
           }
-          disabled={isTerminated}
+          disabled={agentGone}
           rows={showEmpty ? 3 : 2}
           // 빈 상태만 둥근 모서리에 조금 크게(ADR-0145 §5) — 하단 배치는 기존 고대비 바 그대로.
           // 하단 좌우 여백은 대화 본문(ChatRow px-4)과 들여쓰기를 크게 어긋내지 않는 선으로 잡고 세로

@@ -13,9 +13,15 @@ interface TerminalSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 이 값으로 독립 구독·독립 진도(버그 B 해소). */
   viewId: string
   agentId: string | null
+  /**
+   * 재구독 트리거([agentId,epoch]) — **상위가 준다**(ADR-0148). 자기 힘으로 명부에서 유도하면, 종료로
+   * 수거된 뒤 값이 0 으로 떨어져 그 자리에서 재구독·터미널 reset 이 돌고 화면 내용이 지워진다.
+   * 생략 시 종전처럼 명부에서 유도한다.
+   */
+  epoch?: number
 }
 
-export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
+export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: TerminalSlotProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -27,7 +33,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
   const glRef = useRef<WebGLRenderingContext | null>(null)
   const agentIdRef = useRef<string | null>(agentId)
   // §4-1: NotFound 스팸 방지
-  const isTerminatedRef = useRef(false)
+  const agentGoneRef = useRef(false)
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -36,15 +42,21 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
 
   const agents = useAgentStore(s => s.agents)
   const agent = agentId ? (agents.find(a => a.id === agentId) ?? null) : null
+  // ADR-0148: 권위 명부를 받았나 — 받기 전(기동·재연결 직후)의 빈 명부를 "없어졌다" 로 오인하지 않기 위한 가드.
+  const agentsLoaded = useAgentStore(s => s.agentsLoaded)
   // S9 §18-e: epoch이 바뀌면(재spawn) 재구독 트리거. status 변화만으론 effect가 안 돈다.
-  const epoch = agent?.epoch ?? 0
-  const isTerminated =
-    agent != null &&
-    (agent.status.type === 'Exited' ||
-      agent.status.type === 'Killed' ||
-      agent.status.type === 'Failed')
+  const epoch = epochProp ?? agent?.epoch ?? 0
+  // ★부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨(ADR-0148)★. 후자가 종료(kill)의 실제 결말이다
+  //   — reaper 가 세션을 수거하며 명부에서 지우므로 status 로는 잡히지 않는다. 이걸 부재로 안 보면 아래
+  //   onData 가드가 풀려 죽은 에이전트로 입력이 나간다(거절은 조용히 삼켜져 사용자에겐 무반응으로만 보인다).
+  const agentGone =
+    (agentsLoaded && agentId != null && agent == null) ||
+    (agent != null &&
+      (agent.status.type === 'Exited' ||
+        agent.status.type === 'Killed' ||
+        agent.status.type === 'Failed'))
 
-  useEffect(() => { isTerminatedRef.current = isTerminated }, [isTerminated])
+  useEffect(() => { agentGoneRef.current = agentGone }, [agentGone])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -91,7 +103,9 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
       resizeTimerRef.current = setTimeout(() => {
         resizeTimerRef.current = null
-        void agentClient.resizePty(aid, term.cols, term.rows)
+        // 거절 싱크 — 형제 호출부와 동형. 죽은/끊긴 슬롯이 마운트된 채 RO 가 살아 있으므로(ADR-0148 뷰
+        //   유지) 분할선을 끌면 여기로 실패가 온다. Resize 는 fire-and-forget 이라 흡수만 한다.
+        void agentClient.resizePty(aid, term.cols, term.rows).catch(() => {})
       }, 50)
     })
     ro.observe(containerRef.current)
@@ -265,7 +279,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return
     const disp = terminal.onData(data => {
-      if (isTerminatedRef.current) return
+      if (agentGoneRef.current) return
       void agentClient.writeStdin(agentId, new TextEncoder().encode(data)).catch(() => {})
     })
     return () => disp.dispose()
@@ -281,7 +295,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       background: '#0a0a0a',     // 터미널 배경(Terminal theme)과 동일 → 여백이 seamless
     }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-      {isTerminated && (
+      {agentGone && (
         <div
           style={{
             position: 'absolute',
@@ -296,8 +310,9 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
             pointerEvents: 'none',
           }}
         >
-          {agent!.status.type === 'Failed'
-            ? `Failed: ${(agent!.status as { type: 'Failed'; message: string }).message}`
+          {/* agent 는 완전 수거 후 null 이다 — 그 경우는 상태 메시지가 없어 공통 문구로 떨어진다. */}
+          {agent?.status.type === 'Failed'
+            ? `Failed: ${(agent.status as { type: 'Failed'; message: string }).message}`
             : t('agent.terminatedOverlay')}
         </div>
       )}
