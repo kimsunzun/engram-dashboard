@@ -377,6 +377,14 @@ export class ProtocolClient implements AgentClient {
     st.heldMarker = undefined
     if (resetLadder) st.attempts = 0
     this.clearTimers(st)
+    // ★buffering 재시작을 통지한다(ADR-0145)★: 여기 오는 두 경로 모두 full-from-oldest replay 를 재발행한다.
+    //   통지가 없으면 소비자의 '복원 완료' 판정이 열린 채 남아, 그 사이 쌓인 이력이 재flush 될 때 화면이
+    //   뒤집힌다(챗 슬롯 빈 상태 → 대화 깜빡임).
+    //   ★두 경로 중 live 를 되돌리는 건 재연결 전량 리셋(reconnectResetAllViews) 하나다★ — epoch 회전
+    //   경로는 buffering 뷰만 온다(handleOutput 이 error 뷰를 건너뛰고, live 뷰의 epoch 불일치 프레임은
+    //   drop 해 remount 흐름에 맡긴다). 그래도 통지는 두 경로 공통이다.
+    //   위 phase 대입 뒤에 둔다 — 콜백이 getViewOutputState 를 읽어도 정합.
+    st.onState?.('buffering')
     // epoch 회전(§2 상태전이표)은 즉시 재요청(백오프 없음).
     this.issueReplay(st)
   }

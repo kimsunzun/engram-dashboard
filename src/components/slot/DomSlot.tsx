@@ -84,11 +84,17 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
 
   const agents = useAgentStore(s => s.agents)
   const agent = agents.find(a => a.id === agentId) ?? null
-  const isTerminated =
-    agent != null &&
-    (agent.status.type === 'Exited' ||
-      agent.status.type === 'Killed' ||
-      agent.status.type === 'Failed')
+  // ADR-0148: 권위 명부를 받았나 — 받기 전(기동·재연결 직후)의 빈 명부를 "없어졌다" 로 오인하지 않기 위한 가드.
+  const agentsLoaded = useAgentStore(s => s.agentsLoaded)
+  // ★부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨(ADR-0148)★. 후자가 종료(kill)의 실제 결말
+  //   이라(reaper 가 명부에서 지운다) 이걸 안 보면 죽은 슬롯이 살아있는 것처럼 보인다 — 이 슬롯은 관측용
+  //   이지만 배지 하나가 유일한 상태 표면이라 그게 사라지면 아무 신호도 남지 않는다.
+  const agentGone =
+    (agentsLoaded && agent == null) ||
+    (agent != null &&
+      (agent.status.type === 'Exited' ||
+        agent.status.type === 'Killed' ||
+        agent.status.type === 'Failed'))
 
   useEffect(() => {
     setText('') // C2: StrictMode 중복·재spawn replay 재구성
@@ -177,7 +183,7 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
           {text}
         </pre>
       </ScrollArea>
-      {isTerminated && (
+      {agentGone && (
         <div
           style={{
             position: 'absolute',
@@ -190,8 +196,9 @@ export default function DomSlot({ viewId, agentId, epoch }: DomSlotProps) {
             pointerEvents: 'none',
           }}
         >
-          {agent!.status.type === 'Failed'
-            ? `Failed: ${(agent!.status as { type: 'Failed'; message: string }).message}`
+          {/* agent 는 완전 수거 후 null 이다 — 그 경우는 상태 메시지가 없어 공통 문구로 떨어진다. */}
+          {agent?.status.type === 'Failed'
+            ? `Failed: ${(agent.status as { type: 'Failed'; message: string }).message}`
             : t('agent.terminatedOverlay')}
         </div>
       )}

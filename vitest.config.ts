@@ -18,6 +18,10 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // index.css 원문(?raw)을 읽는 회귀 게이트(index.css.test.ts) 때문에 이 파일만 stub 을 끈다 —
+    // 기본값(css: false)은 CSS import 를 빈 문자열로 갈아 그 게이트가 조용히 통과해 버린다(실측).
+    // 나머지 CSS(chat.css 등)는 그대로 stub 이라 기존 테스트 동작은 불변.
+    css: { include: [/index\.css/] },
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     globals: false,
   },
