@@ -36,8 +36,29 @@ pub struct AgentSession {
     /// write_input 을 transport 로 넘기기 **직전** 적용하는 입력 인코딩(ADR-0044/0004).
     /// manager.spawn 이 산출해 주입한다.
     encoder: InputEncoder,
+    /// 이 세션이 **편지를 읽는 주체**인가(= 우편 수신자 명단 자격). spawn 시 backend 가 산출한 값을
+    /// 그대로 들고 있는다 — encoder 와 같은 부류의 backend 파생 사실이다.
+    ///
+    /// ★프로필이 아니라 **세션**이 드는 이유(load-bearing)★: `DeleteProfile` 은 산 세션을 죽이지
+    ///   않는다. 프로필로 판정하면 프로필이 지워진 산 셸이 "모름" 이 되어 명단에 되돌아오고, 봉투가
+    ///   명령으로 실행된다. 세션은 자기가 무엇으로 spawn 됐는지 알고 그 사실은 프로필 삭제로 안 변한다.
+    reads_messages: bool,
+    /// 본문 write 와 제출 write 사이의 대기 — 근거·값 출처는 `backend::SUBMIT_PACING`.
+    ///
+    /// ★기본값은 `new` 가 박는다(생성자 인자가 아니다)★: 호출자가 값을 고를 수 있게 하면 어느 조립
+    ///   경로 하나가 0 을 넘기는 순간 이 결함이 조용히 재발한다. 낮추는 길은 테스트 전용 seam 하나뿐이다.
+    submit_pacing: Duration,
+    /// 위 대기를 실제로 재우는 함수. 운영은 블로킹 sleep 이고, 테스트는 **재우지 않고 호출만 기록**하는
+    /// 것을 꽂아 "대기가 발행됐다" 를 시간 측정 없이(= 비플래키) 단언한다.
+    sleeper: fn(Duration),
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
+}
+
+/// 운영 sleeper — 이 층은 동기 경로라 그냥 블로킹으로 잔다(배달 루프가 그만큼 붙잡히는 것은 수용한 성질:
+/// 터미널 수신은 시연 용도이고, 비동기 분리는 구조 변경이라 별도 결정 사항이다).
+fn blocking_sleep(d: Duration) {
+    std::thread::sleep(d);
 }
 
 impl AgentSession {
@@ -53,6 +74,7 @@ impl AgentSession {
         intent: Arc<AtomicU8>,
         backend_caps: BackendCaps,
         encoder: InputEncoder,
+        reads_messages: bool,
         core: Arc<OutputCore>,
         transport: Box<dyn AgentTransport>,
     ) -> Self {
@@ -65,9 +87,27 @@ impl AgentSession {
             intent,
             backend_caps,
             encoder,
+            reads_messages,
+            submit_pacing: crate::agent::backend::SUBMIT_PACING,
+            sleeper: blocking_sleep,
             core,
             transport,
         }
+    }
+
+    /// ★테스트 전용 seam★ — 제출 대기를 낮추거나(하네스가 0.5초씩 자지 않게) 대기 발행 자체를 관측한다.
+    /// **운영 기본값은 언제나 `backend::SUBMIT_PACING`**(위 필드 doc) — 이 함수는 그 기본값을 바꾸지 않고,
+    /// 테스트가 자기 인스턴스에 대해서만 명시로 내린다.
+    #[cfg(test)]
+    pub(crate) fn with_submit_pacing(mut self, pacing: Duration, sleeper: fn(Duration)) -> Self {
+        self.submit_pacing = pacing;
+        self.sleeper = sleeper;
+        self
+    }
+
+    /// 이 세션이 편지를 읽는 주체인가 — 판정 근거는 필드 doc.
+    pub fn reads_messages(&self) -> bool {
+        self.reads_messages
     }
 
     /// 유저 종료 의도 태깅(ADR-0019) — kill_agent 가 transport.shutdown **전에** 호출한다.
@@ -142,6 +182,46 @@ impl AgentSession {
             msg_uuid,
             epoch: self.epoch,
         })
+    }
+
+    /// `write_input_observed` + **제출**: 본문을 쓴 뒤, encoder 가 제출 바이트를 요구하면 그것을
+    /// **별도 write** 로 한 번 더 낸다. 반환값·유저 에코·바이트 회계는 `write_input_observed` 와 동일하다
+    /// (제출 바이트는 논리 메시지가 아니라 `WriteOutcome` 에 세지 않는다).
+    ///
+    /// ★왜 두 번 쓰나 · 왜 encoder 가 못 합치나★ = `InputEncoder::submit_sequence` 주석(실측 근거).
+    /// ★두 write 사이에 `backend::SUBMIT_PACING` 만큼 잔다★: 나눠 쓰는 것만으로는 부족하고, 간격이
+    ///   없으면 PTY 에서 한 덩이로 묶여 수신자가 한 번의 read 로 받는다(그 상수 doc — "0ms 로 된다" 는
+    ///   옛 관측은 측정 오류였다). **그래서 이 동사는 호출 스레드를 그만큼 붙잡는다.**
+    /// ★왜 이 층인가★: transport 를 소유해 `send_input` 을 두 번 낼 수 있는 가장 낮은 층이 여기다. 위층
+    ///   (manager·데몬 어댑터·메시징 커널)은 transport 를 모르고, 아래층(encoder)은 바이트열 하나를
+    ///   돌려주는 계약이라 write 경계를 만들 수 없다.
+    /// ★`write_input` 과 갈라 둔 이유★: 터미널 키 입력은 사람이 Enter 를 직접 친다 — 그 경로가 이 동사를
+    ///   타면 키 한 번마다 턴이 제출된다. 이 동사는 "완성된 메시지 하나를 턴으로 넣는" 호출자(우편 배달)
+    ///   전용이다.
+    /// ★에러 계약★: 본문은 갔는데 제출 write 가 실패하면 `Err` 다 — 턴이 시작되지 않은 배달은 배달이
+    ///   아니므로 상위(파킹·재시도)가 실패로 다뤄야 한다.
+    pub fn submit_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
+        let outcome = self.write_input_observed(bytes)?;
+        if let Some(submit) = self.encoder.submit_sequence() {
+            // ★이 대기가 제출의 일부다(빼면 제출되지 않는다 — 실측)★: 근거·값 출처·"0ms 로 된다" 는
+            //   옛 관측이 왜 틀렸는지는 `backend::SUBMIT_PACING` doc.
+            (self.sleeper)(self.submit_pacing);
+            //
+            // ★두 실패를 로그에서 가른다(본문도 못 감 vs 본문은 갔고 제출만 실패)★: 후자는 수신자
+            //   입력창에 미제출 봉투가 남은 상태라, 상위의 무손실 재파킹이 다음 flush 에서 같은 봉투를
+            //   그 위에 덧쓴다(한 턴에 두 벌). 입력창을 비우는 동사는 이 층의 계약 밖이라 지우지는
+            //   못하고, 사람이 그 잔여물을 알아볼 수 있게 남기는 것이 여기서 할 수 있는 전부다.
+            if let Err(e) = self.transport.send_input(InputEvent::Raw(submit.to_vec())) {
+                tracing::warn!(
+                    agent = %self.id,
+                    epoch = self.epoch,
+                    bytes = bytes.len(),
+                    "본문은 썼으나 제출 write 실패 — 수신자 입력창에 미제출 봉투가 남았고 재시도가 그 위에 덧쓴다: {e}"
+                );
+                return Err(e);
+            }
+        }
+        Ok(outcome)
     }
 
     /// transport.resize 성공 후에만 cols/rows atomic 을 갱신한다 — 실패 시 옛 값 유지.
@@ -224,14 +304,21 @@ mod tests {
     use std::sync::Mutex;
 
     /// 실 프로세스 없이 인코딩 배선을 단언하기 위한 격리 하네스(ADR-0012).
+    /// `fail_from`: 이 순번(0-based)부터의 write 를 실패시킨다 — 본문은 성공하고 제출만 실패하는 갈래를
+    ///   만들기 위한 것이다(`None` = 전부 성공).
     struct CapturingTransport {
         captured: Arc<Mutex<Vec<Vec<u8>>>>,
+        fail_from: Option<usize>,
     }
     impl AgentTransport for CapturingTransport {
         fn start(&self, _core: Arc<OutputCore>) {}
         fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
             let InputEvent::Raw(bytes) = input;
-            self.captured.lock().unwrap().push(bytes);
+            let mut captured = self.captured.lock().unwrap();
+            if self.fail_from.is_some_and(|n| captured.len() >= n) {
+                return Err(PtyError::WriteFailed("harness: write refused".into()));
+            }
+            captured.push(bytes);
             Ok(())
         }
         fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
@@ -298,6 +385,20 @@ mod tests {
     }
 
     fn session_with(encoder: InputEncoder) -> (AgentSession, Arc<Mutex<Vec<Vec<u8>>>>) {
+        session_harness(encoder, None)
+    }
+
+    fn session_failing_after(
+        encoder: InputEncoder,
+        ok_writes: usize,
+    ) -> (AgentSession, Arc<Mutex<Vec<Vec<u8>>>>) {
+        session_harness(encoder, Some(ok_writes))
+    }
+
+    fn session_harness(
+        encoder: InputEncoder,
+        fail_from: Option<usize>,
+    ) -> (AgentSession, Arc<Mutex<Vec<Vec<u8>>>>) {
         let id = uuid::Uuid::new_v4();
         let core = Arc::new(OutputCore::new(
             id,
@@ -308,6 +409,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let transport = Box::new(CapturingTransport {
             captured: captured.clone(),
+            fail_from,
         });
         let shell_cmd = crate::agent::profile::AgentCommand::Shell {
             program: "cmd.exe".into(),
@@ -322,9 +424,13 @@ mod tests {
             Arc::new(AtomicU8::new(0)),
             ShellBackend.capabilities(&shell_cmd),
             encoder,
+            true,
             core,
             transport,
-        );
+        )
+        // 하네스는 안 잔다 — 대기 **발행 여부**는 아래 전용 테스트가 sleeper 호출로 단언한다(시간
+        //   측정 없이). 여기서 실제로 자면 단위 테스트가 호출마다 0.5초씩 붙잡힌다.
+        .with_submit_pacing(Duration::ZERO, |_| {});
         (session, captured)
     }
 
@@ -389,6 +495,145 @@ mod tests {
         );
     }
 
+    // ── 제출 분리(submit_input_observed) ──
+    //
+    // ★회귀 축은 바이트가 아니라 **write 경계**다★: 봉투 바이트는 예전에도 PTY 에 도착했지만 턴이 시작되지
+    //   않았다. `본문+CR` 을 한 write 로 합치면 claude TUI 가 제출하지 않고, 두 write 로 나누면 제출된다
+    //   (실측 2026-08-17). 그래서 아래 단언은 write **횟수와 경계**를 본다 — 이어붙인 바이트를 보지 않는다.
+
+    #[test]
+    fn submit_input_terminal_writes_the_body_then_the_submit_byte_separately() {
+        let (session, captured) = session_with(InputEncoder::Raw);
+        let body = b"<message from=\"bob\">hi</message>";
+
+        let outcome = session
+            .submit_input_observed(body)
+            .expect("submit_input_observed ok");
+
+        let got = captured.lock().unwrap();
+        assert_eq!(
+            got.len(),
+            2,
+            "본문과 제출은 분리된 write 여야(한 write 로 합치면 TUI 가 제출하지 않음): {got:?}"
+        );
+        assert_eq!(
+            got[0],
+            body.to_vec(),
+            "본문 write 는 봉투 바이트 그대로 — 제출 바이트를 섞지 않는다"
+        );
+        assert_eq!(got[1], b"\r".to_vec(), "두 번째 write = 제출(CR) 단독");
+        assert_eq!(
+            outcome.bytes_requested,
+            body.len(),
+            "회계는 논리 메시지 바이트만 — 제출 바이트는 세지 않는다"
+        );
+        assert_eq!(outcome.bytes_written, body.len());
+    }
+
+    #[test]
+    fn submit_input_json_mode_writes_exactly_the_encoded_line_and_nothing_else() {
+        let (session, captured) = session_with(InputEncoder::ClaudeStreamJson);
+        let body = b"hello";
+
+        let outcome = session
+            .submit_input_observed(body)
+            .expect("submit_input_observed ok");
+
+        // ★exact 비교★: 돌려받은 msg_uuid 로 기대 라인을 재구성해 **바이트 정확 일치**를 본다. 제출 write 를
+        //   더하거나 봉투에 문자를 덧붙이는 회귀는 전부 여기서 걸린다("CR 이 없다" 류의 약한 단언과 달리
+        //   무엇이 추가돼도 잡힌다). `write_input` 과의 동일성을 직접 비교하지 않는 이유 = 그쪽은 자체
+        //   msg_uuid 를 새로 뽑아 두 산출물이 uuid 만큼 다르기 때문이다.
+        let expected = InputEncoder::ClaudeStreamJson.encode(body, outcome.msg_uuid);
+        let got = captured.lock().unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "json 경로는 종전 그대로 write 1회 — 제출 write 를 더하면 CR 만 든 빈 턴이 하나 더 생긴다: {got:?}"
+        );
+        assert_eq!(
+            got[0],
+            expected,
+            "인코더 산출물과 바이트 정확 일치여야: {}",
+            String::from_utf8_lossy(&got[0])
+        );
+    }
+
+    /// ★대기가 **실제로 발행되는지** + 운영 기본값이 무엇인지를 함께 못 박는다★.
+    ///
+    /// 이 결함의 본체는 write 횟수가 아니라 수신자의 read 경계였다 — 나눠 써도 간격이 없으면 한 덩이로
+    /// 묶여 제출되지 않는다(`backend::SUBMIT_PACING` doc). 그래서 "제출 write 전에 대기가 있었나" 와
+    /// "그 값이 운영 기본값인가" 둘 다 회귀 축이다. 시간을 재지 않고 sleeper 호출을 기록해 단언하므로
+    /// 플래키하지 않고, 테스트가 0.5초를 실제로 자지도 않는다.
+    #[test]
+    fn submit_input_waits_between_the_body_and_the_submit_write() {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        // 이 테스트 전용 기록판 — 다른 테스트의 하네스는 no-op sleeper 를 쓰므로 여기 안 닿는다.
+        static SLEPT_MICROS: AtomicU64 = AtomicU64::new(0);
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        fn recording_sleep(d: Duration) {
+            SLEPT_MICROS.store(d.as_micros() as u64, AtomicOrdering::SeqCst);
+            CALLS.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        let (session, captured) = session_harness(InputEncoder::Raw, None);
+        // ★운영 기본값 그대로 두고 재우는 함수만 바꾼다★: 값까지 테스트가 정하면 기본값 회귀를 못 본다.
+        let session =
+            session.with_submit_pacing(crate::agent::backend::SUBMIT_PACING, recording_sleep);
+
+        session
+            .submit_input_observed(b"envelope")
+            .expect("submit ok");
+
+        assert_eq!(
+            CALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "본문과 제출 사이에 대기가 정확히 한 번 발행돼야(빠지면 두 write 가 한 read 로 묶인다)"
+        );
+        assert_eq!(
+            SLEPT_MICROS.load(AtomicOrdering::SeqCst),
+            crate::agent::backend::SUBMIT_PACING.as_micros() as u64,
+            "대기 값 = 운영 기본값(줄이면 이 결함이 재발한다 — 상수 doc 의 근거를 먼저 읽을 것)"
+        );
+        assert!(
+            crate::agent::backend::SUBMIT_PACING > Duration::ZERO,
+            "★운영 기본값이 0 이 되는 형태 금지★ — 0 이면 나눠 쓴 의미가 사라진다"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            2,
+            "대기를 넣어도 write 는 여전히 본문 + 제출 둘"
+        );
+    }
+
+    #[test]
+    fn submit_input_reports_a_failure_that_only_hit_the_submit_write() {
+        // 본문은 이미 수신자 입력창에 들어간 뒤 제출만 실패하는 갈래 — 상위가 재파킹으로 다루려면
+        // 성공으로 삼켜지면 안 된다(그 잔여물의 의미는 submit_input_observed doc).
+        let (session, captured) = session_failing_after(InputEncoder::Raw, 1);
+
+        let err = session.submit_input_observed(b"envelope");
+
+        assert!(
+            matches!(err, Err(PtyError::WriteFailed(_))),
+            "제출 write 실패는 Err 로 표면화돼야: {err:?}"
+        );
+        assert_eq!(
+            captured.lock().unwrap().as_slice(),
+            &[b"envelope".to_vec()],
+            "본문은 이미 나갔다 — 그래서 재시도가 같은 봉투를 덧쓰는 잔여물이 남는다"
+        );
+    }
+
+    #[test]
+    fn write_input_does_not_submit() {
+        // 사람이 Enter 를 직접 치는 키 입력 경로 — 여기에 제출이 끼면 키 한 번마다 턴이 나간다.
+        let (session, captured) = session_with(InputEncoder::Raw);
+        session.write_input(b"partial").unwrap();
+        let got = captured.lock().unwrap();
+        assert_eq!(got.len(), 1, "write_input 은 write 1회 그대로: {got:?}");
+        assert_eq!(got[0], b"partial".to_vec());
+    }
+
     // ── ADR-0088: 실패 표면화 ──
     #[test]
     fn write_input_observed_surfaces_transport_error() {
@@ -449,6 +694,7 @@ mod tests {
             Arc::new(AtomicU8::new(0)),
             ShellBackend.capabilities(&shell_cmd),
             InputEncoder::Raw,
+            true,
             core,
             Box::new(FailingTransport),
         );
@@ -545,6 +791,7 @@ mod tests {
             // json 모드도 backend는 여전히 ClaudeBackend(resume/model은 프로그램 소관, ADR-0030).
             ClaudeBackend.capabilities(&json_cmd),
             InputEncoder::ClaudeStreamJson,
+            true,
             core,
             Box::new(transport),
         );

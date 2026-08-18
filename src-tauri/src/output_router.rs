@@ -356,7 +356,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
         let slot = first_slot(&mgr, view_id);
-        let slot2 = mgr.split_slot(view_id, slot, SplitDir::Horizontal).unwrap();
+        let slot2 = mgr.split_slot(view_id, slot, SplitDir::LeftRight).unwrap();
         let (a1, a1s) = agent();
         let (a2, a2s) = agent();
         mgr.assign_agent(view_id, slot, a1s).unwrap();
@@ -636,7 +636,7 @@ mod tests {
         let view_id = main_active(&mgr);
         let slot_a = first_slot(&mgr, view_id);
         let slot_b = mgr
-            .split_slot(view_id, slot_a, SplitDir::Horizontal)
+            .split_slot(view_id, slot_a, SplitDir::LeftRight)
             .unwrap();
         let (a, as_) = agent();
         let (b, bs) = agent();

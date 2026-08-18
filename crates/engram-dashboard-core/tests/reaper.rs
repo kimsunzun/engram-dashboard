@@ -310,6 +310,10 @@ fn make_test_session(
     ));
     let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
     // ApiTransport 라 caps 내용은 무관 — 합성 경로를 만족시키는 더미로 셸 caps 를 넣는다.
+    let shell_cmd = engram_dashboard_core::agent::profile::AgentCommand::Shell {
+        program: "cmd.exe".into(),
+        args: vec![],
+    };
     Arc::new(AgentSession::new(
         id,
         PathBuf::from("."),
@@ -317,14 +321,12 @@ fn make_test_session(
         80,
         24,
         intent,
-        ShellBackend.capabilities(
-            &engram_dashboard_core::agent::profile::AgentCommand::Shell {
-                program: "cmd.exe".into(),
-                args: vec![],
-            },
-        ),
+        ShellBackend.capabilities(&shell_cmd),
         // 이 테스트 세션은 write_input 을 안 쓰지만 생성자가 encoder 를 요구 → Raw 더미.
         engram_dashboard_core::agent::backend::InputEncoder::Raw,
+        // ★리터럴로 쓰지 마라★: "산 세션 값 == 백엔드 파생값" 이 우편 자격 방어의 전제라, 하네스가
+        //   실물과 반대값을 들면 그 전제가 인트리에서 먼저 깨진다. 같은 명령에서 파생시킨다.
+        engram_dashboard_core::agent::backend::reads_messages(&shell_cmd),
         core,
         Box::new(ApiTransport::new()),
     ))

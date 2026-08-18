@@ -296,16 +296,17 @@ async fn control_send_corrective_errors() {
     handle.shutdown().await;
 }
 
-// ── /control/send: shell(턴 신호 없음) 산 세션이 **로스터에 들어 배달된다** — ADR-0116 결정 1 ────────────
-// ★이 테스트의 실제 범위 = 멤버십 한 축뿐★: 실제 spawn 한 shell(structured=false) 세션이 실물 어댑터 술어
-//   (messaging_host `is_live`)를 통과해 배달까지 간다는 것.
-// ★게이트 생략은 여기서 검증되지 않는다(뮤테이션 실측 — 착각 금지)★: 두 판정 지점에 게이트를 되살려도 이
-//   테스트는 초록이다. shell 은 턴 신호가 없어 busy 가 항상 false 고 보관함도 비어, 게이트가 있어도 파킹으로
-//   분기할 일이 없기 때문이다. 게이트 생략은 **반쪽 둘**이고 방어선은 전부 커널에 있다(`messaging/src/service.rs`):
-//   busy 반쪽 = `a_live_agent_without_a_turn_signal_is_injected_with_no_gate` · 큐 백로그 반쪽 =
-//   `inject_failure_parks_pending_without_a_turn_signal`. 어느 쪽을 지우든 이 통합 테스트가 대신 잡아주지 **않는다**.
+// ── /control/send: shell 산 세션은 **수신자가 아니다**(사용자 결정 2026-08-17) ─────────────────────────
+// ★왜★: 셸에 도착한 봉투는 읽히는 게 아니라 **명령으로 실행된다**. 본문은 LLM 자유 텍스트라 `&`·`|`·`;` 가
+//   섞이면 그 뒤가 별도 명령으로 파싱된다. 그래서 제출 바이트를 빼는 완화가 아니라 명단에서 통째로 뺀다.
+// ★ADR-0116 결정 1 로의 회귀가 아니다★: 그건 "턴 신호가 없으니 배달할 수 없다" 를 기각한 것이고(터미널
+//   claude 는 지금도 그대로 받는다), 이건 **입력이 무엇으로 해석되는가** 라는 다른 축이다. 그 결정이 지키던
+//   축(capability ≠ 멤버십)의 봉인은 `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`.
+// ★게이트 생략은 여기서 검증되지 않는다(뮤테이션 실측 — 착각 금지)★: 방어선은 전부 커널에 있다
+//   (`messaging/src/service.rs`): busy 반쪽 = `a_live_agent_without_a_turn_signal_is_injected_with_no_gate` ·
+//   큐 백로그 반쪽 = `inject_failure_parks_pending_without_a_turn_signal`.
 #[tokio::test]
-async fn control_send_shell_recipient_is_in_the_roster_and_delivered() {
+async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     let (manager, registry, base, data_dir, handle, messaging, _busy) =
         wire("no-turn-signal").await;
     let sender = AgentId::new_v4();
@@ -333,17 +334,17 @@ async fn control_send_shell_recipient_is_in_the_roster_and_delivered() {
     let (_s, body) = post_send(&base, Some("valid-sender"), "sheller", "hi").await;
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
-        v["results"][0]["status"], "delivered",
-        "★ADR-0116 결정 1★ 턴 신호가 없어도 산 세션은 로스터에 들어 배달된다: {body}"
+        v["results"][0]["status"], "failed",
+        "산 셸이어도 편지의 수신자는 아니다: {body}"
     );
-    assert!(
-        v["results"][0]["code"].is_null(),
-        "배달 행에는 실패 코드가 없어야: {body}"
+    assert_eq!(
+        v["results"][0]["code"], "RECIPIENT_NOT_FOUND",
+        "명단에 없는 이름과 같은 결말 — 발신자는 주소를 고쳐 다시 보내면 된다: {body}"
     );
     assert_eq!(
         messaging.parked_len("sheller"),
         0,
-        "배달됐으니 파킹 잔여도 없어야(게이트 생략 자체의 증거는 아니다 — 위 헤더): {body}"
+        "파킹도 되면 안 된다(깨어날 일 없는 이름 앞에 편지가 쌓인다): {body}"
     );
 
     manager.kill_agent(info.id).ok();
@@ -593,8 +594,11 @@ mod obs_seam {
         fn agent_list_updated(&self, _a: Vec<engram_dashboard_core::agent::types::AgentInfo>) {}
     }
 
+    /// `structured`: 이 캐리어가 구조화 출력(= 턴 신호)을 내는가. **기본은 true(json claude 대역)**이고,
+    ///   false 는 터미널 claude 대역 — 그 부류가 명단에 남는지가 ADR-0116 결정 1·7 의 회귀 축이다.
     struct SeamTransport {
         fail: bool,
+        structured: bool,
         captured: Arc<Mutex<Vec<Vec<u8>>>>,
     }
     impl AgentTransport for SeamTransport {
@@ -623,7 +627,7 @@ mod obs_seam {
                 },
                 output: OutputCaps {
                     terminal_bytes: false,
-                    structured: true,
+                    structured: self.structured,
                     markdown: false,
                     tool_events: false,
                     usage: false,
@@ -684,9 +688,11 @@ mod obs_seam {
             Arc::new(AtomicU8::new(0)),
             backend_caps(),
             InputEncoder::ClaudeStreamJson,
+            true,
             core,
             Box::new(SeamTransport {
                 fail: false,
+                structured: true,
                 captured: Arc::new(Mutex::new(Vec::new())),
             }),
         ));
@@ -710,7 +716,38 @@ mod obs_seam {
             Arc::new(NoopStatus),
             TurnWiring::detached(),
         ));
-        let (agent, captured, _core) = insert_seam_with_core(manager, fail, id, name, core);
+        let (agent, captured, _core) = insert_seam_with_core(
+            manager,
+            fail,
+            id,
+            name,
+            core,
+            InputEncoder::ClaudeStreamJson,
+            true,
+        );
+        (agent, captured)
+    }
+
+    /// 수신자의 **캐리어 종류를 지정**하는 판 — 터미널 claude 대역(`Raw` + 턴 신호 없음)과 json claude
+    /// 대역(`ClaudeStreamJson` + 턴 신호 있음)을 한 테스트에서 대조하려고 둔다(다른 헬퍼는 json 고정).
+    ///
+    /// ★두 축을 encoder 하나로 묶는 이유★: 실물에서도 같이 움직인다 — 터미널 claude 는 Raw 입력에
+    ///   구조화 출력이 없고, json claude 는 그 반대다. 따로 받으면 실재하지 않는 조합을 만들 수 있다.
+    pub fn insert_seam_recipient_with_encoder(
+        manager: &Arc<AgentManager>,
+        encoder: InputEncoder,
+    ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let id = AgentId::new_v4();
+        let name = id.to_string()[..8].to_string();
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
+        let structured = encoder == InputEncoder::ClaudeStreamJson;
+        let (agent, captured, _core) =
+            insert_seam_with_core(manager, false, id, &name, core, encoder, structured);
         (agent, captured)
     }
 
@@ -732,7 +769,15 @@ mod obs_seam {
                 },
             ),
         );
-        insert_seam_with_core(manager, fail, id, &name, core)
+        insert_seam_with_core(
+            manager,
+            fail,
+            id,
+            &name,
+            core,
+            InputEncoder::ClaudeStreamJson,
+            true,
+        )
     }
 
     fn insert_seam_with_core(
@@ -741,6 +786,8 @@ mod obs_seam {
         id: AgentId,
         name: &str,
         core: Arc<OutputCore>,
+        encoder: InputEncoder,
+        structured: bool,
     ) -> (AgentId, Arc<Mutex<Vec<Vec<u8>>>>, Arc<OutputCore>) {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let core_out = core.clone();
@@ -757,10 +804,14 @@ mod obs_seam {
             24,
             Arc::new(AtomicU8::new(0)),
             backend_caps(),
-            InputEncoder::ClaudeStreamJson,
+            encoder,
+            // seam 수신자는 claude 대역이라 우편 자격 true — 셸 축은 실 spawn 테스트가 덮는다
+            //   (`messaging_host::tests::a_live_shell_is_excluded_from_the_mail_roster_but_still_counts_as_live`).
+            true,
             core,
             Box::new(SeamTransport {
                 fail,
+                structured,
                 captured: captured.clone(),
             }),
         ));
@@ -874,6 +925,123 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
     );
 
     manager.kill_agent(b_id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── ADR-0116 결정 1·7 봉인: 턴 신호 없는 터미널 에이전트도 **명단에 남는다** ─────────────────────────
+// ★막는 회귀★: 어댑터 산출 함수에 `.filter(|a| a.capabilities.output.structured)` 를 되살리면 **터미널
+//   claude 전원이 조용히 편지를 못 받는다**(파킹 계기조차 없어 24h TTL 로 만료). 그 부류는 실 claude
+//   바이너리 없이는 spawn 할 수 없어, 세션 주입 seam 으로 같은 모양(Raw 입력 + 구조화 출력 없음)을 만든다.
+// ★셸 제외(`reads_messages`)와 다른 축이다★: 이건 capability 축, 그건 "입력이 무엇으로 해석되는가" 축.
+//   한 함수에 두 필터가 있으므로 **둘 다** 회귀 커버가 필요하다(셸 축 = messaging_host 실 spawn 테스트).
+#[tokio::test]
+async fn roster_includes_a_terminal_agent_without_a_turn_signal_no_claude() {
+    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_daemon::messaging_host::ManagerDeliveryPort;
+    use engram_dashboard_messaging::service::DeliveryPort;
+
+    let (manager, _registry, _base, data_dir, handle, _messaging, _busy) =
+        wire("no-signal-roster").await;
+    let port = ManagerDeliveryPort::new(manager.clone());
+
+    let (id, _captured) = obs_seam::insert_seam_recipient_with_encoder(&manager, InputEncoder::Raw);
+
+    let entry = port
+        .live_agents()
+        .into_iter()
+        .find(|a| a.id == id)
+        .expect("턴 신호가 없어도 배달 명단에 있어야(capability 는 멤버십 축이 아니다)");
+    assert!(
+        !entry.turn_signal,
+        "그 사실은 turn_signal=false 로만 나타난다(= 게이트 없이 즉시 주입 대상): {entry:?}"
+    );
+    let sources = port.addressing_sources();
+    assert!(
+        sources.roster.iter().any(|a| a.id == id && !a.turn_signal),
+        "입구 판정 소스도 같은 술어여야(한쪽만 걸러도 그 부류가 통째로 막힌다): {sources:?}"
+    );
+
+    manager.kill_agent(id).ok();
+    let _ = std::fs::remove_dir_all(&data_dir);
+    handle.shutdown().await;
+}
+
+// ── 터미널(TUI) 수신자에게는 제출(CR)이 **별도 write** 로 한 번 더 나간다 ───────────────────────────
+// ★결함 재발 방지 축 = write 경계★: 봉투 바이트는 예전에도 PTY 에 도착했지만 claude TUI 가 그걸 입력창에
+//   담아 둔 채 턴을 시작하지 않았다(실측 2026-08-17 — `본문+CR` 한 write 는 제출 안 됨, 두 write 는 제출됨).
+//   그래서 "바이트가 갔나" 가 아니라 **"write 가 두 번 갈렸나"** 를 단언한다.
+// ★수신자를 하나씩 따로 보내는 이유★: 수신자가 둘이면 봉투에 `to` 속성이 붙어 기대 문자열을 재구성하기
+//   어렵다. 하나씩이면 양쪽 다 **바이트 정확 일치**로 못 박을 수 있고, 그래야 "무엇이든 추가되면 걸리는"
+//   단언이 된다(약한 포함 검사와 달리).
+#[tokio::test]
+async fn control_send_adds_a_separate_submit_write_only_for_terminal_recipients_no_claude() {
+    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
+    use engram_dashboard_daemon::control::registry::BoundIdentity;
+    use engram_dashboard_messaging::envelope::Entrance;
+
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("submit-split").await;
+
+    let (term_id, term_captured) =
+        obs_seam::insert_seam_recipient_with_encoder(&manager, InputEncoder::Raw);
+    let (json_id, json_captured) =
+        obs_seam::insert_seam_recipient_with_encoder(&manager, InputEncoder::ClaudeStreamJson);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    registry.set_delivery_observer(Arc::new(DeliveryCapture { seen: seen.clone() }));
+
+    let sender = AgentId::new_v4();
+    registry.issue(sender, 0, "submit-split-sender".to_string(), true);
+    let from = BoundIdentity {
+        agent_id: sender,
+        epoch: 0,
+    };
+    let body = "hi";
+    let envelope = obs_seam::expected_default_envelope(&obs_seam::fallback_name(sender), body);
+
+    let send_to = |id| {
+        let v = handle_send(
+            &manager,
+            &registry,
+            &messaging,
+            Entrance::Cli,
+            ControlCommand {
+                from,
+                to: vec![obs_seam::fallback_name(id)],
+                body: body.to_string(),
+                contract: Default::default(),
+            },
+        )
+        .to_json();
+        assert_eq!(v["results"][0]["status"], "delivered", "{v}");
+    };
+    send_to(term_id);
+    send_to(json_id);
+
+    assert_eq!(
+        obs_seam::all_written(&term_captured),
+        vec![envelope.as_bytes().to_vec(), b"\r".to_vec()],
+        "터미널 수신자 = 봉투 그대로 1회 + 제출(CR) 단독 1회, **분리된 두 write**"
+    );
+
+    // json 쪽은 그 배달의 msg_uuid 로 기대 라인을 재구성해 바이트 정확 일치를 본다 — 제출 write 가 새거나
+    // 봉투에 문자가 덧붙으면 여기서 깨진다(종전 동작 봉인).
+    let json_uuid = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|o| o.to_id == json_id)
+        .and_then(|o| o.msg_uuid)
+        .expect("json 배달의 관측 레코드 + msg_uuid");
+    assert_eq!(
+        obs_seam::all_written(&json_captured),
+        vec![InputEncoder::ClaudeStreamJson.encode(envelope.as_bytes(), json_uuid)],
+        "json 수신자는 종전 그대로 인코더 산출물 1회뿐이어야(종단 \\n 이 이미 제출)"
+    );
+
+    manager.kill_agent(term_id).ok();
+    manager.kill_agent(json_id).ok();
     let _ = std::fs::remove_dir_all(&data_dir);
     handle.shutdown().await;
 }
@@ -1183,7 +1351,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 // ADR-0088 Stage 1 — 배달 정확성 오라클 (결정적·seam 기반, 실 claude 불요)
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// seam 관측 범위 = handle_send → registry → write_stdin_observed → session.write_input_observed
+// seam 관측 범위 = handle_send → registry → submit_stdin_observed → session.submit_input_observed
 //   (봉투 조립·encoder) → SeamTransport.send_input **까지**. 그 아래 물리 계층(운영
 //   `StdioTransport::send_input` 의 `stdin.lock()` + `write_all`/`flush`)은 이 seam 이 **우회**한다 —
 //   SeamTransport 는 이미 완결된 Vec 을 받아 `push` 로 원자 캡처하므로.
@@ -2257,6 +2425,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
             Arc::new(AtomicU8::new(0)),
             backend_caps(),
             InputEncoder::ClaudeStreamJson,
+            true,
             core,
             Box::new(EpochSeam {
                 captured: captured.clone(),
@@ -2339,7 +2508,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
 }
 
 /// ── ADR-0088 Stage 1-오라클(mid-flight epoch race): **결정적** resolve↔write 경쟁 재현 ──────────────
-/// ★증명한다★: handle_send 가 수신자를 해석(list_agents 스냅샷)한 **직후**, write_stdin_observed **직전**에
+/// ★증명한다★: handle_send 가 수신자를 해석(list_agents 스냅샷)한 **직후**, 수신자 주입 **직전**에
 ///   같은 AgentId 가 새 epoch incarnation 으로 교체되면(재시작=epoch bump 모사), write 는 resolve 가 본
 ///   구 incarnation(epoch 0)이 아니라 **write 해석 시점의** incarnation(epoch 1)에 착지한다. (엄밀히는
 ///   get_session 이후 한 번 더 동시 교체가 끼면 그 사이 "직전"이 된 incarnation 에 바이트가 갈 수도 있다 —
@@ -2452,6 +2621,7 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
             Arc::new(AtomicU8::new(0)),
             backend_caps(),
             InputEncoder::ClaudeStreamJson,
+            true,
             core,
             Box::new(EpochSeam {
                 captured: captured.clone(),

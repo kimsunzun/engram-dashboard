@@ -527,7 +527,7 @@ fn split_slot_returns_new_slot_and_notifies() {
     let target = w.empty_slot(view);
 
     let new_id =
-        apply::split_slot(&w.state, &w.subs, &w.ev, view, target, SplitDir::Vertical).unwrap();
+        apply::split_slot(&w.state, &w.subs, &w.ev, view, target, SplitDir::TopBottom).unwrap();
 
     let slots = w.slots(view);
     assert_eq!(slots.len(), before + 1);
@@ -546,7 +546,7 @@ fn split_slot_unknown_slot_is_err() {
         &w.ev,
         view,
         Uuid::new_v4(),
-        SplitDir::Vertical,
+        SplitDir::TopBottom,
     )
     .unwrap_err();
     assert!(err.contains("slot 없음"), "err={err}");

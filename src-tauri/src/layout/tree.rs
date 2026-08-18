@@ -257,11 +257,11 @@ mod tests {
     #[test]
     fn split_replaces_slot_with_split_and_returns_new_id() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).expect("split 성공");
+        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).expect("split 성공");
         assert_ne!(new_id, id);
         match &node {
             LayoutNode::Split { dir, ratio, a, b } => {
-                assert_eq!(*dir, SplitDir::Horizontal);
+                assert_eq!(*dir, SplitDir::LeftRight);
                 assert_eq!(*ratio, 0.5, "split 기본 ratio 0.5");
                 assert!(matches!(a.as_ref(), LayoutNode::Slot { id: aid, .. } if *aid == id));
                 assert!(matches!(b.as_ref(), LayoutNode::Slot { id: bid, .. } if *bid == new_id));
@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn split_nested_targets_deep_leaf() {
         let (mut node, id) = single_slot();
-        let mid = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
-        let deep = split_in_tree(&mut node, mid, SplitDir::Vertical).expect("중첩 split 성공");
+        let mid = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
+        let deep = split_in_tree(&mut node, mid, SplitDir::TopBottom).expect("중첩 split 성공");
         assert!(contains_slot(&node, id));
         assert!(contains_slot(&node, mid));
         assert!(contains_slot(&node, deep));
@@ -287,7 +287,7 @@ mod tests {
     fn split_missing_slot_is_noop() {
         let (mut node, _id) = single_slot();
         let before = node.clone();
-        assert!(split_in_tree(&mut node, Uuid::new_v4(), SplitDir::Horizontal).is_none());
+        assert!(split_in_tree(&mut node, Uuid::new_v4(), SplitDir::LeftRight).is_none());
         assert_eq!(node, before, "없는 slot split 은 트리 불변");
     }
 
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn close_promotes_sibling() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(close_in_tree(&mut node, new_id));
         match &node {
             LayoutNode::Slot { id: rid, .. } => assert_eq!(*rid, id, "형제 a 가 root 로 승격"),
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn close_promotes_sibling_when_closing_a() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Vertical).unwrap();
+        let new_id = split_in_tree(&mut node, id, SplitDir::TopBottom).unwrap();
         assert!(close_in_tree(&mut node, id));
         match &node {
             LayoutNode::Slot { id: rid, .. } => assert_eq!(*rid, new_id),
@@ -326,8 +326,8 @@ mod tests {
     #[test]
     fn close_nested_promotes_subtree() {
         let (mut node, id) = single_slot();
-        let b_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
-        let y_id = split_in_tree(&mut node, b_id, SplitDir::Vertical).unwrap();
+        let b_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
+        let y_id = split_in_tree(&mut node, b_id, SplitDir::TopBottom).unwrap();
         // 이제 트리: Split{ Slot(id), Split{ Slot(b_id), Slot(y_id) } }
         assert!(close_in_tree(&mut node, b_id), "중첩 슬롯 close");
         assert!(contains_slot(&node, id));
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn assign_in_split_targets_correct_slot() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(assign_in_tree(&mut node, new_id, Some("agent-b".into())));
         assert_eq!(
             find_slot(&node, new_id).unwrap().agent_id(),
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn set_in_tree_targets_correct_slot_in_split() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(set_in_tree(&mut node, new_id, SlotContent::PresetPalette));
         assert_eq!(
             find_slot(&node, new_id).unwrap(),
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn first_slot_id_is_leftmost() {
         let (mut node, id) = single_slot();
-        let _new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        let _new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert_eq!(first_slot_id(&node), id);
     }
 
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn first_empty_slot_id_skips_occupied_leftmost() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(assign_in_tree(&mut node, id, Some("occupied".into())));
         assert_eq!(
             first_empty_slot_id(&node),
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn first_empty_slot_id_all_occupied_is_none() {
         let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::Horizontal).unwrap();
+        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(assign_in_tree(&mut node, id, Some("x".into())));
         assert!(assign_in_tree(&mut node, new_id, Some("y".into())));
         assert_eq!(first_empty_slot_id(&node), None, "전부 점유 → None");

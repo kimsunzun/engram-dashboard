@@ -75,7 +75,7 @@ fn assign_rects(node: &LayoutNode, rect: NormRect, out: &mut Vec<(Uuid, NormRect
             //   구조적으로 배제해야 한다. 이 순수 계산층에서 절대 epsilon 만으로 완전 방어는 불가.
             let r = ratio.clamp(EPS, 1.0 - EPS);
             let (ra, rb) = match dir {
-                SplitDir::Horizontal => (
+                SplitDir::LeftRight => (
                     NormRect {
                         x: rect.x,
                         y: rect.y,
@@ -89,7 +89,7 @@ fn assign_rects(node: &LayoutNode, rect: NormRect, out: &mut Vec<(Uuid, NormRect
                         h: rect.h,
                     },
                 ),
-                SplitDir::Vertical => (
+                SplitDir::TopBottom => (
                     NormRect {
                         x: rect.x,
                         y: rect.y,
@@ -347,13 +347,13 @@ mod tests {
         assert_eq!(s.neighbors, Neighbors::default_none());
     }
 
-    // ── 가로 분할(좌/우 이웃) ───────────────────────────────────────────────────
+    // ── LeftRight 분할(좌/우 이웃) ───────────────────────────────────────────────
 
     #[test]
-    fn horizontal_split_left_right_neighbors() {
+    fn left_right_split_has_left_right_neighbors() {
         let (mut node, left) = single();
         let right =
-            super::super::tree::split_in_tree(&mut node, left, SplitDir::Horizontal).unwrap();
+            super::super::tree::split_in_tree(&mut node, left, SplitDir::LeftRight).unwrap();
         let sp = compute_spatial(&node);
 
         let l = spatial_of(&sp, left);
@@ -376,12 +376,13 @@ mod tests {
         assert_eq!(r.ordinal, 1);
     }
 
-    // ── 세로 분할(위/아래 이웃) ─────────────────────────────────────────────────
+    // ── TopBottom 분할(위/아래 이웃) ─────────────────────────────────────────────
 
     #[test]
-    fn vertical_split_up_down_neighbors() {
+    fn top_bottom_split_has_up_down_neighbors() {
         let (mut node, top) = single();
-        let bottom = super::super::tree::split_in_tree(&mut node, top, SplitDir::Vertical).unwrap();
+        let bottom =
+            super::super::tree::split_in_tree(&mut node, top, SplitDir::TopBottom).unwrap();
         let sp = compute_spatial(&node);
 
         let t = spatial_of(&sp, top);
@@ -397,13 +398,13 @@ mod tests {
 
     // ── L-shape(좌측 한 칸 + 우측 상하 2칸) — bottom-right 수용 기준 ────────────────
 
-    /// 트리: Split{Horizontal, a=Slot(left), b=Split{Vertical, a=Slot(rt), b=Slot(rb)}}.
+    /// 트리: Split{LeftRight, a=Slot(left), b=Split{TopBottom, a=Slot(rt), b=Slot(rb)}}.
     /// left = 좌측 전체 높이, rt = 우상단, rb = 우하단.
     fn l_shape() -> (LayoutNode, Uuid, Uuid, Uuid) {
         let (mut node, left) = single();
         let rroot =
-            super::super::tree::split_in_tree(&mut node, left, SplitDir::Horizontal).unwrap();
-        let rb = super::super::tree::split_in_tree(&mut node, rroot, SplitDir::Vertical).unwrap();
+            super::super::tree::split_in_tree(&mut node, left, SplitDir::LeftRight).unwrap();
+        let rb = super::super::tree::split_in_tree(&mut node, rroot, SplitDir::TopBottom).unwrap();
         (node, left, rroot, rb)
     }
 
@@ -480,7 +481,7 @@ mod tests {
     fn relative_direction_from_focus() {
         let (mut node, left) = single();
         let right =
-            super::super::tree::split_in_tree(&mut node, left, SplitDir::Horizontal).unwrap();
+            super::super::tree::split_in_tree(&mut node, left, SplitDir::LeftRight).unwrap();
         assert_eq!(
             resolve_spatial(&node, Some(left), SpatialToken::Right),
             Some(right)
@@ -515,7 +516,7 @@ mod tests {
         // 되어 이 단언이 깨진다(이 테스트는 가드가 살아있어야만 통과 — load-bearing).
         let (mut node, left) = single();
         let _rroot =
-            super::super::tree::split_in_tree(&mut node, left, SplitDir::Horizontal).unwrap();
+            super::super::tree::split_in_tree(&mut node, left, SplitDir::LeftRight).unwrap();
         // 극단값 — 정상 경로엔 없지만 미래 resize command 가정.
         if let LayoutNode::Split { ratio, .. } = &mut node {
             *ratio = 0.0;

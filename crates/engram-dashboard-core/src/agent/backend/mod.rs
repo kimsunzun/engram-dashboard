@@ -120,6 +120,19 @@ pub trait AgentBackend: Send + Sync {
     fn turn_classifier(&self) -> TurnClassifier {
         no_turn_signals
     }
+
+    /// 이 backend 가 **편지를 읽는 주체**인가 = 에이전트 간 우편의 수신자 명단 자격.
+    ///
+    /// ★"턴 관측 가능성" 축이 아니다(ADR-0116 결정 1·7 을 되돌리는 게 아니다)★: 구조화 출력이 없는
+    ///   터미널 claude 는 **그대로 받는다**. 여기서 가르는 건 관측 가능성이 아니라 **입력이 무엇으로
+    ///   해석되는가** 다 — shell 은 입력을 명령으로 **실행**하는 채널이라 봉투가 닿으면 읽히는 게 아니라
+    ///   실행된다(본문은 LLM 자유 텍스트라 `&`·`|`·`;` 가 섞이면 그 뒤가 별도 명령으로 파싱된다).
+    /// ★기본값 = true(fail-open)★: 새 CLI 백엔드는 편지를 읽는 쪽이 정상이다. 모른다고 배달을 끊으면
+    ///   편지가 조용히 사라지므로, 실행 채널인 backend 만 스스로 false 를 선언한다.
+    // ADR-0004
+    fn reads_messages(&self) -> bool {
+        true
+    }
 }
 
 /// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
@@ -182,6 +195,10 @@ pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
     backend_for(c).turn_classifier()
 }
 
+pub fn reads_messages(c: &AgentCommand) -> bool {
+    backend_for(c).reads_messages()
+}
+
 // ── 입력 인코딩(ADR-0044/0004) ────────────────────────────────────────────────
 
 /// 세션 입력(write_input)을 transport 로 보내기 **직전** 인코딩 방식. AgentSession 이 spawn 시
@@ -241,7 +258,46 @@ impl InputEncoder {
             }),
         }
     }
+
+    /// 인코딩된 본문 뒤에 **별도 write** 로 한 번 더 내보내야 하는 제출(턴 시작) 바이트.
+    /// `None` = 본문 write 하나가 이미 제출이다.
+    ///
+    /// ★왜 `encode` 안에서 붙일 수 없나(실측 2026-08-17 — 되살리지 마라)★: 살아 있는 claude TUI 세션에
+    ///   `본문 + CR` 을 **한 번의 write** 로 넣으면 텍스트가 입력창에 남고 턴이 시작되지 않는다. 제출을
+    ///   만드는 건 바이트열이 아니라 **수신자가 그것을 언제 읽느냐**라, 바이트열 하나를 돌려주는 `encode`
+    ///   로는 표현할 수 없다 — 그래서 별도 질문이다.
+    /// ★write 를 나누는 것만으로는 부족하다★: 나눠 써도 **간격이 없으면** 두 write 가 PTY 에서 한 덩이로
+    ///   묶여 수신자가 한 번의 read 로 받고, 결국 합쳐 쓴 것과 같아진다. 그래서 짝이 되는 대기가 필요하고
+    ///   그 값이 [`SUBMIT_PACING`] 이다(둘은 항상 같이 간다 — 한쪽만 보고 고치지 말 것).
+    /// ★`Raw` = CR★: 터미널·shell 은 PTY 로 사람 키보드를 흉내내는 채널이라 Enter = CR(0x0D) 이다.
+    /// ★`ClaudeStreamJson` = None★: `encode` 가 붙이는 종단 `\n` 이 그 프로토콜의 제출이다. 여기에 CR 을
+    ///   더하면 라인 경계 뒤에 잉여 바이트가 붙어 페이로드가 오염된다.
+    /// ★키 입력 경로는 이 값을 보지 않는다★: 소비자는 "완성된 메시지 하나 = 턴 하나" 인
+    ///   `AgentSession::submit_input_observed` 뿐이다. 사람이 Enter 를 직접 치는 터미널 스트리밍 입력
+    ///   (`write_input`)에 제출을 끼워 넣으면 키 한 번마다 턴이 제출된다.
+    // ADR-0004
+    pub fn submit_sequence(&self) -> Option<&'static [u8]> {
+        match self {
+            InputEncoder::Raw => Some(b"\r"),
+            InputEncoder::ClaudeStreamJson => None,
+        }
+    }
 }
+
+/// 본문 write 와 제출 write([`InputEncoder::submit_sequence`]) **사이에 두는 대기**.
+///
+/// ★왜 필요한가(실측 2026-08-17 — 지우지 마라)★: write 를 둘로 나누는 것만으로는 제출되지 않는다. 간격이
+///   없으면 두 write 가 PTY 에서 한 덩이로 묶여 claude TUI 가 **한 번의 read** 로 받고, CR 을 붙여넣은
+///   텍스트의 일부로 취급해 입력창에 그대로 담아 둔다. 경계를 만드는 건 write 횟수가 아니라 **수신자의
+///   read 경계**이고, 그걸 벌리는 수단이 이 대기다.
+/// ★"지연 0 으로도 제출된다" 는 옛 관측은 측정 오류였다(되살리지 마라)★: 그 측정은 제어 평면 명령을 **두
+///   번 따로** 보낸 것이라 웹소켓 왕복·태스크 전환으로 이미 수 밀리초가 벌어져 있었는데 0ms 로 읽혔다.
+///   같은 함수에서 연달아 쓰는 배달 경로에는 그 간격이 없어 실제로 제출되지 않았다(살아 있는 에이전트로
+///   재확인).
+/// ★값의 출처 = 임의 상수가 아니다(ADR-0038)★: 같은 문제를 푸는 tmux 기반 멀티에이전트 오케스트레이터들이
+///   claude Code 를 상대로 쓰는 정착값이 0.5초이고, 사유도 같다("텍스트와 Enter 를 합치거나 너무 붙여
+///   보내면 입력 버퍼와 경쟁이 난다"). 근거 없이 줄이거나 늘리지 말 것 — 줄이면 이 결함이 그대로 재발한다.
+pub const SUBMIT_PACING: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub fn input_encoder(c: &AgentCommand) -> InputEncoder {
     if c.is_json_mode() {
@@ -414,6 +470,98 @@ mod tests {
         assert_eq!(
             InputEncoder::Raw.encode(input, Uuid::new_v4()),
             input.to_vec()
+        );
+    }
+
+    // ── 우편 자격 트립와이어: 새 variant 는 분류를 **의식적으로** 선언해야 한다 ──────────────────
+    //
+    // ★와일드카드를 추가하지 말 것★ — 기본값이 true(fail-open)라 아무 선언 없이도 수신자가 되는데,
+    // 이 축이 막는 건 **LLM 자유 텍스트가 명령으로 실행되는 것**이라 조용한 상속은 안전 문제가 된다.
+    //
+    // ★목록 누락도 잡힌다(그래서 슬롯을 쓴다)★: 손으로 채우는 Vec 하나였을 땐 새 variant 를 거기 넣는 걸
+    // 잊으면 `reads_messages` 가 한 번도 안 불려 테스트가 초록인 채 fail-open 이 통과했다. 새 variant 를
+    // 추가하면 ① `variant_slot` 의 match 가 컴파일 에러 → ② 슬롯 번호를 늘리면 `BACKEND_VARIANTS` 와
+    // 샘플 배열 길이가 안 맞아 다시 컴파일 에러 → ③ 그래도 샘플을 안 채우면 아래 "슬롯 전부 채움" 단언이
+    // 깨진다. 세 관문 중 하나는 반드시 걸린다.
+    //
+    // 분류 기준: 입력을 **읽고 해석하는** 에이전트(CLI 코딩 에이전트 등)면 true, 입력을 **실행**하는
+    //   채널(셸·REPL 류)이면 false. 판단이 서지 않으면 false 로 두고 사용자에게 올린다.
+    const BACKEND_VARIANTS: usize = 2;
+
+    fn variant_slot(c: &AgentCommand) -> usize {
+        match c {
+            AgentCommand::Claude { .. } => 0,
+            AgentCommand::Shell { .. } => 1,
+        }
+    }
+
+    fn expected_reads_messages(c: &AgentCommand) -> bool {
+        match c {
+            AgentCommand::Claude { .. } => true,
+            AgentCommand::Shell { .. } => false,
+        }
+    }
+
+    /// variant 당 최소 1개. claude 는 모드가 둘이라 둘 다 싣는다(같은 슬롯 — 중복은 허용).
+    fn mail_eligibility_samples() -> Vec<AgentCommand> {
+        let per_variant: [AgentCommand; BACKEND_VARIANTS] = [
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: ClaudeOutputFormat::Terminal,
+            },
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+        ];
+        let mut all = per_variant.to_vec();
+        all.push(AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::StreamJson,
+        });
+        all
+    }
+
+    #[test]
+    fn mail_eligibility_is_consciously_declared_for_every_backend() {
+        let mut covered = [false; BACKEND_VARIANTS];
+        for c in &mail_eligibility_samples() {
+            covered[variant_slot(c)] = true;
+            assert_eq!(
+                reads_messages(c),
+                expected_reads_messages(c),
+                "variant {c:?}: 우편 자격 불일치 — 위 expected_reads_messages 의 분류 기준을 따라 의식적으로 선언할 것"
+            );
+        }
+        assert!(
+            covered.iter().all(|c| *c),
+            "샘플이 안 닿은 variant 가 있다(그 variant 는 reads_messages 가 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
+        );
+    }
+
+    // ── 제출 바이트(submit_sequence) — 백엔드별 "본문 write 만으론 턴이 안 시작되나" ──────────────
+    #[test]
+    fn submit_sequence_is_cr_for_raw_and_absent_for_stream_json() {
+        assert_eq!(
+            InputEncoder::Raw.submit_sequence(),
+            Some(b"\r".as_slice()),
+            "터미널·shell 은 PTY 키보드 흉내 — Enter = CR"
+        );
+        assert_eq!(
+            InputEncoder::ClaudeStreamJson.submit_sequence(),
+            None,
+            "encode 의 종단 \\n 이 이미 제출 — CR 을 더하면 라인 뒤에 잉여 바이트가 붙는다"
+        );
+    }
+
+    #[test]
+    fn submit_sequence_is_not_baked_into_encode() {
+        // ★합치면 claude TUI 가 제출하지 않는다(실측)★ — encode 산출물에 제출 바이트가 섞여 들어가면
+        //   session 이 두 write 로 나눠도 첫 write 가 이미 오염된 상태다.
+        let out = InputEncoder::Raw.encode(b"<message from=\"bob\">hi</message>", Uuid::new_v4());
+        assert!(
+            !out.contains(&b'\r'),
+            "Raw encode 는 제출 바이트를 붙이지 않는다(제출은 write 경계 — session 소관): {out:?}"
         );
     }
 

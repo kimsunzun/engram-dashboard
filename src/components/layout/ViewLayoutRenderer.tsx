@@ -1,9 +1,11 @@
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
-// 사람 우클릭(SlotContextMenu)이든 LLM(window.__engramLayout)이든 같은 invoke→emit 권위 루프로 갱신된다.
+// 사람 클릭(SlotContextMenu — 빈 슬롯은 좌클릭도)이든 LLM(window.__engramLayout)이든 같은 invoke→emit
+// 권위 루프로 갱신된다.
 
 import { useState } from 'react'
 import { Allotment } from 'allotment'
+import { Plus } from 'lucide-react'
 
 import type { LayoutNode } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
@@ -106,7 +108,18 @@ export default function ViewLayoutRenderer({
         //   이 게이트가 없으면 트리 노드 좌클릭이 트리 슬롯 pane 까지 버블해 트리 슬롯이 포커스되고, 이어
         //   우클릭 "열기"가 그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다(선존 UX 버그).
         //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
-        onClick={() => {
+        //   ★빈 슬롯 좌클릭 = 메뉴(ADR-0143)★: 표적은 아이콘이 아니라 슬롯 전체이고, 우클릭과 같은
+        //     setContextMenu 상태·같은 좌표를 쓴다. 콘텐츠 슬롯(터미널·트리·팔레트)의 좌클릭은 포커스
+        //     이동뿐이다 — 자기 클릭 의미를 가진 렌더러들이라 메뉴를 열면 그 의미를 덮는다.
+        //   ★이미 열린 메뉴는 재앵커하지 않는다★: SlotContextMenu 는 포털이 아니라 이 래퍼 안에 마운트돼
+        //     서브메뉴 컨테이너 행·항목 사이 여백 클릭이 여기까지 버블한다. 재앵커하면 메뉴가 커서 밑으로
+        //     점프해 앵커가 메뉴 사각형 안에 들어가고(SlotContextMenu 의 뒤집기 불변식이 막으려는 상태)
+        //     이어지는 클릭이 커서 밑 항목을 실행한다. 슬롯 여백 클릭은 메뉴의 mousedown 바깥닫기가 먼저
+        //     상태를 비우므로 이 가드에 걸리지 않는다(= 메뉴가 새 좌표로 옮겨 열린다).
+        onClick={e => {
+          if (node.content.type === 'empty' && contextMenu == null) {
+            setContextMenu({ x: e.clientX, y: e.clientY })
+          }
           if (!isContentSlot(node.content)) return
           if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
         }}
@@ -146,10 +159,12 @@ export default function ViewLayoutRenderer({
           // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
           <AgentList />
         ) : (
-          <>
-            <span>Slot {node.id.slice(0, 8)}</span>
-            <span>{t('common.viewEmpty')}</span>
-          </>
+          // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
+          //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
+          //   pointer-events 를 끊어 아이콘 위 클릭도 슬롯에 그대로 닿는다 — 유틸리티 클래스가 아니라 인라인인
+          //   이유는 이 끊음이 스타일 취향이 아니라 동작 계약이라서다(클래스 규칙으로 덮이지 않고, Tailwind 를
+          //   적용하지 않는 테스트 환경에서도 계산된 값으로 검증된다).
+          <Plus className="size-11 text-muted" style={{ pointerEvents: 'none' }} />
         )}
         {contextMenu && (
           // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
@@ -180,7 +195,8 @@ export default function ViewLayoutRenderer({
       </div>
     )
   }
-  // dir='vertical' = 상하(allotment vertical).
+  // ★ADR-0140 유일한 진실 경계★: dir='top_bottom' = 위/아래 → allotment 의 vertical(수직 스택). 여기가
+  //   뒤집히면 메뉴·타입·테스트가 전부 맞는데도 화면만 반대가 된다.
   // ★ratio 초기 사이징(ADR-0063)★: node.ratio = a(왼/위) 자식의 비율. ★Allotment 의 `defaultSizes` 는
   //   비율이 아니라 *픽셀*이다★ — [0.2,0.8] 을 주면 0.2px/0.8px 로 먹어 split-view 가 ~1px 로 붕괴하고
   //   자식들이 흐름 밖으로 쌓인다(실측 스샷으로 확인한 회귀). 대신 첫 pane(a=왼/위)에 `preferredSize` 를
@@ -196,7 +212,7 @@ export default function ViewLayoutRenderer({
   //   preferredSize(=ratio 파생 초기 사이징 %)는 첫 pane(a)에만 — 마운트 시 1회 적용·이후 보존(ADR-0063).
   return (
     <div style={{ height: '100%' }}>
-      <Allotment vertical={node.dir === 'vertical'}>
+      <Allotment vertical={node.dir === 'top_bottom'}>
         <Allotment.Pane key="pane-a" preferredSize={`${Math.round(node.ratio * 100)}%`}>
           <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>

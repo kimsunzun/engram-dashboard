@@ -1016,6 +1016,12 @@ mod resolver_alignment {
         fn is_agent_live(&self, id: PeerId) -> bool {
             self.roster.iter().any(|(rid, _)| *rid == id)
         }
+        fn live_id_for_name(&self, name: &str) -> Option<PeerId> {
+            self.roster
+                .iter()
+                .find(|(_, n)| n == name)
+                .map(|(id, _)| *id)
+        }
         fn canonical_name(&self, id: PeerId) -> Option<String> {
             self.roster
                 .iter()

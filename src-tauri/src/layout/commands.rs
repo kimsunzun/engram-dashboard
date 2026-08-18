@@ -44,8 +44,8 @@ use super::{
 //   2026-08-17). 여기서 다른 철자를 지으면 같은 동작에 이름이 둘이 되고, 화면 몫 등록(TRD §6 Step 4 —
 //   그 id 를 바꾸지 않는다고 적은 자리)이 그 둘을 다 지고 간다.
 // ★새로 짓는 이름은 셋뿐★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다)와 `slot.split`(프론트는
-//   방향을 이름에 박아 `slot.split.h`/`slot.split.v` 둘로 두지만, 버스에서는 방향이 **인자**다 — 그래야
-//   호출자가 방향을 값으로 고른다).
+//   방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만, 버스에서는 방향이
+//   **인자**다 — 그래야 호출자가 방향을 값으로 고른다).
 declare_commands! {
     catalog_version: 1;
 
@@ -55,14 +55,14 @@ declare_commands! {
         name: String,
     }
 
-    /// 나눌 방향.
+    /// 나눌 방향 — 이름이 결과 배치를 말한다(`LeftRight` = 좌/우, `TopBottom` = 위/아래). // ADR-0140
     ///
-    /// ★철자가 Tauri invoke 경로(`horizontal`/`vertical`)와 다르다★ — 선언 매크로가 serde rename 을 못
+    /// ★철자가 Tauri invoke 경로(`left_right`/`top_bottom`)와 다르다★ — 선언 매크로가 serde rename 을 못
     /// 달아 Rust variant 이름이 그대로 wire 값이 된다. 두 표면이 같은 뜻을 다른 철자로 받는 것은 알고
     /// 남긴 것이고, 변환은 핸들러가 한다.
     enum SplitDirection {
-        Horizontal,
-        Vertical,
+        LeftRight,
+        TopBottom,
     }
 
     /// 슬롯에 무엇을 담나 — `Agent` 만 `agent_id` 를 함께 받는다.
@@ -450,8 +450,8 @@ fn verb_slot_split(ports: &LayoutPorts, args: SlotSplitArgs) -> Result<SlotSplit
     let view = uuid_arg("view_id", &args.view_id)?;
     let slot = uuid_arg("slot_id", &args.slot_id)?;
     let dir = match args.dir {
-        SplitDirection::Horizontal => SplitDir::Horizontal,
-        SplitDirection::Vertical => SplitDir::Vertical,
+        SplitDirection::LeftRight => SplitDir::LeftRight,
+        SplitDirection::TopBottom => SplitDir::TopBottom,
     };
     let new_slot = apply::split_slot(
         &ports.state,

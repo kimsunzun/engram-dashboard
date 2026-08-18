@@ -24,8 +24,10 @@ export const ko = {
   },
   slot: {
     setContent: '슬롯 콘텐츠 배치',
-    splitH: '가로 분할',
-    splitV: '세로 분할',
+    // 키 이름은 결과 배치 기준 — 축 약자(splitH/splitV)로 되돌리지 않는다. 라벨↔배치 결선이 관례로
+    //   고정된 뒤엔 h/v 가 반대를 가리킨다(결선 근거 = slotCommands.ts 의 registerSplit 주석).
+    splitTopBottom: '가로 분할',
+    splitLeftRight: '세로 분할',
     focus: '포커스',
     popout: '팝업으로 분리',
     empty: '비우기',
@@ -104,7 +106,6 @@ export const ko = {
     // 반복 placeholder 시드 — 같은 토큰 2회. 전역 치환(global replace) 회귀 검증용(index.test.ts). ADR-0069.
     duplicatePreview: '{name} / {name}',
     viewLoading: 'View 로딩 중…',
-    viewEmpty: '— empty —', // em-dash — emptySlot '- 비어있음 -'과 별개 텍스트.
     emptyResult: '(빈 결과)',
     copied: '복사됨',
     copy: '복사',

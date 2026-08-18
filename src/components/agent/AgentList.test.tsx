@@ -381,7 +381,7 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
   it('포커스가 트리(agent_list) + 빈 슬롯 존재 → 트리 대신 빈 슬롯으로 assignAgent', () => {
     selectViewMock.mockReturnValue({
       layout: {
-        type: 'split', dir: 'horizontal', ratio: 0.3,
+        type: 'split', dir: 'left_right', ratio: 0.3,
         a: { type: 'slot', id: 'tree', content: { type: 'agent_list' } },
         b: { type: 'slot', id: 'empty', content: { type: 'empty' } },
       },
@@ -396,7 +396,7 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
   it('포커스가 팔레트(preset_palette) + 빈 슬롯 없음 → assignAgent 미호출 + 실패 인라인 배지', () => {
     selectViewMock.mockReturnValue({
       layout: {
-        type: 'split', dir: 'horizontal', ratio: 0.5,
+        type: 'split', dir: 'left_right', ratio: 0.5,
         a: { type: 'slot', id: 'palette', content: { type: 'preset_palette' } },
         b: { type: 'slot', id: 'busy', content: { type: 'agent', agent_id: 'other' } },
       },

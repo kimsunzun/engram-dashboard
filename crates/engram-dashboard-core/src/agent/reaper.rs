@@ -182,6 +182,7 @@ fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) ->
         rows: session.rows.load(Ordering::Relaxed),
         epoch: session.epoch,
         capabilities: session.capabilities(),
+        reads_messages: session.reads_messages(),
     }
 }
 

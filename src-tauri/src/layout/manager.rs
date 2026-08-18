@@ -210,7 +210,7 @@ impl ViewManager {
     //   ratio 0.2)를 못 맞춘다 → LayoutNode::Split 을 직접 짓는다(types.rs Split 노드 형태 그대로).
     fn default_main_layout() -> LayoutNode {
         LayoutNode::Split {
-            dir: SplitDir::Horizontal,
+            dir: SplitDir::LeftRight,
             ratio: 0.2, // 좌측(AgentList)을 작게 — 사이드패널 폭 재현.
             a: Box::new(LayoutNode::Slot {
                 id: Uuid::new_v4(),
@@ -663,7 +663,7 @@ mod tests {
         let layout = &mgr.views.get(&v0).unwrap().layout;
         match layout {
             LayoutNode::Split { dir, ratio, a, b } => {
-                assert_eq!(*dir, SplitDir::Horizontal, "가로 분할");
+                assert_eq!(*dir, SplitDir::LeftRight, "좌/우 배치");
                 assert_eq!(*ratio, 0.2, "좌측(트리)을 작게");
                 assert!(
                     matches!(
@@ -911,7 +911,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
         let slot = first_slot_of(&mgr, view_id);
-        let new_id = mgr.split_slot(view_id, slot, SplitDir::Horizontal).unwrap();
+        let new_id = mgr.split_slot(view_id, slot, SplitDir::LeftRight).unwrap();
         let v = mgr.views.get(&view_id).unwrap();
         assert!(matches!(v.layout, LayoutNode::Split { .. }));
         assert_eq!(v.focused_slot_id, Some(new_id));
@@ -922,7 +922,7 @@ mod tests {
     fn split_invalid_view_is_err() {
         let mut mgr = ViewManager::new();
         assert!(matches!(
-            mgr.split_slot(Uuid::new_v4(), Uuid::new_v4(), SplitDir::Horizontal)
+            mgr.split_slot(Uuid::new_v4(), Uuid::new_v4(), SplitDir::LeftRight)
                 .unwrap_err(),
             LayoutError::ViewNotFound(_)
         ));
@@ -935,7 +935,7 @@ mod tests {
         let before = mgr.views.get(&view_id).unwrap().layout.clone();
         let ver = mgr.version;
         assert!(matches!(
-            mgr.split_slot(view_id, Uuid::new_v4(), SplitDir::Vertical)
+            mgr.split_slot(view_id, Uuid::new_v4(), SplitDir::TopBottom)
                 .unwrap_err(),
             LayoutError::SlotNotFound(_)
         ));
@@ -948,7 +948,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
         let slot = first_slot_of(&mgr, view_id);
-        let new_id = mgr.split_slot(view_id, slot, SplitDir::Horizontal).unwrap();
+        let new_id = mgr.split_slot(view_id, slot, SplitDir::LeftRight).unwrap();
         mgr.close_slot(view_id, new_id).unwrap();
         let v = mgr.views.get(&view_id).unwrap();
         assert_eq!(v.focused_slot_id, Some(slot));
@@ -1200,7 +1200,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
         let slot = first_slot_of(&mgr, view_id);
-        mgr.split_slot(view_id, slot, SplitDir::Horizontal).unwrap();
+        mgr.split_slot(view_id, slot, SplitDir::LeftRight).unwrap();
         let snap = mgr.snapshot(view_id).unwrap();
         assert_eq!(snap.view_id, view_id);
         assert_eq!(snap.version, mgr.version);
@@ -1396,7 +1396,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
-        let right = mgr.split_slot(v, root, SplitDir::Horizontal).unwrap();
+        let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
         mgr.assign_agent(v, root, "occupied".into()).unwrap();
         let view = mgr.views.get(&v).unwrap();
         assert_eq!(
@@ -1412,7 +1412,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
-        let right = mgr.split_slot(v, root, SplitDir::Horizontal).unwrap();
+        let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
         mgr.assign_agent(v, root, "a".into()).unwrap();
         mgr.assign_agent(v, right, "b".into()).unwrap();
         let view = mgr.views.get(&v).unwrap();
@@ -1470,7 +1470,7 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
-        let new_slot = mgr.split_slot(v, root, SplitDir::Horizontal).unwrap();
+        let new_slot = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
         let view = mgr.views.get(&v).unwrap();
         assert_eq!(
             resolve_spawn_slot(view, Some(new_slot)).unwrap(),

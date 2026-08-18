@@ -14,7 +14,21 @@ import type { ResolvedSlotMenuItem } from '../../commands/slotMenu'
 const MENU_MARGIN = 4
 
 /**
- * 창 하단/우측 가장자리 우클릭 시 메뉴가 잘려 클릭 못 하던 버그(Bug1) 방지.
+ * 앵커(여는 지점)와 메뉴 사각형 사이 간격 — ★더블클릭 인식 반경보다 크게★(ADR-0143 결정 4).
+ *
+ * 유도: Windows 는 첫 클릭 주위 사각형 안에 둘째 클릭이 떨어지면 더블클릭으로 본다. 그 사각형의 *폭·높이*가
+ * `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK`(기본 4px)이므로 첫 클릭에서의 허용 *반경*은 그 절반 = 2px. 여기서 4배를
+ * 잡아 사용자가 허용치를 두 배로 키워도(레지스트리 `DoubleClickWidth`) 둘째 클릭이 메뉴에 닿지 않게 한다.
+ *
+ * 이 간격이 0 이 되면 앵커가 메뉴 모서리에 딱 붙어, 빈 슬롯을 더블클릭하면 둘째 클릭이 항목 위에 떨어져
+ * 실행된다 — 아래쪽 슬롯에선 메뉴가 위로 뒤집혀 맨 아래 `닫기`가 커서 밑에 오고, 레이아웃은 디스크에 없어
+ * 되돌릴 수단이 없다.
+ */
+export const ANCHOR_GAP = 8
+
+/**
+ * 창 가장자리에서 메뉴가 잘려 클릭 못 하던 버그(Bug1) 방지. 앵커(여는 지점)는 어느 방향으로 배치되든 메뉴
+ * 바깥 `ANCHOR_GAP` 만큼 떨어진 자리에 남는다.
  */
 export function clampMenuPosition(
   x: number,
@@ -24,9 +38,22 @@ export function clampMenuPosition(
   vw: number,
   vh: number,
 ): { top: number; left: number } {
-  const left = x + w > vw ? Math.max(MENU_MARGIN, Math.min(x, vw - w - MENU_MARGIN)) : x
-  const top = y + h > vh ? Math.max(MENU_MARGIN, Math.min(y, vh - h - MENU_MARGIN)) : y
-  return { top, left }
+  return { top: placeAlongAxis(y, h, vh), left: placeAlongAxis(x, w, vw) }
+}
+
+// ★밀지 말고 뒤집는다★: 밀어 넣으면 앵커(여는 지점)가 메뉴 *안*으로 들어가 커서 밑에 항목이 놓인다.
+//   빈 슬롯이 좌클릭으로 같은 메뉴를 열게 된 뒤로는(ADR-0141·0142) 그 상태에서 더블클릭 한 번이 커서 밑
+//   항목을 실행해 버린다 — 닫기가 걸리면 슬롯이 사라진다. 뒤집으면 앵커는 어느 방향이든 메뉴 밖에 남는다.
+//   ★두 방향 모두 ANCHOR_GAP 을 얹는다(ADR-0143 결정 4)★: 모서리에 붙기만 해서는 더블클릭 둘째 클릭이
+//   항목에 떨어진다 — 간격을 한 곳(이 helper)에서 주므로 두 축·두 방향이 같은 규칙을 받는다.
+//   뒤집어도 화면을 벗어나는 퇴화 케이스(메뉴가 뷰포트보다 큼)에서만 밀기로 떨어진다 — 그때는
+//   "화면 안에 있다"가 앵커 규칙(간격 포함)보다 우선이다.
+function placeAlongAxis(anchor: number, size: number, viewport: number): number {
+  const forward = anchor + ANCHOR_GAP
+  if (forward + size <= viewport) return forward
+  const flipped = anchor - ANCHOR_GAP - size
+  if (flipped >= 0) return flipped
+  return Math.max(MENU_MARGIN, Math.min(anchor, viewport - size - MENU_MARGIN))
 }
 
 export function flyoutPosition(
