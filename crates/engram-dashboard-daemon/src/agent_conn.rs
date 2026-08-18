@@ -341,7 +341,7 @@ pub struct AgentConnections {
     control_registry: Arc<crate::control::registry::ControlRegistry>,
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    // ADR-0140
+    // ADR-0149
     commands: CommandRoster,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -594,7 +594,7 @@ mod tests {
         }
     }
 
-    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 지우는지(ADR-0140/0144) ──
+    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 지우는지(ADR-0149/0144) ──
 
     /// 공장 하나가 만든 연결들이 **같은 명부**를 보는지까지 이 하네스가 본다 — 연결마다 새 명부가 나면
     /// 아래 conn 2 의 조회가 빈 목록을 받는다.

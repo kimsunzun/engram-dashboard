@@ -234,7 +234,7 @@ pub(crate) async fn run_connection(
     // ★T7c: 데몬 broadcast 이벤트를 프론트로 내보내는 AppHandle(emit 경로).
     //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 app.emit 로 전 webview 에 push.
     app: tauri::AppHandle,
-    // ADR-0140 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
+    // ADR-0149 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
     inbound: Arc<InboundSlot>,
 ) {
     // 1) 첫 핸드셰이크 — 결과를 ready_tx 로 caller(connect/ensure)에 1회 보고한다.
@@ -938,7 +938,7 @@ async fn main_loop(
                                             }
                                         }
                                     }
-                                    // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다(ADR-0140 결정 4)★.
+                                    // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다(ADR-0149 결정 4)★.
                                     //   여기서 하는 일은 넘기는 것뿐이고 적용은 연결 태스크 **밖**에서 돈다
                                     //   (`inbound::InboundReceiver::accept` — 인라인으로 되돌리면 합성 명령이
                                     //   자기 답을 자기가 못 꺼내 교착한다).
@@ -1244,7 +1244,7 @@ pub fn outcome_sink(
     }
 }
 
-/// 데몬이 배달한 봉투를 적용 태스크로 넘긴다 — ★기다리지 않는다★(ADR-0140 결정 4).
+/// 데몬이 배달한 봉투를 적용 태스크로 넘긴다 — ★기다리지 않는다★(ADR-0149 결정 4).
 ///
 /// `socket` = 이 봉투가 도착한 소켓의 세대. 답장이 그 소켓에만 나가게 [`outcome_sink`] 로 함께 실린다.
 /// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓·실 `AppHandle` 없이 세울 수 없어(그래서 이 파일엔

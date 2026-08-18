@@ -9,7 +9,7 @@ use crate::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterEntry {
     pub name: String,
-    /// 등록 패킷이 실어 온 모양. ★불투명 문자열이다★ — 파싱·검증·분기 금지(ADR-0141).
+    /// 등록 패킷이 실어 온 모양. ★불투명 문자열이다★ — 파싱·검증·분기 금지(ADR-0150).
     pub help: String,
     pub owner: OwnerToken,
 }
@@ -57,7 +57,7 @@ impl OwnerLookupSource for Roster {
 /// ★이름 하나에 주인은 하나다★ — 뒤에 등록한 쪽이 이긴다. 서로 다른 두 주인이 같은 이름을 얹으면 앞
 /// 주인은 그 이름을 잃고, 나중 주인이 끊길 때 그 이름은 앞 주인에게 돌아가지 않고 사라진다. 이름 하나에
 /// 주인 여럿은 유보된 안건이다(ADR-0144 대안 G).
-// ADR-0141
+// ADR-0150
 // ADR-0144
 #[derive(Debug, Default)]
 pub struct Roster {
@@ -262,7 +262,7 @@ impl Roster {
     /// 그래서 전체 상한이 **주인별 몫 없는 공유 자원**이 되지 않게 여기서 막는다. 이번 패킷에 실린 이름은
     /// 덮어쓰기라 자리를 새로 먹지 않으므로 두 번 세지 않는다.
     /// ★이 상한은 거부된 TTL 과 다른 축이다★ — 거기서 거부한 것은 **시간**이라 같은 질문의 답이 시계에
-    /// 따라 갈렸다(ADR-0141 대안 C · ADR-0144 대안 F). 개수 상한은 명부에 든 이름의 답을 바꾸지 않는다.
+    /// 따라 갈렸다(ADR-0150 대안 C · ADR-0144 대안 F). 개수 상한은 명부에 든 이름의 답을 바꾸지 않는다.
     /// ★판정이 변경보다 앞이라 **과대측정**이다(알고 남긴 것)★: 이번 왕복에서 내려갈 이름도 아직 명부에
     /// 있으므로 함께 센다 — [`Roster::register`] 가 갈아치울 자기 이름과 [`Roster::update`] 의 `removed`
     /// 가 그렇다. 대가는 「몫이 꽉 찬 주인은 이름 전량을 한 패킷에 갈아치우지 못한다」뿐이고, 빈 전량

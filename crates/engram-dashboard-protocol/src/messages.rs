@@ -213,7 +213,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    // ── 명령 버스 등록 wire(ADR-0140/0141 · TRD §3-7) ───────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0149/0150 · TRD §3-7) ───────────────────────────────
     // ★받는 쪽만 서 있다★ — 데몬 dispatch 가 이 셋을 주인 명부에 반영하고 [`AgentEvent::CommandList`]
     //   로 답한다(`connection_core.rs`). **보내는 쪽은 아직 없다** — 셸·화면이 자기 선언을 얹는 것은
     //   TRD §6 Step 3·4 다.
@@ -420,7 +420,7 @@ pub enum AgentEvent {
         agent: AgentInfo,
     },
 
-    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0140/0141) — request_id 에코.
+    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0149/0150) — request_id 에코.
     /// broadcast 가 아니다(요청한 연결에만 간다). 데몬 dispatch 가 명부를 훑어 이걸 낸다.
     ///
     /// ★구형 셸 안전은 오직 "전용 reply" 라는 사실에만 기댄다★ — 구형 셸은 `ListCommands` 를 보내지
@@ -435,10 +435,10 @@ pub enum AgentEvent {
         entries: Vec<CommandListEntry>,
     },
 
-    /// 데몬이 이 클라이언트 앞으로 배달하는 **명령**(ADR-0140 결정 3 의 2단계).
+    /// 데몬이 이 클라이언트 앞으로 배달하는 **명령**(ADR-0149 결정 3 의 2단계).
     ///
     /// 이 variant 가 클라이언트를 「데몬 명령 **수신** peer」로 만든다 — ADR-0081 이 「신규 능력」으로 적은
-    /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0140 이 이 통합 봉투로 대체했다.
+    /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0149 이 이 통합 봉투로 대체했다.
     ///
     /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지 18개는 알림이거나 내가 보낸 명령의 답장이다. 그래서
     /// 받는 쪽은 이것만 [`AgentEvent`] 소비 흐름에서 갈라내 인바운드 수신기로 넘기고, 답은
@@ -447,7 +447,7 @@ pub enum AgentEvent {
     /// 실행되지 않고 사라지고, 보낸 쪽은 마감시각까지 매달린다).
     ///
     /// `envelope.args` 는 데몬이 **파싱하지 않고 통과시킨** 값이다(ADR-0081 「데몬 opaque 유지」 —
-    /// ADR-0140 이 그 조항을 살려 두었다). `envelope.owner` 는 **목적지** 토큰이고 보낸 이가 아니다.
+    /// ADR-0149 이 그 조항을 살려 두었다). `envelope.owner` 는 **목적지** 토큰이고 보낸 이가 아니다.
     CommandRequest {
         #[ts(
             type = "{ name: string, request_id: string, owner: string, proto_ver: number, args: unknown }"
@@ -599,7 +599,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::RenamePreset { request_id, .. }
         // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
         | AgentCommand::SetEnvelopeFormat { request_id, .. }
-        // 명령 버스 등록 wire(ADR-0140/0141) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
+        // 명령 버스 등록 wire(ADR-0149/0150) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
         //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
         | AgentCommand::RegisterCommands { request_id, .. }
         | AgentCommand::UpdateCommands { request_id, .. }
@@ -631,7 +631,7 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::PresetList { request_id, .. }
         | AgentEvent::Snapshot { request_id, .. }
         | AgentEvent::Created { request_id, .. }
-        // ★CommandList 는 상관 대상이다★(ADR-0140) — ListCommands 조회의 전용 reply라 AgentList/
+        // ★CommandList 는 상관 대상이다★(ADR-0149) — ListCommands 조회의 전용 reply라 AgentList/
         //   ProfileList/PresetList 와 같은 자리다. 여기서 None 을 고르면 셸이 확실히 매달린다: 위
         //   command_request_id 가 ListCommands 에 Some 을 돌려주므로 pending 매칭이 슬롯을 만드는데,
         //   그걸 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다. 두 함수는 명령↔답장 쌍마다 같이
@@ -948,7 +948,7 @@ mod tests {
         ));
     }
 
-    // ── 명령 버스 등록 wire(ADR-0140/0141) ─────────────────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0149/0150) ─────────────────────────────────────────
     //
     // 이 구획은 **아직 배선이 없는** variant 를 지킨다 — 보내는 코드가 없으니 형태가 조용히 틀려도
     // 런타임에 아무 신호가 없고, Step 2 배선이 붙는 날에야 터진다. golden 이 그때까지의 유일한 벽이다.
@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// ★명령↔답장 쌍 박제(ADR-0140)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
+    /// ★명령↔답장 쌍 박제(ADR-0149)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
     /// `AgentEvent::CommandList` 가 그걸 깨우는 쪽이다. 한쪽만 고치면(예: 새 reply variant 를
     /// broadcast 로 잘못 분류) 그 왕복은 연결이 끊길 때까지 안 풀린다. 동형 검증이 `src-tauri`
     /// `daemon_client::protocol_state` 에도 있었으나 그 lib 테스트 타깃은 로컬/CI 모두
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
     }
 
-    // ── 중계 다리 wire 계약(ADR-0140 결정 3 의 2단계) ─────────────────────────────────
+    // ── 중계 다리 wire 계약(ADR-0149 결정 3 의 2단계) ─────────────────────────────────
     //
     // ★이 두 golden 이 지키는 것은 손으로 적은 `#[ts(type = …)]` 이다★ — 봉투 타입은 도구 crate 소유라
     //   ts-rs derive 가 없고(그 crate 가 ts-rs 를 안 든다), 그래서 TS 칸을 이 파일이 손으로 적는다. Rust 쪽

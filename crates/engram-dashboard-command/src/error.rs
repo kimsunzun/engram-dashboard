@@ -60,7 +60,7 @@ error_codes! {
     /// 로 낮춘다([`CommandError`] 의 역직렬화가 `retry` 도 [`RetryMode::Never`] 로 낮춘다). 닫힌 열거형으로
     /// 디코드하면 코드가 하나 느는 additive 확장이 옛 클라이언트를 깨뜨린다.
     /// ★코드 추가는 additive, 뜻 변경은 금지★(TRD §4-③).
-    // ADR-0140
+    // ADR-0149
     pub enum ErrorCode {
         InvalidArgument => "INVALID_ARGUMENT" retry Never,
         UnknownCommand => "UNKNOWN_COMMAND" retry Never,

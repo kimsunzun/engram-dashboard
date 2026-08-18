@@ -25,7 +25,7 @@
 //! `LayoutEvents` 가 없는 것은 그 경로가 프론트에 아무것도 안 쏜다는 사실이다.
 //!
 //! read-only 4종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial`)은 변형이 없어 포트를 하나도
-//! 받지 않는다(ADR-0141 결정 2로 v1 명령 범위에 합류).
+//! 받지 않는다(ADR-0150 결정 2로 v1 명령 범위에 합류).
 
 use std::future::Future;
 use std::pin::Pin;

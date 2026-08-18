@@ -1,7 +1,7 @@
 # ADR-0022: 통합 command registry — palette + 키바인딩 + LLM + 메뉴/트레이 단일 출처
 
-- 상태: **제안(Proposed)** (2026-06-17, 방향만 고정 — 구현은 나중. 다음 세션들이 command를 이 형태로 쌓게 하기 위한 기록.) · 부분 폐기 by ADR-0140 (미해결 forks 3건 소진)
-- 관련: CLAUDE.md §5(LLM-우선 제어, 모든 메뉴 프로그래밍 가능) · ADR-0011(agentClient 제어 표면) · ADR-0020(단일 dispatch) · ADR-0021(데몬 lifecycle command) · 백로그 "data-driven 우클릭 메뉴" · Amended by ADR-0140 (미해결 forks 3건 소진)
+- 상태: **제안(Proposed)** (2026-06-17, 방향만 고정 — 구현은 나중. 다음 세션들이 command를 이 형태로 쌓게 하기 위한 기록.) · 부분 폐기 by ADR-0149 (미해결 forks 3건 소진)
+- 관련: CLAUDE.md §5(LLM-우선 제어, 모든 메뉴 프로그래밍 가능) · ADR-0011(agentClient 제어 표면) · ADR-0020(단일 dispatch) · ADR-0021(데몬 lifecycle command) · 백로그 "data-driven 우클릭 메뉴" · Amended by ADR-0149 (미해결 forks 3건 소진)
 - 범위: 사용자 동작·LLM 제어·키바인딩·메뉴/트레이/palette를 **하나의 command registry**에서 파생시키는 아키텍처 방향. 미래 기능 추가의 blast-radius를 0에 수렴시키는 게 목적.
 
 ## 맥락

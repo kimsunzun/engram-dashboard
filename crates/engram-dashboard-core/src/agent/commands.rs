@@ -1,4 +1,4 @@
-//! `agent.*` 명령 — **선언과 본문이 한 세트**로 일하는 코드(`AgentManager`) 옆에 산다(ADR-0140).
+//! `agent.*` 명령 — **선언과 본문이 한 세트**로 일하는 코드(`AgentManager`) 옆에 산다(ADR-0149).
 //!
 //! ★이 표가 CLI 제어 동사의 실입구다★: 데몬의 `/control/agent` 라우트가 `{verb}` 를 `agent.<verb>` 로
 //!   찾아 여기 핸들러를 부른다(daemon `control/agent.rs`). 즉 이 파일의 반환 모양·오류 코드·통지 횟수가
@@ -127,7 +127,7 @@ pub struct StartedAgent {
 ///   이 seam 이 있어야 가짜 매니저로 표 전체가 프로세스 없이 검증된다.
 /// ★구현체는 번역만 한다★: 동사 규칙(지목 해석 · 모드 유도 · 결말 번역)은 **핸들러가** 갖는다.
 ///   구현체에 규칙이 들어가면 진짜와 가짜가 서로 다른 규칙을 돌게 되어 하네스가 아무것도 못 지킨다.
-// ADR-0140
+// ADR-0149
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
@@ -152,7 +152,7 @@ pub trait AgentCommandHost: Send + Sync {
 /// ★왜 표의 의존이 아니라 포트인가★: 실제 통지는 전-연결 팬아웃이라 데몬 소유다. 소비자인 여기가 좁은
 ///   trait 만 갖고 실물 어댑터는 조립부가 준다(daemon `control::RosterBroadcast` 와 같은 모양).
 /// 논블록이어야 한다 — 팬아웃은 연결별 큐에 try_send 만 한다.
-// ADR-0140
+// ADR-0149
 pub trait RosterChanged: Send + Sync {
     fn roster_changed(&self);
 }
@@ -216,7 +216,7 @@ pub const NEW_AGENT_OUTPUT_FORMAT: ClaudeOutputFormat = ClaudeOutputFormat::Stre
 /// ★`notify` 를 인자로 받는 이유★: 명부를 바꾼 동사는 반드시 통지해야 하는데(포트 doc 참조) 그 실물은
 ///   데몬 소유다. 조립부가 넘기게 하면 **빠뜨릴 수 없다** — trait 기본 구현으로 두면 조용히 안 부른다.
 /// ★명령이 늘어도 조립부(실행 파일)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
-// ADR-0140
+// ADR-0149
 pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged>) -> CommandTable {
     let mut table = CommandTable::new(COMMAND_SPECS);
 
@@ -598,7 +598,7 @@ fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, Co
 /// 전체를 흉내 내지 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다.
 /// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다).
 // ADR-0132
-// ADR-0140
+// ADR-0149
 pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgent, CommandError> {
     let found = |row: &AgentRosterRow| ResolvedAgent {
         id: row.id,

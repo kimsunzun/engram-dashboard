@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use engram_dashboard_protocol::{AgentEvent, RequestId};
 
 // ── request_id 추출(request/reply 상관) ───────────────────────────────────────────────
-// wire 계약이라 protocol crate 가 소유한다 — 명령↔답장 쌍의 정합(ADR-0140 등)은 그 crate 의 테스트가
+// wire 계약이라 protocol crate 가 소유한다 — 명령↔답장 쌍의 정합(ADR-0149 등)은 그 crate 의 테스트가
 // CI 가 항상 실행하는 target(`cargo test -p engram-dashboard-protocol`)에서 박는다. 여기서는 재수출해
 // 이 모듈 호출부(`protocol_state::command_request_id` 등)와 아래 tests 를 그대로 둔다.
 pub use engram_dashboard_protocol::{command_request_id, event_reply_request_id};
@@ -412,7 +412,7 @@ mod tests {
             None,
             "AgentListUpdated 는 broadcast — 매칭 우회"
         );
-        // ADR-0140 명령↔답장 쌍(ListCommands↔CommandList) 박제는 이 파일이 아니라 protocol crate
+        // ADR-0149 명령↔답장 쌍(ListCommands↔CommandList) 박제는 이 파일이 아니라 protocol crate
         // 쪽 테스트(`list_commands_reply_request_id_pairing`)가 CI 에서 돈다 — 이 파일의 lib 테스트
         // 타깃은 로컬/CI 모두 0xc0000139(ENTRYPOINT_NOT_FOUND)로 실행되지 않는다(이 파일에 남은
         // request_id 추출 테스트 전부가 같은 이유로 미실행이다).

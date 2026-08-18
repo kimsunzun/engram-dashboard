@@ -15,7 +15,7 @@ test-support = []
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# ADR-0140: 선언이 생산자 옆으로 흩어지므로 "이 바이너리에 링크된 선언 전량"은 링커가 모은다.
+# ADR-0149: 선언이 생산자 옆으로 흩어지므로 "이 바이너리에 링크된 선언 전량"은 링커가 모은다.
 inventory = "0.3"
 # 왕복 상관 키를 홉마다 다시 정의하지 않으려고 기존 wire 의 표현(uuid)을 그대로 쓴다 —
 #   `engram-dashboard-protocol` 의 `RequestId` 와 같은 표현이라 Step 2·3 배선에서 변환이 끼지 않는다.

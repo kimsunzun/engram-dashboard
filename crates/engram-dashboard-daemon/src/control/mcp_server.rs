@@ -219,7 +219,7 @@ impl RosterBroadcastSlot {
     }
 }
 
-/// ★데몬 명령 표 늦은 주입 슬롯(ADR-0140)★: ManagerSlot 과 동형. 표는 매니저를 쥐므로 매니저 조립
+/// ★데몬 명령 표 늦은 주입 슬롯(ADR-0149)★: ManagerSlot 과 동형. 표는 매니저를 쥐므로 매니저 조립
 /// **뒤**에야 만들어지는데, 그 매니저를 담을 슬롯 자체는 MCP 서버보다 앞에 있어야 한다.
 ///
 /// ★표가 늦게 와도 명부 통지는 안 늦는다★ — 표가 쥐는 것은 팬아웃 값이 아니라 위 슬롯이다
@@ -920,7 +920,7 @@ async fn control_messages_handler(
 
 // ── CLI 제어 입구(/control/agent) ──────────────────────────────────────────────────
 
-/// `/control/agent` 라우트 State — 명령 표 슬롯 하나뿐이다(ADR-0140).
+/// `/control/agent` 라우트 State — 명령 표 슬롯 하나뿐이다(ADR-0149).
 ///
 /// ★매니저·팬아웃 슬롯을 담지 않는다★: 둘 다 **표가** 쥐고 있다(`commands::make_daemon_table`). 여기서
 ///   다시 담으면 같은 실물로 가는 두 번째 경로가 생기고, 통지가 두 곳에서 나가면 동사별 통지 횟수(깨우기
@@ -964,7 +964,7 @@ async fn control_agent_handler(
     let Some(table) = state.commands.get() else {
         tracing::error!(
             entrance = "cli",
-            "제어 동사 처리 불가 — 명령 표 슬롯 미설정(배선 순서 이상, ADR-0140)"
+            "제어 동사 처리 불가 — 명령 표 슬롯 미설정(배선 순서 이상, ADR-0149)"
         );
         return service_unavailable();
     };
