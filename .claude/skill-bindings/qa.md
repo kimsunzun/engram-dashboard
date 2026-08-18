@@ -64,7 +64,7 @@ cargo test  -p engram-dashboard-core        # 영향 crate 테스트
 
 순서대로:
 ```bash
-cargo build                                 # 1) 빌드 (루트, 전 workspace)
+cargo build                                 # 1) 빌드 (루트, 전 workspace). ★이걸로 지어진 engram-dashboard.exe 는 띄우지 않는다★ — TAURI_CONFIG 없이 도는 빌드라 debug 셸에 release identifier 를 다시 찍는다(ADR-0137, 정본 CLAUDE.md 「빌드·검증 명령」). 띄울 exe 는 아래 full 의 build-client-shell.mjs 가 만든다
 cargo test --workspace --exclude engram-dashboard   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05, 정본 CLAUDE.md·2026-07-19 드리프트 수정)
 cargo fmt --check                           # 3) 포맷 게이트 (검사형 — rewrite 안 함)
 rg "^\s*use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
@@ -107,13 +107,13 @@ standard 게이트를 전부 PASS시킨 뒤, 실제 앱을 띄워 화면 동작�
 
 ```bash
 # 0) 이번 변경을 담은 빌드를 만든다 + dev 서버를 띄운다(디버그 빌드는 화면을 품지 않는다)
-cargo build -p engram-dashboard          # 백엔드/데몬을 고쳤으면 -p engram-dashboard-daemon 도
+export CLIENT_EXE="$(node scripts/build-client-shell.mjs)"   # ★클라이언트 셸은 이걸로만★(ADR-0137 — 아래 첫 불릿). ★빈 값이면 빌드 실패다 → 여기서 멈춘다★(경로는 stdout 한 줄, 진행·에러는 stderr). 백엔드/데몬을 고쳤으면 `cargo build -p engram-dashboard-daemon` 도 — ★조건부다★: 데몬이 떠 있으면 그 명령은 os error 5 로 하드 FAIL 한다(아래 "공유 데몬 바이너리 락"), 그러니 무조건 붙여 돌리지 말 것
 # ★1420이 떠 있어도 그냥 재사용하지 말 것 — 그게 이 워크트리 것인지 먼저 확인한다★(아래 절)
 powershell -NoProfile -Command "\$c = Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue; if (\$c) { (Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$c[0].OwningProcess)\").CommandLine }"
 nohup npm run dev > /tmp/engram-vite.log 2>&1 & disown   # 위가 빈 출력일 때만(= 아무도 안 잡고 있을 때만)
 curl -s -o /dev/null --retry 60 --retry-delay 1 --retry-connrefused --max-time 120 http://localhost:1420
 # 1) 분리 실행으로 기동 — 스케줄러가 새 프로세스를 만들어 터미널 트리 밖에 둔다
-powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe 'target/debug/engram-dashboard.exe' -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe \$env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
 #    성공 시 stdout 마지막 두 줄 = LOG=<로그경로> · PID=<pid>   ★PID를 기록한다★(teardown이 이걸 쓴다)
 #    로그까지 켜려면 값을 콤마로 잇는다 — 반드시 작은따옴표 각각:
 #      ... -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223','RUST_LOG=debug'
@@ -124,16 +124,18 @@ node scripts/cdp.mjs info                   # 페이지 목록 확인
 node scripts/cdp.mjs eval "<js>"            # 앱 안 JS·실제 invoke 호출 (spawn/write/interrupt/kill 등 IPC 검증)
 node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로 확인
 ```
+- **★띄우는 exe 경로도 하드코딩하지 말 것★** — `target/debug`는 기본값일 뿐이라 `CARGO_TARGET_DIR`·`.cargo/config.toml`의 `build.target-dir`이 산출물을 딴 데로 돌린다. 그러면 옛 경로에 **남아 있는 낡은 exe**가 존재 검사를 통과해 그걸 띄우고, 이번 변경이 안 담긴 바이너리로 실측하고도 통과로 오판한다. 0)이 `cargo metadata`로 실측한 경로를 `$CLIENT_EXE`로 물려주므로 그대로 쓴다(`\$env:` 이스케이프는 Git Bash가 `$env`를 자기 변수로 먹는 것을 막는 것 — 값은 PowerShell이 환경에서 직접 읽으므로 경로에 작은따옴표가 있어도 안전하다).
+- **★클라이언트 셸을 생 `cargo build -p engram-dashboard`로 짓지 말 것(ADR-0137)★** — 그 명령은 Tauri CLI를 지나지 않아 dev 오버레이(`src-tauri/tauri.dev.conf.json`)가 안 먹고 **release identifier가 찍힌다.** `TAURI_CONFIG`는 `cargo:rerun-if-env-changed`라 *변수를 빼는 것만으로도 재빌드가 돌아* 멀쩡하던 exe를 되돌려 놓는다(실측). 그러면 릴리즈 앱이 떠 있는 동안 실측 대상이 **창도 없이 즉시 죽어** 게이트가 앱 결함으로 오판한다. `scripts/build-client-shell.mjs`가 주입과 산출물 대조를 함께 하며 **런처·이 게이트가 같은 구현을 쓴다**(위 "런처를 쓰지 말 것"은 그대로 유효 — 저건 dev 서버 자식 때문이고, 이 스크립트는 앱을 띄우지 않는다).
 - **★1420을 남이 잡고 있으면 디버그 경로를 쓰지 않는다 — 릴리스로 간다★(실측 2026-08-17):** 디버그 빌드는 화면을 품지 않고 1420에서 받아오는데 그 포트는 **먼저 잡은 워크트리 것**이다. 남의 vite를 재사용하면 **남의 화면을 측정하고 통과로 오판한다** — 앱은 정상으로 보이므로 눈치챌 단서가 없다. 위 0)의 명령줄 출력에 **지금 워크트리 경로가 아닌 다른 경로**가 보이면(예: `...engram-dashboard-wt2\...\vite.js`) 그 vite를 쓰지 말고, 사용자에게 그 프로세스를 알리고 릴리스 경로로 전환한다(릴리스 exe는 화면을 품어 포트가 필요 없다). **남의 vite를 죽이지 않는다** — 그 워크트리에서 다른 작업이 돌고 있을 수 있다.
 - **★릴리스로 갈 땐 순수 `cargo build --release`가 아니다★(실측 2026-08-18):** 그렇게 만든 exe는 여전히 `localhost:1420`을 로드해 **같은 함정에 그대로 빠진다.** 화면을 품은 exe는 `npm run tauri build -- --no-bundle`이 만든다(근거·경고 = `scripts/build-release.ps1` 헤더). 띄운 뒤 앱 안에서 URL을 확인해 `http://tauri.localhost/`인지 본다 — `localhost:1420`이면 잘못된 빌드를 측정하는 것이다.
 - **★`-Command`를 `-File`로 바꾸지 말 것★** — `-File`은 뒤 인자를 전부 문자열 리터럴로 넘겨 `'A=B','C=D'`가 **한 값 `A=B,C=D`로 뭉개진다.** 그러면 포트 인자가 오염돼 **9223이 안 열리는데 스크립트는 PID를 정상 반환**한다 — 게이트가 조용히 죽는 경로다(실측 2026-08-17). 경로에 `\`를 쓰는 것도 금지 — Git Bash가 먹어서 `exe not found`가 난다. 슬래시로 쓴다.
 - **★환경변수는 상속되지 않는다★** — 새 프로세스를 스케줄러가 만들어서 현재 셸의 `$env:...`가 안 넘어간다. 디버그 포트·`RUST_LOG`는 반드시 `-EnvVars`로 넘긴다. 빠뜨리면 포트가 안 열려 "왜 9223이 안 뜨지"로 헤맨다.
-- **★실측 대상이 이번 변경을 담은 빌드인지 먼저 확인한다★** — 분리 실행은 **이미 만들어진 exe**를 띄운다. 소스를 고치고 재빌드 없이 띄우면 옛 바이너리로 실측하고 **통과로 오판한다**. `cargo build -p engram-dashboard`는 **데몬을 빌드하지 않는다** — 백엔드를 고쳤으면 `-p engram-dashboard-daemon`도 돌린다(안 그러면 옛 데몬에 붙어 Rust 변경이 조용히 무효가 된다, ADR-0029).
+- **★실측 대상이 이번 변경을 담은 빌드인지 먼저 확인한다★** — 분리 실행은 **이미 만들어진 exe**를 띄운다. 소스를 고치고 재빌드 없이 띄우면 옛 바이너리로 실측하고 **통과로 오판한다**. `node scripts/build-client-shell.mjs`는 **데몬을 빌드하지 않는다** — 백엔드를 고쳤으면 `-p engram-dashboard-daemon`도 돌린다(안 그러면 옛 데몬에 붙어 Rust 변경이 조용히 무효가 된다, ADR-0029).
 - **디버그 대신 릴리스로 볼 수도 있다** — `target/release/engram-dashboard.exe`는 화면을 품고 있어 dev 서버가 필요 없고 렌더가 즉시다. 대신 빌드가 4분대다(실측 2026-08-17). 반복 확인엔 디버그가 낫다 — dev 서버를 살려두면 재기동 렌더가 1초 안쪽이다.
 - **★`target/release/`와 `release/`는 다른 배포판이다★** — 전자는 위 런처가 만들고, 후자는 `scripts/build-release.ps1`이 조립하는 portable 폴더다. 데이터 폴더도 각자라 섞으면 엉뚱한 데몬·엉뚱한 로스터를 본다.
-- **같은 이름 프로세스가 미리 떠 있으면 안 된다** — 스크립트는 이미지 이름 차집합으로 새 PID를 찾고 여럿이면 첫 번째만 쓴다. 잔여 앱 프로세스를 먼저 확인한다.
-- **기동 실패 판정** — 20초 안에 새 프로세스를 못 찾으면 `LAUNCH_FAILED ...` + 로그 꼬리 20줄 출력 후 종료코드 1. 실측 실패로 보고한다.
-- **앱 출력은 화면에 안 나온다** — 전부 `LOG=` 파일로 리다이렉트된다(기본 `%TEMP%\detached-<exe이름>.log`). `RUST_LOG` 미설정이면 앱이 stdout에 아무것도 안 써서 **로그 0바이트가 정상**이다 — 빈 로그를 기동 실패로 읽지 말 것. **거꾸로 `RUST_LOG=debug`를 넘겼는데도 0바이트면 위 `-EnvVars` 문법이 깨진 것이다**(정상이면 수 KB — 실측 2026-08-17: 0 B → 1672 B).
+- **★다른 배포판 앱이 떠 있는 것은 정상이다(ADR-0137) — 막아야 할 것은 그게 아니다★** — 스크립트는 이미지 이름이 아니라 **exe 경로**로 새 PID를 가리므로 남의 워크트리·release 앱은 애초에 후보에 안 든다. 실제 제약은 **이 배포판의 다른 프로세스가 20초 폴링 창 안에 뜨면 안 된다**는 것뿐이다(여럿이면 첫 번째만 쓴다). 같은 배포판의 잔여 앱을 먼저 확인한다.
+- **기동 실패 판정** — 20초 안에 이 배포판의 새 프로세스를 못 찾으면 `LAUNCH_FAILED (no new ... within 20s). log: <경로>` + 로그 꼬리 20줄, 종료코드 1. 실측 실패로 보고한다.
+- **앱 출력은 화면에 안 나온다** — 전부 `LOG=` 파일로 리다이렉트된다(기본 `%TEMP%\detached-<exe이름>-<이번 실행 태그>.log` — ★실행마다 새 파일이다★. exe 이름만으로 가르면 워크트리·debug/release가 전부 같은 파일에 몰려 먼저 뜬 앱이 다음 앱의 기동을 막는다. 경로를 짐작하지 말고 `LOG=`·`LAUNCH_FAILED` 줄에 찍힌 것을 쓴다). `RUST_LOG` 미설정이면 앱이 stdout에 아무것도 안 써서 **로그 0바이트가 정상**이다 — 빈 로그를 기동 실패로 읽지 말 것. **거꾸로 `RUST_LOG=debug`를 넘겼는데도 0바이트면 위 `-EnvVars` 문법이 깨진 것이다**(정상이면 수 KB — 실측 2026-08-17: 0 B → 1672 B).
 - 포트 9223 고정(9222=Gemini Chrome 충돌 회피, `CDP_PORT`로 변경).
 - **검증엔 스샷보다 `eval` 텍스트가 토큰·정확도 유리**(픽셀 해석 회피) — DOM 텍스트·`window.__TAURI__.core.invoke(...)` 결과를 직접 확인. shot은 레이아웃·시각 확인이 필요할 때만.
 - 변경이 닿은 동작을 실제로 한 번 통과시켜 본다(예: spawn → 출력 도착 → kill → 상태 전이). **이게 통과해야 동작 확인 = 완료**.

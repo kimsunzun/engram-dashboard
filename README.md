@@ -165,7 +165,7 @@ macOS·Linux는 당장 계획에 없지만, Windows 전용 코드를 격리해�
 
 ## 개발
 
-Node.js 20+와 Rust stable 툴체인이 필요합니다.
+Node.js 22.12+와 Rust stable 툴체인이 필요합니다(테스트가 플래그 없는 `require(ESM)` 에 의존합니다 — 그 아래 버전에서는 `npm test` 가 깨집니다. CI·로컬 실사용은 Node 24).
 
 ```bash
 git clone https://github.com/kimsunzun/engram-dashboard.git

@@ -95,13 +95,28 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM ADR-0137 - the debug shell must carry the DEV bundle identifier, not the release one.
 REM ★The client shell must be built too (do not remove)★: `tauri dev` used to compile it for us as
 REM   part of launching. We no longer call it (see the detached-launch note below), so nothing else
 REM   builds engram-dashboard.exe - without this you would relaunch the PREVIOUS shell binary.
+REM ★Build it through scripts\build-client-shell.mjs, NEVER a bare `cargo build -p engram-dashboard`
+REM   (do not remove)★: that script injects the dev overlay and then re-reads the produced exe to
+REM   confirm the dev identifier actually landed. A bare cargo build skips the Tauri CLI, so the
+REM   overlay never applies and the exe is stamped with the RELEASE identifier (measured). The symptom
+REM   never shows at build time: with the release app up, the dev app then exits instantly with no
+REM   window and a 0-byte log, and this launcher dies at LAUNCH_FAILED (mechanism = the overlay file's
+REM   own comment). The same script is what the /qa gate calls, so there is ONE implementation to fix.
+REM ★Launch the path the script PRINTS, never a hardcoded target\debug (do not remove)★: CARGO_TARGET_DIR
+REM   or .cargo\config.toml build.target-dir moves cargo's output, and a hardcoded path would then point
+REM   at a STALE exe that still exists and still passes the identifier check. The script resolves the
+REM   real directory (cargo metadata) and prints the exe path as its only stdout line - empty stdout
+REM   means it failed, which is also our "do not build/launch" signal. Progress and errors go to stderr,
+REM   so they still reach this window despite the capture.
 echo [clean] Rebuilding client shell...
-cargo build -p engram-dashboard
-if errorlevel 1 (
-  echo [clean] BUILD FAILED - see errors above. Not launching.
+set "CLIENT_EXE="
+for /f "usebackq delims=" %%E in (`node scripts\build-client-shell.mjs`) do set "CLIENT_EXE=%%E"
+if not defined CLIENT_EXE (
+  echo [clean] CLIENT SHELL BUILD FAILED - see errors above. Not launching.
   pause
   exit /b 1
 )
@@ -131,8 +146,12 @@ REM ★`-Command`, not `-File` (do not remove)★: with -File, PowerShell takes 
 REM   as a literal string, so a comma-separated -EnvVars list collapses into ONE value. The debug port
 REM   argument is then malformed, 9223 never opens, and the script still prints a PID - silent failure
 REM   (measured 2026-08-17).
+REM ★The exe path travels via env var, never interpolated into the quoted literal (do not revert)★: it
+REM   is resolved at runtime now, and a checkout path containing an apostrophe would break out of a
+REM   single-quoted PowerShell string built by text substitution. Same reason as the portfile lookups
+REM   above.
 echo [clean] Launching app detached...
-powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe 'target/debug/engram-dashboard.exe' -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe $env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
 if errorlevel 1 ( echo [clean] LAUNCH FAILED - see the log tail above. & pause & exit /b 1 )
 
 echo.
