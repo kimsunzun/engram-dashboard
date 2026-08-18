@@ -90,7 +90,7 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 #   (`ws`·`frame_port`·`instance`·`portfile`)을 쓰는 것은 이 crate 뿐이고, 그것을 켜는 자리가 여기다.
 #   근거(왜 기본을 비웠나)는 그 crate `Cargo.toml` 의 `[features]` 주석이 정본이다.
 engram-dashboard-net = { path = "../engram-dashboard-net", features = ["server"] }
-# ADR-0149: 명령 버스 도구(봉투·오류·선언 매크로·표·라우팅). 이 crate 는 도구를 **표 조립에만** 쓴다 —
+# ADR-0155: 명령 버스 도구(봉투·오류·선언 매크로·표·라우팅). 이 crate 는 도구를 **표 조립에만** 쓴다 —
 #   자기 명령을 선언하지 않으므로 `ts-rs` 는 넣지 않는다(선언 crate 만 바인딩을 낸다).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 

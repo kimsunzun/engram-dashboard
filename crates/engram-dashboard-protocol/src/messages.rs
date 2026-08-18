@@ -213,7 +213,7 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    // ── 명령 버스 등록 wire(ADR-0149/0150 · TRD §3-7) ───────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0155/0156 · TRD §3-7) ───────────────────────────────
     // ★받는 쪽만 서 있다★ — 데몬 dispatch 가 이 셋을 주인 명부에 반영하고 [`AgentEvent::CommandList`]
     //   로 답한다(`connection_core.rs`). **보내는 쪽은 아직 없다** — 셸·화면이 자기 선언을 얹는 것은
     //   TRD §6 Step 3·4 다.
@@ -248,7 +248,7 @@ pub enum AgentCommand {
     /// (TRD §3-7 조항 3). 전량 재전송은 [`AgentCommand::RegisterCommands`] 뿐이다.
     ///
     /// `removed` 가 이름만 나르는 것은 의도다 — 내릴 때 모양은 필요 없다. 내린 이름은 명부에서 **자리째
-    /// 지워지고**(ADR-0144 결정 3) 그 뒤로 `UNKNOWN_COMMAND` 로 답한다 — 자취로 남기면 붙어 있는 주인이
+    /// 지워지고**(ADR-0150 결정 3) 그 뒤로 `UNKNOWN_COMMAND` 로 답한다 — 자취로 남기면 붙어 있는 주인이
     /// 이름을 바꿔 가며 자기 몫 상한을 영구히 채울 수 있다.
     UpdateCommands {
         #[ts(type = "string")]
@@ -262,7 +262,7 @@ pub enum AgentCommand {
     /// 명부 전량 조회. 응답은 request_id 동봉 [`AgentEvent::CommandList`](전용 reply).
     ListCommands { request_id: RequestId },
 
-    /// 이 클라이언트가 내는 **명령 요청** — 답은 [`AgentEvent::CommandReply`] 로 온다(ADR-0149 결정 3).
+    /// 이 클라이언트가 내는 **명령 요청** — 답은 [`AgentEvent::CommandReply`] 로 온다(ADR-0155 결정 3).
     ///
     /// ★[`AgentEvent::CommandRequest`] 의 거울상이고 봉투 타입이 **같다**★ — 같은 어휘가 두 방향으로
     /// 흐르고 **어느 연결에 썼는가가 방향**이다(TRD §3-2). 그래서 방향 필드도, 방향마다 다른 봉투도 없다.
@@ -271,7 +271,7 @@ pub enum AgentCommand {
     /// [`event_reply_request_id`] 의 `CommandReply` 갈래다 — **둘 중 하나만 `Some` 이면 왕복이 안 닫힌다.**
     ///
     /// `envelope.owner` 는 **목적지** 토큰이지 보낸 이가 아니다 — 최종 지목은 데몬이 자기 명부로 한다
-    /// (ADR-0148). `envelope.args` 는 데몬이 파싱하지 않고 통과시킨다(ADR-0081 「데몬 opaque 유지」).
+    /// (ADR-0154). `envelope.args` 는 데몬이 파싱하지 않고 통과시킨다(ADR-0081 「데몬 opaque 유지」).
     Command {
         #[ts(
             type = "{ name: string, request_id: string, owner: string, proto_ver: number, args: unknown }"
@@ -308,7 +308,7 @@ pub enum AgentCommand {
 /// 훑어 내려 주는 것이라 명부만 아는 칸(`available`)이 하나 더 붙는다.
 ///
 /// ★`available` 은 **지금 항상 `true`** 이고 분기 근거로 쓰지 말 것★ — 주인이 끊기면 그 이름이 명부에서
-/// 사라져 목록에 아예 실리지 않으므로(ADR-0144 결정 3) 실려 온 항목은 전부 살아 있는 등록이다. `false` 는
+/// 사라져 목록에 아예 실리지 않으므로(ADR-0150 결정 3) 실려 온 항목은 전부 살아 있는 등록이다. `false` 는
 /// 도달 불가고, 이 칸으로 가용성을 판정하는 코드는 **판정할 것이 없는 판정**이다. 칸을 떼지 않은 이유는
 /// 떼는 것 자체가 wire 계약 변경인데 얻는 것이 없어서다(TRD §3-7).
 /// `help` 는 주인이 얹은 문자열 **그대로**다(데몬이 열어보지 않으므로 가공도 없다).
@@ -437,7 +437,7 @@ pub enum AgentEvent {
         agent: AgentInfo,
     },
 
-    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0149/0150) — request_id 에코.
+    /// [`AgentCommand::ListCommands`] 응답(전용 reply, ADR-0155/0156) — request_id 에코.
     /// broadcast 가 아니다(요청한 연결에만 간다). 데몬 dispatch 가 명부를 훑어 이걸 낸다.
     ///
     /// ★구형 셸 안전은 오직 "전용 reply" 라는 사실에만 기댄다★ — 구형 셸은 `ListCommands` 를 보내지
@@ -445,17 +445,17 @@ pub enum AgentEvent {
     /// 로그도 없음). **이 variant 를 나중에 broadcast(요청 없이 push)로 바꾸는 순간** 모든 구형 셸이
     /// 그 이벤트를 아무 신호 없이 잃는다 — broadcast 로 바꾸려면 이 안전을 다시 설계해야 한다.
     ///
-    /// 주인이 끊긴 이름은 실려 오지 않는다 — 명부에서 사라졌기 때문이다(ADR-0144 결정 3). 그래서 목록에
+    /// 주인이 끊긴 이름은 실려 오지 않는다 — 명부에서 사라졌기 때문이다(ADR-0150 결정 3). 그래서 목록에
     /// 없는 이름은 「없는 이름」과 「주인이 자리 비움」이 합쳐진 답이다(감수한 손실).
     CommandList {
         request_id: RequestId,
         entries: Vec<CommandListEntry>,
     },
 
-    /// 데몬이 이 클라이언트 앞으로 배달하는 **명령**(ADR-0149 결정 3 의 2단계).
+    /// 데몬이 이 클라이언트 앞으로 배달하는 **명령**(ADR-0155 결정 3 의 2단계).
     ///
     /// 이 variant 가 클라이언트를 「데몬 명령 **수신** peer」로 만든다 — ADR-0081 이 「신규 능력」으로 적은
-    /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0149 이 이 통합 봉투로 대체했다.
+    /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0155 이 이 통합 봉투로 대체했다.
     ///
     /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지 18개는 알림이거나 내가 보낸 명령의 답장이다. 그래서
     /// 받는 쪽은 이것만 [`AgentEvent`] 소비 흐름에서 갈라내 인바운드 수신기로 넘기고, 답은
@@ -464,7 +464,7 @@ pub enum AgentEvent {
     /// 실행되지 않고 사라지고, 보낸 쪽은 마감시각까지 매달린다).
     ///
     /// `envelope.args` 는 데몬이 **파싱하지 않고 통과시킨** 값이다(ADR-0081 「데몬 opaque 유지」 —
-    /// ADR-0149 이 그 조항을 살려 두었다). `envelope.owner` 는 **목적지** 토큰이고 보낸 이가 아니다.
+    /// ADR-0155 이 그 조항을 살려 두었다). `envelope.owner` 는 **목적지** 토큰이고 보낸 이가 아니다.
     CommandRequest {
         #[ts(
             type = "{ name: string, request_id: string, owner: string, proto_ver: number, args: unknown }"
@@ -472,7 +472,7 @@ pub enum AgentEvent {
         envelope: CommandEnvelope,
     },
 
-    /// [`AgentCommand::Command`] 의 **답장**(전용 reply, ADR-0149 결정 3) — 상관 키는 `reply.request_id` 다.
+    /// [`AgentCommand::Command`] 의 **답장**(전용 reply, ADR-0155 결정 3) — 상관 키는 `reply.request_id` 다.
     ///
     /// ★[`AgentCommand::CommandOutcome`] 과 타입이 같고 방향만 다르다★ — 이쪽은 내가 낸 요청의 답이라
     /// [`event_reply_request_id`] 가 `Some` 을 주고, 저쪽은 내가 보내는 답이라 `None` 이다. 동형이라
@@ -484,7 +484,7 @@ pub enum AgentEvent {
     /// [`AgentCommand::CommandOutcome`] 에 적었다 — 같은 타입이라 같은 관용이다.
     ///
     /// ★생산자는 이제 있다★ — 데몬이 자기 명부에서 주인을 찾아 배달하고 그 결말을 이 답장으로 되돌린다
-    /// (`engram_dashboard_daemon::command_delivery` · ADR-0148). ★그래도 **프론트까지는 안 닿는다**★ —
+    /// (`engram_dashboard_daemon::command_delivery` · ADR-0154). ★그래도 **프론트까지는 안 닿는다**★ —
     /// 아래 두 조각이 아직 비어 있고, 그 둘은 **같은 변경에서** 서야 한다(마지막 문단).
     ///
     /// 셸은 상관한다: [`command_request_id`] 가 [`AgentCommand::Command`] 에 `Some` 을 주므로
@@ -659,12 +659,12 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::RenamePreset { request_id, .. }
         // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
         | AgentCommand::SetEnvelopeFormat { request_id, .. }
-        // 명령 버스 등록 wire(ADR-0149/0150) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
+        // 명령 버스 등록 wire(ADR-0155/0156) — 셋 다 답장을 기다린다. 등록·차분은 Ack, 조회는
         //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
         | AgentCommand::RegisterCommands { request_id, .. }
         | AgentCommand::UpdateCommands { request_id, .. }
         | AgentCommand::ListCommands { request_id } => Some(*request_id),
-        // ★명령 요청은 상관 대상이다 — 키만 봉투 안에 있다★(ADR-0149). 형제들처럼 제 칸이 없다고 여기서
+        // ★명령 요청은 상관 대상이다 — 키만 봉투 안에 있다★(ADR-0155). 형제들처럼 제 칸이 없다고 여기서
         //   None 을 고르면 셸이 답장을 받고도 깨울 슬롯을 못 만들어 마감시각까지 매달린다. 아래
         //   event_reply_request_id 의 `CommandReply` 갈래와 **한 쌍으로만** 성립한다.
         // ★uuid 는 그대로 옮긴다★ — 홉에서 새 키가 나면 답장이 이 요청에 못 붙는다(`RequestId` 의 From).
@@ -697,7 +697,7 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::PresetList { request_id, .. }
         | AgentEvent::Snapshot { request_id, .. }
         | AgentEvent::Created { request_id, .. }
-        // ★CommandList 는 상관 대상이다★(ADR-0149) — ListCommands 조회의 전용 reply라 AgentList/
+        // ★CommandList 는 상관 대상이다★(ADR-0155) — ListCommands 조회의 전용 reply라 AgentList/
         //   ProfileList/PresetList 와 같은 자리다. 여기서 None 을 고르면 셸이 확실히 매달린다: 위
         //   command_request_id 가 ListCommands 에 Some 을 돌려주므로 pending 매칭이 슬롯을 만드는데,
         //   그걸 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다. 두 함수는 명령↔답장 쌍마다 같이
@@ -705,7 +705,7 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         //   (`cargo test -p engram-dashboard-protocol`, CI 가 항상 실행).
         | AgentEvent::CommandList { request_id, .. }
         | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
-        // ★명령 답장도 상관 대상이다 — 위 `AgentCommand::Command` 갈래의 짝★(ADR-0149). 요청이 Some 을
+        // ★명령 답장도 상관 대상이다 — 위 `AgentCommand::Command` 갈래의 짝★(ADR-0155). 요청이 Some 을
         //   주는데 여기서 None 을 고르면 그 슬롯을 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다.
         AgentEvent::CommandReply { reply } => Some(reply.request_id.into()),
         AgentEvent::Error { request_id, .. } => *request_id,
@@ -1017,7 +1017,7 @@ mod tests {
         ));
     }
 
-    // ── 명령 버스 등록 wire(ADR-0149/0150) ─────────────────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0155/0156) ─────────────────────────────────────────
     //
     // 이 구획은 **아직 배선이 없는** variant 를 지킨다 — 보내는 코드가 없으니 형태가 조용히 틀려도
     // 런타임에 아무 신호가 없고, Step 2 배선이 붙는 날에야 터진다. golden 이 그때까지의 유일한 벽이다.
@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     /// 조회 왕복. `available=false` 를 함께 굽는 것은 지금 의도다 — 데몬은 그 값을 내지 않지만
-    /// (ADR-0144 결정 3) 계약은 두 값을 다 나르고, 이 골든이 그 칸이 조용히 사라지지 않게 붙든다.
+    /// (ADR-0150 결정 3) 계약은 두 값을 다 나르고, 이 골든이 그 칸이 조용히 사라지지 않게 붙든다.
     #[test]
     fn list_commands_and_command_list_round_trip() {
         let req = AgentCommand::ListCommands {
@@ -1196,7 +1196,7 @@ mod tests {
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// ★명령↔답장 쌍 박제(ADR-0149)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
+    /// ★명령↔답장 쌍 박제(ADR-0155)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
     /// `AgentEvent::CommandList` 가 그걸 깨우는 쪽이다. 한쪽만 고치면(예: 새 reply variant 를
     /// broadcast 로 잘못 분류) 그 왕복은 연결이 끊길 때까지 안 풀린다. 동형 검증이 `src-tauri`
     /// `daemon_client::protocol_state` 에도 있었으나 그 lib 테스트 타깃은 로컬/CI 모두
@@ -1295,7 +1295,7 @@ mod tests {
         assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
     }
 
-    // ── 명령 버스 wire 계약(ADR-0149 결정 3 의 2단계) ─────────────────────────────────
+    // ── 명령 버스 wire 계약(ADR-0155 결정 3 의 2단계) ─────────────────────────────────
     //
     // ★이 golden 들이 지키는 것은 손으로 적은 `#[ts(type = …)]` 이다★ — 봉투 타입은 도구 crate 소유라
     //   ts-rs derive 가 없고(그 crate 가 ts-rs 를 안 든다), 그래서 TS 칸을 이 파일이 손으로 적는다. Rust 쪽

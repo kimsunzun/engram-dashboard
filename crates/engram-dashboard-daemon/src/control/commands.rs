@@ -2,14 +2,14 @@
 //!
 //! ★이 표가 `/control/agent` 의 배달 대상이다★: 이웃 `agent.rs` 가 `{verb}` 를 `agent.<verb>` 로 찾아
 //!   여기 꽂힌 핸들러를 부른다. 표가 슬롯에 안 꽂혀 있으면 그 라우트는 503 이다.
-//! ★선언은 여기 없다★ — `agent.*` 의 계약은 core 가 소유하고(ADR-0149 결정 1: 선언이 사는 곳이 곧
+//! ★선언은 여기 없다★ — `agent.*` 의 계약은 core 가 소유하고(ADR-0155 결정 1: 선언이 사는 곳이 곧
 //!   주인이다) 이 파일은 그 선언에 데몬의 실물(매니저 · 명부 통지 팬아웃)을 꽂기만 한다. 데몬 자기
 //!   명령(`mail.*`)이 생기면 그때 선언 블록이 이 crate 로 들어온다.
 //!
 //! 진입점: [`make_daemon_table`].
 //!
 //! tauri import 0(daemon crate).
-// ADR-0149
+// ADR-0155
 
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ use super::mcp_server::RosterBroadcastSlot;
 ///   순서**는 그 증상을 만들 수 없다 — 인자 형태가 순서 규율을 산문 대신 타입으로 지고 있다.
 ///   ★단 이게 닫는 건 조립 순서뿐이다★: 서버가 뜨고 나서 이 슬롯이 채워지기 전에 도착한 변경 요청은
 ///   여전히 통지를 건너뛴 채 성공(ok)으로 응답한다 — 그 창은 슬롯을 늦게 채우는 조립이 있는 한 남는다.
-// ADR-0149
+// ADR-0155
 pub fn make_daemon_table(
     manager: Arc<AgentManager>,
     broadcast: Arc<RosterBroadcastSlot>,

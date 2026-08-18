@@ -1,15 +1,15 @@
 //! 주인 명부 — **런타임 등록만으로** 차고, 주인이 끊기면 그 몫이 자취 없이 사라진다
-//! (TRD §3-7 · ADR-0144).
+//! (TRD §3-7 · ADR-0150).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 
-/// 이름 하나의 명부 항목 — 명부에 있는 것은 **주인이 있는 이름뿐**이다(ADR-0144).
+/// 이름 하나의 명부 항목 — 명부에 있는 것은 **주인이 있는 이름뿐**이다(ADR-0150).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterEntry {
     pub name: String,
-    /// 등록 패킷이 실어 온 모양. ★불투명 문자열이다★ — 파싱·검증·분기 금지(ADR-0150).
+    /// 등록 패킷이 실어 온 모양. ★불투명 문자열이다★ — 파싱·검증·분기 금지(ADR-0156).
     pub help: String,
     pub owner: OwnerToken,
 }
@@ -17,7 +17,7 @@ pub struct RosterEntry {
 /// 이름 하나를 물었을 때의 두 답.
 ///
 /// ★「주인이 자리 비움」이라는 답은 없다★ — 끊긴 주인의 등록이 명부에서 사라지므로 그 이름은 **한 번도
-/// 본 적 없는 이름**과 같은 답을 받는다(ADR-0144 가 감수한 것 — 자취를 두지 않는 근거는 [`Roster`]).
+/// 본 적 없는 이름**과 같은 답을 받는다(ADR-0150 가 감수한 것 — 자취를 두지 않는 근거는 [`Roster`]).
 /// 그 구분이 실제로 필요해지면 자취를 되살리는 것이 아니라 연결 목록을 응답에 싣는 쪽으로 푼다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerLookup {
@@ -49,16 +49,16 @@ impl OwnerLookupSource for Roster {
 /// 재접속하면 명부 눈에는 남남이고, 그래서 자취는 덮이지 않고 **쌓인다**. 만료도 회수 경로도 없어
 /// [`Roster::MAX_NAMES`] 에 닿으면 명부에 없던 이름을 실은 등록이 전부 거절되고 — 그 이름들이
 /// `UNKNOWN_COMMAND`(= 「재시도 말고 다시 발견하라」, TRD §4-②)로 나간다 — 데몬 재시작 말고는 안 풀린다
-/// (ADR-0144 결정 3).
+/// (ADR-0150 결정 3).
 /// ★단 그것만으로 크기가 묶이지는 않는다★ — 이름은 등록 패킷이 실어 온 **문자열**이라(빌드 상수가
 /// 아니다) 붙어 있는 주인 하나가 얼마든 많은 이름을 보낼 수 있다. 그 축은 개수·길이 상한이 닫는다
 /// ([`Roster::MAX_NAMES_PER_OWNER`] · [`Roster::MAX_NAMES`] · [`Roster::MAX_NAME_BYTES`] ·
 /// [`Roster::MAX_HELP_BYTES`]).
 /// ★이름 하나에 주인은 하나다★ — 뒤에 등록한 쪽이 이긴다. 서로 다른 두 주인이 같은 이름을 얹으면 앞
 /// 주인은 그 이름을 잃고, 나중 주인이 끊길 때 그 이름은 앞 주인에게 돌아가지 않고 사라진다. 이름 하나에
-/// 주인 여럿은 유보된 안건이다(ADR-0144 대안 G).
+/// 주인 여럿은 유보된 안건이다(ADR-0150 대안 G).
+// ADR-0156
 // ADR-0150
-// ADR-0144
 #[derive(Debug, Default)]
 pub struct Roster {
     /// 이름 → 그 이름을 **마지막으로** 등록한 주인. 끊긴 주인의 항목은 남지 않는다.
@@ -118,7 +118,7 @@ impl Roster {
     /// 산 주인이 보낸 것과 구분할 근거가 없다. 그 그물은 연결 수명을 아는 쪽 **한 곳뿐**이다
     /// (`engram-dashboard-daemon` 의 `CommandRoster::refuse_if_detached`) — 여기에 두 번째 그물을 세우면
     /// 주인 단위 상태를 따로 들어야 하고, 그 목록이 자취와 똑같이 무한히 자란다.
-    // ADR-0144
+    // ADR-0150
     pub fn register(
         &mut self,
         owner: &OwnerToken,
@@ -145,7 +145,7 @@ impl Roster {
     /// ★`removed` 는 이름을 **지운다** — 자취로 남기지 않는다★: 자취로 남기면 끊기지 않은 주인이
     /// `added`=새 이름 · `removed`=옛 이름을 되풀이해 자기 몫([`Roster::MAX_NAMES_PER_OWNER`])을 영구히
     /// 채울 수 있고, 그러면 연결을 끊지 않고도 자취가 명부를 영구히 메우는 같은 사고가 재현된다
-    /// (ADR-0144 결정 3이 끊김에 대해 닫은 축의 나머지 절반).
+    /// (ADR-0150 결정 3이 끊김에 대해 닫은 축의 나머지 절반).
     /// ★`removed` 는 **자기가 쥔 이름만** 지운다★ — [`Roster::disconnect`] 와 같은 규칙이다. 지나간
     /// 주인의 늦은 차분이 방금 붙은 주인의 등록을 지우면 살아 있는 명령이 사라진다(재연결 겹침). 남의
     /// 이름·없는 이름은 조용히 지나간다 — 차분은 「내 몫을 이렇게 바꿔라」이지 남의 상태에 대한 주장이
@@ -167,12 +167,12 @@ impl Roster {
     /// 그 사고 그대로 —
     /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」), 지운 뒤 더하면 내리라는 지시가 조용히
     /// 무시된다. **성공 보고와 실제 상태가 갈리는 쪽이 순서를 잘못 고르는 것보다 나쁘다** — 호출자는 조용한
-    /// 삭제를 성공한 등록과 구분할 수단이 없다. 순서를 정한 조항이 ADR-0144 에도 TRD §3-7 조항 3 에도 없으니
+    /// 삭제를 성공한 등록과 구분할 수단이 없다. 순서를 정한 조항이 ADR-0150 에도 TRD §3-7 조항 3 에도 없으니
     /// 그 자리를 여기서 임의로 메우지 않는다.
     ///
     /// 상한은 `added` 만 세어 다시 본다 — 넘치면 **한 이름도 건드리지 않는다**([`Roster::register`] 와
     /// 같은 계약이고, 위 반려 둘도 같다).
-    // ADR-0144
+    // ADR-0150
     pub fn update(
         &mut self,
         owner: &OwnerToken,
@@ -231,7 +231,7 @@ impl Roster {
         Ok(())
     }
 
-    /// `added` 가 **남의 등록**을 덮지 않나 — 명부에 남는 항목은 주인이 있는 것뿐이라(ADR-0144) 주인
+    /// `added` 가 **남의 등록**을 덮지 않나 — 명부에 남는 항목은 주인이 있는 것뿐이라(ADR-0150) 주인
     /// 비교 하나로 판정된다.
     fn check_added_are_not_taken(
         &self,
@@ -262,7 +262,7 @@ impl Roster {
     /// 그래서 전체 상한이 **주인별 몫 없는 공유 자원**이 되지 않게 여기서 막는다. 이번 패킷에 실린 이름은
     /// 덮어쓰기라 자리를 새로 먹지 않으므로 두 번 세지 않는다.
     /// ★이 상한은 거부된 TTL 과 다른 축이다★ — 거기서 거부한 것은 **시간**이라 같은 질문의 답이 시계에
-    /// 따라 갈렸다(ADR-0150 대안 C · ADR-0144 대안 F). 개수 상한은 명부에 든 이름의 답을 바꾸지 않는다.
+    /// 따라 갈렸다(ADR-0156 대안 C · ADR-0150 대안 F). 개수 상한은 명부에 든 이름의 답을 바꾸지 않는다.
     /// ★판정이 변경보다 앞이라 **과대측정**이다(알고 남긴 것)★: 이번 왕복에서 내려갈 이름도 아직 명부에
     /// 있으므로 함께 센다 — [`Roster::register`] 가 갈아치울 자기 이름과 [`Roster::update`] 의 `removed`
     /// 가 그렇다. 대가는 「몫이 꽉 찬 주인은 이름 전량을 한 패킷에 갈아치우지 못한다」뿐이고, 빈 전량
@@ -329,12 +329,12 @@ impl Roster {
     /// ★**자기가 아직 주인인 이름만** 내린다★ — 재연결 겹침(새 연결이 등록한 뒤 옛 연결의 정리가 도착)에서
     /// 방금 붙은 주인의 등록을 지우지 않기 위해서다.
     /// ★끊김을 처리하는 자리는 이것 하나다★ — 부르는 경로도 데몬의 `on_disconnect → detach` 하나뿐이고
-    /// (ADR-0144), 두 번째를 만들면 인과가 갈라진다.
+    /// (ADR-0150), 두 번째를 만들면 인과가 갈라진다.
     /// ★반환 = **이 호출이 지운 이름 전량**(오름차순)★ — 지운 뒤에는 명부에 그 사건의 자취가 없으므로
     /// (자취를 두지 않는 근거는 이 타입 주석) 무엇이 사라졌는지 말할 수 있는 값이 이 반환뿐이다. 계측은
     /// **연결 수명을 아는 쪽**이 한다(`engram-dashboard-daemon` 의 `CommandRoster::detach`) — 이 crate 는
     /// 로깅 의존을 지지 않는다(워크스페이스·서드파티 의존 상한 = `lib.rs` 헤더).
-    // ADR-0144
+    // ADR-0150
     pub fn disconnect(&mut self, owner: &OwnerToken) -> Vec<String> {
         self.remove_owner(owner)
     }
@@ -432,7 +432,7 @@ mod tests {
     }
 
     /// ★재접속을 되풀이해도 명부에 쌓이는 것이 없다★ — 주인 토큰은 연결마다 새로 나므로 자취를 남기는
-    /// 형태에서는 이 되풀이가 명부를 상한까지 영구히 채웠다(ADR-0144 결정 3).
+    /// 형태에서는 이 되풀이가 명부를 상한까지 영구히 채웠다(ADR-0150 결정 3).
     #[test]
     fn reconnecting_many_times_leaves_nothing_behind() {
         let mut roster = Roster::new();
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
     }
 
-    /// 끊기면 그 주인의 몫이 온전히 빈다 — 상한을 잡고 있던 이름이 자리째 사라진다(ADR-0144 결정 3).
+    /// 끊기면 그 주인의 몫이 온전히 빈다 — 상한을 잡고 있던 이름이 자리째 사라진다(ADR-0150 결정 3).
     #[test]
     fn a_disconnect_frees_that_owners_whole_cap() {
         let owner = OwnerToken::new("shell-1");
@@ -665,7 +665,7 @@ mod tests {
     // ── 차분 등록(TRD §3-7 조항 3) ────────────────────────────────────────────────────────────
 
     /// ★차분은 `removed` 만 지운다★ — 자취를 남기면 끊기지 않은 주인이 add/remove 를 되풀이해 자기 몫을
-    /// 영구히 채운다(ADR-0144). 안 실린 이름을 손대지 않는 것이 `register` 의 전량 last-wins 와 갈리는
+    /// 영구히 채운다(ADR-0150). 안 실린 이름을 손대지 않는 것이 `register` 의 전량 last-wins 와 갈리는
     /// 자리다.
     #[test]
     fn an_update_removes_only_the_names_it_lists() {
@@ -694,7 +694,7 @@ mod tests {
     }
 
     /// ★차분의 `removed` 가 자리를 비운다★ — 자취로 남기면 붙어 있는 주인이 이름을 바꿔 가며 자기 몫
-    /// 상한을 영구히 채울 수 있어, 끊김 없이도 같은 무한 증식이 재현된다(ADR-0144).
+    /// 상한을 영구히 채울 수 있어, 끊김 없이도 같은 무한 증식이 재현된다(ADR-0150).
     #[test]
     fn swapping_names_forever_does_not_eat_an_owners_cap() {
         let owner = OwnerToken::new("shell-1");
@@ -784,7 +784,7 @@ mod tests {
     /// 적용 순서를 고르면 어느 쪽으로 골라도 호출자가 결과를 알 수 없다: 더한 뒤 지우면 **성공을 받고도**
     /// 그 이름이 명부에 없어 `UNKNOWN_COMMAND` 로 나가고(`register` 가 상한에서 막는 그 사고 그대로 —
     /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」), 지운 뒤 더하면 내리라는 지시가
-    /// 조용히 무시된다. 순서를 정한 조항이 ADR-0144 에도 TRD §3-7 조항 3 에도 없어 반려가 답이다.
+    /// 조용히 무시된다. 순서를 정한 조항이 ADR-0150 에도 TRD §3-7 조항 3 에도 없어 반려가 답이다.
     #[test]
     fn an_update_carrying_one_name_in_both_lists_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(roster.len(), 1);
     }
 
-    /// 끊김이 **무엇을 지웠는지** 부르는 쪽에 돌려준다 — 명부에 자취가 남지 않으므로(ADR-0144) 그 사건을
+    /// 끊김이 **무엇을 지웠는지** 부르는 쪽에 돌려준다 — 명부에 자취가 남지 않으므로(ADR-0150) 그 사건을
     /// 나중에 재구성할 값은 이 반환뿐이다. 계측은 연결 수명을 아는 데몬이 한다
     /// (`CommandRoster::detach` — 도구 crate 에 로깅 의존을 들이지 않는다).
     #[test]
@@ -902,7 +902,7 @@ mod tests {
 
     /// ★끊기면 자취 없이 사라진다★ — 주인 토큰은 연결마다 새로 나므로 자취를 남기면 같은 클라이언트의
     /// 재접속이 덮기가 아니라 **쌓기**가 되고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다
-    /// (ADR-0144 결정 3).
+    /// (ADR-0150 결정 3).
     #[test]
     fn a_disconnect_empties_that_owners_share_of_the_roster() {
         let owner = OwnerToken::new("shell-1");
@@ -949,7 +949,7 @@ mod tests {
     /// 없다). 막는 그물은 연결 수명을 아는 쪽 **한 곳뿐**이다 — `engram-dashboard-daemon` 의
     /// `CommandRoster::refuse_if_detached`(살아 있는 연결 명단). 여기에 두 번째 그물을 세우지 말 것:
     /// 명부가 주인 단위 상태를 따로 들면 만료 없는 자료에 무한히 자라는 목록이 하나 더 생긴다(자취를
-    /// 버린 것과 같은 이유 — ADR-0144).
+    /// 버린 것과 같은 이유 — ADR-0150).
     #[test]
     fn the_roster_alone_cannot_refuse_a_late_delta_from_a_disconnected_owner() {
         let owner = OwnerToken::new("shell-1");

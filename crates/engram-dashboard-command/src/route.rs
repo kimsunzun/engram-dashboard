@@ -35,7 +35,7 @@ fn panic_detail(payload: &Box<dyn Any + Send>) -> String {
 }
 
 /// 핸들러가 터졌다 — 이 홉에서 **확실히** 실패했다(봉투가 나간 적이 없다).
-// ADR-0153
+// ADR-0159
 fn handler_panicked(detail: String) -> CommandError {
     CommandError::of(
         ErrorCode::Internal,
@@ -48,7 +48,7 @@ fn handler_panicked(detail: String) -> CommandError {
 /// 봉투는 이미 선을 탔을 수 있으므로 **이 홉의 확실성은 「불명」**이다(TRD §4-④). `INTERNAL`(= `retry:
 /// never`)로 답하면 호출자는 「여기서 확실히 실패했다」로 읽고 새 id 로 다시 부르는데, 그러면 상대가
 /// 이미 적용한 조작이 두 번 적용될 수 있다. `OUTCOME_UNKNOWN` 은 **같은 id 로만** 다시 묻게 한다.
-// ADR-0153
+// ADR-0159
 fn forwarding_unknown(detail: String) -> CommandError {
     CommandError::of(
         ErrorCode::OutcomeUnknown,
@@ -95,7 +95,7 @@ where
 /// `link.send` 왕복 내내 락을 들어야 하고, 느린 상대 하나가 그동안 등록·연결 정리·다른 배달을 전부
 /// 세운다. **인자로 되돌리지 말 것** — 여기 참조가 서면 그 정지는 호출자가 피할 수 없다.
 /// ★인자 검문은 여기 없다★ — 선언에 없는 칸의 거절은 **사람·LLM 이 치는 입구**의 일이고
-/// ([`CommandTable::check_args`] · ADR-0151), 홉 간 배선은 모르는 칸을 무시하고 옛 의미로 실행해야
+/// ([`CommandTable::check_args`] · ADR-0157), 홉 간 배선은 모르는 칸을 무시하고 옛 의미로 실행해야
 /// additive 진화가 산다(TRD §4-③).
 /// ★그래서 **남의 이름**으로 온 인자는 이 경로 어디서도 검문받지 않는다(알려진 구멍)★ — 치는 쪽 입구는
 /// 그 선언을 안 들어 검문하지 못하고, 여기서 넣으면 위 이유로 additive 진화가 죽는다. 그 구멍을 누가
@@ -112,7 +112,7 @@ where
 /// 맡는다.
 /// ★핸들러·링크 future 는 drop 에서 패닉하면 안 된다★ — 아래 그물은 `poll` 만 덮고 drop 은 못 덮으며,
 /// unwind 중 재패닉은 프로세스 abort 라 답장이 아예 나가지 못한다.
-// ADR-0149
+// ADR-0155
 pub async fn route(
     table: &CommandTable,
     roster: &dyn OwnerLookupSource,
@@ -182,7 +182,7 @@ pub async fn route(
             reply
         }
         // ★끊긴 주인의 이름은 명부에서 사라지므로 여기 「주인 부재」 갈래가 없다★ — 그 이름은 한 번도
-        //   등록되지 않았던 이름과 같은 답을 받는다(ADR-0144 가 감수한 구분 손실).
+        //   등록되지 않았던 이름과 같은 답을 받는다(ADR-0150 가 감수한 구분 손실).
         OwnerLookup::Unknown => CommandReply::err(
             request_id,
             CommandError::of(ErrorCode::UnknownCommand, env.name),
@@ -303,7 +303,7 @@ mod tests {
 
     /// ★끊긴 주인의 이름과 한 번도 본 적 없는 이름이 **같은 답**을 받는다★
     ///
-    /// 명부가 끊긴 주인의 등록을 지우므로(ADR-0144 결정 3) 배달에는 두 상황을 가를 근거가 없다 — 알고
+    /// 명부가 끊긴 주인의 등록을 지우므로(ADR-0150 결정 3) 배달에는 두 상황을 가를 근거가 없다 — 알고
     /// 감수한 손실이다. 그 구분이 실제로 필요해지면 자취를 되살리는 것이 아니라 연결 목록을 응답에 싣는
     /// 쪽으로 푼다.
     #[test]

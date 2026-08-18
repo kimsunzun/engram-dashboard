@@ -44,7 +44,7 @@ macro_rules! error_codes {
             /// 코드가 아니라 운에 따라 재시도 여부를 정하게 된다.
             /// ★표의 세 번째 칸인 이유★: 밖에 두면 포괄 갈래(`_ => Never`)가 서고, 그러면 새 코드가
             /// **아무 결정 없이** 「재시도 금지」를 달고 나간다.
-            // ADR-0153
+            // ADR-0159
             pub const fn default_retry(self) -> RetryMode {
                 match self {
                     $( Self::$variant => RetryMode::$retry, )+
@@ -61,12 +61,12 @@ error_codes! {
     /// 로 낮춘다([`CommandError`] 의 역직렬화가 `retry` 도 [`RetryMode::Never`] 로 낮춘다). 닫힌 열거형으로
     /// 디코드하면 코드가 하나 느는 additive 확장이 옛 클라이언트를 깨뜨린다.
     /// ★코드 추가는 additive, 뜻 변경은 금지★(TRD §4-③).
-    // ADR-0149
+    // ADR-0155
     pub enum ErrorCode {
         InvalidArgument => "INVALID_ARGUMENT" retry Never,
         UnknownCommand => "UNKNOWN_COMMAND" retry Never,
         /// ★이 코드를 내는 생산 경로가 지금 없다 — 어휘에만 남아 있다★: 끊긴 주인의 이름은 명부에서
-        /// 사라지므로([`crate::Roster::disconnect`] · ADR-0144 결정 3) 배달은 「주인 부재」 대신
+        /// 사라지므로([`crate::Roster::disconnect`] · ADR-0150 결정 3) 배달은 「주인 부재」 대신
         /// `UNKNOWN_COMMAND` 로 답한다.
         /// 떼지 않은 이유: 이 어휘는 wire 문자열이고 **모르는 코드는 `INTERNAL`·`retry: never` 로
         /// 낮춰진다**(위 헤더) — 떼면 이 코드를 실어 보내는 상대의 답장이 「조건이 바뀐 뒤 재시도」라는
@@ -95,7 +95,7 @@ impl fmt::Display for ErrorCode {
 ///
 /// ★`SameRequestId` 는 「안전하게 재실행해도 된다」가 아니다★ — 적용 여부가 **불명**이라 **같은 id 로만**
 /// 다시 물어야 한다는 뜻이다(새 id 로 재시도하면 같은 조작이 두 번 적용될 수 있다 — TRD §4-⑥).
-// ADR-0153
+// ADR-0159
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetryMode {
     Never,
@@ -492,7 +492,7 @@ mod tests {
     }
 
     /// ★`OWNER_UNAVAILABLE` 을 예로 쓰는 것은 지금 의도다★ — 이 코드를 내는 생산 경로가 없어졌으므로
-    /// (ADR-0144) 이 테스트와 아래 [`retry_is_derived_from_code`] 가 그 코드를 어휘에 붙들어 두는 유일한
+    /// (ADR-0150) 이 테스트와 아래 [`retry_is_derived_from_code`] 가 그 코드를 어휘에 붙들어 두는 유일한
     /// 사용처다. 남겨 두는 이유는 변형 주석에 있다.
     #[test]
     fn known_code_keeps_wire_retry() {

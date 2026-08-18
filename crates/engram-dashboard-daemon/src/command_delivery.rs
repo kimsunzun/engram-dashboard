@@ -1,7 +1,7 @@
 //! 명령 배달 — 명부에서 주인을 찾아 **그 연결의 프레임 출구로 봉투를 쓰고**, 돌아온 결말을 **원래 물어본
-//! 연결**에 실어 준다(ADR-0148 · TRD §3-5·§3-8).
+//! 연결**에 실어 준다(ADR-0154 · TRD §3-5·§3-8).
 //!
-//! 배달 규칙 자체는 여기 없다 — 도구 crate 의 3단계([`route`])가 전 홉 공통이고(ADR-0149 결정 3) 이
+//! 배달 규칙 자체는 여기 없다 — 도구 crate 의 3단계([`route`])가 전 홉 공통이고(ADR-0155 결정 3) 이
 //! 모듈이 더하는 것은 그 3단계가 필요로 하는 **데몬 몫의 두 조각**뿐이다:
 //! ① 주인 토큰에서 연결로 가는 링크([`OwnerLink`] — 그 자리가 [`CommandRoster::sink_of`]) ·
 //! ② 요청 상관 표([`CommandDeliveries`] — `request_id` → 원 연결 · 마감시각).
@@ -23,7 +23,7 @@
 //! 늦게 온 결말은 [`CommandDeliveries::complete`] 에서 빈손을 받고 버려진다 — 답장 자리를 이미 누가
 //! 가져갔기 때문이다.
 //!
-//! ## ★내준 사본을 왕복 너머로 들지 않는다★(ADR-0148)
+//! ## ★내준 사본을 왕복 너머로 들지 않는다★(ADR-0154)
 //!
 //! 명부는 내보낸 프레임 출구 사본을 **회수할 수단이 없다.** 그래서 [`OwnerLink::send`] 는 사본을 받아
 //! 그 자리에서 쓰고 버리고, 답장을 낼 때는 **원 연결을 다시 조회한다**. 상관 표가 드는 것은 연결
@@ -40,7 +40,7 @@
 //! [`deliver`] 가 왕복 하나를 통째로 돈다(연결 태스크 **밖**에서 돌아야 한다 — 그 사유는 그 함수 doc) ·
 //! [`CommandDeliveries::complete`] 가 주인의 결말을 그 왕복에 붙이고 ·
 //! [`CommandDeliveries::expire`] 와 [`CommandDeliveries::drop_origin`] 이 나머지 둘을 거둔다.
-// ADR-0148
+// ADR-0154
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -66,7 +66,7 @@ const CALLER_ALREADY_GONE: &str = "the calling connection went away before the e
 ///
 /// ## 왜 코드에서 파생된 지시를 쓰지 않나
 ///
-/// ADR-0153 의 자는 「안전 × 쓸모」이고, `same-request-id` 의 **안전** 다리는 「같은 번호로 다시 묻는
+/// ADR-0159 의 자는 「안전 × 쓸모」이고, `same-request-id` 의 **안전** 다리는 「같은 번호로 다시 묻는
 /// 것이라 같은 조작이 두 번 적용되지 않는다」이다. 그 전제는 **최초 수신 데몬이 완료분을 캐시해 재생해 줄
 /// 때만** 성립하는데(TRD §4-⑥ 「완료분 재생」), 그 dedup 저장소는 이 저장소 어디에도 없다(실측). 저장소가
 /// 없으면 재질의는 재질의가 아니라 **재실행**이고, 부수효과 있는 명령은 두 번 적용된다. 안전 다리가
@@ -80,7 +80,7 @@ const CALLER_ALREADY_GONE: &str = "the calling connection went away before the e
 ///
 /// ★이 파일에서 오류를 짓는 길은 여기 하나뿐이다★ — 기계로 지키는 자리는
 /// `tests::this_module_can_only_build_do_not_retry_failures`.
-// ADR-0153
+// ADR-0159
 fn no_retry(code: ErrorCode, detail: impl Into<String>) -> CommandError {
     CommandError::with_retry(code, detail, RetryMode::Never)
 }
@@ -106,7 +106,7 @@ impl Clock for SystemClock {
 /// 진행 중인 왕복 하나 — **원 연결**과 **마감시각**, 그리고 답장을 받아 갈 자리.
 ///
 /// ★프레임 출구 사본을 여기 넣지 말 것★ — 이 항목은 연결보다 오래 살 수 있고, 살아남은 사본 하나가
-/// 끊긴 연결의 writer 를 자기 종료하지 못하게 만든다(모듈 헤더 · ADR-0148).
+/// 끊긴 연결의 writer 를 자기 종료하지 못하게 만든다(모듈 헤더 · ADR-0154).
 struct Pending {
     /// 답장을 되돌릴 연결. **세대 번호가 없다 — 그래서 연결 id 가 재사용되지 않는 데 기대고 있다.**
     ///
@@ -213,9 +213,9 @@ enum Seat {
 /// (`engram_dashboard_command::Roster::MAX_NAMES` 항목의 셈). 이 표엔 그런 상한이 없다 — 자리 수도, 자리가
 /// 드는 이름·인자([`Pending::name`]·[`Pending::args`]) 크기도 안 잰다. 열 수 있는 자리는 왕복 하나당
 /// 하나이고 마감(기본 10초)이 걷어 가므로 무한정 자라지는 않지만, **상한이 있는 것과는 다르다.**
-/// 지금 안 닫는 이유는 이 입구가 **인증 경계 안**이라서다(ADR-0147) — 아무나 밀어 넣을 수 있는 표면이
+/// 지금 안 닫는 이유는 이 입구가 **인증 경계 안**이라서다(ADR-0153) — 아무나 밀어 넣을 수 있는 표면이
 /// 아니다. 닫는다면 명부의 그 상한이 선례가 된다.
-// ADR-0148
+// ADR-0154
 #[derive(Clone)]
 pub struct CommandDeliveries {
     inner: Arc<Mutex<Seats>>,
@@ -243,7 +243,7 @@ impl CommandDeliveries {
     /// 만료 수거 주기 — 마감 초과가 이 간격만큼 늦게 관측될 수 있다.
     ///
     /// ★수거를 **트래픽에 얹지 않는 것**이 요점이다★: 다음 프레임이 올 때 훑는 형태면 조용한 데몬에서
-    /// 마감이 영영 안 지나가고, 그러면 호출자가 답도 오류도 없이 매달린다(ADR-0148 이 지목한 무한 대기).
+    /// 마감이 영영 안 지나가고, 그러면 호출자가 답도 오류도 없이 매달린다(ADR-0154 이 지목한 무한 대기).
     const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
     pub fn new() -> Self {
@@ -307,7 +307,7 @@ impl CommandDeliveries {
     /// 남은 자리를 **전부** 거둬 답한다(종료 경로). 반환 = 거둔 수.
     ///
     /// ★`OUTCOME_UNKNOWN` 인 이유★: 봉투는 이미 주인에게 갔을 수 있어 적용 여부가 **불명**이다. 「안전 ×
-    /// 쓸모」(ADR-0153)의 **확실성** 축이 그것이다. `INTERNAL` 로 접으면 호출자는 적용됐을지도 모르는
+    /// 쓸모」(ADR-0159)의 **확실성** 축이 그것이다. `INTERNAL` 로 접으면 호출자는 적용됐을지도 모르는
     /// 조작을 **확실한 실패**로 읽는다 — 사실이 아니다. (지시는 코드와 무관하게 `Never` 다 — [`no_retry`].)
     /// ★마감과 달리 시계를 보지 않는다★ — 종료는 시각이 아니라 사건이다.
     ///
@@ -452,7 +452,7 @@ impl CommandDeliveries {
     /// 뒤에 놓는다. 그 사이에 온 재질의는 [`Seat::Coalesced`] 로 접혀 **나가는 그 한 장**을 같이 쓴다.
     ///
     /// ★어느 연결이 보냈는지는 보지 않는다★: 상관 키가 추측 불가한 난수(v4 UUID)이고, 이 소켓은 이미 인증
-    /// 경계 안이라 문자열 지식만으로 신뢰한다(ADR-0147). 보낸 연결까지 대조하려면 표가 주인 연결도 들어야
+    /// 경계 안이라 문자열 지식만으로 신뢰한다(ADR-0153). 보낸 연결까지 대조하려면 표가 주인 연결도 들어야
     /// 하는데, 그러면 주인이 재접속한 왕복이 자기 답을 못 붙인다.
     pub fn complete(&self, reply: CommandReply) -> bool {
         // 잠금 밖에서 답한다(ADR-0006) — 발권만 안에서 뽑아 온다.
@@ -529,13 +529,13 @@ impl CommandDeliveries {
     /// 놓으면 기다리던 배달이 「기다릴 상대가 사라졌다」로 풀려 태스크가 끝난다.
     /// ★**미구현 — TRD §4-④ 와 어긋나 있다**★(이번 라운드 범위 밖 · 에스컬레이션됨)
     ///
-    /// ① **주인 쪽 끊김은 여기서 안 잡힌다.** 이 표는 원 연결만 기억하므로(ADR-0148 이 고정한 항목 모양)
+    /// ① **주인 쪽 끊김은 여기서 안 잡힌다.** 이 표는 원 연결만 기억하므로(ADR-0154 이 고정한 항목 모양)
     /// 주인이 왕복 도중 죽으면 그 왕복은 마감까지 기다렸다 `TIMEOUT` 으로 끝난다 — TRD §4-④ 는 그 상황에
     /// `OUTCOME_UNKNOWN` 을 적어 두었다. 코드가 다르다는 사실 자체가 계약 미준수다. 호출자가 **하는 일**은
     /// 갈리지 않는다(둘 다 확실성 「불명」이고 지시도 같다)는 것이 오늘 이것을 견디는 이유지, 맞다는 뜻이
     /// 아니다.
     /// ② **§4-④ 의 「어느 쪽 연결이든 cleanup 시 그 ConnId 키 sweep」도 없다** — 이 함수는 원 연결 쪽
-    /// 절반만 한다. 나머지 절반을 하려면 주인 연결 색인이 있어야 하는데 ADR-0148 이 못 박은 항목 모양이
+    /// 절반만 한다. 나머지 절반을 하려면 주인 연결 색인이 있어야 하는데 ADR-0154 이 못 박은 항목 모양이
     /// 그 칸을 배제한다. 그래서 이건 코드로 메울 수 있는 구멍이 아니라 **결정으로 풀 건**이다.
     pub fn drop_origin(&self, conn_id: ConnId) -> usize {
         // 거둔 항목은 잠금 **밖에서** 떨어뜨린다 — 소멸자가 기다리던 태스크를 깨운다(위 `expire` 와 같은 이유).
@@ -596,7 +596,7 @@ impl CommandLink for OwnerLink<'_> {
     fn send(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
         let request_id = env.request_id;
         // 오류 갈래의 문구에 실을 이름 — 봉투는 아래에서 통째로 옮겨진다.
-        // ★되돌려 보내는 호출자 문자열에 길이 상한을 두지 않는다★(ADR-0146) — 읽는 주체가 LLM 이라 꼬리를
+        // ★되돌려 보내는 호출자 문자열에 길이 상한을 두지 않는다★(ADR-0152) — 읽는 주체가 LLM 이라 꼬리를
         //   자르면 다음 행동이 사라진다. 자르는 것은 **로그** 쪽뿐이다.
         let name = env.name.clone();
 
@@ -646,8 +646,8 @@ impl CommandLink for OwnerLink<'_> {
             // ★찢어진 창★ — 명부 조회는 `Available` 을 답했는데 그 사이 주인이 끊겼다. `route` 는 조회와
             //   전달 사이에 명부 잠금을 **일부러** 놓으므로 이 경합은 설계된 잔여다.
             //   답은 `OUTCOME_UNKNOWN` 이다: 주인은 다시 붙을 수 있으므로 같은 id 재질의가 **안전하면서
-            //   쓸모도 있다**(ADR-0153 의 자). ★`UNKNOWN_COMMAND`·`OWNER_UNAVAILABLE` 로 접지 말 것 —
-            //   ADR-0148 이 못 박았고 새 코드도 만들지 않는다★.
+            //   쓸모도 있다**(ADR-0159 의 자). ★`UNKNOWN_COMMAND`·`OWNER_UNAVAILABLE` 로 접지 말 것 —
+            //   ADR-0154 이 못 박았고 새 코드도 만들지 않는다★.
             None => Err(no_retry(
                 ErrorCode::OutcomeUnknown,
                 format!("the owner of '{name}' went away while the envelope was being handed over"),
@@ -661,13 +661,13 @@ impl CommandLink for OwnerLink<'_> {
                             format!("the owner of '{name}' could not take the envelope right now"),
                         )
                     }),
-                    // 직렬화 실패는 우리 쪽 결함이고 기다린다고 달라지지 않는다 — 쓸모 항이 거짓(ADR-0153).
+                    // 직렬화 실패는 우리 쪽 결함이고 기다린다고 달라지지 않는다 — 쓸모 항이 거짓(ADR-0159).
                     None => Err(no_retry(
                         ErrorCode::Internal,
                         format!("this daemon could not encode the envelope for '{name}'"),
                     )),
                 };
-                // 여기서 사본이 떨어진다 — 받아서 즉시 쓰고 버린다(ADR-0148).
+                // 여기서 사본이 떨어진다 — 받아서 즉시 쓰고 버린다(ADR-0154).
                 drop(sink);
                 written
             }
@@ -763,7 +763,7 @@ pub async fn deliver(
             // ★임자가 아직 붙어 있나로 갈린다 — 갈리는 것은 **코드가 말하는 사실**뿐이다★
             //
             //   지시는 두 갈래 다 `Never` 로 같다([`no_retry`]) — 그래서 여기서 고르는 것은 「호출자가
-            //   무엇을 할까」가 아니라 「무슨 일이 벌어졌다고 말할까」다(ADR-0153 의 확실성 축).
+            //   무엇을 할까」가 아니라 「무슨 일이 벌어졌다고 말할까」다(ADR-0159 의 확실성 축).
             //   · 붙어 있다 = 살아 있는 남의 왕복과 키가 겹쳤다. 우리는 **아무것도 실행하지 않았고** 그
             //     사실이 확실하다 → `REQUEST_ID_CONFLICT`. 원인도 정확히 그 한 줄이다.
             //   · 없다 = 그 자리 임자는 이미 떠났다. 십중팔구 **같은 클라이언트가 끊겼다 다시 붙어** 그
@@ -818,7 +818,7 @@ pub async fn deliver(
         origin,
         waiter: Mutex::new(Some(rx)),
     };
-    // 홉마다 같은 3단계를 돈다 — 특별 케이스를 두지 않는다(ADR-0149 결정 3).
+    // 홉마다 같은 3단계를 돈다 — 특별 케이스를 두지 않는다(ADR-0155 결정 3).
     let reply = route(&CommandTable::new(&[]), &roster, &link, envelope).await;
 
     send_reply(&roster, origin, &name, reply);
@@ -1048,7 +1048,7 @@ pub(crate) mod tests {
         let mut caller_inbox = attach_caller(&roster, 2);
         let mut bystander_inbox = attach_caller(&roster, 3);
         let deliveries = deliveries_with(ManualClock::new());
-        // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬 몫이다(ADR-0148).
+        // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬 몫이다(ADR-0154).
         let env = envelope("tab.create", &OwnerToken::new("whatever-the-caller-thinks"));
         let request_id = env.request_id;
 
@@ -1098,7 +1098,7 @@ pub(crate) mod tests {
 
     // ── 갈래 ② 주인 부재 ─────────────────────────────────────────────────────────
 
-    /// 명부에 없는 이름 — 끊긴 주인의 이름과 **같은 답**을 받는다(ADR-0144 가 감수한 구분 손실).
+    /// 명부에 없는 이름 — 끊긴 주인의 이름과 **같은 답**을 받는다(ADR-0150 가 감수한 구분 손실).
     #[tokio::test]
     async fn a_command_nobody_owns_is_answered_unknown_command() {
         let roster = CommandRoster::new();
@@ -1123,7 +1123,7 @@ pub(crate) mod tests {
     // ── 갈래 ③ 찢어진 창 ─────────────────────────────────────────────────────────
 
     /// ★조회는 `Available` 인데 닿는 길이 없다★ — `route` 가 조회와 전달 사이에 명부 잠금을 일부러 놓아
-    /// 생기는 설계된 잔여다(ADR-0148). 그 상태를 결정적으로 만들려고 표에 든 주인 토큰만 갈아 끼운다:
+    /// 생기는 설계된 잔여다(ADR-0154). 그 상태를 결정적으로 만들려고 표에 든 주인 토큰만 갈아 끼운다:
     /// 명부는 옛 토큰 앞으로 이름을 들고 있고, 그 토큰으로는 이제 아무 출구도 안 나온다.
     ///
     /// ★`UNKNOWN_COMMAND` 가 아닌 것이 요점이다★ — 조회가 방금 주인이 있다고 답했으므로 그 코드는 거짓
@@ -1259,7 +1259,7 @@ pub(crate) mod tests {
         ));
     }
 
-    // ── 내준 사본을 왕복 너머로 들지 않는다(ADR-0148) ─────────────────────────────
+    // ── 내준 사본을 왕복 너머로 들지 않는다(ADR-0154) ─────────────────────────────
 
     /// ★주인의 출구 사본이 왕복 동안 살아 있으면 안 된다★
     ///
@@ -1653,7 +1653,7 @@ pub(crate) mod tests {
     ///
     /// 클라이언트에는 재접속을 건너 사는 신분이 없어, 반쯤 끊겼다 다시 붙어 같은 id 로 다시 묻는 그 요청이
     /// 연결 id 로는 **남남**으로 보인다. 자리 임자가 이미 떠났으면 그 왕복의 적용 여부는 **불명**이므로
-    /// 확실성도 지시도 그렇게 답한다(ADR-0153).
+    /// 확실성도 지시도 그렇게 답한다(ADR-0159).
     #[tokio::test]
     async fn a_reconnected_caller_retrying_its_id_is_not_told_nothing_happened() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");

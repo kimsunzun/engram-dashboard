@@ -147,7 +147,7 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     ));
     manager_slot.set(manager.clone());
     if with_table {
-        // 라우트가 실제로 태우는 것이 이 표다(ADR-0149) — 운영 조립(`lib.rs`)과 같은 조립 함수를 쓴다.
+        // 라우트가 실제로 태우는 것이 이 표다(ADR-0155) — 운영 조립(`lib.rs`)과 같은 조립 함수를 쓴다.
         command_slot.set(Arc::new(make_daemon_table(
             manager.clone(),
             broadcast_slot.clone(),
@@ -262,7 +262,7 @@ async fn new_registers_a_sleeping_agent_and_refreshes_the_clients() {
         .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "fresh-one" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    // 성공 본문은 평평하다 — 반환을 명령마다 선언하므로 한 겹 더 감싸지 않는다(ADR-0149).
+    // 성공 본문은 평평하다 — 반환을 명령마다 선언하므로 한 겹 더 감싸지 않는다(ADR-0155).
     assert_eq!(body["name"], "fresh-one", "{body}");
     assert_eq!(body["state"], "sleeping", "{body}");
     assert!(
@@ -625,7 +625,7 @@ async fn a_body_that_is_not_a_command_object_still_gets_a_reason() {
         r#"{"verb": 5}"#,                   // 타입 불일치
         r#"{"verb":"list","verb":"move"}"#, // 동사 중복
         // ★인자 칸 중복도 같은 자리에서 걸린다★: 뒤 값을 택하면 `parent:"lead"` 로 붙이려던 요청이
-        //   **루트로 떼기**로 조용히 바뀐다 — 어느 값을 고를 근거가 없으므로 고르지 않는다(ADR-0151).
+        //   **루트로 떼기**로 조용히 바뀐다 — 어느 값을 고를 근거가 없으므로 고르지 않는다(ADR-0157).
         r#"{"verb":"move","target":"helper","parent":"lead","parent":null}"#,
         r#"["list"]"#,       // 객체가 아님
         r#"{"verb":"list""#, // 깨진 JSON
@@ -798,7 +798,7 @@ async fn unknown_and_irrelevant_fields_are_refused_instead_of_being_dropped() {
     );
 }
 
-/// ★반려 목록이 **선언에서 파생됐다**는 것까지 본다(ADR-0151)★: 문구가 틀린 칸만 짚고 끝나면 손으로 적은
+/// ★반려 목록이 **선언에서 파생됐다**는 것까지 본다(ADR-0157)★: 문구가 틀린 칸만 짚고 끝나면 손으로 적은
 ///   허용 목록으로도 통과한다 — 그 사본은 동사가 늘 때 조용히 뒤처져 모르는 칸을 통과시킨다. 선언된 칸
 ///   **전량**이 함께 실리는지를 보면 판정 재료가 선언이라는 것이 드러나고, 호출자도 스스로 고칠 수 있다.
 #[tokio::test]

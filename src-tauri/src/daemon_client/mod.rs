@@ -17,7 +17,7 @@
 //! - **generation 가드(openGen 씨앗, Fix B)** — `lifecycle.rs`.
 
 pub mod connection;
-// ADR-0149 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
+// ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
 pub mod inbound;
 mod lifecycle;
 pub mod protocol_state;
@@ -127,7 +127,7 @@ pub struct DaemonClient {
     /// ★window Channel registry★: window_label → 출력 Channel. `subscribe_output` invoke 가 insert,
     ///   연결 task 가 fan-out 시 lookup. Arc 라 task·command 양쪽이 공유한다.
     registry: WindowChannelRegistry,
-    /// ★데몬이 배달한 명령의 입구★(ADR-0149 결정 4). 늦게 채워진다 — 표의 스폰 포트가 이 클라이언트를
+    /// ★데몬이 배달한 명령의 입구★(ADR-0155 결정 4). 늦게 채워진다 — 표의 스폰 포트가 이 클라이언트를
     ///   쥐어 조립에 순환이 있기 때문이다(`inbound::InboundSlot` doc). 연결 task 마다 clone 해 넘긴다.
     inbound: Arc<InboundSlot>,
 }
@@ -250,7 +250,7 @@ impl DaemonClient {
         })
     }
 
-    /// 이 클라이언트가 실행할 수 있는 명령 표를 꽂는다 — ★연결 전에 부른다★(ADR-0149 결정 4·5).
+    /// 이 클라이언트가 실행할 수 있는 명령 표를 꽂는다 — ★연결 전에 부른다★(ADR-0155 결정 4·5).
     ///
     /// ★런타임 선택을 여기 두는 것이 요점이다★: 적용 태스크는 연결 태스크와 **같은 런타임**에서 돌아야
     /// 한다 — `agent.spawnInto` 가 데몬 왕복을 기다리는 동안 그 소켓 태스크가 계속 돌아야 답이 오기 때문이다

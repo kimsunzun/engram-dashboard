@@ -318,10 +318,10 @@ async fn run_accept_loop(
     //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    // 명령 주인 명부(ADR-0149/0150) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
+    // 명령 주인 명부(ADR-0155/0156) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
     //   말고는 아직 아무도 쥐지 않는다(배달 라우팅이 붙으면 조립 위로 올라갈 자리다).
     let commands = command_roster::CommandRoster::new();
-    // 진행 중인 명령 왕복의 상관 표(ADR-0148) — 명부와 **다른 표**다(수명 단위가 다르다).
+    // 진행 중인 명령 왕복의 상관 표(ADR-0154) — 명부와 **다른 표**다(수명 단위가 다르다).
     // ★수거 태스크를 함께 띄운다 — 빠뜨리면 마감이 영영 안 지나가고 답 못 받는 요청이 쌓인다★
     //   (`CommandDeliveries::spawn_sweeper`). 데몬 종료 신호를 구독해 함께 멈춘다.
     let deliveries = command_delivery::CommandDeliveries::new();
@@ -388,7 +388,7 @@ async fn run_accept_loop(
         }
     }
 
-    // ── 명령 왕복 정리(ADR-0148) ───────────────────────────────────────────────────
+    // ── 명령 왕복 정리(ADR-0154) ───────────────────────────────────────────────────
     // ★수거기를 기다리는 것이 종료를 유계로 만든다★: 그 태스크가 나가는 길에 남은 자리를 전부 답하고
     //   (`CommandDeliveries::drain`) 그 답이 배달 태스크들의 기다림을 **즉시** 푼다. 안 기다리면
     //   「종료했다」고 적은 뒤에도 그 자리들과 태스크가 마감(기본 10초)까지 살아 있다.
@@ -599,7 +599,7 @@ pub async fn run() -> Result<(), i32> {
     //   `engram agent rename/new/move` 가 성공해도 대시보드 트리는 무관한 이벤트가 올 때까지 옛 명부를
     //   보여 준다(에러도 로그도 없다).
     roster_broadcast_slot.set(wiring.roster_broadcast());
-    // ★제어 동사의 실입구가 이 표다(ADR-0149)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
+    // ★제어 동사의 실입구가 이 표다(ADR-0155)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
     //   ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은 팬아웃 값이 아니라 슬롯이라 통지
     //   시점에 읽는다(`control::commands::make_daemon_table`).
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(

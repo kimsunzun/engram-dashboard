@@ -1,7 +1,7 @@
 # ADR-0081: LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용)
 
-- 상태: 확정 (2026-07-14, 근거: 실측 지형 + 사용자 fork 결정 2건 + `/review prd` 통과) · 부분 폐기 by ADR-0149 (결정 1과 2 대체) · 부분 폐기 by ADR-0148 (대상 주소지정 불요 전제)
-- 관련: PRD·TRD `docs/process/S17-llm-control-surface/spec/` · ADR-0080(제어표면 아키텍처·상위) · ADR-0014(CLI-via-Bash) · ADR-0035(ViewManager=UI 권위) · CLAUDE.md §5(LLM-우선 제어) · 구현 앵커(예정): `crates/engram-dashboard-protocol/src/messages.rs`·`crates/engram-dashboard-daemon/src/connection_core.rs`·`src-tauri/src/daemon_client/connection.rs` · step-log S17 · Amended by ADR-0149 (결정 1과 2 대체) · Amended by ADR-0148 (대상 주소지정 불요 전제)
+- 상태: 확정 (2026-07-14, 근거: 실측 지형 + 사용자 fork 결정 2건 + `/review prd` 통과) · 부분 폐기 by ADR-0155 (결정 1과 2 대체) · 부분 폐기 by ADR-0154 (대상 주소지정 불요 전제)
+- 관련: PRD·TRD `docs/process/S17-llm-control-surface/spec/` · ADR-0080(제어표면 아키텍처·상위) · ADR-0014(CLI-via-Bash) · ADR-0035(ViewManager=UI 권위) · CLAUDE.md §5(LLM-우선 제어) · 구현 앵커(예정): `crates/engram-dashboard-protocol/src/messages.rs`·`crates/engram-dashboard-daemon/src/connection_core.rs`·`src-tauri/src/daemon_client/connection.rs` · step-log S17 · Amended by ADR-0155 (결정 1과 2 대체) · Amended by ADR-0154 (대상 주소지정 불요 전제)
 
 ## 맥락
 release에서 LLM(child claude)이 UI(레이아웃·탭·슬롯)를 제어해야 한다(§5·PRD S17·R3). ADR-0080이 방향을 "engram-ctl → 데몬 WS, UI는 **데몬 opaque-relay**로 앱에 전달"로 정했다. 그러나 실측(2026-07-14, 서브에이전트 지형 조사)에서 데몬엔 **cross-client 라우팅이 없다** — 모든 WS 연결이 대칭 peer이고 broadcast(status/list)만 있으며, "데몬→특정 연결 전달"·"앱의 inbound 명령 수신→ViewManager 적용" 경로가 전무하다. request_id correlation은 이미 있으나(전 side-effect `AgentCommand`), UI relay 자체는 net-new다. 이 ADR은 그 relay의 구체 프로토콜 + 앱 적용 경로를 확정한다.

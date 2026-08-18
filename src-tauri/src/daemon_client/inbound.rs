@@ -1,13 +1,13 @@
 //! 데몬 → 셸 인바운드 명령 수신기 — 받은 봉투를 **연결 태스크 밖**에서 적용한다.
 //!
-//! ★이 파일의 존재 이유가 그 한 줄이다★(ADR-0149 결정 4 · ADR-0081 「relay 적용은 액터 밖(비블로킹)」):
+//! ★이 파일의 존재 이유가 그 한 줄이다★(ADR-0155 결정 4 · ADR-0081 「relay 적용은 액터 밖(비블로킹)」):
 //! 연결 태스크가 봉투를 인라인으로 `.await` 하면 합성 명령(`agent.spawnInto` — 핸들러가 자기 안에서
 //! `DaemonClient::send_command().await` 를 부른다)이 **자기 답을 자기가 못 꺼낸다**. 그 답은 같은 연결
 //! 태스크의 읽기 루프에서만 해소되는데 그 루프가 지금 이 핸들러를 기다리고 있기 때문이다(self-deadlock).
 //! [`InboundReceiver::on_command`] 은 그래서 **큐에 밀어 넣고 즉시 반환**하고, 실제 실행은
 //! [`TaskSpawner`] 가 띄운 별도 태스크에서 돈다.
 //!
-//! 배달 규칙은 홉마다 같은 3단계를 쓴다(`engram_dashboard_command::route` — ADR-0149 결정 3): 내 표에
+//! 배달 규칙은 홉마다 같은 3단계를 쓴다(`engram_dashboard_command::route` — ADR-0155 결정 3): 내 표에
 //! 있나 → 명부에 있나 → 오류. 셸의 2·3단계는 아직 비어 있다([`Hop::roster`] 주석).
 //!
 //! ## 배선
@@ -15,7 +15,7 @@
 //! 프레임도 서 있다 — `AgentEvent::CommandRequest`(데몬→셸)와 `AgentCommand::CommandOutcome`(셸→데몬).
 //! 셸이 자기 이름을 데몬 명부에 얹는 것도 매 (재)연결마다 나간다(`register_own_commands`).
 //! 보내는 쪽도 이제 있다 — 데몬이 자기 명부에서 주인을 찾아 그 연결로 봉투를 쓴다
-//! (`engram_dashboard_daemon::command_delivery` · ADR-0148). 그 다리가 서면서 이 모듈은 한 줄도 안 바뀌었다.
+//! (`engram_dashboard_daemon::command_delivery` · ADR-0154). 그 다리가 서면서 이 모듈은 한 줄도 안 바뀌었다.
 //!
 //! ★단 **화면까지는 아직 안 닿는다**★: 데몬→셸 왕복의 답장(`AgentEvent::CommandReply`)을 웹뷰의
 //! `handleEvent`(`src/api/protocolClient.ts`)가 아직 갈라내지 않아, 웹뷰가 낸 명령의 promise 는 안 풀린다
@@ -28,7 +28,7 @@
 //!
 //! ★이름 충돌 주의★: `connection.rs` 에는 **다른** `CommandReply`(`oneshot::Sender`)가 있다. 그래서 그 파일은
 //! 봉투의 답장 타입을 `BusReply` 로 별칭해 쓴다 — 두 이름을 한 스코프에 그냥 들이지 말 것.
-// ADR-0149
+// ADR-0155
 // ADR-0081
 
 use std::future::Future;

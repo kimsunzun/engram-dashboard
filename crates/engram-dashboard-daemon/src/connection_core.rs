@@ -149,28 +149,28 @@ impl ConnectionSession {
     /// 덮는다 — `Roster::register`). 신원이 봉투가 아니라 **그 봉투가 온 연결**이라는 계약은 이미 서 있고
     /// (TRD §4-⑧ · `CommandEnvelope::owner` 주석), TRD §3-7 은 데몬이 어느 쪽을 쓰는지를 열어 두었다.
     /// ★오늘은 연결마다 새 토큰이 나는데, 그것은 **설계가 아니라 잠정 상태**다★: 재연결이 새 `ConnId` 를
-    /// 받으므로 데몬 눈에는 남남이고, 옛 연결의 등록은 끊길 때 지워지므로(ADR-0144 결정 3) 물려받을 것도
+    /// 받으므로 데몬 눈에는 남남이고, 옛 연결의 등록은 끊길 때 지워지므로(ADR-0150 결정 3) 물려받을 것도
     /// 없다 — 이름의 인수인계는 명부의 last-wins 규칙이 한다.
     /// ★슬라이스 B 가 이 자리를 대체한다★ — 주인 키는 **클라이언트가 만들어 첫 인사에 실어 보낸 식별자**가
-    /// 되고, 그 값은 **재접속을 가로질러 같다**(ADR-0144 결정 1·2 · TRD §3-7 조항 1·5). 명부의 last-wins 가
+    /// 되고, 그 값은 **재접속을 가로질러 같다**(ADR-0150 결정 1·2 · TRD §3-7 조항 1·5). 명부의 last-wins 가
     /// 적힌 대로 「덮기」로 서는 것이 그 동일성에 달려 있다 — 매 연결이 남남인 지금은 같은 규칙이 덮기가
-    /// 아니라 **쌓기**로 돌고, 그래서 자취를 버려야 했다(ADR-0144 맥락). 연결 id 파생은 그때 식별자를 안
+    /// 아니라 **쌓기**로 돌고, 그래서 자취를 버려야 했다(ADR-0150 맥락). 연결 id 파생은 그때 식별자를 안
     /// 보낸 연결의 fail-open 갈래로만 남는다(그 결정의 영향절).
     /// ★이 토큰은 wire 에 나가지 않는다★ — 그래서 클라이언트는 자기 토큰을 알 길이 없고, 등록 패킷의
     /// `owner` 칸이 데몬의 파생값과 다른 것은 위반이 아니라 **정상**이다(그래서 거절이 아니다 —
     /// `note_claimed_owner`). 그 칸은 식별자가 들어온 뒤에도 계속 무시한다 — 떼는 것도 계약 변경인데 얻는
-    /// 것이 없다(ADR-0144 영향절).
+    /// 것이 없다(ADR-0150 영향절).
     ///
     /// 파생 자체는 [`CommandRoster::owner_of`] 하나뿐이다 — 형식을 두 곳에 두지 않는다.
     ///
     /// ★이 값이 **권위는 아니다**★: 명부가 실제로 쓰는 주인 토큰은 `attach` 가 그때 계산해 표에 넣어 둔
-    /// 값이고, 그것을 묻는 곳은 [`CommandRoster::attached_owner`] 다(ADR-0148). 오늘 둘이 같은 것은
+    /// 값이고, 그것을 묻는 곳은 [`CommandRoster::attached_owner`] 다(ADR-0154). 오늘 둘이 같은 것은
     /// 「파생 지점이 하나여서」가 아니라 **`attach` 가 마침 같은 규칙으로 파생하기 때문**이다 — 슬라이스 B
     /// 가 `attach` 를 클라이언트 자작 식별자로 바꾸면 이 메서드는 그 값을 따라가지 못한다.
     /// ★그래서 운영 경로에는 이 메서드의 소비자가 없다★ — 클라이언트의 주장을 견주는
     /// `note_claimed_owner` 도 표의 저장값을 쓴다. 여기 남은 것은 위 정책 서술과, `attach` 가 **무엇을
     /// 저장하는지**를 무는 테스트의 기대값이다.
-    // ADR-0144
+    // ADR-0150
     pub fn owner_token(&self) -> OwnerToken {
         CommandRoster::owner_of(self.conn_id)
     }
@@ -587,9 +587,9 @@ pub struct ConnectionCore {
     ///   정리를 건너뛰어도 정리할 것이 없다.
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    // ADR-0149
+    // ADR-0155
     commands: CommandRoster,
-    // ADR-0148
+    // ADR-0154
     deliveries: CommandDeliveries,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -1123,7 +1123,7 @@ impl ConnectionCore {
                 reply(sink, request_id, Ok(()));
             }
 
-            // ── 명령 버스 등록 wire(ADR-0149/0150, TRD §3-7) ──────────────────────────────
+            // ── 명령 버스 등록 wire(ADR-0155/0156, TRD §3-7) ──────────────────────────────
             //
             // ★`_ =>` 로 묶지 않는 이유★: 이 match 가 exhaustive 라서 variant 를 늘릴 때마다 여기가
             //   컴파일 에러로 걸린다. 그게 「배선을 빠뜨리지 않았나」를 묻는 유일한 지점이라 catch-all 로
@@ -1139,7 +1139,7 @@ impl ConnectionCore {
                 //   (저장값 ≠ 파생값)를 이 층에서는 만들 수 없다 — 명부의 표는 `command_roster` 사설이다.
                 //   되돌리면 슬라이스 B 에서 사칭이 조용히 통과한다(인과 = `note_claimed_owner` 주석,
                 //   판정 자체를 무는 것 = 그 함수를 직접 부르는 세 테스트).
-                // ADR-0148
+                // ADR-0154
                 note_claimed_owner(
                     session,
                     &claimed,
@@ -1173,7 +1173,7 @@ impl ConnectionCore {
                 //   (저장값 ≠ 파생값)를 이 층에서는 만들 수 없다 — 명부의 표는 `command_roster` 사설이다.
                 //   되돌리면 슬라이스 B 에서 사칭이 조용히 통과한다(인과 = `note_claimed_owner` 주석,
                 //   판정 자체를 무는 것 = 그 함수를 직접 부르는 세 테스트).
-                // ADR-0148
+                // ADR-0154
                 note_claimed_owner(
                     session,
                     &claimed,
@@ -1205,7 +1205,7 @@ impl ConnectionCore {
                         help: entry.help,
                         // 명부에 있는 것은 주인이 있는 이름뿐이다 — 계약이 이 칸을 왜 남겼는지는
                         //   `CommandListEntry` 주석.
-                        // ADR-0144
+                        // ADR-0150
                         available: true,
                     })
                     .collect();
@@ -1224,7 +1224,7 @@ impl ConnectionCore {
             //   경로가 그렇다) 자기 답을 자기가 못 꺼낸다 — ADR-0081 결정 3 개정이 잡아낸 self-deadlock
             //   그대로다. `spawn` 이 그 회귀를 막는 유일한 수단이고, 되돌리면 그 조합에서 마감시각까지
             //   연결 하나가 통째로 선다(TRD §3-6 — 셸·데몬·웹뷰 공통 규칙).
-            // ADR-0148
+            // ADR-0154
             AgentCommand::Command { envelope } => {
                 tracing::debug!(
                     conn = conn_id,
@@ -1250,8 +1250,8 @@ impl ConnectionCore {
             //   TRD §4-⑤ 위반이다.
             // ★두 원인을 **가르지 않는다**★: 마감이 지나 자리가 거둬진 늦은 결말과 아무도 안 물은 결말은
             //   표에 아무것도 없다는 점에서 같다 — 표가 지나간 키를 기억하지 않으므로 가를 근거가 없다
-            //   (자취를 두면 그 목록이 무한히 자란다 — ADR-0144 가 명부에서 자취를 버린 것과 같은 이유).
-            // ADR-0148
+            //   (자취를 두면 그 목록이 무한히 자란다 — ADR-0150 가 명부에서 자취를 버린 것과 같은 이유).
+            // ADR-0154
             AgentCommand::CommandOutcome { reply } => {
                 let request_id = reply.request_id;
                 if self.deliveries.complete(reply) {
@@ -1366,7 +1366,7 @@ impl ConnectionCore {
 /// ★`actual` 을 여기서 파생하지 않는 것이 이 함수의 정확성을 좌우한다★: 파생값과 견주면, 저장값이 파생을
 /// 떠나는 날 **정직한 클라이언트가 걸리고 사칭이 통과한다** — 자기 저장 토큰을 그대로 적어 온 연결은
 /// 「다르다」로 갈라지고, 옛 파생형(`conn-<id>`)을 적어 온 연결은 아래 첫 갈래에서 조용히 빠져나간다.
-/// 그 형식을 잡자고 세운 갈래가 정확히 그것을 못 잡게 된다(ADR-0148).
+/// 그 형식을 잡자고 세운 갈래가 정확히 그것을 못 잡게 된다(ADR-0154).
 /// ★`None`(안 붙은 연결) 이면 견줄 값이 없다★ — 어떤 주장도 「같다」로 접지 않고 아래 형식 갈래로 보낸다.
 /// 그 패킷은 어차피 명부가 반려하지만(`CommandRoster::register`), 그 상태에서 우리 형식을 적어 온 것은
 /// 오히려 더 또렷한 사칭 시도다.
@@ -1385,7 +1385,7 @@ impl ConnectionCore {
 /// 것만으로 뒤따르는 경고를 잠글 수 있다.
 /// ★찍는 길이를 자른다★: 이 칸은 검증 안 된 클라이언트 문자열이고 프레임 크기 상한이 없어, 통째로
 /// 찍으면 프레임 하나가 메가바이트짜리 로그 줄이 된다.
-// ADR-0149
+// ADR-0155
 fn note_claimed_owner(
     session: &ConnectionSession,
     claimed: &OwnerToken,
@@ -1953,7 +1953,7 @@ mod tests {
         }
     }
 
-    // ── 명령 버스 등록 wire(ADR-0149/0150 · TRD §3-7) ────────────────────────────
+    // ── 명령 버스 등록 wire(ADR-0155/0156 · TRD §3-7) ────────────────────────────
     use engram_dashboard_command::{CommandDecl, ErrorCode, Roster};
 
     fn decl(name: &str) -> CommandDecl {
@@ -2012,7 +2012,7 @@ mod tests {
         captured.clone()
     }
 
-    // ── 주장한 주인 토큰의 판정(ADR-0148) ────────────────────────────────────────
+    // ── 주장한 주인 토큰의 판정(ADR-0154) ────────────────────────────────────────
     //
     // ★셋 다 **명부의 저장값과 견주는가**를 문다★ — 세션에서 다시 파생하는 구현은 셋 다 뒤집힌다.
     // 저장값을 인자로 받으므로 그 상태를 여기서 그냥 만들 수 있다(명부도 `attach` 도 안 건드린다).
@@ -2159,7 +2159,7 @@ mod tests {
         assert_eq!(
             names,
             vec!["tab.create".to_string(), "tab.split".to_string()],
-            "내린 이름은 자리째 사라지고(ADR-0144) 차분에 안 실린 이름은 그대로다"
+            "내린 이름은 자리째 사라지고(ADR-0150) 차분에 안 실린 이름은 그대로다"
         );
     }
 
@@ -2212,7 +2212,7 @@ mod tests {
         }
     }
 
-    // ── 명령 배달의 두 arm(ADR-0148) ────────────────────────────────────────────
+    // ── 명령 배달의 두 arm(ADR-0154) ────────────────────────────────────────────
     //
     // 갈래별 단언(정상 왕복 · 주인 부재 · 찢어진 창 · 마감 · 끊김 정리)은 `command_delivery` 쪽에 있다.
     // 여기서 보는 것은 **dispatch 가 그 배달로 잇는가**와 두 arm 이 wire 로 내는 답이다.
@@ -2239,7 +2239,7 @@ mod tests {
 
     fn bus_command(name: &str, request_id: engram_dashboard_command::RequestId) -> AgentCommand {
         AgentCommand::Command {
-            // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0148).
+            // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0154).
             envelope: engram_dashboard_command::CommandEnvelope {
                 name: name.to_string(),
                 request_id,

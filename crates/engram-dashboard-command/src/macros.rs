@@ -75,7 +75,7 @@
 ///   방법이 매크로에 없다. 명령 단위 설명(`summary`)만 실린다(런타임 직렬화라 안전하다).
 /// - **공통 오류를 적게 하지 않는다** — `INVALID_ARGUMENT`·`INTERNAL` 은 표가 내는 것이라
 ///   [`crate::CommandSpec::advertised_errors`] 가 자동으로 얹는다.
-// ADR-0149
+// ADR-0155
 #[macro_export]
 macro_rules! declare_commands {
     (
@@ -232,7 +232,7 @@ macro_rules! __engram_declare {
     };
 
     // `required` 는 **생략 가능한 필드만 뺀다** — 스키마가 「없어도 된다」고 광고했는데 역직렬화가
-    //   실패하면 그 광고를 보고 인자를 채우는 호출자(LLM)에게 거짓말을 한 것이다(ADR-0150).
+    //   실패하면 그 광고를 보고 인자를 채우는 호출자(LLM)에게 거짓말을 한 것이다(ADR-0156).
     (@obj [$($d:tt)*] $psep:literal $rsep:literal [$($props:tt)*] [$($req:tt)*]) => {
         concat!("{\"type\":\"object\",\"properties\":{", $($props)* "},\"required\":[", $($req)* "]}")
     };

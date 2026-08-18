@@ -234,7 +234,7 @@ pub(crate) async fn run_connection(
     // ★T7c: 데몬 broadcast 이벤트를 프론트로 내보내는 AppHandle(emit 경로).
     //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 app.emit 로 전 webview 에 push.
     app: tauri::AppHandle,
-    // ADR-0149 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
+    // ADR-0155 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
     inbound: Arc<InboundSlot>,
 ) {
     // 1) 첫 핸드셰이크 — 결과를 ready_tx 로 caller(connect/ensure)에 1회 보고한다.
@@ -843,9 +843,9 @@ async fn main_loop(
     // ★인증 통과 직후 · 재연결마다 자기 명령 이름을 등록한다★. 이 자리가 그 둘을 함께 만족하는 유일한
     //   지점이다 — 이 함수는 첫 핸드셰이크 뒤와 **매 재핸드셰이크 뒤** 새 소켓으로 다시 불린다(호출자
     //   `connected_lifetime` 의 outer loop). 첫 인사 프레임에 **합치지 않고** 통과 직후 별도 메시지로 보내는
-    //   것은 ADR-0144 결정 4 이고, 붙는 순간 전량을 한 방에 얹고 재연결마다 다시 보내는 것은 TRD §3-7 조항 1
+    //   것은 ADR-0150 결정 4 이고, 붙는 순간 전량을 한 방에 얹고 재연결마다 다시 보내는 것은 TRD §3-7 조항 1
     //   이다(protocol `RegisterCommands` doc 이 그 짝을 적고 있다).
-    //   ★재전송이 쌓이지 않고 덮이는 것은 데몬 명부의 이름 단위 last-wins 에 달려 있다(ADR-0144 결정 3 의 제거
+    //   ★재전송이 쌓이지 않고 덮이는 것은 데몬 명부의 이름 단위 last-wins 에 달려 있다(ADR-0150 결정 3 의 제거
     //   + 등록 인수인계)★ — 오늘은 재연결이 새 연결 id 를 받아 옛 등록이 끊길 때 지워진다.
     register_own_commands(&mut sink, pending, my_gen, inbound).await;
     // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
@@ -938,7 +938,7 @@ async fn main_loop(
                                             }
                                         }
                                     }
-                                    // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다(ADR-0149 결정 4)★.
+                                    // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다(ADR-0155 결정 4)★.
                                     //   여기서 하는 일은 넘기는 것뿐이고 적용은 연결 태스크 **밖**에서 돈다
                                     //   (`inbound::InboundReceiver::accept` — 인라인으로 되돌리면 합성 명령이
                                     //   자기 답을 자기가 못 꺼내 교착한다).
@@ -1234,9 +1234,9 @@ pub fn register_pending(
 // ★데몬의 토큰 접두(`conn-`)를 흉내내지 않는다★ — 그 형태를 적으면 데몬이 「남의 주인 토큰을 적은 등록」으로
 //   보고 경고를 남긴다(`note_claimed_owner` 의 접두 분기).
 //
-// ★★이 값을 「클라이언트가 만든 식별자」로 승격하지 말 것(ADR-0144 결정 1)★★ — 그 식별자는 **연결마다
+// ★★이 값을 「클라이언트가 만든 식별자」로 승격하지 말 것(ADR-0150 결정 1)★★ — 그 식별자는 **연결마다
 //   유일**해야 하는데 이 리터럴은 고정이라 두 셸이 같은 값을 쓴다. 데몬 명부는 등록을 이름 단위 last-wins 로
-//   덮고 연결 해제를 주인 단위로 제거하므로(ADR-0144 결정 3), 그 승격은 **두 셸이 서로의 이름을 빼앗고 서로를
+//   덮고 연결 해제를 주인 단위로 제거하므로(ADR-0150 결정 3), 그 승격은 **두 셸이 서로의 이름을 빼앗고 서로를
 //   지우는** 동작이 된다. 식별자를 들일 때는 이 상수를 고치는 것이 아니라 연결마다 새 값을 만들어야 한다.
 const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
 
@@ -1284,7 +1284,7 @@ pub fn outcome_sink(
     }
 }
 
-/// 데몬이 배달한 봉투를 적용 태스크로 넘긴다 — ★기다리지 않는다★(ADR-0149 결정 4).
+/// 데몬이 배달한 봉투를 적용 태스크로 넘긴다 — ★기다리지 않는다★(ADR-0155 결정 4).
 ///
 /// `socket` = 이 봉투가 도착한 소켓의 세대. 답장이 그 소켓에만 나가게 [`outcome_sink`] 로 함께 실린다.
 /// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓·실 `AppHandle` 없이 세울 수 없어(그래서 이 파일엔

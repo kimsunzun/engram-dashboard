@@ -55,7 +55,7 @@ struct Entry {
 ///
 /// ★전역 static 이 아니다★ — `make_table(deps)` 가 조립 때 만들고 핸들러는 그때 주입된다(규칙 T-1).
 /// 그래서 하네스가 가짜 의존을 꽂아 프로세스 없이 핸들러를 단언할 수 있다(ADR-0012).
-// ADR-0149
+// ADR-0155
 pub struct CommandTable {
     declared: &'static [&'static CommandSpec],
     entries: BTreeMap<&'static str, Entry>,
@@ -101,7 +101,7 @@ impl CommandTable {
         };
         // ★`ok_schema` 는 표가 쓰지 않지만 여기서 함께 본다★: `spec_item_json` 이 그것을 `help` 안에
         //   **그대로 이어 붙이므로**(`spec.rs`) 깨진 `ok` 하나가 등록 패킷의 `help` 를 통째로 JSON 이
-        //   아니게 만든다. 데몬은 그것을 불투명 문자열로 저장하는 것이 옳으므로(ADR-0150) 깨짐은 그
+        //   아니게 만든다. 데몬은 그것을 불투명 문자열로 저장하는 것이 옳으므로(ADR-0156) 깨짐은 그
         //   문자열을 읽는 LLM·CLI 앞에서야 드러난다 — 조립이 마지막 검문소다. 값은 안 쓰니 버린다.
         if serde_json::from_str::<serde::de::IgnoredAny>(spec.ok_schema).is_err() {
             return Err(TableError::InvalidSchema(name));
@@ -133,7 +133,7 @@ impl CommandTable {
 
     /// 인자가 **선언과 맞는지** 부르기 전에 본다 — 모르는 칸·빠진 필수 칸을 이름 지어 반려한다.
     ///
-    /// ★부르는 자리는 사람·LLM 이 방금 친 것이 들어오는 표면뿐이다(ADR-0151)★. 홉 간 배선에서 부르면
+    /// ★부르는 자리는 사람·LLM 이 방금 친 것이 들어오는 표면뿐이다(ADR-0157)★. 홉 간 배선에서 부르면
     /// 버전이 앞선 호출자가 실은 신규 칸이 옛 주인을 하드 실패시켜 additive 진화가 죽는다(TRD §4-③) —
     /// [`crate::route`] 가 이것을 부르지 않는 것이 그 결정의 실물이고, 거기 끼워 넣으면 무너진다.
     ///
@@ -146,16 +146,16 @@ impl CommandTable {
     ///   봐 주지 않는다★: 명부가 그 이름을 알면 배달은 봉투를 **그대로 전달**하고, 받는 홉의
     ///   [`crate::route`]→[`CommandTable::call`] 도 검문하지 않는다(바로 위 문단의 그 결정이다). 그래서
     ///   사람·LLM 이 남의 이름을 오타 낀 칸과 함께 치면 그 칸은 어디서도 안 걸리고, 역직렬화가 조용히
-    ///   버린 뒤 성공이 보고된다 — ADR-0151 이 막으려던 그 실패가 한 홉 건너에서 그대로 산다(그 결정의
+    ///   버린 뒤 성공이 보고된다 — ADR-0157 이 막으려던 그 실패가 한 홉 건너에서 그대로 산다(그 결정의
     ///   층 가름은 **출처**이지 이름의 주인이 아니다).
     ///   ★이 구멍은 입구 어댑터 **쌍**의 의무로 남아 있다 — 배선 wave 가 어느 쪽인지 정한다★: 치는 쪽
-    ///   어댑터는 남의 선언을 안 들고(명부의 모양은 데몬에게 불투명 문자열이다 — ADR-0150), 주인 쪽
+    ///   어댑터는 남의 선언을 안 들고(명부의 모양은 데몬에게 불투명 문자열이다 — ADR-0156), 주인 쪽
     ///   어댑터는 그 봉투가 사람·LLM 이 방금 친 것인지를 봉투만 보고 모른다. 어느 쪽이 그 재료를 갖게
     ///   할지가 결정 사항이라 이 crate 에서 닫지 않는다.
     /// - **`properties` 를 안 실은 선언** — 허용 집합을 모르는 채로 반려하면 멀쩡한 인자를 막는다.
     /// - **꼭대기 아래** — 여기는 스키마 검증기가 아니라 선언 속성 집합과의 대조다. 중첩 객체 안의 오타는
     ///   통과하고, 그 자리는 역직렬화가 잡는다(선언된 칸이면 타입이 안 맞고, 아니면 무시된다).
-    // ADR-0151
+    // ADR-0157
     pub fn check_args(&self, name: &str, args: &serde_json::Value) -> Result<(), CommandError> {
         let Some(entry) = self.entries.get(name) else {
             return Ok(());
@@ -205,7 +205,7 @@ impl CommandTable {
         self.entries.contains_key(name)
     }
 
-    /// 데몬에 등록할 명단 — 이름과 **모양**을 함께 나른다(ADR-0150).
+    /// 데몬에 등록할 명단 — 이름과 **모양**을 함께 나른다(ADR-0156).
     pub fn decls(&self) -> Vec<CommandDecl> {
         self.entries
             .values()
@@ -520,7 +520,7 @@ mod tests {
 
     /// ★`ok` 가 깨져도 같다★ — 표는 `ok_schema` 를 안 쓰지만 `spec_item_json` 이 그것을 `help` 에 그대로
     /// 이어 붙이므로 인자 스키마만 보면 **깨진 `help` 를 실은 등록 패킷이 통과한다**. 데몬은 불투명
-    /// 문자열로 저장하는 것이 맞으니(ADR-0150) 그때는 이미 잡을 자리가 없다.
+    /// 문자열로 저장하는 것이 맞으니(ADR-0156) 그때는 이미 잡을 자리가 없다.
     #[test]
     fn a_declaration_whose_ok_schema_is_not_json_is_refused_at_assembly() {
         static BROKEN_OK: CommandSpec = CommandSpec {
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].name, "fixture.ping");
         assert_eq!(decls[0].help, crate::spec_item_json(&PING));
-        // 파생 파일의 원소와 **같은 출처**여야 한다(ADR-0150).
+        // 파생 파일의 원소와 **같은 출처**여야 한다(ADR-0156).
         let parsed: serde_json::Value = serde_json::from_str(&decls[0].help).expect("help 는 JSON");
         assert_eq!(parsed["name"], "fixture.ping");
         assert_eq!(parsed["effect"], "Read");
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(parsed["errors"][1], "INVALID_ARGUMENT");
     }
 
-    /// ★디스크 파일과 등록 패킷이 **같은 한 출처**라는 주장을 바이트로 확인한다★(ADR-0150).
+    /// ★디스크 파일과 등록 패킷이 **같은 한 출처**라는 주장을 바이트로 확인한다★(ADR-0156).
     ///
     /// 두 경로를 서로 견주면 같은 함수를 두 번 부른 항등식이라 **둘이 함께 틀어져도 통과한다** — 그래서
     /// 고정한 기대 바이트를 가운데 둔다.
@@ -697,7 +697,7 @@ mod tests {
         );
     }
 
-    // ── 입구 검문(ADR-0151) ──────────────────────────────────────────────────────────────────
+    // ── 입구 검문(ADR-0157) ──────────────────────────────────────────────────────────────────
 
     fn entrance_table() -> CommandTable {
         let mut table = CommandTable::new(DECLARED);
@@ -708,7 +708,7 @@ mod tests {
     }
 
     /// ★모르는 칸을 조용히 무시하면 **성공이 보고된다**★ — 호출자는 자기가 지시한 것과 다른 일이 일어난
-    /// 줄 모른다(ADR-0151 이 이 그물을 세운 이유). 그래서 반려하되 **스스로 고칠 재료**를 함께 낸다.
+    /// 줄 모른다(ADR-0157 이 이 그물을 세운 이유). 그래서 반려하되 **스스로 고칠 재료**를 함께 낸다.
     #[test]
     fn an_undeclared_argument_field_is_named_and_refused() {
         let err = entrance_table()

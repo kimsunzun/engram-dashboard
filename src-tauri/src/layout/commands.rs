@@ -1,4 +1,4 @@
-//! `window`/`tab`/`slot` 명령 — **선언과 본문이 적용 서비스 옆**에 산다(ADR-0149 결정 1).
+//! `window`/`tab`/`slot` 명령 — **선언과 본문이 적용 서비스 옆**에 산다(ADR-0155 결정 1).
 //!
 //! 사람 클릭(`commands/layout.rs` 의 `#[tauri::command]`)과 중계된 LLM 호출(인바운드 수신기)이 **같은
 //! 적용 서비스**(`super::apply`)에 떨어진다 — 이 파일은 그 서비스로 가는 **두 번째 껍데기**이지 두 번째
@@ -21,7 +21,7 @@
 //! 바로 그것이다). 그래서 **모든 실패에 참인 코드**를 고른다: `CONFLICT` = 「지금 상태로는 그 요청을 적용할
 //! 수 없다」. `NOT_FOUND` 는 main 창 거부에 거짓이고 `INTERNAL` 은 오타 난 id 에 거짓이다. 사유는 문구가
 //! 그대로 나른다. 종류를 가르려면 적용 서비스가 타입드 오류를 내야 하고 그건 이 파일의 결정이 아니다.
-// ADR-0149
+// ADR-0155
 // ADR-0081
 
 use std::sync::Arc;
@@ -214,7 +214,7 @@ declare_commands! {
     } errors [CONFLICT];
 }
 
-/// 레이아웃 명령이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0149 결정 5 / 규칙 T-1).
+/// 레이아웃 명령이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
 ///
 /// 포트 넷의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가 소유한다 — 이 구조체는 그것을
 /// **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로 바꾼 것이 차이의
@@ -231,7 +231,7 @@ pub struct LayoutPorts {
 /// 셸의 레이아웃 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
 ///
 /// ★명령이 늘어도 조립부(`lib.rs`)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
-// ADR-0149
+// ADR-0155
 pub fn make_table(ports: LayoutPorts) -> CommandTable {
     let ports = Arc::new(ports);
     let mut table = CommandTable::new(COMMAND_SPECS);

@@ -16,7 +16,7 @@ test-harness = []
 # src-tauri 에서 그대로 이동한 모듈(pty/persistence/logging). 의존성도 동일하게 옮김.
 # Embedded(src-tauri)와 미래 daemon(별도 bin)이 공통으로 의존하는 lib.
 [dependencies]
-# ★이 crate 의 유일한 워크스페이스 의존이다(ADR-0149)★: `agent.*` 를 선언하려면 도구가 필요한데,
+# ★이 crate 의 유일한 워크스페이스 의존이다(ADR-0155)★: `agent.*` 를 선언하려면 도구가 필요한데,
 #   그것을 protocol 에서 받으면 코어가 wire 타입까지 보게 된다. 도구 crate 가 그 유입을 막는다 —
 #   **protocol 을 여기 추가하지 말 것**.
 engram-dashboard-command = { path = "../engram-dashboard-command" }

@@ -209,7 +209,7 @@ impl ConnectionHandler for AgentConnection {
             //   `on_disconnect` 없이 명단에 영구히 남는다. 뒤로 미뤄도 등록보다는 앞이다 — 네트워크 행이
             //   수신 task 를 **이 호출이 반환한 뒤에** 띄우므로(`ws.rs` 의 on_connect await → read_task
             //   spawn 순서) 여기 도달하지 못한 연결은 프레임 한 장도 못 보낸다.
-            // ADR-0148
+            // ADR-0154
             self.core.commands().attach(conn_id, frames);
         })
     }
@@ -271,7 +271,7 @@ impl ConnectionHandler for AgentConnection {
     }
 
     fn on_disconnect(&self, conn_id: ConnId) {
-        // ── 명령 명부에서 이 연결의 이름 지우기(ADR-0144) — ★이 정리의 **첫 줄**이어야 한다★ ────
+        // ── 명령 명부에서 이 연결의 이름 지우기(ADR-0150) — ★이 정리의 **첫 줄**이어야 한다★ ────
         // 뒤로 밀면 그 앞 정리가 도는 **동안** 이 연결이 아직 붙어 있는 것으로 읽혀, 그 창에 겹쳐 든
         //   등록이 통과한다(겹침 자체의 근거 = `CommandRoster` 헤더). 그러면 이미 죽은 연결이 산 연결이
         //   얹은 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 지운다 — 멀쩡한 연결의 명령이 조용히
@@ -280,10 +280,10 @@ impl ConnectionHandler for AgentConnection {
         //   그 사본이고, 포트 계약이 「반환 시점까지 자기가 만든 사본을 전부 놓아야 한다」고 요구하는
         //   대상 중 하나다(`frame_port::ConnectionHandler::on_disconnect`). 아래 구독 정리와 달리 이건
         //   놓치는 경쟁이 없다 — 넣은 곳도 빼는 곳도 각각 한 곳이고 둘 다 명부의 한 잠금 안에서 돈다.
-        // ADR-0148
+        // ADR-0154
         self.core.commands().detach(conn_id);
 
-        // ── 이 연결이 낸 명령 왕복 거두기(ADR-0148) ───────────────────────────────
+        // ── 이 연결이 낸 명령 왕복 거두기(ADR-0154) ───────────────────────────────
         // ★명부 정리 **뒤**다★: 순서가 뒤집히면 왕복이 풀려 답장을 내려는 순간 이 연결이 아직 명부에 있어,
         //   이미 죽은 출구로 프레임을 한 장 쓰고 버린다(무해하지만 인과가 흐려진다).
         // ★상관 표와 명부는 다른 표라 정리도 두 줄이다★ — 합치지 않는 근거는 `command_delivery` 헤더
@@ -357,9 +357,9 @@ pub struct AgentConnections {
     control_registry: Arc<crate::control::registry::ControlRegistry>,
     // ADR-0116
     messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    // ADR-0149
+    // ADR-0155
     commands: CommandRoster,
-    // ADR-0148
+    // ADR-0154
     deliveries: CommandDeliveries,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -616,7 +616,7 @@ mod tests {
         }
     }
 
-    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 지우는지(ADR-0149/0144) ──
+    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 지우는지(ADR-0155/0150) ──
 
     /// 공장 하나가 만든 연결들이 **같은 명부**를 보는지까지 이 하네스가 본다 — 연결마다 새 명부가 나면
     /// 아래 conn 2 의 조회가 빈 목록을 받는다.
@@ -691,7 +691,7 @@ mod tests {
     }
 
     /// ★끊기면 그 연결의 이름이 명부에서 **사라진다**★ — 자취를 남기면 주인 토큰이 연결마다 새로 나는
-    /// 탓에 재접속마다 쌓이고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다(ADR-0144 결정 3).
+    /// 탓에 재접속마다 쌓이고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다(ADR-0150 결정 3).
     /// 조회하는 쪽을 **다른 연결**로 두는 것은 한 공장이 만든 연결들이 같은 명부를 본다는 것까지 함께
     /// 보기 위해서다.
     #[tokio::test]
@@ -777,7 +777,7 @@ mod tests {
     /// 상관 표 쪽 줄이 빠지면 답장을 받아 갈 곳이 사라진 항목이 마감시각까지 표에 앉고 그 왕복을 돌던
     /// 태스크도 그때까지 안 끝나는데, **런타임엔 아무 신호도 없다** — 그래서 이 테스트가 그 줄의 유일한
     /// 그물이다(거두는 동작 자체의 갈래별 단언은 `command_delivery` 쪽에 있다).
-    // ADR-0148
+    // ADR-0154
     #[tokio::test]
     async fn a_disconnect_also_reclaims_that_connections_command_round_trips() {
         use engram_dashboard_command::{CommandDecl, CommandEnvelope, OwnerToken, RequestId};
