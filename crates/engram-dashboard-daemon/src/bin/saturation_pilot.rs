@@ -31,7 +31,7 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, McpServerHandle, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -721,12 +721,16 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     let slot = Arc::new(ManagerSlot::new());
     let messaging_slot =
         Arc::new(engram_dashboard_daemon::control::mcp_server::MessagingSlot::new());
+    // ★스모크/하네스에는 붙을 클라이언트가 없다★ — 명부 통지 팬아웃 슬롯은 빈 채로 표에 넘긴다
+    //   (통지 생략이 정상인 조립이다, ADR-0132). 표 자체는 채운다 — 비우면 `/control/agent` 가 503 만
+    //   내는 죽은 라우트가 되어, 이 bin 으로 그 계열을 태워 볼 수 없다.
+    let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
+    let command_slot = Arc::new(CommandTableSlot::new());
     let handle = start_mcp_server(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
-        // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
-        Arc::new(RosterBroadcastSlot::new()),
+        command_slot.clone(),
     )
     .await
     .map_err(|e| format!("start mcp server: {e}"))?;
@@ -763,6 +767,12 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
+    command_slot.set(Arc::new(
+        engram_dashboard_daemon::control::commands::make_daemon_table(
+            manager.clone(),
+            broadcast_slot.clone(),
+        ),
+    ));
     let messaging = Arc::new(
         engram_dashboard_daemon::messaging_host::messaging_for_manager(
             manager.clone(),

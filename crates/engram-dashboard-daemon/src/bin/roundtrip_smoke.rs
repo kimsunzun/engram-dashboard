@@ -101,7 +101,7 @@ use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::priming::{
     mentions_mail_cli_surface, teaches_mail_cli, FilePrimingProvider, PrimingProvider,
@@ -416,12 +416,16 @@ async fn run() -> i32 {
     let slot = Arc::new(ManagerSlot::new());
     // C1: MessagingService 늦은 주입 슬롯 — send/flush 담당(manager 조립 후 채운다).
     let messaging_slot = Arc::new(MessagingSlot::new());
+    // ★스모크/하네스에는 붙을 클라이언트가 없다★ — 명부 통지 팬아웃 슬롯은 빈 채로 표에 넘긴다
+    //   (통지 생략이 정상인 조립이다, ADR-0132). 표 자체는 채운다 — 비우면 `/control/agent` 가 503 만
+    //   내는 죽은 라우트가 되어, 이 bin 으로 그 계열을 태워 볼 수 없다.
+    let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
+    let command_slot = Arc::new(CommandTableSlot::new());
     let handle = match start_mcp_server(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
-        // 스모크/하네스에는 붙을 클라이언트가 없다 — 명부 통지 팬아웃은 비운다(ADR-0132).
-        Arc::new(RosterBroadcastSlot::new()),
+        command_slot.clone(),
     )
     .await
     {
@@ -543,6 +547,12 @@ async fn run() -> i32 {
         sink, profiles, presets, tracker, control,
     ));
     slot.set(manager.clone());
+    command_slot.set(Arc::new(
+        engram_dashboard_daemon::control::commands::make_daemon_table(
+            manager.clone(),
+            broadcast_slot.clone(),
+        ),
+    ));
     // C1: MessagingService 조립(발송 3분기·flush) — manager 를 DeliveryPort 로 감싼다. 이 하네스는
     //   flush sink 를 배선하지 않으므로(NoopStatus) 파킹 시나리오는 handle_single_send 직접 경로만 탄다.
     //   씨앗 A→B 는 산 수신자라 delivered 경로.

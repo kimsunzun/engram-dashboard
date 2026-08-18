@@ -332,22 +332,22 @@ fn engram_agent_verbs_post_to_the_control_agent_route_with_the_verb_in_the_body(
         (
             &["agent", "spawn", "qa-bravo"],
             serde_json::json!({ "verb": "spawn", "target": "qa-bravo" }),
-            r#"{"agent":{"id":"i","name":"qa-bravo","state":"live"},"created":false}"#,
+            r#"{"agent_id":"i","name":"qa-bravo","state":"live","created":false}"#,
         ),
         (
             &["agent", "new", "--cwd", "C:/work", "--name", "qa"],
             serde_json::json!({ "verb": "new", "cwd": "C:/work", "name": "qa" }),
-            r#"{"agent":{"id":"i","name":"qa","state":"sleeping"}}"#,
+            r#"{"agent_id":"i","name":"qa","state":"sleeping"}"#,
         ),
         (
             &["agent", "rename", "qa", "qa-lead"],
             serde_json::json!({ "verb": "rename", "target": "qa", "name": "qa-lead" }),
-            r#"{"agent":{"id":"i","name":"qa-lead"},"outcome":"renamed"}"#,
+            r#"{"agent_id":"i","name":"qa-lead","outcome":"renamed"}"#,
         ),
         (
             &["agent", "move", "qa-lead", "--parent", "none"],
             serde_json::json!({ "verb": "move", "target": "qa-lead", "parent": null }),
-            r#"{"agent":{"id":"i","name":"qa-lead"},"parent":null}"#,
+            r#"{"agent_id":"i","name":"qa-lead","parent":null}"#,
         ),
     ];
     for (args, want_body, response) in cases {
@@ -397,9 +397,16 @@ fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
         (vec!["agent", "new", "--cwd", "C:/x"], r#"{}"#),
         (vec!["agent", "new", "--cwd", "C:/x"], r#"{"status":"ok"}"#),
         (vec!["agent", "list"], r#"{"agents":"not-an-array"}"#),
+        // 신원은 다 실렸는데 결말(`outcome`)이 없다 — 개명이 일어났는지 그대로였는지를 답하지 않은 body 다.
         (
             vec!["agent", "rename", "a", "b"],
-            r#"{"agent":{"id":"i","name":"b"}}"#,
+            r#"{"agent_id":"i","name":"b"}"#,
+        ),
+        // 중첩(`{agent:{…}}`)은 어떤 데몬도 내지 않는 shape 이다 — 이 줄이 **프로세스 레벨**에서 그 갈래의
+        //   부활을 막는다. 단위 표에만 두면 실제 exe 를 돌리는 이 스위트는 부활해도 전부 초록으로 남는다.
+        (
+            vec!["agent", "spawn", "w"],
+            r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
         ),
     ] {
         let (host, port, stub) = spawn_capturing_stub(ok_response(body));
@@ -407,6 +414,47 @@ fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
         let (stdout, code) = run_cli(&url, &args, None);
         let _ = stub.join().expect("stub join");
         assert_eq!(code, 2, "증거 없는 2xx → exit 2({args:?}): {stdout}");
+    }
+}
+
+/// ★성공 shape(`{agent_id,name,state,…}`)이 프로세스 레벨에서 exit 0★ — 여기서 새면 정상 데몬 앞에서
+///   `engram agent spawn` 이 exit 2 를 낸다.
+///   ★대조는 그대로★: 마지막 케이스가 그 축을 같이 못박는다(필드만 다 있고 요청과 어긋난 응답).
+#[test]
+fn engram_agent_accepts_the_success_shape_with_the_same_cross_checks() {
+    let cases: [(&[&str], &str, i32); 5] = [
+        (
+            &["agent", "spawn", "qa-bravo"],
+            r#"{"agent_id":"i","name":"qa-bravo","state":"live","created":false}"#,
+            0,
+        ),
+        (
+            &["agent", "new", "--cwd", "C:/work", "--name", "qa"],
+            r#"{"agent_id":"i","name":"qa","state":"sleeping"}"#,
+            0,
+        ),
+        (
+            &["agent", "rename", "qa", "qa-lead"],
+            r#"{"agent_id":"i","name":"qa-lead","outcome":"renamed"}"#,
+            0,
+        ),
+        (
+            &["agent", "move", "qa-lead", "--parent", "none"],
+            r#"{"agent_id":"i","name":"qa-lead","parent":null}"#,
+            0,
+        ),
+        (
+            &["agent", "spawn", "qa-bravo"],
+            r#"{"agent_id":"i","name":"qa-bravo","state":"live","created":true}"#,
+            2,
+        ),
+    ];
+    for (args, response, want) in cases {
+        let (host, port, stub) = spawn_capturing_stub(ok_response(response));
+        let url = format!("http://{host}:{port}");
+        let (stdout, code) = run_cli(&url, args, None);
+        let _ = stub.join().expect("stub join");
+        assert_eq!(code, want, "{args:?} ← {response}: {stdout}");
     }
 }
 

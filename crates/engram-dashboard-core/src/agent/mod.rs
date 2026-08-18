@@ -1,4 +1,6 @@
 pub mod backend;
+// ADR-0155
+pub mod commands;
 pub mod manager;
 // ADR-0101
 pub mod name;

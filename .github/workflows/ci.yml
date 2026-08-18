@@ -104,12 +104,52 @@ jobs:
             --skip control_send_revoked_sender_still_delivers_observation \
             --skip mcp_send_message_tool_happy_and_error
 
-      # 아래 3개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
+      # ★위 스텝이 통째로 뺀 `engram-dashboard`(셸) 패키지 — 이 스텝이 그 스위트의 유일한 실행 경로다★
+      # `--exclude` 의 근거인 0xc0000139(ENTRYPOINT_NOT_FOUND)로 죽는 것은 그 패키지의 **lib** 테스트
+      # 타깃뿐이다. 통합 타깃(`src-tauri/tests/`)은 engram_dashboard_lib 를 링크해 정상 기립한다
+      # (실측 2026-08-17). 그래서 패키지를 뺀 채로도 이 타깃만 집어서 돌릴 수 있다.
+      # ★맨 아래 `cargo build --locked` 가 이걸 대신하지 않는다★ — build 는 테스트 타깃을 컴파일하지
+      #   않는다. 이 스텝이 없으면 스위트는 "안 도는" 게 아니라 **컴파일이 깨져도 안 보인다**.
+      # ★`--test <이름>` 을 `-p` 단독이나 `--tests` 로 넓히지 말 것★ — 둘 다 죽는 lib 타깃을 도로 끌어와
+      #   이 스텝이 통째로 실패한다. 대상 선택은 타깃 단위여야 한다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 쓰지 않고(CLAUDE.md 「빌드·검증 명령」),
+      #   애초에 이 스위트는 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 띄우지 않는다.
+      # 검증 레인(ADR-0131 결정 2)에 둔다 — 릴리즈 잡이 아니다. release-build 는 태그에서만 돌고
+      #   `needs: [backend, …]` 로 이 잡에 매달리므로, 여기 두면 배포 앞 게이트로도 함께 선다.
+      - name: cargo test -p engram-dashboard --test layout_apply
+        shell: bash
+        run: cargo test --locked -p engram-dashboard --test layout_apply
+
+      # 같은 패키지의 또 다른 **통합** 타깃(`src-tauri/tests/layout_commands.rs`) — 판정 사유는 바로 위
+      # layout_apply 스텝과 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 engram_dashboard_lib 를 링크해
+      # 정상 기립·실측 2026-08-17). layout_apply 는 적용 서비스 자체를 재고, 이쪽은 창·탭·슬롯
+      # 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅하는 계층)를 잰다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — 역시 인메모리 fake 포트뿐이라 자식 프로세스가 없다.
+      - name: cargo test -p engram-dashboard --test layout_commands
+        shell: bash
+        run: cargo test --locked -p engram-dashboard --test layout_commands
+
+      # 같은 패키지의 셋째 **통합** 타깃(`src-tauri/tests/daemon_client_pending.rs`) — 판정 사유는 위 두
+      # 스텝과 동일(0xc0000139 는 lib 타깃뿐). 재는 것은 데몬 클라이언트의 pending 슬롯 승계다: 바깥
+      # 호출자가 정한 request_id 가 겹쳐도 연결 태스크가 죽지 않고 옛 대기자가 오류로 깨어난다
+      # (옛 `debug_assert!(false)` 회귀 = 셸↔데몬 영구 단절).
+      # `-- --test-threads=4` 는 붙이지 않는다 — 소켓·자식 프로세스가 하나도 없다.
+      - name: cargo test -p engram-dashboard --test daemon_client_pending
+        shell: bash
+        run: cargo test --locked -p engram-dashboard --test daemon_client_pending
+
+      # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
       - name: cargo test -p engram-dashboard-core
         shell: bash
         run: cargo test --locked -p engram-dashboard-core
+
+      # ADR-0134: 명령 버스 도구 crate(신설) — 워크스페이스 crate 의존 0 이 존재 이유라 이 crate 도
+      # 위와 같은 단독 기립 축으로 확인한다(TRD S20 §6 Step 1).
+      - name: cargo test -p engram-dashboard-command
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-command
 
       - name: cargo test -p engram-dashboard-protocol
         shell: bash
@@ -121,11 +161,24 @@ jobs:
       # ★줄바꿈 잡음으로는 안 터진다★: index blob 이 LF 이고 git 이 비교 전에 작업본을 같은 방식으로
       #   정규화하므로 CRLF 차이만으로는 diff 가 나지 않는다(autocrlf=true 인 Windows 에서 재생성 후
       #   `git diff --exit-code` → 0 실측). 잡음이 보이는 것은 `git status` 쪽이지 `git diff` 가 아니다.
+      # core/bindings/ 도 같은 게이트에 든다(ADR-0134): 위 `cargo test -p engram-dashboard-core` 가
+      #   `agent.*` 선언에서 .ts 와 commands.schema.json 을 재생성하므로, 선언을 고치고 생성물을 안 밀면
+      #   여기서 걸린다. **생성 지점이 crate 마다로 흩어졌으므로 이 경로 목록도 함께 늘어난다.**
+      # ★`git diff` 는 untracked 파일을 보지 않는다★: 처음 생성되는 .ts 는 아직 커밋된 적이 없어
+      #   비교 대상 자체가 없고, 그러면 매치 없이 초록으로 지나간다(`SlotContent.ts` 사건 —
+      #   `docs/process/S20-command-bus/trd.md` §5). `git add -N`(intent-to-add)로 두 바인딩
+      #   디렉터리를 인덱스에 **내용 없이** 등록해 두면, 그 다음 `git diff` 가 신규 파일도 "전체가
+      #   추가된 diff"로 봐서 잡는다. 빈 blob 등록일 뿐 실제 스테이징이 아니므로 이후 커밋 내용에는
+      #   영향이 없다.
+      # ★`-f` 를 빼지 말 것★: `git add` 는 무시된 경로를 조용히 건너뛰므로, 어느 crate 의 `.gitignore` 에
+      #   `*.ts` 나 `bindings/` 같은 넓은 줄이 생기면 그 생성물이 인덱스에 안 올라가고 diff 가 깨끗해져
+      #   **게이트가 소리 없이 해제된다**(지금은 두 디렉터리 다 무시 대상이 아니다 — 실측 2026-08-14).
       - name: 'Gate: ts-rs bindings are in sync with the wire contract'
         shell: bash
         run: |
-          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/; then
-            echo "FAIL — 재생성된 바인딩이 커밋본과 다르다(wire 계약 ↔ TS drift). 위 diff 를 반영해 커밋할 것."
+          git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/
+          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/; then
+            echo "FAIL — 재생성된 바인딩이 커밋본과 다르다(선언 ↔ 생성물 drift, 신규 미커밋 파일 포함). 위 diff 를 반영해 커밋할 것."
             exit 1
           fi
           echo "PASS — bindings in sync"
@@ -245,11 +298,13 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
+      # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
+      #   메시징엔 net 같은 의존 상한 게이트가 없어 **이 정규식이 유일한 벽**이다(ADR-0110 불변식).
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -257,6 +312,64 @@ jobs:
             0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
+
+      # 위 게이트는 소스의 심볼 경로만 본다 — 매니페스트 텍스트 정규식으로 이 구멍을 닫으려 했으나
+      # (이전 버전: `rg 'package\s*=\s*"engram-dashboard-' Cargo.toml`) 교차 리뷰에서 같은 종류의
+      # 구멍이 두 곳 더 확인됐다. **매니페스트도 결국 텍스트라 정규식이 못 보는 정상 TOML 문법이
+      # 항상 남는다** — 그래서 매니페스트 재작성 대신 net 게이트 3 과 같은 계기로 옮긴다:
+      # 텍스트가 아니라 **해석된 의존 그래프**(`cargo tree`)를 읽으면 아래 문법 형태 자체가 무의미해진다.
+      #   ① quoting — TOML literal string 은 작은따옴표도 유효하다: `package = 'engram-dashboard-command'`.
+      #      정규식은 큰따옴표만 봤으므로 그대로 빠져나간다.
+      #   ② build-dependencies — `build.rs` 전용 워크스페이스 crate 는 `[build-dependencies]` 테이블에
+      #      들어가고 rename 없이도 매니페스트 정규식(rename 이 없으면 `package =` 키 자체가 안 생긴다)과
+      #      위 소스 정규식(스캔 범위가 `src/` 뿐이라 크레이트 루트의 `build.rs` 는 안 본다) 양쪽을 다
+      #      빠져나간다.
+      # `-e normal,dev,build --target all --all-features` 를 줄이지 말 것 — net 게이트 3 과 동일 이유로
+      # (rename·비활성 target·optional 이 새어나간다) 형태가 샌다. 기존 소스 정규식 게이트는 그대로
+      # 둔다 — 이건 additive.
+      - name: 'Gate: messaging kernel isolation — direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
+
+      # ADR-0134: 도구 crate(`command`)의 존재 이유 자체가 "워크스페이스 crate 의존 0" 이다
+      # (`crates/engram-dashboard-command/src/lib.rs` 헤더 불변식 1). 그 헤더가 적어 둔 게이트
+      # (`rg "path\s*=" Cargo.toml`) 는 위 messaging 게이트가 방금 폐기한 매니페스트 정규식과 같은
+      # 구멍(quoting·build-dependencies)을 처음부터 안고 있어, 텍스트 정규식으로 세웠다가 나중에 또
+      # 교체하지 않고 처음부터 해석된 그래프로 본다. net 게이트 3 과 같은 계기 — 자세한 이유는 그 게이트
+      # 주석 참조.
+      - name: 'Gate: command tool crate — direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-command --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
 
       - name: 'net gate 1: source refs — no daemon/messaging/discovery'
         shell: bash

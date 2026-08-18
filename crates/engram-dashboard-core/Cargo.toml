@@ -16,6 +16,10 @@ test-harness = []
 # src-tauri 에서 그대로 이동한 모듈(pty/persistence/logging). 의존성도 동일하게 옮김.
 # Embedded(src-tauri)와 미래 daemon(별도 bin)이 공통으로 의존하는 lib.
 [dependencies]
+# ★이 crate 의 유일한 워크스페이스 의존이다(ADR-0155)★: `agent.*` 를 선언하려면 도구가 필요한데,
+#   그것을 protocol 에서 받으면 코어가 wire 타입까지 보게 된다. 도구 crate 가 그 유입을 막는다 —
+#   **protocol 을 여기 추가하지 말 것**.
+engram-dashboard-command = { path = "../engram-dashboard-command" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8.1"
@@ -25,6 +29,12 @@ regex = "1.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dunce = "1.0"
+ts-rs = "10"   # 선언 매크로가 인자·반환 struct 에 TS derive 를 단다(파생물 = bindings/, TRD §2-4 ①)
+
+# 하네스 전용 실행기(`engram_dashboard_command::testing::block_on`)를 테스트 빌드에서만 켠다 —
+#   기능 요청이 dev 그래프에만 있어 운영 바이너리엔 유니피케이션되지 않는다.
+[dev-dependencies]
+engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

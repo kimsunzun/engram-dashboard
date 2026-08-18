@@ -113,6 +113,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 **데이터 흐름:** `AgentManager → AgentSession(= OutputCore + dyn AgentTransport)`. 출력·상태는 `OutputSink`/`StatusSink` trait으로만 흐른다(「코어 격리」 계약의 실물). 종료 분류는 reaper 단일 소비자(ADR-0019).
 
 - **core** — 에이전트 코어(agent·persistence·logging), tauri import 0. seam: `transport`·`backend`.
+- **command** — 명령 버스 **도구**. **존재 이유 = 독립적으로 쓸 수 있고 순환을 막는다**(봉투·오류·선언 매크로·표·라우팅은 어느 소비자와도 무관하게 성립한다). ★**「의존 방향을 강제하려면 crate로 쪼개야 한다」를 이 crate의 근거로 쓰지 말 것 — 거짓이다**★(`pub(in path)`·모듈 규칙 테스트·이 저장소의 `rg`/`cargo tree` 게이트가 방향을 강제하는 실물 수단이다. ADR-0151 결정 4). **워크스페이스 crate 의존 0 · 명령 0개**는 그대로 사실이고 CI 의존 상한 게이트가 그것을 지킨다(「빌드·검증 명령」) — 바뀐 것은 그 사실을 존재 이유로 내세우던 *정당화*뿐이다. 어휘는 생산자 옆에서 선언한다. **불변식·격리 게이트·구성물 목록의 정본은 그 crate `src/lib.rs` 헤더.** 화살표는 **들어오는 쪽 한 방향뿐** — **`core`가 이 crate를 의존한다(코어의 첫 워크스페이스 의존 — 그 대가의 회계는 TRD S20 §5)** · `protocol`도 뒤따른다(Step 2). 그 반대는 없다. (ADR-0155 · 판정 기준 = ADR-0151)
 - **messaging** — 메시징 커널. **워크스페이스 crate 무의존**(컴파일러 강제 벽). 접합은 lib이 소유한 포트 trait뿐이고 실물 어댑터는 데몬이 소유한다. (ADR-0110 — 턴 관측 명단·분류는 ADR-0127이 코어로 승격, TapHost 포트는 폐지)
 - **net** — 데몬의 네트워크 행(WS·Origin·핸드셰이크·연결 수명·단일 writer·keepalive·팬아웃·프레임 포트·단일 인스턴스·portfile). **경계·격리 게이트·의존 상한의 정본은 그 crate `src/lib.rs` 헤더.** (ADR-0129)
 - **daemon** — `AgentManager` 소유, 소켓 수락 루프와 네트워크 행 조립. 이벤트버스 single-push(ADR-0028). 메시징 호스트 조립실(ADR-0110).
@@ -159,6 +160,8 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 - `tauri = "2"` — Channel 무손실 Windows 실측 확인(spike).
 - `portable-pty = "0.8.1"` · `uuid` · `thiserror` · `regex`(로그 마스킹) · `tracing` · `dunce`(cwd canonicalize UNC 회피).
 - `windows`(Job Object) — `#[cfg(windows)]`.
+- `inventory`(명령 선언 링커 수집) — S20 Step 1이 들인 **유일한 신규 서드파티 crate**다(`Cargo.lock` 신규 패키지 = 이것 + 워크스페이스 멤버 자신, 둘뿐 — 실측 2026-08-14). `core`를 타고 데몬·셸 릴리즈 바이너리에 함께 링크된다. (ADR-0155)
+- `ts-rs = "10"` — 워크스페이스엔 이미 있었으나(`protocol`·`src-tauri`) **`core`의 production 의존으로 새로 들어왔다** — 선언 매크로가 `TS` derive를 달기 때문. 즉 코어가 TS 생성 도구를 운영 그래프에 안고 있다.
 
 ---
 
@@ -168,22 +171,30 @@ React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · allotment · react-arbo
 
 **어느 브랜치든 push하면** 아래 「빌드·검증 명령」과 격리 게이트가 windows 러너에서 돈다. 로컬에서 같은 것을 다시 돌리지 않는다 — 범위 분담의 정본은 `/qa` 바인딩.
 
+- ★**"같은 것"은 이제 바이트 단위로 같지 않다**★ — 워크스페이스 회귀에서 **CI는 `-- --test-threads=4`를 쓰지 않는다**(의도된 차이 — 사유는 아래 그 항목). 그러니 두 쪽 명령줄이 갈린 것을 드리프트로 보고 맞추지 말 것. 다른 게이트들은 그대로 같다.
+
 - **CI가 못 하는 것 = GUI 실측**(창이 필요하다) **+ 실 claude 의존 테스트**(러너에 claude 없음 — 워크플로가 이름으로 제외하며 그 목록이 정본) **+ ADR-0130 재론 트리거**(게이트가 아니라 알림이라 CI에 못 얹는다). 셋 다 로컬 몫이다.
-- **CI에만 있고 이 목록엔 없는 게이트 2건** — ts-rs 바인딩 sync(`git diff --exit-code -- crates/engram-dashboard-protocol/bindings/`)와 discovery async 반입. 로컬 fallback으로 돌 때 빠뜨리기 쉽다.
+- **CI에만 있고 이 목록엔 없는 게이트 2건** — 생성물 sync(`protocol/bindings/` + `core/bindings/` — `git add -N -f` 뒤 `git diff --exit-code`. intent-to-add를 거치는 이유는 **`git diff`가 untracked 파일을 안 봐서** 처음 생성되는 `.ts`가 조용히 통과했기 때문이다)와 discovery async 반입. 로컬 fallback으로 돌 때 빠뜨리기 쉽다.
 - **`v*` 태그를 push하면 릴리즈까지 간다** — 배포판 zip을 만들어 GitHub Release에 붙인다. 태그와 제품 버전이 다르면 빌드 전에 멈춘다(대조 대상 목록은 워크플로의 버전 게이트가 정본). 릴리즈 잡은 검증 3잡에 `needs`로 매달려 있어 **빨간 게이트에서는 배포가 시작되지 않는다.**
 - 워크플로를 고치기 전에 **ADR-0131을 읽을 것** — 러너 단일화·검증 전용 범위·빌드/발행 잡 분리의 근거가 거기 있다.
 
 ## 빌드·검증 명령 (워크스페이스 루트에서 실행)
 
-- `cargo test --workspace --exclude engram-dashboard` — 전 workspace 회귀. src-tauri 패키지를 빼는 이유는 그 lib 테스트 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽기 때문이다(실측 2026-08-05). **루트 bare `cargo test` 금지.**
-- `cargo test -p engram-dashboard-core` — 코어 unit + 통합(실 PTY로 단언)
+- `cargo test --workspace --exclude engram-dashboard -- --test-threads=4` — 전 workspace 회귀. src-tauri 패키지를 빼는 이유는 그 lib 테스트 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽기 때문이다(실측 2026-08-05). **루트 bare `cargo test` 금지.** ★`-- --test-threads=4`도 빼지 말 것★ — 사내 보안 에이전트 DLL이 **프로세스 생성**을 후킹하는데, libtest 기본 병렬은 실 자식 프로세스를 띄우는 테스트를 한꺼번에 몰아 **터미널이 그 DLL 안에서 크래시하고 세션까지 함께 내려간다**(실 `engram.exe`를 띄우는 테스트 파일이 들어온 2026-08-11에 크래시가 0.6회/주 → 약 13회/주로 뛰었다). 4는 **실측 안전** — 43개 테스트 바이너리·1473 통과·0 실패, 약 2분, 터미널 생존(실측 2026-08-17 — 프로세스를 띄우는 스위트 전부 포함). **그래도 죽으면 2로 낮춘다.** 더 안전한 fallback = 테스트를 **터미널 프로세스 트리 밖에서 돌리고 출력은 파일로만** 받는 것(Windows 작업 스케줄러가 프로세스를 만든다 — `scripts/launch-detached.ps1`이 앱에 쓰는 그 기법이지만 인자를 못 받아 작은 래퍼 .bat이 필요하다).
+  - ★**CI는 이 플래그를 쓰지 않으며 그것이 의도다**★ — 러너에는 크래시를 일으키는 그 사내 보안 에이전트가 없고, 병렬을 낮추면 **CI만 느려진다.** 그러니 `.github/workflows/ci.yml`을 이 줄에 맞춰 **"드리프트 수정" 하지 말 것.** 로컬만 4로 돈다. (이 예외의 정본이 여기다 — `docs/testing-strategy.md`·`/qa` 바인딩·`README.md`는 이 자리를 가리킨다.)
+  - ★**병렬은 테스트 바이너리마다 걸린다**★ — 그래서 워크스페이스 명령에만 붙이면 불완전하다. **실 자식 프로세스를 띄우는 crate를 좁혀 돌릴 때도 같이 붙인다**(아래 core 줄이 그 예 · `-p engram-dashboard-daemon`도 해당 — 프로세스 레벨 CLI 스위트와 실 `.exe` spawn `#[ignore]` 분을 갖는다). **인메모리 단위 테스트뿐인 crate는 안 붙인다**(`command`·`protocol`·`messaging`·`net` — 층별 근거는 `docs/testing-strategy.md` §1).
+- `cargo test -p engram-dashboard-core -- --test-threads=4` — 코어 unit + 통합(실 PTY로 단언). 플래그 근거 = 바로 위 항목(실 PTY = 실 자식 프로세스).
+- `cargo test -p engram-dashboard-command` — 명령 버스 도구 단위(워크스페이스 의존 0 격리 하네스, ADR-0155)
 - `cargo test -p engram-dashboard-protocol` — codec golden + ts-rs 바인딩
 - `cargo test -p engram-dashboard-messaging` — 메시징 커널 단위(무의존 격리 하네스, ADR-0110)
 - `cargo test -p engram-dashboard-net --all-features` — 네트워크 행 단위(ADR-0129). ★`--all-features`를 빼지 말 것★ — net의 기본 feature가 비어 있어 맨 명령은 `auth`만 컴파일해 6개만 돈다(켜면 42개, 실측 2026-08-14). **두 조합을 다 도는 것이 게이트 5.**
-- `cargo build` — 전체 workspace 빌드. **★이걸로 지은 `engram-dashboard.exe`는 띄우지 않는다★** — `TAURI_CONFIG` 없이 도는 빌드는 debug 셸에 **release identifier**를 다시 찍고(`rerun-if-env-changed`라 변수를 빼는 것만으로 재빌드가 돈다 — 실측), 그 exe는 릴리즈 앱이 떠 있으면 창 없이 즉시 죽는다. 띄울 exe는 `node scripts/build-client-shell.mjs`로 짓는다(ADR-0137).
+- `cargo test -p engram-dashboard --test layout_apply` · `cargo test -p engram-dashboard --test layout_commands` — 셸 패키지(`src-tauri`)의 **통합** 테스트 타깃 2종(IPC 핸들러 16종을 전송 중립 서비스 뒤로 옮긴 리팩터의 회귀망). `layout_apply`는 적용 서비스 자체(락이 어느 포트 안/밖에서 불리나)를 재고, `layout_commands`는 창·탭·슬롯 **명령 선언**(`layout::commands`)과 **인바운드 수신기**(데몬에서 온 명령을 적용 서비스로 라우팅하는 계층)를 잰다. ★**이 두 줄이 그 스위트들을 도는 유일한 경로다**★ — 맨 위 워크스페이스 회귀가 이 패키지를 통째로 빼기 때문. 빠진 근거인 `0xc0000139`로 죽는 것은 **lib 테스트 타깃뿐**이고, **통합 타깃은 둘 다 `engram_dashboard_lib`를 링크해 정상 기립한다**(실측 2026-08-17). 그래서 `--test`로 타깃을 각각 집는다 — `-p`만 쓰거나 `--tests`로 넓히면 죽는 lib 타깃을 도로 끌어온다. **`-- --test-threads=4`는 둘 다 붙이지 않는다** — 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 안 띄운다(위 병렬 항목의 판정 규칙이 그대로 적용된 결과).
+- `cargo build` — 전체 workspace 빌드. **★이걸로 지은 `engram-dashboard.exe`는 띄우지 않는다★** — `TAURI_CONFIG` 없이 도는 빌드는 debug 셸에 **release identifier**를 다시 찍고(`rerun-if-env-changed`라 변수를 빼는 것만으로 재빌드가 돈다 — 실측), 그 exe는 릴리즈 앱이 떠 있으면 창 없이 즉시 죽는다. 띄울 exe는 `node scripts/build-client-shell.mjs`로 짓는다(ADR-0137). ★**테스트 타깃은 컴파일하지 않는다**★ — 이 명령만으로는 위 셸 통합 스위트가 깨져도 안 보인다.
 - `cargo fmt --check` — 포맷 게이트(검사형)
 - `rg "^\s*use tauri" crates/engram-dashboard-core/src/` (→ 0줄) — 코어 격리 게이트. import 라인 앵커라 주석 자기인용이 오탐되지 않는다.
-- `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
+- `rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` (→ 0줄) — 메시징 커널 격리 게이트(ADR-0110)
+- `cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 메시징 커널 의존 상한. 바로 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표·`[build-dependencies]`·rename)를 **해석된 의존 그래프**로 덮는다. **그중 가장 큰 구멍은 정규식이 crate 이름 알파벳을 손으로 박아 둔다는 것** — 새 crate는 누가 그 알파벳에 이름을 더할 때까지 **아예 안 보인다**(`command`를 더한 것이 이 게이트를 세운 계기다). net 상한 게이트와 같은 계기이고 플래그도 같은 이유로 줄이지 않는다.
+- `cargo tree -p engram-dashboard-command --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` (→ 정확히 1줄 = 자기 자신) — 도구 crate 의존 상한. **이 crate는 워크스페이스 의존 0을 유지하기로 돼 있고 이 줄이 그 벽이다** — 다만 그것이 crate로 존재하는 *이유*는 아니다(이유 = **독립적으로 쓸 수 있고 순환을 막는다** — 「백엔드 모듈 맵」 command 항목 · ADR-0151 결정 4). ★**정규식·상한 게이트에 공통으로 남는 구멍**★ — 둘 다 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별한다. 다른 이름을 단 멤버는 양쪽 다 그냥 통과한다. (ADR-0155)
 - 프론트: `npm test`(vitest run) + `npx tsc --noEmit`(별도 typecheck 스크립트 없음)
 - 전체 E2E: `scripts/`의 `run-*.bat` 런처로 띄운다(목록·용도 = README). **셸에서 직접 띄우지 않는다**(아래 「GUI 실측」). 로그 ON: `RUST_LOG=debug`(기본 warn — 분리 실행에선 스크립트 인자로 넘긴다)
 - **CI 정본 = `.github/workflows/ci.yml`** — 로컬 게이트에 없는 검사가 더 있다(여기서 세지 않는다). 그중 wire 바인딩 동기 게이트는 실제로 깨진 적이 있으니, 생성물 drift를 남긴 채 밀지 말 것.

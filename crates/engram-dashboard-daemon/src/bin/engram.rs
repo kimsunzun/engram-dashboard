@@ -1265,7 +1265,7 @@ fn exit_code_for_agent_response(agent: &ParsedAgent, status: u16, resp_body: &st
         // `new` 는 프로세스를 띄우지 않는다 — 살아 있다는 답은 우리가 시킨 일의 결과일 수 없다.
         ParsedAgent::New { .. } => {
             agent_object_ok(&v, true)
-                && v["agent"].get("state").and_then(|s| s.as_str()) == Some(AGENT_STATE_SLEEPING)
+                && read_agent_evidence(&v).and_then(|e| e.state) == Some(AGENT_STATE_SLEEPING)
         }
         // 개명은 **확정된 이름**과 결말이 증거다(확정 이름은 요청 이름과 다를 수 있어 값 자체는 대조하지 않는다).
         ParsedAgent::Rename { .. } => {
@@ -1291,6 +1291,13 @@ fn exit_code_for_agent_response(agent: &ParsedAgent, status: u16, resp_body: &st
     }
     eprintln!(
         "{CLI_EXE_NAME}: malformed success response — the daemon answered 2xx without the evidence this verb must carry (see `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`)"
+    );
+    // ★한 줄 더 내는 이유(load-bearing)★: 이 exit 2 가 dev 에서 가장 자주 나는 경로는 데몬 결함이 아니라
+    //   **빌드 세대 차**다 — `cargo build` 는 이 CLI 만 갈아 끼우고 이미 떠 있는 데몬은 relink 하지 않는데,
+    //   기존 에이전트는 다음 호출부터 새 CLI 를 집는다. 그 자리에서 옛 shape 을 받으면 성공한 조작이
+    //   exit 2 로 보고된다. 단정하지 않고 후보로만 적는다 — CLI 는 상대 데몬의 빌드 세대를 알 수 없다.
+    eprintln!(
+        "{CLI_EXE_NAME}: one possible cause is a daemon from an older build — rebuilding this CLI does not relink a daemon that is already running, so restart the daemon and retry before reporting it (`cargo build` alone is not enough)"
     );
     EXIT_MALFORMED_SUCCESS
 }
@@ -1318,16 +1325,45 @@ fn nonempty_str(v: &serde_json::Value, key: &str) -> bool {
 fn has_agent_state(v: &serde_json::Value) -> bool {
     v.get("state")
         .and_then(|s| s.as_str())
-        .is_some_and(|s| s == AGENT_STATE_LIVE || s == AGENT_STATE_SLEEPING)
+        .is_some_and(is_agent_state)
+}
+
+fn is_agent_state(s: &str) -> bool {
+    s == AGENT_STATE_LIVE || s == AGENT_STATE_SLEEPING
+}
+
+/// 변경 동사 응답이 나르는 "어느 에이전트인가". 값 검사는 하지 않는다 — 비지 않았나·어휘 안인가는 호출부 몫.
+struct AgentEvidence<'a> {
+    id: &'a str,
+    name: &'a str,
+    /// 생사를 싣지 않는 동사(개명·이동)의 응답에선 `None` — 값이 문자열이 아닐 때도 같게 접힌다.
+    /// 이 자리를 요구할지는 `agent_object_ok` 의 `with_state` 가 정한다.
+    state: Option<&'a str>,
+}
+
+/// 성공 body 최상위에서 신원을 집는다 — 신원 두 자리(`agent_id`·`name`) 중 하나라도 없거나 문자열이 아니면
+/// 증거 자체가 없는 것으로 접는다(신원을 반만 읽고 통과시키면 그 반쪽이 어느 에이전트인지 말해주지 못한다).
+/// `state` 는 접는 축이 아니다 — 부재·비문자열이면 `None` 이고, 요구 여부는 호출부가 `with_state` 로 정한다.
+///
+/// ★`{agent:{…}}` 갈래를 되살리지 말 것★: 데몬은 평평하게만 답한다(사용자 결정 2026-08-13, 라우트 착지
+///   732c9b8). 그 갈래는 **어떤 데몬도 내지 않는** shape 을 받는 죽은 코드라, 되살리면 계약 밖 body 에
+///   exit 0 을 내주는 통로가 된다.
+fn read_agent_evidence(v: &serde_json::Value) -> Option<AgentEvidence<'_>> {
+    Some(AgentEvidence {
+        id: v.get("agent_id")?.as_str()?,
+        name: v.get("name")?.as_str()?,
+        state: v.get("state").and_then(|s| s.as_str()),
+    })
 }
 
 /// 변경 동사 공통 증거 — 어느 에이전트인지(id·이름). `with_state` 는 생사까지 실리는 동사에만 켠다
 /// (개명·이동은 생사를 바꾸지 않으므로 그 필드를 요구하지 않는다).
 fn agent_object_ok(v: &serde_json::Value, with_state: bool) -> bool {
-    let Some(a) = v.get("agent") else {
-        return false;
-    };
-    nonempty_str(a, "id") && nonempty_str(a, "name") && (!with_state || has_agent_state(a))
+    read_agent_evidence(v).is_some_and(|e| {
+        !e.id.is_empty()
+            && !e.name.is_empty()
+            && (!with_state || e.state.is_some_and(is_agent_state))
+    })
 }
 
 /// (Debug = 단위 테스트에서 expect_err 시 Ok 쪽 표시용.)
@@ -2499,7 +2535,7 @@ mod tests {
 
     #[test]
     fn agent_exit_code_accepts_only_payloads_that_carry_the_evidence() {
-        let cases: [(&[&str], &str, i32); 12] = [
+        let cases: [(&[&str], &str, i32); 16] = [
             (&["agent", "list"], r#"{"agents":[]}"#, 0),
             (
                 &["agent", "list"],
@@ -2515,19 +2551,25 @@ mod tests {
             (&["agent", "list"], r#"{}"#, EXIT_MALFORMED_SUCCESS),
             (
                 &["agent", "spawn", "w"],
-                r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
+                r#"{"agent_id":"i","name":"w","state":"live","created":false}"#,
                 0,
             ),
             // created 누락 = 깨운 건지 만든 건지 모른다.
             (
                 &["agent", "spawn", "w"],
-                r#"{"agent":{"id":"i","name":"w","state":"live"}}"#,
+                r#"{"agent_id":"i","name":"w","state":"live"}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             (
                 &["agent", "new", "--cwd", "c"],
-                r#"{"agent":{"id":"i","name":"n","state":"sleeping"}}"#,
+                r#"{"agent_id":"i","name":"n","state":"sleeping"}"#,
                 0,
+            ),
+            // 신원 자리가 반만 답해졌다.
+            (
+                &["agent", "new", "--cwd", "c"],
+                r#"{"agent_id":"i","state":"sleeping"}"#,
+                EXIT_MALFORMED_SUCCESS,
             ),
             // 만들었다면서 무엇을 만들었는지가 없다 — 예전 판정기는 이걸 exit 0 으로 흘렸다.
             (
@@ -2537,23 +2579,41 @@ mod tests {
             ),
             (
                 &["agent", "rename", "a", "b"],
-                r#"{"agent":{"id":"i","name":"b"},"outcome":"renamed"}"#,
+                r#"{"agent_id":"i","name":"b","outcome":"renamed"}"#,
                 0,
             ),
             (
                 &["agent", "rename", "a", "b"],
-                r#"{"agent":{"id":"i","name":"b"},"outcome":"maybe"}"#,
+                r#"{"agent_id":"i","name":"b","outcome":"maybe"}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             (
                 &["agent", "move", "a", "--parent", "none"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":null}"#,
+                r#"{"agent_id":"i","name":"a","parent":null}"#,
                 0,
             ),
             // parent 키 자체가 없으면 어디로 갔는지 모른다.
             (
                 &["agent", "move", "a", "--parent", "none"],
-                r#"{"agent":{"id":"i","name":"a"}}"#,
+                r#"{"agent_id":"i","name":"a"}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            (
+                &["agent", "move", "a", "--parent", "none"],
+                r#"{"agent_id":"","name":"a","parent":null}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 신원을 `agent` 밑에 넣은 body 는 최상위가 비어 있는 것과 같다 — 이 줄이 중첩 갈래의 부활을 막는다.
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
+                EXIT_MALFORMED_SUCCESS,
+            ),
+            // 혼종 — 신원을 두 자리에 나눠 실은 body. 위 줄과 잡는 실수가 다르다: 위는 중첩 갈래의 부활을,
+            //   이 줄은 id 는 중첩에서 이름은 최상위에서 집는 **병합** reader 를 막는다.
+            (
+                &["agent", "spawn", "w"],
+                r#"{"agent":{"id":"i"},"name":"w","state":"live","created":false}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
         ];
@@ -2574,37 +2634,37 @@ mod tests {
             // 깨우기인데 "만들었다" 고 답한다.
             (
                 &["agent", "spawn", "worker"],
-                r#"{"agent":{"id":"i","name":"worker","state":"live"},"created":true}"#,
+                r#"{"agent_id":"i","name":"worker","state":"live","created":true}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             // 만들어 띄우라 했는데 "깨웠다" 고 답한다.
             (
                 &["agent", "spawn", "--cwd", "C:/x"],
-                r#"{"agent":{"id":"i","name":"x","state":"live"},"created":false}"#,
+                r#"{"agent_id":"i","name":"x","state":"live","created":false}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             // 루트로 떼라 했는데 부모를 달고 온다.
             (
                 &["agent", "move", "a", "--parent", "none"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":"p-id"}"#,
+                r#"{"agent_id":"i","name":"a","parent":"p-id"}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             // 부모 밑으로 넣으라 했는데 루트라고 답한다.
             (
                 &["agent", "move", "a", "--parent", "lead"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":null}"#,
+                r#"{"agent_id":"i","name":"a","parent":null}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             // `new` 는 아무것도 띄우지 않는다 — 살아 있다는 답은 그 동사의 결과일 수 없다.
             (
                 &["agent", "new", "--cwd", "C:/x"],
-                r#"{"agent":{"id":"i","name":"x","state":"live"}}"#,
+                r#"{"agent_id":"i","name":"x","state":"live"}"#,
                 EXIT_MALFORMED_SUCCESS,
             ),
             // 대조군 — 요청과 맞는 응답은 그대로 통과한다.
             (
                 &["agent", "move", "a", "--parent", "lead"],
-                r#"{"agent":{"id":"i","name":"a"},"parent":"p-id"}"#,
+                r#"{"agent_id":"i","name":"a","parent":"p-id"}"#,
                 0,
             ),
         ];
@@ -2613,6 +2673,25 @@ mod tests {
                 exit_code_for_agent_response(&agent_of(args), 200, body),
                 want,
                 "{args:?} ← {body}"
+            );
+        }
+    }
+
+    /// ★reader 가 "필드가 다 있으면 통과" 로 무너지지 않았나★ — 신원(`agent_id`·`name`·`state`)만 완전한
+    ///   응답은 어느 변경 동사에서도 성공이 아니다. 동사마다 요구하는 대조 필드가 따로 있다.
+    #[test]
+    fn a_payload_without_the_cross_check_still_exits_two() {
+        let identity_only = r#"{"agent_id":"i","name":"n","state":"live"}"#;
+        for args in [
+            &["agent", "spawn", "n"][..],
+            &["agent", "new", "--cwd", "c"][..],
+            &["agent", "rename", "a", "n"][..],
+            &["agent", "move", "a", "--parent", "lead"][..],
+        ] {
+            assert_eq!(
+                exit_code_for_agent_response(&agent_of(args), 200, identity_only),
+                EXIT_MALFORMED_SUCCESS,
+                "신원만으론 부족하다({args:?}): {identity_only}"
             );
         }
     }

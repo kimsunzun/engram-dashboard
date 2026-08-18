@@ -38,7 +38,7 @@ import { retryAsync } from '../util/retryInvoke'
 export const MAIN_WINDOW_LABEL = 'main'
 
 /**
- * window:tabs-updated / list_tabs 페이로드(WindowTabsPayload 미러, commands/layout.rs).
+ * window:tabs-updated / list_tabs 페이로드(WindowTabsPayload 미러, layout/apply.rs).
  * 옛 ViewListPayload{views, active_view_id}(전역) → 창별 {label, tabs, active, version}(ADR-0057).
  */
 export interface WindowTabsPayload {

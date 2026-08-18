@@ -16,9 +16,11 @@ use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfi
 use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
 };
-use engram_dashboard_daemon::control::agent::{resolve_target, RosterBroadcast, TargetResolution};
+use engram_dashboard_daemon::control::agent::RosterBroadcast;
+use engram_dashboard_daemon::control::commands::make_daemon_table;
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, ManagerSlot, McpServerHandle, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
+    RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 
@@ -107,16 +109,23 @@ impl Fixture {
 }
 
 async fn fixture(tag: &str) -> Fixture {
+    fixture_with_table(tag, true).await
+}
+
+/// `with_table = false` 는 **표가 아직 안 꽂힌 조립**을 재현한다 — 그 상태의 계약(503)을 보는 테스트가
+/// 쓴다. 그 외엔 언제나 표를 꽂는다(그게 운영 조립이다).
+async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     let registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
     let broadcast = Arc::new(CountingBroadcast::default());
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     broadcast_slot.set(broadcast.clone());
+    let command_slot = Arc::new(CommandTableSlot::new());
     let handle = start_mcp_server(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
-        broadcast_slot,
+        command_slot.clone(),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -137,6 +146,13 @@ async fn fixture(tag: &str) -> Fixture {
         control,
     ));
     manager_slot.set(manager.clone());
+    if with_table {
+        // 라우트가 실제로 태우는 것이 이 표다(ADR-0155) — 운영 조립(`lib.rs`)과 같은 조립 함수를 쓴다.
+        command_slot.set(Arc::new(make_daemon_table(
+            manager.clone(),
+            broadcast_slot.clone(),
+        )));
+    }
 
     // 호출자 신원 — 제어 동사는 신원을 인가에만 쓴다(발신자 파생이 없다). 그래서 아무 에이전트 신원이나
     //   유효하고, 여기선 명부에 없는 id 로 발급해 "제어는 자기 존재를 전제하지 않는다" 도 함께 고정한다.
@@ -246,10 +262,11 @@ async fn new_registers_a_sleeping_agent_and_refreshes_the_clients() {
         .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "fresh-one" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body["agent"]["name"], "fresh-one", "{body}");
-    assert_eq!(body["agent"]["state"], "sleeping", "{body}");
+    // 성공 본문은 평평하다 — 반환을 명령마다 선언하므로 한 겹 더 감싸지 않는다(ADR-0155).
+    assert_eq!(body["name"], "fresh-one", "{body}");
+    assert_eq!(body["state"], "sleeping", "{body}");
     assert!(
-        body["agent"]["id"].as_str().is_some_and(|s| !s.is_empty()),
+        body["agent_id"].as_str().is_some_and(|s| !s.is_empty()),
         "id 를 돌려줘야 이름이 겹칠 때 지목할 수 있다: {body}"
     );
     assert_eq!(
@@ -280,16 +297,13 @@ async fn new_falls_back_to_the_folder_name_and_appends_a_number_when_it_is_taken
     let (_, first) = f
         .post(serde_json::json!({ "verb": "new", "cwd": cwd }))
         .await;
-    assert_eq!(
-        first["agent"]["name"], base,
-        "이름을 안 주면 폴더 이름: {first}"
-    );
+    assert_eq!(first["name"], base, "이름을 안 주면 폴더 이름: {first}");
     let (_, second) = f
         .post(serde_json::json!({ "verb": "new", "cwd": cwd }))
         .await;
     // ★요청 이름이 아니라 **확정된 이름**을 돌려준다★(ADR-0120/0123) — 아니면 화면·주소와 어긋난다.
     assert_eq!(
-        second["agent"]["name"],
+        second["name"],
         format!("{base}(1)"),
         "겹치면 번호가 붙고 응답이 그 값을 싣는다: {second}"
     );
@@ -305,8 +319,8 @@ async fn spawn_wakes_an_agent_that_already_exists() {
         .post(serde_json::json!({ "verb": "spawn", "target": "worker" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body["agent"]["name"], "worker", "{body}");
-    assert_eq!(body["agent"]["state"], "live", "{body}");
+    assert_eq!(body["name"], "worker", "{body}");
+    assert_eq!(body["state"], "live", "{body}");
     assert_eq!(body["created"], false, "있는 것을 깨운 것이다: {body}");
 
     let (_, list) = f.post(serde_json::json!({ "verb": "list" })).await;
@@ -314,6 +328,10 @@ async fn spawn_wakes_an_agent_that_already_exists() {
         agents_in(&list),
         vec![("worker".to_string(), "live".to_string())]
     );
+    // ★깨우기는 명부의 **구성**을 안 바꾼다★ — 생사 전이는 매니저가 이미 흘리므로(`agent_list_updated`)
+    //   여기서 통지를 겹쳐 보내면 트리가 같은 변화를 두 번 받는다. 표로 옮기면서 이 분담이 유지되는지를
+    //   라우트 레벨에서 못박는다(코어 단위 테스트와 같은 축, 다른 층).
+    assert_eq!(f.broadcast.count(), 0, "깨우기는 통지하지 않는다");
     f.shutdown_agents();
 }
 
@@ -328,10 +346,7 @@ async fn the_state_a_mutation_reports_is_the_state_the_roster_reports() {
     let (_, spawned) = f
         .post(serde_json::json!({ "verb": "spawn", "target": "worker" }))
         .await;
-    let claimed = spawned["agent"]["state"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let claimed = spawned["state"].as_str().unwrap_or_default().to_string();
     assert_eq!(claimed, "live", "산 셸 에이전트: {spawned}");
 
     let (_, list) = f.post(serde_json::json!({ "verb": "list" })).await;
@@ -366,7 +381,8 @@ async fn spawn_with_cwd_registers_exactly_once_and_never_invents_a_state() {
 
     match body["status"].as_str() {
         Some("error") => {
-            assert_eq!(body["code"], "SPAWN_FAILED", "{body}");
+            // 시동 실패는 인자 문제도 대상 부재도 아니다 — 고칠 인자가 없는 실패라 INTERNAL 이다(TRD §4-⑦).
+            assert_eq!(body["code"], "INTERNAL", "{body}");
             let hint = body["hint"].as_str().unwrap_or_default();
             assert!(
                 hint.contains("newborn") && hint.contains("created"),
@@ -374,9 +390,9 @@ async fn spawn_with_cwd_registers_exactly_once_and_never_invents_a_state() {
             );
         }
         _ => {
-            assert_eq!(body["agent"]["name"], "newborn", "{body}");
+            assert_eq!(body["name"], "newborn", "{body}");
             assert_eq!(body["created"], true, "{body}");
-            let state = body["agent"]["state"].as_str().unwrap_or_default();
+            let state = body["state"].as_str().unwrap_or_default();
             assert!(
                 state == "live" || state == "sleeping",
                 "상태 어휘 밖 값을 지어내면 안 된다: {body}"
@@ -403,8 +419,9 @@ async fn near_miss_tokens_do_not_resolve_while_the_real_agent_is_still_there() {
         let (_, body) = f
             .post(serde_json::json!({ "verb": "rename", "target": miss, "name": "hijacked" }))
             .await;
+        // 지목이 아무도 안 가리키면 NOT_FOUND — 코드 어휘는 계열마다 갈리지 않는다(TRD §4-⑦).
         assert_eq!(
-            body["code"], "AGENT_NOT_FOUND",
+            body["code"], "NOT_FOUND",
             "'{miss}' 는 'worker' 로 해석되면 안 된다: {body}"
         );
     }
@@ -415,7 +432,7 @@ async fn near_miss_tokens_do_not_resolve_while_the_real_agent_is_still_there() {
         )
         .await;
     assert_eq!(body["outcome"], "renamed", "{body}");
-    assert_eq!(body["agent"]["name"], "renamed-exactly", "{body}");
+    assert_eq!(body["name"], "renamed-exactly", "{body}");
     // 빗나간 호출들이 아무것도 바꾸지 않았다(성공 1회분만 통지됐다).
     assert_eq!(f.broadcast.count(), 1);
 }
@@ -432,7 +449,7 @@ async fn an_id_beats_a_name_that_looks_like_that_id() {
         .await;
     assert_eq!(body["outcome"], "renamed", "{body}");
     assert_eq!(
-        body["agent"]["id"],
+        body["agent_id"],
         real.to_string(),
         "id 지목은 그 id 의 에이전트에게 간다: {body}"
     );
@@ -462,7 +479,7 @@ async fn move_reparents_and_none_detaches_back_to_the_top_level() {
         .post(serde_json::json!({ "verb": "move", "target": "helper", "parent": "lead" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body["agent"]["name"], "helper", "{body}");
+    assert_eq!(body["name"], "helper", "{body}");
     assert!(body["parent"].as_str().is_some(), "새 부모 id: {body}");
     let (_, list) = f.post(serde_json::json!({ "verb": "list" })).await;
     let row = list["agents"]
@@ -509,7 +526,8 @@ async fn move_refuses_an_impossible_parent_instead_of_silently_doing_nothing() {
         .post(serde_json::json!({ "verb": "move", "target": "solo", "parent": "solo" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body["code"], "MOVE_REJECTED", "{body}");
+    // 트리 구조가 거부한 것은 인자 오류가 아니라 상태 충돌이다 — CONFLICT(TRD §4-⑦).
+    assert_eq!(body["code"], "CONFLICT", "{body}");
     assert_eq!(f.broadcast.count(), 0, "거부는 화면 갱신을 부르지 않는다");
 }
 
@@ -519,7 +537,7 @@ async fn move_refuses_an_impossible_parent_instead_of_silently_doing_nothing() {
 ///
 /// ★소진(`RenameOutcome::Exhausted`)은 여기서 만들 수 없다★ — 매니저는 그 계열의 1..=u32::MAX 가 **전부**
 ///   점유됐을 때만 그 값을 내므로(명부에 42억 항목) 실행 가능한 재현이 없다. 그 갈래가 wire 로 어떻게 나가는지는
-///   코드가 유일한 진술이고(`NAME_SPACE_EXHAUSTED`), 여기서는 나머지 셋을 고정한다.
+///   코드가 유일한 진술이고(`CONFLICT`), 여기서는 나머지 셋을 고정한다.
 #[tokio::test]
 async fn rename_surfaces_each_of_its_four_outcomes_distinctly() {
     let f = fixture("rename").await;
@@ -531,27 +549,28 @@ async fn rename_surfaces_each_of_its_four_outcomes_distinctly() {
         .post(serde_json::json!({ "verb": "rename", "target": "alpha", "name": "gamma" }))
         .await;
     assert_eq!(body["outcome"], "renamed", "{body}");
-    assert_eq!(body["agent"]["name"], "gamma", "{body}");
+    assert_eq!(body["name"], "gamma", "{body}");
 
     // ② 확정 개명 — 이름이 겹쳐 번호가 붙었다. **요청 이름을 되돌려주면 안 된다**(화면·주소와 어긋난다).
     let (_, body) = f
         .post(serde_json::json!({ "verb": "rename", "target": "gamma", "name": "beta" }))
         .await;
     assert_eq!(body["outcome"], "renamed", "{body}");
-    assert_eq!(body["agent"]["name"], "beta(1)", "확정된 이름: {body}");
+    assert_eq!(body["name"], "beta(1)", "확정된 이름: {body}");
 
     // ③ 무변경 — 이미 그 계열의 이름을 쥐고 있다. 성공이지만 ①·②와 **다른 사실**이다.
     let (_, body) = f
         .post(serde_json::json!({ "verb": "rename", "target": "beta(1)", "name": "beta" }))
         .await;
     assert_eq!(body["outcome"], "unchanged", "{body}");
-    assert_eq!(body["agent"]["name"], "beta(1)", "{body}");
+    assert_eq!(body["name"], "beta(1)", "{body}");
 
     // ④ 대상 부재.
     let (_, body) = f
         .post(serde_json::json!({ "verb": "rename", "target": "ghost", "name": "whatever" }))
         .await;
-    assert_eq!(body["code"], "AGENT_NOT_FOUND", "{body}");
+    // 대상이 없다 — NOT_FOUND(TRD §4-⑦).
+    assert_eq!(body["code"], "NOT_FOUND", "{body}");
     assert!(
         body["hint"]
             .as_str()
@@ -585,7 +604,8 @@ async fn a_duplicate_name_is_refused_rather_than_guessed() {
         .post(serde_json::json!({ "verb": "rename", "target": "twin", "name": "x" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(body["code"], "AGENT_AMBIGUOUS", "{body}");
+    // 동명 둘은 **부재와 다른 사실**이다 — 부재는 NOT_FOUND, 이건 CONFLICT 로 갈린다(TRD §4-⑦).
+    assert_eq!(body["code"], "CONFLICT", "{body}");
     assert!(
         body["hint"].as_str().unwrap_or_default().contains("id"),
         "탈출구(id 지목)를 알려야: {body}"
@@ -603,10 +623,13 @@ async fn a_body_that_is_not_a_command_object_still_gets_a_reason() {
     let client = reqwest::Client::new();
     for raw in [
         r#"{"verb": 5}"#,                   // 타입 불일치
-        r#"{"verb":"list","verb":"move"}"#, // 중복 키
-        r#"["list"]"#,                      // 객체가 아님
-        r#"{"verb":"list""#,                // 깨진 JSON
-        "",                                 // 빈 바디
+        r#"{"verb":"list","verb":"move"}"#, // 동사 중복
+        // ★인자 칸 중복도 같은 자리에서 걸린다★: 뒤 값을 택하면 `parent:"lead"` 로 붙이려던 요청이
+        //   **루트로 떼기**로 조용히 바뀐다 — 어느 값을 고를 근거가 없으므로 고르지 않는다(ADR-0157).
+        r#"{"verb":"move","target":"helper","parent":"lead","parent":null}"#,
+        r#"["list"]"#,       // 객체가 아님
+        r#"{"verb":"list""#, // 깨진 JSON
+        "",                  // 빈 바디
     ] {
         let resp = client
             .post(format!("{}/control/agent", f.base))
@@ -624,7 +647,8 @@ async fn a_body_that_is_not_a_command_object_still_gets_a_reason() {
             "봉투로 답한다: {raw} → {text}"
         );
         let v: serde_json::Value = serde_json::from_str(&text).expect("응답 json");
-        assert_eq!(v["code"], "INVALID_AGENT_ARGS", "{raw} → {text}");
+        // 바디가 명령 객체가 아니면 인자 오류다 — 이 입구의 코드는 한 어휘로만 나간다(TRD §4-⑦).
+        assert_eq!(v["code"], "INVALID_ARGUMENT", "{raw} → {text}");
         assert!(
             !v["hint"].as_str().unwrap_or_default().is_empty(),
             "사유가 비면 자기교정이 안 된다: {raw} → {text}"
@@ -637,21 +661,20 @@ async fn a_body_that_is_not_a_command_object_still_gets_a_reason() {
 async fn the_daemon_refuses_malformed_verbs_on_its_own() {
     // ★CLI 가 이미 막는 것도 데몬이 다시 본다★: 이 라우트의 호출자가 우리 CLI 뿐이라는 보장이 없다.
     let f = fixture("bad-args").await;
+    // ★두 어휘가 갈린다(TRD §4-②)★: 이름 자체를 모르는 것과 이름은 아는데 인자가 어긋난 것은 호출자가
+    //   할 일이 다르다 — 전자는 동사를 다시 찾아야 하고, 후자는 같은 동사로 인자만 고치면 된다.
     let cases: [(serde_json::Value, &str); 6] = [
-        (serde_json::json!({}), "INVALID_AGENT_ARGS"),
-        (
-            serde_json::json!({ "verb": "explode" }),
-            "INVALID_AGENT_ARGS",
-        ),
+        (serde_json::json!({}), "UNKNOWN_COMMAND"),
+        (serde_json::json!({ "verb": "explode" }), "UNKNOWN_COMMAND"),
         (
             serde_json::json!({ "verb": "spawn", "target": "a", "cwd": "C:/x" }),
-            "INVALID_AGENT_ARGS",
+            "INVALID_ARGUMENT",
         ),
-        (serde_json::json!({ "verb": "spawn" }), "INVALID_AGENT_ARGS"),
-        (serde_json::json!({ "verb": "new" }), "INVALID_AGENT_ARGS"),
+        (serde_json::json!({ "verb": "spawn" }), "INVALID_ARGUMENT"),
+        (serde_json::json!({ "verb": "new" }), "INVALID_ARGUMENT"),
         (
             serde_json::json!({ "verb": "rename", "target": "a" }),
-            "INVALID_AGENT_ARGS",
+            "INVALID_ARGUMENT",
         ),
     ];
     for (body, want) in cases {
@@ -692,13 +715,13 @@ async fn move_distinguishes_an_absent_parent_a_blank_parent_and_an_explicit_deta
     let (_, absent) = f
         .post(serde_json::json!({ "verb": "move", "target": "helper" }))
         .await;
-    assert_eq!(absent["code"], "INVALID_AGENT_ARGS", "{absent}");
+    assert_eq!(absent["code"], "INVALID_ARGUMENT", "{absent}");
     // ② 공백 값 — 셸의 미설정 변수(`--parent "$UNSET"`)가 이 모양으로 도착한다.
     for blank in ["", "   "] {
         let (_, body) = f
             .post(serde_json::json!({ "verb": "move", "target": "helper", "parent": blank }))
             .await;
-        assert_eq!(body["code"], "INVALID_AGENT_ARGS", "공백 '{blank}': {body}");
+        assert_eq!(body["code"], "INVALID_ARGUMENT", "공백 '{blank}': {body}");
     }
     let (_, list) = f.post(serde_json::json!({ "verb": "list" })).await;
     assert!(
@@ -750,7 +773,7 @@ async fn unknown_and_irrelevant_fields_are_refused_instead_of_being_dropped() {
     for (body, culprit) in cases {
         let (status, resp) = f.post(body.clone()).await;
         assert_eq!(status, reqwest::StatusCode::OK, "반려도 200 + JSON: {body}");
-        assert_eq!(resp["code"], "INVALID_AGENT_ARGS", "{body} → {resp}");
+        assert_eq!(resp["code"], "INVALID_ARGUMENT", "{body} → {resp}");
         assert!(
             resp["hint"].as_str().unwrap_or_default().contains(culprit),
             "어느 필드가 문제인지 지목해야({culprit}): {resp}"
@@ -775,6 +798,60 @@ async fn unknown_and_irrelevant_fields_are_refused_instead_of_being_dropped() {
     );
 }
 
+/// ★반려 목록이 **선언에서 파생됐다**는 것까지 본다(ADR-0157)★: 문구가 틀린 칸만 짚고 끝나면 손으로 적은
+///   허용 목록으로도 통과한다 — 그 사본은 동사가 늘 때 조용히 뒤처져 모르는 칸을 통과시킨다. 선언된 칸
+///   **전량**이 함께 실리는지를 보면 판정 재료가 선언이라는 것이 드러나고, 호출자도 스스로 고칠 수 있다.
+#[tokio::test]
+async fn an_unknown_field_is_refused_with_the_declared_argument_list() {
+    let f = fixture("declared-args").await;
+    seed_shell_agent(&f.manager, "helper");
+
+    let (status, resp) = f
+        .post(serde_json::json!({ "verb": "rename", "target": "helper", "nmae": "x" }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "반려도 200 + JSON: {resp}");
+    assert_eq!(resp["code"], "INVALID_ARGUMENT", "{resp}");
+    let hint = resp["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("nmae"), "틀린 칸을 짚어야: {resp}");
+    for declared in ["target", "name"] {
+        assert!(
+            hint.contains(declared),
+            "선언된 칸 전량이 실려야({declared}): {resp}"
+        );
+    }
+    assert_eq!(f.broadcast.count(), 0, "반려는 아무것도 바꾸지 않는다");
+}
+
+/// 모르는 동사는 **봉투로** 답한다 — 라우트가 없는 것도(404) 서버가 터진 것도(500) 아니다.
+///
+/// ★이름을 모르는 것과 인자가 어긋난 것을 코드로 가른다(TRD §4-②)★: 앞은 동사를 다시 찾아야 하고 뒤는
+///   같은 동사로 인자만 고치면 된다.
+#[tokio::test]
+async fn an_unknown_verb_answers_with_the_error_envelope_not_a_404() {
+    let f = fixture("unknown-verb").await;
+    let (status, resp) = f.post(serde_json::json!({ "verb": "explode" })).await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "봉투로 답한다: {resp}");
+    assert_eq!(resp["status"], "error", "{resp}");
+    assert_eq!(resp["code"], "UNKNOWN_COMMAND", "{resp}");
+    let hint = resp["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("explode"), "어느 동사인지 짚어야: {resp}");
+    assert!(hint.contains("help"), "자기교정 경로를 알려야: {resp}");
+}
+
+/// ★표가 안 꽂힌 조립은 503 이다★ — 요청 형식도 인증도 문제가 아니라 **배선 순서** 문제이므로 4xx 로
+///   내리면 호출자가 자기 인자를 고치러 간다(고칠 것이 없다). 그 갈림이 상태코드에 실린다.
+#[tokio::test]
+async fn the_route_reports_a_missing_command_table_as_unavailable() {
+    let f = fixture_with_table("no-table", false).await;
+    let (status, body) = f.post(serde_json::json!({ "verb": "list" })).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "표 미설정은 503: {body}"
+    );
+}
+
 /// ★거부 사유 목록은 실제 거부 조건과 대응해야 한다★: 2단 트리에서 실제로 걸리는 "옮기려는 쪽이 이미 부모"
 ///   가 문구에 없으면, 거부당한 호출자는 다음에 무엇을 할지 알 수 없다.
 #[tokio::test]
@@ -793,7 +870,7 @@ async fn a_refused_move_names_the_rule_that_actually_fired() {
     let (_, refused) = f
         .post(serde_json::json!({ "verb": "move", "target": "a", "parent": "c" }))
         .await;
-    assert_eq!(refused["code"], "MOVE_REJECTED", "{refused}");
+    assert_eq!(refused["code"], "CONFLICT", "{refused}");
     let hint = refused["hint"].as_str().unwrap_or_default();
     assert!(
         hint.contains("children"),
@@ -803,7 +880,7 @@ async fn a_refused_move_names_the_rule_that_actually_fired() {
     let (_, refused) = f
         .post(serde_json::json!({ "verb": "move", "target": "c", "parent": "b" }))
         .await;
-    assert_eq!(refused["code"], "MOVE_REJECTED", "{refused}");
+    assert_eq!(refused["code"], "CONFLICT", "{refused}");
     assert!(
         refused["hint"]
             .as_str()
@@ -844,7 +921,7 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
     let (_, last) = f
         .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "last-one" }))
         .await;
-    assert_eq!(last["agent"]["name"], "last-one", "{last}");
+    assert_eq!(last["name"], "last-one", "{last}");
     assert_eq!(f.manager.roster().len(), MAX_ROSTER_SIZE);
 
     for body in [
@@ -853,7 +930,8 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
     ] {
         let (status, resp) = f.post(body.clone()).await;
         assert_eq!(status, reqwest::StatusCode::OK);
-        assert_eq!(resp["code"], "ROSTER_FULL", "{body} → {resp}");
+        // 상한은 "자리를 비워라" 는 뜻이지 인자를 고치라는 뜻이 아니다 — CONFLICT(TRD §4-⑦).
+        assert_eq!(resp["code"], "CONFLICT", "{body} → {resp}");
         let hint = resp["hint"].as_str().unwrap_or_default();
         assert!(
             hint.contains("safety ceiling") && hint.contains("not a product limit"),
@@ -881,12 +959,17 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
 /// 경로(`MessagingService::handle_send`)에 같은 로스터를 물려 결말을 읽는다 — 배달됐으면 그 수신자로
 /// 해석된 것이고, `RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS` 면 각각 부재·모호로 해석된 것이다.
 ///
+/// ★제어 쪽은 **입구가 실제로 태우는 해석기**를 부른다★: `agent.*` 표의 동사들이 지목을 푸는 함수가
+/// `core::agent::commands::resolve_in` 하나이고(그 표를 `/control/agent` 가 부른다), 이 대조가 그 함수를
+/// 직접 태운다. 사본을 재면 사본만 초록이고 실입구는 아무 보장도 못 받는다.
+///
 /// ★이 대조가 덮는 축과 안 덮는 축★: 덮는 것은 **매칭 규칙**(정확 일치 · id 우선 · 동명 거부)이다. 두
 /// 해석기의 **정의역**은 원래 다르다 — 우편은 산 로스터만 보고, 제어는 잠든 에이전트까지 본다. 그래서
 /// 픽스처를 전부 산 것으로 두고 규칙만 맞댄다(정의역까지 같게 만드는 것은 이 슬라이스의 결정이 아니다).
 mod resolver_alignment {
     use super::*;
-    use engram_dashboard_core::agent::manager::RosterEntry;
+    use engram_dashboard_command::ErrorCode;
+    use engram_dashboard_core::agent::commands::{resolve_in, AgentRosterRow};
     use engram_dashboard_messaging::envelope::{DeliveryObservation, Entrance, EnvelopeFormat};
     use engram_dashboard_messaging::service::{
         AddressingSources, ControlPlanePort, DeliveryPort, FailCode, InjectReceipt, LiveAgent,
@@ -955,8 +1038,17 @@ mod resolver_alignment {
         fn record_delivery(&self, _obs: DeliveryObservation) {}
     }
 
-    /// 우편 입구가 그 토큰을 어떻게 해석했나 — 제어 쪽 `TargetResolution` 과 같은 어휘로 환산한다.
-    fn mail_resolution(fixture: &Fixture, token: &str) -> TargetResolution {
+    /// 두 입구의 결말을 맞대기 위한 **대조 어휘**. 어느 crate 의 계약도 아니고 이 파일 안에서만 산다 —
+    /// 두 해석기의 반환 타입이 서로 다르므로(한쪽은 배달 행, 한쪽은 타입드 오류) 공통 축이 필요하다.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Resolution {
+        Found(PeerId),
+        NotFound,
+        Ambiguous,
+    }
+
+    /// 우편 입구가 그 토큰을 어떻게 해석했나 — 위 대조 어휘로 환산한다.
+    fn mail_resolution(fixture: &Fixture, token: &str) -> Resolution {
         let port = Arc::new(FixturePort {
             roster: fixture.clone(),
             injected: Mutex::new(vec![]),
@@ -982,18 +1074,21 @@ mod resolver_alignment {
         match (row.status, row.code) {
             (SendStatus::Delivered, _) => {
                 let injected = port.injected.lock().expect("poisoned");
-                TargetResolution::Found(*injected.first().expect("배달된 수신자 id"))
+                Resolution::Found(*injected.first().expect("배달된 수신자 id"))
             }
-            (SendStatus::Failed, Some(FailCode::RecipientAmbiguous)) => TargetResolution::Ambiguous,
-            (SendStatus::Failed, Some(FailCode::RecipientNotFound)) => TargetResolution::NotFound,
+            (SendStatus::Failed, Some(FailCode::RecipientAmbiguous)) => Resolution::Ambiguous,
+            (SendStatus::Failed, Some(FailCode::RecipientNotFound)) => Resolution::NotFound,
             other => panic!("이 픽스처가 낼 수 없는 결말: {other:?} ({token})"),
         }
     }
 
-    fn control_resolution(fixture: &Fixture, token: &str) -> TargetResolution {
-        let roster: Vec<RosterEntry> = fixture
+    /// 제어 입구가 그 토큰을 어떻게 해석했나 — **표의 동사들이 부르는 그 함수**를 태운다.
+    ///
+    /// 결말은 타입드 코드로 읽는다: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(그 함수가 내는 둘).
+    fn control_resolution(fixture: &Fixture, token: &str) -> Resolution {
+        let roster: Vec<AgentRosterRow> = fixture
             .iter()
-            .map(|(id, name)| RosterEntry {
+            .map(|(id, name)| AgentRosterRow {
                 id: *id,
                 canonical_name: name.clone(),
                 live: None,
@@ -1001,7 +1096,12 @@ mod resolver_alignment {
                 parent: None,
             })
             .collect();
-        resolve_target(&roster, token)
+        match resolve_in(&roster, token) {
+            Ok(found) => Resolution::Found(found.id),
+            Err(e) if e.code() == ErrorCode::NotFound => Resolution::NotFound,
+            Err(e) if e.code() == ErrorCode::Conflict => Resolution::Ambiguous,
+            Err(e) => panic!("이 해석기가 낼 수 없는 결말: {e:?} ({token})"),
+        }
     }
 
     #[test]
@@ -1045,36 +1145,30 @@ mod resolver_alignment {
         // ★알고 남긴 단 하나의 불일치 — 토큰 전처리 축★: 우편 입구는 대조 전에 토큰을 trim 한다(CLI 가
         //   `--to a, b` 를 콤마로 쪼갠 뒤 남는 공백을 구제하는 load-bearing 처리). 이 라우트는 쪼갬이 없어
         //   trim 하지 않는다. 두 방향 모두 실수로 뒤집히지 않게 **양쪽을 다 단언**한다 — 여기가 초록인 채로
-        //   `resolve_target` 에 trim 을 넣거나 우편의 trim 을 지우면 이 테스트가 빨개진다.
+        //   `resolve_in` 에 trim 을 넣거나 우편의 trim 을 지우면 이 테스트가 빨개진다.
         let padded = " alice ";
         assert_eq!(
             control_resolution(&fixture, padded),
-            TargetResolution::NotFound,
+            Resolution::NotFound,
             "제어 라우트는 정확 일치를 약속한다 — 패딩을 보정하지 않는다"
         );
         assert_eq!(
             mail_resolution(&fixture, padded),
-            TargetResolution::Found(alice),
+            Resolution::Found(alice),
             "우편 입구는 콤마 분해 잔여 공백을 구제한다(그 trim 을 지우지 말 것)"
         );
 
         // 대조가 **무의미하게** 통과하지 않았음을 못박는다 — 세 결말이 실제로 다 나왔어야 한다.
         assert_eq!(
             control_resolution(&fixture, "alice"),
-            TargetResolution::Found(alice)
+            Resolution::Found(alice)
         );
         assert_eq!(
             control_resolution(&fixture, &bob.to_string()),
-            TargetResolution::Found(bob),
+            Resolution::Found(bob),
             "id 가 UUID 를 닮은 이름을 이긴다"
         );
-        assert_eq!(
-            control_resolution(&fixture, "twin"),
-            TargetResolution::Ambiguous
-        );
-        assert_eq!(
-            control_resolution(&fixture, "nobody"),
-            TargetResolution::NotFound
-        );
+        assert_eq!(control_resolution(&fixture, "twin"), Resolution::Ambiguous);
+        assert_eq!(control_resolution(&fixture, "nobody"), Resolution::NotFound);
     }
 }

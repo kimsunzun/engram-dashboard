@@ -17,6 +17,7 @@ code 단계 Adversary(doc-aware breaker)는 다음 불변식 위반을 공격 �
 - **epoch 재구독** — 같은 AgentId 맵 교체(restart/fresh fallback)마다 +1 → 프론트 `[agentId, epoch]` 재구독. (ADR-0007)
 - **replay→live** — subscribers lock 보유 중 replay 전송(순서 역전 방지) + 프론트 seq dedup.
 - **코어 tauri import 0** — 코어 crate는 Tauri import 금지(ADR-0003). 격리 위반이면 코어가 전송 방식에 묶인 것 = 회귀.
+- **명령 핸들러는 값으로 실패한다** — 패닉으로 죽지 말고 오류를 `CommandError`로 돌려줄 것. 근거·귀결(릴리즈 프로필) 정본 = `docs/process/S20-command-bus/trd.md` §4-⑨.
 - **관찰성/로깅** — load-bearing 경로가 로그 규약(`docs/reference/logging-conventions.md`) 준수 계측됐나. 위반(무계측·레벨오용·토큰 로깅) FIX. **판정 기준·계측 의무는 그 문서가 정본**(여기선 가리키기만).
 
 근거·거부 대안 상세는 CLAUDE.md "핵심 불변식" 섹션과 각 ADR. **이 목록이 정본이 아니다 — 코드의 `// ADR-` 앵커가 단일 출처다.**

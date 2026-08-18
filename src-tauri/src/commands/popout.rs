@@ -1,4 +1,5 @@
-//! 슬롯 팝업 분리(move_slot_to_window) + 빈 창 생성(create_window) invoke 핸들러 — 탭 소유 모델(ADR-0057).
+//! 슬롯 팝업 분리(move_slot_to_window) invoke 핸들러 + 런타임 창 label·빌드·destroy(= 적용 서비스의 OS
+//! 창 포트 어댑터, `crate::layout::apply`) — 탭 소유 모델(ADR-0057).
 //!
 //! ★§5 LLM 제어 표면★: 사람 우클릭(window.__engramLayout.moveSlotToWindow)과 LLM 이 같은 command 를 흔든다.
 //!
@@ -19,9 +20,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
 
-use crate::commands::layout::{emit_window_tabs, send_subscription_delta, WindowTabsPayload};
+use crate::commands::layout::{emit_window_tabs, send_subscription_delta};
 use crate::daemon_client::DaemonClient;
-use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
+use crate::layout::{LabelSource, LayoutState, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL};
 use crate::output_router::OutputRouter;
 
 // 팝업/런타임 창 label prefix. capabilities/popup.json 의 `"slot-popup-*"` glob 과 짝(변경 시 양쪽 동기).
@@ -46,6 +47,27 @@ impl PopupCounter {
     fn next_label(&self) -> String {
         let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
         format!("{POPUP_LABEL_PREFIX}{n}")
+    }
+}
+
+impl LabelSource for PopupCounter {
+    fn next_label(&self) -> String {
+        PopupCounter::next_label(self)
+    }
+}
+
+// 적용 서비스의 OS 창 포트(`crate::layout::apply`) — 창 빌드·destroy 는 이 파일이 소유한 Tauri 기법이다.
+pub(crate) struct TauriWindowHost<'a> {
+    pub app: &'a AppHandle,
+}
+
+impl WindowHost for TauriWindowHost<'_> {
+    fn open(&self, label: &str) -> Result<(), String> {
+        build_runtime_window(self.app, label)
+    }
+
+    fn close(&self, label: &str) {
+        destroy_window(self.app, label);
     }
 }
 
@@ -95,53 +117,6 @@ pub fn destroy_window(app: &AppHandle, label: &str) {
     } else {
         tracing::debug!(label, "destroy_window: OS 창 없음(이미 닫힘) — no-op");
     }
-}
-
-// ★빈 새 창 생성(create_window — D-6)★. 모델에 빈 창(빈 탭 1개) 추가 → 락 밖에서 웹뷰 빌드. 성공 시
-// 새 창 label 반환. 빌드 실패 시 모델 롤백(close_window). command wrapper 는 commands/layout.rs.
-//
-// ★create_window count 노트(ADR-0056/§4-2)★: 창 수를 늘리므로 보이는 슬롯 상한(≤16) 근접을 로그로 남긴다
-// (하드 블록 아님 — 초과 레이아웃은 프론트 onContextLoss→DOM graceful degrade + ADR-0056 재검토 트리거).
-pub async fn create_empty_window(
-    app: &AppHandle,
-    state: &LayoutState,
-    router: &Arc<OutputRouter>,
-    counter: &Arc<PopupCounter>,
-    client: &Arc<DaemonClient>,
-) -> Result<String, String> {
-    let label = counter.next_label();
-
-    // ── phase A(락): 모델에 빈 창 엔트리 생성(빈 탭 1개) ──────────────────────────
-    {
-        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        mgr.create_window(&label).map_err(|e| e.to_string())?;
-        // 빈 슬롯뿐이라 라우팅 델타는 없지만 계약상 rebuild(표 재계산).
-        let delta = router.rebuild(&mgr);
-        send_subscription_delta(client, delta);
-        let n_windows = mgr.windows.len();
-        if n_windows >= 3 {
-            tracing::info!(
-                windows = n_windows,
-                "create_window: 창 수 증가 — 보이는 슬롯 상한(≤16, ADR-0056) 근접 주의"
-            );
-        }
-    } // ← 락 드롭
-
-    // ── phase B(락 밖): 웹뷰 빌드(WebviewWindowBuilder 데드락 회피) ────────────────
-    if let Err(e) = build_runtime_window(app, &label) {
-        let delta = {
-            let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-            let _ = mgr.close_window(&label);
-            router.rebuild(&mgr)
-        };
-        send_subscription_delta(client, delta);
-        return Err(e);
-    }
-
-    // 창 mount 시 프론트가 list_tabs(label) pull + window:tabs-updated listen 으로 초기 렌더(§3-3).
-    // 별도 emit 은 불필요(read-only pull 로 자기 창 활성 탭 확정). 진단 로그만.
-    tracing::info!(label = %label, "빈 새 창 생성 완료(create_window)");
-    Ok(label)
 }
 
 // ★슬롯을 다른 창의 새 탭으로 MOVE(move_slot_to_window)★. §5-3 2-phase 롤백(G4).
@@ -362,10 +337,11 @@ pub fn cleanup_popup_window(
     // 1) 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 — ★전부 같은 락 안★.
     //   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
     //   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
-    //   그 agent 를 재추가하면 stale 1→0 unsubscribe 가 방금 형성된 라이브 구독을 죽인다(ADR-0006 §5-1
-    //   "델타 enqueue 는 락 안" 위반). 이제 create_empty_window/move_slot_to_window 가 이미 락 안에서
-    //   send_subscription_delta 하는 것과 일관되게, 발화도 락 안(unsubscribe 는 동기 try_send — await/network
-    //   0, lifecycle 락 독립 → 데드락 없음).
+    //   그 agent 를 재추가하면 stale 1→0 unsubscribe 가 방금 형성된 라이브 구독을 죽인다
+    //   (`output_router::rebuild` 의 호출 계약 위반 — 정본은 그 함수 주석이고 ★ADR-0006 에 「델타 enqueue
+    //   는 락 안」 조항은 없다★). 이제 적용 서비스(`SubscriptionSync::resync`)·move_slot_to_window 와
+    //   일관되게 발화도 락 안이다(unsubscribe 는 동기 try_send — await/network 0, lifecycle 락 독립 →
+    //   데드락 없음).
     {
         let Ok(mut mgr) = state.0.lock() else {
             tracing::warn!(label, "cleanup_popup_window: lock poisoned — 정리 스킵");

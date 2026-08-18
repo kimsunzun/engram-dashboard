@@ -3,6 +3,7 @@
 //! tauri import 0(daemon crate).
 
 pub mod agent;
+pub mod commands;
 pub mod ingress;
 pub mod mcp_config;
 pub mod mcp_server;

@@ -1,10 +1,16 @@
 //! S14 레이아웃 권위 모듈(ADR-0035) — 레이아웃 SSOT 는 src-tauri(데몬 UI 불가지론).
 
+pub mod apply;
+// ADR-0155 결정 1: `window`/`tab`/`slot` 선언은 그 본문(적용 서비스) 옆에 산다.
+pub mod commands;
 pub mod manager;
 pub mod spatial;
 pub mod tree;
 pub mod types;
 
+pub use apply::{
+    AgentSpawner, LabelSource, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
+};
 pub use manager::{
     resolve_spawn_slot, CloseTabOutcome, LayoutError, SpawnSlotError, ViewManager,
     WindowTabsSnapshot, MAIN_WINDOW_LABEL,

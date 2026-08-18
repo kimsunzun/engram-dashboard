@@ -17,6 +17,8 @@
 //! - **generation 가드(openGen 씨앗, Fix B)** — `lifecycle.rs`.
 
 pub mod connection;
+// ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
+pub mod inbound;
 mod lifecycle;
 pub mod protocol_state;
 // ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri 의존 0).
@@ -31,6 +33,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 
 use connection::{run_connection, ConnectionCommand, HandshakeError, HANDSHAKE_TIMEOUT};
+use inbound::InboundSlot;
 use lifecycle::Lifecycle;
 
 use crate::output_channel::WindowChannelRegistry;
@@ -124,6 +127,9 @@ pub struct DaemonClient {
     /// ★window Channel registry★: window_label → 출력 Channel. `subscribe_output` invoke 가 insert,
     ///   연결 task 가 fan-out 시 lookup. Arc 라 task·command 양쪽이 공유한다.
     registry: WindowChannelRegistry,
+    /// ★데몬이 배달한 명령의 입구★(ADR-0155 결정 4). 늦게 채워진다 — 표의 스폰 포트가 이 클라이언트를
+    ///   쥐어 조립에 순환이 있기 때문이다(`inbound::InboundSlot` doc). 연결 task 마다 clone 해 넘긴다.
+    inbound: Arc<InboundSlot>,
 }
 
 impl DaemonClient {
@@ -153,6 +159,7 @@ impl DaemonClient {
             //   new_real_with_owned_runtime 이 lib.rs setup 이 만든 공유 Arc 를 주입한다.
             router: Arc::new(OutputRouter::new()),
             registry: WindowChannelRegistry::default(),
+            inbound: Arc::new(InboundSlot::new()),
             // 테스트는 emit 불필요(no AppHandle 컨텍스트).
             app: None,
         }
@@ -180,6 +187,7 @@ impl DaemonClient {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             router,
             registry: WindowChannelRegistry::default(),
+            inbound: Arc::new(InboundSlot::new()),
             app: None,
         }
     }
@@ -204,6 +212,7 @@ impl DaemonClient {
             handshake_timeout,
             router,
             registry: WindowChannelRegistry::default(),
+            inbound: Arc::new(InboundSlot::new()),
             app: None,
         }
     }
@@ -235,9 +244,30 @@ impl DaemonClient {
             //   (fan-out)가 *동일* 인스턴스를 본다.
             router,
             registry,
+            inbound: Arc::new(InboundSlot::new()),
             // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로.
             app: Some(app),
         })
+    }
+
+    /// 이 클라이언트가 실행할 수 있는 명령 표를 꽂는다 — ★연결 전에 부른다★(ADR-0155 결정 4·5).
+    ///
+    /// ★런타임 선택을 여기 두는 것이 요점이다★: 적용 태스크는 연결 태스크와 **같은 런타임**에서 돌아야
+    /// 한다 — `agent.spawnInto` 가 데몬 왕복을 기다리는 동안 그 소켓 태스크가 계속 돌아야 답이 오기 때문이다
+    /// (다른 런타임에 띄우면 그 인터리브가 우연에 맡겨진다). 조립부가 `Handle` 을 고르게 하면 그 불변식이
+    /// 조립부마다 다시 지켜져야 하므로, 클라이언트가 자기 `rt` 로 정한다.
+    /// 늦게 부르는 것은 허용되지만(첫 승자만 이긴다), **연결 후에 부르면** 그 사이 도착한 봉투는 표가 없다는
+    /// 오류 답장을 받는다. 등록도 그 연결에서는 안 나간다 — 다음 재연결이 보낸다(`register_own_commands`).
+    pub fn install_command_table(
+        &self,
+        table: engram_dashboard_command::CommandTable,
+        catalog_version: u32,
+    ) {
+        self.inbound.set(Arc::new(inbound::InboundReceiver::new(
+            table,
+            Arc::new(inbound::RuntimeSpawner(self.rt.clone())),
+            catalog_version,
+        )));
     }
 
     // 현재 연결 상태 스냅샷(락 없이).
@@ -389,11 +419,16 @@ impl DaemonClient {
             self.rt.clone(),
             self.handshake_timeout,
             cmd_rx,
+            // ★weak 로 넘긴다 — 강한 clone 이면 이 채널이 영원히 닫히지 않는다★: 연결 태스크의 수명은
+            //   「강한 송신단이 전부 사라졌나」로 정해지고(`close()` 도 stale 억제도 그 EOF 하나에 얹혀 있다),
+            //   태스크가 자기 채널의 강한 clone 을 쥐면 그 신호가 절대 오지 않는다(`connection::OutcomeSender`).
+            cmd_tx.downgrade(),
             ready_tx,
             // ★T6b 출력 평면 주입★: 연결 task 가 frame fan-out 에 쓴다(재연결 task 수명 초월 공유 Arc).
             self.router.clone(),
             self.registry.clone(),
             app_handle,
+            self.inbound.clone(),
         ));
 
         // Hello 수신(=connected) 또는 핸드셰이크 실패를 기다린다. ★락 미보유 await★.

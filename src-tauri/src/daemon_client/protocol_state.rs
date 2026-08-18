@@ -18,85 +18,13 @@
 
 use std::collections::HashMap;
 
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
+use engram_dashboard_protocol::{AgentEvent, RequestId};
 
 // ── request_id 추출(request/reply 상관) ───────────────────────────────────────────────
-/// 명령에 실린 request_id 를 꺼낸다. side-effect 명령(Spawn/Kill/…)은 모두 request_id 를 갖지만,
-/// 일부(Subscribe/Unsubscribe/Resize)는 request_id 가 없다(데몬이 reply 를 안 보냄) → `None`.
-/// (핸드셰이크는 이 표에 없다 — 명령이 아니라 네트워크 lib 소유 프레임이라 이 함수에 오지 않는다.
-///  ADR-0129 0-4.)
-///
-/// ★계약★: `send_command` 은 reply 를 기대하므로 request_id 가 있는 명령에만 쓴다. None 인 명령을
-/// 넣으면 매칭할 키가 없어 영구 pending(hang) 이 되므로 호출자가 None 을 거른다.
-pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
-    match cmd {
-        AgentCommand::Spawn { request_id, .. }
-        | AgentCommand::Kill { request_id, .. }
-        | AgentCommand::Interrupt { request_id, .. }
-        | AgentCommand::WriteStdin { request_id, .. }
-        | AgentCommand::AcquireInput { request_id, .. }
-        | AgentCommand::ReleaseInput { request_id, .. }
-        | AgentCommand::ListAgents { request_id }
-        | AgentCommand::StopDaemon { request_id, .. }
-        | AgentCommand::SpawnByCwd { request_id, .. }
-        | AgentCommand::ListProfiles { request_id }
-        | AgentCommand::CreateProfile { request_id, .. }
-        | AgentCommand::DeleteProfile { request_id, .. }
-        | AgentCommand::SpawnProfile { request_id, .. }
-        | AgentCommand::SetProfileAutoRestore { request_id, .. }
-        // 트리 rename(ADR-0061 리치화) — Ack 매칭 대상(SetProfileAutoRestore 와 동형).
-        | AgentCommand::RenameProfile { request_id, .. }
-        // 트리 reparent(ADR-0072 계층) — Ack 매칭 대상(RenameProfile 와 동형).
-        | AgentCommand::ReparentProfile { request_id, .. }
-        | AgentCommand::GetSnapshot { request_id, .. }
-        // 프리셋 CRUD(ADR-0061) — 넷 다 request_id 동봉(reply 매칭 대상).
-        | AgentCommand::ListPresets { request_id }
-        | AgentCommand::CreatePreset { request_id, .. }
-        | AgentCommand::DeletePreset { request_id, .. }
-        // 프리셋 rename(ADR-0061 리치화) — Ack 매칭 대상.
-        | AgentCommand::RenamePreset { request_id, .. }
-        // 봉투 포맷 전역 스위치(ADR-0096) — Ack 매칭 대상(데몬이 상태 변경 후 Ack echo).
-        | AgentCommand::SetEnvelopeFormat { request_id, .. } => Some(*request_id),
-        // request_id 없는 명령 — reply 매칭 대상 아님(데몬이 전용 reply 를 안 echo).
-        AgentCommand::Resize { .. }
-        | AgentCommand::Subscribe { .. }
-        | AgentCommand::Unsubscribe { .. } => None,
-    }
-}
-
-/// reply 이벤트에 실린 request_id 를 꺼낸다(매칭용). 전용 reply variant(Ack/Spawned/Created/
-/// SubscribeAck-는 request_id 없음/AgentList/ProfileList/Snapshot/Error)만 request_id 를 echo 한다 —
-/// broadcast(AgentListUpdated/StatusChanged/…)는 `None` 이라 pending 매칭을 우회한다(편승 매칭 제거).
-///
-/// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
-/// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
-/// None — send_command 대상이 아니다(Subscribe 는 request_id 없는 명령). `connection.rs` Text arm 이
-/// agent_id 로 처리한다.
-pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
-    match ev {
-        AgentEvent::Ack { request_id }
-        | AgentEvent::AgentList { request_id, .. }
-        | AgentEvent::ProfileList { request_id, .. }
-        // PresetList = 전용 reply(request_id echo, ADR-0061). PresetListUpdated 는 broadcast(아래 None).
-        | AgentEvent::PresetList { request_id, .. }
-        | AgentEvent::Snapshot { request_id, .. }
-        | AgentEvent::Created { request_id, .. }
-        | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
-        AgentEvent::Error { request_id, .. } => *request_id,
-        // request_id 없는 이벤트(broadcast 또는 agent_id 기반) — pending 매칭 대상 아님.
-        AgentEvent::Hello { .. }
-        | AgentEvent::SubscribeAck { .. }
-        | AgentEvent::Output { .. }
-        | AgentEvent::ReplayComplete { .. }
-        | AgentEvent::StatusChanged { .. }
-        | AgentEvent::AgentListUpdated { .. }
-        | AgentEvent::RestoreResult { .. }
-        | AgentEvent::InputLeaseChanged { .. }
-        | AgentEvent::ProfileListUpdated { .. }
-        // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
-        | AgentEvent::PresetListUpdated { .. } => None,
-    }
-}
+// wire 계약이라 protocol crate 가 소유한다 — 명령↔답장 쌍의 정합(ADR-0155 등)은 그 crate 의 테스트가
+// CI 가 항상 실행하는 target(`cargo test -p engram-dashboard-protocol`)에서 박는다. 여기서는 재수출해
+// 이 모듈 호출부(`protocol_state::command_request_id` 등)와 아래 tests 를 그대로 둔다.
+pub use engram_dashboard_protocol::{command_request_id, event_reply_request_id};
 
 /// reply 이벤트가 성공(Ok)인지 실패(Err)인지 가른다(oneshot resolve). `Error{message}` 만
 /// Err(message), 나머지 전용 reply 는 Ok(event). 호출자가 take_pending 으로 꺼낸 oneshot 에 이 결과를
@@ -219,6 +147,7 @@ mod tests {
     //!   배선이라 여기 없다.
 
     use super::*;
+    use engram_dashboard_protocol::AgentCommand;
 
     fn rid(s: &str) -> RequestId {
         // 테스트용 결정적 RequestId — 문자열을 FNV-1a 64bit 해시 → u128 로 Uuid 생성(v5 feature 없이도
@@ -483,6 +412,10 @@ mod tests {
             None,
             "AgentListUpdated 는 broadcast — 매칭 우회"
         );
+        // ADR-0155 명령↔답장 쌍(ListCommands↔CommandList) 박제는 이 파일이 아니라 protocol crate
+        // 쪽 테스트(`list_commands_reply_request_id_pairing`)가 CI 에서 돈다 — 이 파일의 lib 테스트
+        // 타깃은 로컬/CI 모두 0xc0000139(ENTRYPOINT_NOT_FOUND)로 실행되지 않는다(이 파일에 남은
+        // request_id 추출 테스트 전부가 같은 이유로 미실행이다).
         // SubscribeAck 는 agent_id 기반(request_id 없음) — T6a reply 매칭 대상 아님.
         assert_eq!(
             event_reply_request_id(&AgentEvent::SubscribeAck {

@@ -1,12 +1,16 @@
 # Cargo workspace 루트 (S12 phase 1). 정적 링크.
-# 멤버 7: protocol(경계 계약) · core(에이전트 코어, Tauri import 0) · discovery(데몬 발견) ·
-#   messaging(메시징 커널 — 워크스페이스 crate 무의존, ADR-0110) · net(네트워크 행 — WS·프레임 포트·
-#   단일 인스턴스·portfile, ADR-0129) · daemon(에이전트 호스트 + 조립실) · src-tauri(데몬 클라이언트 셸).
+# 멤버 8: protocol(경계 계약) · core(에이전트 코어, Tauri import 0) · command(명령 버스 도구 — 워크스페이스
+#   crate 의존 0·명령 0개, ADR-0155) · discovery(데몬 발견) · messaging(메시징 커널 — 워크스페이스 crate
+#   무의존, ADR-0110) · net(네트워크 행 — WS·프레임 포트·단일 인스턴스·portfile, ADR-0129) ·
+#   daemon(에이전트 호스트 + 조립실) · src-tauri(데몬 클라이언트 셸).
 [workspace]
 resolver = "2"
 members = [
     "crates/engram-dashboard-protocol",
     "crates/engram-dashboard-core",
+    # ADR-0155: 명령 버스 도구 lib(봉투·오류·선언 매크로·표·라우팅). 선언은 생산자 옆에 살고 이 crate 는
+    #   도구만 담는다 — 여기에 명령이 하나라도 생기면 중앙 카탈로그가 다른 문으로 돌아온다.
+    "crates/engram-dashboard-command",
     "crates/engram-dashboard-discovery",
     # ADR-0110: 메시징 커널 lib(워크스페이스 crate 무의존 — 완전 상호무지).
     "crates/engram-dashboard-messaging",

@@ -1,0 +1,22 @@
+[package]
+name = "engram-dashboard-command"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 명령 버스 도구 — 봉투·오류·선언 매크로·표·라우팅. 워크스페이스 crate 의존 0, 명령 0개."
+
+# ★test-support (ADR-0012)★: 하네스가 쓰는 최소 실행기(`testing::block_on`)를 여는 기능 플래그. 기본 OFF —
+#   운영 빌드에 테스트 전용 실행기를 남기지 않는다. 소비 crate 는 dev-dependency 에서만 켠다(core 의
+#   `test-harness` 와 같은 형태).
+[features]
+test-support = []
+
+# ★워크스페이스 crate 를 하나라도 의존하면 이 crate 의 존재 이유가 사라진다★(lib.rs 헤더 불변식 1).
+#   게이트가 경로 의존 표기를 정규식으로 세므로 그 표기를 이 주석에 적지 않는다(자기인용 오탐 방지).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ADR-0155: 선언이 생산자 옆으로 흩어지므로 "이 바이너리에 링크된 선언 전량"은 링커가 모은다.
+inventory = "0.3"
+# 왕복 상관 키를 홉마다 다시 정의하지 않으려고 기존 wire 의 표현(uuid)을 그대로 쓴다 —
+#   `engram-dashboard-protocol` 의 `RequestId` 와 같은 표현이라 Step 2·3 배선에서 변환이 끼지 않는다.
+uuid = { version = "1", features = ["v4", "serde"] }

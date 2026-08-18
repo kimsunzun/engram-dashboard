@@ -40,7 +40,10 @@ pub use domain::{
     RestoreOutcome, RestoreReport, SessionCaps, SnapshotChunk,
 };
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
-pub use messages::{AgentCommand, AgentEvent, OutputChunk, StructuredEvent, SubscribeAction};
+pub use messages::{
+    command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
+    OutputChunk, StructuredEvent, SubscribeAction,
+};
 
 /// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
 /// 지금은 상수만 두고 Hello 에 실어 보냄 — 불일치 시 팝업 가이드는 나중).
