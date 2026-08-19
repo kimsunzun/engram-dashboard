@@ -58,6 +58,7 @@ async fn make_manager_with_control(
         Arc::new(MessagingSlot::new()),
         // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
         Arc::new(CommandTableSlot::new()),
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
     )
     .await
     .expect("start mcp server");
@@ -92,6 +93,7 @@ async fn make_manager_with_control_channel(
         Arc::new(MessagingSlot::new()),
         // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
         Arc::new(CommandTableSlot::new()),
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
     )
     .await
     .expect("start mcp server");

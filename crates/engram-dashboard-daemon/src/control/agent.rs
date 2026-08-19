@@ -40,8 +40,9 @@ use super::ingress::ControlQueryResult;
 ///
 /// ★왜 포트인가★: 실제 통지는 전-연결 팬아웃으로 `ProfileListUpdated` 를 미는 것인데, 그 조립은
 ///   `connection_core` 소유다. `control/` 이 그쪽을 직접 부르면 데몬 층 결정(ADR-0130)이 재론 대상이 되므로
-///   (이 디렉토리의 나가는 간선 0 이 추적 중인 성질이다) 소비자인 여기가 좁은 trait 만 소유하고 실물
-///   어댑터는 조립부가 준다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
+///   (이 디렉토리의 **나가는 간선 수**가 그 결정의 재론 트리거 ② 다 — 「0 건」은 2026-08-05 실측이고 지금은
+///   `command_delivery`·`command_roster` 둘이 있다) 소비자인 여기가 좁은 trait 만 소유하고 실물 어댑터는
+///   조립부가 준다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
 /// ★이게 없으면 나는 증상★: 에이전트가 이름을 바꾸거나 형제를 띄워도 대시보드 트리는 **무관한 이벤트가
 ///   올 때까지 옛 명부를 보여 준다**(조용한 stale).
 /// ★부르는 쪽은 표다★ — 명부를 바꾼 동사가 통지까지 책임진다(core `agent::commands::RosterChanged`).
@@ -89,7 +90,8 @@ pub struct AgentRequest {
 pub struct CommandArgs(serde_json::Map<String, serde_json::Value>);
 
 impl CommandArgs {
-    fn into_value(self) -> serde_json::Value {
+    /// 이웃 `catalog` 의 전체 이름 호출도 같은 칸 규율(중복 키 반려)을 쓰므로 함께 본다.
+    pub(super) fn into_value(self) -> serde_json::Value {
         serde_json::Value::Object(self.0)
     }
 }
@@ -221,12 +223,27 @@ const PREVIEW_CHARS: usize = 80;
 /// ★반려 문구 전체에 대한 상한은 **없다**(알려진 열린 조건)★ — 이 함수를 안 거치고 호출자 문자열을 싣는
 /// 생산 지점이 이 라우트에도 이웃 라우트에도 있고, 그것들은 길이 그대로 나간다. 그 축은 이 조각의 범위가
 /// 아니다. **여기에 「모든 문구가 어딘가에서 잘린다」는 문장을 쓰지 말 것** — 네 판 연속 거짓이었다.
-fn preview(text: &str) -> String {
-    let mut head: String = text.chars().take(PREVIEW_CHARS).collect();
-    if head.len() < text.len() {
-        head.push_str(&format!("…(truncated, {} bytes)", text.len()));
+pub(super) fn preview(text: &str) -> String {
+    preview_within(text, PREVIEW_CHARS)
+}
+
+/// **양 끝을 남기고 가운데를** 줄인다 — 조각이 아니라 문구 하나 전체를 실을 때 쓴다.
+///
+/// ★[`preview`](머리만 남김)를 그런 자리에 쓰면 안 된다★: 표가 준 반려 문구는 호출자가 친 것을 **앞**에,
+/// 다음에 할 일(선언된 칸 전량)을 **뒤**에 둔다(`CommandTable::check_args` 의 레이아웃). 머리만 남기면
+/// 잘려 나가는 것이 정확히 그 「할 일」이라, 호출자는 자기 칸이 틀렸다는 말만 듣고 맞는 칸은 하나도 못 본다.
+/// ★그래도 상한이 필요한 이유★: 이 자리에 오는 문구가 전부 자기 입력을 캡하지는 않는다 —
+/// `commands::drive_to_completion` 은 호출자가 보낸 명령 이름을 **원문 그대로** 문구에 넣는다.
+/// 자를 때 **잘랐다고 말하는 것**은 형제와 같다.
+pub(super) fn preview_within(text: &str, chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= chars {
+        return text.to_string();
     }
-    head
+    let head_chars = chars / 2;
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text.chars().skip(total - (chars - head_chars)).collect();
+    format!("{head}…(truncated, {} bytes)…{tail}", text.len())
 }
 
 /// 바디 자체가 JSON 계약을 못 지킨 경우의 반려 — 어댑터가 부른다(`control_agent_handler`).

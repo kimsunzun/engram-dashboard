@@ -39,9 +39,12 @@ ADR-0129는 데몬 lib을 3층(네트워크 lib · 에이전트 시스템 lib ·
 #   ★-U 를 빼지 말 것★ — rustfmt 가 폭 넘는 import 를 `use crate::{⏎ connection_core::A,⏎};` 로 쪼개면
 #   접두와 모듈명이 다른 줄에 앉아 단일행 패턴은 못 문다(이 repo 엔 rustfmt.toml 이 없어 기본 래핑이 돈다).
 #   매치가 나오면 그 줄이 그 파일의 `#[cfg(test)]` 시작 줄보다 앞인지 볼 것 — 뒤면 테스트 픽스처라 합법.
+#   ★형제 모듈 이름은 lib.rs 의 모듈 선언에서 **파생한다** — 손으로 박지 마라★: 박아 둔 명단은 새 모듈이
+#   생겨도 안 늘어 그 간선이 아예 안 보인다(실측 2026-08-19 — 박힌 판이 command_delivery·command_roster
+#   두 간선을 놓친 채 0줄을 냈다). 명령은 도구라 이 미탐은 날짜와 무관한 결함이고, 발견 즉시 고친다.
 #   양성 대조의 한계: 경로를 src/ 로 넓히면 실간선이 잡히지만 그 간선은 **전부 crate:: 형태**라
 #   super:: 갈래가 죽어도 이 대조는 통과한다. 접두를 좁히는 개정을 이 대조로 승인하지 말 것.
-rg -U -n "(crate|(super::)+)::[^;]*\b(connection_core|agent_conn|status_fanout|messaging_host)\b" crates/engram-dashboard-daemon/src/control/
+rg -U -n "(crate|(super::)+)::[^;]*\b($(rg -o '^(pub )?mod ([a-z_0-9]+);' -r '$2' crates/engram-dashboard-daemon/src/lib.rs | rg -v '^control$' | paste -sd'|'))\b" crates/engram-dashboard-daemon/src/control/
 # connection_core 가 production 에서 옆 모듈을 참조하는가
 #   (매치가 전부 그 파일의 `#[cfg(test)] mod tests` 시작 줄 이후면 production 순환 없음 — 줄 번호를 여기 박지 말 것)
 #   접두·-U 주의사항은 위 명령과 동일하다 — connection_core.rs 도 크레이트 루트의 직계라 super:: 가 같은 간선이다.

@@ -107,6 +107,7 @@ async fn fixture(tag: &str) -> Fixture {
         // ★비워 둔다★: 우편 핸들러가 503 을 내야 "게이트를 통과했다" 가 거절과 구별된다.
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -206,6 +207,43 @@ async fn the_same_credential_passes_on_the_agent_control_route() {
     }
 }
 
+/// ★발견과 전체 이름 호출도 제어 평면이다★ — 편지를 못 쓰는 자격증명이 **무엇을 부를 수 있는지조차** 못
+///   배우면, 그 백엔드로 스폰된 에이전트는 자기 도구를 영영 모른다. 그것이 두 라우트를 「우편 아님」으로
+///   분류한 이유 전부이므로, 분류 함수의 단위 시험 말고 **실제 미들웨어를 태운** 단언이 있어야 한다.
+///
+/// ★"거절이 아니다" 만 보지 않는다★: 그것만 보면 라우트가 통째로 사라져도 초록이다 — 응답이 그 라우트의
+///   실제 계약(발견은 `commands` 배열, 호출은 명부 payload)인지까지 본다.
+#[tokio::test]
+async fn the_same_credential_passes_on_the_catalog_routes() {
+    let f = fixture("catalog").await;
+    for token in [&f.mcp_token, &f.cli_token] {
+        let (status, text) = f
+            .post(token, "/control/commands", serde_json::json!({}))
+            .await;
+        assert_eq!(status, 200, "발견은 통과: {text}");
+        assert!(!is_mail_rejection(status, &text));
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+        assert!(
+            v.get("commands")
+                .and_then(|c| c.as_array())
+                .is_some_and(|c| !c.is_empty()),
+            "발견 목록이어야: {text}"
+        );
+
+        let (status, text) = f
+            .post(
+                token,
+                "/control/call",
+                serde_json::json!({"name":"agent.list"}),
+            )
+            .await;
+        assert_eq!(status, 200, "전체 이름 호출은 통과: {text}");
+        assert!(!is_mail_rejection(status, &text));
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+        assert!(v.get("agents").is_some(), "명부 응답이어야: {text}");
+    }
+}
+
 /// MCP 라우트는 이 게이트의 대상이 아니다 — 우편을 MCP 로 쓰는 것이 바로 그 자격증명의 채널이기 때문이다.
 ///
 /// ★"거절이 아니다" 만 보면 라우트가 통째로 사라져도 초록이다★: 그래서 **게이트를 통과했다** 를 라우트가
@@ -288,6 +326,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
         Arc::new(CommandTableSlot::new()),
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
     )
     .await
     .expect("start mcp server");

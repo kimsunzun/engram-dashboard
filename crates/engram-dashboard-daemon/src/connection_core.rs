@@ -41,7 +41,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_protocol::{
     AgentCommand, AgentEvent, AgentInfo as WireAgentInfo, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ClaudeOutputFormat as WireClaudeOutputFormat, CommandListEntry, ControlCaps as WireControlCaps,
+    ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
     OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
     RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
@@ -1240,48 +1240,11 @@ impl ConnectionCore {
             AgentCommand::ListCommands { request_id } => {
                 // 주인 토큰은 안 내린다 — 선언처가 주인이라 등급 칸이 없어졌다(TRD §3-7 개정 ㉠).
                 //
-                // ★목록은 **두 곳**에서 나온다★: 붙어 있는 주인들의 명부와 **데몬 자기 표**. 자기 표를
-                //   빼면 `agent.*` 는 배달되는데 발견에는 안 보여, 부를 수 있는 이름을 물어본 LLM 이 그
-                //   목록만 믿고 영영 안 부른다.
-                // ★같은 이름이 양쪽에 있으면 **데몬 것이 이긴다**★ — 배달이 그렇게 정해져 있기 때문이다
-                //   (내 표가 1단계, 명부가 2단계 — `command_delivery::deliver`). 목록이 반대로 말하면
-                //   호출자는 남의 help 를 보고 인자를 맞춘 뒤 데몬 핸들러에게 반려당한다.
-                // ★이 dedup 은 **오늘 도달 불가한 상태**를 위한 것이다 — 그래도 지운다는 뜻이 아니다★:
-                //   겹침을 만들려면 데몬 표가 비어 있는 사이에 등록이 도착해야 하는데
-                //   (`refuse_names_i_answer` 는 그 순간의 표를 본다), 조립된 서버 둘은 **연결을 받기 전에**
-                //   슬롯을 채운다(운영 `run()` 과 테스트 서버 모두 accept loop 진입 전이다). 즉 지금의
-                //   조립에서는 이 갈래로 들어오는 항목이 없다.
-                //   ★그것이 이 코드가 죽었다는 뜻이 아니다★: 표를 늦게 꽂는 조립이 **불가능하지는** 않고
-                //   (슬롯은 정의상 늦은 주입이다) 그때 이 자리가 유일한 그물이다. 조립 순서를 확인한 다음
-                //   세션이 「닿지 않으니 지우자」로 읽지 않도록 여기 적어 둔다 — 이 판정은 두 출처를 합치는
-                //   함수의 **자기 정합성**이지 특정 조립 순서에 기댄 것이 아니다.
-                let mine: Vec<CommandListEntry> = self
-                    .locals
-                    .decls()
-                    .into_iter()
-                    .map(|decl| CommandListEntry {
-                        name: decl.name,
-                        help: decl.help,
-                        available: true,
-                    })
-                    .collect();
-                let mut entries: Vec<CommandListEntry> = self
-                    .commands
-                    .entries()
-                    .into_iter()
-                    .filter(|entry| !mine.iter().any(|held| held.name == entry.name))
-                    .map(|entry| CommandListEntry {
-                        name: entry.name,
-                        help: entry.help,
-                        // 명부에 있는 것은 주인이 있는 이름뿐이다 — 계약이 이 칸을 왜 남겼는지는
-                        //   `CommandListEntry` 주석.
-                        // ADR-0150
-                        available: true,
-                    })
-                    .collect();
-                entries.extend(mine);
-                // 두 출처를 이어 붙였으므로 여기서 한 번 정렬한다 — 각각은 이름순인데 합치면 아니다.
-                entries.sort_by(|a, b| a.name.cmp(&b.name));
+                // ★두 출처를 합치는 규칙은 여기 없다★ — HTTP 발견 라우트(`/control/commands`)와 **같은
+                //   함수**를 태운다. 규칙을 여기 되돌려 적으면 두 표면의 목록이 갈리고, 갈린 순간 발견은
+                //   어느 한쪽에게 거짓말이 된다(규칙과 그 근거의 정본 = `control::catalog::merge`).
+                let entries =
+                    crate::control::catalog::merge(self.locals.decls(), self.commands.entries());
                 let _ = sink.enqueue(Outbound::event(AgentEvent::CommandList {
                     request_id,
                     entries,
@@ -1611,7 +1574,7 @@ pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
 mod tests {
     use super::*;
     use engram_dashboard_net::frame_port;
-    use engram_dashboard_protocol::RequestId;
+    use engram_dashboard_protocol::{CommandListEntry, RequestId};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 

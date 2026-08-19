@@ -731,6 +731,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         slot.clone(),
         messaging_slot.clone(),
         command_slot.clone(),
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
     )
     .await
     .map_err(|e| format!("start mcp server: {e}"))?;

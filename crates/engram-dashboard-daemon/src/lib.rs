@@ -308,6 +308,11 @@ async fn run_accept_loop(
     control_registry: Arc<control::registry::ControlRegistry>,
     messaging_slot: Arc<control::mcp_server::MessagingSlot>,
     command_table_slot: Arc<control::mcp_server::CommandTableSlot>,
+    // 명령 주인 명부(ADR-0155/0156) — 전 연결이 공유하는 **그 한 부**. 여기서 만들지 않는 이유는 제어
+    //   평면의 발견 라우트도 같은 부를 읽기 때문이다(`control::mcp_server::start_mcp_server`). 안에서
+    //   만들면 그 라우트는 자기 사본을 보게 되고, 증상은 에러도 로그도 없이 발견이 클라이언트가 얹은
+    //   이름을 영영 안 보여 주는 것이다.
+    commands: command_roster::CommandRoster,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -319,9 +324,6 @@ async fn run_accept_loop(
     //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    // 명령 주인 명부(ADR-0155/0156) — 전 연결이 공유한다. 여기서 나는 이유: 이 루프가 만드는 연결 공장
-    //   말고는 아직 아무도 쥐지 않는다(배달 라우팅이 붙으면 조립 위로 올라갈 자리다).
-    let commands = command_roster::CommandRoster::new();
     // 진행 중인 명령 왕복의 상관 표(ADR-0154) — 명부와 **다른 표**다(수명 단위가 다르다).
     // ★수거 태스크를 함께 띄운다 — 빠뜨리면 마감이 영영 안 지나가고 답 못 받는 요청이 쌓인다★
     //   (`CommandDeliveries::spawn_sweeper`). 데몬 종료 신호를 구독해 함께 멈춘다.
@@ -554,6 +556,11 @@ pub async fn run() -> Result<(), i32> {
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
+    // 명령 주인 명부(ADR-0155/0156) — 전 연결이 공유한다. ★MCP 서버보다 **먼저** 난다★: 발견 라우트
+    //   (`/control/commands`)가 이 명부의 절반을 읽으므로 서버 조립이 그것을 받아야 한다. 아래 accept
+    //   loop 에도 **같은 부**가 들어간다 — 두 곳에 다른 부를 넘기면 클라이언트가 얹은 이름이 발견에서만
+    //   사라지고, 그 어긋남은 런타임에 아무 신호도 내지 않는다.
+    let command_roster = command_roster::CommandRoster::new();
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
@@ -566,6 +573,7 @@ pub async fn run() -> Result<(), i32> {
         manager_slot.clone(),
         messaging_slot.clone(),
         command_table_slot.clone(),
+        command_roster.clone(),
     )
     .await
     {
@@ -736,6 +744,7 @@ pub async fn run() -> Result<(), i32> {
         control_registry,
         messaging_slot.clone(),
         command_table_slot,
+        command_roster,
         expected_token,
         shutdown_tx,
         shutdown_rx,
@@ -905,6 +914,9 @@ async fn start_test_server_inner(
                 control_registry,
                 messaging_slot,
                 command_table_slot,
+                // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 명부를 나눠 쓸 상대가 없다 —
+                //   accept loop 가 유일한 소비자다.
+                command_roster::CommandRoster::new(),
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,

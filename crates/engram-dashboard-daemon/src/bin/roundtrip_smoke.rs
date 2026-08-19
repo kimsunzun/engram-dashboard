@@ -426,6 +426,7 @@ async fn run() -> i32 {
         slot.clone(),
         messaging_slot.clone(),
         command_slot.clone(),
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
     )
     .await
     {

@@ -16,6 +16,7 @@ use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfi
 use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
 };
+use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
 use engram_dashboard_daemon::control::commands::make_daemon_table;
 use engram_dashboard_daemon::control::mcp_server::{
@@ -23,8 +24,24 @@ use engram_dashboard_daemon::control::mcp_server::{
     RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
+use engram_dashboard_net::frame_port::{ConnId, Frame, FrameError, FrameSink};
+use futures_util::future::BoxFuture;
 
 // ── 하네스 ────────────────────────────────────────────────────────────────────────
+
+/// 프레임을 버리는 출구 — 이 파일이 명부에 대해 보는 것은 **이름이 서는가**뿐이고 배달은 보지 않는다
+/// (배달 경로의 회귀는 `command_roster`·`command_delivery` 의 자기 테스트가 잰다).
+struct DiscardingSink;
+
+impl FrameSink for DiscardingSink {
+    fn try_send(&self, _frame: Frame) -> Result<(), FrameError> {
+        Ok(())
+    }
+
+    fn send(&self, _frame: Frame) -> BoxFuture<'_, Result<(), FrameError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
 
 struct NoopSink;
 impl StatusSink for NoopSink {
@@ -75,6 +92,9 @@ struct Fixture {
     base: String,
     token: String,
     broadcast: Arc<CountingBroadcast>,
+    /// 서버가 실제로 읽는 **그 한 부**. 붙어 있는 클라이언트가 얹은 이름을 이 핸들로 심어, 발견·호출이
+    /// 조립부가 넘긴 명부를 보는지(사본이 아닌지) 잰다.
+    registered: CommandRoster,
     _handle: McpServerHandle,
 }
 
@@ -88,10 +108,22 @@ impl Fixture {
         bearer: Option<String>,
         body: serde_json::Value,
     ) -> (reqwest::StatusCode, serde_json::Value) {
+        self.post_to("/control/agent", bearer, Some(body)).await
+    }
+
+    /// 경로를 지목하는 형제 — 카탈로그 라우트 둘이 쓴다. `body` 부재 = 바디 없는 POST.
+    async fn post_to(
+        &self,
+        path: &str,
+        bearer: Option<String>,
+        body: Option<serde_json::Value>,
+    ) -> (reqwest::StatusCode, serde_json::Value) {
         let mut req = reqwest::Client::new()
-            .post(format!("{}/control/agent", self.base))
-            .header("Content-Type", "application/json")
-            .json(&body);
+            .post(format!("{}{path}", self.base))
+            .header("Content-Type", "application/json");
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
         if let Some(b) = bearer {
             req = req.header("Authorization", format!("Bearer {b}"));
         }
@@ -100,6 +132,33 @@ impl Fixture {
         let text = resp.text().await.unwrap_or_default();
         let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
         (status, json)
+    }
+
+    /// 전체 이름 호출(`/control/call`).
+    async fn call(&self, body: serde_json::Value) -> (reqwest::StatusCode, serde_json::Value) {
+        self.post_to("/control/call", Some(self.token.clone()), Some(body))
+            .await
+    }
+
+    /// 발견 목록(`/control/commands`) — ★바디를 싣지 않는다★: 이 라우트가 빈 POST 에 답하는 것이 계약이다.
+    async fn catalog(&self) -> (reqwest::StatusCode, serde_json::Value) {
+        self.post_to("/control/commands", Some(self.token.clone()), None)
+            .await
+    }
+
+    /// 붙어 있는 클라이언트가 자기 이름을 얹은 상태를 만든다 — 대시보드가 창·탭·슬롯을 얹는 그 경로다.
+    fn register_client_command(&self, conn_id: ConnId, name: &str, help: &str) {
+        let sink: Arc<dyn FrameSink> = Arc::new(DiscardingSink);
+        self.registered.attach(conn_id, &sink);
+        self.registered
+            .register(
+                conn_id,
+                vec![engram_dashboard_command::CommandDecl {
+                    name: name.to_string(),
+                    help: help.to_string(),
+                }],
+            )
+            .expect("붙어 있는 연결의 등록");
     }
 
     /// 좀비 PTY 를 남기지 않는다 — 실 프로세스를 띄운 테스트는 끝에서 반드시 부른다.
@@ -121,11 +180,15 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     broadcast_slot.set(broadcast.clone());
     let command_slot = Arc::new(CommandTableSlot::new());
+    // ★조립부가 넘긴 **그 한 부**를 픽스처가 함께 쥔다★ — 서버가 자기 사본을 만들면 아래 발견 테스트가
+    //   빨개진다(운영에서 그 어긋남은 아무 신호도 내지 않는다).
+    let registered = CommandRoster::new();
     let handle = start_mcp_server(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
+        registered.clone(),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -169,6 +232,7 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
         base,
         token,
         broadcast,
+        registered,
         _handle: handle,
     }
 }
@@ -949,6 +1013,387 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
         .post(serde_json::json!({ "verb": "rename", "target": "last-one", "name": "still-works" }))
         .await;
     assert_eq!(renamed["outcome"], "renamed", "{renamed}");
+}
+
+// ── 발견 목록과 전체 이름 호출(`/control/commands` · `/control/call`) ────────────────
+
+/// ★제어 평면 라우트는 전부 같은 미들웨어 뒤에 있다★ — 인증은 라우터 **전체**에 얹히므로 라우트를 늘려도
+/// 따로 배선할 것이 없다. 그 성질을 가정하지 않고 실제로 태워 확인한다(핸들러마다 검사를 두는 형태로
+/// 되돌리면 새 라우트가 그것을 빠뜨리는 날 이 테스트가 유일한 그물이다).
+#[tokio::test]
+async fn the_catalog_routes_refuse_calls_without_a_valid_token() {
+    let f = fixture("catalog-auth").await;
+    let call_body = serde_json::json!({ "name": "agent.list" });
+
+    for bearer in [None, Some("not-a-real-token".to_string())] {
+        let (listing, _) = f.post_to("/control/commands", bearer.clone(), None).await;
+        assert_eq!(
+            listing,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "발견도 토큰을 요구한다({bearer:?})"
+        );
+        let (invoke, _) = f
+            .post_to("/control/call", bearer.clone(), Some(call_body.clone()))
+            .await;
+        assert_eq!(
+            invoke,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "호출도 토큰을 요구한다({bearer:?})"
+        );
+    }
+
+    let (listing, body) = f.catalog().await;
+    assert_eq!(listing, reqwest::StatusCode::OK, "유효 토큰은 통과: {body}");
+    let (invoke, body) = f.call(call_body).await;
+    assert_eq!(invoke, reqwest::StatusCode::OK, "유효 토큰은 통과: {body}");
+}
+
+/// ★목록은 **두 출처**를 합친다★ — 데몬 자기 표와 붙어 있는 클라이언트가 얹은 이름. 한쪽이 빠지면 그
+/// 이름을 물어본 LLM 은 있는 것을 없다고 배운다.
+///
+/// ★`help` 는 바이트 그대로여야 한다★ — JSON 이 아닌 값을 얹어 데몬이 열어보지 않는다는 것까지 본다.
+#[tokio::test]
+async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
+    let f = fixture("catalog-list").await;
+    let opaque = "not json at all — 임의의 바이트 {[(";
+    f.register_client_command(1, "tab.create", opaque);
+
+    let (status, body) = f.catalog().await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let rows = body["commands"].as_array().expect("commands 배열").clone();
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "agent.list",
+            "agent.move",
+            "agent.new",
+            "agent.rename",
+            "agent.spawn",
+            "tab.create"
+        ],
+        "두 출처가 이름순 한 목록으로 합쳐진다: {body}"
+    );
+    let client_row = rows
+        .iter()
+        .find(|r| r["name"] == "tab.create")
+        .expect("클라이언트 행");
+    assert_eq!(
+        client_row["help"], opaque,
+        "help 는 열어보지도 다듬지도 않는다: {body}"
+    );
+    // 데몬 자기 이름의 help 도 실린다 — 이름만 있는 목록은 인자를 맞출 수 없어 발견이 아니다.
+    let own_row = rows
+        .iter()
+        .find(|r| r["name"] == "agent.rename")
+        .expect("데몬 행");
+    assert!(
+        own_row["help"]
+            .as_str()
+            .is_some_and(|h| h.contains("target")),
+        "데몬 명령의 인자 규격이 실려야: {body}"
+    );
+    // 발견은 읽기 전용이다 — 목록을 뽑는 것이 화면 갱신을 부르면 폴링 하나가 트리를 계속 흔든다.
+    assert_eq!(f.broadcast.count(), 0, "발견은 아무것도 바꾸지 않는다");
+}
+
+/// ★목록의 도달성 칸은 **호출 라우트가 실제로 하는 일**과 갈릴 수 없다★ — 상수를 단언하지 않고, 목록이
+/// 실어 온 이름을 전부 그대로 호출해 답을 맞대 본다. 칸이 「부를 수 있다」고 해 놓고 `UNSUPPORTED` 가
+/// 돌아오면(혹은 그 반대면) 여기서 빨개진다.
+///
+/// ★인자를 안 싣는다 — 그게 이 대조를 부작용 없이 만든다★: 데몬 명령은 인자 부족으로 반려되고(그래도
+/// `UNSUPPORTED` 는 아니다) 남의 이름은 못 닿아 `UNSUPPORTED` 다. 즉 이 대조가 재는 축만 남는다.
+#[tokio::test]
+async fn the_listing_flag_predicts_what_the_call_route_actually_does() {
+    let f = fixture("catalog-flag").await;
+    f.register_client_command(1, "tab.create", "{}");
+
+    let (_, listing) = f.catalog().await;
+    let rows = listing["commands"].as_array().expect("배열").clone();
+    assert!(rows.len() > 1, "전제: 두 출처가 다 실렸다: {listing}");
+
+    let mut claimed_callable = 0;
+    let mut claimed_unreachable = 0;
+    for row in rows {
+        let name = row["name"].as_str().expect("이름").to_string();
+        let callable = row["callable"].as_bool().expect("도달성 칸이 있어야");
+        let (status, answer) = f.call(serde_json::json!({ "name": name })).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{name} → {answer}");
+        let unreachable = answer["code"] == "UNSUPPORTED";
+        assert_eq!(
+            callable, !unreachable,
+            "목록의 callable 과 실제 결말이 갈렸다: {name} → {answer}"
+        );
+        if callable {
+            claimed_callable += 1;
+        } else {
+            claimed_unreachable += 1;
+        }
+    }
+    // 두 갈래가 다 나왔어야 대조가 의미를 갖는다(전부 한쪽이면 상수를 단언한 것과 같다).
+    assert!(claimed_callable > 0 && claimed_unreachable > 0);
+}
+
+/// ★설계된 최악에서도 **고칠 재료가 살아 돌아와야 한다**★
+///
+/// 인자 검문의 반려 문구는 호출자가 친 칸을 앞에, 선언된 칸 전량을 뒤에 둔다. 그 문구의 최악은 도구
+/// crate 가 이미 캡해 둔 값 — 틀린 칸 **여덟 개**(`MAX_NAMED_UNKNOWN`)를 각각 **128 바이트**
+/// (`MAX_QUOTED_INPUT_BYTES`)까지 인용한 형태 — 이고, 여덟을 한 번에 보여 주는 것 자체가 그 그물의 값이다.
+/// 여기서 그 최악을 **실제 라우트로** 만들어, 어댑터의 자르기가 꼬리(= 무엇으로 고치나)를 먹지 않는지 본다.
+/// 편한 크기로 낮추지 말 것 — 그러면 경계를 안 밟는다.
+#[tokio::test]
+async fn the_worst_designed_argument_refusal_still_carries_the_declared_fields() {
+    let f = fixture("catalog-worst-args").await;
+    seed_shell_agent(&f.manager, "helper");
+
+    // 인용 표기가 상한을 넘도록 여유 있게 — 잘림 꼬리표까지 붙는 그 형태가 최악이다.
+    let mut args = serde_json::Map::new();
+    for i in 0..8 {
+        args.insert(format!("{i}{}", "n".repeat(200)), serde_json::json!(1));
+    }
+    args.insert("target".to_string(), serde_json::json!("helper"));
+
+    let (status, resp) = f
+        .call(serde_json::json!({ "name": "agent.rename", "args": args }))
+        .await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "{resp}");
+    assert_eq!(resp["code"], "INVALID_ARGUMENT", "{resp}");
+    let hint = resp["hint"].as_str().unwrap_or_default();
+    // 전제 — 여덟을 다 세었고 각 이름은 상한에서 잘렸다(이게 최악이라는 증거).
+    assert_eq!(
+        hint.matches("(truncated, input was").count(),
+        8,
+        "전제: 틀린 칸 여덟이 각각 상한에서 잘렸어야: {hint}"
+    );
+    // 본론 — 꼬리가 살아 있다.
+    assert!(
+        hint.contains("declared arguments"),
+        "선언된 칸 목록이 통째로 잘려 나갔다: {hint}"
+    );
+    for declared in ["target", "name"] {
+        assert!(
+            hint.contains(declared),
+            "선언된 칸({declared})이 없다: {hint}"
+        );
+    }
+    assert_eq!(f.broadcast.count(), 0, "반려는 아무것도 바꾸지 않는다");
+}
+
+/// 바디 상한은 라우터 **전체**에 얹혀 있다 — 라우트를 늘려도 따로 배선할 것이 없다는 성질을 실제로 태워
+/// 확인한다(핸들러가 바디를 안 읽는 발견 라우트도 포함이다).
+#[tokio::test]
+async fn the_catalog_routes_refuse_a_body_past_the_limit() {
+    let f = fixture("catalog-413").await;
+    let client = reqwest::Client::new();
+    let over = "x".repeat(1024 * 1024);
+
+    for path in ["/control/commands", "/control/call"] {
+        let sent = client
+            .post(format!("{}{path}", f.base))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", f.token))
+            // 상한이 안 걸리면 **에이전트가 하나 생기는** 바디다 — 아래 명부 대조가 그것을 잡는다.
+            .body(format!(
+                r#"{{"name":"agent.new","args":{{"cwd":"C:/","name":"past-the-limit"}},"pad":"{over}"}}"#
+            ))
+            .send()
+            .await;
+
+        // ★결말이 둘인 것은 서버가 아니라 **전송 계층**의 사실이다(실측)★: 상한 레이어는 Content-Length
+        //   만 보고 413 을 쓴 뒤 연결을 끊는데, 클라이언트가 아직 업로드 중이면 Windows 는 그 소켓을 RST
+        //   으로 접어 hyper 가 응답 대신 `ConnectionAborted`(os error 10053)를 올린다. 어느 쪽이든 뜻은
+        //   같다 — **바디는 핸들러에 닿지 못했다**. 상한을 걷어내면 둘 다 안 나고 200 이 온다.
+        match sent {
+            Ok(resp) => assert_eq!(
+                resp.status(),
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                "{path} 가 상한 밖 바디를 받아들였다"
+            ),
+            Err(e) => assert!(e.is_request(), "요청 전송 중 끊긴 것이어야({path}): {e:?}"),
+        }
+    }
+
+    // 상태코드만 보면 "413 을 내고도 실행은 했다" 를 못 가른다.
+    let (_, list) = f.post(serde_json::json!({ "verb": "list" })).await;
+    assert_eq!(agents_in(&list), vec![], "상한 밖 바디가 실행됐다: {list}");
+    assert_eq!(f.broadcast.count(), 0);
+}
+
+/// ★형제 라우트와 **같은 표**를 태운다★ — 여기서 만든 것이 `/control/agent` 의 명부에 그대로 보여야
+/// 두 입구가 같은 데몬을 조작한 것이다. 인자 없는 명령은 `args` 를 실을 의무가 없다는 것도 함께 본다.
+#[tokio::test]
+async fn a_full_name_call_runs_a_daemon_owned_command() {
+    let f = fixture("catalog-call").await;
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+    let (status, body) = f
+        .call(serde_json::json!({
+            "name": "agent.new",
+            "args": { "cwd": cwd, "name": "by-full-name" }
+        }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "by-full-name", "{body}");
+    assert_eq!(body["state"], "sleeping", "{body}");
+    assert_eq!(
+        f.broadcast.count(),
+        1,
+        "명부가 바뀌면 클라이언트를 갱신한다"
+    );
+
+    // `args` 부재 = 인자 없음.
+    let (status, listed) = f.call(serde_json::json!({ "name": "agent.list" })).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{listed}");
+    assert_eq!(
+        agents_in(&listed),
+        vec![("by-full-name".to_string(), "sleeping".to_string())]
+    );
+
+    // 형제 라우트가 같은 것을 본다 — 두 입구가 같은 표를 태웠다는 증거다.
+    let (_, sibling) = f.post(serde_json::json!({ "verb": "list" })).await;
+    assert_eq!(agents_in(&sibling), agents_in(&listed), "{sibling}");
+}
+
+/// ★검문이 형제와 **같은 함수**여야 한다★ — 한쪽만 검문하면 그쪽에서 막히는 오타가 다른 쪽으로 통과해
+/// 조용히 다른 동작이 된다(ADR-0157). 같은 오타를 두 입구에 넣어 같은 코드·같은 지목이 나오는지 본다.
+#[tokio::test]
+async fn a_full_name_call_refuses_a_bad_argument_the_way_its_sibling_does() {
+    let f = fixture("catalog-args").await;
+    seed_shell_agent(&f.manager, "helper");
+
+    let (_, sibling) = f
+        .post(serde_json::json!({ "verb": "rename", "target": "helper", "nmae": "x" }))
+        .await;
+    let (status, mine) = f
+        .call(serde_json::json!({
+            "name": "agent.rename",
+            "args": { "target": "helper", "nmae": "x" }
+        }))
+        .await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "반려도 200 + JSON: {mine}");
+    assert_eq!(mine["code"], sibling["code"], "{mine} vs {sibling}");
+    assert_eq!(mine["code"], "INVALID_ARGUMENT", "{mine}");
+    let hint = mine["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("nmae"), "틀린 칸을 짚어야: {mine}");
+    for declared in ["target", "name"] {
+        assert!(
+            hint.contains(declared),
+            "선언된 칸 전량이 실려야({declared}): {mine}"
+        );
+    }
+    assert_eq!(f.broadcast.count(), 0, "반려는 아무것도 바꾸지 않는다");
+}
+
+/// ★발견이 가르친 이름을 「그런 명령 없음」으로 되돌리면 목록이 거짓말한 것이 된다★ — 그러면 호출자는
+/// 존재하는 이름을 계속 바꿔 가며 재시도한다. 실제로 막힌 것은 **이 입구가 그 주인에게 못 닿는 것**이다.
+#[tokio::test]
+async fn a_client_owned_name_is_told_apart_from_a_name_that_does_not_exist() {
+    let f = fixture("catalog-not-mine").await;
+    f.register_client_command(1, "tab.create", "{}");
+    let (_, listing) = f.catalog().await;
+    assert!(
+        listing["commands"]
+            .as_array()
+            .expect("배열")
+            .iter()
+            .any(|r| r["name"] == "tab.create"),
+        "전제: 발견이 그 이름을 가르쳤다: {listing}"
+    );
+
+    let (status, owned) = f
+        .call(serde_json::json!({ "name": "tab.create", "args": { "window": "main" } }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "봉투로 답한다: {owned}");
+    assert_eq!(
+        owned["code"], "UNSUPPORTED",
+        "이름도 주인도 있다 — 못 하는 것은 이 표면이다: {owned}"
+    );
+    let hint = owned["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("tab.create"), "어느 이름인지 짚어야: {owned}");
+    assert!(
+        hint.contains("exists"),
+        "존재한다는 사실을 말해야(목록과 어긋나지 않게): {owned}"
+    );
+
+    let (_, nowhere) = f.call(serde_json::json!({ "name": "nope.nope" })).await;
+    assert_eq!(
+        nowhere["code"], "UNKNOWN_COMMAND",
+        "아무 데도 없는 이름은 다른 사실이다: {nowhere}"
+    );
+    assert_ne!(
+        nowhere["code"], owned["code"],
+        "두 사실이 한 코드로 뭉개졌다"
+    );
+}
+
+/// 바디가 명령 호출 객체가 아니면 **빈 400 이 아니라 봉투**로 답한다 — 형제 라우트와 같은 규율이다
+/// (호출자가 LLM 이라 사유가 실려야 자기교정이 된다).
+#[tokio::test]
+async fn a_call_body_that_is_not_a_command_object_still_gets_a_reason() {
+    let f = fixture("catalog-bad-body").await;
+    let client = reqwest::Client::new();
+    for raw in [
+        r#"{"name": 5}"#,
+        r#"{"name":"agent.list","name":"agent.new"}"#,
+        r#"{"name":"agent.move","args":{"parent":"lead","parent":null}}"#,
+        r#"["agent.list"]"#,
+        r#"{"name":"agent.list""#,
+        "",
+    ] {
+        let resp = client
+            .post(format!("{}/control/call", f.base))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", f.token))
+            .body(raw)
+            .send()
+            .await
+            .expect("http request");
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        assert_eq!(
+            status,
+            reqwest::StatusCode::OK,
+            "봉투로 답한다: {raw} → {text}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).expect("응답 json");
+        assert_eq!(v["code"], "INVALID_ARGUMENT", "{raw} → {text}");
+        assert!(
+            !v["hint"].as_str().unwrap_or_default().is_empty(),
+            "사유가 비면 자기교정이 안 된다: {raw} → {text}"
+        );
+    }
+    assert_eq!(f.broadcast.count(), 0);
+}
+
+/// ★표가 안 꽂힌 조립에서 두 라우트의 대접이 갈린다★: 호출은 태울 표가 없으니 503 이고, 발견은 명부
+/// 절반을 그대로 낸다 — 그것이 같은 상태에서 WS 목록이 내는 답이라, 여기서 503 을 내면 두 표면이 같은
+/// 상태를 두고 다른 말을 하게 된다.
+#[tokio::test]
+async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_answers() {
+    let f = fixture_with_table("catalog-no-table", false).await;
+    f.register_client_command(1, "tab.create", "{}");
+
+    let (status, body) = f.call(serde_json::json!({ "name": "agent.list" })).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "표 미설정은 503: {body}"
+    );
+
+    let (status, listing) = f.catalog().await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{listing}");
+    let names: Vec<&str> = listing["commands"]
+        .as_array()
+        .expect("배열")
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(names, vec!["tab.create"], "명부 절반은 그대로 나온다");
 }
 
 // ── 지목 규칙 ↔ 우편 입구 교차 대조 ─────────────────────────────────────────────────
