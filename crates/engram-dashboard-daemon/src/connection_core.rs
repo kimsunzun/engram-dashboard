@@ -19,8 +19,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::manager::RenameOutcome as CoreRenameOutcome;
-use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
+// 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
+#[cfg(test)]
+use engram_dashboard_core::agent::manager::default_shell;
 use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::agent::profile::SpawnMode;
 use engram_dashboard_core::agent::types::{
@@ -662,6 +665,16 @@ impl ConnectionCore {
         //   나머지를 알아내려고 등록을 N번 다시 시도해야 한다 — 그런데 등록은 **붙을 때 한 번**이라
         //   (TRD §3-7 조항 1) 다시 보내려면 연결을 다시 맺어야 한다. 그러면 이름 하나당 재접속 한 번이다.
         //   (명부가 자기 검문에서 「틀린 칸을 전부 센다」와 같은 논거 — `CommandTable::check_args`.)
+        // ★목적지가 **응답 문구인데도** 로그 손질기를 쓴다 — 그 갈림의 예외이고, 사유가 둘이다★
+        //   (그 갈림의 정본 = `control::agent::preview` doc: 사용자 대면 문구 = `preview` · 로그 필드 =
+        //   `sanitize_for_log`).
+        //   ① 이 문구를 받는 쪽은 **사람이 아니라 프로그램**이고 그 값은 그쪽의 로그·UI 로 그대로 흘러간다.
+        //      제어문자를 원문으로 되돌려주면 위조 항목을 **상대 로그에** 심어 주는 셈이다 — 우리가 우리
+        //      로그에서 막는 그 일이다.
+        //   ② 원문 대조가 필요한 축이 여기 없다: 등록 패킷은 클라이언트 코드가 만든 것이라 「내가 친 값을
+        //      알아본다」는 이유가 서지 않고, 자를 때는 잘렸다고 말한다(`…`).
+        //   ★이름을 인용부호로 감싸는 형태를 함께 고정한다★ — 같은 값이 명부 끊김 로그에도 실리는데
+        //   (`command_roster` 의 `logged_names`) 자리마다 모양이 갈리면 같은 것을 같은 것으로 못 본다.
         let clashing: Vec<String> = decls
             .iter()
             .filter(|decl| self.locals.claim(&decl.name).is_some())
@@ -913,12 +926,19 @@ impl ConnectionCore {
             }
 
             // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────
+            // ★기본 백엔드 = claude(StreamJson)★ — 이 wire 에는 backend 선택 칸이 없어서(`SpawnByCwd{cwd}`)
+            //   여기 박힌 값이 곧 「고르지 않았을 때 뜨는 것」이다. 셸이 아니라 claude 인 이유: 이 문을
+            //   실제로 쓰는 호출자가 `agent.spawnInto`(에이전트가 CLI 로 부르는 배치 스폰)이고, 그 자리에서
+            //   원하는 것은 대화형 셸이 아니라 **일하는 에이전트**다(사용자 결정 2026-08-20).
+            //   ★스위칭이 생긴 것은 아니다★ — 고정 대상이 바뀐 것뿐이라 이제 **셸을 못 고른다**.
+            //   고르려면 wire 에 칸을 내야 하고 그건 봉투 변경이라 별도 결정이다(ADR-0058 fail-loud 문구도
+            //   그때 함께 고친다 — `src-tauri/src/layout/apply.rs` 의 거절 문구가 "현재 셸"이라 적는다).
             AgentCommand::SpawnByCwd { cwd, request_id } => {
                 let profile = CoreProfile::new(
                     cwd.clone(),
-                    CoreSpawnCommand::Shell {
-                        program: default_shell().to_string(),
-                        args: vec![],
+                    CoreSpawnCommand::Claude {
+                        extra_args: vec![],
+                        output_format: CoreClaudeOutputFormat::StreamJson,
                     },
                     std::path::PathBuf::from(&cwd),
                     vec![],
@@ -999,7 +1019,10 @@ impl ConnectionCore {
                     let out = messaging.handle_profile_deleted(profile_id, &name);
                     tracing::debug!(
                         profile = %profile_id,
-                        name = %name,
+                        // 이름은 클라이언트가 정한 문자열이다 — 비어 있지 않은지만 보고 받으므로
+                        //   (core `profile.rs` 의 검증) 모양·길이는 여기서 묶는다([`sanitize_for_log`]).
+                        //   위 훅에 넘긴 값은 원문 그대로다 — 다듬은 것은 이 로그 필드뿐이다.
+                        name = %sanitize_for_log(&name),
                         skipped_live = out.skipped_live,
                         parked_failed = out.failed_parked,
                         contracts_failed = out.failed_contracts,
@@ -1274,6 +1297,7 @@ impl ConnectionCore {
                     Arc::clone(&self.locals),
                     conn_id,
                     envelope,
+                    crate::command_delivery::ENTRANCE_SOCKET,
                 ));
             }
 
@@ -1473,6 +1497,26 @@ fn note_claimed_owner(
 /// ★폭은 **이름 한 조각**을 재는 값이다★ — 그보다 긴 것을 실어야 하는 자리는 자기 폭을 정해
 /// [`sanitize_within`] 을 직접 부른다. 이 값을 그런 자리에 맞춰 넓히지 말 것: 여기 붙어 있는 호출자
 /// 대부분은 클라이언트가 준 **이름**이고, 그 폭이 넓어지면 로그 한 줄의 크기를 상대가 정하게 된다.
+/// ★적용 범위 — **이 crate 의 로그 필드**이고, 그 안에서도 예외가 열거돼 있다★
+///
+/// 이 문장을 「전부」로 넓히지 말 것: 세 판 연속 그렇게 적혀 있었고 세 판 다 반례가 있었다(그때 반례는
+/// 명부 끊김 줄과 프로필 이름 줄이었다 — 지금은 둘 다 이 함수를 거친다).
+///
+/// - **지키는 것** = `engram-dashboard-daemon` 안에서 **검증 안 된 상대 문자열을 로그 필드에 실을 때**.
+///   소켓 행(이 파일)·배달(`command_delivery::deliver`)·명부 끊김(`command_roster` 의 `logged_names`)·
+///   제어 라우트(`control::mcp_server`·`control::registry`)·메시징 호스트가 같은 함수를 쓴다.
+/// - **예외 ① 데몬이 만든 값** — `conn-<id>` 주인 토큰(`command_roster::CommandRoster::attach` 의
+///   `previous_owner`)처럼 길이·모양이 우리 것인 값은 안 거친다. 그 자리에 「저장하는 값을 바꾸는 커밋이
+///   이 줄을 함께 고쳐야 한다」는 방아쇠가 달려 있다.
+/// - **예외 ② 타입드 값** — `Uuid`·`ErrorCode`·`http::Method`·`Path` 는 문자열이 아니라 타입이 모양을 진다.
+/// - **예외 ③ 이 crate 밖** — 네트워크 행(`engram-dashboard-net`)의 `Origin` 필드는 이 함수를 안 거치고
+///   **HTTP 헤더 문법 검사**에 의존한다(제어문자·개행이 헤더 값에 못 들어간다). 그 축을 이 함수가 지킨다고
+///   읽지 말 것.
+/// - **덮지 않는 축** = 메시지 문자열 끝의 `: {e}` 보간(로깅 컨벤션이 그것만 예외로 허용한다). 이 함수가
+///   묶는 것은 **필드**다.
+///
+/// 형제로 보이는 `control::agent::preview` 는 **응답 문구** 전용이고 제어문자를 흘리므로 로그 자리에 쓰면
+/// 위 위조 항목이 그대로 생긴다(그 함수 doc 이 그 갈림을 적는다).
 pub(crate) fn sanitize_for_log(text: &str) -> String {
     const MAX_CHARS: usize = 64;
     sanitize_within(text, MAX_CHARS)
@@ -2466,22 +2510,10 @@ mod tests {
     // 갈래별 단언(정상 왕복 · 주인 부재 · 찢어진 창 · 마감 · 끊김 정리)은 `command_delivery` 쪽에 있다.
     // 여기서 보는 것은 **dispatch 가 그 배달로 잇는가**와 두 arm 이 wire 로 내는 답이다.
     //
-    // ★`CommandOutcome` 의 거절 warn 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다★ — 아래 경합
-    //   하나 때문이다.
-    //
-    // ★관심 캐시는 **끈적하지 않다**★(tracing 0.1.44 / tracing-core 0.1.36 실측): `with_default` 는
-    //   `Dispatch::new` 를 거치고(`tracing/src/subscriber.rs`), 그것이 `callsite::register_dispatch` →
-    //   `CALLSITES.rebuild_interest` 를 불러 **등록된 모든 callsite 의 관심을 매 capture 머리에서 다시
-    //   계산한다**(`tracing-core/src/callsite.rs`). 그러니 구독자 없이 한 번 때렸다고 그 자리가 영영
-    //   죽지는 않는다 — ★이 문단을 「한 번이라도 밖에서 때리면 굳는다」로 읽지 말 것★(그 말은 틀렸고,
-    //   시험해 본 사람이 이 감싸개를 미신으로 보고 걷어낸다).
-    // ★진짜 하자는 좁고 **스레드를 가로지른다**★: 살아 있는 dispatcher 가 하나뿐인 동안
-    //   (`Dispatchers::rebuilder` → `Rebuilder::JustOne`) callsite 의 **최초 등록**은
-    //   `dispatcher::get_default` 로 **그 스레드의** 기본 구독자에게 묻는다. 그래서 다른 스레드가
-    //   `capture_logs` 한복판인 사이 구독자 없는 스레드가 이 자리를 **처음으로** 등록하면
-    //   `NoSubscriber::register_callsite` 가 `Interest::never` 를 주고, 뒤따를 rebuild 가 없어
-    //   **그 capture 만 빈손**이 된다(경고 계수 0 → 단언 실패). 밖에서 때리는 테스트를 안 두면 그
-    //   「구독자 없는 스레드」가 아예 없다.
+    // ★`CommandOutcome` 의 거절 warn 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다 — 하나라도
+    //   밖에서 때리면 그 callsite 의 관심이 구독자 없는 스레드에서 처음 등록돼 **다른 capture 가 빈손**이
+    //   된다★. 그 하자의 정본(무엇이 참이고 무엇이 미신인가 · 실측한 버전)은 `log_capture` 모듈 헤더다 —
+    //   여기 다시 적지 말 것(두 사본이 갈리면 한쪽만 고쳐진다).
     // ★그렇게 깨지면 고칠 것은 래치가 아니다★ — 래치는 멀쩡하고 깨진 것은 로그 관측 조건이다.
     // dispatch 가 async 라 현재 스레드 런타임으로 감싼다 — `with_default` 는 스레드 로컬이므로 그래야
     //   구독자와 같은 스레드에서 돈다.

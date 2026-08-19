@@ -189,6 +189,10 @@ declare_commands! {
     } -> ok SlotFocusOk {} errors [CONFLICT];
 
     /// 이미 살아 있는 에이전트를 그 슬롯에 붙인다(새로 띄우지 않는다 — 띄우려면 agent.spawnInto).
+    /// ★agent_id 는 UUID 다 — 표시 이름을 넘기지 말 것★: 이 층은 데몬에 실재하는지 확인하지 않고
+    /// (레이아웃이 에이전트 상태를 모르는 것이 격리 규약이다 — ADR-0035) 받은 문자열을 그대로 슬롯에
+    /// 넣는다. 그래서 이름을 넘기면 **거부되지 않고 슬롯만 비어 보인다** — 오류가 없어 원인을 못 찾는다.
+    /// id 는 agent.list 가 준다(실발생 2026-08-20).
     #[effect(Write)]
     #[since(1)]
     "slot.assignAgent" => args SlotAssignAgentArgs {
