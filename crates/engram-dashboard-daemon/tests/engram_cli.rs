@@ -985,9 +985,18 @@ fn engram_commands_lists_every_name_with_its_summary_and_marks_what_it_cannot_ru
         !free_text.contains("second line"),
         "한 명령 = 한 줄이어야: {free_text}"
     );
+    // ★이 행은 **오늘 데몬이 내지 않는 값**을 스크립트한 것이다★ — 목록을 합치는 두 출처가 둘 다
+    //   도달 가능해졌으므로(ADR-0160) 진짜 데몬은 지금 모든 행을 `callable:true` 로 낸다. 그래도
+    //   이 갈래를 재는 이유는 그 칸이 상수가 아니기 때문이다 — 거짓을 받는 날 CLI 가 그걸 화면에
+    //   보여 줘야 한다. ★단 문구가 `UNSUPPORTED` 를 약속하면 안 된다★: 그 코드를 내던 생산자는
+    //   사라졌고(`catalog::not_mine` 삭제), 지금 그 자리에 오는 거절은 데몬이 정하는 다른 코드다.
     assert!(
-        stdout.contains("UNSUPPORTED"),
+        stdout.contains("cannot run"),
         "부를 수 없는 이름이라는 사실이 화면에 보여야: {stdout}"
+    );
+    assert!(
+        !stdout.contains("UNSUPPORTED"),
+        "지워진 오류 코드를 약속하고 있다: {stdout}"
     );
     // 발견 화면은 렌더된 평문이다 — 원문 JSON 을 그대로 흘리지 않는다.
     assert!(
@@ -1453,11 +1462,16 @@ fn run_cli_streams(control_url: &str, args: &[&str]) -> (String, String, i32) {
 }
 
 /// ★부를 수 없다는 판정의 정본은 데몬이다★: 목록이 `callable:false` 라 해도 CLI 가 미리 끊지 않는다 —
-///   끊으면 그 거절이 관측되지 않고, 배선이 붙는 날 CLI 도 함께 고쳐야 한다.
+///   끊으면 그 거절이 관측되지 않는다.
+///
+/// ★거절 코드는 **지금 데몬이 실제로 내는 것**이어야 한다★: 예전 이 시험은 `UNSUPPORTED` 를
+///   스크립트했는데, 그 코드를 내던 생산자가 중계 도입으로 사라졌다(ADR-0160). 스크립트된 스텀은
+///   무엇이든 되돌려 주므로 그 시험은 **어떤 구현에서도 초록**이었다. 지금 그 이름을 부르면 중계되고,
+///   주인이 마감까지 안 답하면 `TIMEOUT` 이 돌아온다.
 #[test]
-fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_unsupported() {
+fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_refusal() {
     let refusal = ok_response(
-        r#"{"status":"error","code":"UNSUPPORTED","hint":"'tab.create' exists but it belongs to a connected client"}"#,
+        r#"{"status":"error","code":"TIMEOUT","hint":"'tab.create' was handed to its owner but no outcome came back before the deadline"}"#,
     );
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), refusal]);
     let url = format!("http://{host}:{port}");
@@ -1476,9 +1490,13 @@ fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_unsuppor
         requests[1]
     );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
-    assert_eq!(
-        v["code"], "UNSUPPORTED",
-        "거절 사유가 그대로 흘러야: {stdout}"
+    assert_eq!(v["code"], "TIMEOUT", "거절 사유가 그대로 흘러야: {stdout}");
+    // ★호출은 자기 번호를 실어 보낸다★(ADR-0161 결정 2) — 안 실으면 데몬이 요청마다 새로 발급해
+    //   재실행 방지 좌석이 구조적으로 한 번도 안 걸린다.
+    assert!(
+        requests[1].contains("request_id"),
+        "호출 바디에 요청 번호가 실려야: {}",
+        requests[1]
     );
 }
 

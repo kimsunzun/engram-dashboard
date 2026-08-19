@@ -52,27 +52,55 @@
 //! ## ★상관 표와 명부는 다른 표다 — 합치지 않는다★(TRD §4-④)
 //!
 //! 수명 단위가 다르다: 상관 표의 항목은 **왕복 하나**에 매달려 마감시각으로도 사라지고, 명부 등록은
-//! **연결 하나**에 매달려 종료로만 사라진다. 합치면 마감시각 하나가 어휘를 지운다. 그래서 이 모듈의
-//! 정리는 명부의 단일 제거 지점([`CommandRoster::detach`])을 늘리지 않는다.
+//! **연결 하나**에 매달려 종료로만 사라진다. 합치면 마감시각 하나가 어휘를 지운다.
+//!
+//! ★이 모듈은 [`CommandRoster::detach`] 를 **한 자리에서** 부른다 — [`CallerSeat`] 의 소멸자다★: 그
+//! 호출은 자기가 세운 가짜 호출자 연결 하나를 거둘 뿐이고(이름을 등록하지 않으므로 지울 명부 항목이
+//! 없다), 실 연결의 끊김 정리와 번호 공간이 겹치지 않는다. 그 카브아웃의 정본은 `detach` 의 doc 이다.
+//! ★그 소멸자는 **두 표를 함께** 거둔다★ — 실 연결의 끊김 훅과 같은 짝이다(`detach` + `drop_origin`).
+//! 가짜 연결에는 그 훅이 없으므로, 한쪽만 거두면 나머지 한쪽이 프로세스 수명 내내 남는다.
+//! ★「함께」가 서려면 **첫 줄이 패닉하지 않아야** 한다 — 그것을 지는 것은 두 표의 정리용 잠금이다★:
+//! 명부는 [`CommandRoster::detach`] 안의 `lock_for_cleanup`, 상관 표는
+//! [`CommandDeliveries::lock_for_cleanup`] 이 각각 오염된 잠금을 `into_inner` 로 통과한다. 어느 한쪽을
+//! 패닉하는 잠금으로 되돌리면 그 줄에서 소멸자가 죽어 **뒷줄이 안 돌고**(그 표가 샌다) 되감기 중이면
+//! 이중 패닉이라 프로세스가 abort 한다. ★단 릴리스에는 오염 자체가 없다★ — `panic = "abort"` 라
+//! 이 규율이 실제로 값을 하는 것은 debug·테스트 빌드다(그 범위 = 두 `lock_for_cleanup` 의 doc).
+//! ★상관 표 정리에서 명부를 건드리지 않는다★ — 마감·완료·끊김 정리는 전부 자리 표 안에서 끝난다(위
+//! 소멸자는 그 반대 방향이다: 연결 수명이 두 표를 함께 거둔다).
+//!
+//! ## ★입구는 둘, 기계는 하나★(ADR-0160)
+//!
+//! [`deliver`] 를 부르는 자리가 둘이다 — 소켓 디스패치와 제어 라우트([`CommandBus::invoke`]). 둘은 같은
+//! 자리 표·같은 마감·같은 중복 방지를 쓴다. ★입구별로 다른 장치를 만들지 말 것★ — 대기표가 둘이면 한
+//! 입구가 연 자리를 다른 입구가 못 봐서, 같은 번호의 재질의가 같은 조작을 두 번 적용한다.
+//!
+//! ★단 **3단계 중 1단계는 소켓 입구만 탄다**★ — 제어 라우트는 데몬 자기 이름을 [`CommandBus::invoke`] 가
+//! 거절하고, 그 이름의 답은 판정부(`control::catalog::handle_call`)가 자기 자리에서 낸다. 이유는 취소다:
+//! 1단계 본문은 `spawn_blocking` 이라 취소되지 않는데 HTTP 핸들러 future 는 취소되므로, 그 조합에서는
+//! 자리·상한이 뒷정리 없이 남는다(전문 = 그 거절 자리의 주석). 그래서 「입구는 둘」은 **2·3단계**의
+//! 이야기이고, 1단계의 입구 라벨([`LocalCommands::run`] 의 `entrance`)은 오늘 값이 하나다.
 //!
 //! ## 진입점
 //!
 //! [`deliver`] 가 왕복 하나를 통째로 돈다(연결 태스크 **밖**에서 돌아야 한다 — 그 사유는 그 함수 doc) ·
+//! [`CommandBus::invoke`] 가 연결 없는 호출자(제어 라우트)를 그 함수에 태우고 ·
 //! [`CommandDeliveries::complete`] 가 주인의 결말을 그 왕복에 붙이고 ·
 //! [`CommandDeliveries::expire`] 와 [`CommandDeliveries::drop_origin`] 이 나머지 둘을 거둔다.
 // ADR-0154
+// ADR-0160
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
-    Effect, ErrorCode, RequestId, RetryMode,
+    Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
 };
-use engram_dashboard_net::frame_port::{ConnId, Frame};
+use engram_dashboard_net::frame_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
 
@@ -81,6 +109,19 @@ use crate::connection_core::{event_json, sanitize_for_log, sanitize_within};
 
 /// 물어본 연결이 이미 떠났을 때의 문구 — 이 답장도 갈 곳이 없다(그 연결이 사라졌다).
 const CALLER_ALREADY_GONE: &str = "the calling connection went away before the envelope was sent";
+
+/// 배달을 부른 문 — 로그 필드 `entrance` 의 값이자 [`deliver`] 의 인자다.
+///
+/// ★리터럴을 자리마다 적지 말 것★: 이 필드로 두 입구의 사고를 가르는 것이 목적인데, 철자가 자리마다
+/// 갈리면 그 필터가 조용히 절반만 잡는다. `"cli"` 는 배달을 안 타는 제어 라우트의 **직접 실행** 몫이라
+/// 여기 없다(그 자리 = `control::commands::call_daemon_command` 의 호출부).
+pub const ENTRANCE_SOCKET: &str = "bus";
+/// 제어 라우트가 남의 이름으로 태운 중계.
+///
+/// ★이 값을 내는 자리가 둘이고 **같은 호출의 앞뒤**다★: 중계를 시작할 때 누가 시켰는지 적는 줄
+/// (`control::mcp_server::control_call_handler`)과 그 결말을 적는 줄([`CommandBus::invoke`]). 한쪽만
+/// 이 값을 쓰면 「누가 시켰나」와 「어떻게 끝났나」가 다른 라벨로 갈려 필터가 절반만 잡는다.
+pub const ENTRANCE_CONTROL: &str = "control";
 
 /// 이 경로가 짓는 **모든** 실패 답 — ★재시도 지시는 예외 없이 `Never` 다★.
 ///
@@ -104,6 +145,28 @@ const CALLER_ALREADY_GONE: &str = "the calling connection went away before the e
 fn no_retry(code: ErrorCode, detail: impl Into<String>) -> CommandError {
     CommandError::with_retry(code, detail, RetryMode::Never)
 }
+
+/// 마감이 호출자의 **침묵 한도** 안에 드는가 — ★부등식은 이 함수 하나에만 있다★(ADR-0161 결정 3).
+///
+/// 산문으로 두면 어느 한쪽을 고치는 편집이 관계를 조용히 뒤집는다 — 실제로 뒤집혀 있었고, 증상은
+/// 「데몬에 닿지 못했다」라는 **거짓 보고**였다(근거 전문 = [`CommandDeliveries::DEFAULT_DEADLINE`]).
+/// ★그런데 상수만 재는 것으로는 **도는 값**을 못 문다★: 운영이 보는 마감은 [`CommandDeliveries`] 의
+/// 필드이고 그 값은 [`CommandDeliveries::with_clock`] 이 정한다. 그래서 이 술어를 두 곳에 건다 —
+/// 기본값은 아래 `const` 단언이(컴파일 단계), 주입값은 그 생성자가(구성 단계) 같은 함수로 판정한다.
+/// ★밀리초로 견준다 — 초로 견주면 이 판정이 자기 산문보다 **느슨해진다**★: `as_secs()` 는 버리는 절삭이라
+/// 마감 8.5초 + 주기 1.4초가 `8 + 1 < 10` 으로 통과하는데 실제 최악은 9.9초다. 아래 곱은 `u128` 산술이라
+/// 넘칠 수 없다.
+const fn fits_caller_silence_window(deadline: Duration) -> bool {
+    deadline.as_millis()
+        + CommandDeliveries::SWEEP_INTERVAL.as_millis()
+        + CommandDeliveries::CALLER_MARGIN.as_millis()
+        <= (engram_dashboard_core::agent::types::CLI_CONTROL_READ_TIMEOUT_SECS as u128) * 1_000
+}
+
+const _: () = assert!(
+    fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE),
+    "명령 마감 + 수거 주기 + 여유가 CLI 의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊는다"
+);
 
 /// 시계 seam — 마감 판정이 실시간에 묶이지 않게 한다.
 ///
@@ -206,8 +269,9 @@ enum SeatState {
     /// 기억)를 두면 두 권위가 한 이름 공간을 두고 갈린다: 실행하지 않은 자리가 기억에 남거나, 무관한 읽기
     /// 트래픽이 기억을 밀어내거나, 둘의 수명이 어긋난다. 자리가 곧 그 번호의 임자다.
     /// ★보유 기간은 마감 한 창이다★(`until`) — 그 창이 지나면 수거기가 놓는다([`CommandDeliveries::expire`]).
-    /// 끊긴 호출자의 것은 창을 안 기다리고 정리에서 놓는다([`CommandDeliveries::drop_origin`]) — 지켜 줄
-    /// 재질의를 낼 주체가 사라졌기 때문이다.
+    /// ★끊긴 호출자의 것도 창이 지날 때까지 **남는다**★: [`CommandDeliveries::drop_origin`] 은 1단계 자리를
+    /// 건드리지 않는다(그 필터의 사유가 그 함수에 있다 — 끊김은 오히려 그 보유가 가장 필요한 사건이다).
+    /// 놓는 자리는 수거기 하나뿐이다.
     Retained { until: Instant },
 }
 
@@ -283,10 +347,17 @@ enum Seat {
 ///
 /// ## 상주 — **한 축만 닫혀 있다**
 ///
-/// - **진행 중인 자리**: 상한이 없다. 열 수 있는 자리는 왕복 하나당 하나이고 마감(기본 10초)이 걷어 가므로
-///   무한정 자라지는 않지만, **상한이 있는 것과는 다르다** — 자리 수도, 자리가 드는 이름·인자
-///   ([`Pending::name`]·[`Pending::args`]) 크기도 안 잰다. 안 닫는 이유는 이 입구가 **인증 경계 안**이라서다
-///   (ADR-0153). 닫는다면 명부의 상한이 선례다(`engram_dashboard_command::Roster::MAX_NAMES`).
+/// - **진행 중인 자리**: 이 표 자체에는 상한이 없다. 열 수 있는 자리는 왕복 하나당 하나이고 마감
+///   ([`CommandDeliveries::DEFAULT_DEADLINE`])이 걷어 가므로 무한정 자라지는 않지만, **상한이 있는 것과는
+///   다르다** — 자리 수도, 자리가 드는 이름·인자([`Pending::name`]·[`Pending::args`]) 크기도 안 잰다.
+///   ★입구별로 사정이 갈린다★: 제어 라우트 쪽은 그 문이 자기 상한을 진다([`MAX_RELAYED_IN_FLIGHT`] —
+///   전역 64). 소켓 쪽은 상한 없이 남아 있고, 그것을 견디는 근거는 **연결 수명**이다 — 그 입구의 자리는
+///   연결 하나에 매달려 있어 끊김 정리가 함께 거둔다([`CommandDeliveries::drop_origin`]).
+///   ★「인증 경계 안이니 신뢰하는 클라이언트 하나」로 읽지 말 것 — 그 전제는 이제 소켓 쪽만의 것이다★:
+///   두 입구가 다 인증 경계 안이긴 하지만(ADR-0153 — 소켓은 데몬 토큰, 제어 라우트는 발급된 에이전트
+///   자격증명) 뒤쪽 열쇠는 **에이전트마다 하나씩 여럿**이고 서로를 모른다. 그래서 그 문의 상한은 신뢰가
+///   아니라 그 상수가 진다. 이 표에 상한을 두게 되면 선례는 명부의 것이다
+///   (`engram_dashboard_command::Roster::MAX_NAMES`).
 /// - **보유 중인 자리**: 닫혀 있다. 이쪽은 왕복이 끝난 **뒤에도** 한 창을 더 살아서 상주가 「동시성」이 아니라
 ///   **도착률 × 창**이 된다 — 그래서 시각(창)과 개수([`MAX_RETAINED_LOCAL`]) 둘로 묶고, 넘길 때 페이로드를
 ///   버린다([`CommandDeliveries::settle_local`]). ★이 축을 「마감이 걷어 가니 괜찮다」로 읽지 말 것★ —
@@ -320,6 +391,18 @@ struct Seats {
     /// 재무장이 아예 안 돼 **프로세스 수명 내내 한 줄**뿐이다 — 가장 시끄러워야 할 상황이 가장 조용하다.
     /// 시각으로 열면 두 쪽이 같이 풀린다: 최대 [`CEILING_WARN_INTERVAL`] 마다 한 줄, 물린 동안에도 계속.
     ceiling_warned_at: Option<Instant>,
+    /// ★이 표에 수거기가 **이미 붙었나**★ — 두 번째를 붙이는 조립을 [`CommandDeliveries::spawn_sweeper`]
+    /// 가 이 값으로 거절한다.
+    ///
+    /// ★가시성만으로는 못 막는다(그 근거가 이 칸이다)★: 표는 [`CommandBus::deliveries`] 로 공유되고
+    /// `CommandDeliveries` 는 `Clone` 이며 [`CommandBus::new`] 는 `pub` 이라, **모듈 밖에서도**
+    /// `CommandBus::new(.., bus.deliveries().clone(), ..)` 로 둘째 수거기를 세울 수 있었다. 그 표식이
+    /// 떨어지는 순간 나가는 길의 [`CommandDeliveries::drain`] 이 **살아 있는 데몬의 공유 표를 닫아**
+    /// 그 뒤 모든 왕복이 [`Seat::Closed`] 가 된다(데몬은 멀쩡한데 명령만 전부 「종료 중」).
+    /// ★그래서 이 칸은 **표 자신이** 자기 수거기를 기억하는 형태다★ — 그 상태를 만들려는 조립은 조용히
+    /// 성립하는 대신 그 자리에서 패닉한다(선례 = `CommandTable::new` 의 중복 선언 패닉 — 조립 사고는
+    /// 조립보다 먼저 터뜨린다).
+    swept: bool,
 }
 
 impl Seats {
@@ -359,7 +442,26 @@ impl CommandDeliveries {
     /// ★계약상 마감은 **호출자가 정한다** — 오늘 그 칸이 wire 에 없어 데몬이 기본값을 쓴다★:
     /// `CommandEnvelope` 에 마감 칸이 없으므로 부르는 쪽이 값을 실을 방법이 아직 없다. 칸이 생기면
     /// (additive) 여기가 그 값의 fallback 이 된다.
-    pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(10);
+    ///
+    /// ★이 값은 호출자의 **침묵 한도** 안에 있어야 한다 — [`fits_caller_silence_window`] 가 그것을 문다★:
+    /// 제어 라우트(ADR-0160)의 호출자는 `engram` CLI 이고 그 소켓 상한이
+    /// [`CLI_CONTROL_READ_TIMEOUT_SECS`] 다. 넘으면 **답장이 나가기 전에 클라이언트가 끊어**, 사용자는
+    /// 「데몬에 닿지 못했다」를 보고(거짓이다 — 닿았고 적용됐을 수도 있다) 데몬은 답장을 낼 곳을 잃는다.
+    /// 옛 값 10초가 정확히 그 상태였다: 양쪽이 10초인데 CLI 의 시계가 먼저 시작하고(연결·파싱·blocking 풀
+    /// 스케줄링) 이쪽 답은 [`CommandDeliveries::SWEEP_INTERVAL`] 뒤에야 나가, 클라이언트가 **결정적으로**
+    /// 먼저 끊었다.
+    /// ★그 상한은 **총 예산이 아니다 — `set_read_timeout` 이라 「침묵 한도」다**★(실측 — CLI `post_json`):
+    /// 클라이언트가 포기하는 조건은 「요청을 보낸 뒤 **한 번의 read 가** 그 시간 안에 아무 바이트도 못
+    /// 받는 것」이다. 총 소요가 아니라 **연속 무응답 구간**을 잰다. 이 라우트가 답 전에 아무것도 안 보내므로
+    /// 오늘은 둘이 사실상 같지만, 그 성질에 기대는 문장을 쓰지 말 것 — 중간에 바이트를 흘리는 형태(청크·
+    /// 진행 알림)로 바뀌면 총 소요는 이 값을 넘어도 클라이언트는 안 끊고, 반대로 이 값을 「예산」으로 읽고
+    /// 총 소요를 재는 시험은 그날부터 엉뚱한 것을 잰다.
+    /// ★7초의 셈★: 한도 10 − 수거 주기 1 − 여유 2([`CommandDeliveries::CALLER_MARGIN`]) = 7. 처리량이 아니라
+    /// **관측 가능성**을 사는 값이라 여유 쪽에 치우쳐 잡는다.
+    /// ★소켓 입구도 같은 값을 쓴다 — 그게 요점이다★: 마감은 자리 표 하나의 성질이고 입구마다 갈리면
+    /// 두 기계가 된다(모듈 헤더). 셸 쪽에는 이 값에 묶인 상수가 없다(실측 — `HANDSHAKE_TIMEOUT` 은 핸드셰이크
+    /// 전용이다).
+    pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(7);
 
     /// 만료 수거 주기 — 마감 초과가 이 간격만큼 늦게 관측될 수 있다.
     ///
@@ -367,11 +469,25 @@ impl CommandDeliveries {
     /// 마감이 영영 안 지나가고, 그러면 호출자가 답도 오류도 없이 매달린다(ADR-0154 이 지목한 무한 대기).
     const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
+    /// 왕복 **밖**에서 흘러가는 시간의 몫 — 연결·요청 파싱·`spawn_blocking` 대기·응답 직렬화.
+    ///
+    /// ★부등식에 이 항이 있어야 산문이 참이 된다★: 없으면 마감 8.9초도 통과하는데, 그 값은 위 넷이
+    /// 0.1초만 써도 클라이언트의 침묵 한도를 넘긴다. 「여유 2초」를 문장으로만 적어 두었을 때 실제로 그
+    /// 상태였다.
+    const CALLER_MARGIN: Duration = Duration::from_secs(2);
+
     pub fn new() -> Self {
         Self::with_clock(Arc::new(SystemClock), Self::DEFAULT_DEADLINE)
     }
 
-    pub fn with_clock(clock: Arc<dyn Clock>, deadline: Duration) -> Self {
+    /// ★마감을 **주입**하는 유일한 자리이므로 여기서 부등식을 다시 문다★(ADR-0161 결정 3): 상수만 재는
+    /// 단언은 이 인자를 못 본다 — 실제로 시험 하네스가 그 관계를 어기는 값을 넣고 전 스위트를 돌던 적이 있다.
+    /// ★`pub(crate)` 인 것도 그 일부다★ — 이 문을 crate 밖으로 열면 부등식을 아는 곳 밖에서 마감이 정해진다.
+    pub(crate) fn with_clock(clock: Arc<dyn Clock>, deadline: Duration) -> Self {
+        assert!(
+            fits_caller_silence_window(deadline),
+            "주입된 명령 마감이 호출자의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊어 TIMEOUT 이 도달 불가가 된다(CommandDeliveries::DEFAULT_DEADLINE doc)"
+        );
         Self {
             inner: Arc::new(Mutex::new(Seats::default())),
             clock,
@@ -397,14 +513,39 @@ impl CommandDeliveries {
     ///
     /// ★나가는 길에 [`CommandDeliveries::drain`] 을 부르는 것이 종료를 유계로 만든다★: 배달 태스크는
     /// 자기 답장 자리를 기다리는데 그 자리의 **보내는 쪽이 이 표 안에** 있다. 비우지 않고 끝내면 그
-    /// 태스크들은 마감(기본 10초)까지 깨어날 계기가 없고, 그동안 표와 태스크가 「종료했다」고 보고된
+    /// 태스크들은 마감([`CommandDeliveries::DEFAULT_DEADLINE`])까지 깨어날 계기가 없고, 그동안 표와 태스크가 「종료했다」고 보고된
     /// 시점보다 오래 산다. 비우면 전부 **즉시** 풀린다.
     /// ★반환한 핸들을 버리지 말 것★ — 조립부가 이것을 기다려야 「수거기가 멈췄다」가 관측된다.
+    ///
+    /// ★한 표에 수거기는 **하나뿐이고, 그것을 지는 것은 가시성이 아니라 표의 표식이다**★
+    ///
+    /// 이 함수가 `pub` 이 아닌 것은 필요조건일 뿐 충분조건이 아니었다: 표는 [`CommandBus::deliveries`] 로
+    /// 공유되고 `CommandDeliveries` 는 `Clone` 이며 [`CommandBus::new`] 는 `pub` 이라, 모듈 밖에서
+    /// `CommandBus::new(.., bus.deliveries().clone(), ..)` 한 줄이 **살아 있는 데몬의 공유 표에** 둘째
+    /// 수거기를 붙일 수 있었다. 그 표식이 떨어지면 나가는 길의 [`CommandDeliveries::drain`] 이 그 표를
+    /// 닫아 그 뒤 모든 왕복이 [`Seat::Closed`] 로 반려된다.
+    /// ★그래서 표가 자기 수거기를 기억하고([`Seats::swept`]) 둘째 요구를 **패닉으로** 끊는다★ — 조립
+    /// 사고이므로 조용히 성립하는 쪽보다 그 자리에서 터지는 쪽이 값에 맞다. 그 선례가
+    /// `CommandTable::new` 의 중복 선언 패닉인데, ★그 선례가 **요청 경로 핸들러 무패닉**(TRD §4-⑨)의 예외가
+    /// 아니라 **그 축 밖**이라는 점이 이 자리의 근거다★: 그 조항이 묶는 것은 남이 보낸 요청을 처리하는
+    /// 핸들러이고, 이것은 조립 시점 불변식이라 그 시점에 요청이 존재하지 않는다(어길 수 있는 것은 데몬을
+    /// 짜는 코드뿐이고, 그 잘못은 트래픽으로 도달할 수 없다). 정상 조립에서 이 자리를 부르는 것은
+    /// [`CommandBus::new`] 하나다.
+    /// ★단언은 잠금 **밖**이다 — 그렇지 않으면 이 단언이 자기가 지키려는 상태를 만든다★: 되감기가 가드를
+    /// 떨어뜨려 [`Seats`] 의 잠금이 오염되고, 그러면 살아 있는 데몬의 그 뒤 모든 명령이
+    /// [`CommandDeliveries::lock`] 에서 죽는다(정리 경로만 조용히 지나간다 — 표식이 막으려던 것과 같은
+    /// 「공유 표가 망가진」 상태다). 읽기와 세우기가 임계 구역 안에서 한 번에 끝나므로 밖에서 재도 원자성은
+    /// 그대로다. 회귀망 = `tests::a_refused_second_sweeper_leaves_the_shared_table_usable`.
     #[must_use = "조립부가 이 핸들을 기다려야 종료가 유계다"]
-    pub fn spawn_sweeper(
-        &self,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> tokio::task::JoinHandle<()> {
+    fn spawn_sweeper(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+        let already_swept = {
+            let mut table = self.lock();
+            std::mem::replace(&mut table.swept, true)
+        };
+        assert!(
+            !already_swept,
+            "이 자리 표에는 이미 수거기가 붙어 있다 — 둘째 수거기는 나가는 길에 공유 표를 닫아 그 뒤 모든 명령을 「종료 중」으로 반려한다(CommandBus::new 에 남의 CommandDeliveries 를 넘겼는지 볼 것)"
+        );
         let deliveries = self.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Self::SWEEP_INTERVAL);
@@ -449,7 +590,10 @@ impl CommandDeliveries {
     /// 살아 있고(떼어 낸 spawn 이라 종료 수신기가 없다) 데몬은 세션 정리·flush 에 수 초를 더 쓴다.
     /// 닫힌 뒤의 질의는 [`Seat::Closed`] 로 **즉시 반려**되므로 「종료는 유계다」가 그 창에서도 선다.
     /// ★닫은 뒤엔 자리를 통째로 지운다★ — 재사용을 막을 이유(같은 키의 새 왕복)가 닫힘으로 이미 사라졌다.
-    pub fn drain(&self) -> usize {
+    ///
+    /// ★`pub` 이 아니다★ — 표를 닫는 동사이므로 부를 수 있는 자리가 종료 경로 하나여야 한다(사유 전문 =
+    /// [`CommandDeliveries::spawn_sweeper`]). 유일한 호출자가 그 수거기다.
+    fn drain(&self) -> usize {
         // 잠금 밖에서 답한다 — 근거는 [`CommandDeliveries::expire`] 와 같다.
         let outstanding: Vec<(RequestId, Pending)> = {
             let mut table = self.lock();
@@ -599,7 +743,11 @@ impl CommandDeliveries {
     /// ★반환 `Err` 는 로그를 남기고 온다★ — 전역 상한을 친 것은 운영 사건인데, 안 남기면 유일한 목격자가
     /// **거절당한 호출자**뿐이다(로깅 컨벤션 「무로그 삼킴」). 한 번 친 뒤로는 셈이 상한 아래로 내려갈
     /// 때까지 조용하다 — 거절마다 적으면 로그 크기를 상대가 정한다.
-    fn reserve_local_slot(&self, name: &str) -> Result<LocalGuard, CommandError> {
+    fn reserve_local_slot(
+        &self,
+        name: &str,
+        entrance: &'static str,
+    ) -> Result<LocalGuard, CommandError> {
         let now = self.clock.now();
         let mut table = self.lock();
         if table.local_running >= self.max_local {
@@ -610,7 +758,7 @@ impl CommandDeliveries {
             if due {
                 table.ceiling_warned_at = Some(now);
                 tracing::warn!(
-                    entrance = "bus",
+                    entrance,
                     command = name,
                     running,
                     ceiling = self.max_local,
@@ -638,10 +786,7 @@ impl CommandDeliveries {
     /// 닫혀 결국 계열 전체가 막히므로, 오염된 잠금이라도 **속을 꺼내 뺄셈은 반드시 한다**(그 시점에 표가
     /// 어떤 상태든, 세는 값이 실제보다 큰 채로 굳는 것보다 낫다).
     fn release_local_slot(&self) {
-        let mut table = match self.inner.lock() {
-            Ok(table) => table,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut table = self.lock_for_cleanup();
         // 표식지기가 정확히 한 번 부르므로 이 뺄셈도 한 번이다 — 그래도 saturating 인 것은 셈이 음수로
         //   돌아 상한이 영원히 열리는 쪽이 한 칸 새는 쪽보다 나쁘기 때문이다.
         table.local_running = table.local_running.saturating_sub(1);
@@ -700,9 +845,15 @@ impl CommandDeliveries {
     /// 적용되고 같은 키의 프레임도 둘이 된다). 자리는 [`CommandDeliveries::release`] 가 프레임을 내보낸
     /// 뒤에 놓는다. 그 사이에 온 재질의는 [`Seat::Coalesced`] 로 접혀 **나가는 그 한 장**을 같이 쓴다.
     ///
-    /// ★어느 연결이 보냈는지는 보지 않는다★: 상관 키가 추측 불가한 난수(v4 UUID)이고, 이 소켓은 이미 인증
-    /// 경계 안이라 문자열 지식만으로 신뢰한다(ADR-0153). 보낸 연결까지 대조하려면 표가 주인 연결도 들어야
-    /// 하는데, 그러면 주인이 재접속한 왕복이 자기 답을 못 붙인다.
+    /// ★어느 연결이 보냈는지는 보지 않는다★: 이 결말이 도착하는 문은 **소켓 하나뿐이고**(운영 호출자 =
+    /// `connection_core` 의 디스패치) 그 문은 데몬 토큰으로 이미 인증 경계 안이라, 상관 키 문자열을 아는
+    /// 것만으로 신뢰한다(ADR-0153). 보낸 연결까지 대조하려면 표가 주인 연결도 들어야 하는데, 그러면 주인이
+    /// 재접속한 왕복이 자기 답을 못 붙인다.
+    /// ★「추측 불가한 난수라서 안전하다」로 읽지 말 것 — 그 다리는 이제 없다★: 키는 호출자가 실어 보낼 수
+    /// 있고(ADR-0161 결정 1) 데몬이 요구하는 것은 **UUID 문법**뿐이라(`control::catalog` 의 `parse_str`)
+    /// nil 이나 v4 아닌 값도 통과한다. 즉 예측 가능한 키가 이 표에 앉을 수 있다. 오늘 그것이 문제가 안 되는
+    /// 근거는 **이 함수에 닿는 문이 제어 라우트가 아니라는 사실 하나**다 — 그 라우트의 호출자는 결말을 보낼
+    /// 수단이 없다. 그 문이 하나라도 늘면 이 자리부터 다시 봐야 한다.
     /// ★단 **봉투를 아무에게도 안 보낸 왕복**은 예외다★ — 그 자리는 결말을 받을 이유가 없으므로 거절한다
     /// ([`OutcomeLanding::NotDelegated`] · 근거 = [`Pending::local`]).
     pub fn complete(&self, reply: CommandReply) -> OutcomeLanding {
@@ -807,7 +958,8 @@ impl CommandDeliveries {
     pub fn drop_origin(&self, conn_id: ConnId) -> usize {
         // 거둔 항목은 잠금 **밖에서** 떨어뜨린다 — 소멸자가 기다리던 태스크를 깨운다(위 `expire` 와 같은 이유).
         let dropped: Vec<Pending> = {
-            let mut table = self.lock();
+            // ★이 함수는 소멸자에서도 불린다([`CallerSeat`])★ — 그래서 잠금 실패에 패닉하지 않는다.
+            let mut table = self.lock_for_cleanup();
             let mine: Vec<RequestId> = table
                 .open
                 .iter()
@@ -837,6 +989,26 @@ impl CommandDeliveries {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Seats> {
         self.inner.lock().expect("command deliveries poisoned")
+    }
+
+    /// 잠금 실패에 패닉하지 않는 획득 — ★**소멸자 경로 전용**이다★.
+    ///
+    /// 형제 [`CommandDeliveries::lock`] 은 오염된 표를 계속 쓰는 것을 막으려 패닉하지만, 소멸자 안에서
+    /// 패닉하면(되감기 중이면 곧바로 abort) 그 대가가 이 정리 하나가 감당할 값을 넘는다. 그리고 정리를
+    /// 건너뛰는 것 자체가 이 표의 손해다 — 못 놓은 자리는 아무도 다시 놓아 주지 않는다.
+    ///
+    /// ★이 규율은 **표마다 따로 서야 한다**★: [`CallerSeat`] 의 소멸자는 명부를 먼저 거두므로, 그 줄이
+    /// 패닉하는 잠금을 쓰면 이 함수는 아예 안 불린다. 그래서 명부 쪽에도 같은 짝이 있다
+    /// ([`CommandRoster::detach`] 안의 `lock_for_cleanup`) — 둘 중 하나만 있으면 「두 표를 함께 거둔다」가
+    /// 거짓이 된다.
+    /// ★릴리스에서는 이 갈래에 닿지 못한다★ — `panic = "abort"` 라 오염이 생기지 않는다(그래서 이것이
+    /// 지키는 것은 debug·테스트 빌드다). 그 사실을 근거로 걷지 말 것: 그 빌드에서 새는 표가 회귀 시험의
+    /// 관측을 그대로 망친다.
+    fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Seats> {
+        match self.inner.lock() {
+            Ok(table) => table,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -1013,6 +1185,7 @@ pub trait LocalCommands: Send + Sync {
         &self,
         name: &str,
         args: &mut serde_json::Value,
+        entrance: &'static str,
     ) -> Option<Result<serde_json::Value, CommandError>>;
 
     /// 이 데몬이 스스로 답하는 이름 전량 — 발견(`ListCommands`)이 명부와 **합쳐서** 내린다.
@@ -1031,6 +1204,7 @@ impl LocalCommands for NoLocalCommands {
         &self,
         _name: &str,
         _args: &mut serde_json::Value,
+        _entrance: &'static str,
     ) -> Option<Result<serde_json::Value, CommandError>> {
         None
     }
@@ -1184,6 +1358,7 @@ fn spawn_local(
     roster: CommandRoster,
     origin: ConnId,
     envelope: CommandEnvelope,
+    entrance: &'static str,
 ) -> tokio::task::JoinHandle<(
     CommandEnvelope,
     Option<Result<serde_json::Value, CommandError>>,
@@ -1209,7 +1384,7 @@ fn spawn_local(
                 Some(Err(no_retry(ErrorCode::Conflict, CALLER_ALREADY_GONE))),
             );
         }
-        let outcome = locals.run(&envelope.name, &mut envelope.args);
+        let outcome = locals.run(&envelope.name, &mut envelope.args, entrance);
         (envelope, outcome)
     })
 }
@@ -1228,7 +1403,12 @@ fn spawn_local(
 /// crate 의 `route` 가 쥔 것이고(홉 공통), 여기에 `catch_unwind` 를 하나 더 두면 같은 정책이 두 곳이 된다.
 /// 게다가 릴리즈 프로필은 `panic = "abort"` 라 어느 그물도 그 빌드에서는 실효가 없다 — 실효가 있는 것은
 /// **이 로그 한 줄**이다.
-fn fold_local(joined: LocalJoin, request_id: RequestId, name: &str) -> CommandReply {
+fn fold_local(
+    joined: LocalJoin,
+    request_id: RequestId,
+    name: &str,
+    entrance: &'static str,
+) -> CommandReply {
     match joined {
         Ok((_, Some(outcome))) => CommandReply {
             request_id,
@@ -1239,7 +1419,7 @@ fn fold_local(joined: LocalJoin, request_id: RequestId, name: &str) -> CommandRe
         //   주인의 정당한 결말이 거절되고 끊김 정리도 이 자리를 안 치운다 — 조용한 어긋남 대신 드러낸다.
         Ok((envelope, None)) => {
             tracing::error!(
-                entrance = "bus",
+                entrance,
                 command = name,
                 %request_id,
                 "1단계 표가 자기 이름이라 해 놓고 빈손을 냈다 — 라우팅 권위(`claim`)와 실행이 갈렸다"
@@ -1256,7 +1436,7 @@ fn fold_local(joined: LocalJoin, request_id: RequestId, name: &str) -> CommandRe
             )
         }
         Err(joined) => {
-            log_local_death(&joined, request_id, name);
+            log_local_death(&joined, request_id, name, entrance);
             CommandReply::err(
                 request_id,
                 no_retry(
@@ -1271,9 +1451,14 @@ fn fold_local(joined: LocalJoin, request_id: RequestId, name: &str) -> CommandRe
 /// 본문이 답 없이 끝난 사건 — ★두 갈래(마감 전·마감 후)가 **같은 한 줄**을 쓴다★.
 ///
 /// 필드 모양을 갈래마다 따로 지으면 한쪽만 고쳐지고 다른 쪽이 조용히 다른 이름으로 남는다.
-fn log_local_death(joined: &tokio::task::JoinError, request_id: RequestId, name: &str) {
+fn log_local_death(
+    joined: &tokio::task::JoinError,
+    request_id: RequestId,
+    name: &str,
+    entrance: &'static str,
+) {
     tracing::error!(
-        entrance = "bus",
+        entrance,
         command = name,
         panicked = joined.is_panic(),
         %request_id,
@@ -1298,13 +1483,19 @@ const MAX_LATE_OUTCOME_CHARS: usize = 512;
 /// 필요한 것이 payload 의 `agent_id` 라서 문구에 그대로 싣는다.
 /// ★레벨이 `warn` 인 이유★: 데이터가 깨진 것은 아니지만 **호출자가 아는 상태와 실제 상태가 갈렸다**.
 /// 죽음(`JoinError`)만 `error` 로 갈라 형제 갈래와 같은 줄을 쓴다([`log_local_death`]).
-fn log_late_local(joined: LocalJoin, retained: bool, request_id: RequestId, name: &str) {
+fn log_late_local(
+    joined: LocalJoin,
+    retained: bool,
+    request_id: RequestId,
+    name: &str,
+    entrance: &'static str,
+) {
     match joined {
         // ★payload 는 **붙든 것**에만 싣는다★: 실을 이유가 「호출자가 모르는 채 남은 것을 되찾는 실마리」인데,
         //   붙들지 않는 결말(읽기 · 반려)에는 되찾을 것이 없다. 그리고 읽기의 payload 는 명부 전량이라
         //   에이전트들의 **cwd 절대 경로**가 통째로 로그에 앉는다 — 그건 이 줄이 사려던 값이 아니다.
         Ok((_, Some(Ok(payload)))) if retained => tracing::warn!(
-            entrance = "bus",
+            entrance,
             command = name,
             %request_id,
             outcome = %sanitize_within(&payload.to_string(), MAX_LATE_OUTCOME_CHARS),
@@ -1312,13 +1503,13 @@ fn log_late_local(joined: LocalJoin, retained: bool, request_id: RequestId, name
         ),
         // 되찾을 것이 없는 성공(읽기) — 사건은 남기되 내용은 안 싣는다.
         Ok((_, Some(Ok(_)))) => tracing::debug!(
-            entrance = "bus",
+            entrance,
             command = name,
             %request_id,
             "마감 뒤에 끝난 데몬 자기 명령이 성공했다 — 붙들지 않는 결말이라 되찾을 것이 없다"
         ),
         Ok((_, Some(Err(failed)))) => tracing::warn!(
-            entrance = "bus",
+            entrance,
             command = name,
             %request_id,
             code = %failed.code(),
@@ -1327,12 +1518,12 @@ fn log_late_local(joined: LocalJoin, retained: bool, request_id: RequestId, name
         ),
         // 이름은 우리 것인데 표가 빈손이었다(2·3단계로 갔어야 한다) — 부수효과가 없으므로 조용히 적는다.
         Ok((_, None)) => tracing::debug!(
-            entrance = "bus",
+            entrance,
             command = name,
             %request_id,
             "마감 뒤에 끝난 1단계가 빈손이었다 — 전달 단계로 넘길 기회는 이미 지났다"
         ),
-        Err(joined) => log_local_death(&joined, request_id, name),
+        Err(joined) => log_local_death(&joined, request_id, name, entrance),
     }
 }
 
@@ -1365,6 +1556,7 @@ pub async fn deliver(
     locals: Arc<dyn LocalCommands>,
     origin: ConnId,
     envelope: CommandEnvelope,
+    entrance: &'static str,
 ) {
     let request_id = envelope.request_id;
     let name = sanitize_for_log(&envelope.name);
@@ -1532,7 +1724,7 @@ pub async fn deliver(
         // 동시 실행 상한 — 넘치면 **아무것도 돌리지 않고** 거절한다(그리고 그 사건을 서버에 남긴다).
         // ★자리는 놓는다(보유가 아니다)★: 아무것도 안 돌았으므로 그 번호를 붙들면 정상적인 재시도가
         //   `ALREADY_APPLIED` 로 막힌다 — 판정 규칙은 [`retains_the_id`].
-        let guard = match deliveries.reserve_local_slot(&name) {
+        let guard = match deliveries.reserve_local_slot(&name, entrance) {
             Ok(guard) => guard,
             Err(refused) => {
                 send_reply(
@@ -1545,7 +1737,13 @@ pub async fn deliver(
                 return;
             }
         };
-        let mut job = spawn_local(Arc::clone(&locals), roster.clone(), origin, envelope);
+        let mut job = spawn_local(
+            Arc::clone(&locals),
+            roster.clone(),
+            origin,
+            envelope,
+            entrance,
+        );
 
         // ★본문과 **자리**를 함께 기다린다★ — 자리를 안 보면 마감이 지나도 아무 프레임이 안 나가
         //   호출자가 무한정 매달리고, 수거기 로그만 「TIMEOUT 으로 답했다」고 적는다(하지 않은 일을
@@ -1560,7 +1758,7 @@ pub async fn deliver(
                 // ★붙들지 판정은 **표가 낸 결말**로 한다 — 우리가 지어낸 답장이 아니다★: 빈손을 `INTERNAL`
                 //   답장으로 접은 뒤 그 답장을 보면 「적용됐다」로 읽혀 돌지도 않은 번호를 붙든다.
                 let retain = retains_the_id(effect, &joined);
-                (fold_local(joined, request_id, &name), retain)
+                (fold_local(joined, request_id, &name, entrance), retain)
             }
             // ★자리가 먼저 정산되는 길은 **둘뿐**이다 — 마감([`CommandDeliveries::expire`])과 데몬
             //   종료([`CommandDeliveries::drain`])★. 셋째로 보일 만한 것(주인이 보낸 결말)은 이 자리에
@@ -1585,7 +1783,7 @@ pub async fn deliver(
                 //   모른다([`log_late_local`]).
                 let joined = (&mut job).await;
                 let retain = retains_the_id(effect, &joined);
-                log_late_local(joined, retain, request_id, &name);
+                log_late_local(joined, retain, request_id, &name, entrance);
                 guard.settle(request_id, token, retain);
                 return;
             }
@@ -1663,6 +1861,528 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
     }
 }
 
+// ── 두 번째 입구 — 연결 없는 호출자(ADR-0160) ────────────────────────────────────
+
+/// 동시에 중계를 물고 있을 수 있는 제어 라우트 호출의 수.
+///
+/// ★이 상수가 묶는 것은 **동시성 하나뿐이다** — 상주 바이트가 아니다★
+///
+/// 상한이 필요한 이유는 이 문에 연결 수명이 없어서다: 소켓 입구의 왕복은 **연결 하나에** 매달려 있어 그
+/// 연결이 끊기면 자리가 정리되지만([`CommandDeliveries::drop_origin`]), 이 문의 호출자는 요청 하나마다 새로
+/// 선다. 중계 왕복 하나는 마감([`CommandDeliveries::DEFAULT_DEADLINE`]) 동안 **태스크 + 자리 + 명부 한
+/// 칸**을 물고, 취소로 떠나도 그 셋이 다 돌아온다(셈은 [`RelaySlot`], 나머지 둘은 [`CallerSeat`]) — 그래서
+/// 이 수가 세는 것이 실제로 「지금 동시에 물고 있는 왕복」이다.
+///
+/// ★바이트 상한을 여기서 주장하지 말 것★: 자리가 드는 것은 요청 바디가 아니라 **파싱된
+/// `serde_json::Value` 사본**이다([`Pending::args`]). 바디는 1 MiB 에서 닫혀 있지만(`mcp_server` 의
+/// `MAX_BODY_BYTES`) 그 바이트가 `Value` 로 부푸는 배율은 **모양이 정한다** — 작은 원소를 잔뜩 담은 배열
+/// 하나가 원소마다 `Value` 를 만든다. 그러니 「1 MiB × 이 수 = 64 MiB」는 참이 아니고, 바이트를 묶고 싶으면
+/// 자리가 드는 것의 크기를 재는 축이 따로 서야 한다(지금은 없다).
+///
+/// ★값의 셈★: 형제 상한 [`MAX_LOCAL_IN_FLIGHT`] 와 같은 자릿수로 잡아 「이 데몬이 한 번에 물고 있는 일」의
+/// 규모를 둘이 같이 말하게 한다. 처리량 조절기가 아니다 — 넘치면 큐를 늘리는 대신 **큰 소리로 거절한다**
+/// (명부가 자기 상주에 상한을 두는 것과 같은 논거 — `Roster::MAX_NAMES`).
+/// ★1단계 상한과 **다른 축**이다★: 저쪽은 blocking 풀에 나가 있는 **자기 본문**의 수라 중계에는 안 걸린다
+/// (그 상수 doc ②). 둘을 하나로 합치면 남의 이름을 나르는 트래픽이 자기 실행 상한을 갉아먹는다.
+/// ★축이 **전역**이다 — 모든 자격증명이 이 64 를 나눠 쓴다★: 그래서 에이전트 하나가 이 수를 다 물면 나머지
+/// 전부가 거절당한다(자기 몫이 보장되지 않는다). 자격증명별로 갈라야 하는지는 **미결**이고, 지금 전역인
+/// 것은 그 판단이 서서가 아니라 이 라운드에서 정하지 않았기 때문이다.
+const MAX_RELAYED_IN_FLIGHT: usize = 64;
+
+/// 명령 버스 한 부 — ★두 입구가 **이 값 하나**를 든다★(소켓 디스패치 · 제어 라우트).
+///
+/// 넷을 한 값으로 묶는 이유는 **배선 사고를 타입으로 막는 것**이다: 자리 표·명부·1단계 표는 같은 조립에서
+/// 난 짝이어야 하는데, 따로 넘기면 한 입구에만 딴 부가 들어가는 조립이 표현 가능하다. 그때 증상은 에러도
+/// 로그도 없이 「발견은 되는데 호출만 영영 모르는 이름」이거나, 한 입구가 연 자리를 다른 입구가 못 보는 것
+/// (같은 번호의 재질의가 같은 조작을 두 번 적용한다)이다.
+#[derive(Clone)]
+pub struct CommandBus {
+    roster: CommandRoster,
+    deliveries: CommandDeliveries,
+    locals: Arc<dyn LocalCommands>,
+    /// 연결 없는 호출자에게 붙일 다음 번호 — [`CommandBus::open_caller`].
+    callers: Arc<AtomicU64>,
+    /// 지금 중계를 물고 있는 제어 라우트 호출의 수 — 상한 판정의 재료([`MAX_RELAYED_IN_FLIGHT`]).
+    relayed: Arc<AtomicUsize>,
+}
+
+impl CommandBus {
+    /// 버스와 **그 버스의 유일한 수거기**를 함께 낸다.
+    ///
+    /// ★수거기를 따로 띄우는 함수로 두지 않는 이유★: 그 형태는 한 버스에 수거기 둘을 **표현 가능**하게
+    /// 하는데, 그 상태의 증상이 고약하다 — 먼저 떨어지는 표식 하나가 나가는 길에
+    /// [`CommandDeliveries::drain`] 을 불러 **공유 표를 닫아 버리고**, 그 뒤의 모든 왕복이
+    /// [`Seat::Closed`] 로 반려된다(데몬은 멀쩡히 살아 있는데 명령만 전부 「종료 중」이 된다). 짝으로 내면
+    /// 그 상태를 만들 수 없다.
+    /// ★짝으로 내는 것도, 두 동사를 감추는 것도 **그것만으로는 못 닫는다**★: 자리 표는
+    /// [`CommandBus::deliveries`] 로 공유되고 `Clone` 이라, 이 생성자가 `pub` 인 채로 **남의 표를 받으면**
+    /// 밖에서 `CommandBus::new(.., bus.deliveries().clone(), ..)` 한 줄로 위 상태를 그대로 지을 수 있었다
+    /// (`spawn_sweeper`·`drain` 이 이 모듈 밖에서 안 보이는 것과 무관하게). 그 구멍을 실제로 닫는 것은
+    /// **표가 자기 수거기를 기억하는 것**이고([`Seats::swept`]), 둘째 요구는 이 생성자 안에서 패닉한다.
+    /// 그러니 이 자리에 「그런 상태는 표현 불가」라고 적을 때 근거로 댈 것은 가시성이 아니라 그 표식이다.
+    /// ★버스를 만든 **그 자리에서** 띄우는 것도 이 형태가 강제한다★: 수락 루프에 맡기면 창이 생긴다 —
+    /// 제어 서버는 수락 루프보다 먼저 서는데(daemon `run()` 의 fail-closed 순서) 그 사이에 온 제어 라우트
+    /// 호출은 마감을 볼 눈이 아무 데도 없어 답도 오류도 없이 매달린다. 소켓 입구만 있던 시절엔 두 시점이
+    /// 같아 이 창이 없었다.
+    /// ★async 문맥에서 불러야 한다★ — 수거기가 tokio 태스크다.
+    #[must_use = "조립부가 이 표식을 들고 있다가 종료 때 멈춰야 종료가 유계다"]
+    pub fn new(
+        roster: CommandRoster,
+        deliveries: CommandDeliveries,
+        locals: Arc<dyn LocalCommands>,
+    ) -> (Self, BusSweeper) {
+        let bus = Self {
+            roster,
+            deliveries,
+            locals,
+            callers: Arc::new(AtomicU64::new(u64::MAX)),
+            relayed: Arc::new(AtomicUsize::new(0)),
+        };
+        // ★정지 신호가 데몬 종료 watch 가 아니라 **이 표식이 소유한 별개 신호**인 이유★: 종료 갈래가
+        //   셋인데(StopDaemon · Ctrl-C · 송신단 소멸) 그중 Ctrl-C 는 그 watch 를 건드리지 않아, 그것을
+        //   구독시키면 그 갈래에서 수거기가 영영 안 깨어나 종료 대기가 안 끝난다.
+        let (stop, stopped) = watch::channel(false);
+        let sweeper = BusSweeper {
+            task: bus.deliveries.spawn_sweeper(stopped),
+            stop,
+        };
+        (bus, sweeper)
+    }
+
+    /// 자기 표도 붙은 주인도 없는 버스 — ★제어 평면의 **다른 부분**만 재는 조립 전용★(스모크 bin · 우편
+    /// 게이트·인증 시험).
+    ///
+    /// ★운영 조립에 쓰지 말 것★: 1단계 표 슬롯을 안 물었으므로 `agent.*` 가 조용히 「모르는 명령」이 되고
+    /// 명부가 비어 있어 어떤 이름도 중계되지 않는다. 운영은 [`CommandBus::new`] 다.
+    /// ★수거기는 여기서도 함께 난다★ — 이것이 「자기 표가 없다」와 별개인 이유는 마감을 볼 눈이 없는 버스의
+    /// [`CommandBus::invoke`] 는 자리가 하나 열리는 순간 **영영 안 깨어나기** 때문이다. 그 상태를 만들지
+    /// 않는 편이 그 사실을 산문으로 적는 것보다 싸다.
+    #[must_use = "수거기 표식을 버리면 그 자리에서 자리 표가 닫힌다"]
+    pub fn without_commands() -> (Self, BusSweeper) {
+        Self::new(
+            CommandRoster::new(),
+            CommandDeliveries::new(),
+            Arc::new(NoLocalCommands),
+        )
+    }
+
+    pub fn roster(&self) -> &CommandRoster {
+        &self.roster
+    }
+
+    /// 이 버스가 든 자리 표 — 연결 정리(`agent_conn`)와 조립·시험이 같은 한 부를 잡는 자리다.
+    ///
+    /// ★이 접근자로 **표의 수명을 건드리지 못한다**★: 수거기를 띄우는 동사와 표를 닫는 동사는 이 모듈
+    /// 밖에서 안 보이고(사유 = [`CommandDeliveries::spawn_sweeper`]), 여기서 얻은 사본을
+    /// [`CommandBus::new`] 에 되먹여 둘째 수거기를 세우는 길도 표의 표식이 막는다([`Seats::swept`]) —
+    /// 그 조립은 성립하지 않고 그 자리에서 패닉한다. 그 둘 중 하나라도 걷으면 이 문장이 거짓이 된다.
+    pub fn deliveries(&self) -> &CommandDeliveries {
+        &self.deliveries
+    }
+
+    pub fn locals(&self) -> &Arc<dyn LocalCommands> {
+        &self.locals
+    }
+
+    /// 시험 전용 — 상한 갈래를 **자원을 64개 잡지 않고** 겨눈다.
+    ///
+    /// 운영 값으로 그 갈래를 태우려면 답 안 하는 주인에게 64개를 걸어 둬야 하고, 그러면 시험이 재는 것이
+    /// 판정이 아니라 런타임 스케줄러가 된다(형제 [`CommandDeliveries::with_local_limit`] 와 같은 사유).
+    #[cfg(test)]
+    pub(crate) fn relayed_counter(&self) -> &Arc<AtomicUsize> {
+        &self.relayed
+    }
+
+    /// 연결 없는 호출자에게 붙이는 **연결 번호** — 왕복 하나만 살고 [`CallerSeat`] 이 거둔다.
+    ///
+    /// ★네트워크 행의 번호와 겹치면 안 된다★: 겹치면 [`CommandRoster::attach`] 가 산 연결의 프레임 출구를
+    /// 덮어(그 함수가 못 박은 전제) 그 연결 앞으로 갈 봉투가 이 HTTP 요청으로 새고, 이쪽 답장은 반대로
+    /// 사라진다. 네트워크 행은 1부터 **올라가고**(`ws.rs` 의 `ConnRegistry::alloc_id` — 해제해도 되돌리지
+    /// 않는다) 여기는 `u64::MAX` 에서 **내려간다**. 두 수열이 만나려면 2^63 번을 할당해야 하므로 도달 불가다.
+    /// ★한 프로세스에 이 발급기가 하나여야 한다★ — 그래서 [`CommandBus`] 를 clone 으로 나눠 준다(사본마다
+    /// 새 발급기를 만들면 두 사본이 같은 번호를 낸다).
+    fn open_caller(&self) -> ConnId {
+        self.callers.fetch_sub(1, Ordering::Relaxed)
+    }
+
+    /// 연결 없는 호출자의 명령 하나 — ★배달 기계는 소켓 입구와 **같은 것**을 탄다★(ADR-0160 결정 1).
+    ///
+    /// ★`request_id` 를 인자로 받는다 — 여기서 만들지 않는다★: 같은 번호로 다시 물을지는 **호출자**가
+    /// 정하는 것이고, 그 재질의가 자리 표의 중복 방지([`SeatState::Retained`])에 걸리는 것이 이 문이 두 번째
+    /// 대기표를 안 만드는 이유다(ADR-0161 결정 1·2). 제어 라우트에서 그 값은 요청 바디가 실어 온 것이거나
+    /// (재시도가 같은 값을 되보낸다) 없으면 데몬이 [`RequestId::new`] 로 발급한 것이다 — **후자는 중복
+    /// 방지가 안 걸린다는 사실이 계약이다**(같은 결정 영향 절).
+    ///
+    /// ★가짜 연결 하나를 세웠다 거둔다★: 배달 기계는 「물어본 연결」을 번호로 들고(자리 주인 · 살아 있는지
+    /// 확인 · 답장 목적지) 그 셋이 전부 명부를 거친다. 왕복 동안만 서는 연결은 **HTTP 요청의 수명 그 자체**라
+    /// 흉내가 아니라 사실이고, 그래서 [`deliver`] 를 한 줄도 안 고치고 태울 수 있다.
+    /// ★거두는 것은 [`CallerSeat`] 의 소멸자다 — 직선 코드로 되돌리지 마라★: 이 future 는 **취소된다**.
+    /// axum/hyper 는 클라이언트가 끊기면 핸들러 future 를 drop 하는데(형제 라우트가 같은 사실을 적어 두었다 —
+    /// `mcp_server::send_message` 의 at-least-once 절), 그러면 직선 코드의 뒷정리는 **한 줄도 안 돈다**.
+    /// ★이름을 등록하지 않는다★ — 이 연결은 명령 주인이 될 수 없다(제어 문은 호출 전용이다). 등록 경로가
+    /// 여기 없으므로 이 번호 앞으로는 어떤 이름도 설 수 없고, 따라서 남의 봉투가 이리로 올 수 없다.
+    ///
+    /// ★`deliver` 를 spawn 하지 않고 그 자리에서 기다린다★: spawn 이 필요한 이유는 **연결 태스크가 자기
+    /// 답을 자기가 못 꺼내는 self-deadlock** 인데(그 함수 doc) 여기는 연결 태스크가 아니라 요청당 태스크라
+    /// 그 인과가 없다. 오히려 여기서 spawn 하면 답장을 받아 갈 자리를 또 만들어야 한다.
+    ///
+    /// ★마감 초과는 `TIMEOUT` 답장으로 온다 — 그것을 만드는 것은 수거기다★
+    /// ([`CommandDeliveries::expire`]). 그 수거기는 [`CommandBus::new`] 가 함께 낸다.
+    pub async fn invoke(
+        &self,
+        request_id: RequestId,
+        name: String,
+        args: serde_json::Value,
+    ) -> CommandReply {
+        // ★이 문으로는 **데몬 자기 이름이 오지 않는다 — 그 계약을 여기서 강제한다**★
+        //
+        //   판정부가 자기 표를 먼저 태우므로(`control::catalog::handle_call`) 오늘 이 갈래는 안 온다.
+        //   ★그 「먼저」가 **같은 표**여야 이 문장이 서고, 오늘 그것을 지는 것은 타입이다★: 판정부가 1단계
+        //   표를 `&dyn LocalCommands` 로 받고 어댑터가 넘기는 것이 [`CommandBus::locals`] 하나라, 그쪽
+        //   판정과 이 아래 검사는 **같은 값에 같은 질문**을 한다(그 근거는 `handle_call` 의 그 문단). 표를
+        //   따로 받는 형태로 되돌리면 두 판정이 다른 부를 볼 수 있고, 그때 이 거절은 정당한 중계를 막거나
+        //   (한쪽만 자기 이름이라 답한다) 조용한 no-op 이 된다.
+        //   그래도 이 검사를 걷지 않는 이유는 [`deliver`] 의 1단계 갈래가 **그 사실에 기대고 있어서**다:
+        //   그 갈래가 이 문을 타면 취소 한 번에 자리가 영구히 남는다. HTTP 핸들러 future 는 취소되는데
+        //   ([`CallerSeat`]) 1단계 본문은 `spawn_blocking` 이라 취소가 안 되므로 그 뒷정리
+        //   (`LocalGuard::settle`)가 한 줄도 안 돌고, 남은 자리는 `local` 표식 때문에 끊김 정리도
+        //   ([`CommandDeliveries::drop_origin`]) 마감 수거도([`CommandDeliveries::expire`] 는 `Retained`
+        //   만 놓는다) 건드리지 못한다 — 이름·인자 사본을 든 자리 하나와 「아직 돌고 있다」로 굳은 번호
+        //   하나가 프로세스 수명 내내 남고, 그 번호는 영영 [`Seat::LocalStillRunning`] 만 답한다. 덤으로
+        //   상한 셈([`MAX_LOCAL_IN_FLIGHT`])은 본문이 도는 채로 풀려 그 축이 산 본문을 못 묶는다.
+        //   ★그러니 산문으로 두지 않고 **기대는 자리에서 거절한다**★ — 그러면 그 갈래가 이 문에서
+        //   도달 불가가 되고, 위 누수는 코드로 표현할 수 없게 된다.
+        // ★어휘는 `INTERNAL` 이다★: 배선 결함이고 아무것도 돌지 않았다(확실성 = 확실). 그리고 자원을
+        //   하나도 잡기 전에 돌아선다 — 아래 입장 통제보다 앞이다.
+        // ★`debug_assert` 를 두지 않는 이유★: 그러면 이 갈래를 재는 시험 자체가 debug 에서 패닉해,
+        //   강제하려는 계약의 회귀망을 없애는 셈이 된다. 레벨(`error!`)이 그 몫을 진다.
+        if self.locals.claim(&name).is_some() {
+            tracing::error!(
+                entrance = ENTRANCE_CONTROL,
+                command = %sanitize_for_log(&name),
+                %request_id,
+                "제어 라우트가 데몬 자기 이름을 중계로 보냈다 — 그 이름은 판정부가 자기 자리에서 답해야 한다(배선 결함, ADR-0160)"
+            );
+            return CommandReply::err(
+                request_id,
+                no_retry(
+                    ErrorCode::Internal,
+                    "this daemon answers that command itself, so the control route must not relay it — nothing was run; this is a wiring defect in the daemon, not something the caller can fix",
+                ),
+            );
+        }
+
+        // ★입장 통제는 자원을 잡기 **전**이다★ — 자리도 태스크도 명부 칸도 여기 통과한 뒤에 난다.
+        let Some(_admitted) = RelaySlot::admit(&self.relayed, &name, request_id) else {
+            return CommandReply::err(
+                request_id,
+                no_retry(
+                    ErrorCode::Conflict,
+                    format!(
+                        "this daemon is already relaying {MAX_RELAYED_IN_FLIGHT} commands for control-route callers and will not queue more, so nothing was run — retry once they finish"
+                    ),
+                ),
+            );
+        };
+
+        let logged = sanitize_for_log(&name);
+        let (answer, wait) = oneshot::channel();
+        let caller = self.open_caller();
+        let catcher: Arc<dyn FrameSink> = Arc::new(ReplyCatcher::new(answer, request_id));
+        // 소멸자가 거둔다 — 취소로 이 함수를 떠나도 명부 칸도 자리도 남지 않는다([`CallerSeat`]).
+        let seat = CallerSeat::attach(
+            self.roster.clone(),
+            self.deliveries.clone(),
+            caller,
+            catcher,
+        );
+
+        deliver(
+            self.roster.clone(),
+            self.deliveries.clone(),
+            Arc::clone(&self.locals),
+            caller,
+            CommandEnvelope {
+                name,
+                request_id,
+                // ★목적지 주인은 `route` 가 명부 조회 결과로 **덮어 쓴다**★(그 함수) — 여기서 지어낸 값은
+                //   어디서도 읽히지 않는다. 자칭 신원을 실어 보내는 자리가 아니다(`CommandEnvelope::owner`).
+                owner: OwnerToken::new(""),
+                proto_ver: engram_dashboard_core::agent::commands::CATALOG_VERSION,
+                args,
+            },
+            ENTRANCE_CONTROL,
+        )
+        .await;
+
+        // ★답장이 나간 **뒤에** 거둔다★ — 그 전에 거두면 `send_reply` 가 낼 곳을 못 찾아 이 왕복의 유일한
+        //   답장이 사라진다. 소멸자에 맡겨도 스코프 끝이라 순서는 같지만, 명시적으로 놓아 그 순서가 편집에
+        //   드러나게 한다.
+        // ★이 줄이 **자리도** 놓는다 — 다만 정상 왕복에서는 놓을 것이 없다★([`CallerSeat`]): 위 `deliver`
+        //   가 프레임을 낸 뒤 자기 자리를 이미 처분했다([`CommandDeliveries::release`]). 그래서 여기서
+        //   지워지는 자리가 있는 경우는 취소 하나뿐이고, 그 갈래에서는 이 줄이 **아래 `wait.await` 에 닿기도
+        //   전에** 돈다.
+        //   ★그 「하나뿐」이 서는 근거는 이 함수 맨 앞의 거절이다★ — 1단계 갈래는 취소되면 자리를 놓지
+        //   못하는데(본문이 `spawn_blocking` 이라 뒷정리가 안 돈다) 그 갈래가 이 문에서 도달 불가라
+        //   여기 오는 자리는 전달 갈래의 것뿐이다. 그 거절을 걷으면 이 문장이 곧바로 거짓이 된다.
+        //   즉 이 자리를 앞으로 당기면 안 되는 이유는 자리 축이 아니라 **명부 축**이 그대로 진다(위 첫 줄).
+        drop(seat);
+
+        let reply = wait.await.unwrap_or_else(|_| {
+            // 여기 오는 길은 **답장 프레임이 이 출구에 안 닿은 것**뿐이다. 하나는 인코딩 실패
+            //   (`send_reply` 의 `event_json` 이 빈손 — 그쪽이 이미 error! 를 남겼다), 하나는 이 catcher 가
+            //   그 프레임을 거절한 것(짝 안 맞는 번호·두 번째 장 — 각각 자기 자리에서 남긴다). 합침
+            //   ([`Seat::Coalesced`])은 이 문에서 날 수 없다 — 연결 번호가 요청마다 새것이라 같은
+            //   (번호, 연결) 쌍이 두 번 서지 않는다.
+            tracing::error!(
+                entrance = ENTRANCE_CONTROL,
+                command = %logged,
+                %request_id,
+                "제어 라우트 명령이 답장 없이 끝났다 — 배달이 낸 프레임이 이 요청에 닿지 못했다"
+            );
+            CommandReply::err(
+                request_id,
+                no_retry(
+                    ErrorCode::OutcomeUnknown,
+                    "this daemon finished the round trip without producing a reply",
+                ),
+            )
+        });
+        // ★성공도 남긴다★ — 실패만 적는 계측은 「이 문으로 무엇이 얼마나 지나갔나」에 답하지 못해, 사고가
+        //   났을 때 **그 명령이 이 데몬을 거쳤는지조차** 로그로 못 가린다(로깅 컨벤션 「계측 의무」).
+        //   결말 payload 는 싣지 않는다 — 남의 명령의 반환값이라 무엇이 들었는지 이 층이 모른다.
+        // ★레벨이 갈린다 — 실패만 `warn`, 성공은 `info`★
+        //
+        //   갈리는 축은 **사후 복구 가능성**이다. 이 경로에서 `warn` 을 받는 줄은 하나이고
+        //   (`control::mcp_server` 의 귀속 줄) 그것이 담는 것은 **사건이 지나간 뒤 어디서도 다시 만들 수
+        //   없는 사실**이다: 사용자 눈에 보이는 대시보드 변경을 **어느 자격증명이** 시켰나. 로그 레벨을
+        //   나중에 올려도 이미 벌어진 조작의 주인은 그때도 모른다. 이 라우트가 그 한 줄을 warn 에 두는 것은
+        //   「에이전트가 사람 화면을 움직였다」를 **평상시 잡음이 아니라 봐야 할 사건으로** 취급하기로 한
+        //   판단이고, 형제 게이트(우편 거절)가 같은 자리에 있다.
+        //   반면 여기 성공 줄이 더하는 것은 **끝났다는 사실 하나**뿐이고, 그것은 사후에 복구된다 — 조작
+        //   자체가(탭이 생겼다·창이 닫혔다) 그 증거이며 상태 조회로 확인된다. 그래서 기본 레벨에서 안
+        //   찍히는 것이 손실이 아니다.
+        //   실패는 다시 warn 이다: 「반려됐다」는 화면에 아무 흔적을 남기지 않으므로 로그가 유일한 증거다.
+        //   ★결과적으로 중계 한 번에 warn 은 한 줄이다★ — 성공을 올리면 두 줄이 되고, 그러면 이 채널에서
+        //   「봐야 할 사건」과 「정상 완료」가 구분되지 않는다. 그 이유로 올리지 말 것.
+        // ★이것은 로깅 컨벤션 레벨 표에서 **의도적으로 벗어난 자리**다★(`docs/reference/
+        //   logging-conventions.md` — 정상 수명주기 이벤트 = info). 그 문서 §15 가 금하는 것은 「기본 필터가
+        //   가린다」를 사유로 정상 알림의 레벨을 올리는 것이고, 위 사유는 그것이 아니라 **복구 불가한 귀속
+        //   기록**이다. 그 예외를 그 문서에 적는 일은 아직 안 됐다(미결 — 이 라운드 범위 밖).
+        match &reply.outcome {
+            Ok(_) => tracing::info!(
+                entrance = ENTRANCE_CONTROL,
+                command = %logged,
+                %request_id,
+                "제어 라우트 명령을 중계해 결말을 받았다"
+            ),
+            Err(failed) => tracing::warn!(
+                entrance = ENTRANCE_CONTROL,
+                command = %logged,
+                %request_id,
+                code = %failed.code(),
+                "제어 라우트 명령이 실패로 끝났다"
+            ),
+        }
+        reply
+    }
+}
+
+/// 중계 하나가 물고 있는 자리 — ★`Drop` 이 셈을 **반드시** 되돌린다★(취소·이른 반환·패닉 무관).
+///
+/// 형제 [`LocalGuard`] 와 같은 규율이고, 다른 것은 세는 축뿐이다(그쪽은 blocking 풀에 나간 자기 본문).
+struct RelaySlot(Arc<AtomicUsize>);
+
+impl RelaySlot {
+    /// 상한 안이면 셈을 올리고 표식을 낸다. `None` = 상한을 쳤다(아무것도 안 돌린다).
+    ///
+    /// ★`fetch_update` 인 이유★: 「읽고 → 비교하고 → 올린다」를 쪼개면 두 요청이 같은 값을 읽고 둘 다
+    /// 통과한다. 상한이 하나 새는 것보다 **정확히** 세는 편이 이 값이 사는 이유에 맞다.
+    /// ★거절을 로그로 남긴다★ — 전역 상한을 친 것은 운영 사건인데 안 남기면 유일한 목격자가 거절당한
+    /// 호출자뿐이다(로깅 컨벤션 「무로그 삼킴」). 형제와 달리 시각 억제를 두지 않는 것은 이 문의 도착률이
+    /// **요청당 연결**이라 훨씬 낮아서다 — 시끄러워지면 그때 형제의 억제를 가져온다.
+    fn admit(counter: &Arc<AtomicUsize>, name: &str, request_id: RequestId) -> Option<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held < MAX_RELAYED_IN_FLIGHT).then_some(held + 1)
+            })
+            .map(|_| Self(Arc::clone(counter)))
+            .map_err(|held| {
+                tracing::warn!(
+                    entrance = ENTRANCE_CONTROL,
+                    command = %sanitize_for_log(name),
+                    held,
+                    ceiling = MAX_RELAYED_IN_FLIGHT,
+                    %request_id,
+                    "제어 라우트 중계의 동시 상한 — 이 아래로 내려갈 때까지 전부 거절한다"
+                );
+            })
+            .ok()
+    }
+}
+
+impl Drop for RelaySlot {
+    fn drop(&mut self) {
+        // saturating 인 이유는 형제와 같다 — 셈이 음수로 돌아 상한이 영원히 열리는 쪽이 더 나쁘다.
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                Some(held.saturating_sub(1))
+            });
+    }
+}
+
+/// 가짜 호출자 연결 하나의 수명 — ★`Drop` 이 **두 표에서** 반드시 거둔다★(명부 칸 + 상관 표의 자리).
+///
+/// ★직선 코드로 되돌리지 마라★: 이 항목들을 거둘 다른 경로가 없다. 실 연결은 끊김 훅 하나가 두 표를 함께
+/// 정리하는데(`agent_conn` 의 `on_disconnect` — `detach` 다음 줄이 `drop_origin` 이다) 가짜 연결은 그 훅에
+/// 닿지 않는다. 그리고 이 뒷정리를 건너뛰는 길은 패닉만이 아니다 — HTTP 핸들러 future 는 클라이언트가
+/// 끊기면 **취소**된다.
+///
+/// ★두 축을 **함께** 들어야 하는 이유★: 취소는 [`deliver`] 의 `await` 한복판에서 나므로 그 함수의 자리
+/// 처분([`CommandDeliveries::release`])은 한 줄도 안 돈다. 남은 자리는 마감으로도 안 사라진다 —
+/// [`CommandDeliveries::expire`] 는 `Awaiting` 을 [`SeatState::Void`] 로 바꾸고 **항목은 남긴다**. 그래서
+/// 명부 축만 거두면 봉투의 이름·인자 사본이([`Pending::args`]) 프로세스 수명 내내 앉아 있고, 자리 하나가
+/// 두 입구 **전부**에 값을 매긴다([`CommandDeliveries::open`] 이 배달마다 `expire` 를 부른다). 덤으로
+/// 주인이 이미 답한 뒤 취소된 자리는 `Fulfilled` 로 남아, 그 번호의 재질의가 **죽은 가짜 연결**을 임자로
+/// 지목한 [`Seat::Taken`] 을 영구히 받는다.
+struct CallerSeat {
+    roster: CommandRoster,
+    /// ★명부와 같은 소멸자에 든다 — 따로 정리하는 자리를 만들지 말 것★: 나뉘면 한쪽만 도는 갈래가 생기고,
+    /// 그 갈래의 증상이 위 상주 누수다(런타임엔 아무 신호도 없다).
+    deliveries: CommandDeliveries,
+    conn: ConnId,
+}
+
+impl CallerSeat {
+    fn attach(
+        roster: CommandRoster,
+        deliveries: CommandDeliveries,
+        conn: ConnId,
+        frames: Arc<dyn FrameSink>,
+    ) -> Self {
+        roster.attach(conn, &frames);
+        // 사본은 명부가 든다 — 왕복 너머로 하나 더 들고 있지 않는다(모듈 헤더 · ADR-0154).
+        drop(frames);
+        Self {
+            roster,
+            deliveries,
+            conn,
+        }
+    }
+}
+
+impl Drop for CallerSeat {
+    /// ★순서는 실 연결의 끊김 정리와 같게 둔다★(명부 → 상관 표) — 두 정리가 읽을 때 갈리지 않게 하려는
+    /// 것이고, 저쪽에서 그 순서가 지키는 것(자리가 풀려 답장을 내려는데 명부에 죽은 출구가 아직 있는 상태)은
+    /// **여기서는 날 수 없다**: [`CommandBus::invoke`] 가 [`deliver`] 를 그 자리에서 기다리므로 이 소멸자가
+    /// 도는 시점에 그 배달은 이미 끝났거나 함께 drop 됐다.
+    /// ★잠금은 겹치지 않는다★(ADR-0006) — 두 줄이 각자 잠그고 그 안에서 놓는다.
+    /// ★두 줄 **다** 정리용 잠금이라 첫 줄이 죽어 뒷줄을 건너뛰는 갈래가 없다★ — 근거·범위는 모듈 헤더의
+    /// 그 문단(그리고 두 `lock_for_cleanup` 의 doc). 어느 한쪽을 패닉하는 잠금으로 바꾸면 여기 적힌
+    /// 「함께 거둔다」가 곧바로 거짓이 된다.
+    fn drop(&mut self) {
+        self.roster.detach(self.conn);
+        // ★반환값을 세지 않는다★: 정상 왕복은 [`deliver`] 가 이미 자리를 놓아 여기 셈이 0 이고, 1 이 되는
+        //   길은 취소뿐이다 — 그 사건은 이 층이 아니라 HTTP 층에서 관측된다(호출자가 끊겼다).
+        self.deliveries.drop_origin(self.conn);
+    }
+}
+
+/// 만료 수거기 하나를 든 표식 — ★조립부가 종료 때 [`BusSweeper::stop`] 을 불러야 종료가 유계다★.
+///
+/// 안 부르면 배달 태스크들이 마감까지 깨어날 계기가 없고, 그동안 「종료했다」고 보고된 시점보다 오래 산다
+/// (근거 = [`CommandDeliveries::drain`]).
+/// ★그냥 떨어뜨려도 표는 비워지고 닫힌다★ — 정지 신호의 송신단이 사라지면 수거기가 그것을 종료로 읽는다
+/// ([`CommandDeliveries::spawn_sweeper`]). 다만 **기다리지 않으므로** 종료가 유계라는 보장은 없고, 그
+/// 버스의 그 뒤 왕복은 전부 [`Seat::Closed`] 로 반려된다.
+pub struct BusSweeper {
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BusSweeper {
+    pub async fn stop(self) {
+        let _ = self.stop.send(true);
+        if let Err(e) = self.task.await {
+            tracing::warn!("명령 왕복 수거기 종료 대기 실패: {e}");
+        }
+    }
+}
+
+/// 답장 한 장을 받아 [`CommandBus::invoke`] 에게 넘기는 프레임 출구.
+///
+/// ★프레임을 되읽는 이유★: 배달은 답장을 **프레임 출구**로 내보내는 것 하나로 끝나고(`send_reply`), 그
+/// 출구가 이 계층에서 유일하게 꽂을 수 있는 자리다. 여기에 타입드 지름길을 하나 더 내면 답장을 내보내는
+/// 길이 둘이 되고, 둘이 갈리는 날 한쪽만 고쳐진다.
+struct ReplyCatcher {
+    /// 한 장만 받는다 — 두 번째 프레임은 [`FrameError`] 로 되돌린다.
+    seat: Mutex<Option<oneshot::Sender<CommandReply>>>,
+    /// 이 출구가 기다리는 왕복의 번호 — 다른 번호의 답장은 **이 요청의 답이 아니다**.
+    ///
+    /// ★대조하는 이유★: 이 출구는 요청 하나만 보지만 그것을 **보장하는 것은 이 대조뿐**이다. 명부의 칸을
+    /// 덮어쓰는 사고(같은 연결 번호 두 번 — `CommandRoster::attach` 가 error! 로 적고 덮는다)나 배달의
+    /// 상관 실수가 나면, 대조가 없는 출구는 남의 결말을 **이 호출의 결과로** HTTP 응답에 싣는다.
+    expected: RequestId,
+}
+
+impl ReplyCatcher {
+    fn new(seat: oneshot::Sender<CommandReply>, expected: RequestId) -> Self {
+        Self {
+            seat: Mutex::new(Some(seat)),
+            expected,
+        }
+    }
+}
+
+impl FrameSink for ReplyCatcher {
+    /// ★로그는 잠금 **밖에서** 찍는다★ — 파일 sink 가 동기 쓰기라(로깅 컨벤션 「인프라」) 임계 구역 안에서
+    /// 부르면 그 IO 만큼 이 출구가 잠긴다. 명부의 attach/detach 가 같은 이유로 로그를 밖으로 뺐다.
+    fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
+        let Frame::Text(text) = frame else {
+            tracing::error!(
+                entrance = ENTRANCE_CONTROL,
+                "제어 라우트 왕복에 text 아닌 프레임이 왔다"
+            );
+            return Err(FrameError);
+        };
+        let reply = match serde_json::from_str::<AgentEvent>(&text) {
+            Ok(AgentEvent::CommandReply { reply }) => reply,
+            _ => {
+                tracing::error!(
+                    entrance = ENTRANCE_CONTROL,
+                    "제어 라우트 왕복에 답장 아닌 이벤트가 왔다 — 이 출구에는 그 왕복의 답장만 온다"
+                );
+                return Err(FrameError);
+            }
+        };
+        if reply.request_id != self.expected {
+            tracing::error!(
+                entrance = ENTRANCE_CONTROL,
+                expected = %self.expected,
+                got = %reply.request_id,
+                "제어 라우트 왕복에 남의 번호로 온 답장 — 이 요청의 결과가 아니다"
+            );
+            return Err(FrameError);
+        }
+        let taken = self.seat.lock().expect("reply catcher poisoned").take();
+        let Some(seat) = taken else {
+            tracing::error!(
+                entrance = ENTRANCE_CONTROL,
+                request_id = %reply.request_id,
+                "제어 라우트 왕복에 답장이 두 번 왔다 — 질의 하나에 답장 하나가 깨졌다"
+            );
+            return Err(FrameError);
+        };
+        // 받을 쪽이 사라졌다 = 요청이 이미 끝났다. 낼 곳이 없다는 사실을 부르는 쪽이 알아야 한다.
+        seat.send(reply).map_err(|_| FrameError)
+    }
+
+    fn send(&self, frame: Frame) -> futures_util::future::BoxFuture<'_, Result<(), FrameError>> {
+        Box::pin(std::future::ready(self.try_send(frame)))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1692,8 +2412,12 @@ pub(crate) mod tests {
         }
     }
 
+    /// ★운영 마감을 그대로 쓴다 — 하네스가 자기 값을 고르지 않는다★: 예전에는 여기서 10초를 넣었고, 그
+    /// 값은 `fits_caller_silence_window` 가 금하는 관계라 **전 스위트가 그 관계를 어긴 채** 돌았다. 시각을
+    /// 손으로 미는 시험들은 마감이 몇 초인지에 안 묶여야 하므로(아래 `advance` 들은 이 값에서 파생한다)
+    /// 여기서 값을 고를 이유도 없다.
     pub(crate) fn deliveries_with(clock: Arc<ManualClock>) -> CommandDeliveries {
-        CommandDeliveries::with_clock(clock, Duration::from_secs(10))
+        CommandDeliveries::with_clock(clock, CommandDeliveries::DEFAULT_DEADLINE)
     }
 
     /// 배달 규칙을 재는 기본 배선 — **자기 명령이 없는 데몬**이다(1단계는 언제나 미스).
@@ -1712,6 +2436,7 @@ pub(crate) mod tests {
             Arc::new(NoLocalCommands),
             origin,
             envelope,
+            ENTRANCE_SOCKET,
         )
     }
 
@@ -1725,58 +2450,7 @@ pub(crate) mod tests {
         (Arc::new(FakeFrameSink::new(tx)), rx)
     }
 
-    /// 본문이 도는 동안 난 **큰 소리**(WARN·ERROR) 이벤트의 필드를 모은다.
-    ///
-    /// ★둘을 함께 잡는다★: 「조용히 삼켰나」를 재는 시험들이라 어느 레벨로 냈는지가 아니라 **남았는지**가
-    /// 판정이다. 레벨별로 함수를 쪼개면 같은 질문에 두 하네스가 생긴다.
-    ///
-    /// ★`with_default` 는 **이 스레드에만** 걸리므로 런타임을 이 안에서 만들어 몸통을 통째로 감싼다★ —
-    /// 배달은 spawn 된 태스크에서 도는데, 현재 스레드 런타임이면 그 태스크도 같은 스레드에서 돌아 로그가
-    /// 이 구독자에게 온다. 그래서 이 함수는 `async` 가 아니다(런타임 안에서 부르면 런타임 중첩이다).
-    fn capture_loud<F: std::future::Future<Output = ()>>(body: F) -> Vec<String> {
-        use tracing::subscriber;
-
-        struct Collector {
-            lines: Arc<Mutex<Vec<String>>>,
-        }
-        struct Visit<'a>(&'a mut String);
-        impl tracing::field::Visit for Visit<'_> {
-            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                self.0.push_str(&format!("{}={:?} ", f.name(), v));
-            }
-        }
-        impl subscriber::Subscriber for Collector {
-            fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-                matches!(*m.level(), tracing::Level::WARN | tracing::Level::ERROR)
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
-                tracing::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                let mut buf = String::new();
-                event.record(&mut Visit(&mut buf));
-                self.lines.lock().expect("lines poisoned").push(buf);
-            }
-            fn enter(&self, _: &tracing::Id) {}
-            fn exit(&self, _: &tracing::Id) {}
-        }
-
-        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
-        let collector = Collector {
-            lines: lines.clone(),
-        };
-        subscriber::with_default(collector, || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("현재 스레드 런타임")
-                .block_on(body);
-        });
-        let captured = lines.lock().expect("lines poisoned");
-        captured.clone()
-    }
+    use crate::log_capture::capture_loud_async as capture_loud;
 
     fn envelope(name: &str, owner: &OwnerToken) -> CommandEnvelope {
         CommandEnvelope {
@@ -1854,6 +2528,8 @@ pub(crate) mod tests {
         ran_on: Mutex<Option<std::thread::ThreadId>>,
         /// 본문이 받은 인자 — 봉투가 그대로 실려 오는지 본다.
         saw: Mutex<Option<serde_json::Value>>,
+        /// 본문이 받은 **입구 라벨** — 배달이 자기 입구를 그대로 넘기는지 재는 수단이다.
+        saw_entrance: Mutex<Option<&'static str>>,
         /// 본문이 **몇 번** 돌았나 — 「같은 Write 동사가 두 번 적용되지 않는다」의 관측 수단이다.
         runs: std::sync::atomic::AtomicUsize,
         /// 본문이 들어왔음을 알리는 신호 — 시험이 「본문이 도는 동안」을 결정적으로 겨눌 수 있게 한다.
@@ -1873,6 +2549,7 @@ pub(crate) mod tests {
                 answer: Some(answer),
                 ran_on: Mutex::new(None),
                 saw: Mutex::new(None),
+                saw_entrance: Mutex::new(None),
                 runs: std::sync::atomic::AtomicUsize::new(0),
                 entered: Mutex::new(None),
                 gate: Mutex::new(None),
@@ -1890,6 +2567,10 @@ pub(crate) mod tests {
 
         fn runs(&self) -> usize {
             self.runs.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn entrance(&self) -> Option<&'static str> {
+            *self.saw_entrance.lock().expect("fake local poisoned")
         }
     }
 
@@ -1939,7 +2620,9 @@ pub(crate) mod tests {
             &self,
             _name: &str,
             args: &mut serde_json::Value,
+            entrance: &'static str,
         ) -> Option<Result<serde_json::Value, CommandError>> {
+            *self.saw_entrance.lock().expect("fake local poisoned") = Some(entrance);
             self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *self.ran_on.lock().expect("fake local poisoned") = Some(std::thread::current().id());
             *self.saw.lock().expect("fake local poisoned") = Some(args.clone());
@@ -1983,6 +2666,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             env,
+            ENTRANCE_SOCKET,
         )))
         .await;
 
@@ -2024,6 +2708,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.list", &OwnerToken::new("x")),
+            ENTRANCE_SOCKET,
         )
         .await;
 
@@ -2056,6 +2741,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&empty_handed)),
                 2,
                 envelope("agent.list", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             )
             .await;
         });
@@ -2099,6 +2785,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.rename", &OwnerToken::new("x")),
+            ENTRANCE_SOCKET,
         )
         .await;
 
@@ -2132,6 +2819,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.new", &OwnerToken::new("whatever")),
+            ENTRANCE_SOCKET,
         ));
         // 전제: 본문이 **도는 중**이어야 이 시험이 그 상태를 잰다.
         entered.recv().await.expect("본문이 들어갔다");
@@ -2180,6 +2868,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             env,
+            ENTRANCE_SOCKET,
         ));
         entered.recv().await.expect("본문이 들어갔다");
 
@@ -2230,6 +2919,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             env,
+            ENTRANCE_SOCKET,
         ));
         entered.recv().await.expect("본문이 들어갔다");
         clock.advance(Duration::from_secs(11));
@@ -2253,6 +2943,7 @@ pub(crate) mod tests {
                 proto_ver: 7,
                 args,
             },
+            ENTRANCE_SOCKET,
         )
         .await;
 
@@ -2309,6 +3000,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             env,
+            ENTRANCE_SOCKET,
         ));
         entered.recv().await.expect("본문이 들어갔다");
         clock.advance(Duration::from_secs(11));
@@ -2330,6 +3022,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             again(),
+            ENTRANCE_SOCKET,
         )
         .await;
 
@@ -2374,6 +3067,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.new", &OwnerToken::new("whatever")),
+            ENTRANCE_SOCKET,
         )
         .await;
         let _ = next_event(&mut caller_inbox).await;
@@ -2413,6 +3107,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.rename", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             )
             .await;
             let _ = next_event(&mut caller_inbox).await;
@@ -2449,6 +3144,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&rejecting)),
             2,
             env,
+            ENTRANCE_SOCKET,
         )
         .await;
         let refused = next_event(&mut caller_inbox).await;
@@ -2472,6 +3168,7 @@ pub(crate) mod tests {
                 proto_ver: 7,
                 args,
             },
+            ENTRANCE_SOCKET,
         )
         .await;
 
@@ -2512,6 +3209,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&unsure)),
             2,
             envelope("agent.new", &OwnerToken::new("whatever")),
+            ENTRANCE_SOCKET,
         )
         .await;
         let _ = next_event(&mut caller_inbox).await;
@@ -2542,6 +3240,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&reading)),
                 2,
                 envelope("agent.list", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             )
             .await;
             let _ = next_event(&mut caller_inbox).await;
@@ -2570,6 +3269,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             ));
             entered.recv().await.expect("본문이 들어갔다");
             clock.advance(Duration::from_secs(11));
@@ -2602,6 +3302,7 @@ pub(crate) mod tests {
                     Arc::new(Arc::clone(&local)),
                     2,
                     envelope("agent.new", &OwnerToken::new("whatever")),
+                    ENTRANCE_SOCKET,
                 ));
                 entered.recv().await.expect("본문이 들어갔다");
                 clock.advance(Duration::from_secs(11));
@@ -2645,6 +3346,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             ));
             entered.recv().await.expect("본문이 들어갔다");
 
@@ -2655,6 +3357,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             )
             .await;
 
@@ -2706,6 +3409,7 @@ pub(crate) mod tests {
             &self,
             _name: &str,
             _args: &mut serde_json::Value,
+            _entrance: &'static str,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             panic!("the table blew up while coercing arguments")
         }
@@ -2734,6 +3438,7 @@ pub(crate) mod tests {
                     Arc::new(PanickingLocal),
                     2,
                     envelope("agent.new", &OwnerToken::new("whatever")),
+                    ENTRANCE_SOCKET,
                 )
                 .await;
             })
@@ -2777,6 +3482,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             ));
             entered.recv().await.expect("본문이 들어갔다");
 
@@ -2788,6 +3494,7 @@ pub(crate) mod tests {
                     Arc::new(Arc::clone(&local)),
                     2,
                     envelope("agent.new", &OwnerToken::new("whatever")),
+                    ENTRANCE_SOCKET,
                 )
                 .await;
                 let _ = next_event(&mut caller_inbox).await;
@@ -2800,6 +3507,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             )
             .await;
             let _ = next_event(&mut caller_inbox).await;
@@ -2849,6 +3557,7 @@ pub(crate) mod tests {
                 Arc::new(Arc::clone(&local)),
                 2,
                 envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
             ));
             entered.recv().await.expect("본문이 들어갔다");
             clock.advance(Duration::from_secs(11));
@@ -2885,6 +3594,7 @@ pub(crate) mod tests {
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.new", &OwnerToken::new("whatever")),
+            ENTRANCE_SOCKET,
         )
         .await;
 
@@ -3041,7 +3751,10 @@ pub(crate) mod tests {
             AgentEvent::CommandRequest { .. }
         ));
 
-        clock.advance(Duration::from_secs(9));
+        // ★경계를 마감에서 **파생**한다★ — 숫자를 박으면 마감을 고치는 편집이 이 시험을 조용히 반대편
+        //   갈래로 옮긴다(「마감 전」이 「마감 후」가 되고 첫 단언이 여전히 초록일 수 있다).
+        let deadline = CommandDeliveries::DEFAULT_DEADLINE;
+        clock.advance(deadline - Duration::from_secs(1));
         assert_eq!(deliveries.expire(), 0, "마감 전에는 거두지 않는다");
         clock.advance(Duration::from_secs(2));
         assert_eq!(deliveries.expire(), 1, "마감이 지나면 거둔다");
@@ -3727,7 +4440,8 @@ pub(crate) mod tests {
     /// ★종료는 유계다 — 남은 자리를 전부 답하고 그 답이 배달 태스크를 즉시 푼다★
     ///
     /// 비우지 않으면 배달 태스크는 자기 답장 자리를 기다리는데 그 **보내는 쪽이 이 표 안에** 있어, 마감
-    /// (기본 10초)까지 깨어날 계기가 없다. 그동안 표도 태스크도 「종료했다」고 보고된 시점보다 오래 산다.
+    /// ([`CommandDeliveries::DEFAULT_DEADLINE`])까지 깨어날 계기가 없다. 그동안 표도 태스크도 「종료했다」고
+    /// 보고된 시점보다 오래 산다.
     /// 수거기를 **기다려** 그 사실을 관측한다 — 핸들을 버리면 이 단언이 설 자리가 없다.
     #[tokio::test]
     async fn shutdown_answers_every_outstanding_round_trip_and_stops_the_sweeper() {
@@ -4043,6 +4757,396 @@ pub(crate) mod tests {
         assert_eq!(
             deliveries.complete(CommandReply::ok(RequestId::new(), json!({}))),
             OutcomeLanding::NoSeat
+        );
+    }
+
+    // ── 두 번째 입구 — 연결 없는 호출자(ADR-0160) ──────────────────────────────────
+
+    /// ★첫 가짜 호출자의 번호는 `u64::MAX` 다★ — 발급기가 거기서 내려가므로(`CommandBus::open_caller`)
+    /// 갓 만든 버스의 첫 호출은 이 번호를 쓴다. 아래 누수 시험이 그 번호를 손에 쥐는 근거다.
+    const FIRST_CONTROL_CALLER: ConnId = u64::MAX;
+
+    /// ★수거기를 함께 돌려준다 — 받은 쪽이 들고 있어야 자리 표가 안 닫힌다([`BusSweeper`]).★
+    /// 이 시험들은 마감을 **손으로** 미므로 수거기는 돌아도 아무것도 거두지 않는다(수동 시계는 스스로 안 간다).
+    fn bus_with(roster: CommandRoster, clock: Arc<ManualClock>) -> (CommandBus, BusSweeper) {
+        CommandBus::new(roster, deliveries_with(clock), Arc::new(NoLocalCommands))
+    }
+
+    /// 제어 라우트 호출 하나를 띄운다 — 답은 [`answered`] 로 받는다.
+    fn invoking(
+        bus: &CommandBus,
+        request_id: RequestId,
+        name: &str,
+    ) -> tokio::task::JoinHandle<CommandReply> {
+        let bus = bus.clone();
+        let name = name.to_string();
+        tokio::spawn(async move {
+            bus.invoke(request_id, name, json!({ "window": "main" }))
+                .await
+        })
+    }
+
+    /// 호출의 답을 **상한 안에서** 받는다 — 근거는 [`next_event`] 와 같다(깨지면 hang 이 아니라 실패여야
+    /// 한다). ★이 문의 호출을 그냥 `.await` 하지 말 것★: 답장은 자리 표를 거쳐 오므로 두 입구가 다른 표를
+    /// 보는 회귀에서는 영영 안 오고, 그때 시험은 어느 단언이 틀렸는지도 안 알려 준 채 멈춘다.
+    async fn answered(call: tokio::task::JoinHandle<CommandReply>) -> CommandReply {
+        tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("제어 라우트 호출이 답 없이 매달렸다")
+            .expect("호출 태스크")
+    }
+
+    async fn envelope_from(inbox: &mut mpsc::Receiver<Frame>) -> CommandEnvelope {
+        match next_event(inbox).await {
+            AgentEvent::CommandRequest { envelope } => envelope,
+            other => panic!("봉투가 와야: {other:?}"),
+        }
+    }
+
+    /// ★제어 라우트의 왕복이 끝에서 끝까지 돈다★ — 봉투가 주인에게 나가고, 그 결말이 **이 호출의 반환**으로
+    /// 돌아온다(완결 조건 1). 그리고 세운 가짜 연결을 거둔다 — 안 거두면 명부의 생존 표가 요청마다 한 칸씩
+    /// 영구히 자란다(그 누수는 런타임에 아무 신호도 내지 않는다).
+    #[tokio::test]
+    async fn the_control_door_hands_the_envelope_over_and_brings_the_answer_back() {
+        let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
+        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let request_id = RequestId::new();
+
+        let call = invoking(&bus, request_id, "tab.create");
+        let envelope = envelope_from(&mut owner_inbox).await;
+        assert_eq!(envelope.request_id, request_id);
+        assert_eq!(envelope.name, "tab.create");
+        assert_eq!(envelope.args["window"], "main", "인자는 그대로 건너간다");
+        assert_eq!(
+            envelope.owner,
+            OwnerToken::new("conn-1"),
+            "목적지 주인은 명부 조회 결과로 덮인다"
+        );
+        assert_eq!(
+            bus.deliveries()
+                .complete(CommandReply::ok(request_id, json!({ "tab": "t-1" }))),
+            OutcomeLanding::Attached
+        );
+
+        let reply = answered(call).await;
+        assert_eq!(reply.request_id, request_id);
+        assert_eq!(reply.outcome.expect("주인의 성공")["tab"], "t-1");
+        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 놓는다");
+        assert!(
+            !bus.roster().is_attached(FIRST_CONTROL_CALLER),
+            "왕복이 끝났으면 그 가짜 연결도 거둬져야 한다"
+        );
+    }
+
+    /// 아무도 그 이름을 선언하지 않았으면 배달이 「모르는 명령」으로 답한다 — 이 문이 그 갈래를 삼키지
+    /// 않는다(완결 조건 2 의 배달 쪽 절반. 제어 라우트가 명부 조회로 먼저 거르는 쪽은 `control::catalog`).
+    #[tokio::test]
+    async fn a_name_with_no_owner_comes_back_as_an_unknown_command() {
+        let (bus, _sweeper) = bus_with(CommandRoster::new(), ManualClock::new());
+
+        let reply = answered(invoking(&bus, RequestId::new(), "nope.nope")).await;
+
+        assert_eq!(
+            reply.outcome.expect_err("반려").code(),
+            ErrorCode::UnknownCommand
+        );
+        assert_eq!(bus.deliveries().in_flight(), 0);
+    }
+
+    /// ★답 없는 주인은 **마감이 푼다**★(완결 조건 3) — 이 문이 자기 시한을 따로 세우지 않고 소켓 문과 같은
+    /// 마감을 쓴다는 뜻이다. 시계를 손으로 밀어 그 갈래만 결정적으로 태운다.
+    #[tokio::test]
+    async fn a_control_call_that_passes_its_deadline_answers_timeout() {
+        let clock = ManualClock::new();
+        let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
+        let (bus, _sweeper) = bus_with(roster, clock.clone());
+
+        let call = invoking(&bus, RequestId::new(), "tab.create");
+        let _ = envelope_from(&mut owner_inbox).await;
+
+        clock.advance(Duration::from_secs(11));
+        assert_eq!(bus.deliveries().expire(), 1, "마감이 그 자리를 거둔다");
+
+        let reply = answered(call).await;
+        assert_eq!(reply.outcome.expect_err("반려").code(), ErrorCode::Timeout);
+    }
+
+    /// ★같은 번호의 두 번째 질의는 **봉투를 하나 더 보내지 않는다**★(완결 조건 4 — 전달 갈래).
+    ///
+    /// 이 문은 요청마다 새 연결 번호를 쓰므로 두 질의는 남남으로 보이고, 그래서 자리 표의
+    /// [`Seat::Taken`] 이 판정한다. 그 판정이 없으면 같은 조작이 주인에게 두 번 간다.
+    #[tokio::test]
+    async fn a_repeat_of_the_same_request_id_does_not_send_a_second_envelope() {
+        let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
+        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let request_id = RequestId::new();
+
+        let first = invoking(&bus, request_id, "tab.create");
+        let _ = envelope_from(&mut owner_inbox).await;
+
+        let repeat = answered(invoking(&bus, request_id, "tab.create")).await;
+        assert_eq!(
+            repeat.outcome.expect_err("반려").code(),
+            ErrorCode::RequestIdConflict
+        );
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "봉투는 한 장이어야 한다 — 두 번째 질의가 같은 조작을 다시 보냈다"
+        );
+
+        bus.deliveries()
+            .complete(CommandReply::ok(request_id, json!({ "tab": "t-1" })));
+        assert!(
+            answered(first).await.outcome.is_ok(),
+            "먼저 연 왕복은 제 답을 받는다"
+        );
+    }
+
+    /// ★이 문은 **데몬 자기 이름을 태우지 않는다 — 그 계약을 이 문이 스스로 문다**★
+    ///
+    /// 오늘 그 이름이 여기 안 오는 근거는 **다른 모듈**에 있었다(`control::catalog::handle_call` 이 자기 표를
+    /// 먼저 태운다). 그런데 [`deliver`] 의 1단계 갈래가 그 근거에 기대고 있고, 그 갈래가 이 문을 타면 취소
+    /// 한 번에 **자리 하나와 번호 하나가 프로세스 수명 내내** 남는다(사유 전문 = [`CommandBus::invoke`] 맨
+    /// 앞의 거절 주석). 그래서 기대는 자리에서 거절하고, 이 시험이 그 거절을 못 박는다.
+    /// ★재는 축은 「반려 코드」가 아니라 **아무것도 잡지 않았나**다★ — 본문·자리·명부 칸·상한 셈 넷 다.
+    /// ★이 갈래를 없애고 1단계를 이 문에 되살리려면 취소-완결성을 먼저 만들어야 한다★(그때 필요한 것 =
+    /// `spawn_blocking` 뒷정리를 취소에서 떼어 내는 것). 그 전에 거절만 걷으면 위 누수가 그대로 돌아온다.
+    #[tokio::test]
+    async fn the_control_door_refuses_a_name_this_daemon_answers_itself() {
+        let local = Arc::new(FakeLocal::answering(
+            "agent.new",
+            Ok(json!({ "agent_id": "a-1" })),
+        ));
+        let (bus, _sweeper) = CommandBus::new(
+            CommandRoster::new(),
+            deliveries_with(ManualClock::new()),
+            Arc::new(Arc::clone(&local)),
+        );
+
+        let refused = answered(invoking(&bus, RequestId::new(), "agent.new")).await;
+
+        assert_eq!(
+            refused.outcome.expect_err("반려").code(),
+            ErrorCode::Internal,
+            "배선 결함이지 호출자가 고칠 것이 아니다"
+        );
+        assert_eq!(local.runs(), 0, "본문을 돌리지 않는다");
+        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 열지 않는다");
+        assert!(
+            !bus.roster().is_attached(FIRST_CONTROL_CALLER),
+            "명부에 칸을 만들지 않는다"
+        );
+        assert_eq!(
+            bus.relayed_counter().load(Ordering::SeqCst),
+            0,
+            "상한 셈도 잡기 전에 돌아선다"
+        );
+    }
+
+    /// ★1단계에 도착하는 입구 라벨은 **그 문의 것**이다★ — 이 필드로 두 문의 사고를 가르는 것이 목적이라,
+    /// 한쪽이 남의 이름표를 달면 그 필터가 조용히 절반만 잡는다(중계된 제어 호출이 소켓에서 온 것처럼
+    /// 적혔던 적이 있다).
+    ///
+    /// ★오늘 1단계를 타는 문은 소켓 하나뿐이다★(형제 시험의 그 거절) — 그래서 이 시험은 두 축을 함께
+    /// 잰다: 소켓의 라벨이 그대로 도착하는가, 그리고 제어 라우트가 1단계를 **아예 안 태우는가**.
+    /// ★어댑터의 forwarding 은 여기서 못 잰다★ — 이 더블은 받은 라벨을 그냥 기록하므로 `DaemonLocalCommands`
+    /// 가 상수를 박는 회귀는 여기 안 잡힌다. 그 축은 `control::commands` 의
+    /// `the_entrance_label_is_forwarded_not_hardcoded` 가 그 어댑터를 직접 태워 잰다.
+    #[tokio::test]
+    async fn stage_one_carries_the_label_of_the_door_that_drove_it() {
+        let local = Arc::new(FakeLocal::answering("agent.new", Ok(json!({}))));
+
+        let (roster, _inbox) = roster_with_owner(9, "someone.else");
+        super::deliver(
+            roster,
+            CommandDeliveries::new(),
+            Arc::new(Arc::clone(&local)),
+            9,
+            envelope("agent.new", &OwnerToken::new("")),
+            ENTRANCE_SOCKET,
+        )
+        .await;
+        assert_eq!(local.entrance(), Some(ENTRANCE_SOCKET));
+        assert_eq!(local.runs(), 1, "전제: 소켓 문이 1단계를 태웠다");
+
+        let (bus, _sweeper) = CommandBus::new(
+            CommandRoster::new(),
+            deliveries_with(ManualClock::new()),
+            Arc::new(Arc::clone(&local)),
+        );
+        let _ = answered(invoking(&bus, RequestId::new(), "agent.new")).await;
+        assert_eq!(
+            local.entrance(),
+            Some(ENTRANCE_SOCKET),
+            "제어 라우트가 1단계를 태웠다 — 그 문은 그 갈래에 닿을 수 없어야 한다"
+        );
+        assert_eq!(local.runs(), 1, "본문이 한 번 더 돌았다");
+    }
+
+    /// ★한 자리 표에 수거기 **둘**을 붙이는 조립은 성립하지 않는다★
+    ///
+    /// 성립했을 때의 증상이 고약해서다: 먼저 떨어지는 표식 하나가 나가는 길에
+    /// [`CommandDeliveries::drain`] 을 불러 **살아 있는 데몬의 공유 표를 닫고**, 그 뒤 모든 왕복이
+    /// [`Seat::Closed`] 로 반려된다(데몬은 멀쩡한데 명령만 전부 「종료 중」).
+    /// ★이 시험이 겨누는 것은 **가시성이 못 막는 경로**다★ — `CommandBus::new` 는 `pub` 이고 자리 표는
+    /// [`CommandBus::deliveries`] 로 공유되며 `Clone` 이므로, 모듈 밖에서 이 두 줄을 쓸 수 있었다. 막는
+    /// 것은 표 자신의 표식이다([`Seats::swept`]).
+    ///
+    /// ★이 시험은 **되감기 빌드에서만 판정된다**★ — 릴리스는 `panic = "abort"`(루트 `Cargo.toml`)라
+    /// `cargo test --release` 로 돌리면 단언이 이 시험을 실패시키는 대신 **테스트 바이너리를 통째로 죽인다**
+    /// (그러면 같은 바이너리의 나머지 시험 결과도 함께 사라진다). 릴리스 테스트 실행은 이 저장소의 게이트
+    /// 집합에 없다(정본 = `CLAUDE.md` 「빌드·검증 명령」).
+    #[tokio::test]
+    #[should_panic(expected = "이미 수거기가 붙어")]
+    async fn a_second_sweeper_over_a_live_seat_table_cannot_be_assembled() {
+        let (bus, _sweeper) = CommandBus::new(
+            CommandRoster::new(),
+            deliveries_with(ManualClock::new()),
+            Arc::new(NoLocalCommands),
+        );
+
+        let (_second, _second_sweeper) = CommandBus::new(
+            CommandRoster::new(),
+            bus.deliveries().clone(),
+            Arc::new(NoLocalCommands),
+        );
+    }
+
+    /// ★거절이 **그 표를 망가뜨리면 안 된다**★ — 단언이 지키려는 상태를 단언 자체가 만들던 자리다.
+    ///
+    /// 그 단언을 표의 잠금을 **든 채로** 두면 되감기가 그 가드를 떨어뜨려 [`Seats`] 의 잠금이 오염된다. 그때
+    /// 살아 있는 데몬이 얻는 상태가 정확히 이 표식이 막으려던 것이다: 그 뒤 [`CommandDeliveries::open`]
+    /// ·[`CommandDeliveries::complete`]·[`CommandDeliveries::in_flight`] 은 오염에 패닉하는 잠금을 쓰므로
+    /// (`lock`) 모든 명령이 죽고, 소멸자 경로만(`lock_for_cleanup`) 조용히 지나간다.
+    /// ★릴리스에서는 이 갈래에 닿지 못한다★ — `panic = "abort"` 라 오염 자체가 없다. 그래서 이 시험이 지키는
+    /// 것은 debug·테스트 빌드이고, 그것으로 충분한 이유는 그 빌드에서 패닉을 잡아 계속 도는 호출자가
+    /// **실제로 있다**는 것이다(시험 하네스가 그 형태다).
+    /// ★단언을 잠금 밖으로 낸 뒤에도 원자성은 그대로다★ — 읽기와 세우기가 임계 구역 안에서 한 번에 끝나고,
+    /// 밖으로 나가는 것은 「이미 있었나」라는 지역 값 하나다.
+    ///
+    /// 되감기 출력(패닉 백트레이스)이 stderr 에 한 번 찍히는 것은 정상이다 — 전역 패닉 훅을 갈아 끼우면
+    /// 같은 바이너리의 다른 시험 출력까지 삼키므로 건드리지 않는다.
+    #[tokio::test]
+    async fn a_refused_second_sweeper_leaves_the_shared_table_usable() {
+        let (bus, _sweeper) = CommandBus::new(
+            CommandRoster::new(),
+            deliveries_with(ManualClock::new()),
+            Arc::new(NoLocalCommands),
+        );
+        let shared = bus.deliveries().clone();
+
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CommandBus::new(
+                CommandRoster::new(),
+                shared.clone(),
+                Arc::new(NoLocalCommands),
+            )
+        }));
+
+        assert!(refused.is_err(), "전제: 둘째 수거기 요구는 거절된다");
+        assert!(
+            !shared.inner.is_poisoned(),
+            "거절이 살아 있는 데몬의 공유 표를 오염시켰다 — 그 뒤 모든 명령이 잠금에서 패닉한다"
+        );
+        // 오염됐다면 `lock` 이 패닉해 이 줄에서 죽는다 — 성질을 기능으로도 한 번 더 문다.
+        assert_eq!(shared.in_flight(), 0, "표가 계속 쓸 수 있어야 한다");
+    }
+
+    /// ★상한을 친 중계는 **아무것도 잡지 않고** 거절된다★ — 자리도 태스크도 명부 칸도 나기 전이다.
+    ///
+    /// 이 문에는 연결 수명이 없어(요청마다 새로 선다) 소켓 입구가 가진 자연 상한이 없다. 상한이 없으면
+    /// 왕복 하나가 마감 동안 무는 것(태스크 + 자리 + 명부 한 칸 + 인자 사본)이 무계로 쌓인다.
+    #[tokio::test]
+    async fn a_relayed_call_past_the_ceiling_is_refused_without_taking_anything() {
+        let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
+        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        bus.relayed_counter()
+            .store(MAX_RELAYED_IN_FLIGHT, Ordering::SeqCst);
+
+        let reply = answered(invoking(&bus, RequestId::new(), "tab.create")).await;
+
+        assert_eq!(reply.outcome.expect_err("반려").code(), ErrorCode::Conflict);
+        assert!(
+            owner_inbox.try_recv().is_err(),
+            "거절은 봉투를 내보내기 전이어야 한다"
+        );
+        assert_eq!(bus.deliveries().in_flight(), 0, "자리를 열지 않는다");
+        assert!(
+            !bus.roster().is_attached(FIRST_CONTROL_CALLER),
+            "명부에 칸을 만들지 않는다"
+        );
+    }
+
+    /// ★상한은 **왕복이 끝나면 되돌아온다**★ — 안 그러면 한 번 찬 데몬이 프로세스 수명 내내 중계를 거절한다.
+    ///
+    /// 되돌리는 것은 [`RelaySlot`] 의 소멸자이고, 그래서 취소·이른 반환·패닉 어느 길로 떠나도 같다.
+    #[tokio::test]
+    async fn the_relay_ceiling_is_given_back_when_the_round_trip_ends() {
+        let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
+        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let request_id = RequestId::new();
+
+        let call = invoking(&bus, request_id, "tab.create");
+        let _ = envelope_from(&mut owner_inbox).await;
+        assert_eq!(
+            bus.relayed_counter().load(Ordering::SeqCst),
+            1,
+            "왕복 중에는 한 칸을 물고 있다"
+        );
+
+        bus.deliveries()
+            .complete(CommandReply::ok(request_id, json!({ "tab": "t-1" })));
+        assert!(answered(call).await.outcome.is_ok());
+
+        assert_eq!(
+            bus.relayed_counter().load(Ordering::SeqCst),
+            0,
+            "왕복이 끝나면 셈이 돌아와야 한다"
+        );
+    }
+
+    /// ★취소로 떠나도 **세 축이 다 비어야 한다**★ — 명부 칸 · 상한 셈 · **자리**. HTTP 핸들러 future 는
+    /// 클라이언트가 끊기면 drop 된다.
+    ///
+    /// 직선 코드(`attach` → `await` → `detach`)로 되돌리면 이 시험이 빨개진다: drop 된 future 의 뒷줄은
+    /// 한 줄도 안 돌아 그 칸이 프로세스 수명 내내 남고, [`CommandRoster::sink_of`] 가 **모든 배달마다**
+    /// 그 표를 잠근 채 선형으로 훑는다.
+    /// ★자리 축을 여기서 빼지 말 것 — 그 축이 가장 비싸다★: 취소 시 자리를 안 놓으면 그 자리가 봉투의
+    /// 이름·인자 사본을 **프로세스 수명 내내** 든다([`Pending::args`]). 게다가 [`CommandDeliveries::open`]
+    /// 이 배달마다 [`CommandDeliveries::expire`] 를 부르고 그 함수는 표를 두 번 훑으므로, 남은 자리는 두
+    /// 입구 **양쪽**의 모든 명령에 비용을 매긴다. 이 축이 없던 판(명부·셈만 보던 판)은 그 누수를 안고도
+    /// 초록이었다.
+    #[tokio::test]
+    async fn a_cancelled_control_call_leaves_no_seat_or_pseudo_connection_behind() {
+        let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
+        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+
+        // 답하지 않는 주인에게 걸어 둔 채로 그 future 를 버린다 = 호출자가 끊긴 것과 같은 인과다.
+        let call = invoking(&bus, RequestId::new(), "tab.create");
+        let _ = envelope_from(&mut owner_inbox).await;
+        assert_eq!(
+            bus.deliveries().in_flight(),
+            1,
+            "전제: 취소 시점에 자리가 하나 열려 있다"
+        );
+        call.abort();
+        let _ = call.await;
+
+        // abort 는 즉시 관측되지 않을 수 있다 — 상한 안에서 사라지는지를 본다(안 사라지면 영원히 안 사라진다).
+        for _ in 0..200 {
+            if !bus.roster().is_attached(FIRST_CONTROL_CALLER)
+                && bus.relayed_counter().load(Ordering::SeqCst) == 0
+                && bus.deliveries().in_flight() == 0
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "취소된 제어 라우트 호출이 뒤에 남긴 것: 명부={} 셈={} 자리={}",
+            bus.roster().is_attached(FIRST_CONTROL_CALLER),
+            bus.relayed_counter().load(Ordering::SeqCst),
+            bus.deliveries().in_flight()
         );
     }
 }

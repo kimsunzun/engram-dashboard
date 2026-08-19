@@ -16,6 +16,8 @@ pub mod connection_core;
 pub mod control;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
+#[cfg(test)]
+mod log_capture;
 pub mod messaging_host;
 pub mod status_fanout;
 #[cfg(test)]
@@ -307,12 +309,14 @@ async fn run_accept_loop(
     multiview: MultiViewState,
     control_registry: Arc<control::registry::ControlRegistry>,
     messaging_slot: Arc<control::mcp_server::MessagingSlot>,
-    command_table_slot: Arc<control::mcp_server::CommandTableSlot>,
-    // 명령 주인 명부(ADR-0155/0156) — 전 연결이 공유하는 **그 한 부**. 여기서 만들지 않는 이유는 제어
-    //   평면의 발견 라우트도 같은 부를 읽기 때문이다(`control::mcp_server::start_mcp_server`). 안에서
-    //   만들면 그 라우트는 자기 사본을 보게 되고, 증상은 에러도 로그도 없이 발견이 클라이언트가 얹은
-    //   이름을 영영 안 보여 주는 것이다.
-    commands: command_roster::CommandRoster,
+    // 명령 버스(ADR-0155/0156/0160) — 명부·자리 표·1단계 표를 묶은 **그 한 부**. 여기서 만들지 않는
+    //   이유는 제어 평면의 두 라우트(발견·호출)가 같은 부를 쓰기 때문이다
+    //   (`control::mcp_server::start_mcp_server`). 안에서 만들면 그 라우트들은 자기 사본을 보게 되고,
+    //   증상은 에러도 로그도 없이 발견이 클라이언트가 얹은 이름을 안 보여 주고 중계가 남의 자리 표를
+    //   쓰는 것이다.
+    bus: command_delivery::CommandBus,
+    // 만료 수거기 — ★버스를 만든 자리에서 띄운 것을 받아 여기서 멈춘다★(`CommandBus::new` 가 짝으로 낸다).
+    sweeper: command_delivery::BusSweeper,
     expected_token: Arc<String>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -324,23 +328,6 @@ async fn run_accept_loop(
     //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
     let DaemonWiring { manager, registry } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    // 진행 중인 명령 왕복의 상관 표(ADR-0154) — 명부와 **다른 표**다(수명 단위가 다르다).
-    // ★수거 태스크를 함께 띄운다 — 빠뜨리면 마감이 영영 안 지나가고 답 못 받는 요청이 쌓인다★
-    //   (`CommandDeliveries::spawn_sweeper`). 데몬 종료 신호를 구독해 함께 멈춘다.
-    let deliveries = command_delivery::CommandDeliveries::new();
-    // ★수거기의 정지 신호는 데몬 종료 watch 가 아니라 **이 루프가 소유한 별개 신호**다★: 종료 갈래가
-    //   셋인데(StopDaemon · Ctrl-C · 송신단 소멸) 그중 Ctrl-C 는 그 watch 를 건드리지 않아, 그것을
-    //   구독시키면 그 갈래에서 수거기가 영영 안 깨어나 아래 await 가 안 끝난다. 이 신호는 **탈출 이유와
-    //   무관하게** 루프를 빠져나온 그 자리에서 한 번 켜진다.
-    let (sweeper_stop, sweeper_stopped) = watch::channel(false);
-    let sweeper = deliveries.spawn_sweeper(sweeper_stopped);
-    // 데몬이 스스로 답하는 명령(배달 1단계 + 발견 목록의 자기 몫) — ★값이 아니라 슬롯을 넘긴다★:
-    //   표는 매니저 조립 뒤에 생기고 이 루프는 그보다 앞설 수 있다(테스트 서버 조립이 그렇다). 값을 잡으면
-    //   그때 비어 있던 표가 프로세스 수명 내내 「내 명령 없음」으로 굳고, 증상은 `agent.*` 가 조용히 모르는
-    //   명령으로 되돌아오는 것이다(`command_delivery::LocalCommands` 의 그 성질).
-    let locals: Arc<dyn command_delivery::LocalCommands> = Arc::new(
-        control::commands::DaemonLocalCommands::new(command_table_slot),
-    );
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
@@ -348,9 +335,9 @@ async fn run_accept_loop(
             fanout,
             control_registry,
             messaging_slot,
-            commands,
-            deliveries,
-            locals,
+            bus.roster().clone(),
+            bus.deliveries().clone(),
+            Arc::clone(bus.locals()),
             shutdown_tx,
         ));
 
@@ -402,11 +389,11 @@ async fn run_accept_loop(
     // ── 명령 왕복 정리(ADR-0154) ───────────────────────────────────────────────────
     // ★수거기를 기다리는 것이 종료를 유계로 만든다★: 그 태스크가 나가는 길에 남은 자리를 전부 답하고
     //   (`CommandDeliveries::drain`) 그 답이 배달 태스크들의 기다림을 **즉시** 푼다. 안 기다리면
-    //   「종료했다」고 적은 뒤에도 그 자리들과 태스크가 마감(기본 10초)까지 살아 있다.
-    let _ = sweeper_stop.send(true);
-    if let Err(e) = sweeper.await {
-        tracing::warn!("명령 왕복 수거기 종료 대기 실패: {e}");
-    }
+    //   「종료했다」고 적은 뒤에도 그 자리들과 태스크가 마감(`CommandDeliveries::DEFAULT_DEADLINE`)까지
+    //   살아 있다.
+    // ★탈출 이유와 무관하게 여기 한 번 온다★ — 종료 갈래가 셋인데(StopDaemon · Ctrl-C · 송신단 소멸)
+    //   그중 Ctrl-C 는 데몬 종료 watch 를 건드리지 않는다.
+    sweeper.stop().await;
 }
 
 // ── main 본체 (운영) ──────────────────────────────────────────────────────────────
@@ -556,11 +543,22 @@ pub async fn run() -> Result<(), i32> {
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
-    // 명령 주인 명부(ADR-0155/0156) — 전 연결이 공유한다. ★MCP 서버보다 **먼저** 난다★: 발견 라우트
-    //   (`/control/commands`)가 이 명부의 절반을 읽으므로 서버 조립이 그것을 받아야 한다. 아래 accept
-    //   loop 에도 **같은 부**가 들어간다 — 두 곳에 다른 부를 넘기면 클라이언트가 얹은 이름이 발견에서만
-    //   사라지고, 그 어긋남은 런타임에 아무 신호도 내지 않는다.
-    let command_roster = command_roster::CommandRoster::new();
+    // 명령 버스(ADR-0155/0156/0160) — 명부·자리 표·1단계 표 한 부. ★MCP 서버보다 **먼저** 난다★: 제어
+    //   라우트 둘이 이것을 쓰므로(발견은 명부 절반을, 호출은 배달 기계를) 서버 조립이 그것을 받아야 한다.
+    //   아래 accept loop 에도 **같은 부**가 들어간다 — 두 곳에 다른 부를 넘기면 클라이언트가 얹은 이름이
+    //   발견에서만 사라지거나 두 입구가 서로의 왕복을 못 보고, 그 어긋남은 런타임에 아무 신호도 내지 않는다.
+    // ★1단계 표는 값이 아니라 슬롯으로 든다★: 표는 매니저 조립 뒤(아래 6단계)에 생기므로 지금은 비어 있다.
+    //   값을 잡으면 그 빈 표가 프로세스 수명 내내 「내 명령 없음」으로 굳고, 증상은 에러도 로그도 없이
+    //   `agent.*` 가 모르는 명령으로 되돌아오는 것이다(`command_delivery::LocalCommands` 의 그 성질).
+    // ★수거기는 버스와 **짝으로** 난다 — 따로 띄우는 형태면 수락 루프까지 미루는 조립이 표현 가능해지고,
+    //   그 사이의 제어 라우트 호출이 마감을 볼 눈 없이 매달린다★(`CommandBus::new`). 아래 accept loop 가 나가는 길에 멈춘다.
+    let (command_bus, command_sweeper) = command_delivery::CommandBus::new(
+        command_roster::CommandRoster::new(),
+        command_delivery::CommandDeliveries::new(),
+        Arc::new(control::commands::DaemonLocalCommands::new(
+            command_table_slot.clone(),
+        )),
+    );
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
 
@@ -573,7 +571,7 @@ pub async fn run() -> Result<(), i32> {
         manager_slot.clone(),
         messaging_slot.clone(),
         command_table_slot.clone(),
-        command_roster.clone(),
+        command_bus.clone(),
     )
     .await
     {
@@ -743,8 +741,8 @@ pub async fn run() -> Result<(), i32> {
         multiview,
         control_registry,
         messaging_slot.clone(),
-        command_table_slot,
-        command_roster,
+        command_bus,
+        command_sweeper,
         expected_token,
         shutdown_tx,
         shutdown_rx,
@@ -878,6 +876,15 @@ async fn start_test_server_inner(
         manager.clone(),
         roster_broadcast_slot,
     )));
+    // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 버스를 나눠 쓸 상대가 없다 — accept loop 가
+    //   유일한 소비자다. 조립 자체는 운영과 같은 함수를 쓴다.
+    let (command_bus, command_sweeper) = command_delivery::CommandBus::new(
+        command_roster::CommandRoster::new(),
+        command_delivery::CommandDeliveries::new(),
+        Arc::new(control::commands::DaemonLocalCommands::new(
+            command_table_slot,
+        )),
+    );
     // ★배선을 운영 run() 과 동일하게 유지한다★ — "테스트 서버에서만 게이트가 없는" 갈래를 만들지 않는다.
     let idle_notifier = Arc::new(messaging_host::ChannelIdleNotifier::new(
         flush_tx,
@@ -913,10 +920,8 @@ async fn start_test_server_inner(
                 multiview,
                 control_registry,
                 messaging_slot,
-                command_table_slot,
-                // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 명부를 나눠 쓸 상대가 없다 —
-                //   accept loop 가 유일한 소비자다.
-                command_roster::CommandRoster::new(),
+                command_bus,
+                command_sweeper,
                 expected_token,
                 shutdown_tx,
                 shutdown_rx,

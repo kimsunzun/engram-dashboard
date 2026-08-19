@@ -151,12 +151,19 @@ impl LocalCommands for DaemonLocalCommands {
             .map(|spec| spec.effect)
     }
 
+    /// ★입구 라벨을 여기서 지어내지 않고 **받아서 넘긴다**★ — 다만 오늘 그 값은 **하나**다(소켓 디스패치의
+    /// `bus`): 제어 라우트 중계는 데몬 자기 이름을 `command_delivery::CommandBus::invoke` 가 거절하므로
+    /// 1단계를 타지 않는다(사유 = 그 거절 자리의 주석 — 취소되지 않는 본문 + 취소되는 HTTP future).
+    /// ★그래도 인자로 두는 이유★: 이 seam 이 없으면 두 번째 입구가 1단계를 타게 되는 날 그 사고가 **남의
+    /// 이름표를 달고** 적히고, 그 회귀는 로그를 필터링해 보는 순간에만 드러난다. 상수를 박지 말 것 —
+    /// 아래 시험(`the_entrance_label_is_forwarded_not_hardcoded`)이 그 forwarding 자체를 잰다.
     fn run(
         &self,
         name: &str,
         args: &mut serde_json::Value,
+        entrance: &'static str,
     ) -> Option<Result<serde_json::Value, CommandError>> {
-        call_daemon_command(self.0.get()?, name, args, "bus")
+        call_daemon_command(self.0.get()?, name, args, entrance)
     }
 
     fn decls(&self) -> Vec<CommandDecl> {
@@ -328,7 +335,7 @@ mod tests {
             .expect("이 표의 이름")
             .expect_err("모르는 칸은 반려");
         let over_bus = bus
-            .run("agent.new", &mut typo.clone())
+            .run("agent.new", &mut typo.clone(), "bus")
             .expect("이 표의 이름")
             .expect_err("모르는 칸은 반려");
 
@@ -346,7 +353,7 @@ mod tests {
         let mut args = json!({ "window": "main", "unknown": 1 });
 
         assert!(bus.claim("tab.create").is_none());
-        assert!(bus.run("tab.create", &mut args).is_none());
+        assert!(bus.run("tab.create", &mut args, "bus").is_none());
         assert_eq!(args, json!({ "window": "main", "unknown": 1 }));
     }
 
@@ -357,7 +364,7 @@ mod tests {
         let bus = DaemonLocalCommands::new(Arc::new(CommandTableSlot::new()));
 
         assert!(bus.claim("agent.list").is_none());
-        assert!(bus.run("agent.list", &mut json!({})).is_none());
+        assert!(bus.run("agent.list", &mut json!({}), "bus").is_none());
         assert!(bus.decls().is_empty());
     }
 
@@ -379,6 +386,75 @@ mod tests {
         held.sort();
         assert_eq!(advertised, held);
         assert!(advertised.iter().all(|name| bus.claim(name).is_some()));
+    }
+
+    // ── 입구 라벨 forwarding ─────────────────────────────────────────────────────
+
+    /// 첫 poll 이 끝나지 않는 핸들러 — ★이 표의 blocking 계약을 **일부러** 어긴다★.
+    ///
+    /// 그 갈래만이 `entrance` 를 관측 가능한 곳으로 흘린다([`drive_to_completion`] 의 `error!`). 정상
+    /// 핸들러로는 그 값이 어디에도 안 나와, 라벨을 상수로 박는 회귀가 아무 신호를 내지 않는다.
+    struct NeverFinishes;
+
+    impl engram_dashboard_command::CommandHandler for NeverFinishes {
+        fn call(&self, _args: serde_json::Value) -> engram_dashboard_command::CommandFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// 시험 전용 선언 — `CommandTable::insert` 가 「이 crate 가 선언한 이름」만 받으므로 하나 세운다.
+    static PENDING_SPEC: engram_dashboard_command::CommandSpec =
+        engram_dashboard_command::CommandSpec {
+            name: "fixture.pending",
+            effect: Effect::Write,
+            since: 1,
+            summary: "첫 poll 에서 끝나지 않는 시험용 핸들러",
+            args_schema: "{}",
+            ok_schema: "{}",
+            errors: &[],
+            args_type: "FixturePendingArgs",
+            ok_type: "FixturePendingOk",
+        };
+
+    static PENDING_DECLARED: &[&engram_dashboard_command::CommandSpec] = &[&PENDING_SPEC];
+
+    fn pending_table_slot() -> Arc<CommandTableSlot> {
+        let mut table = CommandTable::new(PENDING_DECLARED);
+        table
+            .insert(PENDING_SPEC.name, Arc::new(NeverFinishes))
+            .expect("시험용 핸들러 삽입");
+        let slot = Arc::new(CommandTableSlot::new());
+        slot.set(Arc::new(table));
+        slot
+    }
+
+    /// ★어댑터는 받은 입구 라벨을 **그대로 넘긴다 — 상수를 박지 않는다**★
+    ///
+    /// ★이 시험이 필요한 이유★: 형제 시험들은 라벨을 인자로 넣고 결과만 보므로, `run` 이 인자를 버리고
+    /// `"bus"` 를 박아도 전부 초록이다. 그래서 여기서는 **여러 값**을 넣고 그 값이 로그 필드에 그대로
+    /// 도착하는지 본다 — 오늘 운영 값이 하나뿐이라(그 사실의 정본 = `LocalCommands::run` 구현 doc) 이
+    /// forwarding 을 지켜 줄 다른 관측 표면이 없다.
+    /// ★계약 위반 갈래를 태우는 것이 의도다★ — 그 갈래가 라벨을 밖으로 내는 유일한 자리이고, 그때
+    /// 오류 코드가 `OUTCOME_UNKNOWN` 인 것도 함께 못박는다(`INTERNAL` 로 바뀌면 재질의 규약이 갈린다).
+    #[test]
+    fn the_entrance_label_is_forwarded_not_hardcoded() {
+        for entrance in ["bus", "control", "a-third-door"] {
+            let (code, lines) = crate::log_capture::capture_loud(|| {
+                let adapter = DaemonLocalCommands::new(pending_table_slot());
+                adapter
+                    .run(PENDING_SPEC.name, &mut json!({}), entrance)
+                    .expect("이 표의 이름")
+                    .expect_err("첫 poll 이 안 끝나면 결말을 지어내지 않는다")
+                    .code()
+            });
+
+            assert_eq!(code, ErrorCode::OutcomeUnknown);
+            let wanted = format!("entrance=\"{entrance}\"");
+            assert!(
+                lines.iter().any(|line| line.contains(&wanted)),
+                "받은 라벨이 그대로 적혀야 한다({entrance}): {lines:?}"
+            );
+        }
     }
 
     /// ★조립 순서가 통지를 죽이지 못한다는 것을 못박는다★: 슬롯이 **빈 채로** 표를 만들고 나중에

@@ -39,6 +39,36 @@ use engram_dashboard_command::{
 };
 use engram_dashboard_net::frame_port::{ConnId, FrameSink};
 
+use crate::connection_core::sanitize_for_log;
+
+/// 끊김 한 줄에 **이름을 몇 개까지** 적나.
+///
+/// ★상한이 없으면 로그 줄 하나의 크기를 상대가 정한다★: 한 주인이 얹을 수 있는 이름은 512개
+/// ([`Roster::MAX_NAMES_PER_OWNER`])이고 하나가 128 B 까지라(`Roster::MAX_NAME_BYTES`) 안 자르면 이 한
+/// 줄이 64 KiB 가 된다 — 그 값 전부가 클라이언트가 고른 문자열이다.
+/// ★자르는 것이 뭘 잃나★: **개수는 안 잃는다**(`names` 필드가 정확한 수를 따로 나른다). 잃는 것은
+/// 「어느 이름이었나」의 뒤쪽이고, 진단에 쓰이는 것은 앞쪽 몇 개다.
+const MAX_LOGGED_NAMES: usize = 8;
+
+/// 클라이언트가 등록한 이름들을 로그 필드 하나로 — **모양은 손질기가, 개수는 [`MAX_LOGGED_NAMES`] 가** 묶는다.
+///
+/// ★같은 문으로 들어온 같은 값을 두 모양으로 적지 않는다★: 등록 반려가 이미 같은 형태를 골랐다
+/// (`connection_core::ConnectionCore::refuse_names_i_answer` — `'이름'` 을 콤마로 잇는다). 한 값이 자리마다
+/// 다른 모양이면 로그를 훑는 사람이 같은 것을 같은 것으로 못 본다.
+fn logged_names(names: &[String]) -> String {
+    let mut out = names
+        .iter()
+        .take(MAX_LOGGED_NAMES)
+        .map(|name| format!("'{}'", sanitize_for_log(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let elided = names.len().saturating_sub(MAX_LOGGED_NAMES);
+    if elided > 0 {
+        out.push_str(&format!(" (+{elided} more)"));
+    }
+    out
+}
+
 /// 붙어 있지 않은 연결의 등록·차분을 반려할 때의 문구.
 ///
 /// ★상수로 두는 이유는 테스트다★: 같은 `CONFLICT` 를 [`Roster`] 의 남의 이름 검사도 내므로, 문구를 안
@@ -109,9 +139,13 @@ impl CommandRoster {
     /// (ADR-0154 삽입 순서).
     ///
     /// ★전제 — 같은 [`ConnId`] 로 두 번 부르지 않는다★: 두 번째가 첫 번째의 출구를 덮으므로, 먼저 붙은
-    /// 연결이 얹은 이름의 봉투가 나중 연결로 간다. 오늘 도달 불가다 — 연결 id 는 네트워크 행의 단조 증가
-    /// 카운터에서 나오고 재사용되지 않는다(`ws.rs` 의 `next_id`). 그래서 **거절 로직을 두지 않고** 덮어쓰기
-    /// 그대로 두되 `error!` 한 줄을 남긴다.
+    /// 연결이 얹은 이름의 봉투가 나중 연결로 간다. 그래서 **거절 로직을 두지 않고** 덮어쓰기 그대로 두되
+    /// `error!` 한 줄을 남긴다.
+    /// ★그 도달 불가는 **호출자가 둘**이라 두 수열이 함께 서야 성립한다★ — 한쪽만 적어 두면 반쪽 근거다:
+    /// 소켓 연결은 네트워크 행의 단조 증가 카운터에서 나오고 재사용되지 않으며(`ws.rs` 의
+    /// `ConnRegistry::alloc_id`), 제어 라우트의 가짜 호출자 연결은 `u64::MAX` 에서 **내려간다**
+    /// (`command_delivery::CommandBus::open_caller` — 두 수열이 만나려면 2^63 번을 할당해야 한다는 셈이
+    /// 그 함수 doc 에 있다). 두 발급기 중 하나라도 성질이 바뀌면 여기 전제가 함께 깨진다.
     /// ★여기서 패닉하지 않는다 — 되살리지 마라★: 이 함수는 `on_connect` 안에서 돈다. 거기서 죽으면
     /// 정리 훅도 레지스트리 해제도 통째로 건너뛴 채 죽은 큐가 팬아웃 대상으로 남고(그 사유의 정본 =
     /// 네트워크 행 `ws.rs` 의 같은 금지), 표에는 영영 안 지워지는 항목이 남아 [`CommandRoster::sink_of`]
@@ -140,9 +174,9 @@ impl CommandRoster {
         // ★갚아야 할 빚 — 이 토큰은 **다듬지 않고** 찍는다★: 오늘은 데몬이 만든 `conn-<id>` 라 길이도
         //   모양도 우리 것이다. 슬라이스 B 가 여기 **클라이언트가 보낸 식별자**를 저장하는 순간, 이 줄은
         //   검증 안 된 상대 문자열을 원문으로 찍는 자리가 된다 — 메가바이트짜리 로그 줄과 제어문자
-        //   위조 항목이 그때 열린다. 그 두 가지를 막는 손질기는 `connection_core` 사설(`sanitize_for_log`)
-        //   이라 지금 끌어오려면 그 함수를 옮겨야 해서 이 슬라이스 밖이다. ★`attach` 가 저장하는 값을
-        //   바꾸는 커밋이 이 줄을 함께 고쳐야 한다★.
+        //   위조 항목이 그때 열린다. ★`attach` 가 저장하는 값을 바꾸는 커밋이 이 줄을 함께 고쳐야 한다★ —
+        //   손질기는 같은 crate 안에 있어(`connection_core::sanitize_for_log` — 이 파일이 아래
+        //   [`logged_names`] 에서 이미 쓴다) 그때 할 일은 그 함수를 부르는 것뿐이다.
         if let Some(previous) = &replaced {
             tracing::error!(
                 conn = conn_id,
@@ -256,8 +290,19 @@ impl CommandRoster {
     /// 잠금 안이라 「명부엔 있는데 닿을 수 없는」 중간 상태를 아무도 관측하지 못하지만, 순서를 코드에
     /// 남겨 두어야 표가 잠금 밖으로 갈리는 날 그 창이 열리지 않는다.
     ///
-    /// ★제거 지점은 이 한 곳뿐이다★ — 끊김을 아는 경로가 `AgentConnection::on_disconnect` 하나이고, 두
-    /// 번째 제거 지점을 만들면 인과가 갈라진다(ADR-0150).
+    /// ## ★부르는 자리는 둘이고, 그 둘은 **다른 종류의 연결**을 거둔다★
+    ///
+    /// ① **실 연결의 끊김** — `AgentConnection::on_disconnect` 하나뿐이다. 끊김을 아는 경로가 그것 하나라
+    ///    이 종류의 두 번째 제거 지점을 만들면 인과가 갈라진다(ADR-0150). 그 조항은 그대로 유효하다.
+    /// ② **가짜 호출자 연결의 왕복 끝** — `command_delivery::CallerSeat` 의 소멸자(ADR-0160). 제어 라우트
+    ///    호출 하나가 답장을 받으려고 세우는 연결이고, **`on_disconnect` 에 영영 닿지 않는다**(소켓이 없다).
+    ///
+    /// ★그래서 ①의 불변식을 「전체 하나」로 되돌려 적지 말 것★ — 그 문장은 이제 거짓이고, 거짓인 채로
+    /// 두면 ②를 지우는 편집이 「단일 제거 지점」을 근거로 정당해 보인다. ②를 지우면 그 칸은 프로세스
+    /// 수명 내내 남아 [`CommandRoster::sink_of`] 의 선형 훑기를 영구히 늘린다.
+    /// ★카브아웃이 성립하는 근거 = **두 종류가 서로의 항목을 못 건드린다**★: 가짜 연결의 번호는 `u64::MAX`
+    /// 에서 내려가고 실 연결은 1부터 올라가며(그 발급기 doc), 가짜 연결은 이름을 등록하지 않아 지울 명부
+    /// 항목이 아예 없다. 즉 ②는 `live` 에서 자기 칸 하나를 빼는 것 이상을 하지 않는다.
     /// ★지운 것을 로그로 남긴다 — 이 줄이 그 사건의 **유일한 진단 표면**이다★: 명부에는 끊긴 주인의 자취가
     /// 남지 않으므로(ADR-0150 결정 3) 사라진 이름을 조회로 되짚을 길이 없다. 이 줄을 지우면 「어느 명령이 왜
     /// 없어졌나」에 답할 자료가 아무 데도 없다(반려 로그는 **거절된 패킷**만 말한다). 레벨은 연결 수명
@@ -288,7 +333,13 @@ impl CommandRoster {
         //   아무 에이전트도 구독하지 않은 클라이언트가 그렇다), 그러면 채널 닫기·waker 깨우기가 임계 구역
         //   안에서 돈다. 이 파일 헤더가 약속한 「잠그고 한 번 부른 뒤 즉시 놓는다」 밖의 일이다.
         let (removed, reclaimed) = {
-            let mut shared = self.lock();
+            // ★잠금 실패에 패닉하지 않는다 — 이 함수의 호출자 둘이 **전부 정리 경로**다★(위 ①②). 그중
+            //   ②는 소멸자라, 여기서 패닉하면 되감기 중이면 곧바로 abort 이고 그렇지 않아도 그 소멸자의
+            //   **다음 줄**(상관 표 정리)이 통째로 안 돌아 두 표가 함께 샌다. 그리고 이 함수가 하는 일은
+            //   **제거뿐**이라 오염된 표를 계속 쓰는 위험도 형제 동사들(등록·조회)보다 작다 —
+            //   형제는 [`CommandRoster::lock`] 의 패닉을 그대로 진다.
+            //   짝 규율의 정본 = `command_delivery::CommandDeliveries::lock_for_cleanup`.
+            let mut shared = self.lock_for_cleanup();
             let owner = shared.live.get(&conn_id).map(|conn| conn.owner.clone());
             let removed = match owner {
                 Some(owner) => shared.roster.disconnect(&owner),
@@ -304,7 +355,7 @@ impl CommandRoster {
             tracing::info!(
                 conn = conn_id,
                 names = removed.len(),
-                removed = %removed.join(" "),
+                removed = %logged_names(&removed),
                 "연결 끊김 — 명령 명부에서 이 주인의 이름을 지웠다"
             );
         }
@@ -338,6 +389,19 @@ impl CommandRoster {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.inner.lock().expect("command roster poisoned")
+    }
+
+    /// 잠금 실패에 패닉하지 않는 획득 — ★**정리 경로 전용**★. 유일한 호출자가
+    /// [`CommandRoster::detach`] 이고, 사유는 그 함수 안 주석이다.
+    ///
+    /// ★릴리스에서는 이 갈래에 닿지 못한다(알려진 범위)★ — 워크스페이스 `[profile.release]` 가
+    /// `panic = "abort"` 라 오염이 아예 생기지 않는다. 그래도 두는 이유는 debug·테스트 빌드에서 그 갈래가
+    /// 실재하고, 거기서 새는 표가 그대로 회귀 시험의 관측을 망치기 때문이다.
+    fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Shared> {
+        match self.inner.lock() {
+            Ok(shared) => shared,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -630,6 +694,69 @@ mod tests {
         );
     }
 
+    /// ★이 줄의 **모양**을 상대가 정하지 못한다★ — 개행 하나면 로그 줄이 둘로 쪼개져 뒤 줄이 우리가 찍은
+    /// 항목처럼 보인다(위조 항목).
+    ///
+    /// 명부는 이름의 **바이트 길이만** 보고 문자셋을 안 보므로(도구 crate `Roster` 의 등록 검사) 개행이 든
+    /// 이름은 실제로 등록된다 — 이 시험의 전제가 그것이다.
+    /// ★이름을 **하나만** 얹는다 — 이 축을 개수 축과 한 시험에 합치지 말 것★: 실제로 합쳐 봤더니
+    /// [`MAX_LOGGED_NAMES`] 를 넘겨 채운 순간 위조 이름이 이름순 정렬에서 **잘리는 쪽에 들어가** 손질기를
+    /// 걷어내도 초록이었다(즉 그 형태는 모양 축을 한 번도 재지 않는다). 개수 축은 아래 형제가 잰다.
+    #[test]
+    fn a_control_character_in_a_removed_name_never_reaches_the_log_field_verbatim() {
+        let roster = CommandRoster::new();
+        roster.attach(9, &some_sink());
+        let forged = "tab.forged\n2026-08-19T00:00:00Z  WARN forged entry";
+        roster.register(9, vec![decl(forged)]).expect("등록");
+
+        let logged = capture_info(|| roster.detach(9));
+
+        assert!(
+            logged.contains("tab.forged"),
+            "전제: 그 이름이 이 줄에 실렸다: {logged:?}"
+        );
+        assert!(
+            !logged.contains('\n'),
+            "개행이 원문으로 실렸다 — 로그 줄이 쪼개진다: {logged:?}"
+        );
+    }
+
+    /// ★이 줄의 **크기**를 상대가 정하지 못한다★ — 한 주인이 512개까지 얹을 수 있어(도구 crate 의
+    /// `Roster::MAX_NAMES_PER_OWNER`) 안 자르면 이 한 줄이 64 KiB 가 된다.
+    ///
+    /// ★`names` 는 자르지 않는다★ — 정확한 개수가 남아야 「몇 개가 사라졌나」가 안 흐려진다. 그래서 잘리는
+    /// 것은 「어느 이름이었나」의 뒤쪽뿐이고, 그 사실도 줄에 적힌다.
+    #[test]
+    fn the_removed_names_line_says_how_many_it_elided() {
+        let roster = CommandRoster::new();
+        roster.attach(9, &some_sink());
+        let total = MAX_LOGGED_NAMES + 3;
+        let decls: Vec<CommandDecl> = (0..total).map(|i| decl(&format!("tab.n{i:02}"))).collect();
+        roster.register(9, decls).expect("등록");
+
+        let logged = capture_info(|| roster.detach(9));
+
+        assert!(
+            logged.contains(&format!("names={total}")),
+            "개수는 정확해야 한다: {logged:?}"
+        );
+        assert!(
+            logged.contains(&format!("(+{} more)", total - MAX_LOGGED_NAMES)),
+            "자른 사실을 말해야 한다: {logged:?}"
+        );
+        assert!(
+            !logged.contains(&format!("tab.n{:02}", total - 1)),
+            "마지막 이름은 잘려 나가야 한다: {logged:?}"
+        );
+        // 넉넉한 상한으로 「상대가 크기를 정하지 못한다」만 못박는다 — 정확한 수를 박으면 필드 하나 늘 때마다
+        //   깨진다.
+        assert!(
+            logged.len() < 1024,
+            "줄 크기를 상대가 정한다: {} bytes",
+            logged.len()
+        );
+    }
+
     /// 내릴 이름이 없던 끊김은 `info!` 를 내지 않는다 — 지운 것이 없으면 이 줄이 말할 사건도 없고, 연결
     /// 자체의 종료는 네트워크 행이 이미 남긴다. 등록하는 클라이언트가 아직 0건이라(TRD §3-7) 이 갈래가
     /// **평상시 전부**이므로, 여기서 안 가르면 기본 경로가 무의미한 줄로 덮인다.
@@ -847,10 +974,11 @@ mod tests {
         );
         assert_eq!(roster.attached_owner(1), Some(stored));
 
-        // ★`capture_info` 로 감싼다 — 이 `detach` 는 지울 이름이 있어 `info!` 를 낸다★: tracing 은
-        //   callsite 의 관심을 **전역에** 캐시하므로, 구독자 없는 스레드가 그 자리를 먼저 때리면
-        //   「관심 없음」이 박혀 뒤에 그 줄을 재는 `a_detach_logs_the_names_it_removed` 가 빈손이 된다.
-        //   실제로 4-스레드 실행에서 한 번 그렇게 깨졌다(2026-08-18).
+        // ★`capture_info` 로 감싼다 — 이 `detach` 는 지울 이름이 있어 `info!` 를 낸다★: 구독자 없는
+        //   스레드가 그 callsite 를 **처음** 등록하면 「관심 없음」이 박혀, 뒤에 그 줄을 재는
+        //   `a_detach_logs_the_names_it_removed` 가 빈손이 된다(4-스레드 실행에서 실제로 그렇게 깨졌다,
+        //   2026-08-18). ★「전역 캐시라 한 번 때리면 굳는다」로 적지 말 것 — 그 진술은 틀렸다★: 하자의
+        //   실제 조건(스레드를 가로지르는 최초 등록)과 실측 근거는 `log_capture` 모듈 헤더가 정본이다.
         capture_info(|| roster.detach(1));
 
         assert_eq!(

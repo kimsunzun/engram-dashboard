@@ -239,7 +239,13 @@ impl ControlRegistry {
     pub fn unbind_session(&self, session_id: &str) {
         let mut inner = self.inner.write().expect("control registry poisoned");
         if inner.session_to_identity.remove(session_id).is_some() {
-            tracing::info!(session = %session_id, "제어 채널 세션 바인딩 해제(DELETE, ADR-0086)");
+            // 호출자가 고른 헤더 값이라 로그에 실을 때는 다듬는다 — 이 모듈의 로그 필드 규율은
+            //   `connection_core::sanitize_for_log` 쪽이 정본이다(`control::agent::preview` 는 **응답
+            //   문구** 전용이고 제어문자를 흘린다).
+            tracing::info!(
+                session = %crate::connection_core::sanitize_for_log(session_id),
+                "제어 채널 세션 바인딩 해제(DELETE, ADR-0086)"
+            );
         }
     }
 

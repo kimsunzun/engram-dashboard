@@ -5,7 +5,9 @@
 //!   있다** — 그 테스트는 기계에 따라 갈리지 않는 것만 단언한다(해당 테스트 주석).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use engram_dashboard_command::{CommandEnvelope, CommandReply};
 use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::manager::MAX_ROSTER_SIZE;
 use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
@@ -15,7 +17,9 @@ use engram_dashboard_core::agent::profile::{
 use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
+    CLI_CONTROL_READ_TIMEOUT_SECS,
 };
+use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandDeliveries};
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
 use engram_dashboard_daemon::control::commands::make_daemon_table;
@@ -29,8 +33,7 @@ use futures_util::future::BoxFuture;
 
 // ── 하네스 ────────────────────────────────────────────────────────────────────────
 
-/// 프레임을 버리는 출구 — 이 파일이 명부에 대해 보는 것은 **이름이 서는가**뿐이고 배달은 보지 않는다
-/// (배달 경로의 회귀는 `command_roster`·`command_delivery` 의 자기 테스트가 잰다).
+/// 프레임을 버리는 출구 — 이름만 세우고 답은 안 하는 주인이다(중계가 **닿는지**만 보는 자리가 쓴다).
 struct DiscardingSink;
 
 impl FrameSink for DiscardingSink {
@@ -40,6 +43,78 @@ impl FrameSink for DiscardingSink {
 
     fn send(&self, _frame: Frame) -> BoxFuture<'_, Result<(), FrameError>> {
         Box::pin(async { Ok(()) })
+    }
+}
+
+/// 얹은 이름을 **실제로 답하는** 클라이언트 — 대시보드가 창·탭·슬롯 명령에 대해 하는 그 일이다.
+///
+/// ★봉투를 되읽어 자리 표에 결말을 붙인다★: 그것이 붙어 있는 클라이언트가 실제로 하는 일이고
+/// (WS `CommandOutcome` → `CommandDeliveries::complete`), 지름길로 답을 만들면 중계가 도는지가 아니라
+/// 이 더블이 도는지를 재게 된다.
+struct AnsweringSink {
+    deliveries: CommandDeliveries,
+    /// 주인이 실제로 받은 봉투 — 이름·인자가 그대로 건너왔는지 보는 자리.
+    seen: Arc<Mutex<Vec<CommandEnvelope>>>,
+}
+
+impl FrameSink for AnsweringSink {
+    fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
+        let Frame::Text(text) = frame else {
+            return Ok(());
+        };
+        if let Ok(engram_dashboard_protocol::AgentEvent::CommandRequest { envelope }) =
+            serde_json::from_str(&text)
+        {
+            let reply = CommandReply::ok(
+                envelope.request_id,
+                serde_json::json!({ "ran": envelope.name, "with": envelope.args }),
+            );
+            self.seen.lock().expect("poisoned").push(envelope);
+            self.deliveries.complete(reply);
+        }
+        Ok(())
+    }
+
+    fn send(&self, frame: Frame) -> BoxFuture<'_, Result<(), FrameError>> {
+        Box::pin(std::future::ready(self.try_send(frame)))
+    }
+}
+
+/// 형제 [`AnsweringSink`] 와 **한 가지만** 다르다 — 결말을 이 스레드가 아니라 **나중에 딴 태스크가** 붙인다.
+///
+/// ★그 하나가 재는 축이다★: 형제는 `try_send` 안에서 곧바로 `complete` 를 부르므로, 결말이 **봉투를 내보내는
+/// 그 호출 스택 안에서** 붙는다 — 즉 배달이 답장 자리에 눕기 **전에** 이미 답이 와 있다. 그러면 「누워
+/// 있다가 깨어난다」는 갈래가 한 번도 안 돈다. 운영의 주인은 남의 프로세스라 답은 언제나 나중에 오고
+/// (WS 프레임 왕복) 그쪽이 실제 경로다.
+struct ParkedAnsweringSink {
+    deliveries: CommandDeliveries,
+    /// 봉투를 받고 **이만큼 뒤에** 답한다 — 배달이 확실히 누운 뒤가 되게 하는 여유.
+    after: Duration,
+}
+
+impl FrameSink for ParkedAnsweringSink {
+    fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
+        let Frame::Text(text) = frame else {
+            return Ok(());
+        };
+        if let Ok(engram_dashboard_protocol::AgentEvent::CommandRequest { envelope }) =
+            serde_json::from_str(&text)
+        {
+            let deliveries = self.deliveries.clone();
+            let after = self.after;
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                deliveries.complete(CommandReply::ok(
+                    envelope.request_id,
+                    serde_json::json!({ "ran": envelope.name, "late": true }),
+                ));
+            });
+        }
+        Ok(())
+    }
+
+    fn send(&self, frame: Frame) -> BoxFuture<'_, Result<(), FrameError>> {
+        Box::pin(std::future::ready(self.try_send(frame)))
     }
 }
 
@@ -91,10 +166,15 @@ struct Fixture {
     manager: Arc<AgentManager>,
     base: String,
     token: String,
+    /// 열쇠를 더 발급할 수 있게 든다 — 자격증명마다 갈리는 축(우편 가부)을 재려면 둘 이상이 필요하다.
+    registry: Arc<ControlRegistry>,
     broadcast: Arc<CountingBroadcast>,
     /// 서버가 실제로 읽는 **그 한 부**. 붙어 있는 클라이언트가 얹은 이름을 이 핸들로 심어, 발견·호출이
-    /// 조립부가 넘긴 명부를 보는지(사본이 아닌지) 잰다.
-    registered: CommandRoster,
+    /// 조립부가 넘긴 버스를 보는지(사본이 아닌지) 잰다.
+    bus: CommandBus,
+    /// ★들고 있어야 한다★ — 떨어뜨리면 수거기가 나가는 길에 자리 표를 비우고 닫아(`CommandDeliveries::drain`)
+    /// 그 뒤의 호출이 전부 「종료 중」으로 반려된다.
+    _sweeper: BusSweeper,
     _handle: McpServerHandle,
 }
 
@@ -147,10 +227,35 @@ impl Fixture {
     }
 
     /// 붙어 있는 클라이언트가 자기 이름을 얹은 상태를 만든다 — 대시보드가 창·탭·슬롯을 얹는 그 경로다.
+    /// 이 주인은 봉투를 받기만 하고 **답하지 않는다**.
     fn register_client_command(&self, conn_id: ConnId, name: &str, help: &str) {
-        let sink: Arc<dyn FrameSink> = Arc::new(DiscardingSink);
-        self.registered.attach(conn_id, &sink);
-        self.registered
+        self.attach_owner(conn_id, name, help, Arc::new(DiscardingSink));
+    }
+
+    /// 얹은 이름을 실제로 답하는 주인 — 반환은 그 주인이 받은 봉투들이다.
+    fn register_answering_client(
+        &self,
+        conn_id: ConnId,
+        name: &str,
+        help: &str,
+    ) -> Arc<Mutex<Vec<CommandEnvelope>>> {
+        let seen: Arc<Mutex<Vec<CommandEnvelope>>> = Arc::default();
+        self.attach_owner(
+            conn_id,
+            name,
+            help,
+            Arc::new(AnsweringSink {
+                deliveries: self.bus.deliveries().clone(),
+                seen: seen.clone(),
+            }),
+        );
+        seen
+    }
+
+    fn attach_owner(&self, conn_id: ConnId, name: &str, help: &str, sink: Arc<dyn FrameSink>) {
+        self.bus.roster().attach(conn_id, &sink);
+        self.bus
+            .roster()
             .register(
                 conn_id,
                 vec![engram_dashboard_command::CommandDecl {
@@ -159,6 +264,49 @@ impl Fixture {
                 }],
             )
             .expect("붙어 있는 연결의 등록");
+    }
+
+    /// 답을 **나중에** 내는 주인 — 배달이 답장 자리에 누운 뒤에 결말이 붙는다([`ParkedAnsweringSink`]).
+    fn register_parked_answering_client(&self, conn_id: ConnId, name: &str, after: Duration) {
+        self.attach_owner(
+            conn_id,
+            name,
+            "{}",
+            Arc::new(ParkedAnsweringSink {
+                deliveries: self.bus.deliveries().clone(),
+                after,
+            }),
+        );
+    }
+
+    /// 호출하되 **호출자 예산 안에서** 답을 요구한다 — 실 클라이언트가 그 예산으로 끊기 때문이다.
+    ///
+    /// ★같은 수를 **다른 뜻으로** 쓴다 — 알고 쓰는 것이다★: 실 CLI 는 `CLI_CONTROL_READ_TIMEOUT_SECS` 를
+    /// `set_read_timeout` 에 넣어 **연속 무응답 구간**을 재는데(정본 = core 쪽 그 상수 doc), 여기 `reqwest` 의
+    /// `.timeout()` 은 **요청 전체의 총 예산**이다. 오늘 이 라우트가 답 전에 바이트를 하나도 안 흘려 두 뜻이
+    /// 같은 값이 되고, 총 예산 쪽이 **더 엄격**하므로 이 시험이 거짓 초록을 내지는 않는다.
+    /// ★그러나 그 등가는 라우트의 성질에 기댄 것이다★ — 중간에 청크·진행 알림을 흘리는 형태로 바뀌면 실
+    /// CLI 는 안 끊는데 이 시험만 끊긴다. 그날 고칠 것은 이 헬퍼(무응답 구간을 재는 형태로)이고, 데몬 마감이
+    /// 아니다.
+    async fn call_within(
+        &self,
+        budget: Duration,
+        body: serde_json::Value,
+    ) -> (reqwest::StatusCode, serde_json::Value) {
+        let resp = reqwest::Client::builder()
+            .timeout(budget)
+            .build()
+            .expect("client")
+            .post(format!("{}/control/call", self.base))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&body)
+            .send()
+            .await
+            .expect("데몬의 답이 호출자 예산 안에 도착해야 한다");
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        (status, serde_json::from_str(&text).unwrap_or_default())
     }
 
     /// 좀비 PTY 를 남기지 않는다 — 실 프로세스를 띄운 테스트는 끝에서 반드시 부른다.
@@ -180,15 +328,26 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     broadcast_slot.set(broadcast.clone());
     let command_slot = Arc::new(CommandTableSlot::new());
-    // ★조립부가 넘긴 **그 한 부**를 픽스처가 함께 쥔다★ — 서버가 자기 사본을 만들면 아래 발견 테스트가
-    //   빨개진다(운영에서 그 어긋남은 아무 신호도 내지 않는다).
-    let registered = CommandRoster::new();
+    // ★조립부가 넘긴 **그 한 부**를 픽스처가 함께 쥔다★ — 서버가 자기 사본을 만들면 아래 발견·중계
+    //   테스트가 빨개진다(운영에서 그 어긋남은 아무 신호도 내지 않는다).
+    // ★1단계 표를 슬롯으로 물린다★ — 운영 조립(`lib.rs`)과 같은 모양이라야 「데몬 자기 이름은 그 자리에서
+    //   끝나고 남의 이름만 중계된다」를 이 파일이 실제로 재게 된다.
+    // 마감을 볼 눈은 버스와 짝으로 난다 — 없으면 답 안 하는 주인을 만난 호출이 영영 안 깨어난다(hang).
+    let (bus, sweeper) = CommandBus::new(
+        CommandRoster::new(),
+        CommandDeliveries::new(),
+        Arc::new(
+            engram_dashboard_daemon::control::commands::DaemonLocalCommands::new(
+                command_slot.clone(),
+            ),
+        ),
+    );
     let handle = start_mcp_server(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
-        registered.clone(),
+        bus.clone(),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -231,8 +390,10 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
         manager,
         base,
         token,
+        registry,
         broadcast,
-        registered,
+        bus,
+        _sweeper: sweeper,
         _handle: handle,
     }
 }
@@ -1100,41 +1261,67 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     assert_eq!(f.broadcast.count(), 0, "발견은 아무것도 바꾸지 않는다");
 }
 
-/// ★목록의 도달성 칸은 **호출 라우트가 실제로 하는 일**과 갈릴 수 없다★ — 상수를 단언하지 않고, 목록이
-/// 실어 온 이름을 전부 그대로 호출해 답을 맞대 본다. 칸이 「부를 수 있다」고 해 놓고 `UNSUPPORTED` 가
-/// 돌아오면(혹은 그 반대면) 여기서 빨개진다.
+/// ★목록의 도달성 칸은 **호출 라우트가 실제로 하는 일**과 갈릴 수 없다★ — 목록이 실어 온 이름을 전부
+/// 그대로 호출해 답을 맞대 본다. 칸이 「부를 수 있다」고 해 놓고 못 닿는 답(`UNSUPPORTED`)이 돌아오면
+/// 여기서 빨개진다.
 ///
-/// ★인자를 안 싣는다 — 그게 이 대조를 부작용 없이 만든다★: 데몬 명령은 인자 부족으로 반려되고(그래도
-/// `UNSUPPORTED` 는 아니다) 남의 이름은 못 닿아 `UNSUPPORTED` 다. 즉 이 대조가 재는 축만 남는다.
+/// ★두 출처를 다 싣는다★: 데몬 자기 이름은 그 자리에서 끝나고 남의 이름은 주인에게 중계된다 — 둘 다
+/// 도달 가능하다는 것이 ADR-0160 이후의 사실이고, 이 대조는 그 사실을 라우트로 확인한다.
+/// ★인자를 안 싣는다 — 그게 이 대조를 부작용 없이 만든다★: 데몬 명령은 인자 부족으로 반려되고 남의
+/// 이름은 답하는 주인이 그대로 되돌려 준다.
 #[tokio::test]
 async fn the_listing_flag_predicts_what_the_call_route_actually_does() {
     let f = fixture("catalog-flag").await;
-    f.register_client_command(1, "tab.create", "{}");
+    f.register_answering_client(1, "tab.create", "{}");
 
     let (_, listing) = f.catalog().await;
     let rows = listing["commands"].as_array().expect("배열").clone();
     assert!(rows.len() > 1, "전제: 두 출처가 다 실렸다: {listing}");
+    assert!(
+        rows.iter().any(|r| r["name"] == "tab.create"),
+        "전제: 남의 이름도 실렸다: {listing}"
+    );
 
-    let mut claimed_callable = 0;
-    let mut claimed_unreachable = 0;
     for row in rows {
         let name = row["name"].as_str().expect("이름").to_string();
         let callable = row["callable"].as_bool().expect("도달성 칸이 있어야");
         let (status, answer) = f.call(serde_json::json!({ "name": name })).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{name} → {answer}");
-        let unreachable = answer["code"] == "UNSUPPORTED";
-        assert_eq!(
-            callable, !unreachable,
-            "목록의 callable 과 실제 결말이 갈렸다: {name} → {answer}"
+        // ★이 한 줄은 **구조적으로 참이다 — 회귀를 잡는 단언이 아니다**★: 목록의 도달성 칸은
+        //   `mine ∪ registered` 로 만들어지고 행 자체도 그 둘의 병합이라(`catalog::handle_list`) 오늘
+        //   `false` 인 행은 **만들 수 없다**. 그래서 여기엔 음성 대조를 붙일 수 없다(아래
+        //   `UNKNOWN_COMMAND` 축에는 붙어 있다 — 그쪽은 실제로 갈릴 수 있다).
+        //   ★그럼 왜 남기나★: 세 번째 출처(주인 없이 선언만 아는 이름 따위)가 병합에 들어오는 날 이 줄이
+        //   그 행에서 처음으로 갈리고, 그때 이것이 **그 사실을 알리는 유일한 자리**다. 지우지 말 것 —
+        //   다만 「이 줄이 초록이니 도달성 계산이 검증됐다」로 읽지도 말 것.
+        assert!(callable, "목록이 도달 불가라고 말한 이름: {name}");
+        // ★이 단언이 잡는 것 = **호출 라우트가 그 이름을 못 알아보는 것**★. 목록은 두 출처를 합쳐 내고
+        //   (`catalog::merge`) 호출은 같은 두 출처를 다시 조회하는데, 둘이 갈리면 갈린 이름이 여기서
+        //   `UNKNOWN_COMMAND` 로 돌아온다. 아래 음성 대조가 이 단언이 실제로 실패할 수 있음을 보인다 —
+        //   그것이 없으면 이 줄은 「상수를 단언한 것」과 구분되지 않는다.
+        assert_ne!(
+            answer["code"], "UNKNOWN_COMMAND",
+            "목록이 가르친 이름을 호출 라우트가 모른다: {name} → {answer}"
         );
-        if callable {
-            claimed_callable += 1;
-        } else {
-            claimed_unreachable += 1;
-        }
+        // ★못 닿는 답도 함께 막는다 — 이 doc 이 이름으로 지목한 회귀가 그것이다★: ADR-0160 이전의 이 라우트는
+        //   남의 이름에 `UNSUPPORTED`(「주인이 나가 아니다」)를 돌려줬다. 그 갈래가 되살아나면 위 단언은
+        //   초록인데 도달성 칸은 거짓이 되므로, 그 코드를 여기서 따로 부인한다.
+        assert_ne!(
+            answer["code"], "UNSUPPORTED",
+            "목록이 부를 수 있다고 한 이름에 못 닿는 답이 왔다: {name} → {answer}"
+        );
     }
-    // 두 갈래가 다 나왔어야 대조가 의미를 갖는다(전부 한쪽이면 상수를 단언한 것과 같다).
-    assert!(claimed_callable > 0 && claimed_unreachable > 0);
+
+    // ★음성 대조 — 위 단언의 관측력을 보증한다★: 목록에 없는 이름은 반드시 `UNKNOWN_COMMAND` 여야 한다.
+    //   이 줄이 빨개지면 위 루프는 무엇을 넣어도 초록이라는 뜻이고, 그때 그 루프는 아무것도 안 지킨다.
+    let (status, answer) = f
+        .call(serde_json::json!({ "name": "nobody.declares.this" }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(
+        answer["code"], "UNKNOWN_COMMAND",
+        "목록에 없는 이름은 모르는 명령이어야: {answer}"
+    );
 }
 
 /// ★설계된 최악에서도 **고칠 재료가 살아 돌아와야 한다**★
@@ -1289,12 +1476,15 @@ async fn a_full_name_call_refuses_a_bad_argument_the_way_its_sibling_does() {
     assert_eq!(f.broadcast.count(), 0, "반려는 아무것도 바꾸지 않는다");
 }
 
-/// ★발견이 가르친 이름을 「그런 명령 없음」으로 되돌리면 목록이 거짓말한 것이 된다★ — 그러면 호출자는
-/// 존재하는 이름을 계속 바꿔 가며 재시도한다. 실제로 막힌 것은 **이 입구가 그 주인에게 못 닿는 것**이다.
+/// ★발견이 가르친 이름은 그 주인에게 **실제로 배달되고 답이 되돌아온다**★(ADR-0160 · 완결 조건 1).
+///
+/// 이 파일에서 라우트를 끝에서 끝까지 태우는 자리다: HTTP 요청 → 데몬 표 미스 → 명부 조회 → 봉투가
+/// 주인의 프레임 출구로 → 주인의 결말 → 같은 HTTP 응답. 어느 고리가 끊겨도 여기서 빨개진다.
+/// ★인자가 그대로 건너가는지도 함께 본다★ — 남의 이름은 검문받지 않고 손도 대지 않는 것이 계약이다.
 #[tokio::test]
-async fn a_client_owned_name_is_told_apart_from_a_name_that_does_not_exist() {
-    let f = fixture("catalog-not-mine").await;
-    f.register_client_command(1, "tab.create", "{}");
+async fn a_client_owned_name_is_relayed_to_its_owner_and_its_answer_comes_back() {
+    let f = fixture("catalog-relay").await;
+    let seen = f.register_answering_client(1, "tab.create", "{}");
     let (_, listing) = f.catalog().await;
     assert!(
         listing["commands"]
@@ -1310,24 +1500,202 @@ async fn a_client_owned_name_is_told_apart_from_a_name_that_does_not_exist() {
         .await;
     assert_eq!(status, reqwest::StatusCode::OK, "봉투로 답한다: {owned}");
     assert_eq!(
-        owned["code"], "UNSUPPORTED",
-        "이름도 주인도 있다 — 못 하는 것은 이 표면이다: {owned}"
+        owned["ran"], "tab.create",
+        "주인이 만든 결과가 그대로 응답 본문이어야: {owned}"
     );
-    let hint = owned["hint"].as_str().unwrap_or_default();
-    assert!(hint.contains("tab.create"), "어느 이름인지 짚어야: {owned}");
+    assert_eq!(owned["with"]["window"], "main", "{owned}");
+
+    let envelopes = seen.lock().expect("poisoned");
+    assert_eq!(envelopes.len(), 1, "봉투는 한 장이다");
+    assert_eq!(envelopes[0].name, "tab.create");
+    assert_eq!(envelopes[0].args["window"], "main", "인자는 손대지 않는다");
+    assert_eq!(
+        envelopes[0].owner.as_str(),
+        "conn-1",
+        "목적지 주인은 명부 조회 결과로 덮여야 한다"
+    );
+}
+
+/// ★아무도 선언하지 않은 이름은 여전히 「모르는 명령」이다★(완결 조건 2) — 중계를 붙이면서 이 갈래가
+/// 조용히 다른 코드로 바뀌면, 오타를 친 호출자가 고칠 곳을 못 찾는다.
+#[tokio::test]
+async fn a_name_nobody_declares_is_still_an_unknown_command() {
+    let f = fixture("catalog-unknown").await;
+    f.register_answering_client(1, "tab.create", "{}");
+
+    let (status, nowhere) = f.call(serde_json::json!({ "name": "nope.nope" })).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "봉투로 답한다: {nowhere}");
+    assert_eq!(nowhere["code"], "UNKNOWN_COMMAND", "{nowhere}");
+    let hint = nowhere["hint"].as_str().unwrap_or_default();
     assert!(
-        hint.contains("exists"),
-        "존재한다는 사실을 말해야(목록과 어긋나지 않게): {owned}"
+        hint.contains("nope.nope"),
+        "어느 이름인지 짚어야: {nowhere}"
+    );
+    assert!(
+        hint.contains("/control/commands"),
+        "회복 경로가 실려야: {nowhere}"
+    );
+}
+
+/// ★주인이 답하지 않으면 **마감이 답한다 — 그것도 호출자가 끊기 전에**★(완결 조건 3 · ADR-0161 결정 3).
+///
+/// ★느린 것이 이 시험의 본체다★: 재는 것이 「마감이 실제로 이 라우트를 푼다」라 운영 마감을 그대로
+/// 태운다. 시계를 손으로 미는 형태로 바꾸면 재는 것이 배달 단위가 되어, 제어 라우트가 그 답을 **응답으로**
+/// 옮기는지는 아무도 안 본다. 그 단위 갈래는 `command_delivery` 의 자기 시험이 이미 잰다.
+///
+/// ★시한 없는 클라이언트로 재지 말 것★: 그러면 이 시험은 **아무리 오래 걸려도** 초록이라, 정작 이 갈래가
+/// 존재하는 이유(실 호출자가 답을 본다)를 하나도 안 잰다. 실제로 그 상태였고 그때 두 마감이 같은 10초라
+/// CLI 가 **결정적으로 먼저** 끊었다 — 사용자가 본 것은 `TIMEOUT` 이 아니라 「데몬에 닿지 못했다」였다.
+/// 아래 상한이 그 실 호출자의 것이고(`CLI_CONTROL_READ_TIMEOUT_SECS`), 넘기면 `send` 가 실패해 빨개진다.
+///
+/// ★여기가 빨갛다고 곧바로 회귀로 읽지 말 것 — **러너 부하일 수 있다**★: 이 시험은 실시간으로 데몬 마감
+/// (7초)을 기다리고 클라이언트 상한(10초)에 견주므로 여유가 3초뿐인데, 로컬 회귀는 `--test-threads=4` 로
+/// 돌아 실 프로세스를 띄우는 스위트들과 같은 머신을 나눈다. 판정 순서는 ① 재실행해서 재현되나 ②
+/// `TIMEOUT` 대신 **전송 오류**가 났나(그러면 마감 관계가 실제로 뒤집힌 것이다 — ADR-0161 결정 3) ③
+/// 둘 다 아니면 부하다. ★그렇다고 값을 늘리지 말 것★ — 이 두 수의 관계가 여기서 재는 대상 자체다.
+/// (귀신 쫓기를 막는 안내이고, 두 수를 손대는 것은 그 관계를 재는 시험을 없애는 것이다.)
+#[tokio::test]
+async fn an_owner_that_never_answers_ends_in_a_timeout_within_the_callers_budget() {
+    let f = fixture("catalog-deadline").await;
+    // 답하지 않는 주인 — 봉투는 받고 결말은 안 낸다.
+    f.register_client_command(1, "tab.create", "{}");
+
+    let (status, answer) = f
+        .call_within(
+            Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS),
+            serde_json::json!({ "name": "tab.create", "args": { "window": "main" } }),
+        )
+        .await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "봉투로 답한다: {answer}");
+    assert_eq!(answer["code"], "TIMEOUT", "{answer}");
+    assert!(
+        !answer["hint"].as_str().unwrap_or_default().is_empty(),
+        "사유가 실려야: {answer}"
+    );
+}
+
+/// ★답이 **누워 있는 배달을 깨우는** 갈래★ — 형제 e2e 시험이 못 재는 자리다.
+///
+/// 형제(`the_control_door_...`)의 주인은 봉투를 내보내는 그 호출 스택 안에서 결말을 붙이므로 배달이
+/// 답장 자리에 **눕기 전에** 답이 와 있다. 운영의 주인은 남의 프로세스라 답은 반드시 나중에 오고, 그
+/// 갈래에서만 깨지는 것들이 있다: 답장 출구가 왕복 너머까지 살아 있어야 하고(취소로 명부 칸이 먼저
+/// 거둬지면 답이 갈 곳을 잃는다), `oneshot` 의 수신단이 그때까지 안 떨어져 있어야 한다.
+#[tokio::test]
+async fn an_answer_that_arrives_while_the_delivery_is_parked_still_reaches_the_caller() {
+    let f = fixture("catalog-parked").await;
+    // 여유는 「배달이 확실히 누웠다」를 만드는 값이지 마감과 겨루는 값이 아니다(마감보다 한참 짧다).
+    f.register_parked_answering_client(1, "tab.create", Duration::from_millis(250));
+
+    let (status, answer) = f
+        .call_within(
+            Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS),
+            serde_json::json!({ "name": "tab.create", "args": { "window": "main" } }),
+        )
+        .await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(
+        answer["late"], true,
+        "늦게 온 결말이 이 호출의 응답이어야: {answer}"
+    );
+    assert_eq!(answer["ran"], "tab.create", "{answer}");
+    assert_eq!(
+        f.bus.deliveries().in_flight(),
+        0,
+        "왕복이 끝났으면 자리를 놓는다"
+    );
+}
+
+/// ★호출자가 준 번호가 **봉투에 그대로 실린다**★(ADR-0161 결정 1) — 번호가 도중에 갈리면 재질의는 남남이
+/// 되어 자리 표가 겹침을 볼 재료를 잃고, 같은 조작이 두 번 적용된다.
+///
+/// ★그 번호가 사는 보장을 여기서 넓혀 읽지 말 것★: 오늘 이 문에서 걸리는 것은 **왕복이 열려 있는 동안의
+/// 재질의**뿐이고 완료 뒤 재질의는 다시 적용된다(정본 = `control::catalog` 의 `CallRequest::request_id` ·
+/// 미결). 이 시험이 재는 축은 번호의 **보존**이다.
+#[tokio::test]
+async fn a_caller_supplied_request_id_rides_all_the_way_into_the_envelope() {
+    let f = fixture("catalog-caller-id").await;
+    let seen = f.register_answering_client(1, "tab.create", "{}");
+    let mine = engram_dashboard_command::RequestId::new();
+
+    let (status, answer) = f
+        .call(serde_json::json!({
+            "name": "tab.create",
+            "args": { "window": "main" },
+            "request_id": mine.to_string(),
+        }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+
+    let envelopes = seen.lock().expect("poisoned");
+    assert_eq!(envelopes.len(), 1, "봉투 한 장: {envelopes:?}");
+    assert_eq!(
+        envelopes[0].request_id, mine,
+        "호출자가 준 번호가 주인에게 그대로 가야 한다"
+    );
+}
+
+/// 바깥에서 온 값이라 문법을 검증한다 — 그리고 그 반려는 **바디 전체가 틀렸다**가 아니라 그 칸을 지목한다.
+#[tokio::test]
+async fn a_malformed_caller_request_id_is_refused_by_name() {
+    let f = fixture("catalog-bad-caller-id").await;
+    f.register_client_command(1, "tab.create", "{}");
+
+    let (status, answer) = f
+        .call(serde_json::json!({ "name": "tab.create", "request_id": "not-a-uuid" }))
+        .await;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(answer["code"], "INVALID_ARGUMENT", "{answer}");
+    assert!(
+        answer["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("request_id"),
+        "어느 칸이 틀렸는지 말해야: {answer}"
+    );
+}
+
+/// ★우편 축은 **이름으로도** 닫혀 있다★ — 이 라우트는 경로가 아니라 바디의 이름으로 명령을 고르므로
+/// 미들웨어의 라우트 분류가 여기까지 오지 못한다.
+///
+/// ★오늘 `mail.*` 은 어느 출처에도 없다 — 그래서 이 시험이 재는 것은 **난간이 서 있나**다★: 그 이름이
+/// 데몬 표로 들어오든(예정돼 있다) 대시보드가 명부에 얹든, 판정은 이름 하나로 나므로 그날 이 줄이 이미
+/// 서 있다. 우편 가능 자격증명은 같은 이름에서 이 반려를 **안** 받아야 한다 — 그 대조가 없으면 이 시험은
+/// 「모든 요청을 거절한다」로도 초록이다.
+#[tokio::test]
+async fn a_mail_name_is_refused_by_name_on_the_call_route() {
+    let f = fixture("catalog-mail-name").await;
+    let barred = "test-token-no-mail".to_string();
+    f.registry
+        .issue(AgentId::new_v4(), 0, barred.clone(), false);
+
+    let body = serde_json::json!({ "name": "mail.send", "args": { "to": "someone" } });
+    let (status, answer) = f
+        .post_to("/control/call", Some(barred.clone()), Some(body.clone()))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(answer["code"], "MAIL_NOT_ALLOWED", "{answer}");
+
+    // 우편 계열이 아닌 이름은 같은 자격증명으로도 그대로 지나간다(모르는 이름으로 답한다).
+    let (_, answer) = f
+        .post_to(
+            "/control/call",
+            Some(barred),
+            Some(serde_json::json!({ "name": "mailbox.open" })),
+        )
+        .await;
+    assert_eq!(
+        answer["code"], "UNKNOWN_COMMAND",
+        "접두가 겹칠 뿐인 이름까지 막으면 안 된다: {answer}"
     );
 
-    let (_, nowhere) = f.call(serde_json::json!({ "name": "nope.nope" })).await;
+    // 우편 가능 자격증명은 그 이름에서 이 반려를 받지 않는다 — 판정이 자격증명 축으로 실제로 갈린다.
+    let (_, answer) = f.call(body).await;
     assert_eq!(
-        nowhere["code"], "UNKNOWN_COMMAND",
-        "아무 데도 없는 이름은 다른 사실이다: {nowhere}"
-    );
-    assert_ne!(
-        nowhere["code"], owned["code"],
-        "두 사실이 한 코드로 뭉개졌다"
+        answer["code"], "UNKNOWN_COMMAND",
+        "우편 가능 열쇠는 이름 게이트를 안 탄다: {answer}"
     );
 }
 
@@ -1373,6 +1741,19 @@ async fn a_call_body_that_is_not_a_command_object_still_gets_a_reason() {
 /// ★표가 안 꽂힌 조립에서 두 라우트의 대접이 갈린다★: 호출은 태울 표가 없으니 503 이고, 발견은 명부
 /// 절반을 그대로 낸다 — 그것이 같은 상태에서 WS 목록이 내는 답이라, 여기서 503 을 내면 두 표면이 같은
 /// 상태를 두고 다른 말을 하게 된다.
+///
+/// ## ★그 대가 = 목록의 도달성 칸이 이 상태에서 **거짓말을 한다**★
+///
+/// 발견은 명부의 이름을 `callable: true` 로 내는데(그 이름의 도달성은 명부에만 달렸다 — `catalog::merge`)
+/// 호출 라우트는 **이름을 보기도 전에** 503 이다(`mcp_server::control_call_handler` 의 표 슬롯 검사가
+/// `handle_call` 보다 앞이다). 즉 이 창에서는 목록이 가르친 이름을 부르면 「지금은 그 문이 없다」가 온다.
+/// ★아래 단언이 그 창을 **못박아 둔** 것이다★ — 산문으로만 두면 다음 편집이 「목록과 실행은 항상 일치한다」를
+/// 전제로 삼는다(형제 시험 `the_listing_flag_predicts_what_the_call_route_actually_does` 가 정확히 그
+/// 전제로 서 있다).
+/// ★닫지 않은 이유★: 닫는 방법은 「표가 없으면 빈 표로 보고 명부 갈래는 그대로 태운다」인데, 그러면
+/// **배선 순서 이상이 조용해진다** — 지금은 그 상태가 error! 한 줄과 503 으로 크게 드러난다. 조립된 서버
+/// 둘은 연결을 받기 전에 슬롯을 채우므로(daemon `run()`) 운영에서 이 창은 나지 않고, 크게 드러나는 쪽이
+/// 그 값에 맞다. 바꾸려면 그건 계약 변경이라 결정이 먼저다.
 #[tokio::test]
 async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_answers() {
     let f = fixture_with_table("catalog-no-table", false).await;
@@ -1387,13 +1768,24 @@ async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_a
 
     let (status, listing) = f.catalog().await;
     assert_eq!(status, reqwest::StatusCode::OK, "{listing}");
-    let names: Vec<&str> = listing["commands"]
-        .as_array()
-        .expect("배열")
+    let rows = listing["commands"].as_array().expect("배열");
+    let names: Vec<&str> = rows
         .iter()
         .map(|r| r["name"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(names, vec!["tab.create"], "명부 절반은 그대로 나온다");
+
+    // ★알려진 불일치의 못★ — 발견은 부를 수 있다고 하고, 그 이름을 부르면 503 이다.
+    // ★이 줄 자체는 구조적으로 참이다★(도달성 칸이 `false` 인 행은 오늘 만들 수 없다 —
+    //   `catalog::handle_list`). 여기서 값을 하는 것은 이 줄이 아니라 **바로 아래 503** 이다: 둘을 나란히
+    //   두어 「목록과 실행이 갈리는 창이 실재한다」를 못박는 것이 이 쌍의 목적이다.
+    assert_eq!(rows[0]["callable"], true, "{listing}");
+    let (status, body) = f.call(serde_json::json!({ "name": "tab.create" })).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "이 창에서는 명부의 이름도 503 이다 — 위 doc 의 그 대가: {body}"
+    );
 }
 
 // ── 지목 규칙 ↔ 우편 입구 교차 대조 ─────────────────────────────────────────────────

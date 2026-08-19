@@ -469,7 +469,9 @@ impl RosterDiff {
         for (name, candidates) in by_name {
             if candidates.len() != 1 {
                 tracing::debug!(
-                    name = %name,
+                    // 에이전트 이름은 클라이언트가 정한 문자열이다 — 로그 필드에 실을 땐 모양·길이를
+                    //   묶는다(`connection_core::sanitize_for_log` · 그 함수 doc 의 그 규율).
+                    name = %crate::connection_core::sanitize_for_log(&name),
                     count = candidates.len(),
                     "flush skip: 동명 도달 후보 다수 — 유일해질 때까지 파킹 대기(finding 2)"
                 );

@@ -110,13 +110,29 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use engram_dashboard_core::agent::types::{
-    AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS, CLI_EXE_NAME,
-    CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS, MAIL_MARKER_ENV,
-    MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
+    AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
+    CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS,
+    CLI_MAIL_VERBS, MAIL_MARKER_ENV, MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED,
+    RENAME_OUTCOME_UNCHANGED,
 };
 
-/// 연결/응답 타임아웃(로컬 데몬이라 짧게). 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// 제어 소켓의 **침묵 한도**(로컬 데몬이라 짧게) — 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
+///
+/// ★이 한 줄을 「연결/응답 타임아웃」으로 되돌리지 말 것★ — 셋 다 틀렸다: 총 대기도 응답 상한도 아니고
+/// (사유는 아래 세 번째 문단) **연결에는 아예 안 걸린다**. `TcpStream::connect` 를 `connect_timeout` 없이
+/// 부르므로(아래 `post_json`) 연결 단계의 상한은 OS 가 정한다.
+///
+/// ★값을 여기서 정하지 않는다 — **데몬과 공유하는 한도**다★: 데몬은 마감을 넘긴 중계에 `TIMEOUT` 을
+/// 실어 답하는데, 그 답이 나가기 전에 이 소켓을 끊으면 사용자는 「데몬에 닿지 못했다」를 보고(거짓이다 —
+/// 닿았고 적용됐을 수도 있다) 실제 사유를 영영 못 본다. 두 값의 대소 관계는 데몬 쪽이 문다
+/// (`command_delivery` 의 `fits_caller_silence_window`). 여기서 숫자를 다시 적으면 그 판정이 못 보는
+/// 곳에서 관계가 갈린다.
+/// ★이 값이 **총 대기 상한이 아니다**★ — 아래에서 `set_read_timeout`/`set_write_timeout` 에 들어가므로
+/// 재는 것은 **연속 무응답 구간**이다. 답 하나가 통째로 이 시간 안에 와야 한다는 뜻이 아니고, 반대로
+/// 서버가 중간에 바이트를 흘리면 총 소요는 이것을 넘어도 끊지 않는다. 지금 제어 라우트가 답 전에 아무
+/// 것도 안 보내서 두 해석이 같아 보일 뿐이다(그 사실의 정본 = core 쪽 상수 doc).
+// ADR-0161
+const TIMEOUT: Duration = Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS);
 
 /// help 동사. `--help`/`-h` 도 같은 자리로 받는다 — `is_help_token`.
 const HELP_VERB: &str = "help";
@@ -139,9 +155,27 @@ const COMMAND_NAME_SEPARATOR: char = '.';
 const ROUTE_COMMANDS: &str = "/control/commands";
 const ROUTE_CALL: &str = "/control/call";
 
+/// 데몬이 「지금 못 돌린다」고 표시한 이름들의 구획 머리(목록)와 그 한 줄(상세).
+///
+/// ★문구를 상수로 두는 이유★: 이것이 호출자가 「왜 안 되나」를 배우는 유일한 자리라 시험이 같은 바이트를
+/// 봐야 한다 — 리터럴을 양쪽에 적어 두면 한쪽만 고친 편집이 그대로 통과한다(실발생 — 이전 문구는
+/// `UNSUPPORTED` 를 약속했고 그 코드를 내는 생산자는 사라졌는데도 시험이 초록이었다).
+/// ★오류 코드 이름을 적지 않는다★ — 이 CLI 는 그 거절이 어떤 코드로 올지 모른다(데몬이 정한다). 그걸
+/// 지어내서 적으면 지금처럼 거짓이 된다.
+const BLOCKED_NOTICE: &str =
+    "\nThe daemon reports it cannot run these right now — calling one is refused, and the reply carries the reason:\n\n";
+const BLOCKED_DETAIL: &str =
+    "The daemon reports it cannot run this right now — calling it is refused, and the reply carries the reason.\n";
+
+/// 이 호출의 요청 번호 하나 — ★UUID 문법이 계약이다★(데몬 `catalog::caller_request_id` 가 그 문법으로만
+/// 받는다). 도구 crate 의 발권 타입을 그대로 써서 두 쪽이 같은 문법을 쓰는 것을 타입으로 잇는다.
+fn new_request_id() -> String {
+    engram_dashboard_command::RequestId::new().to_string()
+}
+
 /// 이름이 표에 없다 — **데몬 어휘와 같은 코드**를 쓴다.
 ///
-/// ★따로 짓지 않는 이유★: 같은 사실을 데몬도 `UNKNOWN_COMMAND` 로 답한다(`catalog::not_mine`). 우리가
+/// ★따로 짓지 않는 이유★: 같은 사실을 데몬도 `UNKNOWN_COMMAND` 로 답한다(`catalog::unknown_name`). 우리가
 ///   먼저 알아챘다고 다른 낱말을 쓰면, 호출자는 어느 층이 답했는지에 따라 분기를 두 벌 써야 한다.
 const ERR_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
 
@@ -1576,9 +1610,13 @@ fn agent_object_ok(v: &serde_json::Value, with_state: bool) -> bool {
 /// ★`help` 는 **불투명 바이트**다★: 데몬 자기 표의 항목이면 우리가 아는 스키마 JSON 이지만, 클라이언트가
 ///   등록한 것은 임의 텍스트이고 JSON 이 아닐 수도 있다. 이 타입은 그것을 **문자열로만** 쥔다 — 파싱은
 ///   렌더 시점에 실패해도 되는 일로 따로 한다.
-/// ★`callable` = 이 입구가 지금 그 이름을 실행할 수 있다★(데몬 계약). 거짓이면 이름과 주인은 실재하지만
-///   `/control/call` 이 `UNSUPPORTED` 로 답한다 — 그래도 **부르는 것을 막지 않는다**: 막으면 그 거절이
-///   관측되지 않고, 배선이 생긴 날 CLI 도 함께 고쳐야 한다.
+/// ★`callable` = 이 입구가 지금 그 이름을 실행할 수 있다★(데몬 계약).
+///   ★**오늘 데몬은 이 칸을 모든 행에서 참으로 낸다**★ — 목록을 합치는 두 출처가 둘 다 도달 가능해서다
+///   (데몬 자기 표는 그 자리에서 돌고, 남의 이름은 주인에게 중계된다 — ADR-0160).
+///   ★그래도 상수로 접지 않는다★: 세 번째 출처(주인 없이 선언만 아는 이름 따위)가 그 목록에 들어오는 날
+///   파생해 둔 이 칸만 거짓이 되고, 박아 둔 쪽은 없는 도달성을 광고한다.
+///   ★거짓이어도 **부르는 것을 막지 않는다**★ — 도달 가능 여부의 정본은 데몬이고, 여기서 미리 끊으면
+///   그 거절을 아무도 관측하지 못한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CatalogEntry {
     name: String,
@@ -1753,8 +1791,20 @@ fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
             return EXIT_FAILED;
         }
     };
-    let body = serde_json::json!({ "name": invoke.name, "args": serde_json::Value::Object(args) })
-        .to_string();
+    let body = serde_json::json!({
+        "name": invoke.name,
+        "args": serde_json::Value::Object(args),
+        // ★번호를 **여기서** 만든다 — 논리적 호출 하나에 하나★(ADR-0161 결정 1·2): 데몬이 요청마다 새로
+        //   발급하면 데몬 쪽 중복 방지가 구조적으로 한 번도 안 걸린다(같은 번호에만 걸리는 장치라서).
+        //   ★이 프로세스는 스스로 재시도하지 않는다★ — 재시도는 이 CLI 를 **다시 실행**하는 호출자 몫이고
+        //   그 실행은 새 번호를 받는다.
+        //   ★데몬 쪽 보장이 어디까지인지를 여기 적지 않는다★ — 정본은 데몬의 요청 바디 계약
+        //   (`control::catalog` 의 `CallRequest::request_id`)이고, 오늘 그것은 **왕복이 열려 있는 동안**만
+        //   선다(완료 뒤 같은 번호는 다시 적용된다 · 미결). 같은 번호를 되보내는 수단을 이 CLI 에 붙일 때는
+        //   그 문단부터 읽을 것 — 지금 없는 보장을 전제로 재시도를 넣으면 조작이 두 번 적용된다.
+        "request_id": new_request_id(),
+    })
+    .to_string();
     match post_json(base, ROUTE_CALL, token, &body) {
         Ok(resp) => {
             println!("{}", resp.body);
@@ -1985,9 +2035,7 @@ fn render_catalog_list(entries: &[CatalogEntry]) -> String {
         }
     }
     if !blocked.is_empty() {
-        out.push_str(
-            "\nThese names exist but this entrance cannot reach their owner yet — calling one answers UNSUPPORTED:\n\n",
-        );
+        out.push_str(BLOCKED_NOTICE);
         let width = name_column(&blocked);
         for entry in &blocked {
             push_row(&mut out, entry, width);
@@ -2485,9 +2533,7 @@ fn push_verbatim(out: &mut String, help: &str) {
 /// 부를 수 없는 이름이면 그 사실을 상세 화면 머리에 붙인다 — 목록에서 구획으로 본 것과 같은 사실이다.
 fn push_reachability(out: &mut String, entry: &CatalogEntry) {
     if !entry.callable {
-        out.push_str(
-            "This entrance cannot reach this command's owner yet — calling it answers UNSUPPORTED.\n",
-        );
+        out.push_str(BLOCKED_DETAIL);
     }
 }
 
@@ -4646,8 +4692,8 @@ mod tests {
         ];
         let rendered = render_catalog_list(&entries);
         assert!(rendered.contains("tab.create"), "{rendered}");
-        assert!(rendered.contains("UNSUPPORTED"), "{rendered}");
-        let marker = rendered.find("UNSUPPORTED").expect("구획");
+        assert!(rendered.contains(BLOCKED_NOTICE), "{rendered}");
+        let marker = rendered.find(BLOCKED_NOTICE).expect("구획");
         assert!(
             rendered.find("agent.list").expect("mine") < marker,
             "부를 수 있는 것이 먼저: {rendered}"
@@ -4658,7 +4704,7 @@ mod tests {
         );
         // 전부 부를 수 있으면 그 구획 자체가 없다.
         let all_callable = render_catalog_list(&entries[..1]);
-        assert!(!all_callable.contains("UNSUPPORTED"), "{all_callable}");
+        assert!(!all_callable.contains(BLOCKED_NOTICE), "{all_callable}");
     }
 
     #[test]
@@ -4702,7 +4748,7 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("UNSUPPORTED"),
+            rendered.contains(BLOCKED_DETAIL),
             "부를 수 없다는 사실이 상세에도: {rendered}"
         );
     }

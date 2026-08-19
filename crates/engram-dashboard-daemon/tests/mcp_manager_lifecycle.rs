@@ -32,6 +32,24 @@ impl StatusSink for NoopSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
+/// ★중계 수거기를 **프로세스 수명에** 묶는 자리★
+///
+/// 떨어뜨리면 수거기가 나가는 길에 자리 표를 비우고 **닫아**(`CommandDeliveries::drain`) 그 서버의 그 뒤
+/// 중계가 전부 「종료 중」으로 반려된다 — 아래 두 하네스에서 지역 변수로 묶으면 함수를 빠져나오는 순간
+/// 그 일이 일어난다(이 파일이 그 상태였고, 여기 테스트가 자리 표를 안 거치는 것만 불러 초록이었다).
+/// ★반환 튜플에 축을 하나 더 얹지 않는 이유★: 어느 테스트도 그 축을 읽지 않고, 이 하네스가 세우는 서버는
+/// 테스트 종료 = 프로세스 종료로 회수된다. 형제 파일(`control_send.rs`)이 같은 형태를 쓴다.
+static RELAY_SWEEPERS: std::sync::Mutex<
+    Vec<engram_dashboard_daemon::command_delivery::BusSweeper>,
+> = std::sync::Mutex::new(Vec::new());
+
+fn hold_for_the_process(sweeper: engram_dashboard_daemon::command_delivery::BusSweeper) {
+    RELAY_SWEEPERS
+        .lock()
+        .expect("relay sweepers poisoned")
+        .push(sweeper);
+}
+
 fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -52,13 +70,18 @@ async fn make_manager_with_control(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
+    // ★수거기를 들고 있어야 한다★ — 지역 변수로 묶으면 이 함수를 나가는 순간 자리 표가 닫힌다
+    //   ([`hold_for_the_process`] 가 그 사유를 적는다).
+    let (relay_bus, relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
+    hold_for_the_process(relay_sweeper);
     let handle = start_mcp_server(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
         // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
         Arc::new(CommandTableSlot::new()),
-        engram_dashboard_daemon::command_roster::CommandRoster::new(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -87,13 +110,18 @@ async fn make_manager_with_control_channel(
     engram_dashboard_daemon::control::mcp_server::McpServerHandle,
 ) {
     let registry = Arc::new(ControlRegistry::new());
+    // ★수거기를 들고 있어야 한다★ — 지역 변수로 묶으면 이 함수를 나가는 순간 자리 표가 닫힌다
+    //   ([`hold_for_the_process`] 가 그 사유를 적는다).
+    let (relay_bus, relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
+    hold_for_the_process(relay_sweeper);
     let handle = start_mcp_server(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
         // 이 파일은 제어 동사를 부르지 않는다 — 명령 표를 비우면 그 라우트만 503 이 된다.
         Arc::new(CommandTableSlot::new()),
-        engram_dashboard_daemon::command_roster::CommandRoster::new(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");

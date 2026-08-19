@@ -1,32 +1,39 @@
 //! 계열을 가리지 않는 제어 입구 둘 — **발견**(`/control/commands`)과 **전체 이름 호출**(`/control/call`).
 //!
 //! ★역할★: 이웃 `agent.rs` 가 `agent` 한 계열의 어휘(`{verb}`)를 지는 어댑터라면, 여기는 **이름을 그대로
-//!   받는** 어댑터다. 동사 표도 계열 지식도 없고, 검문·실행은 이웃 `commands` 의 공통 입구
-//!   (`call_daemon_command`)가 그대로 한다 — 이 파일이 더하는 것은 셋이다: (a) 두 출처를 한 목록으로
-//!   접는 병합 규칙 (b) 이 표면의 어휘로 쓰는 회복 안내 (c) 표의 결말 → wire 봉투.
+//!   받는** 어댑터다. 동사 표도 계열 지식도 없고, 검문·실행은 **1단계 포트**를 거쳐 이웃 `commands` 의 공통
+//!   입구(`call_daemon_command`)가 그대로 한다(그 포트를 쓰는 이유 = [`handle_call`] 의 그 문단) — 이 파일이
+//!   더하는 것은 셋이다: (a) 두 출처를 한 목록으로 접는 병합 규칙 (b) 이 표면의 어휘로 쓰는 회복 안내
+//!   (c) 표의 결말 → wire 봉투.
 //!
 //! ★`help` 는 열어보지 않는다(하드 제약)★: 병합도 목록도 그 문자열을 **바이트 그대로** 나른다 —
 //!   파싱·검증·분기 금지(ADR-0156). 데몬은 그 안에 무엇이 들었는지 알 필요가 없고, 알면 주인이 모양을
 //!   바꿀 때마다 데몬이 함께 깨진다.
 //!
-//! ★이 데몬이 못 부르는 이름도 목록에는 실린다 — 그래서 **목록이 그 사실을 칸으로 말한다**★
-//!   ([`handle_list`] 의 `callable`). 그 칸이 없으면 발견은 「있다」만 말하고 [`handle_call`] 이 「이 입구로는
-//!   안 된다」를 말하게 되는데, 그 어긋남을 산문으로만 두면 **기계가 분기할 수 있는 칸은 거짓을 말하는
-//!   상태**가 된다. 두 자리는 같은 사실(그 이름이 데몬 자기 표에 있는가)에서 나와야 한다.
+//! ★목록의 도달성 칸(`callable`)과 [`handle_call`] 의 결말은 **같은 사실**에서 나와야 한다★: 그 칸이
+//!   기계가 분기할 수 있는 유일한 자리라, 갈리는 순간 발견은 부를 수 없는 이름을 부를 수 있다고
+//!   가르치거나 그 반대가 된다. 그 사실이 무엇인지는 [`handle_list`].
+//!
+//! ★남의 이름은 **버스로 넘긴다**★(ADR-0160): 데몬 자기 표에 없고 주인이 붙어 있으면 [`CallOutcome::Relay`]
+//!   가 되어 부르는 쪽이 배달 기계에 태운다. 여기서 배달을 하지 않는 이유는 이 파일이 blocking 이라서다 —
+//!   왕복은 async 다.
 //!
 //! tauri import 0(daemon crate).
 // ADR-0155
 // ADR-0156
+// ADR-0160
 
 use std::collections::BTreeSet;
 
 use engram_dashboard_command::{
-    CommandDecl, CommandError, CommandTable, ErrorCode, OwnerLookup, OwnerLookupSource, RosterEntry,
+    CommandDecl, CommandError, CommandReply, ErrorCode, OwnerLookup, OwnerLookupSource, RequestId,
+    RosterEntry,
 };
 use engram_dashboard_protocol::CommandListEntry;
 
 use super::agent::{preview, preview_within, CommandArgs};
 use super::ingress::ControlQueryResult;
+use crate::command_delivery::LocalCommands;
 
 /// 발견 목록의 병합 규칙 — ★이 규칙이 사는 자리는 여기 하나다★.
 ///
@@ -48,9 +55,9 @@ use super::ingress::ControlQueryResult;
 ///   **자기 정합성**이지 특정 조립 순서에 기댄 것이 아니다.
 /// ★반환 타입은 **WS 투영**이다 — 그 `available` 은 WS 의 뜻(주인이 붙어 있다)으로만 참이다★: 주인이
 ///   끊기면 그 이름이 명부에서 사라지므로(ADR-0150 결정 3) 실려 오는 항목은 전부 살아 있는 등록이다(그
-///   칸의 정본 주석 = `CommandListEntry`). **HTTP 목록은 그 칸을 다시 내보내지 않는다** — 그 표면의
-///   도달 규칙이 달라서(주인이 붙어 있어도 이 입구는 못 닿는다) 같은 이름의 칸을 재사용하면 뜻이 둘이 된다
-///   ([`handle_list`]).
+///   칸의 정본 주석 = `CommandListEntry`). **HTTP 목록은 그 칸을 다시 내보내지 않는다** — 그쪽이 말하는
+///   것은 「이 입구가 실행할 수 있나」라 재료가 하나 더 있고(데몬 자기 표), 같은 이름의 칸을 두 뜻으로
+///   재사용하면 그 칸으로 분기한 호출자가 어느 뜻인지 못 가린다([`handle_list`]).
 pub fn merge(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Vec<CommandListEntry> {
     let mine: Vec<CommandListEntry> = mine
         .into_iter()
@@ -77,23 +84,29 @@ pub fn merge(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Vec<Comman
 /// 발견 응답 — `{ "commands": [ { "name", "help", "callable" }, … ] }`.
 ///
 /// ★`callable` = **이 입구가 지금 그 이름을 실행할 수 있다**★(계약): 참이면 `/control/call` 이 그 이름을
-///   실제로 돈다. 거짓이면 그 이름은 실재하고 주인도 붙어 있지만 이 입구는 그 주인에게 못 닿아
-///   `UNSUPPORTED` 로 답한다([`not_mine`]). ★도달성을 말하는 칸은 이것 하나여야 한다★ — WS 투영의
-///   `available` 을 여기 다시 실으면 같은 이름의 칸이 표면마다 다른 뜻을 갖고, 그 칸으로 분기한 호출자는
-///   부를 수 없는 이름을 부를 수 있다고 읽는다.
-/// ★판정 재료는 [`handle_call`] 과 **같은 사실 하나**다★ — 그 이름이 데몬 자기 표에 있는가. 여기서 `mine`
-///   으로, 저기서 `CommandTable::contains` 로 읽는데 둘은 같은 표의 같은 명단이다(도구 crate 의
-///   `decls` ↔ `specs` 일치). 재료를 갈라 두면 목록과 실행이 서로 다른 답을 하게 된다.
+///   실제로 돈다 — 데몬 자기 표의 이름은 그 자리에서 돌고, 남의 이름은 그 주인에게 중계된다(ADR-0160).
+///   ★도달성을 말하는 칸은 이것 하나여야 한다★ — WS 투영의 `available` 을 여기 다시 실으면 같은 이름의
+///   칸이 표면마다 다른 뜻을 갖고, 그 칸으로 분기한 호출자는 부를 수 없는 이름을 부를 수 있다고 읽는다.
+/// ★판정 재료는 [`handle_call`] 과 **같은 사실 둘**이다★ — 그 이름이 데몬 자기 표에 있거나(여기서 `mine`,
+///   저기서 `CommandTable::contains` — 같은 표의 같은 명단이다) 명부가 주인을 답하거나(여기서
+///   `registered`, 저기서 `OwnerLookupSource::lookup`). 재료를 갈라 두면 목록과 실행이 서로 다른 답을 한다.
+/// ★그래서 오늘 이 칸은 [`merge`] 가 낸 모든 행에서 참이다 — 그렇다고 상수로 접지 말 것★: 참인 이유는
+///   합치는 두 출처가 **둘 다 도달 가능해서**이지 이 칸이 뜻을 잃어서가 아니다. 세 번째 출처(주인 없이
+///   선언만 아는 이름 따위)가 [`merge`] 에 들어오는 날, 파생해 두었으면 그 행만 거짓이 되고 상수로
+///   박아 두었으면 발견이 없는 도달성을 광고한다.
 ///
 /// ★인자가 값인 이유(슬롯·핸들이 아니라)★: 두 출처를 **어디서 읽었는지**를 이 함수가 모르게 해야 WS 쪽과
 ///   같은 [`merge`] 를 태울 수 있다. 읽는 시점은 부르는 쪽이 정한다.
 /// ★반쪽 목록도 내보낸다(표 슬롯이 비어 있으면 `mine` 이 빈 벡터)★ — 그것이 같은 상태에서 WS 목록이
-///   내는 답이고, 두 표면이 **같은 상태에서 다른 답**을 내지 않는 것이 이 라우트의 요점이다. 그 상태에서
-///   `callable` 은 전부 거짓인데, 그것도 참이다(태울 표가 없으면 호출은 503 이다). 조립된 서버 둘은 연결을
-///   받기 전에 표를 꽂으므로 운영에서 이 갈래는 나지 않는다.
+///   내는 답이고, 두 표면이 **같은 상태에서 다른 답**을 내지 않는 것이 이 라우트의 요점이다. 조립된 서버
+///   둘은 연결을 받기 전에 표를 꽂으므로 운영에서 이 갈래는 나지 않는다.
 pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> ControlQueryResult {
     // 이름만 뜬다 — `help` 는 복사하지 않는다(이 판정에 필요 없고, 그 블롭이 이 목록에서 가장 큰 것이다).
-    let callable: BTreeSet<String> = mine.iter().map(|decl| decl.name.clone()).collect();
+    let callable: BTreeSet<String> = mine
+        .iter()
+        .map(|decl| decl.name.clone())
+        .chain(registered.iter().map(|entry| entry.name.clone()))
+        .collect();
     // ★`json!` 을 쓰지 않는 이유는 **복사**다★: 그 매크로는 리터럴이 아닌 자리를 `to_value(&expr)` 로 펼치고
     //   (`serialize_str` 이 `to_owned` 한다) `help` 블롭이 행마다 한 번 더 복제된다 — 명부 상한(4096 × 4 KiB)
     //   에서 요청마다 나는 그 사본이 이 응답의 가장 큰 비용이다. 손으로 조립하면 아래 String 은 **옮겨진다**.
@@ -126,12 +139,42 @@ pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Cont
 /// ★모르는 꼭대기 칸은 **무시한다**(`args` 안과 규율이 다르다)★: 홉 간 additive 진화를 살리려면 이 봉투에
 ///   칸이 하나 늘어도 옛 데몬이 받아야 한다. 인자를 `args` 에 안 넣고 꼭대기에 실은 요청은 **조용히 통과하지
 ///   않는다** — 그 명령의 필수 칸이 비어 `INVALID_ARGUMENT` 로 선언된 칸 전량과 함께 반려된다.
+/// ★`request_id` 는 **선택**이다 — 있으면 호출자 것을 쓰고 없으면 데몬이 낸다★(ADR-0161 결정 1).
+///
+/// 이 칸이 사는 이유는 하나다: 배달의 중복 방지는 **같은 번호가 다시 왔을 때만** 걸리므로, 데몬이 요청마다
+/// 새 번호를 만들면 그 장치는 구조적으로 한 번도 안 걸린다. 재시도가 같은 번호를 되보내야 걸릴 기회가 생긴다.
+///
+/// ## ★오늘 이 칸이 실제로 사는 보장 = **왕복이 열려 있는 동안뿐**이다(알려진 갭)★
+///
+/// 이 문으로 온 번호가 지금 막는 것은 「진행 중인 왕복과 겹친 재질의」뿐이다 — 그 갈래는 자리 표가
+/// [`Seat::Taken`](crate::command_delivery)·[`Seat::Conflict`](crate::command_delivery) 로 반려하거나
+/// 합친다. **왕복이 끝난 뒤에 온 재질의는 다시 적용된다.** 사유가 둘이고 둘 다 이 문에 걸린다:
+///
+/// 1. **중계된 이름**(대시보드 것)은 답장 프레임이 나가는 순간 자리를 놓는다
+///    ([`CommandDeliveries::release`](crate::command_delivery)) — 번호를 붙드는
+///    [`SeatState::Retained`](crate::command_delivery) 는 데몬 **자기** 1단계 자리에만 붙는다.
+/// 2. **데몬 자기 이름**(`agent.*`)은 [`handle_call`] 이 그 자리에서 답하므로 자리 표를 아예 안 거친다 —
+///    즉 그 보유 장치에 닿을 경로가 이 입구에는 없다.
+///
+/// ★그래서 「완료 후 재질의가 `ALREADY_APPLIED` 로 막힌다」로 적지 말 것★ — 이 입구에서는 거짓이다.
+/// 완료분을 되돌려주는 진짜 dedup 저장소가 없는 것이 그 뿌리이고(그 부재의 정본 = `command_delivery` 의
+/// `no_retry`), 이 문의 좌석을 완료 뒤에도 붙들게 할지는 **미결**이다(사용자 결정 대기).
+///
+/// ★없는 요청도 계속 받는다★ — 하위 호환이고, 그 경로는 위 in-flight 보장조차 안 걸린다(번호가 매번
+/// 새것이라 겹칠 것이 없다 — ADR-0161 영향 절).
+/// ★봉투가 아니라 이 HTTP 바디만 늘어난다★ — ADR-0160 「봉투 무변경」이 그대로 유효하다.
 #[derive(Debug, Default)]
 pub struct CallRequest {
     /// ★필수인데 부재를 허용하는 이유는 이웃과 같다★ — 없으면 역직렬화가 실패해 **사유 없는 반려**로
     ///   끝난다. 빈 문자열로 받아 아래 dispatch 가 「모르는 명령」을 내면 호출자가 발견 목록으로 갈 수 있다.
     pub name: String,
     pub args: CommandArgs,
+    /// 호출자가 실어 보낸 요청 번호의 **원문**. `None` = 안 실었다.
+    ///
+    /// ★문자열로 받아 [`handle_call`] 에서 판정한다 — 역직렬화 단계에서 파싱하지 않는다★: 여기서 실패하면
+    /// 바디 전체가 [`malformed_body`] 로 접혀 「JSON 모양이 틀렸다」가 되는데, 틀린 것은 **이 칸 하나**다.
+    /// 호출자는 그 문구를 읽고 멀쩡한 봉투 모양을 의심한다.
+    pub request_id: Option<String>,
 }
 
 impl<'de> serde::Deserialize<'de> for CallRequest {
@@ -155,6 +198,7 @@ impl<'de> serde::Deserialize<'de> for CallRequest {
             ) -> Result<CallRequest, M::Error> {
                 let mut name: Option<String> = None;
                 let mut args: Option<CommandArgs> = None;
+                let mut request_id: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "name" => {
@@ -169,6 +213,14 @@ impl<'de> serde::Deserialize<'de> for CallRequest {
                             }
                             args = Some(map.next_value()?);
                         }
+                        CALLER_REQUEST_ID_FIELD => {
+                            if request_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    CALLER_REQUEST_ID_FIELD,
+                                ));
+                            }
+                            request_id = Some(map.next_value()?);
+                        }
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -177,6 +229,7 @@ impl<'de> serde::Deserialize<'de> for CallRequest {
                 Ok(CallRequest {
                     name: name.unwrap_or_default(),
                     args: args.unwrap_or_default(),
+                    request_id,
                 })
             }
         }
@@ -185,26 +238,146 @@ impl<'de> serde::Deserialize<'de> for CallRequest {
     }
 }
 
+/// 전체 이름 호출을 이 자리에서 끝냈나, 아니면 버스로 넘겨야 하나.
+///
+/// ★두 갈래를 한 타입으로 가르는 이유★: 넘기는 갈래는 **async 왕복**이라 이 blocking 함수 안에서 끝낼 수
+/// 없다. 산문으로 「빈손이면 넘겨라」를 남기면 넘기지 않는 호출자가 표현 가능하고, 그때 증상은 대시보드
+/// 명령이 조용히 다시 `UNSUPPORTED` 가 되는 것이다.
+// ADR-0160
+#[derive(Debug)]
+pub enum CallOutcome {
+    /// 이 데몬이 답했다(실행했거나 반려했거나 그런 이름을 모른다) — 그대로 나간다.
+    Answered(ControlQueryResult),
+    /// 남의 이름이고 주인이 붙어 있다 — 부르는 쪽이 배달 기계에 태운다.
+    ///
+    /// ★인자를 그대로 넘긴다★: 이 데몬의 표에 없는 이름은 대조할 선언이 없어 검문받지 않고(그게 옳다 —
+    /// 홉 간 additive 진화가 그 관용에 걸려 있다) 손도 대지 않는다(`call_daemon_command` 의 미스 계약).
+    Relay {
+        name: String,
+        args: serde_json::Value,
+        /// 이 왕복의 번호 — 호출자가 실어 보낸 것이거나(ADR-0161 결정 1) 여기서 발급한 것이다.
+        ///
+        /// ★발급을 어댑터로 미루지 않는 이유★: 미루면 「호출자 것을 쓴다」와 「데몬이 낸다」의 갈림이
+        /// 판정부 밖에 남아, 검증을 통과한 값이 쓰이는지 어댑터를 읽어야 알 수 있다.
+        request_id: RequestId,
+    },
+}
+
+/// 호출자가 자기 요청 번호를 싣는 칸의 이름 — 역직렬화와 안내 문구가 같은 철자를 써야 한다.
+const CALLER_REQUEST_ID_FIELD: &str = "request_id";
+
+/// 호출자가 준 번호의 원문 → [`RequestId`].
+///
+/// ★UUID 문법을 요구하는 것이 곧 길이·문자셋 검증이다★(ADR-0161 결정 5): [`RequestId`] 가 UUID 한 개를
+/// 감싼 타입이라(도구 crate `envelope.rs`) 다른 문법을 받아들이려면 **봉투의 타입**을 바꿔야 하고, 그건
+/// ADR-0160 「봉투 무변경」이 막는다. 그래서 바깥에서 온 임의 길이 문자열이 자리 표의 키가 되는 길이 없다.
+/// ★단 받는 모양이 하이픈 36자 하나는 아니다★ — `Uuid::parse_str` 는 hyphenated 말고 simple(32 hex)·
+/// braced(`{…}`)·urn(`urn:uuid:…`) 도 받는다. 그래도 위 문장이 서는 이유는 그 넷이 **전부 유계**라서다
+/// (가장 긴 urn 형이 45자). 안내 문구는 그 사실대로 적는다 — 「36자」로 적으면 통과하는 값을 두고 호출자가
+/// 자기 봉투를 의심한다.
+/// ★값의 **내용**은 검사하지 않는다★ — nil 이나 v4 아닌 값도 통과한다. 그 사실에 기대는 자리가 없어야 한다
+/// (그 전제의 정본 = `command_delivery` 의 `CommandDeliveries::complete`).
+/// ★반려 문구에 호출자 원문을 [`preview`] 로 줄여 싣는다★ — 그 값이 요청만큼 클 수 있다.
+fn caller_request_id(raw: &str) -> Result<RequestId, ControlQueryResult> {
+    uuid::Uuid::parse_str(raw).map(RequestId).map_err(|_| {
+        ControlQueryResult::Error {
+            code: ErrorCode::InvalidArgument.as_str(),
+            hint: format!(
+                "'{CALLER_REQUEST_ID_FIELD}' must be a UUID — hyphenated (8-4-4-4-12), 32 hex digits with no dashes, braced, or urn:uuid: form — so a retry can reuse it; got: {}",
+                preview(raw)
+            ),
+        }
+    })
+}
+
 /// 전체 이름 호출 — HTTP 어댑터가 유일하게 부르는 진입점.
 ///
 /// ★blocking 함수다(호출자 계약)★: 표의 핸들러는 전부 blocking 이다(이웃 `commands` 의 공통 입구 doc) —
 ///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다.
-/// ★`registered` 는 **반려 갈래에서만** 읽는다★: 이름이 이 표의 것이면 명부를 볼 이유가 없고, 명부 조회는
+/// ★`registered` 는 **미스 갈래에서만** 읽는다★: 이름이 이 표의 것이면 명부를 볼 이유가 없고, 명부 조회는
 ///   공유 잠금을 건드린다. 잠금은 그 호출 안에서 끝난다(ADR-0006 — [`OwnerLookupSource`] 의 존재 이유).
+/// ★조회와 배달 사이에 주인이 끊길 수 있다 — 그 경합은 여기서 못 닫는다★: 배달이 그 상태를 자기 어휘로
+///   답한다(`route` 의 명부 재조회 · `OwnerLink::send` 의 찢어진 창). 여기서 잠금을 배달까지 들고 가면
+///   느린 명령 하나가 등록·연결 정리·다른 배달을 전부 세운다.
+/// ★호출자 번호는 **무엇을 하기 전에** 판정한다★: 뒤로 미루면 같은 잘못된 값이 데몬 자기 이름에는 통하고
+///   남의 이름에만 반려되어, 이 입구의 계약이 이름에 따라 갈린다.
+///
+/// ## ★1단계 표를 **버스가 든 그 한 부**로 받는다 — `&CommandTable` 로 되돌리지 말 것★
+///
+/// 이 함수의 판정(내가 답하나 / 중계하나)과 배달 기계의 판정([`LocalCommands::claim`] — 자리의 `local`
+/// 표식과 `CommandBus::invoke` 의 중계 거절이 그 값을 쓴다)은 **같은 사실**이어야 한다. 표를 인자로 따로
+/// 받으면 어댑터가 버스와 **다른 부**를 넘기는 조립이 표현 가능해지고, 그 상태의 증상이 조용하다: 이 함수는
+/// 「내 이름이 아니다」라며 중계로 보내는데 버스는 그 이름을 자기 것이라며 `INTERNAL` 로 반려한다(또는 그
+/// 반대로, 거절이 조용한 no-op 이 되어 취소 한 번에 자리가 영구히 남는 갈래가 열린다). 포트로 받으면 어댑터가
+/// 넘길 수 있는 것이 **버스의 그 한 부**뿐이라 그 어긋남이 표현되지 않는다.
+/// ★그래서 검문·실행도 이 포트를 거친다★ — 실물 구현이 이웃 `commands` 의 공통 입구로 몰기 때문에
+/// (`commands::DaemonLocalCommands::run`) ADR-0157 검문은 그대로 걸린다. [`CommandTable::call`] 을 여기서
+/// 직접 부르는 두 번째 경로를 만들지 말 것.
+// ADR-0157
+// ADR-0160
 pub fn handle_call(
-    table: &CommandTable,
+    locals: &dyn LocalCommands,
     registered: &dyn OwnerLookupSource,
     req: CallRequest,
-) -> ControlQueryResult {
-    let CallRequest { name, args } = req;
+) -> CallOutcome {
+    let CallRequest {
+        name,
+        args,
+        request_id,
+    } = req;
     let mut args = args.into_value();
+    let request_id = match request_id.as_deref().map(caller_request_id) {
+        Some(Err(refusal)) => return CallOutcome::Answered(refusal),
+        Some(Ok(id)) => id,
+        None => RequestId::new(),
+    };
 
-    // ★검문·실행은 이웃 `commands` 의 공통 입구가 한다★ — 여기서 표를 직접 부르면 이 표면만 검문 없이
-    //   돌게 되고, 그것이 ADR-0157 이 막으려던 실패 그대로다.
-    match super::commands::call_daemon_command(table, &name, &mut args, "cli") {
+    // ★라우팅 권위는 `claim` 하나다★([`LocalCommands::claim`] doc) — 그 값이 자리의 `local` 표식을 정하므로,
+    //   여기서 다른 술어로 갈래를 고르면 이 함수와 배달이 서로 다른 답을 한다.
+    if locals.claim(&name).is_none() {
+        return match registered.lookup(&name) {
+            OwnerLookup::Available(_) => CallOutcome::Relay {
+                name,
+                args,
+                request_id,
+            },
+            OwnerLookup::Unknown => CallOutcome::Answered(unknown_name(&name)),
+        };
+    }
+    CallOutcome::Answered(match locals.run(&name, &mut args, "cli") {
         Some(Ok(payload)) => ControlQueryResult::Ok(payload),
         Some(Err(e)) => refused(e),
-        None => not_mine(&name, registered.lookup(&name)),
+        // ★계약 위반이라 **다음 단계로 흘리지 않는다**★: `claim` 이 내 것이라 답했으므로 이 이름은 중계
+        //   대상이 아니고, 중계로 떨어뜨리면 버스가 같은 근거로 그것을 다시 거절한다(무한한 것은 아니지만
+        //   호출자에게는 무의미한 왕복이다). 배달이 같은 어긋남을 같은 코드로 드러낸다
+        //   (`command_delivery` 의 `fold_local`).
+        None => {
+            tracing::error!(
+                entrance = "cli",
+                command = %crate::connection_core::sanitize_for_log(&name),
+                "1단계 표가 자기 이름이라 해 놓고 빈손을 냈다 — 라우팅 권위(`claim`)와 실행이 갈렸다"
+            );
+            refused(CommandError::of(
+                ErrorCode::Internal,
+                format!(
+                    "this daemon claims '{}' but its own table produced no answer for it",
+                    preview(&name)
+                ),
+            ))
+        }
+    })
+}
+
+/// 배달이 돌려준 결말 → wire 봉투.
+///
+/// ★성공 payload 는 주인이 만든 것이라 **열어보지 않는다**★ — 이 데몬은 `args` 도 결과도 파싱하지 않는다
+/// (ADR-0081 「데몬 opaque」). 실패는 이 표면의 다른 반려와 **같은 함수**를 탄다([`refused`]) — 갈라 두면
+/// 같은 코드가 입구 안에서 자리마다 다른 문구·다른 회복 안내를 달고 나간다.
+// ADR-0160
+pub fn relayed(reply: CommandReply) -> ControlQueryResult {
+    match reply.outcome {
+        Ok(payload) => ControlQueryResult::Ok(payload),
+        Err(e) => refused(e),
     }
 }
 
@@ -254,29 +427,20 @@ const MESSAGE_PREVIEW_CHARS: usize = 2048;
 const CATALOG_RECOVERY: &str =
     "list the command catalog (POST /control/commands) for every callable name and its fields";
 
-/// 이 표의 이름이 아니었다 — **모르는 이름**과 **남의 이름**은 다른 사실이다.
+/// 아무도 그 이름을 선언하지 않았다 — 데몬 표에도 없고 붙어 있는 주인도 없다.
 ///
-/// ★둘을 합치면 발견이 거짓말이 된다★: 방금 목록에서 `tab.create` 를 배운 호출자가 여기서 「그런 명령
-///   없음」을 받으면, 고쳐야 할 것이 이름이라고 믿고 존재하는 이름을 계속 바꿔 가며 재시도한다. 실제로
-///   막힌 것은 **이 입구가 그 주인에게 못 닿는 것**이고 그건 호출자가 고칠 수 없다.
-/// ★`UNSUPPORTED` 인 이유★: 이름도 인자도 멀쩡하고 주인도 붙어 있다 — 못 하는 것은 **이 표면**이다.
-///   재시도 지시가 `never` 인 것도 맞다: 같은 입구로 다시 보내도 배선이 생기기 전에는 같은 답이다.
-fn not_mine(name: &str, lookup: OwnerLookup) -> ControlQueryResult {
-    match lookup {
-        OwnerLookup::Available(_) => ControlQueryResult::Error {
-            code: ErrorCode::Unsupported.as_str(),
-            hint: format!(
-                "'{}' exists but it belongs to a connected client, and this entrance cannot reach that owner yet — only the commands this daemon runs itself can be called here.",
-                preview(name)
-            ),
-        },
-        OwnerLookup::Unknown => ControlQueryResult::Error {
-            code: ErrorCode::UnknownCommand.as_str(),
-            hint: format!(
-                "unknown command '{}' — neither this daemon nor any connected client declares that name; {CATALOG_RECOVERY}.",
-                preview(name)
-            ),
-        },
+/// ★「남의 이름이라 못 닿는다」(`UNSUPPORTED`)를 여기 되살리지 마라★: 그 갈래는 이제 배달로 간다
+///   ([`CallOutcome::Relay`] · ADR-0160). 되살리면 방금 목록에서 `tab.create` 를 배운 호출자가 그 이름을
+///   부를 수 없게 되고, 목록의 도달성 칸([`handle_list`])도 함께 거짓이 된다.
+/// ★주인이 방금 끊긴 이름도 여기로 온다★ — 끊긴 주인의 이름은 명부에서 사라지므로(ADR-0150 결정 3)
+///   「한 번도 없던 이름」과 구분할 재료가 이 데몬에 없다. 그 구분 손실은 그 결정이 감수한 것이다.
+fn unknown_name(name: &str) -> ControlQueryResult {
+    ControlQueryResult::Error {
+        code: ErrorCode::UnknownCommand.as_str(),
+        hint: format!(
+            "unknown command '{}' — neither this daemon nor any connected client declares that name; {CATALOG_RECOVERY}.",
+            preview(name)
+        ),
     }
 }
 
@@ -300,9 +464,37 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
 
 #[cfg(test)]
 mod tests {
-    use engram_dashboard_command::OwnerToken;
+    use engram_dashboard_command::{Effect, OwnerToken, RequestId};
 
     use super::*;
+    use crate::command_delivery::NoLocalCommands;
+
+    /// 이름 **하나**를 자기 것이라 답하는 1단계 표 — 실물(`commands::DaemonLocalCommands`)의 성질만 흉내
+    /// 낸다: `claim` 과 `run` 이 **같은 명단**을 본다(그 어댑터가 `OnceLock` 표 하나를 보므로 그렇다).
+    ///
+    /// ★실물을 끌어오지 않는 이유★: `agent.*` 표는 `AgentManager` 를 쥐고 그 뒤에 디스크·프로필 락이 딸려
+    /// 온다(`commands::make_daemon_table`). 이 파일이 재는 것은 **판정**(내가 답하나 / 중계하나 / 모르나)이라
+    /// 그 실물이 필요 없고, 끌어오면 이 시험이 재는 것이 판정에서 조립으로 옮겨간다(ADR-0012).
+    struct Holds(&'static str);
+
+    impl LocalCommands for Holds {
+        fn claim(&self, name: &str) -> Option<Effect> {
+            (name == self.0).then_some(Effect::Read)
+        }
+
+        fn run(
+            &self,
+            name: &str,
+            _args: &mut serde_json::Value,
+            _entrance: &'static str,
+        ) -> Option<Result<serde_json::Value, CommandError>> {
+            (name == self.0).then(|| Ok(serde_json::json!({ "ran": name })))
+        }
+
+        fn decls(&self) -> Vec<CommandDecl> {
+            vec![decl(self.0, "{}")]
+        }
+    }
 
     fn decl(name: &str, help: &str) -> CommandDecl {
         CommandDecl {
@@ -366,34 +558,166 @@ mod tests {
         assert_eq!(json["commands"][0]["help"], opaque);
     }
 
-    /// ★도달성 칸은 **출처에 따라 갈린다**★ — 데몬 자기 표의 이름만 이 입구가 실행한다. 상수를 단언하지
-    /// 않고 두 출처를 한 목록에 넣어 **갈리는지**를 본다(상수를 박으면 그 칸이 굳어도 초록이다).
-    /// 그 칸이 [`handle_call`] 의 답과 실제로 일치하는지는 라우트를 태우는 통합 시험이 잰다.
+    /// ★목록이 가르친 이름은 [`handle_call`] 이 전부 알아본다 — 그리고 그 밖의 이름은 모른다★.
+    ///
+    /// ★`callable == true` 만 단언하지 않는 이유★: 그 칸은 오늘 [`merge`] 의 모든 행에서 참이라(두 출처가
+    /// 둘 다 도달 가능하다) 그 단언은 **상수를 단언한 것**과 구분되지 않는다. 실제로 지켜야 하는 성질은
+    /// 「목록과 실행이 같은 두 사실에서 나온다」이고, 그것은 두 함수를 같은 입력에 태워야 관측된다.
+    /// ★음성 대조를 함께 둔다★ — 없으면 아래 루프는 어떤 구현에서도 초록이다.
     #[test]
-    fn the_listing_marks_only_the_names_this_entrance_can_actually_run() {
+    fn every_name_the_listing_teaches_is_a_name_the_call_route_recognises() {
+        let registered = Registered("tab.create");
         let json = handle_list(
             vec![decl("agent.list", "mine")],
             vec![entry("tab.create", "theirs")],
         )
         .to_json();
-
         let rows = json["commands"].as_array().expect("배열");
-        let flag = |name: &str| {
-            rows.iter()
-                .find(|r| r["name"] == name)
-                .and_then(|r| r["callable"].as_bool())
-        };
-        assert_eq!(flag("agent.list"), Some(true), "{json}");
-        assert_eq!(
-            flag("tab.create"),
-            Some(false),
-            "이 입구가 못 부르는 이름을 부를 수 있다고 말하면 안 된다: {json}"
+        assert_eq!(rows.len(), 2, "전제: 두 출처가 다 실렸다: {json}");
+
+        // 1단계 표는 비워 둔다 — 여기서 재는 것은 **알아보나**이지 결말이 아니다.
+        let table = NoLocalCommands;
+        for row in rows {
+            let name = row["name"].as_str().expect("이름");
+            assert_eq!(row["callable"], true, "{json}");
+            // `agent.list` 는 이 빈 표에 없으므로 명부로 떨어진다 — 그래서 이 루프가 재는 것은 명부 쪽
+            //   절반이고, 표 쪽 절반은 실제 표를 든 통합 시험이 잰다.
+            let known = !matches!(
+                handle_call(&table, &registered, call_of(name)),
+                CallOutcome::Answered(ControlQueryResult::Error { code, .. }) if code == "UNKNOWN_COMMAND"
+            );
+            assert!(
+                known || name == "agent.list",
+                "목록이 가르친 이름을 호출 판정이 모른다: {name}"
+            );
+        }
+
+        assert!(
+            matches!(
+                handle_call(&table, &registered, call_of("nobody.declares.this")),
+                CallOutcome::Answered(ControlQueryResult::Error { ref code, .. }) if code == &"UNKNOWN_COMMAND"
+            ),
+            "음성 대조 — 목록에 없는 이름은 모르는 명령이어야 한다"
         );
+
         // WS 투영의 칸은 이 표면에 새어 나오지 않는다 — 도달 규칙이 달라 뜻이 둘이 된다.
         assert!(
             rows.iter().all(|r| r["available"].is_null()),
             "WS 의 available 이 이 목록에 실렸다: {json}"
         );
+    }
+
+    /// ★호출자가 준 번호를 그대로 쓴다 — 그리고 문법에 안 맞으면 **그 칸을 지목해** 반려한다★
+    /// (ADR-0161 결정 1·5).
+    ///
+    /// 번호를 여기서 새로 만들면 배달의 중복 방지가 구조적으로 안 걸린다 — 그 성질이 이 칸의 존재 이유
+    /// 전부다. ★그 성질이 오늘 어디까지 서는지는 [`CallRequest::request_id`] 가 적는다(왕복이 열려 있는
+    /// 동안뿐)★ — 이 시험이 재는 것은 **번호가 그대로 쓰이는가** 하나다.
+    #[test]
+    fn a_caller_supplied_request_id_is_used_as_is_and_a_malformed_one_names_that_field() {
+        let table = NoLocalCommands;
+        let registered = Registered("tab.create");
+        let mine = RequestId::new();
+
+        let req = CallRequest {
+            name: "tab.create".to_string(),
+            request_id: Some(mine.to_string()),
+            ..CallRequest::default()
+        };
+        match handle_call(&table, &registered, req) {
+            CallOutcome::Relay { request_id, .. } => {
+                assert_eq!(request_id, mine, "호출자가 준 번호를 그대로 써야 한다")
+            }
+            other => panic!("중계여야: {other:?}"),
+        }
+
+        // 안 실으면 데몬이 낸다 — 하위 호환(그 경로는 중복 방지가 하나도 안 걸린다는 것이 계약이다).
+        match handle_call(&table, &registered, call_of("tab.create")) {
+            CallOutcome::Relay { .. } => {}
+            other => panic!("번호 없는 요청도 받아야: {other:?}"),
+        }
+
+        // ★바깥에서 온 값이라 문법을 검증한다★ — 그리고 그 반려는 **바디 전체가 틀렸다**가 아니어야 한다.
+        for bad in ["", "not-a-uuid", &"9".repeat(4096)] {
+            let req = CallRequest {
+                name: "tab.create".to_string(),
+                request_id: Some(bad.to_string()),
+                ..CallRequest::default()
+            };
+            match handle_call(&table, &registered, req) {
+                CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+                    assert_eq!(code, "INVALID_ARGUMENT", "{hint}");
+                    assert!(
+                        hint.contains(CALLER_REQUEST_ID_FIELD),
+                        "어느 칸이 틀렸는지 말해야: {hint}"
+                    );
+                    assert!(hint.len() < 4096, "문구가 요청만큼 커졌다: {}", hint.len());
+                }
+                other => panic!("반려여야: {other:?}"),
+            }
+        }
+    }
+
+    /// 잘못된 번호는 **이름을 가리지 않고** 같은 답을 낸다 — 안 그러면 이 입구의 계약이 이름에 따라 갈린다.
+    ///
+    /// ★그래서 1단계 표가 그 이름을 **실제로 쥐고 있어야** 이 시험이 자기 이름을 잰다★: 빈 표를 넘기면
+    /// `agent.list` 도 중계 갈래로 떨어져, 시험 이름이 주장하는 축(자기 이름에서도 같은 반려)을 한 번도
+    /// 태우지 않는다. 형제([`a_caller_supplied_request_id_is_used_as_is_and_a_malformed_one_names_that_field`])
+    /// 는 빈 표로 중계 갈래를 재므로, 둘이 합쳐 두 갈래를 덮는다.
+    #[test]
+    fn a_malformed_request_id_is_refused_even_for_a_name_this_daemon_holds() {
+        let req = CallRequest {
+            name: "agent.list".to_string(),
+            request_id: Some("nope".to_string()),
+            ..CallRequest::default()
+        };
+        match handle_call(&Holds("agent.list"), &Registered("tab.create"), req) {
+            CallOutcome::Answered(ControlQueryResult::Error { code, .. }) => {
+                assert_eq!(code, "INVALID_ARGUMENT")
+            }
+            other => panic!("반려여야: {other:?}"),
+        }
+    }
+
+    /// ★1단계 표가 **자기 것이라 해 놓고 빈손**을 내면 중계로 흘리지 않는다★
+    ///
+    /// 흘리면 그 이름은 명부에 주인이 없어 「모르는 명령」으로 나가거나(있으면) 버스가 같은 근거로 다시
+    /// 거절한다 — 어느 쪽이든 호출자는 **자기가 고칠 수 없는 배선 결함**을 자기 잘못으로 읽는다. 배달도 같은
+    /// 어긋남을 같은 코드로 드러낸다(`command_delivery` 의 `fold_local`).
+    /// ★이 상태는 실물 어댑터에서는 날 수 없다★(`claim`·`run` 이 같은 `OnceLock` 표를 본다) — 그래서 여기
+    /// 이중인격 표를 손으로 세운다. 다른 구현을 꽂는 날 그 성질을 함께 가져와야 한다는 것이 이 시험의 값이다.
+    #[test]
+    fn a_table_that_claims_a_name_but_answers_nothing_is_not_relayed() {
+        struct ClaimsButAnswersNothing;
+        impl LocalCommands for ClaimsButAnswersNothing {
+            fn claim(&self, _name: &str) -> Option<Effect> {
+                Some(Effect::Write)
+            }
+            fn run(
+                &self,
+                _name: &str,
+                _args: &mut serde_json::Value,
+                _entrance: &'static str,
+            ) -> Option<Result<serde_json::Value, CommandError>> {
+                None
+            }
+            fn decls(&self) -> Vec<CommandDecl> {
+                Vec::new()
+            }
+        }
+
+        // 주인이 붙어 있는 이름으로 태운다 — 중계로 흘렸다면 여기가 `Relay` 가 된다.
+        match handle_call(
+            &ClaimsButAnswersNothing,
+            &Registered("tab.create"),
+            call_of("tab.create"),
+        ) {
+            CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+                assert_eq!(code, "INTERNAL", "{hint}");
+                assert!(hint.contains("tab.create"), "어느 이름인지 말해야: {hint}");
+            }
+            other => panic!("INTERNAL 반려여야: {other:?}"),
+        }
     }
 
     #[test]
@@ -462,34 +786,78 @@ mod tests {
         .is_err());
     }
 
-    /// ★목록에 있는 이름을 「모르는 명령」으로 되돌리면 발견이 거짓말이 된다★ — 두 사실이 다른 코드로
-    /// 갈리는지, 그리고 남의 이름 쪽 문구가 **닿을 수 없다는 사실**을 말하는지 본다.
-    #[test]
-    fn a_name_this_daemon_cannot_reach_is_told_apart_from_a_name_that_does_not_exist() {
-        let owned = not_mine(
-            "tab.create",
-            OwnerLookup::Available(OwnerToken::new("conn-1")),
-        );
-        let nowhere = not_mine("nope.nope", OwnerLookup::Unknown);
+    /// 이름 하나에 주인이 붙어 있다고 답하는 명부.
+    struct Registered(&'static str);
 
-        match (owned, nowhere) {
-            (
-                ControlQueryResult::Error {
-                    code: owned_code,
-                    hint: owned_hint,
-                },
-                ControlQueryResult::Error {
-                    code: unknown_code,
-                    hint: unknown_hint,
-                },
-            ) => {
-                assert_eq!(owned_code, "UNSUPPORTED");
-                assert_eq!(unknown_code, "UNKNOWN_COMMAND");
-                assert!(owned_hint.contains("tab.create"), "{owned_hint}");
-                assert!(owned_hint.contains("exists"), "{owned_hint}");
-                assert!(unknown_hint.contains("nope.nope"), "{unknown_hint}");
+    impl OwnerLookupSource for Registered {
+        fn lookup(&self, name: &str) -> OwnerLookup {
+            if name == self.0 {
+                OwnerLookup::Available(OwnerToken::new("conn-1"))
+            } else {
+                OwnerLookup::Unknown
             }
-            other => panic!("둘 다 반려여야: {other:?}"),
+        }
+    }
+
+    fn call_of(name: &str) -> CallRequest {
+        CallRequest {
+            name: name.to_string(),
+            ..CallRequest::default()
+        }
+    }
+
+    /// ★목록이 가르친 이름은 **버스로 간다**★ — 여기서 반려로 접으면 대시보드 명령 열다섯이 다시 닫힌다
+    /// (ADR-0160). 그리고 아무도 선언하지 않은 이름은 여전히 「모르는 명령」이어야 한다 — 두 사실을 한
+    /// 갈래로 뭉치면 호출자는 실재하는 이름을 계속 바꿔 가며 재시도한다.
+    #[test]
+    fn a_name_with_a_connected_owner_goes_to_the_bus_and_an_unknown_one_is_refused() {
+        let table = NoLocalCommands;
+        let registered = Registered("tab.create");
+
+        match handle_call(&table, &registered, call_of("tab.create")) {
+            CallOutcome::Relay { name, args, .. } => {
+                assert_eq!(name, "tab.create");
+                assert!(args.is_object(), "인자는 그대로 넘어간다: {args}");
+            }
+            CallOutcome::Answered(other) => panic!("주인이 붙은 이름은 중계여야: {other:?}"),
+        }
+
+        match handle_call(&table, &registered, call_of("nope.nope")) {
+            CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+                assert_eq!(code, "UNKNOWN_COMMAND");
+                assert!(hint.contains("nope.nope"), "{hint}");
+                assert!(hint.contains(CATALOG_RECOVERY), "{hint}");
+            }
+            other => panic!("모르는 이름은 반려여야: {other:?}"),
+        }
+    }
+
+    /// 중계된 결말은 **주인이 만든 것**이다 — 성공 payload 는 열어보지 않고, 실패는 이 표면의 다른 반려와
+    /// 같은 함수를 탄다(회복 안내 규율까지 같이 걸린다).
+    #[test]
+    fn a_relayed_outcome_keeps_the_owners_answer() {
+        let id = RequestId::new();
+
+        let ok = relayed(CommandReply::ok(id, serde_json::json!({ "tab": "t-1" })));
+        assert!(
+            matches!(&ok, ControlQueryResult::Ok(v) if v["tab"] == "t-1"),
+            "{ok:?}"
+        );
+
+        let failed = relayed(CommandReply::err(
+            id,
+            CommandError::invalid_argument("no such window 'ghost'"),
+        ));
+        match failed {
+            ControlQueryResult::Error { code, hint } => {
+                assert_eq!(code, "INVALID_ARGUMENT");
+                assert!(hint.contains("ghost"), "{hint}");
+                assert!(
+                    hint.contains(CATALOG_RECOVERY),
+                    "고칠 수 있는 실패다: {hint}"
+                );
+            }
+            other => panic!("반려여야: {other:?}"),
         }
     }
 
@@ -518,9 +886,9 @@ mod tests {
     }
 
     /// ★반려 문구는 요청만큼 커지지 않는다 — **어느 갈래로 나가든**★: 호출자 문자열은 이름으로도
-    /// (`not_mine`) 표가 준 문구 안으로도(`refused` — `check_args` 가 친 키를 원문 그대로 넣는다) 들어온다.
-    /// 한 갈래만 재면 다른 갈래는 1 MiB 바디 상한이 유일한 방벽인 채로 남고, 그 상태에서 이 테스트는
-    /// **파일 전체의 성질처럼 읽혀** 없는 보장을 광고한다.
+    /// (`unknown_name`) 표가 준 문구 안으로도(`refused` — `check_args` 가 친 키를 원문 그대로 넣는다)
+    /// 들어온다. 한 갈래만 재면 다른 갈래는 1 MiB 바디 상한이 유일한 방벽인 채로 남고, 그 상태에서 이
+    /// 테스트는 **파일 전체의 성질처럼 읽혀** 없는 보장을 광고한다.
     ///
     /// 아래 수는 **여유이지 계약이 아니다** — 계약은 「요청 크기와 무관」이고, 그것을 세우는 것은 갈래마다의
     /// `preview_within`·`preview` 다(몫이 다르므로 한 수로 좁게 못 잡는다).
@@ -528,8 +896,12 @@ mod tests {
     fn every_refusal_branch_is_reported_within_a_bound() {
         let huge = "k".repeat(500_000);
         let branches = [
-            not_mine(&huge, OwnerLookup::Unknown),
-            not_mine(&huge, OwnerLookup::Available(OwnerToken::new("conn-1"))),
+            unknown_name(&huge),
+            // 중계된 실패도 이 표면의 반려로 나간다 — 주인이 보낸 문구가 요청만큼 클 수 있다.
+            relayed(CommandReply::err(
+                RequestId::new(),
+                CommandError::of(ErrorCode::Conflict, format!("owner said: {huge}")),
+            )),
             // 표의 문구는 자기 입력을 캡하지만(`quoted_input`), 캡하지 않는 생산자도 있다
             //   (`commands::drive_to_completion`) — 그쪽이 오는 모양으로 잰다.
             refused(CommandError::invalid_argument(format!(
