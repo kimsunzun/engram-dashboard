@@ -65,3 +65,44 @@ describe('index.css — 계층 밖 전역 리셋 금지', () => {
     expect(cssSource).toContain('@import "tailwindcss"')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// xterm 스크롤바 가시성 = ScrollArea seam 과 같은 룰 (ADR-0053)
+//
+// ★왜 소스 문자열로 재나★: jsdom 은 ::-webkit-scrollbar 캐스케이드를 계산하지 않아 렌더로는 관측이
+//   안 된다(위 게이트와 같은 사유). 지키려는 것도 "선언의 형태" 다 — thumb 색이 **스크롤 중 표식으로만**
+//   켜지는지, hover 로 되살리는 규칙이 다시 생기지 않았는지.
+// 표식을 붙이는 쪽(JS 절반)은 components/ui/nativeScrollActivity.test.ts 가 잰다.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', () => {
+  // 주석 제거 — 이 규약을 설명하는 주석 자체가 오탐되지 않게 한다(위 게이트와 동형).
+  const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  /** `.xterm-viewport ... ::-webkit-scrollbar-thumb { ... }` 규칙 = [선택자, 본문] 목록. */
+  const thumbRules = [...code.matchAll(/([^{}]*::-webkit-scrollbar-thumb)\s*\{([^{}]*)\}/g)]
+    .map(m => ({ selector: m[1].trim(), body: m[2] }))
+    .filter(r => r.selector.includes('xterm-viewport'))
+
+  it('thumb 색을 켜는 규칙은 전부 스크롤 중 표식으로 게이트된다', () => {
+    expect(thumbRules.length).toBeGreaterThan(0)
+    const ungated = thumbRules.filter(
+      r => /--scrollbar-thumb/.test(r.body) && !r.selector.includes('[data-scroll-active]'),
+    )
+    // 게이트 없이 색을 주면 상시 표시(= 통일 전 상태)로 되돌아간다.
+    expect(ungated.map(r => r.selector)).toEqual([])
+  })
+
+  it('스크롤 중에는 색을 켜는 규칙이 실제로 있다(영구 비표시 = 세 번째 룰 금지)', () => {
+    const gated = thumbRules.filter(
+      r => r.selector.includes('[data-scroll-active]') && /--scrollbar-thumb/.test(r.body),
+    )
+    expect(gated.length).toBeGreaterThan(0)
+  })
+
+  it('hover 로 스크롤바를 되살리는 규칙이 없다', () => {
+    const offenders = [...code.matchAll(/[^{}]*\{[^{}]*\}/g)]
+      .map(m => m[0])
+      .filter(r => /xterm-viewport/.test(r) && /scrollbar/.test(r) && /:hover/.test(r))
+    expect(offenders).toEqual([])
+  })
+})

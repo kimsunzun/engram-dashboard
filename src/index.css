@@ -29,9 +29,24 @@ html, body, #root {
    xterm 은 자체 .xterm-viewport 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서
    같은 theme.css 토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은
    theme 마다 다른 --scrollbar-thumb, 폭/라운드는 --scrollbar-size/-radius). WebView2=Chromium 이므로
-   ::-webkit-scrollbar 로 트랙/thumb 를 커스텀한다(overlay 스타일 근사 — 트랙 투명, 얇은 pill thumb). */
+   ::-webkit-scrollbar 로 트랙/thumb 를 커스텀한다(overlay 스타일 근사 — 트랙 투명, 얇은 pill thumb).
+
+   ★가시성 규칙도 seam 과 같게 맞춘다(2026-08-21 사용자 지적: "터미널은 화면 호버링만 해도 스크롤바가
+     나온다 — json 쪽으로 통일")★: 평소 숨김 → 스크롤 중에만 보임 → 멈춘 뒤 0.5s 후 숨김, hover 무반응
+     (ADR-0053 요구 (2)(3)(4)). seam 쪽은 Radix 가 스크롤바 요소를 마운트/언마운트해 이걸 구현하지만,
+     네이티브 스크롤바는 요소가 아니라 붙였다 뗄 수 없다 → **thumb 색을 평소 transparent 로 두고
+     "스크롤 중" 표식([data-scroll-active])이 붙은 동안만 칠한다.** 표식을 붙이는 쪽 =
+     components/ui/nativeScrollActivity.ts(숨김 지연 상수도 seam 과 공유 — 두 룰이 갈리지 않게).
+   ★거터(트랙 폭)는 그대로 둔다 — 통일 대상이 아니다★: Chromium 은 ::-webkit-scrollbar 에 width 를 주는
+     순간 클래식(공간 점유)으로 전환하므로 xterm 에서 seam 과 같은 "공간 차지 0" 은 원천 불가다(ADR-0053
+     거부한 대안 1). 여기서 통일하는 것은 **언제 보이나** 뿐이고, 폭을 건드리면 터미널 열 수(cols)가
+     바뀌어 PTY 치수까지 흔든다. */
 .xterm .xterm-viewport {
   scrollbar-width: thin; /* Firefox 폴백(WebView2 는 -webkit-* 사용) */
+  /* 평소 = 안 보임. 색만 죽이고 폭은 유지한다(위 거터 주석). */
+  scrollbar-color: transparent transparent;
+}
+.xterm .xterm-viewport[data-scroll-active] {
   scrollbar-color: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24)) transparent;
 }
 .xterm .xterm-viewport::-webkit-scrollbar {
@@ -42,9 +57,16 @@ html, body, #root {
   background: transparent;
 }
 .xterm .xterm-viewport::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24));
+  /* ★평소 = 투명(안 보임)★. hover 로 되살리지 말 것 — 그게 이 통일이 없앤 룰이다. */
+  background-color: transparent;
   border-radius: var(--scrollbar-radius, 9999px);
   /* 트랙 폭보다 얇게 보이도록 투명 border 로 안쪽 여백(overlay pill 근사). */
   border: 2px solid transparent;
+  /* ★background-color 로 칠하는 이유★: background 단축은 background-clip 을 border-box 로 되돌려
+     위 투명 border 안쪽 여백이 사라진다(thumb 가 트랙 폭 그대로 두꺼워진다). */
   background-clip: padding-box;
+}
+/* 스크롤 중에만 칠한다 — 색 토큰은 테마별(theme.css :root[data-theme=...] --scrollbar-thumb). */
+.xterm .xterm-viewport[data-scroll-active]::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24));
 }
