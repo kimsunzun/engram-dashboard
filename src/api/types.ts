@@ -68,7 +68,13 @@ export interface AgentInfo {
   status: AgentStatus
   cols: number
   rows: number
-  /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (ADR-0007) */
+  /**
+   * ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 화신마다 새로 뽑은 난수라 **순서에 뜻이 없다**.
+   * 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것). 프론트는 이 값을 "지금 읽는 출력
+   * 스트림이 아까 그 스트림인가" 의 판정 축으로만 쓴다 — ★재구독·재마운트 트리거로 쓰지 말 것★:
+   * 종료가 곧 명부에서 사라지는 것이라, 이 값을 컴포넌트 prop 으로 내려보내면 종료 순간 값이 떨어지며
+   * **replay 가 오기도 전에** 화면이 지워진다(데몬 ring 은 이미 없어 복구 불가). (ADR-0007)
+   */
   epoch: number
   capabilities: Capabilities
 }
@@ -76,7 +82,7 @@ export interface AgentInfo {
 export interface AgentStatusChanged {
   id: string
   status: AgentStatus
-  /** 재spawn epoch — 옛 세션의 지연 알림을 버리는 데 사용 (ADR-0007) */
+  /** 이 알림을 낸 화신의 표식 — 옛 세션의 지연 알림을 버리는 데 쓴다(일치/불일치만, AgentInfo.epoch). */
   epoch: number
 }
 

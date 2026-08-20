@@ -417,7 +417,8 @@ pub trait ControlChannel: Send + Sync + 'static {
     /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
     /// 종료)에서든 reaper 가 부르므로 누락이 없다. kill_agent 와 spawn 실패 가드도 선제로 부르니 같은
     /// (id,epoch) 에 중복 호출이 온다(remove-if-present 로 흡수). epoch 를 함께 받아 stale terminal 이
-    /// 재활성화(epoch bump)로 새로 붙은 산 토큰을 지우지 못하게 한다(ADR-0007/0084 epoch-guard 정신).
+    /// 재활성화(새 화신 = 다른 표식)로 새로 붙은 산 토큰을 지우지 못하게 한다(ADR-0007/0084 epoch-guard
+    /// 정신 — 판정은 **일치/불일치**다. 표식엔 순서가 없다).
     fn revoke(&self, id: AgentId, epoch: u32);
 }
 

@@ -2466,8 +2466,8 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     let to_name = obs_seam::fallback_name(id);
 
     let old_buf = insert_epoch(&manager, id, 0);
-    // 같은 AgentId 로 교체 주입 = 재시작(epoch bump) 모사 — `insert_test_session` 은 같은 id 를 덮으므로
-    //   맵엔 이제 B(epoch 1)만 남는다.
+    // 같은 AgentId 로 교체 주입 = 재시작(새 화신 표식) 모사 — `insert_test_session` 은 같은 id 를 덮으므로
+    //   맵엔 이제 B(표식 1)만 남는다. 두 값의 대소에는 뜻이 없다(표식은 난수 — `AgentProfile::epoch`).
     let new_buf = insert_epoch(&manager, id, 1);
 
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2534,8 +2534,8 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
 
 /// ── ADR-0088 Stage 1-오라클(mid-flight epoch race): **결정적** resolve↔write 경쟁 재현 ──────────────
 /// ★증명한다★: handle_send 가 수신자를 해석(list_agents 스냅샷)한 **직후**, 수신자 주입 **직전**에
-///   같은 AgentId 가 새 epoch incarnation 으로 교체되면(재시작=epoch bump 모사), write 는 resolve 가 본
-///   구 incarnation(epoch 0)이 아니라 **write 해석 시점의** incarnation(epoch 1)에 착지한다. (엄밀히는
+///   같은 AgentId 가 새 표식의 incarnation 으로 교체되면(재시작 모사), write 는 resolve 가 본
+///   구 incarnation(표식 0)이 아니라 **write 해석 시점의** incarnation(표식 1)에 착지한다. (엄밀히는
 ///   get_session 이후 한 번 더 동시 교체가 끼면 그 사이 "직전"이 된 incarnation 에 바이트가 갈 수도 있다 —
 ///   그래도 to_epoch 는 실제 착지 incarnation 을 정확히 담으므로 record-self-sufficiency 는 유지된다.) 이 race 는 순차 교체
 ///   (오라클 5)가 아니라 resolve↔write **사이**의 진짜 경쟁이다 — 프로덕션 yield-seam

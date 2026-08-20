@@ -2,7 +2,7 @@
 //!
 //! ★역할★: 스폰 시 데몬이 (AgentId, epoch)마다 256-bit 토큰을 발급하고, 스폰된 claude 에이전트가
 //!   mcp-config 의 Authorization 헤더로 그 토큰을 제시하면 여기서 검증해 신원((AgentId, epoch))을
-//!   되돌린다. epoch 회전(재활성화 bump)·kill·terminal 은 구 토큰을 폐기한다 → stale-epoch 토큰은
+//!   되돌린다. 화신 교체(재활성화 = 다른 표식)·kill·terminal 은 구 토큰을 폐기한다 → stale-epoch 토큰은
 //!   더 이상 유효하지 않다(401). `from`(발신자 신원)은 항상 이 토큰에서 파생한다 — 페이로드가 아니라
 //!   토큰이 신원의 단일 출처다(ADR-0086 §불변식 "from 은 토큰에서만 파생", 사칭 차단).
 //!
@@ -188,8 +188,8 @@ impl ControlRegistry {
     ///   validate→bind 사이에 revoke(토큰 evict) 또는 재발급(같은 agent 새 토큰)이 끼면 바인딩을 건너뛰고
     ///   실패로 신호한다(None 반환).
     /// ★왜 identity 재확인이 아니라 **exact token** 재확인인가(round-2 F2)★: 예전엔 `agent_to_token[agent]`
-    ///   가 가리키는 산 토큰의 신원이 `identity` 와 같은지만 봤다(id·epoch 일치). 그건 "epoch 는 재활성화마다
-    ///   반드시 bump 된다(ADR-0007)"는 **원거리 불변식**에 기대 같은 (id,epoch) 재발급이 불가능하다는 가정
+    ///   가 가리키는 산 토큰의 신원이 `identity` 와 같은지만 봤다(id·epoch 일치). 그건 "화신 표식은 재활성화마다
+    ///   반드시 갈린다(ADR-0007)"는 **원거리 불변식**에 기대 같은 (id,epoch) 재발급이 불가능하다는 가정
     ///   위에서만 안전하다. 검사를 **국소적**으로 만들려 검증된 토큰 문자열 자체를 넘겨받아 그 문자열이
     ///   여전히 현재 크레덴셜인지 직접 비교한다 — 그러면 그 원거리 불변식이 깨지더라도(같은 id·epoch 로
     ///   토큰이 재발급돼도) stale 토큰으로 온 initialize 가 바인딩되지 않는다.
@@ -251,9 +251,10 @@ impl ControlRegistry {
 
     /// (AgentId, epoch) 토큰 폐기 + 그 신원의 세션 바인딩 제거. terminal(reaper) / kill 에서 호출.
     ///
-    /// ★epoch-guard★: 요청 epoch 이 **현재 산 토큰의 epoch 과 일치할 때만** 폐기한다. stale terminal 이
-    ///   재활성화(epoch bump)로 새로 발급된 산 토큰을 지우지 못하게 한다(ADR-0007/0084 정신을 토큰
-    ///   레지스트리까지 확장). 일치하지 않으면 no-op(그 사이 새 토큰이 이미 자리를 차지).
+    /// ★epoch-guard★: 요청 표식이 **현재 산 토큰의 표식과 일치할 때만** 폐기한다. stale terminal 이
+    ///   재활성화(새 화신 = 다른 표식)로 새로 발급된 산 토큰을 지우지 못하게 한다(ADR-0007/0084 정신을
+    ///   토큰 레지스트리까지 확장). 일치하지 않으면 no-op(그 사이 새 토큰이 이미 자리를 차지).
+    ///   ★대소로 바꾸지 말 것★: 표식은 화신마다 뽑은 난수라 순서에 뜻이 없다(`AgentProfile::epoch`).
     /// ★idempotent★: 이미 없으면(이중 revoke — kill 선제 + reaper) no-op. 그래서 kill_agent 와 reaper 가
     ///   둘 다 불러도 안전하다.
     pub fn revoke(&self, id: AgentId, epoch: u32) {

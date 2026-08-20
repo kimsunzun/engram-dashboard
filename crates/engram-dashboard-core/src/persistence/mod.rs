@@ -192,6 +192,35 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// ★앞 릴리스로 되돌아간 바이너리가 이 파일을 읽을 수 있어야 한다★: 그 구조체는 `epoch` 를 **필수**
+    /// 필드로 선언했으므로 키가 없으면 `missing field` 로 파싱이 깨지고, 그 경로가 곧 위
+    /// `corrupt_is_preserved_and_empty` 다 — 파일이 `.corrupt-<ts>` 로 치워지고 빈 목록으로 시작한 뒤
+    /// 다음 save 가 그 빈 목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다.
+    /// 실리는 값은 산 표식이 아니라 고정 `0`(옛 카운터의 "재spawn 없음" 상태 — `AgentProfile::epoch` 주석).
+    #[test]
+    fn agents_json_carries_a_zero_epoch_key_for_older_readers() {
+        let dir = temp_dir("epoch-key");
+        let store = FileProfileStore::new(dir.clone());
+        let mut p = sample();
+        p.epoch = 0xDEAD_BEEF;
+        store.save(&[p]);
+
+        let raw = fs::read(dir.join(FILE_NAME)).expect("agents.json 읽기");
+        let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON 파싱");
+        assert_eq!(
+            v["profiles"][0].get("epoch"),
+            Some(&serde_json::json!(0)),
+            "옛 리더가 필수로 읽는 키가 0 으로 실려 있어야 한다: {v}"
+        );
+
+        assert_eq!(
+            store.load()[0].epoch,
+            0,
+            "다시 읽어도 표식은 파일에서 오지 않는다(다음 spawn 이 새로 발급)"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn load_missing_is_empty() {
         let dir = temp_dir("missing");

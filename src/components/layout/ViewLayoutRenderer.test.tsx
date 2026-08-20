@@ -28,6 +28,11 @@ vi.mock('../../api/clientFactory', () => ({
     spawnAgent: (...args: unknown[]) => clientMock.spawnAgent(...(args as [])),
     killAgent: (...args: unknown[]) => clientMock.killAgent(...(args as [])),
     connectionState: 'down',
+    // 연결 상태 표면 — 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    onConnectionStateChange: (cb: (s: string) => void) => {
+      cb('down')
+      return () => {}
+    },
   },
   getAgentClient: vi.fn(),
 }))
@@ -98,24 +103,24 @@ vi.mock('allotment', async () => {
 })
 
 // ── 슬롯 stub 3종 — 실 구독/xterm 없이 마운트 여부·전달된 prop 만 확인 ─────────────────
-// ★epoch 를 data 속성으로 노출한다(ADR-0148)★: 슬롯 컴포넌트의 재구독 트리거가 [viewId, agentId, epoch] 라,
-//   상위가 넘기는 epoch 이 흔들리면 재마운트·reset 이 돌아 화면 내용이 지워진다. prop 을 그리지 않으면
-//   그 회귀를 DOM 에서 관측할 수 없다.
+// ★넘기는 prop 전량을 그린다★: 상위가 무엇을 내려보내는지가 이 렌더러의 계약이라, prop 을 그리지 않으면
+//   드리프트가 DOM 에서 안 보인다. ★회차(epoch)를 여기 되살리면 그 값이 곧 재마운트 트리거가 되고,
+//   종료로 명부에서 수거되는 순간 값이 떨어지며 보존하려던 대화가 지워진다★(아래 회귀 케이스).
 vi.mock('../slot/TerminalSlot', () => ({
-  default: ({ agentId, epoch }: { agentId: string; epoch?: number }) => (
-    <div data-testid="terminal-slot" data-agent-id={agentId} data-epoch={String(epoch)} />
+  default: ({ viewId, agentId }: { viewId: string; agentId: string }) => (
+    <div data-testid="terminal-slot" data-agent-id={agentId} data-view-id={viewId} />
   ),
 }))
 
 vi.mock('../slot/RichSlot', () => ({
-  default: ({ agentId, epoch }: { agentId: string; epoch?: number }) => (
-    <div data-testid="rich-slot" data-agent-id={agentId} data-epoch={String(epoch)} />
+  default: ({ viewId, agentId }: { viewId?: string; agentId: string }) => (
+    <div data-testid="rich-slot" data-agent-id={agentId} data-view-id={viewId} />
   ),
 }))
 
 vi.mock('../slot/DomSlot', () => ({
-  default: ({ agentId, epoch }: { agentId: string; epoch?: number }) => (
-    <div data-testid="dom-slot" data-agent-id={agentId} data-epoch={String(epoch)} />
+  default: ({ viewId, agentId }: { viewId: string; agentId: string }) => (
+    <div data-testid="dom-slot" data-agent-id={agentId} data-view-id={viewId} />
   ),
 }))
 
@@ -203,11 +208,7 @@ function caps(structured: boolean): Capabilities {
   }
 }
 
-/**
- * ★epoch 기본값 2 = 정상 세대(ADR-0148)★: 백엔드는 매 spawn 마다 epoch 을 올리고 첫 세션 후 그 사실을
- * 영속화하므로, 부팅 복원·트리 재활성화로 뜬 에이전트는 항상 epoch ≥ 1 이다. 0 으로 시딩하면 "죽는 순간
- * epoch 이 0 으로 떨어져 재마운트된다" 는 회귀가 값이 같아서 안 잡힌다(실제로 그렇게 새어 나갔다).
- */
+/** epoch 은 이 렌더러의 판정에 안 쓰이지만 AgentInfo 필수 필드라 채운다(값에 뜻 없음). */
 function agentInfo(id: string, structured: boolean, epoch = 2): AgentInfo {
   return {
     id,
@@ -319,15 +320,11 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   describe('ADR-0148 — 에이전트 없는 슬롯 세 갈래', () => {
     const GONE = 'gone-agent'
 
-    /**
-     * epoch 를 담는다 — 백엔드가 spawn 때 프로필에 올려 영속화하므로 수거 후에도 같은 값이 남는다.
-     * 종료 구간의 epoch 정상 출처가 이것이고, 기억은 프로필을 못 받은 구간의 폴백이다.
-     */
     function profile(id: string, epoch = 3): unknown {
       return { id, name: id, cwd: '/tmp', display_name: null, parent_id: null, created_at: 0, epoch }
     }
 
-    /** 살아있는 에이전트로 한 번 마운트해 "기억"을 만든다(epoch ≥ 1 = 정상 세대). */
+    /** 살아있는 에이전트로 한 번 마운트해 "기억"을 만든다. */
     function mountAlive(structured = true, epoch = 3) {
       seedAgents(agentInfo(GONE, structured, epoch))
       agentStoreState.agentsLoaded = true
@@ -362,13 +359,14 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
     })
 
-    // ★F1 회귀★: 종료 순간 epoch 을 0 으로 떨어뜨리면 [viewId,agentId,epoch] 가 흔들려 슬롯이 재마운트되고
-    //   보존하려던 대화가 그 자리에서 지워진다. "같은 DOM 노드가 그대로 있나" 로 본다 — 텍스트 존재만
-    //   보면 재마운트와 리렌더가 구분되지 않는다.
-    it('프로필 있음 + 기억 있음 → 같은 노드를 유지하고 epoch 도 기억한 값을 그대로 넘긴다', () => {
+    // ★F1 회귀★: 종료 순간 슬롯 prop 이 흔들리면 재마운트가 돌아 보존하려던 대화가 그 자리에서 지워진다
+    //   (데몬 ring 도 세션과 함께 사라져 재구독으로도 못 살린다). "같은 DOM 노드가 그대로 있나" 로 본다 —
+    //   텍스트 존재만 보면 재마운트와 리렌더가 구분되지 않는다.
+    //   ★흔드는 값을 아예 안 넘기는 것이 방어선이다★ — 그래서 아래 케이스는 "무엇을 넘기든 안 흔들린다"
+    //   가 아니라 "넘기는 것이 viewId·agentId 뿐이다" 로 지킨다(맨 아래 케이스).
+    it('프로필 있음 + 기억 있음 → 같은 노드를 유지한다(대화 보존)', () => {
       const { rerender } = mountAlive(true, 3)
       const before = screen.getByTestId('rich-slot')
-      expect(before.getAttribute('data-epoch')).toBe('3')
 
       // 종료 = 명부에서 사라지고 프로필만 남는다.
       agentStoreState.agents = []
@@ -376,22 +374,30 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
       const after = screen.getByTestId('rich-slot')
       expect(Object.is(before, after)).toBe(true) // 재마운트되지 않았다 = 대화 보존
-      expect(after.getAttribute('data-epoch')).toBe('3') // 0 으로 떨어지지 않았다
       expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
       expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
     })
 
-    it('터미널 모드도 같다 — 노드 유지 + epoch prop 유지', () => {
+    it('터미널 모드도 같다 — 노드 유지', () => {
       const { rerender } = mountAlive(false, 5)
       const before = screen.getByTestId('terminal-slot')
-      expect(before.getAttribute('data-epoch')).toBe('5')
 
       agentStoreState.agents = []
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
 
       const after = screen.getByTestId('terminal-slot')
       expect(Object.is(before, after)).toBe(true)
-      expect(after.getAttribute('data-epoch')).toBe('5')
+    })
+
+    // ★회차(epoch)를 슬롯에 되돌려 넣지 말 것★: 그 값은 살아있는 명부에서만 나오는데 종료가 곧 명부에서
+    //   사라지는 것이라, prop 으로 내려보내는 순간 **종료 = prop 변화 = 재마운트 = 대화 소실**이 된다.
+    //   화신 회전은 구독 쪽이 권위 명부로 판정해 비우기 신호로 낸다(protocolClient.observeRoster).
+    it('슬롯에 넘기는 것은 viewId·agentId 뿐이다(회차를 내려보내지 않는다)', () => {
+      mountAlive(true, 3)
+      const slot = screen.getByTestId('rich-slot')
+      expect(slot.getAttribute('data-view-id')).toBe('s1')
+      expect(slot.getAttribute('data-agent-id')).toBe(GONE)
+      expect(slot.getAttribute('data-epoch')).toBeNull()
     })
 
     // ★F2 회귀★: 기억은 그 에이전트 것이다. 다른 에이전트를 배정하면 caps 게이트를 건너뛰어선 안 된다 —
@@ -420,15 +426,12 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       agentStoreState.profiles = []
       const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
       const before = screen.getByTestId('rich-slot')
-      expect(before.getAttribute('data-epoch')).toBe('4')
 
       agentStoreState.agents = []
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
 
       const after = screen.getByTestId('rich-slot')
       expect(Object.is(before, after)).toBe(true)
-      // 프로필이 없으니 epoch 은 기억에서 온다 — 이 폴백이 없으면 0 으로 떨어져 재구독·reset 이 돈다.
-      expect(after.getAttribute('data-epoch')).toBe('4')
       expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
     })
 

@@ -576,12 +576,16 @@ impl DaemonClient {
         {
             return Err("연결 task 가 replay 요청을 받지 못함(끊김)".to_string());
         }
-        // ★FIX-2: send 실패 → Err 회수★. 연결 task 가 send_now Subscribe 를 wire 로 못 보내면(소켓 죽음),
-        //   방금 만든 in-flight 를 롤백하고(abort_in_flight) 이 reply oneshot 을 **send 없이 drop** 한다 —
-        //   따라서 여기 `reply_rx.await` 가 RecvError → Err 로 귀결한다(gen 을 잘못 반환하지 않음). 정상 경로는
-        //   actor 가 `reply.send(gen)` 으로 gen 을 넣어 Ok(gen). ★src-tauri 테스트는 이 환경에서 실행 불가
-        //   (WebView2 DLL)라 이 command-level Err 경로는 코드+주석으로 명시하고, 머신 레벨(slot 롤백)은
-        //   core `send_failure_releases_slot_next_request_works` 단위테스트가 실행 회수한다.
+        // ★send 실패 → Err 회수★. 연결 task 가 send_now Subscribe 를 wire 로 못 보내면(소켓 죽음) 그 자리에서
+        //   **연결을 끊고** 이 reply oneshot 을 send 없이 drop 한다 — 따라서 여기 `reply_rx.await` 가
+        //   RecvError → Err 로 귀결한다(gen 을 잘못 반환하지 않음). 정상 경로는 actor 가 `reply.send(gen)` 으로
+        //   gen 을 넣어 Ok(gen).
+        // ★이 Err 경로를 실제로 태우는 테스트는 없다(정직 표기)★: 끊는 결정은 `main_loop` 의 select 팔
+        //   안이고 그 자리는 실 소켓 없이 못 세운다 — 이 패키지의 lib 테스트 타깃도 이 환경에선 실행
+        //   불가다(WebView2 DLL 로더). 코어의
+        //   `send_failure_path_clears_via_disconnect_and_next_request_sends` 는 **`on_disconnect` 가
+        //   슬롯을 비우고 다음 요청이 다시 나간다**만 재고, 송신 실패에서 그 `on_disconnect` 까지 가는
+        //   구간은 안 탄다.
         reply_rx
             .await
             .map_err(|_| "replay 요청 미전송(연결 끊김) — 프론트 재요청 안전".to_string())

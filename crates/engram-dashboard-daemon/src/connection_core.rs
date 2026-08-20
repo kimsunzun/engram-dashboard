@@ -837,7 +837,11 @@ impl ConnectionCore {
                 epoch,
                 after_seq,
             } => {
-                self.handle_subscribe(agent_id, epoch, after_seq, subs, sink);
+                if self.handle_subscribe(agent_id, epoch, after_seq, subs, sink)
+                    == DispatchFlow::Close
+                {
+                    return DispatchFlow::Close;
+                }
             }
 
             AgentCommand::Unsubscribe { agent_id } => {
@@ -1354,6 +1358,8 @@ impl ConnectionCore {
     /// ★두 평면★: 코어 subscribe_from 에 넘기는 sink(`agent_conn::FrameOutputSink`)는 출력 frame
     /// 평면이고, control(Ack/ReplayComplete/Error)만 dispatch 의 `OutboundSink` 로 나간다. 둘 다
     /// **같은 프레임 출구**(연결당 단일 writer 큐)로 합류하므로 FIFO 가 보존된다 — R1 이 여기 걸려 있다.
+    ///
+    /// ★반환 `Close` = 이 연결을 닫으라★ — `ReplayComplete` 를 큐에 못 실은 경우에만 난다(본문 마지막 분기).
     fn handle_subscribe(
         &self,
         agent_id: AgentId,
@@ -1361,19 +1367,22 @@ impl ConnectionCore {
         after_seq: Option<u64>,
         subs: &Arc<Mutex<HashMap<AgentId, SinkId>>>,
         sink: &dyn OutboundSink,
-    ) {
+    ) -> DispatchFlow {
         let manager = &self.manager;
 
         // agent 가 없으면 subscribe_from 을 부르지 않으므로 Ack 도 나가지 않는다.
+        //
+        // ★거절은 `Error` 가 아니라 `SubscribeFailed` 로 낸다(load-bearing)★: `Subscribe` 는 request_id 가
+        //   없는 명령이라 `Error{request_id: None}` 에는 **주인을 식별할 필드가 없다** — 클라이언트가 어느
+        //   에이전트의 구독이 깨졌는지 몰라 자기 single-flight 슬롯을 못 풀었고, 그 슬롯이 좀비로 남아 그
+        //   에이전트의 Subscribe 가 두 번 다시 나가지 못했다(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19).
+        //   ★아래 두 거절 지점은 Ack 발행보다 먼저 return 한다★ — 그래서 "거절엔 Ack/Complete 가 뒤따르지
+        //   않는다"는 계약이 성립하고, 클라이언트는 그에 기대어 슬롯을 즉시 해제한다(AgentEvent 문서 참조).
         let current_epoch = match manager.agent_epoch(agent_id) {
             Some(e) => e,
             None => {
-                send_error(
-                    sink,
-                    None,
-                    format!("subscribe failed: agent {agent_id} not found"),
-                );
-                return;
+                refuse_subscribe(sink, agent_id, format!("agent {agent_id} not found"));
+                return DispatchFlow::Continue;
             }
         };
         let epoch_matches = requested_epoch == Some(current_epoch);
@@ -1398,8 +1407,14 @@ impl ConnectionCore {
             match manager.subscribe_from(agent_id, out_sink, after_seq, epoch_matches, on_ready) {
                 Ok(o) => o,
                 Err(e) => {
-                    send_error(sink, None, format!("subscribe failed: {e}"));
-                    return;
+                    // 위와 같은 자리다 — `on_ready`(Ack)가 아직 안 불린 실패라 Ack/Complete 가 뒤따르지
+                    //   않는다. 그 순서는 `AgentManager::subscribe_from` 의 계약이고 코어 테스트가 박는다
+                    //   (`subscribe_from_err_never_invokes_on_ready`).
+                    // ★이 갈래는 dispatch 로 결정론 재현이 안 된다★: `agent_epoch` 와 `subscribe_from` 이
+                    //   같은 sessions 맵을 읽으므로, 여기 닿으려면 그 둘 사이에 세션이 사라져야 한다
+                    //   (TOCTOU 창). 그래서 회귀망은 이 갈래가 부르는 `refuse_subscribe` 본체를 직접 태운다.
+                    refuse_subscribe(sink, agent_id, format!("subscribe failed: {e}"));
+                    return DispatchFlow::Continue;
                 }
             };
 
@@ -1423,10 +1438,32 @@ impl ConnectionCore {
             );
         }
 
-        let _ = sink.enqueue(Outbound::event(AgentEvent::ReplayComplete {
-            agent_id,
-            epoch: current_epoch,
-        }));
+        // ★이 한 건은 흘릴 수 없다 — 못 실으면 연결을 닫는다(load-bearing)★: 위 Ack 이 나간 시점에서
+        //   클라이언트의 single-flight 슬롯은 이미 `acked` 다. 그 상태의 슬롯을 푸는 길은 `ReplayComplete`
+        //   아니면 **단절**뿐이다 — 거절은 acked 슬롯을 의도적으로 무시하고(오해제 방어), 만료는 슬롯을
+        //   해제하지 않는다(오귀속 방어). 셋 다 core `replay_flight` 의 결정이고 바꿀 것이 아니다.
+        //   그래서 여기서 조용히 흘리면 그 에이전트의 replay 가 **연결이 끊길 때까지 영구 차단**된다
+        //   (새 요청은 전부 그 슬롯에 병합돼 wire 로 나가지 못한다). 닫으면 그 단절이 지금 일어나고
+        //   클라이언트는 재연결 후 전량 재요청한다.
+        // ★왜 큐가 찰 수 있나★: Ack → replay 프레임 전량 → 이 이벤트가 **같은 단일 writer 큐**를 지난다.
+        //   앞의 replay 가 큐를 채우면 이 control 프레임이 마지막에 밀린다(그 경우 replay 프레임도 이미
+        //   drop 돼 바로 위 truncated 통보가 나갔다 — 클라이언트는 어차피 새로고침이 필요한 상태다).
+        // ★대가★: 그 연결의 **다른 에이전트 구독까지** 함께 떨어진다. 그래도 이쪽을 택한 이유는, 반대쪽
+        //   (계속 살려 둠)이 조용한 영구 차단이라 관측 신호조차 남기지 못하기 때문이다.
+        if sink
+            .enqueue(Outbound::event(AgentEvent::ReplayComplete {
+                agent_id,
+                epoch: current_epoch,
+            }))
+            .is_err()
+        {
+            tracing::error!(
+                %agent_id,
+                "ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다(안 닫으면 그 에이전트의 replay 가 영구 차단)"
+            );
+            return DispatchFlow::Close;
+        }
+        DispatchFlow::Continue
     }
 }
 
@@ -1586,6 +1623,26 @@ fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) 
     };
     if let Some(text) = event_json(&ev) {
         fanout.broadcast_text(text);
+    }
+}
+
+/// `Subscribe` 거절 통보([`AgentEvent::SubscribeFailed`])를 낸다 — [`ConnectionCore::handle_subscribe`] 의
+/// 두 거절 지점이 공유한다.
+///
+/// ★enqueue 실패를 삼키지 않는다★: 이 한 장이 클라이언트의 single-flight 슬롯을 푸는 유일한 신호다.
+/// 큐 포화로 못 나가면 클라이언트는 거절을 영영 모르고 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가
+/// 두 번 다시 나가지 못한다**(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). 회복은 어댑터가 R6
+/// close_signal 로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
+fn refuse_subscribe(sink: &dyn OutboundSink, agent_id: AgentId, reason: String) {
+    tracing::debug!(agent = %agent_id, %reason, "Subscribe 거절");
+    if let Err(e) = sink.enqueue(Outbound::event(AgentEvent::SubscribeFailed {
+        agent_id,
+        reason,
+    })) {
+        tracing::warn!(
+            agent = %agent_id,
+            "Subscribe 거절 통보를 큐에 못 넣음 — 클라이언트가 구독 슬롯을 못 푼다: {e}"
+        );
     }
 }
 
@@ -1886,16 +1943,90 @@ mod tests {
         let _ = core.manager.kill_agent(agent_id);
     }
 
-    // ── Subscribe: 없는 agent ─────────────────────────────────────────────────────
+    // ★회귀 대상★: `ReplayComplete` 를 조용히 흘리면 클라이언트의 acked 슬롯을 풀 길이 사라진다(거절은
+    //   acked 를 무시하고 만료는 해제하지 않는다) — 그 에이전트의 replay 가 단절 전까지 영구 차단된다.
+    //   그래서 못 실으면 **연결을 닫아** 그 단절을 지금 만든다. `Close` 가 안 나오면 그 차단이 부활한다.
     #[tokio::test]
-    async fn subscribe_unknown_agent_emits_error_no_ack() {
+    async fn subscribe_closes_the_connection_when_replay_complete_cannot_be_queued() {
+        // Ack·replay 는 통과시키고 ReplayComplete 만 큐 포화로 떨군다(운영에서 나는 순서 그대로 —
+        //   앞의 replay 가 같은 단일 writer 큐를 채워 마지막 control 프레임이 밀린다).
+        struct DropsReplayComplete(MockOutboundSink);
+        impl OutboundSink for DropsReplayComplete {
+            fn enqueue(&self, out: Outbound) -> Result<(), SinkError> {
+                if matches!(&out, Outbound::Event(ev) if matches!(**ev, AgentEvent::ReplayComplete { .. }))
+                {
+                    return Err(SinkError);
+                }
+                self.0.enqueue(out)
+            }
+            fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
+                self.0.make_output_sink()
+            }
+        }
+
+        let (core, _rx) = test_core();
+        let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
+            "t".into(),
+            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                program: default_shell().to_string(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        let info = core
+            .manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn");
+        let agent_id = info.id;
+
+        let (tx, _conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
+        let sink = DropsReplayComplete(MockOutboundSink::new(tx));
+        let session = ConnectionSession::new(1);
+
+        let flow = core
+            .dispatch(
+                AgentCommand::Subscribe {
+                    agent_id,
+                    epoch: None,
+                    after_seq: None,
+                },
+                &session,
+                &sink,
+            )
+            .await;
+        assert_eq!(
+            flow,
+            DispatchFlow::Close,
+            "ReplayComplete 를 못 실으면 연결을 닫아야(안 닫으면 그 에이전트 replay 가 영구 차단)"
+        );
+        assert!(
+            matches!(
+                sink.0.events().first(),
+                Some(AgentEvent::SubscribeAck { .. })
+            ),
+            "전제: Ack 은 나갔다(그래서 클라 슬롯이 acked 다)"
+        );
+
+        let _ = core.manager.kill_agent(agent_id);
+    }
+
+    // ── Subscribe: 없는 agent ─────────────────────────────────────────────────────
+    // ★거절은 `agent_id` 를 실어 보낸다(회귀 대상 — 실측 2026-08-19)★: 무주공산 `Error{request_id:None}`
+    //   이던 시절엔 클라이언트가 어느 구독이 깨졌는지 몰라 single-flight 슬롯을 못 풀었고, 그 슬롯이
+    //   좀비로 남아 그 에이전트의 Subscribe 가 두 번 다시 나가지 못했다. Ack 부재도 함께 못 박는다 —
+    //   "거절엔 Ack/Complete 가 뒤따르지 않는다" 가 클라이언트 즉시 해제의 전제다.
+    #[tokio::test]
+    async fn subscribe_unknown_agent_emits_subscribe_failed_no_ack() {
         let (core, _rx) = test_core();
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
+        let missing = uuid::Uuid::new_v4();
         core.dispatch(
             AgentCommand::Subscribe {
-                agent_id: uuid::Uuid::new_v4(),
+                agent_id: missing,
                 epoch: None,
                 after_seq: None,
             },
@@ -1904,8 +2035,54 @@ mod tests {
         )
         .await;
         let evs = mock.events();
-        assert_eq!(evs.len(), 1, "Error 1건만");
-        assert!(matches!(evs[0], AgentEvent::Error { .. }), "Error 여야 함");
+        assert_eq!(evs.len(), 1, "거절 1건만");
+        match &evs[0] {
+            AgentEvent::SubscribeFailed { agent_id, .. } => assert_eq!(*agent_id, missing),
+            other => panic!("SubscribeFailed 여야 함: {other:?}"),
+        }
+    }
+
+    // ── Subscribe: subscribe_from Err 갈래(둘째 거절 지점) ─────────────────────────
+    // ★dispatch 로는 못 몬다★: `agent_epoch` 와 `subscribe_from` 이 같은 sessions 맵을 읽어, 그 갈래에
+    //   닿으려면 둘 사이에 세션이 사라지는 TOCTOU 창을 잡아야 한다. 그래서 그 갈래가 부르는 본체를
+    //   직접 태워 **거절 통보의 내용**(agent_id 동봉 · 사유 전달)을 박는다 — 위 케이스가 덮는 것은
+    //   `agent not found` 갈래뿐이라 사유 문자열 경로가 비어 있었다.
+    #[test]
+    fn refuse_subscribe_carries_agent_id_and_reason() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let agent_id = uuid::Uuid::new_v4();
+        refuse_subscribe(&mock, agent_id, "subscribe failed: agent not found".into());
+        match mock.events().as_slice() {
+            [AgentEvent::SubscribeFailed {
+                agent_id: got,
+                reason,
+            }] => {
+                assert_eq!(
+                    *got, agent_id,
+                    "거절엔 주인이 실려야 한다(상관 불가 = 좀비)"
+                );
+                assert!(reason.contains("subscribe failed"), "사유 전달: {reason}");
+            }
+            other => panic!("SubscribeFailed 1건이어야: {other:?}"),
+        }
+    }
+
+    // 큐가 포화라 거절을 못 실어 보내도 dispatch 는 살아남아야 한다(패닉·unwrap 금지). ★로그는 여기서
+    //   단언하지 않는다★ — 구독자 캡처 하네스가 없다. 재는 것은 "실패 경로가 터지지 않는다" 뿐이고,
+    //   경고를 남기는 것 자체는 `refuse_subscribe` 본문이 진다.
+    #[test]
+    fn refuse_subscribe_survives_full_queue() {
+        struct FullSink;
+        impl OutboundSink for FullSink {
+            fn enqueue(&self, _out: Outbound) -> Result<(), SinkError> {
+                Err(SinkError)
+            }
+            fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
+                unreachable!("이 테스트는 enqueue 만 태운다")
+            }
+        }
+        refuse_subscribe(&FullSink, uuid::Uuid::new_v4(), "full".into());
     }
 
     // ── Spawn: 없는 profile ──────────────────────────────────────────────────────

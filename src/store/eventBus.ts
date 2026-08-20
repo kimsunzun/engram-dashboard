@@ -47,9 +47,15 @@ export async function refreshPresets(): Promise<void> {
 
 /**
  * 재연결 직후 목록/프로필 재동기화(Q2). connected *재*전이에서만 호출(첫 연결 제외 — initEventBus
- * 의 lastState 가드). 권위 목록을 다시 끌어와 store 를 새로 쓴다 → 끊긴 동안 변경(spawn/kill/프로필)
- * 반영. 출력 replay 재요청(ProtocolClient 가 connected 전이에서 뷰 buffering 리셋+requestReplay, ADR-0046)은
- * 건드리지 않는다(이미 자동 동작).
+ * 의 lastState 가드). 권위 목록을 다시 끌어와 store 를 새로 쓴다 → 끊긴 동안 변경(spawn/kill/프로필) 반영.
+ *
+ * ★이 getAgents 는 출력 복구의 **주 경로**이기도 하다(ADR-0046 amend)★: 끊긴 뷰는 detached 로 앉아
+ * 아무것도 보내지 않고, 그 명부에 자기 에이전트가 있다는 관측에서만 다시 붙는다
+ * (protocolClient.observeRoster). 여기서 명부를 안 끌어오면 재연결 뒤 슬롯이 영영 안 붙는다 — "목록만
+ * 새로 그리는 편의 기능"으로 읽고 지우지 말 것.
+ *
+ * ★실패는 삼킨다(사용자 결정 2026-08-20)★: 재시도 사다리를 두지 않는다. 수동 재연결이 이 경로를
+ * 통째로 다시 돌리므로 탈출구가 이미 있다.
  */
 async function resyncAfterReconnect(): Promise<void> {
   try {
@@ -222,9 +228,8 @@ export function initEventBus(): Promise<void> {
         }),
       )
 
-      // 재연결 시 목록/프로필 재동기화(Q2). 출력 스트림은 ProtocolClient 가 connected 전이에서 뷰
-      // buffering 리셋+requestReplay 로 자동 복구하나(ADR-0046), 에이전트 트리·프로필 목록은 재동기화
-      // 트리거가 없어 stale 이 된다(끊긴 동안의
+      // 재연결 시 목록/프로필 재동기화(Q2) + 출력 뷰 재부착의 계기(위 resyncAfterReconnect 주석).
+      // 에이전트 트리·프로필 목록은 이 트리거가 없으면 stale 이 된다(끊긴 동안의
       // spawn/kill/프로필 변경 broadcast 를 놓침). connected 로 *재*전이할 때만 권위 목록을 다시
       // 끌어와 store 를 새로 쓴다. ★첫 connected 는 스킵★ — App.tsx 부팅 로드(getAgents/
       // refreshProfiles 1회)와 중복 방지. lastState 가드는 ProtocolClient.lastState 패턴과 동일

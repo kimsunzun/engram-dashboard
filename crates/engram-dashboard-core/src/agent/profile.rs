@@ -162,27 +162,27 @@ pub struct AgentProfile {
     /// fallback·clear로 폐기된 과거 세션 id 이력(감사·디버깅용).
     pub old_session_ids: Vec<Uuid>,
 
-    /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 결정적 트리거.
-    pub epoch: u32,
-
-    /// ★이 프로세스에서 이 에이전트의 화신(세션)이 있었나★ — 다음 spawn 이 **최초**인가 **교체**인가를
-    /// 가르는 축이다(ADR-0007 은 *교체*에만 epoch bump 를 건다 — `epoch_for_spawn`).
+    /// ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 순서에 뜻이 없다. 물어야 할 질문은 오직
+    /// "지금 읽고 있는 출력 스트림이 아까 그 스트림과 같은가" 이고, 답은 같다/다르다 둘뿐이다. 그래서
+    /// 비교는 **일치/불일치만** 쓴다 — 두 값의 대소로 "더 새 것" 을 유도하지 말 것(값은 화신마다 새로
+    /// 뽑은 난수라 그 유도가 성립하지 않는다 — `ProfileRegistry::epoch_for_spawn`).
     ///
-    /// ★`#[serde(skip)]` 가 의미의 일부다★: "이 프로세스에서" 가 정확히 필요한 범위다. 디스크에 남기면
-    ///   재부팅 후 첫 spawn 이 교체로 오판돼 근거 없이 epoch 를 올린다(무해하지만 부정확). 새 프로세스엔
-    ///   아직 배출 중인 앞선 화신이 **있을 수 없으므로** false 로 시작하는 게 옳다.
-    /// ★프로필과 한 몸인 게 요점★: 별도 집합으로 두면 삭제(`remove`)와 spawn 판정 사이에 창이 생기고
-    ///   (삭제가 표식만 지운 뒤 spawn 이 다시 심으면 회수 불가) 크기 상한도 규약으로만 남는다. 필드면
-    ///   삭제가 표식을 **구조적으로** 함께 거두고, 개수는 정의상 프로필 수를 넘지 못한다.
-    /// ★스냅샷이 되돌리지 못한다 — 그리고 그게 이 표식의 유일한 방어다★: spawn 호출부는 프로필 **스냅샷**
-    ///   을 넘기므로(연결이 들고 있던 옛 사본일 수 있다) `upsert_preserving_hierarchy` 가 live 값을
-    ///   보존해야 한다(epoch 과 같은 이유 — ADR-0084). 이 값을 **평범한 `upsert` 로** 쓰는 경로가 새로
-    ///   생기면 그 사본이 표식을 지우고, 다음 Fresh 가 교체를 최초로 오판해 죽은 화신의 epoch 를
-    ///   재사용한다. 새 spawn 명령이 caller 가 만든 프로필을 그대로 받는 모양이면 여기를 먼저 볼 것.
+    /// ★읽기를 건너뛰는 것이 의미의 일부다★: 화신은 이 데몬 프로세스보다 오래 살지 못하므로 그 표식을
+    ///   디스크에서 되살리지 않는다. 되살리면 재기동한 데몬이 복원한 에이전트에 **옛 표식**을 다시 입혀,
+    ///   붙어 있던 클라이언트가 "같은 스트림" 으로 오인하고 옛 진도 커서를 유지한다 — 새 세션의 프레임은
+    ///   0 부터 다시 매겨지므로 통째로 dedup 탈락하고 그 슬롯은 앱을 다시 띄울 때까지 빈 채로 남는다.
+    ///   값이 안 실린 옛 `agents.json` 도, 옛 카운터가 실려 있는 `agents.json` 도 그대로 읽힌다
+    ///   (읽기를 건너뛰므로 그 값은 무시된다 — 마이그레이션 불요).
+    /// ★그런데 쓰기는 건너뛰지 않는다 — 키는 `0` 으로 실어 보낸다★: 앞 릴리스의 구조체는 이 필드를
+    ///   **필수**로 선언했으므로 키가 없는 파일을 읽으면 `missing field` 로 파싱이 깨진다. 그러면
+    ///   persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈 목록을
+    ///   덮어써 프로필·세션 id·트리 부모가 통째로 사라진다(이 빌드를 한 번 돌린 뒤 되돌리기·재설치하는
+    ///   경로에서 실제로 성립한다). `0` 인 이유 = 옛 카운터의 "한 번도 재spawn 안 함" 상태라 옛
+    ///   바이너리가 그대로 믿어도 무해하다 — 산 난수를 실어 보내면 그게 카운터 자리에 앉는다.
+    /// 프론트는 이 값을 `[agentId, epoch]` 재구독 트리거로 쓴다.
     // ADR-0007
-    // ADR-0113
-    #[serde(skip)]
-    pub had_session: bool,
+    #[serde(skip_deserializing, serialize_with = "serialize_zero_placeholder")]
+    pub epoch: u32,
 
     pub auto_restore: bool,
 
@@ -228,7 +228,6 @@ impl AgentProfile {
             claude_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
-            had_session: false,
             auto_restore,
             restart_policy: RestartPolicy::Always,
             restart_count: 0,
@@ -427,12 +426,11 @@ impl ProfileRegistry {
     /// spawn 이 author 할 이유가 없으므로, live 엔트리가 있으면 그 두 필드만 보존하고 나머지
     /// (cwd/command/env/session 등 spawn 이 실제로 확정하는 필드)는 스냅샷을 반영한다.
     ///
-    /// ★epoch 도 live 보존(ADR-0084)★: epoch 역시 프로세스 기동과 무관한 순수 런타임 메타로, spawn 이
-    ///   넘긴 **스냅샷**이 author 하면 안 된다. spawn 은 이 upsert **직후** `epoch_for_spawn` 으로 registry
-    ///   epoch 를 확정하는데(화신 교체면 +1), 옛 스냅샷의 epoch 를 여기서 그대로 삽입하면 앞선 bump 가
-    ///   되돌려져(lost update) 새 세션이 죽은 세션과 같은 epoch 를 재사용한다 → 프론트 재구독 누락(빈 슬롯)
-    ///   + 턴 관측·제어 토큰이 두 세대를 구분 못 함. 그래서 parent_id/display_name 과 동일하게 live 값을
-    ///   보존한다. 신규 id(live 없음)면 스냅샷 epoch(0)를 그대로 쓴다 — 첫 화신은 올릴 앞선 epoch 가 없다.
+    /// ★화신 표식(epoch)도 live 보존(ADR-0084)★: 그 값은 프로세스 기동과 무관한 순수 런타임 메타로,
+    ///   spawn 이 넘긴 **스냅샷**이 author 하면 안 된다. spawn 은 이 upsert **직후** `epoch_for_spawn` 으로
+    ///   registry 표식을 새로 확정하는데, 옛 스냅샷 값을 여기서 그대로 삽입하면 앞선 확정이 되돌려져
+    ///   (lost update) 산 세션이 죽은 세션의 표식을 쓴다 → 프론트 재구독 누락(빈 슬롯) + 턴 관측·제어
+    ///   토큰이 두 세대를 구분 못 함. 그래서 parent_id/display_name 과 동일하게 live 값을 보존한다.
     // ADR-0070 ADR-0072 ADR-0084
     pub fn upsert_preserving_hierarchy(&self, mut profile: AgentProfile) {
         self.mutate(|m| {
@@ -440,9 +438,6 @@ impl ProfileRegistry {
                 profile.parent_id = live.parent_id;
                 profile.display_name = live.display_name.clone();
                 profile.epoch = live.epoch;
-                // 같은 이유로 화신 이력도 live 값이 이긴다 — 스냅샷은 그 사실의 author 가 아니다
-                //   (`had_session` 필드 주석).
-                profile.had_session = live.had_session;
             }
             m.insert(profile.id, profile);
         });
@@ -577,31 +572,53 @@ impl ProfileRegistry {
         })
     }
 
-    /// ★spawn 이 쓸 epoch 을 **한 임계구역에서** 확정한다(ADR-0007 "같은 AgentId 맵 교체마다 +1")★.
+    /// ★spawn 이 쓸 **화신 표식**을 한 임계구역에서 확정한다(ADR-0007)★ — 화신마다 새로 뽑은 난수다.
     ///
-    /// 앞선 화신이 있었으면(`had_session`) 올리고, 최초 화신이면 현재 값을 그대로 준다.
     /// `None` = 그 사이 프로필이 사라졌다(동시 삭제) → **호출자는 spawn 을 중단해야 한다**.
     ///
+    /// ★왜 순서 있는 카운터가 아닌가★: 이 값이 답해야 하는 질문은 "같은 스트림인가" 하나이고 순서는
+    ///   거기 필요 없다. 반면 카운터로 구현하면 **그 카운터가 어디에 사는가**가 문제가 된다 — 디스크에
+    ///   남기면 옛 표식이 새 화신에 다시 붙고(그 필드 주석), 안 남기면 재기동한 데몬이 0 부터 다시 세어
+    ///   **복원된 에이전트가 죽은 화신의 값을 결정론적으로 물려받는다**. 난수는 그 결정론을 없앤다.
+    /// ★단 "새 프로세스면 다르다" 는 보장이 **아니다**(정직 표기)★: 이 필드는 디스크에서 읽히지 않으므로
+    ///   (`skip_deserializing`) 재기동 뒤 복원된 프로필의 비교 대상은 0 이고, 죽은 데몬이 쓰던 값은 어디에도
+    ///   남아 있지 않아 **대조 자체가 일어나지 않는다**. 여기서 실제로 보장되는 것은 **인접 보장** 하나다 —
+    ///   같은 프로세스 안에서 직전 화신과 다르다(아래 while 루프). 프로세스를 넘는 충돌은 2^-32 로 남고,
+    ///   걸리면 그 한 에이전트의 화신 가드들이 한 화신 동안 무력해진다(관측 오염·토큰 충돌·재구독 누락).
+    /// ★직전 값과는 반드시 다르다★: 모든 소비자 가드가 일치/불일치 하나로 두 화신을 가르므로(reap
+    ///   epoch-guard ADR-0084 · 제어 채널 토큰 ADR-0086 · 턴 관측 표 ADR-0113), 배출 중인 앞선 화신과
+    ///   값이 겹치면 그 가드들이 통째로 무력해진다. 확률은 2^-32 지만 공짜로 닫히므로 닫는다.
     /// ★판정과 커밋이 한 락 안이어야 하는 이유(load-bearing)★: 둘로 나누면 그 사이 `remove` 가 끼어들어
-    ///   ① 판정은 "교체" 인데 bump 대상이 사라지거나 ② 판정이 "최초" 로 뒤집혀 죽은 화신의 epoch 를
-    ///   재사용한다. 어느 쪽이든 두 화신이 같은 (AgentId, epoch) 를 갖게 되고, 그걸 키로 쓰는 구조
-    ///   (턴 관측 표 ADR-0113 · 제어 채널 토큰 ADR-0086 · reap epoch-guard ADR-0084)가 두 세대를 구분하지
-    ///   못한다. 그래서 "읽고-정하고-쓰기" 를 여기 한 곳에 가둔다.
+    ///   사라진 프로필에 표식을 심거나, 직전 값과의 대조가 옛 맵을 보고 이뤄진다.
     /// ★현 프로덕션 호출점은 `AgentManager::spawn_agent` **하나**다★ — 모드(Fresh/Resume)를 가리지 않고
-    ///   그 지점만 지나간다. 호출부마다 bump 를 흩뿌리면 새 호출부가 또 빠뜨리므로(실측: WS `Spawn`·
-    ///   부팅 복원이 그렇게 빠졌다) 여기 단일 진입점을 유지할 것. dead code 아님(오인해 지우지 말 것 —
-    ///   지우면 화신 교체가 epoch 를 재사용해 프론트 재구독 누락·관측 오염·토큰 충돌이 한꺼번에 난다).
+    ///   그 지점만 지나간다. 호출부마다 흩뿌리면 새 호출부가 또 빠뜨리므로(실측: WS `Spawn`·부팅 복원이
+    ///   그렇게 빠졌다) 여기 단일 진입점을 유지할 것. dead code 아님(오인해 지우지 말 것 — 지우면 화신
+    ///   교체가 표식을 재사용해 프론트 재구독 누락·관측 오염·토큰 충돌이 한꺼번에 난다).
     // ADR-0084
     // ADR-0007
     pub fn epoch_for_spawn(&self, id: AgentId) -> Option<u32> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            if p.had_session {
-                p.epoch = p.epoch.wrapping_add(1);
+            let mut next = random_incarnation_tag();
+            while next == p.epoch {
+                next = random_incarnation_tag();
             }
-            Some(p.epoch)
+            p.epoch = next;
+            Some(next)
         })
     }
+}
+
+/// 앞 릴리스 리더용 자리채움 — 산 표식과 무관하게 항상 `0` 을 쓴다(근거 = `AgentProfile::epoch` 주석).
+fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_u32(0)
+}
+
+/// 화신 표식 1개 발급. ★난수 crate 를 들이지 않으려고 uuid v4 의 바이트를 쓴다★ — v4 는 OS CSPRNG 로
+/// 채워지고 버전·variant 비트가 박히는 자리는 6·8 바이트째라, 앞 4 바이트는 온전히 난수다.
+fn random_incarnation_tag() -> u32 {
+    let b = Uuid::new_v4().into_bytes();
+    u32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
 
 #[cfg(test)]
@@ -806,40 +823,74 @@ mod tests {
     }
 
     #[test]
-    fn epoch_for_spawn_increments_only_after_a_prior_incarnation() {
+    fn epoch_for_spawn_never_repeats_the_previous_incarnations_tag() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        // 최초 화신 — 올릴 앞선 epoch 이 없다.
-        assert_eq!(reg.epoch_for_spawn(id), Some(0));
-        assert_eq!(reg.epoch_for_spawn(id), Some(0), "판정은 멱등이어야");
 
-        // 화신이 하나 있었다고 표시하면 그 뒤부터는 교체다.
-        reg.update_with(id, |p| p.had_session = true);
-        assert_eq!(reg.epoch_for_spawn(id), Some(1));
-        assert_eq!(reg.epoch_for_spawn(id), Some(2));
+        // 인접 보장 = while 루프가 실제로 지키는 유일한 것. 소비자 가드가 전부 일치/불일치 하나로 두
+        //   화신을 가르므로, 배출 중인 앞 화신과 값이 겹치면 그 가드들이 통째로 무력해진다.
+        let mut seen = Vec::new();
+        for _ in 0..64 {
+            let tag = reg.epoch_for_spawn(id).expect("프로필 존재");
+            assert!(
+                seen.last() != Some(&tag),
+                "직전 화신과 같은 표식이 나오면 안 된다: {tag}"
+            );
+            seen.push(tag);
+        }
+        assert_ne!(
+            seen[0], 0,
+            "새 프로필의 기본값이 0 이라 첫 발급만은 0 을 피한다(그 뒤 발급엔 이 보장이 없다)"
+        );
 
         reg.remove(id);
         assert_eq!(
             reg.epoch_for_spawn(id),
             None,
-            "프로필이 없으면 None — 0 으로 떨어지면 죽은 화신보다 작은 epoch 이 산 세션에 붙는다"
+            "프로필이 없으면 None — 없는 프로필에 표식을 심으면 spawn 이 유령 화신을 만든다"
+        );
+    }
+
+    // ★이 테스트가 겨냥하는 것 = 발급이 **결정론적이지 않다**★. 인접 보장(위 테스트)만으로는 카운터
+    //   회귀가 안 잡힌다 — 증가든 감소든 카운터도 직전 값과는 늘 다르다. 갈리는 지점은 **새 프로세스의
+    //   첫 발급**이다: 카운터는 매번 같은 값(0 에서 한 칸)을 내주므로, 재기동한 데몬이 복원한 에이전트에
+    //   죽은 화신의 표식을 그대로 다시 입힌다(그 결말 = 붙어 있던 클라이언트가 "같은 스트림" 으로 오인
+    //   → 옛 커서 유지 → 새 프레임 통째 dedup 탈락 = 빈 슬롯). 난수라야 그 결정론이 없다.
+    // ★단 이건 확률적 단언이다★: 32비트 공간에서 64개를 뽑아 절반도 안 겹치는 사건은 ~1e-7 이하라
+    //   실질 0 이지만, 정직하게는 "구성상 보장" 이 아니라 확률이다(`epoch_for_spawn` 문단이 그 정본).
+    #[test]
+    fn a_fresh_registry_does_not_hand_out_the_same_first_tag_every_time() {
+        let first_tags: Vec<u32> = (0..64)
+            .map(|_| {
+                let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+                let p = sample();
+                let id = p.id;
+                reg.upsert(p);
+                reg.epoch_for_spawn(id).expect("프로필 존재")
+            })
+            .collect();
+        let distinct: std::collections::HashSet<u32> = first_tags.iter().copied().collect();
+        assert!(
+            distinct.len() >= 32,
+            "프로세스마다 같은 첫 표식이 나오면 재기동 복원이 죽은 화신의 값을 물려받는다(카운터 회귀): {distinct:?}"
         );
     }
 
     #[test]
-    fn had_session_survives_a_stale_snapshot_upsert() {
+    fn a_stale_snapshot_upsert_does_not_roll_back_the_incarnation_tag() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         let p = sample();
         let id = p.id;
         reg.upsert(p.clone());
-        reg.update_with(id, |p| p.had_session = true);
-        // spawn 호출부가 들고 있던 옛 스냅샷(had_session=false)으로 upsert.
+        let live_tag = reg.epoch_for_spawn(id).expect("프로필 존재");
+        // spawn 호출부가 들고 있던 옛 스냅샷(표식 = 기본값 0)으로 upsert.
         reg.upsert_preserving_hierarchy(p);
-        assert!(
-            reg.get(id).expect("존재").had_session,
-            "live 값이 이겨야(스냅샷이 화신 이력을 지우면 epoch 재사용이 되살아난다)"
+        assert_eq!(
+            reg.get(id).expect("존재").epoch,
+            live_tag,
+            "live 값이 이겨야(스냅샷이 표식을 되돌리면 산 세션이 죽은 화신의 표식을 쓴다)"
         );
     }
 
@@ -1318,13 +1369,71 @@ mod tests {
         }"#;
         let p: AgentProfile =
             serde_json::from_str(legacy).expect("legacy profile must deserialize");
-        assert_eq!(p.epoch, 3);
+        // 옛 파일이 실어 둔 `"epoch": 3` 도 같은 취급(알려지지 않은 필드)이라 그냥 무시된다 — 화신 표식은
+        //   프로세스를 넘겨 살지 못하므로 디스크 값을 되살리면 안 된다(그 필드 주석). 마이그레이션 불요.
+        assert_eq!(p.epoch, 0);
         assert_eq!(p.restart_policy, RestartPolicy::Always);
         assert_eq!(p.restart_count, 0);
         assert_eq!(p.failed_reason, None);
         assert_eq!(p.last_start_at, None);
         assert_eq!(p.display_name, None);
         assert_eq!(p.parent_id, None);
+    }
+
+    /// ★디스크에 **산** 화신 표식이 실리면 안 된다★: 실리면 재기동한 데몬이 복원한 에이전트에 옛 표식을
+    /// 다시 입혀, 살아남은 클라이언트가 "같은 스트림" 으로 오인하고 옛 진도 커서를 유지한다 — 새 화신의
+    /// 프레임은 0 부터 다시 매겨지므로 통째로 dedup 탈락하고 그 슬롯이 빈 채로 남는다.
+    /// (키 자체는 실린다 — 앞 릴리스 리더용 자리채움 `0`. 그 근거는 아래 forward-compat 테스트.)
+    #[test]
+    fn the_live_incarnation_tag_never_reaches_disk() {
+        let mut p = sample();
+        p.epoch = 0xDEAD_BEEF;
+        let json = serde_json::to_string(&p).expect("프로필 직렬화");
+        assert!(
+            !json.contains("3735928559") && !json.to_lowercase().contains("deadbeef"),
+            "산 화신 표식이 디스크에 실렸다: {json}"
+        );
+        let back: AgentProfile = serde_json::from_str(&json).expect("역직렬화");
+        assert_eq!(
+            back.epoch, 0,
+            "읽어 들인 프로필은 표식 없이 시작한다(다음 spawn 이 새로 발급)"
+        );
+    }
+
+    /// ★옛 카운터가 실려 있어도 인메모리 값은 파일에서 오지 않는다★ — 앞 릴리스가 남긴
+    /// `agents.json`(이 빌드로 올렸다 되돌렸다 다시 올린 경로)은 0 아닌 카운터를 들고 있다. 그 값이
+    /// 복원되면 위 테스트가 막는 것과 같은 결말(옛 커서 유지 → 새 프레임 통째 dedup 탈락)이 난다.
+    #[test]
+    fn a_persisted_non_zero_tag_is_never_restored_into_memory() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&sample()).expect("프로필 직렬화"))
+                .expect("JSON 파싱");
+        v["epoch"] = serde_json::json!(7);
+        let back: AgentProfile = serde_json::from_value(v).expect("역직렬화");
+        assert_eq!(
+            back.epoch, 0,
+            "파일의 옛 카운터가 인메모리 표식으로 복원되면 안 된다"
+        );
+    }
+
+    /// ★키는 남기고 값만 0 으로 박는다★ — 앞 릴리스로 되돌아간 바이너리의 구조체는 `epoch` 를
+    /// **필수** 필드로 선언했으므로, 키가 아예 없는 `agents.json` 은 `missing field` 로 파싱이 깨진다.
+    /// 그러면 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈
+    /// 목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다.
+    /// 실어 보내는 값이 **산 표식이 아니라 0** 인 이유: 0 은 옛 카운터의 "한 번도 재spawn 안 함" 상태라
+    /// 옛 바이너리가 그대로 믿어도 무해하다 — 난수를 실어 보내면 그게 카운터 자리에 앉는다.
+    #[test]
+    fn the_persisted_incarnation_tag_is_a_fixed_zero_so_older_readers_still_parse() {
+        let mut p = sample();
+        p.epoch = 0xDEAD_BEEF;
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&p).expect("프로필 직렬화"))
+                .expect("JSON 파싱");
+        assert_eq!(
+            v.get("epoch"),
+            Some(&serde_json::json!(0)),
+            "옛 리더가 필수로 읽는 키가 0 으로 실려 있어야 한다: {v}"
+        );
     }
 
     // ── ADR-0044: output_format serde 하위호환 + is_json_mode 판정 ──────────────

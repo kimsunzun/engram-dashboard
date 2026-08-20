@@ -312,7 +312,10 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
 
 // ── FIX 4: revoke-before-kill ────────────────────────────────────────────────────────
 // ★backend 무관★: kill_agent 는 세션 backend 와 무관하게 revoke 를 부르므로, 셸 세션으로 spawn 하되
-//   registry 에 (id, epoch=0) 토큰을 직접 심어 "provision 된 claude" 를 모사한다.
+//   registry 에 그 세션의 (id, 화신 표식) 토큰을 직접 심어 "provision 된 claude" 를 모사한다.
+//   ★표식은 spawn 이 돌려준 값을 쓴다 — 상수로 박지 말 것★: 표식은 화신마다 뽑은 난수라 첫 spawn 도 0 이
+//   아니고, 어긋난 값으로 심으면 revoke 의 epoch-guard 에 걸려 토큰이 안 지워진다(= 이 테스트가 재는
+//   revoke-before-kill 이 아니라 심는 쪽이 틀린 것이다).
 #[tokio::test]
 async fn kill_revokes_token_before_pump_join() {
     let (manager, registry, data_dir, handle) = make_manager_with_control("kill-revoke").await;
@@ -334,7 +337,12 @@ async fn kill_revokes_token_before_pump_join() {
         wait_until(Duration::from_secs(3), || manager.list_agents().len() == 1),
         "spawn 직후 세션 존재"
     );
-    registry.issue(info.id, 0, "simulated-live-token".to_string(), true);
+    registry.issue(
+        info.id,
+        info.epoch,
+        "simulated-live-token".to_string(),
+        true,
+    );
     assert_eq!(registry.live_token_count(), 1, "심은 산 토큰 1개");
 
     manager.kill_agent(info.id).expect("kill ok");

@@ -50,6 +50,11 @@ vi.mock('../../api/clientFactory', () => ({
     writeStdin: vi.fn(async () => undefined),
     resizePty: vi.fn(async () => undefined),
     connectionState: 'connected',
+    // 연결 상태 표면 — 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    onConnectionStateChange: (cb: (s: string) => void) => {
+      cb('connected')
+      return () => {}
+    },
   },
   getAgentClient: vi.fn(),
 }))
@@ -145,7 +150,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
 
 describe('DomSlot — tag 게이트(FIX-1)', () => {
   it('tag0(터미널 바이트) chunk 는 <pre> 관측 텍스트에 반영한다(회귀)', async () => {
-    render(<DomSlot viewId="v1" agentId={AGENT} epoch={0} />)
+    render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
     expect(captured.onChunk).toBeTruthy()
 
@@ -155,7 +160,7 @@ describe('DomSlot — tag 게이트(FIX-1)', () => {
   })
 
   it('tag1(StructuredEvent JSON) chunk 는 무시한다 — 관측 텍스트를 오염시키지 않는다', async () => {
-    render(<DomSlot viewId="v1" agentId={AGENT} epoch={0} />)
+    render(<DomSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
     const json = '{"kind":"TextDelta","text":"leak"}'
