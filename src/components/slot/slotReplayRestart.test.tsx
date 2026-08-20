@@ -78,6 +78,9 @@ vi.mock('../../store/agentStore', () => ({
 // xterm stub — reset/write 를 정적 holder 로 공유해 인스턴스 교체와 무관하게 호출을 센다.
 const xtermReset = vi.hoisted(() => vi.fn())
 const xtermWrite = vi.hoisted(() => vi.fn())
+// 치수는 holder 를 통해 읽는다 — fit() 이 실제로 측정을 반영한 뒤에 읽혔는지를 값으로 가르기 위해서다
+//   (fit 전 값 80×24, 후 값은 테스트가 심는다).
+const xtermDims = vi.hoisted(() => ({ cols: 80, rows: 24 }))
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     loadAddon = vi.fn()
@@ -87,11 +90,16 @@ vi.mock('@xterm/xterm', () => ({
     onData = vi.fn(() => ({ dispose: vi.fn() }))
     dispose = vi.fn()
     refresh = vi.fn()
-    cols = 80
-    rows = 24
+    get cols() {
+      return xtermDims.cols
+    }
+    get rows() {
+      return xtermDims.rows
+    }
   },
 }))
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit = vi.fn() } }))
+const fitAddonFit = vi.hoisted(() => vi.fn())
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit = fitAddonFit } }))
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class { onContextLoss = vi.fn(); dispose = vi.fn() } }))
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 
@@ -127,6 +135,17 @@ function written(): string[] {
   return xtermWrite.mock.calls.map((c) => new TextDecoder().decode(c[0] as Uint8Array))
 }
 
+/**
+ * 슬롯을 "보이는" 상태로 만든다 — jsdom 은 레이아웃이 없어 `offsetParent` 를 **항상** null 로 내고, 그건
+ * 슬롯이 숨김(탭 keep-alive = display:none)을 판정하는 바로 그 신호다(ADR-0056). 손대지 않으면 보이는
+ * 슬롯의 갈래를 이 하네스에서 아예 밟을 수 없다.
+ */
+function showContainer(): void {
+  const container = document.querySelector('div[style*="padding"]')?.querySelector('div')
+  if (!container) throw new Error('containerRef div not found')
+  Object.defineProperty(container, 'offsetParent', { value: document.body, configurable: true })
+}
+
 function domText(): string {
   return (document.querySelector('[data-dom-mode="1"]') as HTMLElement).textContent ?? ''
 }
@@ -137,6 +156,9 @@ beforeEach(() => {
   captured.onReset = null
   xtermReset.mockClear()
   xtermWrite.mockClear()
+  xtermDims.cols = 80
+  xtermDims.rows = 24
+  fitAddonFit.mockReset()
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
 })
@@ -164,6 +186,53 @@ describe('TerminalSlot — 비우기 신호에 화면·seq 가드 리셋', () =>
     // 다른 화신 — 번호가 0 부터 다시 시작한다. 가드를 안 되돌렸으면 전부 탈락한다.
     act(() => captured.onChunk!(tag0(0, 'again')))
     expect(written()).toEqual(['first', 'second', 'again'])
+  })
+
+  // ★재부착에서 PTY 치수를 다시 밀어 넣나★ — 데몬을 재기동하면 복원된 에이전트의 PTY 는 spawn 기본값
+  //   (80×24)에서 시작하는데, 이 슬롯의 xterm 은 사용자가 벌려 둔 치수 그대로다. 상위가 넘기는
+  //   prop(viewId·agentId)은 재기동 전후로 그대로여서 구독 effect 가 다시 돌지 않으므로, 치수를 전파할
+  //   자리가 이 비우기 신호 말고 없다(RO 는 크기 *변화* 시에만, 가시성 effect 는 전이 시에만 발화한다).
+  //   어긋난 채 live 가 되면 TUI 가 자기가 믿는 크기로 계산해 매 갱신이 한 행·수십 열 빗나간다.
+  it('재부착(비우기 신호)에서 지금 터미널 치수를 PTY 에 다시 밀어 넣는다', async () => {
+    const { agentClient } = await import('../../api/clientFactory')
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
+    await flushSubscribe()
+    showContainer()
+
+    const subCalls = (agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length
+    // fit() = "지금 컨테이너를 실측했다" — 그 결과가 137×25 다(실측한 라이브 값). 전파가 fit 앞에서
+    //   치수를 읽으면 여기 심은 값이 아니라 이전 값(80×24)이 나간다.
+    fitAddonFit.mockImplementation(() => {
+      xtermDims.cols = 137
+      xtermDims.rows = 25
+    })
+    // mount·구독 경로가 이미 불러 둔 호출을 걷는다(구현은 남는다) — 아래 단언은 *재부착이* 실측했나다.
+    fitAddonFit.mockClear()
+    ;(agentClient.resizePty as ReturnType<typeof vi.fn>).mockClear()
+
+    fireReset()
+
+    expect(fitAddonFit).toHaveBeenCalled()
+    expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
+    // 재구독을 거치지 않은 채(= prop 불변) 전파됐다는 것까지 못 박는다 — 구독이 갈리면 replay 도착 전에
+    //   화면이 지워지는 결함으로 되돌아간다.
+    expect((agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length).toBe(subCalls)
+  })
+
+  // 반대편 — 숨은 슬롯(탭 keep-alive)에서는 보내지 않는다. 붕괴한 컨테이너의 fit() 은 최소 치수를 내고,
+  //   그 치수가 PTY 로 나가면 에이전트 레이아웃이 깨진다(ADR-0056).
+  it('숨은 슬롯의 재부착은 치수를 전파하지 않는다', async () => {
+    const { agentClient } = await import('../../api/clientFactory')
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
+    await flushSubscribe()
+
+    fitAddonFit.mockClear()
+    ;(agentClient.resizePty as ReturnType<typeof vi.fn>).mockClear()
+
+    fireReset()
+
+    expect(fitAddonFit).not.toHaveBeenCalled()
+    expect(agentClient.resizePty).not.toHaveBeenCalled()
   })
 
   // ★반대 방향 회귀★: 국면 통지에 화면을 비우면, 소켓이 깜빡일 때마다 터미널이 통째로 지워졌다 전량

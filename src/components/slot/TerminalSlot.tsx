@@ -276,6 +276,16 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
           if (cancelled) return
           terminal.reset()
           lastSeq.current = -1
+          // ★재부착은 다른 PTY 다★: 복원된 에이전트의 PTY 는 데몬 spawn 기본값(80×24)에서 시작하고 이
+          //   슬롯의 xterm 은 벌려 둔 치수(실측 137×25) 그대로라, 어긋난 채 live 가 되면 TUI(Ink)가 자기가
+          //   믿는 크기로 지울 행 수·열 위치를 계산해 매 갱신이 한 행·수십 열 빗나간다(줄 중복·상태줄 혼입).
+          //   ★이 전파를 위 구독 트리거(화신)로 되돌리지 말 것★ — 그 형태의 실패 모드는 아래 트리거 주석이
+          //   정본이다. 숨김 중엔 건너뛴다(붕괴한 컨테이너의 fit() = 최소 치수 — RO 주석) — 다시 보일 때
+          //   가시성 effect 가 같은 전파를 낸다.
+          if (containerRef.current?.offsetParent != null) {
+            fitAddonRef.current?.fit()
+            void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
+          }
         },
       )
       .then(handle => {
