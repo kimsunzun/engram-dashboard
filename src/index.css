@@ -26,21 +26,28 @@ html, body, #root {
 }
 
 /* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).
-   xterm 은 자체 .xterm-viewport 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서
-   같은 theme.css 토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은
-   theme 마다 다른 --scrollbar-thumb, 폭/라운드는 --scrollbar-size/-radius). WebView2=Chromium 이므로
-   ::-webkit-scrollbar 로 트랙/thumb 를 커스텀한다(overlay 스타일 근사 — 트랙 투명, 얇은 pill thumb).
+   xterm 은 자체 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서 같은 theme.css
+   토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은 theme 마다
+   다른 --scrollbar-thumb, 폭/라운드는 --scrollbar-size/-radius).
 
-   ★가시성 규칙도 seam 과 같게 맞춘다(2026-08-21 사용자 지적: "터미널은 화면 호버링만 해도 스크롤바가
-     나온다 — json 쪽으로 통일")★: 평소 숨김 → 스크롤 중에만 보임 → 멈춘 뒤 0.5s 후 숨김, hover 무반응
-     (ADR-0053 요구 (2)(3)(4)). seam 쪽은 Radix 가 스크롤바 요소를 마운트/언마운트해 이걸 구현하지만,
-     네이티브 스크롤바는 요소가 아니라 붙였다 뗄 수 없다 → **thumb 색을 평소 transparent 로 두고
-     "스크롤 중" 표식([data-scroll-active])이 붙은 동안만 칠한다.** 표식을 붙이는 쪽 =
+   ★화면에 보이는 스크롤바는 네이티브가 아니라 xterm 이 그리는 DOM 요소다(실측 2026-08-21,
+     @xterm/xterm 6.0.0)★: v6 는 VS Code 의 ScrollableElement 를 쓴다 —
+     `.xterm-scrollable-element > .scrollbar.vertical > .slider`. 남아 있는 .xterm-viewport 는 스크롤을
+     더 이상 받지 않고(스크롤백이 쌓여도 scrollHeight === clientHeight) 불투명한
+     .xterm-scrollable-element 가 그 위를 덮는다. 그래서 아래 네이티브 규칙은 지금 화면에 한 픽셀도
+     칠하지 않는다 — thumb 색을 빨강으로 강제해도 캡처가 변하지 않는 것으로 확인했다. **보이는 두께·색·
+     가시성을 바꾸려면 .slider 를 건드려야 한다.** 네이티브 규칙을 남겨 두는 이유는 기법이 죽은 게
+     아니라 대상이 덮인 것뿐이기 때문이다(10px 트랙 + 투명 border 2px → 정확히 6px 이 칠해지는 것을
+     격리 하네스에서 확인 — 스크롤바가 다시 드러나면 그대로 동작한다).
+
+   ★가시성 규칙(2026-08-21 사용자 지적: "터미널은 화면 호버링만 해도 스크롤바가 나온다 — json 쪽으로
+     통일")★: 평소 숨김 → 스크롤 중에만 보임 → 멈춘 뒤 0.5s 후 숨김, hover 무반응(ADR-0053 요구
+     (2)(3)(4)). seam 쪽은 Radix 가 스크롤바 요소를 마운트/언마운트해 이걸 구현하지만, 네이티브
+     스크롤바는 요소가 아니라 붙였다 뗄 수 없다 → **thumb 색을 평소 transparent 로 두고 "스크롤 중"
+     표식([data-scroll-active])이 붙은 동안만 칠한다.** 표식을 붙이는 쪽 =
      components/ui/nativeScrollActivity.ts(숨김 지연 상수도 seam 과 공유 — 두 룰이 갈리지 않게).
-   ★거터(트랙 폭)는 그대로 둔다 — 통일 대상이 아니다★: Chromium 은 ::-webkit-scrollbar 에 width 를 주는
-     순간 클래식(공간 점유)으로 전환하므로 xterm 에서 seam 과 같은 "공간 차지 0" 은 원천 불가다(ADR-0053
-     거부한 대안 1). 여기서 통일하는 것은 **언제 보이나** 뿐이고, 폭을 건드리면 터미널 열 수(cols)가
-     바뀌어 PTY 치수까지 흔든다. */
+     ★단 이 규칙이 통제하는 것도 위의 덮인 네이티브 스크롤바다★ — 보이는 .slider 의 show/hide 는
+     ScrollableElement 가 스스로 하고(mouseover 에도 뜬다) 아직 이쪽으로 통일되지 않았다. */
 .xterm .xterm-viewport {
   scrollbar-width: thin; /* Firefox 폴백(WebView2 는 -webkit-* 사용) */
   /* 평소 = 안 보임. 색만 죽이고 폭은 유지한다(위 거터 주석). */
@@ -69,4 +76,20 @@ html, body, #root {
 /* 스크롤 중에만 칠한다 — 색 토큰은 테마별(theme.css :root[data-theme=...] --scrollbar-thumb). */
 .xterm .xterm-viewport[data-scroll-active]::-webkit-scrollbar-thumb {
   background-color: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24));
+}
+
+/* 실제로 보이는 thumb(위 헤더의 .slider) 두께를 seam 의 thumb 와 같게 — 기본 14px 은 seam 6px 의
+   2.3 배로 칠해진다(실측: 21 device px / dpr 1.5).
+   ★!important 가 필요하다★: 폭과 left 를 xterm JS 가 인라인 style 로 박는다(verticalScrollbarSize =
+     ViewportConstants.DEFAULT_SCROLL_BAR_WIDTH = 14).
+   폭은 seam 과 같은 산식으로 뽑는다 — 트랙 --scrollbar-size(10px) − .engram-scrollbar 의 padding 2px 양쪽.
+   right: 2px 도 그 padding 을 그대로 옮긴 것이다(트랙 오른쪽 끝에서 2px 띄운 pill).
+   ★트랙(.scrollbar.vertical, 14px)은 건드리지 않는다★ — 다만 그것이 거터라서가 아니다: 트랙은
+     position:absolute 오버레이라 레이아웃 폭을 먹지 않고, 열 수(cols)를 정하는 예약 폭은 FitAddon 이 DOM
+     이 아니라 JS 상수(DEFAULT_SCROLL_BAR_WIDTH — overviewRuler.width 로만 바뀐다)에서 읽는다. 즉 여기서
+     칠하는 폭을 줄여도 PTY 치수는 흔들리지 않고, 흔드는 것은 그 옵션 쪽이다. */
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  width: calc(var(--scrollbar-size, 10px) - 4px) !important;
+  left: auto !important;
+  right: 2px;
 }
