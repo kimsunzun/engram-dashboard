@@ -52,7 +52,11 @@ fn error_sets_are_golden() {
         declared("agent.spawn"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
     );
-    assert_eq!(declared("agent.new"), vec![ErrorCode::Conflict]);
+    // `preset` 지목이 빗나가면 대상 부재다 — 그래서 만들기 동사도 NOT_FOUND 를 광고한다.
+    assert_eq!(
+        declared("agent.new"),
+        vec![ErrorCode::NotFound, ErrorCode::Conflict]
+    );
     assert_eq!(
         declared("agent.rename"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
@@ -116,7 +120,15 @@ fn required_matches_what_deserialization_actually_demands() {
         (
             "agent.new",
             parses::<AgentNewArgs>,
-            json!({ "cwd": "C:/work/x", "name": "beta" }),
+            // 상호배타인 두 칸을 함께 싣는다 — 이 대조가 재는 것은 **역직렬화**이고, 조합 제약은 핸들러가
+            //   본다(`agent.spawn` 의 target/cwd 와 같은 자리).
+            json!({
+                "cwd": "C:/work/x",
+                "preset": "bookmark-1",
+                "name": "beta",
+                "output_format": "StreamJson",
+                "backend": "Claude",
+            }),
         ),
         (
             "agent.rename",
@@ -159,6 +171,46 @@ fn required_matches_what_deserialization_actually_demands() {
             );
         }
     }
+}
+
+/// ★대화상자 없이 등록하는 길을 **광고가** 나른다★(ADR-0156 — 광고가 곧 사용법이다).
+///
+/// 이 명령을 부르는 주체는 LLM 이고, 그가 보는 것은 이 스키마뿐이다: 폴더를 두 길로 정할 수 있다는 것
+/// (`cwd`·`preset`)과 나머지 두 칸이 **닫힌 어휘**라는 것이 거기 실려야 자기 인자를 스스로 고른다.
+/// ★`required` 가 비어 있는 것이 계약이다★ — 어느 칸도 혼자서는 필수가 아니고, 「정확히 하나」는 칸이
+/// 아니라 **조합**이라 스키마가 표현하지 못한다(그 판정은 핸들러가 지고, 반려 문구가 두 칸을 함께 짚는다).
+#[test]
+fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabularies() {
+    let schema: serde_json::Value =
+        serde_json::from_str(spec_of("agent.new").expect("선언").args_schema).expect("args 스키마");
+    let properties = schema["properties"].as_object().expect("properties 객체");
+
+    for field in ["cwd", "preset", "name", "output_format", "backend"] {
+        assert!(properties.contains_key(field), "{field} 칸이 광고에 없다");
+    }
+    assert_eq!(
+        schema["required"].as_array().map(Vec::len),
+        Some(0),
+        "혼자서 필수인 칸은 없다: {schema}"
+    );
+
+    // 닫힌 어휘는 **값 목록**으로 실린다 — 이름만 실리면 호출자가 무엇을 넣을지 스스로 못 고른다.
+    let vocabulary = |field: &str| -> Vec<String> {
+        properties[field]["anyOf"]
+            .as_array()
+            .expect("Option 칸은 anyOf")
+            .iter()
+            .filter_map(|branch| branch.get("enum"))
+            .flat_map(|values| values.as_array().expect("enum 배열").clone())
+            .map(|value| value.as_str().expect("문자열").to_string())
+            .collect()
+    };
+    assert_eq!(vocabulary("output_format"), vec!["Terminal", "StreamJson"]);
+    assert_eq!(
+        vocabulary("backend"),
+        vec!["Claude"],
+        "오늘 통과하는 값은 하나뿐이고 그 사실이 광고에 그대로 있어야 한다"
+    );
 }
 
 /// ★`null` 은 「루트로 떼라」는 지시이고 부재는 반려다★ — 이 셋이 갈려야 오타 필드 하나가 조용히

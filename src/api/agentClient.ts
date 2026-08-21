@@ -37,13 +37,43 @@ export interface OutputSubscription {
 }
 
 /**
+ * 뷰 출력 국면 — `onState` 통지값이자 [`ViewOutputState.phase`] 의 값 집합(둘은 같은 어휘다).
+ *
+ * - `detached` — **붙을 에이전트가 없다**. 내는 자리는 둘뿐이다: 연결이 끊겼거나, 알려진 명부에 그 id 가
+ *   없거나. 요청을 내지 않고 기다린다. 화면에 그려 둔 내용은 **지우지 않는다**("이 슬롯이 이 에이전트를
+ *   본다"는 사용자 의도는 연결보다 오래 산다).
+ *   ★"명부 자체를 아직 모른다" 는 이 값이 아니다★ — 부팅·웹뷰 리로드·명부 조회 실패가 그 구간이고,
+ *   거기선 통지 없이 그냥 요청을 낸다(모름 ≠ 부재 — 합치면 조회 한 번 실패에 출력이 통째로 막힌다).
+ *   그래서 **연결이 살아 있는 채로 이 값을 받았다면 명부가 "그 에이전트는 없다" 고 말한 것**이다.
+ * - `buffering` — 축적 중(replay 경계 대기). ★비우면 안 된다★ — 무슨 이력이 올지 아직 모르는 구간이다.
+ *   같은 화신이면 겹치는 앞부분을 dedup 이 흡수하고, 다른 화신이면 비우기는 `onReset` 이 따로 낸다.
+ * - `live` — 직행 배달.
+ * - `error` — 재요청 사다리 소진. `detached` 와 마찬가지로 **아무것도 오지 않는 상태**라, 소비자는 이걸
+ *   화면에 드러내야 한다 — 안 그러면 명부에도 있고 연결도 붙은 슬롯이 신호 없는 빈 판으로 남는다.
+ *   화면 내용은 여기서도 지우지 않는다(비우기는 `onReset` 단독).
+ */
+export type ViewPhase = 'detached' | 'buffering' | 'live' | 'error'
+
+/**
+ * 뷰 비우기 신호 — **다른 화신의 이력이 지금부터 배달된다**.
+ *
+ * 받는 쪽 의무: 그려 둔 것을 지우고 **자기 seq 가드도 함께** 되돌린다. 하나만 하면 겹쳐 그리거나(가드만
+ * 되돌림) 새 프레임이 전부 탈락한다(화면만 지움 — 새 화신은 번호를 0 부터 다시 매긴다).
+ *
+ * ★요청이 아니라 **도착** 시점에 온다★ — 바로 뒤에 그 이력이 같은 틱으로 배달되므로 빈 화면이 비치는
+ * 구간이 없다. 뒤집어 말하면 replay 가 거절·타임아웃되면 이 신호는 **오지 않고** 앞 화신의 화면이
+ * 그대로 남는다(그게 의도다 — 데몬 재기동 직후가 정확히 그 경우다).
+ */
+export type ViewResetFn = () => void
+
+/**
  * 뷰별 replay 상태 스냅샷(§5 LLM 제어 표면 — ADR-0046).
- * error(재요청 사다리 소진) 등을 LLM/자동화가 타입으로 발견·재구동 판단에 쓴다. 최소 노출.
+ * error(재요청 사다리 소진)·detached(붙을 에이전트 부재) 등을 LLM/자동화가 타입으로 발견·재구동 판단에
+ * 쓴다. 최소 노출.
  */
 export interface ViewOutputState {
   agentId: string
-  /** buffering(축적 중) / live(직행 배달) / error(재요청 소진). */
-  phase: 'buffering' | 'live' | 'error'
+  phase: ViewPhase
   /** buffering 중 축적 프레임 수(디버그·관측). */
   buffered: number
   /** 재요청 사다리 시도 횟수(0=아직 재요청 안 함). */
@@ -107,14 +137,16 @@ export interface AgentClient {
   // ── 출력 구독 ──────────────────────────────────────────────────────────────
   /**
    * 뷰(slot) 단위 출력 구독(ADR-0046). viewId = 슬롯 id — 같은 agentId 를 N 뷰가 봐도 각자 독립 진도
-   * (버그 B 구조 해소). onChunk 로 디코드된 바이트 전달. onState(옵션)로 replay 상태(buffering/live/error)
-   * 통지 — 슬롯이 error·streaming 표면화에 쓴다. 반환 핸들의 unsubscribe 로 해제.
+   * (버그 B 구조 해소). onChunk 로 디코드된 바이트 전달. onState(옵션)는 국면 통지([`ViewPhase`]),
+   * onReset(옵션)은 비우기 신호([`ViewResetFn`]) — 값별 소비자 의무는 각 타입에 있다. 반환 핸들의
+   * unsubscribe 로 해제.
    */
   subscribeOutput(
     viewId: string,
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
-    onState?: (state: 'buffering' | 'live' | 'error') => void,
+    onState?: (state: ViewPhase) => void,
+    onReset?: ViewResetFn,
   ): Promise<OutputSubscription>
 
   /**

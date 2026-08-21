@@ -37,8 +37,28 @@
 //! engram agent new --cwd <경로> [--name <이름>]                 # 만들기만(잠든 채)
 //! engram agent rename <이름> <새-이름>
 //! engram agent move <이름> --parent <이름|none>                 # none = 루트로 떼기
+//!
+//! engram commands                                             # 부를 수 있는 이름 전량(이름 + 한 줄 요약)
+//! engram commands <전체-이름>                                   # 그 명령의 인자·반환·오류 코드
+//! engram <전체-이름> --help                                     # 위와 같은 화면(= `commands <전체-이름>`)
+//! engram <전체-이름> --키 값 …                                   # 그 명령을 실제로 부른다
+//!     # null 을 받는 인자에는 `none` 을 친다(`--parent none`) — 옛 계열과 같은 낱말이다.
 //! ```
 //!
+//! ★세 번째 표면 — **전체 이름**(ADR-0155/0156)★: 위 두 계열이 **컴파일 타임에 닫힌** 알파벳이라면
+//!   (`agent.new` 에 인자가 늘어도 여기 플래그를 손으로 더하기 전엔 칠 수 없다), 이 표면은 데몬이 런타임에
+//!   내려 주는 표를 그대로 받아 친다. 그래서 계열 파서를 안 고쳐도 새 명령·새 인자가 즉시 도달한다.
+//! ★첫 토큰에 `.` 이 있으면 호출이다★ — 계열 이름(`mail`·`agent`)에는 점이 없고 명령 이름에는 항상 있다
+//!   (`<계열>.<동사>`). 그래서 디스패치가 모호해지지 않는다.
+//! ★인자 타입은 **스키마가 정한다 — 값의 생김새가 아니라**★: 셸에서 오는 값은 전부 문자열이라,
+//!   `--name 123` 은 문자열 칸이면 문자열로 실려야 한다. 그래서 호출 경로는 먼저 발견 목록을 받아
+//!   그 명령의 인자 스키마를 읽고, 선언된 타입으로만 값을 옮긴다(`bind_invoke_args`). 모르는 플래그는
+//!   **왕복 없이** 선언된 칸 전량과 함께 반려한다.
+//! ★`help` 블롭은 불투명하다(ADR-0156)★: 데몬 자기 표의 항목은 우리가 아는 스키마지만, 클라이언트가
+//!   등록한 것은 **임의 텍스트일 수 있고 JSON 이 아닐 수도 있다**. 못 읽는 블롭 하나가 목록 전체를
+//!   가라앉히지 않는다 — 그 줄은 이름만 남고 나머지는 그대로 렌더된다.
+//!
+
 //! ★제어 동사의 **의미 검증도 데몬 단독**이다★(우편과 같은 규율): 대상 실재·이름 유일성·계층 규칙은 전부
 //!   데몬이 판정한다. CLI 는 형태(값 누락·모르는 플래그·`spawn` 두 형태의 양립 불가)만 본다.
 //!
@@ -48,13 +68,27 @@
 //! ★stdout 이 JSON 이라는 보장은 없다(파서를 이 가정 위에 쓰지 말 것)★: 비-2xx 응답도 body 를 그대로
 //!   흘린다 — 401 은 빈 줄, 프록시가 끼면 HTML 이 나올 수 있다. **일부러** 그렇게 둔다: 반려 body 엔
 //!   발신 에이전트가 파싱해 자기교정할 교정 JSON 이 실려 있을 수 있어, 우리가 형태로 걸러 버리면 그
-//!   정보가 사라진다. 이 CLI 가 **스스로** 내는 반려(BAD_ARGS·NO_TOKEN·전송 실패)만 항상 봉투 JSON 이고,
-//!   help 는 평문이다. 기계 판정은 stdout 형태가 아니라 **exit code** 로 한다.
+//!   정보가 사라진다. 이 CLI 가 **스스로** 내는 반려(BAD_ARGS·NO_TOKEN·UNKNOWN_COMMAND·전송 실패)만 항상
+//!   봉투 JSON 이고, help 와 `commands` 화면은 평문이다. 기계 판정은 stdout 형태가 아니라 **exit code** 로
+//!   한다.
+//! ★`commands` 두 화면만 데몬 body 를 다시 쓴다★: 목록·상세는 발견용 **읽을 화면**이라 렌더된 평문이
+//!   나가고, 원문 JSON 은 나가지 않는다(그 원문이 필요하면 라우트를 직접 치면 된다). 반대로 **실패했을
+//!   때는** 받은 body 를 그대로 흘린다 — 교정 정보가 거기 있다. 호출(`engram <이름> …`)은 처음부터 끝까지
+//!   기존 규율 그대로다(데몬 응답 원문).
 //!
 //! ★exit code 3분법★: **0** = 접수/조회 성공 · **1** = 실패(반려 `{status:"error",code,hint}`·연결/env
 //!   오류·비-2xx·비-JSON) · **2** = 2xx 인데 응답 shape 이 깨짐(데몬/프록시 결함 — 재시도 대상이 아니라
 //!   보고 대상, stderr 에 사유 한 줄). 발송 판정 정본 = `exit_code_for_response`, 조회(`status`·`pending`) 판정
 //!   정본 = `exit_code_for_query_response`(성공 shape 이 동사마다 달라 "에러가 아니면 성공" 규칙을 쓴다).
+//! ★세 번째 표면도 **같은 3분법**을 쓴다★: `commands`(목록·상세)는 렌더에 성공하면 0 · 목록을 못 받았거나
+//!   (전송 실패·비-2xx·반려·비-JSON) 이름이 표에 없으면 1 · 2xx 인데 **봉투**가 `{commands:[…]}` 가 아니면 2.
+//!   ★행 하나가 깨진 것은 2 가 아니다★ — 그 행만 버리고 목록은 선다(버린 수는 stderr).
+//!   호출(`engram <이름> …`)은 스키마를 못 받은 단계까지 같고, 실제 호출 응답은 **그 명령이 선언한 `ok`** 로
+//!   잰다(`exit_code_for_call_response`) — 선언된 필수 칸이 안 실린 2xx 는 성공이 아니라 보고 대상(2)이다.
+//!   그 선언은 스키마를 받는 같은 왕복에 이미 실려 오므로 CLI 가 shape 을 따로 기술하지 않는다(선언이 아예
+//!   없는 명령만 옛 조회 규칙으로 접힌다). 모르는 플래그·못 옮기는 값은 `BAD_ARGS`(1)로 **왕복 없이** 끝난다.
+//! ★어느 요청이 실패했는지 stderr 가 밝힌다★: 호출 경로의 첫 왕복(목록)이 실패하면 stdout 에 찍히는 body 는
+//!   그 명령 자신의 반려와 구별되지 않는다 — 그 한 줄이 없으면 호출자가 멀쩡한 인자를 고치기 시작한다.
 //!
 //! ★신원(from·"나")은 payload 아님 — `--as` 같은 플래그를 두지 않는다(D 결정)★: 발신자도, `pending` 의
 //!   "나" 도 **토큰에서만** 파생된다(데몬이 토큰→신원 조회). 이 프로세스는 자기 신원을 주장하지 않는다
@@ -76,16 +110,74 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use engram_dashboard_core::agent::types::{
-    AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS, CLI_EXE_NAME,
-    CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS, MAIL_MARKER_ENV,
-    MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
+    AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
+    CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS,
+    CLI_MAIL_VERBS, MAIL_MARKER_ENV, MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED,
+    RENAME_OUTCOME_UNCHANGED,
 };
 
-/// 연결/응답 타임아웃(로컬 데몬이라 짧게). 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// 제어 소켓의 **침묵 한도**(로컬 데몬이라 짧게) — 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
+///
+/// ★이 한 줄을 「연결/응답 타임아웃」으로 되돌리지 말 것★ — 셋 다 틀렸다: 총 대기도 응답 상한도 아니고
+/// (사유는 아래 세 번째 문단) **연결에는 아예 안 걸린다**. `TcpStream::connect` 를 `connect_timeout` 없이
+/// 부르므로(아래 `post_json`) 연결 단계의 상한은 OS 가 정한다.
+///
+/// ★값을 여기서 정하지 않는다 — **데몬과 공유하는 한도**다★: 데몬은 마감을 넘긴 중계에 `TIMEOUT` 을
+/// 실어 답하는데, 그 답이 나가기 전에 이 소켓을 끊으면 사용자는 「데몬에 닿지 못했다」를 보고(거짓이다 —
+/// 닿았고 적용됐을 수도 있다) 실제 사유를 영영 못 본다. 두 값의 대소 관계는 데몬 쪽이 문다
+/// (`command_delivery` 의 `fits_caller_silence_window`). 여기서 숫자를 다시 적으면 그 판정이 못 보는
+/// 곳에서 관계가 갈린다.
+/// ★이 값이 **총 대기 상한이 아니다**★ — 아래에서 `set_read_timeout`/`set_write_timeout` 에 들어가므로
+/// 재는 것은 **연속 무응답 구간**이다. 답 하나가 통째로 이 시간 안에 와야 한다는 뜻이 아니고, 반대로
+/// 서버가 중간에 바이트를 흘리면 총 소요는 이것을 넘어도 끊지 않는다. 지금 제어 라우트가 답 전에 아무
+/// 것도 안 보내서 두 해석이 같아 보일 뿐이다(그 사실의 정본 = core 쪽 상수 doc).
+// ADR-0161
+const TIMEOUT: Duration = Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS);
 
 /// help 동사. `--help`/`-h` 도 같은 자리로 받는다 — `is_help_token`.
 const HELP_VERB: &str = "help";
+
+/// 발견 동사 — 계열이 아니라 **첫 토큰 하나**다(`engram commands [이름]`).
+///
+/// ★계열로 만들지 않은 이유★: 계열은 `<계열> <동사>` 두 토큰을 쓰는데 여기 뒤에 오는 것은 동사가 아니라
+///   **명령 이름**이다. 계열로 두면 `engram commands show agent.new` 처럼 아무것도 안 가르치는 토큰이 하나
+///   더 붙는다.
+/// ★점이 없어 호출 형태와 겹치지 않는다★ — 명령 이름에는 항상 `.` 이 있다([`COMMAND_NAME_SEPARATOR`]).
+const CLI_VERB_COMMANDS: &str = "commands";
+
+/// 전체 이름의 계열/동사 구분자 — 이 글자가 첫 토큰에 있으면 **호출**이다.
+///
+/// ★디스패치가 이 한 글자에 걸려 있다★: 계열 이름(`mail`·`agent`)에 점을 넣거나, 점 없는 명령 이름을
+///   선언하면 그 순간 첫 토큰만으로는 둘을 못 가른다. 명령 이름 규약(`<계열>.<동사>`)의 정본은 명령 표다.
+const COMMAND_NAME_SEPARATOR: char = '.';
+
+/// 발견·범용 호출 라우트 — [`Command::route`] 와 같은 규율(경로 지식은 CLI 소유, 데몬측 상수와 손으로 맞춘다).
+const ROUTE_COMMANDS: &str = "/control/commands";
+const ROUTE_CALL: &str = "/control/call";
+
+/// 데몬이 「지금 못 돌린다」고 표시한 이름들의 구획 머리(목록)와 그 한 줄(상세).
+///
+/// ★문구를 상수로 두는 이유★: 이것이 호출자가 「왜 안 되나」를 배우는 유일한 자리라 시험이 같은 바이트를
+/// 봐야 한다 — 리터럴을 양쪽에 적어 두면 한쪽만 고친 편집이 그대로 통과한다(실발생 — 이전 문구는
+/// `UNSUPPORTED` 를 약속했고 그 코드를 내는 생산자는 사라졌는데도 시험이 초록이었다).
+/// ★오류 코드 이름을 적지 않는다★ — 이 CLI 는 그 거절이 어떤 코드로 올지 모른다(데몬이 정한다). 그걸
+/// 지어내서 적으면 지금처럼 거짓이 된다.
+const BLOCKED_NOTICE: &str =
+    "\nThe daemon reports it cannot run these right now — calling one is refused, and the reply carries the reason:\n\n";
+const BLOCKED_DETAIL: &str =
+    "The daemon reports it cannot run this right now — calling it is refused, and the reply carries the reason.\n";
+
+/// 이 호출의 요청 번호 하나 — ★UUID 문법이 계약이다★(데몬 `catalog::caller_request_id` 가 그 문법으로만
+/// 받는다). 도구 crate 의 발권 타입을 그대로 써서 두 쪽이 같은 문법을 쓰는 것을 타입으로 잇는다.
+fn new_request_id() -> String {
+    engram_dashboard_command::RequestId::new().to_string()
+}
+
+/// 이름이 표에 없다 — **데몬 어휘와 같은 코드**를 쓴다.
+///
+/// ★따로 짓지 않는 이유★: 같은 사실을 데몬도 `UNKNOWN_COMMAND` 로 답한다(`catalog::unknown_name`). 우리가
+///   먼저 알아챘다고 다른 낱말을 쓰면, 호출자는 어느 층이 답했는지에 따라 분기를 두 벌 써야 한다.
+const ERR_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
 
 /// help 템플릿의 실행파일 이름 자리. 출력 직전 `CLI_EXE_NAME` 으로 치환한다 — help 는 에이전트가 표면을
 /// 배우는 유일한 자리라, 여기 적힌 이름이 실제 실행파일과 갈리면 배운 대로 쳐도 명령을 못 찾는다.
@@ -131,8 +223,12 @@ const HELP_ROOT_GROUP_MAIL: &str =
     "  mail     message your teammates and check your own outstanding items\n";
 const HELP_ROOT_GROUP_AGENT: &str =
     "  agent    list, create, start, rename and re-parent the agents on this team\n";
+/// ★이 화면은 정적이다 — 여기서 데몬을 부르지 않는다★: 표면을 배우는 자리가 "이미 연결돼 있어야" 하면
+/// 발견이 아니다. 그래서 런타임 표는 아래 한 줄로 **가리키기만** 한다(그 줄이 세 형태를 전부 적는 이유:
+/// 이 화면 말고는 그 형태를 배울 자리가 없다).
 const HELP_ROOT_TAIL: &str = "
 Run `{tool} help <group>` for that group's verbs (`{tool} <group> --help` works too).
+Run `{tool} commands` for every command the daemon can run right now, `{tool} commands <name>` for one command's arguments and return shape, and `{tool} <name> --flag value` to run it.
 ";
 
 /// `help mail` — 우편 동사 전량과 그 플래그. 읽는 쪽이 LLM 이라 한 동사당 한 줄 + 플래그 목록으로 짧게
@@ -240,13 +336,16 @@ fn run(args: &[String]) -> i32 {
         }
     };
     // help 는 크레덴셜도 데몬도 없이 답한다 — 표면을 배우는 자리가 "먼저 스폰돼 있어야" 하면 발견이 아니다.
-    let command = match parsed {
+    let plan = match parsed {
         ParsedCommand::Help(topic) => {
             println!("{}", render_help(topic, mail));
             return 0;
         }
+        // 발견·호출은 stdin 도 본문도 없다 — 크레덴셜 뒤에서 자기 흐름을 탄다.
+        ParsedCommand::Catalog(c) => Plan::Catalog(c),
+        ParsedCommand::Invoke(i) => Plan::Invoke(i),
         // 제어 동사는 stdin 을 읽지 않으므로 materialize 단계가 없다(본문이라는 개념이 없다).
-        ParsedCommand::Agent(a) => Command::Agent(a),
+        ParsedCommand::Agent(a) => Plan::Legacy(Command::Agent(a)),
         // ★이 단계의 반려도 같은 접기를 탄다★: 파싱이 성공한 **뒤**에 나는 인자 오류(빈 stdin 등)라
         //   `parse_command` 의 접기를 지나쳐 온다 — 그 문구가 계열의 다른 플래그를 되돌려 주면 감춘 계열이
         //   여기로 새어 나간다(실제로 `--body-stdin` 빈 입력 반려가 `--body` 를 안내했다).
@@ -257,7 +356,7 @@ fn run(args: &[String]) -> i32 {
         //   보인다" 로 읽고 원문을 되살리지 말 것.
         // ADR-0133
         ParsedCommand::Mail(m) => match materialize_body(m, read_stdin_to_string) {
-            Ok(c) => c,
+            Ok(c) => Plan::Legacy(c),
             Err(msg) => {
                 print_error("BAD_ARGS", &hide_mail_reason(mail, msg));
                 return 1;
@@ -265,30 +364,58 @@ fn run(args: &[String]) -> i32 {
         },
     };
 
-    let token = match std::env::var("ENGRAM_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
-            print_error(
-                "NO_TOKEN",
-                "ENGRAM_TOKEN is not set; this command must run inside an engram-spawned agent.",
-            );
-            return 1;
-        }
-    };
-    let base = match std::env::var("ENGRAM_CONTROL_URL") {
-        Ok(u) if !u.is_empty() => u,
-        _ => {
-            print_error(
-                "NO_CONTROL_URL",
-                "ENGRAM_CONTROL_URL is not set; this command must run inside an engram-spawned agent.",
-            );
+    let (token, base) = match read_credentials() {
+        Ok(pair) => pair,
+        Err((code, hint)) => {
+            print_error(code, hint);
             return 1;
         }
     };
 
+    match plan {
+        Plan::Legacy(command) => run_legacy(&base, &token, command),
+        Plan::Catalog(request) => run_catalog(&base, &token, &request),
+        Plan::Invoke(invoke) => run_invoke(&base, &token, invoke),
+    }
+}
+
+/// 파싱이 끝난 뒤 남는 갈래 — **크레덴셜 뒤에서** 무엇을 도는가.
+///
+/// ★`Command`(옛 세 계열)를 감싸기만 하는 변형이 있는 이유★: 새 두 표면은 요청이 하나가 아니라
+///   「스키마를 받고 → 그걸로 인자를 옮기고 → 부른다」라서 라우트 하나 + 판정기 하나로 접히지 않는다.
+///   옛 흐름을 그 모양에 맞춰 늘리는 대신 갈래를 갈라 둔다.
+#[derive(Debug)]
+enum Plan {
+    Legacy(Command),
+    Catalog(ParsedCatalog),
+    Invoke(ParsedInvoke),
+}
+
+/// 크레덴셜 두 개. 없으면 `(코드, 문구)` — 찍는 것은 호출자 몫이다(이 함수가 순수해야 갈래마다 같은 문구가
+/// 나간다).
+fn read_credentials() -> Result<(String, String), (&'static str, &'static str)> {
+    let token =
+        match std::env::var("ENGRAM_TOKEN") {
+            Ok(t) if !t.is_empty() => t,
+            _ => return Err((
+                "NO_TOKEN",
+                "ENGRAM_TOKEN is not set; this command must run inside an engram-spawned agent.",
+            )),
+        };
+    let base = match std::env::var("ENGRAM_CONTROL_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return Err((
+            "NO_CONTROL_URL",
+            "ENGRAM_CONTROL_URL is not set; this command must run inside an engram-spawned agent.",
+        )),
+    };
+    Ok((token, base))
+}
+
+fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
     let route = command.route();
     let request_body = command.request_body();
-    match post_json(&base, route, &token, &request_body) {
+    match post_json(base, route, token, &request_body) {
         Ok(resp) => {
             // 비-2xx 라도 body 를 찍는다 — 교정 JSON 이 실려 있어 발신 에이전트가 파싱한다.
             println!("{}", resp.body);
@@ -375,6 +502,29 @@ enum ParsedCommand {
     Help(HelpTopic),
     Mail(ParsedMail),
     Agent(ParsedAgent),
+    Catalog(ParsedCatalog),
+    Invoke(ParsedInvoke),
+}
+
+/// 발견 요청 — 목록 전량이냐 이름 하나냐.
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedCatalog {
+    List,
+    /// 이름이 실재하는지는 **여기서 보지 않는다** — 표가 정본이라 목록을 받은 뒤에 판정한다.
+    Detail {
+        name: String,
+    },
+}
+
+/// 전체 이름 호출의 파싱 결과.
+///
+/// ★인자를 여기서 해석하지 않는다(load-bearing)★: 어느 토큰이 값이고 어느 토큰이 다음 플래그인지는
+///   **선언된 타입**에 달려 있다(불리언 칸은 값을 안 먹는다). 스키마는 네트워크를 타야 오므로, 파서는
+///   argv 잔여를 원문 그대로 남기고 해석은 [`bind_invoke_args`] 가 스키마를 받은 뒤에 한다.
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedInvoke {
+    name: String,
+    tokens: Vec<String>,
 }
 
 /// 제어 계열의 파싱 결과(ADR-0132 결정 6). 데몬 검증과 **겹치지 않는 것만** 여기서 본다 — 형태(값 누락·
@@ -501,6 +651,7 @@ fn parse_command(args: &[String], mail: MailSurface) -> Result<ParsedCommand, St
     };
     match first {
         t if is_help_token(t) => parse_help_topic(&args[1..], mail),
+        CLI_VERB_COMMANDS => parse_catalog(&args[1..]).map(ParsedCommand::Catalog),
         CLI_GROUP_MAIL => {
             let rest = &args[1..];
             if rest.first().is_some_and(|a| is_help_token(a)) {
@@ -526,16 +677,100 @@ fn parse_command(args: &[String], mail: MailSurface) -> Result<ParsedCommand, St
             }
             parse_agent(rest).map(ParsedCommand::Agent)
         }
+        // ★플래그 검사가 이름 검사보다 **앞**이다★: `--foo.bar` 도 점을 가지므로, 순서가 뒤집히면 오타 친
+        //   플래그가 명령 이름으로 읽혀 발견 왕복을 한 뒤에야 반려된다.
         other if other.starts_with('-') => Err(format!(
-            "the first argument must be a group, not a flag ({other}) — e.g. `{}`; run `{CLI_EXE_NAME} help` to list groups",
+            "the first argument must be a group or a command name, not a flag ({other}) — e.g. `{}`; run `{CLI_EXE_NAME} help` to list groups",
             example_invocation(mail)
         )),
+        other if other.contains(COMMAND_NAME_SEPARATOR) => parse_invoke(other, &args[1..]),
         other => Err(unknown_group(other)),
     }
 }
 
 fn unknown_group(name: &str) -> String {
-    format!("unknown group: {name} — run `{CLI_EXE_NAME} help` to list groups")
+    format!(
+        "unknown group: {name} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` for every command the daemon can run by name"
+    )
+}
+
+/// `commands` 뒤에 오는 것은 **명령 이름 하나**뿐이다.
+///
+/// ★`--help` 화면을 따로 두지 않는다(의도적 부재)★: 이 표면이 가르치는 것은 정적으로 적을 수 없는 것
+///   (런타임 표)이고, 세 형태 자체는 root help 한 줄이 이미 적는다. 화면을 하나 더 만들면 그 줄과 갈린다.
+///   그래서 `commands --help` 는 다른 위치 인자 자리와 같게 인자 오류다.
+fn parse_catalog(rest: &[String]) -> Result<ParsedCatalog, String> {
+    let Some(name) = rest.first() else {
+        return Ok(ParsedCatalog::List);
+    };
+    if rest.len() > 1 {
+        return Err(format!(
+            "{CLI_VERB_COMMANDS} takes at most one command name: {} — run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` to list them",
+            rest[1]
+        ));
+    }
+    // 명령 이름은 대시로 시작하지 않는다 — 그대로 실어 보내면 목록에 없는 이름을 조회하는 왕복이 된다.
+    if name.starts_with('-') {
+        return Err(format!(
+            "`{name}` is not a command name — run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` to list them, or `{CLI_EXE_NAME} help` for the built-in groups"
+        ));
+    }
+    Ok(ParsedCatalog::Detail { name: name.clone() })
+}
+
+/// `engram <전체-이름> [--키 값 …]`.
+///
+/// ★네트워크 전에 끊을 수 있는 것만 여기서 끊는다★: 모르는 플래그·값 타입은 선언을 알아야 하므로 목록을
+///   받은 뒤로 미룬다. 아래 셋은 스키마를 봐도 답이 달라지지 않으므로 왕복 전에 끝난다.
+/// ★help 토큰을 **여기서도, 어느 자리에서도** 존중한다(load-bearing)★: 첫 자리만 보면 `--help` 가 한 칸
+///   옆으로 밀린 순간(`--index 1 --help`) 인자 바인딩으로 흘러, `help` 라는 이름의 **불리언 인자**를 선언한
+///   명령에서 `{"help":true}` 가 실려 나간다 — 사용법을 물었는데 Write 가 도는 것이다. 그 이름을 선언하지
+///   않은 명령에서도 왕복 한 번을 쓰고 `BAD_ARGS` 로 끝나, 원하던 상세 화면이 안 나온다.
+fn parse_invoke(name: &str, rest: &[String]) -> Result<ParsedCommand, String> {
+    // 이름은 `<계열>.<동사>` 다 — 어느 한쪽이 비어 있으면 표에 있을 수 없으므로 인증된 왕복을 낭비하지 않는다.
+    if name
+        .split(COMMAND_NAME_SEPARATOR)
+        .any(|part| part.is_empty())
+    {
+        return Err(format!(
+            "`{name}` is not a command name — a name is <group>{COMMAND_NAME_SEPARATOR}<verb> and neither side may be empty; run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` to list the real ones"
+        ));
+    }
+    if asks_for_usage(rest) {
+        // ★단독일 때만 화면이다★: 다른 인자가 붙은 호출을 exit 0 짜리 화면으로 삼키면 하려던 호출이 성공
+        //   코드와 함께 사라진다(계열 자리의 `reject_help_with_extra_args` 와 같은 판단). 어느 쪽이든
+        //   **명령은 돌지 않는다** — 그것이 이 분기의 요점이다.
+        if rest.len() > 1 {
+            return Err(format!(
+                "help takes no further arguments — run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {name}` for this command's arguments, or drop the help flag to call it"
+            ));
+        }
+        return Ok(ParsedCommand::Catalog(ParsedCatalog::Detail {
+            name: name.to_string(),
+        }));
+    }
+    if let Some(first) = rest.first() {
+        if !first.starts_with("--") {
+            return Err(format!(
+                "`{first}` is not a flag — {name} takes named arguments only (`{CLI_EXE_NAME} {name} --<argument> <value>`); run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {name}` for its arguments"
+            ));
+        }
+    }
+    Ok(ParsedCommand::Invoke(ParsedInvoke {
+        name: name.to_string(),
+        tokens: rest.to_vec(),
+    }))
+}
+
+/// 이 호출이 **인자가 아니라 사용법**을 묻고 있나.
+///
+/// ★두 철자는 어느 자리에서도 인자가 아니고, 맨낱말은 첫 자리에서만 그렇다★: `--help`·`-h` 는 이 바이너리
+///   전체에서 발견 요청이라, 값으로 그 **문자열 자체**를 보내려는 호출은 사실상 없다(대가 = 그 리터럴을 값으로
+///   못 보낸다. 문서화된 한계다). 반대로 맨 `help` 는 평범한 값이다(`--name help`) — 값 자리에서 가로채면
+///   이름이 조용히 화면으로 바뀐다. 그래서 맨낱말은 **플래그만 올 수 있는 첫 자리**에서만 발견 요청이다.
+fn asks_for_usage(rest: &[String]) -> bool {
+    rest.first().is_some_and(|t| is_help_token(t))
+        || rest.iter().any(|t| matches!(t.as_str(), "--help" | "-h"))
 }
 
 /// 우편 계열의 반려 사유를 **표면에 맞게 렌더한다**(ADR-0133) — 감춰져 있으면 "모르는 계열" 한 문구로 접고,
@@ -654,14 +889,16 @@ fn parse_mail(rest: &[String]) -> Result<ParsedMail, String> {
     }
 }
 
-/// `--parent` 가 "부모 없음(루트)" 을 뜻하는 낱말.
+/// 셸에서 **JSON null 을 치는 낱말** — 두 표면이 같은 값을 쓴다.
 ///
+/// 옛 계열에서는 `--parent` 의 "부모 없음(루트)" 이고, 전체 이름 호출에서는 **필수이면서 null 을 받는** 인자의
+/// null 이다([`DeclaredArg::takes_null_word`]). 갈라 두면 같은 데몬 명령을 두 입구에서 다르게 쳐야 한다.
 /// ★플래그를 생략하는 형태로 두지 않은 이유★: 생략은 "안 줬다" 와 구분되지 않아 오타 하나가 조용히 루트로
 ///   떼는 동작이 된다. 명시 낱말이면 의도가 argv 에 남는다.
-/// ★대가(문서화된 한계)★: **`none` 이라는 이름의 에이전트는 이 플래그로 부모 지정이 안 된다** — 그 경우는
-///   id 로 지목한다(help 에 적혀 있다). 이름이 유일해도 낱말과 이름은 같은 공간을 쓰므로 어느 쪽이든 한
-///   자리는 내줘야 하고, 데몬이 그 이름을 실제로 갖는지 물어보는 왕복은 파싱을 네트워크에 매단다.
-const AGENT_PARENT_NONE: &str = "none";
+/// ★대가(문서화된 한계)★: **`none` 이라는 이름의 에이전트는 그 자리에 이름으로 못 온다** — 그 경우는 id 로
+///   지목한다(help 에 적혀 있다). 이름이 유일해도 낱말과 이름은 같은 공간을 쓰므로 어느 쪽이든 한 자리는
+///   내줘야 하고, 데몬이 그 이름을 실제로 갖는지 물어보는 왕복은 파싱을 네트워크에 매단다.
+const NULL_WORD: &str = "none";
 
 fn parse_agent(rest: &[String]) -> Result<ParsedAgent, String> {
     match rest.first().map(|s| s.as_str()) {
@@ -869,12 +1106,12 @@ fn parse_agent_move(args: &[String]) -> Result<ParsedAgent, String> {
     })?;
     let parent = parent.ok_or_else(|| {
         format!(
-            "move requires --parent <name|{AGENT_PARENT_NONE}> ({AGENT_PARENT_NONE} moves it back to the top level) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
+            "move requires --parent <name|{NULL_WORD}> ({NULL_WORD} moves it back to the top level) — run `{CLI_EXE_NAME} help {CLI_GROUP_AGENT}`"
         )
     })?;
     Ok(ParsedAgent::Move {
         target,
-        parent: (parent != AGENT_PARENT_NONE).then_some(parent),
+        parent: (parent != NULL_WORD).then_some(parent),
     })
 }
 
@@ -1364,6 +1601,940 @@ fn agent_object_ok(v: &serde_json::Value, with_state: bool) -> bool {
             && !e.name.is_empty()
             && (!with_state || e.state.is_some_and(is_agent_state))
     })
+}
+
+// ── 발견과 전체 이름 호출(ADR-0155/0156) ──────────────────────────────────────────
+
+/// 발견 목록의 한 줄.
+///
+/// ★`help` 는 **불투명 바이트**다★: 데몬 자기 표의 항목이면 우리가 아는 스키마 JSON 이지만, 클라이언트가
+///   등록한 것은 임의 텍스트이고 JSON 이 아닐 수도 있다. 이 타입은 그것을 **문자열로만** 쥔다 — 파싱은
+///   렌더 시점에 실패해도 되는 일로 따로 한다.
+/// ★`callable` = 이 입구가 지금 그 이름을 실행할 수 있다★(데몬 계약).
+///   ★**오늘 데몬은 이 칸을 모든 행에서 참으로 낸다**★ — 목록을 합치는 두 출처가 둘 다 도달 가능해서다
+///   (데몬 자기 표는 그 자리에서 돌고, 남의 이름은 주인에게 중계된다 — ADR-0160).
+///   ★그래도 상수로 접지 않는다★: 세 번째 출처(주인 없이 선언만 아는 이름 따위)가 그 목록에 들어오는 날
+///   파생해 둔 이 칸만 거짓이 되고, 박아 둔 쪽은 없는 도달성을 광고한다.
+///   ★거짓이어도 **부르는 것을 막지 않는다**★ — 도달 가능 여부의 정본은 데몬이고, 여기서 미리 끊으면
+///   그 거절을 아무도 관측하지 못한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogEntry {
+    name: String,
+    help: String,
+    callable: bool,
+}
+
+/// 읽어 낸 목록 + **버린 행 수**. 버린 것을 세어 두는 이유는 침묵하지 않기 위해서다(그 수는 stderr 로 나간다).
+#[derive(Debug, PartialEq, Eq)]
+struct CatalogRead {
+    entries: Vec<CatalogEntry>,
+    skipped: usize,
+}
+
+/// 2xx 목록 body → 항목들. `Err` = **봉투** shape 위반 사유(호출자가 exit 2 로 보고한다).
+///
+/// ★행 하나가 표면 전체를 죽이지 않는다(load-bearing)★: 예전엔 전부-아니면-전무라, 등록 하나가 빈 이름을
+///   내면 목록도 상세도 **모든 호출**도 그 클라이언트가 끊길 때까지 exit 2 였다. 이 목록의 행은 남이 채우는
+///   칸이고 데몬은 그 안을 검사하지 않으므로(불투명 `help` — ADR-0156), 읽을 수 있는 행은 살려야 한다.
+///   `help` 블롭 하나가 목록을 가라앉히지 않는 것과 **같은 규율**을 행 봉투에 적용한 것이다.
+/// ★반대로 봉투가 깨진 것은 여전히 보고 대상이다★: 그때는 아무것도 못 읽으므로 "읽을 수 있는 행" 이라는
+///   개념 자체가 없다.
+/// ★`commands: []` 는 위반이 아니다★: 표 슬롯이 비어 있는 데몬이 내는 정상적인 답이다(그 갈래의 정본 =
+///   `catalog::handle_list` doc). 빈 목록을 결함으로 읽으면 그 상태의 데몬 앞에서 CLI 가 거짓 경보를 낸다.
+fn read_catalog(v: &serde_json::Value) -> Result<CatalogRead, String> {
+    let rows = v
+        .get("commands")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| "'commands' is missing or is not an array".to_string())?;
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut skipped = 0;
+    for row in rows {
+        let name = row
+            .get("name")
+            .and_then(|n| n.as_str())
+            .filter(|s| !s.is_empty());
+        let help = row.get("help").and_then(|h| h.as_str());
+        let callable = row.get("callable").and_then(|c| c.as_bool());
+        match (name, help, callable) {
+            (Some(name), Some(help), Some(callable)) => entries.push(CatalogEntry {
+                name: name.to_string(),
+                help: help.to_string(),
+                callable,
+            }),
+            _ => skipped += 1,
+        }
+    }
+    Ok(CatalogRead { entries, skipped })
+}
+
+/// 목록 라우트를 한 번 친다. `Err(exit code)` = 이미 stdout/stderr 에 보고를 마쳤다는 뜻.
+///
+/// ★성공했을 때만 body 를 안 찍는다★: 발견 화면은 렌더된 평문이 나가기 때문이다. 반대로 실패한 body 는
+///   전부 그대로 흘린다 — 거기 교정 정보가 있고, 그것을 우리가 다시 쓰면 사라진다.
+/// ★목록 실패의 3분법은 옛 계열과 같다★: 전송·비-2xx·비-JSON·검증된 반려 = 1, 2xx 인데 봉투를 읽을 수
+///   없으면 = 2.
+/// ★`for_command` = 이 조회가 **누구를 위한 것인가**(load-bearing)★: 호출 경로에서 이 왕복이 실패하면
+///   stdout 에는 목록 라우트의 body 가 찍히는데, 그것이 그 명령 자신의 반려와 **바이트 단위로 구별되지
+///   않는다** — 401 하나에 호출자(LLM)는 멀쩡한 인자를 고치기 시작한다. 어느 요청이 실패했는지 한 줄로
+///   밝힌다.
+fn fetch_catalog(base: &str, token: &str, for_command: Option<&str>) -> Result<CatalogRead, i32> {
+    let resp = match post_json(base, ROUTE_COMMANDS, token, "{}") {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(e.code(), &e.to_string());
+            note_catalog_failure(for_command);
+            return Err(EXIT_FAILED);
+        }
+    };
+    if !(200..300).contains(&resp.status) {
+        println!("{}", resp.body);
+        note_catalog_failure(for_command);
+        return Err(EXIT_FAILED);
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) else {
+        println!("{}", resp.body);
+        note_catalog_failure(for_command);
+        return Err(EXIT_FAILED);
+    };
+    if is_validated_error_shape(&v) {
+        println!("{}", resp.body);
+        note_catalog_failure(for_command);
+        return Err(EXIT_FAILED);
+    }
+    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+        println!("{}", resp.body);
+        eprintln!(
+            "{CLI_EXE_NAME}: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
+        );
+        note_catalog_failure(for_command);
+        return Err(EXIT_MALFORMED_SUCCESS);
+    }
+    match read_catalog(&v) {
+        Ok(read) => {
+            // 버린 행은 침묵하지 않는다 — 찾던 이름이 그 안에 있었으면 다음 줄이 UNKNOWN_COMMAND 인데,
+            //   그 둘을 잇는 실마리가 여기밖에 없다.
+            if read.skipped > 0 {
+                eprintln!(
+                    "{CLI_EXE_NAME}: {} command row(s) in the catalog could not be read (a row needs a non-empty string 'name', a string 'help' and a boolean 'callable') and are not listed",
+                    read.skipped
+                );
+            }
+            Ok(read)
+        }
+        Err(reason) => {
+            println!("{}", resp.body);
+            eprintln!("{CLI_EXE_NAME}: malformed catalog response — {reason}");
+            note_catalog_failure(for_command);
+            Err(EXIT_MALFORMED_SUCCESS)
+        }
+    }
+}
+
+fn note_catalog_failure(for_command: Option<&str>) {
+    if let Some(name) = for_command {
+        let name = caller_text(name, NAME_CHARS);
+        eprintln!(
+            "{CLI_EXE_NAME}: the reply above is the command catalog's (POST {ROUTE_COMMANDS}), looked up to type the arguments of '{name}' — '{name}' itself was never called, so its arguments are not what needs fixing"
+        );
+    }
+}
+
+fn run_catalog(base: &str, token: &str, request: &ParsedCatalog) -> i32 {
+    let read = match fetch_catalog(base, token, None) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let entries = &read.entries;
+    match request {
+        ParsedCatalog::List => {
+            print!("{}", render_catalog_list(entries));
+            0
+        }
+        ParsedCatalog::Detail { name } => match entries.iter().find(|e| &e.name == name) {
+            Some(entry) => {
+                print!("{}", render_catalog_detail(entry));
+                0
+            }
+            None => {
+                print_error(
+                    ERR_UNKNOWN_COMMAND,
+                    &unknown_command_hint(name, read.skipped),
+                );
+                EXIT_FAILED
+            }
+        },
+    }
+}
+
+/// 목록 → 호출 두 왕복. 첫 왕복은 **스키마를 얻기 위한** 것이고, 그 뒤 인자 검문은 전부 로컬이다.
+///
+/// ★`callable:false` 여도 그대로 부른다★: 도달 가능 여부의 정본은 데몬이고, 여기서 미리 끊으면 그 거절이
+///   관측되지 않는다(그리고 배선이 붙는 날 이 CLI 도 함께 고쳐야 한다).
+fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
+    let read = match fetch_catalog(base, token, Some(&invoke.name)) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let Some(entry) = read.entries.iter().find(|e| e.name == invoke.name) else {
+        print_error(
+            ERR_UNKNOWN_COMMAND,
+            &unknown_command_hint(&invoke.name, read.skipped),
+        );
+        return EXIT_FAILED;
+    };
+    let blob = parse_help_blob(&entry.help);
+    let declared = blob.as_ref().and_then(declared_args_of);
+    let args = match bind_invoke_args(&invoke.name, declared.as_deref(), &invoke.tokens) {
+        Ok(a) => a,
+        Err(msg) => {
+            print_error("BAD_ARGS", &msg);
+            return EXIT_FAILED;
+        }
+    };
+    let body = serde_json::json!({
+        "name": invoke.name,
+        "args": serde_json::Value::Object(args),
+        // ★번호를 **여기서** 만든다 — 논리적 호출 하나에 하나★(ADR-0161 결정 1·2): 데몬이 요청마다 새로
+        //   발급하면 데몬 쪽 중복 방지가 구조적으로 한 번도 안 걸린다(같은 번호에만 걸리는 장치라서).
+        //   ★이 프로세스는 스스로 재시도하지 않는다★ — 재시도는 이 CLI 를 **다시 실행**하는 호출자 몫이고
+        //   그 실행은 새 번호를 받는다.
+        //   ★데몬 쪽 보장이 어디까지인지를 여기 적지 않는다★ — 정본은 데몬의 요청 바디 계약
+        //   (`control::catalog` 의 `CallRequest::request_id`)이고, 오늘 그것은 **왕복이 열려 있는 동안**만
+        //   선다(완료 뒤 같은 번호는 다시 적용된다 · 미결). 같은 번호를 되보내는 수단을 이 CLI 에 붙일 때는
+        //   그 문단부터 읽을 것 — 지금 없는 보장을 전제로 재시도를 넣으면 조작이 두 번 적용된다.
+        "request_id": new_request_id(),
+    })
+    .to_string();
+    match post_json(base, ROUTE_CALL, token, &body) {
+        Ok(resp) => {
+            println!("{}", resp.body);
+            // ★선언된 반환으로 잰다 — 재료는 같은 왕복에 이미 왔다★: 관대한 조회 판정기를 쓰면
+            //   `agent.new` 가 `{"status":"ok"}` 에 exit 0 을 내는데 **같은 명령·같은 응답에 옛 계열은
+            //   exit 2** 다. 한 명령이 입구에 따라 반대 판정을 받으면 호출자는 일어나지 않은 일을 사실로
+            //   기록한다(ADR-0132 가 적어 둔 그 증상 그대로).
+            exit_code_for_call_response(
+                blob.as_ref().and_then(|b| b.get("ok")),
+                resp.status,
+                &resp.body,
+            )
+        }
+        Err(e) => {
+            print_error(e.code(), &e.to_string());
+            EXIT_FAILED
+        }
+    }
+}
+
+/// 호출 응답의 exit code — **선언된 `ok` 가 요구하는 칸이 실제로 실렸나**.
+///
+/// ★검사 범위는 `required` 의 **존재**까지다★: 값의 타입까지 재면 데몬이 칸을 넓히는 날 정상 응답이 exit 2
+///   로 튄다(거짓 경보). 반대로 존재조차 안 보면 `{"status":"ok"}` 가 성공으로 통과해, 아무것도 만들지 않은
+///   응답을 받고 호출자가 그 이름으로 편지를 쓴다 — 그 사고를 막는 최소선이 여기다.
+/// ★선언이 없으면 옛 조회 규칙으로 접는다★: 스키마를 안 내는 주인의 명령에 우리가 계약을 지어내면, 그
+///   명령은 정상 응답에도 영영 exit 2 를 받는다.
+fn exit_code_for_call_response(
+    ok_schema: Option<&serde_json::Value>,
+    status: u16,
+    body: &str,
+) -> i32 {
+    if !(200..300).contains(&status) {
+        return EXIT_FAILED;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return EXIT_FAILED;
+    };
+    if is_validated_error_shape(&v) {
+        return EXIT_FAILED;
+    }
+    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+        eprintln!(
+            "{CLI_EXE_NAME}: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
+        );
+        return EXIT_MALFORMED_SUCCESS;
+    }
+    let required: Vec<String> = ok_schema.map(required_keys).unwrap_or_default();
+    if required.is_empty() {
+        if !v.is_object() {
+            eprintln!(
+                "{CLI_EXE_NAME}: malformed response — expected a JSON object from the command call route"
+            );
+            return EXIT_MALFORMED_SUCCESS;
+        }
+        return 0;
+    }
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|key| v.get(key.as_str()).is_none())
+        .map(|k| k.as_str())
+        .collect();
+    if v.is_object() && missing.is_empty() {
+        return 0;
+    }
+    if v.is_object() {
+        eprintln!(
+            "{CLI_EXE_NAME}: malformed success response — the daemon answered 2xx without the fields this command declares it returns (missing: {})",
+            caller_text(&missing.join(", "), LABEL_CHARS)
+        );
+    } else {
+        eprintln!(
+            "{CLI_EXE_NAME}: malformed success response — this command declares it returns an object with {}, but the reply is not a JSON object",
+            caller_text(&required.join(", "), LABEL_CHARS)
+        );
+    }
+    // 옛 계열과 같은 후보 원인 — dev 에서 이 exit 2 가 가장 자주 나는 경로는 데몬 결함이 아니라 빌드 세대 차다.
+    eprintln!(
+        "{CLI_EXE_NAME}: one possible cause is a daemon from an older build — rebuilding this CLI does not relink a daemon that is already running, so restart the daemon and retry before reporting it (`cargo build` alone is not enough)"
+    );
+    EXIT_MALFORMED_SUCCESS
+}
+
+/// 스키마 조각의 `required` 목록(문자열만).
+fn required_keys(schema: &serde_json::Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|r| {
+            r.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 표에서 못 찾았다 — ★"목록에 없다" 와 "읽을 수 없었다" 를 뭉개지 않는다(load-bearing)★.
+///
+/// 버린 행이 있으면 그 행이 **찾던 이름이었을 수 있다**(`{"name":"slot.assign","help":"x"}` 처럼 `callable`
+/// 이 빠진 등록 하나로 충분하다). 그때 "그런 이름은 없다" 고 단정하면, 실재하는 명령을 호출자(LLM)가 영구히
+/// 포기한다 — 기계가 읽는 봉투에 실리는 문구라 더 그렇다. 우리가 아는 것만 말한다.
+fn unknown_command_hint(name: &str, skipped: usize) -> String {
+    if skipped > 0 {
+        return format!(
+            "cannot call '{name}' — it is not among the catalog rows this CLI could read, and {skipped} row(s) were unreadable, so it may be listed but unreadable rather than absent; run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` to see what was readable"
+        );
+    }
+    format!(
+        "unknown command '{name}' — the daemon's catalog does not list that name; run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` for every name it does list"
+    )
+}
+
+/// `help` 블롭을 **JSON 객체로 읽어 본다**. 못 읽어도 그건 결함이 아니다(ADR-0156 — 주인이 정하는 모양).
+fn parse_help_blob(help: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(help)
+        .ok()
+        .filter(|v| v.is_object())
+}
+
+/// 목록 한 줄에 붙일 요약.
+///
+/// 세 갈래를 갈라 두는 이유가 각각 다르다:
+/// - 우리가 아는 스키마면 `summary` 를 쓴다(그 칸이 정확히 이 용도로 있다).
+/// - JSON 이긴 한데 `summary` 가 없으면 **아무것도 안 쓴다** — 원문을 흘리면 중괄호가 요약 자리에 앉는다.
+/// - JSON 이 아니면 그 텍스트의 **첫 줄**을 쓴다. 그게 주인이 남긴 전부이므로 버리면 그 이름은 영영 이름뿐이다.
+fn catalog_summary(help: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(help) {
+        Ok(v) => v
+            .get("summary")
+            .and_then(|s| s.as_str())
+            .map(|s| caller_text(s, SUMMARY_CHARS))
+            .filter(|s| !s.is_empty()),
+        Err(_) => {
+            let mut lines = help.lines().map(str::trim).filter(|l| !l.is_empty());
+            let text = caller_text(lines.next()?, SUMMARY_CHARS);
+            if text.is_empty() {
+                return None;
+            }
+            // 뒤에 더 있었다는 표시 — 없으면 첫 줄이 전부인 줄 알고 상세를 안 편다.
+            Some(if lines.next().is_some() && !text.ends_with('…') {
+                format!("{text}…")
+            } else {
+                text
+            })
+        }
+    }
+}
+
+/// 요약 한 줄이 차지해도 되는 몫(문자 수) — 계약이 아니라 여유다. 잘린 것은 상세 화면이 전량을 낸다.
+const SUMMARY_CHARS: usize = 100;
+/// 이름 몫 — 명부가 허용하는 상한(128바이트)만큼이라 **정당한 이름은 절대 잘리지 않는다**. 잘린 이름은
+/// 복사해도 안 불리므로, 여기서 아끼면 그 명령이 못 불린다.
+const NAME_CHARS: usize = 128;
+/// 타입 표기·오류 코드처럼 한 칸에 들어가는 낱말의 몫.
+const LABEL_CHARS: usize = 64;
+/// 상세 화면의 산문(요약) 몫 — 목록보다 넉넉하다(고르는 자리가 아니라 읽는 자리다).
+const DETAIL_TEXT_CHARS: usize = 400;
+
+/// **남이 정한 텍스트**가 화면에 들어가기 전에 반드시 지나는 자리.
+///
+/// ★막는 것 둘★
+///   ① **줄바꿈** — 이름·요약·타입·오류 코드는 전부 상대가 채우는 칸이고 명부는 그 안을 검사하지 않는다
+///      (길이만 잰다). 개행 하나면 **가짜 행**과 **가짜 구획 제목**이 생겨, 부를 수 없는 이름이 부를 수 있는
+///      것처럼 서거나 없는 인자가 선언된 것처럼 보인다. 화면 구조를 만드는 것은 우리여야 한다.
+///   ② **제어 문자** — ESC 시퀀스는 이미 찍힌 줄을 덮고 커서를 옮긴다. 읽는 쪽이 사람이든 LLM 이든 화면이
+///      본문과 달라진다. 지우지 않고 U+FFFD 로 **보이게** 바꾼다(조용한 유실보다 가시적 열화).
+/// ★상한은 여유이지 계약이 아니다★ — 자리마다 몫이 다르므로 호출부가 정한다.
+fn caller_text(text: &str, cap: usize) -> String {
+    let collapsed: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect();
+    let mut chars = collapsed.chars();
+    let head: String = chars.by_ref().take(cap).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// 이름 칸의 폭 — 가장 긴 이름에 맞추되 상한을 둔다(긴 이름 하나가 요약을 화면 밖으로 밀지 않게).
+///
+/// ★재는 것은 **찍을 문자열**이다★: 원문 길이로 재면 잘린 이름 뒤로 정렬이 어긋난다.
+fn name_column(entries: &[&CatalogEntry]) -> usize {
+    entries
+        .iter()
+        .map(|e| caller_text(&e.name, NAME_CHARS).chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(32)
+}
+
+fn push_row(out: &mut String, entry: &CatalogEntry, width: usize) {
+    let name = caller_text(&entry.name, NAME_CHARS);
+    match catalog_summary(&entry.help) {
+        Some(summary) => {
+            let pad = width.saturating_sub(name.chars().count());
+            out.push_str(&format!("  {name}{:pad$}  {summary}\n", "", pad = pad));
+        }
+        // ★요약이 없어도 이름은 남는다★: 못 읽는 블롭 하나가 목록 전체를 가라앉히면, 그 목록을 유일한
+        //   발견 표면으로 쓰는 호출자는 멀쩡한 이름들까지 잃는다.
+        None => out.push_str(&format!("  {name}\n")),
+    }
+}
+
+/// `engram commands` 화면.
+///
+/// ★도달 못 하는 이름을 **빼지 않고 갈라 놓는다**★: 빼면 발견이 "있다" 를 말하지 않게 되고, 섞으면
+///   호출자가 하나 부르기 전까지 그 사실을 모른다. 그 칸이 존재하는 이유가 이 구획이다.
+fn render_catalog_list(entries: &[CatalogEntry]) -> String {
+    let (callable, blocked): (Vec<&CatalogEntry>, Vec<&CatalogEntry>) =
+        entries.iter().partition(|e| e.callable);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Commands the daemon can run for you — call one with `{CLI_EXE_NAME} <name> --<argument> <value>`.\nRun `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} <name>` for one command's arguments, return shape and error codes.\n\n"
+    ));
+    if callable.is_empty() {
+        out.push_str("  (the daemon reports none it can run itself)\n");
+    } else {
+        let width = name_column(&callable);
+        for entry in &callable {
+            push_row(&mut out, entry, width);
+        }
+    }
+    if !blocked.is_empty() {
+        out.push_str(BLOCKED_NOTICE);
+        let width = name_column(&blocked);
+        for entry in &blocked {
+            push_row(&mut out, entry, width);
+        }
+    }
+    out
+}
+
+/// 선언된 인자 하나 — 스키마에서 CLI 가 쓸 수 있는 만큼만 뽑은 것.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredArg {
+    name: String,
+    kind: ArgKind,
+    /// 스키마가 null 도 받는다고 말했나(표기 두 종 = [`arg_nullable`]).
+    nullable: bool,
+    required: bool,
+}
+
+impl DeclaredArg {
+    /// 이 칸에서 [`NULL_WORD`] 가 **null 을 뜻하나** — `nullable` 만으로는 부족하다.
+    ///
+    /// ★필수 칸에서만 그 낱말을 특별하게 읽는다(load-bearing)★: 선언 매크로가 `Option<T>` 를 전부
+    ///   `anyOf[T,null]` 로 내므로, nullable 만 보면 **모든 옵션 인자**가 그 낱말을 잃는다 — 실제로
+    ///   `agent.spawn --cwd none` 이 `{"cwd":null}` 로 나가 데몬 기본 폴더에 만들어지고, 그 응답은 `cwd` 를
+    ///   되돌려주지 않아 **다른 폴더가 쓰였다는 사실이 어디에도 안 보인다**. 옛 계열은 같은 입력을 문자열로
+    ///   보내므로 두 입구가 갈리기도 한다.
+    /// ★필수 칸에는 경쟁하는 뜻이 없다★: 옵션 칸에서 "값 없음" 은 이미 **플래그를 빼는 것**으로 표현되므로
+    ///   그 낱말은 평범한 문자열로 남아야 하고, 필수 칸은 뺄 수 없으니 null 을 말할 다른 방법이 없다.
+    ///   `agent.move --parent`(필수 + nullable)가 이 규칙을 만든 자리이고, 오늘 여기 드는 유일한 칸이다.
+    fn takes_null_word(&self) -> bool {
+        self.nullable && self.required
+    }
+}
+
+/// 선언된 타입. ★값의 생김새로 정하지 않는다★ — `--name 123` 이 문자열 칸이면 문자열이다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArgKind {
+    Str,
+    Int,
+    Num,
+    Bool,
+    /// 문자열 어휘. 값은 그대로 문자열로 실린다 — **어휘 검증은 데몬 몫**이다(여기서 겹쳐 걸면 데몬이 어휘를
+    /// 넓힌 날 옛 CLI 가 멀쩡한 값을 막는다).
+    Enum(Vec<String>),
+    /// 배열·객체 — CLI 표기가 없으므로 값을 JSON 으로 받는다.
+    Json(&'static str),
+    /// 스키마가 타입을 말하지 않았다 — 문자열로 그대로 싣는다(추측하지 않는다).
+    Unknown,
+}
+
+/// 스키마 조각이 **null 도 받는가**.
+///
+/// ★두 표기를 다 본다★: 선언 매크로는 `Option<T>` 를 `anyOf[{T},{null}]` 로 내지만, 등록 클라이언트는
+///   `"type": ["integer","null"]` 로 낸다 — 데몬의 인자 변환기가 그 형태를 받으므로(도구 crate `coerce`)
+///   여기가 못 읽으면 **한 스키마를 두 층이 다르게 읽는다**.
+fn arg_nullable(schema: &serde_json::Value) -> bool {
+    if let Some(branches) = schema.get("anyOf").and_then(|a| a.as_array()) {
+        return branches.iter().any(|b| type_names(b).contains(&"null"));
+    }
+    type_names(schema).contains(&"null")
+}
+
+/// `"type"` 이 문자열이든 배열이든 같은 목록으로 본다.
+fn type_names(schema: &serde_json::Value) -> Vec<&str> {
+    match schema.get("type") {
+        Some(serde_json::Value::String(s)) => vec![s.as_str()],
+        Some(serde_json::Value::Array(names)) => names.iter().filter_map(|n| n.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 스키마 조각 → 타입.
+///
+/// ★null 은 **타입이 아니라 곁가지**로 걷어 낸다★: 선언 매크로의 `anyOf[{T},{null}]` 도, 등록 쪽의
+///   `"type":["T","null"]` 도 실제로 받는 값은 `T` 다. 걷어 내고 하나가 남으면 그 타입이고, 둘 이상 남으면
+///   고를 근거가 없어 `Unknown` 이다(추측하지 않는다). null 을 받는다는 사실 자체는 [`arg_nullable`] 이 진다.
+fn arg_kind(schema: &serde_json::Value) -> ArgKind {
+    if let Some(variants) = schema.get("enum").and_then(|e| e.as_array()) {
+        let vocab: Vec<String> = variants
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect();
+        if !vocab.is_empty() {
+            return ArgKind::Enum(vocab);
+        }
+    }
+    if let Some(branches) = schema.get("anyOf").and_then(|a| a.as_array()) {
+        let mut kinds: Vec<ArgKind> = branches
+            .iter()
+            .filter(|b| type_names(b) != vec!["null"])
+            .map(arg_kind)
+            .collect();
+        return if kinds.len() == 1 {
+            kinds.remove(0)
+        } else {
+            ArgKind::Unknown
+        };
+    }
+    let named: Vec<&str> = type_names(schema)
+        .into_iter()
+        .filter(|t| *t != "null")
+        .collect();
+    match named.as_slice() {
+        ["string"] => ArgKind::Str,
+        ["integer"] => ArgKind::Int,
+        ["number"] => ArgKind::Num,
+        ["boolean"] => ArgKind::Bool,
+        ["array"] => ArgKind::Json("array"),
+        ["object"] => ArgKind::Json("object"),
+        _ => ArgKind::Unknown,
+    }
+}
+
+/// 타입 한 칸의 표기. `null_spelling` = 그 자리에서 null 을 **뭐라고 부르는가** — 입력은 셸에서 치는 낱말
+/// ([`NULL_WORD`]), 출력은 payload 에 실제로 실리는 값(`null`)이라 부르는 이름이 다르다. `None` = 안 붙인다.
+fn type_label(kind: &ArgKind, null_spelling: Option<&str>) -> String {
+    let base = match kind {
+        ArgKind::Str => "string".to_string(),
+        ArgKind::Int => "integer".to_string(),
+        ArgKind::Num => "number".to_string(),
+        ArgKind::Bool => "true|false".to_string(),
+        ArgKind::Enum(vocab) => vocab
+            .iter()
+            .map(|v| caller_text(v, LABEL_CHARS))
+            .collect::<Vec<_>>()
+            .join("|"),
+        ArgKind::Json(what) => format!("JSON {what}"),
+        ArgKind::Unknown => "value".to_string(),
+    };
+    match null_spelling {
+        // 어휘가 그 낱말을 이미 담고 있으면 두 번 적지 않는다(`none|wide|none` 이 났다). 그 겹침 자체는
+        //   스키마가 만든 것이라 여기서 풀 수 없다 — 적어도 화면이 같은 낱말을 두 번 말하지는 않게 한다.
+        Some(word) if !base.split('|').any(|part| part == word) => format!("{base}|{word}"),
+        _ => base,
+    }
+}
+
+/// 스키마의 `properties`/`required` → 선언 목록.
+///
+/// ★필수를 먼저, 각 무리 안은 이름순★: 이 순서가 화면의 읽는 순서이자 반려 문구의 나열 순서다(정렬은
+///   `serde_json` 의 객체가 이미 이름순이라 결정적이다). 선언 순서를 되살릴 재료는 스키마에 없다.
+fn declared_args(args_schema: &serde_json::Value) -> Vec<DeclaredArg> {
+    let Some(props) = args_schema.get("properties").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let required = required_keys(args_schema);
+    let mut out: Vec<DeclaredArg> = props
+        .iter()
+        .map(|(name, schema)| DeclaredArg {
+            name: name.clone(),
+            kind: arg_kind(schema),
+            nullable: arg_nullable(schema),
+            required: required.contains(name),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.required
+            .cmp(&a.required)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+/// `None` = 주인이 기계가 읽을 스키마를 내지 않았다.
+///
+/// ★그때는 막지 않고 **문자열 그대로** 보낸다★: 선언이 없으니 타입을 지어낼 수 없고, 모르는 플래그를
+///   가려낼 목록도 없다. 판정은 그 명령의 주인이 한다 — 여기서 거절하면 스키마를 안 내는 주인의 명령은
+///   이 CLI 로 영영 못 부른다.
+fn declared_args_of(blob: &serde_json::Value) -> Option<Vec<DeclaredArg>> {
+    let args = blob.get("args")?;
+    args.is_object().then(|| declared_args(args))
+}
+
+/// argv 잔여 + 선언 → 요청 `args` 객체.
+///
+/// ★모르는 플래그는 **왕복 없이** 끝난다★: 데몬도 같은 판정을 하지만, 그 왕복은 호출자에게 아무것도 더
+///   주지 않으면서 부작용 있는 입구를 한 번 더 두드린다. 문구에 선언된 칸 전량을 실어 호출자가 그 자리에서
+///   고치게 한다.
+/// ★불리언 칸만 값 없이 설 수 있다★: 뒤에 값이 안 오거나 다음 토큰이 플래그면 `true` 다. 나머지 타입은
+///   반드시 값을 받는다 — 그래야 `--name --parent x` 가 이름을 `--parent` 로 삼키지 않는다.
+/// ★같은 플래그를 두 번 주면 반려한다★: 나중 값이 앞 값을 조용히 덮으면 argv 를 이어 붙여 명령을 고쳐 쓰는
+///   호출자(LLM 이 흔히 그렇게 한다)가 그 유실을 볼 방법이 없다(`take_once` 와 같은 판단).
+fn bind_invoke_args(
+    command: &str,
+    declared: Option<&[DeclaredArg]>,
+    tokens: &[String],
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut out = serde_json::Map::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let Some(key) = tokens[i].strip_prefix("--") else {
+            return Err(format!(
+                "`{}` is not an argument of {command} — arguments are named (`--<argument> <value>`); run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {command}` for the list",
+                tokens[i]
+            ));
+        };
+        // ★`=` 표기는 이 CLI 의 것이 아니다★: 삼키면 `index=3` 이라는 **이름의 인자**가 만들어져 나가고,
+        //   스키마가 없는 경로에서는 그대로 데몬까지 가서 영문 모를 반려가 된다.
+        if let Some((head, value)) = key.split_once('=') {
+            return Err(format!(
+                "`--{key}` is not how this CLI takes a value — write `--{head} {value}` with a space; run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {command}` for this command's arguments"
+            ));
+        }
+        let arg = match declared {
+            Some(all) => Some(
+                all.iter()
+                    .find(|d| d.name == key)
+                    .ok_or_else(|| unknown_argument(command, key, all))?,
+            ),
+            None => None,
+        };
+        if out.contains_key(key) {
+            return Err(format!(
+                "--{key} was given more than once — pass it once (the later value would silently replace the earlier one); run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {command}` for this command's arguments"
+            ));
+        }
+        let kind = arg.map(|a| &a.kind).unwrap_or(&ArgKind::Str);
+        let takes_null_word = arg.is_some_and(|a| a.takes_null_word());
+        let next = tokens.get(i + 1);
+        let bare_boolean =
+            *kind == ArgKind::Bool && next.is_none_or(|n| looks_like_flag(declared, n));
+        let value = if bare_boolean {
+            serde_json::Value::Bool(true)
+        } else {
+            let raw = next.ok_or_else(|| {
+                format!(
+                    "--{key} requires a value — run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {command}` for this command's arguments"
+                )
+            })?;
+            if looks_like_flag(declared, raw) {
+                return Err(format!(
+                    "--{key} has no value — the next argument looks like another flag ({raw}); give --{key} its value, or drop it"
+                ));
+            }
+            i += 1;
+            coerce_arg(command, key, kind, takes_null_word, raw)?
+        };
+        out.insert(key.to_string(), value);
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// 값 자리에 온 토큰이 **값이 아니라 다음 플래그**인가.
+///
+/// ★기준이 선언 유무로 갈리는 것은 의도다★
+///   - 선언이 있으면 **아는 칸인지**로 본다: 값은 임의 텍스트라 `--name -weird` 나
+///     `--name --something-nobody-declared` 는 그대로 실려야 한다(옛 계열 `take_once` 와 같은 규율).
+///   - 선언이 없으면 그 목록이 없으므로 `--` 로 시작하는 것을 전부 플래그로 본다. 그렇게 생긴 **값**은
+///     못 보내게 되지만, 반대로 두면 `--pinned --title` 이 `{"pinned":"--title"}` 로 나가고 `--title` 이
+///     **무신호로** 사라진다 — 유실보다 반려가 낫다는 이 파일의 기조 그대로다.
+/// ★그래서 선언 없는 경로에는 **맨 불리언 플래그가 없다**★(문서화된 한계): 타입을 모르니 값 없는 플래그를
+///   `true` 로 읽으면 그게 곧 추측이다. 그 자리는 "값이 없다" 는 반려로 끝나고, 값은 `--flag true` 로 준다.
+fn looks_like_flag(declared: Option<&[DeclaredArg]>, token: &str) -> bool {
+    match declared {
+        Some(all) => token
+            .strip_prefix("--")
+            .is_some_and(|name| all.iter().any(|d| d.name == name)),
+        None => token.starts_with("--"),
+    }
+}
+
+fn unknown_argument(command: &str, key: &str, declared: &[DeclaredArg]) -> String {
+    let names: Vec<String> = declared
+        .iter()
+        .map(|d| format!("--{}", caller_text(&d.name, NAME_CHARS)))
+        .collect();
+    let list = if names.is_empty() {
+        "none — this command takes no arguments".to_string()
+    } else {
+        names.join(", ")
+    };
+    format!(
+        "--{key} is not an argument of {command} — declared arguments: {list}; run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {command}` for their types"
+    )
+}
+
+/// 셸에서 온 문자열 → 선언된 타입의 JSON 값.
+///
+/// ★못 옮기면 **보내지 않는다**★: 그대로 실어 보내면 데몬이 같은 사유로 반려하지만, 그 왕복은 부작용 있는
+///   입구를 한 번 더 두드리면서 호출자에게 더 주는 것이 없다.
+/// ★[`NULL_WORD`] 가 특별한 칸은 좁다★: 판정은 [`DeclaredArg::takes_null_word`] 가 하고(필수 + nullable),
+///   그 doc 이 왜 그렇게 좁은지의 정본이다. 이 자리가 없으면 `agent.move --parent none` 이 문자열로 나가
+///   NOT_FOUND 가 되거나 하필 그 이름의 에이전트 밑으로 들어간다 — 부모를 떼는 형태가 이 표면에서 사라진다.
+fn coerce_arg(
+    command: &str,
+    key: &str,
+    kind: &ArgKind,
+    takes_null_word: bool,
+    raw: &str,
+) -> Result<serde_json::Value, String> {
+    let wrong = |want: &str| {
+        format!(
+            "--{key} of {command} is declared {want} but got `{raw}`; run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS} {command}` for this command's argument types"
+        )
+    };
+    if takes_null_word && raw.trim() == NULL_WORD {
+        return Ok(serde_json::Value::Null);
+    }
+    Ok(match kind {
+        // 어휘 검증은 데몬 몫 — 여기서는 타입만 옮긴다.
+        ArgKind::Str | ArgKind::Enum(_) | ArgKind::Unknown => {
+            serde_json::Value::String(raw.to_string())
+        }
+        ArgKind::Int => {
+            serde_json::Value::from(raw.trim().parse::<i64>().map_err(|_| wrong("an integer"))?)
+        }
+        ArgKind::Num => {
+            let n: f64 = raw.trim().parse().map_err(|_| wrong("a number"))?;
+            // 무한대·NaN 은 JSON 에 실을 수 없다 — `Value::from(f64)` 는 그것을 조용히 null 로 만든다.
+            serde_json::Number::from_f64(n)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| wrong("a finite number"))?
+        }
+        ArgKind::Bool => match raw.trim() {
+            "true" => serde_json::Value::Bool(true),
+            "false" => serde_json::Value::Bool(false),
+            _ => return Err(wrong("true or false")),
+        },
+        ArgKind::Json(what) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(raw).map_err(|_| wrong(&format!("a JSON {what}")))?;
+            let matches = match *what {
+                "array" => parsed.is_array(),
+                _ => parsed.is_object(),
+            };
+            if !matches {
+                return Err(wrong(&format!("a JSON {what}")));
+            }
+            parsed
+        }
+    })
+}
+
+/// 스키마 없는 명령의 원문을 낼 때 다는 인용 표식.
+///
+/// ★원문을 맨몸으로 찍지 않는 이유★: 그 텍스트는 남의 것이고, 안에 우리 구획 제목(`Arguments — …`)을 그대로
+///   적어 두면 **없는 인자 목록이 선언된 것처럼 보인다**. 모든 줄이 이 표식을 달면 어디까지가 인용인지가
+///   화면에 남는다.
+const VERBATIM_QUOTE: &str = "  | ";
+/// 인용으로 낼 최대 줄 수·줄 길이 — 목록 상한(4 KiB)이 화면을 통째로 덮는 것을 막는다.
+const VERBATIM_LINES: usize = 40;
+const VERBATIM_LINE_CHARS: usize = 160;
+
+/// `engram commands <name>` 화면.
+///
+/// ★이 화면의 거의 전부가 **남이 정한 텍스트**다★ — 이름·요약·effect·인자 이름·타입 어휘·반환 칸 이름·오류
+///   코드까지. 화면 구조(구획 제목·정렬)는 우리가 만들고, 그 안에 들어가는 조각은 전부 [`caller_text`] 를
+///   지난다. 한 자리라도 빠지면 그 자리로 가짜 구획이 들어온다.
+/// ★스키마를 못 읽으면 **가진 것을 인용해서** 낸다★: 주인이 정한 모양이라 우리가 다시 쓸 수 없고, 그
+///   텍스트가 그 명령에 대해 존재하는 전부다.
+fn render_catalog_detail(entry: &CatalogEntry) -> String {
+    let mut out = String::new();
+    let name = caller_text(&entry.name, NAME_CHARS);
+    let Some(blob) = parse_help_blob(&entry.help) else {
+        out.push_str(&format!("{name}\n"));
+        push_reachability(&mut out, entry);
+        out.push_str(
+            "\nIts owner published no machine-readable schema, so this is what it did publish, verbatim:\n\n",
+        );
+        push_verbatim(&mut out, &entry.help);
+        return out;
+    };
+    match blob.get("summary").and_then(|s| s.as_str()) {
+        Some(summary) if !summary.trim().is_empty() => out.push_str(&format!(
+            "{name} — {}\n",
+            caller_text(summary, DETAIL_TEXT_CHARS)
+        )),
+        _ => out.push_str(&format!("{name}\n")),
+    }
+    let effect = blob.get("effect").and_then(|e| e.as_str());
+    let since = blob.get("since").and_then(|s| s.as_u64());
+    if effect.is_some() || since.is_some() {
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(e) = effect {
+            facts.push(format!("effect: {}", caller_text(e, LABEL_CHARS)));
+        }
+        if let Some(s) = since {
+            facts.push(format!("since: {s}"));
+        }
+        out.push_str(&format!("{}\n", facts.join(" · ")));
+    }
+    push_reachability(&mut out, entry);
+
+    out.push_str(&format!(
+        "\nArguments — `{CLI_EXE_NAME} {name} --<argument> <value>`:\n"
+    ));
+    match blob.get("args").filter(|a| a.is_object()) {
+        None => out.push_str("  (this command declares no argument schema)\n"),
+        Some(args) => {
+            let declared = declared_args(args);
+            if declared.is_empty() {
+                out.push_str("  (none)\n");
+            } else {
+                let heads: Vec<String> = declared
+                    .iter()
+                    .map(|d| {
+                        format!(
+                            "--{} <{}>",
+                            caller_text(&d.name, NAME_CHARS),
+                            // 입력 자리의 null 은 셸에서 치는 낱말로 부른다 — 그것이 실제로 칠 것이다.
+                            type_label(&d.kind, d.takes_null_word().then_some(NULL_WORD))
+                        )
+                    })
+                    .collect();
+                let width = heads
+                    .iter()
+                    .map(|h| h.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(44);
+                for (head, arg) in heads.iter().zip(&declared) {
+                    let pad = width.saturating_sub(head.chars().count());
+                    let need = if arg.required { "required" } else { "optional" };
+                    out.push_str(&format!("  {head}{:pad$}  {need}\n", "", pad = pad));
+                }
+            }
+        }
+    }
+
+    push_returns(&mut out, blob.get("ok"));
+
+    let errors: Vec<String> = blob
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .map(|e| {
+            e.iter()
+                .filter_map(|c| c.as_str())
+                .map(|c| caller_text(c, LABEL_CHARS))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !errors.is_empty() {
+        out.push_str(&format!("\nError codes: {}\n", errors.join(", ")));
+    }
+    out
+}
+
+/// 반환 구획 — ★읽은 것만 말한다★.
+///
+/// 예전엔 무조건 "a flat JSON object" 라고 적고 그 아래에 칸을 늘어놓았다. `ok` 가 배열이거나 아예 없으면
+/// 그 문장은 거짓이고, 그 상태에서 판정기([`exit_code_for_call_response`])는 화면과 다른 말을 하게 된다.
+fn push_returns(out: &mut String, ok: Option<&serde_json::Value>) {
+    let Some(ok) = ok else {
+        out.push_str("\nReturns:\n  (this command declares no return shape)\n");
+        return;
+    };
+    let props = ok.get("properties").and_then(|p| p.as_object());
+    if props.is_none() && !type_names(ok).contains(&"object") {
+        out.push_str(&format!(
+            "\nReturns — {} on stdout.\n",
+            type_label(&arg_kind(ok), None)
+        ));
+        return;
+    }
+    out.push_str("\nReturns — a flat JSON object on stdout:\n");
+    match props {
+        Some(props) if !props.is_empty() => {
+            let names: Vec<String> = props.keys().map(|k| caller_text(k, NAME_CHARS)).collect();
+            let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+            for (name, (_, schema)) in names.iter().zip(props) {
+                let pad = width.saturating_sub(name.chars().count());
+                out.push_str(&format!(
+                    "  {name}{:pad$}  {}\n",
+                    "",
+                    // 반환 자리의 null 은 payload 에 실제로 실리는 값이라 JSON 의 낱말로 부른다.
+                    type_label(&arg_kind(schema), arg_nullable(schema).then_some("null")),
+                    pad = pad
+                ));
+            }
+        }
+        _ => out.push_str("  (no fields declared)\n"),
+    }
+}
+
+fn push_verbatim(out: &mut String, help: &str) {
+    let mut shown = 0;
+    for line in help.lines() {
+        if shown == VERBATIM_LINES {
+            out.push_str(&format!("{VERBATIM_QUOTE}… (truncated)\n"));
+            return;
+        }
+        out.push_str(&format!(
+            "{VERBATIM_QUOTE}{}\n",
+            caller_text(line, VERBATIM_LINE_CHARS)
+        ));
+        shown += 1;
+    }
+    if shown == 0 {
+        out.push_str(&format!("{VERBATIM_QUOTE}(it published nothing at all)\n"));
+    }
+}
+
+/// 부를 수 없는 이름이면 그 사실을 상세 화면 머리에 붙인다 — 목록에서 구획으로 본 것과 같은 사실이다.
+fn push_reachability(out: &mut String, entry: &CatalogEntry) {
+    if !entry.callable {
+        out.push_str(BLOCKED_DETAIL);
+    }
 }
 
 /// (Debug = 단위 테스트에서 expect_err 시 Ok 쪽 표시용.)
@@ -3204,5 +4375,907 @@ mod tests {
             exit_code_for_query_response(200, r#"{"status":"ok","rows":[]}"#),
             0
         );
+    }
+
+    // ── ADR-0155/0156: 발견과 전체 이름 호출 ──────────────────────────────────────────
+
+    fn entry(name: &str, help: &str, callable: bool) -> CatalogEntry {
+        CatalogEntry {
+            name: name.to_string(),
+            help: help.to_string(),
+            callable,
+        }
+    }
+
+    /// 데몬 자기 표가 내는 것과 같은 모양의 스키마 항목.
+    fn blob(name: &str, summary: &str, args: serde_json::Value) -> String {
+        serde_json::json!({
+            "name": name,
+            "effect": "Write",
+            "since": 1,
+            "summary": summary,
+            "args": args,
+            "ok": { "type": "object", "properties": { "agent_id": { "type": "string" } }, "required": ["agent_id"] },
+            "errors": ["NOT_FOUND", "INVALID_ARGUMENT", "INTERNAL"],
+        })
+        .to_string()
+    }
+
+    fn slot_args() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "index": { "type": "integer" },
+                "sticky": { "type": "boolean" },
+                "name": { "type": "string" },
+                "ratio": { "type": "number" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "mode": { "anyOf": [{ "enum": ["wide", "tall"] }, { "type": "null" }] },
+                "cwd": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+            },
+            "required": ["index", "name"]
+        })
+    }
+
+    fn slot_declared() -> Vec<DeclaredArg> {
+        declared_args(&slot_args())
+    }
+
+    /// 실물 `agent.move` 와 같은 모양 — nullable 이면서 **필수**인 칸이 있는 유일한 형태다.
+    fn move_args() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "target": { "type": "string" },
+                "parent": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+            },
+            "required": ["target", "parent"]
+        })
+    }
+
+    fn bind(tokens: &[&str]) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        let declared = slot_declared();
+        let tokens: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+        bind_invoke_args("slot.assign", Some(&declared), &tokens)
+    }
+
+    /// ★첫 토큰의 점 하나가 디스패치를 가른다★ — 계열은 그대로 계열로, 이름은 호출로 간다.
+    #[test]
+    fn a_first_token_with_a_dot_is_a_call_and_the_old_groups_are_untouched() {
+        match parse_command(&argv(&["agent.list"])).expect("호출") {
+            ParsedCommand::Invoke(i) => {
+                assert_eq!(i.name, "agent.list");
+                assert!(i.tokens.is_empty());
+            }
+            other => panic!("호출이어야: {other:?}"),
+        }
+        match parse_command(&argv(&["agent", "list"])).expect("계열") {
+            ParsedCommand::Agent(a) => assert_eq!(a, ParsedAgent::List),
+            other => panic!("제어 계열이어야: {other:?}"),
+        }
+        match parse_command(&argv(&[CLI_VERB_COMMANDS])).expect("발견") {
+            ParsedCommand::Catalog(c) => assert_eq!(c, ParsedCatalog::List),
+            other => panic!("발견이어야: {other:?}"),
+        }
+        match parse_command(&argv(&[CLI_VERB_COMMANDS, "agent.new"])).expect("상세") {
+            ParsedCommand::Catalog(c) => assert_eq!(
+                c,
+                ParsedCatalog::Detail {
+                    name: "agent.new".to_string()
+                }
+            ),
+            other => panic!("상세여야: {other:?}"),
+        }
+        // 점 없는 모르는 토큰은 그대로 "모르는 계열" 이다 — 호출로 흘려 보내면 발견 왕복을 한 번 낭비한다.
+        assert!(parse_command(&argv(&["wat"])).is_err());
+        // 플래그 검사가 이름 검사보다 앞이라 점 달린 오타 플래그도 인자 오류다.
+        assert!(parse_command(&argv(&["--nope.nope"])).is_err());
+        // 이 형태는 위치 인자를 받지 않는다.
+        assert!(parse_command(&argv(&["agent.list", "oops"])).is_err());
+    }
+
+    #[test]
+    fn the_catalog_verb_takes_at_most_one_name_and_never_a_flag() {
+        assert!(parse_catalog(&argv(&["a.b", "c.d"])).is_err());
+        for token in ["--help", "-h", "--json"] {
+            assert!(
+                parse_catalog(&argv(&[token])).is_err(),
+                "값 자리의 플래그는 이름이 아니다: {token}"
+            );
+        }
+    }
+
+    /// ★스키마가 타입을 정한다 — 값의 생김새가 아니다★. `--name 123` 이 문자열로 남는 것이 이 규칙의 시금석.
+    #[test]
+    fn values_are_coerced_to_the_declared_type_not_the_shape_they_look_like() {
+        let args = bind(&[
+            "--index", "3", "--name", "123", "--ratio", "0.5", "--sticky", "--tags", "[\"a\"]",
+            "--mode", "wide",
+        ])
+        .expect("bind");
+        assert_eq!(args["index"], serde_json::json!(3));
+        assert_eq!(
+            args["name"],
+            serde_json::json!("123"),
+            "문자열 칸은 숫자처럼 생겨도 문자열이다"
+        );
+        assert_eq!(args["ratio"], serde_json::json!(0.5));
+        assert_eq!(args["sticky"], serde_json::json!(true));
+        assert_eq!(args["tags"], serde_json::json!(["a"]));
+        assert_eq!(
+            args["mode"],
+            serde_json::json!("wide"),
+            "어휘 검증은 데몬 몫 — 값은 문자열로 그대로 간다"
+        );
+    }
+
+    #[test]
+    fn a_value_that_does_not_fit_its_declared_type_is_refused_here() {
+        for tokens in [
+            vec!["--index", "three"],
+            vec!["--index", "1", "--ratio", "big"],
+            vec!["--index", "1", "--ratio", "inf"],
+            vec!["--index", "1", "--sticky", "yes"],
+            vec!["--index", "1", "--tags", "a,b"],
+            // 배열 칸에 객체를 주는 것도 타입이 어긋난 것이다(JSON 으로 파싱은 된다).
+            vec!["--index", "1", "--tags", "{\"a\":1}"],
+        ] {
+            assert!(bind(&tokens).is_err(), "{tokens:?}");
+        }
+        // 어휘 밖 값은 **여기서** 막지 않는다 — 데몬이 어휘를 넓힌 날 옛 CLI 가 멀쩡한 값을 막으면 안 된다.
+        assert!(bind(&["--index", "1", "--mode", "diagonal"]).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_argument_is_refused_with_the_declared_list() {
+        let err = bind(&["--nope", "x"]).expect_err("모르는 칸");
+        for declared in [
+            "--index", "--name", "--sticky", "--ratio", "--tags", "--mode",
+        ] {
+            assert!(err.contains(declared), "선언된 칸 전량이 실려야: {err}");
+        }
+        assert!(err.contains(CLI_VERB_COMMANDS), "복구 경로: {err}");
+
+        // 인자가 하나도 없는 명령에서도 문구가 성립해야 한다(빈 목록을 그대로 나열하면 문장이 끊긴다).
+        let none: Vec<DeclaredArg> = Vec::new();
+        let err = bind_invoke_args("agent.list", Some(&none), &argv(&["--nope"]))
+            .expect_err("인자 없는 명령");
+        assert!(err.contains("no arguments"), "{err}");
+    }
+
+    /// ★값 자리 방어는 옛 계열과 같은 규율★: 판정 기준은 `-` 로 시작하는지가 아니라 **선언된 칸인지**다.
+    #[test]
+    fn a_missing_value_is_told_apart_from_a_value_that_merely_looks_like_a_flag() {
+        let err = bind(&["--index", "--name", "x"]).expect_err("값을 빠뜨린 플래그");
+        assert!(err.contains("has no value"), "{err}");
+        assert!(bind(&["--index"])
+            .expect_err("끝에서 값 누락")
+            .contains("requires a value"));
+
+        let args = bind(&["--index", "1", "--name", "--weird"]).expect("임의 텍스트는 값이다");
+        assert_eq!(args["name"], serde_json::json!("--weird"));
+    }
+
+    #[test]
+    fn a_repeated_argument_is_refused_instead_of_silently_replacing() {
+        let err = bind(&["--index", "1", "--index", "2"]).expect_err("중복");
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    /// 불리언 칸만 값 없이 설 수 있고, 그때도 **다음 플래그를 삼키지 않는다**.
+    #[test]
+    fn a_boolean_argument_stands_alone_without_eating_the_next_flag() {
+        let args = bind(&["--sticky", "--index", "1"]).expect("bind");
+        assert_eq!(args["sticky"], serde_json::json!(true));
+        assert_eq!(args["index"], serde_json::json!(1));
+        // 명시 값도 그대로 받는다.
+        assert_eq!(
+            bind(&["--sticky", "false"]).expect("bind")["sticky"],
+            serde_json::json!(false)
+        );
+    }
+
+    /// 스키마를 못 읽는 명령도 **부를 수는 있다** — 판정은 그 주인이 한다.
+    #[test]
+    fn a_command_without_a_readable_schema_still_sends_its_values_verbatim() {
+        let free = entry("tab.create", "opens a tab", false);
+        assert!(
+            parse_help_blob(&free.help).is_none(),
+            "블롭이 JSON 이 아니다"
+        );
+        let args = bind_invoke_args("tab.create", None, &argv(&["--title", "x", "--n", "7"]))
+            .expect("bind");
+        assert_eq!(args["title"], serde_json::json!("x"));
+        assert_eq!(
+            args["n"],
+            serde_json::json!("7"),
+            "선언이 없으면 추측하지 않는다 — 문자열 그대로"
+        );
+    }
+
+    #[test]
+    fn required_arguments_are_listed_before_the_optional_ones() {
+        let declared = slot_declared();
+        let names: Vec<&str> = declared.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names[0], "index");
+        assert_eq!(names[1], "name");
+        assert!(declared[0].required && declared[1].required);
+        assert!(declared[2..].iter().all(|d| !d.required));
+    }
+
+    #[test]
+    fn a_nullable_declaration_keeps_the_type_underneath_the_null() {
+        let declared = slot_declared();
+        let kind = |name: &str| {
+            declared
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.kind.clone())
+                .expect(name)
+        };
+        assert_eq!(kind("cwd"), ArgKind::Str);
+        assert_eq!(
+            kind("mode"),
+            ArgKind::Enum(vec!["wide".to_string(), "tall".to_string()])
+        );
+        // 고를 근거가 없는 합집합은 추측하지 않는다.
+        assert_eq!(
+            arg_kind(&serde_json::json!({ "anyOf": [{"type":"string"},{"type":"integer"}] })),
+            ArgKind::Unknown
+        );
+    }
+
+    /// ★못 읽는 블롭 하나가 목록을 가라앉히지 않는다★ — 그 줄은 이름을 남기고, 남길 수 있는 만큼을 요약한다.
+    #[test]
+    fn the_listing_survives_a_help_blob_it_cannot_read() {
+        let entries = vec![
+            entry(
+                "agent.list",
+                &blob("agent.list", "every agent", serde_json::json!({})),
+                true,
+            ),
+            entry("weird.one", "not json at all {[(", true),
+            entry("empty.one", "", true),
+            entry("json.but.not.ours", r#"{"whatever":1}"#, true),
+        ];
+        let rendered = render_catalog_list(&entries);
+        for name in ["agent.list", "weird.one", "empty.one", "json.but.not.ours"] {
+            assert!(rendered.contains(name), "{name} 이 목록에: {rendered}");
+        }
+        assert!(rendered.contains("every agent"), "{rendered}");
+        assert!(rendered.contains("not json at all"), "{rendered}");
+        assert!(
+            !rendered.contains("whatever"),
+            "우리 스키마가 아닌 JSON 을 요약 자리에 흘리지 않는다: {rendered}"
+        );
+    }
+
+    /// 한 명령 = 한 줄. 줄바꿈이 섞인 요약이 목록의 정렬을 깨면 이름을 고르려고 훑는 쪽이 못 읽는다.
+    #[test]
+    fn one_command_is_one_line_however_long_its_summary_is() {
+        let long = "x".repeat(4000);
+        let entries = vec![
+            entry(
+                "a.b",
+                &blob(
+                    "a.b",
+                    &format!("first\nsecond {long}"),
+                    serde_json::json!({}),
+                ),
+                true,
+            ),
+            entry("c.d", "line one\nline two", true),
+        ];
+        let rendered = render_catalog_list(&entries);
+        for name in ["a.b", "c.d"] {
+            let rows: Vec<&str> = rendered
+                .lines()
+                .filter(|l| l.trim_start().starts_with(name))
+                .collect();
+            assert_eq!(rows.len(), 1, "{name}: {rendered}");
+            assert!(rows[0].chars().count() < 200, "{}", rows[0]);
+        }
+        assert!(!rendered.contains("line two"), "{rendered}");
+    }
+
+    /// ★도달 못 하는 이름을 빼지도, 섞지도 않는다★: 빼면 발견이 "있다" 를 말하지 않게 되고, 섞으면 하나
+    ///   부르기 전까지 그 사실을 모른다.
+    #[test]
+    fn names_this_entrance_cannot_run_are_listed_and_marked() {
+        let entries = vec![
+            entry(
+                "agent.list",
+                &blob("agent.list", "mine", serde_json::json!({})),
+                true,
+            ),
+            entry("tab.create", "theirs", false),
+        ];
+        let rendered = render_catalog_list(&entries);
+        assert!(rendered.contains("tab.create"), "{rendered}");
+        assert!(rendered.contains(BLOCKED_NOTICE), "{rendered}");
+        let marker = rendered.find(BLOCKED_NOTICE).expect("구획");
+        assert!(
+            rendered.find("agent.list").expect("mine") < marker,
+            "부를 수 있는 것이 먼저: {rendered}"
+        );
+        assert!(
+            rendered.find("tab.create").expect("theirs") > marker,
+            "부를 수 없는 것은 구획 뒤: {rendered}"
+        );
+        // 전부 부를 수 있으면 그 구획 자체가 없다.
+        let all_callable = render_catalog_list(&entries[..1]);
+        assert!(!all_callable.contains(BLOCKED_NOTICE), "{all_callable}");
+    }
+
+    #[test]
+    fn the_detail_screen_names_every_argument_its_type_and_whether_it_is_required() {
+        let e = entry(
+            "slot.assign",
+            &blob("slot.assign", "put an agent in a slot", slot_args()),
+            true,
+        );
+        let rendered = render_catalog_detail(&e);
+        for token in [
+            "slot.assign",
+            "put an agent in a slot",
+            "effect: Write",
+            "since: 1",
+            "--index <integer>",
+            "--name <string>",
+            "--sticky <true|false>",
+            "--ratio <number>",
+            "--tags <JSON array>",
+            // 옵션 칸이므로 null 표기가 붙지 않는다(그 판정 = `takes_null_word`).
+            "--mode <wide|tall>",
+            "--cwd <string>",
+            "required",
+            "optional",
+            "agent_id",
+            "NOT_FOUND",
+            "INVALID_ARGUMENT",
+        ] {
+            assert!(rendered.contains(token), "{token} 이 상세에: {rendered}");
+        }
+    }
+
+    #[test]
+    fn the_detail_screen_falls_back_to_the_raw_blob_when_it_cannot_read_it() {
+        let e = entry("tab.create", "opens a tab in the dashboard", false);
+        let rendered = render_catalog_detail(&e);
+        assert!(rendered.contains("tab.create"), "{rendered}");
+        assert!(
+            rendered.contains("opens a tab in the dashboard"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(BLOCKED_DETAIL),
+            "부를 수 없다는 사실이 상세에도: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_command_with_no_arguments_says_so_instead_of_leaving_the_section_empty() {
+        let e = entry(
+            "agent.list",
+            &blob(
+                "agent.list",
+                "every agent",
+                serde_json::json!({ "type": "object", "properties": {}, "required": [] }),
+            ),
+            true,
+        );
+        let rendered = render_catalog_detail(&e);
+        assert!(rendered.contains("(none)"), "{rendered}");
+    }
+
+    /// ★정적 help 는 데몬을 부르지 않는다 — 가리키기만 한다★. 그 한 줄이 실제 동사 철자와 갈리면 배운 대로
+    ///   친 호출자가 "모르는 계열" 을 받는다.
+    #[test]
+    fn the_static_help_points_at_the_catalog_verb_by_its_real_spelling() {
+        for surface in [MailSurface::Shown, MailSurface::Hidden] {
+            let root = render_help(HelpTopic::Root, surface);
+            assert!(
+                root.contains(&format!("{CLI_EXE_NAME} {CLI_VERB_COMMANDS}")),
+                "{surface:?}: {root}"
+            );
+        }
+        // 감춘 계열이 새 안내 줄을 타고 되살아나면 안 된다.
+        let hidden = render_help(HelpTopic::Root, MailSurface::Hidden);
+        assert!(!hidden.contains(CLI_GROUP_MAIL), "{hidden}");
+    }
+
+    // ── 리뷰 A~J: 발견·호출 표면의 구멍 ────────────────────────────────────────────────
+
+    /// ★A. 발견 요청이 명령을 실행하면 안 된다★: 이 자리를 열어 두면 `help` 라는 이름의 불리언 인자를 가진
+    ///   명령에서 `--help` 가 `{"help":true}` 로 실려 **Write 가 돈다**. help 토큰은 이 바이너리의 다른 모든
+    ///   키워드 자리에서 존중되므로 여기서도 존중하고, 이미 받아 둔 표로 상세 화면을 낸다.
+    #[test]
+    fn a_help_token_after_a_full_name_is_the_detail_screen_not_a_call() {
+        for token in ["--help", "-h", HELP_VERB] {
+            match parse_command(&argv(&["agent.list", token]))
+                .unwrap_or_else(|e| panic!("{token}: {e}"))
+            {
+                ParsedCommand::Catalog(ParsedCatalog::Detail { name }) => {
+                    assert_eq!(name, "agent.list", "{token}")
+                }
+                other => panic!("상세 화면이어야({token}): {other:?}"),
+            }
+        }
+        // help 는 단독 호출일 때만 help 다 — 이 규칙이 계열 자리와 갈리면 안 된다(ADR-0132 조각 ①).
+        for args in [
+            vec!["agent.list", "--help", "--cwd", "x"],
+            vec!["agent.list", "-h", "extra"],
+        ] {
+            assert!(parse_command(&argv(&args)).is_err(), "{args:?}");
+        }
+    }
+
+    /// ★L. 한 칸 옆으로 밀린 help 도 인자가 아니다★: 첫 자리만 보면 `--index 1 --help` 가 바인딩으로 흘러,
+    ///   `help` 라는 이름의 불리언 인자를 선언한 명령에서 `{"help":true}` 가 **실려 나간다**. 어느 자리든
+    ///   호출로 흐르지 않는 것이 이 테스트의 단언이고, 화면이냐 반려냐는 단독 여부가 정한다.
+    #[test]
+    fn a_help_token_anywhere_in_an_invocation_never_becomes_an_argument() {
+        for args in [
+            vec!["slot.assign", "--index", "1", "--help"],
+            vec!["slot.assign", "--index", "1", "-h"],
+            vec!["slot.assign", "--help", "--index", "1"],
+            vec!["slot.assign", "--sticky", "--help"],
+        ] {
+            match parse_command(&argv(&args)) {
+                Err(e) => assert!(
+                    e.contains(CLI_VERB_COMMANDS),
+                    "복구 경로를 안내해야({args:?}): {e}"
+                ),
+                Ok(ParsedCommand::Catalog(_)) => {}
+                Ok(other) => panic!("호출로 흘렀다({args:?}): {other:?}"),
+            }
+        }
+        // ★맨낱말 `help` 는 값 자리에서 평범한 값이다★: 가로채면 이름이 조용히 화면으로 바뀐다.
+        let declared = slot_declared();
+        let args = bind_invoke_args(
+            "slot.assign",
+            Some(&declared),
+            &argv(&["--index", "1", "--name", HELP_VERB]),
+        )
+        .expect("bind");
+        assert_eq!(args["name"], serde_json::json!(HELP_VERB));
+        match parse_command(&argv(&["slot.assign", "--name", HELP_VERB])).expect("호출") {
+            ParsedCommand::Invoke(i) => assert_eq!(i.tokens.len(), 2, "{i:?}"),
+            other => panic!("호출이어야: {other:?}"),
+        }
+    }
+
+    /// ★B. 부모를 떼는 형태가 새 표면에서 사라졌다★: `agent.move` 의 `parent` 는 nullable 이면서 필수다.
+    ///   null 을 실을 방법이 없으면 `--parent none` 이 문자열 `"none"` 으로 나가 NOT_FOUND 가 되거나,
+    ///   하필 `none` 이라는 이름의 에이전트 밑으로 들어간다. 낱말은 옛 계열과 **같은 상수**를 쓴다.
+    #[test]
+    fn a_required_nullable_argument_takes_the_same_detach_word_as_the_legacy_group() {
+        let declared = declared_args(&move_args());
+        let tokens = argv(&["--target", "qa", "--parent", NULL_WORD]);
+        let args = bind_invoke_args("agent.move", Some(&declared), &tokens).expect("bind");
+        assert_eq!(
+            args["parent"],
+            serde_json::Value::Null,
+            "필수 + nullable 칸의 `{NULL_WORD}` 은 null 이어야: {args:?}"
+        );
+        // 붙이는 쪽은 그대로 문자열이다.
+        let tokens = argv(&["--target", "qa", "--parent", "lead"]);
+        let args = bind_invoke_args("agent.move", Some(&declared), &tokens).expect("bind");
+        assert_eq!(args["parent"], serde_json::json!("lead"));
+        // nullable 이 아닌 칸에서는 그 낱말이 평범한 문자열이다 — 여기서 삼키면 이름이 사라진다.
+        let tokens = argv(&["--target", NULL_WORD, "--parent", "lead"]);
+        let args = bind_invoke_args("agent.move", Some(&declared), &tokens).expect("bind");
+        assert_eq!(args["target"], serde_json::json!(NULL_WORD));
+    }
+
+    /// ★M. 낱말이 **옵션 칸까지** 먹으면 안 된다★: 선언 매크로가 `Option<T>` 를 전부 `anyOf[T,null]` 로 내므로
+    ///   nullable 만 보면 `agent.spawn --cwd none` 이 `{"cwd":null}` 로 나가 데몬 기본 폴더에 만들어지는데,
+    ///   그 응답은 `cwd` 를 되돌려주지 않아 **다른 폴더가 쓰였다는 사실이 어디에도 안 보인다**. 옵션 칸에서
+    ///   "값 없음" 은 이미 플래그를 빼는 것으로 표현되므로 그 낱말은 문자열로 남아야 하고, 옛 계열도 그렇게 한다.
+    #[test]
+    fn the_detach_word_stays_a_plain_string_in_optional_slots() {
+        let declared = slot_declared();
+        let args = bind_invoke_args(
+            "slot.assign",
+            Some(&declared),
+            &argv(&["--index", "1", "--name", "qa", "--mode", NULL_WORD]),
+        )
+        .expect("bind");
+        assert_eq!(
+            args["mode"],
+            serde_json::json!(NULL_WORD),
+            "옵션 칸은 nullable 이어도 문자열이다: {args:?}"
+        );
+        // 판정의 정본은 이 두 축의 곱이다 — 한쪽만 보면 위 사고가 되살아난다.
+        let by_name = |n: &str| {
+            declared
+                .iter()
+                .find(|d| d.name == n)
+                .map(|d| (d.nullable, d.required, d.takes_null_word()))
+                .expect(n)
+        };
+        assert_eq!(by_name("mode"), (true, false, false), "옵션 + nullable");
+        assert_eq!(by_name("name"), (false, true, false), "필수 + 비-nullable");
+        let move_declared = declared_args(&move_args());
+        assert!(
+            move_declared
+                .iter()
+                .find(|d| d.name == "parent")
+                .expect("parent")
+                .takes_null_word(),
+            "필수 + nullable 만 그 낱말을 먹는다"
+        );
+    }
+
+    /// 화면이 그 낱말을 말하지 않으면 위 능력은 있으나 마나다 — 쓸 방법을 아는 유일한 자리다.
+    /// 반대로 낱말을 먹지 않는 칸에 그 표기를 달면 화면이 거짓을 말한다.
+    #[test]
+    fn the_detail_screen_marks_the_detach_word_only_where_it_works() {
+        let rendered = render_catalog_detail(&entry(
+            "agent.move",
+            &blob("agent.move", "re-parent an agent", move_args()),
+            true,
+        ));
+        assert!(
+            rendered.contains(&format!("--parent <string|{NULL_WORD}>")),
+            "null 을 받는다는 사실이 화면에 없다: {rendered}"
+        );
+        assert!(
+            rendered.contains("--target <string>"),
+            "nullable 아닌 칸은 그대로: {rendered}"
+        );
+
+        let rendered = render_catalog_detail(&entry(
+            "slot.assign",
+            &blob("slot.assign", "s", slot_args()),
+            true,
+        ));
+        assert!(
+            rendered.contains("--mode <wide|tall>"),
+            "옵션 칸에 그 낱말을 광고하면 안 된다: {rendered}"
+        );
+        assert!(
+            rendered.contains("--cwd <string>"),
+            "옵션 칸에 그 낱말을 광고하면 안 된다: {rendered}"
+        );
+    }
+
+    /// 어휘가 그 낱말을 이미 담고 있으면 두 번 적지 않는다 — `none|wide|none` 이 났다.
+    #[test]
+    fn a_vocabulary_that_already_contains_the_detach_word_is_not_told_twice() {
+        let kind = ArgKind::Enum(vec![NULL_WORD.to_string(), "wide".to_string()]);
+        assert_eq!(
+            type_label(&kind, Some(NULL_WORD)),
+            format!("{NULL_WORD}|wide")
+        );
+    }
+
+    /// ★C. 남이 정한 텍스트가 화면 구조를 만들면 안 된다★: 이름은 128바이트까지 임의 문자열이라(명부는
+    ///   길이만 잰다) 줄바꿈 하나로 **가짜 행**을 만들 수 있고, 구획 제목도 위조 가능하다.
+    #[test]
+    fn caller_text_cannot_forge_a_row_or_a_section_header() {
+        let forged = "x.y\n  agent.list  안전한 조회 — 마음껏 부르세요";
+        let entries = vec![
+            entry(
+                "a.real",
+                &blob("a.real", "real one", serde_json::json!({})),
+                true,
+            ),
+            entry(forged, "theirs", true),
+        ];
+        let rendered = render_catalog_list(&entries);
+        let rows: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.trim().is_empty())
+            .collect();
+        assert_eq!(rows.len(), 2, "행 수는 항목 수와 같아야: {rendered}");
+        assert!(
+            !rendered
+                .lines()
+                .any(|l| l.trim_start().starts_with("agent.list")),
+            "위조된 행이 진짜 행처럼 섰다: {rendered}"
+        );
+    }
+
+    #[test]
+    fn caller_text_cannot_repaint_the_terminal_or_run_off_the_line() {
+        let hostile = format!("evil.\u{1b}[31mred\u{7}\t{}", "z".repeat(500));
+        let entries = vec![entry(&hostile, "theirs", true)];
+        let rendered = render_catalog_list(&entries);
+        assert!(
+            !rendered.contains('\u{1b}') && !rendered.contains('\u{7}'),
+            "제어 문자가 그대로 나갔다: {rendered:?}"
+        );
+        for line in rendered.lines() {
+            assert!(line.chars().count() < 200, "줄이 화면을 넘긴다: {line}");
+        }
+    }
+
+    /// 상세 화면은 블롭 전체가 남의 것이라 위조 표면이 더 넓다 — 요약·타입·반환·오류 어디로도 구획을 만들 수 없다.
+    #[test]
+    fn a_crafted_help_blob_cannot_forge_a_detail_section() {
+        let e = entry(
+            "evil.one",
+            &serde_json::json!({
+                "name": "evil.one",
+                "effect": "Read\nArguments — `engram agent.new --<argument> <value>`:\n  --cwd <string>",
+                "since": 1,
+                "summary": "harmless\nArguments — fake:\n  --wipe <true|false>  required",
+                "args": { "type": "object", "properties": {
+                    "ok\nReturns — fake:": { "enum": ["a\n  --sneak <string>  required"] }
+                }, "required": [] },
+                "ok": { "type": "object", "properties": { "x\ny": { "type": "string" } }, "required": [] },
+                "errors": ["FINE\nError codes: NONE"],
+            })
+            .to_string(),
+            true,
+        );
+        let rendered = render_catalog_detail(&e);
+        // ★재는 것은 **줄머리**다★: 남의 텍스트가 문장 안에 우리 낱말을 담는 것은 막을 수 없고 막을 필요도
+        //   없다(요약은 임의 텍스트다). 막아야 하는 것은 그 텍스트가 **줄을 새로 열어** 구획인 척하는 것이다.
+        for header in ["Arguments —", "Returns —", "Error codes:"] {
+            assert_eq!(
+                section_headers(&rendered, header),
+                1,
+                "{header} 구획이 하나여야: {rendered}"
+            );
+        }
+        // 위조된 인자 행은 우리 정렬을 못 얻는다 — 행처럼 서지 못하고 남의 줄 안에 남는다.
+        assert!(
+            !rendered
+                .lines()
+                .any(|l| l.trim_start().starts_with("--wipe")),
+            "위조된 인자가 행으로 섰다: {rendered}"
+        );
+    }
+
+    /// 줄을 **여는** 구획 제목만 센다 — 남의 문장 안에 들어간 같은 낱말은 구획이 아니다.
+    fn section_headers(rendered: &str, header: &str) -> usize {
+        rendered.lines().filter(|l| l.starts_with(header)).count()
+    }
+
+    /// 스키마가 없는 명령의 원문은 **인용해서** 낸다 — 그 텍스트가 화면 구조를 못 만들게.
+    #[test]
+    fn the_verbatim_fallback_is_quoted_so_it_cannot_impersonate_the_screen() {
+        let e = entry(
+            "tab.create",
+            "opens a tab\nArguments — `engram agent.new --<argument> <value>`:\n  --wipe <true|false>  required",
+            false,
+        );
+        let rendered = render_catalog_detail(&e);
+        assert!(
+            rendered.contains("opens a tab"),
+            "원문은 남아야: {rendered}"
+        );
+        assert_eq!(
+            section_headers(&rendered, "Arguments —"),
+            0,
+            "원문이 구획을 만들면 안 된다: {rendered}"
+        );
+        for line in rendered
+            .lines()
+            .skip_while(|l| !l.contains("verbatim"))
+            .skip(1)
+        {
+            if line.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                line.starts_with(VERBATIM_QUOTE),
+                "원문 줄은 인용 표식을 달아야: {line}"
+            );
+        }
+    }
+
+    /// ★D. 행 하나가 표면 전체를 죽이면 안 된다★: 등록 하나가 빈 이름을 내면 목록·상세·모든 호출이 그
+    ///   클라이언트가 끊길 때까지 exit 2 가 됐다. `help` 에 이미 적용한 규율을 행 봉투에도 적용한다.
+    #[test]
+    fn one_unreadable_row_does_not_sink_the_readable_ones() {
+        let body = serde_json::json!({ "commands": [
+            { "name": "a.good", "help": "h", "callable": true },
+            { "name": "", "help": "h", "callable": true },
+            { "help": "h", "callable": true },
+            { "name": "b.good", "help": "h" },
+            { "name": "c.good", "help": 7, "callable": true },
+            { "name": "d.good", "help": "h", "callable": false },
+        ] });
+        let read = read_catalog(&body).expect("봉투는 멀쩡하다");
+        let names: Vec<&str> = read.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["a.good", "d.good"], "읽을 수 있는 행은 살아야");
+        assert_eq!(read.skipped, 4, "버린 행 수를 세어 알린다");
+    }
+
+    /// ★N. 버린 행을 "목록에 없다" 로 보고하면 안 된다★: 그 행이 찾던 이름이었을 수 있는데(등록 하나에
+    ///   `callable` 이 빠지면 된다), 기계가 읽는 봉투에 "그런 이름은 없다" 가 실리면 호출자는 실재하는 명령을
+    ///   영구히 포기한다. 우리가 아는 것만 말한다.
+    #[test]
+    fn a_name_that_may_have_been_a_dropped_row_is_not_reported_as_absent() {
+        let clean = unknown_command_hint("slot.assign", 0);
+        let dropped = unknown_command_hint("slot.assign", 2);
+        assert!(clean.contains("does not list"), "{clean}");
+        assert!(
+            !dropped.contains("does not list"),
+            "버린 행이 있으면 부재를 단정하지 않는다: {dropped}"
+        );
+        for token in ["unreadable", "2", CLI_VERB_COMMANDS] {
+            assert!(dropped.contains(token), "{token} 이 문구에: {dropped}");
+        }
+    }
+
+    /// 봉투 자체가 깨진 것은 여전히 보고 대상이다 — 행 하나와 달리 **아무것도** 읽을 수 없다.
+    #[test]
+    fn a_broken_envelope_is_still_a_reportable_shape_violation() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "commands": "nope" }),
+            serde_json::json!({ "commands": 7 }),
+        ] {
+            assert!(read_catalog(&body).is_err(), "{body}");
+        }
+        let empty = read_catalog(&serde_json::json!({ "commands": [] })).expect("빈 목록은 정상");
+        assert!(empty.entries.is_empty() && empty.skipped == 0);
+    }
+
+    /// ★F. 호출 응답도 **선언된 증거**로 잰다★: 관대한 판정기를 쓰면 `agent.new` 가 `{"status":"ok"}` 를
+    ///   받고 exit 0 을 내는데, 같은 응답에 옛 계열은 exit 2 를 낸다 — 같은 명령·같은 응답·반대 판정이다.
+    ///   재료(`ok.required`)는 이미 같은 왕복에 실려 왔다.
+    #[test]
+    fn the_call_judge_demands_the_declared_return_evidence() {
+        let ok_schema = serde_json::json!({
+            "type": "object",
+            "properties": { "agent_id": {"type":"string"}, "name": {"type":"string"}, "state": {"type":"string"} },
+            "required": ["agent_id", "name", "state"]
+        });
+        let cases: [(&str, i32); 6] = [
+            (r#"{"agent_id":"i","name":"qa","state":"sleeping"}"#, 0),
+            (r#"{"status":"ok"}"#, EXIT_MALFORMED_SUCCESS),
+            (r#"{}"#, EXIT_MALFORMED_SUCCESS),
+            (r#"{"agent_id":"i","name":"qa"}"#, EXIT_MALFORMED_SUCCESS),
+            (r#"[]"#, EXIT_MALFORMED_SUCCESS),
+            (
+                r#"{"status":"error","code":"NOT_FOUND","hint":"h"}"#,
+                EXIT_FAILED,
+            ),
+        ];
+        for (body, want) in cases {
+            assert_eq!(
+                exit_code_for_call_response(Some(&ok_schema), 200, body),
+                want,
+                "body={body}"
+            );
+        }
+        assert_eq!(
+            exit_code_for_call_response(
+                Some(&ok_schema),
+                500,
+                r#"{"agent_id":"i","name":"n","state":"live"}"#
+            ),
+            EXIT_FAILED
+        );
+        // 선언이 없으면 옛 조회 규칙으로 접는다 — 없는 계약을 지어내지 않는다.
+        assert_eq!(
+            exit_code_for_call_response(None, 200, r#"{"status":"ok"}"#),
+            0
+        );
+        assert_eq!(
+            exit_code_for_call_response(None, 200, r#"[]"#),
+            EXIT_MALFORMED_SUCCESS
+        );
+    }
+
+    /// ★G. `"type"` 은 배열로도 온다★ — 데몬의 인자 변환기는 그 형태를 받는데(도구 crate `coerce`) 여기가
+    ///   못 읽으면 한 스키마를 두 층이 다르게 읽는다. 등록 클라이언트가 실제로 그 형태를 낸다.
+    #[test]
+    fn a_type_written_as_an_array_is_read_the_same_way_the_daemon_reads_it() {
+        assert_eq!(
+            arg_kind(&serde_json::json!({ "type": ["integer", "null"] })),
+            ArgKind::Int
+        );
+        assert_eq!(
+            arg_kind(&serde_json::json!({ "type": ["null", "boolean"] })),
+            ArgKind::Bool
+        );
+        assert_eq!(
+            arg_kind(&serde_json::json!({ "type": ["string"] })),
+            ArgKind::Str
+        );
+        // 고를 근거가 없으면 추측하지 않는다.
+        assert_eq!(
+            arg_kind(&serde_json::json!({ "type": ["string", "integer"] })),
+            ArgKind::Unknown
+        );
+        let declared = declared_args(&serde_json::json!({
+            "type": "object",
+            "properties": { "count": { "type": ["integer", "null"] } },
+            "required": ["count"]
+        }));
+        let args =
+            bind_invoke_args("x.y", Some(&declared), &argv(&["--count", "7"])).expect("bind");
+        assert_eq!(args["count"], serde_json::json!(7), "정수로 실려야");
+        let args =
+            bind_invoke_args("x.y", Some(&declared), &argv(&["--count", NULL_WORD])).expect("bind");
+        assert_eq!(
+            args["count"],
+            serde_json::Value::Null,
+            "배열 형태의 null 도 nullable"
+        );
+    }
+
+    /// ★H. 스키마가 없어도 값 자리 방어는 살아 있어야 한다★: 없으면 `--pinned --title` 이
+    ///   `{"pinned":"--title"}` 로 나가고 `--title` 이 **무신호로** 사라진다(옛 `take_once` 가 막던 사고).
+    #[test]
+    fn the_schemaless_path_still_refuses_to_swallow_the_next_flag() {
+        let err = bind_invoke_args("tab.create", None, &argv(&["--pinned", "--title"]))
+            .expect_err("값을 빠뜨린 플래그");
+        assert!(err.contains("has no value"), "{err}");
+        let err =
+            bind_invoke_args("tab.create", None, &argv(&["--pinned"])).expect_err("끝에서 값 누락");
+        assert!(err.contains("requires a value"), "{err}");
+        // 임의 텍스트는 그대로 값이다 — 대시 하나로 시작하는 것까지 막으면 본문 같은 값이 못 지나간다.
+        let args =
+            bind_invoke_args("tab.create", None, &argv(&["--title", "-weird"])).expect("bind");
+        assert_eq!(args["title"], serde_json::json!("-weird"));
+    }
+
+    /// `--key=value` 는 이 CLI 의 표기가 아니다 — 삼키면 `=` 가 낀 이름의 인자가 만들어져 데몬이 영문 모를
+    /// 반려를 한다(스키마가 없으면 그대로 나간다).
+    #[test]
+    fn an_equals_sign_in_the_flag_is_refused_with_the_spelling_this_cli_takes() {
+        for declared in [None, Some(slot_declared())] {
+            let err = bind_invoke_args(
+                "slot.assign",
+                declared.as_deref(),
+                &argv(&["--index=3", "5"]),
+            )
+            .expect_err("등호 표기");
+            assert!(err.contains("--index 3"), "고칠 표기를 보여야: {err}");
+        }
+    }
+
+    /// ★I. `<계열>.<동사>` 가 아닌 것은 왕복 없이 끊는다★ — 인증된 POST 를 낭비할 이유가 없다.
+    #[test]
+    fn a_name_with_an_empty_side_of_the_dot_never_reaches_the_daemon() {
+        for name in [".", "..", ".foo", "foo.", "a..b"] {
+            let err = parse_command(&argv(&[name])).expect_err(name);
+            assert!(err.contains(CLI_VERB_COMMANDS), "복구 경로({name}): {err}");
+        }
+        // 멀쩡한 이름은 그대로 호출이다.
+        assert!(matches!(
+            parse_command(&argv(&["agent.list"])),
+            Ok(ParsedCommand::Invoke(_))
+        ));
+    }
+
+    /// ★J. 안 읽은 모양을 단정하지 않는다★: `ok` 가 객체가 아닌데도 "flat JSON object" 라고 적으면 화면과
+    ///   판정기가 서로 다른 말을 한다.
+    #[test]
+    fn the_detail_screen_does_not_promise_a_shape_it_did_not_read() {
+        let array_ok = entry(
+            "x.y",
+            &serde_json::json!({
+                "name": "x.y", "effect": "Read", "since": 1, "summary": "s",
+                "args": { "type": "object", "properties": {}, "required": [] },
+                "ok": { "type": "array", "items": { "type": "string" } },
+                "errors": [],
+            })
+            .to_string(),
+            true,
+        );
+        let rendered = render_catalog_detail(&array_ok);
+        assert!(
+            !rendered.contains("flat JSON object"),
+            "배열 반환을 객체라고 적으면 안 된다: {rendered}"
+        );
+        assert!(rendered.contains("array"), "읽은 만큼은 말해야: {rendered}");
+
+        let no_ok = entry(
+            "x.z",
+            &serde_json::json!({ "name": "x.z", "effect": "Read", "since": 1, "summary": "s",
+                                 "args": {"type":"object","properties":{},"required":[]}, "errors": [] })
+            .to_string(),
+            true,
+        );
+        let rendered = render_catalog_detail(&no_ok);
+        assert!(!rendered.contains("flat JSON object"), "{rendered}");
     }
 }

@@ -184,6 +184,9 @@ async fn run_one(
         registry,
         messaging,
         mcp_handle,
+        // ★이 이름을 `..` 로 접거나 지우지 말 것★ — 묶어 두는 것이 곧 수거기를 이 스코프 끝까지 살리는
+        //   일이다(사유 = `Wiring` 의 그 칸). 접으면 그 자리에서 drop 돼 자리 표가 닫힌다.
+        _relay_sweeper,
         data_dir,
         profile_dir,
         preset_dir,
@@ -709,6 +712,11 @@ struct Wiring {
     /// C1: 발송 3분기 담당(handle_send 에 넘긴다).
     messaging: Arc<engram_dashboard_messaging::service::MessagingService>,
     mcp_handle: McpServerHandle,
+    /// ★수거기는 **이 구조체가** 들고 있어야 한다★ — `wire()` 의 지역 변수로 두면 함수를 빠져나올 때
+    /// 그 자리에서 자리 표가 닫혀(`CommandDeliveries::drain`) 그 뒤 이 서버의 모든 중계가 「종료 중」으로
+    /// 반려된다. 명부가 비어 오늘은 중계가 없어 조용한 것이고, 그것이 이 파일럿으로 중계를 태워 보려는
+    /// 다음 사람에게 남는 함정이다(같은 형태를 세 픽스처에서 이미 밟았다).
+    _relay_sweeper: engram_dashboard_daemon::command_delivery::BusSweeper,
     data_dir: PathBuf,
     /// ★finding 9★: per-run profile/preset 임시 dir — cleanup 이 이것도 지워야 temp 가 안 샌다.
     profile_dir: PathBuf,
@@ -726,11 +734,25 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     //   내는 죽은 라우트가 되어, 이 bin 으로 그 계열을 태워 볼 수 없다.
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     let command_slot = Arc::new(CommandTableSlot::new());
+    // ★수거기는 반환물이 든다★ — 여기서 `_` 로 묶으면 함수를 빠져나오는 순간 표가 닫힌다(`Wiring` 의 그 칸).
+    // ★1단계 표를 **슬롯으로** 물린다★ — 운영 조립(`lib.rs`)과 같은 모양이다. `without_commands()` 로
+    //   두면 판정부가 보는 표와 버스가 보는 표가 서로 다른 부가 되어, 이 서버의 `/control/call` 이
+    //   `agent.*` 를 자기 이름으로 알아보지 못한다.
+    let (relay_bus, relay_sweeper) = engram_dashboard_daemon::command_delivery::CommandBus::new(
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
+        engram_dashboard_daemon::command_delivery::CommandDeliveries::new(),
+        Arc::new(
+            engram_dashboard_daemon::control::commands::DaemonLocalCommands::new(
+                command_slot.clone(),
+            ),
+        ),
+    );
     let handle = start_mcp_server(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
         command_slot.clone(),
+        relay_bus,
     )
     .await
     .map_err(|e| format!("start mcp server: {e}"))?;
@@ -786,6 +808,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         registry,
         messaging,
         mcp_handle: handle,
+        _relay_sweeper: relay_sweeper,
         data_dir,
         profile_dir,
         preset_dir,

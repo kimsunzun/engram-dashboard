@@ -2,8 +2,9 @@
 //
 // ProtocolClient 가 carrier 디테일(소켓/Channel/바이트)을 모르게 하는 seam: carrier 는 수신 프레임을
 // 정규화된 InboundMessage 로 풀어 올리고(onMessage), 명령은 AgentCommand wire 객체로 받는다(send).
-// 연결 상태도 carrier 소유 — 비-connected → connected 전이마다 ProtocolClient 가 모든 뷰를 buffering
-// 리셋 + requestReplay 하므로(ADR-0046), connected 를 남발하면 전량 재replay 가 돈다.
+// 연결 상태도 carrier 소유 — connected 를 떠나면 ProtocolClient 가 모든 뷰를 detached 로 내려앉히므로
+// (ADR-0046 amend: 재부착 계기는 소켓이 아니라 권위 명부다), 상태를 흔들면 슬롯이 그때마다 부재 표시로
+// 깜빡인다.
 
 import type { ConnectionState } from './agentClient'
 

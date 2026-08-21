@@ -12,13 +12,29 @@
 //! 요청은 전부 "다음 1회 Subscribe" 로 병합(coalesce)하고, 그 Subscribe 는 현 in-flight 가 해소될 때 보낸다.
 //!
 //! ## ★수명·불변식(TRD rev4 §2 + FIX round — zombie 의미론)★
-//! - in_flight 수명 = sent → (SubscribeAck) → acked → (ReplayComplete) → 성공 마커. **슬롯의 유일한 해제
-//!   경로 = resolution(Ack 뒤 Complete) 또는 disconnect** — deadline 초과는 슬롯을 해제하지 않는다.
+//! - in_flight 수명 = sent → (SubscribeAck) → acked → (ReplayComplete) → 성공 마커. **슬롯의 해제 경로는
+//!   셋뿐 — resolution(Ack 뒤 Complete) · 거절([`ReplayFlightSet::on_refused`]) · disconnect.** deadline
+//!   초과는 슬롯을 해제하지 않는다.
 //! - 같은 gen 에 실패 마커 뒤 성공 마커가 붙어도 안전하다: 재요청한 뷰는 더 높은 myGen 을 들고 이걸
 //!   무시하고, 아직 대기 중인 뷰는 완전한 버퍼를 flush 한다(뷰는 실패 마커에 버퍼를 유지한다). 진행 기반
 //!   deadline 아래 late-resolution 은 empty/near-empty replay 를 함의하고, 흘렀던 frame 은 뷰가 이미 버퍼했다.
-//! - **agent-gone(데몬 Error 만 오고 Ack/Complete 영영 안 옴):** 슬롯은 disconnect 까지 좀비로 남는다. 실패
-//!   마커는 최초 만료 때 이미 나갔고, UX 는 뷰의 bounded 재요청 사다리 + agent-list teardown 이 처리한다(수용).
+//! - **agent-gone 은 더 이상 좀비가 아니다:** 데몬이 그 거절을 `AgentEvent::SubscribeFailed` 로 내고
+//!   ([`ReplayFlightSet::on_refused`]) 슬롯이 그 자리에서 풀린다. 옛 배선은 주인을 식별할 필드가 없는
+//!   `Error` 뿐이라 클라가 어느 슬롯을 풀지 몰랐고, 그래서 여기 "수용된 한계" 로 적혀 있었다(되살리지 마라).
+//! - **그래도 좀비가 남는 형태 하나:** 데몬이 `Ack` 만 주고 그 뒤로 `ReplayComplete` 도 거절도 영영 안 보내는
+//!   경우(응답이 아직 올 수 있으므로 만료가 슬롯을 못 푼다). 그 슬롯은 disconnect 까지 남는다. 실패 마커는
+//!   최초 만료 때 이미 나갔고 UX 는 뷰의 bounded 재요청 사다리가 처리한다(수용). ★데몬이 `Complete` 를
+//!   **큐 포화로 흘리는** 갈래는 여기 들지 않는다★ — 그쪽은 데몬이 그 자리에서 연결을 닫아 disconnect 로
+//!   귀결시킨다(daemon `handle_subscribe` 의 ReplayComplete enqueue 실패 분기).
+//!
+//! ## ★단일 outstanding — 이 파일 밖에서 지켜지는 전제(load-bearing)★
+//! [`ReplayFlightSet::on_ack`]·[`ReplayFlightSet::on_complete`]·[`ReplayFlightSet::on_refused`] 는 도착한
+//! 응답의 세대를 **대조하지 않는다**(wire 에 세대 필드가 없다 — 데몬은 gen 을 모른다). 대신 "그 에이전트의
+//! Subscribe 는 wire 에 많아야 하나뿐이고 그것이 곧 현 `in_flight`" 라는 전제에 기댄다. 그래서 이 파일은
+//! **추적을 잃은 채 wire 로 나간 Subscribe 를 만드는 진입점을 두지 않는다** — 그런 함수가 하나라도 있으면
+//! 구세대의 Ack/Complete/거절이 신세대 슬롯에 오각인돼 replay 가 돌지 않은 gen 에 성공 마커가 붙는다
+//! (gen 펜스 붕괴). 호출자 쪽 대응 규율은 `src-tauri/src/daemon_client/connection.rs` 의 replay Subscribe
+//! 송신 실패 처리(연결을 끊는다)다.
 //!
 //! ## ★순수성(테스트 격리 — ADR-0012/0003)★
 //! 소켓·tokio·Tauri·protocol 의존 0 — core crate 에 산다(agentId 는 `uuid::Uuid`, src-tauri 의 `AgentId` 는
@@ -58,6 +74,20 @@ pub struct RequestOutcome {
     /// `true` = 지금 wire `Subscribe{after_seq:None}` 를 보낸다(idle 이라 즉시 발사).
     /// `false` = in-flight 중이라 병합됨(Subscribe 는 현 in-flight 해소 시 [`Resolution::send_next`] 로 발사).
     pub send_now: bool,
+}
+
+/// [`ReplayFlightSet::on_refused`] 결정.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalOutcome {
+    /// 풀 슬롯이 없다 — disconnect 로 이미 청소됐거나, 우리가 낸 적 없는 구독의 거절(stray).
+    Ignore,
+    /// 슬롯 해제 완료.
+    Released {
+        /// 실패 마커. 이미 좀비로 1회 발행됐으면 `None`(중복 발행 금지 — 뷰의 재요청 사다리를 두 번 민다).
+        marker: Option<Marker>,
+        /// `true` = 병합된 다음 요청의 Subscribe 를 지금 보낸다.
+        send_next: bool,
+    },
 }
 
 /// [`ReplayFlightSet::on_complete`] 결정.
@@ -150,15 +180,12 @@ impl ReplayFlightSet {
         }
     }
 
-    /// ★send 실패 롤백(FIX-2)★: send_now Subscribe 가 wire 송신 실패했을 때 방금 만든 in-flight 를 롤백한다
-    /// (마커 미발행 — 아무 것도 wire 로 안 나갔다). 호출자가 send 실패를 감지한 *직후* 부른다(actor
-    /// 직렬이라 그 사이 in-flight 는 방금 만든 그 세대 그대로).
-    pub fn abort_in_flight(&mut self, agent: AgentId) {
-        if let Some(f) = self.agents.get_mut(&agent) {
-            f.in_flight = None;
-            f.next_gen = None;
-        }
-    }
+    // ★송신 실패 롤백 진입점은 의도적으로 없다(되살리지 마라)★: 옛 `abort_in_flight` 는 send_now
+    //   Subscribe 의 wire 송신 실패 시 슬롯만 비우고 **연결은 계속 폴링**했다. 그 조합은 이 파일의 단일
+    //   outstanding 전제(모듈 헤더)를 호출자 쪽 가정 위에 올려놓는다 — "송신 실패 = 상대가 못 받았다"가
+    //   참일 때만 안전한데, 그건 tungstenite/TCP 의 오류 의미론이지 우리가 강제하는 성질이 아니다. 대신
+    //   호출자가 그 자리에서 **연결을 끊고**(`connection.rs` Subscribe(replay) 송신 실패 분기)
+    //   [`Self::on_disconnect`] 가 일괄 청소한다 — 롤백보다 넓게 지우지만 전제를 코드로 만든다.
 
     /// single-flight 라 도착하는 Ack 는 항상 유일 outstanding in-flight 의 것이다(좀비 포함 — 만료
     /// 세대의 late Ack 도 그 슬롯을 가리킨다). 그래서 gen 대조 없이 현 슬롯에 그대로 각인한다.
@@ -217,7 +244,16 @@ impl ReplayFlightSet {
     /// 넘어가 슬롯을 교체하면, 만료 세대의 *늦은* Ack/Complete 가 도착했을 때 그게 새 in-flight 에 오각인돼
     /// **replay 가 아직 안 돈 새 gen 에 성공 마커**가 붙는다(gen 펜스 붕괴). 좀비로 슬롯을 붙잡아 두면
     /// Ack/Complete 는 구조적으로 유일 outstanding Subscribe(=이 좀비)만 가리킬 수 있어 오귀속이 불가능하다.
-    /// 슬롯 해제는 오직 resolution(late Complete) 또는 disconnect 로만 일어난다.
+    /// 슬롯 해제는 resolution(late Complete) · **거절**([`Self::on_refused`]) · disconnect 로만 일어난다.
+    ///
+    /// ★거절은 왜 해제해도 되나 — 타임아웃은 왜 안 되나(위 hazard 를 푸는 근거)★: 이 둘의 차이는
+    /// **응답이 아직 올 수 있는가** 하나다. 타임아웃은 "10초째 조용하다"는 관측일 뿐이라 늦은 Ack/Complete
+    /// 가 여전히 올 수 있고, 그래서 슬롯을 붙잡아 오귀속을 구조적으로 막아야 한다. 반면 거절
+    /// (`AgentEvent::SubscribeFailed`)은 데몬이 **그 Subscribe 를 처리하지 않기로 끝냈다는 통보**이고,
+    /// 그 뒤로 그 구독에 대한 Ack 도 Complete 도 발행되지 않는다(데몬 `handle_subscribe` 는 Ack 발행 전에
+    /// 조기 return 한다 — 그 실패는 `get_session` 조회 실패뿐이라 구조적으로 `on_ready` 앞이다).
+    /// 오귀속될 응답 자체가 존재하지 않으므로 즉시 해제가 안전하다.
+    /// 이 차이 때문에 "만료된 좀비를 해제한다"는 손쉬운 변형을 **택하지 않았다**(실측 2026-08-19).
     pub fn check_deadlines(&mut self, now: Instant) -> Vec<(AgentId, Marker)> {
         let mut out = Vec::new();
         for (agent, f) in self.agents.iter_mut() {
@@ -236,6 +272,53 @@ impl ReplayFlightSet {
             }
         }
         out
+    }
+
+    /// 데몬이 이 에이전트의 `Subscribe` 를 **거절**했다(`AgentEvent::SubscribeFailed`). 슬롯을 해제하고,
+    /// 아직 실패 마커를 안 냈으면 지금 내고(뷰가 10초 deadline 을 기다리지 않게), 병합된 대기열을 전진시킨다.
+    ///
+    /// ★해제가 안전한 이유★ = [`Self::check_deadlines`] 의 "거절은 왜 해제해도 되나" 문단(그 hazard 를
+    /// 푸는 근거가 거기 있다). 요약: 거절된 구독엔 뒤따를 Ack/Complete 가 없어 오귀속될 응답이 없다.
+    ///
+    /// ★왜 세대를 대조하지 않나 — "푸는 슬롯이 곧 거절당한 그 슬롯"인 근거★: wire 거절
+    /// (`AgentEvent::SubscribeFailed`)엔 세대 필드가 없다(데몬은 gen 을 모른다). 그래도 현 `in_flight` 를
+    /// 풀어도 되는 건 **그 에이전트의 Subscribe 가 wire 에 많아야 하나뿐**이기 때문이다 — 모듈 헤더의 단일
+    /// outstanding 전제. 새 Subscribe 는 (a) idle 요청 · (b) [`Self::on_complete`]/이 함수의 `send_next`
+    /// 로만 나가고, 둘 다 **직전 세대가 해소된 뒤에** 나간다. 그래서 "거절이 도착했는데 그 대상은 이미
+    /// 해소된 구세대이고 현 슬롯은 다른 세대" 라는 상태가 성립하지 않는다. ★이 전제를 깨는 유일한 형태 =
+    /// 추적을 잃은 채 wire 에 남은 Subscribe★ 이고, 그런 진입점을 만들지 않는다(위 "송신 실패 롤백 진입점은
+    /// 의도적으로 없다" 주석).
+    ///
+    /// ★acked 슬롯은 해제하지 않는다(방어)★: Ack 를 받은 구독은 데몬이 **받아들인** 것이라 거절과 공존할
+    /// 수 없다. 그래도 막는 이유 = 해제해 버리면 뒤따라오는 `ReplayComplete` 가 빈 슬롯을 만나
+    /// [`Self::on_complete`] 의 acked 게이트에서 `Ignore` 로 떨어지고, 그 replay 를 기다리던 뷰는 성공
+    /// 마커를 영영 못 받는다. 잘못 발화한 거절 하나가 **정상 replay 를 죽이는** 경로라 값싸게 닫는다.
+    ///
+    /// ★거절 사유가 일시적이어도 해제가 맞다★: 이 함수는 "재시도해도 될까"를 판정하지 않는다 — 재요청
+    /// 구동자는 뷰의 bounded 사다리다. 해제는 그 재요청이 **wire 로 나갈 수 있게** 만들 뿐이고, 붙잡아
+    /// 두면 일시적 실패조차 영구 두절이 된다(이 결함의 실제 모습).
+    pub fn on_refused(&mut self, agent: AgentId, now: Instant) -> RefusalOutcome {
+        let deadline = self.deadline;
+        let Some(f) = self.agents.get_mut(&agent) else {
+            return RefusalOutcome::Ignore;
+        };
+        match f.in_flight.as_ref() {
+            None => return RefusalOutcome::Ignore,
+            Some(inf) if inf.acked => return RefusalOutcome::Ignore,
+            Some(_) => {}
+        }
+        let inf = f.in_flight.take().expect("바로 위에서 Some 확인");
+        let marker = if inf.failed {
+            None
+        } else {
+            Some(Marker {
+                generation: inf.generation,
+                truncated: inf.truncated,
+                failed: true,
+            })
+        };
+        let send_next = advance_next(f, now, deadline);
+        RefusalOutcome::Released { marker, send_next }
     }
 
     /// 연결 단절 — 내부 클리어만, **마커는 발행하지 않는다**(재요청 구동자는 프론트 connected 전이 단독).
@@ -518,18 +601,185 @@ mod tests {
         ));
     }
 
-    // ── FIX-2: send 실패 롤백 ─────────────────────────────────────────────────────────
+    // ── 거절(SubscribeFailed) — 슬롯 해제 ──────────────────────────────────────────────
+    // ★회귀 대상(실측 2026-08-19)★: 데몬 재기동 직후엔 세션이 없어(부팅 자동 복원 OFF) 재연결 replay 의
+    //   Subscribe 가 "agent not found" 로 거절된다. 거절엔 Ack/Complete 가 없어 슬롯이 좀비로 남았고,
+    //   그 뒤 **그 에이전트의 Subscribe 가 두 번 다시 나가지 못해**(모든 요청이 병합) 재spawn 해도 출력이
+    //   모든 창에서 영구 두절됐다. 아래 첫 케이스가 정확히 그 "두 번 다시"를 깬다.
     #[test]
-    fn send_failure_releases_slot_next_request_works() {
+    fn refusal_releases_slot_so_next_request_sends_again() {
         let mut fs = ReplayFlightSet::new(dl());
         let a = aid(1);
         let now = t0();
         let first = fs.request_replay(a, now);
         assert_eq!((first.generation, first.send_now), (1, true));
-        fs.abort_in_flight(a);
+
+        match fs.on_refused(a, now) {
+            RefusalOutcome::Released { marker, send_next } => {
+                let m = marker.expect("첫 거절은 실패 마커를 낸다(뷰가 10초를 안 기다리게)");
+                assert_eq!(m.generation, 1);
+                assert!(m.failed);
+                assert!(!send_next, "대기열이 없으면 다음 Subscribe 없음");
+            }
+            other => panic!("거절은 슬롯을 해제해야: {other:?}"),
+        }
+
+        // ★이 단언이 결함의 핵심★ — 고치기 전엔 send_now=false 가 영원히 반복됐다.
+        let next = fs.request_replay(a, now);
+        assert_eq!(next.generation, 2, "gen 단조");
+        assert!(next.send_now, "해제됐으니 새 Subscribe 가 즉시 나간다");
+    }
+
+    #[test]
+    fn refusal_advances_coalesced_waiter() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        fs.request_replay(a, now); // gen1 in-flight
+        let w = fs.request_replay(a, now); // gen2 병합
+        assert_eq!((w.generation, w.send_now), (2, false));
+
+        match fs.on_refused(a, now) {
+            RefusalOutcome::Released { marker, send_next } => {
+                assert_eq!(marker.expect("실패 마커").generation, 1, "해제되는 건 gen1");
+                assert!(send_next, "병합된 gen2 Subscribe 를 지금 발사");
+            }
+            other => panic!("해제여야: {other:?}"),
+        }
+        // gen2 가 in-flight 로 올라섰다 — 정상 Ack/Complete 로 성공 마커까지 간다.
+        fs.on_ack(a, false, now);
+        assert!(matches!(
+            fs.on_complete(a, now),
+            Resolution::Emit {
+                marker: Marker {
+                    generation: 2,
+                    failed: false,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    // ★단일 outstanding 전제의 박제★: 거절엔 세대 필드가 없으므로 "지금 풀리는 게 방금 거절당한 그 세대"는
+    //   순서로만 성립한다 — 연속 거절이 각각 **그때 wire 에 나가 있던** 세대를 낸다. 이게 어긋나면 gen 펜스가
+    //   무너진다(모듈 헤더 · on_refused 문단).
+    #[test]
+    fn consecutive_refusals_release_the_then_outstanding_generation() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        fs.request_replay(a, now); // gen1 = wire 로 나감
+        let w = fs.request_replay(a, now); // gen2 병합(아직 안 나감)
+        assert_eq!((w.generation, w.send_now), (2, false));
+
+        match fs.on_refused(a, now) {
+            RefusalOutcome::Released { marker, send_next } => {
+                assert_eq!(marker.expect("실패 마커").generation, 1, "첫 거절 = gen1");
+                assert!(send_next, "이제 gen2 가 wire 로 나간다");
+            }
+            other => panic!("해제여야: {other:?}"),
+        }
+        // 두 번째 거절이 도착 — 그 시점 outstanding 은 gen2 하나뿐이다.
+        match fs.on_refused(a, now) {
+            RefusalOutcome::Released { marker, send_next } => {
+                assert_eq!(marker.expect("실패 마커").generation, 2, "둘째 거절 = gen2");
+                assert!(!send_next, "대기열 소진");
+            }
+            other => panic!("해제여야: {other:?}"),
+        }
+        assert!(
+            fs.request_replay(a, now).send_now,
+            "슬롯이 비어 재발사 가능"
+        );
+    }
+
+    // 좀비(만료로 실패 마커 1회 발행됨)가 뒤늦게 거절을 받으면: 해제는 하되 마커는 **다시 내지 않는다**.
+    #[test]
+    fn refusal_on_expired_zombie_releases_without_duplicate_marker() {
+        let mut fs = ReplayFlightSet::new(Duration::from_millis(100));
+        let a = aid(1);
+        let start = t0();
+        fs.request_replay(a, start);
+        let expired = fs.check_deadlines(start + Duration::from_millis(200));
+        assert_eq!(expired.len(), 1, "만료 실패 마커 1회");
+
+        match fs.on_refused(a, start + Duration::from_millis(300)) {
+            RefusalOutcome::Released { marker, send_next } => {
+                assert!(
+                    marker.is_none(),
+                    "이미 실패 마커가 나간 gen — 중복 발행 금지"
+                );
+                assert!(!send_next);
+            }
+            other => panic!("해제여야: {other:?}"),
+        }
+        assert!(
+            fs.request_replay(a, start + Duration::from_millis(400))
+                .send_now,
+            "좀비도 거절로 풀린다"
+        );
+    }
+
+    // ★방어★: Ack 를 받은(=데몬이 받아들인) 슬롯은 거절로 해제하지 않는다. 해제하면 뒤따라올
+    //   ReplayComplete 가 빈 슬롯을 만나 Ignore 로 떨어져 그 replay 의 성공 마커가 영영 안 나간다.
+    #[test]
+    fn refusal_never_releases_an_acked_healthy_slot() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        fs.request_replay(a, now);
+        fs.on_ack(a, false, now);
+
+        assert_eq!(
+            fs.on_refused(a, now),
+            RefusalOutcome::Ignore,
+            "acked 슬롯은 거절로 안 풀린다"
+        );
+        // 정상 완료 경로가 그대로 살아 있어야 한다.
+        assert!(matches!(
+            fs.on_complete(a, now),
+            Resolution::Emit {
+                marker: Marker {
+                    generation: 1,
+                    failed: false,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn refusal_without_inflight_is_ignored() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        assert_eq!(fs.on_refused(a, now), RefusalOutcome::Ignore, "미지 agent");
+        fs.request_replay(a, now);
+        fs.on_refused(a, now);
+        assert_eq!(
+            fs.on_refused(a, now),
+            RefusalOutcome::Ignore,
+            "이미 해제된 슬롯의 두 번째 거절은 무시(중복 마커·오해제 금지)"
+        );
+    }
+
+    // ── 송신 실패 = 단절로 청소(옛 abort_in_flight 롤백을 대체) ────────────────────────
+    // ★회귀 대상★: 옛 코드는 wire 송신 실패에 슬롯만 비우고 연결을 계속 폴링했다 — 추적을 잃은 Subscribe 가
+    //   wire 에 남을 수 있으면 뒤늦은 거절/Ack 가 신세대 슬롯에 오각인된다(gen 펜스 붕괴). 지금은 호출자가
+    //   그 자리에서 연결을 끊고 이 경로가 일괄 청소한다. 재요청이 다시 나갈 수 있어야 한다는 결과는 같다.
+    #[test]
+    fn send_failure_path_clears_via_disconnect_and_next_request_sends() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        let first = fs.request_replay(a, now);
+        assert_eq!((first.generation, first.send_now), (1, true));
+        fs.on_disconnect(); // 송신 실패 → 호출자가 연결을 끊는다.
         let next = fs.request_replay(a, now);
         assert_eq!(next.generation, 2, "gen 단조(1 소진 → 2)");
-        assert!(next.send_now, "롤백으로 슬롯 비어 즉시 재발사");
+        assert!(next.send_now, "단절 청소로 슬롯 비어 즉시 재발사");
         fs.on_ack(a, false, now);
         assert!(matches!(
             fs.on_complete(a, now),

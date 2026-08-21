@@ -178,6 +178,26 @@ pub const CLI_EXE_NAME: &str = "engram";
 // ADR-0132
 pub const CLI_GROUP_MAIL: &str = "mail";
 
+/// CLI 가 제어 라우트에서 견디는 **침묵의 한도**(초) — 데몬 마감의 상한이다.
+///
+/// ★「총 예산」이 아니다★: 소비자는 이것을 `set_read_timeout`(+`set_write_timeout`)에 넣으므로, 발동
+/// 조건은 「요청을 보낸 뒤 **한 번의 read 가** 이 시간 안에 바이트를 하나도 못 받는 것」이다 — 왕복 전체의
+/// 소요가 아니라 **연속 무응답 구간**을 잰다. 오늘 제어 라우트가 답 전에 아무 바이트도 안 흘리므로 두
+/// 값이 사실상 같지만, 그 우연에 기대는 문장을 쓰지 말 것(중간 바이트가 생기면 총 소요는 이 값을 넘어도
+/// 클라이언트는 안 끊는다).
+/// ★두 쪽이 같은 값을 봐야 하는 이유★: 데몬이 마감을 넘긴 왕복에 `TIMEOUT` 을 **실어 답하는데**, 그 답이
+/// 나가기 전에 CLI 가 소켓을 끊으면 그 답은 아무도 못 본다 — 사용자에게는 「데몬에 닿지 못했다」로 보이고
+/// (실제로는 닿았고 명령이 적용됐을 수도 있다) 데몬 쪽에는 답장을 낼 곳이 사라진다. 실제로 그렇게
+/// 뒤집혀 있었다: 양쪽이 각자 10초를 들고 있는데 CLI 의 시계가 **먼저** 시작하고(연결·파싱·풀 스케줄링이
+/// 데몬 마감 앞에 있다) 데몬의 답은 수거 주기(1초) 뒤에야 나가, 클라이언트가 결정적으로 먼저 끊었다.
+/// ★그래서 관계는 부등식이다★: `데몬 마감 + 수거 주기 + 여유 ≤ 이 값`. 그 부등식을 무는 자리는 데몬
+/// 쪽 하나다(daemon `command_delivery` 의 `fits_caller_silence_window` — 기본값은 `const` 단언으로,
+/// 주입값은 생성자에서 판정한다). 이 값을 줄이면 그 단언이 깨져 빌드가 멈춘다. **여기서 그 셈을 다시
+/// 적지 말 것** — 두 사본이 갈리는 날 어느 쪽도 못 믿는다.
+/// ★초 단위 정수인 이유★: `Duration` 은 core 의 이 목록이 드는 다른 CLI 어휘와 결이 다르고, 두 소비자가
+/// 각자 자기 타입으로 감싸는 편이 이 상수를 순수한 **숫자**로 남긴다.
+pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
+
 /// CLI 실행파일의 **절대경로**를 스폰 env 로 실어 보낼 때 쓰는 변수 이름.
 ///
 /// backend 가 이 이름으로 값을 넣고(claude), 프라이밍 판정자들은 본문에서 이 이름을 찾아 "CLI 표면이
@@ -397,7 +417,8 @@ pub trait ControlChannel: Send + Sync + 'static {
     /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
     /// 종료)에서든 reaper 가 부르므로 누락이 없다. kill_agent 와 spawn 실패 가드도 선제로 부르니 같은
     /// (id,epoch) 에 중복 호출이 온다(remove-if-present 로 흡수). epoch 를 함께 받아 stale terminal 이
-    /// 재활성화(epoch bump)로 새로 붙은 산 토큰을 지우지 못하게 한다(ADR-0007/0084 epoch-guard 정신).
+    /// 재활성화(새 화신 = 다른 표식)로 새로 붙은 산 토큰을 지우지 못하게 한다(ADR-0007/0084 epoch-guard
+    /// 정신 — 판정은 **일치/불일치**다. 표식엔 순서가 없다).
     fn revoke(&self, id: AgentId, epoch: u32);
 }
 
@@ -561,7 +582,8 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub cols: u16,
     pub rows: u16,
-    /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 트리거(S9 §18-a).
+    /// 화신마다 새로 뽑는 난수 표식 — 순서 증분이 아니다(ADR-0163). 프론트 재구독 deps 에는 넣지
+    /// 않는다(ADR-0164 결정 8, 옛 서술 S9 §18-a는 낡았다).
     pub epoch: u32,
     pub capabilities: Capabilities,
     /// 이 에이전트가 **편지를 읽는 주체**인가(= 우편 수신자 명단 자격). 세션이 spawn 때 backend 에서

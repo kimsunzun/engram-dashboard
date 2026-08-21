@@ -150,8 +150,19 @@ REM ★The exe path travels via env var, never interpolated into the quoted lite
 REM   is resolved at runtime now, and a checkout path containing an apostrophe would break out of a
 REM   single-quoted PowerShell string built by text substitution. Same reason as the portfile lookups
 REM   above.
-echo [clean] Launching app detached...
-powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe $env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+REM ★ENGRAM_RUST_LOG - opt-in tracing (do not hardcode a level here)★: unset means the app keeps its
+REM   built-in default (warn), which is what you want for normal use - debug logging is noisy and the
+REM   file grows fast. Set it only when you are chasing something: scripts\rebuild-run-debug-log.bat
+REM   is a one-line wrapper that sets it to `debug` and calls this script, so there is ONE launcher to
+REM   fix and the two cannot drift. Diagnosing needs the RAW decoder input (what claude actually wrote
+REM   on stdout) - at warn that line is never recorded and the symptom is unreproducible after the fact.
+if defined ENGRAM_RUST_LOG (
+  echo [clean] Launching app detached ^(RUST_LOG=%ENGRAM_RUST_LOG%^)...
+  powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe $env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223',\"RUST_LOG=$env:ENGRAM_RUST_LOG\""
+) else (
+  echo [clean] Launching app detached...
+  powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe $env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
+)
 if errorlevel 1 ( echo [clean] LAUNCH FAILED - see the log tail above. & pause & exit /b 1 )
 
 echo.

@@ -1,27 +1,21 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
-import type { OutputSubscription } from '../../api/agentClient'
+import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
-import { t } from '../../i18n'
+import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 
 interface TerminalSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 이 값으로 독립 구독·독립 진도(버그 B 해소). */
   viewId: string
   agentId: string | null
-  /**
-   * 재구독 트리거([agentId,epoch]) — **상위가 준다**(ADR-0148). 자기 힘으로 명부에서 유도하면, 종료로
-   * 수거된 뒤 값이 0 으로 떨어져 그 자리에서 재구독·터미널 reset 이 돌고 화면 내용이 지워진다.
-   * 생략 시 종전처럼 명부에서 유도한다.
-   */
-  epoch?: number
 }
 
-export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: TerminalSlotProps) {
+export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -32,9 +26,13 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
   //   releaseWebgl 을 containerRef.current 에 의존시키면 안 되기 때문이다(아래 releaseWebgl 주석 참조).
   const glRef = useRef<WebGLRenderingContext | null>(null)
   const agentIdRef = useRef<string | null>(agentId)
-  // §4-1: NotFound 스팸 방지
-  const agentGoneRef = useRef(false)
+  // 입력 가드가 읽는 부재 값 — onData 는 xterm 콜백 안에서 돌아 리렌더로 갱신되는 state 를 못 보므로
+  //   막을 올리는 그 값(agentUnavailable)을 ref 로 실어 나른다. 아래 effect 가 매 판정마다 갱신한다.
+  const unavailableRef = useRef(false)
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 구독이 마지막으로 알린 국면 — 아래 오버레이의 근거. 명부·연결 상태를 따로 유도하지 않고 구독이
+  //   판정한 사실을 그대로 받는다(제어 표면은 하나 — ADR-0046 §5).
+  const [phase, setPhase] = useState<ViewPhase | null>(null)
 
   useEffect(() => {
     agentIdRef.current = agentId
@@ -44,11 +42,9 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
   const agent = agentId ? (agents.find(a => a.id === agentId) ?? null) : null
   // ADR-0148: 권위 명부를 받았나 — 받기 전(기동·재연결 직후)의 빈 명부를 "없어졌다" 로 오인하지 않기 위한 가드.
   const agentsLoaded = useAgentStore(s => s.agentsLoaded)
-  // S9 §18-e: epoch이 바뀌면(재spawn) 재구독 트리거. status 변화만으론 effect가 안 돈다.
-  const epoch = epochProp ?? agent?.epoch ?? 0
   // ★부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨(ADR-0148)★. 후자가 종료(kill)의 실제 결말이다
-  //   — reaper 가 세션을 수거하며 명부에서 지우므로 status 로는 잡히지 않는다. 이걸 부재로 안 보면 아래
-  //   onData 가드가 풀려 죽은 에이전트로 입력이 나간다(거절은 조용히 삼켜져 사용자에겐 무반응으로만 보인다).
+  //   — reaper 가 세션을 수거하며 명부에서 지우므로 status 로는 잡히지 않는다. 이걸 부재로 안 보면 죽은
+  //   에이전트가 막도 입력 가드도 없는 슬롯으로 남는다(아래 agentUnavailable 의 한 항).
   const agentGone =
     (agentsLoaded && agentId != null && agent == null) ||
     (agent != null &&
@@ -56,7 +52,21 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
         agent.status.type === 'Killed' ||
         agent.status.type === 'Failed'))
 
-  useEffect(() => { agentGoneRef.current = agentGone }, [agentGone])
+  // ADR-0148 결정 1 / ADR-0149 결정 4: 부재 판정은 세 슬롯이 같다(RichSlot 이 정본 형태) — 종료 ∪ 연결
+  //   끊김 ∪ 구독이 출력을 못 내는 상태. 기존 연결 상태 표면(agentClient)을 **읽기만** 한다. 구독 콜백은
+  //   등록 즉시 현재 상태로 1회 발화하므로 초기값 동기화가 따로 필요 없다.
+  const [connected, setConnected] = useState(() => agentClient.connectionState === 'connected')
+  useEffect(() => agentClient.onConnectionStateChange(s => setConnected(s === 'connected')), [])
+  // ★'error' 도 부재다★: 재요청 사다리를 소진한 뷰는 아무것도 못 받는데, 이걸 빼면 명부에 살아 있고
+  //   연결도 붙은 슬롯이 **아무 표시 없는 빈 판**으로 남는다(신호도 회복 안내도 없다).
+  const subscriptionDown = phase === 'detached' || phase === 'error'
+  const agentUnavailable = agentGone || !connected || subscriptionDown
+
+  // ★입력을 막는 조건 = 막을 올리는 조건★: 막은 pointer-events-none 이라 아래 조작을 가리지 않는다
+  //   (SlotUnavailableVeil) — 포커스가 남은 xterm 은 막이 떠 있어도 계속 키를 먹는다. 종료만 보고 막으면
+  //   연결이 끊긴·구독이 죽은 슬롯에서 "없다" 고 적힌 화면 뒤로 입력이 계속 나가고, 그 실패는 조용히
+  //   삼켜져 사용자에겐 무반응으로만 보인다.
+  useEffect(() => { unavailableRef.current = agentUnavailable }, [agentUnavailable])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -231,22 +241,53 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
     let cancelled = false
 
     terminal.reset() // C2: StrictMode 중복 방지
+    setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
     const lastSeq = { current: -1 } // T-2/G-2: seq dedup(컴포넌트 방어 — 클라도 내부 dedup)
 
     agentClient
-      .subscribeOutput(viewId, agentId, chunk => {
-        if (cancelled) return
-        if (chunk.seq <= lastSeq.current) return
-        lastSeq.current = chunk.seq
-        // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 터미널 raw 바이트(tag0)만 xterm 에 write 한다. tag1
-        //   (StructuredEvent JSON)이 오면 무시한다 — RichSlot 이 tag0 을 무시하는 것과 정확히 대칭.
-        //   구조화 에이전트에 터미널 슬롯이 붙거나(renderModeOverride·다중 구독) 배선 버그로 tag1 이
-        //   공유 스트림(한 seq 공간)으로 새면, 게이트가 없을 때 JSON 바이트가 그대로 xterm 에 찍혀
-        //   화면이 오염된다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) tag1 을 건너뛰어도
-        //   dedup 은 정합하다.
-        if (chunk.tag !== FRAME_TAG_TERMINAL_BYTES) return
-        terminal.write(chunk.bytes) // 디코드는 클라 내부에서 끝남(transport 캡슐화)
-      })
+      .subscribeOutput(
+        viewId,
+        agentId,
+        chunk => {
+          if (cancelled) return
+          if (chunk.seq <= lastSeq.current) return
+          lastSeq.current = chunk.seq
+          // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 터미널 raw 바이트(tag0)만 xterm 에 write 한다. tag1
+          //   (StructuredEvent JSON)이 오면 무시한다 — RichSlot 이 tag0 을 무시하는 것과 정확히 대칭.
+          //   구조화 에이전트에 터미널 슬롯이 붙거나(renderModeOverride·다중 구독) 배선 버그로 tag1 이
+          //   공유 스트림(한 seq 공간)으로 새면, 게이트가 없을 때 JSON 바이트가 그대로 xterm 에 찍혀
+          //   화면이 오염된다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) tag1 을 건너뛰어도
+          //   dedup 은 정합하다.
+          if (chunk.tag !== FRAME_TAG_TERMINAL_BYTES) return
+          terminal.write(chunk.bytes) // 디코드는 클라 내부에서 끝남(transport 캡슐화)
+        },
+        // 국면으로는 화면을 건드리지 않는다 — 'buffering' 에는 같은 화신 이어보기가 섞여 있어 거기서
+        //   비우면 잠깐 끊겼다 온 슬롯이 매번 깜빡인다. 값은 부재 막 판정에만 쓴다.
+        state => {
+          if (cancelled) return
+          setPhase(state)
+        },
+        // ★비우기 콜백은 세 슬롯 모두 반드시 넘긴다(정본 진술 — DomSlot·RichSlot 은 이 자리를 미러)★:
+        //   라우터는 이 콜백을 부른 직후 같은 틱에 다른 화신의 전량 replay 를 배달하며 진도 커서를 버린다.
+        //   안 넘기면 커서만 0 으로 돌아가고 화면은 앞 화신 내용을 든 채라, 전량이 그 위에 겹쳐 그려지고
+        //   오류는 어디에도 남지 않는다. 화면과 이 로컬 가드를 **함께** 비우는 이유도 같다 — 가드만
+        //   되돌리면 겹쳐 쌓이고, 화면만 지우면 0 부터 다시 매겨진 프레임이 전부 여기서 탈락해 빈 채 남는다.
+        () => {
+          if (cancelled) return
+          terminal.reset()
+          lastSeq.current = -1
+          // ★재부착은 다른 PTY 다★: 복원된 에이전트의 PTY 는 데몬 spawn 기본값(80×24)에서 시작하고 이
+          //   슬롯의 xterm 은 벌려 둔 치수(실측 137×25) 그대로라, 어긋난 채 live 가 되면 TUI(Ink)가 자기가
+          //   믿는 크기로 지울 행 수·열 위치를 계산해 매 갱신이 한 행·수십 열 빗나간다(줄 중복·상태줄 혼입).
+          //   ★이 전파를 위 구독 트리거(화신)로 되돌리지 말 것★ — 그 형태의 실패 모드는 아래 트리거 주석이
+          //   정본이다. 숨김 중엔 건너뛴다(붕괴한 컨테이너의 fit() = 최소 치수 — RO 주석) — 다시 보일 때
+          //   가시성 effect 가 같은 전파를 낸다.
+          if (containerRef.current?.offsetParent != null) {
+            fitAddonRef.current?.fit()
+            void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
+          }
+        },
+      )
       .then(handle => {
         if (cancelled) {
           handle.unsubscribe()
@@ -271,15 +312,18 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
       // unsubscribe 내부가 transport 정리(#13133 delete onmessage) + 백엔드 구독 해제까지 수행.
       sub?.unsubscribe()
     }
-    // epoch 포함 — 재spawn(같은 agentId, epoch++) 시 reset → 재구독 → replay 재생 (S9 §18-e/f).
+    // ★화신(epoch)은 이 트리거에 넣지 않는다★: 화면을 비우는 일은 onReset 단독이 진다. 여기에 화신을
+    //   섞으면 재spawn·데몬 재기동처럼 값이 흔들리는 구간마다 구독이 통째로 갈리면서 **replay 가 오기도
+    //   전에** 이 위의 terminal.reset() 이 돌아 화면이 지워지고(데몬 ring 도 이미 없어 복구 불가),
+    //   그 교체가 화신 표식까지 잃어버려 정작 회전 판정(protocolClient.observeRoster)이 못 선다.
     // viewId 포함 — 구독 키(ADR-0046)라 바뀌면 재구독(실무상 key=viewId 라 slot 교체는 remount).
-  }, [viewId, agentId, epoch])
+  }, [viewId, agentId])
 
   useEffect(() => {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return
     const disp = terminal.onData(data => {
-      if (agentGoneRef.current) return
+      if (unavailableRef.current) return
       void agentClient.writeStdin(agentId, new TextEncoder().encode(data)).catch(() => {})
     })
     return () => disp.dispose()
@@ -295,27 +339,7 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
       background: '#0a0a0a',     // 터미널 배경(Terminal theme)과 동일 → 여백이 seamless
     }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-      {agentGone && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--font-ui)',
-            fontSize: '13px',
-            pointerEvents: 'none',
-          }}
-        >
-          {/* agent 는 완전 수거 후 null 이다 — 그 경우는 상태 메시지가 없어 공통 문구로 떨어진다. */}
-          {agent?.status.type === 'Failed'
-            ? `Failed: ${(agent.status as { type: 'Failed'; message: string }).message}`
-            : t('agent.terminatedOverlay')}
-        </div>
-      )}
+      {agentUnavailable && <SlotUnavailableVeil phase={phase} />}
     </div>
   )
 }

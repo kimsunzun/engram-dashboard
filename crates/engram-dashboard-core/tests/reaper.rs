@@ -338,7 +338,7 @@ fn epoch_mismatch_does_not_reap_current_session() {
     let (profiles, sink, deps) = make_reaper_deps("epoch-race");
     let id = Uuid::new_v4();
 
-    // epoch=1 = 재spawn 으로 bump 된 "현재" 세션.
+    // epoch=1 = 재spawn 으로 표식이 갈린 "현재" 세션(값 자체엔 뜻이 없다 — 0 과 다르기만 하면 된다).
     let status_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
     let session = make_test_session(id, 1, status_dyn);
     deps.sessions.write().unwrap().insert(id, session);
@@ -448,7 +448,7 @@ fn stale_disposition_does_not_downgrade_reactivated_live_session() {
     // 재활성화가 일어난 산 세션을 모사 — auto_restore=true 라야 잘못된 강등이 드러난다.
     let mut profile = exit_profile(0);
     profile.id = id;
-    profile.epoch = 1; // 재활성화 bump 후 상태(reaped_epoch=0 과 불일치).
+    profile.epoch = 1; // 재활성화로 화신 표식이 갈린 상태(reaped_epoch=0 과 불일치).
     profile.auto_restore = true;
     profiles.upsert(profile);
 

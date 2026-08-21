@@ -43,10 +43,10 @@ use tauri::Emitter;
 use super::inbound::{InboundReceiver, InboundSlot};
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
 use super::protocol_state::{self, EpochDecision, PendingMap, SubState};
-use super::replay_flight::{self, ReplayFlightSet, Resolution};
+use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
 use super::{ConnectionState, DaemonDiscovery};
 use crate::output_channel::{self, WindowChannelRegistry};
-use crate::output_router::OutputRouter;
+use crate::output_router::{OutputRouter, WindowLabel};
 
 // ★replay 진행 기반 deadline(ADR-0046)★. single-flight in-flight 가 이 시간 동안 진행(frame/Ack) 0 이면
 // 실패 마커로 종결한다(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 오는 경로). healthy-slow replay
@@ -874,81 +874,81 @@ async fn main_loop(
                                         if let Some(reply) = protocol_state::take_pending(pending, &rid)
                                         {
                                             let _ = reply.send(protocol_state::reply_outcome(ev));
+                                        } else {
+                                            // ★짝 없는 답장은 여기가 유일한 흔적이다★ — 아래 emit_broadcast 는
+                                            //   request_id 있는 이벤트를 아예 못 본다(이 가지가 먼저 삼킨다).
+                                            //   승계(register_pending)·중복 답장이면 정상이지만, 승계도 없었는데
+                                            //   답장이 짝을 잃었다면 그 명령의 호출자는 끊김까지 매달린다.
+                                            tracing::debug!(
+                                                request_id = %rid.0,
+                                                "짝 없는 답장 폐기(승계/중복 또는 이미 만료된 요청)"
+                                            );
                                         }
-                                    } else if let AgentEvent::SubscribeAck {
-                                        agent_id,
-                                        current_epoch,
-                                        truncated,
-                                        ..
-                                    } = ev
-                                    {
-                                        // ★구독 ack★: SubState.epoch 갱신(binary arm decide_epoch 의 기준) +
-                                        //   single-flight in-flight 를 acked 로 전이 + truncated 기억(성공 마커에
-                                        //   전파) + 진행(deadline 리셋). ★ADR-0046: 버퍼/커서 reset 없음★ — epoch
-                                        //   전환 재구독은 프론트 `[agentId, epoch]` remount 가 담당한다.
-                                        // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로
-                                        //   reset_all_windows_for_agent(창 render_seq 리셋)를 했으나, 미러 버퍼
-                                        //   제거(ADR-0046)로 진도 상태가 src-tauri 에 없다 → 리셋 대상이 없다.
-                                        //   epoch 채택은 프론트가 성공 마커 epoch 로 한다(gen 펜스). 그래서 버린다.
-                                        let _ = protocol_state::apply_subscribe_ack(
-                                            subs.entry(agent_id).or_default(),
-                                            current_epoch,
-                                        );
-                                        flight.on_ack(agent_id, truncated, Instant::now());
-                                    } else if let AgentEvent::ReplayComplete { agent_id, epoch } = ev {
-                                        // ★replay 경계 각인(ADR-0046 M1)★: acked in-flight 를 성공 마커로 해소한다
-                                        //   (Ack 전 도착 Complete=전대 고아 → Ignore). 마커 frame(tag=255)을 binary
-                                        //   frame 과 **같은 Channel::send 경로**로 흘려 순서를 보존한다(app.emit 경유
-                                        //   금지 — 순서 붕괴). 대기열 있으면 병합된 다음 Subscribe 를 발사한다.
-                                        match flight.on_complete(agent_id, Instant::now()) {
-                                            Resolution::Ignore => {}
-                                            Resolution::Emit { marker, send_next } => {
-                                                let frame = replay_flight::encode_marker_frame(
-                                                    agent_id, epoch, marker,
-                                                );
-                                                let labels = router.targets(agent_id);
+                                    } else {
+                                        // ★replay 3종(Ack·Complete·거절)은 **한 함수**가 해석한다★ — 여기서
+                                        //   갈래를 펼치면 그 갈래가 소켓 없이 태울 수 없어 통째로 무검증이
+                                        //   된다(그게 거절 팔에 실제로 났던 일이다). 이 줄이 하는 일은
+                                        //   창으로의 배달구를 꽂아 넘기는 것뿐이다.
+                                        let mut deliver =
+                                            |labels: &[WindowLabel], bytes: &[u8]| {
                                                 output_channel::send_to_windows(
-                                                    registry, &labels, &frame,
+                                                    registry, labels, bytes,
                                                 );
-                                                if send_next {
-                                                    // 병합된 다음 replay: 현재 SubState epoch 로 Subscribe(전량).
-                                                    //   (마커 epoch=완료된 replay 의 것과 별개 — 다음 replay 는
-                                                    //   현재 알려진 epoch 로 재구독.)
-                                                    let next_epoch =
-                                                        subs.entry(agent_id).or_default().epoch;
-                                                    let cmd = AgentCommand::Subscribe {
-                                                        agent_id,
-                                                        epoch: next_epoch,
-                                                        after_seq: None,
-                                                    };
-                                                    // 전송 실패를 의도적으로 롤백하지 않는다 — sink send 실패
-                                                    //   ⇒ 소켓 사망 임박 ⇒ on_disconnect 가 in_flight/대기열을
-                                                    //   일괄 정리한다. 여기서 롤백하면 disconnect 정리와 경합만
-                                                    //   생긴다(전송 안 된 in_flight 는 deadline 실패 마커 → 뷰
-                                                    //   재요청 사다리로도 무해). (FIX-2 의 send_now 롤백은 "아직
-                                                    //   대기자 gen 미배포" 시점이라 대칭이 아님.)
-                                                    let _ = send_fire(
+                                            };
+                                        // ★결말을 먼저 바인딩한다★ — `match` 스크루티니에 `&ev` 를 두면
+                                        //   그 빌림이 match 끝까지 살아 아래 팔이 `ev` 를 못 옮긴다.
+                                        let follow_up = apply_replay_event(
+                                            &ev,
+                                            flight,
+                                            subs,
+                                            router,
+                                            Instant::now(),
+                                            &mut deliver,
+                                        );
+                                        match follow_up {
+                                            ReplayFollowUp::Handled(next) => {
+                                                if let Some(cmd) = next {
+                                                    // ★송신 실패 = 연결을 끊는다(RequestReplay 팔과 같은 규칙)★.
+                                                    //   근거 정본은 그쪽 주석 — 요약하면, 못 나간 Subscribe 의
+                                                    //   세대는 이미 in-flight 로 추적되는데 그 슬롯을 풀 응답이
+                                                    //   영영 안 와서 단절 말고는 해제 경로가 없다.
+                                                    if !send_fire(
                                                         &mut sink,
                                                         &cmd,
                                                         my_gen,
                                                         "Subscribe(replay-next)",
                                                     )
-                                                    .await;
+                                                    .await
+                                                    {
+                                                        tracing::warn!(
+                                                            ?cmd,
+                                                            "replay-next Subscribe 송신 실패 — 연결을 끊는다(못 나간 세대는 단절로만 풀린다)"
+                                                        );
+                                                        break LoopExit::Disconnected;
+                                                    }
+                                                }
+                                            }
+                                            // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다
+                                            //   (ADR-0155 결정 4)★. 여기서 하는 일은 넘기는 것뿐이고 적용은
+                                            //   연결 태스크 **밖**에서 돈다(`inbound::InboundReceiver::accept`
+                                            //   — 인라인으로 되돌리면 합성 명령이 자기 답을 자기가 못 꺼내
+                                            //   교착한다).
+                                            ReplayFollowUp::NotHandled => {
+                                                if let AgentEvent::CommandRequest { envelope } = ev {
+                                                    accept_inbound(
+                                                        inbound,
+                                                        cmd_tx,
+                                                        socket_epoch,
+                                                        envelope,
+                                                    );
+                                                } else {
+                                                    // ★T7c: request_id 없는 broadcast 를 app.emit 으로 전
+                                                    //   webview push. Err 는 무시(webview 없음/채널 오류 등은
+                                                    //   치명적이지 않다).
+                                                    emit_broadcast(app, &ev);
                                                 }
                                             }
                                         }
-                                    }
-                                    // ★데몬이 배달한 명령 — 이 arm 이 유일한 인바운드 입구다(ADR-0155 결정 4)★.
-                                    //   여기서 하는 일은 넘기는 것뿐이고 적용은 연결 태스크 **밖**에서 돈다
-                                    //   (`inbound::InboundReceiver::accept` — 인라인으로 되돌리면 합성 명령이
-                                    //   자기 답을 자기가 못 꺼내 교착한다).
-                                    else if let AgentEvent::CommandRequest { envelope } = ev {
-                                        accept_inbound(inbound, cmd_tx, socket_epoch, envelope);
-                                    }
-                                    // ★T7c: request_id 없는 broadcast 를 app.emit 으로 전 webview push.
-                                    //   Err 는 무시(webview 없음/채널 오류 등은 치명적이지 않다).
-                                    else {
-                                        emit_broadcast(app, &ev);
                                     }
                                 }
                             }
@@ -1052,22 +1052,47 @@ async fn main_loop(
                         send_fire(&mut sink, &cmd, my_gen, "CommandOutcome").await;
                     }
                     Some(ConnectionCommand::RequestReplay { agent_id, reply }) => {
-                        let epoch = subs.entry(agent_id).or_default().epoch;
+                        let epoch = known_epoch(subs, agent_id);
                         let outcome = flight.request_replay(agent_id, Instant::now());
+                        // send_now=false 가 **반복**되면 슬롯이 좀비라는 뜻이다(정상 병합은 뷰 동시
+                        //   remount 순간에만 몰린다). 위 만료 warn 과 짝지어 읽는다.
+                        tracing::debug!(
+                            %agent_id,
+                            gen = outcome.generation,
+                            send_now = outcome.send_now,
+                            "request_replay 채번"
+                        );
                         if outcome.send_now {
                             let cmd = AgentCommand::Subscribe {
                                 agent_id,
                                 epoch,
                                 after_seq: None,
                             };
-                            // ★FIX-2: send 실패 surface★. send_now Subscribe 가 wire 로 못 나가면(소켓 죽음),
-                            //   방금 만든 in-flight 를 롤백한다 — 아무 것도 안 나갔으니 마커 미발행, gen_counter
-                            //   는 단조 유지(다음 요청이 새 gen 으로 재시도). reply 를 drop 하면 awaiting
-                            //   request_replay 커맨드가 RecvError → Err 를 받고(프론트가 connected 전이에서
-                            //   재요청). 소켓은 곧 끊겨 다음 select 가 Disconnected 로 빠진다.
+                            // ★송신 실패 = 그 자리에서 연결을 끊는다 — replay Subscribe 세 자리 **전부**
+                            //   같은 규칙이다(이 주석이 그 근거의 정본, 나머지 자리는 여기를 가리킨다)★.
+                            //   ★이유는 "추적을 잃은 Subscribe" 가 아니다(그 논증은 여기 안 선다)★: 이
+                            //   세대는 `flight.request_replay` 가 **보내기 전에** in-flight 로 박아 뒀고,
+                            //   replay-next 두 자리도 `advance_next` 가 같은 순서로 박는다. 세 자리 다
+                            //   똑같이 추적되므로 그 말로는 어느 쪽도 가릴 수 없다.
+                            //   ★실제 이유 = 그 슬롯을 풀 응답이 영영 오지 않는다★: 명령이 wire 에 못 나갔
+                            //   으면 데몬은 그 구독을 모른다 — Ack 도 Complete 도 거절도 안 온다. 그런데
+                            //   해제 경로는 그 셋과 단절뿐이고(만료는 슬롯을 붙잡는다), 그 사이 새 요청은
+                            //   전부 이 슬롯에 병합돼 wire 로 못 나간다. 즉 계속 폴링하면 그 에이전트의
+                            //   replay 가 **조용히 영구 차단**된다(고치려던 그 증상 그대로). 끊으면
+                            //   `on_disconnect` 가 일괄 청소하고 프론트가 connected 재전이에서 전량
+                            //   재요청한다.
+                            //   ★대가(정직 표기)★: 일시적 송신 실패 하나가 **모든** 에이전트의 구독을
+                            //   떨군다. 그래도 이쪽인 이유는 반대쪽이 관측 신호조차 안 남기는 영구 차단이기
+                            //   때문이다. 게다가 `send_fire` 는 직렬화 실패에도 false 를 내는데, 그 갈래는
+                            //   소켓이 멀쩡해서 단절이 저절로 오지도 않는다.
+                            //   reply(있으면)는 여기서 drop 되어 awaiting request_replay 가 RecvError → Err.
                             if !send_fire(&mut sink, &cmd, my_gen, "Subscribe(replay)").await {
-                                flight.abort_in_flight(agent_id);
-                                continue; // reply(있으면) drop → request_replay 가 Err 반환.
+                                tracing::warn!(
+                                    %agent_id,
+                                    gen = outcome.generation,
+                                    "replay Subscribe 송신 실패 — 연결을 끊는다(추적 잃은 Subscribe 금지)"
+                                );
+                                break LoopExit::Disconnected;
                             }
                         }
                         if let Some(reply) = reply {
@@ -1087,10 +1112,23 @@ async fn main_loop(
             //   오직 좀비의 late Complete 각인(on_complete) 또는 disconnect 후 재요청에서만 나간다. agent-gone
             //   (Ack/Complete 영영 안 옴)이면 슬롯은 disconnect 까지 좀비로 남는다(실패 마커는 이미 나갔고 UX 는
             //   뷰 bounded 사다리+agent-list teardown 이 처리 — 수용). 마커는 binary 와 같은 Channel::send 경로로
-            //   흘린다(순서 보존). epoch 는 SubState 현재값(실패엔 Complete 가 없어 마지막 알려진 epoch, 없으면 0).
+            //   흘린다(순서 보존). ★epoch 는 권위값이 아니다★ — 실패엔 Ack 이 없어 확정할 방법이 없으므로
+            //   마지막으로 알려진 SubState.epoch(없으면 0)를 싣고, 뷰는 실패 마커에 epoch 펜스를 적용하지
+            //   않는다(plan_subscribe_refusal 문단이 그 짝의 정본).
             _ = deadline_tick.tick() => {
                 for (agent_id, marker) in flight.check_deadlines(Instant::now()) {
-                    let epoch = subs.entry(agent_id).or_default().epoch.unwrap_or(0);
+                    // ★이 줄이 좀비가 생기는 순간이다★ — 슬롯은 여기서 해제되지 않으므로(위 주석),
+                    //   이 뒤로 그 에이전트의 Subscribe 는 late Complete 나 disconnect 전까지 못 나간다.
+                    //   그 상태를 뒤에서 관측할 다른 신호가 없다(실측 2026-08-19).
+                    tracing::warn!(
+                        %agent_id,
+                        gen = marker.generation,
+                        "replay 무진행 만료 — 실패 마커 발행, 슬롯은 좀비로 유지(이 agent 의 Subscribe 는 \
+                         late Complete/disconnect 전까지 못 나간다)"
+                    );
+                    // 읽기만 한다(규칙·근거 = `known_epoch`). 만료 마커의 epoch 는 권위값이 아니라
+                    //   최선치라 미지면 0 을 싣는다 — 뷰는 실패 마커에 epoch 펜스를 걸지 않는다.
+                    let epoch = known_epoch(subs, agent_id).unwrap_or(0);
                     let frame = replay_flight::encode_marker_frame(agent_id, epoch, marker);
                     let labels = router.targets(agent_id);
                     output_channel::send_to_windows(registry, &labels, &frame);
@@ -1147,6 +1185,18 @@ fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
         AgentEvent::PresetListUpdated { presets } => {
             let _ = app.emit("preset-list-updated", presets);
         }
+        // ★어느 왕복에도 속하지 않는 실패는 여기 말고 닿는 곳이 없다★. `request_id` 가 있는 실패는 이
+        //   함수에 **오지 않는다** — 호출부가 그보다 먼저 reply 매칭 분기로 걷어낸다(`event_reply_request_id`
+        //   가 Some 이면 그 가지에서 끝난다). 그래서 이 팔이 보는 것은 항상 `None` 뿐이고, 패턴에 그렇게
+        //   적어 둔다(옛 `?request_id` 는 언제나 None 을 찍는 죽은 필드였다).
+        //   ★emit 하지 않는 이유★: 이 자리에서 웹뷰로 올리면 어느 뷰가 자기 것으로 오인할지 정할 수
+        //   없다(주인을 식별할 필드가 없다). 판정 없이 기록만 한다.
+        AgentEvent::Error {
+            request_id: None,
+            message,
+        } => {
+            tracing::warn!(%message, "데몬 error 이벤트(명령 왕복 밖)");
+        }
         _ => {}
     }
 }
@@ -1155,9 +1205,12 @@ fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
 // 송신 실패(소켓 죽음)는 로깅만 — reply 가 없어 깨울 oneshot 이 없고, 소켓은 곧 끊겨 다음 select 가
 // Disconnected 로 빠진다(재연결 시 layout 이 다시 rebuild/resubscribe).
 //
-// ★반환(FIX-2)★: `true` = wire 로 나감, `false` = 직렬화/송신 실패. 대부분의 호출처(Unsubscribe/Fire/
-// replay-next)는 반환을 무시(fire-and-forget)하지만, `request_replay` 의 send_now Subscribe 는 이 결과로
-// 실패를 감지해 방금 만든 in-flight 를 롤백한다(gen 을 프론트에 잘못 반환하지 않도록).
+// ★반환★: `true` = wire 로 나감, `false` = 직렬화/송신 실패. Unsubscribe·Fire·CommandOutcome 은 반환을
+// 무시(fire-and-forget)하지만, **replay `Subscribe` 세 자리는 전부 `false` 에서 연결을 끊는다** — 옛
+// `abort_in_flight` 롤백은 삭제됐고 되살리지 않는다(그 근거는 core `replay_flight` 의 "송신 실패 롤백
+// 진입점은 의도적으로 없다" 주석, 끊는 쪽 근거는 `RequestReplay` 팔의 주석이 정본).
+// ★두 실패가 한 값으로 접힌다★: 직렬화 실패는 소켓이 멀쩡한 채로도 나므로, 호출자가 이 `false` 를
+// "소켓이 곧 끊긴다" 로 읽으면 안 된다.
 async fn send_fire(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     cmd: &AgentCommand,
@@ -1176,6 +1229,164 @@ async fn send_fire(
             tracing::warn!(generation = my_gen, "{kind} 직렬화 실패: {e}");
             false
         }
+    }
+}
+
+/// [`apply_replay_event`] 의 결말.
+#[derive(Debug)]
+pub enum ReplayFollowUp {
+    /// replay 계열 이벤트가 아니다 — 호출자가 자기 갈래(인바운드 명령 / broadcast)로 넘긴다.
+    NotHandled,
+    /// 처리했다. `Some(cmd)` = 지금 wire 로 내야 할 **다음 세대 `Subscribe`**(병합돼 있던 요청).
+    Handled(Option<AgentCommand>),
+}
+
+/// 데몬이 보낸 replay 3종(`SubscribeAck`·`ReplayComplete`·`SubscribeFailed`)을 single-flight 상태기계에
+/// 반영하고, 그 결과 창으로 흘릴 경계 마커를 `deliver` 로 넘긴다.
+///
+/// ★셋을 한 함수에 모은 이유(load-bearing)★: 이 배선은 연결 태스크의 `select!` 안에 살았고, 그 자리는 실
+/// 소켓·실 `AppHandle` 없이 세울 수 없다 — 이 패키지의 lib 테스트 타깃은 실행조차 안 되므로(`0xc0000139`)
+/// 거기 인라인으로 둔 갈래는 **어떤 게이트로도 검증되지 않는다.** 실제로 거절 팔이 그 상태였고, 그 팔을
+/// 통째로 지워도 모든 테스트가 초록이었다. 갈래를 여기로 내리면 하네스(`tests/daemon_client_replay.rs`)가
+/// 소켓 없이 태울 수 있고, 남는 무검증 표면은 호출부의 **한 줄**(이 함수를 부르는 것 + 반환 명령을
+/// `send_fire` 하는 것)뿐이다.
+///
+/// ★`deliver` 가 인자인 이유★: 실제 배달구(`output_channel::send_to_windows`)는 `tauri::ipc::Channel` 을
+/// 요구해 하네스에서 세울 수 없다. 대신 **어느 창으로 보내는지**(`router.targets`)와 **무슨 바이트를
+/// 보내는지**는 여기서 확정되므로, 그 둘을 하네스가 잡아 단언한다.
+///
+/// ★마커는 binary frame 과 **같은 경로**로 흘려야 한다(ADR-0046)★ — `app.emit` 을 태우면 순서가 무너진다.
+/// 그래서 `deliver` 의 운영 구현은 binary 팬아웃과 같은 함수다.
+pub fn apply_replay_event(
+    ev: &AgentEvent,
+    flight: &mut ReplayFlightSet,
+    subs: &mut HashMap<AgentId, SubState>,
+    router: &OutputRouter,
+    now: Instant,
+    deliver: &mut dyn FnMut(&[WindowLabel], &[u8]),
+) -> ReplayFollowUp {
+    match ev {
+        // ★구독 ack★: SubState.epoch 갱신(binary 팔 decide_epoch 의 기준) + in-flight 를 acked 로 전이 +
+        //   truncated 기억(성공 마커에 전파) + 진행(deadline 리셋). ★ADR-0046: 버퍼/커서 reset 없음★ —
+        //   epoch 전환 재구독은 프론트의 권위 명부 관측(observeRoster)이 담당한다(ADR-0164 결정 8) —
+        //   구독 deps `[viewId, agentId]`는 화신 표식을 의도적으로 제외한다.
+        // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로 창 render_seq 를 리셋했으나, 미러
+        //   버퍼 제거(ADR-0046)로 진도 상태가 src-tauri 에 없다 → 리셋 대상이 없다. epoch 채택은 프론트가
+        //   성공 마커 epoch 로 한다(gen 펜스).
+        AgentEvent::SubscribeAck {
+            agent_id,
+            current_epoch,
+            truncated,
+            ..
+        } => {
+            let _ = protocol_state::apply_subscribe_ack(
+                subs.entry(*agent_id).or_default(),
+                *current_epoch,
+            );
+            flight.on_ack(*agent_id, *truncated, now);
+            ReplayFollowUp::Handled(None)
+        }
+        // ★replay 경계 각인(ADR-0046 M1)★: acked in-flight 를 성공 마커로 해소한다(Ack 전 도착 Complete =
+        //   전대 고아 → Ignore). 대기열이 있으면 병합된 다음 Subscribe 를 호출자에게 돌려준다.
+        AgentEvent::ReplayComplete { agent_id, epoch } => {
+            match flight.on_complete(*agent_id, now) {
+                Resolution::Ignore => ReplayFollowUp::Handled(None),
+                Resolution::Emit { marker, send_next } => {
+                    let frame = replay_flight::encode_marker_frame(*agent_id, *epoch, marker);
+                    deliver(&router.targets(*agent_id), &frame);
+                    // 마커의 epoch(= 방금 끝난 replay 의 것)과 다음 재구독의 epoch 는 별개다 — 다음 replay 는
+                    //   **현재 알려진** epoch 로 전량 재구독한다.
+                    ReplayFollowUp::Handled(send_next.then(|| AgentCommand::Subscribe {
+                        agent_id: *agent_id,
+                        epoch: known_epoch(subs, *agent_id),
+                        after_seq: None,
+                    }))
+                }
+            }
+        }
+        // ★거절 = single-flight 슬롯의 해제 계기★. 거절된 Subscribe 엔 Ack 도 Complete 도 뒤따르지 않으므로
+        //   (데몬 `handle_subscribe` 가 Ack 발행 전 return) 슬롯을 지금 풀어도 오귀속될 응답이 없다 —
+        //   만료(좀비) 해제를 택하지 않은 이유가 이 차이다(근거 정본 = core `replay_flight::check_deadlines`).
+        //   ★안 풀면 어떻게 되나★: 그 에이전트의 Subscribe 가 두 번 다시 못 나가 재spawn 해도 출력이 모든
+        //   창에서 영구 두절된다(실측 2026-08-19).
+        // ★warn 유지★: 거절이 `Error` 를 떠났으니 `emit_broadcast` 의 error 팔이 더는 이걸 못 잡는다. 이
+        //   줄이 그 진단을 잇는다(사유 문장은 데몬이 쓴 것).
+        AgentEvent::SubscribeFailed { agent_id, reason } => {
+            tracing::warn!(
+                %agent_id,
+                %reason,
+                "데몬이 Subscribe 를 거절 — single-flight 슬롯 해제"
+            );
+            let plan = plan_subscribe_refusal(flight, subs, *agent_id, now);
+            if let Some(frame) = plan.marker_frame {
+                deliver(&router.targets(*agent_id), &frame);
+            }
+            ReplayFollowUp::Handled(plan.next_subscribe)
+        }
+        _ => ReplayFollowUp::NotHandled,
+    }
+}
+
+/// 그 에이전트에 대해 **마지막으로 알려진** epoch(모르면 `None`).
+///
+/// ★읽기는 항목을 만들지 않는다 — 이 맵의 증가 규칙 전부★: `subs` 에 항목을 **넣는** 자리는 두 곳뿐이다 —
+/// `SubscribeAck` 각인과 binary frame 의 epoch 게이트. 둘 다 "그 에이전트가 실재한다" 는 증거를 손에 쥔
+/// 자리다. 반면 읽는 자리(다음 세대 재구독 · 만료 마커 · 거절 마커)엔 그 증거가 없다 — 거기서
+/// `entry().or_default()` 를 쓰면 사라진 에이전트의 빈 항목이 연결 수명 내내 쌓인다. 읽는 자리를 전부 이
+/// 함수로 모아 그 규칙이 사이트마다 갈리지 않게 한다.
+fn known_epoch(subs: &HashMap<AgentId, SubState>, agent_id: AgentId) -> Option<u32> {
+    subs.get(&agent_id).and_then(|st| st.epoch)
+}
+
+/// 거절 한 건이 낳는 부작용 둘 — 창으로 흘릴 실패 마커 프레임과 wire 로 나갈 다음 세대 `Subscribe`.
+/// 실제 송신은 호출자(연결 태스크)가 한다.
+#[derive(Debug)]
+pub struct RefusalPlan {
+    /// tag=255 마커 프레임. `None` = 풀 슬롯이 없었거나 이 세대의 실패 마커가 이미 1회 나갔다(중복 금지).
+    pub marker_frame: Option<Vec<u8>>,
+    /// 병합된 대기열의 `Subscribe`. `None` = 대기열 없음.
+    pub next_subscribe: Option<AgentCommand>,
+}
+
+/// 데몬이 `Subscribe` 를 거절했을 때(`AgentEvent::SubscribeFailed`) 무엇을 내보낼지 정한다 — 슬롯 해제·
+/// 마커 합성·대기열 전진이 여기 한 곳에 있다.
+///
+/// ★`pub` 인 이유(= `register_pending` 과 같은 사정)★: 이 파일의 select 루프는 실 소켓·실 `AppHandle`
+/// 없이 세울 수 없고, 이 패키지의 **lib 테스트 타깃은 실행조차 되지 않는다**(`0xc0000139
+/// STATUS_ENTRYPOINT_NOT_FOUND` — `src/daemon_client/tests.rs` 의 단언은 한 번도 돈 적이 없다). 그래서
+/// 이 함수가 그 배선을 소켓 없이 태울 수 있는 유일한 지점이다. 하네스 = `tests/daemon_client_replay.rs`.
+///
+/// ★실패 마커의 `epoch` 는 권위값이 아니다(최선치)★: 거절엔 `SubscribeAck` 이 없어 이 세대가 어느 세션의
+/// 것인지 확정할 방법이 없다. 그래서 마지막으로 알려진 `SubState.epoch`(없으면 0)를 싣는다 — 그 값은
+/// 재연결을 넘어 살아남는 맵에서 오므로 **지난 데몬의 것일 수 있다**. 받는 쪽이 이 값을 신뢰하지 않는 것이
+/// 짝이다: 뷰는 실패 마커에 epoch 펜스를 적용하지 않는다(`src/api/protocolClient.ts` `evalMarker`) —
+/// 적용하면 마커가 조용히 버려지고 뷰가 10초 watchdog 을 기다려, 마커를 낸 이유 자체가 사라진다.
+///
+/// ★`subs` 를 읽기만 한다★ — 규칙과 그 근거는 [`known_epoch`] 가 단독 소유한다(거절은 "그 에이전트가
+/// 없다" 가 가장 흔한 사유라 여기가 그 규칙이 가장 아픈 자리다).
+pub fn plan_subscribe_refusal(
+    flight: &mut ReplayFlightSet,
+    subs: &HashMap<AgentId, SubState>,
+    agent_id: AgentId,
+    now: Instant,
+) -> RefusalPlan {
+    let epoch = known_epoch(subs, agent_id);
+    match flight.on_refused(agent_id, now) {
+        RefusalOutcome::Ignore => RefusalPlan {
+            marker_frame: None,
+            next_subscribe: None,
+        },
+        RefusalOutcome::Released { marker, send_next } => RefusalPlan {
+            // 실패 마커는 뷰의 대기를 지금 끊는다(없으면 10초 deadline 을 기다린다).
+            marker_frame: marker
+                .map(|m| replay_flight::encode_marker_frame(agent_id, epoch.unwrap_or(0), m)),
+            // 다음 replay 는 **현재 알려진 epoch** 로 재구독한다(마커의 epoch 와 별개).
+            next_subscribe: send_next.then_some(AgentCommand::Subscribe {
+                agent_id,
+                epoch,
+                after_seq: None,
+            }),
+        },
     }
 }
 

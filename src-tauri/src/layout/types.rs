@@ -27,7 +27,8 @@ pub enum SplitDir {
 ///
 /// ★불변식(ADR-0060)★: `Agent` variant 는 데몬 에이전트의 **바인딩(agent_id 참조 문자열)만** 담는다 —
 /// 라이브 출력 스트림은 여기 담지 않고 `OutputRouter` 가 agent_id 로 별도 라우팅한다(ADR-0041/0042/0046).
-/// epoch(재spawn 재구독 트리거)도 레이아웃 트리 밖(agentStore 소유 — ADR-0007/0046).
+/// epoch(화신 표식, ADR-0163)도 레이아웃 트리 밖(agentStore 소유) — 재구독 계기는 이 필드가 아니라
+/// 권위 명부 관측이다(ADR-0164 결정 8).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]

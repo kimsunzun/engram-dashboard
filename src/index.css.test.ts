@@ -65,3 +65,90 @@ describe('index.css — 계층 밖 전역 리셋 금지', () => {
     expect(cssSource).toContain('@import "tailwindcss"')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// xterm 스크롤바 가시성 = ScrollArea seam 과 같은 룰 (ADR-0053)
+//
+// ★왜 소스 문자열로 재나★: jsdom 은 ::-webkit-scrollbar 캐스케이드를 계산하지 않아 렌더로는 관측이
+//   안 된다(위 게이트와 같은 사유). 지키려는 것도 "선언의 형태" 다 — thumb 색이 **스크롤 중 표식으로만**
+//   켜지는지, hover 로 되살리는 규칙이 다시 생기지 않았는지.
+// 표식을 붙이는 쪽(JS 절반)은 components/ui/nativeScrollActivity.test.ts 가 잰다.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', () => {
+  // 주석 제거 — 이 규약을 설명하는 주석 자체가 오탐되지 않게 한다(위 게이트와 동형).
+  const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  /** `.xterm-viewport ... ::-webkit-scrollbar-thumb { ... }` 규칙 = [선택자, 본문] 목록. */
+  const thumbRules = [...code.matchAll(/([^{}]*::-webkit-scrollbar-thumb)\s*\{([^{}]*)\}/g)]
+    .map(m => ({ selector: m[1].trim(), body: m[2] }))
+    .filter(r => r.selector.includes('xterm-viewport'))
+
+  it('thumb 색을 켜는 규칙은 전부 스크롤 중 표식으로 게이트된다', () => {
+    expect(thumbRules.length).toBeGreaterThan(0)
+    const ungated = thumbRules.filter(
+      r => /--scrollbar-thumb/.test(r.body) && !r.selector.includes('[data-scroll-active]'),
+    )
+    // 게이트 없이 색을 주면 상시 표시(= 통일 전 상태)로 되돌아간다.
+    expect(ungated.map(r => r.selector)).toEqual([])
+  })
+
+  it('스크롤 중에는 색을 켜는 규칙이 실제로 있다(영구 비표시 = 세 번째 룰 금지)', () => {
+    const gated = thumbRules.filter(
+      r => r.selector.includes('[data-scroll-active]') && /--scrollbar-thumb/.test(r.body),
+    )
+    expect(gated.length).toBeGreaterThan(0)
+  })
+
+  it('hover 로 스크롤바를 되살리는 규칙이 없다', () => {
+    const offenders = [...code.matchAll(/[^{}]*\{[^{}]*\}/g)]
+      .map(m => m[0])
+      .filter(r => /xterm-viewport/.test(r) && /scrollbar/.test(r) && /:hover/.test(r))
+    expect(offenders).toEqual([])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// xterm 이 실제로 칠하는 thumb(.slider) 두께 = seam thumb 과 같은 산식 (ADR-0053)
+//
+// ★무엇을 지키나★: 두께가 박힌 숫자가 아니라 **파생값**이라는 것. seam 의 thumb 은 트랙
+//   폭(--scrollbar-size)에서 .engram-scrollbar 의 padding 을 양쪽 뺀 만큼 칠해지고, xterm 의 .slider 는
+//   그 산식을 그대로 옮겨야 같은 두께가 된다. 숫자를 직접 박으면 토큰이 바뀔 때 둘이 조용히 갈라진다.
+// ★seam 쪽 실제 값(scroll-area.css·theme.css)과 교차 검증하지 않는 이유★: @tailwindcss/vite 가 엔트리
+//   (index.css)가 아닌 CSS 의 `?raw` 를 빈 문자열로 준다(실측). 그래서 이 파일이 볼 수 있는 것은
+//   index.css 뿐이고, 여기서는 **산식의 내부 정합**(뺀 폭 = 여백×2)까지만 잰다. fs 로 읽는 우회는 하지
+//   않는다 — @types/node 미설치라 `tsc --noEmit` 게이트가 깨진다(위 `?raw` 주석과 같은 사유).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', () => {
+  const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  const sliderRule = /\.scrollbar\.vertical\s*>\s*\.slider\s*\{([^{}]*)\}/.exec(code)
+
+  it('.slider 폭이 --scrollbar-size 파생식이고 좌우 여백이 대칭이다', () => {
+    expect(sliderRule).not.toBeNull()
+    const calc = /width:\s*calc\(\s*var\(--scrollbar-size,\s*[\d.]+px\)\s*-\s*([\d.]+)px\)/.exec(
+      sliderRule![1],
+    )
+    const right = /(?:^|;|\s)right:\s*([\d.]+)px/.exec(sliderRule![1])
+    expect(calc).not.toBeNull()
+    expect(right).not.toBeNull()
+    // 트랙에서 뺀 폭 = 오른쪽 여백 × 2 — seam 의 `padding: 2px` 를 옮긴 관계다.
+    expect(Number(calc![1])).toBe(Number(right![1]) * 2)
+  })
+
+  it('폭·위치 선언은 !important 를 유지한다', () => {
+    // xterm JS 가 width/left 를 인라인 style 로 박으므로(verticalScrollbarSize) !important 가 빠지면
+    // 조용히 기본 14px 로 되돌아간다 — 캐스케이드 실패라 타입체크·렌더 테스트로는 안 잡힌다.
+    expect(/width:[^;]*!important/.test(sliderRule![1])).toBe(true)
+    expect(/left:[^;]*!important/.test(sliderRule![1])).toBe(true)
+  })
+
+  it('트랙(.scrollbar.vertical) 자체의 폭은 건드리지 않는다', () => {
+    // 트랙은 히트 영역이자 xterm 이 예약 폭으로 쓰는 값과 짝이라, 좁히는 것은 별개 판단 대상이다.
+    // 여기서 손대는 것은 칠하는 폭뿐이어야 한다.
+    const offenders = [...code.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+      .map(m => ({ selector: m[1].trim(), body: m[2] }))
+      .filter(r => /\.scrollbar\.vertical/.test(r.selector) && !/\.slider/.test(r.selector))
+      .filter(r => /(?:^|;|\s)width:/.test(r.body))
+    expect(offenders.map(r => r.selector)).toEqual([])
+  })
+})

@@ -138,6 +138,15 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard --test daemon_client_pending
 
+      # 같은 패키지의 넷째 **통합** 타깃(`src-tauri/tests/daemon_client_replay.rs`) — 판정 사유는 위
+      # 세 스텝과 동일(0xc0000139 는 lib 타깃뿐). 재는 것은 replay single-flight 의 거절 배선이다:
+      # 데몬이 Subscribe 를 거절하면 슬롯이 풀리고 병합된 다음 세대의 Subscribe 가 실제로 만들어진다
+      # (안 풀리면 그 에이전트의 출력이 모든 창에서 영구 두절 — 실측 2026-08-19).
+      # `-- --test-threads=4` 는 붙이지 않는다 — 소켓·자식 프로세스가 하나도 없다.
+      - name: cargo test -p engram-dashboard --test daemon_client_replay
+        shell: bash
+        run: cargo test --locked -p engram-dashboard --test daemon_client_replay
+
       # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.

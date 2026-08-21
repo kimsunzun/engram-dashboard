@@ -604,8 +604,6 @@ impl AgentManager {
 
     /// 에이전트 삭제(트리 "지우기").
     pub fn delete_agent(&self, id: AgentId) {
-        // ★화신 이력 표시(`AgentProfile::had_session`)도 이 한 줄이 함께 거둔다★ — 프로필과 한 몸이라
-        //   삭제와 spawn 판정 사이에 표식만 남는 창이 없다(그 필드 주석 · `epoch_for_spawn`).
         self.profiles.remove(id);
     }
 
@@ -879,24 +877,19 @@ impl AgentManager {
             None
         };
 
-        // ★epoch 확정 — 화신 **교체**면 올린다(ADR-0007 "같은 AgentId 맵 교체마다 +1")★
+        // ★화신 표식 확정 — 화신마다 새 값(ADR-0007)★
         //
         // ★왜 이 자리인가(호출부가 아니라)★: 맵 교체가 실제로 일어나는 곳이 여기고, **모든 spawn 이
-        //   모드와 무관하게 이 한 줄을 지난다**. 옛날엔 bump 가 `activate_profile` 의 Resume 갈래에만
+        //   모드와 무관하게 이 한 줄을 지난다**. 옛날엔 발급이 `activate_profile` 의 Resume 갈래에만
         //   있어서 Fresh 재spawn 경로들(WS `Spawn` 명령 · `activate_profile` 의 Fresh 갈래 · sid 없는
-        //   프로필의 부팅 복원)이 죽은 화신의 epoch 를 **그대로 재사용**했다. 그 재사용은 (AgentId, epoch)
+        //   프로필의 부팅 복원)이 죽은 화신의 표식을 **그대로 재사용**했다. 그 재사용은 (AgentId, epoch)
         //   를 키로 쓰는 모든 구조를 무너뜨린다 — 턴 관측 표(ADR-0113: 죽은 화신의 지각 emit 이 산 화신의
         //   항목을 덮고 그 emit 의 finalize 재확인이 그걸 지운다) · 제어 채널 토큰(ADR-0086) ·
         //   reap epoch-guard(ADR-0084). 호출부마다 흩뿌리면 새 호출부가 또 빠뜨린다.
-        // ★모드를 보지 않는다(Resume 도 같은 규칙)★: "교체인가" 는 모드가 아니라 **앞선 화신이 있었는가**
-        //   의 함수다. 모드로 가르면 Resume 쪽 재spawn(`restore_all` 을 부팅 밖에서 부르는 등)이 같은
-        //   재사용 구멍으로 남는다 — 그건 규약일 뿐 강제되지 않는다.
-        // ★판정·bump 원자성(load-bearing)★: 판정과 bump 를 여기서 나눠 하면 그 사이 `delete_agent` 가
-        //   끼어들어 epoch 가 0 으로 떨어지거나(죽은 화신보다 **작은** 값이 산 세션에 붙는다 = 관측이
-        //   거꾸로 뒤집힌다) 재사용으로 되돌아간다. 그래서 레지스트리가 한 임계구역에서 처리한다
-        //   (`epoch_for_spawn` — 그 doc 이 정본).
-        // ★프로필이 사라졌으면 **spawn 을 중단한다**★: 삭제된 프로필로 세션을 띄울 이유가 없고, 무엇보다
-        //   여기서 없는 프로필을 0 으로 떨어뜨리면 위 뒤집힘이 그대로 발생한다 — 그래서 `?` 로 끊는다.
+        // ★모드를 보지 않는다(Resume 도 같은 규칙)★: 새 프로세스를 띄웠으면 그건 새 화신이고, 모드는 그
+        //   사실을 바꾸지 않는다. 모드로 가르면 Resume 쪽 재spawn(`restore_all` 을 부팅 밖에서 부르는 등)이
+        //   같은 재사용 구멍으로 남는다 — 그건 규약일 뿐 강제되지 않는다.
+        // ★프로필이 사라졌으면 **spawn 을 중단한다**★: 삭제된 프로필로 세션을 띄울 이유가 없다. `?` 로 끊는다.
         // ADR-0007
         let epoch = self.profiles.epoch_for_spawn(profile.id).ok_or_else(|| {
             PtyError::SpawnFailed(format!(
@@ -906,8 +899,8 @@ impl AgentManager {
         })?;
 
         // ADR-0086 ★spec 조립 직전에 부른다★ — build_command_spec 이 endpoint 를 받아 backend 방식
-        //   (claude=`--mcp-config`)으로 명령줄에 주입해야 하므로. epoch 는 위에서 확정된 현재값이라
-        //   재활성화(bump) 때마다 새 토큰이 발급된다(토큰 수명=(AgentId,epoch)).
+        //   (claude=`--mcp-config`)으로 명령줄에 주입해야 하므로. 화신 표식은 위에서 확정된 현재값이라
+        //   화신이 바뀔 때마다 새 토큰이 발급된다(토큰 수명=(AgentId,epoch)).
         //
         // ★backend-conditional(round-2 F3)★: 제어 채널을 **소비하는** backend(claude)에만 provision 을
         //   부른다 — shell 은 supports_control_channel=false 라 provision 을 아예 건드리지 않는다(registry
@@ -1013,7 +1006,7 @@ impl AgentManager {
     ///    재spawn 하지 않고** 그 세션의 AgentInfo 를 그대로 돌려준다(무해한 "이미 실행 중" 신호,
     ///    epoch 불변). ★이게 a4aac1a 회귀의 핵심 수정★: 예전엔 이 경로가 `spawn_agent` 이중-spawn
     ///    가드의 "already running" Err 를 만나 `resume_with_fresh_fallback` 이 그걸 "resume 실패"로
-    ///    오인 → `fallback_fresh` 가 **멀쩡히 돌던 산 에이전트를 kill** → epoch++ → 빈 fresh 로 교체
+    ///    오인 → `fallback_fresh` 가 **멀쩡히 돌던 산 에이전트를 kill** → 새 화신 표식 → 빈 fresh 로 교체
     ///    (유저 실측 회귀). 이제 가드 Err 에 닿기 전에 선제 contains_key 로 걸러 산 에이전트를 놔둔다.
     /// 2. **Fresh(진짜 신규 — 세션 없음)** — `spawn_agent(Fresh)` 위임. 이건 실패-fallback 이 아니라
     ///    정상 신규 생성이다(ADR-0076 "Fresh=새 sid" 유효).
@@ -1133,6 +1126,16 @@ impl AgentManager {
             transport,
         ));
 
+        // ★ADR-0113 턴 관측 자리 선점 — sessions 맵 insert 보다 **먼저**★: 이 화신이 그 id 의 항목을
+        //   차지한다(앞 화신의 항목이 있으면 갈아치운다). insert 전이라 아직 아무 스레드도 이 core 에
+        //   닿을 수 없고(구독·emit 경로가 전부 sessions 조회를 거친다), 그래서 이 화신의 **첫 신호보다
+        //   반드시 먼저**다. 뒤집히면 그 첫 신호가 앞 화신 표식과 안 맞아 버려지고, 이 화신은 앞 화신의
+        //   항목이 거둬질 때까지 미관측(=턴 아님)으로 답한다 — 턴 중 우편 주입이 그 결말이다.
+        //   ★표식 대소로 거르던 옛 규칙을 여기로 옮긴 것이다★(난수 표식에선 대소가 절반만 맞는다 —
+        //   `turn::TurnObservations::register`).
+        // ADR-0113
+        self.turns.register(id, epoch);
+
         // ★ADR-0019 — sessions 등록은 pump 기동(start)보다 **먼저**★: finish hook 이 ReapMsg 를 보내는데,
         //    pump 가 즉시 EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에
         //    start 하면 빠른 종료 시 hook send 가 맵에 없는 id 를 가리켜 reap 가 no-op→세션 좀비화.
@@ -1150,14 +1153,7 @@ impl AgentManager {
         //      순서를 "플립 true → start_pump → (크래시 시) reaper false" 로 고정해 reaper 의
         //      downgrade(false)가 항상 **마지막**이 되게 한다. spawn 은 활성화 행동이므로 여기서만 올린다
         //      (reaper 는 downgrade-only — true 로 올리지 않음).
-        //      ★ADR-0007/0113: 같은 갱신에서 화신 이력도 찍는다★ — 이 id 는 이제 "화신을 가진 적 있는"
-        //      쪽이라, 다음 spawn 은 모드와 무관하게 **교체**이므로 epoch 를 올려야 한다
-        //      (`epoch_for_spawn`). reap 은 이 표시를 지우지 않는다 — 시체가 되살아나는 게 그 축이
-        //      잡아야 하는 경우다. 지우는 곳은 프로필 삭제 하나뿐이다.
-        self.profiles.update_with(id, |p| {
-            p.auto_restore = true;
-            p.had_session = true;
-        });
+        self.profiles.update_with(id, |p| p.auto_restore = true);
 
         session.start_pump();
 
@@ -1175,8 +1171,8 @@ impl AgentManager {
         let mut reports = Vec::with_capacity(targets.len());
         for profile in targets {
             let outcome = self.restore_one(&profile);
-            // spawn 이 성공했으면 `epoch_for_spawn` 이 올린 최신값이 명부에 있으므로 그걸 읽는다.
-            //   프로필이 없으면 spawn 이 실패한 경우뿐이라 결말이 Failed 이고, 이때 스냅샷 epoch 은
+            // spawn 이 성공했으면 `epoch_for_spawn` 이 발급한 최신 표식이 명부에 있으므로 그걸 읽는다.
+            //   프로필이 없으면 spawn 이 실패한 경우뿐이라 결말이 Failed 이고, 이때 스냅샷 값은
             //   보고용 표기일 뿐이다.
             let epoch = self
                 .profiles
@@ -1222,7 +1218,7 @@ impl AgentManager {
     ///   그 세션을 맵에서 수거하며 프로필을 `auto_restore=false`(KeepDisableAutoRestore)로 내려
     ///   트리에 `Failed` 시체로 남긴다(profile 은 지워지지 않음 — exit≠0/불명은 삭제 대상이 아님).
     ///   이 헬퍼는 종료를 관측만 하고 어떤 파괴 동작도 하지 않는다(옛 fallback_fresh 의 remove_session·
-    ///   epoch++·respawn 을 전부 걷어냈다 — ADR-0082 사용자 결정: "아무것도 죽지마, 새로 만들지마").
+    ///   화신 표식 재발급·respawn 을 전부 걷어냈다 — ADR-0082 사용자 결정: "아무것도 죽지마, 새로 만들지마").
     /// 이 로직을 restore_one(부팅 복원)과 activate_profile(수동 활성화)이 **똑같이** 재사용한다.
     // ADR-0082
     fn resume_no_fallback(&self, profile: &AgentProfile) -> RestoreOutcome {
@@ -1294,6 +1290,17 @@ impl AgentManager {
 
     /// `epoch_matches` 는 데몬이 요청 epoch 과 세션 현재 epoch 을 비교해 넘긴다 — 코어는 protocol
     /// 무의존이라 epoch 비교를 외부에서 받는다.
+    ///
+    /// ## ★계약: `Err` ⟹ `on_ready` 는 한 번도 불리지 않는다(load-bearing — 깨면 출력이 죽는다)★
+    /// 실패는 **세션 조회 하나뿐**이고 그건 구조적으로 `on_ready` 를 넘기기 *전*이다. 이 순서에 데몬의
+    /// 구독 거절 통보가 얹혀 있다: 데몬은 `Err` 를 `AgentEvent::SubscribeFailed` 로 바꿔 보내면서
+    /// "이 구독엔 `SubscribeAck`(=`on_ready`)도 `ReplayComplete` 도 뒤따르지 않는다"를 계약으로 광고하고,
+    /// 클라이언트(src-tauri)는 그 광고에 기대어 자기 single-flight 슬롯을 **즉시** 푼다.
+    ///
+    /// 그래서 이 함수에 `on_ready` 를 부른 *뒤* 실패할 수 있는 갈래를 추가하면, 거절과 Ack 가 같은 구독에
+    /// 대해 함께 나가고 클라이언트가 이미 푼 슬롯 위로 늦은 Ack/Complete 가 도착해 **replay 가 돌지 않은
+    /// 세대에 성공 마커**가 붙는다(gen 펜스 붕괴). 새 실패 갈래가 필요하면 `on_ready` 앞에 두거나, 거절
+    /// 통보의 계약을 함께 고쳐야 한다. 회귀망 = `subscribe_from_err_never_invokes_on_ready`.
     pub fn subscribe_from(
         &self,
         agent_id: AgentId,
@@ -1341,7 +1348,7 @@ impl AgentManager {
     ///   같을 때만 쓴다. 다르면 transport 를 아예 건드리지 않고(부작용 0) `Err` 를 낸다.
     ///
     /// ★왜 필요한가(check-then-write TOCTOU — load-bearing)★: 호출자가 `(id, epoch)` 로 수신자를 정한 뒤
-    ///   `write_stdin_observed(id, ..)` 를 부르면, 그 사이 에이전트가 재시작(= 세션 맵 교체 + epoch+1)했을 때
+    ///   `write_stdin_observed(id, ..)` 를 부르면, 그 사이 에이전트가 재시작(= 세션 맵 교체 + 새 화신 표식)했을 때
     ///   write 는 **새 incarnation** 에 착지한다. 해석과 write 가 별개 연산인 한 호출자가 아무리 앞서 검사해도
     ///   그 창은 닫히지 않는다 — 판정을 **write 와 같은 단위**로 끌어와야 닫힌다. 그래서 이 함수가 존재한다.
     /// ★★소비자 없음(ADR-0111 결정 6 이후)★★: 이 동사의 **유일한** 호출자는 데몬 메시징의 그룹 방송
@@ -1771,6 +1778,41 @@ mod tests {
             .expect("sessions poisoned")
             .insert(id, session);
         written
+    }
+
+    // ── subscribe_from: Err 은 on_ready 앞이다(데몬 거절 통보 계약의 전제) ──────────────
+    //
+    // ★무엇을 지키나★: 데몬은 이 `Err` 를 `AgentEvent::SubscribeFailed` 로 바꿔 보내면서 "이 구독엔 Ack 도
+    //   ReplayComplete 도 뒤따르지 않는다"를 광고하고, 클라이언트는 그 광고에 기대어 single-flight 슬롯을
+    //   즉시 푼다. `on_ready` 뒤에서 실패하는 갈래가 생기면 거절과 Ack 가 같은 구독에 대해 함께 나가고,
+    //   이미 푼 슬롯 위로 늦은 Ack/Complete 가 도착해 replay 가 돌지 않은 세대에 성공 마커가 붙는다.
+    //   그 회귀는 런타임에 무신호라(출력이 조용히 죽는다) 이 단언이 유일한 감지기다.
+    #[test]
+    fn subscribe_from_err_never_invokes_on_ready() {
+        struct NoopSink;
+        impl OutputSink for NoopSink {
+            fn send(
+                &self,
+                _frame: crate::agent::types::OutputFrame<'_>,
+            ) -> Result<(), crate::agent::types::SinkError> {
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                SinkId::nil()
+            }
+        }
+
+        let manager = bare_manager();
+        let missing = AgentId::new_v4(); // 맵에 없는 id — get_session 이 실패한다.
+        let mut ready_calls = 0usize;
+        let res = manager.subscribe_from(missing, Arc::new(NoopSink), None, false, |_| {
+            ready_calls += 1;
+        });
+        assert!(res.is_err(), "없는 에이전트 구독은 Err");
+        assert_eq!(
+            ready_calls, 0,
+            "Err 경로에서 on_ready(=SubscribeAck) 발행 0"
+        );
     }
 
     #[test]
@@ -2929,7 +2971,8 @@ mod tests {
         );
     }
 
-    /// ★실 프로세스로 보는 이유★: bump 는 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이 말한다.
+    /// ★실 프로세스로 보는 이유★: 표식 발급은 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이
+    /// 말한다.
     #[cfg(windows)]
     #[test]
     fn a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch() {
@@ -2958,13 +3001,7 @@ mod tests {
             .expect("Fresh 재spawn");
         assert_ne!(
             second.epoch, first.epoch,
-            "Fresh 재spawn 이 죽은 화신의 epoch 을 재사용하면 안 된다"
-        );
-        assert!(
-            second.epoch > first.epoch,
-            "epoch 은 단조 증가여야(표의 '더 작은 건 버린다' 규칙이 그 위에 선다): {} → {}",
-            first.epoch,
-            second.epoch
+            "Fresh 재spawn 이 죽은 화신의 표식을 재사용하면 안 된다"
         );
         manager.kill_agent(second.id).ok();
     }

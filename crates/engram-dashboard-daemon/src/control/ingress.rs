@@ -454,6 +454,18 @@ impl ControlQueryResult {
         }
     }
 
+    /// 소비하며 값을 내주는 형제 — 성공 payload 가 클 수 있는 자리가 쓴다.
+    ///
+    /// ★[`ControlQueryResult::to_json`] 은 성공 갈래에서 payload 를 **통째로 깊은 복사**한다★. 명령 카탈로그
+    /// 처럼 payload 가 수 MB 까지 갈 수 있는 응답에서 그 복사는 요청마다 한 번 더 나는 CPU·메모리다 —
+    /// 봉투를 다시 쓸 일이 없는 호출자(HTTP 핸들러가 전부 그렇다)는 이쪽을 쓴다.
+    pub fn into_json(self) -> serde_json::Value {
+        match self {
+            ControlQueryResult::Ok(v) => v,
+            other => other.to_json(),
+        }
+    }
+
     pub fn is_ok(&self) -> bool {
         matches!(self, ControlQueryResult::Ok(_))
     }

@@ -24,7 +24,7 @@ use engram_dashboard_protocol::{
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 
-use crate::command_delivery::CommandDeliveries;
+use crate::command_delivery::{CommandDeliveries, LocalCommands};
 use crate::command_roster::CommandRoster;
 use crate::connection_core::{
     agent_list_event, broadcast_lease_changed, event_json, hello_event, output_event_to_wire,
@@ -361,6 +361,8 @@ pub struct AgentConnections {
     commands: CommandRoster,
     // ADR-0154
     deliveries: CommandDeliveries,
+    // ADR-0155
+    locals: Arc<dyn LocalCommands>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -374,6 +376,7 @@ impl AgentConnections {
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         commands: CommandRoster,
         deliveries: CommandDeliveries,
+        locals: Arc<dyn LocalCommands>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -384,6 +387,7 @@ impl AgentConnections {
             messaging,
             commands,
             deliveries,
+            locals,
             shutdown_tx,
         }
     }
@@ -403,6 +407,7 @@ impl AgentConnections {
             self.messaging.clone(),
             self.commands.clone(),
             self.deliveries.clone(),
+            Arc::clone(&self.locals),
             self.shutdown_tx.clone(),
         ));
         Arc::new(AgentConnection {
@@ -669,6 +674,8 @@ mod tests {
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             commands,
             deliveries,
+            // 자기 명령이 없는 조립 — 이 하네스가 보는 것은 명부·정리 순서다.
+            Arc::new(crate::command_delivery::NoLocalCommands),
             shutdown_tx,
         )
     }

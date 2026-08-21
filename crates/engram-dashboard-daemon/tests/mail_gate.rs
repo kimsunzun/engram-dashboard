@@ -19,6 +19,7 @@ use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfi
 use engram_dashboard_core::agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
 };
+use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
 use engram_dashboard_daemon::control::commands::make_daemon_table;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
@@ -66,10 +67,69 @@ struct Fixture {
     mcp_token: String,
     /// 비-MCP 스폰이 받는 자격증명(우편 허용).
     cli_token: String,
+    /// 서버가 실제로 읽는 **그 한 부** — 중계될 이름을 이 핸들로 심는다.
+    bus: CommandBus,
+    /// ★들고 있어야 한다★ — 떨어뜨리면 수거기가 나가는 길에 자리 표를 비우고 **닫아**
+    /// (`CommandDeliveries::drain`) 그 뒤의 모든 중계가 「종료 중」으로 반려된다. 이 파일이 오랫동안 그
+    /// 상태였고 초록이었던 이유는 여기 테스트가 **데몬 자기 이름만** 불러 자리 표를 아예 안 거쳐서다 —
+    /// 그래서 아래 `a_relayed_name_still_reaches_its_owner_through_this_fixture` 가 함께 있어야 한다.
+    _relay_sweeper: BusSweeper,
     _handle: McpServerHandle,
 }
 
+/// 얹은 이름을 **실제로 답하는** 주인 — 대시보드가 창·탭·슬롯 명령에 대해 하는 그 일이다.
+struct AnsweringSink(engram_dashboard_daemon::command_delivery::CommandDeliveries);
+
+impl engram_dashboard_net::frame_port::FrameSink for AnsweringSink {
+    fn try_send(
+        &self,
+        frame: engram_dashboard_net::frame_port::Frame,
+    ) -> Result<(), engram_dashboard_net::frame_port::FrameError> {
+        let engram_dashboard_net::frame_port::Frame::Text(text) = frame else {
+            return Ok(());
+        };
+        if let Ok(engram_dashboard_protocol::AgentEvent::CommandRequest { envelope }) =
+            serde_json::from_str(&text)
+        {
+            self.0.complete(engram_dashboard_command::CommandReply::ok(
+                envelope.request_id,
+                serde_json::json!({ "ran": envelope.name }),
+            ));
+        }
+        Ok(())
+    }
+
+    fn send(
+        &self,
+        frame: engram_dashboard_net::frame_port::Frame,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), engram_dashboard_net::frame_port::FrameError>>
+    {
+        Box::pin(std::future::ready(self.try_send(frame)))
+    }
+}
+
 impl Fixture {
+    /// 붙어 있는 클라이언트가 자기 이름을 얹고 **답하는** 상태를 만든다.
+    fn register_answering_owner(
+        &self,
+        conn_id: engram_dashboard_net::frame_port::ConnId,
+        name: &str,
+    ) {
+        let sink: Arc<dyn engram_dashboard_net::frame_port::FrameSink> =
+            Arc::new(AnsweringSink(self.bus.deliveries().clone()));
+        self.bus.roster().attach(conn_id, &sink);
+        self.bus
+            .roster()
+            .register(
+                conn_id,
+                vec![engram_dashboard_command::CommandDecl {
+                    name: name.to_string(),
+                    help: "{}".to_string(),
+                }],
+            )
+            .expect("붙어 있는 연결의 등록");
+    }
+
     async fn post(&self, token: &str, route: &str, body: serde_json::Value) -> (u16, String) {
         let resp = reqwest::Client::new()
             .post(format!("{}{route}", self.base))
@@ -101,12 +161,27 @@ async fn fixture(tag: &str) -> Fixture {
     let manager_slot = Arc::new(ManagerSlot::new());
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     let command_slot = Arc::new(CommandTableSlot::new());
+    // ★수거기를 **픽스처가** 들고 있어야 한다★ — 여기서 `_relay_sweeper` 로 묶어 두고 함수를 빠져나오면
+    //   그 자리에서 자리 표가 닫혀(`CommandDeliveries::drain`) 그 뒤 중계가 전부 「종료 중」이 된다.
+    // ★1단계 표를 **아래 슬롯과 같은 부**로 물린다 — `without_commands()` 로 되돌리지 말 것★: 그러면 판정부는
+    //   `agent.*` 를 자기 이름으로 알아보는데 버스는 모르는 조립이 되어(운영에는 없는 모양) 이 파일의 제어
+    //   라우트 단언이 운영과 다른 경로를 잰다. 운영 조립(`lib.rs`)과 같은 어댑터를 쓴다.
+    let (relay_bus, relay_sweeper) = CommandBus::new(
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
+        engram_dashboard_daemon::command_delivery::CommandDeliveries::new(),
+        Arc::new(
+            engram_dashboard_daemon::control::commands::DaemonLocalCommands::new(
+                command_slot.clone(),
+            ),
+        ),
+    );
     let handle = start_mcp_server(
         registry.clone(),
         manager_slot.clone(),
         // ★비워 둔다★: 우편 핸들러가 503 을 내야 "게이트를 통과했다" 가 거절과 구별된다.
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
+        relay_bus.clone(),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -149,6 +224,8 @@ async fn fixture(tag: &str) -> Fixture {
         base,
         mcp_token,
         cli_token,
+        bus: relay_bus,
+        _relay_sweeper: relay_sweeper,
         _handle: handle,
     }
 }
@@ -204,6 +281,71 @@ async fn the_same_credential_passes_on_the_agent_control_route() {
         assert!(v.get("agents").is_some(), "명부 응답이어야: {text}");
         assert!(!is_mail_rejection(status, &text));
     }
+}
+
+/// ★발견과 전체 이름 호출도 제어 평면이다★ — 편지를 못 쓰는 자격증명이 **무엇을 부를 수 있는지조차** 못
+///   배우면, 그 백엔드로 스폰된 에이전트는 자기 도구를 영영 모른다. 그것이 두 라우트를 「우편 아님」으로
+///   분류한 이유 전부이므로, 분류 함수의 단위 시험 말고 **실제 미들웨어를 태운** 단언이 있어야 한다.
+///
+/// ★"거절이 아니다" 만 보지 않는다★: 그것만 보면 라우트가 통째로 사라져도 초록이다 — 응답이 그 라우트의
+///   실제 계약(발견은 `commands` 배열, 호출은 명부 payload)인지까지 본다.
+#[tokio::test]
+async fn the_same_credential_passes_on_the_catalog_routes() {
+    let f = fixture("catalog").await;
+    for token in [&f.mcp_token, &f.cli_token] {
+        let (status, text) = f
+            .post(token, "/control/commands", serde_json::json!({}))
+            .await;
+        assert_eq!(status, 200, "발견은 통과: {text}");
+        assert!(!is_mail_rejection(status, &text));
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+        assert!(
+            v.get("commands")
+                .and_then(|c| c.as_array())
+                .is_some_and(|c| !c.is_empty()),
+            "발견 목록이어야: {text}"
+        );
+
+        let (status, text) = f
+            .post(
+                token,
+                "/control/call",
+                serde_json::json!({"name":"agent.list"}),
+            )
+            .await;
+        assert_eq!(status, 200, "전체 이름 호출은 통과: {text}");
+        assert!(!is_mail_rejection(status, &text));
+        let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+        assert!(v.get("agents").is_some(), "명부 응답이어야: {text}");
+    }
+}
+
+/// ★이 픽스처의 자리 표가 **열려 있다**는 것을 못박는다★
+///
+/// 위 형제들은 `agent.list`(데몬 자기 이름)만 부르는데, 그 이름은 판정부가 자기 표에서 답하므로 자리 표를
+/// **아예 안 거친다**. 그래서 조립이 수거기를 떨어뜨려 표가 닫혀 있어도 전부 초록이었다 — 실제로 그
+/// 상태였다. 남의 이름 하나를 중계까지 태워야 그 축이 관측된다.
+/// ★재는 것은 게이트가 아니라 **픽스처의 건강**이다★ — 그래서 우편이 열린 자격증명 하나로만 태운다.
+/// 표가 닫혀 있으면 여기서 `OUTCOME_UNKNOWN`(「종료 중」)이 돌아온다.
+#[tokio::test]
+async fn a_relayed_name_still_reaches_its_owner_through_this_fixture() {
+    let f = fixture("relay-open").await;
+    f.register_answering_owner(1, "tab.create");
+
+    let (status, text) = f
+        .post(
+            &f.cli_token,
+            "/control/call",
+            serde_json::json!({ "name": "tab.create", "args": { "window": "main" } }),
+        )
+        .await;
+
+    assert_eq!(status, 200, "봉투로 답한다: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+    assert_eq!(
+        v["ran"], "tab.create",
+        "주인이 낸 결말이 그대로 돌아와야 한다 — 자리 표가 닫혀 있으면 여기가 반려다: {text}"
+    );
 }
 
 /// MCP 라우트는 이 게이트의 대상이 아니다 — 우편을 MCP 로 쓰는 것이 바로 그 자격증명의 채널이기 때문이다.
@@ -283,11 +425,15 @@ async fn an_unlisted_control_path_is_refused_when_blocked_and_unrouted_otherwise
 async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() {
     let registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
         Arc::new(CommandTableSlot::new()),
+        relay_bus,
     )
     .await
     .expect("start mcp server");

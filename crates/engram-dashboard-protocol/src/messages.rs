@@ -349,6 +349,26 @@ pub enum AgentEvent {
         /// ring 밖으로 밀려 일부 손실(clear+tail).
         truncated: bool,
     },
+    /// [`AgentCommand::Subscribe`] 가 **거절**됐다 — [`AgentEvent::SubscribeAck`] 의 실패 짝.
+    ///
+    /// ★왜 `Error` 로 안 보내나(load-bearing — 이 variant 의 존재 이유)★: `Subscribe` 는 `request_id` 가
+    /// 없는 명령이라(위 [`command_request_id`]) 그 거절은 `Error{request_id: None}` 으로 나갔고, 그 봉투엔
+    /// **주인을 식별할 필드가 없다**. 받는 쪽(src-tauri)은 어느 에이전트의 구독이 깨졌는지 알 수 없어
+    /// 자기 single-flight 슬롯을 풀지 못했고, 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가 두 번
+    /// 다시 나가지 못했다** — 데몬 재기동 뒤 그 에이전트의 출력이 모든 창에서 영구 두절(실측 2026-08-19).
+    /// 그래서 거절에 `agent_id` 를 실어 상관 가능하게 만든다.
+    ///
+    /// ★계약★: 이 이벤트가 나가면 **그 Subscribe 에 대한 `SubscribeAck` 도 `ReplayComplete` 도 오지
+    /// 않는다**(둘 다 거절 지점 이후에만 발행된다). 받는 쪽은 이 사실에 기대어 슬롯을 즉시 해제해도
+    /// 안전하다 — 나중에 도착해 오귀속될 응답이 존재하지 않는다.
+    ///
+    /// ★`reason` 은 사람이 읽는 진단 문자열이다★ — 기계 분기 금지(문구는 예고 없이 바뀐다). 분기해야 하면
+    /// 코드 필드를 새로 판다.
+    SubscribeFailed {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        reason: String,
+    },
     /// 저빈도 구조화 출력(TextDelta/Usage/ToolCall 등).
     Output {
         #[ts(type = "string")]
@@ -712,6 +732,8 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         // request_id 없는 이벤트(broadcast 또는 agent_id 기반) — pending 매칭 대상 아님.
         AgentEvent::Hello { .. }
         | AgentEvent::SubscribeAck { .. }
+        // SubscribeFailed 도 agent_id 기반이다(Subscribe 는 request_id 없는 명령) — 매칭 대상 아님.
+        | AgentEvent::SubscribeFailed { .. }
         | AgentEvent::Output { .. }
         | AgentEvent::ReplayComplete { .. }
         | AgentEvent::StatusChanged { .. }

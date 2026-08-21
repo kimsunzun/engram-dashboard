@@ -8,7 +8,6 @@ import { Allotment } from 'allotment'
 import { Plus } from 'lucide-react'
 
 import type { LayoutNode } from '../../api/layoutTypes'
-import type { AgentProfile } from '../../api/types'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
 import TerminalSlot from '../slot/TerminalSlot'
@@ -52,16 +51,14 @@ export default function ViewLayoutRenderer({
   //   ★agentId 로 키잉하고 어긋나면 버린다★: 슬롯에 다른 에이전트를 배정하면 이 기억은 죽는다(아래 effect).
   //   무시만 하고 남겨 두면 그 에이전트를 다시 배정할 때 기억이 되살아나, 이미 언마운트된 빈 뷰를 흐림
   //   상태로 띄우고 수거된 에이전트로 구독까지 건다(ADR-0149 가 "빈 화면을 흐리게 하면 오독된다"고 거부한 상태).
-  //   ★epoch 는 기억의 폴백일 뿐이다★: 정상 경로는 프로필의 epoch 을 읽는다(백엔드가 spawn 때 프로필에
-  //   올려 영속화 — 상태 (B) 에서 살아있을 때 값과 같다). 프로필 목록을 아직 못 받은 구간에서만 이 기억을
-  //   쓴다(그때는 프로필이 없어 읽을 값이 없다). 값이 흔들리면 재구독 트리거([viewId,agentId,epoch])가
-  //   흔들려 보존하려던 대화가 지워지므로 폴백을 없애면 안 된다.
+  //   ★담는 것은 렌더 모드 하나뿐이다(ADR-0149 결정 5)★ — 회차 번호(epoch)는 여기도 슬롯 prop 에도 없다.
+  //   슬롯의 재구독 트리거에서 화신을 뺐기 때문이다(비우기는 구독의 onReset 단독 — 각 슬롯 주석).
   //   ★알려진 한계 둘★ ① 대화를 보존 중인 슬롯을 **분할**하면 이 렌더러 인스턴스가 갈려 기억이 사라진다.
   //   기억을 밖(모듈 맵 등)으로 올려도 대화 자체는 슬롯 컴포넌트 state 에 있어 분할 시 언마운트로 함께
   //   사라지므로 — 빈 화면에 흐림만 남고 죽은 에이전트로 재구독까지 나간다 — 지금은 옛 동작(「연결 중」)으로
   //   떨어지게 둔다. 실제 해법은 대화 상태를 슬롯 컴포넌트 밖으로 올리는 것이고 그건 별건이다.
   //   ② 부재 구간에는 mode 유도가 없어 setRenderMode/clearRenderMode 가 조용히 무효다(호출은 성공으로 보인다).
-  const lastMountRef = useRef<{ agentId: string; mode: RenderMode; epoch: number } | null>(null)
+  const lastMountRef = useRef<{ agentId: string; mode: RenderMode } | null>(null)
   // ★우클릭 슬롯 메뉴 상태(§5)★: 슬롯 하나당 이 렌더러 인스턴스가 하나라(재귀 렌더) 여기 useState 는
   //   그 슬롯 전용 메뉴 좌표다. 열림 시 SlotContextMenu 를 이 렌더러 안에서 직접 마운트한다 — 옛
   //   LayoutRenderer→SlotPane 래핑 경로가 Brick 1 에서 삭제돼 메뉴가 캔버스에서 닿지 않던 갭을 메운다.
@@ -82,21 +79,21 @@ export default function ViewLayoutRenderer({
     agent != null && slotId != null ? (renderModeOverride[slotId] ?? defaultRenderMode(agent)) : null
 
   // ★기억 쓰기는 커밋 후에만(effect)★: 렌더 중에 쓰면 **폐기되는 concurrent 렌더**가 커밋되지 않은
-  //   mode/epoch 을 남길 수 있고, 그 뒤 에이전트가 사라지면 그 오염된 신원으로 자식을 갈아 마운트해
-  //   커밋된 대화를 지운다. effect 로 옮기면 "실제로 마운트된 사실"만 기록된다.
+  //   mode 를 남길 수 있고, 그 뒤 에이전트가 사라지면 그 오염된 신원으로 자식을 갈아 마운트해 커밋된
+  //   대화를 지운다. effect 로 옮기면 "실제로 마운트된 사실"만 기록된다.
   // ★그리고 어긋난 기억은 여기서 버린다(G2)★: 배정이 이 기억의 에이전트가 아니게 된 순간 지운다 —
   //   남겨 두면 같은 에이전트를 다시 배정할 때 이미 언마운트된 빈 뷰가 흐림 상태로 되살아난다.
   // deps 는 원시값만 — agent 객체는 store 갱신마다 신원이 바뀌어 매번 재실행된다(쓰는 값은 같아 무해하지만
   //   불필요하다).
   useEffect(() => {
     if (agent != null && mode != null) {
-      lastMountRef.current = { agentId: agent.id, mode, epoch: agent.epoch }
+      lastMountRef.current = { agentId: agent.id, mode }
       return
     }
     if (lastMountRef.current != null && lastMountRef.current.agentId !== slotAgentId) {
       lastMountRef.current = null
     }
-  }, [agent?.id, agent?.epoch, mode, slotAgentId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agent?.id, mode, slotAgentId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (node.type === 'slot') {
     const isFocused = node.id === focusedSlotId
@@ -116,8 +113,6 @@ export default function ViewLayoutRenderer({
         ? lastMountRef.current
         : null
     const presence = slotAgentId != null ? agentPresence(slotAgentId, agents, profiles) : 'unknown'
-    // 프로필에서 epoch 를 읽기 위한 조회(아래 renderer 분기) — 목록이 작아 매 렌더 조립해도 무해하다.
-    const profileById = new Map((profiles as AgentProfile[]).map(p => [p.id, p]))
     // ★ADR-0148 상태 판정 — 축은 "기억 유무"다★
     //   에이전트 있음                → 현행대로(caps 로 렌더러 결정)
     //   프로필 있음 + 기억 없음      → 「연결 중」. 스폰 대기(예약 노드 활성화)·부팅 대기가 여기 든다 —
@@ -207,27 +202,21 @@ export default function ViewLayoutRenderer({
               // ★viewId = node.id(slot id, ADR-0046)★: 슬롯이 자기 slot id 로 구독한다 — 같은 agentId 두
               //   슬롯도 독립 진도(버그 B 해소). key 도 slot id 로 두어(옛 agent_id 키는 같은 agent 두 슬롯이
               //   같은 React key 가 돼 remount 가 꼬였다) 슬롯 정체성을 slot 단위로 고정한다.
-              // ★epoch 은 흔들리면 안 된다★: 슬롯 컴포넌트의 재구독 트리거가 [viewId, agentId, epoch] 이라
-              //   값이 바뀌면 재마운트·reset 이 돌아 보존하려던 대화가 지워지고 죽은 에이전트로 재구독까지
-              //   나간다. 출처 우선순위 = 살아있는 AgentInfo → **프로필**(백엔드가 spawn 때 올려 영속화하므로
-              //   수거 후에도 같은 값이 남는다) → 기억(프로필 목록을 아직 못 받은 구간의 유일한 출처).
-              const epoch = agent?.epoch ?? profileById.get(slotAgentId ?? '')?.epoch ?? kept?.epoch ?? 0
+              // ★여기서 회차(epoch)를 내려보내지 않는다★: 슬롯의 재구독 트리거에서 화신을 뺐다. 이 자리가
+              //   값을 만들어 내려보내면 그게 곧 재마운트 트리거라, 종료로 명부에서 수거되는 순간 값이
+              //   떨어지며 **replay 가 오기도 전에** 보존하려던 대화가 지워진다(데몬 ring 은 이미 없다).
+              //   화신 회전은 구독 쪽이 권위 명부로 판정해 비우기 신호로 낸다(protocolClient.observeRoster).
               const renderAs = mode ?? kept?.mode
               switch (renderAs) {
                 case 'dom':
                   // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
                   // 한다(터미널 xterm 은 canvas 라 관측 불가).
-                  return <DomSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={epoch} />
+                  return <DomSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
                 case 'rich':
-                  // epoch 은 재spawn 재구독 트리거.
-                  return <RichSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={epoch} />
+                  return <RichSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
                 case 'terminal':
                 default:
-                  // epoch 을 prop 으로 준다 — 종료 뒤 명부에서 사라지면 TerminalSlot 이 자기 힘으로는
-                  //   epoch 을 못 구해 0 으로 떨어뜨리고, 그 자리에서 터미널 버퍼가 reset 된다.
-                  return (
-                    <TerminalSlot key={node.id} viewId={node.id} agentId={slotAgentId!} epoch={epoch} />
-                  )
+                  return <TerminalSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
               }
             })()
           )

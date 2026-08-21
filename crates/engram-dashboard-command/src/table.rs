@@ -357,7 +357,7 @@ where
 ///
 /// ★blocking 계약(호출자가 지킬 것)★: 본문은 **첫 poll 에서 끝까지 돈다**. 조립부가 async 런타임
 /// 스레드에서 폴링하면 그 스레드를 막는다 — 에이전트 제어 동사들은 프로필 락을 쥔 채 디스크를 쓰고
-/// resume 조기 종료를 폴링하므로(daemon `control/agent.rs` 의 같은 계약) `spawn_blocking` 뒤에서 불러야 한다.
+/// resume 조기 종료를 폴링하므로(daemon `control/commands.rs` 의 같은 계약) `spawn_blocking` 뒤에서 불러야 한다.
 /// 인자 역직렬화 실패 = `INVALID_ARGUMENT` · 본문 패닉 = `INTERNAL`(답장 없이 끝나지 않는다).
 /// ★스키마와 serde 의 조정은 여기 없다★ — [`CommandTable::call`] 이 선언을 보고 하므로 이 어댑터에
 /// 다시 넣으면 두 자리가 서로 다른 규칙을 갖는다.

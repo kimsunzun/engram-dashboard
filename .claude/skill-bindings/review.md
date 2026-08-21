@@ -14,7 +14,7 @@ code 단계 Adversary(doc-aware breaker)는 다음 불변식 위반을 공격 �
 - **finalize 1회** — `OutputCore.finalized.swap(AcqRel)` — terminal 전이/알림 정확히 1회(pump 단독). (ADR-0005)
 - **락 순서** — sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers clone 후 lock 미보유 send. (ADR-0006)
 - **상태 알림 분담** — 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. 프론트는 `agent-list-updated`로 terminal 판정(status_changed로 판정 금지). (ADR-0005)
-- **epoch 재구독** — 같은 AgentId 맵 교체(restart/fresh fallback)마다 +1 → 프론트 `[agentId, epoch]` 재구독. (ADR-0007)
+- **화신 표식(필드명은 아직 `epoch`)** — 화신마다 새로 뽑는 난수, **비교는 일치/불일치만**(대소로 "더 새 것" 유도 금지). 읽기는 건너뛰고 쓰기는 `0` 자리채움 — 이 비대칭은 의도. (ADR-0163) 재부착 계기는 소켓이 아니라 **권위 명부 관측 단독**이고 구독 deps는 `[viewId, agentId]` — **표식을 넣지 않는다.** (ADR-0164 · 최초 도입 = ADR-0007)
 - **replay→live** — subscribers lock 보유 중 replay 전송(순서 역전 방지) + 프론트 seq dedup.
 - **코어 tauri import 0** — 코어 crate는 Tauri import 금지(ADR-0003). 격리 위반이면 코어가 전송 방식에 묶인 것 = 회귀.
 - **명령 핸들러는 값으로 실패한다** — 패닉으로 죽지 말고 오류를 `CommandError`로 돌려줄 것. 근거·귀결(릴리즈 프로필) 정본 = `docs/process/S20-command-bus/trd.md` §4-⑨.

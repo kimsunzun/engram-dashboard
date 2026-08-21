@@ -1,9 +1,10 @@
 //! `/control/agent` 입구(ADR-0132 결정 6) — CLI 동사를 **명령 표**로 배달하는 어댑터(ADR-0155).
 //!
-//! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 `agent.<verb>` 를 표에서 찾아 부른다.
-//!   동사 본문은 이 파일에 없다 — `agent.*` 의 선언과 본문은 **core 가 소유**하고(선언이 사는 곳이 곧
-//!   주인), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 입구 인자 검문(ADR-0157)
-//!   (c) 표의 결말 → wire 봉투. 표가 아직 안 꽂혔을 때의 503 은 HTTP 어댑터 몫이다(`mcp_server`).
+//! ★역할★: CLI(`engram agent …`)가 POST 한 `{verb, …}` 를 받아 `agent.<verb>` 를 표의 공통 입구
+//!   (`commands::call_daemon_command`)에 넘긴다. 동사 본문도 검문도 이 파일에 없다 — `agent.*` 의 선언과
+//!   본문은 **core 가 소유**하고(선언이 사는 곳이 곧 주인) 검문·실행은 그 공통 입구가 하며(버스 배달과
+//!   **같은 함수**다), 여기가 더하는 것은 셋뿐이다: (a) `{verb}` → 명령 이름 (b) 이 표면의 어휘로 쓰는
+//!   회복 안내 (c) 표의 결말 → wire 봉투. 표가 아직 안 꽂혔을 때의 503 은 HTTP 어댑터 몫이다(`mcp_server`).
 //!
 //! ★이 라우트는 전원 개방이다(ADR-0132 결정 5)★: 스폰된 에이전트는 백엔드와 무관하게 `engram` 배선을
 //!   받으므로 여기 닿는다. 그 배선이 **우편 CLI 도 함께** 깐다는 것은 사실이고(실행파일이 하나라 계열
@@ -13,10 +14,11 @@
 //! ★`kill`·`rm` 이 없는 것도 미구현이 아니다★ — `CLI_AGENT_VERBS` 주석이 정본(ADR-0122 미해소).
 //!
 //! ★입력 규율은 층이 둘이다(ADR-0157)★
-//!   - **모르는 칸·빠진 필수 칸은 이 입구가 거절한다.** 사람·LLM 이 방금 친 것이 오는 자리라 「모르는
-//!     칸 = 오타」로 읽어도 안전하다. `parnet` 오타를 흘려보내면 `move … --parent lead` 가 **루트로 떼기**로
-//!     조용히 바뀐다. 판정 목록은 손으로 두지 않고 **선언에서 파생**한다(`CommandTable::check_args`) —
-//!     사본을 두면 동사를 하나 늘릴 때마다 두 곳이 갈리고, 갈린 쪽이 조용히 통과시킨다.
+//!   - **모르는 칸·빠진 필수 칸은 거절된다** — 판정 자체는 공통 입구가 한다(`call_daemon_command`).
+//!     사람·LLM 이 방금 친 것이 오는 자리라 「모르는 칸 = 오타」로 읽어도 안전하다. `parnet` 오타를
+//!     흘려보내면 `move … --parent lead` 가 **루트로 떼기**로 조용히 바뀐다. 판정 목록은 손으로 두지 않고
+//!     **선언에서 파생**한다(`CommandTable::check_args`) — 사본을 두면 동사를 하나 늘릴 때마다 두 곳이
+//!     갈리고, 갈린 쪽이 조용히 통과시킨다.
 //!   - **공백 값·부재/`null` 의 구분은 표 쪽(core `agent::commands`)이 본다.** 어느 칸이 그런지는 동사마다
 //!     다르고, 그 판정은 동사 본문과 한 집에 있어야 둘이 갈리지 않는다.
 //!
@@ -29,9 +31,8 @@
 // ADR-0155
 // ADR-0157
 
-use engram_dashboard_command::{CommandError, CommandFuture, CommandTable, ErrorCode};
+use engram_dashboard_command::{CommandError, CommandTable, ErrorCode};
 use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
-use futures_util::FutureExt as _;
 
 use super::ingress::ControlQueryResult;
 
@@ -39,8 +40,9 @@ use super::ingress::ControlQueryResult;
 ///
 /// ★왜 포트인가★: 실제 통지는 전-연결 팬아웃으로 `ProfileListUpdated` 를 미는 것인데, 그 조립은
 ///   `connection_core` 소유다. `control/` 이 그쪽을 직접 부르면 데몬 층 결정(ADR-0130)이 재론 대상이 되므로
-///   (이 디렉토리의 나가는 간선 0 이 추적 중인 성질이다) 소비자인 여기가 좁은 trait 만 소유하고 실물
-///   어댑터는 조립부가 준다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
+///   (이 디렉토리의 **나가는 간선 수**가 그 결정의 재론 트리거 ② 다 — 「0 건」은 2026-08-05 실측이고 지금은
+///   `command_delivery`·`command_roster` 둘이 있다) 소비자인 여기가 좁은 trait 만 소유하고 실물 어댑터는
+///   조립부가 준다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
 /// ★이게 없으면 나는 증상★: 에이전트가 이름을 바꾸거나 형제를 띄워도 대시보드 트리는 **무관한 이벤트가
 ///   올 때까지 옛 명부를 보여 준다**(조용한 stale).
 /// ★부르는 쪽은 표다★ — 명부를 바꾼 동사가 통지까지 책임진다(core `agent::commands::RosterChanged`).
@@ -88,7 +90,8 @@ pub struct AgentRequest {
 pub struct CommandArgs(serde_json::Map<String, serde_json::Value>);
 
 impl CommandArgs {
-    fn into_value(self) -> serde_json::Value {
+    /// 이웃 `catalog` 의 전체 이름 호출도 같은 칸 규율(중복 키 반려)을 쓰므로 함께 본다.
+    pub(super) fn into_value(self) -> serde_json::Value {
         serde_json::Value::Object(self.0)
     }
 }
@@ -150,52 +153,13 @@ pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResu
     let name = format!("{CLI_GROUP_AGENT}.{}", req.verb);
     let mut args = req.args.into_value();
 
-    // 표에 없는 이름은 **인자 검문보다 먼저** 갈라낸다: `check_args` 는 모르는 이름을 통과시키므로(대조할
-    //   선언이 이 표에 없다) 순서를 뒤집으면 오타 동사가 "인자 이상 없음" 을 지나 여기까지 온다.
-    if !table.contains(&name) {
-        return unknown_verb(&req.verb);
+    // ★검문·실행은 이웃 `commands` 의 공통 입구가 한다★ — 이 라우트가 표를 직접 부르면 버스 배달과
+    //   **다른 검문**을 갖게 되고, 두 입구 중 하나만 ADR-0157 을 지키는 상태가 된다.
+    match super::commands::call_daemon_command(table, &name, &mut args, "cli") {
+        None => unknown_verb(&req.verb),
+        Some(Ok(payload)) => ControlQueryResult::Ok(payload),
+        Some(Err(e)) => refused(e),
     }
-    // ADR-0157: 사람·LLM 이 치는 입구라 선언에 없는 칸·빠진 필수 칸을 거절한다. 홉 간 배선은 관용이므로
-    //   (`route` 는 이것을 안 부른다) 이 호출을 배달 경로로 옮기지 말 것 — additive 진화가 죽는다.
-    if let Err(rejection) = table.check_args(&name, &args) {
-        return refused(rejection);
-    }
-    let Some(future) = table.call(&name, &mut args) else {
-        // 바로 위 `contains` 를 통과했다 — 표는 이 호출 동안 불변이라 여기 오지 않는다.
-        return unknown_verb(&req.verb);
-    };
-    match run_here(future, &name) {
-        Ok(payload) => ControlQueryResult::Ok(payload),
-        Err(e) => refused(e),
-    }
-}
-
-/// 표가 준 future 를 **이 스레드에서** 끝낸다.
-///
-/// ★실행기를 두지 않는 근거★: 이 표의 핸들러는 전부 `blocking_handler` 라 본문이 **첫 poll 에서 끝까지
-///   돈다**(도구 crate 가 그것을 계약으로 적었다). 이미 blocking 풀 위에 있으므로 여기서 async 런타임을
-///   다시 부르면 blocking 경계가 두 겹이 된다.
-/// ★계약이 깨지면 조용히 성공하지 않는다★: 진짜 async 핸들러가 표에 들어오면 첫 poll 이 `Pending` 이고,
-///   그때 이 어댑터는 답을 지어내는 대신 `OUTCOME_UNKNOWN` 으로 드러낸다.
-/// ★`INTERNAL` 이 아니다★: 그 코드는 `retry: never` = **이 홉에서 확실히 실패했다**는 뜻인데, 첫 poll 이
-///   이미 일의 일부를 적용했을 수 있다(그리고 폐기되는 future 는 나머지를 안 돌린다). 확실성은 「불명」이라
-///   같은 request_id 로만 다시 묻게 해야 한다(TRD §4-④ · 도구 crate 의 전달 패닉이 같은 코드를 쓴다).
-/// ★타입이 강제하지 않는 계약이라 계측한다★: 이 갈래는 표에 async 핸들러가 들어오는 순간에만 나고, 그때
-///   증상은 오류 답장 하나뿐이라 로그가 없으면 원인을 못 찾는다.
-fn run_here(future: CommandFuture, name: &str) -> Result<serde_json::Value, CommandError> {
-    future.now_or_never().unwrap_or_else(|| {
-        tracing::error!(
-            entrance = "cli",
-            command = name,
-            "명령이 첫 poll 에서 끝나지 않았다 — 이 입구는 blocking 핸들러만 몬다(표에 async 핸들러가 들어왔다)"
-        );
-        Err(CommandError::of(
-            ErrorCode::OutcomeUnknown,
-            format!(
-                "'{name}' did not finish on its first poll — this entrance only drives blocking handlers, so part of it may already have been applied"
-            ),
-        ))
-    })
 }
 
 /// 표의 실패 → wire 봉투.
@@ -259,12 +223,42 @@ const PREVIEW_CHARS: usize = 80;
 /// ★반려 문구 전체에 대한 상한은 **없다**(알려진 열린 조건)★ — 이 함수를 안 거치고 호출자 문자열을 싣는
 /// 생산 지점이 이 라우트에도 이웃 라우트에도 있고, 그것들은 길이 그대로 나간다. 그 축은 이 조각의 범위가
 /// 아니다. **여기에 「모든 문구가 어딘가에서 잘린다」는 문장을 쓰지 말 것** — 네 판 연속 거짓이었다.
-fn preview(text: &str) -> String {
-    let mut head: String = text.chars().take(PREVIEW_CHARS).collect();
-    if head.len() < text.len() {
-        head.push_str(&format!("…(truncated, {} bytes)", text.len()));
+///
+/// ★**로그 필드에 쓰지 말 것 — 이 함수는 길이만 보고 모양은 안 본다**★
+///
+/// 제어문자를 escape 하지 않으므로, 개행을 넣은 이름 하나가 로그 줄을 둘로 쪼개고 뒤 줄이 우리가 찍은
+/// 항목처럼 보인다(타임스탬프·레벨을 흉내 낸 문자열을 그 자리에 앉힐 수 있다). 80자 안에도 그 조립은
+/// 들어간다. 그리고 escape 를 여기 더하는 것도 답이 아니다 — 이 함수의 산출물은 **호출자에게 되돌려 주는
+/// 문구**이고, 그쪽에서는 값이 원문 그대로 보여야 호출자가 자기가 친 것을 알아본다.
+/// ★그래서 이 crate 의 갈림은 **목적지**로 정해져 있다(사용자 대면 문구 = 여기 · 로그 필드 =
+/// `connection_core::sanitize_for_log`)★. `command_delivery` 는 이미 그 쪽을 쓴다(`deliver` 첫 줄).
+/// 이 규율이 한 번 깨져 `/control/call` 의 검증 **전** 반려 로그가 임의 문자열을 그대로 실은 적이 있다.
+/// ★반대 방향의 예외가 하나 있다 — 알고 남긴 것이다★: 등록 반려 문구는 **응답인데도** 로그 손질기를 쓴다
+/// (`connection_core::ConnectionCore::refuse_names_i_answer`). 사유는 그 자리 주석이 정본이고 요지는 두 줄
+/// 이다 — 받는 쪽이 사람이 아니라 프로그램이라 그 값이 **상대 로그**로 흘러가고, 원문 대조가 필요한 축이
+/// 거기 없다(클라이언트 코드가 만든 패킷이다). 즉 갈림의 축은 「응답이냐 로그냐」가 아니라 **「사람이 친
+/// 값을 사람에게 되보이나」**이고, 이 doc 의 위 문장은 그 흔한 경우를 가리킨다.
+pub(super) fn preview(text: &str) -> String {
+    preview_within(text, PREVIEW_CHARS)
+}
+
+/// **양 끝을 남기고 가운데를** 줄인다 — 조각이 아니라 문구 하나 전체를 실을 때 쓴다.
+///
+/// ★[`preview`](머리만 남김)를 그런 자리에 쓰면 안 된다★: 표가 준 반려 문구는 호출자가 친 것을 **앞**에,
+/// 다음에 할 일(선언된 칸 전량)을 **뒤**에 둔다(`CommandTable::check_args` 의 레이아웃). 머리만 남기면
+/// 잘려 나가는 것이 정확히 그 「할 일」이라, 호출자는 자기 칸이 틀렸다는 말만 듣고 맞는 칸은 하나도 못 본다.
+/// ★그래도 상한이 필요한 이유★: 이 자리에 오는 문구가 전부 자기 입력을 캡하지는 않는다 —
+/// `commands::drive_to_completion` 은 호출자가 보낸 명령 이름을 **원문 그대로** 문구에 넣는다.
+/// 자를 때 **잘랐다고 말하는 것**은 형제와 같다.
+pub(super) fn preview_within(text: &str, chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= chars {
+        return text.to_string();
     }
-    head
+    let head_chars = chars / 2;
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text.chars().skip(total - (chars - head_chars)).collect();
+    format!("{head}…(truncated, {} bytes)…{tail}", text.len())
 }
 
 /// 바디 자체가 JSON 계약을 못 지킨 경우의 반려 — 어댑터가 부른다(`control_agent_handler`).
