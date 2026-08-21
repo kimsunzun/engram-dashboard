@@ -582,7 +582,8 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub cols: u16,
     pub rows: u16,
-    /// 재spawn마다 +1. 프론트가 `[agentId, epoch]`로 재구독하는 트리거(S9 §18-a).
+    /// 화신마다 새로 뽑는 난수 표식 — 순서 증분이 아니다(ADR-0163). 프론트 재구독 deps 에는 넣지
+    /// 않는다(ADR-0164 결정 8, 옛 서술 S9 §18-a는 낡았다).
     pub epoch: u32,
     pub capabilities: Capabilities,
     /// 이 에이전트가 **편지를 읽는 주체**인가(= 우편 수신자 명단 자격). 세션이 spawn 때 backend 에서

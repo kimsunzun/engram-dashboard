@@ -99,8 +99,8 @@ pub fn decide_epoch(st: &SubState, frame_epoch: u32) -> EpochDecision {
 /// ★버그 B 가드(유지)★: `replay_from` 은 "데몬이 보내는 첫 seq"이지 "마지막으로 본 seq"가 아니다 —
 /// dedup 기준으로 쓰면 첫 정상 프레임을 버린다. 그래서 이 함수는 replay_from 을 인자로 받지 않는다.
 ///
-/// ★epoch 변경(ADR-0007 epoch 재구독 대응)★: epoch 이 바뀌면(데몬 재기동·에이전트 재시작) 새 스트림이다 —
-/// 재구독은 프론트 `[agentId, epoch]` remount 가 걸고, 이 함수는 SubState.epoch 만 새 값으로 넘긴다.
+/// ★epoch 변경(ADR-0007 최초 도입 · 화신 표식 의미=ADR-0163 · 재부착 계기=ADR-0164)★: epoch 이 바뀌면(데몬 재기동·에이전트 재시작) 새 스트림이다 —
+/// 재구독은 프론트가 권위 명부 관측(`observeRoster`)으로 걸고, 구독 deps `[viewId, agentId]`는 화신 표식을 의도적으로 제외한다(ADR-0164 결정 8). 이 함수는 SubState.epoch 만 새 값으로 넘긴다.
 pub fn apply_subscribe_ack(st: &mut SubState, current_epoch: u32) -> bool {
     let epoch_changed = match st.epoch {
         Some(prev) => current_epoch != prev,

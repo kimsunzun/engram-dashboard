@@ -179,8 +179,9 @@ pub struct AgentProfile {
     ///   덮어써 프로필·세션 id·트리 부모가 통째로 사라진다(이 빌드를 한 번 돌린 뒤 되돌리기·재설치하는
     ///   경로에서 실제로 성립한다). `0` 인 이유 = 옛 카운터의 "한 번도 재spawn 안 함" 상태라 옛
     ///   바이너리가 그대로 믿어도 무해하다 — 산 난수를 실어 보내면 그게 카운터 자리에 앉는다.
-    /// 프론트는 이 값을 `[agentId, epoch]` 재구독 트리거로 쓴다.
-    // ADR-0007
+    /// 프론트 구독 deps 에는 이 값을 넣지 않는다 — 재부착 계기는 화신 표식이 아니라 권위 명부
+    /// 관측이다(ADR-0164 결정 8).
+    // ADR-0007, ADR-0163, ADR-0164
     #[serde(skip_deserializing, serialize_with = "serialize_zero_placeholder")]
     pub epoch: u32,
 

@@ -9,8 +9,9 @@ export type AgentInfo = { id: string,
 name: string, cwd: string, status: AgentStatus, cols: number, rows: number, 
 /**
  * ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 화신마다 새로 뽑은 난수라 **순서에 뜻이
- * 없다**. 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것). 받는 쪽은 이 값으로
- * 재구독 트리거(`[agentId,epoch]`)와 "지금 읽는 출력 스트림이 아까 그 스트림인가" 를 판정한다.
+ * 없다**. 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것, ADR-0163). 받는 쪽은 이
+ * 값으로 "지금 읽는 출력 스트림이 아까 그 스트림인가" 를 판정한다 — 재구독 계기·deps 는 이
+ * 필드가 아니라 권위 명부 관측이다(ADR-0164 결정 8).
  * 데몬 프로세스를 넘겨 살지 않는다 — 재기동하면 같은 에이전트도 다른 표식으로 돌아온다.
  */
 epoch: number, capabilities: Capabilities, };

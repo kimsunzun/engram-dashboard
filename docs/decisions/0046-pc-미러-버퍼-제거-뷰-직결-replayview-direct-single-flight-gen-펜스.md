@@ -1,7 +1,7 @@
 # ADR-0046: PC 미러 버퍼 제거 — 뷰 직결 replay(view-direct) + single-flight gen 펜스
 
-- 상태: 확정 (2026-07-05, 근거: medium 리서치(grounding+Codex 적대) + `/review trd deep` 3라운드 + 사용자 결정)
-- 관련: Supersedes ADR-0040 · Amends ADR-0037 (dedup/진도 거처 조항: Rust 단독 → 웹뷰 뷰 단위) · Amends ADR-0007 (프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 채택) · Amends ADR-0043 (deliverable gate 메커니즘: 미러 cursor 게이트 폐기 → 뷰 buffering phase + gen 펜스로 대체) · ADR-0029(데몬 데이터 소유) · ADR-0041/0042(BLOCK-1·axis A 계승) · TRD `docs/process/S16-view-direct-replay/view-direct-replay-trd.md`(rev4) · 리서치 2026-07-05
+- 상태: 확정 (2026-07-05, 근거: medium 리서치(grounding+Codex 적대) + `/review trd deep` 3라운드 + 사용자 결정) · 부분 폐기 by ADR-0164 (결정 2 의 재연결 계기 조항)
+- 관련: Supersedes ADR-0040 · Amends ADR-0037 (dedup/진도 거처 조항: Rust 단독 → 웹뷰 뷰 단위) · Amends ADR-0007 (프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 채택) · Amends ADR-0043 (deliverable gate 메커니즘: 미러 cursor 게이트 폐기 → 뷰 buffering phase + gen 펜스로 대체) · ADR-0029(데몬 데이터 소유) · ADR-0041/0042(BLOCK-1·axis A 계승) · TRD `docs/process/S16-view-direct-replay/view-direct-replay-trd.md`(rev4) · 리서치 2026-07-05 · Amended by ADR-0164 (결정 2 의 재연결 계기 조항)
 
 ## 맥락
 src-tauri 중계 허브가 데몬 ring을 미러(`AgentBufferStore`/`OutputViewStore`, ADR-0040)하고 per-view cursor로 fan-out하는 구조에서 동기화 버그가 3건 연속 발생했다: 리로드 replay 유실(ca3f325), split/remount 고착(23a8c47 resync_output 증상 대응), 다중 slot 공유 유실(버그 B — lastDeliveredSeq가 agentId 단위). 셋 다 "데몬이 이미 가진 데이터를 클라가 한 벌 더 미러하고 그 둘을 맞추려다" 생기는 한 계열이다. ADR-0040은 미러 유지를 "메모리 중복 ~2MB라 실익 작음"으로 정당화했으나 실제 비용은 메모리가 아니라 **동기화 복잡도**였음이 실증됐다. 사용자 결정(2026-07-05): PC(loopback)는 미러 제거·데몬 직수신, 모바일/원격만 캐싱(transport seam 분기).

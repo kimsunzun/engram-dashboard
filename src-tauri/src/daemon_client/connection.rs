@@ -1268,7 +1268,8 @@ pub fn apply_replay_event(
     match ev {
         // ★구독 ack★: SubState.epoch 갱신(binary 팔 decide_epoch 의 기준) + in-flight 를 acked 로 전이 +
         //   truncated 기억(성공 마커에 전파) + 진행(deadline 리셋). ★ADR-0046: 버퍼/커서 reset 없음★ —
-        //   epoch 전환 재구독은 프론트 `[agentId, epoch]` remount 가 담당한다.
+        //   epoch 전환 재구독은 프론트의 권위 명부 관측(observeRoster)이 담당한다(ADR-0164 결정 8) —
+        //   구독 deps `[viewId, agentId]`는 화신 표식을 의도적으로 제외한다.
         // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로 창 render_seq 를 리셋했으나, 미러
         //   버퍼 제거(ADR-0046)로 진도 상태가 src-tauri 에 없다 → 리셋 대상이 없다. epoch 채택은 프론트가
         //   성공 마커 epoch 로 한다(gen 펜스).

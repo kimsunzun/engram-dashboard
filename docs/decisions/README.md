@@ -54,7 +54,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0004](0004-agent-transport-backend-격리.md) | AgentTransport seam + backend 지식 격리 | 확정 |
 | [0005](0005-finalize-1회.md) | finalize 정확히 1회 (pump 단독) | 확정 |
 | [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 |
-| [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — [agentId, epoch] 재구독 원칙은 유지) |
+| [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다 / ADR-0163: 맵 교체마다 epoch +1 증분과 재구독 deps 두 조항) |
 | [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 Failed 로 직행, 자동 fresh 재spawn 없음) |
 | [0009](0009-tauri-2x-핀.md) | tauri 최신 2.x 핀 (Channel 무손실 실측) | 확정 |
 | [0010](0010-cargo-workspace-분리.md) | Cargo workspace 3-crate 분리 | 확정 |
@@ -93,7 +93,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0043](0043-mount-replay-actor-경유-deliverable-게이트-배정등록-fresh-분기.md) | mount-replay = actor 경유 + deliverable 게이트 + 배정·등록 fresh 분기 | 확정 (부분 폐기 by ADR-0046: deliverable gate·미러 cursor 메커니즘 조항: 폐기 → 뷰 buffering phase + gen 펜스로 대체 — mount-replay 원칙 자체는 전량 재replay로 승계) |
 | [0044](0044-json-모드-배선-stdiotransport-신설-바이트-통로-공용-지속-프로세스.md) | JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스 | 확정 (부분 폐기 by ADR-0045: 통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) |
 | [0045](0045-출력-정제를-백엔드로-이동-타입-outputevent를-서버에서-파싱해-wire로-흘림.md) | 출력 정제를 백엔드로 이동 — 타입 OutputEvent를 서버에서 파싱해 wire로 흘림 | 확정 |
-| [0046](0046-pc-미러-버퍼-제거-뷰-직결-replayview-direct-single-flight-gen-펜스.md) | PC 미러 버퍼 제거 — 뷰 직결 replay(view-direct) + single-flight gen 펜스 | 확정 |
+| [0046](0046-pc-미러-버퍼-제거-뷰-직결-replayview-direct-single-flight-gen-펜스.md) | PC 미러 버퍼 제거 — 뷰 직결 replay(view-direct) + single-flight gen 펜스 | 확정 (부분 폐기 by ADR-0164: 결정 2 의 재연결 계기 조항) |
 | [0047](0047-프론트-스타일링-tailwind-css-v4-shadcnlucide-채택-순수-css-기조-전환.md) | 프론트 스타일링 = Tailwind CSS v4 + shadcn/lucide 채택 (순수 CSS 기조 전환) | 확정 (부분 폐기 by ADR-0048: 채팅 UI 렌더 방식: CC룩 네이티브 직접 구현·OSS 참조한정(코드 복붙 아님) → Cline 잎 컴포넌트 verbatim 코드 포트(Apache-2.0 귀속)) |
 | [0048](0048-채팅-렌더-cline-잎-컴포넌트-verbatim-포트-우리-dispatch-react-markdown-스택apache-20-귀속.md) | 채팅 렌더 = Cline 잎 컴포넌트 verbatim 포트 + 우리 dispatch (react-markdown 스택·Apache-2.0 귀속) | 폐기 (Superseded by ADR-0050) |
 | [0049](0049-json-에이전트-thinking-기본-활성화-max-thinking-tokens-백엔드-주입.md) | JSON 에이전트 thinking 기본 활성화 — MAX_THINKING_TOKENS 백엔드 주입 | 확정 |
@@ -195,7 +195,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0145](0145-json-모드-빈-상태-화면-복원-완료-신호-기준-마스코트와-가운데-입력창.md) | JSON 모드 빈 상태 화면 = 복원 완료 신호 기준, 마스코트와 가운데 입력창 | 확정 (부분 폐기 by ADR-0146: 마스코트 임계 높이 접힘) |
 | [0146](0146-빈-상태-마스코트-접힘-폐지-자연-잘림과-svg-렌더.md) | 빈 상태 마스코트 접힘 폐지, 자연 잘림과 SVG 렌더 | 확정 |
 | [0147](0147-전역-리셋-블록-삭제-tailwind-preflight-중복.md) | 전역 리셋은 Tailwind base 계층 안에 둔다 | 확정 |
-| [0148](0148-에이전트가-없는-슬롯은-내용을-고정하고-흐리게-심볼.md) | 에이전트가 없는 슬롯은 내용을 고정하고 흐리게 + 심볼 | 확정 (부분 폐기 by ADR-0149: 에이전트 부재의 단일 판정) |
+| [0148](0148-에이전트가-없는-슬롯은-내용을-고정하고-흐리게-심볼.md) | 에이전트가 없는 슬롯은 내용을 고정하고 흐리게 + 심볼 | 확정 (부분 폐기 by ADR-0149: 에이전트 부재의 단일 판정 / ADR-0165: 문구 없음 조항의 범위를 세 슬롯 공용 막으로 넓힘) |
 | [0149](0149-슬롯의-에이전트-부재를-세-상태로-가른다.md) | 슬롯의 에이전트 부재를 세 상태로 가른다 | 확정 |
 | [0150](0150-명부-주인은-클라이언트가-만든-식별자-끊기면-자취-없이-제거한다.md) | 명부 주인은 클라이언트가 만든 식별자 — 끊기면 자취 없이 제거한다 | 확정 |
 | [0151](0151-crate-분리-판정-기준은-독립적으로-쓸-수-있는가-소비자-수-기준을-대체한다.md) | crate 분리 판정 기준은 독립적으로 쓸 수 있는가 — 소비자 수 기준을 대체한다 | 확정 |
@@ -210,3 +210,6 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0160](0160-에이전트-명령-중계는-제어-라우트를-넓혀-붙인다.md) | 에이전트 명령 중계는 제어 라우트를 넓혀 붙인다 | 확정 (부분 폐기 by ADR-0161: 요청 번호 발급 주체) |
 | [0161](0161-제어-라우트-중계의-요청-번호는-호출자가-낸다.md) | 제어 라우트 중계의 요청 번호는 호출자가 낸다 | 확정 |
 | [0162](0162-중계-재시도는-결과-저장소-대신-상태-조회로-해소한다.md) | 중계 재시도는 결과 저장소 대신 상태 조회로 해소한다 | 확정 |
+| [0163](0163-화신-신원은-순서-없는-난수-표식-읽기는-건너뛰고-쓰기는-0-자리채움.md) | 화신 신원은 순서 없는 난수 표식 — 읽기는 건너뛰고 쓰기는 0 자리채움 | 확정 |
+| [0164](0164-재부착-계기는-소켓이-아니라-권위-명부-구독-deps-에-화신-표식을-넣지-않는다.md) | 재부착 계기는 소켓이 아니라 권위 명부 — 구독 deps 에 화신 표식을 넣지 않는다 | 확정 |
+| [0165](0165-슬롯-부재-표시는-종료-아이콘-하나로-통일하고-막을-세-슬롯이-공유한다.md) | 슬롯 부재 표시는 종료 아이콘 하나로 통일하고 막을 세 슬롯이 공유한다 | 확정 |
