@@ -1,8 +1,12 @@
-//! `window`/`tab`/`slot` 명령 — **선언과 본문이 적용 서비스 옆**에 산다(ADR-0155 결정 1).
+//! 셸이 주인인 명령 표 — `window`/`tab`/`slot` 은 **선언과 본문이 적용 서비스 옆**에 산다(ADR-0155 결정 1).
 //!
 //! 사람 클릭(`commands/layout.rs` 의 `#[tauri::command]`)과 중계된 LLM 호출(인바운드 수신기)이 **같은
 //! 적용 서비스**(`super::apply`)에 떨어진다 — 이 파일은 그 서비스로 가는 **두 번째 껍데기**이지 두 번째
 //! 제어 표면이 아니다(ADR-0081 결정 3 · 「거부한 대안」의 `ViewManager` 직접 호출을 여기서도 하지 않는다).
+//!
+//! ★레이아웃 밖의 셸 명령도 여기 선다★ — `ui.refresh` 는 레이아웃을 안 건드리지만 **셸이 주인인 이름**이라
+//! 이 표에 든다. 두 번째 선언 블록을 만들면 등록 패킷·세대 번호·중복 검사가 표마다 갈린다(매크로 제약도
+//! 「모듈 하나에 블록 하나」다). 그 대신 포트는 자기 것을 따로 든다([`LayoutPorts::ui_settings`]).
 //!
 //! 진입점: [`make_table`](fn.make_table.html)(조립) · [`LayoutPorts`](struct.LayoutPorts.html)(주입 seam).
 //!
@@ -38,19 +42,25 @@ use super::{
     AgentSpawner, LabelSource, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync,
     WindowHost,
 };
+use crate::ui_settings::UiSettingsRefresh;
 
 // ★이름은 프론트 레지스트리가 **오늘 등록한 id** 를 그대로 쓴다★: `tab.create`·`slot.focus`·`slot.popout`·
 //   `layout.setSlotContent`·`agent.spawnInto` 는 `src/commands/*Commands.ts` 에 실재하는 id 다(실측
 //   2026-08-17). 여기서 다른 철자를 지으면 같은 동작에 이름이 둘이 되고, 화면 몫 등록(TRD §6 Step 4 —
 //   그 id 를 바꾸지 않는다고 적은 자리)이 그 둘을 다 지고 간다.
-// ★새로 짓는 이름은 셋뿐★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다)와 `slot.split`(프론트는
-//   방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만, 버스에서는 방향이
-//   **인자**다 — 그래야 호출자가 방향을 값으로 고른다).
-// ★세대 2 = `slot.popout` 이 들어온 세대★. 선언이 바뀌면 손으로 올린다(매크로 계약 — `declare_commands!`
-//   의 `CATALOG_VERSION` 항목). 안 올리면 어휘가 다른 두 셸이 같은 세대를 보고해 진단이 거짓말을 한다.
+// ★프론트에 짝이 없어 새로 짓는 이름은 넷★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다) ·
+//   `slot.split`(프론트는 방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만,
+//   버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) · `ui.refresh`(프론트에 대응 명령이
+//   없다 — 프론트가 가진 `theme.set`/`theme.toggle` 은 파일을 안 본다).
+// ★세대 4 = `ui.refresh` 의 답에 `source` 가 붙은 세대★(세대 3 = `ui.refresh` 자체 · 세대 2 =
+//   `slot.popout`). ★이름이 늘 때만 올리는 번호가 아니다★ — **선언이 바뀌면** 올린다(답 모양도 선언이다).
+//   매크로 계약 = `declare_commands!` 의 `CATALOG_VERSION` 항목. 안 올리면 어휘가 다른 두 셸이 같은 세대를
+//   보고해 진단이 거짓말을 한다.
 //   ★분기 재료가 아니다★ — 받는 쪽이 이 번호로 거절하면 그게 틀린 것이다(`CommandEnvelope::proto_ver`).
+//   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
+//   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 2;
+    catalog_version: 4;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -66,6 +76,19 @@ declare_commands! {
     enum SplitDirection {
         LeftRight,
         TopBottom,
+    }
+
+    /// 적용된 테마가 어디서 왔나 — `File` = 파일에 적힌 그대로, `Fallback` = 못 써서 기본값으로 접힘.
+    ///
+    /// ★`theme` 만으로는 못 가르는 것을 가른다★: 「파일에 dark 라고 적혀 있다」와 「네 값이 반려돼 dark 로
+    /// 접혔다」가 같은 `theme` 을 낸다. 접힌 **사유**(없음·못 읽음·깨짐·모르는 이름·상한 초과)는 여기 안
+    /// 싣는다 — 그건 앱 로그가 지고, 올리면 호출자가 사유별 분기를 짜 그 다섯이 계약이 된다.
+    ///
+    /// 셸 안쪽 쌍둥이는 `crate::ui_settings::ThemeSource` 다(`SplitDirection`↔`SplitDir` 과 같은 관계 —
+    /// 선언 매크로가 남의 타입을 못 실어서 생긴 번역이지 다른 계약이 아니다).
+    enum ThemeOrigin {
+        File,
+        Fallback,
     }
 
     /// 슬롯에 무엇을 담나 — `Agent` 만 `agent_id` 를 함께 받는다.
@@ -237,13 +260,29 @@ declare_commands! {
     } -> ok SlotResolveSpatialOk {
         slot_id: Option<String>,
     } errors [CONFLICT];
+
+    /// 디스크의 UI 설정(`<data_dir>/ui-settings.json`)을 다시 읽어 화면에 적용한다 — 지금은 테마 한 칸.
+    /// 답의 theme 은 **적용된** 값이고, source 가 그것이 파일에서 온 것인지 접힌 것인지 말한다.
+    /// 파일이 없거나 깨졌으면 오류가 아니라 `{theme:"dark", source:"Fallback"}` 이 돌아온다 — 사유는 앱 로그.
+    /// ★오류가 되는 자리는 하나뿐이다★ — 창에 알림을 못 보낸 경우(INTERNAL). 그때는 어느 창에도 안 닿았다.
+    /// ★적용은 값 교체뿐이다★ — 슬롯을 다시 마운트하지 않는다(챗은 컴포넌트 상태라 리마운트 = 대화 영구
+    /// 소실, ADR-0149).
+    #[effect(Write)]
+    #[since(3)]
+    "ui.refresh" => args UiRefreshArgs {}
+                 -> ok   UiRefreshOk { theme: String, source: ThemeOrigin }
+                 errors [];
 }
 
-/// 레이아웃 명령이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
+/// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
 ///
-/// 포트 넷의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가 소유한다 — 이 구조체는 그것을
+/// 앞 다섯의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가 소유한다 — 이 구조체는 그것을
 /// **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로 바꾼 것이 차이의
 /// 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
+///
+/// ★이름이 `Layout` 인데 레이아웃 밖 포트가 하나 있다★(`ui_settings`) — 표가 하나라 포트 묶음도 하나다
+/// (사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트는 적용 서비스를 안 거치고 자기
+/// 모듈(`crate::ui_settings`)만 부르므로 위 락 규율과 무관하다.
 pub struct LayoutPorts {
     pub state: LayoutState,
     pub subs: Arc<dyn SubscriptionSync>,
@@ -251,9 +290,10 @@ pub struct LayoutPorts {
     pub windows: Arc<dyn WindowHost>,
     pub labels: Arc<dyn LabelSource>,
     pub spawner: Arc<dyn AgentSpawner>,
+    pub ui_settings: Arc<dyn UiSettingsRefresh>,
 }
 
-/// 셸의 레이아웃 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
+/// 셸의 명령 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
 ///
 /// ★명령이 늘어도 조립부(`lib.rs`)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
 // ADR-0155
@@ -350,6 +390,12 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         &mut table,
         "slot.resolveSpatial",
         blocking_handler(move |args: SlotResolveSpatialArgs| verb_resolve_spatial(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "ui.refresh",
+        blocking_handler(move |_: UiRefreshArgs| verb_ui_refresh(&p)),
     );
     // ★유일한 async 핸들러★ — 스폰이 데몬 왕복이라 `blocking_handler` 로 감쌀 수 없다(그 어댑터는 본문이
     //   첫 poll 에서 끝까지 도는 것을 계약으로 삼는다).
@@ -599,6 +645,27 @@ fn verb_resolve_spatial(
     let slot = apply::resolve_spatial(&ports.state, token, window, view).map_err(not_applied)?;
     Ok(SlotResolveSpatialOk {
         slot_id: slot.map(|id| id.to_string()),
+    })
+}
+
+/// ★`blocking_handler` 안에서 디스크를 읽는다★ — 그 어댑터는 본문이 첫 poll 에서 끝까지 도는 것을 계약으로
+/// 삼는다. 로컬 파일 한 칸을 한 번 읽는 것이라 여기 두지만, 읽을 것이 늘어 대기가 생기면 `SpawnInto` 쪽
+/// (async 핸들러) 형태로 옮겨야 한다 — 그러지 않으면 연결 태스크가 아니라 **적용 태스크**가 그 시간만큼 묶인다.
+fn verb_ui_refresh(ports: &LayoutPorts) -> Result<UiRefreshOk, CommandError> {
+    // ★알림을 못 보냈으면 실패로 돌려준다★ — 값은 정해졌어도 화면에 안 닿았고, 이 명령이 하는 일은 그
+    //   알림뿐이다. 성공으로 답하면 호출자는 자기 편집이 반영된 줄 안다(`source` 는 값의 출처를 말하지
+    //   화면이 바뀌었는지를 말하지 않는다). `INTERNAL` 은 표가 자동으로 광고하므로 선언은 안 바뀐다.
+    let loaded = ports
+        .ui_settings
+        .refresh()
+        .map_err(CommandError::internal)?;
+    Ok(UiRefreshOk {
+        theme: loaded.theme.as_wire().to_string(),
+        // 갈래를 여기서 만들지 않는다 — 읽기 쪽이 이미 정한 것을 wire 어휘로 옮기기만 한다.
+        source: match loaded.source {
+            crate::ui_settings::ThemeSource::File => ThemeOrigin::File,
+            crate::ui_settings::ThemeSource::Fallback => ThemeOrigin::Fallback,
+        },
     })
 }
 

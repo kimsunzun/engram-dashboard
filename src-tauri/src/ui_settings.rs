@@ -1,0 +1,379 @@
+//! 디스크의 UI 설정(`<data_dir>/ui-settings.json`) — ★셸은 이 파일을 읽기만 한다★.
+//!
+//! 소유: 파일 위치 · 원문→값 변환 · 못 읽거나 깨졌을 때의 기본값. 진입점은 [`load_theme`](fn.load_theme.html)
+//! (seam 위)과 [`parse_theme`](fn.parse_theme.html)(순수).
+//!
+//! ## ★쓰기 경로가 없는 것은 의도다(되살리지 마라)★
+//! 파일은 **밖의 에이전트가 직접 고친다**. 그래서 화면의 테마 토글(`src/commands/themeCommands.ts`)은
+//! 지금처럼 인메모리로 남고, 다음 `ui.refresh` 가 그 토글을 덮어쓴다. 이 비대칭은 파일럿 범위로 알고
+//! 남긴 것이다 — 「토글도 저장하게」 고치면 밖의 편집자와 화면이 같은 파일을 두고 경합하게 되고,
+//! 그 조정(누가 마지막 쓴 사람인가)은 이 파일럿이 다루지 않는다.
+//!
+//! ## ★`.corrupt` 사이드카를 만들지 않는다★
+//! 에이전트 명부는 잃으면 되살릴 수 없어 깨진 원본을 옆에 남기지만, 이 파일에는 되살릴 것이 없다
+//! (한 칸짜리 취향값이고 밖에서 다시 쓰면 그만이다). 깨졌으면 로그 한 줄과 기본값이 전부다.
+//! ★사본을 안 남기는 것과 로그 레벨은 별개다★ — 파싱 실패는 그래도 손상 신호라 `error` 로 나간다
+//! ([`load_theme`] · 정본 `docs/reference/logging-conventions.md`).
+//!
+//! ## ★원문 크기 상한이 있다★
+//! 밖의 에이전트가 쓰는 파일이라 크기가 우리 손에 없다. 통째로 읽고 나서 재면 상한 검사가 도착하기 전에
+//! 메모리가 먼저 바닥나 **기본값 접기도 경고도 못 돌고 프로세스가 죽는다** — 그래서 읽는 양 자체를
+//! [`MAX_SETTINGS_BYTES`] 에서 끊는다([`read_capped`]).
+//!
+//! ## ★한 칸(`theme`)만 읽는 것도 의도다★
+//! 파일럿이라 어휘를 넓히지 않는다. 칸을 늘릴 때는 [`parse_theme`] 을 늘리는 것이 아니라 값 타입을
+//! 세우고 그 아래에 칸을 붙인다 — 지금 모양은 「키 하나를 꺼내 본다」이지 스키마가 아니다.
+
+use std::path::{Path, PathBuf};
+
+/// 데이터 폴더 안 파일 이름 — 밖의 에이전트가 이 이름으로 찾는다.
+pub const UI_SETTINGS_FILE: &str = "ui-settings.json";
+
+/// 읽기·파싱이 실패한 자리에서 쓰는 값. ★실패 종류를 가르지 않고 전부 이 값으로 접는다★.
+pub const DEFAULT_THEME: UiTheme = UiTheme::Dark;
+
+/// 화면 테마 — 세 값이 전부다.
+///
+/// ★`EInk` 를 빼지 말 것★: e-ink 는 밝기 변형이 아니라 **색을 무력화하는** 별도 의도라 dark/light 로
+/// 접히지 않는다(ADR-0062).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTheme {
+    Dark,
+    Light,
+    EInk,
+}
+
+impl UiTheme {
+    /// 프론트가 `document.documentElement` 의 `data-theme` 에 그대로 박는 문자열.
+    ///
+    /// ★`src/styles/theme.css` 의 `:root[data-theme='…']` 셀렉터와 **같은 철자**여야 한다★ — 어긋나면
+    /// 오류 하나 없이 스타일만 안 붙어서, 화면만 보고는 철자가 틀린 것인지 파일이 안 읽힌 것인지 모른다.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            UiTheme::Dark => "dark",
+            UiTheme::Light => "light",
+            UiTheme::EInk => "e-ink",
+        }
+    }
+
+    fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "dark" => Some(UiTheme::Dark),
+            "light" => Some(UiTheme::Light),
+            "e-ink" => Some(UiTheme::EInk),
+            _ => None,
+        }
+    }
+}
+
+/// 적용된 값이 어디서 왔나 — ★두 갈래뿐이다★.
+///
+/// 호출자의 질문은 「내가 고친 값이 먹었나」 하나이고, 그 답에 필요한 것은 이 둘이다. **왜** 접혔는지
+/// (파일 없음 · 못 읽음 · JSON 깨짐 · 모르는 이름 · 상한 초과)는 밖으로 내보내지 않는다 — 그 다섯은
+/// 로그가 진다([`load_theme`]). 다섯을 wire 로 올리면 호출자가 사유별 분기를 짜기 시작하고, 그 순간
+/// 이 다섯 갈래가 계약이 돼 버린다.
+///
+/// ★wire 문자열을 손으로 적지 않는다★ — serde 가 variant 이름을 그대로 낸다. 리터럴을 다시 타이핑하면
+/// 같은 어휘가 **세 곳**(이 enum · 그 리터럴 · wire 쪽 `ThemeOrigin`)에 살고, 리터럴만 고쳐도 아무것도
+/// 안 깨진다. 남은 두 다리는 `layout::commands` 의 exhaustive `match`(갈래 존재)와 두 직렬화를 맞대는
+/// 테스트(철자)가 잡는다. ★여기에 `#[serde(rename)]` 을 달지 말 것★ — 그러면 두 표면이 같은 뜻을 다른
+/// 철자로 말한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum ThemeSource {
+    /// 파일에 적힌 값을 그대로 적용했다.
+    File,
+    /// 파일을 못 써서 [`DEFAULT_THEME`] 으로 접었다.
+    Fallback,
+}
+
+/// [`load_theme`] 이 내놓는 것 — 적용할 값과 **그 값이 파일에서 온 것인지**.
+///
+/// ★둘을 함께 내는 이유★: `theme` 만으로는 「파일에 dark 라고 적혀 있다」와 「네 값이 반려돼 dark 로
+/// 접혔다」가 같아 보인다. 호출자가 그 둘을 못 가르면 편집이 먹었는지 확인할 방법이 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadedTheme {
+    pub theme: UiTheme,
+    pub source: ThemeSource,
+}
+
+/// 프론트로 나가는 값 — 부팅 조회(`get_ui_settings`)와 `ui.refresh` 푸시가 **같은 모양**을 쓴다.
+///
+/// 필드 이름은 wire 계약이다(프론트가 이 이름으로 읽는다 — `src/theme/uiSettings.ts`).
+/// `source` 는 그 한 struct 를 두 자리가 나눠 쓰는 덕에 두 경로에 함께 실린다(따로 배선하지 않았다).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct UiSettingsPayload {
+    pub theme: String,
+    /// ★String 이 아니라 enum 을 그대로 싣는다★ — 문자열로 옮기면 그 자리에 철자를 손으로 적게 되고,
+    /// 그건 wire 쪽 `ThemeOrigin` 과 어긋나도 아무것도 안 깨지는 네 번째 사본이 된다.
+    pub source: ThemeSource,
+}
+
+impl From<LoadedTheme> for UiSettingsPayload {
+    fn from(loaded: LoadedTheme) -> Self {
+        UiSettingsPayload {
+            theme: loaded.theme.as_wire().to_string(),
+            source: loaded.source,
+        }
+    }
+}
+
+/// 설정 원문을 가져오는 seam — 파싱·기본값 판정을 파일 시스템 없이 세우는 자리(ADR-0012).
+pub trait SettingsSource: Send + Sync {
+    /// 파일 원문. **부재도 `Err` 다** — 호출자는 종류를 가르지 않고 전부 기본값으로 접는다.
+    fn read(&self) -> std::io::Result<String>;
+
+    /// 경고에 실을 출처 표시(경로). 어느 파일을 못 읽었는지가 안 보이면 데이터 폴더가 갈렸을 때
+    /// (`ENGRAM_DATA_DIR` · 디버그/릴리즈 분기 — ADR-0024) 엉뚱한 파일을 고치며 헤맨다.
+    fn origin(&self) -> String;
+}
+
+/// 운영 구현 — `<data_dir>/ui-settings.json`.
+pub struct FileSource {
+    path: PathBuf,
+}
+
+impl FileSource {
+    /// 데몬·셸이 공유하는 데이터 폴더 안(ADR-0024/0029 — `default_data_dir`).
+    pub fn in_data_dir() -> Self {
+        Self::at(engram_dashboard_discovery::default_data_dir().join(UI_SETTINGS_FILE))
+    }
+
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl SettingsSource for FileSource {
+    fn read(&self) -> std::io::Result<String> {
+        read_capped(std::fs::File::open(&self.path)?, MAX_SETTINGS_BYTES)
+    }
+
+    fn origin(&self) -> String {
+        self.path.display().to_string()
+    }
+}
+
+/// 원문 상한. 한 칸짜리 취향 파일이라 실제 크기는 수십 바이트다 — 이 값은 「사람이 손으로 늘려도 여기까진
+/// 정상」의 선이지 예상 크기가 아니다.
+pub const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
+
+/// ★상한까지만 읽는다 — 읽고 나서 재지 않는다★.
+///
+/// 먼저 통째로 읽어 길이를 재면 상한 검사가 도착하기 전에 메모리가 먼저 바닥난다(밖의 에이전트가 쓰는
+/// 파일이라 크기가 우리 손에 없다). 그러면 기본값 접기도 경고도 못 돌고 프로세스가 죽는다.
+///
+/// 상한 초과와 UTF-8 아님은 **둘 다 `Err`** 다 — 이 seam 의 계약은 「원문을 가져왔나」 하나이고, 둘 다
+/// 원문을 못 가져온 것이다(호출자는 종류를 안 가른다).
+pub fn read_capped(source: impl std::io::Read, cap: u64) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let mut buf = Vec::new();
+    // cap + 1 = 「넘었나」를 알 수 있는 최소치. 넘었어도 읽는 양은 여기서 멈춘다.
+    source.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{cap} 바이트 상한을 넘었다"),
+        ));
+    }
+    String::from_utf8(buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// 원문 → 테마. ★파일 시스템을 안 탄다★.
+///
+/// ★모르는 칸은 무시한다(의도 — 앞날을 위한 호환)★: 이 파일럿은 **여러 칸짜리 설정 파일의 첫 칸**이라,
+/// 모르는 키를 반려하면 이후 칸을 하나 더할 때마다 옛 셸이 파일 전체를 거부한다. 그래서 스키마 검증이
+/// 아니라 「키 하나를 꺼내 본다」로 짰다 — 빠뜨린 것이 아니다.
+///
+/// ★오류 문구에 원문을 그대로 싣지 않는다★ — 이 문구는 곧장 로그로 나가는데, 파일을 쓰는 것은 밖의
+/// 에이전트라 그 안에 무엇이 들었는지 우리가 정하지 않는다([`describe_value`] · [`json_kind`]).
+///
+/// 오류는 로그 한 줄에 그대로 실릴 문구다 — 호출자가 종류로 분기하지 않는다(전부 기본값행).
+pub fn parse_theme(text: &str) -> Result<UiTheme, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("JSON 이 아니다: {e}"))?;
+    let Some(raw) = doc.get("theme") else {
+        return Err("`theme` 키가 없다".to_string());
+    };
+    let Some(name) = raw.as_str() else {
+        // 값이 아니라 **종류**만 — 여기 걸리는 것은 객체·배열일 수 있고 그건 통째로 상한 크기다.
+        return Err(format!(
+            "`theme` 는 문자열이어야 한다(받은 것: {})",
+            json_kind(raw)
+        ));
+    };
+    UiTheme::from_wire(name).ok_or_else(|| {
+        format!(
+            "모르는 테마 이름 {} — 허용: dark, light, e-ink",
+            describe_value(name)
+        )
+    })
+}
+
+/// JSON 값의 **종류만**. 값 자체는 안 싣는다 — 로그로 샐 수 있고 [`MAX_SETTINGS_BYTES`] 까지 커질 수 있다.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// 로그에 실을 값을 만든다 — ★**모양으로 걸러서**, 테마 이름처럼 생긴 것만 싣는다★.
+///
+/// 막는 것 둘: 파일에 들어온 값이 로그로 **새는** 것과, 상한(64KiB)까지 허용된 덩치가 창을 열 때마다·
+/// refresh 때마다 로그로 **증폭**되는 것. 그런데 값을 아예 안 실으면 오타 진단(무엇을 잘못 적었나)이 죽는다.
+/// 둘 중 하나를 고르는 대신 **모양 게이트**를 둔다: 진짜 테마 오타는 전부 통과하고
+/// (`Dark`·`darkk`·`e-ink2`), 이메일·URL·토큰·붙여넣은 덩치는 charset 이나 길이에서 걸린다.
+/// 걸린 값은 길이만 남긴다 — 「무엇이 들어왔나」 대신 「얼마나 큰 무언가가 들어왔나」.
+///
+/// ★대가는 알고 치른 것이다(사용자 결정 — 되살리지 마라)★: 테마 이름처럼 **생긴** 짧은 비밀은 그대로
+/// 로그에 실린다(`companySecret42` 는 charset·길이를 다 통과한다). 그것까지 막으려면 값을 아예 안 실어야
+/// 하고, 그러면 오타 진단이 죽는다 — 그 둘 중 진단을 택했다. 여기를 「구멍」으로 읽고 값을 지우지 말 것.
+///
+/// ★반환값은 이미 인용·이스케이프된 형태다 — 호출부에서 `{:?}` 를 다시 씌우지 말 것★. 그래서 통과분에
+/// `{:?}`(Rust `str` Debug)를 여기서 씌운다: 그것이 `\n`·`\r`·ESC 를 escape 해 **로그 줄 쪼개기와 ANSI
+/// 주입**을 막는 자리다. 게이트가 이미 그런 문자를 거르므로 오늘은 이중 방어지만, 게이트를 넓히는 순간
+/// 이 한 겹이 유일한 방어가 된다.
+///
+/// ★잘라 싣는 방식을 쓰지 않는다(그 자리에 게이트를 뒀다)★ — 「앞머리 N 자만 남긴다」는 자르는 순서마다
+/// 다른 구멍이 난다. **자르고 마스킹하면** 키 패턴이 반토막 나 정규식을 비켜 가고 그 반토막이 실린다.
+/// **마스킹하고 자르면** 마스킹이 문자열을 줄여 뒤쪽 바이트를 앞머리 창으로 끌어올린다
+/// (`"sk-proj-"+A*30+"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"` → `"***wJalrXUtnFEMI/K7MDENG/bPxRfiCY…"`).
+/// 어느 순서든 어떤 입력에서는 샌다 — 그래서 길이로 자르는 대신 **모양으로 거른다**. 게이트를 통과한 값은
+/// 이미 짧아서 자를 일이 없다.
+///
+/// 마스킹은 코어 공용 헬퍼를 **명시 호출**한다 — 자동 적용이 아니라 호출자 몫이라는 것이 그 헬퍼의 계약이다
+/// (`docs/reference/logging-conventions.md` 「보안」 · ADR-0138). ★이 저장소의 유일한 호출처가 아니다★ —
+/// `core/src/agent/transport/stdio.rs` 가 외부 프로세스 stderr 에 같은 방식으로 건다.
+fn describe_value(raw: &str) -> String {
+    if !looks_like_theme_name(raw) {
+        return format!("<테마 이름 모양이 아닌 {}자 문자열>", raw.chars().count());
+    }
+    // ★게이트를 통과한 값에도 마스킹은 남긴다★ — 길이·charset 을 다 만족하면서 키 모양인 것이 있다
+    // (`AKIA` + 대문자 16자 = 20자 영숫자). 게이트를 넓히면 이 겹이 먼저 받아 준다.
+    format!("{:?}", engram_dashboard_core::logging::mask_secrets(raw))
+}
+
+/// 테마 이름처럼 **생겼나** — ASCII 영숫자와 하이픈만, 그리고 짧을 것.
+///
+/// ★`_`·`.`·`@`·`/`·`:`·공백을 일부러 뺐다★: 그것들이 이메일·URL·경로·문장을 갈라내는 실질적인 칸막이다
+/// (`e_ink` 같은 오타는 그 대가로 길이만 남지만, 그건 통과시켰을 때 이메일이 함께 통과하는 것보다 싸다).
+/// 대문자를 넣은 이유는 `Dark` 가 **가장 흔한 오타**이기 때문이다 — `from_wire` 가 대소문자를 가리므로
+/// 소문자만 받으면 정작 제일 자주 나는 실수를 못 보여준다.
+fn looks_like_theme_name(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= MAX_LOGGED_VALUE_BYTES
+        && raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// 로그에 실을 수 있는 값의 최대 길이(바이트 = 위 charset 에서는 문자 수와 같다). 테마 이름은 다섯 자라
+/// 오타 진단에는 남아돈다.
+///
+/// ★이 선이 무엇을 보장하나 — 성질로 읽을 것, 예외를 세지 말 것★: **긴** 것을 자를 뿐 「키 모양을 전부
+/// 거른다」가 아니다. 이 안에 들어오는 짧은 키 모양이 실제로 있고(`AKIA`+16 = 20자 · `sk-`+20~21 = 23~24자
+/// … 세어 봤자 정규식이 늘면 목록이 낡는다) 그것들은 마스킹 겹이 받는다([`describe_value`]).
+/// 두 겹의 분담이 그것이다 — **길이·charset 은 상한, 마스킹은 통과분의 방어.**
+const MAX_LOGGED_VALUE_BYTES: usize = 24;
+
+/// seam 위 — ★실패는 전부 [`DEFAULT_THEME`] 로 접는다★(패닉도 전파도 없다).
+///
+/// ★레벨이 셋으로 갈린다★(정본 = `docs/reference/logging-conventions.md`):
+/// - **파일 없음 = `debug`.** 아무도 아직 안 만든 상태가 신규 설치의 **정상**이다 — 기본 레벨(warn)에서
+///   창을 열 때마다 경고가 뜨면 「릴리스 평상시 거의 무출력」이 깨진다. 무음(명부 로더가 그렇다 —
+///   `core/src/persistence/mod.rs`) 대신 `debug` 를 고른 것은 **찾아보러 왔을 때 볼 것이 있게** 하려는 것뿐이다:
+///   `RUST_LOG=debug` 로 다시 띄우면 우리가 어느 경로를 봤는지가 이 줄에 실린다(데이터 폴더는
+///   `ENGRAM_DATA_DIR`·디버그/릴리즈 분기로 갈릴 수 있다 — ADR-0024).
+///   ★기본 레벨에서는 아무 신호도 못 준다★ — 폴더가 어긋난 상태는 기본 설정에서 「파일 없음」과 여전히
+///   구별되지 않는다. 그 갭을 메우려면 기동 시 결정된 데이터 폴더를 한 줄 남기는 별개 변경이 필요하다.
+/// - **그 밖의 읽기 실패 = `warn`.** 비정상이지만 안전 폴백.
+/// - **파싱 실패 = `error`.** 손상 신호(그 문서의 명시 분기).
+///
+/// ★레벨 자체는 무검증이다★ — 이 스위트에 tracing subscriber 하네스가 없어 반환값만 덮인다. 셋 중 하나를
+/// 한 낱말 고쳐 뒤바꿔도 테스트는 초록이다(알려진 갭 · 검증하려면 subscriber 하네스가 먼저 서야 한다).
+///
+/// 성공도 남긴다 — 파일 IO 는 외부 경계라 계측 의무가 있고(그 문서 「계측 의무」), 그 한 줄이 없으면
+/// 「refresh 가 dark 를 읽었다」와 「refresh 가 안 돌았다 / 알림이 이 창에 안 닿았다」가 로그에서 같아 보인다.
+pub fn load_theme(source: &dyn SettingsSource) -> LoadedTheme {
+    let text = match source.read() {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                module = "ui_settings",
+                source = %source.origin(),
+                fallback = DEFAULT_THEME.as_wire(),
+                "UI 설정 파일이 없어 기본 테마로 둔다"
+            );
+            return folded();
+        }
+        Err(e) => {
+            tracing::warn!(
+                module = "ui_settings",
+                source = %source.origin(),
+                fallback = DEFAULT_THEME.as_wire(),
+                "UI 설정을 못 읽어 기본 테마로 둔다: {e}"
+            );
+            return folded();
+        }
+    };
+    match parse_theme(&text) {
+        Ok(theme) => {
+            tracing::debug!(
+                module = "ui_settings",
+                source = %source.origin(),
+                theme = theme.as_wire(),
+                "UI 설정에서 테마를 읽었다"
+            );
+            LoadedTheme {
+                theme,
+                source: ThemeSource::File,
+            }
+        }
+        Err(reason) => {
+            // 레벨은 손상 신호(error)지만 ★사본은 남기지 않는다★ — 되살릴 것이 없다(모듈 헤더).
+            tracing::error!(
+                module = "ui_settings",
+                source = %source.origin(),
+                fallback = DEFAULT_THEME.as_wire(),
+                "UI 설정이 쓸 수 없는 모양이라 기본 테마로 둔다: {reason}"
+            );
+            folded()
+        }
+    }
+}
+
+/// 접힌 결과 하나 — 세 실패 갈래가 같은 값을 낸다는 것을 한 자리에 둔다(갈래를 늘리는 것이 아니다).
+fn folded() -> LoadedTheme {
+    LoadedTheme {
+        theme: DEFAULT_THEME,
+        source: ThemeSource::Fallback,
+    }
+}
+
+/// `ui.refresh` 가 잡는 실물 — 파일을 다시 읽어 화면에 밀어 넣는다(조립 때 주입, ADR-0155 규칙 T-1).
+///
+/// 돌려주는 값에 **파일에서 온 것인지**가 함께 실린다([`LoadedTheme`]) — 호출자가 「내 편집이 먹었나」를
+/// 답의 `theme` 만으로는 못 가르기 때문이다.
+///
+/// ★실패하는 자리는 하나뿐이다 — **알림을 못 보낸 것**★.
+///
+/// 읽기·파싱 실패는 [`load_theme`] 이 기본값으로 접으므로 `Err` 로 나가지 않는다(그건 `Fallback` 이다).
+/// 하지만 알림을 못 보내면 값이 **어느 창에도 안 닿았다** — 그 경우 `Ok` 를 돌려주면 호출자는 화면이 바뀐
+/// 줄 안다. `source` 는 「값이 어디서 왔나」를 말하지 「화면이 바뀌었나」를 말하지 않으므로, 그 구분을
+/// enum 에 세 번째 값으로 넣지 않고 **성공/실패로** 가른다.
+///
+/// ★`LayoutEvents` 는 알림 실패를 삼킨다 — 여기는 안 삼킨다★. 저쪽은 레이아웃 **변형이 이미 일어난 뒤**라
+/// 알림 유실이 변형을 되돌릴 사유가 아니고 프론트가 read-only pull 로 복구한다. 이 명령은 반대로 **알림이
+/// 곧 그 명령의 결과 전부**다(다른 부수효과가 없다) — 못 보냈으면 아무 일도 안 일어난 것이다.
+pub trait UiSettingsRefresh: Send + Sync {
+    /// 다시 읽어 적용한 값. `Err` = 알림을 못 보냈다(값은 정해졌으나 화면에 안 닿았다).
+    fn refresh(&self) -> Result<LoadedTheme, String>;
+}

@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { HashRouter, Routes, Route } from 'react-router-dom'
-import { themeManager } from './theme/ThemeManager'
+import { installUiSettings } from './theme/uiSettings'
 import AppLayout from './components/layout/AppLayout'
 import TreePage from './pages/TreePage'
 import PopoutPage from './pages/PopoutPage'
@@ -17,9 +17,10 @@ import { installKeybindings } from './commands/keybindings'
 import { installNativeScrollActivity } from './components/ui/nativeScrollActivity'
 
 function App() {
-  useEffect(() => {
-    themeManager.apply('dark')
-  }, [])
+  // 테마는 디스크(`ui-settings.json`)가 정한다 — 붙는 시점은 부팅 조회가 돌아온 뒤라, 그 전까지는 main.tsx 가
+  // 첫 페인트 전에 박아 둔 dark 가 보인다(색 토큰 미정의 구간을 없애는 그 한 줄 — 사유는 그 파일).
+  // ★값만 갈아끼운다 — 리마운트 없음(ADR-0149)★.
+  useEffect(() => installUiSettings(), [])
 
   // ADR-0055: 반환 disposer 는 언마운트/HMR 시 리스너 중복 누적을 막는다.
   useEffect(() => installKeybindings(), [])

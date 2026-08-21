@@ -10,6 +10,11 @@
 //! 재고, 여기는 **봉투가 그 서비스까지 가는 길**(이름 배달 · 인자 검문 · 답장 상관 · 연결 태스크 밖 실행)을
 //! 잰다. 그래서 이 파일의 가짜 포트에는 락 프로브가 없다 — 같은 것을 두 번 재면 한쪽이 낡는다.
 //!
+//! ★`ui_settings` 의 순수 단위 단언도 여기 있다(§F)★ — 그 모듈은 레이아웃이 아니지만, 이 패키지에서
+//! **실제로 도는 테스트 타깃**은 `tests/` 의 네 개뿐이고(lib 은 `0xc0000139`) 그중 셸 명령 표를 재는 것이
+//! 이 파일이다. 새 타깃을 파면 CI 가 타깃을 이름으로 열거하므로(`.github/workflows/ci.yml`) 아무도 안 도는
+//! 초록 파일이 하나 는다.
+//!
 //! ## ★연결 태스크를 안 막는다는 것을 어떻게 재나★
 //! 두 하네스가 서로 다른 실패 모드를 잡는다.
 //! - [`Queued`] — 태스크를 **쥐고만** 있는 spawner. `on_command` 가 반환한 시점에 적용이 **아직 안 일어났음**을
@@ -47,11 +52,16 @@ use engram_dashboard_lib::daemon_client::inbound::{
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
-    make_table, LayoutPorts, SlotPopoutArgs, WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
+    make_table, LayoutPorts, SlotPopoutArgs, UiRefreshArgs, WindowListArgs, CATALOG_VERSION,
+    COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SubscriptionSync, ViewManager,
     ViewSnapshot, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
+};
+use engram_dashboard_lib::ui_settings::{
+    load_theme, parse_theme, read_capped, LoadedTheme, SettingsSource, ThemeSource,
+    UiSettingsPayload, UiSettingsRefresh, UiTheme, DEFAULT_THEME,
 };
 
 // ── 가짜 포트 ────────────────────────────────────────────────────────────────
@@ -118,6 +128,62 @@ impl AgentSpawner for DaemonSpawner {
             wait.await
                 .map_err(|_| "테스트 스폰 응답이 없다".to_string())?
         })
+    }
+}
+
+/// UI 설정 포트 대역 — 디스크도 창도 없이 「몇 번 다시 읽었나 · 무엇을 돌려줬나」만 남긴다.
+///
+/// 값을 바꿔 끼울 수 있어야 한다: 「같은 명령을 두 번 불러도 **그때의 파일 값**이 돌아온다」를 재려면
+/// 두 호출 사이에 답이 달라져야 한다.
+struct FakeUiSettings {
+    /// `Err` = 알림을 못 보낸 것으로 친다(값은 정해졌으나 어느 창에도 안 닿았다).
+    loaded: Mutex<Result<LoadedTheme, String>>,
+    calls: Mutex<usize>,
+}
+
+impl Default for FakeUiSettings {
+    fn default() -> Self {
+        FakeUiSettings {
+            loaded: Mutex::new(Ok(LoadedTheme {
+                theme: DEFAULT_THEME,
+                source: ThemeSource::File,
+            })),
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+impl UiSettingsRefresh for FakeUiSettings {
+    fn refresh(&self) -> Result<LoadedTheme, String> {
+        *self.calls.lock().unwrap() += 1;
+        self.loaded.lock().unwrap().clone()
+    }
+}
+
+impl FakeUiSettings {
+    /// 파일에 그 값이 적혀 있었던 것으로 친다.
+    fn set(&self, theme: UiTheme) {
+        *self.loaded.lock().unwrap() = Ok(LoadedTheme {
+            theme,
+            source: ThemeSource::File,
+        });
+    }
+
+    /// 파일을 못 써서 기본값으로 접힌 것으로 친다 — ★값은 dark 인데 출처가 다르다★.
+    fn fold(&self) {
+        *self.loaded.lock().unwrap() = Ok(LoadedTheme {
+            theme: DEFAULT_THEME,
+            source: ThemeSource::Fallback,
+        });
+    }
+
+    /// 값은 정해졌는데 **알림을 못 보낸** 것으로 친다.
+    fn fail_broadcast(&self) {
+        *self.loaded.lock().unwrap() = Err("창이 하나도 안 받았다".to_string());
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
     }
 }
 
@@ -196,6 +262,11 @@ impl Mailbox {
         self.0.lock().unwrap().len()
     }
 
+    /// 같은 하네스로 명령을 두 번 부르는 테스트용 — [`Mailbox::only`] 가 「정확히 하나」를 요구한다.
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
     fn only(&self) -> CommandReply {
         let seen = self.0.lock().unwrap();
         assert_eq!(seen.len(), 1, "한 request_id 에 답장은 정확히 하나다");
@@ -241,6 +312,7 @@ fn envelope(name: &str, args: serde_json::Value, request_id: RequestId) -> Comma
 struct World {
     state: LayoutState,
     windows: Arc<Windows>,
+    ui: Arc<FakeUiSettings>,
     mail: Mailbox,
     spawn_requests: mpsc::UnboundedReceiver<SpawnRequest>,
 }
@@ -249,6 +321,7 @@ impl World {
     fn build() -> (World, LayoutPorts) {
         let state = LayoutState::new();
         let windows = Arc::new(Windows::default());
+        let ui = Arc::new(FakeUiSettings::default());
         let (tx, spawn_requests) = mpsc::unbounded_channel();
         let ports = LayoutPorts {
             state: state.clone(),
@@ -258,11 +331,13 @@ impl World {
             // 실물 발급기 — label 단조성은 닫힌 label 재-build 를 막는 계약이라 가짜로 대체하지 않는다.
             labels: Arc::new(PopupCounter::default()),
             spawner: Arc::new(DaemonSpawner { requests: tx }),
+            ui_settings: Arc::clone(&ui) as Arc<dyn UiSettingsRefresh>,
         };
         (
             World {
                 state,
                 windows,
+                ui,
                 mail: Mailbox::default(),
                 spawn_requests,
             },
@@ -378,6 +453,7 @@ fn the_table_holds_exactly_the_declared_commands() {
             "tab.list",
             "tab.rename",
             "tab.switch",
+            "ui.refresh",
             "window.close",
             "window.create",
             "window.list",
@@ -391,12 +467,19 @@ fn the_table_holds_exactly_the_declared_commands() {
 /// 세 줄이 함께 움직여야 한다: 세대 · 선언 수 · 새 명령이 주장하는 `since`(코어 `command_alphabet.rs` 와 같은 형태).
 #[test]
 fn the_catalog_generation_is_pinned_to_the_declaration_set() {
-    assert_eq!(CATALOG_VERSION, 2);
-    assert_eq!(COMMAND_SPECS.len(), 16);
+    // ★이름 수가 안 늘어도 올라간다★ — 세대 4 는 `ui.refresh` 의 **답 모양**이 바뀐 세대다(선언이 바뀌면
+    //   올린다). 아래 선언 수가 그대로인 것이 그 구분의 실물이다.
+    assert_eq!(CATALOG_VERSION, 4);
+    assert_eq!(COMMAND_SPECS.len(), 17);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
         2,
         "세대 2에 들어온 명령이 1부터 있었다고 광고하면 안 된다"
+    );
+    assert_eq!(
+        UiRefreshArgs::SPEC.since,
+        3,
+        "세대 3에 들어온 명령이 그 앞부터 있었다고 광고하면 안 된다"
     );
 }
 
@@ -692,6 +775,147 @@ async fn popout_of_an_empty_slot_is_refused_without_opening_a_window() {
         "거절됐으면 창도 안 연다"
     );
     assert!(world.slots(view).contains(&slot), "부분변경 금지");
+}
+
+/// `ui.refresh` 는 레이아웃을 안 건드리는 유일한 이름이다 — 그래서 「선언만 있고 자기 포트에 안 닿는다」가
+/// 조용히 성립할 수 있다. 답의 값이 **그 포트가 그때 돌려준 것**임을 본다.
+#[tokio::test]
+async fn ui_refresh_rereads_through_its_own_port() {
+    let (world, queue, receiver) = queued();
+    world.ui.set(UiTheme::Light);
+
+    let reply = call(&receiver, &queue, &world.mail, "ui.refresh", json!({})).await;
+
+    let ok = reply.outcome.expect("성공 답장");
+    assert_eq!(ok["theme"], "light");
+    assert_eq!(ok["source"], "File", "파일 값을 그대로 썼으면 File 이다");
+    assert_eq!(world.ui.calls(), 1, "명령 한 번 = 다시 읽기 한 번");
+}
+
+/// ★답의 존재 이유가 이 한 케이스다★: 접혔을 때 `theme` 은 `dark` 인데, 그것만 보면 「파일에 dark 라고
+/// 적혀 있다」와 구별이 안 된다. 호출자는 「내가 적은 값이 반려됐다」를 알아야 파일을 다시 볼 수 있다.
+///
+/// 접힌 **사유**는 여기 없다(없음·못 읽음·깨짐·모르는 이름·상한 초과 — 전부 앱 로그). 그 다섯을 답에
+/// 실으면 호출자가 사유별 분기를 짜기 시작하고 그 순간 다섯 갈래가 계약이 된다.
+#[tokio::test]
+async fn a_folded_refresh_says_so_even_though_the_theme_is_dark() {
+    let (world, queue, receiver) = queued();
+    world.ui.fold();
+
+    let reply = call(&receiver, &queue, &world.mail, "ui.refresh", json!({})).await;
+
+    let ok = reply.outcome.expect("성공 답장(접힘은 오류가 아니다)");
+    assert_eq!(ok["theme"], "dark", "접히면 기본값이 적용된다");
+    assert_eq!(
+        ok["source"], "Fallback",
+        "값이 dark 인 것만으로는 반려됐는지 알 수 없다 — 그걸 가르는 칸이 source 다"
+    );
+    assert!(
+        ok.get("message").is_none() && ok.get("reason").is_none(),
+        "사유는 로그가 진다 — 답에 실으면 그 갈래들이 계약이 된다: {ok}"
+    );
+}
+
+/// ★알림을 못 보내면 성공이 아니다★ — 이 명령이 하는 일은 그 알림뿐이라, 못 보냈으면 아무 창도 안 바뀌었다.
+///
+/// `source` 로는 이걸 못 가른다: 그 칸은 **값이 어디서 왔나**를 말하지 **화면이 바뀌었나**를 말하지 않는다.
+/// 그래서 enum 에 세 번째 값을 더하는 대신 성공/실패로 가른다.
+#[tokio::test]
+async fn a_broadcast_that_never_left_is_not_a_success() {
+    let (world, queue, receiver) = queued();
+    world.ui.fail_broadcast();
+
+    let reply = call(&receiver, &queue, &world.mail, "ui.refresh", json!({})).await;
+
+    let err = error_of(reply);
+    assert_eq!(err.code(), ErrorCode::Internal);
+    assert_eq!(world.ui.calls(), 1, "실패해도 시도는 한 번이다");
+}
+
+/// ★같은 어휘가 두 표면에 산다 — 철자가 갈리면 여기서 걸린다★.
+///
+/// `ui.refresh` 의 답은 `ThemeOrigin`(선언 매크로), 부팅 조회·푸시 페이로드는 `ThemeSource`(셸 내부)로
+/// 직렬화된다. 둘 다 손으로 적은 리터럴은 없지만(각자 variant 이름을 serde 가 낸다) **이름이 갈릴 수는
+/// 있다** — 한쪽 variant 를 고치거나 serde rename 을 달면 두 표면이 같은 뜻을 다른 철자로 말한다.
+/// `layout::commands` 의 exhaustive `match` 는 **빠진 갈래**만 잡지 철자는 못 잡는다.
+///
+/// 이 테스트가 `UiSettingsPayload` 를 읽는 유일한 자리이기도 하다.
+#[test]
+fn both_surfaces_spell_the_outcome_the_same_way() {
+    let spec = spec_of("ui.refresh").expect("선언돼 있다");
+    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("스키마는 JSON");
+    let advertised = shape["properties"]["source"]["enum"].clone();
+
+    for (source, expected) in [
+        (ThemeSource::File, "File"),
+        (ThemeSource::Fallback, "Fallback"),
+    ] {
+        let payload: UiSettingsPayload = LoadedTheme {
+            theme: UiTheme::Dark,
+            source,
+        }
+        .into();
+        let json = serde_json::to_value(&payload).expect("직렬화");
+        assert_eq!(
+            json["source"], expected,
+            "Tauri 페이로드 쪽 철자가 갈렸다: {json}"
+        );
+        assert!(
+            advertised
+                .as_array()
+                .expect("enum 목록")
+                .contains(&json["source"]),
+            "명령 답이 광고하는 값에 {expected} 가 없다: {advertised}"
+        );
+    }
+}
+
+/// 어휘 발견 표면(카탈로그 JSON)에 두 값이 **이름으로** 실린다 — 호출자는 스키마를 읽고 분기한다.
+#[test]
+fn the_reply_advertises_both_outcomes_by_name() {
+    let spec = spec_of("ui.refresh").expect("선언돼 있다");
+    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("스키마는 JSON");
+    let source = &shape["properties"]["source"];
+    assert_eq!(
+        source["enum"],
+        json!(["File", "Fallback"]),
+        "두 값이 이름으로 안 실리면 호출자가 문구를 읽고 추측한다: {shape}"
+    );
+}
+
+/// ★파일이 부팅 뒤에 바뀌는 것이 이 명령의 존재 이유다★ — 두 번째 호출이 첫 값을 캐시해서 돌려주면
+/// 그 이유가 사라진다(그리고 화면은 안 바뀌는데 답은 성공이라 진단이 막힌다).
+#[tokio::test]
+async fn a_second_refresh_answers_with_the_new_value() {
+    let (world, queue, receiver) = queued();
+
+    world.ui.set(UiTheme::Light);
+    let first = call(&receiver, &queue, &world.mail, "ui.refresh", json!({})).await;
+    assert_eq!(first.outcome.expect("성공 답장")["theme"], "light");
+
+    world.mail.clear();
+    world.ui.set(UiTheme::EInk);
+    let second = call(&receiver, &queue, &world.mail, "ui.refresh", json!({})).await;
+    assert_eq!(second.outcome.expect("성공 답장")["theme"], "e-ink");
+    assert_eq!(world.ui.calls(), 2);
+}
+
+/// 레이아웃을 건드리지 않는다 — 슬롯·탭이 그대로여야 프론트가 다시 마운트할 이유가 없다(ADR-0149).
+#[tokio::test]
+async fn ui_refresh_leaves_the_layout_untouched() {
+    let (world, queue, receiver) = queued();
+    let before = world.main_tabs();
+    let slots_before = world.slots(before.active);
+
+    call(&receiver, &queue, &world.mail, "ui.refresh", json!({})).await;
+
+    let after = world.main_tabs();
+    assert_eq!(
+        after.version, before.version,
+        "레이아웃 version 이 움직였다"
+    );
+    assert_eq!(after.active, before.active);
+    assert_eq!(world.slots(after.active), slots_before);
 }
 
 // ── (B) 연결 태스크를 안 막는다 ──────────────────────────────────────────────
@@ -1229,4 +1453,286 @@ async fn a_dropped_task_still_answers() {
     let reply = world.mail.only();
     assert_eq!(reply.request_id, request_id);
     assert_eq!(error_of(reply).code(), ErrorCode::Internal);
+}
+
+// ── (F) UI 설정 읽기 — 파일 시스템도 Tauri 도 없이 ──────────────────────────
+//
+// ★여기 있는 이유는 헤더 마지막 절★(이 패키지에서 실제로 도는 타깃이 `tests/` 뿐이다). 재는 것은 두 층이다:
+// 순수 변환(`parse_theme`)과 그 위의 기본값 접기(`load_theme` + 주입 seam).
+//
+// ## ★안 재는 것 — 로그 레벨(알려진 갭)★
+// `NotFound`=debug · 그 밖의 읽기 실패=warn · 파싱 실패=error · 성공=debug 가 **실제로 그 레벨로 나가는지**는
+// 여기서 안 잰다(tracing subscriber 하네스가 없어 반환값만 덮인다). 넷 중 하나를 한 낱말 고쳐 뒤바꿔도
+// 이 스위트는 초록이다. 근거·의도는 `ui_settings::load_theme` 의 doc 이 진다.
+
+/// 파일 대신 미리 정한 답을 내는 원문 출처.
+struct Canned(std::io::Result<String>);
+
+impl Canned {
+    fn text(raw: &str) -> Self {
+        Canned(Ok(raw.to_string()))
+    }
+
+    fn missing() -> Self {
+        Canned(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "없는 파일",
+        )))
+    }
+
+    fn unreadable() -> Self {
+        Canned(Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "권한 없음",
+        )))
+    }
+}
+
+impl SettingsSource for Canned {
+    fn read(&self) -> std::io::Result<String> {
+        match &self.0 {
+            Ok(text) => Ok(text.clone()),
+            Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
+
+    fn origin(&self) -> String {
+        "<canned>".to_string()
+    }
+}
+
+/// 세 값이 다 살아 있어야 한다 — e-ink 를 dark/light 로 접으면 그 테마의 의도(색 무력화)가 사라진다(ADR-0062).
+#[test]
+fn every_theme_name_round_trips() {
+    for (raw, expected) in [
+        ("dark", UiTheme::Dark),
+        ("light", UiTheme::Light),
+        ("e-ink", UiTheme::EInk),
+    ] {
+        let text = format!("{{\"theme\":\"{raw}\"}}");
+        assert_eq!(parse_theme(&text), Ok(expected), "{raw}");
+        assert_eq!(
+            load_theme(&Canned::text(&text)),
+            LoadedTheme {
+                theme: expected,
+                source: ThemeSource::File
+            },
+            "{raw}"
+        );
+        // 프론트가 `data-theme` 에 박는 철자 = `src/styles/theme.css` 의 셀렉터.
+        assert_eq!(expected.as_wire(), raw);
+    }
+}
+
+/// 못 읽는 네 모양이 **전부 같은 값**으로 접힌다 — 종류를 가르지 않는 것이 계약이다.
+#[test]
+fn an_unusable_settings_file_falls_back_to_dark() {
+    // ★값도 출처도 같아야 한다★ — 접힌 것은 전부 `Fallback` 이다(호출자가 「내 편집이 먹었나」를 이걸로 안다).
+    let folded = LoadedTheme {
+        theme: DEFAULT_THEME,
+        source: ThemeSource::Fallback,
+    };
+    assert_eq!(load_theme(&Canned::missing()), folded);
+    assert_eq!(load_theme(&Canned::unreadable()), folded);
+    assert_eq!(load_theme(&Canned::text("{ this is not json")), folded);
+    assert_eq!(
+        load_theme(&Canned::text(r#"{"theme":"solarized"}"#)),
+        folded
+    );
+    assert_eq!(DEFAULT_THEME, UiTheme::Dark);
+}
+
+/// 모양은 JSON 인데 값이 못 쓸 때도 같은 자리로 간다 — 키 부재 · 문자열 아님 · 대소문자 다름.
+#[test]
+fn a_theme_field_that_is_not_a_known_name_is_refused_not_guessed() {
+    for text in [
+        "{}",
+        r#"{"theme":7}"#,
+        r#"{"theme":null}"#,
+        r#"{"theme":"Dark"}"#,
+        r#"{"theme":"e_ink"}"#,
+        r#"{"theme":" dark "}"#,
+    ] {
+        assert!(parse_theme(text).is_err(), "{text} 를 통과시켰다");
+        assert_eq!(
+            load_theme(&Canned::text(text)),
+            LoadedTheme {
+                theme: DEFAULT_THEME,
+                source: ThemeSource::Fallback
+            },
+            "{text}"
+        );
+    }
+}
+
+/// 같은 원문을 두 번 읽으면 두 번 다 같은 답 — 「부팅과 refresh 가 다른 값을 본다」가 여기서 나오면 안 된다.
+#[test]
+fn reading_the_same_text_twice_gives_the_same_answer() {
+    let broken = Canned::text("{oops");
+    assert_eq!(load_theme(&broken), load_theme(&broken));
+
+    let good = Canned::text(r#"{"theme":"e-ink"}"#);
+    let from_file = LoadedTheme {
+        theme: UiTheme::EInk,
+        source: ThemeSource::File,
+    };
+    assert_eq!(load_theme(&good), from_file);
+    assert_eq!(load_theme(&good), from_file);
+}
+
+/// ★모르는 칸을 무시하는 것은 의도다 — 반려로 바꾸지 말 것★(사용자 결정).
+///
+/// 이 파일럿은 **여러 칸짜리 설정 파일의 첫 칸**이다. 모르는 키를 반려하면 칸을 하나 더할 때마다 옛 셸이
+/// 파일 전체를 거부한다 — 앞날을 위한 호환이지 검증을 빠뜨린 것이 아니다.
+#[test]
+fn unknown_keys_do_not_break_the_one_key_we_read() {
+    assert_eq!(
+        parse_theme(r#"{"theme":"light","fontSize":13,"whatever":{"a":1}}"#),
+        Ok(UiTheme::Light)
+    );
+}
+
+/// ★상한을 넘는 원문은 **읽고 나서** 재는 것이 아니라 읽는 양 자체가 끊긴다★ — 밖에서 쓰는 파일이라
+/// 크기가 우리 손에 없고, 통째로 읽으면 기본값 접기·경고가 돌기 전에 프로세스가 죽는다.
+#[test]
+fn an_oversized_settings_file_is_refused_instead_of_swallowed() {
+    let cap = 32u64;
+
+    let exact = vec![b'x'; cap as usize];
+    assert!(
+        read_capped(std::io::Cursor::new(exact), cap).is_ok(),
+        "상한 자체는 통과다"
+    );
+
+    let over = vec![b'x'; cap as usize + 1];
+    let refused = read_capped(std::io::Cursor::new(over), cap).expect_err("상한 초과는 반려다");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+
+    // 그 반려는 못 읽은 것과 같은 자리로 간다(기본값 + 로그).
+    assert_eq!(
+        load_theme(&Canned(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "상한 초과"
+        )))),
+        LoadedTheme {
+            theme: DEFAULT_THEME,
+            source: ThemeSource::Fallback
+        }
+    );
+}
+
+/// 내보낸 바이트를 세는 리더 — ★`take` 가 **읽기 자체를** 끊는지 재는 유일한 수단★.
+///
+/// 결과만 보면 「다 읽고 나서 반려」와 「끊어 읽고 반려」가 똑같이 `InvalidData` 라 구분이 안 된다.
+/// 그래서 리더가 실제로 몇 바이트를 내보냈는지를 센다.
+struct Counting<R> {
+    inner: R,
+    produced: Arc<Mutex<u64>>,
+}
+
+impl<R: std::io::Read> std::io::Read for Counting<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        *self.produced.lock().unwrap() += n as u64;
+        Ok(n)
+    }
+}
+
+/// ★상한이 결과가 아니라 **읽는 양**을 끊는다★ — 이게 [`read_capped`] 가 존재하는 이유 그 자체다.
+/// 다 읽고 나서 길이를 재는 구현은 반려 코드가 같아서 통과해 버리므로, 여기서는 리더가 내보낸 바이트를 센다.
+#[test]
+fn the_cap_stops_the_read_rather_than_the_result() {
+    let cap = 16u64;
+    let produced = Arc::new(Mutex::new(0u64));
+    let reader = Counting {
+        inner: std::io::Cursor::new(vec![b'x'; 1024 * 1024]),
+        produced: Arc::clone(&produced),
+    };
+
+    let refused = read_capped(reader, cap).expect_err("상한 초과는 반려다");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+
+    let read = *produced.lock().unwrap();
+    assert!(
+        read <= cap + 1,
+        "상한을 넘겨 {read} 바이트를 읽었다(허용 {}) — 끊지 않으면 원문 전체가 메모리에 올라와 \
+         기본값 접기도 로그도 못 돌고 프로세스가 죽는다",
+        cap + 1
+    );
+}
+
+/// ★못 쓰는 값을 로그 문구에 그대로 옮기지 않는다★ — 이 문구는 곧장 로그로 나가고, 파일을 쓰는 것은 밖의
+/// 에이전트라 내용물이 우리 손에 없다. 새면 안 되는 것(자격증명)과 커지면 안 되는 것(상한까지의 덩치,
+/// 창을 열 때마다·refresh 때마다 증폭) 둘 다 막는다.
+#[test]
+fn an_unusable_theme_value_is_not_echoed_into_the_message() {
+    // ① 덩치 — 원문이 통째로 실리지 않고 길이만 남는다.
+    let blob = "A".repeat(4096);
+    let big = parse_theme(&format!(r#"{{"theme":"{blob}"}}"#)).expect_err("반려");
+    assert!(!big.contains(&blob), "원문이 그대로 실렸다");
+    assert!(big.len() < 200, "문구가 {} 바이트로 불었다", big.len());
+    assert!(
+        big.contains("4096자"),
+        "길이도 안 남으면 진단이 죽는다: {big}"
+    );
+
+    // ② 문자열이 아닌 값 — **종류만** 싣는다(객체·배열은 통째로 상한 크기다).
+    let obj = parse_theme(r#"{"theme":{"token":"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#)
+        .expect_err("반려");
+    assert!(!obj.contains("sk-proj"), "값이 실렸다: {obj}");
+    assert!(obj.contains("object"), "종류가 안 실렸다: {obj}");
+
+    // ③ ★모양 게이트★ — 테마 이름처럼 안 생긴 것은 charset 이나 길이에서 걸려 길이만 남는다.
+    //    마스킹만으로는 이것들을 못 잡는다(그 헬퍼는 **알려진 키 모양**만 안다 — 이메일·URL·사내 토큰은
+    //    그 목록에 없고, 그게 이 게이트를 둔 이유다).
+    for (label, value, fragment) in [
+        ("이메일", "customer-email@example.com", "example.com"),
+        ("URL", "https://example.com/theme", "example.com"),
+        ("밑줄 섞인 이름", "internal_build_token_9", "internal"),
+        ("공백 섞인 문장", "please use dark", "please"),
+    ] {
+        let err = parse_theme(&format!(r#"{{"theme":"{value}"}}"#)).expect_err("반려");
+        assert!(
+            !err.contains(fragment),
+            "{label} 가 로그 문구로 샜다: {err}"
+        );
+    }
+
+    // ④ ★게이트를 통과하는 값에도 마스킹이 남아 있다★ — 이 조합(20자 영숫자 = 길이·charset 둘 다 통과,
+    //    그런데 키 모양)이 그 겹이 죽어 있지 않다는 증거다.
+    let akia = parse_theme(r#"{"theme":"AKIAIOSFODNN7EXAMPLE"}"#).expect_err("반려");
+    assert!(!akia.contains("AKIA"), "키가 그대로 실렸다: {akia}");
+
+    // ⑤ 그래도 오타 진단은 산다 — 게이트를 통과하는 값은 그대로 보인다.
+    //    `Dark` 가 가장 흔한 오타다(`from_wire` 가 대소문자를 가린다) — 게이트에서 대문자를 뺐다면
+    //    정작 제일 자주 나는 실수를 못 보여준다.
+    for typo in ["Dark", "darkk", "e-inkk", "light2"] {
+        let err = parse_theme(&format!(r#"{{"theme":"{typo}"}}"#)).expect_err("반려");
+        assert!(err.contains(typo), "오타 {typo} 를 못 보여준다: {err}");
+    }
+}
+
+/// ★마스킹만으로는 못 막는 모양 — 그래서 게이트가 **앞**에 선다★.
+///
+/// 키 패턴 앞에 다른 것이 붙어 있으면 마스킹은 **그 패턴만** 지우고 앞머리는 그대로 남긴다. 게이트가 없으면
+/// 여기 `x` 스무 자가 로그로 나간다(패턴이 잘려 정규식을 비켜 가는 경우도 같은 구멍이다). 게이트는 그 값을
+/// 아예 「모양이 아님 + 길이」로 접어서 그 구멍을 닫는다.
+#[test]
+fn a_value_wrapped_around_a_key_pattern_is_gated_not_just_masked() {
+    let prefixed = format!("{}sk-proj-{}", "x".repeat(20), "A".repeat(30));
+    let err = parse_theme(&format!(r#"{{"theme":"{prefixed}"}}"#)).expect_err("반려");
+
+    assert!(
+        !err.contains(&"x".repeat(20)),
+        "패턴 앞머리가 그대로 실렸다: {err}"
+    );
+    assert!(!err.contains("sk-proj"), "키 조각이 실렸다: {err}");
+    assert!(err.contains("58자"), "길이가 안 남았다: {err}");
+}
+
+/// UTF-8 이 아닌 원문도 「원문을 못 가져왔다」로 접힌다 — seam 의 계약이 그 하나다.
+#[test]
+fn a_non_utf8_settings_file_is_a_read_failure() {
+    let refused = read_capped(std::io::Cursor::new(vec![0xff, 0xfe, 0x00]), 64).expect_err("반려");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
 }

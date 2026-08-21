@@ -3,6 +3,7 @@ pub mod daemon_client;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;
+pub mod ui_settings;
 // 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다.
 pub use engram_dashboard_discovery as discovery;
@@ -217,6 +218,8 @@ pub fn run() {
             commands::list_tabs,
             commands::list_windows,
             commands::resolve_spatial,
+            // 부팅 조회 — 미는 쪽(`ui.refresh`)은 명령 표에 있다(`commands/settings.rs` 「읽는 자리가 둘인 이유」).
+            commands::get_ui_settings,
             commands::agent_spawn,
             commands::agent_kill,
             commands::agent_interrupt,
