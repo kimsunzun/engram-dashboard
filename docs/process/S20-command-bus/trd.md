@@ -1,12 +1,13 @@
 # TRD — 통합 command 버스 (S20)
 
-> 상태: **개정 3판(2026-08-17).** 이 판은 **ADR-0150**(명부 주인 = 클라이언트가 만든 식별자 · 연결이 끊기면 자취 없이 제거)를 반영해, 2판이 **tombstone 위에 세운 조항들**을 갈아낸다. ★판을 올린 이유★ — 아래 「부분 정정 — Step 1 실측」이 판을 **안** 올린 근거는 "설계가 뒤집힌 것이 아니라 회계와 서술이 틀렸다"였고, 이번은 **설계가 뒤집혔다**(자취 보존 → 제거 · 주인 키 산출 교체 · 두 오류 구분 포기). 갈린 절 = §0 · §1 · §2-4 ③ · §3-2 · §3-5 · §3-7 · §4-②·④ · §5 · §6 Step 2·3 · §7 · §8 가정 A · §9.
+> 상태: **개정 4판(2026-08-20).** 본문이 이미 ★4판 정정★이라 부르던 자리(§4-④의 `retry` 전량 `never` · §4-⑥의 dedup 저장소 미구현)와 2026-08-18 개정 셋(§4-⑦의 경합 귀속 · §5 protocol 행의 8종 · §9의 미확인 닫힘)을 표제로 올린다. ★판을 올린 이유★ — 3판이 세운 기준(설계가 뒤집혔다)에 §4-④·⑥이 걸린다: `same-request-id` 재시도가 계약에서 사라졌고(ADR-0159), dedup 저장소는 채택 설계에서 **미구현**으로 내려앉은 뒤 **「만들지 않는다」로 닫혔다**(ADR-0161 · ADR-0162). 함께 **Step 1~3이 착지시킨 실물**에 맞춰 「오늘 없다」로 적혀 있던 서술과 §9 실측 수치를 고친다. 갈린 절 = §4-④ · §4-⑥ · §4-⑦ · §5 protocol 행 · §9.
+> 이력 — **개정 3판(2026-08-17).** 이 판은 **ADR-0150**(명부 주인 = 클라이언트가 만든 식별자 · 연결이 끊기면 자취 없이 제거)를 반영해, 2판이 **tombstone 위에 세운 조항들**을 갈아낸다. ★판을 올린 이유★ — 아래 「부분 정정 — Step 1 실측」이 판을 **안** 올린 근거는 "설계가 뒤집힌 것이 아니라 회계와 서술이 틀렸다"였고, 이번은 **설계가 뒤집혔다**(자취 보존 → 제거 · 주인 키 산출 교체 · 두 오류 구분 포기). 갈린 절 = §0 · §1 · §2-4 ③ · §3-2 · §3-5 · §3-7 · §4-②·④ · §5 · §6 Step 2·3 · §7 · §8 가정 A · §9.
 > 이력 — **개정 2판(2026-08-13).** **ADR-0155**(S20 구조 자체)와 **ADR-0156**(발견 경로 3건 — 등록 패킷에 모양 동봉 · 값 읽기 v1 포함 · tombstone 만료 없음)를 반영해 그 셋에 걸려 있던 미확정·미결 항목을 닫았다. ★그중 「tombstone 만료 없음」은 3판이 폐기했다★ — 만료를 어떻게 둘지가 아니라 **자취 자체가 없어진다**(ADR-0150가 ADR-0156 결정 3만 개정 — 나머지 두 조항은 살아 있다).
 > 이력 — **개정 1판(2026-08-13).** 구판(2026-08-12)은 **선언을 `engram-dashboard-protocol` 한 곳에 모으는 안** 위에 세워졌고, 같은 세션 후반 대화에서 그 안이 뒤집혔다. 1판의 정본은 세션 인계 `.claude/handoff/latest.md` 「확정된 구조」·「세션 중 뒤집힌 판단 3건」이며, 두 절과 어긋나는 구판 문장은 전부 1판에서 개정했다.
 > 부분 정정 — **Step 1 실측(2026-08-14).** 구현이 끝난 칸을 실측값으로 고치고(고친 자리마다 `★개정(Step 1 실측 2026-08-14)★`), §4에 ⑨(릴리즈 패닉 정책 — 사용자 결정)를 더했다. **판을 올리지 않는다** — 설계가 뒤집힌 것이 아니라 회계와 서술이 틀렸던 자리라, 같은 표기 규약(구판 축약 보존)으로 그 칸에만 박았다.
 > **읽는 법:** 뒤집힌 자리는 `★개정★`으로 표시하고 **구판 문장을 줄여서 남긴다.** 결과만 남기면 다음 세션이 같은 안을 다시 꺼낸다.
-> 앵커: **ADR-0150(명부 주인 = 클라이언트 자작 식별자 · 자취 없는 제거 — 3판의 정본) · ADR-0155(S20 구조 — 주인 토큰 산출만 0150가 개정) · ADR-0156(발견 경로 3건 — 결정 3만 0150가 개정)** · ADR-0152(되돌려 보내는 문자열엔 상한 없음 — 0150의 입구 상한과 **방향이 반대인 다른 축**) · ADR-0157(명령 인자의 모르는 칸) · ADR-0022(방향) · ADR-0055(프론트 레지스트리 골격) · ADR-0064(메뉴 = command id 참조) · ADR-0081(릴레이 형태 — 이 문서는 **확장**이지 번복이 아니다) · ADR-0132 결정 7(후속 순서) · ADR-0129(net 격리) · ADR-0035/0057(레이아웃 권위) · ADR-0003(코어 격리) · ADR-0012(테스트 격리) · CLAUDE.md 「LLM-우선 제어」.
-> ★개정★ **선행 조건이 사라졌다.** 구판: "선행 = ADR-0081 릴레이 구현. 이 TRD 밖. §6 Step 3 이후는 그 배선 위에 선다." → 현판: **그 배선을 이 TRD가 짓는다**(§6 Step 3). 확정 구조가 "새로 짓는 것은 둘뿐 — 공통 도구 crate + 데몬→셸 인바운드 수신"이라, 인바운드 수신기가 곧 ADR-0081 릴레이의 실물이기 때문이다. 실측 근거는 그대로 유효하다(재확인 2026-08-13): `RegisterRole`·`RelayUi`·`UiCommand`·`UiResult` `.rs` hit 0 · `src-tauri/src/daemon_client/`(`connection.rs`·`lifecycle.rs`·`mod.rs`·`protocol_state.rs`·`replay_flight.rs`·`tests.rs` — 6개. 구판은 `tests.rs`를 빼고 5개로 적었다)의 읽기 루프가 `Message::Text`를 `AgentEvent`로만 디코드한다(`src-tauri/src/daemon_client/connection.rs:805`, 이벤트 분기 `:1041~1072`).
+> 앵커: **ADR-0150(명부 주인 = 클라이언트 자작 식별자 · 자취 없는 제거 — 3판의 정본) · ADR-0155(S20 구조 — 주인 토큰 산출만 0150가 개정) · ADR-0156(발견 경로 3건 — 결정 3만 0150가 개정)** · ADR-0152(되돌려 보내는 문자열엔 상한 없음 — 0150의 입구 상한과 **방향이 반대인 다른 축**) · ADR-0157(명령 인자의 모르는 칸) · **ADR-0154**(왕복 중 주인 연결이 끊긴 경합의 답 = `OUTCOME_UNKNOWN` — §4-⑦) · **ADR-0159**(재시도 지시는 안전과 쓸모로 고른다 — 배달 모듈의 실패 답은 전부 `Never`, §4-④) · **ADR-0161**(제어 라우트 중계의 요청 번호는 호출자가 낸다 — §4-⑥) · **ADR-0162**(중계 재시도는 결과 저장소 대신 상태 조회로 해소 — §4-⑥의 열린 갈래를 닫는다) · ADR-0022(방향) · ADR-0055(프론트 레지스트리 골격) · ADR-0064(메뉴 = command id 참조) · ADR-0081(릴레이 형태 — 이 문서는 **확장**이지 번복이 아니다) · ADR-0132 결정 7(후속 순서) · ADR-0129(net 격리) · ADR-0035/0057(레이아웃 권위) · ADR-0003(코어 격리) · ADR-0012(테스트 격리) · CLAUDE.md 「LLM-우선 제어」.
+> ★개정★ **선행 조건이 사라졌다.** 구판: "선행 = ADR-0081 릴레이 구현. 이 TRD 밖. §6 Step 3 이후는 그 배선 위에 선다." → 현판: **그 배선을 이 TRD가 짓는다**(§6 Step 3). 확정 구조가 "새로 짓는 것은 둘뿐 — 공통 도구 crate + 데몬→셸 인바운드 수신"이라, 인바운드 수신기가 곧 ADR-0081 릴레이의 실물이기 때문이다. ★**4판 정정 — 그 배선은 이미 섰다**★ 구판(축약 보존, 실측 2026-08-13): "실측 근거는 그대로 유효하다 — `RegisterRole`·`RelayUi`·`UiCommand`·`UiResult` `.rs` hit 0 · `src-tauri/src/daemon_client/` 6개 파일의 읽기 루프가 `Message::Text`를 `AgentEvent`로만 디코드한다." → 오늘 그 루프는 `AgentEvent::CommandRequest` 갈래를 갈라 수신기로 넘기고(`daemon_client/connection.rs`의 `Message::Text` arm), 수신기는 `daemon_client/inbound.rs`의 `InboundReceiver`(= `impl InboundCommands`, `on_command`)로 실재한다. 그 파일이 늘어 디렉터리는 7개다. ★**그러니 이 문서의 「오늘 없음」류 서술을 미착수로 읽지 말 것**★ — 남은 것이 무엇인지는 §6 Step 3의 4판 정정이 적는다.
 
 ---
 
@@ -23,6 +24,8 @@
 ③ 조립은 실행 파일에서 — 이름·인자 스키마는 자동 수집, 실물은 조립 때 주입(MakeTable(deps))
 ④ 배달은 홉마다 같은 3단계 — 내 표에 있나 → 명부에 있나 → 오류
 ```
+
+★4판 정정 — **위 블록 ①은 목표 배치이고 `daemon mail.*`는 아직 선언이 없다**★ 실측: `crates/engram-dashboard-daemon/src/`에 `declare_commands!` 0건 · `mail.send`/`mail.status`/`mail.pending` 0건이다. 데몬이 오늘 쥔 표는 core의 `make_table`을 조립한 것뿐이다(`daemon/src/control/commands.rs`). ★**없는 것은 `mail.*`의 `declare_commands!`이지 우편 표면 자체가 아니다**★ — 우편 어휘는 **두 표면**으로 실재한다: ㉠ CLI 상수(`core/src/agent/types.rs`의 `CLI_MAIL_VERBS`) ㉡ **데몬이 직접 소유한 MCP 툴** — `crates/engram-dashboard-daemon/src/control/mcp_server.rs`의 `SEND_MESSAGE_TOOL = "send_message"`·`MESSAGES_TOOL = "messages"`이고 `tools/list`가 둘 다 광고한다(★이름의 정본은 ADR-0094가 아니라 **컨트롤 채널 입구 정의**다★ — 0094가 박은 것은 그 귀속이고, 그 조항이 덮는 이름은 **발신 셋**뿐이라 `messages`는 조항 밖이다. 자세히는 §2-3 표). **그러니 「CLI 동사 집합이 유일한 표면」으로 읽지 말 것** — 버스가 `mail.*`를 선언할 때 맞춰야 할 계약이 하나가 아니라 둘이다. ★step-log는 Step 2를 「완결」로 적는다 — **그 판정이 이 칸을 포함하는지를 이 문서가 정하지 않는다(사용자 결정)**★. 같은 사실이 §2-3 표 · §5 daemon 행 · §6 Step 2에도 걸린다.
 
 ★개정(2판)★ **등록이 나르는 것 = `{이름 + 모양}`.** 위 블록은 등록 페이로드를 적지 않아 1판이 그것을 「이름만」으로 읽었고(§2-4 ③ 구판 문장), ADR-0156가 그 읽기를 뒤집었다. `모양`은 **불투명 문자열 한 칸(`help`)**이고 데몬은 저장·중계만 한다(§3-7).
 
@@ -41,8 +44,8 @@
 ### v1이 하는 것
 
 - ★개정★ **명령의 정적 계약을 생산자 모듈 옆에 선언한다** — 이름 · 인자 모양 · 반환 · 타입드 오류 · 읽기/쓰기 표식 · 세대 번호. 구판: "**Rust 한 곳에** 선언한다 · 선언처 = `engram-dashboard-protocol`(워크스페이스 의존 0)". 폐기 근거: 사용자 지적 「생산자와 사용자가 명확히 분리돼야 한다」. `protocol`이 의존 0이라는 실측(`crates/engram-dashboard-protocol/Cargo.toml`에 `path =` 항목 0줄 — 재실측 2026-08-13)은 여전히 참이지만, **그 crate는 wire 계약이라 명령 어휘의 집주인이 아니다.**
-- ★개정★ **선언에 「주인」 칸을 두지 않는다.** 선언이 사는 crate가 곧 주인이다. 구판: "`#[owner(Daemon|Shell|View)]` 칸을 둔다". 폐기 근거: step-log.md:1669(사용자 지적, 2026-08-12) + 인계 「do-not 2 — 사용자가 두 번 철회시킨 제안」.
-- **도구만 담는 신규 crate 하나를 판다** — 봉투 · 오류 · 선언 매크로 · 표/라우팅 계약. **명령은 0개, 워크스페이스 의존 0.** 근거: `core`는 지금 워크스페이스 의존이 **0개**다(실측 2026-08-13 — `crates/engram-dashboard-core/Cargo.toml`에 `path =` 0줄). `core`가 `agent.*`를 선언하려면 도구가 필요한데, 그것을 `protocol`에서 받으면 코어가 **wire 타입까지** 보게 된다. 도구 crate가 그 유입을 막는다.
+- ★개정★ **선언에 「주인」 칸을 두지 않는다.** 선언이 사는 crate가 곧 주인이다. 구판: "`#[owner(Daemon|Shell|View)]` 칸을 둔다". 폐기 근거: step-log.md 「사용자 방향 2026-08-12」의 「★주인 지정은 불필요 — 정의 위치가 곧 주인이다★」 항(사용자 지적) + 인계 「do-not 2 — 사용자가 두 번 철회시킨 제안」.
+- **도구만 담는 신규 crate 하나를 판다** — 봉투 · 오류 · 선언 매크로 · 표/라우팅 계약. **명령은 0개, 워크스페이스 의존 0.** 근거: `core`는 이 설계 **이전에** 워크스페이스 의존이 **0개**였다(실측 2026-08-13 — `crates/engram-dashboard-core/Cargo.toml`에 `path =` 0줄). ★4판 정정 — 그 0은 이제 **기준선이지 현황이 아니다**★: Step 1이 도구 crate를 들여 오늘 `core`의 워크스페이스 의존은 **1**이다(같은 파일의 `engram-dashboard-command`). 회계 전체는 §5 게이트 표와 §9 실측이 갖는다. `core`가 `agent.*`를 선언하려면 도구가 필요한데, 그것을 `protocol`에서 받으면 코어가 **wire 타입까지** 보게 된다. 도구 crate가 그 유입을 막는다.
 - **파생물 둘을 뽑는다** — TypeScript 바인딩(기존 ts-rs 경로)과 LLM용 JSON 스키마. ★개정★ 단 **생성 지점이 crate마다로 흩어진다**(§2-4 · §5 게이트 영향 — 여기서 기존 CI 게이트 하나가 부족해진다).
 - ★개정★ **각 프로세스가 자기 표를 채우고 자기가 구현한 것을 `{이름 + 모양}`으로 데몬에 등록한다.** 구판: "자기가 구현한 **이름만** 등록한다 · 데몬은 주인 토큰 → **이름 집합**만 쥔다". 현판에서 데몬이 쥐는 것은 주인 토큰 → `{이름, help}` 집합이고, `help`는 **불투명 문자열**이라 데몬은 여전히 "클라이언트 셸"이라는 구체 개념도 명령의 뜻도 배우지 않는다(ADR-0156 · §3-7).
 - ★2판 추가★ **발견 경로가 왕복 없이 닫힌다.** 등록이 이름과 모양을 함께 나르므로 **프로세스 밖 호출자(LLM·CLI)가 명부 조회 한 번으로 인자를 채울 수 있다** — 소유자에게 되묻는 왕복이 없다(§2-4 ③ · §3-7 개정 요약 ㉤ + 조항 1. ★2판 원문은 「조항 4」를 가리켰으나 3판에서 조항 4는 **제거 조항**이 됐다 — 포인터만 고친 것이고 이 문장의 뜻은 그대로다).
@@ -74,10 +77,10 @@
 | 어휘 | 형태 | 실물 |
 |---|---|---|
 | 화면 | 점 구분 id | `theme.set`(`src/commands/themeCommands.ts:9`) · `tab.create`(`src/commands/tabCommands.ts:29`) · `agent.spawn`(`src/commands/agentCommands.ts:41`) — 총 33개 |
-| CLI | 계열 + 동사 | `CLI_GROUP_AGENT="agent"`(`crates/engram-dashboard-core/src/agent/types.rs:237`) + `CLI_AGENT_VERBS=["list","spawn","new","rename","move"]`(`types.rs:246`) · `CLI_GROUP_MAIL="mail"`(`types.rs:179`) + `CLI_MAIL_VERBS=["send","status","pending"]`(`types.rs:212`) |
-| wire | PascalCase variant | `AgentCommand::SpawnProfile`(`crates/engram-dashboard-protocol/src/messages.rs:124`) 포함 **총 25종**(`messages.rs:25-214` — 재실측 2026-08-13. 구판 "외 25종"은 26종을 함의해 1 어긋났다) |
+| CLI | 계열 + 동사 | `CLI_GROUP_AGENT="agent"` + `CLI_AGENT_VERBS=["list","spawn","new","rename","move"]` · `CLI_GROUP_MAIL="mail"` + `CLI_MAIL_VERBS=["send","status","pending"]` — 넷 다 `crates/engram-dashboard-core/src/agent/types.rs`다. ★줄 번호를 박지 않는다 — 상수명으로 찾을 것★(구판의 `:237`·`:246`·`:212`는 낡았다) |
+| wire | PascalCase variant | `AgentCommand::SpawnProfile`(`crates/engram-dashboard-protocol/src/messages.rs` — ★줄 번호를 박지 않는다, variant 이름으로 찾을 것★) 포함 ★**4판 정정 — 총 30종**★. 구판(축약 보존): "총 25종(재실측 2026-08-13. 구판 '외 25종'은 26종을 함의해 1 어긋났다)." → §5 protocol 행이 예고한 additive가 착지해 `AgentCommand`에 다섯이 늘었다(`RegisterCommands`·`UpdateCommands`·`ListCommands`·`Command`·`CommandOutcome`). 짝인 `AgentEvent`는 **22종**이고 거기에도 셋이 늘었다(`CommandList`·`CommandRequest`·`CommandReply`) |
 
-**카탈로그 이름 = 점 구분 `<계열>.<동사>`로 통일한다.** (구판 그대로 — 뒤집히지 않았다.) 화면 어휘를 정본으로 삼는 이유는 33개가 이미 그 형태로 안정 id를 쌓았고(ADR-0055 「안정적 id」), CLI 표면은 점을 공백으로 바꾸면 그대로 나오기 때문이다 — `agent.spawn` → `engram agent spawn`. 반대 방향으로 가면 화면 33개 id를 전부 갈아야 한다. 이 규칙이 서면 step-log.md:1673 ②(화면 어휘와 데몬 어휘가 서로를 모른다)가 닫힌다.
+**카탈로그 이름 = 점 구분 `<계열>.<동사>`로 통일한다.** (구판 그대로 — 뒤집히지 않았다.) 화면 어휘를 정본으로 삼는 이유는 33개가 이미 그 형태로 안정 id를 쌓았고(ADR-0055 「안정적 id」), CLI 표면은 점을 공백으로 바꾸면 그대로 나오기 때문이다 — `agent.spawn` → `engram agent spawn`. 반대 방향으로 가면 화면 33개 id를 전부 갈아야 한다. 이 규칙이 서면 step-log.md 「사용자 방향 2026-08-12 — 통합 command 버스」절의 **「지금 상태(실측)」 ②**(화면 어휘와 데몬 어휘가 서로를 모른다)가 닫힌다. ★줄 번호를 박지 않는다★ — 그 절은 「다음(미진행)」 안에 있어 위쪽에 항목이 끼면 통째로 밀린다(2판이 한 번 고쳤고 그 뒤 또 밀렸다 — §9 출처).
 
 **덧붙임(개정):** 어휘 통일과 선언 위치는 **별개 축**이다. 이름 규칙이 하나라는 것이 선언이 한 파일에 모여야 한다는 뜻이 아니다 — 구판은 이 둘을 붙여 읽어 중앙화로 갔다.
 
@@ -130,24 +133,24 @@ pub fn make_table(manager: Arc<AgentManager>) -> CommandTable { /* … */ }
 
 | 선언처 (= 주인) | 예시 | 본문이 사는 곳 | 근거 |
 |---|---|---|---|
-| `engram-dashboard-core` | `agent.spawn` | `AgentManager`. wire는 기존 `AgentCommand::SpawnProfile`(`messages.rs:124`)/`SpawnByCwd`(`messages.rs:98`) | 에이전트 제어는 전부 데몬 프로세스가 쥔 `AgentManager`에 있다. **선언은 코어**(일하는 코드가 코어에 있으므로), **호스팅은 데몬**(ADR-0029) — 이 둘이 갈리는 유일한 자리다 |
-| `engram-dashboard-daemon` | `mail.*` | 데몬. CLI 어휘 `CLI_MAIL_VERBS`(`types.rs:212`)가 지금의 표면 | 우편 호스트 = 데몬(ADR-0110 조립실) |
-| `src-tauri` | `tab.create` | `src-tauri`. 오늘은 `create_tab`(`src-tauri/src/commands/layout.rs:98`, 속성은 `:97`)이 `ViewManager::create_tab`을 **직접** 부른다(`layout.rs:108`) | 레이아웃 권위 = `src-tauri`(ADR-0035/0057) |
-| 웹뷰(`src/commands/`) | `theme.set` | 웹뷰(TypeScript, `src/commands/themeCommands.ts:9`) | ★개정★ 구판: "**선언만 Rust에 두고** 구현은 TypeScript(C++ 헤더처럼 가른다)". 현판: **선언도 TypeScript에 둔다** — 선언과 본문을 가르지 않는다. 대신 셸이 웹뷰의 이름 목록을 **대신 등록한다**(§3-7). 구판의 근거였던 step-log.md:1669 뒷문장("화면 전용 명령은 Rust 모듈이 없어 목록에서 빠지므로 선언만은 Rust에")은 **런타임 등록이 그 구멍을 메우면서 불필요해졌다** |
+| `engram-dashboard-core` | `agent.spawn` | `AgentManager`. wire는 기존 `AgentCommand::SpawnProfile`/`SpawnByCwd`(`messages.rs` — variant 이름으로 찾을 것) | 에이전트 제어는 전부 데몬 프로세스가 쥔 `AgentManager`에 있다. **선언은 코어**(일하는 코드가 코어에 있으므로), **호스팅은 데몬**(ADR-0029) — 이 둘이 갈리는 유일한 자리다 |
+| `engram-dashboard-daemon` | `mail.*` | 데몬. ★4판 정정 — **없는 것은 `declare_commands!`뿐이고 우편 표면은 이미 둘이다**★(§0 4판 정정): ㉠ CLI 어휘 `CLI_MAIL_VERBS`(`core/src/agent/types.rs`) ㉡ **데몬 소유 MCP 툴** `send_message`·`messages`(`daemon/src/control/mcp_server.rs`의 `SEND_MESSAGE_TOOL`·`MESSAGES_TOOL`). ★**이름의 정본은 ADR-0094가 아니라 컨트롤 채널 입구 정의다**★ — 0094가 박은 것은 「발신 툴 이름의 정본 = 컨트롤 채널 입구 정의」이고(§0과 같은 회계), 그 조항이 덮는 이름은 **발신 셋**(`send_message`·`engram`·`engram-send`)뿐이다. ★`messages`는 그 조항 밖이다★ — 0094 본문에 그 이름이 등장하지 않는다(실측 2026-08-22). **어느 쪽도 「유일한 표면」이 아니다** | 우편 호스트 = 데몬(ADR-0110 조립실) |
+| `src-tauri` | `tab.create` | `src-tauri`. ★4판 정정 — **이 칸은 착지했다**★ 구판(축약 보존): "오늘은 `create_tab`이 `ViewManager::create_tab`을 **직접** 부른다." → 오늘 `commands/layout.rs`의 `create_tab`은 `crate::layout::apply::create_tab`을 부르는 얇은 껍데기이고, 선언은 `src-tauri/src/layout/commands.rs`가 `apply` 옆에서 한다 | 레이아웃 권위 = `src-tauri`(ADR-0035/0057) |
+| 웹뷰(`src/commands/`) | `theme.set` | 웹뷰(TypeScript, `src/commands/themeCommands.ts:9`) | ★개정★ 구판: "**선언만 Rust에 두고** 구현은 TypeScript(C++ 헤더처럼 가른다)". 현판: **선언도 TypeScript에 둔다** — 선언과 본문을 가르지 않는다. 대신 셸이 웹뷰의 이름 목록을 **대신 등록한다**(§3-7). 구판의 근거였던 그 항(step-log.md 「사용자 방향 2026-08-12」의 「주인 지정은 불필요」) 뒷문장("화면 전용 명령은 Rust 모듈이 없어 목록에서 빠지므로 선언만은 Rust에")은 **런타임 등록이 그 구멍을 메우면서 불필요해졌다** |
 
 ★위 표의 마지막 행이 이 개정의 핵심이다★ — 「화면 명령이 목록에서 빠진다」가 구판의 중앙화를 정당화한 유일한 실제 문제였고, 등록 wire가 그것을 푼다.
 
 ### 2-4. 파생물이 정확히 어떤 모양인가 ★개정★
 
 **① TypeScript 바인딩** — 기존 경로를 쓰되 **생성 지점이 여럿이 된다.**
-- `protocol`: `crates/engram-dashboard-protocol/tests/ts_export.rs:9-20`이 `export_all_to("<crate>/bindings/")`를 부른다(현재 23개 파일).
-- `src-tauri`: **이미 자기 `bindings/`를 갖고 있다** — `src-tauri/bindings/`에 8개(`LayoutNode.ts`·`View.ts`·`SlotContent.ts` 등), 선언은 `src-tauri/src/layout/types.rs:15,31,59,78,91,100`의 `#[ts(export)]`. 그 파일 헤더가 배치 규약을 자인한다: "이 타입들은 **src-tauri 안에서만** 정의·export 된다. protocol/daemon crate 에 …"(`types.rs:3`).
-- `core`: 신설(오늘 `bindings/` 없음).
+- `protocol`: `crates/engram-dashboard-protocol/tests/ts_export.rs`가 `export_all_to("<crate>/bindings/")`를 부른다(현재 **24개** 파일 — 구판 23).
+- `src-tauri`: **이미 자기 `bindings/`를 갖고 있다** — `src-tauri/bindings/`에 8개(`LayoutNode.ts`·`View.ts`·`SlotContent.ts` 등), 선언은 `src-tauri/src/layout/types.rs`의 `#[ts(export)]` 6종(`SplitDir`·`SlotContent`·`LayoutNode`·`View`·`ViewMeta`·`ViewSnapshot`). ★줄 번호를 박지 않는다 — 타입명으로 찾을 것★(구판의 `15,31,59,78,91,100`은 낡았다). 그 파일 헤더가 배치 규약을 자인한다: "이 타입들은 **src-tauri 안에서만** 정의·export 된다. protocol/daemon crate 에 …".
+- `core`: ★**4판 정정 — 신설이 아니라 이미 서 있다**★ 구판: "신설(오늘 `bindings/` 없음)." → Step 1이 세웠다. `crates/engram-dashboard-core/bindings/`에 14개(TS 13 + `commands.schema.json`)가 있고 명시 export는 `crates/engram-dashboard-core/tests/ts_export.rs`가 부른다. **이 문서는 §5에서 이미 그렇게 적고 있었다** — 두 자리가 갈려 있던 것을 여기서 맞춘다.
 
 ★이 실물이 개정의 선례다★ — 셸 소유 타입을 protocol에 누설하지 않기 위해 **선언처 옆에서 TS를 뽑는 방식이 이 repo에 이미 서 있다.** 구판은 그 선례를 거슬러 명령 어휘만 protocol로 모으려 했다.
 
 ```ts
-// crates/engram-dashboard-core/bindings/AgentSpawnArgs.ts (생성물, 신설)
+// crates/engram-dashboard-core/bindings/AgentSpawnArgs.ts (생성물 — Step 1 착지분)
 export type AgentSpawnArgs = { target: string | null, cwd: string | null, name: string | null, }
 ```
 
@@ -265,7 +268,7 @@ Command      { envelope: CommandEnvelope }
 CommandReply { reply: CommandReply }
 ```
 
-이 둘 + 등록 3종 + `CommandList`(§3-7) = **`protocol`에 붙는 additive variant 총 6종**(§5 protocol 행이 같은 수를 적는다). **새 프레임 층·새 소켓·새 채널을 만들지 않으므로 셸 쪽 결론은 그대로다** — 새로 생기는 분기는 **하나뿐**이다. `src-tauri/src/daemon_client/connection.rs:805`의 `Message::Text` 처리에 `Request` 갈래를 더한다. 오늘 그 자리는 `AgentEvent`만 디코드하고(`:1041~1072` 이벤트 분기), `Reply`는 이미 correlation 경로가 있다(ADR-0081 결정 4).
+이 둘 + 등록 3종 + `CommandList`(§3-7) = **`protocol`에 붙는 additive variant 총 6종**(★그 수는 §5 protocol 행이 **8종으로 정정**했다 — 중계 구간 둘이 빠져 있었다★). **새 프레임 층·새 소켓·새 채널을 만들지 않으므로 셸 쪽 결론은 그대로다** — 새로 생기는 분기는 **하나뿐**이다. `src-tauri/src/daemon_client/connection.rs`의 `Message::Text` 처리에 `Request` 갈래를 더한다(★줄 번호를 박지 않는다 — 구판의 `:805`는 낡았다★). ★4판 정정 — **그 갈래는 이미 있다**★: 오늘 그 arm은 `AgentEvent`를 디코드한 뒤 `AgentEvent::CommandRequest`를 갈라 `daemon_client/inbound.rs`의 수신기로 넘긴다. `Reply`는 이미 correlation 경로가 있다(ADR-0081 결정 4).
 
 `name`을 겉봉에 두는 것이 ADR-0081의 순수 opaque 봉투로부터의 **유일한 형태 변경**이다. 근거: 이름이 겉봉에 있으면 데몬이 인자를 모른 채로도 **명령 단위 인가·관측**을 할 수 있고, 감추면 그게 전부 불가능해진다(조사 §2 — "명령 이름까지 불투명 봉투 안에 넣은 선례는 없었다"). `args`는 여전히 데몬이 파싱하지 않으므로 ADR-0081 「데몬 opaque 유지」의 본체는 산다. (인계 「do-not 7」.)
 
@@ -342,7 +345,7 @@ pub trait InboundCommands: Send + Sync {
 pub struct ReplySink { /* oneshot 으로 request_id 에 상관 */ }
 ```
 
-**연결 태스크 안에서 적용하면 합성 명령이 교착한다.** 실측: `crates/engram-dashboard-daemon/src/connection_core.rs`의 **`dispatch`**(★줄 번호를 박지 않는다 — 함수명으로 찾을 것. 이 문서가 적어 두었던 `:582`는 이미 낡았고, Step 2 이후 코드가 계속 움직이는 자리다★)는 `crates/engram-dashboard-daemon/src/agent_conn.rs:217` → `crates/engram-dashboard-net/src/ws.rs:553`(★이 둘은 2026-08-17에 재실측하지 않았다 — 못 찾으면 심볼로 찾을 것★)을 거쳐 **연결당 단일 read 태스크 안에서 인라인으로 `.await`**된다(spawn은 `ws.rs:393`의 연결당 1회뿐). 셸 쪽 `spawn_into`(`src-tauri/src/commands/layout.rs:404`)가 자기 안에서 `DaemonClient::send_command().await`를 부르므로, 이 명령을 연결 태스크에서 인라인으로 기다리면 **자기 답을 자기가 못 꺼낸다** — ADR-0081 결정 3 개정이 잡아낸 self-deadlock 그대로다. `on_command`의 "즉시 반환" 계약이 그 회귀를 형태로 막는다.
+**연결 태스크 안에서 적용하면 합성 명령이 교착한다.** 실측: `crates/engram-dashboard-daemon/src/connection_core.rs`의 **`dispatch`**(★줄 번호를 박지 않는다 — 함수명으로 찾을 것. 이 문서가 적어 두었던 `:582`는 이미 낡았고, Step 2 이후 코드가 계속 움직이는 자리다★)는 `crates/engram-dashboard-daemon/src/agent_conn.rs:217` → `crates/engram-dashboard-net/src/ws.rs:553`(★이 둘은 2026-08-17에 재실측하지 않았다 — 못 찾으면 심볼로 찾을 것★)을 거쳐 **연결당 단일 read 태스크 안에서 인라인으로 `.await`**된다(spawn은 `ws.rs:393`의 연결당 1회뿐). 셸 쪽 `spawn_into`(`src-tauri/src/commands/layout.rs` — ★줄 번호를 박지 않는다, 함수명으로 찾을 것. 구판의 `:404`는 낡았다★)가 자기 안에서 `DaemonClient::send_command().await`를 부르므로, 이 명령을 연결 태스크에서 인라인으로 기다리면 **자기 답을 자기가 못 꺼낸다** — ADR-0081 결정 3 개정이 잡아낸 self-deadlock 그대로다. `on_command`의 "즉시 반환" 계약이 그 회귀를 형태로 막는다.
 
 ★개정에서 강화★ — 이 조항은 구판에도 있었으나 **셸 한 곳**을 겨눴다. 3단 라우팅과 2단 배달이 서면 **중간 홉이 자기 답을 기다리는 경로가 하나 더 생긴다**(데몬 → 셸 → 웹뷰에서 셸이 중간). 따라서 「받은 자리에서 실행하지 않는다」는 **셸·데몬·웹뷰 모두에 적용되는 전역 규칙**이다. (인계 「do-not 6」.)
 
@@ -450,7 +453,7 @@ CommandList { request_id: RequestId, entries: Vec<CommandListEntry> }
 
 | 번호 | 무엇을 잰다 | 불일치 시 | 실물 |
 |---|---|---|---|
-| `PROTOCOL_VERSION` | 프레임·핸드셰이크 형태 | **연결 자체가 안 선다**(정확 일치 요구) | `crates/engram-dashboard-protocol/src/lib.rs:58` = `3` · 핸드셰이크 `AuthFrame::Auth{token, protocol_version}`(`crates/engram-dashboard-net/src/auth.rs:33-36` — enum 선언 `:33`, 필드 `:35-36`) · 응답 `AgentEvent::Hello{protocol_version,...}`(`messages.rs:220`) |
+| `PROTOCOL_VERSION` | 프레임·핸드셰이크 형태 | **연결 자체가 안 선다**(정확 일치 요구) | `PROTOCOL_VERSION` = `3`(`crates/engram-dashboard-protocol/src/lib.rs` — 상수명으로 찾을 것) · 핸드셰이크 `AuthFrame::Auth{token, protocol_version}`(`crates/engram-dashboard-net/src/auth.rs`) · 응답 `AgentEvent::Hello{protocol_version,...}`(`messages.rs` — variant 이름으로 찾을 것) |
 | `CATALOG_VERSION` | 명령 어휘의 세대 | **연결은 서고 개별 명령만 실패한다**(스큐 허용) | 신설. ★개정★ 구판 = 전역 상수 1개 → 현판 = **선언 crate마다 1개**(§2-2 4) |
 
 ★**명령을 하나 더한다고 `PROTOCOL_VERSION`을 올리지 않는다.**★ 올리면 additive 확장 하나가 모든 피어의 연결을 끊는다. 봉투의 `proto_ver`는 보낸 쪽 crate의 `CATALOG_VERSION`이고 **받는 쪽은 이 값만으로 거절하지 않는다** — 거절 판정은 이름 하나 단위(②)로 내린다. 근거: 최근접 피어(WezTerm)도 호환 불가 변경에만 코덱 버전을 올린다(조사 §9).
@@ -495,6 +498,12 @@ CommandList { request_id: RequestId, entries: Vec<CommandListEntry> }
 | 반환 struct에 필드 추가 | 필드 타입 변경 |
 | 새 이름 추가 | 필드 제거 |
 | 오류 코드 집합에 코드 추가 | 기존 이름의 **뜻** 변경 |
+
+★**4판 정정 — 이 표는 이미 착지한 코드와 두 자리에서 어긋나 있다. 「무결한 규칙서」로 읽지 말 것**★ 출처 = step-log `S20.12`의 「★사용자 결정 대기 4건★」(2026-08-19). ★**이 문서는 어느 쪽이 옳은지 판정하지 않는다 — 표를 고칠지 코드를 되돌릴지는 사용자 결정이고, 여기 적는 것은 「어긋났다」는 사실까지다**★(§9 미확인에도 올렸다).
+
+- **`agent.new`의 필수 인자가 선택으로 바뀌었다** — 오늘 `AgentNewArgs`는 `cwd: Option<String>`·`preset: Option<String>`이고 계약은 「둘 중 정확히 하나」다(`crates/engram-dashboard-core/src/agent/commands.rs`). 「둘 중 하나」를 스키마로 표현할 길이 없어 내린 판단이고 리뷰어도 모양 자체는 옳다고 봤으나, 위 표의 **「필드 타입 변경」**에 정면으로 걸린다. 그 새 계약이 사는 곳은 **선언 doc 주석과 테스트 단언**이고 이 표에는 없다.
+  - ★**개정 — 이 한 줄은 출처보다 넓고, 넓은 쪽이 맞다**★ 출처인 step-log `S20.12`는 그 계약이 「**테스트 주석에만**」 있다고 적었다(구판 문장 보존). **실측은 더 넓다:** `crates/engram-dashboard-core/src/agent/commands.rs`의 `cwd` 칸 doc 주석이 「`preset`과 상호배타이고 **둘 중 정확히 하나**」를 직접 지고, `crates/engram-dashboard-core/tests/command_declarations.rs`가 「`required`가 비어 있는 것이 계약이고 조합 판정은 핸들러가 진다」를 단언으로 못 박는다(핸들러의 거절 문구가 두 칸을 함께 짚는 것도 같은 crate의 단위 테스트가 잰다). ★**좁은 쪽(「테스트 주석에만」)으로 되돌리지 말 것**★ — step-log의 그 문장은 같은 개정에서 정정했다(2026-08-22).
+- **버스 경로가 인자를 검문한다** — 이 절의 additive 규칙(모르는 칸은 무시하고 옛 의미로 실행)과 ADR-0157의 「배선은 검문하지 않는다」에 걸린다. 리뷰어 판정: **규칙의 글자는 지켰지만 그 문장이 막으려던 결과를 그대로 냈고**, 버스 프레임 경로가 **LLM이 치는 입구이면서 동시에 홉 간 배선**이라 ADR-0157의 이분법이 이 경우를 안 덮는다.
 
 기계 강제 형태: 인자 struct의 신규 필드는 `#[serde(default)]`를 단다. 어떤 struct에도 `deny_unknown_fields`를 달지 않는다 — 새 호출자가 보낸 모르는 필드가 옛 주인을 깨면 additive가 성립하지 않는다.
 
@@ -551,9 +560,15 @@ CommandList { request_id: RequestId, entries: Vec<CommandListEntry> }
 - **오늘 서 있는 것 = 자리 표 하나뿐**(`command_delivery` 의 `CommandDeliveries`). 그것이 주는 성질은 **왕복이 열려 있는 동안**의 중복 방지다: 같은 id 의 재질의는 진행 중인 왕복에 합쳐지거나(`Seat::Coalesced`) 반려된다(`Seat::Taken`), 같은 id + 다른 페이로드는 `REQUEST_ID_CONFLICT` 다(그 코드는 dedup 저장소가 아니라 이 표에서 나온다). 데몬 **자기** 1단계 자리만 완료 뒤에도 마감 한 창 동안 번호를 붙들어(`SeatState::Retained`) `ALREADY_APPLIED` 로 답한다.
 - **없는 것 = 완료분 재생·재시도 창·창 밖 신규 취급 전부.** 캐시된 원 결과를 되돌려 주는 저장소가 없고, 따라서 `retryWindowMs` 라는 칸도 wire 에 없다(아래 「호출자가 보는 것」의 구판 문장이 그 칸을 전제했다 — 거짓이었다). 중계된 이름은 답장 프레임이 나가는 순간 자리를 놓으므로, **왕복이 끝난 뒤의 같은 id 재질의는 다시 적용된다.**
 - **그 부재의 귀결 = §④ 의 `retry` 가 전부 `never` 다**(위 4판 정정). 저장소를 세우기 전에 `same-request-id` 를 되살리면 「안전하다」가 거짓말이 된다.
-- **어느 갈래로 메울지는 미결(사용자 결정)** — 완료분 재생 저장소를 세우는 길과 중계 갈래도 좌석을 보관하게 하는 길이 있고, 둘 다 공유 기계의 동작 변경이라 별도 결정이 필요하다(ADR-0161 영향 절). ★이 문서를 근거로 저장소를 구현하지 말 것.★
+- ★**4판 정정 — 그 갈래는 닫혔다(ADR-0162, 2026-08-19). 저장소를 만들지 않는다.**★ 구판(축약 보존): "어느 갈래로 메울지는 **미결(사용자 결정)** — 완료분 재생 저장소를 세우는 길과 중계 갈래도 좌석을 보관하게 하는 길이 있고, 둘 다 공유 기계의 동작 변경이라 별도 결정이 필요하다(ADR-0161 영향 절)." → **무처리로 확정**이다: 호출자가 `TIMEOUT`을 받으면 **조회 명령으로 적용 여부를 판정**하고 그 결과로 재시도할지 정한다(셸이 `tab.list`·`window.list`·`slot.resolveSpatial`을 읽기로 등록해 뒀고, 제어 라우트도 CLI도 읽기를 거르지 않는다는 것이 그 결정이 기댄 사슬이다). ★**단 ADR-0162가 자기 「근거」절에 스스로 단서를 달았다 — 그 사슬은 `file:line`까지 확인한 정적 추적이고 실제로 쳐 본 것이 아니다**★. 특히 **③(명부 기반 CLI가 셸이 등록한 조회 명령을 실제로 성사시키는가)은 실측 미완**이고, **결정의 전제라 실측 항목으로 남아 있다**(§9 미확인). 그러니 이 문단을 「사슬 전체가 실측됐다」로 읽지 말 것. 근거의 뿌리는 CLAUDE.md 「LLM-우선 제어」 — 호출자가 판단 주체이므로 배관이 그 판단을 대신 지지 않는다. ★**그러니 이 문서를 근거로 저장소를 구현하지 말 것**★(금지의 사유가 「미결이라서」에서 「거부됐으므로」로 바뀌었다).
 
-아래 네 줄 중 **앞 셋은 그 저장소를 세울 때 그대로 살아나는 설계 조항**이고(오늘 구현 없음), **마지막 줄(읽기 면제)만 오늘 실물로 돈다** — 그 자리는 dedup 저장소가 아니라 자리 표다.
+아래 「재론 조건 둘」·「전제 불변식 셋」 **뒤에 오는 설계 조항 묶음**(`dedup 저장소의 설계는 …`으로 시작하는 넷) 중 **앞 셋은 그 저장소를 세울 때 그대로 살아나는 설계 조항**이고(오늘 구현 없음 · ★ADR-0162가 **세우지 않기로** 확정했으므로 예정이 아니다 — **되살릴 계기는 바로 아래 그 두 블록이 이미 명시한다. 「계기」를 세션이 임의로 판정하지 말 것**★), **그 묶음의 마지막 줄(읽기 면제)만 오늘 실물로 돈다** — 그 자리는 dedup 저장소가 아니라 자리 표다. ★블록 이름으로 가리킨다 — 줄을 세어 찾지 말 것★(구판의 「아래 네 줄」·「아래 다섯 줄」은 그 사이에 두 블록이 끼면서 딴 데를 가리켰다).
+
+★**재론 조건 둘**(ADR-0162 영향절 — 하나라도 성립하면 재론)★
+- ① **조회로 적용 여부를 판정할 수 없는 조작이 생겼을 때** — 같은 조작을 두 번 해도 상태가 구별 안 되는 종류.
+- ② **판단하지 못하는 호출자가 이 문에 들어올 때** — 스크립트·자동 재시도 계층처럼 상태를 안 보고 다시 치는 소비자. 이건 「호출자가 판단 주체」라는 전제(위 CLAUDE.md 「LLM-우선 제어」 뿌리)가 무너지는 경우라, 그때는 배관이 그 판단을 져야 한다.
+
+★**전제 불변식 셋 — 하나라도 깨지면 위 「만들지 않는다」의 근거가 통째로 무너진다**★(같은 영향절): **읽기 명령이 명부에서 빠진다** · **제어 라우트가 읽기를 거르기 시작한다** · **CLI의 명부 기반 표면이 하드코딩으로 되돌아간다.** 그 셋 중 하나를 건드리는 변경은 ADR-0162를 재론하고 가야 한다.
 
 - dedup 저장소의 설계는 S17 TRD가 이미 세운 것을 그대로 쓴다(`trd.md:50-53`, `:72`): 완료분 = 캐시된 원 결과 재생 · in-flight 중복 = 같은 pending에 coalesce · 같은 id + 다른 페이로드 = `REQUEST_ID_CONFLICT` · 재시도 창 `retryWindowMs` 기본 300000(5분). 창 밖 같은 id = 신규 취급.
 - ★쓰기 명령의 dedup 엔트리는 **성공 응답을 받은 뒤에만** 커밋한다★ — 사전 캐싱하면 타임아웃 때 거짓 성공이 캐시된다(ADR-0081 「dedup는 UiResult(적용 후)에만 커밋」).
@@ -564,7 +579,7 @@ CommandList { request_id: RequestId, entries: Vec<CommandListEntry> }
 
 ### ⑦ 타입드 오류 모델
 
-지금은 문자열뿐이다 — 데몬은 실패를 `AgentEvent::Error { request_id, message }`(`messages.rs:334`)로만 답하고, CLI가 그 문자열을 패턴매칭해 코드를 **합성**한다(S17 TRD `trd.md:69`가 "문자열 계약은 취약"이라고 자인). 이 설계가 그것을 계약으로 승격한다.
+지금은 문자열뿐이다 — 데몬은 실패를 `AgentEvent::Error { request_id, message }`(`messages.rs` — variant 이름으로 찾을 것)로만 답하고, CLI가 그 문자열을 패턴매칭해 코드를 **합성**한다(S17 TRD `trd.md:69`가 "문자열 계약은 취약"이라고 자인). 이 설계가 그것을 계약으로 승격한다.
 
 ```rust
 pub struct CommandError {
@@ -605,7 +620,7 @@ pub struct CommandError {
 **릴리즈 프로필의 `panic = "abort"`를 유지한다**(루트 `Cargo.toml:24-30`). 사용자 결정이고, 이 TRD는 재론하지 않는다.
 
 - **근거:** 패닉이 난 뒤의 프로세스 상태는 믿을 수 없다. 미심쩍은 상태로 살려 두고 이어 가는 것보다 **죽고 다시 오는 것**이 잃는 게 적다 — 세션 복원이 그 값을 치러 준다(CLAUDE.md 「세션 복원」 · ADR-0008/0082).
-- ★**귀결 — 릴리즈 빌드에서는 패닉 그물이 서지 않는다. 그것이 의도다.**★ 패닉 그물 둘 — `blocking_handler`가 두르는 `guard_panic`(`crates/engram-dashboard-command/src/route.rs:20`, 호출부 `table.rs:178`)과 `route()`가 두르는 `CatchUnwind`(`route.rs:60`) — 은 **개발·테스트 빌드에서만** 실효가 있다. 릴리즈에서는 핸들러 패닉이 오류 답장이 아니라 **프로세스 종료**가 된다. 그물을 「릴리즈에서도 답장 하나를 보장한다」로 읽지 말 것 — §4-⑤의 「한 `request_id`에 답장 하나」는 그 빌드에서 그물이 아니라 **호출자의 마감시각**(⑥)이 지킨다.
+- ★**귀결 — 릴리즈 빌드에서는 패닉 그물이 서지 않는다. 그것이 의도다.**★ 패닉 그물 둘 — `blocking_handler`가 두르는 `guard_panic`(`crates/engram-dashboard-command/src/route.rs`, 호출부 = 같은 crate `table.rs`의 `blocking_handler` 어댑터)과 `route()`가 두르는 `CatchUnwind`(`route.rs`) — ★줄 번호를 박지 않는다, 심볼명으로 찾을 것★ — 은 **개발·테스트 빌드에서만** 실효가 있다. 릴리즈에서는 핸들러 패닉이 오류 답장이 아니라 **프로세스 종료**가 된다. 그물을 「릴리즈에서도 답장 하나를 보장한다」로 읽지 말 것 — §4-⑤의 「한 `request_id`에 답장 하나」는 그 빌드에서 그물이 아니라 **호출자의 마감시각**(⑥)이 지킨다.
 - **그래서 규약이 하나 선다: 명령 핸들러는 터져서 죽지 않는다 — 오류를 값으로 돌려준다.** 그물은 실수를 덮는 안전망이지 오류 경로가 아니다. 릴리즈에서 그물이 없어지므로, 패닉을 오류 전달 수단으로 쓰면 그 빌드에서 **에이전트 하나의 잘못된 인자가 데몬을 내린다.** 리뷰 체크리스트가 이 항목을 본다(`.claude/skill-bindings/review.md` 「code 단계 게이트」).
 
 ---
@@ -618,27 +633,30 @@ pub struct CommandError {
 | crate / 폴더 | 이 설계가 넣는 것 |
 |---|---|
 | **`engram-dashboard-command`(신규)** — ★개정★ 구판 "이름 잠정" → 이름 확정(ADR-0155) | 선언 매크로 · `CommandSpec`/`command_specs()` · `CommandEnvelope`/`CommandReply`/`CommandError`/`ErrorCode` · ★2판★ **`CommandDecl`**(§3-1 — 등록 단위) · `CommandTable`/`CommandHandler`/`CommandLink`/`InboundCommands`/`Roster` · `route()`. **워크스페이스 의존 0 · 명령 0개.** ★개정(Step 1 실측 2026-08-14)★ 외부 의존은 **넷**(`serde`·`serde_json`·`inventory`·`uuid`)이다. 구판(축약 보존): "외부 의존 = serde + 링커 수집 crate" — 둘로 줄여 적었다. 회계 전체는 아래 게이트 표의 「코어 워크스페이스 의존 0」 칸에 모았다. ★오해 방지★ 아래 protocol 행이 **이 crate를 의존한다** — 그건 protocol의 의존이지 **이 crate의 의존이 아니다.** 화살표는 `protocol → command` 한 방향뿐이라 「의존 0」은 깨지지 않는다 |
-| `engram-dashboard-core` | ★개정★ 구판 "변경 없음" → **`agent.*` 선언 + `make_table(manager)`.** 그리고 **이 crate의 첫 워크스페이스 의존**이 생긴다(오늘 0개 — 실측). 받는 것은 도구 crate 하나뿐이고 `protocol`은 여전히 안 본다 |
-| `engram-dashboard-daemon` | `mail.*` 선언 + `make_table` · 주인 명부(토큰 → 이름 — ★2판★ 각 이름의 `help` 문자열을 **불투명하게** 보관한다. 파싱·검증·분기 금지, 자료형은 `String` 고정: §3-7 하드 제약) · 라우팅 표(ADR-0081 형태) · `connection_core.rs`의 **`dispatch`**(그 함수의 `&dyn OutboundSink` 인자)에 새 variant arm — ★줄 번호를 박지 않는다★(구판이 적어 둔 `:582`/`:586`은 낡았다. 함수명·인자 타입으로 찾을 것)<br>★개정(3판, ADR-0150)★ 구판(축약 보존): 주인 명부가 "**tombstone 포함**". → **자취 없음**(연결 종료 시 제거). 그리고 ㉠ **주인 키가 연결이 첫 인사에서 받아 보관한 클라이언트 자작 식별자**가 된다(연결 id 파생 대체 — 안 보낸 연결은 파생 유지, fail-open) ㉡ **연결별 상태에 그 식별자 칸이 하나 생긴다** ㉢ **끊김 처리는 detach 한 곳만 바꾼다**(자취 남기기 → 제거. 두 번째 제거 지점 금지) |
-| `src-tauri` | `window`/`tab`/`slot` 선언 + `make_table` · **ADR-0081이 요구한 공유 적용 서비스**(오늘 없음) · `daemon_client` 인바운드 수신기(오늘 없음 — `connection.rs:805`에 `Request` 갈래 추가) · 웹뷰 몫 대리 등록<br>★3판 추가(ADR-0150)★ **자기 식별자를 만들어 보관하고 첫 인사에 실어 보낸다**(`src-tauri/src/daemon_client/connection.rs`) · 등록은 첫 인사에 합치지 않고 **인증 통과 직후** 별도 메시지로 보낸다(§3-7 조항 1) |
+| `engram-dashboard-core` | ★개정★ 구판 "변경 없음" → **`agent.*` 선언 + `make_table(manager)`.** 그리고 **이 crate의 첫 워크스페이스 의존**이 생긴다(설계 시점 0개 — ★4판 정정: Step 1이 착지시켜 **오늘 1**이다★). 받는 것은 도구 crate 하나뿐이고 `protocol`은 여전히 안 본다 |
+| `engram-dashboard-daemon` | `mail.*` 선언 + `make_table`(★4판 정정 — **이 선언은 아직 없다**: `daemon/src/`에 `declare_commands!` 0건 · `mail.*` 이름 0건. 데몬이 쥔 표는 core의 `make_table`을 조립한 것뿐이다. Step 2 완결 판정이 이 칸을 포함하는지는 §0 4판 정정 참조★) · 주인 명부(토큰 → 이름 — ★2판★ 각 이름의 `help` 문자열을 **불투명하게** 보관한다. 파싱·검증·분기 금지, 자료형은 `String` 고정: §3-7 하드 제약) · 라우팅 표(ADR-0081 형태) · `connection_core.rs`의 **`dispatch`**(그 함수의 `&dyn OutboundSink` 인자)에 새 variant arm — ★줄 번호를 박지 않는다★(구판이 적어 둔 `:582`/`:586`은 낡았다. 함수명·인자 타입으로 찾을 것)<br>★개정(3판, ADR-0150)★ 구판(축약 보존): 주인 명부가 "**tombstone 포함**". → **자취 없음**(연결 종료 시 제거). 그리고 ㉠ **주인 키가 연결이 첫 인사에서 받아 보관한 클라이언트 자작 식별자**가 된다(연결 id 파생 대체 — 안 보낸 연결은 파생 유지, fail-open) ㉡ **연결별 상태에 그 식별자 칸이 하나 생긴다** ㉢ **끊김 처리는 detach 한 곳만 바꾼다**(자취 남기기 → 제거. 두 번째 제거 지점 금지) |
+| `src-tauri` | `window`/`tab`/`slot` 선언 + `make_table` · **ADR-0081이 요구한 공유 적용 서비스** · `daemon_client` 인바운드 수신기 · 웹뷰 몫 대리 등록<br>★**4판 정정 — 앞의 셋은 이미 섰다**★ 구판(축약 보존): "공유 적용 서비스(**오늘 없음**) · 인바운드 수신기(**오늘 없음** — `connection.rs:805`에 `Request` 갈래 추가)." → 적용 서비스 = `src-tauri/src/layout/apply.rs`(그 옆 `layout/commands.rs`가 `window`/`tab`/`slot`을 선언한다) · 인바운드 수신기 = `src-tauri/src/daemon_client/inbound.rs`의 `InboundReceiver`(`impl InboundCommands`) · 받는 갈래 = `daemon_client/connection.rs`의 `Message::Text` arm이 갈라 내는 `AgentEvent::CommandRequest`. ★남는 것은 **둘**이다 — ㉠ **웹뷰 몫 대리 등록**(§6 Step 4) ㉡ **아래 3판 추가분 = 자작 식별자를 첫 인사에 싣기**(§6 Step 3의 5). ㉡의 실측: `crates/engram-dashboard-net/src/auth.rs`의 `AuthFrame::Auth`는 오늘도 `{token, protocol_version}` 두 칸이고 골든 문자열도 그 모양이다 · `src/api/wsTransport.ts`의 첫 프레임도 그 둘만 싣는다. **㉠만 남았다고 읽지 말 것 — §6 Step 3의 4판 정정과 같은 회계다**★<br>★3판 추가(ADR-0150) — **미착지**★ **자기 식별자를 만들어 보관하고 첫 인사에 실어 보낸다**(`src-tauri/src/daemon_client/connection.rs`) · 등록은 첫 인사에 합치지 않고 **인증 통과 직후** 별도 메시지로 보낸다(§3-7 조항 1) |
 | `src/api/`(웹 클라이언트 transport) | ★3판 신설(ADR-0150)★ **자기 식별자를 만들어 보관하고 첫 인사에 실어 보낸다**(`src/api/wsTransport.ts`). ★**클라 양쪽을 함께 고친다**★ — 오늘 웹과 데스크톱 셸이 **같은 첫 인사 값**을 보내 데몬이 그 둘조차 구분하지 못한다. 한쪽만 고치면 어긋난다 |
 | `src/commands/` | `theme`/`chat` 선언(TypeScript) + 셸에 자기 목록 통지 · ★2판 개정★ **`registry.ts`는 additive로 한 칸 넓힌다**(`Command`에 `help: string` · `list()` 반환에 그 필드 — §6 Step 4). 구판(축약 보존): "기존 `registry.ts` **그대로**" — 그러면 `help`가 웹뷰에서 나갈 길이 없다 |
-| `engram-dashboard-protocol` | ★개정★ 구판 "카탈로그 전부" → **`AgentCommand`/`AgentEvent`의 additive variant 6종만.** 내역 = 등록 3종(`RegisterCommands`·`UpdateCommands`·`ListCommands`) + `AgentEvent::CommandList`(§3-7) + **봉투 2종**(`AgentCommand::Command`·`AgentEvent::CommandReply` — §3-2). ★**3판 정정(2026-08-18, Step 3 착수 실측) — 6종이 아니라 8종이다**★ 위 열거는 **호출자 구간**(호출자→데몬 요청 · 데몬→호출자 응답)만 덮고 **중계 구간이 빠졌다** — 데몬이 주인에게 요청을 건네는 칸과 주인이 결과를 돌려주는 칸이 없다. 그래서 셸은 명령을 **받을 그릇 자체가 없었다**(실측: `rg -c "CommandEnvelope|CommandReply" crates/engram-dashboard-protocol/src/` → 0). 봉투가 **대칭이고 방향 필드가 없다**는 §3-2 결정의 필연적 귀결이라 설계 변경이 아니라 **열거 누락**이다. 보태는 둘 = **`AgentEvent::CommandRequest`(데몬→클라 전달) · `AgentCommand::CommandOutcome`(클라→데몬 결과)**. ★이름 주의★ 결과 칸을 `CommandReply`로 짓지 않는다 — 셸 연결 코드에 **전혀 다른 용도의 같은 이름**(`oneshot::Sender` 별칭)이 이미 있어 한 파일에서 충돌한다. ★2판 정정★ 1판은 「4종」으로 적어 봉투 2종을 빠뜨렸고, 그래서 아래 net 행(「봉투는 variant로 실려」)과 갈렸다. 명령 선언은 여전히 0개. ★**2판 귀결 — 이 crate의 워크스페이스 의존이 0 → 1이 된다**★: 위 variant들(2판 회계로 6종 · **3판 정정 후 8종** — 위 정정 참조)이 `CommandEnvelope`·`CommandReply`·`CommandDecl`을 실으므로 **도구 crate 하나를 의존한다**(§3-1 — 그래서 `CommandDecl`을 protocol로 되옮겨도 의존이 안 사라져 「양쪽에 두고 매핑」을 거부했다). 실측 기준선은 오늘 0(§9) |
+| `engram-dashboard-protocol` | ★개정★ 구판 "카탈로그 전부" → **`AgentCommand`/`AgentEvent`의 additive variant 6종만.** 내역 = 등록 3종(`RegisterCommands`·`UpdateCommands`·`ListCommands`) + `AgentEvent::CommandList`(§3-7) + **봉투 2종**(`AgentCommand::Command`·`AgentEvent::CommandReply` — §3-2). ★**3판 정정(2026-08-18, Step 3 착수 실측) — 6종이 아니라 8종이다**★ 위 열거는 **호출자 구간**(호출자→데몬 요청 · 데몬→호출자 응답)만 덮고 **중계 구간이 빠졌다** — 데몬이 주인에게 요청을 건네는 칸과 주인이 결과를 돌려주는 칸이 없다. 그래서 셸은 명령을 **받을 그릇 자체가 없었다**(실측: `rg -c "CommandEnvelope|CommandReply" crates/engram-dashboard-protocol/src/` → 0). 봉투가 **대칭이고 방향 필드가 없다**는 §3-2 결정의 필연적 귀결이라 설계 변경이 아니라 **열거 누락**이다. 보태는 둘 = **`AgentEvent::CommandRequest`(데몬→클라 전달) · `AgentCommand::CommandOutcome`(클라→데몬 결과)**. ★이름 주의★ 결과 칸을 `CommandReply`로 짓지 않는다 — 셸 연결 코드에 **전혀 다른 용도의 같은 이름**(`oneshot::Sender` 별칭)이 이미 있어 한 파일에서 충돌한다. ★2판 정정★ 1판은 「4종」으로 적어 봉투 2종을 빠뜨렸고, 그래서 아래 net 행(「봉투는 variant로 실려」)과 갈렸다. 명령 선언은 여전히 0개. ★**2판 귀결 — 이 crate의 워크스페이스 의존이 0 → 1이 된다**★: 위 variant들(2판 회계로 6종 · **3판 정정 후 8종** — 위 정정 참조)이 `CommandEnvelope`·`CommandReply`·`CommandDecl`을 실으므로 **도구 crate 하나를 의존한다**(§3-1 — 그래서 `CommandDecl`을 protocol로 되옮겨도 의존이 안 사라져 「양쪽에 두고 매핑」을 거부했다). 실측 기준선은 0(§9)<br>★**4판 정정 — 여덟 종이 전부 들어왔고 의존도 1이 됐다. 이 행을 미래형으로 읽지 말 것**★ 실측: `AgentCommand`에 `RegisterCommands`·`UpdateCommands`·`ListCommands`·`Command`·`CommandOutcome`, `AgentEvent`에 `CommandList`·`CommandRequest`·`CommandReply`(`crates/engram-dashboard-protocol/src/messages.rs`). 그리고 `crates/engram-dashboard-protocol/Cargo.toml`이 `engram-dashboard-command`를 의존한다 — **기준선 0은 이력이고 오늘은 1이다**(위 「명령 선언은 여전히 0개」는 그대로 참이다) |
 | `engram-dashboard-net` | ★**개정(3판) — 변경 없음이 아니다**★ 구판: "★변경 없음★". → **첫 인사(핸드셰이크) 프레임이 net 소유**이므로(`crates/engram-dashboard-net/src/auth.rs` `AuthFrame::Auth`, 오늘 `{token, protocol_version}` 두 필드 · 디코드는 `ws.rs`) **거기 칸 하나가 additive로 붙고 그 프레임의 골든 테스트를 같은 커밋에서 갱신한다**(ADR-0150 — 빨개지는 것이 의도된 신호). 값을 데몬 쪽 연결 상태로 넘기는 통로도 한 칸 필요하다. **명령 어휘는 여전히 net에 안 들어온다** — 들어오는 것은 뜻을 모르는 문자열 한 칸이다. ★**net 경계·격리 게이트의 정본은 그 crate `src/lib.rs` 헤더다**★ — 이 칸이 그 헤더의 불변식에 걸리는지는 착수 시 그 헤더를 읽고 판정한다(여기서 대신 세지 않는다) |
 | `engram-dashboard-messaging` | 변경 없음. ★단 게이트 하나가 새 crate를 못 본다 — 아래★ |
 
 ### 각 격리 게이트에 미치는 영향 ★개정★
 
+★**아래 표는 `ci.yml`의 게이트를 `name:`으로 가리킨다 — 줄 번호를 박지 않는다**★(구판이 박아 둔 번호는 전부 밀렸다. 워크플로에 스텝이 끼면 그 아래가 통째로 움직인다).
+
 | 게이트 (CLAUDE.md · `.github/workflows/ci.yml`) | 영향 |
 |---|---|
-| 코어 tauri import 0줄 (`ci.yml:254`) | **없음.** 도구 crate에 tauri가 없다. 셸·화면 명령의 *본문*은 코어 밖이고 코어가 참조하지 않는다. (ADR-0003) |
+| 코어 tauri import 0줄 (게이트명 ``Gate: core isolation — no `use tauri` in core``) | **없음.** 도구 crate에 tauri가 없다. 셸·화면 명령의 *본문*은 코어 밖이고 코어가 참조하지 않는다. (ADR-0003) |
 | **코어 워크스페이스 의존 0** | ★**0 → 1로 바뀐다.**★ 실측: `crates/engram-dashboard-core/Cargo.toml`에 `path =` 0줄(2026-08-13). 도구 crate 하나가 들어온다. **이 수치를 지키는 CI 게이트는 오늘 없다**(있는 것은 tauri import 게이트뿐) — 즉 게이트가 깨지지는 않지만, 「코어는 아무것도 안 본다」는 문장이 「코어는 도구 하나만 본다」로 바뀐다. 이 완화가 개정의 대가이고, `protocol`을 보게 하는 것(=wire 타입까지 유입)보다 작다는 것이 도구 crate를 판 이유다.<br>★**개정(Step 1 실측 2026-08-14) — 대가는 이 한 줄이 아니었다**★ 구판(축약 보존): 이 칸은 「0 → 1」만 적고 "이 완화가 개정의 대가"로 닫았다. 실측하니 셋이 더 있다. ㉠ **`core`가 `ts-rs`를 `[dependencies]`로 받는다** — 선언 매크로가 `TS` derive를 달아야 해서이고, dev가 아니라 **production 의존**이다(`crates/engram-dashboard-core/Cargo.toml`). ㉡ `command`와 그것이 데려온 `inventory`는 `core`를 타고 **데몬·셸 릴리즈 바이너리에 함께 링크된다**(`cargo tree -i`로 확인 — `core` → `daemon`/`net`/`discovery`/`src-tauri`). ㉢ 외부 의존 수가 표 첫 행의 「serde + 링커 수집 crate」보다 둘 많다(위 정정). **단 `ts-rs`는 이번에 처음 들어온 것이 아니다** — `protocol`과 `src-tauri`가 이미 `ts-rs = "10"`을 production으로 쓰고 있어 릴리즈 그래프에 **새로 든 crate는 `inventory` 하나**다(`Cargo.lock` 신규 패키지 = `inventory` + 워크스페이스 멤버 자신, 둘뿐 — 실측). 즉 늘어난 것은 **바이너리 크기·컴파일 시간이 아니라 의존 간선**이 주고, `core`가 이제 TS 생성 도구를 production 그래프에 안고 있다는 사실이 남는다 |
-| 메시징 커널 워크스페이스 crate 참조 0줄 (`ci.yml:269`) | ★**게이트에 구멍이 생긴다.**★ 정규식이 `engram_dashboard_(core\|daemon\|protocol\|discovery)`라 **신규 crate 이름이 알파벳에 없다.** 메시징이 도구 crate를 쓰게 돼도 게이트가 안 잡는다. **조치: 정규식에 새 이름을 더한다**(ADR-0110 불변식을 지키려면 필수). 메시징엔 net 같은 의존 상한(`cargo tree`) 게이트가 없어 정규식이 유일한 벽이다 |
-| net 소스 참조 0줄 (`ci.yml:340`, `daemon\|messaging\|discovery`) | **정규식은 같은 구멍이 있으나 실질 영향 없음** — net의 의존 상한 게이트(아래)가 새 간선을 잡는다 |
-| **net — core 심볼 allowlist 정확히 2줄** (`ci.yml:355`) | ★**바뀌지 않는다.**★ 허용된 둘은 `agent::platform::pid_alive_with_start_time`·`current_process_start_time`(portfile stale 판정 전용). 이 설계는 core 심볼을 net에서 새로 쓰지 않는다 |
-| **net — 직접 워크스페이스 의존 정확히 3줄** (`ci.yml:379`) | ★**바뀌지 않는다 — 단 근거가 바뀐다.**★ 구판 근거: "카탈로그가 사는 곳이 **이미 그 3에 든 protocol**이라 새 의존이 생기지 않는다." 현판 근거: **net은 명령을 선언하지도 실행하지도 않아 도구 crate를 볼 일이 없다.** 상한 3(자기 + core + protocol)은 그대로다. ★2판 확인★ `protocol`이 도구 crate를 의존하게 되지만(위 §5 protocol 행) **이 게이트는 `--depth 1`이라 net의 *직접* 의존만 센다**(`ci.yml`의 `cargo tree --locked -p engram-dashboard-net --depth 1 …` — 실측 확인 2026-08-13). 도구 crate는 net에게 **깊이 2**라 3줄에 안 잡힌다 |
-| net — auth 어휘 재유입 금지 (`ci.yml:400`) | **없음.** 봉투는 `AgentCommand::Command`/`AgentEvent::CommandReply` variant로 실려(§3-2) net에겐 **불투명 텍스트 프레임**이다 — `ws.rs:553`이 `handler.on_text(...)`로 넘길 뿐 안을 안 본다.<br>★3판 확인★ 첫 인사 프레임에 칸이 하나 붙어도(위 net 행) 이 게이트는 **`AgentCommand`·`PROTOCOL_VERSION` 두 낱말을 `net/src/`에서 찾는 형태**라 평범한 문자열 필드 하나는 걸리지 않는다(`ci.yml` 해당 스텝 실측). **단 net의 다른 불변식은 그 crate 헤더가 정본이다** — 여기서 대신 판정하지 않는다 |
-| **생성물 sync 게이트** (`ci.yml:142`) | ★**그대로 못 쓴다 — 구판의 「새 게이트 0」이 여기서 깨진다.**★ 근거 둘: ㉠ 게이트가 보는 경로가 `crates/engram-dashboard-protocol/bindings/` **하나**다. `core/bindings/`(신설)와 `src-tauri/bindings/`(이미 8개 존재)는 **오늘 아무도 안 본다.** ㉡ 워크스페이스 테스트는 `--exclude engram-dashboard`(`ci.yml:96-99`)라 **src-tauri의 ts-rs export가 CI에서 돌지 않는다.** 즉 셸 소유 선언은 기존 파생 게이트에 그냥 얹히지 않는다. ★개정(Step 1 실측 2026-08-14)★ **㉠의 절반은 닫혔다** — Step 1이 이 게이트를 `core/bindings/`까지 넓히고 `git add -N -f`로 신규 미커밋 파일도 잡게 했다(위 앵커가 그 게이트다). 남은 것은 `src-tauri/bindings/`이고 ㉡은 그대로다. ★실측으로 닫힘(2026-08-13)★ — 아래 문단: `src-tauri/bindings/`는 **오늘 실질적으로 손으로 관리되는 생성물**이다 |
+| 메시징 커널 워크스페이스 crate 참조 0줄 (게이트명 `Gate: messaging kernel isolation — no workspace crate refs`) | ★**게이트에 구멍이 생긴다.**★ 정규식이 `engram_dashboard_(core\|daemon\|protocol\|discovery)`라 **신규 crate 이름이 알파벳에 없다.** 메시징이 도구 crate를 쓰게 돼도 게이트가 안 잡는다. **조치: 정규식에 새 이름을 더한다**(ADR-0110 불변식을 지키려면 필수). ★**4판 정정 — 그 조치는 됐다**★: 오늘 정규식은 `engram_dashboard_(core\|daemon\|protocol\|discovery\|command)`이고, 메시징엔 **의존 상한(`cargo tree`) 게이트도 새로 섰다**(게이트명 `Gate: messaging kernel isolation — direct workspace deps ceiling (exactly 1 = self)`) — 구판의 "정규식이 유일한 벽"은 더 이상 참이 아니다. 남는 구멍은 **알파벳을 손으로 박는다는 것 자체**다(다음 crate도 누가 더할 때까지 안 보인다) |
+| **도구 crate — 직접 워크스페이스 의존 정확히 1줄(= 자기 자신)** (게이트명 `Gate: command tool crate — direct workspace deps ceiling (exactly 1 = self)`) | ★**이 설계가 만든 게이트다 — 「워크스페이스 의존 0」을 지키는 벽이 이것이고, 표 첫 행의 그 문장은 이 줄이 없으면 선언일 뿐이다.**★ 매니페스트 텍스트 정규식(`rg "path\s*=" Cargo.toml`)이 아니라 **해석된 의존 그래프**(`cargo tree --depth 1 -e normal,dev,build --target all --all-features`)를 센다 — 따옴표·`[build-dependencies]`·rename에 뚫리는 구멍을 처음부터 피하려고 그랬다(messaging 상한·net 게이트 3과 같은 계기). 남는 구멍도 그 둘과 같다: 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별하므로 다른 이름을 단 멤버는 그냥 통과한다 |
+| net 소스 참조 0줄 (게이트명 `net gate 1: source refs — no daemon/messaging/discovery`) | **정규식은 같은 구멍이 있으나 실질 영향 없음** — net의 의존 상한 게이트(아래)가 새 간선을 잡는다 |
+| **net — core 심볼 allowlist 정확히 2줄** (게이트명 `net gate 2: core symbol allowlist — exactly 2`) | ★**바뀌지 않는다.**★ 허용된 둘은 `agent::platform::pid_alive_with_start_time`·`current_process_start_time`(portfile stale 판정 전용). 이 설계는 core 심볼을 net에서 새로 쓰지 않는다 |
+| **net — 직접 워크스페이스 의존 정확히 3줄** (게이트명 `net gate 3: direct workspace deps — exactly 3`) | ★**바뀌지 않는다 — 단 근거가 바뀐다.**★ 구판 근거: "카탈로그가 사는 곳이 **이미 그 3에 든 protocol**이라 새 의존이 생기지 않는다." 현판 근거: **net은 명령을 선언하지도 실행하지도 않아 도구 crate를 볼 일이 없다.** 상한 3(자기 + core + protocol)은 그대로다. ★2판 확인★ `protocol`이 도구 crate를 의존하게 되지만(위 §5 protocol 행) **이 게이트는 `--depth 1`이라 net의 *직접* 의존만 센다**(`ci.yml`의 `cargo tree --locked -p engram-dashboard-net --depth 1 …` — 실측 확인 2026-08-13). 도구 crate는 net에게 **깊이 2**라 3줄에 안 잡힌다 |
+| net — auth 어휘 재유입 금지 (게이트명 `net gate 4: no auth vocabulary re-entry`) | **없음.** 봉투는 `AgentCommand::Command`/`AgentEvent::CommandReply` variant로 실려(§3-2) net에겐 **불투명 텍스트 프레임**이다 — `ws.rs:553`이 `handler.on_text(...)`로 넘길 뿐 안을 안 본다.<br>★3판 확인★ 첫 인사 프레임에 칸이 하나 붙어도(위 net 행) 이 게이트는 **`AgentCommand`·`PROTOCOL_VERSION` 두 낱말을 `net/src/`에서 찾는 형태**라 평범한 문자열 필드 하나는 걸리지 않는다(`ci.yml` 해당 스텝 실측). **단 net의 다른 불변식은 그 crate 헤더가 정본이다** — 여기서 대신 판정하지 않는다 |
+| **생성물 sync 게이트** (게이트명 `Gate: ts-rs bindings are in sync with the wire contract`) | ★**그대로 못 쓴다 — 구판의 「새 게이트 0」이 여기서 깨진다.**★ 근거 둘: ㉠ 게이트가 보는 경로가 `crates/engram-dashboard-protocol/bindings/` **하나**다. `core/bindings/`와 `src-tauri/bindings/`(이미 8개 존재)는 **오늘 아무도 안 본다.** ㉡ 워크스페이스 테스트는 `--exclude engram-dashboard`(스텝명 `cargo test --workspace --exclude engram-dashboard`)라 **src-tauri의 ts-rs export가 CI에서 돌지 않는다.** 즉 셸 소유 선언은 기존 파생 게이트에 그냥 얹히지 않는다. ★개정(Step 1 실측 2026-08-14)★ **㉠의 절반은 닫혔다** — Step 1이 이 게이트를 `core/bindings/`까지 넓히고 `git add -N -f`로 신규 미커밋 파일도 잡게 했다(위 앵커가 그 게이트다). 남은 것은 `src-tauri/bindings/`이고 ㉡은 그대로다. ★실측으로 닫힘(2026-08-13)★ — 아래 문단: `src-tauri/bindings/`는 **오늘 실질적으로 손으로 관리되는 생성물**이다 |
 
 ★**net 게이트 둘이 안 바뀌는 이유 한 줄**★: **이 설계는 네트워크 행에 아무 개념도 추가하지 않는다.** 명령 어휘는 선언처(core·daemon·src-tauri·웹뷰)에서 시작해 거기서 끝나고, net은 그 사이를 나르는 바이트 통로로만 참여한다(ADR-0129의 계층 분리 그대로).
 
@@ -650,12 +668,12 @@ pub struct CommandError {
 
 **판정: 실질적으로 손으로 관리되는 생성물이다.** 재생성 메커니즘은 **존재하지만 실행 경로가 하나도 없다.**
 
-- **선언은 있다** — `src-tauri/src/layout/types.rs`의 `#[ts(export)]` 6개 타입(15·31·59·78·91·100줄), 전이 의존까지 합쳐 8개 파일.
-- **메커니즘이 암묵적이다.** protocol의 `crates/engram-dashboard-protocol/tests/ts_export.rs` 같은 **명시적 export 테스트가 `src-tauri`엔 없다**(통합 테스트 디렉터리 자체가 없다). `src-tauri/src/layout/mod.rs:29-32`가 자인한다 — 수동 `export_all_to` 미러는 derive와 "이중출처"라 제거했고(주석의 FIX-2), 대신 ts-rs derive가 타입마다 자동 생성하는 `export_bindings_<타입>` 테스트에 의존한다. 그 테스트들은 **`src-tauri` 패키지의 lib 테스트 타깃**에 속한다.
-- **그 타깃이 로컬에서 안 돈다.** `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 기동 자체가 죽는다(`src-tauri/build.rs` 상단 주석 · `docs/testing-strategy.md:75`·`:99`). export 테스트도 그 안에 있어 함께 안 돈다.
-- **CI에서도 안 돈다.** 워크스페이스 테스트가 그 패키지를 제외하고(`ci.yml:85`·`:96-99`), `cargo build`(`ci.yml:151-153`)는 빌드만 한다. **워크플로 전체에서 `src-tauri/bindings`를 참조하는 줄이 0건이다.**
+- **선언은 있다** — `src-tauri/src/layout/types.rs`의 `#[ts(export)]` 6개 타입(★타입명으로 찾을 것 — 구판이 적어 둔 `15·31·59·78·91·100`줄은 낡았다★), 전이 의존까지 합쳐 8개 파일.
+- **메커니즘이 암묵적이다.** protocol의 `crates/engram-dashboard-protocol/tests/ts_export.rs` 같은 **명시적 export 테스트가 `src-tauri`엔 없다**(★단 통합 테스트 디렉터리 자체는 이제 있다 — `src-tauri/tests/`에 통합 타깃 넷. 없는 것은 **export 테스트**다★). `src-tauri/src/layout/mod.rs` **말미의 ts-rs 주석**이 자인한다(★줄 번호를 박지 않는다 — 구판의 `:29-32`에는 지금 `LayoutState`가 있다★) — 수동 `export_all_to` 미러는 derive와 "이중출처"라 제거했고(주석의 FIX-2), 대신 ts-rs derive가 타입마다 자동 생성하는 `export_bindings_<타입>` 테스트에 의존한다. 그 테스트들은 **`src-tauri` 패키지의 lib 테스트 타깃**에 속한다.
+- **그 타깃이 로컬에서 안 돈다.** `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 기동 자체가 죽는다(`src-tauri/build.rs` 상단 주석 · `docs/testing-strategy.md`의 해당 항). export 테스트도 그 안에 있어 함께 안 돈다.
+- **CI에서도 안 돈다.** 워크스페이스 테스트가 그 패키지를 제외하고(스텝명 `cargo test --workspace --exclude engram-dashboard`), `cargo build` 스텝은 빌드만 한다. **워크플로 전체에서 `src-tauri/bindings`를 참조하는 줄이 0건이다.** ★단 `src-tauri` **통합** 타깃 넷은 CI에서 각각 돈다★(`layout_apply`·`layout_commands`·`daemon_client_pending`·`daemon_client_replay` — lib 타깃만 죽는다). 파생 게이트가 비어 있는 것과 셸 테스트 커버리지가 비어 있는 것은 이제 별개다.
 - **다른 경로도 없다.** npm 스크립트·`scripts/`·cargo alias·git hook 어디에도 재생성 경로가 없다.
-- **이력이 방증한다(★2판 톤 하향★).** 신규 바인딩 파일(`SlotContent.ts`)이 **git 미추적으로 남아 리뷰에서 지적됐고 그 뒤 add됐다**는 기록이 `docs/process/step-log.md:732`에 있다. 구판(축약 보존): "**사람이 수동으로 add**한 사례가 **실측**으로 남아 있다" — 원문은 Codex FIX 「신규 바인딩 git 미추적」 → 「FIX 반영(SlotContent.ts add)」일 뿐 **누가 어떤 경로로 add했는지는 적혀 있지 않아** 라벨이 근거보다 셌다. **판정은 이 줄에 기대지 않는다** — 위 네 항목(선언 있음 · 메커니즘 암묵 · 로컬 미동작 · CI 미동작)이 각각 독립으로 선다. 과거 TRD(`docs/process/C-slot-content/TRD.md:19-20`)가 "ts-rs 재생성으로 자동 갱신(수동 편집 금지)"이라는 **의도**를 적었으나 게이트로 실현된 적이 없다.
+- **이력이 방증한다(★2판 톤 하향★).** 신규 바인딩 파일(`SlotContent.ts`)이 **git 미추적으로 남아 리뷰에서 지적됐고 그 뒤 add됐다**는 기록이 `docs/process/step-log.md:732`에 있다. ★**이 문서에서 step-log 줄 번호를 박는 자리는 여기 하나뿐이고 그것이 의도다**★ — 2판이 step-log 인용 6곳을 되짚어 고칠 때 **이 줄만 삽입 지점 위라 안 밀렸고**, 4판에서도 그 자리를 그대로 가리키는 것을 재확인했다(2026-08-20). 다른 인용을 절 이름으로만 가리키는 규칙과 어긋나 보여도 **드리프트가 아니다 — 지우거나 다시 박지 말 것.** 구판(축약 보존): "**사람이 수동으로 add**한 사례가 **실측**으로 남아 있다" — 원문은 Codex FIX 「신규 바인딩 git 미추적」 → 「FIX 반영(SlotContent.ts add)」일 뿐 **누가 어떤 경로로 add했는지는 적혀 있지 않아** 라벨이 근거보다 셌다. **판정은 이 줄에 기대지 않는다** — 위 네 항목(선언 있음 · 메커니즘 암묵 · 로컬 미동작 · CI 미동작)이 각각 독립으로 선다. 과거 TRD(`docs/process/C-slot-content/TRD.md:19-20`)가 "ts-rs 재생성으로 자동 갱신(수동 편집 금지)"이라는 **의도**를 적었으나 게이트로 실현된 적이 없다.
 
 **남는 미확인 하나(축소된 형태):** `cargo build`(테스트가 아닌 일반 컴파일)가 ts-rs export 경로를 트리거하는지는 실측하지 않았다. ts-rs export는 통상 `#[test]` 경로로만 도는 것으로 알려져 빌드가 트리거하지 않을 가능성이 높으나 **확정하지 않았다.**
 
@@ -672,12 +690,14 @@ pub struct CommandError {
 
 ### Step 1 — 도구 crate + 첫 입주자(`agent.*`), 배선 0
 
-도구 crate 신설(봉투·오류·매크로·표·라우팅) + `core`에 `agent.*` 선언 + `make_table(manager)`. 아직 아무도 이 표로 라우팅하지 않는다. 첫 입주자는 이미 CLI에 실재하는 동사들이다(`types.rs:246` 5개).
+도구 crate 신설(봉투·오류·매크로·표·라우팅) + `core`에 `agent.*` 선언 + `make_table(manager)`. 아직 아무도 이 표로 라우팅하지 않는다. 첫 입주자는 이미 CLI에 실재하는 동사들이다(`core/src/agent/types.rs`의 `CLI_AGENT_VERBS` 5개).
 - **검증:** `cargo test -p engram-dashboard-command`(신설) · `cargo test -p engram-dashboard-core` · `core/bindings/` diff 게이트 **신설**(§5).
 
 ### Step 2 — 데몬: 자기 표 + 명부 + 등록 wire
 
-`mail.*` 선언(`types.rs:212` 3동사) + `make_table` · 주인 명부(tombstone 포함) · `RegisterCommands`/`UpdateCommands`/`ListCommands`를 `connection_core.rs`의 `dispatch`에 additive arm으로 추가(★줄 번호를 박지 않는다 — 구판의 `:582`가 낡았다. 함수명으로 찾을 것★).
+`mail.*` 선언(`core/src/agent/types.rs`의 `CLI_MAIL_VERBS` 3동사) + `make_table` · 주인 명부(tombstone 포함) · `RegisterCommands`/`UpdateCommands`/`ListCommands`를 `connection_core.rs`의 `dispatch`에 additive arm으로 추가(★줄 번호를 박지 않는다 — 구판의 `:582`가 낡았다. 함수명으로 찾을 것★).
+
+★**4판 정정 — `mail.*` 선언은 이 Step에서 착지하지 않았다**★ 실측: `crates/engram-dashboard-daemon/src/`에 `declare_commands!` 0건 · `mail.send`/`mail.status`/`mail.pending` 0건. 데몬이 조립하는 표는 core의 `make_table`뿐이다(`daemon/src/control/commands.rs`). ★그런데 step-log는 이 Step을 **「Step 2 완결」**로 적는다(슬라이스 4 착지 줄).★ **이 문서는 그 완결 판정을 재조정하지 않는다 — 우편 칸을 Step 2 잔여로 볼지 별건으로 뺄지는 사용자 결정이다.** 여기 적는 것은 「오늘 그 선언이 없다」는 사실까지다.
 
 ★**개정(3판, ADR-0150) — 이 Step이 착지시킨 명부는 갈아낸다**★ 위 「주인 명부(tombstone 포함)」와 그 위에 세운 주인 키 산출(연결 id 파생)이 폐기 대상이다 → **자취 없는 제거 + 첫 인사의 클라이언트 자작 식별자**(§3-7 조항 4·5·6). **지금이 가장 싸다** — 등록 wire의 **받는 쪽만 서 있고 보내는 쪽이 0건**이라 깨질 발신자가 아직 없고, 발신자가 생긴 뒤에 고치면 **wire 양쪽을 맞춰야** 한다. **어느 슬라이스에서 손대는지는 이 TRD가 확정하지 않는다** — 확정된 것은 **Step 3·4의 등록 발신자보다 앞이라는 순서**뿐이다. `engram` CLI(`crates/engram-dashboard-daemon/src/bin/engram.rs`)가 이름으로 부르게 바꾸고, 문자열 패턴매칭 오류 합성(S17 TRD `trd.md:69`)을 타입드 오류로 교체한다.
 - **★이 줄은 이력이다 — 현황이 아니다★** 에이전트 문(HTTP `/control`)의 5동사 match가 **이 Step 착수 시점의 벽이었다**(구판이 적어 둔 `agent.rs:222-236`은 낡았다 — 그 코드가 없으므로 줄 번호로 찾지 말 것). 이 Step이 그 match를 표 조회로 바꿨고, **지금은 이미 표 조회다**(아래 착지 줄).
@@ -688,10 +708,13 @@ pub struct CommandError {
 
 ### Step 3 — 셸: 인바운드 수신기 + 공유 적용 서비스 + 자기 선언
 
-★**이 Step이 가장 무겁다**★ — ADR-0081이 요구한 서비스가 **오늘 없다.** `src-tauri/src/commands/layout.rs`의 핸들러들이 `LayoutState`를 잠그고 `ViewManager` 메서드를 직접 부른다(`layout.rs:108`·`:145`·`:227`). ADR-0081 「거부한 대안」이 명시적으로 거부한 그 형태다.
-1. ★개정★ **`layout.rs`의 `#[tauri::command]` 16개 전부**를 전송 중립 적용 서비스 뒤로 옮기고, 그 옆에서 `window`/`tab`/`slot`을 선언한다. 구판: "**쓰기 12개**(16개 중 **읽기 4개 제외** — §8 가정 B)". 가정 B가 채택되면서(ADR-0156) 읽기 4종(`get_view` `:497` · `list_tabs` `:508` · `list_windows` `:520` · `resolve_spatial` `:530`)이 합류해 **16 = 쓰기 12 + 읽기 4** 전량이 이 Step의 범위다(재실측 2026-08-13).
+★**이 Step이 가장 무겁다**★ — ADR-0081이 요구한 서비스가 **오늘 없다.** `src-tauri/src/commands/layout.rs`의 핸들러들이 `LayoutState`를 잠그고 `ViewManager` 메서드를 직접 부른다. ADR-0081 「거부한 대안」이 명시적으로 거부한 그 형태다.
+
+★**4판 정정 — 위 문단은 착수 시점의 진단이고, 아래 1~4는 착지했다**★ 실측: 적용 서비스 = `src-tauri/src/layout/apply.rs`이고 `commands/layout.rs`의 16개 `#[tauri::command]`는 그것을 부르는 얇은 껍데기다(그 파일 헤더가 "★이 파일에 로직이 없다★"고 자인하며, 락 규율·순서·검증은 전부 `apply` 안에 있다) · 선언은 그 옆 `src-tauri/src/layout/commands.rs` · 인바운드 수신기 = `daemon_client/inbound.rs`의 `InboundReceiver` · 등록 발신도 선다(`daemon_client/connection.rs`가 `AgentCommand::RegisterCommands`를 짓고 보낸다). ★**이 Step에 남은 것은 아래 5뿐이다 — 이 Step을 「서비스부터 짓기」로 읽으면 이미 있는 것을 다시 짓는다.**★ 구판이 박아 둔 줄 번호(`layout.rs:108`·`:145`·`:227`)는 딴 코드를 가리킨다.<br>★**단 「5뿐」은 이 Step 안에서다**★ — §5 `src-tauri` 행이 적는 잔여는 **둘**이고(그 5 + Step 4의 웹뷰 몫 대리 등록), 두 자리는 같은 회계다. 5의 실측 = `crates/engram-dashboard-net/src/auth.rs`의 `AuthFrame::Auth`가 여전히 `{token, protocol_version}` 두 칸(골든도 그 모양) · `src/api/wsTransport.ts`의 첫 프레임도 그 둘뿐.
+
+1. ★개정★ **`layout.rs`의 `#[tauri::command]` 16개 전부**를 전송 중립 적용 서비스 뒤로 옮기고, 그 옆에서 `window`/`tab`/`slot`을 선언한다. 구판: "**쓰기 12개**(16개 중 **읽기 4개 제외** — §8 가정 B)". 가정 B가 채택되면서(ADR-0156) 읽기 4종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial` — ★함수명으로 찾을 것, 구판의 `:497`·`:508`·`:520`·`:530`은 낡았다★)이 합류해 **16 = 쓰기 12 + 읽기 4** 전량이 이 Step의 범위다(재실측 2026-08-13).
 2. `#[tauri::command]`는 그 서비스를 부르는 얇은 껍데기가 된다 — 사람 클릭 경로는 그대로.
-3. `daemon_client`에 인바운드 수신기를 단다 — `connection.rs:805`의 `Message::Text` 처리에 `Request` 갈래 하나. **적용은 연결 태스크 밖(spawn)에서** 돈다(§3-6).
+3. `daemon_client`에 인바운드 수신기를 단다 — `connection.rs`의 `Message::Text` 처리에 `Request` 갈래 하나(★줄 번호를 박지 않는다 — 구판의 `:805`는 낡았다★). **적용은 연결 태스크 밖(spawn)에서** 돈다(§3-6).
 4. 셸이 데몬에 자기 이름을 등록한다(§3-7).
 5. ★신설(3판, ADR-0150)★ **셸이 자기 식별자를 만들어 보관하고 첫 인사에 실어 보낸다** — 등록은 **첫 인사에 합치지 않고 인증 통과 직후** 별도 메시지로 보낸다(§3-7 조항 1·5·6). **웹 클라이언트(`src/api/wsTransport.ts`)를 같은 배치에서 함께 고친다** — 한쪽만 고치면 어긋난다. 첫 인사 프레임의 골든 테스트를 같은 커밋에서 갱신한다(§5 net 행).
 - **검증:** 사람 클릭 GUI 실측(`scripts/cdp.mjs`) + 중계 왕복 + §7의 교착 회귀 테스트 + `src-tauri/bindings/` 게이트 — **오늘 그 파생 경로가 없다는 것이 실측으로 확인됐으므로**(§5) 이 Step이 **경로를 세우는 것까지** 포함한다(측정이 아니라 구축이 남았다).
@@ -702,7 +725,7 @@ pub struct CommandError {
 
 ★**개정(2판) — `registry.ts`를 additive로 한 칸 넓힌다**★
 **구판(축약 보존):** "`registry.ts`는 **손대지 않는다**(`src/commands/registry.ts:29~79`)."
-**현판:** 그 문장의 뜻은 **「두 번째 제어 표면을 만들지 않는다」**였지 **「한 필드도 못 넣는다」**가 아니었다. 문자 그대로 읽으면 계약이 모순된다 — 오늘 `Command` 인터페이스(`registry.ts:11-27`)에 설명·인자 칸이 없고 `list()`(`:67-74`)는 `id`·`title`·`category`·`keybinding` **넷만** 돌려주므로, 등록 패킷의 `help`(§3-7)가 웹뷰에서 **나갈 길 자체가 없다.** 그런데 §7 seam 표는 그 값이 비어 있지 않은지를 vitest로 단언한다.
+**현판:** 그 문장의 뜻은 **「두 번째 제어 표면을 만들지 않는다」**였지 **「한 필드도 못 넣는다」**가 아니었다. 문자 그대로 읽으면 계약이 모순된다 — 오늘 `Command` 인터페이스(`registry.ts` — ★줄 번호를 박지 않는다, 타입명으로 찾을 것★)에 설명·인자 칸이 없고 같은 파일의 `list()`는 `id`·`title`·`category`·`keybinding` **넷만** 돌려주므로, 등록 패킷의 `help`(§3-7)가 웹뷰에서 **나갈 길 자체가 없다.** 그런데 §7 seam 표는 그 값이 비어 있지 않은지를 vitest로 단언한다.
 
 - **넓히는 폭 = 정확히 한 필드.** `Command`에 `help: string`을 더하고 `list()` 반환의 `Pick<...>`에 `'help'`를 더한다. `register`/`run`/`getCommand`/`__resetRegistryForTest`와 Map 골격은 **그대로**다.
 - **ADR-0055가 지키던 것은 하나도 안 바뀐다** — 안정 id · 「상태 권위가 아니다」(발견·라우팅·메타만) · DOM-free · 소비자는 `run(id, args)` 하나. 새 전역 핸들도 두 번째 레지스트리도 생기지 않는다(CLAUDE.md 「LLM-우선 제어」).
@@ -712,11 +735,13 @@ pub struct CommandError {
 
 33개의 분류는 **handler가 어디로 라우팅하는가**로 정한다. id는 안정 id라 바꾸지 않는다(ADR-0055).
 
+★**이 표는 파일과 명령 id로만 가리킨다 — 줄 번호를 박지 않는다**★. 구판이 박아 둔 범위 중 `slotCommands.ts:48~98`은 **오늘 이미 틀리다** — 시작점 48은 주석 줄이고 `slot.resolveSpatial` 선언은 그 범위 **밖**에 있다(실측 2026-08-22). 나머지 번호는 오늘 맞지만 **프론트가 한 줄만 움직여도 같이 썩는다** — 이 절이 Step 4 코더의 작업면이라 그 rot을 여기서 끊는다.
+
 | 주인(선언처) | 해당 id (분류 근거 = handler의 라우팅 대상) |
 |---|---|
-| 웹뷰 | `theme.set`·`theme.toggle`(`themeCommands.ts:9`,`:22`) 등 순수 store 조작 |
-| `src-tauri` | `tab.*`·`window.*`·`slot.*`·`layout.setSlotContent`·`agent.spawnInto` — `invoke`로 셸에 간다(`tabCommands.ts:29~181`·`slotCommands.ts:48~98`) |
-| `core`(호스팅은 데몬) | `agent.spawn`(`agentCommands.ts:41`)·`agent.rename`(`:76`)·`agent.kill`(`slotContentCommands.ts:118`)·`preset.*`(`presetCommands.ts:14~69`) — `agentClient`로 데몬에 간다 |
+| 웹뷰 | `theme.set`·`theme.toggle`(`themeCommands.ts` 등록 전량) 등 순수 store 조작 |
+| `src-tauri` | `tab.*`·`window.*`·`slot.*`·`layout.setSlotContent`·`agent.spawnInto` — `invoke`로 셸에 간다(`tabCommands.ts`·`slotCommands.ts` **두 파일의 등록 전량** — 분할 둘은 `registerSplit` 헬퍼가 등록하므로 `id:` 만 훑으면 놓친다) |
+| `core`(호스팅은 데몬) | `agent.spawn`·`agent.rename`(`agentCommands.ts`)·`agent.kill`(`slotContentCommands.ts`)·`preset.*`(`presetCommands.ts` 등록 전량) — `agentClient`로 데몬에 간다 |
 
 - **검증:** `npm test`에 「화면 선언 ↔ `list()`」 대조 테스트 추가(어휘 drift를 CI가 잡는다) + ★2판★ `list()` 각 항목의 `help`가 비어 있지 않은지 단언(§7 화면 표 행) + `npx tsc --noEmit`(필드 추가가 기존 등록처를 깨지 않는지).
 
@@ -724,20 +749,20 @@ pub struct CommandError {
 
 | 핸들 | 실물 | 처리 |
 |---|---|---|
-| `window.__engramLayout` | `src/store/eventBus.ts:80-111`, 메서드 15개(실측). 자기 주석이 "정식 command 버스 전까지의 임시 경로"(`eventBus.ts:72` — 구판은 `:70-71`로 적었으나 그 두 줄은 다른 문장이다)·`setSlotContent`는 "`layout.setSlotContent`와 병행 경로"(`:93-95`)라 자인 | command로 안 덮인 것(`setRenderMode`·`clearRenderMode`·`enableDomMode`·`disableDomMode`·`toggleDomMode`·`moveSlotToWindow`)을 **먼저 command로 승격**한 뒤 핸들 삭제 |
-| `window.__engramChat` | `eventBus.ts:118-124`, 5항목 | ★개정★ **5항목 전부 command로 승격 → 핸들 삭제.** 구판: "`set`·`patch`·`reset`만 승격 · `get`(`:119`)·`defaults`(`:123`)는 **읽기**라 §8 가정 B에 걸려 v1 범위 밖 → 핸들을 통째로 못 지운다". 조회가 v1에 들어와(ADR-0156) 그 둘도 command가 된다 |
-| `window.__engramCmd` | `eventBus.ts:134-137` | **남긴다.** 이게 화면 표의 로컬 입구다 |
+| `window.__engramLayout` | `src/store/eventBus.ts`의 `__engramLayout` 블록, 메서드 15개(실측). 자기 주석이 "정식 command 버스 전까지의 임시 경로"라 자인하고 `setSlotContent`는 "`layout.setSlotContent`와 병행 경로"라 자인한다. ★줄 번호를 박지 않는다 — 핸들 이름으로 찾을 것★(구판의 `:80-111`·`:72`·`:93-95`는 낡았다) | command로 안 덮인 것(`setRenderMode`·`clearRenderMode`·`enableDomMode`·`disableDomMode`·`toggleDomMode`)을 **먼저 command로 승격**한 뒤 핸들 삭제 — ★**4판 정정: 승격 대기는 여섯이 아니라 다섯이다**★. 구판은 `moveSlotToWindow`를 이 목록에 넣었으나 그 동작은 이미 덮였다 — 셸이 `slot.popout`을 `SlotPopoutArgs { view_id, slot_id, to_window: Option<String> }`로 선언해 **기존 창 지정 갈래까지** 받고(`src-tauri/src/layout/commands.rs`), 프론트 `slot.popout`(`src/commands/slotCommands.ts`)이 새 창 갈래를 받는다. ★단 그 둘은 **받는 것도 주는 것도 다른 과도기 분열** 상태이고(양쪽 소스가 서로를 가리키는 메모로 자인한다) 합류는 이 레지스트리를 은퇴시키는 몫이다 — 「덮였다」는 **동작 커버리지**이지 계약 일치가 아니다★. step-log가 이 어긋남을 문서 부채로 이미 적립해 뒀다 |
+| `window.__engramChat` | `eventBus.ts`의 `__engramChat` 블록, 5항목 | ★개정★ **5항목 전부 command로 승격 → 핸들 삭제.** 구판: "`set`·`patch`·`reset`만 승격 · `get`·`defaults`는 **읽기**라 §8 가정 B에 걸려 v1 범위 밖 → 핸들을 통째로 못 지운다". 조회가 v1에 들어와(ADR-0156) 그 둘도 command가 된다 |
+| `window.__engramCmd` | `eventBus.ts`의 `__engramCmd` 블록 | **남긴다.** 이게 화면 표의 로컬 입구다 |
 
 ★개정★ **곁문 둘을 v1에서 전부 철거한다.** 구판: "가정 B의 실제 대가가 여기 드러난다 — 「곁문 둘을 없앤다」가 v1에선 「하나 반」이 된다." 가정 B가 채택되면서(ADR-0156) 그 대가가 사라졌고, 이 Step의 이름(「곁문 둘 철거」)이 문자 그대로 성립한다.
 
 ### Step 6 — CLI 어휘를 선언에서 파생
 
-`types.rs:246`의 `CLI_AGENT_VERBS` 같은 손 배열을 같은 crate의 선언 생성물로 바꾼다. ★개정에서 쉬워진 자리★ — `agent.*` 선언이 **바로 그 파일 옆(core)** 에 있으므로 crate 경계를 넘지 않는다. 구판(선언이 `protocol`)이었다면 `core`가 `protocol`을 보게 돼 워크스페이스 의존 0이 깨졌다.
+`core/src/agent/types.rs`의 `CLI_AGENT_VERBS` 같은 손 배열을 같은 crate의 선언 생성물로 바꾼다. ★개정에서 쉬워진 자리★ — `agent.*` 선언이 **바로 그 파일 옆(core)** 에 있으므로 crate 경계를 넘지 않는다. 구판(선언이 `protocol`)이었다면 `core`가 `protocol`을 보게 돼 워크스페이스 의존 0이 깨졌다.
 **마지막이어야 한다** — 앞 Step이 서기 전에 하면 CLI가 없는 핸들러를 가리킨다.
 
 ### v1에서 이관하지 않는 것
 
-`src-tauri`의 40개 `#[tauri::command]`(`src-tauri/src/lib.rs:147-188` — `generate_handler!` 블록, 재실측 40개) 중 **23개는 남긴다**: `commands/agent.rs` 9개(이미 `AgentCommand` 직송의 얇은 래퍼) · `commands/discovery.rs` 9개 · `commands/autostart.rs` 2개 · `commands/tray.rs` 3개(클라이언트 로컬 생애주기). 이유: 전자는 데몬 소유 명령의 중복 표면이 되고, 후자는 "데몬이 없을 때도 눌러야 하는 것"이라 버스에 태우면 순환이 생긴다. 필요해지면 `src-tauri` 선언으로 additive.
+`src-tauri`의 `#[tauri::command]` 전량(`src-tauri/src/lib.rs`의 `generate_handler!` 블록 — ★줄 번호를 박지 않는다, 매크로 이름으로 찾을 것. 구판의 `:147-188`은 낡았다★) 중 **23개는 남긴다**: `commands/agent.rs` 9개(이미 `AgentCommand` 직송의 얇은 래퍼) · `commands/discovery.rs` 9개 · `commands/autostart.rs` 2개 · `commands/tray.rs` 3개(클라이언트 로컬 생애주기). ★**4판 정정 — 전량이 40개가 아니라 41개다**★ 구판: "40개 … 재실측 40개". 늘어난 하나는 **`commands/settings.rs` 1개(`get_ui_settings` — 부팅 조회)**이고, 미는 쪽인 `ui.refresh`는 이미 셸 명령 표에 있다. ★**그 하나를 「남긴다 23」에 넣을지 「이관 17」에 넣을지는 이 문서가 정하지 않는다 — 사용자 결정**★. 아래 두 수(23·17)는 그래서 여전히 40만 덮고, 41번째는 미분류다. 이유: 전자는 데몬 소유 명령의 중복 표면이 되고, 후자는 "데몬이 없을 때도 눌러야 하는 것"이라 버스에 태우면 순환이 생긴다. 필요해지면 `src-tauri` 선언으로 additive.
 
 **남는 17개의 내역**(구판이 안 적었다): `commands/layout.rs` 16개 + `commands/popout.rs` 1개. ★개정★ 구판: "Step 3이 다루는 것은 layout **12개(쓰기)**이고, layout **읽기 4개는 §8 가정 B에**, popout 1개는 미분류로 남는다." 현판: **Step 3이 layout 16개 전부**를 다루고(ADR-0156), 남는 미분류는 **popout 1개뿐**이다 — 이관 시점에 주인을 정한다.
 
@@ -764,12 +789,12 @@ ADR-0012 — 모든 조각이 외부 의존을 seam으로 끊고 단독 하네�
 | **`make_table` 주입** ★신설★ | **의존 인자 그대로**(`AgentManager` 등) | 가짜 관리자를 넣어 `agent.spawn` 핸들러가 **프로세스 없이** 단언된다. 이 하네스가 서지 않으면 T-1이 깨진 것이다 — **이 테스트가 T-1의 기계적 감시자다** |
 | `route()` | **`CommandLink` + `Roster`** | `FakeLink`(보낸 봉투를 기록하고 미리 정한 답을 돌려준다) + 빈/채운 명부 — 소켓 0으로 **3단계 규칙**을 단언(내 표 / 명부 / 오류). ★개정★ 구판은 2단계만 단언했다 |
 | **2단 배달** ★신설★ | `FakeLink` 두 개(데몬→셸, 셸→웹뷰) | 같은 `request_id`가 전 구간 유지되는지 · 중간 홉이 답을 하나만 내는지 · 홉마다 같은 3단계를 도는지 |
-| 인바운드 수신기 | **`ReplySink` + spawn 주입** | ★교착 회귀 테스트★: 핸들러 안에서 같은 링크로 두 번째 명령을 부르는 fake를 넣는다. 인라인 실행이면 hang, spawn이면 통과. **지금 이 회귀를 잡는 테스트가 없다** — ADR-0081 결정 3의 self-deadlock을 형태로 고정한다. ★개정★ 셸뿐 아니라 **중간 홉(셸)의 경우도** 같은 하네스로 돌린다 |
+| 인바운드 수신기 | **`ReplySink` + spawn 주입** | ★교착 회귀 테스트★: 핸들러 안에서 같은 링크로 두 번째 명령을 부르는 fake를 넣는다. 인라인 실행이면 hang, spawn이면 통과. ★**4판 정정 — 그 테스트는 섰다**★ 구판: "**지금 이 회귀를 잡는 테스트가 없다**." → `src-tauri/tests/layout_commands.rs`의 `a_composite_command_does_not_wait_on_its_caller`가 합성 명령(`agent.spawnInto`)으로 그것을 잰다(hang을 timeout으로 바꿔 실패로 보이게 한다). 같은 파일의 `Queued` 하네스가 「`on_command` 반환 시점에 적용이 아직 안 일어났음」을 따로 잰다 — 두 하네스가 서로 다른 실패 모드를 맡는다는 것을 그 파일 헤더가 적는다. ADR-0081 결정 3의 self-deadlock을 형태로 고정한다. ★개정★ 셸뿐 아니라 **중간 홉(셸)의 경우도** 같은 하네스로 돌린다 |
 | 데몬 명부 | **`OutboundSink`**(`connection_core.rs`의 `dispatch`가 이미 `&dyn OutboundSink`를 받는다 — 새 seam 불요. ★줄 번호 없음이 의도★ — 구판의 `:582`가 낡았다) | 등록 · 델타 · last-wins · ★2판★ **`help` 왕복 골든** — 등록 → 명부 → `CommandList` 조회에서 문자열이 **바이트 그대로** 보존되는지 · **데몬이 파싱하지 않는지**(JSON이 아닌 임의 문자열을 넣어도 등록·조회가 그대로 성공해야 한다 — 파싱이 끼면 여기서 깨진다)<br>★개정(3판, ADR-0150)★ 구판(축약 보존): "연결 해제 시 **tombstone 전환**(삭제 아님) · 주인 부재 = `OWNER_UNAVAILABLE` · 한 번도 못 본 이름 = `UNKNOWN_COMMAND`(§4-② 대가를 테스트로 못 박는다)". → 갈아 끼울 단언 넷: ㉠ **연결 해제 시 제거**(자취 0 — 조회에 그 이름이 아예 없다) ㉡ **제거된 이름 = `UNKNOWN_COMMAND`**(끊긴 주인과 한 번도 못 본 주인이 **같은 답**을 낸다 — §4-②의 대가를 테스트로 못 박는다) ㉢ **같은 식별자로 재연결하면 쌓이지 않고 덮인다**(★이 단언이 3판의 계기를 봉인한다★ — 옛 구조에서는 이름 수가 재접속마다 늘었다) ㉣ **식별자 없는 연결도 등록에 성공한다**(fail-open — 연결 id 파생) · **입구 검증(길이 상한·문자셋)에 걸리는 값은 거절된다** |
-| 셸 적용 서비스 | **`AppHandle`·`State<..>` 제거** | ★난점★: 오늘 핸들러는 `AppHandle` + `State` 여럿을 받아(`layout.rs:98`·`:122`·`:215`) 단독 호출이 불가하다. 적용 서비스는 그것들을 인자에서 걷어낸 순수 함수여야 단독 테스트가 선다. **Step 3의 실제 난이도가 여기다** |
+| 셸 적용 서비스 | **`AppHandle`·`State<..>` 제거** | ★난점★: 오늘 핸들러는 `AppHandle` + `State` 여럿을 받아 단독 호출이 불가하다. 적용 서비스는 그것들을 인자에서 걷어낸 순수 함수여야 단독 테스트가 선다. **Step 3의 실제 난이도가 여기다**<br>★**4판 정정 — 이 난점은 통과했다**★ `src-tauri/src/layout/apply.rs`가 그 인자들을 포트 trait(`LayoutEvents`·`SubscriptionSync`·`WindowHost`·`AgentSpawner`)로 걷어냈고, `#[tauri::command]` 쪽은 그 포트의 Tauri 어댑터만 남는다. 하네스는 `src-tauri/tests/layout_apply.rs`(적용 서비스 자체 — 락이 어느 포트 안/밖에서 불리나)와 `layout_commands.rs`(명령 선언 + 인바운드 수신기) 둘이고 **CI에서 각각 돈다.** 구판이 박아 둔 `layout.rs:98`·`:122`·`:215`는 딴 코드다 |
 | 화면 표 | **`__resetRegistryForTest`**(`src/commands/registry.ts:77-79` — 이미 있다) | `npm test`(vitest)에 화면 선언 ↔ `list()` 대조 추가 · ★2판★ **선언마다 `help`가 비어 있지 않은지** — TypeScript 선언은 손으로 적는 값이라(§2-2 3) **누락이 조용히 새는 유일한 자리**다. Rust 쪽은 매크로가 채우므로 이 단언이 필요 없다 |
 
-CI는 push마다 위 명령을 windows 러너에서 돌린다(CLAUDE.md 「CI」). 로컬 몫으로 남는 것은 GUI 실측(Step 3·5) 하나다. ★단 `src-tauri` 패키지는 워크스페이스 테스트에서 제외돼 있어(`ci.yml:96-99`) 셸 조각의 CI 커버리지가 **오늘 비어 있다** — §5의 파생 게이트 항목(실측으로 닫힘)과 같은 뿌리다.★
+CI는 push마다 위 명령을 windows 러너에서 돌린다(CLAUDE.md 「CI」). 로컬 몫으로 남는 것은 GUI 실측(Step 3·5) 하나다. ★단 `src-tauri` 패키지는 워크스페이스 테스트에서 제외돼 있다(스텝명 `cargo test --workspace --exclude engram-dashboard`). ★**4판 정정 — 구판의 「셸 조각의 CI 커버리지가 오늘 비어 있다」는 더 이상 참이 아니다**★: 통합 타깃 넷(`layout_apply`·`layout_commands`·`daemon_client_pending`·`daemon_client_replay`)이 `--test`로 각각 CI에서 돈다. 제외로 비는 것은 **lib 타깃 안에 사는 것들**이고, 그중 이 문서에 걸리는 것이 `src-tauri/bindings/` 파생 게이트다(§5).★
 
 ---
 
@@ -781,7 +806,7 @@ CI는 push마다 위 명령을 windows 러너에서 돌린다(CLAUDE.md 「CI」
 **현판:** **채택된 형태다.** 확정 구조의 등록 wire(§3-7)가 이 형태를 전제로 서 있고, 뒤집힌 판단 3(데몬이 빌드 목록을 조회하지 않는다)이 그 위에서만 뜻이 통한다.
 
 **채택 근거 둘 — 선례가 아니라 우리 구조에서 나온다:**
-1. **병합 로직을 복제해야 하는 호출자 수가 줄어든다.** 호출자는 셋 이상이다 — `engram` CLI · MCP 우편 경로 · 화면. 셋이 각자 발견·병합을 짜면 어휘가 또 갈리고, 그건 지금 고치려는 증상 자체다(step-log.md:1673 ②).
+1. **병합 로직을 복제해야 하는 호출자 수가 줄어든다.** 호출자는 셋 이상이다 — `engram` CLI · MCP 우편 경로 · 화면. 셋이 각자 발견·병합을 짜면 어휘가 또 갈리고, 그건 지금 고치려는 증상 자체다(step-log.md 「사용자 방향 2026-08-12 — 통합 command 버스」의 「지금 상태(실측)」 ②).
 2. **2단 배달이 균일하게 유지된다**(§3-8). 데몬이 명부를 쥐면 홉마다 규칙이 하나다. 호출자 측 병합으로 가면 「누가 명부를 갖나」가 홉마다 달라지고 특별 케이스가 생긴다 — 확정 구조 ④(「특별 케이스 없음」)가 무너진다.
 
 ★개정(2판)★ **데몬이 배우는 것은 이름 · 주인 토큰 · 불투명 `help` 문자열 한 칸뿐이다.** 구판(축약 보존): "여전히 **이름과 주인 토큰뿐**이다." ADR-0156로 모양이 등록 패킷에 동봉되면서(§1 · §3-7 · §5 daemon 행) 칸이 하나 늘었으므로 구판 문장은 그대로 두면 거짓이다.
@@ -809,8 +834,8 @@ CI는 push마다 위 명령을 windows 러너에서 돌린다(CLAUDE.md 「CI」
 **채택 근거 — 발견 경로를 반만 닫을 수 없다:** `help`는 「**무슨 키**가 있나」를 알려주지 「**지금 값**이 뭔가」를 알려주지 않는다. 등록 패킷 동봉(D1)으로 인자 *모양*의 발견은 닫혔지만, 조회가 없으면 LLM은 **어떤 탭이 있는지도 모른 채** `tab.close`를 불러야 한다 — 모양만 알고 대상은 모르는 상태다. 구판 근거였던 「되돌릴 수 있음」은 **늦추는** 이유였지 **안 하는** 이유가 아니었고, 발견 경로를 닫는 이 판에서 조회만 빼면 발견이 절반에서 멈춘다.
 
 **실물 근거(추정 아님)** — 구판이 「실제 대가」로 적어둔 것이 그대로 **합류 목록**이 된다:
-- `src-tauri/src/commands/layout.rs`의 읽기 4종 — `get_view`(`:497`) · `list_tabs`(`:508`) · `list_windows`(`:520`) · `resolve_spatial`(`:530`), 넷 다 소스 주석이 "★조회만★"이라 자인 — 이 넷이 v1 command가 된다(같은 파일 `#[tauri::command]` **16개** = 쓰기 12 + 읽기 4, 재실측 2026-08-13).
-- `__engramChat`의 `get`(`eventBus.ts:119`)·`defaults`(`:123`) — 이 둘이 들어오면서 §6 Step 5의 곁문 철거가 완결된다(구판에선 이 둘 때문에 핸들을 통째로 못 지웠다).
+- `src-tauri/src/commands/layout.rs`의 읽기 4종 — `get_view` · `list_tabs` · `list_windows` · `resolve_spatial`, 넷 다 같은 파일의 `// ── read-only 조회 ──` 구획 아래에 모여 있다(★함수명으로 찾을 것 — 구판의 `:497`·`:508`·`:520`·`:530`은 낡았고, 구판이 인용한 함수별 "★조회만★" 주석도 지금은 그 구획 표제 하나로 합쳐졌다★) — 이 넷이 v1 command가 된다(같은 파일 `#[tauri::command]` **16개** = 쓰기 12 + 읽기 4, 재실측 2026-08-13).
+- `__engramChat`의 `get`·`defaults`(`eventBus.ts`의 `__engramChat` 블록) — 이 둘이 들어오면서 §6 Step 5의 곁문 철거가 완결된다(구판에선 이 둘 때문에 핸들을 통째로 못 지웠다).
 - §4-⑤(진행 보고 없음)와 겹치던 구멍이 메워진다 — 중간 상태를 물어볼 경로가 v1 안에 생긴다.
 
 조사 §3-②는 이 갈림길에서 **수렴하지 못했다** — 합치는 쪽이 다수(LSP·D-Bus·K8s·sway·WezTerm·CDP·OBS)이고, 가르는 쪽은 실행 의미가 달라서 갈랐다(GraphQL의 query/mutation, MCP의 Resources/Tools). 조사가 승자를 못 고른 자리라 **채택 근거는 선례가 아니라 우리 발견 경로에서 나온다**(가정 A와 같은 형태의 논거다).
@@ -832,11 +857,12 @@ CI는 push마다 위 명령을 windows 러너에서 돌린다(CLAUDE.md 「CI」
 
 - **확정 구조(이 판의 정본):** `.claude/handoff/latest.md` 「★확정된 구조★」·「★세션 중 뒤집힌 판단 3건★」·「★실패한 접근 / do-not★」
 - **선례 조사:** `docs/research/unified-command-bus-survey-2026-08-12.md` — **판정 BLOCK**
-- **사용자 방향(2026-08-12):** `docs/process/step-log.md:1667-1675` — 특히 `:1669`(주인 칸 불필요) · `:1673`(어휘가 서로를 모른다). ★2판 재실측(2026-08-13)★ step-log에 S20.1·S20.2 두 절이 「다음(미진행)」 앞에 끼어 그 아래가 **+16줄** 밀렸다 — 구판 번호(`1651-1659` · `:1653` · `:1657`)는 이제 딴 곳을 가리킨다. 이 문서의 step-log 인용 6곳을 전부 되짚어 고쳤다(`:732`는 삽입 지점 위라 그대로).
-- **이 설계 트랙의 타임라인:** `docs/process/step-log.md:1649`(S20.1 — 선례 조사 → TRD 초안 → 개정 1판의 반전 3건) · `:1657`(S20.2 — 발견 경로 결정 · ADR-0155/0156 · 개정 2판과 적대 리뷰 FIX). **왜**는 ADR, **언제·무엇**은 이 두 절이다.
-- **결정:** **ADR-0150(3판의 정본 — 명부 주인 = 클라이언트 자작 식별자 · 끊기면 자취 없이 제거 · 두 오류 구분 포기) · ADR-0155(S20 구조 — 주인 토큰 산출만 0150가 개정) · ADR-0156(발견 경로 3건 — 등록 패킷 동봉 · 값 읽기 v1 포함 · ~~tombstone 만료 없음~~ **결정 3은 0150가 개정**)** · ADR-0152(되돌려 보내는 호출자 문자열엔 상한 없음 — 0150의 입구 상한과 **방향이 반대인 다른 축**) · ADR-0157(명령 인자의 모르는 칸 — 입구는 거절, 배선은 관용) · ADR-0022(방향 — 상태 **제안**) · ADR-0055(프론트 레지스트리 골격) · ADR-0064(메뉴 = command id 참조) · ADR-0081(릴레이 형태) · ADR-0132 결정 7(후속 순서) · ADR-0129(net 3층 분리) · ADR-0035/0057(레이아웃 권위) · ADR-0012(테스트 격리) · ADR-0003(코어 격리) · ADR-0110(메시징 커널 무의존)
+- **사용자 방향(2026-08-12):** `docs/process/step-log.md` 「다음 (미진행)」 안의 **「사용자 방향 2026-08-12 — 통합 command 버스: ADR-0022를 제안에서 확정으로 올리는 작업」** 절 — 특히 「★주인 지정은 불필요 — 정의 위치가 곧 주인이다★」 항과 「지금 상태(실측)」 ②(화면 어휘와 데몬 어휘가 서로를 모른다). ★**4판 정정 — 줄 번호를 박지 않는다**★ 2판이 `1651-1659`→`1667-1675`로 한 번 되짚어 고쳤는데 **그 뒤 또 밀려** 지금은 딴 절(S20.3 본문)을 가리킨다. 그 절은 「다음 (미진행)」 안이라 위에 항목이 하나 끼면 통째로 움직인다 — 같은 실패를 세 번째로 반복하지 않도록 **절 이름으로만** 가리킨다.
+- **이 설계 트랙의 타임라인:** `docs/process/step-log.md`의 **S20.1**(선례 조사 → TRD 초안 → 개정 1판의 반전 3건) · **S20.2**(발견 경로 결정 · ADR-0155/0156 · 개정 2판과 적대 리뷰 FIX), 그리고 그 뒤로 이어지는 S20.3~(Step 1 착지 · Step 2 슬라이스 · Step 3). **왜**는 ADR, **언제·무엇**은 그 절들이다. ★절 번호로 찾을 것 — 줄 번호를 박지 않는다★
+- **결정:** **ADR-0150(3판의 정본 — 명부 주인 = 클라이언트 자작 식별자 · 끊기면 자취 없이 제거 · 두 오류 구분 포기) · ADR-0155(S20 구조 — 주인 토큰 산출만 0150가 개정) · ADR-0156(발견 경로 3건 — 등록 패킷 동봉 · 값 읽기 v1 포함 · ~~tombstone 만료 없음~~ **결정 3은 0150가 개정**)** · ADR-0152(되돌려 보내는 호출자 문자열엔 상한 없음 — 0150의 입구 상한과 **방향이 반대인 다른 축**) · ADR-0157(명령 인자의 모르는 칸 — 입구는 거절, 배선은 관용) · **ADR-0154**(왕복 중 주인 연결이 끊긴 경합의 답 = `OUTCOME_UNKNOWN` — §4-⑦이 이것에 기댄다) · **ADR-0159**(재시도 지시는 안전과 쓸모로 고른다 — 배달 모듈의 실패 답 전량 `Never`, §4-④) · **ADR-0161**(제어 라우트 중계의 요청 번호는 호출자가 낸다 — §4-⑥의 마감 부등식) · **ADR-0162**(중계 재시도는 결과 저장소 대신 상태 조회로 — §4-⑥의 열린 갈래를 「만들지 않는다」로 닫는다) · ADR-0022(방향 — 상태 **제안**) · ADR-0055(프론트 레지스트리 골격) · ADR-0064(메뉴 = command id 참조) · ADR-0081(릴레이 형태) · ADR-0132 결정 7(후속 순서) · ADR-0129(net 3층 분리) · ADR-0035/0057(레이아웃 권위) · ADR-0012(테스트 격리) · ADR-0003(코어 격리) · ADR-0110(메시징 커널 무의존)
 - **선행 TRD:** `docs/process/S17-llm-control-surface/spec/trd.md` — §4-④/⑥/⑦의 확실성 인코딩·dedup·오류 코드는 **거기서 이미 결정된 것을 승계**한 것이지 새로 만든 것이 아니다.
-- **실측(2026-08-13, 이 개정에서 재확인):** `core` 워크스페이스 의존 0(`Cargo.toml`에 `path =` 0줄 — ★이 설계가 0→1로 바꾼다: 도구 crate, §5★) · `protocol` 0(`Cargo.toml:8-13` — ★2판★ **이 설계가 0→1로 바꾼다** — 봉투·등록 단위 타입 때문에 도구 crate 하나를 의존한다. §3-1 · §5 protocol 행) · `daemon` 5(`Cargo.toml:79-92`) · `messaging` 0 · `src-tauri`는 core·protocol·discovery·net 4 · `protocol/bindings/` 23개 · `src-tauri/bindings/` 8개 · ~~CI 바인딩 게이트는 `protocol/bindings/`만 본다(`ci.yml:124-131`)~~ ★**낡았다 — Step 1이 닫았다**★ 현행 게이트(`ci.yml`의 `Gate: ts-rs bindings are in sync with the wire contract` 스텝 — 줄 번호를 박지 않는다)는 `protocol/bindings/`와 `core/bindings/` **둘 다** 본다(`git add -N -f` 뒤 `git diff --exit-code`). 남은 미커버는 `src-tauri/bindings/` 하나다(§5) · 워크스페이스 테스트는 `--exclude engram-dashboard`(`ci.yml:96-99`) · `AgentCommand` variant 25종 · `src/commands/` 등록 명령 33개 · `layout.rs` `#[tauri::command]` 16개(쓰기 12·읽기 4) · `lib.rs` 등록 handler 40개 · `RegisterRole`/`RelayUi`/`UiCommand`/`UiResult` `.rs` hit 0
+- **실측 기준선(2026-08-13, 설계 시점) — ★이 줄은 이력이다. 현황은 아래 재실측이 갖는다★:** `core` 워크스페이스 의존 0(`Cargo.toml`에 `path =` 0줄 — ★이 설계가 0→1로 바꾼다: 도구 crate, §5★) · `protocol` 0(★2판★ **이 설계가 0→1로 바꾼다** — 봉투·등록 단위 타입 때문에 도구 crate 하나를 의존한다. §3-1 · §5 protocol 행) · `daemon` 5 · `messaging` 0 · `src-tauri`는 core·protocol·discovery·net 4 · `protocol/bindings/` 23개 · `src-tauri/bindings/` 8개 · ~~CI 바인딩 게이트는 `protocol/bindings/`만 본다~~ ★**낡았다 — Step 1이 닫았다**★ 현행 게이트(`ci.yml`의 `Gate: ts-rs bindings are in sync with the wire contract` 스텝 — 줄 번호를 박지 않는다)는 `protocol/bindings/`와 `core/bindings/` **둘 다** 본다(`git add -N -f` 뒤 `git diff --exit-code`). 남은 미커버는 `src-tauri/bindings/` 하나다(§5) · 워크스페이스 테스트는 `--exclude engram-dashboard` · `AgentCommand` variant 25종 · `src/commands/` 등록 명령 33개 · `layout.rs` `#[tauri::command]` 16개(쓰기 12·읽기 4) · `lib.rs` 등록 handler 40개 · `RegisterRole`/`RelayUi`/`UiCommand`/`UiResult` `.rs` hit 0
+- ★**4판 재실측(2026-08-20, Step 1~3 착지 후) — 위 기준선을 현황으로 읽지 말 것**★: `core` 워크스페이스 의존 **1**(도구 crate) · `protocol` **1**(같은 것) · `daemon` **6**(core·protocol·discovery·messaging·net·command) · `messaging` **0**(불변 — 컴파일러 강제 벽 유지) · `src-tauri` **5**(기준선 넷 + command) · `protocol/bindings/` **24개** · `core/bindings/` **14개**(TS 13 + `commands.schema.json`) · `src-tauri/bindings/` **8개**(불변) · `AgentCommand` variant **30종** · `AgentEvent` **22종** · `layout.rs` `#[tauri::command]` **16개**(불변) · `lib.rs` 등록 handler **41개** · 셸 명령 표 **17개**(`src-tauri/src/layout/commands.rs`) · `RegisterRole`/`RelayUi`/`UiCommand`/`UiResult` `.rs` hit **1** — ★그 하나는 코드가 아니라 `crates/engram-dashboard-command/src/roster.rs`의 **주석 자기인용**이다. 「hit 0 = 릴레이 미구현」이라는 옛 추론을 이 수치로 다시 세우지 말 것★. **`src/commands/` 등록 명령은 33개를 그대로 둔다** — 같은 방법으로 다시 세면 고정 id 31 + 동적 계열 1이 나오지만, 33이 기록되던 시점에도 같은 방법이 32를 냈다. **차이는 세는 방법이지 드리프트가 아니다**(경계 사례는 아래 「미확인」이 이미 들고 있다).
 
 ### ★조사 보고서를 얼마나 믿을지 (후속 독자 경고)★
 
@@ -857,7 +883,7 @@ grounding 전수는 **미실시**이고, 리뷰 스팟체크 5건 중 4건이 NO
 
 **모순 1 — 주인 칸. ★해소(구판 주장 철회)★**
 
-- **구판 주장:** step-log.md:1669이 "주인 지정은 불필요 — 정의 위치가 곧 주인"이라 기록했는데도 `#[owner(Daemon|Shell|View)]` 칸을 되살린다. 근거는 "선언을 protocol 한 곳에 모으면 **정의 위치가 주인을 말해주지 않으므로** 칸이 필요해진다"였다.
+- **구판 주장:** step-log.md 「사용자 방향 2026-08-12」가 "주인 지정은 불필요 — 정의 위치가 곧 주인"이라 기록했는데도 `#[owner(Daemon|Shell|View)]` 칸을 되살린다. 근거는 "선언을 protocol 한 곳에 모으면 **정의 위치가 주인을 말해주지 않으므로** 칸이 필요해진다"였다.
 - **개정 후:** **선언 중앙화가 폐기되면서 그 근거가 통째로 사라졌다.** 정의 위치가 다시 주인을 말한다. 칸을 삭제한다(§2-2 · §3-1).
 - **남길 교훈:** 구판의 논리 자체는 옳았다 — 「중앙화하면 주인 칸이 필요하다」는 참이다. 틀린 것은 **전제(중앙화)**였다. 사용자가 두 번 철회시킨 제안이 되살아난 것은 우연이 아니라 전제가 그것을 다시 요구했기 때문이고, 전제를 바꾸는 것이 정답이었다. (인계 「do-not 2」.)
 
@@ -883,9 +909,11 @@ grounding 전수는 **미실시**이고, 리뷰 스팟체크 5건 중 4건이 NO
 - ★3판 신설★ **첫 인사 식별자의 입구 검증 값** — ADR-0150는 「길이 상한·문자셋을 **둔다**」까지만 정했고 **구체 값을 정하지 않았다.** 구현 시 확정한다(내부 상수 — §3-7 조항 6). ★ADR-0152의 「상한 없음」과 섞지 말 것★ — 그건 나가는 값이다.
 - ★3판 신설★ **클라이언트가 그 식별자를 어디에 보관하나** — ADR-0150는 「스스로 만들어 **보관**한다」까지만 정했다. 프로세스 수명뿐인지 앱 재시작을 가로지르는 영속인지, 웹(`src/api/wsTransport.ts`)과 셸(`src-tauri/src/daemon_client/connection.rs`)이 같은 결을 고르는지가 미정이다. **자취 없는 제거가 쌓임을 이미 막으므로 명부 정확성에 미치는 영향은 좁다** — 갈리면 **두 클라의 행동이 달라지는 것**이 문제다.
 - ★3판 신설★ ~~**왕복 중 주인 연결이 끊긴 경합이 지금 어떤 코드를 내는가**~~ — ★**결정으로 닫힘(2026-08-18, ADR-0154 「찢어진 창」 조항)**★ 답은 `OUTCOME_UNKNOWN`이다(조회가 `Available`을 답한 뒤 닿는 길이 사라진 경우). ★**재서 닫은 것이 아니다 — 데몬 전달 구간은 아직 0줄이라 그 구간을 잰 것이 아니다.**★ 고른 근거는 **재시도 축**이다 — `OUTCOME_UNKNOWN`은 같은 `request_id` 재시도를 허가하고(dedup가 흡수한다) 확실한 실패 계열은 그것을 금지하는데, 이 경합에서 주인은 그냥 다시 붙을 수 있으므로 같은 id 재시도가 안전하면서 쓸모도 있다. **받치는 실측은 `route`가 *그 전달 갈래에서* 스스로 만드는 오류 어휘가 단일값(`ErrorCode::OutcomeUnknown`)이라는 것**까지다(★`route` 전체로는 아니다 — `handler_panicked`의 `Internal`과 주인 부재의 `UnknownCommand`가 따로 있다★) — 그 두 자리는 파국 그물이라 「봉투가 이미 선을 탔을 수 있는」 반대 조건이고, `OWNER_UNAVAILABLE`을 실어 보내는 링크의 답장은 `route`가 그대로 통과시키므로 「그 경로에 다른 코드가 없다」는 성립하지 않는다. `OWNER_UNAVAILABLE`은 **여전히 도달 불가**이고(§4-⑦) 되살리지 않는다. 구판: "이 경합이 `OWNER_UNAVAILABLE`의 자연스러운 미래 소유자로 보이나 현 경로가 무엇을 내는지 실측하지 않았다 — 추측을 결정으로 올리지 않는다."
+- ★4판 신설★ **명부 기반 CLI가 셸이 등록한 조회 명령을 실제로 성사시키는가** — ADR-0162가 「결과 저장소를 만들지 않는다」의 근거로 든 4단계 사슬 중 **3번**이고, 그 ADR이 자기 「근거」절에서 **실측 미완**으로 자인하며 **결정의 전제라 실측 항목으로 남긴다**고 적었다(사슬 전체가 `file:line`까지 확인한 **정적 추적**이지 실제로 쳐 본 것이 아니다). 이 TRD가 §4-⑥에서 그 결정에 기대므로 여기로 옮겨 든다. **실측 전까지 「조회로 해소된다」를 검증된 사실로 인용하지 말 것.**
+- ★4판 신설 — **사용자 결정 대기(이 문서가 판정하지 않는다)**★ **§4-③ additive 표와 착지한 코드가 어긋난 두 자리** — ㉠ `agent.new`의 필수 인자가 선택으로 바뀐 것(표의 「필드 타입 변경」에 걸린다. 새 계약은 선언 doc 주석·테스트 단언에만 있다 — ★**개정: 이 서술은 출처보다 넓고 넓은 쪽이 맞다**★. step-log `S20.12`는 「테스트 주석에만」이라 적었으나 `commands.rs`의 `cwd` 칸 doc 주석이 그 계약을 직접 진다. 근거·좁은 쪽 금지는 §4-③의 같은 표시) ㉡ 버스 경로의 인자 검문(ADR-0157의 「배선은 검문하지 않는다」에 걸린다 — 그 이분법이 「LLM 입구이면서 홉 간 배선」인 이 경로를 안 덮는다). 출처 = step-log `S20.12` 「사용자 결정 대기 4건」. **표를 고칠지 코드를 되돌릴지가 결정 사항이고, 그 전까지 §4-③을 무결한 규칙서로 인용하면 안 된다.**
 - **읽기 명령의 read-your-writes 검증** — §8 가정 B가 반영 항목으로 적었으나 **§7 seam 표에 아직 없다**(그 자리에서 ★미반영★으로 자인). 조회가 방금 쓴 값을 돌려주는지를 어느 하네스에서 단언할지 미정 — **Step 3·4 착수 시** seam 표에 더한다.
-- **링커 수집 crate 선정** — §2-2. 새 외부 의존 1개는 CLAUDE.md 「의존성(변경 시 보고)」 대상.
-- 매크로가 직접 찍는 JSON Schema의 타입 알파벳이 실무를 덮는지 — Step 1에서 실측(§2-2).
-- 33개 화면 command의 주인 분류 경계 사례 유무 — §6 Step 4의 표는 handler 라우팅 대상 기준의 1차 분류이고, 개별 검증은 이관 시점.
-- `core`가 CLI 어휘 상수(`types.rs:179~246`)를 왜 갖고 있는지 — **호출부 미확인**(스폰 시 에이전트에게 가르치는 용도로 추정). Step 6이 이 상수를 건드리므로 그 전에 확인.
+- ~~**링커 수집 crate 선정**~~ — ★**4판 정정 — 닫혔다**★ `inventory = "0.3"`이다(`crates/engram-dashboard-command/Cargo.toml`). 릴리즈 그래프의 신규 외부 crate는 이것 하나이고 CLAUDE.md 「의존성(변경 시 보고)」에 이미 올라 있다.
+- ~~매크로가 직접 찍는 JSON Schema의 타입 알파벳이 실무를 덮는지~~ — ★**4판 정정 — 닫혔다**★ `crates/engram-dashboard-core/tests/command_alphabet.rs`가 `agent.*`가 쓰지 않는 갈래(정수·실수·bool·enum·중첩 struct·`Vec<T>`)까지 **실제로 선언해** 태운다. 알파벳을 넘으면 컴파일이 멈추므로 이 하네스가 그 판정을 진다. `schemars` 도입 여부를 다시 올릴 근거는 오늘 없다.
+- 33개 화면 command의 주인 분류 경계 사례 유무 — §6 Step 4의 표는 handler 라우팅 대상 기준의 1차 분류이고, 개별 검증은 이관 시점. ★수 자체도 세는 방법에 걸려 있다 — §9 4판 재실측의 그 항목★
+- `core`가 CLI 어휘 상수(`core/src/agent/types.rs`의 `CLI_GROUP_*`·`CLI_*_VERBS` — 상수명으로 찾을 것)를 왜 갖고 있는지 — **호출부 미확인**(스폰 시 에이전트에게 가르치는 용도로 추정). Step 6이 이 상수를 건드리므로 그 전에 확인.
 - ADR-0022를 확정으로 올릴지 후속 ADR로 갈지 — 이 TRD가 그 미해결 forks(레지스트리 위치·LLM 발견 경로·백엔드 미러)를 소진하므로 결정 시점에 `/adr`. **단 조사 보고서가 BLOCK이라 거부 대안 근거로는 못 쓴다.**
