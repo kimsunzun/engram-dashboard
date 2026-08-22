@@ -69,6 +69,55 @@ describe('command registry (ADR-0055)', () => {
     expect(list()).toEqual([])
   })
 
+  // ★help 가 투영에 실려야 버스로 나갈 길이 생긴다★(TRD §6 Step 4): 셸이 이 값을 카탈로그 항목으로 펴서
+  //   데몬 명부에 얹는다. 빠지면 이름만 등록돼 발견한 호출자가 인자를 채울 재료가 없다(ADR-0156).
+  it('list: help 를 그대로 실어 나른다(없으면 undefined)', () => {
+    const help = {
+      summary: '테마를 바꾼다',
+      effect: 'write' as const,
+      args: { theme: { type: 'string' as const } },
+    }
+    register({ id: 'theme.set', title: 'set', help, run: () => {} })
+    register({ id: 'local.only', title: 'local', run: () => {} })
+
+    const items = list()
+    expect(items.find(i => i.id === 'theme.set')!.help).toEqual(help)
+    expect(items.find(i => i.id === 'local.only')!.help).toBeUndefined()
+  })
+
+  // ★스냅샷이라는 계약은 help 칸에서 가장 쉽게 깨진다★: 값 필드만 있을 땐 얕은 복사로 충분했지만
+  //   help 는 객체 두 겹(args → enum 배열)이라, 그대로 넘기면 소비자가 등록된 command 를 직접 고친다.
+  //   toEqual 만 쓰면 별칭이어도 통과하므로 **변조 후 다시 읽어** 잰다.
+  it('list/getCommand: help 는 사본이라 소비자가 고쳐도 레지스트리가 안 바뀐다', () => {
+    register({
+      id: 'theme.set',
+      title: 'set',
+      help: {
+        summary: '원본',
+        effect: 'write',
+        args: { theme: { type: 'string', enum: ['dark'] } },
+        required: ['theme'],
+      },
+      run: () => {},
+    })
+
+    const leaked = list().find(i => i.id === 'theme.set')!.help!
+    leaked.summary = '변조'
+    leaked.effect = 'read'
+    leaked.args!.theme.type = 'number'
+    leaked.args!.theme.enum!.push('침입')
+    leaked.required!.push('ghost')
+    const viaGet = getCommand('theme.set')!.help!
+    viaGet.summary = 'get 으로 변조'
+    viaGet.args!.theme.description = '침입'
+
+    const fresh = list().find(i => i.id === 'theme.set')!.help!
+    expect(fresh.summary).toBe('원본')
+    expect(fresh.effect).toBe('write')
+    expect(fresh.args!.theme).toEqual({ type: 'string', enum: ['dark'] })
+    expect(fresh.required).toEqual(['theme'])
+  })
+
   it('getCommand: 사본을 반환 → cmd.run 변조가 레지스트리로 새지 않는다(FIX-C)', () => {
     register({ id: 'guarded', title: 'g', run: () => 'original' })
     getCommand('guarded')!.run = () => 'hijacked'

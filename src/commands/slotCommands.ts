@@ -84,6 +84,15 @@ register({
   id: 'slot.empty',
   title: t('slot.empty'),
   category: 'slot',
+  help: {
+    summary: '그 슬롯을 빈 칸으로 되돌린다(슬롯 자체는 남는다 — 없애려면 slot.close).',
+    effect: 'write',
+    args: {
+      viewId: { type: 'string', description: '탭 id(UUID) — tab.list 가 준다.' },
+      slotId: { type: 'string', description: '슬롯 id(UUID) — slot.resolveSpatial 이 준다.' },
+    },
+    required: ['viewId', 'slotId'],
+  },
   // ADR-0063: viewStore.setSlotContent → invoke → emit.
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.empty')

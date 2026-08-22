@@ -27,7 +27,7 @@
 //! 잔여 목록의 정본은 아래 「연결 arm 이 걷는 바이트 경로」 절 머리다 — 이 헤더에 베끼지 않는다(두 곳에 적으면
 //! 한쪽이 낡는다).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,7 +48,7 @@ use engram_dashboard_lib::daemon_client::connection::{
     accept_inbound, outcome_sink, registration_command, ConnectionCommand, OutcomeSender,
 };
 use engram_dashboard_lib::daemon_client::inbound::{
-    BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner,
+    BoxedTask, InboundReceiver, InboundSlot, RuntimeSpawner, TaskSpawner, ViewCommandPort,
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
@@ -62,6 +62,10 @@ use engram_dashboard_lib::layout::{
 use engram_dashboard_lib::ui_settings::{
     load_theme, parse_theme, read_capped, LoadedTheme, SettingsSource, ThemeSource,
     UiSettingsPayload, UiSettingsRefresh, UiTheme, DEFAULT_THEME,
+};
+use engram_dashboard_lib::view_commands::{
+    reserved_names, ViewArgSchema, ViewCommandBridge, ViewCommandDecl, ViewCommandHelp,
+    ViewCommandRequest, ViewDispatch, ViewEffect, VIEW_HOP_MARGIN, VIEW_REPLY_DEADLINE,
 };
 
 // ── 가짜 포트 ────────────────────────────────────────────────────────────────
@@ -1354,6 +1358,903 @@ fn an_empty_slot_is_visible_and_the_first_install_wins() {
     slot.set(Arc::clone(&second));
 
     assert!(Arc::ptr_eq(slot.get().expect("꽂혀 있다"), &first));
+}
+
+// ── (V) 웹뷰 몫 — 대리 등록과 마지막 홉 ─────────────────────────────────────
+//
+// ★창 0으로 잰다★: 배달 실물(`AppHandle::emit_to`)만 가짜로 끊고(`RecordingDispatch`) 나머지는 실코드다 —
+// 예약 이름 필터 · 등록 패킷 합류 · 3단계 배달의 2단계 · 답장 상관 · 마감. 그 함수들을 지우면 이 절이
+// 컴파일되지 않는다.
+//
+// ## ★그래도 안 덮이는 것★
+// - **`TauriViewDispatch::emit_to` 자체**(실 창이 필요하다) 와 웹뷰 쪽 리스너(`src/commands/
+//   viewCommandBridge.ts` — vitest 가 투영만 잰다).
+// - **`report_view_commands`·`report_command_outcome` invoke 껍데기** — Tauri 의 `State`/`WebviewWindow`
+//   주입이 필요하다. 그 안의 판정은 전부 아래가 태우는 `ViewCommandBridge` 메서드에 있다.
+
+/// 봉투를 받아 기록만 하는 배달 — 실물은 `emit_to` 라 창 없이 못 세운다.
+///
+/// 창 생사도 여기서 흉내낸다: `dead` 에 든 label 은 닫힌 창이다. ★`deliver` 는 그래도 성공한다★ —
+/// 운영의 `emit_to` 가 없는 label 에도 `Ok` 를 주기 때문이고, 그 성질이 바로 생사 조회를 따로 둔 이유다.
+struct RecordingDispatch {
+    seen: mpsc::UnboundedSender<(String, ViewCommandRequest)>,
+    dead: Mutex<BTreeSet<String>>,
+}
+
+impl ViewDispatch for RecordingDispatch {
+    fn deliver(&self, target: &str, request: &ViewCommandRequest) -> Result<(), String> {
+        self.seen
+            .send((target.to_string(), request.clone()))
+            .map_err(|_| "테스트 기록 채널이 닫혔다".to_string())
+    }
+
+    fn is_alive(&self, label: &str) -> bool {
+        !self.dead.lock().unwrap().contains(label)
+    }
+}
+
+fn recording_bridge(
+    deadline: Duration,
+) -> (
+    Arc<ViewCommandBridge>,
+    mpsc::UnboundedReceiver<(String, ViewCommandRequest)>,
+) {
+    let (bridge, rx, _dispatch) = recording_bridge_with_windows(deadline);
+    (bridge, rx)
+}
+
+/// 창을 닫아 볼 수 있는 판 — 가짜 배달을 함께 돌려준다.
+fn recording_bridge_with_windows(
+    deadline: Duration,
+) -> (
+    Arc<ViewCommandBridge>,
+    mpsc::UnboundedReceiver<(String, ViewCommandRequest)>,
+    Arc<RecordingDispatch>,
+) {
+    let (seen, rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(RecordingDispatch {
+        seen,
+        dead: Mutex::new(BTreeSet::new()),
+    });
+    let bridge = Arc::new(ViewCommandBridge::with_reserved(
+        Arc::clone(&dispatch) as Arc<dyn ViewDispatch>,
+        deadline,
+        // ★실 예약 집합을 쓴다★ — 손으로 이름을 적으면 이 테스트가 재는 것이 「내가 적은 목록」이 되고,
+        //   어휘가 늘어도 아무 신호가 안 난다.
+        reserved_names(),
+        // 설정이 숨긴 창 — 운영에서는 `hidden_window_labels` 가 `tauri.conf.json` 에서 뽑는다(오늘 이 하나).
+        [TREE_WINDOW_LABEL.to_string()],
+    ));
+    (bridge, rx, dispatch)
+}
+
+/// 설정이 `visible: false` 로 선언한 창(`src-tauri/tauri.conf.json`) — ★사전순으로 `slot-popup-N` 보다
+/// **앞선다**★. 마지막 수단이 그냥 첫 생존자를 고르면 이 창이 목적지가 된다.
+const TREE_WINDOW_LABEL: &str = "agent-tree";
+
+impl RecordingDispatch {
+    fn close(&self, label: &str) {
+        self.dead.lock().unwrap().insert(label.to_string());
+    }
+}
+
+/// 웹뷰가 보고하는 항목 — 인자 없는 최소형.
+fn view_decl(name: &str) -> ViewCommandDecl {
+    view_decl_with_effect(name, Some(ViewEffect::Write))
+}
+
+fn view_decl_with_effect(name: &str, effect: Option<ViewEffect>) -> ViewCommandDecl {
+    ViewCommandDecl {
+        name: name.to_string(),
+        help: ViewCommandHelp {
+            summary: format!("{name} 이 하는 일"),
+            effect,
+            args: BTreeMap::new(),
+            required: Vec::new(),
+        },
+    }
+}
+
+/// 웹뷰 몫을 진 수신기 — 적용은 **실 런타임**에서 돈다(답장이 다른 태스크로 들어와야 끝나는 왕복이라
+/// 태스크를 쥐고 있는 `Queued` 로는 잴 수 없다).
+fn with_view(bridge: Arc<ViewCommandBridge>) -> (World, Arc<InboundReceiver>) {
+    let (world, ports) = World::build();
+    let receiver = Arc::new(InboundReceiver::with_view(
+        make_table(ports),
+        Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+        bridge,
+    ));
+    (world, receiver)
+}
+
+/// ★데몬이 답하는 이름이 하나라도 실리면 **패킷 전체**가 반려된다★ — 그러면 셸의 17개 이름이 그 하나
+/// 때문에 함께 명부에 못 올라 LLM 이 창·탭·슬롯을 통째로 못 만진다(데몬 `refuse_names_i_answer` — 겹친
+/// 이름만 빼 주지 않는다).
+///
+/// 웹뷰 레지스트리에는 실제로 `agent.spawn`·`agent.rename` 이 있다(`src/commands/agentCommands.ts`) —
+/// 그래서 이 필터가 없으면 그 사고가 **오늘 바로** 난다. ★이 테스트가 데몬의 반려 계약을 안 건드리는
+/// 근거다★: 셸이 스스로 안 싣는다.
+/// ★기대값을 손으로 적지 않는다★ — 코어 선언 전량을 훑으므로 데몬 어휘가 늘면 이 그물도 함께 자란다.
+#[tokio::test]
+async fn the_registration_packet_never_carries_a_name_the_daemon_answers_itself() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
+    let daemon_answers: Vec<&str> = engram_dashboard_core::agent::commands::COMMAND_SPECS
+        .iter()
+        .map(|spec| spec.name)
+        .collect();
+    assert!(
+        daemon_answers.contains(&"agent.spawn"),
+        "이 테스트의 전제 — 데몬이 agent.spawn 을 답한다"
+    );
+
+    // 웹뷰가 자기 id 를 통째로 보고한 상황(오늘 프론트 레지스트리에 실재하는 이름들이다).
+    let reported: Vec<ViewCommandDecl> = daemon_answers
+        .iter()
+        .map(|name| view_decl(name))
+        .chain([view_decl("theme.set")])
+        .collect();
+    let outcome = bridge.report(MAIN_WINDOW_LABEL, reported);
+    for name in &daemon_answers {
+        assert!(
+            outcome.refused.iter().any(|r| r == name),
+            "{name} 은 빠졌다고 말해야 한다"
+        );
+    }
+
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let Some(AgentCommand::RegisterCommands { decls, .. }) = registration_command(&receiver) else {
+        panic!("얹을 이름이 있으면 등록 패킷이 나온다");
+    };
+    let names: BTreeSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+    for name in &daemon_answers {
+        assert!(
+            !names.contains(name),
+            "데몬이 답하는 '{name}' 가 실렸다 — 이 패킷은 통째로 반려된다"
+        );
+    }
+    assert!(names.contains("theme.set"), "웹뷰 몫은 실린다");
+    assert!(names.contains("tab.create"), "셸 몫도 그대로 실린다");
+    for decl in &decls {
+        assert!(
+            !decl.help.trim().is_empty(),
+            "{}: help 가 비었다",
+            decl.name
+        );
+    }
+}
+
+/// ★★목적지 창이 닫히면 살아 있는 보고자가 이어받는다★★ — 회복 경로가 없으면 그 뒤 모든 배달이 죽은
+/// label 로 나가 마감까지 기다렸다가 `TIMEOUT` 이 되고, 이름은 명부에 남아 「있는데 영영 안 되는」 상태가
+/// 연결 내내 굳는다.
+///
+/// 재현하는 경로는 리뷰가 짚은 그것이다: main 의 **단발 보고가 실패**해(그 invoke 에 재시도가 없다) 팝아웃이
+/// host 가 된 뒤 그 팝아웃이 닫힌다.
+/// ★`deliver` 실패로는 못 잡는다는 것도 함께 박는다★ — 가짜도 운영처럼 죽은 label 에 `Ok` 를 준다.
+#[tokio::test]
+async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
+    let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
+    // main 은 보고에 실패했다고 친다 — 아예 안 나타난다.
+    bridge.report("popup-1", vec![view_decl("theme.set")]);
+    bridge.report("popup-2", vec![view_decl("theme.set")]);
+    assert_eq!(
+        bridge.host().as_deref(),
+        Some("popup-1"),
+        "먼저 온 창이 목적지"
+    );
+
+    windows.close("popup-1");
+
+    assert_eq!(
+        bridge.host().as_deref(),
+        Some("popup-2"),
+        "죽은 host 를 살아 있는 보고자가 이어받는다"
+    );
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        mail.deliver(),
+    );
+    let (target, request) = seen.recv().await.expect("살아 있는 창으로 내려간다");
+    assert_eq!(target, "popup-2");
+    bridge
+        .settle("popup-2", &request.request_id, Ok(json!({ "ok": true })))
+        .expect("이어받은 창이 답한다");
+    mail.settle(1).await;
+    assert_eq!(mail.only().outcome, Ok(json!({ "ok": true })));
+
+    // 마지막 창까지 닫히면 광고도 함께 내려간다 — 못 부를 이름을 명부에 남기지 않는다.
+    windows.close("popup-2");
+    assert_eq!(bridge.host(), None);
+    assert!(bridge.declarations().is_empty());
+}
+
+/// ★★사람이 못 보는 창은 마지막 수단 목적지가 될 수 없다★★
+///
+/// 사전순 첫 생존자를 그냥 고르면 `agent-tree` 가 모든 `slot-popup-N` 보다 앞선다 — 그 창은 설정이
+/// `visible: false` 라, `theme.set` 이 **성공을 답하면서** 아무도 안 보는 창을 칠한다. 호출자에게는
+/// 「적용됐다」인데 화면은 그대로다.
+///
+/// ★이 규칙이 지키는 것은 「올바른 목적지」가 아니라 **최악의 모양**이다★: main 우선 규칙이 기대는 전제
+/// (숨은 main 이 웹뷰 표에 남는다)는 GUI 로 확인하지 못했다(권한 설정이 `hide()`·`close()` 를 막는다 —
+/// 2026-08-23). 그 전제가 틀려도 여기서 나오는 답은 「host 없음 = 지금 부를 수 없음」이지 「안 보이는 곳에
+/// 조용히 적용됨」이 아니다.
+#[tokio::test]
+async fn the_last_resort_host_is_never_a_window_the_user_cannot_see() {
+    let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
+
+    // ★위 상수가 진짜 설정과 같은지 먼저 본다★ — 운영은 `hidden_window_labels` 로 설정에서 뽑으므로,
+    //   설정이 바뀌면 이 하네스가 재는 것이 실물과 갈린다(그때 이 줄이 먼저 걸린다).
+    let conf: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string("tauri.conf.json").expect("셸 설정"))
+            .expect("설정은 JSON");
+    let declared_hidden: Vec<&str> = conf["app"]["windows"]
+        .as_array()
+        .expect("창 목록")
+        .iter()
+        .filter(|window| window["visible"] == serde_json::Value::Bool(false))
+        .map(|window| window["label"].as_str().expect("label"))
+        .collect();
+    assert_eq!(
+        declared_hidden,
+        vec![TREE_WINDOW_LABEL],
+        "설정이 숨긴 창 목록이 바뀌었다 — 하네스 상수를 함께 고칠 것"
+    );
+
+    // main 은 보고에 실패했다고 친다 — 남은 후보는 숨은 트리 창과 팝아웃뿐이다.
+    bridge.report(TREE_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    assert!(
+        TREE_WINDOW_LABEL < "slot-popup-1",
+        "이 테스트의 전제 — 트리 label 이 팝아웃보다 사전순 앞이다"
+    );
+    assert_eq!(
+        bridge.host(),
+        None,
+        "보이는 후보가 없으면 목적지가 없다 — 숨은 창을 고르지 않는다"
+    );
+    assert!(
+        bridge.declarations().is_empty(),
+        "목적지가 없으면 광고도 없다 — 못 부를 이름을 명부에 올리지 않는다"
+    );
+
+    // 팝아웃이 뜨면 그쪽이 목적지다(사전순으로는 뒤지만 사람이 볼 수 있다).
+    bridge.report("slot-popup-1", vec![view_decl("theme.set")]);
+    assert_eq!(bridge.host().as_deref(), Some("slot-popup-1"));
+
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        mail.deliver(),
+    );
+    let (target, _request) = seen.recv().await.expect("보이는 창으로 내려간다");
+    assert_eq!(target, "slot-popup-1", "숨은 창에는 안 보낸다");
+
+    // 그 팝아웃이 닫히면 다시 목적지가 없다 — 숨은 창으로 **떨어지지 않는다**.
+    windows.close("slot-popup-1");
+    assert_eq!(bridge.host(), None);
+
+    // main 은 이 규칙 밖이다 — `--hidden` 부팅에서 숨어 있어도 사용자가 트레이로 여는 그 창이다.
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    assert_eq!(bridge.host().as_deref(), Some(MAIN_WINDOW_LABEL));
+}
+
+/// ★광고하는 명단과 봉투를 받는 창은 **같은 창에서 나온다**★ — 갈리면 데몬이 B 를 광고하는 동안 A 가
+/// 실행돼, 광고된 이름이 `UNKNOWN_COMMAND` 로 나가거나 실행되는 이름이 광고에 없다.
+///
+/// 오늘은 창마다 같은 정적 `contributions` 를 올려 두 집합이 바이트 동일하지만, 그 우연 위에 계약을 얹지
+/// 않는다 — 그래서 여기서는 **일부러 다른 목록**을 보고시킨다.
+#[tokio::test]
+async fn a_non_host_report_does_not_change_what_is_advertised() {
+    let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    assert_eq!(bridge.host().as_deref(), Some(MAIN_WINDOW_LABEL));
+
+    let popup = bridge.report("popup-1", vec![view_decl("theme.toggle")]);
+
+    assert!(
+        !popup.changed(),
+        "host 가 아닌 창의 보고는 차분을 만들지 않는다"
+    );
+    let advertised: Vec<String> = bridge.declarations().into_iter().map(|d| d.name).collect();
+    assert_eq!(
+        advertised,
+        vec!["theme.set".to_string()],
+        "광고는 host 것뿐"
+    );
+
+    // 그 팝아웃의 이름은 배달도 안 받는다 — 광고에 없으니 명부에도 없다.
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.toggle", json!({}), request_id),
+        mail.deliver(),
+    );
+    mail.settle(1).await;
+    assert_eq!(error_of(mail.only()).code(), ErrorCode::UnknownCommand);
+    assert!(seen.try_recv().is_err());
+
+    // main 이 죽으면 광고도 팝아웃 것으로 **함께** 옮겨간다(둘이 갈리지 않는다).
+    windows.close(MAIN_WINDOW_LABEL);
+    assert_eq!(bridge.host().as_deref(), Some("popup-1"));
+    assert_eq!(
+        bridge
+            .declarations()
+            .into_iter()
+            .map(|d| d.name)
+            .collect::<Vec<_>>(),
+        vec!["theme.toggle".to_string()]
+    );
+}
+
+/// ★보고의 **상태 변경과 그 차분 송신이 한 덩이**여야 한다★ — 갈라지면 나중 보고의 차분이 먼저 나가고,
+/// 데몬은 두 보고의 합집합을 쥔 채 남는다(다리는 나중 것만 안다 → 옛 이름이 배달되면 웹뷰가 모른다고 답한다).
+///
+/// 재는 법: 첫 송신을 문 안에서 붙잡아 둔 채 둘째 보고를 넣는다. 문이 없으면 둘째가 먼저 끝나 순서가
+/// 뒤집히고, 문이 있으면 둘째는 첫 송신이 풀릴 때까지 **시작조차 못 한다**.
+#[tokio::test]
+async fn a_report_and_its_delta_go_out_as_one_unit() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(5));
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let gate = Arc::new(Semaphore::new(0));
+
+    let first = {
+        let (bridge, order, gate) = (Arc::clone(&bridge), Arc::clone(&order), Arc::clone(&gate));
+        tokio::spawn(async move {
+            bridge
+                .report_and_push(
+                    MAIN_WINDOW_LABEL,
+                    vec![view_decl("theme.set")],
+                    |_, _| async move {
+                        order.lock().unwrap().push("first-send-begin");
+                        let _ = gate.acquire().await.expect("게이트");
+                        order.lock().unwrap().push("first-send-end");
+                    },
+                )
+                .await;
+        })
+    };
+    // 첫 송신이 문 안에서 멈출 때까지 기다린다.
+    while order.lock().unwrap().is_empty() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    let second = {
+        let (bridge, order) = (Arc::clone(&bridge), Arc::clone(&order));
+        tokio::spawn(async move {
+            bridge
+                .report_and_push(
+                    MAIN_WINDOW_LABEL,
+                    vec![view_decl("theme.toggle")],
+                    |_, _| async move {
+                        order.lock().unwrap().push("second-send");
+                    },
+                )
+                .await;
+        })
+    };
+
+    // 둘째가 문 앞에서 막혀 있다 — 막히지 않으면 여기서 이미 순서가 뒤집힌다.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["first-send-begin"],
+        "둘째 보고가 첫 송신을 앞질렀다 — 데몬이 합집합을 쥔 채 남는다"
+    );
+    // ★「아직 시작도 안 했다」와 「막혀 있다」를 가른다★ — 앞 단언만이면 둘째 태스크가 굼떠도 통과한다.
+    assert!(!second.is_finished(), "둘째 보고가 문을 안 거치고 끝났다");
+
+    gate.add_permits(1);
+    first.await.expect("첫 보고");
+    second.await.expect("둘째 보고");
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["first-send-begin", "first-send-end", "second-send"]
+    );
+}
+
+/// ★★TypeScript 가 **실제로 찍는 글자**를 Rust 가 읽는지 여기서만 잰다★★
+///
+/// 다른 어느 테스트도 이 경계를 안 건넌다 — Rust 쪽은 enum 을 직접 만들고 vitest 는 invoke 를 mock 한다.
+/// 철자가 갈리면 serde 가 **벡터 전체**를 실패시켜 `report_view_commands` 가 payload 를 통째로 반려하고,
+/// 그 창은 명령을 **0개** 등록한다. 유일한 신호는 웹뷰 콘솔 경고 한 줄이다.
+/// 아래 문자열은 `src/commands/viewCommandBridge.ts` 의 `offeredCommands()` 가 내는 모양 그대로다 —
+/// 짝 단언은 `src/commands/viewCommandBridge.test.ts`(invoke 인자)와 `busCommands.test.ts`(effect 어휘)다.
+#[test]
+fn the_frontend_spelling_of_the_report_payload_deserializes_here() {
+    const FROM_WEBVIEW: &str = r#"[
+      {"name":"theme.set","help":{
+        "summary":"창 하나의 테마를 바꾼다",
+        "effect":"write",
+        "args":{"theme":{"type":"string","enum":["dark","light","e-ink"],"description":"적용할 테마 이름"}},
+        "required":["theme"]}},
+      {"name":"theme.toggle","help":{"summary":"테마 순환","effect":"read"}}
+    ]"#;
+
+    let decls: Vec<ViewCommandDecl> =
+        serde_json::from_str(FROM_WEBVIEW).expect("프론트가 찍는 모양 그대로 읽힌다");
+
+    assert_eq!(decls.len(), 2);
+    assert_eq!(decls[0].help.effect, Some(ViewEffect::Write));
+    assert_eq!(decls[1].help.effect, Some(ViewEffect::Read));
+    let theme = decls[0].help.args.get("theme").expect("인자 칸");
+    assert_eq!(theme.ty.as_deref(), Some("string"));
+    assert_eq!(theme.allowed.as_deref().map(<[String]>::len), Some(3));
+    assert_eq!(decls[0].help.required, vec!["theme".to_string()]);
+    // `args`·`required` 를 안 실은 항목도 읽힌다(둘 다 `#[serde(default)]`).
+    assert!(decls[1].help.args.is_empty());
+
+    // ★대문자 철자는 **안** 읽힌다 — rename 방향을 못 박는다★. 한 항목이 깨지면 벡터 전체가 실패하므로
+    //   이 반려의 대가가 「그 창은 0개 등록」이라는 것도 함께 남긴다.
+    let wrong = r#"[{"name":"theme.set","help":{"summary":"s","effect":"Write"}}]"#;
+    assert!(
+        serde_json::from_str::<Vec<ViewCommandDecl>>(wrong).is_err(),
+        "철자가 갈리면 payload 가 통째로 반려된다 — 그 창은 명령을 하나도 등록하지 못한다"
+    );
+}
+
+/// ★★웹뷰 마감은 **데몬 자리 마감 안쪽**이어야 한다 — 뒤집히면 두 가지가 동시에 깨진다★★
+///
+/// ① **이쪽 마감이 도달 불가가 된다**: 데몬이 먼저 자리를 거둬 호출자에게 `TIMEOUT`/`retry: never` 로
+///    답하고, 뒤늦은 셸의 결말은 자리 없는 답장(`NoSeat`)으로 버려진다 — 아래 timeout 테스트가 단언하는
+///    `retry: same-request-id` 는 운영에서 **한 번도** 나올 수 없는 성질이 된다.
+/// ② **같은 명령이 두 번 돈다**: 데몬 마감 뒤 호출자가 같은 id 로 다시 부르면 아직 도는 첫 왕복 위로
+///    두 번째 봉투가 내려간다.
+///
+/// ★이 파일이 그 관계를 물 수 있는 유일한 자리다★ — 데몬 crate 는 이 패키지의 **dev 의존**이라 운영
+/// 코드가 그 상수를 못 본다. 그래서 값은 셸에 박고 부등식은 여기서 잰다. 어느 쪽 상수를 고쳐 순서를
+/// 뒤집으면 여기가 빨개진다.
+#[test]
+fn the_webview_deadline_fits_inside_the_daemon_seat() {
+    let seat = engram_dashboard_daemon::command_delivery::CommandDeliveries::DEFAULT_DEADLINE;
+
+    assert!(
+        VIEW_REPLY_DEADLINE + VIEW_HOP_MARGIN <= seat,
+        "웹뷰 마감({VIEW_REPLY_DEADLINE:?}) + 홉 여유({VIEW_HOP_MARGIN:?}) 가 데몬 자리 마감({seat:?}) 을 넘는다 \
+         — 이 순서가 뒤집히면 셸의 TIMEOUT 은 도달 불가가 되고 같은 명령이 두 번 돌 수 있다"
+    );
+    assert!(
+        !VIEW_HOP_MARGIN.is_zero(),
+        "여유 항이 0이면 부등식이 산문이 된다 — 데몬↔셸 두 홉이 공짜라는 주장이다"
+    );
+}
+
+/// ★같은 번호가 도는 중이면 **안 보낸다**★ — 조용히 덮으면 부수효과가 두 번 일어나고, 먼저 온 옛 결말이
+/// 새 시도의 답으로 붙는다. 위 부등식이 이 상황을 막지만 그물은 둘이어야 한다.
+#[tokio::test]
+async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        mail.deliver(),
+    );
+    let (_target, first) = seen.recv().await.expect("첫 봉투가 내려간다");
+
+    // 같은 번호로 다시 — 아직 첫 왕복이 돌고 있다.
+    let second = Mailbox::default();
+    receiver.accept(
+        envelope("theme.set", json!({ "theme": "dark" }), request_id),
+        second.deliver(),
+    );
+    second.settle(1).await;
+
+    assert_eq!(
+        error_of(second.only()).code(),
+        ErrorCode::RequestIdConflict,
+        "두 번째 시도는 거절된다"
+    );
+    assert!(
+        seen.try_recv().is_err(),
+        "웹뷰로 두 번째 봉투가 내려가지 않았다 — 내려갔다면 명령이 두 번 돈다"
+    );
+
+    // 첫 대기자는 그대로 살아 있다 — 밀려나지 않았다.
+    bridge
+        .settle(
+            MAIN_WINDOW_LABEL,
+            &first.request_id,
+            Ok(json!({ "first": true })),
+        )
+        .expect("첫 자리가 남아 있다");
+    mail.settle(1).await;
+    assert_eq!(mail.only().outcome, Ok(json!({ "first": true })));
+}
+
+/// ★봉투를 받지 않은 창은 그 왕복을 끝낼 수 없다★ — 상관 키 하나로만 열면 남의 창이 위조 결말을 낼 수
+/// 있고, 호출자는 그것을 받는 동안 진짜 창의 부수효과는 그대로 일어난다.
+/// ★대조에 실패해도 자리는 남는다★ — 빼 버리면 위조 한 번이 진짜 답의 자리를 지운다.
+#[tokio::test]
+async fn only_the_window_that_received_the_envelope_may_settle_it() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        mail.deliver(),
+    );
+    let (_target, request) = seen.recv().await.expect("봉투가 내려간다");
+
+    let forged = bridge
+        .settle(
+            "popup-9",
+            &request.request_id,
+            Ok(json!({ "forged": true })),
+        )
+        .expect_err("남의 창은 못 끝낸다");
+    assert!(forged.contains("popup-9"), "누가 답했는지 말한다: {forged}");
+    assert_eq!(mail.len(), 0, "위조는 아무 답장도 못 낸다");
+
+    bridge
+        .settle(
+            MAIN_WINDOW_LABEL,
+            &request.request_id,
+            Ok(json!({ "real": true })),
+        )
+        .expect("진짜 창의 자리는 위조에 지워지지 않았다");
+    mail.settle(1).await;
+    assert_eq!(mail.only().outcome, Ok(json!({ "real": true })));
+}
+
+/// ★표식은 웹뷰가 실은 값을 그대로 광고한다★ — 상수로 박으면 첫 조회 명령이 붙는 날 명부가 거짓 표식을
+/// 광고하고, 그 값은 데몬의 쓰기 보존 회계에 그대로 먹인다. 안 실은 항목은 아예 등록하지 않는다(기본값을
+/// 고르는 것이 곧 그 거짓말이다).
+#[tokio::test]
+async fn the_advertised_effect_comes_from_the_webview_not_from_a_constant() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
+    let outcome = bridge.report(
+        MAIN_WINDOW_LABEL,
+        vec![
+            view_decl_with_effect("view.peek", Some(ViewEffect::Read)),
+            view_decl_with_effect("view.poke", Some(ViewEffect::Write)),
+            view_decl_with_effect("view.mute", None),
+        ],
+    );
+
+    assert_eq!(
+        outcome.refused,
+        vec!["view.mute".to_string()],
+        "표식 없는 항목은 등록에서 빠진다"
+    );
+    let effect_of = |name: &str| -> String {
+        let decl = outcome
+            .accepted
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} 이 등록됐어야 한다"));
+        let item: serde_json::Value = serde_json::from_str(&decl.help).expect("help 는 JSON");
+        item["effect"].as_str().expect("effect 칸").to_string()
+    };
+    assert_eq!(effect_of("view.peek"), "Read");
+    assert_eq!(effect_of("view.poke"), "Write");
+}
+
+/// ★등록 패킷은 **매번 다시 읽는다**★ — 웹뷰 보고는 소켓과 아무 순서 관계가 없어서, 표를 꽂을 때
+/// 한 번 만들어 캐시하면 재연결이 옛 목록(대개 빈 목록)을 다시 보낸다. 그러면 창은 떠 있는데 화면
+/// 명령이 명부에 없는 상태가 재연결마다 되살아난다.
+#[tokio::test]
+async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+
+    let before = registration_command(&receiver).expect("셸 몫만으로도 패킷은 나온다");
+    let AgentCommand::RegisterCommands { decls, .. } = before else {
+        panic!("RegisterCommands");
+    };
+    assert!(
+        !decls.iter().any(|d| d.name == "theme.set"),
+        "아직 아무 창도 보고하지 않았다"
+    );
+
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+
+    let after = registration_command(&receiver).expect("패킷");
+    let AgentCommand::RegisterCommands { decls, .. } = after else {
+        panic!("RegisterCommands");
+    };
+    assert!(
+        decls.iter().any(|d| d.name == "theme.set"),
+        "다음 (재)핸드셰이크의 패킷에는 웹뷰 몫이 합쳐져 있다"
+    );
+}
+
+/// ★버려진 왕복은 자리를 남기지 않는다★ — 답장 자리를 지우는 경로가 마감 하나뿐이면, 런타임이 접히거나
+/// 배달 future 가 취소될 때마다 자리가 쌓여 다리가 영구히 불어난다.
+#[tokio::test]
+async fn a_cancelled_delivery_gives_its_answer_slot_back() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.toggle")]);
+
+    // 태스크를 **쥐고만** 있다가 버린다 — 취소를 그대로 흉내낸다(`ReplySink` 의 Drop 이 답장을 낸다).
+    let (_world, ports) = World::build();
+    let queue = Arc::new(Queued::default());
+    let receiver = InboundReceiver::with_view(
+        make_table(ports),
+        Arc::clone(&queue) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+        Arc::clone(&bridge) as Arc<dyn ViewCommandPort>,
+    );
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.on_command(
+        envelope("theme.toggle", json!({}), request_id),
+        mail.sink(request_id),
+    );
+    let mut task = Box::pin(queue.drain().pop().expect("적용 태스크 하나"));
+
+    // 첫 poll 에서 배달이 나가고 답장 자리가 선다 — 그 뒤 future 를 버린다.
+    let waker = futures_util::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(std::future::Future::poll(task.as_mut(), &mut cx).is_pending());
+    let (_target, request) = seen.try_recv().expect("웹뷰로 내려갔다");
+    drop(task);
+
+    // 자리가 남아 있으면 늦게 온 답이 그것을 붙잡아 성공한다 — 비었어야 한다.
+    bridge
+        .settle(MAIN_WINDOW_LABEL, &request.request_id, Ok(json!(null)))
+        .expect_err("버려진 왕복의 자리는 남지 않는다");
+    // 답장은 `ReplySink` 의 Drop 이 낸다(태스크가 답 없이 사라져도 부르는 쪽은 매달리지 않는다).
+    assert_eq!(mail.len(), 1);
+}
+
+/// ★셸 표가 먼저 답하는 이름은 등록에서 빠진다★ — 실어도 배달은 안 갈리지만(`route` 가 표를 먼저 본다)
+/// 명부에 **닿을 수 없는 항목**이 하나 늘고, 그것을 발견한 호출자는 웹뷰 계약을 보고 셸 계약대로 답을 받는다.
+#[tokio::test]
+async fn a_name_the_shell_table_answers_is_left_out_and_still_runs_in_the_shell() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_secs(1));
+    let outcome = bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.create")]);
+    assert_eq!(outcome.refused, vec!["tab.create".to_string()]);
+    assert!(outcome.accepted.is_empty());
+
+    let (world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope(
+            "tab.create",
+            json!({ "window": MAIN_WINDOW_LABEL }),
+            request_id,
+        ),
+        mail.deliver(),
+    );
+    mail.settle(1).await;
+
+    assert!(mail.only().outcome.is_ok(), "셸 적용 서비스가 답했다");
+    assert_eq!(world.main_tabs().tabs.len(), 2, "실제로 탭이 늘었다");
+    assert!(seen.try_recv().is_err(), "웹뷰로는 아무것도 안 내려갔다");
+}
+
+/// ★셸 표에 없는 이름은 웹뷰로 내려가고 그 답이 같은 상관 키로 돌아온다★ — 3단계 배달의 2단계다.
+#[tokio::test]
+async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_secs(5));
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        mail.deliver(),
+    );
+
+    let (target, request) = seen.recv().await.expect("웹뷰로 내려간다");
+    assert_eq!(target, MAIN_WINDOW_LABEL, "보고한 창으로 간다");
+    assert_eq!(request.name, "theme.set");
+    assert_eq!(request.args, json!({ "theme": "light" }));
+    assert_eq!(
+        request.request_id,
+        request_id.to_string(),
+        "상관 키는 전 구간 동일하다"
+    );
+    assert!(mail.len() == 0, "웹뷰가 답하기 전에는 결말이 없다");
+
+    bridge
+        .settle(
+            MAIN_WINDOW_LABEL,
+            &request.request_id,
+            Ok(json!({ "applied": true })),
+        )
+        .expect("기다리는 자리가 있다");
+    mail.settle(1).await;
+
+    let reply = mail.only();
+    assert_eq!(reply.request_id, request_id);
+    assert_eq!(reply.outcome, Ok(json!({ "applied": true })));
+
+    // ★두 번째 답은 붙일 자리가 없다★ — 창 둘이 같은 봉투를 받았다는 신호라 조용히 먹지 않는다.
+    bridge
+        .settle(MAIN_WINDOW_LABEL, &request.request_id, Ok(json!(null)))
+        .expect_err("한 request_id 에 답장은 하나다");
+}
+
+/// ★창이 사라져도 왕복은 값으로 끝난다★ — 마감이 없으면 그 봉투는 영영 안 끝나고 호출자가 매달린다
+/// (`route` 는 마감을 안 건다 — 그것이 조립부인 이 다리의 몫이다).
+#[tokio::test]
+async fn a_webview_that_never_answers_ends_as_a_timeout_not_a_hang() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_millis(50));
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.toggle")]);
+
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(
+        envelope("theme.toggle", json!({}), request_id),
+        mail.deliver(),
+    );
+    seen.recv().await.expect("웹뷰로 내려간다");
+
+    mail.settle(1).await;
+    let err = error_of(mail.only());
+    assert_eq!(err.code(), ErrorCode::Timeout);
+    assert_eq!(
+        err.retry(),
+        engram_dashboard_command::RetryMode::SameRequestId,
+        "적용 여부가 불명이라 새 id 로 다시 부르면 두 번 적용될 수 있다"
+    );
+}
+
+/// ★아무 창도 보고하지 않았으면 「모르는 이름」이다★ — 배달할 곳이 없는데 주인이 있다고 답하면 호출자는
+/// 「그런 명령 없음」과 「보낼 곳 없음」을 구분할 수 없다.
+#[tokio::test]
+async fn a_webview_name_is_unknown_until_a_window_reports_it() {
+    let (bridge, mut seen) = recording_bridge(Duration::from_secs(1));
+    let (_world, receiver) = with_view(Arc::clone(&bridge));
+    assert!(bridge.host().is_none());
+
+    let mail = Mailbox::default();
+    let request_id = RequestId::new();
+    receiver.accept(envelope("theme.set", json!({}), request_id), mail.deliver());
+    mail.settle(1).await;
+
+    let err = error_of(mail.only());
+    assert_eq!(err.code(), ErrorCode::UnknownCommand);
+    assert!(
+        seen.try_recv().is_err(),
+        "보낼 곳이 없으니 아무것도 안 나갔다"
+    );
+}
+
+/// ★같은 목록을 다시 보고하면 차분이 없다★ — 창마다 이 App 이 떠서 전부 보고하므로(main·트리·팝아웃)
+/// 보고마다 차분을 내면 뜻 없는 왕복이 창 수만큼 는다.
+/// ★목적지는 main 이 이긴다★ — 팝아웃이 목적지를 가져가면 그 창이 닫히는 순간 웹뷰 명령 전체가 죽는다.
+#[tokio::test]
+async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destination() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
+
+    let first = bridge.report("popup-1", vec![view_decl("theme.set")]);
+    assert!(first.changed(), "첫 보고는 명단을 채운다");
+    assert_eq!(
+        bridge.host().as_deref(),
+        Some("popup-1"),
+        "먼저 온 창을 받아 둔다"
+    );
+
+    let again = bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    assert!(!again.changed(), "같은 목록이면 보낼 차분이 없다");
+    assert_eq!(
+        bridge.host().as_deref(),
+        Some(MAIN_WINDOW_LABEL),
+        "main 이 덮는다"
+    );
+
+    let stolen = bridge.report("popup-2", vec![view_decl("theme.set")]);
+    assert!(!stolen.changed());
+    assert_eq!(
+        bridge.host().as_deref(),
+        Some(MAIN_WINDOW_LABEL),
+        "main 은 뺏기지 않는다"
+    );
+
+    let shrunk = bridge.report(MAIN_WINDOW_LABEL, vec![]);
+    assert_eq!(shrunk.removed, vec!["theme.set".to_string()]);
+    assert!(shrunk.accepted.is_empty());
+}
+
+/// 등록 패킷의 `help` 는 **Rust 선언이 내는 것과 같은 칸**을 쓴다 — 갈리면 명부 하나에 모양이 두 방언으로
+/// 섞여, 그것을 읽는 LLM 이 명령마다 다른 독법을 써야 한다.
+#[tokio::test]
+async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
+    let mut args = BTreeMap::new();
+    args.insert(
+        "theme".to_string(),
+        ViewArgSchema {
+            ty: Some("string".to_string()),
+            allowed: Some(vec!["dark".to_string(), "light".to_string()]),
+            description: Some("적용할 테마".to_string()),
+        },
+    );
+    let outcome = bridge.report(
+        MAIN_WINDOW_LABEL,
+        vec![ViewCommandDecl {
+            name: "theme.set".to_string(),
+            help: ViewCommandHelp {
+                summary: "  이 창의 테마를 바꾼다  ".to_string(),
+                effect: Some(ViewEffect::Write),
+                args,
+                // ★선언에 없는 칸은 required 에서 빠진다★ — 남겨 두면 그 스키마는 어떤 인자로도 만족되지
+                //   않아 호출자가 영영 못 부른다.
+                required: vec!["theme".to_string(), "ghost".to_string()],
+            },
+        }],
+    );
+
+    let item: serde_json::Value =
+        serde_json::from_str(&outcome.accepted[0].help).expect("help 는 JSON 이다");
+    assert_eq!(item["name"], "theme.set");
+    assert_eq!(item["summary"], "이 창의 테마를 바꾼다");
+    assert_eq!(item["args"]["properties"]["theme"]["type"], "string");
+    assert_eq!(item["args"]["properties"]["theme"]["enum"][1], "light");
+    assert_eq!(item["args"]["required"], json!(["theme"]));
+    // 카탈로그 항목의 칸 이름은 Rust 쪽과 같아야 한다 — 그 목록을 여기서 못 박는다.
+    for key in ["name", "effect", "since", "summary", "args", "ok", "errors"] {
+        assert!(item.get(key).is_some(), "{key} 칸이 없다: {item}");
+    }
+    // ★광고하는 오류 = 이 다리가 낼 수 있는 것과 **정확히 같은 집합**이다★ — 부분집합으로 재면 안 되는
+    //   쪽이 열린다: 낼 수 없는 코드를 광고하면 호출자가 **한 번도 안 도는 분기**를 짜고, 그 코드가 안
+    //   온다는 사실은 어디서도 안 드러난다. 빠지는 쪽은 반대로 호출자가 기본 갈래로 떨어진다.
+    //   넷의 출처 —
+    //   - `INTERNAL`  : 웹뷰가 던진 실패(종류를 못 가른다) · 배달 실패 · 답장 채널 조기 종료.
+    //   - `TIMEOUT`   : 마감 초과(`a_webview_that_never_answers_ends_as_a_timeout_not_a_hang`).
+    //   - `REQUEST_ID_CONFLICT` : 같은 번호가 이미 돈다
+    //     (`a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter`).
+    //   - `UNSUPPORTED` : ★보고한 창이 없다 — 다만 **평소엔 여기까지 안 온다**★. 조회가 먼저 「모르는
+    //     이름」으로 답해 배달이 `UNKNOWN_COMMAND` 로 끝나기 때문이다
+    //     (`a_webview_name_is_unknown_until_a_window_reports_it` 이 그것을 잰다). 이 갈래는 조회와 배달
+    //     **사이에** host 가 죽은 경우에만 열리고, 그 인터리브를 만드는 테스트는 없다(무커버 잔여).
+    let advertised: BTreeSet<&str> = item["errors"]
+        .as_array()
+        .expect("errors 는 배열")
+        .iter()
+        .map(|code| code.as_str().expect("코드는 문자열"))
+        .collect();
+    let produced: BTreeSet<&str> = [
+        ErrorCode::Internal,
+        ErrorCode::Timeout,
+        ErrorCode::Unsupported,
+        ErrorCode::RequestIdConflict,
+    ]
+    .iter()
+    .map(|code| code.as_str())
+    .collect();
+    assert_eq!(
+        advertised, produced,
+        "광고와 실제가 갈렸다 — 남으면 안 도는 분기가 생기고, 빠지면 답이 광고 밖으로 나간다"
+    );
+}
+
+/// ★설명 없는 항목은 등록하지 않는다★ — 이름만 오른 명령은 발견해도 인자를 채울 재료가 없어 부를 수 없다
+/// (등록에 모양을 동봉한 이유가 그 왕복을 없애는 것이다 — ADR-0156).
+#[tokio::test]
+async fn a_reported_command_without_a_summary_is_left_out() {
+    let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
+    let outcome = bridge.report(
+        MAIN_WINDOW_LABEL,
+        vec![ViewCommandDecl {
+            name: "theme.set".to_string(),
+            help: ViewCommandHelp {
+                summary: "   ".to_string(),
+                effect: Some(ViewEffect::Write),
+                args: BTreeMap::new(),
+                required: Vec::new(),
+            },
+        }],
+    );
+
+    assert_eq!(outcome.refused, vec!["theme.set".to_string()]);
+    assert!(outcome.accepted.is_empty());
 }
 
 // ── (B) 결말 출구가 연결 수명을 붙들지 않는다 ────────────────────────────────

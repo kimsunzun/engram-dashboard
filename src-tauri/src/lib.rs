@@ -4,6 +4,8 @@ pub mod layout;
 pub mod output_channel;
 pub mod output_router;
 pub mod ui_settings;
+// ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
+pub mod view_commands;
 // 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다.
 pub use engram_dashboard_discovery as discovery;
@@ -89,6 +91,16 @@ pub fn run() {
             let labels = std::sync::Arc::new(crate::commands::popout::PopupCounter::default());
             app.manage(labels.clone());
 
+            // ── 웹뷰 몫 명령의 다리(ADR-0155, TRD §6 Step 4) ─────────────────────────────
+            // ★DaemonClient 보다 먼저 만든다★ — 표를 꽂을 때 함께 넘겨야 하고(등록 패킷이 두 층을 한 방에
+            //   싣는다), 부팅 보고를 받는 invoke 핸들러도 같은 실물을 봐야 한다. 같은 Arc 를 양쪽에 준다.
+            let view_commands = std::sync::Arc::new(crate::view_commands::ViewCommandBridge::new(
+                std::sync::Arc::new(crate::view_commands::TauriViewDispatch(app.handle().clone())),
+                // 설정이 숨긴 창(오늘 = agent-tree)은 마지막 수단 목적지에서 뺀다 — 사유는 그 함수 doc.
+                crate::view_commands::hidden_window_labels(app.handle()),
+            ));
+            app.manage(view_commands.clone());
+
             // ── DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
             // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
             // Handle::current() 대신 전용 런타임 — DaemonClient::new_real_with_owned_runtime).
@@ -119,6 +131,7 @@ pub fn run() {
                                 ),
                             ),
                             crate::layout::commands::CATALOG_VERSION,
+                            view_commands.clone(),
                         ),
                         // LayoutState 는 빌더에서 manage 되므로(위 ADR-0102) 여기 닿지 않는다 — 닿았다면 그
                         //   pre-build 등록이 사라진 것이라 조용히 넘기지 않는다.
@@ -220,6 +233,9 @@ pub fn run() {
             commands::resolve_spatial,
             // 부팅 조회 — 미는 쪽(`ui.refresh`)은 명령 표에 있다(`commands/settings.rs` 「읽는 자리가 둘인 이유」).
             commands::get_ui_settings,
+            // 웹뷰 몫 명령(ADR-0155) — 부팅 보고와 결말 회수 한 쌍(`commands/view_bus.rs`).
+            commands::report_view_commands,
+            commands::report_command_outcome,
             commands::agent_spawn,
             commands::agent_kill,
             commands::agent_interrupt,
