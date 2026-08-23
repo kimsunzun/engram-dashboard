@@ -30,6 +30,15 @@ html, body, #root {
   background: var(--bg, #0a0a0a);
 }
 
+/* allotment/dist/style.css 는 sash 색을 자기 :root 에 하드코딩한다(--separator-border rgba(128,128,128,.35),
+   --focus-border #007fd4 = VS Code blue) — 앱 테마와 무관해 data-theme 스왑을 따라오지 않는다.
+   ★html:root 인 이유★: main.tsx 가 index.css 를 먼저, allotment CSS 를 나중에 import 해 번들에서 allotment
+   규칙이 뒤에 온다 — 같은 :root 로는 later-wins 로 진다. type+pseudo(0,1,1) 로 올려 순서와 무관하게 이긴다. */
+html:root {
+  --separator-border: var(--border);
+  --focus-border: var(--accent);
+}
+
 /* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).
    xterm 은 자체 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서 같은 theme.css
    토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은 theme 마다

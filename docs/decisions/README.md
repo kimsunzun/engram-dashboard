@@ -109,11 +109,11 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0059](0059-spawn-into-slotnone-탭-첫-빈-슬롯-스캔-leftmost-root-only-거부-없으면-noemptyslot.md) | spawn_into slot=None = 탭 첫 빈 슬롯 스캔 (leftmost-root-only 거부 — 없으면 NoEmptySlot) | 확정 |
 | [0060](0060-슬롯-콘텐츠-모델-타입드-유니온slotcontent-enum-view-type-레지스트리p2urip3-거부.md) | 슬롯 콘텐츠 모델 = 타입드 유니온(SlotContent enum) — view-type 레지스트리(P2)·URI(P3) 거부 | 확정 |
 | [0061](0061-프리셋-영속-데몬-소유-presetsjson-프로필-패턴-미러.md) | 프리셋 영속 = 데몬 소유 (presets.json, 프로필 패턴 미러) | 확정 |
-| [0062](0062-agentlist-mvp-상태-표현-5-glyph-어휘-현-백엔드-3-state-매핑.md) | AgentList MVP 상태 표현 = 5-glyph 어휘 / 현 백엔드 3-state 매핑 | 확정 |
+| [0062](0062-agentlist-mvp-상태-표현-5-glyph-어휘-현-백엔드-3-state-매핑.md) | AgentList MVP 상태 표현 = 5-glyph 어휘 / 현 백엔드 3-state 매핑 | 확정 (부분 폐기 by ADR-0168: 상태 표시를 문자에서 아이콘으로 교체) |
 | [0063](0063-슬롯-콘텐츠-배치-제어표면-set-slot-content-제네릭-command-부팅-기본-agentlistempty-분할-고정-사이드패널-제거.md) | 슬롯 콘텐츠 배치 제어표면 = set_slot_content 제네릭 command + 부팅 기본 = AgentList·Empty 분할 (고정 사이드패널 제거) | 확정 (부분 폐기 by ADR-0140: 부팅 기본 레이아웃 방향 어휘) |
 | [0064](0064-슬롯-컨텍스트-메뉴-단일-기여-api-공통-target별-콘텐츠-co-location-등록-일원화-command-단일소스.md) | 슬롯 컨텍스트 메뉴 = 단일 기여 API (공통 target=별 + 콘텐츠 co-location + 등록 일원화, command 단일소스) | 확정 (부분 폐기 by ADR-0065: descriptor 스키마 확장: hideOn 제외조건 + children 1단 서브메뉴 (when-DSL 연기를 hideOn으로 부분 실현) / ADR-0140: 분할 command id) |
 | [0065](0065-슬롯-메뉴-descriptor-확장-hideon-제외조건-children-1단-서브메뉴-빈-슬롯-트림-콘텐츠-채움-접기.md) | 슬롯 메뉴 descriptor 확장 — hideOn 제외조건 + children 1단 서브메뉴 (빈-슬롯 트림 + 콘텐츠-채움 접기) | 확정 |
-| [0066](0066-슬롯-포커스배치-제어-표면-click-to-focus-focus-then-place-slot-geometry-노출-5-llm-제어.md) | 슬롯 포커스·배치 제어 표면 — click-to-focus + focus-then-place + slot geometry 노출 (§5 LLM 제어) | 확정 (부분 폐기 by ADR-0067: 결정 2(focus-then-place 배치) + 결정 5(크로스-윈도우 place 타깃) → 우클릭 컨텍스트 메뉴 배치로 대체 / ADR-0068: 결정 3: LLM 공간 타깃 = geometry {x,y,w,h} 좌표 노출 우선 → 논리 도면 기반 방향/이웃/순서 핸들 우선으로 개정 (좌표계·실측 픽셀 보류)) |
+| [0066](0066-슬롯-포커스배치-제어-표면-click-to-focus-focus-then-place-slot-geometry-노출-5-llm-제어.md) | 슬롯 포커스·배치 제어 표면 — click-to-focus + focus-then-place + slot geometry 노출 (§5 LLM 제어) | 확정 (부분 폐기 by ADR-0067: 결정 2(focus-then-place 배치) + 결정 5(크로스-윈도우 place 타깃) → 우클릭 컨텍스트 메뉴 배치로 대체 / ADR-0068: 결정 3: LLM 공간 타깃 = geometry {x,y,w,h} 좌표 노출 우선 → 논리 도면 기반 방향/이웃/순서 핸들 우선으로 개정 (좌표계·실측 픽셀 보류) / ADR-0168: 포커스 링 강도 40퍼센트로 하향) |
 | [0067](0067-슬롯-콘텐츠-배치-우클릭-컨텍스트-메뉴-2경로-검색-팝업-focus-then-place-대체.md) | 슬롯 콘텐츠 배치 = 우클릭 컨텍스트 메뉴 2경로 + 검색 팝업 (focus-then-place 대체) | 확정 |
 | [0068](0068-llm-공간-타깃-논리-도면viewmanager-방향이웃순서-핸들-우선-geometry-좌표-노출-보류.md) | LLM 공간 타깃 = 논리 도면(ViewManager) 방향·이웃·순서 핸들 우선 (geometry 좌표 노출 보류) | 확정 |
 | [0069](0069-ui-문자열-중앙화-i18n-ready-strings-모듈-완전-i18n-보류.md) | UI 문자열 중앙화 — i18n-ready strings 모듈 (완전 i18n 보류) | 확정 |
@@ -122,7 +122,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0072](0072-에이전트-트리-계층-구조백엔드-parent-id-reparentprofile-react-arborist-부활-1단-중첩부모삭제루트승격상태-글리프.md) | 에이전트 트리 = 계층 구조(백엔드 parent_id + ReparentProfile) + react-arborist 부활 — 1단 중첩·부모삭제=루트승격·상태 글리프 | 확정 |
 | [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 |
 | [0074](0074-json-stream-json-모드-resume-활성화-adr0044-후속-완료-통제-sid-adr0008-재사용.md) | json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용) | 확정 |
-| [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 |
+| [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
 | [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효) |
 | [0077](0077-수동-활성화도-resume-조기종료-시-fresh-fallback-공유-adr-0076-정련.md) | 수동 활성화도 resume 조기종료 시 fresh-fallback 공유 — ADR-0076 정련 | 폐기 (Superseded by ADR-0082) |
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
@@ -215,3 +215,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0165](0165-슬롯-부재-표시는-종료-아이콘-하나로-통일하고-막을-세-슬롯이-공유한다.md) | 슬롯 부재 표시는 종료 아이콘 하나로 통일하고 막을 세 슬롯이 공유한다 | 확정 |
 | [0166](0166-ui-설정은-디스크-파일이-정본이고-uirefresh-가-다시-읽는다.md) | UI 설정은 디스크 파일이 정본이고 ui.refresh 가 다시 읽는다 | 확정 |
 | [0167](0167-창별-테마는-설정-파일에-담고-죽은-창의-항목은-부팅-때-쓸어낸다.md) | 창별 테마는 설정 파일에 담고 죽은 창의 항목은 부팅 때 쓸어낸다 | 확정 |
+| [0168](0168-프레임-시각-정리-포커스-링-하향-상태-글리프-아이콘화-ui-폰트-sans-전환.md) | 프레임 시각 정리 — 포커스 링 하향, 상태 글리프 아이콘화, UI 폰트 sans 전환 | 확정 |

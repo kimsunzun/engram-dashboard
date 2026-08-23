@@ -1,35 +1,53 @@
-// ★공유 모듈로 분리★: 원래 AgentList.tsx 에 있던 두 순수 함수를 여기로 옮겼다. RichSlot 헤더가 같은
-//   상태 글리프를 그리는데, 무거운 AgentList 모듈(react-arborist·트리 로직 전부) 전이 의존을 피하려
-//   순수 헬퍼만 이 경량 모듈에 둔다. AgentList 는 이 값을 re-export 해 기존 importer/test 를 그대로 유지한다.
+// 에이전트 상태 → 아이콘·색 매핑. ADR-0062 §38 이 요구하는 것은 **headless 전 분기 고정**이고, 이 파일은
+//   그것만 지킨다 — react-arborist 를 끌고 오는 AgentList 없이 매핑을 단독 테스트할 수 있다.
+//   ★"외부 의존 0"은 아니다★: lucide 아이콘 컴포넌트를 값으로 돌려주므로 그 import 는 불가피하다(ADR-0168 로
+//   문자 글리프에서 아이콘으로 교체되며 생긴 변화). JSX 는 여기 두지 않는다(그리는 쪽 = AgentList).
+
+import { Circle, Square, X, type LucideIcon } from 'lucide-react'
+
+/** 렌더러가 그대로 svg 에 넘기는 한 벌. */
+export type StatusGlyphIcon = {
+  Icon: LucideIcon
+  /** lucide 기본은 `none`(외곽선) — 채움 여부가 Running(채운 원)과 Reserved(빈 원)를 가르는 *모양* 차이다. */
+  fill: 'currentColor' | 'none'
+  /** DOM 관측 표면(테스트·CDP·LLM 셀렉터)에 나가는 안정 토큰. 아이콘 컴포넌트는 직렬화되지 않는다. */
+  shape: 'filled-circle' | 'square' | 'x' | 'circle'
+}
 
 /**
- * 색이 아닌 모양이 상태를 담아 e-ink 에서도 구분된다.
+ * 색이 아닌 **모양**이 상태를 담아 e-ink 에서도 구분된다.
  *
  * 매핑(ADR-0062):
- *   - Running               → ● (작업중)
- *   - Exiting/Exited/Killed  → ◻ (멈춤 — Exiting 은 terminal 직전 전이)
- *   - Failed                → ✗ (에러)
- *   - Reserved(프론트 합성)   → ○ (유휴/미spawn 깡통)
- *   - 그 외(미지 status)      → ○ (안전 degrade — 빈 칸 방지)
+ *   - Running                → 채운 원 (작업중)
+ *   - Exiting/Exited/Killed  → 사각    (멈춤 — Exiting 은 terminal 직전 전이)
+ *   - Failed                 → ✗ 모양  (에러)
+ *   - Reserved(프론트 합성)   → 빈 원   (유휴/미spawn 깡통)
+ *   - 그 외(미지 status)      → 빈 원   (안전 degrade — 빈 칸 방지)
  *
- * ★◐(입력대기)는 어휘로만 존재 — 절대 점등하지 않는다★: 백엔드가 "입력 대기" 신호를 내지 않으므로
- *   이 함수는 ◐ 를 반환하는 분기가 없다(ADR-0062 — 미점등은 결함이 아니라 의도). 백엔드가 신호를 낼 때
- *   이 함수에 분기를 추가하는 것이 정규 경로.
+ * ★모양이 겹치는 분기를 만들지 말 것★: 색만 다르고 모양이 같은 두 상태는 e-ink 에서 구분이 사라진다
+ *   (e-ink 블록이 `--status-running` 을 `var(--text-muted)` 로 중립화한다 — `statusGlyphColor` 주석).
+ *
+ * ★◐(입력대기)에 해당하는 반쯤 채운 모양은 절대 반환하지 않는다★: 백엔드가 "입력 대기" 신호를 내지
+ *   않으므로 그 분기가 없다(ADR-0062 — 미점등은 결함이 아니라 의도). 백엔드가 신호를 낼 때 여기 분기를
+ *   추가하는 것이 정규 경로.
+ *
+ * ★텍스트 글리프(`● ◻ ✗ ○`)로 되돌리지 말 것★: UI 폰트가 monospace 에서 Segoe UI 로 바뀐 뒤 글자마다
+ *   크기·굵기·baseline 이 달라 행 라벨과 세로 정렬이 어긋났다. 아이콘은 폰트와 무관하게 12px 정사각이다.
  */
-export function statusGlyph(status: string): string {
+export function statusGlyphIcon(status: string): StatusGlyphIcon {
   switch (status) {
     case 'Running':
-      return '●'
+      return { Icon: Circle, fill: 'currentColor', shape: 'filled-circle' }
     case 'Exiting':
     case 'Exited':
     case 'Killed':
-      return '◻'
+      return { Icon: Square, fill: 'none', shape: 'square' }
     case 'Failed':
-      return '✗'
+      return { Icon: X, fill: 'none', shape: 'x' }
     case 'Reserved':
-      return '○'
+      return { Icon: Circle, fill: 'none', shape: 'circle' }
     default:
-      return '○'
+      return { Icon: Circle, fill: 'none', shape: 'circle' }
   }
 }
 
