@@ -174,7 +174,7 @@ npm install
 scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 서버 + 앱 실행까지 한 번에
 ```
 
-**실행은 `scripts/`의 런처로 합니다**(Windows). 앱을 셸에서 직접 띄우지 않습니다 — 터미널의 자손으로 붙으면 앱 출력이 터미널로 거슬러 올라가고, 그 조합에서 터미널이 반복 크래시해 앱까지 함께 내려갑니다(실측). 런처는 작업 스케줄러로 앱을 프로세스 트리 밖에 띄우고 출력을 파일로만 보냅니다.
+**실행은 `scripts/`의 런처로 합니다**(Windows). 앱을 셸에서 직접 띄우지 않습니다 — 그 호출이 앱 수명에 매달리고 앱 출력이 셸로 계속 거슬러 올라옵니다. 런처는 작업 스케줄러로 앱을 프로세스 트리 밖에 띄우고 출력을 파일로만 보내므로, 로그에서 필요한 줄만 읽으면 됩니다.
 
 | 런처 | 하는 일 |
 |---|---|
@@ -184,10 +184,12 @@ scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 
 | `scripts\rebuild-run-release.bat` | 릴리즈 새로 빌드 + 실행 |
 
 ```bash
+# 빌드·테스트도 앱과 같은 규칙 — 셸에서 직접 돌리지 않고 scripts/run-detached.ps1 로 프로세스 트리 밖에서 돌리고 출력은 파일로만 받습니다(빌드 로그 전체를 삼키지 않고 필요한 줄만 읽습니다).
+#   완료 판정 = 로그 마지막 줄의 `__EXIT=<코드>`(프로세스가 사라진 것으로 판정하지 않습니다). 규칙 = CLAUDE.md 「빌드·검증 명령」, 사용법 = scripts/run-detached.ps1 헤더
 # src-tauri만 제외(그 크레이트의 테스트 타깃이 Windows에서 크래시) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)
-# `-- --test-threads=4`도 빼지 말 것 — 근거·실측의 정본은 CLAUDE.md 「빌드·검증 명령」
-cargo test --workspace --exclude engram-dashboard -- --test-threads=4
-npm test
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace --exclude engram-dashboard" -WorkDir . -LogFile test.log
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "npm test" -WorkDir . -LogFile vitest.log
+#   ↑ vitest 는 `__EXIT` 가 안 붙습니다(자식이 래퍼보다 오래 삽니다) — 로그에 찍힌 vitest 자신의 pass/fail 요약으로 판정하세요.
 ```
 
 ## 문서

@@ -1,7 +1,7 @@
 # ADR-0051: 채팅 렌더 스타일(간격·폰트)을 LLM 제어 프론트 control surface로 노출 — Zustand+CSS변수+localStorage 영속
 
-- 상태: 확정 (2026-07-06, 근거: 사용자 결정 + Explore 조사 2건) · 부분 폐기 by ADR-0168 (LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장)
-- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0050(채팅 렌더 자체 구현) · `src/components/slot/StructuredTextView.tsx` · `src/components/slot/chat/chat.css` · `src/store/themeStore.ts`(계승 패턴) · `src/store/eventBus.ts`(window 핸들 노출) · step-log 2026-07-06 · Amended by ADR-0168 (LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장)
+- 상태: 확정 (2026-07-06, 근거: 사용자 결정 + Explore 조사 2건) · 부분 폐기 by ADR-0169 (LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장)
+- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0050(채팅 렌더 자체 구현) · `src/components/slot/StructuredTextView.tsx` · `src/components/slot/chat/chat.css` · `src/store/themeStore.ts`(계승 패턴) · `src/store/eventBus.ts`(window 핸들 노출) · step-log 2026-07-06 · Amended by ADR-0169 (LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장)
 
 ## 맥락
 ADR-0050에서 채팅 렌더를 자체 구현하고 Claude Code VSCode 확장 룩에 맞춰 시각 refine 중이다. 사용자가 우리 렌더와 확장을 나란히 비교해 "줄 간격이 좁고 전체적으로 산만하다"고 지적했다 — 핵심 원인은 ① 행 간 수직 간격 부족 ② 유저 메시지가 대화를 덩어리로 끊어주지 못함 ③ dot-rail 연결선 clean-ends 미처리다.

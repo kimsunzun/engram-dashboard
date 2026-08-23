@@ -1,7 +1,7 @@
 # ADR-0055: command registry 구현 방향 — 프론트 레지스트리 + handler 라우팅(기존 invoke 재사용), 골격 먼저·점진 이관 (ADR-0022 구체화)
 
-- 상태: 확정 (2026-07-09, 근거: 사용자와 설계 합의 — 이 세션 대화에서 forks 해소) · 부분 폐기 by ADR-0168 (결정 3 의 __engramLayout 유지 조항 (agent invoke 는 존속))
-- 관련: ADR-0022(통합 command registry 방향 — 이 ADR이 그 미해결 forks를 구체화) · CLAUDE.md §5(LLM-우선 제어) · ADR-0020(단일 dispatch) · ADR-0011(agentClient 제어 표면) · `docs/process/B-wezterm-tabs/PRD.md`(탭 = 첫 어댑터) · step-log 2026-07-09 · Amended by ADR-0168 (결정 3 의 __engramLayout 유지 조항 (agent invoke 는 존속))
+- 상태: 확정 (2026-07-09, 근거: 사용자와 설계 합의 — 이 세션 대화에서 forks 해소) · 부분 폐기 by ADR-0169 (결정 3 의 __engramLayout 유지 조항 (agent invoke 는 존속))
+- 관련: ADR-0022(통합 command registry 방향 — 이 ADR이 그 미해결 forks를 구체화) · CLAUDE.md §5(LLM-우선 제어) · ADR-0020(단일 dispatch) · ADR-0011(agentClient 제어 표면) · `docs/process/B-wezterm-tabs/PRD.md`(탭 = 첫 어댑터) · step-log 2026-07-09 · Amended by ADR-0169 (결정 3 의 __engramLayout 유지 조항 (agent invoke 는 존속))
 
 ## 맥락
 ADR-0022가 "모든 동작 = id로 등록된 command, palette·키바인딩·LLM·메뉴는 소비자(파생)" 방향만 고정하고 구현 forks(레지스트리 위치·백엔드 미러·키바인딩 저장·when-context·enum vs registry)를 **미해결**로 남겼다. 이제 구현 착수 — 최소 골격을 확정해야 한다. 사용자 방침: **"전부 한꺼번에 커맨드로 갈아엎지 말고, 시스템(골격)을 갖추고 하나씩 이관."**

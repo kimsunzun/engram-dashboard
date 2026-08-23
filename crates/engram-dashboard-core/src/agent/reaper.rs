@@ -63,7 +63,12 @@ impl ReaperDeps {
         if removed.is_none() {
             return;
         }
-        drop(removed); // Arc<AgentSession> 폐기 — 여기서 transport/core 자원이 마지막으로 끊긴다.
+        // Arc<AgentSession> 폐기. ★"마지막" 참조라고 단정하지 않는다★: 이어받기 실패 관측
+        //   (`AgentManager::early_activation_verdict`)은 조기종료 창 동안 같은 Arc 를 들고 있으므로, 그
+        //   경로에선 실제 해제가 **그 관측자의 다음 폴링까지**(현 100ms 간격) 밀린다. 무해하다 —
+        //   terminal 전이는 pump 단독이고(ADR-0005) `JobObjectHandle::drop` 은 마지막 참조가 사라질 때
+        //   그대로 돈다. 즉 자식 프로세스는 이미 죽어 있고 미뤄지는 것은 핸들 회수뿐이다.
+        drop(removed);
 
         // 2.5. ★여기가 모든 terminal 의 단일 수렴점★ — 크래시·EOF·정상 exit·유저 kill 어떤 경로든
         //   이 지점을 지나므로 폐기 누락이 없다. epoch 검증 승자만 여기 오므로 stale terminal 이

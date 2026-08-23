@@ -31,6 +31,7 @@ use engram_dashboard_core::agent::types::{
     SubscribeOutcome,
 };
 
+use engram_dashboard_core::agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_core::agent::preset::Preset as CorePreset;
 use engram_dashboard_core::agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
@@ -42,8 +43,8 @@ use engram_dashboard_core::agent::types::{
 };
 
 use engram_dashboard_protocol::{
-    AgentCommand, AgentEvent, AgentInfo as WireAgentInfo, AgentProfile as WireProfile,
-    AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
+    AgentCommand, AgentEvent, AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
+    AgentProfile as WireProfile, AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
     OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
@@ -437,6 +438,16 @@ fn restart_policy_to_wire(p: CoreRestartPolicy) -> WireRestartPolicy {
     }
 }
 
+// ADR-0172
+fn failure_kind_to_wire(k: CoreFailureKind) -> WireFailureKind {
+    match k {
+        CoreFailureKind::NoConversationToResume => WireFailureKind::NoConversationToResume,
+        CoreFailureKind::SpawnFailed => WireFailureKind::SpawnFailed,
+        CoreFailureKind::EarlyExitAfterResume => WireFailureKind::EarlyExitAfterResume,
+        CoreFailureKind::Other => WireFailureKind::Other,
+    }
+}
+
 fn profile_to_wire(p: &CoreProfile) -> WireProfile {
     WireProfile {
         id: p.id,
@@ -454,6 +465,7 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
         restart_policy: restart_policy_to_wire(p.restart_policy),
         restart_count: p.restart_count,
         failed_reason: p.failed_reason.clone(),
+        last_failure: p.last_failure.map(failure_kind_to_wire),
         created_at: p.created_at,
         last_active: p.last_active,
         last_start_at: p.last_start_at,
@@ -758,11 +770,21 @@ impl ConnectionCore {
                 profile_id,
                 request_id,
             } => {
+                // ★`spawn_agent` 을 직접 부르지 않는다 — 활성화 입구는 하나여야 한다★: 그쪽은
+                //   「마지막 실패」를 기록·지우지 않고(ADR-0172) 재활성화 가드도 없어서, 이 동사로 띄운
+                //   에이전트만 조용히 옛 실패 표시를 들고 있었다. 제어 LLM 이 이 동사를 부를 수 있으므로
+                //   (tauri command + WS) 그 갈림은 「사람 클릭과 LLM 이 같은 핸들을 흔든다」를 깨뜨린다.
+                //   `SpawnProfile` 과 다른 점은 모드 유도가 없다는 것뿐이라(항상 Fresh) 그대로 유지한다.
+                // ADR-0172
                 let result = match manager.agent_snapshot(profile_id) {
-                    Some(profile) => manager
-                        .spawn_agent(&profile, SpawnMode::Fresh)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string()),
+                    Some(profile) => {
+                        let started = manager
+                            .activate_profile(&profile, SpawnMode::Fresh)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string());
+                        broadcast_profile_list(fanout, manager);
+                        started
+                    }
                     None => Err(format!("profile not found: {profile_id}")),
                 };
                 reply(sink, request_id, result);
@@ -948,13 +970,27 @@ impl ConnectionCore {
                     vec![],
                     false,
                 );
+                // ★이 갈래는 활성화가 아니라 **즉석 생성**이라 「마지막 실패」를 쓰지 않는다(ADR-0172)★:
+                //   방금 만든 uuid 라 지울 기록이 있을 수 없고, 저장된 항목을 깨우는 동사가 아니다.
+                //   ★그래서 남는 비대칭 하나는 알고 있다★: 명령 버스의 형제(`create_and_start`)는 만들고
+                //   띄우다 실패하면 기록한다. 이 동사를 그 모양으로 맞추려면 `activate_profile` 이 아직
+                //   등록되지 않은 프로필을 받아야 하는데 그건 그 함수의 전제(저장된 항목)를 바꾸는 일이라
+                //   별건이다 — 맞출 때 두 곳을 함께 본다.
                 match manager.spawn_agent(&profile, SpawnMode::Fresh) {
-                    Ok(info) => {
-                        let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
+                    // 방금 만든 uuid 라 moot(이미 떠 있음)이 나올 수 없다 — 그래도 결말을 가려 받는다.
+                    Ok(outcome) => match outcome.into_info() {
+                        Some(info) => {
+                            let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
+                                request_id,
+                                agent: agent_info_to_wire(&info),
+                            }));
+                        }
+                        None => reply(
+                            sink,
                             request_id,
-                            agent: agent_info_to_wire(&info),
-                        }));
-                    }
+                            Err("ad-hoc spawn produced no session".to_string()),
+                        ),
+                    },
                     Err(e) => reply(sink, request_id, Err(e.to_string())),
                 }
             }
@@ -1043,8 +1079,12 @@ impl ConnectionCore {
                 // ★모드 = 세션 존재 여부로 유도(ADR-0076)★: 사용자 결정 — "에이전트 활성화 = 기존 세션
                 //   이어받기, 새로 로드할 거면 새 에이전트를 만든다". 그래서 저장된 세션이 있으면 wire
                 //   `resume` 플래그(프론트는 false 로 보낸다)와 무관하게 **항상 Resume** 이다.
-                //   ★resume=true 는 존중★: 세션이 없어도 Resume 로 남긴다 — spawn_agent(Resume)가
-                //     ensure_session_id 로 최초 sid 를 발급하므로 안전하다. 즉 mode = resume-요청 OR 세션-존재.
+                //   ★resume=true 는 존중★: 세션이 없어도 Resume 로 남긴다 — `spawn_agent(Resume)` 가
+                //     `ensure_session_id` 로 최초 sid 를 발급하므로 **뜨기는 한다**. 즉 mode = resume-요청
+                //     OR 세션-존재.
+                //   ★단 "안전하다" 고 읽지 말 것★: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude
+                //     는 즉사하고, 그 결말은 이제 그 항목의 「마지막 실패」로 **기록된다**(ADR-0172). 옛
+                //     문구는 그 기록이 없던 시절의 것이다.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         let mode = if resume || profile.claude_session_id.is_some() {
@@ -1052,7 +1092,15 @@ impl ConnectionCore {
                         } else {
                             SpawnMode::Fresh
                         };
-                        match manager.activate_profile(&profile, mode) {
+                        let started = manager.activate_profile(&profile, mode);
+                        // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0172/0162)★: 활성화는 그
+                        //   항목의 「마지막 실패」를 **성공이면 지우고 실패면 기록**하는데, 그 축은
+                        //   프로필 목록으로만 흐른다(`Spawned` 이벤트·산 명부에는 없다). 성공 쪽을
+                        //   빼면 지워진 실패가 화면에 남고, 실패 쪽을 빼면 기록이 화면에 안 뜬다.
+                        //   ★같은 일을 명령 버스 쪽 `agent.spawn` 도 해야 한다★ — 두 핸들이 같은 것을
+                        //   흔들어야 한다(CLAUDE.md 「LLM-우선 제어」). 그쪽 짝은
+                        //   `core::agent::commands::{wake_existing, create_and_start}`.
+                        match started {
                             Ok(info) => {
                                 let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
                                     request_id,
@@ -1061,6 +1109,7 @@ impl ConnectionCore {
                             }
                             Err(e) => reply(sink, request_id, Err(e.to_string())),
                         }
+                        broadcast_profile_list(fanout, manager);
                     }
                     None => reply(
                         sink,
@@ -1748,11 +1797,24 @@ mod tests {
     }
 
     fn test_core() -> (ConnectionCore, watch::Receiver<bool>) {
-        test_core_with(CommandDeliveries::new())
+        let (core, rx, _fanout) = test_core_with(CommandDeliveries::new());
+        (core, rx)
+    }
+
+    /// 팬아웃 기록을 함께 돌려주는 갈래 — 브로드캐스트를 재는 시험용.
+    fn test_core_recording() -> (ConnectionCore, Arc<crate::test_doubles::RecordingFanout>) {
+        let (core, _rx, fanout) = test_core_with(CommandDeliveries::new());
+        (core, fanout)
     }
 
     /// 상관 표를 밖에서 꽂는 갈래 — 마감 갈래를 재는 시험이 **손으로 미는 시계**를 넣어야 한다.
-    fn test_core_with(deliveries: CommandDeliveries) -> (ConnectionCore, watch::Receiver<bool>) {
+    fn test_core_with(
+        deliveries: CommandDeliveries,
+    ) -> (
+        ConnectionCore,
+        watch::Receiver<bool>,
+        Arc<crate::test_doubles::RecordingFanout>,
+    ) {
         test_core_built(deliveries, &|_| {
             Arc::new(crate::command_delivery::NoLocalCommands)
         })
@@ -1763,14 +1825,16 @@ mod tests {
     /// 표는 운영과 같은 조립기(`control::commands::make_daemon_table`)로 만든다 — 여기서 손으로 표를
     /// 꾸미면 그 사본이 운영과 조용히 어긋난다. 매니저는 디스크도 PTY 도 없는 이 하네스의 것을 그대로 쓴다.
     fn test_core_with_own_agent_table() -> (ConnectionCore, watch::Receiver<bool>) {
-        test_core_built(CommandDeliveries::new(), &|manager| {
+        // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다 — 재는 쪽은 `test_core_recording`.
+        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &|manager| {
             let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
             slot.set(Arc::new(crate::control::commands::make_daemon_table(
                 manager.clone(),
                 Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
             )));
             Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
-        })
+        });
+        (core, rx)
     }
 
     /// ★표를 **나중에** 채우는 조립★ — 슬롯 주입은 연결 공장 조립보다 늦을 수 있고, 그 창에 도착한 등록은
@@ -1782,7 +1846,8 @@ mod tests {
     ) {
         let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
         let for_locals = slot.clone();
-        let (core, rx) = test_core_built(CommandDeliveries::new(), &move |_| {
+        // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다(위 형제와 같은 이유).
+        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &move |_| {
             Arc::new(crate::control::commands::DaemonLocalCommands::new(
                 for_locals.clone(),
             ))
@@ -1790,10 +1855,19 @@ mod tests {
         (core, rx, slot)
     }
 
+    /// 위 세 갈래가 공유하는 조립 본체 — 갈리는 것은 자기 몫 `agent.*` 표를 꽂는 방식뿐이다.
+    ///
+    /// ★팬아웃 기록을 세 번째 값으로 함께 돌려준다★: 브로드캐스트가 실제로 나갔는지 재는 시험
+    ///   (`test_core_recording`)이 그 핸들을 여기 말고 얻을 데가 없다 — 조립기가 안에서 만들어 코어에
+    ///   넘기고 끝내면 밖에서는 같은 것을 다시 쥘 수 없다.
     fn test_core_built(
         deliveries: CommandDeliveries,
         locals: &dyn Fn(&Arc<AgentManager>) -> Arc<dyn LocalCommands>,
-    ) -> (ConnectionCore, watch::Receiver<bool>) {
+    ) -> (
+        ConnectionCore,
+        watch::Receiver<bool>,
+        Arc<crate::test_doubles::RecordingFanout>,
+    ) {
         use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
@@ -1824,7 +1898,8 @@ mod tests {
             }
         }
 
-        let fanout: Arc<dyn FrameFanout> = Arc::new(crate::test_doubles::RecordingFanout::new());
+        let recording = Arc::new(crate::test_doubles::RecordingFanout::new());
+        let fanout: Arc<dyn FrameFanout> = recording.clone();
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore::default());
         let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
         let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone()));
@@ -1849,7 +1924,57 @@ mod tests {
             locals(&manager_for_locals),
             shutdown_tx,
         );
-        (core, shutdown_rx)
+        (core, shutdown_rx, recording)
+    }
+
+    /// ★사람 클릭(WS)과 LLM(명령 버스)이 같은 것을 흔든다★ — 그 주장의 WS 절반.
+    ///
+    /// 활성화는 그 항목의 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0172) 그 축은 프로필
+    /// 목록 broadcast 로만 흐른다. 이 통지가 빠지면 WS 로 띄운 결과만 화면에 안 닿고, 명령 버스로는
+    /// 닿아 두 핸들이 갈린다. 버스 절반은 `core::agent::commands` 의 두 시험이 이미 못박고 있다.
+    ///
+    /// 실패 갈래로 잰다 — 실 claude 없이 결정적이고(없는 실행파일), 성공 갈래보다 통지가 더 절실하다
+    /// (그쪽은 화면에 남는 것이 이 통지가 나른 값뿐이다).
+    // ADR-0172
+    #[tokio::test]
+    async fn ws_spawn_profile_announces_the_profile_list_even_when_activation_fails() {
+        let (core, fanout) = test_core_recording();
+        let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
+            "ws-parity".into(),
+            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                // 실재하지 않는 실행파일 — 활성화가 결정적으로 실패한다.
+                program: format!("engram-not-a-real-program-{}.exe", uuid::Uuid::new_v4()),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        let created = core.manager.create_agent(profile).expect("등록");
+        let before = fanout.texts().len();
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::SpawnProfile {
+                profile_id: created.id,
+                resume: false,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        let announced = fanout.texts()[before..]
+            .iter()
+            .any(|t| t.contains("ProfileListUpdated"));
+        assert!(
+            announced,
+            "활성화 결말이 프로필 목록으로 나가야 한다 — 없으면 WS 로 띄운 실패가 화면에 안 뜬다: {:?}",
+            fanout.texts()
+        );
     }
 
     fn test_core_with_control_registry() -> (ConnectionCore, Arc<ControlRegistry>) {
@@ -1875,7 +2000,9 @@ mod tests {
         let info = core
             .manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("spawn");
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
         let agent_id = info.id;
         let mut waited = 0;
         loop {
@@ -1978,7 +2105,9 @@ mod tests {
         let info = core
             .manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("spawn");
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
         let agent_id = info.id;
 
         let (tx, _conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
@@ -2872,7 +3001,7 @@ mod tests {
         let mut seen = None;
         capture_logs(|| {
             seen = Some(on_current_thread(async {
-                let (core, _rx) = test_core_with(deliveries.clone());
+                let (core, _rx, _fanout) = test_core_with(deliveries.clone());
                 let (owner, mut owner_inbox) = attached_with_inbox(&core, 1);
                 let (caller, mut caller_inbox) = attached_with_inbox(&core, 2);
                 let (tx, _spill) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);

@@ -42,6 +42,7 @@ function profile(
     restart_policy: 'Never',
     restart_count: 0,
     failed_reason: null,
+    last_failure: null,
     created_at: 0,
     last_active: 0,
     last_start_at: null,

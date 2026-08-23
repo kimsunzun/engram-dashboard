@@ -1283,6 +1283,7 @@ mod tests {
             restart_policy: RestartPolicy::Always,
             restart_count: 0,
             failed_reason: None,
+            last_failure: None,
             created_at: 1,
             last_active: 1,
             last_start_at: None,
@@ -1315,6 +1316,135 @@ mod tests {
         }"#;
         let p: WireProfile = serde_json::from_str(legacy).expect("parent_id 없는 wire 역직렬화");
         assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
+        assert_eq!(
+            p.last_failure, None,
+            "last_failure 부재 → None(ADR-0172 additive — 옛 wire 가 그대로 통과해야 버전 bump 가 없다)"
+        );
+    }
+
+    /// ★어휘가 늘 때 옛 피어를 지키는 절반★: 모르는 종류 문자열 하나가 `AgentProfile` **메시지 전체**의
+    /// 디코드를 깨면, 그 프로필이 화면에서 통째로 사라진다(필드만 비는 게 아니다). 프론트 표의
+    /// `table[kind] ?? Other` 와 짝을 이룬다.
+    // ADR-0172
+    #[test]
+    fn an_unknown_failure_kind_is_absorbed_instead_of_failing_the_whole_profile() {
+        use crate::domain::{AgentFailureKind, AgentProfile as WireProfile};
+
+        let with_future_kind = r#"{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "future",
+            "command": { "kind": "Shell", "program": "cmd.exe", "args": [] },
+            "cwd": "C:/proj",
+            "env": [],
+            "claude_session_id": null,
+            "old_session_ids": [],
+            "epoch": 0,
+            "auto_restore": true,
+            "restart_policy": "Always",
+            "restart_count": 0,
+            "failed_reason": null,
+            "last_failure": "SomeKindFromANewerDaemon",
+            "created_at": 1,
+            "last_active": 1,
+            "last_start_at": null
+        }"#;
+        let p: WireProfile = serde_json::from_str(with_future_kind)
+            .expect("모르는 종류가 메시지를 깨뜨리면 안 된다");
+        assert_eq!(p.name, "future", "프로필의 나머지 칸이 온전히 남는다");
+        assert_eq!(
+            p.last_failure,
+            Some(AgentFailureKind::Other),
+            "모르는 종류는 「그 밖」으로 흡수된다(재시도 가능 = fail-open)"
+        );
+
+        // 아는 어휘는 그대로 통과한다(흡수가 전부를 뭉개지 않는다).
+        let known = with_future_kind.replace("SomeKindFromANewerDaemon", "NoConversationToResume");
+        let p: WireProfile = serde_json::from_str(&known).expect("아는 종류");
+        assert_eq!(
+            p.last_failure,
+            Some(AgentFailureKind::NoConversationToResume)
+        );
+
+        // ★흡수는 **모르는 문자열** 에만 열려 있다★: 형식 위반까지 삼키면 망가진 값이 `Other` 로 둔갑해
+        //   실패가 없는 항목에 실패 문구가 뜬다(흡수가 아니라 날조).
+        for bad in ["42", "[]", "{}", "true"] {
+            let broken = with_future_kind.replace("\"SomeKindFromANewerDaemon\"", bad);
+            assert!(
+                serde_json::from_str::<WireProfile>(&broken).is_err(),
+                "비-문자열 {bad} 은 흡수 대상이 아니다"
+            );
+        }
+    }
+
+    /// ★wire 어휘와 **생성된 TS 유니온**이 같아야 한다★: 프론트가 받는 타입은 ts-rs 가 만들고, 실제
+    /// JSON 은 `as_wire_str` 가 만든다. 둘이 갈리면 프론트 표가 모든 값을 「그 밖」으로 흡수해 문구가
+    /// 조용히 하나로 뭉개진다.
+    ///
+    /// ★테스트 안에 어휘를 다시 적지 않는다(그러면 아무것도 안 재는 테스트가 된다)★: 예전 형태는 튜플에
+    ///   손으로 쓴 문자열을 비교했는데, 변형을 `Other`→`Unknown` 으로 바꾸고 arm 이 `"Other"` 를 계속
+    ///   내보내도 **통과**했다 — 정확히 이 doc 이 막는다고 적힌 사고다. 이제 한쪽은 생성물 파일에서,
+    ///   다른 쪽은 매크로가 `stringify!` 로 만든 목록에서 온다.
+    // ADR-0172
+    #[test]
+    fn failure_kind_vocabulary_matches_the_generated_ts_union() {
+        use crate::domain::AgentFailureKind;
+
+        // 생성물에서 유니온 멤버를 뽑는다(ts-rs 가 변형 이름으로 만든 쪽).
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings/AgentFailureKind.ts");
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("생성된 바인딩을 읽어야 한다({path}): {e}"));
+        let decl = src
+            .lines()
+            .find(|l| l.starts_with("export type AgentFailureKind"))
+            .expect("유니온 선언 줄");
+        // `export type X = "A" | "B";` → 홀수 조각이 멤버다.
+        let ts_members: Vec<&str> = decl.split('"').skip(1).step_by(2).collect();
+
+        let wire_names: Vec<&str> = AgentFailureKind::wire_names().collect();
+        assert_eq!(
+            ts_members, wire_names,
+            "TS 유니온과 wire 어휘가 갈렸다 — 프론트가 받는 값이 표에 없어 전부 「그 밖」으로 접힌다"
+        );
+
+        // 그리고 그 어휘가 실제로 왕복한다(직렬화 문자열 = 그 이름, 역직렬화 = 그 변형).
+        for (kind, name) in AgentFailureKind::all() {
+            assert_eq!(serde_json::to_string(kind).unwrap(), format!("\"{name}\""));
+            assert_eq!(
+                &serde_json::from_str::<AgentFailureKind>(&format!("\"{name}\"")).unwrap(),
+                kind,
+                "왕복이 성립해야 한다"
+            );
+        }
+    }
+
+    /// ★이스케이프가 든 값도 디코드돼야 한다★: 빌린 `&str` 로 받던 시절엔 `"Other"` 하나로
+    /// `AgentProfile` **메시지 전체**가 깨졌고, src-tauri 수신부는 그 실패를 조용히 버려 증상이
+    /// "트리가 영영 안 바뀐다" 뿐이었다.
+    // ADR-0172
+    #[test]
+    fn an_escaped_failure_kind_string_still_decodes() {
+        use crate::domain::AgentFailureKind;
+
+        // `O` = 'O' — 값은 같고 인코딩만 이스케이프다.
+        let escaped = r#""Other""#;
+        assert_eq!(
+            serde_json::from_str::<AgentFailureKind>(escaped).expect("이스케이프도 디코드된다"),
+            AgentFailureKind::Other
+        );
+
+        // 모르는 어휘 + 이스케이프 조합도 흡수로 떨어진다(오류가 아니다).
+        let unknown_escaped = r#""SomeKindFromANewerDaemon""#;
+        assert_eq!(
+            serde_json::from_str::<AgentFailureKind>(unknown_escaped).expect("흡수"),
+            AgentFailureKind::Other
+        );
+
+        // 소유 값 경로(`from_value`)도 같다 — 빌린 `&str` 은 여기서도 실패했다.
+        let owned = serde_json::Value::String("SpawnFailed".to_string());
+        assert_eq!(
+            serde_json::from_value::<AgentFailureKind>(owned).expect("from_value 경로"),
+            AgentFailureKind::SpawnFailed
+        );
     }
 
     // ── 명령 버스 wire 계약(ADR-0155 결정 3 의 2단계) ─────────────────────────────────

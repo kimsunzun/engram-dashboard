@@ -4,7 +4,11 @@
 
 골격이 "프로젝트 빌드 명령"·"프로젝트 격리 게이트"·"프로젝트 코드 불변식"이라 부르는 자리에 끼우는 **engram 전용 실명령·체크리스트**다. 골격은 스택을 모른다 — 이 파일이 engram(Cargo workspace + Tauri + React)으로 바인딩한다.
 
-> **정본 = CLAUDE.md 「빌드·검증 명령」 절.** 이 파일은 그 **현재 바인딩 스냅샷**일 뿐이다 — 충돌하면 CLAUDE.md를 따르고 이 파일을 고친다(rot 방지). 명령을 통째 복붙해 두 출처가 갈리게 만들지 않는다. **예외 — net 격리 게이트(ADR-0129):** CLAUDE.md 의 그 대목은 스스로 "발췌"라 밝히고 게이트 1~3만 싣는다. 그 다섯 게이트의 명령 텍스트·기대값·근거 정본은 **`crates/engram-dashboard-net/src/lib.rs` 헤더**이고, 충돌하면 그 헤더를 따른다(역할 분담의 서술 = `docs/testing-strategy.md` §net). **예외 — GUI 실측 절차:** CLAUDE.md 「GUI 실측」 절은 **금지 조항만** 싣고 절차를 이 파일로 내렸다. 기동·환경변수·PID·teardown의 정본은 아래 §full이다 — 그쪽으로 되올리지 않는다.
+> **역할 분담 — 셋이 각각 다른 것의 정본이다.** ① **CLAUDE.md 「빌드·검증 명령」 = *규칙*의 정본**(무엇을 반드시 지키나). ② **이 파일 = *실행*의 정본**(어떤 명령을, 어느 강도에서, 무엇을 기대하며 돌리나 — 명령줄·플래그·기대 줄 수·절차·실측 근거). ③ **`.github/workflows/ci.yml` = *게이트 명단*의 정본**(무엇이 게이트인가).
+>
+> CLAUDE.md는 명령줄·기대값을 싣지 않으므로 그쪽에서 명령을 찾지 말 것이고, **규칙과 충돌하면 CLAUDE.md를 따르고 이 파일을 고친다.** ★**CI에 있는데 여기 없는 게이트를 발견하면 그건 드리프트다 — 이 파일을 채운다**★(실발생 2026-08-19: 메시징 격리 정규식이 CI보다 약했고, 의존 상한 게이트 2종이 빠져 있었으며, 바인딩 sync fallback이 옛 명령이었다. 셋 다 *실행되는* 사본만 뒤처진 방향이었다).
+>
+> **예외 — net 격리 게이트(ADR-0129):** 그 다섯 게이트의 명령 텍스트·기대값·근거 정본은 **`crates/engram-dashboard-net/src/lib.rs` 헤더**이고, 충돌하면 그 헤더를 따른다(역할 분담의 서술 = `docs/testing-strategy.md` §net). ★**command crate 헤더는 예외가 아니다**★ — `crates/engram-dashboard-command/src/lib.rs` 불변식 1이 적어 둔 게이트는 매니페스트 텍스트 정규식(`rg "path\s*=" … Cargo.toml`)인데, CI는 그것이 못 보는 형태(따옴표 종류·`[build-dependencies]`) 때문에 **처음부터 `cargo tree` 상한 게이트로 세웠다.** 그 헤더 줄은 CI·이 파일보다 약하므로 **실행은 아래 「의존 상한 게이트 2종」을 쓴다**(헤더 수정은 코드 변경이라 별건). **예외 — GUI 실측 절차:** CLAUDE.md 「GUI 실측」 절은 **금지 조항만** 싣고 절차를 이 파일로 내렸다. 기동·환경변수·PID·teardown의 정본은 아래 §full이다 — 그쪽으로 되올리지 않는다.
 
 ## 프로젝트 구조 (강도·범위 매핑의 전제)
 
@@ -13,7 +17,7 @@
 
 **경로 → 강도 매핑(골격 §1 "변경 범위 판정"에 주입):**
 - `crates/<name>/` → 해당 crate(단일이면 quick 후보)
-- `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향). ★`src-tauri/`는 standard 2번이 통째로 빼는 유일한 패키지다★ — 이 행이 집어 오는 실제 커버리지는 **standard 2b·2c**(아래)이고, 그 줄들이 빠지면 이 경로 변경은 게이트가 0이다.
+- `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향). ★`src-tauri/`는 standard 2번이 통째로 빼는 유일한 패키지다★ — 이 행이 집어 오는 실제 커버리지는 **standard 2b·2c·2d**(아래 — `src-tauri/tests/`의 통합 타깃 전부)이고, 그 줄들이 빠지면 이 경로 변경은 게이트가 0이다. ★**`src-tauri/tests/`에 파일이 늘면 이 목록도 함께 늘린다**★ — 워크스페이스 회귀가 그 패키지를 통째로 빼므로 새 스위트는 등재되기 전까지 로컬 신호가 0이다(실발생: `daemon_client_pending`이 CI에만 있었다).
 - `src/` · `public/` · `index.html` · `package*.json` · `vite.config.*` · `src-tauri/tauri.conf.json` → **UI=full**(cdp 실측)
 - `tests/` → **standard 이상**
 - **산문 문서만 바뀐 경우** → **테스트 게이트 없음.** 테스트는 대상 자체가 없다(실측 2026-08-06: 소스 0 변경에 전체 회귀를 5회 돌려 매번 동일 결과 — 정보량 0). 판정·절차는 아래 「산문 문서 전용」 절.
@@ -41,12 +45,54 @@
 
 - **강도 하향이 아니다.** 경로→강도 매핑도 escalation-only도 그대로다. 바뀐 것은 *누가 돌리나*뿐이다.
 - **게이트 성립 = CI 초록.** push 후 결과를 확인한다 — 초록을 못 봤으면 그 변경은 아직 게이트를 통과한 게 아니다. CI가 못 도는 상황(오프라인·워크플로 자체 수정·CI 장애)이면 아래 강도별 실명령을 로컬에서 그대로 돈다.
+- **★로컬과 CI의 명령줄은 바이트 단위로 같지 않다 — 셋 다 의도된 차이다★.** 드리프트로 보고 맞추지 말 것(게이트의 *내용*은 같다):
+  1. **CI는 `--locked`를 붙인다** — 커밋된 `Cargo.lock`이 낡았을 때 조용히 재해석하지 않고 실패시킨다.
+  2. **CI는 실 claude 의존 테스트를 이름으로 `--skip` 한다** — 러너에 claude가 없다. **그 `--skip` 목록이 정본**이고, 그 축의 CI 커버리지는 0이라 로컬(claude 있음)에서만 검증된다.
+  3. **로컬은 모든 빌드·테스트를 `scripts/run-detached.ps1`로 돌리지만 CI는 그냥 돈다** — 러너는 출력을 이미 자기 잡 로그에 담고 그 로그를 읽어 갈 세션 터미널도 없으니, 감싸 봐야 얻는 게 없고 CI만 느려진다(로컬에서 감싸는 이유 = 아래 「분리 실행」).
 - **CI 미커버 3건 — 로컬 몫이다:** ① GUI 실측(창 필요) ② 실 claude 의존 테스트(워크플로가 `--skip`으로 제외하며 **그 목록이 정본**) ③ ADR-0130 재론 트리거(게이트가 아니라 알림이라 CI에 못 얹는다 — daemon crate가 닿으면 로컬에서 돌 것).
-- **★아래 목록에 없고 CI에만 있는 게이트 2건★** — 생성물 sync(`git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/` 뒤 **같은 두 경로로** `git diff --exit-code`. protocol·core 테스트를 **둘 다 돈 뒤** — `core/bindings/`는 core 테스트가 재생성한다. ★`add -N -f`를 빼고 맨 `git diff`로 줄이지 말 것★ — `git diff`는 untracked 파일을 안 봐서 **처음 생성되는 `.ts`가 조용히 통과한다.** 근거의 정본 = CLAUDE.md 「CI」 절, 명령 정본 = `.github/workflows/ci.yml`의 그 스텝. 여기 되올리지 않는다)와 discovery async 반입(`cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all` → `^(tokio|mio|tokio-tungstenite|futures-util) ` 0줄). 로컬 fallback으로 돌 때 이 둘을 빠뜨리면 CI보다 약하다.
+- **★아래 강도별 목록에 없고 CI에만 있는 게이트★**(개수를 세지 않는다 — 세던 숫자는 게이트가 늘 때마다 뒤처진다). 로컬 fallback으로 돌 때 빠뜨리면 CI보다 약하다:
+  ```bash
+  # ts-rs 바인딩 sync — protocol·core 테스트를 돌린 **직후**(양쪽 다 생성물을 다시 굽는다)
+  git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/
+  git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/
+  # discovery async 반입 → `^(tokio|mio|tokio-tungstenite|futures-util) ` 매치 0줄이어야 PASS
+  cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all
+  ```
+  ★**`git add -N`(intent-to-add)를 빼지 말 것**★ — `git diff`는 **untracked 파일을 보지 않는다.** 처음 생성되는 `.ts`는 비교 대상 자체가 없어 매치 없이 조용히 통과했다(`SlotContent.ts` 사건 — `docs/process/S20-command-bus/trd.md` §5). intent-to-add로 두 디렉터리를 **내용 없이** 인덱스에 올려 두면 신규 파일도 "전체가 추가된 diff"로 잡힌다 — 빈 blob 등록일 뿐이라 이후 커밋 내용에는 영향이 없다. ★**`-f`도 빼지 말 것**★ — `git add`는 무시된 경로를 조용히 건너뛰므로, 어느 crate의 `.gitignore`에 `bindings/`·`*.ts` 같은 넓은 줄이 생기면 생성물이 인덱스에 안 올라가 **게이트가 소리 없이 해제된다**(지금은 두 디렉터리 다 무시 대상이 아니다). ★**경로를 하나로 줄이지 말 것**★ — 선언이 crate마다로 흩어져 생성 지점이 둘이고, 새 생성 지점이 생기면 이 목록도 함께 늘어난다.
 
 ## 강도별 실명령 (골격 §2 "게이트 실행"에 주입)
 
 모두 **워크스페이스 루트에서** 실행한다. 게이트 순서(빌드 → 테스트 → 격리 → 타입체크·프론트 → 실측)·실패 시 멈춤은 골격이 강제한다.
+
+### ★분리 실행 — 아래 명령은 하나도 셸에서 직접 돌리지 않는다★
+
+**빌드·테스트를 포함해 이 절의 모든 명령은 `scripts/run-detached.ps1`을 거친다.** 예외 없다. **규칙 자체의 정본은 CLAUDE.md 「빌드·검증 명령」**이고, **근거·실측·사용법의 정본은 이 절과 그 스크립트 헤더다.**
+
+- **왜 분리 실행인가 — 이유는 출력 처리다.** 출력이 **파일로만** 떨어져 **판정에 필요한 줄만 골라 읽는다.** 셸에서 직접 돌리면 빌드 로그 전체가 도구 결과로 거슬러 올라와 컨텍스트를 통째로 먹는다.
+- ★**크래시 회피는 이 규칙의 이유가 아니다 — 그렇게 적혀 있던 옛 문장은 오진이었다**★(정정 2026-08-19). 세션을 함께 데려가던 터미널 크래시의 실제 원인·증거·해법은 아래 「터미널 크래시」 항목이 갖는다. **`start`·백그라운드 잡·`nohup`은 로그 파일 + 아래 `__EXIT` 마커 계약을 주지 않으므로 대체재가 아니다.**
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "<아래 명령 한 줄>" -WorkDir "<워크스페이스 루트>" -LogFile "<로그경로>.log"
+```
+
+- 즉시 `PID=`·`LOG=`·`BAT=`을 찍고 돌아온다 — **반환 = 시작했다는 뜻이지 끝났다는 뜻이 아니다.**
+- ★**완료 판정 = 로그 마지막 줄의 `__EXIT=<종료코드>` 마커**★ — 그 마커가 나타날 때까지 폴링한다. **프로세스가 사라진 것으로 판정하지 말 것**(래퍼 `cmd`가 자식보다 먼저 빠질 수 있다). PASS/FAIL은 그 종료코드로 가른다.
+- **예외 — vitest(`npm test`)는 `__EXIT`가 안정적으로 안 붙는다**(자식이 래퍼보다 오래 산다). 그 줄만 **로그에 찍힌 vitest 자신의 pass/fail 요약**으로 판정한다.
+- 판정이 끝나면 로그를 읽되 **필요한 줄만 인용한다** — 출력이 파일로 떨어지는 덕에 빌드 로그 전체를 삼키지 않아도 된다.
+- **`rg`·`cargo tree` 격리 게이트처럼 출력이 몇 줄뿐인 단발 조회는 굳이 감쌀 필요가 없다** — 그대로 받아도 컨텍스트를 먹지 않고 판정도 그 몇 줄로 끝난다. 다만 감싸도 무해하니, 애매하면 감싼다.
+- **§full의 「앱을 셸에서 직접 띄우지 않는다」와 같은 규칙이다** — 앱·빌드·테스트, **우리가 띄우는 것은 전부 프로세스 트리 밖 + 출력은 파일로만.** 대상별 절차만 다르다(앱 = `launch-detached.ps1`, 빌드·테스트 = `run-detached.ps1`).
+- ★**옛 규칙은 폐기했다 — 되살리지 말 것**★(2026-08-19). 옛 규칙 = **libtest 테스트 스레드 수 상한 플래그**(워크스페이스·core·daemon 회귀 뒤에 `4`를 박아 두던 그 인자 — ★이 문서에서 그 플래그를 쓰는 자리는 이제 없다★). 원인이 규명된 뒤 폐기 사유는 **더 분명해졌다:**
+  1. **실제 원인에 닿지도 않는다.** 원인은 터미널 자신의 프로세스 트리 재귀(아래 「터미널 크래시」)이고 그 재귀는 **단기 프로세스가 대량으로 나고 죽을 때** 걸리는데, 그 플래그는 *테스트*가 몇 개 동시에 도는지만 정한다. 2026-08-19 12:58 터미널은 테스트가 하나도 돌기 전 **컴파일·링크 단계**에서 죽었다(그 시점 디스크의 테스트 바이너리는 전날 것이고 라이브러리 산출물만 갓 쓰여 있었다) — 플래그가 닿은 적 없는 자리다. *컴파일러* 프로세스 수는 cargo의 build jobs가 정한다.
+  2. **두 번째 후보(프로세스 트리 위치)도 원인이 아니었다.** 분리 실행으로 옮긴 뒤에도 터미널은 죽었다 — 15:18:51 분리 실행 `cargo test` 기동, 15:18:59 터미널 사망(실측). 즉 테스트 동시성도, 트리 위치도 레버가 아니었다. 실제 수정은 **터미널 업그레이드**다(아래 「터미널 크래시」).
+- **터미널 크래시(`0xc00000fd`) — 원인 규명·수정 완료(2026-08-19).** ★**사내 보안 에이전트 탓이 아니다**★:
+  - **증상:** 그날 세 번(12:58 · 15:18 · 15:31) `wezterm-gui.exe`가 `0xc00000fd`(STACK_OVERFLOW)로 죽고 **세션까지 함께 내려갔다** — 돌던 게이트가 통째로 날아갔다.
+  - **원인:** `wezterm-gui`는 각 pane에서 무엇이 돌고 있나(탭 제목·상태)를 판정하려고 **시스템 전역** 프로세스 표(`CreateToolhelp32Snapshot`)를 떠서 부모→자식 트리를 **재귀로** 만든다. 그 재귀에 **순환 가드가 없었다.** 단기 프로세스가 대량으로 나고 죽으면 PID 재사용으로 부모 맵에 순환이 생기고, 재귀가 끝없이 내려가 스레드 스택이 넘친다.
+  - **상류 증거:** wezterm issue **#7705** "Stack overflow in build_proc due to process tree cycle on Windows"(2026-04-01 개설, 2026-06-07 종결) → **PR #7706**이 `build_proc`에 `visited` 집합을 넣어 고쳤다. 보고자 환경이 이 머신과 일치하고(Windows 11 Enterprise 10.0.26200 · `0xc00000fd`), 트리거도 "WezTerm 탭에서 Claude Code 세션 여럿을 돌려 서브프로세스를 대량 생성"이었다. 다른 보고자는 24시간에 3회를 기록했는데 이 머신도 그날 정확히 3회다.
+  - **로컬 증거:** 크래시 덤프 3개가 모두 같은 반복 스택 패턴이고 재귀 깊이가 약 780단이다.
+  - **왜 첫 분석이 보안 에이전트를 범인으로 짚었나:** 스택 오버플로는 **가드 페이지를 건드린 프레임**이 범인 모듈로 찍힐 뿐이다 — 한 번은 `ntdll.dll`, 한 번은 SentinelOne 에이전트의 `InProcessClient64.dll`이었다. 그 DLL이 모든 프로세스에 주입돼 있다는 것은 여전히 사실이지만 **이 크래시의 원인은 아니다**(무고한 구경꾼).
+  - **왜 분리 실행이 못 막았나:** 그 스냅샷은 **시스템 전역**이라, 일을 wezterm 서브트리 밖으로 옮겨도 훑는 표에서 그 프로세스들이 빠지지 않는다. 직접 실측 — 15:18:51 분리 실행 `cargo test` 기동, 15:18:59 터미널 사망.
+  - ★**버전 경계 — 다시 만나면 여기부터 본다**★: dated release는 `20240203`까지 **버그판**이고(이 머신에 설치돼 있던 것 = `20240203-110809-5046fc22`, 수정보다 두 해 이상 오래됐다), 수정은 **2026-06-07**에 들어갔으며 그 뒤 dated release가 없어 **nightly에만 실린다.** **`wezterm-gui.exe`에서 `0xc00000fd`를 또 만나면 가장 먼저 확인할 것 = 지금 돌고 있는 wezterm 빌드가 무엇인가.**
+  - **적용된 해법:** nightly `20260819-012343-33891b4a`를 `I:\Engram\tools\wezterm_new\`에 풀어 그것으로 쓰고 있다(config·런처 동봉 — 런처는 자기 폴더 기준 상대 경로). 옛 폴더 `I:\Engram\tools\wezterm\`는 손대지 않아 2024 빌드 그대로다.
 
 **프론트 게이트 확정 절차:** ① `npm test`(package.json `scripts.test` = `vitest run`). ② 타입체크는 `npm run typecheck`가 있으면 우선, **없으면 `npx tsc --noEmit`**(현재 package.json엔 typecheck 스크립트 없음 → `npx tsc --noEmit`). ③ 스크립트가 아예 없으면 실행하지 말고 package.json 실제 스크립트명을 사용자에게 보고한다. **프론트 린트 게이트는 정본(CLAUDE.md·package.json)에 없음 — 임의로 lint를 추가하지 않는다.**
 
@@ -55,10 +101,10 @@
 영향받은 멤버만 좁게 돌린다(예: core만 바뀐 경우):
 ```bash
 cargo build -p engram-dashboard-core        # 빌드
-cargo test  -p engram-dashboard-core -- --test-threads=4   # 영향 crate 테스트 — 실 PTY = 실 자식 프로세스라 플래그를 붙인다
+cargo test  -p engram-dashboard-core        # 영향 crate 테스트
 ```
-- **★`-- --test-threads=4`는 워크스페이스 명령 전용이 아니다 — 병렬은 테스트 바이너리마다 걸린다★** 좁혀 돌릴 때도 **실 자식 프로세스를 띄우는 crate면 붙인다**: `core`(실 PTY) · `daemon`(프로세스 레벨 CLI 스위트 + 실 `.exe` spawn `#[ignore]` 분). **인메모리 단위 테스트뿐인 crate엔 붙이지 않는다**: `command`·`protocol`·`messaging`·`net`. 층별 근거 = `docs/testing-strategy.md` §1, 플래그 근거·실측의 정본 = CLAUDE.md 「빌드·검증 명령」(여기 되올리지 않는다).
-- **core crate가 닿으면 격리 게이트도 포함**(quick이어도 — 아래 "코어 격리 불변식"): `rg "^\s*use tauri" crates/engram-dashboard-core/src/` → 0줄 PASS. quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다.
+- **★좁혀 돌릴 때도 분리 실행이다★** — 위 「분리 실행」 절은 quick에도 그대로 걸린다. 한 crate짜리 명령이라고 셸에서 직접 돌리지 않는다(좁혀 돌려도 컴파일 로그는 길다 — 이유는 크래시 회피가 아니라 **출력 처리**이고 근거는 그 절).
+- **core crate가 닿으면 격리 게이트도 포함**(quick이어도 — 명령·판정은 아래 standard 4번): quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다.
 - 프론트가 닿았으면(quick 범위라도) 프론트 게이트(위 확정 절차): `npm test` + `npx tsc --noEmit`.
 
 ### standard (기본) — workspace 전회귀 + 격리 + 프론트
@@ -66,7 +112,7 @@ cargo test  -p engram-dashboard-core -- --test-threads=4   # 영향 crate 테스
 순서대로:
 ```bash
 cargo build                                 # 1) 빌드 (루트, 전 workspace). ★이걸로 지어진 engram-dashboard.exe 는 띄우지 않는다★ — TAURI_CONFIG 없이 도는 빌드라 debug 셸에 release identifier 를 다시 찍는다(ADR-0137, 정본 CLAUDE.md 「빌드·검증 명령」). 띄울 exe 는 아래 full 의 build-client-shell.mjs 가 만든다
-cargo test --workspace --exclude engram-dashboard -- --test-threads=4   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05, 정본 CLAUDE.md·2026-07-19 드리프트 수정). `-- --test-threads=4` 도 빼지 않는다(아래 첫 항목)
+cargo test --workspace --exclude engram-dashboard   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05). ★옛 `-- --test-threads=4` 는 폐기했다 — 되살리지 말 것★(2026-08-19: 그 플래그는 실제 원인에 닿지도 않았다. 사유의 정본 = 아래 「분리 실행」)
 cargo test -p engram-dashboard --test layout_apply                      # 2b) 2번이 뺀 그 패키지의 **통합** 타깃 — 죽는 건 lib 타깃뿐이고 통합 타깃은 정상 기립한다(실측 2026-08-17). 2번이 이 스위트를 못 보므로 이 줄이 유일한 실행 경로다(아래 둘째 항목)
 cargo test -p engram-dashboard --test layout_commands                   # 2c) 같은 패키지의 또 다른 **통합** 타깃 — layout_apply 는 적용 서비스 자체, 이쪽은 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅)를 잰다. 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립·실측 2026-08-17) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
 cargo test -p engram-dashboard --test daemon_client_pending             # 2d) 같은 패키지의 셋째 **통합** 타깃 — 겹친 `request_id` 가 연결 태스크를 패닉시키지 않고 옛 대기자가 영구 hang 대신 오류로 깨어나며 새 요청이 그 번호를 승계함을 잰다(GUI 실측 2026-08-18 결함의 회귀망). 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
@@ -76,11 +122,17 @@ rg "^\s*use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
-- **★2번의 `-- --test-threads=4`를 빼지 말 것 — 근거·실측의 정본은 CLAUDE.md 「빌드·검증 명령」★** 여기 되올리지 않는다. 4로도 터미널이 죽으면 2로 낮춘다. **아래 §full의 「앱을 셸에서 직접 띄우지 않는다」와 뿌리는 같고 위험은 다르다** — 그건 *앱* 출력이 셸 사슬을 거슬러 올라가는 경로, 이건 *테스트*가 자식 프로세스를 한꺼번에 만드는 경로다. 한 규칙으로 합치지 않는다.
-- **★2b~2e의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. **거꾸로 `-- --test-threads=4`는 넷 다 붙이지 않는다** — 이 스위트들은 인메모리 하네스뿐이라 자식 프로세스도 소켓도 하나 안 띄운다(위 첫 항목의 판정 규칙을 그대로 적용한 결과지 예외가 아니다). **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21). 이 목록이 곧 로컬 실행 명단이라 타깃이 늘면 여기에도 줄을 늘린다.
+- **★위 블록의 빌드·테스트 줄(1·2·2b~2e·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4번 `rg` 는 대상 밖 — 그 절의 판정 규칙). 근거·실측은 그 절이 갖는다.
+- **★2b~2e의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21). 이 목록이 곧 로컬 실행 명단이라 타깃이 늘면 여기에도 줄을 늘린다.
 - 코어 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(코어가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13).
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
-- **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(core|daemon|protocol|discovery)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다.
+- **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더한다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다).
+- **의존 상한 게이트 2종 — standard에서 항상 돌린다**(해당 crate가 닿으면 quick에서도 필수). 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 **해석된 의존 그래프**로 덮는다:
+  ```bash
+  cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0110 무의존 불변식
+  cargo tree -p engram-dashboard-command   --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0155 도구 crate 무의존
+  ```
+  줄 수로 판정한다(매치 유무가 아니다). **플래그를 줄이지 말 것** — net 게이트 3과 같은 이유로 그만큼 형태가 샌다. ★**정규식 게이트의 가장 큰 구멍이 이것을 부른 계기다**★ — 정규식은 crate 이름 알파벳을 손으로 박아 두므로 **새 crate는 누가 그 알파벳에 이름을 더할 때까지 아예 안 보인다**. ★**두 게이트에 공통으로 남는 구멍**★ — 둘 다 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별하므로, 다른 이름을 단 멤버는 양쪽 다 그냥 통과한다. command crate가 워크스페이스 의존 0을 지키는 것은 **벽**이지 그 crate가 존재하는 *이유*는 아니다(이유 = 독립적으로 쓸 수 있고 순환을 막는다 — CLAUDE.md 「백엔드 모듈 맵」 command 항목 · ADR-0151 결정 4).
 - **네트워크 행 격리 게이트(ADR-0129 — net crate가 닿으면 필수, quick이어도):** 아래를 **전부** 돌린다. 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더이고, 기대값을 늘리기 전에 그 헤더와 그 crate `Cargo.toml`의 의존 상한 규칙을 먼저 읽는다.
   ```bash
   rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/          # 게이트1 소스 참조 → 0줄 PASS
@@ -104,7 +156,7 @@ npm test                                    # 6) 프론트 테스트 (vitest run
 
 standard 게이트를 전부 PASS시킨 뒤, 실제 앱을 띄워 화면 동작을 확인한다(**Windows 전용** — WebView2 CDP, 포트 9223 고정).
 
-**★앱을 셸에서 직접 띄우지 않는다★** — 셸에서 띄우면 앱이 터미널의 자손이 되고 **앱 출력이 그 사슬을 거슬러 올라간다.** 그 조합에서 터미널이 반복 크래시해 실측이 통째로 날아간다(실측 2026-08-16). **끊어야 할 조건이 둘이다 — 프로세스 트리 밖 + 출력은 파일로만.** `start`·백그라운드 잡·`nohup`은 둘 다 못 끊으므로 대체재가 아니다.
+**★앱을 셸에서 직접 띄우지 않는다★** — 셸에서 띄우면 그 호출이 앱 수명에 매달리고 **앱 출력이 파이프를 거슬러 계속 올라온다.** 분리 실행은 앱을 프로세스 트리 밖에 두고 **출력을 로그 파일로만** 보내므로, 판정에 필요한 줄만 골라 읽는다. `start`·백그라운드 잡·`nohup`은 그 로그 파일·PID 계약을 주지 않으므로 대체재가 아니다. **위 「분리 실행」과 같은 규칙의 앱 쪽 절차다** — 원칙은 하나이고 도구만 갈린다(앱 = `launch-detached.ps1`(exe 경로) · 빌드·테스트 = `run-detached.ps1`(명령줄)).
 
 **사람이 손으로 볼 때는 `scripts/`의 `run-*.bat` 런처를 쓴다**(목록·용도 = README) — 빌드·dev 서버·분리 실행을 한 번에 한다. 아래는 그 런처가 하는 일을 게이트에서 단계별로 돌리는 형태다.
 

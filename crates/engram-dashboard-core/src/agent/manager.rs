@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 
 use crate::agent::backend;
 use crate::agent::backend::InputEncoder;
+use crate::agent::failure::AgentFailureKind;
 use crate::agent::output_core::{OutputCore, TurnWiring};
 use crate::agent::preset::PresetRegistry;
 use crate::agent::profile::{
-    AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
+    AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
 use crate::agent::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::agent::session::AgentSession;
@@ -41,8 +42,14 @@ use crate::agent::types::{
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
-/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하면 resume 실패로 판정한다
-/// (H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하거나 **진단 스트림이 실패를 말하면**
+/// resume 실패로 판정한다(H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+///
+/// ★늘려서 문제를 풀지 마라(실측 2026-08-23)★: 실 claude 는 진단을 +2.2s 에 내고 종료는 +6.4s 에야
+///   한다 — 죽음만 기다리는 판정은 이 창을 6s 넘게 늘려야 맞는데, 활성화는 이 창만큼 **블록**하므로
+///   그러면 멀쩡한 이어받기가 전부 그만큼 느려진다. 그래서 판정 근거를 「죽음」에서 「죽음 또는 증거」로
+///   바꿨다(`EarlyVerdict`) — 오히려 실패를 더 **빨리** 확정한다.
+// ADR-0172
 const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
@@ -84,6 +91,78 @@ fn select_transport(
         let (t, pid) = PtyTransport::open(spec, cols, rows)?;
         Ok((Box::new(t), pid))
     }
+}
+
+/// spawn 요청 하나의 결말. ★"띄웠다" 와 "할 일이 없었다" 를 **호출자가 구분할 수 있어야 한다**★ —
+/// 그래야 등록·epoch·기록 같은 뒷정리를 자기가 만들지 않은 세션에 하지 않는다.
+///
+/// ★중복 요청은 오류가 아니다(설계 결정 — 되돌리지 마라)★: 그 항목이 이미 떠 있거나 이미 뜨는 중이면
+///   이 요청은 **무의미(moot)** 하다. 예전엔 그것을 `Err` 로 답했고, 그래서 소비자마다 "이 오류는 진짜
+///   실패가 아니다" 를 알아야 했다 — 그 목록을 세 번 손봤고 세 번 다 하나씩 빠졌다. 오류가 아니라 결말로
+///   두면 빠뜨릴 목록 자체가 없어진다. 프론트는 이미 같은 모양이다(`AgentList` 의 in-flight 가드가 두 번째
+///   활성화를 조용히 흘린다).
+/// ★moot 은 아무것도 바꾸지 않는다★: 한 것이 없으므로 기록할 실패도, 지울 근거도 없다
+///   (`AgentManager::note_spawn_result`).
+// ADR-0172
+#[derive(Debug, Clone)]
+pub enum SpawnOutcome {
+    /// 이 호출이 화신을 띄웠다.
+    Started(AgentInfo),
+    /// **이 요청은 할 일이 없었다** — 그 항목이 이미 떠 있거나 이미 뜨는 중이라 아무것도 하지 않았다.
+    ///
+    /// `Some` = 그 순간 산 세션을 볼 수 있었다(그 정보를 그대로 돌려준다) · `None` = 승자가 아직 명부에
+    /// 올리기 전이라 볼 것이 없었다. 어느 쪽이든 **이 호출은 아무것도 만들지 않았다**.
+    Moot(Option<AgentInfo>),
+}
+
+impl SpawnOutcome {
+    /// 이 호출이 실제로 띄웠나 — 뒷정리를 할 **자격**의 판정.
+    pub fn started(&self) -> bool {
+        matches!(self, SpawnOutcome::Started(_))
+    }
+
+    /// 결말과 무관하게 "지금 그 에이전트" 정보. moot 은 남이 띄운 세션이라 `None` 일 수 있다.
+    pub fn into_info(self) -> Option<AgentInfo> {
+        match self {
+            SpawnOutcome::Started(info) => Some(info),
+            SpawnOutcome::Moot(info) => info,
+        }
+    }
+
+    /// **이 호출이 띄운** 화신만. moot 이면 `None` — "내가 만든 것" 에만 뒷정리를 하려는 호출자용이다.
+    pub fn into_started(self) -> Option<AgentInfo> {
+        match self {
+            SpawnOutcome::Started(info) => Some(info),
+            SpawnOutcome::Moot(_) => None,
+        }
+    }
+}
+
+/// 실패 분류가 들여다보는 출력 꼬리의 하드 상한(`OutputCore::terminal_tail` 이 정확히 지킨다). 우리가
+/// 찾는 종료 문구는 마지막 몇 줄에 있다. 이 값은 화면·로그로 나가지 않는다(분류 입력 전용).
+// ADR-0172
+const FAILURE_TAIL_BYTES: usize = 4096;
+
+/// 이어받기 시도의 조기 판정 결말 — 「죽었나」가 아니라 「무슨 증거가 섰나」로 갈린다.
+///
+/// ★`Diagnosed` 가 있는 이유(실측 2026-08-23 — 되돌리지 마라)★: 실 claude 는 `--resume <빈 sid>` 에
+///   대해 **+2.2s 에 진단을 내고 +6.4s 에야 죽는다**(그 사이 SessionEnd 훅이 돈다). 죽음만 기다리면
+///   조기종료 창(3s)을 넘겨 **실패가 성공으로 판정되고 앞선 기록까지 지워진다** — 이 기능의 표제
+///   사례가 통째로 죽는 자리였다. 증거가 이미 섰으면 시체를 기다리지 않는다.
+/// ★창을 늘리는 것은 이 문제의 답이 아니다★: 활성화는 이 창만큼 **블록**하므로, 늘리면 멀쩡한
+///   이어받기가 전부 그만큼 느려진다. 답은 기다림이 아니라 판단 근거를 바꾸는 것이다.
+// ADR-0172
+enum EarlyVerdict {
+    /// 창 안에 종점 상태로 들었다. `evidence` = 그 순간 붙잡은 콘솔 꼬리 + 진단 텍스트(best-effort,
+    /// 빈 값이 정상).
+    Terminal {
+        status: AgentStatus,
+        evidence: String,
+    },
+    /// **아직 살아 있지만** 진단 스트림이 이미 알려진 실패를 말했다 — 죽음을 기다리지 않고 확정한다.
+    Diagnosed(AgentFailureKind),
+    /// 창을 넘겼고 아무 증거도 서지 않았다 = 활성화 성립.
+    Alive,
 }
 
 /// 명부(roster) 항목 하나 = **에이전트 하나**(ADR-0119 결정 1). "산 목록"과 "프로필 목록"을 소비자가
@@ -823,36 +902,38 @@ impl AgentManager {
 
     // ── spawn ──────────────────────────────────────────────────────────────
 
+    /// ★두 갈래의 「할 일 없음」은 `Ok(Moot)` 다 — `Err` 로 되돌리지 마라★: 그 항목이 이미 떠 있거나
+    /// (아래 이중-spawn 가드) 이미 뜨는 중이면(예약 패배) 이 요청은 무의미하고, 무의미는 실패가 아니다.
+    /// 근거와 그 전환이 없앤 것은 `SpawnOutcome` 주석이 갖는다.
+    // ADR-0172
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
-    ) -> Result<AgentInfo, PtyError> {
+    ) -> Result<SpawnOutcome, PtyError> {
         // ★잔여 레이스(ADR-0082 미해결·후속)★: 이 이중-spawn 가드는 여기서 read lock 을 잡아 contains_key 를 본 뒤
         //   놓고, 실제 등록(sessions.insert)은 아래에서 별개 write lock 으로 한다 — 그 사이 창이 있다.
         //   같은 id 를 **서로 다른 연결**이 동시에 SpawnProfile 하면 둘 다 이 검사와 activate_profile 의
         //   pre-check 를 통과해 double-spawn 이 날 수 있다(데몬 명령 처리는 연결당 직렬일 뿐 연결 간엔
         //   아니다 — 각 연결이 제 read_task 에서 dispatch 를 await 한다). 이 window 는 ADR-0082 이전부터
         //   있던 **선재(pre-existing) 레이스**이며 이번 변경이 도입하지도 닫지도 않았다(후속 과제로 flag).
-        if self
-            .sessions
-            .read()
-            .expect("sessions poisoned")
-            .contains_key(&profile.id)
-        {
-            return Err(PtyError::SpawnFailed(format!(
-                "agent {} already running",
-                profile.id
-            )));
+        if let Ok(session) = self.get_session(profile.id) {
+            tracing::info!(
+                agent = %profile.id,
+                "spawn_agent: 이미 실행 중 — 이 요청은 할 일이 없다(moot)"
+            );
+            return Ok(SpawnOutcome::Moot(Some(self.agent_info(&session))));
         }
 
-        let _reservation = SpawnReservation::reserve(self.spawning.clone(), profile.id)
-            .ok_or_else(|| {
-                PtyError::SpawnFailed(format!(
-                    "agent {} spawn already in progress (concurrent spawn rejected)",
-                    profile.id
-                ))
-            })?;
+        let Some(_reservation) = SpawnReservation::reserve(self.spawning.clone(), profile.id)
+        else {
+            // 승자가 아직 명부에 올리기 전이라 보여 줄 세션이 없다 — 그래도 이 요청은 할 일이 없다.
+            tracing::info!(
+                agent = %profile.id,
+                "spawn_agent: 이미 뜨는 중 — 이 요청은 할 일이 없다(moot)"
+            );
+            return Ok(SpawnOutcome::Moot(None));
+        };
 
         self.register_for_spawn(profile)?;
 
@@ -996,7 +1077,7 @@ impl AgentManager {
 
         let info = self.agent_info(&session);
         self.status_sink.agent_list_updated(self.list_agents());
-        Ok(info)
+        Ok(SpawnOutcome::Started(info))
     }
 
     /// ★수동 활성화 진입점 — 이어받기(resume) 전용, fresh-fallback 폐지(ADR-0082)★.
@@ -1005,16 +1086,19 @@ impl AgentManager {
     /// 1. **이미 실행 중(재활성화 가드)** — 같은 id 세션이 살아 있으면 **아무것도 죽이거나
     ///    재spawn 하지 않고** 그 세션의 AgentInfo 를 그대로 돌려준다(무해한 "이미 실행 중" 신호,
     ///    epoch 불변). ★이게 a4aac1a 회귀의 핵심 수정★: 예전엔 이 경로가 `spawn_agent` 이중-spawn
-    ///    가드의 "already running" Err 를 만나 `resume_with_fresh_fallback` 이 그걸 "resume 실패"로
-    ///    오인 → `fallback_fresh` 가 **멀쩡히 돌던 산 에이전트를 kill** → 새 화신 표식 → 빈 fresh 로 교체
-    ///    (유저 실측 회귀). 이제 가드 Err 에 닿기 전에 선제 contains_key 로 걸러 산 에이전트를 놔둔다.
+    ///    가드가 내던 "already running" **Err** 를 만나 `resume_with_fresh_fallback` 이 그걸 "resume
+    ///    실패"로 오인 → `fallback_fresh` 가 **멀쩡히 돌던 산 에이전트를 kill** → 새 화신 표식 → 빈 fresh
+    ///    로 교체(유저 실측 회귀). 지금은 두 겹으로 막힌다: 여기 선제 조회가 먼저 걸러 산 에이전트를
+    ///    놔두고, 그걸 지나쳐도 그 가드는 이제 Err 가 아니라 `SpawnOutcome::Moot` 을 낸다(오인할 오류
+    ///    자체가 없다).
     /// 2. **Fresh(진짜 신규 — 세션 없음)** — `spawn_agent(Fresh)` 위임. 이건 실패-fallback 이 아니라
     ///    정상 신규 생성이다(ADR-0076 "Fresh=새 sid" 유효).
     /// 3. **Resume** — `resume_no_fallback` 로 이어받기만 시도하고, 그 Failed 결말을 Err 로 노출한다.
     ///
-    /// ★blocking★: Resume 모드는 EARLY_EXIT_WINDOW(현 3s)만큼 조기종료를 폴링하므로 호출이 그만큼
+    /// ★blocking★: Resume 모드는 최대 EARLY_EXIT_WINDOW(현 3s)만큼 결말을 폴링하므로 호출이 그만큼
     ///   블록될 수 있다(restore_all 과 동일 성질). 데몬의 명령 처리 스레드에서 호출되므로 그 연결의
     ///   응답만 지연되고 다른 세션에는 영향 없다. Fresh 모드·재활성화 가드는 폴링 없이 즉시 반환한다.
+    ///   ★실패는 이 상한보다 빨리 돌아올 수 있다★ — 진단 스트림이 먼저 말하면 그 자리에서 끊는다.
     // ADR-0082
     // ADR-0076
     pub fn activate_profile(
@@ -1027,20 +1111,106 @@ impl AgentManager {
                 agent = %profile.id,
                 "activate_profile: 이미 실행 중 — 재활성화 무시(산 에이전트 보존, ADR-0082)"
             );
+            // ★이 갈래는 「마지막 실패」에 아무것도 쓰지 않는다★: 활성화를 시도하지 않았으므로 기록할
+            //   실패도, 지울 근거도 없다 — 아래 `spawn_agent` 의 moot 갈래와 같은 규율이다(ADR-0172).
             return Ok(self.agent_info(&session));
         }
 
         if mode == SpawnMode::Fresh {
-            return self.spawn_agent(profile, SpawnMode::Fresh);
+            let outcome = self.spawn_agent(profile, SpawnMode::Fresh);
+            self.note_spawn_result(profile.id, &outcome);
+            // moot 이면 남이 띄운(띄우는 중인) 세션을 돌려준다. 아직 명부에 없으면 조회로 한 번 더 본다.
+            // ★그마저 없을 때의 문구는 "없는 에이전트" 가 아니다★: 프로필은 실재하고 지금 **다른 요청이
+            //   띄우는 중**이라 우리가 돌려줄 세션이 없을 뿐이다. `NotFound` 를 그대로 흘리면 원인을
+            //   잘못 지목한 문구("agent not found")가 호출자·LLM 에게 간다.
+            // ADR-0172
+            return match outcome?.into_info() {
+                Some(info) => Ok(info),
+                None => self.agent_info_by_id(profile.id).map_err(|e| match e {
+                    PtyError::NotFound(id) => PtyError::SpawnFailed(format!(
+                        "another request is already starting agent {id}; this one did nothing"
+                    )),
+                    other => other,
+                }),
+            };
         }
 
-        match self.resume_no_fallback(profile) {
-            RestoreOutcome::Resumed => self.agent_info_by_id(profile.id),
+        let (outcome, spawned) = self.resume_no_fallback(profile);
+        match outcome {
+            // 성립·실패 양쪽 다 `resume_no_fallback` 안에서 이미 기록됐다(그 자리가 무엇이 일어났는지
+            //   아는 유일한 곳). 여기서 또 쓰면 지움 지점이 둘이 된다.
+            //
+            // ★조회 실패로 성공을 뒤집지 않는다★: 조기종료 창을 넘긴 순간 우리는 성립으로 판정하고 기록을
+            //   **지웠다**. 그 직후 자식이 죽어 reaper 가 거둬 가면 조회는 실패하는데, 그때 Err 를 내면
+            //   "실패했다고 답하면서 기록은 지운" 모순이 된다. 그래서 spawn 시점 정보로 떨어진다.
+            // ★단 그 정보를 **산 것으로** 돌려주지는 않는다★: spawn 시점 스냅샷의 status 는 `Running` 이라
+            //   그대로 내면 호출자가 시체를 산 에이전트로 보고한다(`state_of` 가 "live" 로 번역하고, WS 는
+            //   그 status 로 `Spawned` 를 낸다 — 그러면 다음 동사가 시체에게 편지를 쓴다). 조회가 놓쳤다는
+            //   것 자체가 "그 사이 수거됐다" 는 관측이므로 종점 상태로 낮춰 싣는다. 코드는 모른다(`None`).
+            // ADR-0172
+            RestoreOutcome::Resumed => match self.agent_info_by_id(profile.id) {
+                Ok(info) => Ok(info),
+                Err(e) => match spawned {
+                    Some(mut info) => {
+                        info.status = AgentStatus::Exited { code: None };
+                        Ok(info)
+                    }
+                    None => Err(e),
+                },
+            },
             RestoreOutcome::Failed { reason } => Err(PtyError::SpawnFailed(reason)),
-            // resumable 프로필로만 진입하므로 Started/Blocked/FreshFallback 은 도달 불가(방어적 Err).
+            // resumable 프로필로만 진입하므로 나머지 결말은 도달 불가(방어적 Err).
+            // ★방어 갈래는 상태를 건드리지 않는다★: 무슨 일이 있었는지 모르는 자리라, 실패를 단정해 쓰면
+            //   방금 뜬 에이전트에 도장을 찍을 수 있다(그것도 epoch 가드 없이).
             other => Err(PtyError::SpawnFailed(format!(
                 "activate_profile: 예상 밖 결말 {other:?}"
             ))),
+        }
+    }
+
+    /// ★「마지막 실패」를 쓰는 **유일한 지점**(ADR-0172 결정 4 — 개정판)★. `None` = 활성화가 성립했다
+    /// → 지운다. `Some(kind)` = 그 자리에서 기록한다.
+    ///
+    /// ★지우는 조건이 「대화 왕복 성립」에서 「활성화 성공」으로 바뀐 이유 — 되돌리지 마라★:
+    ///   왕복 성립은 **턴 종료 신호**로만 관측되는데 그 신호는 구조화(stream-json) 출력에서만 나온다
+    ///   (터미널·shell 은 분류자가 침묵). 반대로 실패 **분류**는 콘솔 바이트에서만 나온다(구조화 세션은
+    ///   진단을 stderr 로 흘린다). 두 반쪽이 출력 형식으로 갈려 서로 배타적이라, 왕복 기준으로는
+    ///   터미널 에이전트의 기록이 **영영 안 지워진다**. 게다가 그 신호는 epoch 게이트가 없고
+    ///   (`StatusSink::turn_ended` — "잉여는 무해한 no-op") 논블록 계약이라, 거기서 프로필 lock 을 잡는
+    ///   것 자체가 계약 위반이었다.
+    /// ★성공을 지움 근거로 삼는 것이 정직한 이유★: `--resume` 가 조기종료 창을 넘겼으면 이어받을 대화가
+    ///   **실재했다**는 뜻이고, fresh 가 떴으면 이제 하나 생긴다. 그 뒤 한 마디도 없이 닫으면 **다음
+    ///   활성화가 다시 실패해 다시 기록된다** — 그게 「미리 감지하지 않고 실패한 자리에서 기록한다」다.
+    /// ★기록과 같은 스레드에서 부른다★: 활성화를 집행하는 그 스레드다(출력 pump 아님).
+    /// ★`incarnation` 은 지각-쓰기 가드다★ — 계약은 `ProfileRegistry::set_last_failure` 가 갖는다.
+    ///   화신이 만들어진 결말(성공 · 조기종료)은 그 epoch 을 실어 보내고, 화신 전에 끝난 실패만 `None` 이다.
+    // ADR-0172
+    fn note_activation_result(
+        &self,
+        id: AgentId,
+        incarnation: Option<u32>,
+        failure: Option<AgentFailureKind>,
+    ) {
+        self.profiles.set_last_failure(id, incarnation, failure);
+    }
+
+    /// spawn 한 번으로 결말이 나는 갈래(Fresh)의 기록 — 띄웠으면 그 화신의 epoch 으로 지우고, 실패면
+    /// 기록하고, **할 일이 없었으면 아무것도 쓰지 않는다**.
+    ///
+    /// ★moot 이 아무것도 안 쓰는 것은 예외가 아니라 정의다★: 이 호출은 아무것도 하지 않았으므로 기록할
+    ///   실패도 없고 지울 근거도 없다. `activate_profile` 의 선제 "이미 실행 중" 갈래가 쓰지 않는 것과
+    ///   같은 이유다.
+    /// resume 은 이걸 쓰지 않는다 — spawn 이 Ok 여도 조기종료 창을 넘겨야 성립이라, 결말을 아는 자리가
+    /// `resume_no_fallback` 이다.
+    // ADR-0172
+    fn note_spawn_result(&self, id: AgentId, result: &Result<SpawnOutcome, PtyError>) {
+        match result {
+            Ok(SpawnOutcome::Started(info)) => {
+                self.note_activation_result(id, Some(info.epoch), None)
+            }
+            Ok(SpawnOutcome::Moot(_)) => {}
+            // 화신이 없으므로 비교할 세대가 없다(`set_last_failure` 계약의 `None` 갈래).
+            Err(_) => self.note_activation_result(id, None, Some(AgentFailureKind::SpawnFailed)),
         }
     }
 
@@ -1197,7 +1367,12 @@ impl AgentManager {
             backend::needs_session(&profile.command) && profile.claude_session_id.is_some();
 
         if !resumable {
-            return match self.spawn_agent(profile, SpawnMode::Fresh) {
+            // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.
+            let outcome = self.spawn_agent(profile, SpawnMode::Fresh);
+            self.note_spawn_result(profile.id, &outcome);
+            return match outcome {
+                // moot(이미 떠 있음)도 결과적으로 "그 항목은 떠 있다" 라 같은 보고로 접는다 — 복원 보고
+                //   어휘에 「할 일 없었음」 칸이 없다(그 칸을 만드는 것은 wire 변경이라 별건).
                 Ok(_) => RestoreOutcome::Started,
                 Err(e) => RestoreOutcome::Failed {
                     reason: e.to_string(),
@@ -1205,73 +1380,187 @@ impl AgentManager {
             };
         }
 
-        self.resume_no_fallback(profile)
+        self.resume_no_fallback(profile).0
     }
 
     /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
     /// 전제: 호출 시점에 이 프로필은 resumable(claude + sid 존재)이라고 이미 판정됐다.
     ///
-    /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 비정상 종료(빈/미대화/손상
-    /// 세션이면 claude 가 "No conversation found ..." 로 즉사)하면 **새 대화(fresh)를 자동으로
-    /// 만들지 않고** Failed(시체) 종점으로 직행한다 — 사유를 로그로 남겨 LLM 이 읽고 에스컬레이션한다.
+    /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 **비정상 종료하거나 진단 스트림이
+    /// 실패를 말하면**(빈/미대화/손상 세션이면 claude 가 "No conversation found ..." 를 stderr 로 낸다)
+    /// **새 대화(fresh)를 자동으로 만들지 않고** Failed(시체) 종점으로 직행한다 — 사유를 로그로 남겨
+    /// LLM 이 읽고 에스컬레이션한다.
+    /// ★"즉사" 가 아니다(실측 2026-08-23 정정)★: claude 는 그 진단을 내고도 종료 훅이 도는 동안 몇 초
+    ///   더 산다. 그래서 판정은 죽음이 아니라 증거로도 선다(`EarlyVerdict::Diagnosed`).
     /// ★아무것도 kill·재spawn 하지 않는다★: resume child 는 자기 pump 가 EOF→finish 하고, reaper 가
     ///   그 세션을 맵에서 수거하며 프로필을 `auto_restore=false`(KeepDisableAutoRestore)로 내려
     ///   트리에 `Failed` 시체로 남긴다(profile 은 지워지지 않음 — exit≠0/불명은 삭제 대상이 아님).
     ///   이 헬퍼는 종료를 관측만 하고 어떤 파괴 동작도 하지 않는다(옛 fallback_fresh 의 remove_session·
     ///   화신 표식 재발급·respawn 을 전부 걷어냈다 — ADR-0082 사용자 결정: "아무것도 죽지마, 새로 만들지마").
     /// 이 로직을 restore_one(부팅 복원)과 activate_profile(수동 활성화)이 **똑같이** 재사용한다.
+    ///
+    /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
+    /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
     // ADR-0082
-    fn resume_no_fallback(&self, profile: &AgentProfile) -> RestoreOutcome {
-        match self.spawn_agent(profile, SpawnMode::Resume) {
+    // ADR-0172
+    fn resume_no_fallback(&self, profile: &AgentProfile) -> (RestoreOutcome, Option<AgentInfo>) {
+        let spawned = match self.spawn_agent(profile, SpawnMode::Resume) {
             Err(e) => {
                 let reason = format!("resume spawn 실패: {e}");
+                // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
+                //   제어 LLM 이 읽는다" 의 화면·API 쪽 실물이다(로그는 사람만 읽는다).
+                self.note_activation_result(profile.id, None, Some(AgentFailureKind::SpawnFailed));
                 tracing::warn!(
                     agent = %profile.id,
                     %reason,
                     "ADR-0082: resume 실패 → Failed(시체), fresh-fallback 없음"
                 );
-                RestoreOutcome::Failed { reason }
+                return (RestoreOutcome::Failed { reason }, None);
             }
-            // ★fable M-1★: 성공한 claude resume은 TUI라 윈도 안에 종료하지 않는다.
-            // 따라서 윈도 내 terminal 진입은 code와 무관하게 resume 실패 신호다
-            // (code==0 조기 종료를 Resumed로 오판하면 빈 화면을 "복원 성공"으로 오보).
-            Ok(_) => match self.early_terminal_status(profile.id, EARLY_EXIT_WINDOW) {
-                Some(status) => {
-                    let reason = format!("resume 조기 종료({status:?})");
+            // ★할 일이 없었다 — 조기종료 창을 볼 이유도 없다★: 남이 띄운(띄우는 중인) 세션이라 우리가
+            //   관측한 것이 없고, 그래서 기록도 지움도 하지 않는다(`note_spawn_result` 와 같은 규율).
+            //   보고는 「떠 있다」로 접는다 — 복원 어휘에 「할 일 없었음」 칸이 없다.
+            // ADR-0172
+            Ok(SpawnOutcome::Moot(info)) => {
+                tracing::info!(
+                    agent = %profile.id,
+                    "resume: 이미 떠 있거나 뜨는 중 — 이 요청은 할 일이 없다(moot)"
+                );
+                return (RestoreOutcome::Resumed, info);
+            }
+            Ok(SpawnOutcome::Started(info)) => info,
+        };
+
+        // ★fable M-1★: 성공한 claude resume은 TUI라 윈도 안에 종료하지 않는다.
+        // 따라서 윈도 내 terminal 진입은 code와 무관하게 resume 실패 신호다
+        // (code==0 조기 종료를 Resumed로 오판하면 빈 화면을 "복원 성공"으로 오보).
+        //
+        // ★`spawned.epoch` 을 창 **밖으로** 들고 나간다(지각-쓰기 가드)★: 아래 두 쓰기는 최대
+        //   EARLY_EXIT_WINDOW 뒤에 일어나고 그때 예약은 이미 풀려 있다. 그 사이 다른 연결이 같은
+        //   프로필을 성공적으로 활성화하면 epoch 이 올라가므로, 이 값을 실어 보내면 옛 관측이 새 화신을
+        //   덮지 못한다(`set_last_failure` 계약).
+        // ADR-0172
+        match self.early_activation_verdict(profile.id, &profile.command, EARLY_EXIT_WINDOW) {
+            EarlyVerdict::Terminal { status, evidence } => {
+                let reason = format!("resume 조기 종료({status:?})");
+                // ★사용자가 끊은 것은 활성화 실패가 아니다 — 기록하지 않는다★: 창 안에서 kill 이 오면
+                //   (트리 종료·`agent.kill`·LLM 의 활성화→종료) 그건 우리가 관측할 실패가 아니라 명시적
+                //   개입이다. 기록하면 트리에 「이어받은 직후 종료됐습니다」가 남아, 사용자가 방금 스스로
+                //   끈 항목이 고장 난 것처럼 보인다. 활성화 결과는 여전히 Failed 다(에이전트가 안 떠 있다).
+                //   지우지도 않는다 — 이 시도에 대해 성립을 주장할 근거도 없다.
+                // ADR-0172
+                if matches!(status, AgentStatus::Killed) {
+                    tracing::info!(
+                        agent = %profile.id,
+                        %reason,
+                        "resume 창 안에서 사용자 종료 — 활성화 실패로 기록하지 않는다"
+                    );
+                } else {
+                    // 증거로 종류를 알아보지 못하면 맥락 기본값 — 「이어받기 직후 조기 종료」(재시도 가능).
+                    let kind = backend::resume_failure_kind(&profile.command, &evidence)
+                        .unwrap_or(AgentFailureKind::EarlyExitAfterResume);
+                    self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
                     tracing::warn!(
                         agent = %profile.id,
                         %reason,
+                        ?kind,
                         "ADR-0082: resume 조기종료 → Failed(시체), fresh-fallback 없음 — LLM 에스컬레이션 대상"
                     );
-                    RestoreOutcome::Failed { reason }
                 }
-                None => RestoreOutcome::Resumed,
-            },
+                (RestoreOutcome::Failed { reason }, Some(spawned))
+            }
+            // ★아직 살아 있는데 실패로 접는다 — 그리고 **아무것도 죽이지 않는다**★: claude 는 진단을
+            //   내고도 종료 훅이 도는 동안 몇 초 더 산다(실측 +2.2s 진단 / +6.4s 종료). 그 시체를
+            //   기다리면 창을 넘겨 실패가 성공으로 판정되므로 여기서 확정한다. 처분은 그대로 관측뿐이다
+            //   — 자식은 자기 pump 가 EOF→finish 하고 reaper 가 거둔다(ADR-0082 "아무것도 죽지마").
+            // ★그래서 몇 초간 「도는 중 + 마지막 실패」 조합이 화면에 선다 — 버그가 아니다★: 두 축이
+            //   별개라 표현되는 상태이고, 트리는 「도는 중이 이긴다」로 그 사이를 그린다(ADR-0173).
+            // ADR-0172
+            EarlyVerdict::Diagnosed(kind) => {
+                let reason = format!("resume 실패 진단({kind:?})");
+                self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
+                tracing::warn!(
+                    agent = %profile.id,
+                    %reason,
+                    ?kind,
+                    "ADR-0172: 진단 스트림이 이어받기 실패를 확정 — 종료를 기다리지 않는다"
+                );
+                (RestoreOutcome::Failed { reason }, Some(spawned))
+            }
+            EarlyVerdict::Alive => {
+                // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
+                //   근거다(`note_activation_result` 주석).
+                self.note_activation_result(profile.id, Some(spawned.epoch), None);
+                (RestoreOutcome::Resumed, Some(spawned))
+            }
         }
     }
 
-    /// spawn 후 window 안에 terminal 상태가 되면 그 상태를, 안 되면 None(여전히 살아있음).
-    fn early_terminal_status(&self, id: AgentId, window: Duration) -> Option<AgentStatus> {
+    /// spawn 후 window 안에 이어받기의 결말을 판정한다 — **죽음 또는 증거**(`EarlyVerdict`).
+    ///
+    /// ★증거를 죽음보다 먼저 보지 않는다(루프 안 순서 — load-bearing)★: 매 폴에서 상태를 먼저 보고
+    ///   그 다음 진단을 본다. 뒤집으면 창 안에 온 **사용자 종료**가 `Diagnosed` 로 앞질러 잡혀,
+    ///   "사용자가 끊은 것은 실패가 아니다" 규율(아래 `resume_no_fallback`)이 우회된다.
+    /// ★진단만으로 확정하는 것은 stderr 스트림뿐이다 — 콘솔 링을 여기에 넣지 마라★: 콘솔 링에는
+    ///   claude 가 이어받아 **다시 그린 대화 본문**이 통째로 들어온다. 살아 있는 세션의 링에서 실패
+    ///   문구를 찾으면, 예전에 그 문구를 이야기한 대화(이 저장소의 세션이 실제로 그렇다)를 이어받는
+    ///   순간 **성공한 활성화가 실패로 도장 찍힌다.** stderr 는 claude 자신의 진단 채널이라 대화 본문이
+    ///   섞이지 않으므로 그 오탐이 원천적으로 없다. 콘솔 꼬리는 **죽은 뒤**에만 증거로 쓴다(아래).
+    /// ★세션 Arc 를 **루프 밖에서 한 번** 잡는다(load-bearing — 되돌리지 마라)★: 루프 안에서 매번
+    ///   `get_session` 하면 거의 항상 꼬리를 놓친다. `finish` 는 terminal 상태를 세운 **직후** reaper 를
+    ///   깨우고 reaper 는 첫 동작으로 세션을 명부에서 지우는데, 이 루프의 간격은 100ms 다 — 즉 우리가
+    ///   깨어날 때쯤엔 이미 조회가 실패해 빈 꼬리로 떨어지고, 분류는 언제나 맥락 기본값이 된다
+    ///   (그러면 「이어받을 대화 없음」 판정이 사실상 죽은 코드가 된다). Arc 를 들고 있으면 명부에서
+    ///   빠진 뒤에도 같은 `OutputCore` 를 보므로 terminal 상태도 출력 링도 진단 버퍼도 그대로 읽힌다.
+    /// ★첫 조회 실패는 "세션이 없었다" 가 아니다★: `spawn_agent` 가 Ok 를 준 뒤 이 조회에 닿기까지 자식이
+    ///   죽어 reaper 가 이미 거둬 갔을 수 있다(빠른 즉사 배치가 실제로 그 순서를 낸다). 그 경우 꼬리를
+    ///   놓치므로 분류는 맥락 기본값으로 떨어진다 — 어느 쪽이든 재시도 가능 쪽이라 fail-open 이고, 그래서
+    ///   여기서 두 원인을 가르지 않는다.
+    /// ★증거 두 갈래는 배타적이고, 그래서 합쳐서 넘긴다★: PTY(터미널) 세션은 stderr 가 콘솔에 병합돼
+    ///   링에만 있고, 파이프(구조화) 세션은 진단 버퍼에만 있다. 어느 쪽이든 빈 값이 정상 결과이며,
+    ///   둘 다 비면 호출자가 맥락 기본값으로 떨어뜨린다(fail-open).
+    /// ★`command` 를 받는 이유★: "이 문구가 무슨 뜻인가" 는 백엔드 지식이라 판정을 `backend` 에 위임한다
+    ///   (ADR-0004) — manager 는 문자열을 직접 읽지 않는다.
+    // ADR-0172
+    fn early_activation_verdict(
+        &self,
+        id: AgentId,
+        command: &AgentCommand,
+        window: Duration,
+    ) -> EarlyVerdict {
+        let session = match self.get_session(id) {
+            Ok(s) => s,
+            // 명부에 없다 = 아직 안 올랐거나 이미 거둬졌다 → 어느 쪽이든 종료로 간주(위 doc).
+            Err(_) => {
+                return EarlyVerdict::Terminal {
+                    status: AgentStatus::Failed {
+                        message: "session gone".into(),
+                    },
+                    evidence: String::new(),
+                }
+            }
+        };
         let deadline = Instant::now() + window;
         loop {
-            let session = match self.get_session(id) {
-                Ok(s) => s,
-                // 맵에서 사라짐 = 비정상 → 종료로 간주.
-                Err(_) => {
-                    return Some(AgentStatus::Failed {
-                        message: "session gone".into(),
-                    })
-                }
-            };
             let status = session.status();
             if matches!(
                 status,
                 AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
             ) {
-                return Some(status);
+                let tail = session.terminal_tail(FAILURE_TAIL_BYTES);
+                let mut evidence = String::from_utf8_lossy(&tail).into_owned();
+                let diagnostics = session.diagnostic_tail();
+                if !diagnostics.is_empty() {
+                    evidence.push('\n');
+                    evidence.push_str(&diagnostics);
+                }
+                return EarlyVerdict::Terminal { status, evidence };
+            }
+            if let Some(kind) = backend::resume_failure_kind(command, &session.diagnostic_tail()) {
+                return EarlyVerdict::Diagnosed(kind);
             }
             if Instant::now() >= deadline {
-                return None;
+                return EarlyVerdict::Alive;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1778,6 +2067,178 @@ mod tests {
             .expect("sessions poisoned")
             .insert(id, session);
         written
+    }
+
+    /// 명부에 **살아 있는**(종점 상태가 아닌) 세션 하나를 꽂고 그 화신의 `OutputCore` 를 돌려준다.
+    ///
+    /// ★실 프로세스를 쓰지 않는 이유★: 여기서 재는 것은 "진단 텍스트가 있고 세션이 살아 있을 때 판정이
+    ///   어떻게 서는가" 뿐이라 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리). `RecordingTransport`
+    ///   는 아무것도 띄우지 않으므로 이 세션은 **스스로 절대 죽지 않는다** — 그게 "죽음을 기다리지 않는다"
+    ///   를 재는 데 필요한 성질이다(실 claude 로는 그 상태를 결정적으로 붙들 수 없다).
+    // ADR-0172
+    fn put_live_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<OutputCore> {
+        let core = Arc::new(OutputCore::new(
+            id,
+            epoch,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from("."),
+            epoch,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            BackendCaps {
+                session: SessionCaps {
+                    resume: true,
+                    snapshot: false,
+                    cwd_env: false,
+                },
+                model: ModelCaps {
+                    select: false,
+                    temperature: false,
+                    max_tokens: false,
+                },
+            },
+            InputEncoder::Raw,
+            true,
+            core.clone(),
+            Box::new(RecordingTransport {
+                written: Arc::new(Mutex::new(Vec::new())),
+            }),
+        ));
+        manager
+            .sessions
+            .write()
+            .expect("sessions poisoned")
+            .insert(id, session);
+        core
+    }
+
+    fn claude_terminal_command() -> crate::agent::profile::AgentCommand {
+        crate::agent::profile::AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: crate::agent::profile::ClaudeOutputFormat::Terminal,
+        }
+    }
+
+    // ── ADR-0172: 판정은 죽음이 아니라 **증거**로도 선다 ────────────────────────────────
+
+    /// ★이 기능의 표제 사례 회귀망(실측 2026-08-23)★ — 진단이 이미 실패를 말했으면 프로세스가 아직
+    /// 살아 있어도 그 자리에서 확정한다.
+    ///
+    /// 잡는 회귀는 정확히 이것이다: 실 claude 는 `--resume <빈 sid>` 에 대해 **+2.2s 에 진단을 내고
+    /// +6.4s 에야 죽는다**(그 사이 SessionEnd 훅이 돈다). 죽음만 기다리는 옛 판정은 3s 창을 넘겨
+    /// **실패를 성공으로 판정하고 앞선 기록까지 지웠다** — 표제 사례가 통째로 죽어 있었다.
+    ///
+    /// ★시계를 단언하지 않는다(이 저장소의 옛 flaky 재발 방지)★: "빨리 돌아왔다" 를 경과시간으로 재지
+    ///   않는다. 대신 **창을 아주 길게** 주고 결말만 본다 — 죽음을 기다리는 구현이라면 이 세션은 스스로
+    ///   죽지 않으므로 창 끝까지 갔다가 `Alive` 를 내고, 그 단언이 붉어진다. 통과 조건이 타이밍에
+    ///   좌우되지 않는다.
+    #[test]
+    fn a_diagnosed_failure_settles_the_verdict_without_waiting_for_the_process_to_die() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let core = put_live_session(&manager, id, 1);
+        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        core.push_diagnostic("No conversation found with session ID: 8b1c");
+
+        // ★창을 운영값(3s)보다 훨씬 길게 준다★: 이 세션은 스스로 죽지 않으므로, 죽음만 기다리는 구현은
+        //   창 끝까지 갔다가 `Alive` 를 내고 아래 단언이 붉어진다. 값이 크면 "우연히 데드라인에 걸려
+        //   통과" 가 불가능해진다(그 대가는 회귀 시 red 가 느린 것뿐이다).
+        let verdict = manager.early_activation_verdict(
+            id,
+            &claude_terminal_command(),
+            Duration::from_secs(30),
+        );
+
+        assert!(
+            matches!(
+                verdict,
+                EarlyVerdict::Diagnosed(AgentFailureKind::NoConversationToResume)
+            ),
+            "진단이 이미 말했으면 시체를 기다리지 않는다 — got {:?}",
+            match verdict {
+                EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
+                EarlyVerdict::Alive => "Alive(죽음만 기다리는 옛 판정 = 회귀)".into(),
+                EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
+            }
+        );
+        assert!(
+            !matches!(
+                manager.get_session(id).expect("세션은 명부에 있다").status(),
+                AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
+            ),
+            "판정 시점에 이 세션은 아직 살아 있어야 한다 — 죽었다면 이 테스트는 옛 갈래를 재는 것이다"
+        );
+    }
+
+    /// ★같은 자리의 오탐 방어★ — 진단이 침묵하면 살아 있는 세션은 그대로 성립으로 넘어간다.
+    ///
+    /// 이 단언이 없으면 위 테스트는 "아무 텍스트에나 Diagnosed 를 내는" 구현으로도 통과한다. 그 구현은
+    /// **성공한 이어받기를 실패로 도장 찍는다**(fail-open 위반 — ADR-0172 §영향).
+    #[test]
+    fn a_live_session_with_nothing_to_say_is_not_diagnosed() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let core = put_live_session(&manager, id, 1);
+        // 시드는 단언 밖에서 한다 — 모르는 문구는 단정 대상이 아니다.
+        core.push_diagnostic("[DEBUG] loading plugins…");
+
+        let verdict = manager.early_activation_verdict(
+            id,
+            &claude_terminal_command(),
+            Duration::from_millis(250),
+        );
+
+        assert!(
+            matches!(verdict, EarlyVerdict::Alive),
+            "모르는 진단은 활성화를 막지 않는다(fail-open) — got {}",
+            match verdict {
+                EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
+                EarlyVerdict::Alive => "Alive".into(),
+                EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
+            }
+        );
+    }
+
+    /// ★죽은 세션의 증거에 **진단 스트림**도 들어간다★ — 구조화 세션은 콘솔 링이 비고 stderr 만 찬다.
+    ///
+    /// 이 갈래가 빠져 있었던 것이 결함 (2) 다: 분류기는 콘솔 꼬리만 봤고, stream-json 이 기본 출력
+    /// 형식이라 **대부분의 에이전트에서 분류기가 눈이 먼 채로** 돌았다.
+    #[test]
+    fn a_dead_sessions_diagnostic_stream_counts_as_evidence_too() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let core = put_live_session(&manager, id, 1);
+        // 시드는 단언 밖에서 한다 — 콘솔 링은 **비운 채로** 둔다(구조화 세션의 실제 모양).
+        core.push_diagnostic("No conversation found with session ID: 8b1c");
+        core.finish(TerminalReason::Exited { code: Some(1) });
+
+        let verdict = manager.early_activation_verdict(
+            id,
+            &claude_terminal_command(),
+            Duration::from_secs(5),
+        );
+
+        let evidence = match verdict {
+            EarlyVerdict::Terminal { evidence, .. } => evidence,
+            other => panic!(
+                "전제: 종점 상태로 관측된다 — got {}",
+                match other {
+                    EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
+                    EarlyVerdict::Alive => "Alive".into(),
+                    EarlyVerdict::Terminal { .. } => unreachable!(),
+                }
+            ),
+        };
+        assert_eq!(
+            backend::resume_failure_kind(&claude_terminal_command(), &evidence),
+            Some(AgentFailureKind::NoConversationToResume),
+            "콘솔 링이 비어도 stderr 가 분류를 세워야 한다 — got evidence {evidence:?}"
+        );
     }
 
     // ── subscribe_from: Err 은 on_ready 앞이다(데몬 거절 통보 계약의 전제) ──────────────
@@ -2971,6 +3432,229 @@ mod tests {
         );
     }
 
+    // ── ADR-0172: 중복 요청은 오류가 아니라 「할 일 없음」이고, 아무것도 바꾸지 않는다 ────────────
+
+    /// ★이미 뜨는 중인 항목에 온 요청 — 예약을 잡아 두어 **결정적으로** 그 상황을 만든다★.
+    ///
+    /// 스레드 경쟁을 기다리지 않는다: 예약을 직접 들고 있으면 그 뒤 오는 요청은 반드시 진다.
+    /// 확인하는 것 셋 — 오류가 아니라 결말이라는 것 · 호출자가 「내가 띄운 게 아니다」를 구분할 수 있다는 것 ·
+    /// 그리고 **기록도 지움도 일어나지 않는다**는 것(앞서 기록해 둔 값이 그대로 남는다).
+    #[test]
+    fn a_request_that_arrives_while_another_spawn_is_in_flight_is_moot_and_changes_nothing() {
+        use crate::agent::failure::AgentFailureKind;
+
+        let manager = bare_manager();
+        let profile = create(&manager, "C:/moot-in-flight", Some("moot-in-flight"));
+        let id = profile.id;
+        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        let seeded = manager.profiles.set_last_failure(
+            id,
+            None,
+            Some(AgentFailureKind::NoConversationToResume),
+        );
+        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+
+        // 다른 요청이 진행 중인 상황 그 자체 — 놓지 않고 들고 있는다.
+        let _held =
+            SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약을 잡을 수 있다");
+
+        let outcome = manager
+            .activate_profile(&profile, SpawnMode::Fresh)
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            outcome.is_some(),
+            "승자가 아직 명부에 올리기 전이라 돌려줄 세션이 없다 — NotFound 가 정직한 답이다"
+        );
+        assert!(
+            manager.list_agents().is_empty(),
+            "이 요청은 프로세스를 띄우지 않았다"
+        );
+        assert_eq!(
+            manager.agent_snapshot(id).and_then(|p| p.last_failure),
+            Some(AgentFailureKind::NoConversationToResume),
+            "할 일이 없었으므로 기록하지도, 지우지도 않는다"
+        );
+    }
+
+    /// ★이미 떠 있는 항목에 온 요청 — 실 프로세스로 본다★. 위 형제와 갈리는 지점은 **돌려줄 세션이
+    /// 있다**는 것이라, 호출자가 moot 을 받고도 그 에이전트 정보를 얻는다.
+    #[cfg(windows)]
+    #[test]
+    fn a_request_for_an_already_running_agent_is_moot_and_returns_the_live_session() {
+        use crate::agent::failure::AgentFailureKind;
+
+        let manager = bare_manager();
+        let profile = create(
+            &manager,
+            &std::env::temp_dir().to_string_lossy(),
+            Some("moot-live"),
+        );
+        let id = profile.id;
+        let first = manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("최초 spawn");
+        assert!(first.started(), "전제: 첫 요청이 실제로 띄웠다");
+
+        // 산 에이전트에 기록을 심어 두고, 중복 요청이 그것을 건드리지 않는지 본다.
+        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        let seeded = manager.profiles.set_last_failure(
+            id,
+            None,
+            Some(AgentFailureKind::EarlyExitAfterResume),
+        );
+        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+
+        let again = manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("중복 요청은 오류가 아니다");
+        assert!(!again.started(), "이 호출은 아무것도 띄우지 않았다");
+        assert_eq!(
+            again.into_info().map(|i| i.id),
+            Some(id),
+            "moot 이어도 산 세션 정보는 돌려준다"
+        );
+        assert_eq!(
+            manager.agent_snapshot(id).and_then(|p| p.last_failure),
+            Some(AgentFailureKind::EarlyExitAfterResume),
+            "할 일이 없었으므로 기록도 지움도 없다"
+        );
+        assert_eq!(manager.list_agents().len(), 1, "화신은 여전히 하나다");
+
+        manager.kill_agent(id).ok();
+    }
+
+    /// 활성화가 성립하면 그 자리에서 지운다(ADR-0172 결정 4 개정판) — 그리고 그 뒤에도 축은 여전히
+    /// 별개다: 도는 항목에 기록을 다시 붙일 수 있어야 화면의 「도는 중이 이긴다」 규칙이 설 자리가 있다.
+    ///
+    /// ★in-crate 테스트인 이유★: 시드에 `set_last_failure` 가 필요하고 그 동사는 `pub(crate)` 다
+    ///   (단일 쓰기 지점 경계를 crate 밖으로는 컴파일러가 지키게 한다).
+    #[cfg(windows)]
+    #[test]
+    fn a_successful_activation_clears_the_last_failure_but_the_axis_stays_separate() {
+        use crate::agent::failure::AgentFailureKind;
+
+        let manager = bare_manager();
+        let profile = create(
+            &manager,
+            &std::env::temp_dir().to_string_lossy(),
+            Some("clear-on-success"),
+        );
+        let id = profile.id;
+        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        let seeded = manager.profiles.set_last_failure(
+            id,
+            None,
+            Some(AgentFailureKind::NoConversationToResume),
+        );
+        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+
+        let info = manager
+            .activate_profile(&profile, SpawnMode::Fresh)
+            .expect("활성화는 성공한다");
+        assert!(
+            !matches!(
+                info.status,
+                AgentStatus::Failed { .. } | AgentStatus::Killed | AgentStatus::Exited { .. }
+            ),
+            "전제: 이 세션은 살아 있다 — got {:?}",
+            info.status
+        );
+        assert_eq!(
+            manager.agent_snapshot(id).and_then(|p| p.last_failure),
+            None,
+            "활성화가 성립했으니 지워야 한다"
+        );
+
+        // 축 독립성 — 상태 열거형에 합쳤다면 이 조합이 아예 표현되지 않는다.
+        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        let seeded = manager.profiles.set_last_failure(
+            id,
+            Some(info.epoch),
+            Some(AgentFailureKind::SpawnFailed),
+        );
+        assert!(seeded, "전제: 시드가 실제로 값을 바꾼다");
+        assert!(
+            manager.list_agents().iter().any(|a| a.id == id),
+            "여전히 산 명부에 있다"
+        );
+        assert_eq!(
+            manager.agent_snapshot(id).and_then(|p| p.last_failure),
+            Some(AgentFailureKind::SpawnFailed),
+            "도는 중 + 마지막 실패 조합이 표현된다"
+        );
+
+        manager.kill_agent(id).ok();
+    }
+
+    /// ★죽은 세션의 출력 꼬리가 실제로 읽히는지 — 실 프로세스로만 말할 수 있다(ADR-0172)★.
+    ///
+    /// 이 테스트가 잡는 회귀는 하나다: 폴링 루프 **안에서** 세션을 다시 조회하면, `finish` 가 상태를 세운
+    /// 직후 reaper 가 명부에서 지우므로(우리 폴링 간격은 100ms) 거의 언제나 조회가 실패해 꼬리가 빈다.
+    /// 그러면 분류는 항상 맥락 기본값으로 떨어지고 「이어받을 대화 없음」 판정이 **죽은 코드**가 된다 —
+    /// 순수 dispatch 테스트는 그 사실을 못 본다.
+    #[cfg(windows)]
+    #[test]
+    fn early_verdict_captures_the_dead_sessions_output_tail() {
+        use crate::agent::failure::AgentFailureKind;
+
+        // ★배치 파일인 이유★: portable-pty CommandBuilder 가 `&`·`>` 를 개별 quoting 해 ConPTY 통과 중
+        //   깨뜨린다(activation.rs 픽스처의 실측). 배치는 cmd 가 직접 파싱하니 결정적이다.
+        // ★죽기 전에 잠깐 산다(ping)★: 이 테스트의 대상은 "reaper 가 명부에서 지운 **뒤에도** 링을
+        //   읽는가" 다. 즉사시키면 첫 `get_session` 이 reaper 와 경쟁해 세션을 못 잡는 쪽으로 질 수 있고,
+        //   그러면 대상과 무관한 이유로 붉어진다(거짓 red). 잠깐 살려 Arc 획득을 확실히 한 뒤 죽인다 —
+        //   수거 후 읽기라는 검증 대상은 그대로다.
+        let uniq = uuid::Uuid::new_v4();
+        let batch = std::env::temp_dir().join(format!("engram-tail-probe-{uniq}.cmd"));
+        std::fs::write(
+            &batch,
+            "@echo off\r\necho No conversation found with session ID: 8b1c\r\nping -n 2 127.0.0.1 >nul\r\nexit /b 1\r\n",
+        )
+        .expect("배치 write");
+
+        let manager = bare_manager();
+        let mut draft = agent_profile(&std::env::temp_dir().to_string_lossy(), Some("tail-probe"));
+        draft.command = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), batch.to_string_lossy().to_string()],
+        };
+        let profile = manager.create_agent(draft).expect("등록");
+        manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+
+        // ★shell 프로필이라 진단 버퍼는 비어 있다(PTY 는 stderr 를 콘솔에 병합한다)★ — 즉 여기서
+        //   서는 증거는 오롯이 **콘솔 꼬리**이고, 그게 이 테스트가 재는 것이다.
+        let EarlyVerdict::Terminal { status, evidence } = manager.early_activation_verdict(
+            profile.id,
+            &claude_terminal_command(),
+            Duration::from_secs(10),
+        ) else {
+            panic!("이 배치는 즉시 죽는다(전제)")
+        };
+        assert!(
+            matches!(
+                status,
+                AgentStatus::Exited { .. } | AgentStatus::Failed { .. } | AgentStatus::Killed
+            ),
+            "전제: 종점 상태로 관측된다 — got {status:?}"
+        );
+        assert!(
+            evidence.contains("No conversation found"),
+            "reaper 가 세션을 거둔 뒤에도 꼬리가 읽혀야 한다 — 비면 분류가 언제나 맥락 기본값이다. got {evidence:?}"
+        );
+        // 그 꼬리가 실제로 분류까지 이어진다(claude 어휘 — 실 claude 없이 dispatch 만 태운다).
+        assert_eq!(
+            backend::resume_failure_kind(&claude_terminal_command(), &evidence),
+            Some(AgentFailureKind::NoConversationToResume),
+            "실 세션에서 읽은 꼬리가 「이어받을 대화 없음」으로 분류돼야 한다"
+        );
+
+        let _ = std::fs::remove_file(&batch);
+    }
+
     /// ★실 프로세스로 보는 이유★: 표식 발급은 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이
     /// 말한다.
     #[cfg(windows)]
@@ -2984,7 +3668,9 @@ mod tests {
         );
         let first = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("첫 spawn");
+            .expect("첫 spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
         manager.kill_agent(first.id).ok();
         // reaper 가 맵에서 수거할 때까지 — 그 뒤라야 두 번째 spawn 이 이중 spawn 가드를 통과한다.
         let reaped = (0..200).any(|_| {
@@ -2998,7 +3684,9 @@ mod tests {
 
         let second = manager
             .spawn_agent(&profile, SpawnMode::Fresh)
-            .expect("Fresh 재spawn");
+            .expect("Fresh 재spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
         assert_ne!(
             second.epoch, first.epoch,
             "Fresh 재spawn 이 죽은 화신의 표식을 재사용하면 안 된다"
@@ -3019,7 +3707,9 @@ mod tests {
         );
         let first = manager
             .spawn_agent(&existing, SpawnMode::Fresh)
-            .expect("기존 에이전트 spawn");
+            .expect("기존 에이전트 spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
         assert_eq!(
             first.name, "bob",
             "이미 명부에 있는 에이전트를 띄우는 건 개명 대상이 아니다"
@@ -3028,7 +3718,9 @@ mod tests {
         let adhoc = agent_profile(&std::env::temp_dir().to_string_lossy(), Some("bob"));
         let second = manager
             .spawn_agent(&adhoc, SpawnMode::Fresh)
-            .expect("ad-hoc spawn");
+            .expect("ad-hoc spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
         assert_eq!(second.name, "bob(1)", "신규 등록 spawn 은 접미사를 받는다");
 
         manager.kill_agent(first.id).ok();

@@ -1028,7 +1028,9 @@ mod tests {
             let port = ManagerDeliveryPort::new(manager.clone());
             let info = manager
                 .spawn_agent(&shell("sheller"), SpawnMode::Fresh)
-                .expect("shell spawn");
+                .expect("shell spawn")
+                .into_started()
+                .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
             assert!(wait_until(|| manager
                 .list_agents()
                 .iter()
@@ -1105,7 +1107,9 @@ mod tests {
             let port = ManagerDeliveryPort::new(manager.clone());
             let info = manager
                 .spawn_agent(&profile("raw-live-twin", "twin"), SpawnMode::Fresh)
-                .expect("shell spawn");
+                .expect("shell spawn")
+                .into_started()
+                .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
             assert!(wait_until(|| manager
                 .list_agents()
                 .iter()
