@@ -13,16 +13,19 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import { type ThemeName } from '../store/themeStore'
 import { retryAsync, RetryCancelledError } from '../util/retryInvoke'
 import { themeManager } from './ThemeManager'
 
-// 셸이 미는 알림. 전 창이 같은 값을 받는다(`src-tauri/src/commands/settings.rs`).
+// 셸이 미는 알림. ★창마다 자기 값이 온다★ — 셸이 목적지를 지목해 보낸다(`src-tauri/src/commands/settings.rs`).
 const EVT_UI_SETTINGS_UPDATED = 'ui:settings-updated'
 // 부팅 조회. 미는 쪽과 같은 모양(`{theme, source}`)을 돌려준다 — 셸이 두 자리에 같은 페이로드 struct 를
 // 쓴다. ★여기서 읽는 것은 `theme` 뿐이다★ — `source`(파일에서 왔나 / 기본값으로 접혔나)는 명령 답장을 보는
 // 호출자 몫이고 화면은 값만 쓴다.
+// ★창 인자를 안 넘긴다★ — 어느 창이 물었는지는 Tauri 가 셸 쪽에 넣어 준다(웹뷰가 밝히면 잘못 적힌 label
+// 하나가 남의 창 테마를 가져간다).
 const CMD_GET_UI_SETTINGS = 'get_ui_settings'
 
 const THEMES: readonly ThemeName[] = ['dark', 'light', 'e-ink']
@@ -72,17 +75,26 @@ export function installUiSettings(): () => void {
     //   `listen()` 이 영영 안 풀리면 재시도 루프가 첫 시도에서 멈춰 있고, 그 아래 부팅 조회까지 함께 막힌다
     //   (순서 종속 — 바로 위 항목). 「재시도가 있으니 등록은 결국 된다」로 읽지 말 것.
     try {
+      // ★★`target` 을 빼지 말 것 — 그러면 이 창이 **남의 창 값까지** 받아 마지막 것을 칠한다★★
+      //   `listen()` 의 기본 타깃은 `Any` 이고, Tauri 는 `Any` 로 등록된 리스너를 **필터와 무관하게 전부**
+      //   깨운다(`match_any_or_filter`). 셸은 창마다 `emit_to(label, …)` 로 자기 값을 보내므로, 기본
+      //   등록이면 창 셋짜리 refresh 한 번에 이 창이 값 셋을 받고 **먼저 온 것들이 무의미해진다**.
+      //   ★label 은 Tauri 가 준다★ — 셸도 같은 값을 쓴다(`commands/settings.rs` 의 `Window::label()`).
       const off = await retryAsync(
         () =>
-          listen<unknown>(EVT_UI_SETTINGS_UPDATED, e => {
-            // ★정리된 뒤에 온 것은 버린다★: dispose 가 `listen()` 대기 중에 돌면, 등록은 이미 끝났는데
-            //   아래 `off()` 에는 아직 못 닿은 창이 생긴다. 그 틈에 배달되면 **죽은 인스턴스**
-            //   (StrictMode 첫 회 · HMR 이전 판)가 살아 있는 창의 테마를 덮는다. `off()` 만으로는
-            //   그 한 건을 못 막는다.
-            if (disposed) return
-            pushed = true
-            themeManager.apply(themeOf(e.payload, EVT_UI_SETTINGS_UPDATED))
-          }),
+          listen<unknown>(
+            EVT_UI_SETTINGS_UPDATED,
+            e => {
+              // ★정리된 뒤에 온 것은 버린다★: dispose 가 `listen()` 대기 중에 돌면, 등록은 이미 끝났는데
+              //   아래 `off()` 에는 아직 못 닿은 창이 생긴다. 그 틈에 배달되면 **죽은 인스턴스**
+              //   (StrictMode 첫 회 · HMR 이전 판)가 살아 있는 창의 테마를 덮는다. `off()` 만으로는
+              //   그 한 건을 못 막는다.
+              if (disposed) return
+              pushed = true
+              themeManager.apply(themeOf(e.payload, EVT_UI_SETTINGS_UPDATED))
+            },
+            { target: getCurrentWindow().label },
+          ),
         {
           isCancelled: () => disposed,
           onRetry: (err, attempt) => {

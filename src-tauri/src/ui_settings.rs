@@ -1,7 +1,8 @@
 //! 디스크의 UI 설정(`<data_dir>/ui-settings.json`) — ★셸은 이 파일을 읽기만 한다★.
 //!
-//! 소유: 파일 위치 · 원문→값 변환 · 못 읽거나 깨졌을 때의 기본값. 진입점은 [`load_theme`](fn.load_theme.html)
-//! (seam 위)과 [`parse_theme`](fn.parse_theme.html)(순수).
+//! 소유: 파일 위치 · 원문→값 변환 · 못 읽거나 깨졌을 때의 기본값 · **어느 창이 어떤 값을 받나**. 진입점은
+//! [`load_settings`](fn.load_settings.html)(seam 위) · [`parse_settings`](fn.parse_settings.html)(순수) ·
+//! [`deliver_per_window`](fn.deliver_per_window.html)(창별 배달, 보내는 자리는 호출자가 넣는다).
 //!
 //! ## ★쓰기 경로가 없는 것은 의도다(되살리지 마라)★
 //! 파일은 **밖의 에이전트가 직접 고친다**. 그래서 화면의 테마 토글(`src/commands/themeCommands.ts`)은
@@ -13,17 +14,25 @@
 //! 에이전트 명부는 잃으면 되살릴 수 없어 깨진 원본을 옆에 남기지만, 이 파일에는 되살릴 것이 없다
 //! (한 칸짜리 취향값이고 밖에서 다시 쓰면 그만이다). 깨졌으면 로그 한 줄과 기본값이 전부다.
 //! ★사본을 안 남기는 것과 로그 레벨은 별개다★ — 파싱 실패는 그래도 손상 신호라 `error` 로 나간다
-//! ([`load_theme`] · 정본 `docs/reference/logging-conventions.md`).
+//! ([`load_settings`] · 정본 `docs/reference/logging-conventions.md`).
 //!
 //! ## ★원문 크기 상한이 있다★
 //! 밖의 에이전트가 쓰는 파일이라 크기가 우리 손에 없다. 통째로 읽고 나서 재면 상한 검사가 도착하기 전에
 //! 메모리가 먼저 바닥나 **기본값 접기도 경고도 못 돌고 프로세스가 죽는다** — 그래서 읽는 양 자체를
 //! [`MAX_SETTINGS_BYTES`] 에서 끊는다([`read_capped`]).
 //!
-//! ## ★한 칸(`theme`)만 읽는 것도 의도다★
-//! 파일럿이라 어휘를 넓히지 않는다. 칸을 늘릴 때는 [`parse_theme`] 을 늘리는 것이 아니라 값 타입을
-//! 세우고 그 아래에 칸을 붙인다 — 지금 모양은 「키 하나를 꺼내 본다」이지 스키마가 아니다.
+//! ## ★값 타입이 하나고 파싱도 한 자리다★
+//! 파일이 말하는 것은 [`UiSettings`] 한 벌이다 — 전역 테마와 창별 덮어쓰기 지도. **칸을 늘릴 때는
+//! [`parse_settings`] 안에서 그 타입에 칸을 붙인다**: 키를 하나 더 꺼내 보는 함수를 옆에 세우면 모르는 칸
+//! 무시·상한·기본값 접기가 함수마다 갈린다.
+//!
+//! ## ★고장의 무게가 둘로 갈린다★
+//! - **전역 칸을 못 쓰면 파일 전체를 못 쓴다** — 접을 바닥이 없어 모든 창이 [`DEFAULT_THEME`] 로 간다.
+//! - **창 항목 하나를 못 쓰면 그 창만 전역 값으로 접는다** — 파일은 멀쩡하고 전역 값이 이미 그 창의 답이다.
+//!   [`DEFAULT_THEME`] 로 접으면 그 창만 파일에 적힌 어느 값과도 안 맞게 된다. 사유는 로그가 진다
+//!   ([`ParsedSettings::refused`]).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// 데이터 폴더 안 파일 이름 — 밖의 에이전트가 이 이름으로 찾는다.
@@ -66,11 +75,57 @@ impl UiTheme {
     }
 }
 
+/// 파일 한 벌이 말하는 것 — 전역 테마와 **창별 덮어쓰기**.
+///
+/// 해소 규칙은 하나다: 항목이 있는 창은 그 값, 없는 창은 전역 값([`UiSettings::theme_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiSettings {
+    global: UiTheme,
+    /// 창 label → 그 창만의 테마. **없는 창은 부재가 곧 「전역 값」이다**(빈 값을 따로 두지 않는다).
+    ///
+    /// ★label 은 신원이 아니다★ — 팝아웃 label 은 앱을 띄울 때마다 1 부터 다시 세는 프로세스-로컬 카운터가
+    /// 짓는다(`commands/popout.rs`). 그래서 재시작을 넘긴 `slot-popup-1` 항목은 **다른 창**에 조용히
+    /// 적용된다. 쓸어내는 자리는 부팅이고 `ui.refresh` 가 아니다 — 아직 만들어지는 중인 창의 항목을 지운다.
+    // ADR-0167
+    windows: BTreeMap<String, UiTheme>,
+}
+
+impl UiSettings {
+    /// 창을 안 가리는 자리(명령 답장)가 싣는 값.
+    pub fn global(&self) -> UiTheme {
+        self.global
+    }
+
+    pub fn theme_for(&self, window: &str) -> UiTheme {
+        self.windows.get(window).copied().unwrap_or(self.global)
+    }
+}
+
+/// [`parse_settings`] 가 내놓는 것 — 값 한 벌과 **반려당한 창 항목**.
+///
+/// 반려를 값에 안 싣고 여기 따로 두는 이유: 반려는 로그로만 나가고 wire 로는 안 나간다([`ThemeSource`] 가
+/// 두 갈래인 채로 남는다). 접힌 결과 자체는 「항목이 없는 창」과 구별되지 않는다 — 그게 접기의 뜻이다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSettings {
+    pub settings: UiSettings,
+    /// 반려 사유 — ★[`MAX_REFUSED_DETAILS`] 건까지만★. 전체 개수는 [`ParsedSettings::refused_total`].
+    pub refused: Vec<String>,
+    /// 반려된 항목 총수(위 목록은 그중 앞부분).
+    pub refused_total: usize,
+}
+
+/// 로그에 사유를 펼치는 항목 수 상한.
+///
+/// ★개수 자체가 증폭 경로다★ — 원문은 [`MAX_SETTINGS_BYTES`] 까지 허용되므로 못 쓰는 항목이 수천 개인
+/// 파일이 성립하고, 이 파일은 **창을 열 때마다·refresh 때마다** 다시 읽힌다. 그래서 사유는 앞 몇 건만
+/// 펼치고 나머지는 총수로만 센다(값 하나의 길이를 자르는 것은 [`describe_value`] 의 몫 — 다른 축이다).
+pub const MAX_REFUSED_DETAILS: usize = 3;
+
 /// 적용된 값이 어디서 왔나 — ★두 갈래뿐이다★.
 ///
 /// 호출자의 질문은 「내가 고친 값이 먹었나」 하나이고, 그 답에 필요한 것은 이 둘이다. **왜** 접혔는지
 /// (파일 없음 · 못 읽음 · JSON 깨짐 · 모르는 이름 · 상한 초과)는 밖으로 내보내지 않는다 — 그 다섯은
-/// 로그가 진다([`load_theme`]). 다섯을 wire 로 올리면 호출자가 사유별 분기를 짜기 시작하고, 그 순간
+/// 로그가 진다([`load_settings`]). 다섯을 wire 로 올리면 호출자가 사유별 분기를 짜기 시작하고, 그 순간
 /// 이 다섯 갈래가 계약이 돼 버린다.
 ///
 /// ★wire 문자열을 손으로 적지 않는다★ — serde 가 variant 이름을 그대로 낸다. 리터럴을 다시 타이핑하면
@@ -86,7 +141,8 @@ pub enum ThemeSource {
     Fallback,
 }
 
-/// [`load_theme`] 이 내놓는 것 — 적용할 값과 **그 값이 파일에서 온 것인지**.
+/// 한 자리에 적용할 값과 **그 값이 파일에서 온 것인지** — 창 하나 몫이거나 전역 몫이다
+/// ([`LoadedSettings::for_window`] · [`LoadedSettings::global`]).
 ///
 /// ★둘을 함께 내는 이유★: `theme` 만으로는 「파일에 dark 라고 적혀 있다」와 「네 값이 반려돼 dark 로
 /// 접혔다」가 같아 보인다. 호출자가 그 둘을 못 가르면 편집이 먹었는지 확인할 방법이 없다.
@@ -94,6 +150,39 @@ pub enum ThemeSource {
 pub struct LoadedTheme {
     pub theme: UiTheme,
     pub source: ThemeSource,
+}
+
+/// [`load_settings`] 가 내놓는 것 — 파일 한 벌과 그 파일을 실제로 썼는지.
+///
+/// ★`source` 는 창별로 갈리지 않는다★ — 파일을 읽었으면 모든 창이 `File`, 못 읽었으면 모든 창이
+/// `Fallback` 이다. 창 항목 하나가 반려된 것은 여기 안 실린다: 그 창이 받는 값은 여전히 **읽힌 파일에서 온**
+/// 전역 값이고, 그 사실을 이 칸으로 물으면 세 번째 갈래가 생긴다(ADR-0166 이 막은 자리 · ADR-0167 이
+/// 넓히지 않기로 한 자리). 반려는 로그가 진다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedSettings {
+    settings: UiSettings,
+    source: ThemeSource,
+}
+
+impl LoadedSettings {
+    /// 창을 안 가리는 답 — `ui.refresh` 답장이 싣는 값.
+    pub fn global(&self) -> LoadedTheme {
+        LoadedTheme {
+            theme: self.settings.global(),
+            source: self.source,
+        }
+    }
+
+    pub fn for_window(&self, window: &str) -> LoadedTheme {
+        LoadedTheme {
+            theme: self.settings.theme_for(window),
+            source: self.source,
+        }
+    }
+
+    pub fn payload_for(&self, window: &str) -> UiSettingsPayload {
+        self.for_window(window).into()
+    }
 }
 
 /// 프론트로 나가는 값 — 부팅 조회(`get_ui_settings`)와 `ui.refresh` 푸시가 **같은 모양**을 쓴다.
@@ -184,19 +273,64 @@ pub fn read_capped(source: impl std::io::Read, cap: u64) -> std::io::Result<Stri
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-/// 원문 → 테마. ★파일 시스템을 안 탄다★.
+/// 원문 → 값 한 벌. ★파일 시스템을 안 탄다★.
 ///
-/// ★모르는 칸은 무시한다(의도 — 앞날을 위한 호환)★: 이 파일럿은 **여러 칸짜리 설정 파일의 첫 칸**이라,
-/// 모르는 키를 반려하면 이후 칸을 하나 더할 때마다 옛 셸이 파일 전체를 거부한다. 그래서 스키마 검증이
-/// 아니라 「키 하나를 꺼내 본다」로 짰다 — 빠뜨린 것이 아니다.
+/// ★모르는 칸은 무시한다(의도 — 앞날을 위한 호환)★: 모르는 키를 반려하면 칸을 하나 더할 때마다 옛 셸이
+/// 파일 전체를 거부한다. 빠뜨린 검증이 아니다.
 ///
-/// ★오류 문구에 원문을 그대로 싣지 않는다★ — 이 문구는 곧장 로그로 나가는데, 파일을 쓰는 것은 밖의
+/// `Err` = **파일 전체를 못 쓴다**(전역 칸이 없거나 못 쓸 값이다). 창 항목 하나가 못 쓸 것은 `Err` 가
+/// 아니라 [`ParsedSettings::refused`] 로 나간다 — 무게가 다르다(모듈 헤더 「고장의 무게」).
+///
+/// ★오류·반려 문구에 원문을 그대로 싣지 않는다★ — 이 문구는 곧장 로그로 나가는데, 파일을 쓰는 것은 밖의
 /// 에이전트라 그 안에 무엇이 들었는지 우리가 정하지 않는다([`describe_value`] · [`json_kind`]).
 ///
 /// 오류는 로그 한 줄에 그대로 실릴 문구다 — 호출자가 종류로 분기하지 않는다(전부 기본값행).
-pub fn parse_theme(text: &str) -> Result<UiTheme, String> {
+pub fn parse_settings(text: &str) -> Result<ParsedSettings, String> {
     let doc: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("JSON 이 아니다: {e}"))?;
+    let global = parse_global_theme(&doc)?;
+
+    let mut windows = BTreeMap::new();
+    let mut refused = Vec::new();
+    let mut refused_total = 0usize;
+    let mut refuse = |reason: String| {
+        refused_total += 1;
+        if refused.len() < MAX_REFUSED_DETAILS {
+            refused.push(reason);
+        }
+    };
+    match doc.get("windows") {
+        None => {}
+        Some(serde_json::Value::Object(entries)) => {
+            for (label, raw) in entries {
+                match raw.as_str().and_then(UiTheme::from_wire) {
+                    Some(theme) => {
+                        windows.insert(label.clone(), theme);
+                    }
+                    // ★창 이름도 게이트를 통과해야 실린다★ — 지도의 **키**도 밖의 에이전트가 쓴다.
+                    None => refuse(format!(
+                        "창 {} 의 테마 {}",
+                        describe_value(label),
+                        describe_theme_value(raw)
+                    )),
+                }
+            }
+        }
+        Some(other) => refuse(format!(
+            "`windows` 는 지도여야 한다(받은 것: {})",
+            json_kind(other)
+        )),
+    }
+
+    Ok(ParsedSettings {
+        settings: UiSettings { global, windows },
+        refused,
+        refused_total,
+    })
+}
+
+/// 전역 칸 하나 — 이것이 못 쓸 값이면 파일 전체가 못 쓸 것이다(창 항목을 접을 바닥이 없다).
+fn parse_global_theme(doc: &serde_json::Value) -> Result<UiTheme, String> {
     let Some(raw) = doc.get("theme") else {
         return Err("`theme` 키가 없다".to_string());
     };
@@ -215,6 +349,14 @@ pub fn parse_theme(text: &str) -> Result<UiTheme, String> {
     })
 }
 
+/// 테마 자리에 온 JSON 값을 로그용으로 — 문자열이면 [`describe_value`], 아니면 종류만.
+fn describe_theme_value(raw: &serde_json::Value) -> String {
+    match raw.as_str() {
+        Some(name) => describe_value(name),
+        None => format!("<문자열이 아닌 {}>", json_kind(raw)),
+    }
+}
+
 /// JSON 값의 **종류만**. 값 자체는 안 싣는다 — 로그로 샐 수 있고 [`MAX_SETTINGS_BYTES`] 까지 커질 수 있다.
 fn json_kind(value: &serde_json::Value) -> &'static str {
     match value {
@@ -227,7 +369,7 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// 로그에 실을 값을 만든다 — ★**모양으로 걸러서**, 테마 이름처럼 생긴 것만 싣는다★.
+/// 로그에 실을 값을 만든다 — ★**모양으로 걸러서**, 테마 이름·창 label 처럼 생긴 것만 싣는다★.
 ///
 /// 막는 것 둘: 파일에 들어온 값이 로그로 **새는** 것과, 상한(64KiB)까지 허용된 덩치가 창을 열 때마다·
 /// refresh 때마다 로그로 **증폭**되는 것. 그런데 값을 아예 안 실으면 오타 진단(무엇을 잘못 적었나)이 죽는다.
@@ -255,21 +397,26 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
 /// (`docs/reference/logging-conventions.md` 「보안」 · ADR-0138). ★이 저장소의 유일한 호출처가 아니다★ —
 /// `core/src/agent/transport/stdio.rs` 가 외부 프로세스 stderr 에 같은 방식으로 건다.
 fn describe_value(raw: &str) -> String {
-    if !looks_like_theme_name(raw) {
-        return format!("<테마 이름 모양이 아닌 {}자 문자열>", raw.chars().count());
+    if !looks_like_name(raw) {
+        return format!(
+            "<쓸 수 있는 이름 모양이 아닌 {}자 문자열>",
+            raw.chars().count()
+        );
     }
     // ★게이트를 통과한 값에도 마스킹은 남긴다★ — 길이·charset 을 다 만족하면서 키 모양인 것이 있다
     // (`AKIA` + 대문자 16자 = 20자 영숫자). 게이트를 넓히면 이 겹이 먼저 받아 준다.
     format!("{:?}", engram_dashboard_core::logging::mask_secrets(raw))
 }
 
-/// 테마 이름처럼 **생겼나** — ASCII 영숫자와 하이픈만, 그리고 짧을 것.
+/// 테마 이름·창 label 처럼 **생겼나** — ASCII 영숫자와 하이픈만, 그리고 짧을 것.
 ///
 /// ★`_`·`.`·`@`·`/`·`:`·공백을 일부러 뺐다★: 그것들이 이메일·URL·경로·문장을 갈라내는 실질적인 칸막이다
 /// (`e_ink` 같은 오타는 그 대가로 길이만 남지만, 그건 통과시켰을 때 이메일이 함께 통과하는 것보다 싸다).
 /// 대문자를 넣은 이유는 `Dark` 가 **가장 흔한 오타**이기 때문이다 — `from_wire` 가 대소문자를 가리므로
 /// 소문자만 받으면 정작 제일 자주 나는 실수를 못 보여준다.
-fn looks_like_theme_name(raw: &str) -> bool {
+///
+/// 이 앱이 실제로 쓰는 창 label(`main`·`agent-tree`·`slot-popup-N`)은 전부 이 charset 안이다.
+fn looks_like_name(raw: &str) -> bool {
     !raw.is_empty()
         && raw.len() <= MAX_LOGGED_VALUE_BYTES
         && raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -302,7 +449,7 @@ const MAX_LOGGED_VALUE_BYTES: usize = 24;
 ///
 /// 성공도 남긴다 — 파일 IO 는 외부 경계라 계측 의무가 있고(그 문서 「계측 의무」), 그 한 줄이 없으면
 /// 「refresh 가 dark 를 읽었다」와 「refresh 가 안 돌았다 / 알림이 이 창에 안 닿았다」가 로그에서 같아 보인다.
-pub fn load_theme(source: &dyn SettingsSource) -> LoadedTheme {
+pub fn load_settings(source: &dyn SettingsSource) -> LoadedSettings {
     let text = match source.read() {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -324,16 +471,29 @@ pub fn load_theme(source: &dyn SettingsSource) -> LoadedTheme {
             return folded();
         }
     };
-    match parse_theme(&text) {
-        Ok(theme) => {
+    match parse_settings(&text) {
+        Ok(parsed) => {
+            if parsed.refused_total > 0 {
+                // ★파일이 못 쓸 것이 아니라 **항목 하나가** 못 쓸 것이다★ — 그래서 error 가 아니라 warn 이고,
+                //   그 창은 전역 값으로 돈다. 사유 목록은 상한까지만이라 총수를 따로 싣는다.
+                tracing::warn!(
+                    module = "ui_settings",
+                    source = %source.origin(),
+                    refused = parsed.refused_total,
+                    shown = ?parsed.refused,
+                    fallback = parsed.settings.global().as_wire(),
+                    "쓸 수 없는 창별 테마 항목이 있어 그 창은 전역 테마로 둔다"
+                );
+            }
             tracing::debug!(
                 module = "ui_settings",
                 source = %source.origin(),
-                theme = theme.as_wire(),
+                theme = parsed.settings.global().as_wire(),
+                windows = parsed.settings.windows.len(),
                 "UI 설정에서 테마를 읽었다"
             );
-            LoadedTheme {
-                theme,
+            LoadedSettings {
+                settings: parsed.settings,
                 source: ThemeSource::File,
             }
         }
@@ -351,11 +511,60 @@ pub fn load_theme(source: &dyn SettingsSource) -> LoadedTheme {
 }
 
 /// 접힌 결과 하나 — 세 실패 갈래가 같은 값을 낸다는 것을 한 자리에 둔다(갈래를 늘리는 것이 아니다).
-fn folded() -> LoadedTheme {
-    LoadedTheme {
-        theme: DEFAULT_THEME,
+///
+/// ★창별 지도도 함께 비운다★ — 파일을 못 썼으면 창별 항목도 못 쓴 것이다(그 항목은 그 파일에서 온다).
+fn folded() -> LoadedSettings {
+    LoadedSettings {
+        settings: UiSettings {
+            global: DEFAULT_THEME,
+            windows: BTreeMap::new(),
+        },
         source: ThemeSource::Fallback,
     }
+}
+
+/// 창마다 **그 창의 값**을 보낸다 — 보내는 자리는 호출자가 넣는다(Tauri 를 이 모듈에 들이지 않는다).
+///
+/// ★한 봉투를 전 창에 뿌리지 않는다★: 창마다 값이 다를 수 있으므로 목적지를 지목해 보내야 한다. 받는 쪽도
+/// 자기 label 로 구독해야 한다 — Tauri 는 `Any` 로 등록된 리스너를 **필터와 무관하게 전부** 깨우고 JS
+/// `listen()` 의 기본 타깃이 그 `Any` 다(`view_commands::TauriViewDispatch` 가 같은 쌍을 진다).
+///
+/// `Err` 가 되는 자리 둘, 둘 다 「알림이 안 닿았다」다(ADR-0166 결정 6):
+/// - **보낼 창이 없다** — 이 명령이 하는 일은 알림뿐이라 아무 창도 없으면 아무 일도 안 일어난 것이다.
+/// - **한 창이라도 못 받았다** — ★그래도 남은 창까지 다 시도하고 나서 실패로 답한다★. 죽은 창 하나에서
+///   멈추면 나머지 창이 옛 값으로 남고, 그 답장은 실패라 **어느 창이 갱신됐는지 아무도 모른다.**
+///
+/// 실패 문구도 [`MAX_REFUSED_DETAILS`] 까지만 펼친다(창이 많을 때의 증폭 — 그 상수의 사유와 같다).
+pub fn deliver_per_window<E>(
+    loaded: &LoadedSettings,
+    windows: &[String],
+    mut emit: E,
+) -> Result<(), String>
+where
+    E: FnMut(&str, UiSettingsPayload) -> Result<(), String>,
+{
+    if windows.is_empty() {
+        return Err("알림을 받을 창이 하나도 없다".to_string());
+    }
+
+    let mut failed = 0usize;
+    let mut detail: Vec<String> = Vec::new();
+    for label in windows {
+        if let Err(e) = emit(label, loaded.payload_for(label)) {
+            failed += 1;
+            if detail.len() < MAX_REFUSED_DETAILS {
+                detail.push(format!("{label}: {e}"));
+            }
+        }
+    }
+    if failed > 0 {
+        return Err(format!(
+            "{failed}/{} 창에 못 보냈다 — {}",
+            windows.len(),
+            detail.join(" · ")
+        ));
+    }
+    Ok(())
 }
 
 /// `ui.refresh` 가 잡는 실물 — 파일을 다시 읽어 화면에 밀어 넣는다(조립 때 주입, ADR-0155 규칙 T-1).
@@ -365,7 +574,7 @@ fn folded() -> LoadedTheme {
 ///
 /// ★실패하는 자리는 하나뿐이다 — **알림을 못 보낸 것**★.
 ///
-/// 읽기·파싱 실패는 [`load_theme`] 이 기본값으로 접으므로 `Err` 로 나가지 않는다(그건 `Fallback` 이다).
+/// 읽기·파싱 실패는 [`load_settings`] 이 기본값으로 접으므로 `Err` 로 나가지 않는다(그건 `Fallback` 이다).
 /// 하지만 알림을 못 보내면 값이 **어느 창에도 안 닿았다** — 그 경우 `Ok` 를 돌려주면 호출자는 화면이 바뀐
 /// 줄 안다. `source` 는 「값이 어디서 왔나」를 말하지 「화면이 바뀌었나」를 말하지 않으므로, 그 구분을
 /// enum 에 세 번째 값으로 넣지 않고 **성공/실패로** 가른다.

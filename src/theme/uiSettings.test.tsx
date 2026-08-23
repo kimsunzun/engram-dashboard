@@ -32,17 +32,28 @@ function deferred(): { promise: Promise<void>; open: () => void } {
 
 // listen mock: 등록된 핸들러를 보관해 테스트가 셸 푸시를 직접 흉내낸다(viewStore.test 와 같은 모양).
 // listenGate 가 걸려 있으면 등록 자체를 붙잡아 둔다 — 「등록 전에는 부팅 조회를 안 낸다」를 재는 수단.
+// ★`options` 도 함께 넘긴다★ — 구독 타깃(어느 창 몫인가)이 이 인자에 실린다.
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 let listenGate: { promise: Promise<void>; open: () => void } | null = null
 const unlistenMock = vi.fn()
-async function defaultListen(event: string, handler: (e: { payload: unknown }) => void) {
+async function defaultListen(
+  event: string,
+  handler: (e: { payload: unknown }) => void,
+  _options?: unknown,
+) {
   if (listenGate) await listenGate.promise
   listeners.set(event, handler)
   return unlistenMock
 }
 const listenMock = vi.fn(defaultListen)
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: (event: string, handler: (e: { payload: unknown }) => void) => listenMock(event, handler),
+  listen: (event: string, handler: (e: { payload: unknown }) => void, options?: unknown) =>
+    listenMock(event, handler, options),
+}))
+
+const WINDOW_LABEL = 'slot-popup-1'
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({ label: WINDOW_LABEL }),
 }))
 
 import { useThemeStore } from '../store/themeStore'
@@ -153,6 +164,17 @@ describe('installUiSettings — 부팅 조회', () => {
 })
 
 describe('installUiSettings — ui.refresh 푸시', () => {
+  // ★셸은 창마다 **그 창의 값**을 보낸다★(ADR-0167). 기본 등록(`Any`)은 필터와 무관하게 전부 깨어나므로
+  //   타깃을 안 걸면 이 창이 남의 창 값까지 받아 마지막에 온 것을 칠한다 — 창별 테마가 그 자리에서 무너진다.
+  it('자기 창 label 로 구독한다', async () => {
+    render(<Host />)
+    await settle()
+
+    expect(listenMock).toHaveBeenCalledWith(EVT, expect.any(Function), {
+      target: WINDOW_LABEL,
+    })
+  })
+
   it('★값만 바뀌고 트리는 그대로 마운트돼 있다★', async () => {
     invokeMock.mockImplementation(async () => ({ theme: 'light' }))
     render(<Host />)

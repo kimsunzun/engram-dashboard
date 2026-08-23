@@ -60,8 +60,8 @@ use engram_dashboard_lib::layout::{
     ViewSnapshot, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::ui_settings::{
-    load_theme, parse_theme, read_capped, LoadedTheme, SettingsSource, ThemeSource,
-    UiSettingsPayload, UiSettingsRefresh, UiTheme, DEFAULT_THEME,
+    deliver_per_window, load_settings, parse_settings, read_capped, LoadedTheme, SettingsSource,
+    ThemeSource, UiSettingsPayload, UiSettingsRefresh, UiTheme, DEFAULT_THEME, MAX_REFUSED_DETAILS,
 };
 use engram_dashboard_lib::view_commands::{
     reserved_names, ViewArgSchema, ViewCommandBridge, ViewCommandDecl, ViewCommandHelp,
@@ -2358,13 +2358,18 @@ async fn a_dropped_task_still_answers() {
 
 // ── (F) UI 설정 읽기 — 파일 시스템도 Tauri 도 없이 ──────────────────────────
 //
-// ★여기 있는 이유는 헤더 마지막 절★(이 패키지에서 실제로 도는 타깃이 `tests/` 뿐이다). 재는 것은 두 층이다:
-// 순수 변환(`parse_theme`)과 그 위의 기본값 접기(`load_theme` + 주입 seam).
+// ★여기 있는 이유는 헤더 마지막 절★(이 패키지에서 실제로 도는 타깃이 `tests/` 뿐이다). 재는 것은 세 층이다:
+// 순수 변환(`parse_settings`) · 그 위의 기본값 접기(`load_settings` + 주입 seam) · 창별 배달
+// (`deliver_per_window` + 배달 자리를 클로저로 받는 seam).
 //
 // ## ★안 재는 것 — 로그 레벨(알려진 갭)★
 // `NotFound`=debug · 그 밖의 읽기 실패=warn · 파싱 실패=error · 성공=debug 가 **실제로 그 레벨로 나가는지**는
 // 여기서 안 잰다(tracing subscriber 하네스가 없어 반환값만 덮인다). 넷 중 하나를 한 낱말 고쳐 뒤바꿔도
-// 이 스위트는 초록이다. 근거·의도는 `ui_settings::load_theme` 의 doc 이 진다.
+// 이 스위트는 초록이다. 근거·의도는 `ui_settings::load_settings` 의 doc 이 진다.
+//
+// ## ★안 재는 것 — Tauri 배달(알려진 갭)★
+// 「살아 있는 웹뷰를 어떻게 세나」와 `emit_to` 자체는 여기 안 든다(창이 필요하다). 이 스위트가 덮는 것은
+// 그 앞 두 자리다 — **창마다 어떤 값이 가야 하나**와 **못 보낸 창이 있을 때 성공으로 답하지 않나**.
 
 /// 파일 대신 미리 정한 답을 내는 원문 출처.
 struct Canned(std::io::Result<String>);
@@ -2402,6 +2407,16 @@ impl SettingsSource for Canned {
     }
 }
 
+/// 창을 안 대는 단언들이 재는 것 = **전역 한 칸**. 창별 해소는 아래 자기 단언들이 따로 잰다.
+fn global(source: &dyn SettingsSource) -> LoadedTheme {
+    load_settings(source).global()
+}
+
+/// 원문에서 전역 테마만 — 창별 항목을 안 보는 단언들의 축약.
+fn theme_only(text: &str) -> Result<UiTheme, String> {
+    parse_settings(text).map(|parsed| parsed.settings.global())
+}
+
 /// 세 값이 다 살아 있어야 한다 — e-ink 를 dark/light 로 접으면 그 테마의 의도(색 무력화)가 사라진다(ADR-0062).
 #[test]
 fn every_theme_name_round_trips() {
@@ -2411,9 +2426,9 @@ fn every_theme_name_round_trips() {
         ("e-ink", UiTheme::EInk),
     ] {
         let text = format!("{{\"theme\":\"{raw}\"}}");
-        assert_eq!(parse_theme(&text), Ok(expected), "{raw}");
+        assert_eq!(theme_only(&text), Ok(expected), "{raw}");
         assert_eq!(
-            load_theme(&Canned::text(&text)),
+            global(&Canned::text(&text)),
             LoadedTheme {
                 theme: expected,
                 source: ThemeSource::File
@@ -2433,13 +2448,10 @@ fn an_unusable_settings_file_falls_back_to_dark() {
         theme: DEFAULT_THEME,
         source: ThemeSource::Fallback,
     };
-    assert_eq!(load_theme(&Canned::missing()), folded);
-    assert_eq!(load_theme(&Canned::unreadable()), folded);
-    assert_eq!(load_theme(&Canned::text("{ this is not json")), folded);
-    assert_eq!(
-        load_theme(&Canned::text(r#"{"theme":"solarized"}"#)),
-        folded
-    );
+    assert_eq!(global(&Canned::missing()), folded);
+    assert_eq!(global(&Canned::unreadable()), folded);
+    assert_eq!(global(&Canned::text("{ this is not json")), folded);
+    assert_eq!(global(&Canned::text(r#"{"theme":"solarized"}"#)), folded);
     assert_eq!(DEFAULT_THEME, UiTheme::Dark);
 }
 
@@ -2454,9 +2466,9 @@ fn a_theme_field_that_is_not_a_known_name_is_refused_not_guessed() {
         r#"{"theme":"e_ink"}"#,
         r#"{"theme":" dark "}"#,
     ] {
-        assert!(parse_theme(text).is_err(), "{text} 를 통과시켰다");
+        assert!(theme_only(text).is_err(), "{text} 를 통과시켰다");
         assert_eq!(
-            load_theme(&Canned::text(text)),
+            global(&Canned::text(text)),
             LoadedTheme {
                 theme: DEFAULT_THEME,
                 source: ThemeSource::Fallback
@@ -2470,27 +2482,31 @@ fn a_theme_field_that_is_not_a_known_name_is_refused_not_guessed() {
 #[test]
 fn reading_the_same_text_twice_gives_the_same_answer() {
     let broken = Canned::text("{oops");
-    assert_eq!(load_theme(&broken), load_theme(&broken));
+    assert_eq!(global(&broken), global(&broken));
 
     let good = Canned::text(r#"{"theme":"e-ink"}"#);
     let from_file = LoadedTheme {
         theme: UiTheme::EInk,
         source: ThemeSource::File,
     };
-    assert_eq!(load_theme(&good), from_file);
-    assert_eq!(load_theme(&good), from_file);
+    assert_eq!(global(&good), from_file);
+    assert_eq!(global(&good), from_file);
 }
 
 /// ★모르는 칸을 무시하는 것은 의도다 — 반려로 바꾸지 말 것★(사용자 결정).
 ///
-/// 이 파일럿은 **여러 칸짜리 설정 파일의 첫 칸**이다. 모르는 키를 반려하면 칸을 하나 더할 때마다 옛 셸이
-/// 파일 전체를 거부한다 — 앞날을 위한 호환이지 검증을 빠뜨린 것이 아니다.
+/// 모르는 키를 반려하면 칸을 하나 더할 때마다 옛 셸이 파일 전체를 거부한다 — 앞날을 위한 호환이지 검증을
+/// 빠뜨린 것이 아니다.
 #[test]
-fn unknown_keys_do_not_break_the_one_key_we_read() {
+fn unknown_keys_do_not_break_the_keys_we_read() {
     assert_eq!(
-        parse_theme(r#"{"theme":"light","fontSize":13,"whatever":{"a":1}}"#),
+        theme_only(r#"{"theme":"light","fontSize":13,"whatever":{"a":1}}"#),
         Ok(UiTheme::Light)
     );
+    let with_windows = load_settings(&Canned::text(
+        r#"{"theme":"light","windows":{"main":"e-ink"},"fontSize":13}"#,
+    ));
+    assert_eq!(with_windows.for_window("main").theme, UiTheme::EInk);
 }
 
 /// ★상한을 넘는 원문은 **읽고 나서** 재는 것이 아니라 읽는 양 자체가 끊긴다★ — 밖에서 쓰는 파일이라
@@ -2511,7 +2527,7 @@ fn an_oversized_settings_file_is_refused_instead_of_swallowed() {
 
     // 그 반려는 못 읽은 것과 같은 자리로 간다(기본값 + 로그).
     assert_eq!(
-        load_theme(&Canned(Err(std::io::Error::new(
+        global(&Canned(Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "상한 초과"
         )))),
@@ -2569,7 +2585,7 @@ fn the_cap_stops_the_read_rather_than_the_result() {
 fn an_unusable_theme_value_is_not_echoed_into_the_message() {
     // ① 덩치 — 원문이 통째로 실리지 않고 길이만 남는다.
     let blob = "A".repeat(4096);
-    let big = parse_theme(&format!(r#"{{"theme":"{blob}"}}"#)).expect_err("반려");
+    let big = theme_only(&format!(r#"{{"theme":"{blob}"}}"#)).expect_err("반려");
     assert!(!big.contains(&blob), "원문이 그대로 실렸다");
     assert!(big.len() < 200, "문구가 {} 바이트로 불었다", big.len());
     assert!(
@@ -2578,7 +2594,7 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
     );
 
     // ② 문자열이 아닌 값 — **종류만** 싣는다(객체·배열은 통째로 상한 크기다).
-    let obj = parse_theme(r#"{"theme":{"token":"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#)
+    let obj = theme_only(r#"{"theme":{"token":"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#)
         .expect_err("반려");
     assert!(!obj.contains("sk-proj"), "값이 실렸다: {obj}");
     assert!(obj.contains("object"), "종류가 안 실렸다: {obj}");
@@ -2592,7 +2608,7 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
         ("밑줄 섞인 이름", "internal_build_token_9", "internal"),
         ("공백 섞인 문장", "please use dark", "please"),
     ] {
-        let err = parse_theme(&format!(r#"{{"theme":"{value}"}}"#)).expect_err("반려");
+        let err = theme_only(&format!(r#"{{"theme":"{value}"}}"#)).expect_err("반려");
         assert!(
             !err.contains(fragment),
             "{label} 가 로그 문구로 샜다: {err}"
@@ -2601,14 +2617,14 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
 
     // ④ ★게이트를 통과하는 값에도 마스킹이 남아 있다★ — 이 조합(20자 영숫자 = 길이·charset 둘 다 통과,
     //    그런데 키 모양)이 그 겹이 죽어 있지 않다는 증거다.
-    let akia = parse_theme(r#"{"theme":"AKIAIOSFODNN7EXAMPLE"}"#).expect_err("반려");
+    let akia = theme_only(r#"{"theme":"AKIAIOSFODNN7EXAMPLE"}"#).expect_err("반려");
     assert!(!akia.contains("AKIA"), "키가 그대로 실렸다: {akia}");
 
     // ⑤ 그래도 오타 진단은 산다 — 게이트를 통과하는 값은 그대로 보인다.
     //    `Dark` 가 가장 흔한 오타다(`from_wire` 가 대소문자를 가린다) — 게이트에서 대문자를 뺐다면
     //    정작 제일 자주 나는 실수를 못 보여준다.
     for typo in ["Dark", "darkk", "e-inkk", "light2"] {
-        let err = parse_theme(&format!(r#"{{"theme":"{typo}"}}"#)).expect_err("반려");
+        let err = theme_only(&format!(r#"{{"theme":"{typo}"}}"#)).expect_err("반려");
         assert!(err.contains(typo), "오타 {typo} 를 못 보여준다: {err}");
     }
 }
@@ -2621,7 +2637,7 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
 #[test]
 fn a_value_wrapped_around_a_key_pattern_is_gated_not_just_masked() {
     let prefixed = format!("{}sk-proj-{}", "x".repeat(20), "A".repeat(30));
-    let err = parse_theme(&format!(r#"{{"theme":"{prefixed}"}}"#)).expect_err("반려");
+    let err = theme_only(&format!(r#"{{"theme":"{prefixed}"}}"#)).expect_err("반려");
 
     assert!(
         !err.contains(&"x".repeat(20)),
@@ -2636,4 +2652,227 @@ fn a_value_wrapped_around_a_key_pattern_is_gated_not_just_masked() {
 fn a_non_utf8_settings_file_is_a_read_failure() {
     let refused = read_capped(std::io::Cursor::new(vec![0xff, 0xfe, 0x00]), 64).expect_err("반려");
     assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+}
+
+// ── (W) 창별 테마 — 어느 창이 어떤 값을 받나 ────────────────────────────────
+// ADR-0167
+
+/// 항목이 있는 창은 그 값을, 없는 창은 전역 값을 받는다.
+#[test]
+fn a_window_with_an_entry_gets_it_and_the_rest_take_the_global() {
+    let loaded = load_settings(&Canned::text(
+        r#"{"theme":"dark","windows":{"main":"light","slot-popup-1":"e-ink"}}"#,
+    ));
+
+    assert_eq!(
+        loaded.for_window("main"),
+        LoadedTheme {
+            theme: UiTheme::Light,
+            source: ThemeSource::File
+        }
+    );
+    assert_eq!(loaded.for_window("slot-popup-1").theme, UiTheme::EInk);
+    assert_eq!(loaded.for_window("agent-tree").theme, UiTheme::Dark);
+    // 명령 답장이 싣는 것은 이 전역 값이다 — 창별 값이 그 자리를 덮으면 답 모양이 창마다 갈린다.
+    assert_eq!(loaded.global().theme, UiTheme::Dark);
+}
+
+/// ★`windows` 칸이 없던 파일이 그대로 돈다★ — 밖의 에이전트가 이미 써 둔 파일이 이 칸 때문에 반려되면
+/// 그 순간 모든 창이 dark 로 접힌다(그 창들은 아무것도 안 바꿨는데).
+#[test]
+fn a_settings_file_without_the_windows_key_behaves_as_before() {
+    let from_file = LoadedTheme {
+        theme: UiTheme::Light,
+        source: ThemeSource::File,
+    };
+
+    let old = load_settings(&Canned::text(r#"{"theme":"light"}"#));
+    assert_eq!(old.global(), from_file);
+    for window in ["main", "agent-tree", "slot-popup-1"] {
+        assert_eq!(old.for_window(window), from_file, "{window}");
+    }
+    assert_eq!(
+        parse_settings(r#"{"theme":"light"}"#)
+            .expect("옛 파일도 통과다")
+            .refused_total,
+        0,
+        "칸이 없는 것은 반려가 아니다"
+    );
+
+    // 빈 지도도 같은 자리다 — 「칸은 있는데 비었다」가 「칸이 없다」와 갈리면 안 된다.
+    let empty = load_settings(&Canned::text(r#"{"theme":"light","windows":{}}"#));
+    assert_eq!(empty.for_window("main"), from_file);
+}
+
+/// ★못 쓰는 창 항목은 **전역 값**으로 접는다 — dark 로 접지 않는다★.
+///
+/// 파일은 멀쩡하고 그 파일이 이미 「전역은 light」라고 말했다. 거기서 dark 로 가면 그 창은 파일이 적은
+/// 어느 값과도 안 맞아서, 오타 하나가 창 하나를 파일 밖으로 끌어낸다. 전역으로 접으면 결과는 「창별
+/// 덮어쓰기가 안 먹었다」로 끝나고 — 항목이 아예 없는 창과 같은 자리다 — 사유는 로그가 진다.
+#[test]
+fn an_unusable_window_entry_falls_back_to_the_global_theme_not_to_dark() {
+    let text =
+        r#"{"theme":"light","windows":{"main":"solarized","agent-tree":7,"slot-popup-1":"e-ink"}}"#;
+    let parsed = parse_settings(text).expect("파일 자체는 멀쩡하다");
+    assert_eq!(
+        parsed.refused_total, 2,
+        "모르는 이름 하나 + 문자열 아님 하나"
+    );
+
+    let loaded = load_settings(&Canned::text(text));
+    assert_eq!(loaded.for_window("main").theme, UiTheme::Light);
+    assert_eq!(loaded.for_window("agent-tree").theme, UiTheme::Light);
+    assert_eq!(
+        loaded.for_window("slot-popup-1").theme,
+        UiTheme::EInk,
+        "옆 항목까지 함께 버리지 않는다"
+    );
+    // ★출처 칸은 두 갈래를 유지한다★(ADR-0166 불변식 · ADR-0167 이 넓히지 않기로 했다) — 이 값은 읽힌
+    //   파일에서 왔다. 「내 창 항목이 반려됐다」를 이 칸으로 물으면 세 번째 갈래가 필요해진다.
+    assert_eq!(loaded.for_window("main").source, ThemeSource::File);
+}
+
+/// `windows` 가 지도가 아니면 그 칸만 버린다 — 파일 전체를 반려하지 않는다(모르는 칸 무시와 같은 이유).
+#[test]
+fn a_windows_key_that_is_not_a_map_does_not_sink_the_file() {
+    let loaded = load_settings(&Canned::text(r#"{"theme":"e-ink","windows":"main"}"#));
+
+    assert_eq!(
+        loaded.global(),
+        LoadedTheme {
+            theme: UiTheme::EInk,
+            source: ThemeSource::File
+        }
+    );
+    assert_eq!(loaded.for_window("main").theme, UiTheme::EInk);
+}
+
+/// 파일을 못 쓰면 **모든 창**이 같은 자리로 간다 — 창별 항목이 그 접기를 비켜 가면 안 된다.
+///
+/// 마지막 원문이 「전역 칸 없음」이다: 전역이 없으면 창별 항목이 아무리 멀쩡해도 접을 바닥이 없다.
+#[test]
+fn an_unusable_file_folds_every_window_to_the_default() {
+    let folded = LoadedTheme {
+        theme: DEFAULT_THEME,
+        source: ThemeSource::Fallback,
+    };
+
+    for source in [
+        Canned::missing(),
+        Canned::text("{ this is not json"),
+        Canned::text(r#"{"windows":{"main":"light"}}"#),
+    ] {
+        let loaded = load_settings(&source);
+        assert_eq!(loaded.global(), folded);
+        assert_eq!(loaded.for_window("main"), folded);
+    }
+}
+
+/// ★반려 사유는 항목 수만큼 늘지 않는다★ — 상한(64KiB)까지 허용된 파일이면 항목이 수천 개일 수 있고,
+/// 이 파일은 창을 열 때마다·refresh 때마다 다시 읽힌다. 전량을 실으면 그만큼 로그가 증폭된다.
+#[test]
+fn refused_window_entries_are_counted_in_full_but_described_in_bounded_numbers() {
+    let entries: Vec<String> = (0..50).map(|i| format!(r#""w{i}":"nope{i}""#)).collect();
+    let text = format!(r#"{{"theme":"dark","windows":{{{}}}}}"#, entries.join(","));
+
+    let parsed = parse_settings(&text).expect("파일 자체는 멀쩡하다");
+
+    assert_eq!(parsed.refused_total, 50, "총수는 다 센다");
+    assert_eq!(
+        parsed.refused.len(),
+        MAX_REFUSED_DETAILS,
+        "사유는 상한까지만"
+    );
+}
+
+/// 창 항목도 로그 문구로 새지 않는다 — **이름 칸도 값 칸도 밖의 에이전트가 쓴다**(테마 값과 같은 게이트).
+#[test]
+fn an_unusable_window_entry_is_not_echoed_into_the_message() {
+    let parsed = parse_settings(
+        r#"{"theme":"dark","windows":{"customer-email@example.com":"please use dark"}}"#,
+    )
+    .expect("파일 자체는 멀쩡하다");
+    let said = parsed.refused.join(" · ");
+    assert!(!said.contains("example.com"), "창 이름이 샜다: {said}");
+    assert!(!said.contains("please"), "값이 샜다: {said}");
+
+    // 그래도 오타 진단은 산다 — 테마 이름 모양인 것은 그대로 보인다(`Dark` 가 가장 흔한 오타다).
+    let typo = parse_settings(r#"{"theme":"dark","windows":{"slot-popup-1":"Dark"}}"#)
+        .expect("파일 자체는 멀쩡하다");
+    let said = typo.refused.join(" · ");
+    assert!(said.contains("Dark"), "오타를 못 보여준다: {said}");
+    assert!(said.contains("slot-popup-1"), "어느 창인지가 없다: {said}");
+}
+
+/// ★창마다 **그 창의 값**이 간다★ — 한 봉투를 전 창에 뿌리면 창별 테마가 성립하지 않는다.
+#[test]
+fn each_window_is_sent_its_own_value() {
+    let loaded = load_settings(&Canned::text(
+        r#"{"theme":"dark","windows":{"main":"light"}}"#,
+    ));
+    let windows = [
+        "main".to_string(),
+        "agent-tree".to_string(),
+        "slot-popup-1".to_string(),
+    ];
+
+    let mut sent: Vec<(String, String)> = Vec::new();
+    deliver_per_window(&loaded, &windows, |label, payload| {
+        sent.push((label.to_string(), payload.theme));
+        Ok(())
+    })
+    .expect("셋 다 배달됐다");
+
+    assert_eq!(
+        sent,
+        vec![
+            ("main".to_string(), "light".to_string()),
+            ("agent-tree".to_string(), "dark".to_string()),
+            ("slot-popup-1".to_string(), "dark".to_string()),
+        ]
+    );
+}
+
+/// ★못 보낸 창이 하나라도 있으면 성공이 아니다★(ADR-0166 결정 6). 그리고 거기서 멈추지도 않는다 — 죽은
+/// 창 하나가 나머지 창의 갱신을 막으면 화면들이 서로 갈린 채로 남고, 그 답장은 실패라 사유도 안 남는다.
+#[test]
+fn a_window_that_did_not_receive_it_is_not_answered_as_success() {
+    let loaded = load_settings(&Canned::text(r#"{"theme":"dark"}"#));
+    let windows = [
+        "main".to_string(),
+        "agent-tree".to_string(),
+        "slot-popup-1".to_string(),
+    ];
+
+    let mut tried: Vec<String> = Vec::new();
+    let outcome = deliver_per_window(&loaded, &windows, |label, _payload| {
+        tried.push(label.to_string());
+        if label == "agent-tree" {
+            Err("창이 이미 닫혔다".to_string())
+        } else {
+            Ok(())
+        }
+    });
+
+    let refused = outcome.expect_err("한 창이라도 못 받으면 실패다");
+    assert!(
+        refused.contains("agent-tree"),
+        "어느 창인지가 없다: {refused}"
+    );
+    assert_eq!(tried.len(), windows.len(), "실패한 창에서 멈췄다");
+}
+
+/// 보낼 창이 하나도 없는 것도 실패다 — 「어느 창에도 안 닿았다」가 이 명령의 실패 조건 그 자체다.
+#[test]
+fn a_push_with_no_live_windows_is_a_failure() {
+    let loaded = load_settings(&Canned::text(r#"{"theme":"dark"}"#));
+
+    let mut calls = 0usize;
+    let outcome = deliver_per_window(&loaded, &[], |_label, _payload| {
+        calls += 1;
+        Ok(())
+    });
+
+    assert!(outcome.is_err(), "빈 명단에 성공으로 답했다");
+    assert_eq!(calls, 0);
 }
