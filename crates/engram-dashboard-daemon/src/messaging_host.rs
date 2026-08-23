@@ -18,7 +18,7 @@
 //!     - `ChannelIdleNotifier` — 커널 `IdleNotifier`(상한 sweep 깨우기)·`FlushTrigger`(서비스 도어벨)
 //!       → flush 채널 송신단. (`IdleCoalescer` 는 이 출구의 내부 상태다.)
 //!     - `MessagingFlushSink` — 커널엔 포트가 없다. 묶이는 seam = **코어 `StatusSink`**(데코레이터)이고,
-//!       그 위에서 등장/epoch bump 를 diff 해(`RosterDiff`) 위 도어벨과 **같은 채널**로 flush 를 건다.
+//!       그 위에서 등장/화신 교체를 diff 해(`RosterDiff`) 위 도어벨과 **같은 채널**로 flush 를 건다.
 //!     - `spawn_flush_worker`/`run_flush_worker`/`run_flush_lane`/`FlushWorkerHandles`/`FlushWiring` —
 //!       위 채널의 소비단 → `MessagingSlot`(늦은 주입된 `MessagingService`)의 `flush_for`.
 //!       (배달 레인의 내부 부품 — `DeliveryLanes`·`flush_recipient`·`spawn_delivery`·`advance_lane`·
@@ -299,7 +299,7 @@ pub fn busy_gate_for_manager(
 ///   배선 추론이 어려워진다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlushMsg {
-    /// 로스터 등장/epoch bump(그 이름의 도달 후보가 **유일**할 때만) — 그 **이름** 앞 파킹을 일괄 flush.
+    /// 로스터 등장/화신 교체(그 이름의 도달 후보가 **유일**할 때만) — 그 **이름** 앞 파킹을 일괄 flush.
     Appear { name: String, id: AgentId },
     /// 턴 종료(idle 전이) 관측 — 그 id 의 파킹을 오래된 순 일괄 주입(C2 idle 게이트, ADR-0104 결정 3).
     Idle { id: AgentId },
@@ -380,7 +380,7 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
 }
 
 /// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: `DaemonStatusSink` 를 **감싸** 로스터 변화를
-///   데몬측에서 관측하고, 새로 살아났거나 epoch 이 bump 된 이름 앞으로 파킹된 메시지를 flush 시킨다.
+///   데몬측에서 관측하고, 새로 살아났거나 화신이 갈린 이름 앞으로 파킹된 메시지를 flush 시킨다.
 ///
 /// ★왜 sink 를 감싸나(core seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
 ///   AgentManager 의 상태 sink 가 이미 `agent_list_updated(Vec<AgentInfo>)` 로 로스터 스냅샷을 push 하므로
@@ -469,7 +469,9 @@ impl RosterDiff {
         for (name, candidates) in by_name {
             if candidates.len() != 1 {
                 tracing::debug!(
-                    name = %name,
+                    // 에이전트 이름은 클라이언트가 정한 문자열이다 — 로그 필드에 실을 땐 모양·길이를
+                    //   묶는다(`connection_core::sanitize_for_log` · 그 함수 doc 의 그 규율).
+                    name = %crate::connection_core::sanitize_for_log(&name),
                     count = candidates.len(),
                     "flush skip: 동명 도달 후보 다수 — 유일해질 때까지 파킹 대기(finding 2)"
                 );
@@ -480,15 +482,17 @@ impl RosterDiff {
         for (name, (epoch, id)) in &next {
             // ★flush 트리거 조건(finding 3 — id 반영)★: ① 새로 등장(이전에 없던 이름/동명 해소로 재-유일)
             //   OR ② **id 변경**(같은 이름의 **다른** 에이전트 = 새 AgentId — 예: 같은 이름의 새 프로필)
-            //   OR ③ 같은 id + epoch bump(같은 incarnation 재스폰/재활성화). ②가 load-bearing: 옛 diff 는
-            //   이름별 epoch 만 비교해, id 가 다른데 epoch 이 이전 것보다 ≤ 이면(새 프로필 epoch 0 < 옛
-            //   epoch 3) "새로 살아남" 을 놓쳐 그 이름 앞 파킹이 영영 stranded 됐다. id 가 바뀌면 그건
-            //   별개 에이전트의 등장이니 epoch 대소와 무관하게 flush 후보다.
+            //   OR ③ 같은 id + **다른 화신**(재스폰/재활성화). ②가 load-bearing: 옛 diff 는 이름별 화신
+            //   표식만 비교해, id 가 다른데 표식이 겹치면 "새로 살아남" 을 놓쳐 그 이름 앞 파킹이 영영
+            //   stranded 됐다. id 가 바뀌면 그건 별개 에이전트의 등장이니 표식과 무관하게 flush 후보다.
+            //   ★③ 은 대소가 아니라 불일치다★: 표식은 화신마다 뽑은 난수라 순서에 뜻이 없다
+            //   (`AgentProfile::epoch`). 대소로 걸면 새 화신의 표식이 우연히 작을 때 등장을 놓쳐, 그 이름
+            //   앞 파킹이 다음 재스폰까지 묶인다.
             let trigger = match st.prev.get(name) {
                 None => true, // ① 새로 등장(또는 동명 해소로 다시 유일).
                 Some((prev_epoch, prev_id)) => {
-                    id != prev_id // ② 동명 다른 에이전트(새 AgentId) — epoch 대소와 무관.
-                        || epoch > prev_epoch // ③ 같은 id + epoch bump(재스폰/재활성화).
+                    id != prev_id // ② 동명 다른 에이전트(새 AgentId) — 화신 표식과 무관.
+                        || epoch != prev_epoch // ③ 같은 id + 다른 화신(재스폰/재활성화).
                 }
             };
             if trigger {
@@ -1272,22 +1276,31 @@ mod tests {
         );
     }
 
+    /// ★대소가 아니라 **불일치**로 판정한다★: 화신 표식은 화신마다 뽑은 난수라 새 화신의 값이 옛 값보다
+    /// 작을 수 있다(`AgentProfile::epoch`). 대소로 걸면 그 절반의 재스폰에서 등장을 놓쳐, 그 이름 앞에
+    /// 파킹된 우편이 다음 재스폰까지 묶인다.
     #[test]
-    fn flush_sink_enqueues_on_epoch_bump_but_not_same_epoch() {
+    fn flush_sink_enqueues_on_any_different_tag_but_not_the_same_one() {
         let (sink, mut rx) = flush_sink();
         let id = AgentId::new_v4();
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
+        sink.agent_list_updated(vec![flush_info(id, "a", 5, true, CoreStatus::Running)]);
         assert_eq!(drain_targets(&mut rx), vec![("a".to_string(), id)]);
-        sink.agent_list_updated(vec![flush_info(id, "a", 0, true, CoreStatus::Running)]);
+        sink.agent_list_updated(vec![flush_info(id, "a", 5, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
-            "같은 epoch 재-push 는 flush 안 함"
+            "같은 표식 재-push 는 flush 안 함"
         );
-        sink.agent_list_updated(vec![flush_info(id, "a", 1, true, CoreStatus::Running)]);
+        sink.agent_list_updated(vec![flush_info(id, "a", 9, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
             vec![("a".to_string(), id)],
-            "epoch bump 은 flush(재스폰/재활성화)"
+            "표식이 갈리면 flush(재스폰/재활성화)"
+        );
+        sink.agent_list_updated(vec![flush_info(id, "a", 2, true, CoreStatus::Running)]);
+        assert_eq!(
+            drain_targets(&mut rx),
+            vec![("a".to_string(), id)],
+            "같은 id 라도 표식이 **작아지는** 재스폰이 있다 — 그것도 등장이다"
         );
     }
 

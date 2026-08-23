@@ -1,8 +1,9 @@
 //! 데몬 MCP Streamable HTTP 서버 — 스폰된 claude 에이전트가 mcp-config 로 붙는 제어 채널 입구.
 //!
 //! ★소유★: rmcp `StreamableHttpService`(Tower service)를 axum `/mcp` 에 nest 하고 그 앞에 bearer auth
-//!   미들웨어를 얹는다. 같은 서버·포트·미들웨어에 CLI 평문 라우트(`/control/send`·`/control/messages`·
-//!   `/control/agent`)를 나란히 태운다. 툴 표면 = `engram_ping` · `send_message` · `messages`.
+//!   미들웨어를 얹는다. 같은 서버·포트·미들웨어에 CLI 평문 라우트를 나란히 태운다 — 그 **명단의 정본은
+//!   `ControlRoute`** 이고 여기서 다시 세지 않는다(세던 목록이 라우트 추가 때 뒤처진다).
+//!   툴 표면 = `engram_ping` · `send_message` · `messages`.
 //!   ★제어 동사는 MCP 툴로 내지 않는다★(ADR-0132 결정 = CLI) — 툴 스키마는 모든 에이전트 컨텍스트에 상시
 //!   상주하는데 제어는 빈도가 낮다. 그래서 `/control/agent` 에는 짝이 되는 `#[tool]` 이 없다.
 //!
@@ -35,6 +36,9 @@ use engram_dashboard_messaging::envelope::Entrance; // ADR-0110: 입구 라벨�
 
 use super::ingress::{handle_messages, handle_send, ControlCommand, SendContract};
 use super::registry::{BoundIdentity, ControlRegistry};
+// ★로그 필드에 실을 호출자 문자열은 이 함수를 거친다 — 이웃 `agent::preview` 가 아니다★:
+//   그 갈림의 정본은 [`super::agent::preview`] doc(「로그에 쓰지 말 것」)과 [`sanitize_for_log`] doc 이다.
+use crate::connection_core::sanitize_for_log;
 
 /// MCP 서버가 붙는 axum 경로. mcp-config url 도 이 경로를 가리킨다(`http://127.0.0.1:<port>/mcp`).
 ///
@@ -65,6 +69,24 @@ const CONTROL_MESSAGES_PATH: &str = "/control/messages";
 ///   우편만 자격증명으로 갈린다(`ControlRoute::is_mail`).
 const CONTROL_AGENT_PATH: &str = "/control/agent";
 
+/// CLI 발견 입구 — 데몬 자기 표와 붙어 있는 클라이언트 명부를 **한 목록**으로 낸다(`control::catalog`).
+/// ★읽기 전용이다★ — 어떤 상태도 바꾸지 않는다.
+/// ★POST 인 이유(GET 아님)★: 위 `CONTROL_MESSAGES_PATH` 주석의 규율 그대로다(무-세션 GET 은 미들웨어가
+///   400 으로 끊는다). 경로마다 인증 규칙을 갈라 두 규율을 만들지 않는다.
+/// ★우편이 막힌 자격증명도 닿는다★ — 발견은 제어 평면이고, 편지를 못 쓰는 백엔드도 무엇을 부를 수
+///   있는지는 알아야 한다(`ControlRoute::is_mail`).
+/// ★`pub(super)` 인 이유★: 이웃 `catalog` 의 회복 안내가 이 경로를 문구에 싣고, 그 테스트가 이 상수를 태워
+///   대조한다 — 문구가 없는 주소를 가리키는 것을 막는 유일한 수단이다.
+pub(super) const CONTROL_COMMANDS_PATH: &str = "/control/commands";
+
+/// CLI 범용 호출 입구 — 명령을 **전체 이름**으로 부른다(`{name, args}`).
+///
+/// ★`/control/agent` 의 별칭이 아니다★: 그쪽은 한 계열의 이름을 달고 있고 그 계열 어휘(`{verb}`)와
+///   계열별 회복 안내를 진다. 한 주소가 두 뜻을 갖게 하면 닫힌 라우트 열거가 분류를 강제하는 힘을 잃는다.
+/// ★검문은 형제와 **같은 함수**다★(`commands::call_daemon_command`) — 검문 없는 두 번째 입구를 만들지
+///   않는다는 것이 이 라우트를 더하며 지킨 유일한 하드 제약이다.
+const CONTROL_CALL_PATH: &str = "/control/call";
+
 /// 제어 평면 경로의 네임스페이스 접두 — **분류를 빠뜨린 경로를 fail-closed 로 접는 기준**이다.
 ///
 /// ★비교는 **경로 세그먼트 경계**로 한다(맨 `starts_with` 금지)★: 문자열 접두만 보면 `/controlfoo`·
@@ -87,16 +109,26 @@ enum ControlRoute {
     Send,
     Messages,
     Agent,
+    Commands,
+    Call,
 }
 
 impl ControlRoute {
-    const ALL: [ControlRoute; 3] = [Self::Send, Self::Messages, Self::Agent];
+    const ALL: [ControlRoute; 5] = [
+        Self::Send,
+        Self::Messages,
+        Self::Agent,
+        Self::Commands,
+        Self::Call,
+    ];
 
     const fn path(self) -> &'static str {
         match self {
             Self::Send => CONTROL_SEND_PATH,
             Self::Messages => CONTROL_MESSAGES_PATH,
             Self::Agent => CONTROL_AGENT_PATH,
+            Self::Commands => CONTROL_COMMANDS_PATH,
+            Self::Call => CONTROL_CALL_PATH,
         }
     }
 
@@ -104,10 +136,22 @@ impl ControlRoute {
     ///
     /// ★`_` arm 을 넣지 말 것★: catch-all 이 생기는 순간 새 라우트가 조용히 "우편 아님"(= 전원 통과)으로
     ///   분류된다. 그 실수는 런타임에 아무 신호도 내지 않는다.
+    ///
+    /// ★이 exhaustive match 가 강제하는 것은 **라우트**뿐이다★ — `/control/call` 은 경로가 아니라 **바디의
+    ///   이름**으로 명령을 고르므로, 그 축은 여기서 못 닫는다. 그 축을 닫는 것은 [`mail_by_name`] 이고
+    ///   호출 라우트가 그것을 자기 자리에서 부른다.
+    ///   ★「오늘 데몬 표가 `agent.*` 만 쥐고 있어 도달 불가」를 근거로 되돌리지 말 것 — 그 문장은 이제
+    ///   거짓이다★: 도달 가능한 집합은 데몬 표 **∪ 명부**이고(ADR-0160), 명부의 이름은 대시보드가 정한다
+    ///   (`src-tauri/src/layout/commands.rs`). 그 이름을 짓는 사람은 이 주석을 영영 읽지 않으므로 산문으로
+    ///   맡길 수 있는 축이 아니다.
+    // ADR-0133
+    // ADR-0160
     const fn is_mail(self) -> bool {
         match self {
             Self::Send | Self::Messages => true,
-            Self::Agent => false,
+            // 제어 평면 — 발견과 호출은 우편이 아니다. 편지를 못 쓰는 자격증명도 무엇을 부를 수 있는지
+            //   알아야 하고, 부를 수 있어야 한다(ADR-0132 결정 5 — 제어는 전원 개방).
+            Self::Agent | Self::Commands | Self::Call => false,
         }
     }
 
@@ -152,6 +196,25 @@ const MAIL_NOT_ALLOWED_CODE: &str = "MAIL_NOT_ALLOWED";
 ///   않는다. 재시도 무의미까지만 알려 무한 재시도를 막는다.
 const MAIL_NOT_ALLOWED_HINT: &str =
     "This credential is not allowed to use mail. Retrying will not change that.";
+
+/// 이 **명령 이름**이 우편인가 — 경로가 아니라 바디로 명령을 고르는 라우트(`/control/call`)의 우편 축.
+///
+/// ★이름 하나로 닫는 이유★: 그 라우트가 도달할 수 있는 집합은 데몬 자기 표 **∪ 명부**이고(ADR-0160),
+/// 명부 쪽 이름은 이 crate 밖에서 정해진다(대시보드가 자기 명령을 얹는다). 즉 이 축은 **여기 있는 코드를
+/// 다 읽어도** 알 수 없는 이름까지 포함하므로, 「오늘은 그런 이름이 없다」는 근거가 될 수 없다.
+/// ★계열 구분자는 명령 이름 규약(`<계열>.<동사>`)의 것이다★ — 계열이 `mail` 이면 우편이다. 접두 비교로
+/// 쓰지 말 것: `mailbox.x` 는 우편 계열이 아닌데 접두로는 걸린다. 그 규약의 정본은 명령 표이고 이 글자를
+/// 공유 상수로 올리지 않은 이유는 CLI 도 자기 것을 따로 들고 있어서다(`bin/engram.rs`) — 셋째 사본을
+/// 만들기 전에 그 상수를 어디 둘지가 먼저 정해져야 한다.
+/// ★오늘 이 판정이 참이 되는 이름은 하나도 없다(실측)★ — 데몬 표는 `agent.*` 뿐이고 대시보드가 얹는
+/// 이름에도 `mail.*` 이 없다. 그래서 이것은 구멍을 막는 것이 아니라 **난간**이다: `mail.*` 이 어느 쪽으로
+/// 들어오든 그날 이 줄이 이미 서 있다.
+// ADR-0133
+// ADR-0160
+fn mail_by_name(name: &str) -> bool {
+    name.split_once('.')
+        .is_some_and(|(group, _)| group == engram_dashboard_core::agent::types::CLI_GROUP_MAIL)
+}
 
 /// ★manager 늦은 주입 슬롯(순환 해소)★: 데몬 기동은 MCP 서버를 **먼저** 띄우고(그 URL 로 mcp-config 를
 /// 발급하는 DaemonControlChannel 을 만들어야 하므로) 그 다음 AgentManager 를 배선한다 — 즉 서버 start
@@ -640,6 +703,8 @@ where
     // ★warn 인 이유(info 아님)★: 기본 로그 레벨이 warn 이라 info 로 두면 "왜 이 에이전트가 편지를 못
     //   보내나" 를 쫓는 운영자에게 **아무 흔적도 남지 않는다**. ADR-0133 의 재검토 트리거(거절만 받은
     //   에이전트의 행동 관측)도 이 줄이 보여야 발동한다. 형제 거부(401/403/404/400)와 같은 레벨로 맞춘다.
+    // ★이 표면의 우편 축은 **둘**이다 — 이 줄은 경로 축이다★: 바디로 명령을 고르는 라우트는 경로로
+    //   분류되지 않아 자기 자리에서 같은 판정·같은 로그를 낸다(`control_call_handler` 의 이름 축).
     // ADR-0133
     if !binding.mail_allowed && mail_gated_path(request.uri().path()) {
         tracing::warn!(
@@ -688,8 +753,11 @@ where
         match registry.identity_for_session(sid) {
             Some(bound) if bound == identity => {}
             Some(_) => {
+                // 세션 id 도 호출자가 고른 헤더 값이라 [`sanitize_for_log`] 를 거친다(같은 위조 축).
+                //   HTTP 파서가 CR/LF 는 이미 거르지만 탭·비-ASCII obs-text 는 통과하고 길이도 우리 것이
+                //   아니다 — 여기서 폭까지 우리가 정한다.
                 tracing::warn!(
-                    session = %sid,
+                    session = %sanitize_for_log(sid),
                     "제어 채널 cross-token 세션 탈취 거부(403, ADR-0086 FIX 7)"
                 );
                 return forbidden();
@@ -705,7 +773,7 @@ where
             //   바뀌지 않는다(happy-path 무영향).
             None => {
                 tracing::warn!(
-                    session = %sid,
+                    session = %sanitize_for_log(sid),
                     "제어 채널 orphaned/unknown 세션 거부(404, ADR-0086 F1)"
                 );
                 return not_found();
@@ -725,6 +793,10 @@ where
 
     let mut request: Request<axum::body::Body> = request.into();
     request.extensions_mut().insert(identity);
+    // ★권한 비트를 신원과 **따로** 싣는다★: `BoundIdentity` 는 세션 pinning 의 동일성 키라 권한이 끼면
+    //   인가 문제가 세션 탈취 오탐으로 둔갑한다(그 타입 doc). 그래도 핸들러가 이 비트를 봐야 하는 자리가
+    //   하나 있다 — 바디로 명령을 고르는 라우트의 우편 축([`mail_by_name`])은 위 라우트 분류가 못 닫는다.
+    request.extensions_mut().insert(binding);
 
     let response = next.run(request).await;
 
@@ -973,14 +1045,205 @@ async fn control_agent_handler(
         tokio::task::spawn_blocking(move || super::agent::handle_agent(&table, req)).await
     else {
         // JoinError = blocking 태스크 패닉. 답 자체가 없으므로 "항상 200 + JSON" 계약 밖이다 — 500 으로
-        //   갈라 CLI 가 성공으로 오독하지 않게 한다(send 라우트와 같은 규율).
+        //   갈라 CLI 가 성공으로 오독하지 않게 한다(send 라우트와 같은 규율). ★그 계약이 **debug 에서만**
+        //   성립한다는 것은 `internal_error` 주석이 정본이다★ — 릴리스는 `panic = "abort"` 다.
         tracing::error!(entrance = "cli", "제어 동사 태스크 실패(패닉)");
-        return Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(axum::body::Body::empty())
-            .expect("valid 500 response");
+        return internal_error();
     };
     Json(result.to_json()).into_response()
+}
+
+// ── CLI 발견·범용 호출 입구(/control/commands · /control/call) ──────────────────────
+
+/// 두 카탈로그 라우트의 State — 발견이 합치는 **두 출처**를 그대로 든다(`control::catalog::merge`).
+///
+/// ★명부는 슬롯이 아니라 **핸들**이다★: 표(`CommandTableSlot`)는 매니저 뒤에 생겨 늦은 주입이 필요하지만,
+///   명부는 `Clone` 인 공유 핸들이고 조립부가 서버보다 **먼저** 만든다(`lib.rs` run()·accept loop). 늦은
+///   주입 슬롯을 하나 더 두면 「비어 있으면 반쪽 목록」이라는 갈래를 이유 없이 늘린다.
+/// ★두 번째 명부를 만들지 않는다★ — 여기 드는 것은 연결이 등록을 얹는 **그 한 부**여야 한다. 사본을 쥐면
+///   발견은 영원히 빈 목록을 내고 그 증상은 에러도 로그도 없다.
+#[derive(Clone)]
+struct ControlCatalogState {
+    commands: Arc<CommandTableSlot>,
+    /// 명부 + 자리 표 + 1단계 표를 한 값으로 든다 — ★소켓 입구가 드는 **그 한 부**여야 한다★
+    /// (ADR-0160). 사본을 쥐면 발견은 빈 목록을 내고 중계는 자기만의 자리 표를 쓴다.
+    bus: crate::command_delivery::CommandBus,
+}
+
+/// 발견 목록 — 성공·반려 모두 200 + JSON이고, 답 자체가 없는 경우만 500 이다(그 갈래의 범위는
+/// [`internal_error`] 주석). ★표 슬롯이 비어도 503 이 아니다★: 같은 상태에서 WS 목록이 내는 답이
+/// 「명부 절반」이라, 여기서 503 을 내면 두 표면이 같은 상태를 두고 다른 말을 한다(그 선택의 정본 =
+/// `catalog::handle_list` doc).
+///
+/// ★`spawn_blocking` 이 무엇을 고쳤고 무엇을 안 고쳤나 — 넘겨짚지 말 것★
+///   - **고친 것 = 실행기 위험.** `CommandRoster::entries` 가 잡는 것은 blocking 뮤텍스라, async 워커에서
+///     부르면 그 워커는 양보가 아니라 **park** 된다. 이제 그 대기는 blocking 풀이 진다. 형제
+///     (`control_agent_handler`)와 대우를 맞춘 것이기도 하다 — 같은 잠금을 한쪽만 워커에서 잡을 이유가 없다.
+///   - **안 고친 것 = 잠금 유지 시간.** `entries` 는 여전히 뮤텍스를 **쥔 채** 명부 전량(상한 4096 ×
+///     help 4 KiB)을 복제하고, 그 뮤텍스는 명령 배달(`OwnerLookupSource::lookup`)과 연결 정리가 함께 쓴다.
+///     즉 이 라우트를 도는 자식은 **여전히 배달과 다툰다** — 바뀐 것은 **누가 기다리는가**이지 얼마나 오래
+///     잠기는가가 아니다. 그 복제 규율은 명부 모듈 소유라 여기서 줄일 수 없다(`command_roster` 헤더의
+///     「알려진 비용」).
+/// ★`decls()` 는 부를 때마다 `help` 를 다시 만든다(도구 crate `CommandTable::decls`) — 그대로 둔다★:
+///   데몬 자기 표는 오늘 5개뿐이라 이 응답의 비용은 명부 쪽이 지배하고, 메모이제이션은 그 crate 소유라
+///   여기서 손댈 자리가 아니다. 표가 커지면 그쪽에서 잰다.
+async fn control_commands_handler(
+    axum::extract::State(state): axum::extract::State<ControlCatalogState>,
+    identity: Option<axum::Extension<BoundIdentity>>,
+) -> Response {
+    if identity.is_none() {
+        return unauthorized();
+    }
+    let Ok(result) = tokio::task::spawn_blocking(move || {
+        let mine = state
+            .commands
+            .get()
+            .map(|table| table.decls())
+            .unwrap_or_default();
+        let registered = state.bus.roster().entries();
+        super::catalog::handle_list(mine, registered)
+    })
+    .await
+    else {
+        tracing::error!(entrance = "cli", "발견 목록 태스크 실패(패닉)");
+        return internal_error();
+    };
+    Json(result.into_json()).into_response()
+}
+
+/// 전체 이름 호출 — 항상 200 + JSON(성공/반려 모두), `/control/agent` 와 같은 계약이다.
+///
+/// ★`Json<…>` 추출기를 쓰지 않는 이유·`spawn_blocking` 경계 모두 형제(`control_agent_handler`)와 같다★ —
+///   그쪽 주석이 정본이다. 두 라우트가 같은 표를 같은 함수로 태우므로 대접도 같아야 한다.
+///
+/// ★이 라우트는 **마감까지 지연될 수 있다**(ADR-0160 영향절)★: 남의 이름은 그 주인에게 중계되고, 주인이
+///   답하지 않으면 배달 마감(`CommandDeliveries::DEFAULT_DEADLINE`)이 `TIMEOUT` 을 낸다. 데몬 자기 이름은
+///   예전 그대로 그 자리에서 끝나므로 이 지연을 지지 않는다.
+/// ★`request_id` 는 **호출자가 실어 보낼 수 있다**★(ADR-0161 결정 1) — 안 실었으면 판정부가 발급한다
+///   (`catalog::handle_call`). 그 갈림을 여기서 다시 만들지 않는다.
+async fn control_call_handler(
+    axum::extract::State(state): axum::extract::State<ControlCatalogState>,
+    binding: Option<axum::Extension<super::registry::TokenBinding>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(axum::Extension(binding)) = binding else {
+        return unauthorized();
+    };
+    let caller = binding.identity;
+    let req: super::catalog::CallRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return Json(
+                super::catalog::malformed_body(&e.to_string(), &String::from_utf8_lossy(&body))
+                    .to_json(),
+            )
+            .into_response()
+        }
+    };
+    // ★우편 축은 **이름으로** 닫는다★ — 이 라우트는 경로가 아니라 바디로 명령을 고르므로 미들웨어의
+    //   라우트 분류가 여기까지 못 온다(그 분류 doc · [`mail_by_name`]). 실행에 필요한 무엇을 잡기 전에,
+    //   그리고 이름이 어느 출처의 것인지 가리기 전에 판정한다 — 데몬 표든 명부든 같은 답이어야 한다.
+    // ★거절을 형제와 **같은 레벨·같은 필드**로 남긴다★(`bearer_auth` 의 경로 축 게이트): 안 남기면 우편이
+    //   막힌 자격증명이 **이름으로 더듬어 보는 동안 서버에 흔적이 하나도 안 남고**, ADR-0133 의 재검토
+    //   트리거(거절만 받은 에이전트의 행동 관측)도 이 축에서는 발동할 재료를 잃는다.
+    // ★이름은 [`sanitize_for_log`] 를 거친다 — `agent::preview` 를 쓰지 말 것★: 이 줄은 **검증 전**에
+    //   찍히므로 이름은 완전히 임의의 문자열이고, 그 함수는 길이만 자르고 제어문자를 그대로 흘린다. 개행
+    //   하나면 로그 줄이 둘로 쪼개져 뒤 줄이 우리가 찍은 항목처럼 보인다(위조 항목 — 그 함수 doc 이 이
+    //   실패 모드를 적는다). `warn` 이라 기본 레벨에서 실제로 파일에 남는다는 점이 이 축을 진짜로 만든다.
+    // ADR-0133
+    if !binding.mail_allowed && mail_by_name(&req.name) {
+        tracing::warn!(
+            agent = %caller.agent_id,
+            epoch = caller.epoch,
+            command = %sanitize_for_log(&req.name),
+            "우편 요청 거절 — 이 자격증명은 CLI/HTTP 우편 입구의 것이 아니다(이름 축, ADR-0133)"
+        );
+        return mail_not_allowed();
+    }
+    // ★이 검사는 **배선 경보**이지 라우팅 권위가 아니다★: 권위는 아래 `bus.locals()` 하나이고(그래야 판정과
+    //   배달이 같은 사실을 본다 — `catalog::handle_call` 의 그 문단), 이 줄이 지키는 것은 「표를 늦게 꽂는
+    //   조립에서 이름을 보기도 전에 크게 드러난다」는 이 라우트의 계약뿐이다(그 대접의 정본 =
+    //   `tests/control_agent.rs` 의 두 라우트 대조 시험). ★조립부가 이 슬롯과 버스의 1단계 표를 **같은 한
+    //   부**로 넘겨야 이 경보가 실제 상태를 가리킨다★ — 운영 조립이 그렇게 한다(`lib.rs`).
+    if state.commands.get().is_none() {
+        tracing::error!(
+            entrance = "cli",
+            "전체 이름 호출 불가 — 명령 표 슬롯 미설정(배선 순서 이상, ADR-0155)"
+        );
+        return service_unavailable();
+    }
+    let bus = state.bus.clone();
+    let locals = Arc::clone(bus.locals());
+    let registered = bus.roster().clone();
+    let Ok(outcome) = tokio::task::spawn_blocking(move || {
+        super::catalog::handle_call(locals.as_ref(), &registered, req)
+    })
+    .await
+    else {
+        tracing::error!(entrance = "cli", "전체 이름 호출 태스크 실패(패닉)");
+        return internal_error();
+    };
+    let result = match outcome {
+        super::catalog::CallOutcome::Answered(result) => result,
+        super::catalog::CallOutcome::Relay {
+            name,
+            args,
+            request_id,
+        } => {
+            // ★누가 시킨 명령인지 남긴다★: 중계된 이름은 대시보드의 창·탭·슬롯을 실제로 움직이므로
+            //   (`src-tauri` 의 layout 명령들) 「내 창을 누가 닫았나」에 답할 수 있어야 한다. 그 재료는
+            //   이 문에 **이미 도착해 있는데**(`BoundIdentity`) 여태 존재 확인에만 쓰고 버렸다.
+            //   ★열쇠는 싣지 않는다★ — 신원은 열쇠에서 파생됐지만 그 자체는 자격증명이 아니다
+            //   (로깅 컨벤션 「보안」).
+            // ★warn 인 이유(info 아님)★: 이 줄이 담는 것은 **사건이 지나간 뒤 어디서도 다시 만들 수 없는
+            //   사실**이다 — 사용자 눈에 보이는 변경을 **어느 자격증명이** 시켰나. 조작의 결과는 화면과
+            //   상태 조회에 남지만 주인은 아무 데도 안 남으므로, 나중에 레벨을 올려도 이미 벌어진 조작의
+            //   주인은 그때도 모른다. 그리고 이 라우트는 「에이전트가 사람 화면을 움직였다」를 평상시 잡음이
+            //   아니라 **봐야 할 사건으로** 취급하기로 했다 — 같은 판단이 이 파일의 형제 게이트에 이미 박혀
+            //   있다(우편 거절의 `warn` 절 — `bearer_auth`).
+            //   ★「기본 레벨이 warn 이라 info 는 안 찍힌다」를 사유로 쓰지 말 것★ — 로깅 컨벤션이 그 논거를
+            //   명시적으로 금한다(정상 알림의 레벨을 기본 필터 때문에 올리는 것). 위 두 문장이 사유다.
+            //   ★그래서 중계 한 번에 warn 은 이 한 줄이다★ — 결말 쪽 성공 줄은 `info` 로 남는다(그쪽 주석).
+            //   ★이 예외를 로깅 컨벤션 문서에 적는 일은 아직 안 됐다(미결 — 이 라운드 범위 밖).★
+            //   도착률은 이 문의 자연 상한 안이다(요청당 연결 · `MAX_RELAYED_IN_FLIGHT`).
+            // ★입구 라벨은 상수를 쓴다★ — 이 호출은 `CommandBus::invoke` 를 타므로 그쪽이 남기는 라벨과
+            //   같아야 한다. `"cli"` 는 **중계를 안 타는 직접 실행** 몫이라(그 상수 doc) 여기 것이 아니다.
+            // ★이름은 [`sanitize_for_log`] 를 거친다★ — 사유는 위 우편 거절 줄과 같다(호출자가 고른
+            //   문자열이 `warn` 로 로그에 들어간다). 배달 쪽도 같은 함수를 쓴다(`command_delivery::deliver`
+            //   첫 줄) — 한 값이 두 층에서 다른 모양으로 적히지 않게 하려는 것이다.
+            // ★문구가 「중계했다」고 말하지 않는다 — 이 줄은 왕복 **앞**이다★: 이 뒤의 `invoke` 는 동시
+            //   상한을 쳤으면 아무것도 안 돌리고 반려하므로(`MAX_RELAYED_IN_FLIGHT`), 「중계한다」로 적으면
+            //   그 갈래에서 일어나지 않은 일을 기록한 줄이 남는다. 사실만 적고 결말은 짝 줄이 낸다 —
+            //   `CommandBus::invoke` 가 성공/실패 한 줄을, 상한 거절은 `RelaySlot::admit` 이 한 줄을 낸다
+            //   (셋 다 같은 `entrance`·`request_id` 를 실어 한 왕복으로 묶인다).
+            // ★그래도 이 줄을 왕복 **뒤로** 미루지 말 것★: 귀속은 사건이 지나가면 어디서도 다시 만들 수
+            //   없으므로(아래 사유) 데몬이 왕복 중에 죽으면 미룬 줄은 아예 안 남는다.
+            tracing::warn!(
+                entrance = crate::command_delivery::ENTRANCE_CONTROL,
+                agent = %caller.agent_id,
+                epoch = caller.epoch,
+                command = %sanitize_for_log(&name),
+                %request_id,
+                "에이전트가 남의 명령을 불렀다 — 이 데몬이 그 주인 앞으로 접수했다"
+            );
+            let reply = bus.invoke(request_id, name, args).await;
+            super::catalog::relayed(reply)
+        }
+    };
+    Json(result.into_json()).into_response()
+}
+
+/// 500 응답(빈 body) — blocking 태스크가 패닉해 **답 자체가 없는** 경우.
+///
+/// ★릴리스에서는 이 갈래에 닿지 못한다(알려진 범위)★: 워크스페이스 `[profile.release]` 가
+///   `panic = "abort"` 라 blocking 태스크의 패닉은 `JoinError` 가 아니라 **프로세스 종료**다. 즉 "패닉 →
+///   500" 은 debug 에서만 성립하는 계약이고, 배포판에서 이 자리가 지키는 것은 없다. 그래도 지우지 않는
+///   이유는 debug·테스트 빌드에서 그 갈래가 실재하고, 없으면 그 빌드에서 답 없는 요청이 매달리기 때문이다.
+fn internal_error() -> Response {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(axum::body::Body::empty())
+        .expect("valid 500 response")
 }
 
 /// 503 응답(빈 body) — 슬롯 미설정(배선 순서 이상). 요청 형식·인증 문제가 아니므로 4xx 가 아니다.
@@ -1004,6 +1267,11 @@ pub async fn start_mcp_server(
     //   서버가 두 번째 사본을 쥐면 **조립부가 다른 슬롯 둘을 넘겨도 아무도 안 알려 준다** — 증상은 에러도
     //   로그도 없이 트리가 영원히 옛 명부를 보여 주는 것이다. 인자에서 뺀 것이 그 갈림을 없앤다.
     commands: Arc<CommandTableSlot>,
+    // ★명령 버스는 **값으로** 온다★: `Clone` 인 공유 핸들이고 조립부가 이 서버보다 먼저 만들 수
+    //   있으므로(그렇게 하도록 `lib.rs` 를 고쳤다) 늦은 주입 슬롯이 필요 없다. 발견 목록의 절반과 중계
+    //   배달이 여기서 나오므로 조립부가 **수락 루프가 드는 그 한 부**를 넘겨야 한다 — 새로 만들어 넘기면
+    //   발견은 영원히 데몬 자기 이름만 내고 중계는 자기만의 자리 표를 쓴다(ADR-0160).
+    bus: crate::command_delivery::CommandBus,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr: SocketAddr = listener.local_addr()?;
@@ -1043,6 +1311,10 @@ pub async fn start_mcp_server(
         registry: registry.clone(),
         messaging: messaging.clone(),
     };
+    let catalog_state = ControlCatalogState {
+        commands: commands.clone(),
+        bus,
+    };
     let agent_state = ControlAgentState { commands };
     // ★명단(`ControlRoute::ALL`)을 돌며 얹는다 — 빌더 체인으로 되돌리지 말 것★: 새 라우트가 명단에
     //   들어와야 서빙이 되고, 들어오면 `is_mail` 의 exhaustive match 가 우편 분류를 컴파일 단계에서
@@ -1061,6 +1333,14 @@ pub async fn start_mcp_server(
             ControlRoute::Agent => app.route(
                 route.path(),
                 axum::routing::post(control_agent_handler).with_state(agent_state.clone()),
+            ),
+            ControlRoute::Commands => app.route(
+                route.path(),
+                axum::routing::post(control_commands_handler).with_state(catalog_state.clone()),
+            ),
+            ControlRoute::Call => app.route(
+                route.path(),
+                axum::routing::post(control_call_handler).with_state(catalog_state.clone()),
             ),
         };
     }
@@ -1110,6 +1390,8 @@ mod tests {
             ControlRoute::Send => true,
             ControlRoute::Messages => true,
             ControlRoute::Agent => false,
+            ControlRoute::Commands => false,
+            ControlRoute::Call => false,
         }
     }
 
@@ -1129,11 +1411,11 @@ mod tests {
             );
         }
         // 라우터는 이 명단을 돌며 조립된다 — 길이가 줄면 라우트가 조용히 사라진 것이다.
-        assert_eq!(ControlRoute::ALL.len(), 3);
+        assert_eq!(ControlRoute::ALL.len(), 5);
         assert_eq!(
             ControlRoute::ALL.iter().filter(|r| r.is_mail()).count(),
             2,
-            "우편 라우트는 발송·조회 둘"
+            "우편 라우트는 발송·조회 둘 — 제어 평면이 늘어도 이 수는 안 는다"
         );
     }
 
@@ -1169,10 +1451,9 @@ mod tests {
             );
         }
         // 명단에 있는 라우트는 자기 분류를 그대로 따른다(접기가 분류를 덮어쓰지 않는다).
-        assert!(
-            !mail_gated_path(CONTROL_AGENT_PATH),
-            "제어 동사는 전원 개방"
-        );
+        for open in [CONTROL_AGENT_PATH, CONTROL_COMMANDS_PATH, CONTROL_CALL_PATH] {
+            assert!(!mail_gated_path(open), "제어 평면은 전원 개방: {open}");
+        }
         for route in ControlRoute::ALL {
             assert_eq!(mail_gated_path(route.path()), route.is_mail(), "{route:?}");
         }
@@ -1220,6 +1501,63 @@ mod tests {
         assert_eq!(v["status"], "error");
         assert!(v["code"].as_str().is_some_and(|c| !c.is_empty()));
         assert!(v["hint"].as_str().is_some_and(|h| !h.is_empty()));
+    }
+
+    // ── 로그 위조 방지 — 호출자가 고른 문자열이 로그 필드에 원문으로 들어가지 않는다 ──────────────
+
+    use crate::log_capture::capture_loud_async as capture_loud;
+
+    /// ★검증 **전에** 찍히는 로그 줄에 호출자 문자열이 원문으로 들어가면 로그 위조가 된다★
+    ///
+    /// 이 라우트의 우편 거절은 이름을 보기만 하고 아무것도 검증하지 않은 상태에서 `warn` 을 남긴다 — 즉
+    /// 그 이름은 완전히 임의의 문자열이다. 개행 하나가 로그 줄을 둘로 쪼개면 뒤 줄은 우리가 찍은 항목처럼
+    /// 보이고, 기본 레벨이 warn 이라 그 줄은 **운영 로그 파일에 실제로 남는다**.
+    /// ★재는 것이 「함수를 불렀나」가 아니라 「그 필드에 원문이 갔나」다★ — 그래서 실제 핸들러를 태우고
+    /// 로그 이벤트의 필드 텍스트를 읽는다. 길이만 자르는 함수(`agent::preview`)로 되돌리면 여기가 빨개진다.
+    #[test]
+    fn a_control_character_in_the_called_name_never_reaches_the_log_field_verbatim() {
+        // 개행 + 위조 항목 + **폭 밖으로 밀려나야 하는 꼬리표** 하나(두 성질을 한 값으로 잰다).
+        let forged = "mail.probe\n2026-08-19T00:00:00Z  WARN forged entry padded out past the field width TAILMARK";
+        let lines = capture_loud(async move {
+            let (bus, sweeper) = crate::command_delivery::CommandBus::without_commands();
+            let state = ControlCatalogState {
+                commands: empty_commands_slot(),
+                bus,
+            };
+            let binding = axum::Extension(crate::control::registry::TokenBinding {
+                identity: BoundIdentity {
+                    agent_id: engram_dashboard_core::agent::types::AgentId::new_v4(),
+                    epoch: 0,
+                },
+                mail_allowed: false,
+            });
+            let body = serde_json::json!({ "name": forged }).to_string();
+            let resp = control_call_handler(
+                axum::extract::State(state),
+                Some(binding),
+                axum::body::Bytes::from(body),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "우편 거절은 200 + 반려 봉투");
+            sweeper.stop().await;
+        });
+
+        let logged = lines
+            .iter()
+            .find(|line| line.contains("command="))
+            .unwrap_or_else(|| panic!("거절 줄이 남아야 한다(계측 의무): {lines:?}"));
+        assert!(
+            !logged.contains('\n'),
+            "로그 필드가 줄을 쪼갤 수 있으면 위조 항목이 생긴다: {logged:?}"
+        );
+        assert!(
+            logged.contains("\\n"),
+            "제어문자는 escape 된 모양으로 남아야(값을 지우는 것이 아니다): {logged:?}"
+        );
+        assert!(
+            !logged.contains("TAILMARK"),
+            "로그 한 줄의 폭을 상대가 정하게 하면 안 된다(폭 상한): {logged:?}"
+        );
     }
 
     #[test]
@@ -1326,11 +1664,14 @@ mod tests {
     #[tokio::test]
     async fn server_starts_and_reports_local_url() {
         let reg = Arc::new(ControlRegistry::new());
+        // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+        let (relay_bus, _relay_sweeper) = crate::command_delivery::CommandBus::without_commands();
         let handle = start_mcp_server(
             reg,
             empty_slot(),
             empty_messaging_slot(),
             empty_commands_slot(),
+            relay_bus,
         )
         .await
         .expect("start mcp server");
@@ -1346,11 +1687,14 @@ mod tests {
     #[tokio::test]
     async fn dropping_handle_cancels_serve_task() {
         let reg = Arc::new(ControlRegistry::new());
+        // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+        let (relay_bus, _relay_sweeper) = crate::command_delivery::CommandBus::without_commands();
         let handle = start_mcp_server(
             reg,
             empty_slot(),
             empty_messaging_slot(),
             empty_commands_slot(),
+            relay_bus,
         )
         .await
         .expect("start mcp server");

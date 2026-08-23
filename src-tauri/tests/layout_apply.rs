@@ -11,16 +11,17 @@
 //! 통째로 뺀다. 그래서 CI가 **이 타깃만 따로 부르는 전용 스텝**을 갖는다(`.github/workflows/ci.yml`) —
 //! 그 스텝을 지우면 셸 조각 커버리지가 도로 0이 된다.
 //!
-//! 창 label 발급은 **실 `PopupCounter`**, 구독 재동기는 **실 `OutputRouter`** 를 쓴다 — 가짜로 흉내내면
-//! label 단조성·라우팅 계약을 검증하는 게 아니라 가짜를 검증한다. 나머지 세 포트(알림·OS 창·스폰)는
-//! 기록용 가짜다.
+//! 창 label 발급은 **실 `PopupCounter`**(프로브 껍데기만 덧씌운다), 구독 재동기는 **실 `OutputRouter`** 를
+//! 쓴다 — 가짜로 흉내내면 label 단조성·라우팅 계약을 검증하는 게 아니라 가짜를 검증한다. 나머지 세
+//! 포트(알림·OS 창·스폰)는 기록용 가짜다.
 //!
 //! ## ★락 위치 프로브(이 하네스의 핵심)★
 //! 이 리팩터가 지키려는 불변식은 "어느 포트가 락 **안**에서 불리고 어느 포트가 **밖**에서 불리나"인데,
 //! 호출을 세는 것만으로는 그게 안 잡힌다 — 위치를 옮겨도 개수가 같다. 그래서 각 가짜 포트가 호출된
 //! **그 자리에서** `try_lock` 으로 락 보유 여부를 직접 본다:
-//! - `LayoutEvents`·`WindowHost`·`AgentSpawner` → `is_ok()`(락 **밖**이어야 한다). `WindowHost::close`
-//!   를 락 안으로 옮기면 운영에서 확정 교착이다(`w.destroy()` → `Destroyed` → 같은 락 재취득).
+//! - `LayoutEvents`·`WindowHost`·`LabelSource`·`AgentSpawner` → `is_ok()`(락 **밖**이어야 한다).
+//!   `WindowHost::close` 를 락 안으로 옮기면 운영에서 확정 교착이다(`w.destroy()` → `Destroyed` → 같은 락
+//!   재취득).
 //! - `SubscriptionSync::resync` → `is_err()`(락 **안**이어야 한다). 밖으로 내면 F1/F2 stale-unsubscribe
 //!   결함이 부활한다.
 //!
@@ -38,7 +39,7 @@ use uuid::Uuid;
 
 use engram_dashboard_lib::commands::popout::PopupCounter;
 use engram_dashboard_lib::layout::apply::{
-    self, AgentSpawner, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
+    self, AgentSpawner, LabelSource, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
 };
 use engram_dashboard_lib::layout::{
     tree, LayoutState, SlotContent, SplitDir, ViewManager, ViewSnapshot, MAIN_WINDOW_LABEL,
@@ -163,6 +164,35 @@ impl WindowHost for Host {
         self.probe.assert_outside("WindowHost::close");
         self.closed.lock().unwrap().push(label.to_string());
     }
+
+    // ★main 을 특례로 참이라 답한다★ — 정적 config 창이라 이 가짜가 연 적이 없는데, 실 앱에서는 항상 떠
+    // 있다(팝업 슬롯을 main 으로 되돌리는 것이 실사용 경로다). 나머지는 이 가짜가 연 뒤 안 닫은 것뿐.
+    fn is_open(&self, label: &str) -> bool {
+        self.probe.assert_outside("WindowHost::is_open");
+        label == MAIN_WINDOW_LABEL
+            || (self.opened.lock().unwrap().iter().any(|l| l == label)
+                && !self.closed.lock().unwrap().iter().any(|l| l == label))
+    }
+}
+
+// ★실 발급기를 **감싼다**(대체하지 않는다)★: label 단조성은 안쪽 실물이 계속 지고, 이 껍데기는 호출
+// **위치**만 덧본다. 오늘 구현은 순수해서 락 안에서 불려도 안 터지므로, 그 자리를 못 박는 것은 이 프로브뿐이다
+// — 상태를 만지는 구현으로 바뀌는 날 `Destroyed → cleanup_popup_window → state.0.lock()` 와 교착한다.
+struct Labels {
+    probe: Probe,
+    inner: PopupCounter,
+}
+
+impl LabelSource for Labels {
+    fn next_label(&self) -> String {
+        self.probe.assert_outside("LabelSource::next_label");
+        LabelSource::next_label(&self.inner)
+    }
+
+    fn tab_name(&self, label: &str) -> String {
+        self.probe.assert_outside("LabelSource::tab_name");
+        LabelSource::tab_name(&self.inner, label)
+    }
 }
 
 struct Spawner {
@@ -218,9 +248,9 @@ struct World {
     subs: Subs,
     ev: Recorder,
     host: Host,
-    // 실물 발급기 — prefix(`slot-popup-`)는 capabilities/popup.json glob 과 짝이고 단조성은 닫힌 label
-    // 재-build 에러를 막는 계약이다.
-    labels: PopupCounter,
+    // 실물 발급기(프로브만 덧씌움) — prefix(`slot-popup-`)는 capabilities/popup.json glob 과 짝이고
+    // 단조성은 닫힌 label 재-build 에러를 막는 계약이다.
+    labels: Labels,
 }
 
 impl World {
@@ -238,7 +268,10 @@ impl World {
             subs: Subs::new(&state),
             ev: Recorder::new(&state),
             host: Host::new(&state, fail_open),
-            labels: PopupCounter::default(),
+            labels: Labels {
+                probe: Probe::new(&state),
+                inner: PopupCounter::default(),
+            },
             state,
         }
     }
@@ -704,6 +737,248 @@ fn set_slot_content_unknown_view_is_err() {
     .unwrap_err();
     assert!(err.contains("view 없음"), "err={err}");
     assert_eq!(w.layout_events(), 0);
+}
+
+// ── move_slot_to_window ──────────────────────────────────────────────────────
+
+impl World {
+    // agent 하나가 든 슬롯 + 그것을 담은 View — pop-out 의 전제(빈 슬롯은 거부되므로).
+    fn view_with_filled_slot(&self) -> (Uuid, Uuid, SlotContent) {
+        let view = self.main_active();
+        let slot = self.empty_slot(view);
+        let content = SlotContent::Agent {
+            agent_id: Uuid::new_v4().to_string(),
+        };
+        apply::set_slot_content(
+            &self.state,
+            &self.subs,
+            &self.ev,
+            view,
+            slot,
+            content.clone(),
+        )
+        .unwrap();
+        (view, slot, content)
+    }
+
+    // ★롤백을 재는 유일한 눈금★: `views` 는 창 목록과 달리 owner 없는 임시 View 까지 센다. 창 수를 세면
+    // 실패 경로엔 창 엔트리가 애초에 안 생겨 롤백을 지워도 초록이다(그 단언은 아무것도 안 잰다).
+    fn view_count(&self) -> usize {
+        self.state.0.lock().unwrap().views.len()
+    }
+}
+
+#[test]
+fn move_slot_to_window_detaches_content_into_a_new_window() {
+    let w = World::new();
+    let (view, slot, content) = w.view_with_filled_slot();
+
+    let moved = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap();
+
+    assert_eq!(&*w.host.opened.lock().unwrap(), &[moved.window.clone()]);
+    assert!(!w.slots(view).contains(&slot), "원본 슬롯은 닫힌다(MOVE)");
+    let landed = apply::list_tabs(&w.state, &moved.window).unwrap();
+    assert_eq!(landed.active, moved.tab, "새 탭이 그 창의 활성 탭이다");
+    let landed_slot = w.slots(moved.tab)[0];
+    assert_eq!(
+        tree::find_slot(&w.snapshot(moved.tab).layout, landed_slot),
+        Some(&content),
+        "콘텐츠가 그대로 새 탭에 실린다"
+    );
+}
+
+/// ★알림이 안 나가면 화면은 옛 배치를 그린다★ — 이 명령은 창 **둘**을 바꾸므로(콘텐츠를 잃은 원본 창,
+/// 탭이 하나 는 대상 창) 탭바 알림도 둘이다. 대상 창 몫을 빠뜨리면 새 창 탭바가 빈 채로 뜬다.
+#[test]
+fn move_slot_to_window_notifies_both_windows() {
+    let w = World::new();
+    let (view, slot, _) = w.view_with_filled_slot();
+    let layout_before = w.layout_events();
+    let tabs_before = w.tab_events();
+
+    let moved = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        w.layout_events() - layout_before,
+        1,
+        "원본 뷰의 새 배치 1회"
+    );
+    let tab_payloads = w.ev.tabs.lock().unwrap();
+    let sent: Vec<&str> = tab_payloads[tabs_before..]
+        .iter()
+        .map(|t| t.label.as_str())
+        .collect();
+    assert_eq!(
+        sent,
+        vec![MAIN_WINDOW_LABEL, moved.window.as_str()],
+        "원본 창 → 대상 창 순으로 탭바가 갱신된다"
+    );
+}
+
+/// ★구독은 창을 갈아타는 동안에도 끊기지 않는다★: agent 는 원본 슬롯에서 사라지지만 같은 순간 대상 탭에
+/// 나타난다. 재동기가 attach 전에 계산되거나 close 후에만 돌면 1→0 이 잡혀 살아 있는 구독이 죽는다.
+#[test]
+fn move_slot_to_window_keeps_the_agent_subscribed_across_the_move() {
+    let w = World::new();
+    let (view, slot, _) = w.view_with_filled_slot();
+
+    apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap();
+
+    assert!(
+        w.unsubscribed().is_empty(),
+        "옮겨간 창에서 계속 보이므로 해제할 것이 없다: {:?}",
+        w.unsubscribed()
+    );
+}
+
+#[test]
+fn move_slot_to_window_into_an_existing_window_adds_a_tab() {
+    let w = World::new();
+    let target = w.popup();
+    let tabs_before = apply::list_tabs(&w.state, &target).unwrap().tabs.len();
+    let (view, slot, _) = w.view_with_filled_slot();
+
+    let moved = apply::move_slot_to_window(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &w.host,
+        &w.labels,
+        view,
+        slot,
+        Some(target.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(moved.window, target, "새 창을 열지 않는다");
+    let tabs = apply::list_tabs(&w.state, &target).unwrap();
+    assert_eq!(tabs.tabs.len(), tabs_before + 1);
+    assert_eq!(tabs.active, moved.tab);
+}
+
+#[test]
+fn move_slot_to_window_refuses_an_empty_slot() {
+    let w = World::new();
+    let view = w.main_active();
+    let slot = w.empty_slot(view);
+
+    let err = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap_err();
+
+    assert!(err.contains("빈 슬롯"), "err={err}");
+    assert!(w.host.opened.lock().unwrap().is_empty(), "창도 안 연다");
+    assert!(w.slots(view).contains(&slot), "부분변경 금지");
+}
+
+/// ★임시 View 가 실제로 회수되는지를 잰다★ — 창 수를 세면 실패 경로엔 창 엔트리가 안 생겨 롤백을
+/// 통째로 지워도 초록이고, 그 사이 owner 없는 View 가 재시도마다 `views` 에 무한히 쌓인다
+/// (`apply.rs` 「owner-less tmp_view」 불변식의 ④ 종점이 사라진다).
+#[test]
+fn move_slot_to_window_rolls_back_when_the_window_cannot_be_built() {
+    let w = World::failing_host();
+    let (view, slot, content) = w.view_with_filled_slot();
+    let views_before = w.view_count();
+    let resyncs_before = w.resyncs();
+
+    let err = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap_err();
+
+    assert!(err.contains("창 생성 실패"), "err={err}");
+    assert_eq!(
+        w.view_count(),
+        views_before,
+        "임시 View 가 회수되지 않았다 — 실패한 pop-out 마다 유령 View 가 쌓인다"
+    );
+    assert_eq!(
+        w.resyncs() - resyncs_before,
+        2,
+        "phase A 재동기 + 롤백 재동기 = 2(롤백이 빠지면 1)"
+    );
+    assert_eq!(
+        tree::find_slot(&w.snapshot(view).layout, slot),
+        Some(&content),
+        "빌드 실패 시 소스 슬롯은 그대로 — 사용자가 콘텐츠를 잃지 않는다"
+    );
+}
+
+/// ★`is_open` 만이 거를 수 있는 그 상태를 세운다★: 대상 창이 **모델에는 살아 있는데** OS 창은 이미 사라진
+/// 순간(`Destroyed` 정리가 아직 모델을 안 지웠다). `insert_tab_into` 의 모델 재검증은 이것을 통과시키므로,
+/// `is_open` 이 없으면 콘텐츠가 화면 없는 창의 탭으로 들어가고 소스 슬롯은 닫혀 어느 화면에도 안 남는다.
+#[test]
+fn move_slot_to_window_rejects_a_target_whose_os_window_is_gone() {
+    let w = World::new();
+    let target = w.popup();
+    // OS 창만 사라진 상태 — 모델 엔트리는 그대로다.
+    w.host.closed.lock().unwrap().push(target.clone());
+    let (view, slot, content) = w.view_with_filled_slot();
+    let views_before = w.view_count();
+    let tabs_before = apply::list_tabs(&w.state, &target).unwrap().tabs.len();
+
+    let err = apply::move_slot_to_window(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &w.host,
+        &w.labels,
+        view,
+        slot,
+        Some(target.clone()),
+    )
+    .unwrap_err();
+
+    assert!(err.contains("대상 창 없음"), "err={err}");
+    assert_eq!(
+        tree::find_slot(&w.snapshot(view).layout, slot),
+        Some(&content),
+        "거절은 무행위여야 한다 — 소스 슬롯을 닫으면 콘텐츠가 어느 화면에도 안 남는다"
+    );
+    assert_eq!(
+        apply::list_tabs(&w.state, &target).unwrap().tabs.len(),
+        tabs_before,
+        "화면 없는 창에 탭을 밀어 넣지 않는다"
+    );
+    assert_eq!(w.view_count(), views_before, "임시 View 도 회수된다");
+}
+
+// 모델에도 없는 label 은 `is_open` 이 먼저 걸러 「대상 창 없음」으로 나간다(모델 재검증까지 가지 않는다).
+#[test]
+fn move_slot_to_window_rejects_an_unknown_target_label() {
+    let w = World::new();
+    let (view, slot, content) = w.view_with_filled_slot();
+    let views_before = w.view_count();
+
+    let err = apply::move_slot_to_window(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &w.host,
+        &w.labels,
+        view,
+        slot,
+        Some("no-such".to_string()),
+    )
+    .unwrap_err();
+
+    assert!(err.contains("대상 창 없음"), "err={err}");
+    assert_eq!(
+        tree::find_slot(&w.snapshot(view).layout, slot),
+        Some(&content),
+        "거절은 무행위여야 한다"
+    );
+    assert_eq!(w.view_count(), views_before, "임시 View 회수");
 }
 
 // ── spawn_into ───────────────────────────────────────────────────────────────

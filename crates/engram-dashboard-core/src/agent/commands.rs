@@ -1,8 +1,9 @@
 //! `agent.*` 명령 — **선언과 본문이 한 세트**로 일하는 코드(`AgentManager`) 옆에 산다(ADR-0155).
 //!
-//! ★이 표가 CLI 제어 동사의 실입구다★: 데몬의 `/control/agent` 라우트가 `{verb}` 를 `agent.<verb>` 로
-//!   찾아 여기 핸들러를 부른다(daemon `control/agent.rs`). 즉 이 파일의 반환 모양·오류 코드·통지 횟수가
-//!   그대로 `engram agent …` 의 응답이다.
+//! ★이 표가 제어 동사의 실입구다 — 표면은 **둘**이다★: CLI 의 `/control/agent` 라우트(`{verb}` 를
+//!   `agent.<verb>` 로 찾는다)와 클라이언트가 명령 버스로 내는 봉투(배달 3단계의 1단계). 둘 다 데몬의
+//!   공통 입구 하나를 지난다(daemon `control/commands.rs`). 즉 이 파일의 반환 모양·오류 코드·통지 횟수가
+//!   그대로 `engram agent …` 의 응답이자 LLM 이 버스로 받는 답이다.
 //! ★호스팅은 데몬, 선언은 코어★ — 이 둘이 갈리는 유일한 자리다(ADR-0029 + TRD §2-3).
 //!
 //! 진입점: [`make_table`](fn.make_table.html)(조립) · [`AgentCommandHost`](trait.AgentCommandHost.html)(주입 seam).
@@ -15,6 +16,7 @@ use engram_dashboard_command::{
 };
 
 use crate::agent::manager::{AgentManager, RenameOutcome};
+use crate::agent::preset::PresetId;
 use crate::agent::profile::{AgentCommand, AgentProfile, ClaudeOutputFormat, SpawnMode};
 use crate::agent::types::{
     AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED,
@@ -24,7 +26,7 @@ use crate::agent::types::{
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
-    catalog_version: 1;
+    catalog_version: 2;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -33,6 +35,31 @@ declare_commands! {
         state: String,
         cwd: String,
         parent: Option<String>,
+    }
+
+    /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 하나뿐이다★.
+    ///
+    /// 코어에는 다른 백엔드도 있지만(`agent::backend` 의 codex·gemini·shell) **프로필 생성 경로가
+    /// 그것들로 도는지 확인된 바 없다** — 그래서 칸만 지금 열고 값은 좁혀 둔다(나중에 계약 **모양**이
+    /// 바뀌지 않게).
+    /// ★넓히는 것은 「변형 하나 더」가 아니라 **디스크 호환을 깨는 이주**다★: 여기 변형을 늘리려면
+    /// 실행 명령(`AgentCommand`)에 짝이 있어야 하는데 그 enum 은 `#[serde(tag = "kind")]` 로
+    /// **`agents.json` 에 그대로 적힌다**. 새 빌드가 새 kind 를 쓴 프로필을 저장하고 나면 옛 빌드는 그
+    /// 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다** — 그 빌드에서
+    /// 에이전트가 전부 사라진다(persistence `FileProfileStore::load`). 넓힐 때 그 이주를 함께 설계할 것.
+    enum AgentBackend {
+        Claude,
+    }
+
+    /// 새 에이전트의 출력 형식(= 렌더 모드) — 생성 시점에 고정되고 이후 불변이다(ADR-0044/0078).
+    ///
+    /// `Terminal` = PTY 대화형(xterm 렌더) · `StreamJson` = 헤드리스 NDJSON 스트림.
+    /// 어휘는 `ClaudeOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — 갈리면 프론트 allowlist
+    /// (`coerceOutputFormat`)와 이 입구가 같은 낱말을 다르게 읽는다. 그 일치를 산문이 아니라 컴파일러가
+    /// 지키는 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
+    enum AgentOutputFormat {
+        Terminal,
+        StreamJson,
     }
 
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
@@ -66,13 +93,20 @@ declare_commands! {
     #[effect(Write)]
     #[since(1)]
     "agent.new" => args AgentNewArgs {
-        cwd: String,
+        /// 작업 폴더. ★`preset` 과 상호배타이고 **둘 중 정확히 하나**가 있어야 한다★.
+        cwd: Option<String>,
+        /// 등록된 경로 북마크(프리셋)의 id. cwd 와 상호배타.
+        preset: Option<String>,
         name: Option<String>,
+        /// 미지정 = StreamJson.
+        output_format: Option<AgentOutputFormat>,
+        /// 미지정 = Claude.
+        backend: Option<AgentBackend>,
     } -> ok AgentNewOk {
         agent_id: String,
         name: String,
         state: String,
-    } errors [CONFLICT];
+    } errors [NOT_FOUND, CONFLICT];
 
     /// 표시 이름을 바꾼다.
     #[effect(Write)]
@@ -142,6 +176,11 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★`false` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::reparent`).
     /// 부재와 구조 충돌은 핸들러가 **명부 재조회로** 가른다(`verb_move`).
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> bool;
+    /// 등록된 경로 북마크(프리셋, ADR-0061) 하나의 작업 폴더.
+    ///
+    /// ★지목은 **id 정확 일치**뿐이다★ — 이름으로는 못 찾는다(프리셋 이름은 유일하지 않다). 없는 id 와
+    /// id 형식이 아닌 문자열은 둘 다 `None` 이다: 호출자가 할 일이 같아서다(목록에서 id 를 다시 고른다).
+    fn preset_cwd(&self, id: &str) -> Option<String>;
 }
 
 /// 명부가 바뀌었음을 붙어 있는 클라이언트에게 알리는 출구(포트).
@@ -198,6 +237,15 @@ impl AgentCommandHost for AgentManager {
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> bool {
         AgentManager::reparent_agent(self, child, parent)
     }
+
+    fn preset_cwd(&self, id: &str) -> Option<String> {
+        let id: PresetId = id.parse().ok()?;
+        AgentManager::presets(self)
+            .list()
+            .into_iter()
+            .find(|preset| preset.id == id)
+            .map(|preset| preset.cwd.to_string_lossy().into_owned())
+    }
 }
 
 /// 새로 만드는 에이전트의 백엔드 출력 형식.
@@ -208,11 +256,44 @@ impl AgentCommandHost for AgentManager {
 /// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
 pub const NEW_AGENT_OUTPUT_FORMAT: ClaudeOutputFormat = ClaudeOutputFormat::StreamJson;
 
+/// 선언 어휘 → 실행 명령.
+///
+/// ★이 `match` 는 **선언 enum** 을 훑는다 — 코어에 백엔드가 늘어도 여기서는 컴파일이 깨지지 않는다★.
+/// 그 방향(코어가 늘었는데 선언이 좁은 채로 남는 것)을 잡는 그물은 `AgentCommand` 를 훑는 역방향 `match`
+/// 이고, 그 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones` 하나다.
+fn backend_command(backend: AgentBackend, output_format: ClaudeOutputFormat) -> AgentCommand {
+    match backend {
+        AgentBackend::Claude => AgentCommand::Claude {
+            extra_args: vec![],
+            output_format,
+        },
+    }
+}
+
+/// 선언 어휘 → 코어 어휘. **미지정은 [`NEW_AGENT_OUTPUT_FORMAT`]** 이고, 어휘 밖 값은 여기 오기 전에
+/// 역직렬화가 `INVALID_ARGUMENT` 로 반려한다(조용한 fallback 없음 — 프론트 `coerceOutputFormat` 과 같은 규율).
+fn output_format(given: Option<AgentOutputFormat>) -> ClaudeOutputFormat {
+    match given {
+        None => NEW_AGENT_OUTPUT_FORMAT,
+        Some(AgentOutputFormat::Terminal) => ClaudeOutputFormat::Terminal,
+        Some(AgentOutputFormat::StreamJson) => ClaudeOutputFormat::StreamJson,
+    }
+}
+
+/// ★문구가 **무엇을 실어야 하는지**를 말한다★ — 없는 id 와 id 아닌 문자열이 같은 답을 받으므로
+/// (`AgentCommandHost::preset_cwd`) 그 둘을 한 번에 고칠 수 있는 안내여야 한다.
+fn preset_not_found(id: &str) -> CommandError {
+    CommandError::not_found(format!(
+        "no registered path with id '{id}' — preset takes the id of a path bookmark, not its name or the folder path itself"
+    ))
+}
+
 /// `agent.*` 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
 ///
 /// ★blocking 계약★: 핸들러 본문은 프로필 락을 쥔 채 디스크를 쓰고 resume 조기 종료를 폴링한다
 ///   (`AgentManager::activate_profile`). async 런타임 스레드에서 폴링하면 그 스레드를 막으므로 조립부가
-///   `spawn_blocking` 뒤에서 불러야 한다 — 데몬 `/control/agent` 어댑터가 이미 그렇게 한다.
+///   `spawn_blocking` 뒤에서 불러야 한다 — 이 표를 부르는 두 표면(데몬의 `/control/agent` 라우트와
+///   명령 버스 배달)이 그 공통 입구 하나로 들어오고, 그 자리가 blocking 풀 위에 있다.
 /// ★`notify` 를 인자로 받는 이유★: 명부를 바꾼 동사는 반드시 통지해야 하는데(포트 doc 참조) 그 실물은
 ///   데몬 소유다. 조립부가 넘기게 하면 **빠뜨릴 수 없다** — trait 기본 구현으로 두면 조용히 안 부른다.
 /// ★명령이 늘어도 조립부(실행 파일)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
@@ -331,11 +412,11 @@ fn verb_spawn(
 }
 
 /// ★깨우기도 명부 통지를 낸다 — 항목 수·이름·계층이 그대로여도★: 활성화 결말이 그 항목의
-/// 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0161) 그 축은 **프로필 목록으로만** 흐른다.
+/// 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0169) 그 축은 **프로필 목록으로만** 흐른다.
 /// 매니저가 흘리는 생사 전이(`agent_list_updated`)는 산 세션 목록이라 이 값을 나르지 않는다 —
 /// 여기서 안 알리면 LLM 이 깨운 결과가 화면에 영영 안 뜬다(사람 클릭 경로는 뜬다 = 두 핸들이 갈린다,
 /// CLAUDE.md 「LLM-우선 제어」).
-// ADR-0161
+// ADR-0169
 fn wake_existing(
     host: &dyn AgentCommandHost,
     notify: &dyn RosterChanged,
@@ -365,13 +446,19 @@ fn create_and_start(
     cwd: &str,
     name: Option<String>,
 ) -> Result<AgentSpawnOk, CommandError> {
-    let stored = register(host, cwd, name)?;
+    // ★이 동사에는 형식·백엔드 칸이 없다★ — 만들기 기본값을 그대로 쓴다(둘을 고르는 입구는 `agent.new`).
+    let stored = register(
+        host,
+        cwd,
+        name,
+        backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT),
+    )?;
     notify.roster_changed();
     let started = host.activate_profile(&stored, SpawnMode::Fresh);
     // ★활성화 **뒤에도** 알린다 — 위 통지는 활성화 전 스냅샷이다★: 그 사이 「마지막 실패」가 기록되거나
-    //   지워지고(ADR-0161), 그 축은 프로필 목록으로만 흐른다. 실패 갈래에서 특히 중요하다 — 아래 Err 는
+    //   지워지고(ADR-0169), 그 축은 프로필 목록으로만 흐른다. 실패 갈래에서 특히 중요하다 — 아래 Err 는
     //   호출자에게만 가고 화면에는 아무 것도 남지 않는다.
-    // ADR-0161
+    // ADR-0169
     notify.roster_changed();
     let started = started.map_err(|e| {
             // ★등록을 되돌리지 않는다★: 만들어진 에이전트는 잠든 상태로 명부에 남는다. 되감기는 두 번째
@@ -393,12 +480,62 @@ fn verb_new(
     notify: &dyn RosterChanged,
     args: AgentNewArgs,
 ) -> Result<AgentNewOk, CommandError> {
-    let (cwd, name) = (args.cwd.as_str(), args.name.as_deref());
+    let (cwd, preset, name) = (
+        args.cwd.as_deref(),
+        args.preset.as_deref(),
+        args.name.as_deref(),
+    );
+    // ★두 칸 다 「빼도 된다」가 아니다★ — 하나는 반드시 있어야 하므로 빈 값 안내가 **형제 칸**을 함께
+    //   가리킨다. 안 그러면 시킨 대로 뺀 재시도가 「둘 중 하나는 줘야 한다」로 다시 반려된다.
     reject_blanks(&[
-        ("cwd", Some(cwd), Blank::NeedsValue),
+        (
+            "cwd",
+            cwd,
+            Blank::OrElse("a folder path, or give preset instead"),
+        ),
+        (
+            "preset",
+            preset,
+            Blank::OrElse("the id of a registered path, or give cwd instead"),
+        ),
         ("name", name, Blank::OrOmit),
     ])?;
-    let stored = register(host, cwd, name.map(str::to_string))?;
+    // ★어느 폴더인가를 두 칸이 말할 수 있다 — 조용히 한쪽을 고르지 않는다★(`agent.spawn` 의 target/cwd 와
+    //   같은 규율): 둘 다 주면 고를 근거가 없고, 없으면 만들 자리가 없다.
+    let cwd = match (cwd, preset) {
+        (Some(_), Some(_)) => {
+            return Err(CommandError::invalid_argument(
+                "new takes either a folder (cwd) or a registered path (preset), not both",
+            ))
+        }
+        (None, None) => return Err(CommandError::invalid_argument(
+            "new needs either cwd (a folder to work in) or preset (the id of a registered path)",
+        )),
+        (Some(cwd), None) => cwd.to_string(),
+        (None, Some(id)) => {
+            let stored = host.preset_cwd(id).ok_or_else(|| preset_not_found(id))?;
+            // ★프리셋에 담겨 온 값도 **직접 준 값과 같은 검사**를 받는다★: 위 `reject_blanks` 는 호출자가
+            //   친 칸만 보므로 이 갈래는 그 그물을 통째로 지나친다. 프리셋 등록에는 값 검증이 없고
+            //   (`CreatePreset` 은 받은 문자열을 그대로 저장한다) 아래 `register` 도 빈 폴더를 거르지 않아
+            //   (`PtyError::CwdDenied` 를 만드는 코드가 코어에 없다) 여기서 안 보면 **작업 폴더가 빈
+            //   에이전트**가 명부에 앉고, 그것을 지우는 동사가 없다(ADR-0122).
+            if is_blank(Some(&stored)) {
+                return Err(CommandError::invalid_argument(format!(
+                    "the registered path '{id}' has a blank folder, so there is nothing to work in — register that path again with a real folder, or pass cwd directly"
+                )));
+            }
+            stored
+        }
+    };
+    let stored = register(
+        host,
+        &cwd,
+        name.map(str::to_string),
+        backend_command(
+            args.backend.unwrap_or(AgentBackend::Claude),
+            output_format(args.output_format),
+        ),
+    )?;
     notify.roster_changed();
     Ok(AgentNewOk {
         agent_id: stored.id.to_string(),
@@ -415,17 +552,10 @@ fn register(
     host: &dyn AgentCommandHost,
     cwd: &str,
     name: Option<String>,
+    command: AgentCommand,
 ) -> Result<AgentProfile, CommandError> {
-    let mut profile = AgentProfile::new(
-        cwd.to_string(),
-        AgentCommand::Claude {
-            extra_args: vec![],
-            output_format: NEW_AGENT_OUTPUT_FORMAT,
-        },
-        PathBuf::from(cwd),
-        vec![],
-        false,
-    );
+    let mut profile =
+        AgentProfile::new(cwd.to_string(), command, PathBuf::from(cwd), vec![], false);
     profile.display_name = name;
     // ★실패 사유마다 호출자가 할 일이 다르다★ — 자리를 비워라(CONFLICT) · 인자를 고쳐라
     //   (INVALID_ARGUMENT) · 다시 시도해도 소용없다(INTERNAL). 한 코드로 뭉개면 그 갈림이 사라진다.
@@ -728,6 +858,8 @@ mod tests {
         started_status: Mutex<Option<AgentStatus>>,
         /// reparent 성공 직후 자식이 얻는 새 이름 — 「적용 뒤 개명이 끼어들었다」를 재현한다.
         rename_on_reparent: Mutex<Option<String>>,
+        /// 등록된 경로 북마크(id → cwd) — 프리셋 지목이 **실제로 폴더를 물어 온다**를 재는 재료.
+        presets: Mutex<HashMap<String, String>>,
     }
 
     /// 명부 통지 계수기 — 「이름을 바꿨는데 트리가 옛 명부를 보여준다」의 감시자.
@@ -761,6 +893,13 @@ mod tests {
 
         fn with_agent(self: &Arc<Self>, name: &str, live: bool, resumable: bool) -> AgentId {
             self.with_status(name, live.then_some(AgentStatus::Running), resumable)
+        }
+
+        fn with_preset(self: &Arc<Self>, id: &str, cwd: &str) {
+            self.presets
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), cwd.to_string());
         }
 
         /// 명부 행의 상태를 **그대로** 심는다 — terminal 상태의 행이 `list` 에서 어떤 낱말로 나오는지를
@@ -884,6 +1023,10 @@ mod tests {
             }
             ok
         }
+
+        fn preset_cwd(&self, id: &str) -> Option<String> {
+            self.presets.lock().unwrap().get(id).cloned()
+        }
     }
 
     fn call(
@@ -989,13 +1132,13 @@ mod tests {
         assert_eq!(
             *notify.calls.lock().unwrap(),
             1,
-            "구성은 그대로여도 활성화가 「마지막 실패」를 바꾼다(ADR-0161) — 그 축은 프로필 목록으로만 흐른다"
+            "구성은 그대로여도 활성화가 「마지막 실패」를 바꾼다(ADR-0169) — 그 축은 프로필 목록으로만 흐른다"
         );
     }
 
     /// ★LLM 이 깨운 실패가 화면에 닿아야 한다★: 이 통지가 없으면 사람 클릭(WS `SpawnProfile`)으로는
     /// 실패 표시가 뜨는데 명령 버스로는 안 떠, 두 핸들이 같은 것을 흔들지 않게 된다.
-    // ADR-0161
+    // ADR-0169
     #[test]
     fn waking_that_fails_still_announces_the_roster() {
         let host = FakeHost::new();
@@ -1035,7 +1178,7 @@ mod tests {
         assert_eq!(
             *notify.calls.lock().unwrap(),
             2,
-            "등록 직후 한 번(새 항목) + 활성화 직후 한 번(「마지막 실패」 결말, ADR-0161)"
+            "등록 직후 한 번(새 항목) + 활성화 직후 한 번(「마지막 실패」 결말, ADR-0169)"
         );
     }
 
@@ -1094,6 +1237,304 @@ mod tests {
                 "실패했으면 명부는 안 바뀌었다"
             );
         }
+    }
+
+    /// ★대화상자 없이 등록되는 길★ — 프리셋 id 하나로 작업 폴더가 정해진다(ADR-0061 의 경로 북마크).
+    #[test]
+    fn new_resolves_a_preset_id_to_its_folder() {
+        let host = FakeHost::new();
+        host.with_preset("bookmark-1", "C:/work/from-preset");
+        let (table, notify) = wiring(&host);
+
+        let out = call(&table, "agent.new", json!({ "preset": "bookmark-1" })).expect("등록");
+
+        assert_eq!(out["state"], "sleeping");
+        assert_eq!(
+            host.rows.lock().unwrap()[0].cwd,
+            "C:/work/from-preset",
+            "프리셋이 가리킨 폴더로 등록돼야 한다"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// ★둘 다 주거나 아무것도 안 주면 **조용히 한쪽을 고르지 않는다**★ — 고르면 호출자가 의도한 곳이
+    /// 아닌 폴더에 에이전트가 생긴다(그리고 지울 경로가 없다 — ADR-0122).
+    #[test]
+    fn new_refuses_both_a_folder_and_a_preset_and_refuses_neither() {
+        let host = FakeHost::new();
+        host.with_preset("bookmark-1", "C:/work/from-preset");
+        let (table, notify) = wiring(&host);
+
+        for args in [
+            json!({ "cwd": "C:/work/x", "preset": "bookmark-1" }),
+            json!({}),
+        ] {
+            let err = call(&table, "agent.new", args.clone()).expect_err("고를 근거가 없다");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+            assert!(
+                err.message().contains("cwd") && err.message().contains("preset"),
+                "무엇을 주면 통하는지 말해야: {}",
+                err.message()
+            );
+        }
+        assert!(
+            host.rows.lock().unwrap().is_empty(),
+            "반려는 등록하지 않는다"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    /// ★프리셋 갈래가 빈 폴더 검사를 **비껴가지 않는다**★ — 그 등록에는 값 검증이 없어서 공백만 담긴
+    /// 북마크가 실제로 존재할 수 있고, 통과시키면 작업 폴더가 빈 에이전트가 지울 수단 없이 남는다.
+    #[test]
+    fn a_preset_holding_a_blank_folder_is_refused_like_a_blank_cwd() {
+        let host = FakeHost::new();
+        host.with_preset("blank-bookmark", "   ");
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.new", json!({ "preset": "blank-bookmark" }))
+            .expect_err("빈 폴더는 등록 대상이 아니다");
+
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("blank-bookmark"),
+            "어느 북마크인지 짚어야: {}",
+            err.message()
+        );
+        assert!(
+            host.rows.lock().unwrap().is_empty(),
+            "반려는 등록하지 않는다"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    #[test]
+    fn an_unknown_preset_is_not_found() {
+        let host = FakeHost::new();
+        let (table, _notify) = wiring(&host);
+
+        let err = call(&table, "agent.new", json!({ "preset": "no-such-bookmark" }))
+            .expect_err("없는 북마크");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(
+            host.rows.lock().unwrap().is_empty(),
+            "반려는 등록하지 않는다"
+        );
+    }
+
+    /// ★미지정은 StreamJson, 어휘 밖 값은 반려★ — 조용한 fallback 이 있으면 "만들었는데 화면이 다르다"가
+    /// 되고(ADR-0078) 호출자는 자기 오타를 영영 모른다.
+    #[test]
+    fn new_defaults_the_output_format_and_refuses_a_word_outside_the_vocabulary() {
+        let host = FakeHost::new();
+        let (table, _notify) = wiring(&host);
+
+        let format_of = |name: &str| {
+            let id = host
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|row| row.canonical_name == name)
+                .expect("등록된 행")
+                .id;
+            match host.profiles.lock().unwrap()[&id].command.clone() {
+                AgentCommand::Claude { output_format, .. } => output_format,
+                other => panic!("claude 프로필이어야: {other:?}"),
+            }
+        };
+
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "name": "silent" }),
+        )
+        .expect("미지정");
+        assert_eq!(format_of("silent"), NEW_AGENT_OUTPUT_FORMAT);
+
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "name": "typed", "output_format": "Terminal" }),
+        )
+        .expect("명시");
+        assert_eq!(format_of("typed"), ClaudeOutputFormat::Terminal);
+
+        let err = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "output_format": "terminal" }),
+        )
+        .expect_err("어휘 밖 값");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("Terminal") && err.message().contains("StreamJson"),
+            "무엇이 통하는지 말해야: {}",
+            err.message()
+        );
+    }
+
+    /// ★반려가 **명부를 하나도 안 건드린다**는 사실은 다른 crate 의 판정 재료다★
+    ///
+    /// 데몬은 마감 뒤 재질의를 막을지 가를 때 「실패 답 = 아무것도 안 남았다」를 전제로 쓴다
+    /// (`command_delivery::retains_the_id`). 그 전제가 깨지면 그쪽이 **조용히** 틀린다 — 실패한 번호를
+    /// 붙들어 정상 재시도를 막거나, 적용된 번호를 놓아 두 번 적용되게 한다.
+    /// ★`agent.spawn` 은 이 단언에 **없다 — 그 동사만 다르기 때문이다**★: 만들고 나서 못 띄우면 에이전트를
+    /// 명부에 남긴 채 `INTERNAL` 로 답한다(이웃 시험 `a_created_agent_that_fails_to_start_is_not_rolled_back`
+    /// 이 그 사실을 못박는다). 그래서 데몬 쪽 판정도 그 코드 하나를 예외로 갈라 둔다.
+    #[test]
+    fn a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        host.with_agent("lead", false, false);
+        host.with_preset("blank-bookmark", "   ");
+        let (table, notify) = wiring(&host);
+        let snapshot = || -> Vec<(AgentId, String, Option<AgentId>)> {
+            host.roster()
+                .into_iter()
+                .map(|row| (row.id, row.canonical_name, row.parent))
+                .collect()
+        };
+        let before = snapshot();
+
+        // 반려가 나는 갈래를 동사별로 훑는다 — 코드는 다르지만 전부 「손대기 전」이어야 한다.
+        let rejections = [
+            ("agent.new", json!({ "cwd": "   " })),
+            ("agent.new", json!({ "preset": "no-such-bookmark" })),
+            ("agent.new", json!({ "preset": "blank-bookmark" })),
+            ("agent.new", json!({ "cwd": "C:/x", "preset": "b" })),
+            ("agent.rename", json!({ "target": "ghost", "name": "beta" })),
+            ("agent.rename", json!({ "target": "alpha", "name": "  " })),
+            ("agent.move", json!({ "target": "ghost", "parent": null })),
+            ("agent.move", json!({ "target": "alpha" })),
+        ];
+        for (name, args) in rejections {
+            let err = call(&table, name, args.clone()).expect_err("반려여야: {name} {args}");
+            assert_ne!(
+                err.code(),
+                ErrorCode::Internal,
+                "{name}: 이 갈래가 INTERNAL 이면 데몬은 「적용됐을 수 있다」로 읽는다 — {args}"
+            );
+            assert_eq!(snapshot(), before, "{name}: 반려가 명부를 바꿨다 — {args}");
+        }
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    /// ★선언 어휘와 코어 어휘를 **컴파일러가** 묶는 자리★ — 산문으로만 묶으면 코어에 변형이 하나 늘 때
+    /// 선언 쪽이 조용히 좁은 채로 남고, 그 낱말은 입구에서 `INVALID_ARGUMENT` 로 반려된다(에러도 로그도
+    /// 없는 기능 부재라 아무도 알아채지 못한다).
+    ///
+    /// ★이 시험이 재는 것은 절반이 **컴파일**이다★ — 아래 두 `match` 에는 와일드카드가 없어서 코어 enum 에
+    /// 변형이 늘면 이 파일이 **컴파일되지 않는다**. 그러니 갈래를 채울 때 `_ =>` 를 넣지 말 것: 넣는 순간
+    /// 그 절반이 아무것도 지키지 않는다.
+    /// ★나머지 절반은 **선언이 광고한 값 목록**에서 나온다★ — 낱말을 손으로 적으면 변형을 더하면서 그
+    /// 목록에 안 넣는 편집이 철자 대조를 조용히 비껴간다. 광고에서 끌어오면 그럴 수 없다: 코어에 변형이
+    /// 늘면 `match` 가 깨지고 → 선언에 변형을 더하게 되고 → 그 변형이 광고에 들어가 → 이 순회가 덮는다.
+    #[test]
+    fn the_declared_vocabularies_are_pinned_to_the_core_ones() {
+        /// 선언이 광고한 그 칸의 값 목록 — 이 시험의 순회 대상이자 **호출자가 실제로 보는 목록**이다.
+        fn advertised(field: &str) -> Vec<String> {
+            let schema: serde_json::Value =
+                serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
+            schema["properties"][field]["anyOf"]
+                .as_array()
+                .expect("Option 칸은 anyOf")
+                .iter()
+                .filter_map(|branch| branch.get("enum"))
+                .flat_map(|values| values.as_array().expect("enum 배열").clone())
+                .map(|value| value.as_str().expect("문자열").to_string())
+                .collect()
+        }
+
+        // ── 출력 형식: 선언 변형 ↔ 코어 변형이 일대일이고 wire 표기까지 같다 ──
+        fn declared_output_format(core: ClaudeOutputFormat) -> AgentOutputFormat {
+            match core {
+                ClaudeOutputFormat::Terminal => AgentOutputFormat::Terminal,
+                ClaudeOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
+            }
+        }
+        let formats = advertised("output_format");
+        assert!(!formats.is_empty(), "광고가 비면 이 순회가 무장 해제된다");
+        for word in &formats {
+            let spelled = serde_json::Value::String(word.clone());
+            // 같은 낱말이 **양쪽에서** 읽혀야 한다 — 한쪽만 읽히면 그 자리가 곧 어긋난 지점이다.
+            let declared: AgentOutputFormat =
+                serde_json::from_value(spelled.clone()).expect("선언 어휘가 광고를 읽는다");
+            let core: ClaudeOutputFormat =
+                serde_json::from_value(spelled).expect("코어 어휘가 같은 낱말을 읽는다");
+            assert_eq!(
+                declared_output_format(core),
+                declared,
+                "{word}: 두 어휘가 같은 낱말을 다른 변형으로 읽는다"
+            );
+            assert_eq!(
+                output_format(Some(declared)),
+                core,
+                "{word}: 선언 → 코어 사상이 일대일이어야 한다"
+            );
+        }
+
+        // ── 백엔드: 코어의 실행 명령 변형마다 **이 입구가 만들 수 있나**를 여기서 정한다 ──
+        fn declared_backend(command: &AgentCommand) -> Option<AgentBackend> {
+            match command {
+                AgentCommand::Claude { .. } => Some(AgentBackend::Claude),
+                // ★`Shell` 이 `None` 인 것은 빈칸이 아니라 결정이다★ — 이 입구로는 만들 수 없다
+                //   (프로필 생성 경로가 그것으로 도는지 확인된 바 없다 — `AgentBackend` 선언).
+                AgentCommand::Shell { .. } => None,
+            }
+        }
+        let backends = advertised("backend");
+        assert!(!backends.is_empty(), "광고가 비면 이 순회가 무장 해제된다");
+        for word in &backends {
+            let declared: AgentBackend =
+                serde_json::from_value(serde_json::Value::String(word.clone()))
+                    .expect("선언 어휘가 광고를 읽는다");
+            let built = backend_command(declared.clone(), NEW_AGENT_OUTPUT_FORMAT);
+            assert_eq!(
+                declared_backend(&built),
+                Some(declared),
+                "{word}: 선언 어휘가 짓는 실행 명령이 그 어휘로 되읽히지 않는다"
+            );
+            // ★코어 쪽 wire 철자까지 묶는다★: `AgentCommand` 는 `#[serde(tag = "kind")]` 로 디스크에 그대로
+            //   적히므로(`agents.json`), 그 태그 값을 바꾸면 여기서 걸려야 한다 — 안 걸리면 선언 어휘와
+            //   저장 어휘가 조용히 갈리고, 그 갈림은 옛 빌드가 파일을 못 읽는 형태로 나타난다.
+            assert_eq!(
+                serde_json::to_value(&built).expect("코어 직렬화")["kind"],
+                serde_json::Value::String(word.clone()),
+                "{word}: 선언 어휘와 저장되는 kind 태그가 갈렸다"
+            );
+        }
+    }
+
+    /// ★백엔드 칸은 **모양만** 열려 있다★ — 코어에 다른 백엔드가 있어도 생성 경로가 그것으로 도는지
+    /// 확인된 바 없으므로, 오늘 통과하는 값은 `Claude` 하나다(사유 = `AgentBackend` 선언).
+    #[test]
+    fn new_accepts_the_claude_backend_and_refuses_the_rest() {
+        let host = FakeHost::new();
+        let (table, _notify) = wiring(&host);
+
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "backend": "Claude" }),
+        )
+        .expect("오늘 통하는 하나");
+
+        for unverified in ["Codex", "Gemini", "Shell", "claude"] {
+            let err = call(
+                &table,
+                "agent.new",
+                json!({ "cwd": "C:/x", "backend": unverified }),
+            )
+            .expect_err("확인되지 않은 백엔드");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{unverified}");
+            assert!(
+                err.message().contains("Claude"),
+                "무엇이 통하는지 말해야: {}",
+                err.message()
+            );
+        }
+        assert_eq!(host.rows.lock().unwrap().len(), 1, "반려는 등록하지 않는다");
     }
 
     #[test]
@@ -1290,16 +1731,16 @@ mod tests {
         let (table, notify) = wiring(&host);
 
         let required = call(&table, "agent.new", json!({ "cwd": "   " }))
-            .expect_err("필수 칸이 공백")
+            .expect_err("만들 자리를 정하는 칸이 공백")
             .message()
             .to_string();
         assert!(
-            required.contains("cwd needs a real value"),
-            "값을 채우라고 말해야(수 일치 포함): {required}"
+            required.contains("cwd needs a folder path") && required.contains("preset"),
+            "값을 채우거나 형제 칸을 쓰라고 말해야: {required}"
         );
         assert!(
             !required.contains("left out"),
-            "필수 칸을 빼라고 하면 재시도가 다시 반려된다: {required}"
+            "빼라고만 하면 그 재시도가 「둘 중 하나는 줘야 한다」로 다시 반려된다: {required}"
         );
         // ★반려는 아무것도 만들지 않는다★ — 검사가 등록 뒤로 밀리면 빈 인자 호출이 에이전트를 만들어 놓고
         //   반려를 답한다(호출자는 실패로 읽고 다시 부른다 — 이름만 하나씩 늘어난다).

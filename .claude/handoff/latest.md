@@ -137,7 +137,7 @@
 
 ---
 
-## 실패한 접근 (do-not)
+## 미결 결정 (사용자)
 
 - ★**오류 종류를 열거해 "이건 실패 아님"으로 빼는 방식으로 되돌리지 말 것**★ — 3라운드 연속 실패. 정본 = `SpawnOutcome::Moot`.
 - ★**`ErrorCode::Conflict`로 "이미 실행 중"을 표현하지 말 것**★ — `Internal`과 재시도 정책 동일(`command/src/error.rs:82,84` 둘 다 retry Never), 이 저장소에서 `Conflict`는 **대상 지목 오류**다.
@@ -162,7 +162,7 @@
 
 ---
 
-## 함정 (환경)
+## 커맨드 버스 진도 (이번 세션 조사분 — 문서에는 없다)
 
 - **전역 스킬 폴더는 링크** — `C:\Users\kimsunzun\.claude\skills` → `I:\Engram\apps\engram-dashboard\.claude\skills`(메인 워크트리). 스킬 수정 시 거기 미커밋이 생긴다. 오늘은 정리 완료.
 - **세션 한도가 한 번 터졌다**(리뷰어 2인 동시 사망, 재로그인 후 재투입). 병렬 스폰 시 유의.

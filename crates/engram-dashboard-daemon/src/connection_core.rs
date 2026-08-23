@@ -19,8 +19,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::manager::RenameOutcome as CoreRenameOutcome;
-use engram_dashboard_core::agent::manager::{default_shell, AgentManager};
+// 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
+#[cfg(test)]
+use engram_dashboard_core::agent::manager::default_shell;
 use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_core::agent::profile::SpawnMode;
 use engram_dashboard_core::agent::types::{
@@ -42,7 +45,7 @@ use engram_dashboard_core::agent::types::{
 use engram_dashboard_protocol::{
     AgentCommand, AgentEvent, AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
     AgentProfile as WireProfile, AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ClaudeOutputFormat as WireClaudeOutputFormat, CommandListEntry, ControlCaps as WireControlCaps,
+    ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
     OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
     RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
@@ -52,10 +55,10 @@ use engram_dashboard_protocol::{
 
 use tokio::sync::watch;
 
-use crate::command_delivery::CommandDeliveries;
+use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
-use engram_dashboard_command::{CommandError, OwnerToken};
+use engram_dashboard_command::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 
@@ -435,7 +438,7 @@ fn restart_policy_to_wire(p: CoreRestartPolicy) -> WireRestartPolicy {
     }
 }
 
-// ADR-0161
+// ADR-0169
 fn failure_kind_to_wire(k: CoreFailureKind) -> WireFailureKind {
     match k {
         CoreFailureKind::NoConversationToResume => WireFailureKind::NoConversationToResume,
@@ -603,6 +606,9 @@ pub struct ConnectionCore {
     commands: CommandRoster,
     // ADR-0154
     deliveries: CommandDeliveries,
+    /// 이 데몬이 **스스로 답하는** 명령 — 배달 1단계이자 발견 목록의 한쪽(`command_delivery`).
+    // ADR-0155
+    locals: Arc<dyn LocalCommands>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -616,6 +622,7 @@ impl ConnectionCore {
         messaging: Arc<crate::control::mcp_server::MessagingSlot>,
         commands: CommandRoster,
         deliveries: CommandDeliveries,
+        locals: Arc<dyn LocalCommands>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -626,6 +633,7 @@ impl ConnectionCore {
             messaging,
             commands,
             deliveries,
+            locals,
             shutdown_tx,
         }
     }
@@ -648,6 +656,52 @@ impl ConnectionCore {
 
     pub fn manager(&self) -> &Arc<AgentManager> {
         &self.manager
+    }
+
+    /// 데몬이 **스스로 답하는** 이름은 클라이언트가 등록할 수 없다 — 겹치면 `CONFLICT` 로 반려한다.
+    ///
+    /// ★조용히 받아 주면 성공을 보고하면서 트래픽은 안 준다★: 명부는 데몬 자기 표를 모르므로 그 이름의
+    /// 등록을 그대로 성공시키는데(`Roster::register` 에는 부딪힐 항목이 없다) 배달은 1단계에서 데몬이
+    /// 먼저 답하므로(`command_delivery::deliver`) 그 주인에게는 봉투가 **한 장도** 가지 않는다. 등록한
+    /// 쪽은 자기가 그 이름을 쥐었다고 믿은 채 영영 아무것도 못 받고, 그 사실을 알 방법도 없다. 명부가
+    /// 자기 내부 충돌에 대해 이미 그렇게 판정한다 — 「`added` 를 조용히 무시하면 성공을 보고하면서
+    /// 호출자는 그 이름이 자기 앞으로 온다고 믿는다. 반려는 `CONFLICT` 다」(`Roster::update` doc).
+    /// ★한 이름만 빼고 나머지를 넣지 않는다 — **패킷 통째로** 반려다★: 명부가 자기 충돌·상한에 쓰는
+    /// all-or-nothing 과 같은 계약이고(부분 적용은 「성공했는데 일부가 조용히 없는 상태」를 만든다),
+    /// 판정이 **명부를 건드리기 전에** 끝나므로 실패한 등록이 기존 상태를 바꾸지 않는다.
+    /// ★`CONFLICT` 인 이유★: 패킷이 틀린 것이 아니라(`INVALID_ARGUMENT`) 이 데몬의 **상태**가 그 이름을
+    /// 이미 쥐고 있다는 답이다 — 명부의 형제 판정과 같은 어휘를 쓴다.
+    // ADR-0155
+    fn refuse_names_i_answer(&self, decls: &[CommandDecl]) -> Result<(), CommandError> {
+        // ★겹친 이름을 **전부** 센다★: 첫 하나만 짚으면, 패킷 통째로 반려하는 이 계약에서는 호출자가
+        //   나머지를 알아내려고 등록을 N번 다시 시도해야 한다 — 그런데 등록은 **붙을 때 한 번**이라
+        //   (TRD §3-7 조항 1) 다시 보내려면 연결을 다시 맺어야 한다. 그러면 이름 하나당 재접속 한 번이다.
+        //   (명부가 자기 검문에서 「틀린 칸을 전부 센다」와 같은 논거 — `CommandTable::check_args`.)
+        // ★목적지가 **응답 문구인데도** 로그 손질기를 쓴다 — 그 갈림의 예외이고, 사유가 둘이다★
+        //   (그 갈림의 정본 = `control::agent::preview` doc: 사용자 대면 문구 = `preview` · 로그 필드 =
+        //   `sanitize_for_log`).
+        //   ① 이 문구를 받는 쪽은 **사람이 아니라 프로그램**이고 그 값은 그쪽의 로그·UI 로 그대로 흘러간다.
+        //      제어문자를 원문으로 되돌려주면 위조 항목을 **상대 로그에** 심어 주는 셈이다 — 우리가 우리
+        //      로그에서 막는 그 일이다.
+        //   ② 원문 대조가 필요한 축이 여기 없다: 등록 패킷은 클라이언트 코드가 만든 것이라 「내가 친 값을
+        //      알아본다」는 이유가 서지 않고, 자를 때는 잘렸다고 말한다(`…`).
+        //   ★이름을 인용부호로 감싸는 형태를 함께 고정한다★ — 같은 값이 명부 끊김 로그에도 실리는데
+        //   (`command_roster` 의 `logged_names`) 자리마다 모양이 갈리면 같은 것을 같은 것으로 못 본다.
+        let clashing: Vec<String> = decls
+            .iter()
+            .filter(|decl| self.locals.claim(&decl.name).is_some())
+            .map(|decl| format!("'{}'", sanitize_for_log(&decl.name)))
+            .collect();
+        if clashing.is_empty() {
+            return Ok(());
+        }
+        Err(CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "answered by this daemon itself, so they cannot be registered: {} — pick different names; this packet was not applied",
+                clashing.join(", ")
+            ),
+        ))
     }
 
     /// ★sink.enqueue 실패(SinkError)는 무시★: side-effect 명령의 Ack/Error 송신 실패는 삼킨다.
@@ -717,11 +771,11 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ★`spawn_agent` 을 직접 부르지 않는다 — 활성화 입구는 하나여야 한다★: 그쪽은
-                //   「마지막 실패」를 기록·지우지 않고(ADR-0161) 재활성화 가드도 없어서, 이 동사로 띄운
+                //   「마지막 실패」를 기록·지우지 않고(ADR-0169) 재활성화 가드도 없어서, 이 동사로 띄운
                 //   에이전트만 조용히 옛 실패 표시를 들고 있었다. 제어 LLM 이 이 동사를 부를 수 있으므로
                 //   (tauri command + WS) 그 갈림은 「사람 클릭과 LLM 이 같은 핸들을 흔든다」를 깨뜨린다.
                 //   `SpawnProfile` 과 다른 점은 모드 유도가 없다는 것뿐이라(항상 Fresh) 그대로 유지한다.
-                // ADR-0161
+                // ADR-0169
                 let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         let started = manager
@@ -805,7 +859,11 @@ impl ConnectionCore {
                 epoch,
                 after_seq,
             } => {
-                self.handle_subscribe(agent_id, epoch, after_seq, subs, sink);
+                if self.handle_subscribe(agent_id, epoch, after_seq, subs, sink)
+                    == DispatchFlow::Close
+                {
+                    return DispatchFlow::Close;
+                }
             }
 
             AgentCommand::Unsubscribe { agent_id } => {
@@ -894,18 +952,25 @@ impl ConnectionCore {
             }
 
             // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────
+            // ★기본 백엔드 = claude(StreamJson)★ — 이 wire 에는 backend 선택 칸이 없어서(`SpawnByCwd{cwd}`)
+            //   여기 박힌 값이 곧 「고르지 않았을 때 뜨는 것」이다. 셸이 아니라 claude 인 이유: 이 문을
+            //   실제로 쓰는 호출자가 `agent.spawnInto`(에이전트가 CLI 로 부르는 배치 스폰)이고, 그 자리에서
+            //   원하는 것은 대화형 셸이 아니라 **일하는 에이전트**다(사용자 결정 2026-08-20).
+            //   ★스위칭이 생긴 것은 아니다★ — 고정 대상이 바뀐 것뿐이라 이제 **셸을 못 고른다**.
+            //   고르려면 wire 에 칸을 내야 하고 그건 봉투 변경이라 별도 결정이다(ADR-0058 fail-loud 문구도
+            //   그때 함께 고친다 — `src-tauri/src/layout/apply.rs` 의 거절 문구가 "현재 셸"이라 적는다).
             AgentCommand::SpawnByCwd { cwd, request_id } => {
                 let profile = CoreProfile::new(
                     cwd.clone(),
-                    CoreSpawnCommand::Shell {
-                        program: default_shell().to_string(),
-                        args: vec![],
+                    CoreSpawnCommand::Claude {
+                        extra_args: vec![],
+                        output_format: CoreClaudeOutputFormat::StreamJson,
                     },
                     std::path::PathBuf::from(&cwd),
                     vec![],
                     false,
                 );
-                // ★이 갈래는 활성화가 아니라 **즉석 생성**이라 「마지막 실패」를 쓰지 않는다(ADR-0161)★:
+                // ★이 갈래는 활성화가 아니라 **즉석 생성**이라 「마지막 실패」를 쓰지 않는다(ADR-0169)★:
                 //   방금 만든 uuid 라 지울 기록이 있을 수 없고, 저장된 항목을 깨우는 동사가 아니다.
                 //   ★그래서 남는 비대칭 하나는 알고 있다★: 명령 버스의 형제(`create_and_start`)는 만들고
                 //   띄우다 실패하면 기록한다. 이 동사를 그 모양으로 맞추려면 `activate_profile` 이 아직
@@ -994,7 +1059,10 @@ impl ConnectionCore {
                     let out = messaging.handle_profile_deleted(profile_id, &name);
                     tracing::debug!(
                         profile = %profile_id,
-                        name = %name,
+                        // 이름은 클라이언트가 정한 문자열이다 — 비어 있지 않은지만 보고 받으므로
+                        //   (core `profile.rs` 의 검증) 모양·길이는 여기서 묶는다([`sanitize_for_log`]).
+                        //   위 훅에 넘긴 값은 원문 그대로다 — 다듬은 것은 이 로그 필드뿐이다.
+                        name = %sanitize_for_log(&name),
                         skipped_live = out.skipped_live,
                         parked_failed = out.failed_parked,
                         contracts_failed = out.failed_contracts,
@@ -1015,7 +1083,7 @@ impl ConnectionCore {
                 //     `ensure_session_id` 로 최초 sid 를 발급하므로 **뜨기는 한다**. 즉 mode = resume-요청
                 //     OR 세션-존재.
                 //   ★단 "안전하다" 고 읽지 말 것★: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude
-                //     는 즉사하고, 그 결말은 이제 그 항목의 「마지막 실패」로 **기록된다**(ADR-0161). 옛
+                //     는 즉사하고, 그 결말은 이제 그 항목의 「마지막 실패」로 **기록된다**(ADR-0169). 옛
                 //     문구는 그 기록이 없던 시절의 것이다.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
@@ -1025,7 +1093,7 @@ impl ConnectionCore {
                             SpawnMode::Fresh
                         };
                         let started = manager.activate_profile(&profile, mode);
-                        // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0161/0162)★: 활성화는 그
+                        // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0169/0162)★: 활성화는 그
                         //   항목의 「마지막 실패」를 **성공이면 지우고 실패면 기록**하는데, 그 축은
                         //   프로필 목록으로만 흐른다(`Spawned` 이벤트·산 명부에는 없다). 성공 쪽을
                         //   빼면 지워진 실패가 화면에 남고, 실패 쪽을 빼면 기록이 화면에 안 뜬다.
@@ -1207,7 +1275,8 @@ impl ConnectionCore {
                     conn_id,
                     "register",
                     request_id,
-                    self.commands.register(conn_id, decls),
+                    self.refuse_names_i_answer(&decls)
+                        .and_then(|()| self.commands.register(conn_id, decls)),
                 );
             }
 
@@ -1239,25 +1308,19 @@ impl ConnectionCore {
                     conn_id,
                     "update",
                     request_id,
-                    self.commands.update(conn_id, added, removed),
+                    self.refuse_names_i_answer(&added)
+                        .and_then(|()| self.commands.update(conn_id, added, removed)),
                 );
             }
 
             AgentCommand::ListCommands { request_id } => {
                 // 주인 토큰은 안 내린다 — 선언처가 주인이라 등급 칸이 없어졌다(TRD §3-7 개정 ㉠).
-                let entries: Vec<CommandListEntry> = self
-                    .commands
-                    .entries()
-                    .into_iter()
-                    .map(|entry| CommandListEntry {
-                        name: entry.name,
-                        help: entry.help,
-                        // 명부에 있는 것은 주인이 있는 이름뿐이다 — 계약이 이 칸을 왜 남겼는지는
-                        //   `CommandListEntry` 주석.
-                        // ADR-0150
-                        available: true,
-                    })
-                    .collect();
+                //
+                // ★두 출처를 합치는 규칙은 여기 없다★ — HTTP 발견 라우트(`/control/commands`)와 **같은
+                //   함수**를 태운다. 규칙을 여기 되돌려 적으면 두 표면의 목록이 갈리고, 갈린 순간 발견은
+                //   어느 한쪽에게 거짓말이 된다(규칙과 그 근거의 정본 = `control::catalog::merge`).
+                let entries =
+                    crate::control::catalog::merge(self.locals.decls(), self.commands.entries());
                 let _ = sink.enqueue(Outbound::event(AgentEvent::CommandList {
                     request_id,
                     entries,
@@ -1284,8 +1347,10 @@ impl ConnectionCore {
                 tokio::spawn(crate::command_delivery::deliver(
                     self.commands.clone(),
                     self.deliveries.clone(),
+                    Arc::clone(&self.locals),
                     conn_id,
                     envelope,
+                    crate::command_delivery::ENTRANCE_SOCKET,
                 ));
             }
 
@@ -1303,23 +1368,32 @@ impl ConnectionCore {
             // ADR-0154
             AgentCommand::CommandOutcome { reply } => {
                 let request_id = reply.request_id;
-                if self.deliveries.complete(reply) {
-                    tracing::debug!(conn = conn_id, %request_id, "명령 결말을 그 왕복에 붙였다");
-                    return DispatchFlow::Continue;
-                }
+                // ★거절 사유가 둘이고 **무게가 다르다**★: 「붙일 자리가 없다」는 흔한 정상 경합(마감이
+                //   먼저 지났다)이고, 「위임한 적 없다」는 **있을 수 없는 프레임**이다 — 그 번호의 왕복은
+                //   아무에게도 안 나갔으므로 결말을 보낼 주인이 존재하지 않는다. 뭉치면 뒤엣것이 앞엣것의
+                //   소음에 묻힌다.
+                let refusal = match self.deliveries.complete(reply) {
+                    OutcomeLanding::Attached => {
+                        tracing::debug!(conn = conn_id, %request_id, "명령 결말을 그 왕복에 붙였다");
+                        return DispatchFlow::Continue;
+                    }
+                    OutcomeLanding::NoSeat => "no round trip is waiting for this outcome — it may have passed its deadline, or nothing asked for it",
+                    OutcomeLanding::NotDelegated => "this daemon answers that command itself, so it never handed it to anyone and takes no outcome for it",
+                };
                 // 첫 건만 warn — 나머지는 debug(래치 근거는 `stray_outcome_warned` doc).
                 if !session.stray_outcome_warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         conn = conn_id,
                         %request_id,
-                        "붙일 왕복이 없는 명령 결말 — 거절(이 연결에서 한 번만 남긴다)"
+                        refusal,
+                        "명령 결말 거절(이 연결에서 한 번만 남긴다)"
                     );
                 } else {
-                    tracing::debug!(conn = conn_id, %request_id, "명령 결말 거절(반복)");
+                    tracing::debug!(conn = conn_id, %request_id, refusal, "명령 결말 거절(반복)");
                 }
                 let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                     request_id: None,
-                    message: "no round trip is waiting for this outcome — it may have passed its deadline, or nothing asked for it".into(),
+                    message: refusal.into(),
                 }));
             }
         }
@@ -1333,6 +1407,8 @@ impl ConnectionCore {
     /// ★두 평면★: 코어 subscribe_from 에 넘기는 sink(`agent_conn::FrameOutputSink`)는 출력 frame
     /// 평면이고, control(Ack/ReplayComplete/Error)만 dispatch 의 `OutboundSink` 로 나간다. 둘 다
     /// **같은 프레임 출구**(연결당 단일 writer 큐)로 합류하므로 FIFO 가 보존된다 — R1 이 여기 걸려 있다.
+    ///
+    /// ★반환 `Close` = 이 연결을 닫으라★ — `ReplayComplete` 를 큐에 못 실은 경우에만 난다(본문 마지막 분기).
     fn handle_subscribe(
         &self,
         agent_id: AgentId,
@@ -1340,19 +1416,22 @@ impl ConnectionCore {
         after_seq: Option<u64>,
         subs: &Arc<Mutex<HashMap<AgentId, SinkId>>>,
         sink: &dyn OutboundSink,
-    ) {
+    ) -> DispatchFlow {
         let manager = &self.manager;
 
         // agent 가 없으면 subscribe_from 을 부르지 않으므로 Ack 도 나가지 않는다.
+        //
+        // ★거절은 `Error` 가 아니라 `SubscribeFailed` 로 낸다(load-bearing)★: `Subscribe` 는 request_id 가
+        //   없는 명령이라 `Error{request_id: None}` 에는 **주인을 식별할 필드가 없다** — 클라이언트가 어느
+        //   에이전트의 구독이 깨졌는지 몰라 자기 single-flight 슬롯을 못 풀었고, 그 슬롯이 좀비로 남아 그
+        //   에이전트의 Subscribe 가 두 번 다시 나가지 못했다(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19).
+        //   ★아래 두 거절 지점은 Ack 발행보다 먼저 return 한다★ — 그래서 "거절엔 Ack/Complete 가 뒤따르지
+        //   않는다"는 계약이 성립하고, 클라이언트는 그에 기대어 슬롯을 즉시 해제한다(AgentEvent 문서 참조).
         let current_epoch = match manager.agent_epoch(agent_id) {
             Some(e) => e,
             None => {
-                send_error(
-                    sink,
-                    None,
-                    format!("subscribe failed: agent {agent_id} not found"),
-                );
-                return;
+                refuse_subscribe(sink, agent_id, format!("agent {agent_id} not found"));
+                return DispatchFlow::Continue;
             }
         };
         let epoch_matches = requested_epoch == Some(current_epoch);
@@ -1377,8 +1456,14 @@ impl ConnectionCore {
             match manager.subscribe_from(agent_id, out_sink, after_seq, epoch_matches, on_ready) {
                 Ok(o) => o,
                 Err(e) => {
-                    send_error(sink, None, format!("subscribe failed: {e}"));
-                    return;
+                    // 위와 같은 자리다 — `on_ready`(Ack)가 아직 안 불린 실패라 Ack/Complete 가 뒤따르지
+                    //   않는다. 그 순서는 `AgentManager::subscribe_from` 의 계약이고 코어 테스트가 박는다
+                    //   (`subscribe_from_err_never_invokes_on_ready`).
+                    // ★이 갈래는 dispatch 로 결정론 재현이 안 된다★: `agent_epoch` 와 `subscribe_from` 이
+                    //   같은 sessions 맵을 읽으므로, 여기 닿으려면 그 둘 사이에 세션이 사라져야 한다
+                    //   (TOCTOU 창). 그래서 회귀망은 이 갈래가 부르는 `refuse_subscribe` 본체를 직접 태운다.
+                    refuse_subscribe(sink, agent_id, format!("subscribe failed: {e}"));
+                    return DispatchFlow::Continue;
                 }
             };
 
@@ -1402,10 +1487,32 @@ impl ConnectionCore {
             );
         }
 
-        let _ = sink.enqueue(Outbound::event(AgentEvent::ReplayComplete {
-            agent_id,
-            epoch: current_epoch,
-        }));
+        // ★이 한 건은 흘릴 수 없다 — 못 실으면 연결을 닫는다(load-bearing)★: 위 Ack 이 나간 시점에서
+        //   클라이언트의 single-flight 슬롯은 이미 `acked` 다. 그 상태의 슬롯을 푸는 길은 `ReplayComplete`
+        //   아니면 **단절**뿐이다 — 거절은 acked 슬롯을 의도적으로 무시하고(오해제 방어), 만료는 슬롯을
+        //   해제하지 않는다(오귀속 방어). 셋 다 core `replay_flight` 의 결정이고 바꿀 것이 아니다.
+        //   그래서 여기서 조용히 흘리면 그 에이전트의 replay 가 **연결이 끊길 때까지 영구 차단**된다
+        //   (새 요청은 전부 그 슬롯에 병합돼 wire 로 나가지 못한다). 닫으면 그 단절이 지금 일어나고
+        //   클라이언트는 재연결 후 전량 재요청한다.
+        // ★왜 큐가 찰 수 있나★: Ack → replay 프레임 전량 → 이 이벤트가 **같은 단일 writer 큐**를 지난다.
+        //   앞의 replay 가 큐를 채우면 이 control 프레임이 마지막에 밀린다(그 경우 replay 프레임도 이미
+        //   drop 돼 바로 위 truncated 통보가 나갔다 — 클라이언트는 어차피 새로고침이 필요한 상태다).
+        // ★대가★: 그 연결의 **다른 에이전트 구독까지** 함께 떨어진다. 그래도 이쪽을 택한 이유는, 반대쪽
+        //   (계속 살려 둠)이 조용한 영구 차단이라 관측 신호조차 남기지 못하기 때문이다.
+        if sink
+            .enqueue(Outbound::event(AgentEvent::ReplayComplete {
+                agent_id,
+                epoch: current_epoch,
+            }))
+            .is_err()
+        {
+            tracing::error!(
+                %agent_id,
+                "ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다(안 닫으면 그 에이전트의 replay 가 영구 차단)"
+            );
+            return DispatchFlow::Close;
+        }
+        DispatchFlow::Continue
     }
 }
 
@@ -1473,17 +1580,45 @@ fn note_claimed_owner(
 /// 흉내 낸 문자열을 그 자리에 앉힐 수 있다).
 /// 알려진 범위: `char::is_control`(C0/C1)까지다 — U+2028 같은 유니코드 줄 구분자는 그대로 나가고, 지금
 /// 쓰는 fmt 레이어는 그것으로 줄을 쪼개지 않는다.
+/// ★폭은 **이름 한 조각**을 재는 값이다★ — 그보다 긴 것을 실어야 하는 자리는 자기 폭을 정해
+/// [`sanitize_within`] 을 직접 부른다. 이 값을 그런 자리에 맞춰 넓히지 말 것: 여기 붙어 있는 호출자
+/// 대부분은 클라이언트가 준 **이름**이고, 그 폭이 넓어지면 로그 한 줄의 크기를 상대가 정하게 된다.
+/// ★적용 범위 — **이 crate 의 로그 필드**이고, 그 안에서도 예외가 열거돼 있다★
+///
+/// 이 문장을 「전부」로 넓히지 말 것: 세 판 연속 그렇게 적혀 있었고 세 판 다 반례가 있었다(그때 반례는
+/// 명부 끊김 줄과 프로필 이름 줄이었다 — 지금은 둘 다 이 함수를 거친다).
+///
+/// - **지키는 것** = `engram-dashboard-daemon` 안에서 **검증 안 된 상대 문자열을 로그 필드에 실을 때**.
+///   소켓 행(이 파일)·배달(`command_delivery::deliver`)·명부 끊김(`command_roster` 의 `logged_names`)·
+///   제어 라우트(`control::mcp_server`·`control::registry`)·메시징 호스트가 같은 함수를 쓴다.
+/// - **예외 ① 데몬이 만든 값** — `conn-<id>` 주인 토큰(`command_roster::CommandRoster::attach` 의
+///   `previous_owner`)처럼 길이·모양이 우리 것인 값은 안 거친다. 그 자리에 「저장하는 값을 바꾸는 커밋이
+///   이 줄을 함께 고쳐야 한다」는 방아쇠가 달려 있다.
+/// - **예외 ② 타입드 값** — `Uuid`·`ErrorCode`·`http::Method`·`Path` 는 문자열이 아니라 타입이 모양을 진다.
+/// - **예외 ③ 이 crate 밖** — 네트워크 행(`engram-dashboard-net`)의 `Origin` 필드는 이 함수를 안 거치고
+///   **HTTP 헤더 문법 검사**에 의존한다(제어문자·개행이 헤더 값에 못 들어간다). 그 축을 이 함수가 지킨다고
+///   읽지 말 것.
+/// - **덮지 않는 축** = 메시지 문자열 끝의 `: {e}` 보간(로깅 컨벤션이 그것만 예외로 허용한다). 이 함수가
+///   묶는 것은 **필드**다.
+///
+/// 형제로 보이는 `control::agent::preview` 는 **응답 문구** 전용이고 제어문자를 흘리므로 로그 자리에 쓰면
+/// 위 위조 항목이 그대로 생긴다(그 함수 doc 이 그 갈림을 적는다).
 pub(crate) fn sanitize_for_log(text: &str) -> String {
     const MAX_CHARS: usize = 64;
+    sanitize_within(text, MAX_CHARS)
+}
+
+/// [`sanitize_for_log`] 의 폭을 부르는 쪽이 정하는 갈래 — 다듬는 규칙(길이·모양)은 같다.
+pub(crate) fn sanitize_within(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
-    for ch in text.chars().take(MAX_CHARS) {
+    for ch in text.chars().take(max_chars) {
         if ch.is_control() {
             out.extend(ch.escape_debug());
         } else {
             out.push(ch);
         }
     }
-    if text.chars().nth(MAX_CHARS).is_some() {
+    if text.chars().nth(max_chars).is_some() {
         out.push('…');
     }
     out
@@ -1540,6 +1675,26 @@ fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) 
     }
 }
 
+/// `Subscribe` 거절 통보([`AgentEvent::SubscribeFailed`])를 낸다 — [`ConnectionCore::handle_subscribe`] 의
+/// 두 거절 지점이 공유한다.
+///
+/// ★enqueue 실패를 삼키지 않는다★: 이 한 장이 클라이언트의 single-flight 슬롯을 푸는 유일한 신호다.
+/// 큐 포화로 못 나가면 클라이언트는 거절을 영영 모르고 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가
+/// 두 번 다시 나가지 못한다**(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). 회복은 어댑터가 R6
+/// close_signal 로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
+fn refuse_subscribe(sink: &dyn OutboundSink, agent_id: AgentId, reason: String) {
+    tracing::debug!(agent = %agent_id, %reason, "Subscribe 거절");
+    if let Err(e) = sink.enqueue(Outbound::event(AgentEvent::SubscribeFailed {
+        agent_id,
+        reason,
+    })) {
+        tracing::warn!(
+            agent = %agent_id,
+            "Subscribe 거절 통보를 큐에 못 넣음 — 클라이언트가 구독 슬롯을 못 푼다: {e}"
+        );
+    }
+}
+
 fn send_error(
     sink: &dyn OutboundSink,
     request_id: Option<engram_dashboard_protocol::RequestId>,
@@ -1569,7 +1724,7 @@ pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
 mod tests {
     use super::*;
     use engram_dashboard_net::frame_port;
-    use engram_dashboard_protocol::RequestId;
+    use engram_dashboard_protocol::{CommandListEntry, RequestId};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
@@ -1660,6 +1815,59 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
+        test_core_built(deliveries, &|_| {
+            Arc::new(crate::command_delivery::NoLocalCommands)
+        })
+    }
+
+    /// ★데몬이 **자기 `agent.*` 표를 쥔** 조립★ — 배달 1단계와 발견의 자기 몫이 실제로 도는 자리다.
+    ///
+    /// 표는 운영과 같은 조립기(`control::commands::make_daemon_table`)로 만든다 — 여기서 손으로 표를
+    /// 꾸미면 그 사본이 운영과 조용히 어긋난다. 매니저는 디스크도 PTY 도 없는 이 하네스의 것을 그대로 쓴다.
+    fn test_core_with_own_agent_table() -> (ConnectionCore, watch::Receiver<bool>) {
+        // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다 — 재는 쪽은 `test_core_recording`.
+        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &|manager| {
+            let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
+            slot.set(Arc::new(crate::control::commands::make_daemon_table(
+                manager.clone(),
+                Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
+            )));
+            Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
+        });
+        (core, rx)
+    }
+
+    /// ★표를 **나중에** 채우는 조립★ — 슬롯 주입은 연결 공장 조립보다 늦을 수 있고, 그 창에 도착한 등록은
+    /// 반려할 근거가 없어 명부에 그대로 남는다. 겹침이 실제로 생길 수 있는 상태가 이것 하나다.
+    fn test_core_with_late_agent_table() -> (
+        ConnectionCore,
+        watch::Receiver<bool>,
+        Arc<crate::control::mcp_server::CommandTableSlot>,
+    ) {
+        let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
+        let for_locals = slot.clone();
+        // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다(위 형제와 같은 이유).
+        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &move |_| {
+            Arc::new(crate::control::commands::DaemonLocalCommands::new(
+                for_locals.clone(),
+            ))
+        });
+        (core, rx, slot)
+    }
+
+    /// 위 세 갈래가 공유하는 조립 본체 — 갈리는 것은 자기 몫 `agent.*` 표를 꽂는 방식뿐이다.
+    ///
+    /// ★팬아웃 기록을 세 번째 값으로 함께 돌려준다★: 브로드캐스트가 실제로 나갔는지 재는 시험
+    ///   (`test_core_recording`)이 그 핸들을 여기 말고 얻을 데가 없다 — 조립기가 안에서 만들어 코어에
+    ///   넘기고 끝내면 밖에서는 같은 것을 다시 쥘 수 없다.
+    fn test_core_built(
+        deliveries: CommandDeliveries,
+        locals: &dyn Fn(&Arc<AgentManager>) -> Arc<dyn LocalCommands>,
+    ) -> (
+        ConnectionCore,
+        watch::Receiver<bool>,
+        Arc<crate::test_doubles::RecordingFanout>,
+    ) {
         use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
         use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
@@ -1702,6 +1910,7 @@ mod tests {
             Arc::new(|_aid, _sid| {}),
         ));
         let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
+        let manager_for_locals = manager.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let control_registry = Arc::new(ControlRegistry::new());
         let core = ConnectionCore::new(
@@ -1712,6 +1921,7 @@ mod tests {
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             CommandRoster::new(),
             deliveries,
+            locals(&manager_for_locals),
             shutdown_tx,
         );
         (core, shutdown_rx, recording)
@@ -1719,13 +1929,13 @@ mod tests {
 
     /// ★사람 클릭(WS)과 LLM(명령 버스)이 같은 것을 흔든다★ — 그 주장의 WS 절반.
     ///
-    /// 활성화는 그 항목의 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0161) 그 축은 프로필
+    /// 활성화는 그 항목의 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0169) 그 축은 프로필
     /// 목록 broadcast 로만 흐른다. 이 통지가 빠지면 WS 로 띄운 결과만 화면에 안 닿고, 명령 버스로는
     /// 닿아 두 핸들이 갈린다. 버스 절반은 `core::agent::commands` 의 두 시험이 이미 못박고 있다.
     ///
     /// 실패 갈래로 잰다 — 실 claude 없이 결정적이고(없는 실행파일), 성공 갈래보다 통지가 더 절실하다
     /// (그쪽은 화면에 남는 것이 이 통지가 나른 값뿐이다).
-    // ADR-0161
+    // ADR-0169
     #[tokio::test]
     async fn ws_spawn_profile_announces_the_profile_list_even_when_activation_fails() {
         let (core, fanout) = test_core_recording();
@@ -1860,16 +2070,92 @@ mod tests {
         let _ = core.manager.kill_agent(agent_id);
     }
 
-    // ── Subscribe: 없는 agent ─────────────────────────────────────────────────────
+    // ★회귀 대상★: `ReplayComplete` 를 조용히 흘리면 클라이언트의 acked 슬롯을 풀 길이 사라진다(거절은
+    //   acked 를 무시하고 만료는 해제하지 않는다) — 그 에이전트의 replay 가 단절 전까지 영구 차단된다.
+    //   그래서 못 실으면 **연결을 닫아** 그 단절을 지금 만든다. `Close` 가 안 나오면 그 차단이 부활한다.
     #[tokio::test]
-    async fn subscribe_unknown_agent_emits_error_no_ack() {
+    async fn subscribe_closes_the_connection_when_replay_complete_cannot_be_queued() {
+        // Ack·replay 는 통과시키고 ReplayComplete 만 큐 포화로 떨군다(운영에서 나는 순서 그대로 —
+        //   앞의 replay 가 같은 단일 writer 큐를 채워 마지막 control 프레임이 밀린다).
+        struct DropsReplayComplete(MockOutboundSink);
+        impl OutboundSink for DropsReplayComplete {
+            fn enqueue(&self, out: Outbound) -> Result<(), SinkError> {
+                if matches!(&out, Outbound::Event(ev) if matches!(**ev, AgentEvent::ReplayComplete { .. }))
+                {
+                    return Err(SinkError);
+                }
+                self.0.enqueue(out)
+            }
+            fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
+                self.0.make_output_sink()
+            }
+        }
+
+        let (core, _rx) = test_core();
+        let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
+            "t".into(),
+            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                program: default_shell().to_string(),
+                args: vec![],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        let info = core
+            .manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("spawn")
+            .into_started()
+            .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        let agent_id = info.id;
+
+        let (tx, _conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
+        let sink = DropsReplayComplete(MockOutboundSink::new(tx));
+        let session = ConnectionSession::new(1);
+
+        let flow = core
+            .dispatch(
+                AgentCommand::Subscribe {
+                    agent_id,
+                    epoch: None,
+                    after_seq: None,
+                },
+                &session,
+                &sink,
+            )
+            .await;
+        assert_eq!(
+            flow,
+            DispatchFlow::Close,
+            "ReplayComplete 를 못 실으면 연결을 닫아야(안 닫으면 그 에이전트 replay 가 영구 차단)"
+        );
+        assert!(
+            matches!(
+                sink.0.events().first(),
+                Some(AgentEvent::SubscribeAck { .. })
+            ),
+            "전제: Ack 은 나갔다(그래서 클라 슬롯이 acked 다)"
+        );
+
+        let _ = core.manager.kill_agent(agent_id);
+    }
+
+    // ── Subscribe: 없는 agent ─────────────────────────────────────────────────────
+    // ★거절은 `agent_id` 를 실어 보낸다(회귀 대상 — 실측 2026-08-19)★: 무주공산 `Error{request_id:None}`
+    //   이던 시절엔 클라이언트가 어느 구독이 깨졌는지 몰라 single-flight 슬롯을 못 풀었고, 그 슬롯이
+    //   좀비로 남아 그 에이전트의 Subscribe 가 두 번 다시 나가지 못했다. Ack 부재도 함께 못 박는다 —
+    //   "거절엔 Ack/Complete 가 뒤따르지 않는다" 가 클라이언트 즉시 해제의 전제다.
+    #[tokio::test]
+    async fn subscribe_unknown_agent_emits_subscribe_failed_no_ack() {
         let (core, _rx) = test_core();
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
+        let missing = uuid::Uuid::new_v4();
         core.dispatch(
             AgentCommand::Subscribe {
-                agent_id: uuid::Uuid::new_v4(),
+                agent_id: missing,
                 epoch: None,
                 after_seq: None,
             },
@@ -1878,8 +2164,54 @@ mod tests {
         )
         .await;
         let evs = mock.events();
-        assert_eq!(evs.len(), 1, "Error 1건만");
-        assert!(matches!(evs[0], AgentEvent::Error { .. }), "Error 여야 함");
+        assert_eq!(evs.len(), 1, "거절 1건만");
+        match &evs[0] {
+            AgentEvent::SubscribeFailed { agent_id, .. } => assert_eq!(*agent_id, missing),
+            other => panic!("SubscribeFailed 여야 함: {other:?}"),
+        }
+    }
+
+    // ── Subscribe: subscribe_from Err 갈래(둘째 거절 지점) ─────────────────────────
+    // ★dispatch 로는 못 몬다★: `agent_epoch` 와 `subscribe_from` 이 같은 sessions 맵을 읽어, 그 갈래에
+    //   닿으려면 둘 사이에 세션이 사라지는 TOCTOU 창을 잡아야 한다. 그래서 그 갈래가 부르는 본체를
+    //   직접 태워 **거절 통보의 내용**(agent_id 동봉 · 사유 전달)을 박는다 — 위 케이스가 덮는 것은
+    //   `agent not found` 갈래뿐이라 사유 문자열 경로가 비어 있었다.
+    #[test]
+    fn refuse_subscribe_carries_agent_id_and_reason() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let agent_id = uuid::Uuid::new_v4();
+        refuse_subscribe(&mock, agent_id, "subscribe failed: agent not found".into());
+        match mock.events().as_slice() {
+            [AgentEvent::SubscribeFailed {
+                agent_id: got,
+                reason,
+            }] => {
+                assert_eq!(
+                    *got, agent_id,
+                    "거절엔 주인이 실려야 한다(상관 불가 = 좀비)"
+                );
+                assert!(reason.contains("subscribe failed"), "사유 전달: {reason}");
+            }
+            other => panic!("SubscribeFailed 1건이어야: {other:?}"),
+        }
+    }
+
+    // 큐가 포화라 거절을 못 실어 보내도 dispatch 는 살아남아야 한다(패닉·unwrap 금지). ★로그는 여기서
+    //   단언하지 않는다★ — 구독자 캡처 하네스가 없다. 재는 것은 "실패 경로가 터지지 않는다" 뿐이고,
+    //   경고를 남기는 것 자체는 `refuse_subscribe` 본문이 진다.
+    #[test]
+    fn refuse_subscribe_survives_full_queue() {
+        struct FullSink;
+        impl OutboundSink for FullSink {
+            fn enqueue(&self, _out: Outbound) -> Result<(), SinkError> {
+                Err(SinkError)
+            }
+            fn make_output_sink(&self) -> (Arc<dyn OutputSink>, Arc<AtomicBool>) {
+                unreachable!("이 테스트는 enqueue 만 태운다")
+            }
+        }
+        refuse_subscribe(&FullSink, uuid::Uuid::new_v4(), "full".into());
     }
 
     // ── Spawn: 없는 profile ──────────────────────────────────────────────────────
@@ -2327,32 +2659,180 @@ mod tests {
         }
     }
 
+    /// ★발견 목록은 **두 출처**를 합친다★ — 붙어 있는 주인들의 명부와 **데몬 자기 표**. 자기 표를 빼면
+    /// `agent.*` 는 배달되는데 목록에는 없어서, 부를 수 있는 이름을 물어본 LLM 이 그 목록만 믿고 그 계열을
+    /// 영영 안 부른다(에러도 로그도 없다).
+    ///
+    /// ★같은 이름이 겹치면 **데몬 것이 이긴다**★ — 배달의 단계 순서(내 표 → 명부)가 그렇게 정해져 있으므로
+    /// (`command_delivery::deliver`) 목록도 같은 답을 해야 한다. 반대로 말하면 호출자는 남의 `help` 로
+    /// 인자를 맞춘 뒤 데몬 핸들러에게 반려당한다.
+    #[tokio::test]
+    async fn list_commands_merges_the_daemons_own_names_and_wins_on_a_clash() {
+        // ★조립된 서버에서는 이 상태가 안 난다 — 이 시험은 **포트 계약**을 재는 것이다★: 표를 늦게 꽂는
+        //   조립을 손으로 만든다(운영·테스트 서버는 연결을 받기 전에 채운다). 그 뒤로는 등록 자체가
+        //   `CONFLICT` 로 반려되므로(이웃 시험) 겹침을 만들 다른 길이 없다.
+        let (core, _rx, slot) = test_core_with_late_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(
+            register(
+                vec![
+                    decl("tab.create"),
+                    CommandDecl {
+                        name: "agent.list".to_string(),
+                        help: "stolen".to_string(),
+                    },
+                ],
+                rid(),
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+        assert_eq!(
+            core.commands().entries().len(),
+            2,
+            "전제: 표가 비어 있던 창이라 그 등록은 통과했다"
+        );
+
+        slot.set(Arc::new(crate::control::commands::make_daemon_table(
+            core.manager().clone(),
+            Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
+        )));
+
+        let req = rid();
+        core.dispatch(
+            AgentCommand::ListCommands { request_id: req },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [_, AgentEvent::CommandList {
+                request_id,
+                entries,
+            }] => {
+                assert_eq!(*request_id, req);
+                let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    vec![
+                        "agent.list",
+                        "agent.move",
+                        "agent.new",
+                        "agent.rename",
+                        "agent.spawn",
+                        "tab.create"
+                    ],
+                    "두 출처가 이름순 한 목록으로 합쳐진다"
+                );
+                let clashed = entries
+                    .iter()
+                    .find(|e| e.name == "agent.list")
+                    .expect("겹친 이름");
+                assert_ne!(
+                    clashed.help, "stolen",
+                    "겹친 이름의 모양은 실제로 그것을 실행하는 쪽(데몬)이 낸다"
+                );
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(&clashed.help)
+                        .is_ok_and(|item| item["name"] == "agent.list"),
+                    "데몬 표의 선언이 그대로 실린다: {}",
+                    clashed.help
+                );
+            }
+            other => panic!("조회는 CommandList 로 답한다: {other:?}"),
+        }
+    }
+
+    /// ★데몬이 쥔 이름의 등록은 **성공으로 답하면 안 된다**★ — 명부에는 그 이름이 없어 그대로 들어가지만
+    /// (`Roster::register` 에는 부딪힐 항목이 없다) 배달은 1단계에서 데몬이 먼저 답하므로 그 주인에게는
+    /// 봉투가 한 장도 가지 않는다. 성공을 보고하면서 트래픽을 안 주는 그 상태가 `Roster::update` 가 자기
+    /// 충돌에 대해 이미 금지한 형태이고, 여기서도 같은 어휘(`CONFLICT`)로 같은 all-or-nothing 을 쓴다.
+    #[tokio::test]
+    async fn registering_a_name_this_daemon_answers_is_refused_as_a_conflict() {
+        let (core, _rx) = test_core_with_own_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+
+        core.dispatch(
+            register(
+                vec![decl("agent.list"), decl("tab.create"), decl("agent.new")],
+                rid(),
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => {
+                assert!(message.contains("CONFLICT"), "{message}");
+                // ★겹친 이름을 **전부** 짚는다★ — 패킷 통째로 반려하는데 하나만 알려 주면, 등록이 붙을 때
+                //   한 번뿐이라 나머지를 알아내는 데 이름 하나당 재접속 한 번이 든다.
+                assert!(
+                    message.contains("agent.list") && message.contains("agent.new"),
+                    "겹친 이름이 다 실려야: {message}"
+                );
+            }
+            other => panic!("겹친 이름은 반려여야: {other:?}"),
+        }
+        assert!(
+            core.commands().entries().is_empty(),
+            "패킷 통째로 반려다 — 겹치지 않은 이름도 들어가면 안 된다"
+        );
+
+        // 겹치지 않는 패킷은 그대로 통과한다(반려가 계열 전체를 막지 않는다).
+        core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
+            .await;
+        assert_eq!(core.commands().entries().len(), 1);
+
+        // 차분도 같은 판정이다 — 한쪽만 막으면 막히지 않은 쪽으로 같은 상태가 들어온다.
+        core.dispatch(
+            update(vec![decl("agent.new")], vec![], rid()),
+            &session,
+            &mock,
+        )
+        .await;
+        match mock.events().last() {
+            Some(AgentEvent::Error { message, .. }) => {
+                assert!(message.contains("CONFLICT"), "{message}");
+                assert!(message.contains("agent.new"), "{message}");
+            }
+            other => panic!("차분도 반려여야: {other:?}"),
+        }
+        assert_eq!(
+            core.commands().entries().len(),
+            1,
+            "반려는 명부를 건드리지 않는다"
+        );
+    }
+
     // ── 명령 배달의 두 arm(ADR-0154) ────────────────────────────────────────────
     //
     // 갈래별 단언(정상 왕복 · 주인 부재 · 찢어진 창 · 마감 · 끊김 정리)은 `command_delivery` 쪽에 있다.
     // 여기서 보는 것은 **dispatch 가 그 배달로 잇는가**와 두 arm 이 wire 로 내는 답이다.
     //
-    // ★`CommandOutcome` 의 거절 warn 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다★ — 아래 경합
-    //   하나 때문이다.
-    //
-    // ★관심 캐시는 **끈적하지 않다**★(tracing 0.1.44 / tracing-core 0.1.36 실측): `with_default` 는
-    //   `Dispatch::new` 를 거치고(`tracing/src/subscriber.rs`), 그것이 `callsite::register_dispatch` →
-    //   `CALLSITES.rebuild_interest` 를 불러 **등록된 모든 callsite 의 관심을 매 capture 머리에서 다시
-    //   계산한다**(`tracing-core/src/callsite.rs`). 그러니 구독자 없이 한 번 때렸다고 그 자리가 영영
-    //   죽지는 않는다 — ★이 문단을 「한 번이라도 밖에서 때리면 굳는다」로 읽지 말 것★(그 말은 틀렸고,
-    //   시험해 본 사람이 이 감싸개를 미신으로 보고 걷어낸다).
-    // ★진짜 하자는 좁고 **스레드를 가로지른다**★: 살아 있는 dispatcher 가 하나뿐인 동안
-    //   (`Dispatchers::rebuilder` → `Rebuilder::JustOne`) callsite 의 **최초 등록**은
-    //   `dispatcher::get_default` 로 **그 스레드의** 기본 구독자에게 묻는다. 그래서 다른 스레드가
-    //   `capture_logs` 한복판인 사이 구독자 없는 스레드가 이 자리를 **처음으로** 등록하면
-    //   `NoSubscriber::register_callsite` 가 `Interest::never` 를 주고, 뒤따를 rebuild 가 없어
-    //   **그 capture 만 빈손**이 된다(경고 계수 0 → 단언 실패). 밖에서 때리는 테스트를 안 두면 그
-    //   「구독자 없는 스레드」가 아예 없다.
+    // ★`CommandOutcome` 의 거절 warn 을 때리는 테스트는 **전부 `capture_logs` 안에서** 돈다 — 하나라도
+    //   밖에서 때리면 그 callsite 의 관심이 구독자 없는 스레드에서 처음 등록돼 **다른 capture 가 빈손**이
+    //   된다★. 그 하자의 정본(무엇이 참이고 무엇이 미신인가 · 실측한 버전)은 `log_capture` 모듈 헤더다 —
+    //   여기 다시 적지 말 것(두 사본이 갈리면 한쪽만 고쳐진다).
     // ★그렇게 깨지면 고칠 것은 래치가 아니다★ — 래치는 멀쩡하고 깨진 것은 로그 관측 조건이다.
     // dispatch 가 async 라 현재 스레드 런타임으로 감싼다 — `with_default` 는 스레드 로컬이므로 그래야
     //   구독자와 같은 스레드에서 돈다.
 
     fn bus_command(name: &str, request_id: engram_dashboard_command::RequestId) -> AgentCommand {
+        bus_command_with(name, serde_json::json!({ "window": "main" }), request_id)
+    }
+
+    fn bus_command_with(
+        name: &str,
+        args: serde_json::Value,
+        request_id: engram_dashboard_command::RequestId,
+    ) -> AgentCommand {
         AgentCommand::Command {
             // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬이 자기 명부로 한다(ADR-0154).
             envelope: engram_dashboard_command::CommandEnvelope {
@@ -2360,7 +2840,7 @@ mod tests {
                 request_id,
                 owner: OwnerToken::new("whatever-the-caller-thinks"),
                 proto_ver: 7,
-                args: serde_json::json!({ "window": "main" }),
+                args,
             },
         }
     }
@@ -2391,8 +2871,8 @@ mod tests {
             .count()
     }
 
-    /// 붙일 왕복이 없는 결말의 **첫 경고**만 잡는 조각 — 문구를 고치면 이 상수도 같이 고친다.
-    const STRAY_OUTCOME_WARN: &str = "붙일 왕복이 없는";
+    /// 거절당한 결말의 **첫 경고**만 잡는 조각 — 문구를 고치면 이 상수도 같이 고친다.
+    const STRAY_OUTCOME_WARN: &str = "한 번만 남긴다";
 
     /// 명부에 붙어 있고 **그 연결로 나간 프레임을 받아 볼 수 있는** 세션.
     ///
@@ -2684,8 +3164,14 @@ mod tests {
         );
     }
 
-    /// ★실패를 삼키지 않는다 — 코드까지 실어 보낸다★: 코드가 없으면 부르는 쪽이 문구를 패턴매칭해
-    /// 재시도 여부를 정해야 한다(TRD §4-⑦).
+    /// ★실패를 삼키지 않는다 — 코드까지 실어 보낸다★
+    ///
+    /// ★그 코드가 **문구 앞자리에 실려** 간다는 것이 이 프레임의 사실이다★: `AgentEvent::Error` 에는 타입드
+    /// 코드 칸이 없어 `CommandError` 의 `Display`(`CODE: 문구`)가 유일한 운반 수단이다. 그러니 이 단언은
+    /// 「호출자가 문구를 파싱하지 않아도 된다」를 지키는 것이 **아니다** — 지키는 것은 「그 자리에서 코드가
+    /// 사라지지 않는다」 하나다(문구 형식을 바꾸는 편집이 코드를 조용히 떨어뜨리는 것을 여기서 잡는다).
+    /// ★파싱해야 한다는 비용은 남아 있다★ — 없애려면 이 프레임에 타입드 칸을 더해야 하고(wire 계약 변경)
+    /// 그건 이 시험이 정할 일이 아니다.
     #[tokio::test]
     async fn a_refused_registration_replies_with_the_error_code() {
         let (core, _rx) = test_core();
@@ -3423,5 +3909,104 @@ mod tests {
             Frame::Text(s) => assert!(s.contains("ReplayComplete")),
             _ => panic!("3번째는 ReplayComplete Text 여야 함"),
         }
+    }
+
+    // ── 데몬 자기 표가 버스로 답한다(배달 1단계) ──────────────────────────────────
+
+    /// ★대화상자 없이 등록되는 길 전체★ — 클라이언트가 버스로 `agent.new` 를 내면 데몬이 **자기 표로**
+    /// 답하고, 그 결과가 곧바로 `agent.list` 에 보인다. 이 왕복이 깨지면 LLM 이 에이전트를 만들 수단은
+    /// 클릭뿐이다(CLAUDE.md 「LLM-우선 제어」).
+    #[tokio::test]
+    async fn the_daemons_own_agent_verbs_answer_over_the_bus() {
+        let (core, _rx) = test_core_with_own_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let (session, mut inbox) = attached_with_inbox(&core, 2);
+
+        let made = engram_dashboard_command::RequestId::new();
+        core.dispatch(
+            bus_command_with(
+                "agent.new",
+                serde_json::json!({ "cwd": "C:/work/bus", "name": "from-bus" }),
+                made,
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        let agent_id = match next_frame_event(&mut inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, made);
+                let ok = reply.outcome.expect("등록 성공");
+                assert_eq!(ok["state"], "sleeping", "만들기는 띄우지 않는다: {ok}");
+                assert_eq!(ok["name"], "from-bus", "{ok}");
+                ok["agent_id"].as_str().expect("id 문자열").to_string()
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        };
+
+        let listed = engram_dashboard_command::RequestId::new();
+        core.dispatch(
+            bus_command_with("agent.list", serde_json::json!({}), listed),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match next_frame_event(&mut inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                assert_eq!(reply.request_id, listed);
+                let ok = reply.outcome.expect("조회 성공");
+                let agents = ok["agents"].as_array().expect("배열");
+                assert_eq!(agents.len(), 1, "방금 만든 것이 명부에 보인다: {ok}");
+                assert_eq!(agents[0]["id"], agent_id, "{ok}");
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        }
+    }
+
+    /// ★버스 입구도 **같은 검문**을 받는다(ADR-0157)★ — 여기가 검문 없이 돌면 제어 라우트에서 막히는
+    /// 오타가 버스로는 통과해 조용히 다른 동작이 된다(`parnet` 하나가 계층 해제로 실행되는 그 형태).
+    /// 검문 자리가 두 표면에 **하나**라는 것이 그 보장이다(`control::commands::call_daemon_command`).
+    #[tokio::test]
+    async fn a_typo_in_an_argument_is_refused_on_the_bus_too() {
+        let (core, _rx) = test_core_with_own_agent_table();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let (session, mut inbox) = attached_with_inbox(&core, 2);
+
+        let req = engram_dashboard_command::RequestId::new();
+        core.dispatch(
+            bus_command_with(
+                "agent.new",
+                serde_json::json!({ "cwdd": "C:/work/bus" }),
+                req,
+            ),
+            &session,
+            &mock,
+        )
+        .await;
+
+        match next_frame_event(&mut inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let err = reply.outcome.expect_err("모르는 칸은 반려");
+                assert_eq!(
+                    err.code(),
+                    engram_dashboard_command::ErrorCode::InvalidArgument
+                );
+                assert!(
+                    err.message().contains("cwdd"),
+                    "어느 칸인지 짚어야: {}",
+                    err.message()
+                );
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        }
+        assert_eq!(
+            core.manager().roster().len(),
+            0,
+            "반려는 아무것도 만들지 않는다"
+        );
     }
 }

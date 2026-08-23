@@ -47,11 +47,11 @@ use engram_dashboard_lib::daemon_client::inbound::{
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
-    make_table, LayoutPorts, WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
+    make_table, LayoutPorts, SlotPopoutArgs, WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, SubscriptionSync, ViewManager, ViewSnapshot,
-    WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SubscriptionSync, ViewManager,
+    ViewSnapshot, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 
 // ── 가짜 포트 ────────────────────────────────────────────────────────────────
@@ -85,6 +85,13 @@ impl WindowHost for Windows {
 
     fn close(&self, label: &str) {
         self.closed.lock().unwrap().push(label.to_string());
+    }
+
+    // ★main 을 특례로 참이라 답한다★ — 정적 config 창이라 이 가짜가 연 적이 없는데 실 앱에서는 항상 떠 있다.
+    fn is_open(&self, label: &str) -> bool {
+        label == MAIN_WINDOW_LABEL
+            || (self.opened.lock().unwrap().iter().any(|l| l == label)
+                && !self.closed.lock().unwrap().iter().any(|l| l == label))
     }
 }
 
@@ -266,6 +273,42 @@ impl World {
     fn main_tabs(&self) -> WindowTabsPayload {
         apply::list_tabs(&self.state, MAIN_WINDOW_LABEL).expect("main 창은 항상 있다")
     }
+
+    fn slots(&self, view: uuid::Uuid) -> Vec<uuid::Uuid> {
+        apply::get_view(&self.state, view)
+            .expect("view")
+            .slot_spatial
+            .iter()
+            .map(|s| s.slot_id)
+            .collect()
+    }
+
+    // main 첫 탭은 트리 슬롯 + 빈 작업 슬롯으로 뜬다(ADR-0063) — 그 빈 칸.
+    fn empty_slot(&self, view: uuid::Uuid) -> uuid::Uuid {
+        tree::first_empty_slot_id(&apply::get_view(&self.state, view).expect("view").layout)
+            .expect("빈 슬롯")
+    }
+
+    /// pop-out 의 전제 — 빈 슬롯은 옮길 수 없으므로 한 칸을 채운다. 반환 = (탭, 그 슬롯).
+    ///
+    /// agent 콘텐츠를 쓰는 이유는 운영 형태를 그대로 태우려는 것뿐이다 — ★구독 마이그레이션은 여기서 안
+    /// 잰다★(이 파일의 `Subs` 는 no-op 이고, 실 `OutputRouter` 로 재는 자리는 `layout_apply.rs` 다).
+    fn filled_slot(&self) -> (uuid::Uuid, uuid::Uuid) {
+        let view = self.main_tabs().active;
+        let slot = self.empty_slot(view);
+        apply::set_slot_content(
+            &self.state,
+            &Subs,
+            &Events,
+            view,
+            slot,
+            SlotContent::Agent {
+                agent_id: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .expect("콘텐츠 배치");
+        (view, slot)
+    }
 }
 
 /// 표를 쥐고만 있는 수신기 — 적용 시점을 테스트가 고른다.
@@ -327,6 +370,7 @@ fn the_table_holds_exactly_the_declared_commands() {
             "slot.assignAgent",
             "slot.close",
             "slot.focus",
+            "slot.popout",
             "slot.resolveSpatial",
             "slot.split",
             "tab.close",
@@ -340,6 +384,20 @@ fn the_table_holds_exactly_the_declared_commands() {
         ]
     );
     assert_eq!(names.len(), COMMAND_SPECS.len(), "선언은 있는데 안 꽂힌 것");
+}
+
+/// ★세대 번호를 손으로 못 박는다★ — 매크로 계약이 「선언이 바뀌면 손으로 올린다」이고, 안 올리면 어휘가
+/// 다른 두 셸이 같은 세대를 보고해 진단이 거짓말을 한다. 위 골든 목록은 **이름만** 보므로 이것을 못 잡는다.
+/// 세 줄이 함께 움직여야 한다: 세대 · 선언 수 · 새 명령이 주장하는 `since`(코어 `command_alphabet.rs` 와 같은 형태).
+#[test]
+fn the_catalog_generation_is_pinned_to_the_declaration_set() {
+    assert_eq!(CATALOG_VERSION, 2);
+    assert_eq!(COMMAND_SPECS.len(), 16);
+    assert_eq!(
+        SlotPopoutArgs::SPEC.since,
+        2,
+        "세대 2에 들어온 명령이 1부터 있었다고 광고하면 안 된다"
+    );
 }
 
 #[test]
@@ -521,6 +579,119 @@ async fn slot_content_refuses_a_contradictory_pair() {
         .await,
     );
     assert_eq!(extra.code(), ErrorCode::InvalidArgument);
+}
+
+/// ★버스에서 창을 떼어낸다★ — 클릭 없이도 슬롯이 자기 창으로 나가고, 답장이 그 창과 새 탭을 함께 준다
+/// (둘 다 없으면 호출자가 방금 만든 창을 다시 찾아 헤맨다).
+#[tokio::test]
+async fn popout_detaches_a_slot_into_a_new_window() {
+    let (world, queue, receiver) = queued();
+    let (view, slot) = world.filled_slot();
+
+    let ok = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "slot.popout",
+        json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+    )
+    .await
+    .outcome
+    .expect("분리 성공");
+
+    let window = ok["window"].as_str().expect("창 label").to_string();
+    assert_eq!(
+        world.windows.opened.lock().unwrap().as_slice(),
+        &[window.clone()],
+        "to_window 를 빼면 새 창이 열린다"
+    );
+    let tabs = apply::list_tabs(&world.state, &window).expect("새 창 탭");
+    assert_eq!(
+        ok["new_view_id"].as_str(),
+        Some(tabs.active.to_string().as_str()),
+        "답장의 new_view_id 가 그 창의 활성 탭이다"
+    );
+    // ★인자의 `view_id`(원본)와 답의 `new_view_id`(도착지)는 다른 것을 가리킨다★ — 답을 그대로 되먹여
+    //   두 번 부르는 호출자가 원본 대신 방금 만든 탭을 집는 사고를 이름으로 막는다.
+    assert!(
+        ok.get("view_id").is_none(),
+        "답에 `view_id` 를 두면 인자와 같은 이름이 반대쪽을 뜻하게 된다: {ok}"
+    );
+    assert!(
+        !world.slots(view).contains(&slot),
+        "MOVE 다 — 원본 슬롯은 남지 않는다"
+    );
+}
+
+/// `to_window` 를 주면 그 창의 새 탭이 된다 — 창이 늘지 않는다.
+#[tokio::test]
+async fn popout_into_a_named_window_adds_a_tab_there() {
+    let (world, queue, receiver) = queued();
+    let target = call(&receiver, &queue, &world.mail, "window.create", json!({}))
+        .await
+        .outcome
+        .expect("창 생성")["window"]
+        .as_str()
+        .expect("label")
+        .to_string();
+    let (view, slot) = world.filled_slot();
+    let opened_before = world.windows.opened.lock().unwrap().len();
+
+    let mail = Mailbox::default();
+    let ok = call(
+        &receiver,
+        &queue,
+        &mail,
+        "slot.popout",
+        json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "to_window": target,
+        }),
+    )
+    .await
+    .outcome
+    .expect("분리 성공");
+
+    assert_eq!(ok["window"].as_str(), Some(target.as_str()));
+    assert_eq!(
+        world.windows.opened.lock().unwrap().len(),
+        opened_before,
+        "기존 창 타깃은 창을 새로 열지 않는다"
+    );
+    let tabs = apply::list_tabs(&world.state, &target).expect("대상 창 탭");
+    assert_eq!(tabs.tabs.len(), 2, "빈 탭 + 옮겨온 탭");
+    assert_eq!(
+        ok["new_view_id"].as_str(),
+        Some(tabs.active.to_string().as_str())
+    );
+}
+
+/// 옮길 것이 없는 슬롯은 `CONFLICT` + 서비스의 사유 문구로 반려된다(창도 안 연다).
+#[tokio::test]
+async fn popout_of_an_empty_slot_is_refused_without_opening_a_window() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let slot = world.empty_slot(view);
+
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "slot.popout",
+            json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+        )
+        .await,
+    );
+
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    assert!(err.message().contains("빈 슬롯"), "{}", err.message());
+    assert!(
+        world.windows.opened.lock().unwrap().is_empty(),
+        "거절됐으면 창도 안 연다"
+    );
+    assert!(world.slots(view).contains(&slot), "부분변경 금지");
 }
 
 // ── (B) 연결 태스크를 안 막는다 ──────────────────────────────────────────────

@@ -68,7 +68,13 @@ export interface AgentInfo {
   status: AgentStatus
   cols: number
   rows: number
-  /** 재spawn마다 +1. [agentId, epoch]로 재구독 트리거 (ADR-0007) */
+  /**
+   * ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 화신마다 새로 뽑은 난수라 **순서에 뜻이 없다**.
+   * 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것). 프론트는 이 값을 "지금 읽는 출력
+   * 스트림이 아까 그 스트림인가" 의 판정 축으로만 쓴다 — ★재구독·재마운트 트리거로 쓰지 말 것★:
+   * 종료가 곧 명부에서 사라지는 것이라, 이 값을 컴포넌트 prop 으로 내려보내면 종료 순간 값이 떨어지며
+   * **replay 가 오기도 전에** 화면이 지워진다(데몬 ring 은 이미 없어 복구 불가). (ADR-0007)
+   */
   epoch: number
   capabilities: Capabilities
 }
@@ -76,7 +82,7 @@ export interface AgentInfo {
 export interface AgentStatusChanged {
   id: string
   status: AgentStatus
-  /** 재spawn epoch — 옛 세션의 지연 알림을 버리는 데 사용 (ADR-0007) */
+  /** 이 알림을 낸 화신의 표식 — 옛 세션의 지연 알림을 버리는 데 쓴다(일치/불일치만, AgentInfo.epoch). */
   epoch: number
 }
 
@@ -100,9 +106,9 @@ export type AgentCommand =
 export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'
 
 /**
- * 「마지막 실패」의 종류 — wire `AgentFailureKind` 미러(ADR-0161).
+ * 「마지막 실패」의 종류 — wire `AgentFailureKind` 미러(ADR-0169).
  * 지금 상태(AgentStatus)와 **별개 축**이다: 도는 중이면서 마지막 실패를 들고 있을 수 있고,
- * 그 조합이 화면의 「도는 중이 이긴다」 규칙(ADR-0162)이 서는 자리다.
+ * 그 조합이 화면의 「도는 중이 이긴다」 규칙(ADR-0170)이 서는 자리다.
  */
 export type AgentFailureKind =
   | 'NoConversationToResume'
@@ -139,7 +145,7 @@ export interface AgentProfile {
   /** Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속(ADR-0016). 동작 TODO */
   failed_reason: string | null
   /**
-   * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0161). null = 실패 기록 없음.
+   * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0169). null = 실패 기록 없음.
    * 데몬 메모리에만 사는 값이라 agents.json 엔 없고 데몬 재기동 시 사라진다(앱 창 재시작은 견딘다).
    * wire `AgentProfile.last_failure` 미러(#[serde(default)] — 옛 wire 는 null).
    * 종류→{다시 해볼 가치·문구·권하는 행동} 표 = `src/components/agent/failureKinds.ts`.

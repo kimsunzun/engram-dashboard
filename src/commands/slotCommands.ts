@@ -69,6 +69,11 @@ register({
   category: 'slot',
   // ADR-0057/0064: 슬롯을 새 런타임 팝업 창의 새 탭으로 MOVE(detach) — viewStore.moveSlotToWindow →
   //   invoke(move_slot_to_window, toWindow=null). 콘텐츠 종류 무관(agent 게이팅 제거, ADR-0064).
+  // ★알려진 과도기 분열 — 같은 id 가 두 표면에서 받는 것도 주는 것도 다르다★: 셸의 명령 버스에도
+  //   `slot.popout` 이 있다(`src-tauri/src/layout/commands.rs`). 받는 것 — 여기는 목적지 인자가 없어 항상
+  //   새 창이고(아래 호출이 toWindow 를 안 넘긴다), 그쪽은 to_window 로 기존 창도 고른다. 주는 것 — 여기는
+  //   `{window, tab}`, 그쪽은 `{window, new_view_id}`. 한쪽만 맞춰 고치지 말 것 — 합류는 이 레지스트리를
+  //   은퇴시키는 후속 스텝 몫이다. 반대편에도 같은 메모가 붙어 있다.
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.popout')
     return useViewStore.getState().moveSlotToWindow(viewId, slotId)

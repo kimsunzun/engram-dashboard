@@ -34,7 +34,7 @@ restart_count: number,
  */
 failed_reason: string | null, 
 /**
- * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0161). `null` = 실패 기록 없음.
+ * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0169). `null` = 실패 기록 없음.
  *
  * ★데몬 메모리에만 산다★ — core 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
  *   재기동하면 사라진다(앱 창 재시작은 견딘다).

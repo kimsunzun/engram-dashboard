@@ -320,7 +320,7 @@ export default function AgentList() {
     const isBusy = busyIds.has(data.id)
     const err = errorById[data.id]
     const hasChildren = data.children.length > 0
-    // ADR-0162: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
+    // ADR-0170: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
     const failureTitle = isFailureBlocked(data.status, data.lastFailure)
       ? failureLine(data.lastFailure)
       : null
@@ -365,7 +365,7 @@ export default function AgentList() {
           if (e.key === 'Enter') commitEdit(data)
           else if (e.key === 'Escape') cancelEdit()
         }}
-        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0162 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
+        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0170 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
         //   같은 판정(`isFailureBlocked`)을 써서 둘이 어긋나지 않게 한다. 액션 실패 인라인 메시지(err)는
         //   방금 누른 조작의 결과라 그게 더 앞선다.
         title={
@@ -405,7 +405,7 @@ export default function AgentList() {
           data-agent-glyph="1"
           style={{
             fontSize: '11px',
-            // ADR-0162: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다.
+            // ADR-0170: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다.
             color: statusGlyphColor(data.status, data.lastFailure),
             flexShrink: 0,
           }}

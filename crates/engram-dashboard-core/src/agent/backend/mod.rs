@@ -122,7 +122,7 @@ pub trait AgentBackend: Send + Sync {
         no_turn_signals
     }
 
-    /// 이어받기가 실패했을 때 **그 프로그램의 출력에서 원인을 알아볼 수 있나**(ADR-0161 분류 입구).
+    /// 이어받기가 실패했을 때 **그 프로그램의 출력에서 원인을 알아볼 수 있나**(ADR-0169 분류 입구).
     ///
     /// `tail` = 죽은 프로세스가 마지막으로 남긴 출력의 꼬리(best-effort — 비어 있을 수 있다).
     /// `None` = 이 출력만으로는 종류를 단정할 수 없다 → 호출자가 맥락 기본값으로 떨어뜨린다.
@@ -131,7 +131,7 @@ pub trait AgentBackend: Send + Sync {
     ///   직접 보면 그 지식이 공용 층으로 샌다.
     /// ★기본값 = 모름(fail-open)★: 선언하지 않은 backend 는 아무 것도 단정하지 않는다.
     // ADR-0004
-    // ADR-0161
+    // ADR-0169
     fn resume_failure_kind(&self, _tail: &str) -> Option<AgentFailureKind> {
         None
     }
@@ -464,7 +464,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0161/0004: 이어받기 실패 분류 dispatch(문구 지식은 백엔드 소유) ──────────────────
+    // ── ADR-0169/0004: 이어받기 실패 분류 dispatch(문구 지식은 백엔드 소유) ──────────────────
 
     #[test]
     fn resume_failure_dispatch_reads_claudes_marker_and_stays_silent_elsewhere() {

@@ -822,7 +822,7 @@ async fn case08_epoch_mismatch_reset() {
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
-    // 틀린 epoch(+1) + after_seq 지정 → after_seq 무시하고 Reset.
+    // 다른 화신 표식 + after_seq 지정 → after_seq 무시하고 Reset.
     c.send(&WireCommand::Subscribe {
         agent_id: id,
         epoch: Some(epoch.wrapping_add(1)),

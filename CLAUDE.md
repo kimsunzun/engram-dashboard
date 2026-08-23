@@ -101,6 +101,12 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **결함 수정도 같은 원칙.** 비자명 결함을 추측·매직넘버로 맞추지 않는다. 트리거·발화는 `docs/reference/debugging-conventions.md`. (ADR-0038)
 - **참조는 패턴 차용이지 코드 복붙이 아니다.** 그대로 옮길 때만 라이선스 확인.
 - **특정 도구를 조사 앵커로 선정하지 않는다.** 목록을 박으면 후속 조사가 거기 앵커링돼 직접 피어를 놓친다(실발생 2026-07-15).
+- ★**아래 클론은 표본이지 전수가 아니다 — 여기 있는 것만 보고 조사를 마쳤다고 하지 않는다.**★ 위 앵커 금지 조항이 그대로 유효하다. 그 전제 위에서, 이미 받아 둔 피어가 있으니 같은 것을 다시 clone하지는 않는다. 위치 = `I:\Engram_Workspace\opensource\`(이 repo 기준 `../../../Engram_Workspace/opensource`). **repo 밖이라 추적되지 않는다** — 다른 PC엔 없을 수 있고, 없으면 그때 clone한다.
+  - **herdr** — Rust 단일 바이너리 **백그라운드 서버가 터미널을 소유**하고, 에이전트는 계속 돌며 **어디서든(ssh 포함) 재부착**한다. 에이전트용 socket API도 있다. ★우리 데몬 모델의 가장 가까운 피어★.
+  - **wezterm** — Rust 터미널 + mux **서버/클라이언트 분리와 재부착**(`wezterm-mux-server`·`wezterm-client`).
+  - **zellij** — 멀티플렉서. 세션 생존 + 클라이언트 재부착.
+  - **ttyd** — PTY를 웹소켓으로 나르고 **크기를 협상하는** 최소 구현(리사이즈 메시지 → ConPTY·POSIX 양쪽).
+  - **orca** — 여러 에이전트 백엔드(Codex·ClaudeCode·OpenCode 등)를 **워크트리별로 나란히** 돌리는 오케스트레이터 + GUI. 「백엔드 확장」과 겹친다.
 
 ---
 
@@ -128,7 +134,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **락 순서:** sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers clone 후 lock 미보유 send. (ADR-0006)
 - **상태 알림 분담:** 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. 프론트는 `status_changed`로 terminal 판정 금지 → `agent-list-updated`로 판정. (ADR-0005)
 - **replay→live:** subscribers lock 보유 중 replay 전송(순서 역전 방지) + 프론트 seq dedup.
-- **epoch:** 같은 AgentId 맵 교체마다 +1 → 프론트 재구독. 재구독 원칙은 `[agentId, epoch]`(ADR-0007)이고 실제 effect deps는 `viewId`가 앞에 붙는다(뷰 단위 구독 — ADR-0046 결정 3의 귀결).
+- **화신 표식(필드명은 아직 `epoch`):** 화신마다 새로 뽑는 32비트 난수 — **비교는 일치/불일치만**(대소로 "더 새 것"을 유도 금지). 읽기는 건너뛰고 쓰기는 `0` 자리채움 — ★이 비대칭은 의도★(ADR-0163). 재부착 계기는 소켓이 아니라 **권위 명부 관측 단독**이고, 구독 effect deps는 `[viewId, agentId]` — ★표식을 넣지 않는다★(넣으면 replay 도착 전에 화면이 지워지고 표식까지 잃어 회전 판정이 못 선다. ADR-0164).
 - **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows.
 - **턴 관측 정리 = 두 지점뿐:** `finish` + `emit`의 finalize 재확인. **세 번째 호출자를 늘리면 인과가 갈라진다.** 빠지면 턴 도중 죽은 에이전트가 "진행 중"으로 남아 30분 상한(fail-open)이 풀 때까지 우편이 막힌다. (ADR-0127)
 - **등록 순서:** sessions insert가 pump 시작보다 **먼저** — 뒤집히면 즉시 종료하는 세션이 명부에 오르기 전에 끝나 수거되지 않는다(런타임엔 무신호 — reaper 테스트가 회귀를 잡는다). (ADR-0019)
@@ -142,7 +148,7 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 - **제어 표면(불변):** 컴포넌트·스토어는 `agentClient`(단일 `ProtocolClient`)에만 의존한다(개별 IPC 헬퍼 직접 호출 금지 — ADR-0011이 거부한 `ptyApi` 형태. 그런 모듈은 지금 없다). carrier = transport seam, 운영은 `TauriTransport` 고정(ADR-0036). 교체점은 transport이고, `WsTransport`는 테스트·직결 흔적이다(ADR-0020/0029).
 - **폴더:** api · commands(제어 표면 — registry/dispatch/contributions) · components(layout/agent/slot/diff/ui) · i18n · lab · lib · pages · store · styles · theme · util.
 - **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — raw listener 수명은 각 등록 주체가 진다(`TauriTransport.close` · `viewStore` dispose). 등록 주체는 둘로 갈린다: **에이전트 이벤트 6종**(목록·상태·복원 결과·프로필·프리셋·연결 상태)은 `TauriTransport`가 `listen`을 걸고 `eventBus`는 `agentClient`의 추상 구독만 받는다 · **레이아웃·탭 이벤트**는 `viewStore`가 Tauri `listen`을 직접 건다(백엔드가 권위라 의도된 예외).
-- **통합 micro-rules:** 구독 effect deps `[viewId, agentId, epoch]`(ADR-0046) · 구독 전 `terminal.reset()` · seq dedup · replay 경계 = gen 펜스 성공 마커 · `delete channel.onmessage`(null 아님) · 입력 가드 · resize debounce 50ms.
+- **통합 micro-rules:** 구독 effect deps `[viewId, agentId]`(화신 표식 제외 — ADR-0046 구독 키 + ADR-0164) · 구독 전 `terminal.reset()` · seq dedup · replay 경계 = gen 펜스 성공 마커 · `delete channel.onmessage`(null 아님) · 입력 가드 · resize debounce 50ms.
 
 ## 창 구성
 

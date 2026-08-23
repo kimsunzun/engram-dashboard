@@ -421,11 +421,25 @@ async fn run() -> i32 {
     //   내는 죽은 라우트가 되어, 이 bin 으로 그 계열을 태워 볼 수 없다.
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     let command_slot = Arc::new(CommandTableSlot::new());
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    // ★1단계 표를 **아래 슬롯과 같은 부**로 물린다 — `without_commands()` 로 되돌리지 말 것★: 그러면 판정부가
+    //   보는 표와 버스가 보는 표가 다른 부가 되어, 이 서버의 `/control/call` 이 `agent.*` 를 자기 이름으로
+    //   알아보지 못한다(운영 조립 `lib.rs` 와 다른 모양이 된다).
+    let (relay_bus, _relay_sweeper) = engram_dashboard_daemon::command_delivery::CommandBus::new(
+        engram_dashboard_daemon::command_roster::CommandRoster::new(),
+        engram_dashboard_daemon::command_delivery::CommandDeliveries::new(),
+        Arc::new(
+            engram_dashboard_daemon::control::commands::DaemonLocalCommands::new(
+                command_slot.clone(),
+            ),
+        ),
+    );
     let handle = match start_mcp_server(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
         command_slot.clone(),
+        relay_bus,
     )
     .await
     {

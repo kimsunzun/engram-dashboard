@@ -76,7 +76,6 @@ pub struct ModelCaps {
     pub max_tokens: bool,
 }
 
-/// epoch 는 재구독 트리거(`[agentId,epoch]`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct AgentInfo {
@@ -88,6 +87,11 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub cols: u16,
     pub rows: u16,
+    /// ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 화신마다 새로 뽑은 난수라 **순서에 뜻이
+    /// 없다**. 비교는 일치/불일치만 쓴다(대소로 "더 새 것" 을 유도하지 말 것, ADR-0163). 받는 쪽은 이
+    /// 값으로 "지금 읽는 출력 스트림이 아까 그 스트림인가" 를 판정한다 — 재구독 계기·deps 는 이
+    /// 필드가 아니라 권위 명부 관측이다(ADR-0164 결정 8).
+    /// 데몬 프로세스를 넘겨 살지 않는다 — 재기동하면 같은 에이전트도 다른 표식으로 돌아온다.
     pub epoch: u32,
     pub capabilities: Capabilities,
 }
@@ -195,7 +199,7 @@ pub enum RestartPolicy {
 /// ★wire 문자열은 `stringify!` 로 **변형 이름에서 파생**된다★: ts-rs 가 내는 TS 유니온도 변형 이름에서
 ///   나오므로, 손으로 문자열을 적지 않는 한 그 둘은 구조적으로 같다(그 사실은 `messages.rs` 의 golden 이
 ///   생성된 `.ts` 를 실제로 읽어 다시 확인한다).
-// ADR-0161
+// ADR-0169
 macro_rules! declare_failure_kinds {
     (
         $( $(#[$vmeta:meta])* $variant:ident ),+ $(,)?
@@ -203,7 +207,7 @@ macro_rules! declare_failure_kinds {
     ) => {
         /// core `failure::AgentFailureKind` 와 동일. 「마지막 실패」의 종류 어휘 — **화면 문구는 여기
         /// 없다**: 종류 → {다시 해볼 가치 · 문구 · 권하는 행동} 표는 프론트가 진다
-        /// (ADR-0161 결정 5 · ADR-0162).
+        /// (ADR-0169 결정 5 · ADR-0170).
         ///
         /// ★상태(`AgentStatus`)와 별개 축이라 합치지 않는다★ — "도는 중인데 마지막 실패를 든" 조합이
         ///   표현돼야 화면의 「도는 중이 이긴다」 규칙이 성립한다.
@@ -319,7 +323,7 @@ pub struct AgentProfile {
     /// **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(버전 bump 유발).
     #[ts(type = "string | null")]
     pub failed_reason: Option<String>,
-    /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0161). `null` = 실패 기록 없음.
+    /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0169). `null` = 실패 기록 없음.
     ///
     /// ★데몬 메모리에만 산다★ — core 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
     ///   재기동하면 사라진다(앱 창 재시작은 견딘다).

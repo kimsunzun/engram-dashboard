@@ -60,14 +60,13 @@ export const ko = {
     monitoringSearch: '에이전트 검색 (이름·경로)',
     noCandidates: '검색 결과 없음', // 실행중은 있으나 검색 미스.
     noRunning: '실행중 에이전트 없음 — 트리에서 에이전트를 생성/활성화하세요.',
-    terminatedPlaceholder: '종료된 에이전트', // 오버레이 '종료됨'과 별개.
+    terminatedPlaceholder: '종료된 에이전트', // 챗 입력창 전용 — 슬롯 부재 막은 문구를 쓰지 않는다(SlotUnavailableVeil).
     inputPlaceholder: '메시지 입력 (Enter 전송 · Shift+Enter 줄바꿈)',
     // 빈 상태(ADR-0145) 가운데 입력창 전용. 하단 배치는 위 inputPlaceholder 를 그대로 쓴다 —
     // Enter/Shift+Enter 안내가 사라지면 안 되므로 한 키로 합치지 않는다(사용자 지정 문구).
     emptyInputPlaceholder: '메시지를 입력하세요',
     treeLabel: '에이전트 트리',
     emptyList: '에이전트 없음 — 우클릭으로 생성',
-    terminatedOverlay: '종료됨', // placeholder '종료된 에이전트'와 별개.
     rowActivate: '활성화(spawn)', // reserved 행.
     rowCancelReserved: '삭제', // reserved 행 — preset.deleteBtn 과 어휘 통일.
     rowOpen: '열기', // running 행.
@@ -76,8 +75,8 @@ export const ko = {
     rowRestart: '재시작 (준비 중)', // 백엔드 command 부재로 비활성.
     doubleClickToActivate: '더블클릭으로 활성화(spawn)', // reserved 행 title 힌트.
     rowFailedBadge: '실패',
-    // ── 마지막 실패(ADR-0161 결정 5의 표 — 종류마다 문구 하나 + 권하는 행동 하나) ────────────
-    // ★컴포넌트에 문구를 박지 말 것(ADR-0162 §영향)★: 이 키들을 읽는 곳은
+    // ── 마지막 실패(ADR-0169 결정 5의 표 — 종류마다 문구 하나 + 권하는 행동 하나) ────────────
+    // ★컴포넌트에 문구를 박지 말 것(ADR-0170 §영향)★: 이 키들을 읽는 곳은
     //   `src/components/agent/failureKinds.ts` 한 곳이고, 화면은 그 표에서 문구를 받는다.
     failureNoConversation: '이어받을 대화가 없습니다',
     failureNoConversationAction: '새 대화로 시작해야 합니다',

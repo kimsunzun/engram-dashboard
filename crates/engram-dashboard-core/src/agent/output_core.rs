@@ -561,7 +561,7 @@ impl OutputCore {
     ///   종료 문구 몇 줄만 보므로, 그 비용과 로그 폭주를 치를 이유가 없다.
     /// ★상한은 정확히 지켜진다★: 마지막 청크가 상한을 넘으면 그 청크의 **끝쪽만** 잘라 담는다.
     /// ★빈 결과가 정상이다★: 구조화(NDJSON) 세션의 링에는 콘솔 바이트가 하나도 없다.
-    // ADR-0161
+    // ADR-0169
     pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
         self.replay
             .lock()
@@ -678,7 +678,7 @@ impl Ring {
     ///   않는다(청크 하나가 통째로 넘어오면 상한이 상한이 아니게 된다).
     /// ★clone 하지 않는다★: 슬라이스만 모아 마지막에 한 번 이어 붙인다 — 링 전체 복사(`snapshot`)와의
     ///   차이가 이 메서드의 존재 이유다.
-    // ADR-0161
+    // ADR-0169
     pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
         let mut parts: Vec<&[u8]> = Vec::new();
         let mut total = 0usize;
@@ -1153,7 +1153,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0161: 실패 분류가 읽는 꼬리(상한이 하드인가 · 콘솔 바이트만인가) ────────────────
+    // ── ADR-0169: 실패 분류가 읽는 꼬리(상한이 하드인가 · 콘솔 바이트만인가) ────────────────
 
     #[test]
     fn terminal_tail_returns_the_last_console_bytes_in_order() {

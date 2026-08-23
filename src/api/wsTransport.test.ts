@@ -720,7 +720,10 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     c.close()
   })
 
-  it('재연결 → 재요청(전량 재replay) → 데몬이 본 seq 재전송해도 뷰별 dedup', async () => {
+  // ★재요청 계기 = 명부이지 소켓이 아니다(사용자 결정 2026-08-20)★: 소켓이 서는 것만으로는 아무것도
+  //   나가지 않고, 그 에이전트가 명부에 있다는 관측이 부착시킨다. 여기선 명부에서 빠진 적이 없으므로
+  //   같은 세션 이어보기 = 커서 유지 → 전량 재replay 의 겹치는 앞부분은 dedup 이 흡수한다.
+  it('재연결 → 명부 부착 → 재요청(전량 재replay) → 이미 그린 앞부분은 dedup', async () => {
     const t = new WsTransport()
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
@@ -743,21 +746,89 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     await Promise.resolve()
     await Promise.resolve()
 
-    // connected 재전이 → ProtocolClient 가 뷰 재요청 → WsTransport 가 wire Subscribe{after_seq:null} 재송신.
+    // 소켓만 선 시점 — 아직 아무것도 안 나간다(명부를 기다린다).
+    expect(ws2.parsedSent().some((m) => typeof m === 'object' && m && 'Subscribe' in m)).toBe(false)
+
+    // 권위 명부에 그 에이전트가 **같은 표식으로** 있다 → 같은 화신 이어보기 → 부착 → WsTransport 가 wire
+    //   Subscribe{after_seq:null} 송신. ★표식을 빼면 이 케이스가 성립하지 않는다★ — 표식 없는 명부는
+    //   "같은 화신" 을 증명하지 못해 회전으로 취급되고, 커서 유지를 재는 이 단언이 무의미해진다.
+    ws2.fireText({ AgentListUpdated: { agents: [{ id: AGENT, epoch: E }] } })
+    await Promise.resolve() // myGen 확정(requestReplay 회수) — 그 전 마커는 held 로 밀린다
     const resub = ws2.parsedSent().find((m) => typeof m === 'object' && m && 'Subscribe' in m) as {
       Subscribe: { agent_id: string; after_seq: number | null }
     }
     expect(resub).toBeTruthy()
-    expect(resub.Subscribe.after_seq).toBeNull() // 전량 재replay(재연결 회귀 수용, ADR-0046)
+    expect(resub.Subscribe.after_seq).toBeNull() // 전량 재replay(full-from-oldest, ADR-0046)
 
-    // 데몬이 0,1,2,3 전량 재전송 — 뷰 buffering 이 축적 후 마커에 flush, dedup 로 0~2 는 이미 배달분.
+    // 데몬이 0,1,2,3 전량 재전송 — 뷰 buffering 이 축적 후 마커에 flush. 커서가 2 에 남아 있으므로 앞
+    //   세 개는 dedup 탈락하고 끊긴 동안 놓친 seq 3 만 새로 그려진다.
     ws2.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 1 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 2 }))
     ws2.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
     ws2.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
-    expect(received).toEqual([0, 1, 2, 3]) // 무중복(dedup) — seq 3 만 새로
+    expect(received).toEqual([0, 1, 2, 3])
+    c.close()
+  })
+
+  // ★거절도 미종결 요청을 종결시킨다★: 안 그러면 이 carrier 의 entry.inflight 가 영영 남아 그 에이전트의
+  //   requestReplay 가 전부 병합되고 wire Subscribe 가 두 번 다시 안 나간다 — src-tauri 에서 고친 좀비와
+  //   같은 결함이다(실측 2026-08-19). 운영 carrier 는 TauriTransport 지만(ADR-0029/0036) 같은 wire 를
+  //   먹으면서 한쪽만 멀쩡한 상태를 남기지 않는다.
+  it('SubscribeFailed → 실패 경계 합성 + in-flight 해제(다음 요청이 다시 wire 로 나간다)', async () => {
+    const t = new WsTransport()
+    const c = new ProtocolClient(t)
+    const ws1 = await connect(t)
+    await c.subscribeOutput(V1, AGENT, () => {})
+    await Promise.resolve()
+    const before = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m).length
+    expect(before).toBe(1)
+
+    ws1.fireText({ SubscribeFailed: { agent_id: AGENT, reason: `agent ${AGENT} not found` } })
+    // 실패 경계 → 뷰는 flush 하지 않고 사다리(재요청)로 간다. 뷰가 아직 buffering 인 것이 그 증거다.
+    expect(c.getViewOutputState(V1)?.phase).toBe('buffering')
+
+    // ★핵심★: 슬롯이 풀렸으니 새 요청이 다시 wire 로 나간다(고치기 전엔 영원히 병합만 됐다).
+    void t.requestReplay(AGENT)
+    const after = ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m).length
+    expect(after).toBe(2)
+    c.close()
+  })
+
+  // 병합 대기자가 있으면 거절이 그 세대를 승격한다 — 성공 종결과 같은 뒷정리를 공유한다(settleReplay).
+  it('SubscribeFailed → 병합된 다음 세대의 Subscribe 를 정확히 1회 송신', async () => {
+    const t = new WsTransport()
+    const ws1 = await connect(t)
+    const gen1 = await t.requestReplay(AGENT)
+    const waiter = t.requestReplay(AGENT) // in-flight 중 → 병합
+    expect(ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m).length).toBe(1)
+
+    ws1.fireText({ SubscribeFailed: { agent_id: AGENT, reason: 'nope' } })
+    const gen2 = await waiter
+    expect(gen2).toBeGreaterThan(gen1)
+    expect(ws1.parsedSent().filter((m) => typeof m === 'object' && m && 'Subscribe' in m).length).toBe(2)
+    t.close()
+  })
+
+  // ★방어★: Ack 를 받은(=데몬이 받아들인) 요청은 거절로 풀지 않는다. 풀면 뒤따라오는 ReplayComplete 가
+  //   빈 슬롯을 만나 무시되고, 그 replay 를 기다리던 뷰가 성공 마커를 영영 못 받는다.
+  it('acked 요청은 SubscribeFailed 로 풀리지 않는다(정상 완료 경로 생존)', async () => {
+    const t = new WsTransport()
+    const c = new ProtocolClient(t)
+    const ws1 = await connect(t)
+    const received: number[] = []
+    await c.subscribeOutput(V1, AGENT, (ch) => received.push(ch.seq))
+    await Promise.resolve()
+
+    const E = 4
+    ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
+    ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
+    ws1.fireText({ SubscribeFailed: { agent_id: AGENT, reason: '잘못 발화한 거절' } })
+    expect(received).toEqual([]) // 아직 경계 전 — 실패 경계도 안 났다.
+
+    ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
+    expect(received).toEqual([0]) // 성공 마커가 살아서 flush 됐다.
     c.close()
   })
 })

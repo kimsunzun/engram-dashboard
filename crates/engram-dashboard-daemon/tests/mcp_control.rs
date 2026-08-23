@@ -152,11 +152,15 @@ async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     registry.issue(id, 0, "valid-token-epoch0".to_string(), true);
     registry.issue(id, 1, "valid-token-epoch1".to_string(), true);
 
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -199,11 +203,15 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     let id = AgentId::new_v4();
     registry.issue(id, 7, "good-token".to_string(), true);
 
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -250,11 +258,15 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
 #[tokio::test]
 async fn get_and_delete_without_token_are_rejected() {
     let registry = Arc::new(ControlRegistry::new());
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry,
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -283,11 +295,15 @@ async fn cross_token_session_takeover_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string(), true);
     registry.issue(id_b, 0, "token-b".to_string(), true);
 
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -319,11 +335,15 @@ async fn revoked_mid_session_request_is_rejected() {
     let id = AgentId::new_v4();
     registry.issue(id, 0, "live-token".to_string(), true);
 
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -358,11 +378,15 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_daemon::control::DaemonControlChannel;
 
     let registry = Arc::new(ControlRegistry::new());
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -419,11 +443,15 @@ async fn orphaned_session_attach_is_rejected() {
     registry.issue(id_a, 0, "token-a".to_string(), true);
     registry.issue(id_b, 0, "token-b".to_string(), true);
 
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -456,11 +484,15 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "valid".to_string(), true);
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry,
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -481,11 +513,15 @@ async fn malformed_session_id_header_is_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "malformtok".to_string(), true);
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry,
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -520,11 +556,15 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "optok".to_string(), true);
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry,
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -550,11 +590,15 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "inittok".to_string(), true);
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");
@@ -585,11 +629,15 @@ async fn oversize_body_is_rejected_with_413() {
     let registry = Arc::new(ControlRegistry::new());
     let id = AgentId::new_v4();
     registry.issue(id, 0, "sizetok".to_string(), true);
+    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
+    let (relay_bus, _relay_sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     let handle = start_mcp_server(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
         empty_commands_slot(),
+        relay_bus,
     )
     .await
     .expect("start mcp server");

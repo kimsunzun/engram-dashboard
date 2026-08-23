@@ -190,7 +190,7 @@ fn concurrent_same_id_spawn_does_not_clobber() {
             s.spawn(move || {
                 barrier.wait();
                 // ★세는 축은 「띄웠나」다 — 「오류가 아니었나」가 아니다★: 중복 요청은 이제 오류가 아니라
-                //   결말(moot)이라 전원이 Ok 를 받는다(ADR-0161). 화신을 만든 쪽은 여전히 하나뿐이고,
+                //   결말(moot)이라 전원이 Ok 를 받는다(ADR-0169). 화신을 만든 쪽은 여전히 하나뿐이고,
                 //   그것을 세는 것이 이 가드의 검증 대상이다.
                 if manager
                     .spawn_agent(&profile, SpawnMode::Fresh)

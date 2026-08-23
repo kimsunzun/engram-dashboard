@@ -1,6 +1,6 @@
 // RichSlot — 구조화(JSON 모드) 라이브 렌더 슬롯(ADR-0044/0045).
 //
-//  라이브 모드(<RichSlot agentId epoch />) — 백엔드가 정제한 **구조화 출력 tag1** 프레임을 TerminalSlot 과
+//  라이브 모드(<RichSlot viewId agentId />) — 백엔드가 정제한 **구조화 출력 tag1** 프레임을 TerminalSlot 과
 //  같은 구독 규율로 받아 StructuredEventAccumulator 로 누적해 그린다 + 텍스트 입력창(Enter=전송,
 //  Shift+Enter=줄바꿈). 입력창 배치는 둘 — 대화가 있으면 하단 고정, 빈 상태면 화면 가운데(아래 ADR-0145).
 //
@@ -22,15 +22,15 @@
 //   (§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
 
 import { useEffect, useRef, useState } from 'react'
-import { PowerOff } from 'lucide-react'
 
 import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
-import type { OutputSubscription } from '../../api/agentClient'
+import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import { StructuredTextView } from './StructuredTextView'
 import { ClaudeMascot } from './ClaudeMascot'
+import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
 import { basename } from '../../util/basename'
 import { t } from '../../i18n'
@@ -39,28 +39,26 @@ interface RichSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯 독립 진도 — 버그 B 해소. */
   viewId?: string
   agentId: string
-  /** 재spawn 재구독 트리거([agentId,epoch]). */
-  epoch?: number
 }
 
-export default function RichSlot({ viewId, agentId, epoch }: RichSlotProps) {
+export default function RichSlot({ viewId, agentId }: RichSlotProps) {
   const vid = viewId ?? agentId
-  const ep = epoch ?? 0
-  // ★정체성(viewId·agentId·epoch)이 바뀌면 새로 마운트한다 — key★
+  // ★정체성(viewId·agentId)이 바뀌면 새로 마운트한다 — key★
   //   목록·복원표시·전송표시를 구독 effect 에서 내리면, 그 커밋 한 번은 **새 props + 옛 상태**로 그려진다
   //   (passive effect 는 페인트 뒤에 돈다). 같은 슬롯에 다른 에이전트를 배정하면 그 프레임에 이전
   //   에이전트의 대화가 스친다. key 로 인스턴스를 갈면 옛 상태를 물려받는 커밋이 아예 존재하지 않는다.
-  //   부작용 = 입력 중이던 초안 소실. 다른 에이전트·새 세션으로 갈아타는 전환이라 수용한다.
-  //   ★이 key 를 빼면 send 의 "세대" 가드를 따로 되살려야 한다★ — 지금은 재구독 = 새 인스턴스라,
-  //   건너온 전송 실패가 옛 인스턴스의 setState 를 부르고 그건 무해한 no-op 이 된다.
-  return <LiveRichSlot key={`${vid}|${agentId}|${ep}`} viewId={vid} agentId={agentId} epoch={ep} />
+  //   부작용 = 입력 중이던 초안 소실. 다른 에이전트로 갈아타는 전환이라 수용한다.
+  //   ★화신(epoch)은 이 key 에 넣지 않는다★: 같은 에이전트의 재spawn 은 **인스턴스를 갈지 않는다** —
+  //   갈면 replay 가 오기도 전에 대화가 지워지고 되살릴 이력이 데몬에도 없다. 그 자리를 대신하는 것이
+  //   비우기 신호(onReset)이고, 아래 구독의 그 콜백이 인스턴스를 유지한 채 같은 일을 한다.
+  return <LiveRichSlot key={`${vid}|${agentId}`} viewId={vid} agentId={agentId} />
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
 // ② 라이브 모드 — 실스트림 구독 + 누산 + 입력창
 // ══════════════════════════════════════════════════════════════════════════════════
 
-function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: string; epoch: number }) {
+function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) {
   // 순서 보존 렌더 item 스트림(text/칩/구분선) — 누산기 스냅샷을 그대로 담는다(ADR-0045 §52).
   const [items, setItems] = useState<StructuredItem[]>([])
   const [turnDone, setTurnDone] = useState(false)
@@ -72,6 +70,8 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
   const [input, setInput] = useState('')
   // ADR-0145: 이력 복원이 끝났다는 신호('live')를 받았나. 빈 상태 표시의 게이트이며 재구독마다 내린다.
   const [replayDone, setReplayDone] = useState(false)
+  // 구독이 마지막으로 알린 국면 — 아래 부재 막(ADR-0148)의 세 번째 근거.
+  const [phase, setPhase] = useState<ViewPhase | null>(null)
   // ★ADR-0145: "이 인스턴스에서 이미 보냈다"★ — 전송이 실제로 나갔다는 사실. 전송 자체가 실패하면
   //   아래 send 의 catch 가 되돌린다(아무것도 안 나간 슬롯은 첫 실행 화면으로 돌아가야 한다).
   //   awaiting 으로 대신하지 않는 이유 = awaiting 은 item 을 만들지 않는 tag1 프레임(빈 델타 · user uuid
@@ -83,8 +83,9 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
   const accRef = useRef<StructuredEventAccumulator>(null as unknown as StructuredEventAccumulator)
   if (accRef.current === null) accRef.current = new StructuredEventAccumulator()
   const scrollRef = useRef<HTMLDivElement>(null)
-  // 전송 순번 — 실패 콜백이 "내가 최신 전송인가"를 판정하는 근거. 앞선 전송의 뒤늦은 실패가 진행 중인
-  //   최신 전송의 표시를 지우는 것을 막는다(state 가 아니라 ref: 표시에 안 쓰이니 리렌더 불필요).
+  // 전송 순번 — 결말 콜백(성공·실패)이 "내가 아직 최신 전송인가"를 판정하는 근거. 앞선 전송의 뒤늦은
+  //   결말이 진행 중인 최신 전송의 표시를 지우거나 새 화신의 전송 사실을 날조하는 것을 막는다. 비우기
+  //   콜백(onReset)도 여기를 올려 날아가던 전송을 무효화한다(state 가 아니라 ref: 표시에 안 쓰인다).
   const sendSeqRef = useRef(0)
   // 이 인스턴스에서 성공적으로 나간 전송이 하나라도 있나. 있으면 이후 전송이 실패해도 첫 실행 화면으로
   //   되돌리지 않는다 — 앞선 전송의 응답이 오는 중일 수 있다.
@@ -102,12 +103,15 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     (agent != null &&
       (agent.status.type === 'Exited' || agent.status.type === 'Killed' || agent.status.type === 'Failed'))
 
-  // ADR-0146: 연결이 끊긴 것도 "타겟한 에이전트가 지금 없다" 로 같게 본다(사용자 결정). 기존 연결 상태
-  //   표면(agentClient)을 **읽기만** 한다 — 새 전역 핸들·새 스토어를 만들지 않는다(ConnectionNotice 와
-  //   동형). 구독 콜백은 등록 즉시 현재 상태로 1회 발화하므로 초기값 동기화가 따로 필요 없다.
+  // ADR-0148 결정 1 / ADR-0149 결정 4: 연결이 끊긴 것도 "타겟한 에이전트가 지금 없다" 로 같게 본다(사용자
+  //   결정). 기존 연결 상태 표면(agentClient)을 **읽기만** 한다 — 새 전역 핸들·새 스토어를 만들지 않는다
+  //   (ConnectionNotice 와 동형). 구독 콜백은 등록 즉시 현재 상태로 1회 발화하므로 초기값 동기화 불요.
   const [connected, setConnected] = useState(() => agentClient.connectionState === 'connected')
   useEffect(() => agentClient.onConnectionStateChange((s) => setConnected(s === 'connected')), [])
-  const agentUnavailable = agentGone || !connected
+  // 구독 국면을 함께 본다 — 소켓은 섰는데 명부에 그 에이전트가 없는 구간('detached')과 재요청 사다리를
+  //   소진한 구간('error')이 여기 든다(연결 상태만 보면 둘 다 "정상"으로 읽혀 죽은 슬롯이 살아 있는 척한다).
+  const subscriptionDown = phase === 'detached' || phase === 'error'
+  const agentUnavailable = agentGone || !connected || subscriptionDown
 
   // ★정체성 라벨(§ user request)★: json 모드는 터미널의 claude 웰컴 배너 같은 "어느 에이전트인지" 신호가
   //   없다. 우측 상단에 작은 라벨을 오버랩해 이름만 표시한다(아래 render — 줄을 차지하지 않음). 표시명은
@@ -130,11 +134,13 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     setAwaiting(false) // 스트리밍 힌트 stale 방지
     // ADR-0145: 복원 완료 표시도 여기서 내린다 — 안 내리면 이전 세션의 완료 상태를 물려받아 목록이 빈
     //   복원 구간에 빈 상태가 떴다가 대화로 바뀌는 깜빡임이 되살아난다.
-    // ★정체성 변경(viewId·agentId·epoch)은 key remount 가 처리한다★ — 이 자리의 초기화가 실제로 일 하는
-    //   경우는 StrictMode 이중 마운트처럼 **같은 인스턴스에서 effect 가 다시 도는** 경로뿐이다(누산기 ref 는
-    //   그 사이 살아남는다). 그래도 남겨 둔다 — key 가 사라지면 이게 유일한 방어선이다.
+    // ★정체성 변경(viewId·agentId)은 key remount 가 처리한다★ — 이 자리의 초기화가 실제로 일 하는 경우는
+    //   StrictMode 이중 마운트처럼 **같은 인스턴스에서 effect 가 다시 도는** 경로뿐이다(누산기 ref 는 그
+    //   사이 살아남는다). 그래도 남겨 둔다 — key 가 사라지면 이게 유일한 방어선이다.
+    //   ★같은 에이전트의 재spawn 은 여기로 오지 않는다★ — 그건 아래 비우기 콜백(onReset)이 받는다.
     setReplayDone(false)
     setHasSent(false)
+    setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
 
     let sub: OutputSubscription | null = null
     let cancelled = false
@@ -160,13 +166,36 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
           setTurnDone(acc.isTurnDone())
           setAwaiting(false) // 이후 표시는 turnDone 이 주도
         },
-        // ADR-0145: replay 상태 콜백 — 'live' 는 데몬이 복원 끝에 넣은 표식을 클라가 소비해 버퍼를 비운
+        // ADR-0145: replay 국면 콜백 — 'live' 는 데몬이 복원 끝에 넣은 표식을 클라가 소비해 버퍼를 비운
         //   시점이다(protocolClient.flushToLive). 이력이 0건인 새 에이전트에도 같은 신호가 오므로
         //   "복원 끝 + 0건"이 정확히 갈린다. 'buffering'(복원 중) · 'error'(replay 재요청 소진)에서는
         //   내려 둔다 — 둘 다 빈 상태를 그리면 안 되는 구간이다(복원 중 깜빡임 / 실패는 현행 빈 화면 유지).
         (state) => {
           if (cancelled) return
           setReplayDone(state === 'live')
+          setPhase(state)
+        },
+        // 비우기 의무·onReset 필수 전달의 근거는 TerminalSlot 동형(여기선 누산기까지 되돌린다).
+        // ★전송 흔적도 함께 내린다★: 이 콜백은 **다른 화신**의 이력이 지금부터 온다는 뜻이라, 앞서 나간
+        //   전송은 이미 사라진 화신이 받았고 그 답은 영영 오지 않는다. 남겨 두면 대기 표시(awaiting)가
+        //   고착되고, 이력 0건인 새 화신에 첫 실행 화면(마스코트)이 안 떠 "빈 슬롯인데 대화 중" 으로 보인다.
+        //   ★같은 화신 이어보기에는 이 콜백이 오지 않는다★ — 그 구간의 대기 표시는 그대로 유지된다.
+        // ★replayDone 은 내리지 않는다★: 이 콜백은 새 화신의 replay 가 **도착한** 자리라 바로 뒤 같은 틱에
+        //   'live' 가 따라온다. 복원 중 구간을 여는 것은 그보다 앞선 'buffering' 통지다(ADR-0145).
+        () => {
+          if (cancelled) return
+          acc.reset()
+          setItems([])
+          setTurnDone(false)
+          setAwaiting(false)
+          setHasSent(false)
+          sendOkRef.current = false
+          // ★날아가던 전송을 순번으로 무효화한다★: 앞 화신에 보낸 전송은 여기서 흔적을 내려도 promise
+          //   자체는 살아 있어 나중에 결말이 온다. 순번을 올려 두지 않으면 그 뒤늦은 성공이 새 화신의
+          //   sendOkRef 를 세우고("이 인스턴스에서 나간 전송이 있다"), 이후 실전 전송이 실패해도 첫 실행
+          //   화면으로 돌아가지 못한다 — 아무것도 받지 못한 새 화신이 대화 중으로 남는다.
+          sendSeqRef.current++
+          lastSeq.current = -1
         },
       )
       .then((handle) => {
@@ -183,8 +212,8 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
       cancelled = true
       sub?.unsubscribe()
     }
-    // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). epoch = 재spawn 재구독 트리거.
-  }, [viewId, agentId, epoch])
+    // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). ★화신은 넣지 않는다 — 근거는 위 key 주석.★
+  }, [viewId, agentId])
 
   // ★scrollRef = Radix Viewport(ScrollArea seam 이 forward)★:
   //   Radix ScrollArea 의 실제 스크롤 엘리먼트는 Root 가 아니라 Viewport 다(ADR-0053). auto-scroll 이
@@ -199,7 +228,10 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     //   claude 유저 JSON 라인으로 감싸므로 여기서 개행 추가·래핑 금지(raw 텍스트 바이트만).
     // ★전송 게이트는 turnDone 을 검사하지 않는다 — 의도된 동작(ADR-0044 메커니즘 A: 스트리밍 중
     //   mid-turn 가이던스 주입 허용)★. 여기에 턴 잠금(스트리밍 중 전송 차단)을 넣지 말 것.
-    if (!input.trim() || agentGone) return
+    // ★막는 조건 = 막을 올리는 조건(agentUnavailable)★: 막은 pointer-events-none 이라 조작을 가리지
+    //   않고, disabled 도 프로그램적 키 이벤트를 막지 못한다 — 종료만 보면 연결이 끊긴 슬롯에서 전송이
+    //   나가 실패하고, 그 실패는 대기 표시만 흔들 뿐 사용자에겐 무반응으로 보인다.
+    if (!input.trim() || agentUnavailable) return
     // FIX 5a: 가드도 trim 으로 판정하므로 실제 전송도 trim 일관.
     const text = input.trim()
     setInput('')
@@ -211,11 +243,15 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
     //   보내지 못한 슬롯이 첫 실행 화면으로 못 돌아간다. 실패 경로에서 둘 다 되돌린다(파생 표현값만 교정 —
     //   WIRE 불변, ADR-0044/45/46).
     // ★단 최신 전송의 실패만 되돌린다★: 이 catch 는 어느 전송의 실패인지 스스로 모른다. A→B 로 보낸 뒤
-    //   A 가 뒤늦게 reject 되면, 가드가 없으면 진행 중인 B 의 대기 표시를 지운다. 재구독을 건너온 실패는
-    //   key remount 로 이미 옛 인스턴스에 떨어지므로(위 RichSlot) 여기서는 같은 인스턴스 안 순번만 본다.
+    //   A 가 뒤늦게 reject 되면, 가드가 없으면 진행 중인 B 의 대기 표시를 지운다. 화신이 갈린 뒤 도착한
+    //   실패도 같은 순번 가드가 흡수한다 — 비우기 콜백이 순번을 올려 두므로 그보다 앞선 전송은 결말이
+    //   성공이든 실패든 어긋난다(재spawn 은 인스턴스를 갈지 않아 그 결말이 같은 인스턴스로 떨어진다).
     void agentClient
       .writeStdin(agentId, new TextEncoder().encode(text))
       .then(() => {
+        // 성공도 실패와 같은 순번 가드를 지난다 — 비우기가 지나간 뒤 도착한 성공은 사라진 화신의 것이라
+        //   "이 화신에서 나간 전송" 으로 세면 안 된다(둘 중 하나만 걸면 그 사이 창이 남는다).
+        if (sendSeqRef.current !== token) return
         sendOkRef.current = true
       })
       .catch((err) => {
@@ -314,6 +350,9 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
             }
           }}
           // 우선순위 = 종료 > 빈 상태 > 하단. 종료 표시가 먼저다(어느 배치든 종료면 그 사실이 이긴다).
+          // ★비활성(disabled)은 이보다 넓고 문구는 종료만 말한다★: 연결 끊김·구독 정지에 "종료됨" 을
+          //   적으면 판정이 흔들리는 구간에 단정을 남기게 되고, 그건 막이 문구를 뺀 이유와 어긋난다
+          //   (SlotUnavailableVeil 헤더).
           placeholder={
             agentGone
               ? t('agent.terminatedPlaceholder')
@@ -321,7 +360,7 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
                 ? t('agent.emptyInputPlaceholder')
                 : t('agent.inputPlaceholder')
           }
-          disabled={agentGone}
+          disabled={agentUnavailable}
           rows={showEmpty ? 3 : 2}
           // 빈 상태만 둥근 모서리에 조금 크게(ADR-0145 §5) — 하단 배치는 기존 고대비 바 그대로.
           // 하단 좌우 여백은 대화 본문(ChatRow px-4)과 들여쓰기를 크게 어긋내지 않는 선으로 잡고 세로
@@ -334,22 +373,10 @@ function LiveRichSlot({ viewId, agentId, epoch }: { viewId: string; agentId: str
         />
       </div>
 
-      {/* ADR-0146: 타겟한 에이전트가 지금 없을 때(프로세스 종료 · 연결 끊김 — 둘을 같게 본다) 슬롯을
-          죽인다. ★화면 내용은 지우지 않는다★ — 대화든 첫 실행 화면이든 그 시점 모습을 그대로 두고
-          배경색 반투명 막으로 덮어 흐리게 만든 뒤 가운데에 심볼 하나만 얹는다(문구·배너 금지 — 정보를
-          하드하게 남기지 않는다는 사용자 지시). ★ADR-0162 의 「사유 한 줄」도 그래서 여기 없다★ — 그 줄은
-          문구를 쓸 수 있는 TerminalSlot 종료 화면이 진다. 마지막 자식으로 두는 이유 = 앞 자식들의 인덱스를 밀지
-          않아야 입력창이 remount 되지 않는다(위 textarea 주석). pointer-events-none 으로 아래 조작을
-          막지 않는다(입력창 비활성은 기존 disabled 가 담당). */}
-      {agentUnavailable && (
-        <div
-          data-rich-dead="1"
-          aria-hidden
-          className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70"
-        >
-          <PowerOff className="size-10 text-muted" />
-        </div>
-      )}
+      {/* ADR-0148: 타겟한 에이전트가 지금 없을 때(프로세스 종료 · 연결 끊김 · 구독이 출력을 못 내는 상태 —
+          셋을 같게 본다) 슬롯을 죽인다. 모습은 세 슬롯 공용(SlotUnavailableVeil). 마지막 자식으로 두는
+          이유 = 앞 자식들의 인덱스를 밀지 않아야 입력창이 remount 되지 않는다(위 textarea 주석). */}
+      {agentUnavailable && <SlotUnavailableVeil phase={phase} />}
     </div>
   )
 }

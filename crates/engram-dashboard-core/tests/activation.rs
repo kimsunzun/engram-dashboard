@@ -186,19 +186,6 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         run_count(&count)
     );
 
-    // 여기 epoch 0 은 "다음 spawn 도 0" 이라는 뜻이 아니다 — 그 회귀는
-    //   `manager::tests::a_fresh_respawn_of_a_reaped_agent_never_reuses_the_prior_epoch` 가 본다.
-    assert_eq!(
-        profiles.get(id).map(|p| p.epoch),
-        Some(0),
-        "최초 화신은 올릴 앞선 epoch 가 없다(ADR-0007 은 *교체*에만 건다)"
-    );
-    assert_eq!(
-        profiles.get(id).map(|p| p.had_session),
-        Some(true),
-        "화신이 한 번 떠 봤다는 사실이 찍혀야 다음 spawn 이 교체로 판정된다"
-    );
-
     assert_eq!(
         profiles.get(id).and_then(|p| p.claude_session_id),
         sid_before,
@@ -286,7 +273,7 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     assert_eq!(reactivated.id, id, "재활성화는 같은 에이전트를 가리켜야 함");
     assert_eq!(
         reactivated.epoch, epoch_after_first,
-        "재활성화로 epoch 가 bump 되면 안 됨(맵 교체=fresh 없음, a4aac1a 회귀 신호)"
+        "산 세션 재활성화는 화신 표식을 갈지 않는다(맵 교체=fresh 없음, a4aac1a 회귀 신호)"
     );
     assert!(
         !matches!(
@@ -300,7 +287,7 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         reg_epoch_before,
-        "재활성화로 레지스트리 epoch 가 bump 되면 안 됨(맵 교체=fresh 없음)"
+        "산 세션 재활성화는 레지스트리 표식도 갈지 않는다(맵 교체=fresh 없음)"
     );
 
     // 300ms 는 비동기 reaper 가 뒤늦게 옛 세션을 수거하는 회귀를 잡기 위한 창이다.
@@ -329,11 +316,56 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0084 회귀 가드★ — 시체를 같은 슬롯에서 재활성화하면 epoch 가 엄격히 증가한다.
+/// ★ADR-0113 배선 가드★ — spawn 이 턴 관측 표에 자기 화신을 **등록**한다.
+///
+/// 이 등록이 그 화신의 첫 출력 신호보다 먼저라는 것이 표의 "표식이 다르면 버린다" 규칙을 안전하게 만든다
+/// (`turn::TurnObservations::register`). 배선이 빠지면 앞 화신의 항목이 남아 있는 동안 새 화신의 신호가
+/// 전부 버려지고, 그 에이전트는 미관측(=턴 아님)으로 답해 턴 중에 우편이 들어간다.
+/// ★셸을 쓰는 것이 판별력의 근거다★: 셸 백엔드는 턴 신호를 하나도 내지 않으므로(분류자 침묵), 여기 항목이
+/// 있다면 그건 오직 등록이 만든 것이다.
+/// ★안 재는 것(정직 범위)★: 등록이 **첫 신호보다 먼저**라는 순서 자체는 여기서 못 잰다 — 그걸 뒤집으려면
+/// 앞 화신의 `finish` 를 막아야 하는데 이 하네스엔 그 손잡이가 없다. 순서는 호출 지점(sessions 맵 insert
+/// 전)이 구조적으로 보장한다.
+#[test]
+fn spawn_registers_the_incarnation_in_the_turn_table() {
+    let (manager, _sink, profiles) = make_manager("turn-register");
+
+    let (profile, batch, count) = long_lived_profile("turn-register");
+    let id = profile.id;
+    profiles.upsert(profile.clone());
+
+    let info = manager
+        .activate_profile(&profile, SpawnMode::Fresh)
+        .expect("활성화는 Ok");
+    assert!(
+        manager.turns().get(id, info.epoch).is_some(),
+        "spawn 이 이 화신의 자리를 표에 잡아야 한다"
+    );
+    assert!(
+        !manager.turns().is_in_turn(id, info.epoch),
+        "등록만으로는 턴 중이 아니다(신호는 라이브 emit 에서만 온다)"
+    );
+
+    manager.kill_agent(id).expect("kill_agent failed");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            manager.turns().get(id, info.epoch).is_none()
+        }),
+        "종료가 자기 항목을 거둬야(안 거두면 죽은 에이전트 앞 파킹이 안 풀린다)"
+    );
+
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// ★ADR-0084 회귀 가드★ — 시체를 같은 슬롯에서 재활성화하면 화신 표식이 달라진다.
 ///
 /// 셸은 needs_session=false 라 `--resume` 플래그 조립까지는 보지 않는다 — 그건
 ///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 몫이고,
-///   이 테스트가 겨냥하는 "재활성화 = 맵 교체 = epoch++" 는 backend 무관하게 성립한다.
+///   이 테스트가 겨냥하는 "재활성화 = 맵 교체 = 새 표식" 은 backend 무관하게 성립한다.
+///   ★재는 것은 **다름**뿐이다 — 커진다가 아니다★: 표식은 화신마다 뽑는 난수라 대소에 뜻이 없다
+///   (`ProfileRegistry::epoch_for_spawn`). 단언을 `assert!(new > old)` 로 조이면 절반의 확률로 붉어진다.
 #[test]
 fn reactivate_after_kill_bumps_epoch() {
     let (manager, _sink, profiles) = make_manager("reactivate-epoch-bump");
@@ -346,10 +378,6 @@ fn reactivate_after_kill_bumps_epoch() {
         .activate_profile(&profile, SpawnMode::Fresh)
         .expect("최초 활성화는 Ok(살아있는 세션)여야 함");
     let epoch_e = first.epoch;
-    assert_eq!(
-        epoch_e, 0,
-        "신규 프로필 첫 spawn(Fresh)은 epoch=0(재활성화 아님 → bump 없음)"
-    );
     assert!(
         wait_until(Duration::from_secs(3), || {
             manager.list_agents().iter().any(|a| a.id == id)
@@ -367,23 +395,21 @@ fn reactivate_after_kill_bumps_epoch() {
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(epoch_e),
-        "kill 만으로는 epoch 가 오르지 않는다(재활성화 respawn 이 bump 의 주체)"
+        "kill 만으로는 표식이 갈리지 않는다(재활성화 respawn 이 발급의 주체)"
     );
 
     let reactivated = manager
         .activate_profile(&profile, SpawnMode::Resume)
         .expect("재활성화가 resume 경로로 Ok(살아있는 세션)여야 함(셸은 조기종료 안 함)");
 
-    assert!(
-        reactivated.epoch > epoch_e,
-        "ADR-0084: 재활성화 세션 epoch({}) 가 죽은 세션 epoch({}) 보다 커야 함(맵 교체=epoch++)",
-        reactivated.epoch,
-        epoch_e
+    assert_ne!(
+        reactivated.epoch, epoch_e,
+        "ADR-0084: 재활성화 세션의 화신 표식이 죽은 세션의 것과 달라야 함(맵 교체 = 새 화신)"
     );
     assert_eq!(
         profiles.get(id).map(|p| p.epoch),
         Some(reactivated.epoch),
-        "재활성화 후 레지스트리 epoch 와 세션 epoch 가 일치해야 함(bump 가 spawn_agent 읽기 전에 반영)"
+        "재활성화 후 레지스트리 표식과 세션 표식이 일치해야 함(발급이 spawn_agent 읽기 전에 반영)"
     );
 
     let _ = manager.kill_agent(id);
@@ -469,7 +495,7 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let _ = std::fs::remove_file(&batch);
 }
 
-// ── 마지막 실패 기록(ADR-0161) ────────────────────────────────────────────────────
+// ── 마지막 실패 기록(ADR-0169) ────────────────────────────────────────────────────
 
 /// 이어받기가 조기 종료로 실패하면 그 자리에서 종류가 붙는다 — 사전 판정 없이 관측만으로.
 ///

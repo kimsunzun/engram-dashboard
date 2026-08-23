@@ -4,13 +4,13 @@
 //!
 //! ★Tauri 의존 0★: 전부 `AppHandle`·`State<..>` 를 인자에서 걷어낸 자유 함수다 — 창 없이 단독 호출·
 //! 테스트가 서야 하기 때문이다(TRD S20 §7 「셸 적용 서비스」). 외부 세계(프론트 알림·OS 창·데몬 왕복·
-//! 구독 표)에는 아래 포트 4개로만 닿는다. `#[tauri::command]` 껍데기는 `commands/layout.rs`.
+//! 구독 표)에는 아래 포트 5개로만 닿는다. `#[tauri::command]` 껍데기는 `commands/layout.rs`.
 //!
 //! ## ★락 규율★
 //! 쓰기 함수는 ViewManager 락을 **짧게 잡아 변형 + 필요한 데이터(스냅샷·탭목록)를 복사**하고 **락을
 //! 드롭한 뒤** 알린다. 락 드롭은 스코프(`{ ... }`)로 강제한다. 락 보유 중 부르는 포트는
-//! `SubscriptionSync` 하나뿐(동기·비블로킹 계약)이고 `LayoutEvents`·`WindowHost`·`AgentSpawner` 는 항상
-//! 락 밖이다. **두 규칙의 근거가 다르다:**
+//! `SubscriptionSync` 하나뿐(동기·비블로킹 계약)이고 나머지 넷(`LayoutEvents`·`WindowHost`·`LabelSource`·
+//! `AgentSpawner`)은 항상 락 밖이다. **두 규칙의 근거가 다르다:**
 //! - **락 보유 중 외부 호출 0**(알림·OS 창·데몬 왕복·await) = ADR-0006 의 원칙(「lock 보유 중 외부 호출
 //!   금지」)을 이 락에 적용한 것. ★그 ADR 본문은 코어의 sessions/status 락만 다룬다 — 레이아웃 락이나
 //!   구독 델타 조항을 거기서 찾지 말 것.★
@@ -79,23 +79,50 @@ pub trait LayoutEvents: Send + Sync {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload);
 }
 
-/// OS 창 호스트 포트. ★둘 다 락 밖에서만 불린다 — 락 안으로 옮기면 그 자리에서 교착이다★.
+/// OS 창 호스트 포트. ★셋 다 락 밖에서만 불린다 — 락 안으로 옮기면 그 자리에서 교착이다★.
 ///
 /// - `open`: 창 빌드가 이벤트 루프·락을 요구한다.
 /// - `close`: 구현이 OS 창을 destroy 하면 그 창의 `Destroyed` 이벤트 처리기가 **같은 ViewManager 락**을
 ///   다시 잡는다(`popout::destroy_window` → `Destroyed` → `cleanup_popup_window` → `state.0.lock()`).
 ///   워커 스레드가 가드를 쥔 채 부르면 destroy 는 이벤트 루프를 기다리고 이벤트 루프는 그 가드를
 ///   기다린다. 이미 닫힌 label 이면 no-op(호출자가 존재를 확인하지 않는다).
+/// - `is_open`: **OS 창**이 살아 있나 — 모델(`ViewManager`)이 아니다. 둘은 갈릴 수 있다(창이 사라졌으나
+///   `Destroyed` 정리가 아직 모델 엔트리를 안 지운 순간) — 그 순간을 거르는 것은 이 답뿐이고,
+///   `insert_tab_into` 의 모델 재검증은 그 상태를 통과시킨다.
+///
+/// ★알려진 미확인 — pop-out 이 창 확인과 모델 변형 사이에서 락을 한 번 놓는다★. 그 틈에 사용자가 대상
+/// 창을 닫으면 **어느 검사도 막지 못하고**, 두 갈래의 뒷일이 다르다.
+/// - **기존 창 타깃**(이 답이 `true` 를 준 뒤 닫힘): 두 검사를 다 통과해 탭이 들어가고, 뒤늦게 도착한
+///   `Destroyed` 의 `cleanup_window_core` 가 그 창을 모델에서 지우며 방금 넣은 탭까지 함께 지운다. 소스
+///   슬롯은 이미 닫힌 뒤라 콘텐츠가 어느 화면에도 없다. **모델은 깨끗하게 남는다**(잔해 없음).
+/// - **새 창 타깃**(`is_open` 을 아예 안 거치는 갈래 — `move_slot_to_window` 의 phase B): 창을 만드는 것이
+///   phase C 라 `Destroyed` 가 도착한 시점엔 그 label 이 `mgr.windows` 에 아직 없다 →
+///   `cleanup_window_core` 가 `contains_key` 가드에서 no-op 으로 돌아선다. 그 뒤 phase C 가 **없는 OS 창**
+///   앞으로 창·탭을 만들고 소스 슬롯을 닫는다. ★`Destroyed` 는 한 번뿐이라 뒤에 치우는 것이 없다★ —
+///   화면 없는 창·탭·콘텐츠가 모델에 영구히 남고, `window.list` 로 label 을 찾아 `window.close` 를 부르는
+///   길 말고는 회수 경로가 없다.
+///
+/// 둘 다 「OS 창 닫힘」과 「모델 변형」의 조정 방식을 정해야 없어지고, 그건 이 포트의 결정이 아니다
+/// (미해결 — 사용자 판단 대기).
 pub trait WindowHost: Send + Sync {
     fn open(&self, label: &str) -> Result<(), String>;
     fn close(&self, label: &str);
+    fn is_open(&self, label: &str) -> bool;
 }
 
 /// 새 창 label 발급 포트. ★단조★ — 닫힌 label 을 재사용하면 그 label 의 창을 다시 만들 수 없다.
 /// `WindowHost` 와 가른 이유: 창을 닫기만 하는 경로(`close_tab`·`close_window`)는 발급기를 손에 쥐지
 /// 않는다 — 포트를 합치면 그 경로가 안 쓰는 의존을 끌고 와야 한다.
+///
+/// ★둘 다 락 밖에서만 불린다★(형제 포트와 같은 규율 — 「락 규율」). 오늘 구현이 순수하다는 것에 기대지
+/// 말 것: 상태를 만지는 구현이 락 안에서 불리면 `Destroyed → cleanup_popup_window → state.0.lock()` 와
+/// 교착한다.
 pub trait LabelSource: Send + Sync {
     fn next_label(&self) -> String;
+    /// 그 label 로 연 창의 첫 탭에 붙일 이름. ★label 형식을 아는 쪽이 짓는다★ — 적용 서비스는 label 이
+    /// 어떤 모양인지 모르고(그 prefix 는 Tauri 쪽 상수다), 그걸 여기서 다시 파싱하면 형식이 두 곳에 산다.
+    /// 인자는 **이 발급기가 낸 label** 을 전제하고, 그 밖의 문자열엔 label 을 그대로 쓴 이름을 준다.
+    fn tab_name(&self, label: &str) -> String;
 }
 
 /// 에이전트 스폰 포트 — 성공 시 agent id. ★락 미보유 상태에서 await 된다★(데몬 왕복).
@@ -133,7 +160,7 @@ fn notify(
     }
 }
 
-// ── 쓰기 12종 ────────────────────────────────────────────────────────────────
+// ── 쓰기 13종 ────────────────────────────────────────────────────────────────
 
 pub fn create_tab(
     state: &LayoutState,
@@ -432,7 +459,7 @@ pub async fn spawn_into(
         let norm = b.trim();
         if !norm.is_empty() {
             return Err(format!(
-                "backend '{b}' 선택은 아직 spawn_into 로 지원되지 않음 — 데몬 SpawnByCwd 는 항상 기본 백엔드(현재 셸)를 스폰하며 backend 선택 wire 가 없다(데몬 spawn-protocol 확장 필요, 후속). backend 를 생략하면 기본 백엔드로 스폰된다. 스폰 안 함."
+                "backend '{b}' 선택은 아직 spawn_into 로 지원되지 않음 — 데몬 SpawnByCwd 는 항상 기본 백엔드(현재 claude, StreamJson 출력)를 스폰하며 backend 선택 wire 가 없다(데몬 spawn-protocol 확장 필요, 후속). backend 를 생략하면 기본 백엔드로 스폰된다. 스폰 안 함."
             ));
         }
     }
@@ -490,6 +517,159 @@ pub async fn spawn_into(
 
     tracing::info!(agent = %agent_id, window = %window, view = %view_id, "spawn_into 완료(스폰+배치)");
     Ok(agent_id)
+}
+
+/// 슬롯 분리(pop-out)의 결말 — 콘텐츠가 내려앉은 창 label + 그것을 실은 **새 탭**의 View id.
+///
+/// 필드 이름은 wire 계약이다 — 프론트(`viewStore.moveSlotToWindow`)가 `{window, tab}` 으로 읽는다.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SlotMove {
+    pub window: String,
+    pub tab: Uuid,
+}
+
+// ★슬롯을 다른 창의 새 탭으로 MOVE(mirror 아님)★: 원본 슬롯의 **콘텐츠(SlotContent)** 를 새 탭으로 옮기고
+// 원본 슬롯을 원본 View 에서 제거한다. agent 프로세스는 안 건드린다 — 표시 표면만 이동한다.
+// `to_window` 미지정 → 새 창(label 은 발급기가 준다) · 지정 → 그 기존 창의 새 탭.
+//
+// ★ADR-0064 — 모든 슬롯 콘텐츠★: agent 슬롯뿐 아니라 agent_list/preset_palette 도 옮긴다. 비-에이전트
+// 콘텐츠는 백엔드 출력 구독이 없어 재동기가 자연히 no-op 이다(라우팅은 Agent 슬롯만 훑는다). `Empty` 만
+// 거부한다(메뉴가 empty 를 숨기지만 코어도 방어).
+//
+// ## ★2-phase 롤백 + 기존창 타깃 orphan 방지(G4)★
+// 락이 풀린 사이 대상 창이 소멸/동시 close 될 수 있어 **탭 삽입을 phase C 로 이연**하고, 거기서 대상 창을
+// 다시 확인한 뒤에만 삽입한다(부재면 롤백). 소스 detach 는 still-ours 가드로 2차 락에서 close.
+// ADR-0057
+// ADR-0064
+pub fn move_slot_to_window(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    host: &dyn WindowHost,
+    labels: &dyn LabelSource,
+    view_id: Uuid,
+    slot_id: Uuid,
+    to_window: Option<String>,
+) -> Result<SlotMove, String> {
+    let is_new_window = to_window.is_none();
+    let target_label = to_window.unwrap_or_else(|| labels.next_label());
+    // ★탭 이름은 락을 잡기 **전에** 짓는다★ — `target_label` 에만 의존해 임계구역 안에 둘 이유가 없는데,
+    //   두면 `LabelSource` 가 「락 안에서 불리는 포트」가 되어 상태를 만지는 다음 구현이 이 락과
+    //   `Destroyed → cleanup_popup_window → state.0.lock()` 사이에서 교착한다. 기존 창 타깃은 label 형식과
+    //   무관한 고정 이름이라 발급기를 아예 안 부른다.
+    let tab_name = if is_new_window {
+        labels.tab_name(&target_label)
+    } else {
+        "Tab".to_string()
+    };
+
+    // ── phase A(락): 소스 콘텐츠 → 임시 View(아직 어느 창 tabs 에도 안 넣음 — orphan 방지) ──────────
+    // ★SlotContent 를 락 밖으로 반출★(MOVE 원자성): 창 build 로 락이 풀린 사이 원본 슬롯이 다른 콘텐츠로
+    //   재배정될 수 있다 — 2차 락에서 close 전에 이 값과 재조회 결과를 대조해 "옮긴 그 콘텐츠 그대로일 때만"
+    //   원본을 닫는다(엉뚱한 콘텐츠 삭제 방지).
+    //
+    // ★owner-less tmp_view 가 phase B(언락) 동안 views 에 있어도 안전한 이유★: 이 View 는 `views` 에는 있으나
+    //   `view_owner`/`windows[*].tabs` 어디에도 없다(「모든 View 는 owner 1개」를 phase B 동안 일시 위배).
+    //   그럼에도 안전한 근거 넷: ① 이 view id 는 이 op 만 손에 쥔다 ② 어느 창 tabs 에도 없어 라우팅 순회
+    //   (창→tabs walk)에 안 걸린다 ③ 소스 콘텐츠는 소스 슬롯이 아직 살아 있어 계속 보인다 ④ 종점은 항상
+    //   phase C attach(owner 부여) 또는 롤백(`drop_detached_view`) 둘 중 하나다.
+    //   ⚠️ 「views 전체를 순회하며 owner 를 요구/가정」하는 코드를 나중에 넣을 때는 이 일시 owner-less View 를
+    //   전제로 깔아야 한다(무조건 owner 있음 가정 = 이 op 중 패닉).
+    let (tmp_view, src_content) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        let detached = mgr
+            .prepare_detached_view(view_id, slot_id, tab_name)
+            .map_err(|_| "빈 슬롯은 다른 창으로 옮길 수 없음(콘텐츠 없음)".to_string())?;
+        subs.resync(&mgr);
+        detached
+    }; // ← 락 드롭
+
+    // ── phase B(락 밖): 새 창 타깃이면 웹뷰 빌드 / 기존 창 타깃이면 존재 확인만 ─────────────────
+    if is_new_window {
+        if let Err(e) = host.open(&target_label) {
+            rollback_detached(state, subs, tmp_view);
+            return Err(e);
+        }
+    } else if !host.is_open(&target_label) {
+        rollback_detached(state, subs, tmp_view);
+        return Err(format!("대상 창 없음: {target_label}"));
+    }
+
+    // ── phase C(락): 임시 View 를 타깃 창 탭으로 삽입(★기존창 재검증★) + 소스 슬롯 close ───────────
+    let (src_tabs, tgt_tabs, src_layout) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+
+        let inserted = if is_new_window {
+            mgr.attach_view_as_new_window(&target_label, tmp_view)
+        } else {
+            mgr.insert_tab_into(&target_label, tmp_view)
+        };
+        if let Err(e) = inserted {
+            // ★이 롤백은 실질적으로 기존 창 `insert_tab_into` 실패(phase B 언락 중 대상 창 소멸)만 가드한다★:
+            //   새 창 경로는 fresh label(단조 발급 — 재사용 충돌 없음) + 방금 만든 tmp_view 라 실패 불가다.
+            //   그래도 새 창일 때 close 를 남기는 건 방어다(미래에 attach 가 실패 가능해지면 유령 창이 남는다).
+            mgr.drop_detached_view(tmp_view);
+            subs.resync(&mgr);
+            drop(mgr);
+            if is_new_window {
+                host.close(&target_label);
+            }
+            return Err(format!("탭 삽입 실패(롤백): {e}"));
+        }
+
+        // ★MOVE→COPY 열화는 의도된 best-effort★: phase B(언락) 동안 소스 슬롯이 다른 콘텐츠로 재배정되면
+        //   still_ours=false → close 스킵. 즉 "재배정된 엉뚱한 콘텐츠를 지우지 않는 것"이 최우선이고, 그 대가로
+        //   원래 콘텐츠가 타깃 탭 + 소스 슬롯 양쪽에 남는다. 이 중복은 같은 콘텐츠 두 View 를 허용하는 모델
+        //   불변식으로 무해하므로(진도 독립 — ADR-0046) 엄격 롤백 대신 이대로 둔다.
+        // ★load-bearing★: 소스 View 자체가 gap 중 소멸(탭/창 닫힘)했으면 `slot_content` 가 `Err` 를 준다 →
+        //   아래 대조가 실패 → close 스킵. 이 `Err→스킵` 이 이미-사라진 소스를 다시 close 하려다 나는
+        //   오작동/패닉을 막는다(수정 금지).
+        let still_ours = matches!(
+            mgr.slot_content(view_id, slot_id),
+            Ok(ref c) if *c == src_content
+        );
+        if still_ours {
+            let _ = mgr.close_slot(view_id, slot_id);
+        } else {
+            tracing::warn!(
+                view = %view_id, slot = %slot_id,
+                "원본 슬롯이 창 생성 중 재배정/제거됨 — MOVE 의 close 스킵(대상 탭은 그대로 유지)"
+            );
+        }
+
+        let src_tabs = owner_tabs(&mgr, view_id);
+        let tgt_tabs = tabs_payload(&mgr, &target_label);
+        let src_layout = mgr.snapshot(view_id).ok();
+        subs.resync(&mgr);
+        (src_tabs, tgt_tabs, src_layout)
+    }; // ← 락 드롭
+
+    if let Some(snap) = src_layout {
+        events.layout_updated(&snap);
+    }
+    if let Some(tabs) = &src_tabs {
+        events.window_tabs_updated(tabs);
+    }
+    if let Some(tabs) = &tgt_tabs {
+        events.window_tabs_updated(tabs);
+    }
+
+    tracing::info!(window = %target_label, view = %tmp_view, "슬롯 MOVE 완료(detach)");
+    Ok(SlotMove {
+        window: target_label,
+        tab: tmp_view,
+    })
+}
+
+// phase A 임시 View 롤백(창 삽입 전이라 tabs 갱신 불필요). 소스 슬롯은 유지 — 사용자가 슬롯을 잃지 않는다.
+// 락을 못 잡으면(poison) 롤백을 포기한다: 여기서 터지면 이미 실패한 op 가 프로세스를 데려간다.
+fn rollback_detached(state: &LayoutState, subs: &dyn SubscriptionSync, tmp_view: Uuid) {
+    let Ok(mut mgr) = state.0.lock() else {
+        tracing::warn!("rollback_detached: lock poisoned — 롤백 스킵");
+        return;
+    };
+    mgr.drop_detached_view(tmp_view);
+    subs.resync(&mgr);
 }
 
 // ── read-only 4종 ────────────────────────────────────────────────────────────

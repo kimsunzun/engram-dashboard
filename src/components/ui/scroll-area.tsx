@@ -26,6 +26,15 @@ import * as RadixScrollArea from '@radix-ui/react-scroll-area'
 import { cn } from '@/lib/utils'
 import './scroll-area.css'
 
+/**
+ * 스크롤이 멈춘 뒤 스크롤바를 숨기기까지의 린거(lingering) — ADR-0053 요구 (4) "~0.5s 후 숨김".
+ *
+ * ★공개하는 이유 = 두 번째 구현체가 같은 값을 베끼지 않게★: xterm 은 이 컴포넌트로 감쌀 수 없어
+ *   가시성 규칙을 CSS + `nativeScrollActivity` 로 따로 구현하는데(ADR-0053 "예외 = xterm"), 숨김 지연을
+ *   그쪽에 숫자로 다시 적으면 한쪽만 바뀌어 두 표면의 룰이 조용히 갈린다. 여기가 단일 출처다.
+ */
+export const SCROLL_HIDE_DELAY_MS = 500
+
 export interface ScrollAreaProps {
   children: ReactNode
   className?: string
@@ -49,7 +58,7 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
       type="scroll"
       // ★scrollHideDelay★: 500ms 린거(lingering) — 스크롤을 끝낸 직후 바로 사라지면 어색하므로 잠깐
       //   남긴다(hover 표시 지연과 무관 — 구 CSS animation-delay 제거됨).
-      scrollHideDelay={500}
+      scrollHideDelay={SCROLL_HIDE_DELAY_MS}
       className={cn('relative overflow-hidden', className)}
       style={style}
       data-testid={rest['data-testid']}

@@ -45,7 +45,7 @@ export type AgentTreeNode = {
   displayName: string | null
   status: string
   /**
-   * ★status 와 별개 축★(ADR-0161): 매칭 프로필의 「마지막 실패」. running 노드도 들 수 있고, 그때는
+   * ★status 와 별개 축★(ADR-0169): 매칭 프로필의 「마지막 실패」. running 노드도 들 수 있고, 그때는
    * 「도는 중이 이긴다」로 화면에 안 뜬다(판정은 `statusGlyph.isFailureBlocked` 한 곳).
    * 프로필이 없는 ad-hoc running 노드는 항상 null.
    */
@@ -88,7 +88,7 @@ export function mergeTreeNodes(
     // ad-hoc(SpawnByCwd)은 프로필이 없을 수 있다 → 맵 미스 시 null(basename 파생, 기존 동작 불변).
     displayName: profileById.get(a.id)?.display_name ?? null,
     status: a.status.type,
-    // ADR-0161: AgentInfo wire 엔 없는 축이라 display_name 과 동형으로 매칭 프로필에서 이어받는다.
+    // ADR-0169: AgentInfo wire 엔 없는 축이라 display_name 과 동형으로 매칭 프로필에서 이어받는다.
     lastFailure: profileById.get(a.id)?.last_failure ?? null,
     kind: 'running' as const,
     canInterrupt: a.capabilities?.control?.interrupt ?? false,

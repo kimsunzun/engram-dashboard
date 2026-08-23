@@ -26,8 +26,8 @@ const CLAUDE_PROGRAM: &str = "claude";
 /// ★외부 프로그램의 출력이라 우리가 정한 값이 아니다★ — 실측: `--resume <없는 uuid>` 는 exit 1 과 함께
 ///   `No conversation found with session ID: …` 를 낸다(`docs/process/S9-session-restore/spike-results.md`).
 /// ★못 맞혀도 항목이 잠기지 않는다★: claude 가 문구를 바꾸면 분류가 「이어받기 직후 조기 종료」로
-///   떨어지고 그쪽은 재시도 가능이다(ADR-0161 fail-open).
-// ADR-0161
+///   떨어지고 그쪽은 재시도 가능이다(ADR-0169 fail-open).
+// ADR-0169
 const NO_CONVERSATION_MARKER: &str = "no conversation found";
 
 pub struct ClaudeBackend;

@@ -143,7 +143,7 @@ describe('statusGlyphColor (pure)', () => {
     expect(statusGlyphColor('???')).toBe('var(--text-muted)'))
 })
 
-// ── 마지막 실패가 기호를 갈아끼운다(ADR-0162) ────────────────────────────────
+// ── 마지막 실패가 기호를 갈아끼운다(ADR-0170) ────────────────────────────────
 // 기호를 하나 더 늘리지 않는다 — 상태 기호 자리를 금지 표식이 **대체**하고 색도 함께 갈린다.
 describe('statusGlyph/Color — 마지막 실패 축', () => {
   const reserved = 'Reserved'

@@ -9,8 +9,9 @@
 //!   소비할 뿐. ReapMsg 발행은 finalize 승자 경로 1회.
 //! - 락 순서(ADR-0006): sessions write lock 구간 = epoch 검증 + remove 만. ProfileRegistry
 //!   mutate(디스크 IO)·status_sink 통지는 lock 밖.
-//! - epoch(ADR-0007/0084): reap 전 epoch 일치 검증 → 재spawn 된 새 세션을 옛 done 이 오삭제 못 함.
-//!   같은 epoch-guard 를 apply_disposition 까지 확장(ADR-0084) → stale reap 이 재활성화(epoch bump)로
+//! - epoch(ADR-0007/0084): reap 전 화신 표식 **일치** 검증 → 재spawn 된 새 세션을 옛 done 이 오삭제 못 함.
+//!   대소가 아니라 일치다 — 표식은 화신마다 뽑은 난수라 순서에 뜻이 없다(`AgentProfile::epoch`).
+//!   같은 epoch-guard 를 apply_disposition 까지 확장(ADR-0084) → stale reap 이 재활성화(다른 표식)로
 //!   붙은 산 세션의 auto_restore 를 강등 못 함.
 //! - idempotency: sessions.remove() Some 승자 1명만 disposition·통지(같은 done 2회 와도 1회).
 //!
@@ -118,7 +119,7 @@ pub fn decide(msg: &ReapMsg) -> Disposition {
 /// ★ADR-0084 epoch-guard★: `reaped_epoch`(= ReapMsg.epoch = 죽은 세션이 spawn 될 때 읽은 프로필
 ///   epoch. session.epoch 과 동일 값)와 **현재 프로필 epoch 이 일치할 때만** auto_restore 를 내린다.
 ///   sessions.remove 후 이 lock-free disposition 사이에 재활성화가 `epoch_for_spawn`(manager.rs spawn
-///   갈래)로 프로필 epoch 를 올렸다면, `p.epoch != reaped_epoch` → 다운그레이드를 **건너뛴다**(그
+///   갈래)로 프로필에 **새 화신 표식**을 심었다면, `p.epoch != reaped_epoch` → 다운그레이드를 **건너뛴다**(그
 ///   사이 새로 붙은 산 세션을 stale reap 이 강등하지 못하게). sessions.remove 의 epoch-guard(ADR-0007)
 ///   와 같은 원리를 disposition 계층까지 확장한 것이다.
 /// ★lock 순서(ADR-0006)★: 비교를 **update_with 클로저 안**(프로필 락 보유 중)에서 한다 —

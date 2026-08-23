@@ -13,7 +13,7 @@
 //   잡아두므로(언마운트 ref-null 방어), 보임 *이전에* container 에 canvas 를 심고 그 canvas 의 getContext 를
 //   spy 해 잡힌 컨텍스트의 loseContext 호출과 순서를 검사한다.
 
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk } from '../../api/agentClient'
@@ -131,6 +131,12 @@ const captured = vi.hoisted(() => ({
   onChunk: null as ((c: OutputChunk) => void) | null,
   unsubscribe: null as ReturnType<typeof vi.fn> | null,
 }))
+// 연결 상태 표면 — 실물과 동형으로 구독자를 들고 있다가 전이 때 통지한다(등록 즉시 1회 통지 포함).
+//   테스트가 전이를 몰 수 있어야 "연결만 끊긴" 부재(에이전트는 명부에 살아 있는 상태)를 재현할 수 있다.
+const conn = vi.hoisted(() => ({
+  state: 'connected' as 'connected' | 'reconnecting' | 'down',
+  cbs: new Set<(s: string) => void>(),
+}))
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
     subscribeOutput: vi.fn(
@@ -143,19 +149,22 @@ vi.mock('../../api/clientFactory', () => ({
     ),
     writeStdin: vi.fn(async () => undefined),
     resizePty: vi.fn(async () => undefined),
-    connectionState: 'connected',
+    get connectionState() {
+      return conn.state
+    },
+    // 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    onConnectionStateChange: (cb: (s: string) => void) => {
+      conn.cbs.add(cb)
+      cb(conn.state)
+      return () => conn.cbs.delete(cb)
+    },
   },
   getAgentClient: vi.fn(),
 }))
 
 // ── agentStore stub — 슬롯이 종료 판정용으로 useAgentStore(s => s.agents) 를 조회. 빈 목록 = 살아있음. ──
 // agentsLoaded=false 기본 = 권위 명부 미수신 → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
-const agentStoreState = vi.hoisted(() => ({
-  agents: [] as unknown[],
-  agentsLoaded: false,
-  // ADR-0161: 「마지막 실패」는 프로필에만 있다 — 슬롯이 종료 화면의 사유 한 줄을 여기서 읽는다.
-  profiles: [] as unknown[],
-}))
+const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], agentsLoaded: false }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
@@ -208,7 +217,8 @@ beforeEach(() => {
   captured.unsubscribe = null
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
-  agentStoreState.profiles = []
+  conn.state = 'connected'
+  conn.cbs.clear()
   termState.onDataCb = null
   termState.loadAddon.mockReset()
   termState.refresh.mockClear()
@@ -356,47 +366,92 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
 //
 // 종료(kill)의 실제 결말은 reaper 가 세션을 수거하며 **명부에서 지우는** 것이다. status 로만 판정하면
 // 그 순간 부재 플래그가 풀려 죽은 에이전트로 입력이 나가고(거절은 조용히 삼켜져 무반응으로만 보인다)
-// 종료 오버레이도 사라진다.
+// 부재 막도 사라진다.
+//
+// ★막은 세 슬롯 공용이고 문구가 없다(ADR-0148 결정 4, 사용자 결정 2026-08-20)★ — 그래서 존재 판정은 텍스트가
+// 아니라 공용 마커로 한다.
+function veil(): HTMLElement | null {
+  return document.querySelector('[data-slot-dead="1"]')
+}
+
+/** 연결 상태 전이(실물 ProtocolClient 가 구독자 전원에게 통지하는 경로와 동형). */
+function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
+  act(() => {
+    conn.state = state
+    for (const cb of conn.cbs) cb(state)
+  })
+}
+
 describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
-  it('명부 수신 후 해석 안 되는 에이전트면 입력을 막고 종료 표시를 유지한다', async () => {
+  it('명부 수신 후 해석 안 되는 에이전트면 입력을 막고 부재 막을 유지한다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = []
     agentStoreState.agentsLoaded = true
 
-    render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    expect(screen.getByText('종료됨')).toBeTruthy()
+    expect(veil()).not.toBeNull()
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).not.toHaveBeenCalled()
   })
 
-  // ★live → 부재 전이를 실제로 태운다★: 처음부터 없는 상태로만 렌더하면 epoch prop 을 되돌려도 통과한다
-  //   (구독이 한 번밖에 안 걸리므로). 살아있는 채로 마운트해 구독·reset 을 소비한 뒤 수거를 재현한다.
+  // ★live → 부재 전이를 실제로 태운다★: 처음부터 없는 상태로만 렌더하면 구독이 한 번밖에 안 걸려
+  //   "수거가 재구독을 부르나" 를 못 잰다. 살아있는 채로 마운트해 구독·reset 을 소비한 뒤 수거를 재현한다.
   it('마운트된 뒤 수거되면 입력이 막히고, 재구독·reset 이 다시 돌지 않는다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 2 }]
     agentStoreState.agentsLoaded = true
 
-    const { rerender } = render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    const { rerender } = render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
-    expect(screen.queryByText('종료됨')).toBeNull()
+    expect(veil()).toBeNull()
     const subCalls = (agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length
     const resetCalls = termState.reset.mock.calls.length
 
-    // 수거 = 명부에서 사라짐. 상위(ViewLayoutRenderer)는 이때 epoch 을 그대로 유지한 채 넘긴다.
+    // 수거 = 명부에서 사라짐. 상위가 넘기는 prop(viewId·agentId)은 그대로다.
     agentStoreState.agents = []
-    rerender(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    rerender(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    expect(screen.getByText('종료됨')).toBeTruthy()
+    expect(veil()).not.toBeNull()
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).not.toHaveBeenCalled()
-    // epoch 이 유지됐으므로 구독 effect 가 다시 돌지 않는다(돌면 터미널 버퍼가 reset 된다).
+    // 구독 트리거가 그대로이므로 effect 가 다시 돌지 않는다(돌면 터미널 버퍼가 reset 된다).
     expect((agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length).toBe(subCalls)
     expect(termState.reset.mock.calls.length).toBe(resetCalls)
+  })
+
+  // ★막을 올리는 조건 전부가 입력을 막는 조건이다(ADR-0148 결정 1 / ADR-0149 결정 4)★: 막은
+  //   pointer-events-none 이라 포커스가 남은 xterm 은 막이 떠 있어도 계속 키를 먹는다. 종료만 보고 막으면
+  //   연결이 끊긴 슬롯에서 "없다" 고 적힌 화면 뒤로 입력이 나가고, 그 실패는 조용히 삼켜져 사용자에겐
+  //   무반응으로만 보인다. 여기서는 에이전트를 명부에 **살려 둔 채** 연결만 끊어 그 갈래를 잰다.
+  it('연결이 끊겨 막이 뜬 동안은 에이전트가 살아 있어도 입력이 나가지 않는다', async () => {
+    const { agentClient } = await import('../../api/clientFactory')
+    agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
+    agentStoreState.agentsLoaded = true
+
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
+    await flushSubscribe()
+    expect(veil()).toBeNull()
+
+    // 대조군 — 붙어 있는 동안은 그대로 나간다(가드가 늘 막는 것과 구별).
+    ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
+    act(() => termState.onDataCb!('a'))
+    expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
+
+    setConnection('down')
+    expect(veil()).not.toBeNull()
+    ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
+    act(() => termState.onDataCb!('x'))
+    expect(agentClient.writeStdin).not.toHaveBeenCalled()
+
+    // 다시 붙으면 풀린다 — 가드가 잠긴 채 고착되면 슬롯이 영구 무입력이 된다.
+    setConnection('connected')
+    act(() => termState.onDataCb!('y'))
+    expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
   })
 
   it('명부를 아직 못 받은 구간은 부재로 보지 않는다 — 입력이 그대로 나간다', async () => {
@@ -404,45 +459,12 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     agentStoreState.agents = []
     agentStoreState.agentsLoaded = false
 
-    render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    expect(screen.queryByText('종료됨')).toBeNull()
+    expect(veil()).toBeNull()
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
-  })
-})
-
-// ── 종료 화면의 사유 한 줄(ADR-0162) ────────────────────────────────────────────────
-//
-// 새 상태를 만들지 않는다 — 이어 열기 실패는 이미 「종료됨」 화면으로 떨어지므로 그 화면에 한 줄만 얹는다.
-describe('TerminalSlot — 종료 화면의 마지막 실패 사유', () => {
-  it('마지막 실패가 없으면 종료 화면이 종전과 똑같다(줄이 아예 렌더되지 않는다)', async () => {
-    agentStoreState.agents = []
-    agentStoreState.agentsLoaded = true
-    agentStoreState.profiles = [{ id: AGENT, last_failure: null }]
-
-    const { container } = render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
-    await flushSubscribe()
-
-    expect(screen.getByText('종료됨')).toBeTruthy()
-    expect(container.querySelector('[data-slot-failure]')).toBeNull()
-  })
-
-  it('마지막 실패가 있으면 그 한 줄을 얹되 문구는 종류 표에서 온다', async () => {
-    const { failureLine } = await import('../agent/failureKinds')
-    agentStoreState.agents = []
-    agentStoreState.agentsLoaded = true
-    agentStoreState.profiles = [{ id: AGENT, last_failure: 'NoConversationToResume' }]
-
-    const { container } = render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
-    await flushSubscribe()
-
-    expect(screen.getByText('종료됨')).toBeTruthy()
-    const line = container.querySelector('[data-slot-failure]')
-    expect(line).not.toBeNull()
-    // ★리터럴을 여기 적지 않는다★: 적으면 표와 화면이 갈려도 테스트가 통과한다.
-    expect(line!.textContent).toBe(failureLine('NoConversationToResume'))
   })
 })

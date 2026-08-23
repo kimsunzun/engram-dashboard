@@ -111,19 +111,19 @@ cargo test  -p engram-dashboard-core        # 영향 crate 테스트
 
 순서대로:
 ```bash
-cargo build                                 # 1) 빌드 (루트, 전 workspace). ★이걸로 지어진 engram-dashboard.exe 는 띄우지 않는다★(ADR-0137) — 근거·대체 절차는 아래 §full 의 build-client-shell.mjs 항목
-cargo test --workspace --exclude engram-dashboard   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05)
-cargo test -p engram-dashboard --test layout_apply                      # 2b) 2번이 뺀 그 패키지의 **통합** 타깃 — 죽는 건 lib 타깃뿐이고 통합 타깃은 정상 기립한다(실측 2026-08-17). 적용 서비스 자체(락이 어느 포트 안/밖에서 불리나)를 잰다
-cargo test -p engram-dashboard --test layout_commands                   # 2c) 같은 패키지의 또 다른 **통합** 타깃 — 창·탭·슬롯 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅)를 잰다. 판정 사유는 2b 와 동일
-cargo test -p engram-dashboard --test daemon_client_pending             # 2d) 같은 패키지의 셋째 **통합** 타깃 — 데몬 클라이언트의 pending 슬롯 승계(바깥 호출자가 정한 request_id 가 겹쳐도 연결 태스크가 죽지 않고 옛 대기자가 오류로 깨어난다. 옛 `debug_assert!(false)` 회귀 = 셸↔데몬 영구 단절). 판정 사유는 2b 와 동일
+cargo build                                 # 1) 빌드 (루트, 전 workspace). ★이걸로 지어진 engram-dashboard.exe 는 띄우지 않는다★ — TAURI_CONFIG 없이 도는 빌드라 debug 셸에 release identifier 를 다시 찍는다(ADR-0137, 정본 CLAUDE.md 「빌드·검증 명령」). 띄울 exe 는 아래 full 의 build-client-shell.mjs 가 만든다
+cargo test --workspace --exclude engram-dashboard   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05). ★옛 `-- --test-threads=4` 는 폐기했다 — 되살리지 말 것★(2026-08-19: 그 플래그는 실제 원인에 닿지도 않았다. 사유의 정본 = 아래 「분리 실행」)
+cargo test -p engram-dashboard --test layout_apply                      # 2b) 2번이 뺀 그 패키지의 **통합** 타깃 — 죽는 건 lib 타깃뿐이고 통합 타깃은 정상 기립한다(실측 2026-08-17). 2번이 이 스위트를 못 보므로 이 줄이 유일한 실행 경로다(아래 둘째 항목)
+cargo test -p engram-dashboard --test layout_commands                   # 2c) 같은 패키지의 또 다른 **통합** 타깃 — layout_apply 는 적용 서비스 자체, 이쪽은 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅)를 잰다. 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립·실측 2026-08-17) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
+cargo test -p engram-dashboard --test daemon_client_pending             # 2d) 같은 패키지의 셋째 **통합** 타깃 — 겹친 `request_id` 가 연결 태스크를 패닉시키지 않고 옛 대기자가 영구 hang 대신 오류로 깨어나며 새 요청이 그 번호를 승계함을 잰다(GUI 실측 2026-08-18 결함의 회귀망). 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
+cargo test -p engram-dashboard --test daemon_client_replay              # 2e) 같은 패키지의 넷째 **통합** 타깃 — 거절당한 구독이 슬롯을 풀고 병합된 다음 세대 `Subscribe` 가 실제로 **만들어져 보낼 명령으로 돌아오며** 이미 acked 된 구독은 거절로 풀리지 않음을 잰다(2026-08-19 출력 두절 결함의 회귀망). ★**소켓으로 나가는 것까지는 이 스위트가 안 잰다**★ — 돌려받은 명령을 실 소켓에 미는 줄은 무검증 잔여로 남아 있다(그 파일 헤더 「무엇이 안 덮이나」가 정본). 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립·실측 2026-08-20 재확인) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
 cargo fmt --check                           # 3) 포맷 게이트 (검사형 — rewrite 안 함)
 rg "^\s*use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
-- **★위 블록의 빌드·테스트 줄(1·2·2b·2c·2d·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4번 `rg`는 대상 밖 — 그 절의 판정 규칙). 근거·실측은 그 절이 갖는다.
-- **★2b·2c·2d의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. 대상 선택은 **타깃 단위**여야 한다. **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트는 "안 도는" 게 아니라 **컴파일이 깨져도 안 보인다.**
-- **★이 세 줄이 `src-tauri/tests/`를 도는 유일한 경로다 — 파일이 늘면 줄도 늘린다★**(실발생 2026-08-19: `daemon_client_pending`이 CI에만 있고 로컬 목록엔 없었다. 등재 전까지 그 스위트의 로컬 신호는 0이었다).
+- **★위 블록의 빌드·테스트 줄(1·2·2b~2e·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4번 `rg` 는 대상 밖 — 그 절의 판정 규칙). 근거·실측은 그 절이 갖는다.
+- **★2b~2e의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21). 이 목록이 곧 로컬 실행 명단이라 타깃이 늘면 여기에도 줄을 늘린다.
 - 코어 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(코어가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13).
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
 - **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더한다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다).
@@ -145,10 +145,10 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   게이트1·4는 매치 유무로 판정하고(0줄이어야 PASS — 코어 `use tauri` 게이트와 같은 규칙), 게이트2·3은 줄 수로 판정한다. **게이트5만 성공 여부로 판정한다**(앞 넷과 다르다 — 출력을 읽지 않는다). 게이트5가 두 줄인 이유: net의 기본 feature가 비어 있어 맨 명령은 `server` 아래 모듈을 **컴파일조차 하지 않고**, 반대로 워크스페이스 스코프 명령은 데몬이 `server`를 켜므로 항상 ON 쪽만 본다 — 각 줄이 상대가 못 보는 조합을 맡으므로 한 줄로 줄이지 않는다. `build`가 아니라 `test`인 이유는 dev-의존 경로(`auth.rs` golden이 쓰는 `serde_json`)까지 무는 것이다. 게이트2의 기대값은 **심볼 단위**다 — "`portfile.rs`만"처럼 파일 이름으로 바꾸면 그 파일 안에 새 import가 들어와도 통과한다. 게이트3은 **해석된 의존 그래프**를 읽는다 — `Cargo.toml` 텍스트 grep으로 바꾸지 말고(rename·`[dependencies.<이름>]` 테이블 형·들여쓴 선언·`[build-dependencies]`·비활성 target·`optional`이 빠져나간다 — 실측) 플래그도 줄이지 않는다. 게이트4의 패턴을 `_(이름)` 괄호 형태에서 풀어 쓰지 않는다 — 그 형태의 근거(자기일치 함정, 실측 기록)는 net crate 헤더의 게이트4 절이 정본이다.
 - **★ADR-0130 재론 트리거 — 게이트가 아니다(판정 규칙이 반대)★:** 아래는 *어기면 FAIL* 인 격리 게이트가 **아니라**, 매치가 나오면 **진행을 멈추고 ADR-0130 의 재개 조건을 재론하라**는 알림이다. 매치를 회귀로 보고 되돌리지 말 것 — `control/` 이 형제 모듈을 부르는 것 자체는 결함이 아니다(근거 = ADR-0130 §영향). daemon crate 가 닿으면 필수(quick이어도). **이것이 살아 돌아가는 사본**이고 현행 판정은 여기를 쓴다. ADR-0130 §근거 ③에 같은 명령이 있는데 **그 명령줄(정규식·플래그·경로)은 이 사본과 같아야 한다** — 갈리면 날짜 차이가 아니라 **둘 중 하나가 틀린 것이니 맞춘다**(명령은 도구라 옳고 그름이 날짜와 무관하다. 얼려도 되는 것은 *결과*뿐). 규칙은 명령줄에만 걸린다 — 양쪽의 설명 주석·산문은 독자가 달라 같을 필요가 없다.
   ```bash
-  rg -U -n "(crate|(super::)+)::[^;]*\b(connection_core|agent_conn|status_fanout|messaging_host)\b" crates/engram-dashboard-daemon/src/control/   # 재개 조건② — 0줄이면 보류 유지, 매치가 나오면 ADR-0130 재론
+  rg -U -n "(crate|(super::)+)::[^;]*\b($(rg -o '^(pub )?mod ([a-z_0-9]+);' -r '$2' crates/engram-dashboard-daemon/src/lib.rs | rg -v '^control$' | paste -sd'|'))\b" crates/engram-dashboard-daemon/src/control/   # 재개 조건② — 0줄이면 보류 유지, 매치가 나오면 ADR-0130 재론
   ```
   **★매치가 나와도 바로 재론이 아니다 — 한 단계 걸러라★:** 그 줄이 **그 파일의 `#[cfg(test)]` 시작 줄보다 뒤면 테스트 픽스처라 합법**이다(ADR-0130 §영향이 옆걸음을 명시적으로 허용 — grep 은 이걸 못 가른다). 앞이면 production 간선 후보 = 재론. `rg -n "#\[cfg\(test\)\]" crates/engram-dashboard-daemon/src/control/` 로 경계 줄을 뽑아 대조한다.
-  **패턴 주의(2026-08-05 리뷰 2라운드):** ① 경로 접두를 `crate::` 만으로 좁히지 말 것 — `control/mod.rs` 에서 `super::` 는 크레이트 루트라 같은 간선이 빠져나간다. ② **`-U` 를 빼지 말 것** — rustfmt 가 쪼갠 그룹 import(`use crate::{`⏎`  connection_core::A,`)는 접두와 모듈명이 다른 줄이라 단일행 패턴이 못 문다. ③ **양성 대조(경로를 `src/` 로 넓히기)로 접두 축소를 승인하지 말 것** — 현재 실간선은 전부 `crate::` 형태라 `super::` 갈래가 죽어도 그 대조는 통과한다.
+  **패턴 주의(2026-08-05 리뷰 2라운드):** ① 경로 접두를 `crate::` 만으로 좁히지 말 것 — `control/mod.rs` 에서 `super::` 는 크레이트 루트라 같은 간선이 빠져나간다. ② **`-U` 를 빼지 말 것** — rustfmt 가 쪼갠 그룹 import(`use crate::{`⏎`  connection_core::A,`)는 접두와 모듈명이 다른 줄이라 단일행 패턴이 못 문다. ④ **형제 모듈 이름을 손으로 박지 말 것** — 박아 둔 명단은 새 모듈이 생겨도 안 늘어 그 간선이 **아예 안 보인다**(실측 2026-08-19: 박힌 네 이름 판이 `control/commands.rs → command_delivery` 와 `control/mcp_server.rs → command_roster` 둘을 놓친 채 0줄을 냈다 — 트리거가 관측하려던 성질이 그동안 관측 불가였다). 그래서 명단은 `lib.rs` 의 모듈 선언에서 **파생**한다(`control` 자신만 뺀다). 그 파생을 다시 상수 목록으로 되돌리지 말 것. ③ **양성 대조(경로를 `src/` 로 넓히기)로 접두 축소를 승인하지 말 것** — 현재 실간선은 전부 `crate::` 형태라 `super::` 갈래가 죽어도 그 대조는 통과한다.
   **커버리지는 조건 ②뿐이다.** ①(제어 평면·중계 층을 따로 쓸 소비자가 실제로 생김)은 사람 판단이라 기계화 대상이 아니고, ③(production 의존 그래프의 순환)은 단발 명령이 없다 — 재는 법의 정본은 ADR-0130 §영향 조건 3. **이 블록이 0줄이라고 "순환 없음"으로 읽지 말 것.** ★**등록 상태 자체의 정본은 여기가 아니라 ADR-0130 §영향의 "등록 상태" 줄이다**★ — ③이 나중에 등록되면 그 줄만 갱신되고 이 문단은 낡는다. 상태를 판단할 땐 거기를 볼 것.
 - **공유 데몬 바이너리 락(실발동 2026-07-08):** 실행 중인 `engram-dashboard-daemon.exe`(공유 인프라 — 타 에이전트 호스팅 가능)가 있으면 daemon bin을 빌드하는 루트 `cargo build`·`cargo test`가 os error 5로 FAIL한다 — 코드 결함 아님. **데몬 강제 종료 금지.** 우회 = daemon bin을 안 빌드하는 패키지 스코프(`cargo build/test -p <영향 crate들>`)로 좁혀 회귀 확인, 워크스페이스 전체 게이트는 **PARTIAL로 정직 보고**(못 돌린 범위 명시).
 
@@ -204,6 +204,51 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
   - **실측 시작 전부터 떠 있던 데몬 = 불가침.** 죽이지 않는다(persist 모델·타 에이전트 호스팅 가능 — 에이전트는 데몬의 자식이라 죽이면 진행 중인 작업이 날아간다). 그래서 **기동 전에 데몬 유무를 기록해 둔다**(위 "잔여 프로세스 확인"과 같은 단계).
   - **이번 실측이 띄운 데몬 = 자기가 치운다.** 남기면 그 배포판의 데몬 exe가 잠겨 **다음 재빌드가 하드 실패한다**(`scripts/build-release.ps1`이 "앱과 데몬을 완전히 종료한 뒤 다시 실행하세요"로 멈춘다). 죽이기 전 `ExecutablePath`가 이번에 띄운 배포판(`target/debug/` 또는 `target/release/`) 것인지 **반드시 확인한다** — 이미지 이름만 보고 죽이면 남의 배포판 데몬을 죽인다(ADR-0139).
 - **비-Windows에선 cdp 불가** → standard까지가 한계 + "동작 미확인" 정직 보고(골격 §4).
+
+#### 실측 조리법 — 위 3)에서 무엇을 어떤 채널로 관측하나
+
+> 위 「스샷보다 `eval` 텍스트」 불릿의 **실행 세부**다(그 판정을 되풀이하지 않는다). 이 네 갈래를 워커마다 다시 알아냈다 — 2026-08-21 한 세션에서 둘이 **독립적으로** 같은 것을 발굴했고 한쪽은 그 발굴을 "이번에 가장 비쌌던 작업"(도구 호출 84회)으로 지목했다.
+> ★**검증 표시가 항목마다 붙어 있다 — 이 절을 쓴 세션은 앱을 띄우지 않았다.**★ `코드 파생`(파일:줄이 근거) · `이전 세션 실측`(날짜) · `미검증`(아무도 돌려 본 기록이 없다) 셋으로 갈린다. 미검증 항목이 틀리면 그 자리를 고치고 표시를 올릴 것.
+
+**A. cdp.mjs가 하는 일은 셋뿐이고, 영역 지정 캡처는 없다** (코드 파생)
+- 서브커맨드 = `info`(타깃 목록) · `eval "<js>"`(결과 JSON 출력, `awaitPromise`라 `await` 가능) · `shot <png>` — 그 밖은 usage + exit 1 (`scripts/cdp.mjs:62`·`64`·`106`·`112`). 환경변수 둘: `CDP_PORT`(기본 9223) · `CDP_MATCH`(url·title 정규식). 기본 타깃은 메인 창(popup·tree 제외, `:20`)이고 `CDP_MATCH`로 팝아웃·트리 창을 집는다 — 매치 0건·정규식 무효 = 타깃 목록 + exit 1, 다건 = 첫 번째 선택 (`:66`~`:91`).
+- ★**영역·요소 범위 캡처는 지원하지 않는다**★ — `shot`은 `Page.captureScreenshot`에 `{ format: 'png' }`만 넘겨 **창 전체**를 찍는다(`scripts/cdp.mjs:102`). CDP 프로토콜엔 `clip`이 있지만 **이 스크립트가 노출하지 않으므로 없는 플래그를 짐작해 쓰지 말 것.** 좁히는 실수단은 둘이다: ① 좌표·치수·색·가시성은 `eval` + `getBoundingClientRect()`/`getComputedStyle()`로 **숫자로** 받는다(대개 픽셀을 읽을 이유가 사라진다 — 아래 D) ② 대상이 팝아웃 창에 있으면 `CDP_MATCH`로 그 창을 찍는다(창이 작아 캡처도 작다). 파일명에 디렉토리가 없으면 `_wip/shots/`로 라우팅된다(`:98`).
+
+**B. 프로필 생성·삭제는 command 레지스트리에 없다 → window에 노출된 실 client를 쓴다** (코드 파생)
+- 레지스트리에 **있는** 것: `agent.spawn`·`agent.rename`·`agent.kill`·`agentlist.createAgent|createTerminal|createJson`·`preset.list|create|delete|rename|add`·`slot.*`·`tab.*`·`window.create|close`·`layout.setSlotContent`·`agent.spawnInto`·`theme.set|toggle`. 정상 제어 표면(`window.__engramCmd.run(id, args)` — `src/store/eventBus.ts:140`)으로 되는 일은 여기서 끝낸다.
+- **없는** 것: 프로필 삭제(`deleteProfile`)·자동복원 토글(`setProfileAutoRestore`)에 대응하는 command가 없다. **둘의 처지는 다르니 한 문장으로 묶어 읽지 말 것** — 삭제는 사람 경로(트리 행 메뉴)가 있고(`src/components/agent/AgentList.tsx:213`), **자동복원 토글은 `src/` 안에 호출자가 0건**이라 사람 경로조차 없다(선언만 둘 — `src/api/agentClient.ts:209`·`src/api/protocolClient.ts:907`). 그래서 토글은 아래 탈출구로 client 를 직접 부르는 것 말고 실측 수단이 없다. 생성 쪽 command는 있으나 cdp로는 못 쓴다: 셋 다 `createReservedProfile`을 지나 **폴더 선택 다이얼로그를 먼저 띄우고**(`src/commands/agentCommands.ts:19`) `autoRestore`를 `false`로 박아 넘긴다(`:22`) — ★`agentlist.create*`에는 `autoRestore` 인자가 없다★.
+- **탈출구 = `window.__ENGRAM_AGENT__`**(단일 `ProtocolClient`. 노출 지점 `src/api/clientFactory.ts:29` — ★DEV 가드가 없어 릴리스 빌드에도 있다★). 앱 소스 모듈을 `import()`할 필요가 없다.
+  ```bash
+  node scripts/cdp.mjs eval "window.__ENGRAM_AGENT__.createClaudeProfile('<name>','<cwd>',[],[],true,'Terminal').then(p=>p.id)"
+  node scripts/cdp.mjs eval "window.__ENGRAM_AGENT__.deleteProfile('<id>')"
+  ```
+  인자 순서 = `(name, cwd, extraArgs, env, autoRestore, outputFormat?)` (`src/api/agentClient.ts:199`~`206`, wire 매핑 `src/api/protocolClient.ts:877`). ★**기본값 함정**★ — 생략 시 client는 `'Terminal'`(`protocolClient.ts:883`), command 경로는 `'StreamJson'`(`agentCommands.ts:35`)이다. 같다고 보고 인자를 빼면 **반대 렌더 모드**가 나온다.
+- 나머지 관측 핸들: `window.__engramLayout`(`eventBus.ts:86`) · `window.__engramChat`(`:124`) · store 스냅샷 `window.__engram.agent.getState()`(`src/main.tsx:24` — ★`import.meta.env.DEV` 가드가 있어 **릴리스 빌드엔 없다**★, `:23`. 위 `__ENGRAM_AGENT__`와 갈리는 지점이니 릴리스로 실측할 때 헷갈리지 말 것).
+
+**C. 터미널 화면 텍스트는 DOM에 없다 → fiber를 타고 `Terminal` 인스턴스의 버퍼를 읽는다**
+- 왜(코드 파생): 보이는 슬롯엔 WebGL 렌더러가 붙어(ADR-0056 — `src/components/slot/TerminalSlot.tsx:170`~`222`) 글리프가 canvas로 그려지고, `screenReaderMode`도 안 켜져 있다(생성 옵션 = `fontFamily`·`fontSize`·`theme` 셋뿐, `TerminalSlot.tsx:78`~`82`). 그래서 `.xterm` 하위 `innerText`가 빈 문자열이다(이전 세션 실측 2026-08-21).
+- 잡는 경로(코드 파생): 인스턴스를 들고 있는 것은 `terminalRef` 하나이고 window에 노출되지 않는다(`TerminalSlot.tsx:20`·`:90`). ★**시작점은 `.xterm`이 아니라 그 부모다**★ — fiber 키(`__reactFiber$*`)가 붙는 것은 React가 렌더한 컨테이너 div(`TerminalSlot.tsx:341`)이고 `.xterm`은 `term.open()`이 그 안에 만든 것이라(`:85`) 키가 없다. 슬롯이 여럿이면 `[data-slot-id]`로 먼저 좁힌다(`src/components/layout/ViewLayoutRenderer.tsx:159`).
+- ★**훅 인덱스로 세지 말 것**★ — `terminalRef`는 현재 두 번째 `useRef`지만(`TerminalSlot.tsx:19`~`32`) 훅 순서는 편집 한 번에 밀린다. **모양으로 찾는다**(`.current.buffer`를 가진 훅). ★미검증 스케치 — fiber 내부 구조에 기대므로 이 저장소엔 선례가 없다(`rg reactFiber|memoizedState` → 0건)★:
+  ```js
+  const host = document.querySelector('.xterm').parentElement
+  const k = Object.keys(host).find(s => s.startsWith('__reactFiber$'))
+  let term = null
+  for (let f = host[k]; f && !term; f = f.return)
+    for (let h = f.memoizedState; h && !term; h = h.next)
+      if (h.memoizedState?.current?.buffer) term = h.memoizedState.current
+  const b = term.buffer.active
+  Array.from({length: b.length}, (_, i) => b.getLine(i).translateToString(true)).join('\n')
+  ```
+  `buffer.active`·`translateToString`은 xterm 공개 API다(미검증 — 이 저장소에 호출 선례 0).
+
+**D. 스크롤바 관측은 두 갈래로 갈린다 — 채널을 먼저 고른다**
+- ★**진짜 네이티브 thumb는 어떤 조회로도 안 보인다**★ — DOM 요소가 아니라 selector·`getComputedStyle`이 그 픽셀을 말해 주지 않는다. **이 경우에만** 캡처가 유일 채널이고, 위 A대로 그건 창 전체다. (**미검증** — 이 저장소에 관측 선례 0. 네이티브 스크롤바가 DOM 밖에 그려진다는 일반 사실에 기댄 추론이다.)
+- ★**터미널에서 화면에 보이는 슬라이더는 네이티브가 아니다 — DOM이라 조회된다**★(이전 세션 실측 2026-08-21). xterm 6.0(`package.json:27`)은 VS Code의 ScrollableElement를 쓰고 실물은 `.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider`다(`src/index.css:33`~`35`·`91`~`95`). 폭·위치·가시성은 `eval` + `getBoundingClientRect()`/`getComputedStyle()`로 숫자로 받는다 — **이걸 스크린샷으로 재지 말 것.** 폭·`left`는 xterm JS가 인라인 style로 박아 우리 규칙이 `!important`로 덮는다(`index.css:83`~`92`).
+  - 이 갈래 차이가 곧 `index.css`의 `::-webkit-scrollbar` 블록(`index.css:59`~`79`)이 지금 **죽은 코드**인 근거다 — thumb 색을 빨강으로 강제하고 전체 캡처에서 일치 픽셀을 세어 0을 얻었다(이전 세션 실측 2026-08-21 — 그 관측을 적어 둔 주석이 `index.css:37`~`41`이고, 블록 자체는 그보다 아래다). ★"스크린샷만이 관측 수단"으로 뭉뚱그리면 이 갈래를 놓치고 전창 캡처를 반복하게 된다.★
+- **넘침 강제(이전 세션 실측 2026-08-21):** `.xterm-viewport`에 **높이 있는 빈 자식을 넣는다.** `.xterm-screen`의 높이 조작은 안 듣는다 — v6의 `.xterm-viewport`는 스크롤을 더 이상 받지 않고(스크롤백이 쌓여도 `scrollHeight === clientHeight`) 불투명한 `.xterm-scrollable-element`가 그 위를 덮기 때문이다(`src/index.css:33`~`37`).
+  - ★그렇게 드러나는 것은 **덮인 네이티브 스크롤바**이고 사용자가 보는 그것이 아니다★ — 위 첫 갈래로 간다. (코드 파생 — `src/index.css:33`~`41`)
+  - ★**넘침만 만들면 한 픽셀도 안 칠해진다**★ — thumb 색이 평소 transparent이고 `[data-scroll-active]`가 붙은 동안만 칠해진다(`index.css:66`~`79`). 정적 캡처를 뜨려면 표식을 손으로 붙인다(`el.setAttribute('data-scroll-active','1')`). (코드 파생) 실제 스크롤로 붙이면 마지막 스크롤 **500 ms** 뒤 자동으로 떨어진다(`SCROLL_HIDE_DELAY_MS` = `src/components/ui/scroll-area.tsx:36`, 붙이는 쪽 = `src/components/ui/nativeScrollActivity.ts`).
+  - 거꾸로 **보이는 `.slider`는 DOM 주입으로 못 띄운다** — 기하가 xterm 내부 버퍼 상태에서 나오므로 실제 스크롤백을 쌓아야 한다(에이전트 출력 또는 위 C로 잡은 인스턴스에 쓰기). (미검증 — 추론)
 
 ## 실패 보고 시 게이트 명칭 (골격 §3에 주입)
 

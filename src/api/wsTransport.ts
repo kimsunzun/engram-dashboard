@@ -25,6 +25,15 @@ interface DaemonInfoDto {
 
 type WireEvent = Record<string, unknown>
 
+// 한 에이전트의 직결 single-flight 상태(필드 의미는 아래 `wsReplay` 선언 위 주석이 정본).
+interface WsReplayEntry {
+  inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
+  pending?: {
+    gen: bigint
+    waiters: Array<{ resolve: (gen: bigint) => void; reject: (e: Error) => void }>
+  }
+}
+
 export class WsTransport implements Transport {
   private ws: WebSocket | null = null
 
@@ -66,33 +75,20 @@ export class WsTransport implements Transport {
   //   의 진짜 single-flight(gen 채번·acked 게이트)가 없다. 테스트/흔적 경로지만(운영 carrier =
   //   TauriTransport 고정, ADR-0029), ★per-agent sole-outstanding★을 강제한다 — 어느 시점에도 wire
   //   Subscribe 는 에이전트당 1개만 in-flight. 진행 중 들어온 요청은 다음 1개 gen 으로 병합(같은
-  //   promise/gen 을 모든 대기자가 공유)하고, 현재 ReplayComplete(경계) 뒤에 정확히 1회 Subscribe 를
+  //   promise/gen 을 모든 대기자가 공유)하고, 현재 요청이 경계로 종결된 뒤에 정확히 1회 Subscribe 를
   //   송신한다. 경계(replayBoundary)는 그 미종결 요청의 gen 으로 각인한다 — 마지막값 각인(concurrent
   //   요청이 두 Subscribe 를 보내고 경계에 마지막 gen 을 찍어 조기 flush)을 원천 차단(FIX-4).
+  //   ★종결 계기는 둘이다★ — `ReplayComplete`(성공) · `SubscribeFailed`(거절 = 실패 경계). 둘 다
+  //   `settleReplay` 로 모인다.
   //
   //   상태(agentId →):
-  //    - inflight: 현재 미종결(sent, ReplayComplete 대기) 요청 {gen, truncated(Ack), epoch(Ack)}. 없으면 undefined.
-  //    - pending: inflight 중 병합된 다음 요청 {gen, waiters[]}. ReplayComplete 시 승격돼 Subscribe 송신.
+  //    - inflight: 현재 미종결(sent, 경계 대기) 요청 {gen, truncated(Ack), epoch(Ack)}. 없으면 undefined.
+  //    - pending: inflight 중 병합된 다음 요청 {gen, waiters[]}. 경계 종결 시 승격돼 Subscribe 송신.
   //      waiter 는 resolve/reject 쌍 — 소켓이 ReplayComplete 전에 닫히면(handleClose) reject 로 깨운다(FIX-B).
-  private wsReplay = new Map<
-    string,
-    {
-      inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
-      pending?: {
-        gen: bigint
-        waiters: Array<{ resolve: (gen: bigint) => void; reject: (e: Error) => void }>
-      }
-    }
-  >()
+  private wsReplay = new Map<string, WsReplayEntry>()
   private wsGenCounter = 0n
 
-  private wsReplayEntry(agentId: string): {
-    inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
-    pending?: {
-      gen: bigint
-      waiters: Array<{ resolve: (gen: bigint) => void; reject: (e: Error) => void }>
-    }
-  } {
+  private wsReplayEntry(agentId: string): WsReplayEntry {
     let e = this.wsReplay.get(agentId)
     if (!e) {
       e = {}
@@ -274,7 +270,8 @@ export class WsTransport implements Transport {
             if ('Hello' in msg && !settled) {
               settled = true
               this.reconnectAttempt = 0
-              // connected 전이 → ProtocolClient 가 뷰 buffering 리셋 + requestReplay(재연결 전량 재replay, ADR-0046).
+              // connected 전이 자체는 replay 를 부르지 않는다 — 뷰 부착 계기는 권위 명부다(ADR-0046 amend,
+              //   protocolClient.observeRoster). 여기선 상태만 세운다.
               this.setState('connected')
               settleResolve()
               return
@@ -427,6 +424,27 @@ export class WsTransport implements Transport {
       }
       return
     }
+    if ('SubscribeFailed' in msg) {
+      // ★거절도 미종결 요청을 종결시킨다(실패 boundary)★: 안 그러면 이 entry.inflight 가 영영 남아
+      //   그 에이전트의 requestReplay 가 전부 pending 으로 병합되고 wire Subscribe 가 두 번 다시 안 나간다
+      //   — 데몬 재기동 뒤 출력 영구 두절(실측 2026-08-19). src-tauri single-flight 의 on_refused 와 같은
+      //   의미론을 이 carrier 에도 둔다.
+      const f = msg.SubscribeFailed as { agent_id: string }
+      const entry = this.wsReplay.get(f.agent_id)
+      // ★Ack 를 받은(=데몬이 받아들인) 요청은 풀지 않는다★ — src-tauri on_refused 와 동형 방어. 풀어 버리면
+      //   뒤따라오는 ReplayComplete 가 빈 슬롯을 만나 무시되고, 그 replay 를 기다리던 뷰는 성공 마커를 영영
+      //   못 받는다. 여기선 Ack 관측 여부가 곧 `inflight.epoch !== undefined` 다.
+      if (!entry?.inflight || entry.inflight.epoch !== undefined) return
+      // epoch 은 Ack 이 없어 모른다 → 0(근사). 뷰는 실패 마커에 epoch 펜스를 걸지 않는다(protocolClient
+      //   evalMarker) — 걸면 이 마커가 버려지고 뷰가 watchdog 을 기다린다.
+      this.settleReplay(f.agent_id, entry, {
+        epoch: 0,
+        gen: entry.inflight.gen,
+        truncated: entry.inflight.truncated,
+        failed: true,
+      })
+      return
+    }
     if ('ReplayComplete' in msg) {
       const c = msg.ReplayComplete as { agent_id: string; epoch?: number }
       const entry = this.wsReplay.get(c.agent_id)
@@ -434,30 +452,39 @@ export class WsTransport implements Transport {
       // 미종결 요청을 성공 boundary 로 종결 — 경계 gen = 이 replay 를 종결하는 요청의 gen(마지막값 오각인
       //   방지). epoch 은 Ack 관측치, 없으면 Complete 의 epoch, 그것도 없으면 0(직결 근사).
       const done = entry.inflight
-      entry.inflight = undefined
-      this.messageCb?.({
-        kind: 'replayBoundary',
-        agentId: c.agent_id,
+      this.settleReplay(c.agent_id, entry, {
         epoch: done.epoch ?? c.epoch ?? 0,
         gen: done.gen,
         truncated: done.truncated,
         failed: false,
       })
-      const pending = entry.pending
-      if (pending) {
-        entry.pending = undefined
-        try {
-          this.sendSubscribeFromOldest(c.agent_id)
-          entry.inflight = { gen: pending.gen, truncated: false, epoch: undefined }
-        } catch {
-          // 송신 실패(끊김) — in-flight 못 세운다. 대기자는 gen 은 받되(계약상 gen 반환) 마커는 재연결
-          //   전이가 구동하는 재요청이 낸다. entry 는 다음 요청 때 재사용.
-        }
-        for (const w of pending.waiters) w.resolve(pending.gen)
-      } else if (!entry.inflight) {
-        // 미종결·병합 모두 없으면 entry 정리(맵 누수 방지).
-        this.wsReplay.delete(c.agent_id)
+    }
+  }
+
+  // 미종결 요청 하나를 경계 마커로 종결하고, 병합된 다음 요청이 있으면 승격해 Subscribe 를 정확히 1회
+  // 송신한다(boundary 1개 ↔ Subscribe 1개). 성공 종결(ReplayComplete)과 실패 종결(SubscribeFailed)이
+  // 이 뒷정리를 공유한다 — 갈라 놓으면 한쪽만 대기열을 전진시켜 나머지 대기자가 영구 stuck 된다.
+  private settleReplay(
+    agentId: string,
+    entry: WsReplayEntry,
+    boundary: { epoch: number; gen: bigint; truncated: boolean; failed: boolean },
+  ): void {
+    entry.inflight = undefined
+    this.messageCb?.({ kind: 'replayBoundary', agentId, ...boundary })
+    const pending = entry.pending
+    if (pending) {
+      entry.pending = undefined
+      try {
+        this.sendSubscribeFromOldest(agentId)
+        entry.inflight = { gen: pending.gen, truncated: false, epoch: undefined }
+      } catch {
+        // 송신 실패(끊김) — in-flight 못 세운다. 대기자는 gen 은 받되(계약상 gen 반환) 마커는 재연결
+        //   전이가 구동하는 재요청이 낸다. entry 는 다음 요청 때 재사용.
       }
+      for (const w of pending.waiters) w.resolve(pending.gen)
+    } else if (!entry.inflight) {
+      // 미종결·병합 모두 없으면 entry 정리(맵 누수 방지).
+      this.wsReplay.delete(agentId)
     }
   }
 
