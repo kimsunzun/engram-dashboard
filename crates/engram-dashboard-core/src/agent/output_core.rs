@@ -25,6 +25,18 @@ use crate::agent::types::{
 
 type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
 
+/// 진단 스트림 버퍼의 상한 — 이 화신의 stderr 를 **뒤에서부터** 이만큼만 붙든다.
+///
+/// ★출력 링과 다른 물건이다 — 합치지 말 것★: 링은 터미널 화면과 stream-json 파서가 **함께** 먹는
+///   스트림이라, 거기 stderr 를 섞으면 NDJSON 중간에 비-JSON 라인이 껴 파서가 깨지고 화면에도 진단이
+///   새 나온다(근거 정본 = `transport::stdio` 모듈의 ADR-0044 주석). 그래서 별도의 작은 버퍼다.
+/// ★크기 근거★: 이 버퍼를 읽는 소비자는 활성화 실패 분류 하나뿐이고(`AgentManager` 의 조기 판정),
+///   그가 찾는 것은 claude 가 내는 한 줄짜리 진단 문구다. 몇 KB 면 그 줄이 뒤 출력에 밀려나지 않는다.
+///   ★상한을 지우면 안 된다★ — 이 버퍼는 세션이 사는 내내 자라므로 무제한이면 진행 로그를 뱉는
+///   에이전트에서 그대로 메모리 누수가 된다.
+// ADR-0169
+const DIAGNOSTIC_CAP_BYTES: usize = 8 * 1024;
+
 /// 에이전트 1개의 출력 측 핵심 상태. 필드별 독립 Mutex(session.rs 모듈 주석의 분리 동기와 동일):
 /// emit이 replay/subscribers lock만 짧게 잡는 동안 다른 경로(status 등)와 교착 없이 병행 가능.
 pub struct OutputCore {
@@ -42,6 +54,12 @@ pub struct OutputCore {
 
     // ── Replay buffer ─────────────────────────────────────────
     replay: Mutex<Ring>,
+
+    // ── 진단 스트림 (ADR-0169 분류 입구) ──────────────────────
+    /// 이 화신의 **stderr 텍스트** 꼬리(bounded). 출력 링과 **분리된** 별도 버퍼이고, 그 이유와
+    /// 크기 근거는 `DIAGNOSTIC_CAP_BYTES`. PTY 세션은 stderr 가 콘솔 스트림에 병합돼 오므로 여기는
+    /// 항상 비어 있다(정상 — 그쪽 증거는 `terminal_tail` 이 진다).
+    diagnostics: Mutex<String>,
 
     // ── 상태 알림 ─────────────────────────────────────────────
     status_sink: Arc<dyn StatusSink>,
@@ -118,6 +136,7 @@ impl OutputCore {
             finalized: AtomicBool::new(false),
             subscribers: Mutex::new(Vec::new()),
             replay: Mutex::new(Ring::new()),
+            diagnostics: Mutex::new(String::new()),
             status_sink,
             drain_handle: Mutex::new(None),
             drain_done_rx: Mutex::new(None),
@@ -569,8 +588,114 @@ impl OutputCore {
             .terminal_tail(max_bytes)
     }
 
+    /// 이 화신의 진단(stderr) 한 줄을 붙든다 — transport 의 stderr drain 스레드가 부른다.
+    ///
+    /// ★로그와 **독립**이어야 한다(load-bearing)★: 같은 줄이 `tracing::debug!(target: "agent_stderr")`
+    ///   로도 나가지만 기본 로그 필터는 `warn` 이라 그 줄은 평소 **버려진다**. 분류를 그 로그에 매달면
+    ///   로그 레벨이 기능을 켜고 끄게 된다(= 개발자 머신에서만 되는 기능). 그래서 여기 쌓는 것은 레벨과
+    ///   무관하게 항상 일어나고, 호출자는 로그 매크로보다 **먼저** 이걸 부른다.
+    /// ★마스킹된 텍스트를 받는다(호출자 의무)★: 외부 프로세스 출력이라 자격증명이 섞일 수 있고, 이
+    ///   버퍼는 분류 근거로 읽히는 것에 더해 실패 사유로 로그·보고에 실릴 수 있는 자리다.
+    /// ★상한은 앞에서부터 버려 지킨다★ — 최신 줄이 증거이므로 뒤를 남긴다.
+    // ADR-0169
+    pub fn push_diagnostic(&self, line: &str) {
+        let mut buf = self.diagnostics.lock().expect("diagnostics poisoned");
+        buf.push_str(line);
+        buf.push('\n');
+        if buf.len() > DIAGNOSTIC_CAP_BYTES {
+            // ★자르는 위치를 **문자 경계**로 밀어 올린다★: 바이트로 그냥 자르면 멀티바이트 문자를
+            //   쪼개 `String` 불변식이 깨지고 `drain` 이 panic 한다 — claude 진단에 한글·이모지가
+            //   섞이면 실제로 걸린다.
+            let mut cut = buf.len() - DIAGNOSTIC_CAP_BYTES;
+            while cut < buf.len() && !buf.is_char_boundary(cut) {
+                cut += 1;
+            }
+            buf.drain(..cut);
+        }
+    }
+
+    /// 지금까지 붙든 진단 텍스트 전부(최대 `DIAGNOSTIC_CAP_BYTES`).
+    ///
+    /// ★빈 결과가 정상이다★: PTY 세션은 stderr 를 콘솔 스트림에 병합해 내보내므로 이 버퍼를 쓰지
+    ///   않는다 — 그쪽 증거는 `terminal_tail` 이 진다. 호출자는 둘을 **합쳐** 분류에 넘긴다.
+    // ADR-0169
+    pub fn diagnostic_tail(&self) -> String {
+        self.diagnostics
+            .lock()
+            .expect("diagnostics poisoned")
+            .clone()
+    }
+
     pub fn status(&self) -> AgentStatus {
         self.status.lock().expect("status poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::agent::types::AgentId;
+
+    struct NoopStatus;
+    impl StatusSink for NoopStatus {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<crate::agent::types::AgentInfo>) {}
+    }
+
+    fn core() -> OutputCore {
+        OutputCore::new(
+            AgentId::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )
+    }
+
+    /// 진단 버퍼는 **분리돼 있고 비어 있는 것이 기본**이다 — 링에 아무것도 흘리지 않는다.
+    ///
+    /// ★이 단언이 지키는 것★: 이 버퍼를 출력 링으로 합치는 변경이 오면 여기가 붉어진다. 합치면 NDJSON
+    ///   파서 중간에 비-JSON 라인이 껴 구조화 세션이 깨지고, 터미널 화면에도 진단이 새 나온다.
+    #[test]
+    fn diagnostics_never_leak_into_the_output_ring() {
+        let core = core();
+        core.push_diagnostic("No conversation found with session ID: 8b1c");
+
+        assert!(
+            core.diagnostic_tail().contains("No conversation found"),
+            "진단은 진단 버퍼에 남는다"
+        );
+        assert!(
+            core.terminal_tail(4096).is_empty(),
+            "진단이 출력 링에 들어가면 안 된다 — 링은 화면과 stream-json 파서가 함께 먹는다"
+        );
+        assert!(core.snapshot().is_empty(), "링에 이벤트가 생겨서도 안 된다");
+    }
+
+    /// 상한을 넘겨도 **최신 줄이 남고**, 멀티바이트 문자를 쪼개지 않는다.
+    ///
+    /// ★후자가 panic 회귀다★: 바이트 위치로 그냥 자르면 `String` 불변식이 깨져 `drain` 이 panic 한다 —
+    ///   claude 진단에 한글·이모지가 섞이면 실제로 걸린다. 그 패닉은 stderr drain 스레드에서 나므로
+    ///   조용히 진단 캡처만 죽는다(런타임에 거의 무신호).
+    #[test]
+    fn the_diagnostic_buffer_is_bounded_and_utf8_safe() {
+        let core = core();
+        // 한 줄이 순수 멀티바이트라 어느 지점에서 잘라도 경계에 걸린다.
+        let noisy = "가".repeat(512); // 3 bytes each = 1536B/line
+        for _ in 0..32 {
+            core.push_diagnostic(&noisy);
+        }
+        core.push_diagnostic("No conversation found with session ID: 8b1c");
+
+        let tail = core.diagnostic_tail();
+        assert!(
+            tail.len() <= DIAGNOSTIC_CAP_BYTES,
+            "상한이 안 지켜지면 세션이 사는 내내 자라는 누수가 된다 — got {}B",
+            tail.len()
+        );
+        assert!(
+            tail.contains("No conversation found"),
+            "앞에서부터 버리므로 **최신** 줄이 증거로 남아야 한다"
+        );
     }
 }
 

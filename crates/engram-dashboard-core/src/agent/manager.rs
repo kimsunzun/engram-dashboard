@@ -24,7 +24,7 @@ use crate::agent::failure::AgentFailureKind;
 use crate::agent::output_core::{OutputCore, TurnWiring};
 use crate::agent::preset::PresetRegistry;
 use crate::agent::profile::{
-    AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
+    AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
 use crate::agent::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::agent::session::AgentSession;
@@ -42,8 +42,14 @@ use crate::agent::types::{
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
-/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하면 resume 실패로 판정한다
-/// (H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+/// resume spawn 후 이 시간 안에 비정상 종료(code≠0/Failed/Killed)하거나 **진단 스트림이 실패를 말하면**
+/// resume 실패로 판정한다(H-1.7 "조기 종료 윈도"). 성공한 resume은 TUI라 계속 떠 있다.
+///
+/// ★늘려서 문제를 풀지 마라(실측 2026-08-23)★: 실 claude 는 진단을 +2.2s 에 내고 종료는 +6.4s 에야
+///   한다 — 죽음만 기다리는 판정은 이 창을 6s 넘게 늘려야 맞는데, 활성화는 이 창만큼 **블록**하므로
+///   그러면 멀쩡한 이어받기가 전부 그만큼 느려진다. 그래서 판정 근거를 「죽음」에서 「죽음 또는 증거」로
+///   바꿨다(`EarlyVerdict`) — 오히려 실패를 더 **빨리** 확정한다.
+// ADR-0169
 const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
@@ -136,6 +142,28 @@ impl SpawnOutcome {
 /// 찾는 종료 문구는 마지막 몇 줄에 있다. 이 값은 화면·로그로 나가지 않는다(분류 입력 전용).
 // ADR-0169
 const FAILURE_TAIL_BYTES: usize = 4096;
+
+/// 이어받기 시도의 조기 판정 결말 — 「죽었나」가 아니라 「무슨 증거가 섰나」로 갈린다.
+///
+/// ★`Diagnosed` 가 있는 이유(실측 2026-08-23 — 되돌리지 마라)★: 실 claude 는 `--resume <빈 sid>` 에
+///   대해 **+2.2s 에 진단을 내고 +6.4s 에야 죽는다**(그 사이 SessionEnd 훅이 돈다). 죽음만 기다리면
+///   조기종료 창(3s)을 넘겨 **실패가 성공으로 판정되고 앞선 기록까지 지워진다** — 이 기능의 표제
+///   사례가 통째로 죽는 자리였다. 증거가 이미 섰으면 시체를 기다리지 않는다.
+/// ★창을 늘리는 것은 이 문제의 답이 아니다★: 활성화는 이 창만큼 **블록**하므로, 늘리면 멀쩡한
+///   이어받기가 전부 그만큼 느려진다. 답은 기다림이 아니라 판단 근거를 바꾸는 것이다.
+// ADR-0169
+enum EarlyVerdict {
+    /// 창 안에 종점 상태로 들었다. `evidence` = 그 순간 붙잡은 콘솔 꼬리 + 진단 텍스트(best-effort,
+    /// 빈 값이 정상).
+    Terminal {
+        status: AgentStatus,
+        evidence: String,
+    },
+    /// **아직 살아 있지만** 진단 스트림이 이미 알려진 실패를 말했다 — 죽음을 기다리지 않고 확정한다.
+    Diagnosed(AgentFailureKind),
+    /// 창을 넘겼고 아무 증거도 서지 않았다 = 활성화 성립.
+    Alive,
+}
 
 /// 명부(roster) 항목 하나 = **에이전트 하나**(ADR-0119 결정 1). "산 목록"과 "프로필 목록"을 소비자가
 /// 각자 합치던 중복을 없애는 것이 이 타입의 존재 이유다.
@@ -1067,9 +1095,10 @@ impl AgentManager {
     ///    정상 신규 생성이다(ADR-0076 "Fresh=새 sid" 유효).
     /// 3. **Resume** — `resume_no_fallback` 로 이어받기만 시도하고, 그 Failed 결말을 Err 로 노출한다.
     ///
-    /// ★blocking★: Resume 모드는 EARLY_EXIT_WINDOW(현 3s)만큼 조기종료를 폴링하므로 호출이 그만큼
+    /// ★blocking★: Resume 모드는 최대 EARLY_EXIT_WINDOW(현 3s)만큼 결말을 폴링하므로 호출이 그만큼
     ///   블록될 수 있다(restore_all 과 동일 성질). 데몬의 명령 처리 스레드에서 호출되므로 그 연결의
     ///   응답만 지연되고 다른 세션에는 영향 없다. Fresh 모드·재활성화 가드는 폴링 없이 즉시 반환한다.
+    ///   ★실패는 이 상한보다 빨리 돌아올 수 있다★ — 진단 스트림이 먼저 말하면 그 자리에서 끊는다.
     // ADR-0082
     // ADR-0076
     pub fn activate_profile(
@@ -1357,9 +1386,12 @@ impl AgentManager {
     /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
     /// 전제: 호출 시점에 이 프로필은 resumable(claude + sid 존재)이라고 이미 판정됐다.
     ///
-    /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 비정상 종료(빈/미대화/손상
-    /// 세션이면 claude 가 "No conversation found ..." 로 즉사)하면 **새 대화(fresh)를 자동으로
-    /// 만들지 않고** Failed(시체) 종점으로 직행한다 — 사유를 로그로 남겨 LLM 이 읽고 에스컬레이션한다.
+    /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 **비정상 종료하거나 진단 스트림이
+    /// 실패를 말하면**(빈/미대화/손상 세션이면 claude 가 "No conversation found ..." 를 stderr 로 낸다)
+    /// **새 대화(fresh)를 자동으로 만들지 않고** Failed(시체) 종점으로 직행한다 — 사유를 로그로 남겨
+    /// LLM 이 읽고 에스컬레이션한다.
+    /// ★"즉사" 가 아니다(실측 2026-08-23 정정)★: claude 는 그 진단을 내고도 종료 훅이 도는 동안 몇 초
+    ///   더 산다. 그래서 판정은 죽음이 아니라 증거로도 선다(`EarlyVerdict::Diagnosed`).
     /// ★아무것도 kill·재spawn 하지 않는다★: resume child 는 자기 pump 가 EOF→finish 하고, reaper 가
     ///   그 세션을 맵에서 수거하며 프로필을 `auto_restore=false`(KeepDisableAutoRestore)로 내려
     ///   트리에 `Failed` 시체로 남긴다(profile 은 지워지지 않음 — exit≠0/불명은 삭제 대상이 아님).
@@ -1408,8 +1440,8 @@ impl AgentManager {
         //   프로필을 성공적으로 활성화하면 epoch 이 올라가므로, 이 값을 실어 보내면 옛 관측이 새 화신을
         //   덮지 못한다(`set_last_failure` 계약).
         // ADR-0169
-        match self.early_terminal_status(profile.id, EARLY_EXIT_WINDOW) {
-            Some((status, tail)) => {
+        match self.early_activation_verdict(profile.id, &profile.command, EARLY_EXIT_WINDOW) {
+            EarlyVerdict::Terminal { status, evidence } => {
                 let reason = format!("resume 조기 종료({status:?})");
                 // ★사용자가 끊은 것은 활성화 실패가 아니다 — 기록하지 않는다★: 창 안에서 kill 이 오면
                 //   (트리 종료·`agent.kill`·LLM 의 활성화→종료) 그건 우리가 관측할 실패가 아니라 명시적
@@ -1424,8 +1456,8 @@ impl AgentManager {
                         "resume 창 안에서 사용자 종료 — 활성화 실패로 기록하지 않는다"
                     );
                 } else {
-                    // 꼬리로 종류를 알아보지 못하면 맥락 기본값 — 「이어받기 직후 조기 종료」(재시도 가능).
-                    let kind = backend::resume_failure_kind(&profile.command, &tail)
+                    // 증거로 종류를 알아보지 못하면 맥락 기본값 — 「이어받기 직후 조기 종료」(재시도 가능).
+                    let kind = backend::resume_failure_kind(&profile.command, &evidence)
                         .unwrap_or(AgentFailureKind::EarlyExitAfterResume);
                     self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
                     tracing::warn!(
@@ -1437,46 +1469,75 @@ impl AgentManager {
                 }
                 (RestoreOutcome::Failed { reason }, Some(spawned))
             }
-            None => {
-                // ★조기종료 창을 넘겼다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의 근거다
-                //   (`note_activation_result` 주석).
+            // ★아직 살아 있는데 실패로 접는다 — 그리고 **아무것도 죽이지 않는다**★: claude 는 진단을
+            //   내고도 종료 훅이 도는 동안 몇 초 더 산다(실측 +2.2s 진단 / +6.4s 종료). 그 시체를
+            //   기다리면 창을 넘겨 실패가 성공으로 판정되므로 여기서 확정한다. 처분은 그대로 관측뿐이다
+            //   — 자식은 자기 pump 가 EOF→finish 하고 reaper 가 거둔다(ADR-0082 "아무것도 죽지마").
+            // ★그래서 몇 초간 「도는 중 + 마지막 실패」 조합이 화면에 선다 — 버그가 아니다★: 두 축이
+            //   별개라 표현되는 상태이고, 트리는 「도는 중이 이긴다」로 그 사이를 그린다(ADR-0170).
+            // ADR-0169
+            EarlyVerdict::Diagnosed(kind) => {
+                let reason = format!("resume 실패 진단({kind:?})");
+                self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
+                tracing::warn!(
+                    agent = %profile.id,
+                    %reason,
+                    ?kind,
+                    "ADR-0169: 진단 스트림이 이어받기 실패를 확정 — 종료를 기다리지 않는다"
+                );
+                (RestoreOutcome::Failed { reason }, Some(spawned))
+            }
+            EarlyVerdict::Alive => {
+                // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
+                //   근거다(`note_activation_result` 주석).
                 self.note_activation_result(profile.id, Some(spawned.epoch), None);
                 (RestoreOutcome::Resumed, Some(spawned))
             }
         }
     }
 
-    /// spawn 후 window 안에 terminal 상태가 되면 `(그 상태, 그 순간 붙잡은 출력 꼬리)`, 안 되면
-    /// None(여전히 살아있음).
+    /// spawn 후 window 안에 이어받기의 결말을 판정한다 — **죽음 또는 증거**(`EarlyVerdict`).
     ///
+    /// ★증거를 죽음보다 먼저 보지 않는다(루프 안 순서 — load-bearing)★: 매 폴에서 상태를 먼저 보고
+    ///   그 다음 진단을 본다. 뒤집으면 창 안에 온 **사용자 종료**가 `Diagnosed` 로 앞질러 잡혀,
+    ///   "사용자가 끊은 것은 실패가 아니다" 규율(아래 `resume_no_fallback`)이 우회된다.
+    /// ★진단만으로 확정하는 것은 stderr 스트림뿐이다 — 콘솔 링을 여기에 넣지 마라★: 콘솔 링에는
+    ///   claude 가 이어받아 **다시 그린 대화 본문**이 통째로 들어온다. 살아 있는 세션의 링에서 실패
+    ///   문구를 찾으면, 예전에 그 문구를 이야기한 대화(이 저장소의 세션이 실제로 그렇다)를 이어받는
+    ///   순간 **성공한 활성화가 실패로 도장 찍힌다.** stderr 는 claude 자신의 진단 채널이라 대화 본문이
+    ///   섞이지 않으므로 그 오탐이 원천적으로 없다. 콘솔 꼬리는 **죽은 뒤**에만 증거로 쓴다(아래).
     /// ★세션 Arc 를 **루프 밖에서 한 번** 잡는다(load-bearing — 되돌리지 마라)★: 루프 안에서 매번
     ///   `get_session` 하면 거의 항상 꼬리를 놓친다. `finish` 는 terminal 상태를 세운 **직후** reaper 를
     ///   깨우고 reaper 는 첫 동작으로 세션을 명부에서 지우는데, 이 루프의 간격은 100ms 다 — 즉 우리가
     ///   깨어날 때쯤엔 이미 조회가 실패해 빈 꼬리로 떨어지고, 분류는 언제나 맥락 기본값이 된다
     ///   (그러면 「이어받을 대화 없음」 판정이 사실상 죽은 코드가 된다). Arc 를 들고 있으면 명부에서
-    ///   빠진 뒤에도 같은 `OutputCore` 를 보므로 terminal 상태도 출력 링도 그대로 읽힌다.
+    ///   빠진 뒤에도 같은 `OutputCore` 를 보므로 terminal 상태도 출력 링도 진단 버퍼도 그대로 읽힌다.
     /// ★첫 조회 실패는 "세션이 없었다" 가 아니다★: `spawn_agent` 가 Ok 를 준 뒤 이 조회에 닿기까지 자식이
     ///   죽어 reaper 가 이미 거둬 갔을 수 있다(빠른 즉사 배치가 실제로 그 순서를 낸다). 그 경우 꼬리를
     ///   놓치므로 분류는 맥락 기본값으로 떨어진다 — 어느 쪽이든 재시도 가능 쪽이라 fail-open 이고, 그래서
     ///   여기서 두 원인을 가르지 않는다.
-    /// ★꼬리는 best-effort — 빈 값이 정상 결과다★: 구조화(NDJSON) 세션은 진단 텍스트를 stderr 로 흘리고
-    ///   그건 출력 링에 들어오지 않는다. 호출자는 빈 꼬리를 "분류 불가" 로 받아 맥락 기본값으로 떨어뜨린다.
+    /// ★증거 두 갈래는 배타적이고, 그래서 합쳐서 넘긴다★: PTY(터미널) 세션은 stderr 가 콘솔에 병합돼
+    ///   링에만 있고, 파이프(구조화) 세션은 진단 버퍼에만 있다. 어느 쪽이든 빈 값이 정상 결과이며,
+    ///   둘 다 비면 호출자가 맥락 기본값으로 떨어뜨린다(fail-open).
+    /// ★`command` 를 받는 이유★: "이 문구가 무슨 뜻인가" 는 백엔드 지식이라 판정을 `backend` 에 위임한다
+    ///   (ADR-0004) — manager 는 문자열을 직접 읽지 않는다.
     // ADR-0169
-    fn early_terminal_status(
+    fn early_activation_verdict(
         &self,
         id: AgentId,
+        command: &AgentCommand,
         window: Duration,
-    ) -> Option<(AgentStatus, String)> {
+    ) -> EarlyVerdict {
         let session = match self.get_session(id) {
             Ok(s) => s,
             // 명부에 없다 = 아직 안 올랐거나 이미 거둬졌다 → 어느 쪽이든 종료로 간주(위 doc).
             Err(_) => {
-                return Some((
-                    AgentStatus::Failed {
+                return EarlyVerdict::Terminal {
+                    status: AgentStatus::Failed {
                         message: "session gone".into(),
                     },
-                    String::new(),
-                ))
+                    evidence: String::new(),
+                }
             }
         };
         let deadline = Instant::now() + window;
@@ -1487,10 +1548,19 @@ impl AgentManager {
                 AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
             ) {
                 let tail = session.terminal_tail(FAILURE_TAIL_BYTES);
-                return Some((status, String::from_utf8_lossy(&tail).into_owned()));
+                let mut evidence = String::from_utf8_lossy(&tail).into_owned();
+                let diagnostics = session.diagnostic_tail();
+                if !diagnostics.is_empty() {
+                    evidence.push('\n');
+                    evidence.push_str(&diagnostics);
+                }
+                return EarlyVerdict::Terminal { status, evidence };
+            }
+            if let Some(kind) = backend::resume_failure_kind(command, &session.diagnostic_tail()) {
+                return EarlyVerdict::Diagnosed(kind);
             }
             if Instant::now() >= deadline {
-                return None;
+                return EarlyVerdict::Alive;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1997,6 +2067,178 @@ mod tests {
             .expect("sessions poisoned")
             .insert(id, session);
         written
+    }
+
+    /// 명부에 **살아 있는**(종점 상태가 아닌) 세션 하나를 꽂고 그 화신의 `OutputCore` 를 돌려준다.
+    ///
+    /// ★실 프로세스를 쓰지 않는 이유★: 여기서 재는 것은 "진단 텍스트가 있고 세션이 살아 있을 때 판정이
+    ///   어떻게 서는가" 뿐이라 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리). `RecordingTransport`
+    ///   는 아무것도 띄우지 않으므로 이 세션은 **스스로 절대 죽지 않는다** — 그게 "죽음을 기다리지 않는다"
+    ///   를 재는 데 필요한 성질이다(실 claude 로는 그 상태를 결정적으로 붙들 수 없다).
+    // ADR-0169
+    fn put_live_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<OutputCore> {
+        let core = Arc::new(OutputCore::new(
+            id,
+            epoch,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from("."),
+            epoch,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            BackendCaps {
+                session: SessionCaps {
+                    resume: true,
+                    snapshot: false,
+                    cwd_env: false,
+                },
+                model: ModelCaps {
+                    select: false,
+                    temperature: false,
+                    max_tokens: false,
+                },
+            },
+            InputEncoder::Raw,
+            true,
+            core.clone(),
+            Box::new(RecordingTransport {
+                written: Arc::new(Mutex::new(Vec::new())),
+            }),
+        ));
+        manager
+            .sessions
+            .write()
+            .expect("sessions poisoned")
+            .insert(id, session);
+        core
+    }
+
+    fn claude_terminal_command() -> crate::agent::profile::AgentCommand {
+        crate::agent::profile::AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: crate::agent::profile::ClaudeOutputFormat::Terminal,
+        }
+    }
+
+    // ── ADR-0169: 판정은 죽음이 아니라 **증거**로도 선다 ────────────────────────────────
+
+    /// ★이 기능의 표제 사례 회귀망(실측 2026-08-23)★ — 진단이 이미 실패를 말했으면 프로세스가 아직
+    /// 살아 있어도 그 자리에서 확정한다.
+    ///
+    /// 잡는 회귀는 정확히 이것이다: 실 claude 는 `--resume <빈 sid>` 에 대해 **+2.2s 에 진단을 내고
+    /// +6.4s 에야 죽는다**(그 사이 SessionEnd 훅이 돈다). 죽음만 기다리는 옛 판정은 3s 창을 넘겨
+    /// **실패를 성공으로 판정하고 앞선 기록까지 지웠다** — 표제 사례가 통째로 죽어 있었다.
+    ///
+    /// ★시계를 단언하지 않는다(이 저장소의 옛 flaky 재발 방지)★: "빨리 돌아왔다" 를 경과시간으로 재지
+    ///   않는다. 대신 **창을 아주 길게** 주고 결말만 본다 — 죽음을 기다리는 구현이라면 이 세션은 스스로
+    ///   죽지 않으므로 창 끝까지 갔다가 `Alive` 를 내고, 그 단언이 붉어진다. 통과 조건이 타이밍에
+    ///   좌우되지 않는다.
+    #[test]
+    fn a_diagnosed_failure_settles_the_verdict_without_waiting_for_the_process_to_die() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let core = put_live_session(&manager, id, 1);
+        // 시드는 단언 밖에서 한다(행위-in-단언 회피).
+        core.push_diagnostic("No conversation found with session ID: 8b1c");
+
+        // ★창을 운영값(3s)보다 훨씬 길게 준다★: 이 세션은 스스로 죽지 않으므로, 죽음만 기다리는 구현은
+        //   창 끝까지 갔다가 `Alive` 를 내고 아래 단언이 붉어진다. 값이 크면 "우연히 데드라인에 걸려
+        //   통과" 가 불가능해진다(그 대가는 회귀 시 red 가 느린 것뿐이다).
+        let verdict = manager.early_activation_verdict(
+            id,
+            &claude_terminal_command(),
+            Duration::from_secs(30),
+        );
+
+        assert!(
+            matches!(
+                verdict,
+                EarlyVerdict::Diagnosed(AgentFailureKind::NoConversationToResume)
+            ),
+            "진단이 이미 말했으면 시체를 기다리지 않는다 — got {:?}",
+            match verdict {
+                EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
+                EarlyVerdict::Alive => "Alive(죽음만 기다리는 옛 판정 = 회귀)".into(),
+                EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
+            }
+        );
+        assert!(
+            !matches!(
+                manager.get_session(id).expect("세션은 명부에 있다").status(),
+                AgentStatus::Exited { .. } | AgentStatus::Killed | AgentStatus::Failed { .. }
+            ),
+            "판정 시점에 이 세션은 아직 살아 있어야 한다 — 죽었다면 이 테스트는 옛 갈래를 재는 것이다"
+        );
+    }
+
+    /// ★같은 자리의 오탐 방어★ — 진단이 침묵하면 살아 있는 세션은 그대로 성립으로 넘어간다.
+    ///
+    /// 이 단언이 없으면 위 테스트는 "아무 텍스트에나 Diagnosed 를 내는" 구현으로도 통과한다. 그 구현은
+    /// **성공한 이어받기를 실패로 도장 찍는다**(fail-open 위반 — ADR-0169 §영향).
+    #[test]
+    fn a_live_session_with_nothing_to_say_is_not_diagnosed() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let core = put_live_session(&manager, id, 1);
+        // 시드는 단언 밖에서 한다 — 모르는 문구는 단정 대상이 아니다.
+        core.push_diagnostic("[DEBUG] loading plugins…");
+
+        let verdict = manager.early_activation_verdict(
+            id,
+            &claude_terminal_command(),
+            Duration::from_millis(250),
+        );
+
+        assert!(
+            matches!(verdict, EarlyVerdict::Alive),
+            "모르는 진단은 활성화를 막지 않는다(fail-open) — got {}",
+            match verdict {
+                EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
+                EarlyVerdict::Alive => "Alive".into(),
+                EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
+            }
+        );
+    }
+
+    /// ★죽은 세션의 증거에 **진단 스트림**도 들어간다★ — 구조화 세션은 콘솔 링이 비고 stderr 만 찬다.
+    ///
+    /// 이 갈래가 빠져 있었던 것이 결함 (2) 다: 분류기는 콘솔 꼬리만 봤고, stream-json 이 기본 출력
+    /// 형식이라 **대부분의 에이전트에서 분류기가 눈이 먼 채로** 돌았다.
+    #[test]
+    fn a_dead_sessions_diagnostic_stream_counts_as_evidence_too() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let core = put_live_session(&manager, id, 1);
+        // 시드는 단언 밖에서 한다 — 콘솔 링은 **비운 채로** 둔다(구조화 세션의 실제 모양).
+        core.push_diagnostic("No conversation found with session ID: 8b1c");
+        core.finish(TerminalReason::Exited { code: Some(1) });
+
+        let verdict = manager.early_activation_verdict(
+            id,
+            &claude_terminal_command(),
+            Duration::from_secs(5),
+        );
+
+        let evidence = match verdict {
+            EarlyVerdict::Terminal { evidence, .. } => evidence,
+            other => panic!(
+                "전제: 종점 상태로 관측된다 — got {}",
+                match other {
+                    EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
+                    EarlyVerdict::Alive => "Alive".into(),
+                    EarlyVerdict::Terminal { .. } => unreachable!(),
+                }
+            ),
+        };
+        assert_eq!(
+            backend::resume_failure_kind(&claude_terminal_command(), &evidence),
+            Some(AgentFailureKind::NoConversationToResume),
+            "콘솔 링이 비어도 stderr 가 분류를 세워야 한다 — got evidence {evidence:?}"
+        );
     }
 
     // ── subscribe_from: Err 은 on_ready 앞이다(데몬 거절 통보 계약의 전제) ──────────────
@@ -3353,9 +3595,8 @@ mod tests {
     /// 순수 dispatch 테스트는 그 사실을 못 본다.
     #[cfg(windows)]
     #[test]
-    fn early_terminal_status_captures_the_dead_sessions_output_tail() {
+    fn early_verdict_captures_the_dead_sessions_output_tail() {
         use crate::agent::failure::AgentFailureKind;
-        use crate::agent::profile::{AgentCommand, ClaudeOutputFormat};
 
         // ★배치 파일인 이유★: portable-pty CommandBuilder 가 `&`·`>` 를 개별 quoting 해 ConPTY 통과 중
         //   깨뜨린다(activation.rs 픽스처의 실측). 배치는 cmd 가 직접 파싱하니 결정적이다.
@@ -3384,9 +3625,15 @@ mod tests {
             .into_started()
             .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
 
-        let (status, tail) = manager
-            .early_terminal_status(profile.id, Duration::from_secs(10))
-            .expect("이 배치는 즉시 죽는다(전제)");
+        // ★shell 프로필이라 진단 버퍼는 비어 있다(PTY 는 stderr 를 콘솔에 병합한다)★ — 즉 여기서
+        //   서는 증거는 오롯이 **콘솔 꼬리**이고, 그게 이 테스트가 재는 것이다.
+        let EarlyVerdict::Terminal { status, evidence } = manager.early_activation_verdict(
+            profile.id,
+            &claude_terminal_command(),
+            Duration::from_secs(10),
+        ) else {
+            panic!("이 배치는 즉시 죽는다(전제)")
+        };
         assert!(
             matches!(
                 status,
@@ -3395,18 +3642,12 @@ mod tests {
             "전제: 종점 상태로 관측된다 — got {status:?}"
         );
         assert!(
-            tail.contains("No conversation found"),
-            "reaper 가 세션을 거둔 뒤에도 꼬리가 읽혀야 한다 — 비면 분류가 언제나 맥락 기본값이다. got {tail:?}"
+            evidence.contains("No conversation found"),
+            "reaper 가 세션을 거둔 뒤에도 꼬리가 읽혀야 한다 — 비면 분류가 언제나 맥락 기본값이다. got {evidence:?}"
         );
         // 그 꼬리가 실제로 분류까지 이어진다(claude 어휘 — 실 claude 없이 dispatch 만 태운다).
         assert_eq!(
-            backend::resume_failure_kind(
-                &AgentCommand::Claude {
-                    extra_args: vec![],
-                    output_format: ClaudeOutputFormat::Terminal,
-                },
-                &tail
-            ),
+            backend::resume_failure_kind(&claude_terminal_command(), &evidence),
             Some(AgentFailureKind::NoConversationToResume),
             "실 세션에서 읽은 꼬리가 「이어받을 대화 없음」으로 분류돼야 한다"
         );

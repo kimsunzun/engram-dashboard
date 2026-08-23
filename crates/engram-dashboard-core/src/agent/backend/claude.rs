@@ -280,10 +280,15 @@ impl AgentBackend for ClaudeBackend {
         classify_turn
     }
 
-    /// ★터미널 모드에서만 실질적으로 답이 나온다(알고 수용)★: 구조화(stream-json) 세션은 claude 의 진단
-    ///   텍스트를 stderr 로 흘리고 그건 출력 링에 들어오지 않아 `tail` 이 비어 온다 → `None`.
-    fn resume_failure_kind(&self, tail: &str) -> Option<AgentFailureKind> {
-        if tail.to_lowercase().contains(NO_CONVERSATION_MARKER) {
+    /// ★옛 주석의 "터미널 모드에서만 답이 나온다(알고 수용)" 는 이제 사실이 아니다 — 되살리지 마라★:
+    ///   구조화(stream-json) 세션이 진단을 stderr 로 흘리는 것은 그대로지만, 호출자가 그 stderr 를
+    ///   별도 진단 버퍼로 붙들어 `evidence` 에 합쳐 넘긴다(ADR-0169). stream-json 이 기본 출력 형식이라
+    ///   그 갈래가 침묵하는 동안은 이 분류기가 **대부분의 에이전트에서 사실상 죽은 코드**였다.
+    /// ★이 문구는 claude 가 이어받기에 실패했을 때만 낸다★ — 그래서 아직 살아 있는 세션의 진단만
+    ///   보고도 확정할 수 있다(trait doc 의 조건). 대화 본문에 섞여 나올 수 있는 문구를 여기 추가하면
+    ///   그 성질이 깨진다.
+    fn resume_failure_kind(&self, evidence: &str) -> Option<AgentFailureKind> {
+        if evidence.to_lowercase().contains(NO_CONVERSATION_MARKER) {
             return Some(AgentFailureKind::NoConversationToResume);
         }
         None
