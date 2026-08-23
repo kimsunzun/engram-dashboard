@@ -35,6 +35,7 @@ function profile(
   createdAt = 0,
   displayName: string | null = null,
   parentId: string | null = null,
+  lastFailure: AgentProfile['last_failure'] = null,
 ): AgentProfile {
   return {
     id,
@@ -51,6 +52,7 @@ function profile(
     restart_policy: 'Never',
     restart_count: 0,
     failed_reason: null,
+    last_failure: lastFailure,
     created_at: createdAt,
     last_active: 0,
     last_start_at: null,
@@ -311,5 +313,33 @@ describe('agentPresence', () => {
       .filter(id => agentPresence(id, agents, profiles) === 'reserved')
     expect(reservedInTree).toEqual(['dead'])
     expect([...new Set(reservedByRule)]).toEqual(reservedInTree)
+  })
+})
+
+// ── 마지막 실패 축(ADR-0172) ──────────────────────────────────────────────────
+// AgentInfo wire 엔 없는 축이라 running 노드도 매칭 프로필에서 이어받아야 한다 — 안 이어받으면
+// "다시 떴는데 아직 첫 대화 전" 상태를 화면이 판정할 재료가 없다.
+describe('mergeTreeNodes — lastFailure', () => {
+  it('예약 노드는 프로필의 값을 그대로 싣는다', () => {
+    const out = mergeTreeNodes([profile('p1', '', 0, null, null, 'NoConversationToResume')], [])
+    expect(out[0].lastFailure).toBe('NoConversationToResume')
+  })
+
+  it('실행중 노드도 매칭 프로필에서 이어받는다(도는 중 + 마지막 실패 조합이 표현돼야 한다)', () => {
+    const out = mergeTreeNodes(
+      [profile('a', '', 0, null, null, 'SpawnFailed')],
+      [agent('a', '코더')],
+    )
+    expect(out[0]).toMatchObject({ kind: 'running', lastFailure: 'SpawnFailed' })
+  })
+
+  it('프로필이 없는 ad-hoc 실행중 노드는 null', () => {
+    const out = mergeTreeNodes([], [agent('adhoc')])
+    expect(out[0].lastFailure).toBeNull()
+  })
+
+  it('기록이 없으면 null(기존 노드 모양 불변)', () => {
+    const out = mergeTreeNodes([profile('p1')], [])
+    expect(out[0].lastFailure).toBeNull()
   })
 })

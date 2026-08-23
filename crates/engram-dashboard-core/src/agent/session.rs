@@ -282,6 +282,22 @@ impl AgentSession {
         self.core.snapshot()
     }
 
+    /// 마지막 콘솔 바이트 최대 `max_bytes`(계약·비용은 `OutputCore::terminal_tail`).
+    // ADR-0172
+    pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
+        self.core.terminal_tail(max_bytes)
+    }
+
+    /// 이 화신이 낸 **진단(stderr) 텍스트** 꼬리(계약·상한은 `OutputCore::diagnostic_tail`).
+    ///
+    /// ★`terminal_tail` 의 대체재가 아니라 짝이다★: 두 스트림은 transport 에 따라 배타적으로 찬다
+    ///   — 파이프(구조화) 세션은 여기가 차고 링은 비고, PTY(터미널) 세션은 반대다. 그래서 분류
+    ///   호출자는 둘 중 하나를 고르지 않고 **합쳐서** 넘긴다.
+    // ADR-0172
+    pub fn diagnostic_tail(&self) -> String {
+        self.core.diagnostic_tail()
+    }
+
     pub fn status(&self) -> AgentStatus {
         self.core.status()
     }

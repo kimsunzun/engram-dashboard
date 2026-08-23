@@ -832,7 +832,10 @@ fn spawn_pilot_agent(
         vec![],
         false,
     );
-    let info = manager.spawn_agent(&profile, SpawnMode::Fresh).ok()?;
+    let info = manager
+        .spawn_agent(&profile, SpawnMode::Fresh)
+        .ok()?
+        .into_started()?;
     let deadline = Instant::now() + SPAWN_APPEAR_TIMEOUT;
     while Instant::now() < deadline {
         if manager.list_agents().iter().any(|a| a.id == info.id) {

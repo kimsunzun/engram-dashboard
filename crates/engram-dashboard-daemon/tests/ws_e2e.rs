@@ -516,7 +516,9 @@ fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
     handle
         .manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("shell agent spawn 실패");
+        .expect("shell agent spawn 실패")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     id
 }
 

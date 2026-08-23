@@ -68,7 +68,8 @@ function profile(id: string, cwd: string, createdAt = 0, parentId: string | null
     id, name: '', display_name: null, parent_id: parentId,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
-    restart_policy: 'Never', restart_count: 0, failed_reason: null, created_at: createdAt,
+    restart_policy: 'Never', restart_count: 0, failed_reason: null, last_failure: null,
+    created_at: createdAt,
     last_active: 0, last_start_at: null,
   }
 }

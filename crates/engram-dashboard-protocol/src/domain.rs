@@ -189,6 +189,104 @@ pub enum RestartPolicy {
     Always,
 }
 
+/// 「마지막 실패」 어휘를 **한 목록에서** 선언한다 — 열거형 · wire 표기 · 전수 목록 · 양방향 직렬화가
+/// 전부 이 매크로 한 번의 전개에서 나온다.
+///
+/// ★존재 이유 = 반쪽 수정이 컴파일되지 않게 하는 것★: 손으로 쓴 표가 둘이면(예전 형태: exhaustive match
+///   하나 + 고정 길이 배열 하나) 변형을 늘릴 때 한쪽만 고쳐도 **빌드가 통과한다**. 그러면 같은 버전 피어
+///   둘이 serialize 는 새 문자열을 내보내고 deserialize 는 그걸 못 찾아 `Other` 로 접는다 — 왕복이 깨지고
+///   화면엔 그 종류의 문구 대신 일반 문구가 영원히 뜬다. 목록이 하나뿐이면 그 반쪽 수정 자체가 불가능하다.
+/// ★wire 문자열은 `stringify!` 로 **변형 이름에서 파생**된다★: ts-rs 가 내는 TS 유니온도 변형 이름에서
+///   나오므로, 손으로 문자열을 적지 않는 한 그 둘은 구조적으로 같다(그 사실은 `messages.rs` 의 golden 이
+///   생성된 `.ts` 를 실제로 읽어 다시 확인한다).
+// ADR-0172
+macro_rules! declare_failure_kinds {
+    (
+        $( $(#[$vmeta:meta])* $variant:ident ),+ $(,)?
+        ; absorbing = $absorbing:ident
+    ) => {
+        /// core `failure::AgentFailureKind` 와 동일. 「마지막 실패」의 종류 어휘 — **화면 문구는 여기
+        /// 없다**: 종류 → {다시 해볼 가치 · 문구 · 권하는 행동} 표는 프론트가 진다
+        /// (ADR-0172 결정 5 · ADR-0173).
+        ///
+        /// ★상태(`AgentStatus`)와 별개 축이라 합치지 않는다★ — "도는 중인데 마지막 실패를 든" 조합이
+        ///   표현돼야 화면의 「도는 중이 이긴다」 규칙이 성립한다.
+        /// ★변형을 늘리려면 `declare_failure_kinds!` 호출 한 곳만 고친다★ — 여기 직접 쓸 수 없다.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, TS)]
+        #[ts(export)]
+        pub enum AgentFailureKind {
+            $( $(#[$vmeta])* $variant, )+
+        }
+
+        impl AgentFailureKind {
+            /// 어휘 전수 = (변형, wire 표기). 매크로가 열거형과 **같은 목록**에서 만든다.
+            const ALL: &'static [(AgentFailureKind, &'static str)] =
+                &[ $( (AgentFailureKind::$variant, stringify!($variant)), )+ ];
+
+            /// 어휘 전수 — golden 이 생성된 TS 유니온과 대조하는 축(테스트가 어휘를 다시 적지 않게).
+            pub fn all() -> impl Iterator<Item = &'static (AgentFailureKind, &'static str)> {
+                AgentFailureKind::ALL.iter()
+            }
+
+            /// 위와 같은 목록의 이름만.
+            pub fn wire_names() -> impl Iterator<Item = &'static str> {
+                AgentFailureKind::ALL.iter().map(|(_, name)| *name)
+            }
+
+            /// wire 표기 — 변형 이름 그대로(`stringify!`).
+            fn as_wire_str(self) -> &'static str {
+                match self {
+                    $( AgentFailureKind::$variant => stringify!($variant), )+
+                }
+            }
+        }
+
+        impl serde::Serialize for AgentFailureKind {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_wire_str())
+            }
+        }
+
+        /// 모르는 종류를 흡수 변형으로 접는다 — **어휘가 늘어날 때 옛 피어를 지키는 유일한 장치**.
+        ///
+        /// ★막는 사고★: 이 타입은 프로필 구조체 **안**에 있어서, 그냥 파생하면 새 변형 문자열 하나가
+        ///   `AgentProfile` **메시지 전체**의 디코드를 실패시킨다 — 필드만 비는 게 아니라 그 프로필이
+        ///   통째로 사라진다. 옛 빌드의 src-tauri 셸이 새 데몬에 붙는 조합이 실제 경로이고, 그쪽
+        ///   수신부는 디코드 실패를 **조용히 버린다**(증상이 "트리가 안 바뀐다" 뿐이다).
+        /// ★프론트와 같은 계약의 러스트 쪽 절반★: `src/components/agent/failureKinds.ts` 가
+        ///   `table[kind] ?? Other` 로 같은 fail-open 을 이미 한다.
+        /// ★흡수 범위는 **모르는 문자열** 하나뿐이다★: `42`·`[]`·`{}` 같은 비-문자열은 그대로 오류가
+        ///   된다. 전부 삼키면 망가진 값이 흡수 변형으로 둔갑해 **실패가 없는 항목에 실패 문구가 뜬다** —
+        ///   그건 흡수가 아니라 날조다.
+        /// ★`String` 으로 받는다(`&str` 로 좁히지 말 것)★: 빌린 `&str` 은 이스케이프 없는 in-memory
+        ///   버퍼에서만 성공한다 — `"Other"` 처럼 이스케이프가 하나만 있어도 serde_json 이 scratch
+        ///   경로로 빠져 `invalid type: string, expected a borrowed string` 을 내고 **메시지 전체**가
+        ///   깨진다. `from_value`/`from_reader` 경로도 같다.
+        impl<'de> serde::Deserialize<'de> for AgentFailureKind {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let raw = <String as serde::Deserialize>::deserialize(d)?;
+                Ok(AgentFailureKind::ALL
+                    .iter()
+                    .find(|(_, name)| *name == raw)
+                    .map(|(kind, _)| *kind)
+                    .unwrap_or(AgentFailureKind::$absorbing))
+            }
+        }
+    };
+}
+
+declare_failure_kinds! {
+    /// 이어받을 대화 실물이 없다 — 한 마디도 주고받지 않고 죽은 항목.
+    NoConversationToResume,
+    /// 프로세스를 띄우지 못했다.
+    SpawnFailed,
+    /// 이어받기로 떴으나 관측 창 안에 종료했다.
+    EarlyExitAfterResume,
+    /// 생산자가 분류하지 못했다 — **그리고** 소비자가 모르는 어휘를 흡수하는 자리다.
+    Other,
+    ; absorbing = Other
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct AgentProfile {
@@ -225,6 +323,15 @@ pub struct AgentProfile {
     /// **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(버전 bump 유발).
     #[ts(type = "string | null")]
     pub failed_reason: Option<String>,
+    /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). `null` = 실패 기록 없음.
+    ///
+    /// ★데몬 메모리에만 산다★ — core 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
+    ///   재기동하면 사라진다(앱 창 재시작은 견딘다).
+    /// `#[serde(default)]` 라 이 필드 없는 옛 wire → None(PROTOCOL_VERSION 유지 — display_name·
+    /// parent_id 와 동형 additive). 모르는 **값**은 `Other` 로 흡수된다(`AgentFailureKind` 의
+    /// `Deserialize` 구현 — 그 doc 이 왜 필요한지의 정본).
+    #[serde(default)]
+    pub last_failure: Option<AgentFailureKind>,
     pub created_at: i64,
     pub last_active: i64,
     /// 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용).

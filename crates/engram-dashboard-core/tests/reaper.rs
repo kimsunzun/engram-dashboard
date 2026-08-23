@@ -126,7 +126,9 @@ fn natural_exit_zero_reaps_and_keeps_profile_corpse() {
     let updates_before = sink.list_update_count();
     manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn failed");
+        .expect("spawn failed")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
 
     let removed = wait_until(Duration::from_secs(15), || manager.list_agents().is_empty());
     if !removed {
@@ -162,7 +164,9 @@ fn crash_exit_one_keeps_profile_disables_auto_restore() {
 
     manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn failed");
+        .expect("spawn failed")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
 
     assert!(
         wait_until(Duration::from_secs(5), || manager.list_agents().is_empty()),
@@ -203,7 +207,9 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
 
     let info = manager
         .spawn_agent(&seeded, SpawnMode::Fresh)
-        .expect("spawn failed");
+        .expect("spawn failed")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
 
     assert!(
         wait_until(Duration::from_secs(2), || manager.list_agents().len() == 1),
@@ -250,7 +256,9 @@ fn shutdown_all_keeps_profiles_for_boot_restore() {
     let id = profile.id;
     manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn failed");
+        .expect("spawn failed")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     assert!(
         wait_until(Duration::from_secs(2), || manager.list_agents().len() == 1),
         "shutdown: spawn 직후 세션이 없음"

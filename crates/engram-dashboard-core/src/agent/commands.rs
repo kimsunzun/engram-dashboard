@@ -406,14 +406,22 @@ fn verb_spawn(
         (Some(token), None) if name.is_some() => Err(CommandError::invalid_argument(format!(
             "name does not apply when waking an existing agent ({token}) — changing a name is a separate verb, so drop this field"
         ))),
-        (Some(token), None) => wake_existing(host, token),
+        (Some(token), None) => wake_existing(host, notify, token),
         (None, Some(cwd)) => create_and_start(host, notify, cwd, name.map(str::to_string)),
     }
 }
 
-/// ★깨우기는 명부 통지를 겹쳐 보내지 않는다★ — 항목 수·이름·계층이 그대로이고, 생사 전이는 매니저가
-/// 이미 흘린다(`spawn_agent` 가 `agent_list_updated` 를 낸다).
-fn wake_existing(host: &dyn AgentCommandHost, token: &str) -> Result<AgentSpawnOk, CommandError> {
+/// ★깨우기도 명부 통지를 낸다 — 항목 수·이름·계층이 그대로여도★: 활성화 결말이 그 항목의
+/// 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0172) 그 축은 **프로필 목록으로만** 흐른다.
+/// 매니저가 흘리는 생사 전이(`agent_list_updated`)는 산 세션 목록이라 이 값을 나르지 않는다 —
+/// 여기서 안 알리면 LLM 이 깨운 결과가 화면에 영영 안 뜬다(사람 클릭 경로는 뜬다 = 두 핸들이 갈린다,
+/// CLAUDE.md 「LLM-우선 제어」).
+// ADR-0172
+fn wake_existing(
+    host: &dyn AgentCommandHost,
+    notify: &dyn RosterChanged,
+    token: &str,
+) -> Result<AgentSpawnOk, CommandError> {
     let id = resolve(host, token)?.id;
     let Some(profile) = host.agent_snapshot(id) else {
         return Err(not_found(token));
@@ -425,8 +433,9 @@ fn wake_existing(host: &dyn AgentCommandHost, token: &str) -> Result<AgentSpawnO
     } else {
         SpawnMode::Fresh
     };
-    let started = host
-        .activate_profile(&profile, mode)
+    let started = host.activate_profile(&profile, mode);
+    notify.roster_changed();
+    let started = started
         .map_err(|e| CommandError::internal(format!("could not start agent '{token}': {e}")))?;
     Ok(started_payload(started, false))
 }
@@ -445,9 +454,13 @@ fn create_and_start(
         backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT),
     )?;
     notify.roster_changed();
-    let started = host
-        .activate_profile(&stored, SpawnMode::Fresh)
-        .map_err(|e| {
+    let started = host.activate_profile(&stored, SpawnMode::Fresh);
+    // ★활성화 **뒤에도** 알린다 — 위 통지는 활성화 전 스냅샷이다★: 그 사이 「마지막 실패」가 기록되거나
+    //   지워지고(ADR-0172), 그 축은 프로필 목록으로만 흐른다. 실패 갈래에서 특히 중요하다 — 아래 Err 는
+    //   호출자에게만 가고 화면에는 아무 것도 남지 않는다.
+    // ADR-0172
+    notify.roster_changed();
+    let started = started.map_err(|e| {
             // ★등록을 되돌리지 않는다★: 만들어진 에이전트는 잠든 상태로 명부에 남는다. 되감기는 두 번째
             //   삭제 경로를 만드는데 삭제의 semantics 자체가 미결이다(ADR-0122).
             // ★회복 경로를 문구가 나른다★: 만들어진 에이전트는 명부에 남아 있으므로 호출자가 할 일은
@@ -1118,9 +1131,24 @@ mod tests {
         assert_eq!(host.started.lock().unwrap().as_slice(), &[(id, true)]);
         assert_eq!(
             *notify.calls.lock().unwrap(),
-            0,
-            "깨우기는 명부 구성을 안 바꾼다 — 생사 전이는 매니저가 흘린다"
+            1,
+            "구성은 그대로여도 활성화가 「마지막 실패」를 바꾼다(ADR-0172) — 그 축은 프로필 목록으로만 흐른다"
         );
+    }
+
+    /// ★LLM 이 깨운 실패가 화면에 닿아야 한다★: 이 통지가 없으면 사람 클릭(WS `SpawnProfile`)으로는
+    /// 실패 표시가 뜨는데 명령 버스로는 안 떠, 두 핸들이 같은 것을 흔들지 않게 된다.
+    // ADR-0172
+    #[test]
+    fn waking_that_fails_still_announces_the_roster() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, true);
+        *host.start_fails.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("전제: 활성화가 실패한다");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
     #[test]
@@ -1149,8 +1177,8 @@ mod tests {
         assert_eq!(host.started.lock().unwrap().len(), 1);
         assert_eq!(
             *notify.calls.lock().unwrap(),
-            1,
-            "새 항목이 생겼으므로 알린다"
+            2,
+            "등록 직후 한 번(새 항목) + 활성화 직후 한 번(「마지막 실패」 결말, ADR-0172)"
         );
     }
 

@@ -28,8 +28,11 @@ import { refreshProfiles } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 import { selectOpenTarget } from './selectOpenTarget'
-import { statusGlyphColor, statusGlyphIcon } from './statusGlyph'
+import { isFailureBlocked, rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
+import { failureLine } from './failureKinds'
 import { t } from '../../i18n'
+// 「답을 기다리는 중」기호의 회전(클래스 `engram-glyph-spin`). 키프레임은 스타일시트가 소유한다.
+import './agentGlyph.css'
 
 // 상태 매핑의 SSOT 는 statusGlyph.ts 한 곳이다(react-arborist 를 끌고 오는 이 모듈 없이 headless 로 재려고
 //   분리했다). 여기 re-export 는 `from './AgentList'` 를 쓰는 기존 importer 를 위한 통로일 뿐이다.
@@ -63,6 +66,13 @@ export default function AgentList() {
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   // 액션 실패 메시지 — 토스트/StatusBar 가 없어 행 옆 인라인 표시(AgentTree MAJOR-3 패턴).
   const [errorById, setErrorById] = useState<Record<string, string>>({})
+  // ★활성화가 거절당한 행★ — 「마지막 실패」기록의 *대역*이 아니라 이 화면이 직접 받은 답이다.
+  //   백엔드는 세션이 생기는 순간 status 를 낙관적으로 Running 으로 올리고 프로세스가 죽어 관측될
+  //   때까지 그대로 둔다 → 거절을 이미 손에 쥔 뒤에도 몇 초간 초록이 남았다(실측 2026-08-24).
+  //   그래서 기록(lastFailure)이 도착하기를 기다리지 않고 이 집합이 즉시 금지 표식을 세운다.
+  //   ★errorById 와 합치지 않는 이유★: 그건 아무 액션(종료·열기·이름변경) 실패나 담는 통이라,
+  //   섞으면 이름 변경 한 번 실패한 행이 "못 여는 항목"으로 뒤바뀐다. 활성화 경로만 여기 적는다.
+  const [activationRejectedIds, setActivationRejectedIds] = useState<Set<string>>(new Set())
 
   // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★:
   //   확정(Enter/blur) 시에만 renameProfile.
@@ -137,6 +147,15 @@ export default function AgentList() {
       return next
     })
   }
+  const markActivationRejected = (id: string) =>
+    setActivationRejectedIds(prev => (prev.has(id) ? prev : new Set(prev).add(id)))
+  const clearActivationRejected = (id: string) =>
+    setActivationRejectedIds(prev => {
+      if (!prev.has(id)) return prev // 참조 유지 = 불필요한 재렌더 없음.
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
   const setError = (id: string, msg: string) => setErrorById(prev => ({ ...prev, [id]: msg }))
   const clearError = (id: string) =>
     setErrorById(prev => {
@@ -147,15 +166,22 @@ export default function AgentList() {
     })
 
   // 예약 노드 활성화(spawnProfile) — AgentTree 와 동일 restore UX(리그레션 금지).
+  // ★행이 말하는 것을 답에 맞춘다★: 더블클릭 → 답이 올 때까지 `pending`(스피너) → 거절이면 즉시
+  //   `rejected`(금지 표식), 성공이면 표식을 걷고 평소 상태 기호로 돌아간다. 초록은 활성화가 실제로
+  //   성공한 뒤에만 나온다.
   const activateReserved = (agentId: string) => {
     if (!beginInFlight(agentId)) return
     clearError(agentId)
+    // 재시도 시작 = 지난 거절은 더 이상 지금의 사실이 아니다(스피너가 그 자리를 받는다).
+    clearActivationRejected(agentId)
     agentClient
       .spawnProfile(agentId, false)
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[spawnProfile]', e)
         setError(agentId, t('agent.activateFailed', { err: String(e) }))
+        // 「실패」배지를 띄우는 바로 그 자리 — 기호도 같은 순간에 갈린다(둘이 어긋나던 것이 결함이었다).
+        markActivationRejected(agentId)
       })
       .finally(() => endInFlight(agentId))
   }
@@ -318,7 +344,24 @@ export default function AgentList() {
     const isBusy = busyIds.has(data.id)
     const err = errorById[data.id]
     const hasChildren = data.children.length > 0
-    const glyph = statusGlyphIcon(data.status)
+    // ADR-0173: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
+    const failureTitle = isFailureBlocked(data.status, data.lastFailure)
+      ? failureLine(data.lastFailure)
+      : null
+    // ★한 판정(phase)이 기호·색·hover 를 함께 몬다★(ADR-0173 의 성질을 시연 층으로 이어받는다):
+    //   답을 기다리는 동안(`pending`)은 상태 기호를 그리지 않고, 활성화가 거절당한 뒤(`rejected`)는
+    //   기록이나 프로세스 사망 관측을 기다리지 않고 금지 표식으로 간다. 그 밖은 옛 두 축 그대로.
+    //   ★in-flight 채널을 하나로 둔다★: `isBusy` 는 이 행에 건 요청 전부(활성화·종료·열기·이름변경·
+    //   이동)를 담는 기존 표식이고, 그 구간엔 어느 것이든 행의 상태가 답을 기다리는 중이다 —
+    //   두 번째 장부를 만들면 그것과 opacity/cursor 가 갈라진다.
+    const phase = rowPhase(isBusy, activationRejectedIds.has(data.id))
+    const glyph = rowGlyphIcon(phase, data.status, data.lastFailure)
+    // hover 도 같은 phase 를 따른다 — 기다리는 중에 옛 실패 문구가 뜨면 기호와 말이 어긋난다.
+    //   거절 직후엔 `err`(활성화 실패 인라인)이 이미 맨 앞이라 사유가 그대로 나온다.
+    const rowTitle =
+      phase === 'pending'
+        ? t('agent.glyphPending')
+        : (err ?? failureTitle ?? (isReserved ? t('agent.doubleClickToActivate') : data.cwd))
     return (
       <div
         ref={dragHandle}
@@ -370,7 +413,10 @@ export default function AgentList() {
           if (e.key === 'Enter') commitEdit(data)
           else if (e.key === 'Escape') cancelEdit()
         }}
-        title={err ?? (isReserved ? t('agent.doubleClickToActivate') : data.cwd)}
+        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0173 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
+        //   같은 판정(`isFailureBlocked`)을 써서 둘이 어긋나지 않게 한다. 액션 실패 인라인 메시지(err)는
+        //   방금 누른 조작의 결과라 그게 더 앞선다.
+        title={rowTitle}
         onContextMenu={e => {
           e.preventDefault()
           e.stopPropagation() // ★행 메뉴가 이긴다(ADR-0064)★: 상위 통합 슬롯 메뉴가 안 뜨게 여기서 멈춘다.
@@ -402,7 +448,10 @@ export default function AgentList() {
             ★색은 span 의 CSS color 가 소유한다★: 아이콘의 stroke·fill 이 둘 다 currentColor 라 그것을
             따른다 — lucide 의 `color` prop 은 stroke 만 잡아서 채운 원의 fill 이 안 따라온다.
             data-agent-glyph-shape = DOM 관측 표면: 텍스트 글리프 시절 textContent 가 나르던 상태 판독을
-            아이콘 전환으로 잃지 않게 남긴다(svg 는 글자를 남기지 않는다). */}
+            아이콘 전환으로 잃지 않게 남긴다(svg 는 글자를 남기지 않는다).
+            ★ADR-0173: 이 자리엔 축이 둘 얹힌다★ — 마지막 실패가 있고 안 떠 있는 행은 상태 모양 대신
+            금지 표식(shape=`blocked`)이 **갈아끼워지고** 색·hover 도 같은 판정을 따라간다. 기호를 둘
+            나란히 두지 않는 것이 그 결정의 요지라, 여기에 두 번째 <span> 을 늘리지 말 것. */}
         {/* ★role+aria-label 이 있어야 상태가 들린다★: lucide 는 접근성 prop 이 없으면 svg 에 자동으로
             aria-hidden 을 붙여(node_modules/lucide-react) 아이콘이 접근성 트리에서 통째로 사라진다 —
             문자 글리프 시절엔 textContent 가 그 역할을 했다. 이게 없으면 Running 행과 Exited 행의
@@ -410,12 +459,23 @@ export default function AgentList() {
         <span
           data-agent-glyph="1"
           data-agent-glyph-shape={glyph.shape}
+          // 회전은 스타일시트가 소유한다(agentGlyph.css) — 기다리는 동안에만 붙는다.
+          className={phase === 'pending' ? 'engram-glyph-spin' : undefined}
           role="img"
-          aria-label={data.status}
+          // ★들리는 이름은 상태 어휘 그대로 둔다★: 마지막 실패의 사유는 행 `title`(hover)이 한 줄로
+          //   나르고 그 문구의 유일한 출처는 종류 표다(failureKinds). 여기에 사유를 한 번 더 얹으면
+          //   같은 문장이 두 표면에서 갈릴 수 있고, 그렇다고 새 문구를 지어내는 것은 날조다.
+          //   기계 판독(테스트·CDP·LLM)은 위 `data-agent-glyph-shape` 가 `blocked` 로 진다.
+          //   ★단 기다리는 동안은 예외★: 그 구간의 `status` 는 아직 답이 아니라 낙관값이라(더블클릭
+          //   직후부터 `Running` 이다) 그대로 읽히면 화면에서 걷어낸 거짓말이 소리로 되살아난다.
+          aria-label={phase === 'pending' ? t('agent.glyphPending') : data.status}
+          aria-busy={phase === 'pending' ? true : undefined}
           style={{
             display: 'flex',
             alignItems: 'center',
-            color: statusGlyphColor(data.status),
+            // ADR-0173: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다 —
+            //   위 `glyph` 와 같은 판정을 타야 둘이 어긋나지 않는다(시연 층도 같은 phase 를 받는다).
+            color: rowGlyphColor(phase, data.status, data.lastFailure),
             flexShrink: 0,
           }}
         >
