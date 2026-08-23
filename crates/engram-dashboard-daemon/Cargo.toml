@@ -1,6 +1,6 @@
 [package]
 name = "engram-dashboard-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Engram Dashboard 데몬 — AgentManager 소유(에이전트 호스트) + 제어 평면(MCP·ingress·프라이밍) + 메시징 접합 + 조립실(ADR-0129 슬라이스 1)."
 
