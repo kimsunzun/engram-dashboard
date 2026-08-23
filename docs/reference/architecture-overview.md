@@ -433,7 +433,7 @@ flowchart TD
   CS["③ 제어 표면 · api · ★단일 진입점(불변)<br/>agentClient = ProtocolClient<br/>request_id · viewId 구독 · replay · seq dedup · epoch"]
   TT["TauriTransport · 운영 carrier 고정 (ADR-0036)"]
   BE["무상태 라우터 (src-tauri) → 데몬(백엔드)"]
-  LLM["§5 LLM 제어 핸들<br/>__ENGRAM_AGENT__ · __engramLayout · __engramCmd"]
+  LLM["§5 LLM 제어 핸들<br/>__engramCmd (명령 표) + 버스 밖 곁문"]
 
   WV --> UI
   UI -->|"액션 호출 (쓰기)"| ST
