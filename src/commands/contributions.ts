@@ -8,6 +8,7 @@
 import './tabCommands'
 import './slotCommands'
 import './slotContentCommands'
+import './renderModeCommands'
 import './presetCommands'
 import './agentCommands'
 

@@ -42,6 +42,7 @@ node <skill>/scripts/adr.mjs lint
 - **격리 테스트** — `--dir <폴더>` 또는 `ADR_DIR` 환경변수로 대상 폴더를 바꿔 실데이터 밖에서 dry-run. 기본 = `docs/decisions/`(cwd 기준). 스캔/상대경로 기준 루트는 `--root`(기본 = cwd).
 - **파라미터 플래그(멀티 소비처)** — 스크립트는 여러 소비처를 하나로 섬긴다. dashboard는 위 기본값이 실값이라 플래그 불필요. 다른 소비처는 `--dir · --index-name · --template · --status-vocab a,b,c · --default-status · --anchor-roots a,b`로 실값을 주입한다(각 프로젝트 바인딩 소관).
 - **호출 순서** — `new`/`supersede`로 파일을 만든 뒤 **본문 prose를 채우고**, 그 다음 `index --write`로 인덱스를 재생성한다. `link`는 파일을 안 만드니 곧바로 `index --write`다(스캐폴드만으론 prose가 TODO라 인덱스 제목이 임시값일 수 있음 — prose 먼저, 인덱스 나중).
+- ★**채번했으면 스캐폴드를 바로 커밋·푸시해 번호를 선점한다**★ — 골격 §2 「채번은 미루지 않는다」의 engram 사정이다. **이 저장소는 워크트리를 넷 동시에 돌린다**(`git worktree list`), 그래서 다른 워크트리가 쓴 번호가 이쪽 `docs/decisions/`에 없는 구간이 상시 존재한다. 밀어 두는 비용은 **CI 7분뿐이고 그건 무료다** — 워크플로에 경로 필터가 없어 문서만 바뀐 커밋에도 게이트가 다 도는데(실측 2026-08-23: 문서 11파일 커밋이 6분 44초 초록), public repo 라 러너 비용이 0 이다(근거 = `.github/workflows/ci.yml` 트리거 주석). 실발생 = ADR-0168 이 두 워크트리에서 같은 번호로 만들어져 한쪽을 0169 로 내렸다(2026-08-24).
 
 ## ADR 폴더 + 파일명 규약 (골격 §2에 주입)
 

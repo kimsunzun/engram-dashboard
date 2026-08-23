@@ -1,10 +1,18 @@
-// ADR-0051: 채팅 렌더 간격·폰트 control surface — 프론트 전용 권위(Zustand slice)가 값을 소유하고
-//   :root CSS 변수를 setProperty 로 갱신하며 localStorage 에 영속한다. 사람 UI 와 LLM(window.__engramChat)
-//   이 **같은 store 액션**을 부른다(§5 단일 control surface). themeStore 패턴 계승 + 영속 추가
-//   (themeStore 는 영속이 없어 새로고침 시 dark 로 리셋되는 함정이 있다 — 여기선 반복하지 않는다).
+// ADR-0051: 채팅 렌더 간격·폰트 값의 프론트 전용 권위(Zustand slice) — :root CSS 변수를 setProperty 로
+//   갱신하고 localStorage 에 영속한다. CSS 변수 레이어라 StructuredTextView/ChatRow/chat.css 는 var()
+//   참조만 하고 값은 여기서만 쓴다.
+//
+// ★릴리스에서 이 값을 바꿀 경로는 없다★: 부팅 때 main.tsx 가 loadAndApplyChatStyle 로 한 번 읽어
+//   적용하는 것이 전부고, 사람 UI 도 command 도 없다. 쓰기 액션(setValue/patch/reset)에 닿는 것은 dev
+//   빌드의 window.__engram.chatStyle 뿐이다.
+//   ★그래서 예전에 저장된 값이 있으면 그게 계속 이긴다★ — loadChatStyle 이 localStorage 값을
+//   CHAT_STYLE_DEFAULTS 위에 병합하므로, 릴리스 빌드에는 그걸 되돌릴 수단이 없다(reset 도 dev 전용).
+//   여기 기본값을 고쳐도 저장분이 남은 설치본에는 안 닿는다.
+//   ★그 갭을 개별 command 로 메우지 말 것★ — 표시 상태는 「데이터 + 다시 읽기」로 다룬다(ADR-0167 결정 1).
+//   설정 영속 경로가 생기면 그것이 이 store 를 쓴다.
 //
 // ★권위 = 프론트★: 순수 렌더 프리퍼런스라 백엔드(데몬/settings.json/emit)를 안 태운다(ADR-0051 거부한
-//   대안: 백엔드 영속). CSS 변수 레이어라 StructuredTextView/chat.css 는 var() 참조만 하고 값은 여기서만 쓴다.
+//   대안: 백엔드 영속).
 
 import { create } from 'zustand'
 
@@ -24,7 +32,7 @@ export type ChatStyleKey =
 export type ChatStyleValues = Record<ChatStyleKey, string>
 
 // ADR-0051: 기본값 — theme.css :root fallback 과 동기(둘 중 하나만 바뀌면 부팅 첫 프레임과 store 적용이
-//   어긋난다). 값은 사용자 라이브 튜닝(window.__engramChat) 확정값으로 bake(74ce001 이후 조정).
+//   어긋난다). 숫자는 사용자가 라이브 튜닝으로 확정한 값을 bake 한 것이다 — 임의로 "정리"하지 말 것.
 export const CHAT_STYLE_DEFAULTS: ChatStyleValues = {
   railRowPt: '0.8rem',
   plainRowPt: '0.7rem',
@@ -81,8 +89,8 @@ function persist(values: ChatStyleValues): void {
   }
 }
 
-// ADR-0051 (FIX-2): control surface 는 런타임 무신뢰 경계다 — window.__engramChat.patch/set 은 LLM·외부
-//   호출자가 부르고 TS 타입은 런타임 방어가 못 된다. 그래서 CHAT_STYLE_DEFAULTS 의 고정 키 목록을 단일
+// ADR-0051 (FIX-2): 값이 타입 밖에서 들어오는 입구가 둘이다 — localStorage 의 JSON(신뢰할 수 없는 저장값)
+//   과 dev 핸들(window.__engram.chatStyle)의 무타입 호출. 그래서 CHAT_STYLE_DEFAULTS 의 고정 키 목록을 단일
 //   화이트리스트로 삼는다: applyToRoot 는 이 목록만 순회하고(values 에 낯선 키가 섞여도 setProperty 안 함),
 //   set/patch 는 이 목록에 없는 키를 store·localStorage 진입 전에 걸러낸다.
 const CHAT_STYLE_KEYS = Object.keys(CHAT_STYLE_DEFAULTS) as ChatStyleKey[]
@@ -121,7 +129,7 @@ export function loadAndApplyChatStyle(): void {
 interface ChatStyleState {
   values: ChatStyleValues
   init: () => void
-  /** 단일 키 갱신 — CSS 변수 적용 + localStorage 저장. 사람 UI·LLM 공통 진입점. */
+  /** 단일 키 갱신 — CSS 변수 적용 + localStorage 저장. */
   setValue: (key: ChatStyleKey, value: string) => void
   /** 부분 병합 갱신(여러 키 한 번에). */
   patch: (partial: Partial<ChatStyleValues>) => void

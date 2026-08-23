@@ -1,7 +1,7 @@
 // TabBar — 한 창(label)의 탭 목록 + 활성 탭 표시 + [+] 새 탭 + 탭별 닫기 + 이름 인라인 편집(ADR-0057, §7-2).
 //
 // ★§5 손발/두뇌 분리★: 사람 클릭(탭 전환/추가/닫기/이름변경)은 viewStore 액션(switchTab/createTab/closeTab/
-// renameTab)만 부른다 — LLM(window.__engramLayout·__engramCmd)이 같은 command 를 흔드는 것과 물리적으로
+// renameTab)만 부른다 — LLM(window.__engramCmd)이 같은 command 를 흔드는 것과 물리적으로
 // 동일 표면. 실제 상태 변경은 백엔드 ViewManager(권위)가 하고 window:tabs-updated emit 으로 반영된다(낙관 갱신 X).
 
 import { useEffect, useRef, useState } from 'react'

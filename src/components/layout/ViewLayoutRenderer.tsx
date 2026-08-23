@@ -1,6 +1,6 @@
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
-// 사람 클릭(SlotContextMenu — 우클릭 전용, ADR-0144)이든 LLM(window.__engramLayout)이든 같은 invoke→emit
+// 사람 클릭(SlotContextMenu — 우클릭 전용, ADR-0144)이든 LLM(window.__engramCmd)이든 같은 invoke→emit
 // 권위 루프로 갱신된다.
 
 import { useEffect, useRef, useState } from 'react'
@@ -176,8 +176,8 @@ export default function ViewLayoutRenderer({
           if (!isContentSlot(node.content)) return
           if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
         }}
-        // ADR-0035: 메뉴 액션(분할/닫기/배정)은 viewStore(=window.__engramLayout) 단일 제어 표면으로만
-        //   흐른다(사람 클릭 = LLM 이 한 표면, §5).
+        // ADR-0064: 메뉴 항목은 command id 로만 실행한다 — 메뉴가 store 를 직접 부르지 않는다.
+        //   그래서 사람 우클릭과 LLM 이 같은 진입점을 지난다(§5).
         onContextMenu={e => {
           e.preventDefault()
           setContextMenu({ x: e.clientX, y: e.clientY })
