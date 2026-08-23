@@ -58,9 +58,12 @@ vi.mock('../../store/viewStore', () => ({
 
 // Ban = 마지막 실패 축의 금지 표식(ADR-0173) — 상태 축 4모양(Circle/Square/X)과 달리 `lastFailure` 가
 //   있을 때만 나온다. 그래서 아래 「4모양 밖은 나오지 않는다」 allowlist(상태 축 단독 호출)에는 안 든다.
-import { Ban, Circle, Square, X } from 'lucide-react'
+import { Ban, Circle, Loader, Square, X } from 'lucide-react'
 
 import AgentList, { statusGlyphColor, statusGlyphIcon } from './AgentList'
+// 시연(presentation) 층은 매핑 SSOT 인 statusGlyph 에서 직접 가져온다 — AgentList 의 re-export 는
+//   옛 importer 를 위한 통로일 뿐이라 새 축을 거기로 늘리지 않는다.
+import { rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { useAgentStore } from '../../store/agentStore'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 import type { LayoutNode } from '../../api/layoutTypes'
@@ -215,6 +218,62 @@ describe('statusGlyphIcon/Color — 마지막 실패 축', () => {
     const kinds = ['NoConversationToResume', 'SpawnFailed', 'EarlyExitAfterResume', 'Other'] as const
     const shapes = new Set(kinds.map(k => statusGlyphIcon(reserved, k).shape))
     expect(shapes.size).toBe(1)
+  })
+})
+
+// ── 시연 층: 「답을 기다리는 중」·「방금 거절당했다」(pure) ────────────────────────
+// 백엔드 status 는 세션이 생기는 순간 낙관적으로 Running 이 되므로 "연결됐다"를 뜻하지 않는다. 그래서
+//   답이 오기 전 구간과 거절 직후 구간을 상태 축 **위에** 얹는다 — `isFailureBlocked` 의 의미는 불변.
+describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
+  it('우선순위 = pending > rejected > settled(재시도가 지난 거절을 이긴다)', () => {
+    expect(rowPhase(true, false)).toBe('pending')
+    expect(rowPhase(true, true)).toBe('pending')
+    expect(rowPhase(false, true)).toBe('rejected')
+    expect(rowPhase(false, false)).toBe('settled')
+  })
+
+  it('pending = 바퀴살 모양 + 새 토큰(기존 다섯을 재사용·개명하지 않는다)', () => {
+    const g = rowGlyphIcon('pending', 'Running', null)
+    expect(g.Icon).toBe(Loader)
+    expect(g.shape).toBe('pending')
+    // 바퀴살은 선이라 채울 면이 없다 — 채우면 lucide 가 획을 뭉갠다.
+    expect(g.fill).toBe('none')
+  })
+
+  it('★기다리는 동안 초록은 없다★ — 낙관적 Running 이어도 색이 muted 로 눌린다', () => {
+    // 이 결함의 본체가 그 초록이었다: 답을 모르는 구간에 "돌고 있다"고 주장한 것.
+    for (const s of ['Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', '???']) {
+      expect(rowGlyphColor('pending', s, null)).toBe('var(--text-muted)')
+      expect(rowGlyphColor('pending', s, null)).not.toBe('var(--status-running)')
+      expect(rowGlyphIcon('pending', s, null).shape).toBe('pending')
+    }
+  })
+
+  it('★거절은 기록도 사망 관측도 기다리지 않는다★ — lastFailure=null·status=Running 이어도 금지 표식', () => {
+    // 실측한 거짓말의 정확한 구간: RPC 는 이미 거절했는데 프로세스가 아직 살아 있어 status 는 Running.
+    const g = rowGlyphIcon('rejected', 'Running', null)
+    expect(g.shape).toBe('blocked')
+    expect(g.Icon).toBe(Ban)
+    expect(rowGlyphColor('rejected', 'Running', null)).toBe('var(--status-blocked)')
+    // 「도는 중이 이긴다」(ADR-0173)는 *지난* 시도의 기록에 대한 규칙이라 여기 적용되지 않는다 —
+    //   거절은 방금 이 화면이 직접 받은 답이다.
+    expect(rowGlyphIcon('rejected', 'Running', null)).not.toEqual(statusGlyphIcon('Running', null))
+  })
+
+  it('settled 는 상태 축을 한 톨도 바꾸지 않는다(위임 — 사본을 만들지 않는다)', () => {
+    for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???']) {
+      for (const f of [null, 'NoConversationToResume'] as const) {
+        expect(rowGlyphIcon('settled', s, f)).toEqual(statusGlyphIcon(s, f))
+        expect(rowGlyphColor('settled', s, f)).toBe(statusGlyphColor(s, f))
+      }
+    }
+  })
+
+  it('상태 축 단독(statusGlyphIcon)은 절대 pending 을 내지 않는다(층이 섞이지 않는다)', () => {
+    for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???', '']) {
+      expect(statusGlyphIcon(s).shape).not.toBe('pending')
+      expect(statusGlyphIcon(s, 'SpawnFailed').shape).not.toBe('pending')
+    }
   })
 })
 
@@ -485,6 +544,121 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     fireEvent.click(screen.getByText('열기'))
     expect(assignAgentMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── ★더블클릭한 행은 답이 올 때까지 상태를 주장하지 않는다★ ────────────────────────────
+//   실측한 결함(2026-08-24): 더블클릭 후 2.4초에 활성화 RPC 가 이미 **거절**했는데도 행은 4.2초 더
+//   초록 채운 원을 그렸다 — 「실패」배지와 나란히. 초록은 status 를 따라 그려지고, 그 status 는 세션이
+//   생기는 순간 낙관적으로 Running 이 되어(코어) 프로세스가 죽어 관측될 때까지 남기 때문이다.
+//   여기서 고정하는 성질 넷: ① in-flight = 스피너 ② 거절 = 즉시 금지 표식 ③ 성공 = 평소 기호
+//   ④ 기다리는 동안 초록은 어떤 경로로도 나오지 않는다.
+//
+//   ★시간을 재지 않는다★: 이 저장소엔 벽시계 단언으로 흔들린 테스트 전례가 있다. 대신 spawnProfile
+//   Promise 를 직접 쥐고(미해결/거절/해결) microtask 만 flush 해 구간을 결정적으로 만든다.
+describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회귀 안전망)', () => {
+  const rowOf = (id: string) => document.querySelector(`[data-agent-row="${id}"]`) as HTMLElement
+  const glyphOf = (id: string) =>
+    document.querySelector(`[data-agent-row="${id}"] [data-agent-glyph]`) as HTMLElement
+
+  /** reject/resolve 뒤 .catch → .finally 까지 도는 microtask 를 확정적으로 비운다(타이머 아님). */
+  async function flush(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('①④ 더블클릭 후 답이 오기 전 → 스피너, 그 사이 명부에 Running 이 올라와도 초록 아님', () => {
+    let resolveSpawn: (() => void) | undefined
+    clientMock.spawnProfile.mockImplementationOnce(
+      () => new Promise<{ id: string }>(res => { resolveSpawn = () => res({ id: 'p1' }) }),
+    )
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
+    expect(glyphOf('p1').querySelector('svg.lucide-loader')).toBeTruthy()
+    // 회전은 스타일시트가 소유한다(agentGlyph.css) — 컴포넌트는 클래스만 붙인다.
+    expect(glyphOf('p1').classList.contains('engram-glyph-spin')).toBe(true)
+    expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
+    // hover 도 같은 판정을 따라간다 — 기다리는 중에 옛 실패 문구/cwd 가 뜨면 기호와 말이 어긋난다.
+    expect(rowOf('p1').getAttribute('title')).toBe('진행 중…')
+
+    // ★결함의 정확한 구간★: 백엔드가 세션 생성과 함께 낙관적 Running 을 명부에 올린다. 그래도
+    //   아직 답이 아니므로 초록으로 갈아타면 안 된다.
+    act(() => { useAgentStore.setState({ agents: [agent('p1', 'C:/r')] }) })
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
+    expect(glyphOf('p1').dataset.agentGlyphShape).not.toBe('filled-circle')
+    expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
+
+    resolveSpawn?.() // cleanup(핸들 미해결 방지)
+  })
+
+  it('② 거절 → lastFailure 기록이 오기 전에 이미 금지 표식(배지와 같은 순간)', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(() =>
+      Promise.reject(new Error('no conversation to resume')),
+    )
+    // last_failure = null 로 둔다 — 기록이 아직 안 온 상태가 이 테스트의 전제다.
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+
+    expect(useAgentStore.getState().profiles[0].last_failure).toBeNull()
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
+    expect(glyphOf('p1').querySelector('svg.lucide-ban')).toBeTruthy()
+    expect(glyphOf('p1').style.color).toBe('var(--status-blocked)')
+    // 「실패」배지 = 프론트가 답을 이미 쥐고 있었다는 증거. 기호가 그것과 같은 순간에 갈린다.
+    expect(rowOf('p1').textContent).toContain('실패')
+  })
+
+  it('② 거절 후 프로세스가 아직 살아 status=Running 이어도 초록으로 돌아가지 않는다', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(() => Promise.reject(new Error('rejected')))
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+    // 죽어 가는 프로세스가 명부에 Running 으로 남아 있는 구간(실측 +2.4s ~ +6.6s).
+    act(() => { useAgentStore.setState({ agents: [agent('p1', 'C:/r')] }) })
+
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
+    expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
+  })
+
+  it('③ 성공 → 평소 상태 기호(초록 채운 원은 여기서만 난다)', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(async () => ({ id: 'p1' }))
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+    act(() => {
+      useAgentStore.setState({ agents: [agent('p1', 'C:/r')], profiles: [profile('p1', 'C:/r')] })
+    })
+
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('filled-circle')
+    expect(glyphOf('p1').querySelector('svg.lucide-circle')).toBeTruthy()
+    expect(glyphOf('p1').style.color).toBe('var(--status-running)')
+    expect(glyphOf('p1').classList.contains('engram-glyph-spin')).toBe(false)
+  })
+
+  it('거절 후 재시도 → 스피너가 금지 표식을 이긴다(지난 답은 지금의 사실이 아니다)', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(() => Promise.reject(new Error('rejected')))
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
+
+    let resolveSpawn: (() => void) | undefined
+    clientMock.spawnProfile.mockImplementationOnce(
+      () => new Promise<{ id: string }>(res => { resolveSpawn = () => res({ id: 'p1' }) }),
+    )
+    fireEvent.doubleClick(rowOf('p1'))
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
+    resolveSpawn?.()
   })
 })
 

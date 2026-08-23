@@ -75,6 +75,9 @@ export const ko = {
     rowRestart: '재시작 (준비 중)', // 백엔드 command 부재로 비활성.
     doubleClickToActivate: '더블클릭으로 활성화(spawn)', // reserved 행 title 힌트.
     rowFailedBadge: '실패',
+    // 답을 기다리는 동안의 행 기호(회전) — hover 문구이자 들리는 이름. 낙관적 `Running` 을 그대로
+    //   읽으면 화면에서 걷어낸 거짓말이 소리로 되살아나므로 이 구간만 상태 어휘를 대체한다.
+    glyphPending: '진행 중…',
     // ── 마지막 실패(ADR-0172 결정 5의 표 — 종류마다 문구 하나 + 권하는 행동 하나) ────────────
     // ★컴포넌트에 문구를 박지 말 것(ADR-0173 §영향)★: 이 키들을 읽는 곳은
     //   `src/components/agent/failureKinds.ts` 한 곳이고, 화면은 그 표에서 문구를 받는다.

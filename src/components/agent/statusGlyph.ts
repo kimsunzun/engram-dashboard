@@ -13,7 +13,7 @@
 //   {아이콘 · 채움 · 모양 토큰} 한 벌이 들어왔고, 판정식·색·hover 문구는 손대지 않았다. 관측 표면도
 //   textContent 에서 `shape` 토큰으로 옮겨갔을 뿐 사라지지 않았다(svg 는 글자를 남기지 않는다).
 
-import { Ban, Circle, Square, X, type LucideIcon } from 'lucide-react'
+import { Ban, Circle, Loader, Square, X, type LucideIcon } from 'lucide-react'
 
 import type { AgentFailureKind } from '../../api/types'
 
@@ -26,9 +26,10 @@ export type StatusGlyphIcon = {
    * DOM 관측 표면(테스트·CDP·LLM 셀렉터)에 나가는 안정 토큰. 아이콘 컴포넌트는 직렬화되지 않는다.
    *
    * ★기존 토큰을 지우거나 이름을 바꾸지 말 것★: 이 문자열에 셀렉터가 걸려 있어서 개명은 조용한 파괴다.
-   *   **늘리는 것만 안전하다** — `blocked` 가 그렇게 늘어난 것이다(ADR-0173 의 마지막 실패 축).
+   *   **늘리는 것만 안전하다** — `blocked` 가 그렇게 늘어난 것이고(ADR-0173 의 마지막 실패 축),
+   *   `pending` 이 그 다음이다(아래 시연 층 — 답을 기다리는 동안).
    */
-  shape: 'filled-circle' | 'square' | 'x' | 'circle' | 'blocked'
+  shape: 'filled-circle' | 'square' | 'x' | 'circle' | 'blocked' | 'pending'
 }
 
 /**
@@ -121,4 +122,90 @@ export function statusGlyphColor(status: string, lastFailure?: AgentFailureKind 
   // ADR-0173
   if (isFailureBlocked(status, lastFailure)) return 'var(--status-blocked)'
   return status === 'Running' ? 'var(--status-running)' : 'var(--text-muted)'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 시연(presentation) 층 — 「답을 기다리는 중」·「방금 거절당했다」
+//
+// ★백엔드 상태를 늘리지 않는다★: `status` 는 세션이 생기는 순간 낙관적으로 `Running` 이 되고(코어의
+//   OutputCore 초기값) "연결됐다·쓸 수 있다"를 뜻한 적이 없다. 그래서 더블클릭한 행은 답이 오기 전
+//   구간에서 초록 채운 원을 그렸다 — 아직 아무것도 모르는데 "돌고 있다"고 말한 셈이고, 활성화가
+//   거절된 뒤에도 프로세스가 죽어 관측될 때까지 그 초록이 몇 초 더 남았다(실측 2026-08-24: 거절
+//   +2.4s → 초록 4.2s → 그제서야 금지 표식).
+//
+// ★고친 방향 = 프론트가 이미 들고 있는 답을 쓰는 것★: 활성화 RPC 의 in-flight/거절은 이 화면이
+//   먼저 안다(거절이 「실패」 배지를 띄우는 그 순간이다). 그러니 상태 축을 건드리지 않고 그 위에
+//   한 겹을 얹는다 — `isFailureBlocked` 의 의미는 한 글자도 바뀌지 않는다.
+//
+// ★셋(기호·색·hover)이 한 판정을 따르는 성질은 유지된다★(ADR-0173): 아래 `rowPhase` 가 그 한 판정의
+//   자리이고, 기호(`rowGlyphIcon`)·색(`rowGlyphColor`)·hover(AgentList 의 title)가 같은 값을 받는다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 지금 이 행이 무엇을 말하고 있나 — **결정 순서가 곧 우선순위**다.
+ *
+ * - `pending`  : 이 행에 건 요청이 아직 돌고 있다. 답을 모르므로 상태 기호를 그리지 않는다.
+ * - `rejected` : 방금 건 활성화가 **거절당했다**. 프로세스가 죽어 관측되기 전이라 `status` 는 아직
+ *                `Running` 일 수 있고 「마지막 실패」 기록도 한 박자 뒤에 온다 — 둘 다 기다리지 않는다.
+ * - `settled`  : 그 밖 — 상태·마지막 실패 축(위 `statusGlyphIcon`) 그대로.
+ */
+export type RowPhase = 'settled' | 'pending' | 'rejected'
+
+/**
+ * ★`pending` 이 `rejected` 를 이긴다★: 거절 표식은 *지난* 시도의 결과라, 같은 행에 새 시도가 걸려
+ *   있으면 그 새 시도가 지금의 사실이다(재시도 즉시 스피너로 갈아타야 한다).
+ */
+export function rowPhase(inFlight: boolean, activationRejected: boolean): RowPhase {
+  if (inFlight) return 'pending'
+  if (activationRejected) return 'rejected'
+  return 'settled'
+}
+
+/**
+ * 답을 기다리는 동안의 기호.
+ *
+ * ★`Loader`(바퀴살 8개)를 고른 이유 = e-ink★: 그 테마는 `--status-*` 를 통째로 중립화하므로
+ *   (`--status-running` → `var(--text-muted)`) **모양만 남는다.** 후보 중 `LoaderCircle` 은 한 군데
+ *   트인 원 하나(`M21 12a9 9 0 1 1-6.219-8.56`)라 12px 에서 Reserved 의 빈 원과 실루엣이 사실상
+ *   같아진다 — 색도 움직임도 못 믿는 자리에서 그건 신호가 아니다. `Loader` 는 축 4 + 대각 4 = 여덟
+ *   갈래가 가운데를 비우고 뻗은 별 모양이라 기존 넷(채운 원·빈 원·사각·✗)·금지 표식 어느 것과도
+ *   겹치지 않는다. 그래서 **회전이 멈춰도**(reduced-motion) 읽힌다.
+ * ★채움은 `none`★: 바퀴살은 선이라 채울 면이 없다(채우면 lucide 가 획을 뭉갠다).
+ * ★회전은 CSS 가 소유한다★: 키프레임은 `agentGlyph.css`(클래스 `engram-glyph-spin`) — JSX 인라인
+ *   키프레임 금지. 이 모듈은 여전히 JSX 도 스타일도 만들지 않는다(ADR-0168).
+ */
+const PENDING_GLYPH: StatusGlyphIcon = { Icon: Loader, fill: 'none', shape: 'pending' }
+
+/**
+ * 행이 실제로 그리는 기호 — 시연 층을 얹은 최종 선택.
+ *
+ * `settled` 는 `statusGlyphIcon` 을 **그대로 위임**한다(복제 금지 — 두 사본이 갈리면 같은 상태가
+ * 자리마다 다른 모양으로 뜬다).
+ */
+export function rowGlyphIcon(
+  phase: RowPhase,
+  status: string,
+  lastFailure?: AgentFailureKind | null,
+): StatusGlyphIcon {
+  if (phase === 'pending') return PENDING_GLYPH
+  // ★기록을 기다리지 않는다★: 거절은 이 화면이 직접 받은 답이고, 「마지막 실패」는 그 사실이 백엔드를
+  //   한 바퀴 돌아 오는 사본일 뿐이다. 기록이 도착하면 `settled` 로 내려앉아도 같은 금지 표식이 나온다.
+  if (phase === 'rejected') return BLOCKED_GLYPH
+  return statusGlyphIcon(status, lastFailure)
+}
+
+/**
+ * 행이 실제로 쓰는 색 — 기호와 **같은 phase** 를 받는다(어긋나면 금지 표식이 초록으로 뜬다).
+ *
+ * ★`pending` 은 muted★: 초록은 "돌고 있다"는 주장이라 답을 모르는 구간에 쓸 수 없다 — 이 결함의
+ *   본체가 바로 그 초록이었다.
+ */
+export function rowGlyphColor(
+  phase: RowPhase,
+  status: string,
+  lastFailure?: AgentFailureKind | null,
+): string {
+  if (phase === 'pending') return 'var(--text-muted)'
+  if (phase === 'rejected') return 'var(--status-blocked)'
+  return statusGlyphColor(status, lastFailure)
 }
