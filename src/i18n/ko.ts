@@ -75,8 +75,8 @@ export const ko = {
     rowRestart: '재시작 (준비 중)', // 백엔드 command 부재로 비활성.
     doubleClickToActivate: '더블클릭으로 활성화(spawn)', // reserved 행 title 힌트.
     rowFailedBadge: '실패',
-    // ── 마지막 실패(ADR-0169 결정 5의 표 — 종류마다 문구 하나 + 권하는 행동 하나) ────────────
-    // ★컴포넌트에 문구를 박지 말 것(ADR-0170 §영향)★: 이 키들을 읽는 곳은
+    // ── 마지막 실패(ADR-0172 결정 5의 표 — 종류마다 문구 하나 + 권하는 행동 하나) ────────────
+    // ★컴포넌트에 문구를 박지 말 것(ADR-0173 §영향)★: 이 키들을 읽는 곳은
     //   `src/components/agent/failureKinds.ts` 한 곳이고, 화면은 그 표에서 문구를 받는다.
     failureNoConversation: '이어받을 대화가 없습니다',
     failureNoConversationAction: '새 대화로 시작해야 합니다',
@@ -108,10 +108,6 @@ export const ko = {
     label: '프리셋',
     empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
     deleteBtn: '삭제',
-  },
-  theme: {
-    set: '테마 설정',
-    toggle: '테마 순환',
   },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {

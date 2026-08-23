@@ -49,7 +49,7 @@ const DEFAULT_ROWS: u16 = 24;
 ///   한다 — 죽음만 기다리는 판정은 이 창을 6s 넘게 늘려야 맞는데, 활성화는 이 창만큼 **블록**하므로
 ///   그러면 멀쩡한 이어받기가 전부 그만큼 느려진다. 그래서 판정 근거를 「죽음」에서 「죽음 또는 증거」로
 ///   바꿨다(`EarlyVerdict`) — 오히려 실패를 더 **빨리** 확정한다.
-// ADR-0169
+// ADR-0172
 const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
@@ -103,7 +103,7 @@ fn select_transport(
 ///   활성화를 조용히 흘린다).
 /// ★moot 은 아무것도 바꾸지 않는다★: 한 것이 없으므로 기록할 실패도, 지울 근거도 없다
 ///   (`AgentManager::note_spawn_result`).
-// ADR-0169
+// ADR-0172
 #[derive(Debug, Clone)]
 pub enum SpawnOutcome {
     /// 이 호출이 화신을 띄웠다.
@@ -140,7 +140,7 @@ impl SpawnOutcome {
 
 /// 실패 분류가 들여다보는 출력 꼬리의 하드 상한(`OutputCore::terminal_tail` 이 정확히 지킨다). 우리가
 /// 찾는 종료 문구는 마지막 몇 줄에 있다. 이 값은 화면·로그로 나가지 않는다(분류 입력 전용).
-// ADR-0169
+// ADR-0172
 const FAILURE_TAIL_BYTES: usize = 4096;
 
 /// 이어받기 시도의 조기 판정 결말 — 「죽었나」가 아니라 「무슨 증거가 섰나」로 갈린다.
@@ -151,7 +151,7 @@ const FAILURE_TAIL_BYTES: usize = 4096;
 ///   사례가 통째로 죽는 자리였다. 증거가 이미 섰으면 시체를 기다리지 않는다.
 /// ★창을 늘리는 것은 이 문제의 답이 아니다★: 활성화는 이 창만큼 **블록**하므로, 늘리면 멀쩡한
 ///   이어받기가 전부 그만큼 느려진다. 답은 기다림이 아니라 판단 근거를 바꾸는 것이다.
-// ADR-0169
+// ADR-0172
 enum EarlyVerdict {
     /// 창 안에 종점 상태로 들었다. `evidence` = 그 순간 붙잡은 콘솔 꼬리 + 진단 텍스트(best-effort,
     /// 빈 값이 정상).
@@ -905,7 +905,7 @@ impl AgentManager {
     /// ★두 갈래의 「할 일 없음」은 `Ok(Moot)` 다 — `Err` 로 되돌리지 마라★: 그 항목이 이미 떠 있거나
     /// (아래 이중-spawn 가드) 이미 뜨는 중이면(예약 패배) 이 요청은 무의미하고, 무의미는 실패가 아니다.
     /// 근거와 그 전환이 없앤 것은 `SpawnOutcome` 주석이 갖는다.
-    // ADR-0169
+    // ADR-0172
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
@@ -1112,7 +1112,7 @@ impl AgentManager {
                 "activate_profile: 이미 실행 중 — 재활성화 무시(산 에이전트 보존, ADR-0082)"
             );
             // ★이 갈래는 「마지막 실패」에 아무것도 쓰지 않는다★: 활성화를 시도하지 않았으므로 기록할
-            //   실패도, 지울 근거도 없다 — 아래 `spawn_agent` 의 moot 갈래와 같은 규율이다(ADR-0169).
+            //   실패도, 지울 근거도 없다 — 아래 `spawn_agent` 의 moot 갈래와 같은 규율이다(ADR-0172).
             return Ok(self.agent_info(&session));
         }
 
@@ -1123,7 +1123,7 @@ impl AgentManager {
             // ★그마저 없을 때의 문구는 "없는 에이전트" 가 아니다★: 프로필은 실재하고 지금 **다른 요청이
             //   띄우는 중**이라 우리가 돌려줄 세션이 없을 뿐이다. `NotFound` 를 그대로 흘리면 원인을
             //   잘못 지목한 문구("agent not found")가 호출자·LLM 에게 간다.
-            // ADR-0169
+            // ADR-0172
             return match outcome?.into_info() {
                 Some(info) => Ok(info),
                 None => self.agent_info_by_id(profile.id).map_err(|e| match e {
@@ -1147,7 +1147,7 @@ impl AgentManager {
             //   그대로 내면 호출자가 시체를 산 에이전트로 보고한다(`state_of` 가 "live" 로 번역하고, WS 는
             //   그 status 로 `Spawned` 를 낸다 — 그러면 다음 동사가 시체에게 편지를 쓴다). 조회가 놓쳤다는
             //   것 자체가 "그 사이 수거됐다" 는 관측이므로 종점 상태로 낮춰 싣는다. 코드는 모른다(`None`).
-            // ADR-0169
+            // ADR-0172
             RestoreOutcome::Resumed => match self.agent_info_by_id(profile.id) {
                 Ok(info) => Ok(info),
                 Err(e) => match spawned {
@@ -1168,7 +1168,7 @@ impl AgentManager {
         }
     }
 
-    /// ★「마지막 실패」를 쓰는 **유일한 지점**(ADR-0169 결정 4 — 개정판)★. `None` = 활성화가 성립했다
+    /// ★「마지막 실패」를 쓰는 **유일한 지점**(ADR-0172 결정 4 — 개정판)★. `None` = 활성화가 성립했다
     /// → 지운다. `Some(kind)` = 그 자리에서 기록한다.
     ///
     /// ★지우는 조건이 「대화 왕복 성립」에서 「활성화 성공」으로 바뀐 이유 — 되돌리지 마라★:
@@ -1184,7 +1184,7 @@ impl AgentManager {
     /// ★기록과 같은 스레드에서 부른다★: 활성화를 집행하는 그 스레드다(출력 pump 아님).
     /// ★`incarnation` 은 지각-쓰기 가드다★ — 계약은 `ProfileRegistry::set_last_failure` 가 갖는다.
     ///   화신이 만들어진 결말(성공 · 조기종료)은 그 epoch 을 실어 보내고, 화신 전에 끝난 실패만 `None` 이다.
-    // ADR-0169
+    // ADR-0172
     fn note_activation_result(
         &self,
         id: AgentId,
@@ -1202,7 +1202,7 @@ impl AgentManager {
     ///   같은 이유다.
     /// resume 은 이걸 쓰지 않는다 — spawn 이 Ok 여도 조기종료 창을 넘겨야 성립이라, 결말을 아는 자리가
     /// `resume_no_fallback` 이다.
-    // ADR-0169
+    // ADR-0172
     fn note_spawn_result(&self, id: AgentId, result: &Result<SpawnOutcome, PtyError>) {
         match result {
             Ok(SpawnOutcome::Started(info)) => {
@@ -1367,7 +1367,7 @@ impl AgentManager {
             backend::needs_session(&profile.command) && profile.claude_session_id.is_some();
 
         if !resumable {
-            // ADR-0169: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.
+            // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.
             let outcome = self.spawn_agent(profile, SpawnMode::Fresh);
             self.note_spawn_result(profile.id, &outcome);
             return match outcome {
@@ -1402,12 +1402,12 @@ impl AgentManager {
     /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
     /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
     // ADR-0082
-    // ADR-0169
+    // ADR-0172
     fn resume_no_fallback(&self, profile: &AgentProfile) -> (RestoreOutcome, Option<AgentInfo>) {
         let spawned = match self.spawn_agent(profile, SpawnMode::Resume) {
             Err(e) => {
                 let reason = format!("resume spawn 실패: {e}");
-                // ADR-0169: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
+                // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
                 //   제어 LLM 이 읽는다" 의 화면·API 쪽 실물이다(로그는 사람만 읽는다).
                 self.note_activation_result(profile.id, None, Some(AgentFailureKind::SpawnFailed));
                 tracing::warn!(
@@ -1420,7 +1420,7 @@ impl AgentManager {
             // ★할 일이 없었다 — 조기종료 창을 볼 이유도 없다★: 남이 띄운(띄우는 중인) 세션이라 우리가
             //   관측한 것이 없고, 그래서 기록도 지움도 하지 않는다(`note_spawn_result` 와 같은 규율).
             //   보고는 「떠 있다」로 접는다 — 복원 어휘에 「할 일 없었음」 칸이 없다.
-            // ADR-0169
+            // ADR-0172
             Ok(SpawnOutcome::Moot(info)) => {
                 tracing::info!(
                     agent = %profile.id,
@@ -1439,7 +1439,7 @@ impl AgentManager {
         //   EARLY_EXIT_WINDOW 뒤에 일어나고 그때 예약은 이미 풀려 있다. 그 사이 다른 연결이 같은
         //   프로필을 성공적으로 활성화하면 epoch 이 올라가므로, 이 값을 실어 보내면 옛 관측이 새 화신을
         //   덮지 못한다(`set_last_failure` 계약).
-        // ADR-0169
+        // ADR-0172
         match self.early_activation_verdict(profile.id, &profile.command, EARLY_EXIT_WINDOW) {
             EarlyVerdict::Terminal { status, evidence } => {
                 let reason = format!("resume 조기 종료({status:?})");
@@ -1448,7 +1448,7 @@ impl AgentManager {
                 //   개입이다. 기록하면 트리에 「이어받은 직후 종료됐습니다」가 남아, 사용자가 방금 스스로
                 //   끈 항목이 고장 난 것처럼 보인다. 활성화 결과는 여전히 Failed 다(에이전트가 안 떠 있다).
                 //   지우지도 않는다 — 이 시도에 대해 성립을 주장할 근거도 없다.
-                // ADR-0169
+                // ADR-0172
                 if matches!(status, AgentStatus::Killed) {
                     tracing::info!(
                         agent = %profile.id,
@@ -1474,8 +1474,8 @@ impl AgentManager {
             //   기다리면 창을 넘겨 실패가 성공으로 판정되므로 여기서 확정한다. 처분은 그대로 관측뿐이다
             //   — 자식은 자기 pump 가 EOF→finish 하고 reaper 가 거둔다(ADR-0082 "아무것도 죽지마").
             // ★그래서 몇 초간 「도는 중 + 마지막 실패」 조합이 화면에 선다 — 버그가 아니다★: 두 축이
-            //   별개라 표현되는 상태이고, 트리는 「도는 중이 이긴다」로 그 사이를 그린다(ADR-0170).
-            // ADR-0169
+            //   별개라 표현되는 상태이고, 트리는 「도는 중이 이긴다」로 그 사이를 그린다(ADR-0173).
+            // ADR-0172
             EarlyVerdict::Diagnosed(kind) => {
                 let reason = format!("resume 실패 진단({kind:?})");
                 self.note_activation_result(profile.id, Some(spawned.epoch), Some(kind));
@@ -1483,7 +1483,7 @@ impl AgentManager {
                     agent = %profile.id,
                     %reason,
                     ?kind,
-                    "ADR-0169: 진단 스트림이 이어받기 실패를 확정 — 종료를 기다리지 않는다"
+                    "ADR-0172: 진단 스트림이 이어받기 실패를 확정 — 종료를 기다리지 않는다"
                 );
                 (RestoreOutcome::Failed { reason }, Some(spawned))
             }
@@ -1521,7 +1521,7 @@ impl AgentManager {
     ///   둘 다 비면 호출자가 맥락 기본값으로 떨어뜨린다(fail-open).
     /// ★`command` 를 받는 이유★: "이 문구가 무슨 뜻인가" 는 백엔드 지식이라 판정을 `backend` 에 위임한다
     ///   (ADR-0004) — manager 는 문자열을 직접 읽지 않는다.
-    // ADR-0169
+    // ADR-0172
     fn early_activation_verdict(
         &self,
         id: AgentId,
@@ -2075,7 +2075,7 @@ mod tests {
     ///   어떻게 서는가" 뿐이라 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리). `RecordingTransport`
     ///   는 아무것도 띄우지 않으므로 이 세션은 **스스로 절대 죽지 않는다** — 그게 "죽음을 기다리지 않는다"
     ///   를 재는 데 필요한 성질이다(실 claude 로는 그 상태를 결정적으로 붙들 수 없다).
-    // ADR-0169
+    // ADR-0172
     fn put_live_session(manager: &AgentManager, id: AgentId, epoch: u32) -> Arc<OutputCore> {
         let core = Arc::new(OutputCore::new(
             id,
@@ -2124,7 +2124,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0169: 판정은 죽음이 아니라 **증거**로도 선다 ────────────────────────────────
+    // ── ADR-0172: 판정은 죽음이 아니라 **증거**로도 선다 ────────────────────────────────
 
     /// ★이 기능의 표제 사례 회귀망(실측 2026-08-23)★ — 진단이 이미 실패를 말했으면 프로세스가 아직
     /// 살아 있어도 그 자리에서 확정한다.
@@ -2178,7 +2178,7 @@ mod tests {
     /// ★같은 자리의 오탐 방어★ — 진단이 침묵하면 살아 있는 세션은 그대로 성립으로 넘어간다.
     ///
     /// 이 단언이 없으면 위 테스트는 "아무 텍스트에나 Diagnosed 를 내는" 구현으로도 통과한다. 그 구현은
-    /// **성공한 이어받기를 실패로 도장 찍는다**(fail-open 위반 — ADR-0169 §영향).
+    /// **성공한 이어받기를 실패로 도장 찍는다**(fail-open 위반 — ADR-0172 §영향).
     #[test]
     fn a_live_session_with_nothing_to_say_is_not_diagnosed() {
         let manager = bare_manager();
@@ -3432,7 +3432,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0169: 중복 요청은 오류가 아니라 「할 일 없음」이고, 아무것도 바꾸지 않는다 ────────────
+    // ── ADR-0172: 중복 요청은 오류가 아니라 「할 일 없음」이고, 아무것도 바꾸지 않는다 ────────────
 
     /// ★이미 뜨는 중인 항목에 온 요청 — 예약을 잡아 두어 **결정적으로** 그 상황을 만든다★.
     ///
@@ -3524,7 +3524,7 @@ mod tests {
         manager.kill_agent(id).ok();
     }
 
-    /// 활성화가 성립하면 그 자리에서 지운다(ADR-0169 결정 4 개정판) — 그리고 그 뒤에도 축은 여전히
+    /// 활성화가 성립하면 그 자리에서 지운다(ADR-0172 결정 4 개정판) — 그리고 그 뒤에도 축은 여전히
     /// 별개다: 도는 항목에 기록을 다시 붙일 수 있어야 화면의 「도는 중이 이긴다」 규칙이 설 자리가 있다.
     ///
     /// ★in-crate 테스트인 이유★: 시드에 `set_last_failure` 가 필요하고 그 동사는 `pub(crate)` 다
@@ -3587,7 +3587,7 @@ mod tests {
         manager.kill_agent(id).ok();
     }
 
-    /// ★죽은 세션의 출력 꼬리가 실제로 읽히는지 — 실 프로세스로만 말할 수 있다(ADR-0169)★.
+    /// ★죽은 세션의 출력 꼬리가 실제로 읽히는지 — 실 프로세스로만 말할 수 있다(ADR-0172)★.
     ///
     /// 이 테스트가 잡는 회귀는 하나다: 폴링 루프 **안에서** 세션을 다시 조회하면, `finish` 가 상태를 세운
     /// 직후 reaper 가 명부에서 지우므로(우리 폴링 간격은 100ms) 거의 언제나 조회가 실패해 꼬리가 빈다.

@@ -146,8 +146,8 @@ spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실
 ## 프론트 구조 (`src/`)
 
 - **제어 표면(불변):** 컴포넌트·스토어는 `agentClient`(단일 `ProtocolClient`)에만 의존한다(개별 IPC 헬퍼 직접 호출 금지 — ADR-0011이 거부한 `ptyApi` 형태. 그런 모듈은 지금 없다). carrier = transport seam, 운영은 `TauriTransport` 고정(ADR-0036). 교체점은 transport이고, `WsTransport`는 테스트·직결 흔적이다(ADR-0020/0029).
-- **폴더:** api · commands(제어 표면 — registry/dispatch/contributions) · components(layout/agent/slot/diff/ui) · i18n · lab · lib · pages · store · styles · theme · util.
-- **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — raw listener 수명은 각 등록 주체가 진다(`TauriTransport.close` · `viewStore` dispose). 등록 주체는 둘로 갈린다: **에이전트 이벤트 6종**(목록·상태·복원 결과·프로필·프리셋·연결 상태)은 `TauriTransport`가 `listen`을 걸고 `eventBus`는 `agentClient`의 추상 구독만 받는다 · **레이아웃·탭 이벤트**는 `viewStore`가 Tauri `listen`을 직접 건다(백엔드가 권위라 의도된 예외).
+- **폴더:** api · commands(제어 표면 — registry/dispatch/contributions + 버스 다리) · components(layout/agent/slot/diff/ui) · i18n · lab · lib · pages · store · styles · theme · util.
+- **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — 단 **raw `listen` 수명은 각 등록 주체가 따로 진다**. ★**등록 주체를 세지 말 것 — 늘어난다**★(옛 문장이 "둘로 갈린다"였는데 실제로는 넷이 됐고, 그 어긋남을 두 번 연속 리뷰가 잡았다). 대신 **가름 규칙**을 쓴다: `eventBus`는 `agentClient`의 **추상 구독**만 받고, **백엔드가 권위인 표면**은 Tauri `listen`을 직접 걸되 **거는 쪽이 자기 disposer를 소유한다**. 오늘 그 예외에 드는 것 = 에이전트 이벤트(전송 계층) · 레이아웃·탭 · 창 레이아웃 · UI 설정 · 버스 다리. **찾는 법 = `rg "from '@tauri-apps/api/event'" src/`** — 손으로 적은 명단은 또 낡는다.
 - **통합 micro-rules:** 구독 effect deps `[viewId, agentId]`(화신 표식 제외 — ADR-0046 구독 키 + ADR-0164) · 구독 전 `terminal.reset()` · seq dedup · replay 경계 = gen 펜스 성공 마커 · `delete channel.onmessage`(null 아님) · 입력 가드 · resize debounce 50ms.
 
 ## 창 구성

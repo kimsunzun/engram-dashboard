@@ -34,7 +34,7 @@ type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
 ///   그가 찾는 것은 claude 가 내는 한 줄짜리 진단 문구다. 몇 KB 면 그 줄이 뒤 출력에 밀려나지 않는다.
 ///   ★상한을 지우면 안 된다★ — 이 버퍼는 세션이 사는 내내 자라므로 무제한이면 진행 로그를 뱉는
 ///   에이전트에서 그대로 메모리 누수가 된다.
-// ADR-0169
+// ADR-0172
 const DIAGNOSTIC_CAP_BYTES: usize = 8 * 1024;
 
 /// 에이전트 1개의 출력 측 핵심 상태. 필드별 독립 Mutex(session.rs 모듈 주석의 분리 동기와 동일):
@@ -55,7 +55,7 @@ pub struct OutputCore {
     // ── Replay buffer ─────────────────────────────────────────
     replay: Mutex<Ring>,
 
-    // ── 진단 스트림 (ADR-0169 분류 입구) ──────────────────────
+    // ── 진단 스트림 (ADR-0172 분류 입구) ──────────────────────
     /// 이 화신의 **stderr 텍스트** 꼬리(bounded). 출력 링과 **분리된** 별도 버퍼이고, 그 이유와
     /// 크기 근거는 `DIAGNOSTIC_CAP_BYTES`. PTY 세션은 stderr 가 콘솔 스트림에 병합돼 오므로 여기는
     /// 항상 비어 있다(정상 — 그쪽 증거는 `terminal_tail` 이 진다).
@@ -580,7 +580,7 @@ impl OutputCore {
     ///   종료 문구 몇 줄만 보므로, 그 비용과 로그 폭주를 치를 이유가 없다.
     /// ★상한은 정확히 지켜진다★: 마지막 청크가 상한을 넘으면 그 청크의 **끝쪽만** 잘라 담는다.
     /// ★빈 결과가 정상이다★: 구조화(NDJSON) 세션의 링에는 콘솔 바이트가 하나도 없다.
-    // ADR-0169
+    // ADR-0172
     pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
         self.replay
             .lock()
@@ -597,7 +597,7 @@ impl OutputCore {
     /// ★마스킹된 텍스트를 받는다(호출자 의무)★: 외부 프로세스 출력이라 자격증명이 섞일 수 있고, 이
     ///   버퍼는 분류 근거로 읽히는 것에 더해 실패 사유로 로그·보고에 실릴 수 있는 자리다.
     /// ★상한은 앞에서부터 버려 지킨다★ — 최신 줄이 증거이므로 뒤를 남긴다.
-    // ADR-0169
+    // ADR-0172
     pub fn push_diagnostic(&self, line: &str) {
         let mut buf = self.diagnostics.lock().expect("diagnostics poisoned");
         buf.push_str(line);
@@ -618,7 +618,7 @@ impl OutputCore {
     ///
     /// ★빈 결과가 정상이다★: PTY 세션은 stderr 를 콘솔 스트림에 병합해 내보내므로 이 버퍼를 쓰지
     ///   않는다 — 그쪽 증거는 `terminal_tail` 이 진다. 호출자는 둘을 **합쳐** 분류에 넘긴다.
-    // ADR-0169
+    // ADR-0172
     pub fn diagnostic_tail(&self) -> String {
         self.diagnostics
             .lock()
@@ -803,7 +803,7 @@ impl Ring {
     ///   않는다(청크 하나가 통째로 넘어오면 상한이 상한이 아니게 된다).
     /// ★clone 하지 않는다★: 슬라이스만 모아 마지막에 한 번 이어 붙인다 — 링 전체 복사(`snapshot`)와의
     ///   차이가 이 메서드의 존재 이유다.
-    // ADR-0169
+    // ADR-0172
     pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
         let mut parts: Vec<&[u8]> = Vec::new();
         let mut total = 0usize;
@@ -1278,7 +1278,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0169: 실패 분류가 읽는 꼬리(상한이 하드인가 · 콘솔 바이트만인가) ────────────────
+    // ── ADR-0172: 실패 분류가 읽는 꼬리(상한이 하드인가 · 콘솔 바이트만인가) ────────────────
 
     #[test]
     fn terminal_tail_returns_the_last_console_bytes_in_order() {

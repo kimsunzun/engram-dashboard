@@ -554,11 +554,11 @@ async fn spawn_wakes_an_agent_that_already_exists() {
         vec![("worker".to_string(), "live".to_string())]
     );
     // ★깨우기도 통지한다★ — 명부의 **구성**은 그대로지만 그 항목의 「마지막 실패」가 바뀐다(활성화
-    //   성공=지움 / 실패=기록, ADR-0169). 그 축은 프로필 목록으로만 흐르므로 매니저가 흘리는 생사 전이
+    //   성공=지움 / 실패=기록, ADR-0172). 그 축은 프로필 목록으로만 흐르므로 매니저가 흘리는 생사 전이
     //   (`agent_list_updated`)로는 화면에 닿지 않는다. 이 통지가 없으면 LLM 이 깨운 결과가 화면에 안 뜨고
     //   사람 클릭(WS `SpawnProfile`)으로는 떠서 두 핸들이 갈린다(CLAUDE.md 「LLM-우선 제어」).
     //   라우트 레벨에서 못박는다(코어 단위 테스트와 같은 축, 다른 층).
-    // ADR-0169
+    // ADR-0172
     assert_eq!(
         f.broadcast.count(),
         1,
@@ -605,9 +605,9 @@ async fn spawn_with_cwd_registers_once_and_announces_both_steps() {
         .post(serde_json::json!({ "verb": "spawn", "cwd": cwd, "name": "newborn" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    // 등록 직후 한 번 + 활성화 결말 직후 한 번(ADR-0169). 둘 다 시동 성패와 무관하게 나간다 — 실패
+    // 등록 직후 한 번 + 활성화 결말 직후 한 번(ADR-0172). 둘 다 시동 성패와 무관하게 나간다 — 실패
     //   갈래에서 특히 필요하다(그때 화면에 남는 것은 이 통지가 나른 「마지막 실패」뿐이다).
-    // ADR-0169
+    // ADR-0172
     assert_eq!(
         f.broadcast.count(),
         2,

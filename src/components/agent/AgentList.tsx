@@ -4,8 +4,8 @@
 //!   목록을 새로 그린다(rename 과 동형). 행 클릭·더블클릭·우클릭 메뉴·인라인 rename·in-flight 가드는 평면
 //!   목록과 동일 로직을 NodeRenderer 안에서 그대로 쓴다(리그레션 금지).
 //!
-//! ★상태 = 색이 아니라 모양(글리프)★(ADR-0062): e-ink(흑백)에서도 상태가 구분되도록 색 리터럴 대신
-//! statusGlyph 로 모양을 고른다. ◐(입력대기)는 어휘로만 정의(백엔드 신호 없어 절대 점등 안 함).
+//! ★상태 = 색이 아니라 모양(아이콘)★(ADR-0062): e-ink(흑백)에서도 상태가 구분되도록 색 리터럴 대신
+//! statusGlyphIcon 으로 모양을 고른다. ◐(입력대기)는 어휘로만 정의(백엔드 신호 없어 절대 점등 안 함).
 //!
 //! ★표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화)★: 프로필 표시명 override
 //! (display_name)가 있으면 그대로, 없으면 cwd 의 마지막 세그먼트를 쓴다(공용 basename 유틸 — PresetPalette
@@ -28,14 +28,13 @@ import { refreshProfiles } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 import { selectOpenTarget } from './selectOpenTarget'
-import { isFailureBlocked, statusGlyph, statusGlyphColor } from './statusGlyph'
+import { isFailureBlocked, statusGlyphColor, statusGlyphIcon } from './statusGlyph'
 import { failureLine } from './failureKinds'
 import { t } from '../../i18n'
 
-// ★상태 글리프 헬퍼는 공유 경량 모듈로 이사★: RichSlot 헤더가 같은 글리프를 그리되 이 무거운 모듈 전이
-//   의존을 피하도록 statusGlyph.ts 로 분리했다. 기존 importer/test(`from './AgentList'`)를 깨지 않게
-//   여기서 re-export 한다(단방향 SSOT = statusGlyph.ts).
-export { statusGlyph, statusGlyphColor } from './statusGlyph'
+// 상태 매핑의 SSOT 는 statusGlyph.ts 한 곳이다(react-arborist 를 끌고 오는 이 모듈 없이 headless 로 재려고
+//   분리했다). 여기 re-export 는 `from './AgentList'` 를 쓰는 기존 importer 를 위한 통로일 뿐이다.
+export { statusGlyphColor, statusGlyphIcon } from './statusGlyph'
 
 /** 행 우클릭 메뉴 — react-arborist 가상화로 row 가 unmount 될 수 있어 NodeApi 대신 primitive snapshot 만 든다. */
 type RowMenu = {
@@ -45,8 +44,8 @@ type RowMenu = {
   kind: 'running' | 'reserved'
 }
 
-/** react-arborist 행 높이·들여쓰기(px). 옛 AgentTree 와 동일 값(리그레션 없이 부활). */
-const ROW_HEIGHT = 24
+/** react-arborist 행 높이·들여쓰기(px). */
+const ROW_HEIGHT = 28
 const INDENT = 12
 
 export default function AgentList() {
@@ -320,26 +319,39 @@ export default function AgentList() {
     const isBusy = busyIds.has(data.id)
     const err = errorById[data.id]
     const hasChildren = data.children.length > 0
-    // ADR-0170: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
+    // ADR-0173: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
     const failureTitle = isFailureBlocked(data.status, data.lastFailure)
       ? failureLine(data.lastFailure)
       : null
+    // ★기호도 같은 축을 탄다★: `lastFailure` 를 함께 넘겨야 모양·색·hover 셋이 한 판정(`isFailureBlocked`)
+    //   위에 선다. 여기서 상태만 넘기면 hover 는 실패를 말하는데 기호는 멀쩡한 행이 된다.
+    const glyph = statusGlyphIcon(data.status, data.lastFailure)
     return (
       <div
         ref={dragHandle}
         data-agent-row={data.id}
+        // ★선택 상태의 기계 판독 채널★: 배경색만으로는 CDP·LLM 셀렉터가 선택을 못 읽고(CLAUDE.md
+        //   「LLM-우선 제어」의 "트리 선택 상태 미커버" 갭), 색만 바뀌는 회귀를 테스트가 못 잡는다.
+        //   ★`aria-selected` 를 여기 달지 말 것★: 이 div 에는 role 이 없어 ARIA 상 무효이고, react-arborist 가
+        //   *부모* 행에 이미 `role="treeitem" + aria-selected` 를 건다 — 둘이 갈리면 AT 는 바깥 값을 읽어
+        //   오히려 틀린 상태를 읽는다(리뷰 지적 2026-08-23). 기계 판독은 아래 data 속성이 진다.
+        data-selected={selectedAgentId === data.id ? 'true' : 'false'}
         style={{
           ...style, // react-arborist 가상화 위치/높이(top/height). 들여쓰기는 아래 paddingLeft 로 level 반영.
           display: 'flex',
           alignItems: 'center',
           gap: '6px',
           // 토글이 없는 leaf 도 부모와 글리프 정렬이 맞게 토글 폭만큼 고정 확보.
-          paddingLeft: `${8 + node.level * INDENT}px`,
-          paddingRight: '8px',
+          paddingLeft: `${12 + node.level * INDENT}px`,
+          paddingRight: '12px',
           cursor: isBusy ? 'wait' : 'pointer',
+          // ★`--surface-elevated` 를 쓰지 말 것★: light(#ffffff)·e-ink(#f0f0f0) 에서 이 패널 배경
+          //   (`--bg-secondary` = #fff · #f0f0f0)과 값이 같아 선택 표시가 통째로 사라진다(dark 만
+          //   #141414 vs #262626 로 갈려서 화면 대조로는 안 잡힌다 — 실측 2026-08-23).
+          //   `--text` 를 섞는 이유 = 그 토큰은 정의상 배경과 대비되므로 세 테마 모두에서 차이가 남는다.
           background:
             selectedAgentId === data.id
-              ? 'color-mix(in srgb, var(--accent) 15%, transparent)'
+              ? 'color-mix(in srgb, var(--text) 12%, var(--bg-secondary))'
               : 'transparent',
           fontFamily: 'var(--font-ui)',
           fontSize: '12px',
@@ -365,7 +377,7 @@ export default function AgentList() {
           if (e.key === 'Enter') commitEdit(data)
           else if (e.key === 'Escape') cancelEdit()
         }}
-        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0170 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
+        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0173 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
         //   같은 판정(`isFailureBlocked`)을 써서 둘이 어긋나지 않게 한다. 액션 실패 인라인 메시지(err)는
         //   방금 누른 조작의 결과라 그게 더 앞선다.
         title={
@@ -398,19 +410,39 @@ export default function AgentList() {
         >
           {hasChildren ? (node.isOpen ? '▾' : '▸') : ''}
         </span>
-        {/* 상태 = 글리프 모양(1차 신호). ADR-0062 (색 개정 — e-ink 분리로 색 허용): 활성(Running)은 green
+        {/* 상태 = 아이콘 모양(1차 신호). ADR-0062 (색 개정 — e-ink 분리로 색 허용): 활성(Running)은 green
             (--status-running theme var)으로 *부가* 채색, 그 외는 muted. e-ink 블록이 이 변수를 중립화 →
-            e-ink 에선 모양만 남는다. 색 리터럴은 컴포넌트에 두지 않고 변수로만(ADR-0062 §44). */}
+            e-ink 에선 모양만 남는다. 색 리터럴은 컴포넌트에 두지 않고 변수로만(ADR-0062 §44).
+            ★색은 span 의 CSS color 가 소유한다★: 아이콘의 stroke·fill 이 둘 다 currentColor 라 그것을
+            따른다 — lucide 의 `color` prop 은 stroke 만 잡아서 채운 원의 fill 이 안 따라온다.
+            data-agent-glyph-shape = DOM 관측 표면: 텍스트 글리프 시절 textContent 가 나르던 상태 판독을
+            아이콘 전환으로 잃지 않게 남긴다(svg 는 글자를 남기지 않는다).
+            ★ADR-0173: 이 자리엔 축이 둘 얹힌다★ — 마지막 실패가 있고 안 떠 있는 행은 상태 모양 대신
+            금지 표식(shape=`blocked`)이 **갈아끼워지고** 색·hover 도 같은 판정을 따라간다. 기호를 둘
+            나란히 두지 않는 것이 그 결정의 요지라, 여기에 두 번째 <span> 을 늘리지 말 것. */}
+        {/* ★role+aria-label 이 있어야 상태가 들린다★: lucide 는 접근성 prop 이 없으면 svg 에 자동으로
+            aria-hidden 을 붙여(node_modules/lucide-react) 아이콘이 접근성 트리에서 통째로 사라진다 —
+            문자 글리프 시절엔 textContent 가 그 역할을 했다. 이게 없으면 Running 행과 Exited 행의
+            읽히는 이름이 완전히 같아진다(리뷰 지적 2026-08-23). */}
         <span
           data-agent-glyph="1"
+          data-agent-glyph-shape={glyph.shape}
+          role="img"
+          // ★들리는 이름은 상태 어휘 그대로 둔다★: 마지막 실패의 사유는 행 `title`(hover)이 한 줄로
+          //   나르고 그 문구의 유일한 출처는 종류 표다(failureKinds). 여기에 사유를 한 번 더 얹으면
+          //   같은 문장이 두 표면에서 갈릴 수 있고, 그렇다고 새 문구를 지어내는 것은 날조다.
+          //   기계 판독(테스트·CDP·LLM)은 위 `data-agent-glyph-shape` 가 `blocked` 로 진다.
+          aria-label={data.status}
           style={{
-            fontSize: '11px',
-            // ADR-0170: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다.
+            display: 'flex',
+            alignItems: 'center',
+            // ADR-0173: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다 —
+            //   위 `glyph` 와 같은 판정을 타야 둘이 어긋나지 않는다.
             color: statusGlyphColor(data.status, data.lastFailure),
             flexShrink: 0,
           }}
         >
-          {statusGlyph(data.status, data.lastFailure)}
+          <glyph.Icon size={12} fill={glyph.fill} />
         </span>
         {/* cwd 는 노출 안 함(title 로만). */}
         {editingId === data.id ? (
@@ -486,8 +518,7 @@ export default function AgentList() {
         data-slot-label="agent-list"
         style={{
           flexShrink: 0,
-          padding: '6px 8px',
-          borderBottom: '1px solid var(--border)',
+          padding: '10px 12px 6px',
           background: 'var(--bg-secondary)',
           color: 'var(--text-muted)',
           fontFamily: 'var(--font-ui)',

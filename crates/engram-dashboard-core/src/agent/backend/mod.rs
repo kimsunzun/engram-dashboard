@@ -122,7 +122,7 @@ pub trait AgentBackend: Send + Sync {
         no_turn_signals
     }
 
-    /// 이어받기가 실패했을 때 **그 프로그램의 출력에서 원인을 알아볼 수 있나**(ADR-0169 분류 입구).
+    /// 이어받기가 실패했을 때 **그 프로그램의 출력에서 원인을 알아볼 수 있나**(ADR-0172 분류 입구).
     ///
     /// `evidence` = 그 화신이 남긴 텍스트(best-effort — 비어 있을 수 있다). 호출자가 **두 스트림을
     /// 합쳐** 넘긴다: 콘솔 꼬리(PTY 세션) + 진단 stderr 꼬리(파이프 세션). 둘은 transport 에 따라
@@ -136,7 +136,7 @@ pub trait AgentBackend: Send + Sync {
     ///   (`EarlyVerdict::Diagnosed`). 그러니 **"그 프로그램이 실패했을 때만 낼 수 있는 문구"** 만
     ///   선언할 것 — 대화 본문에 섞여 나올 수 있는 문구를 선언하면 성공한 활성화가 실패로 도장 찍힌다.
     // ADR-0004
-    // ADR-0169
+    // ADR-0172
     fn resume_failure_kind(&self, _evidence: &str) -> Option<AgentFailureKind> {
         None
     }
@@ -469,7 +469,7 @@ mod tests {
         }
     }
 
-    // ── ADR-0169/0004: 이어받기 실패 분류 dispatch(문구 지식은 백엔드 소유) ──────────────────
+    // ── ADR-0172/0004: 이어받기 실패 분류 dispatch(문구 지식은 백엔드 소유) ──────────────────
 
     #[test]
     fn resume_failure_dispatch_reads_claudes_marker_and_stays_silent_elsewhere() {

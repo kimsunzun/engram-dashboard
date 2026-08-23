@@ -248,7 +248,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.queryByText('— empty —')).toBeNull()
   })
 
-  it('focusedSlotId == node.id → 포커스 링 오버레이(inset box-shadow, accent 65%)가 컨텐츠 위에 뜬다', () => {
+  it('focusedSlotId == node.id → 포커스 링 오버레이(inset box-shadow, accent 40%)가 컨텐츠 위에 뜬다', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s1" />)
     const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
     expect(wrapper).toBeTruthy()
@@ -256,6 +256,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정).
     const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
     expect(overlay).toBeTruthy()
+    // ★강도를 실제로 잰다★: 예전 단언은 `includes('accent')` 뿐이라 65%로 되돌려도 통과했다 — 값을 바꾸는
+    //   회귀를 못 잡으면서 제목만 강도를 광고하는 테스트였다(리뷰 지적 2026-08-23). 값 = ADR-0168 결정 1.
+    expect(overlay!.style.boxShadow).toContain('40%')
     expect(overlay!.style.pointerEvents).toBe('none')
     expect(overlay!.style.position).toBe('absolute')
     expect(wrapper.style.border).toContain('border')

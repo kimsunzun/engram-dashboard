@@ -47,8 +47,11 @@ export function comboOf(e: KeyboardEvent): string {
 }
 
 // 골격 최소 — 커스텀 키맵은 후속.
+//
+// ★없는 id 를 여기 남기지 말 것★: 조합이 잡히면 아래 리스너가 `preventDefault` 까지 하고 나서 run 이
+// throw 한다 — 키는 먹히는데 아무 일도 안 일어나고 신호는 콘솔 한 줄뿐이다. (Ctrl+Shift+T 가 그랬다 —
+// 가리키던 테마 명령을 ADR-0167 이 내리면서 이 줄도 함께 내렸다.)
 const BINDINGS: Record<string, string> = {
-  'ctrl+shift+t': 'theme.toggle',
   // ★Ctrl+Tab(D-8, ADR-0057)★: tab.next 는 사람 클릭과 동일 경로(switch_tab)로 간다.
   'ctrl+tab': 'tab.next',
 }

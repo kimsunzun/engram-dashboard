@@ -187,11 +187,11 @@ pub struct AgentProfile {
     pub epoch: u32,
 
     /// ★이 항목이 마지막으로 활성화에 실패한 종류★ — `None` = 실패 기록 없음. 사전 판정 결과가 아니라
-    /// **시도한 자리에서 관측된 사실**이고(ADR-0169 결정 1), 지금 상태(`AgentStatus`)와 별개 축이다.
+    /// **시도한 자리에서 관측된 사실**이고(ADR-0172 결정 1), 지금 상태(`AgentStatus`)와 별개 축이다.
     ///
     /// ★`#[serde(skip)]` 가 의미의 일부다(위 `epoch` 의 읽기 건너뛰기와 결이 같다, 다른 근거)★: 데몬을 내리면 그
     ///   세션들도 함께 죽으므로 옛 실패를 디스크로 붙들 이유가 없다 — 수명을 **데몬 수명**으로 못박는
-    ///   것이 이 skip 이다(ADR-0168 3층). 파일 규격 변경·하위 호환 처리도 함께 면제된다.
+    ///   것이 이 skip 이다(ADR-0171 3층). 파일 규격 변경·하위 호환 처리도 함께 면제된다.
     /// ★타입에 serde 파생이 아예 없다★ — 그래서 이 skip 을 지우는 변경은 컴파일에 실패한다
     ///   (`failure::AgentFailureKind` 주석).
     /// ★쓰는 지점은 하나뿐★: `manager::AgentManager::note_activation_result`(활성화 성공=지움 /
@@ -199,7 +199,7 @@ pub struct AgentProfile {
     ///   턴 관측 정리 지점을 둘로 못박은 ADR-0127 과 같은 이유다.
     /// ★스냅샷이 되돌리지 못한다★: `upsert_preserving_hierarchy` 가 live 값을 보존한다(화신 표식
     ///   `epoch` 과 같은 인과 — spawn 호출부가 넘기는 옛 사본이 그 사이 기록된 실패나 지움을 덮으면 안 된다).
-    // ADR-0169
+    // ADR-0172
     #[serde(skip)]
     pub last_failure: Option<AgentFailureKind>,
 
@@ -460,7 +460,7 @@ impl ProfileRegistry {
                 profile.epoch = live.epoch;
                 // 마지막 실패도 같은 이유로 live 값이 이긴다 — 그 사실을 쓰는 곳은 활성화 관측뿐이고,
                 //   spawn 이 넘긴 옛 사본이 그것을 되돌리면 이미 지워진 실패가 화면에 되살아난다.
-                // ADR-0169
+                // ADR-0172
                 profile.last_failure = live.last_failure;
             }
             m.insert(profile.id, profile);
@@ -567,7 +567,7 @@ impl ProfileRegistry {
     /// ★디스크에 쓰지 않는다 — `mutate` 를 타지 않는 유일한 쓰기다★: 이 필드는 `#[serde(skip)]` 이라
     ///   저장해도 파일 내용이 한 바이트도 달라지지 않는다. `mutate` 를 타면 활성화마다 `agents.json`
     ///   전체를 다시 쓰는 순수 비용만 붙는다.
-    // ADR-0169
+    // ADR-0172
     pub(crate) fn set_last_failure(
         &self,
         id: AgentId,
@@ -958,7 +958,7 @@ mod tests {
         );
     }
 
-    // ── 마지막 실패(ADR-0169) ────────────────────────────────────────────────────
+    // ── 마지막 실패(ADR-0172) ────────────────────────────────────────────────────
 
     #[test]
     fn last_failure_never_reaches_the_serialized_profile() {

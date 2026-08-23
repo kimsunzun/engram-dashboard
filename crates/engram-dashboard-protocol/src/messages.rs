@@ -1318,14 +1318,14 @@ mod tests {
         assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
         assert_eq!(
             p.last_failure, None,
-            "last_failure 부재 → None(ADR-0169 additive — 옛 wire 가 그대로 통과해야 버전 bump 가 없다)"
+            "last_failure 부재 → None(ADR-0172 additive — 옛 wire 가 그대로 통과해야 버전 bump 가 없다)"
         );
     }
 
     /// ★어휘가 늘 때 옛 피어를 지키는 절반★: 모르는 종류 문자열 하나가 `AgentProfile` **메시지 전체**의
     /// 디코드를 깨면, 그 프로필이 화면에서 통째로 사라진다(필드만 비는 게 아니다). 프론트 표의
     /// `table[kind] ?? Other` 와 짝을 이룬다.
-    // ADR-0169
+    // ADR-0172
     #[test]
     fn an_unknown_failure_kind_is_absorbed_instead_of_failing_the_whole_profile() {
         use crate::domain::{AgentFailureKind, AgentProfile as WireProfile};
@@ -1384,7 +1384,7 @@ mod tests {
     ///   손으로 쓴 문자열을 비교했는데, 변형을 `Other`→`Unknown` 으로 바꾸고 arm 이 `"Other"` 를 계속
     ///   내보내도 **통과**했다 — 정확히 이 doc 이 막는다고 적힌 사고다. 이제 한쪽은 생성물 파일에서,
     ///   다른 쪽은 매크로가 `stringify!` 로 만든 목록에서 온다.
-    // ADR-0169
+    // ADR-0172
     #[test]
     fn failure_kind_vocabulary_matches_the_generated_ts_union() {
         use crate::domain::AgentFailureKind;
@@ -1420,7 +1420,7 @@ mod tests {
     /// ★이스케이프가 든 값도 디코드돼야 한다★: 빌린 `&str` 로 받던 시절엔 `"Other"` 하나로
     /// `AgentProfile` **메시지 전체**가 깨졌고, src-tauri 수신부는 그 실패를 조용히 버려 증상이
     /// "트리가 영영 안 바뀐다" 뿐이었다.
-    // ADR-0169
+    // ADR-0172
     #[test]
     fn an_escaped_failure_kind_string_still_decodes() {
         use crate::domain::AgentFailureKind;

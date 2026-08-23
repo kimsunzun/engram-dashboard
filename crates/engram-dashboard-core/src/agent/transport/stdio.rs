@@ -156,13 +156,13 @@ impl AgentTransport for StdioTransport {
         //   비-JSON 라인이 껴 파서가 깨진다. 그래서 stderr는 출력과 분리해 라인별 로그로만 흘린다.
         // ★레벨=debug(FIX 4/logging-conventions)★: claude 는 진행·진단 텍스트를 stderr 로 흘리는 게
         //   정상 noise다 — warn 으로 찍으면 레벨 규약(warn=비정상)을 위반하고 로그를 범람시킨다.
-        // ★drain 하면서 core 의 **진단 버퍼**에도 쌓는다(출력 링이 아니다 — ADR-0169)★: 위 ADR-0044
+        // ★drain 하면서 core 의 **진단 버퍼**에도 쌓는다(출력 링이 아니다 — ADR-0172)★: 위 ADR-0044
         //   근거대로 이 텍스트를 출력 스트림에 섞을 수는 없지만, 구조화 세션에서는 이것이 활성화 실패의
         //   **유일한 증거**다(claude 의 "No conversation found with session ID: …" 가 여기로만 온다).
         //   그래서 링과 분리된 작은 bounded 버퍼로 따로 붙든다 — 계약은 `OutputCore::push_diagnostic`.
         // ★두 번째 캡처를 만들지 않았다★: 이 drain 이 이미 stderr 를 라인 단위로 읽는 유일한 지점이라,
         //   여기 한 줄을 얹는 것으로 끝난다(파이프를 두 번 읽을 수는 없다).
-        // ADR-0169
+        // ADR-0172
         if let Some(stderr) = self.stderr.lock().expect("stderr poisoned").take() {
             let diag_core = core.clone();
             let spawn_result = std::thread::Builder::new()

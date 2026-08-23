@@ -26,8 +26,8 @@ const CLAUDE_PROGRAM: &str = "claude";
 /// ★외부 프로그램의 출력이라 우리가 정한 값이 아니다★ — 실측: `--resume <없는 uuid>` 는 exit 1 과 함께
 ///   `No conversation found with session ID: …` 를 낸다(`docs/process/S9-session-restore/spike-results.md`).
 /// ★못 맞혀도 항목이 잠기지 않는다★: claude 가 문구를 바꾸면 분류가 「이어받기 직후 조기 종료」로
-///   떨어지고 그쪽은 재시도 가능이다(ADR-0169 fail-open).
-// ADR-0169
+///   떨어지고 그쪽은 재시도 가능이다(ADR-0172 fail-open).
+// ADR-0172
 const NO_CONVERSATION_MARKER: &str = "no conversation found";
 
 pub struct ClaudeBackend;
@@ -282,7 +282,7 @@ impl AgentBackend for ClaudeBackend {
 
     /// ★옛 주석의 "터미널 모드에서만 답이 나온다(알고 수용)" 는 이제 사실이 아니다 — 되살리지 마라★:
     ///   구조화(stream-json) 세션이 진단을 stderr 로 흘리는 것은 그대로지만, 호출자가 그 stderr 를
-    ///   별도 진단 버퍼로 붙들어 `evidence` 에 합쳐 넘긴다(ADR-0169). stream-json 이 기본 출력 형식이라
+    ///   별도 진단 버퍼로 붙들어 `evidence` 에 합쳐 넘긴다(ADR-0172). stream-json 이 기본 출력 형식이라
     ///   그 갈래가 침묵하는 동안은 이 분류기가 **대부분의 에이전트에서 사실상 죽은 코드**였다.
     /// ★이 문구는 claude 가 이어받기에 실패했을 때만 낸다★ — 그래서 아직 살아 있는 세션의 진단만
     ///   보고도 확정할 수 있다(trait doc 의 조건). 대화 본문에 섞여 나올 수 있는 문구를 여기 추가하면

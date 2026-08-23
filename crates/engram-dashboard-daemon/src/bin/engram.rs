@@ -86,7 +86,8 @@
 //!   호출(`engram <이름> …`)은 스키마를 못 받은 단계까지 같고, 실제 호출 응답은 **그 명령이 선언한 `ok`** 로
 //!   잰다(`exit_code_for_call_response`) — 선언된 필수 칸이 안 실린 2xx 는 성공이 아니라 보고 대상(2)이다.
 //!   그 선언은 스키마를 받는 같은 왕복에 이미 실려 오므로 CLI 가 shape 을 따로 기술하지 않는다(선언이 아예
-//!   없는 명령만 옛 조회 규칙으로 접힌다). 모르는 플래그·못 옮기는 값은 `BAD_ARGS`(1)로 **왕복 없이** 끝난다.
+//!   없는 명령만 옛 조회 규칙으로 접히고, 거기서 `null` 은 「반환할 것이 없음」이라 0 이다). 모르는
+//!   플래그·못 옮기는 값은 `BAD_ARGS`(1)로 **왕복 없이** 끝난다.
 //! ★어느 요청이 실패했는지 stderr 가 밝힌다★: 호출 경로의 첫 왕복(목록)이 실패하면 stdout 에 찍히는 body 는
 //!   그 명령 자신의 반려와 구별되지 않는다 — 그 한 줄이 없으면 호출자가 멀쩡한 인자를 고치기 시작한다.
 //!
@@ -1830,8 +1831,9 @@ fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
 /// ★검사 범위는 `required` 의 **존재**까지다★: 값의 타입까지 재면 데몬이 칸을 넓히는 날 정상 응답이 exit 2
 ///   로 튄다(거짓 경보). 반대로 존재조차 안 보면 `{"status":"ok"}` 가 성공으로 통과해, 아무것도 만들지 않은
 ///   응답을 받고 호출자가 그 이름으로 편지를 쓴다 — 그 사고를 막는 최소선이 여기다.
-/// ★선언이 없으면 옛 조회 규칙으로 접는다★: 스키마를 안 내는 주인의 명령에 우리가 계약을 지어내면, 그
-///   명령은 정상 응답에도 영영 exit 2 를 받는다.
+/// ★선언이 없으면 옛 조회 규칙으로 접되 `null` 만 예외로 받는다★: 스키마를 안 내는 주인의 명령에 우리가
+///   계약을 지어내면, 그 명령은 정상 응답에도 영영 exit 2 를 받는다 — **반환할 것이 없어 `ok` 를 아예 안
+///   내는 명령**이 딱 그 자리였다(`theme.set` 실측).
 fn exit_code_for_call_response(
     ok_schema: Option<&serde_json::Value>,
     status: u16,
@@ -1854,6 +1856,12 @@ fn exit_code_for_call_response(
     }
     let required: Vec<String> = ok_schema.map(required_keys).unwrap_or_default();
     if required.is_empty() {
+        // ★`null` 은 "반환값 없음" 이지 깨진 응답이 아니다★ — 뷰 다리가 `undefined` 를 그 자리에 정규화해
+        //   싣는다(`src/commands/viewCommandBridge.ts` 의 `jsonSafe`: `value ?? null`). ★`[]` 는 그대로 2 다★
+        //   — 값이 오긴 왔는데 쓸 수 없는 형태라 재시도가 아니라 보고 대상이다.
+        if v.is_null() {
+            return 0;
+        }
         if !v.is_object() {
             eprintln!(
                 "{CLI_EXE_NAME}: malformed response — expected a JSON object from the command call route"
@@ -5157,6 +5165,8 @@ mod tests {
             exit_code_for_call_response(None, 200, r#"{"status":"ok"}"#),
             0
         );
+        // 반환할 것이 없어 `ok` 를 안 내는 명령 — 다리가 `undefined` 를 `null` 로 싣는다(`theme.set`).
+        assert_eq!(exit_code_for_call_response(None, 200, "null"), 0);
         assert_eq!(
             exit_code_for_call_response(None, 200, r#"[]"#),
             EXIT_MALFORMED_SUCCESS

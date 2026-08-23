@@ -438,7 +438,7 @@ fn restart_policy_to_wire(p: CoreRestartPolicy) -> WireRestartPolicy {
     }
 }
 
-// ADR-0169
+// ADR-0172
 fn failure_kind_to_wire(k: CoreFailureKind) -> WireFailureKind {
     match k {
         CoreFailureKind::NoConversationToResume => WireFailureKind::NoConversationToResume,
@@ -771,11 +771,11 @@ impl ConnectionCore {
                 request_id,
             } => {
                 // ★`spawn_agent` 을 직접 부르지 않는다 — 활성화 입구는 하나여야 한다★: 그쪽은
-                //   「마지막 실패」를 기록·지우지 않고(ADR-0169) 재활성화 가드도 없어서, 이 동사로 띄운
+                //   「마지막 실패」를 기록·지우지 않고(ADR-0172) 재활성화 가드도 없어서, 이 동사로 띄운
                 //   에이전트만 조용히 옛 실패 표시를 들고 있었다. 제어 LLM 이 이 동사를 부를 수 있으므로
                 //   (tauri command + WS) 그 갈림은 「사람 클릭과 LLM 이 같은 핸들을 흔든다」를 깨뜨린다.
                 //   `SpawnProfile` 과 다른 점은 모드 유도가 없다는 것뿐이라(항상 Fresh) 그대로 유지한다.
-                // ADR-0169
+                // ADR-0172
                 let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         let started = manager
@@ -970,7 +970,7 @@ impl ConnectionCore {
                     vec![],
                     false,
                 );
-                // ★이 갈래는 활성화가 아니라 **즉석 생성**이라 「마지막 실패」를 쓰지 않는다(ADR-0169)★:
+                // ★이 갈래는 활성화가 아니라 **즉석 생성**이라 「마지막 실패」를 쓰지 않는다(ADR-0172)★:
                 //   방금 만든 uuid 라 지울 기록이 있을 수 없고, 저장된 항목을 깨우는 동사가 아니다.
                 //   ★그래서 남는 비대칭 하나는 알고 있다★: 명령 버스의 형제(`create_and_start`)는 만들고
                 //   띄우다 실패하면 기록한다. 이 동사를 그 모양으로 맞추려면 `activate_profile` 이 아직
@@ -1083,7 +1083,7 @@ impl ConnectionCore {
                 //     `ensure_session_id` 로 최초 sid 를 발급하므로 **뜨기는 한다**. 즉 mode = resume-요청
                 //     OR 세션-존재.
                 //   ★단 "안전하다" 고 읽지 말 것★: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude
-                //     는 즉사하고, 그 결말은 이제 그 항목의 「마지막 실패」로 **기록된다**(ADR-0169). 옛
+                //     는 즉사하고, 그 결말은 이제 그 항목의 「마지막 실패」로 **기록된다**(ADR-0172). 옛
                 //     문구는 그 기록이 없던 시절의 것이다.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
@@ -1093,7 +1093,7 @@ impl ConnectionCore {
                             SpawnMode::Fresh
                         };
                         let started = manager.activate_profile(&profile, mode);
-                        // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0169/0162)★: 활성화는 그
+                        // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0172/0162)★: 활성화는 그
                         //   항목의 「마지막 실패」를 **성공이면 지우고 실패면 기록**하는데, 그 축은
                         //   프로필 목록으로만 흐른다(`Spawned` 이벤트·산 명부에는 없다). 성공 쪽을
                         //   빼면 지워진 실패가 화면에 남고, 실패 쪽을 빼면 기록이 화면에 안 뜬다.
@@ -1929,13 +1929,13 @@ mod tests {
 
     /// ★사람 클릭(WS)과 LLM(명령 버스)이 같은 것을 흔든다★ — 그 주장의 WS 절반.
     ///
-    /// 활성화는 그 항목의 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0169) 그 축은 프로필
+    /// 활성화는 그 항목의 「마지막 실패」를 바꾸는데(성공=지움 / 실패=기록, ADR-0172) 그 축은 프로필
     /// 목록 broadcast 로만 흐른다. 이 통지가 빠지면 WS 로 띄운 결과만 화면에 안 닿고, 명령 버스로는
     /// 닿아 두 핸들이 갈린다. 버스 절반은 `core::agent::commands` 의 두 시험이 이미 못박고 있다.
     ///
     /// 실패 갈래로 잰다 — 실 claude 없이 결정적이고(없는 실행파일), 성공 갈래보다 통지가 더 절실하다
     /// (그쪽은 화면에 남는 것이 이 통지가 나른 값뿐이다).
-    // ADR-0169
+    // ADR-0172
     #[tokio::test]
     async fn ws_spawn_profile_announces_the_profile_list_even_when_activation_fails() {
         let (core, fanout) = test_core_recording();

@@ -199,7 +199,7 @@ pub enum RestartPolicy {
 /// ★wire 문자열은 `stringify!` 로 **변형 이름에서 파생**된다★: ts-rs 가 내는 TS 유니온도 변형 이름에서
 ///   나오므로, 손으로 문자열을 적지 않는 한 그 둘은 구조적으로 같다(그 사실은 `messages.rs` 의 golden 이
 ///   생성된 `.ts` 를 실제로 읽어 다시 확인한다).
-// ADR-0169
+// ADR-0172
 macro_rules! declare_failure_kinds {
     (
         $( $(#[$vmeta:meta])* $variant:ident ),+ $(,)?
@@ -207,7 +207,7 @@ macro_rules! declare_failure_kinds {
     ) => {
         /// core `failure::AgentFailureKind` 와 동일. 「마지막 실패」의 종류 어휘 — **화면 문구는 여기
         /// 없다**: 종류 → {다시 해볼 가치 · 문구 · 권하는 행동} 표는 프론트가 진다
-        /// (ADR-0169 결정 5 · ADR-0170).
+        /// (ADR-0172 결정 5 · ADR-0173).
         ///
         /// ★상태(`AgentStatus`)와 별개 축이라 합치지 않는다★ — "도는 중인데 마지막 실패를 든" 조합이
         ///   표현돼야 화면의 「도는 중이 이긴다」 규칙이 성립한다.
@@ -323,7 +323,7 @@ pub struct AgentProfile {
     /// **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(버전 bump 유발).
     #[ts(type = "string | null")]
     pub failed_reason: Option<String>,
-    /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0169). `null` = 실패 기록 없음.
+    /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). `null` = 실패 기록 없음.
     ///
     /// ★데몬 메모리에만 산다★ — core 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
     ///   재기동하면 사라진다(앱 창 재시작은 견딘다).
