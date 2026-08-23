@@ -36,6 +36,11 @@ export const ko = {
     fillAgentList: '에이전트 트리 열기',
     fillPresetPalette: '프리셋 팔레트 열기',
     newContent: '새 콘텐츠', // ADR-0065 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨.
+    renderModeSet: '렌더 모드 지정',
+    renderModeClear: '렌더 모드 해제',
+    domModeEnable: 'DOM 모드 켜기',
+    domModeDisable: 'DOM 모드 끄기',
+    domModeToggle: 'DOM 모드 전환',
   },
   window: {
     create: '새 창',
