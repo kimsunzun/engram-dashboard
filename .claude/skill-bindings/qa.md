@@ -42,7 +42,7 @@
 - **강도 하향이 아니다.** 경로→강도 매핑도 escalation-only도 그대로다. 바뀐 것은 *누가 돌리나*뿐이다.
 - **게이트 성립 = CI 초록.** push 후 결과를 확인한다 — 초록을 못 봤으면 그 변경은 아직 게이트를 통과한 게 아니다. CI가 못 도는 상황(오프라인·워크플로 자체 수정·CI 장애)이면 아래 강도별 실명령을 로컬에서 그대로 돈다.
 - **CI 미커버 3건 — 로컬 몫이다:** ① GUI 실측(창 필요) ② 실 claude 의존 테스트(워크플로가 `--skip`으로 제외하며 **그 목록이 정본**) ③ ADR-0130 재론 트리거(게이트가 아니라 알림이라 CI에 못 얹는다 — daemon crate가 닿으면 로컬에서 돌 것).
-- **★아래 목록에 없고 CI에만 있는 게이트 2건★** — ts-rs 바인딩 sync(`git diff --exit-code -- crates/engram-dashboard-protocol/bindings/`, protocol 테스트 **직후**)와 discovery async 반입(`cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all` → `^(tokio|mio|tokio-tungstenite|futures-util) ` 0줄). 로컬 fallback으로 돌 때 이 둘을 빠뜨리면 CI보다 약하다.
+- **★아래 목록에 없고 CI에만 있는 게이트 2건★** — 생성물 sync(`git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/` 뒤 **같은 두 경로로** `git diff --exit-code`. protocol·core 테스트를 **둘 다 돈 뒤** — `core/bindings/`는 core 테스트가 재생성한다. ★`add -N -f`를 빼고 맨 `git diff`로 줄이지 말 것★ — `git diff`는 untracked 파일을 안 봐서 **처음 생성되는 `.ts`가 조용히 통과한다.** 근거의 정본 = CLAUDE.md 「CI」 절, 명령 정본 = `.github/workflows/ci.yml`의 그 스텝. 여기 되올리지 않는다)와 discovery async 반입(`cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all` → `^(tokio|mio|tokio-tungstenite|futures-util) ` 0줄). 로컬 fallback으로 돌 때 이 둘을 빠뜨리면 CI보다 약하다.
 
 ## 강도별 실명령 (골격 §2 "게이트 실행"에 주입)
 
