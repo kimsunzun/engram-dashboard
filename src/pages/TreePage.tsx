@@ -11,9 +11,7 @@ export default function TreePage() {
       flexDirection: 'column',
     }}>
       <div style={{
-        padding: '0 8px',
-        height: '28px',
-        borderBottom: '1px solid var(--border)',
+        padding: '10px 12px 6px',
         display: 'flex',
         alignItems: 'center',
         fontFamily: 'var(--font-ui)',

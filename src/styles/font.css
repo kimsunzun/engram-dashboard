@@ -1,5 +1,10 @@
 :root {
-  --font-ui:           'JetBrains Mono', monospace;
+  /* UI 셸(탭·패널 헤더·트리) 전용 — 터미널/코드 폰트와 의도적으로 다르다. 목록·라벨이 모노스페이스면
+     "터미널 출력"처럼 읽히고 한글 자간이 벌어진다(사용자 결정 2026-08-23, Orca 대조).
+     ★이 스택은 전부 Windows 내장이라 실제로 적용된다★ — 옛 'JetBrains Mono'는 이 PC에 미설치라
+     일반 monospace 대체로 그려지고 있었다(canvas 폭 실측). 라틴 = Segoe UI, 한글 = Malgun Gothic
+     자동 폴백(Windows 기본 동작 그대로). */
+  --font-ui:           'Segoe UI Variable Text', 'Segoe UI', 'Malgun Gothic', system-ui, sans-serif;
   --font-terminal:     'Cascadia Code', monospace;
   --font-code:         'Fira Code', monospace;
   --font-claude-prose: 'Inter', sans-serif;

@@ -56,7 +56,9 @@ vi.mock('../../store/viewStore', () => ({
   selectView: () => selectViewMock(),
 }))
 
-import AgentList, { statusGlyph, statusGlyphColor } from './AgentList'
+import { Circle, Square, X } from 'lucide-react'
+
+import AgentList, { statusGlyphColor, statusGlyphIcon } from './AgentList'
 import { useAgentStore } from '../../store/agentStore'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 import type { LayoutNode } from '../../api/layoutTypes'
@@ -111,18 +113,49 @@ afterEach(() => {
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
 })
 
-// ── statusGlyph: 전 분기(pure, ADR-0062) ─────────────────────────────────────
-describe('statusGlyph (pure, 전 분기)', () => {
-  it('Running → ● (작업중)', () => expect(statusGlyph('Running')).toBe('●'))
-  it('Exiting → ◻ (멈춤 전이)', () => expect(statusGlyph('Exiting')).toBe('◻'))
-  it('Exited → ◻ (멈춤)', () => expect(statusGlyph('Exited')).toBe('◻'))
-  it('Killed → ◻ (멈춤)', () => expect(statusGlyph('Killed')).toBe('◻'))
-  it('Failed → ✗ (에러)', () => expect(statusGlyph('Failed')).toBe('✗'))
-  it('Reserved → ○ (유휴/미spawn)', () => expect(statusGlyph('Reserved')).toBe('○'))
-  it('미지 status → ○ (degrade, 빈 글리프 방지)', () => expect(statusGlyph('???')).toBe('○'))
-  it('◐(입력대기)는 어떤 입력으로도 반환되지 않는다(어휘로만 존재, 미점등)', () => {
-    const inputs = ['Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', 'unknown', '']
-    for (const s of inputs) expect(statusGlyph(s)).not.toBe('◐')
+// ── statusGlyphIcon: 전 분기(pure, ADR-0062) ─────────────────────────────────
+// 아이콘 동일성은 **컴포넌트 참조**로 잰다 — lucide 의 클래스명 규약이 바뀌어도 매핑 테스트는 성립한다.
+//   클래스명은 아래 렌더 스위트에서만 본다(실제 svg 가 떴나).
+describe('statusGlyphIcon (pure, 전 분기)', () => {
+  it('Running → 채운 원 (작업중)', () => {
+    const g = statusGlyphIcon('Running')
+    expect(g.Icon).toBe(Circle)
+    expect(g.fill).toBe('currentColor')
+    expect(g.shape).toBe('filled-circle')
+  })
+  it('Exiting → 사각 (멈춤 전이)', () => expect(statusGlyphIcon('Exiting').Icon).toBe(Square))
+  it('Exited → 사각 (멈춤)', () => expect(statusGlyphIcon('Exited').Icon).toBe(Square))
+  it('Killed → 사각 (멈춤)', () => expect(statusGlyphIcon('Killed').Icon).toBe(Square))
+  it('Failed → ✗ 모양 (에러)', () => expect(statusGlyphIcon('Failed').Icon).toBe(X))
+  it('Reserved → 빈 원 (유휴/미spawn)', () => {
+    const g = statusGlyphIcon('Reserved')
+    expect(g.Icon).toBe(Circle)
+    expect(g.fill).toBe('none')
+    expect(g.shape).toBe('circle')
+  })
+  it('미지 status → 빈 원 (degrade, 빈 칸 방지)', () => {
+    const g = statusGlyphIcon('???')
+    expect(g.Icon).toBe(Circle)
+    expect(g.shape).toBe('circle')
+  })
+
+  // ★옛 "◐ 를 반환하지 않는다" 테스트의 계승★(ADR-0062 — 입력대기는 어휘로만, 미점등): 문자 비교가
+  //   사라졌으므로 **치역 allowlist** 로 잰다. 반쯤 채운 모양(CircleDashed·PieChart…)이든 뭐든 아래 4모양
+  //   밖의 것을 새 분기가 반환하면 여기서 깨진다. 입력 목록에 InputWaiting/Idle/Waiting 을 섞어 둔 이유 =
+  //   그런 분기가 실제로 붙는다면 이 이름들로 붙기 때문(안 붙어 있으면 default 로 떨어져 통과한다).
+  it('4모양 밖(◐ 같은 반쯤 채운 모양 포함)은 어떤 입력으로도 나오지 않는다', () => {
+    const inputs = [
+      'Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', 'unknown', '',
+      'InputWaiting', 'Idle', 'Waiting',
+    ]
+    const allowedIcons = [Circle, Square, X]
+    const allowedShapes = ['filled-circle', 'square', 'x', 'circle']
+    for (const s of inputs) {
+      const g = statusGlyphIcon(s)
+      expect(allowedIcons).toContain(g.Icon)
+      expect(allowedShapes).toContain(g.shape)
+      expect(['currentColor', 'none']).toContain(g.fill)
+    }
   })
 })
 
@@ -179,16 +212,59 @@ describe('AgentList 트리 렌더', () => {
     expect(screen.getByText('reserved-proj')).toBeTruthy()
   })
 
-  it('상태 글리프가 모양으로 뜬다(running=● / reserved=○)', () => {
+  // 관측 표면 둘을 같이 잰다: data-agent-glyph-shape(안정 토큰)와 실제 lucide svg(클래스 + fill).
+  //   속성만 맞고 아이콘이 안 그려지는 회귀를 토큰 단독으로는 못 잡는다.
+  it('상태가 아이콘 모양으로 뜬다(Failed=✗ / reserved=빈 원)', () => {
     useAgentStore.setState({
       agents: [agent('a1', 'C:/w', { type: 'Failed', message: 'x' })],
       profiles: [profile('p1', 'C:/r')],
     })
     render(<AgentList />)
-    const runGlyph = document.querySelector('[data-agent-row="a1"] [data-agent-glyph]') as HTMLElement
+    const failGlyph = document.querySelector('[data-agent-row="a1"] [data-agent-glyph]') as HTMLElement
     const resGlyph = document.querySelector('[data-agent-row="p1"] [data-agent-glyph]') as HTMLElement
-    expect(runGlyph.textContent).toBe('✗')
-    expect(resGlyph.textContent).toBe('○')
+    expect(failGlyph.dataset.agentGlyphShape).toBe('x')
+    expect(resGlyph.dataset.agentGlyphShape).toBe('circle')
+    expect(failGlyph.querySelector('svg.lucide-x')).toBeTruthy()
+    expect(resGlyph.querySelector('svg.lucide-circle')).toBeTruthy()
+  })
+
+  // Running 과 Reserved 는 같은 원이라 **채움 여부가 유일한 모양 차이**다(e-ink 에선 색이 중립화돼 이것만
+  //   남는다 — ADR-0062). 그래서 fill 을 DOM 에서 직접 고정한다.
+  it('Running=채운 원 / Reserved=빈 원 — 채움이 두 상태를 가른다', () => {
+    useAgentStore.setState({
+      agents: [agent('a1', 'C:/w')],
+      profiles: [profile('p1', 'C:/r')],
+    })
+    render(<AgentList />)
+    const runSvg = document.querySelector('[data-agent-row="a1"] [data-agent-glyph] svg') as SVGElement
+    const resSvg = document.querySelector('[data-agent-row="p1"] [data-agent-glyph] svg') as SVGElement
+    expect(runSvg.classList.contains('lucide-circle')).toBe(true)
+    expect(resSvg.classList.contains('lucide-circle')).toBe(true)
+    expect(runSvg.getAttribute('fill')).toBe('currentColor')
+    expect(resSvg.getAttribute('fill')).toBe('none')
+  })
+
+  // 선택 표시를 배경색 하나에만 걸면 테마별로 조용히 사라진다 — `--surface-elevated` 를 썼다가 light·
+  //   e-ink 에서 패널 배경과 동색이 돼 선택이 안 보이던 실발생(2026-08-23)이 계기다. jsdom 은 CSS 변수를
+  //   풀지 않아 *색 자체*는 못 재므로, 기계 판독 채널(`data-selected`)이 회귀망을 대신 진다.
+  it('선택 행은 색이 아니라 data-selected 로도 식별된다(테마 무관 채널)', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w'), agent('a2', 'C:/x')] })
+    render(<AgentList />)
+    fireEvent.click(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    expect(document.querySelector('[data-agent-row="a1"]')?.getAttribute('data-selected')).toBe('true')
+    expect(document.querySelector('[data-agent-row="a2"]')?.getAttribute('data-selected')).toBe('false')
+  })
+
+  // 선택 배경이 패널 배경 토큰과 *같은 토큰*으로 회귀하면 테마에 따라 안 보인다. 값 비교는 jsdom 이 못
+  //   하므로 "같은 var 를 쓰지 않는다"는 약한 형태로 고정한다.
+  it('선택 배경은 패널 배경(--bg-secondary)을 그대로 쓰지 않는다', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    fireEvent.click(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    const bg = (document.querySelector('[data-agent-row="a1"]') as HTMLElement).style.background
+    expect(bg).not.toBe('var(--bg-secondary)')
+    expect(bg).not.toBe('var(--surface-elevated)')
+    expect(bg).toContain('var(')
   })
 
   it('예약 행 더블클릭 → spawnProfile(restore UX 유지)', () => {

@@ -64,7 +64,15 @@ export default function TabBar({
         alignItems: 'stretch',
         height: '28px',
         flexShrink: 0,
-        background: 'var(--bg-secondary)',
+        // ★규칙 = "활성 탭이 깨끗한 면(`--bg-secondary`), 바는 한 칸 눌린 면(`--bg`)"★ — Chrome 방식
+        //   (사용자 지정 참조·결정 2026-08-23). 다크(#0a0a0a 바 < #141414 탭)·라이트(#f5f5f5 바 < #fff 탭)
+        //   양쪽에서 **활성 탭이 더 밝다**로 일관되게 성립한다.
+        //   ☞ 반대 배치(바=`--bg-secondary` · 활성=`--bg`)와 `--text` 를 섞어 바를 띄우는 안, 둘 다 실제로
+        //   적용해 봤다가 되돌렸다 — 전자는 활성 탭이 프레임에서 가장 어두워 구멍처럼 읽혔고, 후자는
+        //   바가 트리 패널과 따로 노는 회색 띠가 됐다(사용자 판단).
+        //   ★e-ink 만 이 관계가 성립하지 않는다★ — 그 테마는 `--bg`(#ffffff) 가 `--bg-secondary`(#f0f0f0)
+        //   보다 *밝아* 방향이 뒤집힌다. 거기선 글자색과 비활성 구분선이 활성 판정을 진다(미해소 잔여).
+        background: 'var(--bg)',
         borderBottom: '1px solid var(--border)',
         fontFamily: 'var(--font-ui)',
         fontSize: '12px',
@@ -85,12 +93,17 @@ export default function TabBar({
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '0 10px',
+              padding: '0 12px',
               cursor: 'pointer',
-              borderRight: '1px solid var(--border)',
-              background: isActive ? 'var(--bg)' : 'transparent',
+              // 활성 탭 = 깨끗한 면(트리 패널과 같은 `--bg-secondary`). 근거·거부한 대안은 위 바 주석.
+              //   ★accent 밑줄을 되살리지 말 것★ — 2px 파란 줄이 프레임에서 가장 튀어 "고대비"의
+              //   주범이었다(사용자 판단 2026-08-23, Orca 대조).
+              background: isActive ? 'var(--bg-secondary)' : 'var(--tab-inactive-bg)',
               color: isActive ? 'var(--text)' : 'var(--text-muted)',
-              borderBottom: isActive ? '2px solid var(--accent)' : '2px solid transparent',
+              // Chrome 처럼 비활성 탭 사이에만 얇은 세로 구분선 — 활성 탭 양옆은 떠오른 조각이라 선이 없다.
+              borderRight: isActive ? '1px solid transparent' : '1px solid var(--border)',
+              borderTopLeftRadius: '6px',
+              borderTopRightRadius: '6px',
               whiteSpace: 'nowrap',
             }}
           >
@@ -183,7 +196,7 @@ export default function TabBar({
           border: 'none',
           color: 'var(--text-muted)',
           cursor: 'pointer',
-          padding: '0 10px',
+          padding: '0 12px',
           fontSize: '14px',
         }}
       >
