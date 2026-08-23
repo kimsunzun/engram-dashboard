@@ -198,9 +198,11 @@ pub fn command_ports(
             client: Arc::clone(&client),
         }),
         events: Arc::new(OwnedEvents { app: app.clone() }),
-        windows: Arc::new(OwnedWindowHost { app }),
+        windows: Arc::new(OwnedWindowHost { app: app.clone() }),
         labels,
         spawner: Arc::new(OwnedSpawner { client }),
+        // 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
+        ui_settings: Arc::new(crate::commands::settings::TauriUiSettings::new(app)),
     }
 }
 

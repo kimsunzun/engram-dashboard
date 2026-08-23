@@ -258,16 +258,22 @@ impl DaemonClient {
     /// 조립부마다 다시 지켜져야 하므로, 클라이언트가 자기 `rt` 로 정한다.
     /// 늦게 부르는 것은 허용되지만(첫 승자만 이긴다), **연결 후에 부르면** 그 사이 도착한 봉투는 표가 없다는
     /// 오류 답장을 받는다. 등록도 그 연결에서는 안 나간다 — 다음 재연결이 보낸다(`register_own_commands`).
+    /// `view` = 셸 표에 없는 이름을 넘길 곳(웹뷰 몫 — TRD §3-8 의 홉 ③). 표와 **같은 자리에서** 꽂는
+    /// 이유는 등록 패킷이 두 층을 한 방에 싣기 때문이다(TRD §3-7 조항 2) — 따로 꽂게 하면 어느 조립부는
+    /// 웹뷰 몫 없이 등록을 내보내고, 그 연결에서는 화면 명령이 통째로 `UNKNOWN_COMMAND` 다.
     pub fn install_command_table(
         &self,
         table: engram_dashboard_command::CommandTable,
         catalog_version: u32,
+        view: Arc<dyn inbound::ViewCommandPort>,
     ) {
-        self.inbound.set(Arc::new(inbound::InboundReceiver::new(
-            table,
-            Arc::new(inbound::RuntimeSpawner(self.rt.clone())),
-            catalog_version,
-        )));
+        self.inbound
+            .set(Arc::new(inbound::InboundReceiver::with_view(
+                table,
+                Arc::new(inbound::RuntimeSpawner(self.rt.clone())),
+                catalog_version,
+                view,
+            )));
     }
 
     // 현재 연결 상태 스냅샷(락 없이).

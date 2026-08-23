@@ -133,7 +133,7 @@ export function initEventBus(): Promise<void> {
       //   LLM(cdp eval)이 부른다.
       //   ★레지스트리는 상태 권위가 아니다★ — handler 가 기존 store 액션/invoke 로 라우팅한다(ADR-0035
       //   유지). run 은 handler 반환(일부 Promise)을 그대로 흘려보내 cdp eval 에서 await 가능.
-      //   window.__engramCmd.run('theme.set', { theme:'light' })  // 실행(모르는 id 는 throw)
+      //   window.__engramCmd.run('slot.empty', { viewId, slotId })  // 실행(모르는 id 는 throw)
       // ★전체 command 를 window 에 노출하는 것은 의도적이다(WONTFIX)★: CLAUDE.md §5(모든 기능은 LLM 제어
       //   가능해야 한다) / ADR-0055 의 설계 요구다. "allowlist 로 일부만 노출" 대안은 §5(LLM 이 메인 조작
       //   주체)와 정면 충돌해 기각됐다. 이 표면은 보안 취약점이 아니라 제어 계약이다(리뷰어 재제기 방지 앵커).

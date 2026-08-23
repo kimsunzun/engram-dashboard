@@ -96,10 +96,6 @@ export const ko = {
     empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
     deleteBtn: '삭제',
   },
-  theme: {
-    set: '테마 설정',
-    toggle: '테마 순환',
-  },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {
     pickAgentCwd: '에이전트 작업 디렉토리 선택',

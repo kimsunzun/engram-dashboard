@@ -144,7 +144,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   beforeEach(() => {
     __resetRegistryForTest()
-    // 각 테스트가 자기 command 를 등록하므로 부수효과 import(themeCommands)에 의존하지 않는다.
+    // 각 테스트가 자기 command 를 등록하므로 어느 어댑터 모듈의 부수효과 import 에도 의존하지 않는다.
   })
 
   afterEach(() => {
@@ -154,11 +154,10 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     vi.restoreAllMocks()
   })
 
-  function fireCtrlShiftT(target: EventTarget): KeyboardEvent {
+  function fireCtrlTab(target: EventTarget): KeyboardEvent {
     const e = new KeyboardEvent('keydown', {
-      key: 'T',
+      key: 'Tab',
       ctrlKey: true,
-      shiftKey: true,
       bubbles: true,
       cancelable: true,
     })
@@ -166,26 +165,28 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     return e
   }
 
-  it('비편집 타겟(document.body)에서 ctrl+shift+t → 바인딩 command 실행 + preventDefault', () => {
+  it('비편집 타겟(document.body)에서 ctrl+tab → 바인딩 command 실행 + preventDefault', () => {
     const spy = vi.fn()
-    // 기본 바인딩(ctrl+shift+t → theme.toggle)을 이 테스트용 spy command 로 갈아끼운다.
-    register({ id: 'theme.toggle', title: 'toggle', run: spy })
+    // 기본 바인딩(ctrl+tab → tab.next)을 이 테스트용 spy command 로 갈아끼운다.
+    register({ id: 'tab.next', title: 'next', run: spy })
     dispose = installKeybindings()
 
-    const e = fireCtrlShiftT(document.body)
+    const e = fireCtrlTab(document.body)
     expect(spy).toHaveBeenCalledTimes(1)
     expect(e.defaultPrevented).toBe(true)
   })
 
-  it('배선이 store 액션까지 닿는다: 테마가 순환한다(document.body keydown)', () => {
-    // themeCommands 는 모듈 side-effect 로 register 하는데, 그 모듈이 이미 다른 테스트에서 캐시-import
-    // 됐다면 __resetRegistryForTest() 뒤 재등록되지 않는다(테스트 순서 의존 회피). 그래서 여기서는
-    // 동일한 순환 로직을 명시 등록해 "키 → run → store 액션" 전 구간이 닿는지만 확인한다.
+  it('배선이 store 액션까지 닿는다(document.body keydown)', () => {
+    // ★진짜 어댑터를 안 태운다★ — 어댑터는 모듈 side-effect 로 register 하는데, 다른 테스트가 이미
+    // 캐시-import 했으면 `__resetRegistryForTest()` 뒤 재등록되지 않는다(테스트 순서 의존). 그래서 이
+    // 자리에 직접 등록해 "키 → run → store 액션" 전 구간이 닿는지만 본다.
+    // ★store 로 themeStore 를 고른 것은 그것이 **Tauri 없이 관측되는 store** 라서다★ — 이 키가 실제로
+    // 부르는 `tab.next` 의 store(viewStore)는 invoke 를 타므로 여기서 재려면 배선 아닌 mock 을 재게 된다.
     useThemeStore.getState().setTheme('dark')
     const THEMES = ['dark', 'light', 'e-ink'] as const
     register({
-      id: 'theme.toggle',
-      title: 'toggle',
+      id: 'tab.next',
+      title: 'next',
       run: () => {
         const cur = useThemeStore.getState().theme
         const next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]
@@ -193,25 +194,25 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
       },
     })
     dispose = installKeybindings()
-    fireCtrlShiftT(document.body)
+    fireCtrlTab(document.body)
     expect(useThemeStore.getState().theme).toBe('light')
   })
 
   it('타겟이 <input> 이면 command 실행 안 함(가드가 리스너에 배선됨)', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', run: spy })
+    register({ id: 'tab.next', title: 'next', run: spy })
     dispose = installKeybindings()
 
     const input = document.createElement('input')
     document.body.appendChild(input)
-    const e = fireCtrlShiftT(input)
+    const e = fireCtrlTab(input)
     expect(spy).not.toHaveBeenCalled()
     expect(e.defaultPrevented).toBe(false)
   })
 
   it('타겟이 .xterm 자손이면 command 실행 안 함', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', run: spy })
+    register({ id: 'tab.next', title: 'next', run: spy })
     dispose = installKeybindings()
 
     const term = document.createElement('div')
@@ -219,58 +220,58 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     const row = document.createElement('div')
     term.appendChild(row)
     document.body.appendChild(term)
-    fireCtrlShiftT(row)
+    fireCtrlTab(row)
     expect(spy).not.toHaveBeenCalled()
   })
 
   it('타겟이 contenteditable="plaintext-only" 면 command 실행 안 함', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', run: spy })
+    register({ id: 'tab.next', title: 'next', run: spy })
     dispose = installKeybindings()
 
     const editable = document.createElement('div')
     editable.setAttribute('contenteditable', 'plaintext-only')
     document.body.appendChild(editable)
     withSpecContentEditable(editable)
-    fireCtrlShiftT(editable)
+    fireCtrlTab(editable)
     expect(spy).not.toHaveBeenCalled()
   })
 
   it('disposer 호출 후엔 더 이상 발화하지 않는다', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', run: spy })
+    register({ id: 'tab.next', title: 'next', run: spy })
     const d = installKeybindings()
     d()
-    fireCtrlShiftT(document.body)
+    fireCtrlTab(document.body)
     expect(spy).not.toHaveBeenCalled()
   })
 
   it('StrictMode 식 install→dispose→install → 정확히 1회만 발화(중복 등록 누수 없음)', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', run: spy })
+    register({ id: 'tab.next', title: 'next', run: spy })
     const d1 = installKeybindings()
     d1()
     dispose = installKeybindings()
-    fireCtrlShiftT(document.body)
+    fireCtrlTab(document.body)
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
   it('when:()=>false 로 바인딩된 command 는 키로 발화 안 함(FIX-5)', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', when: () => false, run: spy })
+    register({ id: 'tab.next', title: 'next', when: () => false, run: spy })
     dispose = installKeybindings()
 
-    const e = fireCtrlShiftT(document.body)
+    const e = fireCtrlTab(document.body)
     expect(spy).not.toHaveBeenCalled()
     expect(e.defaultPrevented).toBe(false)
   })
 
   it('when:()=>true 로 바인딩된 command 는 정상 발화(FIX-5)', () => {
     const spy = vi.fn()
-    register({ id: 'theme.toggle', title: 'toggle', when: () => true, run: spy })
+    register({ id: 'tab.next', title: 'next', when: () => true, run: spy })
     dispose = installKeybindings()
 
-    const e = fireCtrlShiftT(document.body)
+    const e = fireCtrlTab(document.body)
     expect(spy).toHaveBeenCalledTimes(1)
     expect(e.defaultPrevented).toBe(true)
   })
@@ -278,8 +279,8 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   it('when 이 throw 하면 command 미실행 + 리스너 밖으로 안 새고 + preventDefault 안 함(FIX-B)', () => {
     const spy = vi.fn()
     register({
-      id: 'theme.toggle',
-      title: 'toggle',
+      id: 'tab.next',
+      title: 'next',
       when: () => {
         throw new Error('x')
       },
@@ -288,7 +289,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     dispose = installKeybindings()
 
     // dispatchEvent 는 리스너에서 throw 가 새어나오지 않으면 정상 반환한다(핸들러 밖 uncaught 없음).
-    const e = fireCtrlShiftT(document.body)
+    const e = fireCtrlTab(document.body)
     expect(spy).not.toHaveBeenCalled()
     expect(e.defaultPrevented).toBe(false)
   })

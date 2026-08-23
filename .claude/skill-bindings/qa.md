@@ -42,7 +42,7 @@
 - **강도 하향이 아니다.** 경로→강도 매핑도 escalation-only도 그대로다. 바뀐 것은 *누가 돌리나*뿐이다.
 - **게이트 성립 = CI 초록.** push 후 결과를 확인한다 — 초록을 못 봤으면 그 변경은 아직 게이트를 통과한 게 아니다. CI가 못 도는 상황(오프라인·워크플로 자체 수정·CI 장애)이면 아래 강도별 실명령을 로컬에서 그대로 돈다.
 - **CI 미커버 3건 — 로컬 몫이다:** ① GUI 실측(창 필요) ② 실 claude 의존 테스트(워크플로가 `--skip`으로 제외하며 **그 목록이 정본**) ③ ADR-0130 재론 트리거(게이트가 아니라 알림이라 CI에 못 얹는다 — daemon crate가 닿으면 로컬에서 돌 것).
-- **★아래 목록에 없고 CI에만 있는 게이트 2건★** — ts-rs 바인딩 sync(`git diff --exit-code -- crates/engram-dashboard-protocol/bindings/`, protocol 테스트 **직후**)와 discovery async 반입(`cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all` → `^(tokio|mio|tokio-tungstenite|futures-util) ` 0줄). 로컬 fallback으로 돌 때 이 둘을 빠뜨리면 CI보다 약하다.
+- **★아래 목록에 없고 CI에만 있는 게이트 2건★** — 생성물 sync(`git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/` 뒤 **같은 두 경로로** `git diff --exit-code`. protocol·core 테스트를 **둘 다 돈 뒤** — `core/bindings/`는 core 테스트가 재생성한다. ★`add -N -f`를 빼고 맨 `git diff`로 줄이지 말 것★ — `git diff`는 untracked 파일을 안 봐서 **처음 생성되는 `.ts`가 조용히 통과한다.** 근거의 정본 = CLAUDE.md 「CI」 절, 명령 정본 = `.github/workflows/ci.yml`의 그 스텝. 여기 되올리지 않는다)와 discovery async 반입(`cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all` → `^(tokio|mio|tokio-tungstenite|futures-util) ` 0줄). 로컬 fallback으로 돌 때 이 둘을 빠뜨리면 CI보다 약하다.
 
 ## 강도별 실명령 (골격 §2 "게이트 실행"에 주입)
 
@@ -163,7 +163,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - ★**영역·요소 범위 캡처는 지원하지 않는다**★ — `shot`은 `Page.captureScreenshot`에 `{ format: 'png' }`만 넘겨 **창 전체**를 찍는다(`scripts/cdp.mjs:102`). CDP 프로토콜엔 `clip`이 있지만 **이 스크립트가 노출하지 않으므로 없는 플래그를 짐작해 쓰지 말 것.** 좁히는 실수단은 둘이다: ① 좌표·치수·색·가시성은 `eval` + `getBoundingClientRect()`/`getComputedStyle()`로 **숫자로** 받는다(대개 픽셀을 읽을 이유가 사라진다 — 아래 D) ② 대상이 팝아웃 창에 있으면 `CDP_MATCH`로 그 창을 찍는다(창이 작아 캡처도 작다). 파일명에 디렉토리가 없으면 `_wip/shots/`로 라우팅된다(`:98`).
 
 **B. 프로필 생성·삭제는 command 레지스트리에 없다 → window에 노출된 실 client를 쓴다** (코드 파생)
-- 레지스트리에 **있는** 것: `agent.spawn`·`agent.rename`·`agent.kill`·`agentlist.createAgent|createTerminal|createJson`·`preset.list|create|delete|rename|add`·`slot.*`·`tab.*`·`window.create|close`·`layout.setSlotContent`·`agent.spawnInto`·`theme.set|toggle`. 정상 제어 표면(`window.__engramCmd.run(id, args)` — `src/store/eventBus.ts:140`)으로 되는 일은 여기서 끝낸다.
+- 레지스트리에 **있는** 것: `agent.spawn`·`agent.rename`·`agent.kill`·`agentlist.createAgent|createTerminal|createJson`·`preset.list|create|delete|rename|add`·`slot.*`·`tab.*`·`window.create|close`·`layout.setSlotContent`·`agent.spawnInto`. ★`theme.set|toggle`은 2026-08-23 에 회수됐다 — 테마는 이제 설정 파일 데이터다(ADR-0167)★. 정상 제어 표면(`window.__engramCmd.run(id, args)` — `src/store/eventBus.ts:140`)으로 되는 일은 여기서 끝낸다.
 - **없는** 것: 프로필 삭제(`deleteProfile`)·자동복원 토글(`setProfileAutoRestore`)에 대응하는 command가 없다. **둘의 처지는 다르니 한 문장으로 묶어 읽지 말 것** — 삭제는 사람 경로(트리 행 메뉴)가 있고(`src/components/agent/AgentList.tsx:213`), **자동복원 토글은 `src/` 안에 호출자가 0건**이라 사람 경로조차 없다(선언만 둘 — `src/api/agentClient.ts:209`·`src/api/protocolClient.ts:907`). 그래서 토글은 아래 탈출구로 client 를 직접 부르는 것 말고 실측 수단이 없다. 생성 쪽 command는 있으나 cdp로는 못 쓴다: 셋 다 `createReservedProfile`을 지나 **폴더 선택 다이얼로그를 먼저 띄우고**(`src/commands/agentCommands.ts:19`) `autoRestore`를 `false`로 박아 넘긴다(`:22`) — ★`agentlist.create*`에는 `autoRestore` 인자가 없다★.
 - **탈출구 = `window.__ENGRAM_AGENT__`**(단일 `ProtocolClient`. 노출 지점 `src/api/clientFactory.ts:29` — ★DEV 가드가 없어 릴리스 빌드에도 있다★). 앱 소스 모듈을 `import()`할 필요가 없다.
   ```bash

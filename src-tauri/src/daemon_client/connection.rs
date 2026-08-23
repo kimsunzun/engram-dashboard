@@ -1451,6 +1451,12 @@ pub fn register_pending(
 //   지우는** 동작이 된다. 식별자를 들일 때는 이 상수를 고치는 것이 아니라 연결마다 새 값을 만들어야 한다.
 const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
 
+/// 등록·차분 패킷이 함께 쓰는 광고 문자열 — ★두 곳에서 따로 짓지 않는다★. 갈리면 데몬 로그에서 같은
+/// 셸의 두 패킷이 남남으로 보인다(명부의 주인 판정은 이 값과 무관하다 — 위 주석).
+pub fn shell_owner_advert() -> engram_dashboard_command::OwnerToken {
+    engram_dashboard_command::OwnerToken::new(SHELL_OWNER_ADVERT)
+}
+
 /// 결말을 이 연결의 단일 writer 로 되보내는 송신단 — ★반드시 **weak** 이다(load-bearing)★.
 ///
 /// ## ★왜 weak 인가 — 이 채널의 송신단 수가 연결 태스크의 수명이다★
@@ -1540,7 +1546,7 @@ pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> 
         return None;
     }
     Some(AgentCommand::RegisterCommands {
-        owner: engram_dashboard_command::OwnerToken::new(SHELL_OWNER_ADVERT),
+        owner: shell_owner_advert(),
         decls,
         catalog_version: receiver.catalog_version(),
         request_id: RequestId::new(),
