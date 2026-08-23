@@ -216,7 +216,10 @@ fn spawn_json_agent(
     //   (profile.name 은 더 이상 주소축 아님). 테스트가 이 `name` 으로 지목하므로 display_name 에 심어
     //   "보이는 이름 = 주소" 를 성립시킨다(cwd="." 의 basename 은 "." 이라 name 으로 매치 불가).
     profile.display_name = Some(name.to_string());
-    let info = manager.spawn_agent(&profile, SpawnMode::Fresh).ok()?;
+    let info = manager
+        .spawn_agent(&profile, SpawnMode::Fresh)
+        .ok()?
+        .into_started()?;
     if !wait_until(Duration::from_secs(5), || {
         manager.list_agents().iter().any(|a| a.id == info.id)
     }) {
@@ -325,7 +328,9 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     profile.display_name = Some("sheller".to_string());
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("shell spawn");
+        .expect("shell spawn")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     assert!(wait_until(Duration::from_secs(3), || manager
         .list_agents()
         .iter()

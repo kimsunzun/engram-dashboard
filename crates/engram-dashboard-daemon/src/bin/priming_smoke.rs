@@ -159,8 +159,14 @@ async fn run() -> i32 {
         vec![],
         false,
     );
-    let agent = match manager.spawn_agent(&profile, SpawnMode::Fresh) {
-        Ok(info) => {
+    let agent = match manager
+        .spawn_agent(&profile, SpawnMode::Fresh)
+        .map(|o| o.into_started())
+    {
+        Ok(None) => {
+            return skip_no_claude("spawn_agent: 이미 뜨는 중(moot) — 이 하네스에선 도달 불가")
+        }
+        Ok(Some(info)) => {
             let deadline = Instant::now() + SPAWN_APPEAR_TIMEOUT;
             let mut appeared = false;
             while Instant::now() < deadline {

@@ -76,6 +76,19 @@ export const ko = {
     rowRestart: '재시작 (준비 중)', // 백엔드 command 부재로 비활성.
     doubleClickToActivate: '더블클릭으로 활성화(spawn)', // reserved 행 title 힌트.
     rowFailedBadge: '실패',
+    // ── 마지막 실패(ADR-0161 결정 5의 표 — 종류마다 문구 하나 + 권하는 행동 하나) ────────────
+    // ★컴포넌트에 문구를 박지 말 것(ADR-0162 §영향)★: 이 키들을 읽는 곳은
+    //   `src/components/agent/failureKinds.ts` 한 곳이고, 화면은 그 표에서 문구를 받는다.
+    failureNoConversation: '이어받을 대화가 없습니다',
+    failureNoConversationAction: '새 대화로 시작해야 합니다',
+    failureSpawn: '에이전트를 띄우지 못했습니다',
+    failureSpawnAction: '다시 시도해 보세요',
+    failureEarlyExit: '이어받은 직후 종료됐습니다',
+    failureEarlyExitAction: '다시 시도해 보세요',
+    failureOther: '활성화에 실패했습니다',
+    failureOtherAction: '다시 시도해 보세요',
+    // 트리 hover · 슬롯 종료 화면이 함께 쓰는 한 줄 형태(문구 + 권하는 행동).
+    failureLine: '{reason} — {action}',
     // AgentList 액션 실패 인라인 메시지 — 각 액션별 distinct 키. collapse 금지.
     activateFailed: '활성화 실패: {err}',
     openFailed: '열기 실패: {err}',

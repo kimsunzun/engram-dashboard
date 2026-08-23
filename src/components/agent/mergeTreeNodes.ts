@@ -7,7 +7,7 @@
 //   *한 단계만* 중첩한다(§ nestByParent 주석). parent_id 는 AgentProfile 에만 있다(AgentInfo wire 엔
 //   없음) → running 노드도 매칭 프로필에서 parent_id 를 이어받는다(display_name override 와 동형 조회).
 
-import type { AgentInfo, AgentProfile } from '../../api/types'
+import type { AgentFailureKind, AgentInfo, AgentProfile } from '../../api/types'
 
 /**
  * 한 id 가 지금 무엇인가 — 트리의 "실행중 vs 예약" 판정을 **id 하나**로 물어보는 형태(ADR-0148).
@@ -44,6 +44,12 @@ export type AgentTreeNode = {
    */
   displayName: string | null
   status: string
+  /**
+   * ★status 와 별개 축★(ADR-0161): 매칭 프로필의 「마지막 실패」. running 노드도 들 수 있고, 그때는
+   * 「도는 중이 이긴다」로 화면에 안 뜬다(판정은 `statusGlyph.isFailureBlocked` 한 곳).
+   * 프로필이 없는 ad-hoc running 노드는 항상 null.
+   */
+  lastFailure: AgentFailureKind | null
   /** 'running'=실행중(또는 종료 등 세션 보유) / 'reserved'=저장만 된 깡통. */
   kind: 'running' | 'reserved'
   canInterrupt: boolean
@@ -82,6 +88,8 @@ export function mergeTreeNodes(
     // ad-hoc(SpawnByCwd)은 프로필이 없을 수 있다 → 맵 미스 시 null(basename 파생, 기존 동작 불변).
     displayName: profileById.get(a.id)?.display_name ?? null,
     status: a.status.type,
+    // ADR-0161: AgentInfo wire 엔 없는 축이라 display_name 과 동형으로 매칭 프로필에서 이어받는다.
+    lastFailure: profileById.get(a.id)?.last_failure ?? null,
     kind: 'running' as const,
     canInterrupt: a.capabilities?.control?.interrupt ?? false,
     // 매칭 프로필 존재 여부 = 드롭 가드 pre-filter(ad-hoc 셸은 프로필 없어 false → 드래그/드롭 부모 불가).
@@ -98,6 +106,7 @@ export function mergeTreeNodes(
       cwd: p.cwd,
       displayName: p.display_name ?? null,
       status: 'Reserved',
+      lastFailure: p.last_failure ?? null,
       kind: 'reserved' as const,
       canInterrupt: false,
       hasProfile: true,

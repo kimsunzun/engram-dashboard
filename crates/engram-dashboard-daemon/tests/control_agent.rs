@@ -328,10 +328,17 @@ async fn spawn_wakes_an_agent_that_already_exists() {
         agents_in(&list),
         vec![("worker".to_string(), "live".to_string())]
     );
-    // ★깨우기는 명부의 **구성**을 안 바꾼다★ — 생사 전이는 매니저가 이미 흘리므로(`agent_list_updated`)
-    //   여기서 통지를 겹쳐 보내면 트리가 같은 변화를 두 번 받는다. 표로 옮기면서 이 분담이 유지되는지를
+    // ★깨우기도 통지한다★ — 명부의 **구성**은 그대로지만 그 항목의 「마지막 실패」가 바뀐다(활성화
+    //   성공=지움 / 실패=기록, ADR-0161). 그 축은 프로필 목록으로만 흐르므로 매니저가 흘리는 생사 전이
+    //   (`agent_list_updated`)로는 화면에 닿지 않는다. 이 통지가 없으면 LLM 이 깨운 결과가 화면에 안 뜨고
+    //   사람 클릭(WS `SpawnProfile`)으로는 떠서 두 핸들이 갈린다(CLAUDE.md 「LLM-우선 제어」).
     //   라우트 레벨에서 못박는다(코어 단위 테스트와 같은 축, 다른 층).
-    assert_eq!(f.broadcast.count(), 0, "깨우기는 통지하지 않는다");
+    // ADR-0161
+    assert_eq!(
+        f.broadcast.count(),
+        1,
+        "활성화 결말이 항목을 바꾸므로 통지한다"
+    );
     f.shutdown_agents();
 }
 
@@ -362,21 +369,24 @@ async fn the_state_a_mutation_reports_is_the_state_the_roster_reports() {
     f.shutdown_agents();
 }
 
-/// 만들기+띄우기에서 **기계와 무관하게 확정적인 부분만** 엄격히 본다: 등록 · 통지 **정확히 1회** · 명부 등장 ·
-/// 응답이 상태 어휘 안의 값만 싣는 것. 시동 성패 자체는 claude 유무에 달려 있어(claude 에이전트를 만든다)
-/// 여기서 단언하지 않는다 — 시동의 회귀는 위 셸 백엔드 테스트가 결정적으로 본다.
+/// 만들기+띄우기에서 **기계와 무관하게 확정적인 부분만** 엄격히 본다: 등록 1건 · 통지 **등록분 + 활성화
+/// 결말분** · 명부 등장 · 응답이 상태 어휘 안의 값만 싣는 것. 시동 성패 자체는 claude 유무에 달려 있어
+/// (claude 에이전트를 만든다) 여기서 단언하지 않는다 — 시동의 회귀는 위 셸 백엔드 테스트가 결정적으로 본다.
 #[tokio::test]
-async fn spawn_with_cwd_registers_exactly_once_and_never_invents_a_state() {
+async fn spawn_with_cwd_registers_once_and_announces_both_steps() {
     let f = fixture("spawn-create").await;
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     let (status, body) = f
         .post(serde_json::json!({ "verb": "spawn", "cwd": cwd, "name": "newborn" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    // 등록 직후 한 번 + 활성화 결말 직후 한 번(ADR-0161). 둘 다 시동 성패와 무관하게 나간다 — 실패
+    //   갈래에서 특히 필요하다(그때 화면에 남는 것은 이 통지가 나른 「마지막 실패」뿐이다).
+    // ADR-0161
     assert_eq!(
         f.broadcast.count(),
-        1,
-        "등록 1건 = 통지 1건(시동 성패와 무관): {body}"
+        2,
+        "등록 통지 + 활성화 결말 통지(시동 성패와 무관): {body}"
     );
 
     match body["status"].as_str() {

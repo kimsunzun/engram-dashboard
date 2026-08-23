@@ -78,12 +78,14 @@ function profile(
   createdAt = 0,
   displayName: string | null = null,
   parentId: string | null = null,
+  lastFailure: AgentProfile['last_failure'] = null,
 ): AgentProfile {
   return {
     id, name: '', display_name: displayName, parent_id: parentId,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
-    restart_policy: 'Never', restart_count: 0, failed_reason: null, created_at: createdAt,
+    restart_policy: 'Never', restart_count: 0, failed_reason: null, last_failure: lastFailure,
+    created_at: createdAt,
     last_active: 0, last_start_at: null,
   }
 }
@@ -139,6 +141,37 @@ describe('statusGlyphColor (pure)', () => {
   it('Reserved → var(--text-muted)', () => expect(statusGlyphColor('Reserved')).toBe('var(--text-muted)'))
   it('미지 status → var(--text-muted) (default)', () =>
     expect(statusGlyphColor('???')).toBe('var(--text-muted)'))
+})
+
+// ── 마지막 실패가 기호를 갈아끼운다(ADR-0162) ────────────────────────────────
+// 기호를 하나 더 늘리지 않는다 — 상태 기호 자리를 금지 표식이 **대체**하고 색도 함께 갈린다.
+describe('statusGlyph/Color — 마지막 실패 축', () => {
+  const reserved = 'Reserved'
+  it('쉬고 있는 항목은 상태와 무관하게 금지 표식으로 갈린다', () => {
+    for (const s of [reserved, 'Exited', 'Killed', 'Failed', '???']) {
+      expect(statusGlyph(s, 'NoConversationToResume')).toBe('⊘')
+      expect(statusGlyphColor(s, 'NoConversationToResume')).toBe('var(--status-blocked)')
+    }
+  })
+  it('★도는 중이 이긴다★ — 마지막 실패를 들고 있어도 Running 이면 원래 기호·색 그대로', () => {
+    expect(statusGlyph('Running', 'NoConversationToResume')).toBe('●')
+    expect(statusGlyphColor('Running', 'NoConversationToResume')).toBe('var(--status-running)')
+  })
+  it('Exiting 은 과도기라 도는 중 쪽으로 센다(정상 종료 몇 초 동안 깜빡이면 안 된다)', () => {
+    expect(statusGlyph('Exiting', 'NoConversationToResume')).toBe(statusGlyph('Exiting'))
+    expect(statusGlyphColor('Exiting', 'NoConversationToResume')).toBe(statusGlyphColor('Exiting'))
+  })
+  it('마지막 실패가 없으면 기존 매핑이 한 글자도 바뀌지 않는다', () => {
+    for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???']) {
+      expect(statusGlyph(s, null)).toBe(statusGlyph(s))
+      expect(statusGlyphColor(s, null)).toBe(statusGlyphColor(s))
+    }
+  })
+  it('종류가 달라도 기호는 하나다(종류별 기호를 늘리지 않는다)', () => {
+    const kinds = ['NoConversationToResume', 'SpawnFailed', 'EarlyExitAfterResume', 'Other'] as const
+    const glyphs = new Set(kinds.map(k => statusGlyph(reserved, k)))
+    expect(glyphs.size).toBe(1)
+  })
 })
 
 // ── 트리 렌더(react-arborist, ADR-0072) ────────────────────────────────────────

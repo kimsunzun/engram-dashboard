@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
+use crate::agent::failure::AgentFailureKind;
 use crate::agent::profile::{AgentCommand, SpawnMode};
 use crate::agent::transport::OutputDecoder;
 use crate::agent::turn::TurnSignal;
@@ -121,6 +122,20 @@ pub trait AgentBackend: Send + Sync {
         no_turn_signals
     }
 
+    /// 이어받기가 실패했을 때 **그 프로그램의 출력에서 원인을 알아볼 수 있나**(ADR-0161 분류 입구).
+    ///
+    /// `tail` = 죽은 프로세스가 마지막으로 남긴 출력의 꼬리(best-effort — 비어 있을 수 있다).
+    /// `None` = 이 출력만으로는 종류를 단정할 수 없다 → 호출자가 맥락 기본값으로 떨어뜨린다.
+    ///
+    /// ★왜 backend 인가(ADR-0004)★: "이 문구가 무슨 뜻인가" 는 프로그램별 지식이다. manager 가 문자열을
+    ///   직접 보면 그 지식이 공용 층으로 샌다.
+    /// ★기본값 = 모름(fail-open)★: 선언하지 않은 backend 는 아무 것도 단정하지 않는다.
+    // ADR-0004
+    // ADR-0161
+    fn resume_failure_kind(&self, _tail: &str) -> Option<AgentFailureKind> {
+        None
+    }
+
     /// 이 backend 가 **편지를 읽는 주체**인가 = 에이전트 간 우편의 수신자 명단 자격.
     ///
     /// ★"턴 관측 가능성" 축이 아니다(ADR-0116 결정 1·7 을 되돌리는 게 아니다)★: 구조화 출력이 없는
@@ -193,6 +208,10 @@ pub fn backend_caps(c: &AgentCommand) -> BackendCaps {
 
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
     backend_for(c).turn_classifier()
+}
+
+pub fn resume_failure_kind(c: &AgentCommand, tail: &str) -> Option<AgentFailureKind> {
+    backend_for(c).resume_failure_kind(tail)
 }
 
 pub fn reads_messages(c: &AgentCommand) -> bool {
@@ -443,6 +462,45 @@ mod tests {
                 "매핑 미선언 backend 는 어떤 이벤트에도 신호를 내지 않는다(기본 = 침묵)"
             );
         }
+    }
+
+    // ── ADR-0161/0004: 이어받기 실패 분류 dispatch(문구 지식은 백엔드 소유) ──────────────────
+
+    #[test]
+    fn resume_failure_dispatch_reads_claudes_marker_and_stays_silent_elsewhere() {
+        let claude = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: ClaudeOutputFormat::Terminal,
+        };
+        let shell = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let tail = "\u{1b}[?25hNo conversation found with session ID: 8b1c…\r\n";
+        assert_eq!(
+            resume_failure_kind(&claude, tail),
+            Some(AgentFailureKind::NoConversationToResume)
+        );
+        assert_eq!(
+            resume_failure_kind(&claude, "NO CONVERSATION FOUND with session ID: x"),
+            Some(AgentFailureKind::NoConversationToResume),
+            "대소문자는 외부 프로그램이 정하므로 우리 판정이 거기 매달리면 안 된다"
+        );
+        assert_eq!(
+            resume_failure_kind(&claude, ""),
+            None,
+            "꼬리가 비면 단정하지 않는다 — 구조화 세션은 진단을 stderr 로 흘려 여기 안 온다"
+        );
+        assert_eq!(
+            resume_failure_kind(&claude, "Error: EPERM"),
+            None,
+            "모르는 문구는 단정하지 않는다(호출자가 맥락 기본값으로 떨어뜨린다)"
+        );
+        assert_eq!(
+            resume_failure_kind(&shell, tail),
+            None,
+            "선언하지 않은 backend 는 남의 문구를 읽지 않는다"
+        );
     }
 
     #[test]

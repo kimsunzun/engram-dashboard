@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::agent::backend::{console_command, AgentBackend, TurnClassifier};
+use crate::agent::failure::AgentFailureKind;
 use crate::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
 use crate::agent::turn::TurnSignal;
 use crate::agent::types::{
@@ -19,6 +20,15 @@ use crate::agent::types::{
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
+
+/// claude 가 `--resume <sid>` 로 이어받을 대화를 못 찾았을 때 내는 문구의 **소문자 조각**.
+///
+/// ★외부 프로그램의 출력이라 우리가 정한 값이 아니다★ — 실측: `--resume <없는 uuid>` 는 exit 1 과 함께
+///   `No conversation found with session ID: …` 를 낸다(`docs/process/S9-session-restore/spike-results.md`).
+/// ★못 맞혀도 항목이 잠기지 않는다★: claude 가 문구를 바꾸면 분류가 「이어받기 직후 조기 종료」로
+///   떨어지고 그쪽은 재시도 가능이다(ADR-0161 fail-open).
+// ADR-0161
+const NO_CONVERSATION_MARKER: &str = "no conversation found";
 
 pub struct ClaudeBackend;
 
@@ -268,6 +278,15 @@ impl AgentBackend for ClaudeBackend {
 
     fn turn_classifier(&self) -> TurnClassifier {
         classify_turn
+    }
+
+    /// ★터미널 모드에서만 실질적으로 답이 나온다(알고 수용)★: 구조화(stream-json) 세션은 claude 의 진단
+    ///   텍스트를 stderr 로 흘리고 그건 출력 링에 들어오지 않아 `tail` 이 비어 온다 → `None`.
+    fn resume_failure_kind(&self, tail: &str) -> Option<AgentFailureKind> {
+        if tail.to_lowercase().contains(NO_CONVERSATION_MARKER) {
+            return Some(AgentFailureKind::NoConversationToResume);
+        }
+        None
     }
 }
 

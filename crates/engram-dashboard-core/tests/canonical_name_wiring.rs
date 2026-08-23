@@ -106,7 +106,9 @@ fn the_stored_profile_name_field_is_never_used_as_the_routing_address() {
 
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn");
+        .expect("spawn")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     let name = projected_name(&manager, &info);
     manager.kill_agent(info.id).ok();
 
@@ -134,7 +136,9 @@ fn a_relative_cwd_derives_the_name_from_the_canonicalized_session_cwd() {
 
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn");
+        .expect("spawn")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     let name = projected_name(&manager, &info);
     manager.kill_agent(info.id).ok();
 
@@ -165,7 +169,9 @@ fn a_blank_display_name_override_is_ignored_by_the_production_path() {
 
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn");
+        .expect("spawn")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     let name = projected_name(&manager, &info);
     manager.kill_agent(info.id).ok();
 
@@ -196,7 +202,9 @@ fn a_real_display_name_override_wins_over_the_cwd_basename() {
 
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn");
+        .expect("spawn")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     let name = projected_name(&manager, &info);
     manager.kill_agent(info.id).ok();
 

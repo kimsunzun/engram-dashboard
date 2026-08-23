@@ -217,7 +217,9 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
 
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("shell 스폰은 provision 실패와 무관하게 성공해야(F3)");
+        .expect("shell 스폰은 provision 실패와 무관하게 성공해야(F3)")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     assert!(
         wait_until(Duration::from_secs(3), || manager.list_agents().len() == 1),
         "셸 spawn 직후 세션 존재"
@@ -299,7 +301,9 @@ async fn kill_revokes_token_before_pump_join() {
     );
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn ok");
+        .expect("spawn ok")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
     assert!(
         wait_until(Duration::from_secs(3), || manager.list_agents().len() == 1),
         "spawn 직후 세션 존재"

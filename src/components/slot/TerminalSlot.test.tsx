@@ -150,7 +150,12 @@ vi.mock('../../api/clientFactory', () => ({
 
 // ── agentStore stub — 슬롯이 종료 판정용으로 useAgentStore(s => s.agents) 를 조회. 빈 목록 = 살아있음. ──
 // agentsLoaded=false 기본 = 권위 명부 미수신 → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
-const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], agentsLoaded: false }))
+const agentStoreState = vi.hoisted(() => ({
+  agents: [] as unknown[],
+  agentsLoaded: false,
+  // ADR-0161: 「마지막 실패」는 프로필에만 있다 — 슬롯이 종료 화면의 사유 한 줄을 여기서 읽는다.
+  profiles: [] as unknown[],
+}))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
@@ -203,6 +208,7 @@ beforeEach(() => {
   captured.unsubscribe = null
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
+  agentStoreState.profiles = []
   termState.onDataCb = null
   termState.loadAddon.mockReset()
   termState.refresh.mockClear()
@@ -405,5 +411,38 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── 종료 화면의 사유 한 줄(ADR-0162) ────────────────────────────────────────────────
+//
+// 새 상태를 만들지 않는다 — 이어 열기 실패는 이미 「종료됨」 화면으로 떨어지므로 그 화면에 한 줄만 얹는다.
+describe('TerminalSlot — 종료 화면의 마지막 실패 사유', () => {
+  it('마지막 실패가 없으면 종료 화면이 종전과 똑같다(줄이 아예 렌더되지 않는다)', async () => {
+    agentStoreState.agents = []
+    agentStoreState.agentsLoaded = true
+    agentStoreState.profiles = [{ id: AGENT, last_failure: null }]
+
+    const { container } = render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    await flushSubscribe()
+
+    expect(screen.getByText('종료됨')).toBeTruthy()
+    expect(container.querySelector('[data-slot-failure]')).toBeNull()
+  })
+
+  it('마지막 실패가 있으면 그 한 줄을 얹되 문구는 종류 표에서 온다', async () => {
+    const { failureLine } = await import('../agent/failureKinds')
+    agentStoreState.agents = []
+    agentStoreState.agentsLoaded = true
+    agentStoreState.profiles = [{ id: AGENT, last_failure: 'NoConversationToResume' }]
+
+    const { container } = render(<TerminalSlot viewId="v1" agentId={AGENT} epoch={2} />)
+    await flushSubscribe()
+
+    expect(screen.getByText('종료됨')).toBeTruthy()
+    const line = container.querySelector('[data-slot-failure]')
+    expect(line).not.toBeNull()
+    // ★리터럴을 여기 적지 않는다★: 적으면 표와 화면이 갈려도 테스트가 통과한다.
+    expect(line!.textContent).toBe(failureLine('NoConversationToResume'))
   })
 })

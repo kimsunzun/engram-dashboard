@@ -189,7 +189,14 @@ fn concurrent_same_id_spawn_does_not_clobber() {
             let ok_count = ok_count.clone();
             s.spawn(move || {
                 barrier.wait();
-                if manager.spawn_agent(&profile, SpawnMode::Fresh).is_ok() {
+                // ★세는 축은 「띄웠나」다 — 「오류가 아니었나」가 아니다★: 중복 요청은 이제 오류가 아니라
+                //   결말(moot)이라 전원이 Ok 를 받는다(ADR-0161). 화신을 만든 쪽은 여전히 하나뿐이고,
+                //   그것을 세는 것이 이 가드의 검증 대상이다.
+                if manager
+                    .spawn_agent(&profile, SpawnMode::Fresh)
+                    .expect("중복 요청은 오류가 아니다")
+                    .started()
+                {
                     ok_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             });
@@ -199,7 +206,7 @@ fn concurrent_same_id_spawn_does_not_clobber() {
     assert_eq!(
         ok_count.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "같은 id 동시 spawn 은 정확히 1개만 성공해야(예약 가드)"
+        "같은 id 동시 spawn 중 실제로 띄우는 것은 정확히 하나여야(예약 가드)"
     );
     assert_eq!(
         manager.list_agents().len(),
@@ -368,7 +375,9 @@ fn manager_spawn_write_resize_kill() {
     );
     let info = manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("spawn failed");
+        .expect("spawn failed")
+        .into_started()
+        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
 
     assert_eq!(
         manager.list_agents().len(),

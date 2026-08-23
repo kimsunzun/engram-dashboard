@@ -28,7 +28,8 @@ import { refreshProfiles } from '../../store/eventBus'
 import { basename } from '../../util/basename'
 import { mergeTreeNodes, type AgentTreeNode } from './mergeTreeNodes'
 import { selectOpenTarget } from './selectOpenTarget'
-import { statusGlyph, statusGlyphColor } from './statusGlyph'
+import { isFailureBlocked, statusGlyph, statusGlyphColor } from './statusGlyph'
+import { failureLine } from './failureKinds'
 import { t } from '../../i18n'
 
 // ★상태 글리프 헬퍼는 공유 경량 모듈로 이사★: RichSlot 헤더가 같은 글리프를 그리되 이 무거운 모듈 전이
@@ -319,6 +320,10 @@ export default function AgentList() {
     const isBusy = busyIds.has(data.id)
     const err = errorById[data.id]
     const hasChildren = data.children.length > 0
+    // ADR-0162: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
+    const failureTitle = isFailureBlocked(data.status, data.lastFailure)
+      ? failureLine(data.lastFailure)
+      : null
     return (
       <div
         ref={dragHandle}
@@ -360,7 +365,14 @@ export default function AgentList() {
           if (e.key === 'Enter') commitEdit(data)
           else if (e.key === 'Escape') cancelEdit()
         }}
-        title={err ?? (isReserved ? t('agent.doubleClickToActivate') : data.cwd)}
+        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0162 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
+        //   같은 판정(`isFailureBlocked`)을 써서 둘이 어긋나지 않게 한다. 액션 실패 인라인 메시지(err)는
+        //   방금 누른 조작의 결과라 그게 더 앞선다.
+        title={
+          err ??
+          failureTitle ??
+          (isReserved ? t('agent.doubleClickToActivate') : data.cwd)
+        }
         onContextMenu={e => {
           e.preventDefault()
           e.stopPropagation() // ★행 메뉴가 이긴다(ADR-0064)★: 상위 통합 슬롯 메뉴가 안 뜨게 여기서 멈춘다.
@@ -391,9 +403,14 @@ export default function AgentList() {
             e-ink 에선 모양만 남는다. 색 리터럴은 컴포넌트에 두지 않고 변수로만(ADR-0062 §44). */}
         <span
           data-agent-glyph="1"
-          style={{ fontSize: '11px', color: statusGlyphColor(data.status), flexShrink: 0 }}
+          style={{
+            fontSize: '11px',
+            // ADR-0162: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다.
+            color: statusGlyphColor(data.status, data.lastFailure),
+            flexShrink: 0,
+          }}
         >
-          {statusGlyph(data.status)}
+          {statusGlyph(data.status, data.lastFailure)}
         </span>
         {/* cwd 는 노출 안 함(title 로만). */}
         {editingId === data.id ? (

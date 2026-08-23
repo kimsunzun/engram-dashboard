@@ -7,6 +7,7 @@ import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputSubscription } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
+import { failureLine } from '../agent/failureKinds'
 import { t } from '../../i18n'
 
 interface TerminalSlotProps {
@@ -57,6 +58,14 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
         agent.status.type === 'Failed'))
 
   useEffect(() => { agentGoneRef.current = agentGone }, [agentGone])
+
+  // ADR-0161/0162: 「마지막 실패」는 프로필에만 있다(AgentInfo wire 엔 없다). 문구는 종류 표에서만 나온다 —
+  //   컴포넌트에 박으면 종류가 늘 때 두 곳을 고쳐야 한다. profiles 는 일부 단위테스트 mock 이 안 채워
+  //   방어적 기본값을 쓴다(ViewLayoutRenderer 동형).
+  const profiles = useAgentStore(s => s.profiles) ?? []
+  const failureReason = agentId
+    ? failureLine(profiles.find(p => p.id === agentId)?.last_failure)
+    : null
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -302,8 +311,10 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
             inset: 0,
             background: 'rgba(0,0,0,0.6)',
             display: 'flex',
+            flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
+            gap: '4px',
             color: 'var(--text-muted)',
             fontFamily: 'var(--font-ui)',
             fontSize: '13px',
@@ -311,9 +322,18 @@ export default function TerminalSlot({ viewId, agentId, epoch: epochProp }: Term
           }}
         >
           {/* agent 는 완전 수거 후 null 이다 — 그 경우는 상태 메시지가 없어 공통 문구로 떨어진다. */}
-          {agent?.status.type === 'Failed'
-            ? `Failed: ${(agent.status as { type: 'Failed'; message: string }).message}`
-            : t('agent.terminatedOverlay')}
+          <span>
+            {agent?.status.type === 'Failed'
+              ? `Failed: ${(agent.status as { type: 'Failed'; message: string }).message}`
+              : t('agent.terminatedOverlay')}
+          </span>
+          {/* ★새 상태를 만들지 않는다(ADR-0162)★: 이어 열기 실패는 이미 이 「종료됨」 화면으로 떨어지므로
+              사유 한 줄만 얹는다. 마지막 실패가 없으면 이 줄이 렌더되지 않아 화면은 종전과 똑같다. */}
+          {failureReason && (
+            <span data-slot-failure="1" style={{ fontSize: '12px', color: 'var(--status-blocked)' }}>
+              {failureReason}
+            </span>
+          )}
         </div>
       )}
     </div>

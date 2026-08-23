@@ -554,6 +554,21 @@ impl OutputCore {
             .collect()
     }
 
+    /// 이 화신이 마지막으로 낸 **콘솔 바이트**를 최대 `max_bytes` 만큼(뒤에서부터) 돌려준다.
+    ///
+    /// ★`snapshot()` 의 형제가 아니다 — 그걸 대신 쓰지 말 것★: `snapshot()` 은 링 전체를 clone 하고
+    ///   (문서상 최대 2MB) 콘솔 바이트가 아닌 항목마다 warn 을 찍는다. 이 게터의 호출자는 죽은 세션의
+    ///   종료 문구 몇 줄만 보므로, 그 비용과 로그 폭주를 치를 이유가 없다.
+    /// ★상한은 정확히 지켜진다★: 마지막 청크가 상한을 넘으면 그 청크의 **끝쪽만** 잘라 담는다.
+    /// ★빈 결과가 정상이다★: 구조화(NDJSON) 세션의 링에는 콘솔 바이트가 하나도 없다.
+    // ADR-0161
+    pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
+        self.replay
+            .lock()
+            .expect("replay poisoned")
+            .terminal_tail(max_bytes)
+    }
+
     pub fn status(&self) -> AgentStatus {
         self.status.lock().expect("status poisoned").clone()
     }
@@ -655,6 +670,30 @@ impl Ring {
                 break;
             }
         }
+    }
+
+    /// 뒤에서부터 `TerminalBytes` 만 최대 `max_bytes` 모아 **시간순**으로 돌려준다.
+    ///
+    /// ★상한은 하드다★: 경계에 걸친 청크는 그 **끝쪽**만 잘라 담으므로 반환 길이가 `max_bytes` 를 넘지
+    ///   않는다(청크 하나가 통째로 넘어오면 상한이 상한이 아니게 된다).
+    /// ★clone 하지 않는다★: 슬라이스만 모아 마지막에 한 번 이어 붙인다 — 링 전체 복사(`snapshot`)와의
+    ///   차이가 이 메서드의 존재 이유다.
+    // ADR-0161
+    pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut total = 0usize;
+        for item in self.items.iter().rev() {
+            if total >= max_bytes {
+                break;
+            }
+            if let OutputEvent::TerminalBytes(data) = &item.event {
+                let take = data.len().min(max_bytes - total);
+                parts.push(&data[data.len() - take..]);
+                total += take;
+            }
+        }
+        parts.reverse();
+        parts.concat()
     }
 
     /// 현재 버퍼 전체를 clone 해 반환(seq 오름차순). 호출부가 after_seq 필터는 partition_point 로.
@@ -1112,6 +1151,64 @@ mod tests {
             event,
             cost_bytes,
         }
+    }
+
+    // ── ADR-0161: 실패 분류가 읽는 꼬리(상한이 하드인가 · 콘솔 바이트만인가) ────────────────
+
+    #[test]
+    fn terminal_tail_returns_the_last_console_bytes_in_order() {
+        let mut ring = Ring::new();
+        ring.push(stored(0, OutputEvent::TerminalBytes(b"first ".to_vec())));
+        ring.push(stored(1, OutputEvent::TerminalBytes(b"second".to_vec())));
+        assert_eq!(ring.terminal_tail(64), b"first second".to_vec());
+    }
+
+    #[test]
+    fn terminal_tail_is_a_hard_bound_even_when_one_chunk_exceeds_it() {
+        // ★청크를 통째로 담으면 상한이 상한이 아니다★ — 경계에 걸친 청크는 끝쪽만 잘라야 한다.
+        let mut ring = Ring::new();
+        ring.push(stored(
+            0,
+            OutputEvent::TerminalBytes(b"xxxxxxxxxx".to_vec()),
+        ));
+        let tail = ring.terminal_tail(4);
+        assert_eq!(tail.len(), 4);
+        assert_eq!(tail, b"xxxx".to_vec());
+
+        let mut ring = Ring::new();
+        ring.push(stored(0, OutputEvent::TerminalBytes(b"OLD".to_vec())));
+        ring.push(stored(
+            1,
+            OutputEvent::TerminalBytes(b"0123456789".to_vec()),
+        ));
+        assert_eq!(
+            ring.terminal_tail(4),
+            b"6789".to_vec(),
+            "뒤에서부터 채우므로 남는 건 가장 최근 바이트다"
+        );
+    }
+
+    #[test]
+    fn terminal_tail_skips_structured_events_and_can_be_empty() {
+        // 구조화(NDJSON) 세션의 링에는 콘솔 바이트가 하나도 없다 — 빈 값이 정상 결과다.
+        let mut ring = Ring::new();
+        ring.push(stored(0, OutputEvent::Error("boom".into())));
+        ring.push(stored(
+            1,
+            OutputEvent::TextDelta {
+                text: "hi".into(),
+                turn_id: None,
+                message_id: None,
+            },
+        ));
+        assert!(ring.terminal_tail(64).is_empty());
+
+        ring.push(stored(2, OutputEvent::TerminalBytes(b"raw".to_vec())));
+        assert_eq!(
+            ring.terminal_tail(64),
+            b"raw".to_vec(),
+            "사이에 낀 구조화 이벤트는 건너뛰고 콘솔 바이트만 잇는다"
+        );
     }
 
     #[test]

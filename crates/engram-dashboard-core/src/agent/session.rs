@@ -282,6 +282,12 @@ impl AgentSession {
         self.core.snapshot()
     }
 
+    /// 마지막 콘솔 바이트 최대 `max_bytes`(계약·비용은 `OutputCore::terminal_tail`).
+    // ADR-0161
+    pub fn terminal_tail(&self, max_bytes: usize) -> Vec<u8> {
+        self.core.terminal_tail(max_bytes)
+    }
+
     pub fn status(&self) -> AgentStatus {
         self.core.status()
     }

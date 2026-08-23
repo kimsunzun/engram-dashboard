@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use engram_dashboard_core::agent::failure::AgentFailureKind;
 use engram_dashboard_core::agent::manager::AgentManager;
 use engram_dashboard_core::agent::preset::PresetRegistry;
 use engram_dashboard_core::agent::profile::{
@@ -463,6 +464,182 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     );
 
     let _ = manager.kill_agent(id);
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+// ── 마지막 실패 기록(ADR-0161) ────────────────────────────────────────────────────
+
+/// 이어받기가 조기 종료로 실패하면 그 자리에서 종류가 붙는다 — 사전 판정 없이 관측만으로.
+///
+/// ★shell 프로필이라 종류가 「이어받기 직후 조기 종료」다★: 문구를 알아보는 지식은 claude backend 에만
+///   있고(그 단위 테스트가 별도), shell 은 침묵하므로 맥락 기본값으로 떨어진다 — 그 기본값이 재시도
+///   가능이라는 것이 fail-open 의 실물이다.
+#[test]
+fn resume_early_exit_records_a_typed_last_failure() {
+    let (manager, _sink, profiles) = make_manager("record-early-exit");
+
+    let (profile, batch, count) = always_early_exit_profile("record-early-exit");
+    let id = profile.id;
+    profiles.upsert(profile.clone());
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        None,
+        "전제: 시도 전에는 기록이 없다(사전 판정을 하지 않는다)"
+    );
+
+    let result = manager.activate_profile(&profile, SpawnMode::Resume);
+    assert!(result.is_err(), "전제: 조기 종료는 Err 로 끝난다");
+
+    let recorded = profiles.get(id).and_then(|p| p.last_failure);
+    assert_eq!(
+        recorded,
+        Some(AgentFailureKind::EarlyExitAfterResume),
+        "실패한 자리에서 종류가 붙어야 한다 — got {recorded:?}"
+    );
+
+    let _ = manager.kill_agent(id);
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// 프로세스를 아예 못 띄운 활성화도 기록한다(Fresh 갈래 — resume 만 덮으면 이쪽이 샌다).
+#[test]
+fn an_unspawnable_profile_records_a_spawn_failure() {
+    let (manager, _sink, profiles) = make_manager("record-spawn-fail");
+
+    let profile = AgentProfile::new(
+        "activate-nonexistent".into(),
+        AgentCommand::Shell {
+            // 실재하지 않는 실행파일 — PTY open 이 실패해 spawn 이 Err 로 끝난다.
+            program: format!("engram-not-a-real-program-{}.exe", Uuid::new_v4()),
+            args: vec![],
+        },
+        PathBuf::from("."),
+        vec![],
+        false,
+    );
+    let id = profile.id;
+    profiles.upsert(profile.clone());
+
+    let result = manager.activate_profile(&profile, SpawnMode::Fresh);
+    assert!(result.is_err(), "전제: 없는 실행파일은 Err 로 끝난다");
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        Some(AgentFailureKind::SpawnFailed)
+    );
+}
+
+/// ★이미 떠 있는 에이전트를 다시 복원해도 실패 도장이 찍히지 않는다★ — 그리고 이 경로는 **결정적**이다.
+///
+/// `restore_one` 은 `activate_profile` 의 "이미 실행 중" 선제 필터를 지나지 않으므로, 산 에이전트를 두고
+/// 복원을 돌리면 `spawn_agent` 의 이중-spawn 가드에 그대로 부딪힌다 — 스레드 인터리빙을 기다릴 필요 없이
+/// 그 갈래(`SpawnOutcome::Moot`)가 활성화 기록 경로로 들어온다. 옛 형태는 두 스레드를 경쟁시켜 승자·패자를
+/// 기대했는데, 선제 필터 뒤에서 디스케줄만 나면 둘 다 통과해 통과 조건이 흔들렸다(간헐 red) — 되살리지 말 것.
+///
+/// ★"두 번째 프로세스가 안 떴다" 를 **시간 창으로 재지 않는다**★: 파일 append 로 세면 부재 단언이
+/// "아직 안 썼다" 와 구분되지 않아, 대기를 얼마로 잡든 경합 아래선 헛통과할 수 있다(그래서 이 파일의 다른
+/// 픽스처가 쓰는 count 대기를 여기선 쓰지 않는다). 대신 **epoch** 을 본다: 두 번째 spawn 은 반드시
+/// `epoch_for_spawn` 을 지나 값을 올리므로, 값이 그대로면 아무것도 안 떴다는 증거가 즉시·확정적으로 선다.
+#[test]
+fn restoring_over_a_live_agent_never_stamps_it_as_failed() {
+    let (manager, _sink, profiles) = make_manager("restore-over-live");
+
+    let (profile, batch, count) = long_lived_profile("restore-over-live");
+    let id = profile.id;
+    profiles.upsert(profile.clone());
+    manager
+        .activate_profile(&profile, SpawnMode::Fresh)
+        .expect("최초 활성화는 성공한다");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "전제: 세션이 명부에 올라 살아 있다"
+    );
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        None,
+        "전제: 성공한 활성화는 기록을 남기지 않는다"
+    );
+    let epoch_before = profiles.get(id).map(|p| p.epoch);
+
+    // spawn 이 auto_restore 를 true 로 올려 두므로 이 프로필은 복원 대상이다.
+    let reports = manager.restore_all();
+    let handled = reports.iter().any(|r| r.agent_id == id);
+    assert!(
+        handled,
+        "전제: 복원이 이 프로필을 훑어야 한다 — got {reports:?}"
+    );
+
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        None,
+        "중복 요청은 그 항목의 실패가 아니다 — 산 에이전트에 도장이 찍히면 정상 종료 순간 화면에 뜬다"
+    );
+    assert_eq!(
+        profiles.get(id).map(|p| p.epoch),
+        epoch_before,
+        "epoch 이 올랐다 = 두 번째 화신이 떴다(할 일 없는 요청이 프로세스를 띄우면 안 된다)"
+    );
+    assert_eq!(
+        manager.list_agents().iter().filter(|a| a.id == id).count(),
+        1,
+        "명부의 화신도 하나뿐이어야 한다"
+    );
+
+    let _ = manager.kill_agent(id);
+    let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// ★사용자가 끊은 것은 활성화 실패가 아니다★ — 조기종료 창 안에서 kill 이 와도 기록이 남지 않는다.
+///
+/// 기록되면 트리에 「이어받은 직후 종료됐습니다」가 남아, 방금 스스로 끈 항목이 고장 난 것처럼 보인다
+/// (그 표시는 다음 활성화가 성립할 때까지 안 지워진다). HEAD 에선 이 경로가 일시적 Err 만 냈다.
+///
+/// ★거짓 red 가 없는 모양★: 단언은 「기록이 없다」 하나이고, 그것은 두 인터리빙 **모두에서** 참이다 —
+/// kill 이 창 안에 들면 이 갈래가(기록 안 함), 창을 넘겨 들면 성립 갈래가(지움) 같은 결과를 만든다.
+/// 어느 쪽을 탔는지는 활성화 반환값으로 구분해 아래에서 보고만 한다.
+#[test]
+fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
+    let (manager, _sink, profiles) = make_manager("kill-in-window");
+
+    let (profile, batch, count) = long_lived_profile("kill-in-window");
+    let id = profile.id;
+    profiles.upsert(profile.clone());
+
+    let manager = Arc::new(manager);
+    let activator = {
+        let m = manager.clone();
+        let p = profile.clone();
+        // Resume 모드라 조기종료 창(3s)만큼 폴링하며 블록된다 — 그 사이 본 스레드가 끊는다.
+        std::thread::spawn(move || m.activate_profile(&p, SpawnMode::Resume))
+    };
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            manager.list_agents().iter().any(|a| a.id == id)
+        }),
+        "전제: 세션이 명부에 올라야 끊을 수 있다"
+    );
+    let _ = manager.kill_agent(id);
+
+    let outcome = activator.join().expect("활성화 스레드");
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        None,
+        "사용자 종료는 활성화 실패가 아니다 — 도장이 남으면 안 된다(결말: {})",
+        if outcome.is_err() {
+            "창 안에서 관측됨"
+        } else {
+            "창을 넘겨 성립으로 판정됨"
+        }
+    );
+
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
     let _ = std::fs::remove_file(&batch);

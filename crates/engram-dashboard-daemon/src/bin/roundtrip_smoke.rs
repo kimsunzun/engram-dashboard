@@ -1060,7 +1060,10 @@ fn spawn_named(
         false,
     );
     profile.display_name = Some(name.to_string());
-    let info = manager.spawn_agent(&profile, SpawnMode::Fresh).ok()?;
+    let info = manager
+        .spawn_agent(&profile, SpawnMode::Fresh)
+        .ok()?
+        .into_started()?;
     let deadline = Instant::now() + SPAWN_APPEAR_TIMEOUT;
     while Instant::now() < deadline {
         if manager.list_agents().iter().any(|a| a.id == info.id) {
