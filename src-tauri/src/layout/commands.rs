@@ -51,7 +51,8 @@ use crate::ui_settings::UiSettingsRefresh;
 // ★프론트에 짝이 없어 새로 짓는 이름은 넷★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다) ·
 //   `slot.split`(프론트는 방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만,
 //   버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) · `ui.refresh`(프론트에 대응 명령이
-//   없다 — 프론트가 가진 `theme.set`/`theme.toggle` 은 파일을 안 본다).
+//   없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만 만지던 화면 명령 둘은 ADR-0167 이
+//   내렸다).
 // ★세대 4 = `ui.refresh` 의 답에 `source` 가 붙은 세대★(세대 3 = `ui.refresh` 자체 · 세대 2 =
 //   `slot.popout`). ★이름이 늘 때만 올리는 번호가 아니다★ — **선언이 바뀌면** 올린다(답 모양도 선언이다).
 //   매크로 계약 = `declare_commands!` 의 `CATALOG_VERSION` 항목. 안 올리면 어휘가 다른 두 셸이 같은 세대를

@@ -1,8 +1,8 @@
-//! UI 설정의 Tauri 어댑터 — 부팅 조회 command 와 `ui.refresh` 가 미는 알림.
+//! UI 설정의 Tauri 어댑터 — 부팅 조회 command · `ui.refresh` 가 미는 알림 · 부팅 정리.
 //!
-//! ★이 파일에 로직이 없다★: 파일 위치·읽기·기본값·창별 해소는 `crate::ui_settings` 가 소유하고, 여기 남는
-//! 것은 Tauri 세계로의 번역 셋(조회 응답 · **살아 있는 웹뷰 세기** · `emit_to`)뿐이다(`commands/layout.rs`
-//! 와 같은 분담).
+//! ★이 파일에 로직이 없다★: 파일 위치·읽기·기본값·창별 해소·무엇을 쓸어낼지는 `crate::ui_settings` 가
+//! 소유하고, 여기 남는 것은 Tauri 세계로의 번역 넷(조회 응답 · **살아 있는 웹뷰 세기** · `emit_to` ·
+//! **설정이 선언한 창 뽑기**)뿐이다(`commands/layout.rs` 와 같은 분담).
 //!
 //! ## ★읽는 자리가 둘인 이유★
 //! - **부팅 = 프론트가 당긴다**(`get_ui_settings`). 창이 언제 스크립트를 다 올렸는지 셸이 모르므로
@@ -13,13 +13,14 @@
 //! 한쪽만 창을 알면 그 창은 부팅과 refresh 에서 다른 테마를 본다.
 // ADR-0167
 
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, Window};
 
 use crate::ui_settings::{
-    deliver_per_window, load_settings, FileSource, LoadedTheme, UiSettingsPayload,
-    UiSettingsRefresh,
+    deliver_per_window, load_settings, sweep_dead_windows, write_atomic, FileSource, LoadedTheme,
+    UiSettingsPayload, UiSettingsRefresh,
 };
 
 /// 창마다 **자기 값**을 받는다 — 목적지를 지목해 보내므로 받는 쪽도 자기 label 로 구독해야 한다
@@ -46,6 +47,37 @@ const EVT_UI_SETTINGS_UPDATED: &str = "ui:settings-updated";
 #[tauri::command]
 pub fn get_ui_settings(window: Window) -> UiSettingsPayload {
     load_settings(&FileSource::in_data_dir()).payload_for(window.label())
+}
+
+/// 앱 설정이 **선언한** 창 label 전량(`tauri.conf.json` 의 `app.windows`).
+///
+/// ★손 목록을 쓰지 않는다★ — 설정에 창이 늘면 이 함수가 함께 자란다. 런타임에 만드는 창(팝아웃)은 설정에
+/// 없으므로 여기 안 든다: 부팅 쓸기가 지우는 것이 바로 그쪽이다.
+///
+/// 같은 설정 표를 읽는 형제가 하나 더 있다 — `view_commands::hidden_window_labels`(그쪽은 `visible` 로
+/// 거른다). 둘이 재료를 공유한다는 것을 알고 남긴다.
+// ADR-0167
+pub fn declared_window_labels(app: &AppHandle) -> BTreeSet<String> {
+    app.config()
+        .app
+        .windows
+        .iter()
+        .map(|window| window.label.clone())
+        .collect()
+}
+
+/// 부팅 정리 — 죽은 창의 테마 항목을 지운다. ★`setup` 에서 한 번만 부른다★(사유·불변식 =
+/// [`crate::ui_settings::sweep_dead_windows`], 원자성 = [`write_atomic`]).
+///
+/// 실패는 로그로 끝난다 — 이 정리는 앱이 뜨는 조건이 아니다.
+// ADR-0167
+pub fn sweep_dead_window_entries(app: &AppHandle) {
+    let source = FileSource::in_data_dir();
+    // 쓸 경로는 읽은 경로와 같아야 한다 — 두 번 고르면 데이터 폴더가 갈렸을 때 읽은 파일과 쓴 파일이 갈린다.
+    let path = source.path().to_path_buf();
+    sweep_dead_windows(&source, &declared_window_labels(app), |text| {
+        write_atomic(&path, text)
+    });
 }
 
 /// `ui.refresh` 의 실물.

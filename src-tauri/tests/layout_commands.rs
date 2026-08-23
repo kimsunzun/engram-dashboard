@@ -60,8 +60,9 @@ use engram_dashboard_lib::layout::{
     ViewSnapshot, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::ui_settings::{
-    deliver_per_window, load_settings, parse_settings, read_capped, LoadedTheme, SettingsSource,
-    ThemeSource, UiSettingsPayload, UiSettingsRefresh, UiTheme, DEFAULT_THEME, MAX_REFUSED_DETAILS,
+    deliver_per_window, load_settings, parse_settings, read_capped, sweep_dead_windows,
+    write_atomic, LoadedTheme, SettingsSource, SweepOutcome, ThemeSource, UiSettingsPayload,
+    UiSettingsRefresh, UiTheme, DEFAULT_THEME, MAX_REFUSED_DETAILS,
 };
 use engram_dashboard_lib::view_commands::{
     reserved_names, ViewArgSchema, ViewCommandBridge, ViewCommandDecl, ViewCommandHelp,
@@ -1492,7 +1493,7 @@ async fn the_registration_packet_never_carries_a_name_the_daemon_answers_itself(
     let reported: Vec<ViewCommandDecl> = daemon_answers
         .iter()
         .map(|name| view_decl(name))
-        .chain([view_decl("theme.set")])
+        .chain([view_decl("tab.next")])
         .collect();
     let outcome = bridge.report(MAIN_WINDOW_LABEL, reported);
     for name in &daemon_answers {
@@ -1513,7 +1514,7 @@ async fn the_registration_packet_never_carries_a_name_the_daemon_answers_itself(
             "데몬이 답하는 '{name}' 가 실렸다 — 이 패킷은 통째로 반려된다"
         );
     }
-    assert!(names.contains("theme.set"), "웹뷰 몫은 실린다");
+    assert!(names.contains("tab.next"), "웹뷰 몫은 실린다");
     assert!(names.contains("tab.create"), "셸 몫도 그대로 실린다");
     for decl in &decls {
         assert!(
@@ -1535,8 +1536,8 @@ async fn the_registration_packet_never_carries_a_name_the_daemon_answers_itself(
 async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
     let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
     // main 은 보고에 실패했다고 친다 — 아예 안 나타난다.
-    bridge.report("popup-1", vec![view_decl("theme.set")]);
-    bridge.report("popup-2", vec![view_decl("theme.set")]);
+    bridge.report("popup-1", vec![view_decl("tab.next")]);
+    bridge.report("popup-2", vec![view_decl("tab.next")]);
     assert_eq!(
         bridge.host().as_deref(),
         Some("popup-1"),
@@ -1554,7 +1555,7 @@ async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
     let (target, request) = seen.recv().await.expect("살아 있는 창으로 내려간다");
@@ -1574,7 +1575,7 @@ async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
 /// ★★사람이 못 보는 창은 마지막 수단 목적지가 될 수 없다★★
 ///
 /// 사전순 첫 생존자를 그냥 고르면 `agent-tree` 가 모든 `slot-popup-N` 보다 앞선다 — 그 창은 설정이
-/// `visible: false` 라, `theme.set` 이 **성공을 답하면서** 아무도 안 보는 창을 칠한다. 호출자에게는
+/// `visible: false` 라, `tab.next` 이 **성공을 답하면서** 아무도 안 보는 창을 칠한다. 호출자에게는
 /// 「적용됐다」인데 화면은 그대로다.
 ///
 /// ★이 규칙이 지키는 것은 「올바른 목적지」가 아니라 **최악의 모양**이다★: main 우선 규칙이 기대는 전제
@@ -1604,7 +1605,7 @@ async fn the_last_resort_host_is_never_a_window_the_user_cannot_see() {
     );
 
     // main 은 보고에 실패했다고 친다 — 남은 후보는 숨은 트리 창과 팝아웃뿐이다.
-    bridge.report(TREE_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(TREE_WINDOW_LABEL, vec![view_decl("tab.next")]);
     assert!(
         TREE_WINDOW_LABEL < "slot-popup-1",
         "이 테스트의 전제 — 트리 label 이 팝아웃보다 사전순 앞이다"
@@ -1620,14 +1621,14 @@ async fn the_last_resort_host_is_never_a_window_the_user_cannot_see() {
     );
 
     // 팝아웃이 뜨면 그쪽이 목적지다(사전순으로는 뒤지만 사람이 볼 수 있다).
-    bridge.report("slot-popup-1", vec![view_decl("theme.set")]);
+    bridge.report("slot-popup-1", vec![view_decl("tab.next")]);
     assert_eq!(bridge.host().as_deref(), Some("slot-popup-1"));
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
     let (target, _request) = seen.recv().await.expect("보이는 창으로 내려간다");
@@ -1638,7 +1639,7 @@ async fn the_last_resort_host_is_never_a_window_the_user_cannot_see() {
     assert_eq!(bridge.host(), None);
 
     // main 은 이 규칙 밖이다 — `--hidden` 부팅에서 숨어 있어도 사용자가 트레이로 여는 그 창이다.
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
     assert_eq!(bridge.host().as_deref(), Some(MAIN_WINDOW_LABEL));
 }
 
@@ -1650,28 +1651,24 @@ async fn the_last_resort_host_is_never_a_window_the_user_cannot_see() {
 #[tokio::test]
 async fn a_non_host_report_does_not_change_what_is_advertised() {
     let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
     assert_eq!(bridge.host().as_deref(), Some(MAIN_WINDOW_LABEL));
 
-    let popup = bridge.report("popup-1", vec![view_decl("theme.toggle")]);
+    let popup = bridge.report("popup-1", vec![view_decl("slot.empty")]);
 
     assert!(
         !popup.changed(),
         "host 가 아닌 창의 보고는 차분을 만들지 않는다"
     );
     let advertised: Vec<String> = bridge.declarations().into_iter().map(|d| d.name).collect();
-    assert_eq!(
-        advertised,
-        vec!["theme.set".to_string()],
-        "광고는 host 것뿐"
-    );
+    assert_eq!(advertised, vec!["tab.next".to_string()], "광고는 host 것뿐");
 
     // 그 팝아웃의 이름은 배달도 안 받는다 — 광고에 없으니 명부에도 없다.
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.toggle", json!({}), request_id),
+        envelope("slot.empty", json!({}), request_id),
         mail.deliver(),
     );
     mail.settle(1).await;
@@ -1687,7 +1684,7 @@ async fn a_non_host_report_does_not_change_what_is_advertised() {
             .into_iter()
             .map(|d| d.name)
             .collect::<Vec<_>>(),
-        vec!["theme.toggle".to_string()]
+        vec!["slot.empty".to_string()]
     );
 }
 
@@ -1708,7 +1705,7 @@ async fn a_report_and_its_delta_go_out_as_one_unit() {
             bridge
                 .report_and_push(
                     MAIN_WINDOW_LABEL,
-                    vec![view_decl("theme.set")],
+                    vec![view_decl("tab.next")],
                     |_, _| async move {
                         order.lock().unwrap().push("first-send-begin");
                         let _ = gate.acquire().await.expect("게이트");
@@ -1729,7 +1726,7 @@ async fn a_report_and_its_delta_go_out_as_one_unit() {
             bridge
                 .report_and_push(
                     MAIN_WINDOW_LABEL,
-                    vec![view_decl("theme.toggle")],
+                    vec![view_decl("slot.empty")],
                     |_, _| async move {
                         order.lock().unwrap().push("second-send");
                     },
@@ -1762,17 +1759,23 @@ async fn a_report_and_its_delta_go_out_as_one_unit() {
 /// 다른 어느 테스트도 이 경계를 안 건넌다 — Rust 쪽은 enum 을 직접 만들고 vitest 는 invoke 를 mock 한다.
 /// 철자가 갈리면 serde 가 **벡터 전체**를 실패시켜 `report_view_commands` 가 payload 를 통째로 반려하고,
 /// 그 창은 명령을 **0개** 등록한다. 유일한 신호는 웹뷰 콘솔 경고 한 줄이다.
-/// 아래 문자열은 `src/commands/viewCommandBridge.ts` 의 `offeredCommands()` 가 내는 모양 그대로다 —
-/// 짝 단언은 `src/commands/viewCommandBridge.test.ts`(invoke 인자)와 `busCommands.test.ts`(effect 어휘)다.
+/// 아래 첫 문자열은 `src/commands/viewCommandBridge.ts` 의 `offeredCommands()` 가 **오늘 내는 모양
+/// 그대로**다 — 짝 단언은 `src/commands/viewCommandBridge.test.ts`(invoke 인자)와
+/// `busCommands.test.ts`(명단·effect 어휘)다.
+///
+/// ★뒤이은 둘째 문자열은 오늘 아무 명령도 안 내는 모양이다★ — `enum` 과 `read` 를 싣던 유일한 발신자가
+/// 테마 명령이었고 ADR-0167 이 그것을 내렸다. 그래도 그 두 칸은 **계약**이라 여기서 계속 잰다: 안 재면
+/// 다음에 그 모양을 내는 명령이 생길 때 이 경계가 무검증으로 그것을 만난다.
 #[test]
 fn the_frontend_spelling_of_the_report_payload_deserializes_here() {
     const FROM_WEBVIEW: &str = r#"[
-      {"name":"theme.set","help":{
-        "summary":"창 하나의 테마를 바꾼다",
+      {"name":"slot.empty","help":{
+        "summary":"그 슬롯을 빈 칸으로 되돌린다(슬롯 자체는 남는다 — 없애려면 slot.close).",
         "effect":"write",
-        "args":{"theme":{"type":"string","enum":["dark","light","e-ink"],"description":"적용할 테마 이름"}},
-        "required":["theme"]}},
-      {"name":"theme.toggle","help":{"summary":"테마 순환","effect":"read"}}
+        "args":{"viewId":{"type":"string","description":"탭 id(UUID) — tab.list 가 준다."},
+                "slotId":{"type":"string","description":"슬롯 id(UUID) — slot.resolveSpatial 이 준다."}},
+        "required":["viewId","slotId"]}},
+      {"name":"tab.next","help":{"summary":"그 창의 활성 탭을 다음 탭으로 옮긴다.","effect":"write"}}
     ]"#;
 
     let decls: Vec<ViewCommandDecl> =
@@ -1780,17 +1783,31 @@ fn the_frontend_spelling_of_the_report_payload_deserializes_here() {
 
     assert_eq!(decls.len(), 2);
     assert_eq!(decls[0].help.effect, Some(ViewEffect::Write));
-    assert_eq!(decls[1].help.effect, Some(ViewEffect::Read));
-    let theme = decls[0].help.args.get("theme").expect("인자 칸");
-    assert_eq!(theme.ty.as_deref(), Some("string"));
-    assert_eq!(theme.allowed.as_deref().map(<[String]>::len), Some(3));
-    assert_eq!(decls[0].help.required, vec!["theme".to_string()]);
+    let slot = decls[0].help.args.get("slotId").expect("인자 칸");
+    assert_eq!(slot.ty.as_deref(), Some("string"));
+    assert_eq!(
+        decls[0].help.required,
+        vec!["viewId".to_string(), "slotId".to_string()]
+    );
     // `args`·`required` 를 안 실은 항목도 읽힌다(둘 다 `#[serde(default)]`).
     assert!(decls[1].help.args.is_empty());
 
+    // 오늘 발신자가 없는 두 칸 — `read` 철자와 `enum` 목록(위 doc).
+    const NOT_EMITTED_TODAY: &str = r#"[{"name":"probe.shape","help":{"summary":"s","effect":"read","args":{"pick":{"type":"string","enum":["a","b","c"]}}}}]"#;
+    let shapes: Vec<ViewCommandDecl> =
+        serde_json::from_str(NOT_EMITTED_TODAY).expect("계약에 있는 모양은 읽힌다");
+    assert_eq!(shapes[0].help.effect, Some(ViewEffect::Read));
+    assert_eq!(
+        shapes[0].help.args["pick"]
+            .allowed
+            .as_deref()
+            .map(<[String]>::len),
+        Some(3)
+    );
+
     // ★대문자 철자는 **안** 읽힌다 — rename 방향을 못 박는다★. 한 항목이 깨지면 벡터 전체가 실패하므로
     //   이 반려의 대가가 「그 창은 0개 등록」이라는 것도 함께 남긴다.
-    let wrong = r#"[{"name":"theme.set","help":{"summary":"s","effect":"Write"}}]"#;
+    let wrong = r#"[{"name":"tab.next","help":{"summary":"s","effect":"Write"}}]"#;
     assert!(
         serde_json::from_str::<Vec<ViewCommandDecl>>(wrong).is_err(),
         "철자가 갈리면 payload 가 통째로 반려된다 — 그 창은 명령을 하나도 등록하지 못한다"
@@ -1828,13 +1845,13 @@ fn the_webview_deadline_fits_inside_the_daemon_seat() {
 #[tokio::test]
 async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
     let (_target, first) = seen.recv().await.expect("첫 봉투가 내려간다");
@@ -1842,7 +1859,7 @@ async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter
     // 같은 번호로 다시 — 아직 첫 왕복이 돌고 있다.
     let second = Mailbox::default();
     receiver.accept(
-        envelope("theme.set", json!({ "theme": "dark" }), request_id),
+        envelope("tab.next", json!({ "window": "agent-tree" }), request_id),
         second.deliver(),
     );
     second.settle(1).await;
@@ -1875,13 +1892,13 @@ async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter
 #[tokio::test]
 async fn only_the_window_that_received_the_envelope_may_settle_it() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
     let (_target, request) = seen.recv().await.expect("봉투가 내려간다");
@@ -1953,18 +1970,18 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
         panic!("RegisterCommands");
     };
     assert!(
-        !decls.iter().any(|d| d.name == "theme.set"),
+        !decls.iter().any(|d| d.name == "tab.next"),
         "아직 아무 창도 보고하지 않았다"
     );
 
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
 
     let after = registration_command(&receiver).expect("패킷");
     let AgentCommand::RegisterCommands { decls, .. } = after else {
         panic!("RegisterCommands");
     };
     assert!(
-        decls.iter().any(|d| d.name == "theme.set"),
+        decls.iter().any(|d| d.name == "tab.next"),
         "다음 (재)핸드셰이크의 패킷에는 웹뷰 몫이 합쳐져 있다"
     );
 }
@@ -1974,7 +1991,7 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
 #[tokio::test]
 async fn a_cancelled_delivery_gives_its_answer_slot_back() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.toggle")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("slot.empty")]);
 
     // 태스크를 **쥐고만** 있다가 버린다 — 취소를 그대로 흉내낸다(`ReplySink` 의 Drop 이 답장을 낸다).
     let (_world, ports) = World::build();
@@ -1988,7 +2005,7 @@ async fn a_cancelled_delivery_gives_its_answer_slot_back() {
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.on_command(
-        envelope("theme.toggle", json!({}), request_id),
+        envelope("slot.empty", json!({}), request_id),
         mail.sink(request_id),
     );
     let mut task = Box::pin(queue.drain().pop().expect("적용 태스크 하나"));
@@ -2039,20 +2056,20 @@ async fn a_name_the_shell_table_answers_is_left_out_and_still_runs_in_the_shell(
 #[tokio::test]
 async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(5));
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.set", json!({ "theme": "light" }), request_id),
+        envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
 
     let (target, request) = seen.recv().await.expect("웹뷰로 내려간다");
     assert_eq!(target, MAIN_WINDOW_LABEL, "보고한 창으로 간다");
-    assert_eq!(request.name, "theme.set");
-    assert_eq!(request.args, json!({ "theme": "light" }));
+    assert_eq!(request.name, "tab.next");
+    assert_eq!(request.args, json!({ "window": "main" }));
     assert_eq!(
         request.request_id,
         request_id.to_string(),
@@ -2084,13 +2101,13 @@ async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
 #[tokio::test]
 async fn a_webview_that_never_answers_ends_as_a_timeout_not_a_hang() {
     let (bridge, mut seen) = recording_bridge(Duration::from_millis(50));
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.toggle")]);
+    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("slot.empty")]);
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
     receiver.accept(
-        envelope("theme.toggle", json!({}), request_id),
+        envelope("slot.empty", json!({}), request_id),
         mail.deliver(),
     );
     seen.recv().await.expect("웹뷰로 내려간다");
@@ -2115,7 +2132,7 @@ async fn a_webview_name_is_unknown_until_a_window_reports_it() {
 
     let mail = Mailbox::default();
     let request_id = RequestId::new();
-    receiver.accept(envelope("theme.set", json!({}), request_id), mail.deliver());
+    receiver.accept(envelope("tab.next", json!({}), request_id), mail.deliver());
     mail.settle(1).await;
 
     let err = error_of(mail.only());
@@ -2133,7 +2150,7 @@ async fn a_webview_name_is_unknown_until_a_window_reports_it() {
 async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destination() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
 
-    let first = bridge.report("popup-1", vec![view_decl("theme.set")]);
+    let first = bridge.report("popup-1", vec![view_decl("tab.next")]);
     assert!(first.changed(), "첫 보고는 명단을 채운다");
     assert_eq!(
         bridge.host().as_deref(),
@@ -2141,7 +2158,7 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
         "먼저 온 창을 받아 둔다"
     );
 
-    let again = bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("theme.set")]);
+    let again = bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
     assert!(!again.changed(), "같은 목록이면 보낼 차분이 없다");
     assert_eq!(
         bridge.host().as_deref(),
@@ -2149,7 +2166,7 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
         "main 이 덮는다"
     );
 
-    let stolen = bridge.report("popup-2", vec![view_decl("theme.set")]);
+    let stolen = bridge.report("popup-2", vec![view_decl("tab.next")]);
     assert!(!stolen.changed());
     assert_eq!(
         bridge.host().as_deref(),
@@ -2158,7 +2175,7 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
     );
 
     let shrunk = bridge.report(MAIN_WINDOW_LABEL, vec![]);
-    assert_eq!(shrunk.removed, vec!["theme.set".to_string()]);
+    assert_eq!(shrunk.removed, vec!["tab.next".to_string()]);
     assert!(shrunk.accepted.is_empty());
 }
 
@@ -2168,36 +2185,41 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
 async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
     let mut args = BTreeMap::new();
+    // ★`enum` 을 싣는 화면 명령은 오늘 하나도 없다★ — 마지막 발신자였던 테마 명령을 ADR-0167 이 내렸다.
+    //   그래도 투영이 그 칸을 흘려보내는지는 계약이라, 여기서 값을 지어내 잰다.
     args.insert(
-        "theme".to_string(),
+        "window".to_string(),
         ViewArgSchema {
             ty: Some("string".to_string()),
-            allowed: Some(vec!["dark".to_string(), "light".to_string()]),
-            description: Some("적용할 테마".to_string()),
+            allowed: Some(vec!["main".to_string(), "agent-tree".to_string()]),
+            description: Some("대상 창 label".to_string()),
         },
     );
     let outcome = bridge.report(
         MAIN_WINDOW_LABEL,
         vec![ViewCommandDecl {
-            name: "theme.set".to_string(),
+            name: "tab.next".to_string(),
             help: ViewCommandHelp {
-                summary: "  이 창의 테마를 바꾼다  ".to_string(),
+                summary: "  그 창의 활성 탭을 다음 탭으로 옮긴다  ".to_string(),
                 effect: Some(ViewEffect::Write),
                 args,
                 // ★선언에 없는 칸은 required 에서 빠진다★ — 남겨 두면 그 스키마는 어떤 인자로도 만족되지
                 //   않아 호출자가 영영 못 부른다.
-                required: vec!["theme".to_string(), "ghost".to_string()],
+                required: vec!["window".to_string(), "ghost".to_string()],
             },
         }],
     );
 
     let item: serde_json::Value =
         serde_json::from_str(&outcome.accepted[0].help).expect("help 는 JSON 이다");
-    assert_eq!(item["name"], "theme.set");
-    assert_eq!(item["summary"], "이 창의 테마를 바꾼다");
-    assert_eq!(item["args"]["properties"]["theme"]["type"], "string");
-    assert_eq!(item["args"]["properties"]["theme"]["enum"][1], "light");
-    assert_eq!(item["args"]["required"], json!(["theme"]));
+    assert_eq!(item["name"], "tab.next");
+    assert_eq!(item["summary"], "그 창의 활성 탭을 다음 탭으로 옮긴다");
+    assert_eq!(item["args"]["properties"]["window"]["type"], "string");
+    assert_eq!(
+        item["args"]["properties"]["window"]["enum"][1],
+        "agent-tree"
+    );
+    assert_eq!(item["args"]["required"], json!(["window"]));
     // 카탈로그 항목의 칸 이름은 Rust 쪽과 같아야 한다 — 그 목록을 여기서 못 박는다.
     for key in ["name", "effect", "since", "summary", "args", "ok", "errors"] {
         assert!(item.get(key).is_some(), "{key} 칸이 없다: {item}");
@@ -2243,7 +2265,7 @@ async fn a_reported_command_without_a_summary_is_left_out() {
     let outcome = bridge.report(
         MAIN_WINDOW_LABEL,
         vec![ViewCommandDecl {
-            name: "theme.set".to_string(),
+            name: "tab.next".to_string(),
             help: ViewCommandHelp {
                 summary: "   ".to_string(),
                 effect: Some(ViewEffect::Write),
@@ -2253,7 +2275,7 @@ async fn a_reported_command_without_a_summary_is_left_out() {
         }],
     );
 
-    assert_eq!(outcome.refused, vec!["theme.set".to_string()]);
+    assert_eq!(outcome.refused, vec!["tab.next".to_string()]);
     assert!(outcome.accepted.is_empty());
 }
 
@@ -2875,4 +2897,246 @@ fn a_push_with_no_live_windows_is_a_failure() {
 
     assert!(outcome.is_err(), "빈 명단에 성공으로 답했다");
     assert_eq!(calls, 0);
+}
+
+// ── (G) 부팅 쓸기 — 죽은 창 항목 지우기 (ADR-0167) ──────────────────────────
+//
+// 재는 것 다섯: 어떤 label 이 살아남나 · 지울 것이 없으면 **안 쓴다** · 못 쓸 파일은 그대로 둔다 ·
+// 아는 칸 밖의 것이 살아남나 · 쓰기가 실패해도 앱이 죽지 않나. 실 파일을 만지는 것은 원자적 쓰기 단언
+// 하나뿐이고(임시 폴더), 나머지는 쓰기 자리를 클로저로 받는 seam 위에서 돈다.
+//
+// ## ★안 재는 것 — 「부팅 순간 팝아웃이 0 개」라는 전제(알려진 갭)★
+// 그 전제는 레이아웃에 디스크 영속이 없다는 사실에서 나온다(ADR-0167 결정 6). 여기서 재려면 실제 창이
+// 필요하므로, 이 스위트가 재는 것은 그 전제를 **받았을 때 무엇이 지워지나**까지다.
+//
+// ## ★안 재는 것 — 키 순서(알려진 갭이자 알고 친 대가)★
+// `serde_json` 이 `preserve_order` 없이 붙어 있어 `Value` 의 지도가 `BTreeMap` 이다 — 쓸기가 실제로
+// 도는 부팅에서는 남는 키가 사전순으로 다시 적힌다. 값과 키 집합은 그대로다(아래 단언이 그것을 잰다).
+
+/// 설정이 선언한 창 — 운영은 `commands::settings::declared_window_labels` 가 앱 설정에서 뽑는다.
+fn declared_windows(labels: &[&str]) -> BTreeSet<String> {
+    labels.iter().map(|label| label.to_string()).collect()
+}
+
+/// 쓸기가 쓴 원문을 붙잡는다 — ★`None` = 한 번도 안 썼다★(이 스위트가 가장 자주 묻는 것).
+#[derive(Default)]
+struct Written(Option<String>);
+
+impl Written {
+    fn sink(&mut self) -> impl FnOnce(&str) -> std::io::Result<()> + '_ {
+        |text| {
+            self.0 = Some(text.to_string());
+            Ok(())
+        }
+    }
+
+    /// 쓴 원문을 다시 읽어 값으로 — 바이트가 아니라 **뜻**이 남았나를 잰다(키 순서는 위 헤더 참조).
+    fn reparsed(&self) -> serde_json::Value {
+        serde_json::from_str(self.0.as_deref().expect("쓴 것이 없다")).expect("쓴 것은 JSON 이다")
+    }
+}
+
+/// ★면제 목록은 손으로 적지 않는다 — 설정이 정본이다★.
+///
+/// 운영은 `app.config().app.windows` 에서 뽑고 이 하네스는 같은 파일을 읽는다(창 없이 앱 설정을 물을
+/// 길이 없다 — `the_last_resort_host_is_never_a_window_the_user_cannot_see` 가 쓰는 그 우회다).
+/// 설정에 창이 늘면 이 줄이 먼저 걸린다.
+#[test]
+fn the_sweep_exempts_exactly_the_windows_the_config_declares() {
+    let conf: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string("tauri.conf.json").expect("셸 설정"))
+            .expect("설정은 JSON");
+    let labels: Vec<&str> = conf["app"]["windows"]
+        .as_array()
+        .expect("창 목록")
+        .iter()
+        .map(|window| window["label"].as_str().expect("label"))
+        .collect();
+
+    assert_eq!(
+        labels,
+        vec![MAIN_WINDOW_LABEL, TREE_WINDOW_LABEL],
+        "설정이 선언한 창 목록이 바뀌었다 — 이 스위트의 면제 목록을 함께 고칠 것"
+    );
+}
+
+/// ★★재시작을 넘긴 팝아웃 항목이 사라진다★★ — 남겨 두면 오늘 처음 뜬 `slot-popup-1` 이 어제의 테마를
+/// 조용히 입는다(label 은 앱을 띄울 때마다 1 부터 다시 세는 카운터가 짓는다 — ADR-0167 「근거」).
+#[test]
+fn the_boot_sweep_removes_entries_for_labels_the_config_never_declared() {
+    let mut written = Written::default();
+    let outcome = sweep_dead_windows(
+        &Canned::text(
+            r#"{"theme":"dark","windows":{"agent-tree":"light","main":"e-ink","slot-popup-1":"light","slot-popup-2":"dark"}}"#,
+        ),
+        &declared_windows(&[MAIN_WINDOW_LABEL, TREE_WINDOW_LABEL]),
+        written.sink(),
+    );
+
+    assert_eq!(
+        outcome,
+        SweepOutcome::Swept {
+            removed: vec!["slot-popup-1".to_string(), "slot-popup-2".to_string()],
+        }
+    );
+    let doc = written.reparsed();
+    assert_eq!(doc["theme"], "dark", "전역 칸은 그대로다");
+    assert_eq!(
+        doc["windows"],
+        json!({ "agent-tree": "light", "main": "e-ink" }),
+        "선언된 창만 남고 값도 그대로다"
+    );
+}
+
+/// ★★지울 것이 없으면 아예 안 쓴다★★ — 평상시 부팅이 이 길이다. 여기서 매번 쓰면 밖의 에이전트 편집기와
+/// 다투는 자리가 「부팅에 한 번, 지울 것이 있을 때만」에서 「부팅마다」로 넓어진다(ADR-0167 결정 6).
+#[test]
+fn the_boot_sweep_does_not_write_when_every_entry_is_declared() {
+    let mut written = Written::default();
+    let outcome = sweep_dead_windows(
+        &Canned::text(r#"{"theme":"dark","windows":{"main":"light"}}"#),
+        &declared_windows(&[MAIN_WINDOW_LABEL, TREE_WINDOW_LABEL]),
+        written.sink(),
+    );
+
+    assert_eq!(outcome, SweepOutcome::Untouched);
+    assert_eq!(written.0, None, "지울 것이 없는데 파일을 다시 썼다");
+}
+
+/// `windows` 칸이 아예 없는 옛 파일도 마찬가지 — 지울 항목이 없다.
+#[test]
+fn a_settings_file_without_a_windows_map_is_never_rewritten() {
+    let mut written = Written::default();
+    let outcome = sweep_dead_windows(
+        &Canned::text(r#"{"theme":"light"}"#),
+        &declared_windows(&[MAIN_WINDOW_LABEL]),
+        written.sink(),
+    );
+
+    assert_eq!(outcome, SweepOutcome::Untouched);
+    assert_eq!(written.0, None);
+}
+
+/// ★★아는 칸 밖의 것을 지우지 않는다★★ — 읽기가 모르는 키를 **무시**해 앞날의 칸을 받아 주는데
+/// (`parse_settings` 「모르는 칸은 무시한다」 · ADR-0166 결정 7), 쓸기가 그것을 떨구면 그 호환이 죽는다.
+/// 창 항목의 **못 쓸 값**도 그대로 둔다 — 쓸기는 지우는 일이지 고치는 일이 아니다.
+#[test]
+fn the_boot_sweep_keeps_everything_it_does_not_own() {
+    let mut written = Written::default();
+    let outcome = sweep_dead_windows(
+        &Canned::text(
+            r#"{"theme":"light","font":{"family":"D2Coding","size":13},"unknown-key":[1,2],"windows":{"main":"Dark","slot-popup-9":"light"}}"#,
+        ),
+        &declared_windows(&[MAIN_WINDOW_LABEL, TREE_WINDOW_LABEL]),
+        written.sink(),
+    );
+
+    assert_eq!(
+        outcome,
+        SweepOutcome::Swept {
+            removed: vec!["slot-popup-9".to_string()],
+        }
+    );
+    let doc = written.reparsed();
+    assert_eq!(
+        doc["font"],
+        json!({ "family": "D2Coding", "size": 13 }),
+        "모르는 칸이 사라졌다"
+    );
+    assert_eq!(doc["unknown-key"], json!([1, 2]));
+    assert_eq!(
+        doc["windows"]["main"], "Dark",
+        "읽기가 반려할 값이라도 쓸기가 고치지 않는다"
+    );
+}
+
+/// ★★깨진 파일은 손대지 않는다★★ — 되살릴 것이 없다고 사본을 안 남기기로 한 것(ADR-0166 결정 9)과 다시
+/// 쓰는 것은 다른 이야기다. 여기서 다시 쓰면 사람이 고치던 원문이 사라진다.
+#[test]
+fn a_settings_file_that_is_not_json_is_left_untouched() {
+    let mut written = Written::default();
+    let outcome = sweep_dead_windows(
+        &Canned::text("{ not json at all"),
+        &declared_windows(&[MAIN_WINDOW_LABEL]),
+        written.sink(),
+    );
+
+    assert_eq!(outcome, SweepOutcome::Skipped);
+    assert_eq!(written.0, None, "못 쓸 파일을 다시 썼다");
+}
+
+/// 파일이 없는 것도, 못 읽는 것도 마찬가지 — 없는 파일을 쓸기가 새로 만들지 않는다.
+#[test]
+fn a_missing_or_unreadable_settings_file_is_left_untouched() {
+    for source in [Canned::missing(), Canned::unreadable()] {
+        let mut written = Written::default();
+        let outcome = sweep_dead_windows(
+            &source,
+            &declared_windows(&[MAIN_WINDOW_LABEL]),
+            written.sink(),
+        );
+
+        assert_eq!(outcome, SweepOutcome::Skipped);
+        assert_eq!(written.0, None);
+    }
+}
+
+/// ★★쓰기가 실패해도 부팅이 멈추지 않는다★★ — 이 정리는 앱이 뜨는 조건이 아니다(ADR-0167 결정 8 의
+/// 원자성이 지키는 것은 「반쪽 파일이 안 남는다」이지 「반드시 성공한다」가 아니다).
+#[test]
+fn a_failed_sweep_write_is_reported_and_not_fatal() {
+    let outcome = sweep_dead_windows(
+        &Canned::text(r#"{"theme":"dark","windows":{"slot-popup-1":"light"}}"#),
+        &declared_windows(&[MAIN_WINDOW_LABEL]),
+        |_text| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no permission",
+            ))
+        },
+    );
+
+    let SweepOutcome::NotWritten(reason) = outcome else {
+        panic!("쓰기 실패가 성공으로 답했다: {outcome:?}");
+    };
+    assert!(reason.contains("no permission"), "사유가 없다: {reason}");
+}
+
+/// ★★임시 파일 + rename — 쓰다 죽어도 반쪽 파일이 안 남는다★★(ADR-0167 결정 8).
+///
+/// 크래시를 재현할 수는 없으므로 재는 것은 그 방식의 **관측 가능한 자취**다: 이미 있는 파일이 통째로
+/// 갈리고, 임시 파일이 남지 않는다. 남으면 데이터 폴더에 쓰레기가 부팅마다 쌓인다.
+#[test]
+fn an_atomic_write_replaces_the_file_and_leaves_no_temp_behind() {
+    let dir = std::env::temp_dir().join(format!(
+        "engram-sweep-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("시계")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("임시 폴더");
+    let path = dir.join("ui-settings.json");
+    std::fs::write(
+        &path,
+        r#"{"theme":"dark","windows":{"slot-popup-1":"light"}}"#,
+    )
+    .expect("초기 원문");
+
+    write_atomic(&path, "{\"theme\":\"light\"}\n").expect("원자적 쓰기");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("다시 읽기"),
+        "{\"theme\":\"light\"}\n"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .expect("폴더 훑기")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name != "ui-settings.json")
+        .collect();
+    assert!(leftovers.is_empty(), "임시 파일이 남았다: {leftovers:?}");
+
+    std::fs::remove_dir_all(&dir).ok();
 }

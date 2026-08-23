@@ -7,8 +7,9 @@
 // 표면은 Tauri 를 직접 쓴다(레이아웃이 `viewStore` 에서 쓰는 그 예외 — 이 값의 주인은 데몬이 아니라 셸이라
 // agentClient 가 나를 것이 아니다).
 //
-// ★쓰기 경로가 없다★: 화면의 테마 토글(`commands/themeCommands.ts`)은 인메모리로 남고 다음 `ui.refresh` 가
-// 그것을 덮는다. 파일을 고치는 것은 밖의 에이전트다(사유 = `src-tauri/src/ui_settings.rs` 헤더).
+// ★이 경로는 읽기 전용이다★: 화면에서 테마를 만져도 파일에 저장하지 않는다 — 밖의 편집자와 화면이 한 파일을
+// 두고 경합하기 때문이다. 파일을 고치는 것은 밖의 에이전트고, 앱이 쓰는 자리는 부팅 정리 하나뿐이다
+// (사유 = `src-tauri/src/ui_settings.rs` 헤더 · ADR-0167).
 // ADR-0149
 
 import { invoke } from '@tauri-apps/api/core'

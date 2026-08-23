@@ -70,13 +70,13 @@ afterEach(() => {
 describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () => {
   it('help 있는 것만 골라 {name, help} 로 투영한다', () => {
     register({
-      id: 'theme.set',
-      title: 'set',
+      id: 'tab.next',
+      title: 'next',
       help: {
-        summary: '테마를 바꾼다',
+        summary: '다음 탭으로 옮긴다',
         effect: 'write',
-        args: { theme: { type: 'string' } },
-        required: ['theme'],
+        args: { window: { type: 'string' } },
+        required: ['window'],
       },
       run: () => {},
     })
@@ -84,19 +84,19 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
 
     expect(offeredCommands()).toEqual([
       {
-        name: 'theme.set',
+        name: 'tab.next',
         help: {
-          summary: '테마를 바꾼다',
+          summary: '다음 탭으로 옮긴다',
           effect: 'write',
-          args: { theme: { type: 'string' } },
-          required: ['theme'],
+          args: { window: { type: 'string' } },
+          required: ['window'],
         },
       },
     ])
   })
 
   it('summary 가 공백뿐이면 내놓지 않는다 — 이름만으로는 부를 수 없다', () => {
-    register({ id: 'theme.set', title: 'set', help: { summary: '   ', effect: 'write' }, run: () => {} })
+    register({ id: 'tab.next', title: 'next', help: { summary: '   ', effect: 'write' }, run: () => {} })
     expect(offeredCommands()).toEqual([])
   })
 })
@@ -112,7 +112,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
   })
 
   it('구독을 건 뒤에 보고한다 — 순서가 뒤집히면 첫 봉투가 이 창에 도착조차 안 한다', async () => {
-    register({ id: 'theme.toggle', title: 'toggle', help: { summary: '테마 순환', effect: 'write' }, run: () => {} })
+    register({ id: 'slot.empty', title: 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
     installViewCommandBridge()
     await flush()
 
@@ -120,7 +120,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     const [cmd, args] = invokeMock.mock.calls[0]
     expect(cmd).toBe('report_view_commands')
     expect(args).toEqual({
-      commands: [{ name: 'theme.toggle', help: { summary: '테마 순환', effect: 'write' } }],
+      commands: [{ name: 'slot.empty', help: { summary: '슬롯을 비운다', effect: 'write' } }],
     })
     // 보고보다 구독이 먼저 — listen 이 풀린 뒤에야 invoke 가 나간다.
     expect(listenMock.mock.invocationCallOrder[0]).toBeLessThan(
@@ -129,16 +129,16 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
   })
 
   it('봉투 → run(id, args) → 성공 결말(같은 상관 키)', async () => {
-    const spy = vi.fn((args?: Record<string, unknown>) => ({ got: args?.theme }))
-    register({ id: 'theme.set', title: 'set', help: { summary: '테마', effect: 'write' }, run: spy })
+    const spy = vi.fn((args?: Record<string, unknown>) => ({ got: args?.window }))
+    register({ id: 'tab.next', title: 'next', help: { summary: '다음 탭', effect: 'write' }, run: spy })
     installViewCommandBridge()
     await flush()
 
-    deliver({ request_id: 'req-1', name: 'theme.set', args: { theme: 'light' } })
+    deliver({ request_id: 'req-1', name: 'tab.next', args: { window: 'main' } })
     await flush()
 
-    expect(spy).toHaveBeenCalledWith({ theme: 'light' })
-    expect(outcomeOf()).toEqual({ requestId: 'req-1', ok: { got: 'light' }, error: null })
+    expect(spy).toHaveBeenCalledWith({ window: 'main' })
+    expect(outcomeOf()).toEqual({ requestId: 'req-1', ok: { got: 'main' }, error: null })
   })
 
   it('handler 가 던지면 실패 결말을 낸다 — 답 없이 끝나면 셸이 마감까지 매단다', async () => {
@@ -176,13 +176,13 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
   })
 
   it('정리한 뒤에 온 봉투는 답하지 않는다 — 죽은 인스턴스가 답하면 한 봉투에 답이 둘이 된다', async () => {
-    register({ id: 'theme.toggle', title: 'toggle', help: { summary: '테마 순환', effect: 'write' }, run: () => {} })
+    register({ id: 'slot.empty', title: 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
     const dispose = installViewCommandBridge()
     await flush()
     dispose()
     invokeMock.mockClear()
 
-    deliver({ request_id: 'req-4', name: 'theme.toggle', args: {} })
+    deliver({ request_id: 'req-4', name: 'slot.empty', args: {} })
     await flush()
 
     expect(unlistenMock).toHaveBeenCalledOnce()

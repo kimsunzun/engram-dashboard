@@ -5,8 +5,8 @@
 // 안 물면 「등록되던 command 가 조용히 사라졌다」·「의도 없이 하나가 밖으로 나갔다」가 diff 에 안 보인다.
 // 손으로 적은 이 배열이 그 편집을 **눈에 보이는 변경**으로 만든다(테스트를 함께 고쳐야 초록이 된다).
 //
-// ★help 를 전 command 에 강제하지 않는 이유(사용자 결정)★: 이번 스텝의 범위가 증명용 넷이고 나머지 29개는
-// 이연이다. 그래서 `help` 는 선택 칸으로 두고, 대신 **어느 것이 그 칸을 갖는지**를 여기서 못 박는다.
+// ★help 를 전 command 에 강제하지 않는 이유(사용자 결정)★: 증명용 몇 개만 올리고 나머지는 이연이다.
+// 그래서 `help` 는 선택 칸으로 두고, 대신 **어느 것이 그 칸을 갖는지**를 여기서 못 박는다.
 //
 // ★셸·데몬이 답하는 이름과의 충돌은 여기서 안 잰다★ — 그 판정은 Rust 한 곳에 산다
 // (`src-tauri/src/view_commands.rs` 의 `reserved_names`, 하네스는 `tests/layout_commands.rs`).
@@ -29,11 +29,16 @@ import './contributions' // side-effect: 전 command 등록
 import { list } from './registry'
 import { offeredCommands } from './viewCommandBridge'
 
-/** 오늘 버스에 오르는 화면 command 전량 — 늘리거나 줄이면 이 줄을 함께 고친다. */
-const ON_THE_BUS = ['slot.empty', 'tab.next', 'theme.set', 'theme.toggle']
+/**
+ * 오늘 버스에 오르는 화면 command 전량 — 늘리거나 줄이면 이 줄을 함께 고친다.
+ *
+ * ★비지 않아야 한다★: 여기가 비면 셸이 명부에 얹을 화면 몫이 하나도 없어 **웹뷰 배달 경로 전체가
+ * 무검증**이 된다(ADR-0167 이 테마 명령 둘을 내리면서 남긴 조건 — 그 둘을 뺀 자리가 이 둘이다).
+ */
+const ON_THE_BUS = ['slot.empty', 'tab.next']
 
 describe('화면 command 중 버스에 오르는 것', () => {
-  it('명단이 정확히 이 넷이다', () => {
+  it('명단이 정확히 이 둘이다', () => {
     expect(offeredCommands().map(c => c.name).sort()).toEqual([...ON_THE_BUS].sort())
   })
 

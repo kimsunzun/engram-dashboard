@@ -23,8 +23,8 @@ describe('command registry (ADR-0055)', () => {
 
   it('인자 = 단일 객체 가방으로 전달된다(가변인자 아님)', () => {
     const spy = vi.fn((args?: Record<string, unknown>) => args?.theme)
-    register({ id: 'theme.set', title: 'set', run: spy })
-    const result = run('theme.set', { theme: 'light', extra: 1 })
+    register({ id: 'demo.theme', title: 'set', run: spy })
+    const result = run('demo.theme', { theme: 'light', extra: 1 })
     expect(spy).toHaveBeenCalledTimes(1)
     expect(spy).toHaveBeenCalledWith({ theme: 'light', extra: 1 })
     expect(result).toBe('light')
@@ -77,11 +77,11 @@ describe('command registry (ADR-0055)', () => {
       effect: 'write' as const,
       args: { theme: { type: 'string' as const } },
     }
-    register({ id: 'theme.set', title: 'set', help, run: () => {} })
+    register({ id: 'demo.theme', title: 'set', help, run: () => {} })
     register({ id: 'local.only', title: 'local', run: () => {} })
 
     const items = list()
-    expect(items.find(i => i.id === 'theme.set')!.help).toEqual(help)
+    expect(items.find(i => i.id === 'demo.theme')!.help).toEqual(help)
     expect(items.find(i => i.id === 'local.only')!.help).toBeUndefined()
   })
 
@@ -90,7 +90,7 @@ describe('command registry (ADR-0055)', () => {
   //   toEqual 만 쓰면 별칭이어도 통과하므로 **변조 후 다시 읽어** 잰다.
   it('list/getCommand: help 는 사본이라 소비자가 고쳐도 레지스트리가 안 바뀐다', () => {
     register({
-      id: 'theme.set',
+      id: 'demo.theme',
       title: 'set',
       help: {
         summary: '원본',
@@ -101,17 +101,17 @@ describe('command registry (ADR-0055)', () => {
       run: () => {},
     })
 
-    const leaked = list().find(i => i.id === 'theme.set')!.help!
+    const leaked = list().find(i => i.id === 'demo.theme')!.help!
     leaked.summary = '변조'
     leaked.effect = 'read'
     leaked.args!.theme.type = 'number'
     leaked.args!.theme.enum!.push('침입')
     leaked.required!.push('ghost')
-    const viaGet = getCommand('theme.set')!.help!
+    const viaGet = getCommand('demo.theme')!.help!
     viaGet.summary = 'get 으로 변조'
     viaGet.args!.theme.description = '침입'
 
-    const fresh = list().find(i => i.id === 'theme.set')!.help!
+    const fresh = list().find(i => i.id === 'demo.theme')!.help!
     expect(fresh.summary).toBe('원본')
     expect(fresh.effect).toBe('write')
     expect(fresh.args!.theme).toEqual({ type: 'string', enum: ['dark'] })

@@ -1,14 +1,23 @@
-//! 디스크의 UI 설정(`<data_dir>/ui-settings.json`) — ★셸은 이 파일을 읽기만 한다★.
+//! 디스크의 UI 설정(`<data_dir>/ui-settings.json`) — ★셸은 읽고, 부팅에 한 번만 쓴다★(아래 두 절).
 //!
-//! 소유: 파일 위치 · 원문→값 변환 · 못 읽거나 깨졌을 때의 기본값 · **어느 창이 어떤 값을 받나**. 진입점은
-//! [`load_settings`](fn.load_settings.html)(seam 위) · [`parse_settings`](fn.parse_settings.html)(순수) ·
-//! [`deliver_per_window`](fn.deliver_per_window.html)(창별 배달, 보내는 자리는 호출자가 넣는다).
+//! 소유: 파일 위치 · 원문→값 변환 · 못 읽거나 깨졌을 때의 기본값 · **어느 창이 어떤 값을 받나** ·
+//! **어느 창 항목이 살아남나**. 진입점은 [`load_settings`](fn.load_settings.html)(seam 위) ·
+//! [`parse_settings`](fn.parse_settings.html)(순수) · [`deliver_per_window`](fn.deliver_per_window.html)
+//! (창별 배달) · [`sweep_dead_windows`](fn.sweep_dead_windows.html)(부팅 정리). 뒤 둘은 **보내는·쓰는
+//! 자리를 호출자가 넣는다** — Tauri 도 파일 쓰기도 이 모듈에 들이지 않는다.
 //!
-//! ## ★쓰기 경로가 없는 것은 의도다(되살리지 마라)★
-//! 파일은 **밖의 에이전트가 직접 고친다**. 그래서 화면의 테마 토글(`src/commands/themeCommands.ts`)은
-//! 지금처럼 인메모리로 남고, 다음 `ui.refresh` 가 그 토글을 덮어쓴다. 이 비대칭은 파일럿 범위로 알고
-//! 남긴 것이다 — 「토글도 저장하게」 고치면 밖의 편집자와 화면이 같은 파일을 두고 경합하게 되고,
-//! 그 조정(누가 마지막 쓴 사람인가)은 이 파일럿이 다루지 않는다.
+//! ## ★화면발 쓰기를 만들지 마라(되살리지 마라)★
+//! 파일은 **밖의 에이전트가 직접 고친다**. 화면이 테마를 파일에 저장하기 시작하면 밖의 편집자와 화면이
+//! 같은 파일을 두고 경합하고, 그 조정(누가 마지막에 썼나)은 아무도 안 풀었다 — ADR-0166 이 범위 밖에
+//! 둔 자리다. 그래서 화면의 테마 조작은 인메모리로 남고 다음 `ui.refresh` 가 그것을 덮는다.
+//! ★금지되는 것은 **화면발 쓰기**이지 이 파일에 쓰는 행위 전부가 아니다★ — 그 오독이 두 번 났다.
+//!
+//! ## ★쓰는 자리는 하나 — 부팅 쓸기★ // ADR-0167
+//! [`sweep_dead_windows`] 가 **죽은 창의 항목**만 지운다([`write_atomic`] — 임시 파일 + rename).
+//! 위 경합에 안 닿는 이유 셋: **부팅에 한 번**만 돌고(refresh 마다가 아니다), **화면이 끼지 않으며**
+//! (토글을 영속시키는 것이 아니다), 지우는 대상이 밖의 에이전트가 방금 쓴 값이 아니라 **재시작을 넘겨
+//! 오적용될 항목**이다. 세 번째 쓰는 자리를 늘리기 전에 ADR-0167 「영향/불변식」의 갈림길(파일 쪼개기 /
+//! 쓰기 직렬화)을 먼저 고를 것 — 그때 위 경합이 실재가 된다.
 //!
 //! ## ★`.corrupt` 사이드카를 만들지 않는다★
 //! 에이전트 명부는 잃으면 되살릴 수 없어 깨진 원본을 옆에 남기지만, 이 파일에는 되살릴 것이 없다
@@ -32,7 +41,7 @@
 //!   [`DEFAULT_THEME`] 로 접으면 그 창만 파일에 적힌 어느 값과도 안 맞게 된다. 사유는 로그가 진다
 //!   ([`ParsedSettings::refused`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// 데이터 폴더 안 파일 이름 — 밖의 에이전트가 이 이름으로 찾는다.
@@ -521,6 +530,189 @@ fn folded() -> LoadedSettings {
         },
         source: ThemeSource::Fallback,
     }
+}
+
+// ── 부팅 쓸기 — 죽은 창의 항목 지우기 ────────────────────────────────────────
+
+/// [`sweep_dead_windows`] 가 하고 온 일 — 로그가 읽고 하네스가 잰다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SweepOutcome {
+    /// 지울 항목이 없어 ★파일을 다시 쓰지 않았다★ — 평상시 부팅이 이 길이다.
+    Untouched,
+    /// 지우고 다시 썼다.
+    Swept { removed: Vec<String> },
+    /// 원문을 못 가져왔거나 JSON 이 아니라 손대지 않았다. ★실패 종류를 가르지 않는다★ — 어느 쪽이든 이
+    /// 함수가 할 일은 「아무것도 안 한다」 하나다([`load_settings`] 와 같은 분담).
+    Skipped,
+    /// 지울 것은 있었는데 쓰기가 실패했다 — 파일은 옛 상태 그대로이고 앱은 계속 뜬다.
+    NotWritten(String),
+}
+
+/// 설정 파일에서 **죽은 창의 항목**을 지운다 — ★부팅에서 한 번만 부른다★.
+///
+/// `declared` = 앱 설정이 선언한 창 label 전량(오늘 `main`·`agent-tree`). ★손으로 적지 말 것★ — 뽑는
+/// 자리는 `commands::settings::declared_window_labels` 이고 재료는 `tauri.conf.json` 이다.
+///
+/// ## ★왜 부팅에서만인가 — 생사 확인을 덧대지 마라★
+/// 레이아웃은 디스크에 영속되지 않는다(`layout::manager`). 그래서 **부팅 순간 팝아웃은 하나도 없고**, 그때
+/// 파일에 있는 비-선언 label 은 생사를 물을 것도 없이 **정의상 전부 죽은 것**이다 — 판정이 공짜인 유일한
+/// 시점이 여기다. 여기에 「살아 있나」를 묻는 확인을 덧대거나 이 호출을 `ui.refresh` 로 옮기면, 곧 열릴 창의
+/// 항목을 밖의 에이전트가 미리 써 둔 경우 **창이 도착하기 전에 그 항목이 지워진다**(ADR-0167 이 그 경합을
+/// 이유로 기각한 대안 그대로다). 선언된 창을 면제하는 것이 남은 위험까지 없앤다 — 그 창들은 항상 있으므로
+/// 「아직 안 떴을 수 있다」를 물을 일이 없다.
+///
+/// ## ★지울 것이 없으면 안 쓴다★
+/// 평상시 부팅은 읽기로 끝난다. 매번 쓰면 밖의 에이전트 편집기와 다투는 창이 부팅마다 열린다(모듈 헤더
+/// 「쓰는 자리는 하나」).
+///
+/// ## ★지우기만 한다 — 고치지 않는다★
+/// 못 쓸 값·모르는 칸·JSON 이 아닌 원문은 전부 **그대로 둔다**. 읽기가 모르는 칸을 무시하는 것이 앞날의 칸을
+/// 받아 주는 장치인데([`parse_settings`]), 쓸기가 문서를 자기가 아는 모양으로 다시 그리면 그 호환이 죽는다.
+/// 깨진 파일을 다시 쓰지 않는 이유도 같다 — 사람이 고치던 원문이 사라진다.
+///
+/// ★남는 키의 **순서**는 보장하지 않는다★ — `serde_json` 이 `preserve_order` 없이 붙어 있어 `Value` 의
+/// 지도가 `BTreeMap` 이고, 실제로 쓰는 부팅에서 남는 키가 사전순으로 다시 적힌다(값과 키 집합은 그대로).
+/// 순서까지 지키려면 그 feature 를 켜야 하는데 그건 워크스페이스 전체의 `Value` 동작을 바꾼다.
+///
+/// 쓰는 자리는 호출자가 넣는다 — 이 모듈에 파일 쓰기를 들이지 않는다([`deliver_per_window`] 와 같은 분담).
+/// 운영 구현은 [`write_atomic`].
+// ADR-0167
+pub fn sweep_dead_windows<W>(
+    source: &dyn SettingsSource,
+    declared: &BTreeSet<String>,
+    write: W,
+) -> SweepOutcome
+where
+    W: FnOnce(&str) -> std::io::Result<()>,
+{
+    let Ok(text) = source.read() else {
+        // ★여기서 사유를 로그로 올리지 않는다★ — 곧 첫 창의 부팅 조회가 같은 파일을 같은 이유로 못 읽고,
+        //   그때 `load_settings` 가 레벨까지 갈라 남긴다. 여기서 한 번 더 쓰면 같은 사실이 두 줄이 된다.
+        return SweepOutcome::Skipped;
+    };
+    let swept = match plan_sweep(&text, declared) {
+        Ok(None) => return SweepOutcome::Untouched,
+        Ok(Some(swept)) => swept,
+        Err(reason) => {
+            // 손상 신호(error)를 여기서 내지 않는 것도 같은 이유다 — `load_settings` 가 곧 그 레벨로 낸다.
+            tracing::debug!(
+                module = "ui_settings",
+                source = %source.origin(),
+                "UI 설정이 쓸 수 없는 모양이라 죽은 창 항목을 손대지 않는다: {reason}"
+            );
+            return SweepOutcome::Skipped;
+        }
+    };
+
+    // label 도 밖의 에이전트가 쓰는 값이라 로그에 그대로 싣지 않는다(`describe_value` · 상한은
+    // `MAX_REFUSED_DETAILS` 의 증폭 사유와 같다 — 이 줄은 부팅에 한 번이지만 항목 수는 파일이 정한다).
+    let shown: Vec<String> = swept
+        .removed
+        .iter()
+        .take(MAX_REFUSED_DETAILS)
+        .map(|label| describe_value(label))
+        .collect();
+    match write(&swept.text) {
+        Ok(()) => {
+            tracing::info!(
+                module = "ui_settings",
+                source = %source.origin(),
+                removed = swept.removed.len(),
+                shown = ?shown,
+                "재시작을 넘긴 창별 테마 항목을 지웠다"
+            );
+            SweepOutcome::Swept {
+                removed: swept.removed,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                module = "ui_settings",
+                source = %source.origin(),
+                removed = swept.removed.len(),
+                shown = ?shown,
+                "죽은 창별 테마 항목을 못 지웠다(앱은 계속 뜬다): {e}"
+            );
+            SweepOutcome::NotWritten(e.to_string())
+        }
+    }
+}
+
+/// 지울 것을 뺀 새 원문과 지운 label — [`plan_sweep`] 의 산출물.
+struct SweptDocument {
+    text: String,
+    removed: Vec<String>,
+}
+
+/// 원문 → 지울 것을 뺀 원문. ★파일 시스템을 안 탄다★.
+///
+/// `Ok(None)` = 지울 것이 없다(새 원문을 아예 안 만든다 — 그래야 호출자가 「안 쓴다」를 고를 수 있다).
+/// `Err` = 원문이 JSON 이 아니다.
+fn plan_sweep(text: &str, declared: &BTreeSet<String>) -> Result<Option<SweptDocument>, String> {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("JSON 이 아니다: {e}"))?;
+    // `windows` 가 없거나 지도가 아니면 지울 항목이 없다 — 모양 반려는 읽기 쪽 몫이고 여기서 고쳐 쓰지 않는다.
+    let Some(entries) = doc
+        .get_mut("windows")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(None);
+    };
+    let removed: Vec<String> = entries
+        .keys()
+        .filter(|label| !declared.contains(label.as_str()))
+        .cloned()
+        .collect();
+    if removed.is_empty() {
+        return Ok(None);
+    }
+    for label in &removed {
+        entries.remove(label);
+    }
+
+    let mut text =
+        serde_json::to_string_pretty(&doc).map_err(|e| format!("다시 쓸 수 없다: {e}"))?;
+    // 사람이 손으로도 고치는 파일이라 줄 끝을 남긴다.
+    text.push('\n');
+    Ok(Some(SweptDocument { text, removed }))
+}
+
+/// 임시 파일에 쓰고 **rename 으로 갈아끼운다** — 쓰다 죽어도 반쪽 파일이 안 남는다.
+///
+/// ★임시 파일은 같은 폴더에 만든다★ — rename 이 갈아끼우기로 도는 것은 같은 볼륨 안에서다. 이름에 pid 를
+/// 붙이는 것은 같은 폴더를 보는 다른 프로세스와 임시 이름이 겹치면 서로의 반쪽을 rename 하기 때문이다.
+///
+/// 실패하면 임시 파일을 치우고 원본을 그대로 둔다 — 안 치우면 데이터 폴더에 쓰레기가 쌓인다.
+// ADR-0167
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let invalid = |what: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{what} 를 못 고르는 경로"),
+        )
+    };
+    let dir = path.parent().ok_or_else(|| invalid("부모 폴더"))?;
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| invalid("파일 이름"))?
+        .to_os_string();
+    name.push(format!(".tmp{}", std::process::id()));
+    let tmp = dir.join(name);
+
+    let staged = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        // ★flush 로는 부족하다★ — 그건 프로세스 버퍼만 비운다. rename 이 가리키게 될 내용이 실제로
+        //   디스크에 있어야 「반쪽이 안 남는다」가 성립한다.
+        file.sync_all()
+    })();
+    let outcome = staged.and_then(|()| std::fs::rename(&tmp, path));
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    outcome
 }
 
 /// 창마다 **그 창의 값**을 보낸다 — 보내는 자리는 호출자가 넣는다(Tauri 를 이 모듈에 들이지 않는다).

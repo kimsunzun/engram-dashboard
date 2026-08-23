@@ -40,7 +40,7 @@ export interface CommandHelp {
 }
 
 export interface Command {
-  /** 전역 고유 id(예: 'theme.set'). 소비자는 이 id 로만 실행을 지시한다. */
+  /** 전역 고유 id(예: 'tab.next'). 소비자는 이 id 로만 실행을 지시한다. */
   id: string
   /** 사람이 읽는 이름(팔레트·메뉴 표기용, 후속 소비자). */
   title: string
