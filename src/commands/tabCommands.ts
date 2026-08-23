@@ -1,5 +1,5 @@
-// ADR-0055/0057: 사람 클릭(TabBar·Ctrl+Tab)·LLM(__engramCmd)·window.__engramLayout 이 모두 이 동일 store
-//   액션을 지난다(§5 단일 제어 표면 — 새 상태 경로 0).
+// ADR-0055/0057: 사람 클릭(TabBar·Ctrl+Tab)과 LLM(__engramCmd)이 모두 이 동일 store 액션을 지난다
+//   (§5 단일 제어 표면 — 새 상태 경로 0).
 //
 // ★window 해소★: command args 로 window 를 받되, 생략하면 이 웹뷰 창(readWindowLabelFromHash — main·팝업
 //   label)으로 떨어진다. 그래서 Ctrl+Tab 같은 "포커스된 창" 소비자가 별도 label 계산 없이 부를 수 있다.

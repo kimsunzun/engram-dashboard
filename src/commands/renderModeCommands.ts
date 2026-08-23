@@ -1,10 +1,6 @@
 // ADR-0055: 레지스트리는 상태 권위가 아니다 — 이 다섯은 viewStore 의 렌더 모드 액션으로 라우팅만 한다
 //   (새 상태 경로 0). 사람 클릭·팔레트·LLM(__engramCmd)이 같은 command 를 실행한다(§5 단일 제어 표면).
 //
-// ★같은 액션에 붙은 표면이 둘이다★: `window.__engramLayout.{setRenderMode, clearRenderMode, …}` 가
-//   아직 살아 있고 이 command 들과 같은 store 액션 하나로 수렴한다. 병존은 의도된 과도기이며 그 핸들
-//   철거는 별건이다 — 한쪽만 고치지 말 것(`store/eventBus.ts` 의 __engramLayout 정의).
-//
 // ★형제 slot.* 과 달리 백엔드 권위 루프를 안 탄다★: renderModeOverride 는 프론트 전용 override 라
 //   invoke→emit(ADR-0035)을 거치지 않는다(그 예외의 계약 = viewStore 의 renderModeOverride 필드 JSDoc).
 //   그래서 이 다섯의 반환은 항상 undefined 다 — 호출부가 await 할 완료 시점이 없다.

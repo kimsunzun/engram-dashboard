@@ -2,9 +2,10 @@
 :root[data-theme='light'] { --bg: #f5f5f5; --bg-secondary: #fff; --surface-elevated: #ffffff; --text: #1a1a1a; --text-muted: #666; --border: #ccc; --accent: #0066cc; --status-running: #1a7f37; /* 활성(Running) 글리프 색 — 밝은 bg 위 가독 green(github-light 계열, ADR-0062 색 개정) */ --scrollbar-thumb: rgba(0, 0, 0, 0.28); /* 밝은 bg 위 어두운 반투명 thumb */ }
 :root[data-theme='e-ink']  { --bg: #ffffff; --bg-secondary: #f0f0f0; --surface-elevated: #f0f0f0; --text: #000000; --text-muted: #444; --border: #000; --accent: #000; --status-running: var(--text-muted); /* e-ink 은 색 무력화 — Running 도 muted(중립)로 모양만 남긴다(ADR-0062 e-ink 의도 보존, 색 개정 예외) */ --scrollbar-thumb: rgba(0, 0, 0, 0.32); /* 흰 고대비 bg 위 진한 반투명 thumb(e-ink 강조) */ }
 
-/* ADR-0051: 채팅 렌더 간격·폰트 토큰 — LLM 제어 control surface(window.__engramChat) + chatStyleStore
-   가 값의 권위이며 런타임에 이 :root 변수들을 setProperty 로 덮어쓴다(localStorage 영속). 여기 값은
-   store 부재/파싱 실패 시의 CSS 레벨 최종 fallback(= chatStyleStore.ts CHAT_STYLE_DEFAULTS 와 동기).
+/* ADR-0051: 채팅 렌더 간격·폰트 토큰 — 값의 권위는 chatStyleStore 이고, 부팅 때 이 :root 변수들을
+   setProperty 로 덮어쓴다(localStorage 영속). 여기 값이 서는 구간은 그 부팅 적용이 돌기 전까지다
+   (= chatStyleStore.ts CHAT_STYLE_DEFAULTS 와 동기). ★파싱 실패는 이 경로로 오지 않는다★ — 그때도
+   loadChatStyle 이 CHAT_STYLE_DEFAULTS 를 돌려주고 부팅 적용이 그걸 inline 으로 쓴다.
    색 토큰과 달리 theme(dark/light/e-ink) 무관이라 :root 한 곳에만 둔다.
    ★기본값은 이전 하드코딩(pt-3=12px 등)보다 넉넉하게 잡는다★ — 사용자 지적(우리 렌더가 확장 대비
    좁고 산만)에 대한 1차 근사치. 정확한 px 는 후속 스크린샷 반복으로 조정(핵심은 값이 변수화된 것).
