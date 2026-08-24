@@ -80,8 +80,9 @@ impl SubscriptionSync for RouterSubs<'_> {
 // 스폰 응답 해석(어떤 프레임이 성공인가)은 전송 계약이라 어댑터 몫이다.
 //
 // ★backend fail-loud 근거(ADR-0058)★: 이 wire(`SpawnByCwd{cwd}`)에는 backend 선택 인자가 없고 데몬
-// 핸들러는 무조건 자기 기본 백엔드(현재 셸 = `default_shell()`)를 스폰한다(claude 가 아니다 —
-// `connection_core.rs` `SpawnByCwd` arm). 그래서 적용 서비스가 명시 backend 를 스폰 전에 거부한다.
+// 핸들러는 무조건 자기 고정 기본 백엔드를 스폰한다 — ★오늘 그 값은 claude(`StreamJson` 출력)다★
+// (`connection_core.rs` 의 `SpawnByCwd` arm). 그래서 적용 서비스가 명시 backend 를 스폰 전에 거부한다
+// — 거부의 지속적 근거는 「무엇이 뜨나」가 아니라 **고를 칸이 wire 에 없다**는 것이다.
 struct DaemonSpawner<'a> {
     client: &'a DaemonClient,
 }

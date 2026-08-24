@@ -225,7 +225,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
   인자 순서 = `(name, cwd, extraArgs, env, autoRestore, outputFormat?)` (`src/api/agentClient.ts:199`~`206`). wire 매핑은 그 메서드 본문의 `CreateProfile` 리터럴이다(`src/api/protocolClient.ts:886`~`894` — ★구판이 가리킨 `:877`은 매핑이 아니라 **메서드 시그니처 첫 줄**이었다★). ★**기본값 함정**★ — 생략 시 client는 `'Terminal'`(같은 시그니처의 `outputFormat` 기본값), command 경로는 `'StreamJson'`(`agentCommands.ts:35`)이다. 같다고 보고 인자를 빼면 **반대 렌더 모드**가 나온다.
 - **레이아웃·창·탭·렌더 모드 관측은 전부 위 `__engramCmd` 로 간다** — 전용 관측 핸들은 없다. ★**그 표로 안 닿는 자리 둘**★:
   - **슬롯을 기존 창으로 옮기기.** 프론트 `slot.popout` 은 목적지 인자가 없어 **항상 새 창**이다(`src/commands/slotCommands.ts` 의 `slot.popout` — 그 주석이 셸 쪽 동명 명령과의 과도기 분열을 자인한다). 기존 창을 지목해야 하면 아래 invoke 로 간다.
-  - **챗 스타일**(여백·글자 크기)**은 릴리스 빌드에서 읽지도 바꾸지도 못한다** — 명령이 아니라 설정 데이터로 분류됐고 그 저장 경로가 아직 없다(ADR-0168). dev 빌드엔 아래 store 핸들의 `chatStyle` 칸이 남는다. 그 값을 재야 하면 **릴리스로는 못 잰다**가 답이다.
+  - **챗 스타일**(여백·글자 크기)**은 릴리스 빌드에서 읽지도 바꾸지도 못한다** — 명령이 아니라 설정 데이터로 분류됐고 그 저장 경로가 아직 없다(ADR-0169). dev 빌드엔 아래 store 핸들의 `chatStyle` 칸이 남는다. 그 값을 재야 하면 **릴리스로는 못 잰다**가 답이다.
   - ★**셸 invoke 는 직통이다**★ — `withGlobalTauri` 가 켜져 있어(`src-tauri/tauri.conf.json`) command 표를 안 거치고도 `window.__TAURI__.core.invoke('list_tabs', …)`·`invoke('move_slot_to_window', {viewId, slotId, toWindow})` 를 부를 수 있다. 위 첫 갈래의 탈출구가 이것이다.
 - store 스냅샷 `window.__engram.agent.getState()` — 노출 지점 `src/main.tsx:34`(★바로 위 `:33`이 `import.meta.env.DEV` 가드라 **릴리스 빌드엔 없다**★. 위 `__ENGRAM_AGENT__`와 갈리는 지점이니 릴리스로 실측할 때 헷갈리지 말 것). 칸은 셋 = `theme`·`agent`·`chatStyle`.
 
