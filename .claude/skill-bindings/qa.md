@@ -17,7 +17,7 @@
 
 **경로 → 강도 매핑(골격 §1 "변경 범위 판정"에 주입):**
 - `crates/<name>/` → 해당 crate(단일이면 quick 후보)
-- `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향). ★`src-tauri/`는 standard 2번이 통째로 빼는 유일한 패키지다★ — 이 행이 집어 오는 실제 커버리지는 **standard 2b·2c·2d**(아래 — `src-tauri/tests/`의 통합 타깃 전부)이고, 그 줄들이 빠지면 이 경로 변경은 게이트가 0이다. ★**`src-tauri/tests/`에 파일이 늘면 이 목록도 함께 늘린다**★ — 워크스페이스 회귀가 그 패키지를 통째로 빼므로 새 스위트는 등재되기 전까지 로컬 신호가 0이다(실발생: `daemon_client_pending`이 CI에만 있었다).
+- `src-tauri/` · 루트 `Cargo.toml` · `Cargo.lock` → **standard 이상**(workspace 영향). ★`src-tauri/`는 standard 2번이 통째로 빼는 유일한 패키지다★ — 이 행이 집어 오는 실제 커버리지는 **standard 2b~2f**(아래 — `src-tauri/tests/`의 통합 타깃 넷 + 단위 스위트 `lib_unit`)이고, 그 줄들이 빠지면 이 경로 변경은 게이트가 0이다. ★**`src-tauri/tests/`에 파일이 늘거나 새 테스트 타깃이 생기면 이 목록도 함께 늘린다**★ — 워크스페이스 회귀가 그 패키지를 통째로 빼므로 새 스위트는 등재되기 전까지 로컬 신호가 0이다(실발생: `daemon_client_pending`이 CI에만 있었다).
 - `src/` · `public/` · `index.html` · `package*.json` · `vite.config.*` · `src-tauri/tauri.conf.json` → **UI=full**(cdp 실측)
 - `tests/` → **standard 이상**
 - **산문 문서만 바뀐 경우** → **테스트 게이트 없음.** 테스트는 대상 자체가 없다(실측 2026-08-06: 소스 0 변경에 전체 회귀를 5회 돌려 매번 동일 결과 — 정보량 0). 판정·절차는 아래 「산문 문서 전용」 절.
@@ -45,20 +45,22 @@
 
 - **강도 하향이 아니다.** 경로→강도 매핑도 escalation-only도 그대로다. 바뀐 것은 *누가 돌리나*뿐이다.
 - **게이트 성립 = CI 초록.** push 후 결과를 확인한다 — 초록을 못 봤으면 그 변경은 아직 게이트를 통과한 게 아니다. CI가 못 도는 상황(오프라인·워크플로 자체 수정·CI 장애)이면 아래 강도별 실명령을 로컬에서 그대로 돈다.
-- **★로컬과 CI의 명령줄은 바이트 단위로 같지 않다 — 셋 다 의도된 차이다★.** 드리프트로 보고 맞추지 말 것(게이트의 *내용*은 같다):
+- **★로컬과 CI의 명령줄은 바이트 단위로 같지 않다 — 아래 넷 다 의도된 차이다★.** 드리프트로 보고 맞추지 말 것(게이트의 *내용*은 같다):
   1. **CI는 `--locked`를 붙인다** — 커밋된 `Cargo.lock`이 낡았을 때 조용히 재해석하지 않고 실패시킨다.
   2. **CI는 실 claude 의존 테스트를 이름으로 `--skip` 한다** — 러너에 claude가 없다. **그 `--skip` 목록이 정본**이고, 그 축의 CI 커버리지는 0이라 로컬(claude 있음)에서만 검증된다.
   3. **로컬은 모든 빌드·테스트를 `scripts/run-detached.ps1`로 돌리지만 CI는 그냥 돈다** — 러너는 출력을 이미 자기 잡 로그에 담고 그 로그를 읽어 갈 세션 터미널도 없으니, 감싸 봐야 얻는 게 없고 CI만 느려진다(로컬에서 감싸는 이유 = 아래 「분리 실행」).
+  4. **워크스페이스 회귀에 로컬만 `-- --test-threads=4`를 붙인다** — 러너엔 그 플래그가 겨냥하는 조건(프로세스 생성을 후킹하는 사내 보안 에이전트)이 없어 병렬을 낮추면 CI만 느려진다. **규칙·근거의 정본 = CLAUDE.md 「빌드·검증 명령」**(어느 스위트에 붙고 어느 스위트에 안 붙는지의 판정 규칙도 그쪽). ★셸 패키지 타깃 다섯(2b~2f)은 하나도 안 붙는다★ — 그 패키지엔 프로세스를 만드는 줄이 없다.
 - **CI 미커버 3건 — 로컬 몫이다:** ① GUI 실측(창 필요) ② 실 claude 의존 테스트(워크플로가 `--skip`으로 제외하며 **그 목록이 정본**) ③ ADR-0130 재론 트리거(게이트가 아니라 알림이라 CI에 못 얹는다 — daemon crate가 닿으면 로컬에서 돌 것).
 - **★아래 강도별 목록에 없고 CI에만 있는 게이트★**(개수를 세지 않는다 — 세던 숫자는 게이트가 늘 때마다 뒤처진다). 로컬 fallback으로 돌 때 빠뜨리면 CI보다 약하다:
   ```bash
-  # ts-rs 바인딩 sync — protocol·core 테스트를 돌린 **직후**(양쪽 다 생성물을 다시 굽는다)
-  git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/
-  git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/
+  # ts-rs 바인딩 sync — protocol·core·셸 테스트를 돌린 **직후**(셋 다 생성물을 다시 굽는다.
+  #   셋째를 굽는 것은 위 2f 의 `lib_unit` 이고, CI 는 그 스위트에서 `-- export_bindings_` 8건만 골라 돈다)
+  git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/ src-tauri/bindings/
+  git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/ src-tauri/bindings/
   # discovery async 반입 → `^(tokio|mio|tokio-tungstenite|futures-util) ` 매치 0줄이어야 PASS
   cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all
   ```
-  ★**`git add -N`(intent-to-add)를 빼지 말 것**★ — `git diff`는 **untracked 파일을 보지 않는다.** 처음 생성되는 `.ts`는 비교 대상 자체가 없어 매치 없이 조용히 통과했다(`SlotContent.ts` 사건 — `docs/process/S20-command-bus/trd.md` §5). intent-to-add로 두 디렉터리를 **내용 없이** 인덱스에 올려 두면 신규 파일도 "전체가 추가된 diff"로 잡힌다 — 빈 blob 등록일 뿐이라 이후 커밋 내용에는 영향이 없다. ★**`-f`도 빼지 말 것**★ — `git add`는 무시된 경로를 조용히 건너뛰므로, 어느 crate의 `.gitignore`에 `bindings/`·`*.ts` 같은 넓은 줄이 생기면 생성물이 인덱스에 안 올라가 **게이트가 소리 없이 해제된다**(지금은 두 디렉터리 다 무시 대상이 아니다). ★**경로를 하나로 줄이지 말 것**★ — 선언이 crate마다로 흩어져 생성 지점이 둘이고, 새 생성 지점이 생기면 이 목록도 함께 늘어난다.
+  ★**`git add -N`(intent-to-add)를 빼지 말 것**★ — `git diff`는 **untracked 파일을 보지 않는다.** 처음 생성되는 `.ts`는 비교 대상 자체가 없어 매치 없이 조용히 통과했다(`SlotContent.ts` 사건 — `docs/process/S20-command-bus/trd.md` §5). intent-to-add로 세 디렉터리를 **내용 없이** 인덱스에 올려 두면 신규 파일도 "전체가 추가된 diff"로 잡힌다 — 빈 blob 등록일 뿐이라 이후 커밋 내용에는 영향이 없다. ★**`-f`도 빼지 말 것**★ — `git add`는 무시된 경로를 조용히 건너뛰므로, 어느 crate의 `.gitignore`에 `bindings/`·`*.ts` 같은 넓은 줄이 생기면 생성물이 인덱스에 안 올라가 **게이트가 소리 없이 해제된다**(지금은 세 디렉터리 다 무시 대상이 아니다). ★**경로를 줄이지 말 것**★ — 선언이 crate마다로 흩어져 생성 지점이 셋이고, 새 생성 지점이 생기면 이 목록도 함께 늘어난다.
 
 ## 강도별 실명령 (골격 §2 "게이트 실행"에 주입)
 
@@ -81,7 +83,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 - 판정이 끝나면 로그를 읽되 **필요한 줄만 인용한다** — 출력이 파일로 떨어지는 덕에 빌드 로그 전체를 삼키지 않아도 된다.
 - **`rg`·`cargo tree` 격리 게이트처럼 출력이 몇 줄뿐인 단발 조회는 굳이 감쌀 필요가 없다** — 그대로 받아도 컨텍스트를 먹지 않고 판정도 그 몇 줄로 끝난다. 다만 감싸도 무해하니, 애매하면 감싼다.
 - **§full의 「앱을 셸에서 직접 띄우지 않는다」와 같은 규칙이다** — 앱·빌드·테스트, **우리가 띄우는 것은 전부 프로세스 트리 밖 + 출력은 파일로만.** 대상별 절차만 다르다(앱 = `launch-detached.ps1`, 빌드·테스트 = `run-detached.ps1`).
-- ★**옛 규칙은 폐기했다 — 되살리지 말 것**★(2026-08-19). 옛 규칙 = **libtest 테스트 스레드 수 상한 플래그**(워크스페이스·core·daemon 회귀 뒤에 `4`를 박아 두던 그 인자 — ★이 문서에서 그 플래그를 쓰는 자리는 이제 없다★). 원인이 규명된 뒤 폐기 사유는 **더 분명해졌다:**
+- ★**libtest 테스트 스레드 수 상한 플래그(`-- --test-threads=4`)를 「터미널 크래시 대책」으로 되살리지 말 것 — 그 사유는 죽었다**★(2026-08-19). ★**플래그 자체가 폐기된 것이 아니다 — 폐기된 것은 그 사유다**★. 규칙의 정본인 **CLAUDE.md 「빌드·검증 명령」**이 그 플래그를 **실 자식 프로세스를 띄우는 스위트**에 요구하고 있고(사내 보안 에이전트 DLL이 *프로세스 생성*을 후킹한다는 별개 축), 아래 강도별 목록은 그 요구를 그대로 따른다 — 어디에 붙고 어디에 안 붙는지의 판정 규칙도 그 절이 갖는다. **이 절이 소유하는 것은 크래시 축의 사실뿐**이고, 그 축에서 이 플래그는 레버가 아니었다. 원인이 규명된 뒤 그 점은 **더 분명해졌다:**
   1. **실제 원인에 닿지도 않는다.** 원인은 터미널 자신의 프로세스 트리 재귀(아래 「터미널 크래시」)이고 그 재귀는 **단기 프로세스가 대량으로 나고 죽을 때** 걸리는데, 그 플래그는 *테스트*가 몇 개 동시에 도는지만 정한다. 2026-08-19 12:58 터미널은 테스트가 하나도 돌기 전 **컴파일·링크 단계**에서 죽었다(그 시점 디스크의 테스트 바이너리는 전날 것이고 라이브러리 산출물만 갓 쓰여 있었다) — 플래그가 닿은 적 없는 자리다. *컴파일러* 프로세스 수는 cargo의 build jobs가 정한다.
   2. **두 번째 후보(프로세스 트리 위치)도 원인이 아니었다.** 분리 실행으로 옮긴 뒤에도 터미널은 죽었다 — 15:18:51 분리 실행 `cargo test` 기동, 15:18:59 터미널 사망(실측). 즉 테스트 동시성도, 트리 위치도 레버가 아니었다. 실제 수정은 **터미널 업그레이드**다(아래 「터미널 크래시」).
 - **터미널 크래시(`0xc00000fd`) — 원인 규명·수정 완료(2026-08-19).** ★**사내 보안 에이전트 탓이 아니다**★:
@@ -112,18 +114,19 @@ cargo test  -p engram-dashboard-core        # 영향 crate 테스트
 순서대로:
 ```bash
 cargo build                                 # 1) 빌드 (루트, 전 workspace). ★이걸로 지어진 engram-dashboard.exe 는 띄우지 않는다★ — TAURI_CONFIG 없이 도는 빌드라 debug 셸에 release identifier 를 다시 찍는다(ADR-0137, 정본 CLAUDE.md 「빌드·검증 명령」). 띄울 exe 는 아래 full 의 build-client-shell.mjs 가 만든다
-cargo test --workspace --exclude engram-dashboard   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. 루트 bare cargo test 금지(src-tauri lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다 — 실측 2026-08-05). ★옛 `-- --test-threads=4` 는 폐기했다 — 되살리지 말 것★(2026-08-19: 그 플래그는 실제 원인에 닿지도 않았다. 사유의 정본 = 아래 「분리 실행」)
-cargo test -p engram-dashboard --test layout_apply                      # 2b) 2번이 뺀 그 패키지의 **통합** 타깃 — 죽는 건 lib 타깃뿐이고 통합 타깃은 정상 기립한다(실측 2026-08-17). 2번이 이 스위트를 못 보므로 이 줄이 유일한 실행 경로다(아래 둘째 항목)
-cargo test -p engram-dashboard --test layout_commands                   # 2c) 같은 패키지의 또 다른 **통합** 타깃 — layout_apply 는 적용 서비스 자체, 이쪽은 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅)를 잰다. 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립·실측 2026-08-17) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
-cargo test -p engram-dashboard --test daemon_client_pending             # 2d) 같은 패키지의 셋째 **통합** 타깃 — 겹친 `request_id` 가 연결 태스크를 패닉시키지 않고 옛 대기자가 영구 hang 대신 오류로 깨어나며 새 요청이 그 번호를 승계함을 잰다(GUI 실측 2026-08-18 결함의 회귀망). 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
-cargo test -p engram-dashboard --test daemon_client_replay              # 2e) 같은 패키지의 넷째 **통합** 타깃 — 거절당한 구독이 슬롯을 풀고 병합된 다음 세대 `Subscribe` 가 실제로 **만들어져 보낼 명령으로 돌아오며** 이미 acked 된 구독은 거절로 풀리지 않음을 잰다(2026-08-19 출력 두절 결함의 회귀망). ★**소켓으로 나가는 것까지는 이 스위트가 안 잰다**★ — 돌려받은 명령을 실 소켓에 미는 줄은 무검증 잔여로 남아 있다(그 파일 헤더 「무엇이 안 덮이나」가 정본). 판정 사유는 2b 와 동일(0xc0000139 는 lib 타깃뿐, 통합 타깃은 정상 기립·실측 2026-08-20 재확인) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
+cargo test --workspace --exclude engram-dashboard -- --test-threads=4   # 2) 전 멤버 회귀 — src-tauri 패키지(`engram-dashboard`)만 뺀다. ★제외 사유가 바뀌었다(2026-08-24)★: 옛 사유(lib 타깃이 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND 로 죽는다)는 해소됐고(ADR-0174), 지금은 그 패키지 단위 스위트(2f)에 알려진 실패가 남아 있어 넣으면 이 줄이 통째로 빨개지기 때문이다(수치·현황 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄). 루트 bare cargo test 금지는 그대로. ★`-- --test-threads=4` 를 빼지 말 것★ — 이 회귀는 실 자식 프로세스를 띄우는 스위트를 여럿 담는다. 규칙·근거의 정본 = CLAUDE.md 「빌드·검증 명령」(그 절이 이 예외의 정본이라 선언하고 이 파일을 가리킨다). ★단 CI 는 이 플래그를 쓰지 않으며 그것이 의도다★ — 러너엔 그 조건이 없어 병렬을 낮추면 CI 만 느려진다. 드리프트로 보고 맞추지 말 것
+cargo test -p engram-dashboard --test layout_apply                      # 2b) 2번이 뺀 그 패키지의 **통합** 타깃 — 정상 기립한다(실측 2026-08-17). 2번이 이 스위트를 못 보므로 이 줄이 유일한 실행 경로다(아래 둘째 항목)
+cargo test -p engram-dashboard --test layout_commands                   # 2c) 같은 패키지의 또 다른 **통합** 타깃 — layout_apply 는 적용 서비스 자체, 이쪽은 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅)를 잰다. 판정 사유는 2b 와 동일(통합 타깃은 정상 기립·실측 2026-08-17) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
+cargo test -p engram-dashboard --test daemon_client_pending             # 2d) 같은 패키지의 셋째 **통합** 타깃 — 겹친 `request_id` 가 연결 태스크를 패닉시키지 않고 옛 대기자가 영구 hang 대신 오류로 깨어나며 새 요청이 그 번호를 승계함을 잰다(GUI 실측 2026-08-18 결함의 회귀망). 판정 사유는 2b 와 동일(통합 타깃은 정상 기립) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
+cargo test -p engram-dashboard --test daemon_client_replay              # 2e) 같은 패키지의 넷째 **통합** 타깃 — 거절당한 구독이 슬롯을 풀고 병합된 다음 세대 `Subscribe` 가 실제로 **만들어져 보낼 명령으로 돌아오며** 이미 acked 된 구독은 거절로 풀리지 않음을 잰다(2026-08-19 출력 두절 결함의 회귀망). ★**소켓으로 나가는 것까지는 이 스위트가 안 잰다**★ — 돌려받은 명령을 실 소켓에 미는 줄은 무검증 잔여로 남아 있다(그 파일 헤더 「무엇이 안 덮이나」가 정본). 판정 사유는 2b 와 동일(통합 타깃은 정상 기립·실측 2026-08-20 재확인) — 2번이 이 스위트도 못 보므로 이 줄이 유일한 실행 경로다
+cargo test -p engram-dashboard --test lib_unit                          # 2f) 같은 패키지의 **단위** 스위트(`src/**` 의 `#[cfg(test)]` 전부 = 217건) — 2026-08-24에 처음 실행 가능해졌다(세 다리 = `[lib] test = false` + `[[test]] name = "lib_unit"` + build.rs 의 `rustc-link-arg-tests`. 왜 이 모양이고 무엇을 거부했나 = ADR-0174). ★자식 프로세스를 하나도 안 띄우므로 `-- --test-threads=4` 를 붙이지 않는다★. ★빨간 게 정상이다★ — 알려진 선재 실패가 남아 있고 제품 결함이 아니다(수치·원인·CI 등재 상태의 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄 · 남은 갭과 결정권 = docs/tracking.md T-27). **판정 — 둘 다 참이어야 PASS:** ① 실패한 테스트 이름이 **전부 `daemon_client::tests::` 로 시작한다** ② 실패 건수가 **32를 넘지 않는다**. ★한쪽만 보면 샌다★ — 건수만 보면 하나 고치고 하나 새로 깨진 맞바꿈이 그대로 통과하고, 축만 보면 같은 축에서 늘어난 것을 놓친다. 확인 = 로그 끝의 `failures:` 이름 목록을 그대로 읽는다(요약 줄의 숫자만 보지 말 것). 부수 효과 = 이 줄을 돌리면 `src-tauri/bindings/*.ts` 8개가 재생성된다 — ★그 디렉터리는 이제 CI sync 게이트가 덮으므로(위 「CI와의 분담」) diff 가 남으면 커밋해서 함께 민다★
 cargo fmt --check                           # 3) 포맷 게이트 (검사형 — rewrite 안 함)
 rg "^\s*use tauri" crates/engram-dashboard-core/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
-- **★위 블록의 빌드·테스트 줄(1·2·2b~2e·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4번 `rg` 는 대상 밖 — 그 절의 판정 규칙). 근거·실측은 그 절이 갖는다.
-- **★2b~2e의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — 둘 다 죽는 lib 타깃(`0xc0000139`)을 도로 끌어와 스텝이 통째로 실패한다. **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21). 이 목록이 곧 로컬 실행 명단이라 타깃이 늘면 여기에도 줄을 늘린다.
+- **★위 블록의 빌드·테스트 줄(1·2·2b~2f·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4번 `rg` 는 대상 밖 — 그 절의 판정 규칙). 근거·실측은 그 절이 갖는다.
+- **★2b~2f의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — ★사유가 바뀌었다(2026-08-24)★: 넓히면 통합 타깃 넷과 `lib_unit`이 **한 스텝에 뭉쳐** 돌고, `lib_unit`의 알려진 실패가 그 스텝을 통째로 빨갛게 만들어 **통합 스위트의 판정이 그 안에 묻힌다**(그러면 2f의 두 갈래 판정도 못 세운다 — 어느 타깃에서 난 실패인지가 섞인다). 옛 사유였던 "죽는 lib 타깃(`0xc0000139`)을 도로 끌어온다"는 해소됐고(그 타깃은 이제 `lib_unit`으로 돈다), **★`--lib`·`--all-targets`는 여전히 즉사한다★**(`[lib] test = false`는 *기본 선택*에서만 빼므로 명시로 부르면 manifest 없는 내장 타깃이 골라진다 — 실측 2026-08-24). **`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않는다** — `build`는 테스트 타깃을 안 굽고 2번은 패키지를 뺀다. 그래서 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21). 이 목록이 곧 로컬 실행 명단이라 타깃이 늘면 여기에도 줄을 늘린다 — **2f가 그렇게 늘어난 줄이다**(정정 2026-08-24).
 - 코어 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(코어가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13).
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
 - **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더한다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다).

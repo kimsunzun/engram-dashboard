@@ -1221,8 +1221,10 @@ mod tests {
     /// ★명령↔답장 쌍 박제(ADR-0155)★: `AgentCommand::ListCommands` 가 pending 슬롯을 만드는 쪽이고
     /// `AgentEvent::CommandList` 가 그걸 깨우는 쪽이다. 한쪽만 고치면(예: 새 reply variant 를
     /// broadcast 로 잘못 분류) 그 왕복은 연결이 끊길 때까지 안 풀린다. 동형 검증이 `src-tauri`
-    /// `daemon_client::protocol_state` 에도 있었으나 그 lib 테스트 타깃은 로컬/CI 모두
-    /// 0xc0000139(ENTRYPOINT_NOT_FOUND)로 실행되지 않는다 — 실제로 도는 건 이 crate 테스트뿐이다.
+    /// `daemon_client::protocol_state` 에도 있는데, **CI 에서 도는 건 이 crate 테스트뿐이다** —
+    /// 그쪽 단위 스위트는 아직 CI 에 등재돼 있지 않다(알려진 실패 30건 대기 · 로컬에서는 2026-08-24부터
+    /// `cargo test -p engram-dashboard --test lib_unit` 으로 돈다. 옛 사유였던
+    /// 0xc0000139(ENTRYPOINT_NOT_FOUND) 즉사는 해소됐다).
     #[test]
     fn list_commands_reply_request_id_pairing() {
         let r = RequestId::new();

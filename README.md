@@ -186,8 +186,9 @@ scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 
 ```bash
 # 빌드·테스트도 앱과 같은 규칙 — 셸에서 직접 돌리지 않고 scripts/run-detached.ps1 로 프로세스 트리 밖에서 돌리고 출력은 파일로만 받습니다(빌드 로그 전체를 삼키지 않고 필요한 줄만 읽습니다).
 #   완료 판정 = 로그 마지막 줄의 `__EXIT=<코드>`(프로세스가 사라진 것으로 판정하지 않습니다). 규칙 = CLAUDE.md 「빌드·검증 명령」, 사용법 = scripts/run-detached.ps1 헤더
-# src-tauri만 제외(그 크레이트의 테스트 타깃이 Windows에서 크래시) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace --exclude engram-dashboard" -WorkDir . -LogFile test.log
+# src-tauri만 제외(그 패키지의 단위 스위트에 알려진 실패가 남아 있어서입니다 — 제품 결함이 아니라 하네스 부패, 별도 수정 대기. 옛 사유였던 Windows 크래시는 2026-08-24에 해소됐습니다. 수치·현황·별도 실행 명령의 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄) · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)
+#   `-- --test-threads=4` 는 로컬 전용이며 빼지 마세요(근거 = 같은 절). CI는 그것을 쓰지 않으며 그 차이가 의도입니다.
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace --exclude engram-dashboard -- --test-threads=4" -WorkDir . -LogFile test.log
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "npm test" -WorkDir . -LogFile vitest.log
 #   ↑ vitest 는 `__EXIT` 가 안 붙습니다(자식이 래퍼보다 오래 삽니다) — 로그에 찍힌 vitest 자신의 pass/fail 요약으로 판정하세요.
 ```

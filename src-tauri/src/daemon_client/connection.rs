@@ -1244,9 +1244,10 @@ pub enum ReplayFollowUp {
 /// 데몬이 보낸 replay 3종(`SubscribeAck`·`ReplayComplete`·`SubscribeFailed`)을 single-flight 상태기계에
 /// 반영하고, 그 결과 창으로 흘릴 경계 마커를 `deliver` 로 넘긴다.
 ///
-/// ★셋을 한 함수에 모은 이유(load-bearing)★: 이 배선은 연결 태스크의 `select!` 안에 살았고, 그 자리는 실
-/// 소켓·실 `AppHandle` 없이 세울 수 없다 — 이 패키지의 lib 테스트 타깃은 실행조차 안 되므로(`0xc0000139`)
-/// 거기 인라인으로 둔 갈래는 **어떤 게이트로도 검증되지 않는다.** 실제로 거절 팔이 그 상태였고, 그 팔을
+/// ★셋을 한 함수에 모은 이유(load-bearing)★: 이 배선은 연결 태스크의 `select!` 안에 살았고, **그 자리는 실
+/// 소켓·실 `AppHandle` 없이 세울 수 없다** — 거기 인라인으로 둔 갈래는 어떤 하네스로도 태울 수 없다(단위
+/// 스위트가 도는 지금도 그렇다 — 요구되는 것이 소켓과 `AppHandle` 이지 타깃이 서느냐가 아니다). 실제로
+/// 거절 팔이 그 상태였고, 그 팔을
 /// 통째로 지워도 모든 테스트가 초록이었다. 갈래를 여기로 내리면 하네스(`tests/daemon_client_replay.rs`)가
 /// 소켓 없이 태울 수 있고, 남는 무검증 표면은 호출부의 **한 줄**(이 함수를 부르는 것 + 반환 명령을
 /// `send_fire` 하는 것)뿐이다.
@@ -1351,10 +1352,10 @@ pub struct RefusalPlan {
 /// 데몬이 `Subscribe` 를 거절했을 때(`AgentEvent::SubscribeFailed`) 무엇을 내보낼지 정한다 — 슬롯 해제·
 /// 마커 합성·대기열 전진이 여기 한 곳에 있다.
 ///
-/// ★`pub` 인 이유(= `register_pending` 과 같은 사정)★: 이 파일의 select 루프는 실 소켓·실 `AppHandle`
-/// 없이 세울 수 없고, 이 패키지의 **lib 테스트 타깃은 실행조차 되지 않는다**(`0xc0000139
-/// STATUS_ENTRYPOINT_NOT_FOUND` — `src/daemon_client/tests.rs` 의 단언은 한 번도 돈 적이 없다). 그래서
-/// 이 함수가 그 배선을 소켓 없이 태울 수 있는 유일한 지점이다. 하네스 = `tests/daemon_client_replay.rs`.
+/// ★`pub` 인 이유(= `register_pending` 과 같은 사정)★: **이 파일의 select 루프는 실 소켓·실 `AppHandle`
+/// 없이 세울 수 없다.** 그래서 이 함수가 그 배선을 소켓 없이 태울 수 있는 유일한 지점이다.
+/// 하네스 = `tests/daemon_client_replay.rs`. ★근거는 이 한 줄이면 충분하다★ — 같은 패키지의 단위 스위트가
+/// 도는지 여부는 이 판단에 들어오지 않는다.
 ///
 /// ★실패 마커의 `epoch` 는 권위값이 아니다(최선치)★: 거절엔 `SubscribeAck` 이 없어 이 세대가 어느 세션의
 /// 것인지 확정할 방법이 없다. 그래서 마지막으로 알려진 `SubState.epoch`(없으면 0)를 싣는다 — 그 값은

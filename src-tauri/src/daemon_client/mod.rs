@@ -403,17 +403,20 @@ impl DaemonClient {
                     "start_connection: app=None(테스트 맥락) — emit 없이 연결 task 를 spawn 할 수 없음. \
                      테스트는 Tauri AppHandle 주입이 필요합니다(T7c 한계, 후속 작업)."
                 );
-                // ★app:None 단락 = 통합테스트 위양성, 후속 ADR 필요(미해결)★: 이 `Ok(())` 단락은 task 를
-                //   spawn 하지 않은 채 성공을 반환한다 → 상태가 Connecting 에 고착되는데, tests.rs 의
-                //   connect/ensure 테스트(app=None 생성자)는 `assert_eq!(state, Connected)` 를 단언한다(예:
-                //   tests.rs:228/337/389). 즉 *실행되면* 위양성으로 실패한다. 현재는 `cargo test -p
-                //   engram-dashboard` 가 STATUS_ENTRYPOINT_NOT_FOUND(DLL 로더 — 별개 환경 이슈)로 실행 자체가
-                //   안 돼 드러나지 않는다. ★운영 경로는 항상 app:Some(new_real_with_owned_runtime)이라 무영향★
-                //   — 이 분기는 테스트 맥락에서만 닿는다.
-                //   근본 수정 = run_connection 이 `Option<AppHandle>` 을 받아 emit no-op(connection.rs 동시성
-                //   영역 전반 + 다수 emit 지점 변경)이거나 test_app 주입 — 회귀 검증(테스트 실행)이 막혀 보류.
-                //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목(박제). 정식 ADR
-                //   채번은 별도.
+                // ★이 단락이 `lib_unit` 단위 스위트의 알려진 실패 전부의 뿌리다 — 그 설명의 정본이 여기다★:
+                //   이 `Ok(())` 는 task 를 spawn 하지 않은 채 성공을 반환한다 → 소켓이 열리지 않고 상태가
+                //   Connecting 에 고착되는데, tests.rs 의 connect/ensure 테스트(app=None 생성자 —
+                //   `new`/`new_with_handshake_timeout`)는 `assert_eq!(state, Connected)` 를 단언한다. 그
+                //   단언들이 깨진다. 실패는 전부 `daemon_client::tests::` 안에 모인다.
+                //   ★운영 경로는 항상 app:Some(new_real_with_owned_runtime)이라 무영향★ — 이 분기는 테스트
+                //   맥락에서만 닿는다. 그래서 이것은 제품 결함이 아니라 하네스 부패이고, 단락 자체는 커밋
+                //   ffcd766(2026-07-01)부터 있던 선재 결함이다.
+                //   후보 수정 = run_connection 이 `Option<AppHandle>` 을 받아 emit no-op(connection.rs 동시성
+                //   영역 전반 + 다수 emit 지점 변경)이거나 test_app 주입. ★어느 모양으로 갈지는 사용자 결정
+                //   대기 중이다★ — 임의로 고르지 말 것. 남은 갭·결정권 = docs/tracking.md T-27(정식 ADR 은
+                //   수정 모양이 정해지면 박는다 — ADR-0174 는 스위트를 세운 방법이지 이 수정의 결정이 아니다).
+                //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목(박제).
+                //   ★수치·CI 등재 상태는 여기 적지 않는다★ — 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄.
                 return Ok(());
             }
         };
