@@ -3,14 +3,10 @@ import type { Neighbors } from "./Neighbors";
 
 /**
  * 한 말단 슬롯의 공간 타깃 파생 정보(ViewSnapshot 에 슬롯별로 실린다). ADR-0068.
- * ★좌표 비노출★: neighbors + ordinal 만 — 정규화 rect 는 내부 계산 detail 이라 여기 없다(ADR-0068 결정 3).
  */
-export type SlotSpatial = { slot_id: string,
+export type SlotSpatial = { slot_id: string, neighbors: Neighbors, 
 /**
- * 방향별 인접 슬롯(공유 변 있음). 없으면 각 None.
- */
-neighbors: Neighbors,
-/**
- * 읽기 순서 인덱스(위 먼저, 같으면 왼쪽 먼저) 0-based.
+ * 순서 인덱스 — 중심점 `(center_y, center_x)` 전역 사전순(위→아래, 동률 왼쪽→오른쪽) 0-based.
+ * 상세·응집 미보장은 모듈 헤더 §계산 뼈대 참조.
  */
 ordinal: number, };

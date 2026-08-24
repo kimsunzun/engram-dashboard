@@ -480,6 +480,11 @@ async fn spawn_mock_server_silent() -> u16 {
 // DaemonInfo.protocol_version 을 틀린 값(999)으로 줘도, 송신된 Auth.protocol_version 은 컴파일된
 // PROTOCOL_VERSION 이어야 한다. echo(info 값 되쏘기)면 999 가 나가 이 단언이 깨진다 → 버전 게이트
 // 무력화 회귀를 잡는다.
+// ★지금은 app:None 단락 때문에 실패한다★: `mod.rs` start_connection 의 app:None 단락(아래
+//   「app:None 단락」 주석)이 연결 task 를 안 띄워 **소켓이 아예 안 열린다** → mock 서버가 첫 frame 을
+//   못 받아 oneshot 을 못 보낸다. 그래서 아래 `first_rx` 에 상한(5s)을 씌운다 — 이 파일의 다른 대기
+//   지점과 같은 방식이라 **영구 hang 이 아니라 깨끗한 실패**로 떨어지고, 단락이 걷히면 손대지 않아도
+//   다시 통과한다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_sends_compiled_protocol_version_not_echo() {
     let (port, first_rx) = spawn_mock_server_capturing_first_frame().await;
@@ -498,7 +503,10 @@ async fn auth_sends_compiled_protocol_version_not_echo() {
 
     client.connect().await.expect("connect");
 
-    let first = first_rx.await.expect("첫 frame");
+    let first = tokio::time::timeout(Duration::from_secs(5), first_rx)
+        .await
+        .expect("mock 서버가 첫 frame 을 bound 내 수신(영구 hang 아님)")
+        .expect("첫 frame");
     let frame: AuthFrame = serde_json::from_str(&first).expect("valid 핸드셰이크 프레임");
     let AuthFrame::Auth {
         protocol_version, ..
@@ -558,6 +566,9 @@ async fn concurrent_connect_settles_connected_no_flap() {
 // Hello 를 지연하는 서버로 클라를 핸드셰이크 in-flight 상태로 만든 뒤 close() 를 호출한다. close 가
 // generation 을 bump 했으므로, 뒤늦게 Hello 를 받은 연결 task 는 stale 이라 Connected 를 송신하지
 // 않고 self-close 한다 → 최종 상태 Down 유지(부활 없음).
+// ★지금은 app:None 단락 때문에 실패한다★: 위 auth_… 와 같은 원인 — app:None 단락이 소켓을 안 열어
+//   서버가 Auth 를 영영 못 받는다. 그래서 아래 `auth_rx` 에 상한(5s)을 씌워 영구 hang 대신 깨끗한
+//   실패로 떨어뜨린다(단락이 걷히면 자동 복구).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_in_flight_stays_down_no_revival() {
     let (port, auth_rx) = spawn_mock_server_delayed_hello().await;
@@ -569,7 +580,10 @@ async fn close_in_flight_stays_down_no_revival() {
     let connect_task = tokio::spawn(async move { c.connect().await });
 
     // 서버가 Auth 를 받은 시점 = 클라가 핸드셰이크 in-flight. 이때 close() 로 세대를 올린다.
-    auth_rx.await.expect("서버가 Auth 수신 신호");
+    tokio::time::timeout(Duration::from_secs(5), auth_rx)
+        .await
+        .expect("서버가 Auth 를 bound 내 수신(영구 hang 아님)")
+        .expect("서버가 Auth 수신 신호");
     client.close();
     assert_eq!(client.state(), ConnectionState::Down, "close 직후 Down");
 

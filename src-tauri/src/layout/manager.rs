@@ -1272,10 +1272,17 @@ mod tests {
 
     #[test]
     fn prepare_detached_view_empty_slot_is_err() {
-        // ADR-0064: Empty 만 거부(팝업 대상 없음). agent_list/preset_palette 는 위 테스트대로 허용.
+        // Empty 거부 = 코어 방어(팝업 대상 없음) — 이걸 정한 ADR 은 없고 메뉴 숨김만 ADR-0065
+        // (slot.popout hideOn:['empty']). agent_list/preset_palette 허용은 ADR-0064 — 위 테스트.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
+        // ★first_slot_of 는 점유를 안 본다★ — 부팅 레이아웃 branch a(=AgentList)를 집으므로 Empty 를 명시 설정.
         let slot = first_slot_of(&mgr, src);
+        // ★썩음(낡은/없는 slot id)을 막는 것은 바로 아래 `unwrap()` 이다★ — prepare_detached_view 는
+        //   "빈 슬롯"과 "없는 슬롯"에 같은 LayoutError::SlotNotFound 를 돌려주므로 마지막 is_err 만으론
+        //   둘을 못 가른다. 하지만 set_slot_content 는 없는 id 면 set_in_tree 가 false → SlotNotFound 라
+        //   여기서 패닉한다 — 즉 다음 줄이 통과했다는 것 자체가 slot id 실재의 증거다.
+        mgr.set_slot_content(src, slot, SlotContent::Empty).unwrap();
         assert!(mgr.prepare_detached_view(src, slot, "P".into()).is_err());
     }
 
