@@ -82,10 +82,37 @@ jobs:
           key: backend
 
       # `--locked` 는 아래 전부에 붙인다: 커밋된 Cargo.lock 이 낡았을 때 조용히 재해석하지 않고 실패한다.
-      # src-tauri 패키지를 빼는 이유가 2026-08-24 에 바뀌었다: 옛 사유(그 lib 테스트 타깃이
-      # 0xc0000139/ENTRYPOINT_NOT_FOUND 로 즉사)는 해소됐고(`[lib] test = false` + `[[test]] lib_unit`
-      # + build.rs 의 `rustc-link-arg-tests`), 지금은 그 단위 스위트에 알려진 실패 30 건이 남아 있어서다
-      # (선재 하네스 부패 — daemon_client 의 app:None 단락. 제품 결함 아님). 제외 자체는 그대로 옳다.
+      #
+      # ★2026-08-24: `--exclude engram-dashboard` 를 뗐다 — 셸 패키지도 이 회귀에 든다★
+      # 제외를 떠받치던 사유 둘이 다 죽었다. 옛①(그 lib 테스트 타깃이 0xc0000139/ENTRYPOINT_NOT_FOUND
+      #   로 즉사)은 ADR-0174 의 세 다리(`[lib] test = false` + `[[test]] lib_unit` + build.rs 의
+      #   `rustc-link-arg-tests`)로 해소됐고, 옛②(그 단위 스위트의 알려진 실패 32 건 — daemon_client 의
+      #   app:None 단락)는 전부 고쳐졌다. 사유가 죽은 제외를 남겨 두면 이 줄이 **워크스페이스 회귀라는
+      #   이름으로 멤버 하나를 조용히 건너뛴다** — `src-tauri/` 에 새 테스트 타깃이 생겨도 누가 아래에
+      #   스텝을 손으로 더할 때까지 아무 데서도 안 돈다(`daemon_client_pending`·`daemon_client_replay` 가
+      #   실제로 그랬다). 그 침묵이 이 패키지의 217 건을 몇 달간 가려 둔 부류다.
+      #
+      # ★아래 다섯 스텝과 테스트 집합이 겹친다 — 알고 남긴 중복이다★ 잡는 축이 서로 다르다:
+      #   이 줄  : cargo 의 **기본 타깃 선택**을 쓴다. 그래서 세 다리 ①(`[lib] test = false`)을 지우면
+      #            죽는 내장 lib 테스트 타깃이 기본 선택으로 되돌아와 **여기서** 0xC0000139 로 죽는다.
+      #            아래 `--test lib_unit` 은 그 타깃을 아예 안 고르므로 ①이 사라져도 초록이다.
+      #   아래 줄: `--test <이름>` 은 타깃이 **없으면 cargo 가 실패**한다. 그래서 세 다리 ②
+      #            (`[[test]] lib_unit`)를 지우면 아래 스텝이 "no test target named `lib_unit`" 로 죽는다.
+      #            이 줄은 그걸 못 잡는다 — 사라진 타깃은 실패가 아니라 **침묵**이다(스위트가 통째로
+      #            증발한 채 초록). 세 다리 ③(링크 인자)은 양쪽 다 잡는다.
+      #   ★실패 이름★: 아래 줄들은 스텝 이름이 곧 어느 스위트인지를 짚는다. 단 이 줄이 **먼저** 돌므로
+      #            셸 패키지가 깨지면 여기서 먼저 빨개지고 아래 스텝은 돌지 않는다 — 그때 어느 타깃인지는
+      #            스텝 이름이 아니라 cargo 출력의 테스트 바이너리 이름에서 읽는다. 스텝 이름이 짚어 주는
+      #            이점은 그만큼 줄었고, 그래도 나머지 멤버 전부에는 그대로 남는다.
+      #   중복 비용: 셸 패키지 테스트가 이 잡에서 두 번 돈다. 전부 인메모리 하네스·소켓뿐이라(자식 프로세스
+      #            0) 초 단위고, 컴파일 산출물은 같은 잡의 target/ 을 공유한다.
+      #   ★기본 선택이라 새로 링크되는 것이 하나 있다 — `[[bin]]` 의 유닛테스트 하네스★
+      #            (`src/main.rs`, `#[cfg(test)]` 0 건이라 도는 테스트는 0 이다). 아래 다섯 스텝 중
+      #            어느 것도 이걸 짓지 않으므로 이 줄이 처음 짓는다. **kind=bin 이라 embed-resource 의
+      #            `rustc-link-arg-bins` 를 받아 manifest 가 붙는다고 본다 — 즉 0xC0000139 축 밖이다.**
+      #            ★단 이건 cargo 의 링크 인자 적용 규칙에서 따라 나온 추론이지 이 조합의 실측이 아니다★
+      #            (실측된 것은 lib 내장 타깃이 `-tests` 를 못 받는다는 반대쪽 사실 — ADR-0174).
+      #            여기서 0xC0000139 가 나오면 그 추론이 틀린 것이니 `[[bin]] test = false` 로 끈다.
       #
       # ★아래 --skip 6건 = CI 레인 한정 제외(실 claude 바이너리 의존 축) — 미결 사항★
       # 이 6건은 수신자로 **실 claude** 를 띄워 턴 신호·중계를 관측한다. 러너에는 claude 가 없다.
@@ -96,10 +123,10 @@ jobs:
       # 31169137744 = mcp_send_message — 같은 코드에 다른 실패). 그래서 개별이 아니라 축 단위로 뺀다.
       # ★이 축의 CI 커버리지는 0 이다★ — 로컬(claude 있음)에서만 검증된다. 테스트 소스는 고치지
       # 않았다(가드 보강 / 러너에 claude+인증 부여 중 무엇을 할지는 미결).
-      - name: cargo test --workspace --exclude engram-dashboard
+      - name: cargo test --workspace
         shell: bash
         run: |
-          cargo test --locked --workspace --exclude engram-dashboard -- \
+          cargo test --locked --workspace -- \
             --skip c1_park_then_spawn_auto_delivers \
             --skip c2_live_mid_turn_send_parks_and_delivers_after_turn_end \
             --skip control_send_delivery_observation_records_bytes_and_correlated_ids \
@@ -107,18 +134,24 @@ jobs:
             --skip control_send_revoked_sender_still_delivers_observation \
             --skip mcp_send_message_tool_happy_and_error
 
-      # ★위 스텝이 통째로 뺀 `engram-dashboard`(셸) 패키지 — 이 스텝이 이 스위트(layout_apply)의 유일한
-      #   실행 경로다★. ★단 그 패키지의 테스트 타깃 명단은 아래 넷이 전부가 아니다★ — 2026-08-24 에
-      #   단위 스위트 타깃 `lib_unit`(`[[test]] path = "src/lib.rs"`)이 생겼고, **그쪽은 알려진 실패
-      #   때문에 스위트 전체로는 등재하지 않았다** — 대신 아래 다섯째 스텝이 이름 필터로 ts-rs
-      #   export 8 건만 돌린다(그 스텝 주석이 사유의 정본).
-      # 통합 타깃(`src-tauri/tests/`)은 engram_dashboard_lib 를 링크해 정상 기립한다(실측 2026-08-17).
-      # 그래서 패키지를 뺀 채로도 이 타깃만 집어서 돌릴 수 있다.
+      # 아래 다섯 스텝 = 셸 패키지(`engram-dashboard`)의 테스트 타깃을 **하나씩** 집는다 —
+      #   통합 4종(`src-tauri/tests/`) + 단위 스위트 1종(`lib_unit` = `[[test]] path = "src/lib.rs"`).
+      # ★2026-08-24: 이제 이 스위트들의 유일한 실행 경로가 아니다★ — 위 워크스페이스 회귀가 이 패키지를
+      #   함께 돈다(제외 해제 · 겹침을 남긴 사유의 정본 = 그 스텝 주석). 이 다섯 줄이 남아 있는 값어치는
+      #   둘이다: ① 실패가 **어느 스위트**에서 났는지를 스텝 이름이 짚는다(「실패 보고 시 게이트 명칭」).
+      #   ② `--test lib_unit` 은 **타깃 부재를 실패로** 만든다 — 위 줄이 구조적으로 못 잡는 축이다.
+      # 통합 타깃(`src-tauri/tests/`)은 engram_dashboard_lib 를 rlib 으로 소비해 정상 기립한다
+      #   (실측 2026-08-17 — Wry 사슬이 링크에서 빠진다. ADR-0174 「근거」).
       # ★맨 아래 `cargo build --locked` 가 이걸 대신하지 않는다★ — build 는 테스트 타깃을 컴파일하지
-      #   않는다. 이 스텝이 없으면 스위트는 "안 도는" 게 아니라 **컴파일이 깨져도 안 보인다**.
-      # ★`--test <이름>` 을 `-p` 단독이나 `--tests` 로 넓히지 말 것★ — 둘 다 `lib_unit` 을 **이름 필터
-      #   없이 통째로** 끌어와 그 알려진 실패로 이 스텝이 함께 죽는다(옛 사유였던 "죽는 lib 타깃" 은 2026-08-24 에
-      #   해소됐고, 넓히면 안 되는 결론만 사유를 갈아 끼운 채 그대로다). 대상 선택은 타깃 단위여야 한다.
+      #   않는다(컴파일 커버리지 자체는 이제 위 워크스페이스 회귀도 함께 준다 — 그래도 이 줄들이 지는
+      #   ①②는 그쪽에 없다).
+      # ★`--test <이름>` 을 `--lib` 이나 `--all-targets` 로 바꾸지 말 것★ — 그 둘은 **여전히 즉사한다**.
+      #   `[lib] test = false` 는 **기본 선택**에서만 빼므로 명시로 부르면 manifest 를 못 받는 내장 lib
+      #   테스트 타깃이 그대로 골라져 0xC0000139 로 죽는다(ADR-0174 「영향/불변식」 · 실측 2026-08-24).
+      # ★`-p` 단독·`--tests` 로 넓히지도 말 것★ — 이쪽은 즉사하지 않는다(둘 다 기본 선택을 따라 그 내장
+      #   타깃을 안 고른다). 넓히면 안 되는 이유는 위 ① 하나다: 다섯 타깃이 한 스텝에 뭉치면 어느 타깃이
+      #   깨졌는지가 판정에서 섞인다. (옛 사유 "`lib_unit` 의 알려진 실패를 통째로 끌어온다" 는 그 실패가
+      #   전부 고쳐지며 죽었다 — 결론만 남기고 사유를 갈아 끼웠다.)
       # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 쓰지 않고(CLAUDE.md 「빌드·검증 명령」),
       #   애초에 이 스위트는 인메모리 fake 포트뿐이라 자식 프로세스를 하나도 띄우지 않는다.
       # 검증 레인(ADR-0131 결정 2)에 둔다 — 릴리즈 잡이 아니다. release-build 는 태그에서만 돌고
@@ -127,17 +160,17 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard --test layout_apply
 
-      # 같은 패키지의 또 다른 **통합** 타깃(`src-tauri/tests/layout_commands.rs`) — 판정 사유는 바로 위
-      # layout_apply 스텝과 동일(통합 타깃은 engram_dashboard_lib 를 링크해 정상 기립·실측 2026-08-17,
-      # 그리고 `lib_unit` 을 통째로 끌어오지 않도록 타깃 단위로 집는다). layout_apply 는 적용 서비스 자체를 재고, 이쪽은 창·탭·슬롯
+      # 같은 패키지의 또 다른 **통합** 타깃(`src-tauri/tests/layout_commands.rs`) — 스텝을 따로 가르는
+      # 사유는 위 layout_apply 블록이 정본이다(실패한 스위트를 스텝 이름이 짚는다 · 대상 선택은 타깃
+      # 단위). layout_apply 는 적용 서비스 자체를 재고, 이쪽은 창·탭·슬롯
       # 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅하는 계층)를 잰다.
       # `-- --test-threads=4` 는 붙이지 않는다 — 역시 인메모리 fake 포트뿐이라 자식 프로세스가 없다.
       - name: cargo test -p engram-dashboard --test layout_commands
         shell: bash
         run: cargo test --locked -p engram-dashboard --test layout_commands
 
-      # 같은 패키지의 셋째 **통합** 타깃(`src-tauri/tests/daemon_client_pending.rs`) — 판정 사유는 위 두
-      # 스텝과 동일(통합 타깃은 정상 기립하고, 타깃 단위로 집어 `lib_unit` 을 통째로 안 끌어온다).
+      # 같은 패키지의 셋째 **통합** 타깃(`src-tauri/tests/daemon_client_pending.rs`) — 스텝을 따로 가르는
+      # 사유는 위 layout_apply 블록이 정본이다(실패한 스위트를 스텝 이름이 짚는다).
       # 재는 것은 데몬 클라이언트의 pending 슬롯 승계다: 바깥
       # 호출자가 정한 request_id 가 겹쳐도 연결 태스크가 죽지 않고 옛 대기자가 오류로 깨어난다
       # (옛 `debug_assert!(false)` 회귀 = 셸↔데몬 영구 단절).
@@ -146,8 +179,8 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard --test daemon_client_pending
 
-      # 같은 패키지의 넷째 **통합** 타깃(`src-tauri/tests/daemon_client_replay.rs`) — 판정 사유는 위
-      # 세 스텝과 동일(통합 타깃은 정상 기립하고, 타깃 단위로 집어 `lib_unit` 을 통째로 안 끌어온다).
+      # 같은 패키지의 넷째 **통합** 타깃(`src-tauri/tests/daemon_client_replay.rs`) — 스텝을 따로 가르는
+      # 사유는 위 layout_apply 블록이 정본이다(실패한 스위트를 스텝 이름이 짚는다).
       # 재는 것은 replay single-flight 의 거절 배선이다:
       # 데몬이 Subscribe 를 거절하면 슬롯이 풀리고 병합된 다음 세대의 Subscribe 가 실제로 만들어진다
       # (안 풀리면 그 에이전트의 출력이 모든 창에서 영구 두절 — 실측 2026-08-19).
@@ -157,34 +190,37 @@ jobs:
         run: cargo test --locked -p engram-dashboard --test daemon_client_replay
 
       # 같은 패키지의 다섯째 타깃 — 위 넷과 달리 통합이 아니라 **단위** 스위트다
-      # (`[[test]] name = "lib_unit"`, `path = "src/lib.rs"`).
-      # ★스위트 전체가 아니라 이름 필터로 ts-rs export 8 건만 돈다★ — 나머지에는 알려진 실패가
-      #   남아 있어(선재 하네스 부패 — daemon_client 의 app:None 단락. 제품 결함 아님) 통째로 등재하면
-      #   이 잡이 빨개진다. 그 실패들을 고치면 그때 필터를 떼고 스위트 전체로 넓힌다.
-      # 필터가 `export_bindings_` 하나로 충분한 근거: ts-rs derive 가 `#[ts(export)]` 타입마다
-      #   `export_bindings_<타입명 소문자>` 테스트를 만들고, 이 패키지의 그 타입은 정확히 8 개
-      #   (`layout::types` 6 + `layout::spatial` 2)라 커밋된 `src-tauri/bindings/*.ts` 8 개와 1:1 이다.
-      #   실측 2026-08-24 → `8 passed; 0 failed; 0 ignored; 209 filtered out`.
+      # (`[[test]] name = "lib_unit"`, `path = "src/lib.rs"` → `src/**` 의 `#[cfg(test)]` 전부).
+      # ★2026-08-24: 이름 필터(`-- export_bindings_`)를 뗐다 — 스위트 전체가 돈다★
+      #   필터가 있던 사유(나머지에 알려진 실패 32 건 — daemon_client 의 app:None 단락이라는 선재 하네스
+      #   부패. 제품 결함 아님)는 그 32 건이 전부 고쳐지며 죽었다. **판정 = 실패 0 이어야 PASS다.**
+      #   ★기대 건수를 여기 박지 말 것★ — 테스트가 하나 늘 때마다 낡는다(이 자리에 있던 "217 건"·"8 건"이
+      #   실제로 그렇게 낡았다). 판정에 필요한 것은 실패 0 뿐이다.
       #
-      # ★이 스텝이 지키는 것은 바인딩만이 아니다 — 그 스위트를 서게 하는 다리 셋을 함께 지킨다★
+      # ★이 스텝이 지키는 것은 테스트 실행만이 아니다 — 그 스위트를 서게 하는 다리 셋 중 ②를
+      #   워크플로 전체에서 여기서만 잡는다★
       #   이 패키지의 lib 내장 유닛테스트 타깃은 manifest 리소스를 못 받아 로더 단계에서 0xC0000139
       #   (ENTRYPOINT_NOT_FOUND) 로 즉사했다. 지금 도는 이유는 셋이 함께 서 있어서다:
       #     ① `src-tauri/Cargo.toml` 의 `[lib] test = false`
       #     ② `src-tauri/Cargo.toml` 의 `[[test]] name = "lib_unit"` (kind=test 라야 `-tests` 가 닿는다)
       #     ③ `src-tauri/build.rs` 의 `cargo:rustc-link-arg-tests=<OUT_DIR 의 리소스 .lib>`
-      #   하나만 빠져도 **조용히** 무너진다 — ②를 지우면 217 건이 통째로 증발하고, ③을 지우면
-      #   0xC0000139 가 그대로 돌아온다. 어느 쪽이든 **이 스텝이 먼저 죽는다**: ② 부재 → cargo 가
-      #   "no test target named `lib_unit`" 로 실패, ③ 부재 → 테스트 exe 가 뜨기도 전에 죽는다.
-      #   즉 8 건을 돌리는 것 자체가 세 다리의 존재 증명이다. 위 통합 타깃 4 종은 이 축을 못 본다 —
-      #   그쪽은 원래부터 `-tests` 인자를 받고 있었고, 그래서 ②③이 사라져도 멀쩡히 초록이다.
+      #   하나만 빠져도 **조용히** 무너진다. 누가 무엇을 잡는지가 갈린다:
+      #     ② 부재 → 이 스텝이 "no test target named `lib_unit`" 로 실패한다. ★위 워크스페이스 회귀는
+      #        이걸 못 잡는다★ — 그쪽엔 스위트가 통째로 증발한 채 초록으로 남는다(침묵 ≠ 실패).
+      #     ① 부재 → 죽는 내장 타깃이 **기본 선택**으로 돌아와 위 워크스페이스 회귀가 0xC0000139 로
+      #        죽는다. 반대로 이 스텝은 그 타깃을 아예 안 고르므로 초록으로 남는다.
+      #     ③ 부재 → 테스트 exe 가 뜨기도 전에 죽는다(양쪽 다 빨개진다).
+      #   위 통합 타깃 4 종은 이 축을 못 본다 — 그쪽은 원래부터 `-tests` 인자를 받고 있었고, 그래서
+      #   ②③이 사라져도 멀쩡히 초록이다.
       #
-      # 바인딩 **대조**는 여기서 하지 않는다 — 아래 'Gate: ts-rs bindings …' 한 곳이 세 디렉터리를
-      #   모아서 본다(core 와 같은 모양: 재생성 스텝 따로, diff 게이트 하나). 그래서 이 스텝이 그
-      #   게이트보다 반드시 **앞**에 있어야 한다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — 이 8 건은 .ts 파일 쓰기뿐이라 자식 프로세스도 소켓도 없다.
-      - name: cargo test -p engram-dashboard --test lib_unit -- export_bindings_
+      # 이 스위트가 `src-tauri/bindings/*.ts` 를 다시 굽는다(ts-rs derive 가 `#[ts(export)]` 타입마다
+      #   만드는 `export_bindings_*` 가 그 안에 있다) — 그래서 이 스텝은 아래 'Gate: ts-rs bindings …'
+      #   보다 반드시 **앞**에 있어야 한다. 바인딩 **대조**는 여기서 하지 않는다: 그 게이트 한 곳이 세
+      #   디렉터리를 모아서 본다(core 와 같은 모양 — 재생성 스텝 따로, diff 게이트 하나).
+      # `-- --test-threads=4` 는 붙이지 않는다 — 이 스위트는 인메모리 하네스·소켓뿐이라 자식 프로세스가 없다.
+      - name: cargo test -p engram-dashboard --test lib_unit
         shell: bash
-        run: cargo test --locked -p engram-dashboard --test lib_unit -- export_bindings_
+        run: cargo test --locked -p engram-dashboard --test lib_unit
 
       # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
@@ -218,15 +254,14 @@ jobs:
       #   디렉터리를 인덱스에 **내용 없이** 등록해 두면, 그 다음 `git diff` 가 신규 파일도 "전체가
       #   추가된 diff"로 봐서 잡는다. 빈 blob 등록일 뿐 실제 스테이징이 아니므로 이후 커밋 내용에는
       #   영향이 없다.
-      # 셋째 생성물 디렉터리 `src-tauri/bindings/` 도 2026-08-24 부터 이 게이트에 든다(.ts 8 개) —
+      # 셋째 생성물 디렉터리 `src-tauri/bindings/` 도 2026-08-24 부터 이 게이트에 든다 —
       #   위 "생성 지점이 crate 마다로 흩어졌으므로 이 경로 목록도 함께 늘어난다" 가 가리키던 그 항목이다.
-      #   그 8 개를 쓰는 `export_bindings_*` 는 셸 패키지의 **단위** 스위트 타깃(`lib_unit`) 안에 산다.
-      # ★같은 자리에 있던 옛 주석("스위트에 알려진 실패 30 건이 남아 등재가 막혀 있으니 지금 이 목록에
-      #   더하지 말 것 — 순서 의존이지 누락이 아니다")은 틀렸다★ — 그 순서 의존은 **스위트를 통째로
-      #   돌리려 할 때만** 생긴다. 이 게이트가 요구하는 것은 스위트 등재가 아니라 **재생성**이고, 그건
-      #   이름 필터 한 줄로 된다. 위 `--test lib_unit -- export_bindings_` 스텝이 실패 건을 건드리지 않고
-      #   그 8 개만 돌려 재생성해 둔다. 즉 30 건이든 32 건이든 고치기 전에 오늘 닫히는 게이트였고,
-      #   그동안 이 디렉터리는 대조 없이 표류했다(이 게이트를 세운 변경이 실제로 drift 를 재생성해 냈다).
+      #   그것을 굽는 `export_bindings_*` 는 셸 패키지의 **단위** 스위트 타깃(`lib_unit`) 안에 살고,
+      #   이 잡에서 **두 번** 구워진다 — 워크스페이스 회귀(그 패키지 제외가 풀렸다)와 `--test lib_unit`
+      #   스텝. ★이 게이트는 재생성을 하지 않고 대조만 한다★ — 그래서 요구는 하나뿐이다: 굽는 스텝이
+      #   이 게이트보다 **앞**일 것(지금 둘 다 앞이다).
+      # ★이 디렉터리를 목록에서 빼지 말 것★ — 편입 전까지 여기는 대조 없이 표류했고, 편입한 변경이
+      #   실제로 drift 를 재생성해 냈다.
       # ★`-f` 를 빼지 말 것★: `git add` 는 무시된 경로를 조용히 건너뛰므로, 어느 crate 의 `.gitignore` 에
       #   `*.ts` 나 `bindings/` 같은 넓은 줄이 생기면 그 생성물이 인덱스에 안 올라가고 diff 가 깨끗해져
       #   **게이트가 소리 없이 해제된다**(지금은 세 디렉터리 다 무시 대상이 아니다 — 실측 2026-08-24).

@@ -17,6 +17,11 @@
 //! - **generation 가드(openGen 씨앗, Fix B)** — `lifecycle.rs`.
 
 pub mod connection;
+// ADR-0012: 연결 태스크가 프론트로 내는 emit 의 seam(실물 AppHandle / 기록형 가짜 / no-op). 이 seam 이
+// 없으면 이 모듈의 단위 하네스는 아예 서지 못한다 — 사유·계약 정본은 그 파일 헤더.
+// ★`pub(crate)` 인 것이 요점이다★: 이 포트의 유일한 소비자는 `run_connection`(그 자체가 `pub(crate)`)이고,
+//   밖에 열어 봐야 crate 밖에서 꽂을 자리가 없다 — 열어 두면 `AppHandle` 운반통이 lib 표면으로 새 나간다.
+pub(crate) mod events;
 // ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
 pub mod inbound;
 mod lifecycle;
@@ -33,6 +38,10 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 
 use connection::{run_connection, ConnectionCommand, HandshakeError, HANDSHAKE_TIMEOUT};
+use events::{ConnectionStateEvent, DaemonEvents, TauriEmitter};
+// 알림을 버리는 조립은 하네스 전용이다(`events::NoDaemonEvents` doc) — 운영 빌드엔 아예 없다.
+#[cfg(test)]
+use events::NoDaemonEvents;
 use inbound::InboundSlot;
 use lifecycle::Lifecycle;
 
@@ -112,9 +121,11 @@ pub struct DaemonClient {
     _owned_rt: Option<Arc<tokio::runtime::Runtime>>,
     // 데몬 발견 경계(connect=spawn 가능 / ensure=no-spawn).
     discovery: Arc<dyn DaemonDiscovery>,
-    /// ★emit 경로★. broadcast 이벤트를 app.emit 으로 전 webview 에 push 하는 AppHandle.
-    /// `None` = 테스트 생성자(emit 불필요). `Some` = 운영(`new_real_with_owned_runtime`).
-    app: Option<tauri::AppHandle>,
+    /// ★emit 경로(seam — ADR-0012)★. broadcast·연결 상태를 전 webview 로 내보내는 포트.
+    /// 운영 = `events::TauriEmitter`(실 `AppHandle`), 하네스 = `events::NoDaemonEvents`(no-op).
+    /// ★`Option` 이 아닌 것이 요점이다★ — 비어 있을 수 있는 emit 경로는 곧 "emit 을 못 하니 연결도 안
+    /// 띄운다"는 단락으로 자라고, 그 단락이 실제로 이 모듈 단위 스위트 전체를 죽였었다(↓ `start_connection`).
+    events: Arc<dyn DaemonEvents>,
     // 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
     // 락 아래서만(가드된 전이) — 그래야 "세대 체크 + watch send" 가 원자적이다. 이 rx 는 borrow 만.
     state_rx: watch::Receiver<ConnectionState>,
@@ -135,16 +146,49 @@ pub struct DaemonClient {
 impl DaemonClient {
     // 핸들만 만든다(연결은 connect/ensure 호출 시). `rt` 는 연결 task 를 띄울 런타임 핸들.
     // 핸드셰이크 상한은 운영 기본값(HANDSHAKE_TIMEOUT).
+    //
+    // ★emit 은 `NoDaemonEvents`(버림)로 조립된다★ — 연결·재연결·명령 왕복은 전부 실코드로 돌고 **프론트
+    // 알림만** 나가지 않는다. 운영 조립은 `new_real_with_owned_runtime`(실 `AppHandle`)이다.
+    //
+    // ## ★`#[cfg(test)]` 인 것이 요점이다(되돌리지 말 것)★
+    // 2026-08-24 이전 이 생성자는 `pub` 이고 `#[cfg(test)]` 도 아니었다. 그때는 그 조립이 **연결 태스크를
+    // 아예 안 띄워서**(↓ `start_connection` 의 옛 단락) 조용한 no-op 이었고, 단락을 지운 지금은 소켓·핸드셰이크
+    // ·명령 왕복이 전부 진짜로 도는 채 **화면만 갱신되지 않는다**. 프론트의 자가복구는 연결 상태만 메우고
+    // (`src/api/tauriTransport.ts` Fix-D) `agent-list-updated` 는 못 메우므로, 그런 클라이언트를 조립한
+    // 비테스트 호출자는 「연결은 됐는데 목록이 안 뜬다」를 만난다. 그래서 덫을 타입 밖으로 밀어냈다 —
+    // 알림을 버리는 조립은 이제 **테스트 빌드에만 존재한다**. 알림을 재고 싶으면 `new_with_events` 로 간다.
+    #[cfg(test)]
     pub fn new(rt: Handle, discovery: Arc<dyn DaemonDiscovery>) -> Self {
         Self::new_with_handshake_timeout(rt, discovery, HANDSHAKE_TIMEOUT)
     }
 
     // 핸드셰이크 상한을 주입하는 생성자(Fix A 테스트 용이성 — 테스트가 짧은 값으로 Timeout 을 검증).
     // const 하드코딩이 테스트를 10초 기다리게 만들지 않도록, 상한을 필드로 받는다.
+    #[cfg(test)]
     pub fn new_with_handshake_timeout(
         rt: Handle,
         discovery: Arc<dyn DaemonDiscovery>,
         handshake_timeout: Duration,
+    ) -> Self {
+        Self::new_with_events(rt, discovery, handshake_timeout, Arc::new(NoDaemonEvents))
+    }
+
+    /// ★알림 포트의 주입점 — 이 seam 이 검증을 사는 자리가 여기 하나다★(ADR-0012 ·
+    /// `inbound::InboundReceiver::with_view` 와 동형).
+    ///
+    /// 위 두 생성자는 `NoDaemonEvents` 를 꽂아 **발화를 버린다** — 그 조립만 있으면 11개 emit 은 영원히
+    /// 무검증으로 남는다(포트를 끊어 놓고 그 값을 안 사는 셈이다). 기록형 가짜를 여기로 넣으면 연결 태스크가
+    /// **무엇을 어떤 순서로** 알리는지를 실 소켓 왕복 위에서 단언할 수 있다 —
+    /// `tests.rs` 의 `recording_events_capture_connected_then_broadcasts` 가 그 첫 소비자다.
+    ///
+    /// ★`pub(crate)` 인 이유★: `DaemonEvents` 자체가 crate 안에서만 보이므로(`events` 모듈 주석) 이보다
+    /// 넓히면 lib 표면에 crate-private 타입이 새는 경고가 난다. crate 밖에서 꽂을 자리도 없다.
+    #[cfg(test)]
+    pub(crate) fn new_with_events(
+        rt: Handle,
+        discovery: Arc<dyn DaemonDiscovery>,
+        handshake_timeout: Duration,
+        events: Arc<dyn DaemonEvents>,
     ) -> Self {
         let (lifecycle, state_rx) = Lifecycle::new();
         Self {
@@ -160,11 +204,14 @@ impl DaemonClient {
             router: Arc::new(OutputRouter::new()),
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
-            // 테스트는 emit 불필요(no AppHandle 컨텍스트).
-            app: None,
+            events,
         }
     }
 
+    // 실 discovery + `NoDaemonEvents`. ★emit 없는 조립이라는 것이 `new` 와 같다★ — 운영 셸은 이걸 부르지
+    // 않는다(`lib.rs` = `new_real_with_owned_runtime`). ★`#[cfg(test)]` 사유는 `new` 와 같고, 실 discovery 를
+    // 함께 쥐는 만큼 이쪽이 더 위험했다★ — 진짜 데몬에 붙은 채 화면만 죽는 조립이었다.
+    #[cfg(test)]
     pub fn new_real(rt: Handle) -> Self {
         Self::new(rt, Arc::new(RealDiscovery))
     }
@@ -188,7 +235,7 @@ impl DaemonClient {
             router,
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
-            app: None,
+            events: Arc::new(NoDaemonEvents),
         }
     }
 
@@ -213,7 +260,7 @@ impl DaemonClient {
             router,
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
-            app: None,
+            events: Arc::new(NoDaemonEvents),
         }
     }
 
@@ -245,8 +292,8 @@ impl DaemonClient {
             router,
             registry,
             inbound: Arc::new(InboundSlot::new()),
-            // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로.
-            app: Some(app),
+            // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로(실물 어댑터).
+            events: Arc::new(TauriEmitter(app)),
         })
     }
 
@@ -323,14 +370,38 @@ impl DaemonClient {
             Ok(Err(e)) => {
                 tracing::warn!("데몬 발견/spawn 실패: {e}");
                 // 내가 올린 세대가 아직 current 면 Down 으로(가드된). 더 새 connect/close 가 끼었으면 미발행.
-                self.lifecycle
-                    .publish_if_current(my_gen, ConnectionState::Down);
+                // ★내부 전이만 접으면 창은 모른다★: 이 실패를 아는 것은 반환 `Err` 를 받는 그 호출자 하나뿐이고,
+                //   나머지 창은 **마지막으로 들은 발화**에 머문다. 진입의 `Connecting` 은 발화 어휘 자체가 없어
+                //   (`events::ConnectionStateEvent` 는 셋뿐) 그 자리를 못 메운다 — 끊김 뒤 재진입이면 마지막
+                //   발화가 `reconnecting` 인 채 굳고, 이 경로는 재연결 루프에도 들지 않아 아무도 재시도하지 않는다.
+                // ★가드는 그대로★: stale 이면 미발행 — 더 새 연결의 Connected 를 Down 으로 clobber 하지 않는다.
+                if self
+                    .lifecycle
+                    .publish_if_current(my_gen, ConnectionState::Down)
+                {
+                    self.events.connection_state(ConnectionStateEvent::Down);
+                } else {
+                    tracing::debug!(
+                        generation = my_gen,
+                        "발견/spawn 실패 — Down 미발행(더 새 연결이 current)"
+                    );
+                }
                 return Err(HandshakeError::Discovery(e));
             }
             Err(e) => {
                 tracing::warn!("데몬 discovery join 실패: {e}");
-                self.lifecycle
-                    .publish_if_current(my_gen, ConnectionState::Down);
+                // 발화를 짝지어야 하는 사유·가드는 위 분기와 같다(여기선 discovery 가 패닉해 join 이 깨진 경우).
+                if self
+                    .lifecycle
+                    .publish_if_current(my_gen, ConnectionState::Down)
+                {
+                    self.events.connection_state(ConnectionStateEvent::Down);
+                } else {
+                    tracing::debug!(
+                        generation = my_gen,
+                        "discovery join 실패 — Down 미발행(더 새 연결이 current)"
+                    );
+                }
                 return Err(HandshakeError::Discovery(format!("ensure join 실패: {e}")));
             }
         };
@@ -361,8 +432,20 @@ impl DaemonClient {
         let Some(info) = self.discovery.read_live() else {
             tracing::warn!("ensure 실패 — 살아있는 데몬 없음(no-spawn, connect 로만 복구)");
             // 내가 올린 세대가 current 면 Connecting 을 Down 으로 되돌린다(가드된).
-            self.lifecycle
-                .publish_if_current(my_gen, ConnectionState::Down);
+            // ★발화도 함께★: 사유는 `connect()` 의 발견/spawn 실패 분기와 같고, 이 경로는 그보다 더 조용하다 —
+            //   attach-only 라 연결 태스크를 아예 띄우지 않으므로 나중에 대신 알려 줄 발화자가 하나도 없다.
+            //   복구가 명시 `connect()` 뿐이라(ADR-0021) 화면이 굳으면 사용자가 그것을 누를 계기도 사라진다.
+            if self
+                .lifecycle
+                .publish_if_current(my_gen, ConnectionState::Down)
+            {
+                self.events.connection_state(ConnectionStateEvent::Down);
+            } else {
+                tracing::debug!(
+                    generation = my_gen,
+                    "ensure 실패 — Down 미발행(더 새 연결이 current)"
+                );
+            }
             return Err(HandshakeError::NoLiveDaemon);
         };
         self.start_connection(info, my_gen).await
@@ -394,32 +477,21 @@ impl DaemonClient {
         //   cmd_rx 로 들어오는 명령을 처리한다. 비의도 끊김 시 이 task 안에서 백오프 재연결을
         //   돈다(discovery.read_live no-spawn + rt.spawn_blocking). my_gen + lifecycle 핸들로
         //   stale task 가 공유 상태를 못 건드리게 한다(Fix B + reconnect_guard).
-        // ★emit 경로★: run_connection 은 `AppHandle`(Option 아님)을 받는다 — mock 이 어려워 테스트용
-        //   Option 화를 하지 않았다. 그래서 app=None(테스트 생성자)이면 연결 task 를 띄울 수 없다(↓ None 분기).
-        let app_handle = match self.app.clone() {
-            Some(a) => a,
-            None => {
-                tracing::warn!(
-                    "start_connection: app=None(테스트 맥락) — emit 없이 연결 task 를 spawn 할 수 없음. \
-                     테스트는 Tauri AppHandle 주입이 필요합니다(T7c 한계, 후속 작업)."
-                );
-                // ★이 단락이 `lib_unit` 단위 스위트의 알려진 실패 전부의 뿌리다 — 그 설명의 정본이 여기다★:
-                //   이 `Ok(())` 는 task 를 spawn 하지 않은 채 성공을 반환한다 → 소켓이 열리지 않고 상태가
-                //   Connecting 에 고착되는데, tests.rs 의 connect/ensure 테스트(app=None 생성자 —
-                //   `new`/`new_with_handshake_timeout`)는 `assert_eq!(state, Connected)` 를 단언한다. 그
-                //   단언들이 깨진다. 실패는 전부 `daemon_client::tests::` 안에 모인다.
-                //   ★운영 경로는 항상 app:Some(new_real_with_owned_runtime)이라 무영향★ — 이 분기는 테스트
-                //   맥락에서만 닿는다. 그래서 이것은 제품 결함이 아니라 하네스 부패이고, 단락 자체는 커밋
-                //   ffcd766(2026-07-01)부터 있던 선재 결함이다.
-                //   후보 수정 = run_connection 이 `Option<AppHandle>` 을 받아 emit no-op(connection.rs 동시성
-                //   영역 전반 + 다수 emit 지점 변경)이거나 test_app 주입. ★어느 모양으로 갈지는 사용자 결정
-                //   대기 중이다★ — 임의로 고르지 말 것. 남은 갭·결정권 = docs/tracking.md T-27(정식 ADR 은
-                //   수정 모양이 정해지면 박는다 — ADR-0174 는 스위트를 세운 방법이지 이 수정의 결정이 아니다).
-                //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목(박제).
-                //   ★수치·CI 등재 상태는 여기 적지 않는다★ — 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄.
-                return Ok(());
-            }
-        };
+        // ★emit 경로 = seam(ADR-0012)★: `run_connection` 은 `AppHandle` 대신 `events::DaemonEvents` 포트를
+        //   받는다. 그래서 **어느 조립이든 연결 task 는 무조건 뜬다** — 알림을 낼 곳이 없는 조립은
+        //   `NoDaemonEvents` 로 알림만 버리고 소켓·핸드셰이크·재연결·왕복은 전부 실코드로 돈다.
+        //
+        //   ## ★여기 있던 단락 이야기(되살리지 말 것)★
+        //   2026-08-24 이전 이 자리에는 `app: Option<AppHandle>` 이 `None` 이면 **task 를 안 띄운 채
+        //   `Ok(())` 를 돌려주는** 단락이 있었다(커밋 ffcd766, 2026-07-01 선재). 소켓이 안 열려 상태가
+        //   `Connecting` 에 고착하는데 호출자는 성공을 받는다 — `tests.rs` 의 connect/ensure 단언
+        //   (`assert_eq!(state, Connected)`)이 전부 그 하나에서 깨졌다(`lib_unit` 32건). 운영은 항상
+        //   `AppHandle` 을 쥐어 무영향이었지만, `new`/`new_real` 은 `pub` 이고 `#[cfg(test)]` 도 아니라
+        //   **미래의 비테스트 호출자도 조용한 no-op 성공을 받을 수 있는** 덫이었다. 그래서 단락을 지우고
+        //   emit 을 포트로 끊었다(`events.rs`) — 이제 `None` 상태 자체가 타입에 없다.
+        //   ★기록 위치★: docs/process/step-log.md "모듈① T7c Fix-C" 섹션 ② 항목. ADR-0174 는 이 스위트를
+        //   **세운 방법**이고, 이 seam 은 거기서 후속으로 남겨 둔 몫이다.
+        //   ★수치·CI 등재 상태는 여기 적지 않는다★ — 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄.
         self.rt.spawn(run_connection(
             info,
             my_gen,
@@ -436,7 +508,7 @@ impl DaemonClient {
             // ★T6b 출력 평면 주입★: 연결 task 가 frame fan-out 에 쓴다(재연결 task 수명 초월 공유 Arc).
             self.router.clone(),
             self.registry.clone(),
-            app_handle,
+            self.events.clone(),
             self.inbound.clone(),
         ));
 
@@ -464,6 +536,16 @@ impl DaemonClient {
                 //   이미 정확한 문구로 warn 을 남겼다(connection.rs). 여기서 또 찍으면 같은 실패가 warn 2줄 +
                 //   "reject" 로 오라벨된다 — 단일 출처 유지를 위해 caller 쪽은 무로깅으로 전파만 한다.
                 // current 일 때만 Down(stale 이면 더 새 연결의 상태를 clobber 하면 안 됨) — 원자 가드.
+                // ★이 분기만 발화를 붙이지 않는다 — 이미 나갔기 때문이다★: 이 `Err` 를 만드는 자리는
+                //   `run_connection` 의 핸드셰이크 실패 분기 하나뿐이고(`connection.rs` 의 `ready_tx.send(Err)`),
+                //   그 자리는 보고 직후 **같은 my_gen 으로** 가드된 Down 발화를 스스로 낸다. 여기서 또 내면
+                //   같은 실패가 창에 `down` 두 장으로 간다 — 프론트의 `setState` 는 같은 값이면 단락하지만
+                //   (`src/api/tauriTransport.ts`), 그 중복을 계약으로 박은 회귀망이 있다
+                //   (`tests.rs` 의 `failed_handshake_tells_every_window_down`). ★그 테스트가 개수를 세는
+                //   시점은 연결 태스크가 발화 포트를 놓은 뒤다★ — 그래서 "down 한 장" 은 먼저 도착한 하나를
+                //   본 스냅샷이 아니라 **두 발화자 몫을 합친 총량**이고, 여기에 한 장을 보태면 깨진다.
+                //   ★내부 전이는 그대로 둔다★ — 두 태스크의 순서가 뒤집혀 저쪽 가드가 stale 로 삼키는 창이
+                //   있고, 그때 watch 를 접는 것은 이쪽 몫이다(발행은 멱등이라 겹쳐도 무해).
                 self.lifecycle
                     .publish_if_current(my_gen, ConnectionState::Down);
                 Err(e)
@@ -478,10 +560,16 @@ impl DaemonClient {
                 //   없이 사라진 원인은 run_connection 의 가드 self-close *또는* stale task 의 panic 둘 다일 수
                 //   있으나(둘 다 false 분기로 귀결), 어느 쪽이든 이미 superseded 라 진단용 debug 로 충분하다.
                 //   Down 이 stale 이면 삼켜진다(clobber 방지 — connection.rs 의 main_loop 종료 Down 가드와 동형).
+                // ★발화가 붙는 쪽은 true 분기뿐이고, 그것이 이 분기의 갈림과 정확히 겹친다★: false(=stale)는
+                //   `run_connection` 의 가드 self-close 가 대부분이고 그때 화면의 주인은 더 새 세대다 — 그쪽이
+                //   자기 결말을 알린다. true 는 **아무도 알리지 못한 채 태스크가 사라진** 경우다(그 태스크는
+                //   `connected` 를 알리기 전에 죽었거나, 알린 직후 `ready_tx` 를 보내기 전에 죽었다). 어느
+                //   쪽이든 이 자리가 유일한 발화자라 여기서 내지 않으면 창은 마지막으로 들은 상태에 굳는다.
                 if self
                     .lifecycle
                     .publish_if_current(my_gen, ConnectionState::Down)
                 {
+                    self.events.connection_state(ConnectionStateEvent::Down);
                     tracing::warn!(
                         generation = my_gen,
                         "연결 task 가 ready 신호 전 사라짐(current 연결 — panic 추정)"
@@ -497,13 +585,106 @@ impl DaemonClient {
         }
     }
 
+    // ★핸들이 떨어지면 연결 태스크도 함께 접는다★ — `close()` 를 안 부르고 버려도 소켓·재연결 루프가
+    // 남지 않게.
+    //
+    // ## 왜 이게 없으면 안 접히나 — 송신단이 태스크 자신에게 걸려 있다
+    // 연결 태스크의 즉시 종료 신호는 **`cmd_rx` 의 EOF 하나뿐**이고(`connection::OutcomeSender` doc),
+    // 그 EOF 는 **강한 송신단이 전부 사라져야** 온다. 태스크가 받아 가는 송신단은 weak 이라 무해하지만
+    // (↑ `start_connection` 의 `downgrade()`), 강한 송신단은 `Lifecycle` 이 쥐고(`store_cmd_if_current`)
+    // 그 `Lifecycle` 을 `Arc` 로 **태스크 자신이 함께 쥔다**. 그래서 클라이언트 핸들만 떨어지면 고리가
+    // 스스로 닫혀 EOF 가 영영 오지 않는다. ★재연결 소진 상한(MAX_RECONNECT_ATTEMPTS)은 이 고리를 못
+    // 끊는다★ — 소켓이 멀쩡한 동안 `main_loop` 는 끊김 자체를 보지 않아 그 상한에 닿지도 않는다.
+    //
+    // ## ★이 자리가 비어 있어도 무해하던 시절이 있었다(되돌리지 말 것)★
+    // 2026-08-24 이전에는 창 없는 조립이 연결 태스크를 **아예 안 띄웠고**(↑ `new` 의 「단락 이야기」),
+    // 운영 조립은 앱 수명 내내 살아 drop 되지 않는다. 단락을 지워 **어느 조립이든 태스크가 뜨게 된**
+    // 지금은 그 우연한 무해함이 사라졌다 — 이 `Drop` 이 그 자리를 메운다.
+    //
+    // ## ★운영에서는 이 `Drop` 이 **한 번도 돌지 않는다** — 운영 종료 경로로 읽지 말 것★
+    // 운영 조립은 클라이언트를 되쥐는 강한 `Arc` 순환을 만든다: `lib.rs` 의 setup 이 클라이언트를
+    // `Arc` 로 세운 뒤 `commands::layout::command_ports` 에 **그 `Arc` 자신**을 넘겨 명령 표를 굽고
+    // (`layout::commands::make_table`), 그 표를 `install_command_table` 로 클라이언트 자신의
+    // `inbound: Arc<InboundSlot>` 에 꽂는다. 그래서 운영 클라이언트의 강한 참조수는 0으로 내려가지 않고
+    // 이 함수는 불리지 않는다 — 프로세스 수명과 같이 사는 싱글턴이 된다는 뜻이고, 오늘 이 앱에서는
+    // 그것이 결함이라기보다 **의도된 수명**에 가깝다(연결 핸들은 앱이 살아 있는 동안 계속 필요하다).
+    // ★따라서 이 `Drop` 은 운영 teardown 이 아니라 **비운영 조립의 안전망**이다★ — 하네스나 앞으로 생길
+    // 짧은 수명 조립이 `close()` 없이 핸들을 버려도 소켓·재연결 루프가 남지 않게 하는 것이 전부다.
+    // ★순환을 `Weak` 로 끊는 안은 여기서 하지 않는다★ — 살아 있는 명령 배달 경로의 배선을 갈아 끼우는
+    // 별건이고, 그 판단(싱글턴 수명을 유지할지)이 선행한다. ★끊는다면 아래 ③을 함께 재판정한다★ —
+    // 그 항은 이 순환에 얹혀 있어서, 순환이 사라지는 날 조용히 거짓이 된다.
+    //
+    // ## ★여기서는 발화하지 않는다 — 명시 `close()` 와의 이 비대칭은 의도다(맞추지 말 것)★
+    // 사유 셋이 겹친다.
+    // ① **전이가 일어났는지 모른다**: 이 경로가 부르는 `Lifecycle::close_best_effort` 는 락이 오염되면
+    //    아무것도 하지 않고 조용히 빠진다(그래서 세대도 안 돌려준다). 그 위에 무조건 발화를 얹으면 *안
+    //    일어난* 전이를 화면에 알린다.
+    // ② **소멸자는 패닉하면 안 된다**: 그 함수의 계약이 「절대 패닉하지 않는다」인데, 발화는 우리가 구현을
+    //    고르지 않는 포트(`events::DaemonEvents`) 너머의 외부 호출이다. unwinding 중이면 그 패닉이 프로세스를
+    //    abort 시킨다 — 소멸자에서 살 값이 아니다.
+    // ③ **알릴 상대가 없다** — ★이건 일반 성질이 아니라 ↑ `Arc` 순환의 **결과**다★: 그 순환이 클라이언트를
+    //    teardown 까지 살려 두는 덕에 운영에서 이 `Drop` 이 한 번도 돌지 않고, 실제로 도는 조립은 창이 없는
+    //    하네스뿐이다. 창이 있는 짧은 수명 조립이 생기더라도 그 다음 조립의 전이가 화면을 다시 채운다.
+    //    ★그러니 그 순환을 `Weak` 로 끊는 변경은 이 ③을 함께 뒤집는다★ — 그날부터 이 `Drop` 은 창이 살아
+    //    있는 운영 종료에서 돌고, 알릴 상대가 생긴다. 그때 ③을 다시 세우지 않으면 「연결은 끊겼는데
+    //    화면만 connected」라는 이 작업이 없애려던 결함이 이 자리로 되돌아온다(①②는 그대로 남는다 —
+    //    전이 확정 여부와 소멸자 패닉 금지는 순환과 무관하다).
+    // ★명시 `close()` 는 셋 다 해당 없다★ — 전이가 확정이고, 소멸자가 아니며, 알릴 창이 살아 있다.
+    fn close_on_drop(&self) {
+        self.lifecycle.close_best_effort();
+    }
+
     // 명시 종료(wsTransport `close()` 대응). 연결 task 에 종료를 알리고 Down 으로 전이한다.
     //
     // ★재연결 금지는 T4★: T2 는 명시 close 만. closedByUser 가드(명령/재연결이 respawn 안 하게)는
     // 백오프 재연결과 함께 T4 가 채운다.
+    //
+    // ## ★명시 종료도 전 webview 에 알린다 — 부른 창 하나만 아는 것으로는 모자란다★
+    // 이 연결은 **창이 몇 개든 하나**다(ADR-0036). 그래서 한 창이 닫으면 **모든 창의 연결이 끊긴다**.
+    // 그런데 그 사실을 스스로 아는 것은 부른 창뿐이다 — `src/api/tauriTransport.ts` 의 `close()` 는
+    // 리스너를 걷은(`cleanupListeners()`) **뒤에** 이 커맨드를 invoke 하고, 자기 `_state` 는 그 invoke 를
+    // 띄운 **뒤에** `'down'` 으로 세운다. 나머지
+    // 창은 마지막으로 들은 발화(`connected`)에 굳은 채 죽은 연결에 출력 채널을 걸고 앉는다. 프론트의
+    // 연결 상태 자가복구는 리로드 시 pull 1회뿐이라(같은 파일 `selfHeal`) 살아 있는 창은 영영 못 깨어나고,
+    // 복구 경로는 명시 `connect()` 뿐인데(ADR-0021) 화면이 연결됨으로 보이면 그것을 누를 계기도 없다.
+    // ★연결 태스크가 대신 알려 주지 못한다★: 그 태스크는 `cmd_rx` EOF 로 종료하며 자기 Down 을 내려
+    // 하지만, 이 함수가 **이미 세대를 올렸으므로** 그 발행은 stale 로 삼켜진다(`connection.rs` 의
+    // `LoopExit::Closed` 분기) — 발화자가 아무도 남지 않는다. 그래서 여기가 유일한 자리다.
+    //
+    // ★발화가 락 밖인 것이 요점이다★(ADR-0006 — 락 보유 중 외부 호출 금지): `lifecycle.close()` 는 자기
+    // 락을 잡았다 **반환하면서 풀고**, 세운 세대를 돌려준다. 발화는 그 뒤다. 그리고 그 세대로 한 번 더
+    // 가드한다 — 반환~발화 사이에 승계 connect 가 끼면 화면의 주인은 더 새 세대이고, 뒤늦은 `down` 은 그
+    // 주인의 `connected` 를 덮는다. 그때는 미발화가 옳다(그 세대가 자기 결말을 스스로 알린다).
+    // ★그 재확인은 `is_current` 이지 `publish_if_current` 가 아니다★ — watch 의 `Down` 은 `lifecycle.close()`
+    // 가 자기 락 안에서 **이미 실었다**. 여기서 또 발행하면 한 번의 close 가 구독자에게 변경 두 번으로
+    // 보인다. 이 자리에 남은 물음은 「발화할까」뿐이다(사유 정본 = `lifecycle::Lifecycle::is_current`).
+    // ★이중 보고 아님★: 부른 창은 `daemon_close` 를 invoke 하기 **전에** 자기 control 핸들러를 뗀다
+    // (`src/api/tauriTransport.ts` `close()` → `cleanupListeners()`, invoke 보다 앞). 떼는 일의 웹뷰 쪽
+    // 절반은 동기라(`@tauri-apps/api` 의 `_unlisten` 이 자기 await 보다 **먼저** JS 핸들러를 지운다) 그
+    // 발화는 대개 닿지도 않는다. 그 창의 `_state='down'` 은 invoke 를 **띄운 뒤에** 세워지지만 그 순서는
+    // 무해하다 — 닿더라도 같은 값이라 프론트 `setState` 가 단락한다. 그러니 이 발화가 처음부터 노리는
+    // 것은 **나머지 창**이다.
+    //
+    // ## ★가드와 발화는 원자가 아니다 — 여기서 고치지 않는다(구조적 잔여)★
+    // `is_current` 가 true 를 돌려준 뒤 아래 발화가 실행되기 전에, 세대 g+1 의 승계 `connect()` 가 끝까지
+    // 달려 `connected` 를 먼저 낼 수 있다. 그러면 뒤늦은 이 `down` 이 그 화면을 덮는다 — 이 가드가 없애려던
+    // 바로 그 낡은 화면이다. ★가드를 원자성으로 읽지 말 것★.
+    // ★새로운 종류는 아니다★: `connection.rs` 의 가드된 발화 자리들이 같은 모양을 이미 갖는다. 다만
+    // close→connect 는 사용자가 늘 하는 차례라 이 자리가 그중 가장 노출돼 있다.
+    // ★국소 땜질로 닫히지 않는다★: 락 안에서 발화하면 ADR-0006 을 깬다. 순서를 세우려면 **락 아래서 밀어
+    // 넣고 단일 소비자가 빼는 발화 큐**를 두거나, 발화에 세대를 실어 프론트가 정렬하게 해야 한다 — 둘 다
+    // 이 자리 하나로 끝나지 않으므로 별건이다.
     pub fn close(&self) {
         tracing::info!("데몬 연결 명시 종료(close)");
-        self.lifecycle.close();
+        let my_gen = self.lifecycle.close();
+        if self.lifecycle.is_current(my_gen) {
+            self.events.connection_state(ConnectionStateEvent::Down);
+        } else {
+            tracing::debug!(
+                generation = my_gen,
+                "명시 종료 — Down 미발화(더 새 연결이 current · watch 전이는 이미 실렸다)"
+            );
+        }
     }
 
     // ── T6a: invoke 명령 request/reply 평면(spawn/kill/interrupt/write/resize/…) ─────────
@@ -590,8 +771,8 @@ impl DaemonClient {
         //   RecvError → Err 로 귀결한다(gen 을 잘못 반환하지 않음). 정상 경로는 actor 가 `reply.send(gen)` 으로
         //   gen 을 넣어 Ok(gen).
         // ★이 Err 경로를 실제로 태우는 테스트는 없다(정직 표기)★: 끊는 결정은 `main_loop` 의 select 팔
-        //   안이고 그 자리는 실 소켓 없이 못 세운다 — 이 패키지의 lib 테스트 타깃도 이 환경에선 실행
-        //   불가다(WebView2 DLL 로더). 코어의
+        //   안이고, 그 자리를 태우려면 **송신이 실패하는 실 소켓**이 있어야 한다 — 루프백 WS 하네스
+        //   (`tests.rs`)는 그 select 팔 자체는 돌리지만 송신 실패를 만들어 내지는 않는다. 코어의
         //   `send_failure_path_clears_via_disconnect_and_next_request_sends` 는 **`on_disconnect` 가
         //   슬롯을 비우고 다음 요청이 다시 나간다**만 재고, 송신 실패에서 그 `on_disconnect` 까지 가는
         //   구간은 안 탄다.
@@ -629,6 +810,29 @@ impl DaemonClient {
     // 없다 — ADR-0046 이후 진도 거처는 웹뷰 뷰 단위(프론트 lastDeliveredSeq) 단독이고, src-tauri 상태는
     // 요청 부기(epoch·single-flight replay_flight)뿐이다. binary frame 라우팅은 connection.rs 가 OutputRouter
     // (targets∩registered 창 Channel)로, replay 경계 마커 합성은 replay_flight 상태기계가 담당한다.
+}
+
+// 연결 태스크를 접는 사유·불변식은 [`DaemonClient::close_on_drop`] 이 단독 소유한다 — 여기 다시 적지 않는다.
+impl Drop for DaemonClient {
+    fn drop(&mut self) {
+        self.close_on_drop();
+        // ★전용 런타임은 여기서 **비블로킹으로** 접는다★ — 이 함수 본문이 끝나면 필드들이 이어서 drop
+        //   되고, 그중 [`Self::_owned_rt`] 는 tokio `Runtime` 이다. `Runtime` 의 기본 drop 은 워커가 멈출
+        //   때까지 블로킹하는데, **async 컨텍스트 안에서 그 drop 이 일어나면 tokio 가 패닉한다**. `Drop`
+        //   안의 패닉은 unwinding 중이면 프로세스를 abort 시킨다 — 진단 없이 죽는 결말이다.
+        //   `shutdown_background` 는 워커를 detach 해 즉시 돌아오므로 어느 컨텍스트에서든 같은 값을 낸다.
+        //   소멸자가 원하는 것이 정확히 그것이다(기다리지 않음 + 패닉 없음).
+        // ★"오늘은 못 닿는다"에 이걸 걸지 않는다★: 지금 이 자리가 그 조합에 닿을 길은 없다 — 테스트
+        //   생성자는 전부 `_owned_rt: None` 이고, 운영 클라이언트는 ↑ `close_on_drop` 이 적은 `Arc` 순환
+        //   때문에 애초에 drop 되지 않는다. 그러나 그 무해함은 **우연이지 구조가 아니다**(런타임을 소유하는
+        //   생성자가 하나만 늘거나, 순환이 끊기면 그날로 사라진다). 그래서 구조로 막아 둔다.
+        // ★마지막 참조일 때만 접는다★ — `Arc` 가 남아 있으면 다른 소유자가 그 런타임을 아직 쓰는 중이다.
+        if let Some(rt) = self._owned_rt.take() {
+            if let Ok(rt) = Arc::try_unwrap(rt) {
+                rt.shutdown_background();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -140,6 +140,20 @@ impl Lifecycle {
         }
     }
 
+    // ★판정만 하는 형제 — 발행하지 않는다★: `generation == my_gen` 인지만 보고 돌려준다.
+    //
+    // ★왜 `publish_if_current` 로 대신하면 안 되나★: 전이를 **이미 발행한** 자리(`close_locked` 의 Down)가
+    // 락 밖 발화 직전에 세대만 재확인할 때, 그것으로 대신하면 같은 종료가 watch 에 **두 번** 실린다.
+    // tokio `watch` 는 값이 같아도 버전을 올리므로(값 비교는 `send_if_modified` 몫), 두 send 사이에 깨어
+    // 있던 구독자는 종료 한 번을 `changed()` 두 번으로 본다. 이 자리에 남아 있는 물음은 「발행할까」가
+    // 아니라 「발화할까」뿐이므로, 그 물음만 답하는 연산을 따로 둔다.
+    //
+    // ★불변식★: 락은 이 호출 안에서 잡았다 푼다 — 반환 뒤의 발화는 락 밖 외부 호출이다(ADR-0006).
+    // 비교는 일치/불일치만(ADR-0163 — 대소로 "더 새 것" 을 유도하지 않는다).
+    pub(crate) fn is_current(&self, my_gen: u64) -> bool {
+        self.inner.lock().expect("lifecycle poisoned").generation == my_gen
+    }
+
     // ★가드된 cmd_tx 저장★: current 일 때만 sender 를 저장한다. stale 이면 저장하지 않고 false 를
     // 돌려준다 → 호출자가 sender 를 drop(연결 task 의 cmd_rx EOF → 정리)해야 한다.
     pub(crate) fn store_cmd_if_current(
@@ -164,8 +178,48 @@ impl Lifecycle {
     // 즉시 멈춘다(끊김 재연결 금지 — wsTransport `close()` 의 `closedByUser=true` 와 동형). bump 로 인한
     // stale 화만으론 "끊김→재연결 루프가 새 my_gen 으로 다시 진입" 같은 경로를 못 막을 수 있어, 의도
     // 플래그를 함께 둬 명시 종료를 영구히 식별한다.
-    pub(crate) fn close(&self) {
-        let mut g = self.inner.lock().expect("lifecycle poisoned");
+    //
+    // ## ★반환값 = 이 close 가 세운 세대★
+    // 이 모듈은 프론트 발화 포트를 **들지 않는다** — 그 호출은 락 보유 중 외부 호출이 되어 ADR-0006 을
+    // 깬다(헤더 「락을 .await across 보유 금지」와 같은 이유로, 이 락 안에서는 우리 코드만 돈다).
+    // 그래서 발화는 호출자가 이 함수가 반환한 **뒤에**(= guard 가 풀린 뒤에) 낸다. 다만 그 발화에는
+    // 위 watch 전이와 달리 가드가 필요하다: 반환 직후~발화 사이에 승계 connect 가 세대를 올리면 화면의
+    // 주인은 더 새 세대이고, 그때 뒤늦은 `down` 은 그 주인의 `connected` 를 덮어쓴다. 그 재확인
+    // ([`Self::is_current`])의 키가 이 반환값이다.
+    //
+    // ★재확인은 **판정**이지 발행이 아니다★ — `Down` 은 위 한 락 안에서 이미 watch 에 실렸다. 그 자리에
+    // `publish_if_current` 를 쓰면 한 번의 close 가 watch 에 두 장으로 실린다(그 사유의 정본 =
+    // [`Self::is_current`]).
+    pub(crate) fn close(&self) -> u64 {
+        Self::close_locked(&mut self.inner.lock().expect("lifecycle poisoned"))
+    }
+
+    // `DaemonClient` 의 `Drop` 전용 — ★**이 함수는** 절대 패닉하지 않는다★.
+    //
+    // `Drop` 안의 패닉은 unwinding 중이면 프로세스를 abort 시킨다. 이 락의 critical section 은 순수 동기
+    // 코드뿐이라(위 헤더) 오염될 일이 사실상 없지만, "사실상 없다"에 abort 를 걸지는 않는다 — 오염된
+    // 락은 조용히 포기한다. 그 경우엔 이미 다른 패닉이 진행 중이고, 연결 task 는 런타임 종료가 거둔다.
+    //
+    // ★그 보증이 덮는 것은 `Drop` 경로의 **절반**뿐이다★ — 나머지 절반은 이 호출이 끝난 **뒤에 이어지는
+    // 필드 drop** 이고, 거기에는 전용 tokio 런타임(`DaemonClient::_owned_rt`)이 들어 있다. 런타임을 async
+    // 컨텍스트 안에서 drop 하면 tokio 가 패닉하는데, 이 함수는 그쪽을 **막지 못한다**(막을 자리가 아니다).
+    // 그 절반은 `DaemonClient` 의 `Drop` 본문이 런타임을 직접 꺼내 `shutdown_background` 로 접어 막는다 —
+    // 설명의 정본은 그 자리 주석이다. 여기서 "Drop 경로가 패닉하지 않는다"를 통째로 읽지 말 것.
+    //
+    // ★이 경로는 세대를 **돌려주지 않는다**(명시 `close` 와 갈리는 지점)★ — 락이 오염되면 전이 자체가
+    // 일어나지 않으므로 돌려줄 세대가 없고, 없는 것을 있는 척 돌려주면 호출자가 *안 일어난* 전이를 화면에
+    // 알린다. 그 갈림의 결말(Drop 경로는 발화하지 않는다)은 [`super::DaemonClient::close_on_drop`] 이
+    // 소유한다 — 여기 다시 적지 않는다.
+    pub(crate) fn close_best_effort(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            Self::close_locked(&mut g);
+        }
+    }
+
+    // close 의 본체 — 두 진입점(명시 close / Drop)이 **같은 전이**를 하도록 한 곳에 둔다. 갈라 적으면
+    // 한쪽만 cancel 을 쏘거나 한쪽만 closed_by_user 를 세우는 어긋남이 조용히 생긴다.
+    // 반환 = 이 전이가 세운 세대(락 밖 발화 가드의 키 — `close` 주석).
+    fn close_locked(g: &mut LifecycleInner) -> u64 {
         g.generation += 1;
         g.cmd_tx = None;
         g.closed_by_user = true;
@@ -173,6 +227,7 @@ impl Lifecycle {
         //   reconnect_guard 동기 체크에 닿기 전에 그 await(예: connect_async)가 완료돼 소켓이 열린다.
         let _ = g.cancel_tx.send(g.generation);
         let _ = g.state_tx.send(ConnectionState::Down);
+        g.generation
     }
 
     // ★재연결 루프 1틱 가드(T4)★: 재연결 task 가 매 백오프/시도 전에 호출한다. `generation == my_gen`

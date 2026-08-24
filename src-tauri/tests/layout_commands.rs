@@ -1127,10 +1127,14 @@ async fn a_slow_handler_does_not_stall_the_read_loop() {
 // 지우면 이 테스트들은 컴파일되지 않는다.
 //
 // ## ★그래도 안 덮이는 것(잔여 목록 — 이 자리가 정본)★
-// - **select arm 의 갈래 선택**(`connection.rs` 의 `else if let AgentEvent::CommandRequest`) — 그 루프는 실
-//   `WebSocketStream` 과 실 `AppHandle` 을 요구한다. 게다가 `connection.rs` 에는 `#[cfg(test)]` 블록이
-//   **하나도 없어서**(단위 스위트가 2026-08-24부터 돌게 된 뒤에도 그 파일엔 담을 것이 없다) 그 파일의 코드
-//   커버는 전부 이 파일이 진다.
+// - **select arm 의 갈래 선택**(`connection.rs` 의 `else if let AgentEvent::CommandRequest`) — 그 루프는
+//   **실 소켓을 요구한다**. ★그것은 불가능이 아니라 비용이다★ — 같은 패키지의 `src/daemon_client/tests.rs`
+//   가 루프백 WS 를 세워 `run_connection`→`main_loop` 를 실제로 돌린다(`recording_events_capture_connected_then_broadcasts`).
+//   그러니 이 갈래가 무커버인 것은 「태울 수 없어서」가 아니라, 갈래 하나를 재려고 매번 소켓·핸드셰이크를
+//   세우는 값이 비싸서다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도다.
+//   ★2026-08-24 전에는 이 자리에 「실 `AppHandle` 도 함께 요구한다」·「`connection.rs` 의 코드 커버는 전부
+//   이 파일이 진다」고 적혀 있었다★ — 앞은 emit 이 포트로 끊기면서(`src/daemon_client/events.rs`) 그 파일이
+//   `AppHandle` 을 이름으로도 모르게 돼 사라졌고, 뒤는 그 단위 스위트가 같은 루프를 태우기 시작하면서 낡았다.
 // - **sink 로의 실제 소켓 쓰기**(`send_fire` 의 직렬화·전송 실패 갈래 포함).
 // - **`register_own_commands` 의 전송부**(pending 슬롯 · 결말 로그) — 실리는 내용물은 `registration_command`
 //   테스트가 덮는다.
