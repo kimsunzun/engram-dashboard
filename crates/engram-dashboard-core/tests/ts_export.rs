@@ -3,7 +3,11 @@
 //! ★명시적 export 다(암묵 derive 테스트에 기대지 않는다)★: ts-rs 는 `#[ts(export)]` 타입마다
 //!   `export_bindings_<타입>` 테스트를 자동으로 만드는데, `src-tauri/bindings/` 가 그 암묵 경로에 기댔다가
 //!   로컬(`0xc0000139`)에서도 CI(패키지 제외)에서도 **한 번도 돌지 않는** 손관리 생성물이 됐다(TRD §5 실측).
-//!   여기서는 protocol 의 `tests/ts_export.rs` 와 같은 형태로 export 를 직접 부른다.
+//!   ★2026-08-24 갱신★: 로컬 쪽은 풀렸다 — `--test lib_unit` 이 서면서 그 암묵 테스트들이 돌고
+//!   `src-tauri/bindings/` 는 그 스위트를 돌 때마다 자동 재생성된다. **CI 쪽은 그대로 막혀 있고**(그 스위트
+//!   미등재 · 알려진 실패 30건 대기) **그 디렉터리를 보는 동기 게이트도 아직 없다**. 그래서 암묵 경로에
+//!   기대지 않는다는 이 파일의 방침은 유지한다 — 여기서는 protocol 의 `tests/ts_export.rs` 와 같은 형태로
+//!   export 를 직접 부른다.
 //! ★생성물은 커밋한다★ — CI 의 diff 게이트가 이 디렉토리를 봐야 어휘 drift 를 잡는다.
 
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};

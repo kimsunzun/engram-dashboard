@@ -38,8 +38,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-use tauri::Emitter;
-
+// ADR-0012: 프론트 알림은 포트로만 나간다 — 이 파일은 실 `AppHandle` 을 이름으로도 알지 못한다.
+//   그 덕에 이 태스크는 소켓만 있으면 서고, 하네스가 핸드셰이크·재연결·왕복을 실코드로 잰다.
+use super::events::{ConnectionStateEvent, DaemonEvents};
 use super::inbound::{InboundReceiver, InboundSlot};
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
 use super::protocol_state::{self, EpochDecision, PendingMap, SubState};
@@ -231,9 +232,10 @@ pub(crate) async fn run_connection(
     //   디코드해 router.targets 로 라우팅하고 registry 의 각 창 Channel 로 fan-out 한다.
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
-    // ★T7c: 데몬 broadcast 이벤트를 프론트로 내보내는 AppHandle(emit 경로).
-    //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 app.emit 로 전 webview 에 push.
-    app: tauri::AppHandle,
+    // ★T7c: 데몬 broadcast 이벤트를 프론트로 내보내는 포트(emit 경로 — ADR-0012 seam).
+    //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 전 webview 에 push 한다.
+    //   실물은 `events::TauriEmitter`, 창 없는 조립은 `events::NoDaemonEvents`(버림).
+    events: Arc<dyn DaemonEvents>,
     // ADR-0155 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
     inbound: Arc<InboundSlot>,
 ) {
@@ -256,7 +258,7 @@ pub(crate) async fn run_connection(
                 "데몬 WS 연결 수립(Hello 수신, 인증 성공)"
             );
             // ★T7c★: 첫 connected 전이를 프론트에 push.
-            let _ = app.emit("daemon-connection-state", "connected");
+            events.connection_state(ConnectionStateEvent::Connected);
             if ready_tx.send(Ok(())).is_err() {
                 // 호출자(connect await)가 사라짐 → 정리 종료.
                 tracing::debug!(
@@ -264,7 +266,18 @@ pub(crate) async fn run_connection(
                     "연결 수립 후 호출자 사라짐(ready 수신자 drop) — 정리 종료"
                 );
                 let _ = conn.sink_close().await;
-                lifecycle.publish_if_current(my_gen, ConnectionState::Down);
+                // ★Connected 를 이미 알린 뒤라 Down 도 반드시 알린다★: 내부 상태만 접으면 전 webview 가
+                //   connected 로 굳은 채 죽은 연결에 출력 채널을 걸고 앉는다 — 프론트의 연결 상태 자가복구는
+                //   리로드 시 pull 1회뿐이라(`tauriTransport.ts` selfHeal) 살아 있는 창은 영영 못 깨어난다.
+                // ★가드는 그대로★: stale 이면 미발행 — 더 새 연결의 Connected 를 Down 으로 clobber 하지 않는다.
+                if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                    events.connection_state(ConnectionStateEvent::Down);
+                } else {
+                    tracing::debug!(
+                        generation = my_gen,
+                        "호출자 소멸 정리 — Down 미발행(더 새 연결이 current)"
+                    );
+                }
                 return;
             }
             conn.into_split()
@@ -274,7 +287,17 @@ pub(crate) async fn run_connection(
             tracing::warn!(generation = my_gen, "데몬 WS 핸드셰이크 실패: {e}");
             let _ = ready_tx.send(Err(e));
             // ★원자 가드★ stale 이면 Down 미송신(current 의 Connected clobber 방지).
-            lifecycle.publish_if_current(my_gen, ConnectionState::Down);
+            // ★실패도 알린다★: 이 실패를 아는 것은 `ready_tx` 를 받은 그 호출자 하나뿐이고, 나머지 창은
+            //   마지막으로 들은 상태에 머문다 — 끊김 뒤 재진입(직전 발화가 `reconnecting`)이면 아무도
+            //   재시도하지 않는데 화면만 재연결 중으로 굳는다(첫 핸드셰이크 실패는 재연결 루프에 못 든다).
+            if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
+                events.connection_state(ConnectionStateEvent::Down);
+            } else {
+                tracing::debug!(
+                    generation = my_gen,
+                    "핸드셰이크 실패 — Down 미발행(더 새 연결이 current)"
+                );
+            }
             return;
         }
     };
@@ -297,7 +320,7 @@ pub(crate) async fn run_connection(
         cancel_rx,
         router,
         registry,
-        app,
+        events,
         inbound,
     )
     .await;
@@ -546,7 +569,7 @@ async fn connected_lifetime(
     mut cancel_rx: tokio::sync::watch::Receiver<u64>,
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
-    app: tauri::AppHandle,
+    events: Arc<dyn DaemonEvents>,
     inbound: Arc<InboundSlot>,
 ) {
     // ★pending 소유(T6a — 단일 actor 가 단독 소유, Mutex 없음)★: request_id → reply oneshot 상관 맵을
@@ -581,7 +604,7 @@ async fn connected_lifetime(
             my_gen,
             &router,
             &registry,
-            &app,
+            events.as_ref(),
             &inbound,
         )
         .await;
@@ -636,7 +659,7 @@ async fn connected_lifetime(
                 // ★원자 가드(Fix B)★: stale task 의 종료가 current 의 Connected 를 Down 으로 clobber
                 //    하지 않게 publish_if_current 로 비교+send 를 한 락에 묶는다.
                 if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                    let _ = app.emit("daemon-connection-state", "down");
+                    events.connection_state(ConnectionStateEvent::Down);
                 } else {
                     tracing::debug!(
                         generation = my_gen,
@@ -650,7 +673,7 @@ async fn connected_lifetime(
                 // 들어왔으면 재연결 금지). Stop 이면 종료 Down 가드.
                 if lifecycle.reconnect_guard(my_gen) == ReconnectVerdict::Stop {
                     if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                        let _ = app.emit("daemon-connection-state", "down");
+                        events.connection_state(ConnectionStateEvent::Down);
                     } else {
                         tracing::debug!(
                             generation = my_gen,
@@ -661,7 +684,7 @@ async fn connected_lifetime(
                 }
                 // 재연결 진입 — reconnecting 전이(가드된). stale 이면 발행 안 되고 아래 루프가 Stop 으로 종료.
                 if lifecycle.publish_if_current(my_gen, ConnectionState::Reconnecting) {
-                    let _ = app.emit("daemon-connection-state", "reconnecting");
+                    events.connection_state(ConnectionStateEvent::Reconnecting);
                 }
                 tracing::info!(generation = my_gen, "데몬 끊김 — 재연결 루프 진입");
             }
@@ -773,7 +796,7 @@ async fn connected_lifetime(
                         let _ = conn.sink_close().await;
                         break None;
                     }
-                    let _ = app.emit("daemon-connection-state", "connected");
+                    events.connection_state(ConnectionStateEvent::Connected);
                     // 회복 — attempt 리셋(wsTransport `reconnectAttempt=0` on Hello). 다음 끊김은 처음부터.
                     attempt = 0;
                     tracing::info!(generation = my_gen, "데몬 재연결 성공(Hello 수신)");
@@ -797,7 +820,7 @@ async fn connected_lifetime(
             None => {
                 // 소진 또는 Stop(close/stale) → Down 가드 후 종료.
                 if lifecycle.publish_if_current(my_gen, ConnectionState::Down) {
-                    let _ = app.emit("daemon-connection-state", "down");
+                    events.connection_state(ConnectionStateEvent::Down);
                 } else {
                     tracing::debug!(
                         generation = my_gen,
@@ -833,7 +856,7 @@ async fn main_loop(
     my_gen: u64,
     router: &Arc<OutputRouter>,
     registry: &WindowChannelRegistry,
-    app: &tauri::AppHandle,
+    events: &dyn DaemonEvents,
     inbound: &Arc<InboundSlot>,
 ) -> LoopExit {
     // ★진행 기반 deadline sweep tick(ADR-0046)★: single-flight in-flight 의 무진행 만료를 이 주기로 훑는다.
@@ -864,7 +887,7 @@ async fn main_loop(
                         match msg {
                             Message::Text(text) => {
                                 // 데몬 control 이벤트. reply(request_id echo) 면 pending 매칭→resolve.
-                                //   broadcast(request_id 없음)는 매칭 우회 — app.emit 으로 전 webview 에
+                                //   broadcast(request_id 없음)는 매칭 우회 — 알림 포트로 전 webview 에
                                 //   push 한다(아래 emit_broadcast, else 분기).
                                 // 파싱 실패는 무시(데몬은 valid JSON 만 보낸다 — 부분/미래 프레임 방어).
                                 if let Ok(ev) = serde_json::from_str::<AgentEvent>(&text) {
@@ -886,9 +909,9 @@ async fn main_loop(
                                         }
                                     } else {
                                         // ★replay 3종(Ack·Complete·거절)은 **한 함수**가 해석한다★ — 여기서
-                                        //   갈래를 펼치면 그 갈래가 소켓 없이 태울 수 없어 통째로 무검증이
-                                        //   된다(그게 거절 팔에 실제로 났던 일이다). 이 줄이 하는 일은
-                                        //   창으로의 배달구를 꽂아 넘기는 것뿐이다.
+                                        //   갈래를 펼치면 그 갈래는 소켓 하네스에서만 돌 수 있어 실제로는
+                                        //   아무도 안 태운다(그게 거절 팔에 실제로 났던 일이다). 이 줄이
+                                        //   하는 일은 창으로의 배달구를 꽂아 넘기는 것뿐이다.
                                         let mut deliver =
                                             |labels: &[WindowLabel], bytes: &[u8]| {
                                                 output_channel::send_to_windows(
@@ -942,10 +965,10 @@ async fn main_loop(
                                                         envelope,
                                                     );
                                                 } else {
-                                                    // ★T7c: request_id 없는 broadcast 를 app.emit 으로 전
-                                                    //   webview push. Err 는 무시(webview 없음/채널 오류 등은
-                                                    //   치명적이지 않다).
-                                                    emit_broadcast(app, &ev);
+                                                    // ★T7c: request_id 없는 broadcast 를 알림 포트로 전
+                                                    //   webview push. 실패는 포트 구현이 삼킨다(webview
+                                                    //   없음/채널 오류 등은 치명적이지 않다).
+                                                    emit_broadcast(events, &ev);
                                                 }
                                             }
                                         }
@@ -1143,47 +1166,39 @@ async fn main_loop(
     exit
 }
 
-// ★T7c: broadcast 이벤트(request_id 없음) → app.emit 으로 전 webview push.★
+// ★T7c: broadcast 이벤트(request_id 없음) → 알림 포트로 전 webview push.★
 //
-// AgentListUpdated / StatusChanged / RestoreResult / ProfileListUpdated 에 대응하는 Tauri 이벤트를
-// 발행한다. 그 외 variant(Ack·SubscribeAck·Output·ReplayComplete·AgentList/ProfileList/Snapshot 등)는
-// request_id 있거나 Binary 평면이거나 내부 소비라 emit 대상이 아니다 → 조용히 no-op.
-// Err 무시(webview 없음·채널 오류는 치명적이지 않음).
-fn emit_broadcast(app: &tauri::AppHandle, ev: &AgentEvent) {
+// AgentListUpdated / StatusChanged / RestoreResult / ProfileListUpdated 에 대응하는 알림을 낸다. 그 외
+// variant(Ack·SubscribeAck·Output·ReplayComplete·AgentList/ProfileList/Snapshot 등)는 request_id 있거나
+// Binary 평면이거나 내부 소비라 emit 대상이 아니다 → 조용히 no-op.
+//
+// ★이 함수가 포트 뒤로 안 들어간 이유★: **어느 variant 가 알림 대상인가**는 연결 태스크의 판정이지
+// 전송 어댑터의 판정이 아니다. 아래 `Error` 팔은 emit 이 아니라 로깅뿐인데, 이걸 어댑터로 옮기면
+// no-op 조립에서 그 흔적까지 함께 사라진다. 포트가 아는 것은 **무슨 일이 일어났나**뿐이고, 그것이
+// 어떤 Tauri 이벤트 이름으로 나가는지는 어댑터가 안다(`events.rs`).
+fn emit_broadcast(events: &dyn DaemonEvents, ev: &AgentEvent) {
     match ev {
         AgentEvent::AgentListUpdated { agents } => {
-            let _ = app.emit("agent-list-updated", agents);
+            events.agent_list_updated(agents);
         }
         AgentEvent::StatusChanged {
             agent_id,
             status,
             epoch,
         } => {
-            let _ = app.emit(
-                "status-changed",
-                serde_json::json!({
-                    "agentId": agent_id,
-                    "status": status,
-                    "epoch": epoch,
-                }),
-            );
+            events.status_changed(agent_id, status, *epoch);
         }
         AgentEvent::RestoreResult { report } => {
-            let _ = app.emit(
-                "restore-result",
-                serde_json::json!({
-                    "result": report,
-                }),
-            );
+            events.restore_result(report);
         }
         AgentEvent::ProfileListUpdated { profiles } => {
-            let _ = app.emit("profile-list-updated", profiles);
+            events.profile_list_updated(profiles);
         }
         // ADR-0061: 프리셋 CRUD(생성/삭제) 후 데몬 broadcast → 전 webview push(profile 미러).
         //   프론트 소비(preset-list-updated 리스너)는 후속 슬라이스지만, broadcast 가 창까지
         //   닿아야 멀티창 동기화 불변식이 성립하므로 emit 배선은 여기서 함께 깐다.
         AgentEvent::PresetListUpdated { presets } => {
-            let _ = app.emit("preset-list-updated", presets);
+            events.preset_list_updated(presets);
         }
         // ★어느 왕복에도 속하지 않는 실패는 여기 말고 닿는 곳이 없다★. `request_id` 가 있는 실패는 이
         //   함수에 **오지 않는다** — 호출부가 그보다 먼저 reply 매칭 분기로 걷어낸다(`event_reply_request_id`
@@ -1244,18 +1259,24 @@ pub enum ReplayFollowUp {
 /// 데몬이 보낸 replay 3종(`SubscribeAck`·`ReplayComplete`·`SubscribeFailed`)을 single-flight 상태기계에
 /// 반영하고, 그 결과 창으로 흘릴 경계 마커를 `deliver` 로 넘긴다.
 ///
-/// ★셋을 한 함수에 모은 이유(load-bearing)★: 이 배선은 연결 태스크의 `select!` 안에 살았고, 그 자리는 실
-/// 소켓·실 `AppHandle` 없이 세울 수 없다 — 이 패키지의 lib 테스트 타깃은 실행조차 안 되므로(`0xc0000139`)
-/// 거기 인라인으로 둔 갈래는 **어떤 게이트로도 검증되지 않는다.** 실제로 거절 팔이 그 상태였고, 그 팔을
-/// 통째로 지워도 모든 테스트가 초록이었다. 갈래를 여기로 내리면 하네스(`tests/daemon_client_replay.rs`)가
-/// 소켓 없이 태울 수 있고, 남는 무검증 표면은 호출부의 **한 줄**(이 함수를 부르는 것 + 반환 명령을
-/// `send_fire` 하는 것)뿐이다.
+/// ★셋을 한 함수에 모은 이유(load-bearing)★: 이 배선은 연결 태스크의 `select!` 안에 살았고, **그 자리는
+/// 실 소켓을 요구한다**. ★그것은 불가능이 아니라 비용이다★ — 같은 패키지의 `tests.rs` 가 루프백 WS 를
+/// 세워 `run_connection`→`main_loop` 를 실제로 돌리므로 태울 방법 자체는 있다. 다만 상태기계 한 갈래를
+/// 재려고 매번 소켓·핸드셰이크를 세우는 값이 비싸고, 인라인으로 두면 그 값 때문에 **아무도 안 태운다** —
+/// 실제로 거절 팔이 그 상태였고, 그 팔을 통째로 지워도 모든 테스트가 초록이었다. 갈래를 여기로 내리면
+/// 하네스(`tests/daemon_client_replay.rs`)가 소켓 없이 태울 수 있고, 남는 무검증 표면은 호출부의
+/// **한 줄**(이 함수를 부르는 것 + 반환 명령을 `send_fire` 하는 것)뿐이다.
+///
+/// ★2026-08-24 전에는 이 자리에 「어떤 하네스로도 태울 수 없다」고 적혀 있었다★ — 그 말은 실 `AppHandle`
+/// 이 없으면 연결 태스크를 **아예 안 띄우던 단락** 때문에 우연히 참이었다. emit 을 포트로 끊어
+/// (`events.rs`) 그 단락을 지우면서 문장이 낡았다. 남은 요구는 소켓 하나이고, 그것은 비용 판단이다.
 ///
 /// ★`deliver` 가 인자인 이유★: 실제 배달구(`output_channel::send_to_windows`)는 `tauri::ipc::Channel` 을
 /// 요구해 하네스에서 세울 수 없다. 대신 **어느 창으로 보내는지**(`router.targets`)와 **무슨 바이트를
 /// 보내는지**는 여기서 확정되므로, 그 둘을 하네스가 잡아 단언한다.
 ///
-/// ★마커는 binary frame 과 **같은 경로**로 흘려야 한다(ADR-0046)★ — `app.emit` 을 태우면 순서가 무너진다.
+/// ★마커는 binary frame 과 **같은 경로**로 흘려야 한다(ADR-0046)★ — 알림 포트(`events`)를 태우면 순서가
+/// 무너진다.
 /// 그래서 `deliver` 의 운영 구현은 binary 팬아웃과 같은 함수다.
 pub fn apply_replay_event(
     ev: &AgentEvent,
@@ -1351,10 +1372,10 @@ pub struct RefusalPlan {
 /// 데몬이 `Subscribe` 를 거절했을 때(`AgentEvent::SubscribeFailed`) 무엇을 내보낼지 정한다 — 슬롯 해제·
 /// 마커 합성·대기열 전진이 여기 한 곳에 있다.
 ///
-/// ★`pub` 인 이유(= `register_pending` 과 같은 사정)★: 이 파일의 select 루프는 실 소켓·실 `AppHandle`
-/// 없이 세울 수 없고, 이 패키지의 **lib 테스트 타깃은 실행조차 되지 않는다**(`0xc0000139
-/// STATUS_ENTRYPOINT_NOT_FOUND` — `src/daemon_client/tests.rs` 의 단언은 한 번도 돈 적이 없다). 그래서
-/// 이 함수가 그 배선을 소켓 없이 태울 수 있는 유일한 지점이다. 하네스 = `tests/daemon_client_replay.rs`.
+/// ★`pub` 인 이유(= `register_pending` 과 같은 사정)★: **이 파일의 select 루프는 실 소켓을 요구한다.**
+/// 그래서 이 함수가 그 배선을 소켓 없이 태울 수 있는 지점이고, 하네스 = `tests/daemon_client_replay.rs` 다.
+/// ★이 `pub` 은 불가능이 아니라 **비용 트레이드**다★ — 같은 패키지의 `tests.rs` 가 루프백 WS 로 그 루프를
+/// 실제로 돌리므로, 되돌리려면 소켓 하네스로 같은 규칙을 재면 된다. 그때 잃는 것은 결정론과 속도다.
 ///
 /// ★실패 마커의 `epoch` 는 권위값이 아니다(최선치)★: 거절엔 `SubscribeAck` 이 없어 이 세대가 어느 세션의
 /// 것인지 확정할 방법이 없다. 그래서 마지막으로 알려진 `SubState.epoch`(없으면 0)를 싣는다 — 그 값은
@@ -1417,9 +1438,10 @@ pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
 /// 도착한 한 장**만 새 슬롯을 풀고 나머지는 짝 없는 답장으로 무시된다([`protocol_state::take_pending`] 이
 /// `None`) — 어느 쪽도 매달리지 않는다.
 ///
-/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓·실 `AppHandle` 없이 세울 수 없어(그래서 이 파일엔
-/// `#[cfg(test)]` 가 없다) 이 함수가 그 승계 규칙을 **소켓 없이 태울 수 있는 지점**이다 —
-/// `tests/daemon_client_pending.rs` 가 여기를 태운다.
+/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓을 요구해(그래서 이 파일엔 `#[cfg(test)]` 가 없다)
+/// 이 함수가 그 승계 규칙을 **소켓 없이 태울 수 있는 지점**이다 — `tests/daemon_client_pending.rs` 가
+/// 여기를 태운다. ★"요구한다"이지 "세울 수 없다"가 아니다★: 같은 패키지의 `tests.rs` 가 루프백 WS 로 그
+/// 루프를 돌린다. 이 `pub` 이 사는 것은 소켓 없는 결정론이지 유일한 가능성이 아니다.
 pub fn register_pending(
     pending: &mut PendingMap<CommandReply>,
     request_id: RequestId,
@@ -1450,6 +1472,12 @@ pub fn register_pending(
 //   덮고 연결 해제를 주인 단위로 제거하므로(ADR-0150 결정 3), 그 승격은 **두 셸이 서로의 이름을 빼앗고 서로를
 //   지우는** 동작이 된다. 식별자를 들일 때는 이 상수를 고치는 것이 아니라 연결마다 새 값을 만들어야 한다.
 const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
+
+/// 등록·차분 패킷이 함께 쓰는 광고 문자열 — ★두 곳에서 따로 짓지 않는다★. 갈리면 데몬 로그에서 같은
+/// 셸의 두 패킷이 남남으로 보인다(명부의 주인 판정은 이 값과 무관하다 — 위 주석).
+pub fn shell_owner_advert() -> engram_dashboard_command::OwnerToken {
+    engram_dashboard_command::OwnerToken::new(SHELL_OWNER_ADVERT)
+}
 
 /// 결말을 이 연결의 단일 writer 로 되보내는 송신단 — ★반드시 **weak** 이다(load-bearing)★.
 ///
@@ -1498,8 +1526,9 @@ pub fn outcome_sink(
 /// 데몬이 배달한 봉투를 적용 태스크로 넘긴다 — ★기다리지 않는다★(ADR-0155 결정 4).
 ///
 /// `socket` = 이 봉투가 도착한 소켓의 세대. 답장이 그 소켓에만 나가게 [`outcome_sink`] 로 함께 실린다.
-/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓·실 `AppHandle` 없이 세울 수 없어(그래서 이 파일엔
-/// `#[cfg(test)]` 가 없다) 이 함수가 **소켓 없이 태울 수 있는 가장 바깥 지점**이다. 하네스가 여기를 태우면
+/// ★`pub` 인 이유★: 이 파일의 select 루프는 실 소켓을 요구해(그래서 이 파일엔 `#[cfg(test)]` 가 없다)
+/// 이 함수가 **소켓 없이 태울 수 있는 가장 바깥 지점**이다 — 그 요구는 비용이지 불가능이 아니다(같은
+/// 패키지 `tests.rs` 가 루프백 WS 로 그 루프를 돌린다). 하네스가 여기를 태우면
 /// 슬롯 조회 · 결말 프레임 조립 · 채널 배달 · 표 부재 갈래가 실코드로 덮인다
 /// (남는 것 = select arm 의 갈래 선택 하나 — `tests/layout_commands.rs` 헤더가 그 잔여를 적는다).
 pub fn accept_inbound(
@@ -1531,7 +1560,7 @@ pub fn accept_inbound(
 
 /// 이 클라이언트가 얹을 등록 패킷 — 얹을 것이 없으면 `None`.
 ///
-/// ★`pub` 이고 [`register_own_commands`] 와 갈라져 있는 이유★: 보내는 쪽은 실 소켓 없이 세울 수 없지만
+/// ★`pub` 이고 [`register_own_commands`] 와 갈라져 있는 이유★: 보내는 쪽은 실 소켓을 요구하지만
 /// **무엇을 보내나**(광고 이름 · 세대 · 주인 문자열)는 소켓과 무관하다. 갈라 두면 하네스가 실제로 나가는 그
 /// 패킷을 단언할 수 있다 — 손으로 다시 지은 패킷을 재면 그 둘이 갈려도 아무도 모른다.
 pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> {
@@ -1540,7 +1569,7 @@ pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> 
         return None;
     }
     Some(AgentCommand::RegisterCommands {
-        owner: engram_dashboard_command::OwnerToken::new(SHELL_OWNER_ADVERT),
+        owner: shell_owner_advert(),
         decls,
         catalog_version: receiver.catalog_version(),
         request_id: RequestId::new(),

@@ -1,9 +1,13 @@
 //! 데몬 클라이언트의 pending 슬롯 승계(`daemon_client::connection::register_pending`) 통합 테스트 —
 //! 소켓·데몬·Tauri 0.
 //!
-//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 이 패키지의 lib 테스트 타깃은 실행 자체가 안 된다
-//! (`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`, 실측 2026-08-17) — `#[cfg(test)]` 안의 단언은 한 번도 돌지
-//! 않는다. 실행: `cargo test -p engram-dashboard --test daemon_client_pending`(자식 프로세스를 하나도 안
+//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 재는 대상이 **실 소켓을 요구하는 배선**이라, 그 자리를
+//! 포트로 끊어 세우는 통합 하네스가 제자리다(그래서 하네스 자신은 소켓·데몬·Tauri 를 하나도 안 쓴다).
+//! ★"요구한다"이지 "못 세운다"가 아니다★ — `src/daemon_client/tests.rs` 가 루프백 WS 로 그 배선을 실제로
+//! 돌린다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도이지 유일한 가능성이 아니다.
+//! 순수 단위 단언은 모듈 옆 `#[cfg(test)]` 로 가고 그쪽은 `--test lib_unit` 으로 돈다
+//! (그 타깃을 세운 결정 = ADR-0174 · 현황 = CLAUDE.md 「빌드·검증 명령」).
+//! 실행: `cargo test -p engram-dashboard --test daemon_client_pending`(자식 프로세스를 하나도 안
 //! 띄우므로 `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」).
 //! ★워크스페이스 회귀에 안 실린다★ — 그 명령이 `--exclude engram-dashboard` 로 이 패키지를 통째로 뺀다.
 //! 그래서 CI가 이 타깃만 따로 부르는 전용 스텝을 갖는다(`.github/workflows/ci.yml`).
@@ -20,8 +24,8 @@
 //! on)의 그 테스트가 **그 자리에서 죽는다**. 즉 아래 단언들이 곧 패닉 회귀 감지기다.
 //!
 //! ## ★무엇이 안 덮이나(정직성)★
-//! 연결 태스크의 `select!` arm 자체(소켓에서 온 명령을 이 함수까지 나르는 배선)는 실 소켓·실 `AppHandle`
-//! 없이 세울 수 없어 여기서 안 돈다 — `tests/layout_commands.rs` 헤더가 적는 같은 잔여다. 여기서 재는 것은
+//! 연결 태스크의 `select!` arm 자체(소켓에서 온 명령을 이 함수까지 나르는 배선)는 실 소켓을 요구해
+//! 여기서 안 돈다 — `tests/layout_commands.rs` 헤더가 적는 같은 잔여다. 여기서 재는 것은
 //! 그 arm 이 부르는 **규칙 본체**다.
 
 use engram_dashboard_lib::daemon_client::connection::{

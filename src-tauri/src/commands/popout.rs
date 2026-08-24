@@ -1,8 +1,9 @@
 //! 슬롯 팝업 분리(move_slot_to_window) invoke 껍데기 + 런타임 창 label·빌드·destroy(= 적용 서비스의 OS
 //! 창 포트·label 발급 포트 어댑터, `crate::layout::apply`) — 탭 소유 모델(ADR-0057).
 //!
-//! ★§5 LLM 제어 표면★: 사람 우클릭(window.__engramLayout.moveSlotToWindow)과 LLM(명령 버스의
-//! `slot.popout`)이 **같은 적용 서비스**에 떨어진다 — 이 파일에 MOVE 로직은 없다(`apply::move_slot_to_window`).
+//! ★§5 LLM 제어 표면★: 사람 우클릭(프론트 레지스트리의 `slot.popout` → `viewStore.moveSlotToWindow`
+//! invoke)과 LLM(명령 버스의 `slot.popout`)이 **같은 적용 서비스**에 떨어진다 — 이 파일에 MOVE 로직은
+//! 없다(`apply::move_slot_to_window`).
 //! 여기 남는 것은 Tauri 세계로의 번역뿐이다: 창 빌드·destroy·존재 확인, label·탭 이름 발급, 창 정리.
 //!
 //! ★두 경로가 **백엔드에서만** 합류한다 — 그 앞은 아직 다르다★: 프론트는 invoke 전에 그 슬롯의 렌더 모드

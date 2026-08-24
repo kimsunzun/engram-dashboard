@@ -5,14 +5,7 @@
 import { agentClient } from '../api/clientFactory'
 import { list as cmdList, run as cmdRun } from '../commands/registry'
 import { useAgentStore } from './agentStore'
-import { CHAT_STYLE_DEFAULTS, useChatStyleStore, type ChatStyleKey } from './chatStyleStore'
-import {
-  currentViewId,
-  initMainWindowFromBackend,
-  readWindowLabelFromHash,
-  subscribeViewEvents,
-  useViewStore,
-} from './viewStore'
+import { initMainWindowFromBackend, subscribeViewEvents } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
 // StrictMode 이중마운트 레이스 방지
@@ -73,67 +66,20 @@ export function initEventBus(): Promise<void> {
 
   initPromise = (async () => {
     try {
-      // §5: 레이아웃 제어 표면을 window에 노출 → LLM(cdp eval 등)이 사람 UI와 동일한 단일 진입점을
-      // 호출한다. ★레이아웃 권위 = src-tauri(ADR-0035/0057)★.
-      // 정식 command 버스 전까지의 임시 경로(CLAUDE.md §5 임시 경로 항).
-      // ★렌더 모드 오버라이드(§5)★: 슬롯 렌더러(터미널/rich/dom)를 강제하는 프론트 전용 override.
-      // 백엔드 invoke 를 안 타고 viewStore 프론트 상태만 흔든다(override라 권위 레이아웃과 무관).
-      //   window.__engramLayout.clearRenderMode('<nodeId>')   // 해제(caps 유도 기본 복귀)
-      // ★DOM 모드 별칭★: 평문 DOM(<pre>)로 렌더시켜 CDP eval/innerText 로 출력을 읽히게 한다(터미널
-      // xterm 은 canvas 라 innerText 로 안 읽힘). set/clearRenderMode 위 얇은 래퍼 — 검증 툴링이 이 이름을 씀.
-      //   window.__engramLayout.toggleDomMode('<nodeId>')   // slot node.id(=data-slot-id) 로 켬/끔(dom↔기본)
-      // ★탭 소유 모델(ADR-0057)★: 탭/창 조작은 창 label 을 받는 탭-언어 표면이다.
-      ;(globalThis as Record<string, unknown>).__engramLayout = {
-        // 탭/창 command(window 생략 시 이 웹뷰 창).
-        createTab: (window?: string, name?: string) =>
-          useViewStore.getState().createTab(window ?? readWindowLabelFromHash(), name),
-        closeTab: (viewId: string, window?: string) =>
-          useViewStore.getState().closeTab(window ?? readWindowLabelFromHash(), viewId),
-        switchTab: (viewId: string, window?: string) =>
-          useViewStore.getState().switchTab(window ?? readWindowLabelFromHash(), viewId),
-        createWindow: useViewStore.getState().createWindow,
-        closeWindow: useViewStore.getState().closeWindow,
-        split: useViewStore.getState().split,
-        closeSlot: useViewStore.getState().closeSlot,
-        assignAgent: useViewStore.getState().assignAgent,
-        // ★슬롯 콘텐츠 배치(§5, ADR-0063)★: assignAgent 미러. 트리(agent_list)·팔레트(preset_palette)·
-        //   비우기(empty)·에이전트 배정을 SlotContent 유니온으로 교체한다.
-        //   invoke→emit 권위 루프(ADR-0035 낙관 갱신 X). __engramCmd.run('layout.setSlotContent') 와 병행 경로.
-        setSlotContent: useViewStore.getState().setSlotContent,
-        // ★슬롯 이동(§5)★: LLM 이 slot id 만으로 부를 수 있게 원본 viewId 를 currentViewId() 로 해소한다.
-        //   toWindow 미지정 → 새 팝업 창. 팝업 창 안에서 호출되면 그 창의 active 탭으로 떨어져, 팝업 안
-        //   LLM/CDP 가 엉뚱한 main view 를 집는 것을 막는다. slotId 가 그 view 밖이면 백엔드가
-        //   SlotNotFound Err(방어). 명시적 (viewId, slotId, toWindow) 호출은 viewStore.moveSlotToWindow 직접.
-        moveSlotToWindow: (slotId: string, toWindow?: string) => {
-          const viewId = currentViewId()
-          if (!viewId) return Promise.reject(new Error('view id 미확정 — move 대상 뷰 없음'))
-          return useViewStore.getState().moveSlotToWindow(viewId, slotId, toWindow)
-        },
-        setRenderMode: useViewStore.getState().setRenderMode,
-        clearRenderMode: useViewStore.getState().clearRenderMode,
-        enableDomMode: useViewStore.getState().enableDomMode,
-        disableDomMode: useViewStore.getState().disableDomMode,
-        toggleDomMode: useViewStore.getState().toggleDomMode,
-      }
-
-      // ★채팅 스타일 control surface(§5, ADR-0051)★: 채팅 렌더 간격·폰트 토큰을 LLM 이 사람 UI 와
-      //   동일한 store 액션(chatStyleStore)으로 조작한다. 프론트 전용 권위 + localStorage 영속. 값은 :root
-      //   CSS 변수로 반영돼 StructuredTextView/chat.css 가 var() 로 읽는다.
-      //   ★로드+적용은 여기가 아니라 main.tsx 최상단(loadAndApplyChatStyle)★ — 데몬 bootstrap 경로에
-      //   의존하지 않도록 분리했다(FIX-1). 여기선 핸들만 노출한다(핸들 노출과 값 로드는 독립).
-      ;(globalThis as Record<string, unknown>).__engramChat = {
-        get: () => useChatStyleStore.getState().values,
-        set: (key: ChatStyleKey, value: string) => useChatStyleStore.getState().setValue(key, value),
-        patch: useChatStyleStore.getState().patch,
-        reset: useChatStyleStore.getState().reset,
-        defaults: CHAT_STYLE_DEFAULTS,
-      }
-
       // §5: command 레지스트리 제어 표면(ADR-0055) — 사람 클릭·전역 keydown 과 동일한 단일 진입점을
       //   LLM(cdp eval)이 부른다.
+      //   ★새 전역 핸들을 만들지 말 것★: 레이아웃·탭·창·렌더모드는 전부 여기 등록된
+      //   tab.*·window.*·slot.*·layout.setSlotContent 로 부른다. 핸들을 나란히 두면 같은 액션에 표면이
+      //   둘이 되고, 한쪽만 고친 변경이 조용히 갈라진다.
+      //   ★단 표면이 이미 하나인 것은 아니다★ — 버스 밖 전역 핸들이 아직 남아 있다. 여기를 읽고 "이제
+      //   단일 표면"이라고 결론내지 말 것. 정책 정본 = CLAUDE.md 「LLM-우선 제어」, 살아 있는 대입만 뽑는
+      //   법 = `rg "\)\.__ENGRAM_|\)\.__engram" src/ -g '!*.test.*'`(4줄 — 그중 `__engramCmd` 가 여기다.
+      //   `).__NAME` 앵커를 빼면 타입 표기·주석까지 걸려 38줄이 된다). ★이 자리에 명단을 적지 말 것 —
+      //   낡는다★. ★그 출력을 정의부 주석으로 판정하지 말 것★ — 남은 것 중 일부는 자기를 「정식 §5 표면」
+      //   으로 소개해서, 주석만 보면 곁문인지 알 수 없다(판정은 CLAUDE.md 그 절이 한다).
       //   ★레지스트리는 상태 권위가 아니다★ — handler 가 기존 store 액션/invoke 로 라우팅한다(ADR-0035
       //   유지). run 은 handler 반환(일부 Promise)을 그대로 흘려보내 cdp eval 에서 await 가능.
-      //   window.__engramCmd.run('theme.set', { theme:'light' })  // 실행(모르는 id 는 throw)
+      //   window.__engramCmd.run('slot.empty', { viewId, slotId })  // 실행(모르는 id 는 throw)
       // ★전체 command 를 window 에 노출하는 것은 의도적이다(WONTFIX)★: CLAUDE.md §5(모든 기능은 LLM 제어
       //   가능해야 한다) / ADR-0055 의 설계 요구다. "allowlist 로 일부만 노출" 대안은 §5(LLM 이 메인 조작
       //   주체)와 정면 충돌해 기각됐다. 이 표면은 보안 취약점이 아니라 제어 계약이다(리뷰어 재제기 방지 앵커).
@@ -167,6 +113,10 @@ export function initEventBus(): Promise<void> {
           unlistenFns.forEach(fn => fn())
           unlistenFns = []
           initPromise = null
+          // ★여기서 __engramCmd 를 지우지 않는다★: 재설치는 initEventBus 안에서 일어나는데 App 은
+          // bootstrapDaemonIfNeeded 를 먼저 await 하므로(App.tsx), 지우면 그 사이 cdp 호출이 undefined 를
+          // 만나고 데몬이 흔들리면 재시도 지연만큼 길어진다. HMR 세션이 옛 핸들을 문 채 남는 것은 알려진
+          // dev 전용 동작이다 — 전체 새로고침이 푼다.
         })
       }
 

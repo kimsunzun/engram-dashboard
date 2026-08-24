@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agent::failure::AgentFailureKind;
 use crate::agent::types::AgentId;
 
 fn now_millis() -> i64 {
@@ -185,6 +186,23 @@ pub struct AgentProfile {
     #[serde(skip_deserializing, serialize_with = "serialize_zero_placeholder")]
     pub epoch: u32,
 
+    /// ★이 항목이 마지막으로 활성화에 실패한 종류★ — `None` = 실패 기록 없음. 사전 판정 결과가 아니라
+    /// **시도한 자리에서 관측된 사실**이고(ADR-0172 결정 1), 지금 상태(`AgentStatus`)와 별개 축이다.
+    ///
+    /// ★`#[serde(skip)]` 가 의미의 일부다(위 `epoch` 의 읽기 건너뛰기와 결이 같다, 다른 근거)★: 데몬을 내리면 그
+    ///   세션들도 함께 죽으므로 옛 실패를 디스크로 붙들 이유가 없다 — 수명을 **데몬 수명**으로 못박는
+    ///   것이 이 skip 이다(ADR-0171 3층). 파일 규격 변경·하위 호환 처리도 함께 면제된다.
+    /// ★타입에 serde 파생이 아예 없다★ — 그래서 이 skip 을 지우는 변경은 컴파일에 실패한다
+    ///   (`failure::AgentFailureKind` 주석).
+    /// ★쓰는 지점은 하나뿐★: `manager::AgentManager::note_activation_result`(활성화 성공=지움 /
+    ///   실패=기록). 그 함수 주석이 「왜 활성화 성공인가」의 정본이다. 호출자를 늘리면 인과가 갈라진다 —
+    ///   턴 관측 정리 지점을 둘로 못박은 ADR-0127 과 같은 이유다.
+    /// ★스냅샷이 되돌리지 못한다★: `upsert_preserving_hierarchy` 가 live 값을 보존한다(화신 표식
+    ///   `epoch` 과 같은 인과 — spawn 호출부가 넘기는 옛 사본이 그 사이 기록된 실패나 지움을 덮으면 안 된다).
+    // ADR-0172
+    #[serde(skip)]
+    pub last_failure: Option<AgentFailureKind>,
+
     pub auto_restore: bool,
 
     /// 자동 재시작 정책. **예약(reserved)** — 동작 미구현(게이트), 제거 금지(RestartPolicy 주석 참조).
@@ -229,6 +247,7 @@ impl AgentProfile {
             claude_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
+            last_failure: None,
             auto_restore,
             restart_policy: RestartPolicy::Always,
             restart_count: 0,
@@ -439,6 +458,10 @@ impl ProfileRegistry {
                 profile.parent_id = live.parent_id;
                 profile.display_name = live.display_name.clone();
                 profile.epoch = live.epoch;
+                // 마지막 실패도 같은 이유로 live 값이 이긴다 — 그 사실을 쓰는 곳은 활성화 관측뿐이고,
+                //   spawn 이 넘긴 옛 사본이 그것을 되돌리면 이미 지워진 실패가 화면에 되살아난다.
+                // ADR-0172
+                profile.last_failure = live.last_failure;
             }
             m.insert(profile.id, profile);
         });
@@ -520,6 +543,46 @@ impl ProfileRegistry {
             }
             None => false,
         })
+    }
+
+    /// 「마지막 실패」 기록/해제. 값이 실제로 바뀌었으면 `true`, 없는 id·epoch 불일치·같은 값이면 `false`.
+    ///
+    /// `incarnation`:
+    /// - `Some(epoch)` — 이 관측이 **그 화신**에 대한 것이다. 프로필의 현재 epoch 과 같을 때만 쓴다.
+    /// - `None` — 화신이 만들어지기 전에 실패했다(예약 거절·PTY open 실패). 비교할 대상이 없다.
+    ///
+    /// ★epoch 비교가 막는 것(load-bearing)★: resume 관측은 조기종료 창(현 3s)만큼 **늦게** 쓴다. 그 사이
+    ///   reaper 가 그 세션을 거두고 다른 연결이 같은 프로필을 성공적으로 활성화하면(epoch +1 · 지움 완료),
+    ///   뒤늦게 깨어난 옛 관측이 **산 새 화신에 죽은 화신의 실패를 찍는다**. 이 저장소의 다른 지각-쓰기
+    ///   방어와 같은 모양이다(`reaper` 의 세션 제거 가드 · `TurnObservations::forget`).
+    /// ★판정과 쓰기가 한 임계구역이어야 한다★ — 그래서 비교를 호출자에 두지 않고 이 lock 안에서 한다
+    ///   (`epoch_for_spawn` 과 같은 이유).
+    /// ★`None` 갈래의 잔여(알고 수용)★: 화신이 없어 비교할 축이 없으므로 무조건 쓴다. 이 갈래의 쓰기는
+    ///   관측 **직후**(대기 없음)라 창이 명령 몇 개 폭이고, 방향도 안전한 쪽이 아니다 — 즉 이론상 남는
+    ///   구멍이다. 닫으려면 실패한 spawn 도 자기 세대를 들고 나와야 하는데 그건 `spawn_agent` 의 오류 타입
+    ///   변경이라 별건이다.
+    /// ★호출자는 하나뿐이다★: `AgentManager::note_activation_result`. `pub(crate)` 로 좁혀 데몬·셸에서
+    ///   두 번째 쓰기 경로가 생기는 것을 **컴파일러가** 막는다(crate 안에서는 규약과 리뷰가 지킨다 —
+    ///   그 이상을 주장하지 않는다).
+    /// ★디스크에 쓰지 않는다 — `mutate` 를 타지 않는 유일한 쓰기다★: 이 필드는 `#[serde(skip)]` 이라
+    ///   저장해도 파일 내용이 한 바이트도 달라지지 않는다. `mutate` 를 타면 활성화마다 `agents.json`
+    ///   전체를 다시 쓰는 순수 비용만 붙는다.
+    // ADR-0172
+    pub(crate) fn set_last_failure(
+        &self,
+        id: AgentId,
+        incarnation: Option<u32>,
+        kind: Option<AgentFailureKind>,
+    ) -> bool {
+        let mut guard = self.profiles.lock().expect("profiles poisoned");
+        match guard.get_mut(&id) {
+            Some(p) if incarnation.is_some_and(|e| e != p.epoch) => false,
+            Some(p) if p.last_failure != kind => {
+                p.last_failure = kind;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// 세션 id 확보 — `claude_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
@@ -892,6 +955,116 @@ mod tests {
             reg.get(id).expect("존재").epoch,
             live_tag,
             "live 값이 이겨야(스냅샷이 표식을 되돌리면 산 세션이 죽은 화신의 표식을 쓴다)"
+        );
+    }
+
+    // ── 마지막 실패(ADR-0172) ────────────────────────────────────────────────────
+
+    #[test]
+    fn last_failure_never_reaches_the_serialized_profile() {
+        let mut p = sample();
+        p.last_failure = Some(AgentFailureKind::NoConversationToResume);
+        let json = serde_json::to_string(&p).expect("직렬화");
+        assert!(
+            !json.contains("last_failure"),
+            "agents.json 에 이 필드가 나가면 데몬 수명 제약이 깨진다 — got {json}"
+        );
+        let back: AgentProfile = serde_json::from_str(&json).expect("역직렬화");
+        assert_eq!(
+            back.last_failure, None,
+            "디스크에서 돌아온 값은 늘 비어 있다"
+        );
+    }
+
+    #[test]
+    fn set_last_failure_reports_change_and_never_writes_to_disk() {
+        let store = Arc::new(MemStore::default());
+        let reg = ProfileRegistry::new(store.clone());
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+
+        assert!(reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)));
+        assert!(
+            !reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)),
+            "같은 값 재기록은 변경 아님"
+        );
+        assert_eq!(
+            reg.get(id).unwrap().last_failure,
+            Some(AgentFailureKind::SpawnFailed)
+        );
+        assert!(reg.set_last_failure(id, None, None), "지움도 변경이다");
+        assert_eq!(reg.get(id).unwrap().last_failure, None);
+        assert!(
+            !reg.set_last_failure(Uuid::new_v4(), None, Some(AgentFailureKind::Other)),
+            "없는 id 는 no-op"
+        );
+
+        assert!(
+            store.load().iter().all(|p| p.last_failure.is_none()),
+            "store 로 나간 스냅샷에도 값이 실리지 않는다"
+        );
+    }
+
+    /// ★지각-쓰기 가드★: resume 관측은 조기종료 창(3s)만큼 늦게 쓴다. 그 사이 다른 연결이 같은 프로필을
+    /// 성공적으로 활성화하면(새 화신 표식) 뒤늦은 옛 관측이 **산 새 화신**에 죽은 화신의 실패를 찍는다.
+    ///
+    /// ★표식을 상수로 적지 않는다★: 화신 표식은 화신마다 새로 뽑은 난수라(ADR-0163) `0 → 1` 같은
+    ///   순서가 없다. 그래서 옛 값·새 값을 **발급받아 들고** 비교하고, 가드도 대소가 아니라
+    ///   일치/불일치로만 선다.
+    #[test]
+    fn a_late_write_from_an_older_incarnation_is_rejected() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        // 화신 교체 두 번 — 앞 화신의 표식과 산 화신의 표식을 각각 손에 쥔다.
+        let old = reg.epoch_for_spawn(id).expect("첫 화신 표식");
+        let live = reg.epoch_for_spawn(id).expect("둘째 화신 표식");
+        assert_ne!(old, live, "전제: 인접 화신은 서로 다른 표식을 받는다");
+
+        assert!(
+            !reg.set_last_failure(id, Some(old), Some(AgentFailureKind::EarlyExitAfterResume)),
+            "옛 화신의 지각 관측은 거부돼야 한다"
+        );
+        assert_eq!(reg.get(id).unwrap().last_failure, None);
+
+        assert!(
+            reg.set_last_failure(id, Some(live), Some(AgentFailureKind::EarlyExitAfterResume)),
+            "현 화신의 관측은 그대로 쓰인다"
+        );
+        // 지움도 같은 가드를 탄다 — 옛 화신의 성공 관측이 새 화신의 기록을 지우면 안 된다.
+        assert!(!reg.set_last_failure(id, Some(old), None));
+        assert_eq!(
+            reg.get(id).unwrap().last_failure,
+            Some(AgentFailureKind::EarlyExitAfterResume)
+        );
+        assert!(
+            reg.set_last_failure(id, Some(live), None),
+            "현 화신은 지운다"
+        );
+
+        // 화신 전에 끝난 실패는 비교할 세대가 없어 무조건 쓴다(계약의 `None` 갈래).
+        assert!(reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)));
+        assert_eq!(
+            reg.get(id).unwrap().last_failure,
+            Some(AgentFailureKind::SpawnFailed)
+        );
+    }
+
+    #[test]
+    fn last_failure_survives_a_stale_snapshot_upsert() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p.clone());
+        reg.set_last_failure(id, None, Some(AgentFailureKind::NoConversationToResume));
+        // spawn 호출부가 들고 있던 옛 스냅샷(last_failure=None)으로 upsert.
+        reg.upsert_preserving_hierarchy(p);
+        assert_eq!(
+            reg.get(id).expect("존재").last_failure,
+            Some(AgentFailureKind::NoConversationToResume),
+            "live 값이 이겨야(스냅샷이 실패 기록을 지우면 표시가 조용히 사라진다)"
         );
     }
 

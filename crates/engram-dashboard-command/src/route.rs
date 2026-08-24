@@ -324,7 +324,7 @@ mod tests {
         let link = FakeLink::default();
 
         let gone = block_on(route(&table, &roster, &link, envelope("tab.create")));
-        let never = block_on(route(&table, &roster, &link, envelope("theme.set")));
+        let never = block_on(route(&table, &roster, &link, envelope("never.registered")));
 
         for (reply, what) in [(gone, "끊긴 주인의 이름"), (never, "모르는 이름")] {
             let err = reply.outcome.expect_err(what);

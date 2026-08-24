@@ -1,5 +1,5 @@
-// ADR-0055/0057: 사람 클릭(TabBar·Ctrl+Tab)·LLM(__engramCmd)·window.__engramLayout 이 모두 이 동일 store
-//   액션을 지난다(§5 단일 제어 표면 — 새 상태 경로 0).
+// ADR-0055/0057: 사람 클릭(TabBar·Ctrl+Tab)과 LLM(__engramCmd)이 모두 이 동일 store 액션을 지난다
+//   (§5 단일 제어 표면 — 새 상태 경로 0).
 //
 // ★window 해소★: command args 로 window 를 받되, 생략하면 이 웹뷰 창(readWindowLabelFromHash — main·팝업
 //   label)으로 떨어진다. 그래서 Ctrl+Tab 같은 "포커스된 창" 소비자가 별도 label 계산 없이 부를 수 있다.
@@ -65,6 +65,21 @@ register({
   title: t('tab.next'),
   category: 'tab',
   keybinding: 'Ctrl+Tab',
+  // ★생략 시 무엇이 바뀌나를 정확히 적는다★: 버스 호출자에겐 「자기 창」이 없고, 실제 대상은 셸이 고른
+  //   목적지 창(보통 main)이다. 게다가 아래 resolveWindow 의 fallback 은 URL 해시를 읽는데 그 값은
+  //   main·트리 양쪽에서 main 으로 떨어진다 — 즉 생략하면 사실상 main 이다. LLM 이 window 를 넘길지
+  //   말지를 정하는 근거가 이 문장뿐이라 「이 창」 같은 말을 쓰지 않는다.
+  help: {
+    summary: '그 창의 활성 탭을 다음 탭으로 옮긴다(탭이 하나뿐이면 아무 일도 안 한다).',
+    effect: 'write',
+    args: {
+      window: {
+        type: 'string',
+        description:
+          '대상 창 label(window.list 가 준다). 생략하면 사실상 main 이다 — 버스 호출에는 "부른 창"이 없어 셸이 고른 목적지 창의 해시를 읽고, 그 값이 main 으로 떨어진다.',
+      },
+    },
+  },
   // ★Ctrl+Tab(D-8)★: 사람 키·클릭과 동일 command 경로(§5).
   run: args => {
     const window = resolveWindow(args)

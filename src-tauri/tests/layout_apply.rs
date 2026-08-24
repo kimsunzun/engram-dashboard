@@ -1,9 +1,10 @@
 //! 레이아웃 적용 서비스(`layout::apply`) 통합 테스트 — 창·데몬·Tauri 0 (ADR-0012 seam 격리).
 //!
-//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 이 패키지의 **lib 테스트 타깃은 실행 자체가 안 된다** —
-//! `cargo test -p engram-dashboard --lib` 이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 로 즉사한다(실측
-//! 2026-08-17, 2026-08-05에도 같은 증상). 그래서 `#[cfg(test)]` 모듈에 넣은 단언은 **한 번도 돌지 않는다.**
-//! 통합 타깃은 별도 실행 파일로 링크돼 정상 동작한다 → 셸 조각의 단언은 전부 여기 둔다.
+//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 재는 대상이 **실 소켓·실 `AppHandle` 없이는 못 세우는
+//! 배선**이라, 그 자리를 포트로 끊어 세우는 통합 하네스가 제자리다(그래서 하네스 자신은 창·데몬·Tauri 를
+//! 하나도 안 쓴다). 새 단언의 배치 기준도 그것이다 — **순수 단위는 모듈 옆 `#[cfg(test)]`**(그쪽은
+//! `--test lib_unit` 으로 돈다 · 그 타깃을 세운 결정 = ADR-0174 · 현황 = CLAUDE.md 「빌드·검증 명령」),
+//! **배선은 여기.**
 //! 실행: `cargo test -p engram-dashboard --test layout_apply` — ★`-- --test-threads=4` 를 붙이지 않는다★
 //! (이 스위트는 자식 프로세스를 하나도 안 띄운다. 그 플래그의 근거·판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」)
 //!
@@ -418,8 +419,8 @@ fn create_window_rolls_back_model_when_open_fails() {
 
 // ★실 `PopupCounter` 를 통과시킨다★: prefix 는 capabilities/popup.json 의 glob 과 짝이고(다른 label 이면
 // Destroyed 정리 게이트가 스킵돼 라우팅·구독·Channel 이 샌다), 단조성은 닫힌 label 재-build 에러를 막는다.
-// 이 계약의 단위 테스트는 `popout.rs` 안에 있으나 그 타깃(lib)이 0xc0000139 로 안 돌아 **실제로는 아무도
-// 지키고 있지 않았다** — 여기서 서비스 경유로 되살린다.
+// 이 계약의 단위 테스트는 `popout.rs` 안에 따로 있지만 이 단언은 그대로 둔다 — ★**서비스 경유로 재는 것은
+// 다른 층**★이라 중복이 아니다.
 #[test]
 fn create_window_issues_monotonic_popup_labels_from_real_counter() {
     let w = World::new();

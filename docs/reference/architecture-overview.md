@@ -22,7 +22,7 @@
 - **클라이언트(client)** = 앱 실행파일(`engram-dashboard.exe`, src-tauri 셸). 데몬에 붙는 손님.
 - **데몬(daemon)** = 에이전트 호스팅 서버(`engram-dashboard-daemon.exe`). 생사·출력·상태의 진짜 주인.
 - **웹뷰(webview)** = 창(WebView2) · **슬롯(slot)** = 그 창 안 레이아웃 한 칸.
-- **replay** = 데몬이 보관한 출력 되감기(리로드·신규 구독 때 과거 복원). **epoch** = 에이전트 재시작 카운터(낡은 프레임 거르는 기준).
+- **replay** = 데몬이 보관한 출력 되감기(리로드·신규 구독 때 과거 복원). **epoch**(필드명) = 화신마다 새로 뽑는 32비트 난수 표식(낡은 프레임 거르는 기준). ★카운터가 아니다 — 비교는 일치/불일치만이고 대소로 「더 새 것」을 유도하지 않는다★(ADR-0163).
 
 ## 5분 요약 — 핵심 6문장
 
@@ -433,7 +433,7 @@ flowchart TD
   CS["③ 제어 표면 · api · ★단일 진입점(불변)<br/>agentClient = ProtocolClient<br/>request_id · viewId 구독 · replay · seq dedup · epoch"]
   TT["TauriTransport · 운영 carrier 고정 (ADR-0036)"]
   BE["무상태 라우터 (src-tauri) → 데몬(백엔드)"]
-  LLM["§5 LLM 제어 핸들<br/>__ENGRAM_AGENT__ · __engramLayout · __engramCmd"]
+  LLM["§5 LLM 제어 핸들<br/>__engramCmd (명령 표) + 버스 밖 곁문"]
 
   WV --> UI
   UI -->|"액션 호출 (쓰기)"| ST
@@ -545,7 +545,7 @@ flowchart TD
   TS["'terminal' → TerminalSlot : tag=0만 받아 xterm.write"]
   RS["'rich' → RichSlot : tag=1만 받아 StructuredEvent 파싱 → 칩+마크다운+턴 구분선"]
   DS["'dom' → DomSlot : ANSI 벗겨 &lt;pre&gt; (CDP innerText 관측용 — LLM 제어, CLAUDE.md §5)"]
-  NOTE["구독 effect deps = [viewId, agentId, epoch] · reset() 선행 · seq dedup · tag 게이트"]
+  NOTE["구독 effect deps = [viewId, agentId] — 화신 표식(epoch) 제외, ADR-0164 · reset() 선행 · seq dedup · tag 게이트"]
 
   VLR --> MODE
   MODE -->|"'terminal'"| TS
@@ -702,7 +702,7 @@ flowchart TD
 
 **출력·복원:**
 - **replay** = 데몬 ring 되감기(리로드·신규구독 복원). **gen 펜스** = 옛/남의 replay 무시하는 세대 검사.
-- **epoch** = 같은 AgentId 재시작(재활성화 포함) 카운터. 낡은 프레임·사망메시지 거르는 기준.
+- **epoch**(필드명) = 화신마다 새로 뽑는 32비트 난수 표식. 낡은 프레임·사망메시지 거르는 기준. ★카운터가 아니다 — 비교는 일치/불일치만이고 대소로 「더 새 것」을 유도하지 않는다★(ADR-0163).
 - **freeze-frame** = 사망 순간의 판정 재료(intent·shutting_down)를 얼려 나중 오분류 차단.
 
 **생명주기(S17):**

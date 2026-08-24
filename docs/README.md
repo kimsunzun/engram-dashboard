@@ -28,6 +28,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 | `decisions/` | "왜 이렇게 정했나" — 결정 + 거부한 대안(ADR). 영구 누적. |
 | `tracking.md` | 보류 항목(T-)·결정 추적(D-). "재도입 시점"이 트리거. |
 | `research/` | step 착수 전 선행조사(조사·비교·미결질문). |
+| `refactoring/` | 리팩토링 재료 — 분리·병합 **경계 실측**, 구조 부채 계측, 계획·순서. **한 곳에서 훑어보려고 `research/`에서 갈라냈다**(사용자 지적 2026-08-23: 조사 더미에 묻혀 못 찾는다). 열람면·경계 규약 = 그 폴더 `README.md`. |
 | `reference/` | 코드 동기화 정설(진화형 캐논 — 제자리 수정). 실재 목록 = `ls docs/reference/`(주석·로깅·디버깅 컨벤션 등). *손으로 열거하지 않는다(rot).* |
 | `handbook/` | 문서·프로세스 **시스템 설명서**. 첫 입주: `documentation-system.md`(개발 플로우↔문서 매핑·불변식·자동화 맵). "문서들이 어디에 왜 박히나"의 큰 그림. |
 
@@ -37,6 +38,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 - 지금 안 하고 **나중에** 다룰 것·미결 질문 → `tracking.md` (T-/D-)
 - **무엇을 언제** 했나 → `step-log.md`
 - step 착수 전 **조사** → `research/`
+- **리팩토링** 경계 실측·구조 부채 계측·계획 → `refactoring/` (결정이 아니다 — 결정하면 `decisions/`에 박고 거기서 링크. 「나중에 다룬다」는 `tracking.md` T-)
 - 코드와 동기화되는 **정설(진화형 캐논)** → `reference/` (제자리 수정, ADR 아님 — ADR이 *왜*면 캐논은 *실천 규약*)
 - 새 기능 **설계 착수** → `process/SN-name/` 새 폴더 (관련 `research/`·ADR 먼저 참조)
 

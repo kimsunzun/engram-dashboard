@@ -14,8 +14,8 @@
 //   이 창 Channel 로 라우팅된다(백엔드 OutputRouter 일반 메커니즘, 모든 탭 walk). 슬롯은 메인과 동일하게
 //   agentClient 로 구독하고 request_replay(gen 펜스, ADR-0046)로 replay 를 받는다 — 팝업 전용 배선 없음.
 //
-// ★§5★: 이 창의 생성/바인딩 자체가 window.__engramLayout.moveSlotToWindow·createWindow(= invoke)로 LLM
-//   제어 가능하다. 이 페이지는 순수 I/O 표시 표면(손발) — 제어는 백엔드측(두뇌)이 쥔다.
+// ★§5★: 이 창의 생성/바인딩 자체가 command(`slot.popout`·`window.create` = invoke)로 LLM 제어 가능하다.
+//   이 페이지는 순수 I/O 표시 표면(손발) — 제어는 백엔드측(두뇌)이 쥔다.
 
 import { useState } from 'react'
 

@@ -18,11 +18,25 @@
 
 /* html/body/#root 배경을 var(--bg)로 고정.
    WebView2 기본 흰 배경이 Allotment 신규 pane 마운트 1-2프레임 동안 투시되는 현상 제거.
-   폴백 #0a0a0a = 다크 --bg 값. data-theme 는 App 마운트 후 useEffect 로 붙으므로 first-paint 순간엔 미적용 → 이 폴백이 쓰인다.
-   부팅 테마가 항상 dark 인 현재는 정확; 향후 테마 영속 도입 시 폴백을 저장 테마와 맞춰야 함.
+   폴백 #0a0a0a = 다크 --bg 값. data-theme 는 main.tsx 가 createRoot 전에 dark 로 박으므로, 이 폴백이 쓰이는
+   구간은 그 모듈이 돌기 전(HTML 파싱~스크립트 평가)뿐이다.
+   ★그 선박기를 걷어내지 말 것★ — 색 토큰은 styles/theme.css 의 :root[data-theme='…'] 안에만 있고 폴백이
+   없어서, 속성이 없는 동안엔 --text·--border 가 통째로 미정의다(배경만 어둡고 글자는 UA 기본 검정 = 검은
+   화면). 디스크 테마(`src/theme/uiSettings.ts`)는 IPC 왕복 뒤에 오므로 그 구간이 짧지 않다.
+   그래서 남는 것은 dark→저장 테마 전환 한 번이다. 그것까지 없애려면 값을 첫 페인트 전에 알아야 하고,
+   그건 조회를 없애야 가능하다.
    var(--bg)가 이미 있으면 폴백은 무시되고 현재 테마 배경이 사용된다(세 테마 모두 --bg 정의). */
 html, body, #root {
   background: var(--bg, #0a0a0a);
+}
+
+/* allotment/dist/style.css 는 sash 색을 자기 :root 에 하드코딩한다(--separator-border rgba(128,128,128,.35),
+   --focus-border #007fd4 = VS Code blue) — 앱 테마와 무관해 data-theme 스왑을 따라오지 않는다.
+   ★html:root 인 이유★: main.tsx 가 index.css 를 먼저, allotment CSS 를 나중에 import 해 번들에서 allotment
+   규칙이 뒤에 온다 — 같은 :root 로는 later-wins 로 진다. type+pseudo(0,1,1) 로 올려 순서와 무관하게 이긴다. */
+html:root {
+  --separator-border: var(--border);
+  --focus-border: var(--accent);
 }
 
 /* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).

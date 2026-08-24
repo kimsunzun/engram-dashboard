@@ -1,7 +1,7 @@
 # ADR-0051: 채팅 렌더 스타일(간격·폰트)을 LLM 제어 프론트 control surface로 노출 — Zustand+CSS변수+localStorage 영속
 
-- 상태: 확정 (2026-07-06, 근거: 사용자 결정 + Explore 조사 2건)
-- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0050(채팅 렌더 자체 구현) · `src/components/slot/StructuredTextView.tsx` · `src/components/slot/chat/chat.css` · `src/store/themeStore.ts`(계승 패턴) · `src/api/eventBus.ts`(window 핸들 노출) · step-log 2026-07-06
+- 상태: 확정 (2026-07-06, 근거: 사용자 결정 + Explore 조사 2건) · 부분 폐기 by ADR-0169 (LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장)
+- 관련: CLAUDE.md §5(LLM-우선 제어) · ADR-0050(채팅 렌더 자체 구현) · `src/components/slot/StructuredTextView.tsx` · `src/components/slot/chat/chat.css` · `src/store/themeStore.ts`(계승 패턴) · `src/store/eventBus.ts`(window 핸들 노출) · step-log 2026-07-06 · Amended by ADR-0169 (LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장)
 
 ## 맥락
 ADR-0050에서 채팅 렌더를 자체 구현하고 Claude Code VSCode 확장 룩에 맞춰 시각 refine 중이다. 사용자가 우리 렌더와 확장을 나란히 비교해 "줄 간격이 좁고 전체적으로 산만하다"고 지적했다 — 핵심 원인은 ① 행 간 수직 간격 부족 ② 유저 메시지가 대화를 덩어리로 끊어주지 못함 ③ dot-rail 연결선 clean-ends 미처리다.
@@ -31,7 +31,7 @@ ADR-0050에서 채팅 렌더를 자체 구현하고 Claude Code VSCode 확장 �
 - Explore 조사 2건으로 grounding: 스타일 값 위치 맵 + 현 제어 표면 현황(`window.__engramLayout`/`__ENGRAM_AGENT__` 등).
 
 ## 영향 / 불변식
-- 새 Zustand chat-style slice + CSS 변수(theme.css/index.css `@theme`) + `window.__engramChat` 핸들 추가. `src/api/eventBus.ts` 부팅 시 핸들 노출.
+- 새 Zustand chat-style slice + CSS 변수(theme.css/index.css `@theme`) + `window.__engramChat` 핸들 추가. `src/store/eventBus.ts` 부팅 시 핸들 노출.
 - `StructuredTextView.tsx`/`chat.css`의 간격·폰트 하드코딩 값이 CSS 변수 참조로 교체됨.
 - **rail 연결선 오프셋 ↔ outer padding 커플링을 CSS 변수로 명시화** — 둘이 한 변수 그룹으로 묶여 함께 조정(기존 `top-[-12px]`↔`pt-3` 암묵 커플링 제거).
 - localStorage 키 추가(부팅 로드→CSS 변수 적용). 값 부재/파싱 실패 시 기본값 fallback.

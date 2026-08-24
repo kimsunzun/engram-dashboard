@@ -2,11 +2,4 @@
 import type { SlotContent } from "./SlotContent";
 import type { SplitDir } from "./SplitDir";
 
-/**
- * 레이아웃 트리 노드 — 말단 Slot / 내부 Split 의 재귀 enum.
- *
- * `#[serde(tag = "type")]` + snake_case → 프론트 discriminated union(`{type:"slot",...}`/
- * `{type:"split",...}`). content 는 슬롯 점유자(Empty/Agent, ADR-0060) — 옛 `agent_id: Option<String>`
- * 을 타입드 유니온으로 대체(콘텐츠 종류 확장 seam).
- */
 export type LayoutNode = { "type": "slot", id: string, content: SlotContent, } | { "type": "split", dir: SplitDir, ratio: number, a: LayoutNode, b: LayoutNode, };

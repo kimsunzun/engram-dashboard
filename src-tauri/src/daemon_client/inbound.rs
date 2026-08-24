@@ -8,23 +8,30 @@
 //! [`TaskSpawner`] 가 띄운 별도 태스크에서 돈다.
 //!
 //! 배달 규칙은 홉마다 같은 3단계를 쓴다(`engram_dashboard_command::route` — ADR-0155 결정 3): 내 표에
-//! 있나 → 명부에 있나 → 오류. 셸의 2·3단계는 아직 비어 있다([`Hop::roster`] 주석).
+//! 있나 → 명부에 있나 → 오류. 셸의 2단계는 **웹뷰 몫**이다([`ViewCommandPort`]) — 표에 없는 이름은
+//! 그 창으로 내려가고, 거기에도 없으면 `UNKNOWN_COMMAND` 로 나간다.
 //!
 //! ## 배선
 //! 부르는 자리는 `connection.rs` 의 `Message::Text` 갈래이고(그 파일의 `accept_inbound`), 봉투를 나르는 wire
 //! 프레임도 서 있다 — `AgentEvent::CommandRequest`(데몬→셸)와 `AgentCommand::CommandOutcome`(셸→데몬).
 //! 셸이 자기 이름을 데몬 명부에 얹는 것도 매 (재)연결마다 나간다(`register_own_commands`).
 //! 보내는 쪽도 이제 있다 — 데몬이 자기 명부에서 주인을 찾아 그 연결로 봉투를 쓴다
-//! (`engram_dashboard_daemon::command_delivery` · ADR-0154). 그 다리가 서면서 이 모듈은 한 줄도 안 바뀌었다.
+//! (`engram_dashboard_daemon::command_delivery` · ADR-0154). 셸 표에 없는 이름은 여기서 한 홉 더 내려가
+//! 웹뷰에 닿는다([`ViewCommandPort`] · 실물 = `crate::view_commands`).
 //!
-//! ★단 **화면까지는 아직 안 닿는다**★: 데몬→셸 왕복의 답장(`AgentEvent::CommandReply`)을 웹뷰의
+//! ★단 **반대 방향은 아직 안 닿는다**★: 데몬→셸 왕복의 답장(`AgentEvent::CommandReply`)을 웹뷰의
 //! `handleEvent`(`src/api/protocolClient.ts`)가 아직 갈라내지 않아, 웹뷰가 낸 명령의 promise 는 안 풀린다
 //! (그 사실의 정본 = `engram_dashboard_protocol` 의 `AgentEvent::CommandReply` 주석). 이 모듈이 도는 방향
 //! (데몬→셸)과는 별개의 다리다.
 //!
-//! ★검증이 서는 자리★: 실 소켓·실 `AppHandle` 이 필요한 조각(연결 select 루프)은 이 패키지에서 테스트가
-//! 아예 안 돌아(`0xc0000139`) 그 갈래 선택만 무커버로 남고, 그 아래 전부(슬롯 조회 · 결말 조립 · 채널 배달 ·
-//! 등록 패킷 내용)는 소켓 없는 하네스가 실코드로 덮는다 — 잔여 목록의 정본은 `tests/layout_commands.rs` 헤더다.
+//! ★검증이 서는 자리★: 연결 select 루프는 **실 소켓을 요구한다** — 그 갈래 선택만 여기서 무커버로 남고,
+//! 그 아래 전부(슬롯 조회 · 결말 조립 · 채널 배달 · 등록 패킷 내용)는 소켓 없는 하네스가 실코드로 덮는다
+//! — 잔여 목록의 정본은 `tests/layout_commands.rs` 헤더다.
+//! ★단 그 요구는 **비용이지 불가능이 아니다**★: 같은 패키지의 `src/daemon_client/tests.rs` 가 루프백 WS 를
+//! 세워 그 루프를 실제로 돌린다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도다.
+//! ★2026-08-24 전에는 이 자리에 「어떤 하네스로도 세울 수 없다」고 적혀 있었다★ — 그 말은 참이었지만
+//! 사유가 소켓이 아니라 **`AppHandle` 이 없으면 연결 태스크를 아예 안 띄우던 단락**이었다. 그 단락이
+//! 지워지면서(정본 = `mod.rs` 의 `start_connection` 「단락 이야기」) 문장도 함께 낡았다.
 //!
 //! ★이름 충돌 주의★: `connection.rs` 에는 **다른** `CommandReply`(`oneshot::Sender`)가 있다. 그래서 그 파일은
 //! 봉투의 답장 타입을 `BusReply` 로 별칭해 쓴다 — 두 이름을 한 스코프에 그냥 들이지 말 것.
@@ -37,7 +44,7 @@ use std::sync::{Arc, OnceLock};
 
 use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
-    ErrorCode, InboundCommands, ReplySink, Roster,
+    ErrorCode, InboundCommands, OwnerLookup, OwnerLookupSource, ReplySink,
 };
 
 /// 태스크 하나 — 출력이 없다(답장은 [`ReplySink`] 가 나른다).
@@ -64,14 +71,74 @@ impl TaskSpawner for RuntimeSpawner {
     }
 }
 
+/// 셸이 **자기 표에 없는 이름**을 넘길 곳 — 오늘 그곳은 웹뷰 하나다(TRD §3-8 의 홉 ③).
+///
+/// ★세 창구를 한 trait 으로 묶는 이유★: 셋 다 같은 한 상태(어느 창이 무엇을 보고했나)를 읽는다. 명부와
+/// 링크를 따로 주입받게 하면 조립부가 그 둘이 같은 실물인지를 매번 지켜야 한다.
+/// ★주입인 이유★: 실물은 `AppHandle::emit_to` 에 닿아 창 없이 못 세운다(ADR-0012). 실물은
+/// `crate::view_commands::ViewCommandBridge` 다.
+/// ★[`ViewCommandPort::declarations`] 는 셸 표가 쥔 이름을 실으면 안 된다★ — 실어도 배달은 안 갈린다
+/// (`route` 가 표를 먼저 본다) 대신 **등록 패킷에 못 부를 이름**이 하나 는다. 거르는 자리는 구현 쪽이다
+/// (`view_commands` 의 예약 이름 필터) — 여기서 한 번 더 거르면 같은 판정이 두 곳에 살고, 둘이 다른
+/// 기준(선언 / 꽂힌 것)을 쓰게 되는 순간 어느 쪽이 진짜인지 알 수 없어진다.
+pub trait ViewCommandPort: Send + Sync {
+    /// 등록 패킷에 얹을 웹뷰 몫.
+    fn declarations(&self) -> Vec<CommandDecl>;
+    /// 「이 이름을 지금 웹뷰가 받을 수 있나」 — 배달 3단계의 2단계.
+    fn lookup(&self, name: &str) -> OwnerLookup;
+    /// 봉투를 웹뷰로 내리고 답장을 기다린다.
+    fn dispatch(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>>;
+}
+
+/// 웹뷰가 없는 조립 — 2단계가 항상 미스라 모르는 이름은 `UNKNOWN_COMMAND` 로 나간다.
+struct NoViewCommands;
+
+impl ViewCommandPort for NoViewCommands {
+    fn declarations(&self) -> Vec<CommandDecl> {
+        Vec::new()
+    }
+
+    fn lookup(&self, _name: &str) -> OwnerLookup {
+        OwnerLookup::Unknown
+    }
+
+    /// ★위 `lookup` 이 항상 `Unknown` 이라 여기 닿지 않는다★ — 그래도 패닉이 아니라 값으로 답하는 것은
+    /// 계약이다(명령 핸들러는 터져서 죽지 않는다 — TRD §4-⑨).
+    fn dispatch(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
+        let request_id = env.request_id;
+        let name = env.name;
+        Box::pin(async move {
+            CommandReply::err(
+                request_id,
+                CommandError::of(
+                    ErrorCode::Unsupported,
+                    format!("this client cannot forward '{name}' — it has no onward command link"),
+                ),
+            )
+        })
+    }
+}
+
+/// `route` 가 요구하는 두 창구(`OwnerLookupSource`·`CommandLink`)를 한 포트에서 낸다.
+struct ViewHop(Arc<dyn ViewCommandPort>);
+
+impl OwnerLookupSource for ViewHop {
+    fn lookup(&self, name: &str) -> OwnerLookup {
+        self.0.lookup(name)
+    }
+}
+
+impl CommandLink for ViewHop {
+    fn send(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
+        self.0.dispatch(env)
+    }
+}
+
 /// 이 홉이 배달에 쓰는 것 전부 — 태스크로 넘어가야 해서 한 `Arc` 에 묶는다.
 struct Hop {
     table: CommandTable,
-    /// ★언제나 비어 있다(오늘)★ — 셸이 남의 이름을 대신 배달하는 것은 화면 몫 등록(TRD §6 Step 4)이
-    /// 서야 생긴다. 빈 명부라 3단계 배달의 2단계가 항상 미스이고, 그래서 모르는 이름은 `UNKNOWN_COMMAND`
-    /// 로 나간다(`route` 의 마지막 갈래).
-    roster: Roster,
-    link: NoRelay,
+    /// 3단계 배달의 2·3단계 — 명부(어느 이름이 웹뷰 것인가)와 그 링크를 함께 낸다.
+    view: ViewHop,
 }
 
 /// 받은 봉투를 자기 표로 배달하는 수신기.
@@ -84,12 +151,23 @@ pub struct InboundReceiver {
 impl InboundReceiver {
     /// `catalog_version` = 표를 만든 선언 블록의 세대(`CATALOG_VERSION`). 등록 패킷이 진단용으로 싣는다
     /// (받는 쪽이 자기 번호와 비교해 거절하면 틀린다 — TRD §4-①).
+    ///
+    /// 웹뷰 몫 없이 선다 — 셸 자기 표만 배달한다.
     pub fn new(table: CommandTable, spawn: Arc<dyn TaskSpawner>, catalog_version: u32) -> Self {
+        Self::with_view(table, spawn, catalog_version, Arc::new(NoViewCommands))
+    }
+
+    /// 웹뷰 몫을 함께 지는 조립 — 운영 경로(`DaemonClient::install_command_table`)가 쓴다.
+    pub fn with_view(
+        table: CommandTable,
+        spawn: Arc<dyn TaskSpawner>,
+        catalog_version: u32,
+        view: Arc<dyn ViewCommandPort>,
+    ) -> Self {
         InboundReceiver {
             hop: Arc::new(Hop {
                 table,
-                roster: Roster::new(),
-                link: NoRelay,
+                view: ViewHop(view),
             }),
             spawn,
             catalog_version,
@@ -98,8 +176,14 @@ impl InboundReceiver {
 
     /// 등록 패킷에 실을 것 — ★선언이 아니라 **표에 실제로 꽂힌 것**을 광고한다★(못 부를 이름을 등록하면
     /// 데몬이 배달한 봉투가 `UNKNOWN_COMMAND` 로 되돌아간다).
+    ///
+    /// 웹뷰 몫이 뒤에 붙는다 — 데몬 눈에 두 층은 구분되지 않고, 구분할 필요도 없다(2단 배달이 셸에서 다시
+    /// 갈라 준다 — TRD §3-7 조항 2). ★그래서 이 목록은 **매번 다시 읽는다**★: 웹뷰는 소켓과 무관하게
+    /// 늦게 뜨므로, 한 번 만들어 캐시하면 재연결이 옛 목록을 다시 보낸다.
     pub fn declarations(&self) -> Vec<CommandDecl> {
-        self.hop.table.decls()
+        let mut decls = self.hop.table.decls();
+        decls.extend(self.hop.view.0.declarations());
+        decls
     }
 
     pub fn catalog_version(&self) -> u32 {
@@ -130,7 +214,7 @@ impl InboundCommands for InboundReceiver {
     fn on_command(&self, env: CommandEnvelope, reply: ReplySink) {
         let hop = Arc::clone(&self.hop);
         self.spawn.spawn(Box::pin(async move {
-            let answered = route(&hop.table, &hop.roster, &hop.link, env).await;
+            let answered = route(&hop.table, &hop.view, &hop.view, env).await;
             reply.send(answered.outcome);
         }));
     }
@@ -165,28 +249,5 @@ impl InboundSlot {
 impl Default for InboundSlot {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// 3단계 배달의 2단계가 쓸 전송 — ★셸엔 아직 내보낼 곳이 없다★.
-///
-/// 명부가 비어 있어(`Hop::roster`) `route` 는 이 링크에 닿지 않는다. 그래도 패닉이 아니라 값으로 답하는
-/// 것은 계약이다 — 명령 핸들러는 터져서 죽지 않는다(TRD §4-⑨). 화면 몫 배달이 서면 이 자리가 웹뷰 링크로
-/// 바뀐다.
-struct NoRelay;
-
-impl CommandLink for NoRelay {
-    fn send(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
-        let request_id = env.request_id;
-        let name = env.name;
-        Box::pin(async move {
-            CommandReply::err(
-                request_id,
-                CommandError::of(
-                    ErrorCode::Unsupported,
-                    format!("this client cannot forward '{name}' — it has no onward command link"),
-                ),
-            )
-        })
     }
 }

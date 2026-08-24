@@ -56,7 +56,14 @@ vi.mock('../../store/viewStore', () => ({
   selectView: () => selectViewMock(),
 }))
 
-import AgentList, { statusGlyph, statusGlyphColor } from './AgentList'
+// Ban = 마지막 실패 축의 금지 표식(ADR-0173) — 상태 축 4모양(Circle/Square/X)과 달리 `lastFailure` 가
+//   있을 때만 나온다. 그래서 아래 「4모양 밖은 나오지 않는다」 allowlist(상태 축 단독 호출)에는 안 든다.
+import { Ban, Circle, Loader, Square, X } from 'lucide-react'
+
+import AgentList, { statusGlyphColor, statusGlyphIcon } from './AgentList'
+// 시연(presentation) 층은 매핑 SSOT 인 statusGlyph 에서 직접 가져온다 — AgentList 의 re-export 는
+//   옛 importer 를 위한 통로일 뿐이라 새 축을 거기로 늘리지 않는다.
+import { rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { useAgentStore } from '../../store/agentStore'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 import type { LayoutNode } from '../../api/layoutTypes'
@@ -78,12 +85,14 @@ function profile(
   createdAt = 0,
   displayName: string | null = null,
   parentId: string | null = null,
+  lastFailure: AgentProfile['last_failure'] = null,
 ): AgentProfile {
   return {
     id, name: '', display_name: displayName, parent_id: parentId,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
-    restart_policy: 'Never', restart_count: 0, failed_reason: null, created_at: createdAt,
+    restart_policy: 'Never', restart_count: 0, failed_reason: null, last_failure: lastFailure,
+    created_at: createdAt,
     last_active: 0, last_start_at: null,
   }
 }
@@ -111,18 +120,49 @@ afterEach(() => {
   useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
 })
 
-// ── statusGlyph: 전 분기(pure, ADR-0062) ─────────────────────────────────────
-describe('statusGlyph (pure, 전 분기)', () => {
-  it('Running → ● (작업중)', () => expect(statusGlyph('Running')).toBe('●'))
-  it('Exiting → ◻ (멈춤 전이)', () => expect(statusGlyph('Exiting')).toBe('◻'))
-  it('Exited → ◻ (멈춤)', () => expect(statusGlyph('Exited')).toBe('◻'))
-  it('Killed → ◻ (멈춤)', () => expect(statusGlyph('Killed')).toBe('◻'))
-  it('Failed → ✗ (에러)', () => expect(statusGlyph('Failed')).toBe('✗'))
-  it('Reserved → ○ (유휴/미spawn)', () => expect(statusGlyph('Reserved')).toBe('○'))
-  it('미지 status → ○ (degrade, 빈 글리프 방지)', () => expect(statusGlyph('???')).toBe('○'))
-  it('◐(입력대기)는 어떤 입력으로도 반환되지 않는다(어휘로만 존재, 미점등)', () => {
-    const inputs = ['Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', 'unknown', '']
-    for (const s of inputs) expect(statusGlyph(s)).not.toBe('◐')
+// ── statusGlyphIcon: 전 분기(pure, ADR-0062) ─────────────────────────────────
+// 아이콘 동일성은 **컴포넌트 참조**로 잰다 — lucide 의 클래스명 규약이 바뀌어도 매핑 테스트는 성립한다.
+//   클래스명은 아래 렌더 스위트에서만 본다(실제 svg 가 떴나).
+describe('statusGlyphIcon (pure, 전 분기)', () => {
+  it('Running → 채운 원 (작업중)', () => {
+    const g = statusGlyphIcon('Running')
+    expect(g.Icon).toBe(Circle)
+    expect(g.fill).toBe('currentColor')
+    expect(g.shape).toBe('filled-circle')
+  })
+  it('Exiting → 사각 (멈춤 전이)', () => expect(statusGlyphIcon('Exiting').Icon).toBe(Square))
+  it('Exited → 사각 (멈춤)', () => expect(statusGlyphIcon('Exited').Icon).toBe(Square))
+  it('Killed → 사각 (멈춤)', () => expect(statusGlyphIcon('Killed').Icon).toBe(Square))
+  it('Failed → ✗ 모양 (에러)', () => expect(statusGlyphIcon('Failed').Icon).toBe(X))
+  it('Reserved → 빈 원 (유휴/미spawn)', () => {
+    const g = statusGlyphIcon('Reserved')
+    expect(g.Icon).toBe(Circle)
+    expect(g.fill).toBe('none')
+    expect(g.shape).toBe('circle')
+  })
+  it('미지 status → 빈 원 (degrade, 빈 칸 방지)', () => {
+    const g = statusGlyphIcon('???')
+    expect(g.Icon).toBe(Circle)
+    expect(g.shape).toBe('circle')
+  })
+
+  // ★옛 "◐ 를 반환하지 않는다" 테스트의 계승★(ADR-0062 — 입력대기는 어휘로만, 미점등): 문자 비교가
+  //   사라졌으므로 **치역 allowlist** 로 잰다. 반쯤 채운 모양(CircleDashed·PieChart…)이든 뭐든 아래 4모양
+  //   밖의 것을 새 분기가 반환하면 여기서 깨진다. 입력 목록에 InputWaiting/Idle/Waiting 을 섞어 둔 이유 =
+  //   그런 분기가 실제로 붙는다면 이 이름들로 붙기 때문(안 붙어 있으면 default 로 떨어져 통과한다).
+  it('4모양 밖(◐ 같은 반쯤 채운 모양 포함)은 어떤 입력으로도 나오지 않는다', () => {
+    const inputs = [
+      'Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', 'unknown', '',
+      'InputWaiting', 'Idle', 'Waiting',
+    ]
+    const allowedIcons = [Circle, Square, X]
+    const allowedShapes = ['filled-circle', 'square', 'x', 'circle']
+    for (const s of inputs) {
+      const g = statusGlyphIcon(s)
+      expect(allowedIcons).toContain(g.Icon)
+      expect(allowedShapes).toContain(g.shape)
+      expect(['currentColor', 'none']).toContain(g.fill)
+    }
   })
 })
 
@@ -139,6 +179,102 @@ describe('statusGlyphColor (pure)', () => {
   it('Reserved → var(--text-muted)', () => expect(statusGlyphColor('Reserved')).toBe('var(--text-muted)'))
   it('미지 status → var(--text-muted) (default)', () =>
     expect(statusGlyphColor('???')).toBe('var(--text-muted)'))
+})
+
+// ── 마지막 실패가 기호를 갈아끼운다(ADR-0173) ────────────────────────────────
+// 기호를 하나 더 늘리지 않는다 — 상태 기호 자리를 금지 표식이 **대체**하고 색도 함께 갈린다.
+//
+// ★관측 대상이 문자에서 모양 토큰으로 옮겨갔다★: 아이콘화(ADR-0168) 전에는 이 스위트가 반환 문자
+//   (`'⊘'`·`'●'`)를 그대로 비교했는데, 이제 반환물이 {아이콘·채움·모양 토큰} 한 벌이라 비교할 문자가
+//   없다. 대신 `shape`(DOM 에도 그대로 나가는 안정 토큰)로 잰다 — 아이콘 컴포넌트 대신 토큰을 쓰는
+//   이유는 lucide 가 컴포넌트를 갈아끼워도 "무엇으로 읽히나"는 이 토큰이 지기 때문이다.
+describe('statusGlyphIcon/Color — 마지막 실패 축', () => {
+  const reserved = 'Reserved'
+  it('쉬고 있는 항목은 상태와 무관하게 금지 표식으로 갈린다', () => {
+    for (const s of [reserved, 'Exited', 'Killed', 'Failed', '???']) {
+      const g = statusGlyphIcon(s, 'NoConversationToResume')
+      expect(g.shape).toBe('blocked')
+      expect(g.Icon).toBe(Ban)
+      // 채우면 Running(채운 원)과 실루엣이 겹쳐 e-ink 에서 구분이 사라진다.
+      expect(g.fill).toBe('none')
+      expect(statusGlyphColor(s, 'NoConversationToResume')).toBe('var(--status-blocked)')
+    }
+  })
+  it('★도는 중이 이긴다★ — 마지막 실패를 들고 있어도 Running 이면 원래 기호·색 그대로', () => {
+    expect(statusGlyphIcon('Running', 'NoConversationToResume').shape).toBe('filled-circle')
+    expect(statusGlyphColor('Running', 'NoConversationToResume')).toBe('var(--status-running)')
+  })
+  it('Exiting 은 과도기라 도는 중 쪽으로 센다(정상 종료 몇 초 동안 깜빡이면 안 된다)', () => {
+    expect(statusGlyphIcon('Exiting', 'NoConversationToResume')).toEqual(statusGlyphIcon('Exiting'))
+    expect(statusGlyphColor('Exiting', 'NoConversationToResume')).toBe(statusGlyphColor('Exiting'))
+  })
+  it('마지막 실패가 없으면 기존 매핑이 한 톨도 바뀌지 않는다', () => {
+    for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???']) {
+      expect(statusGlyphIcon(s, null)).toEqual(statusGlyphIcon(s))
+      expect(statusGlyphColor(s, null)).toBe(statusGlyphColor(s))
+    }
+  })
+  it('종류가 달라도 기호는 하나다(종류별 기호를 늘리지 않는다)', () => {
+    const kinds = ['NoConversationToResume', 'SpawnFailed', 'EarlyExitAfterResume', 'Other'] as const
+    const shapes = new Set(kinds.map(k => statusGlyphIcon(reserved, k).shape))
+    expect(shapes.size).toBe(1)
+  })
+})
+
+// ── 시연 층: 「답을 기다리는 중」·「방금 거절당했다」(pure) ────────────────────────
+// 백엔드 status 는 세션이 생기는 순간 낙관적으로 Running 이 되므로 "연결됐다"를 뜻하지 않는다. 그래서
+//   답이 오기 전 구간과 거절 직후 구간을 상태 축 **위에** 얹는다 — `isFailureBlocked` 의 의미는 불변.
+describe('rowPhase / rowGlyphIcon / rowGlyphColor (시연 층, pure)', () => {
+  it('우선순위 = pending > rejected > settled(재시도가 지난 거절을 이긴다)', () => {
+    expect(rowPhase(true, false)).toBe('pending')
+    expect(rowPhase(true, true)).toBe('pending')
+    expect(rowPhase(false, true)).toBe('rejected')
+    expect(rowPhase(false, false)).toBe('settled')
+  })
+
+  it('pending = 바퀴살 모양 + 새 토큰(기존 다섯을 재사용·개명하지 않는다)', () => {
+    const g = rowGlyphIcon('pending', 'Running', null)
+    expect(g.Icon).toBe(Loader)
+    expect(g.shape).toBe('pending')
+    // 바퀴살은 선이라 채울 면이 없다 — 채우면 lucide 가 획을 뭉갠다.
+    expect(g.fill).toBe('none')
+  })
+
+  it('★기다리는 동안 초록은 없다★ — 낙관적 Running 이어도 색이 muted 로 눌린다', () => {
+    // 이 결함의 본체가 그 초록이었다: 답을 모르는 구간에 "돌고 있다"고 주장한 것.
+    for (const s of ['Running', 'Exiting', 'Exited', 'Failed', 'Killed', 'Reserved', '???']) {
+      expect(rowGlyphColor('pending', s, null)).toBe('var(--text-muted)')
+      expect(rowGlyphColor('pending', s, null)).not.toBe('var(--status-running)')
+      expect(rowGlyphIcon('pending', s, null).shape).toBe('pending')
+    }
+  })
+
+  it('★거절은 기록도 사망 관측도 기다리지 않는다★ — lastFailure=null·status=Running 이어도 금지 표식', () => {
+    // 실측한 거짓말의 정확한 구간: RPC 는 이미 거절했는데 프로세스가 아직 살아 있어 status 는 Running.
+    const g = rowGlyphIcon('rejected', 'Running', null)
+    expect(g.shape).toBe('blocked')
+    expect(g.Icon).toBe(Ban)
+    expect(rowGlyphColor('rejected', 'Running', null)).toBe('var(--status-blocked)')
+    // 「도는 중이 이긴다」(ADR-0173)는 *지난* 시도의 기록에 대한 규칙이라 여기 적용되지 않는다 —
+    //   거절은 방금 이 화면이 직접 받은 답이다.
+    expect(rowGlyphIcon('rejected', 'Running', null)).not.toEqual(statusGlyphIcon('Running', null))
+  })
+
+  it('settled 는 상태 축을 한 톨도 바꾸지 않는다(위임 — 사본을 만들지 않는다)', () => {
+    for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???']) {
+      for (const f of [null, 'NoConversationToResume'] as const) {
+        expect(rowGlyphIcon('settled', s, f)).toEqual(statusGlyphIcon(s, f))
+        expect(rowGlyphColor('settled', s, f)).toBe(statusGlyphColor(s, f))
+      }
+    }
+  })
+
+  it('상태 축 단독(statusGlyphIcon)은 절대 pending 을 내지 않는다(층이 섞이지 않는다)', () => {
+    for (const s of ['Running', 'Exiting', 'Exited', 'Killed', 'Failed', 'Reserved', '???', '']) {
+      expect(statusGlyphIcon(s).shape).not.toBe('pending')
+      expect(statusGlyphIcon(s, 'SpawnFailed').shape).not.toBe('pending')
+    }
+  })
 })
 
 // ── 트리 렌더(react-arborist, ADR-0072) ────────────────────────────────────────
@@ -179,16 +315,59 @@ describe('AgentList 트리 렌더', () => {
     expect(screen.getByText('reserved-proj')).toBeTruthy()
   })
 
-  it('상태 글리프가 모양으로 뜬다(running=● / reserved=○)', () => {
+  // 관측 표면 둘을 같이 잰다: data-agent-glyph-shape(안정 토큰)와 실제 lucide svg(클래스 + fill).
+  //   속성만 맞고 아이콘이 안 그려지는 회귀를 토큰 단독으로는 못 잡는다.
+  it('상태가 아이콘 모양으로 뜬다(Failed=✗ / reserved=빈 원)', () => {
     useAgentStore.setState({
       agents: [agent('a1', 'C:/w', { type: 'Failed', message: 'x' })],
       profiles: [profile('p1', 'C:/r')],
     })
     render(<AgentList />)
-    const runGlyph = document.querySelector('[data-agent-row="a1"] [data-agent-glyph]') as HTMLElement
+    const failGlyph = document.querySelector('[data-agent-row="a1"] [data-agent-glyph]') as HTMLElement
     const resGlyph = document.querySelector('[data-agent-row="p1"] [data-agent-glyph]') as HTMLElement
-    expect(runGlyph.textContent).toBe('✗')
-    expect(resGlyph.textContent).toBe('○')
+    expect(failGlyph.dataset.agentGlyphShape).toBe('x')
+    expect(resGlyph.dataset.agentGlyphShape).toBe('circle')
+    expect(failGlyph.querySelector('svg.lucide-x')).toBeTruthy()
+    expect(resGlyph.querySelector('svg.lucide-circle')).toBeTruthy()
+  })
+
+  // Running 과 Reserved 는 같은 원이라 **채움 여부가 유일한 모양 차이**다(e-ink 에선 색이 중립화돼 이것만
+  //   남는다 — ADR-0062). 그래서 fill 을 DOM 에서 직접 고정한다.
+  it('Running=채운 원 / Reserved=빈 원 — 채움이 두 상태를 가른다', () => {
+    useAgentStore.setState({
+      agents: [agent('a1', 'C:/w')],
+      profiles: [profile('p1', 'C:/r')],
+    })
+    render(<AgentList />)
+    const runSvg = document.querySelector('[data-agent-row="a1"] [data-agent-glyph] svg') as SVGElement
+    const resSvg = document.querySelector('[data-agent-row="p1"] [data-agent-glyph] svg') as SVGElement
+    expect(runSvg.classList.contains('lucide-circle')).toBe(true)
+    expect(resSvg.classList.contains('lucide-circle')).toBe(true)
+    expect(runSvg.getAttribute('fill')).toBe('currentColor')
+    expect(resSvg.getAttribute('fill')).toBe('none')
+  })
+
+  // 선택 표시를 배경색 하나에만 걸면 테마별로 조용히 사라진다 — `--surface-elevated` 를 썼다가 light·
+  //   e-ink 에서 패널 배경과 동색이 돼 선택이 안 보이던 실발생(2026-08-23)이 계기다. jsdom 은 CSS 변수를
+  //   풀지 않아 *색 자체*는 못 재므로, 기계 판독 채널(`data-selected`)이 회귀망을 대신 진다.
+  it('선택 행은 색이 아니라 data-selected 로도 식별된다(테마 무관 채널)', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w'), agent('a2', 'C:/x')] })
+    render(<AgentList />)
+    fireEvent.click(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    expect(document.querySelector('[data-agent-row="a1"]')?.getAttribute('data-selected')).toBe('true')
+    expect(document.querySelector('[data-agent-row="a2"]')?.getAttribute('data-selected')).toBe('false')
+  })
+
+  // 선택 배경이 패널 배경 토큰과 *같은 토큰*으로 회귀하면 테마에 따라 안 보인다. 값 비교는 jsdom 이 못
+  //   하므로 "같은 var 를 쓰지 않는다"는 약한 형태로 고정한다.
+  it('선택 배경은 패널 배경(--bg-secondary)을 그대로 쓰지 않는다', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    fireEvent.click(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    const bg = (document.querySelector('[data-agent-row="a1"]') as HTMLElement).style.background
+    expect(bg).not.toBe('var(--bg-secondary)')
+    expect(bg).not.toBe('var(--surface-elevated)')
+    expect(bg).toContain('var(')
   })
 
   it('예약 행 더블클릭 → spawnProfile(restore UX 유지)', () => {
@@ -365,6 +544,121 @@ describe('동기 in-flight 가드(useRef, FIX#1)', () => {
     fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
     fireEvent.click(screen.getByText('열기'))
     expect(assignAgentMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── ★더블클릭한 행은 답이 올 때까지 상태를 주장하지 않는다★ ────────────────────────────
+//   실측한 결함(2026-08-24): 더블클릭 후 2.4초에 활성화 RPC 가 이미 **거절**했는데도 행은 4.2초 더
+//   초록 채운 원을 그렸다 — 「실패」배지와 나란히. 초록은 status 를 따라 그려지고, 그 status 는 세션이
+//   생기는 순간 낙관적으로 Running 이 되어(코어) 프로세스가 죽어 관측될 때까지 남기 때문이다.
+//   여기서 고정하는 성질 넷: ① in-flight = 스피너 ② 거절 = 즉시 금지 표식 ③ 성공 = 평소 기호
+//   ④ 기다리는 동안 초록은 어떤 경로로도 나오지 않는다.
+//
+//   ★시간을 재지 않는다★: 이 저장소엔 벽시계 단언으로 흔들린 테스트 전례가 있다. 대신 spawnProfile
+//   Promise 를 직접 쥐고(미해결/거절/해결) microtask 만 flush 해 구간을 결정적으로 만든다.
+describe('활성화 진행/거절이 행 기호를 몬다(초록 거짓말 회귀 안전망)', () => {
+  const rowOf = (id: string) => document.querySelector(`[data-agent-row="${id}"]`) as HTMLElement
+  const glyphOf = (id: string) =>
+    document.querySelector(`[data-agent-row="${id}"] [data-agent-glyph]`) as HTMLElement
+
+  /** reject/resolve 뒤 .catch → .finally 까지 도는 microtask 를 확정적으로 비운다(타이머 아님). */
+  async function flush(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('①④ 더블클릭 후 답이 오기 전 → 스피너, 그 사이 명부에 Running 이 올라와도 초록 아님', () => {
+    let resolveSpawn: (() => void) | undefined
+    clientMock.spawnProfile.mockImplementationOnce(
+      () => new Promise<{ id: string }>(res => { resolveSpawn = () => res({ id: 'p1' }) }),
+    )
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
+    expect(glyphOf('p1').querySelector('svg.lucide-loader')).toBeTruthy()
+    // 회전은 스타일시트가 소유한다(agentGlyph.css) — 컴포넌트는 클래스만 붙인다.
+    expect(glyphOf('p1').classList.contains('engram-glyph-spin')).toBe(true)
+    expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
+    // hover 도 같은 판정을 따라간다 — 기다리는 중에 옛 실패 문구/cwd 가 뜨면 기호와 말이 어긋난다.
+    expect(rowOf('p1').getAttribute('title')).toBe('진행 중…')
+
+    // ★결함의 정확한 구간★: 백엔드가 세션 생성과 함께 낙관적 Running 을 명부에 올린다. 그래도
+    //   아직 답이 아니므로 초록으로 갈아타면 안 된다.
+    act(() => { useAgentStore.setState({ agents: [agent('p1', 'C:/r')] }) })
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
+    expect(glyphOf('p1').dataset.agentGlyphShape).not.toBe('filled-circle')
+    expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
+
+    resolveSpawn?.() // cleanup(핸들 미해결 방지)
+  })
+
+  it('② 거절 → lastFailure 기록이 오기 전에 이미 금지 표식(배지와 같은 순간)', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(() =>
+      Promise.reject(new Error('no conversation to resume')),
+    )
+    // last_failure = null 로 둔다 — 기록이 아직 안 온 상태가 이 테스트의 전제다.
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+
+    expect(useAgentStore.getState().profiles[0].last_failure).toBeNull()
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
+    expect(glyphOf('p1').querySelector('svg.lucide-ban')).toBeTruthy()
+    expect(glyphOf('p1').style.color).toBe('var(--status-blocked)')
+    // 「실패」배지 = 프론트가 답을 이미 쥐고 있었다는 증거. 기호가 그것과 같은 순간에 갈린다.
+    expect(rowOf('p1').textContent).toContain('실패')
+  })
+
+  it('② 거절 후 프로세스가 아직 살아 status=Running 이어도 초록으로 돌아가지 않는다', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(() => Promise.reject(new Error('rejected')))
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+    // 죽어 가는 프로세스가 명부에 Running 으로 남아 있는 구간(실측 +2.4s ~ +6.6s).
+    act(() => { useAgentStore.setState({ agents: [agent('p1', 'C:/r')] }) })
+
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
+    expect(glyphOf('p1').style.color).not.toBe('var(--status-running)')
+  })
+
+  it('③ 성공 → 평소 상태 기호(초록 채운 원은 여기서만 난다)', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(async () => ({ id: 'p1' }))
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+    act(() => {
+      useAgentStore.setState({ agents: [agent('p1', 'C:/r')], profiles: [profile('p1', 'C:/r')] })
+    })
+
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('filled-circle')
+    expect(glyphOf('p1').querySelector('svg.lucide-circle')).toBeTruthy()
+    expect(glyphOf('p1').style.color).toBe('var(--status-running)')
+    expect(glyphOf('p1').classList.contains('engram-glyph-spin')).toBe(false)
+  })
+
+  it('거절 후 재시도 → 스피너가 금지 표식을 이긴다(지난 답은 지금의 사실이 아니다)', async () => {
+    clientMock.spawnProfile.mockImplementationOnce(() => Promise.reject(new Error('rejected')))
+    useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })
+    render(<AgentList />)
+    fireEvent.doubleClick(rowOf('p1'))
+    await flush()
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('blocked')
+
+    let resolveSpawn: (() => void) | undefined
+    clientMock.spawnProfile.mockImplementationOnce(
+      () => new Promise<{ id: string }>(res => { resolveSpawn = () => res({ id: 'p1' }) }),
+    )
+    fireEvent.doubleClick(rowOf('p1'))
+    expect(glyphOf('p1').dataset.agentGlyphShape).toBe('pending')
+    resolveSpawn?.()
   })
 })
 

@@ -413,9 +413,9 @@ mod tests {
             "AgentListUpdated 는 broadcast — 매칭 우회"
         );
         // ADR-0155 명령↔답장 쌍(ListCommands↔CommandList) 박제는 이 파일이 아니라 protocol crate
-        // 쪽 테스트(`list_commands_reply_request_id_pairing`)가 CI 에서 돈다 — 이 파일의 lib 테스트
-        // 타깃은 로컬/CI 모두 0xc0000139(ENTRYPOINT_NOT_FOUND)로 실행되지 않는다(이 파일에 남은
-        // request_id 추출 테스트 전부가 같은 이유로 미실행이다).
+        // 쪽 테스트(`list_commands_reply_request_id_pairing`)가 **CI 에서** 돈다 — 이 파일의 단언은
+        // 로컬(`cargo test -p engram-dashboard --test lib_unit`)에서만 돌고 CI 는 보지 않는다.
+        // 그 등재 상태의 정본 = CLAUDE.md 「빌드·검증 명령」의 lib_unit 줄.
         // SubscribeAck 는 agent_id 기반(request_id 없음) — T6a reply 매칭 대상 아님.
         assert_eq!(
             event_reply_request_id(&AgentEvent::SubscribeAck {

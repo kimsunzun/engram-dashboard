@@ -1,6 +1,6 @@
 // ★유일한 레이아웃 렌더러★(Brick 1): 옛 프론트 전용 slotStore/LayoutRenderer(number id + content union)는
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
-// 사람 클릭(SlotContextMenu — 우클릭 전용, ADR-0144)이든 LLM(window.__engramLayout)이든 같은 invoke→emit
+// 사람 클릭(SlotContextMenu — 우클릭 전용, ADR-0144)이든 LLM(window.__engramCmd)이든 같은 invoke→emit
 // 권위 루프로 갱신된다.
 
 import { useEffect, useRef, useState } from 'react'
@@ -176,8 +176,8 @@ export default function ViewLayoutRenderer({
           if (!isContentSlot(node.content)) return
           if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
         }}
-        // ADR-0035: 메뉴 액션(분할/닫기/배정)은 viewStore(=window.__engramLayout) 단일 제어 표면으로만
-        //   흐른다(사람 클릭 = LLM 이 한 표면, §5).
+        // ADR-0064: 메뉴 항목은 command id 로만 실행한다 — 메뉴가 store 를 직접 부르지 않는다.
+        //   그래서 사람 우클릭과 LLM 이 같은 진입점을 지난다(§5).
         onContextMenu={e => {
           e.preventDefault()
           setContextMenu({ x: e.clientX, y: e.clientY })
@@ -232,7 +232,7 @@ export default function ViewLayoutRenderer({
           //   pointer-events 를 끊어 아이콘 위 클릭도 슬롯에 그대로 닿는다 — 유틸리티 클래스가 아니라 인라인인
           //   이유는 이 끊음이 스타일 취향이 아니라 동작 계약이라서다(클래스 규칙으로 덮이지 않고, Tailwind 를
           //   적용하지 않는 테스트 환경에서도 계산된 값으로 검증된다).
-          <Plus className="size-11 text-muted" style={{ pointerEvents: 'none' }} />
+          <Plus className="size-11 text-muted" style={{ pointerEvents: 'none', opacity: 0.5 }} />
         )}
         {contextMenu && (
           // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
@@ -247,15 +247,17 @@ export default function ViewLayoutRenderer({
           />
         )}
         {isFocused && (
-          // ★강도 65%★: 너무 약한 포커스 표시가 반복 UX 불만이라(VS Code #24586 등, /research) "은은하되
-          //   확실히 식별"되게 65%(사용자 결정). 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
+          // ★강도 40%★: 옛 65%는 프레임이 시끄럽다고 판단해 하향(사용자 결정 2026-08-23 — 65→50→40을
+          //   실제 화면에서 눈으로 비교해 고른 값). ADR-0066이 "너무 약해 안 보인다"며 거부했던 값과 같은
+          //   40%지만, 그 거부는 실물 대조 없이 내린 것이라 이번 실측 결정이 우선한다. 되돌리려면 이 줄만
+          //   올리면 된다. 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
           //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 트리/프리셋 제외).
           <div
             style={{
               position: 'absolute',
               inset: 0,
               pointerEvents: 'none',
-              boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent)',
+              boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent)',
               zIndex: 10,
             }}
           />

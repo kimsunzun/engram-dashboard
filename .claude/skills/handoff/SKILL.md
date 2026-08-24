@@ -27,7 +27,7 @@ description: 세션 핸드오프(인계 메모)를 기록·복원한다 — save
 
 ## 프로젝트 바인딩
 
-경로 등 환경 의존은 바인딩으로 주입한다(정본 = `references/flow.md §0`). 별도 프로젝트 `handoff` 스킬을 만들어도 전역을 덮지 못한다(Claude Code 우선순위 User > Project).
+경로 등 환경 의존은 바인딩으로 주입한다(정본 = `references/flow.md §0`). 별도 프로젝트 `handoff` 스킬을 만들어도 전역을 덮지 못한다(Claude Code 우선순위 User > Project — **스킬 해석 순위에 한한다**. 훅은 별개 경로다: `references/flow.md §0`).
 
 ## 자기개선 피드백
 

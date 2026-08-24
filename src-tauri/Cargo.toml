@@ -1,6 +1,6 @@
 [package]
 name = "engram-dashboard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Engram Dashboard"
 authors = []
 edition = "2021"
@@ -8,6 +8,26 @@ edition = "2021"
 [lib]
 name = "engram_dashboard_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+# ★lib 내장 유닛테스트 타깃을 끄고 아래 `[[test]] lib_unit` 으로 대체한다★ — 그 내장 타깃만은
+#   `cargo:rustc-link-arg-tests=` 가 닿지 않아 manifest 리소스를 못 받고, manifest 없는 exe 는
+#   comctl32 v5.82(TaskDialogIndirect 없음)를 물어 로더 단계에서 0xC0000139 로 죽는다(build.rs 참조).
+#   cargo 의 `-tests` 는 「tests/ 폴더 타깃 = kind test」를 뜻하므로, 같은 소스를 명시 `[[test]]` 로
+#   한 번 더 선언하면 그 인자를 받는 타깃이 된다.
+# ★남는 함정 — 이 플래그는 **기본 선택**에서만 뺀다★(실측): `--lib` 도 `--all-targets` 도 여전히 그
+#   내장 타깃을 골라 `engram_dashboard_lib-<hash>.exe` 를 짓고, 그 exe 는 manifest 를 못 받아 그대로
+#   0xC0000139 로 죽는다. 매니페스트로 닫을 수 있는 구멍이 아니니 **호출 형태로 피한다** — 이 패키지의
+#   lib 유닛테스트를 도는 유일하게 올바른 명령은 `cargo test -p engram-dashboard --test lib_unit` 이다.
+test = false
+# ★doctest 는 `test` 와 **독립 필드**다★ — 위 `test = false` 로 같이 꺼지지 않는다(기본값 true, 게다가
+#   crate-type 에 rlib 이 남아 있어 대상 자격도 그대로다). 그래서 여기서 따로 끈다. 끄는 근거 = 이
+#   패키지엔 doctest 가 없다(코드펜스 2곳 전부 ```text — `src/daemon_client/lifecycle.rs:9,14`).
+doctest = false
+
+# lib 유닛테스트(`mod tests`, src/** 전역)의 실제 실행 타깃. 위 `[lib] test = false` 의 짝이라
+#   둘 중 하나만 손대면 테스트가 통째로 사라지거나 0xC0000139 가 돌아온다.
+[[test]]
+name = "lib_unit"
+path = "src/lib.rs"
 
 [[bin]]
 name = "engram-dashboard"

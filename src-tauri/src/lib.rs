@@ -3,6 +3,9 @@ pub mod daemon_client;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;
+pub mod ui_settings;
+// ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
+pub mod view_commands;
 // 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
 // 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다.
 pub use engram_dashboard_discovery as discovery;
@@ -71,6 +74,15 @@ pub fn run() {
                 "앱 로그 파일 결정"
             );
 
+            // ── 죽은 창의 테마 항목 쓸기 ─────────────────────────────────────────────────
+            // ★부팅에서만 돈다 — `ui.refresh` 로 옮기지 말 것★. 레이아웃은 디스크에 영속되지 않아
+            //   **이 순간 팝아웃이 하나도 없고**, 그래서 지금 파일에 있는 비-선언 label 은 생사를 물을
+            //   것도 없이 정의상 전부 죽은 것이다. 여기에 생존 확인을 덧대면 아직 만들어지는 중인 창의
+            //   항목을 지우는 경합이 되살아난다(사유·불변식 전문 = `ui_settings::sweep_dead_windows`).
+            //   로그 자리를 잡은 뒤에 부른다 — 무엇을 지웠는지가 이 앱 로그에만 남는다.
+            // ADR-0167
+            crate::commands::settings::sweep_dead_window_entries(app.handle());
+
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).
             // ADR-0028: 데몬 생사 push 의 단일 소유 상태. build_tray 의 초기 refresh 가 publish 를
@@ -87,6 +99,16 @@ pub fn run() {
 
             let labels = std::sync::Arc::new(crate::commands::popout::PopupCounter::default());
             app.manage(labels.clone());
+
+            // ── 웹뷰 몫 명령의 다리(ADR-0155, TRD §6 Step 4) ─────────────────────────────
+            // ★DaemonClient 보다 먼저 만든다★ — 표를 꽂을 때 함께 넘겨야 하고(등록 패킷이 두 층을 한 방에
+            //   싣는다), 부팅 보고를 받는 invoke 핸들러도 같은 실물을 봐야 한다. 같은 Arc 를 양쪽에 준다.
+            let view_commands = std::sync::Arc::new(crate::view_commands::ViewCommandBridge::new(
+                std::sync::Arc::new(crate::view_commands::TauriViewDispatch(app.handle().clone())),
+                // 설정이 숨긴 창(오늘 = agent-tree)은 마지막 수단 목적지에서 뺀다 — 사유는 그 함수 doc.
+                crate::view_commands::hidden_window_labels(app.handle()),
+            ));
+            app.manage(view_commands.clone());
 
             // ── DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
             // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
@@ -118,6 +140,7 @@ pub fn run() {
                                 ),
                             ),
                             crate::layout::commands::CATALOG_VERSION,
+                            view_commands.clone(),
                         ),
                         // LayoutState 는 빌더에서 manage 되므로(위 ADR-0102) 여기 닿지 않는다 — 닿았다면 그
                         //   pre-build 등록이 사라진 것이라 조용히 넘기지 않는다.
@@ -217,6 +240,11 @@ pub fn run() {
             commands::list_tabs,
             commands::list_windows,
             commands::resolve_spatial,
+            // 부팅 조회 — 미는 쪽(`ui.refresh`)은 명령 표에 있다(`commands/settings.rs` 「읽는 자리가 둘인 이유」).
+            commands::get_ui_settings,
+            // 웹뷰 몫 명령(ADR-0155) — 부팅 보고와 결말 회수 한 쌍(`commands/view_bus.rs`).
+            commands::report_view_commands,
+            commands::report_command_outcome,
             commands::agent_spawn,
             commands::agent_kill,
             commands::agent_interrupt,

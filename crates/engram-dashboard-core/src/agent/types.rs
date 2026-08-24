@@ -623,6 +623,10 @@ pub enum PtyError {
     ///   (같은 id 의 화신 교체)은 그대로 통과한다 — 백스톱이 기존 팀을 인질로 잡으면 복구가 불가능해진다.
     #[error("roster is full: {current} agents (ceiling {limit}) — refusing to register another")]
     RosterFull { current: usize, limit: usize },
+    // ★중복 spawn 요청을 여기 오류로 되돌리지 마라★: "이미 떠 있다 / 이미 뜨는 중이다" 는 실패가 아니라
+    //   **할 일이 없는 요청**이라 `Ok(manager::SpawnOutcome::Moot)` 로 답한다. 오류로 두던 시절엔 소비자
+    //   마다 "이 오류는 진짜 실패가 아니다" 목록을 들어야 했고, 그 목록을 세 번 손보는 동안 세 번 다 하나씩
+    //   빠져 산 에이전트에 실패 표시가 찍혔다(ADR-0172).
 }
 
 /// 구독 replay 분기 결과(코어 중립 — 데몬이 protocol::SubscribeAction 으로 매핑).

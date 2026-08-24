@@ -82,7 +82,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0032](0032-주석컨벤션-2계층-overview헤더.md) | 주석 컨벤션 = 2계층(인라인 좁히기 + load-bearing overview 헤더) + ADR 앵커 점진 확대 (캐논 docs/reference/commenting-conventions.md) | 확정 |
 | [0033](0033-검증기록-스킬-인프라-2층-골격바인딩-adr-하이브리드.md) | 검증·기록 스킬 인프라 — 2층 골격+바인딩 + adr 하이브리드 | 확정 |
 | [0034](0034-문서-아키텍처-개발-플로우-중심-frame-claudemd-라우터화.md) | 문서 아키텍처 — 개발 플로우 중심 frame + CLAUDE.md 라우터화 | 확정 |
-| [0035](0035-레이아웃-권위-src-tauri-클라-데몬-ui-불가지론-에디터-모델.md) | 레이아웃 권위 = src-tauri 클라 (데몬 UI 불가지론, 에디터 모델) | 확정 (부분 폐기 by ADR-0057: ViewManager 내부 모델: 전역 active_view_id(main-전용)+window_bindings → 창별 active + view_owner/windows 탭 소유) |
+| [0035](0035-레이아웃-권위-src-tauri-클라-데몬-ui-불가지론-에디터-모델.md) | 레이아웃 권위 = src-tauri 클라 (데몬 UI 불가지론, 에디터 모델) | 확정 (부분 폐기 by ADR-0057: ViewManager 내부 모델: 전역 active_view_id(main-전용)+window_bindings → 창별 active + view_owner/windows 탭 소유 / ADR-0169: §5 제어 표면이 __engramLayout 이라는 조항) |
 | [0036](0036-전송-중계-통일-src-tauri-단일-데몬-클라이언트-출력-라우터-창tauri-ipc.md) | 전송 중계 통일 — src-tauri 단일 데몬 클라이언트 + 출력 라우터 (창=Tauri IPC) | 확정 |
 | [0037](0037-전송-의미론-위치-rust-단독-가드-프론트-protocolclient-박막화.md) | 전송 의미론 위치 — Rust 단독 가드, 프론트 ProtocolClient 박막화 | 확정 (부분 폐기 by ADR-0046: seq dedup/진도 거처 조항: Rust 단독 → 웹뷰 뷰 단위 lastDeliveredSeq — epoch 1차 필터는 Rust 존속) |
 | [0038](0038-비자명-기술결함은-솔로-추측매직넘버-대신-oss-사례-조사-우선.md) | 비자명 기술결함은 솔로 추측·매직넘버 대신 OSS 사례 조사 우선 | 확정 |
@@ -98,22 +98,22 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0048](0048-채팅-렌더-cline-잎-컴포넌트-verbatim-포트-우리-dispatch-react-markdown-스택apache-20-귀속.md) | 채팅 렌더 = Cline 잎 컴포넌트 verbatim 포트 + 우리 dispatch (react-markdown 스택·Apache-2.0 귀속) | 폐기 (Superseded by ADR-0050) |
 | [0049](0049-json-에이전트-thinking-기본-활성화-max-thinking-tokens-백엔드-주입.md) | JSON 에이전트 thinking 기본 활성화 — MAX_THINKING_TOKENS 백엔드 주입 | 확정 |
 | [0050](0050-채팅-렌더-자체-구현-cline-포트-제거-claude-code-vscode-확장-시각-벤치마크.md) | 채팅 렌더 = 자체 구현 (Cline 포트 제거) + Claude Code VSCode 확장 시각 벤치마크 | 확정 |
-| [0051](0051-채팅-렌더-스타일간격폰트을-llm-제어-프론트-control-surface로-노출-zustandcss변수localstorage-영속.md) | 채팅 렌더 스타일(간격·폰트)을 LLM 제어 프론트 control surface로 노출 — Zustand+CSS변수+localStorage 영속 | 확정 |
+| [0051](0051-채팅-렌더-스타일간격폰트을-llm-제어-프론트-control-surface로-노출-zustandcss변수localstorage-영속.md) | 채팅 렌더 스타일(간격·폰트)을 LLM 제어 프론트 control surface로 노출 — Zustand+CSS변수+localStorage 영속 | 확정 (부분 폐기 by ADR-0169: LLM 핸들 __engramChat 과 사람 UI 동일 액션 주장) |
 | [0052](0052-json-모드-유저-에코-중복-제거-uuidisreplay-기반-dedup-blunt-suppress-폐기.md) | json 모드 유저 에코 중복 제거 = uuid/isReplay 기반 dedup (blunt suppress 폐기) | 확정 |
 | [0053](0053-채팅-슬롯-오버레이-스크롤바-radix-scrollarea-채택-네이티브-css전용-라이브러리자작-거부.md) | 채팅 슬롯 오버레이 스크롤바 = Radix ScrollArea 채택 (네이티브 CSS·전용 라이브러리·자작 거부) | 확정 |
 | [0054](0054-런타임-webviewwindow는-config-창과-동일한-webview2-additionalbrowserargs를-써야-한다-환경-옵션-parity-불변식.md) | 런타임 WebviewWindow는 config 창과 동일한 WebView2 additionalBrowserArgs를 써야 한다 (환경 옵션 parity 불변식) | 확정 |
-| [0055](0055-command-registry-구현-방향-프론트-레지스트리-handler-라우팅기존-invoke-재사용-골격-먼저점진-이관-adr-0022-구체화.md) | command registry 구현 방향 — 프론트 레지스트리 + handler 라우팅(기존 invoke 재사용), 골격 먼저·점진 이관 (ADR-0022 구체화) | 확정 |
+| [0055](0055-command-registry-구현-방향-프론트-레지스트리-handler-라우팅기존-invoke-재사용-골격-먼저점진-이관-adr-0022-구체화.md) | command registry 구현 방향 — 프론트 레지스트리 + handler 라우팅(기존 invoke 재사용), 골격 먼저·점진 이관 (ADR-0022 구체화) | 확정 (부분 폐기 by ADR-0169: 결정 3 의 __engramLayout 유지 조항 (agent invoke 는 존속)) |
 | [0056](0056-탭-전환-렌더링-전략-keep-alivea-보이는-슬롯만-webgl-좌석-렌더모드domxterm-교체-레버.md) | 탭 전환 렌더링 전략 — keep-alive(A) + 보이는 슬롯만 WebGL 좌석, 렌더모드(dom/xterm) 교체 레버 | 확정 |
 | [0057](0057-탭-소유-모델-창별-탭-유니크-소유-owner-index-하이브리드.md) | 탭 소유 모델 — 창별 탭 + 유니크 소유 (owner-index 하이브리드) | 확정 |
 | [0058](0058-spawn-into-명시-backend-pre-spawn-fail-loud-데몬-wire-부재-조용한-셸-대체-금지.md) | spawn_into 명시 backend = pre-spawn fail-loud (데몬 wire 부재 — 조용한 셸 대체 금지) | 확정 |
 | [0059](0059-spawn-into-slotnone-탭-첫-빈-슬롯-스캔-leftmost-root-only-거부-없으면-noemptyslot.md) | spawn_into slot=None = 탭 첫 빈 슬롯 스캔 (leftmost-root-only 거부 — 없으면 NoEmptySlot) | 확정 |
 | [0060](0060-슬롯-콘텐츠-모델-타입드-유니온slotcontent-enum-view-type-레지스트리p2urip3-거부.md) | 슬롯 콘텐츠 모델 = 타입드 유니온(SlotContent enum) — view-type 레지스트리(P2)·URI(P3) 거부 | 확정 |
 | [0061](0061-프리셋-영속-데몬-소유-presetsjson-프로필-패턴-미러.md) | 프리셋 영속 = 데몬 소유 (presets.json, 프로필 패턴 미러) | 확정 |
-| [0062](0062-agentlist-mvp-상태-표현-5-glyph-어휘-현-백엔드-3-state-매핑.md) | AgentList MVP 상태 표현 = 5-glyph 어휘 / 현 백엔드 3-state 매핑 | 확정 |
+| [0062](0062-agentlist-mvp-상태-표현-5-glyph-어휘-현-백엔드-3-state-매핑.md) | AgentList MVP 상태 표현 = 5-glyph 어휘 / 현 백엔드 3-state 매핑 | 확정 (부분 폐기 by ADR-0168: 상태 표시를 문자에서 아이콘으로 교체) |
 | [0063](0063-슬롯-콘텐츠-배치-제어표면-set-slot-content-제네릭-command-부팅-기본-agentlistempty-분할-고정-사이드패널-제거.md) | 슬롯 콘텐츠 배치 제어표면 = set_slot_content 제네릭 command + 부팅 기본 = AgentList·Empty 분할 (고정 사이드패널 제거) | 확정 (부분 폐기 by ADR-0140: 부팅 기본 레이아웃 방향 어휘) |
 | [0064](0064-슬롯-컨텍스트-메뉴-단일-기여-api-공통-target별-콘텐츠-co-location-등록-일원화-command-단일소스.md) | 슬롯 컨텍스트 메뉴 = 단일 기여 API (공통 target=별 + 콘텐츠 co-location + 등록 일원화, command 단일소스) | 확정 (부분 폐기 by ADR-0065: descriptor 스키마 확장: hideOn 제외조건 + children 1단 서브메뉴 (when-DSL 연기를 hideOn으로 부분 실현) / ADR-0140: 분할 command id) |
 | [0065](0065-슬롯-메뉴-descriptor-확장-hideon-제외조건-children-1단-서브메뉴-빈-슬롯-트림-콘텐츠-채움-접기.md) | 슬롯 메뉴 descriptor 확장 — hideOn 제외조건 + children 1단 서브메뉴 (빈-슬롯 트림 + 콘텐츠-채움 접기) | 확정 |
-| [0066](0066-슬롯-포커스배치-제어-표면-click-to-focus-focus-then-place-slot-geometry-노출-5-llm-제어.md) | 슬롯 포커스·배치 제어 표면 — click-to-focus + focus-then-place + slot geometry 노출 (§5 LLM 제어) | 확정 (부분 폐기 by ADR-0067: 결정 2(focus-then-place 배치) + 결정 5(크로스-윈도우 place 타깃) → 우클릭 컨텍스트 메뉴 배치로 대체 / ADR-0068: 결정 3: LLM 공간 타깃 = geometry {x,y,w,h} 좌표 노출 우선 → 논리 도면 기반 방향/이웃/순서 핸들 우선으로 개정 (좌표계·실측 픽셀 보류)) |
+| [0066](0066-슬롯-포커스배치-제어-표면-click-to-focus-focus-then-place-slot-geometry-노출-5-llm-제어.md) | 슬롯 포커스·배치 제어 표면 — click-to-focus + focus-then-place + slot geometry 노출 (§5 LLM 제어) | 확정 (부분 폐기 by ADR-0067: 결정 2(focus-then-place 배치) + 결정 5(크로스-윈도우 place 타깃) → 우클릭 컨텍스트 메뉴 배치로 대체 / ADR-0068: 결정 3: LLM 공간 타깃 = geometry {x,y,w,h} 좌표 노출 우선 → 논리 도면 기반 방향/이웃/순서 핸들 우선으로 개정 (좌표계·실측 픽셀 보류) / ADR-0168: 포커스 링 강도 40퍼센트로 하향) |
 | [0067](0067-슬롯-콘텐츠-배치-우클릭-컨텍스트-메뉴-2경로-검색-팝업-focus-then-place-대체.md) | 슬롯 콘텐츠 배치 = 우클릭 컨텍스트 메뉴 2경로 + 검색 팝업 (focus-then-place 대체) | 확정 |
 | [0068](0068-llm-공간-타깃-논리-도면viewmanager-방향이웃순서-핸들-우선-geometry-좌표-노출-보류.md) | LLM 공간 타깃 = 논리 도면(ViewManager) 방향·이웃·순서 핸들 우선 (geometry 좌표 노출 보류) | 확정 |
 | [0069](0069-ui-문자열-중앙화-i18n-ready-strings-모듈-완전-i18n-보류.md) | UI 문자열 중앙화 — i18n-ready strings 모듈 (완전 i18n 보류) | 확정 |
@@ -122,7 +122,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0072](0072-에이전트-트리-계층-구조백엔드-parent-id-reparentprofile-react-arborist-부활-1단-중첩부모삭제루트승격상태-글리프.md) | 에이전트 트리 = 계층 구조(백엔드 parent_id + ReparentProfile) + react-arborist 부활 — 1단 중첩·부모삭제=루트승격·상태 글리프 | 확정 |
 | [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 |
 | [0074](0074-json-stream-json-모드-resume-활성화-adr0044-후속-완료-통제-sid-adr0008-재사용.md) | json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용) | 확정 |
-| [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 |
+| [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
 | [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효) |
 | [0077](0077-수동-활성화도-resume-조기종료-시-fresh-fallback-공유-adr-0076-정련.md) | 수동 활성화도 resume 조기종료 시 fresh-fallback 공유 — ADR-0076 정련 | 폐기 (Superseded by ADR-0082) |
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
@@ -203,7 +203,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0153](0153-명령-명부-식별자의-위협-모형-인증-경계-안에서는-문자열-지식만으로-신뢰한다.md) | 명령 명부 식별자의 위협 모형 — 인증 경계 안에서는 문자열 지식만으로 신뢰한다 | 확정 |
 | [0154](0154-명령-배달의-대상-지목은-데몬이-자기-표로-한다.md) | 명령 배달의 대상 지목은 데몬이 자기 표로 한다 | 확정 (부분 폐기 by ADR-0159: 확실성 분류 미결 항목) |
 | [0155](0155-통합-command-버스-선언은-생산자-옆-배달은-홉마다-같은-3단계-명부는-런타임-등록만.md) | 통합 command 버스 — 선언은 생산자 옆, 배달은 홉마다 같은 3단계, 명부는 런타임 등록만 | 확정 (부분 폐기 by ADR-0150: 주인 토큰 산출) |
-| [0156](0156-명령-발견-인자와-반환-모양을-등록-패킷에-불투명-문자열로-동봉하고-조회를-v1에-포함한다.md) | 명령 발견 — 인자와 반환 모양을 등록 패킷에 불투명 문자열로 동봉하고 조회를 v1에 포함한다 | 확정 (부분 폐기 by ADR-0150: 끊긴 이름의 자취 보존) |
+| [0156](0156-명령-발견-인자와-반환-모양을-등록-패킷에-불투명-문자열로-동봉하고-조회를-v1에-포함한다.md) | 명령 발견 — 인자와 반환 모양을 등록 패킷에 불투명 문자열로 동봉하고 조회를 v1에 포함한다 | 확정 (부분 폐기 by ADR-0150: 끊긴 이름의 자취 보존 / ADR-0169: 곁문 철거 근거로 든 챗 읽기 둘) |
 | [0157](0157-명령-인자의-모르는-칸-입구는-거절-배선은-관용.md) | 명령 인자의 모르는 칸 — 입구는 거절, 배선은 관용 | 확정 |
 | [0158](0158-버전-불일치는-끊지-않고-알린다-능력-광고-시작-시-1회-고지.md) | 버전 불일치는 끊지 않고 알린다 — 능력 광고 + 시작 시 1회 고지 | 확정 |
 | [0159](0159-재시도-지시는-안전과-쓸모로-고른다-확실성-축은-기준이-아니다.md) | 재시도 지시는 안전과 쓸모로 고른다 — 확실성 축은 기준이 아니다 | 확정 |
@@ -213,3 +213,11 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0163](0163-화신-신원은-순서-없는-난수-표식-읽기는-건너뛰고-쓰기는-0-자리채움.md) | 화신 신원은 순서 없는 난수 표식 — 읽기는 건너뛰고 쓰기는 0 자리채움 | 확정 |
 | [0164](0164-재부착-계기는-소켓이-아니라-권위-명부-구독-deps-에-화신-표식을-넣지-않는다.md) | 재부착 계기는 소켓이 아니라 권위 명부 — 구독 deps 에 화신 표식을 넣지 않는다 | 확정 |
 | [0165](0165-슬롯-부재-표시는-종료-아이콘-하나로-통일하고-막을-세-슬롯이-공유한다.md) | 슬롯 부재 표시는 종료 아이콘 하나로 통일하고 막을 세 슬롯이 공유한다 | 확정 |
+| [0166](0166-ui-설정은-디스크-파일이-정본이고-uirefresh-가-다시-읽는다.md) | UI 설정은 디스크 파일이 정본이고 ui.refresh 가 다시 읽는다 | 확정 |
+| [0167](0167-창별-테마는-설정-파일에-담고-죽은-창의-항목은-부팅-때-쓸어낸다.md) | 창별 테마는 설정 파일에 담고 죽은 창의 항목은 부팅 때 쓸어낸다 | 확정 |
+| [0168](0168-프레임-시각-정리-포커스-링-하향-상태-글리프-아이콘화-ui-폰트-sans-전환.md) | 프레임 시각 정리 — 포커스 링 하향, 상태 글리프 아이콘화, UI 폰트 sans 전환 | 확정 |
+| [0169](0169-챗-스타일은-명령이-아니라-설정-데이터이고-버스-이전-곁문-둘을-걷는다.md) | 챗 스타일은 명령이 아니라 설정 데이터이고 버스 이전 곁문 둘을 걷는다 | 확정 |
+| [0171](0171-상태의-거처는-누가-보나와-언제까지-사나로-정한다.md) | 상태의 거처는 누가 보나와 언제까지 사나로 정한다 | 확정 |
+| [0172](0172-에이전트-실패는-미리-감지하지-않고-실패한-자리에서-기록한다.md) | 에이전트 실패는 미리 감지하지 않고 실패한 자리에서 기록한다 | 확정 |
+| [0173](0173-실패-표시는-트리에서-기호를-갈아끼우고-슬롯은-기존-종료-화면에-얹는다.md) | 실패 표시는 트리에서 기호를 갈아끼우고 슬롯은 기존 종료 화면에 얹는다 | 확정 (슬롯 조항은 ADR-0165 로 대체 — 화면은 아이콘만, 사유는 트리 hover 만) |
+| [0174](0174-셸-유닛테스트는-lib-내장-타깃을-끄고-명시-test-타깃으로-옮겨-세운다.md) | 셸 유닛테스트는 lib 내장 타깃을 끄고 명시 [[test]] 타깃으로 옮겨 세운다 | 확정 |

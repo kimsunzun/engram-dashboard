@@ -2,7 +2,7 @@
 //
 // ★권위 = 백엔드★: 이 스토어는 레이아웃을 *직접 변형하지 않는다*. 액션은 대응 invoke 만 부르고,
 // 실제 상태 갱신은 백엔드가 emit 하는 layout:updated / window:tabs-updated 를 listen 해서만 한다
-// (낙관적 갱신 X). 그래서 사람 클릭이든 LLM(cdp eval → window.__engramLayout)이든 같은 invoke→emit
+// (낙관적 갱신 X). 그래서 사람 클릭이든 LLM(cdp eval → window.__engramCmd)이든 같은 invoke→emit
 // 루프 한 곳을 지난다 — 두 입력이 같은 단일 control surface 를 흔든다(§5 손발/두뇌 분리).
 //
 // ★레이아웃은 agentClient/ProtocolClient seam(ADR-0011)을 거치지 않는다★ — 그건 *에이전트 명령*
@@ -111,14 +111,22 @@ interface ViewState {
    * slot 의 콘텐츠를 SlotContent 유니온 어느 것으로도 교체(ADR-0063 배치 제어 표면). 트리(agent_list)·
    * 팔레트(preset_palette)·비우기(empty)를 슬롯에 배치한다. 백엔드 set_slot_content 를 invoke 하고 실제
    * 반영은 layout:updated emit 으로만(낙관 갱신 X — 레이아웃 권위 = src-tauri, ADR-0035).
-   * §5: window.__engramLayout.setSlotContent 로 LLM 도 호출.
+   * §5: `layout.setSlotContent` command 로 LLM 도 호출.
    */
   setSlotContent: (viewId: string, slotId: string, content: SlotContent) => Promise<void>
   /**
    * slot 의 agent 를 다른 창의 새 탭으로 MOVE(detach, not mirror). 백엔드 move_slot_to_window 가 새 View
    * 생성 → agent 이전 → 대상 창(미지정 시 새 팝업 창) 새 탭 삽입 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는
    * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4).
-   * §5: window.__engramLayout.moveSlotToWindow 로 LLM 도 호출.
+   * §5: `slot.popout` command 로 LLM 도 호출 — ★그 command 는 toWindow 를 안 넘겨 항상 새 창이다★.
+   * 그래서 `toWindow` 는 프로덕션 호출부가 없고 `viewStore.test.ts` 만 그 갈래를 잰다. 기존 창을 목적지로
+   * 고르는 갈래는 셸의 버스 선언(`slot.popout` 의 `to_window`)이 쥐고 있고, 두 표면이 받는 것도 주는 것도
+   * 다르다는 메모는 `commands/slotCommands.ts` 의 등록 옆에 있다.
+   *
+   * ★command 표에서 빠졌을 뿐 닿지 못하는 것은 아니다★: `withGlobalTauri`(`src-tauri/tauri.conf.json`)라
+   * 릴리스에도 `window.__TAURI__.core.invoke` 가 있다. CDP 호출자는 `list_tabs` 로 view id 를 받고
+   * `move_slot_to_window` 에 `toWindow` 를 직접 넘길 수 있다 — 이 액션이 부르는 바로 그 command 다.
+   * 잃은 것은 능력이 아니라 그 두 갈래가 command 표를 안 지난다는 것뿐이다.
    */
   moveSlotToWindow: (
     viewId: string,
@@ -132,7 +140,7 @@ interface ViewState {
   /** slot 의 오버라이드 해제(caps 유도 기본 렌더러로 복귀). */
   clearRenderMode: (nodeId: string) => void
 
-  // ── ★DOM 모드 별칭(§5 관측)★: 검증 툴링(window.__engramLayout)이 이 이름을 씀 — 이름 변경 금지 ──
+  // ── DOM 모드 별칭(§5 관측 — 평문 <pre> 라 CDP innerText 로 출력이 읽힌다) ──────────────────────
   /** slot 을 DOM 모드로(= setRenderMode(id,'dom')). */
   enableDomMode: (nodeId: string) => void
   /** slot 의 DOM 모드 해제(= clearRenderMode(id)). */
@@ -199,9 +207,9 @@ export const useViewStore = create<ViewState>((set, get) => ({
   // ★렌더 모드 오버라이드 = 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set(override 라 백엔드
   // 권위 레이아웃과 무관 — 백엔드 wire LayoutNode 는 렌더 모드 개념을 모른다).
   setRenderMode: (nodeId, mode) => {
-    // ★미타입 JS 진입 가드(FIX-4)★: window.__engramLayout 경유로 임의 문자열이 올 수 있다. 유효 mode 가
-    // 아니면 store 에 쓰지 않고 no-op — 무효 값이 오버라이드로 새면 ViewLayoutRenderer switch 가 그걸
-    // 조용히 terminal 로 떨어뜨려(default) 의도와 다른 렌더가 되므로, 쓰기 전에 걸러 경고만 남긴다.
+    // ★타입 밖 진입 가드(FIX-4)★: 무효 mode 가 오버라이드로 새면 ViewLayoutRenderer switch 가 그걸
+    // 조용히 terminal 로 떨어뜨려(default) 의도와 다른 렌더가 된다 — 쓰기 전에 걸러 경고만 남긴다.
+    // 레지스트리 진입점(`slot.renderMode.set`)은 여기 닿기 전에 throw 하므로 이건 그 뒤의 그물이다.
     if (!isRenderMode(mode)) {
       console.warn(`[viewStore] setRenderMode: 무효 mode 무시 — ${JSON.stringify(mode)}`)
       return
@@ -215,8 +223,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
       return { renderModeOverride: next }
     }),
 
-  // ★DOM 모드 = 얇은 별칭★(검증 툴링이 이 이름을 계속 씀 — 제거 금지). enable/disable/toggle 을
-  // set/clearRenderMode 위에 얹은 래퍼로만 정의(도메인 상태는 renderModeOverride 하나뿐).
+  // ★별칭은 set/clearRenderMode 위 래퍼로만 둔다★ — 자기 상태를 만들면 renderModeOverride 가 렌더 모드의
+  // 유일 출처가 아니게 된다(ViewLayoutRenderer 가 읽는 곳이 둘로 갈린다).
   enableDomMode: nodeId => get().setRenderMode(nodeId, 'dom'),
   disableDomMode: nodeId => get().clearRenderMode(nodeId),
   toggleDomMode: nodeId =>
@@ -295,15 +303,15 @@ export function readWindowLabelFromHash(): string {
  *   - agent-tree = URL 이 `#/tree` 라 위 판정이 main 폴백 → windows["main"].active(모델 밖 config 창 특례)
  * 못 구하면 null(그 창의 탭 상태가 아직 안 도착 — 부팅 직후 pull 전).
  *
- * 사람 클릭(SlotContextMenu)·LLM(window.__engramLayout)이 같은 이 판정을 공유해 "자기 창 active 탭"으로
- * 동작한다 — 팝업 안 호출이 엉뚱한 main view 를 건드리지 않는다.
+ * 사람 클릭(SlotContextMenu)·LLM command 가 같은 이 판정을 공유해 "자기 창 active 탭"으로 동작한다 —
+ * 팝업 안 호출이 엉뚱한 main view 를 건드리지 않는다.
  */
 export function useCurrentViewId(): string | null {
   const label = readWindowLabelFromHash()
   return useViewStore(s => s.windows[label]?.active ?? null)
 }
 
-/** 훅 밖(이벤트 핸들러·__engramLayout)에서 현재 창 active 탭 조회. useCurrentViewId 의 non-hook 판. */
+/** 훅 밖(이벤트 핸들러)에서 현재 창 active 탭 조회. useCurrentViewId 의 non-hook 판. */
 export function currentViewId(): string | null {
   const label = readWindowLabelFromHash()
   return useViewStore.getState().windows[label]?.active ?? null

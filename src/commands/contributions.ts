@@ -5,10 +5,10 @@
 //   일어나므로 import 순서와 무관하지만, 매니페스트 로드 시점엔 모든 register 가 끝나 있어야 우클릭이 안전하다
 //   — 이 파일이 전부 import 하므로 그 불변식이 성립한다.
 
-import './themeCommands'
 import './tabCommands'
 import './slotCommands'
 import './slotContentCommands'
+import './renderModeCommands'
 import './presetCommands'
 import './agentCommands'
 
