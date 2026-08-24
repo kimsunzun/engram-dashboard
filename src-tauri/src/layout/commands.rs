@@ -796,5 +796,7 @@ fn slot_content(
     }
 }
 
-// ★단위 테스트가 이 파일에 없는 것은 의도다★ — 이 패키지의 lib 테스트 타깃은 실행 자체가 안 된다
-//   (`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`, 실측 2026-08-17). 단언은 `tests/layout_commands.rs`.
+// ★단위 테스트가 이 파일에 없는 것은 「둘 수 없어서」가 아니라 「아직 안 두어서」다★. 이 패키지의
+//   `#[cfg(test)]` 단언은 `cargo test -p engram-dashboard --test lib_unit` 으로 돈다(현황 = CLAUDE.md
+//   「빌드·검증 명령」의 그 줄 · 그 타깃을 세운 결정 = ADR-0174). 지금 단언은 `tests/layout_commands.rs` 에
+//   있고 배치는 건드리지 않았다 — 여기 단위 테스트를 둘지는 열린 선택이다.

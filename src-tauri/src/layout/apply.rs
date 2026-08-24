@@ -438,10 +438,13 @@ pub fn set_slot_content(
 //
 // ## ★backend fail-loud(USER DECISION 1a — ADR-0058)★
 // 현 데몬 스폰 wire 는 **cwd 만** 받고 backend 선택 인자가 없다 → 요청한 `backend` 는 데몬까지 흐르지
-// 못하고 데몬은 무조건 기본 백엔드(현재 셸)를 스폰한다. 그래서 **명시된 backend 요청은 스폰 전에
-// 거부**한다(호출자가 원한 것과 다른 에이전트를 조용히 받는 것 방지). 통과 = `backend`
-// 미지정(`None`/빈/공백)뿐 — **`"claude"` 포함 어떤 명시값도 거부**(현재 스폰되는 건 셸이므로 "claude
-// 지원"은 거짓말). backend 선택은 데몬 spawn-protocol 확장이 필요하다(미구현 — 별도 ADR/후속).
+// 못하고 데몬은 무조건 고정된 기본 백엔드를 스폰한다 — ★오늘 그 값은 **claude · StreamJson 출력**★
+// (`crates/engram-dashboard-daemon/src/connection_core.rs` 의 `SpawnByCwd` 갈래가 정본). 그래서
+// **명시된 backend 요청은 스폰 전에 거부**한다(호출자가 원한 것과 다른 에이전트를 조용히 받는 것 방지).
+// 통과 = `backend` 미지정(`None`/빈/공백)뿐 — ★**`"claude"` 도 거부한다**★: 그 값이 오늘의 고정 대상과
+// 우연히 같아도 **요청이 데몬까지 흐르지 않으므로** 승낙은 지킬 수 없는 약속이고, 고정 대상이 바뀌면
+// 그 승낙만 조용히 거짓이 된다. backend 선택은 데몬 spawn-protocol 확장이 필요하다(미구현 — 별도
+// ADR/후속).
 pub async fn spawn_into(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,

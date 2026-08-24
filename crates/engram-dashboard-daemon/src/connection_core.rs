@@ -957,8 +957,9 @@ impl ConnectionCore {
             //   실제로 쓰는 호출자가 `agent.spawnInto`(에이전트가 CLI 로 부르는 배치 스폰)이고, 그 자리에서
             //   원하는 것은 대화형 셸이 아니라 **일하는 에이전트**다(사용자 결정 2026-08-20).
             //   ★스위칭이 생긴 것은 아니다★ — 고정 대상이 바뀐 것뿐이라 이제 **셸을 못 고른다**.
-            //   고르려면 wire 에 칸을 내야 하고 그건 봉투 변경이라 별도 결정이다(ADR-0058 fail-loud 문구도
-            //   그때 함께 고친다 — `src-tauri/src/layout/apply.rs` 의 거절 문구가 "현재 셸"이라 적는다).
+            //   고르려면 wire 에 칸을 내야 하고 그건 봉투 변경이라 별도 결정이다(ADR-0058 fail-loud 도
+            //   그때 함께 본다 — `src-tauri/src/layout/apply.rs` 가 「이 wire 에 칸이 없다」를 근거로
+            //   명시된 backend 를 전부 거절한다).
             AgentCommand::SpawnByCwd { cwd, request_id } => {
                 let profile = CoreProfile::new(
                     cwd.clone(),

@@ -30,7 +30,7 @@
 | ③ 실/시각(실프로세스·렌더링) | `tests/*.rs` + `#[ignore]` | CDP(`scripts/cdp.mjs`, shot/layout) | 수동/CI |
 | 데모·스파이크 | `examples/` | — | ❌ (게이트 아님) |
 
-**규칙 한 줄: `examples/` 는 데모·스파이크(사용예시·throwaway) 전용. 검증 하네스는 전부 `tests/`(단언 기반).** 그래야 `cargo test --workspace --exclude engram-dashboard` 가 전 층 회귀의 단일 진실원이 된다(이 명령도 셸에서 직접 돌리지 않고 `scripts/run-detached.ps1` 을 거친다 — 규칙 = CLAUDE.md 「빌드·검증 명령」, 근거·실측·사용법 = `/qa` 바인딩 「분리 실행」).
+**규칙 한 줄: `examples/` 는 데모·스파이크(사용예시·throwaway) 전용. 검증 하네스는 전부 `tests/`(단언 기반).** 그래야 `cargo test --workspace` 가 전 층 회귀의 단일 진실원이 된다(이 명령도 셸에서 직접 돌리지 않고 `scripts/run-detached.ps1` 을 거친다 — 규칙 = CLAUDE.md 「빌드·검증 명령」, 근거·실측·사용법 = `/qa` 바인딩 「분리 실행」).
 
 ## 1. 층별 현재 인벤토리
 
@@ -70,10 +70,13 @@
 - 실행: `cargo test -p engram-dashboard-daemon` · 실프로세스 `cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture` — 이 crate는 `engram_cli.rs`가 실 `.exe`를, `#[ignore]` 분이 실 데몬을 띄운다. **좁혀 돌릴 때도 `scripts/run-detached.ps1` 을 거친다**(근거·사용법 = `/qa` 바인딩 「분리 실행」).
 
 ### src-tauri (`src-tauri`)
-- **① 단위**: 18건(discovery DTO 변환, `ensure_with` OS/WMI/clock trait 주입 순수 검증, ComGuard 분류 등).
+- **① 단위**: `src/**` 의 `#[cfg(test)]` 전부(discovery DTO 변환, `ensure_with` OS/WMI/clock trait 주입 순수 검증, ComGuard 분류 등). ★**건수를 여기 적지 않는다**★ — 실행이 막혀 있던 시절의 "18건", 그것을 고친 날의 수치가 차례로 낡았다. 세야 하면 정본은 CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄이다.
 - thin command wrapper(spawn/kill/write/profile)는 로직이 core 에 있어 여기선 배선만.
-- 실행: `cargo test -p engram-dashboard` 은 현재 lib 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 로 죽는다(실측 2026-08-05). 그래서 전 멤버 회귀는 이 패키지를 빼고 `cargo test --workspace --exclude engram-dashboard` 로 돈다 — 루트 bare `cargo test` 도 같은 이유로 금지(§3 치트시트).
-  - ★**죽는 것은 lib 타깃뿐이다 — 통합 타깃은 선다**★(실측 2026-08-17). `src-tauri/tests/` 의 통합 스위트는 `engram_dashboard_lib` 를 링크하고 정상 실행된다. 그래서 이 패키지에 새로 쓰는 테스트는 **`#[cfg(test)]` 가 아니라 `src-tauri/tests/` 로 간다** — 전자는 게이트에서 한 번도 돌지 않는다. 실행은 타깃을 집어서: `cargo test -p engram-dashboard --test <이름>`(`-p` 만 쓰거나 `--tests` 로 넓히면 죽는 lib 타깃을 도로 끌어온다). **현재 등재분(`layout_apply`·`layout_commands`·`daemon_client_pending`)의 정본 = `/qa` 바인딩 standard 2b~2d** — ★`src-tauri/tests/` 에 파일을 더하면 그 목록도 함께 늘린다★. 워크스페이스 회귀가 이 패키지를 빼므로 등재 전까지 로컬 신호가 0이다(실발생: `daemon_client_pending` 이 CI 에만 있었다).
+- 실행: ★**2026-08-24부터 이 패키지의 단위 스위트도 돈다**★ — `cargo test -p engram-dashboard --test lib_unit`(★자식 프로세스를 하나도 안 띄우므로 `-- --test-threads=4` 를 붙이지 않는다★ — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」). `[lib] test = false` + `[[test]] name = "lib_unit" / path = "src/lib.rs"` 로 kind=test 타깃을 만들고 `build.rs` 가 `cargo:rustc-link-arg-tests=` 로 Windows `RT_MANIFEST` 를 그쪽에도 링크한 결과이며, **왜 이 모양이고 무엇을 거부했는지는 ADR-0174** 가 갖는다(옛 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 의 원인이 그 manifest 부재였다). ★**그리고 전 멤버 회귀도 이제 이 패키지를 함께 돈다**★ — `cargo test --workspace -- --test-threads=4`(옛 `--exclude engram-dashboard` 는 걷혔다). 제외를 떠받치던 사유 둘이 다 죽었기 때문이다: 즉사는 위 ADR-0174 로, **알려진 선재 실패는 전부 고쳐지면서.** 루트 bare `cargo test` 금지도 그대로(§3 치트시트).
+  - ★**판정은 초록 하나뿐이다**★ — 이 스위트에 알려진 선재 실패는 없고, 빨간 줄은 그대로 회귀 신호다. ★**"이만큼까지는 빨개도 정상" 갈래를 다시 만들지 말 것**★ — 옛 판정은 `daemon_client::tests::` 축의 하네스 부패(`daemon_client::start_connection` 의 `app: None` 단락)를 건수 상한과 함께 눈감아 줬는데, 그 실패가 사라진 지금 그런 상한은 **그만큼의 회귀를 조용히 통과시키는 문**일 뿐이다. ★**수치를 여기 베끼지 않는다**★ — 정본 = CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄(한 번 베꼈더니 하루 만에 낡았다).
+  - ★**`--lib`·`--all-targets` 는 여전히 함정이다**★ — `[lib] test = false` 는 *기본 선택*에서만 빼므로, 명시로 부르면 manifest 없는 내장 타깃이 그대로 골라져 `0xc0000139` 로 즉사한다(실측 2026-08-24 · 설명 정본 = `src-tauri/Cargo.toml` 주석). 부르는 법은 `--test lib_unit` 하나뿐이고, 통합 타깃도 `--test <이름>` 으로 각각 집는다 — ★`-p` 단독·`--tests` 는 즉사 축이 아니다★(기본 선택을 따라 그 내장 타깃을 안 고른다). 그렇게 넓히지 않는 이유는 **다섯 타깃이 한 스텝에 뭉쳐 어느 타깃이 깨졌는지가 섞이기** 때문이다.
+  - **테스트 배치 규칙 — 이제 `#[cfg(test)]` 도 정당한 자리다.** 옛 규칙("이 패키지에 새로 쓰는 테스트는 `tests/` 로 간다 — `#[cfg(test)]` 는 한 번도 안 돈다")의 전제가 사라졌다. 지금 가름은 **무엇을 재나**다: 소켓·실 `AppHandle` 없이 못 세우는 배선은 그대로 `src-tauri/tests/` 의 통합 하네스로 가고, 순수 단위 단언은 모듈 옆 `#[cfg(test)]` 에 둔다. ★**CI 신호의 강도도 이제 같다**★ — `lib_unit` 은 통째로 CI 에 등재돼 있고 워크스페이스 회귀에도 실리므로, `#[cfg(test)]` 에 넣은 새 단언도 통합 타깃과 같은 강도로 감시된다.
+  - **`--test <이름>` 으로 따로 집는 다섯(`layout_apply`·`layout_commands`·`daemon_client_pending`·`daemon_client_replay`·`lib_unit`)의 정본 = `/qa` 바인딩 standard 2b~2f** — ★타깃을 더하면 그 목록도 함께 늘린다★. ★사유가 바뀌었다★: 새 타깃은 워크스페이스 회귀의 기본 타깃 선택에 자동으로 실리므로 더는 "등재 전까지 신호 0" 이 아니다(옛 실발생: `daemon_client_pending` 이 CI 에만 있었다). 줄을 남기는 값어치는 둘 — ① 실패가 어느 스위트에서 났는지를 줄 이름이 짚는다 ② `--test <이름>` 은 **타깃이 사라지면 실패**한다(워크스페이스 회귀는 못 잡는다 — 사라진 타깃은 실패가 아니라 **침묵**이다).
 
 ### command (`crates/engram-dashboard-command`) — 신설(ADR-0155)
 - **① 단위**: `src/` 내 `#[cfg(test)]`(봉투·오류·선언 매크로·표·라우팅).
@@ -103,8 +106,9 @@
 5. **실프로세스 테스트 실행 시점 문서화** — `#[ignore]` 3건은 수동 전용. "데몬 수명주기·Job·discovery 변경 시 반드시 `--ignored` 실행"을 PR 체크리스트화.
 6. **~~CI 부재~~ → 도입 완료(ADR-0131)** — 어느 브랜치든 push하면 `.github/workflows/ci.yml` 이 검증 명령 + 격리 게이트 전부를 windows 러너에서 돈다. `v*` 태그면 릴리즈까지. **CI 미커버 3건(로컬 몫)** = GUI 실측 · 실 claude 의존 테스트(워크플로가 `--skip`) · ADR-0130 재론 트리거. 분담 정본 = `/qa` 바인딩 「CI와의 분담」. (clippy 는 정본에 없어 CI 에도 넣지 않았다.)
 7. **`net → protocol` 심볼 게이트 부재** — 허용된 그 간선에는 core 쪽 같은 심볼 allowlist 게이트가 없어, 간선을 타고 에이전트 어휘가 늘어도 어느 게이트도 울리지 않는다(ADR-0129 슬라이스 1 note 가 의도적 유예로 기록 — 작업항목 0-4 뒤의 자연스러운 후속).
-8. **src-tauri 단위테스트가 로컬 회귀에서 안 돈다** — §1 src-tauri 항목의 단위테스트는 존재하지만 `cargo test -p engram-dashboard`의 lib 타깃이 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`로 죽어(실측 2026-08-05) 실행되지 않는다 — 그래서 `cargo test --workspace --exclude engram-dashboard`가 이 패키지를 뺀다. 사전부터 있던 환경 요인이며 원인 미해결 — 이력은 `docs/process/step-log.md` 494/532/761행 부근.
-   - ★**이 갭은 이제 `#[cfg(test)]` 단위테스트에 한정된다**★(2026-08-17) — 같은 패키지의 **통합** 타깃은 정상 실행되고 게이트에도 등재됐다(§1 src-tauri 실행 항목). 그러므로 이 줄을 「셸은 테스트가 불가능하다」로 읽지 말 것. **아직 이관되지 않은 잔여 = 그 패키지의 `#[cfg(test)]` 전부**다(12개 파일 — ★목록을 여기 손으로 베끼지 않는다. 정본 = `rg -l "#\[cfg\(test\)\]" src-tauri/src/`★). 존재하지만 한 번도 돈 적이 없다. ★그중 `output_router.rs`(ArcSwap·RMW 동시성)와 `commands/popout.rs`(팝업 label 발급)가 가장 아프다 — 앞의 「구독 재동기는 락 안」 계약이 기대는 코드가 바로 전자다.★ 통합 타깃 이관이 해소 경로이며 아직 미착수다.
+8. **~~src-tauri 단위테스트가 로컬 회귀에서 안 돈다~~ → 닫혔다(2026-08-24).** 두 단계로 닫혔다: ① **실행이 뚫렸다** — 옛 서술(`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 로 죽어 아예 실행 불가 — 실측 2026-08-05)은 `[lib] test = false` + `[[test]] lib_unit` + `build.rs` 의 `cargo:rustc-link-arg-tests=` 로 해소됐다(§1 src-tauri 실행 항목 · **결정과 거부한 대안 = ADR-0174**) ② **회귀망에 실렸다** — 남아 있던 알려진 실패가 전부 고쳐지면서 CI 가 이 스위트를 **통째로** 돌고(옛 이름 필터 없음) 워크스페이스 회귀도 `--exclude` 를 걷어 이 패키지를 함께 돈다. 그래서 `#[cfg(test)]` 에 새로 쓰는 단언의 CI 신호는 이제 통합 타깃과 같다. 이력은 `docs/process/step-log.md` 494/532/761행 부근.
+   - **~~부수 갭: `src-tauri/bindings/` 를 보는 CI 동기 게이트가 없다~~ → 닫혔다(2026-08-24).** 기존 sync 게이트가 이제 세 디렉터리(`protocol`·`core`·`src-tauri`)를 전부 대조하고, 그보다 앞에서 `lib_unit` 이 그 `.ts` 를 실제로 다시 굽는다(CI 에선 워크스페이스 회귀와 `--test lib_unit` 스텝 양쪽에서). **「게이트 확장은 실패 수정이 먼저다」던 순서 의존은 남아 있지 않다.**
+   - ★그 스위트에서 가장 값어치가 큰 것 = `output_router.rs`(ArcSwap·RMW 동시성)와 `commands/popout.rs`(팝업 label 발급)★ — 앞의 「구독 재동기는 락 안」 계약이 기대는 코드가 바로 전자다. ★목록을 여기 손으로 베끼지 않는다. 정본 = `rg -l "#\[cfg\(test\)\]" src-tauri/src/`★
 
 ## 3. 명령 치트시트 (workspace 루트에서 실행 — 경로는 워크트리마다 다르므로 여기 박지 않는다)
 
@@ -115,8 +119,9 @@
 # ★아래 cargo·npm 명령은 셸에서 직접 돌리지 않는다★ — `scripts/run-detached.ps1` 로 프로세스 트리 밖에서 돌리고 출력은 파일로만 받는다(이유 = 로그 전체가 도구 결과로 거슬러 오지 않게 하고 판정에 필요한 줄만 읽는 것. 출력이 몇 줄뿐인 `rg`·`cargo tree` 게이트는 대상 밖).
 #   완료 판정 = 로그 마지막 줄의 `__EXIT=<코드>` 마커(프로세스 부재로 판정하지 말 것). 규칙 = CLAUDE.md 「빌드·검증 명령」, 근거·실측·사용법의 정본 = `/qa` 바인딩 「분리 실행」(여기 되올리지 않는다).
 #   예: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "<아래 한 줄>" -WorkDir "<루트>" -LogFile "<경로>.log"
-cargo test --workspace --exclude engram-dashboard  # 전 멤버 회귀(src-tauri 패키지 `engram-dashboard` 만 제외 — 그 lib 타깃이 0xc0000139 로 죽어 루트 bare cargo test 는 못 쓴다)
-cargo test -p engram-dashboard --test <이름>  # 위가 뺀 그 패키지의 통합 타깃 — 등재분·근거는 위 §1 src-tauri 절
+cargo test --workspace -- --test-threads=4   # 전 멤버 회귀 — 2026-08-24부터 셸 패키지(`engram-dashboard`)도 든다(옛 --exclude 는 걷혔다: 0xc0000139 즉사는 ADR-0174 로, 알려진 실패는 전부 고쳐지며 사라졌다). 루트 bare cargo test 금지는 그대로. 이 플래그는 로컬 전용이며 빼지 말 것 — 규칙 정본 = CLAUDE.md 「빌드·검증 명령」
+cargo test -p engram-dashboard --test <이름>  # 같은 패키지의 타깃을 하나씩 — 위 회귀와 겹치지만 실패한 스위트를 이름으로 짚고 타깃 부재를 실패로 만든다(목록·근거는 위 §1 src-tauri 절)
+cargo test -p engram-dashboard --test lib_unit  # 같은 패키지의 단위 스위트(판정 = 실패 0 · 건수 정본 = CLAUDE.md 「빌드·검증 명령」). ★--lib·--all-targets 로 부르지 말 것 — 그쪽은 아직 0xc0000139 로 즉사한다(설명 정본 = src-tauri/Cargo.toml 주석)★
 cargo test -p engram-dashboard-protocol     # 단위+golden+ts_export
 cargo test -p engram-dashboard-core         # 단위+통합(headless/transport_smoke/session_smoke, 실 PTY)
 cargo test -p engram-dashboard-command      # 명령 버스 도구 단위 — 워크스페이스 crate 무의존, ADR-0155

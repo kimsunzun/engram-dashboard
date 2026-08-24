@@ -6,6 +6,6 @@ import type { LayoutNode } from "./LayoutNode";
  */
 export type View = { id: string, name: string, layout: LayoutNode, 
 /**
- * 현재 포커스된 슬롯. 가리키던 슬롯이 사라지면 트리 첫 슬롯으로 폴백(없으면 None).
+ * 가리키던 슬롯이 사라지면 트리 첫 슬롯으로 폴백.
  */
 focused_slot_id: string | null, };

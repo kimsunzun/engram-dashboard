@@ -480,6 +480,10 @@ async fn spawn_mock_server_silent() -> u16 {
 // DaemonInfo.protocol_version 을 틀린 값(999)으로 줘도, 송신된 Auth.protocol_version 은 컴파일된
 // PROTOCOL_VERSION 이어야 한다. echo(info 값 되쏘기)면 999 가 나가 이 단언이 깨진다 → 버전 게이트
 // 무력화 회귀를 잡는다.
+// ★`first_rx` 의 상한(5s)은 유지한다★: 이 파일의 다른 대기 지점과 같은 방식이라, 소켓이 안 열리는
+//   어떤 회귀가 나도 **영구 hang 이 아니라 깨끗한 실패**로 떨어진다. (2026-08-24 이전에는 emit 경로가
+//   `Option<AppHandle>` 이라 `None` 이면 연결 task 자체가 안 떴고 이 대기가 그 단락의 증상이었다 —
+//   지금은 emit 이 포트다(`events.rs`). 사연 정본 = `mod.rs` start_connection 주석.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_sends_compiled_protocol_version_not_echo() {
     let (port, first_rx) = spawn_mock_server_capturing_first_frame().await;
@@ -498,7 +502,10 @@ async fn auth_sends_compiled_protocol_version_not_echo() {
 
     client.connect().await.expect("connect");
 
-    let first = first_rx.await.expect("첫 frame");
+    let first = tokio::time::timeout(Duration::from_secs(5), first_rx)
+        .await
+        .expect("mock 서버가 첫 frame 을 bound 내 수신(영구 hang 아님)")
+        .expect("첫 frame");
     let frame: AuthFrame = serde_json::from_str(&first).expect("valid 핸드셰이크 프레임");
     let AuthFrame::Auth {
         protocol_version, ..
@@ -558,6 +565,8 @@ async fn concurrent_connect_settles_connected_no_flap() {
 // Hello 를 지연하는 서버로 클라를 핸드셰이크 in-flight 상태로 만든 뒤 close() 를 호출한다. close 가
 // generation 을 bump 했으므로, 뒤늦게 Hello 를 받은 연결 task 는 stale 이라 Connected 를 송신하지
 // 않고 self-close 한다 → 최종 상태 Down 유지(부활 없음).
+// ★`auth_rx` 의 상한(5s)도 위 auth_… 와 같은 사유로 유지한다★ — 소켓이 안 열리는 회귀를 영구 hang 이
+//   아니라 깨끗한 실패로 떨어뜨린다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_in_flight_stays_down_no_revival() {
     let (port, auth_rx) = spawn_mock_server_delayed_hello().await;
@@ -569,7 +578,10 @@ async fn close_in_flight_stays_down_no_revival() {
     let connect_task = tokio::spawn(async move { c.connect().await });
 
     // 서버가 Auth 를 받은 시점 = 클라가 핸드셰이크 in-flight. 이때 close() 로 세대를 올린다.
-    auth_rx.await.expect("서버가 Auth 수신 신호");
+    tokio::time::timeout(Duration::from_secs(5), auth_rx)
+        .await
+        .expect("서버가 Auth 를 bound 내 수신(영구 hang 아님)")
+        .expect("서버가 Auth 수신 신호");
     client.close();
     assert_eq!(client.state(), ConnectionState::Down, "close 직후 Down");
 
@@ -885,6 +897,44 @@ fn guard_close_blocks_stale_revival() {
         *rx.borrow(),
         ConnectionState::Down,
         "stale 부활이 거부됐으니 watch 는 Down 유지"
+    );
+}
+
+// ── (e) 세대 재확인은 **판정만** 한다 — watch 를 다시 밀지 않는다 ──────────────────────────────
+// `close()` 는 자기 락 안에서 Down 을 이미 watch 에 실었고(위 (d)), 락 밖 발화 직전에 남는 물음은
+// 「발화할까」 하나뿐이다(`DaemonClient::close`). 그 재확인을 `publish_if_current` 로 하면 한 번의 종료가
+// watch 에 **두 번** 실려 구독자는 close 한 번을 변경 두 번으로 본다.
+// ★값이 아니라 변경 여부로 재는 것이 요점이다★: 두 경우 모두 Down 이라 `borrow` 비교로는 구별되지 않는다.
+// tokio `watch::Sender::send` 는 값이 같아도 버전을 올리므로(값 비교는 `send_if_modified` 몫), 그 회귀는
+// `has_changed()` 에만 드러난다.
+#[test]
+fn guard_is_current_reports_without_republishing() {
+    let (lc, mut rx) = Lifecycle::new();
+    let opened = lc.bump_and_capture(Some(ConnectionState::Connecting));
+    assert_eq!(*rx.borrow_and_update(), ConnectionState::Connecting);
+
+    let my_gen = lc.close(); // 락 안에서 Down 을 **이미** 싣는다.
+    assert!(my_gen > opened, "close 는 세대를 올린다");
+    assert!(
+        rx.has_changed().expect("watch sender 생존"),
+        "close 자신의 전이는 watch 에 실려야"
+    );
+    assert_eq!(*rx.borrow_and_update(), ConnectionState::Down);
+
+    // 락 밖 발화 직전의 재확인 — 판정만 하고 watch 는 건드리지 않아야 한다.
+    assert!(lc.is_current(my_gen), "close 가 세운 세대는 아직 current");
+    assert!(
+        !rx.has_changed().expect("watch sender 생존"),
+        "재확인이 watch 를 다시 밀면 안 된다 — 한 번의 close 가 변경 두 번으로 보인다"
+    );
+
+    // 승계가 끼면 판정만 false 로 갈린다 — 그때도 watch 는 그대로다.
+    let newer = lc.bump_and_capture(None);
+    assert!(newer > my_gen, "승계는 더 새 세대");
+    assert!(!lc.is_current(my_gen), "밀려난 세대는 current 가 아니다");
+    assert!(
+        !rx.has_changed().expect("watch sender 생존"),
+        "stale 판정도 watch 를 건드리지 않는다"
     );
 }
 
@@ -3140,3 +3190,634 @@ async fn duplicate_request_id_insert_errs_prev_slot() {
 // ★ADR-0046: 버퍼 hook 테스트(replay_slots/drop_slots/resync 비연결 no-op) 삭제★ — 미러 버퍼(AgentBufferStore)
 //   와 그 배선(ConnectionCommand::ReplaySlots/DropSlots/Resync)이 제거됐다. 뷰 주도 replay 는 request_replay
 //   (single-flight)로 흡수됐고, 그 상태기계 검증은 daemon_client::replay_flight 단위테스트가 회수한다.
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 알림 포트(`events::DaemonEvents`) — 주입점이 사는 검증.
+//
+// ★왜 이 절이 있나★: emit 을 포트로 끊어 놓고 하네스가 `NoDaemonEvents`(버림)만 꽂으면, 포트는 섰지만
+//   **11개 emit 은 영원히 무검증**이다 — 모듈이 서는 것과 그 seam 이 검증을 사는 것은 다른 일이다
+//   (ADR-0012 가 요구하는 쪽은 뒤엣것이다). 그래서 `DaemonClient::new_with_events` 로 기록형 가짜를 꽂아,
+//   연결 태스크가 **무엇을 어떤 순서로** 알리는지를 실 소켓 왕복 위에서 잰다.
+// ★전수는 아니다(정직성)★: 여기서 실제로 발화되는 것은 넷(`connected` · `down` · 목록 갱신 · 상태 전이)
+//   이고 나머지(restore·profile·preset·reconnecting)는 여전히 무검증이다. 늘리는 자리는 여기다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+use engram_dashboard_protocol::{
+    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport,
+};
+
+use super::events::{ConnectionStateEvent, DaemonEvents};
+
+// 발화를 **온 순서대로** 한 줄씩 적는 가짜. ★Vec 이지 집합이 아니다★ — 이 하네스가 사는 것의 절반이
+// 순서다(연결 상태가 broadcast 보다 먼저 나가야 프론트가 출력 Channel 을 등록한 뒤 목록을 받는다).
+#[derive(Default)]
+struct RecordingEvents {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingEvents {
+    fn record(&self, line: String) {
+        self.seen
+            .lock()
+            .expect("recording events poisoned")
+            .push(line);
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("recording events poisoned").clone()
+    }
+}
+
+impl DaemonEvents for RecordingEvents {
+    fn connection_state(&self, state: ConnectionStateEvent) {
+        // ★`as_str()` 을 거쳐 적는다★ — 재려는 것은 프론트가 실제로 받는 **그 문자열**이지 enum 이름이 아니다.
+        self.record(format!("state:{}", state.as_str()));
+    }
+
+    fn agent_list_updated(&self, agents: &[AgentInfo]) {
+        self.record(format!("agent_list:{}", agents.len()));
+    }
+
+    fn status_changed(&self, agent_id: &AgentId, status: &AgentStatus, epoch: u32) {
+        self.record(format!("status:{agent_id}:{status:?}:{epoch}"));
+    }
+
+    fn restore_result(&self, _report: &RestoreReport) {
+        self.record("restore".to_string());
+    }
+
+    fn profile_list_updated(&self, profiles: &[AgentProfile]) {
+        self.record(format!("profile_list:{}", profiles.len()));
+    }
+
+    fn preset_list_updated(&self, presets: &[Preset]) {
+        self.record(format!("preset_list:{}", presets.len()));
+    }
+}
+
+// 핸드셰이크 뒤 broadcast 두 장(목록 갱신 · 상태 전이)을 밀어넣고, **호출자가 놓으라고 할 때까지** 소켓을
+// 쥐고 있는 mock 서버. 반환: (port, 해제 신호 sender).
+// ★request_id 가 없는 이벤트만 보낸다★ — 그래야 pending 매칭을 우회해 `emit_broadcast` 갈래로 간다.
+//
+// ★수명이 고정 sleep 이 아닌 것이 요점이다★: 이 서버가 먼저 손을 놓으면 클라는 끊김을 보고
+// `state:reconnecting` 을 **한 장 더** 발화한다(`connection.rs` 의 `connected_lifetime` 재연결 진입).
+// 아래 단언은 발화 목록을 **전부·순서까지** 일치로 보므로, 서버 수명이 벽시계에 걸려 있으면 그 한 장이
+// 느린 실행에서만 끼어드는 간헐 실패가 된다 — 상한을 늘려 덮는 것은 ADR-0038 이 금하는 매직 넘버다.
+// 그래서 수명을 시간이 아니라 **신호**로 넘긴다(형제 = `spawn_dying_server`).
+async fn spawn_broadcast_mock_server(
+    agent_id: AgentId,
+    epoch: u32,
+) -> (u16, tokio::sync::oneshot::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ws.next().await; // Auth 소비
+        let hello = serde_json::to_string(&AgentEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            capabilities: None,
+        })
+        .unwrap();
+        let _ = ws.send(Message::Text(hello.into())).await;
+        for ev in [
+            AgentEvent::AgentListUpdated { agents: Vec::new() },
+            AgentEvent::StatusChanged {
+                agent_id,
+                status: AgentStatus::Killed,
+                epoch,
+            },
+        ] {
+            let text = serde_json::to_string(&ev).unwrap();
+            let _ = ws.send(Message::Text(text.into())).await;
+        }
+        // 해제 신호까지 소켓 유지. sender 가 그냥 drop 돼도(테스트 조기 실패) Err 로 즉시 깨어나
+        // 태스크가 매달리지 않는다.
+        let _ = release_rx.await;
+        drop(ws);
+        drop(listener);
+    });
+    (port, release_tx)
+}
+
+// ── 주입점이 실제로 발화를 잡는다 ────────────────────────────────────────────────────
+// 재는 것 셋: ① 포트가 **실 경로에서** 불린다(connect→핸드셰이크→main_loop Text 팔) ② `connected` 가
+// broadcast 보다 **먼저** 나간다 ③ variant→메서드 배정(`emit_broadcast` 의 표)이 맞고 `epoch` 가 그대로
+// 실린다. ★`NoDaemonEvents` 만 꽂던 시절엔 셋 다 무검증이었다 — 이 함수를 통째로 지워도 초록이었다.★
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recording_events_capture_connected_then_broadcasts() {
+    let agent_id: AgentId = uuid::Uuid::new_v4();
+    let (port, release_socket) = spawn_broadcast_mock_server(agent_id, 77).await;
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(
+        None,
+        Ok(info_for(port, "events-record")),
+    ));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    );
+
+    client.connect().await.expect("connect → connected");
+    assert_eq!(client.state(), ConnectionState::Connected);
+
+    // broadcast 도착은 연결 태스크가 하므로 폴링으로 기다린다(도착 순간을 동기화할 신호가 없다).
+    let arrived = poll_until_realtime(Duration::from_secs(5), || events.seen().len() >= 3).await;
+    assert!(
+        arrived,
+        "connected 1건 + broadcast 2건이 와야: {:?}",
+        events.seen()
+    );
+
+    assert_eq!(
+        events.seen(),
+        vec![
+            "state:connected".to_string(),
+            "agent_list:0".to_string(),
+            format!("status:{agent_id}:Killed:77"),
+        ],
+        "발화 내용·순서가 어긋났다"
+    );
+
+    // ★단언을 마친 **뒤에야** 서버가 소켓을 놓는다★ — 순서를 뒤집으면 끊김 → `state:reconnecting` 이
+    // 위 목록 뒤에 붙어 일치 단언이 깨진다(그 발화의 자리 = `connection.rs` 의 `LoopExit::Disconnected`).
+    // 클라를 먼저 닫아 연결 태스크를 접고, 그 다음 서버를 푼다.
+    client.close();
+    let _ = release_socket.send(());
+}
+
+// Auth 를 소비한 뒤 **신호가 올 때까지 Hello 를 보류**하는 mock 서버. 반환: (port, Auth 도달 신호,
+// Hello 해제 sender).
+//
+// ★수명이 시간이 아니라 신호인 것이 요점이다★(형제 = `spawn_broadcast_mock_server`·`spawn_dying_server`):
+// 아래 테스트는 "핸드셰이크가 끝나기 **전에** ready 수신단이 사라진다" 는 순서 자체를 재므로, 그 순서를
+// 지연으로 흉내내면 느린 실행에서만 뒤집히는 간헐 실패가 된다(ADR-0038 이 금하는 매직 넘버). Auth 도달을
+// 서버가 신호하고 Hello 를 테스트가 풀어, 두 사건의 순서를 벽시계 없이 고정한다.
+async fn spawn_hello_on_demand_server() -> (
+    u16,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (auth_tx, auth_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ws.next().await; // Auth 소비 — 이 시점의 클라는 wait_for_hello 창에 있다.
+        let _ = auth_tx.send(());
+        // 해제 신호 전까지 Hello 보류. sender 가 그냥 drop 돼도(테스트 조기 실패) Err 로 즉시 깨어나
+        // 태스크가 매달리지 않는다.
+        if release_rx.await.is_err() {
+            return;
+        }
+        let hello = serde_json::to_string(&AgentEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            capabilities: None,
+        })
+        .unwrap();
+        let _ = ws.send(Message::Text(hello.into())).await;
+        // 클라가 소켓을 놓을 때까지 쥔다(정리 종료 경로의 close 를 받아 준다).
+        while let Some(Ok(_)) = ws.next().await {}
+    });
+    (port, auth_rx, release_tx)
+}
+
+// ── 호출자가 사라진 뒤에도 상태 발화는 짝이 맞는다(회귀망) ─────────────────────────────────
+// ★무엇을 막나★: 핸드셰이크가 성공하면 연결 태스크는 **먼저** `connected` 를 전 webview 에 알리고, 그
+//   다음에야 `ready_tx` 로 호출자에게 보고한다. 그 사이 호출자가 사라지면(웹뷰 리로드로 invoke future 가
+//   drop) 태스크는 소켓을 닫고 빠지는데, 내부 상태만 Down 으로 접고 **알리지 않으면** 모든 창이
+//   `connected` 로 굳는다 — 죽은 연결에 출력 채널을 걸고 앉고, 프론트의 연결 상태 자가복구는 리로드 시
+//   pull 1회뿐이라(`tauriTransport.ts` selfHeal) 리로드한 그 창만 살아나고 나머지는 못 깨어난다.
+// ★결정론★: 벽시계 지연이 아니라 두 신호로 순서를 고정한다 — (1) 서버가 Auth 도달을 알리고 (2) 테스트가
+//   connect task 를 abort 한 뒤 **join 으로 그 future 의 drop 완료를 확인하고** (3) 그제서야 Hello 를 푼다.
+//   그래서 `ready_tx.send` 는 항상 수신단이 없는 상태에서 불린다(경합 창 없음).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn caller_gone_after_hello_lands_on_down_not_connected() {
+    let (port, auth_seen, release_hello) = spawn_hello_on_demand_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(None, Ok(info_for(port, "caller-gone"))));
+    let client = Arc::new(DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    ));
+
+    // ★ready 수신단을 별도 task 에 가둔다★: 그 task 를 통째로 떨어뜨리는 것이 「호출자가 사라진다」의
+    //   실물이다(운영에선 웹뷰 리로드가 invoke future 를 drop 한다).
+    let connecting = tokio::spawn({
+        let client = client.clone();
+        async move { client.connect().await }
+    });
+
+    auth_seen
+        .await
+        .expect("서버가 Auth 를 봤다(핸드셰이크 진행 중)");
+    connecting.abort();
+    // ★abort 만으로는 부족하다★: 취소는 예약일 뿐이고 future 가 실제로 drop 돼야 ready 수신단이 사라진다.
+    //   join 이 끝난 시점이 그 drop 이 끝난 시점이라, 여기서 기다려야 다음 줄의 Hello 가 늦다.
+    match connecting.await {
+        Err(e) => assert!(e.is_cancelled(), "취소가 아닌 사유로 끝났다: {e:?}"),
+        Ok(r) => panic!("Hello 를 아직 안 보냈으므로 connect 는 완료될 수 없다: {r:?}"),
+    }
+
+    let _ = release_hello.send(()); // 이제야 핸드셰이크 성공 — 보고할 호출자는 이미 없다.
+
+    let landed = poll_until_realtime(Duration::from_secs(5), || {
+        events.seen().last().map(String::as_str) == Some("state:down")
+    })
+    .await;
+    assert!(
+        landed,
+        "호출자가 사라져도 connected 에서 멈추면 안 된다 — Down 발화로 끝나야: {:?}",
+        events.seen()
+    );
+    assert_eq!(
+        events.seen(),
+        vec!["state:connected".to_string(), "state:down".to_string()],
+        "정리 종료의 발화는 connected→down 두 장이어야(순서 포함)"
+    );
+    assert_eq!(
+        client.state(),
+        ConnectionState::Down,
+        "내부 상태도 같이 Down 이어야(발화만 나가고 상태가 남으면 다음 connect 가 단락된다)"
+    );
+}
+
+// WS 업그레이드를 **거절**하는 mock 서버 — 핸드셰이크가 확정적으로 실패하는 주소를 만든다. accept 한
+// 뒤 응답을 주지 않고 소켓을 놓으므로, 클라의 `connect_async` 는 업그레이드 응답 대신 EOF 를 보고
+// `HandshakeError::Connect` 로 떨어진다.
+//
+// ★bind 하고 즉시 놓아 "아무도 안 듣는 포트" 를 쓰지 않는다★: 놓는 순간 그 번호는 임자가 없어져 같은
+//   실행의 다른 테스트도, 이 기계의 다른 프로세스도 가져갈 수 있다. 그러면 기대하던 접속 거부가 접속
+//   성공·타임아웃·엉뚱한 프로토콜 실패로 바뀐다 — 포트 번호는 우리가 통제하는 값이 아니므로 그 자리를
+//   비워 두는 설계 자체가 간헐 실패의 씨앗이다. 그래서 listener 를 **계속 쥔 채** 거절을 우리가 만든다
+//   (형제 = 이 파일의 다른 mock 서버들 — 수명·행동을 전부 테스트가 정한다).
+async fn spawn_upgrade_refusing_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        // 재시도가 와도 같은 대접을 하도록 계속 받는다(테스트가 끝나 태스크가 거둬질 때까지).
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream); // 업그레이드 응답 없이 즉시 끊는다.
+        }
+    });
+    port
+}
+
+// ── 핸드셰이크 실패도 창에 알린다(회귀망) ────────────────────────────────────────────────
+// ★무엇을 막나★: 첫 핸드셰이크 실패를 아는 것은 `ready_tx` 를 받은 그 호출자 하나뿐이다. 나머지 창은
+//   마지막으로 들은 상태에 머무는데, 끊김 뒤 재진입이면 그 마지막이 `reconnecting` 이다 — 첫 핸드셰이크
+//   실패는 재연결 루프에 들지 않고 그대로 종료하므로(`connection.rs` handshake Err 분기), 아무도
+//   재시도하지 않는 채 화면만 재연결 중으로 굳는다. `connect()` 진입의 `Connecting` 은 발화가 없어
+//   (`ConnectionStateEvent` 에 그 어휘가 없다) 이 갭을 못 메운다.
+// ★"한 장" 도 같은 무게로 재는 것이다★: 이 자리의 발화자는 연결 태스크 하나여야 한다. 호출자 쪽
+//   (`mod.rs` start_connection 의 `Ok(Err(_))` 분기)이 하나 더 내면 같은 실패가 창에 `down` 두 장으로
+//   가고, 그 침묵을 계약으로 박는 것이 아래 개수 단언이다. ★그래서 관측 시점이 load-bearing 하다★ —
+//   두 발화자가 **모두 끝난 뒤**가 아니면 개수를 세는 의미가 없다(↓ 그 시점을 세우는 법).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_handshake_tells_every_window_down() {
+    let port = spawn_upgrade_refusing_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(
+        None,
+        Ok(info_for(port, "handshake-fail")),
+    ));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    );
+
+    let err = client
+        .connect()
+        .await
+        .expect_err("업그레이드 거절 → 핸드셰이크 실패");
+    assert!(
+        matches!(err, HandshakeError::Connect(_)),
+        "접속 단계에서 거부돼야: {err:?}"
+    );
+
+    // ★관측 시점 = 연결 태스크가 발화 포트를 놓은 뒤★. `connect()` 가 돌아온 것은 **호출자 쪽** 몫이
+    //   끝났다는 뜻일 뿐이다 — 연결 태스크의 발화는 `ready_tx.send` **뒤**라(`connection.rs` 핸드셰이크
+    //   실패 분기) 그 시점에 아직 진행 중일 수 있다. 「발화가 하나라도 생겼나」로 기다리면 호출자 쪽이
+    //   한 장을 보태는 회귀에서 그 한 장만 보고 개수 단언이 통과한다 — 재려던 중복이 정확히 그 회귀라,
+    //   그 조건은 이 테스트가 지키려는 계약을 스스로 비운다.
+    //   ★태스크는 그 포트를 `Arc` 로 쥐고, 발화를 마친 뒤에야 놓는다★(반환하며 인자가 drop). 그래서 강한
+    //   참조가 둘(이 테스트 + 클라이언트)로 돌아온 시점 뒤로는 태스크가 보탤 수 있는 발화가 없다 —
+    //   벽시계가 아니라 **태스크 자신의 종료**에 건다(ADR-0038).
+    let settled =
+        poll_until_realtime(Duration::from_secs(5), || Arc::strong_count(&events) == 2).await;
+    assert!(
+        settled,
+        "연결 태스크가 발화 포트를 놓지 않았다 — 개수를 잴 시점이 서지 않는다: {:?}",
+        events.seen()
+    );
+    assert_eq!(
+        events.seen(),
+        vec!["state:down".to_string()],
+        "핸드셰이크 실패의 발화는 down 한 장이어야"
+    );
+}
+
+// ── 프론트 계약 문자열 고정 ──────────────────────────────────────────────────────────
+// 어휘를 enum 으로 올린 뒤에도 **나가는 바이트는 그대로여야 한다** — 이 세 값은
+// `src/api/tauriTransport.ts` 의 `applyConnectionState` 가 그대로 비교하는 것이고(`commands::discovery` 의
+// 상태 조회도 같은 어휘를 낸다), 하나만 어긋나도 컴파일은 통과한 채 화면이 조용히 멈춘다.
+#[test]
+fn connection_state_event_strings_are_the_frontend_contract() {
+    assert_eq!(ConnectionStateEvent::Connected.as_str(), "connected");
+    assert_eq!(ConnectionStateEvent::Reconnecting.as_str(), "reconnecting");
+    assert_eq!(ConnectionStateEvent::Down.as_str(), "down");
+}
+
+// ── 핸들이 떨어지면 연결 태스크의 채널도 놓는다(`Drop` 회귀망) ──────────────────────────
+// ★무엇을 막나★: 연결 태스크는 `Arc<Lifecycle>` 을 쥐고 그 `Lifecycle` 이 **강한 `cmd_tx`** 를 쥔다 —
+//   `Drop` 이 없으면 그 고리가 스스로 닫혀 `cmd_rx` 에 EOF 가 영영 안 오고, 소켓이 멀쩡한 동안엔
+//   `main_loop` 가 끊김조차 안 봐서 재연결 소진 상한도 그 고리를 못 끊는다(= 소켓·재연결 루프 누수).
+// ★소켓이 필요한 이유는 하나뿐★: `cmd_tx` 는 핸드셰이크 성공 뒤에야 저장되므로(`store_cmd_if_current`),
+//   연결 없이는 "놓았다"가 공허하게 참이 된다. 그래서 진짜로 걸린 것을 먼저 확인하고 떨어뜨린다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_client_releases_the_connection_task_channel() {
+    let port = spawn_reply_mock_server(ReplyBehavior::AckEcho).await;
+    let client = connected_client_to(port, "drop-guard").await;
+    let lifecycle = client.lifecycle.clone();
+    assert!(
+        lifecycle.cmd_tx_snapshot().is_some(),
+        "connected 면 강한 cmd_tx 가 lifecycle 에 걸려 있어야(그게 끊을 고리다)"
+    );
+
+    drop(client);
+
+    assert!(
+        lifecycle.cmd_tx_snapshot().is_none(),
+        "핸들이 떨어지면 강한 송신단도 놓아야 — 안 놓으면 연결 태스크가 EOF 를 영영 못 본다"
+    );
+    assert!(
+        lifecycle.is_closed_by_user(),
+        "Drop 은 명시 close 와 **같은 전이**를 해야(재연결 루프도 함께 멈춘다)"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 연결 태스크가 뜨기 **전에** 끝나는 실패도 창에 알린다(회귀망).
+//
+// ★무엇을 막나★: `connect()`/`ensure()` 는 소켓을 열기도 전에 실패할 수 있다(데몬을 못 띄움 · 살아있는
+//   데몬 없음 · discovery 자체가 패닉). 그 자리들은 내부 상태만 `Down` 으로 접고 **발화를 내지 않았다** —
+//   그러면 실패를 아는 것은 반환 `Err` 를 받는 그 호출자 하나뿐이고, 나머지 창은 마지막으로 들은 발화에
+//   머문다. 진입의 `Connecting` 은 어휘 자체가 없어(`events::ConnectionStateEvent` 는 셋뿐 — 그래서
+//   `crate::commands::discovery` 의 상태 조회도 그것을 `"down"` 으로 접는다) 그 자리를 못 메우고,
+//   이 경로들은 연결 태스크를 아예 안 띄우므로 나중에 대신 알려 줄 발화자도 없다. 끊김 뒤 재진입이면
+//   마지막 발화가 `reconnecting` 인 채 굳는데 재시도하는 주체는 아무도 없다.
+// ★폴링이 없는 것이 요점이다★: 이 발화들은 전부 `connect()`/`ensure()` **자신이** 반환 직전에 내므로
+//   await 가 돌아온 시점엔 이미 끝나 있다 — 벽시계도 상한도 필요 없다(ADR-0038).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+// ── (a) 데몬을 못 띄웠다(connect 의 발견/spawn 실패) ────────────────────────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_discovery_failure_tells_every_window_down() {
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(
+        None,
+        Err("데몬을 띄우지 못했다(테스트)".to_string()),
+    ));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    );
+
+    let err = client.connect().await.expect_err("발견/spawn 실패");
+    assert!(
+        matches!(&err, HandshakeError::Discovery(m) if m.contains("띄우지 못했다")),
+        "발견/spawn 실패 사유가 그대로 전파돼야: {err:?}"
+    );
+
+    assert_eq!(
+        events.seen(),
+        vec!["state:down".to_string()],
+        "데몬을 못 띄운 것도 창에 알려야 — 발화는 down 한 장"
+    );
+    assert_eq!(
+        client.state(),
+        ConnectionState::Down,
+        "내부 상태도 Connecting 에서 되돌아와야(발화와 상태가 갈리면 다음 connect 판정이 어긋난다)"
+    );
+}
+
+// ── (b) 살아있는 데몬이 없다(ensure — attach-only) ──────────────────────────────────────
+// ★이 경로가 가장 조용하다★: no-spawn 이라 소켓도 연결 태스크도 없고, 복구는 명시 `connect()` 뿐이다
+//   (ADR-0021). 화면이 굳으면 사용자가 그 `connect()` 를 누를 계기까지 사라진다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure_without_live_daemon_tells_every_window_down() {
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(
+        None,
+        Err("ensure 는 이 값을 쓰지 않는다(no-spawn)".to_string()),
+    ));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    );
+
+    let err = client.ensure().await.expect_err("살아있는 데몬 없음");
+    assert!(
+        matches!(err, HandshakeError::NoLiveDaemon),
+        "attach-only 실패여야: {err:?}"
+    );
+
+    assert_eq!(
+        events.seen(),
+        vec!["state:down".to_string()],
+        "attach 실패도 창에 알려야 — 발화는 down 한 장"
+    );
+    assert_eq!(
+        client.state(),
+        ConnectionState::Down,
+        "내부 상태도 Connecting 에서 되돌아와야"
+    );
+}
+
+// discovery 가 **패닉**해 `spawn_blocking` 의 join 이 깨지는 경로 전용 mock — `MockDiscovery` 의 정상
+// 실패(`Err`)와는 다른 분기다(그쪽은 `Ok(Err(..))`, 이쪽은 `Err(JoinError)`).
+//
+// ★패닉 메시지는 libtest 가 이 테스트 몫으로 삼킨다(실측)★ — 초록으로 도는 동안 출력에 안 뜨고, 이
+//   테스트가 깨졌을 때만 그 실패 블록 안에 함께 찍힌다. 패닉 훅을 갈아 삼키는 쪽은 프로세스 전역이라
+//   병렬로 도는 다른 테스트까지 함께 조용해지므로 하지 않는다.
+struct PanickingDiscovery;
+
+impl DaemonDiscovery for PanickingDiscovery {
+    fn ensure_spawn(&self, _timeout: Duration) -> Result<DaemonInfo, String> {
+        panic!("discovery 패닉(테스트)");
+    }
+
+    fn read_live(&self) -> Option<DaemonInfo> {
+        None
+    }
+}
+
+// ── (c) discovery 가 패닉했다(join 실패) ────────────────────────────────────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_discovery_join_failure_tells_every_window_down() {
+    let events = Arc::new(RecordingEvents::default());
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        Arc::new(PanickingDiscovery),
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    );
+
+    let err = client.connect().await.expect_err("discovery join 실패");
+    assert!(
+        matches!(&err, HandshakeError::Discovery(m) if m.contains("ensure join 실패")),
+        "join 실패로 분류돼야: {err:?}"
+    );
+
+    assert_eq!(
+        events.seen(),
+        vec!["state:down".to_string()],
+        "discovery 가 죽은 것도 창에 알려야 — 발화는 down 한 장"
+    );
+    assert_eq!(client.state(), ConnectionState::Down);
+}
+
+// ── (d) 밀려난 세대의 태스크 소멸은 **조용해야** 한다 ───────────────────────────────────
+// ★같은 자리의 반대쪽 단언이다★: 위 셋은 "알리지 않던 자리가 알린다" 를 재고, 이 하나는 그 발화가
+//   generation 가드를 **넘어가지 않는다** 를 잰다(ADR-0163 — 비교는 일치/불일치만). 승계가 일어나면
+//   화면의 주인은 더 새 세대이고, 밀려난 태스크의 `down` 은 그 주인의 `connected` 를 덮어쓴다.
+// ★결정론★: 벽시계가 아니라 두 신호로 순서를 고정한다 — (1) 서버가 Auth 도달을 알리면 그 시점의 클라는
+//   `wait_for_hello` 창에 있고 (2) 그때 `close()` 로 세대를 올린 뒤 (3) 그제서야 Hello 를 푼다. 뒤늦은
+//   Hello 를 받은 태스크는 stale 이라 `ready_tx` 를 보내지 않고 self-close 하므로 호출자는 `TaskGone` 을
+//   받는다. 발화 관측 시점도 확정적이다 — 그 태스크는 소켓을 닫은 **뒤에** `ready_tx` 를 놓으므로,
+//   호출자가 깨어난 시점엔 양쪽의 발화 기회가 모두 지나 있다.
+// ★반대편(진짜 panic 으로 인한 `TaskGone`)은 여전히 무검증이다(정직 표기)★ — 그 자리를 태우려면 연결
+//   태스크를 패닉시켜야 하고, 그건 이 하네스가 아니라 `connection.rs` 를 건드려야 나온다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_task_gone_emits_nothing_newer_generation_owns_the_screen() {
+    let (port, auth_seen, release_hello) = spawn_hello_on_demand_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(
+        None,
+        Ok(info_for(port, "stale-task-gone")),
+    ));
+    let client = Arc::new(DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    ));
+
+    let connecting = tokio::spawn({
+        let client = client.clone();
+        async move { client.connect().await }
+    });
+
+    auth_seen
+        .await
+        .expect("서버가 Auth 를 봤다(핸드셰이크 진행 중)");
+    // 세대를 올려 그 핸드셰이크를 stale 로 만든다(close 는 bump + Down 을 한 락으로 한다).
+    client.close();
+    // ★기준선을 여기서 뜬다★: 명시 종료는 **자기 발화 한 장을 낸다**(그 계약의 정본 =
+    //   `explicit_close_tells_every_window_down`). 이 테스트가 재려는 것은 그 한 장이 아니라 **그 뒤로
+    //   밀려난 태스크가 무엇을 보태느냐**다 — 목록 전체를 「비어 있음」으로 재면 두 발화자가 한 칸에
+    //   섞여, 어느 쪽이 냈는지 구분하지 못한 채 초록이 되는 조합이 생긴다.
+    let after_close = events.seen();
+    assert_eq!(
+        after_close,
+        vec!["state:down".to_string()],
+        "이 시점의 발화는 명시 close 자신의 down 한 장이어야: {after_close:?}"
+    );
+    let _ = release_hello.send(()); // 뒤늦은 Hello — 받는 태스크는 이미 밀려났다.
+
+    let err = connecting
+        .await
+        .expect("connect task join")
+        .expect_err("stale self-close → ready 없이 사라짐");
+    assert!(
+        matches!(err, HandshakeError::TaskGone),
+        "ready 전 태스크 소멸이어야: {err:?}"
+    );
+
+    assert_eq!(
+        events.seen(),
+        after_close,
+        "밀려난 세대는 화면을 건드리면 안 된다 — close 이후 보탠 발화가 0건이어야"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 명시 종료도 창에 알린다(회귀망).
+//
+// ★무엇을 막나★: 이 연결은 **창이 몇 개든 하나**라(ADR-0036) 한 창이 닫으면 모든 창이 끊긴다. 그런데
+//   그 사실을 스스로 아는 것은 부른 창뿐이다 — `src/api/tauriTransport.ts` 의 `close()` 는 리스너를 걷은
+//   **뒤에** 커맨드를 invoke 한다(그래서 이 발화는 그 창에
+//   이중 보고가 되지 않는다 — 사유 정본은 `DaemonClient::close` 주석). 나머지 창은 마지막으로 들은 `connected` 에 굳어 죽은 연결에 출력 채널을
+//   걸고 앉고, 프론트의 자가복구는 리로드 시 pull 1회뿐이라(같은 파일 `selfHeal`) 살아 있는 창은 영영
+//   못 깨어난다. ★연결 태스크가 대신 알려 주지 못한다★: `close()` 가 세대를 먼저 올리므로 그 태스크의
+//   종료 Down 은 stale 로 삼켜진다(`connection.rs` 의 `LoopExit::Closed` 분기).
+// ★폴링이 없는 것이 요점이다(ADR-0038)★: `connected` 는 연결 태스크가 `ready_tx` **보다 먼저** 내므로
+//   `connect()` 가 돌아온 시점에 이미 기록돼 있고, `down` 은 `close()` 자신이 반환 전에 낸다. 두 발화
+//   모두 관측 시점이 확정이라 벽시계도 상한도 필요 없다.
+// ══════════════════════════════════════════════════════════════════════════════════
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_close_tells_every_window_down() {
+    // ★Hello 게이트를 미리 연다★ — 이 테스트는 핸드셰이크 창을 쓰지 않는다. 이 서버를 고른 이유는 하나,
+    //   Hello 뒤에도 **소켓을 쥐고 있다**는 것이다: 서버가 먼저 손을 놓으면 클라가 끊김을 보고
+    //   `state:reconnecting` 을 한 장 더 발화해, 아래 일치 단언이 서버 수명이라는 벽시계에 걸린다.
+    let (port, _auth_seen, release_hello) = spawn_hello_on_demand_server().await;
+    let _ = release_hello.send(());
+    let events = Arc::new(RecordingEvents::default());
+    let disco = Arc::new(MockDiscovery::new(
+        None,
+        Ok(info_for(port, "explicit-close")),
+    ));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco,
+        super::connection::HANDSHAKE_TIMEOUT,
+        events.clone(),
+    );
+
+    client.connect().await.expect("connect → connected");
+    assert_eq!(
+        events.seen(),
+        vec!["state:connected".to_string()],
+        "연결까지의 발화는 connected 한 장: {:?}",
+        events.seen()
+    );
+
+    client.close();
+
+    assert_eq!(
+        events.seen(),
+        vec!["state:connected".to_string(), "state:down".to_string()],
+        "명시 종료도 창에 알려야 — 부른 창 말고는 아무도 끊김을 모른다"
+    );
+    assert_eq!(
+        client.state(),
+        ConnectionState::Down,
+        "내부 상태와 발화가 갈리면 다음 connect 판정이 어긋난다"
+    );
+
+    // ── 그리고 `Drop` 은 조용하다(위 비대칭의 반대쪽) ──────────────────────────────────
+    // 소멸자는 발화하지 않는다 — 사유 셋(전이가 일어났는지 모름 · 소멸자 패닉 금지 · 알릴 창 없음)의
+    // 정본은 `DaemonClient::close_on_drop` 주석이다. 여기서는 그 결정이 코드에 남아 있는지만 잰다.
+    let before_drop = events.seen();
+    drop(client);
+    assert_eq!(
+        events.seen(),
+        before_drop,
+        "Drop 이 발화를 보태면 안 된다(명시 close 와의 비대칭은 의도)"
+    );
+}

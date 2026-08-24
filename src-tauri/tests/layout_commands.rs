@@ -1,19 +1,21 @@
 //! 셸 명령 표(`layout::commands`) + 인바운드 수신기(`daemon_client::inbound`) 통합 테스트 —
 //! 데몬·창·소켓 0 (ADR-0012 seam 격리).
 //!
-//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 이 패키지의 lib 테스트 타깃은 실행 자체가 안 된다
-//! (`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`, 실측 2026-08-17) — `#[cfg(test)]` 안의 단언은 한 번도 돌지
-//! 않는다. 실행: `cargo test -p engram-dashboard --test layout_commands`(자식 프로세스를 하나도 안 띄우므로
+//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 재는 대상이 **실 소켓·실 `AppHandle` 없이는 못 세우는
+//! 배선**이라, 그 자리를 포트로 끊어 세우는 통합 하네스가 제자리다(그래서 하네스 자신은 데몬·창·소켓을
+//! 하나도 안 쓴다). 순수 단위 단언은 모듈 옆 `#[cfg(test)]` 로 가고 그쪽은 `--test lib_unit` 으로 돈다
+//! (그 타깃을 세운 결정 = ADR-0174 · 현황 = CLAUDE.md 「빌드·검증 명령」).
+//! 실행: `cargo test -p engram-dashboard --test layout_commands`(자식 프로세스를 하나도 안 띄우므로
 //! `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」).
 //!
 //! ★`layout_apply.rs` 와 나누는 기준★: 저쪽은 **적용 서비스의 락 위치**(어느 포트가 락 안/밖에서 불리나)를
 //! 재고, 여기는 **봉투가 그 서비스까지 가는 길**(이름 배달 · 인자 검문 · 답장 상관 · 연결 태스크 밖 실행)을
 //! 잰다. 그래서 이 파일의 가짜 포트에는 락 프로브가 없다 — 같은 것을 두 번 재면 한쪽이 낡는다.
 //!
-//! ★`ui_settings` 의 순수 단위 단언도 여기 있다(§F)★ — 그 모듈은 레이아웃이 아니지만, 이 패키지에서
-//! **실제로 도는 테스트 타깃**은 `tests/` 의 네 개뿐이고(lib 은 `0xc0000139`) 그중 셸 명령 표를 재는 것이
-//! 이 파일이다. 새 타깃을 파면 CI 가 타깃을 이름으로 열거하므로(`.github/workflows/ci.yml`) 아무도 안 도는
-//! 초록 파일이 하나 는다.
+//! ★`ui_settings` 의 순수 단위 단언도 여기 있다(§F)★ — 그 모듈은 레이아웃이 아니지만, **CI 가 통째로 도는
+//! 이 패키지의 테스트 타깃**은 `tests/` 의 네 개뿐이고(`lib_unit` 은 일부만 등재돼 있다 — 현황 = CLAUDE.md
+//! 「빌드·검증 명령」) 그중 셸 명령 표를 재는 것이 이 파일이다. 새 타깃을 파면 CI 가 타깃을 이름으로
+//! 열거하므로(`.github/workflows/ci.yml`) 아무도 안 도는 초록 파일이 하나 는다.
 //!
 //! ## ★연결 태스크를 안 막는다는 것을 어떻게 재나★
 //! 두 하네스가 서로 다른 실패 모드를 잡는다.
@@ -1125,10 +1127,14 @@ async fn a_slow_handler_does_not_stall_the_read_loop() {
 // 지우면 이 테스트들은 컴파일되지 않는다.
 //
 // ## ★그래도 안 덮이는 것(잔여 목록 — 이 자리가 정본)★
-// - **select arm 의 갈래 선택**(`connection.rs` 의 `else if let AgentEvent::CommandRequest`) — 그 루프는 실
-//   `WebSocketStream` 과 실 `AppHandle` 을 요구한다. 게다가 `connection.rs` 에는 `#[cfg(test)]` 블록이
-//   **하나도 없고** 이 패키지의 lib 테스트는 실행 자체가 안 되므로(`0xc0000139`), 그 파일의 코드 커버는 전부
-//   이 파일이 진다.
+// - **select arm 의 갈래 선택**(`connection.rs` 의 `else if let AgentEvent::CommandRequest`) — 그 루프는
+//   **실 소켓을 요구한다**. ★그것은 불가능이 아니라 비용이다★ — 같은 패키지의 `src/daemon_client/tests.rs`
+//   가 루프백 WS 를 세워 `run_connection`→`main_loop` 를 실제로 돌린다(`recording_events_capture_connected_then_broadcasts`).
+//   그러니 이 갈래가 무커버인 것은 「태울 수 없어서」가 아니라, 갈래 하나를 재려고 매번 소켓·핸드셰이크를
+//   세우는 값이 비싸서다. 여기서 사는 것은 소켓 없이 얻는 결정론과 속도다.
+//   ★2026-08-24 전에는 이 자리에 「실 `AppHandle` 도 함께 요구한다」·「`connection.rs` 의 코드 커버는 전부
+//   이 파일이 진다」고 적혀 있었다★ — 앞은 emit 이 포트로 끊기면서(`src/daemon_client/events.rs`) 그 파일이
+//   `AppHandle` 을 이름으로도 모르게 돼 사라졌고, 뒤는 그 단위 스위트가 같은 루프를 태우기 시작하면서 낡았다.
 // - **sink 로의 실제 소켓 쓰기**(`send_fire` 의 직렬화·전송 실패 갈래 포함).
 // - **`register_own_commands` 의 전송부**(pending 슬롯 · 결말 로그) — 실리는 내용물은 `registration_command`
 //   테스트가 덮는다.
