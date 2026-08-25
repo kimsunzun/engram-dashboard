@@ -108,7 +108,9 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
   - **wezterm** — Rust 터미널 + mux **서버/클라이언트 분리와 재부착**(`wezterm-mux-server`·`wezterm-client`).
   - **zellij** — 멀티플렉서. 세션 생존 + 클라이언트 재부착.
   - **ttyd** — PTY를 웹소켓으로 나르고 **크기를 협상하는** 최소 구현(리사이즈 메시지 → ConPTY·POSIX 양쪽).
-  - **orca** — 여러 에이전트 백엔드(Codex·ClaudeCode·OpenCode 등)를 **워크트리별로 나란히** 돌리는 오케스트레이터 + GUI. 「백엔드 확장」과 겹친다.
+  - **orca** — 여러 에이전트 백엔드(Codex·ClaudeCode·OpenCode 등)를 **워크트리별로 나란히** 돌리는 오케스트레이터 + GUI. 「백엔드 확장」과 겹친다. 정본 주소 = `stablyai/orca`.
+  - **paseo** — **데몬이 에이전트를 소유하고 desktop·web·mobile·CLI 가 붙는다**. 다중 클라이언트 재부착이 우리와 겹친다. ★단 에이전트 경로에 PTY가 없어★(백엔드마다 SDK·JSON-RPC) 전송 계층은 참조가 안 된다. AGPL-3.0.
+  - **octoally** — Claude·Codex 대시보드. 세션 생존을 tmux/dtach에 맡긴다. ★**SQLite 되감기는 순수 셸 탭 전용 — 우리 replay 버퍼의 디스크 선례로 읽지 말 것**★(에이전트 탭은 `tmux capture-pane`). sid 회수는 「세션 복원」의 반례. Apache-2.0 + Commons Clause(OSI 아님).
 
 ---
 
