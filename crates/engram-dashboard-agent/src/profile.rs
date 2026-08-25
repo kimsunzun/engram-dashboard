@@ -148,9 +148,8 @@ pub struct AgentProfile {
     pub command: AgentCommand,
 
     /// ★저장된 값은 **raw** 다 — 정규화되지 않는다(리뷰 fix N3 · load-bearing)★: 이 필드를 canonicalize
-    /// 하는 코드는 agent·persistence 어디에도 없다. 그래서 `"."`·`".."`·심링크·대소문자 다른 Windows 경로가
-    /// 그대로 앉아 있을 수 있고, 정규화는 이 값을 쓰는 쪽(spawn 의 `session.cwd`,
-    /// `canonical_name_when_live`)이 각자 한다.
+    /// 하는 코드는 없다. 그래서 `"."`·`".."`·심링크·대소문자 다른 Windows 경로가 그대로 앉아 있을 수
+    /// 있고, 정규화는 이 값을 쓰는 쪽(spawn 의 `session.cwd`, `canonical_name_when_live`)이 각자 한다.
     pub cwd: PathBuf,
 
     /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
