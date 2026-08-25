@@ -9,7 +9,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 
 통독이 아니라 **점프형 소비**다 — 만지는 영역으로 좁혀 필요한 곳만 본다.
 
-> **전체 그림이 먼저 필요하면** → `reference/architecture-overview.md`(클라이언트~데몬~에이전트 조감도 — 프로세스 경계·4대 seam·E2E 시퀀스). 그림 위주 orientation.
+> **전체 그림이 먼저 필요하면** → `reference/architecture-overview.md`(클라이언트~데몬~에이전트 조감도 — 프로세스 경계·seam 지도·E2E 시퀀스). 그림 위주 orientation. *그 문서도 seam 개수를 세지 않는다 — 여기서도 세지 않는다(늘어난다).*
 
 1. `../CLAUDE.md` — 기조·불변식·규약(항상 로드).
 2. 이 `docs/README.md` — 상태·구조 허브.
